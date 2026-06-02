@@ -24,6 +24,9 @@ import (
 
 	"entgo.io/ent/dialect"
 	entsql "entgo.io/ent/dialect/sql"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/stdlib"
+
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/migrate"
 )
@@ -39,6 +42,13 @@ type PoolConfig struct {
 	MaxOpenConns    int
 	MaxIdleConns    int
 	ConnMaxLifetime time.Duration
+	// ConnMaxIdleTime bounds how long a connection may sit idle in the pool
+	// before being closed. Set it shorter than the server/proxy idle timeout
+	// (CloudSQL drops idle connections after ~10m) so the pool recycles a
+	// connection before the remote silently closes it; otherwise the first
+	// request after an idle period stalls waiting for a dead connection to time
+	// out. A zero value leaves the database/sql default (no idle limit).
+	ConnMaxIdleTime time.Duration
 }
 
 // apply sets the pool parameters on db, skipping any unset (non-positive) field.
@@ -51,6 +61,9 @@ func (p PoolConfig) apply(db *sql.DB) {
 	}
 	if p.ConnMaxLifetime > 0 {
 		db.SetConnMaxLifetime(p.ConnMaxLifetime)
+	}
+	if p.ConnMaxIdleTime > 0 {
+		db.SetConnMaxIdleTime(p.ConnMaxIdleTime)
 	}
 }
 
@@ -114,17 +127,46 @@ func OpenSQLiteReadOnly(dsn string, opts ...ent.Option) (*ent.Client, error) {
 // The dsn should be a PostgreSQL connection string
 // (e.g. "host=localhost port=5432 user=scion dbname=scion sslmode=disable").
 func OpenPostgres(dsn string, pool PoolConfig, opts ...ent.Option) (*ent.Client, error) {
-	// Use the pgx stdlib driver, which registers itself as "pgx" via the
-	// blank import in driver_postgres.go. It accepts both keyword/value DSNs
-	// ("host=... port=...") and URL-style ("postgres://...") connection strings.
-	db, err := sql.Open("pgx", dsn)
+	// Parse the DSN with pgx (accepts both keyword/value DSNs "host=... port=..."
+	// and URL-style "postgres://..." connection strings) so we can attach TCP
+	// keepalive settings to the connection before handing it to database/sql via
+	// stdlib.OpenDB. Keepalives let the OS detect a connection silently dropped by
+	// a peer (e.g. CloudSQL recycling idle backends or a NAT timeout) instead of
+	// the first query after idle hanging on a dead socket.
+	connConfig, err := pgx.ParseConfig(dsn)
 	if err != nil {
-		return nil, fmt.Errorf("opening postgres connection: %w", err)
+		return nil, fmt.Errorf("parsing postgres dsn: %w", err)
 	}
+	applyKeepalives(connConfig.RuntimeParams)
+	if connConfig.ConnectTimeout == 0 {
+		connConfig.ConnectTimeout = connectTimeout
+	}
+
+	db := stdlib.OpenDB(*connConfig)
 	pool.apply(db)
 	drv := entsql.OpenDB(dialect.Postgres, db)
 	client := ent.NewClient(append(opts, ent.Driver(drv))...)
 	return client, nil
+}
+
+const connectTimeout = 10 * time.Second
+
+// applyKeepalives sets server-side TCP keepalive GUCs as pgx RuntimeParams so the
+// kernel probes idle connections and tears down dead ones promptly. Values mirror
+// the pgx event pool (events_postgres.go): probe after 60s idle, every 15s, give
+// up after 4 missed probes (~2 min to detect a dead peer). Existing keys are not
+// overwritten so an explicit DSN setting wins.
+func applyKeepalives(params map[string]string) {
+	defaults := map[string]string{
+		"tcp_keepalives_idle":     "60",
+		"tcp_keepalives_interval": "15",
+		"tcp_keepalives_count":    "4",
+	}
+	for k, v := range defaults {
+		if _, ok := params[k]; !ok {
+			params[k] = v
+		}
+	}
 }
 
 // AutoMigrate runs automatic schema migration on the given client.

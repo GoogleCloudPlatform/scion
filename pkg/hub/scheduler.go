@@ -138,9 +138,18 @@ func (s *Scheduler) RegisterRecurringSingleton(name string, intervalMinutes int,
 
 // singletonGuard wraps fn so it only runs while this replica holds the named
 // advisory lock. The lock is released as soon as fn returns, so the next tick on
-// any replica is free to win it. Errors and missing-capability fall open to
-// running fn unguarded, which is correct on a single replica and at worst
-// duplicates idempotent work on the rare lock-acquisition error.
+// any replica is free to win it.
+//
+// A store that does not implement AdvisoryLocker falls open to running fn
+// unguarded — correct for a single-replica / SQLite deployment where there is no
+// other replica to collide with.
+//
+// A lock-acquisition error (e.g. a connection timeout to Postgres) does NOT fall
+// open: in a multi-replica deployment running unguarded would let two replicas
+// execute the same singleton work concurrently. Since we cannot prove we are
+// alone when the lock query itself failed, we SKIP this tick and let the next one
+// retry. Missing one tick of idempotent maintenance work is safer than running it
+// in duplicate.
 func (s *Scheduler) singletonGuard(name string, key store.AdvisoryLockKey, fn func(ctx context.Context)) func(ctx context.Context) {
 	return func(ctx context.Context) {
 		locker, ok := s.store.(store.AdvisoryLocker)
@@ -150,9 +159,8 @@ func (s *Scheduler) singletonGuard(name string, key store.AdvisoryLockKey, fn fu
 		}
 		acquired, release, err := locker.TryAdvisoryLock(ctx, key)
 		if err != nil {
-			s.log.Warn("Scheduler: advisory lock error; running handler unguarded",
+			s.log.Warn("Scheduler: advisory lock acquisition failed; skipping tick to avoid running unguarded across replicas",
 				"name", name, "error", err)
-			fn(ctx)
 			return
 		}
 		if !acquired {

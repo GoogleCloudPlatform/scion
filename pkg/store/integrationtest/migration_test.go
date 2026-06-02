@@ -88,9 +88,11 @@ func TestMigration_IdempotentReRunPreservesData(t *testing.T) {
 	for pass := 0; pass < 3; pass++ {
 		require.NoErrorf(t, cs.Migrate(ctx), "re-migration pass %d must succeed", pass)
 
+		// Migration must not change the row count. The expected count grows by one
+		// per pass because each iteration appends a row at the end of the loop.
 		var count int
 		require.NoError(t, db.QueryRowContext(ctx, `SELECT count(*) FROM scheduled_events`).Scan(&count))
-		require.Equalf(t, firstBatch, count, "re-migration pass %d changed the row count", pass)
+		require.Equalf(t, firstBatch+pass, count, "re-migration pass %d changed the row count", pass)
 
 		// Writes continue to work against the re-migrated schema.
 		require.NoError(t, cs.CreateScheduledEvent(ctx, makeScheduledEvent(project.ID)))
