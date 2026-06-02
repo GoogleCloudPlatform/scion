@@ -15,9 +15,13 @@
 package telegram
 
 import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"strconv"
+	"time"
 )
 
 // ProjectOption represents a project choice for keyboard selection.
@@ -73,6 +77,11 @@ func buildProjectSelectionKeyboard(projects []ProjectOption) *InlineKeyboardMark
 // Callback data format: setup:dflt:<agentSlug>
 func buildAgentSelectionKeyboard(agents []string, currentDefault string) *InlineKeyboardMarkup {
 	kb := buildAgentKeyboard(agents, currentDefault, "setup:dflt")
+	for i, row := range kb.InlineKeyboard {
+		for j, btn := range row {
+			kb.InlineKeyboard[i][j].CallbackData = truncateCallback(btn.CallbackData)
+		}
+	}
 	kb.InlineKeyboard = append(kb.InlineKeyboard, []InlineKeyboardButton{
 		{Text: "No default agent", CallbackData: "setup:dflt:"},
 	})
@@ -81,18 +90,18 @@ func buildAgentSelectionKeyboard(agents []string, currentDefault string) *Inline
 
 // buildDefaultAgentKeyboard creates an inline keyboard for /default command.
 // Callback data format: dflt:<agentSlug> or dflt:<agentSlug>:<threadID> for topic-scoped defaults.
-func buildDefaultAgentKeyboard(agents []string, currentDefault string, threadID int64) *InlineKeyboardMarkup {
+// When the callback data exceeds Telegram's 64-byte limit, it is stored in
+// callback_lookups and replaced with a short cblu:<id> reference.
+func buildDefaultAgentKeyboard(ctx context.Context, store Store, agents []string, currentDefault string, threadID int64) *InlineKeyboardMarkup {
 	suffix := ""
 	if threadID != 0 {
 		suffix = ":" + strconv.FormatInt(threadID, 10)
 	}
 	prefix := "dflt"
 	kb := buildAgentKeyboard(agents, currentDefault, prefix)
-	if suffix != "" {
-		for i, row := range kb.InlineKeyboard {
-			for j, btn := range row {
-				kb.InlineKeyboard[i][j].CallbackData = fitCallback(btn.CallbackData, suffix)
-			}
+	for i, row := range kb.InlineKeyboard {
+		for j, btn := range row {
+			kb.InlineKeyboard[i][j].CallbackData = callbackOrLookup(ctx, store, btn.CallbackData+suffix)
 		}
 	}
 	noneLabel := "No default agent"
@@ -107,7 +116,7 @@ func buildDefaultAgentKeyboard(agents []string, currentDefault string, threadID 
 		}
 	}
 	kb.InlineKeyboard = append(kb.InlineKeyboard, []InlineKeyboardButton{
-		{Text: noneLabel, CallbackData: fitCallback("dflt:__none__", suffix)},
+		{Text: noneLabel, CallbackData: callbackOrLookup(ctx, store, "dflt:__none__"+suffix)},
 	})
 	return kb
 }
@@ -123,7 +132,7 @@ func buildAgentKeyboard(agents []string, currentDefault string, prefix string) *
 		}
 		btn := InlineKeyboardButton{
 			Text:         label,
-			CallbackData: truncateCallback(fmt.Sprintf("%s:%s", prefix, agent)),
+			CallbackData: fmt.Sprintf("%s:%s", prefix, agent),
 		}
 		row = append(row, btn)
 		if len(row) == 2 {
@@ -268,20 +277,35 @@ func truncateCallback(data string) string {
 	return data[:maxCallbackData]
 }
 
-// fitCallback truncates the prefix portion of callback data to make room for
-// a required suffix (e.g. a threadID) that must not be corrupted. If the
-// prefix alone already exceeds the limit, it falls back to simple truncation
-// of the combined string.
-func fitCallback(prefix, suffix string) string {
-	combined := prefix + suffix
-	if len(combined) <= maxCallbackData {
-		return combined
+// callbackLookupPrefix identifies callback data that is stored in the
+// callback_lookups table rather than inline.
+const callbackLookupPrefix = "cblu:"
+
+// callbackLookupTTL is how long a stored callback lookup remains valid.
+const callbackLookupTTL = 24 * time.Hour
+
+// callbackOrLookup returns data as-is when it fits within Telegram's 64-byte
+// callback_data limit. When data exceeds the limit, the full payload is
+// persisted via the store's callback_lookups table and a short cblu:<id>
+// reference is returned instead.
+func callbackOrLookup(ctx context.Context, store Store, data string) string {
+	if len(data) <= maxCallbackData {
+		return data
 	}
-	maxPrefix := maxCallbackData - len(suffix)
-	if maxPrefix > 0 {
-		slog.Warn("callback_data exceeds 64-byte Telegram limit, truncating prefix to preserve suffix",
-			"len", len(combined), "prefix", prefix, "suffix", suffix)
-		return prefix[:maxPrefix] + suffix
+	idBytes := make([]byte, 8)
+	if _, err := rand.Read(idBytes); err != nil {
+		slog.Error("failed to generate callback lookup ID", "error", err)
+		return truncateCallback(data)
 	}
-	return truncateCallback(combined)
+	shortID := hex.EncodeToString(idBytes)
+	lookup := &CallbackLookup{
+		ShortID:   shortID,
+		FullData:  data,
+		ExpiresAt: time.Now().Add(callbackLookupTTL),
+	}
+	if err := store.SaveCallbackLookup(ctx, lookup); err != nil {
+		slog.Error("failed to save callback lookup", "error", err, "data", data)
+		return truncateCallback(data)
+	}
+	return callbackLookupPrefix + shortID
 }

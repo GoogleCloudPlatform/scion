@@ -320,7 +320,11 @@ func (r *CommandRouter) handleDialogSubmit(ctx context.Context, event *ChatEvent
 			return r.reply(ctx, event, fmt.Sprintf("Failed to create client: %v", err))
 		}
 
-		msg := messages.NewInstruction("user:"+mapping.HubUserEmail, agentID, responseText)
+		senderEmail := mapping.HubUserEmail
+		if senderEmail == "" {
+			return r.reply(ctx, event, "Your user mapping is missing a valid email address.")
+		}
+		msg := messages.NewInstruction("user:"+senderEmail, agentID, responseText)
 		msg.Channel = r.broker.ChannelName()
 		if event.ThreadID != "" {
 			msg.ThreadID = event.ThreadID

@@ -239,7 +239,7 @@ func (h *CommandHandler) handleDefault(msg *TGMessage) {
 		}
 	}
 
-	kb := buildDefaultAgentKeyboard(agentSlugs(agents), currentDefault, threadID)
+	kb := buildDefaultAgentKeyboard(ctx, h.store, agentSlugs(agents), currentDefault, threadID)
 	h.replyWithKeyboardInThread(chatID, threadID, promptText, kb)
 }
 

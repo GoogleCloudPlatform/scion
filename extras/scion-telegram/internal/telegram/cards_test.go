@@ -15,7 +15,9 @@
 package telegram
 
 import (
+	"context"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -96,7 +98,8 @@ func TestBuildAgentSelectionKeyboard_NoDefault(t *testing.T) {
 }
 
 func TestBuildDefaultAgentKeyboard_CallbackFormat(t *testing.T) {
-	kb := buildDefaultAgentKeyboard([]string{"coder", "reviewer"}, "coder", 0)
+	store := newTestStore(t)
+	kb := buildDefaultAgentKeyboard(context.Background(), store, []string{"coder", "reviewer"}, "coder", 0)
 	assert.Equal(t, "dflt:coder", kb.InlineKeyboard[0][0].CallbackData)
 	assert.Equal(t, "✓ coder (current)", kb.InlineKeyboard[0][0].Text)
 	assert.Equal(t, "dflt:reviewer", kb.InlineKeyboard[0][1].CallbackData)
@@ -104,7 +107,8 @@ func TestBuildDefaultAgentKeyboard_CallbackFormat(t *testing.T) {
 }
 
 func TestBuildDefaultAgentKeyboard_TopicScoped(t *testing.T) {
-	kb := buildDefaultAgentKeyboard([]string{"coder", "reviewer"}, "coder", 42)
+	store := newTestStore(t)
+	kb := buildDefaultAgentKeyboard(context.Background(), store, []string{"coder", "reviewer"}, "coder", 42)
 	assert.Equal(t, "dflt:coder:42", kb.InlineKeyboard[0][0].CallbackData)
 	assert.Equal(t, "✓ coder (current)", kb.InlineKeyboard[0][0].Text)
 	assert.Equal(t, "dflt:reviewer:42", kb.InlineKeyboard[0][1].CallbackData)
@@ -112,6 +116,24 @@ func TestBuildDefaultAgentKeyboard_TopicScoped(t *testing.T) {
 	lastRow := kb.InlineKeyboard[len(kb.InlineKeyboard)-1]
 	assert.Equal(t, "dflt:__none__:42", lastRow[0].CallbackData)
 	assert.Contains(t, lastRow[0].Text, "use chat default")
+}
+
+func TestBuildDefaultAgentKeyboard_LongSlugUsesLookup(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	longSlug := "this-is-a-very-long-agent-slug-that-will-exceed-sixty-four-bytes"
+	kb := buildDefaultAgentKeyboard(ctx, store, []string{longSlug}, "", 99999999)
+
+	cbData := kb.InlineKeyboard[0][0].CallbackData
+	assert.True(t, strings.HasPrefix(cbData, callbackLookupPrefix),
+		"expected callback lookup prefix, got %q", cbData)
+	assert.LessOrEqual(t, len(cbData), maxCallbackData)
+
+	shortID := strings.TrimPrefix(cbData, callbackLookupPrefix)
+	lookup, err := store.GetCallbackLookup(ctx, shortID)
+	require.NoError(t, err)
+	require.NotNil(t, lookup)
+	assert.Equal(t, fmt.Sprintf("dflt:%s:99999999", longSlug), lookup.FullData)
 }
 
 func TestBuildAskUserKeyboard_WithChoices(t *testing.T) {

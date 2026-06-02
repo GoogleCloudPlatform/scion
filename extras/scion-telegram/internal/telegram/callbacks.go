@@ -83,6 +83,19 @@ func (h *CallbackHandler) HandleCallback(ctx context.Context, cb *CallbackQuery)
 		return nil, nil
 	}
 
+	if strings.HasPrefix(cb.Data, callbackLookupPrefix) {
+		shortID := strings.TrimPrefix(cb.Data, callbackLookupPrefix)
+		lookup, err := h.store.GetCallbackLookup(ctx, shortID)
+		if err != nil {
+			return nil, fmt.Errorf("failed to resolve callback lookup %s: %w", shortID, err)
+		}
+		if lookup == nil {
+			h.answerCallback(ctx, cb.ID, "This button has expired. Please try the command again.", false)
+			return nil, nil
+		}
+		cb.Data = lookup.FullData
+	}
+
 	parts := strings.SplitN(cb.Data, ":", 4)
 	if len(parts) < 2 {
 		return nil, fmt.Errorf("invalid callback data: %s", cb.Data)
