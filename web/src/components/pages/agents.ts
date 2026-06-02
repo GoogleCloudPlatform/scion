@@ -23,8 +23,11 @@
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
-import type { PageData, Agent, Capabilities } from '../../shared/types.js';
+import type { PageData, Agent, AgentPhase, Capabilities } from '../../shared/types.js';
 import { can, isTerminalAvailable, getAgentDisplayStatus, isAgentRunning } from '../../shared/types.js';
+
+type AgentSortField = 'name' | 'status' | 'created' | 'updated';
+type SortDir = 'asc' | 'desc';
 import type { StatusType } from '../shared/status-badge.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { stateManager } from '../../client/state.js';
@@ -88,6 +91,15 @@ export class ScionPageAgents extends LitElement {
    */
   @state()
   private agentScope: 'all' | 'mine' | 'shared' = 'all';
+
+  @state()
+  private phaseFilter: AgentPhase | '' = '';
+
+  @state()
+  private sortField: AgentSortField = 'updated';
+
+  @state()
+  private sortDir: SortDir = 'desc';
 
   static override styles = [
     listPageStyles,
@@ -224,6 +236,41 @@ export class ScionPageAgents extends LitElement {
       .project-link:hover {
         text-decoration: underline;
       }
+
+      .filter-bar {
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+        margin-bottom: 1rem;
+        flex-wrap: wrap;
+      }
+
+      .filter-bar .label {
+        font-size: 0.8125rem;
+        color: var(--scion-text-muted, #64748b);
+        font-weight: 500;
+      }
+
+      th.sortable {
+        cursor: pointer;
+        user-select: none;
+      }
+
+      th.sortable:hover {
+        color: var(--scion-text, #1e293b);
+      }
+
+      .sort-indicator {
+        display: inline-block;
+        margin-left: 0.25rem;
+        font-size: 0.625rem;
+        vertical-align: middle;
+        opacity: 0.4;
+      }
+
+      th.sorted .sort-indicator {
+        opacity: 1;
+      }
     `,
   ];
 
@@ -244,6 +291,22 @@ export class ScionPageAgents extends LitElement {
       if (scope === 'mine' || scope === 'shared') {
         this.agentScope = scope;
       }
+    }
+
+    // Read persisted phase filter
+    const storedPhase = localStorage.getItem('scion-filter-agents-phase');
+    if (storedPhase) {
+      this.phaseFilter = storedPhase as AgentPhase;
+    }
+
+    // Read persisted sort
+    const storedSort = localStorage.getItem('scion-sort-agents');
+    if (storedSort) {
+      try {
+        const parsed = JSON.parse(storedSort) as { field: AgentSortField; dir: SortDir };
+        this.sortField = parsed.field;
+        this.sortDir = parsed.dir;
+      } catch { /* ignore invalid stored sort */ }
     }
 
     // Set SSE scope to dashboard (all project summaries).
@@ -468,6 +531,72 @@ export class ScionPageAgents extends LitElement {
     this.viewMode = e.detail.view;
   }
 
+  private get displayAgents(): Agent[] {
+    let list = this.agents;
+    if (this.phaseFilter) {
+      list = list.filter(a => a.phase === this.phaseFilter);
+    }
+    const sorted = [...list];
+    sorted.sort((a, b) => {
+      let cmp = 0;
+      switch (this.sortField) {
+        case 'name':
+          cmp = (a.name || '').localeCompare(b.name || '');
+          break;
+        case 'status':
+          cmp = getAgentDisplayStatus(a).localeCompare(getAgentDisplayStatus(b));
+          break;
+        case 'created':
+          cmp = (a.created || '').localeCompare(b.created || '');
+          break;
+        case 'updated':
+          cmp = (a.updated || '').localeCompare(b.updated || '');
+          break;
+      }
+      return this.sortDir === 'asc' ? cmp : -cmp;
+    });
+    return sorted;
+  }
+
+  private formatRelativeTime(isoString: string): string {
+    const date = new Date(isoString);
+    const now = Date.now();
+    const diffMs = now - date.getTime();
+    if (diffMs < 0) return 'just now';
+    const seconds = Math.floor(diffMs / 1000);
+    if (seconds < 60) return 'just now';
+    const minutes = Math.floor(seconds / 60);
+    if (minutes < 60) return `${minutes}m ago`;
+    const hours = Math.floor(minutes / 60);
+    if (hours < 24) return `${hours}h ago`;
+    const days = Math.floor(hours / 24);
+    return `${days}d ago`;
+  }
+
+  private setPhaseFilter(phase: AgentPhase | ''): void {
+    if (this.phaseFilter === phase) return;
+    this.phaseFilter = phase;
+    if (phase) {
+      localStorage.setItem('scion-filter-agents-phase', phase);
+    } else {
+      localStorage.removeItem('scion-filter-agents-phase');
+    }
+  }
+
+  private toggleSort(field: AgentSortField): void {
+    if (this.sortField === field) {
+      this.sortDir = this.sortDir === 'asc' ? 'desc' : 'asc';
+    } else {
+      this.sortField = field;
+      this.sortDir = field === 'name' ? 'asc' : 'desc';
+    }
+    localStorage.setItem('scion-sort-agents', JSON.stringify({ field: this.sortField, dir: this.sortDir }));
+  }
+
+  private sortIndicator(field: AgentSortField): string {
+    return this.sortField === field ? (this.sortDir === 'asc' ? '▲' : '▼') : '▲';
+  }
+
   private setScope(scope: 'all' | 'mine' | 'shared'): void {
     if (this.agentScope === scope) return;
     this.agentScope = scope;
@@ -538,7 +667,10 @@ export class ScionPageAgents extends LitElement {
         </div>
       </div>
 
-      ${this.loading ? this.renderLoading() : this.error ? this.renderError() : this.renderAgents()}
+      ${this.loading ? this.renderLoading() : this.error ? this.renderError() : html`
+        ${this.renderFilterBar()}
+        ${this.renderAgents()}
+      `}
     `;
   }
 
@@ -566,6 +698,50 @@ export class ScionPageAgents extends LitElement {
     `;
   }
 
+  private renderFilterBar() {
+    return html`
+      <div class="filter-bar">
+        <span class="label">Status:</span>
+        <div class="scope-toggle">
+          <button
+            class=${this.phaseFilter === '' ? 'active' : ''}
+            @click=${() => this.setPhaseFilter('')}
+          >All</button>
+          <button
+            class=${this.phaseFilter === 'running' ? 'active' : ''}
+            @click=${() => this.setPhaseFilter('running')}
+          >Running</button>
+          <button
+            class=${this.phaseFilter === 'stopped' ? 'active' : ''}
+            @click=${() => this.setPhaseFilter('stopped')}
+          >Stopped</button>
+          <button
+            class=${this.phaseFilter === 'suspended' ? 'active' : ''}
+            @click=${() => this.setPhaseFilter('suspended')}
+          >Suspended</button>
+          <button
+            class=${this.phaseFilter === 'error' ? 'active' : ''}
+            @click=${() => this.setPhaseFilter('error')}
+          >Error</button>
+        </div>
+        ${this.viewMode === 'grid' ? html`
+          <sl-dropdown>
+            <sl-button slot="trigger" size="small" outline>
+              <sl-icon slot="prefix" name=${this.sortDir === 'asc' ? 'sort-alpha-down' : 'sort-alpha-down-alt'}></sl-icon>
+              Sort: ${this.sortField}
+            </sl-button>
+            <sl-menu @sl-select=${(e: CustomEvent<{ item: { value: string } }>) => this.toggleSort(e.detail.item.value as AgentSortField)}>
+              <sl-menu-item value="name" ?checked=${this.sortField === 'name'}>Name</sl-menu-item>
+              <sl-menu-item value="status" ?checked=${this.sortField === 'status'}>Status</sl-menu-item>
+              <sl-menu-item value="created" ?checked=${this.sortField === 'created'}>Created</sl-menu-item>
+              <sl-menu-item value="updated" ?checked=${this.sortField === 'updated'}>Updated</sl-menu-item>
+            </sl-menu>
+          </sl-dropdown>
+        ` : nothing}
+      </div>
+    `;
+  }
+
   private renderAgents() {
     if (this.agents.length === 0) {
       if (this.agentScope === 'mine') {
@@ -587,6 +763,17 @@ export class ScionPageAgents extends LitElement {
         `;
       }
       return this.renderEmptyState();
+    }
+
+    const filtered = this.displayAgents;
+    if (filtered.length === 0 && this.phaseFilter) {
+      return html`
+        <div class="empty-state">
+          <sl-icon name="funnel"></sl-icon>
+          <h2>No Matching Agents</h2>
+          <p>No agents match the current filter. Try changing the status filter.</p>
+        </div>
+      `;
     }
 
     return this.viewMode === 'grid' ? this.renderGrid() : this.renderTable();
@@ -614,7 +801,7 @@ export class ScionPageAgents extends LitElement {
 
   private renderGrid() {
     return html`
-      <div class="resource-grid">${this.agents.map((agent) => this.renderAgentCard(agent))}</div>
+      <div class="resource-grid">${this.displayAgents.map((agent) => this.renderAgentCard(agent))}</div>
     `;
   }
 
@@ -743,16 +930,26 @@ export class ScionPageAgents extends LitElement {
         <table>
           <thead>
             <tr>
-              <th>Name</th>
+              <th
+                class="sortable ${this.sortField === 'name' ? 'sorted' : ''}"
+                @click=${() => this.toggleSort('name')}
+              >Name <span class="sort-indicator">${this.sortIndicator('name')}</span></th>
               <th>Project</th>
               <th class="hide-mobile">Template</th>
-              <th class="status-col">Status</th>
+              <th
+                class="status-col sortable ${this.sortField === 'status' ? 'sorted' : ''}"
+                @click=${() => this.toggleSort('status')}
+              >Status <span class="sort-indicator">${this.sortIndicator('status')}</span></th>
+              <th
+                class="hide-mobile sortable ${this.sortField === 'updated' ? 'sorted' : ''}"
+                @click=${() => this.toggleSort('updated')}
+              >Updated <span class="sort-indicator">${this.sortIndicator('updated')}</span></th>
               <th class="hide-mobile">Task</th>
               <th style="text-align: right">Actions</th>
             </tr>
           </thead>
           <tbody>
-            ${this.agents.map((agent) => this.renderAgentRow(agent))}
+            ${this.displayAgents.map((agent) => this.renderAgentRow(agent))}
           </tbody>
         </table>
       </div>
@@ -779,6 +976,7 @@ export class ScionPageAgents extends LitElement {
             size="small"
           ></scion-status-badge>
         </td>
+        <td class="hide-mobile">${agent.updated ? this.formatRelativeTime(agent.updated) : '\u2014'}</td>
         <td class="hide-mobile">
           <span class="task-cell">${agent.taskSummary || '\u2014'}</span>
         </td>

@@ -580,3 +580,352 @@ func TestHubAgentToAgentInfo_HarnessConfigTopLevelTakesPrecedence(t *testing.T) 
 		t.Errorf("HarnessConfig = %q, want %q (top-level should take precedence)", info.HarnessConfig, "gemini")
 	}
 }
+
+func TestFilterAgentsByPhase(t *testing.T) {
+	agents := []api.AgentInfo{
+		{Name: "running-1", Phase: "running", Template: "default", Runtime: "docker", Project: "p"},
+		{Name: "stopped-1", Phase: "stopped", Template: "default", Runtime: "docker", Project: "p"},
+		{Name: "running-2", Phase: "running", Template: "claude", Runtime: "docker", Project: "p"},
+		{Name: "error-1", Phase: "error", Template: "default", Runtime: "docker", Project: "p"},
+	}
+
+	filterPhase = "running"
+	defer func() { filterPhase = "" }()
+
+	old := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	err := displayAgents(agents, false, false)
+	w.Close()
+	os.Stdout = old
+
+	if err != nil {
+		t.Fatalf("displayAgents returned error: %v", err)
+	}
+
+	var buf bytes.Buffer
+	buf.ReadFrom(r)
+	output := buf.String()
+
+	if !strings.Contains(output, "running-1") {
+		t.Errorf("output should contain 'running-1': %s", output)
+	}
+	if !strings.Contains(output, "running-2") {
+		t.Errorf("output should contain 'running-2': %s", output)
+	}
+	if strings.Contains(output, "stopped-1") {
+		t.Errorf("output should NOT contain 'stopped-1': %s", output)
+	}
+	if strings.Contains(output, "error-1") {
+		t.Errorf("output should NOT contain 'error-1': %s", output)
+	}
+}
+
+func TestFilterAgentsByActivity(t *testing.T) {
+	agents := []api.AgentInfo{
+		{Name: "thinking-agent", Phase: "running", Activity: "thinking", Template: "default", Runtime: "docker", Project: "p"},
+		{Name: "waiting-agent", Phase: "running", Activity: "waiting_for_input", Template: "default", Runtime: "docker", Project: "p"},
+		{Name: "no-activity", Phase: "stopped", Template: "default", Runtime: "docker", Project: "p"},
+	}
+
+	filterActivity = "thinking"
+	defer func() { filterActivity = "" }()
+
+	old := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	err := displayAgents(agents, false, false)
+	w.Close()
+	os.Stdout = old
+
+	if err != nil {
+		t.Fatalf("displayAgents returned error: %v", err)
+	}
+
+	var buf bytes.Buffer
+	buf.ReadFrom(r)
+	output := buf.String()
+
+	if !strings.Contains(output, "thinking-agent") {
+		t.Errorf("output should contain 'thinking-agent': %s", output)
+	}
+	if strings.Contains(output, "waiting-agent") {
+		t.Errorf("output should NOT contain 'waiting-agent': %s", output)
+	}
+	if strings.Contains(output, "no-activity") {
+		t.Errorf("output should NOT contain 'no-activity': %s", output)
+	}
+}
+
+func TestFilterAgentsByTemplate(t *testing.T) {
+	agents := []api.AgentInfo{
+		{Name: "claude-agent", Phase: "running", Template: "claude", Runtime: "docker", Project: "p"},
+		{Name: "gemini-agent", Phase: "running", Template: "gemini", Runtime: "docker", Project: "p"},
+	}
+
+	filterTemplate = "claude"
+	defer func() { filterTemplate = "" }()
+
+	old := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	err := displayAgents(agents, false, false)
+	w.Close()
+	os.Stdout = old
+
+	if err != nil {
+		t.Fatalf("displayAgents returned error: %v", err)
+	}
+
+	var buf bytes.Buffer
+	buf.ReadFrom(r)
+	output := buf.String()
+
+	if !strings.Contains(output, "claude-agent") {
+		t.Errorf("output should contain 'claude-agent': %s", output)
+	}
+	if strings.Contains(output, "gemini-agent") {
+		t.Errorf("output should NOT contain 'gemini-agent': %s", output)
+	}
+}
+
+func TestFilterAgentsCombined(t *testing.T) {
+	agents := []api.AgentInfo{
+		{Name: "match", Phase: "running", Activity: "thinking", Template: "claude", Runtime: "docker", Project: "p"},
+		{Name: "wrong-phase", Phase: "stopped", Activity: "thinking", Template: "claude", Runtime: "docker", Project: "p"},
+		{Name: "wrong-activity", Phase: "running", Activity: "executing", Template: "claude", Runtime: "docker", Project: "p"},
+		{Name: "wrong-template", Phase: "running", Activity: "thinking", Template: "gemini", Runtime: "docker", Project: "p"},
+	}
+
+	filterPhase = "running"
+	filterActivity = "thinking"
+	filterTemplate = "claude"
+	defer func() { filterPhase = ""; filterActivity = ""; filterTemplate = "" }()
+
+	old := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	err := displayAgents(agents, false, false)
+	w.Close()
+	os.Stdout = old
+
+	if err != nil {
+		t.Fatalf("displayAgents returned error: %v", err)
+	}
+
+	var buf bytes.Buffer
+	buf.ReadFrom(r)
+	output := buf.String()
+
+	lines := strings.Split(strings.TrimSpace(output), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("expected 2 lines (header + 1 agent), got %d: %s", len(lines), output)
+	}
+	if !strings.Contains(lines[1], "match") {
+		t.Errorf("only 'match' agent should appear: %s", lines[1])
+	}
+}
+
+func TestSortAgentsByName(t *testing.T) {
+	agents := []api.AgentInfo{
+		{Name: "charlie", Template: "default", Runtime: "docker", Project: "p", Phase: "running"},
+		{Name: "alice", Template: "default", Runtime: "docker", Project: "p", Phase: "running"},
+		{Name: "bob", Template: "default", Runtime: "docker", Project: "p", Phase: "running"},
+	}
+
+	sortField = "name"
+	defer func() { sortField = "" }()
+
+	old := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	err := displayAgents(agents, false, false)
+	w.Close()
+	os.Stdout = old
+
+	if err != nil {
+		t.Fatalf("displayAgents returned error: %v", err)
+	}
+
+	var buf bytes.Buffer
+	buf.ReadFrom(r)
+	output := buf.String()
+
+	lines := strings.Split(strings.TrimSpace(output), "\n")
+	if len(lines) < 4 {
+		t.Fatalf("expected 4 lines, got %d: %s", len(lines), output)
+	}
+	if !strings.Contains(lines[1], "alice") {
+		t.Errorf("first agent should be 'alice': %s", lines[1])
+	}
+	if !strings.Contains(lines[2], "bob") {
+		t.Errorf("second agent should be 'bob': %s", lines[2])
+	}
+	if !strings.Contains(lines[3], "charlie") {
+		t.Errorf("third agent should be 'charlie': %s", lines[3])
+	}
+}
+
+func TestSortAgentsByCreated(t *testing.T) {
+	now := time.Now()
+	agents := []api.AgentInfo{
+		{Name: "oldest", Template: "default", Runtime: "docker", Project: "p", Phase: "running", Created: now.Add(-3 * time.Hour)},
+		{Name: "newest", Template: "default", Runtime: "docker", Project: "p", Phase: "running", Created: now.Add(-1 * time.Hour)},
+		{Name: "middle", Template: "default", Runtime: "docker", Project: "p", Phase: "running", Created: now.Add(-2 * time.Hour)},
+	}
+
+	sortField = "created"
+	defer func() { sortField = "" }()
+
+	old := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	err := displayAgents(agents, false, false)
+	w.Close()
+	os.Stdout = old
+
+	if err != nil {
+		t.Fatalf("displayAgents returned error: %v", err)
+	}
+
+	var buf bytes.Buffer
+	buf.ReadFrom(r)
+	output := buf.String()
+
+	lines := strings.Split(strings.TrimSpace(output), "\n")
+	if len(lines) < 4 {
+		t.Fatalf("expected 4 lines, got %d: %s", len(lines), output)
+	}
+	// Timestamps default to descending (newest first)
+	if !strings.Contains(lines[1], "newest") {
+		t.Errorf("first agent should be 'newest': %s", lines[1])
+	}
+	if !strings.Contains(lines[2], "middle") {
+		t.Errorf("second agent should be 'middle': %s", lines[2])
+	}
+	if !strings.Contains(lines[3], "oldest") {
+		t.Errorf("third agent should be 'oldest': %s", lines[3])
+	}
+}
+
+func TestSortAgentsReverse(t *testing.T) {
+	now := time.Now()
+	agents := []api.AgentInfo{
+		{Name: "oldest", Template: "default", Runtime: "docker", Project: "p", Phase: "running", Created: now.Add(-3 * time.Hour)},
+		{Name: "newest", Template: "default", Runtime: "docker", Project: "p", Phase: "running", Created: now.Add(-1 * time.Hour)},
+		{Name: "middle", Template: "default", Runtime: "docker", Project: "p", Phase: "running", Created: now.Add(-2 * time.Hour)},
+	}
+
+	sortField = "created"
+	sortReverse = true
+	defer func() { sortField = ""; sortReverse = false }()
+
+	old := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	err := displayAgents(agents, false, false)
+	w.Close()
+	os.Stdout = old
+
+	if err != nil {
+		t.Fatalf("displayAgents returned error: %v", err)
+	}
+
+	var buf bytes.Buffer
+	buf.ReadFrom(r)
+	output := buf.String()
+
+	lines := strings.Split(strings.TrimSpace(output), "\n")
+	if len(lines) < 4 {
+		t.Fatalf("expected 4 lines, got %d: %s", len(lines), output)
+	}
+	// --reverse on timestamp: ascending (oldest first)
+	if !strings.Contains(lines[1], "oldest") {
+		t.Errorf("first agent should be 'oldest': %s", lines[1])
+	}
+	if !strings.Contains(lines[2], "middle") {
+		t.Errorf("second agent should be 'middle': %s", lines[2])
+	}
+	if !strings.Contains(lines[3], "newest") {
+		t.Errorf("third agent should be 'newest': %s", lines[3])
+	}
+}
+
+func TestDisplayAgentsFilteredEmpty(t *testing.T) {
+	agents := []api.AgentInfo{
+		{Name: "running-agent", Phase: "running", Template: "default", Runtime: "docker", Project: "p"},
+	}
+
+	filterPhase = "error"
+	defer func() { filterPhase = "" }()
+
+	old := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	err := displayAgents(agents, false, false)
+	w.Close()
+	os.Stdout = old
+
+	if err != nil {
+		t.Fatalf("displayAgents returned error: %v", err)
+	}
+
+	var buf bytes.Buffer
+	buf.ReadFrom(r)
+	output := buf.String()
+
+	if !strings.Contains(output, "No active agents") {
+		t.Errorf("expected empty message when filter matches nothing, got: %s", output)
+	}
+	if strings.Contains(output, "running-agent") {
+		t.Errorf("output should NOT contain filtered-out agent: %s", output)
+	}
+}
+
+func TestValidateListFlags(t *testing.T) {
+	tests := []struct {
+		name       string
+		phase      string
+		activity   string
+		sort       string
+		wantErr    bool
+		errContain string
+	}{
+		{"valid phase", "running", "", "", false, ""},
+		{"valid activity", "", "thinking", "", false, ""},
+		{"valid sort", "", "", "name", false, ""},
+		{"invalid phase", "bogus", "", "", true, "invalid phase"},
+		{"invalid activity", "", "bogus", "", true, "invalid activity"},
+		{"invalid sort", "", "", "bogus", true, "invalid sort field"},
+		{"all empty", "", "", "", false, ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			filterPhase = tt.phase
+			filterActivity = tt.activity
+			sortField = tt.sort
+			defer func() { filterPhase = ""; filterActivity = ""; sortField = "" }()
+
+			err := validateListFlags()
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got nil")
+				}
+				if !strings.Contains(err.Error(), tt.errContain) {
+					t.Errorf("error %q should contain %q", err.Error(), tt.errContain)
+				}
+			} else if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+}
