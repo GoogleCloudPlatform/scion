@@ -40,14 +40,10 @@ func scrubHubEnv(t *testing.T) {
 // variables removed. Use when constructing exec.Cmd.Env to prevent
 // credential leakage to child processes.
 func filterHubEnv(env []string) []string {
-	blocked := make(map[string]bool, len(hubEnvVars))
-	for _, key := range hubEnvVars {
-		blocked[key] = true
-	}
 	var filtered []string
 	for _, e := range env {
 		key, _, _ := strings.Cut(e, "=")
-		if !blocked[key] {
+		if !slices.Contains(hubEnvVars, key) {
 			filtered = append(filtered, e)
 		}
 	}
@@ -179,14 +175,15 @@ func TestInitCommand_Integration(t *testing.T) {
 	scrubHubEnv(t)
 
 	// Build sciontool if needed for integration testing
-	cmd := exec.Command("go", "build", "-buildvcs=false", "-o", "/tmp/sciontool-test", "../")
+	binPath := filepath.Join(t.TempDir(), "sciontool-test")
+	cmd := exec.Command("go", "build", "-buildvcs=false", "-o", binPath, "../")
 	if err := cmd.Run(); err != nil {
 		t.Skipf("failed to build sciontool for integration test: %v", err)
 	}
 
 	// Test running a simple command — filter Hub env vars from the
 	// subprocess environment as belt-and-suspenders protection.
-	testCmd := exec.Command("/tmp/sciontool-test", "init", "--", "echo", "hello")
+	testCmd := exec.Command(binPath, "init", "--", "echo", "hello")
 	testCmd.Env = filterHubEnv(os.Environ())
 	output, err := testCmd.CombinedOutput()
 	if err != nil {
