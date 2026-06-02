@@ -19,7 +19,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"testing"
 	"time"
 
@@ -28,53 +27,52 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// scrubHubEnv clears all Hub-related environment variables for the
+// duration of the test, preventing accidental communication with a
+// real Hub when tests run inside an agent container. See issue #123.
+func scrubHubEnv(t *testing.T) {
+	t.Helper()
+	for _, key := range []string{
+		EnvHubEndpoint,
+		EnvHubURL,
+		EnvHubToken,
+		EnvAgentID,
+		EnvAgentMode,
+	} {
+		t.Setenv(key, "")
+	}
+}
+
 func TestNewClient_FromEnvironment(t *testing.T) {
-	// Save and restore env vars
-	origEndpoint := os.Getenv(EnvHubEndpoint)
-	origURL := os.Getenv(EnvHubURL)
-	origToken := os.Getenv(EnvHubToken)
-	origAgentID := os.Getenv(EnvAgentID)
-	defer func() {
-		os.Setenv(EnvHubEndpoint, origEndpoint)
-		os.Setenv(EnvHubURL, origURL)
-		os.Setenv(EnvHubToken, origToken)
-		os.Setenv(EnvAgentID, origAgentID)
-	}()
+	// Clear Hub env vars to prevent leakage from the container (issue #123).
+	scrubHubEnv(t)
 
 	t.Run("missing env vars returns nil", func(t *testing.T) {
-		os.Unsetenv(EnvHubEndpoint)
-		os.Unsetenv(EnvHubURL)
-		os.Unsetenv(EnvHubToken)
-		os.Unsetenv(EnvAgentID)
-
+		scrubHubEnv(t)
 		client := NewClient()
 		assert.Nil(t, client)
 	})
 
 	t.Run("missing token returns nil", func(t *testing.T) {
-		os.Unsetenv(EnvHubEndpoint)
-		os.Setenv(EnvHubURL, "http://hub.example.com")
-		os.Unsetenv(EnvHubToken)
-		os.Unsetenv(EnvAgentID)
-
+		scrubHubEnv(t)
+		t.Setenv(EnvHubURL, "http://hub.example.com")
 		client := NewClient()
 		assert.Nil(t, client)
 	})
 
 	t.Run("missing agentID returns nil", func(t *testing.T) {
-		os.Setenv(EnvHubEndpoint, "http://hub.example.com")
-		os.Setenv(EnvHubToken, "test-token")
-		os.Unsetenv(EnvAgentID)
-
+		scrubHubEnv(t)
+		t.Setenv(EnvHubEndpoint, "http://hub.example.com")
+		t.Setenv(EnvHubToken, "test-token")
 		client := NewClient()
 		assert.Nil(t, client, "should not create client without agent ID (local agent scenario)")
 	})
 
 	t.Run("with all env vars returns client", func(t *testing.T) {
-		os.Unsetenv(EnvHubEndpoint)
-		os.Setenv(EnvHubURL, "http://hub.example.com")
-		os.Setenv(EnvHubToken, "test-token")
-		os.Setenv(EnvAgentID, "agent-123")
+		scrubHubEnv(t)
+		t.Setenv(EnvHubURL, "http://hub.example.com")
+		t.Setenv(EnvHubToken, "test-token")
+		t.Setenv(EnvAgentID, "agent-123")
 
 		client := NewClient()
 		require.NotNil(t, client)
@@ -82,10 +80,11 @@ func TestNewClient_FromEnvironment(t *testing.T) {
 	})
 
 	t.Run("prefers SCION_HUB_ENDPOINT over SCION_HUB_URL", func(t *testing.T) {
-		os.Setenv(EnvHubEndpoint, "http://endpoint.example.com")
-		os.Setenv(EnvHubURL, "http://url.example.com")
-		os.Setenv(EnvHubToken, "test-token")
-		os.Setenv(EnvAgentID, "agent-123")
+		scrubHubEnv(t)
+		t.Setenv(EnvHubEndpoint, "http://endpoint.example.com")
+		t.Setenv(EnvHubURL, "http://url.example.com")
+		t.Setenv(EnvHubToken, "test-token")
+		t.Setenv(EnvAgentID, "agent-123")
 
 		client := NewClient()
 		require.NotNil(t, client)
@@ -93,10 +92,10 @@ func TestNewClient_FromEnvironment(t *testing.T) {
 	})
 
 	t.Run("falls back to SCION_HUB_URL when SCION_HUB_ENDPOINT not set", func(t *testing.T) {
-		os.Unsetenv(EnvHubEndpoint)
-		os.Setenv(EnvHubURL, "http://url.example.com")
-		os.Setenv(EnvHubToken, "test-token")
-		os.Setenv(EnvAgentID, "agent-123")
+		scrubHubEnv(t)
+		t.Setenv(EnvHubURL, "http://url.example.com")
+		t.Setenv(EnvHubToken, "test-token")
+		t.Setenv(EnvAgentID, "agent-123")
 
 		client := NewClient()
 		require.NotNil(t, client)
@@ -261,31 +260,25 @@ func TestClient_Heartbeat(t *testing.T) {
 }
 
 func TestIsHostedMode(t *testing.T) {
-	origMode := os.Getenv(EnvAgentMode)
-	defer os.Setenv(EnvAgentMode, origMode)
-
 	t.Run("not hosted mode", func(t *testing.T) {
-		os.Unsetenv(EnvAgentMode)
+		t.Setenv(EnvAgentMode, "")
 		assert.False(t, IsHostedMode())
 
-		os.Setenv(EnvAgentMode, "solo")
+		t.Setenv(EnvAgentMode, "solo")
 		assert.False(t, IsHostedMode())
 	})
 
 	t.Run("hosted mode", func(t *testing.T) {
-		os.Setenv(EnvAgentMode, "hosted")
+		t.Setenv(EnvAgentMode, "hosted")
 		assert.True(t, IsHostedMode())
 	})
 }
 
 func TestGetAgentID(t *testing.T) {
-	origID := os.Getenv(EnvAgentID)
-	defer os.Setenv(EnvAgentID, origID)
-
-	os.Setenv(EnvAgentID, "test-agent-id")
+	t.Setenv(EnvAgentID, "test-agent-id")
 	assert.Equal(t, "test-agent-id", GetAgentID())
 
-	os.Unsetenv(EnvAgentID)
+	t.Setenv(EnvAgentID, "")
 	assert.Equal(t, "", GetAgentID())
 }
 
@@ -677,16 +670,6 @@ func TestClient_StartTokenRefresh(t *testing.T) {
 }
 
 func TestOperatingMode(t *testing.T) {
-	// Save and restore env vars
-	origEndpoint := os.Getenv(EnvHubEndpoint)
-	origURL := os.Getenv(EnvHubURL)
-	origMode := os.Getenv(EnvAgentMode)
-	defer func() {
-		os.Setenv(EnvHubEndpoint, origEndpoint)
-		os.Setenv(EnvHubURL, origURL)
-		os.Setenv(EnvAgentMode, origMode)
-	}()
-
 	tests := []struct {
 		name         string
 		endpoint     string
@@ -747,17 +730,16 @@ func TestOperatingMode(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			os.Unsetenv(EnvHubEndpoint)
-			os.Unsetenv(EnvHubURL)
-			os.Unsetenv(EnvAgentMode)
+			// Clear Hub env, then set test values (issue #123).
+			scrubHubEnv(t)
 			if tt.endpoint != "" {
-				os.Setenv(EnvHubEndpoint, tt.endpoint)
+				t.Setenv(EnvHubEndpoint, tt.endpoint)
 			}
 			if tt.hubURL != "" {
-				os.Setenv(EnvHubURL, tt.hubURL)
+				t.Setenv(EnvHubURL, tt.hubURL)
 			}
 			if tt.agentMode != "" {
-				os.Setenv(EnvAgentMode, tt.agentMode)
+				t.Setenv(EnvAgentMode, tt.agentMode)
 			}
 
 			mode := OperatingMode()
@@ -768,20 +750,8 @@ func TestOperatingMode(t *testing.T) {
 }
 
 func TestOperatingMode_Defaults(t *testing.T) {
-	// Save and restore env vars
-	origEndpoint := os.Getenv(EnvHubEndpoint)
-	origURL := os.Getenv(EnvHubURL)
-	origMode := os.Getenv(EnvAgentMode)
-	defer func() {
-		os.Setenv(EnvHubEndpoint, origEndpoint)
-		os.Setenv(EnvHubURL, origURL)
-		os.Setenv(EnvAgentMode, origMode)
-	}()
-
-	// Clear all relevant env vars
-	os.Unsetenv(EnvHubEndpoint)
-	os.Unsetenv(EnvHubURL)
-	os.Unsetenv(EnvAgentMode)
+	// Clear all relevant env vars (issue #123).
+	scrubHubEnv(t)
 
 	mode := OperatingMode()
 	assert.Equal(t, ModeLocal, mode, "should default to ModeLocal when no env vars are set")
@@ -818,18 +788,11 @@ func TestNewClient_UsesTokenFile(t *testing.T) {
 	cleanup := SetTokenHome(t.TempDir())
 	defer cleanup()
 
-	origEndpoint := os.Getenv(EnvHubEndpoint)
-	origToken := os.Getenv(EnvHubToken)
-	origAgentID := os.Getenv(EnvAgentID)
-	defer func() {
-		os.Setenv(EnvHubEndpoint, origEndpoint)
-		os.Setenv(EnvHubToken, origToken)
-		os.Setenv(EnvAgentID, origAgentID)
-	}()
-
-	os.Setenv(EnvHubEndpoint, "http://hub.example.com")
-	os.Setenv(EnvHubToken, "original-env-token")
-	os.Setenv(EnvAgentID, "agent-123")
+	// Clear Hub env, then set test values (issue #123).
+	scrubHubEnv(t)
+	t.Setenv(EnvHubEndpoint, "http://hub.example.com")
+	t.Setenv(EnvHubToken, "original-env-token")
+	t.Setenv(EnvAgentID, "agent-123")
 
 	t.Run("uses env token when no file exists", func(t *testing.T) {
 		client := NewClient()
@@ -974,27 +937,21 @@ func TestGitHubTokenFile_WriteAndRead(t *testing.T) {
 }
 
 func TestIsGitHubAppEnabled(t *testing.T) {
-	orig := os.Getenv(EnvGitHubAppEnabled)
-	defer os.Setenv(EnvGitHubAppEnabled, orig)
-
-	os.Unsetenv(EnvGitHubAppEnabled)
+	t.Setenv(EnvGitHubAppEnabled, "")
 	assert.False(t, IsGitHubAppEnabled())
 
-	os.Setenv(EnvGitHubAppEnabled, "false")
+	t.Setenv(EnvGitHubAppEnabled, "false")
 	assert.False(t, IsGitHubAppEnabled())
 
-	os.Setenv(EnvGitHubAppEnabled, "true")
+	t.Setenv(EnvGitHubAppEnabled, "true")
 	assert.True(t, IsGitHubAppEnabled())
 }
 
 func TestGitHubTokenPath(t *testing.T) {
-	orig := os.Getenv(EnvGitHubTokenPath)
-	defer os.Setenv(EnvGitHubTokenPath, orig)
-
-	os.Unsetenv(EnvGitHubTokenPath)
+	t.Setenv(EnvGitHubTokenPath, "")
 	assert.Equal(t, DefaultGitHubTokenPath, GitHubTokenPath())
 
-	os.Setenv(EnvGitHubTokenPath, "/custom/path/token")
+	t.Setenv(EnvGitHubTokenPath, "/custom/path/token")
 	assert.Equal(t, "/custom/path/token", GitHubTokenPath())
 }
 

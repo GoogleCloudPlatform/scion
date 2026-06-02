@@ -16,6 +16,22 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 )
 
+// scrubHubEnv clears all Hub-related environment variables for the
+// duration of the test, preventing accidental communication with a
+// real Hub when tests run inside an agent container. See issue #123.
+func scrubHubEnv(t *testing.T) {
+	t.Helper()
+	for _, key := range []string{
+		"SCION_HUB_ENDPOINT",
+		"SCION_HUB_URL",
+		"SCION_AUTH_TOKEN",
+		"SCION_AGENT_ID",
+		"SCION_AGENT_MODE",
+	} {
+		t.Setenv(key, "")
+	}
+}
+
 // TestHubHandler_EventMapping tests that events are correctly mapped to Hub status updates.
 func TestHubHandler_EventMapping(t *testing.T) {
 	tests := []struct {
@@ -90,9 +106,7 @@ func TestHubHandler_EventMapping(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			tmpHome := t.TempDir()
-			oldHome := os.Getenv("HOME")
-			os.Setenv("HOME", tmpHome)
-			defer os.Setenv("HOME", oldHome)
+			t.Setenv("HOME", tmpHome)
 
 			var receivedStatus string
 			var mu sync.Mutex
@@ -121,16 +135,11 @@ func TestHubHandler_EventMapping(t *testing.T) {
 			}))
 			defer server.Close()
 
-			// Set environment variables for the Hub client
-			os.Setenv("SCION_HUB_ENDPOINT", server.URL)
-			os.Setenv("SCION_AUTH_TOKEN", "test-token")
-			os.Setenv("SCION_AGENT_ID", "test-agent-id")
-			defer func() {
-				os.Unsetenv("SCION_HUB_ENDPOINT")
-				os.Unsetenv("SCION_HUB_URL")
-				os.Unsetenv("SCION_AUTH_TOKEN")
-				os.Unsetenv("SCION_AGENT_ID")
-			}()
+			// Clear real Hub env, then point at the test server (issue #123).
+			scrubHubEnv(t)
+			t.Setenv("SCION_HUB_ENDPOINT", server.URL)
+			t.Setenv("SCION_AUTH_TOKEN", "test-token")
+			t.Setenv("SCION_AGENT_ID", "test-agent-id")
 
 			// Create handler
 			handler := NewHubHandler()
@@ -172,11 +181,8 @@ func TestHubHandler_EventMapping(t *testing.T) {
 
 // TestHubHandler_NotConfigured tests that nil handler doesn't panic.
 func TestHubHandler_NotConfigured(t *testing.T) {
-	// Clear environment to ensure client is not configured
-	os.Unsetenv("SCION_HUB_ENDPOINT")
-	os.Unsetenv("SCION_HUB_URL")
-	os.Unsetenv("SCION_AUTH_TOKEN")
-	os.Unsetenv("SCION_AGENT_ID")
+	// Clear environment to ensure client is not configured (issue #123).
+	scrubHubEnv(t)
 
 	handler := NewHubHandler()
 	if handler != nil {
@@ -206,15 +212,11 @@ func TestHubHandler_ReportMethods(t *testing.T) {
 	}))
 	defer server.Close()
 
-	os.Setenv("SCION_HUB_ENDPOINT", server.URL)
-	os.Setenv("SCION_AUTH_TOKEN", "test-token")
-	os.Setenv("SCION_AGENT_ID", "test-agent-id")
-	defer func() {
-		os.Unsetenv("SCION_HUB_ENDPOINT")
-		os.Unsetenv("SCION_HUB_URL")
-		os.Unsetenv("SCION_AUTH_TOKEN")
-		os.Unsetenv("SCION_AGENT_ID")
-	}()
+	// Clear real Hub env, then point at the test server (issue #123).
+	scrubHubEnv(t)
+	t.Setenv("SCION_HUB_ENDPOINT", server.URL)
+	t.Setenv("SCION_AUTH_TOKEN", "test-token")
+	t.Setenv("SCION_AGENT_ID", "test-agent-id")
 
 	handler := NewHubHandler()
 	if handler == nil {
@@ -377,9 +379,7 @@ func TestHubHandler_StickyStatus(t *testing.T) {
 			os.WriteFile(tmpDir+"/agent-info.json", data, 0644)
 
 			// Point HOME to the temp dir so readLocalActivity finds our file
-			origHome := os.Getenv("HOME")
-			os.Setenv("HOME", tmpDir)
-			defer os.Setenv("HOME", origHome)
+			t.Setenv("HOME", tmpDir)
 
 			var mu sync.Mutex
 			callCount := 0
@@ -400,15 +400,11 @@ func TestHubHandler_StickyStatus(t *testing.T) {
 			}))
 			defer server.Close()
 
-			os.Setenv("SCION_HUB_ENDPOINT", server.URL)
-			os.Setenv("SCION_AUTH_TOKEN", "test-token")
-			os.Setenv("SCION_AGENT_ID", "test-agent-id")
-			defer func() {
-				os.Unsetenv("SCION_HUB_ENDPOINT")
-				os.Unsetenv("SCION_HUB_URL")
-				os.Unsetenv("SCION_AUTH_TOKEN")
-				os.Unsetenv("SCION_AGENT_ID")
-			}()
+			// Clear real Hub env, then point at the test server (issue #123).
+			scrubHubEnv(t)
+			t.Setenv("SCION_HUB_ENDPOINT", server.URL)
+			t.Setenv("SCION_AUTH_TOKEN", "test-token")
+			t.Setenv("SCION_AGENT_ID", "test-agent-id")
 
 			handler := NewHubHandler()
 			if handler == nil {
@@ -447,11 +443,8 @@ func TestHubHandler_StickyStatus(t *testing.T) {
 // TestHubHandler_ModeBehavior verifies behavior differences between local and hub modes.
 func TestHubHandler_ModeBehavior(t *testing.T) {
 	t.Run("local mode: HubHandler is nil", func(t *testing.T) {
-		// Clear hub env vars to simulate local mode
-		os.Unsetenv("SCION_HUB_ENDPOINT")
-		os.Unsetenv("SCION_HUB_URL")
-		os.Unsetenv("SCION_AUTH_TOKEN")
-		os.Unsetenv("SCION_AGENT_ID")
+		// Clear hub env vars to simulate local mode (issue #123).
+		scrubHubEnv(t)
 
 		handler := NewHubHandler()
 		if handler != nil {
@@ -463,15 +456,10 @@ func TestHubHandler_ModeBehavior(t *testing.T) {
 		// Even without a hub, the StatusHandler must write to agent-info.json
 		// for local observability (defense-in-depth).
 		tmpHome := t.TempDir()
-		origHome := os.Getenv("HOME")
-		os.Setenv("HOME", tmpHome)
-		defer os.Setenv("HOME", origHome)
+		t.Setenv("HOME", tmpHome)
 
-		// Clear hub env to ensure local mode
-		os.Unsetenv("SCION_HUB_ENDPOINT")
-		os.Unsetenv("SCION_HUB_URL")
-		os.Unsetenv("SCION_AUTH_TOKEN")
-		os.Unsetenv("SCION_AGENT_ID")
+		// Clear hub env to ensure local mode (issue #123).
+		scrubHubEnv(t)
 
 		statusHandler := NewStatusHandler()
 		event := &hooks.Event{
@@ -497,9 +485,7 @@ func TestHubHandler_ModeBehavior(t *testing.T) {
 
 	t.Run("hub mode: HubHandler is active and sends updates", func(t *testing.T) {
 		tmpHome := t.TempDir()
-		origHome := os.Getenv("HOME")
-		os.Setenv("HOME", tmpHome)
-		defer os.Setenv("HOME", origHome)
+		t.Setenv("HOME", tmpHome)
 
 		callCount := 0
 		var mu sync.Mutex
@@ -513,14 +499,11 @@ func TestHubHandler_ModeBehavior(t *testing.T) {
 		}))
 		defer server.Close()
 
-		os.Setenv("SCION_HUB_ENDPOINT", server.URL)
-		os.Setenv("SCION_AUTH_TOKEN", "test-token")
-		os.Setenv("SCION_AGENT_ID", "test-agent")
-		defer func() {
-			os.Unsetenv("SCION_HUB_ENDPOINT")
-			os.Unsetenv("SCION_AUTH_TOKEN")
-			os.Unsetenv("SCION_AGENT_ID")
-		}()
+		// Clear real Hub env, then point at the test server (issue #123).
+		scrubHubEnv(t)
+		t.Setenv("SCION_HUB_ENDPOINT", server.URL)
+		t.Setenv("SCION_AUTH_TOKEN", "test-token")
+		t.Setenv("SCION_AGENT_ID", "test-agent")
 
 		handler := NewHubHandler()
 		if handler == nil {
@@ -546,9 +529,7 @@ func TestHubHandler_ModeBehavior(t *testing.T) {
 	t.Run("hub mode: StatusHandler still writes agent-info.json", func(t *testing.T) {
 		// In hub mode, StatusHandler should still write locally for defense-in-depth.
 		tmpHome := t.TempDir()
-		origHome := os.Getenv("HOME")
-		os.Setenv("HOME", tmpHome)
-		defer os.Setenv("HOME", origHome)
+		t.Setenv("HOME", tmpHome)
 
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
@@ -556,14 +537,11 @@ func TestHubHandler_ModeBehavior(t *testing.T) {
 		}))
 		defer server.Close()
 
-		os.Setenv("SCION_HUB_ENDPOINT", server.URL)
-		os.Setenv("SCION_AUTH_TOKEN", "test-token")
-		os.Setenv("SCION_AGENT_ID", "test-agent")
-		defer func() {
-			os.Unsetenv("SCION_HUB_ENDPOINT")
-			os.Unsetenv("SCION_AUTH_TOKEN")
-			os.Unsetenv("SCION_AGENT_ID")
-		}()
+		// Clear real Hub env, then point at the test server (issue #123).
+		scrubHubEnv(t)
+		t.Setenv("SCION_HUB_ENDPOINT", server.URL)
+		t.Setenv("SCION_AUTH_TOKEN", "test-token")
+		t.Setenv("SCION_AGENT_ID", "test-agent")
 
 		statusHandler := NewStatusHandler()
 		event := &hooks.Event{
@@ -594,9 +572,7 @@ func TestHubHandler_ModeBehavior(t *testing.T) {
 func TestHubHandler_AssistantTextForwarding(t *testing.T) {
 	t.Run("forwards assistant text to outbound-message endpoint", func(t *testing.T) {
 		tmpHome := t.TempDir()
-		origHome := os.Getenv("HOME")
-		os.Setenv("HOME", tmpHome)
-		defer os.Setenv("HOME", origHome)
+		t.Setenv("HOME", tmpHome)
 
 		var mu sync.Mutex
 		var outboundMsg string
@@ -624,15 +600,11 @@ func TestHubHandler_AssistantTextForwarding(t *testing.T) {
 		}))
 		defer server.Close()
 
-		os.Setenv("SCION_HUB_ENDPOINT", server.URL)
-		os.Setenv("SCION_AUTH_TOKEN", "test-token")
-		os.Setenv("SCION_AGENT_ID", "test-agent-id")
-		defer func() {
-			os.Unsetenv("SCION_HUB_ENDPOINT")
-			os.Unsetenv("SCION_HUB_URL")
-			os.Unsetenv("SCION_AUTH_TOKEN")
-			os.Unsetenv("SCION_AGENT_ID")
-		}()
+		// Clear real Hub env, then point at the test server (issue #123).
+		scrubHubEnv(t)
+		t.Setenv("SCION_HUB_ENDPOINT", server.URL)
+		t.Setenv("SCION_AUTH_TOKEN", "test-token")
+		t.Setenv("SCION_AGENT_ID", "test-agent-id")
 
 		handler := NewHubHandler()
 		if handler == nil {
@@ -662,9 +634,7 @@ func TestHubHandler_AssistantTextForwarding(t *testing.T) {
 
 	t.Run("truncates assistant text exceeding 64KB", func(t *testing.T) {
 		tmpHome := t.TempDir()
-		origHome := os.Getenv("HOME")
-		os.Setenv("HOME", tmpHome)
-		defer os.Setenv("HOME", origHome)
+		t.Setenv("HOME", tmpHome)
 
 		var mu sync.Mutex
 		var outboundMsg string
@@ -685,15 +655,11 @@ func TestHubHandler_AssistantTextForwarding(t *testing.T) {
 		}))
 		defer server.Close()
 
-		os.Setenv("SCION_HUB_ENDPOINT", server.URL)
-		os.Setenv("SCION_AUTH_TOKEN", "test-token")
-		os.Setenv("SCION_AGENT_ID", "test-agent-id")
-		defer func() {
-			os.Unsetenv("SCION_HUB_ENDPOINT")
-			os.Unsetenv("SCION_HUB_URL")
-			os.Unsetenv("SCION_AUTH_TOKEN")
-			os.Unsetenv("SCION_AGENT_ID")
-		}()
+		// Clear real Hub env, then point at the test server (issue #123).
+		scrubHubEnv(t)
+		t.Setenv("SCION_HUB_ENDPOINT", server.URL)
+		t.Setenv("SCION_AUTH_TOKEN", "test-token")
+		t.Setenv("SCION_AGENT_ID", "test-agent-id")
 
 		handler := NewHubHandler()
 		if handler == nil {
@@ -734,9 +700,7 @@ func TestHubHandler_AssistantTextForwarding(t *testing.T) {
 func TestHubHandler_AssistantTextVisibilityTagging(t *testing.T) {
 	t.Run("tags outbound message with verbose visibility", func(t *testing.T) {
 		tmpHome := t.TempDir()
-		origHome := os.Getenv("HOME")
-		os.Setenv("HOME", tmpHome)
-		defer os.Setenv("HOME", origHome)
+		t.Setenv("HOME", tmpHome)
 
 		var mu sync.Mutex
 		var outboundPayload map[string]interface{}
@@ -757,15 +721,11 @@ func TestHubHandler_AssistantTextVisibilityTagging(t *testing.T) {
 		}))
 		defer server.Close()
 
-		os.Setenv("SCION_HUB_ENDPOINT", server.URL)
-		os.Setenv("SCION_AUTH_TOKEN", "test-token")
-		os.Setenv("SCION_AGENT_ID", "test-agent-id")
-		defer func() {
-			os.Unsetenv("SCION_HUB_ENDPOINT")
-			os.Unsetenv("SCION_HUB_URL")
-			os.Unsetenv("SCION_AUTH_TOKEN")
-			os.Unsetenv("SCION_AGENT_ID")
-		}()
+		// Clear real Hub env, then point at the test server (issue #123).
+		scrubHubEnv(t)
+		t.Setenv("SCION_HUB_ENDPOINT", server.URL)
+		t.Setenv("SCION_AUTH_TOKEN", "test-token")
+		t.Setenv("SCION_AGENT_ID", "test-agent-id")
 
 		handler := NewHubHandler()
 		if handler == nil {
@@ -800,9 +760,7 @@ func TestHubHandler_AssistantTextVisibilityTagging(t *testing.T) {
 
 	t.Run("sets has_thinking metadata when thinking content was filtered", func(t *testing.T) {
 		tmpHome := t.TempDir()
-		origHome := os.Getenv("HOME")
-		os.Setenv("HOME", tmpHome)
-		defer os.Setenv("HOME", origHome)
+		t.Setenv("HOME", tmpHome)
 
 		var mu sync.Mutex
 		var outboundPayload map[string]interface{}
@@ -823,15 +781,11 @@ func TestHubHandler_AssistantTextVisibilityTagging(t *testing.T) {
 		}))
 		defer server.Close()
 
-		os.Setenv("SCION_HUB_ENDPOINT", server.URL)
-		os.Setenv("SCION_AUTH_TOKEN", "test-token")
-		os.Setenv("SCION_AGENT_ID", "test-agent-id")
-		defer func() {
-			os.Unsetenv("SCION_HUB_ENDPOINT")
-			os.Unsetenv("SCION_HUB_URL")
-			os.Unsetenv("SCION_AUTH_TOKEN")
-			os.Unsetenv("SCION_AGENT_ID")
-		}()
+		// Clear real Hub env, then point at the test server (issue #123).
+		scrubHubEnv(t)
+		t.Setenv("SCION_HUB_ENDPOINT", server.URL)
+		t.Setenv("SCION_AUTH_TOKEN", "test-token")
+		t.Setenv("SCION_AGENT_ID", "test-agent-id")
 
 		handler := NewHubHandler()
 		if handler == nil {

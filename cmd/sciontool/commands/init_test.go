@@ -15,6 +15,45 @@ import (
 	"testing"
 )
 
+// hubEnvVars lists the environment variables used by the Hub client.
+// Leaking these to a subprocess (e.g., sciontool init) causes the child
+// to talk to the real Hub and corrupt agent state. See issue #123.
+var hubEnvVars = []string{
+	"SCION_HUB_ENDPOINT",
+	"SCION_HUB_URL",
+	"SCION_AUTH_TOKEN",
+	"SCION_AGENT_ID",
+	"SCION_AGENT_MODE",
+}
+
+// scrubHubEnv clears all Hub-related environment variables for the
+// duration of the test, preventing accidental communication with a
+// real Hub when tests run inside an agent container.
+func scrubHubEnv(t *testing.T) {
+	t.Helper()
+	for _, key := range hubEnvVars {
+		t.Setenv(key, "")
+	}
+}
+
+// filterHubEnv returns a copy of the environment with all Hub-related
+// variables removed. Use when constructing exec.Cmd.Env to prevent
+// credential leakage to child processes.
+func filterHubEnv(env []string) []string {
+	blocked := make(map[string]bool, len(hubEnvVars))
+	for _, key := range hubEnvVars {
+		blocked[key] = true
+	}
+	var filtered []string
+	for _, e := range env {
+		key, _, _ := strings.Cut(e, "=")
+		if !blocked[key] {
+			filtered = append(filtered, e)
+		}
+	}
+	return filtered
+}
+
 // TestInitProjectDataIsolation is a canary test that verifies sciontool source code
 // does NOT import the pkg/config package, which contains project path resolution logic.
 // This is a compile-time guarantee that in-container code cannot access project data paths.
@@ -135,14 +174,20 @@ func TestInitCommand_Integration(t *testing.T) {
 		t.Skip("skipping integration test in short mode")
 	}
 
+	// Clear Hub env vars so the subprocess cannot talk to the real Hub
+	// and corrupt agent state. See issue #123.
+	scrubHubEnv(t)
+
 	// Build sciontool if needed for integration testing
 	cmd := exec.Command("go", "build", "-buildvcs=false", "-o", "/tmp/sciontool-test", "../")
 	if err := cmd.Run(); err != nil {
 		t.Skipf("failed to build sciontool for integration test: %v", err)
 	}
 
-	// Test running a simple command
+	// Test running a simple command — filter Hub env vars from the
+	// subprocess environment as belt-and-suspenders protection.
 	testCmd := exec.Command("/tmp/sciontool-test", "init", "--", "echo", "hello")
+	testCmd.Env = filterHubEnv(os.Environ())
 	output, err := testCmd.CombinedOutput()
 	if err != nil {
 		t.Errorf("init command failed: %v\nOutput: %s", err, output)
