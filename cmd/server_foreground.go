@@ -656,6 +656,14 @@ func initStore(cfg *config.GlobalConfig) (store.Store, error) {
 	var entClient *ent.Client
 	switch cfg.Database.Driver {
 	case "sqlite":
+		// Migration α: upgrade a legacy raw-SQL hub.db (the former
+		// pkg/store/sqlite schema) to the consolidated Ent schema before opening
+		// it. Detection is conservative and the whole step is a no-op for an
+		// already-Ent file, so it is safe to run on every boot.
+		if err := maybeMigrateLegacySQLite(cfg.Database.URL); err != nil {
+			return nil, err
+		}
+
 		// All Hub state lives in a single Ent-backed SQLite database.
 		entClient, err = entc.OpenSQLite("file:"+cfg.Database.URL+"?cache=shared", pool)
 		if err != nil {
@@ -687,6 +695,42 @@ func initStore(cfg *config.GlobalConfig) (store.Store, error) {
 	}
 
 	return s, nil
+}
+
+// maybeMigrateLegacySQLite detects a legacy raw-SQL hub.db at path and, unless
+// the operator opted out with --no-auto-migrate, upgrades it in-process to the
+// consolidated Ent schema (after taking an automatic backup). It is a no-op when
+// the file is already the Ent schema, empty, or absent.
+func maybeMigrateLegacySQLite(path string) error {
+	legacy, err := entc.IsLegacyRawSQLSchema(path)
+	if err != nil {
+		return fmt.Errorf("detecting database schema: %w", err)
+	}
+	if !legacy {
+		return nil
+	}
+
+	if noAutoMigrate {
+		// The operator opted out, but the file is a legacy schema the Ent store
+		// cannot open. Fail loudly with guidance rather than crash later.
+		return fmt.Errorf("detected a legacy raw-SQL hub database at %s but --no-auto-migrate is set; "+
+			"remove the flag to upgrade it in place (a backup is taken automatically), "+
+			"or point --db at an already-migrated database", path)
+	}
+
+	log.Printf("Detected legacy raw-SQL hub database at %s. Backing up and migrating to the Ent schema...", path)
+	report, err := entc.MigrateAlphaSQLite(context.Background(), path, entc.AlphaOptions{
+		Logf: func(format string, args ...any) { log.Printf(format, args...) },
+	})
+	if err != nil {
+		return fmt.Errorf("migrating legacy database (original left untouched): %w", err)
+	}
+	if report.Skipped {
+		return nil
+	}
+	log.Printf("Migration α complete: %d tables, %d rows migrated. Backup: %s",
+		len(report.Tables), report.TotalRows(), report.BackupPath)
+	return nil
 }
 
 // initDevAuth initializes dev authentication and returns the token.
