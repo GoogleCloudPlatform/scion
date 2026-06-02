@@ -25,6 +25,7 @@ package integrationtest
 
 import (
 	"context"
+	"net/url"
 	"sync"
 	"testing"
 	"time"
@@ -43,12 +44,14 @@ import (
 func openPoolStore(t *testing.T, maxOpen int, appName string) *entadapter.CompositeStore {
 	t.Helper()
 	dsn := enttest.NewSchemaURL(t)
+	u, err := url.Parse(dsn)
+	require.NoError(t, err)
+	q := u.Query()
 	if appName != "" {
-		var err error
-		dsn, err = enttest.WithConnParam(dsn, "application_name", appName)
-		require.NoError(t, err)
+		q.Set("application_name", appName)
 	}
-	client, err := entc.OpenPostgres(dsn, entc.PoolConfig{MaxOpenConns: maxOpen, MaxIdleConns: maxOpen})
+	u.RawQuery = q.Encode()
+	client, err := entc.OpenPostgres(u.String(), entc.PoolConfig{MaxOpenConns: maxOpen, MaxIdleConns: maxOpen})
 	require.NoError(t, err)
 	cs := entadapter.NewCompositeStore(client)
 	t.Cleanup(func() { _ = cs.Close() })
