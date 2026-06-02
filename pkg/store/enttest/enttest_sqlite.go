@@ -30,3 +30,16 @@ func newClient(t *testing.T) *ent.Client { return newSQLiteClient(t) }
 // setup/teardown have nothing to do for the SQLite backend.
 func setup()    {}
 func teardown() {}
+
+// Active always reports false in the SQLite build: there is no Postgres backend.
+func Active() bool { return false }
+
+// NewSchemaURL has no meaning without the Postgres backend; it skips the calling
+// test. The integration build provides the real implementation. The signature
+// is kept identical so Postgres-only integration tests reference one symbol
+// regardless of build tag.
+func NewSchemaURL(t *testing.T) string {
+	t.Helper()
+	t.Skip("enttest: Postgres backend not built; rebuild with -tags integration and set SCION_TEST_POSTGRES_URL")
+	return ""
+}

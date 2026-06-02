@@ -160,6 +160,58 @@ func newClient(t *testing.T) *ent.Client {
 	return client
 }
 
+// Active reports whether a per-package ephemeral Postgres database was
+// provisioned (i.e. SCION_TEST_POSTGRES_URL was set and MainSetup succeeded).
+// Integration tests that exercise Postgres-only behavior use it to skip cleanly
+// when run without a live database.
+func Active() bool { return active }
+
+// NewSchemaURL creates and migrates a fresh, isolated schema inside the
+// per-package ephemeral database and returns a connection URL whose search_path
+// points at it. Cleanup drops the schema (CASCADE) on test completion.
+//
+// Unlike NewClient (which hands back a ready *ent.Client with a fixed pool), this
+// returns the raw DSN so callers can open their own clients/pools — needed by the
+// connection-pool stress tests (custom MaxOpenConns) and the multi-process tests
+// (a stable DSN shared with a forked child process). The schema is migrated once
+// here so every client opened against the returned URL sees the full table set.
+//
+// It skips the calling test when the Postgres backend is inactive.
+func NewSchemaURL(t *testing.T) string {
+	t.Helper()
+	if !active {
+		t.Skip("enttest: SCION_TEST_POSTGRES_URL not set; skipping Postgres-only integration test")
+	}
+
+	schema := "t_" + hexID()
+	if _, err := adminDB.ExecContext(context.Background(), "CREATE SCHEMA "+schema); err != nil {
+		t.Fatalf("enttest: creating schema %s: %v", schema, err)
+	}
+	t.Cleanup(func() {
+		if _, err := adminDB.ExecContext(context.Background(), "DROP SCHEMA IF EXISTS "+schema+" CASCADE"); err != nil {
+			t.Logf("enttest: warning: dropping schema %s: %v", schema, err)
+		}
+	})
+
+	clientURL, err := withSearchPath(postgresURL, pkgDBName, schema)
+	if err != nil {
+		t.Fatalf("enttest: building schema URL: %v", err)
+	}
+
+	// Migrate once so the schema is fully provisioned; callers open their own
+	// clients/pools against clientURL afterwards.
+	client, err := entc.OpenPostgres(clientURL, entc.PoolConfig{MaxOpenConns: 2, MaxIdleConns: 1})
+	if err != nil {
+		t.Fatalf("enttest: opening migrate client for schema %s: %v", schema, err)
+	}
+	if err := entc.AutoMigrate(context.Background(), client); err != nil {
+		_ = client.Close()
+		t.Fatalf("enttest: migrating schema %s: %v", schema, err)
+	}
+	_ = client.Close()
+	return clientURL
+}
+
 // hexID returns a 32-char lowercase hex identifier safe to embed in a Postgres
 // database or schema name.
 func hexID() string {
