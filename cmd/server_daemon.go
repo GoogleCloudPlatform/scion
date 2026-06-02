@@ -49,6 +49,15 @@ func runServerStartOrDaemon(cmd *cobra.Command, args []string) error {
 			pid, daemon.GetLogPathComponent(serverDaemonComponent, globalDir))
 	}
 
+	// Check for phantom processes holding server ports even without a PID file
+	serverPorts := collectServerPorts(cmd)
+	if phantomPorts := daemon.DetectOccupiedPorts(serverPorts); len(phantomPorts) > 0 {
+		fmt.Fprintf(os.Stderr, "Error: the following ports are already in use: %v\n", phantomPorts)
+		fmt.Fprintf(os.Stderr, "A previous server process may be running without a PID file.\n")
+		fmt.Fprintf(os.Stderr, "Run 'scion server stop --force' to kill any process on these ports.\n")
+		return fmt.Errorf("port conflict: ports %v are occupied", phantomPorts)
+	}
+
 	// Check if hosted mode is set in config (settings.yaml server.mode).
 	// LoadServerMode() normalizes the legacy "production" value to "hosted".
 	if !cmd.Flags().Changed("hosted") && !cmd.Flags().Changed("production") {
@@ -397,4 +406,21 @@ func printWorkstationQuickstart(globalDir string, host string, wPort int, webEna
 		}
 	}
 	fmt.Println()
+}
+
+// collectServerPorts returns the list of TCP ports the server would bind based
+// on the flags the user passed (or their defaults).
+func collectServerPorts(cmd *cobra.Command) []int {
+	seen := map[int]bool{}
+	var ports []int
+	add := func(p int) {
+		if !seen[p] {
+			seen[p] = true
+			ports = append(ports, p)
+		}
+	}
+	add(webPort)
+	add(hubPort)
+	add(runtimeBrokerPort)
+	return ports
 }
