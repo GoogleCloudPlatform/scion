@@ -72,7 +72,7 @@ func (f *FanOutEventBus) Publish(ctx context.Context, topic string, msg *message
 			if channelKey == "" {
 				channelKey = f.buses[i].Name
 			}
-			if channelKey == msg.Channel {
+			if msg != nil && channelKey == msg.Channel {
 				target = &f.buses[i]
 			}
 		}

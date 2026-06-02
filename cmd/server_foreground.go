@@ -1260,7 +1260,10 @@ func pluginChannelID(pluginMgr *scionplugin.Manager, name string) string {
 	if err != nil {
 		return ""
 	}
-	rpc, ok := raw.(*scionplugin.BrokerRPCClient)
+	type infoer interface {
+		GetInfo() (*scionplugin.PluginInfo, error)
+	}
+	rpc, ok := raw.(infoer)
 	if !ok {
 		return ""
 	}
@@ -1277,7 +1280,10 @@ func pluginChannelID(pluginMgr *scionplugin.Manager, name string) string {
 func isObserverBroker(pluginMgr *scionplugin.Manager, name string) bool {
 	raw, err := pluginMgr.Get(scionplugin.PluginTypeBroker, name)
 	if err == nil {
-		if rpc, ok := raw.(*scionplugin.BrokerRPCClient); ok {
+		type infoer interface {
+			GetInfo() (*scionplugin.PluginInfo, error)
+		}
+		if rpc, ok := raw.(infoer); ok {
 			if info, infoErr := rpc.GetInfo(); infoErr == nil && info != nil {
 				for _, cap := range info.Capabilities {
 					if strings.EqualFold(cap, "observer") {
