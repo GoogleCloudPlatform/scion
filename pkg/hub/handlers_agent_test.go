@@ -4643,3 +4643,126 @@ func TestHandleProjectAgentExec_DispatchesToRuntimeBroker(t *testing.T) {
 	assert.Equal(t, "terminal output", resp.Output)
 	assert.Equal(t, 0, resp.ExitCode)
 }
+
+func TestAgentStatusUpdate_RejectsPhaseRegression(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	project := &store.Project{ID: "proj-regress", Name: "Regression Project", Slug: "regress-project"}
+	require.NoError(t, s.CreateProject(ctx, project))
+
+	agent := &store.Agent{
+		ID: "agent-regress", Slug: "regress-slug", Name: "Regression Agent",
+		ProjectID: project.ID, Phase: string(state.PhaseRunning),
+		Activity: string(state.ActivityExecuting),
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	tokenSvc := srv.GetAgentTokenService()
+	require.NotNil(t, tokenSvc)
+	token, err := tokenSvc.GenerateAgentToken(agent.ID, project.ID, []AgentTokenScope{ScopeAgentStatusUpdate}, nil)
+	require.NoError(t, err)
+
+	// Attempt to regress phase from running → starting (as a spurious session would)
+	status := store.AgentStatusUpdate{Phase: string(state.PhaseStarting)}
+	body, _ := json.Marshal(status)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+agent.ID+"/status", bytes.NewReader(body))
+	req.Header.Set("X-Scion-Agent-Token", token)
+	req.Header.Set("Content-Type", "application/json")
+
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusOK, rec.Code)
+
+	// Phase should remain running — regression was rejected
+	updated, err := s.GetAgent(ctx, agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, string(state.PhaseRunning), updated.Phase,
+		"phase regression from running to starting should be rejected")
+	assert.Equal(t, string(state.ActivityExecuting), updated.Activity,
+		"activity should be preserved when phase regression is rejected")
+}
+
+func TestAgentStatusUpdate_ActivityAutoCorrectsPhase(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	project := &store.Project{ID: "proj-autocorrect", Name: "AutoCorrect Project", Slug: "autocorrect-project"}
+	require.NoError(t, s.CreateProject(ctx, project))
+
+	agent := &store.Agent{
+		ID: "agent-autocorrect", Slug: "autocorrect-slug", Name: "AutoCorrect Agent",
+		ProjectID: project.ID, Phase: string(state.PhaseStarting),
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	tokenSvc := srv.GetAgentTokenService()
+	require.NotNil(t, tokenSvc)
+	token, err := tokenSvc.GenerateAgentToken(agent.ID, project.ID, []AgentTokenScope{ScopeAgentStatusUpdate}, nil)
+	require.NoError(t, err)
+
+	// Send an activity-only update (working) while phase is starting.
+	// This should auto-correct the phase to running.
+	status := store.AgentStatusUpdate{Activity: string(state.ActivityWorking)}
+	body, _ := json.Marshal(status)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+agent.ID+"/status", bytes.NewReader(body))
+	req.Header.Set("X-Scion-Agent-Token", token)
+	req.Header.Set("Content-Type", "application/json")
+
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusOK, rec.Code)
+
+	// Phase should auto-correct to running
+	updated, err := s.GetAgent(ctx, agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, string(state.PhaseRunning), updated.Phase,
+		"activity=working should auto-correct phase from starting to running")
+	assert.Equal(t, string(state.ActivityWorking), updated.Activity)
+}
+
+func TestBrokerHeartbeat_RejectsPhaseRegression(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	project := &store.Project{ID: "proj-hb-regress", Name: "HB Regression Project", Slug: "hb-regress-project"}
+	require.NoError(t, s.CreateProject(ctx, project))
+
+	broker := &store.RuntimeBroker{
+		ID: "broker-hb-regress", Name: "HB Regression Broker", Slug: "hb-regress-broker",
+		Status: store.BrokerStatusOnline,
+	}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+
+	agent := &store.Agent{
+		ID: "agent-hb-regress", Slug: "hb-regress-slug", Name: "HB Regression Agent",
+		ProjectID: project.ID, RuntimeBrokerID: broker.ID,
+		Phase:    string(state.PhaseRunning),
+		Activity: string(state.ActivityWorking),
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	// Send a heartbeat with stale phase=starting (as if agent-info.json was
+	// corrupted by a spurious session's pre-start hook)
+	hb := brokerHeartbeatRequest{
+		Status: "online",
+		Projects: []brokerProjectHeartbeat{{
+			ProjectID:  project.ID,
+			AgentCount: 1,
+			Agents: []brokerAgentHeartbeat{{
+				Slug:            agent.Slug,
+				Phase:           string(state.PhaseStarting),
+				Activity:        string(state.ActivityWorking),
+				ContainerStatus: "Up 10 minutes",
+			}},
+		}},
+	}
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/runtime-brokers/"+broker.ID+"/heartbeat", hb)
+	assert.Equal(t, http.StatusOK, rec.Code)
+
+	// Phase should remain running — heartbeat regression was rejected
+	updated, err := s.GetAgent(ctx, agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, string(state.PhaseRunning), updated.Phase,
+		"heartbeat should not regress phase from running to starting")
+}

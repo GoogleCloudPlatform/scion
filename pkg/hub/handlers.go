@@ -2847,6 +2847,16 @@ func (s *Server) updateAgentStatus(w http.ResponseWriter, r *http.Request, id st
 		return
 	}
 
+	// Guard against phase regressions and auto-correct phase from activity.
+	if status.Phase != "" || status.Activity != "" {
+		agent, err := s.store.GetAgent(ctx, id)
+		if err != nil {
+			writeErrorFromErr(w, err, "")
+			return
+		}
+		guardAgentPhaseTransition(agent, &status)
+	}
+
 	if err := s.store.UpdateAgentStatus(ctx, id, status); err != nil {
 		writeErrorFromErr(w, err, "")
 		return
@@ -2860,6 +2870,37 @@ func (s *Server) updateAgentStatus(w http.ResponseWriter, r *http.Request, id st
 	}
 
 	w.WriteHeader(http.StatusOK)
+}
+
+// guardAgentPhaseTransition applies two guards to a status update:
+//
+//  1. Phase regression guard: rejects transitions that would move an agent
+//     backward in its forward-progress lifecycle (e.g. running → starting).
+//  2. Activity-driven phase auto-correction: when an activity that implies the
+//     agent is running arrives but the phase is pre-running, auto-promotes the
+//     phase to running.
+func guardAgentPhaseTransition(agent *store.Agent, status *store.AgentStatusUpdate) {
+	currentPhase := state.Phase(agent.Phase)
+
+	// Guard 1: reject phase regressions within the forward-progress lifecycle.
+	if status.Phase != "" {
+		newPhase := state.Phase(status.Phase)
+		if currentPhase.IsActivePhase() && newPhase.IsActivePhase() &&
+			newPhase.Ordinal() < currentPhase.Ordinal() {
+			status.Phase = ""
+		}
+	}
+
+	// Guard 2: if an activity that implies the agent is running arrives
+	// without an explicit phase, and the current phase is pre-running,
+	// auto-correct the phase to running.
+	if status.Activity != "" && status.Phase == "" {
+		activity := state.Activity(status.Activity)
+		if activity.ImpliesRunning() && currentPhase.IsActivePhase() &&
+			currentPhase != state.PhaseRunning {
+			status.Phase = string(state.PhaseRunning)
+		}
+	}
 }
 
 func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id, action string) {
@@ -6094,8 +6135,17 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 						statusUpdate.Message = agentHB.Message
 					}
 				} else {
-					// Structured path: broker sent Phase/Activity directly
-					statusUpdate.Phase = agentHB.Phase
+					// Structured path: broker sent Phase/Activity directly.
+					// Guard against phase regressions: stale heartbeat data
+					// must not move a running agent back to starting/etc.
+					hbPhase := state.Phase(agentHB.Phase)
+					curPhase := state.Phase(agent.Phase)
+					if curPhase.IsActivePhase() && hbPhase.IsActivePhase() &&
+						hbPhase.Ordinal() < curPhase.Ordinal() {
+						// Suppress the regression — keep the hub's phase.
+					} else {
+						statusUpdate.Phase = agentHB.Phase
+					}
 					// Only propagate Activity when it differs from the stored
 					// value. Heartbeats always report the current activity, but
 					// repeating the same value would refresh last_activity_event
