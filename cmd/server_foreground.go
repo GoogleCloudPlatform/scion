@@ -640,7 +640,7 @@ func initStore(cfg *config.GlobalConfig) (store.Store, error) {
 
 	// The connection pool config is shared across backends. For SQLite,
 	// MaxOpenConns is forced to 1 by applyDatabasePoolDefaults to serialize
-	// writes; for Postgres it carries the larger pool sizing (default 20/5/30m)
+	// writes; for Postgres it carries the larger pool sizing (default 10/5/30m)
 	// since Postgres handles concurrent connections natively.
 	pool := entc.PoolConfig{
 		MaxOpenConns:    cfg.Database.MaxOpenConns,

@@ -347,7 +347,12 @@ func applyDatabasePoolDefaults(db *DatabaseConfig) {
 	switch db.Driver {
 	case "postgres":
 		if db.MaxOpenConns <= 0 {
-			db.MaxOpenConns = 20
+			// Conservative per-replica default so several replicas fit within a
+			// modest Postgres connection budget. The connection ceiling for N
+			// replicas is roughly N × (MaxOpenConns + event pool + 1 listener +
+			// brokers); see CONNECTION-BUDGET.md. Raise this only when the
+			// instance's max_connections (and any pooler) has headroom.
+			db.MaxOpenConns = 10
 		}
 		if db.MaxIdleConns <= 0 {
 			db.MaxIdleConns = 5

@@ -122,6 +122,16 @@ const (
 	listenPollInterval = time.Second
 	// payloadTTL is how long oversized payloads are retained for refetch.
 	payloadTTL = 60 * time.Second
+	// publishTimeout bounds a single autocommit publish (Publish* methods). These
+	// run synchronously on the caller's goroutine — typically a request handler
+	// right after a CRUD write — and acquire a connection from the event pool. On
+	// an undersized / connection-starved instance (see CONNECTION-BUDGET.md) that
+	// acquire could otherwise block indefinitely, stalling the handler and
+	// silently never emitting the NOTIFY. Bounding it converts that failure mode
+	// into a logged error and a dropped event (publishing is fire-and-forget),
+	// keeping CRUD responsive. The transactional path (PublishTx) is unaffected:
+	// it uses the caller's context and transaction.
+	publishTimeout = 5 * time.Second
 )
 
 // pgExecutor is satisfied by both *pgxpool.Pool and pgx.Tx, letting the publish
@@ -202,7 +212,12 @@ CREATE INDEX IF NOT EXISTS scion_event_payloads_created_at_idx
 // pool (autocommit). Errors are logged rather than returned because the
 // EventPublisher Publish* methods are fire-and-forget.
 func (p *PostgresEventPublisher) publish(subject string, event interface{}) {
-	if err := p.buildAndNotify(p.ctx, p.pool, subject, event); err != nil {
+	// Bound the publish so a saturated event pool surfaces a logged error instead
+	// of blocking the calling (often request-handler) goroutine forever. See
+	// publishTimeout.
+	ctx, cancel := context.WithTimeout(p.ctx, publishTimeout)
+	defer cancel()
+	if err := p.buildAndNotify(ctx, p.pool, subject, event); err != nil {
 		p.log.Error("Failed to publish event via NOTIFY", "subject", subject, "error", err)
 	}
 }
