@@ -227,8 +227,10 @@ func (h *CommandHandler) handleDefault(msg *TGMessage) {
 	currentDefault := link.DefaultAgent
 
 	if threadID != 0 {
-		topicDefault, _ := h.store.GetTopicDefault(ctx, chatID, threadID)
-		if topicDefault != "" {
+		topicDefault, err := h.store.GetTopicDefault(ctx, chatID, threadID)
+		if err != nil {
+			h.log.Error("Failed to get topic default", "error", err)
+		} else if topicDefault != "" {
 			currentDefault = topicDefault
 		}
 		promptText = "Select the default agent for this topic:"

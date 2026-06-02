@@ -486,13 +486,6 @@ func (b *TelegramBrokerV2) Publish(ctx context.Context, topic string, msg *messa
 		return fmt.Errorf("telegram v2 broker not configured")
 	}
 
-	// Channel filter: skip messages explicitly targeted at a different channel.
-	if msg != nil && msg.Channel != "" && msg.Channel != b.pluginName {
-		b.log.Debug("Skipping message for different channel",
-			"channel", msg.Channel, "plugin", b.pluginName)
-		return nil
-	}
-
 	// Dedup check.
 	dedupKey := msgDedupKey(msg)
 	if dedupKey != "" {
@@ -1552,7 +1545,9 @@ func (b *TelegramBrokerV2) handleGroupMessage(tgMsg *TGMessage) {
 	// Resolve effective default agent: topic-level override first, then chat-level.
 	effectiveDefault := link.DefaultAgent
 	if tgMsg.MessageThreadID != 0 {
-		if topicDefault, _ := b.store.GetTopicDefault(ctx, chatID, tgMsg.MessageThreadID); topicDefault != "" {
+		if topicDefault, err := b.store.GetTopicDefault(ctx, chatID, tgMsg.MessageThreadID); err != nil {
+			b.log.Error("Failed to get topic default", "error", err)
+		} else if topicDefault != "" {
 			effectiveDefault = topicDefault
 		}
 	}

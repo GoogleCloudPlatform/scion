@@ -79,18 +79,6 @@ func (b *BrokerServer) Configure(config map[string]string) error {
 
 // Publish receives a message from the Hub and routes it to the handler.
 func (b *BrokerServer) Publish(ctx context.Context, topic string, msg *messages.StructuredMessage) error {
-	// Skip messages explicitly targeted at a different channel.
-	if msg != nil && msg.Channel != "" {
-		b.mu.RLock()
-		name := b.channelName
-		b.mu.RUnlock()
-		if name != "" && msg.Channel != name {
-			b.log.Debug("skipping message for different channel",
-				"channel", msg.Channel, "plugin", name, "topic", topic)
-			return nil
-		}
-	}
-
 	if msg != nil {
 		b.log.Debug("received message via broker",
 			"topic", topic,

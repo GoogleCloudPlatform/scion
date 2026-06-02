@@ -308,7 +308,11 @@ func (r *CommandRouter) handleDialogSubmit(ctx context.Context, event *ChatEvent
 		}
 
 		mapping, err := r.idMapper.ResolveOrAutoRegister(ctx, &eventUserLookup{event}, event.UserID, event.Platform)
-		if err != nil || mapping == nil {
+		if err != nil {
+			r.log.Error("Failed to resolve user mapping", "error", err, "userID", event.UserID)
+			return r.reply(ctx, event, "Something went wrong, please try again later.")
+		}
+		if mapping == nil {
 			return r.reply(ctx, event, "Authentication required. Use `/scionAdmin register` first.")
 		}
 		client, err := r.idMapper.ClientFor(ctx, mapping)
