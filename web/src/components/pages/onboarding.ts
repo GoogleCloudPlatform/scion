@@ -31,6 +31,8 @@ interface OnboardingStatus {
   imagesPresent: boolean;
   hasWorkspace: boolean;
   complete: boolean;
+  imageRegistry?: string;
+  buildAvailable?: boolean;
 }
 
 interface DiagnosticResult {
@@ -74,7 +76,7 @@ export class ScionPageOnboarding extends LitElement {
   @state() private selectedHarnesses = new Set<string>();
 
   // Step 4: Images
-  @state() private imageStatuses = new Map<string, { status: string; error?: string }>();
+  @state() private imageStatuses = new Map<string, { status: string; error?: string; fullName?: string }>();
   @state() private imagePulling = false;
   @state() private imageBuilding = false;
   @state() private buildLogs: string[] = [];
@@ -869,9 +871,10 @@ export class ScionPageOnboarding extends LitElement {
         ${harnesses.map(h => {
           const s = this.imageStatuses.get(h);
           const status = s?.status ?? 'pending';
+          const displayName = s?.fullName ?? `scion-${h}:latest`;
           return html`
             <div class="image-item">
-              <span class="image-name">scion-${h}:latest</span>
+              <span class="image-name">${displayName}</span>
               ${status === 'pending' ? nothing : html`
                 <span class="image-status ${status}">
                   ${status === 'pulling' ? html`<sl-spinner></sl-spinner>` : nothing}
@@ -1004,14 +1007,14 @@ export class ScionPageOnboarding extends LitElement {
         const d = wrapper.data;
 
         if (mode === 'pull' && d['image']) {
-          const image = d['image'] as string;
+          const fullImageName = d['image'] as string;
           const status = d['status'] as string;
           const error = d['error'] as string | undefined;
 
-          const harness = this.imageNameToHarness(image);
+          const harness = this.imageNameToHarness(fullImageName);
           if (harness) {
             const next = new Map(this.imageStatuses);
-            const entry: { status: string; error?: string } = { status };
+            const entry: { status: string; error?: string; fullName?: string } = { status, fullName: fullImageName };
             if (error) entry.error = error;
             next.set(harness, entry);
             this.imageStatuses = next;

@@ -225,6 +225,7 @@ type OnboardingStatus struct {
 	HasWorkspace     bool   `json:"hasWorkspace"`
 	Complete         bool   `json:"complete"`
 	EmbeddedBrokerID string `json:"embeddedBrokerID,omitempty"`
+	ImageRegistry    string `json:"imageRegistry,omitempty"`
 }
 
 func (s *Server) computeOnboardingStatus(ctx context.Context) OnboardingStatus {
@@ -279,6 +280,11 @@ func (s *Server) computeOnboardingStatus(ctx context.Context) OnboardingStatus {
 	status.Complete = status.Initialized && status.IdentitySet && status.RuntimeOK && status.HarnessesSeeded
 
 	status.EmbeddedBrokerID = s.GetEmbeddedBrokerID()
+
+	// ImageRegistry: resolve configured image registry
+	if vs, loadErr := config.LoadSingleFileVersioned(globalDir); loadErr == nil && vs != nil {
+		status.ImageRegistry = vs.ResolveImageRegistry("")
+	}
 
 	return status
 }
