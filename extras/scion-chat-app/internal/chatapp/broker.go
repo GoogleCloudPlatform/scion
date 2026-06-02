@@ -79,17 +79,25 @@ func (b *BrokerServer) Configure(config map[string]string) error {
 
 // Publish receives a message from the Hub and routes it to the handler.
 func (b *BrokerServer) Publish(ctx context.Context, topic string, msg *messages.StructuredMessage) error {
-	if msg != nil {
-		b.log.Debug("received message via broker",
-			"topic", topic,
-			"sender", msg.Sender,
-			"type", msg.Type,
-		)
+	if msg == nil {
+		return nil
 	}
+	b.log.Debug("received message via broker",
+		"topic", topic,
+		"sender", msg.Sender,
+		"type", msg.Type,
+	)
 	if b.handler != nil {
 		return b.handler(ctx, topic, msg)
 	}
 	return nil
+}
+
+// ChannelName returns the configured channel name in a thread-safe manner.
+func (b *BrokerServer) ChannelName() string {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.channelName
 }
 
 // Subscribe registers a topic pattern for receiving messages.
@@ -121,7 +129,7 @@ func (b *BrokerServer) GetInfo() (*plugin.PluginInfo, error) {
 	return &plugin.PluginInfo{
 		Name:         "scion-chat-app",
 		Version:      "1.0.0",
-		ChannelID:    "gchat",
+		ChannelID:    b.ChannelName(),
 		Capabilities: []string{"chat-bridge", "notification-relay"},
 	}, nil
 }

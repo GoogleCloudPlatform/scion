@@ -321,7 +321,7 @@ func (r *CommandRouter) handleDialogSubmit(ctx context.Context, event *ChatEvent
 		}
 
 		msg := messages.NewInstruction("user:"+mapping.HubUserEmail, agentID, responseText)
-		msg.Channel = "gchat"
+		msg.Channel = r.broker.ChannelName()
 		if event.ThreadID != "" {
 			msg.ThreadID = event.ThreadID
 		}
@@ -1076,7 +1076,7 @@ func (r *CommandRouter) cmdMessage(ctx context.Context, event *ChatEvent, args [
 
 	// Use the hub user email with "user:" prefix so agents can address replies
 	msg := messages.NewInstruction("user:"+mapping.HubUserEmail, agentSlug, messageText)
-	msg.Channel = "gchat"
+	msg.Channel = r.broker.ChannelName()
 	if threadID != "" {
 		msg.ThreadID = threadID
 	} else if event.ThreadID != "" {
