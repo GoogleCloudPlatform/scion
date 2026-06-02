@@ -368,7 +368,18 @@ func DefaultGlobalConfig() GlobalConfig {
 func applyDatabasePoolDefaults(db *DatabaseConfig) {
 	switch db.Driver {
 	case "postgres":
-		if db.MaxOpenConns <= 0 {
+		// NOTE: the struct-level default for these fields is 1 (the value SQLite
+		// REQUIRES to serialize writes — see DefaultGlobalConfig). For a postgres
+		// deployment configured purely via env/driver override, that 1 leaks
+		// through unchanged, and a plain `<= 0` guard would leave the pool at a
+		// single connection. A pool of 1 is pathological for postgres: a
+		// singleton scheduler handler that checks out the lone connection to hold
+		// an advisory lock then self-deadlocks waiting for a second connection to
+		// do its work, and every API request serializes behind it (~55s context
+		// deadlines). Treat the leaked SQLite default (<= 1) as "unset" so
+		// postgres always gets a real pool. An operator who genuinely wants a
+		// tiny pool can still request 2+.
+		if db.MaxOpenConns <= 1 {
 			// Conservative per-replica default so several replicas fit within a
 			// modest Postgres connection budget. The connection ceiling for N
 			// replicas is roughly N × (MaxOpenConns + event pool + 1 listener +
@@ -376,7 +387,7 @@ func applyDatabasePoolDefaults(db *DatabaseConfig) {
 			// instance's max_connections (and any pooler) has headroom.
 			db.MaxOpenConns = 10
 		}
-		if db.MaxIdleConns <= 0 {
+		if db.MaxIdleConns <= 1 {
 			db.MaxIdleConns = 5
 		}
 		if db.ConnMaxLifetime == "" {
