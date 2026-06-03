@@ -247,6 +247,18 @@ func (s *BrokerDispatchStore) MarkMessageDispatched(ctx context.Context, id stri
 	return affected == 1, nil
 }
 
+// CountStuckPendingMessages returns the number of messages still in
+// dispatch_state='pending' whose created timestamp is before the given cutoff.
+func (s *BrokerDispatchStore) CountStuckPendingMessages(ctx context.Context, before time.Time) (int, error) {
+	n, err := s.client.Message.Query().
+		Where(message.DispatchStateEQ(store.MessageDispatchPending), message.CreatedLT(before)).
+		Count(ctx)
+	if err != nil {
+		return 0, mapError(err)
+	}
+	return n, nil
+}
+
 // ListPendingMessages returns messages still pending delivery whose target agent
 // lives on the given broker (messages have no broker_id; the association is via
 // the recipient agent's runtime_broker_id).

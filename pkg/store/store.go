@@ -359,6 +359,12 @@ type BrokerDispatchStore interface {
 
 	// ListPendingMessages returns pending messages whose target agent is on the broker.
 	ListPendingMessages(ctx context.Context, brokerID string) ([]Message, error)
+
+	// CountStuckPendingMessages returns the number of messages still in
+	// dispatch_state='pending' whose created timestamp is before the given
+	// cutoff. Used by the stuck-message sweep (B5-2) to surface messages that
+	// have not been dispatched within the expected window.
+	CountStuckPendingMessages(ctx context.Context, before time.Time) (int, error)
 }
 
 // TemplateStore defines template persistence operations.

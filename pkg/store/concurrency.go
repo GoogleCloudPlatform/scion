@@ -53,6 +53,8 @@ const (
 	// LockGitHubAppHealthCheck guards the periodic GitHub App installation
 	// health check.
 	LockGitHubAppHealthCheck AdvisoryLockKey = 0x5C100005
+	// LockBrokerMessageSweep guards the periodic stuck-pending-message sweep (B5-2).
+	LockBrokerMessageSweep AdvisoryLockKey = 0x5C100007
 
 	// LockWorkspaceProvision is the CLASS ID for per-project workspace
 	// provisioning locks. It is used with the two-int advisory lock form

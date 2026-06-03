@@ -26,8 +26,10 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/GoogleCloudPlatform/scion/pkg/observability/dispatchmetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"go.opentelemetry.io/otel/attribute"
 	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/google/uuid"
 )
@@ -141,8 +143,9 @@ type HTTPAgentDispatcher struct {
 	// the dispatcher writes durable intent + signals the owning node + waits
 	// for the terminal phase transition. Nil = cross-node dispatch disabled
 	// (single-node / SQLite mode: all brokers are local).
-	events     EventPublisher
-	commandBus CommandBus
+	events          EventPublisher
+	commandBus      CommandBus
+	dispatchMetrics dispatchmetrics.Recorder
 }
 
 // NewHTTPAgentDispatcher creates a new HTTP-based agent dispatcher.
@@ -209,6 +212,11 @@ func (d *HTTPAgentDispatcher) SetGitHubAppMinter(m GitHubAppTokenMinter) {
 func (d *HTTPAgentDispatcher) SetCrossNodeDeps(events EventPublisher, bus CommandBus) {
 	d.events = events
 	d.commandBus = bus
+}
+
+// SetDispatchMetrics wires the dispatch metrics recorder (B5-2).
+func (d *HTTPAgentDispatcher) SetDispatchMetrics(rec dispatchmetrics.Recorder) {
+	d.dispatchMetrics = rec
 }
 
 // getBrokerEndpoint retrieves the endpoint URL for a runtime broker.
@@ -1388,6 +1396,9 @@ func (d *HTTPAgentDispatcher) deferredDataOpResult(
 		unsub()
 		return nil, fmt.Errorf("insert dispatch intent: %w", err)
 	}
+	if rec := d.dispatchMetrics; rec != nil {
+		rec.IncPublished(ctx, 1, attribute.String("op", op))
+	}
 
 	// 3. Best-effort signal.
 	if err := d.commandBus.SignalBrokerCmd(ctx, agent.RuntimeBrokerID); err != nil {
@@ -1446,6 +1457,9 @@ func (d *HTTPAgentDispatcher) deferredLifecycle(
 	if err := d.store.InsertBrokerDispatch(ctx, dispatch); err != nil {
 		unsub()
 		return fmt.Errorf("insert dispatch intent: %w", err)
+	}
+	if rec := d.dispatchMetrics; rec != nil {
+		rec.IncPublished(ctx, 1, attribute.String("op", op))
 	}
 
 	// 3. Best-effort signal — the row is the durable intent; reconnect-drain
