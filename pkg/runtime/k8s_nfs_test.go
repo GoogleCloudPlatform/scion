@@ -17,6 +17,7 @@ package runtime
 import (
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/k8s"
 	corev1 "k8s.io/api/core/v1"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
@@ -170,6 +171,190 @@ func TestBuildPod_NoInitContainers_LocalBackend(t *testing.T) {
 	if len(pod.Spec.InitContainers) != 0 {
 		t.Errorf("local backend: expected no init containers, got %d", len(pod.Spec.InitContainers))
 	}
+}
+
+// --- N2-2: Init-container workspace provisioning tests ---
+
+func TestBuildPod_NFSBackend_InitContainer_Present(t *testing.T) {
+	r := newNFSTestK8sRuntime()
+	config := RunConfig{
+		Name:                 "test-nfs-init",
+		Image:                "test-image",
+		UnixUsername:         "scion",
+		WorkspaceBackendName: "nfs",
+		NFSPVClaimName:       "scion-workspaces",
+		NFSSubPath:           "projects/proj-123/workspace",
+		GitCloneForInit: &api.GitCloneConfig{
+			URL:    "https://github.com/example/repo.git",
+			Branch: "main",
+			Depth:  1,
+		},
+	}
+
+	pod, err := r.buildPod("default", config)
+	if err != nil {
+		t.Fatalf("buildPod failed: %v", err)
+	}
+
+	// Must have exactly one init container
+	if len(pod.Spec.InitContainers) != 1 {
+		t.Fatalf("expected 1 init container, got %d", len(pod.Spec.InitContainers))
+	}
+
+	ic := pod.Spec.InitContainers[0]
+
+	// Init container name
+	if ic.Name != "workspace-provision" {
+		t.Errorf("init container name = %q, want %q", ic.Name, "workspace-provision")
+	}
+
+	// Uses the same image
+	if ic.Image != "test-image" {
+		t.Errorf("init container image = %q, want %q", ic.Image, "test-image")
+	}
+
+	// Must mount workspace volume with subPath
+	var wsMount *corev1.VolumeMount
+	for i := range ic.VolumeMounts {
+		if ic.VolumeMounts[i].Name == "workspace" {
+			wsMount = &ic.VolumeMounts[i]
+			break
+		}
+	}
+	if wsMount == nil {
+		t.Fatal("init container: workspace volume mount not found")
+	}
+	if wsMount.MountPath != "/workspace" {
+		t.Errorf("init container workspace mountPath = %q, want /workspace", wsMount.MountPath)
+	}
+	if wsMount.SubPath != "projects/proj-123/workspace" {
+		t.Errorf("init container workspace subPath = %q, want %q", wsMount.SubPath, "projects/proj-123/workspace")
+	}
+
+	// Command should reference the git URL and contain sentinel check
+	if len(ic.Command) < 3 {
+		t.Fatalf("init container command too short: %v", ic.Command)
+	}
+	script := ic.Command[2] // sh -c <script>
+	if !contains(script, ".scion-provisioned") {
+		t.Errorf("init script does not reference sentinel file .scion-provisioned")
+	}
+	if !contains(script, "https://github.com/example/repo.git") {
+		t.Errorf("init script does not contain git clone URL")
+	}
+	if !contains(script, "--branch 'main'") {
+		t.Errorf("init script does not contain branch flag")
+	}
+}
+
+func TestBuildPod_NFSBackend_NoInitContainer_WhenNoGitClone(t *testing.T) {
+	r := newNFSTestK8sRuntime()
+	config := RunConfig{
+		Name:                 "test-nfs-no-git",
+		Image:                "test-image",
+		UnixUsername:         "scion",
+		WorkspaceBackendName: "nfs",
+		NFSPVClaimName:       "scion-workspaces",
+		NFSSubPath:           "projects/proj-123/workspace",
+		// GitCloneForInit is nil — no init container expected
+	}
+
+	pod, err := r.buildPod("default", config)
+	if err != nil {
+		t.Fatalf("buildPod failed: %v", err)
+	}
+
+	if len(pod.Spec.InitContainers) != 0 {
+		t.Errorf("NFS without git clone: expected no init containers, got %d", len(pod.Spec.InitContainers))
+	}
+}
+
+func TestBuildPod_LocalBackend_NoInitContainer_EvenWithGitClone(t *testing.T) {
+	r := newNFSTestK8sRuntime()
+	config := RunConfig{
+		Name:         "test-local-git",
+		Image:        "test-image",
+		UnixUsername: "scion",
+		// Local backend (no NFS fields)
+		GitCloneForInit: &api.GitCloneConfig{
+			URL: "https://github.com/example/repo.git",
+		},
+	}
+
+	pod, err := r.buildPod("default", config)
+	if err != nil {
+		t.Fatalf("buildPod failed: %v", err)
+	}
+
+	if len(pod.Spec.InitContainers) != 0 {
+		t.Errorf("local backend: expected no init containers even with GitCloneForInit, got %d", len(pod.Spec.InitContainers))
+	}
+}
+
+func TestNFSInitProvisionScript_SentinelCheck(t *testing.T) {
+	gc := &api.GitCloneConfig{
+		URL:    "https://github.com/example/repo.git",
+		Branch: "main",
+		Depth:  1,
+	}
+
+	script := nfsInitProvisionScript(gc)
+
+	// Must check sentinel before cloning
+	if !contains(script, ".scion-provisioned") {
+		t.Error("script missing sentinel check")
+	}
+
+	// Must contain git clone with the URL
+	if !contains(script, "git") && !contains(script, "clone") {
+		t.Error("script missing git clone command")
+	}
+	if !contains(script, gc.URL) {
+		t.Errorf("script missing clone URL %q", gc.URL)
+	}
+
+	// Must write sentinel after successful clone
+	if !contains(script, "provisioned_at=") {
+		t.Error("script does not write provisioning timestamp to sentinel")
+	}
+}
+
+func TestNFSInitProvisionScript_NilConfig(t *testing.T) {
+	script := nfsInitProvisionScript(nil)
+	if !contains(script, "skipping") {
+		t.Error("nil config: expected skip message")
+	}
+}
+
+func TestNFSInitProvisionScript_FullClone(t *testing.T) {
+	gc := &api.GitCloneConfig{
+		URL:   "https://github.com/example/repo.git",
+		Depth: -1, // full clone (depth < 0 means no --depth flag)
+	}
+
+	script := nfsInitProvisionScript(gc)
+
+	// With depth -1, should not include --depth flag
+	if contains(script, "--depth") {
+		t.Error("full clone (depth=-1): should not include --depth flag")
+	}
+}
+
+func contains(s, substr string) bool {
+	return len(s) > 0 && len(substr) > 0 && containsSubstring(s, substr)
+}
+
+func containsSubstring(s, substr string) bool {
+	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsHelper(s, substr))
+}
+
+func containsHelper(s, substr string) bool {
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if s[i:i+len(substr)] == substr {
+			return true
+		}
+	}
+	return false
 }
 
 // findVolume finds a volume by name in a pod spec.
