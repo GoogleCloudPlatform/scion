@@ -859,6 +859,17 @@ func parseAdminEmails(cfg *config.GlobalConfig) []string {
 	return adminEmailList
 }
 
+// resolveSessionSecret resolves the deployment-wide session secret from the
+// --session-secret flag, falling back to the SCION_SERVER_SESSION_SECRET env
+// var. The same value backs both the web session cookie store and the hub JWT
+// signing keys so that all replicas behind the load balancer agree.
+func resolveSessionSecret() string {
+	if webSessionSecret != "" {
+		return webSessionSecret
+	}
+	return os.Getenv("SCION_SERVER_SESSION_SECRET")
+}
+
 // initHubServer creates and configures the Hub server.
 func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store, hubEndpoint, devAuthToken string, adminEmailList []string, adminMode bool, maintenanceMessage string, requestLogger, messageLogger *slog.Logger, globalDir string, pluginMgr *scionplugin.Manager, secretBackend secret.SecretBackend) (*hub.Server, error) {
 	hubCfg := hub.ServerConfig{
@@ -929,6 +940,12 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 		MaintenanceConfig: resolveMaintenanceConfig(cfg),
 		SecretBackend:     secretBackend,
 		GCPProjectID:      cfg.Hub.GCPProjectID,
+		// Derive the agent/user JWT signing keys from the same shared session
+		// secret the web cookie store uses, so every replica behind the load
+		// balancer agrees on the signing key regardless of its host-derived
+		// HubID. Without this, a JWT minted by one replica fails validation on
+		// another (cross-replica "session_expired" login loop).
+		SharedSigningSecret: resolveSessionSecret(),
 	}
 
 	hubSrv, err := hub.New(hubCfg, s)
@@ -1123,10 +1140,7 @@ func initWebServer(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Se
 	}
 
 	// Allow env var overrides for session/OAuth config
-	sessionSecret := webSessionSecret
-	if sessionSecret == "" {
-		sessionSecret = os.Getenv("SCION_SERVER_SESSION_SECRET")
-	}
+	sessionSecret := resolveSessionSecret()
 	baseURL := webBaseURL
 	if baseURL == "" {
 		baseURL = os.Getenv("SCION_SERVER_BASE_URL")
