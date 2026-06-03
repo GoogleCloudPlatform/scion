@@ -364,6 +364,13 @@ func (b *DiscordBroker) Publish(ctx context.Context, topic string, msg *messages
 		return fmt.Errorf("discord broker not configured")
 	}
 
+	// Channel filtering: if the message targets a specific channel that
+	// isn't ours, skip it. FanOutEventBus already does this, but
+	// belt-and-suspenders.
+	if msg != nil && msg.Channel != "" && msg.Channel != "discord" {
+		return nil
+	}
+
 	// Dedup check.
 	dedupKey := msgDedupKey(msg)
 	if dedupKey != "" {
@@ -384,8 +391,15 @@ func (b *DiscordBroker) Publish(ctx context.Context, topic string, msg *messages
 	// Collect target channel IDs via dynamic routing.
 	var channelIDs []string
 
+	// Priority 0: Thread routing — ThreadID maps directly to a Discord
+	// channel or thread snowflake. This takes precedence over all other
+	// routing so replies land in the same channel/thread as the original.
+	if msg != nil && msg.ThreadID != "" {
+		channelIDs = append(channelIDs, msg.ThreadID)
+	}
+
 	// Priority 1: Direct channel ID from metadata.
-	if msg != nil && msg.Metadata != nil {
+	if len(channelIDs) == 0 && msg != nil && msg.Metadata != nil {
 		if chID, ok := msg.Metadata["discord_channel_id"]; ok && chID != "" {
 			channelIDs = append(channelIDs, chID)
 		}
@@ -470,8 +484,9 @@ func (b *DiscordBroker) Close() error {
 // GetInfo returns plugin metadata.
 func (b *DiscordBroker) GetInfo() (*plugin.PluginInfo, error) {
 	return &plugin.PluginInfo{
-		Name:    "discord",
-		Version: "1.0.0",
+		Name:      "discord",
+		Version:   "1.0.0",
+		ChannelID: "discord",
 		Capabilities: []string{
 			"echo-filter",
 			"gateway-websocket",
@@ -793,6 +808,8 @@ func (b *DiscordBroker) handleIncomingMessage(s *discordgo.Session, m *discordgo
 		msg := &messages.StructuredMessage{
 			Version:   messages.Version,
 			Timestamp: m.Timestamp.UTC().Format(time.RFC3339),
+			Channel:   "discord",
+			ThreadID:  channelID,
 			Sender:    sender,
 			SenderID:  senderID,
 			Recipient: recipient,
