@@ -2426,7 +2426,27 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		ServiceNotReady(w, "Agent has no runtime broker assigned — the server may still be starting up")
 		return
 	}
-	if err := dispatcher.DispatchAgentMessage(ctx, agent, plainMessage, req.Interrupt, structuredMsg); err != nil {
+	if err := dispatcher.DispatchAgentMessage(ctx, agent, plainMessage, req.Interrupt, structuredMsg); errors.Is(err, ErrMessageDeferred) {
+		s.signalDeferredMessage(ctx, agent.RuntimeBrokerID, agent.ID)
+		// Create notification subscription if requested (before returning 202)
+		if req.Notify {
+			var notifySubscriberType, notifySubscriberID, createdBy string
+			if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
+				createdBy = agentIdent.ID()
+				if creatorAgent, err := s.store.GetAgent(ctx, agentIdent.ID()); err == nil {
+					notifySubscriberType = store.SubscriberTypeAgent
+					notifySubscriberID = creatorAgent.Slug
+				}
+			} else if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
+				createdBy = userIdent.ID()
+				notifySubscriberType = store.SubscriberTypeUser
+				notifySubscriberID = userIdent.ID()
+			}
+			s.createNotifySubscription(ctx, agent.ID, agent.ProjectID, notifySubscriberType, notifySubscriberID, createdBy)
+		}
+		w.WriteHeader(http.StatusAccepted)
+		return
+	} else if err != nil {
 		RuntimeError(w, "Failed to send message to runtime broker: "+err.Error())
 		return
 	}
@@ -2547,7 +2567,12 @@ func (s *Server) handleSetMessage(w http.ResponseWriter, r *http.Request, anchor
 			s.events.PublishUserMessage(ctx, storeMsg)
 
 			if dispatcher != nil && agent.RuntimeBrokerID != "" {
-				if err := dispatcher.DispatchAgentMessage(ctx, agent, plainMessage, interrupt, &agentMsg); err != nil {
+				if err := dispatcher.DispatchAgentMessage(ctx, agent, plainMessage, interrupt, &agentMsg); errors.Is(err, ErrMessageDeferred) {
+					s.signalDeferredMessage(ctx, agent.RuntimeBrokerID, agent.ID)
+					results[i] = SetMessageRecipientResult{Recipient: recipStr, Status: "deferred"}
+					delivered++
+					continue
+				} else if err != nil {
 					results[i] = SetMessageRecipientResult{Recipient: recipStr, Status: "failed", Error: err.Error()}
 					continue
 				}
@@ -2765,7 +2790,9 @@ func (s *Server) broadcastDirect(w http.ResponseWriter, r *http.Request, project
 		agentMsg := *msg
 		agentMsg.Recipient = "agent:" + agent.Slug
 		agentMsg.RecipientID = agent.ID
-		if err := dispatcher.DispatchAgentMessage(ctx, &agent, agentMsg.Msg, interrupt, &agentMsg); err != nil {
+		if err := dispatcher.DispatchAgentMessage(ctx, &agent, agentMsg.Msg, interrupt, &agentMsg); errors.Is(err, ErrMessageDeferred) {
+			s.signalDeferredMessage(ctx, agent.RuntimeBrokerID, agent.ID)
+		} else if err != nil {
 			s.messageLog.Error("Failed to deliver broadcast message to agent",
 				"agent_id", agent.ID,
 				"agentSlug", agent.Slug, "error", err)

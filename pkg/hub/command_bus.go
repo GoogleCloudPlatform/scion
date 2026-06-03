@@ -34,6 +34,10 @@ type CommandBus interface {
 	// NotifyBrokerCmd issues a NOTIFY signal inside the caller's transaction,
 	// so the signal commits atomically with the durable intent row.
 	NotifyBrokerCmd(ctx context.Context, tx pgExecutor, brokerID string) error
+	// SignalBrokerCmd is a best-effort NOTIFY using the bus's own pool (not
+	// tx-scoped). Used by the message dispatch path where the durable intent
+	// is the message row itself and the NOTIFY is only a wakeup hint.
+	SignalBrokerCmd(ctx context.Context, brokerID string) error
 	Close()
 }
 
@@ -156,6 +160,11 @@ func (b *PostgresCommandBus) NotifyBrokerCmd(ctx context.Context, tx pgExecutor,
 		return fmt.Errorf("pg_notify on %s: %w", pgCommandChannel, err)
 	}
 	return nil
+}
+
+// SignalBrokerCmd issues a best-effort NOTIFY using the bus's own pool.
+func (b *PostgresCommandBus) SignalBrokerCmd(ctx context.Context, brokerID string) error {
+	return b.NotifyBrokerCmd(ctx, b.pool, brokerID)
 }
 
 // Close stops the listener and releases the pool.
@@ -305,4 +314,5 @@ type NoopCommandBus struct{}
 var _ CommandBus = NoopCommandBus{}
 
 func (NoopCommandBus) NotifyBrokerCmd(context.Context, pgExecutor, string) error { return nil }
+func (NoopCommandBus) SignalBrokerCmd(context.Context, string) error              { return nil }
 func (NoopCommandBus) Close()                                                    {}
