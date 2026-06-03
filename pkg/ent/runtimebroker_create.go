@@ -260,6 +260,48 @@ func (_c *RuntimeBrokerCreate) SetNillableAutoProvide(v *bool) *RuntimeBrokerCre
 	return _c
 }
 
+// SetConnectedHubID sets the "connected_hub_id" field.
+func (_c *RuntimeBrokerCreate) SetConnectedHubID(v string) *RuntimeBrokerCreate {
+	_c.mutation.SetConnectedHubID(v)
+	return _c
+}
+
+// SetNillableConnectedHubID sets the "connected_hub_id" field if the given value is not nil.
+func (_c *RuntimeBrokerCreate) SetNillableConnectedHubID(v *string) *RuntimeBrokerCreate {
+	if v != nil {
+		_c.SetConnectedHubID(*v)
+	}
+	return _c
+}
+
+// SetConnectedSessionID sets the "connected_session_id" field.
+func (_c *RuntimeBrokerCreate) SetConnectedSessionID(v string) *RuntimeBrokerCreate {
+	_c.mutation.SetConnectedSessionID(v)
+	return _c
+}
+
+// SetNillableConnectedSessionID sets the "connected_session_id" field if the given value is not nil.
+func (_c *RuntimeBrokerCreate) SetNillableConnectedSessionID(v *string) *RuntimeBrokerCreate {
+	if v != nil {
+		_c.SetConnectedSessionID(*v)
+	}
+	return _c
+}
+
+// SetConnectedAt sets the "connected_at" field.
+func (_c *RuntimeBrokerCreate) SetConnectedAt(v time.Time) *RuntimeBrokerCreate {
+	_c.mutation.SetConnectedAt(v)
+	return _c
+}
+
+// SetNillableConnectedAt sets the "connected_at" field if the given value is not nil.
+func (_c *RuntimeBrokerCreate) SetNillableConnectedAt(v *time.Time) *RuntimeBrokerCreate {
+	if v != nil {
+		_c.SetConnectedAt(*v)
+	}
+	return _c
+}
+
 // SetCreated sets the "created" field.
 func (_c *RuntimeBrokerCreate) SetCreated(v time.Time) *RuntimeBrokerCreate {
 	_c.mutation.SetCreated(v)
@@ -517,6 +559,18 @@ func (_c *RuntimeBrokerCreate) createSpec() (*RuntimeBroker, *sqlgraph.CreateSpe
 	if value, ok := _c.mutation.AutoProvide(); ok {
 		_spec.SetField(runtimebroker.FieldAutoProvide, field.TypeBool, value)
 		_node.AutoProvide = value
+	}
+	if value, ok := _c.mutation.ConnectedHubID(); ok {
+		_spec.SetField(runtimebroker.FieldConnectedHubID, field.TypeString, value)
+		_node.ConnectedHubID = &value
+	}
+	if value, ok := _c.mutation.ConnectedSessionID(); ok {
+		_spec.SetField(runtimebroker.FieldConnectedSessionID, field.TypeString, value)
+		_node.ConnectedSessionID = &value
+	}
+	if value, ok := _c.mutation.ConnectedAt(); ok {
+		_spec.SetField(runtimebroker.FieldConnectedAt, field.TypeTime, value)
+		_node.ConnectedAt = &value
 	}
 	if value, ok := _c.mutation.Created(); ok {
 		_spec.SetField(runtimebroker.FieldCreated, field.TypeTime, value)
@@ -863,6 +917,60 @@ func (u *RuntimeBrokerUpsert) SetAutoProvide(v bool) *RuntimeBrokerUpsert {
 // UpdateAutoProvide sets the "auto_provide" field to the value that was provided on create.
 func (u *RuntimeBrokerUpsert) UpdateAutoProvide() *RuntimeBrokerUpsert {
 	u.SetExcluded(runtimebroker.FieldAutoProvide)
+	return u
+}
+
+// SetConnectedHubID sets the "connected_hub_id" field.
+func (u *RuntimeBrokerUpsert) SetConnectedHubID(v string) *RuntimeBrokerUpsert {
+	u.Set(runtimebroker.FieldConnectedHubID, v)
+	return u
+}
+
+// UpdateConnectedHubID sets the "connected_hub_id" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsert) UpdateConnectedHubID() *RuntimeBrokerUpsert {
+	u.SetExcluded(runtimebroker.FieldConnectedHubID)
+	return u
+}
+
+// ClearConnectedHubID clears the value of the "connected_hub_id" field.
+func (u *RuntimeBrokerUpsert) ClearConnectedHubID() *RuntimeBrokerUpsert {
+	u.SetNull(runtimebroker.FieldConnectedHubID)
+	return u
+}
+
+// SetConnectedSessionID sets the "connected_session_id" field.
+func (u *RuntimeBrokerUpsert) SetConnectedSessionID(v string) *RuntimeBrokerUpsert {
+	u.Set(runtimebroker.FieldConnectedSessionID, v)
+	return u
+}
+
+// UpdateConnectedSessionID sets the "connected_session_id" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsert) UpdateConnectedSessionID() *RuntimeBrokerUpsert {
+	u.SetExcluded(runtimebroker.FieldConnectedSessionID)
+	return u
+}
+
+// ClearConnectedSessionID clears the value of the "connected_session_id" field.
+func (u *RuntimeBrokerUpsert) ClearConnectedSessionID() *RuntimeBrokerUpsert {
+	u.SetNull(runtimebroker.FieldConnectedSessionID)
+	return u
+}
+
+// SetConnectedAt sets the "connected_at" field.
+func (u *RuntimeBrokerUpsert) SetConnectedAt(v time.Time) *RuntimeBrokerUpsert {
+	u.Set(runtimebroker.FieldConnectedAt, v)
+	return u
+}
+
+// UpdateConnectedAt sets the "connected_at" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsert) UpdateConnectedAt() *RuntimeBrokerUpsert {
+	u.SetExcluded(runtimebroker.FieldConnectedAt)
+	return u
+}
+
+// ClearConnectedAt clears the value of the "connected_at" field.
+func (u *RuntimeBrokerUpsert) ClearConnectedAt() *RuntimeBrokerUpsert {
+	u.SetNull(runtimebroker.FieldConnectedAt)
 	return u
 }
 
@@ -1262,6 +1370,69 @@ func (u *RuntimeBrokerUpsertOne) SetAutoProvide(v bool) *RuntimeBrokerUpsertOne 
 func (u *RuntimeBrokerUpsertOne) UpdateAutoProvide() *RuntimeBrokerUpsertOne {
 	return u.Update(func(s *RuntimeBrokerUpsert) {
 		s.UpdateAutoProvide()
+	})
+}
+
+// SetConnectedHubID sets the "connected_hub_id" field.
+func (u *RuntimeBrokerUpsertOne) SetConnectedHubID(v string) *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetConnectedHubID(v)
+	})
+}
+
+// UpdateConnectedHubID sets the "connected_hub_id" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertOne) UpdateConnectedHubID() *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdateConnectedHubID()
+	})
+}
+
+// ClearConnectedHubID clears the value of the "connected_hub_id" field.
+func (u *RuntimeBrokerUpsertOne) ClearConnectedHubID() *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.ClearConnectedHubID()
+	})
+}
+
+// SetConnectedSessionID sets the "connected_session_id" field.
+func (u *RuntimeBrokerUpsertOne) SetConnectedSessionID(v string) *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetConnectedSessionID(v)
+	})
+}
+
+// UpdateConnectedSessionID sets the "connected_session_id" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertOne) UpdateConnectedSessionID() *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdateConnectedSessionID()
+	})
+}
+
+// ClearConnectedSessionID clears the value of the "connected_session_id" field.
+func (u *RuntimeBrokerUpsertOne) ClearConnectedSessionID() *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.ClearConnectedSessionID()
+	})
+}
+
+// SetConnectedAt sets the "connected_at" field.
+func (u *RuntimeBrokerUpsertOne) SetConnectedAt(v time.Time) *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetConnectedAt(v)
+	})
+}
+
+// UpdateConnectedAt sets the "connected_at" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertOne) UpdateConnectedAt() *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdateConnectedAt()
+	})
+}
+
+// ClearConnectedAt clears the value of the "connected_at" field.
+func (u *RuntimeBrokerUpsertOne) ClearConnectedAt() *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.ClearConnectedAt()
 	})
 }
 
@@ -1830,6 +2001,69 @@ func (u *RuntimeBrokerUpsertBulk) SetAutoProvide(v bool) *RuntimeBrokerUpsertBul
 func (u *RuntimeBrokerUpsertBulk) UpdateAutoProvide() *RuntimeBrokerUpsertBulk {
 	return u.Update(func(s *RuntimeBrokerUpsert) {
 		s.UpdateAutoProvide()
+	})
+}
+
+// SetConnectedHubID sets the "connected_hub_id" field.
+func (u *RuntimeBrokerUpsertBulk) SetConnectedHubID(v string) *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetConnectedHubID(v)
+	})
+}
+
+// UpdateConnectedHubID sets the "connected_hub_id" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertBulk) UpdateConnectedHubID() *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdateConnectedHubID()
+	})
+}
+
+// ClearConnectedHubID clears the value of the "connected_hub_id" field.
+func (u *RuntimeBrokerUpsertBulk) ClearConnectedHubID() *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.ClearConnectedHubID()
+	})
+}
+
+// SetConnectedSessionID sets the "connected_session_id" field.
+func (u *RuntimeBrokerUpsertBulk) SetConnectedSessionID(v string) *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetConnectedSessionID(v)
+	})
+}
+
+// UpdateConnectedSessionID sets the "connected_session_id" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertBulk) UpdateConnectedSessionID() *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdateConnectedSessionID()
+	})
+}
+
+// ClearConnectedSessionID clears the value of the "connected_session_id" field.
+func (u *RuntimeBrokerUpsertBulk) ClearConnectedSessionID() *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.ClearConnectedSessionID()
+	})
+}
+
+// SetConnectedAt sets the "connected_at" field.
+func (u *RuntimeBrokerUpsertBulk) SetConnectedAt(v time.Time) *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetConnectedAt(v)
+	})
+}
+
+// UpdateConnectedAt sets the "connected_at" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertBulk) UpdateConnectedAt() *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdateConnectedAt()
+	})
+}
+
+// ClearConnectedAt clears the value of the "connected_at" field.
+func (u *RuntimeBrokerUpsertBulk) ClearConnectedAt() *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.ClearConnectedAt()
 	})
 }
 

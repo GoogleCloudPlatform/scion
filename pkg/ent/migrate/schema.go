@@ -724,6 +724,9 @@ var (
 		{Name: "endpoint", Type: field.TypeString, Nullable: true},
 		{Name: "created_by", Type: field.TypeString, Nullable: true},
 		{Name: "auto_provide", Type: field.TypeBool, Default: false},
+		{Name: "connected_hub_id", Type: field.TypeString, Nullable: true},
+		{Name: "connected_session_id", Type: field.TypeString, Nullable: true},
+		{Name: "connected_at", Type: field.TypeTime, Nullable: true},
 		{Name: "created", Type: field.TypeTime},
 		{Name: "updated", Type: field.TypeTime},
 	}

@@ -145,6 +145,21 @@ func AutoProvide(v bool) predicate.RuntimeBroker {
 	return predicate.RuntimeBroker(sql.FieldEQ(FieldAutoProvide, v))
 }
 
+// ConnectedHubID applies equality check predicate on the "connected_hub_id" field. It's identical to ConnectedHubIDEQ.
+func ConnectedHubID(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldEQ(FieldConnectedHubID, v))
+}
+
+// ConnectedSessionID applies equality check predicate on the "connected_session_id" field. It's identical to ConnectedSessionIDEQ.
+func ConnectedSessionID(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldEQ(FieldConnectedSessionID, v))
+}
+
+// ConnectedAt applies equality check predicate on the "connected_at" field. It's identical to ConnectedAtEQ.
+func ConnectedAt(v time.Time) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldEQ(FieldConnectedAt, v))
+}
+
 // Created applies equality check predicate on the "created" field. It's identical to CreatedEQ.
 func Created(v time.Time) predicate.RuntimeBroker {
 	return predicate.RuntimeBroker(sql.FieldEQ(FieldCreated, v))
@@ -1328,6 +1343,206 @@ func AutoProvideEQ(v bool) predicate.RuntimeBroker {
 // AutoProvideNEQ applies the NEQ predicate on the "auto_provide" field.
 func AutoProvideNEQ(v bool) predicate.RuntimeBroker {
 	return predicate.RuntimeBroker(sql.FieldNEQ(FieldAutoProvide, v))
+}
+
+// ConnectedHubIDEQ applies the EQ predicate on the "connected_hub_id" field.
+func ConnectedHubIDEQ(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldEQ(FieldConnectedHubID, v))
+}
+
+// ConnectedHubIDNEQ applies the NEQ predicate on the "connected_hub_id" field.
+func ConnectedHubIDNEQ(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldNEQ(FieldConnectedHubID, v))
+}
+
+// ConnectedHubIDIn applies the In predicate on the "connected_hub_id" field.
+func ConnectedHubIDIn(vs ...string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldIn(FieldConnectedHubID, vs...))
+}
+
+// ConnectedHubIDNotIn applies the NotIn predicate on the "connected_hub_id" field.
+func ConnectedHubIDNotIn(vs ...string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldNotIn(FieldConnectedHubID, vs...))
+}
+
+// ConnectedHubIDGT applies the GT predicate on the "connected_hub_id" field.
+func ConnectedHubIDGT(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldGT(FieldConnectedHubID, v))
+}
+
+// ConnectedHubIDGTE applies the GTE predicate on the "connected_hub_id" field.
+func ConnectedHubIDGTE(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldGTE(FieldConnectedHubID, v))
+}
+
+// ConnectedHubIDLT applies the LT predicate on the "connected_hub_id" field.
+func ConnectedHubIDLT(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldLT(FieldConnectedHubID, v))
+}
+
+// ConnectedHubIDLTE applies the LTE predicate on the "connected_hub_id" field.
+func ConnectedHubIDLTE(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldLTE(FieldConnectedHubID, v))
+}
+
+// ConnectedHubIDContains applies the Contains predicate on the "connected_hub_id" field.
+func ConnectedHubIDContains(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldContains(FieldConnectedHubID, v))
+}
+
+// ConnectedHubIDHasPrefix applies the HasPrefix predicate on the "connected_hub_id" field.
+func ConnectedHubIDHasPrefix(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldHasPrefix(FieldConnectedHubID, v))
+}
+
+// ConnectedHubIDHasSuffix applies the HasSuffix predicate on the "connected_hub_id" field.
+func ConnectedHubIDHasSuffix(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldHasSuffix(FieldConnectedHubID, v))
+}
+
+// ConnectedHubIDIsNil applies the IsNil predicate on the "connected_hub_id" field.
+func ConnectedHubIDIsNil() predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldIsNull(FieldConnectedHubID))
+}
+
+// ConnectedHubIDNotNil applies the NotNil predicate on the "connected_hub_id" field.
+func ConnectedHubIDNotNil() predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldNotNull(FieldConnectedHubID))
+}
+
+// ConnectedHubIDEqualFold applies the EqualFold predicate on the "connected_hub_id" field.
+func ConnectedHubIDEqualFold(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldEqualFold(FieldConnectedHubID, v))
+}
+
+// ConnectedHubIDContainsFold applies the ContainsFold predicate on the "connected_hub_id" field.
+func ConnectedHubIDContainsFold(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldContainsFold(FieldConnectedHubID, v))
+}
+
+// ConnectedSessionIDEQ applies the EQ predicate on the "connected_session_id" field.
+func ConnectedSessionIDEQ(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldEQ(FieldConnectedSessionID, v))
+}
+
+// ConnectedSessionIDNEQ applies the NEQ predicate on the "connected_session_id" field.
+func ConnectedSessionIDNEQ(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldNEQ(FieldConnectedSessionID, v))
+}
+
+// ConnectedSessionIDIn applies the In predicate on the "connected_session_id" field.
+func ConnectedSessionIDIn(vs ...string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldIn(FieldConnectedSessionID, vs...))
+}
+
+// ConnectedSessionIDNotIn applies the NotIn predicate on the "connected_session_id" field.
+func ConnectedSessionIDNotIn(vs ...string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldNotIn(FieldConnectedSessionID, vs...))
+}
+
+// ConnectedSessionIDGT applies the GT predicate on the "connected_session_id" field.
+func ConnectedSessionIDGT(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldGT(FieldConnectedSessionID, v))
+}
+
+// ConnectedSessionIDGTE applies the GTE predicate on the "connected_session_id" field.
+func ConnectedSessionIDGTE(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldGTE(FieldConnectedSessionID, v))
+}
+
+// ConnectedSessionIDLT applies the LT predicate on the "connected_session_id" field.
+func ConnectedSessionIDLT(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldLT(FieldConnectedSessionID, v))
+}
+
+// ConnectedSessionIDLTE applies the LTE predicate on the "connected_session_id" field.
+func ConnectedSessionIDLTE(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldLTE(FieldConnectedSessionID, v))
+}
+
+// ConnectedSessionIDContains applies the Contains predicate on the "connected_session_id" field.
+func ConnectedSessionIDContains(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldContains(FieldConnectedSessionID, v))
+}
+
+// ConnectedSessionIDHasPrefix applies the HasPrefix predicate on the "connected_session_id" field.
+func ConnectedSessionIDHasPrefix(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldHasPrefix(FieldConnectedSessionID, v))
+}
+
+// ConnectedSessionIDHasSuffix applies the HasSuffix predicate on the "connected_session_id" field.
+func ConnectedSessionIDHasSuffix(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldHasSuffix(FieldConnectedSessionID, v))
+}
+
+// ConnectedSessionIDIsNil applies the IsNil predicate on the "connected_session_id" field.
+func ConnectedSessionIDIsNil() predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldIsNull(FieldConnectedSessionID))
+}
+
+// ConnectedSessionIDNotNil applies the NotNil predicate on the "connected_session_id" field.
+func ConnectedSessionIDNotNil() predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldNotNull(FieldConnectedSessionID))
+}
+
+// ConnectedSessionIDEqualFold applies the EqualFold predicate on the "connected_session_id" field.
+func ConnectedSessionIDEqualFold(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldEqualFold(FieldConnectedSessionID, v))
+}
+
+// ConnectedSessionIDContainsFold applies the ContainsFold predicate on the "connected_session_id" field.
+func ConnectedSessionIDContainsFold(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldContainsFold(FieldConnectedSessionID, v))
+}
+
+// ConnectedAtEQ applies the EQ predicate on the "connected_at" field.
+func ConnectedAtEQ(v time.Time) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldEQ(FieldConnectedAt, v))
+}
+
+// ConnectedAtNEQ applies the NEQ predicate on the "connected_at" field.
+func ConnectedAtNEQ(v time.Time) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldNEQ(FieldConnectedAt, v))
+}
+
+// ConnectedAtIn applies the In predicate on the "connected_at" field.
+func ConnectedAtIn(vs ...time.Time) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldIn(FieldConnectedAt, vs...))
+}
+
+// ConnectedAtNotIn applies the NotIn predicate on the "connected_at" field.
+func ConnectedAtNotIn(vs ...time.Time) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldNotIn(FieldConnectedAt, vs...))
+}
+
+// ConnectedAtGT applies the GT predicate on the "connected_at" field.
+func ConnectedAtGT(v time.Time) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldGT(FieldConnectedAt, v))
+}
+
+// ConnectedAtGTE applies the GTE predicate on the "connected_at" field.
+func ConnectedAtGTE(v time.Time) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldGTE(FieldConnectedAt, v))
+}
+
+// ConnectedAtLT applies the LT predicate on the "connected_at" field.
+func ConnectedAtLT(v time.Time) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldLT(FieldConnectedAt, v))
+}
+
+// ConnectedAtLTE applies the LTE predicate on the "connected_at" field.
+func ConnectedAtLTE(v time.Time) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldLTE(FieldConnectedAt, v))
+}
+
+// ConnectedAtIsNil applies the IsNil predicate on the "connected_at" field.
+func ConnectedAtIsNil() predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldIsNull(FieldConnectedAt))
+}
+
+// ConnectedAtNotNil applies the NotNil predicate on the "connected_at" field.
+func ConnectedAtNotNil() predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldNotNull(FieldConnectedAt))
 }
 
 // CreatedEQ applies the EQ predicate on the "created" field.
