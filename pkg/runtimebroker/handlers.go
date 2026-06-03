@@ -79,6 +79,11 @@ func (s *Server) GetHealthInfo(ctx context.Context) *HealthResponse {
 		checks["runtime"] = "unavailable"
 	}
 
+	// NFS mount health
+	if s.nfsMountReconciler != nil {
+		checks["nfs_mounts"] = s.nfsMountReconciler.HealthCheckString()
+	}
+
 	status := "healthy"
 	for _, v := range checks {
 		if v != "available" && v != "healthy" {
@@ -559,6 +564,14 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			writeError(w, d.HTTPStatus, d.Code, d.Message, nil)
 			return
 		}
+	}
+
+	// N1-7: Ensure NFS shares are mounted before dispatch (no-op when backend=local).
+	if err := s.ensureNFSMountsReady(); err != nil {
+		markAttemptFailed(http.StatusServiceUnavailable, "NFS mount check failed: "+err.Error())
+		writeError(w, http.StatusServiceUnavailable, "nfs_unavailable",
+			"NFS workspace storage is not available: "+err.Error(), nil)
+		return
 	}
 
 	// Build unified start context (project path, env, template, git-clone, secrets, manager)
