@@ -261,6 +261,14 @@ func (b *DiscordBroker) Configure(config map[string]string) error {
 			"hub_url", b.hubURL,
 			"broker_id", b.brokerID,
 		)
+
+		// Bootstrap Gateway: request a wildcard subscription so the Hub calls
+		// Subscribe(), which triggers startGateway() on the first call.
+		if hc := b.hostCallbacks; hc != nil {
+			if err := hc.RequestSubscription("scion.grove.>"); err != nil {
+				b.log.Warn("Failed to request bootstrap subscription", "error", err)
+			}
+		}
 	}
 
 	return nil
@@ -913,7 +921,7 @@ func (b *DiscordBroker) getProjectAgents(ctx context.Context, projectID string) 
 // --- Dynamic subscription management ---
 
 func (b *DiscordBroker) subscribeForProject(projectID string) {
-	pattern := fmt.Sprintf("scion.project.%s.>", projectID)
+	pattern := fmt.Sprintf("scion.grove.%s.>", projectID)
 
 	b.mu.RLock()
 	hc := b.hostCallbacks
@@ -928,7 +936,7 @@ func (b *DiscordBroker) subscribeForProject(projectID string) {
 }
 
 func (b *DiscordBroker) unsubscribeForProject(projectID string) {
-	pattern := fmt.Sprintf("scion.project.%s.>", projectID)
+	pattern := fmt.Sprintf("scion.grove.%s.>", projectID)
 
 	b.mu.RLock()
 	hc := b.hostCallbacks
