@@ -435,10 +435,16 @@ func (b *DiscordBroker) Publish(ctx context.Context, topic string, msg *messages
 		return nil
 	}
 
-	// Send to each target channel.
+	// Send to each target channel via the rate-limited SendQueue.
+	// Falls back to direct session send if the queue is not initialised.
 	var errs []error
 	for _, channelID := range channelIDs {
-		_, err := session.ChannelMessageSend(channelID, text)
+		var err error
+		if sendQueue != nil {
+			_, err = sendQueue.Send(ctx, channelID, text, nil, nil)
+		} else {
+			_, err = session.ChannelMessageSend(channelID, text)
+		}
 		if err != nil {
 			b.log.Error("Failed to send Discord message",
 				"channel_id", channelID, "error", err)
