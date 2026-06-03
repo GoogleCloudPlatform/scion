@@ -700,10 +700,27 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 		RequestTimeout: 120 * time.Second,
 		Debug:          cfg.Debug,
 	}, logging.Subsystem("hub.control-channel"))
-	// Set disconnect callback to mark broker offline when WebSocket drops
-	srv.controlChannel.SetOnDisconnect(func(brokerID string) {
+	// Set disconnect callback to mark broker offline when WebSocket drops.
+	// Compare-and-clear affinity first: only stamp offline if this hub instance +
+	// session still owns the broker. If affinity has moved (broker flapped to
+	// another replica or re-dialed with a newer session), this is a stale
+	// disconnect and we must NOT clobber the live owner's online status.
+	srv.controlChannel.SetOnDisconnect(func(brokerID, sessionID string) {
 		ctx := context.Background()
-		slog.Info("Broker disconnected, marking offline", "brokerID", brokerID)
+
+		cleared, err := s.ReleaseRuntimeBrokerConnection(ctx, brokerID, srv.instanceID, sessionID)
+		if err != nil {
+			slog.Error("Failed to release broker affinity on disconnect", "brokerID", brokerID, "sessionID", sessionID, "error", err)
+			return
+		}
+		if !cleared {
+			// Another replica (or a newer session on this replica) already owns
+			// the socket. Skip the offline stamp to avoid clobbering it.
+			slog.Info("broker reconnected elsewhere; skipping offline stamp", "brokerID", brokerID, "staleSession", sessionID)
+			return
+		}
+
+		slog.Info("Broker disconnected, marking offline", "brokerID", brokerID, "sessionID", sessionID)
 
 		if err := s.UpdateRuntimeBrokerHeartbeat(ctx, brokerID, store.BrokerStatusOffline); err != nil {
 			slog.Error("Failed to mark broker offline", "brokerID", brokerID, "error", err)
@@ -2447,31 +2464,35 @@ func (s *Server) handleRuntimeBrokerConnect(w http.ResponseWriter, r *http.Reque
 		}
 
 		// Use the broker ID from header
-		if err := s.controlChannel.HandleUpgrade(w, r, brokerID); err != nil {
+		sessionID, err := s.controlChannel.HandleUpgrade(w, r, brokerID)
+		if err != nil {
 			slog.Error("Upgrade failed for broker", "brokerID", brokerID, "error", err)
 			// Error already written by upgrader
 			return
 		}
-		s.markBrokerOnline(brokerID)
+		s.markBrokerOnline(brokerID, sessionID)
 		return
 	}
 
 	// Use authenticated broker identity
-	if err := s.controlChannel.HandleUpgrade(w, r, broker.ID()); err != nil {
+	sessionID, err := s.controlChannel.HandleUpgrade(w, r, broker.ID())
+	if err != nil {
 		slog.Error("Upgrade failed for broker", "brokerID", broker.ID(), "error", err)
 		// Error already written by upgrader
 		return
 	}
-	s.markBrokerOnline(broker.ID())
+	s.markBrokerOnline(broker.ID(), sessionID)
 }
 
 // markBrokerOnline updates broker and provider statuses to online after a successful WebSocket connection.
-func (s *Server) markBrokerOnline(brokerID string) {
+// It claims broker affinity for this hub instance + the connection's sessionID,
+// which also bumps status->online and refreshes the heartbeat in one CAS write.
+func (s *Server) markBrokerOnline(brokerID, sessionID string) {
 	ctx := context.Background()
-	slog.Info("Broker connected, marking online", "brokerID", brokerID)
+	slog.Info("Broker connected, marking online", "brokerID", brokerID, "sessionID", sessionID, "instanceID", s.instanceID)
 
-	if err := s.store.UpdateRuntimeBrokerHeartbeat(ctx, brokerID, store.BrokerStatusOnline); err != nil {
-		slog.Error("Failed to mark broker online", "brokerID", brokerID, "error", err)
+	if err := s.store.ClaimRuntimeBrokerConnection(ctx, brokerID, s.instanceID, sessionID); err != nil {
+		slog.Error("Failed to claim broker connection", "brokerID", brokerID, "error", err)
 	}
 
 	providers, err := s.store.GetBrokerProjects(ctx, brokerID)

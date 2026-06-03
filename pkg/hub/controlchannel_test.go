@@ -29,21 +29,23 @@ func TestControlChannelManager_OnDisconnectCallback(t *testing.T) {
 
 	var mu sync.Mutex
 	var receivedBrokerID string
+	var receivedSessionID string
 	done := make(chan struct{})
 
-	mgr.SetOnDisconnect(func(brokerID string) {
+	mgr.SetOnDisconnect(func(brokerID, sessionID string) {
 		mu.Lock()
 		defer mu.Unlock()
 		receivedBrokerID = brokerID
+		receivedSessionID = sessionID
 		close(done)
 	})
 
 	// Manually add a connection entry so removeConnection has something to remove
 	mgr.mu.Lock()
-	mgr.connections[tid("broker-1")] = &BrokerConnection{brokerID: tid("broker-1")}
+	mgr.connections[tid("broker-1")] = &BrokerConnection{brokerID: tid("broker-1"), sessionID: "sess-1"}
 	mgr.mu.Unlock()
 
-	mgr.removeConnection(tid("broker-1"))
+	mgr.removeConnection(tid("broker-1"), "sess-1")
 
 	// Wait for async callback
 	select {
@@ -55,9 +57,42 @@ func TestControlChannelManager_OnDisconnectCallback(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 	assert.Equal(t, tid("broker-1"), receivedBrokerID)
+	assert.Equal(t, "sess-1", receivedSessionID)
 
 	// Verify connection was removed
 	require.False(t, mgr.IsConnected(tid("broker-1")))
+}
+
+// TestControlChannelManager_RemoveStaleSessionNoop verifies that a teardown for
+// an OLD session does not remove a NEWER connection that replaced it (flap), and
+// does not fire onDisconnect for the stale session.
+func TestControlChannelManager_RemoveStaleSessionNoop(t *testing.T) {
+	mgr := NewControlChannelManager(DefaultControlChannelConfig(), slog.Default())
+
+	var fired bool
+	var mu sync.Mutex
+	mgr.SetOnDisconnect(func(brokerID, sessionID string) {
+		mu.Lock()
+		defer mu.Unlock()
+		fired = true
+	})
+
+	// Current live connection is session "new".
+	mgr.mu.Lock()
+	mgr.connections[tid("broker-1")] = &BrokerConnection{brokerID: tid("broker-1"), sessionID: "new"}
+	mgr.mu.Unlock()
+
+	// The old session's teardown must be a no-op.
+	mgr.removeConnection(tid("broker-1"), "old")
+
+	// Give any (erroneous) async callback a chance to run.
+	time.Sleep(100 * time.Millisecond)
+
+	mu.Lock()
+	assert.False(t, fired, "onDisconnect must not fire for a stale session")
+	mu.Unlock()
+	// The live (new) connection must still be present.
+	require.True(t, mgr.IsConnected(tid("broker-1")))
 }
 
 func TestControlChannelManager_OnDisconnectCallback_NilSafe(t *testing.T) {
@@ -65,11 +100,11 @@ func TestControlChannelManager_OnDisconnectCallback_NilSafe(t *testing.T) {
 
 	// Don't set any callback - verify removeConnection doesn't panic
 	mgr.mu.Lock()
-	mgr.connections[tid("broker-2")] = &BrokerConnection{brokerID: tid("broker-2")}
+	mgr.connections[tid("broker-2")] = &BrokerConnection{brokerID: tid("broker-2"), sessionID: "sess-2"}
 	mgr.mu.Unlock()
 
 	// This should not panic
-	mgr.removeConnection(tid("broker-2"))
+	mgr.removeConnection(tid("broker-2"), "sess-2")
 
 	require.False(t, mgr.IsConnected(tid("broker-2")))
 }
