@@ -277,9 +277,9 @@ func (b *DiscordBroker) Configure(config map[string]string) error {
 				}
 				if err := hc.RequestSubscription("scion.grove.>"); err != nil {
 					b.log.Warn("Failed to request bootstrap subscription", "error", err)
-				} else {
-					b.log.Info("Requested bootstrap subscription for Discord Gateway")
+					continue
 				}
+				b.log.Info("Requested bootstrap subscription for Discord Gateway")
 				return
 			}
 			b.log.Error("Bootstrap subscription timed out — host callbacks never became available")
