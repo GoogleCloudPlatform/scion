@@ -5461,7 +5461,7 @@ func (s *Server) cleanupBrokerProjectDirectories(ctx context.Context, project *s
 			continue
 		}
 
-		if err := client.CleanupProject(ctx, provider.BrokerID, broker.Endpoint, project.Slug); err != nil {
+		if err := client.CleanupProject(ctx, provider.BrokerID, broker.Endpoint, project.Slug, project.ID); err != nil {
 			slog.Warn("failed to cleanup project on broker",
 				"project_id", project.ID, "slug", project.Slug,
 				"broker", provider.BrokerID, "endpoint", broker.Endpoint, "error", err)

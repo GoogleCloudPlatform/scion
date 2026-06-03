@@ -100,8 +100,8 @@ func (c *HTTPRuntimeBrokerClient) ExecAgent(ctx context.Context, brokerID, broke
 	return c.transport.ExecAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, command, timeout)
 }
 
-func (c *HTTPRuntimeBrokerClient) CleanupProject(ctx context.Context, brokerID, brokerEndpoint, projectSlug string) error {
-	return c.transport.CleanupProject(ctx, brokerID, brokerEndpoint, projectSlug)
+func (c *HTTPRuntimeBrokerClient) CleanupProject(ctx context.Context, brokerID, brokerEndpoint, projectSlug, projectID string) error {
+	return c.transport.CleanupProject(ctx, brokerID, brokerEndpoint, projectSlug, projectID)
 }
 
 // GetClient returns the underlying RuntimeBrokerClient.

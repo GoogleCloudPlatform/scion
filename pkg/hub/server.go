@@ -329,8 +329,9 @@ type RuntimeBrokerClient interface {
 
 	// CleanupProject asks a broker to remove its local hub-native project directory.
 	// brokerID is used for HMAC authentication lookup.
+	// projectID is passed to enable NFS subtree cleanup (keyed by project ID).
 	// 404 responses are tolerated for idempotency.
-	CleanupProject(ctx context.Context, brokerID, brokerEndpoint, projectSlug string) error
+	CleanupProject(ctx context.Context, brokerID, brokerEndpoint, projectSlug, projectID string) error
 }
 
 // RemoteCreateAgentRequest is the request body for creating an agent on a remote runtime broker.

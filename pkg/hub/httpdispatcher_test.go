@@ -180,7 +180,7 @@ func (m *mockRuntimeBrokerClient) GetAgentLogs(ctx context.Context, brokerID, br
 	return "", nil
 }
 
-func (m *mockRuntimeBrokerClient) CleanupProject(ctx context.Context, brokerID, brokerEndpoint, projectSlug string) error {
+func (m *mockRuntimeBrokerClient) CleanupProject(ctx context.Context, brokerID, brokerEndpoint, projectSlug, projectID string) error {
 	m.cleanupCalled = true
 	m.cleanupCalls++
 	m.lastBrokerID = brokerID

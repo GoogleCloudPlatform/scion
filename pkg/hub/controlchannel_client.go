@@ -326,9 +326,12 @@ func (c *ControlChannelBrokerClient) ExecAgent(ctx context.Context, brokerID, br
 	return result.Output, result.ExitCode, nil
 }
 
-func (c *ControlChannelBrokerClient) CleanupProject(ctx context.Context, brokerID, brokerEndpoint, projectSlug string) error {
+func (c *ControlChannelBrokerClient) CleanupProject(ctx context.Context, brokerID, brokerEndpoint, projectSlug, projectID string) error {
 	_ = brokerEndpoint
 	path := fmt.Sprintf("/api/v1/projects/%s", url.PathEscape(projectSlug))
+	if projectID != "" {
+		path += "?project_id=" + url.QueryEscape(projectID)
+	}
 	resp, err := c.doRequest(ctx, brokerID, "DELETE", path, "", nil)
 	if err != nil {
 		return err
@@ -604,11 +607,11 @@ func (c *HybridBrokerClient) ExecAgent(ctx context.Context, brokerID, brokerEndp
 	return c.httpClient.ExecAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, command, timeout)
 }
 
-func (c *HybridBrokerClient) CleanupProject(ctx context.Context, brokerID, brokerEndpoint, projectSlug string) error {
+func (c *HybridBrokerClient) CleanupProject(ctx context.Context, brokerID, brokerEndpoint, projectSlug, projectID string) error {
 	if c.useControlChannel(brokerID) {
-		return c.controlChannel.CleanupProject(ctx, brokerID, brokerEndpoint, projectSlug)
+		return c.controlChannel.CleanupProject(ctx, brokerID, brokerEndpoint, projectSlug, projectID)
 	}
-	return c.httpClient.CleanupProject(ctx, brokerID, brokerEndpoint, projectSlug)
+	return c.httpClient.CleanupProject(ctx, brokerID, brokerEndpoint, projectSlug, projectID)
 }
 
 // FinalizeEnv sends gathered env vars to a broker, using route() to decide the
