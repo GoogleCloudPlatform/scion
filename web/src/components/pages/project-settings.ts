@@ -1768,7 +1768,7 @@ export class ScionPageProjectSettings extends LitElement {
         ?canImport=${canSync}
         allowWorkspace
         gitRemote=${this.project?.gitRemote ?? ''}
-        @resource-imported=${() => {
+        @resource-changed=${() => {
           this.refreshTemplatesList();
           void this.loadDropdownTemplates();
         }}
@@ -1779,6 +1779,13 @@ export class ScionPageProjectSettings extends LitElement {
         scope="project"
         .scopeId=${this.projectId}
         detailBasePath="/projects/${this.projectId}"
+        ?canClone=${canSync}
+        ?canDelete=${can(this.project!._capabilities, 'delete') || can(this.project!._capabilities, 'manage')}
+        ?cloneFromGlobal=${canSync}
+        @resource-changed=${() => {
+          this.refreshTemplatesList();
+          void this.loadDropdownTemplates();
+        }}
       ></scion-resource-list>
     `;
   }
@@ -1801,7 +1808,7 @@ export class ScionPageProjectSettings extends LitElement {
         ?canImport=${canSync}
         allowWorkspace
         gitRemote=${this.project?.gitRemote ?? ''}
-        @resource-imported=${() => this.refreshHarnessConfigsList()}
+        @resource-changed=${() => this.refreshHarnessConfigsList()}
       ></scion-resource-import>
       <scion-resource-list
         id="harness-configs-resource-list"
@@ -1809,6 +1816,10 @@ export class ScionPageProjectSettings extends LitElement {
         scope="project"
         .scopeId=${this.projectId}
         detailBasePath="/projects/${this.projectId}"
+        ?canClone=${canSync}
+        ?canDelete=${can(this.project!._capabilities, 'delete') || can(this.project!._capabilities, 'manage')}
+        ?cloneFromGlobal=${canSync}
+        @resource-changed=${() => this.refreshHarnessConfigsList()}
       ></scion-resource-list>
     `;
   }
