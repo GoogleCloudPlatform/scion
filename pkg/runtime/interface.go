@@ -18,6 +18,7 @@ import (
 	"context"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 type RunConfig struct {
@@ -78,6 +79,25 @@ type RunConfig struct {
 	// workspace provisioning (N2-2). When set, buildPod adds an init container
 	// that clones/provisions the workspace before the main container starts.
 	GitCloneForInit *api.GitCloneConfig
+
+	// Locker provides the per-project advisory lock for NFS workspace
+	// provisioning (N2-2b, design §7, risk RN1). When set and backend=nfs,
+	// the K8s runtime acquires the lock before building the pod to determine
+	// whether this pod should clone (lock winner) or wait for the sentinel
+	// (lock loser). This prevents concurrent first-clone corruption when
+	// two pods for the same project are scheduled on different nodes.
+	//
+	// May be nil — when absent, all pods get the cloning init container
+	// (sentinel-only guard, correct for single-node but unsafe for
+	// multi-node). On Postgres-backed deployments this is wired from
+	// the store's AdvisoryLocker capability.
+	Locker store.AdvisoryLocker
+
+	// nfsProvisionLockLost is set internally by Run() after a failed
+	// advisory lock acquisition attempt. When true, buildPod injects a
+	// wait-for-sentinel init container instead of the cloning one.
+	// Callers should not set this field.
+	nfsProvisionLockLost bool
 }
 
 type Runtime interface {
