@@ -17,6 +17,7 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -27,6 +28,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/go-jose/go-jose/v4/jwt"
+	"github.com/google/uuid"
 )
 
 // HTTPRuntimeBrokerClient is an HTTP-based implementation of RuntimeBrokerClient.
@@ -132,6 +134,14 @@ type HTTPAgentDispatcher struct {
 	devAuthToken    string               // Dev auth token to inject into agent env (dev-auth mode only)
 	debug           bool
 	log             *slog.Logger
+
+	// Cross-node dispatch deps (B4-2). When events + commandBus are non-nil
+	// and client.StartAgent/StopAgent/RestartAgent returns ErrLifecycleDeferred,
+	// the dispatcher writes durable intent + signals the owning node + waits
+	// for the terminal phase transition. Nil = cross-node dispatch disabled
+	// (single-node / SQLite mode: all brokers are local).
+	events     EventPublisher
+	commandBus CommandBus
 }
 
 // NewHTTPAgentDispatcher creates a new HTTP-based agent dispatcher.
@@ -189,6 +199,15 @@ func (d *HTTPAgentDispatcher) SetAuthzService(a *AuthzService) {
 // GitHub App installation tokens during agent credential resolution.
 func (d *HTTPAgentDispatcher) SetGitHubAppMinter(m GitHubAppTokenMinter) {
 	d.githubAppMinter = m
+}
+
+// SetCrossNodeDeps wires the event publisher and command bus needed for
+// cross-node lifecycle dispatch (B4-2). When both are set and a lifecycle
+// op returns ErrLifecycleDeferred, the dispatcher writes durable intent,
+// signals the owning node, and waits for the terminal phase.
+func (d *HTTPAgentDispatcher) SetCrossNodeDeps(events EventPublisher, bus CommandBus) {
+	d.events = events
+	d.commandBus = bus
 }
 
 // getBrokerEndpoint retrieves the endpoint URL for a runtime broker.
@@ -1064,6 +1083,11 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 	}
 
 	resp, err := d.client.StartAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID, task, projectPath, projectSlug, harnessConfig, resolvedEnv, resolvedSecrets, inlineConfig, projectInfo.sharedDirs, projectInfo.sharedWorkspace)
+	if errors.Is(err, ErrLifecycleDeferred) {
+		return d.deferredStart(ctx, agent, &StartDispatchArgs{
+			Task: task,
+		})
+	}
 	if err != nil {
 		return err
 	}
@@ -1085,7 +1109,11 @@ func (d *HTTPAgentDispatcher) DispatchAgentStop(ctx context.Context, agent *stor
 		return err
 	}
 
-	return d.client.StopAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID)
+	err = d.client.StopAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID)
+	if errors.Is(err, ErrLifecycleDeferred) {
+		return d.deferredStop(ctx, agent)
+	}
+	return err
 }
 
 // DispatchAgentRestart restarts an agent on the runtime broker.
@@ -1139,7 +1167,11 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 		}
 	}
 
-	return d.client.RestartAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID, resolvedEnv)
+	err = d.client.RestartAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID, resolvedEnv)
+	if errors.Is(err, ErrLifecycleDeferred) {
+		return d.deferredRestart(ctx, agent)
+	}
+	return err
 }
 
 // DispatchAgentDelete deletes an agent from the runtime broker.
@@ -1210,6 +1242,95 @@ func (d *HTTPAgentDispatcher) DispatchCheckAgentPrompt(ctx context.Context, agen
 	}
 
 	return d.client.CheckAgentPrompt(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID)
+}
+
+// =============================================================================
+// Cross-node lifecycle dispatch (B4-2)
+// =============================================================================
+
+// isStartTerminal returns true for terminal phases of a start/restart op.
+func isStartTerminal(phase string) bool { return phase == "running" || phase == "error" }
+
+// isStopTerminal returns true for terminal phases of a stop op.
+func isStopTerminal(phase string) bool { return phase == "stopped" || phase == "error" }
+
+// deferredStart handles a cross-node agent start: subscribe → write intent →
+// signal → wait for the terminal phase. Called when client.StartAgent returns
+// ErrLifecycleDeferred (broker not locally connected).
+func (d *HTTPAgentDispatcher) deferredStart(ctx context.Context, agent *store.Agent, args *StartDispatchArgs) error {
+	return d.deferredLifecycle(ctx, agent, "start", args, isStartTerminal)
+}
+
+// deferredStop handles a cross-node agent stop.
+func (d *HTTPAgentDispatcher) deferredStop(ctx context.Context, agent *store.Agent) error {
+	return d.deferredLifecycle(ctx, agent, "stop", &StopDispatchArgs{}, isStopTerminal)
+}
+
+// deferredRestart handles a cross-node agent restart.
+func (d *HTTPAgentDispatcher) deferredRestart(ctx context.Context, agent *store.Agent) error {
+	return d.deferredLifecycle(ctx, agent, "restart", &RestartDispatchArgs{}, isStartTerminal)
+}
+
+// deferredLifecycle is the common flow for cross-node start/stop/restart:
+//  1. Subscribe to agent.<id>.status BEFORE writing intent (no missed events)
+//  2. InsertBrokerDispatch with serialized resolved args
+//  3. Best-effort SignalBrokerCmd (the row is durable; reconnect-drain backstop)
+//  4. waitForAgentTransition with the op's terminal set
+//  5. Return nil on success-terminal, ErrDispatchFailed on timeout, wrapped
+//     error on error-terminal
+func (d *HTTPAgentDispatcher) deferredLifecycle(
+	ctx context.Context,
+	agent *store.Agent,
+	op string,
+	args interface{},
+	terminal func(string) bool,
+) error {
+	if d.events == nil || d.commandBus == nil {
+		return fmt.Errorf("cross-node dispatch not available: events or command bus not configured")
+	}
+
+	// 1. Subscribe BEFORE writing intent so we don't miss events.
+	eventCh, unsub := d.events.Subscribe("agent." + agent.ID + ".status")
+
+	// 2. Serialize args and insert the durable intent row.
+	argsJSON, err := MarshalDispatchArgs(args)
+	if err != nil {
+		unsub()
+		return fmt.Errorf("marshal dispatch args: %w", err)
+	}
+
+	dispatch := &store.BrokerDispatch{
+		ID:        uuid.NewString(),
+		BrokerID:  agent.RuntimeBrokerID,
+		AgentID:   agent.ID,
+		AgentSlug: agent.Slug,
+		ProjectID: agent.ProjectID,
+		Op:        op,
+		Args:      argsJSON,
+	}
+	if err := d.store.InsertBrokerDispatch(ctx, dispatch); err != nil {
+		unsub()
+		return fmt.Errorf("insert dispatch intent: %w", err)
+	}
+
+	// 3. Best-effort signal — the row is the durable intent; reconnect-drain
+	//    is the backstop if the signal is missed or no node owns the broker.
+	if err := d.commandBus.SignalBrokerCmd(ctx, agent.RuntimeBrokerID); err != nil {
+		d.log.Warn("deferredLifecycle: signal failed (durable intent is backstop)",
+			"op", op, "brokerID", agent.RuntimeBrokerID, "error", err)
+	}
+
+	// 4. Wait for terminal phase.
+	phase, err := waitForAgentTransition(ctx, eventCh, unsub, terminal)
+	if err != nil {
+		return err
+	}
+
+	// 5. Map terminal phase.
+	if phase == "error" {
+		return fmt.Errorf("agent entered error phase during %s", op)
+	}
+	return nil
 }
 
 // resolveSecrets queries secrets from all applicable scopes and merges them

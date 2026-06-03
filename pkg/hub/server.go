@@ -1463,6 +1463,13 @@ func (s *Server) CreateAuthenticatedDispatcher() *HTTPAgentDispatcher {
 		dispatcher.SetGitHubAppMinter(s)
 	}
 
+	// Wire cross-node lifecycle dispatch deps (B4-2) so the dispatcher
+	// can handle ErrLifecycleDeferred from route-gated Start/Stop/Restart
+	// by writing durable intent, signaling the owning node, and waiting
+	// for the terminal phase. In SQLite mode events/commandBus are no-ops,
+	// and route() always returns routeLocal, so this never triggers.
+	dispatcher.SetCrossNodeDeps(s.events, s.commandBus)
+
 	return dispatcher
 }
 

@@ -46,7 +46,7 @@ const dispatchRollingTimeout = 90 * time.Second
 //
 // Returns the terminal phase on success, or ErrDispatchFailed on rolling
 // timeout, or ctx.Err() on context cancellation.
-func (s *Server) waitForAgentTransition(
+func waitForAgentTransition(
 	ctx context.Context,
 	events <-chan Event,
 	unsub func(),
@@ -71,7 +71,6 @@ func (s *Server) waitForAgentTransition(
 			if terminal(status.Phase) {
 				return status.Phase, nil
 			}
-			// Any status change (phase/activity/detail) resets the rolling window.
 			if !timer.Stop() {
 				select {
 				case <-timer.C:
