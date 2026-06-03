@@ -3713,7 +3713,7 @@ func TestWorkspaceStorageConfig_NFSDefaults(t *testing.T) {
 		ws.ApplyNFSDefaults()
 
 		require.NotNil(t, ws.NFS)
-		assert.Equal(t, "vers=4.1,hard,nconnect=4,_netdev", ws.NFS.MountOptions)
+		assert.Equal(t, "vers=3,hard,nconnect=4,_netdev", ws.NFS.MountOptions)
 		assert.Equal(t, 1000, ws.NFS.UID)
 		assert.Equal(t, 1000, ws.NFS.GID)
 		assert.Equal(t, "projects", ws.NFS.SubPathRoot)

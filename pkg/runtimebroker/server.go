@@ -212,6 +212,9 @@ type Server struct {
 	auxiliaryRuntimes   map[string]auxiliaryRuntime
 	auxiliaryRuntimesMu sync.RWMutex
 
+	// NFS mount reconciler (nil when backend != "nfs")
+	nfsMountReconciler *NFSMountReconciler
+
 	// Dedicated request logger (nil = disabled)
 	requestLogger *slog.Logger
 
@@ -300,6 +303,17 @@ func New(cfg ServerConfig, mgr agent.Manager, rt scionrt.Runtime) *Server {
 		if err := srv.initStateStore(); err != nil {
 			slog.Warn("Failed to initialize runtime broker state store", "error", err, "stateDir", srv.stateDir)
 		}
+	}
+
+	// Initialize NFS mount reconciler when NFS storage is configured.
+	// This only constructs the reconciler; Reconcile() is called in Start().
+	if cfg.NFSConfig != nil && len(cfg.NFSConfig.Shares) > 0 {
+		nfsLog := logging.Subsystem("broker.nfs-mount")
+		checker := NewExecMountChecker(nfsLog)
+		srv.nfsMountReconciler = NewNFSMountReconciler(cfg.NFSConfig, checker, nfsLog)
+		slog.Info("NFS mount reconciler initialized",
+			"shares", len(cfg.NFSConfig.Shares),
+			"mountRoot", cfg.NFSConfig.MountRoot)
 	}
 
 	// Initialize Hub integration if enabled
@@ -776,6 +790,20 @@ func (s *Server) Start(ctx context.Context) error {
 	// so that agents running on non-default runtimes can be found after
 	// a broker restart.
 	s.discoverAuxiliaryRuntimes()
+
+	// Reconcile NFS mounts at startup (ensure configured shares are mounted).
+	if s.nfsMountReconciler != nil {
+		if err := s.nfsMountReconciler.Reconcile(); err != nil {
+			slog.Warn("NFS mount reconciliation returned error at startup", "error", err)
+		}
+		if !s.nfsMountReconciler.IsHealthy() {
+			slog.Error("NFS mounts unhealthy at startup",
+				"detail", s.nfsMountReconciler.HealthCheckString())
+		} else {
+			slog.Info("NFS mounts reconciled at startup",
+				"status", s.nfsMountReconciler.HealthCheckString())
+		}
+	}
 
 	// Start all hub connections' services
 	s.hubMu.RLock()
