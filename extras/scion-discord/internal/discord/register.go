@@ -44,12 +44,10 @@ type pendingLinkReg struct {
 	pollCancel       context.CancelFunc
 }
 
-// identityLinkRequest is the JSON body sent to the hub to register a linking code.
-type identityLinkRequest struct {
-	Platform       string            `json:"platform"`
-	PlatformUserID string            `json:"platform_user_id"`
-	Code           string            `json:"code"`
-	Metadata       map[string]string `json:"metadata,omitempty"`
+// discordLinkRequest is the JSON body sent to the hub to register a linking code.
+type discordLinkRequest struct {
+	Code          string `json:"code"`
+	DiscordUserID string `json:"discordUserId"`
 }
 
 // identityLinkStatusResponse is the JSON response from checking a linking status.
@@ -301,42 +299,33 @@ func (h *RegistrationHandler) completeRegistration(s *discordgo.Session, interac
 }
 
 // registerCodeWithHub POSTs a linking code to the hub for registration.
-func (h *RegistrationHandler) registerCodeWithHub(ctx context.Context, code, discordUserID, discordUsername, guildID string) error {
-	metadata := map[string]string{
-		"username": discordUsername,
-	}
-	if guildID != "" {
-		metadata["guild_id"] = guildID
-	}
-
-	body, err := json.Marshal(identityLinkRequest{
-		Platform:       "discord",
-		PlatformUserID: discordUserID,
-		Code:           code,
-		Metadata:       metadata,
+func (h *RegistrationHandler) registerCodeWithHub(ctx context.Context, code, discordUserID, _, _ string) error {
+	body, err := json.Marshal(discordLinkRequest{
+		Code:          code,
+		DiscordUserID: discordUserID,
 	})
 	if err != nil {
-		return fmt.Errorf("marshal identity link request: %w", err)
+		return fmt.Errorf("marshal discord link request: %w", err)
 	}
 
-	url := h.hubURL + "/api/v1/identity/link"
+	url := h.hubURL + "/api/v1/discord/link"
 	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
 	if err != nil {
-		return fmt.Errorf("create identity link request: %w", err)
+		return fmt.Errorf("create discord link request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	if err := h.signRequest(req); err != nil {
-		return fmt.Errorf("sign identity link request: %w", err)
+		return fmt.Errorf("sign discord link request: %w", err)
 	}
 
 	resp, err := h.httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("identity link request failed: %w", err)
+		return fmt.Errorf("discord link request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-		return fmt.Errorf("identity link endpoint returned status %d", resp.StatusCode)
+		return fmt.Errorf("discord link endpoint returned status %d", resp.StatusCode)
 	}
 
 	return nil
@@ -344,7 +333,7 @@ func (h *RegistrationHandler) registerCodeWithHub(ctx context.Context, code, dis
 
 // checkLinkingStatus checks with the hub whether a linking code was confirmed.
 func (h *RegistrationHandler) checkLinkingStatus(ctx context.Context, discordUserID string) (*identityLinkStatusResponse, error) {
-	url := fmt.Sprintf("%s/api/v1/identity/link/status?platform=discord&platform_user_id=%s",
+	url := fmt.Sprintf("%s/api/v1/discord/link/status?discord_user_id=%s",
 		h.hubURL, discordUserID)
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
