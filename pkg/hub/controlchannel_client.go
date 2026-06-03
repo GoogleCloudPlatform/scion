@@ -456,6 +456,11 @@ type HybridBrokerClient struct {
 	controlChannel *ControlChannelBrokerClient
 	httpClient     RuntimeBrokerClient
 	debug          bool
+	// affinity returns the believed owning hub instanceID for a broker and
+	// whether that owner is alive (last_heartbeat fresh). It is a routing HINT
+	// only (correctness comes from durable intent + drain); injected so route()
+	// is unit-testable. Nil means "no affinity info" (treated as no owner).
+	affinity func(ctx context.Context, brokerID string) (owner string, alive bool)
 }
 
 // NewHybridBrokerClient creates a hybrid client that prefers control channel.
