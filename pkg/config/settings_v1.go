@@ -432,7 +432,11 @@ type V1WorkspaceStorageConfig struct {
 type V1NFSConfig struct {
 	// MountRoot is the local base under which each share is mounted at <MountRoot>/<share.ID>.
 	MountRoot    string       `json:"mount_root,omitempty" yaml:"mount_root,omitempty" koanf:"mount_root"`
-	MountOptions string       `json:"mount_options,omitempty" yaml:"mount_options,omitempty" koanf:"mount_options"` // default "vers=4.1,hard,nconnect=4,_netdev"
+	// MountOptions are passed to mount.nfs. Default "vers=3,hard,nconnect=4,_netdev".
+	// NFSv4.1 requires Filestore Enterprise/zonal or self-hosted NFS; basic/HDD
+	// (BASIC_HDD) supports NFSv3 only. We use Postgres advisory locks, not NFS
+	// flock, so v3 is fine for correctness.
+	MountOptions string `json:"mount_options,omitempty" yaml:"mount_options,omitempty" koanf:"mount_options"`
 	Shares       []V1NFSShare `json:"shares,omitempty" yaml:"shares,omitempty" koanf:"shares"`
 
 	// Stable, node-independent ownership for NFS-backed trees.
@@ -464,7 +468,7 @@ func (ws *V1WorkspaceStorageConfig) ApplyNFSDefaults() {
 		ws.NFS = &V1NFSConfig{}
 	}
 	if ws.NFS.MountOptions == "" {
-		ws.NFS.MountOptions = "vers=4.1,hard,nconnect=4,_netdev"
+		ws.NFS.MountOptions = "vers=3,hard,nconnect=4,_netdev"
 	}
 	if ws.NFS.UID == 0 {
 		ws.NFS.UID = 1000

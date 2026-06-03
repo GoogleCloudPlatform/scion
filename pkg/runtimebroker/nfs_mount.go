@@ -107,7 +107,7 @@ func (r *NFSMountReconciler) Reconcile() error {
 
 	mountOpts := r.cfg.MountOptions
 	if mountOpts == "" {
-		mountOpts = "vers=4.1,hard,nconnect=4,_netdev"
+		mountOpts = "vers=3,hard,nconnect=4,_netdev"
 	}
 
 	for _, share := range r.cfg.Shares {
@@ -270,7 +270,7 @@ func (r *NFSMountReconciler) EnsureShareMounted(shareID string) error {
 
 	mountOpts := r.cfg.MountOptions
 	if mountOpts == "" {
-		mountOpts = "vers=4.1,hard,nconnect=4,_netdev"
+		mountOpts = "vers=3,hard,nconnect=4,_netdev"
 	}
 
 	for _, share := range r.cfg.Shares {

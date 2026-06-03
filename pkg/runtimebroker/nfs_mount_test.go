@@ -106,7 +106,7 @@ func (m *mockMountChecker) MkdirAll(path string, perm os.FileMode) error {
 func testNFSConfig() *config.V1NFSConfig {
 	return &config.V1NFSConfig{
 		MountRoot:    "/mnt/nfs",
-		MountOptions: "vers=4.1,hard,nconnect=4,_netdev",
+		MountOptions: "vers=3,hard,nconnect=4,_netdev",
 		SubPathRoot:  "projects",
 		Shares: []config.V1NFSShare{
 			{ID: "ws1", Server: "10.0.0.2", Export: "/scion-workspaces"},
@@ -138,7 +138,7 @@ func TestReconcile_MountAbsent_MkdirAndMount(t *testing.T) {
 		t.Errorf("mount call = %+v, want server=10.0.0.2, export=/scion-workspaces, target=%s",
 			call, wantTarget)
 	}
-	if call.Options != "vers=4.1,hard,nconnect=4,_netdev" {
+	if call.Options != "vers=3,hard,nconnect=4,_netdev" {
 		t.Errorf("mount options = %q, want default NFS options", call.Options)
 	}
 
@@ -385,7 +385,7 @@ func TestReconcile_DefaultMountOptions(t *testing.T) {
 	if len(mc.mountCalls) != 1 {
 		t.Fatalf("mountCalls = %d, want 1", len(mc.mountCalls))
 	}
-	if mc.mountCalls[0].Options != "vers=4.1,hard,nconnect=4,_netdev" {
+	if mc.mountCalls[0].Options != "vers=3,hard,nconnect=4,_netdev" {
 		t.Errorf("options = %q, want default NFS options", mc.mountCalls[0].Options)
 	}
 }
