@@ -51,6 +51,7 @@ type CompositeStore struct {
 	*AllowListStore
 	*GroupStore
 	*PolicyStore
+	*BrokerDispatchStore
 
 	client *ent.Client
 }
@@ -77,9 +78,10 @@ func NewCompositeStore(client *ent.Client) *CompositeStore {
 		ExternalStore:     NewExternalStore(client),
 		BrokerSecretStore: NewBrokerSecretStore(client),
 		AllowListStore:    NewAllowListStore(client),
-		GroupStore:        NewGroupStore(client),
-		PolicyStore:       NewPolicyStore(client),
-		client:            client,
+		GroupStore:          NewGroupStore(client),
+		PolicyStore:         NewPolicyStore(client),
+		BrokerDispatchStore: NewBrokerDispatchStore(client),
+		client:              client,
 	}
 }
 
