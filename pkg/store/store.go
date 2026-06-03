@@ -49,6 +49,9 @@ type Store interface {
 	// RuntimeBroker operations
 	RuntimeBrokerStore
 
+	// BrokerDispatch operations (multi-node command dispatch)
+	BrokerDispatchStore
+
 	// Template operations
 	TemplateStore
 
@@ -325,6 +328,33 @@ type RuntimeBrokerFilter struct {
 	ProjectID   string
 	Name        string // Exact match on broker name (case-insensitive)
 	AutoProvide *bool  // Filter by auto-provide flag (nil = no filter)
+}
+
+// BrokerDispatchStore defines persistence for the durable broker-dispatch intent
+// table and the message dispatch-state CAS helpers (multi-node command dispatch).
+type BrokerDispatchStore interface {
+	// InsertBrokerDispatch persists a new dispatch intent (state defaults pending).
+	InsertBrokerDispatch(ctx context.Context, d *BrokerDispatch) error
+
+	// ClaimBrokerDispatch CAS-transitions a dispatch pending->in_progress for the
+	// given hub instance. Returns claimed=false if it was not pending (so exactly
+	// one node executes a given intent).
+	ClaimBrokerDispatch(ctx context.Context, id, hubInstanceID string) (claimed bool, err error)
+
+	// CompleteBrokerDispatch marks a dispatch done with an optional result JSON.
+	CompleteBrokerDispatch(ctx context.Context, id, result string) error
+
+	// FailBrokerDispatch marks a dispatch failed, records the error, bumps attempts.
+	FailBrokerDispatch(ctx context.Context, id, errMsg string) error
+
+	// ListPendingDispatch returns pending intents for a broker (drain query).
+	ListPendingDispatch(ctx context.Context, brokerID string) ([]BrokerDispatch, error)
+
+	// MarkMessageDispatched CAS-flips a message pending->dispatched (dedupes drains).
+	MarkMessageDispatched(ctx context.Context, id string) (dispatched bool, err error)
+
+	// ListPendingMessages returns pending messages whose target agent is on the broker.
+	ListPendingMessages(ctx context.Context, brokerID string) ([]Message, error)
 }
 
 // TemplateStore defines template persistence operations.
