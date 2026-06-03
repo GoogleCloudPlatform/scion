@@ -501,6 +501,7 @@ type Server struct {
 	controlChannel         *ControlChannelManager  // WebSocket control channel for runtime brokers
 	authzService           *AuthzService           // Authorization service for policy evaluation
 	events                 EventPublisher          // Event publisher for real-time SSE updates
+	commandBus             CommandBus              // Inter-node dispatch signal bus (nil-safe; nil = no-op)
 	notificationDispatcher *NotificationDispatcher // Notification dispatcher for agent status events
 	maintenance            *MaintenanceState       // Runtime maintenance mode state
 	hubID                  string                  // Unique hub instance ID for secret namespacing
@@ -1322,6 +1323,17 @@ func (s *Server) SetEventPublisher(ep EventPublisher) {
 	s.events = ep
 }
 
+// SetCommandBus sets the inter-node dispatch signal bus. Nil is safe (treated
+// as no-op). Called from the server-foreground init path after backend selection.
+func (s *Server) SetCommandBus(cb CommandBus) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.commandBus = cb
+}
+
+// CommandBus returns the configured command bus, or nil.
+func (s *Server) CommandBus() CommandBus { return s.commandBus }
+
 // StartNotificationDispatcher creates and starts the notification dispatcher
 // if a subscription-capable EventPublisher is available. It uses a lazy getter for the
 // AgentDispatcher so it works even if SetDispatcher is called later.
@@ -2006,6 +2018,9 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	if s.events != nil {
 		s.events.Close()
 	}
+	if s.commandBus != nil {
+		s.commandBus.Close()
+	}
 
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
@@ -2044,6 +2059,9 @@ func (s *Server) CleanupResources(ctx context.Context) error {
 		}
 		if s.events != nil {
 			s.events.Close()
+		}
+		if s.commandBus != nil {
+			s.commandBus.Close()
 		}
 		if s.logQueryService != nil {
 			s.logQueryService.Close()

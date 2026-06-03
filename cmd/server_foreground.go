@@ -1058,6 +1058,29 @@ func newEventPublisher(ctx context.Context, cfg *config.GlobalConfig) hub.EventP
 	return hub.NewChannelEventPublisher()
 }
 
+// newCommandBus selects the command bus backend. With Postgres it returns a
+// PostgresCommandBus (LISTEN/NOTIFY on scion_broker_cmd); otherwise it returns
+// a no-op bus (single-process SQLite always owns all brokers locally).
+func newCommandBus(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Server) hub.CommandBus {
+	if !strings.EqualFold(cfg.Database.Driver, "postgres") {
+		return hub.NoopCommandBus{}
+	}
+	mgr := hubSrv.GetControlChannelManager()
+	ownsLocally := func(brokerID string) bool {
+		if mgr == nil {
+			return false
+		}
+		return mgr.IsConnected(brokerID)
+	}
+	bus, err := hub.NewPostgresCommandBus(ctx, cfg.Database.URL, ownsLocally, nil, logging.Subsystem("hub.commandbus"))
+	if err != nil {
+		log.Printf("WARNING: failed to start Postgres command bus (%v); falling back to no-op. Cross-replica dispatch signals will not work.", err)
+		return hub.NoopCommandBus{}
+	}
+	log.Printf("Using Postgres command bus on channel scion_broker_cmd")
+	return bus
+}
+
 // initWebServer creates and configures the Web server.
 func initWebServer(cfg *config.GlobalConfig, hubSrv *hub.Server, devAuthToken string, adminEmailList []string, adminMode bool, maintenanceMessage string, requestLogger *slog.Logger) *hub.WebServer {
 	webHost := cfg.Hub.Host
@@ -1119,6 +1142,7 @@ func initWebServer(cfg *config.GlobalConfig, hubSrv *hub.Server, devAuthToken st
 	// Wire Hub services into WebServer if Hub is enabled
 	if hubSrv != nil {
 		hubSrv.SetEventPublisher(eventPub)
+		hubSrv.SetCommandBus(newCommandBus(context.Background(), cfg, hubSrv))
 		webSrv.SetOAuthService(hubSrv.GetOAuthService())
 		webSrv.SetStore(hubSrv.GetStore())
 		webSrv.SetUserTokenService(hubSrv.GetUserTokenService())
