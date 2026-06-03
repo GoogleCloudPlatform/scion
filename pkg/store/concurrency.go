@@ -53,6 +53,8 @@ const (
 	// LockGitHubAppHealthCheck guards the periodic GitHub App installation
 	// health check.
 	LockGitHubAppHealthCheck AdvisoryLockKey = 0x5C100005
+	// LockBrokerAffinityReap guards the stale broker-affinity + stuck dispatch reaper.
+	LockBrokerAffinityReap AdvisoryLockKey = 0x5C100006
 
 	// LockWorkspaceProvision is the CLASS ID for per-project workspace
 	// provisioning locks. It is used with the two-int advisory lock form
