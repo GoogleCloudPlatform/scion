@@ -431,6 +431,37 @@ func TestLoadConfigInvalidVolumes(t *testing.T) {
 		}
 	})
 
+	t.Run("valid nfs volume", func(t *testing.T) {
+		tmpDir, err := os.MkdirTemp("", "scion-test-nfs-volumes-*")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer os.RemoveAll(tmpDir)
+
+		configContent := `{
+			"harness": "gemini",
+			"volumes": [{"source": "/scion-workspaces", "target": "/workspace", "type": "nfs", "server": "10.0.0.2"}]
+		}`
+		if err := os.WriteFile(filepath.Join(tmpDir, "scion-agent.json"), []byte(configContent), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		tpl := &Template{Path: tmpDir}
+		cfg, err := tpl.LoadConfig()
+		if err != nil {
+			t.Fatalf("LoadConfig() unexpected error for valid nfs volume: %v", err)
+		}
+		if len(cfg.Volumes) != 1 {
+			t.Fatalf("LoadConfig() expected 1 volume, got %d", len(cfg.Volumes))
+		}
+		if cfg.Volumes[0].Type != "nfs" {
+			t.Errorf("Volume type = %q, want %q", cfg.Volumes[0].Type, "nfs")
+		}
+		if cfg.Volumes[0].Server != "10.0.0.2" {
+			t.Errorf("Volume server = %q, want %q", cfg.Volumes[0].Server, "10.0.0.2")
+		}
+	})
+
 	t.Run("volume with invalid type", func(t *testing.T) {
 		tmpDir, err := os.MkdirTemp("", "scion-test-invalid-volumes-*")
 		if err != nil {
@@ -440,7 +471,7 @@ func TestLoadConfigInvalidVolumes(t *testing.T) {
 
 		configContent := `{
 			"harness": "gemini",
-			"volumes": [{"source": "/foo", "target": "/bar", "type": "nfs"}]
+			"volumes": [{"source": "/foo", "target": "/bar", "type": "bogus"}]
 		}`
 		if err := os.WriteFile(filepath.Join(tmpDir, "scion-agent.json"), []byte(configContent), 0644); err != nil {
 			t.Fatal(err)
