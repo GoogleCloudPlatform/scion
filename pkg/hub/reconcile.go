@@ -97,17 +97,89 @@ func (s *Server) reconcileBroker(ctx context.Context, brokerID string) {
 	}
 }
 
-// executeDispatch runs a claimed dispatch intent's op via the LOCAL broker tunnel
-// and returns its result JSON. This is the default executor wired in New(); the
-// per-op tunnel wiring (start/stop/restart/delete/finalize_env/check_prompt) is
-// supplied by Phase 4 (B4-2..B4-4). The substrate (claim → execute → mark) is in
-// place now; unknown ops fail cleanly (and are retryable) rather than silently
-// completing.
+// executeDispatch runs a claimed dispatch intent's op via the LOCAL broker
+// tunnel and returns its result JSON. The lifecycle cases (start/stop/restart)
+// deserialize args from the dispatch row and call the local dispatcher, which
+// delivers over the in-memory control-channel socket. Unknown ops fail cleanly
+// (and are retryable).
 func (s *Server) executeDispatch(ctx context.Context, d store.BrokerDispatch) (string, error) {
 	switch d.Op {
+	case "start":
+		return s.execDispatchStart(ctx, d)
+	case "stop":
+		return s.execDispatchStop(ctx, d)
+	case "restart":
+		return s.execDispatchRestart(ctx, d)
 	default:
 		return "", fmt.Errorf("broker dispatch op %q not yet wired on this node", d.Op)
 	}
+}
+
+func (s *Server) execDispatchStart(ctx context.Context, d store.BrokerDispatch) (string, error) {
+	agent, err := s.resolveDispatchAgent(ctx, d)
+	if err != nil {
+		return "", err
+	}
+	dispatcher := s.GetDispatcher()
+	if dispatcher == nil {
+		return "", fmt.Errorf("no dispatcher available")
+	}
+	var task string
+	if d.Args != "" {
+		args, err := UnmarshalStartArgs(d.Args)
+		if err != nil {
+			return "", fmt.Errorf("unmarshal start args: %w", err)
+		}
+		task = args.Task
+	}
+	if err := dispatcher.DispatchAgentStart(ctx, agent, task); err != nil {
+		return "", fmt.Errorf("dispatch start: %w", err)
+	}
+	return "", nil
+}
+
+func (s *Server) execDispatchStop(ctx context.Context, d store.BrokerDispatch) (string, error) {
+	agent, err := s.resolveDispatchAgent(ctx, d)
+	if err != nil {
+		return "", err
+	}
+	dispatcher := s.GetDispatcher()
+	if dispatcher == nil {
+		return "", fmt.Errorf("no dispatcher available")
+	}
+	if err := dispatcher.DispatchAgentStop(ctx, agent); err != nil {
+		return "", fmt.Errorf("dispatch stop: %w", err)
+	}
+	return "", nil
+}
+
+func (s *Server) execDispatchRestart(ctx context.Context, d store.BrokerDispatch) (string, error) {
+	agent, err := s.resolveDispatchAgent(ctx, d)
+	if err != nil {
+		return "", err
+	}
+	dispatcher := s.GetDispatcher()
+	if dispatcher == nil {
+		return "", fmt.Errorf("no dispatcher available")
+	}
+	if err := dispatcher.DispatchAgentRestart(ctx, agent); err != nil {
+		return "", fmt.Errorf("dispatch restart: %w", err)
+	}
+	return "", nil
+}
+
+// resolveDispatchAgent loads the agent from the store by slug (used as the
+// identifier in the dispatch row's AgentSlug field, matching the runtime
+// broker's slug-based addressing).
+func (s *Server) resolveDispatchAgent(ctx context.Context, d store.BrokerDispatch) (*store.Agent, error) {
+	if d.AgentID != "" {
+		agent, err := s.store.GetAgent(ctx, d.AgentID)
+		if err != nil {
+			return nil, fmt.Errorf("resolve agent %s: %w", d.AgentID, err)
+		}
+		return agent, nil
+	}
+	return nil, fmt.Errorf("dispatch row has no agent ID")
 }
 
 // deliverMessage tunnels a reconciled message to its agent over the LOCAL
