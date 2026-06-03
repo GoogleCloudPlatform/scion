@@ -343,11 +343,6 @@ type RuntimeBroker struct {
 	Labels      map[string]string `json:"labels,omitempty"`
 	Annotations map[string]string `json:"annotations,omitempty"`
 
-	// Affinity — which hub instance currently holds the control-channel socket
-	ConnectedHubID    *string    `json:"connectedHubId,omitempty"`
-	ConnectedSessionID *string   `json:"connectedSessionId,omitempty"`
-	ConnectedAt       *time.Time `json:"connectedAt,omitempty"`
-
 	// Network endpoint (for direct HTTP mode)
 	Endpoint string `json:"endpoint,omitempty"`
 
