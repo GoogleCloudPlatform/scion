@@ -131,11 +131,28 @@ type ProvisionInput struct {
 	// AgentID is the agent's stable UUID.
 	AgentID string
 
+	// AgentName is a human-readable agent name (used for worktree branch names).
+	AgentName string
+
 	// Mode is the workspace sharing mode.
 	Mode store.WorkspaceSharingMode
 
 	// GitClone holds git-clone config when the project is git-backed; nil otherwise.
 	GitClone *api.GitCloneConfig
+
+	// Locker provides the per-project advisory lock for the NFS first-access
+	// provisioning guard (design §7, risk RN1). On Postgres-backed deployments
+	// this uses pg_try_advisory_lock(classid, objid) for cross-node mutual
+	// exclusion; on SQLite it's a no-op (single-writer serializes already).
+	//
+	// May be nil — nfsBackend.Provision degrades to sentinel-only guarding
+	// (correct for single-node but NOT safe for multi-node).
+	Locker store.AdvisoryLocker
+
+	// NFSUID and NFSGID are the stable NFS ownership values (default 1000:1000).
+	// Used for one-time chown of newly provisioned workspace directories.
+	NFSUID int
+	NFSGID int
 }
 
 // RealizeInput holds parameters for emitting a runtime mount descriptor.

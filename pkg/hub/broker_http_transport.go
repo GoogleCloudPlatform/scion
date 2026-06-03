@@ -447,8 +447,11 @@ func (t *brokerHTTPTransport) ExecAgent(ctx context.Context, brokerID, brokerEnd
 	return result.Output, result.ExitCode, nil
 }
 
-func (t *brokerHTTPTransport) CleanupProject(ctx context.Context, brokerID, brokerEndpoint, projectSlug string) error {
+func (t *brokerHTTPTransport) CleanupProject(ctx context.Context, brokerID, brokerEndpoint, projectSlug, projectID string) error {
 	endpoint := fmt.Sprintf("%s/api/v1/projects/%s", strings.TrimSuffix(brokerEndpoint, "/"), url.PathEscape(projectSlug))
+	if projectID != "" {
+		endpoint += "?project_id=" + url.QueryEscape(projectID)
+	}
 	resp, err := t.doRequest(ctx, brokerID, http.MethodDelete, endpoint, nil)
 	if err != nil {
 		return fmt.Errorf("failed to send request: %w", err)
