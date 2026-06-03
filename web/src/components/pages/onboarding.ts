@@ -83,6 +83,7 @@ export class ScionPageOnboarding extends LitElement {
   @state() private buildExpanded = false;
   @state() private runtimeAvailable = false;
   @state() private buildAvailable = false;
+  @state() private imageRegistry = '';
   private imageEventSource: EventSource | null = null;
 
   // Step 5: Workspace
@@ -501,6 +502,8 @@ export class ScionPageOnboarding extends LitElement {
         }
       }
 
+      if (status?.imageRegistry) this.imageRegistry = status.imageRegistry;
+
       // Resume: advance past completed steps only if user has previously started
       const previouslyStarted = sessionStorage.getItem('onboardingStarted') === 'true';
       if (status && previouslyStarted) {
@@ -872,7 +875,8 @@ export class ScionPageOnboarding extends LitElement {
         ${harnesses.map(h => {
           const s = this.imageStatuses.get(h);
           const status = s?.status ?? 'pending';
-          const displayName = s?.fullName ?? `scion-${h}:latest`;
+          const prefix = this.imageRegistry ? `${this.imageRegistry}/` : '';
+          const displayName = s?.fullName ?? `${prefix}scion-${h}:latest`;
           return html`
             <div class="image-item">
               <span class="image-name">${displayName}</span>
@@ -948,7 +952,8 @@ export class ScionPageOnboarding extends LitElement {
 
     const statuses = new Map(this.imageStatuses);
     for (const h of harnesses) {
-      statuses.set(h, { status: 'queued' });
+      const prefix = this.imageRegistry ? `${this.imageRegistry}/` : '';
+      statuses.set(h, { status: 'queued', fullName: `${prefix}scion-${h}:latest` });
     }
     this.imageStatuses = statuses;
 
