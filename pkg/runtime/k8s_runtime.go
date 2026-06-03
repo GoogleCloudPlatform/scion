@@ -1047,6 +1047,38 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 		}
 	}
 
+	// Workspace volume: NFS-backed pods use a PVC+subPath for shared, persistent
+	// storage isolated to the project subtree (design §5.1/§9.4).
+	// Local-backend pods keep the existing EmptyDir (zero behavior change).
+	var workspaceVolume corev1.Volume
+	var workspaceVolumeMount corev1.VolumeMount
+	if config.WorkspaceBackendName == "nfs" && config.NFSPVClaimName != "" {
+		workspaceVolume = corev1.Volume{
+			Name: "workspace",
+			VolumeSource: corev1.VolumeSource{
+				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+					ClaimName: config.NFSPVClaimName,
+				},
+			},
+		}
+		workspaceVolumeMount = corev1.VolumeMount{
+			Name:      "workspace",
+			MountPath: "/workspace",
+			SubPath:   config.NFSSubPath,
+		}
+	} else {
+		workspaceVolume = corev1.Volume{
+			Name: "workspace",
+			VolumeSource: corev1.VolumeSource{
+				EmptyDir: &corev1.EmptyDirVolumeSource{},
+			},
+		}
+		workspaceVolumeMount = corev1.VolumeMount{
+			Name:      "workspace",
+			MountPath: "/workspace",
+		}
+	}
+
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        config.Name,
@@ -1072,19 +1104,10 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 							Drop: []corev1.Capability{"ALL"},
 						},
 					},
-					VolumeMounts: []corev1.VolumeMount{
-						{Name: "workspace", MountPath: "/workspace"},
-					},
+					VolumeMounts: []corev1.VolumeMount{workspaceVolumeMount},
 				},
 			},
-			Volumes: []corev1.Volume{
-				{
-					Name: "workspace",
-					VolumeSource: corev1.VolumeSource{
-						EmptyDir: &corev1.EmptyDirVolumeSource{},
-					},
-				},
-			},
+			Volumes:       []corev1.Volume{workspaceVolume},
 			RestartPolicy: corev1.RestartPolicyNever,
 		},
 	}
