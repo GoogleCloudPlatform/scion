@@ -295,17 +295,23 @@ export class ScionPageAgents extends LitElement {
 
     // Read persisted phase filter
     const storedPhase = localStorage.getItem('scion-filter-agents-phase');
-    if (storedPhase) {
-      this.phaseFilter = storedPhase as AgentPhase;
+    if (storedPhase === 'running' || storedPhase === 'stopped' || storedPhase === 'suspended' || storedPhase === 'error') {
+      this.phaseFilter = storedPhase;
     }
 
     // Read persisted sort
     const storedSort = localStorage.getItem('scion-sort-agents');
     if (storedSort) {
       try {
-        const parsed = JSON.parse(storedSort) as { field: AgentSortField; dir: SortDir };
-        this.sortField = parsed.field;
-        this.sortDir = parsed.dir;
+        const parsed = JSON.parse(storedSort);
+        if (
+          parsed &&
+          (parsed.field === 'name' || parsed.field === 'status' || parsed.field === 'created' || parsed.field === 'updated') &&
+          (parsed.dir === 'asc' || parsed.dir === 'desc')
+        ) {
+          this.sortField = parsed.field;
+          this.sortDir = parsed.dir;
+        }
       } catch { /* ignore invalid stored sort */ }
     }
 
@@ -560,6 +566,7 @@ export class ScionPageAgents extends LitElement {
 
   private formatRelativeTime(isoString: string): string {
     const date = new Date(isoString);
+    if (isNaN(date.getTime())) return '—';
     const now = Date.now();
     const diffMs = now - date.getTime();
     if (diffMs < 0) return 'just now';

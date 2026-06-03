@@ -287,6 +287,7 @@ func filterRunningAgents(agents []api.AgentInfo) []api.AgentInfo {
 // validateListFlags checks that filter and sort flag values are valid.
 func validateListFlags() error {
 	if filterPhase != "" {
+		filterPhase = strings.ToLower(filterPhase)
 		if !state.Phase(filterPhase).IsValid() {
 			valid := make([]string, 0, len(state.Phases()))
 			for _, p := range state.Phases() {
@@ -296,7 +297,8 @@ func validateListFlags() error {
 		}
 	}
 	if filterActivity != "" {
-		if !state.Activity(filterActivity).IsValid() || filterActivity == "" {
+		filterActivity = strings.ToLower(filterActivity)
+		if !state.Activity(filterActivity).IsValid() {
 			valid := make([]string, 0, len(state.Activities()))
 			for _, a := range state.Activities() {
 				valid = append(valid, string(a))
@@ -304,13 +306,16 @@ func validateListFlags() error {
 			return fmt.Errorf("invalid activity %q; valid values: %s", filterActivity, strings.Join(valid, ", "))
 		}
 	}
-	if sortField != "" && !validSortFields[sortField] {
-		valid := make([]string, 0, len(validSortFields))
-		for k := range validSortFields {
-			valid = append(valid, k)
+	if sortField != "" {
+		sortField = strings.ToLower(sortField)
+		if !validSortFields[sortField] {
+			valid := make([]string, 0, len(validSortFields))
+			for k := range validSortFields {
+				valid = append(valid, k)
+			}
+			sort.Strings(valid)
+			return fmt.Errorf("invalid sort field %q; valid values: %s", sortField, strings.Join(valid, ", "))
 		}
-		sort.Strings(valid)
-		return fmt.Errorf("invalid sort field %q; valid values: %s", sortField, strings.Join(valid, ", "))
 	}
 	return nil
 }
