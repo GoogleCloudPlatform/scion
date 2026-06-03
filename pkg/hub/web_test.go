@@ -27,7 +27,6 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
-	"github.com/gorilla/securecookie"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -1288,20 +1287,85 @@ func TestSessionStore_CookieConfiguration(t *testing.T) {
 		"HTTP base URL should produce non-secure cookies")
 }
 
-func TestSessionStore_NoMaxLengthLimit(t *testing.T) {
-	// The FilesystemStore stores data on disk, not in cookies, so the default
-	// securecookie 4096-byte limit must be removed. JWT tokens in the session
-	// regularly exceed that limit after gob+base64 encoding.
-	ws := newTestWebServer(t, WebServerConfig{})
-	for _, codec := range ws.sessionStore.Codecs {
-		if sc, ok := codec.(*securecookie.SecureCookie); ok {
-			// Encode a large value — if MaxLength were still 4096 this would fail.
-			large := make(map[interface{}]interface{})
-			large["token"] = string(make([]byte, 8000))
-			_, err := securecookie.EncodeMulti("test", large, sc)
-			assert.NoError(t, err, "session store should allow values larger than 4096 bytes")
-		}
+func TestSessionStore_CrossReplicaRoundTrip(t *testing.T) {
+	// Behind a load balancer the OAuth login, the provider callback, and every
+	// follow-up API request can each land on a different replica. With a
+	// cookie-backed session store, any replica configured with the same
+	// SESSION_SECRET must be able to read a session cookie minted by another
+	// replica. This is the regression test for the "state_mismatch" login
+	// failures (and dropped post-login sessions) caused by the previous
+	// filesystem-backed, process-local store.
+	const secret = "test-shared-session-secret-value-1234567890"
+
+	replicaA := newTestWebServer(t, WebServerConfig{SessionSecret: secret})
+	replicaB := newTestWebServer(t, WebServerConfig{SessionSecret: secret})
+
+	// A realistic post-login payload: identity plus access/refresh JWTs, in
+	// addition to the short-lived OAuth CSRF state.
+	svc, err := NewUserTokenService(UserTokenConfig{})
+	require.NoError(t, err)
+	access, refresh, _, err := svc.GenerateTokenPair("user_123", "user@example.com", "Test User", "admin", ClientTypeWeb)
+	require.NoError(t, err)
+
+	// Replica A writes the session and emits the cookie (e.g. during /auth/login
+	// and the callback that completes login).
+	reqA := httptest.NewRequest(http.MethodGet, "/auth/login/google", nil)
+	recA := httptest.NewRecorder()
+	sessA, err := replicaA.sessionStore.Get(reqA, webSessionName)
+	require.NoError(t, err)
+	sessA.Values[sessKeyOAuthState] = "state-token-abc123"
+	sessA.Values[sessKeyUserID] = "user_123"
+	sessA.Values[sessKeyUserEmail] = "user@example.com"
+	sessA.Values[sessKeyHubAccessToken] = access
+	sessA.Values[sessKeyHubRefreshToken] = refresh
+	require.NoError(t, sessA.Save(reqA, recA))
+
+	cookies := recA.Result().Cookies()
+	require.NotEmpty(t, cookies, "replica A should set a session cookie")
+
+	// Replica B receives the cookie minted by replica A and must decode it.
+	reqB := httptest.NewRequest(http.MethodGet, "/auth/callback/google", nil)
+	for _, c := range cookies {
+		reqB.AddCookie(c)
 	}
+	sessB, err := replicaB.sessionStore.Get(reqB, webSessionName)
+	require.NoError(t, err)
+	assert.False(t, sessB.IsNew, "replica B must decode the session cookie minted by replica A")
+	assert.Equal(t, "state-token-abc123", sessB.Values[sessKeyOAuthState],
+		"OAuth state must survive across replicas (fixes state_mismatch)")
+	assert.Equal(t, "user_123", sessB.Values[sessKeyUserID])
+	assert.Equal(t, access, sessB.Values[sessKeyHubAccessToken],
+		"post-login access token must survive across replicas")
+	assert.Equal(t, refresh, sessB.Values[sessKeyHubRefreshToken])
+}
+
+func TestSessionStore_DifferentSecretCannotDecode(t *testing.T) {
+	// A replica configured with a different SESSION_SECRET must NOT be able to
+	// read another replica's session cookie — the cookie is authenticated and
+	// encrypted with keys derived from the shared secret.
+	replicaA := newTestWebServer(t, WebServerConfig{SessionSecret: "secret-A-1234567890-abcdefghijklmnop"})
+	replicaC := newTestWebServer(t, WebServerConfig{SessionSecret: "secret-C-1234567890-abcdefghijklmnop"})
+
+	reqA := httptest.NewRequest(http.MethodGet, "/auth/login/google", nil)
+	recA := httptest.NewRecorder()
+	sessA, err := replicaA.sessionStore.Get(reqA, webSessionName)
+	require.NoError(t, err)
+	sessA.Values[sessKeyOAuthState] = "state-token-abc123"
+	require.NoError(t, sessA.Save(reqA, recA))
+
+	reqC := httptest.NewRequest(http.MethodGet, "/auth/callback/google", nil)
+	for _, c := range recA.Result().Cookies() {
+		reqC.AddCookie(c)
+	}
+	sessC, err := replicaC.sessionStore.Get(reqC, webSessionName)
+	// A cookie authenticated/encrypted with a different secret fails to decode:
+	// gorilla returns a decode error together with a fresh, empty session.
+	// Either way, the state must not leak across mismatched secrets.
+	if err == nil {
+		assert.True(t, sessC.IsNew, "session from a mismatched secret should be new/empty")
+	}
+	assert.Nil(t, sessC.Values[sessKeyOAuthState],
+		"OAuth state must not decode under a different secret")
 }
 
 func TestSetters(t *testing.T) {

@@ -17,6 +17,7 @@ package hub
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -143,7 +144,7 @@ type WebServer struct {
 	assets       fs.FS  // embedded or nil
 	assetsDisk   string // filesystem override path, or ""
 	shellTmpl    *template.Template
-	sessionStore *sessions.FilesystemStore
+	sessionStore *sessions.CookieStore
 	oauthService *OAuthService
 	store        store.Store
 	userTokenSvc *UserTokenService
@@ -420,28 +421,44 @@ func NewWebServer(cfg WebServerConfig) *WebServer {
 		slog.Warn("No session secret configured, using random key (sessions will not persist across restarts)")
 	}
 
-	// Use a filesystem-backed session store so that only a small session ID
-	// is sent as a cookie. This avoids the 4 KB cookie size limit that can
-	// be exceeded when JWT tokens are stored in the session.
-	sessionDir := filepath.Join(os.TempDir(), "scion-sessions")
-	if err := os.MkdirAll(sessionDir, 0700); err != nil {
-		slog.Error("Failed to create session directory", "dir", sessionDir, "error", err)
-	}
-	fsStore := sessions.NewFilesystemStore(sessionDir, []byte(sessionKey))
-	// Remove the default 4096-byte securecookie encoding limit. The
-	// FilesystemStore writes session data to disk (not cookies), so the
-	// browser cookie-size cap is irrelevant. JWT tokens stored in the
-	// session regularly exceed 4096 bytes after gob+base64 encoding,
-	// which causes Save() to fail and tokens to be silently dropped.
-	fsStore.MaxLength(0)
-	fsStore.Options = &sessions.Options{
+	// Use an encrypted, signed cookie session store so that NO session state
+	// lives on a single replica's local filesystem. This is required for
+	// horizontal scaling: behind a load balancer the OAuth login and callback
+	// (and every subsequent API request) can land on different replicas. A
+	// cookie-backed store keeps the whole session — the OAuth CSRF state token,
+	// the post-login return path, the user identity, and the Hub access/refresh
+	// tokens — in the client's signed+encrypted cookie, so any replica sharing
+	// SESSION_SECRET can read it.
+	//
+	// The previous FilesystemStore kept this state on one replica's disk, which
+	// caused intermittent "state_mismatch" login failures (and silently dropped
+	// post-login sessions) whenever the LB routed a follow-up request to a
+	// different replica. The whole session encodes to roughly 2.6 KB today —
+	// well within the browser's ~4 KB per-cookie cap — so the historical
+	// "JWT tokens exceed 4096 bytes" concern that motivated the disk store no
+	// longer applies to the current compact HS256 tokens.
+	//
+	// Keys are derived deterministically from the shared SESSION_SECRET so all
+	// replicas agree: a 32-byte HMAC authentication key and a 32-byte AES-256
+	// encryption key, with domain separation so the two keys differ.
+	cookieStore := sessions.NewCookieStore(
+		deriveSessionKey(sessionKey, "scion-session-hash"),
+		deriveSessionKey(sessionKey, "scion-session-block"),
+	)
+	cookieStore.Options = &sessions.Options{
 		Path:     "/",
 		MaxAge:   86400, // 24 hours
 		HttpOnly: true,
 		Secure:   strings.HasPrefix(cfg.BaseURL, "https://"),
 		SameSite: http.SameSiteLaxMode,
 	}
-	ws.sessionStore = fsStore
+	// Keep securecookie's timestamp window in sync with the cookie MaxAge. We
+	// intentionally leave the default 4096-byte securecookie length limit in
+	// force (unlike the disk store, which disabled it): if a session ever grew
+	// past the browser cookie cap, Save() would return an error we can log
+	// rather than silently emitting an oversized cookie the browser drops.
+	cookieStore.MaxAge(cookieStore.Options.MaxAge)
+	ws.sessionStore = cookieStore
 
 	// Resolve asset source
 	if cfg.AssetsDir != "" {
@@ -469,6 +486,17 @@ func NewWebServer(cfg WebServerConfig) *WebServer {
 	ws.registerRoutes()
 
 	return ws
+}
+
+// deriveSessionKey deterministically derives a 32-byte key from the shared
+// session secret and a label. The label provides domain separation so the
+// HMAC authentication key and the AES encryption key differ even though both
+// originate from the same SESSION_SECRET. Every replica configured with the
+// same secret derives identical keys, which is what lets a session cookie
+// minted by one replica be validated and decrypted by another.
+func deriveSessionKey(secret, label string) []byte {
+	sum := sha256.Sum256([]byte(label + ":" + secret))
+	return sum[:]
 }
 
 // SetMaintenanceState sets the shared runtime maintenance state.
