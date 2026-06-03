@@ -15,12 +15,14 @@
 package runtime
 
 import (
+	"context"
 	"os"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/k8s"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/dynamic/fake"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
@@ -506,6 +508,249 @@ func TestSkipWorkspaceSync_NFSBackend_RunConfigGuard(t *testing.T) {
 				t.Errorf("workspace sync guard: got %v, want %v", shouldSync, tt.wantWorkspaceCP)
 			}
 		})
+	}
+}
+
+// --- N2-5: Generalized shared-dir PVC helpers ---
+
+func TestBuildPod_SharedDirs_LocalBackend_SeparatePVCs(t *testing.T) {
+	r := newNFSTestK8sRuntime()
+	config := RunConfig{
+		Name:         "test-local-shared",
+		Image:        "test-image",
+		UnixUsername: "scion",
+		Labels: map[string]string{
+			"scion.grove": "my-project",
+		},
+		SharedDirs: []api.SharedDir{
+			{Name: "build-cache"},
+			{Name: "logs"},
+		},
+	}
+
+	pod, err := r.buildPod("default", config)
+	if err != nil {
+		t.Fatalf("buildPod failed: %v", err)
+	}
+
+	// Local backend: each shared dir should have its own PVC volume
+	sd0Vol := findVolume(pod, "shared-dir-0")
+	sd1Vol := findVolume(pod, "shared-dir-1")
+
+	if sd0Vol == nil || sd1Vol == nil {
+		t.Fatal("local backend: expected shared-dir-0 and shared-dir-1 volumes")
+	}
+
+	// PVC names should follow the sharedDirPVCName convention
+	if sd0Vol.PersistentVolumeClaim.ClaimName != "scion-shared-my-project-build-cache" {
+		t.Errorf("shared-dir-0 claimName = %q, want %q", sd0Vol.PersistentVolumeClaim.ClaimName, "scion-shared-my-project-build-cache")
+	}
+	if sd1Vol.PersistentVolumeClaim.ClaimName != "scion-shared-my-project-logs" {
+		t.Errorf("shared-dir-1 claimName = %q, want %q", sd1Vol.PersistentVolumeClaim.ClaimName, "scion-shared-my-project-logs")
+	}
+
+	// Mounts should NOT have subPath for local backend
+	sd0Mount := findVolumeMount(&pod.Spec.Containers[0], "shared-dir-0")
+	if sd0Mount == nil {
+		t.Fatal("shared-dir-0 mount not found")
+	}
+	if sd0Mount.SubPath != "" {
+		t.Errorf("local backend: shared-dir-0 should not have subPath, got %q", sd0Mount.SubPath)
+	}
+}
+
+func TestBuildPod_SharedDirs_NFSBackend_UsesNFSSubPaths(t *testing.T) {
+	r := newNFSTestK8sRuntime()
+	config := RunConfig{
+		Name:                 "test-nfs-shared",
+		Image:                "test-image",
+		UnixUsername:         "scion",
+		WorkspaceBackendName: "nfs",
+		NFSPVClaimName:       "scion-workspaces",
+		NFSSubPath:           "projects/proj-123/workspace",
+		Labels: map[string]string{
+			"scion.grove": "my-project",
+		},
+		SharedDirs: []api.SharedDir{
+			{Name: "build-cache"},
+			{Name: "logs", ReadOnly: true},
+		},
+	}
+
+	pod, err := r.buildPod("default", config)
+	if err != nil {
+		t.Fatalf("buildPod failed: %v", err)
+	}
+
+	// NFS backend: shared dir volumes should use the SAME PVC as workspace
+	sd0Vol := findVolume(pod, "shared-dir-0")
+	sd1Vol := findVolume(pod, "shared-dir-1")
+
+	if sd0Vol == nil || sd1Vol == nil {
+		t.Fatal("NFS backend: expected shared-dir-0 and shared-dir-1 volumes")
+	}
+
+	// Both should reference the workspace NFS PVC
+	if sd0Vol.PersistentVolumeClaim.ClaimName != "scion-workspaces" {
+		t.Errorf("shared-dir-0 claimName = %q, want %q", sd0Vol.PersistentVolumeClaim.ClaimName, "scion-workspaces")
+	}
+	if sd1Vol.PersistentVolumeClaim.ClaimName != "scion-workspaces" {
+		t.Errorf("shared-dir-1 claimName = %q, want %q", sd1Vol.PersistentVolumeClaim.ClaimName, "scion-workspaces")
+	}
+
+	// Mounts should have NFS subPaths
+	sd0Mount := findVolumeMount(&pod.Spec.Containers[0], "shared-dir-0")
+	sd1Mount := findVolumeMount(&pod.Spec.Containers[0], "shared-dir-1")
+
+	if sd0Mount == nil || sd1Mount == nil {
+		t.Fatal("shared-dir mounts not found")
+	}
+
+	wantSubPath0 := "projects/proj-123/shared-dirs/build-cache"
+	if sd0Mount.SubPath != wantSubPath0 {
+		t.Errorf("shared-dir-0 subPath = %q, want %q", sd0Mount.SubPath, wantSubPath0)
+	}
+
+	wantSubPath1 := "projects/proj-123/shared-dirs/logs"
+	if sd1Mount.SubPath != wantSubPath1 {
+		t.Errorf("shared-dir-1 subPath = %q, want %q", sd1Mount.SubPath, wantSubPath1)
+	}
+
+	// Verify readOnly flag propagates
+	if sd1Mount.ReadOnly != true {
+		t.Error("shared-dir-1 should be read-only")
+	}
+	if sd0Mount.ReadOnly != false {
+		t.Error("shared-dir-0 should not be read-only")
+	}
+}
+
+func TestNFSSharedDirSubPath(t *testing.T) {
+	tests := []struct {
+		workspaceSubPath string
+		sharedDirName    string
+		want             string
+	}{
+		{
+			workspaceSubPath: "projects/proj-123/workspace",
+			sharedDirName:    "build-cache",
+			want:             "projects/proj-123/shared-dirs/build-cache",
+		},
+		{
+			workspaceSubPath: "projects/proj-456/workspace",
+			sharedDirName:    "logs",
+			want:             "projects/proj-456/shared-dirs/logs",
+		},
+		{
+			workspaceSubPath: "custom-root/proj-789/workspace",
+			sharedDirName:    "data",
+			want:             "custom-root/proj-789/shared-dirs/data",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.sharedDirName, func(t *testing.T) {
+			got := nfsSharedDirSubPath(tt.workspaceSubPath, tt.sharedDirName)
+			if got != tt.want {
+				t.Errorf("nfsSharedDirSubPath(%q, %q) = %q, want %q", tt.workspaceSubPath, tt.sharedDirName, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestProjectRWXClaimName(t *testing.T) {
+	// Test the generalized naming helper
+	got := projectRWXClaimName("my-project", "shared", "build-cache")
+	want := "scion-shared-my-project-build-cache"
+	if got != want {
+		t.Errorf("projectRWXClaimName = %q, want %q", got, want)
+	}
+
+	// Test backward compatibility with sharedDirPVCName
+	got2 := sharedDirPVCName("my-project", "build-cache")
+	if got != got2 {
+		t.Errorf("sharedDirPVCName should equal projectRWXClaimName(shared): %q != %q", got2, got)
+	}
+}
+
+func TestCreateSharedDirPVCs_NFSBackend_SkipsPVCCreation(t *testing.T) {
+	clientset := k8sfake.NewClientset()
+	scheme := k8sruntime.NewScheme()
+	fc := fake.NewSimpleDynamicClient(scheme)
+	client := k8s.NewTestClient(fc, clientset)
+	r := NewKubernetesRuntime(client)
+
+	config := RunConfig{
+		Name:                 "test-nfs",
+		WorkspaceBackendName: "nfs",
+		NFSPVClaimName:       "scion-workspaces",
+		Labels: map[string]string{
+			"scion.grove":    "my-project",
+			"scion.grove_id": "proj-123",
+		},
+		SharedDirs: []api.SharedDir{
+			{Name: "build-cache"},
+		},
+	}
+
+	err := r.createSharedDirPVCs(context.Background(), "default", config)
+	if err != nil {
+		t.Fatalf("createSharedDirPVCs failed: %v", err)
+	}
+
+	// No PVCs should have been created for NFS backend
+	pvcs, err := clientset.CoreV1().PersistentVolumeClaims("default").List(context.Background(), metav1.ListOptions{})
+	if err != nil {
+		t.Fatalf("list PVCs failed: %v", err)
+	}
+	if len(pvcs.Items) != 0 {
+		t.Errorf("NFS backend: expected 0 PVCs, got %d", len(pvcs.Items))
+	}
+}
+
+func TestCreateSharedDirPVCs_LocalBackend_CreatesPVCs(t *testing.T) {
+	clientset := k8sfake.NewClientset()
+	scheme := k8sruntime.NewScheme()
+	fc := fake.NewSimpleDynamicClient(scheme)
+	client := k8s.NewTestClient(fc, clientset)
+	r := NewKubernetesRuntime(client)
+
+	config := RunConfig{
+		Name: "test-local",
+		Labels: map[string]string{
+			"scion.grove":    "my-project",
+			"scion.grove_id": "proj-123",
+		},
+		SharedDirs: []api.SharedDir{
+			{Name: "build-cache"},
+			{Name: "logs"},
+		},
+	}
+
+	err := r.createSharedDirPVCs(context.Background(), "default", config)
+	if err != nil {
+		t.Fatalf("createSharedDirPVCs failed: %v", err)
+	}
+
+	// Local backend: 2 PVCs should be created
+	pvcs, err := clientset.CoreV1().PersistentVolumeClaims("default").List(context.Background(), metav1.ListOptions{})
+	if err != nil {
+		t.Fatalf("list PVCs failed: %v", err)
+	}
+	if len(pvcs.Items) != 2 {
+		t.Errorf("local backend: expected 2 PVCs, got %d", len(pvcs.Items))
+	}
+
+	// Verify PVC names
+	pvcNames := map[string]bool{}
+	for _, pvc := range pvcs.Items {
+		pvcNames[pvc.Name] = true
+	}
+	if !pvcNames["scion-shared-my-project-build-cache"] {
+		t.Error("missing PVC scion-shared-my-project-build-cache")
+	}
+	if !pvcNames["scion-shared-my-project-logs"] {
+		t.Error("missing PVC scion-shared-my-project-logs")
 	}
 }
 
