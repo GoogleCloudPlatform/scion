@@ -20,6 +20,7 @@ import (
 	"context"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -194,6 +195,46 @@ func TestListPendingMessages_ByBrokerAgent(t *testing.T) {
 	pending, err = cs.ListPendingMessages(ctx, brokerA)
 	require.NoError(t, err)
 	assert.Empty(t, pending)
+}
+
+func TestCountStuckPendingMessages(t *testing.T) {
+	client := enttest.NewClient(t)
+	cs := NewCompositeStore(client)
+	ctx := context.Background()
+
+	proj := &store.Project{
+		ID: uuid.NewString(), Name: "p", Slug: "p-" + uuid.NewString()[:8],
+		Visibility: store.VisibilityPrivate, OwnerID: uuid.NewString(),
+	}
+	require.NoError(t, cs.CreateProject(ctx, proj))
+
+	// A message created 10 minutes ago (stuck).
+	oldMsg := &store.Message{
+		ID: uuid.NewString(), ProjectID: proj.ID,
+		Sender: "user:x", Recipient: "agent:a", Msg: "old",
+		CreatedAt: time.Now().Add(-10 * time.Minute),
+	}
+	require.NoError(t, cs.CreateMessage(ctx, oldMsg))
+	assert.Equal(t, store.MessageDispatchPending, oldMsg.DispatchState)
+
+	// A message created just now (not stuck).
+	newMsg := &store.Message{
+		ID: uuid.NewString(), ProjectID: proj.ID,
+		Sender: "user:x", Recipient: "agent:b", Msg: "new",
+	}
+	require.NoError(t, cs.CreateMessage(ctx, newMsg))
+
+	cutoff := time.Now().Add(-5 * time.Minute)
+	count, err := cs.CountStuckPendingMessages(ctx, cutoff)
+	require.NoError(t, err)
+	assert.Equal(t, 1, count, "only the old message is stuck")
+
+	// Dispatch the old message — it should no longer be stuck.
+	_, err = cs.MarkMessageDispatched(ctx, oldMsg.ID)
+	require.NoError(t, err)
+	count, err = cs.CountStuckPendingMessages(ctx, cutoff)
+	require.NoError(t, err)
+	assert.Equal(t, 0, count, "dispatched message is not stuck")
 }
 
 func mustCreateAgent(t *testing.T, client *ent.Client, projectID uuid.UUID, brokerID string) string {

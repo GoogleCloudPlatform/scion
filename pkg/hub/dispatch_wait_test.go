@@ -61,6 +61,10 @@ func (f *fakeDispatchStore) ReapStuckDispatch(_ context.Context, _ time.Time, _ 
 	return 0, 0, nil
 }
 
+func (f *fakeDispatchStore) CountStuckPendingMessages(_ context.Context, _ time.Time) (int, error) {
+	return 0, nil
+}
+
 // sendStatus pushes a fake AgentStatusEvent onto the channel.
 func sendStatus(ch chan<- Event, phase, activity string, detail *AgentDetail) {
 	evt := AgentStatusEvent{

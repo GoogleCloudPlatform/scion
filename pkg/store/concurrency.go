@@ -55,6 +55,8 @@ const (
 	LockGitHubAppHealthCheck AdvisoryLockKey = 0x5C100005
 	// LockBrokerAffinityReap guards the stale broker-affinity + stuck dispatch reaper.
 	LockBrokerAffinityReap AdvisoryLockKey = 0x5C100006
+	// LockBrokerMessageSweep guards the periodic stuck-pending-message sweep (B5-2).
+	LockBrokerMessageSweep AdvisoryLockKey = 0x5C100007
 
 	// LockWorkspaceProvision is the CLASS ID for per-project workspace
 	// provisioning locks. It is used with the two-int advisory lock form

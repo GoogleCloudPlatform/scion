@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 // ReconcileBroker is the exported entry point used by the command-bus signal
@@ -45,6 +46,12 @@ func (s *Server) reconcileBroker(ctx context.Context, brokerID string) {
 	if s == nil || s.store == nil || brokerID == "" {
 		return
 	}
+	drainStart := time.Now()
+	defer func() {
+		if rec := s.dispatchMetrics; rec != nil {
+			rec.RecordReconcileDrainDuration(ctx, float64(time.Since(drainStart).Milliseconds()))
+		}
+	}()
 
 	// 1. Lifecycle / create-time dispatch intents.
 	dispatches, err := s.store.ListPendingDispatch(ctx, brokerID)
@@ -61,11 +68,18 @@ func (s *Server) reconcileBroker(ctx context.Context, brokerID string) {
 		if !claimed {
 			continue // another node/drain owns this intent (exactly-once)
 		}
+		opAttr := attribute.String("op", d.Op)
+		if rec := s.dispatchMetrics; rec != nil {
+			rec.IncClaimed(ctx, 1, opAttr)
+		}
 		result, execErr := s.execDispatch(ctx, d)
 		if execErr != nil {
 			s.agentLifecycleLog.Warn("reconcile: dispatch op failed", "id", d.ID, "op", d.Op, "error", execErr)
 			if err := s.store.FailBrokerDispatch(ctx, d.ID, execErr.Error()); err != nil {
 				s.agentLifecycleLog.Error("reconcile: fail dispatch failed", "id", d.ID, "error", err)
+			}
+			if rec := s.dispatchMetrics; rec != nil {
+				rec.IncFailed(ctx, 1, opAttr)
 			}
 			if s.events != nil {
 				s.events.PublishDispatchDone(ctx, d.ID)
@@ -74,6 +88,11 @@ func (s *Server) reconcileBroker(ctx context.Context, brokerID string) {
 		}
 		if err := s.store.CompleteBrokerDispatch(ctx, d.ID, result); err != nil {
 			s.agentLifecycleLog.Error("reconcile: complete dispatch failed", "id", d.ID, "error", err)
+		}
+		if rec := s.dispatchMetrics; rec != nil {
+			rec.IncDone(ctx, 1, opAttr)
+			latencyMs := float64(time.Since(d.CreatedAt).Milliseconds())
+			rec.RecordDispatchLatency(ctx, latencyMs, opAttr)
 		}
 		// Emit a slim completion event so originators waiting on
 		// waitForDispatchDone wake up (design §6.3).
@@ -97,6 +116,9 @@ func (s *Server) reconcileBroker(ctx context.Context, brokerID string) {
 		}
 		if !dispatched {
 			continue // another drain already took it (dedupe)
+		}
+		if rec := s.dispatchMetrics; rec != nil {
+			rec.IncMessageDispatched(ctx, 1)
 		}
 		if err := s.deliverMsg(ctx, &m); err != nil {
 			// At-least-once: the row is already marked dispatched; a delivery
