@@ -142,6 +142,12 @@ type ServerConfig struct {
 	// with access to projected secrets. Defaults to true; set false to block
 	// container-script dispatches on this broker.
 	AllowContainerScriptHarnesses bool
+
+	// NFSConfig holds NFS workspace storage settings for this broker.
+	// When non-nil with shares configured, the broker can provision and
+	// clean up NFS-backed workspace subtrees. Used by deleteProject (N1-6)
+	// to also remove the NFS project subtree on project deletion.
+	NFSConfig *config.V1NFSConfig
 }
 
 // DefaultServerConfig returns the default server configuration.
