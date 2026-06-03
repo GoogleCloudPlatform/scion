@@ -15,6 +15,7 @@
 package runtime
 
 import (
+	"os"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -355,6 +356,103 @@ func containsHelper(s, substr string) bool {
 		}
 	}
 	return false
+}
+
+// --- N2-4: Stable FSGroup/UID for NFS pods ---
+
+func TestBuildPod_FSGroup_LocalBackend_UsesHostGID(t *testing.T) {
+	r := newNFSTestK8sRuntime()
+	config := RunConfig{
+		Name:         "test-local-gid",
+		Image:        "test-image",
+		UnixUsername: "scion",
+	}
+
+	pod, err := r.buildPod("default", config)
+	if err != nil {
+		t.Fatalf("buildPod failed: %v", err)
+	}
+
+	// Local backend: FSGroup should be the host GID (os.Getgid())
+	if pod.Spec.SecurityContext == nil || pod.Spec.SecurityContext.FSGroup == nil {
+		t.Fatal("pod security context or FSGroup is nil")
+	}
+
+	hostGID := int64(os.Getgid())
+	if *pod.Spec.SecurityContext.FSGroup != hostGID {
+		t.Errorf("local backend: FSGroup = %d, want host GID %d", *pod.Spec.SecurityContext.FSGroup, hostGID)
+	}
+}
+
+func TestBuildPod_FSGroup_NFSBackend_UsesStableGID(t *testing.T) {
+	r := newNFSTestK8sRuntime()
+	config := RunConfig{
+		Name:                 "test-nfs-gid",
+		Image:                "test-image",
+		UnixUsername:         "scion",
+		WorkspaceBackendName: "nfs",
+		NFSPVClaimName:       "scion-workspaces",
+		NFSGID:               1000,
+	}
+
+	pod, err := r.buildPod("default", config)
+	if err != nil {
+		t.Fatalf("buildPod failed: %v", err)
+	}
+
+	if pod.Spec.SecurityContext == nil || pod.Spec.SecurityContext.FSGroup == nil {
+		t.Fatal("pod security context or FSGroup is nil")
+	}
+
+	if *pod.Spec.SecurityContext.FSGroup != 1000 {
+		t.Errorf("NFS backend: FSGroup = %d, want 1000", *pod.Spec.SecurityContext.FSGroup)
+	}
+}
+
+func TestBuildPod_FSGroup_NFSBackend_DefaultGID(t *testing.T) {
+	r := newNFSTestK8sRuntime()
+	config := RunConfig{
+		Name:                 "test-nfs-default-gid",
+		Image:                "test-image",
+		UnixUsername:         "scion",
+		WorkspaceBackendName: "nfs",
+		NFSPVClaimName:       "scion-workspaces",
+		// NFSGID is 0 (unset) — should default to 1000
+	}
+
+	pod, err := r.buildPod("default", config)
+	if err != nil {
+		t.Fatalf("buildPod failed: %v", err)
+	}
+
+	if pod.Spec.SecurityContext == nil || pod.Spec.SecurityContext.FSGroup == nil {
+		t.Fatal("pod security context or FSGroup is nil")
+	}
+
+	if *pod.Spec.SecurityContext.FSGroup != 1000 {
+		t.Errorf("NFS backend default: FSGroup = %d, want 1000", *pod.Spec.SecurityContext.FSGroup)
+	}
+}
+
+func TestBuildPod_FSGroup_NFSBackend_CustomGID(t *testing.T) {
+	r := newNFSTestK8sRuntime()
+	config := RunConfig{
+		Name:                 "test-nfs-custom-gid",
+		Image:                "test-image",
+		UnixUsername:         "scion",
+		WorkspaceBackendName: "nfs",
+		NFSPVClaimName:       "scion-workspaces",
+		NFSGID:               2000,
+	}
+
+	pod, err := r.buildPod("default", config)
+	if err != nil {
+		t.Fatalf("buildPod failed: %v", err)
+	}
+
+	if *pod.Spec.SecurityContext.FSGroup != 2000 {
+		t.Errorf("NFS backend custom GID: FSGroup = %d, want 2000", *pod.Spec.SecurityContext.FSGroup)
+	}
 }
 
 // --- N2-3: Skip workspace kubectl cp when backend=nfs ---
