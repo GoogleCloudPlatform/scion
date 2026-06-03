@@ -76,6 +76,7 @@ type PostgresCommandBus struct {
 	mu          sync.RWMutex
 	ownsLocally func(brokerID string) bool
 	onSignal    func(ctx context.Context, brokerID string)
+	onReconnect func()
 	closed      bool
 }
 
@@ -136,6 +137,14 @@ func NewPostgresCommandBus(
 	return b, nil
 }
 
+// SetOnReconnect sets a callback invoked each time the listener reconnects
+// after a connection loss. Used by B5-2 to increment a reconnects counter.
+func (b *PostgresCommandBus) SetOnReconnect(fn func()) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.onReconnect = fn
+}
+
 // SetOnSignal replaces the reconcile callback. This allows wiring the
 // reconcile drain (B2-5) after construction.
 func (b *PostgresCommandBus) SetOnSignal(fn func(ctx context.Context, brokerID string)) {
@@ -192,6 +201,7 @@ func (b *PostgresCommandBus) runListener() {
 		maxBackoff = 10 * time.Second
 	)
 	backoff := minBackoff
+	firstConnect := true
 
 	for {
 		if b.ctx.Err() != nil {
@@ -211,6 +221,15 @@ func (b *PostgresCommandBus) runListener() {
 			continue
 		}
 
+		if !firstConnect {
+			b.mu.RLock()
+			fn := b.onReconnect
+			b.mu.RUnlock()
+			if fn != nil {
+				fn()
+			}
+		}
+		firstConnect = false
 		b.log.Info("Command bus listener connected")
 		backoff = minBackoff
 

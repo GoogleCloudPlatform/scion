@@ -52,6 +52,8 @@ const (
 	LockGitHubAppHealthCheck AdvisoryLockKey = 0x5C100005
 	// LockBrokerAffinityReap guards the stale broker-affinity + stuck dispatch reaper.
 	LockBrokerAffinityReap AdvisoryLockKey = 0x5C100006
+	// LockBrokerMessageSweep guards the periodic stuck-pending-message sweep (B5-2).
+	LockBrokerMessageSweep AdvisoryLockKey = 0x5C100007
 )
 
 // AdvisoryLocker is implemented by backends that can take a cluster-wide

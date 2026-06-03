@@ -371,6 +371,12 @@ type BrokerDispatchStore interface {
 	// are reset to pending (re-driven); those at or above the limit are failed.
 	// Returns counts of re-driven and failed rows.
 	ReapStuckDispatch(ctx context.Context, stuckBefore time.Time, maxAttempts int) (requeued, failed int, err error)
+
+	// CountStuckPendingMessages returns the number of messages still in
+	// dispatch_state='pending' whose created timestamp is before the given
+	// cutoff. Used by the stuck-message sweep (B5-2) to surface messages that
+	// have not been dispatched within the expected window.
+	CountStuckPendingMessages(ctx context.Context, before time.Time) (int, error)
 }
 
 // TemplateStore defines template persistence operations.

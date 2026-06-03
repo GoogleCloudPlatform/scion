@@ -38,6 +38,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/githubapp"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/dbmetrics"
+	"github.com/GoogleCloudPlatform/scion/pkg/observability/dispatchmetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -547,6 +548,10 @@ type Server struct {
 	// disabled no-op recorder; SetDBMetrics wires a real exporter. Drives the
 	// connection-pool sampler started in StartBackgroundServices.
 	dbMetrics dbmetrics.Recorder
+
+	// Broker dispatch metrics recorder (B5-2). Defaults to a disabled no-op
+	// recorder; SetDispatchMetrics wires a real exporter.
+	dispatchMetrics dispatchmetrics.Recorder
 
 	// stopPoolSampler stops the DB pool-stats sampling goroutine on shutdown.
 	stopPoolSampler func()
@@ -1307,6 +1312,13 @@ func (s *Server) SetDBMetrics(rec dbmetrics.Recorder) {
 	s.dbMetrics = rec
 }
 
+// SetDispatchMetrics wires the broker-dispatch metrics recorder (B5-2).
+func (s *Server) SetDispatchMetrics(rec dispatchmetrics.Recorder) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.dispatchMetrics = rec
+}
+
 // GetMaintenanceState returns the runtime maintenance state.
 func (s *Server) GetMaintenanceState() *MaintenanceState {
 	return s.maintenance
@@ -1346,6 +1358,13 @@ func (s *Server) SetCommandBus(cb CommandBus) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.commandBus = cb
+	if pgBus, ok := cb.(*PostgresCommandBus); ok {
+		pgBus.SetOnReconnect(func() {
+			if rec := s.dispatchMetrics; rec != nil {
+				rec.IncCmdBusReconnects(context.Background(), 1)
+			}
+		})
+	}
 }
 
 // CommandBus returns the configured command bus, or nil.
@@ -1476,6 +1495,9 @@ func (s *Server) CreateAuthenticatedDispatcher() *HTTPAgentDispatcher {
 	// for the terminal phase. In SQLite mode events/commandBus are no-ops,
 	// and route() always returns routeLocal, so this never triggers.
 	dispatcher.SetCrossNodeDeps(s.events, s.commandBus)
+	if s.dispatchMetrics != nil {
+		dispatcher.SetDispatchMetrics(s.dispatchMetrics)
+	}
 
 	return dispatcher
 }
@@ -1938,6 +1960,7 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 	s.scheduler.RegisterEventHandler("dispatch_agent", s.dispatchAgentEventHandler())
 	s.scheduler.RegisterRecurringSingleton("schedule-evaluator", 1, store.LockScheduleEvaluator, s.evaluateSchedulesHandler())
 	s.scheduler.RegisterRecurringSingleton("broker-affinity-reap", 1, store.LockBrokerAffinityReap, s.brokerAffinityReapHandler())
+	s.scheduler.RegisterRecurringSingleton("broker-message-sweep", 1, store.LockBrokerMessageSweep, s.brokerMessageSweepHandler())
 
 	// Register GitHub App health check if the app is configured
 	s.mu.RLock()
