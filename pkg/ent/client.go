@@ -20,6 +20,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/allowlistentry"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/apikey"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokerdispatch"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokerjointoken"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokersecret"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/envvar"
@@ -61,6 +62,8 @@ type Client struct {
 	AllowListEntry *AllowListEntryClient
 	// ApiKey is the client for interacting with the ApiKey builders.
 	ApiKey *ApiKeyClient
+	// BrokerDispatch is the client for interacting with the BrokerDispatch builders.
+	BrokerDispatch *BrokerDispatchClient
 	// BrokerJoinToken is the client for interacting with the BrokerJoinToken builders.
 	BrokerJoinToken *BrokerJoinTokenClient
 	// BrokerSecret is the client for interacting with the BrokerSecret builders.
@@ -128,6 +131,7 @@ func (c *Client) init() {
 	c.Agent = NewAgentClient(c.config)
 	c.AllowListEntry = NewAllowListEntryClient(c.config)
 	c.ApiKey = NewApiKeyClient(c.config)
+	c.BrokerDispatch = NewBrokerDispatchClient(c.config)
 	c.BrokerJoinToken = NewBrokerJoinTokenClient(c.config)
 	c.BrokerSecret = NewBrokerSecretClient(c.config)
 	c.EnvVar = NewEnvVarClient(c.config)
@@ -250,6 +254,7 @@ func (c *Client) Tx(ctx context.Context) (*Tx, error) {
 		Agent:                    NewAgentClient(cfg),
 		AllowListEntry:           NewAllowListEntryClient(cfg),
 		ApiKey:                   NewApiKeyClient(cfg),
+		BrokerDispatch:           NewBrokerDispatchClient(cfg),
 		BrokerJoinToken:          NewBrokerJoinTokenClient(cfg),
 		BrokerSecret:             NewBrokerSecretClient(cfg),
 		EnvVar:                   NewEnvVarClient(cfg),
@@ -299,6 +304,7 @@ func (c *Client) BeginTx(ctx context.Context, opts *sql.TxOptions) (*Tx, error) 
 		Agent:                    NewAgentClient(cfg),
 		AllowListEntry:           NewAllowListEntryClient(cfg),
 		ApiKey:                   NewApiKeyClient(cfg),
+		BrokerDispatch:           NewBrokerDispatchClient(cfg),
 		BrokerJoinToken:          NewBrokerJoinTokenClient(cfg),
 		BrokerSecret:             NewBrokerSecretClient(cfg),
 		EnvVar:                   NewEnvVarClient(cfg),
@@ -354,13 +360,14 @@ func (c *Client) Close() error {
 // In order to add hooks to a specific client, call: `client.Node.Use(...)`.
 func (c *Client) Use(hooks ...Hook) {
 	for _, n := range []interface{ Use(...Hook) }{
-		c.AccessPolicy, c.Agent, c.AllowListEntry, c.ApiKey, c.BrokerJoinToken,
-		c.BrokerSecret, c.EnvVar, c.GCPServiceAccount, c.GithubInstallation, c.Group,
-		c.GroupMembership, c.HarnessConfig, c.InviteCode, c.MaintenanceOperation,
-		c.MaintenanceOperationRun, c.Message, c.Notification,
-		c.NotificationSubscription, c.PolicyBinding, c.Project, c.ProjectContributor,
-		c.ProjectSyncState, c.RuntimeBroker, c.Schedule, c.ScheduledEvent, c.Secret,
-		c.SubscriptionTemplate, c.Template, c.User, c.UserAccessToken,
+		c.AccessPolicy, c.Agent, c.AllowListEntry, c.ApiKey, c.BrokerDispatch,
+		c.BrokerJoinToken, c.BrokerSecret, c.EnvVar, c.GCPServiceAccount,
+		c.GithubInstallation, c.Group, c.GroupMembership, c.HarnessConfig,
+		c.InviteCode, c.MaintenanceOperation, c.MaintenanceOperationRun, c.Message,
+		c.Notification, c.NotificationSubscription, c.PolicyBinding, c.Project,
+		c.ProjectContributor, c.ProjectSyncState, c.RuntimeBroker, c.Schedule,
+		c.ScheduledEvent, c.Secret, c.SubscriptionTemplate, c.Template, c.User,
+		c.UserAccessToken,
 	} {
 		n.Use(hooks...)
 	}
@@ -370,13 +377,14 @@ func (c *Client) Use(hooks ...Hook) {
 // In order to add interceptors to a specific client, call: `client.Node.Intercept(...)`.
 func (c *Client) Intercept(interceptors ...Interceptor) {
 	for _, n := range []interface{ Intercept(...Interceptor) }{
-		c.AccessPolicy, c.Agent, c.AllowListEntry, c.ApiKey, c.BrokerJoinToken,
-		c.BrokerSecret, c.EnvVar, c.GCPServiceAccount, c.GithubInstallation, c.Group,
-		c.GroupMembership, c.HarnessConfig, c.InviteCode, c.MaintenanceOperation,
-		c.MaintenanceOperationRun, c.Message, c.Notification,
-		c.NotificationSubscription, c.PolicyBinding, c.Project, c.ProjectContributor,
-		c.ProjectSyncState, c.RuntimeBroker, c.Schedule, c.ScheduledEvent, c.Secret,
-		c.SubscriptionTemplate, c.Template, c.User, c.UserAccessToken,
+		c.AccessPolicy, c.Agent, c.AllowListEntry, c.ApiKey, c.BrokerDispatch,
+		c.BrokerJoinToken, c.BrokerSecret, c.EnvVar, c.GCPServiceAccount,
+		c.GithubInstallation, c.Group, c.GroupMembership, c.HarnessConfig,
+		c.InviteCode, c.MaintenanceOperation, c.MaintenanceOperationRun, c.Message,
+		c.Notification, c.NotificationSubscription, c.PolicyBinding, c.Project,
+		c.ProjectContributor, c.ProjectSyncState, c.RuntimeBroker, c.Schedule,
+		c.ScheduledEvent, c.Secret, c.SubscriptionTemplate, c.Template, c.User,
+		c.UserAccessToken,
 	} {
 		n.Intercept(interceptors...)
 	}
@@ -393,6 +401,8 @@ func (c *Client) Mutate(ctx context.Context, m Mutation) (Value, error) {
 		return c.AllowListEntry.mutate(ctx, m)
 	case *ApiKeyMutation:
 		return c.ApiKey.mutate(ctx, m)
+	case *BrokerDispatchMutation:
+		return c.BrokerDispatch.mutate(ctx, m)
 	case *BrokerJoinTokenMutation:
 		return c.BrokerJoinToken.mutate(ctx, m)
 	case *BrokerSecretMutation:
@@ -1075,6 +1085,139 @@ func (c *ApiKeyClient) mutate(ctx context.Context, m *ApiKeyMutation) (Value, er
 		return (&ApiKeyDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
 	default:
 		return nil, fmt.Errorf("ent: unknown ApiKey mutation op: %q", m.Op())
+	}
+}
+
+// BrokerDispatchClient is a client for the BrokerDispatch schema.
+type BrokerDispatchClient struct {
+	config
+}
+
+// NewBrokerDispatchClient returns a client for the BrokerDispatch from the given config.
+func NewBrokerDispatchClient(c config) *BrokerDispatchClient {
+	return &BrokerDispatchClient{config: c}
+}
+
+// Use adds a list of mutation hooks to the hooks stack.
+// A call to `Use(f, g, h)` equals to `brokerdispatch.Hooks(f(g(h())))`.
+func (c *BrokerDispatchClient) Use(hooks ...Hook) {
+	c.hooks.BrokerDispatch = append(c.hooks.BrokerDispatch, hooks...)
+}
+
+// Intercept adds a list of query interceptors to the interceptors stack.
+// A call to `Intercept(f, g, h)` equals to `brokerdispatch.Intercept(f(g(h())))`.
+func (c *BrokerDispatchClient) Intercept(interceptors ...Interceptor) {
+	c.inters.BrokerDispatch = append(c.inters.BrokerDispatch, interceptors...)
+}
+
+// Create returns a builder for creating a BrokerDispatch entity.
+func (c *BrokerDispatchClient) Create() *BrokerDispatchCreate {
+	mutation := newBrokerDispatchMutation(c.config, OpCreate)
+	return &BrokerDispatchCreate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// CreateBulk returns a builder for creating a bulk of BrokerDispatch entities.
+func (c *BrokerDispatchClient) CreateBulk(builders ...*BrokerDispatchCreate) *BrokerDispatchCreateBulk {
+	return &BrokerDispatchCreateBulk{config: c.config, builders: builders}
+}
+
+// MapCreateBulk creates a bulk creation builder from the given slice. For each item in the slice, the function creates
+// a builder and applies setFunc on it.
+func (c *BrokerDispatchClient) MapCreateBulk(slice any, setFunc func(*BrokerDispatchCreate, int)) *BrokerDispatchCreateBulk {
+	rv := reflect.ValueOf(slice)
+	if rv.Kind() != reflect.Slice {
+		return &BrokerDispatchCreateBulk{err: fmt.Errorf("calling to BrokerDispatchClient.MapCreateBulk with wrong type %T, need slice", slice)}
+	}
+	builders := make([]*BrokerDispatchCreate, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		builders[i] = c.Create()
+		setFunc(builders[i], i)
+	}
+	return &BrokerDispatchCreateBulk{config: c.config, builders: builders}
+}
+
+// Update returns an update builder for BrokerDispatch.
+func (c *BrokerDispatchClient) Update() *BrokerDispatchUpdate {
+	mutation := newBrokerDispatchMutation(c.config, OpUpdate)
+	return &BrokerDispatchUpdate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOne returns an update builder for the given entity.
+func (c *BrokerDispatchClient) UpdateOne(_m *BrokerDispatch) *BrokerDispatchUpdateOne {
+	mutation := newBrokerDispatchMutation(c.config, OpUpdateOne, withBrokerDispatch(_m))
+	return &BrokerDispatchUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOneID returns an update builder for the given id.
+func (c *BrokerDispatchClient) UpdateOneID(id uuid.UUID) *BrokerDispatchUpdateOne {
+	mutation := newBrokerDispatchMutation(c.config, OpUpdateOne, withBrokerDispatchID(id))
+	return &BrokerDispatchUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// Delete returns a delete builder for BrokerDispatch.
+func (c *BrokerDispatchClient) Delete() *BrokerDispatchDelete {
+	mutation := newBrokerDispatchMutation(c.config, OpDelete)
+	return &BrokerDispatchDelete{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// DeleteOne returns a builder for deleting the given entity.
+func (c *BrokerDispatchClient) DeleteOne(_m *BrokerDispatch) *BrokerDispatchDeleteOne {
+	return c.DeleteOneID(_m.ID)
+}
+
+// DeleteOneID returns a builder for deleting the given entity by its id.
+func (c *BrokerDispatchClient) DeleteOneID(id uuid.UUID) *BrokerDispatchDeleteOne {
+	builder := c.Delete().Where(brokerdispatch.ID(id))
+	builder.mutation.id = &id
+	builder.mutation.op = OpDeleteOne
+	return &BrokerDispatchDeleteOne{builder}
+}
+
+// Query returns a query builder for BrokerDispatch.
+func (c *BrokerDispatchClient) Query() *BrokerDispatchQuery {
+	return &BrokerDispatchQuery{
+		config: c.config,
+		ctx:    &QueryContext{Type: TypeBrokerDispatch},
+		inters: c.Interceptors(),
+	}
+}
+
+// Get returns a BrokerDispatch entity by its id.
+func (c *BrokerDispatchClient) Get(ctx context.Context, id uuid.UUID) (*BrokerDispatch, error) {
+	return c.Query().Where(brokerdispatch.ID(id)).Only(ctx)
+}
+
+// GetX is like Get, but panics if an error occurs.
+func (c *BrokerDispatchClient) GetX(ctx context.Context, id uuid.UUID) *BrokerDispatch {
+	obj, err := c.Get(ctx, id)
+	if err != nil {
+		panic(err)
+	}
+	return obj
+}
+
+// Hooks returns the client hooks.
+func (c *BrokerDispatchClient) Hooks() []Hook {
+	return c.hooks.BrokerDispatch
+}
+
+// Interceptors returns the client interceptors.
+func (c *BrokerDispatchClient) Interceptors() []Interceptor {
+	return c.inters.BrokerDispatch
+}
+
+func (c *BrokerDispatchClient) mutate(ctx context.Context, m *BrokerDispatchMutation) (Value, error) {
+	switch m.Op() {
+	case OpCreate:
+		return (&BrokerDispatchCreate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdate:
+		return (&BrokerDispatchUpdate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdateOne:
+		return (&BrokerDispatchUpdateOne{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpDelete, OpDeleteOne:
+		return (&BrokerDispatchDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
+	default:
+		return nil, fmt.Errorf("ent: unknown BrokerDispatch mutation op: %q", m.Op())
 	}
 }
 
@@ -4827,19 +4970,21 @@ func (c *UserAccessTokenClient) mutate(ctx context.Context, m *UserAccessTokenMu
 // hooks and interceptors per client, for fast access.
 type (
 	hooks struct {
-		AccessPolicy, Agent, AllowListEntry, ApiKey, BrokerJoinToken, BrokerSecret,
-		EnvVar, GCPServiceAccount, GithubInstallation, Group, GroupMembership,
-		HarnessConfig, InviteCode, MaintenanceOperation, MaintenanceOperationRun,
-		Message, Notification, NotificationSubscription, PolicyBinding, Project,
-		ProjectContributor, ProjectSyncState, RuntimeBroker, Schedule, ScheduledEvent,
-		Secret, SubscriptionTemplate, Template, User, UserAccessToken []ent.Hook
+		AccessPolicy, Agent, AllowListEntry, ApiKey, BrokerDispatch, BrokerJoinToken,
+		BrokerSecret, EnvVar, GCPServiceAccount, GithubInstallation, Group,
+		GroupMembership, HarnessConfig, InviteCode, MaintenanceOperation,
+		MaintenanceOperationRun, Message, Notification, NotificationSubscription,
+		PolicyBinding, Project, ProjectContributor, ProjectSyncState, RuntimeBroker,
+		Schedule, ScheduledEvent, Secret, SubscriptionTemplate, Template, User,
+		UserAccessToken []ent.Hook
 	}
 	inters struct {
-		AccessPolicy, Agent, AllowListEntry, ApiKey, BrokerJoinToken, BrokerSecret,
-		EnvVar, GCPServiceAccount, GithubInstallation, Group, GroupMembership,
-		HarnessConfig, InviteCode, MaintenanceOperation, MaintenanceOperationRun,
-		Message, Notification, NotificationSubscription, PolicyBinding, Project,
-		ProjectContributor, ProjectSyncState, RuntimeBroker, Schedule, ScheduledEvent,
-		Secret, SubscriptionTemplate, Template, User, UserAccessToken []ent.Interceptor
+		AccessPolicy, Agent, AllowListEntry, ApiKey, BrokerDispatch, BrokerJoinToken,
+		BrokerSecret, EnvVar, GCPServiceAccount, GithubInstallation, Group,
+		GroupMembership, HarnessConfig, InviteCode, MaintenanceOperation,
+		MaintenanceOperationRun, Message, Notification, NotificationSubscription,
+		PolicyBinding, Project, ProjectContributor, ProjectSyncState, RuntimeBroker,
+		Schedule, ScheduledEvent, Secret, SubscriptionTemplate, Template, User,
+		UserAccessToken []ent.Interceptor
 	}
 )

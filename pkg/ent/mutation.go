@@ -15,6 +15,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/allowlistentry"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/apikey"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokerdispatch"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokerjointoken"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokersecret"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/envvar"
@@ -59,6 +60,7 @@ const (
 	TypeAgent                    = "Agent"
 	TypeAllowListEntry           = "AllowListEntry"
 	TypeApiKey                   = "ApiKey"
+	TypeBrokerDispatch           = "BrokerDispatch"
 	TypeBrokerJoinToken          = "BrokerJoinToken"
 	TypeBrokerSecret             = "BrokerSecret"
 	TypeEnvVar                   = "EnvVar"
@@ -6014,6 +6016,1231 @@ func (m *ApiKeyMutation) ClearEdge(name string) error {
 // It returns an error if the edge is not defined in the schema.
 func (m *ApiKeyMutation) ResetEdge(name string) error {
 	return fmt.Errorf("unknown ApiKey edge %s", name)
+}
+
+// BrokerDispatchMutation represents an operation that mutates the BrokerDispatch nodes in the graph.
+type BrokerDispatchMutation struct {
+	config
+	op            Op
+	typ           string
+	id            *uuid.UUID
+	broker_id     *uuid.UUID
+	agent_id      *uuid.UUID
+	agent_slug    *string
+	project_id    *uuid.UUID
+	_op           *string
+	args          *string
+	state         *string
+	result        *string
+	claimed_by    *string
+	attempts      *int
+	addattempts   *int
+	error         *string
+	created_at    *time.Time
+	updated_at    *time.Time
+	deadline_at   *time.Time
+	clearedFields map[string]struct{}
+	done          bool
+	oldValue      func(context.Context) (*BrokerDispatch, error)
+	predicates    []predicate.BrokerDispatch
+}
+
+var _ ent.Mutation = (*BrokerDispatchMutation)(nil)
+
+// brokerdispatchOption allows management of the mutation configuration using functional options.
+type brokerdispatchOption func(*BrokerDispatchMutation)
+
+// newBrokerDispatchMutation creates new mutation for the BrokerDispatch entity.
+func newBrokerDispatchMutation(c config, op Op, opts ...brokerdispatchOption) *BrokerDispatchMutation {
+	m := &BrokerDispatchMutation{
+		config:        c,
+		op:            op,
+		typ:           TypeBrokerDispatch,
+		clearedFields: make(map[string]struct{}),
+	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
+}
+
+// withBrokerDispatchID sets the ID field of the mutation.
+func withBrokerDispatchID(id uuid.UUID) brokerdispatchOption {
+	return func(m *BrokerDispatchMutation) {
+		var (
+			err   error
+			once  sync.Once
+			value *BrokerDispatch
+		)
+		m.oldValue = func(ctx context.Context) (*BrokerDispatch, error) {
+			once.Do(func() {
+				if m.done {
+					err = errors.New("querying old values post mutation is not allowed")
+				} else {
+					value, err = m.Client().BrokerDispatch.Get(ctx, id)
+				}
+			})
+			return value, err
+		}
+		m.id = &id
+	}
+}
+
+// withBrokerDispatch sets the old BrokerDispatch of the mutation.
+func withBrokerDispatch(node *BrokerDispatch) brokerdispatchOption {
+	return func(m *BrokerDispatchMutation) {
+		m.oldValue = func(context.Context) (*BrokerDispatch, error) {
+			return node, nil
+		}
+		m.id = &node.ID
+	}
+}
+
+// Client returns a new `ent.Client` from the mutation. If the mutation was
+// executed in a transaction (ent.Tx), a transactional client is returned.
+func (m BrokerDispatchMutation) Client() *Client {
+	client := &Client{config: m.config}
+	client.init()
+	return client
+}
+
+// Tx returns an `ent.Tx` for mutations that were executed in transactions;
+// it returns an error otherwise.
+func (m BrokerDispatchMutation) Tx() (*Tx, error) {
+	if _, ok := m.driver.(*txDriver); !ok {
+		return nil, errors.New("ent: mutation is not running in a transaction")
+	}
+	tx := &Tx{config: m.config}
+	tx.init()
+	return tx, nil
+}
+
+// SetID sets the value of the id field. Note that this
+// operation is only accepted on creation of BrokerDispatch entities.
+func (m *BrokerDispatchMutation) SetID(id uuid.UUID) {
+	m.id = &id
+}
+
+// ID returns the ID value in the mutation. Note that the ID is only available
+// if it was provided to the builder or after it was returned from the database.
+func (m *BrokerDispatchMutation) ID() (id uuid.UUID, exists bool) {
+	if m.id == nil {
+		return
+	}
+	return *m.id, true
+}
+
+// IDs queries the database and returns the entity ids that match the mutation's predicate.
+// That means, if the mutation is applied within a transaction with an isolation level such
+// as sql.LevelSerializable, the returned ids match the ids of the rows that will be updated
+// or updated by the mutation.
+func (m *BrokerDispatchMutation) IDs(ctx context.Context) ([]uuid.UUID, error) {
+	switch {
+	case m.op.Is(OpUpdateOne | OpDeleteOne):
+		id, exists := m.ID()
+		if exists {
+			return []uuid.UUID{id}, nil
+		}
+		fallthrough
+	case m.op.Is(OpUpdate | OpDelete):
+		return m.Client().BrokerDispatch.Query().Where(m.predicates...).IDs(ctx)
+	default:
+		return nil, fmt.Errorf("IDs is not allowed on %s operations", m.op)
+	}
+}
+
+// SetBrokerID sets the "broker_id" field.
+func (m *BrokerDispatchMutation) SetBrokerID(u uuid.UUID) {
+	m.broker_id = &u
+}
+
+// BrokerID returns the value of the "broker_id" field in the mutation.
+func (m *BrokerDispatchMutation) BrokerID() (r uuid.UUID, exists bool) {
+	v := m.broker_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldBrokerID returns the old "broker_id" field's value of the BrokerDispatch entity.
+// If the BrokerDispatch object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BrokerDispatchMutation) OldBrokerID(ctx context.Context) (v uuid.UUID, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldBrokerID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldBrokerID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldBrokerID: %w", err)
+	}
+	return oldValue.BrokerID, nil
+}
+
+// ResetBrokerID resets all changes to the "broker_id" field.
+func (m *BrokerDispatchMutation) ResetBrokerID() {
+	m.broker_id = nil
+}
+
+// SetAgentID sets the "agent_id" field.
+func (m *BrokerDispatchMutation) SetAgentID(u uuid.UUID) {
+	m.agent_id = &u
+}
+
+// AgentID returns the value of the "agent_id" field in the mutation.
+func (m *BrokerDispatchMutation) AgentID() (r uuid.UUID, exists bool) {
+	v := m.agent_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldAgentID returns the old "agent_id" field's value of the BrokerDispatch entity.
+// If the BrokerDispatch object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BrokerDispatchMutation) OldAgentID(ctx context.Context) (v *uuid.UUID, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldAgentID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldAgentID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldAgentID: %w", err)
+	}
+	return oldValue.AgentID, nil
+}
+
+// ClearAgentID clears the value of the "agent_id" field.
+func (m *BrokerDispatchMutation) ClearAgentID() {
+	m.agent_id = nil
+	m.clearedFields[brokerdispatch.FieldAgentID] = struct{}{}
+}
+
+// AgentIDCleared returns if the "agent_id" field was cleared in this mutation.
+func (m *BrokerDispatchMutation) AgentIDCleared() bool {
+	_, ok := m.clearedFields[brokerdispatch.FieldAgentID]
+	return ok
+}
+
+// ResetAgentID resets all changes to the "agent_id" field.
+func (m *BrokerDispatchMutation) ResetAgentID() {
+	m.agent_id = nil
+	delete(m.clearedFields, brokerdispatch.FieldAgentID)
+}
+
+// SetAgentSlug sets the "agent_slug" field.
+func (m *BrokerDispatchMutation) SetAgentSlug(s string) {
+	m.agent_slug = &s
+}
+
+// AgentSlug returns the value of the "agent_slug" field in the mutation.
+func (m *BrokerDispatchMutation) AgentSlug() (r string, exists bool) {
+	v := m.agent_slug
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldAgentSlug returns the old "agent_slug" field's value of the BrokerDispatch entity.
+// If the BrokerDispatch object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BrokerDispatchMutation) OldAgentSlug(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldAgentSlug is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldAgentSlug requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldAgentSlug: %w", err)
+	}
+	return oldValue.AgentSlug, nil
+}
+
+// ClearAgentSlug clears the value of the "agent_slug" field.
+func (m *BrokerDispatchMutation) ClearAgentSlug() {
+	m.agent_slug = nil
+	m.clearedFields[brokerdispatch.FieldAgentSlug] = struct{}{}
+}
+
+// AgentSlugCleared returns if the "agent_slug" field was cleared in this mutation.
+func (m *BrokerDispatchMutation) AgentSlugCleared() bool {
+	_, ok := m.clearedFields[brokerdispatch.FieldAgentSlug]
+	return ok
+}
+
+// ResetAgentSlug resets all changes to the "agent_slug" field.
+func (m *BrokerDispatchMutation) ResetAgentSlug() {
+	m.agent_slug = nil
+	delete(m.clearedFields, brokerdispatch.FieldAgentSlug)
+}
+
+// SetProjectID sets the "project_id" field.
+func (m *BrokerDispatchMutation) SetProjectID(u uuid.UUID) {
+	m.project_id = &u
+}
+
+// ProjectID returns the value of the "project_id" field in the mutation.
+func (m *BrokerDispatchMutation) ProjectID() (r uuid.UUID, exists bool) {
+	v := m.project_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldProjectID returns the old "project_id" field's value of the BrokerDispatch entity.
+// If the BrokerDispatch object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BrokerDispatchMutation) OldProjectID(ctx context.Context) (v *uuid.UUID, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldProjectID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldProjectID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldProjectID: %w", err)
+	}
+	return oldValue.ProjectID, nil
+}
+
+// ClearProjectID clears the value of the "project_id" field.
+func (m *BrokerDispatchMutation) ClearProjectID() {
+	m.project_id = nil
+	m.clearedFields[brokerdispatch.FieldProjectID] = struct{}{}
+}
+
+// ProjectIDCleared returns if the "project_id" field was cleared in this mutation.
+func (m *BrokerDispatchMutation) ProjectIDCleared() bool {
+	_, ok := m.clearedFields[brokerdispatch.FieldProjectID]
+	return ok
+}
+
+// ResetProjectID resets all changes to the "project_id" field.
+func (m *BrokerDispatchMutation) ResetProjectID() {
+	m.project_id = nil
+	delete(m.clearedFields, brokerdispatch.FieldProjectID)
+}
+
+// SetOpField sets the "op" field.
+func (m *BrokerDispatchMutation) SetOpField(s string) {
+	m._op = &s
+}
+
+// GetOp returns the value of the "op" field in the mutation.
+func (m *BrokerDispatchMutation) GetOp() (r string, exists bool) {
+	v := m._op
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldOp returns the old "op" field's value of the BrokerDispatch entity.
+// If the BrokerDispatch object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BrokerDispatchMutation) OldOp(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldOp is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldOp requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldOp: %w", err)
+	}
+	return oldValue.Op, nil
+}
+
+// ResetOp resets all changes to the "op" field.
+func (m *BrokerDispatchMutation) ResetOp() {
+	m._op = nil
+}
+
+// SetArgs sets the "args" field.
+func (m *BrokerDispatchMutation) SetArgs(s string) {
+	m.args = &s
+}
+
+// Args returns the value of the "args" field in the mutation.
+func (m *BrokerDispatchMutation) Args() (r string, exists bool) {
+	v := m.args
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldArgs returns the old "args" field's value of the BrokerDispatch entity.
+// If the BrokerDispatch object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BrokerDispatchMutation) OldArgs(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldArgs is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldArgs requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldArgs: %w", err)
+	}
+	return oldValue.Args, nil
+}
+
+// ClearArgs clears the value of the "args" field.
+func (m *BrokerDispatchMutation) ClearArgs() {
+	m.args = nil
+	m.clearedFields[brokerdispatch.FieldArgs] = struct{}{}
+}
+
+// ArgsCleared returns if the "args" field was cleared in this mutation.
+func (m *BrokerDispatchMutation) ArgsCleared() bool {
+	_, ok := m.clearedFields[brokerdispatch.FieldArgs]
+	return ok
+}
+
+// ResetArgs resets all changes to the "args" field.
+func (m *BrokerDispatchMutation) ResetArgs() {
+	m.args = nil
+	delete(m.clearedFields, brokerdispatch.FieldArgs)
+}
+
+// SetState sets the "state" field.
+func (m *BrokerDispatchMutation) SetState(s string) {
+	m.state = &s
+}
+
+// State returns the value of the "state" field in the mutation.
+func (m *BrokerDispatchMutation) State() (r string, exists bool) {
+	v := m.state
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldState returns the old "state" field's value of the BrokerDispatch entity.
+// If the BrokerDispatch object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BrokerDispatchMutation) OldState(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldState is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldState requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldState: %w", err)
+	}
+	return oldValue.State, nil
+}
+
+// ResetState resets all changes to the "state" field.
+func (m *BrokerDispatchMutation) ResetState() {
+	m.state = nil
+}
+
+// SetResult sets the "result" field.
+func (m *BrokerDispatchMutation) SetResult(s string) {
+	m.result = &s
+}
+
+// Result returns the value of the "result" field in the mutation.
+func (m *BrokerDispatchMutation) Result() (r string, exists bool) {
+	v := m.result
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldResult returns the old "result" field's value of the BrokerDispatch entity.
+// If the BrokerDispatch object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BrokerDispatchMutation) OldResult(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldResult is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldResult requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldResult: %w", err)
+	}
+	return oldValue.Result, nil
+}
+
+// ClearResult clears the value of the "result" field.
+func (m *BrokerDispatchMutation) ClearResult() {
+	m.result = nil
+	m.clearedFields[brokerdispatch.FieldResult] = struct{}{}
+}
+
+// ResultCleared returns if the "result" field was cleared in this mutation.
+func (m *BrokerDispatchMutation) ResultCleared() bool {
+	_, ok := m.clearedFields[brokerdispatch.FieldResult]
+	return ok
+}
+
+// ResetResult resets all changes to the "result" field.
+func (m *BrokerDispatchMutation) ResetResult() {
+	m.result = nil
+	delete(m.clearedFields, brokerdispatch.FieldResult)
+}
+
+// SetClaimedBy sets the "claimed_by" field.
+func (m *BrokerDispatchMutation) SetClaimedBy(s string) {
+	m.claimed_by = &s
+}
+
+// ClaimedBy returns the value of the "claimed_by" field in the mutation.
+func (m *BrokerDispatchMutation) ClaimedBy() (r string, exists bool) {
+	v := m.claimed_by
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldClaimedBy returns the old "claimed_by" field's value of the BrokerDispatch entity.
+// If the BrokerDispatch object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BrokerDispatchMutation) OldClaimedBy(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldClaimedBy is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldClaimedBy requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldClaimedBy: %w", err)
+	}
+	return oldValue.ClaimedBy, nil
+}
+
+// ClearClaimedBy clears the value of the "claimed_by" field.
+func (m *BrokerDispatchMutation) ClearClaimedBy() {
+	m.claimed_by = nil
+	m.clearedFields[brokerdispatch.FieldClaimedBy] = struct{}{}
+}
+
+// ClaimedByCleared returns if the "claimed_by" field was cleared in this mutation.
+func (m *BrokerDispatchMutation) ClaimedByCleared() bool {
+	_, ok := m.clearedFields[brokerdispatch.FieldClaimedBy]
+	return ok
+}
+
+// ResetClaimedBy resets all changes to the "claimed_by" field.
+func (m *BrokerDispatchMutation) ResetClaimedBy() {
+	m.claimed_by = nil
+	delete(m.clearedFields, brokerdispatch.FieldClaimedBy)
+}
+
+// SetAttempts sets the "attempts" field.
+func (m *BrokerDispatchMutation) SetAttempts(i int) {
+	m.attempts = &i
+	m.addattempts = nil
+}
+
+// Attempts returns the value of the "attempts" field in the mutation.
+func (m *BrokerDispatchMutation) Attempts() (r int, exists bool) {
+	v := m.attempts
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldAttempts returns the old "attempts" field's value of the BrokerDispatch entity.
+// If the BrokerDispatch object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BrokerDispatchMutation) OldAttempts(ctx context.Context) (v int, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldAttempts is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldAttempts requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldAttempts: %w", err)
+	}
+	return oldValue.Attempts, nil
+}
+
+// AddAttempts adds i to the "attempts" field.
+func (m *BrokerDispatchMutation) AddAttempts(i int) {
+	if m.addattempts != nil {
+		*m.addattempts += i
+	} else {
+		m.addattempts = &i
+	}
+}
+
+// AddedAttempts returns the value that was added to the "attempts" field in this mutation.
+func (m *BrokerDispatchMutation) AddedAttempts() (r int, exists bool) {
+	v := m.addattempts
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetAttempts resets all changes to the "attempts" field.
+func (m *BrokerDispatchMutation) ResetAttempts() {
+	m.attempts = nil
+	m.addattempts = nil
+}
+
+// SetError sets the "error" field.
+func (m *BrokerDispatchMutation) SetError(s string) {
+	m.error = &s
+}
+
+// Error returns the value of the "error" field in the mutation.
+func (m *BrokerDispatchMutation) Error() (r string, exists bool) {
+	v := m.error
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldError returns the old "error" field's value of the BrokerDispatch entity.
+// If the BrokerDispatch object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BrokerDispatchMutation) OldError(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldError is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldError requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldError: %w", err)
+	}
+	return oldValue.Error, nil
+}
+
+// ClearError clears the value of the "error" field.
+func (m *BrokerDispatchMutation) ClearError() {
+	m.error = nil
+	m.clearedFields[brokerdispatch.FieldError] = struct{}{}
+}
+
+// ErrorCleared returns if the "error" field was cleared in this mutation.
+func (m *BrokerDispatchMutation) ErrorCleared() bool {
+	_, ok := m.clearedFields[brokerdispatch.FieldError]
+	return ok
+}
+
+// ResetError resets all changes to the "error" field.
+func (m *BrokerDispatchMutation) ResetError() {
+	m.error = nil
+	delete(m.clearedFields, brokerdispatch.FieldError)
+}
+
+// SetCreatedAt sets the "created_at" field.
+func (m *BrokerDispatchMutation) SetCreatedAt(t time.Time) {
+	m.created_at = &t
+}
+
+// CreatedAt returns the value of the "created_at" field in the mutation.
+func (m *BrokerDispatchMutation) CreatedAt() (r time.Time, exists bool) {
+	v := m.created_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCreatedAt returns the old "created_at" field's value of the BrokerDispatch entity.
+// If the BrokerDispatch object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BrokerDispatchMutation) OldCreatedAt(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCreatedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCreatedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCreatedAt: %w", err)
+	}
+	return oldValue.CreatedAt, nil
+}
+
+// ResetCreatedAt resets all changes to the "created_at" field.
+func (m *BrokerDispatchMutation) ResetCreatedAt() {
+	m.created_at = nil
+}
+
+// SetUpdatedAt sets the "updated_at" field.
+func (m *BrokerDispatchMutation) SetUpdatedAt(t time.Time) {
+	m.updated_at = &t
+}
+
+// UpdatedAt returns the value of the "updated_at" field in the mutation.
+func (m *BrokerDispatchMutation) UpdatedAt() (r time.Time, exists bool) {
+	v := m.updated_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldUpdatedAt returns the old "updated_at" field's value of the BrokerDispatch entity.
+// If the BrokerDispatch object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BrokerDispatchMutation) OldUpdatedAt(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldUpdatedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldUpdatedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldUpdatedAt: %w", err)
+	}
+	return oldValue.UpdatedAt, nil
+}
+
+// ResetUpdatedAt resets all changes to the "updated_at" field.
+func (m *BrokerDispatchMutation) ResetUpdatedAt() {
+	m.updated_at = nil
+}
+
+// SetDeadlineAt sets the "deadline_at" field.
+func (m *BrokerDispatchMutation) SetDeadlineAt(t time.Time) {
+	m.deadline_at = &t
+}
+
+// DeadlineAt returns the value of the "deadline_at" field in the mutation.
+func (m *BrokerDispatchMutation) DeadlineAt() (r time.Time, exists bool) {
+	v := m.deadline_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldDeadlineAt returns the old "deadline_at" field's value of the BrokerDispatch entity.
+// If the BrokerDispatch object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BrokerDispatchMutation) OldDeadlineAt(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldDeadlineAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldDeadlineAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldDeadlineAt: %w", err)
+	}
+	return oldValue.DeadlineAt, nil
+}
+
+// ClearDeadlineAt clears the value of the "deadline_at" field.
+func (m *BrokerDispatchMutation) ClearDeadlineAt() {
+	m.deadline_at = nil
+	m.clearedFields[brokerdispatch.FieldDeadlineAt] = struct{}{}
+}
+
+// DeadlineAtCleared returns if the "deadline_at" field was cleared in this mutation.
+func (m *BrokerDispatchMutation) DeadlineAtCleared() bool {
+	_, ok := m.clearedFields[brokerdispatch.FieldDeadlineAt]
+	return ok
+}
+
+// ResetDeadlineAt resets all changes to the "deadline_at" field.
+func (m *BrokerDispatchMutation) ResetDeadlineAt() {
+	m.deadline_at = nil
+	delete(m.clearedFields, brokerdispatch.FieldDeadlineAt)
+}
+
+// Where appends a list predicates to the BrokerDispatchMutation builder.
+func (m *BrokerDispatchMutation) Where(ps ...predicate.BrokerDispatch) {
+	m.predicates = append(m.predicates, ps...)
+}
+
+// WhereP appends storage-level predicates to the BrokerDispatchMutation builder. Using this method,
+// users can use type-assertion to append predicates that do not depend on any generated package.
+func (m *BrokerDispatchMutation) WhereP(ps ...func(*sql.Selector)) {
+	p := make([]predicate.BrokerDispatch, len(ps))
+	for i := range ps {
+		p[i] = ps[i]
+	}
+	m.Where(p...)
+}
+
+// Op returns the operation name.
+func (m *BrokerDispatchMutation) Op() Op {
+	return m.op
+}
+
+// SetOp allows setting the mutation operation.
+func (m *BrokerDispatchMutation) SetOp(op Op) {
+	m.op = op
+}
+
+// Type returns the node type of this mutation (BrokerDispatch).
+func (m *BrokerDispatchMutation) Type() string {
+	return m.typ
+}
+
+// Fields returns all fields that were changed during this mutation. Note that in
+// order to get all numeric fields that were incremented/decremented, call
+// AddedFields().
+func (m *BrokerDispatchMutation) Fields() []string {
+	fields := make([]string, 0, 14)
+	if m.broker_id != nil {
+		fields = append(fields, brokerdispatch.FieldBrokerID)
+	}
+	if m.agent_id != nil {
+		fields = append(fields, brokerdispatch.FieldAgentID)
+	}
+	if m.agent_slug != nil {
+		fields = append(fields, brokerdispatch.FieldAgentSlug)
+	}
+	if m.project_id != nil {
+		fields = append(fields, brokerdispatch.FieldProjectID)
+	}
+	if m._op != nil {
+		fields = append(fields, brokerdispatch.FieldOp)
+	}
+	if m.args != nil {
+		fields = append(fields, brokerdispatch.FieldArgs)
+	}
+	if m.state != nil {
+		fields = append(fields, brokerdispatch.FieldState)
+	}
+	if m.result != nil {
+		fields = append(fields, brokerdispatch.FieldResult)
+	}
+	if m.claimed_by != nil {
+		fields = append(fields, brokerdispatch.FieldClaimedBy)
+	}
+	if m.attempts != nil {
+		fields = append(fields, brokerdispatch.FieldAttempts)
+	}
+	if m.error != nil {
+		fields = append(fields, brokerdispatch.FieldError)
+	}
+	if m.created_at != nil {
+		fields = append(fields, brokerdispatch.FieldCreatedAt)
+	}
+	if m.updated_at != nil {
+		fields = append(fields, brokerdispatch.FieldUpdatedAt)
+	}
+	if m.deadline_at != nil {
+		fields = append(fields, brokerdispatch.FieldDeadlineAt)
+	}
+	return fields
+}
+
+// Field returns the value of a field with the given name. The second boolean
+// return value indicates that this field was not set, or was not defined in the
+// schema.
+func (m *BrokerDispatchMutation) Field(name string) (ent.Value, bool) {
+	switch name {
+	case brokerdispatch.FieldBrokerID:
+		return m.BrokerID()
+	case brokerdispatch.FieldAgentID:
+		return m.AgentID()
+	case brokerdispatch.FieldAgentSlug:
+		return m.AgentSlug()
+	case brokerdispatch.FieldProjectID:
+		return m.ProjectID()
+	case brokerdispatch.FieldOp:
+		return m.GetOp()
+	case brokerdispatch.FieldArgs:
+		return m.Args()
+	case brokerdispatch.FieldState:
+		return m.State()
+	case brokerdispatch.FieldResult:
+		return m.Result()
+	case brokerdispatch.FieldClaimedBy:
+		return m.ClaimedBy()
+	case brokerdispatch.FieldAttempts:
+		return m.Attempts()
+	case brokerdispatch.FieldError:
+		return m.Error()
+	case brokerdispatch.FieldCreatedAt:
+		return m.CreatedAt()
+	case brokerdispatch.FieldUpdatedAt:
+		return m.UpdatedAt()
+	case brokerdispatch.FieldDeadlineAt:
+		return m.DeadlineAt()
+	}
+	return nil, false
+}
+
+// OldField returns the old value of the field from the database. An error is
+// returned if the mutation operation is not UpdateOne, or the query to the
+// database failed.
+func (m *BrokerDispatchMutation) OldField(ctx context.Context, name string) (ent.Value, error) {
+	switch name {
+	case brokerdispatch.FieldBrokerID:
+		return m.OldBrokerID(ctx)
+	case brokerdispatch.FieldAgentID:
+		return m.OldAgentID(ctx)
+	case brokerdispatch.FieldAgentSlug:
+		return m.OldAgentSlug(ctx)
+	case brokerdispatch.FieldProjectID:
+		return m.OldProjectID(ctx)
+	case brokerdispatch.FieldOp:
+		return m.OldOp(ctx)
+	case brokerdispatch.FieldArgs:
+		return m.OldArgs(ctx)
+	case brokerdispatch.FieldState:
+		return m.OldState(ctx)
+	case brokerdispatch.FieldResult:
+		return m.OldResult(ctx)
+	case brokerdispatch.FieldClaimedBy:
+		return m.OldClaimedBy(ctx)
+	case brokerdispatch.FieldAttempts:
+		return m.OldAttempts(ctx)
+	case brokerdispatch.FieldError:
+		return m.OldError(ctx)
+	case brokerdispatch.FieldCreatedAt:
+		return m.OldCreatedAt(ctx)
+	case brokerdispatch.FieldUpdatedAt:
+		return m.OldUpdatedAt(ctx)
+	case brokerdispatch.FieldDeadlineAt:
+		return m.OldDeadlineAt(ctx)
+	}
+	return nil, fmt.Errorf("unknown BrokerDispatch field %s", name)
+}
+
+// SetField sets the value of a field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *BrokerDispatchMutation) SetField(name string, value ent.Value) error {
+	switch name {
+	case brokerdispatch.FieldBrokerID:
+		v, ok := value.(uuid.UUID)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetBrokerID(v)
+		return nil
+	case brokerdispatch.FieldAgentID:
+		v, ok := value.(uuid.UUID)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetAgentID(v)
+		return nil
+	case brokerdispatch.FieldAgentSlug:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetAgentSlug(v)
+		return nil
+	case brokerdispatch.FieldProjectID:
+		v, ok := value.(uuid.UUID)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetProjectID(v)
+		return nil
+	case brokerdispatch.FieldOp:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetOpField(v)
+		return nil
+	case brokerdispatch.FieldArgs:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetArgs(v)
+		return nil
+	case brokerdispatch.FieldState:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetState(v)
+		return nil
+	case brokerdispatch.FieldResult:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetResult(v)
+		return nil
+	case brokerdispatch.FieldClaimedBy:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetClaimedBy(v)
+		return nil
+	case brokerdispatch.FieldAttempts:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetAttempts(v)
+		return nil
+	case brokerdispatch.FieldError:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetError(v)
+		return nil
+	case brokerdispatch.FieldCreatedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCreatedAt(v)
+		return nil
+	case brokerdispatch.FieldUpdatedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetUpdatedAt(v)
+		return nil
+	case brokerdispatch.FieldDeadlineAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetDeadlineAt(v)
+		return nil
+	}
+	return fmt.Errorf("unknown BrokerDispatch field %s", name)
+}
+
+// AddedFields returns all numeric fields that were incremented/decremented during
+// this mutation.
+func (m *BrokerDispatchMutation) AddedFields() []string {
+	var fields []string
+	if m.addattempts != nil {
+		fields = append(fields, brokerdispatch.FieldAttempts)
+	}
+	return fields
+}
+
+// AddedField returns the numeric value that was incremented/decremented on a field
+// with the given name. The second boolean return value indicates that this field
+// was not set, or was not defined in the schema.
+func (m *BrokerDispatchMutation) AddedField(name string) (ent.Value, bool) {
+	switch name {
+	case brokerdispatch.FieldAttempts:
+		return m.AddedAttempts()
+	}
+	return nil, false
+}
+
+// AddField adds the value to the field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *BrokerDispatchMutation) AddField(name string, value ent.Value) error {
+	switch name {
+	case brokerdispatch.FieldAttempts:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddAttempts(v)
+		return nil
+	}
+	return fmt.Errorf("unknown BrokerDispatch numeric field %s", name)
+}
+
+// ClearedFields returns all nullable fields that were cleared during this
+// mutation.
+func (m *BrokerDispatchMutation) ClearedFields() []string {
+	var fields []string
+	if m.FieldCleared(brokerdispatch.FieldAgentID) {
+		fields = append(fields, brokerdispatch.FieldAgentID)
+	}
+	if m.FieldCleared(brokerdispatch.FieldAgentSlug) {
+		fields = append(fields, brokerdispatch.FieldAgentSlug)
+	}
+	if m.FieldCleared(brokerdispatch.FieldProjectID) {
+		fields = append(fields, brokerdispatch.FieldProjectID)
+	}
+	if m.FieldCleared(brokerdispatch.FieldArgs) {
+		fields = append(fields, brokerdispatch.FieldArgs)
+	}
+	if m.FieldCleared(brokerdispatch.FieldResult) {
+		fields = append(fields, brokerdispatch.FieldResult)
+	}
+	if m.FieldCleared(brokerdispatch.FieldClaimedBy) {
+		fields = append(fields, brokerdispatch.FieldClaimedBy)
+	}
+	if m.FieldCleared(brokerdispatch.FieldError) {
+		fields = append(fields, brokerdispatch.FieldError)
+	}
+	if m.FieldCleared(brokerdispatch.FieldDeadlineAt) {
+		fields = append(fields, brokerdispatch.FieldDeadlineAt)
+	}
+	return fields
+}
+
+// FieldCleared returns a boolean indicating if a field with the given name was
+// cleared in this mutation.
+func (m *BrokerDispatchMutation) FieldCleared(name string) bool {
+	_, ok := m.clearedFields[name]
+	return ok
+}
+
+// ClearField clears the value of the field with the given name. It returns an
+// error if the field is not defined in the schema.
+func (m *BrokerDispatchMutation) ClearField(name string) error {
+	switch name {
+	case brokerdispatch.FieldAgentID:
+		m.ClearAgentID()
+		return nil
+	case brokerdispatch.FieldAgentSlug:
+		m.ClearAgentSlug()
+		return nil
+	case brokerdispatch.FieldProjectID:
+		m.ClearProjectID()
+		return nil
+	case brokerdispatch.FieldArgs:
+		m.ClearArgs()
+		return nil
+	case brokerdispatch.FieldResult:
+		m.ClearResult()
+		return nil
+	case brokerdispatch.FieldClaimedBy:
+		m.ClearClaimedBy()
+		return nil
+	case brokerdispatch.FieldError:
+		m.ClearError()
+		return nil
+	case brokerdispatch.FieldDeadlineAt:
+		m.ClearDeadlineAt()
+		return nil
+	}
+	return fmt.Errorf("unknown BrokerDispatch nullable field %s", name)
+}
+
+// ResetField resets all changes in the mutation for the field with the given name.
+// It returns an error if the field is not defined in the schema.
+func (m *BrokerDispatchMutation) ResetField(name string) error {
+	switch name {
+	case brokerdispatch.FieldBrokerID:
+		m.ResetBrokerID()
+		return nil
+	case brokerdispatch.FieldAgentID:
+		m.ResetAgentID()
+		return nil
+	case brokerdispatch.FieldAgentSlug:
+		m.ResetAgentSlug()
+		return nil
+	case brokerdispatch.FieldProjectID:
+		m.ResetProjectID()
+		return nil
+	case brokerdispatch.FieldOp:
+		m.ResetOp()
+		return nil
+	case brokerdispatch.FieldArgs:
+		m.ResetArgs()
+		return nil
+	case brokerdispatch.FieldState:
+		m.ResetState()
+		return nil
+	case brokerdispatch.FieldResult:
+		m.ResetResult()
+		return nil
+	case brokerdispatch.FieldClaimedBy:
+		m.ResetClaimedBy()
+		return nil
+	case brokerdispatch.FieldAttempts:
+		m.ResetAttempts()
+		return nil
+	case brokerdispatch.FieldError:
+		m.ResetError()
+		return nil
+	case brokerdispatch.FieldCreatedAt:
+		m.ResetCreatedAt()
+		return nil
+	case brokerdispatch.FieldUpdatedAt:
+		m.ResetUpdatedAt()
+		return nil
+	case brokerdispatch.FieldDeadlineAt:
+		m.ResetDeadlineAt()
+		return nil
+	}
+	return fmt.Errorf("unknown BrokerDispatch field %s", name)
+}
+
+// AddedEdges returns all edge names that were set/added in this mutation.
+func (m *BrokerDispatchMutation) AddedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// AddedIDs returns all IDs (to other nodes) that were added for the given edge
+// name in this mutation.
+func (m *BrokerDispatchMutation) AddedIDs(name string) []ent.Value {
+	return nil
+}
+
+// RemovedEdges returns all edge names that were removed in this mutation.
+func (m *BrokerDispatchMutation) RemovedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// RemovedIDs returns all IDs (to other nodes) that were removed for the edge with
+// the given name in this mutation.
+func (m *BrokerDispatchMutation) RemovedIDs(name string) []ent.Value {
+	return nil
+}
+
+// ClearedEdges returns all edge names that were cleared in this mutation.
+func (m *BrokerDispatchMutation) ClearedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// EdgeCleared returns a boolean which indicates if the edge with the given name
+// was cleared in this mutation.
+func (m *BrokerDispatchMutation) EdgeCleared(name string) bool {
+	return false
+}
+
+// ClearEdge clears the value of the edge with the given name. It returns an error
+// if that edge is not defined in the schema.
+func (m *BrokerDispatchMutation) ClearEdge(name string) error {
+	return fmt.Errorf("unknown BrokerDispatch unique edge %s", name)
+}
+
+// ResetEdge resets all changes to the edge with the given name in this mutation.
+// It returns an error if the edge is not defined in the schema.
+func (m *BrokerDispatchMutation) ResetEdge(name string) error {
+	return fmt.Errorf("unknown BrokerDispatch edge %s", name)
 }
 
 // BrokerJoinTokenMutation represents an operation that mutates the BrokerJoinToken nodes in the graph.
@@ -16037,26 +17264,28 @@ func (m *MaintenanceOperationRunMutation) ResetEdge(name string) error {
 // MessageMutation represents an operation that mutates the Message nodes in the graph.
 type MessageMutation struct {
 	config
-	op            Op
-	typ           string
-	id            *uuid.UUID
-	project_id    *uuid.UUID
-	sender        *string
-	sender_id     *string
-	recipient     *string
-	recipient_id  *string
-	msg           *string
-	_type         *string
-	urgent        *bool
-	broadcasted   *bool
-	read          *bool
-	agent_id      *string
-	group_id      *string
-	created       *time.Time
-	clearedFields map[string]struct{}
-	done          bool
-	oldValue      func(context.Context) (*Message, error)
-	predicates    []predicate.Message
+	op             Op
+	typ            string
+	id             *uuid.UUID
+	project_id     *uuid.UUID
+	sender         *string
+	sender_id      *string
+	recipient      *string
+	recipient_id   *string
+	msg            *string
+	_type          *string
+	urgent         *bool
+	broadcasted    *bool
+	read           *bool
+	agent_id       *string
+	group_id       *string
+	dispatch_state *string
+	dispatched_at  *time.Time
+	created        *time.Time
+	clearedFields  map[string]struct{}
+	done           bool
+	oldValue       func(context.Context) (*Message, error)
+	predicates     []predicate.Message
 }
 
 var _ ent.Mutation = (*MessageMutation)(nil)
@@ -16647,6 +17876,91 @@ func (m *MessageMutation) ResetGroupID() {
 	delete(m.clearedFields, message.FieldGroupID)
 }
 
+// SetDispatchState sets the "dispatch_state" field.
+func (m *MessageMutation) SetDispatchState(s string) {
+	m.dispatch_state = &s
+}
+
+// DispatchState returns the value of the "dispatch_state" field in the mutation.
+func (m *MessageMutation) DispatchState() (r string, exists bool) {
+	v := m.dispatch_state
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldDispatchState returns the old "dispatch_state" field's value of the Message entity.
+// If the Message object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *MessageMutation) OldDispatchState(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldDispatchState is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldDispatchState requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldDispatchState: %w", err)
+	}
+	return oldValue.DispatchState, nil
+}
+
+// ResetDispatchState resets all changes to the "dispatch_state" field.
+func (m *MessageMutation) ResetDispatchState() {
+	m.dispatch_state = nil
+}
+
+// SetDispatchedAt sets the "dispatched_at" field.
+func (m *MessageMutation) SetDispatchedAt(t time.Time) {
+	m.dispatched_at = &t
+}
+
+// DispatchedAt returns the value of the "dispatched_at" field in the mutation.
+func (m *MessageMutation) DispatchedAt() (r time.Time, exists bool) {
+	v := m.dispatched_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldDispatchedAt returns the old "dispatched_at" field's value of the Message entity.
+// If the Message object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *MessageMutation) OldDispatchedAt(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldDispatchedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldDispatchedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldDispatchedAt: %w", err)
+	}
+	return oldValue.DispatchedAt, nil
+}
+
+// ClearDispatchedAt clears the value of the "dispatched_at" field.
+func (m *MessageMutation) ClearDispatchedAt() {
+	m.dispatched_at = nil
+	m.clearedFields[message.FieldDispatchedAt] = struct{}{}
+}
+
+// DispatchedAtCleared returns if the "dispatched_at" field was cleared in this mutation.
+func (m *MessageMutation) DispatchedAtCleared() bool {
+	_, ok := m.clearedFields[message.FieldDispatchedAt]
+	return ok
+}
+
+// ResetDispatchedAt resets all changes to the "dispatched_at" field.
+func (m *MessageMutation) ResetDispatchedAt() {
+	m.dispatched_at = nil
+	delete(m.clearedFields, message.FieldDispatchedAt)
+}
+
 // SetCreated sets the "created" field.
 func (m *MessageMutation) SetCreated(t time.Time) {
 	m.created = &t
@@ -16717,7 +18031,7 @@ func (m *MessageMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *MessageMutation) Fields() []string {
-	fields := make([]string, 0, 13)
+	fields := make([]string, 0, 15)
 	if m.project_id != nil {
 		fields = append(fields, message.FieldProjectID)
 	}
@@ -16754,6 +18068,12 @@ func (m *MessageMutation) Fields() []string {
 	if m.group_id != nil {
 		fields = append(fields, message.FieldGroupID)
 	}
+	if m.dispatch_state != nil {
+		fields = append(fields, message.FieldDispatchState)
+	}
+	if m.dispatched_at != nil {
+		fields = append(fields, message.FieldDispatchedAt)
+	}
 	if m.created != nil {
 		fields = append(fields, message.FieldCreated)
 	}
@@ -16789,6 +18109,10 @@ func (m *MessageMutation) Field(name string) (ent.Value, bool) {
 		return m.AgentID()
 	case message.FieldGroupID:
 		return m.GroupID()
+	case message.FieldDispatchState:
+		return m.DispatchState()
+	case message.FieldDispatchedAt:
+		return m.DispatchedAt()
 	case message.FieldCreated:
 		return m.Created()
 	}
@@ -16824,6 +18148,10 @@ func (m *MessageMutation) OldField(ctx context.Context, name string) (ent.Value,
 		return m.OldAgentID(ctx)
 	case message.FieldGroupID:
 		return m.OldGroupID(ctx)
+	case message.FieldDispatchState:
+		return m.OldDispatchState(ctx)
+	case message.FieldDispatchedAt:
+		return m.OldDispatchedAt(ctx)
 	case message.FieldCreated:
 		return m.OldCreated(ctx)
 	}
@@ -16919,6 +18247,20 @@ func (m *MessageMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetGroupID(v)
 		return nil
+	case message.FieldDispatchState:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetDispatchState(v)
+		return nil
+	case message.FieldDispatchedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetDispatchedAt(v)
+		return nil
 	case message.FieldCreated:
 		v, ok := value.(time.Time)
 		if !ok {
@@ -16968,6 +18310,9 @@ func (m *MessageMutation) ClearedFields() []string {
 	if m.FieldCleared(message.FieldGroupID) {
 		fields = append(fields, message.FieldGroupID)
 	}
+	if m.FieldCleared(message.FieldDispatchedAt) {
+		fields = append(fields, message.FieldDispatchedAt)
+	}
 	return fields
 }
 
@@ -16993,6 +18338,9 @@ func (m *MessageMutation) ClearField(name string) error {
 		return nil
 	case message.FieldGroupID:
 		m.ClearGroupID()
+		return nil
+	case message.FieldDispatchedAt:
+		m.ClearDispatchedAt()
 		return nil
 	}
 	return fmt.Errorf("unknown Message nullable field %s", name)
@@ -17037,6 +18385,12 @@ func (m *MessageMutation) ResetField(name string) error {
 		return nil
 	case message.FieldGroupID:
 		m.ResetGroupID()
+		return nil
+	case message.FieldDispatchState:
+		m.ResetDispatchState()
+		return nil
+	case message.FieldDispatchedAt:
+		m.ResetDispatchedAt()
 		return nil
 	case message.FieldCreated:
 		m.ResetCreated()

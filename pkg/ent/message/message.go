@@ -38,6 +38,10 @@ const (
 	FieldAgentID = "agent_id"
 	// FieldGroupID holds the string denoting the group_id field in the database.
 	FieldGroupID = "group_id"
+	// FieldDispatchState holds the string denoting the dispatch_state field in the database.
+	FieldDispatchState = "dispatch_state"
+	// FieldDispatchedAt holds the string denoting the dispatched_at field in the database.
+	FieldDispatchedAt = "dispatched_at"
 	// FieldCreated holds the string denoting the created field in the database.
 	FieldCreated = "created"
 	// Table holds the table name of the message in the database.
@@ -59,6 +63,8 @@ var Columns = []string{
 	FieldRead,
 	FieldAgentID,
 	FieldGroupID,
+	FieldDispatchState,
+	FieldDispatchedAt,
 	FieldCreated,
 }
 
@@ -87,6 +93,8 @@ var (
 	DefaultBroadcasted bool
 	// DefaultRead holds the default value on creation for the "read" field.
 	DefaultRead bool
+	// DefaultDispatchState holds the default value on creation for the "dispatch_state" field.
+	DefaultDispatchState string
 	// DefaultCreated holds the default value on creation for the "created" field.
 	DefaultCreated func() time.Time
 	// DefaultID holds the default value on creation for the "id" field.
@@ -159,6 +167,16 @@ func ByAgentID(opts ...sql.OrderTermOption) OrderOption {
 // ByGroupID orders the results by the group_id field.
 func ByGroupID(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldGroupID, opts...).ToFunc()
+}
+
+// ByDispatchState orders the results by the dispatch_state field.
+func ByDispatchState(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldDispatchState, opts...).ToFunc()
+}
+
+// ByDispatchedAt orders the results by the dispatched_at field.
+func ByDispatchedAt(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldDispatchedAt, opts...).ToFunc()
 }
 
 // ByCreated orders the results by the created field.

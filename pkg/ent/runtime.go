@@ -9,6 +9,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/allowlistentry"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/apikey"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokerdispatch"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokerjointoken"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokersecret"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/envvar"
@@ -163,6 +164,34 @@ func init() {
 	apikeyDescID := apikeyFields[0].Descriptor()
 	// apikey.DefaultID holds the default value on creation for the id field.
 	apikey.DefaultID = apikeyDescID.Default.(func() uuid.UUID)
+	brokerdispatchFields := schema.BrokerDispatch{}.Fields()
+	_ = brokerdispatchFields
+	// brokerdispatchDescOp is the schema descriptor for op field.
+	brokerdispatchDescOp := brokerdispatchFields[5].Descriptor()
+	// brokerdispatch.OpValidator is a validator for the "op" field. It is called by the builders before save.
+	brokerdispatch.OpValidator = brokerdispatchDescOp.Validators[0].(func(string) error)
+	// brokerdispatchDescState is the schema descriptor for state field.
+	brokerdispatchDescState := brokerdispatchFields[7].Descriptor()
+	// brokerdispatch.DefaultState holds the default value on creation for the state field.
+	brokerdispatch.DefaultState = brokerdispatchDescState.Default.(string)
+	// brokerdispatchDescAttempts is the schema descriptor for attempts field.
+	brokerdispatchDescAttempts := brokerdispatchFields[10].Descriptor()
+	// brokerdispatch.DefaultAttempts holds the default value on creation for the attempts field.
+	brokerdispatch.DefaultAttempts = brokerdispatchDescAttempts.Default.(int)
+	// brokerdispatchDescCreatedAt is the schema descriptor for created_at field.
+	brokerdispatchDescCreatedAt := brokerdispatchFields[12].Descriptor()
+	// brokerdispatch.DefaultCreatedAt holds the default value on creation for the created_at field.
+	brokerdispatch.DefaultCreatedAt = brokerdispatchDescCreatedAt.Default.(func() time.Time)
+	// brokerdispatchDescUpdatedAt is the schema descriptor for updated_at field.
+	brokerdispatchDescUpdatedAt := brokerdispatchFields[13].Descriptor()
+	// brokerdispatch.DefaultUpdatedAt holds the default value on creation for the updated_at field.
+	brokerdispatch.DefaultUpdatedAt = brokerdispatchDescUpdatedAt.Default.(func() time.Time)
+	// brokerdispatch.UpdateDefaultUpdatedAt holds the default value on update for the updated_at field.
+	brokerdispatch.UpdateDefaultUpdatedAt = brokerdispatchDescUpdatedAt.UpdateDefault.(func() time.Time)
+	// brokerdispatchDescID is the schema descriptor for id field.
+	brokerdispatchDescID := brokerdispatchFields[0].Descriptor()
+	// brokerdispatch.DefaultID holds the default value on creation for the id field.
+	brokerdispatch.DefaultID = brokerdispatchDescID.Default.(func() uuid.UUID)
 	brokerjointokenFields := schema.BrokerJoinToken{}.Fields()
 	_ = brokerjointokenFields
 	// brokerjointokenDescTokenHash is the schema descriptor for token_hash field.
@@ -503,8 +532,12 @@ func init() {
 	messageDescRead := messageFields[10].Descriptor()
 	// message.DefaultRead holds the default value on creation for the read field.
 	message.DefaultRead = messageDescRead.Default.(bool)
+	// messageDescDispatchState is the schema descriptor for dispatch_state field.
+	messageDescDispatchState := messageFields[13].Descriptor()
+	// message.DefaultDispatchState holds the default value on creation for the dispatch_state field.
+	message.DefaultDispatchState = messageDescDispatchState.Default.(string)
 	// messageDescCreated is the schema descriptor for created field.
-	messageDescCreated := messageFields[13].Descriptor()
+	messageDescCreated := messageFields[15].Descriptor()
 	// message.DefaultCreated holds the default value on creation for the created field.
 	message.DefaultCreated = messageDescCreated.Default.(func() time.Time)
 	// messageDescID is the schema descriptor for id field.

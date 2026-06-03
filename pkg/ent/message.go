@@ -42,6 +42,10 @@ type Message struct {
 	AgentID string `json:"agent_id,omitempty"`
 	// GroupID holds the value of the "group_id" field.
 	GroupID string `json:"group_id,omitempty"`
+	// DispatchState holds the value of the "dispatch_state" field.
+	DispatchState string `json:"dispatch_state,omitempty"`
+	// DispatchedAt holds the value of the "dispatched_at" field.
+	DispatchedAt *time.Time `json:"dispatched_at,omitempty"`
 	// Created holds the value of the "created" field.
 	Created      time.Time `json:"created,omitempty"`
 	selectValues sql.SelectValues
@@ -54,9 +58,9 @@ func (*Message) scanValues(columns []string) ([]any, error) {
 		switch columns[i] {
 		case message.FieldUrgent, message.FieldBroadcasted, message.FieldRead:
 			values[i] = new(sql.NullBool)
-		case message.FieldSender, message.FieldSenderID, message.FieldRecipient, message.FieldRecipientID, message.FieldMsg, message.FieldType, message.FieldAgentID, message.FieldGroupID:
+		case message.FieldSender, message.FieldSenderID, message.FieldRecipient, message.FieldRecipientID, message.FieldMsg, message.FieldType, message.FieldAgentID, message.FieldGroupID, message.FieldDispatchState:
 			values[i] = new(sql.NullString)
-		case message.FieldCreated:
+		case message.FieldDispatchedAt, message.FieldCreated:
 			values[i] = new(sql.NullTime)
 		case message.FieldID, message.FieldProjectID:
 			values[i] = new(uuid.UUID)
@@ -153,6 +157,19 @@ func (_m *Message) assignValues(columns []string, values []any) error {
 			} else if value.Valid {
 				_m.GroupID = value.String
 			}
+		case message.FieldDispatchState:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field dispatch_state", values[i])
+			} else if value.Valid {
+				_m.DispatchState = value.String
+			}
+		case message.FieldDispatchedAt:
+			if value, ok := values[i].(*sql.NullTime); !ok {
+				return fmt.Errorf("unexpected type %T for field dispatched_at", values[i])
+			} else if value.Valid {
+				_m.DispatchedAt = new(time.Time)
+				*_m.DispatchedAt = value.Time
+			}
 		case message.FieldCreated:
 			if value, ok := values[i].(*sql.NullTime); !ok {
 				return fmt.Errorf("unexpected type %T for field created", values[i])
@@ -230,6 +247,14 @@ func (_m *Message) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("group_id=")
 	builder.WriteString(_m.GroupID)
+	builder.WriteString(", ")
+	builder.WriteString("dispatch_state=")
+	builder.WriteString(_m.DispatchState)
+	builder.WriteString(", ")
+	if v := _m.DispatchedAt; v != nil {
+		builder.WriteString("dispatched_at=")
+		builder.WriteString(v.Format(time.ANSIC))
+	}
 	builder.WriteString(", ")
 	builder.WriteString("created=")
 	builder.WriteString(_m.Created.Format(time.ANSIC))

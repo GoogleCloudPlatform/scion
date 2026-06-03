@@ -57,6 +57,18 @@ func (f ApiKeyFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, erro
 	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.ApiKeyMutation", m)
 }
 
+// The BrokerDispatchFunc type is an adapter to allow the use of ordinary
+// function as BrokerDispatch mutator.
+type BrokerDispatchFunc func(context.Context, *ent.BrokerDispatchMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f BrokerDispatchFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.BrokerDispatchMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.BrokerDispatchMutation", m)
+}
+
 // The BrokerJoinTokenFunc type is an adapter to allow the use of ordinary
 // function as BrokerJoinToken mutator.
 type BrokerJoinTokenFunc func(context.Context, *ent.BrokerJoinTokenMutation) (ent.Value, error)

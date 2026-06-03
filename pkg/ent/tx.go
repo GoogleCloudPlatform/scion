@@ -20,6 +20,8 @@ type Tx struct {
 	AllowListEntry *AllowListEntryClient
 	// ApiKey is the client for interacting with the ApiKey builders.
 	ApiKey *ApiKeyClient
+	// BrokerDispatch is the client for interacting with the BrokerDispatch builders.
+	BrokerDispatch *BrokerDispatchClient
 	// BrokerJoinToken is the client for interacting with the BrokerJoinToken builders.
 	BrokerJoinToken *BrokerJoinTokenClient
 	// BrokerSecret is the client for interacting with the BrokerSecret builders.
@@ -207,6 +209,7 @@ func (tx *Tx) init() {
 	tx.Agent = NewAgentClient(tx.config)
 	tx.AllowListEntry = NewAllowListEntryClient(tx.config)
 	tx.ApiKey = NewApiKeyClient(tx.config)
+	tx.BrokerDispatch = NewBrokerDispatchClient(tx.config)
 	tx.BrokerJoinToken = NewBrokerJoinTokenClient(tx.config)
 	tx.BrokerSecret = NewBrokerSecretClient(tx.config)
 	tx.EnvVar = NewEnvVarClient(tx.config)

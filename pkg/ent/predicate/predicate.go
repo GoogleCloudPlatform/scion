@@ -18,6 +18,9 @@ type AllowListEntry func(*sql.Selector)
 // ApiKey is the predicate function for apikey builders.
 type ApiKey func(*sql.Selector)
 
+// BrokerDispatch is the predicate function for brokerdispatch builders.
+type BrokerDispatch func(*sql.Selector)
+
 // BrokerJoinToken is the predicate function for brokerjointoken builders.
 type BrokerJoinToken func(*sql.Selector)
 

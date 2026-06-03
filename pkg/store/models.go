@@ -786,6 +786,42 @@ const (
 	BrokerStatusDegraded = "degraded"
 )
 
+// BrokerDispatch is the durable intent for a lifecycle/create-time command
+// targeted at a broker (design §5.2). The socket-holding node reconciles it:
+// CAS-claim (pending->in_progress) → run the local tunnel op → mark done/failed.
+type BrokerDispatch struct {
+	ID         string     `json:"id"`
+	BrokerID   string     `json:"brokerId"`
+	AgentID    string     `json:"agentId,omitempty"`   // empty for project-scoped ops
+	AgentSlug  string     `json:"agentSlug,omitempty"`
+	ProjectID  string     `json:"projectId,omitempty"` // empty if unknown/none
+	Op         string     `json:"op"`                  // start|stop|restart|delete|finalize_env|check_prompt|create|message
+	Args       string     `json:"args,omitempty"`      // JSON
+	State      string     `json:"state"`               // pending|in_progress|done|failed
+	Result     string     `json:"result,omitempty"`    // JSON
+	ClaimedBy  string     `json:"claimedBy,omitempty"` // hub instanceID that reconciled it
+	Attempts   int        `json:"attempts"`
+	Error      string     `json:"error,omitempty"`
+	CreatedAt  time.Time  `json:"createdAt"`
+	UpdatedAt  time.Time  `json:"updatedAt"`
+	DeadlineAt *time.Time `json:"deadlineAt,omitempty"`
+}
+
+// BrokerDispatch.State values.
+const (
+	DispatchStatePending    = "pending"
+	DispatchStateInProgress = "in_progress"
+	DispatchStateDone       = "done"
+	DispatchStateFailed     = "failed"
+)
+
+// Message.DispatchState values (the message row is its own dispatch intent).
+const (
+	MessageDispatchPending    = "pending"
+	MessageDispatchDispatched = "dispatched"
+	MessageDispatchFailed     = "failed"
+)
+
 // =============================================================================
 // Notifications (Agent Status Notification System)
 // =============================================================================
@@ -1387,6 +1423,11 @@ type Message struct {
 	AgentID     string    `json:"agentId"` // The agent involved (sender or recipient)
 	GroupID     string    `json:"groupId,omitempty"`
 	CreatedAt   time.Time `json:"createdAt"`
+	// DispatchState tracks cross-node delivery of the message to the broker:
+	// pending|dispatched|failed. The message row is its own durable dispatch
+	// intent (design §5.2/§6.1).
+	DispatchState string     `json:"dispatchState,omitempty"`
+	DispatchedAt  *time.Time `json:"dispatchedAt,omitempty"`
 }
 
 // MarshalJSON implements custom marshaling to support legacy groveId field.
