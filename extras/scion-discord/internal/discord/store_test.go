@@ -37,6 +37,7 @@ func TestChannelLinkCRUD(t *testing.T) {
 			Active:             true,
 			ShowAgentToAgent:   false,
 			ShowAssistantReply: true,
+			ShowStateChanges:   true,
 			NotifyInGroup:      true,
 			ChatOnly:           false,
 		}
@@ -56,6 +57,7 @@ func TestChannelLinkCRUD(t *testing.T) {
 		assert.True(t, got.Active)
 		assert.False(t, got.ShowAgentToAgent)
 		assert.True(t, got.ShowAssistantReply)
+		assert.True(t, got.ShowStateChanges)
 		assert.True(t, got.NotifyInGroup)
 		assert.False(t, got.ChatOnly)
 		assert.Equal(t, 2026, got.LinkedAt.Year())

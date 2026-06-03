@@ -55,6 +55,10 @@ func (h *CallbackHandler) Dispatch(s *discordgo.Session, i *discordgo.Interactio
 		h.handleAskCallback(s, i, customID)
 	case "notif":
 		h.handleNotifCallback(s, i, customID)
+	case "settings":
+		h.handleSettingsCallback(s, i, customID)
+	case "default":
+		h.handleDefaultCallback(s, i, customID)
 	default:
 		h.log.Debug("Unhandled callback prefix", "prefix", parts[0], "custom_id", customID)
 	}
@@ -186,6 +190,7 @@ func (h *CallbackHandler) saveChannelLink(ctx context.Context, i *discordgo.Inte
 		LinkedAt:           time.Now(),
 		Active:             true,
 		ShowAssistantReply: true,
+		ShowStateChanges:   true,
 		NotifyInGroup:      true,
 	}
 
@@ -428,6 +433,111 @@ func (h *CallbackHandler) deliverAskUserResponse(ctx context.Context, i *discord
 	}
 
 	h.deliverInbound(topic, msg)
+}
+
+// --- Settings callback handlers ---
+
+// handleSettingsCallback toggles channel settings.
+// custom_id formats:
+//   - settings:observe:<channelID>      — toggle observe mode
+//   - settings:statechange:<channelID>  — toggle state change notifications
+func (h *CallbackHandler) handleSettingsCallback(s *discordgo.Session, i *discordgo.InteractionCreate, customID string) {
+	parts := strings.SplitN(customID, ":", 3)
+	if len(parts) < 3 {
+		h.log.Warn("Malformed settings callback custom_id", "custom_id", customID)
+		return
+	}
+	action := parts[1]
+	channelID := parts[2]
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	link, err := h.store.GetChannelLink(ctx, channelID)
+	if err != nil || link == nil {
+		h.respondUpdate(s, i, "This channel is no longer linked to a project.", nil)
+		return
+	}
+
+	switch action {
+	case "observe":
+		link.ShowAgentToAgent = !link.ShowAgentToAgent
+	case "statechange":
+		link.ShowStateChanges = !link.ShowStateChanges
+	default:
+		h.log.Debug("Unknown settings action", "action", action)
+		return
+	}
+
+	if err := h.store.UpdateChannelLink(ctx, link); err != nil {
+		h.log.Error("Failed to update channel settings", "error", err, "channel_id", channelID)
+		h.respondUpdate(s, i, "Failed to update settings. Please try again.", nil)
+		return
+	}
+
+	content, components := settingsPanel(link)
+	h.respondUpdate(s, i, content, components)
+
+	h.log.Info("Channel settings updated",
+		"channel_id", channelID,
+		"action", action,
+		"observe_mode", link.ShowAgentToAgent,
+		"state_changes", link.ShowStateChanges,
+	)
+}
+
+// --- Default agent callback handlers ---
+
+// handleDefaultCallback handles default agent selection buttons.
+// custom_id formats:
+//   - default:set:<agentSlug>  — set agent as default
+//   - default:none             — clear default agent
+func (h *CallbackHandler) handleDefaultCallback(s *discordgo.Session, i *discordgo.InteractionCreate, customID string) {
+	parts := strings.SplitN(customID, ":", 3)
+	if len(parts) < 2 {
+		h.log.Warn("Malformed default callback custom_id", "custom_id", customID)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	link, err := h.store.GetChannelLink(ctx, i.ChannelID)
+	if err != nil || link == nil {
+		h.respondUpdate(s, i, "This channel is not linked to a project.", nil)
+		return
+	}
+
+	action := parts[1]
+	switch action {
+	case "none":
+		link.DefaultAgent = ""
+		if err := h.store.UpdateChannelLink(ctx, link); err != nil {
+			h.log.Error("Failed to clear default agent", "error", err)
+			h.respondUpdate(s, i, "Failed to clear default agent. Please try again.", nil)
+			return
+		}
+		h.respondUpdate(s, i, "Default agent cleared for this channel.", nil)
+		h.log.Info("Default agent cleared via button", "channel_id", i.ChannelID)
+
+	case "set":
+		if len(parts) < 3 {
+			h.log.Warn("Missing agent slug in default:set callback", "custom_id", customID)
+			return
+		}
+		agentSlug := parts[2]
+		link.DefaultAgent = agentSlug
+		if err := h.store.UpdateChannelLink(ctx, link); err != nil {
+			h.log.Error("Failed to set default agent", "error", err)
+			h.respondUpdate(s, i, "Failed to set default agent. Please try again.", nil)
+			return
+		}
+		h.respondUpdate(s, i, fmt.Sprintf("Default agent set to **%s** for this channel.", agentSlug), nil)
+		h.log.Info("Default agent set via button", "channel_id", i.ChannelID, "agent", agentSlug)
+
+	default:
+		h.log.Debug("Unknown default action", "action", action, "custom_id", customID)
+	}
 }
 
 // --- Notification callback handlers ---

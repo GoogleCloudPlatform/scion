@@ -461,9 +461,30 @@ func (b *DiscordBroker) Publish(ctx context.Context, topic string, msg *messages
 		return nil
 	}
 
+	// Per-channel filtering based on channel link settings.
+	isAgentToAgent := msg != nil &&
+		strings.HasPrefix(msg.Sender, "agent:") &&
+		strings.HasPrefix(msg.Recipient, "agent:")
+	isStateChange := msg != nil && msg.Type == messages.TypeStateChange
+	needsFilter := isAgentToAgent || isStateChange
+
 	// Send to each target channel.
 	var errs []error
 	for _, channelID := range channelIDs {
+		if needsFilter && store != nil {
+			link, linkErr := store.GetChannelLink(ctx, channelID)
+			if linkErr == nil && link != nil {
+				if isAgentToAgent && !link.ShowAgentToAgent {
+					b.log.Debug("Filtering agent-to-agent message", "channel_id", channelID)
+					continue
+				}
+				if isStateChange && !link.ShowStateChanges {
+					b.log.Debug("Filtering state change notification", "channel_id", channelID)
+					continue
+				}
+			}
+		}
+
 		var err error
 
 		if useWebhook {

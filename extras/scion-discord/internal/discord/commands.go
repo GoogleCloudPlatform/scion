@@ -163,13 +163,6 @@ func (h *CommandHandler) RegisterCommands() error {
 				Type:        discordgo.ApplicationCommandOptionSubCommand,
 				Name:        "default",
 				Description: "Set or show the default agent for this channel",
-				Options: []*discordgo.ApplicationCommandOption{{
-					Type:         discordgo.ApplicationCommandOptionString,
-					Name:         "agent",
-					Description:  "Agent name (use 'none' to clear)",
-					Required:     false,
-					Autocomplete: true,
-				}},
 			},
 			{
 				Type:        discordgo.ApplicationCommandOptionSubCommand,
@@ -337,13 +330,6 @@ func (h *CommandHandler) HandleAutocomplete(s *discordgo.Session, i *discordgo.I
 		prefix := strings.ToLower(opt.StringValue())
 		var choices []*discordgo.ApplicationCommandOptionChoice
 
-		if sub.Name == "default" && strings.HasPrefix("none", prefix) {
-			choices = append(choices, &discordgo.ApplicationCommandOptionChoice{
-				Name:  "none (clear default)",
-				Value: "none",
-			})
-		}
-
 		for _, slug := range agents {
 			if strings.HasPrefix(strings.ToLower(slug), prefix) {
 				choices = append(choices, &discordgo.ApplicationCommandOptionChoice{
@@ -375,7 +361,7 @@ func helpText() string {
 		"`/scion stop <agent>` — Stop an agent\n" +
 		"`/scion message <agent> <text>` — Send a message to an agent\n" +
 		"`/scion logs <agent>` — View agent logs\n" +
-		"`/scion default [agent]` — Set or show the default agent\n" +
+		"`/scion default` — Set or clear the default agent\n" +
 		"`/scion register` — Link your Discord account to Scion Hub\n" +
 		"`/scion unregister` — Unlink your Discord account\n" +
 		"`/scion settings` — Configure channel notification settings\n" +
@@ -712,7 +698,7 @@ func (h *CommandHandler) HandleLogs(s *discordgo.Session, i *discordgo.Interacti
 	h.followup(s, i, fmt.Sprintf("Viewing logs for agent **%s** is not yet implemented.", agentSlug))
 }
 
-// HandleDefault sets, shows, or clears the default agent for a channel.
+// HandleDefault shows agent selection buttons for setting the default agent.
 func (h *CommandHandler) HandleDefault(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -728,29 +714,6 @@ func (h *CommandHandler) HandleDefault(s *discordgo.Session, i *discordgo.Intera
 		return
 	}
 
-	agentSlug := getSubcommandOption(i, "agent")
-
-	if agentSlug == "" {
-		if link.DefaultAgent == "" {
-			h.followup(s, i, "No default agent is set for this channel.\nUse `/scion default agent:<name>` to set one.")
-		} else {
-			h.followup(s, i, fmt.Sprintf("Default agent for this channel: **%s**", link.DefaultAgent))
-		}
-		return
-	}
-
-	if agentSlug == "none" {
-		link.DefaultAgent = ""
-		if err := h.store.UpdateChannelLink(ctx, link); err != nil {
-			h.log.Error("Failed to clear default agent", "error", err, "channel_id", i.ChannelID)
-			h.followup(s, i, "Failed to clear default agent. Please try again.")
-			return
-		}
-		h.followup(s, i, "Default agent cleared for this channel.")
-		h.log.Info("Default agent cleared", "channel_id", i.ChannelID)
-		return
-	}
-
 	agents, err := h.getAgents(ctx, link.ProjectID)
 	if err != nil {
 		h.log.Error("Failed to list agents", "error", err, "project_id", link.ProjectID)
@@ -758,32 +721,116 @@ func (h *CommandHandler) HandleDefault(s *discordgo.Session, i *discordgo.Intera
 		return
 	}
 
-	found := false
-	for _, slug := range agents {
-		if slug == agentSlug {
-			found = true
+	if len(agents) == 0 {
+		h.followup(s, i, "No agents found in this project.")
+		return
+	}
+
+	var currentText string
+	if link.DefaultAgent != "" {
+		currentText = fmt.Sprintf("Current default: **%s**\n", link.DefaultAgent)
+	}
+
+	var rows []discordgo.MessageComponent
+	var buttons []discordgo.MessageComponent
+	for idx, slug := range agents {
+		style := discordgo.SecondaryButton
+		if slug == link.DefaultAgent {
+			style = discordgo.PrimaryButton
+		}
+		buttons = append(buttons, discordgo.Button{
+			Label:    slug,
+			Style:    style,
+			CustomID: fmt.Sprintf("default:set:%s", slug),
+		})
+		if len(buttons) == 5 || idx == len(agents)-1 {
+			rows = append(rows, discordgo.ActionsRow{Components: buttons})
+			buttons = nil
+		}
+		if len(rows) >= 4 {
 			break
 		}
 	}
-	if !found {
-		h.followup(s, i, fmt.Sprintf("Agent **%s** not found in this project.", agentSlug))
-		return
+	if len(rows) < 5 {
+		rows = append(rows, discordgo.ActionsRow{
+			Components: []discordgo.MessageComponent{
+				discordgo.Button{
+					Label:    "None",
+					Style:    discordgo.DangerButton,
+					CustomID: "default:none",
+				},
+			},
+		})
 	}
 
-	link.DefaultAgent = agentSlug
-	if err := h.store.UpdateChannelLink(ctx, link); err != nil {
-		h.log.Error("Failed to set default agent", "error", err, "channel_id", i.ChannelID)
-		h.followup(s, i, "Failed to set default agent. Please try again.")
-		return
-	}
-
-	h.followup(s, i, fmt.Sprintf("Default agent set to **%s** for this channel.", agentSlug))
-	h.log.Info("Default agent set", "channel_id", i.ChannelID, "agent", agentSlug)
+	_, _ = s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
+		Content:    currentText + "Select the default agent for this channel:",
+		Components: rows,
+	})
 }
 
-// HandleSettings is a placeholder for channel settings (Phase 3).
+// HandleSettings shows channel settings with toggle buttons.
 func (h *CommandHandler) HandleSettings(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	h.followup(s, i, "Channel settings configuration is not yet implemented.")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	link, err := h.store.GetChannelLink(ctx, i.ChannelID)
+	if err != nil {
+		h.log.Error("Failed to get channel link", "error", err, "channel_id", i.ChannelID)
+		h.followup(s, i, "Something went wrong. Please try again.")
+		return
+	}
+	if link == nil {
+		h.followup(s, i, "This channel is not linked to a project. Use `/scion setup` first.")
+		return
+	}
+
+	content, components := settingsPanel(link)
+	_, _ = s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
+		Content:    content,
+		Components: components,
+	})
+}
+
+// settingsPanel builds the settings message content and toggle buttons.
+func settingsPanel(link *ChannelLink) (string, []discordgo.MessageComponent) {
+	observeLabel := "Observe Mode: OFF"
+	observeStyle := discordgo.SecondaryButton
+	if link.ShowAgentToAgent {
+		observeLabel = "Observe Mode: ON"
+		observeStyle = discordgo.SuccessButton
+	}
+
+	stateLabel := "State Notifications: OFF"
+	stateStyle := discordgo.SecondaryButton
+	if link.ShowStateChanges {
+		stateLabel = "State Notifications: ON"
+		stateStyle = discordgo.SuccessButton
+	}
+
+	content := fmt.Sprintf("**Channel Settings** — %s\n\n"+
+		"**Observe Mode** — Show agent-to-agent messages in this channel\n"+
+		"**State Notifications** — Show agent state change cards (working/idle/stalled)",
+		link.ProjectSlug)
+
+	components := []discordgo.MessageComponent{
+		discordgo.ActionsRow{
+			Components: []discordgo.MessageComponent{
+				discordgo.Button{
+					Label:    observeLabel,
+					Style:    observeStyle,
+					CustomID: fmt.Sprintf("settings:observe:%s", link.ChannelID),
+				},
+				discordgo.Button{
+					Label:    stateLabel,
+					Style:    stateStyle,
+					CustomID: fmt.Sprintf("settings:statechange:%s", link.ChannelID),
+				},
+			},
+		},
+	}
+
+	return content, components
 }
 
 // getAgents returns agent slugs for a project, using the store cache with
