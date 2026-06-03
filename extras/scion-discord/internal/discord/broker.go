@@ -275,7 +275,7 @@ func (b *DiscordBroker) Configure(config map[string]string) error {
 				if hc == nil {
 					continue
 				}
-				if err := hc.RequestSubscription("scion.grove.>"); err != nil {
+				if err := hc.RequestSubscription("scion.project.>"); err != nil {
 					b.log.Warn("Failed to request bootstrap subscription", "error", err)
 					continue
 				}
@@ -936,7 +936,7 @@ func (b *DiscordBroker) getProjectAgents(ctx context.Context, projectID string) 
 // --- Dynamic subscription management ---
 
 func (b *DiscordBroker) subscribeForProject(projectID string) {
-	pattern := fmt.Sprintf("scion.grove.%s.>", projectID)
+	pattern := fmt.Sprintf("scion.project.%s.>", projectID)
 
 	b.mu.RLock()
 	hc := b.hostCallbacks
@@ -951,7 +951,7 @@ func (b *DiscordBroker) subscribeForProject(projectID string) {
 }
 
 func (b *DiscordBroker) unsubscribeForProject(projectID string) {
-	pattern := fmt.Sprintf("scion.grove.%s.>", projectID)
+	pattern := fmt.Sprintf("scion.project.%s.>", projectID)
 
 	b.mu.RLock()
 	hc := b.hostCallbacks
