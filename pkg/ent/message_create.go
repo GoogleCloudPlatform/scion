@@ -160,6 +160,34 @@ func (_c *MessageCreate) SetNillableGroupID(v *string) *MessageCreate {
 	return _c
 }
 
+// SetDispatchState sets the "dispatch_state" field.
+func (_c *MessageCreate) SetDispatchState(v string) *MessageCreate {
+	_c.mutation.SetDispatchState(v)
+	return _c
+}
+
+// SetNillableDispatchState sets the "dispatch_state" field if the given value is not nil.
+func (_c *MessageCreate) SetNillableDispatchState(v *string) *MessageCreate {
+	if v != nil {
+		_c.SetDispatchState(*v)
+	}
+	return _c
+}
+
+// SetDispatchedAt sets the "dispatched_at" field.
+func (_c *MessageCreate) SetDispatchedAt(v time.Time) *MessageCreate {
+	_c.mutation.SetDispatchedAt(v)
+	return _c
+}
+
+// SetNillableDispatchedAt sets the "dispatched_at" field if the given value is not nil.
+func (_c *MessageCreate) SetNillableDispatchedAt(v *time.Time) *MessageCreate {
+	if v != nil {
+		_c.SetDispatchedAt(*v)
+	}
+	return _c
+}
+
 // SetCreated sets the "created" field.
 func (_c *MessageCreate) SetCreated(v time.Time) *MessageCreate {
 	_c.mutation.SetCreated(v)
@@ -239,6 +267,10 @@ func (_c *MessageCreate) defaults() {
 		v := message.DefaultRead
 		_c.mutation.SetRead(v)
 	}
+	if _, ok := _c.mutation.DispatchState(); !ok {
+		v := message.DefaultDispatchState
+		_c.mutation.SetDispatchState(v)
+	}
 	if _, ok := _c.mutation.Created(); !ok {
 		v := message.DefaultCreated()
 		_c.mutation.SetCreated(v)
@@ -289,6 +321,9 @@ func (_c *MessageCreate) check() error {
 	}
 	if _, ok := _c.mutation.Read(); !ok {
 		return &ValidationError{Name: "read", err: errors.New(`ent: missing required field "Message.read"`)}
+	}
+	if _, ok := _c.mutation.DispatchState(); !ok {
+		return &ValidationError{Name: "dispatch_state", err: errors.New(`ent: missing required field "Message.dispatch_state"`)}
 	}
 	if _, ok := _c.mutation.Created(); !ok {
 		return &ValidationError{Name: "created", err: errors.New(`ent: missing required field "Message.created"`)}
@@ -376,6 +411,14 @@ func (_c *MessageCreate) createSpec() (*Message, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.GroupID(); ok {
 		_spec.SetField(message.FieldGroupID, field.TypeString, value)
 		_node.GroupID = value
+	}
+	if value, ok := _c.mutation.DispatchState(); ok {
+		_spec.SetField(message.FieldDispatchState, field.TypeString, value)
+		_node.DispatchState = value
+	}
+	if value, ok := _c.mutation.DispatchedAt(); ok {
+		_spec.SetField(message.FieldDispatchedAt, field.TypeTime, value)
+		_node.DispatchedAt = &value
 	}
 	if value, ok := _c.mutation.Created(); ok {
 		_spec.SetField(message.FieldCreated, field.TypeTime, value)
@@ -598,6 +641,36 @@ func (u *MessageUpsert) UpdateGroupID() *MessageUpsert {
 // ClearGroupID clears the value of the "group_id" field.
 func (u *MessageUpsert) ClearGroupID() *MessageUpsert {
 	u.SetNull(message.FieldGroupID)
+	return u
+}
+
+// SetDispatchState sets the "dispatch_state" field.
+func (u *MessageUpsert) SetDispatchState(v string) *MessageUpsert {
+	u.Set(message.FieldDispatchState, v)
+	return u
+}
+
+// UpdateDispatchState sets the "dispatch_state" field to the value that was provided on create.
+func (u *MessageUpsert) UpdateDispatchState() *MessageUpsert {
+	u.SetExcluded(message.FieldDispatchState)
+	return u
+}
+
+// SetDispatchedAt sets the "dispatched_at" field.
+func (u *MessageUpsert) SetDispatchedAt(v time.Time) *MessageUpsert {
+	u.Set(message.FieldDispatchedAt, v)
+	return u
+}
+
+// UpdateDispatchedAt sets the "dispatched_at" field to the value that was provided on create.
+func (u *MessageUpsert) UpdateDispatchedAt() *MessageUpsert {
+	u.SetExcluded(message.FieldDispatchedAt)
+	return u
+}
+
+// ClearDispatchedAt clears the value of the "dispatched_at" field.
+func (u *MessageUpsert) ClearDispatchedAt() *MessageUpsert {
+	u.SetNull(message.FieldDispatchedAt)
 	return u
 }
 
@@ -845,6 +918,41 @@ func (u *MessageUpsertOne) UpdateGroupID() *MessageUpsertOne {
 func (u *MessageUpsertOne) ClearGroupID() *MessageUpsertOne {
 	return u.Update(func(s *MessageUpsert) {
 		s.ClearGroupID()
+	})
+}
+
+// SetDispatchState sets the "dispatch_state" field.
+func (u *MessageUpsertOne) SetDispatchState(v string) *MessageUpsertOne {
+	return u.Update(func(s *MessageUpsert) {
+		s.SetDispatchState(v)
+	})
+}
+
+// UpdateDispatchState sets the "dispatch_state" field to the value that was provided on create.
+func (u *MessageUpsertOne) UpdateDispatchState() *MessageUpsertOne {
+	return u.Update(func(s *MessageUpsert) {
+		s.UpdateDispatchState()
+	})
+}
+
+// SetDispatchedAt sets the "dispatched_at" field.
+func (u *MessageUpsertOne) SetDispatchedAt(v time.Time) *MessageUpsertOne {
+	return u.Update(func(s *MessageUpsert) {
+		s.SetDispatchedAt(v)
+	})
+}
+
+// UpdateDispatchedAt sets the "dispatched_at" field to the value that was provided on create.
+func (u *MessageUpsertOne) UpdateDispatchedAt() *MessageUpsertOne {
+	return u.Update(func(s *MessageUpsert) {
+		s.UpdateDispatchedAt()
+	})
+}
+
+// ClearDispatchedAt clears the value of the "dispatched_at" field.
+func (u *MessageUpsertOne) ClearDispatchedAt() *MessageUpsertOne {
+	return u.Update(func(s *MessageUpsert) {
+		s.ClearDispatchedAt()
 	})
 }
 
@@ -1259,6 +1367,41 @@ func (u *MessageUpsertBulk) UpdateGroupID() *MessageUpsertBulk {
 func (u *MessageUpsertBulk) ClearGroupID() *MessageUpsertBulk {
 	return u.Update(func(s *MessageUpsert) {
 		s.ClearGroupID()
+	})
+}
+
+// SetDispatchState sets the "dispatch_state" field.
+func (u *MessageUpsertBulk) SetDispatchState(v string) *MessageUpsertBulk {
+	return u.Update(func(s *MessageUpsert) {
+		s.SetDispatchState(v)
+	})
+}
+
+// UpdateDispatchState sets the "dispatch_state" field to the value that was provided on create.
+func (u *MessageUpsertBulk) UpdateDispatchState() *MessageUpsertBulk {
+	return u.Update(func(s *MessageUpsert) {
+		s.UpdateDispatchState()
+	})
+}
+
+// SetDispatchedAt sets the "dispatched_at" field.
+func (u *MessageUpsertBulk) SetDispatchedAt(v time.Time) *MessageUpsertBulk {
+	return u.Update(func(s *MessageUpsert) {
+		s.SetDispatchedAt(v)
+	})
+}
+
+// UpdateDispatchedAt sets the "dispatched_at" field to the value that was provided on create.
+func (u *MessageUpsertBulk) UpdateDispatchedAt() *MessageUpsertBulk {
+	return u.Update(func(s *MessageUpsert) {
+		s.UpdateDispatchedAt()
+	})
+}
+
+// ClearDispatchedAt clears the value of the "dispatched_at" field.
+func (u *MessageUpsertBulk) ClearDispatchedAt() *MessageUpsertBulk {
+	return u.Update(func(s *MessageUpsert) {
+		s.ClearDispatchedAt()
 	})
 }
 

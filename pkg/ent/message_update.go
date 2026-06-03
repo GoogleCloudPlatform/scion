@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"entgo.io/ent/dialect/sql"
 	"entgo.io/ent/dialect/sql/sqlgraph"
@@ -220,6 +221,40 @@ func (_u *MessageUpdate) ClearGroupID() *MessageUpdate {
 	return _u
 }
 
+// SetDispatchState sets the "dispatch_state" field.
+func (_u *MessageUpdate) SetDispatchState(v string) *MessageUpdate {
+	_u.mutation.SetDispatchState(v)
+	return _u
+}
+
+// SetNillableDispatchState sets the "dispatch_state" field if the given value is not nil.
+func (_u *MessageUpdate) SetNillableDispatchState(v *string) *MessageUpdate {
+	if v != nil {
+		_u.SetDispatchState(*v)
+	}
+	return _u
+}
+
+// SetDispatchedAt sets the "dispatched_at" field.
+func (_u *MessageUpdate) SetDispatchedAt(v time.Time) *MessageUpdate {
+	_u.mutation.SetDispatchedAt(v)
+	return _u
+}
+
+// SetNillableDispatchedAt sets the "dispatched_at" field if the given value is not nil.
+func (_u *MessageUpdate) SetNillableDispatchedAt(v *time.Time) *MessageUpdate {
+	if v != nil {
+		_u.SetDispatchedAt(*v)
+	}
+	return _u
+}
+
+// ClearDispatchedAt clears the value of the "dispatched_at" field.
+func (_u *MessageUpdate) ClearDispatchedAt() *MessageUpdate {
+	_u.mutation.ClearDispatchedAt()
+	return _u
+}
+
 // Mutation returns the MessageMutation object of the builder.
 func (_u *MessageUpdate) Mutation() *MessageMutation {
 	return _u.mutation
@@ -331,6 +366,15 @@ func (_u *MessageUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	}
 	if _u.mutation.GroupIDCleared() {
 		_spec.ClearField(message.FieldGroupID, field.TypeString)
+	}
+	if value, ok := _u.mutation.DispatchState(); ok {
+		_spec.SetField(message.FieldDispatchState, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.DispatchedAt(); ok {
+		_spec.SetField(message.FieldDispatchedAt, field.TypeTime, value)
+	}
+	if _u.mutation.DispatchedAtCleared() {
+		_spec.ClearField(message.FieldDispatchedAt, field.TypeTime)
 	}
 	if _node, err = sqlgraph.UpdateNodes(ctx, _u.driver, _spec); err != nil {
 		if _, ok := err.(*sqlgraph.NotFoundError); ok {
@@ -544,6 +588,40 @@ func (_u *MessageUpdateOne) ClearGroupID() *MessageUpdateOne {
 	return _u
 }
 
+// SetDispatchState sets the "dispatch_state" field.
+func (_u *MessageUpdateOne) SetDispatchState(v string) *MessageUpdateOne {
+	_u.mutation.SetDispatchState(v)
+	return _u
+}
+
+// SetNillableDispatchState sets the "dispatch_state" field if the given value is not nil.
+func (_u *MessageUpdateOne) SetNillableDispatchState(v *string) *MessageUpdateOne {
+	if v != nil {
+		_u.SetDispatchState(*v)
+	}
+	return _u
+}
+
+// SetDispatchedAt sets the "dispatched_at" field.
+func (_u *MessageUpdateOne) SetDispatchedAt(v time.Time) *MessageUpdateOne {
+	_u.mutation.SetDispatchedAt(v)
+	return _u
+}
+
+// SetNillableDispatchedAt sets the "dispatched_at" field if the given value is not nil.
+func (_u *MessageUpdateOne) SetNillableDispatchedAt(v *time.Time) *MessageUpdateOne {
+	if v != nil {
+		_u.SetDispatchedAt(*v)
+	}
+	return _u
+}
+
+// ClearDispatchedAt clears the value of the "dispatched_at" field.
+func (_u *MessageUpdateOne) ClearDispatchedAt() *MessageUpdateOne {
+	_u.mutation.ClearDispatchedAt()
+	return _u
+}
+
 // Mutation returns the MessageMutation object of the builder.
 func (_u *MessageUpdateOne) Mutation() *MessageMutation {
 	return _u.mutation
@@ -685,6 +763,15 @@ func (_u *MessageUpdateOne) sqlSave(ctx context.Context) (_node *Message, err er
 	}
 	if _u.mutation.GroupIDCleared() {
 		_spec.ClearField(message.FieldGroupID, field.TypeString)
+	}
+	if value, ok := _u.mutation.DispatchState(); ok {
+		_spec.SetField(message.FieldDispatchState, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.DispatchedAt(); ok {
+		_spec.SetField(message.FieldDispatchedAt, field.TypeTime, value)
+	}
+	if _u.mutation.DispatchedAtCleared() {
+		_spec.ClearField(message.FieldDispatchedAt, field.TypeTime)
 	}
 	_node = &Message{config: _u.config}
 	_spec.Assign = _node.assignValues

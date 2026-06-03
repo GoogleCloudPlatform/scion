@@ -155,6 +155,37 @@ var (
 			},
 		},
 	}
+	// BrokerDispatchColumns holds the columns for the "broker_dispatch" table.
+	BrokerDispatchColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "broker_id", Type: field.TypeUUID},
+		{Name: "agent_id", Type: field.TypeUUID, Nullable: true},
+		{Name: "agent_slug", Type: field.TypeString, Nullable: true},
+		{Name: "project_id", Type: field.TypeUUID, Nullable: true},
+		{Name: "op", Type: field.TypeString},
+		{Name: "args", Type: field.TypeString, Nullable: true},
+		{Name: "state", Type: field.TypeString, Default: "pending"},
+		{Name: "result", Type: field.TypeString, Nullable: true},
+		{Name: "claimed_by", Type: field.TypeString, Nullable: true},
+		{Name: "attempts", Type: field.TypeInt, Default: 0},
+		{Name: "error", Type: field.TypeString, Nullable: true},
+		{Name: "created_at", Type: field.TypeTime},
+		{Name: "updated_at", Type: field.TypeTime},
+		{Name: "deadline_at", Type: field.TypeTime, Nullable: true},
+	}
+	// BrokerDispatchTable holds the schema information for the "broker_dispatch" table.
+	BrokerDispatchTable = &schema.Table{
+		Name:       "broker_dispatch",
+		Columns:    BrokerDispatchColumns,
+		PrimaryKey: []*schema.Column{BrokerDispatchColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "brokerdispatch_broker_id_state",
+				Unique:  false,
+				Columns: []*schema.Column{BrokerDispatchColumns[1], BrokerDispatchColumns[7]},
+			},
+		},
+	}
 	// BrokerJoinTokensColumns holds the columns for the "broker_join_tokens" table.
 	BrokerJoinTokensColumns = []*schema.Column{
 		{Name: "broker_id", Type: field.TypeUUID},
@@ -492,6 +523,8 @@ var (
 		{Name: "read", Type: field.TypeBool, Default: false},
 		{Name: "agent_id", Type: field.TypeString, Nullable: true},
 		{Name: "group_id", Type: field.TypeString, Nullable: true},
+		{Name: "dispatch_state", Type: field.TypeString, Default: "pending"},
+		{Name: "dispatched_at", Type: field.TypeTime, Nullable: true},
 		{Name: "created", Type: field.TypeTime},
 	}
 	// MessagesTable holds the schema information for the "messages" table.
@@ -513,7 +546,7 @@ var (
 			{
 				Name:    "message_created",
 				Unique:  false,
-				Columns: []*schema.Column{MessagesColumns[13]},
+				Columns: []*schema.Column{MessagesColumns[15]},
 			},
 		},
 	}
@@ -1027,6 +1060,7 @@ var (
 		AgentsTable,
 		AllowListTable,
 		APIKeysTable,
+		BrokerDispatchTable,
 		BrokerJoinTokensTable,
 		BrokerSecretsTable,
 		EnvVarsTable,
@@ -1066,6 +1100,9 @@ func init() {
 	}
 	APIKeysTable.Annotation = &entsql.Annotation{
 		Table: "api_keys",
+	}
+	BrokerDispatchTable.Annotation = &entsql.Annotation{
+		Table: "broker_dispatch",
 	}
 	BrokerJoinTokensTable.Annotation = &entsql.Annotation{
 		Table: "broker_join_tokens",

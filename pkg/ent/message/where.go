@@ -115,6 +115,16 @@ func GroupID(v string) predicate.Message {
 	return predicate.Message(sql.FieldEQ(FieldGroupID, v))
 }
 
+// DispatchState applies equality check predicate on the "dispatch_state" field. It's identical to DispatchStateEQ.
+func DispatchState(v string) predicate.Message {
+	return predicate.Message(sql.FieldEQ(FieldDispatchState, v))
+}
+
+// DispatchedAt applies equality check predicate on the "dispatched_at" field. It's identical to DispatchedAtEQ.
+func DispatchedAt(v time.Time) predicate.Message {
+	return predicate.Message(sql.FieldEQ(FieldDispatchedAt, v))
+}
+
 // Created applies equality check predicate on the "created" field. It's identical to CreatedEQ.
 func Created(v time.Time) predicate.Message {
 	return predicate.Message(sql.FieldEQ(FieldCreated, v))
@@ -748,6 +758,121 @@ func GroupIDEqualFold(v string) predicate.Message {
 // GroupIDContainsFold applies the ContainsFold predicate on the "group_id" field.
 func GroupIDContainsFold(v string) predicate.Message {
 	return predicate.Message(sql.FieldContainsFold(FieldGroupID, v))
+}
+
+// DispatchStateEQ applies the EQ predicate on the "dispatch_state" field.
+func DispatchStateEQ(v string) predicate.Message {
+	return predicate.Message(sql.FieldEQ(FieldDispatchState, v))
+}
+
+// DispatchStateNEQ applies the NEQ predicate on the "dispatch_state" field.
+func DispatchStateNEQ(v string) predicate.Message {
+	return predicate.Message(sql.FieldNEQ(FieldDispatchState, v))
+}
+
+// DispatchStateIn applies the In predicate on the "dispatch_state" field.
+func DispatchStateIn(vs ...string) predicate.Message {
+	return predicate.Message(sql.FieldIn(FieldDispatchState, vs...))
+}
+
+// DispatchStateNotIn applies the NotIn predicate on the "dispatch_state" field.
+func DispatchStateNotIn(vs ...string) predicate.Message {
+	return predicate.Message(sql.FieldNotIn(FieldDispatchState, vs...))
+}
+
+// DispatchStateGT applies the GT predicate on the "dispatch_state" field.
+func DispatchStateGT(v string) predicate.Message {
+	return predicate.Message(sql.FieldGT(FieldDispatchState, v))
+}
+
+// DispatchStateGTE applies the GTE predicate on the "dispatch_state" field.
+func DispatchStateGTE(v string) predicate.Message {
+	return predicate.Message(sql.FieldGTE(FieldDispatchState, v))
+}
+
+// DispatchStateLT applies the LT predicate on the "dispatch_state" field.
+func DispatchStateLT(v string) predicate.Message {
+	return predicate.Message(sql.FieldLT(FieldDispatchState, v))
+}
+
+// DispatchStateLTE applies the LTE predicate on the "dispatch_state" field.
+func DispatchStateLTE(v string) predicate.Message {
+	return predicate.Message(sql.FieldLTE(FieldDispatchState, v))
+}
+
+// DispatchStateContains applies the Contains predicate on the "dispatch_state" field.
+func DispatchStateContains(v string) predicate.Message {
+	return predicate.Message(sql.FieldContains(FieldDispatchState, v))
+}
+
+// DispatchStateHasPrefix applies the HasPrefix predicate on the "dispatch_state" field.
+func DispatchStateHasPrefix(v string) predicate.Message {
+	return predicate.Message(sql.FieldHasPrefix(FieldDispatchState, v))
+}
+
+// DispatchStateHasSuffix applies the HasSuffix predicate on the "dispatch_state" field.
+func DispatchStateHasSuffix(v string) predicate.Message {
+	return predicate.Message(sql.FieldHasSuffix(FieldDispatchState, v))
+}
+
+// DispatchStateEqualFold applies the EqualFold predicate on the "dispatch_state" field.
+func DispatchStateEqualFold(v string) predicate.Message {
+	return predicate.Message(sql.FieldEqualFold(FieldDispatchState, v))
+}
+
+// DispatchStateContainsFold applies the ContainsFold predicate on the "dispatch_state" field.
+func DispatchStateContainsFold(v string) predicate.Message {
+	return predicate.Message(sql.FieldContainsFold(FieldDispatchState, v))
+}
+
+// DispatchedAtEQ applies the EQ predicate on the "dispatched_at" field.
+func DispatchedAtEQ(v time.Time) predicate.Message {
+	return predicate.Message(sql.FieldEQ(FieldDispatchedAt, v))
+}
+
+// DispatchedAtNEQ applies the NEQ predicate on the "dispatched_at" field.
+func DispatchedAtNEQ(v time.Time) predicate.Message {
+	return predicate.Message(sql.FieldNEQ(FieldDispatchedAt, v))
+}
+
+// DispatchedAtIn applies the In predicate on the "dispatched_at" field.
+func DispatchedAtIn(vs ...time.Time) predicate.Message {
+	return predicate.Message(sql.FieldIn(FieldDispatchedAt, vs...))
+}
+
+// DispatchedAtNotIn applies the NotIn predicate on the "dispatched_at" field.
+func DispatchedAtNotIn(vs ...time.Time) predicate.Message {
+	return predicate.Message(sql.FieldNotIn(FieldDispatchedAt, vs...))
+}
+
+// DispatchedAtGT applies the GT predicate on the "dispatched_at" field.
+func DispatchedAtGT(v time.Time) predicate.Message {
+	return predicate.Message(sql.FieldGT(FieldDispatchedAt, v))
+}
+
+// DispatchedAtGTE applies the GTE predicate on the "dispatched_at" field.
+func DispatchedAtGTE(v time.Time) predicate.Message {
+	return predicate.Message(sql.FieldGTE(FieldDispatchedAt, v))
+}
+
+// DispatchedAtLT applies the LT predicate on the "dispatched_at" field.
+func DispatchedAtLT(v time.Time) predicate.Message {
+	return predicate.Message(sql.FieldLT(FieldDispatchedAt, v))
+}
+
+// DispatchedAtLTE applies the LTE predicate on the "dispatched_at" field.
+func DispatchedAtLTE(v time.Time) predicate.Message {
+	return predicate.Message(sql.FieldLTE(FieldDispatchedAt, v))
+}
+
+// DispatchedAtIsNil applies the IsNil predicate on the "dispatched_at" field.
+func DispatchedAtIsNil() predicate.Message {
+	return predicate.Message(sql.FieldIsNull(FieldDispatchedAt))
+}
+
+// DispatchedAtNotNil applies the NotNil predicate on the "dispatched_at" field.
+func DispatchedAtNotNil() predicate.Message {
+	return predicate.Message(sql.FieldNotNull(FieldDispatchedAt))
 }
 
 // CreatedEQ applies the EQ predicate on the "created" field.

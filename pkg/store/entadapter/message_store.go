@@ -74,9 +74,11 @@ func entMessageToStore(e *ent.Message) *store.Message {
 		Urgent:      e.Urgent,
 		Broadcasted: e.Broadcasted,
 		Read:        e.Read,
-		AgentID:     e.AgentID,
-		GroupID:     e.GroupID,
-		CreatedAt:   e.Created,
+		AgentID:       e.AgentID,
+		GroupID:       e.GroupID,
+		CreatedAt:     e.Created,
+		DispatchState: e.DispatchState,
+		DispatchedAt:  e.DispatchedAt,
 	}
 }
 
@@ -112,6 +114,12 @@ func (s *MessageStore) CreateMessage(ctx context.Context, msg *store.Message) er
 	if msg.Type == "" {
 		create.SetType("instruction")
 	}
+	if msg.DispatchState != "" {
+		create.SetDispatchState(msg.DispatchState)
+	}
+	if msg.DispatchedAt != nil {
+		create.SetDispatchedAt(*msg.DispatchedAt)
+	}
 	if !msg.CreatedAt.IsZero() {
 		create.SetCreated(msg.CreatedAt)
 	}
@@ -122,6 +130,7 @@ func (s *MessageStore) CreateMessage(ctx context.Context, msg *store.Message) er
 	}
 	msg.CreatedAt = created.Created
 	msg.Type = created.Type
+	msg.DispatchState = created.DispatchState
 
 	// Design-in: announce the new message for LISTEN/NOTIFY subscribers.
 	// Best-effort — a publish failure must not fail the write that succeeded.
