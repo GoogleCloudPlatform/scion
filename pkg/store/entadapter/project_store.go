@@ -890,6 +890,26 @@ func (s *ProjectStore) ReleaseRuntimeBrokerConnection(ctx context.Context, broke
 	return false, store.ErrVersionConflict
 }
 
+// ReapStaleBrokerAffinity clears affinity (connected_hub_id/connected_session_id/
+// connected_at) for brokers that still claim affinity but whose last_heartbeat
+// is older than staleBefore. Does not change broker status.
+func (s *ProjectStore) ReapStaleBrokerAffinity(ctx context.Context, staleBefore time.Time) (int, error) {
+	affected, err := s.client.RuntimeBroker.Update().
+		Where(
+			runtimebroker.ConnectedHubIDNotNil(),
+			runtimebroker.LastHeartbeatLT(staleBefore),
+		).
+		ClearConnectedHubID().
+		ClearConnectedSessionID().
+		ClearConnectedAt().
+		SetUpdated(time.Now()).
+		Save(ctx)
+	if err != nil {
+		return 0, mapError(err)
+	}
+	return affected, nil
+}
+
 // =============================================================================
 // ProjectProvider (project_contributors) operations
 // =============================================================================

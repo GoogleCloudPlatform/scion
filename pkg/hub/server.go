@@ -1937,6 +1937,7 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 	s.scheduler.RegisterEventHandler("message", s.messageEventHandler())
 	s.scheduler.RegisterEventHandler("dispatch_agent", s.dispatchAgentEventHandler())
 	s.scheduler.RegisterRecurringSingleton("schedule-evaluator", 1, store.LockScheduleEvaluator, s.evaluateSchedulesHandler())
+	s.scheduler.RegisterRecurringSingleton("broker-affinity-reap", 1, store.LockBrokerAffinityReap, s.brokerAffinityReapHandler())
 
 	// Register GitHub App health check if the app is configured
 	s.mu.RLock()
