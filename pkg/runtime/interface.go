@@ -51,6 +51,16 @@ type RunConfig struct {
 	NetworkMode          string   // Container network mode (e.g. "host" for --network=host)
 	Project              string   // Project name (e.g., "global" or "my-project")
 	ProjectID            string   // Project ID (e.g., "550e8400-e29b-41d4-a716-446655440000")
+
+	// WorkspaceBackendName is "local" or "nfs", set by the workspace backend
+	// selector. Used to branch UID/GID injection and skip per-start chown
+	// when NFS (N1-5).
+	WorkspaceBackendName string
+	// NFSUID and NFSGID are the stable, node-independent UID/GID for NFS-backed
+	// workspaces. Advertised as SCION_HOST_UID/GID when WorkspaceBackendName is "nfs"
+	// instead of os.Getuid()/os.Getgid(). Default 1000:1000 (design §9.1).
+	NFSUID int
+	NFSGID int
 }
 
 type Runtime interface {
