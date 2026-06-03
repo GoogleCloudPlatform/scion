@@ -61,6 +61,23 @@ type RunConfig struct {
 	// instead of os.Getuid()/os.Getgid(). Default 1000:1000 (design §9.1).
 	NFSUID int
 	NFSGID int
+
+	// NFSPVClaimName is the K8s PVC name for the NFS-backed workspace volume.
+	// Set when WorkspaceBackendName is "nfs". The PVC references a static RWX PV
+	// bound to the Filestore/NFS export. Empty for local backend.
+	NFSPVClaimName string
+	// NFSSubPath is the subPath within the NFS PVC that isolates this project's
+	// workspace (e.g. "projects/<pid>/workspace"). Used by K8s buildPod to scope
+	// the volume mount — pod sees only its project subtree (design §9.4).
+	NFSSubPath string
+	// NFSStorageClass is the K8s StorageClass for NFS-backed PVCs.
+	// Used when creating shared-dir PVCs on NFS. Empty uses cluster default.
+	NFSStorageClass string
+
+	// GitCloneForInit holds git clone configuration for NFS init-container
+	// workspace provisioning (N2-2). When set, buildPod adds an init container
+	// that clones/provisions the workspace before the main container starts.
+	GitCloneForInit *api.GitCloneConfig
 }
 
 type Runtime interface {
