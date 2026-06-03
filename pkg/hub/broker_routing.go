@@ -28,6 +28,13 @@ import (
 // the caller should emit a NOTIFY wakeup and return 202 Accepted.
 var ErrMessageDeferred = errors.New("message deferred: broker not locally reachable")
 
+// ErrLifecycleDeferred is returned by HybridBrokerClient.StartAgent/StopAgent/
+// RestartAgent when the broker is not locally connected and has no HTTP
+// endpoint. The caller should serialize resolved params into a broker_dispatch
+// row, signal the owning node via the command bus, and wait for the resulting
+// agent status transition (design §5.4, §6.2).
+var ErrLifecycleDeferred = errors.New("lifecycle deferred: broker not locally reachable")
+
 // routeDecision is the outcome of HybridBrokerClient.route — how a dispatch for a
 // broker should be delivered when this node does not hold the broker's socket.
 type routeDecision int
