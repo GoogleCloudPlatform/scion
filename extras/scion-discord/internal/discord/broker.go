@@ -264,11 +264,26 @@ func (b *DiscordBroker) Configure(config map[string]string) error {
 
 		// Bootstrap Gateway: request a wildcard subscription so the Hub calls
 		// Subscribe(), which triggers startGateway() on the first call.
-		if hc := b.hostCallbacks; hc != nil {
-			if err := hc.RequestSubscription("scion.grove.>"); err != nil {
-				b.log.Warn("Failed to request bootstrap subscription", "error", err)
+		// Host callbacks are wired after Configure() returns, so we defer
+		// the request in a goroutine that retries until they're available.
+		go func() {
+			for i := 0; i < 20; i++ {
+				time.Sleep(500 * time.Millisecond)
+				b.mu.RLock()
+				hc := b.hostCallbacks
+				b.mu.RUnlock()
+				if hc == nil {
+					continue
+				}
+				if err := hc.RequestSubscription("scion.grove.>"); err != nil {
+					b.log.Warn("Failed to request bootstrap subscription", "error", err)
+				} else {
+					b.log.Info("Requested bootstrap subscription for Discord Gateway")
+				}
+				return
 			}
-		}
+			b.log.Error("Bootstrap subscription timed out — host callbacks never became available")
+		}()
 	}
 
 	return nil
