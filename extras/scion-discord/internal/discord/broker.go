@@ -163,8 +163,7 @@ func (b *DiscordBroker) Configure(config map[string]string) error {
 		session.Identify.Intents = discordgo.IntentsGuilds |
 			discordgo.IntentsGuildMessages |
 			discordgo.IntentsDirectMessages |
-			discordgo.IntentsMessageContent |
-			discordgo.IntentsGuildMembers
+			discordgo.IntentsMessageContent
 
 		b.session = session
 
@@ -358,6 +357,7 @@ func (b *DiscordBroker) Publish(ctx context.Context, topic string, msg *messages
 	}
 	session := b.session
 	store := b.store
+	sendQueue := b.sendQueue
 	b.mu.RUnlock()
 
 	if session == nil {
@@ -618,9 +618,6 @@ func (b *DiscordBroker) handleInteractionCreate(s *discordgo.Session, i *discord
 	b.mu.RLock()
 	commands := b.commands
 	callbacks := b.callbacks
-	b.mu.RUnlock()
-
-	b.mu.RLock()
 	registration := b.registration
 	b.mu.RUnlock()
 
