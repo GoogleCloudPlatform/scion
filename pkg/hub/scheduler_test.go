@@ -1292,6 +1292,18 @@ func (l *lockerStore) TryAdvisoryLock(_ context.Context, _ store.AdvisoryLockKey
 	}, nil
 }
 
+func (l *lockerStore) TryAdvisoryLockObject(_ context.Context, _ store.AdvisoryLockKey, _ int32) (bool, func() error, error) {
+	if l.err != nil {
+		return false, func() error { return nil }, l.err
+	}
+	return l.acquired, func() error {
+		if l.released != nil {
+			l.released.Add(1)
+		}
+		return nil
+	}, nil
+}
+
 // TestSingletonGuard_SkipsTickOnLockError verifies that a lock-acquisition error
 // (e.g. a connection timeout) causes the tick to be SKIPPED rather than running
 // the handler unguarded — running unguarded would let multiple replicas execute
