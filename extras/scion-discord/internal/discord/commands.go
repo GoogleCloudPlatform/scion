@@ -161,6 +161,18 @@ func (h *CommandHandler) RegisterCommands() error {
 			},
 			{
 				Type:        discordgo.ApplicationCommandOptionSubCommand,
+				Name:        "default",
+				Description: "Set or show the default agent for this channel",
+				Options: []*discordgo.ApplicationCommandOption{{
+					Type:         discordgo.ApplicationCommandOptionString,
+					Name:         "agent",
+					Description:  "Agent name (use 'none' to clear)",
+					Required:     false,
+					Autocomplete: true,
+				}},
+			},
+			{
+				Type:        discordgo.ApplicationCommandOptionSubCommand,
 				Name:        "register",
 				Description: "Link your Discord account to Scion Hub",
 			},
@@ -204,6 +216,7 @@ var ephemeralCommands = map[string]bool{
 	"setup":    true,
 	"unlink":   true,
 	"settings": true,
+	"default":  true,
 }
 
 // ephemeralFlag returns MessageFlagsEphemeral if the subcommand should be
@@ -269,6 +282,8 @@ func (h *CommandHandler) HandleSlashCommand(s *discordgo.Session, i *discordgo.I
 			h.HandleLogs(s, i)
 		case "settings":
 			h.HandleSettings(s, i)
+		case "default":
+			h.HandleDefault(s, i)
 		// register and unregister are handled by RegistrationHandler
 		// and should be wired up in the broker's dispatch
 		default:
@@ -321,6 +336,14 @@ func (h *CommandHandler) HandleAutocomplete(s *discordgo.Session, i *discordgo.I
 
 		prefix := strings.ToLower(opt.StringValue())
 		var choices []*discordgo.ApplicationCommandOptionChoice
+
+		if sub.Name == "default" && strings.HasPrefix("none", prefix) {
+			choices = append(choices, &discordgo.ApplicationCommandOptionChoice{
+				Name:  "none (clear default)",
+				Value: "none",
+			})
+		}
+
 		for _, slug := range agents {
 			if strings.HasPrefix(strings.ToLower(slug), prefix) {
 				choices = append(choices, &discordgo.ApplicationCommandOptionChoice{
@@ -328,7 +351,6 @@ func (h *CommandHandler) HandleAutocomplete(s *discordgo.Session, i *discordgo.I
 					Value: slug,
 				})
 			}
-			// Discord allows max 25 autocomplete choices.
 			if len(choices) >= 25 {
 				break
 			}
@@ -353,6 +375,7 @@ func helpText() string {
 		"`/scion stop <agent>` — Stop an agent\n" +
 		"`/scion message <agent> <text>` — Send a message to an agent\n" +
 		"`/scion logs <agent>` — View agent logs\n" +
+		"`/scion default [agent]` — Set or show the default agent\n" +
 		"`/scion register` — Link your Discord account to Scion Hub\n" +
 		"`/scion unregister` — Unlink your Discord account\n" +
 		"`/scion settings` — Configure channel notification settings\n" +
@@ -687,6 +710,75 @@ func (h *CommandHandler) HandleLogs(s *discordgo.Session, i *discordgo.Interacti
 		return
 	}
 	h.followup(s, i, fmt.Sprintf("Viewing logs for agent **%s** is not yet implemented.", agentSlug))
+}
+
+// HandleDefault sets, shows, or clears the default agent for a channel.
+func (h *CommandHandler) HandleDefault(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	link, err := h.store.GetChannelLink(ctx, i.ChannelID)
+	if err != nil {
+		h.log.Error("Failed to get channel link", "error", err, "channel_id", i.ChannelID)
+		h.followup(s, i, "Something went wrong. Please try again.")
+		return
+	}
+	if link == nil {
+		h.followup(s, i, "This channel is not linked to a project. Use `/scion setup` first.")
+		return
+	}
+
+	agentSlug := getSubcommandOption(i, "agent")
+
+	if agentSlug == "" {
+		if link.DefaultAgent == "" {
+			h.followup(s, i, "No default agent is set for this channel.\nUse `/scion default agent:<name>` to set one.")
+		} else {
+			h.followup(s, i, fmt.Sprintf("Default agent for this channel: **%s**", link.DefaultAgent))
+		}
+		return
+	}
+
+	if agentSlug == "none" {
+		link.DefaultAgent = ""
+		if err := h.store.UpdateChannelLink(ctx, link); err != nil {
+			h.log.Error("Failed to clear default agent", "error", err, "channel_id", i.ChannelID)
+			h.followup(s, i, "Failed to clear default agent. Please try again.")
+			return
+		}
+		h.followup(s, i, "Default agent cleared for this channel.")
+		h.log.Info("Default agent cleared", "channel_id", i.ChannelID)
+		return
+	}
+
+	agents, err := h.getAgents(ctx, link.ProjectID)
+	if err != nil {
+		h.log.Error("Failed to list agents", "error", err, "project_id", link.ProjectID)
+		h.followup(s, i, "Failed to fetch agents. Please try again later.")
+		return
+	}
+
+	found := false
+	for _, slug := range agents {
+		if slug == agentSlug {
+			found = true
+			break
+		}
+	}
+	if !found {
+		h.followup(s, i, fmt.Sprintf("Agent **%s** not found in this project.", agentSlug))
+		return
+	}
+
+	link.DefaultAgent = agentSlug
+	if err := h.store.UpdateChannelLink(ctx, link); err != nil {
+		h.log.Error("Failed to set default agent", "error", err, "channel_id", i.ChannelID)
+		h.followup(s, i, "Failed to set default agent. Please try again.")
+		return
+	}
+
+	h.followup(s, i, fmt.Sprintf("Default agent set to **%s** for this channel.", agentSlug))
+	h.log.Info("Default agent set", "channel_id", i.ChannelID, "agent", agentSlug)
 }
 
 // HandleSettings is a placeholder for channel settings (Phase 3).
