@@ -155,7 +155,7 @@ func (h *RegistrationHandler) HandleRegister(s *discordgo.Session, i *discordgo.
 	h.mu.Unlock()
 
 	// Build the link URL.
-	hubLink := fmt.Sprintf("%s/profile/link?platform=discord&code=%s&user_name=%s",
+	hubLink := fmt.Sprintf("%s/profile/discord?code=%s&user_name=%s",
 		strings.TrimRight(h.hubURL, "/"), code, discordUsername)
 
 	// Send follow-up with a URL button.
