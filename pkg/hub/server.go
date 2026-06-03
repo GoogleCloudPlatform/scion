@@ -318,10 +318,12 @@ type RuntimeBrokerClient interface {
 	// Returns the command output, exit code, and any error.
 	ExecAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, command []string, timeout int) (string, int, error)
 
-	// CleanupProject asks a broker to remove its local hub-native project directory.
+	// CleanupProject asks a broker to remove its local hub-native project directory
+	// and, for NFS-backed projects, the NFS project subtree.
 	// brokerID is used for HMAC authentication lookup.
+	// projectID is passed to enable NFS subtree cleanup (keyed by project ID).
 	// 404 responses are tolerated for idempotency.
-	CleanupProject(ctx context.Context, brokerID, brokerEndpoint, projectSlug string) error
+	CleanupProject(ctx context.Context, brokerID, brokerEndpoint, projectSlug, projectID string) error
 }
 
 // RemoteCreateAgentRequest is the request body for creating an agent on a remote runtime broker.

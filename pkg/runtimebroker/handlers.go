@@ -2349,7 +2349,38 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, slug stri
 	}
 
 	s.agentLifecycleLog.Info("Removed hub-native project directory", "slug", slug, "path", projectPath)
+
+	// N1-6: Also clean the NFS workspace subtree if NFS is configured and the
+	// Hub passed a project_id. NFS paths are keyed by project ID (UUID), not
+	// slug. This mirrors cleanupSharedDirPVCs on the K8s side (design §4.4).
+	// Cleanup is idempotent — multiple brokers attempting the same deletion
+	// (they share the NFS mount) is safe.
+	s.cleanupNFSProjectSubtree(r)
+
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// cleanupNFSProjectSubtree removes the NFS project subtree if NFS is
+// configured and the request includes a project_id query parameter.
+// This is an append-only extension to the existing deleteProject handler
+// for NFS-backed workspaces (N1-6).
+func (s *Server) cleanupNFSProjectSubtree(r *http.Request) {
+	nfsCfg := s.config.NFSConfig
+	if nfsCfg == nil || len(nfsCfg.Shares) == 0 {
+		return // NFS not configured on this broker
+	}
+
+	projectID := r.URL.Query().Get("project_id")
+	if projectID == "" {
+		return // No project ID provided — skip NFS cleanup
+	}
+
+	if err := scionrt.CleanupNFSProject(nfsCfg, projectID); err != nil {
+		s.agentLifecycleLog.Warn("failed to cleanup NFS project subtree",
+			"project_id", projectID, "error", err)
+		// Non-fatal: local cleanup already succeeded. NFS cleanup failure
+		// is logged but does not fail the request (best-effort, idempotent).
+	}
 }
 
 // findAgentInHubNativeProjects scans hub-native project directories

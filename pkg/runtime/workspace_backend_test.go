@@ -668,19 +668,28 @@ func TestLocalBackendProvision_NoOp(t *testing.T) {
 	}
 }
 
-func TestNFSBackendProvision_Stub(t *testing.T) {
+func TestNFSBackendProvision_NonGit(t *testing.T) {
+	mountRoot := t.TempDir()
 	nfsCfg := &config.V1NFSConfig{
-		MountRoot: "/mnt/nfs",
+		MountRoot: mountRoot,
 		Shares: []config.V1NFSShare{
 			{ID: "s1", Server: "10.0.0.2", Export: "/ws"},
 		},
 	}
 	b := NewNFSBackend(nfsCfg)
-	err := b.Provision(ProvisionInput{
+	res, err := b.Resolve(ResolveInput{
 		ProjectID: "proj1",
 		Mode:      store.SharingModeSharedPlain,
 	})
 	if err != nil {
-		t.Errorf("nfsBackend.Provision stub should return nil, got error: %v", err)
+		t.Fatalf("Resolve: %v", err)
+	}
+	err = b.Provision(ProvisionInput{
+		Resolved:  res,
+		ProjectID: "proj1",
+		Mode:      store.SharingModeSharedPlain,
+	})
+	if err != nil {
+		t.Errorf("nfsBackend.Provision for non-git project should succeed, got error: %v", err)
 	}
 }
