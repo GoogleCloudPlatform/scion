@@ -17,6 +17,7 @@ package hub
 import (
 	"context"
 	"fmt"
+	"log/slog"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -109,9 +110,35 @@ func (s *Server) executeDispatch(ctx context.Context, d store.BrokerDispatch) (s
 	}
 }
 
-// deliverMessage tunnels a reconciled message to its agent over the LOCAL control
-// channel. The tunnel wiring is completed in Phase 3 (B3-3); in the current phase
-// no producer writes pending message intent, so the default is a no-op success.
+// deliverMessage tunnels a reconciled message to its agent over the LOCAL
+// control channel — the same path DispatchAgentMessage uses for a locally-
+// connected broker. reconcileBroker has already CAS-marked the message
+// dispatched before calling this, so just deliver.
 func (s *Server) deliverMessage(ctx context.Context, m *store.Message) error {
-	return nil
+	if m == nil || m.AgentID == "" {
+		return fmt.Errorf("message has no agent ID")
+	}
+	agent, err := s.store.GetAgent(ctx, m.AgentID)
+	if err != nil {
+		return fmt.Errorf("resolve agent %s: %w", m.AgentID, err)
+	}
+	if agent.RuntimeBrokerID == "" {
+		return fmt.Errorf("agent %s has no runtime broker", m.AgentID)
+	}
+	dispatcher := s.GetDispatcher()
+	if dispatcher == nil {
+		return fmt.Errorf("no dispatcher available for message delivery")
+	}
+	return dispatcher.DispatchAgentMessage(ctx, agent, m.Msg, m.Urgent, nil)
+}
+
+// signalDeferredMessage emits a best-effort NOTIFY wakeup so the broker's
+// owning node drains the pending message. Called when route() returns
+// routeForward or routeUndeliverable (the message row is already durable).
+func (s *Server) signalDeferredMessage(ctx context.Context, brokerID, agentID string) {
+	if s.commandBus != nil {
+		if err := s.commandBus.SignalBrokerCmd(ctx, brokerID); err != nil {
+			slog.Warn("failed to signal deferred message", "brokerID", brokerID, "agentID", agentID, "error", err)
+		}
+	}
 }

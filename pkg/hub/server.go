@@ -1364,6 +1364,7 @@ func (s *Server) StartNotificationDispatcher() {
 	nd := NewNotificationDispatcher(s.store, s.events, s.GetDispatcher, logging.Subsystem("hub.notifications"))
 	nd.messageLog = s.dedicatedMessageLog
 	nd.channelRegistry = s.channelRegistry
+	nd.signalDeferred = s.signalDeferredMessage
 	s.notificationDispatcher = nd
 	s.notificationDispatcher.Start()
 }
@@ -1387,6 +1388,7 @@ func (s *Server) StartMessageBroker(b broker.MessageBroker) {
 
 	proxy := NewMessageBrokerProxy(b, s.store, s.events, s.GetDispatcher, logging.Subsystem("hub.broker"))
 	proxy.messageLog = s.dedicatedMessageLog
+	proxy.SetSignalDeferred(s.signalDeferredMessage)
 	s.messageBrokerProxy = proxy
 	proxy.Start()
 
@@ -1415,7 +1417,9 @@ func (s *Server) CreateAuthenticatedDispatcher() *HTTPAgentDispatcher {
 	// Wrap with hybrid client that prefers control channel
 	var client RuntimeBrokerClient
 	if s.controlChannel != nil {
-		client = NewHybridBrokerClient(s.controlChannel, httpClient, &hmacBrokerSigner{store: s.store}, s.config.Debug)
+		hbc := NewHybridBrokerClient(s.controlChannel, httpClient, &hmacBrokerSigner{store: s.store}, s.config.Debug)
+		hbc.SetAffinityLookup(StoreAffinityLookup(s.store, 0))
+		client = hbc
 	} else {
 		client = httpClient
 	}
@@ -1647,12 +1651,16 @@ func (s *Server) messageEventHandler() EventHandler {
 		structuredMsg.Plain = payload.Plain
 		structuredMsg.Urgent = payload.Interrupt
 
-		if err := dispatcher.DispatchAgentMessage(ctx, agent, payload.Message, payload.Interrupt, structuredMsg); err != nil {
+		if err := dispatcher.DispatchAgentMessage(ctx, agent, payload.Message, payload.Interrupt, structuredMsg); errors.Is(err, ErrMessageDeferred) {
+			s.signalDeferredMessage(ctx, agent.RuntimeBrokerID, agent.ID)
+			slog.Info("Scheduler: message deferred for cross-node delivery",
+				"eventID", evt.ID, "agent_id", agent.ID, "agentName", agent.Name)
+		} else if err != nil {
 			return fmt.Errorf("failed to dispatch message to agent %s: %w", agent.Name, err)
+		} else {
+			slog.Info("Scheduler: message delivered to agent",
+				"eventID", evt.ID, "agent_id", agent.ID, "agentName", agent.Name)
 		}
-
-		slog.Info("Scheduler: message delivered to agent",
-			"eventID", evt.ID, "agent_id", agent.ID, "agentName", agent.Name)
 		return nil
 	}
 }
