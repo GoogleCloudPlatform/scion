@@ -49,8 +49,6 @@ const (
 	FieldFiles = "files"
 	// FieldBaseTemplate holds the string denoting the base_template field in the database.
 	FieldBaseTemplate = "base_template"
-	// FieldLocked holds the string denoting the locked field in the database.
-	FieldLocked = "locked"
 	// FieldStatus holds the string denoting the status field in the database.
 	FieldStatus = "status"
 	// FieldOwnerID holds the string denoting the owner_id field in the database.
@@ -89,7 +87,6 @@ var Columns = []string{
 	FieldStoragePath,
 	FieldFiles,
 	FieldBaseTemplate,
-	FieldLocked,
 	FieldStatus,
 	FieldOwnerID,
 	FieldCreatedBy,
@@ -116,8 +113,6 @@ var (
 	SlugValidator func(string) error
 	// DefaultScope holds the default value on creation for the "scope" field.
 	DefaultScope string
-	// DefaultLocked holds the default value on creation for the "locked" field.
-	DefaultLocked bool
 	// DefaultVisibility holds the default value on creation for the "visibility" field.
 	DefaultVisibility string
 	// DefaultCreated holds the default value on creation for the "created" field.
@@ -248,11 +243,6 @@ func ByFiles(opts ...sql.OrderTermOption) OrderOption {
 // ByBaseTemplate orders the results by the base_template field.
 func ByBaseTemplate(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldBaseTemplate, opts...).ToFunc()
-}
-
-// ByLocked orders the results by the locked field.
-func ByLocked(opts ...sql.OrderTermOption) OrderOption {
-	return sql.OrderByField(FieldLocked, opts...).ToFunc()
 }
 
 // ByStatus orders the results by the status field.

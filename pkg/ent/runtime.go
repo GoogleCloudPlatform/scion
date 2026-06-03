@@ -386,20 +386,16 @@ func init() {
 	harnessconfigDescScope := harnessconfigFields[8].Descriptor()
 	// harnessconfig.DefaultScope holds the default value on creation for the scope field.
 	harnessconfig.DefaultScope = harnessconfigDescScope.Default.(string)
-	// harnessconfigDescLocked is the schema descriptor for locked field.
-	harnessconfigDescLocked := harnessconfigFields[14].Descriptor()
-	// harnessconfig.DefaultLocked holds the default value on creation for the locked field.
-	harnessconfig.DefaultLocked = harnessconfigDescLocked.Default.(bool)
 	// harnessconfigDescVisibility is the schema descriptor for visibility field.
-	harnessconfigDescVisibility := harnessconfigFields[19].Descriptor()
+	harnessconfigDescVisibility := harnessconfigFields[18].Descriptor()
 	// harnessconfig.DefaultVisibility holds the default value on creation for the visibility field.
 	harnessconfig.DefaultVisibility = harnessconfigDescVisibility.Default.(string)
 	// harnessconfigDescCreated is the schema descriptor for created field.
-	harnessconfigDescCreated := harnessconfigFields[20].Descriptor()
+	harnessconfigDescCreated := harnessconfigFields[19].Descriptor()
 	// harnessconfig.DefaultCreated holds the default value on creation for the created field.
 	harnessconfig.DefaultCreated = harnessconfigDescCreated.Default.(func() time.Time)
 	// harnessconfigDescUpdated is the schema descriptor for updated field.
-	harnessconfigDescUpdated := harnessconfigFields[21].Descriptor()
+	harnessconfigDescUpdated := harnessconfigFields[20].Descriptor()
 	// harnessconfig.DefaultUpdated holds the default value on creation for the updated field.
 	harnessconfig.DefaultUpdated = harnessconfigDescUpdated.Default.(func() time.Time)
 	// harnessconfig.UpdateDefaultUpdated holds the default value on update for the updated field.
@@ -860,20 +856,16 @@ func init() {
 	templateDescScope := templateFields[10].Descriptor()
 	// template.DefaultScope holds the default value on creation for the scope field.
 	template.DefaultScope = templateDescScope.Default.(string)
-	// templateDescLocked is the schema descriptor for locked field.
-	templateDescLocked := templateFields[18].Descriptor()
-	// template.DefaultLocked holds the default value on creation for the locked field.
-	template.DefaultLocked = templateDescLocked.Default.(bool)
 	// templateDescVisibility is the schema descriptor for visibility field.
-	templateDescVisibility := templateFields[23].Descriptor()
+	templateDescVisibility := templateFields[22].Descriptor()
 	// template.DefaultVisibility holds the default value on creation for the visibility field.
 	template.DefaultVisibility = templateDescVisibility.Default.(string)
 	// templateDescCreated is the schema descriptor for created field.
-	templateDescCreated := templateFields[24].Descriptor()
+	templateDescCreated := templateFields[23].Descriptor()
 	// template.DefaultCreated holds the default value on creation for the created field.
 	template.DefaultCreated = templateDescCreated.Default.(func() time.Time)
 	// templateDescUpdated is the schema descriptor for updated field.
-	templateDescUpdated := templateFields[25].Descriptor()
+	templateDescUpdated := templateFields[24].Descriptor()
 	// template.DefaultUpdated holds the default value on creation for the updated field.
 	template.DefaultUpdated = templateDescUpdated.Default.(func() time.Time)
 	// template.UpdateDefaultUpdated holds the default value on update for the updated field.

@@ -400,7 +400,6 @@ var (
 		{Name: "storage_bucket", Type: field.TypeString, Nullable: true},
 		{Name: "storage_path", Type: field.TypeString, Nullable: true},
 		{Name: "files", Type: field.TypeString, Nullable: true},
-		{Name: "locked", Type: field.TypeBool, Default: false},
 		{Name: "status", Type: field.TypeEnum, Enums: []string{"pending", "active", "archived"}, Default: "active"},
 		{Name: "owner_id", Type: field.TypeString, Nullable: true},
 		{Name: "created_by", Type: field.TypeString, Nullable: true},
@@ -428,7 +427,7 @@ var (
 			{
 				Name:    "harnessconfig_status",
 				Unique:  false,
-				Columns: []*schema.Column{HarnessConfigsColumns[15]},
+				Columns: []*schema.Column{HarnessConfigsColumns[14]},
 			},
 			{
 				Name:    "harnessconfig_content_hash",
@@ -934,7 +933,6 @@ var (
 		{Name: "storage_path", Type: field.TypeString, Nullable: true},
 		{Name: "files", Type: field.TypeString, Nullable: true},
 		{Name: "base_template", Type: field.TypeString, Nullable: true},
-		{Name: "locked", Type: field.TypeBool, Default: false},
 		{Name: "status", Type: field.TypeEnum, Enums: []string{"pending", "active", "archived"}, Default: "active"},
 		{Name: "owner_id", Type: field.TypeString, Nullable: true},
 		{Name: "created_by", Type: field.TypeString, Nullable: true},
@@ -962,7 +960,7 @@ var (
 			{
 				Name:    "template_status",
 				Unique:  false,
-				Columns: []*schema.Column{TemplatesColumns[19]},
+				Columns: []*schema.Column{TemplatesColumns[18]},
 			},
 			{
 				Name:    "template_content_hash",

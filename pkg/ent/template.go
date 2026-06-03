@@ -52,8 +52,6 @@ type Template struct {
 	Files string `json:"files,omitempty"`
 	// BaseTemplate holds the value of the "base_template" field.
 	BaseTemplate string `json:"base_template,omitempty"`
-	// Locked holds the value of the "locked" field.
-	Locked bool `json:"locked,omitempty"`
 	// Status holds the value of the "status" field.
 	Status template.Status `json:"status,omitempty"`
 	// OwnerID holds the value of the "owner_id" field.
@@ -76,8 +74,6 @@ func (*Template) scanValues(columns []string) ([]any, error) {
 	values := make([]any, len(columns))
 	for i := range columns {
 		switch columns[i] {
-		case template.FieldLocked:
-			values[i] = new(sql.NullBool)
 		case template.FieldName, template.FieldSlug, template.FieldDisplayName, template.FieldDescription, template.FieldHarness, template.FieldDefaultHarnessConfig, template.FieldImage, template.FieldConfig, template.FieldContentHash, template.FieldScope, template.FieldScopeID, template.FieldProjectID, template.FieldStorageURI, template.FieldStorageBucket, template.FieldStoragePath, template.FieldFiles, template.FieldBaseTemplate, template.FieldStatus, template.FieldOwnerID, template.FieldCreatedBy, template.FieldUpdatedBy, template.FieldVisibility:
 			values[i] = new(sql.NullString)
 		case template.FieldCreated, template.FieldUpdated:
@@ -207,12 +203,6 @@ func (_m *Template) assignValues(columns []string, values []any) error {
 			} else if value.Valid {
 				_m.BaseTemplate = value.String
 			}
-		case template.FieldLocked:
-			if value, ok := values[i].(*sql.NullBool); !ok {
-				return fmt.Errorf("unexpected type %T for field locked", values[i])
-			} else if value.Valid {
-				_m.Locked = value.Bool
-			}
 		case template.FieldStatus:
 			if value, ok := values[i].(*sql.NullString); !ok {
 				return fmt.Errorf("unexpected type %T for field status", values[i])
@@ -341,9 +331,6 @@ func (_m *Template) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("base_template=")
 	builder.WriteString(_m.BaseTemplate)
-	builder.WriteString(", ")
-	builder.WriteString("locked=")
-	builder.WriteString(fmt.Sprintf("%v", _m.Locked))
 	builder.WriteString(", ")
 	builder.WriteString("status=")
 	builder.WriteString(fmt.Sprintf("%v", _m.Status))

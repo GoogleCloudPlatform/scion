@@ -182,20 +182,6 @@ func (_c *HarnessConfigCreate) SetNillableFiles(v *string) *HarnessConfigCreate 
 	return _c
 }
 
-// SetLocked sets the "locked" field.
-func (_c *HarnessConfigCreate) SetLocked(v bool) *HarnessConfigCreate {
-	_c.mutation.SetLocked(v)
-	return _c
-}
-
-// SetNillableLocked sets the "locked" field if the given value is not nil.
-func (_c *HarnessConfigCreate) SetNillableLocked(v *bool) *HarnessConfigCreate {
-	if v != nil {
-		_c.SetLocked(*v)
-	}
-	return _c
-}
-
 // SetStatus sets the "status" field.
 func (_c *HarnessConfigCreate) SetStatus(v harnessconfig.Status) *HarnessConfigCreate {
 	_c.mutation.SetStatus(v)
@@ -347,10 +333,6 @@ func (_c *HarnessConfigCreate) defaults() {
 		v := harnessconfig.DefaultScope
 		_c.mutation.SetScope(v)
 	}
-	if _, ok := _c.mutation.Locked(); !ok {
-		v := harnessconfig.DefaultLocked
-		_c.mutation.SetLocked(v)
-	}
 	if _, ok := _c.mutation.Status(); !ok {
 		v := harnessconfig.DefaultStatus
 		_c.mutation.SetStatus(v)
@@ -401,9 +383,6 @@ func (_c *HarnessConfigCreate) check() error {
 	}
 	if _, ok := _c.mutation.Scope(); !ok {
 		return &ValidationError{Name: "scope", err: errors.New(`ent: missing required field "HarnessConfig.scope"`)}
-	}
-	if _, ok := _c.mutation.Locked(); !ok {
-		return &ValidationError{Name: "locked", err: errors.New(`ent: missing required field "HarnessConfig.locked"`)}
 	}
 	if _, ok := _c.mutation.Status(); !ok {
 		return &ValidationError{Name: "status", err: errors.New(`ent: missing required field "HarnessConfig.status"`)}
@@ -509,10 +488,6 @@ func (_c *HarnessConfigCreate) createSpec() (*HarnessConfig, *sqlgraph.CreateSpe
 	if value, ok := _c.mutation.Files(); ok {
 		_spec.SetField(harnessconfig.FieldFiles, field.TypeString, value)
 		_node.Files = value
-	}
-	if value, ok := _c.mutation.Locked(); ok {
-		_spec.SetField(harnessconfig.FieldLocked, field.TypeBool, value)
-		_node.Locked = value
 	}
 	if value, ok := _c.mutation.Status(); ok {
 		_spec.SetField(harnessconfig.FieldStatus, field.TypeEnum, value)
@@ -801,18 +776,6 @@ func (u *HarnessConfigUpsert) UpdateFiles() *HarnessConfigUpsert {
 // ClearFiles clears the value of the "files" field.
 func (u *HarnessConfigUpsert) ClearFiles() *HarnessConfigUpsert {
 	u.SetNull(harnessconfig.FieldFiles)
-	return u
-}
-
-// SetLocked sets the "locked" field.
-func (u *HarnessConfigUpsert) SetLocked(v bool) *HarnessConfigUpsert {
-	u.Set(harnessconfig.FieldLocked, v)
-	return u
-}
-
-// UpdateLocked sets the "locked" field to the value that was provided on create.
-func (u *HarnessConfigUpsert) UpdateLocked() *HarnessConfigUpsert {
-	u.SetExcluded(harnessconfig.FieldLocked)
 	return u
 }
 
@@ -1199,20 +1162,6 @@ func (u *HarnessConfigUpsertOne) UpdateFiles() *HarnessConfigUpsertOne {
 func (u *HarnessConfigUpsertOne) ClearFiles() *HarnessConfigUpsertOne {
 	return u.Update(func(s *HarnessConfigUpsert) {
 		s.ClearFiles()
-	})
-}
-
-// SetLocked sets the "locked" field.
-func (u *HarnessConfigUpsertOne) SetLocked(v bool) *HarnessConfigUpsertOne {
-	return u.Update(func(s *HarnessConfigUpsert) {
-		s.SetLocked(v)
-	})
-}
-
-// UpdateLocked sets the "locked" field to the value that was provided on create.
-func (u *HarnessConfigUpsertOne) UpdateLocked() *HarnessConfigUpsertOne {
-	return u.Update(func(s *HarnessConfigUpsert) {
-		s.UpdateLocked()
 	})
 }
 
@@ -1781,20 +1730,6 @@ func (u *HarnessConfigUpsertBulk) UpdateFiles() *HarnessConfigUpsertBulk {
 func (u *HarnessConfigUpsertBulk) ClearFiles() *HarnessConfigUpsertBulk {
 	return u.Update(func(s *HarnessConfigUpsert) {
 		s.ClearFiles()
-	})
-}
-
-// SetLocked sets the "locked" field.
-func (u *HarnessConfigUpsertBulk) SetLocked(v bool) *HarnessConfigUpsertBulk {
-	return u.Update(func(s *HarnessConfigUpsert) {
-		s.SetLocked(v)
-	})
-}
-
-// UpdateLocked sets the "locked" field to the value that was provided on create.
-func (u *HarnessConfigUpsertBulk) UpdateLocked() *HarnessConfigUpsertBulk {
-	return u.Update(func(s *HarnessConfigUpsert) {
-		s.UpdateLocked()
 	})
 }
 

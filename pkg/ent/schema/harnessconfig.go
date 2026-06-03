@@ -65,8 +65,6 @@ func (HarnessConfig) Fields() []ent.Field {
 			Optional(),
 		field.String("files").
 			Optional(),
-		field.Bool("locked").
-			Default(false),
 		field.Enum("status").
 			Values("pending", "active", "archived").
 			Default("active"),

@@ -464,9 +464,7 @@ type Template struct {
 	// Inheritance
 	BaseTemplate string `json:"baseTemplate,omitempty"` // Parent template ID (for inheritance)
 
-	// Protection
-	Locked bool   `json:"locked,omitempty"` // Prevent modifications (global templates)
-	Status string `json:"status"`           // pending, active, archived
+	Status string `json:"status"` // pending, active, archived
 
 	// Ownership
 	OwnerID    string `json:"ownerId,omitempty"`
@@ -559,9 +557,7 @@ type HarnessConfig struct {
 	// File manifest
 	Files []TemplateFile `json:"files,omitempty"` // Manifest of harness config files (reuses TemplateFile)
 
-	// Protection
-	Locked bool   `json:"locked,omitempty"` // Prevent modifications
-	Status string `json:"status"`           // pending, active, archived
+	Status string `json:"status"` // pending, active, archived
 
 	// Ownership
 	OwnerID    string `json:"ownerId,omitempty"`

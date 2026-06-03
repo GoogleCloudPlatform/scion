@@ -13137,7 +13137,6 @@ type HarnessConfigMutation struct {
 	storage_bucket *string
 	storage_path   *string
 	files          *string
-	locked         *bool
 	status         *harnessconfig.Status
 	owner_id       *string
 	created_by     *string
@@ -13840,42 +13839,6 @@ func (m *HarnessConfigMutation) ResetFiles() {
 	delete(m.clearedFields, harnessconfig.FieldFiles)
 }
 
-// SetLocked sets the "locked" field.
-func (m *HarnessConfigMutation) SetLocked(b bool) {
-	m.locked = &b
-}
-
-// Locked returns the value of the "locked" field in the mutation.
-func (m *HarnessConfigMutation) Locked() (r bool, exists bool) {
-	v := m.locked
-	if v == nil {
-		return
-	}
-	return *v, true
-}
-
-// OldLocked returns the old "locked" field's value of the HarnessConfig entity.
-// If the HarnessConfig object wasn't provided to the builder, the object is fetched from the database.
-// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
-func (m *HarnessConfigMutation) OldLocked(ctx context.Context) (v bool, err error) {
-	if !m.op.Is(OpUpdateOne) {
-		return v, errors.New("OldLocked is only allowed on UpdateOne operations")
-	}
-	if m.id == nil || m.oldValue == nil {
-		return v, errors.New("OldLocked requires an ID field in the mutation")
-	}
-	oldValue, err := m.oldValue(ctx)
-	if err != nil {
-		return v, fmt.Errorf("querying old value for OldLocked: %w", err)
-	}
-	return oldValue.Locked, nil
-}
-
-// ResetLocked resets all changes to the "locked" field.
-func (m *HarnessConfigMutation) ResetLocked() {
-	m.locked = nil
-}
-
 // SetStatus sets the "status" field.
 func (m *HarnessConfigMutation) SetStatus(h harnessconfig.Status) {
 	m.status = &h
@@ -14201,7 +14164,7 @@ func (m *HarnessConfigMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *HarnessConfigMutation) Fields() []string {
-	fields := make([]string, 0, 21)
+	fields := make([]string, 0, 20)
 	if m.name != nil {
 		fields = append(fields, harnessconfig.FieldName)
 	}
@@ -14240,9 +14203,6 @@ func (m *HarnessConfigMutation) Fields() []string {
 	}
 	if m.files != nil {
 		fields = append(fields, harnessconfig.FieldFiles)
-	}
-	if m.locked != nil {
-		fields = append(fields, harnessconfig.FieldLocked)
 	}
 	if m.status != nil {
 		fields = append(fields, harnessconfig.FieldStatus)
@@ -14299,8 +14259,6 @@ func (m *HarnessConfigMutation) Field(name string) (ent.Value, bool) {
 		return m.StoragePath()
 	case harnessconfig.FieldFiles:
 		return m.Files()
-	case harnessconfig.FieldLocked:
-		return m.Locked()
 	case harnessconfig.FieldStatus:
 		return m.Status()
 	case harnessconfig.FieldOwnerID:
@@ -14350,8 +14308,6 @@ func (m *HarnessConfigMutation) OldField(ctx context.Context, name string) (ent.
 		return m.OldStoragePath(ctx)
 	case harnessconfig.FieldFiles:
 		return m.OldFiles(ctx)
-	case harnessconfig.FieldLocked:
-		return m.OldLocked(ctx)
 	case harnessconfig.FieldStatus:
 		return m.OldStatus(ctx)
 	case harnessconfig.FieldOwnerID:
@@ -14465,13 +14421,6 @@ func (m *HarnessConfigMutation) SetField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetFiles(v)
-		return nil
-	case harnessconfig.FieldLocked:
-		v, ok := value.(bool)
-		if !ok {
-			return fmt.Errorf("unexpected type %T for field %s", value, name)
-		}
-		m.SetLocked(v)
 		return nil
 	case harnessconfig.FieldStatus:
 		v, ok := value.(harnessconfig.Status)
@@ -14684,9 +14633,6 @@ func (m *HarnessConfigMutation) ResetField(name string) error {
 		return nil
 	case harnessconfig.FieldFiles:
 		m.ResetFiles()
-		return nil
-	case harnessconfig.FieldLocked:
-		m.ResetLocked()
 		return nil
 	case harnessconfig.FieldStatus:
 		m.ResetStatus()
@@ -29847,7 +29793,6 @@ type TemplateMutation struct {
 	storage_path           *string
 	files                  *string
 	base_template          *string
-	locked                 *bool
 	status                 *template.Status
 	owner_id               *string
 	created_by             *string
@@ -30746,42 +30691,6 @@ func (m *TemplateMutation) ResetBaseTemplate() {
 	delete(m.clearedFields, template.FieldBaseTemplate)
 }
 
-// SetLocked sets the "locked" field.
-func (m *TemplateMutation) SetLocked(b bool) {
-	m.locked = &b
-}
-
-// Locked returns the value of the "locked" field in the mutation.
-func (m *TemplateMutation) Locked() (r bool, exists bool) {
-	v := m.locked
-	if v == nil {
-		return
-	}
-	return *v, true
-}
-
-// OldLocked returns the old "locked" field's value of the Template entity.
-// If the Template object wasn't provided to the builder, the object is fetched from the database.
-// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
-func (m *TemplateMutation) OldLocked(ctx context.Context) (v bool, err error) {
-	if !m.op.Is(OpUpdateOne) {
-		return v, errors.New("OldLocked is only allowed on UpdateOne operations")
-	}
-	if m.id == nil || m.oldValue == nil {
-		return v, errors.New("OldLocked requires an ID field in the mutation")
-	}
-	oldValue, err := m.oldValue(ctx)
-	if err != nil {
-		return v, fmt.Errorf("querying old value for OldLocked: %w", err)
-	}
-	return oldValue.Locked, nil
-}
-
-// ResetLocked resets all changes to the "locked" field.
-func (m *TemplateMutation) ResetLocked() {
-	m.locked = nil
-}
-
 // SetStatus sets the "status" field.
 func (m *TemplateMutation) SetStatus(t template.Status) {
 	m.status = &t
@@ -31107,7 +31016,7 @@ func (m *TemplateMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *TemplateMutation) Fields() []string {
-	fields := make([]string, 0, 25)
+	fields := make([]string, 0, 24)
 	if m.name != nil {
 		fields = append(fields, template.FieldName)
 	}
@@ -31158,9 +31067,6 @@ func (m *TemplateMutation) Fields() []string {
 	}
 	if m.base_template != nil {
 		fields = append(fields, template.FieldBaseTemplate)
-	}
-	if m.locked != nil {
-		fields = append(fields, template.FieldLocked)
 	}
 	if m.status != nil {
 		fields = append(fields, template.FieldStatus)
@@ -31225,8 +31131,6 @@ func (m *TemplateMutation) Field(name string) (ent.Value, bool) {
 		return m.Files()
 	case template.FieldBaseTemplate:
 		return m.BaseTemplate()
-	case template.FieldLocked:
-		return m.Locked()
 	case template.FieldStatus:
 		return m.Status()
 	case template.FieldOwnerID:
@@ -31284,8 +31188,6 @@ func (m *TemplateMutation) OldField(ctx context.Context, name string) (ent.Value
 		return m.OldFiles(ctx)
 	case template.FieldBaseTemplate:
 		return m.OldBaseTemplate(ctx)
-	case template.FieldLocked:
-		return m.OldLocked(ctx)
 	case template.FieldStatus:
 		return m.OldStatus(ctx)
 	case template.FieldOwnerID:
@@ -31427,13 +31329,6 @@ func (m *TemplateMutation) SetField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetBaseTemplate(v)
-		return nil
-	case template.FieldLocked:
-		v, ok := value.(bool)
-		if !ok {
-			return fmt.Errorf("unexpected type %T for field %s", value, name)
-		}
-		m.SetLocked(v)
 		return nil
 	case template.FieldStatus:
 		v, ok := value.(template.Status)
@@ -31682,9 +31577,6 @@ func (m *TemplateMutation) ResetField(name string) error {
 		return nil
 	case template.FieldBaseTemplate:
 		m.ResetBaseTemplate()
-		return nil
-	case template.FieldLocked:
-		m.ResetLocked()
 		return nil
 	case template.FieldStatus:
 		m.ResetStatus()

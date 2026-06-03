@@ -41,8 +41,6 @@ const (
 	FieldStoragePath = "storage_path"
 	// FieldFiles holds the string denoting the files field in the database.
 	FieldFiles = "files"
-	// FieldLocked holds the string denoting the locked field in the database.
-	FieldLocked = "locked"
 	// FieldStatus holds the string denoting the status field in the database.
 	FieldStatus = "status"
 	// FieldOwnerID holds the string denoting the owner_id field in the database.
@@ -77,7 +75,6 @@ var Columns = []string{
 	FieldStorageBucket,
 	FieldStoragePath,
 	FieldFiles,
-	FieldLocked,
 	FieldStatus,
 	FieldOwnerID,
 	FieldCreatedBy,
@@ -106,8 +103,6 @@ var (
 	HarnessValidator func(string) error
 	// DefaultScope holds the default value on creation for the "scope" field.
 	DefaultScope string
-	// DefaultLocked holds the default value on creation for the "locked" field.
-	DefaultLocked bool
 	// DefaultVisibility holds the default value on creation for the "visibility" field.
 	DefaultVisibility string
 	// DefaultCreated holds the default value on creation for the "created" field.
@@ -218,11 +213,6 @@ func ByStoragePath(opts ...sql.OrderTermOption) OrderOption {
 // ByFiles orders the results by the files field.
 func ByFiles(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldFiles, opts...).ToFunc()
-}
-
-// ByLocked orders the results by the locked field.
-func ByLocked(opts ...sql.OrderTermOption) OrderOption {
-	return sql.OrderByField(FieldLocked, opts...).ToFunc()
 }
 
 // ByStatus orders the results by the status field.

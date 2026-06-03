@@ -140,11 +140,6 @@ func BaseTemplate(v string) predicate.Template {
 	return predicate.Template(sql.FieldEQ(FieldBaseTemplate, v))
 }
 
-// Locked applies equality check predicate on the "locked" field. It's identical to LockedEQ.
-func Locked(v bool) predicate.Template {
-	return predicate.Template(sql.FieldEQ(FieldLocked, v))
-}
-
 // OwnerID applies equality check predicate on the "owner_id" field. It's identical to OwnerIDEQ.
 func OwnerID(v string) predicate.Template {
 	return predicate.Template(sql.FieldEQ(FieldOwnerID, v))
@@ -1408,16 +1403,6 @@ func BaseTemplateEqualFold(v string) predicate.Template {
 // BaseTemplateContainsFold applies the ContainsFold predicate on the "base_template" field.
 func BaseTemplateContainsFold(v string) predicate.Template {
 	return predicate.Template(sql.FieldContainsFold(FieldBaseTemplate, v))
-}
-
-// LockedEQ applies the EQ predicate on the "locked" field.
-func LockedEQ(v bool) predicate.Template {
-	return predicate.Template(sql.FieldEQ(FieldLocked, v))
-}
-
-// LockedNEQ applies the NEQ predicate on the "locked" field.
-func LockedNEQ(v bool) predicate.Template {
-	return predicate.Template(sql.FieldNEQ(FieldLocked, v))
 }
 
 // StatusEQ applies the EQ predicate on the "status" field.

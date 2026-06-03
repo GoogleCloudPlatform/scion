@@ -344,20 +344,6 @@ func (_u *TemplateUpdate) ClearBaseTemplate() *TemplateUpdate {
 	return _u
 }
 
-// SetLocked sets the "locked" field.
-func (_u *TemplateUpdate) SetLocked(v bool) *TemplateUpdate {
-	_u.mutation.SetLocked(v)
-	return _u
-}
-
-// SetNillableLocked sets the "locked" field if the given value is not nil.
-func (_u *TemplateUpdate) SetNillableLocked(v *bool) *TemplateUpdate {
-	if v != nil {
-		_u.SetLocked(*v)
-	}
-	return _u
-}
-
 // SetStatus sets the "status" field.
 func (_u *TemplateUpdate) SetStatus(v template.Status) *TemplateUpdate {
 	_u.mutation.SetStatus(v)
@@ -614,9 +600,6 @@ func (_u *TemplateUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	}
 	if _u.mutation.BaseTemplateCleared() {
 		_spec.ClearField(template.FieldBaseTemplate, field.TypeString)
-	}
-	if value, ok := _u.mutation.Locked(); ok {
-		_spec.SetField(template.FieldLocked, field.TypeBool, value)
 	}
 	if value, ok := _u.mutation.Status(); ok {
 		_spec.SetField(template.FieldStatus, field.TypeEnum, value)
@@ -981,20 +964,6 @@ func (_u *TemplateUpdateOne) ClearBaseTemplate() *TemplateUpdateOne {
 	return _u
 }
 
-// SetLocked sets the "locked" field.
-func (_u *TemplateUpdateOne) SetLocked(v bool) *TemplateUpdateOne {
-	_u.mutation.SetLocked(v)
-	return _u
-}
-
-// SetNillableLocked sets the "locked" field if the given value is not nil.
-func (_u *TemplateUpdateOne) SetNillableLocked(v *bool) *TemplateUpdateOne {
-	if v != nil {
-		_u.SetLocked(*v)
-	}
-	return _u
-}
-
 // SetStatus sets the "status" field.
 func (_u *TemplateUpdateOne) SetStatus(v template.Status) *TemplateUpdateOne {
 	_u.mutation.SetStatus(v)
@@ -1281,9 +1250,6 @@ func (_u *TemplateUpdateOne) sqlSave(ctx context.Context) (_node *Template, err 
 	}
 	if _u.mutation.BaseTemplateCleared() {
 		_spec.ClearField(template.FieldBaseTemplate, field.TypeString)
-	}
-	if value, ok := _u.mutation.Locked(); ok {
-		_spec.SetField(template.FieldLocked, field.TypeBool, value)
 	}
 	if value, ok := _u.mutation.Status(); ok {
 		_spec.SetField(template.FieldStatus, field.TypeEnum, value)

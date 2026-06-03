@@ -405,12 +405,6 @@ func (s *Server) updateTemplateV2(w http.ResponseWriter, r *http.Request, id str
 		return
 	}
 
-	// Check if template is locked
-	if existing.Locked {
-		ValidationError(w, "template is locked and cannot be modified", nil)
-		return
-	}
-
 	var template store.Template
 	if err := readJSON(r, &template); err != nil {
 		BadRequest(w, "Invalid request body: "+err.Error())
@@ -421,8 +415,6 @@ func (s *Server) updateTemplateV2(w http.ResponseWriter, r *http.Request, id str
 	template.ID = existing.ID
 	template.Created = existing.Created
 	template.CreatedBy = existing.CreatedBy
-	template.Locked = existing.Locked
-
 	if template.Slug == "" {
 		template.Slug = api.Slugify(template.Name)
 	}
@@ -442,12 +434,6 @@ func (s *Server) patchTemplateV2(w http.ResponseWriter, r *http.Request, id stri
 	existing, err := s.store.GetTemplate(ctx, id)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
-		return
-	}
-
-	// Check if template is locked
-	if existing.Locked {
-		ValidationError(w, "template is locked and cannot be modified", nil)
 		return
 	}
 
@@ -498,17 +484,10 @@ func (s *Server) deleteTemplateV2(w http.ResponseWriter, r *http.Request, id str
 	query := r.URL.Query()
 
 	deleteFiles := query.Get("deleteFiles") == "true"
-	force := query.Get("force") == "true"
 
 	existing, err := s.store.GetTemplate(ctx, id)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
-		return
-	}
-
-	// Check if template is locked
-	if existing.Locked && !force {
-		ValidationError(w, "template is locked; use force=true to delete", nil)
 		return
 	}
 

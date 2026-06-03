@@ -264,20 +264,6 @@ func (_u *HarnessConfigUpdate) ClearFiles() *HarnessConfigUpdate {
 	return _u
 }
 
-// SetLocked sets the "locked" field.
-func (_u *HarnessConfigUpdate) SetLocked(v bool) *HarnessConfigUpdate {
-	_u.mutation.SetLocked(v)
-	return _u
-}
-
-// SetNillableLocked sets the "locked" field if the given value is not nil.
-func (_u *HarnessConfigUpdate) SetNillableLocked(v *bool) *HarnessConfigUpdate {
-	if v != nil {
-		_u.SetLocked(*v)
-	}
-	return _u
-}
-
 // SetStatus sets the "status" field.
 func (_u *HarnessConfigUpdate) SetStatus(v harnessconfig.Status) *HarnessConfigUpdate {
 	_u.mutation.SetStatus(v)
@@ -515,9 +501,6 @@ func (_u *HarnessConfigUpdate) sqlSave(ctx context.Context) (_node int, err erro
 	}
 	if _u.mutation.FilesCleared() {
 		_spec.ClearField(harnessconfig.FieldFiles, field.TypeString)
-	}
-	if value, ok := _u.mutation.Locked(); ok {
-		_spec.SetField(harnessconfig.FieldLocked, field.TypeBool, value)
 	}
 	if value, ok := _u.mutation.Status(); ok {
 		_spec.SetField(harnessconfig.FieldStatus, field.TypeEnum, value)
@@ -802,20 +785,6 @@ func (_u *HarnessConfigUpdateOne) ClearFiles() *HarnessConfigUpdateOne {
 	return _u
 }
 
-// SetLocked sets the "locked" field.
-func (_u *HarnessConfigUpdateOne) SetLocked(v bool) *HarnessConfigUpdateOne {
-	_u.mutation.SetLocked(v)
-	return _u
-}
-
-// SetNillableLocked sets the "locked" field if the given value is not nil.
-func (_u *HarnessConfigUpdateOne) SetNillableLocked(v *bool) *HarnessConfigUpdateOne {
-	if v != nil {
-		_u.SetLocked(*v)
-	}
-	return _u
-}
-
 // SetStatus sets the "status" field.
 func (_u *HarnessConfigUpdateOne) SetStatus(v harnessconfig.Status) *HarnessConfigUpdateOne {
 	_u.mutation.SetStatus(v)
@@ -1083,9 +1052,6 @@ func (_u *HarnessConfigUpdateOne) sqlSave(ctx context.Context) (_node *HarnessCo
 	}
 	if _u.mutation.FilesCleared() {
 		_spec.ClearField(harnessconfig.FieldFiles, field.TypeString)
-	}
-	if value, ok := _u.mutation.Locked(); ok {
-		_spec.SetField(harnessconfig.FieldLocked, field.TypeBool, value)
 	}
 	if value, ok := _u.mutation.Status(); ok {
 		_spec.SetField(harnessconfig.FieldStatus, field.TypeEnum, value)

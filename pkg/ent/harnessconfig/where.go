@@ -120,11 +120,6 @@ func Files(v string) predicate.HarnessConfig {
 	return predicate.HarnessConfig(sql.FieldEQ(FieldFiles, v))
 }
 
-// Locked applies equality check predicate on the "locked" field. It's identical to LockedEQ.
-func Locked(v bool) predicate.HarnessConfig {
-	return predicate.HarnessConfig(sql.FieldEQ(FieldLocked, v))
-}
-
 // OwnerID applies equality check predicate on the "owner_id" field. It's identical to OwnerIDEQ.
 func OwnerID(v string) predicate.HarnessConfig {
 	return predicate.HarnessConfig(sql.FieldEQ(FieldOwnerID, v))
@@ -1088,16 +1083,6 @@ func FilesEqualFold(v string) predicate.HarnessConfig {
 // FilesContainsFold applies the ContainsFold predicate on the "files" field.
 func FilesContainsFold(v string) predicate.HarnessConfig {
 	return predicate.HarnessConfig(sql.FieldContainsFold(FieldFiles, v))
-}
-
-// LockedEQ applies the EQ predicate on the "locked" field.
-func LockedEQ(v bool) predicate.HarnessConfig {
-	return predicate.HarnessConfig(sql.FieldEQ(FieldLocked, v))
-}
-
-// LockedNEQ applies the NEQ predicate on the "locked" field.
-func LockedNEQ(v bool) predicate.HarnessConfig {
-	return predicate.HarnessConfig(sql.FieldNEQ(FieldLocked, v))
 }
 
 // StatusEQ applies the EQ predicate on the "status" field.

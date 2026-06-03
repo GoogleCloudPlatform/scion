@@ -79,8 +79,6 @@ func (Template) Fields() []ent.Field {
 			Optional(),
 		field.String("base_template").
 			Optional(),
-		field.Bool("locked").
-			Default(false),
 		field.Enum("status").
 			Values("pending", "active", "archived").
 			Default("active"),

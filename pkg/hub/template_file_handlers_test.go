@@ -319,33 +319,6 @@ func TestHandleTemplateFileWrite_NewFile(t *testing.T) {
 	}
 }
 
-func TestHandleTemplateFileWrite_LockedTemplate(t *testing.T) {
-	srv, s, stor := testTemplateFileServer(t)
-	ctx := context.Background()
-
-	tmpl := createTestTemplate(t, s, stor, map[string]string{
-		"CLAUDE.md": "# Agent",
-	})
-
-	// Lock the template
-	tmpl.Locked = true
-	if err := s.UpdateTemplate(ctx, tmpl); err != nil {
-		t.Fatalf("failed to lock template: %v", err)
-	}
-
-	body := `{"content": "new content"}`
-	req := httptest.NewRequest(http.MethodPut, "/api/v1/templates/"+tmpl.ID+"/files/CLAUDE.md",
-		strings.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+testDevToken)
-	w := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(w, req)
-
-	if w.Code != http.StatusForbidden {
-		t.Fatalf("expected 403, got %d: %s", w.Code, w.Body.String())
-	}
-}
-
 func TestHandleTemplateFileWrite_ConflictHash(t *testing.T) {
 	srv, s, stor := testTemplateFileServer(t)
 
@@ -399,29 +372,6 @@ func TestHandleTemplateFileDelete(t *testing.T) {
 	// Verify removed from storage
 	if _, ok := stor.content[tmpl.StoragePath+"/home/.bashrc"]; ok {
 		t.Error("expected file to be removed from storage")
-	}
-}
-
-func TestHandleTemplateFileDelete_LockedTemplate(t *testing.T) {
-	srv, s, stor := testTemplateFileServer(t)
-	ctx := context.Background()
-
-	tmpl := createTestTemplate(t, s, stor, map[string]string{
-		"CLAUDE.md": "# Agent",
-	})
-
-	tmpl.Locked = true
-	if err := s.UpdateTemplate(ctx, tmpl); err != nil {
-		t.Fatalf("failed to lock template: %v", err)
-	}
-
-	req := httptest.NewRequest(http.MethodDelete, "/api/v1/templates/"+tmpl.ID+"/files/CLAUDE.md", nil)
-	req.Header.Set("Authorization", "Bearer "+testDevToken)
-	w := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(w, req)
-
-	if w.Code != http.StatusForbidden {
-		t.Fatalf("expected 403, got %d: %s", w.Code, w.Body.String())
 	}
 }
 
@@ -549,30 +499,6 @@ func TestHandleTemplateFileUpload_MultipleFiles(t *testing.T) {
 	}
 	if len(updated.Files) != 3 {
 		t.Errorf("expected 3 files in manifest, got %d", len(updated.Files))
-	}
-}
-
-func TestHandleTemplateFileUpload_LockedTemplate(t *testing.T) {
-	srv, s, stor := testTemplateFileServer(t)
-	ctx := context.Background()
-
-	tmpl := createTestTemplate(t, s, stor, map[string]string{
-		"CLAUDE.md": "# Agent",
-	})
-
-	tmpl.Locked = true
-	if err := s.UpdateTemplate(ctx, tmpl); err != nil {
-		t.Fatalf("failed to lock template: %v", err)
-	}
-
-	req := templateMultipartRequest(t, tmpl.ID, map[string][]byte{
-		"config.yaml": []byte("key: value"),
-	})
-	w := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(w, req)
-
-	if w.Code != http.StatusForbidden {
-		t.Fatalf("expected 403, got %d: %s", w.Code, w.Body.String())
 	}
 }
 

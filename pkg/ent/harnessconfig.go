@@ -44,8 +44,6 @@ type HarnessConfig struct {
 	StoragePath string `json:"storage_path,omitempty"`
 	// Files holds the value of the "files" field.
 	Files string `json:"files,omitempty"`
-	// Locked holds the value of the "locked" field.
-	Locked bool `json:"locked,omitempty"`
 	// Status holds the value of the "status" field.
 	Status harnessconfig.Status `json:"status,omitempty"`
 	// OwnerID holds the value of the "owner_id" field.
@@ -68,8 +66,6 @@ func (*HarnessConfig) scanValues(columns []string) ([]any, error) {
 	values := make([]any, len(columns))
 	for i := range columns {
 		switch columns[i] {
-		case harnessconfig.FieldLocked:
-			values[i] = new(sql.NullBool)
 		case harnessconfig.FieldName, harnessconfig.FieldSlug, harnessconfig.FieldDisplayName, harnessconfig.FieldDescription, harnessconfig.FieldHarness, harnessconfig.FieldConfig, harnessconfig.FieldContentHash, harnessconfig.FieldScope, harnessconfig.FieldScopeID, harnessconfig.FieldStorageURI, harnessconfig.FieldStorageBucket, harnessconfig.FieldStoragePath, harnessconfig.FieldFiles, harnessconfig.FieldStatus, harnessconfig.FieldOwnerID, harnessconfig.FieldCreatedBy, harnessconfig.FieldUpdatedBy, harnessconfig.FieldVisibility:
 			values[i] = new(sql.NullString)
 		case harnessconfig.FieldCreated, harnessconfig.FieldUpdated:
@@ -174,12 +170,6 @@ func (_m *HarnessConfig) assignValues(columns []string, values []any) error {
 				return fmt.Errorf("unexpected type %T for field files", values[i])
 			} else if value.Valid {
 				_m.Files = value.String
-			}
-		case harnessconfig.FieldLocked:
-			if value, ok := values[i].(*sql.NullBool); !ok {
-				return fmt.Errorf("unexpected type %T for field locked", values[i])
-			} else if value.Valid {
-				_m.Locked = value.Bool
 			}
 		case harnessconfig.FieldStatus:
 			if value, ok := values[i].(*sql.NullString); !ok {
@@ -297,9 +287,6 @@ func (_m *HarnessConfig) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("files=")
 	builder.WriteString(_m.Files)
-	builder.WriteString(", ")
-	builder.WriteString("locked=")
-	builder.WriteString(fmt.Sprintf("%v", _m.Locked))
 	builder.WriteString(", ")
 	builder.WriteString("status=")
 	builder.WriteString(fmt.Sprintf("%v", _m.Status))

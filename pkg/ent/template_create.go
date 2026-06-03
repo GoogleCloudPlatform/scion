@@ -238,20 +238,6 @@ func (_c *TemplateCreate) SetNillableBaseTemplate(v *string) *TemplateCreate {
 	return _c
 }
 
-// SetLocked sets the "locked" field.
-func (_c *TemplateCreate) SetLocked(v bool) *TemplateCreate {
-	_c.mutation.SetLocked(v)
-	return _c
-}
-
-// SetNillableLocked sets the "locked" field if the given value is not nil.
-func (_c *TemplateCreate) SetNillableLocked(v *bool) *TemplateCreate {
-	if v != nil {
-		_c.SetLocked(*v)
-	}
-	return _c
-}
-
 // SetStatus sets the "status" field.
 func (_c *TemplateCreate) SetStatus(v template.Status) *TemplateCreate {
 	_c.mutation.SetStatus(v)
@@ -403,10 +389,6 @@ func (_c *TemplateCreate) defaults() {
 		v := template.DefaultScope
 		_c.mutation.SetScope(v)
 	}
-	if _, ok := _c.mutation.Locked(); !ok {
-		v := template.DefaultLocked
-		_c.mutation.SetLocked(v)
-	}
 	if _, ok := _c.mutation.Status(); !ok {
 		v := template.DefaultStatus
 		_c.mutation.SetStatus(v)
@@ -452,9 +434,6 @@ func (_c *TemplateCreate) check() error {
 	}
 	if _, ok := _c.mutation.Scope(); !ok {
 		return &ValidationError{Name: "scope", err: errors.New(`ent: missing required field "Template.scope"`)}
-	}
-	if _, ok := _c.mutation.Locked(); !ok {
-		return &ValidationError{Name: "locked", err: errors.New(`ent: missing required field "Template.locked"`)}
 	}
 	if _, ok := _c.mutation.Status(); !ok {
 		return &ValidationError{Name: "status", err: errors.New(`ent: missing required field "Template.status"`)}
@@ -576,10 +555,6 @@ func (_c *TemplateCreate) createSpec() (*Template, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.BaseTemplate(); ok {
 		_spec.SetField(template.FieldBaseTemplate, field.TypeString, value)
 		_node.BaseTemplate = value
-	}
-	if value, ok := _c.mutation.Locked(); ok {
-		_spec.SetField(template.FieldLocked, field.TypeBool, value)
-		_node.Locked = value
 	}
 	if value, ok := _c.mutation.Status(); ok {
 		_spec.SetField(template.FieldStatus, field.TypeEnum, value)
@@ -940,18 +915,6 @@ func (u *TemplateUpsert) UpdateBaseTemplate() *TemplateUpsert {
 // ClearBaseTemplate clears the value of the "base_template" field.
 func (u *TemplateUpsert) ClearBaseTemplate() *TemplateUpsert {
 	u.SetNull(template.FieldBaseTemplate)
-	return u
-}
-
-// SetLocked sets the "locked" field.
-func (u *TemplateUpsert) SetLocked(v bool) *TemplateUpsert {
-	u.Set(template.FieldLocked, v)
-	return u
-}
-
-// UpdateLocked sets the "locked" field to the value that was provided on create.
-func (u *TemplateUpsert) UpdateLocked() *TemplateUpsert {
-	u.SetExcluded(template.FieldLocked)
 	return u
 }
 
@@ -1422,20 +1385,6 @@ func (u *TemplateUpsertOne) UpdateBaseTemplate() *TemplateUpsertOne {
 func (u *TemplateUpsertOne) ClearBaseTemplate() *TemplateUpsertOne {
 	return u.Update(func(s *TemplateUpsert) {
 		s.ClearBaseTemplate()
-	})
-}
-
-// SetLocked sets the "locked" field.
-func (u *TemplateUpsertOne) SetLocked(v bool) *TemplateUpsertOne {
-	return u.Update(func(s *TemplateUpsert) {
-		s.SetLocked(v)
-	})
-}
-
-// UpdateLocked sets the "locked" field to the value that was provided on create.
-func (u *TemplateUpsertOne) UpdateLocked() *TemplateUpsertOne {
-	return u.Update(func(s *TemplateUpsert) {
-		s.UpdateLocked()
 	})
 }
 
@@ -2088,20 +2037,6 @@ func (u *TemplateUpsertBulk) UpdateBaseTemplate() *TemplateUpsertBulk {
 func (u *TemplateUpsertBulk) ClearBaseTemplate() *TemplateUpsertBulk {
 	return u.Update(func(s *TemplateUpsert) {
 		s.ClearBaseTemplate()
-	})
-}
-
-// SetLocked sets the "locked" field.
-func (u *TemplateUpsertBulk) SetLocked(v bool) *TemplateUpsertBulk {
-	return u.Update(func(s *TemplateUpsert) {
-		s.SetLocked(v)
-	})
-}
-
-// UpdateLocked sets the "locked" field to the value that was provided on create.
-func (u *TemplateUpsertBulk) UpdateLocked() *TemplateUpsertBulk {
-	return u.Update(func(s *TemplateUpsert) {
-		s.UpdateLocked()
 	})
 }
 

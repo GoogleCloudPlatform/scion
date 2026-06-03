@@ -289,11 +289,6 @@ func (s *Server) updateHarnessConfig(w http.ResponseWriter, r *http.Request, id 
 		return
 	}
 
-	if existing.Locked {
-		ValidationError(w, "harness config is locked and cannot be modified", nil)
-		return
-	}
-
 	var hc store.HarnessConfig
 	if err := readJSON(r, &hc); err != nil {
 		BadRequest(w, "Invalid request body: "+err.Error())
@@ -304,8 +299,6 @@ func (s *Server) updateHarnessConfig(w http.ResponseWriter, r *http.Request, id 
 	hc.ID = existing.ID
 	hc.Created = existing.Created
 	hc.CreatedBy = existing.CreatedBy
-	hc.Locked = existing.Locked
-
 	if hc.Slug == "" {
 		hc.Slug = api.Slugify(hc.Name)
 	}
@@ -324,11 +317,6 @@ func (s *Server) patchHarnessConfig(w http.ResponseWriter, r *http.Request, id s
 	existing, err := s.store.GetHarnessConfig(ctx, id)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
-		return
-	}
-
-	if existing.Locked {
-		ValidationError(w, "harness config is locked and cannot be modified", nil)
 		return
 	}
 
@@ -377,16 +365,10 @@ func (s *Server) deleteHarnessConfig(w http.ResponseWriter, r *http.Request, id 
 	query := r.URL.Query()
 
 	deleteFiles := query.Get("deleteFiles") == "true"
-	force := query.Get("force") == "true"
 
 	existing, err := s.store.GetHarnessConfig(ctx, id)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
-		return
-	}
-
-	if existing.Locked && !force {
-		ValidationError(w, "harness config is locked; use force=true to delete", nil)
 		return
 	}
 
