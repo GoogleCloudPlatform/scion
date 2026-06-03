@@ -415,9 +415,9 @@ var (
 		PrimaryKey: []*schema.Column{HarnessConfigsColumns[0]},
 		Indexes: []*schema.Index{
 			{
-				Name:    "harnessconfig_slug_scope",
-				Unique:  false,
-				Columns: []*schema.Column{HarnessConfigsColumns[2], HarnessConfigsColumns[8]},
+				Name:    "harnessconfig_slug_scope_scope_id",
+				Unique:  true,
+				Columns: []*schema.Column{HarnessConfigsColumns[2], HarnessConfigsColumns[8], HarnessConfigsColumns[9]},
 			},
 			{
 				Name:    "harnessconfig_harness",
@@ -948,9 +948,9 @@ var (
 		PrimaryKey: []*schema.Column{TemplatesColumns[0]},
 		Indexes: []*schema.Index{
 			{
-				Name:    "template_slug_scope",
-				Unique:  false,
-				Columns: []*schema.Column{TemplatesColumns[2], TemplatesColumns[10]},
+				Name:    "template_slug_scope_scope_id",
+				Unique:  true,
+				Columns: []*schema.Column{TemplatesColumns[2], TemplatesColumns[10], TemplatesColumns[11]},
 			},
 			{
 				Name:    "template_harness",
