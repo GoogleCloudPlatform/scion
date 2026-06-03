@@ -1026,14 +1026,25 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 		corev1.EnvVar{Name: "LOGNAME", Value: config.UnixUsername},
 	)
 
-	// Security context: run agent pods as the image's non-root scion user and
-	// keep FSGroup aligned with the broker user so synced files remain writable.
+	// Security context: run agent pods as the image's non-root scion user.
+	// FSGroup is branched by workspace backend (N2-4):
+	//   - NFS backend: stable GID (default 1000) so files are writable across
+	//     pods and nodes without per-start chown (design §9.1).
+	//   - Local backend: host GID (today's behavior) so synced files remain
+	//     writable by the broker user.
 	const containerUID int64 = 1000
-	hostGID := int64(os.Getgid())
+	fsGroupGID := int64(os.Getgid()) // default: host GID (local backend)
+	if config.WorkspaceBackendName == "nfs" {
+		nfsGID := config.NFSGID
+		if nfsGID == 0 {
+			nfsGID = 1000 // design default
+		}
+		fsGroupGID = int64(nfsGID)
+	}
 	runAsNonRoot := true
 	allowPrivilegeEscalation := false
 	podSecurityContext := &corev1.PodSecurityContext{
-		FSGroup:      &hostGID,
+		FSGroup:      &fsGroupGID,
 		RunAsUser:    int64Ptr(containerUID),
 		RunAsGroup:   int64Ptr(containerUID),
 		RunAsNonRoot: &runAsNonRoot,
