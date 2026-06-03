@@ -192,6 +192,21 @@ func (s *BrokerDispatchStore) FailBrokerDispatch(ctx context.Context, id, errMsg
 	return nil
 }
 
+// GetBrokerDispatch returns a single dispatch row by ID. Used by the originator
+// to read the result/state after the owner completes the dispatch.
+func (s *BrokerDispatchStore) GetBrokerDispatch(ctx context.Context, id string) (*store.BrokerDispatch, error) {
+	uid, err := parseUUID(id)
+	if err != nil {
+		return nil, err
+	}
+	row, err := s.client.BrokerDispatch.Get(ctx, uid)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	d := entBrokerDispatchToStore(row)
+	return &d, nil
+}
+
 // ListPendingDispatch returns the pending dispatch intents for a broker, oldest
 // first — the reconcile-drain query (design §5.3).
 func (s *BrokerDispatchStore) ListPendingDispatch(ctx context.Context, brokerID string) ([]store.BrokerDispatch, error) {

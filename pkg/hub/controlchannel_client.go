@@ -528,12 +528,18 @@ func (c *HybridBrokerClient) RestartAgent(ctx context.Context, brokerID, brokerE
 	}
 }
 
-// DeleteAgent deletes an agent, preferring control channel.
+// DeleteAgent deletes an agent, using route() to decide the delivery path.
+// routeLocal uses the control-channel tunnel, routeHTTP falls back to HTTP,
+// and routeForward/routeUndeliverable return ErrLifecycleDeferred.
 func (c *HybridBrokerClient) DeleteAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, deleteFiles, removeBranch, softDelete bool, deletedAt time.Time) error {
-	if c.useControlChannel(brokerID) {
+	switch c.route(ctx, brokerID, brokerEndpoint) {
+	case routeLocal:
 		return c.controlChannel.DeleteAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, deleteFiles, removeBranch, softDelete, deletedAt)
+	case routeHTTP:
+		return c.httpClient.DeleteAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, deleteFiles, removeBranch, softDelete, deletedAt)
+	default:
+		return ErrLifecycleDeferred
 	}
-	return c.httpClient.DeleteAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, deleteFiles, removeBranch, softDelete, deletedAt)
 }
 
 // MessageAgent sends a message to an agent, using route() to decide the
@@ -552,20 +558,34 @@ func (c *HybridBrokerClient) MessageAgent(ctx context.Context, brokerID, brokerE
 	}
 }
 
-// CheckAgentPrompt checks if an agent has a non-empty prompt.md file.
+// CheckAgentPrompt checks if an agent has a non-empty prompt.md file, using
+// route() to decide the delivery path. routeLocal uses the control-channel
+// tunnel, routeHTTP falls back to HTTP, and routeForward/routeUndeliverable
+// return ErrLifecycleDeferred so the caller can write durable intent + wait.
 func (c *HybridBrokerClient) CheckAgentPrompt(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string) (bool, error) {
-	if c.useControlChannel(brokerID) {
+	switch c.route(ctx, brokerID, brokerEndpoint) {
+	case routeLocal:
 		return c.controlChannel.CheckAgentPrompt(ctx, brokerID, brokerEndpoint, agentID, projectID)
+	case routeHTTP:
+		return c.httpClient.CheckAgentPrompt(ctx, brokerID, brokerEndpoint, agentID, projectID)
+	default:
+		return false, ErrLifecycleDeferred
 	}
-	return c.httpClient.CheckAgentPrompt(ctx, brokerID, brokerEndpoint, agentID, projectID)
 }
 
-// CreateAgentWithGather creates an agent with env-gather support, preferring control channel.
+// CreateAgentWithGather creates an agent with env-gather support, using route()
+// to decide the delivery path. routeLocal uses the control-channel tunnel,
+// routeHTTP falls back to HTTP, and routeForward/routeUndeliverable return
+// ErrLifecycleDeferred so the caller can write durable intent + wait.
 func (c *HybridBrokerClient) CreateAgentWithGather(ctx context.Context, brokerID, brokerEndpoint string, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error) {
-	if c.useControlChannel(brokerID) {
+	switch c.route(ctx, brokerID, brokerEndpoint) {
+	case routeLocal:
 		return c.controlChannel.CreateAgentWithGather(ctx, brokerID, brokerEndpoint, req)
+	case routeHTTP:
+		return c.httpClient.CreateAgentWithGather(ctx, brokerID, brokerEndpoint, req)
+	default:
+		return nil, nil, ErrLifecycleDeferred
 	}
-	return c.httpClient.CreateAgentWithGather(ctx, brokerID, brokerEndpoint, req)
 }
 
 // GetAgentLogs retrieves agent.log content, preferring control channel.
@@ -591,10 +611,17 @@ func (c *HybridBrokerClient) CleanupProject(ctx context.Context, brokerID, broke
 	return c.httpClient.CleanupProject(ctx, brokerID, brokerEndpoint, projectSlug)
 }
 
-// FinalizeEnv sends gathered env vars to a broker, preferring control channel.
+// FinalizeEnv sends gathered env vars to a broker, using route() to decide the
+// delivery path. routeLocal uses the control-channel tunnel, routeHTTP falls
+// back to HTTP, and routeForward/routeUndeliverable return ErrLifecycleDeferred
+// so the caller can write durable intent + wait.
 func (c *HybridBrokerClient) FinalizeEnv(ctx context.Context, brokerID, brokerEndpoint, agentID string, env map[string]string) (*RemoteAgentResponse, error) {
-	if c.useControlChannel(brokerID) {
+	switch c.route(ctx, brokerID, brokerEndpoint) {
+	case routeLocal:
 		return c.controlChannel.FinalizeEnv(ctx, brokerID, brokerEndpoint, agentID, env)
+	case routeHTTP:
+		return c.httpClient.FinalizeEnv(ctx, brokerID, brokerEndpoint, agentID, env)
+	default:
+		return nil, ErrLifecycleDeferred
 	}
-	return c.httpClient.FinalizeEnv(ctx, brokerID, brokerEndpoint, agentID, env)
 }

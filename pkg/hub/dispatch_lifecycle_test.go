@@ -18,6 +18,7 @@ import (
 	"context"
 	"log/slog"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -121,6 +122,131 @@ func TestRestartDispatchArgs_RoundTrip(t *testing.T) {
 
 func TestStopDispatchArgs_RoundTrip(t *testing.T) {
 	raw, err := MarshalDispatchArgs(&StopDispatchArgs{})
+	require.NoError(t, err)
+	assert.Equal(t, "{}", raw)
+}
+
+// =========================================================================
+// B4-3: Route-gating tests for DeleteAgent
+// =========================================================================
+
+func TestHybridBrokerClient_DeleteAgent_RouteGate(t *testing.T) {
+	const remoteBroker = "broker-remote"
+
+	mgr := NewControlChannelManager(DefaultControlChannelConfig(), slog.Default())
+	c := NewHybridBrokerClient(mgr, &fakeHTTPClient{}, nil, false)
+
+	t.Run("routeForward returns ErrLifecycleDeferred", func(t *testing.T) {
+		c.SetAffinityLookup(func(context.Context, string) (string, bool) { return "hubA", true })
+		err := c.DeleteAgent(context.Background(), remoteBroker, "", "a1", "p1", false, false, false, time.Time{})
+		assert.ErrorIs(t, err, ErrLifecycleDeferred)
+	})
+
+	t.Run("routeUndeliverable returns ErrLifecycleDeferred", func(t *testing.T) {
+		c.SetAffinityLookup(func(context.Context, string) (string, bool) { return "", false })
+		err := c.DeleteAgent(context.Background(), remoteBroker, "", "a1", "p1", false, false, false, time.Time{})
+		assert.ErrorIs(t, err, ErrLifecycleDeferred)
+	})
+}
+
+// =========================================================================
+// B4-4: Route-gating tests for CheckAgentPrompt / CreateAgentWithGather / FinalizeEnv
+// =========================================================================
+
+func TestHybridBrokerClient_CheckAgentPrompt_RouteGate(t *testing.T) {
+	const remoteBroker = "broker-remote"
+
+	mgr := NewControlChannelManager(DefaultControlChannelConfig(), slog.Default())
+	c := NewHybridBrokerClient(mgr, &fakeHTTPClient{}, nil, false)
+
+	t.Run("routeForward returns ErrLifecycleDeferred", func(t *testing.T) {
+		c.SetAffinityLookup(func(context.Context, string) (string, bool) { return "hubA", true })
+		_, err := c.CheckAgentPrompt(context.Background(), remoteBroker, "", "a1", "p1")
+		assert.ErrorIs(t, err, ErrLifecycleDeferred)
+	})
+
+	t.Run("routeUndeliverable returns ErrLifecycleDeferred", func(t *testing.T) {
+		c.SetAffinityLookup(func(context.Context, string) (string, bool) { return "", false })
+		_, err := c.CheckAgentPrompt(context.Background(), remoteBroker, "", "a1", "p1")
+		assert.ErrorIs(t, err, ErrLifecycleDeferred)
+	})
+}
+
+func TestHybridBrokerClient_CreateAgentWithGather_RouteGate(t *testing.T) {
+	const remoteBroker = "broker-remote"
+
+	mgr := NewControlChannelManager(DefaultControlChannelConfig(), slog.Default())
+	c := NewHybridBrokerClient(mgr, &fakeHTTPClient{}, nil, false)
+
+	t.Run("routeForward returns ErrLifecycleDeferred", func(t *testing.T) {
+		c.SetAffinityLookup(func(context.Context, string) (string, bool) { return "hubA", true })
+		_, _, err := c.CreateAgentWithGather(context.Background(), remoteBroker, "", &RemoteCreateAgentRequest{})
+		assert.ErrorIs(t, err, ErrLifecycleDeferred)
+	})
+
+	t.Run("routeUndeliverable returns ErrLifecycleDeferred", func(t *testing.T) {
+		c.SetAffinityLookup(func(context.Context, string) (string, bool) { return "", false })
+		_, _, err := c.CreateAgentWithGather(context.Background(), remoteBroker, "", &RemoteCreateAgentRequest{})
+		assert.ErrorIs(t, err, ErrLifecycleDeferred)
+	})
+}
+
+func TestHybridBrokerClient_FinalizeEnv_RouteGate(t *testing.T) {
+	const remoteBroker = "broker-remote"
+
+	mgr := NewControlChannelManager(DefaultControlChannelConfig(), slog.Default())
+	c := NewHybridBrokerClient(mgr, &fakeHTTPClient{}, nil, false)
+
+	t.Run("routeForward returns ErrLifecycleDeferred", func(t *testing.T) {
+		c.SetAffinityLookup(func(context.Context, string) (string, bool) { return "hubA", true })
+		_, err := c.FinalizeEnv(context.Background(), remoteBroker, "", "a1", nil)
+		assert.ErrorIs(t, err, ErrLifecycleDeferred)
+	})
+
+	t.Run("routeUndeliverable returns ErrLifecycleDeferred", func(t *testing.T) {
+		c.SetAffinityLookup(func(context.Context, string) (string, bool) { return "", false })
+		_, err := c.FinalizeEnv(context.Background(), remoteBroker, "", "a1", nil)
+		assert.ErrorIs(t, err, ErrLifecycleDeferred)
+	})
+}
+
+// =========================================================================
+// B4-3/B4-4: Dispatch args round-trip
+// =========================================================================
+
+func TestDeleteDispatchArgs_RoundTrip(t *testing.T) {
+	original := &DeleteDispatchArgs{
+		DeleteFiles:  true,
+		RemoveBranch: true,
+		SoftDelete:   false,
+	}
+
+	raw, err := MarshalDispatchArgs(original)
+	require.NoError(t, err)
+	require.NotEmpty(t, raw)
+
+	got, err := UnmarshalDeleteArgs(raw)
+	require.NoError(t, err)
+	assert.Equal(t, original.DeleteFiles, got.DeleteFiles)
+	assert.Equal(t, original.RemoveBranch, got.RemoveBranch)
+	assert.Equal(t, original.SoftDelete, got.SoftDelete)
+}
+
+func TestFinalizeEnvDispatchArgs_RoundTrip(t *testing.T) {
+	original := &FinalizeEnvDispatchArgs{
+		Env: map[string]string{"KEY": "val", "SECRET": "abc"},
+	}
+
+	raw, err := MarshalDispatchArgs(original)
+	require.NoError(t, err)
+
+	got, err := UnmarshalFinalizeEnvArgs(raw)
+	require.NoError(t, err)
+	assert.Equal(t, original.Env, got.Env)
+}
+
+func TestCheckPromptDispatchArgs_RoundTrip(t *testing.T) {
+	raw, err := MarshalDispatchArgs(&CheckPromptDispatchArgs{})
 	require.NoError(t, err)
 	assert.Equal(t, "{}", raw)
 }
