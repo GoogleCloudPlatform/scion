@@ -347,6 +347,10 @@ type BrokerDispatchStore interface {
 	// FailBrokerDispatch marks a dispatch failed, records the error, bumps attempts.
 	FailBrokerDispatch(ctx context.Context, id, errMsg string) error
 
+	// GetBrokerDispatch returns a single dispatch row by ID (used by the
+	// originator to read the result after the owner completes it).
+	GetBrokerDispatch(ctx context.Context, id string) (*BrokerDispatch, error)
+
 	// ListPendingDispatch returns pending intents for a broker (drain query).
 	ListPendingDispatch(ctx context.Context, brokerID string) ([]BrokerDispatch, error)
 

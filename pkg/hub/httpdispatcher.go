@@ -17,6 +17,7 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -714,6 +715,9 @@ func (d *HTTPAgentDispatcher) DispatchAgentCreateWithGather(ctx context.Context,
 		"agent_id", agent.ID, "agent", agent.Name,
 		"brokerElapsed", time.Since(brokerCallStart).String(),
 		"totalElapsed", time.Since(dispatchStart).String())
+	if errors.Is(err, ErrLifecycleDeferred) {
+		return d.deferredCreateWithGather(ctx, agent)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -728,6 +732,22 @@ func (d *HTTPAgentDispatcher) DispatchAgentCreateWithGather(ctx context.Context,
 	return nil, nil
 }
 
+// deferredCreateWithGather handles a cross-node create-with-gather via durable dispatch.
+func (d *HTTPAgentDispatcher) deferredCreateWithGather(ctx context.Context, agent *store.Agent) (*RemoteEnvRequirementsResponse, error) {
+	result, err := d.deferredDataOpResult(ctx, agent, "create", &CreateWithGatherDispatchArgs{})
+	if err != nil {
+		return nil, err
+	}
+	if result.Result == "" {
+		return nil, nil
+	}
+	var cr CreateWithGatherResult
+	if err := json.Unmarshal([]byte(result.Result), &cr); err != nil {
+		return nil, fmt.Errorf("unmarshal create result: %w", err)
+	}
+	return cr.EnvRequirements, nil
+}
+
 // DispatchFinalizeEnv sends gathered env vars to the broker to complete agent creation.
 func (d *HTTPAgentDispatcher) DispatchFinalizeEnv(ctx context.Context, agent *store.Agent, env map[string]string) error {
 	if err := requireRuntimeBrokerAssigned(agent); err != nil {
@@ -740,6 +760,9 @@ func (d *HTTPAgentDispatcher) DispatchFinalizeEnv(ctx context.Context, agent *st
 	}
 
 	resp, err := d.client.FinalizeEnv(ctx, agent.RuntimeBrokerID, endpoint, agent.ID, env)
+	if errors.Is(err, ErrLifecycleDeferred) {
+		return d.deferredFinalizeEnv(ctx, agent, env)
+	}
 	if err != nil {
 		return err
 	}
@@ -748,6 +771,11 @@ func (d *HTTPAgentDispatcher) DispatchFinalizeEnv(ctx context.Context, agent *st
 		d.applyBrokerResponse(agent, resp)
 	}
 	return nil
+}
+
+// deferredFinalizeEnv handles a cross-node finalize_env via durable dispatch.
+func (d *HTTPAgentDispatcher) deferredFinalizeEnv(ctx context.Context, agent *store.Agent, env map[string]string) error {
+	return d.deferredDataOp(ctx, agent, "finalize_env", &FinalizeEnvDispatchArgs{Env: env})
 }
 
 // resolveEnvFromStorage queries Hub env var storage for all applicable scopes
@@ -1185,7 +1213,11 @@ func (d *HTTPAgentDispatcher) DispatchAgentDelete(ctx context.Context, agent *st
 		return err
 	}
 
-	return d.client.DeleteAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID, deleteFiles, removeBranch, softDelete, deletedAt)
+	err = d.client.DeleteAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID, deleteFiles, removeBranch, softDelete, deletedAt)
+	if errors.Is(err, ErrLifecycleDeferred) {
+		return d.deferredDelete(ctx, agent, deleteFiles, removeBranch, softDelete, deletedAt)
+	}
+	return err
 }
 
 // DispatchAgentMessage sends a message to an agent on the runtime broker.
@@ -1241,7 +1273,26 @@ func (d *HTTPAgentDispatcher) DispatchCheckAgentPrompt(ctx context.Context, agen
 		return false, err
 	}
 
-	return d.client.CheckAgentPrompt(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID)
+	hasPrompt, err := d.client.CheckAgentPrompt(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID)
+	if errors.Is(err, ErrLifecycleDeferred) {
+		return d.deferredCheckPrompt(ctx, agent)
+	}
+	return hasPrompt, err
+}
+
+// deferredCheckPrompt handles a cross-node check_prompt via durable dispatch.
+func (d *HTTPAgentDispatcher) deferredCheckPrompt(ctx context.Context, agent *store.Agent) (bool, error) {
+	result, err := d.deferredDataOpResult(ctx, agent, "check_prompt", &CheckPromptDispatchArgs{})
+	if err != nil {
+		return false, err
+	}
+	var cr CheckPromptResult
+	if result.Result != "" {
+		if err := json.Unmarshal([]byte(result.Result), &cr); err != nil {
+			return false, fmt.Errorf("unmarshal check_prompt result: %w", err)
+		}
+	}
+	return cr.HasPrompt, nil
 }
 
 // =============================================================================
@@ -1269,6 +1320,90 @@ func (d *HTTPAgentDispatcher) deferredStop(ctx context.Context, agent *store.Age
 // deferredRestart handles a cross-node agent restart.
 func (d *HTTPAgentDispatcher) deferredRestart(ctx context.Context, agent *store.Agent) error {
 	return d.deferredLifecycle(ctx, agent, "restart", &RestartDispatchArgs{}, isStartTerminal)
+}
+
+// deferredDelete handles a cross-node agent delete: subscribe → write intent →
+// signal → wait for the dispatch row to reach terminal state. Delete is
+// idempotent: 404 from the owner is treated as success.
+func (d *HTTPAgentDispatcher) deferredDelete(ctx context.Context, agent *store.Agent, deleteFiles, removeBranch, softDelete bool, deletedAt time.Time) error {
+	args := &DeleteDispatchArgs{
+		DeleteFiles:  deleteFiles,
+		RemoveBranch: removeBranch,
+		SoftDelete:   softDelete,
+		DeletedAt:    deletedAt,
+	}
+	return d.deferredDataOp(ctx, agent, "delete", args)
+}
+
+// deferredDataOp is the common flow for cross-node ops that return a result
+// via the dispatch row (delete, finalize_env, check_prompt, create):
+//  1. Subscribe to broker.dispatch.<id>.done BEFORE writing intent
+//  2. InsertBrokerDispatch with serialized args
+//  3. Best-effort SignalBrokerCmd
+//  4. waitForDispatchDone (reads result from the DB row — authoritative)
+func (d *HTTPAgentDispatcher) deferredDataOp(
+	ctx context.Context,
+	agent *store.Agent,
+	op string,
+	args interface{},
+) error {
+	_, err := d.deferredDataOpResult(ctx, agent, op, args)
+	return err
+}
+
+// deferredDataOpResult is like deferredDataOp but returns the completed
+// dispatch row so callers can read the result JSON.
+func (d *HTTPAgentDispatcher) deferredDataOpResult(
+	ctx context.Context,
+	agent *store.Agent,
+	op string,
+	args interface{},
+) (*store.BrokerDispatch, error) {
+	if d.events == nil || d.commandBus == nil {
+		return nil, fmt.Errorf("cross-node dispatch not available: events or command bus not configured")
+	}
+
+	dispatchID := uuid.NewString()
+
+	// 1. Subscribe BEFORE writing intent so we don't miss events.
+	eventCh, unsub := d.events.Subscribe("broker.dispatch." + dispatchID + ".done")
+
+	// 2. Serialize args and insert the durable intent row.
+	argsJSON, err := MarshalDispatchArgs(args)
+	if err != nil {
+		unsub()
+		return nil, fmt.Errorf("marshal dispatch args: %w", err)
+	}
+
+	dispatch := &store.BrokerDispatch{
+		ID:        dispatchID,
+		BrokerID:  agent.RuntimeBrokerID,
+		AgentID:   agent.ID,
+		AgentSlug: agent.Slug,
+		ProjectID: agent.ProjectID,
+		Op:        op,
+		Args:      argsJSON,
+	}
+	if err := d.store.InsertBrokerDispatch(ctx, dispatch); err != nil {
+		unsub()
+		return nil, fmt.Errorf("insert dispatch intent: %w", err)
+	}
+
+	// 3. Best-effort signal.
+	if err := d.commandBus.SignalBrokerCmd(ctx, agent.RuntimeBrokerID); err != nil {
+		d.log.Warn("deferredDataOp: signal failed (durable intent is backstop)",
+			"op", op, "brokerID", agent.RuntimeBrokerID, "error", err)
+	}
+
+	// 4. Wait for completion — reads result from the DB row (authoritative).
+	result, err := waitForDispatchDone(ctx, eventCh, unsub, d.store, dispatchID)
+	if err != nil {
+		return nil, err
+	}
+	if result.State == store.DispatchStateFailed {
+		return nil, fmt.Errorf("dispatch %s failed: %s", op, result.Error)
+	}
+	return result, nil
 }
 
 // deferredLifecycle is the common flow for cross-node start/stop/restart:

@@ -18,7 +18,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 // ErrDispatchFailed is returned when a lifecycle dispatch rolling timeout
@@ -84,6 +87,62 @@ func waitForAgentTransition(
 
 		case <-ctx.Done():
 			return "", ctx.Err()
+		}
+	}
+}
+
+// waitForDispatchDone waits for a broker_dispatch row to reach terminal state.
+// The caller subscribes to broker.dispatch.<id>.done BEFORE writing intent and
+// passes the channel + unsub here. On event arrival (or timeout), the row is
+// read from the store — the DB row is authoritative (design §6.3), so a missed
+// event is recoverable.
+func waitForDispatchDone(
+	ctx context.Context,
+	events <-chan Event,
+	unsub func(),
+	st store.BrokerDispatchStore,
+	dispatchID string,
+) (*store.BrokerDispatch, error) {
+	defer unsub()
+
+	timeout := dispatchRollingTimeout
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
+	for {
+		select {
+		case _, ok := <-events:
+			if !ok {
+				return nil, ErrDispatchFailed
+			}
+			d, err := st.GetBrokerDispatch(ctx, dispatchID)
+			if err != nil {
+				return nil, fmt.Errorf("read dispatch result: %w", err)
+			}
+			if d.State == store.DispatchStateDone || d.State == store.DispatchStateFailed {
+				return d, nil
+			}
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			timer.Reset(timeout)
+
+		case <-timer.C:
+			// Bounded re-read: the event may have been missed (design §6.3).
+			d, err := st.GetBrokerDispatch(ctx, dispatchID)
+			if err != nil {
+				return nil, fmt.Errorf("read dispatch result on timeout: %w", err)
+			}
+			if d.State == store.DispatchStateDone || d.State == store.DispatchStateFailed {
+				return d, nil
+			}
+			return nil, ErrDispatchFailed
+
+		case <-ctx.Done():
+			return nil, ctx.Err()
 		}
 	}
 }
