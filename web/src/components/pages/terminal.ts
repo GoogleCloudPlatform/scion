@@ -68,6 +68,9 @@ export class ScionPageTerminal extends LitElement {
   private connected = false;
 
   @state()
+  private wasConnected = false;
+
+  @state()
   private error: string | null = null;
 
   @state()
@@ -619,6 +622,7 @@ export class ScionPageTerminal extends LitElement {
     this.socket.onopen = () => {
       console.debug('[Terminal] WebSocket connected');
       this.connected = true;
+      this.wasConnected = true;
       this.error = null;
       // Re-fit now that the connection is live so tmux gets accurate dimensions
       if (this.fitAddon) {
@@ -714,6 +718,7 @@ export class ScionPageTerminal extends LitElement {
     }
     this.fitAddon = null;
     this.clipboardAddon = null;
+    this.wasConnected = false;
   }
 
   /**
@@ -842,7 +847,7 @@ export class ScionPageTerminal extends LitElement {
         : ''}
       <div class="terminal-wrapper">
         <div class="terminal-container"></div>
-        ${!this.connected && this.terminal
+        ${!this.connected && this.wasConnected
           ? html`<div class="disconnected-overlay">
               <span class="overlay-text">DISCONNECTED</span>
             </div>`
