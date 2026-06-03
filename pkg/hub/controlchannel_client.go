@@ -517,12 +517,20 @@ func (c *HybridBrokerClient) DeleteAgent(ctx context.Context, brokerID, brokerEn
 	return c.httpClient.DeleteAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, deleteFiles, removeBranch, softDelete, deletedAt)
 }
 
-// MessageAgent sends a message to an agent, preferring control channel.
+// MessageAgent sends a message to an agent, using route() to decide the
+// delivery path (B3-2). routeLocal uses the control-channel tunnel (unchanged
+// fast path), routeHTTP falls back to the broker's HTTP endpoint, and
+// routeForward/routeUndeliverable return ErrMessageDeferred so the caller
+// can emit a NOTIFY wakeup and return 202 (the message row is durable).
 func (c *HybridBrokerClient) MessageAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID, message string, interrupt bool, structuredMsg *messages.StructuredMessage) error {
-	if c.useControlChannel(brokerID) {
+	switch c.route(ctx, brokerID, brokerEndpoint) {
+	case routeLocal:
 		return c.controlChannel.MessageAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, message, interrupt, structuredMsg)
+	case routeHTTP:
+		return c.httpClient.MessageAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, message, interrupt, structuredMsg)
+	default:
+		return ErrMessageDeferred
 	}
-	return c.httpClient.MessageAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, message, interrupt, structuredMsg)
 }
 
 // CheckAgentPrompt checks if an agent has a non-empty prompt.md file.

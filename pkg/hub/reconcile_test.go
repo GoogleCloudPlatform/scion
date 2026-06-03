@@ -22,7 +22,9 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
@@ -130,6 +132,112 @@ func TestReconcileBroker_DrainsPendingMessageOnce(t *testing.T) {
 	got, err := cs.GetMessage(ctx, msg.ID)
 	require.NoError(t, err)
 	assert.Equal(t, store.MessageDispatchDispatched, got.DispatchState)
+}
+
+// TestDeliverMessage_TunnelsViaDispatcher verifies that deliverMessage resolves
+// the agent from the store and dispatches via the local AgentDispatcher.
+func TestDeliverMessage_TunnelsViaDispatcher(t *testing.T) {
+	ctx := context.Background()
+	client := enttest.NewClient(t)
+	cs := entadapter.NewCompositeStore(client)
+
+	proj := &store.Project{ID: uuid.NewString(), Name: "p", Slug: "p-" + uuid.NewString()[:8], Visibility: store.VisibilityPrivate, OwnerID: uuid.NewString()}
+	require.NoError(t, cs.CreateProject(ctx, proj))
+
+	brokerID := uuid.NewString()
+	agent, err := client.Agent.Create().
+		SetSlug("a-" + uuid.NewString()[:8]).SetName("deliver-test").
+		SetProjectID(uuid.MustParse(proj.ID)).SetRuntimeBrokerID(brokerID).
+		Save(ctx)
+	require.NoError(t, err)
+
+	var dispatched atomic.Int32
+	var lastMsg string
+	fakeDispatcher := &reconcileTestDispatcher{
+		onMessage: func(a *store.Agent, msg string) error {
+			dispatched.Add(1)
+			lastMsg = msg
+			return nil
+		},
+	}
+
+	srv := &Server{
+		store:             cs,
+		instanceID:        "hub-test",
+		agentLifecycleLog: slog.Default(),
+	}
+	srv.SetDispatcher(fakeDispatcher)
+	srv.deliverMsg = srv.deliverMessage
+
+	m := &store.Message{
+		ID:      uuid.NewString(),
+		AgentID: agent.ID.String(),
+		Msg:     "hello from reconcile",
+		Urgent:  true,
+	}
+
+	err = srv.deliverMsg(ctx, m)
+	require.NoError(t, err)
+	assert.Equal(t, int32(1), dispatched.Load(), "message dispatched once")
+	assert.Equal(t, "hello from reconcile", lastMsg)
+}
+
+// TestDeliverMessage_MissingAgent returns an error when the agent doesn't exist.
+func TestDeliverMessage_MissingAgent(t *testing.T) {
+	ctx := context.Background()
+	cs := entadapter.NewCompositeStore(enttest.NewClient(t))
+	srv := &Server{
+		store:             cs,
+		instanceID:        "hub-test",
+		agentLifecycleLog: slog.Default(),
+	}
+	srv.deliverMsg = srv.deliverMessage
+
+	m := &store.Message{ID: uuid.NewString(), AgentID: uuid.NewString(), Msg: "test"}
+	err := srv.deliverMsg(ctx, m)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "resolve agent")
+}
+
+// reconcileTestDispatcher is a minimal AgentDispatcher for deliverMessage tests.
+type reconcileTestDispatcher struct {
+	onMessage func(agent *store.Agent, msg string) error
+}
+
+func (d *reconcileTestDispatcher) DispatchAgentCreate(context.Context, *store.Agent) error { return nil }
+func (d *reconcileTestDispatcher) DispatchAgentProvision(context.Context, *store.Agent) error {
+	return nil
+}
+func (d *reconcileTestDispatcher) DispatchAgentStart(context.Context, *store.Agent, string) error {
+	return nil
+}
+func (d *reconcileTestDispatcher) DispatchAgentStop(context.Context, *store.Agent) error { return nil }
+func (d *reconcileTestDispatcher) DispatchAgentRestart(context.Context, *store.Agent) error {
+	return nil
+}
+func (d *reconcileTestDispatcher) DispatchAgentDelete(_ context.Context, _ *store.Agent, _, _, _ bool, _ time.Time) error {
+	return nil
+}
+func (d *reconcileTestDispatcher) DispatchAgentMessage(_ context.Context, agent *store.Agent, msg string, _ bool, _ *messages.StructuredMessage) error {
+	if d.onMessage != nil {
+		return d.onMessage(agent, msg)
+	}
+	return nil
+}
+func (d *reconcileTestDispatcher) DispatchAgentLogs(context.Context, *store.Agent, int) (string, error) {
+	return "", nil
+}
+func (d *reconcileTestDispatcher) DispatchAgentExec(context.Context, *store.Agent, []string, int) (string, int, error) {
+	return "", 0, nil
+}
+func (d *reconcileTestDispatcher) DispatchCheckAgentPrompt(context.Context, *store.Agent) (bool, error) {
+	return false, nil
+}
+func (d *reconcileTestDispatcher) DispatchAgentCreateWithGather(context.Context, *store.Agent) (*RemoteEnvRequirementsResponse, error) {
+	return nil, nil
+}
+func (d *reconcileTestDispatcher) DispatchFinalizeEnv(context.Context, *store.Agent, map[string]string) error {
+	return nil
 }
 
 type assertErr struct{}
