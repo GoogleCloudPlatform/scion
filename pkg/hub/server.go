@@ -79,6 +79,14 @@ type ServerConfig struct {
 	// UserTokenConfig holds configuration for user JWT tokens.
 	// If SigningKey is empty, a random key is generated.
 	UserTokenConfig UserTokenConfig
+	// SharedSigningSecret is the deployment-wide secret (the same value every
+	// replica receives via --session-secret / SESSION_SECRET) from which the
+	// agent and user JWT signing keys are derived deterministically. When set,
+	// every replica derives identical signing keys regardless of its
+	// host-derived HubID, so a JWT minted by one replica validates on any
+	// other replica behind the load balancer. When empty, signing keys fall
+	// back to per-hub storage in the secret backend / store.
+	SharedSigningSecret string
 	// TrustedProxies is a list of trusted proxy IPs/CIDRs for forwarded headers.
 	TrustedProxies []string
 	// Debug enables verbose debug logging.
@@ -816,6 +824,18 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 	return srv, nil
 }
 
+// deriveSharedSigningKey deterministically derives a 32-byte HS256 signing key
+// from the deployment's shared signing secret and the logical key name. The key
+// name (e.g. "user_signing_key", "agent_signing_key") provides domain
+// separation so the user and agent keys differ even though both originate from
+// the same shared secret. Every replica configured with the same shared secret
+// derives identical keys, which is what lets a JWT minted by one replica be
+// validated by another.
+func deriveSharedSigningKey(secret, keyName string) []byte {
+	sum := sha256.Sum256([]byte("scion-hub-signing-key:" + keyName + ":" + secret))
+	return sum[:]
+}
+
 // ensureSigningKey ensures a signing key exists, loading it if it does
 // or generating and saving it if it doesn't.
 //
@@ -833,6 +853,27 @@ func (s *Server) ensureSigningKey(ctx context.Context, keyName string, existingK
 			"sha256_prefix", hex.EncodeToString(fp[:8]),
 		)
 		return existingKey, nil
+	}
+
+	// When a deployment-wide shared signing secret is configured (the same
+	// secret every replica receives via --session-secret / SESSION_SECRET),
+	// derive the signing key deterministically from it. This makes the key
+	// identical on every replica regardless of the host-derived hub ID, so a
+	// JWT minted by one replica validates on any other. It mirrors the web
+	// session cookie store (commit 0515e2a8), whose keys are derived from the
+	// same shared secret, and is what lets the hub scale horizontally behind a
+	// load balancer without operators having to pin a matching HubID on each
+	// replica. Per-host secret-backend storage (below) is bypassed entirely.
+	if s.config.SharedSigningSecret != "" {
+		key := deriveSharedSigningKey(s.config.SharedSigningSecret, keyName)
+		fp := sha256.Sum256(key)
+		slog.Info("ensureSigningKey: derived from shared signing secret",
+			"key", keyName,
+			"source", "shared_secret",
+			"key_len", len(key),
+			"sha256_prefix", hex.EncodeToString(fp[:8]),
+		)
+		return key, nil
 	}
 
 	hubID := s.hubID
