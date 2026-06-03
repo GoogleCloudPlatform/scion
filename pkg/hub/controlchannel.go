@@ -65,7 +65,7 @@ type ControlChannelManager struct {
 	config       ControlChannelConfig
 	log          *slog.Logger
 	upgrader     websocket.Upgrader
-	onDisconnect func(brokerID string)
+	onDisconnect func(brokerID, sessionID string)
 }
 
 // NewControlChannelManager creates a new control channel manager.
@@ -86,8 +86,10 @@ func NewControlChannelManager(config ControlChannelConfig, log *slog.Logger) *Co
 }
 
 // SetOnDisconnect sets a callback that is invoked when a broker disconnects.
-// The callback is called asynchronously after the connection is removed.
-func (m *ControlChannelManager) SetOnDisconnect(fn func(brokerID string)) {
+// The callback is called asynchronously after the connection is removed and
+// receives the sessionID of the connection that dropped, so the handler can
+// compare-and-clear affinity (avoiding the flap clobber race).
+func (m *ControlChannelManager) SetOnDisconnect(fn func(brokerID, sessionID string)) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.onDisconnect = fn
@@ -183,10 +185,12 @@ func (s *StreamProxy) Close() {
 }
 
 // HandleUpgrade upgrades an HTTP connection to a WebSocket control channel.
-func (m *ControlChannelManager) HandleUpgrade(w http.ResponseWriter, r *http.Request, brokerID string) error {
+// It returns the sessionID generated for the new connection so the caller can
+// claim broker affinity for this exact session.
+func (m *ControlChannelManager) HandleUpgrade(w http.ResponseWriter, r *http.Request, brokerID string) (string, error) {
 	conn, err := m.upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		return fmt.Errorf("websocket upgrade failed: %w", err)
+		return "", fmt.Errorf("websocket upgrade failed: %w", err)
 	}
 
 	wsConn := wsprotocol.NewConnection(conn, wsprotocol.ConnectionConfig{
@@ -232,19 +236,19 @@ func (m *ControlChannelManager) HandleUpgrade(w http.ResponseWriter, r *http.Req
 	if err := wsConn.WriteJSON(connectedMsg); err != nil {
 		m.log.Error("Failed to send connected message", "brokerID", brokerID, "error", err)
 		brokerConn.Close()
-		m.removeConnection(brokerID)
-		return err
+		m.removeConnection(brokerID, sessionID)
+		return "", err
 	}
 
-	return nil
+	return sessionID, nil
 }
 
 // handleConnection handles messages from a connected broker.
 func (m *ControlChannelManager) handleConnection(hc *BrokerConnection) {
 	defer func() {
 		hc.Close()
-		m.removeConnection(hc.brokerID)
-		m.log.Info("Broker control channel disconnected", "brokerID", hc.brokerID)
+		m.removeConnection(hc.brokerID, hc.sessionID)
+		m.log.Info("Broker control channel disconnected", "brokerID", hc.brokerID, "sessionID", hc.sessionID)
 	}()
 
 	// Set up pong handler
@@ -450,16 +454,23 @@ func (m *ControlChannelManager) pingLoop(hc *BrokerConnection) {
 	}
 }
 
-// removeConnection removes a broker connection from the manager.
-func (m *ControlChannelManager) removeConnection(brokerID string) {
+// removeConnection removes a broker connection from the manager. It only
+// removes (and fires onDisconnect for) the entry if it is still THIS session:
+// when a broker flaps, HandleUpgrade replaces the map entry with a newer
+// session, and the older connection's teardown must not drop the live socket or
+// stamp a spurious disconnect for the session that already moved on.
+func (m *ControlChannelManager) removeConnection(brokerID, sessionID string) {
 	m.mu.Lock()
-	_, existed := m.connections[brokerID]
-	delete(m.connections, brokerID)
+	cur, ok := m.connections[brokerID]
+	existed := ok && cur.sessionID == sessionID
+	if existed {
+		delete(m.connections, brokerID)
+	}
 	cb := m.onDisconnect
 	m.mu.Unlock()
 
 	if cb != nil && existed {
-		go cb(brokerID)
+		go cb(brokerID, sessionID)
 	}
 }
 
