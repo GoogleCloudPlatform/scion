@@ -64,6 +64,61 @@ var (
 	_ store.ScheduledEventClaimer = (*CompositeStore)(nil)
 )
 
+// TryAdvisoryLockObject acquires a per-object advisory lock using Postgres's
+// two-integer form: pg_try_advisory_lock(int4 classid, int4 objid).
+//
+// This is the per-project provisioning guard. Two agents for the same project
+// (same classID + same objID derived from the project ID hash) contend on the
+// same lock; agents for different projects never contend.
+//
+// The implementation mirrors TryAdvisoryLock but uses the two-int form for
+// both lock and unlock. On SQLite it is a no-op (always acquired).
+func (c *CompositeStore) TryAdvisoryLockObject(ctx context.Context, classID store.AdvisoryLockKey, objID int32) (bool, func() error, error) {
+	if !c.isPostgres() {
+		return true, noopRelease, nil
+	}
+
+	db := c.DB()
+	if db == nil {
+		return true, noopRelease, nil
+	}
+
+	acquireCtx, cancelAcquire := context.WithTimeout(ctx, advisoryLockTimeout)
+	defer cancelAcquire()
+
+	conn, err := db.Conn(acquireCtx)
+	if err != nil {
+		return false, noopRelease, fmt.Errorf("advisory lock object: acquiring connection: %w", err)
+	}
+
+	var acquired bool
+	if err := conn.QueryRowContext(acquireCtx,
+		"SELECT pg_try_advisory_lock($1, $2)", int32(classID), objID,
+	).Scan(&acquired); err != nil {
+		_ = conn.Close()
+		return false, noopRelease, fmt.Errorf("advisory lock object: pg_try_advisory_lock(%d, %d): %w", int32(classID), objID, err)
+	}
+
+	if !acquired {
+		_ = conn.Close()
+		return false, noopRelease, nil
+	}
+
+	release := func() error {
+		unlockCtx, cancel := context.WithTimeout(context.Background(), advisoryLockTimeout)
+		defer cancel()
+		_, unlockErr := conn.ExecContext(unlockCtx,
+			"SELECT pg_advisory_unlock($1, $2)", int32(classID), objID,
+		)
+		closeErr := conn.Close()
+		if unlockErr != nil {
+			return fmt.Errorf("advisory lock object: pg_advisory_unlock(%d, %d): %w", int32(classID), objID, unlockErr)
+		}
+		return closeErr
+	}
+	return true, release, nil
+}
+
 // isPostgres reports whether the shared Ent client is talking to Postgres.
 func (c *CompositeStore) isPostgres() bool {
 	return c.client.Driver().Dialect() == dialect.Postgres

@@ -14,7 +14,10 @@
 
 package store
 
-import "context"
+import (
+	"context"
+	"hash/fnv"
+)
 
 // The interfaces in this file are OPTIONAL capabilities that a store backend may
 // implement to support running N stateless hub processes against one shared
@@ -54,6 +57,21 @@ const (
 	LockBrokerAffinityReap AdvisoryLockKey = 0x5C100006
 	// LockBrokerMessageSweep guards the periodic stuck-pending-message sweep (B5-2).
 	LockBrokerMessageSweep AdvisoryLockKey = 0x5C100007
+
+	// LockWorkspaceProvision is the CLASS ID for per-project workspace
+	// provisioning locks. It is used with the two-int advisory lock form
+	// pg_try_advisory_lock(classid, objid), where classid is this constant
+	// and objid is a stable hash of the project ID. This guards the NFS
+	// first-access provisioning flow (design §7, risk RN1): only one
+	// broker across all nodes may clone/provision a project's workspace at
+	// a time, while different projects lock independently.
+	//
+	// The value is intentionally in a different range (0x5C10_1001) from
+	// the singleton keys above (0x5C10_0001..0005) to avoid collisions
+	// when the two-int lock form's classid is compared against the
+	// single-int form's key — Postgres treats them as separate namespaces,
+	// but keeping them visually distinct aids debugging.
+	LockWorkspaceProvision AdvisoryLockKey = 0x5C101001
 )
 
 // AdvisoryLocker is implemented by backends that can take a cluster-wide
@@ -72,6 +90,37 @@ type AdvisoryLocker interface {
 	// If acquired is false another replica currently holds the lock and the
 	// caller should skip the work this round.
 	TryAdvisoryLock(ctx context.Context, key AdvisoryLockKey) (acquired bool, release func() error, err error)
+
+	// TryAdvisoryLockObject acquires a per-object advisory lock using
+	// Postgres's two-integer form: pg_try_advisory_lock(classid, objid).
+	// classid identifies the lock family (e.g. LockWorkspaceProvision) and
+	// objid identifies the specific object within that family (e.g. a
+	// stable hash of the project ID). Two different objIDs under the same
+	// classid are independent locks; the same (classid, objid) pair
+	// provides mutual exclusion across all replicas.
+	//
+	// This is the per-project provisioning guard (design §7, risk RN1):
+	// two agents for the same project on different nodes contend on the
+	// same (classid, hash(projectID)) lock; agents for different projects
+	// never contend.
+	//
+	// On SQLite the lock is a no-op that always succeeds — the single-
+	// writer model already serializes provisioning.
+	TryAdvisoryLockObject(ctx context.Context, classID AdvisoryLockKey, objID int32) (acquired bool, release func() error, err error)
+}
+
+// StableProjectHash returns a deterministic, cross-node-stable int32 hash
+// of a project ID string, suitable for use as the objID argument to
+// TryAdvisoryLockObject. It uses FNV-32a, which is fast, deterministic,
+// and has good distribution for UUID strings.
+//
+// The result is cast to int32 (Postgres int4 range) — FNV-32a produces a
+// uint32 which wraps into the negative int32 range, but that is fine:
+// pg_try_advisory_lock(int4, int4) accepts any int4 value.
+func StableProjectHash(projectID string) int32 {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(projectID)) // hash.Hash.Write never errors
+	return int32(h.Sum32())
 }
 
 // NOTE: the SERIALIZABLE + retry-on-serialization-failure primitive (P3-4) is

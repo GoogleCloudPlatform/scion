@@ -128,6 +128,41 @@ func TestClaimScheduledEvent_MissingLoses(t *testing.T) {
 	assert.False(t, won)
 }
 
+// On SQLite the two-int advisory lock is a no-op that always succeeds.
+func TestTryAdvisoryLockObject_SQLiteAlwaysAcquires(t *testing.T) {
+	c := newTestCompositeStore(t)
+	ctx := context.Background()
+
+	acquired, release, err := c.TryAdvisoryLockObject(ctx, store.LockWorkspaceProvision, 42)
+	require.NoError(t, err)
+	assert.True(t, acquired, "SQLite two-int advisory lock must always acquire")
+	require.NotNil(t, release)
+	require.NoError(t, release())
+
+	// A second concurrent acquisition on the same (classID, objID) also succeeds.
+	acquired2, release2, err := c.TryAdvisoryLockObject(ctx, store.LockWorkspaceProvision, 42)
+	require.NoError(t, err)
+	assert.True(t, acquired2)
+	require.NoError(t, release2())
+}
+
+// Two-int locks with different objIDs are independent.
+func TestTryAdvisoryLockObject_SQLiteDifferentObjIDsIndependent(t *testing.T) {
+	c := newTestCompositeStore(t)
+	ctx := context.Background()
+
+	acq1, rel1, err := c.TryAdvisoryLockObject(ctx, store.LockWorkspaceProvision, 1)
+	require.NoError(t, err)
+	assert.True(t, acq1)
+
+	acq2, rel2, err := c.TryAdvisoryLockObject(ctx, store.LockWorkspaceProvision, 2)
+	require.NoError(t, err)
+	assert.True(t, acq2)
+
+	require.NoError(t, rel1())
+	require.NoError(t, rel2())
+}
+
 // Under concurrent claims of the same event, exactly one wins. This mirrors two
 // replicas recovering the same pending event on startup.
 func TestClaimScheduledEvent_ConcurrentSingleWinner(t *testing.T) {
