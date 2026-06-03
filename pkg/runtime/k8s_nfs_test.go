@@ -16,11 +16,15 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"os"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/k8s"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
@@ -358,6 +362,390 @@ func containsHelper(s, substr string) bool {
 		}
 	}
 	return false
+}
+
+// --- N2-2b: Advisory lock guard for NFS init-container provisioning ---
+
+// nfsBaseConfig returns a RunConfig for NFS tests with common fields pre-filled.
+func nfsBaseConfig(name string) RunConfig {
+	return RunConfig{
+		Name:                 name,
+		Image:                "test-image",
+		UnixUsername:         "scion",
+		WorkspaceBackendName: "nfs",
+		NFSPVClaimName:       "scion-workspaces",
+		NFSSubPath:           "projects/proj-123/workspace",
+		ProjectID:            "proj-123",
+		GitCloneForInit: &api.GitCloneConfig{
+			URL:    "https://github.com/example/repo.git",
+			Branch: "main",
+			Depth:  1,
+		},
+	}
+}
+
+func TestBuildPod_NFSLockWinner_InjectsCloneInitContainer(t *testing.T) {
+	r := newNFSTestK8sRuntime()
+	config := nfsBaseConfig("test-lock-winner")
+	// nfsProvisionLockLost defaults to false (winner)
+
+	pod, err := r.buildPod("default", config)
+	if err != nil {
+		t.Fatalf("buildPod failed: %v", err)
+	}
+
+	if len(pod.Spec.InitContainers) != 1 {
+		t.Fatalf("expected 1 init container, got %d", len(pod.Spec.InitContainers))
+	}
+
+	ic := pod.Spec.InitContainers[0]
+	if ic.Name != "workspace-provision" {
+		t.Errorf("init container name = %q, want %q", ic.Name, "workspace-provision")
+	}
+
+	script := ic.Command[2]
+	if !contains(script, "git") {
+		t.Error("winner init script should contain git clone command")
+	}
+	if !contains(script, "https://github.com/example/repo.git") {
+		t.Error("winner init script should contain the clone URL")
+	}
+	if !contains(script, ".scion-provisioned") {
+		t.Error("winner init script should reference sentinel file")
+	}
+	// Must NOT contain wait-for-sentinel messaging
+	if contains(script, "Another node is provisioning") {
+		t.Error("winner init script should not contain wait-for-sentinel messaging")
+	}
+}
+
+func TestBuildPod_NFSLockLoser_InjectsWaitInitContainer(t *testing.T) {
+	r := newNFSTestK8sRuntime()
+	config := nfsBaseConfig("test-lock-loser")
+	config.nfsProvisionLockLost = true
+
+	pod, err := r.buildPod("default", config)
+	if err != nil {
+		t.Fatalf("buildPod failed: %v", err)
+	}
+
+	if len(pod.Spec.InitContainers) != 1 {
+		t.Fatalf("expected 1 init container, got %d", len(pod.Spec.InitContainers))
+	}
+
+	ic := pod.Spec.InitContainers[0]
+	if ic.Name != "workspace-provision" {
+		t.Errorf("init container name = %q, want %q", ic.Name, "workspace-provision")
+	}
+
+	script := ic.Command[2]
+	// Wait script must poll for sentinel, NOT clone
+	if contains(script, "git") {
+		t.Error("loser init script should NOT contain git commands")
+	}
+	if !contains(script, ".scion-provisioned") {
+		t.Error("loser init script should reference sentinel file")
+	}
+	if !contains(script, "Another node is provisioning") {
+		t.Error("loser init script should contain wait messaging")
+	}
+	if !contains(script, "TIMEOUT=300") {
+		t.Error("loser init script should have bounded timeout")
+	}
+}
+
+func TestBuildPod_NFSNoLocker_InjectsCloneInitContainer(t *testing.T) {
+	r := newNFSTestK8sRuntime()
+	config := nfsBaseConfig("test-no-locker")
+	// Locker is nil, nfsProvisionLockLost stays false → clone init container
+
+	pod, err := r.buildPod("default", config)
+	if err != nil {
+		t.Fatalf("buildPod failed: %v", err)
+	}
+
+	if len(pod.Spec.InitContainers) != 1 {
+		t.Fatalf("expected 1 init container, got %d", len(pod.Spec.InitContainers))
+	}
+
+	script := pod.Spec.InitContainers[0].Command[2]
+	if !contains(script, "git") {
+		t.Error("no-locker: should get clone init script (sentinel-only fallback)")
+	}
+}
+
+func TestBuildPod_LocalBackend_LockLostIgnored(t *testing.T) {
+	r := newNFSTestK8sRuntime()
+	config := RunConfig{
+		Name:                 "test-local-lockflag",
+		Image:                "test-image",
+		UnixUsername:         "scion",
+		nfsProvisionLockLost: true, // should be ignored for local backend
+	}
+
+	pod, err := r.buildPod("default", config)
+	if err != nil {
+		t.Fatalf("buildPod failed: %v", err)
+	}
+
+	// Local backend: no init containers regardless of lock flag
+	if len(pod.Spec.InitContainers) != 0 {
+		t.Errorf("local backend: expected no init containers, got %d", len(pod.Spec.InitContainers))
+	}
+}
+
+func TestNFSWaitForSentinelScript(t *testing.T) {
+	script := nfsWaitForSentinelScript()
+
+	if !contains(script, ".scion-provisioned") {
+		t.Error("wait script missing sentinel file reference")
+	}
+	if !contains(script, "TIMEOUT=300") {
+		t.Error("wait script missing timeout")
+	}
+	if !contains(script, "sleep") {
+		t.Error("wait script missing sleep/poll")
+	}
+	if !contains(script, "exit 1") {
+		t.Error("wait script should exit 1 on timeout")
+	}
+	// Must NOT contain git commands
+	if contains(script, "git") {
+		t.Error("wait script should NOT contain git commands")
+	}
+}
+
+func TestBuildPod_NFSConcurrentProjects_IndependentLocks(t *testing.T) {
+	// Two pods for DIFFERENT projects should both get clone init containers
+	// when both are lock winners (no contention across projects).
+	r := newNFSTestK8sRuntime()
+
+	configA := nfsBaseConfig("test-proj-a")
+	configA.ProjectID = "proj-aaa"
+	configA.NFSSubPath = "projects/proj-aaa/workspace"
+
+	configB := nfsBaseConfig("test-proj-b")
+	configB.ProjectID = "proj-bbb"
+	configB.NFSSubPath = "projects/proj-bbb/workspace"
+
+	podA, err := r.buildPod("default", configA)
+	if err != nil {
+		t.Fatalf("buildPod A failed: %v", err)
+	}
+	podB, err := r.buildPod("default", configB)
+	if err != nil {
+		t.Fatalf("buildPod B failed: %v", err)
+	}
+
+	if len(podA.Spec.InitContainers) != 1 {
+		t.Fatalf("project A: expected 1 init container, got %d", len(podA.Spec.InitContainers))
+	}
+	if len(podB.Spec.InitContainers) != 1 {
+		t.Fatalf("project B: expected 1 init container, got %d", len(podB.Spec.InitContainers))
+	}
+
+	// Both should be cloning (winner) init containers
+	scriptA := podA.Spec.InitContainers[0].Command[2]
+	scriptB := podB.Spec.InitContainers[0].Command[2]
+	if !contains(scriptA, "git") {
+		t.Error("project A: should get clone init script")
+	}
+	if !contains(scriptB, "git") {
+		t.Error("project B: should get clone init script")
+	}
+}
+
+func TestBuildPod_NFSSameProject_WinnerAndLoser(t *testing.T) {
+	// Simulate two pods for the SAME project: one winner, one loser.
+	r := newNFSTestK8sRuntime()
+
+	winner := nfsBaseConfig("test-winner")
+	loser := nfsBaseConfig("test-loser")
+	loser.nfsProvisionLockLost = true
+
+	podWinner, err := r.buildPod("default", winner)
+	if err != nil {
+		t.Fatalf("buildPod winner failed: %v", err)
+	}
+	podLoser, err := r.buildPod("default", loser)
+	if err != nil {
+		t.Fatalf("buildPod loser failed: %v", err)
+	}
+
+	if len(podWinner.Spec.InitContainers) != 1 || len(podLoser.Spec.InitContainers) != 1 {
+		t.Fatal("both pods should have exactly 1 init container")
+	}
+
+	winnerScript := podWinner.Spec.InitContainers[0].Command[2]
+	loserScript := podLoser.Spec.InitContainers[0].Command[2]
+
+	// Winner clones
+	if !contains(winnerScript, "git") {
+		t.Error("winner should have clone script")
+	}
+	// Loser waits
+	if contains(loserScript, "git") {
+		t.Error("loser should NOT have clone script")
+	}
+	if !contains(loserScript, "Another node is provisioning") {
+		t.Error("loser should have wait-for-sentinel script")
+	}
+}
+
+// --- N2-2b: Run()-level advisory lock integration tests ---
+
+// errorLocker is an AdvisoryLocker that always returns an error.
+type errorLocker struct {
+	err error
+}
+
+func (l *errorLocker) TryAdvisoryLock(_ context.Context, _ store.AdvisoryLockKey) (bool, func() error, error) {
+	return false, func() error { return nil }, l.err
+}
+
+func (l *errorLocker) TryAdvisoryLockObject(_ context.Context, _ store.AdvisoryLockKey, _ int32) (bool, func() error, error) {
+	return false, func() error { return nil }, l.err
+}
+
+// alwaysLoseLocker is an AdvisoryLocker where TryAdvisoryLockObject always
+// returns acquired=false (another node holds the lock).
+type alwaysLoseLocker struct{}
+
+func (l *alwaysLoseLocker) TryAdvisoryLock(_ context.Context, _ store.AdvisoryLockKey) (bool, func() error, error) {
+	return false, func() error { return nil }, nil
+}
+
+func (l *alwaysLoseLocker) TryAdvisoryLockObject(_ context.Context, _ store.AdvisoryLockKey, _ int32) (bool, func() error, error) {
+	return false, func() error { return nil }, nil
+}
+
+func TestRun_NFSLockError_FailsDispatch(t *testing.T) {
+	// When the advisory lock returns an error, Run() must fail BEFORE
+	// creating any pods (no unguarded clone).
+	r := newNFSTestK8sRuntime()
+	config := nfsBaseConfig("test-lock-err")
+	config.Locker = &errorLocker{err: errors.New("connection lost")}
+
+	_, err := r.Run(context.Background(), config)
+	if err == nil {
+		t.Fatal("expected Run() to fail when advisory lock returns error")
+	}
+	if !strings.Contains(err.Error(), "advisory lock") {
+		t.Errorf("error should mention advisory lock, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "connection lost") {
+		t.Errorf("error should propagate underlying cause, got: %v", err)
+	}
+
+	// Verify no pods were created
+	pods, listErr := r.Client.Clientset.CoreV1().Pods("default").List(
+		context.Background(), metav1.ListOptions{},
+	)
+	if listErr != nil {
+		t.Fatalf("failed to list pods: %v", listErr)
+	}
+	if len(pods.Items) != 0 {
+		t.Errorf("lock error should prevent pod creation, but found %d pods", len(pods.Items))
+	}
+}
+
+func TestRun_NFSLockLost_CreatesWaitPod(t *testing.T) {
+	// When the lock is held by another node, the pod should have a
+	// wait-for-sentinel init container, not a cloning one.
+	r := newNFSTestK8sRuntime()
+	config := nfsBaseConfig("scion-test-lock-lost")
+	config.Locker = &alwaysLoseLocker{}
+
+	// Run() will create the pod but waitForPodReady will time out with the
+	// fake clientset. Use a short-lived context so we don't block for 10m.
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	r.Run(ctx, config) //nolint:errcheck
+
+	// Verify the created pod has a wait-for-sentinel init container
+	pods, err := r.Client.Clientset.CoreV1().Pods("default").List(
+		context.Background(), metav1.ListOptions{},
+	)
+	if err != nil {
+		t.Fatalf("failed to list pods: %v", err)
+	}
+	if len(pods.Items) != 1 {
+		t.Fatalf("expected 1 pod, got %d", len(pods.Items))
+	}
+
+	pod := pods.Items[0]
+	if len(pod.Spec.InitContainers) != 1 {
+		t.Fatalf("expected 1 init container, got %d", len(pod.Spec.InitContainers))
+	}
+
+	script := pod.Spec.InitContainers[0].Command[2]
+	if strings.Contains(script, "git") {
+		t.Error("lock-lost pod should have wait-for-sentinel script, not clone script")
+	}
+	if !strings.Contains(script, "Another node is provisioning") {
+		t.Error("lock-lost pod should have wait-for-sentinel messaging")
+	}
+}
+
+func TestRun_NFSLockWon_CreatesClonePod(t *testing.T) {
+	// When the lock is won, the pod should have the cloning init container.
+	r := newNFSTestK8sRuntime()
+	locker := newTestLocker()
+	config := nfsBaseConfig("scion-test-lock-won")
+	config.Locker = locker
+
+	// Short-lived context to avoid blocking on waitForPodReady.
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	r.Run(ctx, config) //nolint:errcheck
+
+	pods, err := r.Client.Clientset.CoreV1().Pods("default").List(
+		context.Background(), metav1.ListOptions{},
+	)
+	if err != nil {
+		t.Fatalf("failed to list pods: %v", err)
+	}
+	if len(pods.Items) != 1 {
+		t.Fatalf("expected 1 pod, got %d", len(pods.Items))
+	}
+
+	pod := pods.Items[0]
+	if len(pod.Spec.InitContainers) != 1 {
+		t.Fatalf("expected 1 init container, got %d", len(pod.Spec.InitContainers))
+	}
+
+	script := pod.Spec.InitContainers[0].Command[2]
+	if !strings.Contains(script, "git") {
+		t.Error("lock-won pod should have clone script")
+	}
+	if strings.Contains(script, "Another node is provisioning") {
+		t.Error("lock-won pod should not have wait-for-sentinel messaging")
+	}
+}
+
+func TestRun_LocalBackend_NoLockAttempt(t *testing.T) {
+	// Local backend should never attempt the advisory lock, even if a
+	// Locker is provided. The lock is only for NFS.
+	r := newNFSTestK8sRuntime()
+	locker := &errorLocker{err: errors.New("should not be called")}
+	config := RunConfig{
+		Name:         "scion-test-local-nolock",
+		Image:        "test-image",
+		UnixUsername: "scion",
+		ProjectID:    "proj-local",
+		Locker:       locker,
+		// No NFS fields → local backend
+	}
+
+	// Run() should NOT fail with lock error (lock is only for NFS).
+	// It will fail at waitForPodReady with fake client, but NOT at lock.
+	// Short-lived context to avoid blocking.
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	_, err := r.Run(ctx, config)
+	if err != nil && strings.Contains(err.Error(), "advisory lock") {
+		t.Errorf("local backend should not attempt advisory lock, got: %v", err)
+	}
 }
 
 // --- N2-4: Stable FSGroup/UID for NFS pods ---

@@ -34,6 +34,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/gcp"
 	"github.com/GoogleCloudPlatform/scion/pkg/k8s"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"golang.org/x/term"
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
@@ -291,6 +292,56 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (string, 
 			return "", fmt.Errorf("failed to create shared dir PVCs: %w", err)
 		}
 	}
+
+	// --- N2-2b: Per-project advisory lock for NFS init-container provisioning ---
+	//
+	// When backend=nfs with a git clone configured AND an advisory locker is
+	// available, acquire the per-project lock before building the pod spec.
+	// This prevents concurrent first-clone corruption (risk RN1, design §7):
+	//   - Lock winner: injects the cloning init container (existing N2-2 script)
+	//   - Lock loser:  injects a wait-for-sentinel init container (polls for
+	//                  .scion-provisioned without cloning)
+	//
+	// The lock is held until waitForPodReady returns (all init containers
+	// complete), mirroring N1-4's "hold during clone" lifetime. On error
+	// paths the deferred release ensures no lock leak.
+	var nfsProvisionLockRelease func() error
+	if config.WorkspaceBackendName == "nfs" && config.NFSPVClaimName != "" && config.GitCloneForInit != nil {
+		if config.Locker != nil {
+			objID := store.StableProjectHash(config.ProjectID)
+			acquired, release, err := config.Locker.TryAdvisoryLockObject(
+				ctx, store.LockWorkspaceProvision, objID,
+			)
+			if err != nil {
+				return "", fmt.Errorf("NFS provision advisory lock for project %s: %w", config.ProjectID, err)
+			}
+			nfsProvisionLockRelease = release
+			if !acquired {
+				// Another node is currently provisioning this project's workspace.
+				// buildPod will inject a wait-for-sentinel init container instead
+				// of the cloning one.
+				config.nfsProvisionLockLost = true
+				runtimeLog.Info("NFS provision lock held by another node — pod will wait for sentinel",
+					"agent", config.Name, "project_id", config.ProjectID, "phase", "nfs-lock")
+			} else {
+				runtimeLog.Info("NFS provision lock acquired — pod will clone workspace",
+					"agent", config.Name, "project_id", config.ProjectID, "phase", "nfs-lock")
+			}
+		} else {
+			runtimeLog.Warn("No advisory locker available — NFS provisioning is unguarded (sentinel-only)",
+				"agent", config.Name, "project_id", config.ProjectID, "phase", "nfs-lock")
+		}
+	}
+	// Deferred release: held through pod creation + waitForPodReady (init
+	// containers complete), then released. Safe to call even when nil.
+	defer func() {
+		if nfsProvisionLockRelease != nil {
+			if err := nfsProvisionLockRelease(); err != nil {
+				runtimeLog.Error("Failed to release NFS provision lock", "error", err,
+					"agent", config.Name, "project_id", config.ProjectID)
+			}
+		}
+	}()
 
 	pod, err := r.buildPod(namespace, config)
 	if err != nil {
@@ -1185,17 +1236,34 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 	}
 
 	// NFS init container: when backend=nfs and git clone config is set, add an
-	// init container that provisions the workspace (clone + sentinel) before the
-	// main container starts. The init container mounts the same workspace PVC+subPath
-	// so provisioned files are visible to the main container. Uses the sentinel
-	// file (.scion-provisioned) to skip re-cloning if the workspace already exists.
+	// init container that provisions the workspace before the main container
+	// starts. The init container mounts the same workspace PVC+subPath so
+	// provisioned files are visible to the main container.
 	//
-	// The advisory lock (design §7, N1-4) is NOT used in the init container —
-	// K8s init containers serialize naturally per-pod, and the sentinel file
-	// provides idempotent cross-pod protection on the shared NFS volume.
-	// Full advisory lock integration is deferred to the NM2 live cluster gate.
+	// Advisory lock integration (N2-2b, design §7, risk RN1): the Go-side
+	// Run() method acquires a per-project advisory lock (via TryAdvisoryLockObject)
+	// BEFORE reaching this point. The lock result determines the init container
+	// behavior:
+	//   - Lock winner (nfsProvisionLockLost=false): injects the CLONING init
+	//     container that checks the sentinel and clones if absent (N2-2 script).
+	//   - Lock loser  (nfsProvisionLockLost=true): injects a WAIT-for-sentinel
+	//     init container that polls for .scion-provisioned without cloning.
+	//
+	// When no advisory locker is available (Locker nil / single-node deploy),
+	// nfsProvisionLockLost stays false and the cloning init container is
+	// injected — the sentinel provides idempotent protection but NOT
+	// cross-node mutual exclusion.
 	if config.WorkspaceBackendName == "nfs" && config.NFSPVClaimName != "" && config.GitCloneForInit != nil {
-		initScript := nfsInitProvisionScript(config.GitCloneForInit)
+		var initScript string
+		if config.nfsProvisionLockLost {
+			// Lock loser: wait for the sentinel written by the winning node's
+			// cloning init container. Does NOT clone.
+			initScript = nfsWaitForSentinelScript()
+		} else {
+			// Lock winner (or no locker available): clone if sentinel is absent,
+			// skip if already provisioned. The script is idempotent.
+			initScript = nfsInitProvisionScript(config.GitCloneForInit)
+		}
 		initContainer := corev1.Container{
 			Name:    "workspace-provision",
 			Image:   config.Image,
@@ -2402,4 +2470,31 @@ echo "Workspace provisioned successfully"`,
 		cloneArgs, gc.URL)
 
 	return script
+}
+
+// nfsWaitForSentinelScript generates a shell script for the non-winner
+// init container (N2-2b). This pod lost the advisory lock, meaning another
+// node is currently cloning the workspace. The script polls for the
+// sentinel file (.scion-provisioned) with a bounded timeout, allowing the
+// main container to start only after the winner has finished provisioning.
+//
+// Timeout: 5 minutes (300s) — generous enough for a full clone over NFS.
+// Poll interval: 2 seconds.
+func nfsWaitForSentinelScript() string {
+	return `set -e
+SENTINEL="/workspace/.scion-provisioned"
+TIMEOUT=300
+INTERVAL=2
+ELAPSED=0
+
+echo "Another node is provisioning this workspace — waiting for sentinel..."
+while [ ! -f "$SENTINEL" ]; do
+  if [ $ELAPSED -ge $TIMEOUT ]; then
+    echo "ERROR: Timed out waiting for workspace provisioning sentinel after ${TIMEOUT}s"
+    exit 1
+  fi
+  sleep $INTERVAL
+  ELAPSED=$((ELAPSED + INTERVAL))
+done
+echo "Workspace provisioned by another node (sentinel found after ${ELAPSED}s)"`
 }
