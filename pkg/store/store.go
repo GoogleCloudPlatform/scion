@@ -320,6 +320,12 @@ type RuntimeBrokerStore interface {
 	// hub/session, in which case the caller MUST NOT stamp the broker offline.
 	// It does not change status (the caller decides offline based on cleared).
 	ReleaseRuntimeBrokerConnection(ctx context.Context, brokerID, hubInstanceID, sessionID string) (cleared bool, err error)
+
+	// ReapStaleBrokerAffinity clears connected_hub_id/connected_session_id/
+	// connected_at for brokers whose last_heartbeat is older than staleBefore
+	// and whose connected_hub_id is not NULL (i.e. they still claim affinity).
+	// Returns the number of rows cleared. Does not change broker status.
+	ReapStaleBrokerAffinity(ctx context.Context, staleBefore time.Time) (cleared int, err error)
 }
 
 // RuntimeBrokerFilter defines criteria for filtering runtime brokers.
@@ -359,6 +365,12 @@ type BrokerDispatchStore interface {
 
 	// ListPendingMessages returns pending messages whose target agent is on the broker.
 	ListPendingMessages(ctx context.Context, brokerID string) ([]Message, error)
+
+	// ReapStuckDispatch re-drives or fails in_progress dispatches that have gone
+	// stale (updated_at < stuckBefore). Dispatches with attempts < maxAttempts
+	// are reset to pending (re-driven); those at or above the limit are failed.
+	// Returns counts of re-driven and failed rows.
+	ReapStuckDispatch(ctx context.Context, stuckBefore time.Time, maxAttempts int) (requeued, failed int, err error)
 }
 
 // TemplateStore defines template persistence operations.

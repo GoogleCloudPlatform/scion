@@ -277,3 +277,45 @@ func (s *BrokerDispatchStore) ListPendingMessages(ctx context.Context, brokerID 
 	}
 	return out, nil
 }
+
+// ReapStuckDispatch re-drives or fails in_progress dispatches that have gone
+// stale. Dispatches with attempts < maxAttempts are reset to pending; those at
+// or above the limit are marked failed.
+func (s *BrokerDispatchStore) ReapStuckDispatch(ctx context.Context, stuckBefore time.Time, maxAttempts int) (requeued, failed int, err error) {
+	now := time.Now()
+
+	stuckPred := brokerdispatch.And(
+		brokerdispatch.StateEQ(store.DispatchStateInProgress),
+		brokerdispatch.Or(
+			brokerdispatch.UpdatedAtLT(stuckBefore),
+			brokerdispatch.And(
+				brokerdispatch.DeadlineAtNotNil(),
+				brokerdispatch.DeadlineAtLT(now),
+			),
+		),
+	)
+
+	requeued, err = s.client.BrokerDispatch.Update().
+		Where(stuckPred, brokerdispatch.AttemptsLT(maxAttempts)).
+		SetState(store.DispatchStatePending).
+		ClearClaimedBy().
+		AddAttempts(1).
+		SetUpdatedAt(now).
+		Save(ctx)
+	if err != nil {
+		return 0, 0, mapError(err)
+	}
+
+	failed, err = s.client.BrokerDispatch.Update().
+		Where(stuckPred, brokerdispatch.AttemptsGTE(maxAttempts)).
+		SetState(store.DispatchStateFailed).
+		SetError("reaper: max attempts exceeded").
+		AddAttempts(1).
+		SetUpdatedAt(now).
+		Save(ctx)
+	if err != nil {
+		return requeued, 0, mapError(err)
+	}
+
+	return requeued, failed, nil
+}
