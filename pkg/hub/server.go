@@ -503,6 +503,10 @@ type Server struct {
 	events                 EventPublisher          // Event publisher for real-time SSE updates
 	commandBus             CommandBus              // Inter-node dispatch signal bus (nil-safe; nil = no-op)
 	notificationDispatcher *NotificationDispatcher // Notification dispatcher for agent status events
+	// reconcile op executors (seams): default to executeDispatch/deliverMessage;
+	// Phase 3/4 supply the real local-tunnel ops; tests override for exactly-once.
+	execDispatch func(ctx context.Context, d store.BrokerDispatch) (string, error)
+	deliverMsg   func(ctx context.Context, m *store.Message) error
 	maintenance            *MaintenanceState       // Runtime maintenance mode state
 	hubID                  string                  // Unique hub instance ID for secret namespacing
 	instanceID             string                  // Unique per-process ID (uuid); affinity key for broker dispatch
@@ -683,6 +687,10 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 	}
 
 	// Initialize audit logger (used by broker auth and invite system)
+	// Default reconcile-drain op executors (Phase 3/4 supply the real local ops).
+	srv.execDispatch = srv.executeDispatch
+	srv.deliverMsg = srv.deliverMessage
+
 	srv.auditLogger = NewLogAuditLogger("[Hub Audit]", cfg.Debug)
 
 	// Initialize broker auth service if enabled
@@ -2535,6 +2543,12 @@ func (s *Server) markBrokerOnline(brokerID, sessionID string) {
 		brokerName = broker.Name
 	}
 	s.events.PublishBrokerConnected(ctx, brokerID, brokerName, projectIDs)
+
+	// Durability backstop (design §5.3): the moment this node owns the socket,
+	// drain any durable dispatch intent that accumulated while the broker was
+	// offline or owned elsewhere. Async so it never blocks the connect path;
+	// idempotent + CAS-gated so concurrent drains execute each item once.
+	go s.reconcileBroker(context.Background(), brokerID)
 }
 
 // isWebSocketUpgrade checks if the request is a WebSocket upgrade request.

@@ -1072,7 +1072,7 @@ func newCommandBus(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Se
 		}
 		return mgr.IsConnected(brokerID)
 	}
-	bus, err := hub.NewPostgresCommandBus(ctx, cfg.Database.URL, ownsLocally, nil, logging.Subsystem("hub.commandbus"))
+	bus, err := hub.NewPostgresCommandBus(ctx, cfg.Database.URL, ownsLocally, hubSrv.ReconcileBroker, logging.Subsystem("hub.commandbus"))
 	if err != nil {
 		log.Printf("WARNING: failed to start Postgres command bus (%v); falling back to no-op. Cross-replica dispatch signals will not work.", err)
 		return hub.NoopCommandBus{}
