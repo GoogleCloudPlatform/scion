@@ -28,6 +28,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -503,6 +504,7 @@ type Server struct {
 	notificationDispatcher *NotificationDispatcher // Notification dispatcher for agent status events
 	maintenance            *MaintenanceState       // Runtime maintenance mode state
 	hubID                  string                  // Unique hub instance ID for secret namespacing
+	instanceID             string                  // Unique per-process ID (uuid); affinity key for broker dispatch
 	embeddedBrokerID       string                  // Broker ID when running in hub+broker combo mode
 	scheduler              *Scheduler              // Unified scheduler for recurring tasks
 	cleanupOnce            sync.Once               // Ensures CleanupResources runs only once
@@ -560,6 +562,16 @@ type Server struct {
 	githubAppRateLimit *githubapp.RateLimitInfo
 }
 
+func newInstanceID() string {
+	if podName := os.Getenv("POD_NAME"); podName != "" {
+		return podName + "-" + uuid.NewString()
+	}
+	return uuid.NewString()
+}
+
+// InstanceID returns the per-process unique identifier for this hub instance.
+func (s *Server) InstanceID() string { return s.instanceID }
+
 // New creates a new Hub API server.
 func New(cfg ServerConfig, s store.Store) (*Server, error) {
 	// Apply defaults for zero-value fields that have meaningful defaults.
@@ -576,6 +588,7 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 		events:      noopEventPublisher{},
 		maintenance: NewMaintenanceState(cfg.AdminMode, cfg.MaintenanceMessage),
 		hubID:       cfg.HubID,
+		instanceID:  newInstanceID(),
 
 		// Subsystem loggers
 		agentLifecycleLog: logging.Subsystem("hub.agent-lifecycle"),
