@@ -91,6 +91,7 @@ type DiscordBroker struct {
 	sentIDsMu sync.Mutex
 
 	sendQueue *SendQueue
+	webhooks  *WebhookManager
 
 	agentCacheTTL  time.Duration
 	projectSlugMap map[string]string // injected by hub: projectID -> slug
@@ -208,6 +209,9 @@ func (b *DiscordBroker) Configure(config map[string]string) error {
 		}
 		b.sendQueue = NewSendQueue(session, b.log, sqSize, sqDelay)
 
+		// Initialize webhook manager for per-agent identity.
+		b.webhooks = NewWebhookManager(session, b.log)
+
 		// Parse optional agent cache TTL.
 		if v, ok := config["agent_cache_ttl"]; ok && v != "" {
 			d, err := time.ParseDuration(v)
@@ -238,7 +242,7 @@ func (b *DiscordBroker) Configure(config map[string]string) error {
 			guildID = b.config.GuildID
 		}
 		b.commands = NewCommandHandler(b.store, b.session, b.hubClient, appID, guildID, b.agentCacheTTL, b.log)
-		b.callbacks = NewCallbackHandler(b.store, b.session, b.hubClient, b.log)
+		b.callbacks = NewCallbackHandler(b.store, b.session, b.hubClient, b.deliverInbound, b.log)
 		b.registration = NewRegistrationHandler(b.store, b.session, b.hubURL, b.hmacKey, b.brokerID, b.log)
 
 		// Parse hub-injected project slug map (projectID -> slug).
@@ -358,6 +362,7 @@ func (b *DiscordBroker) Publish(ctx context.Context, topic string, msg *messages
 	session := b.session
 	store := b.store
 	sendQueue := b.sendQueue
+	webhooks := b.webhooks
 	b.mu.RUnlock()
 
 	if session == nil {
@@ -428,23 +433,64 @@ func (b *DiscordBroker) Publish(ctx context.Context, topic string, msg *messages
 		return nil
 	}
 
-	// Format the message for Discord (basic plain text for now;
-	// rich embeds and webhook identity come in Phase 2).
-	text := formatMessage(msg, agentSlug)
+	// Determine whether this message should be sent via webhook (agent identity)
+	// or via the bot API. Webhook routing applies when:
+	//   - Sender is an agent (starts with "agent:")
+	//   - Message type is TypeAssistantReply or TypeInstruction
+	// State changes and input-needed messages keep the bot identity (embed style).
+	useWebhook := webhooks != nil &&
+		strings.HasPrefix(msg.Sender, "agent:") &&
+		(msg.Type == messages.TypeAssistantReply || msg.Type == messages.TypeInstruction)
+
+	// Extract agent slug from sender for webhook username.
+	senderSlug := agentSlug
+	if senderSlug == "" && strings.HasPrefix(msg.Sender, "agent:") {
+		senderSlug = strings.TrimPrefix(msg.Sender, "agent:")
+	}
+
+	// Format the message text. When sending via webhook, the webhook username
+	// already shows the agent name, so we skip the agent name header and just
+	// send the body with prefix tags.
+	var text string
+	if useWebhook {
+		text = formatWebhookMessage(msg)
+	} else {
+		text = formatMessage(msg, agentSlug)
+	}
 	if text == "" {
 		return nil
 	}
 
-	// Send to each target channel via the rate-limited SendQueue.
-	// Falls back to direct session send if the queue is not initialised.
+	// Send to each target channel.
 	var errs []error
 	for _, channelID := range channelIDs {
 		var err error
-		if sendQueue != nil {
-			_, err = sendQueue.Send(ctx, channelID, text, nil, nil)
+
+		if useWebhook {
+			// Send via webhook with per-agent identity.
+			_, err = webhooks.SendAsAgent(channelID, senderSlug, text, nil, nil)
+			if err != nil {
+				// Fallback to bot API if webhook send fails.
+				b.log.Warn("Webhook send failed, falling back to bot API",
+					"channel_id", channelID,
+					"agent", senderSlug,
+					"error", err)
+				botText := formatMessage(msg, agentSlug)
+				if sendQueue != nil {
+					_, err = sendQueue.Send(ctx, channelID, botText, nil, nil)
+				} else {
+					_, err = session.ChannelMessageSend(channelID, botText)
+				}
+			}
 		} else {
-			_, err = session.ChannelMessageSend(channelID, text)
+			// Send via bot API (state changes, input-needed, non-agent messages).
+			if sendQueue != nil {
+				_, err = sendQueue.Send(ctx, channelID, text, nil, nil)
+			} else {
+				_, err = session.ChannelMessageSend(channelID, text)
+			}
 		}
+
 		if err != nil {
 			b.log.Error("Failed to send Discord message",
 				"channel_id", channelID, "error", err)
@@ -668,22 +714,49 @@ func (b *DiscordBroker) handleInteractionCreate(s *discordgo.Session, i *discord
 				"custom_id", data.CustomID,
 				"user", interactionUserID(i),
 			)
-			// Acknowledge with deferred update.
-			_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-				Type: discordgo.InteractionResponseDeferredMessageUpdate,
-			})
-			go func() {
-				callbacks.Dispatch(s, i, data.CustomID, data.Values)
-			}()
+
+			// Special case: "ask:reply:" buttons open a modal, which must
+			// be the FIRST interaction response. Do NOT pre-acknowledge
+			// with DeferredMessageUpdate — the callback itself responds
+			// with InteractionResponseModal.
+			if strings.HasPrefix(data.CustomID, "ask:reply:") {
+				go func() {
+					callbacks.Dispatch(s, i, data.CustomID, data.Values)
+				}()
+			} else {
+				// Acknowledge with deferred update for all other components.
+				_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+					Type: discordgo.InteractionResponseDeferredMessageUpdate,
+				})
+				go func() {
+					callbacks.Dispatch(s, i, data.CustomID, data.Values)
+				}()
+			}
 		}
 
 	case discordgo.InteractionModalSubmit:
 		// Modal form submission.
+		data := i.ModalSubmitData()
 		b.log.Debug("Modal submit interaction",
-			"custom_id", i.ModalSubmitData().CustomID,
+			"custom_id", data.CustomID,
 			"user", interactionUserID(i),
 		)
-		// TODO: dispatch to appropriate handler when modal support is implemented
+
+		if strings.HasPrefix(data.CustomID, "ask:") {
+			// Acknowledge with deferred ephemeral message so we can
+			// send a follow-up after processing.
+			_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+				Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
+				Data: &discordgo.InteractionResponseData{
+					Flags: discordgo.MessageFlagsEphemeral,
+				},
+			})
+
+			store := b.store
+			go func() {
+				HandleModalSubmit(s, i, store, b.deliverInbound, b.log)
+			}()
+		}
 
 	case discordgo.InteractionApplicationCommandAutocomplete:
 		// Autocomplete for slash command options.
@@ -1075,8 +1148,44 @@ func parseTopicComponents(topic string) (projectID, agentSlug string) {
 
 // --- Message formatting ---
 
+// formatWebhookMessage formats a StructuredMessage for sending via webhook.
+// The webhook username already displays the agent name, so this function
+// omits the agent name header and just sends the body with prefix tags.
+func formatWebhookMessage(msg *messages.StructuredMessage) string {
+	if msg == nil {
+		return ""
+	}
+
+	var b strings.Builder
+
+	// Prefix tags are kept — they carry important context.
+	if msg.Urgent {
+		b.WriteString("**[URGENT]** ")
+	}
+	if msg.Broadcasted {
+		b.WriteString("**[Broadcast]** ")
+	}
+
+	// For agent-to-agent messages, show the recipient (the sender is in
+	// the webhook username already).
+	if strings.HasPrefix(msg.Sender, "agent:") && strings.HasPrefix(msg.Recipient, "agent:") {
+		recipientSlug := strings.TrimPrefix(msg.Recipient, "agent:")
+		fmt.Fprintf(&b, "→ **%s**\n", recipientSlug)
+	}
+
+	// Status tag (e.g. [RUNNING], [COMPLETED]).
+	if msg.Status != "" {
+		fmt.Fprintf(&b, "[%s] ", msg.Status)
+	}
+
+	// Body text.
+	b.WriteString(msg.Msg)
+
+	return truncateMessage(b.String())
+}
+
 // formatMessage formats a StructuredMessage for Discord plain text output.
-// Rich embed formatting and webhook identity come in Phase 2.
+// Used for bot API sends where agent identity needs to be in the message text.
 func formatMessage(msg *messages.StructuredMessage, agentSlug string) string {
 	if msg == nil {
 		return ""

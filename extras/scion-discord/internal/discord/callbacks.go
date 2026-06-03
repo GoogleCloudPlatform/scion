@@ -4,10 +4,13 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/bwmarrin/discordgo"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 )
 
 // CallbackHandler processes Discord message component interactions (buttons, selects).
@@ -16,18 +19,24 @@ type CallbackHandler struct {
 	session   *discordgo.Session
 	hubClient HubClient
 	log       *slog.Logger
+
+	// deliverInbound delivers a StructuredMessage to the hub on the given topic.
+	// Injected by the broker so callbacks can route responses back to agents.
+	deliverInbound func(topic string, msg *messages.StructuredMessage)
 }
 
 // NewCallbackHandler creates a new CallbackHandler.
-func NewCallbackHandler(store Store, session *discordgo.Session, hubClient HubClient, log *slog.Logger) *CallbackHandler {
+// deliverInbound is a function that posts a StructuredMessage to the hub.
+func NewCallbackHandler(store Store, session *discordgo.Session, hubClient HubClient, deliverInbound func(string, *messages.StructuredMessage), log *slog.Logger) *CallbackHandler {
 	if log == nil {
 		log = slog.Default()
 	}
 	return &CallbackHandler{
-		store:     store,
-		session:   session,
-		hubClient: hubClient,
-		log:       log,
+		store:          store,
+		session:        session,
+		hubClient:      hubClient,
+		deliverInbound: deliverInbound,
+		log:            log,
 	}
 }
 
@@ -42,6 +51,10 @@ func (h *CallbackHandler) Dispatch(s *discordgo.Session, i *discordgo.Interactio
 	switch parts[0] {
 	case "setup":
 		h.handleSetupCallback(s, i, parts[1:])
+	case "ask":
+		h.handleAskCallback(s, i, customID)
+	case "notif":
+		h.handleNotifCallback(s, i, customID)
 	default:
 		h.log.Debug("Unhandled callback prefix", "prefix", parts[0], "custom_id", customID)
 	}
@@ -204,4 +217,274 @@ func (h *CallbackHandler) respondUpdate(s *discordgo.Session, i *discordgo.Inter
 	if err != nil {
 		h.log.Error("Failed to edit interaction response", "error", err)
 	}
+}
+
+// --- Ask-user callback handlers ---
+
+// handleAskCallback routes ask-user component interactions.
+// custom_id formats:
+//   - ask:opt:<requestID>:<index>  — user picked a choice button
+//   - ask:reply:<requestID>        — user clicked "Reply" (opens modal; NOT pre-acknowledged)
+//   - ask:dismiss:<requestID>      — user clicked "Dismiss"
+func (h *CallbackHandler) handleAskCallback(s *discordgo.Session, i *discordgo.InteractionCreate, customID string) {
+	// Parse: "ask:<action>:<requestID>[:<extra>]"
+	parts := strings.SplitN(customID, ":", 4)
+	if len(parts) < 3 {
+		h.log.Warn("Malformed ask callback custom_id", "custom_id", customID)
+		return
+	}
+	action := parts[1]
+	requestID := parts[2]
+
+	switch action {
+	case "opt":
+		// ask:opt:<requestID>:<index>
+		if len(parts) < 4 {
+			h.log.Warn("Missing index in ask:opt callback", "custom_id", customID)
+			return
+		}
+		idx, err := strconv.Atoi(parts[3])
+		if err != nil {
+			h.log.Warn("Invalid index in ask:opt callback", "custom_id", customID, "error", err)
+			return
+		}
+		h.handleAskOption(s, i, requestID, idx)
+
+	case "reply":
+		// ask:reply:<requestID> — open a modal for free-text response.
+		// NOTE: The broker must NOT pre-acknowledge this interaction with
+		// InteractionResponseDeferredMessageUpdate, because we need to
+		// respond with InteractionResponseModal instead.
+		h.handleAskReply(s, i, requestID)
+
+	case "dismiss":
+		// ask:dismiss:<requestID>
+		h.handleAskDismiss(s, i, requestID)
+
+	default:
+		h.log.Debug("Unknown ask sub-action", "action", action, "custom_id", customID)
+	}
+}
+
+// handleAskOption handles a choice button click for an ask-user request.
+func (h *CallbackHandler) handleAskOption(s *discordgo.Session, i *discordgo.InteractionCreate, requestID string, index int) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	pending, err := h.store.GetPendingAskUser(ctx, requestID)
+	if err != nil {
+		h.log.Error("Failed to get pending ask-user", "request_id", requestID, "error", err)
+		h.respondUpdate(s, i, "Error looking up request. Please try again.", nil)
+		return
+	}
+	if pending == nil {
+		h.respondUpdate(s, i, "This request has expired or was not found.", nil)
+		return
+	}
+	if pending.Responded {
+		h.respondUpdate(s, i, "This request has already been answered.", nil)
+		return
+	}
+	if time.Now().After(pending.ExpiresAt) {
+		h.respondUpdate(s, i, "This request has expired.", nil)
+		return
+	}
+	if index < 0 || index >= len(pending.Choices) {
+		h.log.Warn("Choice index out of range", "request_id", requestID, "index", index, "choices", len(pending.Choices))
+		h.respondUpdate(s, i, "Invalid choice.", nil)
+		return
+	}
+
+	choice := pending.Choices[index]
+
+	// Deliver the response to the hub.
+	h.deliverAskUserResponse(ctx, i, pending, choice)
+
+	// Mark as responded.
+	if err := h.store.MarkAskUserResponded(ctx, requestID); err != nil {
+		h.log.Error("Failed to mark ask-user as responded", "request_id", requestID, "error", err)
+	}
+
+	// Update the original message to show the selection and disable buttons.
+	h.respondUpdate(s, i, fmt.Sprintf("✅ Responded: **%s**", choice), nil)
+
+	h.log.Info("Ask-user option selected",
+		"request_id", requestID,
+		"choice", choice,
+		"user", interactionUserID(i),
+	)
+}
+
+// handleAskReply opens a modal for free-text response to an ask-user request.
+func (h *CallbackHandler) handleAskReply(s *discordgo.Session, i *discordgo.InteractionCreate, requestID string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	pending, err := h.store.GetPendingAskUser(ctx, requestID)
+	if err != nil || pending == nil {
+		// Can't open a modal after a deferred update. Since this interaction
+		// was NOT pre-acknowledged, respond with a simple message.
+		_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseChannelMessageWithSource,
+			Data: &discordgo.InteractionResponseData{
+				Content: "This request has expired or was not found.",
+				Flags:   discordgo.MessageFlagsEphemeral,
+			},
+		})
+		return
+	}
+	if pending.Responded {
+		_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseChannelMessageWithSource,
+			Data: &discordgo.InteractionResponseData{
+				Content: "This request has already been answered.",
+				Flags:   discordgo.MessageFlagsEphemeral,
+			},
+		})
+		return
+	}
+	if time.Now().After(pending.ExpiresAt) {
+		_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseChannelMessageWithSource,
+			Data: &discordgo.InteractionResponseData{
+				Content: "This request has expired.",
+				Flags:   discordgo.MessageFlagsEphemeral,
+			},
+		})
+		return
+	}
+
+	// Open the modal. The prompt is included in the modal for context.
+	OpenAskUserModal(s, i, requestID, "")
+}
+
+// handleAskDismiss handles the "Dismiss" button for an ask-user request.
+func (h *CallbackHandler) handleAskDismiss(s *discordgo.Session, i *discordgo.InteractionCreate, requestID string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	pending, err := h.store.GetPendingAskUser(ctx, requestID)
+	if err != nil {
+		h.log.Error("Failed to get pending ask-user for dismiss", "request_id", requestID, "error", err)
+		h.respondUpdate(s, i, "Error looking up request.", nil)
+		return
+	}
+	if pending == nil {
+		h.respondUpdate(s, i, "This request has expired or was not found.", nil)
+		return
+	}
+	if pending.Responded {
+		h.respondUpdate(s, i, "This request has already been answered.", nil)
+		return
+	}
+
+	// Mark as responded (dismissed).
+	if err := h.store.MarkAskUserResponded(ctx, requestID); err != nil {
+		h.log.Error("Failed to mark ask-user as dismissed", "request_id", requestID, "error", err)
+	}
+
+	// Update the original message to show dismissal and remove buttons.
+	h.respondUpdate(s, i, "Dismissed.", nil)
+
+	h.log.Info("Ask-user dismissed",
+		"request_id", requestID,
+		"user", interactionUserID(i),
+	)
+}
+
+// deliverAskUserResponse builds a StructuredMessage from the user's response
+// and delivers it to the hub, targeting the agent that asked.
+func (h *CallbackHandler) deliverAskUserResponse(ctx context.Context, i *discordgo.InteractionCreate, pending *PendingAskUser, responseText string) {
+	if h.deliverInbound == nil {
+		h.log.Error("deliverInbound not configured, cannot deliver ask-user response")
+		return
+	}
+
+	// Resolve the sender identity from Discord user → Scion identity.
+	discordUserID := interactionUserID(i)
+	sender := "discord:" + discordUserID
+	if mapping, err := h.store.GetUserMapping(ctx, discordUserID); err == nil && mapping != nil && mapping.ScionEmail != "" {
+		sender = "user:" + mapping.ScionEmail
+	}
+
+	topic := fmt.Sprintf("scion.project.%s.agent.%s.messages", pending.ProjectID, pending.AgentSlug)
+	recipient := "agent:" + pending.AgentSlug
+
+	msg := &messages.StructuredMessage{
+		Version:   messages.Version,
+		Timestamp: time.Now().UTC().Format(time.RFC3339),
+		Channel:   "discord",
+		ThreadID:  pending.ChannelID,
+		Sender:    sender,
+		SenderID:  discordUserID,
+		Recipient: recipient,
+		Msg:       responseText,
+		Type:      messages.TypeInstruction,
+		Metadata: map[string]string{
+			"discord_channel_id": pending.ChannelID,
+			"project_id":        pending.ProjectID,
+			"ask_request_id":    pending.RequestID,
+		},
+	}
+
+	h.deliverInbound(topic, msg)
+}
+
+// --- Notification callback handlers ---
+
+// handleNotifCallback toggles notification preferences.
+// custom_id formats:
+//   - notif:on:<agentSlug>   — enable notifications for agent
+//   - notif:off:<agentSlug>  — disable notifications for agent
+func (h *CallbackHandler) handleNotifCallback(s *discordgo.Session, i *discordgo.InteractionCreate, customID string) {
+	parts := strings.SplitN(customID, ":", 3)
+	if len(parts) < 3 {
+		h.log.Warn("Malformed notif callback custom_id", "custom_id", customID)
+		return
+	}
+	action := parts[1]
+	agentSlug := parts[2]
+
+	enabled := action == "on"
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	discordUserID := interactionUserID(i)
+
+	// Look up the channel link to determine the project.
+	link, err := h.store.GetChannelLink(ctx, i.ChannelID)
+	if err != nil || link == nil {
+		h.respondUpdate(s, i, "This channel is not linked to a project.", nil)
+		return
+	}
+
+	pref := &NotificationPref{
+		DiscordUserID: discordUserID,
+		ProjectID:     link.ProjectID,
+		AgentSlug:     agentSlug,
+		Enabled:       enabled,
+		UpdatedAt:     time.Now(),
+	}
+
+	if err := h.store.SetNotificationPref(ctx, pref); err != nil {
+		h.log.Error("Failed to save notification pref", "error", err)
+		h.respondUpdate(s, i, "Failed to update notification preference.", nil)
+		return
+	}
+
+	stateText := "enabled"
+	if !enabled {
+		stateText = "disabled"
+	}
+	h.respondUpdate(s, i,
+		fmt.Sprintf("Notifications for **%s**: %s", agentSlug, stateText),
+		nil,
+	)
+
+	h.log.Info("Notification preference updated",
+		"user", discordUserID,
+		"agent", agentSlug,
+		"enabled", enabled,
+	)
 }
