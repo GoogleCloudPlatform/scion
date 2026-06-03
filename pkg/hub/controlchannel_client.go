@@ -485,28 +485,47 @@ func (c *HybridBrokerClient) CreateAgent(ctx context.Context, brokerID, brokerEn
 	return c.httpClient.CreateAgent(ctx, brokerID, brokerEndpoint, req)
 }
 
-// StartAgent starts an agent, preferring control channel.
+// StartAgent starts an agent, using route() to decide the delivery path.
+// routeLocal uses the control-channel tunnel (unchanged fast path), routeHTTP
+// falls back to the broker's HTTP endpoint, and routeForward/routeUndeliverable
+// return ErrLifecycleDeferred so the caller can write durable intent + wait.
 func (c *HybridBrokerClient) StartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID, task, projectPath, projectSlug, harnessConfig string, resolvedEnv map[string]string, resolvedSecrets []ResolvedSecret, inlineConfig *api.ScionConfig, sharedDirs []api.SharedDir, sharedWorkspace bool) (*RemoteAgentResponse, error) {
-	if c.useControlChannel(brokerID) {
+	switch c.route(ctx, brokerID, brokerEndpoint) {
+	case routeLocal:
 		return c.controlChannel.StartAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, task, projectPath, projectSlug, harnessConfig, resolvedEnv, resolvedSecrets, inlineConfig, sharedDirs, sharedWorkspace)
+	case routeHTTP:
+		return c.httpClient.StartAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, task, projectPath, projectSlug, harnessConfig, resolvedEnv, resolvedSecrets, inlineConfig, sharedDirs, sharedWorkspace)
+	default:
+		return nil, ErrLifecycleDeferred
 	}
-	return c.httpClient.StartAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, task, projectPath, projectSlug, harnessConfig, resolvedEnv, resolvedSecrets, inlineConfig, sharedDirs, sharedWorkspace)
 }
 
-// StopAgent stops an agent, preferring control channel.
+// StopAgent stops an agent, using route() to decide the delivery path.
+// routeLocal uses the control-channel tunnel, routeHTTP falls back to HTTP,
+// and routeForward/routeUndeliverable return ErrLifecycleDeferred.
 func (c *HybridBrokerClient) StopAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string) error {
-	if c.useControlChannel(brokerID) {
+	switch c.route(ctx, brokerID, brokerEndpoint) {
+	case routeLocal:
 		return c.controlChannel.StopAgent(ctx, brokerID, brokerEndpoint, agentID, projectID)
+	case routeHTTP:
+		return c.httpClient.StopAgent(ctx, brokerID, brokerEndpoint, agentID, projectID)
+	default:
+		return ErrLifecycleDeferred
 	}
-	return c.httpClient.StopAgent(ctx, brokerID, brokerEndpoint, agentID, projectID)
 }
 
-// RestartAgent restarts an agent, preferring control channel.
+// RestartAgent restarts an agent, using route() to decide the delivery path.
+// routeLocal uses the control-channel tunnel, routeHTTP falls back to HTTP,
+// and routeForward/routeUndeliverable return ErrLifecycleDeferred.
 func (c *HybridBrokerClient) RestartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, resolvedEnv map[string]string) error {
-	if c.useControlChannel(brokerID) {
+	switch c.route(ctx, brokerID, brokerEndpoint) {
+	case routeLocal:
 		return c.controlChannel.RestartAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, resolvedEnv)
+	case routeHTTP:
+		return c.httpClient.RestartAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, resolvedEnv)
+	default:
+		return ErrLifecycleDeferred
 	}
-	return c.httpClient.RestartAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, resolvedEnv)
 }
 
 // DeleteAgent deletes an agent, preferring control channel.
