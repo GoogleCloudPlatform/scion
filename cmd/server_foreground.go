@@ -1289,6 +1289,15 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 		BrokerAuthStrictMode: true,
 	}
 
+	// N1-7: Wire NFS config from versioned settings so the broker can
+	// auto-mount configured NFS shares at startup and guard dispatches.
+	if versionedSettings != nil && versionedSettings.Server != nil &&
+		versionedSettings.Server.WorkspaceStorage != nil &&
+		strings.EqualFold(versionedSettings.Server.WorkspaceStorage.Backend, "nfs") {
+		versionedSettings.Server.WorkspaceStorage.ApplyNFSDefaults()
+		rhCfg.NFSConfig = versionedSettings.Server.WorkspaceStorage.NFS
+	}
+
 	rhSrv := runtimebroker.New(rhCfg, mgr, rt)
 	rhSrv.SetRequestLogger(requestLogger)
 	if messageLogger != nil {
