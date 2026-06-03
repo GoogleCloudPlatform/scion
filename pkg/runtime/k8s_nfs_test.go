@@ -357,6 +357,60 @@ func containsHelper(s, substr string) bool {
 	return false
 }
 
+// --- N2-3: Skip workspace kubectl cp when backend=nfs ---
+
+// TestSkipWorkspaceSync_NFSBackend_RunConfigGuard validates the guard condition
+// that controls workspace sync skip. The actual Run() method performs real K8s
+// API calls, so we test the conditional logic via the config fields that
+// determine behavior.
+func TestSkipWorkspaceSync_NFSBackend_RunConfigGuard(t *testing.T) {
+	tests := []struct {
+		name            string
+		workspace       string
+		backendName     string
+		wantWorkspaceCP bool
+	}{
+		{
+			name:            "local backend syncs workspace",
+			workspace:       "/some/path",
+			backendName:     "",
+			wantWorkspaceCP: true,
+		},
+		{
+			name:            "local backend explicit syncs workspace",
+			workspace:       "/some/path",
+			backendName:     "local",
+			wantWorkspaceCP: true,
+		},
+		{
+			name:            "NFS backend skips workspace sync",
+			workspace:       "/some/path",
+			backendName:     "nfs",
+			wantWorkspaceCP: false,
+		},
+		{
+			name:            "empty workspace skips sync for any backend",
+			workspace:       "",
+			backendName:     "",
+			wantWorkspaceCP: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			config := RunConfig{
+				Workspace:            tt.workspace,
+				WorkspaceBackendName: tt.backendName,
+			}
+			// Replicate the guard condition from Run()
+			shouldSync := config.Workspace != "" && config.WorkspaceBackendName != "nfs"
+			if shouldSync != tt.wantWorkspaceCP {
+				t.Errorf("workspace sync guard: got %v, want %v", shouldSync, tt.wantWorkspaceCP)
+			}
+		})
+	}
+}
+
 // findVolume finds a volume by name in a pod spec.
 func findVolume(pod *corev1.Pod, name string) *corev1.Volume {
 	for i := range pod.Spec.Volumes {

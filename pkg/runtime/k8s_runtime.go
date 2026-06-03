@@ -333,7 +333,14 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (string, 
 		}
 	}
 
-	if config.Workspace != "" {
+	// Workspace sync: NFS-backed pods have workspace bytes pre-populated by the
+	// init container (N2-2), so skip the kubectl-cp workspace sync. This avoids
+	// redundantly copying workspace contents that already exist on the shared
+	// NFS volume. Local-backend pods RETAIN the existing workspace sync.
+	//
+	// Home-dir sync and the startup gate (/tmp/.scion-home-ready) are RETAINED
+	// for both backends — they carry agent dotfiles and secrets, not workspace code.
+	if config.Workspace != "" && config.WorkspaceBackendName != "nfs" {
 		runtimeLog.Info("Syncing workspace", "agent", config.Name, "source", config.Workspace, "phase", "workspace-sync")
 		fmt.Printf("  Syncing workspace (%s -> /workspace)...\n", config.Workspace)
 		err = r.syncWithRetry(ctx, func() error {
@@ -347,6 +354,9 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (string, 
 		if _, err := r.execInPod(ctx, namespace, createdPod.Name, []string{"sh", "-c", chownCmd}); err != nil {
 			runtimeLog.Debug("Failed to chown workspace (non-fatal)", "error", err)
 		}
+	} else if config.WorkspaceBackendName == "nfs" {
+		runtimeLog.Info("Skipping workspace sync (NFS backend: workspace pre-populated by init container)",
+			"agent", config.Name, "phase", "workspace-sync-skip")
 	}
 
 	// Signal the startup gate: all files are synced and ownership is fixed,
