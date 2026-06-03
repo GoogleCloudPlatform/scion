@@ -40,6 +40,10 @@ type EventPublisher interface {
 	PublishUserMessage(ctx context.Context, msg *store.Message)
 	PublishAllowListChanged(ctx context.Context, action string, email string)
 	PublishInviteChanged(ctx context.Context, action string, inviteID string, codePrefix string)
+	// PublishDispatchDone emits a slim completion event on
+	// broker.dispatch.<dispatchID>.done so the originator's subscription wakes
+	// and reads the result from the dispatch row (design §6.3).
+	PublishDispatchDone(ctx context.Context, dispatchID string)
 	// Subscribe returns a channel that receives events matching the given
 	// subject patterns, along with an unsubscribe function. Patterns use
 	// NATS-style wildcards: '*' matches a single token, '>' matches the
@@ -66,6 +70,7 @@ func (noopEventPublisher) PublishNotification(_ context.Context, _ *store.Notifi
 func (noopEventPublisher) PublishUserMessage(_ context.Context, _ *store.Message)            {}
 func (noopEventPublisher) PublishAllowListChanged(_ context.Context, _, _ string)            {}
 func (noopEventPublisher) PublishInviteChanged(_ context.Context, _, _, _ string)            {}
+func (noopEventPublisher) PublishDispatchDone(_ context.Context, _ string)                   {}
 func (noopEventPublisher) Close()                                                            {}
 
 // Subscribe on the no-op publisher returns a nil channel (which blocks forever
@@ -210,6 +215,14 @@ type InviteChangedEvent struct {
 	Action     string `json:"action"` // "created", "redeemed", "revoked", "deleted"
 	InviteID   string `json:"inviteId"`
 	CodePrefix string `json:"codePrefix,omitempty"`
+}
+
+// DispatchDoneEvent is a slim completion event emitted by the owner when a
+// broker_dispatch reaches terminal state (done/failed). The originator
+// subscribes to broker.dispatch.<id>.done BEFORE writing intent and reads the
+// result from the dispatch row on wake (design §6.3).
+type DispatchDoneEvent struct {
+	DispatchID string `json:"dispatchId"`
 }
 
 // eventBuilder holds the EventPublisher Publish* method implementations shared
@@ -551,6 +564,15 @@ func (p *eventBuilder) PublishUserMessage(_ context.Context, msg *store.Message)
 	if msg.AgentID != "" {
 		p.sink("agent."+msg.AgentID+".message", evt)
 	}
+}
+
+// PublishDispatchDone emits a slim completion event when a broker_dispatch row
+// reaches terminal state. The subject broker.dispatch.<id>.done is what the
+// originator subscribes to before writing intent (design §6.3).
+func (p *eventBuilder) PublishDispatchDone(_ context.Context, dispatchID string) {
+	p.sink("broker.dispatch."+dispatchID+".done", DispatchDoneEvent{
+		DispatchID: dispatchID,
+	})
 }
 
 // subjectMatchesPattern checks if a subject matches a NATS-style pattern.

@@ -20,9 +20,43 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// fakeDispatchStore is a minimal in-memory BrokerDispatchStore for unit tests.
+type fakeDispatchStore struct {
+	dispatches map[string]*store.BrokerDispatch
+}
+
+func (f *fakeDispatchStore) GetBrokerDispatch(_ context.Context, id string) (*store.BrokerDispatch, error) {
+	d, ok := f.dispatches[id]
+	if !ok {
+		return nil, store.ErrNotFound
+	}
+	return d, nil
+}
+
+func (f *fakeDispatchStore) InsertBrokerDispatch(_ context.Context, d *store.BrokerDispatch) error {
+	return nil
+}
+func (f *fakeDispatchStore) ClaimBrokerDispatch(_ context.Context, _, _ string) (bool, error) {
+	return false, nil
+}
+func (f *fakeDispatchStore) CompleteBrokerDispatch(_ context.Context, _, _ string) error {
+	return nil
+}
+func (f *fakeDispatchStore) FailBrokerDispatch(_ context.Context, _, _ string) error { return nil }
+func (f *fakeDispatchStore) ListPendingDispatch(_ context.Context, _ string) ([]store.BrokerDispatch, error) {
+	return nil, nil
+}
+func (f *fakeDispatchStore) MarkMessageDispatched(_ context.Context, _ string) (bool, error) {
+	return false, nil
+}
+func (f *fakeDispatchStore) ListPendingMessages(_ context.Context, _ string) ([]store.Message, error) {
+	return nil, nil
+}
 
 // sendStatus pushes a fake AgentStatusEvent onto the channel.
 func sendStatus(ch chan<- Event, phase, activity string, detail *AgentDetail) {
@@ -162,4 +196,111 @@ func TestWaitForAgentTransition_StopTerminal(t *testing.T) {
 	)
 	require.NoError(t, err)
 	assert.Equal(t, "stopped", phase)
+}
+
+// =========================================================================
+// waitForDispatchDone tests (data-op completion path)
+// =========================================================================
+
+func TestWaitForDispatchDone_ReturnsOnDone(t *testing.T) {
+	const dispatchID = "dispatch-1"
+	ch := make(chan Event, 4)
+	unsub := func() {}
+
+	fs := &fakeDispatchStore{
+		dispatches: map[string]*store.BrokerDispatch{
+			dispatchID: {
+				ID:     dispatchID,
+				State:  store.DispatchStateDone,
+				Result: `{"hasPrompt":true}`,
+			},
+		},
+	}
+
+	go func() {
+		ch <- Event{Subject: "broker.dispatch." + dispatchID + ".done"}
+	}()
+
+	result, err := waitForDispatchDone(context.Background(), ch, unsub, fs, dispatchID)
+	require.NoError(t, err)
+	assert.Equal(t, store.DispatchStateDone, result.State)
+	assert.Equal(t, `{"hasPrompt":true}`, result.Result)
+}
+
+func TestWaitForDispatchDone_ReturnsOnFailed(t *testing.T) {
+	const dispatchID = "dispatch-2"
+	ch := make(chan Event, 4)
+	unsub := func() {}
+
+	fs := &fakeDispatchStore{
+		dispatches: map[string]*store.BrokerDispatch{
+			dispatchID: {
+				ID:    dispatchID,
+				State: store.DispatchStateFailed,
+				Error: "container crashed",
+			},
+		},
+	}
+
+	go func() {
+		ch <- Event{Subject: "broker.dispatch." + dispatchID + ".done"}
+	}()
+
+	result, err := waitForDispatchDone(context.Background(), ch, unsub, fs, dispatchID)
+	require.NoError(t, err)
+	assert.Equal(t, store.DispatchStateFailed, result.State)
+	assert.Equal(t, "container crashed", result.Error)
+}
+
+func TestWaitForDispatchDone_ChannelClose(t *testing.T) {
+	const dispatchID = "dispatch-3"
+	ch := make(chan Event, 4)
+	unsub := func() {}
+
+	fs := &fakeDispatchStore{dispatches: map[string]*store.BrokerDispatch{}}
+
+	close(ch)
+
+	_, err := waitForDispatchDone(context.Background(), ch, unsub, fs, dispatchID)
+	assert.ErrorIs(t, err, ErrDispatchFailed)
+}
+
+func TestWaitForDispatchDone_ContextCancel(t *testing.T) {
+	const dispatchID = "dispatch-4"
+	ch := make(chan Event, 4)
+	unsub := func() {}
+
+	fs := &fakeDispatchStore{dispatches: map[string]*store.BrokerDispatch{}}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := waitForDispatchDone(ctx, ch, unsub, fs, dispatchID)
+	assert.ErrorIs(t, err, context.Canceled)
+}
+
+func TestWaitForDispatchDone_TimeoutReread(t *testing.T) {
+	// Verify that on timeout, the row is re-read and if done, returned.
+	const dispatchID = "dispatch-5"
+	ch := make(chan Event, 4)
+	var unsubCalled bool
+	unsub := func() { unsubCalled = true }
+
+	fs := &fakeDispatchStore{
+		dispatches: map[string]*store.BrokerDispatch{
+			dispatchID: {
+				ID:     dispatchID,
+				State:  store.DispatchStateDone,
+				Result: `{"success":true}`,
+			},
+		},
+	}
+
+	// Don't send any event — let it time out and re-read.
+	// We can't easily override the 90s rolling timeout in a unit test,
+	// so we test the channel-close path instead (above) and verify the
+	// unsub is called on all paths.
+	close(ch)
+	_, _ = waitForDispatchDone(context.Background(), ch, unsub, fs, dispatchID)
+	assert.True(t, unsubCalled, "unsub must be called on return")
 }

@@ -16,8 +16,10 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -65,10 +67,18 @@ func (s *Server) reconcileBroker(ctx context.Context, brokerID string) {
 			if err := s.store.FailBrokerDispatch(ctx, d.ID, execErr.Error()); err != nil {
 				s.agentLifecycleLog.Error("reconcile: fail dispatch failed", "id", d.ID, "error", err)
 			}
+			if s.events != nil {
+				s.events.PublishDispatchDone(ctx, d.ID)
+			}
 			continue
 		}
 		if err := s.store.CompleteBrokerDispatch(ctx, d.ID, result); err != nil {
 			s.agentLifecycleLog.Error("reconcile: complete dispatch failed", "id", d.ID, "error", err)
+		}
+		// Emit a slim completion event so originators waiting on
+		// waitForDispatchDone wake up (design §6.3).
+		if s.events != nil {
+			s.events.PublishDispatchDone(ctx, d.ID)
 		}
 	}
 
@@ -110,6 +120,14 @@ func (s *Server) executeDispatch(ctx context.Context, d store.BrokerDispatch) (s
 		return s.execDispatchStop(ctx, d)
 	case "restart":
 		return s.execDispatchRestart(ctx, d)
+	case "delete":
+		return s.execDispatchDelete(ctx, d)
+	case "check_prompt":
+		return s.execDispatchCheckPrompt(ctx, d)
+	case "finalize_env":
+		return s.execDispatchFinalizeEnv(ctx, d)
+	case "create":
+		return s.execDispatchCreate(ctx, d)
 	default:
 		return "", fmt.Errorf("broker dispatch op %q not yet wired on this node", d.Op)
 	}
@@ -166,6 +184,101 @@ func (s *Server) execDispatchRestart(ctx context.Context, d store.BrokerDispatch
 		return "", fmt.Errorf("dispatch restart: %w", err)
 	}
 	return "", nil
+}
+
+func (s *Server) execDispatchDelete(ctx context.Context, d store.BrokerDispatch) (string, error) {
+	agent, err := s.resolveDispatchAgent(ctx, d)
+	if err != nil {
+		return "", err
+	}
+	dispatcher := s.GetDispatcher()
+	if dispatcher == nil {
+		return "", fmt.Errorf("no dispatcher available")
+	}
+	var deleteFiles, removeBranch, softDelete bool
+	var deletedAt time.Time
+	if d.Args != "" {
+		args, err := UnmarshalDeleteArgs(d.Args)
+		if err != nil {
+			return "", fmt.Errorf("unmarshal delete args: %w", err)
+		}
+		deleteFiles = args.DeleteFiles
+		removeBranch = args.RemoveBranch
+		softDelete = args.SoftDelete
+		deletedAt = args.DeletedAt
+	}
+	if err := dispatcher.DispatchAgentDelete(ctx, agent, deleteFiles, removeBranch, softDelete, deletedAt); err != nil {
+		return "", fmt.Errorf("dispatch delete: %w", err)
+	}
+	return "", nil
+}
+
+func (s *Server) execDispatchCheckPrompt(ctx context.Context, d store.BrokerDispatch) (string, error) {
+	agent, err := s.resolveDispatchAgent(ctx, d)
+	if err != nil {
+		return "", err
+	}
+	dispatcher := s.GetDispatcher()
+	if dispatcher == nil {
+		return "", fmt.Errorf("no dispatcher available")
+	}
+	hasPrompt, err := dispatcher.DispatchCheckAgentPrompt(ctx, agent)
+	if err != nil {
+		return "", fmt.Errorf("dispatch check_prompt: %w", err)
+	}
+	result, err := json.Marshal(CheckPromptResult{HasPrompt: hasPrompt})
+	if err != nil {
+		return "", fmt.Errorf("marshal check_prompt result: %w", err)
+	}
+	return string(result), nil
+}
+
+func (s *Server) execDispatchFinalizeEnv(ctx context.Context, d store.BrokerDispatch) (string, error) {
+	agent, err := s.resolveDispatchAgent(ctx, d)
+	if err != nil {
+		return "", err
+	}
+	dispatcher := s.GetDispatcher()
+	if dispatcher == nil {
+		return "", fmt.Errorf("no dispatcher available")
+	}
+	var env map[string]string
+	if d.Args != "" {
+		args, err := UnmarshalFinalizeEnvArgs(d.Args)
+		if err != nil {
+			return "", fmt.Errorf("unmarshal finalize_env args: %w", err)
+		}
+		env = args.Env
+	}
+	if err := dispatcher.DispatchFinalizeEnv(ctx, agent, env); err != nil {
+		return "", fmt.Errorf("dispatch finalize_env: %w", err)
+	}
+	result, err := json.Marshal(FinalizeEnvResult{Success: true})
+	if err != nil {
+		return "", fmt.Errorf("marshal finalize_env result: %w", err)
+	}
+	return string(result), nil
+}
+
+func (s *Server) execDispatchCreate(ctx context.Context, d store.BrokerDispatch) (string, error) {
+	agent, err := s.resolveDispatchAgent(ctx, d)
+	if err != nil {
+		return "", err
+	}
+	dispatcher := s.GetDispatcher()
+	if dispatcher == nil {
+		return "", fmt.Errorf("no dispatcher available")
+	}
+	envReqs, err := dispatcher.DispatchAgentCreateWithGather(ctx, agent)
+	if err != nil {
+		return "", fmt.Errorf("dispatch create: %w", err)
+	}
+	cr := CreateWithGatherResult{EnvRequirements: envReqs}
+	result, err := json.Marshal(cr)
+	if err != nil {
+		return "", fmt.Errorf("marshal create result: %w", err)
+	}
+	return string(result), nil
 }
 
 // resolveDispatchAgent loads the agent from the store by slug (used as the

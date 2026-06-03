@@ -16,6 +16,7 @@ package hub
 
 import (
 	"encoding/json"
+	"time"
 )
 
 // StartDispatchArgs carries the parameters for a cross-node agent start.
@@ -36,6 +37,42 @@ type RestartDispatchArgs struct{}
 // beyond what the dispatch row already carries (agentID, projectID).
 type StopDispatchArgs struct{}
 
+// DeleteDispatchArgs carries the parameters for a cross-node agent delete.
+type DeleteDispatchArgs struct {
+	DeleteFiles  bool      `json:"deleteFiles,omitempty"`
+	RemoveBranch bool      `json:"removeBranch,omitempty"`
+	SoftDelete   bool      `json:"softDelete,omitempty"`
+	DeletedAt    time.Time `json:"deletedAt,omitempty"`
+}
+
+// CheckPromptDispatchArgs is intentionally empty — the agent slug/ID in the
+// dispatch row is sufficient for the owner to run the local check.
+type CheckPromptDispatchArgs struct{}
+
+// FinalizeEnvDispatchArgs carries the gathered env vars for cross-node finalize.
+type FinalizeEnvDispatchArgs struct {
+	Env map[string]string `json:"env,omitempty"`
+}
+
+// CreateWithGatherDispatchArgs is intentionally empty — the owner rebuilds the
+// full RemoteCreateAgentRequest from the shared store (same pattern as start).
+type CreateWithGatherDispatchArgs struct{}
+
+// CheckPromptResult is serialized into broker_dispatch.result by the owner.
+type CheckPromptResult struct {
+	HasPrompt bool `json:"hasPrompt"`
+}
+
+// FinalizeEnvResult is serialized into broker_dispatch.result by the owner.
+type FinalizeEnvResult struct {
+	Success bool `json:"success"`
+}
+
+// CreateWithGatherResult is serialized into broker_dispatch.result by the owner.
+type CreateWithGatherResult struct {
+	EnvRequirements *RemoteEnvRequirementsResponse `json:"envRequirements,omitempty"`
+}
+
 // MarshalDispatchArgs serializes a dispatch args struct to JSON for storage in
 // broker_dispatch.args.
 func MarshalDispatchArgs(v interface{}) (string, error) {
@@ -49,6 +86,24 @@ func MarshalDispatchArgs(v interface{}) (string, error) {
 // UnmarshalStartArgs deserializes start dispatch args from the broker_dispatch row.
 func UnmarshalStartArgs(raw string) (*StartDispatchArgs, error) {
 	var a StartDispatchArgs
+	if err := json.Unmarshal([]byte(raw), &a); err != nil {
+		return nil, err
+	}
+	return &a, nil
+}
+
+// UnmarshalDeleteArgs deserializes delete dispatch args from the broker_dispatch row.
+func UnmarshalDeleteArgs(raw string) (*DeleteDispatchArgs, error) {
+	var a DeleteDispatchArgs
+	if err := json.Unmarshal([]byte(raw), &a); err != nil {
+		return nil, err
+	}
+	return &a, nil
+}
+
+// UnmarshalFinalizeEnvArgs deserializes finalize_env dispatch args.
+func UnmarshalFinalizeEnvArgs(raw string) (*FinalizeEnvDispatchArgs, error) {
+	var a FinalizeEnvDispatchArgs
 	if err := json.Unmarshal([]byte(raw), &a); err != nil {
 		return nil, err
 	}
