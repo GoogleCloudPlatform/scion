@@ -23,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
@@ -96,7 +97,13 @@ func newLifecycleTestServer(t *testing.T) (*Server, *lifecycleTestDispatcher, st
 	return srv, disp, cs
 }
 
+// seedAgent creates a project + runtime broker + agent and returns the agent.
+// The broker has no endpoint (simulates a NAT'd control-channel-only broker).
 func seedAgent(t *testing.T, cs store.Store) *store.Agent {
+	return seedAgentWithBrokerID(t, cs, uuid.NewString())
+}
+
+func seedAgentWithBrokerID(t *testing.T, cs store.Store, brokerID string) *store.Agent {
 	t.Helper()
 	ctx := context.Background()
 	proj := &store.Project{
@@ -107,12 +114,19 @@ func seedAgent(t *testing.T, cs store.Store) *store.Agent {
 		OwnerID:    uuid.NewString(),
 	}
 	require.NoError(t, cs.CreateProject(ctx, proj))
+	broker := &store.RuntimeBroker{
+		ID:     brokerID,
+		Name:   "test-broker",
+		Slug:   "tb-" + uuid.NewString()[:8],
+		Status: "online",
+	}
+	require.NoError(t, cs.CreateRuntimeBroker(ctx, broker))
 	agent := &store.Agent{
 		ID:              uuid.NewString(),
 		Name:            "test-agent",
 		Slug:            "ta-" + uuid.NewString()[:8],
 		ProjectID:       proj.ID,
-		RuntimeBrokerID: uuid.NewString(),
+		RuntimeBrokerID: brokerID,
 	}
 	require.NoError(t, cs.CreateAgent(ctx, agent))
 	return agent
@@ -124,8 +138,7 @@ func TestExecuteDispatch_Start(t *testing.T) {
 	agent := seedAgent(t, cs)
 
 	args, err := MarshalDispatchArgs(&StartDispatchArgs{
-		Task:        "run tests",
-		ResolvedEnv: map[string]string{"FOO": "bar"},
+		Task: "run tests",
 	})
 	require.NoError(t, err)
 
@@ -166,17 +179,11 @@ func TestExecuteDispatch_Restart(t *testing.T) {
 	srv, disp, cs := newLifecycleTestServer(t)
 	agent := seedAgent(t, cs)
 
-	args, err := MarshalDispatchArgs(&RestartDispatchArgs{
-		ResolvedEnv: map[string]string{"TOKEN": "xyz"},
-	})
-	require.NoError(t, err)
-
 	d := store.BrokerDispatch{
 		ID:       uuid.NewString(),
 		BrokerID: agent.RuntimeBrokerID,
 		AgentID:  agent.ID,
 		Op:       "restart",
-		Args:     args,
 	}
 
 	_, execErr := srv.executeDispatch(ctx, d)
@@ -215,6 +222,132 @@ func TestExecuteDispatch_MissingAgent(t *testing.T) {
 	_, err := srv.executeDispatch(ctx, d)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "resolve agent")
+}
+
+// =========================================================================
+// Deferred lifecycle integration test (originator side)
+// =========================================================================
+
+// deferredTestClient is a RuntimeBrokerClient that returns ErrLifecycleDeferred
+// for Start/Stop/Restart when the broker is "remote", and succeeds for "local".
+type deferredTestClient struct {
+	fakeHTTPClient
+	localBroker string
+	startCalled atomic.Int32
+}
+
+func (c *deferredTestClient) StartAgent(_ context.Context, brokerID, _, _, _, _, _, _, _ string, _ map[string]string, _ []ResolvedSecret, _ *api.ScionConfig, _ []api.SharedDir, _ bool) (*RemoteAgentResponse, error) {
+	c.startCalled.Add(1)
+	if brokerID != c.localBroker {
+		return nil, ErrLifecycleDeferred
+	}
+	return &RemoteAgentResponse{}, nil
+}
+
+func (c *deferredTestClient) StopAgent(_ context.Context, brokerID, _, _, _ string) error {
+	if brokerID != c.localBroker {
+		return ErrLifecycleDeferred
+	}
+	return nil
+}
+
+func (c *deferredTestClient) RestartAgent(_ context.Context, brokerID, _, _, _ string, _ map[string]string) error {
+	if brokerID != c.localBroker {
+		return ErrLifecycleDeferred
+	}
+	return nil
+}
+
+func TestDeferredStart_WritesIntentAndWaits(t *testing.T) {
+	ctx := context.Background()
+	client := enttest.NewClient(t)
+	cs := entadapter.NewCompositeStore(client)
+
+	remoteBroker := uuid.NewString()
+	fakeClient := &deferredTestClient{localBroker: "local-broker"}
+
+	events := NewChannelEventPublisher()
+	defer events.Close()
+
+	dispatcher := NewHTTPAgentDispatcherWithClient(cs, fakeClient, false, slog.Default())
+	dispatcher.SetCrossNodeDeps(events, NoopCommandBus{})
+
+	agent := seedAgentWithBrokerID(t, cs, remoteBroker)
+
+	// Simulate the owner publishing "running" shortly after intent is written.
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		updatedAgent := *agent
+		updatedAgent.Phase = "running"
+		events.PublishAgentStatus(ctx, &updatedAgent)
+	}()
+
+	err := dispatcher.DispatchAgentStart(ctx, agent, "my-task")
+	require.NoError(t, err, "deferred start should succeed when 'running' event arrives")
+
+	// Verify a broker_dispatch row was written (intent is durable). No owner
+	// claimed it in this test, so it stays pending.
+	pending, err := cs.ListPendingDispatch(ctx, remoteBroker)
+	require.NoError(t, err)
+	assert.Len(t, pending, 1, "durable intent row should exist")
+	assert.Equal(t, "start", pending[0].Op)
+	assert.Equal(t, agent.ID, pending[0].AgentID)
+}
+
+func TestDeferredStart_ReturnsErrorOnErrorPhase(t *testing.T) {
+	ctx := context.Background()
+	client := enttest.NewClient(t)
+	cs := entadapter.NewCompositeStore(client)
+
+	remoteBroker := uuid.NewString()
+	fakeClient := &deferredTestClient{localBroker: "local-broker"}
+
+	events := NewChannelEventPublisher()
+	defer events.Close()
+
+	dispatcher := NewHTTPAgentDispatcherWithClient(cs, fakeClient, false, slog.Default())
+	dispatcher.SetCrossNodeDeps(events, NoopCommandBus{})
+
+	agent := seedAgentWithBrokerID(t, cs, remoteBroker)
+
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		updatedAgent := *agent
+		updatedAgent.Phase = "error"
+		updatedAgent.Message = "container crash"
+		events.PublishAgentStatus(ctx, &updatedAgent)
+	}()
+
+	err := dispatcher.DispatchAgentStart(ctx, agent, "")
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "error phase")
+}
+
+func TestLocalStart_SkipsIntentRow(t *testing.T) {
+	ctx := context.Background()
+	client := enttest.NewClient(t)
+	cs := entadapter.NewCompositeStore(client)
+
+	localBroker := uuid.NewString()
+	fakeClient := &deferredTestClient{localBroker: localBroker}
+
+	events := NewChannelEventPublisher()
+	defer events.Close()
+
+	dispatcher := NewHTTPAgentDispatcherWithClient(cs, fakeClient, false, slog.Default())
+	dispatcher.SetCrossNodeDeps(events, NoopCommandBus{})
+
+	agent := seedAgentWithBrokerID(t, cs, localBroker)
+
+	err := dispatcher.DispatchAgentStart(ctx, agent, "local-task")
+	require.NoError(t, err, "local start should succeed directly")
+
+	// Verify no broker_dispatch row was written (local path skips intent).
+	pending, err := cs.ListPendingDispatch(ctx, localBroker)
+	require.NoError(t, err)
+	assert.Empty(t, pending, "local path should not write intent rows")
+
+	assert.Equal(t, int32(1), fakeClient.startCalled.Load(), "client.StartAgent called once")
 }
 
 // TestReconcileBroker_LifecycleEndToEnd verifies the full reconcile path:

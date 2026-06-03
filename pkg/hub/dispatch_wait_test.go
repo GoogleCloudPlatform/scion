@@ -39,14 +39,14 @@ func sendStatus(ch chan<- Event, phase, activity string, detail *AgentDetail) {
 func TestWaitForAgentTransition_TerminalPhase(t *testing.T) {
 	ch := make(chan Event, 8)
 	unsub := func() {}
-	srv := &Server{}
+	_ = &Server{} // ensure Server type compiles; waitForAgentTransition is standalone
 
 	go func() {
 		sendStatus(ch, "starting", "pulling image", nil)
 		sendStatus(ch, "running", "", nil)
 	}()
 
-	phase, err := srv.waitForAgentTransition(
+	phase, err := waitForAgentTransition(
 		context.Background(), ch, unsub,
 		func(p string) bool { return p == "running" || p == "error" },
 	)
@@ -57,14 +57,14 @@ func TestWaitForAgentTransition_TerminalPhase(t *testing.T) {
 func TestWaitForAgentTransition_ErrorPhase(t *testing.T) {
 	ch := make(chan Event, 8)
 	unsub := func() {}
-	srv := &Server{}
+	_ = &Server{} // ensure Server type compiles; waitForAgentTransition is standalone
 
 	go func() {
 		sendStatus(ch, "starting", "", nil)
 		sendStatus(ch, "error", "", nil)
 	}()
 
-	phase, err := srv.waitForAgentTransition(
+	phase, err := waitForAgentTransition(
 		context.Background(), ch, unsub,
 		func(p string) bool { return p == "running" || p == "error" },
 	)
@@ -77,7 +77,7 @@ func TestWaitForAgentTransition_RollingReset(t *testing.T) {
 	// We use a very short timeout override for testing speed.
 	ch := make(chan Event, 64)
 	unsub := func() {}
-	srv := &Server{}
+	_ = &Server{} // ensure Server type compiles; waitForAgentTransition is standalone
 
 	// Override the timeout by wrapping: we cannot easily override the
 	// const, but we can send events faster than the 90s default and
@@ -91,7 +91,7 @@ func TestWaitForAgentTransition_RollingReset(t *testing.T) {
 		sendStatus(ch, "running", "", nil)
 	}()
 
-	phase, err := srv.waitForAgentTransition(
+	phase, err := waitForAgentTransition(
 		context.Background(), ch, unsub,
 		func(p string) bool { return p == "running" || p == "error" },
 	)
@@ -106,12 +106,12 @@ func TestWaitForAgentTransition_SilenceExpiry(t *testing.T) {
 	// the ok=false branch.
 	ch := make(chan Event, 4)
 	unsub := func() {}
-	srv := &Server{}
+	_ = &Server{} // ensure Server type compiles; waitForAgentTransition is standalone
 
 	// Close immediately: simulates silence (no events).
 	close(ch)
 
-	_, err := srv.waitForAgentTransition(
+	_, err := waitForAgentTransition(
 		context.Background(), ch, unsub,
 		func(p string) bool { return p == "running" },
 	)
@@ -121,12 +121,12 @@ func TestWaitForAgentTransition_SilenceExpiry(t *testing.T) {
 func TestWaitForAgentTransition_ContextCancel(t *testing.T) {
 	ch := make(chan Event, 4)
 	unsub := func() {}
-	srv := &Server{}
+	_ = &Server{} // ensure Server type compiles; waitForAgentTransition is standalone
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	_, err := srv.waitForAgentTransition(
+	_, err := waitForAgentTransition(
 		ctx, ch, unsub,
 		func(p string) bool { return p == "running" },
 	)
@@ -137,10 +137,10 @@ func TestWaitForAgentTransition_UnsubCalled(t *testing.T) {
 	ch := make(chan Event, 4)
 	var unsubCalled bool
 	unsub := func() { unsubCalled = true }
-	srv := &Server{}
+	_ = &Server{} // ensure Server type compiles; waitForAgentTransition is standalone
 
 	close(ch)
-	_, _ = srv.waitForAgentTransition(
+	_, _ = waitForAgentTransition(
 		context.Background(), ch, unsub,
 		func(p string) bool { return p == "running" },
 	)
@@ -150,13 +150,13 @@ func TestWaitForAgentTransition_UnsubCalled(t *testing.T) {
 func TestWaitForAgentTransition_StopTerminal(t *testing.T) {
 	ch := make(chan Event, 4)
 	unsub := func() {}
-	srv := &Server{}
+	_ = &Server{} // ensure Server type compiles; waitForAgentTransition is standalone
 
 	go func() {
 		sendStatus(ch, "stopped", "", nil)
 	}()
 
-	phase, err := srv.waitForAgentTransition(
+	phase, err := waitForAgentTransition(
 		context.Background(), ch, unsub,
 		func(p string) bool { return p == "stopped" || p == "error" },
 	)

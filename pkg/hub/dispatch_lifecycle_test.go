@@ -101,15 +101,7 @@ func TestHybridBrokerClient_RestartAgent_RouteGate(t *testing.T) {
 
 func TestStartDispatchArgs_RoundTrip(t *testing.T) {
 	original := &StartDispatchArgs{
-		Task:        "build the widget",
-		ResolvedEnv: map[string]string{"API_KEY": "secret123", "SCION_AGENT_ID": "a1"},
-		ResolvedSecrets: []ResolvedSecret{
-			{Name: "gh-token", Type: "environment", Target: "GITHUB_TOKEN", Value: "ghp_xxx", Source: "project"},
-		},
-		SharedWorkspace: true,
-		ProjectPath:     "/workspace",
-		ProjectSlug:     "my-project",
-		HarnessConfig:   "claude-code",
+		Task: "build the widget",
 	}
 
 	raw, err := MarshalDispatchArgs(original)
@@ -118,29 +110,13 @@ func TestStartDispatchArgs_RoundTrip(t *testing.T) {
 
 	got, err := UnmarshalStartArgs(raw)
 	require.NoError(t, err)
-
 	assert.Equal(t, original.Task, got.Task)
-	assert.Equal(t, original.ResolvedEnv, got.ResolvedEnv)
-	assert.Equal(t, len(original.ResolvedSecrets), len(got.ResolvedSecrets))
-	assert.Equal(t, original.ResolvedSecrets[0].Name, got.ResolvedSecrets[0].Name)
-	assert.Equal(t, original.ResolvedSecrets[0].Value, got.ResolvedSecrets[0].Value)
-	assert.Equal(t, original.SharedWorkspace, got.SharedWorkspace)
-	assert.Equal(t, original.ProjectPath, got.ProjectPath)
-	assert.Equal(t, original.ProjectSlug, got.ProjectSlug)
-	assert.Equal(t, original.HarnessConfig, got.HarnessConfig)
 }
 
 func TestRestartDispatchArgs_RoundTrip(t *testing.T) {
-	original := &RestartDispatchArgs{
-		ResolvedEnv: map[string]string{"SCION_AUTH_TOKEN": "token123", "SCION_HUB_ENDPOINT": "https://hub.example.com"},
-	}
-
-	raw, err := MarshalDispatchArgs(original)
+	raw, err := MarshalDispatchArgs(&RestartDispatchArgs{})
 	require.NoError(t, err)
-
-	got, err := UnmarshalRestartArgs(raw)
-	require.NoError(t, err)
-	assert.Equal(t, original.ResolvedEnv, got.ResolvedEnv)
+	assert.Equal(t, "{}", raw)
 }
 
 func TestStopDispatchArgs_RoundTrip(t *testing.T) {
