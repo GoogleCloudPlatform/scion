@@ -189,6 +189,47 @@ const (
 	WorkspaceModePerAgent = "per-agent"
 )
 
+// WorkspaceSharingMode is the canonical set of workspace sharing modes from the
+// glossary. These three modes govern how workspaces are allocated to agents and
+// determine which storage backend is used (NFS-shared vs node-local).
+type WorkspaceSharingMode string
+
+const (
+	// SharingModeSharedPlain: one workspace directory mounted into every agent,
+	// no per-agent isolation. Used for plain/non-git projects.
+	// Maps from label value "shared".
+	SharingModeSharedPlain WorkspaceSharingMode = "shared-plain"
+
+	// SharingModeClonePerAgent: each agent gets its own full git clone.
+	// Nothing is shared, so this stays on node-local storage (NOT NFS).
+	// Maps from label value "per-agent".
+	SharingModeClonePerAgent WorkspaceSharingMode = "clone-per-agent"
+
+	// SharingModeWorktreePerAgent: each agent gets its own git worktree over
+	// one shared checkout. The shared checkout + all worktrees live on NFS.
+	// Maps from label value "worktree-per-agent".
+	// Note: not yet on Hub-managed projects — reserved for Phase 1+.
+	SharingModeWorktreePerAgent WorkspaceSharingMode = "worktree-per-agent"
+)
+
+// ResolveWorkspaceSharingMode maps a workspace mode label value (wire format) to
+// the canonical WorkspaceSharingMode. Empty or unknown values default to
+// SharingModeSharedPlain for backward compatibility (existing projects without
+// an explicit label are treated as shared).
+func ResolveWorkspaceSharingMode(label string) WorkspaceSharingMode {
+	switch label {
+	case WorkspaceModeShared, "shared-plain":
+		return SharingModeSharedPlain
+	case WorkspaceModePerAgent, "clone-per-agent":
+		return SharingModeClonePerAgent
+	case "worktree-per-agent":
+		return SharingModeWorktreePerAgent
+	default:
+		// Empty or unrecognized: default to shared-plain.
+		return SharingModeSharedPlain
+	}
+}
+
 // Project represents a project/agent group in the Hub database.
 type Project struct {
 	// Identity
