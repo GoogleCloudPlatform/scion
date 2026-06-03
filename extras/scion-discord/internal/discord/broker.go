@@ -237,7 +237,7 @@ func (b *DiscordBroker) Configure(config map[string]string) error {
 			appID = b.config.ApplicationID
 			guildID = b.config.GuildID
 		}
-		b.commands = NewCommandHandler(b.store, b.session, b.hubClient, appID, guildID, b.log)
+		b.commands = NewCommandHandler(b.store, b.session, b.hubClient, appID, guildID, b.agentCacheTTL, b.log)
 		b.callbacks = NewCallbackHandler(b.store, b.session, b.hubClient, b.log)
 		b.registration = NewRegistrationHandler(b.store, b.session, b.hubURL, b.hmacKey, b.brokerID, b.log)
 

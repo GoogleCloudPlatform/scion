@@ -44,26 +44,29 @@ type HubClient interface {
 
 // CommandHandler manages Discord slash command registration and dispatch.
 type CommandHandler struct {
-	store     Store
-	session   *discordgo.Session
-	hubClient HubClient
-	log       *slog.Logger
-	appID     string
-	guildID   string // empty = global commands
+	store         Store
+	session       *discordgo.Session
+	hubClient     HubClient
+	log           *slog.Logger
+	appID         string
+	guildID       string // empty = global commands
+	agentCacheTTL time.Duration
 }
 
-// NewCommandHandler creates a new CommandHandler.
-func NewCommandHandler(store Store, session *discordgo.Session, hubClient HubClient, appID, guildID string, log *slog.Logger) *CommandHandler {
+// NewCommandHandler creates a new CommandHandler. agentCacheTTL controls how
+// long agent lists are cached before refreshing from the Hub API.
+func NewCommandHandler(store Store, session *discordgo.Session, hubClient HubClient, appID, guildID string, agentCacheTTL time.Duration, log *slog.Logger) *CommandHandler {
 	if log == nil {
 		log = slog.Default()
 	}
 	return &CommandHandler{
-		store:     store,
-		session:   session,
-		hubClient: hubClient,
-		log:       log,
-		appID:     appID,
-		guildID:   guildID,
+		store:         store,
+		session:       session,
+		hubClient:     hubClient,
+		log:           log,
+		appID:         appID,
+		guildID:       guildID,
+		agentCacheTTL: agentCacheTTL,
 	}
 }
 
@@ -199,6 +202,8 @@ var ephemeralCommands = map[string]bool{
 	"info":     true,
 	"register": true,
 	"setup":    true,
+	"unlink":   true,
+	"settings": true,
 }
 
 // ephemeralFlag returns MessageFlagsEphemeral if the subcommand should be
@@ -214,15 +219,23 @@ func ephemeralFlag(i *discordgo.InteractionCreate) discordgo.MessageFlags {
 }
 
 // HandleSlashCommand dispatches a slash command interaction to the
-// appropriate handler. It immediately acknowledges the interaction
-// (within Discord's 3-second deadline) then processes asynchronously.
+// appropriate handler. Simple commands that don't need async Hub API
+// calls respond immediately; others defer and process asynchronously.
 func (h *CommandHandler) HandleSlashCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	data := i.ApplicationCommandData()
 	if data.Name != "scion" || len(data.Options) == 0 {
 		return
 	}
 
-	// Immediately acknowledge — Discord requires a response within 3 seconds.
+	subcommand := data.Options[0].Name
+
+	// Commands that don't need async Hub API calls respond immediately.
+	if subcommand == "help" {
+		h.respondImmediate(s, i, helpText())
+		return
+	}
+
+	// All other commands defer — Discord requires a response within 3 seconds.
 	err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 		Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
 		Data: &discordgo.InteractionResponseData{
@@ -234,12 +247,8 @@ func (h *CommandHandler) HandleSlashCommand(s *discordgo.Session, i *discordgo.I
 		return
 	}
 
-	subcommand := data.Options[0].Name
-
 	go func() {
 		switch subcommand {
-		case "help":
-			h.HandleHelp(s, i)
 		case "setup":
 			h.HandleSetup(s, i)
 		case "unlink":
@@ -333,9 +342,9 @@ func (h *CommandHandler) HandleAutocomplete(s *discordgo.Session, i *discordgo.I
 	}
 }
 
-// HandleHelp responds with a listing of available commands.
-func (h *CommandHandler) HandleHelp(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	text := "**Scion Bot Commands**\n\n" +
+// helpText returns the help message listing available commands.
+func helpText() string {
+	return "**Scion Bot Commands**\n\n" +
 		"`/scion setup` — Link this channel to a Scion project\n" +
 		"`/scion unlink` — Unlink this channel from its project\n" +
 		"`/scion agents` — List agents in the linked project\n" +
@@ -350,8 +359,27 @@ func (h *CommandHandler) HandleHelp(s *discordgo.Session, i *discordgo.Interacti
 		"`/scion info` — Show your registration info\n" +
 		"`/scion help` — Show this help message\n\n" +
 		"Mention the bot or an agent by name in a linked channel to send messages."
+}
 
-	h.followup(s, i, text)
+// HandleHelp responds with a listing of available commands.
+// Used as a fallback when the command is dispatched via the deferred path.
+func (h *CommandHandler) HandleHelp(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	h.followup(s, i, helpText())
+}
+
+// respondImmediate sends an immediate (non-deferred) response to an
+// interaction, suitable for commands that don't need async processing.
+func (h *CommandHandler) respondImmediate(s *discordgo.Session, i *discordgo.InteractionCreate, content string) {
+	err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseChannelMessageWithSource,
+		Data: &discordgo.InteractionResponseData{
+			Content: content,
+			Flags:   ephemeralFlag(i),
+		},
+	})
+	if err != nil {
+		h.log.Error("Failed to send immediate response", "error", err)
+	}
 }
 
 // HandleSetup starts the channel setup flow: check permissions, check
@@ -673,7 +701,7 @@ func (h *CommandHandler) getAgents(ctx context.Context, projectID string) ([]str
 	if err != nil {
 		h.log.Warn("Failed to read agent cache", "project_id", projectID, "error", err)
 	}
-	if cached != nil && time.Since(cached.RefreshedAt) < 5*time.Minute {
+	if cached != nil && time.Since(cached.RefreshedAt) < h.agentCacheTTL {
 		return cached.AgentSlugs, nil
 	}
 
