@@ -39,12 +39,37 @@ During the NM1 live gate the broker container ran as `uid=1002` while
 ## Mount Privilege
 
 The broker process requires mount privilege to auto-mount NFS shares at
-startup (see `NFSMountReconciler`). Options:
+startup (see `NFSMountReconciler`). Options, in order of preference:
 
-- Run the broker as root (not recommended for production).
-- Grant `CAP_SYS_ADMIN` via `setcap` or K8s `securityContext.capabilities`.
 - Configure `/etc/sudoers` to allow the broker user to run `mount`/`umount`
-  without a password.
+  without a password, and have the reconciler invoke `sudo mount` (recommended
+  for a non-root service).
+- Run the broker as root.
+
+### Important (NM1b finding): `CAP_SYS_ADMIN` alone is NOT sufficient
+
+The userspace `mount.nfs`/`mount.nfs4` helper **checks `uid == 0` explicitly**
+(not Linux capabilities), so granting `CAP_SYS_ADMIN` via `setcap` or a K8s
+`securityContext.capabilities` add does **not** let a non-root broker run
+`mount -t nfs`. During NM1b the service had to run as `User=root` for the
+helper to succeed. To run unprivileged, use the `sudo mount` wrapper above, or
+have the reconciler call the `mount(2)` syscall directly (which does honor
+`CAP_SYS_ADMIN`) rather than shelling out to the `mount.nfs` helper.
+
+## Config: `schema_version` required (NM1b finding)
+
+`settings.yaml` **must** include `schema_version: "1"` when it contains a
+`server.workspace_storage` block. A config without `schema_version` is treated
+as legacy and auto-migrated to v1; the legacy→v1 migration does **not** carry
+the `workspace_storage` block, so it is silently stripped. Always set:
+
+```yaml
+schema_version: "1"
+server:
+  workspace_storage:
+    backend: nfs
+    nfs: { ... }
+```
 
 ## NFSv3 Default
 
