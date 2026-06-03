@@ -54,6 +54,12 @@ type RuntimeBroker struct {
 	CreatedBy string `json:"created_by,omitempty"`
 	// AutoProvide holds the value of the "auto_provide" field.
 	AutoProvide bool `json:"auto_provide,omitempty"`
+	// ConnectedHubID holds the value of the "connected_hub_id" field.
+	ConnectedHubID *string `json:"connected_hub_id,omitempty"`
+	// ConnectedSessionID holds the value of the "connected_session_id" field.
+	ConnectedSessionID *string `json:"connected_session_id,omitempty"`
+	// ConnectedAt holds the value of the "connected_at" field.
+	ConnectedAt *time.Time `json:"connected_at,omitempty"`
 	// Created holds the value of the "created" field.
 	Created time.Time `json:"created,omitempty"`
 	// Updated holds the value of the "updated" field.
@@ -70,9 +76,9 @@ func (*RuntimeBroker) scanValues(columns []string) ([]any, error) {
 			values[i] = new(sql.NullBool)
 		case runtimebroker.FieldLockVersion:
 			values[i] = new(sql.NullInt64)
-		case runtimebroker.FieldName, runtimebroker.FieldSlug, runtimebroker.FieldType, runtimebroker.FieldMode, runtimebroker.FieldVersion, runtimebroker.FieldStatus, runtimebroker.FieldConnectionState, runtimebroker.FieldCapabilities, runtimebroker.FieldSupportedHarnesses, runtimebroker.FieldResources, runtimebroker.FieldRuntimes, runtimebroker.FieldLabels, runtimebroker.FieldAnnotations, runtimebroker.FieldEndpoint, runtimebroker.FieldCreatedBy:
+		case runtimebroker.FieldName, runtimebroker.FieldSlug, runtimebroker.FieldType, runtimebroker.FieldMode, runtimebroker.FieldVersion, runtimebroker.FieldStatus, runtimebroker.FieldConnectionState, runtimebroker.FieldCapabilities, runtimebroker.FieldSupportedHarnesses, runtimebroker.FieldResources, runtimebroker.FieldRuntimes, runtimebroker.FieldLabels, runtimebroker.FieldAnnotations, runtimebroker.FieldEndpoint, runtimebroker.FieldCreatedBy, runtimebroker.FieldConnectedHubID, runtimebroker.FieldConnectedSessionID:
 			values[i] = new(sql.NullString)
-		case runtimebroker.FieldLastHeartbeat, runtimebroker.FieldCreated, runtimebroker.FieldUpdated:
+		case runtimebroker.FieldLastHeartbeat, runtimebroker.FieldConnectedAt, runtimebroker.FieldCreated, runtimebroker.FieldUpdated:
 			values[i] = new(sql.NullTime)
 		case runtimebroker.FieldID:
 			values[i] = new(uuid.UUID)
@@ -206,6 +212,27 @@ func (_m *RuntimeBroker) assignValues(columns []string, values []any) error {
 			} else if value.Valid {
 				_m.AutoProvide = value.Bool
 			}
+		case runtimebroker.FieldConnectedHubID:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field connected_hub_id", values[i])
+			} else if value.Valid {
+				_m.ConnectedHubID = new(string)
+				*_m.ConnectedHubID = value.String
+			}
+		case runtimebroker.FieldConnectedSessionID:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field connected_session_id", values[i])
+			} else if value.Valid {
+				_m.ConnectedSessionID = new(string)
+				*_m.ConnectedSessionID = value.String
+			}
+		case runtimebroker.FieldConnectedAt:
+			if value, ok := values[i].(*sql.NullTime); !ok {
+				return fmt.Errorf("unexpected type %T for field connected_at", values[i])
+			} else if value.Valid {
+				_m.ConnectedAt = new(time.Time)
+				*_m.ConnectedAt = value.Time
+			}
 		case runtimebroker.FieldCreated:
 			if value, ok := values[i].(*sql.NullTime); !ok {
 				return fmt.Errorf("unexpected type %T for field created", values[i])
@@ -309,6 +336,21 @@ func (_m *RuntimeBroker) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("auto_provide=")
 	builder.WriteString(fmt.Sprintf("%v", _m.AutoProvide))
+	builder.WriteString(", ")
+	if v := _m.ConnectedHubID; v != nil {
+		builder.WriteString("connected_hub_id=")
+		builder.WriteString(*v)
+	}
+	builder.WriteString(", ")
+	if v := _m.ConnectedSessionID; v != nil {
+		builder.WriteString("connected_session_id=")
+		builder.WriteString(*v)
+	}
+	builder.WriteString(", ")
+	if v := _m.ConnectedAt; v != nil {
+		builder.WriteString("connected_at=")
+		builder.WriteString(v.Format(time.ANSIC))
+	}
 	builder.WriteString(", ")
 	builder.WriteString("created=")
 	builder.WriteString(_m.Created.Format(time.ANSIC))

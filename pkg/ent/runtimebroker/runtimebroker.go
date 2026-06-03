@@ -50,6 +50,12 @@ const (
 	FieldCreatedBy = "created_by"
 	// FieldAutoProvide holds the string denoting the auto_provide field in the database.
 	FieldAutoProvide = "auto_provide"
+	// FieldConnectedHubID holds the string denoting the connected_hub_id field in the database.
+	FieldConnectedHubID = "connected_hub_id"
+	// FieldConnectedSessionID holds the string denoting the connected_session_id field in the database.
+	FieldConnectedSessionID = "connected_session_id"
+	// FieldConnectedAt holds the string denoting the connected_at field in the database.
+	FieldConnectedAt = "connected_at"
 	// FieldCreated holds the string denoting the created field in the database.
 	FieldCreated = "created"
 	// FieldUpdated holds the string denoting the updated field in the database.
@@ -79,6 +85,9 @@ var Columns = []string{
 	FieldEndpoint,
 	FieldCreatedBy,
 	FieldAutoProvide,
+	FieldConnectedHubID,
+	FieldConnectedSessionID,
+	FieldConnectedAt,
 	FieldCreated,
 	FieldUpdated,
 }
@@ -214,6 +223,21 @@ func ByCreatedBy(opts ...sql.OrderTermOption) OrderOption {
 // ByAutoProvide orders the results by the auto_provide field.
 func ByAutoProvide(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldAutoProvide, opts...).ToFunc()
+}
+
+// ByConnectedHubID orders the results by the connected_hub_id field.
+func ByConnectedHubID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldConnectedHubID, opts...).ToFunc()
+}
+
+// ByConnectedSessionID orders the results by the connected_session_id field.
+func ByConnectedSessionID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldConnectedSessionID, opts...).ToFunc()
+}
+
+// ByConnectedAt orders the results by the connected_at field.
+func ByConnectedAt(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldConnectedAt, opts...).ToFunc()
 }
 
 // ByCreated orders the results by the created field.

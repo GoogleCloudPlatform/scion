@@ -22704,34 +22704,37 @@ func (m *ProjectSyncStateMutation) ResetEdge(name string) error {
 // RuntimeBrokerMutation represents an operation that mutates the RuntimeBroker nodes in the graph.
 type RuntimeBrokerMutation struct {
 	config
-	op                  Op
-	typ                 string
-	id                  *uuid.UUID
-	name                *string
-	slug                *string
-	_type               *string
-	mode                *string
-	version             *string
-	lock_version        *int64
-	addlock_version     *int64
-	status              *string
-	connection_state    *string
-	last_heartbeat      *time.Time
-	capabilities        *string
-	supported_harnesses *string
-	resources           *string
-	runtimes            *string
-	labels              *string
-	annotations         *string
-	endpoint            *string
-	created_by          *string
-	auto_provide        *bool
-	created             *time.Time
-	updated             *time.Time
-	clearedFields       map[string]struct{}
-	done                bool
-	oldValue            func(context.Context) (*RuntimeBroker, error)
-	predicates          []predicate.RuntimeBroker
+	op                   Op
+	typ                  string
+	id                   *uuid.UUID
+	name                 *string
+	slug                 *string
+	_type                *string
+	mode                 *string
+	version              *string
+	lock_version         *int64
+	addlock_version      *int64
+	status               *string
+	connection_state     *string
+	last_heartbeat       *time.Time
+	capabilities         *string
+	supported_harnesses  *string
+	resources            *string
+	runtimes             *string
+	labels               *string
+	annotations          *string
+	endpoint             *string
+	created_by           *string
+	auto_provide         *bool
+	connected_hub_id     *string
+	connected_session_id *string
+	connected_at         *time.Time
+	created              *time.Time
+	updated              *time.Time
+	clearedFields        map[string]struct{}
+	done                 bool
+	oldValue             func(context.Context) (*RuntimeBroker, error)
+	predicates           []predicate.RuntimeBroker
 }
 
 var _ ent.Mutation = (*RuntimeBrokerMutation)(nil)
@@ -23649,6 +23652,153 @@ func (m *RuntimeBrokerMutation) ResetAutoProvide() {
 	m.auto_provide = nil
 }
 
+// SetConnectedHubID sets the "connected_hub_id" field.
+func (m *RuntimeBrokerMutation) SetConnectedHubID(s string) {
+	m.connected_hub_id = &s
+}
+
+// ConnectedHubID returns the value of the "connected_hub_id" field in the mutation.
+func (m *RuntimeBrokerMutation) ConnectedHubID() (r string, exists bool) {
+	v := m.connected_hub_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldConnectedHubID returns the old "connected_hub_id" field's value of the RuntimeBroker entity.
+// If the RuntimeBroker object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *RuntimeBrokerMutation) OldConnectedHubID(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldConnectedHubID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldConnectedHubID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldConnectedHubID: %w", err)
+	}
+	return oldValue.ConnectedHubID, nil
+}
+
+// ClearConnectedHubID clears the value of the "connected_hub_id" field.
+func (m *RuntimeBrokerMutation) ClearConnectedHubID() {
+	m.connected_hub_id = nil
+	m.clearedFields[runtimebroker.FieldConnectedHubID] = struct{}{}
+}
+
+// ConnectedHubIDCleared returns if the "connected_hub_id" field was cleared in this mutation.
+func (m *RuntimeBrokerMutation) ConnectedHubIDCleared() bool {
+	_, ok := m.clearedFields[runtimebroker.FieldConnectedHubID]
+	return ok
+}
+
+// ResetConnectedHubID resets all changes to the "connected_hub_id" field.
+func (m *RuntimeBrokerMutation) ResetConnectedHubID() {
+	m.connected_hub_id = nil
+	delete(m.clearedFields, runtimebroker.FieldConnectedHubID)
+}
+
+// SetConnectedSessionID sets the "connected_session_id" field.
+func (m *RuntimeBrokerMutation) SetConnectedSessionID(s string) {
+	m.connected_session_id = &s
+}
+
+// ConnectedSessionID returns the value of the "connected_session_id" field in the mutation.
+func (m *RuntimeBrokerMutation) ConnectedSessionID() (r string, exists bool) {
+	v := m.connected_session_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldConnectedSessionID returns the old "connected_session_id" field's value of the RuntimeBroker entity.
+// If the RuntimeBroker object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *RuntimeBrokerMutation) OldConnectedSessionID(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldConnectedSessionID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldConnectedSessionID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldConnectedSessionID: %w", err)
+	}
+	return oldValue.ConnectedSessionID, nil
+}
+
+// ClearConnectedSessionID clears the value of the "connected_session_id" field.
+func (m *RuntimeBrokerMutation) ClearConnectedSessionID() {
+	m.connected_session_id = nil
+	m.clearedFields[runtimebroker.FieldConnectedSessionID] = struct{}{}
+}
+
+// ConnectedSessionIDCleared returns if the "connected_session_id" field was cleared in this mutation.
+func (m *RuntimeBrokerMutation) ConnectedSessionIDCleared() bool {
+	_, ok := m.clearedFields[runtimebroker.FieldConnectedSessionID]
+	return ok
+}
+
+// ResetConnectedSessionID resets all changes to the "connected_session_id" field.
+func (m *RuntimeBrokerMutation) ResetConnectedSessionID() {
+	m.connected_session_id = nil
+	delete(m.clearedFields, runtimebroker.FieldConnectedSessionID)
+}
+
+// SetConnectedAt sets the "connected_at" field.
+func (m *RuntimeBrokerMutation) SetConnectedAt(t time.Time) {
+	m.connected_at = &t
+}
+
+// ConnectedAt returns the value of the "connected_at" field in the mutation.
+func (m *RuntimeBrokerMutation) ConnectedAt() (r time.Time, exists bool) {
+	v := m.connected_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldConnectedAt returns the old "connected_at" field's value of the RuntimeBroker entity.
+// If the RuntimeBroker object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *RuntimeBrokerMutation) OldConnectedAt(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldConnectedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldConnectedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldConnectedAt: %w", err)
+	}
+	return oldValue.ConnectedAt, nil
+}
+
+// ClearConnectedAt clears the value of the "connected_at" field.
+func (m *RuntimeBrokerMutation) ClearConnectedAt() {
+	m.connected_at = nil
+	m.clearedFields[runtimebroker.FieldConnectedAt] = struct{}{}
+}
+
+// ConnectedAtCleared returns if the "connected_at" field was cleared in this mutation.
+func (m *RuntimeBrokerMutation) ConnectedAtCleared() bool {
+	_, ok := m.clearedFields[runtimebroker.FieldConnectedAt]
+	return ok
+}
+
+// ResetConnectedAt resets all changes to the "connected_at" field.
+func (m *RuntimeBrokerMutation) ResetConnectedAt() {
+	m.connected_at = nil
+	delete(m.clearedFields, runtimebroker.FieldConnectedAt)
+}
+
 // SetCreated sets the "created" field.
 func (m *RuntimeBrokerMutation) SetCreated(t time.Time) {
 	m.created = &t
@@ -23755,7 +23905,7 @@ func (m *RuntimeBrokerMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *RuntimeBrokerMutation) Fields() []string {
-	fields := make([]string, 0, 20)
+	fields := make([]string, 0, 23)
 	if m.name != nil {
 		fields = append(fields, runtimebroker.FieldName)
 	}
@@ -23810,6 +23960,15 @@ func (m *RuntimeBrokerMutation) Fields() []string {
 	if m.auto_provide != nil {
 		fields = append(fields, runtimebroker.FieldAutoProvide)
 	}
+	if m.connected_hub_id != nil {
+		fields = append(fields, runtimebroker.FieldConnectedHubID)
+	}
+	if m.connected_session_id != nil {
+		fields = append(fields, runtimebroker.FieldConnectedSessionID)
+	}
+	if m.connected_at != nil {
+		fields = append(fields, runtimebroker.FieldConnectedAt)
+	}
 	if m.created != nil {
 		fields = append(fields, runtimebroker.FieldCreated)
 	}
@@ -23860,6 +24019,12 @@ func (m *RuntimeBrokerMutation) Field(name string) (ent.Value, bool) {
 		return m.CreatedBy()
 	case runtimebroker.FieldAutoProvide:
 		return m.AutoProvide()
+	case runtimebroker.FieldConnectedHubID:
+		return m.ConnectedHubID()
+	case runtimebroker.FieldConnectedSessionID:
+		return m.ConnectedSessionID()
+	case runtimebroker.FieldConnectedAt:
+		return m.ConnectedAt()
 	case runtimebroker.FieldCreated:
 		return m.Created()
 	case runtimebroker.FieldUpdated:
@@ -23909,6 +24074,12 @@ func (m *RuntimeBrokerMutation) OldField(ctx context.Context, name string) (ent.
 		return m.OldCreatedBy(ctx)
 	case runtimebroker.FieldAutoProvide:
 		return m.OldAutoProvide(ctx)
+	case runtimebroker.FieldConnectedHubID:
+		return m.OldConnectedHubID(ctx)
+	case runtimebroker.FieldConnectedSessionID:
+		return m.OldConnectedSessionID(ctx)
+	case runtimebroker.FieldConnectedAt:
+		return m.OldConnectedAt(ctx)
 	case runtimebroker.FieldCreated:
 		return m.OldCreated(ctx)
 	case runtimebroker.FieldUpdated:
@@ -24048,6 +24219,27 @@ func (m *RuntimeBrokerMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetAutoProvide(v)
 		return nil
+	case runtimebroker.FieldConnectedHubID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetConnectedHubID(v)
+		return nil
+	case runtimebroker.FieldConnectedSessionID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetConnectedSessionID(v)
+		return nil
+	case runtimebroker.FieldConnectedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetConnectedAt(v)
+		return nil
 	case runtimebroker.FieldCreated:
 		v, ok := value.(time.Time)
 		if !ok {
@@ -24140,6 +24332,15 @@ func (m *RuntimeBrokerMutation) ClearedFields() []string {
 	if m.FieldCleared(runtimebroker.FieldCreatedBy) {
 		fields = append(fields, runtimebroker.FieldCreatedBy)
 	}
+	if m.FieldCleared(runtimebroker.FieldConnectedHubID) {
+		fields = append(fields, runtimebroker.FieldConnectedHubID)
+	}
+	if m.FieldCleared(runtimebroker.FieldConnectedSessionID) {
+		fields = append(fields, runtimebroker.FieldConnectedSessionID)
+	}
+	if m.FieldCleared(runtimebroker.FieldConnectedAt) {
+		fields = append(fields, runtimebroker.FieldConnectedAt)
+	}
 	return fields
 }
 
@@ -24186,6 +24387,15 @@ func (m *RuntimeBrokerMutation) ClearField(name string) error {
 		return nil
 	case runtimebroker.FieldCreatedBy:
 		m.ClearCreatedBy()
+		return nil
+	case runtimebroker.FieldConnectedHubID:
+		m.ClearConnectedHubID()
+		return nil
+	case runtimebroker.FieldConnectedSessionID:
+		m.ClearConnectedSessionID()
+		return nil
+	case runtimebroker.FieldConnectedAt:
+		m.ClearConnectedAt()
 		return nil
 	}
 	return fmt.Errorf("unknown RuntimeBroker nullable field %s", name)
@@ -24248,6 +24458,15 @@ func (m *RuntimeBrokerMutation) ResetField(name string) error {
 		return nil
 	case runtimebroker.FieldAutoProvide:
 		m.ResetAutoProvide()
+		return nil
+	case runtimebroker.FieldConnectedHubID:
+		m.ResetConnectedHubID()
+		return nil
+	case runtimebroker.FieldConnectedSessionID:
+		m.ResetConnectedSessionID()
+		return nil
+	case runtimebroker.FieldConnectedAt:
+		m.ResetConnectedAt()
 		return nil
 	case runtimebroker.FieldCreated:
 		m.ResetCreated()

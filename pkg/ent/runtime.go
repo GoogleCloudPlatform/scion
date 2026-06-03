@@ -680,11 +680,11 @@ func init() {
 	// runtimebroker.DefaultAutoProvide holds the default value on creation for the auto_provide field.
 	runtimebroker.DefaultAutoProvide = runtimebrokerDescAutoProvide.Default.(bool)
 	// runtimebrokerDescCreated is the schema descriptor for created field.
-	runtimebrokerDescCreated := runtimebrokerFields[19].Descriptor()
+	runtimebrokerDescCreated := runtimebrokerFields[22].Descriptor()
 	// runtimebroker.DefaultCreated holds the default value on creation for the created field.
 	runtimebroker.DefaultCreated = runtimebrokerDescCreated.Default.(func() time.Time)
 	// runtimebrokerDescUpdated is the schema descriptor for updated field.
-	runtimebrokerDescUpdated := runtimebrokerFields[20].Descriptor()
+	runtimebrokerDescUpdated := runtimebrokerFields[23].Descriptor()
 	// runtimebroker.DefaultUpdated holds the default value on creation for the updated field.
 	runtimebroker.DefaultUpdated = runtimebrokerDescUpdated.Default.(func() time.Time)
 	// runtimebroker.UpdateDefaultUpdated holds the default value on update for the updated field.

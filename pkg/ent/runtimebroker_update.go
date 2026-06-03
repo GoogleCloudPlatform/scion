@@ -353,6 +353,66 @@ func (_u *RuntimeBrokerUpdate) SetNillableAutoProvide(v *bool) *RuntimeBrokerUpd
 	return _u
 }
 
+// SetConnectedHubID sets the "connected_hub_id" field.
+func (_u *RuntimeBrokerUpdate) SetConnectedHubID(v string) *RuntimeBrokerUpdate {
+	_u.mutation.SetConnectedHubID(v)
+	return _u
+}
+
+// SetNillableConnectedHubID sets the "connected_hub_id" field if the given value is not nil.
+func (_u *RuntimeBrokerUpdate) SetNillableConnectedHubID(v *string) *RuntimeBrokerUpdate {
+	if v != nil {
+		_u.SetConnectedHubID(*v)
+	}
+	return _u
+}
+
+// ClearConnectedHubID clears the value of the "connected_hub_id" field.
+func (_u *RuntimeBrokerUpdate) ClearConnectedHubID() *RuntimeBrokerUpdate {
+	_u.mutation.ClearConnectedHubID()
+	return _u
+}
+
+// SetConnectedSessionID sets the "connected_session_id" field.
+func (_u *RuntimeBrokerUpdate) SetConnectedSessionID(v string) *RuntimeBrokerUpdate {
+	_u.mutation.SetConnectedSessionID(v)
+	return _u
+}
+
+// SetNillableConnectedSessionID sets the "connected_session_id" field if the given value is not nil.
+func (_u *RuntimeBrokerUpdate) SetNillableConnectedSessionID(v *string) *RuntimeBrokerUpdate {
+	if v != nil {
+		_u.SetConnectedSessionID(*v)
+	}
+	return _u
+}
+
+// ClearConnectedSessionID clears the value of the "connected_session_id" field.
+func (_u *RuntimeBrokerUpdate) ClearConnectedSessionID() *RuntimeBrokerUpdate {
+	_u.mutation.ClearConnectedSessionID()
+	return _u
+}
+
+// SetConnectedAt sets the "connected_at" field.
+func (_u *RuntimeBrokerUpdate) SetConnectedAt(v time.Time) *RuntimeBrokerUpdate {
+	_u.mutation.SetConnectedAt(v)
+	return _u
+}
+
+// SetNillableConnectedAt sets the "connected_at" field if the given value is not nil.
+func (_u *RuntimeBrokerUpdate) SetNillableConnectedAt(v *time.Time) *RuntimeBrokerUpdate {
+	if v != nil {
+		_u.SetConnectedAt(*v)
+	}
+	return _u
+}
+
+// ClearConnectedAt clears the value of the "connected_at" field.
+func (_u *RuntimeBrokerUpdate) ClearConnectedAt() *RuntimeBrokerUpdate {
+	_u.mutation.ClearConnectedAt()
+	return _u
+}
+
 // SetUpdated sets the "updated" field.
 func (_u *RuntimeBrokerUpdate) SetUpdated(v time.Time) *RuntimeBrokerUpdate {
 	_u.mutation.SetUpdated(v)
@@ -516,6 +576,24 @@ func (_u *RuntimeBrokerUpdate) sqlSave(ctx context.Context) (_node int, err erro
 	}
 	if value, ok := _u.mutation.AutoProvide(); ok {
 		_spec.SetField(runtimebroker.FieldAutoProvide, field.TypeBool, value)
+	}
+	if value, ok := _u.mutation.ConnectedHubID(); ok {
+		_spec.SetField(runtimebroker.FieldConnectedHubID, field.TypeString, value)
+	}
+	if _u.mutation.ConnectedHubIDCleared() {
+		_spec.ClearField(runtimebroker.FieldConnectedHubID, field.TypeString)
+	}
+	if value, ok := _u.mutation.ConnectedSessionID(); ok {
+		_spec.SetField(runtimebroker.FieldConnectedSessionID, field.TypeString, value)
+	}
+	if _u.mutation.ConnectedSessionIDCleared() {
+		_spec.ClearField(runtimebroker.FieldConnectedSessionID, field.TypeString)
+	}
+	if value, ok := _u.mutation.ConnectedAt(); ok {
+		_spec.SetField(runtimebroker.FieldConnectedAt, field.TypeTime, value)
+	}
+	if _u.mutation.ConnectedAtCleared() {
+		_spec.ClearField(runtimebroker.FieldConnectedAt, field.TypeTime)
 	}
 	if value, ok := _u.mutation.Updated(); ok {
 		_spec.SetField(runtimebroker.FieldUpdated, field.TypeTime, value)
@@ -865,6 +943,66 @@ func (_u *RuntimeBrokerUpdateOne) SetNillableAutoProvide(v *bool) *RuntimeBroker
 	return _u
 }
 
+// SetConnectedHubID sets the "connected_hub_id" field.
+func (_u *RuntimeBrokerUpdateOne) SetConnectedHubID(v string) *RuntimeBrokerUpdateOne {
+	_u.mutation.SetConnectedHubID(v)
+	return _u
+}
+
+// SetNillableConnectedHubID sets the "connected_hub_id" field if the given value is not nil.
+func (_u *RuntimeBrokerUpdateOne) SetNillableConnectedHubID(v *string) *RuntimeBrokerUpdateOne {
+	if v != nil {
+		_u.SetConnectedHubID(*v)
+	}
+	return _u
+}
+
+// ClearConnectedHubID clears the value of the "connected_hub_id" field.
+func (_u *RuntimeBrokerUpdateOne) ClearConnectedHubID() *RuntimeBrokerUpdateOne {
+	_u.mutation.ClearConnectedHubID()
+	return _u
+}
+
+// SetConnectedSessionID sets the "connected_session_id" field.
+func (_u *RuntimeBrokerUpdateOne) SetConnectedSessionID(v string) *RuntimeBrokerUpdateOne {
+	_u.mutation.SetConnectedSessionID(v)
+	return _u
+}
+
+// SetNillableConnectedSessionID sets the "connected_session_id" field if the given value is not nil.
+func (_u *RuntimeBrokerUpdateOne) SetNillableConnectedSessionID(v *string) *RuntimeBrokerUpdateOne {
+	if v != nil {
+		_u.SetConnectedSessionID(*v)
+	}
+	return _u
+}
+
+// ClearConnectedSessionID clears the value of the "connected_session_id" field.
+func (_u *RuntimeBrokerUpdateOne) ClearConnectedSessionID() *RuntimeBrokerUpdateOne {
+	_u.mutation.ClearConnectedSessionID()
+	return _u
+}
+
+// SetConnectedAt sets the "connected_at" field.
+func (_u *RuntimeBrokerUpdateOne) SetConnectedAt(v time.Time) *RuntimeBrokerUpdateOne {
+	_u.mutation.SetConnectedAt(v)
+	return _u
+}
+
+// SetNillableConnectedAt sets the "connected_at" field if the given value is not nil.
+func (_u *RuntimeBrokerUpdateOne) SetNillableConnectedAt(v *time.Time) *RuntimeBrokerUpdateOne {
+	if v != nil {
+		_u.SetConnectedAt(*v)
+	}
+	return _u
+}
+
+// ClearConnectedAt clears the value of the "connected_at" field.
+func (_u *RuntimeBrokerUpdateOne) ClearConnectedAt() *RuntimeBrokerUpdateOne {
+	_u.mutation.ClearConnectedAt()
+	return _u
+}
+
 // SetUpdated sets the "updated" field.
 func (_u *RuntimeBrokerUpdateOne) SetUpdated(v time.Time) *RuntimeBrokerUpdateOne {
 	_u.mutation.SetUpdated(v)
@@ -1058,6 +1196,24 @@ func (_u *RuntimeBrokerUpdateOne) sqlSave(ctx context.Context) (_node *RuntimeBr
 	}
 	if value, ok := _u.mutation.AutoProvide(); ok {
 		_spec.SetField(runtimebroker.FieldAutoProvide, field.TypeBool, value)
+	}
+	if value, ok := _u.mutation.ConnectedHubID(); ok {
+		_spec.SetField(runtimebroker.FieldConnectedHubID, field.TypeString, value)
+	}
+	if _u.mutation.ConnectedHubIDCleared() {
+		_spec.ClearField(runtimebroker.FieldConnectedHubID, field.TypeString)
+	}
+	if value, ok := _u.mutation.ConnectedSessionID(); ok {
+		_spec.SetField(runtimebroker.FieldConnectedSessionID, field.TypeString, value)
+	}
+	if _u.mutation.ConnectedSessionIDCleared() {
+		_spec.ClearField(runtimebroker.FieldConnectedSessionID, field.TypeString)
+	}
+	if value, ok := _u.mutation.ConnectedAt(); ok {
+		_spec.SetField(runtimebroker.FieldConnectedAt, field.TypeTime, value)
+	}
+	if _u.mutation.ConnectedAtCleared() {
+		_spec.ClearField(runtimebroker.FieldConnectedAt, field.TypeTime)
 	}
 	if value, ok := _u.mutation.Updated(); ok {
 		_spec.SetField(runtimebroker.FieldUpdated, field.TypeTime, value)

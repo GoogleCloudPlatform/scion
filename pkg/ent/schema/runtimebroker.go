@@ -86,6 +86,15 @@ func (RuntimeBroker) Fields() []ent.Field {
 			Optional(),
 		field.Bool("auto_provide").
 			Default(false),
+		field.String("connected_hub_id").
+			Optional().
+			Nillable(),
+		field.String("connected_session_id").
+			Optional().
+			Nillable(),
+		field.Time("connected_at").
+			Optional().
+			Nillable(),
 		field.Time("created").
 			Default(time.Now).
 			Immutable(),
