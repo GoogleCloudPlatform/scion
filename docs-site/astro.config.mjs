@@ -74,11 +74,14 @@ export default defineConfig({
 				                { label: 'Secret Management', slug: 'hub-user/secrets' },
 				                { label: 'Runtime Broker', slug: 'hub-user/runtime-broker' },
 				                { label: 'Messaging & Notifications', slug: 'hub-user/messaging' },
+				                { label: 'External Channels', slug: 'hub-user/external-channels' },
+				                { label: 'Multi-Broker Setup', slug: 'hub-user/multi-broker' },
 				        ],
 				},
 				{
 				        label: 'Hub Administration',					items: [
 						{ label: 'Hub Setup', slug: 'hub-admin/hub-server' },
+						{ label: 'Hub Setup (GCE)', slug: 'hub-admin/hub-setup-gce' },
 						{ label: 'Kubernetes', slug: 'hub-admin/kubernetes' },
 						{ label: 'Security', slug: 'hub-admin/auth' },
 						{ label: 'Permissions', slug: 'hub-admin/permissions' },
