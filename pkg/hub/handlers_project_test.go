@@ -44,32 +44,77 @@ func TestHubManagedProjectPath(t *testing.T) {
 	homeDir, err := os.UserHomeDir()
 	require.NoError(t, err)
 
-	expected := filepath.Join(homeDir, ".scion", "projects", "my-test-project")
+	// Default (no content in either dir) should resolve to groves/ —
+	// that's where the actual git checkout lives (mounted as /workspace in agents).
+	expected := filepath.Join(homeDir, ".scion", "groves", "my-test-project")
 	assert.Equal(t, expected, path)
 }
 
-func TestHubManagedProjectPath_EmptyProjectsFallsBackToGroves(t *testing.T) {
+func TestHubManagedProjectPath_PrefersGrovesOverProjects(t *testing.T) {
 	// Use a temp directory as HOME to avoid polluting real ~/.scion
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
 
-	slug := "empty-projects-grove"
+	slug := "both-dirs-exist"
 	globalDir := filepath.Join(tmpHome, ".scion")
 
-	// Create projects/{slug} with only infrastructure dirs (no real content)
+	// Create both directories with workspace content
 	projectsDir := filepath.Join(globalDir, "projects", slug)
-	require.NoError(t, os.MkdirAll(filepath.Join(projectsDir, "shared-dirs"), 0755))
-	require.NoError(t, os.MkdirAll(filepath.Join(projectsDir, ".scion"), 0755))
+	require.NoError(t, os.MkdirAll(projectsDir, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(projectsDir, "metadata.json"), []byte("{}"), 0644))
 
-	// Create groves/{slug} with actual workspace content
 	grovesDir := filepath.Join(globalDir, "groves", slug)
 	require.NoError(t, os.MkdirAll(grovesDir, 0755))
 	require.NoError(t, os.WriteFile(filepath.Join(grovesDir, "README.md"), []byte("# workspace"), 0644))
 
-	// hubManagedProjectPath should fall back to groves/ since projects/ has no real content
+	// hubManagedProjectPath should prefer groves/ — that's the actual git checkout
 	path, err := hubManagedProjectPath(slug)
 	require.NoError(t, err)
-	assert.Equal(t, grovesDir, path, "should fall back to groves path when projects dir only contains infrastructure dirs")
+	assert.Equal(t, grovesDir, path, "should prefer groves path over projects path")
+}
+
+func TestHubManagedProjectPath_FallsBackToProjectsWhenGrovesEmpty(t *testing.T) {
+	// Use a temp directory as HOME to avoid polluting real ~/.scion
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	slug := "groves-empty-projects-has-content"
+	globalDir := filepath.Join(tmpHome, ".scion")
+
+	// Create groves/{slug} with only infrastructure dirs (no real content)
+	grovesDir := filepath.Join(globalDir, "groves", slug)
+	require.NoError(t, os.MkdirAll(filepath.Join(grovesDir, ".scion"), 0755))
+
+	// Create projects/{slug} with actual workspace content
+	projectsDir := filepath.Join(globalDir, "projects", slug)
+	require.NoError(t, os.MkdirAll(projectsDir, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(projectsDir, "README.md"), []byte("# workspace"), 0644))
+
+	// hubManagedProjectPath should fall back to projects/ since groves/ has no real content
+	path, err := hubManagedProjectPath(slug)
+	require.NoError(t, err)
+	assert.Equal(t, projectsDir, path, "should fall back to projects path when groves dir only contains infrastructure dirs")
+}
+
+func TestHubManagedProjectPath_DefaultsToGrovesWhenNeitherHasContent(t *testing.T) {
+	// Use a temp directory as HOME to avoid polluting real ~/.scion
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	slug := "neither-has-content"
+	globalDir := filepath.Join(tmpHome, ".scion")
+
+	// Create both directories with only infrastructure dirs
+	grovesDir := filepath.Join(globalDir, "groves", slug)
+	require.NoError(t, os.MkdirAll(filepath.Join(grovesDir, ".scion"), 0755))
+
+	projectsDir := filepath.Join(globalDir, "projects", slug)
+	require.NoError(t, os.MkdirAll(filepath.Join(projectsDir, "shared-dirs"), 0755))
+
+	// When neither has content, should default to groves/
+	path, err := hubManagedProjectPath(slug)
+	require.NoError(t, err)
+	assert.Equal(t, grovesDir, path, "should default to groves path when neither dir has workspace content")
 }
 
 func TestCreateProject_HubManaged_NoGitRemote(t *testing.T) {

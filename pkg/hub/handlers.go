@@ -3763,21 +3763,23 @@ func (s *Server) createProjectMembersGroupAndPolicy(ctx context.Context, project
 }
 
 // hubManagedProjectPath returns the filesystem path for a hub-managed project workspace.
+// It prefers groves/<slug> (the actual git checkout mounted as /workspace in agents)
+// over projects/<slug> (which only contains project metadata).
 func hubManagedProjectPath(slug string) (string, error) {
 	globalDir, err := config.GetGlobalDir()
 	if err != nil {
 		return "", fmt.Errorf("failed to get global dir: %w", err)
 	}
-	newPath := filepath.Join(globalDir, "projects", slug)
-	if hasWorkspaceContent(newPath) {
-		return newPath, nil
+	grovesPath := filepath.Join(globalDir, "groves", slug)
+	if hasWorkspaceContent(grovesPath) {
+		return grovesPath, nil
 	}
-	oldPath := filepath.Join(globalDir, "groves", slug)
-	if hasWorkspaceContent(oldPath) {
-		return oldPath, nil
+	projectsPath := filepath.Join(globalDir, "projects", slug)
+	if hasWorkspaceContent(projectsPath) {
+		return projectsPath, nil
 	}
-	// Neither has content — return new path (will be created on demand)
-	return newPath, nil
+	// Neither has content — return groves path (will be created on demand)
+	return grovesPath, nil
 }
 
 // hasWorkspaceContent returns true if dir exists and contains meaningful
