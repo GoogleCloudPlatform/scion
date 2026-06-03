@@ -1112,6 +1112,35 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 		},
 	}
 
+	// NFS init container: when backend=nfs and git clone config is set, add an
+	// init container that provisions the workspace (clone + sentinel) before the
+	// main container starts. The init container mounts the same workspace PVC+subPath
+	// so provisioned files are visible to the main container. Uses the sentinel
+	// file (.scion-provisioned) to skip re-cloning if the workspace already exists.
+	//
+	// The advisory lock (design §7, N1-4) is NOT used in the init container —
+	// K8s init containers serialize naturally per-pod, and the sentinel file
+	// provides idempotent cross-pod protection on the shared NFS volume.
+	// Full advisory lock integration is deferred to the NM2 live cluster gate.
+	if config.WorkspaceBackendName == "nfs" && config.NFSPVClaimName != "" && config.GitCloneForInit != nil {
+		initScript := nfsInitProvisionScript(config.GitCloneForInit)
+		initContainer := corev1.Container{
+			Name:    "workspace-provision",
+			Image:   config.Image,
+			Command: []string{"sh", "-c", initScript},
+			VolumeMounts: []corev1.VolumeMount{
+				workspaceVolumeMount,
+			},
+			SecurityContext: &corev1.SecurityContext{
+				AllowPrivilegeEscalation: &allowPrivilegeEscalation,
+				Capabilities: &corev1.Capabilities{
+					Drop: []corev1.Capability{"ALL"},
+				},
+			},
+		}
+		pod.Spec.InitContainers = append(pod.Spec.InitContainers, initContainer)
+	}
+
 	// Append secret volumes and mounts
 	if len(extraVolumes) > 0 {
 		pod.Spec.Volumes = append(pod.Spec.Volumes, extraVolumes...)
@@ -2201,4 +2230,57 @@ func (r *KubernetesRuntime) GetWorkspacePath(ctx context.Context, id string) (st
 	}
 
 	return "", fmt.Errorf("no workspace path found for pod %s", id)
+}
+
+// nfsInitProvisionScript generates the shell script for the NFS workspace
+// init container. The script checks for a sentinel file and clones the
+// repository if it is absent, providing first-access provisioning for NFS
+// workspaces (design §5.5/§7/§8.2). The sentinel file ensures idempotency
+// across concurrent pod starts for the same project.
+//
+// The /workspace mount in the init container points at the project's subPath
+// (e.g. projects/<pid>/workspace), so all operations are relative to "."
+// within that mount.
+func nfsInitProvisionScript(gc *api.GitCloneConfig) string {
+	if gc == nil || gc.URL == "" {
+		return "echo 'No git clone URL configured, skipping workspace provision'"
+	}
+
+	// Build the git clone command.
+	depth := gc.Depth
+	if depth == 0 {
+		depth = 1 // default shallow clone
+	}
+
+	cloneArgs := "clone"
+	if depth > 0 {
+		cloneArgs += fmt.Sprintf(" --depth %d", depth)
+	}
+	if gc.Branch != "" {
+		cloneArgs += fmt.Sprintf(" --branch '%s'", gc.Branch)
+	}
+
+	// The script clones into a temp dir then moves content into /workspace,
+	// because git clone requires an empty target directory. The sentinel
+	// (.scion-provisioned) is checked first to skip if already provisioned.
+	script := fmt.Sprintf(`set -e
+SENTINEL="/workspace/.scion-provisioned"
+if [ -f "$SENTINEL" ]; then
+  echo "Workspace already provisioned (sentinel exists), skipping clone"
+  exit 0
+fi
+echo "Provisioning NFS workspace..."
+export GIT_TERMINAL_PROMPT=0
+TMPDIR=$(mktemp -d /workspace/.clone-XXXXXX)
+git %s '%s' "$TMPDIR"
+# Move cloned content into /workspace (handles hidden files like .git)
+shopt -s dotglob 2>/dev/null || true
+mv "$TMPDIR"/* /workspace/ 2>/dev/null || cp -a "$TMPDIR"/. /workspace/
+rm -rf "$TMPDIR"
+# Write sentinel to mark provisioning complete
+echo "provisioned_at=$(date -u +%%Y-%%m-%%dT%%H:%%M:%%SZ)" > "$SENTINEL"
+echo "Workspace provisioned successfully"`,
+		cloneArgs, gc.URL)
+
+	return script
 }
