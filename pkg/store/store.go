@@ -302,6 +302,21 @@ type RuntimeBrokerStore interface {
 
 	// UpdateRuntimeBrokerHeartbeat updates the last heartbeat and status.
 	UpdateRuntimeBrokerHeartbeat(ctx context.Context, id string, status string) error
+
+	// ClaimRuntimeBrokerConnection records this hub instance as the owner of the
+	// broker's live control-channel socket. The newest connection wins
+	// (unconditional claim): it sets connected_hub_id/connected_session_id/
+	// connected_at and, in the same write, bumps status to online and refreshes
+	// last_heartbeat.
+	ClaimRuntimeBrokerConnection(ctx context.Context, brokerID, hubInstanceID, sessionID string) error
+
+	// ReleaseRuntimeBrokerConnection clears the broker's affinity ONLY IF it still
+	// names (hubInstanceID, sessionID) — a compare-and-clear. It returns
+	// cleared=true when this caller owned the affinity and it was cleared; it
+	// returns cleared=false (a no-op) when affinity has already moved to another
+	// hub/session, in which case the caller MUST NOT stamp the broker offline.
+	// It does not change status (the caller decides offline based on cleared).
+	ReleaseRuntimeBrokerConnection(ctx context.Context, brokerID, hubInstanceID, sessionID string) (cleared bool, err error)
 }
 
 // RuntimeBrokerFilter defines criteria for filtering runtime brokers.
