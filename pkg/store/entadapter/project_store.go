@@ -539,6 +539,9 @@ func entBrokerToStore(b *ent.RuntimeBroker) *store.RuntimeBroker {
 	if b.LastHeartbeat != nil {
 		sb.LastHeartbeat = *b.LastHeartbeat
 	}
+	sb.ConnectedHubID = b.ConnectedHubID
+	sb.ConnectedSessionID = b.ConnectedSessionID
+	sb.ConnectedAt = b.ConnectedAt
 	unmarshalRawJSON(b.Capabilities, &sb.Capabilities)
 	// Profiles are persisted in the "runtimes" column (legacy naming).
 	unmarshalRawJSON(b.Runtimes, &sb.Profiles)
@@ -579,6 +582,15 @@ func (s *ProjectStore) CreateRuntimeBroker(ctx context.Context, b *store.Runtime
 	}
 	if b.CreatedBy != "" {
 		create.SetCreatedBy(b.CreatedBy)
+	}
+	if b.ConnectedHubID != nil {
+		create.SetConnectedHubID(*b.ConnectedHubID)
+	}
+	if b.ConnectedSessionID != nil {
+		create.SetConnectedSessionID(*b.ConnectedSessionID)
+	}
+	if b.ConnectedAt != nil {
+		create.SetConnectedAt(*b.ConnectedAt)
 	}
 
 	created, err := create.Save(ctx)
@@ -637,7 +649,7 @@ func (s *ProjectStore) UpdateRuntimeBroker(ctx context.Context, b *store.Runtime
 			return mapError(err)
 		}
 
-		affected, err := s.client.RuntimeBroker.Update().
+		update := s.client.RuntimeBroker.Update().
 			Where(runtimebroker.IDEQ(uid), runtimebroker.LockVersionEQ(cur.LockVersion)).
 			SetName(b.Name).
 			SetSlug(b.Slug).
@@ -652,8 +664,23 @@ func (s *ProjectStore) UpdateRuntimeBroker(ctx context.Context, b *store.Runtime
 			SetEndpoint(b.Endpoint).
 			SetAutoProvide(b.AutoProvide).
 			SetUpdated(now).
-			AddLockVersion(1).
-			Save(ctx)
+			AddLockVersion(1)
+		if b.ConnectedHubID != nil {
+			update.SetConnectedHubID(*b.ConnectedHubID)
+		} else {
+			update.ClearConnectedHubID()
+		}
+		if b.ConnectedSessionID != nil {
+			update.SetConnectedSessionID(*b.ConnectedSessionID)
+		} else {
+			update.ClearConnectedSessionID()
+		}
+		if b.ConnectedAt != nil {
+			update.SetConnectedAt(*b.ConnectedAt)
+		} else {
+			update.ClearConnectedAt()
+		}
+		affected, err := update.Save(ctx)
 		if err != nil {
 			return mapError(err)
 		}
