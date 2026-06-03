@@ -1,9 +1,12 @@
 package discord
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/bwmarrin/discordgo"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 )
@@ -12,6 +15,18 @@ const (
 	// maxDiscordMessageLength is the maximum character length for a Discord message.
 	maxDiscordMessageLength = 2000
 
+	// maxEmbedDescriptionLength is the maximum character length for an embed description.
+	maxEmbedDescriptionLength = 4096
+
+	// maxEmbedFieldValueLength is the maximum character length for an embed field value.
+	maxEmbedFieldValueLength = 1024
+
+	// maxEmbedTitleLength is the maximum character length for an embed title.
+	maxEmbedTitleLength = 256
+
+	// maxButtonsPerRow is the maximum number of buttons allowed in a single Discord action row.
+	maxButtonsPerRow = 5
+
 	// truncationSuffix is appended when a message exceeds the Discord limit.
 	truncationSuffix = "\n*[truncated]*"
 
@@ -19,6 +34,17 @@ const (
 	// text (agent name, mentions, prefix tags). The body is truncated to
 	// leave room for the header so the total stays under the limit.
 	headerBudget = 100
+)
+
+// Embed sidebar colors keyed by activity/status string.
+const (
+	colorCompleted  = 0x2ECC71 // Green
+	colorInputWait  = 0xF1C40F // Yellow
+	colorError      = 0xE74C3C // Red
+	colorStalled    = 0xE67E22 // Orange
+	colorDeleted    = 0x95A5A6 // Gray
+	colorRunning    = 0x3498DB // Blue
+	colorDefault    = 0x1A1A2E // Dark
 )
 
 // FormatMessage converts a StructuredMessage to Discord-compatible text.
@@ -162,4 +188,216 @@ func truncateAtRuneBoundaryLen(text string, maxLen int) int {
 // FormatDiscordMention formats a Discord user mention from a user ID.
 func FormatDiscordMention(discordUserID string) string {
 	return fmt.Sprintf("<@%s>", discordUserID)
+}
+
+// activityColor returns the embed sidebar color for the given activity/status.
+func activityColor(activity string) int {
+	switch activity {
+	case "COMPLETED":
+		return colorCompleted
+	case "WAITING_FOR_INPUT":
+		return colorInputWait
+	case "ERROR":
+		return colorError
+	case "STALLED", "LIMITS_EXCEEDED":
+		return colorStalled
+	case "DELETED":
+		return colorDeleted
+	case "RUNNING":
+		return colorRunning
+	default:
+		return colorDefault
+	}
+}
+
+// RenderStateChangeEmbed builds a colored Discord embed for a TypeStateChange message.
+// The sidebar color reflects the agent's current activity/status.
+func RenderStateChangeEmbed(msg *messages.StructuredMessage, agentSlug string) *discordgo.MessageEmbed {
+	if msg == nil {
+		return nil
+	}
+
+	activity := ""
+	projectID := ""
+	summary := ""
+	if msg.Metadata != nil {
+		activity = msg.Metadata["activity"]
+		projectID = msg.Metadata["project_id"]
+		summary = msg.Metadata["summary"]
+	}
+
+	title := agentSlug
+	if activity != "" {
+		title = fmt.Sprintf("%s — %s", agentSlug, activity)
+	}
+	title = truncateForDiscord(title, maxEmbedTitleLength)
+
+	description := msg.Msg
+	if len(description) > maxEmbedDescriptionLength {
+		description = truncateForDiscord(description, maxEmbedDescriptionLength)
+	}
+
+	embed := &discordgo.MessageEmbed{
+		Title:       title,
+		Description: description,
+		Color:       activityColor(activity),
+		Timestamp:   msg.Timestamp,
+	}
+
+	if projectID != "" {
+		embed.Footer = &discordgo.MessageEmbedFooter{
+			Text: fmt.Sprintf("Project: %s", projectID),
+		}
+	}
+
+	if summary != "" {
+		if len(summary) > maxEmbedFieldValueLength {
+			summary = truncateForDiscord(summary, maxEmbedFieldValueLength)
+		}
+		embed.Fields = append(embed.Fields, &discordgo.MessageEmbedField{
+			Name:  "Summary",
+			Value: summary,
+		})
+	}
+
+	return embed
+}
+
+// RenderInputNeeded builds an embed and interactive components for a TypeInputNeeded message.
+// If msg.Metadata["choices"] contains a JSON array of strings, each choice is rendered as a
+// button. Otherwise, a generic "Reply" and "Dismiss" button pair is returned.
+func RenderInputNeeded(msg *messages.StructuredMessage, agentSlug, requestID string) (*discordgo.MessageEmbed, []discordgo.MessageComponent) {
+	if msg == nil {
+		return nil, nil
+	}
+
+	description := msg.Msg
+	if len(description) > maxEmbedDescriptionLength {
+		description = truncateForDiscord(description, maxEmbedDescriptionLength)
+	}
+
+	embed := &discordgo.MessageEmbed{
+		Title:       fmt.Sprintf("Input Needed — %s", agentSlug),
+		Description: description,
+		Color:       colorInputWait,
+	}
+
+	var components []discordgo.MessageComponent
+
+	choicesJSON := ""
+	if msg.Metadata != nil {
+		choicesJSON = msg.Metadata["choices"]
+	}
+
+	if choicesJSON != "" {
+		var choices []string
+		if err := json.Unmarshal([]byte(choicesJSON), &choices); err == nil && len(choices) > 0 {
+			var buttons []discordgo.MessageComponent
+			for idx, choice := range choices {
+				buttons = append(buttons, discordgo.Button{
+					Label:    choice,
+					Style:    discordgo.PrimaryButton,
+					CustomID: fmt.Sprintf("ask:opt:%s:%d", requestID, idx),
+				})
+				if len(buttons) == maxButtonsPerRow || idx == len(choices)-1 {
+					components = append(components, discordgo.ActionsRow{
+						Components: buttons,
+					})
+					buttons = nil
+				}
+			}
+			return embed, components
+		}
+	}
+
+	// Default: Reply + Dismiss buttons.
+	components = append(components, discordgo.ActionsRow{
+		Components: []discordgo.MessageComponent{
+			discordgo.Button{
+				Label:    "Reply",
+				Style:    discordgo.PrimaryButton,
+				CustomID: fmt.Sprintf("ask:reply:%s", requestID),
+			},
+			discordgo.Button{
+				Label:    "Dismiss",
+				Style:    discordgo.SecondaryButton,
+				CustomID: fmt.Sprintf("ask:dismiss:%s", requestID),
+			},
+		},
+	})
+	return embed, components
+}
+
+// FormatWithEmbed decides whether to return plain text, an embed, or both,
+// based on the message length.
+//
+//   - ≤2000 chars: plain text content, no embeds
+//   - ≤4096 chars: empty content, single embed with description
+//   - >4096 chars: first 4096 in an embed, remainder returned as plain text
+//     (caller is responsible for splitting the remainder into ≤2000-char chunks
+//     via SplitLongMessage)
+func FormatWithEmbed(msg *messages.StructuredMessage, agentSlug string) (string, []*discordgo.MessageEmbed) {
+	if msg == nil {
+		return "", nil
+	}
+
+	body := msg.Msg
+	if len(body) <= maxDiscordMessageLength {
+		return body, nil
+	}
+
+	if len(body) <= maxEmbedDescriptionLength {
+		embed := &discordgo.MessageEmbed{
+			Description: body,
+		}
+		return "", []*discordgo.MessageEmbed{embed}
+	}
+
+	// Body exceeds embed description limit: put the first 4096 in an embed,
+	// return the remainder as content text (possibly requiring further splitting).
+	cutoff := maxEmbedDescriptionLength - len(truncationSuffix)
+	cutoff = truncateAtRuneBoundaryLen(body, cutoff)
+	embedText := body[:cutoff] + truncationSuffix
+
+	remainder := body[cutoff:]
+
+	embed := &discordgo.MessageEmbed{
+		Description: embedText,
+	}
+	return remainder, []*discordgo.MessageEmbed{embed}
+}
+
+// SplitLongMessage splits text into chunks of at most maxLen characters.
+// It prefers to split at newline boundaries. If no newline is found within
+// the window, it falls back to splitting at maxLen on a rune boundary.
+func SplitLongMessage(text string, maxLen int) []string {
+	if maxLen <= 0 {
+		maxLen = maxDiscordMessageLength
+	}
+
+	var chunks []string
+	for len(text) > 0 {
+		if len(text) <= maxLen {
+			chunks = append(chunks, text)
+			break
+		}
+
+		// Look for the last newline within the allowed window.
+		cutoff := maxLen
+		if cutoff > len(text) {
+			cutoff = len(text)
+		}
+		splitAt := strings.LastIndex(text[:cutoff], "\n")
+		if splitAt <= 0 {
+			// No suitable newline — split at rune boundary.
+			splitAt = truncateAtRuneBoundaryLen(text, maxLen)
+		} else {
+			// Include the newline in the current chunk.
+			splitAt++
+		}
+
+		chunks = append(chunks, text[:splitAt])
+		text = text[splitAt:]
+	}
+	return chunks
 }
