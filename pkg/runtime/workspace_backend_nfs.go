@@ -105,21 +105,36 @@ func (b *nfsBackend) Provision(in ProvisionInput) error {
 	return nil
 }
 
-// Realize is a stub in N1-1. Full NFS mount wiring (Docker bind-mount from
-// the NFS host path, K8s PVC+subPath, Cloud Run NFS volume) lands in N1-3.
+// Realize emits a Docker bind-mount descriptor from the NFS host path to the
+// container workspace. The host path points at the project subtree under the
+// NFS mount (<MountRoot>/<shareID>/<SubPathRoot>/<projectID>/workspace), NOT
+// the export root — this is the critical isolation guarantee (design §9.4).
+//
+// For K8s the SubPath and PVClaimName fields are populated for PVC+subPath
+// wiring; for Docker, HostPath is the bind-mount source.
 func (b *nfsBackend) Realize(in RealizeInput) (MountDescriptor, error) {
 	target := in.ContainerWorkspace
 	if target == "" {
 		target = "/workspace"
 	}
 
-	// Return a descriptor with enough information for N1-3 to wire up.
-	// For now the HostPath is populated so callers can see what would be
-	// mounted, but the actual mount wiring is deferred.
-	return MountDescriptor{
+	// Isolation guard: never bind the host base (export root mount) directly.
+	// The resolved HostPath must be a subdirectory of HostBase, not equal to it.
+	if err := ValidateNotExportRoot(in.Resolved.HostPath, in.Resolved.HostBase); err != nil {
+		return MountDescriptor{}, err
+	}
+
+	desc := MountDescriptor{
 		Type:     "nfs",
 		HostPath: in.Resolved.HostPath,
 		Target:   target,
 		SubPath:  in.Resolved.ServerRelativePath,
-	}, nil
+	}
+
+	// Populate K8s PVC info from the first share if available.
+	if b.cfg != nil && len(b.cfg.Shares) > 0 && b.cfg.Shares[0].PVName != "" {
+		desc.PVClaimName = b.cfg.Shares[0].PVName
+	}
+
+	return desc, nil
 }
