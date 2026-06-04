@@ -1,0 +1,5 @@
+.git
+downloads/
+scratch/
+*.md
+.claude/

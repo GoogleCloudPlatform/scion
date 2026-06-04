@@ -50,10 +50,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 RUN useradd -m -d /home/scion -s /bin/bash -u 1000 scion \
-    && mkdir -p /home/scion/.scion /home/scion/.kube \
-    && chown -R scion:scion /home/scion
+    && mkdir -p /home/scion/.kube /run/secrets \
+    && chown -R scion:scion /home/scion /run/secrets
 
 COPY --from=go-builder /scion /usr/local/bin/scion
+COPY scripts/cloudrun/entrypoint.sh /usr/local/bin/entrypoint.sh
 
 ENV HOME=/home/scion
 ENV KUBECONFIG=/home/scion/.kube/config
@@ -63,7 +64,4 @@ WORKDIR /home/scion
 
 EXPOSE 8080
 
-ENTRYPOINT ["scion", "server", "start", \
-            "--foreground", "--production", \
-            "--enable-hub", "--enable-web", "--web-port", "8080", \
-            "--auto-provide", "--global"]
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

@@ -344,6 +344,13 @@ func (c *client) Health(ctx context.Context) (*HealthResponse, error) {
 	if err != nil {
 		return nil, err
 	}
+	if resp.StatusCode == 404 {
+		resp.Body.Close()
+		resp, err = c.get(ctx, "/health", nil)
+		if err != nil {
+			return nil, err
+		}
+	}
 	return apiclient.DecodeResponse[HealthResponse](resp)
 }
 

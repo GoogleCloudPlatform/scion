@@ -286,7 +286,7 @@ func extractBearerToken(r *http.Request) string {
 
 // isHealthEndpoint returns true if the path is a health check endpoint.
 func isHealthEndpoint(path string) bool {
-	return path == "/healthz" || path == "/readyz"
+	return path == "/healthz" || path == "/health" || path == "/readyz"
 }
 
 // isUnauthenticatedEndpoint returns true if the path does not require authentication.

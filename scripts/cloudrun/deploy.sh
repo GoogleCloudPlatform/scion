@@ -154,7 +154,7 @@ gcloud run deploy "$SERVICE_NAME" \
   --memory 1Gi \
   --cpu 1 \
   --timeout 3600 \
-  --set-secrets "/home/scion/.kube/config=${SERVICE_NAME}-kubeconfig:latest,/home/scion/.scion/settings.yaml=${SERVICE_NAME}-settings:latest" \
+  --set-secrets "/home/scion/.kube/config=${SERVICE_NAME}-kubeconfig:latest,/run/secrets/settings.yaml=${SERVICE_NAME}-settings:latest" \
   --set-env-vars "HOME=/home/scion,KUBECONFIG=/home/scion/.kube/config"
 
 # ── 9. Print service URL ────────────────────────────────────────────────────
