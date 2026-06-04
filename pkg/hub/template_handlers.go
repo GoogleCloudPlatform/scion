@@ -828,6 +828,9 @@ func (s *Server) handleTemplateClone(w http.ResponseWriter, r *http.Request, id 
 	}
 
 	if err := s.store.CreateTemplate(ctx, clone); err != nil {
+		if stor != nil {
+			_ = stor.DeletePrefix(ctx, storagePath)
+		}
 		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
 			writeError(w, http.StatusConflict, "conflict", "A resource with this slug already exists in the target scope. Choose a different name.", nil)
 			return

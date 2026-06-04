@@ -451,47 +451,6 @@ export class ScionResourceList extends LitElement {
     this.actionInProgress = false;
   }
 
-  private async confirmCloneFromGlobal(): Promise<void> {
-    if (!this.cloneTarget) return;
-    this.actionInProgress = true;
-    this.actionError = '';
-    try {
-      const body: Record<string, string> = {
-        name: this.cloneName,
-        scope: 'project',
-        scopeId: this.scopeId,
-      };
-
-      const response = await apiFetch(
-        `/api/v1/${this.apiResource}/${this.cloneTarget.id}/clone`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(body),
-        }
-      );
-      if (response.status === 409) {
-        this.actionError = 'A resource with this slug already exists. Choose a different name.';
-        this.actionInProgress = false;
-        return;
-      }
-      if (!response.ok) {
-        throw new Error(
-          await extractApiError(response, `Failed to clone: HTTP ${response.status}`)
-        );
-      }
-      const created = (await response.json()) as { id?: string };
-      const sourceId = this.cloneTarget.id;
-      this.closeCloneDialog();
-      await this.load();
-      this.emitChanged('cloned', created.id ?? '', sourceId);
-    } catch (err) {
-      this.actionError = err instanceof Error ? err.message : 'Clone failed';
-    } finally {
-      this.actionInProgress = false;
-    }
-  }
-
   // ── Render ─────────────────────────────────────────────────────────
 
   override render() {
@@ -693,7 +652,7 @@ export class ScionResourceList extends LitElement {
             size="small"
             ?loading=${this.actionInProgress}
             ?disabled=${this.actionInProgress || !this.cloneName.trim()}
-            @click=${() => (isFromGlobal ? this.confirmCloneFromGlobal() : this.confirmClone())}
+            @click=${() => this.confirmClone()}
           >
             Clone
           </sl-button>

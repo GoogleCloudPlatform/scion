@@ -682,6 +682,9 @@ func (s *Server) handleHarnessConfigClone(w http.ResponseWriter, r *http.Request
 	}
 
 	if err := s.store.CreateHarnessConfig(ctx, clone); err != nil {
+		if stor != nil {
+			_ = stor.DeletePrefix(ctx, storagePath)
+		}
 		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
 			writeError(w, http.StatusConflict, "conflict", "A resource with this slug already exists in the target scope. Choose a different name.", nil)
 			return
