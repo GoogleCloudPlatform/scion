@@ -1,4 +1,5 @@
 schema_version: "1"
+image_registry: "us-central1-docker.pkg.dev/deploy-demo-test/public-docker"
 active_profile: default
 server:
   database:
