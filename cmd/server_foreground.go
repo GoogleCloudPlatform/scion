@@ -673,12 +673,23 @@ func initStore(ctx context.Context, cfg *config.GlobalConfig) (store.Store, erro
 		// pkg/store/sqlite schema) to the consolidated Ent schema before opening
 		// it. Detection is conservative and the whole step is a no-op for an
 		// already-Ent file, so it is safe to run on every boot.
-		if err := maybeMigrateLegacySQLite(cfg.Database.URL); err != nil {
+		if err := maybeMigrateLegacySQLite(ctx, cfg.Database.URL); err != nil {
 			return nil, err
 		}
 
 		// All Hub state lives in a single Ent-backed SQLite database.
-		entClient, err = entc.OpenSQLite("file:"+cfg.Database.URL+"?cache=shared", pool)
+		// Guard against a double "file:" prefix when the operator already
+		// supplies "file:/path/hub.db" in their config.
+		sqliteDSN := cfg.Database.URL
+		if !strings.HasPrefix(sqliteDSN, "file:") {
+			sqliteDSN = "file:" + sqliteDSN
+		}
+		if !strings.Contains(sqliteDSN, "?") {
+			sqliteDSN += "?cache=shared"
+		} else if !strings.Contains(sqliteDSN, "cache=") {
+			sqliteDSN += "&cache=shared"
+		}
+		entClient, err = entc.OpenSQLite(sqliteDSN, pool)
 		if err != nil {
 			return nil, fmt.Errorf("failed to open database: %w", err)
 		}
@@ -713,8 +724,9 @@ func initStore(ctx context.Context, cfg *config.GlobalConfig) (store.Store, erro
 // maybeMigrateLegacySQLite detects a legacy raw-SQL hub.db at path and, unless
 // the operator opted out with --no-auto-migrate, upgrades it in-process to the
 // consolidated Ent schema (after taking an automatic backup). It is a no-op when
-// the file is already the Ent schema, empty, or absent.
-func maybeMigrateLegacySQLite(path string) error {
+// the file is already the Ent schema, empty, or absent. The provided context
+// allows the migration to be cancelled (e.g. Ctrl+C during first boot).
+func maybeMigrateLegacySQLite(ctx context.Context, path string) error {
 	legacy, err := entc.IsLegacyRawSQLSchema(path)
 	if err != nil {
 		return fmt.Errorf("detecting database schema: %w", err)
@@ -732,7 +744,7 @@ func maybeMigrateLegacySQLite(path string) error {
 	}
 
 	log.Printf("Detected legacy raw-SQL hub database at %s. Backing up and migrating to the Ent schema...", path)
-	report, err := entc.MigrateAlphaSQLite(context.Background(), path, entc.AlphaOptions{
+	report, err := entc.MigrateAlphaSQLite(ctx, path, entc.AlphaOptions{
 		Logf: func(format string, args ...any) { log.Printf(format, args...) },
 	})
 	if err != nil {
