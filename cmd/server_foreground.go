@@ -168,7 +168,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	// 8. Initialize store
 	var s store.Store
 	if enableHub {
-		s, err = initStore(cfg)
+		s, err = initStore(ctx, cfg)
 		if err != nil {
 			return err
 		}
@@ -260,7 +260,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	// 12. Start Web
 	var webSrv *hub.WebServer
 	if enableWeb {
-		webSrv = initWebServer(cfg, hubSrv, devAuthToken, adminEmailList, adminMode, maintenanceMessage, requestLogger)
+		webSrv = initWebServer(ctx, cfg, hubSrv, devAuthToken, adminEmailList, adminMode, maintenanceMessage, requestLogger)
 
 		// In combined mode, start Hub background services now that the
 		// ChannelEventPublisher has been wired by initWebServer.
@@ -642,8 +642,10 @@ func checkServerPorts(cfg *config.GlobalConfig) error {
 	return nil
 }
 
-// initStore initializes the database store.
-func initStore(cfg *config.GlobalConfig) (store.Store, error) {
+// initStore initializes the database store. The provided context is used for
+// schema migration and the initial health-check ping so that a Ctrl+C during
+// startup cancels those operations gracefully.
+func initStore(ctx context.Context, cfg *config.GlobalConfig) (store.Store, error) {
 	connMaxLifetime, err := cfg.Database.ConnMaxLifetimeDuration()
 	if err != nil {
 		return nil, fmt.Errorf("invalid database pool config: %w", err)
@@ -695,12 +697,12 @@ func initStore(cfg *config.GlobalConfig) (store.Store, error) {
 
 	// Migrate runs Ent's schema migration and seeds built-in maintenance
 	// operations (parity with the former raw-SQL store).
-	if err := s.Migrate(context.Background()); err != nil {
+	if err := s.Migrate(ctx); err != nil {
 		s.Close()
 		return nil, fmt.Errorf("failed to run migrations: %w", err)
 	}
 
-	if err := s.Ping(context.Background()); err != nil {
+	if err := s.Ping(ctx); err != nil {
 		s.Close()
 		return nil, fmt.Errorf("database ping failed: %w", err)
 	}
@@ -1069,8 +1071,10 @@ func newEventPublisher(ctx context.Context, cfg *config.GlobalConfig) hub.EventP
 	return hub.NewChannelEventPublisher()
 }
 
-// initWebServer creates and configures the Web server.
-func initWebServer(cfg *config.GlobalConfig, hubSrv *hub.Server, devAuthToken string, adminEmailList []string, adminMode bool, maintenanceMessage string, requestLogger *slog.Logger) *hub.WebServer {
+// initWebServer creates and configures the Web server. The provided context is
+// threaded to the event publisher so that the Postgres LISTEN/NOTIFY goroutine
+// is cancelled cleanly on shutdown, preventing connection leaks.
+func initWebServer(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Server, devAuthToken string, adminEmailList []string, adminMode bool, maintenanceMessage string, requestLogger *slog.Logger) *hub.WebServer {
 	webHost := cfg.Hub.Host
 	if webHost == "" {
 		webHost = "0.0.0.0"
@@ -1124,7 +1128,7 @@ func initWebServer(cfg *config.GlobalConfig, hubSrv *hub.Server, devAuthToken st
 	webSrv.SetRequestLogger(requestLogger)
 
 	// Create shared event publisher for real-time SSE
-	eventPub := newEventPublisher(context.Background(), cfg)
+	eventPub := newEventPublisher(ctx, cfg)
 	webSrv.SetEventPublisher(eventPub)
 
 	// Wire Hub services into WebServer if Hub is enabled
