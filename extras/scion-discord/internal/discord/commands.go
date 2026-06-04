@@ -129,7 +129,7 @@ func (h *CommandHandler) RegisterCommands() error {
 			},
 			{
 				Type:        discordgo.ApplicationCommandOptionSubCommand,
-				Name:        "message",
+				Name:        "msg",
 				Description: "Send a message to an agent",
 				Options: []*discordgo.ApplicationCommandOption{
 					{
@@ -269,7 +269,7 @@ func (h *CommandHandler) HandleSlashCommand(s *discordgo.Session, i *discordgo.I
 			h.HandleStart(s, i)
 		case "stop":
 			h.HandleStop(s, i)
-		case "message":
+		case "msg":
 			h.HandleMessage(s, i)
 		case "logs":
 			h.HandleLogs(s, i)
