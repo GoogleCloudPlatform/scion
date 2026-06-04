@@ -117,6 +117,12 @@ func TestHubManagedProjectPath_DefaultsToGrovesWhenNeitherHasContent(t *testing.
 	assert.Equal(t, grovesDir, path, "should default to groves path when neither dir has workspace content")
 }
 
+func TestHubManagedProjectPath_EmptySlug(t *testing.T) {
+	_, err := hubManagedProjectPath("")
+	require.Error(t, err, "empty slug should return an error")
+	assert.Contains(t, err.Error(), "slug must not be empty")
+}
+
 func TestCreateProject_HubManaged_NoGitRemote(t *testing.T) {
 	srv, _ := testServer(t)
 

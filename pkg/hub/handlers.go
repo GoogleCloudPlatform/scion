@@ -3766,6 +3766,9 @@ func (s *Server) createProjectMembersGroupAndPolicy(ctx context.Context, project
 // It prefers groves/<slug> (the actual git checkout mounted as /workspace in agents)
 // over projects/<slug> (which only contains project metadata).
 func hubManagedProjectPath(slug string) (string, error) {
+	if slug == "" {
+		return "", fmt.Errorf("project slug must not be empty")
+	}
 	globalDir, err := config.GetGlobalDir()
 	if err != nil {
 		return "", fmt.Errorf("failed to get global dir: %w", err)
