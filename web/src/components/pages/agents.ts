@@ -24,7 +24,12 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
 import type { PageData, Agent, AgentPhase, Capabilities } from '../../shared/types.js';
-import { can, isTerminalAvailable, getAgentDisplayStatus, isAgentRunning } from '../../shared/types.js';
+import {
+  can,
+  isTerminalAvailable,
+  getAgentDisplayStatus,
+  isAgentRunning,
+} from '../../shared/types.js';
 
 type AgentSortField = 'name' | 'status' | 'created' | 'updated';
 type SortDir = 'asc' | 'desc';
@@ -188,6 +193,31 @@ export class ScionPageAgents extends LitElement {
         justify-content: flex-end;
       }
 
+      /* Color-coded hover effects for action buttons */
+      .action-btn-danger::part(base):hover {
+        background: var(--scion-danger-50, #fef2f2);
+        border-color: var(--scion-danger-400, #f87171);
+        color: var(--scion-danger-600, #dc2626);
+      }
+
+      .action-btn-warning::part(base):hover {
+        background: var(--scion-warning-50, #fffbeb);
+        border-color: var(--scion-warning-400, #fbbf24);
+        color: var(--scion-warning-600, #d97706);
+      }
+
+      .action-btn-success::part(base):hover {
+        background: var(--scion-success-50, #f0fdf4);
+        border-color: var(--scion-success-400, #4ade80);
+        color: var(--scion-success-600, #16a34a);
+      }
+
+      .action-btn-primary::part(base):hover {
+        background: var(--scion-primary-50, #eff6ff);
+        border-color: var(--scion-primary-400, #60a5fa);
+        color: var(--scion-primary-600, #2563eb);
+      }
+
       .scope-toggle {
         display: inline-flex;
         border: 1px solid var(--scion-border, #e2e8f0);
@@ -295,7 +325,12 @@ export class ScionPageAgents extends LitElement {
 
     // Read persisted phase filter
     const storedPhase = localStorage.getItem('scion-filter-agents-phase');
-    if (storedPhase === 'running' || storedPhase === 'stopped' || storedPhase === 'suspended' || storedPhase === 'error') {
+    if (
+      storedPhase === 'running' ||
+      storedPhase === 'stopped' ||
+      storedPhase === 'suspended' ||
+      storedPhase === 'error'
+    ) {
       this.phaseFilter = storedPhase;
     }
 
@@ -306,13 +341,18 @@ export class ScionPageAgents extends LitElement {
         const parsed = JSON.parse(storedSort);
         if (
           parsed &&
-          (parsed.field === 'name' || parsed.field === 'status' || parsed.field === 'created' || parsed.field === 'updated') &&
+          (parsed.field === 'name' ||
+            parsed.field === 'status' ||
+            parsed.field === 'created' ||
+            parsed.field === 'updated') &&
           (parsed.dir === 'asc' || parsed.dir === 'desc')
         ) {
           this.sortField = parsed.field;
           this.sortDir = parsed.dir;
         }
-      } catch { /* ignore invalid stored sort */ }
+      } catch {
+        /* ignore invalid stored sort */
+      }
     }
 
     // Set SSE scope to dashboard (all project summaries).
@@ -393,22 +433,25 @@ export class ScionPageAgents extends LitElement {
   }
 
   private backgroundRefresh(): void {
-    this.fetchAndMergeAgents().catch(err => {
+    this.fetchAndMergeAgents().catch((err) => {
       console.warn('Background refresh failed:', err);
     });
   }
 
   private async fetchAndMergeAgents(): Promise<void> {
-    const url = this.agentScope !== 'all'
-      ? `/api/v1/agents?scope=${this.agentScope}`
-      : '/api/v1/agents';
+    const url =
+      this.agentScope !== 'all' ? `/api/v1/agents?scope=${this.agentScope}` : '/api/v1/agents';
     const response = await apiFetch(url);
 
     if (!response.ok) {
-      throw new Error(await extractApiError(response, `HTTP ${response.status}: ${response.statusText}`));
+      throw new Error(
+        await extractApiError(response, `HTTP ${response.status}: ${response.statusText}`)
+      );
     }
 
-    const data = (await response.json()) as { agents?: Agent[]; _capabilities?: Capabilities } | Agent[];
+    const data = (await response.json()) as
+      | { agents?: Agent[]; _capabilities?: Capabilities }
+      | Agent[];
     if (Array.isArray(data)) {
       this.agents = data;
       this.scopeCapabilities = undefined;
@@ -445,7 +488,7 @@ export class ScionPageAgents extends LitElement {
         }
 
         // Server confirmed — remove from local list
-        this.agents = this.agents.filter(a => a.id !== agentId);
+        this.agents = this.agents.filter((a) => a.id !== agentId);
         this.backgroundRefresh();
       } catch (err) {
         console.error('Failed to delete agent:', err);
@@ -463,7 +506,7 @@ export class ScionPageAgents extends LitElement {
       suspend: 'stopping',
       resume: 'starting',
     };
-    const agentIndex = this.agents.findIndex(a => a.id === agentId);
+    const agentIndex = this.agents.findIndex((a) => a.id === agentId);
     if (agentIndex >= 0) {
       const updated = { ...this.agents[agentIndex] };
       updated.phase = optimisticPhase[action] as Agent['phase'];
@@ -504,7 +547,7 @@ export class ScionPageAgents extends LitElement {
     }
 
     // Optimistic: mark all running agents as "stopping"
-    this.agents = this.agents.map(a =>
+    this.agents = this.agents.map((a) =>
       isAgentRunning(a) ? { ...a, phase: 'stopping' as const } : a
     );
     this.stopAllLoading = true;
@@ -540,7 +583,7 @@ export class ScionPageAgents extends LitElement {
   private get displayAgents(): Agent[] {
     let list = this.agents;
     if (this.phaseFilter) {
-      list = list.filter(a => a.phase === this.phaseFilter);
+      list = list.filter((a) => a.phase === this.phaseFilter);
     }
     const sorted = [...list];
     sorted.sort((a, b) => {
@@ -597,7 +640,10 @@ export class ScionPageAgents extends LitElement {
       this.sortField = field;
       this.sortDir = field === 'name' ? 'asc' : 'desc';
     }
-    localStorage.setItem('scion-sort-agents', JSON.stringify({ field: this.sortField, dir: this.sortDir }));
+    localStorage.setItem(
+      'scion-sort-agents',
+      JSON.stringify({ field: this.sortField, dir: this.sortDir })
+    );
   }
 
   private sortIndicator(field: AgentSortField): string {
@@ -620,64 +666,73 @@ export class ScionPageAgents extends LitElement {
       <div class="header">
         <h1>Agents</h1>
         <div class="header-actions">
-          ${this.pageData?.user ? html`
-            <div class="scope-toggle">
-              <button
-                class=${this.agentScope === 'all' ? 'active' : ''}
-                title="All agents"
-                @click=${() => this.setScope('all')}
-              >All</button>
-              <button
-                class=${this.agentScope === 'mine' ? 'active' : ''}
-                title="Agents I created"
-                @click=${() => this.setScope('mine')}
-              >
-                <sl-icon name="person"></sl-icon>
-                Mine
-              </button>
-              <button
-                class=${this.agentScope === 'shared' ? 'active' : ''}
-                title="Agents in shared projects"
-                @click=${() => this.setScope('shared')}
-              >
-                <sl-icon name="people"></sl-icon>
-                Shared
-              </button>
-            </div>
-          ` : nothing}
+          ${this.pageData?.user
+            ? html`
+                <div class="scope-toggle">
+                  <button
+                    class=${this.agentScope === 'all' ? 'active' : ''}
+                    title="All agents"
+                    @click=${() => this.setScope('all')}
+                  >
+                    All
+                  </button>
+                  <button
+                    class=${this.agentScope === 'mine' ? 'active' : ''}
+                    title="Agents I created"
+                    @click=${() => this.setScope('mine')}
+                  >
+                    <sl-icon name="person"></sl-icon>
+                    Mine
+                  </button>
+                  <button
+                    class=${this.agentScope === 'shared' ? 'active' : ''}
+                    title="Agents in shared projects"
+                    @click=${() => this.setScope('shared')}
+                  >
+                    <sl-icon name="people"></sl-icon>
+                    Shared
+                  </button>
+                </div>
+              `
+            : nothing}
           <scion-view-toggle
             .view=${this.viewMode}
             storageKey="scion-view-agents"
             @view-change=${this.onViewChange}
           ></scion-view-toggle>
-          ${can(this.scopeCapabilities, 'stop_all') && this.hasRunningAgents() ? html`
-            <sl-button
-              variant="danger"
-              size="small"
-              outline
-              ?loading=${this.stopAllLoading}
-              ?disabled=${this.stopAllLoading}
-              @click=${() => this.handleStopAll()}
-            >
-              <sl-icon slot="prefix" name="stop-circle"></sl-icon>
-              Stop All
-            </sl-button>
-          ` : nothing}
-          ${can(this.scopeCapabilities, 'create') ? html`
-            <a href="/agents/new" style="text-decoration: none;">
-              <sl-button variant="primary" size="small">
-                <sl-icon slot="prefix" name="plus-lg"></sl-icon>
-                New Agent
-              </sl-button>
-            </a>
-          ` : nothing}
+          ${can(this.scopeCapabilities, 'stop_all') && this.hasRunningAgents()
+            ? html`
+                <sl-button
+                  variant="danger"
+                  size="small"
+                  outline
+                  ?loading=${this.stopAllLoading}
+                  ?disabled=${this.stopAllLoading}
+                  @click=${() => this.handleStopAll()}
+                >
+                  <sl-icon slot="prefix" name="stop-circle"></sl-icon>
+                  Stop All
+                </sl-button>
+              `
+            : nothing}
+          ${can(this.scopeCapabilities, 'create')
+            ? html`
+                <a href="/agents/new" style="text-decoration: none;">
+                  <sl-button variant="primary" size="small">
+                    <sl-icon slot="prefix" name="plus-lg"></sl-icon>
+                    New Agent
+                  </sl-button>
+                </a>
+              `
+            : nothing}
         </div>
       </div>
 
-      ${this.loading ? this.renderLoading() : this.error ? this.renderError() : html`
-        ${this.renderFilterBar()}
-        ${this.renderAgents()}
-      `}
+      ${this.loading
+        ? this.renderLoading()
+        : this.error
+          ? this.renderError()
+          : html` ${this.renderFilterBar()} ${this.renderAgents()} `}
     `;
   }
 
@@ -713,38 +768,64 @@ export class ScionPageAgents extends LitElement {
           <button
             class=${this.phaseFilter === '' ? 'active' : ''}
             @click=${() => this.setPhaseFilter('')}
-          >All</button>
+          >
+            All
+          </button>
           <button
             class=${this.phaseFilter === 'running' ? 'active' : ''}
             @click=${() => this.setPhaseFilter('running')}
-          >Running</button>
+          >
+            Running
+          </button>
           <button
             class=${this.phaseFilter === 'stopped' ? 'active' : ''}
             @click=${() => this.setPhaseFilter('stopped')}
-          >Stopped</button>
+          >
+            Stopped
+          </button>
           <button
             class=${this.phaseFilter === 'suspended' ? 'active' : ''}
             @click=${() => this.setPhaseFilter('suspended')}
-          >Suspended</button>
+          >
+            Suspended
+          </button>
           <button
             class=${this.phaseFilter === 'error' ? 'active' : ''}
             @click=${() => this.setPhaseFilter('error')}
-          >Error</button>
+          >
+            Error
+          </button>
         </div>
-        ${this.viewMode === 'grid' ? html`
-          <sl-dropdown>
-            <sl-button slot="trigger" size="small" outline>
-              <sl-icon slot="prefix" name=${this.sortDir === 'asc' ? 'sort-alpha-down' : 'sort-alpha-down-alt'}></sl-icon>
-              Sort: ${this.sortField}
-            </sl-button>
-            <sl-menu @sl-select=${(e: CustomEvent<{ item: { value: string } }>) => this.toggleSort(e.detail.item.value as AgentSortField)}>
-              <sl-menu-item value="name" ?checked=${this.sortField === 'name'}>Name</sl-menu-item>
-              <sl-menu-item value="status" ?checked=${this.sortField === 'status'}>Status</sl-menu-item>
-              <sl-menu-item value="created" ?checked=${this.sortField === 'created'}>Created</sl-menu-item>
-              <sl-menu-item value="updated" ?checked=${this.sortField === 'updated'}>Updated</sl-menu-item>
-            </sl-menu>
-          </sl-dropdown>
-        ` : nothing}
+        ${this.viewMode === 'grid'
+          ? html`
+              <sl-dropdown>
+                <sl-button slot="trigger" size="small" outline>
+                  <sl-icon
+                    slot="prefix"
+                    name=${this.sortDir === 'asc' ? 'sort-alpha-down' : 'sort-alpha-down-alt'}
+                  ></sl-icon>
+                  Sort: ${this.sortField}
+                </sl-button>
+                <sl-menu
+                  @sl-select=${(e: CustomEvent<{ item: { value: string } }>) =>
+                    this.toggleSort(e.detail.item.value as AgentSortField)}
+                >
+                  <sl-menu-item value="name" ?checked=${this.sortField === 'name'}
+                    >Name</sl-menu-item
+                  >
+                  <sl-menu-item value="status" ?checked=${this.sortField === 'status'}
+                    >Status</sl-menu-item
+                  >
+                  <sl-menu-item value="created" ?checked=${this.sortField === 'created'}
+                    >Created</sl-menu-item
+                  >
+                  <sl-menu-item value="updated" ?checked=${this.sortField === 'updated'}
+                    >Updated</sl-menu-item
+                  >
+                </sl-menu>
+              </sl-dropdown>
+            `
+          : nothing}
       </div>
     `;
   }
@@ -792,29 +873,149 @@ export class ScionPageAgents extends LitElement {
         <sl-icon name="cpu"></sl-icon>
         <h2>No Agents Found</h2>
         <p>
-          Agents are AI-powered workers that can help you with coding tasks.${can(this.scopeCapabilities, 'create') ? ' Create your first agent to get started.' : ''}
+          Agents are AI-powered workers that can help you with coding
+          tasks.${can(this.scopeCapabilities, 'create')
+            ? ' Create your first agent to get started.'
+            : ''}
         </p>
-        ${can(this.scopeCapabilities, 'create') ? html`
-          <a href="/agents/new" style="text-decoration: none;">
-            <sl-button variant="primary">
-              <sl-icon slot="prefix" name="plus-lg"></sl-icon>
-              Create Agent
-            </sl-button>
-          </a>
-        ` : nothing}
+        ${can(this.scopeCapabilities, 'create')
+          ? html`
+              <a href="/agents/new" style="text-decoration: none;">
+                <sl-button variant="primary">
+                  <sl-icon slot="prefix" name="plus-lg"></sl-icon>
+                  Create Agent
+                </sl-button>
+              </a>
+            `
+          : nothing}
       </div>
     `;
   }
 
   private renderGrid() {
     return html`
-      <div class="resource-grid">${this.displayAgents.map((agent) => this.renderAgentCard(agent))}</div>
+      <div class="resource-grid">
+        ${this.displayAgents.map((agent) => this.renderAgentCard(agent))}
+      </div>
+    `;
+  }
+
+  private renderActionButtons(agent: Agent) {
+    const isLoading = this.actionLoading[agent.id] || false;
+
+    return html`
+      ${can(agent._capabilities, 'attach')
+        ? html`
+            <sl-tooltip content="Terminal">
+              <sl-button
+                class="action-btn-primary"
+                variant="primary"
+                size="small"
+                href="/agents/${agent.id}/terminal"
+                ?disabled=${!isTerminalAvailable(agent)}
+                aria-label="Terminal"
+              >
+                <sl-icon slot="prefix" name="terminal"></sl-icon>
+              </sl-button>
+            </sl-tooltip>
+          `
+        : nothing}
+      ${isAgentRunning(agent)
+        ? can(agent._capabilities, 'stop')
+          ? html`
+              ${agent.harnessCapabilities?.resume?.support !== 'no'
+                ? html`
+                    <sl-tooltip content="Suspend">
+                      <sl-button
+                        class="action-btn-warning"
+                        variant="warning"
+                        size="small"
+                        outline
+                        ?loading=${isLoading}
+                        ?disabled=${isLoading}
+                        @click=${() => this.handleAgentAction(agent.id, 'suspend')}
+                        aria-label="Suspend"
+                      >
+                        <sl-icon slot="prefix" name="pause-circle"></sl-icon>
+                      </sl-button>
+                    </sl-tooltip>
+                  `
+                : nothing}
+              <sl-tooltip content="Stop">
+                <sl-button
+                  class="action-btn-danger"
+                  variant="danger"
+                  size="small"
+                  outline
+                  ?loading=${isLoading}
+                  ?disabled=${isLoading}
+                  @click=${() => this.handleAgentAction(agent.id, 'stop')}
+                  aria-label="Stop"
+                >
+                  <sl-icon slot="prefix" name="stop-circle"></sl-icon>
+                </sl-button>
+              </sl-tooltip>
+            `
+          : nothing
+        : agent.phase === 'suspended'
+          ? can(agent._capabilities, 'start')
+            ? html`
+                <sl-tooltip content="Resume">
+                  <sl-button
+                    class="action-btn-success"
+                    variant="success"
+                    size="small"
+                    outline
+                    ?loading=${isLoading}
+                    ?disabled=${isLoading}
+                    @click=${() => this.handleAgentAction(agent.id, 'resume')}
+                    aria-label="Resume"
+                  >
+                    <sl-icon slot="prefix" name="play-circle"></sl-icon>
+                  </sl-button>
+                </sl-tooltip>
+              `
+            : nothing
+          : can(agent._capabilities, 'start')
+            ? html`
+                <sl-tooltip content="Start">
+                  <sl-button
+                    class="action-btn-success"
+                    variant="success"
+                    size="small"
+                    outline
+                    ?loading=${isLoading}
+                    ?disabled=${isLoading}
+                    @click=${() => this.handleAgentAction(agent.id, 'start')}
+                    aria-label="Start"
+                  >
+                    <sl-icon slot="prefix" name="play-circle"></sl-icon>
+                  </sl-button>
+                </sl-tooltip>
+              `
+            : nothing}
+      ${can(agent._capabilities, 'delete')
+        ? html`
+            <sl-tooltip content="Delete">
+              <sl-button
+                class="action-btn-danger"
+                variant="default"
+                size="small"
+                outline
+                ?loading=${isLoading}
+                ?disabled=${isLoading}
+                @click=${(e: MouseEvent) => this.handleAgentAction(agent.id, 'delete', e)}
+                aria-label="Delete"
+              >
+                <sl-icon slot="prefix" name="trash"></sl-icon>
+              </sl-button>
+            </sl-tooltip>
+          `
+        : nothing}
     `;
   }
 
   private renderAgentCard(agent: Agent) {
-    const isLoading = this.actionLoading[agent.id] || false;
-
     return html`
       <div class="agent-card">
         <div class="agent-header">
@@ -826,7 +1027,16 @@ export class ScionPageAgents extends LitElement {
               </a>
             </h3>
             <div class="agent-meta">
-              ${agent.project ? html`<div><sl-icon name="folder"></sl-icon> <a href="/projects/${agent.projectId}" @click=${(e: MouseEvent) => e.stopPropagation()}>${agent.project}</a></div>` : ''}
+              ${agent.project
+                ? html`<div>
+                    <sl-icon name="folder"></sl-icon>
+                    <a
+                      href="/projects/${agent.projectId}"
+                      @click=${(e: MouseEvent) => e.stopPropagation()}
+                      >${agent.project}</a
+                    >
+                  </div>`
+                : ''}
               <div><sl-icon name="code-square"></sl-icon> ${agent.template}</div>
               ${agent.runtimeBrokerId
                 ? html`<div>
@@ -848,85 +1058,7 @@ export class ScionPageAgents extends LitElement {
 
         ${agent.taskSummary ? html` <div class="agent-task">${agent.taskSummary}</div> ` : ''}
 
-        <div class="agent-actions">
-          ${can(agent._capabilities, 'attach') ? html`
-            <sl-button
-              variant="primary"
-              size="small"
-              href="/agents/${agent.id}/terminal"
-              ?disabled=${!isTerminalAvailable(agent)}
-            >
-              <sl-icon slot="prefix" name="terminal"></sl-icon>
-              Terminal
-            </sl-button>
-          ` : nothing}
-          ${isAgentRunning(agent)
-            ? can(agent._capabilities, 'stop') ? html`
-                ${agent.harnessCapabilities?.resume?.support !== 'no' ? html`
-                  <sl-button
-                    variant="warning"
-                    size="small"
-                    outline
-                    ?loading=${isLoading}
-                    ?disabled=${isLoading}
-                    @click=${() => this.handleAgentAction(agent.id, 'suspend')}
-                  >
-                    <sl-icon slot="prefix" name="pause-circle"></sl-icon>
-                    Suspend
-                  </sl-button>
-                ` : nothing}
-                <sl-button
-                  variant="danger"
-                  size="small"
-                  outline
-                  ?loading=${isLoading}
-                  ?disabled=${isLoading}
-                  @click=${() => this.handleAgentAction(agent.id, 'stop')}
-                >
-                  <sl-icon slot="prefix" name="stop-circle"></sl-icon>
-                  Stop
-                </sl-button>
-              ` : nothing
-            : agent.phase === 'suspended'
-              ? can(agent._capabilities, 'start') ? html`
-                  <sl-button
-                    variant="success"
-                    size="small"
-                    outline
-                    ?loading=${isLoading}
-                    ?disabled=${isLoading}
-                    @click=${() => this.handleAgentAction(agent.id, 'resume')}
-                  >
-                    <sl-icon slot="prefix" name="play-circle"></sl-icon>
-                    Resume
-                  </sl-button>
-                ` : nothing
-              : can(agent._capabilities, 'start') ? html`
-                  <sl-button
-                    variant="success"
-                    size="small"
-                    outline
-                    ?loading=${isLoading}
-                    ?disabled=${isLoading}
-                    @click=${() => this.handleAgentAction(agent.id, 'start')}
-                  >
-                    <sl-icon slot="prefix" name="play-circle"></sl-icon>
-                    Start
-                  </sl-button>
-                ` : nothing}
-          ${can(agent._capabilities, 'delete') ? html`
-            <sl-button
-              variant="default"
-              size="small"
-              outline
-              ?loading=${isLoading}
-              ?disabled=${isLoading}
-              @click=${(e: MouseEvent) => this.handleAgentAction(agent.id, 'delete', e)}
-            >
-              <sl-icon slot="prefix" name="trash"></sl-icon>
-            </sl-button>
-          ` : nothing}
-        </div>
+        <div class="agent-actions">${this.renderActionButtons(agent)}</div>
       </div>
     `;
   }
@@ -940,17 +1072,23 @@ export class ScionPageAgents extends LitElement {
               <th
                 class="sortable ${this.sortField === 'name' ? 'sorted' : ''}"
                 @click=${() => this.toggleSort('name')}
-              >Name <span class="sort-indicator">${this.sortIndicator('name')}</span></th>
+              >
+                Name <span class="sort-indicator">${this.sortIndicator('name')}</span>
+              </th>
               <th>Project</th>
               <th class="hide-mobile">Template</th>
               <th
                 class="status-col sortable ${this.sortField === 'status' ? 'sorted' : ''}"
                 @click=${() => this.toggleSort('status')}
-              >Status <span class="sort-indicator">${this.sortIndicator('status')}</span></th>
+              >
+                Status <span class="sort-indicator">${this.sortIndicator('status')}</span>
+              </th>
               <th
                 class="hide-mobile sortable ${this.sortField === 'updated' ? 'sorted' : ''}"
                 @click=${() => this.toggleSort('updated')}
-              >Updated <span class="sort-indicator">${this.sortIndicator('updated')}</span></th>
+              >
+                Updated <span class="sort-indicator">${this.sortIndicator('updated')}</span>
+              </th>
               <th class="hide-mobile">Task</th>
               <th style="text-align: right">Actions</th>
             </tr>
@@ -964,8 +1102,6 @@ export class ScionPageAgents extends LitElement {
   }
 
   private renderAgentRow(agent: Agent) {
-    const isLoading = this.actionLoading[agent.id] || false;
-
     return html`
       <tr>
         <td>
@@ -974,7 +1110,11 @@ export class ScionPageAgents extends LitElement {
             <a href="/agents/${agent.id}">${agent.name}</a>
           </span>
         </td>
-        <td>${agent.project ? html`<a href="/projects/${agent.projectId}" class="project-link">${agent.project}</a>` : '\u2014'}</td>
+        <td>
+          ${agent.project
+            ? html`<a href="/projects/${agent.projectId}" class="project-link">${agent.project}</a>`
+            : '\u2014'}
+        </td>
         <td class="hide-mobile">${agent.template}</td>
         <td>
           <scion-status-badge
@@ -983,85 +1123,14 @@ export class ScionPageAgents extends LitElement {
             size="small"
           ></scion-status-badge>
         </td>
-        <td class="hide-mobile">${agent.updated ? this.formatRelativeTime(agent.updated) : '\u2014'}</td>
+        <td class="hide-mobile">
+          ${agent.updated ? this.formatRelativeTime(agent.updated) : '\u2014'}
+        </td>
         <td class="hide-mobile">
           <span class="task-cell">${agent.taskSummary || '\u2014'}</span>
         </td>
         <td class="actions-cell">
-          <span class="table-actions">
-            ${can(agent._capabilities, 'attach') ? html`
-              <sl-button
-                variant="primary"
-                size="small"
-                href="/agents/${agent.id}/terminal"
-                ?disabled=${!isTerminalAvailable(agent)}
-              >
-                <sl-icon slot="prefix" name="terminal"></sl-icon>
-              </sl-button>
-            ` : nothing}
-            ${isAgentRunning(agent)
-              ? can(agent._capabilities, 'stop') ? html`
-                  ${agent.harnessCapabilities?.resume?.support !== 'no' ? html`
-                    <sl-button
-                      variant="warning"
-                      size="small"
-                      outline
-                      ?loading=${isLoading}
-                      ?disabled=${isLoading}
-                      @click=${() => this.handleAgentAction(agent.id, 'suspend')}
-                    >
-                      <sl-icon slot="prefix" name="pause-circle"></sl-icon>
-                    </sl-button>
-                  ` : nothing}
-                  <sl-button
-                    variant="danger"
-                    size="small"
-                    outline
-                    ?loading=${isLoading}
-                    ?disabled=${isLoading}
-                    @click=${() => this.handleAgentAction(agent.id, 'stop')}
-                  >
-                    <sl-icon slot="prefix" name="stop-circle"></sl-icon>
-                  </sl-button>
-                ` : nothing
-              : agent.phase === 'suspended'
-                ? can(agent._capabilities, 'start') ? html`
-                    <sl-button
-                      variant="success"
-                      size="small"
-                      outline
-                      ?loading=${isLoading}
-                      ?disabled=${isLoading}
-                      @click=${() => this.handleAgentAction(agent.id, 'resume')}
-                    >
-                      <sl-icon slot="prefix" name="play-circle"></sl-icon>
-                    </sl-button>
-                  ` : nothing
-                : can(agent._capabilities, 'start') ? html`
-                    <sl-button
-                      variant="success"
-                      size="small"
-                      outline
-                      ?loading=${isLoading}
-                      ?disabled=${isLoading}
-                      @click=${() => this.handleAgentAction(agent.id, 'start')}
-                    >
-                      <sl-icon slot="prefix" name="play-circle"></sl-icon>
-                    </sl-button>
-                  ` : nothing}
-            ${can(agent._capabilities, 'delete') ? html`
-              <sl-button
-                variant="default"
-                size="small"
-                outline
-                ?loading=${isLoading}
-                ?disabled=${isLoading}
-                @click=${(e: MouseEvent) => this.handleAgentAction(agent.id, 'delete', e)}
-              >
-                <sl-icon slot="prefix" name="trash"></sl-icon>
-              </sl-button>
-            ` : nothing}
-          </span>
+          <span class="table-actions"> ${this.renderActionButtons(agent)} </span>
         </td>
       </tr>
     `;
