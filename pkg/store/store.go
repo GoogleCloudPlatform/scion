@@ -321,6 +321,15 @@ type RuntimeBrokerStore interface {
 	// It does not change status (the caller decides offline based on cleared).
 	ReleaseRuntimeBrokerConnection(ctx context.Context, brokerID, hubInstanceID, sessionID string) (cleared bool, err error)
 
+	// ReleaseAndMarkBrokerOffline atomically clears broker affinity AND stamps
+	// status=offline, ONLY IF affinity still names (hubInstanceID, sessionID).
+	// This prevents a stale disconnect callback from clobbering a concurrent
+	// reconnect's online status — the session check and the offline stamp happen
+	// in the same CAS write with no TOCTOU window.
+	// Returns cleared=true when affinity matched and the broker was stamped offline.
+	// Returns cleared=false (no-op) when affinity has already moved.
+	ReleaseAndMarkBrokerOffline(ctx context.Context, brokerID, hubInstanceID, sessionID string) (cleared bool, err error)
+
 	// ReapStaleBrokerAffinity clears connected_hub_id/connected_session_id/
 	// connected_at for brokers whose last_heartbeat is older than staleBefore
 	// and whose connected_hub_id is not NULL (i.e. they still claim affinity).

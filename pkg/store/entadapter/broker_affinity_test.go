@@ -106,6 +106,90 @@ func TestReleaseRuntimeBrokerConnection_NoOpWhenUnclaimed(t *testing.T) {
 	assert.False(t, cleared)
 }
 
+// ---------------------------------------------------------------------------
+// ReleaseAndMarkBrokerOffline — atomic release + offline stamp
+// ---------------------------------------------------------------------------
+
+func TestReleaseAndMarkBrokerOffline_StampsOffline(t *testing.T) {
+	ps := newTestProjectStore(t)
+	ctx := context.Background()
+	b := newOfflineBroker(t, ps)
+
+	require.NoError(t, ps.ClaimRuntimeBrokerConnection(ctx, b.ID, "hub-1", "sess-1"))
+
+	cleared, err := ps.ReleaseAndMarkBrokerOffline(ctx, b.ID, "hub-1", "sess-1")
+	require.NoError(t, err)
+	assert.True(t, cleared)
+
+	got, err := ps.GetRuntimeBroker(ctx, b.ID)
+	require.NoError(t, err)
+	assert.Nil(t, got.ConnectedHubID)
+	assert.Nil(t, got.ConnectedSessionID)
+	assert.Nil(t, got.ConnectedAt)
+	assert.Equal(t, store.BrokerStatusOffline, got.Status)
+	assert.False(t, got.LastHeartbeat.IsZero())
+}
+
+func TestReleaseAndMarkBrokerOffline_NoopOnSessionMismatch(t *testing.T) {
+	ps := newTestProjectStore(t)
+	ctx := context.Background()
+	b := newOfflineBroker(t, ps)
+
+	require.NoError(t, ps.ClaimRuntimeBrokerConnection(ctx, b.ID, "hub-1", "sess-NEW"))
+
+	// Stale session tries to release+offline: must be a no-op.
+	cleared, err := ps.ReleaseAndMarkBrokerOffline(ctx, b.ID, "hub-1", "sess-OLD")
+	require.NoError(t, err)
+	assert.False(t, cleared)
+
+	got, err := ps.GetRuntimeBroker(ctx, b.ID)
+	require.NoError(t, err)
+	require.NotNil(t, got.ConnectedHubID)
+	assert.Equal(t, "hub-1", *got.ConnectedHubID)
+	require.NotNil(t, got.ConnectedSessionID)
+	assert.Equal(t, "sess-NEW", *got.ConnectedSessionID)
+	assert.Equal(t, store.BrokerStatusOnline, got.Status, "status must remain online")
+}
+
+// TestReleaseAndMarkBrokerOffline_NoopAfterReclaim reproduces the exact race
+// from issue #131: old session releases + stamps offline, but a new session
+// has already re-claimed the broker. The stale release must be a no-op.
+func TestReleaseAndMarkBrokerOffline_NoopAfterReclaim(t *testing.T) {
+	ps := newTestProjectStore(t)
+	ctx := context.Background()
+	b := newOfflineBroker(t, ps)
+
+	// t0: session A claims.
+	require.NoError(t, ps.ClaimRuntimeBrokerConnection(ctx, b.ID, "hub-1", "sess-A"))
+	// t1: session A disconnects, but before the callback runs, session B re-claims.
+	require.NoError(t, ps.ClaimRuntimeBrokerConnection(ctx, b.ID, "hub-1", "sess-B"))
+
+	// t2: stale callback tries to release+offline for session A.
+	cleared, err := ps.ReleaseAndMarkBrokerOffline(ctx, b.ID, "hub-1", "sess-A")
+	require.NoError(t, err)
+	assert.False(t, cleared, "stale session must not stamp offline")
+
+	got, err := ps.GetRuntimeBroker(ctx, b.ID)
+	require.NoError(t, err)
+	require.NotNil(t, got.ConnectedSessionID)
+	assert.Equal(t, "sess-B", *got.ConnectedSessionID, "new session must still own the broker")
+	assert.Equal(t, store.BrokerStatusOnline, got.Status, "status must remain online")
+}
+
+func TestReleaseAndMarkBrokerOffline_NoopWhenUnclaimed(t *testing.T) {
+	ps := newTestProjectStore(t)
+	ctx := context.Background()
+	b := newOfflineBroker(t, ps)
+
+	cleared, err := ps.ReleaseAndMarkBrokerOffline(ctx, b.ID, "hub-1", "sess-1")
+	require.NoError(t, err)
+	assert.False(t, cleared)
+}
+
+// ---------------------------------------------------------------------------
+// Flap / cross-hub scenarios
+// ---------------------------------------------------------------------------
+
 // TestBrokerAffinity_FlapAtoB reproduces the design §9.4 disconnect race: a
 // broker flaps from hub A to hub B; A's delayed onDisconnect must NOT clobber
 // B's live ownership.

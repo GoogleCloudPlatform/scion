@@ -890,6 +890,48 @@ func (s *ProjectStore) ReleaseRuntimeBrokerConnection(ctx context.Context, broke
 	return false, store.ErrVersionConflict
 }
 
+// ReleaseAndMarkBrokerOffline atomically clears broker affinity AND stamps
+// status=offline in a single CAS write, ONLY IF affinity still names
+// (hubInstanceID, sessionID). This eliminates the TOCTOU race between a
+// separate release and a separate offline stamp: if a concurrent reconnect
+// has already claimed the broker with a new session, the compare fails and
+// this is a no-op — the new connection's online status is not clobbered.
+func (s *ProjectStore) ReleaseAndMarkBrokerOffline(ctx context.Context, brokerID, hubInstanceID, sessionID string) (bool, error) {
+	uid, err := parseUUID(brokerID)
+	if err != nil {
+		return false, err
+	}
+
+	now := time.Now()
+	for attempt := 0; attempt < maxCASRetries; attempt++ {
+		cur, err := s.client.RuntimeBroker.Get(ctx, uid)
+		if err != nil {
+			return false, mapError(err)
+		}
+		if cur.ConnectedHubID == nil || *cur.ConnectedHubID != hubInstanceID ||
+			cur.ConnectedSessionID == nil || *cur.ConnectedSessionID != sessionID {
+			return false, nil
+		}
+		affected, err := s.client.RuntimeBroker.Update().
+			Where(runtimebroker.IDEQ(uid), runtimebroker.LockVersionEQ(cur.LockVersion)).
+			ClearConnectedHubID().
+			ClearConnectedSessionID().
+			ClearConnectedAt().
+			SetStatus(store.BrokerStatusOffline).
+			SetLastHeartbeat(now).
+			SetUpdated(now).
+			AddLockVersion(1).
+			Save(ctx)
+		if err != nil {
+			return false, mapError(err)
+		}
+		if affected == 1 {
+			return true, nil
+		}
+	}
+	return false, store.ErrVersionConflict
+}
+
 // ReapStaleBrokerAffinity clears affinity (connected_hub_id/connected_session_id/
 // connected_at) for brokers that still claim affinity but whose last_heartbeat
 // is older than staleBefore. Does not change broker status.

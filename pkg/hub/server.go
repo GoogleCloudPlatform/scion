@@ -724,29 +724,36 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 		Debug:          cfg.Debug,
 	}, logging.Subsystem("hub.control-channel"))
 	// Set disconnect callback to mark broker offline when WebSocket drops.
-	// Compare-and-clear affinity first: only stamp offline if this hub instance +
-	// session still owns the broker. If affinity has moved (broker flapped to
-	// another replica or re-dialed with a newer session), this is a stale
-	// disconnect and we must NOT clobber the live owner's online status.
+	// ReleaseAndMarkBrokerOffline atomically clears affinity AND stamps
+	// status=offline in a single CAS write — if a concurrent reconnect has
+	// already claimed the broker with a new session, the compare fails and the
+	// callback is a no-op. This eliminates the TOCTOU race where a separate
+	// ReleaseRuntimeBrokerConnection + UpdateRuntimeBrokerHeartbeat allowed
+	// the offline stamp to clobber a concurrent markBrokerOnline (issue #131).
 	srv.controlChannel.SetOnDisconnect(func(brokerID, sessionID string) {
 		ctx := context.Background()
 
-		cleared, err := s.ReleaseRuntimeBrokerConnection(ctx, brokerID, srv.instanceID, sessionID)
+		cleared, err := s.ReleaseAndMarkBrokerOffline(ctx, brokerID, srv.instanceID, sessionID)
 		if err != nil {
 			slog.Error("Failed to release broker affinity on disconnect", "brokerID", brokerID, "sessionID", sessionID, "error", err)
 			return
 		}
 		if !cleared {
-			// Another replica (or a newer session on this replica) already owns
-			// the socket. Skip the offline stamp to avoid clobbering it.
 			slog.Info("broker reconnected elsewhere; skipping offline stamp", "brokerID", brokerID, "staleSession", sessionID)
 			return
 		}
 
 		slog.Info("Broker disconnected, marking offline", "brokerID", brokerID, "sessionID", sessionID)
 
-		if err := s.UpdateRuntimeBrokerHeartbeat(ctx, brokerID, store.BrokerStatusOffline); err != nil {
-			slog.Error("Failed to mark broker offline", "brokerID", brokerID, "error", err)
+		// Guard: re-read the broker before updating provider statuses. A
+		// concurrent markBrokerOnline may have already re-claimed the broker
+		// between our atomic release+offline and now. If so, skip provider
+		// updates to avoid clobbering the new session's online providers.
+		broker, rerr := s.GetRuntimeBroker(ctx, brokerID)
+		if rerr == nil && broker.ConnectedSessionID != nil && *broker.ConnectedSessionID != "" {
+			slog.Info("broker re-claimed by new session after release; skipping provider offline stamp",
+				"brokerID", brokerID, "staleSession", sessionID, "newSession", *broker.ConnectedSessionID)
+			return
 		}
 
 		// Update all project provider records for this broker
