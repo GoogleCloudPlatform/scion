@@ -71,7 +71,18 @@ if ! gcloud iam service-accounts describe "$SA_EMAIL" --project="$PROJECT" &>/de
   done
 fi
 
-# ── 2. Build & push image ───────────────────────────────────────────────────
+# ── 2. Create Artifact Registry repo (if needed) ───────────────────────────
+
+if ! gcloud artifacts repositories describe "$REPO" \
+  --location="$REGION" --project="$PROJECT" &>/dev/null; then
+  log "Creating Artifact Registry repository ${REPO}"
+  gcloud artifacts repositories create "$REPO" \
+    --repository-format=docker \
+    --location="$REGION" \
+    --project="$PROJECT"
+fi
+
+# ── 3. Build & push image ───────────────────────────────────────────────────
 
 if [[ "$SKIP_BUILD" == false ]]; then
   log "Building container image"
@@ -83,7 +94,7 @@ else
   log "Skipping build (--skip-build)"
 fi
 
-# ── 3. Generate kubeconfig from live cluster info ────────────────────────────
+# ── 4. Generate kubeconfig from live cluster info ────────────────────────────
 
 log "Fetching GKE cluster details"
 ENDPOINT=$(gcloud container clusters describe "$GKE_CLUSTER" \
@@ -110,34 +121,23 @@ contexts:
   name: ${GKE_CLUSTER}
 current-context: ${GKE_CLUSTER}"
 
-# ── 4. Generate hub settings ────────────────────────────────────────────────
+# ── 5. Generate hub settings ────────────────────────────────────────────────
 
 SESSION_SECRET="${SCION_SESSION_SECRET:-$(openssl rand -hex 32)}"
 
 SETTINGS_CONTENT=$(sed "s/__SESSION_SECRET__/${SESSION_SECRET}/" \
   "${SCRIPT_DIR}/hub-settings-template.yaml")
 
-# ── 5. Store secrets ────────────────────────────────────────────────────────
+# ── 6. Store secrets ────────────────────────────────────────────────────────
 
 log "Storing secrets in Secret Manager"
 ensure_secret "${SERVICE_NAME}-kubeconfig" "$KUBECONFIG_CONTENT"
 ensure_secret "${SERVICE_NAME}-settings"   "$SETTINGS_CONTENT"
 
-# ── 6. Ensure K8s namespace ─────────────────────────────────────────────────
+# ── 7. Ensure K8s namespace ─────────────────────────────────────────────────
 
 log "Ensuring namespace ${K8S_NAMESPACE} exists in ${GKE_CLUSTER}"
 kubectl create namespace "$K8S_NAMESPACE" --dry-run=client -o yaml | kubectl apply -f - || true
-
-# ── 7. Create Artifact Registry repo (if needed) ────────────────────────────
-
-if ! gcloud artifacts repositories describe "$REPO" \
-  --location="$REGION" --project="$PROJECT" &>/dev/null; then
-  log "Creating Artifact Registry repository ${REPO}"
-  gcloud artifacts repositories create "$REPO" \
-    --repository-format=docker \
-    --location="$REGION" \
-    --project="$PROJECT"
-fi
 
 # ── 8. Deploy Cloud Run service ─────────────────────────────────────────────
 
@@ -157,7 +157,7 @@ gcloud run deploy "$SERVICE_NAME" \
   --set-secrets "/home/scion/.kube/config=${SERVICE_NAME}-kubeconfig:latest,/run/secrets/settings.yaml=${SERVICE_NAME}-settings:latest" \
   --set-env-vars "HOME=/home/scion,KUBECONFIG=/home/scion/.kube/config"
 
-# ── 9. Print service URL ────────────────────────────────────────────────────
+# ── 9. Print service URL ───────────────────────────────────────────────────
 
 SERVICE_URL=$(gcloud run services describe "$SERVICE_NAME" \
   --region "$REGION" --project "$PROJECT" \

@@ -19,6 +19,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -94,7 +95,7 @@ func (s *oidcTokenSource) getToken() (string, error) {
 		return "", fmt.Errorf("oidc: read response: %w", err)
 	}
 
-	tok := string(body)
+	tok := strings.TrimSpace(string(body))
 	expiry, err := ParseTokenExpiry(tok)
 	if err != nil {
 		expiry = time.Now().Add(oidcDefaultTTL)
