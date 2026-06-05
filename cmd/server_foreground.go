@@ -31,6 +31,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
@@ -328,7 +330,11 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 				// can authenticate back to the Hub API. Self-managed plugins
 				// handle their own credential lifecycle.
 				if !pluginMgr.IsSelfManaged(scionplugin.PluginTypeBroker, bt) && hubSrv != nil && s != nil {
-					brokerID := "plugin-broker-" + bt
+					// Use the same deterministic UUIDv5 as the α migration so the
+					// broker entity created here matches the migrated ID.
+					pluginBrokerNS := uuid.MustParse("5c104390-a1d0-5e9a-9b1e-5c104390a1d0")
+					legacyID := "plugin-broker-" + bt
+					brokerID := uuid.NewSHA1(pluginBrokerNS, []byte(legacyID)).String()
 					if authSvc := hubSrv.GetBrokerAuthService(); authSvc != nil {
 						// Ensure the runtime broker entity exists (required by
 						// the broker_secrets foreign key constraint).
