@@ -269,10 +269,10 @@ docker run -p 8443:8443 -p 9090:9090 \
 
 The container runs as non-root user `bridge` (UID 1000). The state database directory `/var/lib/scion-a2a-bridge/` is writable by this user inside the container (mode `0700`). To persist state across restarts, mount a volume at that path.
 
-## Known Limitations (MVP)
+## Known Limitations
 
-- **Single-turn only.** The bridge treats the first non-state-change message from an agent as the final response and closes the task. Multi-turn agents that emit interim content (clarifying questions, progress updates) will have their task closed prematurely. Agents using `input-required` → `completed` flows are not supported yet. Agent cards advertise `streaming: false` and `pushNotifications: false` to reflect this constraint. Streaming requests (`message/stream`) are accepted but emit a runtime warning because multi-turn dispatch is not implemented.
-- **Blocking-mode `input-required` flows never resolve.** State-change messages are intentionally skipped for blocking waiters so the actual content reply is delivered. This means a blocking `message/send` call against an agent that transitions to `input-required` will time out (default 120s) because the state change is suppressed and no content reply follows.
+- **No gRPC or REST transport.** The bridge only supports JSON-RPC 2.0 over HTTP. gRPC and HTTP+JSON/REST transports are not implemented.
+- **Blocking-mode `input-required` flows.** In blocking mode, state-change messages are skipped for waiters so the actual content reply is delivered. A blocking `message/send` against an agent that transitions to `input-required` without sending content will time out (default 120s). Use non-blocking mode with push notifications or SSE for `input-required` flows.
 
 ## Security considerations
 

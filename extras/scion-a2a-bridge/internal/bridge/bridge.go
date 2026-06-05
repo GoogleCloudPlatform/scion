@@ -730,8 +730,8 @@ func (b *Bridge) GenerateAgentCard(ctx context.Context, projectSlug, agentSlug s
 		"url":         agentURL,
 		"version":     "1.0.0",
 		"capabilities": map[string]bool{
-			"streaming":         false,
-			"pushNotifications": false,
+			"streaming":         true,
+			"pushNotifications": true,
 		},
 		"defaultInputModes":  []string{"text/plain", "application/json"},
 		"defaultOutputModes": []string{"text/plain", "application/json"},
