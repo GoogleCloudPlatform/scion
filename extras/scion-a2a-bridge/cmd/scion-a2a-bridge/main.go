@@ -22,6 +22,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -32,6 +33,7 @@ import (
 	secretmanager "cloud.google.com/go/secretmanager/apiv1"
 	smpb "cloud.google.com/go/secretmanager/apiv1/secretmanagerpb"
 	"github.com/prometheus/client_golang/prometheus"
+	"google.golang.org/grpc"
 	"gopkg.in/yaml.v3"
 
 	"github.com/GoogleCloudPlatform/scion/extras/scion-a2a-bridge/internal/bridge"
@@ -154,7 +156,7 @@ func main() {
 		MaxHeaderBytes: 1 << 20,
 	}
 
-	errCh := make(chan error, 1)
+	errCh := make(chan error, 2)
 	go func() {
 		log.Warn("A2A server starting WITHOUT TLS — ensure TLS is terminated at a reverse proxy (e.g. Caddy, nginx, cloud LB)", "address", listenAddr)
 		log.Info("A2A protocol server starting", "address", listenAddr)
@@ -162,6 +164,27 @@ func main() {
 			errCh <- fmt.Errorf("a2a server: %w", err)
 		}
 	}()
+
+	// Start gRPC server if configured.
+	var grpcServer *grpc.Server
+	if cfg.Bridge.GRPCListenAddress != "" {
+		grpcServer = grpc.NewServer()
+		grpcSrv := bridge.NewGRPCServer(b, cfg, log.With("component", "grpc-server"))
+		grpcSrv.Register(grpcServer)
+
+		grpcLis, err := net.Listen("tcp", cfg.Bridge.GRPCListenAddress)
+		if err != nil {
+			log.Error("failed to listen for gRPC", "address", cfg.Bridge.GRPCListenAddress, "error", err)
+			os.Exit(1)
+		}
+
+		go func() {
+			log.Info("gRPC server starting", "address", cfg.Bridge.GRPCListenAddress)
+			if err := grpcServer.Serve(grpcLis); err != nil {
+				errCh <- fmt.Errorf("grpc server: %w", err)
+			}
+		}()
+	}
 
 	log.Info("scion-a2a-bridge ready")
 
@@ -181,6 +204,11 @@ func main() {
 
 	if err := httpServer.Shutdown(shutdownCtx); err != nil {
 		log.Error("failed to stop A2A server", "error", err)
+	}
+
+	if grpcServer != nil {
+		grpcServer.GracefulStop()
+		log.Info("gRPC server stopped")
 	}
 
 	// Drain background goroutines before closing the store.
