@@ -202,11 +202,15 @@ func (a *IAPAuthenticator) resolveJWKSURL() string {
 	return DefaultIAPJWKSURL
 }
 
+// defaultJWKSHTTPClient is used for JWKS fetches when no custom client is provided.
+// It has a reasonable timeout to prevent hanging on unresponsive endpoints.
+var defaultJWKSHTTPClient = &http.Client{Timeout: 10 * time.Second}
+
 func (a *IAPAuthenticator) resolveHTTPClient() *http.Client {
 	if a.HTTPClient != nil {
 		return a.HTTPClient
 	}
-	return http.DefaultClient
+	return defaultJWKSHTTPClient
 }
 
 func (a *IAPAuthenticator) init() {
@@ -229,9 +233,11 @@ type jwksCache struct {
 	url    string
 	client *http.Client
 
-	mu          sync.RWMutex
-	keys        map[string]jose.JSONWebKey // kid -> key
-	lastFetched time.Time
+	mu            sync.RWMutex
+	keys          map[string]jose.JSONWebKey // kid -> key
+	lastFetched   time.Time                 // last successful fetch
+	lastAttempted time.Time                 // last fetch attempt (success or failure), for stampede prevention
+	refreshing    bool                      // true while a refresh is in-flight
 }
 
 // GetKey returns the public key for the given kid. If the kid is not found
@@ -275,18 +281,41 @@ func (c *jwksCache) GetKey(kid string) (interface{}, error) {
 	return nil, fmt.Errorf("unknown kid %q after JWKS refresh", kid)
 }
 
+// jwksDebounceInterval is the minimum time between refresh attempts (success or failure)
+// to prevent stampedes during JWKS endpoint outages.
+const jwksDebounceInterval = 5 * time.Second
+
 // refresh fetches the JWKS from the endpoint and updates the cache.
 // On transient failure, the last-good keys are preserved.
+// Concurrent calls are coalesced: if a refresh is already in-flight, subsequent
+// callers return immediately (nil error) and rely on cached keys.
 func (c *jwksCache) refresh() error {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 
-	// Debounce: don't re-fetch if we just fetched very recently
-	if time.Since(c.lastFetched) < 5*time.Second {
+	// Debounce: skip if a refresh was attempted (success OR failure) very recently.
+	if time.Since(c.lastAttempted) < jwksDebounceInterval {
+		c.mu.Unlock()
 		return nil
 	}
 
+	// Prevent concurrent in-flight refreshes.
+	if c.refreshing {
+		c.mu.Unlock()
+		return nil
+	}
+	c.refreshing = true
+	c.lastAttempted = time.Now()
+	c.mu.Unlock()
+
+	// Perform the network fetch outside the lock to avoid holding it across I/O.
 	resp, err := c.client.Get(c.url)
+
+	c.mu.Lock()
+	defer func() {
+		c.refreshing = false
+		c.mu.Unlock()
+	}()
+
 	if err != nil {
 		slog.Warn("jwks fetch failed, serving last-good keys", "url", c.url, "error", err)
 		return err

@@ -376,10 +376,11 @@ func TestIAPAuthenticator_UnknownKidTriggersRefresh(t *testing.T) {
 	bothData, _ := json.Marshal(bothKeys)
 	currentJWKS = bothData
 
-	// Reset the cache's last fetch time to force refresh on unknown kid
+	// Reset the cache's fetch times to force refresh on unknown kid
 	auth.initOnce.Do(func() {}) // ensure init ran
 	auth.jwksCache.mu.Lock()
-	auth.jwksCache.lastFetched = time.Time{} // force refresh
+	auth.jwksCache.lastFetched = time.Time{}   // force proactive refresh
+	auth.jwksCache.lastAttempted = time.Time{} // clear debounce window
 	auth.jwksCache.mu.Unlock()
 
 	// Second request with new key — should trigger JWKS refresh and succeed
@@ -526,9 +527,10 @@ func TestJWKSCache_TransientFailure(t *testing.T) {
 		t.Fatal("first GetKey returned nil key")
 	}
 
-	// Force refresh by clearing lastFetched
+	// Force refresh by clearing lastFetched and lastAttempted
 	cache.mu.Lock()
 	cache.lastFetched = time.Time{}
+	cache.lastAttempted = time.Time{}
 	cache.mu.Unlock()
 
 	// Second fetch with same kid still works (returns cached key even though refresh fails)
@@ -538,5 +540,67 @@ func TestJWKSCache_TransientFailure(t *testing.T) {
 	}
 	if key2 == nil {
 		t.Fatal("second GetKey returned nil key")
+	}
+}
+
+func TestJWKSCache_StampedePreventionDuringOutage(t *testing.T) {
+	kp := newTestKeyPair(t, "test-key-1")
+
+	fetchCount := 0
+	jwksSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fetchCount++
+		if fetchCount <= 1 {
+			// First call succeeds — populate the cache
+			w.Header().Set("Content-Type", "application/json")
+			w.Write(kp.jwksJSON(t))
+		} else {
+			// All subsequent calls fail (simulating a persistent outage)
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+	}))
+	t.Cleanup(jwksSrv.Close)
+
+	cache := &jwksCache{url: jwksSrv.URL, client: jwksSrv.Client()}
+
+	// Populate cache with a successful fetch
+	key, err := cache.GetKey(kp.kid)
+	if err != nil {
+		t.Fatalf("initial GetKey failed: %v", err)
+	}
+	if key == nil {
+		t.Fatal("initial GetKey returned nil key")
+	}
+	if fetchCount != 1 {
+		t.Fatalf("expected 1 fetch after initial GetKey, got %d", fetchCount)
+	}
+
+	// Reset lastAttempted to allow the next refresh attempt, but keep lastFetched
+	// old enough that proactive refresh is desired
+	cache.mu.Lock()
+	cache.lastFetched = time.Time{}
+	cache.lastAttempted = time.Time{}
+	cache.mu.Unlock()
+
+	// Now make multiple GetKey calls for an unknown kid during the outage.
+	// Each call triggers refresh() (kid miss), but debounce should prevent
+	// more than one actual fetch within the debounce window.
+	unknownKid := "unknown-kid"
+	for i := 0; i < 5; i++ {
+		_, _ = cache.GetKey(unknownKid)
+	}
+
+	// Expect exactly 2 fetches total: 1 initial success + 1 failed attempt
+	// within the debounce window. The remaining 4 calls should be debounced.
+	if fetchCount != 2 {
+		t.Errorf("expected 2 total fetches (1 initial + 1 debounced attempt), got %d", fetchCount)
+	}
+
+	// Verify the cache still serves the last-good key
+	key2, err := cache.GetKey(kp.kid)
+	if err != nil {
+		t.Fatalf("GetKey for cached kid during outage failed: %v", err)
+	}
+	if key2 == nil {
+		t.Fatal("expected last-good key to be served during outage")
 	}
 }
