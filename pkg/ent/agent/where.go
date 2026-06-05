@@ -91,11 +91,6 @@ func DelegationEnabled(v bool) predicate.Agent {
 	return predicate.Agent(sql.FieldEQ(FieldDelegationEnabled, v))
 }
 
-// Visibility applies equality check predicate on the "visibility" field. It's identical to VisibilityEQ.
-func Visibility(v string) predicate.Agent {
-	return predicate.Agent(sql.FieldEQ(FieldVisibility, v))
-}
-
 // Phase applies equality check predicate on the "phase" field. It's identical to PhaseEQ.
 func Phase(v string) predicate.Agent {
 	return predicate.Agent(sql.FieldEQ(FieldPhase, v))
@@ -569,71 +564,6 @@ func DelegationEnabledEQ(v bool) predicate.Agent {
 // DelegationEnabledNEQ applies the NEQ predicate on the "delegation_enabled" field.
 func DelegationEnabledNEQ(v bool) predicate.Agent {
 	return predicate.Agent(sql.FieldNEQ(FieldDelegationEnabled, v))
-}
-
-// VisibilityEQ applies the EQ predicate on the "visibility" field.
-func VisibilityEQ(v string) predicate.Agent {
-	return predicate.Agent(sql.FieldEQ(FieldVisibility, v))
-}
-
-// VisibilityNEQ applies the NEQ predicate on the "visibility" field.
-func VisibilityNEQ(v string) predicate.Agent {
-	return predicate.Agent(sql.FieldNEQ(FieldVisibility, v))
-}
-
-// VisibilityIn applies the In predicate on the "visibility" field.
-func VisibilityIn(vs ...string) predicate.Agent {
-	return predicate.Agent(sql.FieldIn(FieldVisibility, vs...))
-}
-
-// VisibilityNotIn applies the NotIn predicate on the "visibility" field.
-func VisibilityNotIn(vs ...string) predicate.Agent {
-	return predicate.Agent(sql.FieldNotIn(FieldVisibility, vs...))
-}
-
-// VisibilityGT applies the GT predicate on the "visibility" field.
-func VisibilityGT(v string) predicate.Agent {
-	return predicate.Agent(sql.FieldGT(FieldVisibility, v))
-}
-
-// VisibilityGTE applies the GTE predicate on the "visibility" field.
-func VisibilityGTE(v string) predicate.Agent {
-	return predicate.Agent(sql.FieldGTE(FieldVisibility, v))
-}
-
-// VisibilityLT applies the LT predicate on the "visibility" field.
-func VisibilityLT(v string) predicate.Agent {
-	return predicate.Agent(sql.FieldLT(FieldVisibility, v))
-}
-
-// VisibilityLTE applies the LTE predicate on the "visibility" field.
-func VisibilityLTE(v string) predicate.Agent {
-	return predicate.Agent(sql.FieldLTE(FieldVisibility, v))
-}
-
-// VisibilityContains applies the Contains predicate on the "visibility" field.
-func VisibilityContains(v string) predicate.Agent {
-	return predicate.Agent(sql.FieldContains(FieldVisibility, v))
-}
-
-// VisibilityHasPrefix applies the HasPrefix predicate on the "visibility" field.
-func VisibilityHasPrefix(v string) predicate.Agent {
-	return predicate.Agent(sql.FieldHasPrefix(FieldVisibility, v))
-}
-
-// VisibilityHasSuffix applies the HasSuffix predicate on the "visibility" field.
-func VisibilityHasSuffix(v string) predicate.Agent {
-	return predicate.Agent(sql.FieldHasSuffix(FieldVisibility, v))
-}
-
-// VisibilityEqualFold applies the EqualFold predicate on the "visibility" field.
-func VisibilityEqualFold(v string) predicate.Agent {
-	return predicate.Agent(sql.FieldEqualFold(FieldVisibility, v))
-}
-
-// VisibilityContainsFold applies the ContainsFold predicate on the "visibility" field.
-func VisibilityContainsFold(v string) predicate.Agent {
-	return predicate.Agent(sql.FieldContainsFold(FieldVisibility, v))
 }
 
 // LabelsIsNil applies the IsNil predicate on the "labels" field.

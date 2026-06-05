@@ -2899,7 +2899,6 @@ func TestOutboundMessage_UnknownRecipient(t *testing.T) {
 		ProjectID:       project.ID,
 		Phase:           "running",
 		RuntimeBrokerID: tid("broker-msg"),
-		Visibility:      store.VisibilityPrivate,
 	}
 	if err := s.CreateAgent(ctx, agent); err != nil {
 		t.Fatal(err)

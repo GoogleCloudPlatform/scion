@@ -27,10 +27,10 @@ import (
 // Agent holds the schema definition for the Agent entity.
 //
 // The agent entity carries both the principal-relevant fields used by the
-// authorization layer (created_by, owner_id, delegation_enabled, visibility)
-// and the full set of operational fields required to back store.Agent through
-// the Ent adapter (P2-port-agent). Together they give the Ent-backed agent
-// store parity with the former raw-SQL store implementation.
+// authorization layer (created_by, owner_id, delegation_enabled) and the full
+// set of operational fields required to back store.Agent through the Ent
+// adapter (P2-port-agent). Together they give the Ent-backed agent store
+// parity with the former raw-SQL store implementation.
 type Agent struct {
 	ent.Schema
 }
@@ -66,9 +66,6 @@ func (Agent) Fields() []ent.Field {
 			Nillable(),
 		field.Bool("delegation_enabled").
 			Default(false),
-		field.String("visibility").
-			Default("private"),
-
 		// --- Metadata (stored as JSON) ---
 		field.JSON("labels", map[string]string{}).
 			Optional(),
@@ -175,5 +172,6 @@ func (Agent) Indexes() []ent.Index {
 	return []ent.Index{
 		index.Fields("slug", "project_id").
 			Unique(),
+		index.Fields("project_id"),
 	}
 }

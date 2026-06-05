@@ -1491,7 +1491,6 @@ type AgentMutation struct {
 	created_by             *uuid.UUID
 	owner_id               *uuid.UUID
 	delegation_enabled     *bool
-	visibility             *string
 	labels                 *map[string]string
 	annotations            *map[string]string
 	phase                  *string
@@ -1966,42 +1965,6 @@ func (m *AgentMutation) OldDelegationEnabled(ctx context.Context) (v bool, err e
 // ResetDelegationEnabled resets all changes to the "delegation_enabled" field.
 func (m *AgentMutation) ResetDelegationEnabled() {
 	m.delegation_enabled = nil
-}
-
-// SetVisibility sets the "visibility" field.
-func (m *AgentMutation) SetVisibility(s string) {
-	m.visibility = &s
-}
-
-// Visibility returns the value of the "visibility" field in the mutation.
-func (m *AgentMutation) Visibility() (r string, exists bool) {
-	v := m.visibility
-	if v == nil {
-		return
-	}
-	return *v, true
-}
-
-// OldVisibility returns the old "visibility" field's value of the Agent entity.
-// If the Agent object wasn't provided to the builder, the object is fetched from the database.
-// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
-func (m *AgentMutation) OldVisibility(ctx context.Context) (v string, err error) {
-	if !m.op.Is(OpUpdateOne) {
-		return v, errors.New("OldVisibility is only allowed on UpdateOne operations")
-	}
-	if m.id == nil || m.oldValue == nil {
-		return v, errors.New("OldVisibility requires an ID field in the mutation")
-	}
-	oldValue, err := m.oldValue(ctx)
-	if err != nil {
-		return v, fmt.Errorf("querying old value for OldVisibility: %w", err)
-	}
-	return oldValue.Visibility, nil
-}
-
-// ResetVisibility resets all changes to the "visibility" field.
-func (m *AgentMutation) ResetVisibility() {
-	m.visibility = nil
 }
 
 // SetLabels sets the "labels" field.
@@ -3481,7 +3444,7 @@ func (m *AgentMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *AgentMutation) Fields() []string {
-	fields := make([]string, 0, 36)
+	fields := make([]string, 0, 35)
 	if m.slug != nil {
 		fields = append(fields, agent.FieldSlug)
 	}
@@ -3505,9 +3468,6 @@ func (m *AgentMutation) Fields() []string {
 	}
 	if m.delegation_enabled != nil {
 		fields = append(fields, agent.FieldDelegationEnabled)
-	}
-	if m.visibility != nil {
-		fields = append(fields, agent.FieldVisibility)
 	}
 	if m.labels != nil {
 		fields = append(fields, agent.FieldLabels)
@@ -3614,8 +3574,6 @@ func (m *AgentMutation) Field(name string) (ent.Value, bool) {
 		return m.OwnerID()
 	case agent.FieldDelegationEnabled:
 		return m.DelegationEnabled()
-	case agent.FieldVisibility:
-		return m.Visibility()
 	case agent.FieldLabels:
 		return m.Labels()
 	case agent.FieldAnnotations:
@@ -3695,8 +3653,6 @@ func (m *AgentMutation) OldField(ctx context.Context, name string) (ent.Value, e
 		return m.OldOwnerID(ctx)
 	case agent.FieldDelegationEnabled:
 		return m.OldDelegationEnabled(ctx)
-	case agent.FieldVisibility:
-		return m.OldVisibility(ctx)
 	case agent.FieldLabels:
 		return m.OldLabels(ctx)
 	case agent.FieldAnnotations:
@@ -3815,13 +3771,6 @@ func (m *AgentMutation) SetField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetDelegationEnabled(v)
-		return nil
-	case agent.FieldVisibility:
-		v, ok := value.(string)
-		if !ok {
-			return fmt.Errorf("unexpected type %T for field %s", value, name)
-		}
-		m.SetVisibility(v)
 		return nil
 	case agent.FieldLabels:
 		v, ok := value.(map[string]string)
@@ -4264,9 +4213,6 @@ func (m *AgentMutation) ResetField(name string) error {
 		return nil
 	case agent.FieldDelegationEnabled:
 		m.ResetDelegationEnabled()
-		return nil
-	case agent.FieldVisibility:
-		m.ResetVisibility()
 		return nil
 	case agent.FieldLabels:
 		m.ResetLabels()

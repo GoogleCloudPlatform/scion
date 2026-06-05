@@ -51,7 +51,7 @@ func permSeedAgent(t *testing.T, ctx context.Context, s store.Store, id string) 
 	_ = s.CreateProject(ctx, &store.Project{ID: projectID, Name: "Perm Agent Project", Slug: "perm-agent-project"})
 	err := s.CreateAgent(ctx, &store.Agent{
 		ID: id, Name: "Seed Agent", Slug: "seed-agent-" + id[:8],
-		ProjectID: projectID, Phase: "stopped", Visibility: store.VisibilityPrivate,
+		ProjectID: projectID, Phase: "stopped",
 	})
 	if err != nil && !errors.Is(err, store.ErrAlreadyExists) {
 		t.Fatalf("seed agent %s: %v", id, err)

@@ -189,7 +189,6 @@ func setupNotificationTest(t *testing.T) *notificationTestEnv {
 		ProjectID:       project.ID,
 		Phase:           string(state.PhaseRunning),
 		RuntimeBrokerID: tid("broker-1"),
-		Visibility:      store.VisibilityPrivate,
 	}
 	require.NoError(t, s.CreateAgent(ctx, watched))
 
@@ -201,7 +200,6 @@ func setupNotificationTest(t *testing.T) *notificationTestEnv {
 		ProjectID:       project.ID,
 		Phase:           string(state.PhaseRunning),
 		RuntimeBrokerID: tid("broker-1"),
-		Visibility:      store.VisibilityPrivate,
 	}
 	require.NoError(t, s.CreateAgent(ctx, subscriber))
 

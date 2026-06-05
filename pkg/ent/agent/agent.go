@@ -32,8 +32,6 @@ const (
 	FieldOwnerID = "owner_id"
 	// FieldDelegationEnabled holds the string denoting the delegation_enabled field in the database.
 	FieldDelegationEnabled = "delegation_enabled"
-	// FieldVisibility holds the string denoting the visibility field in the database.
-	FieldVisibility = "visibility"
 	// FieldLabels holds the string denoting the labels field in the database.
 	FieldLabels = "labels"
 	// FieldAnnotations holds the string denoting the annotations field in the database.
@@ -130,7 +128,6 @@ var Columns = []string{
 	FieldCreatedBy,
 	FieldOwnerID,
 	FieldDelegationEnabled,
-	FieldVisibility,
 	FieldLabels,
 	FieldAnnotations,
 	FieldPhase,
@@ -177,8 +174,6 @@ var (
 	NameValidator func(string) error
 	// DefaultDelegationEnabled holds the default value on creation for the "delegation_enabled" field.
 	DefaultDelegationEnabled bool
-	// DefaultVisibility holds the default value on creation for the "visibility" field.
-	DefaultVisibility string
 	// DefaultCurrentTurns holds the default value on creation for the "current_turns" field.
 	DefaultCurrentTurns int
 	// DefaultCurrentModelCalls holds the default value on creation for the "current_model_calls" field.
@@ -278,11 +273,6 @@ func ByOwnerID(opts ...sql.OrderTermOption) OrderOption {
 // ByDelegationEnabled orders the results by the delegation_enabled field.
 func ByDelegationEnabled(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldDelegationEnabled, opts...).ToFunc()
-}
-
-// ByVisibility orders the results by the visibility field.
-func ByVisibility(opts ...sql.OrderTermOption) OrderOption {
-	return sql.OrderByField(FieldVisibility, opts...).ToFunc()
 }
 
 // ByPhase orders the results by the phase field.

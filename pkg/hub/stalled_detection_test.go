@@ -75,7 +75,6 @@ func TestAgentStalledDetectionHandler_MarksStalledAgents(t *testing.T) {
 		Template:   "claude",
 		ProjectID:  project.ID,
 		Phase:      string(state.PhaseCreated),
-		Visibility: store.VisibilityPrivate,
 	}
 	if err := s.CreateAgent(ctx, agent); err != nil {
 		t.Fatalf("failed to create agent: %v", err)
@@ -160,7 +159,6 @@ func TestAgentStalledDetectionHandler_ClearedByActivityEvent(t *testing.T) {
 		Template:   "claude",
 		ProjectID:  project.ID,
 		Phase:      string(state.PhaseCreated),
-		Visibility: store.VisibilityPrivate,
 	}
 	if err := s.CreateAgent(ctx, agent); err != nil {
 		t.Fatalf("failed to create agent: %v", err)
@@ -221,7 +219,6 @@ func TestAgentStalledDetectionHandler_StalledFromActivityIsPreserved(t *testing.
 		Template:   "claude",
 		ProjectID:  project.ID,
 		Phase:      string(state.PhaseCreated),
-		Visibility: store.VisibilityPrivate,
 	}
 	if err := s.CreateAgent(ctx, agent); err != nil {
 		t.Fatalf("failed to create agent: %v", err)
@@ -302,7 +299,6 @@ func TestAgentStalledDetectionHandler_BlockedAgentNotStalled(t *testing.T) {
 		Template:   "claude",
 		ProjectID:  project.ID,
 		Phase:      string(state.PhaseCreated),
-		Visibility: store.VisibilityPrivate,
 	}
 	if err := s.CreateAgent(ctx, agent); err != nil {
 		t.Fatalf("failed to create agent: %v", err)
@@ -366,7 +362,6 @@ func TestAgentStalledDetectionHandler_IdleAgentMarkedStalled(t *testing.T) {
 		Template:   "claude",
 		ProjectID:  project.ID,
 		Phase:      string(state.PhaseCreated),
-		Visibility: store.VisibilityPrivate,
 	}
 	if err := s.CreateAgent(ctx, agent); err != nil {
 		t.Fatalf("failed to create agent: %v", err)

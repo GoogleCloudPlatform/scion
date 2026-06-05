@@ -126,7 +126,6 @@ type AgentCreatedEvent struct {
 	Runtime         string `json:"runtime,omitempty"`
 	RuntimeBrokerID string `json:"runtimeBrokerId,omitempty"`
 	CreatedBy       string `json:"createdBy,omitempty"`
-	Visibility      string `json:"visibility,omitempty"`
 	TaskSummary     string `json:"taskSummary,omitempty"`
 	Created         string `json:"created,omitempty"`
 }
@@ -384,7 +383,6 @@ func (p *eventBuilder) PublishAgentCreated(_ context.Context, agent *store.Agent
 		Runtime:         agent.Runtime,
 		RuntimeBrokerID: agent.RuntimeBrokerID,
 		CreatedBy:       agent.CreatedBy,
-		Visibility:      agent.Visibility,
 		TaskSummary:     agent.TaskSummary,
 	}
 	if !agent.Created.IsZero() {

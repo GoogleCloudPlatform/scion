@@ -243,7 +243,6 @@ func hubAgentToAgentInfo(a hubclient.Agent) api.AgentInfo {
 		DeletedAt:         a.DeletedAt,
 		CreatedBy:         a.CreatedBy,
 		OwnerID:           a.OwnerID,
-		Visibility:        a.Visibility,
 		StateVersion:      a.StateVersion,
 	}
 

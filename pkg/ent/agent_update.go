@@ -163,20 +163,6 @@ func (_u *AgentUpdate) SetNillableDelegationEnabled(v *bool) *AgentUpdate {
 	return _u
 }
 
-// SetVisibility sets the "visibility" field.
-func (_u *AgentUpdate) SetVisibility(v string) *AgentUpdate {
-	_u.mutation.SetVisibility(v)
-	return _u
-}
-
-// SetNillableVisibility sets the "visibility" field if the given value is not nil.
-func (_u *AgentUpdate) SetNillableVisibility(v *string) *AgentUpdate {
-	if v != nil {
-		_u.SetVisibility(*v)
-	}
-	return _u
-}
-
 // SetLabels sets the "labels" field.
 func (_u *AgentUpdate) SetLabels(v map[string]string) *AgentUpdate {
 	_u.mutation.SetLabels(v)
@@ -845,9 +831,6 @@ func (_u *AgentUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	if value, ok := _u.mutation.DelegationEnabled(); ok {
 		_spec.SetField(agent.FieldDelegationEnabled, field.TypeBool, value)
 	}
-	if value, ok := _u.mutation.Visibility(); ok {
-		_spec.SetField(agent.FieldVisibility, field.TypeString, value)
-	}
 	if value, ok := _u.mutation.Labels(); ok {
 		_spec.SetField(agent.FieldLabels, field.TypeJSON, value)
 	}
@@ -1265,20 +1248,6 @@ func (_u *AgentUpdateOne) SetDelegationEnabled(v bool) *AgentUpdateOne {
 func (_u *AgentUpdateOne) SetNillableDelegationEnabled(v *bool) *AgentUpdateOne {
 	if v != nil {
 		_u.SetDelegationEnabled(*v)
-	}
-	return _u
-}
-
-// SetVisibility sets the "visibility" field.
-func (_u *AgentUpdateOne) SetVisibility(v string) *AgentUpdateOne {
-	_u.mutation.SetVisibility(v)
-	return _u
-}
-
-// SetNillableVisibility sets the "visibility" field if the given value is not nil.
-func (_u *AgentUpdateOne) SetNillableVisibility(v *string) *AgentUpdateOne {
-	if v != nil {
-		_u.SetVisibility(*v)
 	}
 	return _u
 }
@@ -1980,9 +1949,6 @@ func (_u *AgentUpdateOne) sqlSave(ctx context.Context) (_node *Agent, err error)
 	}
 	if value, ok := _u.mutation.DelegationEnabled(); ok {
 		_spec.SetField(agent.FieldDelegationEnabled, field.TypeBool, value)
-	}
-	if value, ok := _u.mutation.Visibility(); ok {
-		_spec.SetField(agent.FieldVisibility, field.TypeString, value)
 	}
 	if value, ok := _u.mutation.Labels(); ok {
 		_spec.SetField(agent.FieldLabels, field.TypeJSON, value)

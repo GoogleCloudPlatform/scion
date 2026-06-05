@@ -100,7 +100,6 @@ func TestAgentHeartbeatTimeoutHandler_MarksStaleAgents(t *testing.T) {
 		Template:   "claude",
 		ProjectID:  project.ID,
 		Phase:      string(state.PhaseCreated),
-		Visibility: store.VisibilityPrivate,
 	}
 	if err := s.CreateAgent(ctx, staleAgent); err != nil {
 		t.Fatalf("failed to create agent: %v", err)
@@ -121,7 +120,6 @@ func TestAgentHeartbeatTimeoutHandler_MarksStaleAgents(t *testing.T) {
 		Template:   "claude",
 		ProjectID:  project.ID,
 		Phase:      string(state.PhaseStopped),
-		Visibility: store.VisibilityPrivate,
 	}
 	if err := s.CreateAgent(ctx, stoppedAgent); err != nil {
 		t.Fatalf("failed to create stopped agent: %v", err)
@@ -189,7 +187,6 @@ func TestAgentHeartbeatTimeoutHandler_ClearedBySubsequentHeartbeat(t *testing.T)
 		Template:  "claude",
 		ProjectID: project.ID,
 		Phase:     string(state.PhaseRunning), Activity: string(state.ActivityOffline),
-		Visibility: store.VisibilityPrivate,
 	}
 	if err := s.CreateAgent(ctx, agent); err != nil {
 		t.Fatalf("failed to create agent: %v", err)

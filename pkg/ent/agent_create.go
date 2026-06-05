@@ -115,20 +115,6 @@ func (_c *AgentCreate) SetNillableDelegationEnabled(v *bool) *AgentCreate {
 	return _c
 }
 
-// SetVisibility sets the "visibility" field.
-func (_c *AgentCreate) SetVisibility(v string) *AgentCreate {
-	_c.mutation.SetVisibility(v)
-	return _c
-}
-
-// SetNillableVisibility sets the "visibility" field if the given value is not nil.
-func (_c *AgentCreate) SetNillableVisibility(v *string) *AgentCreate {
-	if v != nil {
-		_c.SetVisibility(*v)
-	}
-	return _c
-}
-
 // SetLabels sets the "labels" field.
 func (_c *AgentCreate) SetLabels(v map[string]string) *AgentCreate {
 	_c.mutation.SetLabels(v)
@@ -575,10 +561,6 @@ func (_c *AgentCreate) defaults() {
 		v := agent.DefaultDelegationEnabled
 		_c.mutation.SetDelegationEnabled(v)
 	}
-	if _, ok := _c.mutation.Visibility(); !ok {
-		v := agent.DefaultVisibility
-		_c.mutation.SetVisibility(v)
-	}
 	if _, ok := _c.mutation.CurrentTurns(); !ok {
 		v := agent.DefaultCurrentTurns
 		_c.mutation.SetCurrentTurns(v)
@@ -644,9 +626,6 @@ func (_c *AgentCreate) check() error {
 	}
 	if _, ok := _c.mutation.DelegationEnabled(); !ok {
 		return &ValidationError{Name: "delegation_enabled", err: errors.New(`ent: missing required field "Agent.delegation_enabled"`)}
-	}
-	if _, ok := _c.mutation.Visibility(); !ok {
-		return &ValidationError{Name: "visibility", err: errors.New(`ent: missing required field "Agent.visibility"`)}
 	}
 	if _, ok := _c.mutation.CurrentTurns(); !ok {
 		return &ValidationError{Name: "current_turns", err: errors.New(`ent: missing required field "Agent.current_turns"`)}
@@ -735,10 +714,6 @@ func (_c *AgentCreate) createSpec() (*Agent, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.DelegationEnabled(); ok {
 		_spec.SetField(agent.FieldDelegationEnabled, field.TypeBool, value)
 		_node.DelegationEnabled = value
-	}
-	if value, ok := _c.mutation.Visibility(); ok {
-		_spec.SetField(agent.FieldVisibility, field.TypeString, value)
-		_node.Visibility = value
 	}
 	if value, ok := _c.mutation.Labels(); ok {
 		_spec.SetField(agent.FieldLabels, field.TypeJSON, value)
@@ -1060,18 +1035,6 @@ func (u *AgentUpsert) SetDelegationEnabled(v bool) *AgentUpsert {
 // UpdateDelegationEnabled sets the "delegation_enabled" field to the value that was provided on create.
 func (u *AgentUpsert) UpdateDelegationEnabled() *AgentUpsert {
 	u.SetExcluded(agent.FieldDelegationEnabled)
-	return u
-}
-
-// SetVisibility sets the "visibility" field.
-func (u *AgentUpsert) SetVisibility(v string) *AgentUpsert {
-	u.Set(agent.FieldVisibility, v)
-	return u
-}
-
-// UpdateVisibility sets the "visibility" field to the value that was provided on create.
-func (u *AgentUpsert) UpdateVisibility() *AgentUpsert {
-	u.SetExcluded(agent.FieldVisibility)
 	return u
 }
 
@@ -1706,20 +1669,6 @@ func (u *AgentUpsertOne) SetDelegationEnabled(v bool) *AgentUpsertOne {
 func (u *AgentUpsertOne) UpdateDelegationEnabled() *AgentUpsertOne {
 	return u.Update(func(s *AgentUpsert) {
 		s.UpdateDelegationEnabled()
-	})
-}
-
-// SetVisibility sets the "visibility" field.
-func (u *AgentUpsertOne) SetVisibility(v string) *AgentUpsertOne {
-	return u.Update(func(s *AgentUpsert) {
-		s.SetVisibility(v)
-	})
-}
-
-// UpdateVisibility sets the "visibility" field to the value that was provided on create.
-func (u *AgentUpsertOne) UpdateVisibility() *AgentUpsertOne {
-	return u.Update(func(s *AgentUpsert) {
-		s.UpdateVisibility()
 	})
 }
 
@@ -2596,20 +2545,6 @@ func (u *AgentUpsertBulk) SetDelegationEnabled(v bool) *AgentUpsertBulk {
 func (u *AgentUpsertBulk) UpdateDelegationEnabled() *AgentUpsertBulk {
 	return u.Update(func(s *AgentUpsert) {
 		s.UpdateDelegationEnabled()
-	})
-}
-
-// SetVisibility sets the "visibility" field.
-func (u *AgentUpsertBulk) SetVisibility(v string) *AgentUpsertBulk {
-	return u.Update(func(s *AgentUpsert) {
-		s.SetVisibility(v)
-	})
-}
-
-// UpdateVisibility sets the "visibility" field to the value that was provided on create.
-func (u *AgentUpsertBulk) UpdateVisibility() *AgentUpsertBulk {
-	return u.Update(func(s *AgentUpsert) {
-		s.UpdateVisibility()
 	})
 }
 

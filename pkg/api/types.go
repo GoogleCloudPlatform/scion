@@ -568,10 +568,9 @@ type AgentInfo struct {
 	DeletedAt time.Time `json:"deletedAt,omitempty"` // When the agent was soft-deleted
 
 	// Ownership & access
-	CreatedBy  string   `json:"createdBy,omitempty"`  // User/system that created the agent
-	OwnerID    string   `json:"ownerId,omitempty"`    // Current owner user ID
-	Visibility string   `json:"visibility,omitempty"` // Access level: private, team, public
-	Ancestry   []string `json:"ancestry,omitempty"`   // Ordered ancestor chain [root, ..., parent] for transitive access
+	CreatedBy string   `json:"createdBy,omitempty"` // User/system that created the agent
+	OwnerID   string   `json:"ownerId,omitempty"`   // Current owner user ID
+	Ancestry  []string `json:"ancestry,omitempty"`  // Ordered ancestor chain [root, ..., parent] for transitive access
 
 	// Hosted/distributed mode fields
 	RuntimeBrokerID   string `json:"runtimeBrokerId,omitempty"`   // ID of the Runtime Broker managing this agent
