@@ -1268,6 +1268,7 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 			Name:    "workspace-provision",
 			Image:   config.Image,
 			Command: []string{"sh", "-c", initScript},
+			Env:     nfsInitProvisionEnv(config.GitCloneForInit),
 			VolumeMounts: []corev1.VolumeMount{
 				workspaceVolumeMount,
 			},
@@ -2428,28 +2429,30 @@ func nfsSharedDirSubPath(workspaceSubPath, sharedDirName string) string {
 // The /workspace mount in the init container points at the project's subPath
 // (e.g. projects/<pid>/workspace), so all operations are relative to "."
 // within that mount.
+//
+// Security: URL and Branch are injected via environment variables
+// (SCION_CLONE_URL, SCION_CLONE_BRANCH) set on the init container, NOT
+// interpolated into the script text. This prevents shell injection through
+// crafted branch names or URLs. Only the numeric depth is interpolated.
 func nfsInitProvisionScript(gc *api.GitCloneConfig) string {
 	if gc == nil || gc.URL == "" {
 		return "echo 'No git clone URL configured, skipping workspace provision'"
 	}
 
-	// Build the git clone command.
+	// Build the git clone depth flag. Only numeric depth is safe to interpolate.
 	depth := gc.Depth
 	if depth == 0 {
 		depth = 1 // default shallow clone
 	}
 
-	cloneArgs := "clone"
+	depthFlag := ""
 	if depth > 0 {
-		cloneArgs += fmt.Sprintf(" --depth %d", depth)
-	}
-	if gc.Branch != "" {
-		cloneArgs += fmt.Sprintf(" --branch '%s'", gc.Branch)
+		depthFlag = fmt.Sprintf("--depth %d", depth)
 	}
 
-	// The script clones into a temp dir then moves content into /workspace,
-	// because git clone requires an empty target directory. The sentinel
-	// (.scion-provisioned) is checked first to skip if already provisioned.
+	// The script reads URL and branch from env vars (set on the container spec)
+	// to avoid shell injection. The sentinel (.scion-provisioned) is checked
+	// first to skip if already provisioned.
 	script := fmt.Sprintf(`set -e
 SENTINEL="/workspace/.scion-provisioned"
 if [ -f "$SENTINEL" ]; then
@@ -2459,17 +2462,35 @@ fi
 echo "Provisioning NFS workspace..."
 export GIT_TERMINAL_PROMPT=0
 TMPDIR=$(mktemp -d /workspace/.clone-XXXXXX)
-git %s '%s' "$TMPDIR"
+CLONE_ARGS="clone %s"
+if [ -n "$SCION_CLONE_BRANCH" ]; then
+  CLONE_ARGS="$CLONE_ARGS --branch $SCION_CLONE_BRANCH"
+fi
+git $CLONE_ARGS "$SCION_CLONE_URL" "$TMPDIR"
 # Move cloned content into /workspace (handles hidden files like .git)
 shopt -s dotglob 2>/dev/null || true
 mv "$TMPDIR"/* /workspace/ 2>/dev/null || cp -a "$TMPDIR"/. /workspace/
 rm -rf "$TMPDIR"
 # Write sentinel to mark provisioning complete
 echo "provisioned_at=$(date -u +%%Y-%%m-%%dT%%H:%%M:%%SZ)" > "$SENTINEL"
-echo "Workspace provisioned successfully"`,
-		cloneArgs, gc.URL)
+echo "Workspace provisioned successfully"`, depthFlag)
 
 	return script
+}
+
+// nfsInitProvisionEnv returns the environment variables for the NFS init
+// container. URL and Branch are passed as env vars to prevent shell injection.
+func nfsInitProvisionEnv(gc *api.GitCloneConfig) []corev1.EnvVar {
+	if gc == nil {
+		return nil
+	}
+	envs := []corev1.EnvVar{
+		{Name: "SCION_CLONE_URL", Value: gc.URL},
+	}
+	if gc.Branch != "" {
+		envs = append(envs, corev1.EnvVar{Name: "SCION_CLONE_BRANCH", Value: gc.Branch})
+	}
+	return envs
 }
 
 // nfsWaitForSentinelScript generates a shell script for the non-winner

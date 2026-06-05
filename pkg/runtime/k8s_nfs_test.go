@@ -25,6 +25,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/k8s"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
@@ -238,7 +240,7 @@ func TestBuildPod_NFSBackend_InitContainer_Present(t *testing.T) {
 		t.Errorf("init container workspace subPath = %q, want %q", wsMount.SubPath, "projects/proj-123/workspace")
 	}
 
-	// Command should reference the git URL and contain sentinel check
+	// Command should reference env vars (not inline URL/branch) and contain sentinel check
 	if len(ic.Command) < 3 {
 		t.Fatalf("init container command too short: %v", ic.Command)
 	}
@@ -246,11 +248,32 @@ func TestBuildPod_NFSBackend_InitContainer_Present(t *testing.T) {
 	if !contains(script, ".scion-provisioned") {
 		t.Errorf("init script does not reference sentinel file .scion-provisioned")
 	}
-	if !contains(script, "https://github.com/example/repo.git") {
-		t.Errorf("init script does not contain git clone URL")
+	// URL and branch must be passed via env vars, NOT interpolated into script
+	if !contains(script, "$SCION_CLONE_URL") {
+		t.Errorf("init script does not reference $SCION_CLONE_URL env var")
 	}
-	if !contains(script, "--branch 'main'") {
-		t.Errorf("init script does not contain branch flag")
+	if contains(script, "https://github.com/example/repo.git") {
+		t.Errorf("init script contains inline URL — must use env var for injection safety")
+	}
+	if !contains(script, "$SCION_CLONE_BRANCH") {
+		t.Errorf("init script does not reference $SCION_CLONE_BRANCH env var")
+	}
+
+	// Verify env vars are set on the container
+	var hasURL, hasBranch bool
+	for _, env := range ic.Env {
+		if env.Name == "SCION_CLONE_URL" && env.Value == "https://github.com/example/repo.git" {
+			hasURL = true
+		}
+		if env.Name == "SCION_CLONE_BRANCH" && env.Value == "main" {
+			hasBranch = true
+		}
+	}
+	if !hasURL {
+		t.Error("init container missing SCION_CLONE_URL env var")
+	}
+	if !hasBranch {
+		t.Error("init container missing SCION_CLONE_BRANCH env var")
 	}
 }
 
@@ -312,12 +335,19 @@ func TestNFSInitProvisionScript_SentinelCheck(t *testing.T) {
 		t.Error("script missing sentinel check")
 	}
 
-	// Must contain git clone with the URL
-	if !contains(script, "git") && !contains(script, "clone") {
-		t.Error("script missing git clone command")
+	// Script must reference $SCION_CLONE_URL env var (not inline URL)
+	if !contains(script, "$SCION_CLONE_URL") {
+		t.Error("script missing $SCION_CLONE_URL env var reference")
 	}
-	if !contains(script, gc.URL) {
-		t.Errorf("script missing clone URL %q", gc.URL)
+
+	// URL must NOT be interpolated into script text (shell injection prevention)
+	if contains(script, gc.URL) {
+		t.Error("script contains inline URL — must use env var instead")
+	}
+
+	// Must contain git clone command
+	if !contains(script, "git") || !contains(script, "clone") {
+		t.Error("script missing git clone command")
 	}
 
 	// Must write sentinel after successful clone
@@ -344,6 +374,53 @@ func TestNFSInitProvisionScript_FullClone(t *testing.T) {
 	// With depth -1, should not include --depth flag
 	if contains(script, "--depth") {
 		t.Error("full clone (depth=-1): should not include --depth flag")
+	}
+}
+
+func TestNFSInitProvisionEnv(t *testing.T) {
+	t.Run("includes URL and branch", func(t *testing.T) {
+		gc := &api.GitCloneConfig{
+			URL:    "https://github.com/example/repo.git",
+			Branch: "main",
+		}
+		envs := nfsInitProvisionEnv(gc)
+		require.Len(t, envs, 2)
+		assert.Equal(t, "SCION_CLONE_URL", envs[0].Name)
+		assert.Equal(t, gc.URL, envs[0].Value)
+		assert.Equal(t, "SCION_CLONE_BRANCH", envs[1].Name)
+		assert.Equal(t, gc.Branch, envs[1].Value)
+	})
+
+	t.Run("omits branch when empty", func(t *testing.T) {
+		gc := &api.GitCloneConfig{
+			URL: "https://github.com/example/repo.git",
+		}
+		envs := nfsInitProvisionEnv(gc)
+		require.Len(t, envs, 1)
+		assert.Equal(t, "SCION_CLONE_URL", envs[0].Name)
+	})
+
+	t.Run("nil config returns nil", func(t *testing.T) {
+		envs := nfsInitProvisionEnv(nil)
+		assert.Nil(t, envs)
+	})
+}
+
+func TestNFSInitProvisionScript_BranchEnvVar(t *testing.T) {
+	gc := &api.GitCloneConfig{
+		URL:    "https://github.com/example/repo.git",
+		Branch: "feat/test",
+	}
+	script := nfsInitProvisionScript(gc)
+
+	// Branch must NOT appear in script text (injection prevention)
+	if contains(script, gc.Branch) {
+		t.Error("script contains inline branch — must use env var instead")
+	}
+
+	// Script must reference $SCION_CLONE_BRANCH env var
+	if !contains(script, "$SCION_CLONE_BRANCH") {
+		t.Error("script missing $SCION_CLONE_BRANCH env var reference")
 	}
 }
 
@@ -407,8 +484,12 @@ func TestBuildPod_NFSLockWinner_InjectsCloneInitContainer(t *testing.T) {
 	if !contains(script, "git") {
 		t.Error("winner init script should contain git clone command")
 	}
-	if !contains(script, "https://github.com/example/repo.git") {
-		t.Error("winner init script should contain the clone URL")
+	// URL must be passed via env var, not interpolated into script
+	if !contains(script, "$SCION_CLONE_URL") {
+		t.Error("winner init script should reference $SCION_CLONE_URL env var")
+	}
+	if contains(script, "https://github.com/example/repo.git") {
+		t.Error("winner init script must NOT contain inline URL (shell injection risk)")
 	}
 	if !contains(script, ".scion-provisioned") {
 		t.Error("winner init script should reference sentinel file")
@@ -416,6 +497,23 @@ func TestBuildPod_NFSLockWinner_InjectsCloneInitContainer(t *testing.T) {
 	// Must NOT contain wait-for-sentinel messaging
 	if contains(script, "Another node is provisioning") {
 		t.Error("winner init script should not contain wait-for-sentinel messaging")
+	}
+
+	// Verify env vars are set on the init container
+	var hasURL, hasBranch bool
+	for _, env := range ic.Env {
+		if env.Name == "SCION_CLONE_URL" && env.Value == "https://github.com/example/repo.git" {
+			hasURL = true
+		}
+		if env.Name == "SCION_CLONE_BRANCH" && env.Value == "main" {
+			hasBranch = true
+		}
+	}
+	if !hasURL {
+		t.Error("init container missing SCION_CLONE_URL env var")
+	}
+	if !hasBranch {
+		t.Error("init container missing SCION_CLONE_BRANCH env var")
 	}
 }
 
@@ -1160,4 +1258,32 @@ func findVolumeMount(container *corev1.Container, name string) *corev1.VolumeMou
 		}
 	}
 	return nil
+}
+
+// --- acquireProvisionLock context cancellation test ---
+
+func TestAcquireProvisionLock_ContextCancellation(t *testing.T) {
+	// When the context is cancelled while waiting for a lock, acquireProvisionLock
+	// must return promptly with a context error instead of sleeping for the full
+	// retry duration (30 × 1s = 30s).
+	backend := &nfsBackend{}
+	locker := &alwaysLoseLocker{} // lock never acquired
+
+	ctx, cancel := context.WithCancel(context.Background())
+	// Cancel immediately so the first select on ctx.Done() fires
+	cancel()
+
+	in := ProvisionInput{
+		ProjectID: "proj-cancel-test",
+		Locker:    locker,
+	}
+
+	start := time.Now()
+	_, err := backend.acquireProvisionLock(ctx, in)
+	elapsed := time.Since(start)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "context cancelled")
+	// Must return within 2s, not 30s (provisionLockRetries × provisionLockRetryDelay)
+	assert.Less(t, elapsed, 2*time.Second, "should return promptly on context cancellation, not wait for all retries")
 }

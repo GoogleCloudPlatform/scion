@@ -226,6 +226,9 @@ func (b *nfsBackend) Provision(in ProvisionInput) error {
 
 // acquireProvisionLock acquires the per-project advisory lock, retrying briefly
 // if another node currently holds it. Returns a release func.
+//
+// The retry loop respects context cancellation so that server shutdown is not
+// blocked for up to provisionLockRetries × provisionLockRetryDelay.
 func (b *nfsBackend) acquireProvisionLock(ctx context.Context, in ProvisionInput) (func() error, error) {
 	if in.Locker == nil {
 		// No locker available — degrade to unguarded (correct for single-node,
@@ -236,6 +239,8 @@ func (b *nfsBackend) acquireProvisionLock(ctx context.Context, in ProvisionInput
 	}
 
 	objID := store.StableProjectHash(in.ProjectID)
+	ticker := time.NewTicker(provisionLockRetryDelay)
+	defer ticker.Stop()
 
 	for attempt := 0; attempt < provisionLockRetries; attempt++ {
 		acquired, release, err := in.Locker.TryAdvisoryLockObject(ctx, store.LockWorkspaceProvision, objID)
@@ -246,10 +251,15 @@ func (b *nfsBackend) acquireProvisionLock(ctx context.Context, in ProvisionInput
 			return release, nil
 		}
 		// Another node holds the lock — it's provisioning this project.
-		// Wait briefly and retry.
+		// Wait briefly and retry, but honour context cancellation.
 		slog.Debug("nfsBackend.Provision: lock held by another node, retrying",
 			"project_id", in.ProjectID, "attempt", attempt+1)
-		time.Sleep(provisionLockRetryDelay)
+		select {
+		case <-ctx.Done():
+			return nil, fmt.Errorf("context cancelled while waiting for provisioning lock (project %s): %w",
+				in.ProjectID, ctx.Err())
+		case <-ticker.C:
+		}
 	}
 
 	return nil, fmt.Errorf("failed to acquire provisioning lock after %d attempts (project %s)",
