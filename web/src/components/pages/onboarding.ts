@@ -33,6 +33,8 @@ interface OnboardingStatus {
   complete: boolean;
   imageRegistry?: string;
   buildAvailable?: boolean;
+  gitVersion?: string;
+  gitVersionOK?: boolean;
 }
 
 interface DiagnosticResult {
@@ -84,6 +86,8 @@ export class ScionPageOnboarding extends LitElement {
   @state() private runtimeAvailable = false;
   @state() private buildAvailable = false;
   @state() private imageRegistry = '';
+  @state() private gitVersion = '';
+  @state() private gitVersionOK = true;
   private imageEventSource: EventSource | null = null;
 
   // Step 5: Workspace
@@ -503,6 +507,8 @@ export class ScionPageOnboarding extends LitElement {
       }
 
       if (status?.imageRegistry) this.imageRegistry = status.imageRegistry;
+      if (status?.gitVersion !== undefined) this.gitVersion = status.gitVersion;
+      if (status?.gitVersionOK !== undefined) this.gitVersionOK = status.gitVersionOK;
 
       // Resume: advance past completed steps only if user has previously started
       const previouslyStarted = sessionStorage.getItem('onboardingStarted') === 'true';
@@ -653,6 +659,16 @@ export class ScionPageOnboarding extends LitElement {
               <span class="message">${r.message}</span>
             </div>
           `)}
+          ${!this.gitVersionOK && this.gitVersion ? html`
+            <div class="check-item">
+              <span class="pill warn">warn</span>
+              <span class="name">Git version</span>
+              <span class="message">
+                Git 2.47+ is required for agent worktrees. Detected: ${this.gitVersion}.
+                Run <code>brew install git</code> to upgrade.
+              </span>
+            </div>
+          ` : nothing}
         </div>
       `}
 

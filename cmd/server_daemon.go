@@ -133,6 +133,11 @@ func runServerStartOrDaemon(cmd *cobra.Command, args []string) error {
 		daemonArgs = append(daemonArgs, "--global")
 	}
 
+	// Capture onboarding state BEFORE starting the daemon — the child process
+	// calls InitGlobal() on startup which creates settings.yaml, so checking
+	// afterwards would always see the file as present.
+	needsOnboarding := !hostedMode && config.GetSettingsPath(globalDir) == ""
+
 	// Start daemon
 	mode := "workstation"
 	if hostedMode {
@@ -162,7 +167,7 @@ func runServerStartOrDaemon(cmd *cobra.Command, args []string) error {
 
 	// Print quickstart info for workstation mode
 	if !hostedMode {
-		printWorkstationQuickstart(globalDir, hubHost, webPort, enableWeb, enableDevAuth)
+		printWorkstationQuickstart(needsOnboarding, globalDir, hubHost, webPort, enableWeb, enableDevAuth)
 	}
 
 	fmt.Println("Use 'scion server stop' to stop the daemon.")
@@ -419,16 +424,17 @@ func runServerStatus(cmd *cobra.Command, args []string) error {
 // printWorkstationQuickstart prints the first-run quickstart information
 // including the developer token and web UI URL after a workstation-mode daemon starts.
 // When the machine hasn't been onboarded yet, it prints and opens the /onboarding URL.
-func printWorkstationQuickstart(globalDir string, host string, wPort int, webEnabled, devAuth bool) {
+func printWorkstationQuickstart(needsOnboarding bool, globalDir string, host string, wPort int, webEnabled, devAuth bool) {
 	if webEnabled {
 		displayHost := host
 		if displayHost == "0.0.0.0" || displayHost == "" {
 			displayHost = "127.0.0.1"
 		}
 
-		// Point to /onboarding when the machine hasn't been set up yet
+		// Point to /onboarding when the machine hadn't been set up before daemon start.
+		// This state is captured before the daemon launches (which auto-creates settings.yaml).
 		path := ""
-		if config.GetSettingsPath(globalDir) == "" {
+		if needsOnboarding {
 			path = "/onboarding"
 		}
 

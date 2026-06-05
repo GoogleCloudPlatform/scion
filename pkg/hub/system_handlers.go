@@ -30,6 +30,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
 
 // --- 2.1: System Check (Doctor) ---
@@ -227,6 +228,8 @@ type OnboardingStatus struct {
 	EmbeddedBrokerID string `json:"embeddedBrokerID,omitempty"`
 	ImageRegistry    string `json:"imageRegistry,omitempty"`
 	BuildAvailable   bool   `json:"buildAvailable"`
+	GitVersion       string `json:"gitVersion,omitempty"`
+	GitVersionOK     bool   `json:"gitVersionOK"`
 }
 
 func (s *Server) computeOnboardingStatus(ctx context.Context) OnboardingStatus {
@@ -289,6 +292,15 @@ func (s *Server) computeOnboardingStatus(ctx context.Context) OnboardingStatus {
 
 	// BuildAvailable: true only if the build script can be resolved
 	status.BuildAvailable = resolveBuildScript() != ""
+
+	// GitVersion: report installed git version and whether it meets the worktree requirement
+	if gitVersion, _, err := util.GetGitVersion(); err == nil {
+		status.GitVersion = gitVersion
+		status.GitVersionOK = util.CheckGitVersion() == nil
+	} else {
+		status.GitVersion = "not found"
+		status.GitVersionOK = false
+	}
 
 	return status
 }
