@@ -188,26 +188,26 @@ export class ScionPageAgents extends LitElement {
         justify-content: flex-end;
       }
 
-      /* Color-coded hover effects for action buttons */
-      .action-btn-danger::part(base):hover {
+      /* Color-coded hover effects for action buttons (skip disabled) */
+      .action-btn-danger:not([disabled])::part(base):hover {
         background: var(--scion-action-hover-danger-bg, rgba(239, 68, 68, 0.1));
         border-color: var(--scion-danger-400, #f87171);
         color: var(--scion-danger-600, #dc2626);
       }
 
-      .action-btn-warning::part(base):hover {
+      .action-btn-warning:not([disabled])::part(base):hover {
         background: var(--scion-action-hover-warning-bg, rgba(245, 158, 11, 0.1));
         border-color: var(--scion-warning-400, #fbbf24);
         color: var(--scion-warning-600, #d97706);
       }
 
-      .action-btn-success::part(base):hover {
+      .action-btn-success:not([disabled])::part(base):hover {
         background: var(--scion-action-hover-success-bg, rgba(34, 197, 94, 0.1));
         border-color: var(--scion-success-400, #4ade80);
         color: var(--scion-success-600, #16a34a);
       }
 
-      .action-btn-primary::part(base):hover {
+      .action-btn-primary:not([disabled])::part(base):hover {
         background: var(--scion-action-hover-primary-bg, rgba(59, 130, 246, 0.1));
         border-color: var(--scion-primary-400, #60a5fa);
         color: var(--scion-primary-600, #2563eb);
@@ -843,16 +843,18 @@ export class ScionPageAgents extends LitElement {
     return html`
       ${can(agent._capabilities, 'attach') ? html`
         <sl-tooltip content="Terminal">
-          <sl-button
-            class="action-btn-primary"
-            variant="primary"
-            size="small"
-            href="/agents/${agent.id}/terminal"
-            ?disabled=${!isTerminalAvailable(agent)}
-            aria-label="Terminal"
-          >
-            <sl-icon slot="prefix" name="terminal"></sl-icon>
-          </sl-button>
+          <span style="display: inline-flex">
+            <sl-button
+              class="action-btn-primary"
+              variant="primary"
+              size="small"
+              href="/agents/${agent.id}/terminal"
+              ?disabled=${!isTerminalAvailable(agent)}
+              aria-label="Terminal"
+            >
+              <sl-icon slot="prefix" name="terminal"></sl-icon>
+            </sl-button>
+          </span>
         </sl-tooltip>
       ` : nothing}
       ${isAgentRunning(agent)
