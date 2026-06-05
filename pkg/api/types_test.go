@@ -486,3 +486,23 @@ func TestScionConfig_ParseMaxDuration(t *testing.T) {
 		})
 	}
 }
+
+func TestNormalizeVisibility(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"private", "private"},
+		{"team", "team"},
+		{"public", "public"},
+		{"grove", "team"},
+		{"project", "team"},
+		{"", ""},
+		{"unknown", "unknown"},
+	}
+	for _, tt := range tests {
+		if got := NormalizeVisibility(tt.input); got != tt.want {
+			t.Errorf("NormalizeVisibility(%q) = %q, want %q", tt.input, got, tt.want)
+		}
+	}
+}

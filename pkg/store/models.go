@@ -469,7 +469,7 @@ type Template struct {
 	OwnerID    string `json:"ownerId,omitempty"`
 	CreatedBy  string `json:"createdBy,omitempty"`
 	UpdatedBy  string `json:"updatedBy,omitempty"`
-	Visibility string `json:"visibility"` // private, project, public
+	Visibility string `json:"visibility"` // private, team, public
 
 	// Timestamps
 	Created time.Time `json:"created"`
@@ -562,7 +562,7 @@ type HarnessConfig struct {
 	OwnerID    string `json:"ownerId,omitempty"`
 	CreatedBy  string `json:"createdBy,omitempty"`
 	UpdatedBy  string `json:"updatedBy,omitempty"`
-	Visibility string `json:"visibility"` // private, project, public
+	Visibility string `json:"visibility"` // private, team, public
 
 	// Timestamps
 	Created time.Time `json:"created"`

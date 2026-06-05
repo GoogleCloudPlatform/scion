@@ -165,7 +165,7 @@ func (s *Server) createHarnessConfig(w http.ResponseWriter, r *http.Request) {
 		Config:      req.Config,
 		Scope:       req.Scope,
 		ScopeID:     req.ScopeID,
-		Visibility:  req.Visibility,
+		Visibility:  api.NormalizeVisibility(req.Visibility),
 		Status:      store.HarnessConfigStatusPending,
 	}
 
@@ -351,7 +351,7 @@ func (s *Server) patchHarnessConfig(w http.ResponseWriter, r *http.Request, id s
 		existing.Description = updates.Description
 	}
 	if updates.Visibility != "" {
-		existing.Visibility = updates.Visibility
+		existing.Visibility = api.NormalizeVisibility(updates.Visibility)
 	}
 
 	if err := s.store.UpdateHarnessConfig(ctx, existing); err != nil {

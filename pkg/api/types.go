@@ -814,6 +814,17 @@ const (
 	VisibilityPublic  = "public"  // Anyone can access (read-only)
 )
 
+// NormalizeVisibility maps legacy visibility values to their canonical form.
+// "grove" and "project" are accepted as aliases for "team" for backward compatibility.
+func NormalizeVisibility(v string) string {
+	switch v {
+	case "grove", "project":
+		return VisibilityTeam
+	default:
+		return v
+	}
+}
+
 // ProjectInfo contains metadata about a project (project/agent group).
 // It supports both local/solo mode and hosted/distributed mode.
 type ProjectInfo struct {

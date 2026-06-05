@@ -268,7 +268,7 @@ func (s *Server) createTemplateV2(w http.ResponseWriter, r *http.Request) {
 		ScopeID:      scopeID,
 		ProjectID:    scopeID, // Keep for backwards compat
 		BaseTemplate: req.BaseTemplate,
-		Visibility:   req.Visibility,
+		Visibility:   api.NormalizeVisibility(req.Visibility),
 		Status:       store.TemplateStatusPending, // Start as pending until files uploaded
 	}
 
@@ -467,7 +467,7 @@ func (s *Server) patchTemplateV2(w http.ResponseWriter, r *http.Request, id stri
 		existing.Description = updates.Description
 	}
 	if updates.Visibility != "" {
-		existing.Visibility = updates.Visibility
+		existing.Visibility = api.NormalizeVisibility(updates.Visibility)
 	}
 
 	if err := s.store.UpdateTemplate(ctx, existing); err != nil {
@@ -790,7 +790,7 @@ func (s *Server) handleTemplateClone(w http.ResponseWriter, r *http.Request, id 
 		ScopeID:      scopeID,
 		ProjectID:    scopeID,
 		BaseTemplate: source.ID, // Track the source template
-		Visibility:   req.Visibility,
+		Visibility:   api.NormalizeVisibility(req.Visibility),
 		Status:       store.TemplateStatusPending,
 	}
 
