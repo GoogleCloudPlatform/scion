@@ -15,6 +15,7 @@
 package hub
 
 import (
+	"context"
 	"net/http"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -61,5 +62,32 @@ func (s *Server) handleSystemIdentity(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Also update the database user record so the name is visible immediately
+	// without a server restart.
+	if s.store != nil && (req.DisplayName != "" || req.Email != "") {
+		s.updateDevUserRecord(r.Context(), req.DisplayName, req.Email)
+	}
+
 	writeJSON(w, http.StatusOK, systemIdentityResponse(req))
+}
+
+// updateDevUserRecord updates the dev user's display name and/or email in the
+// database so that the change is visible immediately without a server restart.
+func (s *Server) updateDevUserRecord(ctx context.Context, displayName, email string) {
+	user, err := s.store.GetUser(ctx, DevUserID)
+	if err != nil {
+		return
+	}
+	changed := false
+	if displayName != "" && user.DisplayName != displayName {
+		user.DisplayName = displayName
+		changed = true
+	}
+	if email != "" && user.Email != email {
+		user.Email = email
+		changed = true
+	}
+	if changed {
+		_ = s.store.UpdateUser(ctx, user)
+	}
 }

@@ -105,7 +105,8 @@ func seedPolicy(ctx context.Context, s store.Store, groupID string, policy *stor
 // This is needed because Ent enforces foreign key constraints on owner_id,
 // and the dev user must exist as a User record for project group creation to
 // succeed in workstation/dev-auth mode.
-func seedDevUser(ctx context.Context, s store.Store) {
+func seedDevUser(ctx context.Context, s store.Store, cfg DevUserConfig) {
+	u := NewDevUser(cfg)
 	_, err := s.GetUser(ctx, DevUserID)
 	if err == nil {
 		return // already exists
@@ -116,8 +117,8 @@ func seedDevUser(ctx context.Context, s store.Store) {
 	}
 	if err := s.CreateUser(ctx, &store.User{
 		ID:          DevUserID,
-		Email:       "dev@localhost",
-		DisplayName: "Development User",
+		Email:       u.Email(),
+		DisplayName: u.DisplayName(),
 		Role:        "admin",
 		Status:      "active",
 	}); err != nil && !errors.Is(err, store.ErrAlreadyExists) {

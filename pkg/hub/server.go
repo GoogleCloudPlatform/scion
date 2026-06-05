@@ -892,7 +892,7 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 	// Seed the dev user when dev-auth is enabled so that Ent FK constraints
 	// on owner_id are satisfied when the dev user creates projects/groups.
 	if cfg.DevAuthToken != "" {
-		seedDevUser(ctx, s)
+		seedDevUser(ctx, s, cfg.DevUserConfig)
 	}
 
 	// Abort any maintenance operations/migrations left in "running" state from

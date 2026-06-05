@@ -1152,7 +1152,7 @@ export class ScionPageOnboarding extends LitElement {
         <div class="ws-card" @click=${() => { this.workspaceMode = 'hub'; }}>
           <sl-icon name="cloud"></sl-icon>
           <div class="ws-card-text">
-            <div class="ws-card-title">Hub-native project</div>
+            <div class="ws-card-title">Hub-managed project</div>
             <div class="ws-card-desc">A workspace managed by the Hub. No git repository required.</div>
           </div>
         </div>

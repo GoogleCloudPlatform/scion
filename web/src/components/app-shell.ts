@@ -51,6 +51,7 @@ const PAGE_TITLES: Record<string, string> = {
   '/admin/skill-registries': 'Skill Registries',
   '/skills': 'Skills',
   '/github-app/installed': 'GitHub App Setup',
+  '/onboarding': 'Setup',
 };
 
 @customElement('scion-app')

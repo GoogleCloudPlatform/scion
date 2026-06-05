@@ -1180,11 +1180,24 @@ func (ws *WebServer) devAuthMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		// No user — auto-login with dev identity
+		// No user — auto-login with dev identity.
+		// Read from the store so any identity set via the onboarding wizard is reflected.
+		devEmail := "dev@localhost"
+		devName := "Development User"
+		if ws.store != nil {
+			if dbUser, err := ws.store.GetUser(r.Context(), DevUserID); err == nil {
+				if dbUser.Email != "" {
+					devEmail = dbUser.Email
+				}
+				if dbUser.DisplayName != "" {
+					devName = dbUser.DisplayName
+				}
+			}
+		}
 		devUser := &webSessionUser{
 			UserID:    DevUserID,
-			Email:     "dev@localhost",
-			Name:      "Development User",
+			Email:     devEmail,
+			Name:      devName,
 			AvatarURL: "",
 			Role:      "admin",
 		}
