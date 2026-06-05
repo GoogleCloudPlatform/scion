@@ -499,7 +499,7 @@ func (s *ProjectStore) populateProjectComputed(ctx context.Context, p *store.Pro
 	if linked {
 		p.ProjectType = store.ProjectTypeLinked
 	} else {
-		p.ProjectType = store.ProjectTypeHubNative
+		p.ProjectType = store.ProjectTypeHubManaged
 	}
 	return nil
 }
