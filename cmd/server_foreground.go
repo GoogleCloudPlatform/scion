@@ -970,6 +970,26 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 		}
 	}
 
+	// Construct transport token minter when auth.transport is configured
+	if cfg.Auth.Transport != nil && cfg.Auth.Transport.Mode != "" && cfg.Auth.Transport.Mode != "none" {
+		if cfg.Auth.Transport.PlatformAuthSA == "" {
+			return nil, fmt.Errorf("auth.transport.platformAuthSA is required when auth.transport.mode=%q", cfg.Auth.Transport.Mode)
+		}
+		audience := cfg.Auth.Transport.OIDCAudience
+		if audience == "" && cfg.Auth.Transport.Mode == "cloudrun_invoker" {
+			// Derive audience from hub endpoint for Cloud Run invoker mode
+			audience = hubEndpoint
+		}
+		if audience == "" {
+			return nil, fmt.Errorf("auth.transport.oidcAudience is required when auth.transport.mode=%q", cfg.Auth.Transport.Mode)
+		}
+		hubCfg.TransportMode = cfg.Auth.Transport.Mode
+		hubCfg.TransportAudience = audience
+		hubCfg.TransportMinter = hub.NewGCPTransportMinter(cfg.Auth.Transport.PlatformAuthSA, "")
+		log.Printf("Transport auth configured: mode=%s, audience=%s, sa=%s",
+			cfg.Auth.Transport.Mode, audience, cfg.Auth.Transport.PlatformAuthSA)
+	}
+
 	hubSrv, err := hub.New(hubCfg, s)
 	if err != nil {
 		return nil, fmt.Errorf("hub server initialization failed: %w", err)

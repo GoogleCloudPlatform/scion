@@ -134,9 +134,11 @@ type HTTPAgentDispatcher struct {
 	githubAppMinter GitHubAppTokenMinter // Optional GitHub App token minter
 	hubEndpoint     string               // Hub endpoint URL for agents to call back
 	hubID           string               // Hub instance ID for hub-scoped queries
-	devAuthToken    string               // Dev auth token to inject into agent env (dev-auth mode only)
-	debug           bool
-	log             *slog.Logger
+	devAuthToken      string               // Dev auth token to inject into agent env (dev-auth mode only)
+	transportMinter   TransportTokenMinter // Optional transport token minter for OIDC dispatch
+	transportAudience string               // OIDC audience for transport tokens
+	debug             bool
+	log               *slog.Logger
 
 	// Cross-node dispatch deps (B4-2). When events + commandBus are non-nil
 	// and client.StartAgent/StopAgent/RestartAgent returns ErrLifecycleDeferred,
@@ -197,6 +199,13 @@ func (d *HTTPAgentDispatcher) SetDevAuthToken(token string) {
 // SetAuthzService sets the authorization service for progeny secret verification.
 func (d *HTTPAgentDispatcher) SetAuthzService(a *AuthzService) {
 	d.authzService = a
+}
+
+// SetTransportMinter sets the transport token minter and audience for injecting
+// transport-layer OIDC tokens into agent dispatch payloads.
+func (d *HTTPAgentDispatcher) SetTransportMinter(minter TransportTokenMinter, audience string) {
+	d.transportMinter = minter
+	d.transportAudience = audience
 }
 
 // SetGitHubAppMinter sets the GitHub App token minter for resolving
@@ -510,6 +519,23 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 			req.ResolvedEnv = make(map[string]string)
 		}
 		req.ResolvedEnv["SCION_DEV_TOKEN"] = d.devAuthToken
+	}
+
+	// Transport token minting for platform-layer auth (IAP / Cloud Run invoker)
+	if d.transportMinter != nil && d.transportAudience != "" {
+		tToken, tExpiry, tErr := d.transportMinter.MintIDToken(ctx, d.transportAudience)
+		if tErr != nil {
+			if d.debug {
+				d.log.Warn("buildCreateRequest: failed to mint transport token", "error", tErr)
+			}
+		} else if tToken != "" {
+			if req.ResolvedEnv == nil {
+				req.ResolvedEnv = make(map[string]string)
+			}
+			req.ResolvedEnv["SCION_TRANSPORT_TOKEN"] = tToken
+			req.ResolvedEnv["SCION_TRANSPORT_AUDIENCE"] = d.transportAudience
+			req.ResolvedEnv["SCION_TRANSPORT_TOKEN_EXPIRY"] = tExpiry.UTC().Format(time.RFC3339)
+		}
 	}
 
 	return req, nil
@@ -1056,6 +1082,20 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 		}
 	}
 
+	// Transport token minting for platform-layer auth (IAP / Cloud Run invoker)
+	if d.transportMinter != nil && d.transportAudience != "" {
+		tToken, tExpiry, tErr := d.transportMinter.MintIDToken(ctx, d.transportAudience)
+		if tErr != nil {
+			if d.debug {
+				d.log.Warn("DispatchAgentStart: failed to mint transport token", "error", tErr)
+			}
+		} else if tToken != "" {
+			resolvedEnv["SCION_TRANSPORT_TOKEN"] = tToken
+			resolvedEnv["SCION_TRANSPORT_AUDIENCE"] = d.transportAudience
+			resolvedEnv["SCION_TRANSPORT_TOKEN_EXPIRY"] = tExpiry.UTC().Format(time.RFC3339)
+		}
+	}
+
 	// GitHub App token minting for agent start
 	if d.githubAppMinter != nil && agent.ProjectID != "" {
 		project, projectErr := d.store.GetProject(ctx, agent.ProjectID)
@@ -1200,6 +1240,20 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 			}
 		} else if token != "" {
 			resolvedEnv["SCION_AUTH_TOKEN"] = token
+		}
+	}
+
+	// Transport token minting for platform-layer auth (IAP / Cloud Run invoker)
+	if d.transportMinter != nil && d.transportAudience != "" {
+		tToken, tExpiry, tErr := d.transportMinter.MintIDToken(ctx, d.transportAudience)
+		if tErr != nil {
+			if d.debug {
+				d.log.Warn("DispatchAgentRestart: failed to mint transport token", "error", tErr)
+			}
+		} else if tToken != "" {
+			resolvedEnv["SCION_TRANSPORT_TOKEN"] = tToken
+			resolvedEnv["SCION_TRANSPORT_AUDIENCE"] = d.transportAudience
+			resolvedEnv["SCION_TRANSPORT_TOKEN_EXPIRY"] = tExpiry.UTC().Format(time.RFC3339)
 		}
 	}
 

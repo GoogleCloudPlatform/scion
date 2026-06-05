@@ -154,6 +154,15 @@ type ServerConfig struct {
 	// GCPMintCapGlobal is the maximum total number of minted service accounts across all projects.
 	// Zero means unlimited (default).
 	GCPMintCapGlobal int
+	// TransportMode is the transport-layer auth mode: "none" (default), "cloudrun_invoker", "iap".
+	// Controls which transport tokens the hub issues to agents.
+	TransportMode string
+	// TransportAudience is the OIDC audience for transport tokens.
+	// For IAP: the IAP OAuth client ID. For cloudrun_invoker: the hub URL.
+	TransportAudience string
+	// TransportMinter mints transport-layer OIDC tokens for agents.
+	// Nil when TransportMode == "none" or unset.
+	TransportMinter TransportTokenMinter
 }
 
 // MaintenanceConfig holds configuration for routine maintenance operation executors.
@@ -536,6 +545,10 @@ type Server struct {
 	// Channel registry for external notification delivery (nil = disabled)
 	channelRegistry *ChannelRegistry
 
+	// Transport token minter for agent outbound auth (nil = transport auth disabled)
+	transportMinter   TransportTokenMinter
+	transportAudience string
+
 	// GCP token generator for agent identity (nil = GCP identity disabled)
 	gcpTokenGenerator GCPTokenGenerator
 
@@ -716,6 +729,15 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 		srv.brokerAuthService = NewBrokerAuthService(cfg.BrokerAuthConfig, s)
 		srv.metrics = NewBrokerAuthMetrics()
 		slog.Info("Broker HMAC authentication enabled")
+	}
+
+	// Store transport token minter if configured
+	if cfg.TransportMinter != nil {
+		srv.transportMinter = cfg.TransportMinter
+		srv.transportAudience = cfg.TransportAudience
+		slog.Info("Transport token minter configured",
+			"mode", cfg.TransportMode,
+			"audience", cfg.TransportAudience)
 	}
 
 	// Initialize control channel manager
@@ -1547,6 +1569,11 @@ func (s *Server) CreateAuthenticatedDispatcher() *HTTPAgentDispatcher {
 	dispatcher.SetCrossNodeDeps(s.events, s.commandBus)
 	if s.dispatchMetrics != nil {
 		dispatcher.SetDispatchMetrics(s.dispatchMetrics)
+	}
+
+	// Configure transport token minter if available
+	if s.transportMinter != nil && s.transportAudience != "" {
+		dispatcher.SetTransportMinter(s.transportMinter, s.transportAudience)
 	}
 
 	return dispatcher
