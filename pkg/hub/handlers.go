@@ -1917,9 +1917,43 @@ func (s *Server) handleAgentTokenRefresh(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
+	// Build the generalized tokens[] array.
+	// App tokens are always present; transport tokens are added when
+	// the hub has a transport minter configured.
+	tokens := []RefreshTokenEntry{
+		{
+			Layer:     "app",
+			Type:      "scion_access",
+			Value:     newToken,
+			ExpiresIn: int(time.Until(expiresAt).Seconds()),
+		},
+	}
+
+	// Mint a transport token if transport auth is configured
+	if s.transportMinter != nil && s.transportAudience != "" {
+		tToken, tExpiry, tErr := s.transportMinter.MintIDToken(r.Context(), s.transportAudience)
+		if tErr != nil {
+			// Log but don't fail the refresh — app token is still valid
+			slog.Warn("Failed to mint transport token during refresh",
+				"agent_id", id, "error", tErr)
+		} else if tToken != "" {
+			tokens = append(tokens, RefreshTokenEntry{
+				Layer:     "transport",
+				Type:      "google_oidc",
+				Value:     tToken,
+				ExpiresIn: int(time.Until(tExpiry).Seconds()),
+				Audience:  s.transportAudience,
+			})
+		}
+	}
+
+	// Response includes both the legacy single-token fields (backward compat)
+	// and the generalized tokens[] array. Old clients ignore tokens[];
+	// new clients prefer tokens[].
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"token":      newToken,
 		"expires_at": expiresAt.UTC().Format(time.RFC3339),
+		"tokens":     tokens,
 	})
 }
 
