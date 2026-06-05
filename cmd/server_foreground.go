@@ -731,6 +731,9 @@ func initStore(ctx context.Context, cfg *config.GlobalConfig) (store.Store, erro
 // the file is already the Ent schema, empty, or absent. The provided context
 // allows the migration to be cancelled (e.g. Ctrl+C during first boot).
 func maybeMigrateLegacySQLite(ctx context.Context, path string) error {
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return nil
+	}
 	legacy, err := entc.IsLegacyRawSQLSchema(path)
 	if err != nil {
 		return fmt.Errorf("detecting database schema: %w", err)

@@ -89,8 +89,8 @@ func (c *AuthenticatedBrokerClient) ExecAgent(ctx context.Context, brokerID, bro
 }
 
 // CleanupProject asks a broker to remove its local hub-managed project directory with HMAC authentication.
-func (c *AuthenticatedBrokerClient) CleanupProject(ctx context.Context, brokerID, brokerEndpoint, projectSlug string) error {
-	return c.transport.CleanupProject(ctx, brokerID, brokerEndpoint, projectSlug)
+func (c *AuthenticatedBrokerClient) CleanupProject(ctx context.Context, brokerID, brokerEndpoint, projectSlug, projectID string) error {
+	return c.transport.CleanupProject(ctx, brokerID, brokerEndpoint, projectSlug, projectID)
 }
 
 // FinalizeEnv sends gathered env vars to a broker to complete agent creation.

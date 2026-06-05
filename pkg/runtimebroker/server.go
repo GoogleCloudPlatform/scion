@@ -144,6 +144,12 @@ type ServerConfig struct {
 	// container-script dispatches on this broker.
 	AllowContainerScriptHarnesses bool
 
+	// NFSConfig holds NFS workspace storage settings for this broker.
+	// When non-nil with shares configured, the broker can provision and
+	// clean up NFS-backed workspace subtrees. Used by deleteProject (N1-6)
+	// to also remove the NFS project subtree on project deletion.
+	NFSConfig *config.V1NFSConfig
+
 	// ColocatedStorage is the storage backend of a Hub running co-located in the
 	// same process. When set and backed by the local filesystem, the broker
 	// resolves resources for the co-located connection by reading directly from
