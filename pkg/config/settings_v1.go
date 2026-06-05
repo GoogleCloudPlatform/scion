@@ -384,13 +384,37 @@ type V1DatabaseConfig struct {
 	ConnMaxIdleTime string `json:"conn_max_idle_time,omitempty" yaml:"conn_max_idle_time,omitempty" koanf:"conn_max_idle_time"`
 }
 
-// V1AuthConfig holds development authentication settings.
+// V1AuthConfig holds authentication settings.
 type V1AuthConfig struct {
-	DevMode           bool     `json:"dev_mode,omitempty" yaml:"dev_mode,omitempty" koanf:"dev_mode"`
-	DevToken          string   `json:"dev_token,omitempty" yaml:"dev_token,omitempty" koanf:"dev_token"`
-	DevTokenFile      string   `json:"dev_token_file,omitempty" yaml:"dev_token_file,omitempty" koanf:"dev_token_file"`
-	AuthorizedDomains []string `json:"authorized_domains,omitempty" yaml:"authorized_domains,omitempty" koanf:"authorized_domains"`
-	UserAccessMode    string   `json:"user_access_mode,omitempty" yaml:"user_access_mode,omitempty" koanf:"user_access_mode"`
+	// Mode selects the exclusive human auth mode: "oauth" (default), "proxy", or "dev".
+	// In proxy mode, OAuth handlers are disabled; in dev mode, dev token auth is used.
+	Mode              string         `json:"mode,omitempty" yaml:"mode,omitempty" koanf:"mode"`
+	DevMode           bool           `json:"dev_mode,omitempty" yaml:"dev_mode,omitempty" koanf:"dev_mode"`
+	DevToken          string         `json:"dev_token,omitempty" yaml:"dev_token,omitempty" koanf:"dev_token"`
+	DevTokenFile      string         `json:"dev_token_file,omitempty" yaml:"dev_token_file,omitempty" koanf:"dev_token_file"`
+	AuthorizedDomains []string       `json:"authorized_domains,omitempty" yaml:"authorized_domains,omitempty" koanf:"authorized_domains"`
+	UserAccessMode    string         `json:"user_access_mode,omitempty" yaml:"user_access_mode,omitempty" koanf:"user_access_mode"`
+	Proxy             *V1ProxyConfig `json:"proxy,omitempty" yaml:"proxy,omitempty" koanf:"proxy"`
+}
+
+// V1ProxyConfig holds proxy authentication settings (consulted when auth.mode == "proxy").
+type V1ProxyConfig struct {
+	// Provider selects the proxy auth provider: "iap" or "header".
+	Provider string       `json:"provider,omitempty" yaml:"provider,omitempty" koanf:"provider"`
+	// IAP holds Google IAP-specific settings.
+	IAP      *V1IAPConfig `json:"iap,omitempty" yaml:"iap,omitempty" koanf:"iap"`
+	// RequireTrustedProxyIP enables defense-in-depth IP allowlisting.
+	RequireTrustedProxyIP bool `json:"require_trusted_proxy_ip,omitempty" yaml:"require_trusted_proxy_ip,omitempty" koanf:"require_trusted_proxy_ip"`
+}
+
+// V1IAPConfig holds Google IAP-specific settings.
+type V1IAPConfig struct {
+	// Audience is the expected audience claim — MANDATORY for IAP.
+	Audience string `json:"audience,omitempty" yaml:"audience,omitempty" koanf:"audience"`
+	// Issuer overrides the default IAP issuer (for testing).
+	Issuer string `json:"issuer,omitempty" yaml:"issuer,omitempty" koanf:"issuer"`
+	// JWKSURL overrides the default IAP JWKS URL (for testing).
+	JWKSURL string `json:"jwks_url,omitempty" yaml:"jwks_url,omitempty" koanf:"jwks_url"`
 }
 
 // V1OAuthConfig holds OAuth provider configurations.
@@ -890,9 +914,11 @@ func versionedEnvKeyMapper(s string) string {
 // These must be recognized as single fields rather than split into nested keys.
 // IMPORTANT: Sorted longest-first so that "dev_token_file" matches before "dev_token".
 var knownCompoundFields = []string{
+	"require_trusted_proxy_ip",
 	"soft_delete_retain_files",
 	"soft_delete_retention",
 	"authorized_domains",
+	"jwks_url",
 	"broker_nickname",
 	"allowed_origins",
 	"allowed_methods",
@@ -985,7 +1011,7 @@ func mapEnvKeyRecursive(key string) string {
 func isSectionName(name string) bool {
 	switch name {
 	case "hub", "broker", "database", "auth", "oauth", "storage", "secrets", "cors",
-		"web", "cli", "device", "google", "github":
+		"web", "cli", "device", "google", "github", "proxy", "iap":
 		return true
 	}
 	return false
@@ -1235,6 +1261,9 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 
 	// Auth config
 	if v1.Auth != nil {
+		if v1.Auth.Mode != "" {
+			gc.Auth.Mode = v1.Auth.Mode
+		}
 		gc.Auth.Enabled = v1.Auth.DevMode
 		gc.Auth.Token = v1.Auth.DevToken
 		gc.Auth.TokenFile = v1.Auth.DevTokenFile
@@ -1243,6 +1272,19 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 		}
 		if v1.Auth.UserAccessMode != "" {
 			gc.Auth.UserAccessMode = v1.Auth.UserAccessMode
+		}
+		if v1.Auth.Proxy != nil {
+			gc.Auth.Proxy = &ProxyAuthConfig{
+				Provider:              v1.Auth.Proxy.Provider,
+				RequireTrustedProxyIP: v1.Auth.Proxy.RequireTrustedProxyIP,
+			}
+			if v1.Auth.Proxy.IAP != nil {
+				gc.Auth.Proxy.IAP = &IAPAuthConfig{
+					Audience: v1.Auth.Proxy.IAP.Audience,
+					Issuer:   v1.Auth.Proxy.IAP.Issuer,
+					JWKSURL:  v1.Auth.Proxy.IAP.JWKSURL,
+				}
+			}
 		}
 	}
 
@@ -1397,11 +1439,25 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 
 	// Auth config
 	v1.Auth = &V1AuthConfig{
+		Mode:              gc.Auth.Mode,
 		DevMode:           gc.Auth.Enabled,
 		DevToken:          gc.Auth.Token,
 		DevTokenFile:      gc.Auth.TokenFile,
 		AuthorizedDomains: gc.Auth.AuthorizedDomains,
 		UserAccessMode:    gc.Auth.UserAccessMode,
+	}
+	if gc.Auth.Proxy != nil {
+		v1.Auth.Proxy = &V1ProxyConfig{
+			Provider:              gc.Auth.Proxy.Provider,
+			RequireTrustedProxyIP: gc.Auth.Proxy.RequireTrustedProxyIP,
+		}
+		if gc.Auth.Proxy.IAP != nil {
+			v1.Auth.Proxy.IAP = &V1IAPConfig{
+				Audience: gc.Auth.Proxy.IAP.Audience,
+				Issuer:   gc.Auth.Proxy.IAP.Issuer,
+				JWKSURL:  gc.Auth.Proxy.IAP.JWKSURL,
+			}
+		}
 	}
 
 	// OAuth config

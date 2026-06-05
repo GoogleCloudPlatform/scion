@@ -124,6 +124,9 @@ type WebServerConfig struct {
 	BaseURL string
 	// DevAuthToken is the dev token for auto-login (empty = disabled).
 	DevAuthToken string
+	// AuthMode is the exclusive human auth mode: "oauth" (default), "proxy", "dev".
+	// In proxy mode, OAuth providers are not shown and logout behavior changes.
+	AuthMode string
 	// AuthorizedDomains is the list of allowed email domains (empty = all allowed).
 	AuthorizedDomains []string
 	// AdminEmails is the list of bootstrap admin emails (bypass domain check).
@@ -1475,8 +1478,26 @@ func (ws *WebServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request)
 }
 
 // handleLogout clears the session and redirects to login (or returns JSON for API).
+// In proxy mode, logout is a no-op (the proxy owns the session) — optionally
+// redirect to IAP's clear_login_cookie endpoint.
 // Route: GET /auth/logout, POST /auth/logout
 func (ws *WebServer) handleLogout(w http.ResponseWriter, r *http.Request) {
+	// In proxy mode, the hub does not own the session.
+	if ws.config.AuthMode == "proxy" {
+		if isBrowserRequest(r) {
+			// Redirect to IAP's clear login cookie endpoint
+			http.Redirect(w, r, "/_gcp_iap/clear_login_cookie", http.StatusFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": true,
+			"message": "proxy mode: session is managed by the authenticating proxy",
+		})
+		return
+	}
+
 	session, err := ws.sessionStore.Get(r, webSessionName)
 	if err != nil {
 		session, _ = ws.sessionStore.New(r, webSessionName)
@@ -1543,11 +1564,14 @@ func (ws *WebServer) handleAuthMe(w http.ResponseWriter, r *http.Request) {
 // handleAuthProviders returns which OAuth providers are enabled for web login.
 // Route: GET /auth/providers
 func (ws *WebServer) handleAuthProviders(w http.ResponseWriter, r *http.Request) {
-	resp := map[string]bool{
+	resp := map[string]interface{}{
 		"google": false,
 		"github": false,
 	}
-	if ws.oauthService != nil {
+	// In proxy mode, no OAuth providers are active (auth is handled by the proxy).
+	if ws.config.AuthMode == "proxy" {
+		resp["authMode"] = "proxy"
+	} else if ws.oauthService != nil {
 		resp["google"] = ws.oauthService.IsProviderConfiguredForClient(OAuthClientTypeWeb, "google")
 		resp["github"] = ws.oauthService.IsProviderConfiguredForClient(OAuthClientTypeWeb, "github")
 	}
@@ -1574,6 +1598,7 @@ func (ws *WebServer) handleAuthDebug(w http.ResponseWriter, r *http.Request) {
 		"hasAccessToken": session.Values[sessKeyHubAccessToken] != nil,
 		"config": map[string]interface{}{
 			"baseURL":         ws.config.BaseURL,
+			"authMode":        ws.config.AuthMode,
 			"devAuthEnabled":  ws.config.DevAuthToken != "",
 			"oauthConfigured": ws.oauthService != nil,
 			"storeConfigured": ws.store != nil,

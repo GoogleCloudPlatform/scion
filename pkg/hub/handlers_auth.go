@@ -267,6 +267,11 @@ func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 				"your email domain is not authorized", nil)
 			return
 		}
+		if errors.Is(err, ErrUserSuspended) {
+			writeError(w, http.StatusForbidden, "user_suspended",
+				"your account has been suspended", nil)
+			return
+		}
 		InternalError(w)
 		return
 	}
@@ -376,6 +381,11 @@ func (s *Server) handleAuthToken(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, ErrAccessDenied) {
 			writeError(w, http.StatusForbidden, "unauthorized_domain",
 				"your email domain is not authorized", nil)
+			return
+		}
+		if errors.Is(err, ErrUserSuspended) {
+			writeError(w, http.StatusForbidden, "user_suspended",
+				"your account has been suspended", nil)
 			return
 		}
 		InternalError(w)
@@ -488,7 +498,14 @@ func (s *Server) handleAuthValidate(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleAuthLogout handles POST /api/v1/auth/logout.
+// In proxy mode, this is a no-op (the proxy owns the session).
 func (s *Server) handleAuthLogout(w http.ResponseWriter, r *http.Request) {
+	// In proxy mode, the hub does not own the session.
+	if s.config.AuthMode == "proxy" {
+		writeJSON(w, http.StatusOK, AuthLogoutResponse{Success: true})
+		return
+	}
+
 	var req AuthLogoutRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		// Empty body is fine for logout
@@ -808,7 +825,8 @@ func (s *Server) handleCLIAuthProviders(w http.ResponseWriter, r *http.Request) 
 		ClientType: clientTypeParam,
 		Providers:  []string{},
 	}
-	if s.oauthService != nil {
+	// In proxy mode, no OAuth providers are available.
+	if s.config.AuthMode != "proxy" && s.oauthService != nil {
 		resp.Providers = s.oauthService.ConfiguredProvidersForClient(clientType)
 	}
 
@@ -877,6 +895,11 @@ func (s *Server) handleCLIAuthToken(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, ErrAccessDenied) {
 			writeError(w, http.StatusForbidden, "unauthorized_domain",
 				"your email domain is not authorized", nil)
+			return
+		}
+		if errors.Is(err, ErrUserSuspended) {
+			writeError(w, http.StatusForbidden, "user_suspended",
+				"your account has been suspended", nil)
 			return
 		}
 		InternalError(w)
@@ -1102,6 +1125,11 @@ func (s *Server) completeOAuthLogin(w http.ResponseWriter, r *http.Request, user
 				"your email domain is not authorized", nil)
 			return
 		}
+		if errors.Is(err, ErrUserSuspended) {
+			writeError(w, http.StatusForbidden, "user_suspended",
+				"your account has been suspended", nil)
+			return
+		}
 		InternalError(w)
 		return
 	}
@@ -1134,13 +1162,13 @@ func (s *Server) completeOAuthLogin(w http.ResponseWriter, r *http.Request, user
 	})
 }
 
+// ErrUserSuspended is returned by provisionUser when the user's account is suspended.
+var ErrUserSuspended = errors.New("user account is suspended")
+
 // provisionUser authorizes the external user, then finds or creates the
 // corresponding store.User. It returns ErrAccessDenied when the email is not
-// authorized. On success it also ensures hub-members group membership.
-//
-// NOTE: this method does not check user.Status (e.g. suspended). The current
-// OAuth flow has no such check either. A suspended-user gate will be added in
-// Phase 1 (proxy auth) if needed.
+// authorized, or ErrUserSuspended when the user is suspended.
+// On success it also ensures hub-members group membership.
 func (s *Server) provisionUser(ctx context.Context, info *ExternalUserInfo) (*store.User, error) {
 	// Authorization check
 	if !s.isUserAuthorized(ctx, info.Email) {
@@ -1170,6 +1198,12 @@ func (s *Server) provisionUser(ctx context.Context, info *ExternalUserInfo) (*st
 			return nil, fmt.Errorf("create user: %w", err)
 		}
 	} else {
+		// Reject suspended users (covers both OAuth and proxy auth paths)
+		if user.Status == "suspended" {
+			slog.Warn("login rejected: user is suspended", "email", info.Email, "user_id", user.ID)
+			return nil, ErrUserSuspended
+		}
+
 		// Update last login and backfill profile
 		user.LastLogin = time.Now()
 		if info.AvatarURL != "" && user.AvatarURL == "" {

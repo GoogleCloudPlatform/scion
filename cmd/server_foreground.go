@@ -883,6 +883,7 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 		CORSAllowedMethods:    cfg.Hub.CORSAllowedMethods,
 		CORSAllowedHeaders:    cfg.Hub.CORSAllowedHeaders,
 		CORSMaxAge:            cfg.Hub.CORSMaxAge,
+		AuthMode:              cfg.Auth.Mode,
 		DevAuthToken:          devAuthToken,
 		Debug:                 enableDebug,
 		AuthorizedDomains:     cfg.Auth.AuthorizedDomains,
@@ -946,6 +947,27 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 		// HubID. Without this, a JWT minted by one replica fails validation on
 		// another (cross-replica "session_expired" login loop).
 		SharedSigningSecret: resolveSessionSecret(),
+	}
+
+	// Construct proxy authenticator when auth mode is "proxy"
+	if cfg.Auth.Mode == "proxy" && cfg.Auth.Proxy != nil {
+		switch cfg.Auth.Proxy.Provider {
+		case "iap":
+			if cfg.Auth.Proxy.IAP == nil || cfg.Auth.Proxy.IAP.Audience == "" {
+				return nil, fmt.Errorf("auth.proxy.iap.audience is required when auth.mode=proxy and provider=iap")
+			}
+			hubCfg.ProxyAuth = &hub.IAPAuthenticator{
+				Audience: cfg.Auth.Proxy.IAP.Audience,
+				Issuer:   cfg.Auth.Proxy.IAP.Issuer,
+				JWKSURL:  cfg.Auth.Proxy.IAP.JWKSURL,
+			}
+			log.Printf("Proxy auth configured: provider=iap, audience=%s", cfg.Auth.Proxy.IAP.Audience)
+		case "header":
+			// TODO: HeaderProxyAuthenticator (refactor of extractProxyUser)
+			log.Printf("Proxy auth configured: provider=header (legacy IP-trust mode)")
+		default:
+			return nil, fmt.Errorf("unsupported auth.proxy.provider: %q", cfg.Auth.Proxy.Provider)
+		}
 	}
 
 	hubSrv, err := hub.New(hubCfg, s)
@@ -1174,6 +1196,7 @@ func initWebServer(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Se
 		SessionSecret:      sessionSecret,
 		BaseURL:            baseURL,
 		DevAuthToken:       devAuthToken,
+		AuthMode:           cfg.Auth.Mode,
 		AuthorizedDomains:  webAuthorizedDomains,
 		AdminEmails:        webAdminEmails,
 		UserAccessMode:     cfg.Auth.UserAccessMode,

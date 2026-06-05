@@ -16,10 +16,13 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net"
 	"net/http"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 )
@@ -40,6 +43,15 @@ type AuthConfig struct {
 	UATSvc *UserAccessTokenService
 	// TrustedProxies is a list of trusted proxy IPs/CIDRs
 	TrustedProxies []string
+	// ProxyAuthenticator is the configured proxy authenticator (for proxy auth mode).
+	// When set, it replaces the legacy IP-only extractProxyUser path.
+	ProxyAuthenticator ProxyAuthenticator
+	// ProxyUserProvisioner is a function that provisions a user from a verified
+	// proxy identity. It runs provisionUser and returns the stored user.
+	// Required when ProxyAuthenticator is set.
+	ProxyUserProvisioner func(ctx context.Context, info *ProxyUserInfo) (UserIdentity, error)
+	// AuthMode is the exclusive human auth mode: "oauth", "proxy", "dev".
+	AuthMode string
 	// Debug enables verbose logging
 	Debug bool
 	// Logger is the subsystem logger for auth middleware (defaults to slog.Default())
@@ -139,14 +151,57 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 			// Step 3: Extract bearer token
 			token := extractBearerToken(r)
 			if token == "" {
-				// Check for trusted proxy headers
-				if len(trustedNets) > 0 && isTrustedProxy(r, trustedNets) {
+				// Step 3a: Try proxy authenticator (new verified-assertion path)
+				if cfg.ProxyAuthenticator != nil {
+					proxyUser, proxyErr := cfg.ProxyAuthenticator.Authenticate(r)
+					if proxyErr != nil {
+						// Assertion present but invalid — reject
+						if cfg.Debug {
+							log.Debug("Proxy auth rejected", "provider", cfg.ProxyAuthenticator.Name(), "error", proxyErr)
+						}
+						writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
+							"invalid proxy assertion: "+proxyErr.Error(), nil)
+						return
+					}
+					if proxyUser != nil {
+						// Verified proxy identity — provision the user
+						identity, err := cfg.ProxyUserProvisioner(ctx, proxyUser)
+						if err != nil {
+							if cfg.Debug {
+								log.Debug("Proxy user provisioning failed", "email", proxyUser.Email, "error", err)
+							}
+							if errors.Is(err, ErrAccessDenied) {
+								writeError(w, http.StatusForbidden, ErrCodeForbidden,
+									"access denied: email not authorized", nil)
+							} else if errors.Is(err, ErrUserSuspended) {
+								writeError(w, http.StatusForbidden, "user_suspended",
+									"access denied: user account is suspended", nil)
+							} else {
+								writeError(w, http.StatusInternalServerError, "internal_error",
+									"user provisioning failed", nil)
+							}
+							return
+						}
+						ctx = context.WithValue(ctx, userContextKey{}, identity)
+						ctx = contextWithIdentity(ctx, identity)
+						ctx = contextWithAuthType(ctx, AuthTypeProxy)
+						if cfg.Debug {
+							log.Debug("Proxy user authenticated", "provider", cfg.ProxyAuthenticator.Name(), "email", proxyUser.Email)
+						}
+						next.ServeHTTP(w, r.WithContext(ctx))
+						return
+					}
+					// (nil, nil) = no assertion present, fall through
+				}
+
+				// Step 3b: Legacy trusted proxy headers (backward compat when no ProxyAuthenticator)
+				if cfg.ProxyAuthenticator == nil && len(trustedNets) > 0 && isTrustedProxy(r, trustedNets) {
 					if user := extractProxyUser(r); user != nil {
 						ctx = context.WithValue(ctx, userContextKey{}, user)
 						ctx = contextWithIdentity(ctx, user)
 						ctx = contextWithAuthType(ctx, AuthTypeProxy)
 						if cfg.Debug {
-							log.Debug("Proxy user authenticated", "email", user.Email())
+							log.Debug("Proxy user authenticated (legacy)", "email", user.Email())
 						}
 						next.ServeHTTP(w, r.WithContext(ctx))
 						return
@@ -444,5 +499,86 @@ func RequireRole(roles ...string) func(http.Handler) http.Handler {
 
 			next.ServeHTTP(w, r)
 		})
+	}
+}
+
+// ---- Proxy user resolution cache ----
+
+const proxyUserCacheTTL = 60 * time.Second
+
+// proxyUserCacheEntry holds a cached provisioned user identity.
+type proxyUserCacheEntry struct {
+	identity  UserIdentity
+	expiresAt time.Time
+}
+
+// ProxyUserCache is a short-TTL cache keyed by verified email wrapping the
+// provisionUser store lookup. The JWT signature verification still runs every
+// request; only the store round-trip is cached.
+type ProxyUserCache struct {
+	mu    sync.RWMutex
+	cache map[string]*proxyUserCacheEntry
+}
+
+// NewProxyUserCache creates a new proxy user resolution cache.
+func NewProxyUserCache() *ProxyUserCache {
+	return &ProxyUserCache{
+		cache: make(map[string]*proxyUserCacheEntry),
+	}
+}
+
+// Get returns a cached user identity if present and not expired.
+func (c *ProxyUserCache) Get(email string) (UserIdentity, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	entry, ok := c.cache[email]
+	if !ok || time.Now().After(entry.expiresAt) {
+		return nil, false
+	}
+	return entry.identity, true
+}
+
+// Set stores a user identity in the cache.
+func (c *ProxyUserCache) Set(email string, identity UserIdentity) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.cache[email] = &proxyUserCacheEntry{
+		identity:  identity,
+		expiresAt: time.Now().Add(proxyUserCacheTTL),
+	}
+}
+
+// MakeProxyUserProvisioner creates the ProxyUserProvisioner function that
+// wraps provisionUser with a short-TTL cache. It converts the stored user
+// to the canonical UserIdentity (real UUID/role from the store).
+func MakeProxyUserProvisioner(server *Server) func(ctx context.Context, info *ProxyUserInfo) (UserIdentity, error) {
+	cache := NewProxyUserCache()
+
+	return func(ctx context.Context, info *ProxyUserInfo) (UserIdentity, error) {
+		// Check cache first (keyed by verified email)
+		if identity, ok := cache.Get(info.Email); ok {
+			return identity, nil
+		}
+
+		// Provision: authorize + find-or-create + hub membership
+		user, err := server.provisionUser(ctx, &ExternalUserInfo{
+			Email:       info.Email,
+			DisplayName: info.DisplayName,
+		})
+		if err != nil {
+			return nil, err
+		}
+
+		// Build canonical identity from stored user
+		identity := NewAuthenticatedUser(
+			user.ID,
+			user.Email,
+			user.DisplayName,
+			user.Role,
+			string(ClientTypeWeb),
+		)
+
+		cache.Set(info.Email, identity)
+		return identity, nil
 	}
 }

@@ -87,6 +87,10 @@ type ServerConfig struct {
 	// other replica behind the load balancer. When empty, signing keys fall
 	// back to per-hub storage in the secret backend / store.
 	SharedSigningSecret string
+	// AuthMode is the exclusive human auth mode: "oauth" (default), "proxy", "dev".
+	AuthMode string
+	// ProxyAuthenticator is the configured proxy authenticator (when AuthMode == "proxy").
+	ProxyAuth ProxyAuthenticator
 	// TrustedProxies is a list of trusted proxy IPs/CIDRs for forwarded headers.
 	TrustedProxies []string
 	// Debug enables verbose debug logging.
@@ -800,15 +804,21 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 
 	// Build unified auth configuration
 	srv.authConfig = AuthConfig{
-		Mode:           "production",
-		DevAuthEnabled: cfg.DevAuthToken != "",
-		DevAuthToken:   cfg.DevAuthToken,
-		AgentTokenSvc:  srv.agentTokenService,
-		UserTokenSvc:   srv.userTokenService,
-		UATSvc:         srv.uatService,
-		TrustedProxies: cfg.TrustedProxies,
-		Debug:          cfg.Debug,
-		Logger:         srv.authLog,
+		Mode:               "production",
+		DevAuthEnabled:     cfg.DevAuthToken != "",
+		DevAuthToken:       cfg.DevAuthToken,
+		AgentTokenSvc:      srv.agentTokenService,
+		UserTokenSvc:       srv.userTokenService,
+		UATSvc:             srv.uatService,
+		TrustedProxies:     cfg.TrustedProxies,
+		ProxyAuthenticator: cfg.ProxyAuth,
+		AuthMode:           cfg.AuthMode,
+		Debug:              cfg.Debug,
+		Logger:             srv.authLog,
+	}
+	// Wire the proxy user provisioner (wraps provisionUser with 60s cache)
+	if cfg.ProxyAuth != nil {
+		srv.authConfig.ProxyUserProvisioner = MakeProxyUserProvisioner(srv)
 	}
 
 	// Initialize Cloud Logging query service (optional, gated on GCP project ID)

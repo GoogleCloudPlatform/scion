@@ -183,8 +183,10 @@ func (d DatabaseConfig) ConnMaxIdleTimeDuration() (time.Duration, error) {
 	return dur, nil
 }
 
-// DevAuthConfig holds development authentication settings.
+// DevAuthConfig holds authentication settings.
 type DevAuthConfig struct {
+	// Mode selects the exclusive human auth mode: "oauth" (default), "proxy", or "dev".
+	Mode string `json:"mode,omitempty" yaml:"mode,omitempty" koanf:"mode"`
 	// Enabled indicates whether development authentication is enabled.
 	// WARNING: Not for production use.
 	Enabled bool `json:"devMode" yaml:"devMode" koanf:"devMode"`
@@ -199,6 +201,28 @@ type DevAuthConfig struct {
 	// UserAccessMode controls how user access is evaluated at login time.
 	// Values: "open" (default), "domain_restricted", "invite_only".
 	UserAccessMode string `json:"userAccessMode" yaml:"userAccessMode" koanf:"userAccessMode"`
+	// Proxy holds proxy authentication settings (consulted when Mode == "proxy").
+	Proxy *ProxyAuthConfig `json:"proxy,omitempty" yaml:"proxy,omitempty" koanf:"proxy"`
+}
+
+// ProxyAuthConfig holds proxy authentication settings.
+type ProxyAuthConfig struct {
+	// Provider selects the proxy auth provider: "iap" or "header".
+	Provider string `json:"provider" yaml:"provider" koanf:"provider"`
+	// IAP holds Google IAP-specific settings.
+	IAP *IAPAuthConfig `json:"iap,omitempty" yaml:"iap,omitempty" koanf:"iap"`
+	// RequireTrustedProxyIP enables defense-in-depth IP allowlisting.
+	RequireTrustedProxyIP bool `json:"requireTrustedProxyIP,omitempty" yaml:"requireTrustedProxyIP,omitempty" koanf:"requireTrustedProxyIP"`
+}
+
+// IAPAuthConfig holds Google IAP-specific settings.
+type IAPAuthConfig struct {
+	// Audience is the expected audience claim — MANDATORY for IAP.
+	Audience string `json:"audience" yaml:"audience" koanf:"audience"`
+	// Issuer overrides the default IAP issuer (for testing).
+	Issuer string `json:"issuer,omitempty" yaml:"issuer,omitempty" koanf:"issuer"`
+	// JWKSURL overrides the default IAP JWKS URL (for testing).
+	JWKSURL string `json:"jwksURL,omitempty" yaml:"jwksURL,omitempty" koanf:"jwksURL"`
 }
 
 // OAuthProviderConfig holds OAuth credentials for a single provider.
