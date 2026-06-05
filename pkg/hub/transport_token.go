@@ -19,6 +19,8 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"strings"
+	"sync"
 	"time"
 
 	"google.golang.org/api/iamcredentials/v1"
@@ -61,6 +63,11 @@ type gcpTransportMinter struct {
 	// iamEndpoint overrides the IAM Credentials API endpoint (for testing).
 	// Empty uses the default Google endpoint.
 	iamEndpoint string
+
+	// svcOnce guards lazy initialization of the cached IAM credentials service.
+	svcOnce sync.Once
+	svc     *iamcredentials.Service
+	svcErr  error
 }
 
 // NewGCPTransportMinter creates a new GCP transport token minter.
@@ -73,6 +80,19 @@ func NewGCPTransportMinter(serviceAccountEmail, iamEndpoint string) *gcpTranspor
 	}
 }
 
+// getOrCreateService lazily creates and caches the IAM credentials service client.
+// Uses context.Background() for the long-lived client; per-call ctx is passed to .Do().
+func (m *gcpTransportMinter) getOrCreateService() (*iamcredentials.Service, error) {
+	m.svcOnce.Do(func() {
+		var opts []option.ClientOption
+		if m.iamEndpoint != "" {
+			opts = append(opts, option.WithEndpoint(m.iamEndpoint))
+		}
+		m.svc, m.svcErr = iamcredentials.NewService(context.Background(), opts...)
+	})
+	return m.svc, m.svcErr
+}
+
 // MintIDToken impersonates the configured SA to mint a Google OIDC ID token
 // with the given audience via the IAM Credentials API.
 func (m *gcpTransportMinter) MintIDToken(ctx context.Context, audience string) (string, time.Time, error) {
@@ -80,12 +100,7 @@ func (m *gcpTransportMinter) MintIDToken(ctx context.Context, audience string) (
 		return "", time.Time{}, fmt.Errorf("transport minter: service account email not configured")
 	}
 
-	var opts []option.ClientOption
-	if m.iamEndpoint != "" {
-		opts = append(opts, option.WithEndpoint(m.iamEndpoint))
-	}
-
-	svc, err := iamcredentials.NewService(ctx, opts...)
+	svc, err := m.getOrCreateService()
 	if err != nil {
 		return "", time.Time{}, fmt.Errorf("transport minter: failed to create IAM credentials client: %w", err)
 	}
@@ -118,7 +133,7 @@ func (m *gcpTransportMinter) MintIDToken(ctx context.Context, audience string) (
 // parseJWTExpiry extracts the expiry time from a JWT without validating the signature.
 // This is safe for scheduling purposes since the token will be validated by the platform.
 func parseJWTExpiry(tokenString string) (time.Time, error) {
-	parts := splitJWT(tokenString)
+	parts := strings.Split(tokenString, ".")
 	if len(parts) != 3 {
 		return time.Time{}, fmt.Errorf("invalid JWT format: expected 3 parts, got %d", len(parts))
 	}
@@ -140,20 +155,6 @@ func parseJWTExpiry(tokenString string) (time.Time, error) {
 	}
 
 	return time.Unix(claims.Exp, 0), nil
-}
-
-// splitJWT splits a JWT string into its three dot-separated parts.
-func splitJWT(token string) []string {
-	parts := make([]string, 0, 3)
-	start := 0
-	for i := 0; i < len(token); i++ {
-		if token[i] == '.' {
-			parts = append(parts, token[start:i])
-			start = i + 1
-		}
-	}
-	parts = append(parts, token[start:])
-	return parts
 }
 
 // fakeTransportMinter is a test double for TransportTokenMinter.
