@@ -318,12 +318,14 @@ func (b *Bridge) SendMessage(ctx context.Context, projectSlug, agentSlug, contex
 		projectID: agentCtx.ProjectID,
 	})
 	defer b.removeWaiter(taskID)
-	defer b.unregisterActiveTask(taskID, aKey)
+	// Keep task registered in activeTasks — the agent's eventual state-change
+	// to completed/failed will close it via dispatchToActiveTask.
 
 	if err := b.hubClient.Agents().SendStructuredMessage(ctx, agentCtx.AgentID, scionMsg, false, false, false); err != nil {
 		if err := b.store.UpdateTaskState(taskID, TaskStateFailed); err != nil {
 			b.log.Error("failed to update task state", "error", err, "task_id", taskID)
 		}
+		b.unregisterActiveTask(taskID, aKey)
 		return nil, fmt.Errorf("send message to agent: %w", err)
 	}
 
@@ -342,15 +344,12 @@ func (b *Bridge) SendMessage(ctx context.Context, projectSlug, agentSlug, contex
 	select {
 	case response := <-responseCh:
 		msg, artifacts := TranslateScionToA2A(response)
-		if err := b.store.UpdateTaskState(taskID, TaskStateCompleted); err != nil {
-			b.log.Error("failed to update task state", "error", err, "task_id", taskID)
-		}
 
 		return &TaskResult{
 			ID:        taskID,
 			ContextID: agentCtx.ContextID,
 			Status: TaskStatus{
-				State:   TaskStateCompleted,
+				State:   TaskStateWorking,
 				Message: &msg,
 			},
 			Artifacts: artifacts,
@@ -360,12 +359,14 @@ func (b *Bridge) SendMessage(ctx context.Context, projectSlug, agentSlug, contex
 		if err := b.store.UpdateTaskState(taskID, TaskStateFailed); err != nil {
 			b.log.Error("failed to update task state", "error", err, "task_id", taskID)
 		}
+		b.unregisterActiveTask(taskID, aKey)
 		return nil, fmt.Errorf("timeout waiting for agent response after %v", timeout)
 
 	case <-ctx.Done():
 		if err := b.store.UpdateTaskState(taskID, TaskStateFailed); err != nil {
 			b.log.Error("failed to update task state", "error", err, "task_id", taskID)
 		}
+		b.unregisterActiveTask(taskID, aKey)
 		return nil, ctx.Err()
 	}
 }
@@ -630,17 +631,8 @@ func (b *Bridge) dispatchToActiveTask(ctx context.Context, taskID, agentSlug str
 			b.unregisterActiveTask(taskID, aKey)
 		}
 	} else {
-		// TODO(multi-turn): MVP limitation — treats any non-state-change message as
-		// a terminal response. Multi-turn agents that emit interim content (e.g.
-		// clarifying questions, progress updates) will have their task closed
-		// prematurely on the first content message. This breaks agents that use
-		// input-required → completed flows. Must be fixed before exposing
-		// non-trivial agent types.
-		b.log.Debug("treating content message as task completion (MVP)", "task_id", taskID)
-		if err := b.store.UpdateTaskState(taskID, TaskStateCompleted); err != nil {
-			b.log.Error("failed to update task state", "error", err, "task_id", taskID)
-		}
-
+		// Content message — broadcast to subscribers but keep task alive.
+		// Task lifecycle is driven by state-change messages, not content.
 		for _, art := range artifacts {
 			artEvent := StreamEvent{
 				ArtifactUpdate: &TaskArtifactUpdate{
@@ -656,22 +648,14 @@ func (b *Bridge) dispatchToActiveTask(ctx context.Context, taskID, agentSlug str
 			StatusUpdate: &TaskStatusUpdate{
 				TaskID: taskID,
 				Status: TaskStatus{
-					State:   TaskStateCompleted,
+					State:   TaskStateWorking,
 					Message: &a2aMsg,
 				},
-				Final: true,
+				Final: false,
 			},
 		}
 		b.streams.Broadcast(taskID, statusEvent)
 		b.push.Dispatch(ctx, taskID, statusEvent)
-
-		if b.metrics != nil {
-			b.metrics.TasksCompleted.WithLabelValues(TaskStateCompleted).Inc()
-		}
-		b.tasksMu.RLock()
-		aKey := b.activeTasks[taskID].aKey
-		b.tasksMu.RUnlock()
-		b.unregisterActiveTask(taskID, aKey)
 	}
 }
 
