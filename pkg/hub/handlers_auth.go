@@ -181,6 +181,19 @@ func (t TokenResponse) MarshalJSON() ([]byte, error) {
 	})
 }
 
+// ExternalUserInfo carries the provider-verified identity fields needed to
+// provision a user. It is a subset of OAuthUserInfo, decoupled from the
+// OAuth layer so that provisionUser can serve both OAuth and proxy callers.
+type ExternalUserInfo struct {
+	Email       string
+	DisplayName string
+	AvatarURL   string
+}
+
+// ErrAccessDenied is returned by provisionUser when the user's email is not
+// authorized to log in (domain restriction, invite-only, etc.).
+var ErrAccessDenied = errors.New("access denied")
+
 // handleAuth routes auth-related requests.
 func (s *Server) handleAuth(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Path
@@ -241,55 +254,22 @@ func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check if user is authorized (admin bypass, domain check, access mode)
+	// Provision user (authorize + find-or-create + hub membership)
 	ctx := r.Context()
-	if !s.isUserAuthorized(ctx, userInfo.Email) {
-		reason := "not_on_allow_list"
-		if s.config.UserAccessMode != "invite_only" {
-			reason = "domain_not_authorized"
-		}
-		LogInviteAuditFailure(ctx, s.auditLogger, InviteAuditLoginDenied, userInfo.Email, reason)
-		writeError(w, http.StatusForbidden, "unauthorized_domain",
-			"your email domain is not authorized", nil)
-		return
-	}
-
-	// Find or create user
-	user, err := s.store.GetUserByEmail(ctx, userInfo.Email)
+	user, err := s.provisionUser(ctx, &ExternalUserInfo{
+		Email:       userInfo.Email,
+		DisplayName: userInfo.DisplayName,
+		AvatarURL:   userInfo.AvatarURL,
+	})
 	if err != nil {
-		// Create new user
-		user = &store.User{
-			ID:          generateID(),
-			Email:       userInfo.Email,
-			DisplayName: userInfo.DisplayName,
-			AvatarURL:   userInfo.AvatarURL,
-			Role:        s.getUserRole(userInfo.Email),
-			Status:      "active",
-			Created:     time.Now(),
-			LastLogin:   time.Now(),
-		}
-		if err := s.store.CreateUser(ctx, user); err != nil {
-			InternalError(w)
+		if errors.Is(err, ErrAccessDenied) {
+			writeError(w, http.StatusForbidden, "unauthorized_domain",
+				"your email domain is not authorized", nil)
 			return
 		}
-	} else {
-		// Update last login
-		user.LastLogin = time.Now()
-		if userInfo.AvatarURL != "" && user.AvatarURL == "" {
-			user.AvatarURL = userInfo.AvatarURL
-		}
-		if userInfo.DisplayName != "" && user.DisplayName == "" {
-			user.DisplayName = userInfo.DisplayName
-		}
-		// Check if user should be promoted to admin (in case admin list changed)
-		if user.Role != "admin" && s.getUserRole(userInfo.Email) == "admin" {
-			user.Role = "admin"
-		}
-		_ = s.store.UpdateUser(ctx, user)
+		InternalError(w)
+		return
 	}
-
-	// Ensure user is a member of the hub-members group
-	ensureHubMembership(ctx, s.store, user.ID)
 
 	// Generate tokens
 	if s.userTokenService == nil {
@@ -386,54 +366,21 @@ func (s *Server) handleAuthToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check if user is authorized (admin bypass, domain check, access mode)
-	if !s.isUserAuthorized(ctx, userInfo.Email) {
-		reason := "not_on_allow_list"
-		if s.config.UserAccessMode != "invite_only" {
-			reason = "domain_not_authorized"
-		}
-		LogInviteAuditFailure(ctx, s.auditLogger, InviteAuditLoginDenied, userInfo.Email, reason)
-		writeError(w, http.StatusForbidden, "unauthorized_domain",
-			"your email domain is not authorized", nil)
-		return
-	}
-
-	// Find or create user
-	user, err := s.store.GetUserByEmail(ctx, userInfo.Email)
+	// Provision user (authorize + find-or-create + hub membership)
+	user, err := s.provisionUser(ctx, &ExternalUserInfo{
+		Email:       userInfo.Email,
+		DisplayName: userInfo.DisplayName,
+		AvatarURL:   userInfo.AvatarURL,
+	})
 	if err != nil {
-		// Create new user
-		user = &store.User{
-			ID:          generateID(),
-			Email:       userInfo.Email,
-			DisplayName: userInfo.DisplayName,
-			AvatarURL:   userInfo.AvatarURL,
-			Role:        s.getUserRole(userInfo.Email),
-			Status:      "active",
-			Created:     time.Now(),
-			LastLogin:   time.Now(),
-		}
-		if err := s.store.CreateUser(ctx, user); err != nil {
-			InternalError(w)
+		if errors.Is(err, ErrAccessDenied) {
+			writeError(w, http.StatusForbidden, "unauthorized_domain",
+				"your email domain is not authorized", nil)
 			return
 		}
-	} else {
-		// Update last login
-		user.LastLogin = time.Now()
-		if userInfo.AvatarURL != "" && user.AvatarURL == "" {
-			user.AvatarURL = userInfo.AvatarURL
-		}
-		if userInfo.DisplayName != "" && user.DisplayName == "" {
-			user.DisplayName = userInfo.DisplayName
-		}
-		// Check if user should be promoted to admin (in case admin list changed)
-		if user.Role != "admin" && s.getUserRole(userInfo.Email) == "admin" {
-			user.Role = "admin"
-		}
-		_ = s.store.UpdateUser(ctx, user)
+		InternalError(w)
+		return
 	}
-
-	// Ensure user is a member of the hub-members group
-	ensureHubMembership(ctx, s.store, user.ID)
 
 	// Generate tokens
 	if s.userTokenService == nil {
@@ -920,54 +867,21 @@ func (s *Server) handleCLIAuthToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check if user is authorized (admin bypass, domain check, access mode)
-	if !s.isUserAuthorized(ctx, userInfo.Email) {
-		reason := "not_on_allow_list"
-		if s.config.UserAccessMode != "invite_only" {
-			reason = "domain_not_authorized"
-		}
-		LogInviteAuditFailure(ctx, s.auditLogger, InviteAuditLoginDenied, userInfo.Email, reason)
-		writeError(w, http.StatusForbidden, "unauthorized_domain",
-			"your email domain is not authorized", nil)
-		return
-	}
-
-	// Find or create user
-	user, err := s.store.GetUserByEmail(ctx, userInfo.Email)
+	// Provision user (authorize + find-or-create + hub membership)
+	user, err := s.provisionUser(ctx, &ExternalUserInfo{
+		Email:       userInfo.Email,
+		DisplayName: userInfo.DisplayName,
+		AvatarURL:   userInfo.AvatarURL,
+	})
 	if err != nil {
-		// Create new user
-		user = &store.User{
-			ID:          generateID(),
-			Email:       userInfo.Email,
-			DisplayName: userInfo.DisplayName,
-			AvatarURL:   userInfo.AvatarURL,
-			Role:        s.getUserRole(userInfo.Email),
-			Status:      "active",
-			Created:     time.Now(),
-			LastLogin:   time.Now(),
-		}
-		if err := s.store.CreateUser(ctx, user); err != nil {
-			InternalError(w)
+		if errors.Is(err, ErrAccessDenied) {
+			writeError(w, http.StatusForbidden, "unauthorized_domain",
+				"your email domain is not authorized", nil)
 			return
 		}
-	} else {
-		// Update last login and profile info
-		user.LastLogin = time.Now()
-		if userInfo.AvatarURL != "" && user.AvatarURL == "" {
-			user.AvatarURL = userInfo.AvatarURL
-		}
-		if userInfo.DisplayName != "" && user.DisplayName == "" {
-			user.DisplayName = userInfo.DisplayName
-		}
-		// Check if user should be promoted to admin (in case admin list changed)
-		if user.Role != "admin" && s.getUserRole(userInfo.Email) == "admin" {
-			user.Role = "admin"
-		}
-		_ = s.store.UpdateUser(ctx, user)
+		InternalError(w)
+		return
 	}
-
-	// Ensure user is a member of the hub-members group
-	ensureHubMembership(ctx, s.store, user.ID)
 
 	// Generate Hub tokens (CLI type for longer duration)
 	if s.userTokenService == nil {
@@ -1176,53 +1090,21 @@ func (s *Server) getDeviceFlowUserInfo(ctx context.Context, provider, accessToke
 func (s *Server) completeOAuthLogin(w http.ResponseWriter, r *http.Request, userInfo *OAuthUserInfo) {
 	ctx := r.Context()
 
-	// Check if user is authorized (admin bypass, domain check, access mode)
-	if !s.isUserAuthorized(ctx, userInfo.Email) {
-		reason := "not_on_allow_list"
-		if s.config.UserAccessMode != "invite_only" {
-			reason = "domain_not_authorized"
-		}
-		LogInviteAuditFailure(ctx, s.auditLogger, InviteAuditLoginDenied, userInfo.Email, reason)
-		writeError(w, http.StatusForbidden, "unauthorized_domain",
-			"your email domain is not authorized", nil)
-		return
-	}
-
-	// Find or create user
-	user, err := s.store.GetUserByEmail(ctx, userInfo.Email)
+	// Provision user (authorize + find-or-create + hub membership)
+	user, err := s.provisionUser(ctx, &ExternalUserInfo{
+		Email:       userInfo.Email,
+		DisplayName: userInfo.DisplayName,
+		AvatarURL:   userInfo.AvatarURL,
+	})
 	if err != nil {
-		// Create new user
-		user = &store.User{
-			ID:          generateID(),
-			Email:       userInfo.Email,
-			DisplayName: userInfo.DisplayName,
-			AvatarURL:   userInfo.AvatarURL,
-			Role:        s.getUserRole(userInfo.Email),
-			Status:      "active",
-			Created:     time.Now(),
-			LastLogin:   time.Now(),
-		}
-		if err := s.store.CreateUser(ctx, user); err != nil {
-			InternalError(w)
+		if errors.Is(err, ErrAccessDenied) {
+			writeError(w, http.StatusForbidden, "unauthorized_domain",
+				"your email domain is not authorized", nil)
 			return
 		}
-	} else {
-		// Update last login and profile info
-		user.LastLogin = time.Now()
-		if userInfo.AvatarURL != "" && user.AvatarURL == "" {
-			user.AvatarURL = userInfo.AvatarURL
-		}
-		if userInfo.DisplayName != "" && user.DisplayName == "" {
-			user.DisplayName = userInfo.DisplayName
-		}
-		if user.Role != "admin" && s.getUserRole(userInfo.Email) == "admin" {
-			user.Role = "admin"
-		}
-		_ = s.store.UpdateUser(ctx, user)
+		InternalError(w)
+		return
 	}
-
-	// Ensure user is a member of the hub-members group
-	ensureHubMembership(ctx, s.store, user.ID)
 
 	// Generate Hub tokens (CLI type for longer duration)
 	if s.userTokenService == nil {
@@ -1250,6 +1132,63 @@ func (s *Server) completeOAuthLogin(w http.ResponseWriter, r *http.Request, user
 			AvatarURL:   user.AvatarURL,
 		},
 	})
+}
+
+// provisionUser authorizes the external user, then finds or creates the
+// corresponding store.User. It returns ErrAccessDenied when the email is not
+// authorized. On success it also ensures hub-members group membership.
+//
+// NOTE: this method does not check user.Status (e.g. suspended). The current
+// OAuth flow has no such check either. A suspended-user gate will be added in
+// Phase 1 (proxy auth) if needed.
+func (s *Server) provisionUser(ctx context.Context, info *ExternalUserInfo) (*store.User, error) {
+	// Authorization check
+	if !s.isUserAuthorized(ctx, info.Email) {
+		reason := "not_on_allow_list"
+		if s.config.UserAccessMode != "invite_only" {
+			reason = "domain_not_authorized"
+		}
+		LogInviteAuditFailure(ctx, s.auditLogger, InviteAuditLoginDenied, info.Email, reason)
+		return nil, ErrAccessDenied
+	}
+
+	// Find or create user
+	user, err := s.store.GetUserByEmail(ctx, info.Email)
+	if err != nil {
+		// Create new user
+		user = &store.User{
+			ID:          generateID(),
+			Email:       info.Email,
+			DisplayName: info.DisplayName,
+			AvatarURL:   info.AvatarURL,
+			Role:        s.getUserRole(info.Email),
+			Status:      "active",
+			Created:     time.Now(),
+			LastLogin:   time.Now(),
+		}
+		if err := s.store.CreateUser(ctx, user); err != nil {
+			return nil, fmt.Errorf("create user: %w", err)
+		}
+	} else {
+		// Update last login and backfill profile
+		user.LastLogin = time.Now()
+		if info.AvatarURL != "" && user.AvatarURL == "" {
+			user.AvatarURL = info.AvatarURL
+		}
+		if info.DisplayName != "" && user.DisplayName == "" {
+			user.DisplayName = info.DisplayName
+		}
+		// Promote to admin if config changed
+		if user.Role != "admin" && s.getUserRole(info.Email) == "admin" {
+			user.Role = "admin"
+		}
+		_ = s.store.UpdateUser(ctx, user)
+	}
+
+	// Ensure user is a member of the hub-members group
+	ensureHubMembership(ctx, s.store, user.ID)
+
+	return user, nil
 }
 
 // generateID generates a new UUID.

@@ -19,6 +19,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -488,4 +489,231 @@ func TestCLIDeviceToken_MethodNotAllowed(t *testing.T) {
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Errorf("expected status 405 for GET, got %d", rec.Code)
 	}
+}
+
+func TestProvisionUser(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("creates new user", func(t *testing.T) {
+		srv, s := testServer(t)
+
+		info := &ExternalUserInfo{
+			Email:       "new@example.com",
+			DisplayName: "New User",
+			AvatarURL:   "https://example.com/avatar.png",
+		}
+
+		user, err := srv.provisionUser(ctx, info)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if user.Email != "new@example.com" {
+			t.Errorf("expected email new@example.com, got %q", user.Email)
+		}
+		if user.DisplayName != "New User" {
+			t.Errorf("expected display name 'New User', got %q", user.DisplayName)
+		}
+		if user.AvatarURL != "https://example.com/avatar.png" {
+			t.Errorf("expected avatar URL, got %q", user.AvatarURL)
+		}
+		if user.Status != "active" {
+			t.Errorf("expected status 'active', got %q", user.Status)
+		}
+		if user.ID == "" {
+			t.Error("expected non-empty user ID")
+		}
+
+		// Verify persisted in store
+		stored, err := s.GetUserByEmail(ctx, "new@example.com")
+		if err != nil {
+			t.Fatalf("user not found in store: %v", err)
+		}
+		if stored.ID != user.ID {
+			t.Errorf("stored user ID mismatch: %q vs %q", stored.ID, user.ID)
+		}
+	})
+
+	t.Run("updates existing user last login", func(t *testing.T) {
+		srv, s := testServer(t)
+
+		// Pre-create user
+		original := &store.User{
+			ID:          generateID(),
+			Email:       "existing@example.com",
+			DisplayName: "Original Name",
+			AvatarURL:   "https://example.com/original.png",
+			Role:        "member",
+			Status:      "active",
+			Created:     time.Now().Add(-24 * time.Hour),
+			LastLogin:   time.Now().Add(-24 * time.Hour),
+		}
+		if err := s.CreateUser(ctx, original); err != nil {
+			t.Fatalf("failed to create user: %v", err)
+		}
+
+		beforeLogin := time.Now()
+		info := &ExternalUserInfo{
+			Email:       "existing@example.com",
+			DisplayName: "Updated Name",
+			AvatarURL:   "https://example.com/updated.png",
+		}
+
+		user, err := srv.provisionUser(ctx, info)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		// LastLogin should be updated
+		if user.LastLogin.Before(beforeLogin) {
+			t.Error("expected LastLogin to be updated")
+		}
+		// DisplayName should NOT be updated (original was non-empty)
+		if user.DisplayName != "Original Name" {
+			t.Errorf("expected display name 'Original Name', got %q", user.DisplayName)
+		}
+		// AvatarURL should NOT be updated (original was non-empty)
+		if user.AvatarURL != "https://example.com/original.png" {
+			t.Errorf("expected original avatar URL, got %q", user.AvatarURL)
+		}
+	})
+
+	t.Run("backfills empty display name and avatar", func(t *testing.T) {
+		srv, s := testServer(t)
+
+		// Pre-create user with empty display name and avatar
+		original := &store.User{
+			ID:      generateID(),
+			Email:   "backfill@example.com",
+			Role:    "member",
+			Status:  "active",
+			Created: time.Now().Add(-1 * time.Hour),
+		}
+		if err := s.CreateUser(ctx, original); err != nil {
+			t.Fatalf("failed to create user: %v", err)
+		}
+
+		info := &ExternalUserInfo{
+			Email:       "backfill@example.com",
+			DisplayName: "Backfilled Name",
+			AvatarURL:   "https://example.com/backfilled.png",
+		}
+
+		user, err := srv.provisionUser(ctx, info)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		if user.DisplayName != "Backfilled Name" {
+			t.Errorf("expected backfilled display name, got %q", user.DisplayName)
+		}
+		if user.AvatarURL != "https://example.com/backfilled.png" {
+			t.Errorf("expected backfilled avatar URL, got %q", user.AvatarURL)
+		}
+	})
+
+	t.Run("promotes member to admin when config changes", func(t *testing.T) {
+		srv, s := testServer(t)
+
+		// Pre-create user as member
+		original := &store.User{
+			ID:      generateID(),
+			Email:   "admin@example.com",
+			Role:    "member",
+			Status:  "active",
+			Created: time.Now(),
+		}
+		if err := s.CreateUser(ctx, original); err != nil {
+			t.Fatalf("failed to create user: %v", err)
+		}
+
+		// Configure server to recognize this email as admin
+		srv.config.AdminEmails = []string{"admin@example.com"}
+
+		info := &ExternalUserInfo{Email: "admin@example.com"}
+		user, err := srv.provisionUser(ctx, info)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		if user.Role != "admin" {
+			t.Errorf("expected role 'admin', got %q", user.Role)
+		}
+	})
+
+	t.Run("returns ErrAccessDenied for unauthorized domain", func(t *testing.T) {
+		srv, _ := testServer(t)
+
+		// Configure domain restriction
+		srv.config.AuthorizedDomains = []string{"allowed.com"}
+		srv.config.UserAccessMode = "domain_restricted"
+
+		info := &ExternalUserInfo{Email: "user@forbidden.com"}
+		_, err := srv.provisionUser(ctx, info)
+		if !errors.Is(err, ErrAccessDenied) {
+			t.Errorf("expected ErrAccessDenied, got %v", err)
+		}
+	})
+
+	t.Run("returns ErrAccessDenied for invite-only mode", func(t *testing.T) {
+		srv, _ := testServer(t)
+
+		// Configure invite-only mode (user not on allow list)
+		srv.config.UserAccessMode = "invite_only"
+
+		info := &ExternalUserInfo{Email: "user@example.com"}
+		_, err := srv.provisionUser(ctx, info)
+		if !errors.Is(err, ErrAccessDenied) {
+			t.Errorf("expected ErrAccessDenied, got %v", err)
+		}
+	})
+
+	t.Run("admin bypasses domain restriction", func(t *testing.T) {
+		srv, _ := testServer(t)
+
+		// Configure domain restriction but also add admin email
+		srv.config.AuthorizedDomains = []string{"allowed.com"}
+		srv.config.UserAccessMode = "domain_restricted"
+		srv.config.AdminEmails = []string{"admin@other.com"}
+
+		info := &ExternalUserInfo{Email: "admin@other.com"}
+		user, err := srv.provisionUser(ctx, info)
+		if err != nil {
+			t.Fatalf("expected admin bypass, got error: %v", err)
+		}
+		if user.Role != "admin" {
+			t.Errorf("expected role 'admin', got %q", user.Role)
+		}
+	})
+
+	t.Run("idempotent - calling twice does not duplicate", func(t *testing.T) {
+		srv, s := testServer(t)
+
+		info := &ExternalUserInfo{
+			Email:       "idempotent@example.com",
+			DisplayName: "First Call",
+		}
+
+		user1, err := srv.provisionUser(ctx, info)
+		if err != nil {
+			t.Fatalf("first call failed: %v", err)
+		}
+
+		user2, err := srv.provisionUser(ctx, info)
+		if err != nil {
+			t.Fatalf("second call failed: %v", err)
+		}
+
+		if user1.ID != user2.ID {
+			t.Errorf("expected same user ID across calls, got %q and %q", user1.ID, user2.ID)
+		}
+
+		// Verify only one user exists
+		u, err := s.GetUserByEmail(ctx, "idempotent@example.com")
+		if err != nil {
+			t.Fatalf("user not found: %v", err)
+		}
+		if u.ID != user1.ID {
+			t.Error("store user ID does not match")
+		}
+	})
 }
