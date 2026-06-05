@@ -366,7 +366,7 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request, req J
 		blocking = *params.Configuration.Blocking
 	}
 
-	result, err := s.bridge.SendMessage(r.Context(), projectSlug, agentSlug, params.ContextID, params.Message.Parts, blocking)
+	result, err := s.bridge.SendMessage(r.Context(), projectSlug, agentSlug, params.ContextID, params.TaskID, params.Message.Parts, blocking)
 	if err != nil {
 		s.log.Error("SendMessage failed", "error", err, "project", projectSlug, "agent", agentSlug)
 		switch {
@@ -374,6 +374,8 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request, req J
 			s.writeRPCError(w, req.ID, ErrCodeInvalidParams, "agent not found")
 		case errors.Is(err, ErrContextUnknown):
 			s.writeRPCError(w, req.ID, ErrCodeInvalidParams, "unknown context ID")
+		case errors.Is(err, ErrTaskTerminal):
+			s.writeRPCError(w, req.ID, ErrCodeInvalidParams, "task is in a terminal state")
 		default:
 			s.writeRPCError(w, req.ID, ErrCodeInternalError, "internal error")
 		}

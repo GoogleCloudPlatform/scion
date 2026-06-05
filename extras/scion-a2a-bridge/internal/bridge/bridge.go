@@ -34,6 +34,7 @@ import (
 var (
 	ErrAgentNotFound  = errors.New("agent not found")
 	ErrContextUnknown = errors.New("unknown context ID")
+	ErrTaskTerminal   = errors.New("task is in a terminal state")
 )
 
 // waiter tracks a blocking response channel with agent routing info.
@@ -232,10 +233,15 @@ func agentKey(projectID, agentSlug string) string {
 	return projectID + ":" + agentSlug
 }
 
-// SendMessage handles an A2A SendMessage. When blocking is true (the default),
-// it waits for the agent response. When blocking is false, it returns immediately
-// after submitting the message and the client can poll via GetTask or subscribe.
-func (b *Bridge) SendMessage(ctx context.Context, projectSlug, agentSlug, contextID string, parts []Part, blocking bool) (*TaskResult, error) {
+// SendMessage handles an A2A SendMessage. When taskID is non-empty, the message
+// is routed as a follow-up to an existing task (continuing the conversation).
+// When blocking is true (the default), it waits for the agent response.
+func (b *Bridge) SendMessage(ctx context.Context, projectSlug, agentSlug, contextID, existingTaskID string, parts []Part, blocking bool) (*TaskResult, error) {
+	// Follow-up on an existing task
+	if existingTaskID != "" {
+		return b.sendFollowUp(ctx, projectSlug, agentSlug, existingTaskID, parts, blocking)
+	}
+
 	agentCtx, err := b.resolveContext(ctx, projectSlug, agentSlug, contextID)
 	if err != nil {
 		return nil, fmt.Errorf("resolve context: %w", err)
@@ -368,6 +374,94 @@ func (b *Bridge) SendMessage(ctx context.Context, projectSlug, agentSlug, contex
 		}
 		return nil, ctx.Err()
 	}
+}
+
+// sendFollowUp routes a user message to an existing task's agent, continuing
+// the conversation. Returns ErrTaskTerminal if the task has already completed.
+func (b *Bridge) sendFollowUp(ctx context.Context, projectSlug, agentSlug, taskID string, parts []Part, blocking bool) (*TaskResult, error) {
+	task, err := b.store.GetTask(taskID)
+	if err != nil {
+		return nil, fmt.Errorf("get task: %w", err)
+	}
+	if task == nil {
+		return nil, fmt.Errorf("%w: %s", ErrAgentNotFound, taskID)
+	}
+	if task.ProjectID != projectSlug || task.AgentSlug != agentSlug {
+		return nil, fmt.Errorf("%w: task does not belong to %s/%s", ErrAgentNotFound, projectSlug, agentSlug)
+	}
+	if IsTerminalState(task.State) {
+		return nil, fmt.Errorf("%w: state is %s", ErrTaskTerminal, task.State)
+	}
+
+	agentID := task.AgentID
+	if agent := b.lookupAgent(ctx, task.ProjectID, task.AgentSlug); agent != nil {
+		agentID = agent.ID
+	}
+
+	scionMsg := TranslateA2AToScion(parts)
+	scionMsg.Sender = fmt.Sprintf("user:%s", b.config.Hub.User)
+	scionMsg.Recipient = fmt.Sprintf("agent:%s", task.AgentSlug)
+	scionMsg.Metadata = map[string]string{"a2aTaskId": taskID}
+
+	if err := b.store.UpdateTaskState(taskID, TaskStateWorking); err != nil {
+		b.log.Error("failed to update task state for follow-up", "error", err, "task_id", taskID)
+	}
+
+	if blocking {
+		aKey := agentKey(task.ProjectID, task.AgentSlug)
+		b.registerActiveTask(taskID, aKey)
+		responseCh := make(chan *messages.StructuredMessage, 1)
+		b.addWaiter(taskID, &waiter{ch: responseCh, agentSlug: task.AgentSlug, projectID: task.ProjectID})
+		defer b.removeWaiter(taskID)
+
+		if err := b.hubClient.Agents().SendStructuredMessage(ctx, agentID, scionMsg, false, false, false); err != nil {
+			b.unregisterActiveTask(taskID, aKey)
+			return nil, fmt.Errorf("send follow-up to agent: %w", err)
+		}
+
+		timeout := b.config.Timeouts.SendMessage
+		if timeout == 0 {
+			timeout = 120 * time.Second
+		}
+		timer := time.NewTimer(timeout)
+		defer timer.Stop()
+
+		select {
+		case response := <-responseCh:
+			msg, artifacts := TranslateScionToA2A(response)
+			return &TaskResult{
+				ID:        taskID,
+				ContextID: task.ContextID,
+				Status:    TaskStatus{State: TaskStateWorking, Message: &msg},
+				Artifacts: artifacts,
+			}, nil
+		case <-timer.C:
+			b.unregisterActiveTask(taskID, aKey)
+			return nil, fmt.Errorf("timeout waiting for agent response after %v", timeout)
+		case <-ctx.Done():
+			b.unregisterActiveTask(taskID, aKey)
+			return nil, ctx.Err()
+		}
+	}
+
+	// Non-blocking follow-up
+	aKey := agentKey(task.ProjectID, task.AgentSlug)
+	b.registerActiveTask(taskID, aKey)
+	b.wg.Add(1)
+	go func() {
+		defer b.wg.Done()
+		sendCtx, cancel := context.WithTimeout(b.shutdownCtx, 30*time.Second)
+		defer cancel()
+		if err := b.hubClient.Agents().SendStructuredMessage(sendCtx, agentID, scionMsg, false, false, false); err != nil {
+			b.log.Error("non-blocking follow-up send failed", "error", err, "task_id", taskID)
+		}
+	}()
+
+	return &TaskResult{
+		ID:        taskID,
+		ContextID: task.ContextID,
+		Status:    TaskStatus{State: TaskStateWorking},
+	}, nil
 }
 
 // GetTask retrieves a task by ID.
