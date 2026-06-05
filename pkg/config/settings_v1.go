@@ -394,7 +394,18 @@ type V1AuthConfig struct {
 	DevTokenFile      string         `json:"dev_token_file,omitempty" yaml:"dev_token_file,omitempty" koanf:"dev_token_file"`
 	AuthorizedDomains []string       `json:"authorized_domains,omitempty" yaml:"authorized_domains,omitempty" koanf:"authorized_domains"`
 	UserAccessMode    string         `json:"user_access_mode,omitempty" yaml:"user_access_mode,omitempty" koanf:"user_access_mode"`
-	Proxy             *V1ProxyConfig `json:"proxy,omitempty" yaml:"proxy,omitempty" koanf:"proxy"`
+	Proxy             *V1ProxyConfig     `json:"proxy,omitempty" yaml:"proxy,omitempty" koanf:"proxy"`
+	Transport         *V1TransportConfig `json:"transport,omitempty" yaml:"transport,omitempty" koanf:"transport"`
+}
+
+// V1TransportConfig holds transport-layer auth settings for agent outbound requests.
+type V1TransportConfig struct {
+	// Mode selects the transport auth mode: "none" (default), "cloudrun_invoker", or "iap".
+	Mode string `json:"mode,omitempty" yaml:"mode,omitempty" koanf:"mode"`
+	// OIDCAudience is the OIDC audience for transport tokens.
+	OIDCAudience string `json:"oidc_audience,omitempty" yaml:"oidc_audience,omitempty" koanf:"oidc_audience"`
+	// PlatformAuthSA is the dedicated SA email used for transport-layer auth.
+	PlatformAuthSA string `json:"platform_auth_sa,omitempty" yaml:"platform_auth_sa,omitempty" koanf:"platform_auth_sa"`
 }
 
 // V1ProxyConfig holds proxy authentication settings (consulted when auth.mode == "proxy").
@@ -918,6 +929,8 @@ var knownCompoundFields = []string{
 	"soft_delete_retain_files",
 	"soft_delete_retention",
 	"authorized_domains",
+	"platform_auth_sa",
+	"oidc_audience",
 	"jwks_url",
 	"broker_nickname",
 	"allowed_origins",
@@ -1011,7 +1024,7 @@ func mapEnvKeyRecursive(key string) string {
 func isSectionName(name string) bool {
 	switch name {
 	case "hub", "broker", "database", "auth", "oauth", "storage", "secrets", "cors",
-		"web", "cli", "device", "google", "github", "proxy", "iap":
+		"web", "cli", "device", "google", "github", "proxy", "iap", "transport":
 		return true
 	}
 	return false
@@ -1286,6 +1299,13 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 				}
 			}
 		}
+		if v1.Auth.Transport != nil {
+			gc.Auth.Transport = &TransportAuthConfig{
+				Mode:           v1.Auth.Transport.Mode,
+				OIDCAudience:   v1.Auth.Transport.OIDCAudience,
+				PlatformAuthSA: v1.Auth.Transport.PlatformAuthSA,
+			}
+		}
 	}
 
 	// OAuth config
@@ -1457,6 +1477,13 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 				Issuer:   gc.Auth.Proxy.IAP.Issuer,
 				JWKSURL:  gc.Auth.Proxy.IAP.JWKSURL,
 			}
+		}
+	}
+	if gc.Auth.Transport != nil {
+		v1.Auth.Transport = &V1TransportConfig{
+			Mode:           gc.Auth.Transport.Mode,
+			OIDCAudience:   gc.Auth.Transport.OIDCAudience,
+			PlatformAuthSA: gc.Auth.Transport.PlatformAuthSA,
 		}
 	}
 

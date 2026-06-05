@@ -203,6 +203,25 @@ type DevAuthConfig struct {
 	UserAccessMode string `json:"userAccessMode" yaml:"userAccessMode" koanf:"userAccessMode"`
 	// Proxy holds proxy authentication settings (consulted when Mode == "proxy").
 	Proxy *ProxyAuthConfig `json:"proxy,omitempty" yaml:"proxy,omitempty" koanf:"proxy"`
+	// Transport holds transport-layer auth settings for agent outbound requests.
+	// Controls which transport tokens the hub issues to agents (dispatch + refresh).
+	Transport *TransportAuthConfig `json:"transport,omitempty" yaml:"transport,omitempty" koanf:"transport"`
+}
+
+// TransportAuthConfig holds transport-layer (outer/platform) auth settings.
+// This controls how agents authenticate to the platform guard (IAP or Cloud Run invoker)
+// when making outbound requests to the hub.
+type TransportAuthConfig struct {
+	// Mode selects the transport auth mode: "none" (default), "cloudrun_invoker", or "iap".
+	Mode string `json:"mode" yaml:"mode" koanf:"mode"`
+	// OIDCAudience is the OIDC audience for the transport token.
+	// For IAP: the IAP OAuth client ID. For cloudrun_invoker: the hub URL.
+	// Empty means derive from hub endpoint (cloudrun_invoker only).
+	OIDCAudience string `json:"oidcAudience" yaml:"oidcAudience" koanf:"oidcAudience"`
+	// PlatformAuthSA is the email of the dedicated service account used for
+	// transport-layer auth. The hub's runtime SA must hold serviceAccountTokenCreator
+	// on this SA to impersonate it via the IAM Credentials API.
+	PlatformAuthSA string `json:"platformAuthSA" yaml:"platformAuthSA" koanf:"platformAuthSA"`
 }
 
 // ProxyAuthConfig holds proxy authentication settings.
