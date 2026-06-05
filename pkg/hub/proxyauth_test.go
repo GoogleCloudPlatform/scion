@@ -413,7 +413,7 @@ func TestIAPAuthenticator_StripPrefix(t *testing.T) {
 	}{
 		{"accounts.google.com:12345", "12345"},
 		{"accounts.google.com:user@example.com", "user@example.com"},
-		{"12345", "12345"},                   // no prefix
+		{"12345", "12345"},                       // no prefix
 		{"user@example.com", "user@example.com"}, // no prefix
 		{"", ""},
 	}
