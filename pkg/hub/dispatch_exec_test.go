@@ -581,6 +581,11 @@ func TestGetBrokerDispatch_RoundTrip(t *testing.T) {
 	assert.Equal(t, "check_prompt", got.Op)
 	assert.Equal(t, store.DispatchStatePending, got.State)
 
+	// Claim (pending→in_progress) before completing, matching the CAS guard.
+	claimed, err := cs.ClaimBrokerDispatch(ctx, d.ID, "hub-test")
+	require.NoError(t, err)
+	require.True(t, claimed)
+
 	require.NoError(t, cs.CompleteBrokerDispatch(ctx, d.ID, `{"hasPrompt":true}`))
 
 	got, err = cs.GetBrokerDispatch(ctx, d.ID)

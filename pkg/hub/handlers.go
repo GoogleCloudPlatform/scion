@@ -2413,6 +2413,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 	s.logMessage("message dispatched", logAttrs...)
 
 	// Persist to message store (write-through; non-fatal if store fails)
+	var persistedMsgID string
 	if structuredMsg != nil {
 		storeMsg := &store.Message{
 			ID:          api.NewUUID(),
@@ -2437,6 +2438,8 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		}
 		if err := s.store.CreateMessage(ctx, storeMsg); err != nil {
 			s.messageLog.Error("Failed to persist message", "error", err)
+		} else {
+			persistedMsgID = storeMsg.ID
 		}
 		// Publish SSE event so connected browser clients can update the
 		// per-agent conversation view in real time — mirrors the agent→user
@@ -2477,6 +2480,14 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 	} else if err != nil {
 		RuntimeError(w, "Failed to send message to runtime broker: "+err.Error())
 		return
+	}
+
+	// Mark the message as dispatched so reconcileBroker does not
+	// re-deliver it on the next broker reconnect.
+	if persistedMsgID != "" {
+		if _, err := s.store.MarkMessageDispatched(ctx, persistedMsgID); err != nil {
+			s.messageLog.Error("Failed to mark message dispatched", "id", persistedMsgID, "error", err)
+		}
 	}
 
 	// Publish agent-to-agent messages through the broker so plugin observers
@@ -2611,6 +2622,12 @@ func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anch
 			} else {
 				results[i] = GroupMessageRecipientResult{Recipient: recipStr, Status: "failed", Error: "agent has no runtime broker"}
 				continue
+			}
+
+			// Mark the message as dispatched so reconcileBroker does not
+			// re-deliver it on the next broker reconnect.
+			if _, err := s.store.MarkMessageDispatched(ctx, storeMsg.ID); err != nil {
+				s.messageLog.Error("Failed to mark set message dispatched", "id", storeMsg.ID, "error", err)
 			}
 
 			// Publish agent-to-agent messages through the broker for plugin observers.
@@ -2819,12 +2836,15 @@ func (s *Server) broadcastDirect(w http.ResponseWriter, r *http.Request, project
 		agentMsg := *msg
 		agentMsg.Recipient = "agent:" + agent.Slug
 		agentMsg.RecipientID = agent.ID
+		dispatched := false
 		if err := dispatcher.DispatchAgentMessage(ctx, &agent, agentMsg.Msg, interrupt, &agentMsg); errors.Is(err, ErrMessageDeferred) {
 			s.signalDeferredMessage(ctx, agent.RuntimeBrokerID, agent.ID)
 		} else if err != nil {
 			s.messageLog.Error("Failed to deliver broadcast message to agent",
 				"agent_id", agent.ID,
 				"agentSlug", agent.Slug, "error", err)
+		} else {
+			dispatched = true
 		}
 		// Persist broadcast message per recipient (non-fatal)
 		storeMsg := &store.Message{
@@ -2843,6 +2863,11 @@ func (s *Server) broadcastDirect(w http.ResponseWriter, r *http.Request, project
 		}
 		if err := s.store.CreateMessage(ctx, storeMsg); err != nil {
 			s.messageLog.Error("Failed to persist broadcast message", "agent_id", agent.ID, "error", err)
+		} else if dispatched {
+			// Mark dispatched so reconcileBroker does not re-deliver.
+			if _, err := s.store.MarkMessageDispatched(ctx, storeMsg.ID); err != nil {
+				s.messageLog.Error("Failed to mark broadcast message dispatched", "id", storeMsg.ID, "error", err)
+			}
 		}
 	}
 

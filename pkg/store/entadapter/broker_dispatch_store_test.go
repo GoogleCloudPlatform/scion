@@ -127,6 +127,8 @@ func TestBrokerDispatch_CompleteAndFail(t *testing.T) {
 
 	d2 := newDispatch(uuid.NewString(), "start")
 	require.NoError(t, s.InsertBrokerDispatch(ctx, d2))
+	_, err = s.ClaimBrokerDispatch(ctx, d2.ID, "hub-1")
+	require.NoError(t, err)
 	require.NoError(t, s.FailBrokerDispatch(ctx, d2.ID, "boom"))
 	got2, err := client.BrokerDispatch.Get(ctx, uuid.MustParse(d2.ID))
 	require.NoError(t, err)

@@ -535,6 +535,9 @@ func (p *MessageBrokerProxy) deliverToAgent(ctx context.Context, projectID, agen
 	}
 	if err := p.store.CreateMessage(ctx, storeMsg); err != nil {
 		p.log.Error("Failed to persist broker message to store", "agentSlug", agentSlug, "error", err)
+		// Without a durable row, a deferred signal has nothing for the
+		// owning node to reconcile — abort dispatch entirely.
+		return
 	}
 
 	if err := dispatcher.DispatchAgentMessage(ctx, agent, msg.Msg, msg.Urgent, msg); errors.Is(err, ErrMessageDeferred) {
@@ -546,6 +549,12 @@ func (p *MessageBrokerProxy) deliverToAgent(ctx context.Context, projectID, agen
 		p.log.Error("Failed to dispatch broker message to agent",
 			"agentSlug", agentSlug, "error", err)
 		return
+	}
+
+	// Mark the message as dispatched so reconcileBroker does not
+	// re-deliver it on the next broker reconnect.
+	if _, err := p.store.MarkMessageDispatched(ctx, storeMsg.ID); err != nil {
+		p.log.Error("Failed to mark broker message dispatched", "id", storeMsg.ID, "error", err)
 	}
 
 	// Log to dedicated message audit log

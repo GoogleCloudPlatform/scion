@@ -147,13 +147,15 @@ func (s *BrokerDispatchStore) ClaimBrokerDispatch(ctx context.Context, id, hubIn
 }
 
 // CompleteBrokerDispatch marks a dispatch done and records its result JSON.
+// The update is guarded by state=in_progress (CAS) so a done or failed
+// dispatch cannot be flipped by a stale or duplicate completion call.
 func (s *BrokerDispatchStore) CompleteBrokerDispatch(ctx context.Context, id, result string) error {
 	uid, err := parseUUID(id)
 	if err != nil {
 		return err
 	}
 	upd := s.client.BrokerDispatch.Update().
-		Where(brokerdispatch.IDEQ(uid)).
+		Where(brokerdispatch.IDEQ(uid), brokerdispatch.StateEQ(store.DispatchStateInProgress)).
 		SetState(store.DispatchStateDone).
 		SetUpdatedAt(time.Now())
 	if result != "" {
@@ -170,14 +172,16 @@ func (s *BrokerDispatchStore) CompleteBrokerDispatch(ctx context.Context, id, re
 }
 
 // FailBrokerDispatch marks a dispatch failed, records the error, and bumps the
-// attempt counter (so a reaper/retry can bound re-drives).
+// attempt counter (so a reaper/retry can bound re-drives). The update is
+// guarded by state=in_progress (CAS) so a completed or already-failed dispatch
+// cannot be overwritten by a stale failure call.
 func (s *BrokerDispatchStore) FailBrokerDispatch(ctx context.Context, id, errMsg string) error {
 	uid, err := parseUUID(id)
 	if err != nil {
 		return err
 	}
 	affected, err := s.client.BrokerDispatch.Update().
-		Where(brokerdispatch.IDEQ(uid)).
+		Where(brokerdispatch.IDEQ(uid), brokerdispatch.StateEQ(store.DispatchStateInProgress)).
 		SetState(store.DispatchStateFailed).
 		SetError(errMsg).
 		AddAttempts(1).
