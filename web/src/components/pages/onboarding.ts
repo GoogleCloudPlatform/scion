@@ -878,6 +878,29 @@ export class ScionPageOnboarding extends LitElement {
       `;
     }
 
+    // No registry configured — show a clear error rather than letting pull hang
+    if (!this.imageRegistry) {
+      return html`
+        <h2>Container Images</h2>
+        <div class="alert alert-warning">
+          <strong>No image registry configured.</strong>
+          <p>
+            An image registry is required to pull container images.
+            Run the following to configure one, then restart the server:
+          </p>
+          <code>scion config set --global image_registry ghcr.io/homebrew-scion</code>
+          <p>If you installed via Homebrew, try reinstalling to auto-configure the registry:</p>
+          <code>brew reinstall --HEAD homebrew-scion/scion/scion-workstation</code>
+        </div>
+        <div class="footer">
+          <sl-button variant="text" @click=${() => { this.currentStep = 3; }}>Back</sl-button>
+          <div class="footer-right">
+            <sl-button variant="default" @click=${() => { this.currentStep = 5; }}>Skip for now</sl-button>
+          </div>
+        </div>
+      `;
+    }
+
     const allDone = harnesses.length > 0 && harnesses.every(h => {
       const s = this.imageStatuses.get(h);
       return s && (s.status === 'done' || s.status === 'exists');

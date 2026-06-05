@@ -434,6 +434,10 @@ func (s *Server) handleSystemImagesPull(w http.ResponseWriter, r *http.Request) 
 			registry = vs.ResolveImageRegistry("")
 		}
 	}
+	if registry == "" {
+		http.Error(w, `{"error":"image_registry is not configured — run 'scion config set --global image_registry <registry>' or reinstall via Homebrew"}`, http.StatusUnprocessableEntity)
+		return
+	}
 
 	jobID := api.NewUUID()
 
