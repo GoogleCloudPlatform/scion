@@ -16,6 +16,7 @@ package bridge
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -162,6 +163,17 @@ func TestWellKnownAgentCard(t *testing.T) {
 	if provider["organization"] != "Test Org" {
 		t.Errorf("provider.organization = %q, want %q", provider["organization"], "Test Org")
 	}
+
+	caps, ok := card["capabilities"].(map[string]interface{})
+	if !ok {
+		t.Fatal("expected capabilities object in card")
+	}
+	if caps["streaming"] != true {
+		t.Errorf("capabilities.streaming = %v, want true", caps["streaming"])
+	}
+	if caps["pushNotifications"] != true {
+		t.Errorf("capabilities.pushNotifications = %v, want true", caps["pushNotifications"])
+	}
 }
 
 func TestPerAgentCard(t *testing.T) {
@@ -187,6 +199,17 @@ func TestPerAgentCard(t *testing.T) {
 	expectedURL := "https://a2a.test.example.com/projects/test-grove/agents/test-agent"
 	if card["url"] != expectedURL {
 		t.Errorf("url = %q, want %q", card["url"], expectedURL)
+	}
+
+	caps, ok := card["capabilities"].(map[string]interface{})
+	if !ok {
+		t.Fatal("expected capabilities object in per-agent card")
+	}
+	if caps["streaming"] != true {
+		t.Errorf("capabilities.streaming = %v, want true", caps["streaming"])
+	}
+	if caps["pushNotifications"] != true {
+		t.Errorf("capabilities.pushNotifications = %v, want true", caps["pushNotifications"])
 	}
 }
 
@@ -778,6 +801,92 @@ func TestNewRPCMethods(t *testing.T) {
 				t.Errorf("method %q should be registered but got method not found", method)
 			}
 		})
+	}
+}
+
+func TestGenerateAgentCardCapabilities(t *testing.T) {
+	dir := t.TempDir()
+	store, err := state.New(filepath.Join(dir, "caps-test.db"))
+	if err != nil {
+		t.Fatalf("state.New: %v", err)
+	}
+	defer store.Close()
+
+	cfg := &Config{
+		Bridge: BridgeConfig{
+			ExternalURL: "https://a2a.test.example.com",
+		},
+	}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	bridge := New(store, nil, nil, cfg, nil, log)
+
+	card := bridge.GenerateAgentCard(context.Background(), "test-project", "test-agent")
+
+	caps, ok := card["capabilities"].(map[string]bool)
+	if !ok {
+		t.Fatal("expected capabilities to be map[string]bool")
+	}
+	if !caps["streaming"] {
+		t.Error("capabilities.streaming should be true")
+	}
+	if !caps["pushNotifications"] {
+		t.Error("capabilities.pushNotifications should be true")
+	}
+
+	// Verify other required fields are present.
+	if card["name"] != "test-agent" {
+		t.Errorf("name = %q, want %q", card["name"], "test-agent")
+	}
+	expectedURL := "https://a2a.test.example.com/projects/test-project/agents/test-agent"
+	if card["url"] != expectedURL {
+		t.Errorf("url = %q, want %q", card["url"], expectedURL)
+	}
+	if card["version"] != "1.0.0" {
+		t.Errorf("version = %q, want %q", card["version"], "1.0.0")
+	}
+}
+
+func TestRegistryAndPerAgentCardCapabilitiesMatch(t *testing.T) {
+	_, ts, _ := newTestServer(t)
+
+	// Fetch registry card.
+	resp, err := http.Get(ts.URL + "/.well-known/agent-card.json")
+	if err != nil {
+		t.Fatalf("GET registry card: %v", err)
+	}
+	defer resp.Body.Close()
+	var registryCard map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&registryCard)
+
+	registryCaps, ok := registryCard["capabilities"].(map[string]interface{})
+	if !ok {
+		t.Fatal("expected capabilities in registry card")
+	}
+
+	// Fetch per-agent card.
+	resp2, err := http.Get(ts.URL + "/projects/test-grove/agents/test-agent/.well-known/agent-card.json")
+	if err != nil {
+		t.Fatalf("GET per-agent card: %v", err)
+	}
+	defer resp2.Body.Close()
+	var agentCard map[string]interface{}
+	json.NewDecoder(resp2.Body).Decode(&agentCard)
+
+	agentCaps, ok := agentCard["capabilities"].(map[string]interface{})
+	if !ok {
+		t.Fatal("expected capabilities in per-agent card")
+	}
+
+	// Capabilities should be identical.
+	for key, regVal := range registryCaps {
+		if agentCaps[key] != regVal {
+			t.Errorf("capability %q: registry=%v, agent=%v", key, regVal, agentCaps[key])
+		}
+	}
+	for key, agentVal := range agentCaps {
+		if registryCaps[key] != agentVal {
+			t.Errorf("capability %q: agent=%v, registry=%v", key, agentVal, registryCaps[key])
+		}
 	}
 }
 
