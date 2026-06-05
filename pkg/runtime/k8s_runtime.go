@@ -2415,7 +2415,7 @@ func (r *KubernetesRuntime) GetWorkspacePath(ctx context.Context, id string) (st
 func nfsSharedDirSubPath(workspaceSubPath, sharedDirName string) string {
 	// workspaceSubPath is "projects/<pid>/workspace"
 	// We need "projects/<pid>/shared-dirs/<name>"
-	parent := filepath.Dir(workspaceSubPath)     // "projects/<pid>"
+	parent := filepath.Dir(workspaceSubPath) // "projects/<pid>"
 	return filepath.Join(parent, "shared-dirs", sharedDirName)
 }
 

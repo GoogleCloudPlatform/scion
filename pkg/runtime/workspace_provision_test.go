@@ -658,4 +658,3 @@ func TestWriteSentinel_Atomic(t *testing.T) {
 		t.Fatalf("writeSentinel overwrite: %v", err)
 	}
 }
-

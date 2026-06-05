@@ -200,9 +200,9 @@ func (h *nfsTestHarness) GetCommand(task string, resume bool, args []string) []s
 func (h *nfsTestHarness) GetEnv(name, homeDir, unixUsername string) map[string]string {
 	return map[string]string{}
 }
-func (h *nfsTestHarness) GetTelemetryEnv() map[string]string   { return nil }
-func (h *nfsTestHarness) DefaultConfigDir() string             { return ".test" }
-func (h *nfsTestHarness) SkillsDir() string                    { return ".test/skills" }
+func (h *nfsTestHarness) GetTelemetryEnv() map[string]string    { return nil }
+func (h *nfsTestHarness) DefaultConfigDir() string              { return ".test" }
+func (h *nfsTestHarness) SkillsDir() string                     { return ".test/skills" }
 func (h *nfsTestHarness) HasSystemPrompt(agentHome string) bool { return false }
 func (h *nfsTestHarness) Provision(ctx context.Context, agentName, agentDir, agentHome, agentWorkspace string) error {
 	return nil

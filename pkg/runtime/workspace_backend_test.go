@@ -464,10 +464,10 @@ func TestNFSResolve_SubPathRootDefault(t *testing.T) {
 
 func TestLocalBackendResolve(t *testing.T) {
 	tests := []struct {
-		name       string
-		input      ResolveInput
-		wantErr    bool
-		wantPath   string
+		name        string
+		input       ResolveInput
+		wantErr     bool
+		wantPath    string
 		wantBackend string
 	}{
 		{

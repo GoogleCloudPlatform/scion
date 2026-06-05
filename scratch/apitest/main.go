@@ -5,8 +5,9 @@
 // internal network. Not part of the product.
 //
 // Env:
-//   A_BASE, B_BASE   base URLs (e.g. http://localhost:8080, http://10.128.15.241:8080)
-//   A_TOK, B_TOK     admin bearer tokens (per-hub signing keys)
+//
+//	A_BASE, B_BASE   base URLs (e.g. http://localhost:8080, http://10.128.15.241:8080)
+//	A_TOK, B_TOK     admin bearer tokens (per-hub signing keys)
 package main
 
 import (

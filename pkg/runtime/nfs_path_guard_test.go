@@ -214,9 +214,9 @@ func TestNFSRealize_IsolationGuard(t *testing.T) {
 	// Valid: project subtree
 	_, err := b.Realize(RealizeInput{
 		Resolved: ResolvedWorkspace{
-			HostPath: "/mnt/nfs/share1/projects/proj1/workspace",
-			HostBase: "/mnt/nfs/share1",
-			Backend:  "nfs",
+			HostPath:           "/mnt/nfs/share1/projects/proj1/workspace",
+			HostBase:           "/mnt/nfs/share1",
+			Backend:            "nfs",
 			ServerRelativePath: "projects/proj1/workspace",
 		},
 		ContainerWorkspace: "/workspace",
