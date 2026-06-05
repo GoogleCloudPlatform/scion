@@ -271,7 +271,7 @@ type RuntimeBrokerClient interface {
 	// brokerID is used for HMAC authentication lookup.
 	// task is an optional task string to pass to the agent on start.
 	// projectPath is the local filesystem path to the project on the broker.
-	// projectSlug is the project slug for hub-managed projects (no local provider path).
+	// projectSlug is the project slug for hub-native projects (no local provider path).
 	// resolvedEnv contains environment variables resolved from Hub storage (API keys, etc.).
 	// harnessConfig is the harness config name to use for the agent (e.g. "claude", "gemini").
 	// resolvedSecrets contains type-aware secrets (including file-type) for auth resolution.
@@ -327,7 +327,7 @@ type RuntimeBrokerClient interface {
 	// Returns the command output, exit code, and any error.
 	ExecAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, command []string, timeout int) (string, int, error)
 
-	// CleanupProject asks a broker to remove its local hub-managed project directory.
+	// CleanupProject asks a broker to remove its local hub-native project directory.
 	// brokerID is used for HMAC authentication lookup.
 	// 404 responses are tolerated for idempotency.
 	CleanupProject(ctx context.Context, brokerID, brokerEndpoint, projectSlug string) error
@@ -375,7 +375,7 @@ type RemoteCreateAgentRequest struct {
 	// Only populated when GatherEnv is true.
 	EnvSources map[string]string `json:"envSources,omitempty"`
 
-	// ProjectSlug is the project slug for hub-managed projects.
+	// ProjectSlug is the project slug for hub-native projects.
 	// When set, the broker creates the workspace at ~/.scion/projects/<slug>/
 	// instead of the default worktree-based path.
 	ProjectSlug string `json:"projectSlug,omitempty"`
@@ -423,15 +423,6 @@ type RemoteAgentConfig struct {
 	// TemplateHash is the content hash of the template for cache validation.
 	// If the cached template's hash matches, it can be used without re-downloading.
 	TemplateHash string `json:"templateHash,omitempty"`
-
-	// HarnessConfigID is the Hub harness-config ID for hydration on the broker.
-	// When set, the broker fetches the harness-config from the Hub's storage
-	// backend rather than requiring it on the broker's local filesystem.
-	HarnessConfigID string `json:"harnessConfigId,omitempty"`
-
-	// HarnessConfigHash is the content hash of the harness-config for cache
-	// validation, mirroring TemplateHash.
-	HarnessConfigHash string `json:"harnessConfigHash,omitempty"`
 
 	// GitClone specifies git clone parameters for git-anchored projects.
 	// When set, the runtime broker skips workspace mounting and injects env vars
@@ -2222,9 +2213,6 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/harness-configs", s.handleHarnessConfigs)
 	s.mux.HandleFunc("/api/v1/harness-configs/", s.handleHarnessConfigByID)
 
-	// Unified, kind/scope-generic resource import (templates + harness-configs).
-	s.mux.HandleFunc("/api/v1/resources/import", s.handleResourcesImport)
-
 	s.mux.HandleFunc("/api/v1/users", s.handleUsers)
 	s.mux.HandleFunc("/api/v1/users/", s.handleUserByID)
 
@@ -2248,9 +2236,6 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/brokers", s.handleBrokersEndpoint)
 	s.mux.HandleFunc("/api/v1/brokers/join", s.handleBrokerJoin)
 	s.mux.HandleFunc("/api/v1/brokers/", s.handleBrokerByIDRoutes)
-
-	// Message channel listing
-	s.mux.HandleFunc("/api/v1/message-channels", s.handleMessageChannels)
 
 	// Broker plugin inbound message delivery
 	s.mux.HandleFunc("/api/v1/broker/inbound", s.handleBrokerInbound)

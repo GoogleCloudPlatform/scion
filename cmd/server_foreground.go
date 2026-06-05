@@ -230,6 +230,10 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 			log.Fatalf("Hub server failed to start: %v", hubInitErr)
 		}
 
+		// Wire command bus for cross-node dispatch (B2-4).
+		cmdBus := newCommandBus(ctx, cfg, hubSrv)
+		hubSrv.SetCommandBus(cmdBus)
+
 		if !enableWeb {
 			// Hub runs its own HTTP server (standalone mode).
 			eventPub := newEventPublisher(ctx, cfg)
@@ -642,8 +646,10 @@ func checkServerPorts(cfg *config.GlobalConfig) error {
 	return nil
 }
 
-// initStore initializes the database store.
-func initStore(cfg *config.GlobalConfig) (store.Store, error) {
+// initStore initializes the database store. The provided context is used for
+// schema migration and the initial health-check ping so that a Ctrl+C during
+// startup cancels those operations gracefully.
+func initStore(ctx context.Context, cfg *config.GlobalConfig) (store.Store, error) {
 	connMaxLifetime, err := cfg.Database.ConnMaxLifetimeDuration()
 	if err != nil {
 		return nil, fmt.Errorf("invalid database pool config: %w", err)
@@ -671,12 +677,23 @@ func initStore(cfg *config.GlobalConfig) (store.Store, error) {
 		// pkg/store/sqlite schema) to the consolidated Ent schema before opening
 		// it. Detection is conservative and the whole step is a no-op for an
 		// already-Ent file, so it is safe to run on every boot.
-		if err := maybeMigrateLegacySQLite(cfg.Database.URL); err != nil {
+		if err := maybeMigrateLegacySQLite(ctx, cfg.Database.URL); err != nil {
 			return nil, err
 		}
 
 		// All Hub state lives in a single Ent-backed SQLite database.
-		entClient, err = entc.OpenSQLite("file:"+cfg.Database.URL+"?cache=shared", pool)
+		// Guard against a double "file:" prefix when the operator already
+		// supplies "file:/path/hub.db" in their config.
+		sqliteDSN := cfg.Database.URL
+		if !strings.HasPrefix(sqliteDSN, "file:") {
+			sqliteDSN = "file:" + sqliteDSN
+		}
+		if !strings.Contains(sqliteDSN, "?") {
+			sqliteDSN += "?cache=shared"
+		} else if !strings.Contains(sqliteDSN, "cache=") {
+			sqliteDSN += "&cache=shared"
+		}
+		entClient, err = entc.OpenSQLite(sqliteDSN, pool)
 		if err != nil {
 			return nil, fmt.Errorf("failed to open database: %w", err)
 		}
@@ -695,12 +712,12 @@ func initStore(cfg *config.GlobalConfig) (store.Store, error) {
 
 	// Migrate runs Ent's schema migration and seeds built-in maintenance
 	// operations (parity with the former raw-SQL store).
-	if err := s.Migrate(context.Background()); err != nil {
+	if err := s.Migrate(ctx); err != nil {
 		s.Close()
 		return nil, fmt.Errorf("failed to run migrations: %w", err)
 	}
 
-	if err := s.Ping(context.Background()); err != nil {
+	if err := s.Ping(ctx); err != nil {
 		s.Close()
 		return nil, fmt.Errorf("database ping failed: %w", err)
 	}
@@ -711,8 +728,9 @@ func initStore(cfg *config.GlobalConfig) (store.Store, error) {
 // maybeMigrateLegacySQLite detects a legacy raw-SQL hub.db at path and, unless
 // the operator opted out with --no-auto-migrate, upgrades it in-process to the
 // consolidated Ent schema (after taking an automatic backup). It is a no-op when
-// the file is already the Ent schema, empty, or absent.
-func maybeMigrateLegacySQLite(path string) error {
+// the file is already the Ent schema, empty, or absent. The provided context
+// allows the migration to be cancelled (e.g. Ctrl+C during first boot).
+func maybeMigrateLegacySQLite(ctx context.Context, path string) error {
 	legacy, err := entc.IsLegacyRawSQLSchema(path)
 	if err != nil {
 		return fmt.Errorf("detecting database schema: %w", err)
@@ -730,7 +748,7 @@ func maybeMigrateLegacySQLite(path string) error {
 	}
 
 	log.Printf("Detected legacy raw-SQL hub database at %s. Backing up and migrating to the Ent schema...", path)
-	report, err := entc.MigrateAlphaSQLite(context.Background(), path, entc.AlphaOptions{
+	report, err := entc.MigrateAlphaSQLite(ctx, path, entc.AlphaOptions{
 		Logf: func(format string, args ...any) { log.Printf(format, args...) },
 	})
 	if err != nil {
@@ -838,17 +856,6 @@ func parseAdminEmails(cfg *config.GlobalConfig) []string {
 	return adminEmailList
 }
 
-// resolveSessionSecret resolves the deployment-wide session secret from the
-// --session-secret flag, falling back to the SCION_SERVER_SESSION_SECRET env
-// var. The same value backs both the web session cookie store and the hub JWT
-// signing keys so that all replicas behind the load balancer agree.
-func resolveSessionSecret() string {
-	if webSessionSecret != "" {
-		return webSessionSecret
-	}
-	return os.Getenv("SCION_SERVER_SESSION_SECRET")
-}
-
 // initHubServer creates and configures the Hub server.
 func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store, hubEndpoint, devAuthToken string, adminEmailList []string, adminMode bool, maintenanceMessage string, requestLogger, messageLogger *slog.Logger, globalDir string, pluginMgr *scionplugin.Manager, secretBackend secret.SecretBackend) (*hub.Server, error) {
 	hubCfg := hub.ServerConfig{
@@ -919,12 +926,6 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 		MaintenanceConfig: resolveMaintenanceConfig(cfg),
 		SecretBackend:     secretBackend,
 		GCPProjectID:      cfg.Hub.GCPProjectID,
-		// Derive the agent/user JWT signing keys from the same shared session
-		// secret the web cookie store uses, so every replica behind the load
-		// balancer agrees on the signing key regardless of its host-derived
-		// HubID. Without this, a JWT minted by one replica fails validation on
-		// another (cross-replica "session_expired" login loop).
-		SharedSigningSecret: resolveSessionSecret(),
 	}
 
 	hubSrv, err := hub.New(hubCfg, s)
@@ -1109,15 +1110,20 @@ func newCommandBus(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Se
 	return bus
 }
 
-// initWebServer creates and configures the Web server.
-func initWebServer(cfg *config.GlobalConfig, hubSrv *hub.Server, devAuthToken string, adminEmailList []string, adminMode bool, maintenanceMessage string, requestLogger *slog.Logger) *hub.WebServer {
+// initWebServer creates and configures the Web server. The provided context is
+// threaded to the event publisher so that the Postgres LISTEN/NOTIFY goroutine
+// is cancelled cleanly on shutdown, preventing connection leaks.
+func initWebServer(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Server, devAuthToken string, adminEmailList []string, adminMode bool, maintenanceMessage string, requestLogger *slog.Logger) *hub.WebServer {
 	webHost := cfg.Hub.Host
 	if webHost == "" {
 		webHost = "0.0.0.0"
 	}
 
 	// Allow env var overrides for session/OAuth config
-	sessionSecret := resolveSessionSecret()
+	sessionSecret := webSessionSecret
+	if sessionSecret == "" {
+		sessionSecret = os.Getenv("SCION_SERVER_SESSION_SECRET")
+	}
 	baseURL := webBaseURL
 	if baseURL == "" {
 		baseURL = os.Getenv("SCION_SERVER_BASE_URL")
@@ -1161,13 +1167,12 @@ func initWebServer(cfg *config.GlobalConfig, hubSrv *hub.Server, devAuthToken st
 	webSrv.SetRequestLogger(requestLogger)
 
 	// Create shared event publisher for real-time SSE
-	eventPub := newEventPublisher(context.Background(), cfg)
+	eventPub := newEventPublisher(ctx, cfg)
 	webSrv.SetEventPublisher(eventPub)
 
 	// Wire Hub services into WebServer if Hub is enabled
 	if hubSrv != nil {
 		hubSrv.SetEventPublisher(eventPub)
-		hubSrv.SetCommandBus(newCommandBus(context.Background(), cfg, hubSrv))
 		webSrv.SetOAuthService(hubSrv.GetOAuthService())
 		webSrv.SetStore(hubSrv.GetStore())
 		webSrv.SetUserTokenService(hubSrv.GetUserTokenService())

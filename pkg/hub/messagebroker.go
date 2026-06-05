@@ -44,7 +44,7 @@ const brokerCallbackTimeout = 30 * time.Second
 //   - Manages subscriptions based on agent lifecycle events (created/deleted)
 //   - Handles broadcast fan-out from a single broker publish to individual agent deliveries
 type MessageBrokerProxy struct {
-	broker         broker.MessageBroker
+	bus            eventbus.EventBus
 	store          store.Store
 	events         EventPublisher
 	getDispatcher  func() AgentDispatcher
@@ -55,7 +55,7 @@ type MessageBrokerProxy struct {
 	mu                  sync.Mutex
 	subscriptions       map[string][]eventbus.Subscription // projectID -> active subscriptions
 	pluginSubscriptions map[string]eventbus.Subscription   // pattern -> plugin-initiated subscription
-	subscribedTopics    map[string]bool                    // dedup guard for project-level subscriptions
+	subscribedTopics    map[string]bool                  // dedup guard for project-level subscriptions
 	stopCh              chan struct{}
 	stopOnce            sync.Once
 	wg                  sync.WaitGroup
@@ -251,7 +251,7 @@ func (p *MessageBrokerProxy) PublishUserMessage(ctx context.Context, projectID, 
 	return p.bus.Publish(ctx, topic, msg)
 }
 
-// PublishToGroup fans out a message to a parsed group of recipients, delegating
+// PublishToGroup fans out a message to a parsed set of recipients, delegating
 // to PublishMessage for agents and PublishUserMessage for users.
 func (p *MessageBrokerProxy) PublishToGroup(ctx context.Context, projectID string, recipients []messages.GroupRecipient, msg *messages.StructuredMessage) map[string]error {
 	errs := make(map[string]error, len(recipients))
@@ -450,8 +450,6 @@ func (p *MessageBrokerProxy) deliverToUser(ctx context.Context, projectID, topic
 		Urgent:      msg.Urgent,
 		Broadcasted: msg.Broadcasted,
 		AgentID:     agentID,
-		Channel:     msg.Channel,
-		ThreadID:    msg.ThreadID,
 		CreatedAt:   time.Now(),
 	}
 	if err := p.store.CreateMessage(ctx, storeMsg); err != nil {
@@ -529,8 +527,6 @@ func (p *MessageBrokerProxy) deliverToAgent(ctx context.Context, projectID, agen
 		Urgent:      msg.Urgent,
 		Broadcasted: msg.Broadcasted,
 		AgentID:     agent.ID,
-		Channel:     msg.Channel,
-		ThreadID:    msg.ThreadID,
 		CreatedAt:   time.Now(),
 	}
 	if err := p.store.CreateMessage(ctx, storeMsg); err != nil {
@@ -619,8 +615,8 @@ func (p *MessageBrokerProxy) fanOutGlobal(ctx context.Context, msg *messages.Str
 	}
 }
 
-// ListChannels returns the names of registered bus channels. Returns nil if
-// the underlying bus does not support channel listing.
+// ListChannels returns the named bus channels when using a FanOutEventBus,
+// or nil for single-bus configurations. Used by the message-channels API.
 func (p *MessageBrokerProxy) ListChannels() []eventbus.BusChannel {
 	if fb, ok := p.bus.(*eventbus.FanOutEventBus); ok {
 		return fb.BusChannels()

@@ -133,10 +133,10 @@ func TestPopulateAgentConfig_HubManagedProject_SetsWorkspace(t *testing.T) {
 	srv, _ := testServer(t)
 
 	project := &store.Project{
-		ID:   tid("project-hub-native"),
-		Name: "Hub Native",
-		Slug: "hub-native",
-		// No GitRemote — hub-native project
+		ID:   tid("project-hub-managed"),
+		Name: "Hub Managed",
+		Slug: "hub-managed",
+		// No GitRemote — hub-managed project
 	}
 
 	agent := &store.Agent{
