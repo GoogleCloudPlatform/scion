@@ -101,7 +101,7 @@ func TestFormatLastActivity(t *testing.T) {
 func TestDisplayAgentsLocalMode(t *testing.T) {
 	agents := []api.AgentInfo{
 		{
-			Name:            "agent-1",
+			Name:            tid("agent-1"),
 			Template:        "default",
 			HarnessConfig:   "claude",
 			Runtime:         "docker",
@@ -458,7 +458,7 @@ func TestHubAgentToAgentInfo_PhaseFromStatusFallback(t *testing.T) {
 func TestHubAgentToAgentInfo_HarnessConfigFromTopLevel(t *testing.T) {
 	// When the Hub returns harnessConfig at the top level, use it directly
 	a := hubclient.Agent{
-		ID:            "agent-1",
+		ID:            tid("agent-1"),
 		Name:          "test-agent",
 		HarnessConfig: "gemini",
 	}
