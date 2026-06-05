@@ -1093,8 +1093,8 @@ func newCommandBus(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Se
 	if !strings.EqualFold(cfg.Database.Driver, "postgres") {
 		return hub.NoopCommandBus{}
 	}
-	mgr := hubSrv.GetControlChannelManager()
 	ownsLocally := func(brokerID string) bool {
+		mgr := hubSrv.GetControlChannelManager()
 		if mgr == nil {
 			return false
 		}

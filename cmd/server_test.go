@@ -18,6 +18,7 @@ package cmd
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -30,7 +31,8 @@ import (
 
 func newTestStore(t *testing.T) store.Store {
 	t.Helper()
-	client, err := entc.OpenSQLite("file:"+t.Name()+"?mode=memory&cache=shared", entc.PoolConfig{})
+	dbName := strings.ReplaceAll(t.Name(), "/", "_")
+	client, err := entc.OpenSQLite("file:"+dbName+"?mode=memory&cache=shared", entc.PoolConfig{})
 	require.NoError(t, err)
 	require.NoError(t, entc.AutoMigrate(context.Background(), client))
 	s := entadapter.NewCompositeStore(client)

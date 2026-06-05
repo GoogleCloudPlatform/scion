@@ -49,6 +49,12 @@ func TestParseSQLiteSourceDSN(t *testing.T) {
 			wantPath: "/tmp/hub.db",
 		},
 		{
+			name:     "file url with triple slashes",
+			in:       "file:///tmp/hub.db",
+			wantDSN:  "file:/tmp/hub.db?cache=shared",
+			wantPath: "/tmp/hub.db",
+		},
+		{
 			name:     "bare path",
 			in:       "/tmp/hub.db",
 			wantDSN:  "file:/tmp/hub.db?cache=shared",
