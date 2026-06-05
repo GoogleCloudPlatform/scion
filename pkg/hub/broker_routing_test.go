@@ -67,7 +67,7 @@ func (f *fakeHTTPClient) GetAgentLogs(context.Context, string, string, string, s
 func (f *fakeHTTPClient) ExecAgent(context.Context, string, string, string, string, []string, int) (string, int, error) {
 	return "", 0, nil
 }
-func (f *fakeHTTPClient) CleanupProject(context.Context, string, string, string) error {
+func (f *fakeHTTPClient) CleanupProject(context.Context, string, string, string, string) error {
 	return nil
 }
 
