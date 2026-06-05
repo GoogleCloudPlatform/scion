@@ -262,8 +262,8 @@ type V1ServerConfig struct {
 	Storage          *V1StorageConfig          `json:"storage,omitempty" yaml:"storage,omitempty" koanf:"storage"`
 	WorkspaceStorage *V1WorkspaceStorageConfig `json:"workspace_storage,omitempty" yaml:"workspace_storage,omitempty" koanf:"workspace_storage"`
 	Secrets          *V1SecretsConfig          `json:"secrets,omitempty" yaml:"secrets,omitempty" koanf:"secrets"`
-	LogLevel  string             `json:"log_level,omitempty" yaml:"log_level,omitempty" koanf:"log_level"`
-	LogFormat string             `json:"log_format,omitempty" yaml:"log_format,omitempty" koanf:"log_format"`
+	LogLevel         string                    `json:"log_level,omitempty" yaml:"log_level,omitempty" koanf:"log_level"`
+	LogFormat        string                    `json:"log_format,omitempty" yaml:"log_format,omitempty" koanf:"log_format"`
 
 	// NotificationChannels configures external notification delivery channels.
 	// Secrets (webhook URLs, API tokens) are held in memory only — never persisted to a database.
@@ -430,12 +430,12 @@ type V1WorkspaceStorageConfig struct {
 // V1NFSConfig holds NFS workspace storage settings.
 type V1NFSConfig struct {
 	// MountRoot is the local base under which each share is mounted at <MountRoot>/<share.ID>.
-	MountRoot    string       `json:"mount_root,omitempty" yaml:"mount_root,omitempty" koanf:"mount_root"`
+	MountRoot string `json:"mount_root,omitempty" yaml:"mount_root,omitempty" koanf:"mount_root"`
 	// MountOptions are passed to mount.nfs. Default "vers=3,hard,nconnect=4,_netdev".
 	// NFSv4.1 requires Filestore Enterprise/zonal or self-hosted NFS; basic/HDD
 	// (BASIC_HDD) supports NFSv3 only. We use Postgres advisory locks, not NFS
 	// flock, so v3 is fine for correctness.
-	MountOptions string `json:"mount_options,omitempty" yaml:"mount_options,omitempty" koanf:"mount_options"`
+	MountOptions string       `json:"mount_options,omitempty" yaml:"mount_options,omitempty" koanf:"mount_options"`
 	Shares       []V1NFSShare `json:"shares,omitempty" yaml:"shares,omitempty" koanf:"shares"`
 
 	// Stable, node-independent ownership for NFS-backed trees.
@@ -450,9 +450,9 @@ type V1NFSConfig struct {
 
 // V1NFSShare identifies a single NFS export that may be mounted by a Runtime Broker.
 type V1NFSShare struct {
-	ID     string `json:"id,omitempty" yaml:"id,omitempty" koanf:"id"`             // stable share id → mount dir + (K8s) PV name
-	Server string `json:"server,omitempty" yaml:"server,omitempty" koanf:"server"` // e.g. 10.0.0.2 or Filestore IP
-	Export string `json:"export,omitempty" yaml:"export,omitempty" koanf:"export"` // server export path, e.g. /scion-workspaces
+	ID     string `json:"id,omitempty" yaml:"id,omitempty" koanf:"id"`                // stable share id → mount dir + (K8s) PV name
+	Server string `json:"server,omitempty" yaml:"server,omitempty" koanf:"server"`    // e.g. 10.0.0.2 or Filestore IP
+	Export string `json:"export,omitempty" yaml:"export,omitempty" koanf:"export"`    // server export path, e.g. /scion-workspaces
 	PVName string `json:"pv_name,omitempty" yaml:"pv_name,omitempty" koanf:"pv_name"` // K8s static PV+subPath strategy
 }
 
@@ -478,6 +478,19 @@ func (ws *V1WorkspaceStorageConfig) ApplyNFSDefaults() {
 	if ws.NFS.SubPathRoot == "" {
 		ws.NFS.SubPathRoot = "projects"
 	}
+}
+
+// ValidateNFS returns an error if Backend is "nfs" but the NFS block is
+// misconfigured (e.g. no shares defined). Call after ApplyNFSDefaults.
+func (ws *V1WorkspaceStorageConfig) ValidateNFS() error {
+	if ws == nil || strings.ToLower(ws.Backend) != "nfs" {
+		return nil
+	}
+	if ws.NFS == nil || len(ws.NFS.Shares) == 0 {
+		return fmt.Errorf("workspace_storage.backend is \"nfs\" but no NFS shares are defined; " +
+			"add at least one entry under workspace_storage.nfs.shares")
+	}
+	return nil
 }
 
 // V1SecretsConfig holds secrets backend settings.

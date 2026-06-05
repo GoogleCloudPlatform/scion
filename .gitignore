@@ -55,3 +55,6 @@ Thumbs.db
 testdata/hub-v46-fixture.db
 testdata/hub-v46-fixture.db-wal
 testdata/hub-v46-fixture.db-shm
+
+# Claude temporary files
+.claude/

@@ -86,6 +86,10 @@ func runServerMigrate(cmd *cobra.Command, _ []string) error {
 	ctx := cmd.Context()
 	out := cmd.OutOrStdout()
 
+	if migrateBatchSize < 0 {
+		return fmt.Errorf("batch size must be non-negative, got %d", migrateBatchSize)
+	}
+
 	srcDSN, srcPath, err := parseSQLiteSourceDSN(migrateFrom)
 	if err != nil {
 		return err

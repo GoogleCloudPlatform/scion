@@ -3762,6 +3762,40 @@ func TestWorkspaceStorageConfig_NFSDefaults(t *testing.T) {
 	})
 }
 
+func TestWorkspaceStorageConfig_ValidateNFS(t *testing.T) {
+	t.Run("nfs backend with no shares returns error", func(t *testing.T) {
+		ws := &V1WorkspaceStorageConfig{Backend: "nfs"}
+		ws.ApplyNFSDefaults()
+		err := ws.ValidateNFS()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "no NFS shares are defined")
+	})
+
+	t.Run("nfs backend with shares passes", func(t *testing.T) {
+		ws := &V1WorkspaceStorageConfig{
+			Backend: "nfs",
+			NFS: &V1NFSConfig{
+				Shares: []V1NFSShare{{ID: "share1", Server: "10.0.0.2", Export: "/data"}},
+			},
+		}
+		ws.ApplyNFSDefaults()
+		err := ws.ValidateNFS()
+		require.NoError(t, err)
+	})
+
+	t.Run("local backend skips validation", func(t *testing.T) {
+		ws := &V1WorkspaceStorageConfig{Backend: "local"}
+		err := ws.ValidateNFS()
+		require.NoError(t, err)
+	})
+
+	t.Run("nil receiver is safe", func(t *testing.T) {
+		var ws *V1WorkspaceStorageConfig
+		err := ws.ValidateNFS()
+		require.NoError(t, err)
+	})
+}
+
 func TestWorkspaceStorageConfig_BackendUnset_IsLocal(t *testing.T) {
 	// Backend unset => treated as "local", no NFS struct required.
 	ws := &V1WorkspaceStorageConfig{}
