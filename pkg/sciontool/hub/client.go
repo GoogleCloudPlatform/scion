@@ -151,6 +151,7 @@ type Client struct {
 	maxRetries     int
 	retryBaseDelay time.Duration
 	retryMaxDelay  time.Duration
+	oidcSource     oidcTokenSource // transport-layer OIDC token source (nil = disabled)
 }
 
 // NewClient creates a new Hub client from environment variables.
@@ -175,7 +176,7 @@ func NewClient() *Client {
 		return nil
 	}
 
-	return &Client{
+	c := &Client{
 		hubURL:         hubURL,
 		token:          token,
 		agentID:        agentID,
@@ -186,6 +187,8 @@ func NewClient() *Client {
 			Timeout: DefaultTimeout,
 		},
 	}
+	c.configureOIDCTransport()
+	return c
 }
 
 // NewClientWithConfig creates a new Hub client with explicit configuration.
@@ -333,10 +336,23 @@ func (c *Client) ReportState(ctx context.Context, phase state.Phase, activity st
 	})
 }
 
+// RefreshTokenEntry represents a single token in the generalized refresh response.
+// Mirrors the hub's RefreshTokenEntry type.
+type RefreshTokenEntry struct {
+	Layer     string `json:"layer"`              // "app" | "transport"
+	Type      string `json:"type"`               // "scion_access" | "scion_refresh" | "google_oidc"
+	Value     string `json:"value"`              // the token value
+	ExpiresIn int    `json:"expiresIn"`          // seconds until expiry
+	Audience  string `json:"audience,omitempty"` // only for transport tokens
+}
+
 // RefreshTokenResponse is the response from the token refresh endpoint.
+// Includes both legacy single-token fields (backward compat) and the
+// generalized tokens[] array.
 type RefreshTokenResponse struct {
-	Token     string `json:"token"`
-	ExpiresAt string `json:"expires_at"`
+	Token     string              `json:"token"`
+	ExpiresAt string              `json:"expires_at"`
+	Tokens    []RefreshTokenEntry `json:"tokens,omitempty"`
 }
 
 // RefreshToken calls the Hub to refresh the agent's authentication token.
@@ -398,7 +414,56 @@ func (c *Client) RefreshToken(ctx context.Context) (string, time.Time, error) {
 		_ = err
 	}
 
+	// Process the generalized tokens[] array if present.
+	// Apply each entry to the appropriate subsystem by layer/type.
+	if len(result.Tokens) > 0 {
+		c.applyRefreshTokens(result.Tokens)
+	}
+
 	return result.Token, expiresAt, nil
+}
+
+// applyRefreshTokens processes the tokens[] array from a refresh response,
+// applying each entry to the appropriate subsystem.
+func (c *Client) applyRefreshTokens(tokens []RefreshTokenEntry) {
+	for _, entry := range tokens {
+		switch {
+		case entry.Layer == "transport" && entry.Type == "google_oidc":
+			// Update the OIDC transport's token source
+			if c.oidcSource != nil {
+				entryExpiry := time.Now().Add(time.Duration(entry.ExpiresIn) * time.Second)
+				c.oidcSource.setToken(entry.Value, entryExpiry)
+			}
+		// app/scion_access is already handled via the legacy token field above
+		}
+	}
+}
+
+// adjustRefreshForTransportTokens checks if the OIDC source has a shorter
+// expiry than the proposed refresh time and returns the earlier of the two.
+// Transport tokens (~1h) use a 5-minute refresh margin vs the app token's
+// 2-hour margin.
+func (c *Client) adjustRefreshForTransportTokens(proposed time.Time) time.Time {
+	if c.oidcSource == nil {
+		return proposed
+	}
+
+	// Read the transport token expiry from the source
+	switch src := c.oidcSource.(type) {
+	case *injectedTokenSource:
+		src.mu.RLock()
+		expiry := src.expiresAt
+		src.mu.RUnlock()
+		if !expiry.IsZero() {
+			transportRefresh := expiry.Add(-oidcRefreshMargin)
+			if transportRefresh.Before(proposed) {
+				return transportRefresh
+			}
+		}
+	case *metadataTokenSource:
+		// Metadata source self-refreshes; no need to drive refresh from here.
+	}
+	return proposed
 }
 
 // TokenRefreshConfig configures the token refresh loop.
@@ -496,8 +561,13 @@ func (c *Client) StartTokenRefresh(ctx context.Context, config *TokenRefreshConf
 				config.OnRefreshed(newExpiry)
 			}
 
-			// Schedule next refresh: 2 hours before new expiry
+			// Schedule next refresh: 2 hours before new expiry for the app token.
 			refreshAt = newExpiry.Add(-2 * time.Hour)
+
+			// If transport tokens are present, use the shortest-lived entry
+			// to drive refresh timing (transport tokens ~1h need a tighter margin).
+			refreshAt = c.adjustRefreshForTransportTokens(refreshAt)
+
 			if refreshAt.Before(time.Now()) {
 				// Token duration is very short; refresh in 1 minute
 				refreshAt = time.Now().Add(1 * time.Minute)
