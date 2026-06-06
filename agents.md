@@ -151,6 +151,20 @@ Learned the hard way; these are specific to running inside this container.
 1.  Notify the user you have completed the task
 
 
+## What NOT to commit
+
+Follow these rules to keep the repository clean and the git history lean.
+
+- **No binary files** (images, photos, compiled artifacts) unless they are part of the shipped product UI. Development screenshots, Telegram downloads, and similar media must never be committed.
+- **No development screenshots.** Use PR comments or issue attachments to share before/after visuals — not files in the repo.
+- **No agent orchestration state files.** Files like `.coordinator-state.md`, `.eng-manager-state.md`, or other runtime state produced by the Scion agent system are ephemeral and must not be tracked.
+- **No test artifacts or generated data files.** One-off debugging scripts (`test_json.go`), format-conversion utilities (`format_callouts.py`), and generated fixtures belong in scratch space or should be gitignored.
+- **No scratch or task-tracking files.** The `.scratch/` and `.tasks/` directories are gitignored. Do not force-add files into them (`git add -f`).
+- **No PR review artifacts.** Code-review notes (`pr-*-review*.md`) belong in the PR discussion thread, not as committed files.
+- **The `downloads/` directory is gitignored.** Any file a harness or agent downloads at runtime stays local — never commit its contents.
+
+When in doubt, check `.gitignore` before staging. If a new category of generated or ephemeral file appears, add a `.gitignore` entry in the same PR that introduces the workflow.
+
 ## Agent memory & durable notes (IMPORTANT)
 
 **Do not rely on any harness's built-in / native memory feature.** This applies to every harness (Claude, Gemini, etc.), not just one. The per-agent memory directory is **ephemeral — it is not persisted across container restarts**, so anything written there is silently lost between sessions and gives a false sense of continuity.
