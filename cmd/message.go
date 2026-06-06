@@ -93,9 +93,7 @@ Examples:
 			} else if strings.HasPrefix(recipient, "user:") {
 				userRecipient = recipient
 			} else if strings.Contains(recipient, "@") && !strings.HasPrefix(recipient, "agent:") {
-				// Bare email address without user: prefix — return a clear error
-				// instead of silently converting, which can lead to undelivered messages.
-				return fmt.Errorf("recipient %q looks like an email address but is missing the \"user:\" prefix.\n\nDid you mean?\n  scion message user:%s %q", recipient, recipient, message)
+				userRecipient = "user:" + recipient
 			} else {
 				// Strip optional "agent:" prefix for backwards compatibility
 				agentName = api.Slugify(strings.TrimPrefix(recipient, "agent:"))
