@@ -7,14 +7,19 @@ Dockerfiles and build configurations for Scion container images.
 ```
 core-base          System dependencies (Go, Node, Python)
   └── scion-base   Adds sciontool binary and scion user
-        ├── claude     Claude Code harness
-        ├── gemini     Gemini CLI harness
-        ├── opencode   OpenCode harness
-        ├── codex      Codex harness
-        └── hub        Scion hub server
+        ├── claude         Claude Code harness
+        ├── gemini         Gemini CLI harness
+        ├── opencode       OpenCode harness (bundle-local build)
+        ├── codex          Codex harness (bundle-local build)
+        ├── antigravity    Antigravity harness (bundle-local build)
+        └── hub            Scion hub server
 ```
 
-Each harness directory (and `hub/`) contains a `Dockerfile` that extends `scion-base` with image-specific tooling.
+The `claude/`, `gemini/`, and `hub/` directories live under `image-build/` and
+each contains a `Dockerfile` that extends `scion-base`. The `opencode`, `codex`,
+and `antigravity` images build from their self-contained bundles under
+`harnesses/<name>/` (each bundle carries its own `Dockerfile` and
+`cloudbuild.yaml`). See [`harnesses/README.md`](../harnesses/README.md).
 
 ## Scripts
 
@@ -48,7 +53,7 @@ The orchestrator owns target sequencing, tag computation, and BASE_IMAGE threadi
 |---|---|---|
 | `core-base` | `core-base` | Foundation tools layer. |
 | `scion-base` | `scion-base` | Adds sciontool. Uses existing `core-base:<tag>`. |
-| `harnesses` | `scion-claude`, `scion-gemini`, `scion-opencode`, `scion-codex` | Uses existing `scion-base:<tag>`. |
+| `harnesses` | `scion-claude`, `scion-gemini` (+ opt-in bundle images) | Uses existing `scion-base:<tag>`. Opt-in harness images (opencode, codex, antigravity) build from `harnesses/<name>/`. |
 | `hub` | `scion-hub` | Hub server image. Uses existing `scion-base:<tag>`. |
 | `common` (default) | `scion-base` + harnesses + hub | Skips `core-base`. Most common rebuild. |
 | `all` | Full DAG | Rebuilds everything from `core-base`. |

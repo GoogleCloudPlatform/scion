@@ -7,7 +7,7 @@ _sci·on /ˈsīən/ — a young shoot or twig, cut for grafting or rooting._
 Scion is an experimental multi-agent orchestration testbed designed to manage "deep agents" running in containers.
 
 
-Scion orchestrates "deep agents" (Claude Code, Gemini CLI, Codex, and others) as isolated, concurrent processes. Each agent gets its own container, git worktree, and credentials — so they can work on different parts of your project without stepping on each other. Agents run locally, on remote VMs, or across Kubernetes clusters.
+Scion orchestrates "deep agents" (Claude Code, Gemini CLI, and others) as isolated, concurrent processes. Each agent gets its own container, git worktree, and credentials — so they can work on different parts of your project without stepping on each other. Agents run locally, on remote VMs, or across Kubernetes clusters.
 
 Rather than prescribing rigid orchestration patterns, Scion takes a "less is more" approach: agents dynamically learn a CLI tool, letting the models themselves decide how to coordinate among agents. This makes it a rapid prototype testbed for experimenting with multi-agent patterns through natural language prompting. Read more in [Philosophy](https://googlecloudplatform.github.io/scion/philosophy/).
 
@@ -69,7 +69,7 @@ scion start debug "Help me debug this error" --attach
 
 ## Key Features
 
-- **Harness Agnostic** — Works with Gemini CLI, Claude Code, OpenCode, and Codex. Adaptable to anything that runs in a container.
+- **Harness Agnostic** — Ships with Gemini CLI and Claude Code by default. Additional harnesses (OpenCode, Codex, Antigravity) are available as [opt-in bundles](harnesses/README.md). Adaptable to anything that runs in a container.
 - **True Isolation** — Each agent runs in its own container with separated credentials, config, and a dedicated `git worktree`, preventing merge conflicts.
 - **Parallel Execution** — Run multiple agents concurrently as fully independent processes, locally or remotely.
 - **Attach / Detach** — Agents run in `tmux` sessions for background operation. Attach for human-in-the-loop interaction, enqueue messages while detached, and tunnel into remote agents securely.

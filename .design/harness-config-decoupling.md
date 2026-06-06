@@ -205,15 +205,18 @@ relocated bundles.
    the bundle dirs (or split codex/opencode out of the centralized `harnesses`
    target entirely, since their images are now bundle-local).
 
-### Phase E — Discoverability & docs
+### Phase E — Discoverability & docs ✓
 
-1. Add `harnesses/README.md` indexing available bundles + install commands.
-2. Update `image-build/README.md` (image hierarchy no longer lists
+1. [x] Add `harnesses/README.md` indexing available bundles + install commands.
+2. [x] Update `image-build/README.md` (image hierarchy no longer lists
    opencode/codex centrally), top-level `README.md`, and
    `decoupled-harness-implementation.md` cross-references.
-3. Consider `scion harness-config list --available` surfacing the in-repo
-   `harnesses/` bundles so users can discover what's installable. *(Stretch —
-   confirm scope.)*
+3. [x] Verified web UI harness fallback lists in `agent-create.ts` and
+   `project-settings.ts` — they enumerate known/installable harnesses (incl.
+   opt-in ones), not the default-install set; left as-is with clarifying
+   comments.
+4. `scion harness-config list --available` deferred — out of scope for this PR;
+   noted as follow-up in `harnesses/README.md`.
 
 ### Phase F — Migration for existing installs
 

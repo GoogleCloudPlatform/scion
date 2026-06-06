@@ -1438,7 +1438,8 @@ export class ScionPageProjectSettings extends LitElement {
                           </sl-option>
                         `
                       )
-                    : html`
+                    : // Fallback: all known/installable harnesses (incl. opt-in), not the default-install set.
+                      html`
                         <sl-option value="gemini">Gemini</sl-option>
                         <sl-option value="claude">Claude</sl-option>
                         <sl-option value="opencode">OpenCode</sl-option>

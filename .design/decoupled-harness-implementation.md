@@ -1,5 +1,12 @@
 # Decoupled Harness Implementation: Script-Based Provisioning
 
+> **Packaging follow-on complete.** The harness-config decoupling work
+> ([`harness-config-decoupling.md`](./harness-config-decoupling.md)) relocated
+> OpenCode, Codex, and Antigravity bundles to `harnesses/<name>/`, removed their
+> Go embed/built-in implementations, and shrunk the default-install set to
+> `{claude, gemini}`. Each bundle is now self-contained (config + provisioner +
+> Dockerfile + Cloud Build config) under [`harnesses/`](../harnesses/README.md).
+
 ## Motivation
 
 Today, every harness implementation lives as compiled Go code inside the scion binary (`pkg/harness/`). Each harness performs a similar set of operations — writing config files, injecting auth credentials, rewriting settings JSON/YAML/TOML — but the specifics are unique per harness. This means:
