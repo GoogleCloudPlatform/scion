@@ -1800,6 +1800,8 @@ func (s *Server) handleAgentAction(w http.ResponseWriter, r *http.Request, id, a
 		s.handleAgentMessage(w, r, id)
 	case api.AgentActionExec:
 		s.handleAgentExec(w, r, id)
+	case api.AgentActionResetAuth:
+		s.handleAgentResetAuth(w, r, id)
 	case api.AgentActionRestore:
 		s.restoreAgent(w, r, id)
 	case api.AgentActionTokenRefresh:
@@ -1920,6 +1922,38 @@ func (s *Server) handleAgentTokenRefresh(w http.ResponseWriter, r *http.Request,
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"token":      newToken,
 		"expires_at": expiresAt.UTC().Format(time.RFC3339),
+	})
+}
+
+// handleAgentResetAuth handles POST /api/v1/agents/{id}/reset-auth.
+// It generates a fresh token and pushes it into the running agent container
+// via the runtime broker, restarting the agent's token refresh loop without
+// a full container restart.
+func (s *Server) handleAgentResetAuth(w http.ResponseWriter, r *http.Request, id string) {
+	ctx := r.Context()
+
+	agent, err := s.store.GetAgent(ctx, id)
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	if s.dispatcher == nil {
+		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+			"agent dispatcher not configured", nil)
+		return
+	}
+
+	if err := s.dispatcher.DispatchAgentResetAuth(ctx, agent); err != nil {
+		slog.Error("Failed to reset agent auth", "agent_id", id, "error", err)
+		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+			"auth reset failed: "+err.Error(), nil)
+		return
+	}
+
+	slog.Info("Agent auth reset dispatched", "agent_id", id)
+	writeJSON(w, http.StatusOK, map[string]string{
+		"message": "Auth reset dispatched successfully",
 	})
 }
 
