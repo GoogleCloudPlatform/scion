@@ -2408,6 +2408,288 @@ func TestProjectCreateWithSlug(t *testing.T) {
 }
 
 // ============================================================================
+// Project Rename Tests
+// ============================================================================
+
+func TestProjectRenameSlug(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	project := &store.Project{
+		ID:      tid("project_rename1"),
+		Slug:    "old-slug",
+		Name:    "Old Name",
+		Created: time.Now(),
+		Updated: time.Now(),
+	}
+	if err := s.CreateProject(ctx, project); err != nil {
+		t.Fatalf("failed to create project: %v", err)
+	}
+
+	body := map[string]interface{}{
+		"name": "New Name",
+		"slug": "new-slug",
+	}
+
+	rec := doRequest(t, srv, http.MethodPatch, fmt.Sprintf("/api/v1/projects/%s", tid("project_rename1")), body)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp store.Project
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	if resp.Name != "New Name" {
+		t.Errorf("expected name %q, got %q", "New Name", resp.Name)
+	}
+	if resp.Slug != "new-slug" {
+		t.Errorf("expected slug %q, got %q", "new-slug", resp.Slug)
+	}
+
+	// Verify the project was actually updated in the store
+	updated, err := s.GetProject(ctx, tid("project_rename1"))
+	if err != nil {
+		t.Fatalf("failed to get project: %v", err)
+	}
+	if updated.Slug != "new-slug" {
+		t.Errorf("store slug not updated: expected %q, got %q", "new-slug", updated.Slug)
+	}
+}
+
+func TestProjectRenameSlugConflict(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	// Create two projects
+	project1 := &store.Project{
+		ID:      tid("project_rename_a"),
+		Slug:    "project-a",
+		Name:    "Project A",
+		Created: time.Now(),
+		Updated: time.Now(),
+	}
+	project2 := &store.Project{
+		ID:      tid("project_rename_b"),
+		Slug:    "project-b",
+		Name:    "Project B",
+		Created: time.Now(),
+		Updated: time.Now(),
+	}
+	if err := s.CreateProject(ctx, project1); err != nil {
+		t.Fatalf("failed to create project1: %v", err)
+	}
+	if err := s.CreateProject(ctx, project2); err != nil {
+		t.Fatalf("failed to create project2: %v", err)
+	}
+
+	// Try to rename project-a to project-b's slug
+	body := map[string]interface{}{
+		"slug": "project-b",
+	}
+
+	rec := doRequest(t, srv, http.MethodPatch, fmt.Sprintf("/api/v1/projects/%s", tid("project_rename_a")), body)
+
+	if rec.Code != http.StatusConflict {
+		t.Errorf("expected status 409 (conflict), got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestProjectRenameSlugOnly(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	project := &store.Project{
+		ID:      tid("project_rename_slug"),
+		Slug:    "original-slug",
+		Name:    "Original Name",
+		Created: time.Now(),
+		Updated: time.Now(),
+	}
+	if err := s.CreateProject(ctx, project); err != nil {
+		t.Fatalf("failed to create project: %v", err)
+	}
+
+	// Rename slug only (no name change)
+	body := map[string]interface{}{
+		"slug": "renamed-slug",
+	}
+
+	rec := doRequest(t, srv, http.MethodPatch, fmt.Sprintf("/api/v1/projects/%s", tid("project_rename_slug")), body)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp store.Project
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	if resp.Slug != "renamed-slug" {
+		t.Errorf("expected slug %q, got %q", "renamed-slug", resp.Slug)
+	}
+	if resp.Name != "Original Name" {
+		t.Errorf("name should not change: expected %q, got %q", "Original Name", resp.Name)
+	}
+}
+
+func TestProjectRenameSlugSanitized(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	project := &store.Project{
+		ID:      tid("project_rename_san"),
+		Slug:    "sanitize-test",
+		Name:    "Sanitize Test",
+		Created: time.Now(),
+		Updated: time.Now(),
+	}
+	if err := s.CreateProject(ctx, project); err != nil {
+		t.Fatalf("failed to create project: %v", err)
+	}
+
+	// Slug with spaces and uppercase should be sanitized
+	body := map[string]interface{}{
+		"slug": "My New Project",
+	}
+
+	rec := doRequest(t, srv, http.MethodPatch, fmt.Sprintf("/api/v1/projects/%s", tid("project_rename_san")), body)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp store.Project
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	if resp.Slug != "my-new-project" {
+		t.Errorf("expected sanitized slug %q, got %q", "my-new-project", resp.Slug)
+	}
+}
+
+func TestProjectRenameSameSlugNoOp(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	project := &store.Project{
+		ID:      tid("project_rename_noop"),
+		Slug:    "same-slug",
+		Name:    "Same Slug",
+		Created: time.Now(),
+		Updated: time.Now(),
+	}
+	if err := s.CreateProject(ctx, project); err != nil {
+		t.Fatalf("failed to create project: %v", err)
+	}
+
+	body := map[string]interface{}{
+		"slug": "same-slug",
+		"name": "Updated Name",
+	}
+
+	rec := doRequest(t, srv, http.MethodPatch, fmt.Sprintf("/api/v1/projects/%s", tid("project_rename_noop")), body)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp store.Project
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	if resp.Name != "Updated Name" {
+		t.Errorf("expected name %q, got %q", "Updated Name", resp.Name)
+	}
+	if resp.Slug != "same-slug" {
+		t.Errorf("slug should remain %q, got %q", "same-slug", resp.Slug)
+	}
+}
+
+func TestProjectRenameGroupMigration(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	project := &store.Project{
+		ID:        tid("project_rename_grp"),
+		Slug:      "grp-old",
+		Name:      "Group Test",
+		Created:   time.Now(),
+		Updated:   time.Now(),
+		CreatedBy: "test-user",
+	}
+	if err := s.CreateProject(ctx, project); err != nil {
+		t.Fatalf("failed to create project: %v", err)
+	}
+
+	// Create associated groups (mimicking what createProject does)
+	agentsGroup := &store.Group{
+		ID:        api.NewUUID(),
+		Name:      "Group Test Agents",
+		Slug:      "project:grp-old:agents",
+		GroupType: store.GroupTypeProjectAgents,
+		ProjectID: tid("project_rename_grp"),
+		CreatedBy: "test-user",
+	}
+	membersGroup := &store.Group{
+		ID:        api.NewUUID(),
+		Name:      "Group Test Members",
+		Slug:      "project:grp-old:members",
+		GroupType: store.GroupTypeExplicit,
+		ProjectID: tid("project_rename_grp"),
+		CreatedBy: "test-user",
+	}
+	if err := s.CreateGroup(ctx, agentsGroup); err != nil {
+		t.Fatalf("failed to create agents group: %v", err)
+	}
+	if err := s.CreateGroup(ctx, membersGroup); err != nil {
+		t.Fatalf("failed to create members group: %v", err)
+	}
+
+	// Rename the project
+	body := map[string]interface{}{
+		"name": "Group Test Renamed",
+		"slug": "grp-new",
+	}
+
+	rec := doRequest(t, srv, http.MethodPatch, fmt.Sprintf("/api/v1/projects/%s", tid("project_rename_grp")), body)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Verify groups were migrated
+	newAgentsGroup, err := s.GetGroupBySlug(ctx, "project:grp-new:agents")
+	if err != nil {
+		t.Errorf("agents group not migrated: %v", err)
+	} else if newAgentsGroup.Name != "Group Test Renamed Agents" {
+		t.Errorf("agents group name not updated: got %q", newAgentsGroup.Name)
+	}
+
+	newMembersGroup, err := s.GetGroupBySlug(ctx, "project:grp-new:members")
+	if err != nil {
+		t.Errorf("members group not migrated: %v", err)
+	} else if newMembersGroup.Name != "Group Test Renamed Members" {
+		t.Errorf("members group name not updated: got %q", newMembersGroup.Name)
+	}
+
+	// Old slugs should no longer exist
+	_, err = s.GetGroupBySlug(ctx, "project:grp-old:agents")
+	if err == nil {
+		t.Error("old agents group slug should not exist after migration")
+	}
+	_, err = s.GetGroupBySlug(ctx, "project:grp-old:members")
+	if err == nil {
+		t.Error("old members group slug should not exist after migration")
+	}
+}
+
+// ============================================================================
 // Template Slug Display Tests
 // ============================================================================
 

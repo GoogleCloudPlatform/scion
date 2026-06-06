@@ -5267,6 +5267,7 @@ func (s *Server) updateProject(w http.ResponseWriter, r *http.Request, id string
 
 	var updates struct {
 		Name                   string            `json:"name,omitempty"`
+		Slug                   string            `json:"slug,omitempty"`
 		Labels                 map[string]string `json:"labels,omitempty"`
 		Visibility             string            `json:"visibility,omitempty"`
 		DefaultRuntimeBrokerID string            `json:"defaultRuntimeBrokerId,omitempty"`
@@ -5277,8 +5278,26 @@ func (s *Server) updateProject(w http.ResponseWriter, r *http.Request, id string
 		return
 	}
 
+	oldSlug := project.Slug
+
 	if updates.Name != "" {
 		project.Name = updates.Name
+	}
+	if updates.Slug != "" {
+		newSlug := api.Slugify(updates.Slug)
+		if newSlug == "" {
+			BadRequest(w, "Invalid slug: must contain at least one alphanumeric character")
+			return
+		}
+		if newSlug != oldSlug {
+			existing, err := s.store.GetProjectBySlug(ctx, newSlug)
+			if err == nil && existing.ID != project.ID {
+				writeError(w, http.StatusConflict, ErrCodeConflict,
+					fmt.Sprintf("A project with slug %q already exists", newSlug), nil)
+				return
+			}
+			project.Slug = newSlug
+		}
 	}
 	if updates.Labels != nil {
 		project.Labels = updates.Labels
@@ -5295,9 +5314,59 @@ func (s *Server) updateProject(w http.ResponseWriter, r *http.Request, id string
 		return
 	}
 
+	// If the slug changed, update associated group slugs and filesystem paths.
+	if project.Slug != oldSlug {
+		s.migrateProjectSlug(ctx, project, oldSlug)
+	}
+
 	s.events.PublishProjectUpdated(ctx, project)
 
 	writeJSON(w, http.StatusOK, project)
+}
+
+// migrateProjectSlug updates group slugs and filesystem paths after a project slug change.
+// This is best-effort: failures are logged but don't roll back the rename.
+func (s *Server) migrateProjectSlug(ctx context.Context, project *store.Project, oldSlug string) {
+	newSlug := project.Slug
+
+	// Migrate the project agents group slug.
+	oldAgentsSlug := "project:" + oldSlug + ":agents"
+	newAgentsSlug := "project:" + newSlug + ":agents"
+	if group, err := s.store.GetGroupBySlug(ctx, oldAgentsSlug); err == nil {
+		group.Slug = newAgentsSlug
+		group.Name = project.Name + " Agents"
+		if err := s.store.UpdateGroup(ctx, group); err != nil {
+			slog.Warn("failed to migrate project agents group slug",
+				"project_id", project.ID, "old_slug", oldAgentsSlug, "new_slug", newAgentsSlug, "error", err)
+		}
+	}
+
+	// Migrate the project members group slug.
+	oldMembersSlug := "project:" + oldSlug + ":members"
+	newMembersSlug := "project:" + newSlug + ":members"
+	if group, err := s.store.GetGroupBySlug(ctx, oldMembersSlug); err == nil {
+		group.Slug = newMembersSlug
+		group.Name = project.Name + " Members"
+		if err := s.store.UpdateGroup(ctx, group); err != nil {
+			slog.Warn("failed to migrate project members group slug",
+				"project_id", project.ID, "old_slug", oldMembersSlug, "new_slug", newMembersSlug, "error", err)
+		}
+	}
+
+	// Migrate hub-managed project filesystem paths (best-effort).
+	if oldPath, err := hubManagedProjectPath(oldSlug); err == nil {
+		if newPath, err := hubManagedProjectPath(newSlug); err == nil {
+			// Only rename if the old path exists and the new path doesn't.
+			if _, statErr := os.Stat(oldPath); statErr == nil {
+				if _, statErr := os.Stat(newPath); os.IsNotExist(statErr) {
+					if err := os.Rename(oldPath, newPath); err != nil {
+						slog.Warn("failed to rename project workspace directory",
+							"project_id", project.ID, "old_path", oldPath, "new_path", newPath, "error", err)
+					}
+				}
+			}
+		}
+	}
 }
 
 func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, id string) {

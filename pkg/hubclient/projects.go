@@ -164,6 +164,7 @@ type CreateProjectRequest struct {
 // UpdateProjectRequest is the request for updating a project.
 type UpdateProjectRequest struct {
 	Name                   string            `json:"name,omitempty"`
+	Slug                   string            `json:"slug,omitempty"`
 	Labels                 map[string]string `json:"labels,omitempty"`
 	Annotations            map[string]string `json:"annotations,omitempty"`
 	Visibility             string            `json:"visibility,omitempty"`
