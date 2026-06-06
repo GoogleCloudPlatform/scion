@@ -90,8 +90,8 @@ step_dockerfile() {
     scion-base)    echo "${IMAGE_BUILD_DIR}/scion-base/Dockerfile" ;;
     scion-claude)  echo "${IMAGE_BUILD_DIR}/claude/Dockerfile" ;;
     scion-gemini)  echo "${IMAGE_BUILD_DIR}/gemini/Dockerfile" ;;
-    scion-opencode) echo "${IMAGE_BUILD_DIR}/opencode/Dockerfile" ;;
-    scion-codex)   echo "${IMAGE_BUILD_DIR}/codex/Dockerfile" ;;
+    scion-opencode) echo "${REPO_ROOT}/harnesses/opencode/Dockerfile" ;;
+    scion-codex)   echo "${REPO_ROOT}/harnesses/codex/Dockerfile" ;;
     scion-hub)     echo "${IMAGE_BUILD_DIR}/hub/Dockerfile" ;;
     *) return 1 ;;
   esac
@@ -108,8 +108,8 @@ step_context_dir() {
     scion-base)    echo "${REPO_ROOT}" ;;
     scion-claude)  echo "${IMAGE_BUILD_DIR}/claude" ;;
     scion-gemini)  echo "${IMAGE_BUILD_DIR}/gemini" ;;
-    scion-opencode) echo "${IMAGE_BUILD_DIR}/opencode" ;;
-    scion-codex)   echo "${IMAGE_BUILD_DIR}/codex" ;;
+    scion-opencode) echo "${REPO_ROOT}/harnesses/opencode" ;;
+    scion-codex)   echo "${REPO_ROOT}/harnesses/codex" ;;
     scion-hub)     echo "${IMAGE_BUILD_DIR}/hub" ;;
     *) return 1 ;;
   esac

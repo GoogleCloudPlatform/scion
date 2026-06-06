@@ -84,7 +84,7 @@ steps:
   # Build OpenCode Harness Image
   - name: 'gcr.io/cloud-builders/docker'
     id: 'build-scion-opencode'
-    dir: 'image-build/opencode'
+    dir: 'harnesses/opencode'
     args:
       - 'buildx'
       - 'build'
@@ -107,7 +107,7 @@ steps:
   # Build Codex Harness Image
   - name: 'gcr.io/cloud-builders/docker'
     id: 'build-scion-codex'
-    dir: 'image-build/codex'
+    dir: 'harnesses/codex'
     args:
       - 'buildx'
       - 'build'
