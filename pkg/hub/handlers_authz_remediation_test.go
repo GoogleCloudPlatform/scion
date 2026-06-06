@@ -100,6 +100,7 @@ func TestAuthzRemediation_ListEndpointsFilterUnauthorizedItems(t *testing.T) {
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, visibleProject))
+	srv.createProjectMembersGroupAndPolicy(ctx, visibleProject)
 
 	hiddenProject := &store.Project{
 		ID:        tid("project-hidden-authz"),
@@ -121,6 +122,13 @@ func TestAuthzRemediation_ListEndpointsFilterUnauthorizedItems(t *testing.T) {
 		CreatedBy: tid("owner-outside-user"),
 	}
 	require.NoError(t, s.CreateRuntimeBroker(ctx, visibleBroker))
+	// Link visible broker to visible project so member can see it via project membership
+	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID:  visibleProject.ID,
+		BrokerID:   visibleBroker.ID,
+		BrokerName: visibleBroker.Name,
+		Status:     store.BrokerStatusOnline,
+	}))
 
 	hiddenBroker := &store.RuntimeBroker{
 		ID:        tid("broker-hidden-authz"),
@@ -151,6 +159,16 @@ func TestAuthzRemediation_ListEndpointsFilterUnauthorizedItems(t *testing.T) {
 		Phase:     string(state.PhaseRunning),
 	}
 	require.NoError(t, s.CreateAgent(ctx, hiddenAgent))
+
+	// Add the member to the visible project's members group (membership-gated listing)
+	visibleMembersGroup, err := s.GetGroupBySlug(ctx, "project:"+visibleProject.Slug+":members")
+	require.NoError(t, err)
+	require.NoError(t, s.AddGroupMember(ctx, &store.GroupMember{
+		GroupID:    visibleMembersGroup.ID,
+		MemberType: store.GroupMemberTypeUser,
+		MemberID:   member.ID,
+		Role:       store.GroupMemberRoleMember,
+	}))
 
 	grantUserActionOnResource(t, s, member.ID, "project", visibleProject.ID, ActionRead)
 	grantUserActionOnResource(t, s, member.ID, "agent", visibleAgent.ID, ActionRead)
