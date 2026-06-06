@@ -1627,28 +1627,10 @@ func (s *Server) resetAuth(w http.ResponseWriter, r *http.Request, id, projectID
 	}
 
 	// Write the token to the canonical file atomically via temp+rename.
+	// Write the token to the canonical file atomically via temp+rename.
+	// Pass the token as part of the script using a heredoc pattern to avoid
+	// exposing it in argv (visible in /proc).
 	writeCmd := []string{"sh", "-c",
-		"TOKEN_DIR=\"$(getent passwd scion 2>/dev/null | cut -d: -f6 || echo /home/scion)/.scion\" && " +
-			"mkdir -p \"$TOKEN_DIR\" && " +
-			"cat > \"$TOKEN_DIR/scion-token.tmp\" && " +
-			"mv \"$TOKEN_DIR/scion-token.tmp\" \"$TOKEN_DIR/scion-token\""}
-
-	// Use exec with stdin to avoid passing the token on the command line.
-	// The exec interface takes a command array; we pipe the token via the
-	// command's stdin by embedding it in the shell script.
-	writeCmd = []string{"sh", "-c",
-		fmt.Sprintf(
-			"TOKEN_DIR=\"$(getent passwd scion 2>/dev/null | cut -d: -f6 || echo /home/scion)/.scion\" && "+
-				"mkdir -p \"$TOKEN_DIR\" && "+
-				"printf '%%s' \"$SCION_RESET_TOKEN\" > \"$TOKEN_DIR/scion-token.tmp\" && "+
-				"mv \"$TOKEN_DIR/scion-token.tmp\" \"$TOKEN_DIR/scion-token\"",
-		),
-	}
-
-	// ExecWithEnv is not available; pass token as part of the script.
-	// Avoid embedding the raw token in argv (visible in /proc). Instead,
-	// write it via a heredoc pattern that doesn't expose it.
-	writeCmd = []string{"sh", "-c",
 		"TOKEN_DIR=\"$(getent passwd scion 2>/dev/null | cut -d: -f6 || echo /home/scion)/.scion\" && " +
 			"mkdir -p \"$TOKEN_DIR\" && " +
 			"cat <<'SCION_TOKEN_EOF' > \"$TOKEN_DIR/scion-token.tmp\"\n" + req.Token + "\nSCION_TOKEN_EOF\n" +

@@ -914,6 +914,11 @@ func handleLimitsExceeded(sup *supervisor.Supervisor, limitType, message string)
 func handleAuthReset(hubClient *hub.Client, tokenRefreshCancel *context.CancelFunc, tokenRefreshDone *<-chan struct{}, statusHandler *handlers.StatusHandler, targetUID, targetGID int) {
 	log.TaggedInfo("AUTH_RESET", "Received SIGUSR2: auth reset requested")
 
+	if hubClient == nil {
+		log.Error("AUTH_RESET: Hub client is not configured, cannot reset auth")
+		return
+	}
+
 	newToken := hub.ReadTokenFile()
 	if newToken == "" {
 		log.Error("AUTH_RESET: Token file is empty after SIGUSR2, cannot reset auth")

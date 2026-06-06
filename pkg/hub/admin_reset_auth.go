@@ -44,16 +44,34 @@ func (s *Server) handleAdminResetAuthAll(w http.ResponseWriter, r *http.Request)
 		Error string `json:"error,omitempty"`
 	}
 
-	var succeeded []agentResult
-	var failed []agentResult
+	// Dispatch concurrently with a bounded worker pool to avoid timeouts
+	// when many agents are running across slow or unreachable brokers.
+	results := make(chan agentResult, len(agents.Items))
+	sem := make(chan struct{}, 20)
 
 	for _, agent := range agents.Items {
 		a := agent
-		if err := s.dispatcher.DispatchAgentResetAuth(ctx, &a); err != nil {
-			slog.Error("Bulk reset-auth failed for agent", "agent_id", a.ID, "error", err)
-			failed = append(failed, agentResult{ID: a.ID, Name: a.Name, Error: err.Error()})
+		go func() {
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			res := agentResult{ID: a.ID, Name: a.Name}
+			if err := s.dispatcher.DispatchAgentResetAuth(ctx, &a); err != nil {
+				slog.Error("Bulk reset-auth failed for agent", "agent_id", a.ID, "error", err)
+				res.Error = err.Error()
+			}
+			results <- res
+		}()
+	}
+
+	var succeeded []agentResult
+	var failed []agentResult
+	for range agents.Items {
+		res := <-results
+		if res.Error != "" {
+			failed = append(failed, res)
 		} else {
-			succeeded = append(succeeded, agentResult{ID: a.ID, Name: a.Name})
+			succeeded = append(succeeded, res)
 		}
 	}
 
