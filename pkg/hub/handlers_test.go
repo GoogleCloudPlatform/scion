@@ -860,12 +860,15 @@ func TestProjectList(t *testing.T) {
 			Slug:      tid("project-" + string(rune('a'+i))),
 			Name:      "Project " + string(rune('A'+i)),
 			GitRemote: "https://github.com/test/repo" + string(rune('a'+i)),
+			OwnerID:   DevUserID,
+			CreatedBy: DevUserID,
 			Created:   time.Now(),
 			Updated:   time.Now(),
 		}
 		if err := s.CreateProject(ctx, project); err != nil {
 			t.Fatalf("failed to create project: %v", err)
 		}
+		srv.createProjectMembersGroupAndPolicy(ctx, project)
 	}
 
 	rec := doRequest(t, srv, http.MethodGet, "/api/v1/projects", nil)
