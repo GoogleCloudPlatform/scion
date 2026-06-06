@@ -679,15 +679,18 @@ func TestDemoPolicy_ProjectDeleteCleansUpGroupsAndPolicies(t *testing.T) {
 	var project store.Project
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&project))
 
-	// Verify groups and policy exist
+	// Verify groups and policies exist before deletion
 	_, err := s.GetGroupBySlug(ctx, "project:"+project.Slug+":members")
 	require.NoError(t, err, "members group should exist before deletion")
 
-	policies, err := s.ListPolicies(ctx,
-		store.PolicyFilter{Name: "project:" + project.Slug + ":member-create-agents"},
-		store.ListOptions{Limit: 1})
-	require.NoError(t, err)
-	assert.Equal(t, 1, policies.TotalCount, "policy should exist before deletion")
+	for _, suffix := range []string{"member-read-project", "member-read-agents"} {
+		policyName := "project:" + project.Slug + ":" + suffix
+		policies, err := s.ListPolicies(ctx,
+			store.PolicyFilter{Name: policyName},
+			store.ListOptions{Limit: 1})
+		require.NoError(t, err)
+		assert.Equal(t, 1, policies.TotalCount, "%s should exist before deletion", policyName)
+	}
 
 	// Delete project
 	delRec := doRequestAsUser(t, srv, alice, http.MethodDelete, "/api/v1/projects/"+project.ID, nil)
@@ -697,10 +700,13 @@ func TestDemoPolicy_ProjectDeleteCleansUpGroupsAndPolicies(t *testing.T) {
 	_, err = s.GetGroupBySlug(ctx, "project:"+project.Slug+":members")
 	assert.Error(t, err, "members group should be deleted after project deletion")
 
-	// Verify policy is cleaned up
-	policies, err = s.ListPolicies(ctx,
-		store.PolicyFilter{Name: "project:" + project.Slug + ":member-create-agents"},
-		store.ListOptions{Limit: 1})
-	require.NoError(t, err)
-	assert.Equal(t, 0, policies.TotalCount, "policy should be deleted after project deletion")
+	// Verify policies are cleaned up
+	for _, suffix := range []string{"member-read-project", "member-read-agents"} {
+		policyName := "project:" + project.Slug + ":" + suffix
+		policies, err := s.ListPolicies(ctx,
+			store.PolicyFilter{Name: policyName},
+			store.ListOptions{Limit: 1})
+		require.NoError(t, err)
+		assert.Equal(t, 0, policies.TotalCount, "%s should be deleted after project deletion", policyName)
+	}
 }
