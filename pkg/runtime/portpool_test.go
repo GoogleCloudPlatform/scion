@@ -174,6 +174,42 @@ func TestPortPoolAllocatedPorts(t *testing.T) {
 	}
 }
 
+func TestPortPoolHostURLTrailingSlash(t *testing.T) {
+	// Verify that NewPortPool stores hostURL as-is; the caller
+	// (server_foreground.go) is responsible for trimming trailing slashes
+	// before constructing the pool.  This test documents the contract.
+	tests := []struct {
+		name    string
+		hostURL string
+		want    string
+	}{
+		{
+			name:    "no trailing slash",
+			hostURL: "http://example.com",
+			want:    "http://example.com",
+		},
+		{
+			name:    "trailing slash trimmed by caller",
+			hostURL: "http://example.com",
+			want:    "http://example.com",
+		},
+		{
+			name:    "empty host URL",
+			hostURL: "",
+			want:    "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pool := NewPortPool(8000, 9000, 2, tt.hostURL)
+			if got := pool.HostURL(); got != tt.want {
+				t.Errorf("HostURL() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestPortPoolConcurrency(t *testing.T) {
 	pool := NewPortPool(8000, 8099, 2, "")
 

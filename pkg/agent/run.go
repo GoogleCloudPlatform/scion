@@ -915,6 +915,12 @@ authDone:
 	// Allocate ports from the pool if available
 	var allocatedPorts []int
 	if m.PortPool != nil {
+		// Release any previously allocated ports for this agent name.
+		// This handles the restart case (stop + start) where the old
+		// ports were never freed because the previous run didn't go
+		// through Delete. Release is idempotent — a no-op if the name
+		// has no allocation.
+		m.PortPool.Release(opts.Name)
 		ports, err := m.PortPool.Allocate(opts.Name, m.PortPool.PerAgent())
 		if err != nil {
 			return nil, fmt.Errorf("port allocation failed: %w", err)
