@@ -1,3 +1,5 @@
+//go:build !no_sqlite
+
 package entadapter
 
 import (
