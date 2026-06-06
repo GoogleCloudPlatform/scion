@@ -16,9 +16,12 @@ package hub
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -26,6 +29,21 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// makeJWTWithExpiry builds an unsigned JWT-shaped token whose payload carries the
+// given expiry. ParseTokenExpiry only base64-decodes the payload (it does not
+// verify the signature), so this is enough to drive the refresh loop's
+// expiry-tracking logic in tests.
+func makeJWTWithExpiry(t *testing.T, exp time.Time) string {
+	t.Helper()
+	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"HS256","typ":"JWT"}`))
+	payloadJSON, err := json.Marshal(struct {
+		Exp int64 `json:"exp"`
+	}{Exp: exp.Unix()})
+	require.NoError(t, err)
+	payload := base64.RawURLEncoding.EncodeToString(payloadJSON)
+	return header + "." + payload + ".sig"
+}
 
 // scrubHubEnv clears all Hub-related environment variables for the
 // duration of the test, preventing accidental communication with a
@@ -673,6 +691,126 @@ func TestClient_StartTokenRefresh(t *testing.T) {
 			t.Fatal("token refresh loop did not exit after context cancellation")
 		}
 	})
+
+	t.Run("retries after a transient failure then recovers", func(t *testing.T) {
+		cleanup := SetTokenHome(t.TempDir())
+		defer cleanup()
+
+		var calls int32
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// First attempt fails transiently (503); the second succeeds.
+			if atomic.AddInt32(&calls, 1) == 1 {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				w.Write([]byte("temporarily down"))
+				return
+			}
+			futureExpiry := time.Now().Add(10 * time.Hour).UTC().Format(time.RFC3339)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`{"token":"recovered-token","expires_at":"` + futureExpiry + `"}`))
+		}))
+		defer server.Close()
+
+		client := NewClientWithConfig(server.URL, "old-token", "agent-123")
+
+		var errCount int32
+		refreshed := make(chan struct{}, 1)
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+
+		done := client.StartTokenRefresh(ctx, &TokenRefreshConfig{
+			RefreshAt:      time.Now(),
+			Timeout:        time.Second,
+			RetryBaseDelay: 10 * time.Millisecond,
+			RetryMaxDelay:  10 * time.Millisecond,
+			OnError:        func(error) { atomic.AddInt32(&errCount, 1) },
+			OnRefreshed: func(time.Time) {
+				select {
+				case refreshed <- struct{}{}:
+				default:
+				}
+			},
+		})
+
+		select {
+		case <-refreshed:
+			// Recovered after the transient failure.
+		case <-time.After(time.Second):
+			t.Fatal("token refresh did not recover after a transient failure")
+		}
+
+		assert.Equal(t, "recovered-token", client.GetToken())
+		assert.GreaterOrEqual(t, atomic.LoadInt32(&errCount), int32(1), "transient failure should invoke OnError")
+
+		cancel()
+		<-done
+	})
+
+	t.Run("auth lost fires once and keeps retrying", func(t *testing.T) {
+		cleanup := SetTokenHome(t.TempDir())
+		defer cleanup()
+
+		// The current token is already expired, so the first failed refresh is a
+		// terminal auth loss. The server always rejects with 401 (as it would
+		// after a hub signing-key rotation).
+		expiredToken := makeJWTWithExpiry(t, time.Now().Add(-time.Minute))
+
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusUnauthorized)
+			w.Write([]byte("invalid agent token: failed to verify token"))
+		}))
+		defer server.Close()
+
+		client := NewClientWithConfig(server.URL, expiredToken, "agent-123")
+
+		var errCount, authLostCount int32
+		var sawUnauthorized atomic.Bool
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		done := client.StartTokenRefresh(ctx, &TokenRefreshConfig{
+			RefreshAt:      time.Now(),
+			Timeout:        time.Second,
+			RetryBaseDelay: 10 * time.Millisecond,
+			RetryMaxDelay:  10 * time.Millisecond,
+			OnError: func(err error) {
+				atomic.AddInt32(&errCount, 1)
+				if errors.Is(err, ErrTokenRefreshUnauthorized) {
+					sawUnauthorized.Store(true)
+				}
+			},
+			OnAuthLost: func() { atomic.AddInt32(&authLostCount, 1) },
+		})
+
+		// Let several retries elapse.
+		require.Eventually(t, func() bool {
+			return atomic.LoadInt32(&errCount) >= 3
+		}, time.Second, 5*time.Millisecond, "expected the loop to keep retrying")
+
+		// The loop must still be running (not exited) despite the auth loss.
+		select {
+		case <-done:
+			t.Fatal("refresh loop exited instead of continuing to retry after auth loss")
+		default:
+		}
+
+		cancel()
+		<-done
+
+		assert.Equal(t, int32(1), atomic.LoadInt32(&authLostCount), "OnAuthLost should fire exactly once")
+		assert.True(t, sawUnauthorized.Load(), "401 refresh error should wrap ErrTokenRefreshUnauthorized")
+	})
+}
+
+func TestTokenRefreshBackoff(t *testing.T) {
+	base := 30 * time.Second
+	max := 5 * time.Minute
+
+	assert.Equal(t, base, tokenRefreshBackoff(0, base, max), "non-positive failures clamps to one attempt")
+	assert.Equal(t, base, tokenRefreshBackoff(1, base, max))
+	assert.Equal(t, 2*base, tokenRefreshBackoff(2, base, max))
+	assert.Equal(t, 4*base, tokenRefreshBackoff(3, base, max))
+	assert.Equal(t, max, tokenRefreshBackoff(10, base, max), "backoff is capped at max")
 }
 
 func TestOperatingMode(t *testing.T) {
