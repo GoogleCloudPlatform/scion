@@ -734,6 +734,41 @@ func TestWriteEnvFile_IncludesGitHubToken(t *testing.T) {
 	}
 }
 
+func TestWriteEnvFile_ReflectsUpdatedGitHubToken(t *testing.T) {
+	tmpHome := t.TempDir()
+
+	t.Setenv("GITHUB_TOKEN", "ghs_initial_token_abc123")
+
+	writeEnvFile(tmpHome, 0, 0)
+
+	envPath := filepath.Join(tmpHome, ".scion", "scion-env")
+	data, err := os.ReadFile(envPath)
+	if err != nil {
+		t.Fatalf("failed to read scion-env file: %v", err)
+	}
+	if !strings.Contains(string(data), `export GITHUB_TOKEN="ghs_initial_token_abc123"`) {
+		t.Fatalf("expected initial GITHUB_TOKEN in env file, got:\n%s", string(data))
+	}
+
+	// Simulate what StartGitHubTokenRefresh does: os.Setenv then OnRefreshed calls writeEnvFile
+	t.Setenv("GITHUB_TOKEN", "ghs_refreshed_token_xyz789")
+
+	writeEnvFile(tmpHome, 0, 0)
+
+	data, err = os.ReadFile(envPath)
+	if err != nil {
+		t.Fatalf("failed to read scion-env file after refresh: %v", err)
+	}
+	content := string(data)
+
+	if !strings.Contains(content, `export GITHUB_TOKEN="ghs_refreshed_token_xyz789"`) {
+		t.Errorf("expected refreshed GITHUB_TOKEN in env file, got:\n%s", content)
+	}
+	if strings.Contains(content, "ghs_initial_token_abc123") {
+		t.Errorf("stale initial token should not appear in env file after refresh")
+	}
+}
+
 func TestGitCloneWorkspace_DefaultEnvValues(t *testing.T) {
 	// Set SCION_GIT_CLONE_URL to trigger the clone path, but use a URL
 	// that will cause a predictable early failure (non-existent host).

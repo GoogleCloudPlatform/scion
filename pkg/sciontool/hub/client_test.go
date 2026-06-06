@@ -21,6 +21,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -1271,6 +1272,46 @@ func TestStartGitHubTokenRefresh_WritesExpiryFile(t *testing.T) {
 
 	// Token should not be considered expired
 	assert.False(t, IsGitHubTokenExpired(tokenPath))
+}
+
+func TestStartGitHubTokenRefresh_CallsOnRefreshedAfterEnvUpdate(t *testing.T) {
+	tmpDir := t.TempDir()
+	tokenPath := tmpDir + "/github-token"
+
+	t.Setenv("GITHUB_TOKEN", "ghs_original_stale")
+
+	futureExpiry := time.Now().Add(1 * time.Hour).UTC()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]string{
+			"token":      "ghs_fresh_token",
+			"expires_at": futureExpiry.Format(time.RFC3339),
+		})
+	}))
+	defer server.Close()
+
+	client := NewClientWithConfig(server.URL, "hub-token", "agent-123")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	var callbackToken string
+	done := client.StartGitHubTokenRefresh(ctx, &GitHubTokenRefreshConfig{
+		RefreshAt: time.Now(),
+		TokenPath: tokenPath,
+		OnRefreshed: func(newToken string, newExpiry time.Time) {
+			// At callback time, GITHUB_TOKEN env var should already be updated
+			callbackToken = newToken
+			assert.Equal(t, "ghs_fresh_token", os.Getenv("GITHUB_TOKEN"),
+				"GITHUB_TOKEN env var should be updated before OnRefreshed is called")
+		},
+	})
+
+	<-done
+
+	assert.Equal(t, "ghs_fresh_token", callbackToken,
+		"OnRefreshed callback should have been called with the new token")
 }
 
 func TestClient_StartHeartbeat_DefaultConfig(t *testing.T) {

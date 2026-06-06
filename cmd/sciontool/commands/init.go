@@ -627,6 +627,7 @@ func runInit(args []string) int {
 							ChownGID:  targetGID,
 							OnRefreshed: func(newToken string, newExpiry time.Time) {
 								log.Info("GitHub token refreshed, new expiry: %s", newExpiry.Format(time.RFC3339))
+								writeEnvFile(agentHome, targetUID, targetGID)
 							},
 							OnError: func(err error) {
 								log.Error("GitHub token refresh failed: %v", err)
