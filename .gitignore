@@ -59,3 +59,19 @@ testdata/hub-v46-fixture.db-shm
 # Claude temporary files
 .claude/
 fixturegen
+
+# Agent state files
+.coordinator-state.md
+.eng-manager-state.md
+
+# Task tracking (ephemeral)
+.tasks/
+
+# Screenshot artifacts
+web/.screenshots/
+
+# Downloaded files
+downloads/
+
+# PR review artifacts
+pr-*-review*.md
