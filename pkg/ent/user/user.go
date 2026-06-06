@@ -32,10 +32,8 @@ const (
 	FieldCreated = "created"
 	// FieldLastLogin holds the string denoting the last_login field in the database.
 	FieldLastLogin = "last_login"
-	// EdgeCreatedAgents holds the string denoting the created_agents edge name in mutations.
-	EdgeCreatedAgents = "created_agents"
-	// EdgeOwnedAgents holds the string denoting the owned_agents edge name in mutations.
-	EdgeOwnedAgents = "owned_agents"
+	// FieldLastSeen holds the string denoting the last_seen field in the database.
+	FieldLastSeen = "last_seen"
 	// EdgeOwnedGroups holds the string denoting the owned_groups edge name in mutations.
 	EdgeOwnedGroups = "owned_groups"
 	// EdgeMemberships holds the string denoting the memberships edge name in mutations.
@@ -44,20 +42,6 @@ const (
 	EdgePolicyBindings = "policy_bindings"
 	// Table holds the table name of the user in the database.
 	Table = "users"
-	// CreatedAgentsTable is the table that holds the created_agents relation/edge.
-	CreatedAgentsTable = "agents"
-	// CreatedAgentsInverseTable is the table name for the Agent entity.
-	// It exists in this package in order to avoid circular dependency with the "agent" package.
-	CreatedAgentsInverseTable = "agents"
-	// CreatedAgentsColumn is the table column denoting the created_agents relation/edge.
-	CreatedAgentsColumn = "created_by"
-	// OwnedAgentsTable is the table that holds the owned_agents relation/edge.
-	OwnedAgentsTable = "agents"
-	// OwnedAgentsInverseTable is the table name for the Agent entity.
-	// It exists in this package in order to avoid circular dependency with the "agent" package.
-	OwnedAgentsInverseTable = "agents"
-	// OwnedAgentsColumn is the table column denoting the owned_agents relation/edge.
-	OwnedAgentsColumn = "owner_id"
 	// OwnedGroupsTable is the table that holds the owned_groups relation/edge.
 	OwnedGroupsTable = "groups"
 	// OwnedGroupsInverseTable is the table name for the Group entity.
@@ -92,6 +76,7 @@ var Columns = []string{
 	FieldPreferences,
 	FieldCreated,
 	FieldLastLogin,
+	FieldLastSeen,
 }
 
 // ValidColumn reports if the column name is valid (part of the table columns).
@@ -107,8 +92,6 @@ func ValidColumn(column string) bool {
 var (
 	// EmailValidator is a validator for the "email" field. It is called by the builders before save.
 	EmailValidator func(string) error
-	// DisplayNameValidator is a validator for the "display_name" field. It is called by the builders before save.
-	DisplayNameValidator func(string) error
 	// DefaultCreated holds the default value on creation for the "created" field.
 	DefaultCreated func() time.Time
 	// DefaultID holds the default value on creation for the "id" field.
@@ -211,32 +194,9 @@ func ByLastLogin(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldLastLogin, opts...).ToFunc()
 }
 
-// ByCreatedAgentsCount orders the results by created_agents count.
-func ByCreatedAgentsCount(opts ...sql.OrderTermOption) OrderOption {
-	return func(s *sql.Selector) {
-		sqlgraph.OrderByNeighborsCount(s, newCreatedAgentsStep(), opts...)
-	}
-}
-
-// ByCreatedAgents orders the results by created_agents terms.
-func ByCreatedAgents(term sql.OrderTerm, terms ...sql.OrderTerm) OrderOption {
-	return func(s *sql.Selector) {
-		sqlgraph.OrderByNeighborTerms(s, newCreatedAgentsStep(), append([]sql.OrderTerm{term}, terms...)...)
-	}
-}
-
-// ByOwnedAgentsCount orders the results by owned_agents count.
-func ByOwnedAgentsCount(opts ...sql.OrderTermOption) OrderOption {
-	return func(s *sql.Selector) {
-		sqlgraph.OrderByNeighborsCount(s, newOwnedAgentsStep(), opts...)
-	}
-}
-
-// ByOwnedAgents orders the results by owned_agents terms.
-func ByOwnedAgents(term sql.OrderTerm, terms ...sql.OrderTerm) OrderOption {
-	return func(s *sql.Selector) {
-		sqlgraph.OrderByNeighborTerms(s, newOwnedAgentsStep(), append([]sql.OrderTerm{term}, terms...)...)
-	}
+// ByLastSeen orders the results by the last_seen field.
+func ByLastSeen(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldLastSeen, opts...).ToFunc()
 }
 
 // ByOwnedGroupsCount orders the results by owned_groups count.
@@ -279,20 +239,6 @@ func ByPolicyBindings(term sql.OrderTerm, terms ...sql.OrderTerm) OrderOption {
 	return func(s *sql.Selector) {
 		sqlgraph.OrderByNeighborTerms(s, newPolicyBindingsStep(), append([]sql.OrderTerm{term}, terms...)...)
 	}
-}
-func newCreatedAgentsStep() *sqlgraph.Step {
-	return sqlgraph.NewStep(
-		sqlgraph.From(Table, FieldID),
-		sqlgraph.To(CreatedAgentsInverseTable, FieldID),
-		sqlgraph.Edge(sqlgraph.O2M, false, CreatedAgentsTable, CreatedAgentsColumn),
-	)
-}
-func newOwnedAgentsStep() *sqlgraph.Step {
-	return sqlgraph.NewStep(
-		sqlgraph.From(Table, FieldID),
-		sqlgraph.To(OwnedAgentsInverseTable, FieldID),
-		sqlgraph.Edge(sqlgraph.O2M, false, OwnedAgentsTable, OwnedAgentsColumn),
-	)
 }
 func newOwnedGroupsStep() *sqlgraph.Step {
 	return sqlgraph.NewStep(

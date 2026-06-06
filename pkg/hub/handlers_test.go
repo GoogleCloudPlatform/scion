@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -29,7 +30,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
-	"github.com/GoogleCloudPlatform/scion/pkg/store/sqlite"
 	"github.com/go-jose/go-jose/v4/jwt"
 )
 
@@ -40,7 +40,7 @@ const testDevToken = "scion_dev_test_token_for_unit_tests_1234567890"
 // The server is configured with dev auth enabled using testDevToken.
 func testServer(t *testing.T) (*Server, store.Store) {
 	t.Helper()
-	s, err := sqlite.New(":memory:")
+	s, err := newTestStore(":memory:")
 	if err != nil {
 		if strings.Contains(err.Error(), "sqlite driver not registered") {
 			t.Skip("Skipping test because sqlite driver is not registered (build with -tags sqlite to enable)")
@@ -183,7 +183,7 @@ func TestAgentList(t *testing.T) {
 
 	// Create a project first (agents reference projects)
 	project := &store.Project{
-		ID:        "project_test123",
+		ID:        tid("project_test123"),
 		Slug:      "test-project",
 		Name:      "Test Project",
 		GitRemote: "https://github.com/test/repo",
@@ -197,8 +197,8 @@ func TestAgentList(t *testing.T) {
 	// Create some test agents
 	for i := 0; i < 3; i++ {
 		agent := &store.Agent{
-			ID:           "agent_" + string(rune('a'+i)),
-			Slug:         "test-agent-" + string(rune('a'+i)),
+			ID:           tid("agent_" + string(rune('a'+i))),
+			Slug:         tid("test-agent-" + string(rune('a'+i))),
 			Name:         "Test Agent " + string(rune('A'+i)),
 			ProjectID:    project.ID,
 			Phase:        string(state.PhaseStopped),
@@ -237,7 +237,7 @@ func TestAgentCreate(t *testing.T) {
 
 	// Create a runtime broker first
 	broker := &store.RuntimeBroker{
-		ID:     "host_test123",
+		ID:     tid("host_test123"),
 		Slug:   "test-host",
 		Name:   "Test Host",
 		Status: store.BrokerStatusOnline,
@@ -248,8 +248,8 @@ func TestAgentCreate(t *testing.T) {
 
 	// Create a project with default runtime broker
 	project := &store.Project{
-		ID:                     "project_abc123",
-		Slug:                   "my-project",
+		ID:                     tid("project_abc123"),
+		Slug:                   tid("my-project"),
 		Name:                   "My Project",
 		GitRemote:              "github.com/test/repo",
 		DefaultRuntimeBrokerID: broker.ID,
@@ -316,7 +316,7 @@ func TestAgentCreate_NoTask(t *testing.T) {
 
 	// Create a runtime broker
 	broker := &store.RuntimeBroker{
-		ID:     "host_notask",
+		ID:     tid("host_notask"),
 		Slug:   "notask-host",
 		Name:   "No Task Host",
 		Status: store.BrokerStatusOnline,
@@ -327,7 +327,7 @@ func TestAgentCreate_NoTask(t *testing.T) {
 
 	// Create a project with default runtime broker
 	project := &store.Project{
-		ID:                     "project_notask",
+		ID:                     tid("project_notask"),
 		Slug:                   "notask-project",
 		Name:                   "No Task Project",
 		GitRemote:              "github.com/test/notask",
@@ -387,7 +387,7 @@ func TestAgentCreate_NoTaskViaProject(t *testing.T) {
 
 	// Create a runtime broker
 	broker := &store.RuntimeBroker{
-		ID:     "host_notask_project",
+		ID:     tid("host_notask_project"),
 		Slug:   "notask-project-host",
 		Name:   "No Task Project Host",
 		Status: store.BrokerStatusOnline,
@@ -398,7 +398,7 @@ func TestAgentCreate_NoTaskViaProject(t *testing.T) {
 
 	// Create a project with default runtime broker
 	project := &store.Project{
-		ID:                     "project_notask_project",
+		ID:                     tid("project_notask_project"),
 		Slug:                   "notask-project-ep",
 		Name:                   "No Task Project EP",
 		GitRemote:              "github.com/test/notask-project",
@@ -454,7 +454,7 @@ func TestAgentCreate_AttachNoTask(t *testing.T) {
 
 	// Create a runtime broker
 	broker := &store.RuntimeBroker{
-		ID:     "host_attach",
+		ID:     tid("host_attach"),
 		Slug:   "attach-host",
 		Name:   "Attach Host",
 		Status: store.BrokerStatusOnline,
@@ -465,7 +465,7 @@ func TestAgentCreate_AttachNoTask(t *testing.T) {
 
 	// Create a project with default runtime broker
 	project := &store.Project{
-		ID:                     "project_attach",
+		ID:                     tid("project_attach"),
 		Slug:                   "attach-project",
 		Name:                   "Attach Project",
 		GitRemote:              "github.com/test/attach",
@@ -525,7 +525,7 @@ func TestAgentCreate_SingleProvider(t *testing.T) {
 
 	// Create a runtime broker
 	broker := &store.RuntimeBroker{
-		ID:     "host_single",
+		ID:     tid("host_single"),
 		Slug:   "single-host",
 		Name:   "Single Host",
 		Status: store.BrokerStatusOnline,
@@ -536,7 +536,7 @@ func TestAgentCreate_SingleProvider(t *testing.T) {
 
 	// Create a project WITHOUT a default runtime broker
 	project := &store.Project{
-		ID:        "project_single",
+		ID:        tid("project_single"),
 		Slug:      "single-project",
 		Name:      "Single Project",
 		GitRemote: "github.com/test/single",
@@ -589,7 +589,7 @@ func TestAgentCreate_SingleOfflineProvider(t *testing.T) {
 	ctx := context.Background()
 
 	broker := &store.RuntimeBroker{
-		ID:     "host_single_offline",
+		ID:     tid("host_single_offline"),
 		Slug:   "single-host-offline",
 		Name:   "Single Host Offline",
 		Status: store.BrokerStatusOffline,
@@ -599,7 +599,7 @@ func TestAgentCreate_SingleOfflineProvider(t *testing.T) {
 	}
 
 	project := &store.Project{
-		ID:        "project_single_offline",
+		ID:        tid("project_single_offline"),
 		Slug:      "single-project-offline",
 		Name:      "Single Project Offline",
 		GitRemote: "github.com/test/single-offline",
@@ -647,7 +647,7 @@ func TestAgentCreate_MultipleProviders(t *testing.T) {
 
 	// Create two runtime brokers
 	broker1 := &store.RuntimeBroker{
-		ID:     "host_multi1",
+		ID:     tid("host_multi1"),
 		Slug:   "multi-host-1",
 		Name:   "Multi Host 1",
 		Status: store.BrokerStatusOnline,
@@ -657,7 +657,7 @@ func TestAgentCreate_MultipleProviders(t *testing.T) {
 	}
 
 	broker2 := &store.RuntimeBroker{
-		ID:     "host_multi2",
+		ID:     tid("host_multi2"),
 		Slug:   "multi-host-2",
 		Name:   "Multi Host 2",
 		Status: store.BrokerStatusOnline,
@@ -668,7 +668,7 @@ func TestAgentCreate_MultipleProviders(t *testing.T) {
 
 	// Create a project WITHOUT a default runtime broker
 	project := &store.Project{
-		ID:        "project_multi",
+		ID:        tid("project_multi"),
 		Slug:      "multi-project",
 		Name:      "Multi Project",
 		GitRemote: "github.com/test/multi",
@@ -739,7 +739,7 @@ func TestAgentGetByID(t *testing.T) {
 
 	// Create project and agent
 	project := &store.Project{
-		ID:        "project_xyz",
+		ID:        tid("project_xyz"),
 		Slug:      "project-xyz",
 		Name:      "Project XYZ",
 		GitRemote: "https://github.com/test/repo",
@@ -751,7 +751,7 @@ func TestAgentGetByID(t *testing.T) {
 	}
 
 	agent := &store.Agent{
-		ID:           "agent_test1",
+		ID:           tid("agent_test1"),
 		Slug:         "test-agent",
 		Name:         "Test Agent",
 		ProjectID:    project.ID,
@@ -764,7 +764,7 @@ func TestAgentGetByID(t *testing.T) {
 		t.Fatalf("failed to create agent: %v", err)
 	}
 
-	rec := doRequest(t, srv, http.MethodGet, "/api/v1/agents/agent_test1", nil)
+	rec := doRequest(t, srv, http.MethodGet, fmt.Sprintf("/api/v1/agents/%s", tid("agent_test1")), nil)
 
 	if rec.Code != http.StatusOK {
 		t.Errorf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
@@ -775,7 +775,7 @@ func TestAgentGetByID(t *testing.T) {
 		t.Fatalf("failed to decode response: %v", err)
 	}
 
-	if resp.ID != "agent_test1" {
+	if resp.ID != tid("agent_test1") {
 		t.Errorf("expected ID 'agent_test1', got %q", resp.ID)
 	}
 }
@@ -805,7 +805,7 @@ func TestAgentDelete(t *testing.T) {
 
 	// Create project and agent
 	project := &store.Project{
-		ID:        "project_del",
+		ID:        tid("project_del"),
 		Slug:      "project-del",
 		Name:      "Project Del",
 		GitRemote: "https://github.com/test/repo",
@@ -817,7 +817,7 @@ func TestAgentDelete(t *testing.T) {
 	}
 
 	agent := &store.Agent{
-		ID:           "agent_delete",
+		ID:           tid("agent_delete"),
 		Slug:         "delete-me",
 		Name:         "Delete Me",
 		ProjectID:    project.ID,
@@ -830,14 +830,14 @@ func TestAgentDelete(t *testing.T) {
 		t.Fatalf("failed to create agent: %v", err)
 	}
 
-	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/agents/agent_delete", nil)
+	rec := doRequest(t, srv, http.MethodDelete, fmt.Sprintf("/api/v1/agents/%s", tid("agent_delete")), nil)
 
 	if rec.Code != http.StatusNoContent {
 		t.Errorf("expected status 204, got %d: %s", rec.Code, rec.Body.String())
 	}
 
 	// Verify agent is deleted
-	_, err := s.GetAgent(ctx, "agent_delete")
+	_, err := s.GetAgent(ctx, tid("agent_delete"))
 	if err == nil {
 		t.Error("expected agent to be deleted")
 	}
@@ -853,8 +853,8 @@ func TestProjectList(t *testing.T) {
 
 	for i := 0; i < 2; i++ {
 		project := &store.Project{
-			ID:        "project_" + string(rune('a'+i)),
-			Slug:      "project-" + string(rune('a'+i)),
+			ID:        tid("project_" + string(rune('a'+i))),
+			Slug:      tid("project-" + string(rune('a'+i))),
 			Name:      "Project " + string(rune('A'+i)),
 			GitRemote: "https://github.com/test/repo" + string(rune('a'+i)),
 			Created:   time.Now(),
@@ -1014,13 +1014,13 @@ func TestProjectRegisterMultipleGitRemoteMatches(t *testing.T) {
 
 	// Pre-create two projects for the same git remote.
 	project1 := &store.Project{
-		ID:        "project-1",
+		ID:        tid("project-1"),
 		Name:      "widgets",
 		Slug:      "widgets",
 		GitRemote: "github.com/acme/widgets",
 	}
 	project2 := &store.Project{
-		ID:        "project-2",
+		ID:        tid("project-2"),
 		Name:      "widgets (2)",
 		Slug:      "widgets-2",
 		GitRemote: "github.com/acme/widgets",
@@ -1062,7 +1062,7 @@ func TestProjectRegisterMultipleGitRemoteMatches(t *testing.T) {
 	for _, m := range resp.Matches {
 		matchIDs[m.ID] = true
 	}
-	if !matchIDs["project-1"] || !matchIDs["project-2"] {
+	if !matchIDs[tid("project-1")] || !matchIDs[tid("project-2")] {
 		t.Errorf("expected matches to include project-1 and project-2, got %v", resp.Matches)
 	}
 
@@ -1136,7 +1136,7 @@ func TestProjectRegisterWithBrokerID(t *testing.T) {
 
 	// First, create a broker directly (simulating Phase 1 + 2 of two-phase flow)
 	broker := &store.RuntimeBroker{
-		ID:     "host_twophase_test",
+		ID:     tid("host_twophase_test"),
 		Name:   "Two Phase Test Host",
 		Slug:   "two-phase-test-host",
 		Status: store.BrokerStatusOnline,
@@ -1230,7 +1230,7 @@ func TestAddProvider(t *testing.T) {
 
 	// Create a project
 	project := &store.Project{
-		ID:        "project_contrib_test",
+		ID:        tid("project_contrib_test"),
 		Slug:      "contrib-test",
 		Name:      "Provider Test Project",
 		GitRemote: "https://github.com/test/contrib-test",
@@ -1243,7 +1243,7 @@ func TestAddProvider(t *testing.T) {
 
 	// Create a broker
 	broker := &store.RuntimeBroker{
-		ID:     "host_contrib_test",
+		ID:     tid("host_contrib_test"),
 		Name:   "Provider Test Host",
 		Slug:   "contrib-test-host",
 		Status: store.BrokerStatusOnline,
@@ -1295,7 +1295,7 @@ func TestListProviders(t *testing.T) {
 
 	// Create a project
 	project := &store.Project{
-		ID:      "project_list_contrib",
+		ID:      tid("project_list_contrib"),
 		Slug:    "list-contrib",
 		Name:    "List Providers Project",
 		Created: time.Now(),
@@ -1307,7 +1307,7 @@ func TestListProviders(t *testing.T) {
 
 	// Create and add a broker as provider
 	broker := &store.RuntimeBroker{
-		ID:     "host_list_contrib",
+		ID:     tid("host_list_contrib"),
 		Name:   "List Providers Host",
 		Slug:   "list-contrib-host",
 		Status: store.BrokerStatusOnline,
@@ -1352,7 +1352,7 @@ func TestProjectGetByID(t *testing.T) {
 	ctx := context.Background()
 
 	project := &store.Project{
-		ID:        "project_gettest",
+		ID:        tid("project_gettest"),
 		Slug:      "get-test",
 		Name:      "Get Test",
 		GitRemote: "https://github.com/test/get-test",
@@ -1363,7 +1363,7 @@ func TestProjectGetByID(t *testing.T) {
 		t.Fatalf("failed to create project: %v", err)
 	}
 
-	rec := doRequest(t, srv, http.MethodGet, "/api/v1/projects/project_gettest", nil)
+	rec := doRequest(t, srv, http.MethodGet, fmt.Sprintf("/api/v1/projects/%s", tid("project_gettest")), nil)
 
 	if rec.Code != http.StatusOK {
 		t.Errorf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
@@ -1374,7 +1374,7 @@ func TestProjectGetByID(t *testing.T) {
 		t.Fatalf("failed to decode response: %v", err)
 	}
 
-	if resp.ID != "project_gettest" {
+	if resp.ID != tid("project_gettest") {
 		t.Errorf("expected ID 'project_gettest', got %q", resp.ID)
 	}
 }
@@ -1388,7 +1388,7 @@ func TestRuntimeBrokerList(t *testing.T) {
 	ctx := context.Background()
 
 	broker := &store.RuntimeBroker{
-		ID:            "host_test1",
+		ID:            tid("host_test1"),
 		Name:          "Test Host",
 		Slug:          "test-host",
 		Status:        store.BrokerStatusOnline,
@@ -1422,7 +1422,7 @@ func TestRuntimeBrokerListByName(t *testing.T) {
 
 	// Create two brokers with different names
 	broker1 := &store.RuntimeBroker{
-		ID:            "host_name_test1",
+		ID:            tid("host_name_test1"),
 		Name:          "Alpha Host",
 		Slug:          "alpha-host",
 		Status:        store.BrokerStatusOnline,
@@ -1431,7 +1431,7 @@ func TestRuntimeBrokerListByName(t *testing.T) {
 		Updated:       time.Now(),
 	}
 	broker2 := &store.RuntimeBroker{
-		ID:            "host_name_test2",
+		ID:            tid("host_name_test2"),
 		Name:          "Beta Host",
 		Slug:          "beta-host",
 		Status:        store.BrokerStatusOnline,
@@ -1499,7 +1499,7 @@ func TestRuntimeBrokerDeleteCascadesProviders(t *testing.T) {
 
 	// Create a broker
 	broker := &store.RuntimeBroker{
-		ID:      "broker_cascade_test",
+		ID:      tid("broker_cascade_test"),
 		Name:    "Cascade Test Broker",
 		Slug:    "cascade-test-broker",
 		Status:  store.BrokerStatusOnline,
@@ -1512,7 +1512,7 @@ func TestRuntimeBrokerDeleteCascadesProviders(t *testing.T) {
 
 	// Create two projects, one with default_runtime_broker_id pointing to this broker
 	project1 := &store.Project{
-		ID:                     "project_cascade_1",
+		ID:                     tid("project_cascade_1"),
 		Name:                   "Cascade Project 1",
 		Slug:                   "cascade-project-1",
 		DefaultRuntimeBrokerID: broker.ID,
@@ -1520,7 +1520,7 @@ func TestRuntimeBrokerDeleteCascadesProviders(t *testing.T) {
 		Updated:                time.Now(),
 	}
 	project2 := &store.Project{
-		ID:      "project_cascade_2",
+		ID:      tid("project_cascade_2"),
 		Name:    "Cascade Project 2",
 		Slug:    "cascade-project-2",
 		Created: time.Now(),
@@ -1599,7 +1599,7 @@ func TestRuntimeBrokerGetByID(t *testing.T) {
 	ctx := context.Background()
 
 	broker := &store.RuntimeBroker{
-		ID:            "host_gettest",
+		ID:            tid("host_gettest"),
 		Name:          "Get Test Host",
 		Slug:          "get-test-host",
 		Status:        store.BrokerStatusOnline,
@@ -1611,7 +1611,7 @@ func TestRuntimeBrokerGetByID(t *testing.T) {
 		t.Fatalf("failed to create runtime broker: %v", err)
 	}
 
-	rec := doRequest(t, srv, http.MethodGet, "/api/v1/runtime-brokers/host_gettest", nil)
+	rec := doRequest(t, srv, http.MethodGet, fmt.Sprintf("/api/v1/runtime-brokers/%s", tid("host_gettest")), nil)
 
 	if rec.Code != http.StatusOK {
 		t.Errorf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
@@ -1622,7 +1622,7 @@ func TestRuntimeBrokerGetByID(t *testing.T) {
 		t.Fatalf("failed to decode response: %v", err)
 	}
 
-	if resp.ID != "host_gettest" {
+	if resp.ID != tid("host_gettest") {
 		t.Errorf("expected ID 'host_gettest', got %q", resp.ID)
 	}
 }
@@ -1633,7 +1633,7 @@ func TestRuntimeBrokerGetByID_CreatedByName(t *testing.T) {
 
 	// Create a user to be the broker creator
 	if err := s.CreateUser(ctx, &store.User{
-		ID:          "user_broker_creator",
+		ID:          tid("user_broker_creator"),
 		Email:       "creator@test.com",
 		DisplayName: "Broker Creator",
 		Role:        "member",
@@ -1643,11 +1643,11 @@ func TestRuntimeBrokerGetByID_CreatedByName(t *testing.T) {
 	}
 
 	broker := &store.RuntimeBroker{
-		ID:            "broker_createdby_test",
+		ID:            tid("broker_createdby_test"),
 		Name:          "CreatedBy Test Broker",
 		Slug:          "createdby-test-broker",
 		Status:        store.BrokerStatusOnline,
-		CreatedBy:     "user_broker_creator",
+		CreatedBy:     tid("user_broker_creator"),
 		LastHeartbeat: time.Now(),
 		Created:       time.Now(),
 		Updated:       time.Now(),
@@ -1656,7 +1656,7 @@ func TestRuntimeBrokerGetByID_CreatedByName(t *testing.T) {
 		t.Fatalf("failed to create runtime broker: %v", err)
 	}
 
-	rec := doRequest(t, srv, http.MethodGet, "/api/v1/runtime-brokers/broker_createdby_test", nil)
+	rec := doRequest(t, srv, http.MethodGet, fmt.Sprintf("/api/v1/runtime-brokers/%s", tid("broker_createdby_test")), nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
 	}
@@ -1692,7 +1692,7 @@ func TestRuntimeBrokerGetByID_CreatedByNameFallsBackToEmail(t *testing.T) {
 
 	// Create a user with no display name
 	if err := s.CreateUser(ctx, &store.User{
-		ID:     "user_no_display",
+		ID:     tid("user_no_display"),
 		Email:  "nodisplay@test.com",
 		Role:   "member",
 		Status: "active",
@@ -1701,11 +1701,11 @@ func TestRuntimeBrokerGetByID_CreatedByNameFallsBackToEmail(t *testing.T) {
 	}
 
 	broker := &store.RuntimeBroker{
-		ID:            "broker_email_fallback",
+		ID:            tid("broker_email_fallback"),
 		Name:          "Email Fallback Broker",
 		Slug:          "email-fallback-broker",
 		Status:        store.BrokerStatusOnline,
-		CreatedBy:     "user_no_display",
+		CreatedBy:     tid("user_no_display"),
 		LastHeartbeat: time.Now(),
 		Created:       time.Now(),
 		Updated:       time.Now(),
@@ -1714,7 +1714,7 @@ func TestRuntimeBrokerGetByID_CreatedByNameFallsBackToEmail(t *testing.T) {
 		t.Fatalf("failed to create runtime broker: %v", err)
 	}
 
-	rec := doRequest(t, srv, http.MethodGet, "/api/v1/runtime-brokers/broker_email_fallback", nil)
+	rec := doRequest(t, srv, http.MethodGet, fmt.Sprintf("/api/v1/runtime-brokers/%s", tid("broker_email_fallback")), nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
 	}
@@ -1734,7 +1734,7 @@ func TestRuntimeBrokerList_Capabilities(t *testing.T) {
 	ctx := context.Background()
 
 	broker := &store.RuntimeBroker{
-		ID:            "broker_caps_list",
+		ID:            tid("broker_caps_list"),
 		Name:          "Caps List Broker",
 		Slug:          "caps-list-broker",
 		Status:        store.BrokerStatusOnline,
@@ -1771,7 +1771,7 @@ func TestRuntimeBrokerList_CreatedByName(t *testing.T) {
 
 	// Create a user to be the broker creator
 	if err := s.CreateUser(ctx, &store.User{
-		ID:          "user_list_creator",
+		ID:          tid("user_list_creator"),
 		Email:       "listcreator@test.com",
 		DisplayName: "List Creator",
 		Role:        "member",
@@ -1781,11 +1781,11 @@ func TestRuntimeBrokerList_CreatedByName(t *testing.T) {
 	}
 
 	broker := &store.RuntimeBroker{
-		ID:            "broker_list_createdby",
+		ID:            tid("broker_list_createdby"),
 		Name:          "List CreatedBy Broker",
 		Slug:          "list-createdby-broker",
 		Status:        store.BrokerStatusOnline,
-		CreatedBy:     "user_list_creator",
+		CreatedBy:     tid("user_list_creator"),
 		LastHeartbeat: time.Now(),
 		Created:       time.Now(),
 		Updated:       time.Now(),
@@ -1819,7 +1819,7 @@ func TestRuntimeBrokerListWithProjectLocalPath(t *testing.T) {
 
 	// Create a project
 	project := &store.Project{
-		ID:         "project_localpath_test",
+		ID:         tid("project_localpath_test"),
 		Name:       "Local Path Test Project",
 		Slug:       "local-path-test",
 		Visibility: store.VisibilityPrivate,
@@ -1832,7 +1832,7 @@ func TestRuntimeBrokerListWithProjectLocalPath(t *testing.T) {
 
 	// Create a runtime broker
 	broker := &store.RuntimeBroker{
-		ID:            "host_localpath_test",
+		ID:            tid("host_localpath_test"),
 		Name:          "Local Path Test Host",
 		Slug:          "local-path-test-host",
 		Status:        store.BrokerStatusOnline,
@@ -1857,7 +1857,7 @@ func TestRuntimeBrokerListWithProjectLocalPath(t *testing.T) {
 	}
 
 	// List runtime brokers filtered by project - should include localPath
-	rec := doRequest(t, srv, http.MethodGet, "/api/v1/runtime-brokers?projectId=project_localpath_test", nil)
+	rec := doRequest(t, srv, http.MethodGet, fmt.Sprintf("/api/v1/runtime-brokers?projectId=%s", tid("project_localpath_test")), nil)
 
 	if rec.Code != http.StatusOK {
 		t.Errorf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
@@ -1872,7 +1872,7 @@ func TestRuntimeBrokerListWithProjectLocalPath(t *testing.T) {
 		t.Errorf("expected 1 broker, got %d", len(resp.Brokers))
 	}
 
-	if resp.Brokers[0].ID != "host_localpath_test" {
+	if resp.Brokers[0].ID != tid("host_localpath_test") {
 		t.Errorf("expected broker ID 'host_localpath_test', got %q", resp.Brokers[0].ID)
 	}
 
@@ -1904,7 +1904,7 @@ func TestRuntimeBrokerListWithProjectLocalPath(t *testing.T) {
 // testServerWithBrokerAuth creates a test server with broker auth enabled.
 func testServerWithBrokerAuth(t *testing.T) (*Server, store.Store) {
 	t.Helper()
-	s, err := sqlite.New(":memory:")
+	s, err := newTestStore(":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
@@ -2052,7 +2052,7 @@ func TestTemplateList(t *testing.T) {
 	ctx := context.Background()
 
 	template := &store.Template{
-		ID:         "tmpl_test1",
+		ID:         tid("tmpl_test1"),
 		Slug:       "test-template",
 		Name:       "Test Template",
 		Harness:    "claude",
@@ -2088,7 +2088,7 @@ func TestTemplateListByProjectID(t *testing.T) {
 
 	// Create a global template
 	if err := s.CreateTemplate(ctx, &store.Template{
-		ID: "tmpl_global1", Slug: "global-tmpl", Name: "Global Template",
+		ID: tid("tmpl_global1"), Slug: "global-tmpl", Name: "Global Template",
 		Harness: "claude", Scope: "global",
 		Visibility: store.VisibilityPublic, Status: "active",
 		Created: now, Updated: now,
@@ -2098,8 +2098,8 @@ func TestTemplateListByProjectID(t *testing.T) {
 
 	// Create a project-scoped template for project "project_abc"
 	if err := s.CreateTemplate(ctx, &store.Template{
-		ID: "tmpl_project1", Slug: "project-tmpl", Name: "Project Template",
-		Harness: "gemini", Scope: "project", ScopeID: "project_abc",
+		ID: tid("tmpl_project1"), Slug: "project-tmpl", Name: "Project Template",
+		Harness: "gemini", Scope: "project", ScopeID: tid("project_abc"),
 		Visibility: store.VisibilityPublic, Status: "active",
 		Created: now, Updated: now,
 	}); err != nil {
@@ -2108,8 +2108,8 @@ func TestTemplateListByProjectID(t *testing.T) {
 
 	// Create a project-scoped template for a different project
 	if err := s.CreateTemplate(ctx, &store.Template{
-		ID: "tmpl_project2", Slug: "other-project-tmpl", Name: "Other Project Template",
-		Harness: "claude", Scope: "project", ScopeID: "project_xyz",
+		ID: tid("tmpl_project2"), Slug: "other-project-tmpl", Name: "Other Project Template",
+		Harness: "claude", Scope: "project", ScopeID: tid("project_xyz"),
 		Visibility: store.VisibilityPublic, Status: "active",
 		Created: now, Updated: now,
 	}); err != nil {
@@ -2117,7 +2117,7 @@ func TestTemplateListByProjectID(t *testing.T) {
 	}
 
 	// Query with projectId=project_abc should return global + project_abc templates only
-	rec := doRequest(t, srv, http.MethodGet, "/api/v1/templates?projectId=project_abc", nil)
+	rec := doRequest(t, srv, http.MethodGet, fmt.Sprintf("/api/v1/templates?projectId=%s", tid("project_abc")), nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
 	}
@@ -2136,13 +2136,13 @@ func TestTemplateListByProjectID(t *testing.T) {
 	for _, tmpl := range resp.Templates {
 		ids[tmpl.ID] = true
 	}
-	if !ids["tmpl_global1"] {
+	if !ids[tid("tmpl_global1")] {
 		t.Error("expected global template in results")
 	}
-	if !ids["tmpl_project1"] {
+	if !ids[tid("tmpl_project1")] {
 		t.Error("expected project_abc template in results")
 	}
-	if ids["tmpl_project2"] {
+	if ids[tid("tmpl_project2")] {
 		t.Error("did not expect project_xyz template in results")
 	}
 }
@@ -2191,7 +2191,7 @@ func TestUserList(t *testing.T) {
 	ctx := context.Background()
 
 	user := &store.User{
-		ID:          "user_test1",
+		ID:          tid("user_test1"),
 		Email:       "test@example.com",
 		DisplayName: "Test User",
 		Role:        store.UserRoleMember,
@@ -2256,7 +2256,7 @@ func TestInvalidJSON(t *testing.T) {
 
 	// Create a project first
 	project := &store.Project{
-		ID:        "project_invalid",
+		ID:        tid("project_invalid"),
 		Slug:      "invalid-project",
 		Name:      "Invalid Project",
 		GitRemote: "https://github.com/test/invalid",
@@ -2325,8 +2325,9 @@ func TestCORSPreflight(t *testing.T) {
 func TestProjectCreateIdempotent(t *testing.T) {
 	srv, _ := testServer(t)
 
+	deterministicID := tid("deterministic-id-1234")
 	body := CreateProjectRequest{
-		ID:        "deterministic-id-1234",
+		ID:        deterministicID,
 		Name:      "My Project",
 		Slug:      "my-project",
 		GitRemote: "github.com/acme/widgets",
@@ -2342,8 +2343,8 @@ func TestProjectCreateIdempotent(t *testing.T) {
 	if err := json.NewDecoder(rec.Body).Decode(&project1); err != nil {
 		t.Fatalf("failed to decode first response: %v", err)
 	}
-	if project1.ID != "deterministic-id-1234" {
-		t.Errorf("expected ID %q, got %q", "deterministic-id-1234", project1.ID)
+	if project1.ID != deterministicID {
+		t.Errorf("expected ID %q, got %q", deterministicID, project1.ID)
 	}
 
 	// Second create with same ID — should return 200 with same project
@@ -2407,6 +2408,288 @@ func TestProjectCreateWithSlug(t *testing.T) {
 }
 
 // ============================================================================
+// Project Rename Tests
+// ============================================================================
+
+func TestProjectRenameSlug(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	project := &store.Project{
+		ID:      tid("project_rename1"),
+		Slug:    "old-slug",
+		Name:    "Old Name",
+		Created: time.Now(),
+		Updated: time.Now(),
+	}
+	if err := s.CreateProject(ctx, project); err != nil {
+		t.Fatalf("failed to create project: %v", err)
+	}
+
+	body := map[string]interface{}{
+		"name": "New Name",
+		"slug": "new-slug",
+	}
+
+	rec := doRequest(t, srv, http.MethodPatch, fmt.Sprintf("/api/v1/projects/%s", tid("project_rename1")), body)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp store.Project
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	if resp.Name != "New Name" {
+		t.Errorf("expected name %q, got %q", "New Name", resp.Name)
+	}
+	if resp.Slug != "new-slug" {
+		t.Errorf("expected slug %q, got %q", "new-slug", resp.Slug)
+	}
+
+	// Verify the project was actually updated in the store
+	updated, err := s.GetProject(ctx, tid("project_rename1"))
+	if err != nil {
+		t.Fatalf("failed to get project: %v", err)
+	}
+	if updated.Slug != "new-slug" {
+		t.Errorf("store slug not updated: expected %q, got %q", "new-slug", updated.Slug)
+	}
+}
+
+func TestProjectRenameSlugConflict(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	// Create two projects
+	project1 := &store.Project{
+		ID:      tid("project_rename_a"),
+		Slug:    "project-a",
+		Name:    "Project A",
+		Created: time.Now(),
+		Updated: time.Now(),
+	}
+	project2 := &store.Project{
+		ID:      tid("project_rename_b"),
+		Slug:    "project-b",
+		Name:    "Project B",
+		Created: time.Now(),
+		Updated: time.Now(),
+	}
+	if err := s.CreateProject(ctx, project1); err != nil {
+		t.Fatalf("failed to create project1: %v", err)
+	}
+	if err := s.CreateProject(ctx, project2); err != nil {
+		t.Fatalf("failed to create project2: %v", err)
+	}
+
+	// Try to rename project-a to project-b's slug
+	body := map[string]interface{}{
+		"slug": "project-b",
+	}
+
+	rec := doRequest(t, srv, http.MethodPatch, fmt.Sprintf("/api/v1/projects/%s", tid("project_rename_a")), body)
+
+	if rec.Code != http.StatusConflict {
+		t.Errorf("expected status 409 (conflict), got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestProjectRenameSlugOnly(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	project := &store.Project{
+		ID:      tid("project_rename_slug"),
+		Slug:    "original-slug",
+		Name:    "Original Name",
+		Created: time.Now(),
+		Updated: time.Now(),
+	}
+	if err := s.CreateProject(ctx, project); err != nil {
+		t.Fatalf("failed to create project: %v", err)
+	}
+
+	// Rename slug only (no name change)
+	body := map[string]interface{}{
+		"slug": "renamed-slug",
+	}
+
+	rec := doRequest(t, srv, http.MethodPatch, fmt.Sprintf("/api/v1/projects/%s", tid("project_rename_slug")), body)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp store.Project
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	if resp.Slug != "renamed-slug" {
+		t.Errorf("expected slug %q, got %q", "renamed-slug", resp.Slug)
+	}
+	if resp.Name != "Original Name" {
+		t.Errorf("name should not change: expected %q, got %q", "Original Name", resp.Name)
+	}
+}
+
+func TestProjectRenameSlugSanitized(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	project := &store.Project{
+		ID:      tid("project_rename_san"),
+		Slug:    "sanitize-test",
+		Name:    "Sanitize Test",
+		Created: time.Now(),
+		Updated: time.Now(),
+	}
+	if err := s.CreateProject(ctx, project); err != nil {
+		t.Fatalf("failed to create project: %v", err)
+	}
+
+	// Slug with spaces and uppercase should be sanitized
+	body := map[string]interface{}{
+		"slug": "My New Project",
+	}
+
+	rec := doRequest(t, srv, http.MethodPatch, fmt.Sprintf("/api/v1/projects/%s", tid("project_rename_san")), body)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp store.Project
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	if resp.Slug != "my-new-project" {
+		t.Errorf("expected sanitized slug %q, got %q", "my-new-project", resp.Slug)
+	}
+}
+
+func TestProjectRenameSameSlugNoOp(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	project := &store.Project{
+		ID:      tid("project_rename_noop"),
+		Slug:    "same-slug",
+		Name:    "Same Slug",
+		Created: time.Now(),
+		Updated: time.Now(),
+	}
+	if err := s.CreateProject(ctx, project); err != nil {
+		t.Fatalf("failed to create project: %v", err)
+	}
+
+	body := map[string]interface{}{
+		"slug": "same-slug",
+		"name": "Updated Name",
+	}
+
+	rec := doRequest(t, srv, http.MethodPatch, fmt.Sprintf("/api/v1/projects/%s", tid("project_rename_noop")), body)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp store.Project
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	if resp.Name != "Updated Name" {
+		t.Errorf("expected name %q, got %q", "Updated Name", resp.Name)
+	}
+	if resp.Slug != "same-slug" {
+		t.Errorf("slug should remain %q, got %q", "same-slug", resp.Slug)
+	}
+}
+
+func TestProjectRenameGroupMigration(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	project := &store.Project{
+		ID:        tid("project_rename_grp"),
+		Slug:      "grp-old",
+		Name:      "Group Test",
+		Created:   time.Now(),
+		Updated:   time.Now(),
+		CreatedBy: "test-user",
+	}
+	if err := s.CreateProject(ctx, project); err != nil {
+		t.Fatalf("failed to create project: %v", err)
+	}
+
+	// Create associated groups (mimicking what createProject does)
+	agentsGroup := &store.Group{
+		ID:        api.NewUUID(),
+		Name:      "Group Test Agents",
+		Slug:      "project:grp-old:agents",
+		GroupType: store.GroupTypeProjectAgents,
+		ProjectID: tid("project_rename_grp"),
+		CreatedBy: "test-user",
+	}
+	membersGroup := &store.Group{
+		ID:        api.NewUUID(),
+		Name:      "Group Test Members",
+		Slug:      "project:grp-old:members",
+		GroupType: store.GroupTypeExplicit,
+		ProjectID: tid("project_rename_grp"),
+		CreatedBy: "test-user",
+	}
+	if err := s.CreateGroup(ctx, agentsGroup); err != nil {
+		t.Fatalf("failed to create agents group: %v", err)
+	}
+	if err := s.CreateGroup(ctx, membersGroup); err != nil {
+		t.Fatalf("failed to create members group: %v", err)
+	}
+
+	// Rename the project
+	body := map[string]interface{}{
+		"name": "Group Test Renamed",
+		"slug": "grp-new",
+	}
+
+	rec := doRequest(t, srv, http.MethodPatch, fmt.Sprintf("/api/v1/projects/%s", tid("project_rename_grp")), body)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Verify groups were migrated
+	newAgentsGroup, err := s.GetGroupBySlug(ctx, "project:grp-new:agents")
+	if err != nil {
+		t.Errorf("agents group not migrated: %v", err)
+	} else if newAgentsGroup.Name != "Group Test Renamed Agents" {
+		t.Errorf("agents group name not updated: got %q", newAgentsGroup.Name)
+	}
+
+	newMembersGroup, err := s.GetGroupBySlug(ctx, "project:grp-new:members")
+	if err != nil {
+		t.Errorf("members group not migrated: %v", err)
+	} else if newMembersGroup.Name != "Group Test Renamed Members" {
+		t.Errorf("members group name not updated: got %q", newMembersGroup.Name)
+	}
+
+	// Old slugs should no longer exist
+	_, err = s.GetGroupBySlug(ctx, "project:grp-old:agents")
+	if err == nil {
+		t.Error("old agents group slug should not exist after migration")
+	}
+	_, err = s.GetGroupBySlug(ctx, "project:grp-old:members")
+	if err == nil {
+		t.Error("old members group slug should not exist after migration")
+	}
+}
+
+// ============================================================================
 // Template Slug Display Tests
 // ============================================================================
 
@@ -2419,7 +2702,7 @@ func TestAgentCreate_StoresTemplateSlug(t *testing.T) {
 
 	// Create a runtime broker
 	broker := &store.RuntimeBroker{
-		ID:     "host_tmpl_slug",
+		ID:     tid("host_tmpl_slug"),
 		Slug:   "tmpl-host",
 		Name:   "Template Host",
 		Status: store.BrokerStatusOnline,
@@ -2430,7 +2713,7 @@ func TestAgentCreate_StoresTemplateSlug(t *testing.T) {
 
 	// Create a project
 	project := &store.Project{
-		ID:                     "project_tmpl_slug",
+		ID:                     tid("project_tmpl_slug"),
 		Slug:                   "tmpl-project",
 		Name:                   "Template Project",
 		GitRemote:              "github.com/test/tmpl-repo",
@@ -2455,7 +2738,7 @@ func TestAgentCreate_StoresTemplateSlug(t *testing.T) {
 
 	// Create a template with a known slug
 	tmpl := &store.Template{
-		ID:         "tmpl_uuid_123",
+		ID:         tid("tmpl_uuid_123"),
 		Slug:       "my-claude-template",
 		Name:       "My Claude Template",
 		Harness:    "claude",
@@ -2513,7 +2796,7 @@ func TestEnrichAgents_ResolvesTemplateSlug(t *testing.T) {
 
 	// Create a template
 	tmpl := &store.Template{
-		ID:         "tmpl_enrich_123",
+		ID:         tid("tmpl_enrich_123"),
 		Slug:       "enriched-template",
 		Name:       "Enriched Template",
 		Harness:    "gemini",
@@ -2554,7 +2837,7 @@ func TestEnrichAgent_ResolvesTemplateSlug(t *testing.T) {
 
 	// Create a template
 	tmpl := &store.Template{
-		ID:         "tmpl_enrich_single",
+		ID:         tid("tmpl_enrich_single"),
 		Slug:       "single-enriched",
 		Name:       "Single Enriched",
 		Harness:    "claude",
@@ -2599,7 +2882,7 @@ func TestOutboundMessage_UnknownRecipient(t *testing.T) {
 	}
 
 	rb := &store.RuntimeBroker{
-		ID:       "broker-msg",
+		ID:       tid("broker-msg"),
 		Name:     "test-broker",
 		Slug:     "test-broker",
 		Endpoint: "http://localhost:9800",
@@ -2615,7 +2898,7 @@ func TestOutboundMessage_UnknownRecipient(t *testing.T) {
 		Slug:            "sender",
 		ProjectID:       project.ID,
 		Phase:           "running",
-		RuntimeBrokerID: "broker-msg",
+		RuntimeBrokerID: tid("broker-msg"),
 		Visibility:      store.VisibilityPrivate,
 	}
 	if err := s.CreateAgent(ctx, agent); err != nil {

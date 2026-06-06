@@ -67,7 +67,7 @@ func setupIntegrationTest(t *testing.T) *integrationTestEnv {
 	srv.SetDispatcher(recorder)
 
 	project := &store.Project{
-		ID:         "project-integ",
+		ID:         tid("project-integ"),
 		Name:       "Integration Project",
 		Slug:       "integration-project",
 		Visibility: store.VisibilityPrivate,
@@ -75,7 +75,7 @@ func setupIntegrationTest(t *testing.T) *integrationTestEnv {
 	require.NoError(t, s.CreateProject(ctx, project))
 
 	broker := &store.RuntimeBroker{
-		ID:     "broker-integ",
+		ID:     tid("broker-integ"),
 		Name:   "Integration Broker",
 		Slug:   "integration-broker",
 		Status: store.BrokerStatusOnline,
@@ -114,6 +114,10 @@ func setupIntegrationTest(t *testing.T) *integrationTestEnv {
 // with notify=true. Returns the created agent.
 func (env *integrationTestEnv) createAgentWithNotify(t *testing.T, callingAgent *store.Agent, subAgentName string) *store.Agent {
 	t.Helper()
+
+	// The created sub-agent's created_by/owner_id FK references the users table,
+	// so seed a user sharing the calling agent's ID.
+	permSeedUser(t, context.Background(), env.store, callingAgent.ID)
 
 	token, err := env.tokenSvc.GenerateAgentToken(callingAgent.ID, env.project.ID, []AgentTokenScope{
 		ScopeAgentStatusUpdate,
@@ -186,7 +190,7 @@ func TestIntegration_AgentCreatesAgentWithNotify_FullFlow(t *testing.T) {
 
 	// Create the parent agent (subscriber)
 	parent := &store.Agent{
-		ID:              "agent-parent",
+		ID:              tid("agent-parent"),
 		Slug:            "parent-agent",
 		Name:            "Parent Agent",
 		ProjectID:       env.project.ID,
@@ -242,7 +246,7 @@ func TestIntegration_AgentCreatesAgentWithNotify_WaitingForInput(t *testing.T) {
 	ctx := context.Background()
 
 	parent := &store.Agent{
-		ID:              "agent-parent-wfi",
+		ID:              tid("agent-parent-wfi"),
 		Slug:            "parent-agent-wfi",
 		Name:            "Parent Agent WFI",
 		ProjectID:       env.project.ID,
@@ -290,7 +294,7 @@ func TestIntegration_AgentCreatesAgentWithNotify_MultipleStatusChanges(t *testin
 	ctx := context.Background()
 
 	parent := &store.Agent{
-		ID:              "agent-parent-multi",
+		ID:              tid("agent-parent-multi"),
 		Slug:            "parent-multi",
 		Name:            "Parent Multi",
 		ProjectID:       env.project.ID,
@@ -348,7 +352,7 @@ func TestIntegration_StatusNormalization_LowercaseEventMatchesUppercaseTrigger(t
 	ctx := context.Background()
 
 	parent := &store.Agent{
-		ID:              "agent-parent-case",
+		ID:              tid("agent-parent-case"),
 		Slug:            "parent-case",
 		Name:            "Parent Case",
 		ProjectID:       env.project.ID,
@@ -385,7 +389,7 @@ func TestIntegration_StatusNormalization_DedupAcrossCaseBoundaries(t *testing.T)
 	ctx := context.Background()
 
 	parent := &store.Agent{
-		ID:              "agent-parent-dedup",
+		ID:              tid("agent-parent-dedup"),
 		Slug:            "parent-dedup",
 		Name:            "Parent Dedup",
 		ProjectID:       env.project.ID,
@@ -426,7 +430,7 @@ func TestIntegration_StatusNormalization_NonTriggerStatusNoNotification(t *testi
 	ctx := context.Background()
 
 	parent := &store.Agent{
-		ID:              "agent-parent-nontrig",
+		ID:              tid("agent-parent-nontrig"),
 		Slug:            "parent-nontrig",
 		Name:            "Parent NonTrig",
 		ProjectID:       env.project.ID,
@@ -476,7 +480,7 @@ func TestIntegration_SubscriptionCleanup_HardDeleteCascades(t *testing.T) {
 	ctx := context.Background()
 
 	parent := &store.Agent{
-		ID:              "agent-parent-hdel",
+		ID:              tid("agent-parent-hdel"),
 		Slug:            "parent-hdel",
 		Name:            "Parent Hard Delete",
 		ProjectID:       env.project.ID,
@@ -528,7 +532,7 @@ func TestIntegration_SubscriptionCleanup_SoftDeleteRetainsSubscriptions(t *testi
 	env.srv.config.SoftDeleteRetention = 24 * time.Hour
 
 	parent := &store.Agent{
-		ID:              "agent-parent-sdel",
+		ID:              tid("agent-parent-sdel"),
 		Slug:            "parent-sdel",
 		Name:            "Parent Soft Delete",
 		ProjectID:       env.project.ID,
@@ -741,7 +745,7 @@ func TestIntegration_MultipleSubscribers_AgentAndUser(t *testing.T) {
 
 	// Create parent agent
 	parent := &store.Agent{
-		ID:              "agent-parent-multi-sub",
+		ID:              tid("agent-parent-multi-sub"),
 		Slug:            "parent-multi-sub",
 		Name:            "Parent Multi Sub",
 		ProjectID:       env.project.ID,
@@ -756,7 +760,7 @@ func TestIntegration_MultipleSubscribers_AgentAndUser(t *testing.T) {
 
 	// User also subscribes to the same child (manually, since the API doesn't support this yet)
 	userSub := &store.NotificationSubscription{
-		ID:                "user-sub-multi",
+		ID:                tid("user-sub-multi"),
 		AgentID:           child.ID,
 		SubscriberType:    store.SubscriberTypeUser,
 		SubscriberID:      DevUserID,
@@ -802,7 +806,7 @@ func TestIntegration_NoNotifyFlag_NoSubscription(t *testing.T) {
 	ctx := context.Background()
 
 	parent := &store.Agent{
-		ID:              "agent-parent-no-notify",
+		ID:              tid("agent-parent-no-notify"),
 		Slug:            "parent-no-notify",
 		Name:            "Parent No Notify",
 		ProjectID:       env.project.ID,
@@ -811,6 +815,9 @@ func TestIntegration_NoNotifyFlag_NoSubscription(t *testing.T) {
 		Visibility:      store.VisibilityPrivate,
 	}
 	require.NoError(t, env.store.CreateAgent(ctx, parent))
+
+	// The created sub-agent's created_by/owner_id FK references the users table.
+	permSeedUser(t, ctx, env.store, parent.ID)
 
 	// Create sub-agent WITHOUT notify
 	token, err := env.tokenSvc.GenerateAgentToken(parent.ID, env.project.ID, []AgentTokenScope{
@@ -860,7 +867,7 @@ func TestIntegration_PATCHSubscriptionTriggers(t *testing.T) {
 
 	// Create a subscription via store (SubscriberID must match DevUserID)
 	sub := &store.NotificationSubscription{
-		ID:                "sub-patch-test",
+		ID:                tid("sub-patch-test"),
 		Scope:             store.SubscriptionScopeProject,
 		SubscriberType:    store.SubscriberTypeUser,
 		SubscriberID:      DevUserID,

@@ -263,6 +263,26 @@ func (t *brokerHTTPTransport) RestartAgent(ctx context.Context, brokerID, broker
 	return nil
 }
 
+func (t *brokerHTTPTransport) ResetAuthAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID, token string) error {
+	endpoint := fmt.Sprintf("%s/api/v1/agents/%s/reset-auth", strings.TrimSuffix(brokerEndpoint, "/"), url.PathEscape(agentID))
+	if projectID != "" {
+		endpoint += "?projectId=" + url.QueryEscape(projectID)
+	}
+	body, err := json.Marshal(map[string]string{"token": token})
+	if err != nil {
+		return fmt.Errorf("failed to marshal reset-auth request: %w", err)
+	}
+	resp, err := t.doRequest(ctx, brokerID, http.MethodPost, endpoint, body)
+	if err != nil {
+		return fmt.Errorf("failed to send request: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		return brokerHTTPError(resp)
+	}
+	return nil
+}
+
 func (t *brokerHTTPTransport) DeleteAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, deleteFiles, removeBranch, softDelete bool, deletedAt time.Time) error {
 	endpoint := fmt.Sprintf("%s/api/v1/agents/%s?deleteFiles=%t&removeBranch=%t",
 		strings.TrimSuffix(brokerEndpoint, "/"), url.PathEscape(agentID), deleteFiles, removeBranch)
@@ -447,8 +467,11 @@ func (t *brokerHTTPTransport) ExecAgent(ctx context.Context, brokerID, brokerEnd
 	return result.Output, result.ExitCode, nil
 }
 
-func (t *brokerHTTPTransport) CleanupProject(ctx context.Context, brokerID, brokerEndpoint, projectSlug string) error {
+func (t *brokerHTTPTransport) CleanupProject(ctx context.Context, brokerID, brokerEndpoint, projectSlug, projectID string) error {
 	endpoint := fmt.Sprintf("%s/api/v1/projects/%s", strings.TrimSuffix(brokerEndpoint, "/"), url.PathEscape(projectSlug))
+	if projectID != "" {
+		endpoint += "?project_id=" + url.QueryEscape(projectID)
+	}
 	resp, err := t.doRequest(ctx, brokerID, http.MethodDelete, endpoint, nil)
 	if err != nil {
 		return fmt.Errorf("failed to send request: %w", err)

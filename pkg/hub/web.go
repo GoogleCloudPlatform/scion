@@ -17,6 +17,7 @@ package hub
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -123,6 +124,9 @@ type WebServerConfig struct {
 	BaseURL string
 	// DevAuthToken is the dev token for auto-login (empty = disabled).
 	DevAuthToken string
+	// AuthMode is the exclusive human auth mode: "oauth" (default), "proxy", "dev".
+	// In proxy mode, OAuth providers are not shown and logout behavior changes.
+	AuthMode string
 	// AuthorizedDomains is the list of allowed email domains (empty = all allowed).
 	AuthorizedDomains []string
 	// AdminEmails is the list of bootstrap admin emails (bypass domain check).
@@ -143,11 +147,11 @@ type WebServer struct {
 	assets       fs.FS  // embedded or nil
 	assetsDisk   string // filesystem override path, or ""
 	shellTmpl    *template.Template
-	sessionStore *sessions.FilesystemStore
+	sessionStore *sessions.CookieStore
 	oauthService *OAuthService
 	store        store.Store
 	userTokenSvc *UserTokenService
-	events       *ChannelEventPublisher      // nil when no publisher configured
+	events       EventPublisher              // nil when no publisher configured
 	hubHandler   http.Handler                // mounted Hub API handler, or nil
 	hubShutdown  func(context.Context) error // Hub resource cleanup, or nil
 	maintenance  *MaintenanceState           // runtime maintenance mode state (shared with Hub)
@@ -420,28 +424,44 @@ func NewWebServer(cfg WebServerConfig) *WebServer {
 		slog.Warn("No session secret configured, using random key (sessions will not persist across restarts)")
 	}
 
-	// Use a filesystem-backed session store so that only a small session ID
-	// is sent as a cookie. This avoids the 4 KB cookie size limit that can
-	// be exceeded when JWT tokens are stored in the session.
-	sessionDir := filepath.Join(os.TempDir(), "scion-sessions")
-	if err := os.MkdirAll(sessionDir, 0700); err != nil {
-		slog.Error("Failed to create session directory", "dir", sessionDir, "error", err)
-	}
-	fsStore := sessions.NewFilesystemStore(sessionDir, []byte(sessionKey))
-	// Remove the default 4096-byte securecookie encoding limit. The
-	// FilesystemStore writes session data to disk (not cookies), so the
-	// browser cookie-size cap is irrelevant. JWT tokens stored in the
-	// session regularly exceed 4096 bytes after gob+base64 encoding,
-	// which causes Save() to fail and tokens to be silently dropped.
-	fsStore.MaxLength(0)
-	fsStore.Options = &sessions.Options{
+	// Use an encrypted, signed cookie session store so that NO session state
+	// lives on a single replica's local filesystem. This is required for
+	// horizontal scaling: behind a load balancer the OAuth login and callback
+	// (and every subsequent API request) can land on different replicas. A
+	// cookie-backed store keeps the whole session — the OAuth CSRF state token,
+	// the post-login return path, the user identity, and the Hub access/refresh
+	// tokens — in the client's signed+encrypted cookie, so any replica sharing
+	// SESSION_SECRET can read it.
+	//
+	// The previous FilesystemStore kept this state on one replica's disk, which
+	// caused intermittent "state_mismatch" login failures (and silently dropped
+	// post-login sessions) whenever the LB routed a follow-up request to a
+	// different replica. The whole session encodes to roughly 2.6 KB today —
+	// well within the browser's ~4 KB per-cookie cap — so the historical
+	// "JWT tokens exceed 4096 bytes" concern that motivated the disk store no
+	// longer applies to the current compact HS256 tokens.
+	//
+	// Keys are derived deterministically from the shared SESSION_SECRET so all
+	// replicas agree: a 32-byte HMAC authentication key and a 32-byte AES-256
+	// encryption key, with domain separation so the two keys differ.
+	cookieStore := sessions.NewCookieStore(
+		deriveSessionKey(sessionKey, "scion-session-hash"),
+		deriveSessionKey(sessionKey, "scion-session-block"),
+	)
+	cookieStore.Options = &sessions.Options{
 		Path:     "/",
 		MaxAge:   86400, // 24 hours
 		HttpOnly: true,
 		Secure:   strings.HasPrefix(cfg.BaseURL, "https://"),
 		SameSite: http.SameSiteLaxMode,
 	}
-	ws.sessionStore = fsStore
+	// Keep securecookie's timestamp window in sync with the cookie MaxAge. We
+	// intentionally leave the default 4096-byte securecookie length limit in
+	// force (unlike the disk store, which disabled it): if a session ever grew
+	// past the browser cookie cap, Save() would return an error we can log
+	// rather than silently emitting an oversized cookie the browser drops.
+	cookieStore.MaxAge(cookieStore.Options.MaxAge)
+	ws.sessionStore = cookieStore
 
 	// Resolve asset source
 	if cfg.AssetsDir != "" {
@@ -471,6 +491,17 @@ func NewWebServer(cfg WebServerConfig) *WebServer {
 	return ws
 }
 
+// deriveSessionKey deterministically derives a 32-byte key from the shared
+// session secret and a label. The label provides domain separation so the
+// HMAC authentication key and the AES encryption key differ even though both
+// originate from the same SESSION_SECRET. Every replica configured with the
+// same secret derives identical keys, which is what lets a session cookie
+// minted by one replica be validated and decrypted by another.
+func deriveSessionKey(secret, label string) []byte {
+	sum := sha256.Sum256([]byte(label + ":" + secret))
+	return sum[:]
+}
+
 // SetMaintenanceState sets the shared runtime maintenance state.
 func (ws *WebServer) SetMaintenanceState(ms *MaintenanceState) {
 	ws.maintenance = ms
@@ -492,7 +523,7 @@ func (ws *WebServer) SetUserTokenService(svc *UserTokenService) {
 }
 
 // SetEventPublisher sets the event publisher for real-time SSE streaming.
-func (ws *WebServer) SetEventPublisher(pub *ChannelEventPublisher) {
+func (ws *WebServer) SetEventPublisher(pub EventPublisher) {
 	ws.events = pub
 }
 
@@ -952,7 +983,7 @@ func (ws *WebServer) tryServeStaticFile(w http.ResponseWriter, r *http.Request) 
 }
 
 // handleSSE serves the Server-Sent Events endpoint. It subscribes to the
-// in-process ChannelEventPublisher and streams matching events to the browser.
+// configured EventPublisher and streams matching events to the browser.
 // Route: GET /events?sub=<pattern>&sub=<pattern>...
 func (ws *WebServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 	if ws.events == nil {
@@ -1447,8 +1478,26 @@ func (ws *WebServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request)
 }
 
 // handleLogout clears the session and redirects to login (or returns JSON for API).
+// In proxy mode, logout is a no-op (the proxy owns the session) — optionally
+// redirect to IAP's clear_login_cookie endpoint.
 // Route: GET /auth/logout, POST /auth/logout
 func (ws *WebServer) handleLogout(w http.ResponseWriter, r *http.Request) {
+	// In proxy mode, the hub does not own the session.
+	if ws.config.AuthMode == "proxy" {
+		if isBrowserRequest(r) {
+			// Redirect to IAP's clear login cookie endpoint
+			http.Redirect(w, r, "/_gcp_iap/clear_login_cookie", http.StatusFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": true,
+			"message": "proxy mode: session is managed by the authenticating proxy",
+		})
+		return
+	}
+
 	session, err := ws.sessionStore.Get(r, webSessionName)
 	if err != nil {
 		session, _ = ws.sessionStore.New(r, webSessionName)
@@ -1515,11 +1564,14 @@ func (ws *WebServer) handleAuthMe(w http.ResponseWriter, r *http.Request) {
 // handleAuthProviders returns which OAuth providers are enabled for web login.
 // Route: GET /auth/providers
 func (ws *WebServer) handleAuthProviders(w http.ResponseWriter, r *http.Request) {
-	resp := map[string]bool{
+	resp := map[string]interface{}{
 		"google": false,
 		"github": false,
 	}
-	if ws.oauthService != nil {
+	// In proxy mode, no OAuth providers are active (auth is handled by the proxy).
+	if ws.config.AuthMode == "proxy" {
+		resp["authMode"] = "proxy"
+	} else if ws.oauthService != nil {
 		resp["google"] = ws.oauthService.IsProviderConfiguredForClient(OAuthClientTypeWeb, "google")
 		resp["github"] = ws.oauthService.IsProviderConfiguredForClient(OAuthClientTypeWeb, "github")
 	}
@@ -1546,6 +1598,7 @@ func (ws *WebServer) handleAuthDebug(w http.ResponseWriter, r *http.Request) {
 		"hasAccessToken": session.Values[sessKeyHubAccessToken] != nil,
 		"config": map[string]interface{}{
 			"baseURL":         ws.config.BaseURL,
+			"authMode":        ws.config.AuthMode,
 			"devAuthEnabled":  ws.config.DevAuthToken != "",
 			"oauthConfigured": ws.oauthService != nil,
 			"storeConfigured": ws.store != nil,

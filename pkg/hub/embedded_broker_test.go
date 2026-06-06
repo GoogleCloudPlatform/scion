@@ -31,7 +31,7 @@ func TestIsEmbeddedBroker(t *testing.T) {
 	srv := &Server{}
 
 	// Before setting, everything should return false
-	if srv.isEmbeddedBroker("broker-1") {
+	if srv.isEmbeddedBroker(tid("broker-1")) {
 		t.Error("expected isEmbeddedBroker to return false before setting")
 	}
 	if srv.isEmbeddedBroker("") {
@@ -39,15 +39,15 @@ func TestIsEmbeddedBroker(t *testing.T) {
 	}
 
 	// Set the embedded broker ID
-	srv.SetEmbeddedBrokerID("broker-1")
+	srv.SetEmbeddedBrokerID(tid("broker-1"))
 
 	// Matching ID should return true
-	if !srv.isEmbeddedBroker("broker-1") {
+	if !srv.isEmbeddedBroker(tid("broker-1")) {
 		t.Error("expected isEmbeddedBroker to return true for matching ID")
 	}
 
 	// Non-matching ID should return false
-	if srv.isEmbeddedBroker("broker-2") {
+	if srv.isEmbeddedBroker(tid("broker-2")) {
 		t.Error("expected isEmbeddedBroker to return false for non-matching ID")
 	}
 
@@ -63,7 +63,7 @@ func TestCreateAgent_SkipsGCSSyncForEmbeddedBroker(t *testing.T) {
 
 	// Create a project (hub-managed: no git remote)
 	project := &store.Project{
-		ID:   "project-embedded-test",
+		ID:   tid("project-embedded-test"),
 		Name: "embedded-test",
 		Slug: "embedded-test",
 	}
@@ -72,10 +72,11 @@ func TestCreateAgent_SkipsGCSSyncForEmbeddedBroker(t *testing.T) {
 	}
 
 	// Create a runtime broker
-	brokerID := "embedded-broker-1"
+	brokerID := tid("embedded-broker-1")
 	broker := &store.RuntimeBroker{
 		ID:       brokerID,
 		Name:     "embedded-broker",
+		Slug:     "embedded-broker",
 		Endpoint: "http://localhost:9090",
 		Status:   store.BrokerStatusOnline,
 	}

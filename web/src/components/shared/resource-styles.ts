@@ -640,10 +640,12 @@ export const listPageStyles = css`
   }
 
   .resource-table-container .task-cell {
-    max-width: 250px;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
     overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    max-width: 250px;
+    white-space: normal;
     color: var(--scion-text-muted, #64748b);
     font-size: 0.8125rem;
   }

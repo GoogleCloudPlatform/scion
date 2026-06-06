@@ -125,6 +125,16 @@ func (r *PodmanRuntime) ExecUser() string {
 }
 
 func (r *PodmanRuntime) Run(ctx context.Context, config RunConfig) (string, error) {
+	// N1-5: Podman rootless + NFS is unsupported. keep-id subuid ranges
+	// yield no stable on-wire UID, so files on the shared NFS export would
+	// have unpredictable ownership across nodes. Reject early with a clear
+	// error (design §9.1).
+	if r.Rootless && config.WorkspaceBackendName == "nfs" {
+		return "", fmt.Errorf("podman rootless with NFS workspace backend is not supported: " +
+			"keep-id subuid ranges cannot produce a stable on-wire UID for shared NFS storage; " +
+			"use rootful Docker or Podman for NFS-backed projects")
+	}
+
 	// Stage file and variable secrets before building args
 	var secretMountSpecs []string
 	if config.HomeDir != "" && len(config.ResolvedSecrets) > 0 {

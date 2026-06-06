@@ -20,8 +20,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -37,15 +37,12 @@ var (
 
 func newTestPolicyStore(t *testing.T) *PolicyStore {
 	t.Helper()
-	client, err := entc.OpenSQLite("file:" + t.Name() + "?mode=memory&cache=shared")
-	require.NoError(t, err)
-	t.Cleanup(func() { client.Close() })
-	require.NoError(t, entc.AutoMigrate(context.Background(), client))
+	client := enttest.NewClient(t)
 
 	ctx := context.Background()
 
 	// Create test user
-	_, err = client.User.Create().
+	_, err := client.User.Create().
 		SetID(policyTestUserUID).
 		SetEmail("alice@example.com").
 		SetDisplayName("Alice").

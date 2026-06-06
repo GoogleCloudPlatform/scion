@@ -481,6 +481,70 @@ func TestPhasesEnumeration(t *testing.T) {
 	}
 }
 
+func TestPhaseOrdinal(t *testing.T) {
+	tests := []struct {
+		phase   Phase
+		ordinal int
+	}{
+		{PhaseCreated, 1},
+		{PhaseProvisioning, 2},
+		{PhaseCloning, 3},
+		{PhaseStarting, 4},
+		{PhaseRunning, 5},
+		{PhaseSuspended, 0},
+		{PhaseStopping, 0},
+		{PhaseStopped, 0},
+		{PhaseError, 0},
+	}
+	for _, tt := range tests {
+		if got := tt.phase.Ordinal(); got != tt.ordinal {
+			t.Errorf("Phase(%q).Ordinal() = %d, want %d", tt.phase, got, tt.ordinal)
+		}
+	}
+
+	// Verify strict ordering for forward-progress phases.
+	forward := []Phase{PhaseCreated, PhaseProvisioning, PhaseCloning, PhaseStarting, PhaseRunning}
+	for i := 1; i < len(forward); i++ {
+		if forward[i].Ordinal() <= forward[i-1].Ordinal() {
+			t.Errorf("Ordinal(%q)=%d should be > Ordinal(%q)=%d",
+				forward[i], forward[i].Ordinal(), forward[i-1], forward[i-1].Ordinal())
+		}
+	}
+}
+
+func TestPhaseIsActivePhase(t *testing.T) {
+	active := []Phase{PhaseCreated, PhaseProvisioning, PhaseCloning, PhaseStarting, PhaseRunning}
+	for _, p := range active {
+		if !p.IsActivePhase() {
+			t.Errorf("Phase(%q).IsActivePhase() = false, want true", p)
+		}
+	}
+
+	notActive := []Phase{PhaseSuspended, PhaseStopping, PhaseStopped, PhaseError}
+	for _, p := range notActive {
+		if p.IsActivePhase() {
+			t.Errorf("Phase(%q).IsActivePhase() = true, want false", p)
+		}
+	}
+}
+
+func TestActivityImpliesRunning(t *testing.T) {
+	implies := []Activity{ActivityWorking, ActivityThinking, ActivityExecuting,
+		ActivityWaitingForInput, ActivityBlocked, ActivityCompleted}
+	for _, a := range implies {
+		if !a.ImpliesRunning() {
+			t.Errorf("Activity(%q).ImpliesRunning() = false, want true", a)
+		}
+	}
+
+	doesNotImply := []Activity{ActivityLimitsExceeded, ActivityStalled, ActivityOffline, ActivityCrashed}
+	for _, a := range doesNotImply {
+		if a.ImpliesRunning() {
+			t.Errorf("Activity(%q).ImpliesRunning() = true, want false", a)
+		}
+	}
+}
+
 func TestActivitiesEnumeration(t *testing.T) {
 	activities := Activities()
 	if len(activities) != 10 {

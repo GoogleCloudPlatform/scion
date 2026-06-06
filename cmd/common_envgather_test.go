@@ -49,7 +49,7 @@ func TestGatherAndSubmitEnv_NonInteractiveGathersFromLocalEnv(t *testing.T) {
 	defer os.Unsetenv("TEST_SECRET_KEY")
 
 	// Set up mock Hub server
-	projectID := "grove-1"
+	projectID := tid("grove-1")
 	server, captured := newEnvGatherMockHubServer(t, projectID)
 	defer server.Close()
 
@@ -63,9 +63,9 @@ func TestGatherAndSubmitEnv_NonInteractiveGathersFromLocalEnv(t *testing.T) {
 	}
 
 	resp := &hubclient.CreateAgentResponse{
-		Agent: &hubclient.Agent{ID: "agent-1"},
+		Agent: &hubclient.Agent{ID: tid("agent-1")},
 		EnvGather: &hubclient.EnvGatherResponse{
-			AgentID:  "agent-1",
+			AgentID:  tid("agent-1"),
 			Required: []string{"TEST_SECRET_KEY"},
 			Needs:    []string{"TEST_SECRET_KEY"},
 		},
@@ -103,7 +103,7 @@ func TestGatherAndSubmitEnv_NonInteractiveAllowsWhenAllSatisfied(t *testing.T) {
 		},
 	}
 
-	result, err := gatherAndSubmitEnv(context.Background(), nil, "grove-1", resp)
+	result, err := gatherAndSubmitEnv(context.Background(), nil, tid("grove-1"), resp)
 	require.NoError(t, err)
 	// Should return the original response since no env was gathered
 	assert.Equal(t, resp, result)
@@ -137,7 +137,7 @@ func TestGatherAndSubmitEnv_NonInteractiveMultipleKeysMissing(t *testing.T) {
 		},
 	}
 
-	_, err := gatherAndSubmitEnv(context.Background(), nil, "grove-1", resp)
+	_, err := gatherAndSubmitEnv(context.Background(), nil, tid("grove-1"), resp)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "cannot satisfy required environment variables")
 	assert.Contains(t, err.Error(), "KEY_A")
@@ -231,7 +231,7 @@ func TestStartAgentViaHub_GlobalGroveSkipsWorkspaceBootstrap(t *testing.T) {
 	outputFormat = "json"
 	templateName = ""
 	harnessConfigFlag = "codex"
-	runtimeBrokerID = "broker-1"
+	runtimeBrokerID = tid("broker-1")
 
 	globalDir := t.TempDir()
 	settingsPath := filepath.Join(globalDir, "settings.yaml")
@@ -256,12 +256,12 @@ func TestStartAgentViaHub_GlobalGroveSkipsWorkspaceBootstrap(t *testing.T) {
 			captured = &req
 			json.NewEncoder(w).Encode(&hubclient.CreateAgentResponse{
 				Agent: &hubclient.Agent{
-					ID:                "agent-1",
-					Slug:              "agent-1",
-					Name:              "agent-1",
+					ID:                tid("agent-1"),
+					Slug:              tid("agent-1"),
+					Name:              tid("agent-1"),
 					Status:            "running",
 					Phase:             "running",
-					RuntimeBrokerID:   "broker-1",
+					RuntimeBrokerID:   tid("broker-1"),
 					RuntimeBrokerName: "scion",
 					Created:           time.Now().UTC(),
 				},
@@ -312,7 +312,7 @@ func newEnvGatherMockHubServer(t *testing.T, projectID string) (*httptest.Server
 				captured[k] = v
 			}
 			json.NewEncoder(w).Encode(map[string]interface{}{
-				"agent": map[string]interface{}{"id": "agent-1", "status": "running"},
+				"agent": map[string]interface{}{"id": tid("agent-1"), "status": "running"},
 			})
 
 		default:
@@ -365,9 +365,9 @@ func TestGatherAndSubmitEnv_InteractiveSecretPrompt(t *testing.T) {
 	}
 
 	resp := &hubclient.CreateAgentResponse{
-		Agent: &hubclient.Agent{ID: "agent-1"},
+		Agent: &hubclient.Agent{ID: tid("agent-1")},
 		EnvGather: &hubclient.EnvGatherResponse{
-			AgentID:  "agent-1",
+			AgentID:  tid("agent-1"),
 			Required: []string{"MY_SECRET"},
 			Needs:    []string{"MY_SECRET"},
 			SecretInfo: map[string]hubclient.SecretKeyInfo{
@@ -403,9 +403,9 @@ func TestGatherAndSubmitEnv_FileSecretShowsGuidance(t *testing.T) {
 	outputFormat = "json" // suppress stderr
 
 	resp := &hubclient.CreateAgentResponse{
-		Agent: &hubclient.Agent{ID: "agent-1"},
+		Agent: &hubclient.Agent{ID: tid("agent-1")},
 		EnvGather: &hubclient.EnvGatherResponse{
-			AgentID:  "agent-1",
+			AgentID:  tid("agent-1"),
 			Required: []string{"FILE_CERT"},
 			Needs:    []string{"FILE_CERT"},
 			SecretInfo: map[string]hubclient.SecretKeyInfo{
@@ -418,7 +418,7 @@ func TestGatherAndSubmitEnv_FileSecretShowsGuidance(t *testing.T) {
 		},
 	}
 
-	_, err := gatherAndSubmitEnv(context.Background(), nil, "grove-1", resp)
+	_, err := gatherAndSubmitEnv(context.Background(), nil, tid("grove-1"), resp)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "FILE_CERT")
 }
@@ -440,9 +440,9 @@ func TestGatherAndSubmitEnv_MixedSecretAndEnvKeys(t *testing.T) {
 
 	// ENV_ONLY is not in SecretInfo → it's an env-only key that can't be prompted
 	resp := &hubclient.CreateAgentResponse{
-		Agent: &hubclient.Agent{ID: "agent-1"},
+		Agent: &hubclient.Agent{ID: tid("agent-1")},
 		EnvGather: &hubclient.EnvGatherResponse{
-			AgentID:  "agent-1",
+			AgentID:  tid("agent-1"),
 			Required: []string{"ENV_ONLY", "SECRET_KEY"},
 			Needs:    []string{"ENV_ONLY", "SECRET_KEY"},
 			SecretInfo: map[string]hubclient.SecretKeyInfo{
@@ -454,7 +454,7 @@ func TestGatherAndSubmitEnv_MixedSecretAndEnvKeys(t *testing.T) {
 		},
 	}
 
-	_, err := gatherAndSubmitEnv(context.Background(), nil, "grove-1", resp)
+	_, err := gatherAndSubmitEnv(context.Background(), nil, tid("grove-1"), resp)
 	require.Error(t, err)
 	// Should fail because ENV_ONLY is not secret-eligible and not in local env
 	assert.Contains(t, err.Error(), "ENV_ONLY")
@@ -481,9 +481,9 @@ func TestGatherAndSubmitEnv_NonInteractiveSecretsMissing(t *testing.T) {
 	os.Unsetenv("ENV_B")
 
 	resp := &hubclient.CreateAgentResponse{
-		Agent: &hubclient.Agent{ID: "agent-1"},
+		Agent: &hubclient.Agent{ID: tid("agent-1")},
 		EnvGather: &hubclient.EnvGatherResponse{
-			AgentID:  "agent-1",
+			AgentID:  tid("agent-1"),
 			Required: []string{"SECRET_A", "ENV_B"},
 			Needs:    []string{"SECRET_A", "ENV_B"},
 			SecretInfo: map[string]hubclient.SecretKeyInfo{
@@ -495,7 +495,7 @@ func TestGatherAndSubmitEnv_NonInteractiveSecretsMissing(t *testing.T) {
 		},
 	}
 
-	_, err := gatherAndSubmitEnv(context.Background(), nil, "grove-1", resp)
+	_, err := gatherAndSubmitEnv(context.Background(), nil, tid("grove-1"), resp)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "cannot satisfy required environment variables")
 }
@@ -528,9 +528,9 @@ func TestGatherAndSubmitEnv_InteractiveSecretEmptyInput(t *testing.T) {
 	}
 
 	resp := &hubclient.CreateAgentResponse{
-		Agent: &hubclient.Agent{ID: "agent-1"},
+		Agent: &hubclient.Agent{ID: tid("agent-1")},
 		EnvGather: &hubclient.EnvGatherResponse{
-			AgentID:  "agent-1",
+			AgentID:  tid("agent-1"),
 			Required: []string{"MY_SECRET"},
 			Needs:    []string{"MY_SECRET"},
 			SecretInfo: map[string]hubclient.SecretKeyInfo{
@@ -542,7 +542,7 @@ func TestGatherAndSubmitEnv_InteractiveSecretEmptyInput(t *testing.T) {
 		},
 	}
 
-	_, err := gatherAndSubmitEnv(context.Background(), nil, "grove-1", resp)
+	_, err := gatherAndSubmitEnv(context.Background(), nil, tid("grove-1"), resp)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "MY_SECRET")
 }

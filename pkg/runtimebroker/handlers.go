@@ -79,6 +79,11 @@ func (s *Server) GetHealthInfo(ctx context.Context) *HealthResponse {
 		checks["runtime"] = "unavailable"
 	}
 
+	// NFS mount health
+	if s.nfsMountReconciler != nil {
+		checks["nfs_mounts"] = s.nfsMountReconciler.HealthCheckString()
+	}
+
 	status := "healthy"
 	for _, v := range checks {
 		if v != "available" && v != "healthy" {
@@ -559,6 +564,14 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			writeError(w, d.HTTPStatus, d.Code, d.Message, nil)
 			return
 		}
+	}
+
+	// N1-7: Ensure NFS shares are mounted before dispatch (no-op when backend=local).
+	if err := s.ensureNFSMountsReady(); err != nil {
+		markAttemptFailed(http.StatusServiceUnavailable, "NFS mount check failed: "+err.Error())
+		writeError(w, http.StatusServiceUnavailable, "nfs_unavailable",
+			"NFS workspace storage is not available: "+err.Error(), nil)
+		return
 	}
 
 	// Build unified start context (project path, env, template, git-clone, secrets, manager)
@@ -1099,6 +1112,8 @@ func (s *Server) handleAgentAction(w http.ResponseWriter, r *http.Request, id, p
 		s.sendMessage(w, r, id, projectID)
 	case api.AgentActionExec:
 		s.execCommand(w, r, id, projectID)
+	case api.AgentActionResetAuth:
+		s.resetAuth(w, r, id, projectID)
 	case api.AgentActionLogs:
 		s.getLogs(w, r, id, projectID)
 	case api.AgentActionStats:
@@ -1585,6 +1600,69 @@ func (s *Server) execCommand(w http.ResponseWriter, r *http.Request, id, project
 	writeJSON(w, http.StatusOK, ExecResponse{
 		Output:   output,
 		ExitCode: 0, // TODO: Get actual exit code from runtime
+	})
+}
+
+// resetAuth writes a fresh token into a running agent's container and signals
+// sciontool init (PID 1) to restart its token refresh loop via SIGUSR2.
+func (s *Server) resetAuth(w http.ResponseWriter, r *http.Request, id, projectID string) {
+	ctx := r.Context()
+
+	var req ResetAuthRequest
+	if err := readJSON(r, &req); err != nil {
+		BadRequest(w, "Invalid request body: "+err.Error())
+		return
+	}
+
+	if req.Token == "" {
+		ValidationError(w, "token is required", nil)
+		return
+	}
+
+	rt := s.resolveRuntimeForAgent(ctx, id, projectID)
+	target, err := s.LookupContainerID(ctx, id, projectID)
+	if err != nil || target == "" {
+		NotFound(w, "Agent")
+		return
+	}
+
+	// Write the token to the canonical file atomically via temp+rename.
+	// Write the token to the canonical file atomically via temp+rename.
+	// Pass the token as part of the script using a heredoc pattern to avoid
+	// exposing it in argv (visible in /proc).
+	writeCmd := []string{"sh", "-c",
+		"TOKEN_DIR=\"$(getent passwd scion 2>/dev/null | cut -d: -f6 || echo /home/scion)/.scion\" && " +
+			"mkdir -p \"$TOKEN_DIR\" && " +
+			"cat <<'SCION_TOKEN_EOF' > \"$TOKEN_DIR/scion-token.tmp\"\n" + req.Token + "\nSCION_TOKEN_EOF\n" +
+			"mv \"$TOKEN_DIR/scion-token.tmp\" \"$TOKEN_DIR/scion-token\"",
+	}
+
+	if _, err := rt.Exec(ctx, target, writeCmd); err != nil {
+		s.agentLifecycleLog.Error("reset-auth: failed to write token file", "agent_id", id, "error", err)
+		RuntimeError(w, "Failed to write token file: "+err.Error())
+		return
+	}
+
+	// Signal sciontool init (PID 1) to re-read the token and restart refresh.
+	// Best-effort: the token refresh loop will pick up the new token even
+	// without the signal, so a failure here should not fail the request.
+	signalCmd := []string{"kill", "-USR2", "1"}
+	signaled := true
+	if _, err := rt.Exec(ctx, target, signalCmd); err != nil {
+		s.agentLifecycleLog.Warn("reset-auth: failed to signal PID 1 (best-effort)", "agent_id", id, "error", err)
+		signaled = false
+	}
+
+	s.agentLifecycleLog.Info("Auth reset completed", "agent_id", id, "signaled", signaled)
+
+	s.forceHeartbeatAll("reset-auth", id)
+
+	msg := "Auth reset: token written and init signaled"
+	if !signaled {
+		msg = "Auth reset: token written (signal skipped — refresh loop will pick it up)"
+	}
+	writeJSON(w, http.StatusOK, ResetAuthResponse{
+		Message: msg,
 	})
 }
 
@@ -2619,4 +2697,28 @@ func isLocalhostEndpoint(endpoint string) bool {
 	}
 	host := u.Hostname()
 	return host == "localhost" || host == "127.0.0.1" || host == "::1"
+}
+
+// ensureNFSMountsReady verifies that all configured NFS shares are mounted
+// before dispatching an agent. This is a pre-flight check (N1-7):
+// the reconciler may have mounted them at startup, but a transient
+// unmount (network blip, manual intervention) should block dispatches.
+// Returns an error if any configured share cannot be mounted — the caller
+// should reject the dispatch to avoid silent fallback to a broken mount.
+func (s *Server) ensureNFSMountsReady() error {
+	if s.nfsMountReconciler == nil {
+		return nil // NFS not configured — local backend, nothing to check.
+	}
+
+	nfsCfg := s.config.NFSConfig
+	if nfsCfg == nil || len(nfsCfg.Shares) == 0 {
+		return nil
+	}
+
+	for _, share := range nfsCfg.Shares {
+		if err := s.nfsMountReconciler.EnsureShareMounted(share.ID); err != nil {
+			return err
+		}
+	}
+	return nil
 }

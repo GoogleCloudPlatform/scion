@@ -88,7 +88,7 @@ func TestEnvGather_HubDispatch_AllSatisfied(t *testing.T) {
 	memStore := createTestStore(t)
 
 	broker := &store.RuntimeBroker{
-		ID:       "broker-1",
+		ID:       tid("broker-1"),
 		Name:     "test-broker",
 		Slug:     "test-broker",
 		Endpoint: "http://localhost:9800",
@@ -99,7 +99,7 @@ func TestEnvGather_HubDispatch_AllSatisfied(t *testing.T) {
 	}
 
 	project := &store.Project{
-		ID:   "project-1",
+		ID:   tid("project-1"),
 		Name: "test-project",
 		Slug: "test-project",
 	}
@@ -109,8 +109,8 @@ func TestEnvGather_HubDispatch_AllSatisfied(t *testing.T) {
 
 	// Add provider so broker can serve this project
 	if err := memStore.AddProjectProvider(ctx, &store.ProjectProvider{
-		ProjectID: "project-1",
-		BrokerID:  "broker-1",
+		ProjectID: tid("project-1"),
+		BrokerID:  tid("broker-1"), BrokerName: "test-broker",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -119,11 +119,11 @@ func TestEnvGather_HubDispatch_AllSatisfied(t *testing.T) {
 	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, true, slog.Default())
 
 	agent := &store.Agent{
-		ID:              "agent-1",
+		ID:              tid("agent-1"),
 		Name:            "test-agent",
 		Slug:            "test-agent",
-		ProjectID:       "project-1",
-		RuntimeBrokerID: "broker-1",
+		ProjectID:       tid("project-1"),
+		RuntimeBrokerID: tid("broker-1"),
 		AppliedConfig: &store.AgentAppliedConfig{
 			HarnessConfig: "claude",
 		},
@@ -155,7 +155,7 @@ func TestEnvGather_HubDispatch_NeedsGather(t *testing.T) {
 	memStore := createTestStore(t)
 
 	broker := &store.RuntimeBroker{
-		ID:       "broker-2",
+		ID:       tid("broker-2"),
 		Name:     "test-broker-2",
 		Slug:     "test-broker-2",
 		Endpoint: "http://localhost:9800",
@@ -167,7 +167,7 @@ func TestEnvGather_HubDispatch_NeedsGather(t *testing.T) {
 
 	mockClient := &envGatherMockBrokerClient{
 		gatherReturnEnvReqs: &RemoteEnvRequirementsResponse{
-			AgentID:  "agent-2",
+			AgentID:  tid("agent-2"),
 			Required: []string{"API_KEY", "SECRET"},
 			HubHas:   []string{"API_KEY"},
 			Needs:    []string{"SECRET"},
@@ -176,11 +176,11 @@ func TestEnvGather_HubDispatch_NeedsGather(t *testing.T) {
 	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, true, slog.Default())
 
 	agent := &store.Agent{
-		ID:              "agent-2",
+		ID:              tid("agent-2"),
 		Name:            "test-agent-2",
 		Slug:            "test-agent-2",
-		ProjectID:       "project-1",
-		RuntimeBrokerID: "broker-2",
+		ProjectID:       tid("project-1"),
+		RuntimeBrokerID: tid("broker-2"),
 		AppliedConfig: &store.AgentAppliedConfig{
 			HarnessConfig: "claude",
 		},
@@ -210,7 +210,7 @@ func TestEnvGather_HubDispatch_FinalizeEnv(t *testing.T) {
 	memStore := createTestStore(t)
 
 	broker := &store.RuntimeBroker{
-		ID:       "broker-3",
+		ID:       tid("broker-3"),
 		Name:     "test-broker-3",
 		Slug:     "test-broker-3",
 		Endpoint: "http://localhost:9800",
@@ -224,11 +224,11 @@ func TestEnvGather_HubDispatch_FinalizeEnv(t *testing.T) {
 	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, true, slog.Default())
 
 	agent := &store.Agent{
-		ID:              "agent-3",
+		ID:              tid("agent-3"),
 		Name:            "test-agent-3",
 		Slug:            "test-agent-3",
-		ProjectID:       "project-1",
-		RuntimeBrokerID: "broker-3",
+		ProjectID:       tid("project-1"),
+		RuntimeBrokerID: tid("broker-3"),
 	}
 
 	gatheredEnv := map[string]string{
@@ -257,14 +257,14 @@ func TestEnvGather_HubHandler_202Response(t *testing.T) {
 	ctx := context.Background()
 
 	// Create project
-	project := &store.Project{ID: "project-gather", Name: "gather-project", Slug: "gather-project"}
+	project := &store.Project{ID: tid("project-gather"), Name: "gather-project", Slug: "gather-project"}
 	if err := st.CreateProject(ctx, project); err != nil {
 		t.Fatal(err)
 	}
 
 	// Create broker
 	broker := &store.RuntimeBroker{
-		ID: "broker-gather", Name: "gather-broker", Slug: "gather-broker",
+		ID: tid("broker-gather"), Name: "gather-broker", Slug: "gather-broker",
 		Endpoint: "http://localhost:9800", Status: store.BrokerStatusOnline,
 	}
 	if err := st.CreateRuntimeBroker(ctx, broker); err != nil {
@@ -273,7 +273,7 @@ func TestEnvGather_HubHandler_202Response(t *testing.T) {
 
 	// Add provider with local path so template can be resolved locally
 	if err := st.AddProjectProvider(ctx, &store.ProjectProvider{
-		ProjectID: "project-gather", BrokerID: "broker-gather",
+		ProjectID: tid("project-gather"), BrokerID: tid("broker-gather"), BrokerName: "test-broker",
 		LocalPath: "/tmp/test-project",
 	}); err != nil {
 		t.Fatal(err)
@@ -293,7 +293,7 @@ func TestEnvGather_HubHandler_202Response(t *testing.T) {
 	// Create agent with GatherEnv=true
 	reqBody := map[string]interface{}{
 		"name":      "gather-agent",
-		"projectId": "project-gather",
+		"projectId": tid("project-gather"),
 		"template":  "claude",
 		"gatherEnv": true,
 	}
@@ -333,14 +333,14 @@ func TestEnvGather_HubHandler_ProjectRoute_202Response(t *testing.T) {
 	ctx := context.Background()
 
 	// Create project
-	project := &store.Project{ID: "project-gather-route", Name: "gather-route-project", Slug: "gather-route-project"}
+	project := &store.Project{ID: tid("project-gather-route"), Name: "gather-route-project", Slug: "gather-route-project"}
 	if err := st.CreateProject(ctx, project); err != nil {
 		t.Fatal(err)
 	}
 
 	// Create broker
 	broker := &store.RuntimeBroker{
-		ID: "broker-gather-route", Name: "gather-route-broker", Slug: "gather-route-broker",
+		ID: tid("broker-gather-route"), Name: "gather-route-broker", Slug: "gather-route-broker",
 		Endpoint: "http://localhost:9800", Status: store.BrokerStatusOnline,
 	}
 	if err := st.CreateRuntimeBroker(ctx, broker); err != nil {
@@ -349,7 +349,7 @@ func TestEnvGather_HubHandler_ProjectRoute_202Response(t *testing.T) {
 
 	// Add provider with local path so template can be resolved locally
 	if err := st.AddProjectProvider(ctx, &store.ProjectProvider{
-		ProjectID: "project-gather-route", BrokerID: "broker-gather-route",
+		ProjectID: tid("project-gather-route"), BrokerID: tid("broker-gather-route"), BrokerName: "test-broker",
 		LocalPath: "/tmp/test-project",
 	}); err != nil {
 		t.Fatal(err)
@@ -413,14 +413,14 @@ func TestEnvGather_HubHandler_SubmitEnv(t *testing.T) {
 	ctx := context.Background()
 
 	// Create project
-	project := &store.Project{ID: "project-submit", Name: "submit-project", Slug: "submit-project"}
+	project := &store.Project{ID: tid("project-submit"), Name: "submit-project", Slug: "submit-project"}
 	if err := st.CreateProject(ctx, project); err != nil {
 		t.Fatal(err)
 	}
 
 	// Create broker
 	broker := &store.RuntimeBroker{
-		ID: "broker-submit", Name: "submit-broker", Slug: "submit-broker",
+		ID: tid("broker-submit"), Name: "submit-broker", Slug: "submit-broker",
 		Endpoint: "http://localhost:9800", Status: store.BrokerStatusOnline,
 	}
 	if err := st.CreateRuntimeBroker(ctx, broker); err != nil {
@@ -429,11 +429,11 @@ func TestEnvGather_HubHandler_SubmitEnv(t *testing.T) {
 
 	// Create agent in provisioning state (as if 202 was already returned)
 	agent := &store.Agent{
-		ID:              "agent-submit",
+		ID:              tid("agent-submit"),
 		Name:            "submit-agent",
 		Slug:            "submit-agent",
-		ProjectID:       "project-submit",
-		RuntimeBrokerID: "broker-submit",
+		ProjectID:       tid("project-submit"),
+		RuntimeBrokerID: tid("broker-submit"),
 		Phase:           string(state.PhaseProvisioning),
 		AppliedConfig: &store.AgentAppliedConfig{
 			HarnessConfig: "claude",
@@ -455,7 +455,7 @@ func TestEnvGather_HubHandler_SubmitEnv(t *testing.T) {
 		},
 	}
 
-	path := "/api/v1/projects/project-submit/agents/submit-agent/env"
+	path := fmt.Sprintf("/api/v1/projects/%s/agents/submit-agent/env", tid("project-submit"))
 	rec := doRequest(t, srv, http.MethodPost, path, reqBody)
 
 	if rec.Code != http.StatusOK {
@@ -471,7 +471,7 @@ func TestEnvGather_HubHandler_SubmitEnv(t *testing.T) {
 	}
 
 	// Agent should be updated to running
-	updated, err := st.GetAgent(ctx, "agent-submit")
+	updated, err := st.GetAgent(ctx, tid("agent-submit"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -487,17 +487,17 @@ func TestEnvGather_HubHandler_SubmitEnv_InvalidState(t *testing.T) {
 	ctx := context.Background()
 
 	// Create project
-	project := &store.Project{ID: "project-invalid", Name: "invalid-project", Slug: "invalid-project"}
+	project := &store.Project{ID: tid("project-invalid"), Name: "invalid-project", Slug: "invalid-project"}
 	if err := st.CreateProject(ctx, project); err != nil {
 		t.Fatal(err)
 	}
 
 	// Create agent in running state (not valid for env submission)
 	agent := &store.Agent{
-		ID:        "agent-invalid",
+		ID:        tid("agent-invalid"),
 		Name:      "invalid-agent",
 		Slug:      "invalid-agent",
-		ProjectID: "project-invalid",
+		ProjectID: tid("project-invalid"),
 		Phase:     string(state.PhaseRunning),
 	}
 	if err := st.CreateAgent(ctx, agent); err != nil {
@@ -508,7 +508,7 @@ func TestEnvGather_HubHandler_SubmitEnv_InvalidState(t *testing.T) {
 		"env": map[string]string{"KEY": "value"},
 	}
 
-	path := "/api/v1/projects/project-invalid/agents/invalid-agent/env"
+	path := fmt.Sprintf("/api/v1/projects/%s/agents/invalid-agent/env", tid("project-invalid"))
 	rec := doRequest(t, srv, http.MethodPost, path, reqBody)
 
 	if rec.Code != http.StatusConflict {
@@ -523,14 +523,14 @@ func TestEnvGather_HubEnvResolution(t *testing.T) {
 	memStore := createTestStore(t)
 
 	// Create project
-	project := &store.Project{ID: "project-env", Name: "env-project", Slug: "env-project"}
+	project := &store.Project{ID: tid("project-env"), Name: "env-project", Slug: "env-project"}
 	if err := memStore.CreateProject(ctx, project); err != nil {
 		t.Fatal(err)
 	}
 
 	// Create broker
 	broker := &store.RuntimeBroker{
-		ID: "broker-env", Name: "env-broker", Slug: "env-broker",
+		ID: tid("broker-env"), Name: "env-broker", Slug: "env-broker",
 		Endpoint: "http://localhost:9800", Status: store.BrokerStatusOnline,
 	}
 	if err := memStore.CreateRuntimeBroker(ctx, broker); err != nil {
@@ -539,11 +539,11 @@ func TestEnvGather_HubEnvResolution(t *testing.T) {
 
 	// Store env vars in project scope
 	if err := memStore.CreateEnvVar(ctx, &store.EnvVar{
-		ID:      "env-1",
+		ID:      tid("env-1"),
 		Key:     "GROVE_API_KEY",
 		Value:   "project-key-value",
 		Scope:   "project",
-		ScopeID: "project-env",
+		ScopeID: tid("project-env"),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -555,8 +555,8 @@ func TestEnvGather_HubEnvResolution(t *testing.T) {
 		ID:              "agent-env",
 		Name:            "env-agent",
 		Slug:            "env-agent",
-		ProjectID:       "project-env",
-		RuntimeBrokerID: "broker-env",
+		ProjectID:       tid("project-env"),
+		RuntimeBrokerID: tid("broker-env"),
 		AppliedConfig: &store.AgentAppliedConfig{
 			HarnessConfig: "claude",
 		},
@@ -585,13 +585,13 @@ func TestEnvGather_HubHandler_RetryAfterCancel_GlobalRoute(t *testing.T) {
 	srv, st := testServer(t)
 	ctx := context.Background()
 
-	project := &store.Project{ID: "project-retry-global", Name: "retry-global-project", Slug: "retry-global-project"}
+	project := &store.Project{ID: tid("project-retry-global"), Name: "retry-global-project", Slug: "retry-global-project"}
 	if err := st.CreateProject(ctx, project); err != nil {
 		t.Fatal(err)
 	}
 
 	broker := &store.RuntimeBroker{
-		ID: "broker-retry-global", Name: "retry-global-broker", Slug: "retry-global-broker",
+		ID: tid("broker-retry-global"), Name: "retry-global-broker", Slug: "retry-global-broker",
 		Endpoint: "http://localhost:9800", Status: store.BrokerStatusOnline,
 	}
 	if err := st.CreateRuntimeBroker(ctx, broker); err != nil {
@@ -599,7 +599,7 @@ func TestEnvGather_HubHandler_RetryAfterCancel_GlobalRoute(t *testing.T) {
 	}
 
 	if err := st.AddProjectProvider(ctx, &store.ProjectProvider{
-		ProjectID: "project-retry-global", BrokerID: "broker-retry-global",
+		ProjectID: tid("project-retry-global"), BrokerID: tid("broker-retry-global"), BrokerName: "test-broker",
 		LocalPath: "/tmp/test-project",
 	}); err != nil {
 		t.Fatal(err)
@@ -607,11 +607,11 @@ func TestEnvGather_HubHandler_RetryAfterCancel_GlobalRoute(t *testing.T) {
 
 	// Simulate a previous cancelled env-gather: agent exists in "provisioning" status
 	staleAgent := &store.Agent{
-		ID:              "stale-agent-global",
+		ID:              tid("stale-agent-global"),
 		Name:            "retry-agent",
 		Slug:            "retry-agent",
-		ProjectID:       "project-retry-global",
-		RuntimeBrokerID: "broker-retry-global",
+		ProjectID:       tid("project-retry-global"),
+		RuntimeBrokerID: tid("broker-retry-global"),
 		Phase:           string(state.PhaseProvisioning),
 		AppliedConfig: &store.AgentAppliedConfig{
 			HarnessConfig: "claude",
@@ -635,7 +635,7 @@ func TestEnvGather_HubHandler_RetryAfterCancel_GlobalRoute(t *testing.T) {
 	// Second create request with GatherEnv=true
 	reqBody := map[string]interface{}{
 		"name":      "retry-agent",
-		"projectId": "project-retry-global",
+		"projectId": tid("project-retry-global"),
 		"template":  "claude",
 		"gatherEnv": true,
 	}
@@ -669,7 +669,7 @@ func TestEnvGather_HubHandler_RetryAfterCancel_GlobalRoute(t *testing.T) {
 	if resp.Agent == nil {
 		t.Fatal("expected agent in response")
 	}
-	if resp.Agent.ID == "stale-agent-global" {
+	if resp.Agent.ID == tid("stale-agent-global") {
 		t.Error("expected a new agent ID, got the stale agent ID")
 	}
 	if resp.Agent.Phase != string(state.PhaseProvisioning) {
@@ -677,7 +677,7 @@ func TestEnvGather_HubHandler_RetryAfterCancel_GlobalRoute(t *testing.T) {
 	}
 
 	// The old agent should no longer exist in the store
-	_, err := st.GetAgent(ctx, "stale-agent-global")
+	_, err := st.GetAgent(ctx, tid("stale-agent-global"))
 	if err != store.ErrNotFound {
 		t.Errorf("expected stale agent to be deleted, got err=%v", err)
 	}
@@ -692,7 +692,7 @@ func TestEnvGather_BuildResponse_SecretScope(t *testing.T) {
 
 	// Create a user secret for API_KEY
 	if err := st.CreateSecret(ctx, &store.Secret{
-		ID:             "sec-1",
+		ID:             tid("sec-1"),
 		Key:            "API_KEY",
 		EncryptedValue: "encrypted-val",
 		SecretType:     store.SecretTypeEnvironment,
@@ -711,7 +711,7 @@ func TestEnvGather_BuildResponse_SecretScope(t *testing.T) {
 		ID:        "agent-scope-test",
 		Name:      "scope-test-agent",
 		OwnerID:   "owner-1",
-		ProjectID: "project-1",
+		ProjectID: tid("project-1"),
 	}
 
 	brokerReqs := &RemoteEnvRequirementsResponse{
@@ -756,13 +756,13 @@ func TestEnvGather_SecretInfoRelay(t *testing.T) {
 	srv, st := testServer(t)
 	ctx := context.Background()
 
-	project := &store.Project{ID: "project-si-relay", Name: "si-relay-project", Slug: "si-relay-project"}
+	project := &store.Project{ID: tid("project-si-relay"), Name: "si-relay-project", Slug: "si-relay-project"}
 	if err := st.CreateProject(ctx, project); err != nil {
 		t.Fatal(err)
 	}
 
 	broker := &store.RuntimeBroker{
-		ID: "broker-si-relay", Name: "si-relay-broker", Slug: "si-relay-broker",
+		ID: tid("broker-si-relay"), Name: "si-relay-broker", Slug: "si-relay-broker",
 		Endpoint: "http://localhost:9800", Status: store.BrokerStatusOnline,
 	}
 	if err := st.CreateRuntimeBroker(ctx, broker); err != nil {
@@ -770,7 +770,7 @@ func TestEnvGather_SecretInfoRelay(t *testing.T) {
 	}
 
 	if err := st.AddProjectProvider(ctx, &store.ProjectProvider{
-		ProjectID: "project-si-relay", BrokerID: "broker-si-relay",
+		ProjectID: tid("project-si-relay"), BrokerID: tid("broker-si-relay"), BrokerName: "test-broker",
 		LocalPath: "/tmp/test-project",
 	}); err != nil {
 		t.Fatal(err)
@@ -793,7 +793,7 @@ func TestEnvGather_SecretInfoRelay(t *testing.T) {
 
 	reqBody := map[string]interface{}{
 		"name":      "si-relay-agent",
-		"projectId": "project-si-relay",
+		"projectId": tid("project-si-relay"),
 		"template":  "claude",
 		"gatherEnv": true,
 	}
@@ -835,13 +835,13 @@ func TestEnvGather_SecretInfoRelayType(t *testing.T) {
 	srv, st := testServer(t)
 	ctx := context.Background()
 
-	project := &store.Project{ID: "project-si-type", Name: "si-type-project", Slug: "si-type-project"}
+	project := &store.Project{ID: tid("project-si-type"), Name: "si-type-project", Slug: "si-type-project"}
 	if err := st.CreateProject(ctx, project); err != nil {
 		t.Fatal(err)
 	}
 
 	broker := &store.RuntimeBroker{
-		ID: "broker-si-type", Name: "si-type-broker", Slug: "si-type-broker",
+		ID: tid("broker-si-type"), Name: "si-type-broker", Slug: "si-type-broker",
 		Endpoint: "http://localhost:9800", Status: store.BrokerStatusOnline,
 	}
 	if err := st.CreateRuntimeBroker(ctx, broker); err != nil {
@@ -849,7 +849,7 @@ func TestEnvGather_SecretInfoRelayType(t *testing.T) {
 	}
 
 	if err := st.AddProjectProvider(ctx, &store.ProjectProvider{
-		ProjectID: "project-si-type", BrokerID: "broker-si-type",
+		ProjectID: tid("project-si-type"), BrokerID: tid("broker-si-type"), BrokerName: "test-broker",
 		LocalPath: "/tmp/test-project",
 	}); err != nil {
 		t.Fatal(err)
@@ -873,7 +873,7 @@ func TestEnvGather_SecretInfoRelayType(t *testing.T) {
 
 	reqBody := map[string]interface{}{
 		"name":      "si-type-agent",
-		"projectId": "project-si-type",
+		"projectId": tid("project-si-type"),
 		"template":  "claude",
 		"gatherEnv": true,
 	}
@@ -923,13 +923,13 @@ func TestNonGatherEnv_MissingEnvVars_Returns422(t *testing.T) {
 	srv, st := testServer(t)
 	ctx := context.Background()
 
-	project := &store.Project{ID: "project-nogather-missing", Name: "nogather-missing-project", Slug: "nogather-missing-project"}
+	project := &store.Project{ID: tid("project-nogather-missing"), Name: "nogather-missing-project", Slug: "nogather-missing-project"}
 	if err := st.CreateProject(ctx, project); err != nil {
 		t.Fatal(err)
 	}
 
 	broker := &store.RuntimeBroker{
-		ID: "broker-nogather-missing", Name: "nogather-missing-broker", Slug: "nogather-missing-broker",
+		ID: tid("broker-nogather-missing"), Name: "nogather-missing-broker", Slug: "nogather-missing-broker",
 		Endpoint: "http://localhost:9800", Status: store.BrokerStatusOnline,
 	}
 	if err := st.CreateRuntimeBroker(ctx, broker); err != nil {
@@ -937,7 +937,7 @@ func TestNonGatherEnv_MissingEnvVars_Returns422(t *testing.T) {
 	}
 
 	if err := st.AddProjectProvider(ctx, &store.ProjectProvider{
-		ProjectID: "project-nogather-missing", BrokerID: "broker-nogather-missing",
+		ProjectID: tid("project-nogather-missing"), BrokerID: tid("broker-nogather-missing"), BrokerName: "test-broker",
 		LocalPath: "/tmp/test-project",
 	}); err != nil {
 		t.Fatal(err)
@@ -958,7 +958,7 @@ func TestNonGatherEnv_MissingEnvVars_Returns422(t *testing.T) {
 	// Create agent WITHOUT GatherEnv (simulating web/API caller)
 	reqBody := map[string]interface{}{
 		"name":      "nogather-missing-agent",
-		"projectId": "project-nogather-missing",
+		"projectId": tid("project-nogather-missing"),
 		"template":  "claude",
 		// gatherEnv is NOT set — this is the non-CLI path
 	}
@@ -993,7 +993,7 @@ func TestNonGatherEnv_MissingEnvVars_Returns422(t *testing.T) {
 	}
 
 	// Agent should have been cleaned up from the store
-	result, err := st.ListAgents(ctx, store.AgentFilter{ProjectID: "project-nogather-missing"}, store.ListOptions{})
+	result, err := st.ListAgents(ctx, store.AgentFilter{ProjectID: tid("project-nogather-missing")}, store.ListOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1008,13 +1008,13 @@ func TestNonGatherEnv_MissingEnvVars_ProjectRoute_Returns422(t *testing.T) {
 	srv, st := testServer(t)
 	ctx := context.Background()
 
-	project := &store.Project{ID: "project-nogather-route", Name: "nogather-route-project", Slug: "nogather-route-project"}
+	project := &store.Project{ID: tid("project-nogather-route"), Name: "nogather-route-project", Slug: "nogather-route-project"}
 	if err := st.CreateProject(ctx, project); err != nil {
 		t.Fatal(err)
 	}
 
 	broker := &store.RuntimeBroker{
-		ID: "broker-nogather-route", Name: "nogather-route-broker", Slug: "nogather-route-broker",
+		ID: tid("broker-nogather-route"), Name: "nogather-route-broker", Slug: "nogather-route-broker",
 		Endpoint: "http://localhost:9800", Status: store.BrokerStatusOnline,
 	}
 	if err := st.CreateRuntimeBroker(ctx, broker); err != nil {
@@ -1022,7 +1022,7 @@ func TestNonGatherEnv_MissingEnvVars_ProjectRoute_Returns422(t *testing.T) {
 	}
 
 	if err := st.AddProjectProvider(ctx, &store.ProjectProvider{
-		ProjectID: "project-nogather-route", BrokerID: "broker-nogather-route",
+		ProjectID: tid("project-nogather-route"), BrokerID: tid("broker-nogather-route"), BrokerName: "test-broker",
 		LocalPath: "/tmp/test-project",
 	}); err != nil {
 		t.Fatal(err)
@@ -1063,7 +1063,7 @@ func TestNonGatherEnv_MissingEnvVars_ProjectRoute_Returns422(t *testing.T) {
 	}
 
 	// Agent should have been cleaned up
-	result, err := st.ListAgents(ctx, store.AgentFilter{ProjectID: "project-nogather-route"}, store.ListOptions{})
+	result, err := st.ListAgents(ctx, store.AgentFilter{ProjectID: tid("project-nogather-route")}, store.ListOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1078,13 +1078,13 @@ func TestNonGatherEnv_AllSatisfied_Returns201(t *testing.T) {
 	srv, st := testServer(t)
 	ctx := context.Background()
 
-	project := &store.Project{ID: "project-nogather-ok", Name: "nogather-ok-project", Slug: "nogather-ok-project"}
+	project := &store.Project{ID: tid("project-nogather-ok"), Name: "nogather-ok-project", Slug: "nogather-ok-project"}
 	if err := st.CreateProject(ctx, project); err != nil {
 		t.Fatal(err)
 	}
 
 	broker := &store.RuntimeBroker{
-		ID: "broker-nogather-ok", Name: "nogather-ok-broker", Slug: "nogather-ok-broker",
+		ID: tid("broker-nogather-ok"), Name: "nogather-ok-broker", Slug: "nogather-ok-broker",
 		Endpoint: "http://localhost:9800", Status: store.BrokerStatusOnline,
 	}
 	if err := st.CreateRuntimeBroker(ctx, broker); err != nil {
@@ -1092,7 +1092,7 @@ func TestNonGatherEnv_AllSatisfied_Returns201(t *testing.T) {
 	}
 
 	if err := st.AddProjectProvider(ctx, &store.ProjectProvider{
-		ProjectID: "project-nogather-ok", BrokerID: "broker-nogather-ok",
+		ProjectID: tid("project-nogather-ok"), BrokerID: tid("broker-nogather-ok"), BrokerName: "test-broker",
 		LocalPath: "/tmp/test-project",
 	}); err != nil {
 		t.Fatal(err)
@@ -1106,7 +1106,7 @@ func TestNonGatherEnv_AllSatisfied_Returns201(t *testing.T) {
 	// Create agent WITHOUT GatherEnv — all env satisfied
 	reqBody := map[string]interface{}{
 		"name":      "nogather-ok-agent",
-		"projectId": "project-nogather-ok",
+		"projectId": tid("project-nogather-ok"),
 		"template":  "claude",
 	}
 
@@ -1146,13 +1146,13 @@ func TestEnvGather_HubHandler_RetryAfterCancel_ProjectRoute(t *testing.T) {
 	srv, st := testServer(t)
 	ctx := context.Background()
 
-	project := &store.Project{ID: "project-retry-route", Name: "retry-route-project", Slug: "retry-route-project"}
+	project := &store.Project{ID: tid("project-retry-route"), Name: "retry-route-project", Slug: "retry-route-project"}
 	if err := st.CreateProject(ctx, project); err != nil {
 		t.Fatal(err)
 	}
 
 	broker := &store.RuntimeBroker{
-		ID: "broker-retry-route", Name: "retry-route-broker", Slug: "retry-route-broker",
+		ID: tid("broker-retry-route"), Name: "retry-route-broker", Slug: "retry-route-broker",
 		Endpoint: "http://localhost:9800", Status: store.BrokerStatusOnline,
 	}
 	if err := st.CreateRuntimeBroker(ctx, broker); err != nil {
@@ -1160,7 +1160,7 @@ func TestEnvGather_HubHandler_RetryAfterCancel_ProjectRoute(t *testing.T) {
 	}
 
 	if err := st.AddProjectProvider(ctx, &store.ProjectProvider{
-		ProjectID: "project-retry-route", BrokerID: "broker-retry-route",
+		ProjectID: tid("project-retry-route"), BrokerID: tid("broker-retry-route"), BrokerName: "test-broker",
 		LocalPath: "/tmp/test-project",
 	}); err != nil {
 		t.Fatal(err)
@@ -1168,11 +1168,11 @@ func TestEnvGather_HubHandler_RetryAfterCancel_ProjectRoute(t *testing.T) {
 
 	// Simulate a previous cancelled env-gather: agent exists in "provisioning" status
 	staleAgent := &store.Agent{
-		ID:              "stale-agent-route",
+		ID:              tid("stale-agent-route"),
 		Name:            "retry-route-agent",
 		Slug:            "retry-route-agent",
-		ProjectID:       "project-retry-route",
-		RuntimeBrokerID: "broker-retry-route",
+		ProjectID:       tid("project-retry-route"),
+		RuntimeBrokerID: tid("broker-retry-route"),
 		Phase:           string(state.PhaseProvisioning),
 		AppliedConfig: &store.AgentAppliedConfig{
 			HarnessConfig: "claude",
@@ -1225,7 +1225,7 @@ func TestEnvGather_HubHandler_RetryAfterCancel_ProjectRoute(t *testing.T) {
 	if resp.Agent == nil {
 		t.Fatal("expected agent in response")
 	}
-	if resp.Agent.ID == "stale-agent-route" {
+	if resp.Agent.ID == tid("stale-agent-route") {
 		t.Error("expected a new agent ID, got the stale agent ID")
 	}
 	if resp.Agent.Phase != string(state.PhaseProvisioning) {
@@ -1233,7 +1233,7 @@ func TestEnvGather_HubHandler_RetryAfterCancel_ProjectRoute(t *testing.T) {
 	}
 
 	// The old agent should no longer exist in the store
-	_, err := st.GetAgent(ctx, "stale-agent-route")
+	_, err := st.GetAgent(ctx, tid("stale-agent-route"))
 	if err != store.ErrNotFound {
 		t.Errorf("expected stale agent to be deleted, got err=%v", err)
 	}
@@ -1248,13 +1248,13 @@ func TestProjectRoute_ResolvesUserScopedEnvVars(t *testing.T) {
 	srv, st := testServer(t)
 	ctx := context.Background()
 
-	project := &store.Project{ID: "project-owner-env", Name: "owner-env-project", Slug: "owner-env-project"}
+	project := &store.Project{ID: tid("project-owner-env"), Name: "owner-env-project", Slug: "owner-env-project"}
 	if err := st.CreateProject(ctx, project); err != nil {
 		t.Fatal(err)
 	}
 
 	broker := &store.RuntimeBroker{
-		ID: "broker-owner-env", Name: "owner-env-broker", Slug: "owner-env-broker",
+		ID: tid("broker-owner-env"), Name: "owner-env-broker", Slug: "owner-env-broker",
 		Endpoint: "http://localhost:9800", Status: store.BrokerStatusOnline,
 	}
 	if err := st.CreateRuntimeBroker(ctx, broker); err != nil {
@@ -1262,7 +1262,7 @@ func TestProjectRoute_ResolvesUserScopedEnvVars(t *testing.T) {
 	}
 
 	if err := st.AddProjectProvider(ctx, &store.ProjectProvider{
-		ProjectID: "project-owner-env", BrokerID: "broker-owner-env",
+		ProjectID: tid("project-owner-env"), BrokerID: tid("broker-owner-env"), BrokerName: "test-broker",
 		LocalPath: "/tmp/test-project",
 	}); err != nil {
 		t.Fatal(err)
@@ -1270,7 +1270,7 @@ func TestProjectRoute_ResolvesUserScopedEnvVars(t *testing.T) {
 
 	// Store a user-scoped env var for the dev-user (dev auth identity)
 	if err := st.CreateEnvVar(ctx, &store.EnvVar{
-		ID:      "env-owner-1",
+		ID:      tid("env-owner-1"),
 		Key:     "GEMINI_API_KEY",
 		Value:   "user-scoped-gemini-key",
 		Scope:   "user",
@@ -1335,13 +1335,13 @@ func TestProjectRoute_ResolvesUserScopedSecrets(t *testing.T) {
 	srv, st := testServer(t)
 	ctx := context.Background()
 
-	project := &store.Project{ID: "project-owner-secret", Name: "owner-secret-project", Slug: "owner-secret-project"}
+	project := &store.Project{ID: tid("project-owner-secret"), Name: "owner-secret-project", Slug: "owner-secret-project"}
 	if err := st.CreateProject(ctx, project); err != nil {
 		t.Fatal(err)
 	}
 
 	broker := &store.RuntimeBroker{
-		ID: "broker-owner-secret", Name: "owner-secret-broker", Slug: "owner-secret-broker",
+		ID: tid("broker-owner-secret"), Name: "owner-secret-broker", Slug: "owner-secret-broker",
 		Endpoint: "http://localhost:9800", Status: store.BrokerStatusOnline,
 	}
 	if err := st.CreateRuntimeBroker(ctx, broker); err != nil {
@@ -1349,7 +1349,7 @@ func TestProjectRoute_ResolvesUserScopedSecrets(t *testing.T) {
 	}
 
 	if err := st.AddProjectProvider(ctx, &store.ProjectProvider{
-		ProjectID: "project-owner-secret", BrokerID: "broker-owner-secret",
+		ProjectID: tid("project-owner-secret"), BrokerID: tid("broker-owner-secret"), BrokerName: "test-broker",
 		LocalPath: "/tmp/test-project",
 	}); err != nil {
 		t.Fatal(err)

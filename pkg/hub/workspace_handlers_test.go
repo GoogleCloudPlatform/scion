@@ -19,6 +19,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -27,7 +28,6 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
-	"github.com/GoogleCloudPlatform/scion/pkg/store/sqlite"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 )
 
@@ -37,7 +37,7 @@ const testWorkspaceDevToken = "scion_dev_workspace_test_token_1234567890"
 // testWorkspaceServer creates a test server for workspace handler tests.
 func testWorkspaceServer(t *testing.T) (*Server, store.Store) {
 	t.Helper()
-	s, err := sqlite.New(":memory:")
+	s, err := newTestStore(":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
@@ -82,25 +82,25 @@ func TestWorkspaceRoutesParsing(t *testing.T) {
 	}{
 		{
 			name:           "workspace status",
-			url:            "/api/v1/agents/agent-123/workspace",
+			url:            fmt.Sprintf("/api/v1/agents/%s/workspace", "agent-123"),
 			expectedID:     "agent-123",
 			expectedAction: "workspace",
 		},
 		{
 			name:           "workspace sync-from",
-			url:            "/api/v1/agents/agent-123/workspace/sync-from",
+			url:            fmt.Sprintf("/api/v1/agents/%s/workspace/sync-from", "agent-123"),
 			expectedID:     "agent-123",
 			expectedAction: "workspace/sync-from",
 		},
 		{
 			name:           "workspace sync-to",
-			url:            "/api/v1/agents/agent-123/workspace/sync-to",
+			url:            fmt.Sprintf("/api/v1/agents/%s/workspace/sync-to", "agent-123"),
 			expectedID:     "agent-123",
 			expectedAction: "workspace/sync-to",
 		},
 		{
 			name:           "workspace sync-to finalize",
-			url:            "/api/v1/agents/agent-123/workspace/sync-to/finalize",
+			url:            fmt.Sprintf("/api/v1/agents/%s/workspace/sync-to/finalize", "agent-123"),
 			expectedID:     "agent-123",
 			expectedAction: "workspace/sync-to/finalize",
 		},
@@ -128,14 +128,14 @@ func TestWorkspaceStatusHandler(t *testing.T) {
 	now := time.Now()
 
 	// Create the project first (foreign key dependency)
-	createTestProject(t, s, "project_test_1")
+	createTestProject(t, s, tid("project_test_1"))
 
 	// Create a test agent
 	agent := &store.Agent{
-		ID:           "agent_workspace_test_1",
+		ID:           tid("agent_workspace_test_1"),
 		Slug:         "workspace-test-agent",
 		Name:         "test-agent",
-		ProjectID:    "project_test_1",
+		ProjectID:    tid("project_test_1"),
 		Phase:        string(state.PhaseRunning),
 		StateVersion: 1,
 		Created:      now,
@@ -146,7 +146,7 @@ func TestWorkspaceStatusHandler(t *testing.T) {
 	}
 
 	// Test workspace status endpoint
-	req := httptest.NewRequest("GET", "/api/v1/agents/agent_workspace_test_1/workspace", nil)
+	req := httptest.NewRequest("GET", fmt.Sprintf("/api/v1/agents/%s/workspace", tid("agent_workspace_test_1")), nil)
 	req.Header.Set("Authorization", "Bearer "+testWorkspaceDevToken)
 	rec := httptest.NewRecorder()
 
@@ -161,11 +161,11 @@ func TestWorkspaceStatusHandler(t *testing.T) {
 		t.Fatalf("failed to decode response: %v", err)
 	}
 
-	if resp.Slug != "agent_workspace_test_1" {
-		t.Errorf("response AgentID = %q, want %q", resp.Slug, "agent_workspace_test_1")
+	if resp.Slug != tid("agent_workspace_test_1") {
+		t.Errorf("response AgentID = %q, want %q", resp.Slug, tid("agent_workspace_test_1"))
 	}
-	if resp.ProjectID != "project_test_1" {
-		t.Errorf("response ProjectID = %q, want %q", resp.ProjectID, "project_test_1")
+	if resp.ProjectID != tid("project_test_1") {
+		t.Errorf("response ProjectID = %q, want %q", resp.ProjectID, tid("project_test_1"))
 	}
 }
 
@@ -189,14 +189,14 @@ func TestWorkspaceSyncFromHandler_AgentNotRunning(t *testing.T) {
 	now := time.Now()
 
 	// Create the project first
-	createTestProject(t, s, "project_test")
+	createTestProject(t, s, tid("project_test"))
 
 	// Create a stopped agent
 	agent := &store.Agent{
-		ID:           "agent_stopped_1",
+		ID:           tid("agent_stopped_1"),
 		Slug:         "stopped-agent",
 		Name:         "stopped-agent",
-		ProjectID:    "project_test",
+		ProjectID:    tid("project_test"),
 		Phase:        string(state.PhaseStopped),
 		StateVersion: 1,
 		Created:      now,
@@ -206,7 +206,7 @@ func TestWorkspaceSyncFromHandler_AgentNotRunning(t *testing.T) {
 		t.Fatalf("failed to create agent: %v", err)
 	}
 
-	req := httptest.NewRequest("POST", "/api/v1/agents/agent_stopped_1/workspace/sync-from", nil)
+	req := httptest.NewRequest("POST", fmt.Sprintf("/api/v1/agents/%s/workspace/sync-from", tid("agent_stopped_1")), nil)
 	req.Header.Set("Authorization", "Bearer "+testWorkspaceDevToken)
 	rec := httptest.NewRecorder()
 
@@ -224,13 +224,13 @@ func TestWorkspaceSyncToHandler_EmptyFiles(t *testing.T) {
 	now := time.Now()
 
 	// Create the project first
-	createTestProject(t, s, "project_syncto")
+	createTestProject(t, s, tid("project_syncto"))
 
 	agent := &store.Agent{
-		ID:           "agent_syncto_test",
+		ID:           tid("agent_syncto_test"),
 		Slug:         "sync-to-test-agent",
 		Name:         "test-agent",
-		ProjectID:    "project_syncto",
+		ProjectID:    tid("project_syncto"),
 		Phase:        string(state.PhaseRunning),
 		StateVersion: 1,
 		Created:      now,
@@ -242,7 +242,7 @@ func TestWorkspaceSyncToHandler_EmptyFiles(t *testing.T) {
 
 	// Send request with empty files list
 	body := `{"files": []}`
-	req := httptest.NewRequest("POST", "/api/v1/agents/agent_syncto_test/workspace/sync-to", strings.NewReader(body))
+	req := httptest.NewRequest("POST", fmt.Sprintf("/api/v1/agents/%s/workspace/sync-to", tid("agent_syncto_test")), strings.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+testWorkspaceDevToken)
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
@@ -261,13 +261,13 @@ func TestWorkspaceSyncToFinalizeHandler_MissingManifest(t *testing.T) {
 	now := time.Now()
 
 	// Create the project first
-	createTestProject(t, s, "project_finalize")
+	createTestProject(t, s, tid("project_finalize"))
 
 	agent := &store.Agent{
-		ID:           "agent_finalize_test",
+		ID:           tid("agent_finalize_test"),
 		Slug:         "finalize-test-agent",
 		Name:         "test-agent",
-		ProjectID:    "project_finalize",
+		ProjectID:    tid("project_finalize"),
 		Phase:        string(state.PhaseRunning),
 		StateVersion: 1,
 		Created:      now,
@@ -279,7 +279,7 @@ func TestWorkspaceSyncToFinalizeHandler_MissingManifest(t *testing.T) {
 
 	// Send request without manifest
 	body := `{}`
-	req := httptest.NewRequest("POST", "/api/v1/agents/agent_finalize_test/workspace/sync-to/finalize", strings.NewReader(body))
+	req := httptest.NewRequest("POST", fmt.Sprintf("/api/v1/agents/%s/workspace/sync-to/finalize", tid("agent_finalize_test")), strings.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+testWorkspaceDevToken)
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
@@ -298,13 +298,13 @@ func TestWorkspaceRoutesRequireAuth(t *testing.T) {
 	now := time.Now()
 
 	// Create the project first
-	createTestProject(t, s, "project_auth")
+	createTestProject(t, s, tid("project_auth"))
 
 	agent := &store.Agent{
-		ID:           "agent_auth_test",
+		ID:           tid("agent_auth_test"),
 		Slug:         "auth-test-agent",
 		Name:         "test-agent",
-		ProjectID:    "project_auth",
+		ProjectID:    tid("project_auth"),
 		Phase:        string(state.PhaseRunning),
 		StateVersion: 1,
 		Created:      now,
@@ -319,10 +319,10 @@ func TestWorkspaceRoutesRequireAuth(t *testing.T) {
 		method string
 		url    string
 	}{
-		{"workspace status", "GET", "/api/v1/agents/agent_auth_test/workspace"},
-		{"sync-from", "POST", "/api/v1/agents/agent_auth_test/workspace/sync-from"},
-		{"sync-to", "POST", "/api/v1/agents/agent_auth_test/workspace/sync-to"},
-		{"sync-to finalize", "POST", "/api/v1/agents/agent_auth_test/workspace/sync-to/finalize"},
+		{"workspace status", "GET", fmt.Sprintf("/api/v1/agents/%s/workspace", tid("agent_auth_test"))},
+		{"sync-from", "POST", fmt.Sprintf("/api/v1/agents/%s/workspace/sync-from", tid("agent_auth_test"))},
+		{"sync-to", "POST", fmt.Sprintf("/api/v1/agents/%s/workspace/sync-to", tid("agent_auth_test"))},
+		{"sync-to finalize", "POST", fmt.Sprintf("/api/v1/agents/%s/workspace/sync-to/finalize", tid("agent_auth_test"))},
 	}
 
 	for _, tt := range tests {
@@ -414,8 +414,8 @@ func TestWorkspaceSyncFromHandler_StorageNotConfigured(t *testing.T) {
 	now := time.Now()
 
 	// Use unique IDs for this test
-	projectID := "project_nostor_syncfrom"
-	agentID := "agent_nostor_syncfrom"
+	projectID := tid("project_nostor_syncfrom")
+	agentID := tid("agent_nostor_syncfrom")
 
 	// Create the project first
 	createTestProject(t, s, projectID)
@@ -460,13 +460,13 @@ func TestWorkspaceSyncToHandler_StorageNotConfigured(t *testing.T) {
 	now := time.Now()
 
 	// Create the project first
-	createTestProject(t, s, "project_syncto_no_storage")
+	createTestProject(t, s, tid("project_syncto_no_storage"))
 
 	agent := &store.Agent{
-		ID:           "agent_syncto_no_storage",
+		ID:           tid("agent_syncto_no_storage"),
 		Slug:         "sync-to-no-storage-agent",
 		Name:         "test-agent",
-		ProjectID:    "project_syncto_no_storage",
+		ProjectID:    tid("project_syncto_no_storage"),
 		Phase:        string(state.PhaseRunning),
 		StateVersion: 1,
 		Created:      now,
@@ -478,7 +478,7 @@ func TestWorkspaceSyncToHandler_StorageNotConfigured(t *testing.T) {
 
 	// Send request with files but no storage configured
 	body := `{"files": [{"path": "test.txt", "size": 100, "hash": "sha256:abc123"}]}`
-	req := httptest.NewRequest("POST", "/api/v1/agents/agent_syncto_no_storage/workspace/sync-to", strings.NewReader(body))
+	req := httptest.NewRequest("POST", fmt.Sprintf("/api/v1/agents/%s/workspace/sync-to", tid("agent_syncto_no_storage")), strings.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+testWorkspaceDevToken)
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
@@ -497,13 +497,13 @@ func TestWorkspaceSyncToFinalizeHandler_StorageNotConfigured(t *testing.T) {
 	now := time.Now()
 
 	// Create the project first
-	createTestProject(t, s, "project_finalize_no_storage")
+	createTestProject(t, s, tid("project_finalize_no_storage"))
 
 	agent := &store.Agent{
-		ID:           "agent_finalize_no_storage",
+		ID:           tid("agent_finalize_no_storage"),
 		Slug:         "finalize-no-storage-agent",
 		Name:         "test-agent",
-		ProjectID:    "project_finalize_no_storage",
+		ProjectID:    tid("project_finalize_no_storage"),
 		Phase:        string(state.PhaseRunning),
 		StateVersion: 1,
 		Created:      now,
@@ -515,7 +515,7 @@ func TestWorkspaceSyncToFinalizeHandler_StorageNotConfigured(t *testing.T) {
 
 	// Send request with manifest but no storage configured
 	body := `{"manifest": {"version": "1.0", "files": [{"path": "test.txt", "size": 100, "hash": "sha256:abc123"}]}}`
-	req := httptest.NewRequest("POST", "/api/v1/agents/agent_finalize_no_storage/workspace/sync-to/finalize", strings.NewReader(body))
+	req := httptest.NewRequest("POST", fmt.Sprintf("/api/v1/agents/%s/workspace/sync-to/finalize", tid("agent_finalize_no_storage")), strings.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+testWorkspaceDevToken)
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
@@ -534,14 +534,14 @@ func TestWorkspaceSyncToFinalizeHandler_AgentNotRunning(t *testing.T) {
 	now := time.Now()
 
 	// Create the project first
-	createTestProject(t, s, "project_finalize_stopped")
+	createTestProject(t, s, tid("project_finalize_stopped"))
 
 	// Create a stopped agent
 	agent := &store.Agent{
-		ID:           "agent_finalize_stopped",
+		ID:           tid("agent_finalize_stopped"),
 		Slug:         "finalize-stopped-agent",
 		Name:         "stopped-agent",
-		ProjectID:    "project_finalize_stopped",
+		ProjectID:    tid("project_finalize_stopped"),
 		Phase:        string(state.PhaseStopped),
 		StateVersion: 1,
 		Created:      now,
@@ -552,7 +552,7 @@ func TestWorkspaceSyncToFinalizeHandler_AgentNotRunning(t *testing.T) {
 	}
 
 	body := `{"manifest": {"version": "1.0", "files": [{"path": "test.txt", "size": 100, "hash": "sha256:abc123"}]}}`
-	req := httptest.NewRequest("POST", "/api/v1/agents/agent_finalize_stopped/workspace/sync-to/finalize", strings.NewReader(body))
+	req := httptest.NewRequest("POST", fmt.Sprintf("/api/v1/agents/%s/workspace/sync-to/finalize", tid("agent_finalize_stopped")), strings.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+testWorkspaceDevToken)
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
@@ -571,13 +571,13 @@ func TestWorkspaceMethodNotAllowed(t *testing.T) {
 	now := time.Now()
 
 	// Create the project first
-	createTestProject(t, s, "project_method")
+	createTestProject(t, s, tid("project_method"))
 
 	agent := &store.Agent{
-		ID:           "agent_method_test",
+		ID:           tid("agent_method_test"),
 		Slug:         "method-test-agent",
 		Name:         "test-agent",
-		ProjectID:    "project_method",
+		ProjectID:    tid("project_method"),
 		Phase:        string(state.PhaseRunning),
 		StateVersion: 1,
 		Created:      now,
@@ -594,24 +594,24 @@ func TestWorkspaceMethodNotAllowed(t *testing.T) {
 		expectedStatus int
 	}{
 		// workspace status - GET only
-		{"workspace status with POST", "POST", "/api/v1/agents/agent_method_test/workspace", http.StatusMethodNotAllowed},
-		{"workspace status with PUT", "PUT", "/api/v1/agents/agent_method_test/workspace", http.StatusMethodNotAllowed},
-		{"workspace status with DELETE", "DELETE", "/api/v1/agents/agent_method_test/workspace", http.StatusMethodNotAllowed},
+		{"workspace status with POST", "POST", fmt.Sprintf("/api/v1/agents/%s/workspace", tid("agent_method_test")), http.StatusMethodNotAllowed},
+		{"workspace status with PUT", "PUT", fmt.Sprintf("/api/v1/agents/%s/workspace", tid("agent_method_test")), http.StatusMethodNotAllowed},
+		{"workspace status with DELETE", "DELETE", fmt.Sprintf("/api/v1/agents/%s/workspace", tid("agent_method_test")), http.StatusMethodNotAllowed},
 
 		// sync-from - POST only
-		{"sync-from with GET", "GET", "/api/v1/agents/agent_method_test/workspace/sync-from", http.StatusMethodNotAllowed},
-		{"sync-from with PUT", "PUT", "/api/v1/agents/agent_method_test/workspace/sync-from", http.StatusMethodNotAllowed},
-		{"sync-from with DELETE", "DELETE", "/api/v1/agents/agent_method_test/workspace/sync-from", http.StatusMethodNotAllowed},
+		{"sync-from with GET", "GET", fmt.Sprintf("/api/v1/agents/%s/workspace/sync-from", tid("agent_method_test")), http.StatusMethodNotAllowed},
+		{"sync-from with PUT", "PUT", fmt.Sprintf("/api/v1/agents/%s/workspace/sync-from", tid("agent_method_test")), http.StatusMethodNotAllowed},
+		{"sync-from with DELETE", "DELETE", fmt.Sprintf("/api/v1/agents/%s/workspace/sync-from", tid("agent_method_test")), http.StatusMethodNotAllowed},
 
 		// sync-to - POST only
-		{"sync-to with GET", "GET", "/api/v1/agents/agent_method_test/workspace/sync-to", http.StatusMethodNotAllowed},
-		{"sync-to with PUT", "PUT", "/api/v1/agents/agent_method_test/workspace/sync-to", http.StatusMethodNotAllowed},
-		{"sync-to with DELETE", "DELETE", "/api/v1/agents/agent_method_test/workspace/sync-to", http.StatusMethodNotAllowed},
+		{"sync-to with GET", "GET", fmt.Sprintf("/api/v1/agents/%s/workspace/sync-to", tid("agent_method_test")), http.StatusMethodNotAllowed},
+		{"sync-to with PUT", "PUT", fmt.Sprintf("/api/v1/agents/%s/workspace/sync-to", tid("agent_method_test")), http.StatusMethodNotAllowed},
+		{"sync-to with DELETE", "DELETE", fmt.Sprintf("/api/v1/agents/%s/workspace/sync-to", tid("agent_method_test")), http.StatusMethodNotAllowed},
 
 		// sync-to/finalize - POST only
-		{"finalize with GET", "GET", "/api/v1/agents/agent_method_test/workspace/sync-to/finalize", http.StatusMethodNotAllowed},
-		{"finalize with PUT", "PUT", "/api/v1/agents/agent_method_test/workspace/sync-to/finalize", http.StatusMethodNotAllowed},
-		{"finalize with DELETE", "DELETE", "/api/v1/agents/agent_method_test/workspace/sync-to/finalize", http.StatusMethodNotAllowed},
+		{"finalize with GET", "GET", fmt.Sprintf("/api/v1/agents/%s/workspace/sync-to/finalize", tid("agent_method_test")), http.StatusMethodNotAllowed},
+		{"finalize with PUT", "PUT", fmt.Sprintf("/api/v1/agents/%s/workspace/sync-to/finalize", tid("agent_method_test")), http.StatusMethodNotAllowed},
+		{"finalize with DELETE", "DELETE", fmt.Sprintf("/api/v1/agents/%s/workspace/sync-to/finalize", tid("agent_method_test")), http.StatusMethodNotAllowed},
 	}
 
 	for _, tt := range tests {
@@ -635,13 +635,13 @@ func TestWorkspaceSyncToHandler_InvalidJSON(t *testing.T) {
 	now := time.Now()
 
 	// Create the project first
-	createTestProject(t, s, "project_invalid_json")
+	createTestProject(t, s, tid("project_invalid_json"))
 
 	agent := &store.Agent{
-		ID:           "agent_invalid_json",
+		ID:           tid("agent_invalid_json"),
 		Slug:         "invalid-json-agent",
 		Name:         "test-agent",
-		ProjectID:    "project_invalid_json",
+		ProjectID:    tid("project_invalid_json"),
 		Phase:        string(state.PhaseRunning),
 		StateVersion: 1,
 		Created:      now,
@@ -653,7 +653,7 @@ func TestWorkspaceSyncToHandler_InvalidJSON(t *testing.T) {
 
 	// Send invalid JSON
 	body := `{invalid json`
-	req := httptest.NewRequest("POST", "/api/v1/agents/agent_invalid_json/workspace/sync-to", strings.NewReader(body))
+	req := httptest.NewRequest("POST", fmt.Sprintf("/api/v1/agents/%s/workspace/sync-to", tid("agent_invalid_json")), strings.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+testWorkspaceDevToken)
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
@@ -672,13 +672,13 @@ func TestWorkspaceSyncToFinalizeHandler_InvalidJSON(t *testing.T) {
 	now := time.Now()
 
 	// Create the project first
-	createTestProject(t, s, "project_finalize_invalid")
+	createTestProject(t, s, tid("project_finalize_invalid"))
 
 	agent := &store.Agent{
-		ID:           "agent_finalize_invalid",
+		ID:           tid("agent_finalize_invalid"),
 		Slug:         "finalize-invalid-agent",
 		Name:         "test-agent",
-		ProjectID:    "project_finalize_invalid",
+		ProjectID:    tid("project_finalize_invalid"),
 		Phase:        string(state.PhaseRunning),
 		StateVersion: 1,
 		Created:      now,
@@ -690,7 +690,7 @@ func TestWorkspaceSyncToFinalizeHandler_InvalidJSON(t *testing.T) {
 
 	// Send invalid JSON
 	body := `{not valid`
-	req := httptest.NewRequest("POST", "/api/v1/agents/agent_finalize_invalid/workspace/sync-to/finalize", strings.NewReader(body))
+	req := httptest.NewRequest("POST", fmt.Sprintf("/api/v1/agents/%s/workspace/sync-to/finalize", tid("agent_finalize_invalid")), strings.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+testWorkspaceDevToken)
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
@@ -786,13 +786,13 @@ func TestWorkspaceUnknownAction(t *testing.T) {
 	now := time.Now()
 
 	// Create the project first
-	createTestProject(t, s, "project_unknown")
+	createTestProject(t, s, tid("project_unknown"))
 
 	agent := &store.Agent{
-		ID:           "agent_unknown_action",
+		ID:           tid("agent_unknown_action"),
 		Slug:         "unknown-action-agent",
 		Name:         "test-agent",
-		ProjectID:    "project_unknown",
+		ProjectID:    tid("project_unknown"),
 		Phase:        string(state.PhaseRunning),
 		StateVersion: 1,
 		Created:      now,
@@ -803,7 +803,7 @@ func TestWorkspaceUnknownAction(t *testing.T) {
 	}
 
 	// Request with unknown workspace action
-	req := httptest.NewRequest("POST", "/api/v1/agents/agent_unknown_action/workspace/unknown-action", nil)
+	req := httptest.NewRequest("POST", fmt.Sprintf("/api/v1/agents/%s/workspace/unknown-action", tid("agent_unknown_action")), nil)
 	req.Header.Set("Authorization", "Bearer "+testWorkspaceDevToken)
 	rec := httptest.NewRecorder()
 
@@ -886,8 +886,8 @@ func TestSyncHubManagedWorkspaceBack_SkipsGitProject(t *testing.T) {
 
 	// Create a git-backed project (has GitRemote)
 	project := &store.Project{
-		ID:        "project-git-sync",
-		Slug:      "project-git-sync",
+		ID:        tid("project-git-sync"),
+		Slug:      tid("project-git-sync"),
 		Name:      "Git Project",
 		GitRemote: "github.com/test/repo",
 	}
@@ -897,7 +897,7 @@ func TestSyncHubManagedWorkspaceBack_SkipsGitProject(t *testing.T) {
 
 	agent := &store.Agent{
 		ID:        "agent-sync-1",
-		ProjectID: "project-git-sync",
+		ProjectID: tid("project-git-sync"),
 	}
 
 	// This should return without doing anything for git-backed projects
@@ -911,8 +911,8 @@ func TestSyncHubManagedWorkspaceBack_SkipsColocatedBroker(t *testing.T) {
 
 	// Create a hub-managed project
 	project := &store.Project{
-		ID:   "project-colo-sync",
-		Slug: "project-colo-sync",
+		ID:   tid("project-colo-sync"),
+		Slug: tid("project-colo-sync"),
 		Name: "Hub Native Colo",
 		// No GitRemote = hub-managed
 	}
@@ -922,7 +922,7 @@ func TestSyncHubManagedWorkspaceBack_SkipsColocatedBroker(t *testing.T) {
 
 	// Create a broker with local path (colocated)
 	broker := &store.RuntimeBroker{
-		ID:       "broker-colo",
+		ID:       tid("broker-colo"),
 		Name:     "colo-broker",
 		Slug:     "colo-broker",
 		Endpoint: "http://localhost:9800",
@@ -932,8 +932,8 @@ func TestSyncHubManagedWorkspaceBack_SkipsColocatedBroker(t *testing.T) {
 		t.Fatalf("failed to create broker: %v", err)
 	}
 	provider := &store.ProjectProvider{
-		ProjectID:  "project-colo-sync",
-		BrokerID:   "broker-colo",
+		ProjectID:  tid("project-colo-sync"),
+		BrokerID:   tid("broker-colo"),
 		BrokerName: "colo-broker",
 		LocalPath:  "/home/user/.scion",
 		Status:     store.BrokerStatusOnline,
@@ -944,8 +944,8 @@ func TestSyncHubManagedWorkspaceBack_SkipsColocatedBroker(t *testing.T) {
 
 	agent := &store.Agent{
 		ID:              "agent-colo-sync",
-		ProjectID:       "project-colo-sync",
-		RuntimeBrokerID: "broker-colo",
+		ProjectID:       tid("project-colo-sync"),
+		RuntimeBrokerID: tid("broker-colo"),
 	}
 
 	// Should skip sync because broker has local path

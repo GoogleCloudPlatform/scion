@@ -59,6 +59,9 @@ type AgentService interface {
 	// Restart restarts an agent.
 	Restart(ctx context.Context, agentID string) error
 
+	// ResetAuth injects a fresh token into a running agent without restarting.
+	ResetAuth(ctx context.Context, agentID string) error
+
 	// StopAll stops all running agents in scope.
 	StopAll(ctx context.Context) (*StopAllResponse, error)
 
@@ -431,6 +434,15 @@ func (s *agentService) Suspend(ctx context.Context, agentID string) error {
 // Restart restarts an agent.
 func (s *agentService) Restart(ctx context.Context, agentID string) error {
 	resp, err := s.c.post(ctx, s.agentPath(agentID)+"/restart", nil, nil)
+	if err != nil {
+		return err
+	}
+	return apiclient.CheckResponse(resp)
+}
+
+// ResetAuth injects a fresh token into a running agent without restarting.
+func (s *agentService) ResetAuth(ctx context.Context, agentID string) error {
+	resp, err := s.c.post(ctx, s.agentPath(agentID)+"/reset-auth", nil, nil)
 	if err != nil {
 		return err
 	}

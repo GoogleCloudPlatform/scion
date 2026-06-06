@@ -756,7 +756,7 @@ export class ScionPageAgentDetail extends LitElement {
   }
 
   private async handleAction(
-    action: 'start' | 'stop' | 'suspend' | 'resume' | 'delete',
+    action: 'start' | 'stop' | 'suspend' | 'resume' | 'delete' | 'reset-auth',
     event?: MouseEvent
   ): Promise<void> {
     if (!this.agent) return;
@@ -782,6 +782,28 @@ export class ScionPageAgentDetail extends LitElement {
         alert(err instanceof Error ? err.message : 'Failed to delete agent');
       } finally {
         this.actionLoading = { ...this.actionLoading, delete: false };
+      }
+      return;
+    }
+
+    if (action === 'reset-auth') {
+      this.actionLoading = { ...this.actionLoading, 'reset-auth': true };
+      try {
+        const response = await apiFetch(
+          `/api/v1/agents/${this.agentId}/reset-auth`,
+          { method: 'POST' }
+        );
+        if (!response.ok) {
+          throw new Error(
+            await extractApiError(response, 'Failed to reset auth')
+          );
+        }
+        this.backgroundRefresh();
+      } catch (err) {
+        console.error('Failed to reset auth:', err);
+        alert(err instanceof Error ? err.message : 'Failed to reset auth');
+      } finally {
+        this.actionLoading = { ...this.actionLoading, 'reset-auth': false };
       }
       return;
     }
@@ -1078,6 +1100,23 @@ export class ScionPageAgentDetail extends LitElement {
                     Configure
                   </sl-button>
                 </a>
+              `
+            : nothing}
+          ${isAgentRunning(agent)
+            ? html`
+                <sl-tooltip content="Inject a fresh auth token without restarting">
+                  <sl-button
+                    variant="default"
+                    size="small"
+                    outline
+                    ?loading=${this.actionLoading['reset-auth']}
+                    ?disabled=${this.actionLoading['reset-auth']}
+                    @click=${() => this.handleAction('reset-auth')}
+                  >
+                    <sl-icon slot="prefix" name="key"></sl-icon>
+                    Reset Auth
+                  </sl-button>
+                </sl-tooltip>
               `
             : nothing}
           ${can(agent._capabilities, 'delete')

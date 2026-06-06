@@ -126,6 +126,14 @@ export class ScionPageAdminMaintenance extends LitElement {
   @state()
   private viewingRun: MaintenanceRun | null = null;
 
+  /** Whether the bulk reset-auth request is in-flight. */
+  @state()
+  private resetAuthAllLoading = false;
+
+  /** Result of the last bulk reset-auth request. */
+  @state()
+  private resetAuthAllResult: { succeeded: { id: string; name: string }[]; failed: { id: string; name: string; error: string }[]; total: number } | null = null;
+
   /** Update check state for rebuild-server. */
   @state()
   private updateCheckLoading = false;
@@ -946,9 +954,82 @@ export class ScionPageAdminMaintenance extends LitElement {
   private renderContent() {
     return html`
       ${this.renderMaintenanceMode()}
+      ${this.renderQuickActions()}
       ${this.renderMigrations()}
       ${this.renderOperations()}
     `;
+  }
+
+  private renderQuickActions() {
+    return html`
+      <div class="section">
+        <h2 class="section-title">Quick Actions</h2>
+        <p class="section-description">
+          One-off administrative actions across all agents.
+        </p>
+        <div class="card-list">
+          <div class="card">
+            <div class="card-header">
+              <sl-icon name="key" class="pending"></sl-icon>
+              <span class="card-title">Reset Auth &mdash; All Running Agents</span>
+              ${this.resetAuthAllLoading
+                ? html`<sl-button size="small" disabled loading>Running...</sl-button>`
+                : html`
+                    <sl-button
+                      variant="warning"
+                      size="small"
+                      @click=${() => this.handleResetAuthAll()}
+                    >
+                      <sl-icon slot="prefix" name="key"></sl-icon>
+                      Reset Auth
+                    </sl-button>
+                  `}
+            </div>
+            <div class="card-description">
+              Inject a fresh auth token into every running agent without restarting them.
+              The token refresh loop in each agent will pick up the new credentials automatically.
+            </div>
+            ${this.resetAuthAllResult
+              ? html`
+                  <div class="card-meta">
+                    <span>
+                      Total: ${this.resetAuthAllResult.total} &middot;
+                      Succeeded: ${this.resetAuthAllResult.succeeded?.length ?? 0} &middot;
+                      Failed: ${this.resetAuthAllResult.failed?.length ?? 0}
+                    </span>
+                  </div>
+                  ${(this.resetAuthAllResult.failed?.length ?? 0) > 0
+                    ? html`
+                        <div class="result-log result-error">${this.resetAuthAllResult.failed
+                            .map((f) => `${f.name || f.id}: ${f.error}`)
+                            .join('\n')}</div>
+                      `
+                    : nothing}
+                `
+              : nothing}
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  private async handleResetAuthAll() {
+    this.resetAuthAllLoading = true;
+    this.resetAuthAllResult = null;
+    try {
+      const response = await apiFetch('/api/v1/admin/agents/reset-auth-all', {
+        method: 'POST',
+      });
+      if (!response.ok) {
+        const errMsg = await extractApiError(response, `HTTP ${response.status}`);
+        throw new Error(errMsg);
+      }
+      this.resetAuthAllResult = await response.json();
+    } catch (err) {
+      alert(err instanceof Error ? err.message : 'Failed to reset auth for all agents');
+    } finally {
+      this.resetAuthAllLoading = false;
+    }
   }
 
   private renderMaintenanceMode() {

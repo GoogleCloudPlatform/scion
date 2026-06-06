@@ -29,7 +29,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
-	"github.com/GoogleCloudPlatform/scion/pkg/store/sqlite"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -75,6 +74,9 @@ func (d *recordingDispatcher) DispatchAgentStart(_ context.Context, _ *store.Age
 }
 func (d *recordingDispatcher) DispatchAgentStop(_ context.Context, _ *store.Agent) error { return nil }
 func (d *recordingDispatcher) DispatchAgentRestart(_ context.Context, _ *store.Agent) error {
+	return nil
+}
+func (d *recordingDispatcher) DispatchAgentResetAuth(_ context.Context, _ *store.Agent) error {
 	return nil
 }
 func (d *recordingDispatcher) DispatchAgentDelete(_ context.Context, _ *store.Agent, _, _, _ bool, _ time.Time) error {
@@ -149,7 +151,7 @@ type notificationTestEnv struct {
 func setupNotificationTest(t *testing.T) *notificationTestEnv {
 	t.Helper()
 
-	s, err := sqlite.New(":memory:")
+	s, err := newTestStore(":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
@@ -172,7 +174,7 @@ func setupNotificationTest(t *testing.T) *notificationTestEnv {
 	require.NoError(t, s.CreateProject(ctx, project))
 
 	broker := &store.RuntimeBroker{
-		ID:     "broker-1",
+		ID:     tid("broker-1"),
 		Name:   "Test Broker",
 		Slug:   "test-broker",
 		Status: store.BrokerStatusOnline,
@@ -186,7 +188,7 @@ func setupNotificationTest(t *testing.T) *notificationTestEnv {
 		Template:        "claude",
 		ProjectID:       project.ID,
 		Phase:           string(state.PhaseRunning),
-		RuntimeBrokerID: "broker-1",
+		RuntimeBrokerID: tid("broker-1"),
 		Visibility:      store.VisibilityPrivate,
 	}
 	require.NoError(t, s.CreateAgent(ctx, watched))
@@ -198,7 +200,7 @@ func setupNotificationTest(t *testing.T) *notificationTestEnv {
 		Template:        "claude",
 		ProjectID:       project.ID,
 		Phase:           string(state.PhaseRunning),
-		RuntimeBrokerID: "broker-1",
+		RuntimeBrokerID: tid("broker-1"),
 		Visibility:      store.VisibilityPrivate,
 	}
 	require.NoError(t, s.CreateAgent(ctx, subscriber))
@@ -1238,7 +1240,7 @@ func TestUpdateNotificationSubscriptionTriggers_NotFound(t *testing.T) {
 	env := setupNotificationTest(t)
 	ctx := context.Background()
 
-	err := env.store.UpdateNotificationSubscriptionTriggers(ctx, "nonexistent-id", []string{"COMPLETED"})
+	err := env.store.UpdateNotificationSubscriptionTriggers(ctx, tid("nonexistent-id"), []string{"COMPLETED"})
 	assert.ErrorIs(t, err, store.ErrNotFound)
 }
 

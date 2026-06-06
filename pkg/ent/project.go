@@ -25,10 +25,14 @@ type Project struct {
 	Slug string `json:"slug,omitempty"`
 	// GitRemote holds the value of the "git_remote" field.
 	GitRemote *string `json:"git_remote,omitempty"`
+	// DefaultRuntimeBrokerID holds the value of the "default_runtime_broker_id" field.
+	DefaultRuntimeBrokerID *string `json:"default_runtime_broker_id,omitempty"`
 	// Labels holds the value of the "labels" field.
 	Labels map[string]string `json:"labels,omitempty"`
 	// Annotations holds the value of the "annotations" field.
 	Annotations map[string]string `json:"annotations,omitempty"`
+	// SharedDirs holds the value of the "shared_dirs" field.
+	SharedDirs string `json:"shared_dirs,omitempty"`
 	// Created holds the value of the "created" field.
 	Created time.Time `json:"created,omitempty"`
 	// Updated holds the value of the "updated" field.
@@ -39,6 +43,14 @@ type Project struct {
 	OwnerID string `json:"owner_id,omitempty"`
 	// Visibility holds the value of the "visibility" field.
 	Visibility string `json:"visibility,omitempty"`
+	// GithubInstallationID holds the value of the "github_installation_id" field.
+	GithubInstallationID *int64 `json:"github_installation_id,omitempty"`
+	// GithubPermissions holds the value of the "github_permissions" field.
+	GithubPermissions string `json:"github_permissions,omitempty"`
+	// GithubAppStatus holds the value of the "github_app_status" field.
+	GithubAppStatus string `json:"github_app_status,omitempty"`
+	// GitIdentity holds the value of the "git_identity" field.
+	GitIdentity string `json:"git_identity,omitempty"`
 	// Edges holds the relations/edges for other nodes in the graph.
 	// The values are being populated by the ProjectQuery when eager-loading is set.
 	Edges        ProjectEdges `json:"edges"`
@@ -70,7 +82,9 @@ func (*Project) scanValues(columns []string) ([]any, error) {
 		switch columns[i] {
 		case project.FieldLabels, project.FieldAnnotations:
 			values[i] = new([]byte)
-		case project.FieldName, project.FieldSlug, project.FieldGitRemote, project.FieldCreatedBy, project.FieldOwnerID, project.FieldVisibility:
+		case project.FieldGithubInstallationID:
+			values[i] = new(sql.NullInt64)
+		case project.FieldName, project.FieldSlug, project.FieldGitRemote, project.FieldDefaultRuntimeBrokerID, project.FieldSharedDirs, project.FieldCreatedBy, project.FieldOwnerID, project.FieldVisibility, project.FieldGithubPermissions, project.FieldGithubAppStatus, project.FieldGitIdentity:
 			values[i] = new(sql.NullString)
 		case project.FieldCreated, project.FieldUpdated:
 			values[i] = new(sql.NullTime)
@@ -116,6 +130,13 @@ func (_m *Project) assignValues(columns []string, values []any) error {
 				_m.GitRemote = new(string)
 				*_m.GitRemote = value.String
 			}
+		case project.FieldDefaultRuntimeBrokerID:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field default_runtime_broker_id", values[i])
+			} else if value.Valid {
+				_m.DefaultRuntimeBrokerID = new(string)
+				*_m.DefaultRuntimeBrokerID = value.String
+			}
 		case project.FieldLabels:
 			if value, ok := values[i].(*[]byte); !ok {
 				return fmt.Errorf("unexpected type %T for field labels", values[i])
@@ -131,6 +152,12 @@ func (_m *Project) assignValues(columns []string, values []any) error {
 				if err := json.Unmarshal(*value, &_m.Annotations); err != nil {
 					return fmt.Errorf("unmarshal field annotations: %w", err)
 				}
+			}
+		case project.FieldSharedDirs:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field shared_dirs", values[i])
+			} else if value.Valid {
+				_m.SharedDirs = value.String
 			}
 		case project.FieldCreated:
 			if value, ok := values[i].(*sql.NullTime); !ok {
@@ -161,6 +188,31 @@ func (_m *Project) assignValues(columns []string, values []any) error {
 				return fmt.Errorf("unexpected type %T for field visibility", values[i])
 			} else if value.Valid {
 				_m.Visibility = value.String
+			}
+		case project.FieldGithubInstallationID:
+			if value, ok := values[i].(*sql.NullInt64); !ok {
+				return fmt.Errorf("unexpected type %T for field github_installation_id", values[i])
+			} else if value.Valid {
+				_m.GithubInstallationID = new(int64)
+				*_m.GithubInstallationID = value.Int64
+			}
+		case project.FieldGithubPermissions:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field github_permissions", values[i])
+			} else if value.Valid {
+				_m.GithubPermissions = value.String
+			}
+		case project.FieldGithubAppStatus:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field github_app_status", values[i])
+			} else if value.Valid {
+				_m.GithubAppStatus = value.String
+			}
+		case project.FieldGitIdentity:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field git_identity", values[i])
+			} else if value.Valid {
+				_m.GitIdentity = value.String
 			}
 		default:
 			_m.selectValues.Set(columns[i], values[i])
@@ -214,11 +266,19 @@ func (_m *Project) String() string {
 		builder.WriteString(*v)
 	}
 	builder.WriteString(", ")
+	if v := _m.DefaultRuntimeBrokerID; v != nil {
+		builder.WriteString("default_runtime_broker_id=")
+		builder.WriteString(*v)
+	}
+	builder.WriteString(", ")
 	builder.WriteString("labels=")
 	builder.WriteString(fmt.Sprintf("%v", _m.Labels))
 	builder.WriteString(", ")
 	builder.WriteString("annotations=")
 	builder.WriteString(fmt.Sprintf("%v", _m.Annotations))
+	builder.WriteString(", ")
+	builder.WriteString("shared_dirs=")
+	builder.WriteString(_m.SharedDirs)
 	builder.WriteString(", ")
 	builder.WriteString("created=")
 	builder.WriteString(_m.Created.Format(time.ANSIC))
@@ -234,6 +294,20 @@ func (_m *Project) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("visibility=")
 	builder.WriteString(_m.Visibility)
+	builder.WriteString(", ")
+	if v := _m.GithubInstallationID; v != nil {
+		builder.WriteString("github_installation_id=")
+		builder.WriteString(fmt.Sprintf("%v", *v))
+	}
+	builder.WriteString(", ")
+	builder.WriteString("github_permissions=")
+	builder.WriteString(_m.GithubPermissions)
+	builder.WriteString(", ")
+	builder.WriteString("github_app_status=")
+	builder.WriteString(_m.GithubAppStatus)
+	builder.WriteString(", ")
+	builder.WriteString("git_identity=")
+	builder.WriteString(_m.GitIdentity)
 	builder.WriteByte(')')
 	return builder.String()
 }

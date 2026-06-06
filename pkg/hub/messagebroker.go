@@ -17,6 +17,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -43,12 +44,13 @@ const brokerCallbackTimeout = 30 * time.Second
 //   - Manages subscriptions based on agent lifecycle events (created/deleted)
 //   - Handles broadcast fan-out from a single broker publish to individual agent deliveries
 type MessageBrokerProxy struct {
-	bus           eventbus.EventBus
-	store         store.Store
-	events        *ChannelEventPublisher
-	getDispatcher func() AgentDispatcher
-	log           *slog.Logger
-	messageLog    *slog.Logger
+	bus            eventbus.EventBus
+	store          store.Store
+	events         EventPublisher
+	getDispatcher  func() AgentDispatcher
+	signalDeferred func(ctx context.Context, brokerID, agentID string) // NOTIFY wakeup for deferred messages
+	log            *slog.Logger
+	messageLog     *slog.Logger
 
 	mu                  sync.Mutex
 	subscriptions       map[string][]eventbus.Subscription // projectID -> active subscriptions
@@ -63,7 +65,7 @@ type MessageBrokerProxy struct {
 func NewMessageBrokerProxy(
 	b eventbus.EventBus,
 	s store.Store,
-	events *ChannelEventPublisher,
+	events EventPublisher,
 	getDispatcher func() AgentDispatcher,
 	log *slog.Logger,
 ) *MessageBrokerProxy {
@@ -78,6 +80,12 @@ func NewMessageBrokerProxy(
 		subscribedTopics:    make(map[string]bool),
 		stopCh:              make(chan struct{}),
 	}
+}
+
+// SetSignalDeferred injects the callback used to emit a NOTIFY wakeup when a
+// message dispatch is deferred (broker not locally connected).
+func (p *MessageBrokerProxy) SetSignalDeferred(fn func(ctx context.Context, brokerID, agentID string)) {
+	p.signalDeferred = fn
 }
 
 // Start subscribes to agent lifecycle events and sets up broker subscriptions
@@ -243,7 +251,7 @@ func (p *MessageBrokerProxy) PublishUserMessage(ctx context.Context, projectID, 
 	return p.bus.Publish(ctx, topic, msg)
 }
 
-// PublishToGroup fans out a message to a parsed group of recipients, delegating
+// PublishToGroup fans out a message to a parsed set of recipients, delegating
 // to PublishMessage for agents and PublishUserMessage for users.
 func (p *MessageBrokerProxy) PublishToGroup(ctx context.Context, projectID string, recipients []messages.GroupRecipient, msg *messages.StructuredMessage) map[string]error {
 	errs := make(map[string]error, len(recipients))
@@ -442,8 +450,6 @@ func (p *MessageBrokerProxy) deliverToUser(ctx context.Context, projectID, topic
 		Urgent:      msg.Urgent,
 		Broadcasted: msg.Broadcasted,
 		AgentID:     agentID,
-		Channel:     msg.Channel,
-		ThreadID:    msg.ThreadID,
 		CreatedAt:   time.Now(),
 	}
 	if err := p.store.CreateMessage(ctx, storeMsg); err != nil {
@@ -507,13 +513,8 @@ func (p *MessageBrokerProxy) deliverToAgent(ctx context.Context, projectID, agen
 		return
 	}
 
-	if err := dispatcher.DispatchAgentMessage(ctx, agent, msg.Msg, msg.Urgent, msg); err != nil {
-		p.log.Error("Failed to dispatch broker message to agent",
-			"agentSlug", agentSlug, "error", err)
-		return
-	}
-
-	// Persist to message store (write-through; non-fatal if store fails).
+	// Persist to message store first so the row is durable intent for
+	// cross-node dispatch (dispatch_state defaults to pending).
 	storeMsg := &store.Message{
 		ID:          api.NewUUID(),
 		ProjectID:   projectID,
@@ -526,12 +527,30 @@ func (p *MessageBrokerProxy) deliverToAgent(ctx context.Context, projectID, agen
 		Urgent:      msg.Urgent,
 		Broadcasted: msg.Broadcasted,
 		AgentID:     agent.ID,
-		Channel:     msg.Channel,
-		ThreadID:    msg.ThreadID,
 		CreatedAt:   time.Now(),
 	}
 	if err := p.store.CreateMessage(ctx, storeMsg); err != nil {
 		p.log.Error("Failed to persist broker message to store", "agentSlug", agentSlug, "error", err)
+		// Without a durable row, a deferred signal has nothing for the
+		// owning node to reconcile — abort dispatch entirely.
+		return
+	}
+
+	if err := dispatcher.DispatchAgentMessage(ctx, agent, msg.Msg, msg.Urgent, msg); errors.Is(err, ErrMessageDeferred) {
+		if p.signalDeferred != nil {
+			p.signalDeferred(ctx, agent.RuntimeBrokerID, agent.ID)
+		}
+		return
+	} else if err != nil {
+		p.log.Error("Failed to dispatch broker message to agent",
+			"agentSlug", agentSlug, "error", err)
+		return
+	}
+
+	// Mark the message as dispatched so reconcileBroker does not
+	// re-deliver it on the next broker reconnect.
+	if _, err := p.store.MarkMessageDispatched(ctx, storeMsg.ID); err != nil {
+		p.log.Error("Failed to mark broker message dispatched", "id", storeMsg.ID, "error", err)
 	}
 
 	// Log to dedicated message audit log
@@ -596,8 +615,8 @@ func (p *MessageBrokerProxy) fanOutGlobal(ctx context.Context, msg *messages.Str
 	}
 }
 
-// ListChannels returns the names of registered bus channels. Returns nil if
-// the underlying bus does not support channel listing.
+// ListChannels returns the named bus channels when using a FanOutEventBus,
+// or nil for single-bus configurations. Used by the message-channels API.
 func (p *MessageBrokerProxy) ListChannels() []eventbus.BusChannel {
 	if fb, ok := p.bus.(*eventbus.FanOutEventBus); ok {
 		return fb.BusChannels()

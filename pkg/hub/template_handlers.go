@@ -405,12 +405,6 @@ func (s *Server) updateTemplateV2(w http.ResponseWriter, r *http.Request, id str
 		return
 	}
 
-	// Check if template is locked
-	if existing.Locked {
-		ValidationError(w, "template is locked and cannot be modified", nil)
-		return
-	}
-
 	var template store.Template
 	if err := readJSON(r, &template); err != nil {
 		BadRequest(w, "Invalid request body: "+err.Error())
@@ -421,8 +415,6 @@ func (s *Server) updateTemplateV2(w http.ResponseWriter, r *http.Request, id str
 	template.ID = existing.ID
 	template.Created = existing.Created
 	template.CreatedBy = existing.CreatedBy
-	template.Locked = existing.Locked
-
 	if template.Slug == "" {
 		template.Slug = api.Slugify(template.Name)
 	}
@@ -442,12 +434,6 @@ func (s *Server) patchTemplateV2(w http.ResponseWriter, r *http.Request, id stri
 	existing, err := s.store.GetTemplate(ctx, id)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
-		return
-	}
-
-	// Check if template is locked
-	if existing.Locked {
-		ValidationError(w, "template is locked and cannot be modified", nil)
 		return
 	}
 
@@ -498,7 +484,6 @@ func (s *Server) deleteTemplateV2(w http.ResponseWriter, r *http.Request, id str
 	query := r.URL.Query()
 
 	deleteFiles := query.Get("deleteFiles") == "true"
-	force := query.Get("force") == "true"
 
 	existing, err := s.store.GetTemplate(ctx, id)
 	if err != nil {
@@ -506,10 +491,40 @@ func (s *Server) deleteTemplateV2(w http.ResponseWriter, r *http.Request, id str
 		return
 	}
 
-	// Check if template is locked
-	if existing.Locked && !force {
-		ValidationError(w, "template is locked; use force=true to delete", nil)
-		return
+	// Authorize: check source scope for ActionDelete
+	if existing.Scope == store.TemplateScopeGlobal {
+		userIdent := GetUserIdentityFromContext(ctx)
+		if userIdent == nil {
+			writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required", nil)
+			return
+		}
+		decision := s.authzService.CheckAccess(ctx, userIdent, Resource{Type: "template"}, ActionDelete)
+		if !decision.Allowed {
+			writeError(w, http.StatusForbidden, ErrCodeForbidden, "You do not have permission to delete global resources", nil)
+			return
+		}
+	} else if existing.Scope == store.TemplateScopeProject {
+		if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
+			if !agentIdent.HasScope(ScopeAgentCreate) {
+				writeError(w, http.StatusForbidden, ErrCodeForbidden, "Missing required scope", nil)
+				return
+			}
+			if existing.ScopeID != agentIdent.ProjectID() {
+				writeError(w, http.StatusForbidden, ErrCodeForbidden, "Agents can only manage resources within their own project", nil)
+				return
+			}
+		} else if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
+			decision := s.authzService.CheckAccess(ctx, userIdent, Resource{
+				Type: "template", ParentType: "project", ParentID: existing.ScopeID,
+			}, ActionDelete)
+			if !decision.Allowed {
+				writeError(w, http.StatusForbidden, ErrCodeForbidden, "You do not have permission to delete resources in this project", nil)
+				return
+			}
+		} else {
+			writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required", nil)
+			return
+		}
 	}
 
 	// If deleteFiles is true and we have storage, delete the files
@@ -721,6 +736,46 @@ func (s *Server) handleTemplateClone(w http.ResponseWriter, r *http.Request, id 
 		scopeID = req.ProjectID
 	}
 
+	// Authorize: check destination scope for ActionCreate
+	destScope := req.Scope
+	if destScope == "" {
+		destScope = store.TemplateScopeProject
+	}
+	if destScope == store.TemplateScopeGlobal {
+		userIdent := GetUserIdentityFromContext(ctx)
+		if userIdent == nil {
+			writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required", nil)
+			return
+		}
+		decision := s.authzService.CheckAccess(ctx, userIdent, Resource{Type: "template"}, ActionCreate)
+		if !decision.Allowed {
+			writeError(w, http.StatusForbidden, ErrCodeForbidden, "You do not have permission to create global resources", nil)
+			return
+		}
+	} else if destScope == store.TemplateScopeProject {
+		if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
+			if !agentIdent.HasScope(ScopeAgentCreate) {
+				writeError(w, http.StatusForbidden, ErrCodeForbidden, "Missing required scope", nil)
+				return
+			}
+			if scopeID != agentIdent.ProjectID() {
+				writeError(w, http.StatusForbidden, ErrCodeForbidden, "Agents can only manage resources within their own project", nil)
+				return
+			}
+		} else if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
+			decision := s.authzService.CheckAccess(ctx, userIdent, Resource{
+				Type: "template", ParentType: "project", ParentID: scopeID,
+			}, ActionCreate)
+			if !decision.Allowed {
+				writeError(w, http.StatusForbidden, ErrCodeForbidden, "You do not have permission to create resources in this project", nil)
+				return
+			}
+		} else {
+			writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required", nil)
+			return
+		}
+	}
+
 	// Create new template based on source
 	clone := &store.Template{
 		ID:           api.NewUUID(),
@@ -758,24 +813,28 @@ func (s *Server) handleTemplateClone(w http.ResponseWriter, r *http.Request, id 
 
 	// Copy files from source to clone location
 	if stor != nil && len(source.Files) > 0 && source.StoragePath != "" {
-		clonedFiles := make([]store.TemplateFile, 0, len(source.Files))
 		for _, file := range source.Files {
 			srcPath := source.StoragePath + "/" + file.Path
 			dstPath := storagePath + "/" + file.Path
-
-			_, err := stor.Copy(ctx, srcPath, dstPath)
-			if err != nil {
-				// Log but continue
-				continue
+			if _, err := stor.Copy(ctx, srcPath, dstPath); err != nil {
+				_ = stor.DeletePrefix(ctx, storagePath)
+				RuntimeError(w, "Failed to copy files: "+err.Error())
+				return
 			}
-			clonedFiles = append(clonedFiles, file)
 		}
-		clone.Files = clonedFiles
+		clone.Files = source.Files
 		clone.ContentHash = source.ContentHash
 		clone.Status = store.TemplateStatusActive
 	}
 
 	if err := s.store.CreateTemplate(ctx, clone); err != nil {
+		if stor != nil {
+			_ = stor.DeletePrefix(ctx, storagePath)
+		}
+		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+			writeError(w, http.StatusConflict, "conflict", "A resource with this slug already exists in the target scope. Choose a different name.", nil)
+			return
+		}
 		writeErrorFromErr(w, err, "")
 		return
 	}

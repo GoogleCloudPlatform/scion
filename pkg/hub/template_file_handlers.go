@@ -305,11 +305,6 @@ func (s *Server) handleTemplateFileWrite(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
-	if template.Locked {
-		Forbidden(w)
-		return
-	}
-
 	stor := s.GetStorage()
 	if stor == nil {
 		RuntimeError(w, "Storage not configured")
@@ -477,11 +472,6 @@ func (s *Server) handleTemplateFileUpload(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	if template.Locked {
-		Forbidden(w)
-		return
-	}
-
 	stor := s.GetStorage()
 	if stor == nil {
 		RuntimeError(w, "Storage not configured")
@@ -604,11 +594,6 @@ func (s *Server) handleTemplateFileDelete(w http.ResponseWriter, r *http.Request
 	template, err := s.store.GetTemplate(ctx, templateID)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
-		return
-	}
-
-	if template.Locked {
-		Forbidden(w)
 		return
 	}
 

@@ -277,9 +277,30 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 		}
 	}
 
-	// Pass host user UID/GID for container user synchronization
-	addEnv("SCION_HOST_UID", fmt.Sprintf("%d", os.Getuid()))
-	addEnv("SCION_HOST_GID", fmt.Sprintf("%d", os.Getgid()))
+	// Pass host user UID/GID for container user synchronization.
+	// N1-5: branch on workspace backend — NFS needs a stable, node-independent
+	// UID/GID (default 1000:1000) so files written by agents on different nodes
+	// have consistent ownership on the shared filesystem. The local backend
+	// continues to use the broker's host UID/GID (today's behavior, unchanged).
+	uid, gid := os.Getuid(), os.Getgid()
+	if config.WorkspaceBackendName == "nfs" {
+		uid, gid = config.NFSUID, config.NFSGID
+		if uid == 0 {
+			uid = 1000 // default stable NFS UID
+		}
+		if gid == 0 {
+			gid = 1000 // default stable NFS GID
+		}
+	}
+	addEnv("SCION_HOST_UID", fmt.Sprintf("%d", uid))
+	addEnv("SCION_HOST_GID", fmt.Sprintf("%d", gid))
+
+	// Expose the workspace backend to the container so sciontool init can
+	// skip the per-start recursive chown when backend=nfs (slow/racy over
+	// the network; ownership is set once by operator + provisioner).
+	if config.WorkspaceBackendName != "" {
+		addEnv("SCION_WORKSPACE_BACKEND", config.WorkspaceBackendName)
+	}
 
 	// Phase 3 & 5: Project identity injection
 	addEnv("SCION_PROJECT", config.Project)

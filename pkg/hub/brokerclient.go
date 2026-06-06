@@ -58,6 +58,11 @@ func (c *AuthenticatedBrokerClient) RestartAgent(ctx context.Context, brokerID, 
 	return c.transport.RestartAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, resolvedEnv)
 }
 
+// ResetAuthAgent injects a fresh auth token into a running agent with HMAC authentication.
+func (c *AuthenticatedBrokerClient) ResetAuthAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID, token string) error {
+	return c.transport.ResetAuthAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, token)
+}
+
 // DeleteAgent deletes an agent from a remote runtime broker with HMAC authentication.
 func (c *AuthenticatedBrokerClient) DeleteAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, deleteFiles, removeBranch, softDelete bool, deletedAt time.Time) error {
 	return c.transport.DeleteAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, deleteFiles, removeBranch, softDelete, deletedAt)
@@ -89,8 +94,8 @@ func (c *AuthenticatedBrokerClient) ExecAgent(ctx context.Context, brokerID, bro
 }
 
 // CleanupProject asks a broker to remove its local hub-managed project directory with HMAC authentication.
-func (c *AuthenticatedBrokerClient) CleanupProject(ctx context.Context, brokerID, brokerEndpoint, projectSlug string) error {
-	return c.transport.CleanupProject(ctx, brokerID, brokerEndpoint, projectSlug)
+func (c *AuthenticatedBrokerClient) CleanupProject(ctx context.Context, brokerID, brokerEndpoint, projectSlug, projectID string) error {
+	return c.transport.CleanupProject(ctx, brokerID, brokerEndpoint, projectSlug, projectID)
 }
 
 // FinalizeEnv sends gathered env vars to a broker to complete agent creation.

@@ -49,6 +49,9 @@ type Store interface {
 	// RuntimeBroker operations
 	RuntimeBrokerStore
 
+	// BrokerDispatch operations (multi-node command dispatch)
+	BrokerDispatchStore
+
 	// Template operations
 	TemplateStore
 
@@ -302,6 +305,36 @@ type RuntimeBrokerStore interface {
 
 	// UpdateRuntimeBrokerHeartbeat updates the last heartbeat and status.
 	UpdateRuntimeBrokerHeartbeat(ctx context.Context, id string, status string) error
+
+	// ClaimRuntimeBrokerConnection records this hub instance as the owner of the
+	// broker's live control-channel socket. The newest connection wins
+	// (unconditional claim): it sets connected_hub_id/connected_session_id/
+	// connected_at and, in the same write, bumps status to online and refreshes
+	// last_heartbeat.
+	ClaimRuntimeBrokerConnection(ctx context.Context, brokerID, hubInstanceID, sessionID string) error
+
+	// ReleaseRuntimeBrokerConnection clears the broker's affinity ONLY IF it still
+	// names (hubInstanceID, sessionID) — a compare-and-clear. It returns
+	// cleared=true when this caller owned the affinity and it was cleared; it
+	// returns cleared=false (a no-op) when affinity has already moved to another
+	// hub/session, in which case the caller MUST NOT stamp the broker offline.
+	// It does not change status (the caller decides offline based on cleared).
+	ReleaseRuntimeBrokerConnection(ctx context.Context, brokerID, hubInstanceID, sessionID string) (cleared bool, err error)
+
+	// ReleaseAndMarkBrokerOffline atomically clears broker affinity AND stamps
+	// status=offline, ONLY IF affinity still names (hubInstanceID, sessionID).
+	// This prevents a stale disconnect callback from clobbering a concurrent
+	// reconnect's online status — the session check and the offline stamp happen
+	// in the same CAS write with no TOCTOU window.
+	// Returns cleared=true when affinity matched and the broker was stamped offline.
+	// Returns cleared=false (no-op) when affinity has already moved.
+	ReleaseAndMarkBrokerOffline(ctx context.Context, brokerID, hubInstanceID, sessionID string) (cleared bool, err error)
+
+	// ReapStaleBrokerAffinity clears connected_hub_id/connected_session_id/
+	// connected_at for brokers whose last_heartbeat is older than staleBefore
+	// and whose connected_hub_id is not NULL (i.e. they still claim affinity).
+	// Returns the number of rows cleared. Does not change broker status.
+	ReapStaleBrokerAffinity(ctx context.Context, staleBefore time.Time) (cleared int, err error)
 }
 
 // RuntimeBrokerFilter defines criteria for filtering runtime brokers.
@@ -310,6 +343,49 @@ type RuntimeBrokerFilter struct {
 	ProjectID   string
 	Name        string // Exact match on broker name (case-insensitive)
 	AutoProvide *bool  // Filter by auto-provide flag (nil = no filter)
+}
+
+// BrokerDispatchStore defines persistence for the durable broker-dispatch intent
+// table and the message dispatch-state CAS helpers (multi-node command dispatch).
+type BrokerDispatchStore interface {
+	// InsertBrokerDispatch persists a new dispatch intent (state defaults pending).
+	InsertBrokerDispatch(ctx context.Context, d *BrokerDispatch) error
+
+	// ClaimBrokerDispatch CAS-transitions a dispatch pending->in_progress for the
+	// given hub instance. Returns claimed=false if it was not pending (so exactly
+	// one node executes a given intent).
+	ClaimBrokerDispatch(ctx context.Context, id, hubInstanceID string) (claimed bool, err error)
+
+	// CompleteBrokerDispatch marks a dispatch done with an optional result JSON.
+	CompleteBrokerDispatch(ctx context.Context, id, result string) error
+
+	// FailBrokerDispatch marks a dispatch failed, records the error, bumps attempts.
+	FailBrokerDispatch(ctx context.Context, id, errMsg string) error
+
+	// GetBrokerDispatch returns a single dispatch row by ID (used by the
+	// originator to read the result after the owner completes it).
+	GetBrokerDispatch(ctx context.Context, id string) (*BrokerDispatch, error)
+
+	// ListPendingDispatch returns pending intents for a broker (drain query).
+	ListPendingDispatch(ctx context.Context, brokerID string) ([]BrokerDispatch, error)
+
+	// MarkMessageDispatched CAS-flips a message pending->dispatched (dedupes drains).
+	MarkMessageDispatched(ctx context.Context, id string) (dispatched bool, err error)
+
+	// ListPendingMessages returns pending messages whose target agent is on the broker.
+	ListPendingMessages(ctx context.Context, brokerID string) ([]Message, error)
+
+	// ReapStuckDispatch re-drives or fails in_progress dispatches that have gone
+	// stale (updated_at < stuckBefore). Dispatches with attempts < maxAttempts
+	// are reset to pending (re-driven); those at or above the limit are failed.
+	// Returns counts of re-driven and failed rows.
+	ReapStuckDispatch(ctx context.Context, stuckBefore time.Time, maxAttempts int) (requeued, failed int, err error)
+
+	// CountStuckPendingMessages returns the number of messages still in
+	// dispatch_state='pending' whose created timestamp is before the given
+	// cutoff. Used by the stuck-message sweep (B5-2) to surface messages that
+	// have not been dispatched within the expected window.
+	CountStuckPendingMessages(ctx context.Context, before time.Time) (int, error)
 }
 
 // TemplateStore defines template persistence operations.

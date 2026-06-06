@@ -17,6 +17,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -33,8 +34,9 @@ import (
 // messages to subscriber agents.
 type NotificationDispatcher struct {
 	store           store.Store
-	events          *ChannelEventPublisher
-	getDispatcher   func() AgentDispatcher // lazy getter; dispatcher may be set after startup
+	events          EventPublisher
+	getDispatcher   func() AgentDispatcher                              // lazy getter; dispatcher may be set after startup
+	signalDeferred  func(ctx context.Context, brokerID, agentID string) // NOTIFY wakeup for deferred messages
 	log             *slog.Logger
 	messageLog      *slog.Logger        // dedicated message audit logger (nil = disabled)
 	channelRegistry *ChannelRegistry    // external notification channels (nil = disabled)
@@ -48,7 +50,7 @@ type NotificationDispatcher struct {
 // The getDispatcher function is called at dispatch time to resolve the current
 // AgentDispatcher, allowing the dispatcher to be set up after the notification
 // system starts (e.g. in combined hub+web mode).
-func NewNotificationDispatcher(s store.Store, events *ChannelEventPublisher, getDispatcher func() AgentDispatcher, log *slog.Logger) *NotificationDispatcher {
+func NewNotificationDispatcher(s store.Store, events EventPublisher, getDispatcher func() AgentDispatcher, log *slog.Logger) *NotificationDispatcher {
 	return &NotificationDispatcher{
 		store:         s,
 		events:        events,
@@ -358,7 +360,13 @@ func (nd *NotificationDispatcher) dispatchToAgent(ctx context.Context, sub *stor
 	structuredMsg.RecipientID = subscriber.ID
 	structuredMsg.Status = strings.ToUpper(notif.Status)
 
-	if err := dispatcher.DispatchAgentMessage(ctx, subscriber, notif.Message, false, structuredMsg); err != nil {
+	if err := dispatcher.DispatchAgentMessage(ctx, subscriber, notif.Message, false, structuredMsg); errors.Is(err, ErrMessageDeferred) {
+		nd.log.Info("Notification deferred for cross-node delivery",
+			"subscriberID", sub.SubscriberID, "brokerID", subscriber.RuntimeBrokerID)
+		if nd.signalDeferred != nil {
+			nd.signalDeferred(ctx, subscriber.RuntimeBrokerID, subscriber.ID)
+		}
+	} else if err != nil {
 		nd.log.Error("Failed to dispatch notification to agent",
 			"subscriberID", sub.SubscriberID, "error", err)
 	} else {

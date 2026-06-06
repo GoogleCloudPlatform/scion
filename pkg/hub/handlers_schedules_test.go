@@ -37,7 +37,7 @@ func setupScheduleTest(t *testing.T) (*Server, store.Store, string) {
 	srv.scheduler.RegisterEventHandler("message", srv.messageEventHandler())
 
 	project := &store.Project{
-		ID:   "project-sched-recurring",
+		ID:   tid("project-sched-recurring"),
 		Name: "Schedule Test Project",
 		Slug: "schedule-test-project",
 	}
@@ -251,7 +251,7 @@ func TestSchedule_History(t *testing.T) {
 	// Create some events linked to this schedule
 	for i := 0; i < 3; i++ {
 		evt := &store.ScheduledEvent{
-			ID:         "hist-evt-" + string(rune('a'+i)),
+			ID:         tid("hist-evt-" + string(rune('a'+i))),
 			ProjectID:  projectID,
 			EventType:  "message",
 			FireAt:     created.CreatedAt,
@@ -276,7 +276,7 @@ func TestSchedule_ProjectIsolation(t *testing.T) {
 
 	// Create another project
 	otherProject := &store.Project{
-		ID:   "project-other-sched",
+		ID:   tid("project-other-sched"),
 		Name: "Other Project",
 		Slug: "other-project-sched",
 	}

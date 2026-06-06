@@ -21,12 +21,11 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
-	"github.com/GoogleCloudPlatform/scion/pkg/store/sqlite"
 )
 
 func createTestStore(t *testing.T) store.SecretStore {
 	t.Helper()
-	s, err := sqlite.New(":memory:")
+	s, err := newTestStore(":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
@@ -173,7 +172,7 @@ func TestLocalBackend_Get(t *testing.T) {
 	ctx := context.Background()
 
 	seedSecret(t, s, &store.Secret{
-		ID:             "s1",
+		ID:             tid("s1"),
 		Key:            "API_KEY",
 		EncryptedValue: "sk-test-123",
 		SecretType:     store.SecretTypeEnvironment,
@@ -200,7 +199,7 @@ func TestLocalBackend_Delete(t *testing.T) {
 	ctx := context.Background()
 
 	seedSecret(t, s, &store.Secret{
-		ID:             "s1",
+		ID:             tid("s1"),
 		Key:            "TO_DELETE",
 		EncryptedValue: "value",
 		SecretType:     store.SecretTypeEnvironment,
@@ -235,7 +234,7 @@ func TestLocalBackend_List(t *testing.T) {
 
 	for i, name := range []string{"A_KEY", "B_KEY", "C_KEY"} {
 		seedSecret(t, s, &store.Secret{
-			ID:             "s" + string(rune('1'+i)),
+			ID:             tid("s" + string(rune('1'+i))),
 			Key:            name,
 			EncryptedValue: "val-" + name,
 			SecretType:     store.SecretTypeEnvironment,
@@ -259,7 +258,7 @@ func TestLocalBackend_ListFilterByType(t *testing.T) {
 	ctx := context.Background()
 
 	seedSecret(t, s, &store.Secret{
-		ID:             "s1",
+		ID:             tid("s1"),
 		Key:            "ENV_KEY",
 		EncryptedValue: "val",
 		SecretType:     store.SecretTypeEnvironment,
@@ -268,7 +267,7 @@ func TestLocalBackend_ListFilterByType(t *testing.T) {
 		ScopeID:        "user-1",
 	})
 	seedSecret(t, s, &store.Secret{
-		ID:             "s2",
+		ID:             tid("s2"),
 		Key:            "FILE_KEY",
 		EncryptedValue: "data",
 		SecretType:     store.SecretTypeFile,
@@ -294,7 +293,7 @@ func TestLocalBackend_GetMeta(t *testing.T) {
 	ctx := context.Background()
 
 	seedSecret(t, s, &store.Secret{
-		ID:             "s1",
+		ID:             tid("s1"),
 		Key:            "META_KEY",
 		EncryptedValue: "secret-value",
 		SecretType:     store.SecretTypeVariable,
@@ -321,7 +320,7 @@ func TestLocalBackend_Resolve(t *testing.T) {
 
 	// User-level secrets
 	seedSecret(t, s, &store.Secret{
-		ID:             "s1",
+		ID:             tid("s1"),
 		Key:            "API_KEY",
 		EncryptedValue: "user-api-key",
 		SecretType:     store.SecretTypeEnvironment,
@@ -330,7 +329,7 @@ func TestLocalBackend_Resolve(t *testing.T) {
 		ScopeID:        "user-1",
 	})
 	seedSecret(t, s, &store.Secret{
-		ID:             "s2",
+		ID:             tid("s2"),
 		Key:            "TLS_CERT",
 		EncryptedValue: "cert-data",
 		SecretType:     store.SecretTypeFile,
@@ -341,7 +340,7 @@ func TestLocalBackend_Resolve(t *testing.T) {
 
 	// Project-level override
 	seedSecret(t, s, &store.Secret{
-		ID:             "s3",
+		ID:             tid("s3"),
 		Key:            "API_KEY",
 		EncryptedValue: "grove-api-key",
 		SecretType:     store.SecretTypeEnvironment,
@@ -350,7 +349,7 @@ func TestLocalBackend_Resolve(t *testing.T) {
 		ScopeID:        "grove-1",
 	})
 	seedSecret(t, s, &store.Secret{
-		ID:             "s4",
+		ID:             tid("s4"),
 		Key:            "DB_PASS",
 		EncryptedValue: "grove-db-pass",
 		SecretType:     store.SecretTypeEnvironment,
@@ -425,7 +424,7 @@ func TestLocalBackend_ResolveBrokerOverride(t *testing.T) {
 	ctx := context.Background()
 
 	seedSecret(t, s, &store.Secret{
-		ID:             "s1",
+		ID:             tid("s1"),
 		Key:            "API_KEY",
 		EncryptedValue: "user-key",
 		SecretType:     store.SecretTypeEnvironment,
@@ -434,7 +433,7 @@ func TestLocalBackend_ResolveBrokerOverride(t *testing.T) {
 		ScopeID:        "user-1",
 	})
 	seedSecret(t, s, &store.Secret{
-		ID:             "s2",
+		ID:             tid("s2"),
 		Key:            "API_KEY",
 		EncryptedValue: "broker-key",
 		SecretType:     store.SecretTypeEnvironment,
@@ -465,7 +464,7 @@ func TestLocalBackend_ResolveExcludesInternalSecrets(t *testing.T) {
 
 	// Seed an internal signing key at hub scope (simulates hub signing keys)
 	seedSecret(t, s, &store.Secret{
-		ID:             "signing-1",
+		ID:             tid("signing-1"),
 		Key:            "agent_signing_key",
 		EncryptedValue: "super-secret-key-material",
 		SecretType:     store.SecretTypeInternal,
@@ -476,7 +475,7 @@ func TestLocalBackend_ResolveExcludesInternalSecrets(t *testing.T) {
 
 	// Seed a normal hub-scoped environment secret
 	seedSecret(t, s, &store.Secret{
-		ID:             "hub-env-1",
+		ID:             tid("hub-env-1"),
 		Key:            "HUB_API_TOKEN",
 		EncryptedValue: "hub-token-value",
 		SecretType:     store.SecretTypeEnvironment,
@@ -487,7 +486,7 @@ func TestLocalBackend_ResolveExcludesInternalSecrets(t *testing.T) {
 
 	// Seed a user-scoped secret
 	seedSecret(t, s, &store.Secret{
-		ID:             "user-env-1",
+		ID:             tid("user-env-1"),
 		Key:            "USER_KEY",
 		EncryptedValue: "user-key-value",
 		SecretType:     store.SecretTypeEnvironment,
@@ -532,7 +531,7 @@ func TestLocalBackend_ResolveDuplicateTargetAcrossScopes(t *testing.T) {
 
 	// User-level file secret targeting /tmp/my-secret.json
 	seedSecret(t, s, &store.Secret{
-		ID:             "u1",
+		ID:             tid("u1"),
 		Key:            "my-svc-account",
 		EncryptedValue: "user-cert-data",
 		SecretType:     store.SecretTypeFile,
@@ -544,7 +543,7 @@ func TestLocalBackend_ResolveDuplicateTargetAcrossScopes(t *testing.T) {
 
 	// Project-level file secret targeting the SAME path
 	seedSecret(t, s, &store.Secret{
-		ID:             "g1",
+		ID:             tid("g1"),
 		Key:            "my-key",
 		EncryptedValue: "grove-cert-data",
 		SecretType:     store.SecretTypeFile,
@@ -585,7 +584,7 @@ func TestLocalBackend_ResolveDuplicateEnvTargetAcrossScopes(t *testing.T) {
 
 	// User-level env secret targeting FOO_VAR
 	seedSecret(t, s, &store.Secret{
-		ID:             "u1",
+		ID:             tid("u1"),
 		Key:            "user-foo",
 		EncryptedValue: "user-val",
 		SecretType:     store.SecretTypeEnvironment,
@@ -596,7 +595,7 @@ func TestLocalBackend_ResolveDuplicateEnvTargetAcrossScopes(t *testing.T) {
 
 	// Project-level env secret targeting the SAME env var
 	seedSecret(t, s, &store.Secret{
-		ID:             "g1",
+		ID:             tid("g1"),
 		Key:            "grove-foo",
 		EncryptedValue: "grove-val",
 		SecretType:     store.SecretTypeEnvironment,
@@ -675,7 +674,7 @@ func TestLocalBackend_ResolveProgeny_AllowProgenyGrantsAccess(t *testing.T) {
 
 	// User "alice" creates a secret with allowProgeny
 	seedSecret(t, s, &store.Secret{
-		ID:             "sec-prog-1",
+		ID:             tid("sec-prog-1"),
 		Key:            "ANTHROPIC_API_KEY",
 		EncryptedValue: "sk-ant-progeny",
 		SecretType:     store.SecretTypeEnvironment,
@@ -716,7 +715,7 @@ func TestLocalBackend_ResolveProgeny_DeepAncestry(t *testing.T) {
 	ctx := context.Background()
 
 	seedSecret(t, s, &store.Secret{
-		ID:             "sec-prog-deep",
+		ID:             tid("sec-prog-deep"),
 		Key:            "DEEP_KEY",
 		EncryptedValue: "deep-value",
 		SecretType:     store.SecretTypeEnvironment,
@@ -754,7 +753,7 @@ func TestLocalBackend_ResolveProgeny_ProjectOverridesProgeny(t *testing.T) {
 
 	// User-scoped progeny secret
 	seedSecret(t, s, &store.Secret{
-		ID:             "sec-prog-override-user",
+		ID:             tid("sec-prog-override-user"),
 		Key:            "API_KEY",
 		EncryptedValue: "user-progeny-value",
 		SecretType:     store.SecretTypeEnvironment,
@@ -767,7 +766,7 @@ func TestLocalBackend_ResolveProgeny_ProjectOverridesProgeny(t *testing.T) {
 
 	// Project-scoped secret with same key (higher precedence)
 	seedSecret(t, s, &store.Secret{
-		ID:             "sec-prog-override-grove",
+		ID:             tid("sec-prog-override-grove"),
 		Key:            "API_KEY",
 		EncryptedValue: "grove-value",
 		SecretType:     store.SecretTypeEnvironment,
@@ -812,7 +811,7 @@ func TestLocalBackend_ResolveProgeny_DeniedWhenFlagFalse(t *testing.T) {
 
 	// User-scoped secret WITHOUT allowProgeny
 	seedSecret(t, s, &store.Secret{
-		ID:             "sec-no-prog",
+		ID:             tid("sec-no-prog"),
 		Key:            "PRIVATE_KEY",
 		EncryptedValue: "private-value",
 		SecretType:     store.SecretTypeEnvironment,
@@ -848,7 +847,7 @@ func TestLocalBackend_ResolveProgeny_DeniedWhenAncestryMismatch(t *testing.T) {
 
 	// Alice's secret with allowProgeny
 	seedSecret(t, s, &store.Secret{
-		ID:             "sec-ancestry-miss",
+		ID:             tid("sec-ancestry-miss"),
 		Key:            "ALICE_SECRET",
 		EncryptedValue: "alice-value",
 		SecretType:     store.SecretTypeEnvironment,
@@ -885,7 +884,7 @@ func TestLocalBackend_ResolveProgeny_DeniedByPolicyCheck(t *testing.T) {
 	ctx := context.Background()
 
 	seedSecret(t, s, &store.Secret{
-		ID:             "sec-policy-deny",
+		ID:             tid("sec-policy-deny"),
 		Key:            "POLICY_KEY",
 		EncryptedValue: "policy-value",
 		SecretType:     store.SecretTypeEnvironment,
@@ -921,7 +920,7 @@ func TestLocalBackend_ResolveProgeny_NilAuthzCheckIncludesAll(t *testing.T) {
 	ctx := context.Background()
 
 	seedSecret(t, s, &store.Secret{
-		ID:             "sec-no-authz",
+		ID:             tid("sec-no-authz"),
 		Key:            "NO_AUTHZ_KEY",
 		EncryptedValue: "no-authz-value",
 		SecretType:     store.SecretTypeEnvironment,
@@ -960,7 +959,7 @@ func TestLocalBackend_ResolveProgeny_NilOptsNoProgeny(t *testing.T) {
 	ctx := context.Background()
 
 	seedSecret(t, s, &store.Secret{
-		ID:             "sec-nil-opts",
+		ID:             tid("sec-nil-opts"),
 		Key:            "NIL_OPTS_KEY",
 		EncryptedValue: "nil-opts-value",
 		SecretType:     store.SecretTypeEnvironment,

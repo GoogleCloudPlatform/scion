@@ -122,6 +122,61 @@ func (s *Scheduler) RegisterRecurring(name string, intervalMinutes int, fn func(
 	})
 }
 
+// RegisterRecurringSingleton registers a recurring handler that runs on AT MOST
+// ONE replica per tick, guarded by a cluster-wide advisory lock keyed by key.
+//
+// This is the singleton/leader primitive (P3-5) for cluster-wide-once work such
+// as the stale-agent sweep, stalled detection, purge, schedule evaluation, and
+// the GitHub App health check. In a single-replica or SQLite deployment the
+// lock is a no-op that always succeeds, so the handler runs exactly as before.
+//
+// If the store does not implement store.AdvisoryLocker, the handler runs
+// unguarded (correct for a single replica).
+func (s *Scheduler) RegisterRecurringSingleton(name string, intervalMinutes int, key store.AdvisoryLockKey, fn func(ctx context.Context)) {
+	s.RegisterRecurring(name, intervalMinutes, s.singletonGuard(name, key, fn))
+}
+
+// singletonGuard wraps fn so it only runs while this replica holds the named
+// advisory lock. The lock is released as soon as fn returns, so the next tick on
+// any replica is free to win it.
+//
+// A store that does not implement AdvisoryLocker falls open to running fn
+// unguarded — correct for a single-replica / SQLite deployment where there is no
+// other replica to collide with.
+//
+// A lock-acquisition error (e.g. a connection timeout to Postgres) does NOT fall
+// open: in a multi-replica deployment running unguarded would let two replicas
+// execute the same singleton work concurrently. Since we cannot prove we are
+// alone when the lock query itself failed, we SKIP this tick and let the next one
+// retry. Missing one tick of idempotent maintenance work is safer than running it
+// in duplicate.
+func (s *Scheduler) singletonGuard(name string, key store.AdvisoryLockKey, fn func(ctx context.Context)) func(ctx context.Context) {
+	return func(ctx context.Context) {
+		locker, ok := s.store.(store.AdvisoryLocker)
+		if !ok {
+			fn(ctx)
+			return
+		}
+		acquired, release, err := locker.TryAdvisoryLock(ctx, key)
+		if err != nil {
+			s.log.Warn("Scheduler: advisory lock acquisition failed; skipping tick to avoid running unguarded across replicas",
+				"name", name, "error", err)
+			return
+		}
+		if !acquired {
+			s.log.Debug("Scheduler: singleton handler held by another replica, skipping",
+				"name", name)
+			return
+		}
+		defer func() {
+			if rerr := release(); rerr != nil {
+				s.log.Warn("Scheduler: advisory unlock failed", "name", name, "error", rerr)
+			}
+		}()
+		fn(ctx)
+	}
+}
+
 // Start begins the root ticker loop and runs eligible handlers immediately
 // on startup (tick 0). The provided context is used as the parent for handler
 // invocations. Before starting the ticker, persisted one-shot timers are
@@ -296,6 +351,27 @@ func (s *Scheduler) fireEvent(ctx context.Context, evt store.ScheduledEvent, was
 	status := store.ScheduledEventFired
 	if wasExpired {
 		status = store.ScheduledEventExpired
+	}
+
+	// Multi-replica dedup (P3-5): several replicas may each recover the same
+	// pending event from the database on startup and arm a timer for it. Claim
+	// the event atomically (pending -> status) before running its side effect so
+	// exactly one replica delivers it. If the store supports claiming and we
+	// lose the race (already claimed/cancelled), skip silently. Backends without
+	// the capability fall through to the legacy run-then-mark behavior, which is
+	// correct for a single replica.
+	if claimer, ok := s.store.(store.ScheduledEventClaimer); ok {
+		claimed, err := claimer.ClaimScheduledEvent(ctx, evt.ID, status)
+		if err != nil {
+			s.log.Warn("Scheduler: failed to claim scheduled event; skipping to avoid duplicate",
+				"eventID", evt.ID, "type", evt.EventType, "error", err)
+			return
+		}
+		if !claimed {
+			s.log.Debug("Scheduler: scheduled event already claimed by another replica, skipping",
+				"eventID", evt.ID, "type", evt.EventType)
+			return
+		}
 	}
 
 	var errMsg string

@@ -3627,6 +3627,182 @@ func TestRequireImageRegistry_Configured(t *testing.T) {
 	assert.NoError(t, err)
 }
 
+// --- N0-1: Workspace storage config tests ---
+
+func TestWorkspaceStorageConfig_YAMLRoundTrip(t *testing.T) {
+	yamlInput := `
+schema_version: "1"
+server:
+  workspace_storage:
+    backend: nfs
+    nfs:
+      mount_root: /mnt/nfs
+      mount_options: "vers=4.1,hard,nconnect=8"
+      uid: 2000
+      gid: 2000
+      subpath_root: workspaces
+      storage_class: filestore-sc
+      shares:
+        - id: share-1
+          server: "10.0.0.2"
+          export: /scion-workspaces
+          pv_name: scion-workspaces-pv
+`
+	tmpDir := t.TempDir()
+	originalHome := os.Getenv("HOME")
+	defer os.Setenv("HOME", originalHome)
+	os.Setenv("HOME", tmpDir)
+
+	globalDir := filepath.Join(tmpDir, ".scion")
+	require.NoError(t, os.MkdirAll(globalDir, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(globalDir, "settings.yaml"), []byte(yamlInput), 0644))
+
+	projectDir := filepath.Join(tmpDir, "project", ".scion")
+	require.NoError(t, os.MkdirAll(projectDir, 0755))
+
+	vs, err := LoadVersionedSettings(projectDir)
+	require.NoError(t, err)
+	require.NotNil(t, vs.Server)
+	require.NotNil(t, vs.Server.WorkspaceStorage)
+
+	ws := vs.Server.WorkspaceStorage
+	assert.Equal(t, "nfs", ws.Backend)
+	require.NotNil(t, ws.NFS)
+	assert.Equal(t, "/mnt/nfs", ws.NFS.MountRoot)
+	assert.Equal(t, "vers=4.1,hard,nconnect=8", ws.NFS.MountOptions)
+	assert.Equal(t, 2000, ws.NFS.UID)
+	assert.Equal(t, 2000, ws.NFS.GID)
+	assert.Equal(t, "workspaces", ws.NFS.SubPathRoot)
+	assert.Equal(t, "filestore-sc", ws.NFS.StorageClass)
+	require.Len(t, ws.NFS.Shares, 1)
+	assert.Equal(t, "share-1", ws.NFS.Shares[0].ID)
+	assert.Equal(t, "10.0.0.2", ws.NFS.Shares[0].Server)
+	assert.Equal(t, "/scion-workspaces", ws.NFS.Shares[0].Export)
+	assert.Equal(t, "scion-workspaces-pv", ws.NFS.Shares[0].PVName)
+}
+
+func TestWorkspaceStorageConfig_JSONRoundTrip(t *testing.T) {
+	ws := &V1WorkspaceStorageConfig{
+		Backend: "nfs",
+		NFS: &V1NFSConfig{
+			MountRoot:    "/mnt/nfs",
+			MountOptions: "vers=4.1,hard,nconnect=4,_netdev",
+			UID:          1000,
+			GID:          1000,
+			SubPathRoot:  "projects",
+			Shares: []V1NFSShare{
+				{ID: "main", Server: "10.0.0.2", Export: "/scion-workspaces", PVName: "scion-ws-pv"},
+			},
+		},
+	}
+
+	data, err := json.Marshal(ws)
+	require.NoError(t, err)
+
+	var roundTripped V1WorkspaceStorageConfig
+	require.NoError(t, json.Unmarshal(data, &roundTripped))
+
+	assert.Equal(t, ws.Backend, roundTripped.Backend)
+	require.NotNil(t, roundTripped.NFS)
+	assert.Equal(t, ws.NFS.MountRoot, roundTripped.NFS.MountRoot)
+	assert.Equal(t, ws.NFS.MountOptions, roundTripped.NFS.MountOptions)
+	assert.Equal(t, ws.NFS.UID, roundTripped.NFS.UID)
+	assert.Equal(t, ws.NFS.GID, roundTripped.NFS.GID)
+	assert.Equal(t, ws.NFS.SubPathRoot, roundTripped.NFS.SubPathRoot)
+	require.Len(t, roundTripped.NFS.Shares, 1)
+	assert.Equal(t, ws.NFS.Shares[0].ID, roundTripped.NFS.Shares[0].ID)
+	assert.Equal(t, ws.NFS.Shares[0].Server, roundTripped.NFS.Shares[0].Server)
+}
+
+func TestWorkspaceStorageConfig_NFSDefaults(t *testing.T) {
+	t.Run("nfs backend applies defaults to empty sub-fields", func(t *testing.T) {
+		ws := &V1WorkspaceStorageConfig{Backend: "nfs"}
+		ws.ApplyNFSDefaults()
+
+		require.NotNil(t, ws.NFS)
+		assert.Equal(t, "vers=3,hard,nconnect=4,_netdev", ws.NFS.MountOptions)
+		assert.Equal(t, 1000, ws.NFS.UID)
+		assert.Equal(t, 1000, ws.NFS.GID)
+		assert.Equal(t, "projects", ws.NFS.SubPathRoot)
+	})
+
+	t.Run("nfs backend preserves explicit values", func(t *testing.T) {
+		ws := &V1WorkspaceStorageConfig{
+			Backend: "nfs",
+			NFS: &V1NFSConfig{
+				MountOptions: "custom-opts",
+				UID:          5000,
+				GID:          5000,
+				SubPathRoot:  "custom-root",
+			},
+		}
+		ws.ApplyNFSDefaults()
+
+		assert.Equal(t, "custom-opts", ws.NFS.MountOptions)
+		assert.Equal(t, 5000, ws.NFS.UID)
+		assert.Equal(t, 5000, ws.NFS.GID)
+		assert.Equal(t, "custom-root", ws.NFS.SubPathRoot)
+	})
+
+	t.Run("local backend does not materialize NFS block", func(t *testing.T) {
+		ws := &V1WorkspaceStorageConfig{Backend: "local"}
+		ws.ApplyNFSDefaults()
+		assert.Nil(t, ws.NFS)
+	})
+
+	t.Run("empty backend does not materialize NFS block", func(t *testing.T) {
+		ws := &V1WorkspaceStorageConfig{}
+		ws.ApplyNFSDefaults()
+		assert.Nil(t, ws.NFS)
+	})
+
+	t.Run("nil receiver is safe", func(t *testing.T) {
+		var ws *V1WorkspaceStorageConfig
+		ws.ApplyNFSDefaults() // should not panic
+	})
+}
+
+func TestWorkspaceStorageConfig_ValidateNFS(t *testing.T) {
+	t.Run("nfs backend with no shares returns error", func(t *testing.T) {
+		ws := &V1WorkspaceStorageConfig{Backend: "nfs"}
+		ws.ApplyNFSDefaults()
+		err := ws.ValidateNFS()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "no NFS shares are defined")
+	})
+
+	t.Run("nfs backend with shares passes", func(t *testing.T) {
+		ws := &V1WorkspaceStorageConfig{
+			Backend: "nfs",
+			NFS: &V1NFSConfig{
+				Shares: []V1NFSShare{{ID: "share1", Server: "10.0.0.2", Export: "/data"}},
+			},
+		}
+		ws.ApplyNFSDefaults()
+		err := ws.ValidateNFS()
+		require.NoError(t, err)
+	})
+
+	t.Run("local backend skips validation", func(t *testing.T) {
+		ws := &V1WorkspaceStorageConfig{Backend: "local"}
+		err := ws.ValidateNFS()
+		require.NoError(t, err)
+	})
+
+	t.Run("nil receiver is safe", func(t *testing.T) {
+		var ws *V1WorkspaceStorageConfig
+		err := ws.ValidateNFS()
+		require.NoError(t, err)
+	})
+}
+
+func TestWorkspaceStorageConfig_BackendUnset_IsLocal(t *testing.T) {
+	// Backend unset => treated as "local", no NFS struct required.
+	ws := &V1WorkspaceStorageConfig{}
+	assert.Equal(t, "", ws.Backend, "empty backend is treated as local")
+	assert.Nil(t, ws.NFS, "no NFS block when backend is local/empty")
+}
+
 // --- Helper ---
 
 func boolPtr(b bool) *bool {

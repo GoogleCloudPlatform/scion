@@ -49,7 +49,7 @@ func setupEntDB(t *testing.T) string {
 	t.Helper()
 	dbName := t.Name()
 	dsn := "file:" + dbName + "?mode=memory&cache=shared"
-	client, err := OpenSQLite(dsn)
+	client, err := OpenSQLite(dsn, PoolConfig{})
 	require.NoError(t, err)
 	t.Cleanup(func() { client.Close() })
 	require.NoError(t, AutoMigrate(context.Background(), client))

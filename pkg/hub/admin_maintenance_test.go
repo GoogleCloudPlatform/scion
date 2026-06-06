@@ -27,13 +27,12 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
-	"github.com/GoogleCloudPlatform/scion/pkg/store/sqlite"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 )
 
 func newTestServerWithStore(t *testing.T) (*Server, store.Store) {
 	t.Helper()
-	s, err := sqlite.New(":memory:")
+	s, err := newTestStore(":memory:")
 	if err != nil {
 		t.Fatalf("failed to create sqlite store: %v", err)
 	}
@@ -349,7 +348,7 @@ func TestListOperationRuns(t *testing.T) {
 	completed := time.Now().Add(10 * time.Second)
 	for i, status := range []string{"completed", "failed"} {
 		run := &store.MaintenanceOperationRun{
-			ID:           fmt.Sprintf("run-%d", i),
+			ID:           tid(fmt.Sprintf("run-%d", i)),
 			OperationKey: "pull-images",
 			Status:       status,
 			StartedAt:    now,
@@ -406,7 +405,7 @@ func TestGetOperationRun(t *testing.T) {
 	now := time.Now()
 	completed := now.Add(10 * time.Second)
 	run := &store.MaintenanceOperationRun{
-		ID:           "run-detail-1",
+		ID:           tid("run-detail-1"),
 		OperationKey: "pull-images",
 		Status:       "completed",
 		StartedAt:    now,
@@ -419,7 +418,7 @@ func TestGetOperationRun(t *testing.T) {
 	}
 
 	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/maintenance/operations/pull-images/runs/run-detail-1", nil)
+	req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/v1/admin/maintenance/operations/pull-images/runs/%s", tid("run-detail-1")), nil)
 	req = req.WithContext(contextWithIdentity(req.Context(), admin))
 	rr := httptest.NewRecorder()
 	srv.handleAdminMaintenanceOps(rr, req)
@@ -432,7 +431,7 @@ func TestGetOperationRun(t *testing.T) {
 	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("invalid JSON: %v", err)
 	}
-	if resp["id"] != "run-detail-1" {
+	if resp["id"] != tid("run-detail-1") {
 		t.Errorf("expected id=run-detail-1, got %v", resp["id"])
 	}
 	if resp["log"] != "Pulling images...\nDone." {

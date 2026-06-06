@@ -18,6 +18,7 @@ package entadapter
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
@@ -47,6 +48,19 @@ func parseUUID(s string) (uuid.UUID, error) {
 	return uid, nil
 }
 
+// parseGetID parses a primary-key identifier for a get-by-id lookup. A malformed
+// identifier cannot match any UUID primary key, so it is reported as
+// store.ErrNotFound — matching the raw-SQL store, where such a lookup simply
+// returned no row (callers like resolveTemplate rely on ErrNotFound to fall back
+// to slug-based resolution).
+func parseGetID(s string) (uuid.UUID, error) {
+	uid, err := uuid.Parse(s)
+	if err != nil {
+		return uuid.Nil, store.ErrNotFound
+	}
+	return uid, nil
+}
+
 // mapError converts Ent errors to store errors.
 func mapError(err error) error {
 	if err == nil {
@@ -56,6 +70,16 @@ func mapError(err error) error {
 		return store.ErrNotFound
 	}
 	if ent.IsConstraintError(err) {
+		// Both unique-constraint and foreign-key violations surface as Ent
+		// constraint errors, but they mean very different things: a unique
+		// violation is a duplicate (ErrAlreadyExists), while a foreign-key
+		// violation is a reference to a row that does not exist (ErrInvalidInput).
+		// Mapping both to ErrAlreadyExists produced a misleading "already exists"
+		// (HTTP 409) for what is really a bad reference.
+		msg := strings.ToLower(err.Error())
+		if strings.Contains(msg, "foreign key") || strings.Contains(msg, "sqlstate 23503") {
+			return fmt.Errorf("%w: %v", store.ErrInvalidInput, err)
+		}
 		return store.ErrAlreadyExists
 	}
 	return err
@@ -164,7 +188,7 @@ func (s *GroupStore) CreateGroup(ctx context.Context, g *store.Group) error {
 
 // GetGroup retrieves a group by ID.
 func (s *GroupStore) GetGroup(ctx context.Context, id string) (*store.Group, error) {
-	uid, err := parseUUID(id)
+	uid, err := parseGetID(id)
 	if err != nil {
 		return nil, err
 	}
@@ -868,10 +892,8 @@ func (s *GroupStore) CheckDelegatedAccess(ctx context.Context, agentID string, c
 		return false, err
 	}
 
-	// Load agent with creator edge
 	a, err := s.client.Agent.Query().
 		Where(agent.IDEQ(uid)).
-		WithCreator().
 		Only(ctx)
 	if err != nil {
 		return false, mapError(err)
@@ -882,10 +904,19 @@ func (s *GroupStore) CheckDelegatedAccess(ctx context.Context, agentID string, c
 		return false, nil
 	}
 
-	// Check creator exists
-	creator := a.Edges.Creator
-	if creator == nil {
+	// created_by is a polymorphic principal reference: it may be a user or
+	// another agent. Delegation only flows from a *user* creator, so resolve
+	// the creator as a user by ID and bail out when there is none (no creator,
+	// or the creator is an agent rather than a user).
+	if a.CreatedBy == nil {
 		return false, nil
+	}
+	creator, err := s.client.User.Get(ctx, *a.CreatedBy)
+	if err != nil {
+		if ent.IsNotFound(err) {
+			return false, nil
+		}
+		return false, mapError(err)
 	}
 
 	// Suspended creators cannot be delegation sources

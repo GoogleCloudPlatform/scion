@@ -137,10 +137,56 @@ type RuntimeBrokerConfig struct {
 type DatabaseConfig struct {
 	Driver string `json:"driver" yaml:"driver" koanf:"driver"` // sqlite, postgres
 	URL    string `json:"url" yaml:"url" koanf:"url"`          // Connection URL/path
+
+	// Connection pool settings (applied to the underlying *sql.DB).
+	// MaxOpenConns is the maximum number of open connections to the database.
+	// For sqlite this MUST be 1 to serialize writes (load-bearing).
+	MaxOpenConns int `json:"max_open_conns" yaml:"max_open_conns" koanf:"max_open_conns"`
+	// MaxIdleConns is the maximum number of idle connections in the pool.
+	MaxIdleConns int `json:"max_idle_conns" yaml:"max_idle_conns" koanf:"max_idle_conns"`
+	// ConnMaxLifetime is the maximum amount of time a connection may be
+	// reused, parsed as a Go duration string (e.g. "30m"). Empty means unlimited.
+	ConnMaxLifetime string `json:"conn_max_lifetime" yaml:"conn_max_lifetime" koanf:"conn_max_lifetime"`
+	// ConnMaxIdleTime is the maximum amount of time a connection may sit idle
+	// in the pool before being closed, parsed as a Go duration string (e.g.
+	// "5m"). This must be shorter than the server-side / proxy idle timeout
+	// (CloudSQL drops idle connections after ~10m) so the pool recycles a
+	// connection before the remote silently closes it — otherwise the first
+	// request after an idle period stalls waiting for a dead connection to time
+	// out. Empty means no idle limit.
+	ConnMaxIdleTime string `json:"conn_max_idle_time" yaml:"conn_max_idle_time" koanf:"conn_max_idle_time"`
 }
 
-// DevAuthConfig holds development authentication settings.
+// ConnMaxLifetimeDuration parses ConnMaxLifetime into a time.Duration.
+// An empty value yields 0 (unlimited). A malformed value returns an error.
+func (d DatabaseConfig) ConnMaxLifetimeDuration() (time.Duration, error) {
+	if d.ConnMaxLifetime == "" {
+		return 0, nil
+	}
+	dur, err := time.ParseDuration(d.ConnMaxLifetime)
+	if err != nil {
+		return 0, fmt.Errorf("invalid conn_max_lifetime %q: %w", d.ConnMaxLifetime, err)
+	}
+	return dur, nil
+}
+
+// ConnMaxIdleTimeDuration parses ConnMaxIdleTime into a time.Duration.
+// An empty value yields 0 (no idle limit). A malformed value returns an error.
+func (d DatabaseConfig) ConnMaxIdleTimeDuration() (time.Duration, error) {
+	if d.ConnMaxIdleTime == "" {
+		return 0, nil
+	}
+	dur, err := time.ParseDuration(d.ConnMaxIdleTime)
+	if err != nil {
+		return 0, fmt.Errorf("invalid conn_max_idle_time %q: %w", d.ConnMaxIdleTime, err)
+	}
+	return dur, nil
+}
+
+// DevAuthConfig holds authentication settings.
 type DevAuthConfig struct {
+	// Mode selects the exclusive human auth mode: "oauth" (default), "proxy", or "dev".
+	Mode string `json:"mode,omitempty" yaml:"mode,omitempty" koanf:"mode"`
 	// Enabled indicates whether development authentication is enabled.
 	// WARNING: Not for production use.
 	Enabled bool `json:"devMode" yaml:"devMode" koanf:"devMode"`
@@ -155,6 +201,47 @@ type DevAuthConfig struct {
 	// UserAccessMode controls how user access is evaluated at login time.
 	// Values: "open" (default), "domain_restricted", "invite_only".
 	UserAccessMode string `json:"userAccessMode" yaml:"userAccessMode" koanf:"userAccessMode"`
+	// Proxy holds proxy authentication settings (consulted when Mode == "proxy").
+	Proxy *ProxyAuthConfig `json:"proxy,omitempty" yaml:"proxy,omitempty" koanf:"proxy"`
+	// Transport holds transport-layer auth settings for agent outbound requests.
+	// Controls which transport tokens the hub issues to agents (dispatch + refresh).
+	Transport *TransportAuthConfig `json:"transport,omitempty" yaml:"transport,omitempty" koanf:"transport"`
+}
+
+// TransportAuthConfig holds transport-layer (outer/platform) auth settings.
+// This controls how agents authenticate to the platform guard (IAP or Cloud Run invoker)
+// when making outbound requests to the hub.
+type TransportAuthConfig struct {
+	// Mode selects the transport auth mode: "none" (default), "cloudrun_invoker", or "iap".
+	Mode string `json:"mode" yaml:"mode" koanf:"mode"`
+	// OIDCAudience is the OIDC audience for the transport token.
+	// For IAP: the IAP OAuth client ID. For cloudrun_invoker: the hub URL.
+	// Empty means derive from hub endpoint (cloudrun_invoker only).
+	OIDCAudience string `json:"oidcAudience" yaml:"oidcAudience" koanf:"oidcAudience"`
+	// PlatformAuthSA is the email of the dedicated service account used for
+	// transport-layer auth. The hub's runtime SA must hold serviceAccountTokenCreator
+	// on this SA to impersonate it via the IAM Credentials API.
+	PlatformAuthSA string `json:"platformAuthSA" yaml:"platformAuthSA" koanf:"platformAuthSA"`
+}
+
+// ProxyAuthConfig holds proxy authentication settings.
+type ProxyAuthConfig struct {
+	// Provider selects the proxy auth provider: "iap" or "header".
+	Provider string `json:"provider" yaml:"provider" koanf:"provider"`
+	// IAP holds Google IAP-specific settings.
+	IAP *IAPAuthConfig `json:"iap,omitempty" yaml:"iap,omitempty" koanf:"iap"`
+	// RequireTrustedProxyIP enables defense-in-depth IP allowlisting.
+	RequireTrustedProxyIP bool `json:"requireTrustedProxyIP,omitempty" yaml:"requireTrustedProxyIP,omitempty" koanf:"requireTrustedProxyIP"`
+}
+
+// IAPAuthConfig holds Google IAP-specific settings.
+type IAPAuthConfig struct {
+	// Audience is the expected audience claim — MANDATORY for IAP.
+	Audience string `json:"audience" yaml:"audience" koanf:"audience"`
+	// Issuer overrides the default IAP issuer (for testing).
+	Issuer string `json:"issuer,omitempty" yaml:"issuer,omitempty" koanf:"issuer"`
+	// JWKSURL overrides the default IAP JWKS URL (for testing).
+	JWKSURL string `json:"jwksURL,omitempty" yaml:"jwksURL,omitempty" koanf:"jwksURL"`
 }
 
 // OAuthProviderConfig holds OAuth credentials for a single provider.
@@ -291,6 +378,13 @@ func DefaultGlobalConfig() GlobalConfig {
 		Database: DatabaseConfig{
 			Driver: "sqlite",
 			URL:    "", // Will be set to default path if empty
+			// SQLite pool defaults. MaxOpenConns MUST stay 1 to serialize
+			// writes; postgres pool defaults are applied in
+			// applyDatabasePoolDefaults when Driver == "postgres".
+			MaxOpenConns:    1,
+			MaxIdleConns:    1,
+			ConnMaxLifetime: "0",
+			ConnMaxIdleTime: "0",
 		},
 		Auth: DevAuthConfig{
 			Enabled:   false,
@@ -305,6 +399,59 @@ func DefaultGlobalConfig() GlobalConfig {
 		},
 		LogLevel:  "info",
 		LogFormat: "text",
+	}
+}
+
+// applyDatabasePoolDefaults fills in driver-appropriate connection pool
+// defaults for any pool field left unset. It is applied after config loading
+// so that postgres deployments get sensible pool sizing without requiring
+// every config file to specify it.
+//
+// For sqlite, MaxOpenConns is forced to 1: more than one open connection
+// breaks write serialization and causes "database is locked" errors.
+func applyDatabasePoolDefaults(db *DatabaseConfig) {
+	switch db.Driver {
+	case "postgres":
+		// NOTE: the struct-level default for these fields is 1 (the value SQLite
+		// REQUIRES to serialize writes — see DefaultGlobalConfig). For a postgres
+		// deployment configured purely via env/driver override, that 1 leaks
+		// through unchanged, and a plain `<= 0` guard would leave the pool at a
+		// single connection. A pool of 1 is pathological for postgres: a
+		// singleton scheduler handler that checks out the lone connection to hold
+		// an advisory lock then self-deadlocks waiting for a second connection to
+		// do its work, and every API request serializes behind it (~55s context
+		// deadlines). Treat the leaked SQLite default (<= 1) as "unset" so
+		// postgres always gets a real pool. An operator who genuinely wants a
+		// tiny pool can still request 2+.
+		if db.MaxOpenConns <= 1 {
+			// Conservative per-replica default so several replicas fit within a
+			// modest Postgres connection budget. The connection ceiling for N
+			// replicas is roughly N × (MaxOpenConns + event pool + 1 listener +
+			// brokers); see CONNECTION-BUDGET.md. Raise this only when the
+			// instance's max_connections (and any pooler) has headroom.
+			db.MaxOpenConns = 10
+		}
+		if db.MaxIdleConns <= 1 {
+			db.MaxIdleConns = 5
+		}
+		if db.ConnMaxLifetime == "" {
+			db.ConnMaxLifetime = "30m"
+		}
+		if db.ConnMaxIdleTime == "" {
+			// Shorter than CloudSQL's ~10m idle timeout so the pool recycles a
+			// connection before the remote silently drops it.
+			db.ConnMaxIdleTime = "5m"
+		}
+	case "sqlite":
+		// Load-bearing: SQLite must use a single open connection.
+		db.MaxOpenConns = 1
+		if db.MaxIdleConns <= 0 {
+			db.MaxIdleConns = 1
+		}
+		// No idle recycling for the single local SQLite connection.
+		if db.ConnMaxIdleTime == "" {
+			db.ConnMaxIdleTime = "0"
+		}
 	}
 }
 
@@ -381,6 +528,7 @@ func loadGlobalConfigFromSettings(configPath string) (*GlobalConfig, bool) {
 	if gc.Database.URL == "" && gc.Database.Driver == "sqlite" {
 		gc.Database.URL = filepath.Join(globalDir, "hub.db")
 	}
+	applyDatabasePoolDefaults(&gc.Database)
 
 	return gc, true
 }
@@ -511,6 +659,7 @@ func loadGlobalConfigLegacy(configPath string) (*GlobalConfig, error) {
 			config.Database.URL = "hub.db"
 		}
 	}
+	applyDatabasePoolDefaults(&config.Database)
 
 	// Fixup for list fields that might be loaded as a single comma-separated string from env vars.
 	// This happens because koanf's env provider doesn't automatically split strings for slice fields.

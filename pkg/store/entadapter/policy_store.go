@@ -153,7 +153,7 @@ func (s *PolicyStore) CreatePolicy(ctx context.Context, p *store.Policy) error {
 
 // GetPolicy retrieves a policy by ID.
 func (s *PolicyStore) GetPolicy(ctx context.Context, id string) (*store.Policy, error) {
-	uid, err := parseUUID(id)
+	uid, err := parseGetID(id)
 	if err != nil {
 		return nil, err
 	}

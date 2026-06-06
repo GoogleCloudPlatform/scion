@@ -189,6 +189,47 @@ const (
 	WorkspaceModePerAgent = "per-agent"
 )
 
+// WorkspaceSharingMode is the canonical set of workspace sharing modes from the
+// glossary. These three modes govern how workspaces are allocated to agents and
+// determine which storage backend is used (NFS-shared vs node-local).
+type WorkspaceSharingMode string
+
+const (
+	// SharingModeSharedPlain: one workspace directory mounted into every agent,
+	// no per-agent isolation. Used for plain/non-git projects.
+	// Maps from label value "shared".
+	SharingModeSharedPlain WorkspaceSharingMode = "shared-plain"
+
+	// SharingModeClonePerAgent: each agent gets its own full git clone.
+	// Nothing is shared, so this stays on node-local storage (NOT NFS).
+	// Maps from label value "per-agent".
+	SharingModeClonePerAgent WorkspaceSharingMode = "clone-per-agent"
+
+	// SharingModeWorktreePerAgent: each agent gets its own git worktree over
+	// one shared checkout. The shared checkout + all worktrees live on NFS.
+	// Maps from label value "worktree-per-agent".
+	// Note: not yet on Hub-managed projects — reserved for Phase 1+.
+	SharingModeWorktreePerAgent WorkspaceSharingMode = "worktree-per-agent"
+)
+
+// ResolveWorkspaceSharingMode maps a workspace mode label value (wire format) to
+// the canonical WorkspaceSharingMode. Empty or unknown values default to
+// SharingModeSharedPlain for backward compatibility (existing projects without
+// an explicit label are treated as shared).
+func ResolveWorkspaceSharingMode(label string) WorkspaceSharingMode {
+	switch label {
+	case WorkspaceModeShared, "shared-plain":
+		return SharingModeSharedPlain
+	case WorkspaceModePerAgent, "clone-per-agent":
+		return SharingModeClonePerAgent
+	case "worktree-per-agent":
+		return SharingModeWorktreePerAgent
+	default:
+		// Empty or unrecognized: default to shared-plain.
+		return SharingModeSharedPlain
+	}
+}
+
 // Project represents a project/agent group in the Hub database.
 type Project struct {
 	// Identity
@@ -308,6 +349,11 @@ type RuntimeBroker struct {
 	Labels      map[string]string `json:"labels,omitempty"`
 	Annotations map[string]string `json:"annotations,omitempty"`
 
+	// Affinity — which hub instance currently holds the control-channel socket
+	ConnectedHubID     *string    `json:"connectedHubId,omitempty"`
+	ConnectedSessionID *string    `json:"connectedSessionId,omitempty"`
+	ConnectedAt        *time.Time `json:"connectedAt,omitempty"`
+
 	// Network endpoint (for direct HTTP mode)
 	Endpoint string `json:"endpoint,omitempty"`
 
@@ -418,9 +464,7 @@ type Template struct {
 	// Inheritance
 	BaseTemplate string `json:"baseTemplate,omitempty"` // Parent template ID (for inheritance)
 
-	// Protection
-	Locked bool   `json:"locked,omitempty"` // Prevent modifications (global templates)
-	Status string `json:"status"`           // pending, active, archived
+	Status string `json:"status"` // pending, active, archived
 
 	// Ownership
 	OwnerID    string `json:"ownerId,omitempty"`
@@ -513,9 +557,7 @@ type HarnessConfig struct {
 	// File manifest
 	Files []TemplateFile `json:"files,omitempty"` // Manifest of harness config files (reuses TemplateFile)
 
-	// Protection
-	Locked bool   `json:"locked,omitempty"` // Prevent modifications
-	Status string `json:"status"`           // pending, active, archived
+	Status string `json:"status"` // pending, active, archived
 
 	// Ownership
 	OwnerID    string `json:"ownerId,omitempty"`
@@ -745,6 +787,42 @@ const (
 	BrokerStatusOnline   = "online"
 	BrokerStatusOffline  = "offline"
 	BrokerStatusDegraded = "degraded"
+)
+
+// BrokerDispatch is the durable intent for a lifecycle/create-time command
+// targeted at a broker (design §5.2). The socket-holding node reconciles it:
+// CAS-claim (pending->in_progress) → run the local tunnel op → mark done/failed.
+type BrokerDispatch struct {
+	ID         string     `json:"id"`
+	BrokerID   string     `json:"brokerId"`
+	AgentID    string     `json:"agentId,omitempty"` // empty for project-scoped ops
+	AgentSlug  string     `json:"agentSlug,omitempty"`
+	ProjectID  string     `json:"projectId,omitempty"` // empty if unknown/none
+	Op         string     `json:"op"`                  // start|stop|restart|delete|finalize_env|check_prompt|create|message
+	Args       string     `json:"args,omitempty"`      // JSON
+	State      string     `json:"state"`               // pending|in_progress|done|failed
+	Result     string     `json:"result,omitempty"`    // JSON
+	ClaimedBy  string     `json:"claimedBy,omitempty"` // hub instanceID that reconciled it
+	Attempts   int        `json:"attempts"`
+	Error      string     `json:"error,omitempty"`
+	CreatedAt  time.Time  `json:"createdAt"`
+	UpdatedAt  time.Time  `json:"updatedAt"`
+	DeadlineAt *time.Time `json:"deadlineAt,omitempty"`
+}
+
+// BrokerDispatch.State values.
+const (
+	DispatchStatePending    = "pending"
+	DispatchStateInProgress = "in_progress"
+	DispatchStateDone       = "done"
+	DispatchStateFailed     = "failed"
+)
+
+// Message.DispatchState values (the message row is its own dispatch intent).
+const (
+	MessageDispatchPending    = "pending"
+	MessageDispatchDispatched = "dispatched"
+	MessageDispatchFailed     = "failed"
 )
 
 // =============================================================================
@@ -1350,6 +1428,11 @@ type Message struct {
 	Channel     string    `json:"channel,omitempty"`
 	ThreadID    string    `json:"threadId,omitempty"`
 	CreatedAt   time.Time `json:"createdAt"`
+	// DispatchState tracks cross-node delivery of the message to the broker:
+	// pending|dispatched|failed. The message row is its own durable dispatch
+	// intent (design §5.2/§6.1).
+	DispatchState string     `json:"dispatchState,omitempty"`
+	DispatchedAt  *time.Time `json:"dispatchedAt,omitempty"`
 }
 
 // MarshalJSON implements custom marshaling to support legacy groveId field.

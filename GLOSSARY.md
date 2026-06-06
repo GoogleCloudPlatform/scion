@@ -200,7 +200,7 @@ The three run modes at a glance — distinguish them by whether a server runs an
 | Mode | Server | Tenancy | State & isolation | Canonical use |
 |------|--------|---------|-------------------|----------------|
 | **Local mode** | None | Single user | Local machine; isolation via git worktrees | Agents launched directly via the `scion` CLI, no server |
-| **Workstation mode** | Combo server (Hub + Runtime Broker + Web) on loopback | Single-tenant | Local machine; single-tenant state | The hosted experience locally, on your own machine |
+| **Workstation mode** | Combo server (Hub + Runtime Broker + Web) on loopback | Single-tenant | That machine | The hosted experience locally, on your own machine |
 | **Hosted mode** | Multi-user server deployment | Multi-user | Hub-coordinated across brokers | Coordinating state across users, projects, and runtime brokers |
 
 **Local mode**:

@@ -19,6 +19,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"testing"
 	"time"
@@ -31,7 +32,7 @@ func TestHarnessConfigList(t *testing.T) {
 	ctx := context.Background()
 
 	hc := &store.HarnessConfig{
-		ID:         "hc_test1",
+		ID:         tid("hc_test1"),
 		Slug:       "test-hc",
 		Name:       "Test HC",
 		Harness:    "claude",
@@ -68,7 +69,7 @@ func TestHarnessConfigListByProjectID(t *testing.T) {
 
 	// Create a global harness config
 	if err := s.CreateHarnessConfig(ctx, &store.HarnessConfig{
-		ID: "hc_global1", Slug: "global-hc", Name: "Global HC",
+		ID: tid("hc_global1"), Slug: "global-hc", Name: "Global HC",
 		Harness: "claude", Scope: "global",
 		Visibility: store.VisibilityPublic, Status: store.HarnessConfigStatusActive,
 		Created: now, Updated: now,
@@ -78,8 +79,8 @@ func TestHarnessConfigListByProjectID(t *testing.T) {
 
 	// Create a project-scoped harness config for project "project_abc"
 	if err := s.CreateHarnessConfig(ctx, &store.HarnessConfig{
-		ID: "hc_project1", Slug: "project-hc", Name: "Project HC",
-		Harness: "gemini", Scope: "project", ScopeID: "project_abc",
+		ID: tid("hc_project1"), Slug: "project-hc", Name: "Project HC",
+		Harness: "gemini", Scope: "project", ScopeID: tid("project_abc"),
 		Visibility: store.VisibilityPublic, Status: store.HarnessConfigStatusActive,
 		Created: now, Updated: now,
 	}); err != nil {
@@ -88,8 +89,8 @@ func TestHarnessConfigListByProjectID(t *testing.T) {
 
 	// Create a project-scoped harness config for a different project
 	if err := s.CreateHarnessConfig(ctx, &store.HarnessConfig{
-		ID: "hc_project2", Slug: "other-project-hc", Name: "Other Project HC",
-		Harness: "claude", Scope: "project", ScopeID: "project_xyz",
+		ID: tid("hc_project2"), Slug: "other-project-hc", Name: "Other Project HC",
+		Harness: "claude", Scope: "project", ScopeID: tid("project_xyz"),
 		Visibility: store.VisibilityPublic, Status: store.HarnessConfigStatusActive,
 		Created: now, Updated: now,
 	}); err != nil {
@@ -98,8 +99,8 @@ func TestHarnessConfigListByProjectID(t *testing.T) {
 
 	// Create a user-scoped harness config
 	if err := s.CreateHarnessConfig(ctx, &store.HarnessConfig{
-		ID: "hc_user1", Slug: "user-hc", Name: "User HC",
-		Harness: "claude", Scope: "user", ScopeID: "user_123",
+		ID: tid("hc_user1"), Slug: "user-hc", Name: "User HC",
+		Harness: "claude", Scope: "user", ScopeID: tid("user_123"),
 		Visibility: store.VisibilityPrivate, Status: store.HarnessConfigStatusActive,
 		Created: now, Updated: now,
 	}); err != nil {
@@ -107,7 +108,7 @@ func TestHarnessConfigListByProjectID(t *testing.T) {
 	}
 
 	// Query with projectId=project_abc should return global + project_abc configs only
-	rec := doRequest(t, srv, http.MethodGet, "/api/v1/harness-configs?projectId=project_abc", nil)
+	rec := doRequest(t, srv, http.MethodGet, fmt.Sprintf("/api/v1/harness-configs?projectId=%s", tid("project_abc")), nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
 	}
@@ -126,16 +127,16 @@ func TestHarnessConfigListByProjectID(t *testing.T) {
 	for _, hc := range resp.HarnessConfigs {
 		ids[hc.ID] = true
 	}
-	if !ids["hc_global1"] {
+	if !ids[tid("hc_global1")] {
 		t.Error("expected global harness config in results")
 	}
-	if !ids["hc_project1"] {
+	if !ids[tid("hc_project1")] {
 		t.Error("expected project_abc harness config in results")
 	}
-	if ids["hc_project2"] {
+	if ids[tid("hc_project2")] {
 		t.Error("did not expect project_xyz harness config in results")
 	}
-	if ids["hc_user1"] {
+	if ids[tid("hc_user1")] {
 		t.Error("did not expect user harness config in results")
 	}
 }
@@ -224,7 +225,7 @@ func TestHarnessConfigGet(t *testing.T) {
 	ctx := context.Background()
 
 	hc := &store.HarnessConfig{
-		ID:         "hc_get1",
+		ID:         tid("hc_get1"),
 		Slug:       "get-test",
 		Name:       "Get Test",
 		Harness:    "gemini",
@@ -238,7 +239,7 @@ func TestHarnessConfigGet(t *testing.T) {
 		t.Fatalf("failed to create harness config: %v", err)
 	}
 
-	rec := doRequest(t, srv, http.MethodGet, "/api/v1/harness-configs/hc_get1", nil)
+	rec := doRequest(t, srv, http.MethodGet, fmt.Sprintf("/api/v1/harness-configs/%s", tid("hc_get1")), nil)
 
 	if rec.Code != http.StatusOK {
 		t.Errorf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
@@ -262,7 +263,7 @@ func TestHarnessConfigDelete(t *testing.T) {
 	ctx := context.Background()
 
 	hc := &store.HarnessConfig{
-		ID:         "hc_del1",
+		ID:         tid("hc_del1"),
 		Slug:       "del-test",
 		Name:       "Del Test",
 		Harness:    "claude",
@@ -276,13 +277,13 @@ func TestHarnessConfigDelete(t *testing.T) {
 		t.Fatalf("failed to create harness config: %v", err)
 	}
 
-	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/harness-configs/hc_del1", nil)
+	rec := doRequest(t, srv, http.MethodDelete, fmt.Sprintf("/api/v1/harness-configs/%s", tid("hc_del1")), nil)
 	if rec.Code != http.StatusNoContent {
 		t.Errorf("expected status 204, got %d: %s", rec.Code, rec.Body.String())
 	}
 
 	// Verify deleted
-	rec = doRequest(t, srv, http.MethodGet, "/api/v1/harness-configs/hc_del1", nil)
+	rec = doRequest(t, srv, http.MethodGet, fmt.Sprintf("/api/v1/harness-configs/%s", tid("hc_del1")), nil)
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("expected status 404 after delete, got %d", rec.Code)
 	}
@@ -293,7 +294,7 @@ func TestHarnessConfigPatch(t *testing.T) {
 	ctx := context.Background()
 
 	hc := &store.HarnessConfig{
-		ID:         "hc_patch1",
+		ID:         tid("hc_patch1"),
 		Slug:       "patch-test",
 		Name:       "Patch Test",
 		Harness:    "claude",
@@ -312,7 +313,7 @@ func TestHarnessConfigPatch(t *testing.T) {
 		"description": "Updated description",
 	}
 
-	rec := doRequest(t, srv, http.MethodPatch, "/api/v1/harness-configs/hc_patch1", body)
+	rec := doRequest(t, srv, http.MethodPatch, fmt.Sprintf("/api/v1/harness-configs/%s", tid("hc_patch1")), body)
 
 	if rec.Code != http.StatusOK {
 		t.Errorf("expected status 200, got %d: %s", rec.Code, rec.Body.String())

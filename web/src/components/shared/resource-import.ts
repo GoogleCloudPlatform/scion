@@ -323,8 +323,8 @@ export class ScionResourceImport extends LitElement {
     if (summary.failed.length > 0) msg += ` ${summary.failed.length} failed.`;
     this.success = msg;
     this.dispatchEvent(
-      new CustomEvent('resource-imported', {
-        detail: { count },
+      new CustomEvent('resource-changed', {
+        detail: { action: 'imported', kind: this.kind, count },
         bubbles: true,
         composed: true,
       })

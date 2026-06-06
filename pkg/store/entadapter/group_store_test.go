@@ -20,8 +20,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -29,13 +29,10 @@ import (
 
 func newTestGroupStore(t *testing.T) *GroupStore {
 	t.Helper()
-	client, err := entc.OpenSQLite("file:" + t.Name() + "?mode=memory&cache=shared")
-	require.NoError(t, err)
-	t.Cleanup(func() { client.Close() })
-	require.NoError(t, entc.AutoMigrate(context.Background(), client))
+	client := enttest.NewClient(t)
 
 	// Create a test user for membership tests
-	_, err = client.User.Create().
+	_, err := client.User.Create().
 		SetID(testUserUID).
 		SetEmail("test@example.com").
 		SetDisplayName("Test User").
@@ -816,14 +813,9 @@ func TestGetEffectiveGroupsNoMemberships(t *testing.T) {
 
 func TestCompositeStoreDelegation(t *testing.T) {
 	// Verify the CompositeStore properly delegates group operations
-	client, err := entc.OpenSQLite("file:" + t.Name() + "?mode=memory&cache=shared")
-	require.NoError(t, err)
-	t.Cleanup(func() { client.Close() })
-	require.NoError(t, entc.AutoMigrate(context.Background(), client))
+	client := enttest.NewClient(t)
 
-	// We use nil as the base store since we're only testing group methods
-	// and they should all go to the Ent adapter.
-	composite := NewCompositeStore(nil, client)
+	composite := NewCompositeStore(client)
 
 	ctx := context.Background()
 	g := &store.Group{
@@ -832,7 +824,7 @@ func TestCompositeStoreDelegation(t *testing.T) {
 		Slug: "composite-test",
 	}
 
-	err = composite.CreateGroup(ctx, g)
+	err := composite.CreateGroup(ctx, g)
 	require.NoError(t, err)
 
 	got, err := composite.GetGroup(ctx, g.ID)
@@ -1084,7 +1076,7 @@ func TestCheckDelegatedAccess_Enabled(t *testing.T) {
 	// Enable delegation on the test agent and set creator
 	_, err := gs.client.Agent.UpdateOneID(testAgentUID).
 		SetDelegationEnabled(true).
-		SetCreatorID(testUserUID).
+		SetCreatedBy(testUserUID).
 		Save(ctx)
 	require.NoError(t, err)
 
@@ -1106,7 +1098,7 @@ func TestCheckDelegatedAccess_Disabled(t *testing.T) {
 
 	// Creator is set but delegation is disabled (default)
 	_, err := gs.client.Agent.UpdateOneID(testAgentUID).
-		SetCreatorID(testUserUID).
+		SetCreatedBy(testUserUID).
 		Save(ctx)
 	require.NoError(t, err)
 
@@ -1134,7 +1126,7 @@ func TestCheckDelegatedAccess_SuspendedCreator(t *testing.T) {
 	// Enable delegation
 	_, err = gs.client.Agent.UpdateOneID(testAgentUID).
 		SetDelegationEnabled(true).
-		SetCreatorID(testUserUID).
+		SetCreatedBy(testUserUID).
 		Save(ctx)
 	require.NoError(t, err)
 
@@ -1191,7 +1183,7 @@ func TestCheckDelegatedAccess_GroupCondition(t *testing.T) {
 	// Enable delegation and set creator
 	_, err := gs.client.Agent.UpdateOneID(testAgentUID).
 		SetDelegationEnabled(true).
-		SetCreatorID(testUserUID).
+		SetCreatedBy(testUserUID).
 		Save(ctx)
 	require.NoError(t, err)
 
@@ -1219,7 +1211,7 @@ func TestCheckDelegatedAccess_GroupCondition_NotMember(t *testing.T) {
 	// Enable delegation and set creator
 	_, err := gs.client.Agent.UpdateOneID(testAgentUID).
 		SetDelegationEnabled(true).
-		SetCreatorID(testUserUID).
+		SetCreatedBy(testUserUID).
 		Save(ctx)
 	require.NoError(t, err)
 

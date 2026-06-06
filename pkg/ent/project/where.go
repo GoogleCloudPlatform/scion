@@ -71,6 +71,16 @@ func GitRemote(v string) predicate.Project {
 	return predicate.Project(sql.FieldEQ(FieldGitRemote, v))
 }
 
+// DefaultRuntimeBrokerID applies equality check predicate on the "default_runtime_broker_id" field. It's identical to DefaultRuntimeBrokerIDEQ.
+func DefaultRuntimeBrokerID(v string) predicate.Project {
+	return predicate.Project(sql.FieldEQ(FieldDefaultRuntimeBrokerID, v))
+}
+
+// SharedDirs applies equality check predicate on the "shared_dirs" field. It's identical to SharedDirsEQ.
+func SharedDirs(v string) predicate.Project {
+	return predicate.Project(sql.FieldEQ(FieldSharedDirs, v))
+}
+
 // Created applies equality check predicate on the "created" field. It's identical to CreatedEQ.
 func Created(v time.Time) predicate.Project {
 	return predicate.Project(sql.FieldEQ(FieldCreated, v))
@@ -94,6 +104,26 @@ func OwnerID(v string) predicate.Project {
 // Visibility applies equality check predicate on the "visibility" field. It's identical to VisibilityEQ.
 func Visibility(v string) predicate.Project {
 	return predicate.Project(sql.FieldEQ(FieldVisibility, v))
+}
+
+// GithubInstallationID applies equality check predicate on the "github_installation_id" field. It's identical to GithubInstallationIDEQ.
+func GithubInstallationID(v int64) predicate.Project {
+	return predicate.Project(sql.FieldEQ(FieldGithubInstallationID, v))
+}
+
+// GithubPermissions applies equality check predicate on the "github_permissions" field. It's identical to GithubPermissionsEQ.
+func GithubPermissions(v string) predicate.Project {
+	return predicate.Project(sql.FieldEQ(FieldGithubPermissions, v))
+}
+
+// GithubAppStatus applies equality check predicate on the "github_app_status" field. It's identical to GithubAppStatusEQ.
+func GithubAppStatus(v string) predicate.Project {
+	return predicate.Project(sql.FieldEQ(FieldGithubAppStatus, v))
+}
+
+// GitIdentity applies equality check predicate on the "git_identity" field. It's identical to GitIdentityEQ.
+func GitIdentity(v string) predicate.Project {
+	return predicate.Project(sql.FieldEQ(FieldGitIdentity, v))
 }
 
 // NameEQ applies the EQ predicate on the "name" field.
@@ -301,6 +331,81 @@ func GitRemoteContainsFold(v string) predicate.Project {
 	return predicate.Project(sql.FieldContainsFold(FieldGitRemote, v))
 }
 
+// DefaultRuntimeBrokerIDEQ applies the EQ predicate on the "default_runtime_broker_id" field.
+func DefaultRuntimeBrokerIDEQ(v string) predicate.Project {
+	return predicate.Project(sql.FieldEQ(FieldDefaultRuntimeBrokerID, v))
+}
+
+// DefaultRuntimeBrokerIDNEQ applies the NEQ predicate on the "default_runtime_broker_id" field.
+func DefaultRuntimeBrokerIDNEQ(v string) predicate.Project {
+	return predicate.Project(sql.FieldNEQ(FieldDefaultRuntimeBrokerID, v))
+}
+
+// DefaultRuntimeBrokerIDIn applies the In predicate on the "default_runtime_broker_id" field.
+func DefaultRuntimeBrokerIDIn(vs ...string) predicate.Project {
+	return predicate.Project(sql.FieldIn(FieldDefaultRuntimeBrokerID, vs...))
+}
+
+// DefaultRuntimeBrokerIDNotIn applies the NotIn predicate on the "default_runtime_broker_id" field.
+func DefaultRuntimeBrokerIDNotIn(vs ...string) predicate.Project {
+	return predicate.Project(sql.FieldNotIn(FieldDefaultRuntimeBrokerID, vs...))
+}
+
+// DefaultRuntimeBrokerIDGT applies the GT predicate on the "default_runtime_broker_id" field.
+func DefaultRuntimeBrokerIDGT(v string) predicate.Project {
+	return predicate.Project(sql.FieldGT(FieldDefaultRuntimeBrokerID, v))
+}
+
+// DefaultRuntimeBrokerIDGTE applies the GTE predicate on the "default_runtime_broker_id" field.
+func DefaultRuntimeBrokerIDGTE(v string) predicate.Project {
+	return predicate.Project(sql.FieldGTE(FieldDefaultRuntimeBrokerID, v))
+}
+
+// DefaultRuntimeBrokerIDLT applies the LT predicate on the "default_runtime_broker_id" field.
+func DefaultRuntimeBrokerIDLT(v string) predicate.Project {
+	return predicate.Project(sql.FieldLT(FieldDefaultRuntimeBrokerID, v))
+}
+
+// DefaultRuntimeBrokerIDLTE applies the LTE predicate on the "default_runtime_broker_id" field.
+func DefaultRuntimeBrokerIDLTE(v string) predicate.Project {
+	return predicate.Project(sql.FieldLTE(FieldDefaultRuntimeBrokerID, v))
+}
+
+// DefaultRuntimeBrokerIDContains applies the Contains predicate on the "default_runtime_broker_id" field.
+func DefaultRuntimeBrokerIDContains(v string) predicate.Project {
+	return predicate.Project(sql.FieldContains(FieldDefaultRuntimeBrokerID, v))
+}
+
+// DefaultRuntimeBrokerIDHasPrefix applies the HasPrefix predicate on the "default_runtime_broker_id" field.
+func DefaultRuntimeBrokerIDHasPrefix(v string) predicate.Project {
+	return predicate.Project(sql.FieldHasPrefix(FieldDefaultRuntimeBrokerID, v))
+}
+
+// DefaultRuntimeBrokerIDHasSuffix applies the HasSuffix predicate on the "default_runtime_broker_id" field.
+func DefaultRuntimeBrokerIDHasSuffix(v string) predicate.Project {
+	return predicate.Project(sql.FieldHasSuffix(FieldDefaultRuntimeBrokerID, v))
+}
+
+// DefaultRuntimeBrokerIDIsNil applies the IsNil predicate on the "default_runtime_broker_id" field.
+func DefaultRuntimeBrokerIDIsNil() predicate.Project {
+	return predicate.Project(sql.FieldIsNull(FieldDefaultRuntimeBrokerID))
+}
+
+// DefaultRuntimeBrokerIDNotNil applies the NotNil predicate on the "default_runtime_broker_id" field.
+func DefaultRuntimeBrokerIDNotNil() predicate.Project {
+	return predicate.Project(sql.FieldNotNull(FieldDefaultRuntimeBrokerID))
+}
+
+// DefaultRuntimeBrokerIDEqualFold applies the EqualFold predicate on the "default_runtime_broker_id" field.
+func DefaultRuntimeBrokerIDEqualFold(v string) predicate.Project {
+	return predicate.Project(sql.FieldEqualFold(FieldDefaultRuntimeBrokerID, v))
+}
+
+// DefaultRuntimeBrokerIDContainsFold applies the ContainsFold predicate on the "default_runtime_broker_id" field.
+func DefaultRuntimeBrokerIDContainsFold(v string) predicate.Project {
+	return predicate.Project(sql.FieldContainsFold(FieldDefaultRuntimeBrokerID, v))
+}
+
 // LabelsIsNil applies the IsNil predicate on the "labels" field.
 func LabelsIsNil() predicate.Project {
 	return predicate.Project(sql.FieldIsNull(FieldLabels))
@@ -319,6 +424,81 @@ func AnnotationsIsNil() predicate.Project {
 // AnnotationsNotNil applies the NotNil predicate on the "annotations" field.
 func AnnotationsNotNil() predicate.Project {
 	return predicate.Project(sql.FieldNotNull(FieldAnnotations))
+}
+
+// SharedDirsEQ applies the EQ predicate on the "shared_dirs" field.
+func SharedDirsEQ(v string) predicate.Project {
+	return predicate.Project(sql.FieldEQ(FieldSharedDirs, v))
+}
+
+// SharedDirsNEQ applies the NEQ predicate on the "shared_dirs" field.
+func SharedDirsNEQ(v string) predicate.Project {
+	return predicate.Project(sql.FieldNEQ(FieldSharedDirs, v))
+}
+
+// SharedDirsIn applies the In predicate on the "shared_dirs" field.
+func SharedDirsIn(vs ...string) predicate.Project {
+	return predicate.Project(sql.FieldIn(FieldSharedDirs, vs...))
+}
+
+// SharedDirsNotIn applies the NotIn predicate on the "shared_dirs" field.
+func SharedDirsNotIn(vs ...string) predicate.Project {
+	return predicate.Project(sql.FieldNotIn(FieldSharedDirs, vs...))
+}
+
+// SharedDirsGT applies the GT predicate on the "shared_dirs" field.
+func SharedDirsGT(v string) predicate.Project {
+	return predicate.Project(sql.FieldGT(FieldSharedDirs, v))
+}
+
+// SharedDirsGTE applies the GTE predicate on the "shared_dirs" field.
+func SharedDirsGTE(v string) predicate.Project {
+	return predicate.Project(sql.FieldGTE(FieldSharedDirs, v))
+}
+
+// SharedDirsLT applies the LT predicate on the "shared_dirs" field.
+func SharedDirsLT(v string) predicate.Project {
+	return predicate.Project(sql.FieldLT(FieldSharedDirs, v))
+}
+
+// SharedDirsLTE applies the LTE predicate on the "shared_dirs" field.
+func SharedDirsLTE(v string) predicate.Project {
+	return predicate.Project(sql.FieldLTE(FieldSharedDirs, v))
+}
+
+// SharedDirsContains applies the Contains predicate on the "shared_dirs" field.
+func SharedDirsContains(v string) predicate.Project {
+	return predicate.Project(sql.FieldContains(FieldSharedDirs, v))
+}
+
+// SharedDirsHasPrefix applies the HasPrefix predicate on the "shared_dirs" field.
+func SharedDirsHasPrefix(v string) predicate.Project {
+	return predicate.Project(sql.FieldHasPrefix(FieldSharedDirs, v))
+}
+
+// SharedDirsHasSuffix applies the HasSuffix predicate on the "shared_dirs" field.
+func SharedDirsHasSuffix(v string) predicate.Project {
+	return predicate.Project(sql.FieldHasSuffix(FieldSharedDirs, v))
+}
+
+// SharedDirsIsNil applies the IsNil predicate on the "shared_dirs" field.
+func SharedDirsIsNil() predicate.Project {
+	return predicate.Project(sql.FieldIsNull(FieldSharedDirs))
+}
+
+// SharedDirsNotNil applies the NotNil predicate on the "shared_dirs" field.
+func SharedDirsNotNil() predicate.Project {
+	return predicate.Project(sql.FieldNotNull(FieldSharedDirs))
+}
+
+// SharedDirsEqualFold applies the EqualFold predicate on the "shared_dirs" field.
+func SharedDirsEqualFold(v string) predicate.Project {
+	return predicate.Project(sql.FieldEqualFold(FieldSharedDirs, v))
+}
+
+// SharedDirsContainsFold applies the ContainsFold predicate on the "shared_dirs" field.
+func SharedDirsContainsFold(v string) predicate.Project {
+	return predicate.Project(sql.FieldContainsFold(FieldSharedDirs, v))
 }
 
 // CreatedEQ applies the EQ predicate on the "created" field.
@@ -614,6 +794,281 @@ func VisibilityEqualFold(v string) predicate.Project {
 // VisibilityContainsFold applies the ContainsFold predicate on the "visibility" field.
 func VisibilityContainsFold(v string) predicate.Project {
 	return predicate.Project(sql.FieldContainsFold(FieldVisibility, v))
+}
+
+// GithubInstallationIDEQ applies the EQ predicate on the "github_installation_id" field.
+func GithubInstallationIDEQ(v int64) predicate.Project {
+	return predicate.Project(sql.FieldEQ(FieldGithubInstallationID, v))
+}
+
+// GithubInstallationIDNEQ applies the NEQ predicate on the "github_installation_id" field.
+func GithubInstallationIDNEQ(v int64) predicate.Project {
+	return predicate.Project(sql.FieldNEQ(FieldGithubInstallationID, v))
+}
+
+// GithubInstallationIDIn applies the In predicate on the "github_installation_id" field.
+func GithubInstallationIDIn(vs ...int64) predicate.Project {
+	return predicate.Project(sql.FieldIn(FieldGithubInstallationID, vs...))
+}
+
+// GithubInstallationIDNotIn applies the NotIn predicate on the "github_installation_id" field.
+func GithubInstallationIDNotIn(vs ...int64) predicate.Project {
+	return predicate.Project(sql.FieldNotIn(FieldGithubInstallationID, vs...))
+}
+
+// GithubInstallationIDGT applies the GT predicate on the "github_installation_id" field.
+func GithubInstallationIDGT(v int64) predicate.Project {
+	return predicate.Project(sql.FieldGT(FieldGithubInstallationID, v))
+}
+
+// GithubInstallationIDGTE applies the GTE predicate on the "github_installation_id" field.
+func GithubInstallationIDGTE(v int64) predicate.Project {
+	return predicate.Project(sql.FieldGTE(FieldGithubInstallationID, v))
+}
+
+// GithubInstallationIDLT applies the LT predicate on the "github_installation_id" field.
+func GithubInstallationIDLT(v int64) predicate.Project {
+	return predicate.Project(sql.FieldLT(FieldGithubInstallationID, v))
+}
+
+// GithubInstallationIDLTE applies the LTE predicate on the "github_installation_id" field.
+func GithubInstallationIDLTE(v int64) predicate.Project {
+	return predicate.Project(sql.FieldLTE(FieldGithubInstallationID, v))
+}
+
+// GithubInstallationIDIsNil applies the IsNil predicate on the "github_installation_id" field.
+func GithubInstallationIDIsNil() predicate.Project {
+	return predicate.Project(sql.FieldIsNull(FieldGithubInstallationID))
+}
+
+// GithubInstallationIDNotNil applies the NotNil predicate on the "github_installation_id" field.
+func GithubInstallationIDNotNil() predicate.Project {
+	return predicate.Project(sql.FieldNotNull(FieldGithubInstallationID))
+}
+
+// GithubPermissionsEQ applies the EQ predicate on the "github_permissions" field.
+func GithubPermissionsEQ(v string) predicate.Project {
+	return predicate.Project(sql.FieldEQ(FieldGithubPermissions, v))
+}
+
+// GithubPermissionsNEQ applies the NEQ predicate on the "github_permissions" field.
+func GithubPermissionsNEQ(v string) predicate.Project {
+	return predicate.Project(sql.FieldNEQ(FieldGithubPermissions, v))
+}
+
+// GithubPermissionsIn applies the In predicate on the "github_permissions" field.
+func GithubPermissionsIn(vs ...string) predicate.Project {
+	return predicate.Project(sql.FieldIn(FieldGithubPermissions, vs...))
+}
+
+// GithubPermissionsNotIn applies the NotIn predicate on the "github_permissions" field.
+func GithubPermissionsNotIn(vs ...string) predicate.Project {
+	return predicate.Project(sql.FieldNotIn(FieldGithubPermissions, vs...))
+}
+
+// GithubPermissionsGT applies the GT predicate on the "github_permissions" field.
+func GithubPermissionsGT(v string) predicate.Project {
+	return predicate.Project(sql.FieldGT(FieldGithubPermissions, v))
+}
+
+// GithubPermissionsGTE applies the GTE predicate on the "github_permissions" field.
+func GithubPermissionsGTE(v string) predicate.Project {
+	return predicate.Project(sql.FieldGTE(FieldGithubPermissions, v))
+}
+
+// GithubPermissionsLT applies the LT predicate on the "github_permissions" field.
+func GithubPermissionsLT(v string) predicate.Project {
+	return predicate.Project(sql.FieldLT(FieldGithubPermissions, v))
+}
+
+// GithubPermissionsLTE applies the LTE predicate on the "github_permissions" field.
+func GithubPermissionsLTE(v string) predicate.Project {
+	return predicate.Project(sql.FieldLTE(FieldGithubPermissions, v))
+}
+
+// GithubPermissionsContains applies the Contains predicate on the "github_permissions" field.
+func GithubPermissionsContains(v string) predicate.Project {
+	return predicate.Project(sql.FieldContains(FieldGithubPermissions, v))
+}
+
+// GithubPermissionsHasPrefix applies the HasPrefix predicate on the "github_permissions" field.
+func GithubPermissionsHasPrefix(v string) predicate.Project {
+	return predicate.Project(sql.FieldHasPrefix(FieldGithubPermissions, v))
+}
+
+// GithubPermissionsHasSuffix applies the HasSuffix predicate on the "github_permissions" field.
+func GithubPermissionsHasSuffix(v string) predicate.Project {
+	return predicate.Project(sql.FieldHasSuffix(FieldGithubPermissions, v))
+}
+
+// GithubPermissionsIsNil applies the IsNil predicate on the "github_permissions" field.
+func GithubPermissionsIsNil() predicate.Project {
+	return predicate.Project(sql.FieldIsNull(FieldGithubPermissions))
+}
+
+// GithubPermissionsNotNil applies the NotNil predicate on the "github_permissions" field.
+func GithubPermissionsNotNil() predicate.Project {
+	return predicate.Project(sql.FieldNotNull(FieldGithubPermissions))
+}
+
+// GithubPermissionsEqualFold applies the EqualFold predicate on the "github_permissions" field.
+func GithubPermissionsEqualFold(v string) predicate.Project {
+	return predicate.Project(sql.FieldEqualFold(FieldGithubPermissions, v))
+}
+
+// GithubPermissionsContainsFold applies the ContainsFold predicate on the "github_permissions" field.
+func GithubPermissionsContainsFold(v string) predicate.Project {
+	return predicate.Project(sql.FieldContainsFold(FieldGithubPermissions, v))
+}
+
+// GithubAppStatusEQ applies the EQ predicate on the "github_app_status" field.
+func GithubAppStatusEQ(v string) predicate.Project {
+	return predicate.Project(sql.FieldEQ(FieldGithubAppStatus, v))
+}
+
+// GithubAppStatusNEQ applies the NEQ predicate on the "github_app_status" field.
+func GithubAppStatusNEQ(v string) predicate.Project {
+	return predicate.Project(sql.FieldNEQ(FieldGithubAppStatus, v))
+}
+
+// GithubAppStatusIn applies the In predicate on the "github_app_status" field.
+func GithubAppStatusIn(vs ...string) predicate.Project {
+	return predicate.Project(sql.FieldIn(FieldGithubAppStatus, vs...))
+}
+
+// GithubAppStatusNotIn applies the NotIn predicate on the "github_app_status" field.
+func GithubAppStatusNotIn(vs ...string) predicate.Project {
+	return predicate.Project(sql.FieldNotIn(FieldGithubAppStatus, vs...))
+}
+
+// GithubAppStatusGT applies the GT predicate on the "github_app_status" field.
+func GithubAppStatusGT(v string) predicate.Project {
+	return predicate.Project(sql.FieldGT(FieldGithubAppStatus, v))
+}
+
+// GithubAppStatusGTE applies the GTE predicate on the "github_app_status" field.
+func GithubAppStatusGTE(v string) predicate.Project {
+	return predicate.Project(sql.FieldGTE(FieldGithubAppStatus, v))
+}
+
+// GithubAppStatusLT applies the LT predicate on the "github_app_status" field.
+func GithubAppStatusLT(v string) predicate.Project {
+	return predicate.Project(sql.FieldLT(FieldGithubAppStatus, v))
+}
+
+// GithubAppStatusLTE applies the LTE predicate on the "github_app_status" field.
+func GithubAppStatusLTE(v string) predicate.Project {
+	return predicate.Project(sql.FieldLTE(FieldGithubAppStatus, v))
+}
+
+// GithubAppStatusContains applies the Contains predicate on the "github_app_status" field.
+func GithubAppStatusContains(v string) predicate.Project {
+	return predicate.Project(sql.FieldContains(FieldGithubAppStatus, v))
+}
+
+// GithubAppStatusHasPrefix applies the HasPrefix predicate on the "github_app_status" field.
+func GithubAppStatusHasPrefix(v string) predicate.Project {
+	return predicate.Project(sql.FieldHasPrefix(FieldGithubAppStatus, v))
+}
+
+// GithubAppStatusHasSuffix applies the HasSuffix predicate on the "github_app_status" field.
+func GithubAppStatusHasSuffix(v string) predicate.Project {
+	return predicate.Project(sql.FieldHasSuffix(FieldGithubAppStatus, v))
+}
+
+// GithubAppStatusIsNil applies the IsNil predicate on the "github_app_status" field.
+func GithubAppStatusIsNil() predicate.Project {
+	return predicate.Project(sql.FieldIsNull(FieldGithubAppStatus))
+}
+
+// GithubAppStatusNotNil applies the NotNil predicate on the "github_app_status" field.
+func GithubAppStatusNotNil() predicate.Project {
+	return predicate.Project(sql.FieldNotNull(FieldGithubAppStatus))
+}
+
+// GithubAppStatusEqualFold applies the EqualFold predicate on the "github_app_status" field.
+func GithubAppStatusEqualFold(v string) predicate.Project {
+	return predicate.Project(sql.FieldEqualFold(FieldGithubAppStatus, v))
+}
+
+// GithubAppStatusContainsFold applies the ContainsFold predicate on the "github_app_status" field.
+func GithubAppStatusContainsFold(v string) predicate.Project {
+	return predicate.Project(sql.FieldContainsFold(FieldGithubAppStatus, v))
+}
+
+// GitIdentityEQ applies the EQ predicate on the "git_identity" field.
+func GitIdentityEQ(v string) predicate.Project {
+	return predicate.Project(sql.FieldEQ(FieldGitIdentity, v))
+}
+
+// GitIdentityNEQ applies the NEQ predicate on the "git_identity" field.
+func GitIdentityNEQ(v string) predicate.Project {
+	return predicate.Project(sql.FieldNEQ(FieldGitIdentity, v))
+}
+
+// GitIdentityIn applies the In predicate on the "git_identity" field.
+func GitIdentityIn(vs ...string) predicate.Project {
+	return predicate.Project(sql.FieldIn(FieldGitIdentity, vs...))
+}
+
+// GitIdentityNotIn applies the NotIn predicate on the "git_identity" field.
+func GitIdentityNotIn(vs ...string) predicate.Project {
+	return predicate.Project(sql.FieldNotIn(FieldGitIdentity, vs...))
+}
+
+// GitIdentityGT applies the GT predicate on the "git_identity" field.
+func GitIdentityGT(v string) predicate.Project {
+	return predicate.Project(sql.FieldGT(FieldGitIdentity, v))
+}
+
+// GitIdentityGTE applies the GTE predicate on the "git_identity" field.
+func GitIdentityGTE(v string) predicate.Project {
+	return predicate.Project(sql.FieldGTE(FieldGitIdentity, v))
+}
+
+// GitIdentityLT applies the LT predicate on the "git_identity" field.
+func GitIdentityLT(v string) predicate.Project {
+	return predicate.Project(sql.FieldLT(FieldGitIdentity, v))
+}
+
+// GitIdentityLTE applies the LTE predicate on the "git_identity" field.
+func GitIdentityLTE(v string) predicate.Project {
+	return predicate.Project(sql.FieldLTE(FieldGitIdentity, v))
+}
+
+// GitIdentityContains applies the Contains predicate on the "git_identity" field.
+func GitIdentityContains(v string) predicate.Project {
+	return predicate.Project(sql.FieldContains(FieldGitIdentity, v))
+}
+
+// GitIdentityHasPrefix applies the HasPrefix predicate on the "git_identity" field.
+func GitIdentityHasPrefix(v string) predicate.Project {
+	return predicate.Project(sql.FieldHasPrefix(FieldGitIdentity, v))
+}
+
+// GitIdentityHasSuffix applies the HasSuffix predicate on the "git_identity" field.
+func GitIdentityHasSuffix(v string) predicate.Project {
+	return predicate.Project(sql.FieldHasSuffix(FieldGitIdentity, v))
+}
+
+// GitIdentityIsNil applies the IsNil predicate on the "git_identity" field.
+func GitIdentityIsNil() predicate.Project {
+	return predicate.Project(sql.FieldIsNull(FieldGitIdentity))
+}
+
+// GitIdentityNotNil applies the NotNil predicate on the "git_identity" field.
+func GitIdentityNotNil() predicate.Project {
+	return predicate.Project(sql.FieldNotNull(FieldGitIdentity))
+}
+
+// GitIdentityEqualFold applies the EqualFold predicate on the "git_identity" field.
+func GitIdentityEqualFold(v string) predicate.Project {
+	return predicate.Project(sql.FieldEqualFold(FieldGitIdentity, v))
+}
+
+// GitIdentityContainsFold applies the ContainsFold predicate on the "git_identity" field.
+func GitIdentityContainsFold(v string) predicate.Project {
+	return predicate.Project(sql.FieldContainsFold(FieldGitIdentity, v))
 }
 
 // HasAgents applies the HasEdge predicate on the "agents" edge.

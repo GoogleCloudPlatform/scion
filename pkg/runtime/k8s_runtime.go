@@ -34,6 +34,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/gcp"
 	"github.com/GoogleCloudPlatform/scion/pkg/k8s"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"golang.org/x/term"
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
@@ -292,6 +293,56 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (string, 
 		}
 	}
 
+	// --- N2-2b: Per-project advisory lock for NFS init-container provisioning ---
+	//
+	// When backend=nfs with a git clone configured AND an advisory locker is
+	// available, acquire the per-project lock before building the pod spec.
+	// This prevents concurrent first-clone corruption (risk RN1, design §7):
+	//   - Lock winner: injects the cloning init container (existing N2-2 script)
+	//   - Lock loser:  injects a wait-for-sentinel init container (polls for
+	//                  .scion-provisioned without cloning)
+	//
+	// The lock is held until waitForPodReady returns (all init containers
+	// complete), mirroring N1-4's "hold during clone" lifetime. On error
+	// paths the deferred release ensures no lock leak.
+	var nfsProvisionLockRelease func() error
+	if config.WorkspaceBackendName == "nfs" && config.NFSPVClaimName != "" && config.GitCloneForInit != nil {
+		if config.Locker != nil {
+			objID := store.StableProjectHash(config.ProjectID)
+			acquired, release, err := config.Locker.TryAdvisoryLockObject(
+				ctx, store.LockWorkspaceProvision, objID,
+			)
+			if err != nil {
+				return "", fmt.Errorf("NFS provision advisory lock for project %s: %w", config.ProjectID, err)
+			}
+			nfsProvisionLockRelease = release
+			if !acquired {
+				// Another node is currently provisioning this project's workspace.
+				// buildPod will inject a wait-for-sentinel init container instead
+				// of the cloning one.
+				config.nfsProvisionLockLost = true
+				runtimeLog.Info("NFS provision lock held by another node — pod will wait for sentinel",
+					"agent", config.Name, "project_id", config.ProjectID, "phase", "nfs-lock")
+			} else {
+				runtimeLog.Info("NFS provision lock acquired — pod will clone workspace",
+					"agent", config.Name, "project_id", config.ProjectID, "phase", "nfs-lock")
+			}
+		} else {
+			runtimeLog.Warn("No advisory locker available — NFS provisioning is unguarded (sentinel-only)",
+				"agent", config.Name, "project_id", config.ProjectID, "phase", "nfs-lock")
+		}
+	}
+	// Deferred release: held through pod creation + waitForPodReady (init
+	// containers complete), then released. Safe to call even when nil.
+	defer func() {
+		if nfsProvisionLockRelease != nil {
+			if err := nfsProvisionLockRelease(); err != nil {
+				runtimeLog.Error("Failed to release NFS provision lock", "error", err,
+					"agent", config.Name, "project_id", config.ProjectID)
+			}
+		}
+	}()
+
 	pod, err := r.buildPod(namespace, config)
 	if err != nil {
 		return "", fmt.Errorf("failed to build pod spec: %w", err)
@@ -333,7 +384,14 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (string, 
 		}
 	}
 
-	if config.Workspace != "" {
+	// Workspace sync: NFS-backed pods have workspace bytes pre-populated by the
+	// init container (N2-2), so skip the kubectl-cp workspace sync. This avoids
+	// redundantly copying workspace contents that already exist on the shared
+	// NFS volume. Local-backend pods RETAIN the existing workspace sync.
+	//
+	// Home-dir sync and the startup gate (/tmp/.scion-home-ready) are RETAINED
+	// for both backends — they carry agent dotfiles and secrets, not workspace code.
+	if config.Workspace != "" && config.WorkspaceBackendName != "nfs" {
 		runtimeLog.Info("Syncing workspace", "agent", config.Name, "source", config.Workspace, "phase", "workspace-sync")
 		fmt.Printf("  Syncing workspace (%s -> /workspace)...\n", config.Workspace)
 		err = r.syncWithRetry(ctx, func() error {
@@ -347,6 +405,9 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (string, 
 		if _, err := r.execInPod(ctx, namespace, createdPod.Name, []string{"sh", "-c", chownCmd}); err != nil {
 			runtimeLog.Debug("Failed to chown workspace (non-fatal)", "error", err)
 		}
+	} else if config.WorkspaceBackendName == "nfs" {
+		runtimeLog.Info("Skipping workspace sync (NFS backend: workspace pre-populated by init container)",
+			"agent", config.Name, "phase", "workspace-sync-skip")
 	}
 
 	// Signal the startup gate: all files are synced and ownership is fixed,
@@ -654,10 +715,28 @@ func (r *KubernetesRuntime) createAuthFileSecret(ctx context.Context, namespace,
 	return nil
 }
 
-// sharedDirPVCName returns the deterministic PVC name for a project shared directory.
+// --- Generalized project RWX claim helpers (N2-5) ---
+//
+// These helpers manage project-scoped PVCs for both shared directories and
+// (future) workspace claims. The naming convention and lifecycle are identical;
+// only the label selector differs.
+//
+// When backend=nfs, shared dirs are served from the workspace NFS PVC via
+// subPath (e.g., "projects/<pid>/shared-dirs/<name>") and do NOT need their
+// own PVC — the NFS volume already provides RWX access. The create/cleanup
+// helpers short-circuit for NFS.
+
+// projectRWXClaimName returns a deterministic PVC name for a project-scoped
+// RWX claim. Usable for shared dirs ("shared") and workspace claims ("workspace").
 // PVCs are project-scoped (not agent-scoped), so multiple agents share the same PVC.
+func projectRWXClaimName(projectName, claimType, dirName string) string {
+	return fmt.Sprintf("scion-%s-%s-%s", claimType, projectName, dirName)
+}
+
+// sharedDirPVCName returns the deterministic PVC name for a project shared directory.
+// This is a convenience wrapper around projectRWXClaimName for backward compatibility.
 func sharedDirPVCName(projectName, dirName string) string {
-	return fmt.Sprintf("scion-shared-%s-%s", projectName, dirName)
+	return projectRWXClaimName(projectName, "shared", dirName)
 }
 
 // defaultSharedDirSize is the default PVC size when not specified in settings.
@@ -666,8 +745,19 @@ const defaultSharedDirSize = "10Gi"
 // createSharedDirPVCs ensures PVCs exist for all declared shared directories.
 // PVCs are project-scoped and persist across agent restarts. If a PVC already
 // exists (from a previous agent in the same project), it is reused.
+//
+// When backend=nfs, shared dirs are served via NFS subPath from the workspace
+// PVC and do NOT require separate PVCs — this method is a no-op for NFS.
 func (r *KubernetesRuntime) createSharedDirPVCs(ctx context.Context, namespace string, config RunConfig) error {
 	if len(config.SharedDirs) == 0 {
+		return nil
+	}
+
+	// NFS backend: shared dirs use subPaths on the workspace NFS PVC,
+	// no separate PVCs needed (design §5.3).
+	if config.WorkspaceBackendName == "nfs" && config.NFSPVClaimName != "" {
+		runtimeLog.Info("NFS backend: shared dirs served via NFS subPath, skipping PVC creation",
+			"shared_dir_count", len(config.SharedDirs))
 		return nil
 	}
 
@@ -702,49 +792,63 @@ func (r *KubernetesRuntime) createSharedDirPVCs(ctx context.Context, namespace s
 	}
 
 	for _, sd := range config.SharedDirs {
-		pvcName := sharedDirPVCName(projectName, sd.Name)
-
-		// Check if PVC already exists (project-scoped, may have been created by another agent)
-		_, err := r.Client.Clientset.CoreV1().PersistentVolumeClaims(namespace).Get(ctx, pvcName, metav1.GetOptions{})
-		if err == nil {
-			runtimeLog.Info("Shared dir PVC already exists, reusing", "pvc", pvcName, "shared_dir", sd.Name)
-			continue
+		if err := r.ensureProjectRWXClaim(ctx, namespace, projectName, projectID, sd.Name, storageClass, storageQuantity); err != nil {
+			return err
 		}
+	}
 
-		accessMode := corev1.ReadWriteMany
-		pvc := &corev1.PersistentVolumeClaim{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      pvcName,
-				Namespace: namespace,
-				Labels: map[string]string{
-					"scion.project":    projectName,
-					"scion.grove":      projectName,
-					"scion.shared-dir": sd.Name,
+	return nil
+}
+
+// ensureProjectRWXClaim is the idempotent get-or-create core for project-scoped
+// RWX PVCs. It creates a PVC with a deterministic name if one does not already
+// exist. Used by both shared-dir and (future) workspace claim paths.
+func (r *KubernetesRuntime) ensureProjectRWXClaim(
+	ctx context.Context,
+	namespace, projectName, projectID, dirName, storageClass string,
+	storageQuantity resource.Quantity,
+) error {
+	pvcName := sharedDirPVCName(projectName, dirName)
+
+	// Check if PVC already exists (project-scoped, may have been created by another agent)
+	_, err := r.Client.Clientset.CoreV1().PersistentVolumeClaims(namespace).Get(ctx, pvcName, metav1.GetOptions{})
+	if err == nil {
+		runtimeLog.Info("Project RWX PVC already exists, reusing", "pvc", pvcName, "dir", dirName)
+		return nil
+	}
+
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      pvcName,
+			Namespace: namespace,
+			Labels: map[string]string{
+				"scion.project":    projectName,
+				"scion.grove":      projectName,
+				"scion.shared-dir": dirName,
+			},
+		},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany},
+			Resources: corev1.VolumeResourceRequirements{
+				Requests: corev1.ResourceList{
+					corev1.ResourceStorage: storageQuantity,
 				},
 			},
-			Spec: corev1.PersistentVolumeClaimSpec{
-				AccessModes: []corev1.PersistentVolumeAccessMode{accessMode},
-				Resources: corev1.VolumeResourceRequirements{
-					Requests: corev1.ResourceList{
-						corev1.ResourceStorage: storageQuantity,
-					},
-				},
-			},
-		}
+		},
+	}
 
-		if projectID != "" {
-			pvc.Labels["scion.project_id"] = projectID
-			pvc.Labels["scion.grove_id"] = projectID
-		}
+	if projectID != "" {
+		pvc.Labels["scion.project_id"] = projectID
+		pvc.Labels["scion.grove_id"] = projectID
+	}
 
-		if storageClass != "" {
-			pvc.Spec.StorageClassName = &storageClass
-		}
+	if storageClass != "" {
+		pvc.Spec.StorageClassName = &storageClass
+	}
 
-		runtimeLog.Info("Creating shared dir PVC", "pvc", pvcName, "shared_dir", sd.Name, "size", size)
-		if _, err := r.Client.Clientset.CoreV1().PersistentVolumeClaims(namespace).Create(ctx, pvc, metav1.CreateOptions{}); err != nil {
-			return fmt.Errorf("failed to create shared dir PVC %q: %w", pvcName, err)
-		}
+	runtimeLog.Info("Creating project RWX PVC", "pvc", pvcName, "dir", dirName, "storage", storageQuantity.String())
+	if _, err := r.Client.Clientset.CoreV1().PersistentVolumeClaims(namespace).Create(ctx, pvc, metav1.CreateOptions{}); err != nil {
+		return fmt.Errorf("failed to create project RWX PVC %q: %w", pvcName, err)
 	}
 
 	return nil
@@ -752,19 +856,27 @@ func (r *KubernetesRuntime) createSharedDirPVCs(ctx context.Context, namespace s
 
 // cleanupSharedDirPVCs removes PVCs for shared directories belonging to a project.
 // This is called during project deletion, not agent deletion, since PVCs are project-scoped.
+// When backend=nfs, shared dirs live on the NFS volume (no separate PVCs) but the
+// cleanup still runs — it harmlessly finds nothing because no PVCs were created.
 func (r *KubernetesRuntime) cleanupSharedDirPVCs(ctx context.Context, namespace, projectName string) {
-	selector := fmt.Sprintf("scion.grove=%s,scion.shared-dir", projectName)
+	r.cleanupProjectRWXClaims(ctx, namespace, projectName, "scion.shared-dir")
+}
+
+// cleanupProjectRWXClaims is the generic cleanup helper for project-scoped RWX PVCs.
+// It lists PVCs matching the project and label key, then deletes them.
+func (r *KubernetesRuntime) cleanupProjectRWXClaims(ctx context.Context, namespace, projectName, labelKey string) {
+	selector := fmt.Sprintf("scion.grove=%s,%s", projectName, labelKey)
 	pvcList, err := r.Client.Clientset.CoreV1().PersistentVolumeClaims(namespace).List(ctx, metav1.ListOptions{
 		LabelSelector: selector,
 	})
 	if err != nil {
-		runtimeLog.Warn("Failed to list shared dir PVCs for cleanup", "grove_id", projectName, "error", err)
+		runtimeLog.Warn("Failed to list project RWX PVCs for cleanup", "project", projectName, "label", labelKey, "error", err)
 		return
 	}
 	for _, pvc := range pvcList.Items {
-		runtimeLog.Info("Deleting shared dir PVC", "pvc", pvc.Name, "grove_id", projectName)
+		runtimeLog.Info("Deleting project RWX PVC", "pvc", pvc.Name, "project", projectName)
 		if err := r.Client.Clientset.CoreV1().PersistentVolumeClaims(namespace).Delete(ctx, pvc.Name, metav1.DeleteOptions{}); err != nil {
-			runtimeLog.Warn("Failed to delete shared dir PVC", "pvc", pvc.Name, "error", err)
+			runtimeLog.Warn("Failed to delete project RWX PVC", "pvc", pvc.Name, "error", err)
 		}
 	}
 }
@@ -1016,14 +1128,25 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 		corev1.EnvVar{Name: "LOGNAME", Value: config.UnixUsername},
 	)
 
-	// Security context: run agent pods as the image's non-root scion user and
-	// keep FSGroup aligned with the broker user so synced files remain writable.
+	// Security context: run agent pods as the image's non-root scion user.
+	// FSGroup is branched by workspace backend (N2-4):
+	//   - NFS backend: stable GID (default 1000) so files are writable across
+	//     pods and nodes without per-start chown (design §9.1).
+	//   - Local backend: host GID (today's behavior) so synced files remain
+	//     writable by the broker user.
 	const containerUID int64 = 1000
-	hostGID := int64(os.Getgid())
+	fsGroupGID := int64(os.Getgid()) // default: host GID (local backend)
+	if config.WorkspaceBackendName == "nfs" {
+		nfsGID := config.NFSGID
+		if nfsGID == 0 {
+			nfsGID = 1000 // design default
+		}
+		fsGroupGID = int64(nfsGID)
+	}
 	runAsNonRoot := true
 	allowPrivilegeEscalation := false
 	podSecurityContext := &corev1.PodSecurityContext{
-		FSGroup:      &hostGID,
+		FSGroup:      &fsGroupGID,
 		RunAsUser:    int64Ptr(containerUID),
 		RunAsGroup:   int64Ptr(containerUID),
 		RunAsNonRoot: &runAsNonRoot,
@@ -1044,6 +1167,38 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 			pullPolicy = corev1.PullIfNotPresent
 		default:
 			return nil, fmt.Errorf("invalid imagePullPolicy %q: must be Always, IfNotPresent, or Never", config.Kubernetes.ImagePullPolicy)
+		}
+	}
+
+	// Workspace volume: NFS-backed pods use a PVC+subPath for shared, persistent
+	// storage isolated to the project subtree (design §5.1/§9.4).
+	// Local-backend pods keep the existing EmptyDir (zero behavior change).
+	var workspaceVolume corev1.Volume
+	var workspaceVolumeMount corev1.VolumeMount
+	if config.WorkspaceBackendName == "nfs" && config.NFSPVClaimName != "" {
+		workspaceVolume = corev1.Volume{
+			Name: "workspace",
+			VolumeSource: corev1.VolumeSource{
+				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+					ClaimName: config.NFSPVClaimName,
+				},
+			},
+		}
+		workspaceVolumeMount = corev1.VolumeMount{
+			Name:      "workspace",
+			MountPath: "/workspace",
+			SubPath:   config.NFSSubPath,
+		}
+	} else {
+		workspaceVolume = corev1.Volume{
+			Name: "workspace",
+			VolumeSource: corev1.VolumeSource{
+				EmptyDir: &corev1.EmptyDirVolumeSource{},
+			},
+		}
+		workspaceVolumeMount = corev1.VolumeMount{
+			Name:      "workspace",
+			MountPath: "/workspace",
 		}
 	}
 
@@ -1072,21 +1227,59 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 							Drop: []corev1.Capability{"ALL"},
 						},
 					},
-					VolumeMounts: []corev1.VolumeMount{
-						{Name: "workspace", MountPath: "/workspace"},
-					},
+					VolumeMounts: []corev1.VolumeMount{workspaceVolumeMount},
 				},
 			},
-			Volumes: []corev1.Volume{
-				{
-					Name: "workspace",
-					VolumeSource: corev1.VolumeSource{
-						EmptyDir: &corev1.EmptyDirVolumeSource{},
-					},
-				},
-			},
+			Volumes:       []corev1.Volume{workspaceVolume},
 			RestartPolicy: corev1.RestartPolicyNever,
 		},
+	}
+
+	// NFS init container: when backend=nfs and git clone config is set, add an
+	// init container that provisions the workspace before the main container
+	// starts. The init container mounts the same workspace PVC+subPath so
+	// provisioned files are visible to the main container.
+	//
+	// Advisory lock integration (N2-2b, design §7, risk RN1): the Go-side
+	// Run() method acquires a per-project advisory lock (via TryAdvisoryLockObject)
+	// BEFORE reaching this point. The lock result determines the init container
+	// behavior:
+	//   - Lock winner (nfsProvisionLockLost=false): injects the CLONING init
+	//     container that checks the sentinel and clones if absent (N2-2 script).
+	//   - Lock loser  (nfsProvisionLockLost=true): injects a WAIT-for-sentinel
+	//     init container that polls for .scion-provisioned without cloning.
+	//
+	// When no advisory locker is available (Locker nil / single-node deploy),
+	// nfsProvisionLockLost stays false and the cloning init container is
+	// injected — the sentinel provides idempotent protection but NOT
+	// cross-node mutual exclusion.
+	if config.WorkspaceBackendName == "nfs" && config.NFSPVClaimName != "" && config.GitCloneForInit != nil {
+		var initScript string
+		if config.nfsProvisionLockLost {
+			// Lock loser: wait for the sentinel written by the winning node's
+			// cloning init container. Does NOT clone.
+			initScript = nfsWaitForSentinelScript()
+		} else {
+			// Lock winner (or no locker available): clone if sentinel is absent,
+			// skip if already provisioned. The script is idempotent.
+			initScript = nfsInitProvisionScript(config.GitCloneForInit)
+		}
+		initContainer := corev1.Container{
+			Name:    "workspace-provision",
+			Image:   config.Image,
+			Command: []string{"sh", "-c", initScript},
+			Env:     nfsInitProvisionEnv(config.GitCloneForInit),
+			VolumeMounts: []corev1.VolumeMount{
+				workspaceVolumeMount,
+			},
+			SecurityContext: &corev1.SecurityContext{
+				AllowPrivilegeEscalation: &allowPrivilegeEscalation,
+				Capabilities: &corev1.Capabilities{
+					Drop: []corev1.Capability{"ALL"},
+				},
+			},
+		}
+		pod.Spec.InitContainers = append(pod.Spec.InitContainers, initContainer)
 	}
 
 	// Append secret volumes and mounts
@@ -1179,13 +1372,20 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 		}
 	}
 
-	// Process shared directories — create PVC-backed volumes and mounts.
+	// Process shared directories — mount shared-dir volumes.
 	// Build a set of shared dir targets so we can skip them in the regular volume loop.
+	//
+	// NFS backend (N2-5): shared dirs are served from the SAME workspace NFS PVC
+	// via subPath (e.g., "projects/<pid>/shared-dirs/<name>"), avoiding per-dir PVCs.
+	// The workspace volume is already defined; we add additional subPath mounts.
+	//
+	// Local backend: each shared dir gets its own PVC (existing behavior, unchanged).
 	k8sContainerWorkspace := config.ContainerWorkspace
 	if k8sContainerWorkspace == "" {
 		k8sContainerWorkspace = "/workspace"
 	}
 	sharedDirTargets := make(map[string]bool, len(config.SharedDirs))
+	nfsSharedDirs := config.WorkspaceBackendName == "nfs" && config.NFSPVClaimName != ""
 	for i, sd := range config.SharedDirs {
 		target := fmt.Sprintf("/scion-volumes/%s", sd.Name)
 		if sd.InWorkspace {
@@ -1193,24 +1393,52 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 		}
 		sharedDirTargets[target] = true
 
-		projectName := config.Labels["scion.grove"]
-		pvcName := sharedDirPVCName(projectName, sd.Name)
-		volName := fmt.Sprintf("shared-dir-%d", i)
+		if nfsSharedDirs {
+			// NFS backend: mount from the workspace PVC with a shared-dir subPath.
+			// SubPath root mirrors the nfsBackend.Resolve layout:
+			//   <SubPathRoot>/<projectID>/shared-dirs/<name>
+			sdSubPath := nfsSharedDirSubPath(config.NFSSubPath, sd.Name)
+			volName := fmt.Sprintf("shared-dir-%d", i)
 
-		pod.Spec.Volumes = append(pod.Spec.Volumes, corev1.Volume{
-			Name: volName,
-			VolumeSource: corev1.VolumeSource{
-				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-					ClaimName: pvcName,
-					ReadOnly:  sd.ReadOnly,
+			// The volume source is the SAME NFS PVC as the workspace — but K8s
+			// requires a separate Volume entry per unique (claimName, subPath)
+			// pair in the pod spec, so we add the volume under a distinct name.
+			pod.Spec.Volumes = append(pod.Spec.Volumes, corev1.Volume{
+				Name: volName,
+				VolumeSource: corev1.VolumeSource{
+					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+						ClaimName: config.NFSPVClaimName,
+						ReadOnly:  sd.ReadOnly,
+					},
 				},
-			},
-		})
-		pod.Spec.Containers[0].VolumeMounts = append(pod.Spec.Containers[0].VolumeMounts, corev1.VolumeMount{
-			Name:      volName,
-			MountPath: target,
-			ReadOnly:  sd.ReadOnly,
-		})
+			})
+			pod.Spec.Containers[0].VolumeMounts = append(pod.Spec.Containers[0].VolumeMounts, corev1.VolumeMount{
+				Name:      volName,
+				MountPath: target,
+				SubPath:   sdSubPath,
+				ReadOnly:  sd.ReadOnly,
+			})
+		} else {
+			// Local backend: each shared dir gets its own PVC (existing behavior).
+			projectName := config.Labels["scion.grove"]
+			pvcName := sharedDirPVCName(projectName, sd.Name)
+			volName := fmt.Sprintf("shared-dir-%d", i)
+
+			pod.Spec.Volumes = append(pod.Spec.Volumes, corev1.Volume{
+				Name: volName,
+				VolumeSource: corev1.VolumeSource{
+					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+						ClaimName: pvcName,
+						ReadOnly:  sd.ReadOnly,
+					},
+				},
+			})
+			pod.Spec.Containers[0].VolumeMounts = append(pod.Spec.Containers[0].VolumeMounts, corev1.VolumeMount{
+				Name:      volName,
+				MountPath: target,
+				ReadOnly:  sd.ReadOnly,
+			})
+		}
 	}
 
 	// Process Volumes
@@ -2178,4 +2406,116 @@ func (r *KubernetesRuntime) GetWorkspacePath(ctx context.Context, id string) (st
 	}
 
 	return "", fmt.Errorf("no workspace path found for pod %s", id)
+}
+
+// nfsSharedDirSubPath computes the NFS subPath for a shared directory given the
+// workspace subPath. The workspace subPath is like "projects/<pid>/workspace";
+// shared dirs are siblings: "projects/<pid>/shared-dirs/<name>".
+//
+// This mirrors the nfsBackend.Resolve layout (design §5.3).
+func nfsSharedDirSubPath(workspaceSubPath, sharedDirName string) string {
+	// workspaceSubPath is "projects/<pid>/workspace"
+	// We need "projects/<pid>/shared-dirs/<name>"
+	parent := filepath.Dir(workspaceSubPath) // "projects/<pid>"
+	return filepath.Join(parent, "shared-dirs", sharedDirName)
+}
+
+// nfsInitProvisionScript generates the shell script for the NFS workspace
+// init container. The script checks for a sentinel file and clones the
+// repository if it is absent, providing first-access provisioning for NFS
+// workspaces (design §5.5/§7/§8.2). The sentinel file ensures idempotency
+// across concurrent pod starts for the same project.
+//
+// The /workspace mount in the init container points at the project's subPath
+// (e.g. projects/<pid>/workspace), so all operations are relative to "."
+// within that mount.
+//
+// Security: URL and Branch are injected via environment variables
+// (SCION_CLONE_URL, SCION_CLONE_BRANCH) set on the init container, NOT
+// interpolated into the script text. This prevents shell injection through
+// crafted branch names or URLs. Only the numeric depth is interpolated.
+func nfsInitProvisionScript(gc *api.GitCloneConfig) string {
+	if gc == nil || gc.URL == "" {
+		return "echo 'No git clone URL configured, skipping workspace provision'"
+	}
+
+	// Build the git clone depth flag. Only numeric depth is safe to interpolate.
+	depth := gc.Depth
+	if depth == 0 {
+		depth = 1 // default shallow clone
+	}
+
+	depthFlag := ""
+	if depth > 0 {
+		depthFlag = fmt.Sprintf("--depth %d", depth)
+	}
+
+	// The script reads URL and branch from env vars (set on the container spec)
+	// to avoid shell injection. The sentinel (.scion-provisioned) is checked
+	// first to skip if already provisioned.
+	script := fmt.Sprintf(`set -e
+SENTINEL="/workspace/.scion-provisioned"
+if [ -f "$SENTINEL" ]; then
+  echo "Workspace already provisioned (sentinel exists), skipping clone"
+  exit 0
+fi
+echo "Provisioning NFS workspace..."
+export GIT_TERMINAL_PROMPT=0
+TMPDIR=$(mktemp -d /workspace/.clone-XXXXXX)
+CLONE_ARGS="clone %s"
+if [ -n "$SCION_CLONE_BRANCH" ]; then
+  CLONE_ARGS="$CLONE_ARGS --branch $SCION_CLONE_BRANCH"
+fi
+git $CLONE_ARGS "$SCION_CLONE_URL" "$TMPDIR"
+# Move cloned content into /workspace (handles hidden files like .git)
+shopt -s dotglob 2>/dev/null || true
+mv "$TMPDIR"/* /workspace/ 2>/dev/null || cp -a "$TMPDIR"/. /workspace/
+rm -rf "$TMPDIR"
+# Write sentinel to mark provisioning complete
+echo "provisioned_at=$(date -u +%%Y-%%m-%%dT%%H:%%M:%%SZ)" > "$SENTINEL"
+echo "Workspace provisioned successfully"`, depthFlag)
+
+	return script
+}
+
+// nfsInitProvisionEnv returns the environment variables for the NFS init
+// container. URL and Branch are passed as env vars to prevent shell injection.
+func nfsInitProvisionEnv(gc *api.GitCloneConfig) []corev1.EnvVar {
+	if gc == nil {
+		return nil
+	}
+	envs := []corev1.EnvVar{
+		{Name: "SCION_CLONE_URL", Value: gc.URL},
+	}
+	if gc.Branch != "" {
+		envs = append(envs, corev1.EnvVar{Name: "SCION_CLONE_BRANCH", Value: gc.Branch})
+	}
+	return envs
+}
+
+// nfsWaitForSentinelScript generates a shell script for the non-winner
+// init container (N2-2b). This pod lost the advisory lock, meaning another
+// node is currently cloning the workspace. The script polls for the
+// sentinel file (.scion-provisioned) with a bounded timeout, allowing the
+// main container to start only after the winner has finished provisioning.
+//
+// Timeout: 5 minutes (300s) — generous enough for a full clone over NFS.
+// Poll interval: 2 seconds.
+func nfsWaitForSentinelScript() string {
+	return `set -e
+SENTINEL="/workspace/.scion-provisioned"
+TIMEOUT=300
+INTERVAL=2
+ELAPSED=0
+
+echo "Another node is provisioning this workspace — waiting for sentinel..."
+while [ ! -f "$SENTINEL" ]; do
+  if [ $ELAPSED -ge $TIMEOUT ]; then
+    echo "ERROR: Timed out waiting for workspace provisioning sentinel after ${TIMEOUT}s"
+    exit 1
+  fi
+  sleep $INTERVAL
+  ELAPSED=$((ELAPSED + INTERVAL))
+done
+echo "Workspace provisioned by another node (sentinel found after ${ELAPSED}s)"`
 }

@@ -35,14 +35,14 @@ func TestStopAllAgents_Global(t *testing.T) {
 
 	// Create a project
 	project := &store.Project{
-		ID:   "project-1",
+		ID:   tid("project-1"),
 		Name: "Test Project",
 		Slug: "test-project",
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
 
 	// Create running agents
-	for i, name := range []string{"agent-1", "agent-2", "agent-3"} {
+	for i, name := range []string{tid("agent-1"), tid("agent-2"), tid("agent-3")} {
 		agent := &store.Agent{
 			ID:        name,
 			Slug:      name,
@@ -69,7 +69,7 @@ func TestStopAllAgents_Global(t *testing.T) {
 		assert.Equal(t, 2, resp.Total)
 
 		// Verify agents are stopped in store
-		for _, name := range []string{"agent-1", "agent-2"} {
+		for _, name := range []string{tid("agent-1"), tid("agent-2")} {
 			agent, err := s.GetAgent(ctx, name)
 			require.NoError(t, err)
 			assert.Equal(t, string(state.PhaseStopped), agent.Phase)
@@ -102,27 +102,27 @@ func TestStopAllAgents_ProjectScoped(t *testing.T) {
 	ctx := context.Background()
 
 	// Create two projects
-	project1 := &store.Project{ID: "project-1", Name: "Project 1", Slug: "project-1"}
-	project2 := &store.Project{ID: "project-2", Name: "Project 2", Slug: "project-2"}
+	project1 := &store.Project{ID: tid("project-1"), Name: "Project 1", Slug: tid("project-1")}
+	project2 := &store.Project{ID: tid("project-2"), Name: "Project 2", Slug: tid("project-2")}
 	require.NoError(t, s.CreateProject(ctx, project1))
 	require.NoError(t, s.CreateProject(ctx, project2))
 
 	// Create running agents in both projects
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
-		ID: "g1-agent-1", Slug: "g1-agent-1", Name: "G1 Agent 1",
+		ID: tid("g1-agent-1"), Slug: tid("g1-agent-1"), Name: "G1 Agent 1",
 		ProjectID: project1.ID, Phase: string(state.PhaseRunning),
 	}))
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
-		ID: "g1-agent-2", Slug: "g1-agent-2", Name: "G1 Agent 2",
+		ID: tid("g1-agent-2"), Slug: tid("g1-agent-2"), Name: "G1 Agent 2",
 		ProjectID: project1.ID, Phase: string(state.PhaseRunning),
 	}))
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
-		ID: "g2-agent-1", Slug: "g2-agent-1", Name: "G2 Agent 1",
+		ID: tid("g2-agent-1"), Slug: tid("g2-agent-1"), Name: "G2 Agent 1",
 		ProjectID: project2.ID, Phase: string(state.PhaseRunning),
 	}))
 
 	t.Run("stops only agents in scoped project", func(t *testing.T) {
-		rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/project-1/agents/stop-all", nil)
+		rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+project1.ID+"/agents/stop-all", nil)
 		assert.Equal(t, http.StatusOK, rec.Code)
 
 		var resp StopAllAgentsResponse
@@ -133,11 +133,11 @@ func TestStopAllAgents_ProjectScoped(t *testing.T) {
 		assert.Equal(t, 2, resp.Total)
 
 		// Verify project-1 agents are stopped
-		a1, _ := s.GetAgent(ctx, "g1-agent-1")
+		a1, _ := s.GetAgent(ctx, tid("g1-agent-1"))
 		assert.Equal(t, string(state.PhaseStopped), a1.Phase)
 
 		// Verify project-2 agent is still running
-		a2, _ := s.GetAgent(ctx, "g2-agent-1")
+		a2, _ := s.GetAgent(ctx, tid("g2-agent-1"))
 		assert.Equal(t, string(state.PhaseRunning), a2.Phase)
 	})
 }
@@ -166,13 +166,14 @@ func TestStopAllAgents_ProjectOwner_StopsAllAgents(t *testing.T) {
 	ctx := context.Background()
 
 	// Create running agents owned by different users
+	permSeedUser(t, ctx, s, tid("user-other"))
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
-		ID: "alice-agent", Slug: "alice-agent", Name: "Alice Agent",
+		ID: tid("alice-agent"), Slug: tid("alice-agent"), Name: "Alice Agent",
 		ProjectID: project.ID, OwnerID: alice.ID, Phase: string(state.PhaseRunning),
 	}))
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
-		ID: "other-agent", Slug: "other-agent", Name: "Other Agent",
-		ProjectID: project.ID, OwnerID: "user-other", Phase: string(state.PhaseRunning),
+		ID: tid("other-agent"), Slug: tid("other-agent"), Name: "Other Agent",
+		ProjectID: project.ID, OwnerID: tid("user-other"), Phase: string(state.PhaseRunning),
 	}))
 
 	// Alice is project owner — should stop ALL agents, scope = "all"
@@ -188,9 +189,9 @@ func TestStopAllAgents_ProjectOwner_StopsAllAgents(t *testing.T) {
 	assert.Equal(t, "all", resp.Scope)
 
 	// Verify both agents are stopped
-	a1, _ := s.GetAgent(ctx, "alice-agent")
+	a1, _ := s.GetAgent(ctx, tid("alice-agent"))
 	assert.Equal(t, string(state.PhaseStopped), a1.Phase)
-	a2, _ := s.GetAgent(ctx, "other-agent")
+	a2, _ := s.GetAgent(ctx, tid("other-agent"))
 	assert.Equal(t, string(state.PhaseStopped), a2.Phase)
 }
 
@@ -200,7 +201,7 @@ func TestStopAllAgents_ProjectMember_StopsOnlyOwnAgents(t *testing.T) {
 
 	// Create a third user "carol" as a regular project member
 	carol := &store.User{
-		ID:          "user-carol",
+		ID:          tid("user-carol"),
 		Email:       "carol@test.com",
 		DisplayName: "Carol",
 		Role:        store.UserRoleMember,
@@ -222,16 +223,16 @@ func TestStopAllAgents_ProjectMember_StopsOnlyOwnAgents(t *testing.T) {
 
 	// Create agents owned by carol and by alice
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
-		ID: "carol-agent-1", Slug: "carol-agent-1", Name: "Carol Agent 1",
+		ID: tid("carol-agent-1"), Slug: tid("carol-agent-1"), Name: "Carol Agent 1",
 		ProjectID: project.ID, OwnerID: carol.ID, Phase: string(state.PhaseRunning),
 	}))
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
-		ID: "carol-agent-2", Slug: "carol-agent-2", Name: "Carol Agent 2",
+		ID: tid("carol-agent-2"), Slug: tid("carol-agent-2"), Name: "Carol Agent 2",
 		ProjectID: project.ID, OwnerID: carol.ID, Phase: string(state.PhaseRunning),
 	}))
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
-		ID: "alice-agent", Slug: "alice-agent", Name: "Alice Agent",
-		ProjectID: project.ID, OwnerID: "user-alice", Phase: string(state.PhaseRunning),
+		ID: tid("alice-agent"), Slug: tid("alice-agent"), Name: "Alice Agent",
+		ProjectID: project.ID, OwnerID: tid("user-alice"), Phase: string(state.PhaseRunning),
 	}))
 
 	// Carol (regular member) should only stop her own agents, scope = "own"
@@ -247,13 +248,13 @@ func TestStopAllAgents_ProjectMember_StopsOnlyOwnAgents(t *testing.T) {
 	assert.Equal(t, "own", resp.Scope)
 
 	// Verify carol's agents are stopped
-	c1, _ := s.GetAgent(ctx, "carol-agent-1")
+	c1, _ := s.GetAgent(ctx, tid("carol-agent-1"))
 	assert.Equal(t, string(state.PhaseStopped), c1.Phase)
-	c2, _ := s.GetAgent(ctx, "carol-agent-2")
+	c2, _ := s.GetAgent(ctx, tid("carol-agent-2"))
 	assert.Equal(t, string(state.PhaseStopped), c2.Phase)
 
 	// Verify alice's agent is still running
-	a1, _ := s.GetAgent(ctx, "alice-agent")
+	a1, _ := s.GetAgent(ctx, tid("alice-agent"))
 	assert.Equal(t, string(state.PhaseRunning), a1.Phase)
 }
 
@@ -263,7 +264,7 @@ func TestStopAllAgents_NonMember_Forbidden(t *testing.T) {
 
 	// Create a running agent in the project
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
-		ID: "agent-1", Slug: "agent-1", Name: "Agent 1",
+		ID: tid("agent-1"), Slug: tid("agent-1"), Name: "Agent 1",
 		ProjectID: project.ID, Phase: string(state.PhaseRunning),
 	}))
 
@@ -273,7 +274,7 @@ func TestStopAllAgents_NonMember_Forbidden(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, rec.Code)
 
 	// Agent should still be running
-	a, _ := s.GetAgent(ctx, "agent-1")
+	a, _ := s.GetAgent(ctx, tid("agent-1"))
 	assert.Equal(t, string(state.PhaseRunning), a.Phase)
 }
 

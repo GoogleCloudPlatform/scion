@@ -15,6 +15,7 @@
 package hub
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -103,7 +104,11 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := dispatcher.DispatchAgentMessage(r.Context(), agent, req.Message.Msg, req.Message.Urgent, req.Message); err != nil {
+	if err := dispatcher.DispatchAgentMessage(r.Context(), agent, req.Message.Msg, req.Message.Urgent, req.Message); errors.Is(err, ErrMessageDeferred) {
+		s.signalDeferredMessage(r.Context(), agent.RuntimeBrokerID, agent.ID)
+		w.WriteHeader(http.StatusAccepted)
+		return
+	} else if err != nil {
 		log.Error("Failed to dispatch inbound message",
 			"agent_id", agent.ID, "agent_slug", agentSlug, "error", err)
 		writeError(w, http.StatusBadGateway, ErrCodeRuntimeError,

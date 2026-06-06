@@ -67,14 +67,14 @@ func TestAgentGroups(t *testing.T) {
 	ctx := context.Background()
 
 	project := &store.Project{
-		ID:   "project-1",
+		ID:   tid("project-1"),
 		Name: "Test Project",
 		Slug: "test-project",
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
 
 	agent := &store.Agent{
-		ID:        "agent-1",
+		ID:        tid("agent-1"),
 		Slug:      "agent-1-slug",
 		Name:      "Agent 1",
 		ProjectID: project.ID,
@@ -82,7 +82,7 @@ func TestAgentGroups(t *testing.T) {
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
 
-	rec := doRequest(t, srv, http.MethodGet, "/api/v1/agents/agent-1/groups", nil)
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/agents/"+tid("agent-1")+"/groups", nil)
 
 	assert.Equal(t, http.StatusOK, rec.Code)
 
@@ -104,7 +104,7 @@ func TestPrincipalResolve_User(t *testing.T) {
 	ctx := context.Background()
 
 	user := &store.User{
-		ID:          "user-1",
+		ID:          tid("user-1"),
 		Email:       "alice@example.com",
 		DisplayName: "Alice",
 		Role:        "member",
@@ -112,14 +112,14 @@ func TestPrincipalResolve_User(t *testing.T) {
 	}
 	require.NoError(t, s.CreateUser(ctx, user))
 
-	rec := doRequest(t, srv, http.MethodGet, "/api/v1/principals/user/user-1", nil)
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/principals/user/"+tid("user-1"), nil)
 
 	assert.Equal(t, http.StatusOK, rec.Code)
 
 	var resp PrincipalResolutionResponse
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
 	assert.Equal(t, "user", resp.Principal.Type)
-	assert.Equal(t, "user-1", resp.Principal.ID)
+	assert.Equal(t, tid("user-1"), resp.Principal.ID)
 	assert.Equal(t, "Alice", resp.Principal.DisplayName)
 	assert.NotNil(t, resp.DirectGroups)
 	assert.NotNil(t, resp.EffectiveGroups)
@@ -130,14 +130,14 @@ func TestPrincipalResolve_Agent(t *testing.T) {
 	ctx := context.Background()
 
 	project := &store.Project{
-		ID:   "project-1",
+		ID:   tid("project-1"),
 		Name: "Test Project",
 		Slug: "test-project",
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
 
 	agent := &store.Agent{
-		ID:        "agent-1",
+		ID:        tid("agent-1"),
 		Slug:      "agent-1-slug",
 		Name:      "Agent 1",
 		ProjectID: project.ID,
@@ -145,16 +145,16 @@ func TestPrincipalResolve_Agent(t *testing.T) {
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
 
-	rec := doRequest(t, srv, http.MethodGet, "/api/v1/principals/agent/agent-1", nil)
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/principals/agent/"+tid("agent-1"), nil)
 
 	assert.Equal(t, http.StatusOK, rec.Code)
 
 	var resp PrincipalResolutionResponse
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
 	assert.Equal(t, "agent", resp.Principal.Type)
-	assert.Equal(t, "agent-1", resp.Principal.ID)
+	assert.Equal(t, tid("agent-1"), resp.Principal.ID)
 	assert.Equal(t, "Agent 1", resp.Principal.DisplayName)
-	assert.Equal(t, "project-1", resp.Principal.ProjectID)
+	assert.Equal(t, tid("project-1"), resp.Principal.ProjectID)
 	assert.NotNil(t, resp.DirectGroups)
 	assert.NotNil(t, resp.EffectiveGroups)
 }
@@ -164,21 +164,21 @@ func TestPrincipalResolve_Group(t *testing.T) {
 	ctx := context.Background()
 
 	group := &store.Group{
-		ID:          "group-1",
+		ID:          tid("group-1"),
 		Name:        "Platform Team",
 		Slug:        "platform-team",
 		Description: "The platform team",
 	}
 	require.NoError(t, s.CreateGroup(ctx, group))
 
-	rec := doRequest(t, srv, http.MethodGet, "/api/v1/principals/group/group-1", nil)
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/principals/group/"+tid("group-1"), nil)
 
 	assert.Equal(t, http.StatusOK, rec.Code)
 
 	var resp PrincipalResolutionResponse
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
 	assert.Equal(t, "group", resp.Principal.Type)
-	assert.Equal(t, "group-1", resp.Principal.ID)
+	assert.Equal(t, tid("group-1"), resp.Principal.ID)
 	assert.Equal(t, "Platform Team", resp.Principal.DisplayName)
 	assert.Empty(t, resp.DirectGroups)
 	assert.Empty(t, resp.EffectiveGroups)
@@ -223,7 +223,7 @@ func TestPrincipalResolve_AgentWithCreator(t *testing.T) {
 
 	// Create a user as the agent's creator
 	user := &store.User{
-		ID:          "creator-1",
+		ID:          tid("creator-1"),
 		Email:       "creator@example.com",
 		DisplayName: "Creator User",
 		Role:        "member",
@@ -232,33 +232,33 @@ func TestPrincipalResolve_AgentWithCreator(t *testing.T) {
 	require.NoError(t, s.CreateUser(ctx, user))
 
 	project := &store.Project{
-		ID:   "project-1",
+		ID:   tid("project-1"),
 		Name: "Test Project",
 		Slug: "test-project",
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
 
 	agent := &store.Agent{
-		ID:        "agent-deleg",
+		ID:        tid("agent-deleg"),
 		Slug:      "agent-deleg-slug",
 		Name:      "Delegated Agent",
 		ProjectID: project.ID,
 		Phase:     string(state.PhaseRunning),
-		CreatedBy: "creator-1",
+		CreatedBy: tid("creator-1"),
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
 
-	rec := doRequest(t, srv, http.MethodGet, "/api/v1/principals/agent/agent-deleg", nil)
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/principals/agent/"+tid("agent-deleg"), nil)
 
 	assert.Equal(t, http.StatusOK, rec.Code)
 
 	var resp PrincipalResolutionResponse
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
 	assert.Equal(t, "agent", resp.Principal.Type)
-	assert.Equal(t, "agent-deleg", resp.Principal.ID)
+	assert.Equal(t, tid("agent-deleg"), resp.Principal.ID)
 	// Should include delegation info
 	require.NotNil(t, resp.DelegatesFrom)
 	assert.Equal(t, "user", resp.DelegatesFrom.Type)
-	assert.Equal(t, "creator-1", resp.DelegatesFrom.ID)
+	assert.Equal(t, tid("creator-1"), resp.DelegatesFrom.ID)
 	assert.Equal(t, "Creator User", resp.DelegatesFrom.DisplayName)
 }

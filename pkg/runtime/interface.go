@@ -18,6 +18,7 @@ import (
 	"context"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 type RunConfig struct {
@@ -51,6 +52,52 @@ type RunConfig struct {
 	NetworkMode          string   // Container network mode (e.g. "host" for --network=host)
 	Project              string   // Project name (e.g., "global" or "my-project")
 	ProjectID            string   // Project ID (e.g., "550e8400-e29b-41d4-a716-446655440000")
+
+	// WorkspaceBackendName is "local" or "nfs", set by the workspace backend
+	// selector. Used to branch UID/GID injection and skip per-start chown
+	// when NFS (N1-5).
+	WorkspaceBackendName string
+	// NFSUID and NFSGID are the stable, node-independent UID/GID for NFS-backed
+	// workspaces. Advertised as SCION_HOST_UID/GID when WorkspaceBackendName is "nfs"
+	// instead of os.Getuid()/os.Getgid(). Default 1000:1000 (design §9.1).
+	NFSUID int
+	NFSGID int
+
+	// NFSPVClaimName is the K8s PVC name for the NFS-backed workspace volume.
+	// Set when WorkspaceBackendName is "nfs". The PVC references a static RWX PV
+	// bound to the Filestore/NFS export. Empty for local backend.
+	NFSPVClaimName string
+	// NFSSubPath is the subPath within the NFS PVC that isolates this project's
+	// workspace (e.g. "projects/<pid>/workspace"). Used by K8s buildPod to scope
+	// the volume mount — pod sees only its project subtree (design §9.4).
+	NFSSubPath string
+	// NFSStorageClass is the K8s StorageClass for NFS-backed PVCs.
+	// Used when creating shared-dir PVCs on NFS. Empty uses cluster default.
+	NFSStorageClass string
+
+	// GitCloneForInit holds git clone configuration for NFS init-container
+	// workspace provisioning (N2-2). When set, buildPod adds an init container
+	// that clones/provisions the workspace before the main container starts.
+	GitCloneForInit *api.GitCloneConfig
+
+	// Locker provides the per-project advisory lock for NFS workspace
+	// provisioning (N2-2b, design §7, risk RN1). When set and backend=nfs,
+	// the K8s runtime acquires the lock before building the pod to determine
+	// whether this pod should clone (lock winner) or wait for the sentinel
+	// (lock loser). This prevents concurrent first-clone corruption when
+	// two pods for the same project are scheduled on different nodes.
+	//
+	// May be nil — when absent, all pods get the cloning init container
+	// (sentinel-only guard, correct for single-node but unsafe for
+	// multi-node). On Postgres-backed deployments this is wired from
+	// the store's AdvisoryLocker capability.
+	Locker store.AdvisoryLocker
+
+	// nfsProvisionLockLost is set internally by Run() after a failed
+	// advisory lock acquisition attempt. When true, buildPod injects a
+	// wait-for-sentinel init container instead of the cloning one.
+	// Callers should not set this field.
+	nfsProvisionLockLost bool
 }
 
 type Runtime interface {

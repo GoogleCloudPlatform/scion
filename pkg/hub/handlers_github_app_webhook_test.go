@@ -152,7 +152,7 @@ func TestHandleGitHubWebhook_InstallationCreated(t *testing.T) {
 
 	// Create a project with a matching git remote
 	project := &store.Project{
-		ID:        "project-1",
+		ID:        tid("project-1"),
 		Name:      "Test Project",
 		Slug:      "test-project",
 		GitRemote: "https://github.com/acme/widgets.git",
@@ -205,7 +205,7 @@ func TestHandleGitHubWebhook_InstallationCreated(t *testing.T) {
 	}
 
 	// Verify project was auto-associated
-	updatedProject, err := s.GetProject(ctx, "project-1")
+	updatedProject, err := s.GetProject(ctx, tid("project-1"))
 	if err != nil {
 		t.Fatalf("failed to get project: %v", err)
 	}
@@ -242,7 +242,7 @@ func TestHandleGitHubWebhook_InstallationDeleted(t *testing.T) {
 
 	// Create a project associated with the installation
 	project := &store.Project{
-		ID:                   "project-1",
+		ID:                   tid("project-1"),
 		Name:                 "Test Project",
 		Slug:                 "test-project",
 		GitRemote:            "https://github.com/acme/widgets.git",
@@ -286,7 +286,7 @@ func TestHandleGitHubWebhook_InstallationDeleted(t *testing.T) {
 	}
 
 	// Verify project was set to error state
-	updatedProject, _ := s.GetProject(ctx, "project-1")
+	updatedProject, _ := s.GetProject(ctx, tid("project-1"))
 	if updatedProject.GitHubAppStatus == nil || updatedProject.GitHubAppStatus.State != store.GitHubAppStateError {
 		t.Errorf("expected project error state, got %v", updatedProject.GitHubAppStatus)
 	}
@@ -310,7 +310,7 @@ func TestHandleGitHubWebhook_InstallationReposRemoved(t *testing.T) {
 	}
 
 	project := &store.Project{
-		ID:                   "project-1",
+		ID:                   tid("project-1"),
 		Name:                 "Test Project",
 		Slug:                 "test-project",
 		GitRemote:            "https://github.com/acme/widgets.git",
@@ -351,7 +351,7 @@ func TestHandleGitHubWebhook_InstallationReposRemoved(t *testing.T) {
 	}
 
 	// Verify project was set to error
-	updatedProject, _ := s.GetProject(ctx, "project-1")
+	updatedProject, _ := s.GetProject(ctx, tid("project-1"))
 	if updatedProject.GitHubAppStatus == nil || updatedProject.GitHubAppStatus.State != store.GitHubAppStateError {
 		t.Errorf("expected error state, got %v", updatedProject.GitHubAppStatus)
 	}
@@ -390,10 +390,10 @@ func TestMatchProjectsToInstallation(t *testing.T) {
 
 	// Create projects with different git remotes
 	projects := []*store.Project{
-		{ID: "g1", Name: "G1", Slug: "g1", GitRemote: "https://github.com/acme/widgets.git", Created: time.Now(), Updated: time.Now()},
-		{ID: "g2", Name: "G2", Slug: "g2", GitRemote: "https://github.com/acme/api.git", Created: time.Now(), Updated: time.Now()},
-		{ID: "g3", Name: "G3", Slug: "g3", GitRemote: "https://github.com/other/repo.git", Created: time.Now(), Updated: time.Now()},
-		{ID: "g4", Name: "G4", Slug: "g4", Created: time.Now(), Updated: time.Now()}, // No git remote
+		{ID: tid("g1"), Name: "G1", Slug: tid("g1"), GitRemote: "https://github.com/acme/widgets.git", Created: time.Now(), Updated: time.Now()},
+		{ID: tid("g2"), Name: "G2", Slug: tid("g2"), GitRemote: "https://github.com/acme/api.git", Created: time.Now(), Updated: time.Now()},
+		{ID: tid("g3"), Name: "G3", Slug: tid("g3"), GitRemote: "https://github.com/other/repo.git", Created: time.Now(), Updated: time.Now()},
+		{ID: tid("g4"), Name: "G4", Slug: tid("g4"), Created: time.Now(), Updated: time.Now()}, // No git remote
 	}
 
 	for _, g := range projects {
@@ -418,7 +418,7 @@ func TestMatchProjectsToInstallation(t *testing.T) {
 	}
 
 	// Verify both matching projects were associated
-	for _, gID := range []string{"g1", "g2"} {
+	for _, gID := range []string{tid("g1"), tid("g2")} {
 		project, _ := s.GetProject(ctx, gID)
 		if project.GitHubInstallationID == nil {
 			t.Errorf("project %s should be associated with installation", gID)
@@ -428,13 +428,13 @@ func TestMatchProjectsToInstallation(t *testing.T) {
 	}
 
 	// Verify non-matching project was NOT associated
-	g3, _ := s.GetProject(ctx, "g3")
+	g3, _ := s.GetProject(ctx, tid("g3"))
 	if g3.GitHubInstallationID != nil {
 		t.Error("project g3 should not be associated")
 	}
 
 	// Verify no-remote project was NOT associated
-	g4, _ := s.GetProject(ctx, "g4")
+	g4, _ := s.GetProject(ctx, tid("g4"))
 	if g4.GitHubInstallationID != nil {
 		t.Error("project g4 should not be associated")
 	}
@@ -456,9 +456,9 @@ func TestMatchProjectsToInstallation_SkipsAlreadyAssociated(t *testing.T) {
 	}
 
 	project := &store.Project{
-		ID:                   "g1",
+		ID:                   tid("g1"),
 		Name:                 "G1",
-		Slug:                 "g1",
+		Slug:                 tid("g1"),
 		GitRemote:            "https://github.com/acme/widgets.git",
 		GitHubInstallationID: &otherInstallation,
 		Created:              time.Now(),
@@ -479,7 +479,7 @@ func TestMatchProjectsToInstallation_SkipsAlreadyAssociated(t *testing.T) {
 	}
 
 	// Verify project still has the original installation
-	updatedProject, _ := s.GetProject(ctx, "g1")
+	updatedProject, _ := s.GetProject(ctx, tid("g1"))
 	if *updatedProject.GitHubInstallationID != 99999 {
 		t.Errorf("project should still have original installation")
 	}
@@ -593,7 +593,7 @@ func TestWebhook_PublishesProjectUpdatedOnInstallationDeleted(t *testing.T) {
 
 	// Create a project associated with the installation
 	project := &store.Project{
-		ID:                   "project-event-1",
+		ID:                   tid("project-event-1"),
 		Name:                 "Event Test Project",
 		Slug:                 "event-test-project",
 		GitRemote:            "https://github.com/acme/widgets.git",
@@ -635,7 +635,7 @@ func TestWebhook_PublishesProjectUpdatedOnInstallationDeleted(t *testing.T) {
 	if len(updates) != 1 {
 		t.Fatalf("expected 1 project updated event, got %d", len(updates))
 	}
-	if updates[0].ID != "project-event-1" {
+	if updates[0].ID != tid("project-event-1") {
 		t.Errorf("expected project ID project-event-1, got %s", updates[0].ID)
 	}
 	if updates[0].GitHubAppStatus == nil || updates[0].GitHubAppStatus.State != store.GitHubAppStateError {
@@ -664,7 +664,7 @@ func TestWebhook_PublishesProjectUpdatedOnRepoRemoved(t *testing.T) {
 	}
 
 	project := &store.Project{
-		ID:                   "project-event-2",
+		ID:                   tid("project-event-2"),
 		Name:                 "Event Test Project 2",
 		Slug:                 "event-test-project-2",
 		GitRemote:            "https://github.com/acme/widgets.git",
@@ -702,7 +702,7 @@ func TestWebhook_PublishesProjectUpdatedOnRepoRemoved(t *testing.T) {
 	if len(updates) != 1 {
 		t.Fatalf("expected 1 project updated event, got %d", len(updates))
 	}
-	if updates[0].ID != "project-event-2" {
+	if updates[0].ID != tid("project-event-2") {
 		t.Errorf("expected project ID project-event-2, got %s", updates[0].ID)
 	}
 	if updates[0].GitHubAppStatus == nil || updates[0].GitHubAppStatus.State != store.GitHubAppStateError {
@@ -719,7 +719,7 @@ func TestWebhook_PublishesProjectUpdatedOnAutoMatch(t *testing.T) {
 
 	// Create a project with a matching git remote but no installation yet
 	project := &store.Project{
-		ID:        "project-event-3",
+		ID:        tid("project-event-3"),
 		Name:      "Event Test Project 3",
 		Slug:      "event-test-project-3",
 		GitRemote: "https://github.com/acme/widgets.git",
@@ -762,7 +762,7 @@ func TestWebhook_PublishesProjectUpdatedOnAutoMatch(t *testing.T) {
 	if len(updates) != 1 {
 		t.Fatalf("expected 1 project updated event from auto-match, got %d", len(updates))
 	}
-	if updates[0].ID != "project-event-3" {
+	if updates[0].ID != tid("project-event-3") {
 		t.Errorf("expected project ID project-event-3, got %s", updates[0].ID)
 	}
 	if updates[0].GitHubInstallationID == nil || *updates[0].GitHubInstallationID != 12345 {

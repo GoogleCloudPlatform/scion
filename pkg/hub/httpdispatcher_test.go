@@ -30,13 +30,12 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
-	"github.com/GoogleCloudPlatform/scion/pkg/store/sqlite"
 )
 
 // createTestStore creates an in-memory SQLite store for testing.
 func createTestStore(t *testing.T) store.Store {
 	t.Helper()
-	s, err := sqlite.New(":memory:")
+	s, err := newTestStore(":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
@@ -137,6 +136,10 @@ func (m *mockRuntimeBrokerClient) RestartAgent(ctx context.Context, brokerID, br
 	return m.returnErr
 }
 
+func (m *mockRuntimeBrokerClient) ResetAuthAgent(_ context.Context, _, _, _, _, _ string) error {
+	return m.returnErr
+}
+
 func (m *mockRuntimeBrokerClient) DeleteAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, deleteFiles, removeBranch, softDelete bool, deletedAt time.Time) error {
 	m.deleteCalled = true
 	m.lastBrokerID = brokerID
@@ -181,7 +184,7 @@ func (m *mockRuntimeBrokerClient) GetAgentLogs(ctx context.Context, brokerID, br
 	return "", nil
 }
 
-func (m *mockRuntimeBrokerClient) CleanupProject(ctx context.Context, brokerID, brokerEndpoint, projectSlug string) error {
+func (m *mockRuntimeBrokerClient) CleanupProject(ctx context.Context, brokerID, brokerEndpoint, projectSlug, projectID string) error {
 	m.cleanupCalled = true
 	m.cleanupCalls++
 	m.lastBrokerID = brokerID
@@ -215,7 +218,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate(t *testing.T) {
 
 	// Create a runtime broker with an endpoint
 	broker := &store.RuntimeBroker{
-		ID:       "host-1",
+		ID:       tid("host-1"),
 		Name:     "test-host",
 		Slug:     "test-host",
 		Endpoint: "http://localhost:9800",
@@ -229,11 +232,11 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate(t *testing.T) {
 	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
 
 	agent := &store.Agent{
-		ID:              "agent-1",
+		ID:              tid("agent-1"),
 		Name:            "test-agent",
 		Slug:            "test-agent",
-		ProjectID:       "project-1",
-		RuntimeBrokerID: "host-1",
+		ProjectID:       tid("project-1"),
+		RuntimeBrokerID: tid("host-1"),
 		AppliedConfig: &store.AgentAppliedConfig{
 			HarnessConfig: "claude",
 			Task:          "Fix a bug",
@@ -258,8 +261,9 @@ func TestHTTPAgentDispatcher_DispatchAgentStop(t *testing.T) {
 	memStore := createTestStore(t)
 
 	broker := &store.RuntimeBroker{
-		ID:       "host-1",
+		ID:       tid("host-1"),
 		Name:     "test-host",
+		Slug:     "test-host",
 		Endpoint: "http://localhost:9800",
 		Status:   store.BrokerStatusOnline,
 	}
@@ -271,10 +275,10 @@ func TestHTTPAgentDispatcher_DispatchAgentStop(t *testing.T) {
 	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
 
 	agent := &store.Agent{
-		ID:              "agent-1",
+		ID:              tid("agent-1"),
 		Name:            "test-agent",
 		Slug:            "test-agent",
-		RuntimeBrokerID: "host-1",
+		RuntimeBrokerID: tid("host-1"),
 	}
 
 	err := dispatcher.DispatchAgentStop(ctx, agent)
@@ -295,8 +299,9 @@ func TestHTTPAgentDispatcher_DispatchAgentDelete(t *testing.T) {
 	memStore := createTestStore(t)
 
 	broker := &store.RuntimeBroker{
-		ID:       "host-1",
+		ID:       tid("host-1"),
 		Name:     "test-host",
+		Slug:     "test-host",
 		Endpoint: "http://localhost:9800",
 		Status:   store.BrokerStatusOnline,
 	}
@@ -308,10 +313,10 @@ func TestHTTPAgentDispatcher_DispatchAgentDelete(t *testing.T) {
 	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
 
 	agent := &store.Agent{
-		ID:              "agent-1",
+		ID:              tid("agent-1"),
 		Name:            "test-agent",
 		Slug:            "test-agent",
-		RuntimeBrokerID: "host-1",
+		RuntimeBrokerID: tid("host-1"),
 	}
 
 	err := dispatcher.DispatchAgentDelete(ctx, agent, true, false, false, time.Time{})
@@ -335,8 +340,9 @@ func TestHTTPAgentDispatcher_DispatchAgentMessage(t *testing.T) {
 	memStore := createTestStore(t)
 
 	broker := &store.RuntimeBroker{
-		ID:       "host-1",
+		ID:       tid("host-1"),
 		Name:     "test-host",
+		Slug:     "test-host",
 		Endpoint: "http://localhost:9800",
 		Status:   store.BrokerStatusOnline,
 	}
@@ -348,10 +354,10 @@ func TestHTTPAgentDispatcher_DispatchAgentMessage(t *testing.T) {
 	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
 
 	agent := &store.Agent{
-		ID:              "agent-1",
+		ID:              tid("agent-1"),
 		Name:            "test-agent",
 		Slug:            "test-agent",
-		RuntimeBrokerID: "host-1",
+		RuntimeBrokerID: tid("host-1"),
 	}
 
 	err := dispatcher.DispatchAgentMessage(ctx, agent, "Hello, agent!", true, nil)
@@ -407,12 +413,12 @@ func TestHTTPRuntimeBrokerClient_CreateAgent(t *testing.T) {
 
 	req := &RemoteCreateAgentRequest{
 		ID:        "hub-uuid-1",
-		Slug:      "agent-1",
+		Slug:      tid("agent-1"),
 		Name:      "test-agent",
-		ProjectID: "project-1",
+		ProjectID: tid("project-1"),
 	}
 
-	resp, err := client.CreateAgent(context.Background(), "host-1", server.URL, req)
+	resp, err := client.CreateAgent(context.Background(), tid("host-1"), server.URL, req)
 	if err != nil {
 		t.Fatalf("CreateAgent failed: %v", err)
 	}
@@ -440,7 +446,7 @@ func TestHTTPRuntimeBrokerClient_StartAgent_InvalidJSONFails(t *testing.T) {
 	defer server.Close()
 
 	client := NewHTTPRuntimeBrokerClient()
-	_, err := client.StartAgent(context.Background(), "host-1", server.URL, "test-agent", "", "", "", "", "", nil, nil, nil, nil, false)
+	_, err := client.StartAgent(context.Background(), tid("host-1"), server.URL, "test-agent", "", "", "", "", "", nil, nil, nil, nil, false)
 	if err == nil {
 		t.Fatal("expected StartAgent to fail on invalid JSON response")
 	}
@@ -464,7 +470,7 @@ func TestHTTPRuntimeBrokerClient_StopAgent(t *testing.T) {
 
 	client := NewHTTPRuntimeBrokerClient()
 
-	err := client.StopAgent(context.Background(), "host-1", server.URL, "test-agent", "")
+	err := client.StopAgent(context.Background(), tid("host-1"), server.URL, "test-agent", "")
 	if err != nil {
 		t.Fatalf("StopAgent failed: %v", err)
 	}
@@ -493,7 +499,7 @@ func TestHTTPRuntimeBrokerClient_DeleteAgent(t *testing.T) {
 
 	client := NewHTTPRuntimeBrokerClient()
 
-	err := client.DeleteAgent(context.Background(), "host-1", server.URL, "test-agent", "", true, false, false, time.Time{})
+	err := client.DeleteAgent(context.Background(), tid("host-1"), server.URL, "test-agent", "", true, false, false, time.Time{})
 	if err != nil {
 		t.Fatalf("DeleteAgent failed: %v", err)
 	}
@@ -526,7 +532,7 @@ func TestHTTPRuntimeBrokerClient_MessageAgent(t *testing.T) {
 
 	client := NewHTTPRuntimeBrokerClient()
 
-	err := client.MessageAgent(context.Background(), "host-1", server.URL, "test-agent", "", "Hello!", true, nil)
+	err := client.MessageAgent(context.Background(), tid("host-1"), server.URL, "test-agent", "", "Hello!", true, nil)
 	if err != nil {
 		t.Fatalf("MessageAgent failed: %v", err)
 	}
@@ -540,7 +546,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_WithProjectProviderPath(t *test
 	// (not hub-managed). This ensures buildCreateRequest looks up the
 	// provider's LocalPath instead of sending a projectSlug.
 	project := &store.Project{
-		ID:        "project-1",
+		ID:        tid("project-1"),
 		Name:      "test-project",
 		Slug:      "test-project",
 		GitRemote: "https://github.com/example/repo.git",
@@ -551,7 +557,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_WithProjectProviderPath(t *test
 
 	// Create a runtime broker
 	broker := &store.RuntimeBroker{
-		ID:       "broker-1",
+		ID:       tid("broker-1"),
 		Name:     "test-broker",
 		Slug:     "test-broker",
 		Endpoint: "http://localhost:9800",
@@ -563,8 +569,8 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_WithProjectProviderPath(t *test
 
 	// Add a project provider record WITH a local path
 	provider := &store.ProjectProvider{
-		ProjectID:  "project-1",
-		BrokerID:   "broker-1",
+		ProjectID:  tid("project-1"),
+		BrokerID:   tid("broker-1"),
 		BrokerName: "test-broker",
 		LocalPath:  "/home/user/projects/myproject/.scion",
 		Status:     store.BrokerStatusOnline,
@@ -577,11 +583,11 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_WithProjectProviderPath(t *test
 	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
 
 	agent := &store.Agent{
-		ID:              "agent-1",
+		ID:              tid("agent-1"),
 		Name:            "test-agent",
 		Slug:            "test-agent",
-		ProjectID:       "project-1",
-		RuntimeBrokerID: "broker-1",
+		ProjectID:       tid("project-1"),
+		RuntimeBrokerID: tid("broker-1"),
 	}
 
 	err := dispatcher.DispatchAgentCreate(ctx, agent)
@@ -606,7 +612,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_MissingBrokerEndpoint(t *testin
 	memStore := createTestStore(t)
 
 	broker := &store.RuntimeBroker{
-		ID:     "host-1",
+		ID:     tid("host-1"),
 		Name:   "test-host",
 		Slug:   "test-host",
 		Status: store.BrokerStatusOnline,
@@ -619,10 +625,10 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_MissingBrokerEndpoint(t *testin
 	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
 
 	agent := &store.Agent{
-		ID:              "agent-1",
+		ID:              tid("agent-1"),
 		Name:            "test-agent",
 		Slug:            "test-agent",
-		RuntimeBrokerID: "host-1",
+		RuntimeBrokerID: tid("host-1"),
 	}
 
 	err := dispatcher.DispatchAgentCreate(ctx, agent)
@@ -639,7 +645,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_MissingBrokerEndpoint(t *testin
 
 func TestBrokerHTTPTransport_RejectsEmptyEndpoint(t *testing.T) {
 	transport := newBrokerHTTPTransport(false, nil)
-	_, err := transport.CreateAgent(context.Background(), "broker-1", "", &RemoteCreateAgentRequest{})
+	_, err := transport.CreateAgent(context.Background(), tid("broker-1"), "", &RemoteCreateAgentRequest{})
 	if err == nil {
 		t.Fatal("expected error when endpoint is empty")
 	}
@@ -654,7 +660,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_WithoutProjectProviderPath(t *t
 
 	// Create the project (required by FK constraint)
 	project := &store.Project{
-		ID:   "project-1",
+		ID:   tid("project-1"),
 		Name: "test-project",
 		Slug: "test-project",
 	}
@@ -664,7 +670,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_WithoutProjectProviderPath(t *t
 
 	// Create a runtime broker
 	broker := &store.RuntimeBroker{
-		ID:       "broker-1",
+		ID:       tid("broker-1"),
 		Name:     "test-broker",
 		Slug:     "test-broker",
 		Endpoint: "http://localhost:9800",
@@ -676,8 +682,8 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_WithoutProjectProviderPath(t *t
 
 	// Add a project provider record WITHOUT a local path (simulating auto-provide)
 	provider := &store.ProjectProvider{
-		ProjectID:  "project-1",
-		BrokerID:   "broker-1",
+		ProjectID:  tid("project-1"),
+		BrokerID:   tid("broker-1"),
 		BrokerName: "test-broker",
 		LocalPath:  "",
 		Status:     store.BrokerStatusOnline,
@@ -691,11 +697,11 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_WithoutProjectProviderPath(t *t
 	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
 
 	agent := &store.Agent{
-		ID:              "agent-1",
+		ID:              tid("agent-1"),
 		Name:            "test-agent",
 		Slug:            "test-agent",
-		ProjectID:       "project-1",
-		RuntimeBrokerID: "broker-1",
+		ProjectID:       tid("project-1"),
+		RuntimeBrokerID: tid("broker-1"),
 	}
 
 	err := dispatcher.DispatchAgentCreate(ctx, agent)
@@ -718,7 +724,7 @@ func TestHTTPAgentDispatcher_DispatchAgentProvision(t *testing.T) {
 
 	// Create a runtime broker with an endpoint
 	broker := &store.RuntimeBroker{
-		ID:       "host-1",
+		ID:       tid("host-1"),
 		Name:     "test-host",
 		Slug:     "test-host",
 		Endpoint: "http://localhost:9800",
@@ -732,11 +738,11 @@ func TestHTTPAgentDispatcher_DispatchAgentProvision(t *testing.T) {
 	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
 
 	agent := &store.Agent{
-		ID:              "agent-1",
+		ID:              tid("agent-1"),
 		Name:            "test-agent",
 		Slug:            "test-agent",
-		ProjectID:       "project-1",
-		RuntimeBrokerID: "host-1",
+		ProjectID:       tid("project-1"),
+		RuntimeBrokerID: tid("host-1"),
 		AppliedConfig: &store.AgentAppliedConfig{
 			HarnessConfig: "claude",
 		},
@@ -762,7 +768,7 @@ func TestHTTPAgentDispatcher_DispatchAgentProvision(t *testing.T) {
 	}
 
 	// Verify broker ID was passed
-	if mockClient.lastBrokerID != "host-1" {
+	if mockClient.lastBrokerID != tid("host-1") {
 		t.Errorf("expected brokerID 'host-1', got '%s'", mockClient.lastBrokerID)
 	}
 }
@@ -775,7 +781,7 @@ func TestHTTPAgentDispatcher_DispatchAgentProvision_NoBroker(t *testing.T) {
 	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
 
 	agent := &store.Agent{
-		ID:              "agent-1",
+		ID:              tid("agent-1"),
 		Name:            "test-agent",
 		Slug:            "test-agent",
 		RuntimeBrokerID: "", // No broker assigned
@@ -796,7 +802,7 @@ func TestHTTPAgentDispatcher_DispatchAgentProvision_PassesTaskThrough(t *testing
 	memStore := createTestStore(t)
 
 	broker := &store.RuntimeBroker{
-		ID:       "host-1",
+		ID:       tid("host-1"),
 		Name:     "test-host",
 		Slug:     "test-host",
 		Endpoint: "http://localhost:9800",
@@ -810,11 +816,11 @@ func TestHTTPAgentDispatcher_DispatchAgentProvision_PassesTaskThrough(t *testing
 	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
 
 	agent := &store.Agent{
-		ID:              "agent-1",
+		ID:              tid("agent-1"),
 		Name:            "test-agent",
 		Slug:            "test-agent",
-		ProjectID:       "project-1",
-		RuntimeBrokerID: "host-1",
+		ProjectID:       tid("project-1"),
+		RuntimeBrokerID: tid("host-1"),
 		AppliedConfig: &store.AgentAppliedConfig{
 			Task: "implement feature X",
 		},
@@ -845,7 +851,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_WithWorkspace(t *testing.T) {
 
 	// Create a runtime broker
 	broker := &store.RuntimeBroker{
-		ID:       "host-1",
+		ID:       tid("host-1"),
 		Name:     "test-host",
 		Slug:     "test-host",
 		Endpoint: "http://localhost:9800",
@@ -859,11 +865,11 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_WithWorkspace(t *testing.T) {
 	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
 
 	agent := &store.Agent{
-		ID:              "agent-1",
+		ID:              tid("agent-1"),
 		Name:            "test-agent",
 		Slug:            "test-agent",
-		ProjectID:       "project-1",
-		RuntimeBrokerID: "host-1",
+		ProjectID:       tid("project-1"),
+		RuntimeBrokerID: tid("host-1"),
 		AppliedConfig: &store.AgentAppliedConfig{
 			HarnessConfig: "claude",
 			Task:          "do something",
@@ -893,7 +899,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_WithCreatorName(t *testing.T) {
 
 	// Create a runtime broker
 	broker := &store.RuntimeBroker{
-		ID:       "host-1",
+		ID:       tid("host-1"),
 		Name:     "test-host",
 		Slug:     "test-host",
 		Endpoint: "http://localhost:9800",
@@ -907,11 +913,11 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_WithCreatorName(t *testing.T) {
 	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
 
 	agent := &store.Agent{
-		ID:              "agent-1",
+		ID:              tid("agent-1"),
 		Name:            "test-agent",
 		Slug:            "test-agent",
-		ProjectID:       "project-1",
-		RuntimeBrokerID: "host-1",
+		ProjectID:       tid("project-1"),
+		RuntimeBrokerID: tid("host-1"),
 		AppliedConfig: &store.AgentAppliedConfig{
 			HarnessConfig: "claude",
 			Task:          "do something",
@@ -939,7 +945,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_WithoutCreatorName(t *testing.T
 	memStore := createTestStore(t)
 
 	broker := &store.RuntimeBroker{
-		ID:       "host-1",
+		ID:       tid("host-1"),
 		Name:     "test-host",
 		Slug:     "test-host",
 		Endpoint: "http://localhost:9800",
@@ -953,11 +959,11 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_WithoutCreatorName(t *testing.T
 	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
 
 	agent := &store.Agent{
-		ID:              "agent-1",
+		ID:              tid("agent-1"),
 		Name:            "test-agent",
 		Slug:            "test-agent",
-		ProjectID:       "project-1",
-		RuntimeBrokerID: "host-1",
+		ProjectID:       tid("project-1"),
+		RuntimeBrokerID: tid("host-1"),
 		AppliedConfig: &store.AgentAppliedConfig{
 			HarnessConfig: "claude",
 		},
@@ -980,7 +986,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_DoesNotSetProvisionOnly(t *test
 
 	// Create a runtime broker
 	broker := &store.RuntimeBroker{
-		ID:       "host-1",
+		ID:       tid("host-1"),
 		Name:     "test-host",
 		Slug:     "test-host",
 		Endpoint: "http://localhost:9800",
@@ -994,11 +1000,11 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_DoesNotSetProvisionOnly(t *test
 	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
 
 	agent := &store.Agent{
-		ID:              "agent-1",
+		ID:              tid("agent-1"),
 		Name:            "test-agent",
 		Slug:            "test-agent",
-		ProjectID:       "project-1",
-		RuntimeBrokerID: "host-1",
+		ProjectID:       tid("project-1"),
+		RuntimeBrokerID: tid("host-1"),
 		AppliedConfig: &store.AgentAppliedConfig{
 			Task: "do something",
 		},
@@ -1021,7 +1027,7 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_WithProjectProviderPath(t *testi
 
 	// Create the project with a GitRemote so it is treated as a linked project
 	project := &store.Project{
-		ID:        "project-1",
+		ID:        tid("project-1"),
 		Name:      "test-project",
 		Slug:      "test-project",
 		GitRemote: "https://github.com/example/repo.git",
@@ -1032,7 +1038,7 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_WithProjectProviderPath(t *testi
 
 	// Create a runtime broker
 	broker := &store.RuntimeBroker{
-		ID:       "broker-1",
+		ID:       tid("broker-1"),
 		Name:     "test-broker",
 		Slug:     "test-broker",
 		Endpoint: "http://localhost:9800",
@@ -1044,8 +1050,8 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_WithProjectProviderPath(t *testi
 
 	// Add a project provider record with a local path
 	provider := &store.ProjectProvider{
-		ProjectID:  "project-1",
-		BrokerID:   "broker-1",
+		ProjectID:  tid("project-1"),
+		BrokerID:   tid("broker-1"),
 		BrokerName: "test-broker",
 		LocalPath:  "/home/user/projects/myproject/.scion",
 		Status:     store.BrokerStatusOnline,
@@ -1058,11 +1064,11 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_WithProjectProviderPath(t *testi
 	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
 
 	agent := &store.Agent{
-		ID:              "agent-1",
+		ID:              tid("agent-1"),
 		Name:            "test-agent",
 		Slug:            "test-agent",
-		ProjectID:       "project-1",
-		RuntimeBrokerID: "broker-1",
+		ProjectID:       tid("project-1"),
+		RuntimeBrokerID: tid("broker-1"),
 	}
 
 	err := dispatcher.DispatchAgentStart(ctx, agent, "do task")
@@ -1098,7 +1104,7 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_IncludesAgentIdentity(t *testing
 	memStore := createTestStore(t)
 
 	project := &store.Project{
-		ID:        "project-1",
+		ID:        tid("project-1"),
 		Name:      "test-project",
 		Slug:      "test-project",
 		GitRemote: "https://github.com/example/repo.git",
@@ -1108,7 +1114,7 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_IncludesAgentIdentity(t *testing
 	}
 
 	broker := &store.RuntimeBroker{
-		ID:       "broker-1",
+		ID:       tid("broker-1"),
 		Name:     "test-broker",
 		Slug:     "test-broker",
 		Endpoint: "http://localhost:9800",
@@ -1119,8 +1125,8 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_IncludesAgentIdentity(t *testing
 	}
 
 	provider := &store.ProjectProvider{
-		ProjectID:  "project-1",
-		BrokerID:   "broker-1",
+		ProjectID:  tid("project-1"),
+		BrokerID:   tid("broker-1"),
 		BrokerName: "test-broker",
 		LocalPath:  "/home/user/projects/myproject/.scion",
 		Status:     store.BrokerStatusOnline,
@@ -1136,8 +1142,8 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_IncludesAgentIdentity(t *testing
 		ID:              "agent-uuid-123",
 		Name:            "test-agent",
 		Slug:            "test-agent-slug",
-		ProjectID:       "project-1",
-		RuntimeBrokerID: "broker-1",
+		ProjectID:       tid("project-1"),
+		RuntimeBrokerID: tid("broker-1"),
 	}
 
 	err := dispatcher.DispatchAgentStart(ctx, agent, "")
@@ -1166,7 +1172,7 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_IncludesAgentIdentity(t *testing
 	// Verify SCION_GROVE_ID is included in resolvedEnv
 	if v, ok := mockClient.lastResolvedEnv["SCION_GROVE_ID"]; !ok {
 		t.Error("expected SCION_GROVE_ID in resolvedEnv, but not found")
-	} else if v != "project-1" {
+	} else if v != tid("project-1") {
 		t.Errorf("expected SCION_GROVE_ID='project-1', got %q", v)
 	}
 }
@@ -1177,7 +1183,7 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_HubManagedProject(t *testing.T) 
 
 	// Create a hub-managed project (no git remote)
 	project := &store.Project{
-		ID:   "project-hub",
+		ID:   tid("project-hub"),
 		Name: "My Hub Project",
 		Slug: "my-hub-project",
 		// No GitRemote — this is a hub-managed project
@@ -1188,7 +1194,7 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_HubManagedProject(t *testing.T) 
 
 	// Create a runtime broker with no local provider path for this project
 	broker := &store.RuntimeBroker{
-		ID:       "broker-1",
+		ID:       tid("broker-1"),
 		Name:     "test-broker",
 		Slug:     "test-broker",
 		Endpoint: "http://localhost:9800",
@@ -1205,8 +1211,8 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_HubManagedProject(t *testing.T) 
 		ID:              "agent-hub-1",
 		Name:            "hub-agent",
 		Slug:            "hub-agent",
-		ProjectID:       "project-hub",
-		RuntimeBrokerID: "broker-1",
+		ProjectID:       tid("project-hub"),
+		RuntimeBrokerID: tid("broker-1"),
 	}
 
 	err := dispatcher.DispatchAgentStart(ctx, agent, "")
@@ -1235,7 +1241,7 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_ProjectSlugSetForGitRemoteWithou
 	// The broker needs the projectSlug to resolve agent directories under
 	// ~/.scion/projects/<slug>/ instead of falling back to the global project.
 	project := &store.Project{
-		ID:        "project-git",
+		ID:        tid("project-git"),
 		Name:      "Git Project",
 		Slug:      "git-project",
 		GitRemote: "https://github.com/user/repo.git",
@@ -1245,7 +1251,7 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_ProjectSlugSetForGitRemoteWithou
 	}
 
 	broker := &store.RuntimeBroker{
-		ID:       "broker-1",
+		ID:       tid("broker-1"),
 		Name:     "test-broker",
 		Slug:     "test-broker",
 		Endpoint: "http://localhost:9800",
@@ -1262,8 +1268,8 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_ProjectSlugSetForGitRemoteWithou
 		ID:              "agent-git-1",
 		Name:            "git-agent",
 		Slug:            "git-agent",
-		ProjectID:       "project-git",
-		RuntimeBrokerID: "broker-1",
+		ProjectID:       tid("project-git"),
+		RuntimeBrokerID: tid("broker-1"),
 	}
 
 	err := dispatcher.DispatchAgentStart(ctx, agent, "")
@@ -1287,7 +1293,7 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_ResolvesEnvFromStorage(t *testin
 
 	// Create a project
 	project := &store.Project{
-		ID:   "project-env",
+		ID:   tid("project-env"),
 		Name: "env-test-project",
 		Slug: "env-test-project",
 	}
@@ -1297,7 +1303,7 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_ResolvesEnvFromStorage(t *testin
 
 	// Create a runtime broker
 	broker := &store.RuntimeBroker{
-		ID:       "broker-env",
+		ID:       tid("broker-env"),
 		Name:     "test-broker",
 		Slug:     "test-broker",
 		Endpoint: "http://localhost:9800",
@@ -1309,8 +1315,8 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_ResolvesEnvFromStorage(t *testin
 
 	// Add a project provider with a local path
 	provider := &store.ProjectProvider{
-		ProjectID:  "project-env",
-		BrokerID:   "broker-env",
+		ProjectID:  tid("project-env"),
+		BrokerID:   tid("broker-env"),
 		BrokerName: "test-broker",
 		LocalPath:  "/home/user/project/.scion",
 		Status:     store.BrokerStatusOnline,
@@ -1321,18 +1327,18 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_ResolvesEnvFromStorage(t *testin
 
 	// Store an env var in project scope (simulating API key stored in hub)
 	if err := memStore.CreateEnvVar(ctx, &store.EnvVar{
-		ID:      "ev-project-1",
+		ID:      tid("ev-project-1"),
 		Key:     "GEMINI_API_KEY",
 		Value:   "test-api-key-123",
 		Scope:   "project",
-		ScopeID: "project-env",
+		ScopeID: tid("project-env"),
 	}); err != nil {
 		t.Fatalf("failed to set env var: %v", err)
 	}
 
 	// Store a user-scoped env var
 	if err := memStore.CreateEnvVar(ctx, &store.EnvVar{
-		ID:      "ev-user-1",
+		ID:      tid("ev-user-1"),
 		Key:     "CUSTOM_VAR",
 		Value:   "user-value",
 		Scope:   "user",
@@ -1348,9 +1354,9 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_ResolvesEnvFromStorage(t *testin
 		ID:              "agent-env",
 		Name:            "test-agent",
 		Slug:            "test-agent",
-		ProjectID:       "project-env",
+		ProjectID:       tid("project-env"),
 		OwnerID:         "owner-1",
-		RuntimeBrokerID: "broker-env",
+		RuntimeBrokerID: tid("broker-env"),
 		AppliedConfig: &store.AgentAppliedConfig{
 			HarnessConfig: "gemini",
 			Env:           map[string]string{"EXISTING_VAR": "from-config"},
@@ -1393,7 +1399,7 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_ConfigEnvTakesPrecedence(t *test
 
 	// Create project and broker
 	project := &store.Project{
-		ID:   "project-prec",
+		ID:   tid("project-prec"),
 		Name: "precedence-test",
 		Slug: "precedence-test",
 	}
@@ -1402,7 +1408,7 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_ConfigEnvTakesPrecedence(t *test
 	}
 
 	broker := &store.RuntimeBroker{
-		ID:       "broker-prec",
+		ID:       tid("broker-prec"),
 		Name:     "test-broker",
 		Slug:     "test-broker",
 		Endpoint: "http://localhost:9800",
@@ -1414,11 +1420,11 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_ConfigEnvTakesPrecedence(t *test
 
 	// Store an env var that conflicts with config env
 	if err := memStore.CreateEnvVar(ctx, &store.EnvVar{
-		ID:      "ev-prec-1",
+		ID:      tid("ev-prec-1"),
 		Key:     "API_KEY",
 		Value:   "storage-value",
 		Scope:   "project",
-		ScopeID: "project-prec",
+		ScopeID: tid("project-prec"),
 	}); err != nil {
 		t.Fatalf("failed to set env var: %v", err)
 	}
@@ -1430,8 +1436,8 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_ConfigEnvTakesPrecedence(t *test
 		ID:              "agent-prec",
 		Name:            "test-agent",
 		Slug:            "test-agent",
-		ProjectID:       "project-prec",
-		RuntimeBrokerID: "broker-prec",
+		ProjectID:       tid("project-prec"),
+		RuntimeBrokerID: tid("broker-prec"),
 		AppliedConfig: &store.AgentAppliedConfig{
 			HarnessConfig: "gemini",
 			Env:           map[string]string{"API_KEY": "config-value"},
@@ -1456,7 +1462,7 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_StorageOverridesEmptyConfigEnv(t
 	memStore := createTestStore(t)
 
 	project := &store.Project{
-		ID:   "project-empty-env",
+		ID:   tid("project-empty-env"),
 		Name: "empty-env-test",
 		Slug: "empty-env-test",
 	}
@@ -1465,7 +1471,7 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_StorageOverridesEmptyConfigEnv(t
 	}
 
 	broker := &store.RuntimeBroker{
-		ID:       "broker-empty-env",
+		ID:       tid("broker-empty-env"),
 		Name:     "test-broker",
 		Slug:     "test-broker",
 		Endpoint: "http://localhost:9800",
@@ -1477,11 +1483,11 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_StorageOverridesEmptyConfigEnv(t
 
 	// Store an env var that should override the empty config value
 	if err := memStore.CreateEnvVar(ctx, &store.EnvVar{
-		ID:      "ev-empty-1",
+		ID:      tid("ev-empty-1"),
 		Key:     "GEMINI_API_KEY",
 		Value:   "stored-api-key",
 		Scope:   "project",
-		ScopeID: "project-empty-env",
+		ScopeID: tid("project-empty-env"),
 	}); err != nil {
 		t.Fatalf("failed to set env var: %v", err)
 	}
@@ -1493,8 +1499,8 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_StorageOverridesEmptyConfigEnv(t
 		ID:              "agent-empty-env",
 		Name:            "test-agent",
 		Slug:            "test-agent",
-		ProjectID:       "project-empty-env",
-		RuntimeBrokerID: "broker-empty-env",
+		ProjectID:       tid("project-empty-env"),
+		RuntimeBrokerID: tid("broker-empty-env"),
 		AppliedConfig: &store.AgentAppliedConfig{
 			HarnessConfig: "gemini",
 			// Empty value = passthrough marker; storage should fill it in
@@ -1526,7 +1532,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_InjectsDevToken(t *testing.T) {
 	memStore := createTestStore(t)
 
 	broker := &store.RuntimeBroker{
-		ID:       "host-1",
+		ID:       tid("host-1"),
 		Name:     "test-host",
 		Slug:     "test-host",
 		Endpoint: "http://localhost:9800",
@@ -1541,11 +1547,11 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_InjectsDevToken(t *testing.T) {
 	dispatcher.SetDevAuthToken("my-dev-token")
 
 	agent := &store.Agent{
-		ID:              "agent-1",
+		ID:              tid("agent-1"),
 		Name:            "test-agent",
 		Slug:            "test-agent",
-		ProjectID:       "project-1",
-		RuntimeBrokerID: "host-1",
+		ProjectID:       tid("project-1"),
+		RuntimeBrokerID: tid("host-1"),
 		AppliedConfig: &store.AgentAppliedConfig{
 			HarnessConfig: "claude",
 		},
@@ -1575,7 +1581,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_NoDevToken(t *testing.T) {
 	memStore := createTestStore(t)
 
 	broker := &store.RuntimeBroker{
-		ID:       "host-1",
+		ID:       tid("host-1"),
 		Name:     "test-host",
 		Slug:     "test-host",
 		Endpoint: "http://localhost:9800",
@@ -1590,11 +1596,11 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_NoDevToken(t *testing.T) {
 	// Do NOT set dev auth token
 
 	agent := &store.Agent{
-		ID:              "agent-1",
+		ID:              tid("agent-1"),
 		Name:            "test-agent",
 		Slug:            "test-agent",
-		ProjectID:       "project-1",
-		RuntimeBrokerID: "host-1",
+		ProjectID:       tid("project-1"),
+		RuntimeBrokerID: tid("host-1"),
 	}
 
 	err := dispatcher.DispatchAgentCreate(ctx, agent)
@@ -1615,7 +1621,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_DevTokenMergesWithExistingEnv(t
 	memStore := createTestStore(t)
 
 	broker := &store.RuntimeBroker{
-		ID:       "host-1",
+		ID:       tid("host-1"),
 		Name:     "test-host",
 		Slug:     "test-host",
 		Endpoint: "http://localhost:9800",
@@ -1630,11 +1636,11 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_DevTokenMergesWithExistingEnv(t
 	dispatcher.SetDevAuthToken("my-dev-token")
 
 	agent := &store.Agent{
-		ID:              "agent-1",
+		ID:              tid("agent-1"),
 		Name:            "test-agent",
 		Slug:            "test-agent",
-		ProjectID:       "project-1",
-		RuntimeBrokerID: "host-1",
+		ProjectID:       tid("project-1"),
+		RuntimeBrokerID: tid("host-1"),
 		AppliedConfig: &store.AgentAppliedConfig{
 			HarnessConfig: "claude",
 			Env: map[string]string{
@@ -1664,7 +1670,7 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_AppliesBrokerResponse(t *testing
 	memStore := createTestStore(t)
 
 	broker := &store.RuntimeBroker{
-		ID:       "broker-1",
+		ID:       tid("broker-1"),
 		Name:     "test-broker",
 		Slug:     "test-broker",
 		Endpoint: "http://localhost:9800",
@@ -1689,11 +1695,11 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_AppliesBrokerResponse(t *testing
 	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
 
 	agent := &store.Agent{
-		ID:              "agent-1",
+		ID:              tid("agent-1"),
 		Name:            "test-agent",
 		Slug:            "test-agent",
-		ProjectID:       "project-1",
-		RuntimeBrokerID: "broker-1",
+		ProjectID:       tid("project-1"),
+		RuntimeBrokerID: tid("broker-1"),
 		Phase:           string(state.PhaseCreated),
 	}
 
@@ -1725,7 +1731,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_PropagatesGitClone(t *testing.T
 	memStore := createTestStore(t)
 
 	broker := &store.RuntimeBroker{
-		ID:       "host-1",
+		ID:       tid("host-1"),
 		Name:     "test-host",
 		Slug:     "test-host",
 		Endpoint: "http://localhost:9800",
@@ -1742,8 +1748,8 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_PropagatesGitClone(t *testing.T
 		ID:              "agent-gc-1",
 		Name:            "git-clone-agent",
 		Slug:            "git-clone-agent",
-		ProjectID:       "project-1",
-		RuntimeBrokerID: "host-1",
+		ProjectID:       tid("project-1"),
+		RuntimeBrokerID: tid("host-1"),
 		AppliedConfig: &store.AgentAppliedConfig{
 			HarnessConfig: "claude",
 			Task:          "implement feature",
@@ -1788,7 +1794,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_PropagatesProfile(t *testing.T)
 	memStore := createTestStore(t)
 
 	broker := &store.RuntimeBroker{
-		ID:       "host-1",
+		ID:       tid("host-1"),
 		Name:     "test-host",
 		Slug:     "test-host",
 		Endpoint: "http://localhost:9800",
@@ -1805,8 +1811,8 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_PropagatesProfile(t *testing.T)
 		ID:              "agent-profile-1",
 		Name:            "profile-agent",
 		Slug:            "profile-agent",
-		ProjectID:       "project-1",
-		RuntimeBrokerID: "host-1",
+		ProjectID:       tid("project-1"),
+		RuntimeBrokerID: tid("host-1"),
 		AppliedConfig: &store.AgentAppliedConfig{
 			HarnessConfig: "claude",
 			Task:          "do something",
@@ -1836,7 +1842,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_PropagatesProjectSlug_HubManage
 
 	// Create a hub-managed project (no GitRemote)
 	project := &store.Project{
-		ID:   "project-hub-managed",
+		ID:   tid("project-hub-managed"),
 		Name: "Hub Managed Project",
 		Slug: "hub-managed-project",
 		// No GitRemote = hub-managed
@@ -1846,7 +1852,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_PropagatesProjectSlug_HubManage
 	}
 
 	broker := &store.RuntimeBroker{
-		ID:       "host-1",
+		ID:       tid("host-1"),
 		Name:     "test-host",
 		Slug:     "test-host",
 		Endpoint: "http://localhost:9800",
@@ -1860,11 +1866,11 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_PropagatesProjectSlug_HubManage
 	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
 
 	agent := &store.Agent{
-		ID:              "agent-1",
+		ID:              tid("agent-1"),
 		Name:            "test-agent",
 		Slug:            "test-agent",
-		ProjectID:       "project-hub-managed",
-		RuntimeBrokerID: "host-1",
+		ProjectID:       tid("project-hub-managed"),
+		RuntimeBrokerID: tid("host-1"),
 		AppliedConfig: &store.AgentAppliedConfig{
 			HarnessConfig: "claude",
 		},
@@ -1889,7 +1895,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_ProjectSlugSet_GitProject(t *te
 
 	// Create a git-backed project (has GitRemote) without a local provider path.
 	project := &store.Project{
-		ID:        "project-git",
+		ID:        tid("project-git"),
 		Name:      "Git Project",
 		Slug:      "git-project",
 		GitRemote: "github.com/test/repo",
@@ -1899,7 +1905,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_ProjectSlugSet_GitProject(t *te
 	}
 
 	broker := &store.RuntimeBroker{
-		ID:       "host-1",
+		ID:       tid("host-1"),
 		Name:     "test-host",
 		Slug:     "test-host",
 		Endpoint: "http://localhost:9800",
@@ -1913,11 +1919,11 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_ProjectSlugSet_GitProject(t *te
 	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
 
 	agent := &store.Agent{
-		ID:              "agent-1",
+		ID:              tid("agent-1"),
 		Name:            "test-agent",
 		Slug:            "test-agent",
-		ProjectID:       "project-git",
-		RuntimeBrokerID: "host-1",
+		ProjectID:       tid("project-git"),
+		RuntimeBrokerID: tid("host-1"),
 		AppliedConfig: &store.AgentAppliedConfig{
 			HarnessConfig: "claude",
 		},
@@ -1943,7 +1949,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_EmptyProfile(t *testing.T) {
 	memStore := createTestStore(t)
 
 	broker := &store.RuntimeBroker{
-		ID:       "host-1",
+		ID:       tid("host-1"),
 		Name:     "test-host",
 		Slug:     "test-host",
 		Endpoint: "http://localhost:9800",
@@ -1960,8 +1966,8 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_EmptyProfile(t *testing.T) {
 		ID:              "agent-no-profile-1",
 		Name:            "no-profile-agent",
 		Slug:            "no-profile-agent",
-		ProjectID:       "project-1",
-		RuntimeBrokerID: "host-1",
+		ProjectID:       tid("project-1"),
+		RuntimeBrokerID: tid("host-1"),
 		AppliedConfig: &store.AgentAppliedConfig{
 			HarnessConfig: "claude",
 			Task:          "do something",
@@ -1993,7 +1999,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_NoProjectSlug_LocalPathProject(
 	// Even though the broker has the repo locally, all hub-linked projects with a
 	// git remote use clone-based provisioning (HTTPS + GitHub token).
 	project := &store.Project{
-		ID:        "project-local",
+		ID:        tid("project-local"),
 		Name:      "Local Project",
 		Slug:      "local-project",
 		GitRemote: "https://github.com/example/local-project.git",
@@ -2003,7 +2009,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_NoProjectSlug_LocalPathProject(
 	}
 
 	broker := &store.RuntimeBroker{
-		ID:       "broker-1",
+		ID:       tid("broker-1"),
 		Name:     "test-broker",
 		Slug:     "test-broker",
 		Endpoint: "http://localhost:9800",
@@ -2015,8 +2021,8 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_NoProjectSlug_LocalPathProject(
 
 	// Add a project provider record WITH a local path
 	provider := &store.ProjectProvider{
-		ProjectID:  "project-local",
-		BrokerID:   "broker-1",
+		ProjectID:  tid("project-local"),
+		BrokerID:   tid("broker-1"),
 		BrokerName: "test-broker",
 		LocalPath:  "/home/user/projects/myproject/.scion",
 		Status:     store.BrokerStatusOnline,
@@ -2029,11 +2035,11 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_NoProjectSlug_LocalPathProject(
 	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
 
 	agent := &store.Agent{
-		ID:              "agent-1",
+		ID:              tid("agent-1"),
 		Name:            "test-agent",
 		Slug:            "test-agent",
-		ProjectID:       "project-local",
-		RuntimeBrokerID: "broker-1",
+		ProjectID:       tid("project-local"),
+		RuntimeBrokerID: tid("broker-1"),
 		AppliedConfig: &store.AgentAppliedConfig{
 			HarnessConfig: "claude",
 			Workspace:     "/should/be/cleared",
@@ -2099,7 +2105,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_LinkedProjectNoGitRemote(t *tes
 	// Create a linked project WITHOUT a GitRemote — this is what happens when
 	// a user links a local project via `scion hub projects link`.
 	project := &store.Project{
-		ID:   "project-linked-no-git",
+		ID:   tid("project-linked-no-git"),
 		Name: "Linked No Git Project",
 		Slug: "linked-no-git",
 		// No GitRemote — looks like hub-managed, but has a provider path
@@ -2109,7 +2115,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_LinkedProjectNoGitRemote(t *tes
 	}
 
 	broker := &store.RuntimeBroker{
-		ID:       "broker-1",
+		ID:       tid("broker-1"),
 		Name:     "test-broker",
 		Slug:     "test-broker",
 		Endpoint: "http://localhost:9800",
@@ -2121,8 +2127,8 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_LinkedProjectNoGitRemote(t *tes
 
 	// Add a project provider record WITH a local path
 	provider := &store.ProjectProvider{
-		ProjectID:  "project-linked-no-git",
-		BrokerID:   "broker-1",
+		ProjectID:  tid("project-linked-no-git"),
+		BrokerID:   tid("broker-1"),
 		BrokerName: "test-broker",
 		LocalPath:  "/Users/user/dev/projects/my-project/.scion",
 		Status:     store.BrokerStatusOnline,
@@ -2135,11 +2141,11 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_LinkedProjectNoGitRemote(t *tes
 	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
 
 	agent := &store.Agent{
-		ID:              "agent-1",
+		ID:              tid("agent-1"),
 		Name:            "test-agent",
 		Slug:            "test-agent",
-		ProjectID:       "project-linked-no-git",
-		RuntimeBrokerID: "broker-1",
+		ProjectID:       tid("project-linked-no-git"),
+		RuntimeBrokerID: tid("broker-1"),
 		AppliedConfig: &store.AgentAppliedConfig{
 			HarnessConfig: "claude",
 			Workspace:     "/should/be/cleared",
@@ -2180,7 +2186,7 @@ func TestBuildCreateRequest_ResolvesStorageEnvVars(t *testing.T) {
 
 	// Create a runtime broker
 	broker := &store.RuntimeBroker{
-		ID:       "host-1",
+		ID:       tid("host-1"),
 		Name:     "test-host",
 		Slug:     "test-host",
 		Endpoint: "http://localhost:9800",
@@ -2192,11 +2198,11 @@ func TestBuildCreateRequest_ResolvesStorageEnvVars(t *testing.T) {
 
 	// Store a user-scoped env var
 	envVar := &store.EnvVar{
-		ID:      "ev-1",
+		ID:      tid("ev-1"),
 		Key:     "GEMINI_API_KEY",
 		Value:   "stored-key-value",
 		Scope:   "user",
-		ScopeID: "user-1",
+		ScopeID: tid("user-1"),
 	}
 	if err := memStore.CreateEnvVar(ctx, envVar); err != nil {
 		t.Fatalf("failed to create env var: %v", err)
@@ -2206,11 +2212,11 @@ func TestBuildCreateRequest_ResolvesStorageEnvVars(t *testing.T) {
 	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
 
 	agent := &store.Agent{
-		ID:              "agent-1",
+		ID:              tid("agent-1"),
 		Name:            "test-agent",
 		Slug:            "test-agent",
-		OwnerID:         "user-1",
-		RuntimeBrokerID: "host-1",
+		OwnerID:         tid("user-1"),
+		RuntimeBrokerID: tid("host-1"),
 		AppliedConfig:   &store.AgentAppliedConfig{},
 	}
 
@@ -2233,7 +2239,7 @@ func TestBuildCreateRequest_ConfigEnvOverridesStorage(t *testing.T) {
 
 	// Create a runtime broker
 	broker := &store.RuntimeBroker{
-		ID:       "host-1",
+		ID:       tid("host-1"),
 		Name:     "test-host",
 		Slug:     "test-host",
 		Endpoint: "http://localhost:9800",
@@ -2245,11 +2251,11 @@ func TestBuildCreateRequest_ConfigEnvOverridesStorage(t *testing.T) {
 
 	// Store a user-scoped env var with the same key as config env
 	envVar := &store.EnvVar{
-		ID:      "ev-1",
+		ID:      tid("ev-1"),
 		Key:     "MY_KEY",
 		Value:   "storage-value",
 		Scope:   "user",
-		ScopeID: "user-1",
+		ScopeID: tid("user-1"),
 	}
 	if err := memStore.CreateEnvVar(ctx, envVar); err != nil {
 		t.Fatalf("failed to create env var: %v", err)
@@ -2259,11 +2265,11 @@ func TestBuildCreateRequest_ConfigEnvOverridesStorage(t *testing.T) {
 	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
 
 	agent := &store.Agent{
-		ID:              "agent-1",
+		ID:              tid("agent-1"),
 		Name:            "test-agent",
 		Slug:            "test-agent",
-		OwnerID:         "user-1",
-		RuntimeBrokerID: "host-1",
+		OwnerID:         tid("user-1"),
+		RuntimeBrokerID: tid("host-1"),
 		AppliedConfig: &store.AgentAppliedConfig{
 			Env: map[string]string{
 				"MY_KEY": "config-value",
@@ -2288,7 +2294,7 @@ func TestBuildCreateRequest_ResolvesProjectAndUserScopes(t *testing.T) {
 
 	// Create project and broker
 	project := &store.Project{
-		ID:   "project-1",
+		ID:   tid("project-1"),
 		Name: "test-project",
 		Slug: "test-project",
 	}
@@ -2297,7 +2303,7 @@ func TestBuildCreateRequest_ResolvesProjectAndUserScopes(t *testing.T) {
 	}
 
 	broker := &store.RuntimeBroker{
-		ID:       "host-1",
+		ID:       tid("host-1"),
 		Name:     "test-host",
 		Slug:     "test-host",
 		Endpoint: "http://localhost:9800",
@@ -2309,11 +2315,11 @@ func TestBuildCreateRequest_ResolvesProjectAndUserScopes(t *testing.T) {
 
 	// Store a project-scoped env var
 	projectEnv := &store.EnvVar{
-		ID:      "ev-project",
+		ID:      tid("ev-project"),
 		Key:     "SHARED_KEY",
 		Value:   "project-value",
 		Scope:   "project",
-		ScopeID: "project-1",
+		ScopeID: tid("project-1"),
 	}
 	if err := memStore.CreateEnvVar(ctx, projectEnv); err != nil {
 		t.Fatalf("failed to create project env var: %v", err)
@@ -2321,11 +2327,11 @@ func TestBuildCreateRequest_ResolvesProjectAndUserScopes(t *testing.T) {
 
 	// Store a user-scoped env var with the same key (higher precedence)
 	userEnv := &store.EnvVar{
-		ID:      "ev-user",
+		ID:      tid("ev-user"),
 		Key:     "SHARED_KEY",
 		Value:   "user-value",
 		Scope:   "user",
-		ScopeID: "user-1",
+		ScopeID: tid("user-1"),
 	}
 	if err := memStore.CreateEnvVar(ctx, userEnv); err != nil {
 		t.Fatalf("failed to create user env var: %v", err)
@@ -2333,11 +2339,11 @@ func TestBuildCreateRequest_ResolvesProjectAndUserScopes(t *testing.T) {
 
 	// Store a project-only env var
 	projectOnly := &store.EnvVar{
-		ID:      "ev-project-only",
+		ID:      tid("ev-project-only"),
 		Key:     "GROVE_ONLY_KEY",
 		Value:   "project-only-value",
 		Scope:   "project",
-		ScopeID: "project-1",
+		ScopeID: tid("project-1"),
 	}
 	if err := memStore.CreateEnvVar(ctx, projectOnly); err != nil {
 		t.Fatalf("failed to create project-only env var: %v", err)
@@ -2347,12 +2353,12 @@ func TestBuildCreateRequest_ResolvesProjectAndUserScopes(t *testing.T) {
 	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
 
 	agent := &store.Agent{
-		ID:              "agent-1",
+		ID:              tid("agent-1"),
 		Name:            "test-agent",
 		Slug:            "test-agent",
-		OwnerID:         "user-1",
-		ProjectID:       "project-1",
-		RuntimeBrokerID: "host-1",
+		OwnerID:         tid("user-1"),
+		ProjectID:       tid("project-1"),
+		RuntimeBrokerID: tid("host-1"),
 		AppliedConfig:   &store.AgentAppliedConfig{},
 	}
 
@@ -2378,7 +2384,7 @@ func TestDispatchAgentCreate_IncludesStorageEnvVars(t *testing.T) {
 
 	// Create a runtime broker
 	broker := &store.RuntimeBroker{
-		ID:       "host-1",
+		ID:       tid("host-1"),
 		Name:     "test-host",
 		Slug:     "test-host",
 		Endpoint: "http://localhost:9800",
@@ -2390,11 +2396,11 @@ func TestDispatchAgentCreate_IncludesStorageEnvVars(t *testing.T) {
 
 	// Store user-scoped env vars
 	envVar := &store.EnvVar{
-		ID:      "ev-1",
+		ID:      tid("ev-1"),
 		Key:     "API_TOKEN",
 		Value:   "secret-token-123",
 		Scope:   "user",
-		ScopeID: "user-1",
+		ScopeID: tid("user-1"),
 	}
 	if err := memStore.CreateEnvVar(ctx, envVar); err != nil {
 		t.Fatalf("failed to create env var: %v", err)
@@ -2404,11 +2410,11 @@ func TestDispatchAgentCreate_IncludesStorageEnvVars(t *testing.T) {
 	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
 
 	agent := &store.Agent{
-		ID:              "agent-1",
+		ID:              tid("agent-1"),
 		Name:            "test-agent",
 		Slug:            "test-agent",
-		OwnerID:         "user-1",
-		RuntimeBrokerID: "host-1",
+		OwnerID:         tid("user-1"),
+		RuntimeBrokerID: tid("host-1"),
 		AppliedConfig: &store.AgentAppliedConfig{
 			HarnessConfig: "claude",
 		},
@@ -2438,7 +2444,7 @@ func TestBuildCreateRequest_PropagatesHarnessName(t *testing.T) {
 	memStore := createTestStore(t)
 
 	broker := &store.RuntimeBroker{
-		ID:       "host-1",
+		ID:       tid("host-1"),
 		Name:     "test-host",
 		Slug:     "test-host",
 		Endpoint: "http://localhost:9800",
@@ -2455,8 +2461,8 @@ func TestBuildCreateRequest_PropagatesHarnessName(t *testing.T) {
 		ID:              "agent-harness-1",
 		Name:            "harness-agent",
 		Slug:            "harness-agent",
-		ProjectID:       "project-1",
-		RuntimeBrokerID: "host-1",
+		ProjectID:       tid("project-1"),
+		RuntimeBrokerID: tid("host-1"),
 		AppliedConfig: &store.AgentAppliedConfig{
 			HarnessConfig: "gemini",
 			Task:          "do something",
@@ -2483,7 +2489,7 @@ func TestHTTPAgentDispatcher_DispatchAgentStop_UsesSlugNotName(t *testing.T) {
 	memStore := createTestStore(t)
 
 	broker := &store.RuntimeBroker{
-		ID:       "host-1",
+		ID:       tid("host-1"),
 		Name:     "test-host",
 		Slug:     "test-host",
 		Endpoint: "http://localhost:9800",
@@ -2497,10 +2503,10 @@ func TestHTTPAgentDispatcher_DispatchAgentStop_UsesSlugNotName(t *testing.T) {
 	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
 
 	agent := &store.Agent{
-		ID:              "agent-1",
+		ID:              tid("agent-1"),
 		Name:            "My Special Agent!",
 		Slug:            "my-special-agent",
-		RuntimeBrokerID: "host-1",
+		RuntimeBrokerID: tid("host-1"),
 	}
 
 	err := dispatcher.DispatchAgentStop(ctx, agent)
@@ -2518,7 +2524,7 @@ func TestHTTPAgentDispatcher_DispatchAgentDelete_UsesSlugNotName(t *testing.T) {
 	memStore := createTestStore(t)
 
 	broker := &store.RuntimeBroker{
-		ID:       "host-1",
+		ID:       tid("host-1"),
 		Name:     "test-host",
 		Slug:     "test-host",
 		Endpoint: "http://localhost:9800",
@@ -2532,10 +2538,10 @@ func TestHTTPAgentDispatcher_DispatchAgentDelete_UsesSlugNotName(t *testing.T) {
 	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
 
 	agent := &store.Agent{
-		ID:              "agent-1",
+		ID:              tid("agent-1"),
 		Name:            "slug Stres$@ . / test",
 		Slug:            "slug-stres-test",
-		RuntimeBrokerID: "host-1",
+		RuntimeBrokerID: tid("host-1"),
 	}
 
 	err := dispatcher.DispatchAgentDelete(ctx, agent, true, true, false, time.Time{})
@@ -2553,7 +2559,7 @@ func TestHTTPAgentDispatcher_DispatchAgentRestart_UsesSlugNotName(t *testing.T) 
 	memStore := createTestStore(t)
 
 	broker := &store.RuntimeBroker{
-		ID:       "host-1",
+		ID:       tid("host-1"),
 		Name:     "test-host",
 		Slug:     "test-host",
 		Endpoint: "http://localhost:9800",
@@ -2567,10 +2573,10 @@ func TestHTTPAgentDispatcher_DispatchAgentRestart_UsesSlugNotName(t *testing.T) 
 	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
 
 	agent := &store.Agent{
-		ID:              "agent-1",
+		ID:              tid("agent-1"),
 		Name:            "My Special Agent!",
 		Slug:            "my-special-agent",
-		RuntimeBrokerID: "host-1",
+		RuntimeBrokerID: tid("host-1"),
 	}
 
 	err := dispatcher.DispatchAgentRestart(ctx, agent)
@@ -2588,7 +2594,7 @@ func TestHTTPAgentDispatcher_DispatchAgentMessage_UsesSlugNotName(t *testing.T) 
 	memStore := createTestStore(t)
 
 	broker := &store.RuntimeBroker{
-		ID:       "host-1",
+		ID:       tid("host-1"),
 		Name:     "test-host",
 		Slug:     "test-host",
 		Endpoint: "http://localhost:9800",
@@ -2602,10 +2608,10 @@ func TestHTTPAgentDispatcher_DispatchAgentMessage_UsesSlugNotName(t *testing.T) 
 	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
 
 	agent := &store.Agent{
-		ID:              "agent-1",
+		ID:              tid("agent-1"),
 		Name:            "My Special Agent!",
 		Slug:            "my-special-agent",
-		RuntimeBrokerID: "host-1",
+		RuntimeBrokerID: tid("host-1"),
 	}
 
 	err := dispatcher.DispatchAgentMessage(ctx, agent, "hello", false, nil)
@@ -2623,7 +2629,7 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_IncludesAgentIDAndSlug(t *testin
 	memStore := createTestStore(t)
 
 	broker := &store.RuntimeBroker{
-		ID:       "broker-id-test",
+		ID:       tid("broker-id-test"),
 		Name:     "test-broker",
 		Slug:     "test-broker",
 		Endpoint: "http://localhost:9800",
@@ -2634,7 +2640,7 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_IncludesAgentIDAndSlug(t *testin
 	}
 
 	project := &store.Project{
-		ID:   "project-id-test",
+		ID:   tid("project-id-test"),
 		Name: "test-project",
 		Slug: "test-project",
 	}
@@ -2643,8 +2649,8 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_IncludesAgentIDAndSlug(t *testin
 	}
 
 	provider := &store.ProjectProvider{
-		ProjectID:  "project-id-test",
-		BrokerID:   "broker-id-test",
+		ProjectID:  tid("project-id-test"),
+		BrokerID:   tid("broker-id-test"),
 		BrokerName: "test-broker",
 		LocalPath:  "/home/user/project/.scion",
 		Status:     store.BrokerStatusOnline,
@@ -2660,8 +2666,8 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_IncludesAgentIDAndSlug(t *testin
 		ID:              "agent-uuid-123",
 		Name:            "my-agent",
 		Slug:            "my-agent",
-		ProjectID:       "project-id-test",
-		RuntimeBrokerID: "broker-id-test",
+		ProjectID:       tid("project-id-test"),
+		RuntimeBrokerID: tid("broker-id-test"),
 		AppliedConfig: &store.AgentAppliedConfig{
 			HarnessConfig: "claude",
 		},
@@ -2695,7 +2701,7 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_IncludesInlineConfig(t *testing.
 	memStore := createTestStore(t)
 
 	broker := &store.RuntimeBroker{
-		ID:       "broker-inline",
+		ID:       tid("broker-inline"),
 		Name:     "test-broker",
 		Slug:     "test-broker",
 		Endpoint: "http://localhost:9800",
@@ -2706,7 +2712,7 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_IncludesInlineConfig(t *testing.
 	}
 
 	project := &store.Project{
-		ID:   "project-inline",
+		ID:   tid("project-inline"),
 		Name: "test-project",
 		Slug: "test-project",
 	}
@@ -2715,8 +2721,8 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_IncludesInlineConfig(t *testing.
 	}
 
 	provider := &store.ProjectProvider{
-		ProjectID:  "project-inline",
-		BrokerID:   "broker-inline",
+		ProjectID:  tid("project-inline"),
+		BrokerID:   tid("broker-inline"),
 		BrokerName: "test-broker",
 		LocalPath:  "/home/user/project/.scion",
 		Status:     store.BrokerStatusOnline,
@@ -2737,8 +2743,8 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_IncludesInlineConfig(t *testing.
 		ID:              "agent-inline-cfg",
 		Name:            "inline-agent",
 		Slug:            "inline-agent",
-		ProjectID:       "project-inline",
-		RuntimeBrokerID: "broker-inline",
+		ProjectID:       tid("project-inline"),
+		RuntimeBrokerID: tid("broker-inline"),
 		AppliedConfig: &store.AgentAppliedConfig{
 			HarnessConfig: "claude",
 			InlineConfig:  inlineCfg,
@@ -2770,7 +2776,7 @@ func TestDispatchAgentStart_IncludesHubEndpoint(t *testing.T) {
 	memStore := createTestStore(t)
 
 	broker := &store.RuntimeBroker{
-		ID:       "host-1",
+		ID:       tid("host-1"),
 		Name:     "test-host",
 		Slug:     "test-host",
 		Endpoint: "http://localhost:9800",
@@ -2785,12 +2791,12 @@ func TestDispatchAgentStart_IncludesHubEndpoint(t *testing.T) {
 	dispatcher.SetHubEndpoint("http://hub.example.com:8080")
 
 	agent := &store.Agent{
-		ID:              "agent-1",
+		ID:              tid("agent-1"),
 		Name:            "test-agent",
 		Slug:            "test-agent",
-		ProjectID:       "project-1",
-		OwnerID:         "user-1",
-		RuntimeBrokerID: "host-1",
+		ProjectID:       tid("project-1"),
+		OwnerID:         tid("user-1"),
+		RuntimeBrokerID: tid("host-1"),
 		AppliedConfig: &store.AgentAppliedConfig{
 			HarnessConfig: "claude",
 		},
@@ -2817,11 +2823,11 @@ func TestDispatchAgentStart_IncludesHubEndpoint(t *testing.T) {
 	}
 
 	// Verify agent identity vars are also present
-	if mockClient.lastResolvedEnv["SCION_AGENT_ID"] != "agent-1" {
-		t.Errorf("SCION_AGENT_ID = %q, want %q", mockClient.lastResolvedEnv["SCION_AGENT_ID"], "agent-1")
+	if mockClient.lastResolvedEnv["SCION_AGENT_ID"] != tid("agent-1") {
+		t.Errorf("SCION_AGENT_ID = %q, want %q", mockClient.lastResolvedEnv["SCION_AGENT_ID"], tid("agent-1"))
 	}
-	if mockClient.lastResolvedEnv["SCION_GROVE_ID"] != "project-1" {
-		t.Errorf("SCION_GROVE_ID = %q, want %q", mockClient.lastResolvedEnv["SCION_GROVE_ID"], "project-1")
+	if mockClient.lastResolvedEnv["SCION_GROVE_ID"] != tid("project-1") {
+		t.Errorf("SCION_GROVE_ID = %q, want %q", mockClient.lastResolvedEnv["SCION_GROVE_ID"], tid("project-1"))
 	}
 }
 
@@ -2831,7 +2837,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_PropagatesSharedWorkspace(t *te
 
 	// Create a shared-workspace git project
 	project := &store.Project{
-		ID:        "project-shared-ws",
+		ID:        tid("project-shared-ws"),
 		Name:      "Shared WS",
 		Slug:      "shared-ws",
 		GitRemote: "github.com/test/shared",
@@ -2844,7 +2850,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_PropagatesSharedWorkspace(t *te
 	}
 
 	broker := &store.RuntimeBroker{
-		ID:       "host-1",
+		ID:       tid("host-1"),
 		Name:     "test-host",
 		Slug:     "test-host",
 		Endpoint: "http://localhost:9800",
@@ -2861,8 +2867,8 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_PropagatesSharedWorkspace(t *te
 		ID:              "agent-shared-1",
 		Name:            "shared-agent",
 		Slug:            "shared-agent",
-		ProjectID:       "project-shared-ws",
-		RuntimeBrokerID: "host-1",
+		ProjectID:       tid("project-shared-ws"),
+		RuntimeBrokerID: tid("host-1"),
 		AppliedConfig: &store.AgentAppliedConfig{
 			HarnessConfig: "claude",
 			Workspace:     "/home/user/.scion/projects/shared-ws",
@@ -2897,7 +2903,7 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_InjectsGCPIdentityEnv(t *testing
 	memStore := createTestStore(t)
 
 	project := &store.Project{
-		ID:        "project-gcp",
+		ID:        tid("project-gcp"),
 		Name:      "gcp-project",
 		Slug:      "gcp-project",
 		GitRemote: "https://github.com/example/repo.git",
@@ -2907,7 +2913,7 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_InjectsGCPIdentityEnv(t *testing
 	}
 
 	broker := &store.RuntimeBroker{
-		ID:       "broker-gcp",
+		ID:       tid("broker-gcp"),
 		Name:     "test-broker",
 		Slug:     "test-broker",
 		Endpoint: "http://localhost:9800",
@@ -2918,8 +2924,8 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_InjectsGCPIdentityEnv(t *testing
 	}
 
 	provider := &store.ProjectProvider{
-		ProjectID:  "project-gcp",
-		BrokerID:   "broker-gcp",
+		ProjectID:  tid("project-gcp"),
+		BrokerID:   tid("broker-gcp"),
 		BrokerName: "test-broker",
 		LocalPath:  "/home/user/projects/myproject/.scion",
 		Status:     store.BrokerStatusOnline,
@@ -2935,14 +2941,14 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_InjectsGCPIdentityEnv(t *testing
 		ID:              "agent-gcp-1",
 		Name:            "gcp-agent",
 		Slug:            "gcp-agent",
-		ProjectID:       "project-gcp",
-		RuntimeBrokerID: "broker-gcp",
+		ProjectID:       tid("project-gcp"),
+		RuntimeBrokerID: tid("broker-gcp"),
 		AppliedConfig: &store.AgentAppliedConfig{
 			GCPIdentity: &store.GCPIdentityConfig{
 				MetadataMode:        store.GCPMetadataModeAssign,
 				ServiceAccountID:    "sa-123",
 				ServiceAccountEmail: "sa@proj.iam.gserviceaccount.com",
-				ProjectID:           "my-project",
+				ProjectID:           tid("my-project"),
 			},
 		},
 	}
@@ -2963,7 +2969,7 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_InjectsGCPIdentityEnv(t *testing
 	if v := mockClient.lastResolvedEnv["SCION_METADATA_SA_EMAIL"]; v != "sa@proj.iam.gserviceaccount.com" {
 		t.Errorf("expected SCION_METADATA_SA_EMAIL='sa@proj.iam.gserviceaccount.com', got %q", v)
 	}
-	if v := mockClient.lastResolvedEnv["SCION_METADATA_PROJECT_ID"]; v != "my-project" {
+	if v := mockClient.lastResolvedEnv["SCION_METADATA_PROJECT_ID"]; v != tid("my-project") {
 		t.Errorf("expected SCION_METADATA_PROJECT_ID='my-project', got %q", v)
 	}
 }
@@ -2973,7 +2979,7 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_GCPBlockMode(t *testing.T) {
 	memStore := createTestStore(t)
 
 	project := &store.Project{
-		ID:        "project-gcp-block",
+		ID:        tid("project-gcp-block"),
 		Name:      "gcp-project",
 		Slug:      "gcp-project",
 		GitRemote: "https://github.com/example/repo.git",
@@ -2983,7 +2989,7 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_GCPBlockMode(t *testing.T) {
 	}
 
 	broker := &store.RuntimeBroker{
-		ID:       "broker-gcp-block",
+		ID:       tid("broker-gcp-block"),
 		Name:     "test-broker",
 		Slug:     "test-broker",
 		Endpoint: "http://localhost:9800",
@@ -2994,8 +3000,8 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_GCPBlockMode(t *testing.T) {
 	}
 
 	provider := &store.ProjectProvider{
-		ProjectID:  "project-gcp-block",
-		BrokerID:   "broker-gcp-block",
+		ProjectID:  tid("project-gcp-block"),
+		BrokerID:   tid("broker-gcp-block"),
 		BrokerName: "test-broker",
 		LocalPath:  "/home/user/projects/myproject/.scion",
 		Status:     store.BrokerStatusOnline,
@@ -3011,8 +3017,8 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_GCPBlockMode(t *testing.T) {
 		ID:              "agent-gcp-block",
 		Name:            "gcp-agent",
 		Slug:            "gcp-agent",
-		ProjectID:       "project-gcp-block",
-		RuntimeBrokerID: "broker-gcp-block",
+		ProjectID:       tid("project-gcp-block"),
+		RuntimeBrokerID: tid("broker-gcp-block"),
 		AppliedConfig: &store.AgentAppliedConfig{
 			GCPIdentity: &store.GCPIdentityConfig{
 				MetadataMode: store.GCPMetadataModeBlock,
@@ -3063,7 +3069,7 @@ func TestBuildCreateRequest_UserGitHubTokenPrecedesApp(t *testing.T) {
 	}
 
 	project := &store.Project{
-		ID:                   "project-1",
+		ID:                   tid("project-1"),
 		Name:                 "test-project",
 		Slug:                 "test-project",
 		GitHubInstallationID: &installID,
@@ -3073,7 +3079,7 @@ func TestBuildCreateRequest_UserGitHubTokenPrecedesApp(t *testing.T) {
 	}
 
 	broker := &store.RuntimeBroker{
-		ID:       "host-1",
+		ID:       tid("host-1"),
 		Name:     "test-host",
 		Slug:     "test-host",
 		Endpoint: "http://localhost:9800",
@@ -3093,12 +3099,12 @@ func TestBuildCreateRequest_UserGitHubTokenPrecedesApp(t *testing.T) {
 	dispatcher.SetGitHubAppMinter(minter)
 
 	agent := &store.Agent{
-		ID:              "agent-1",
+		ID:              tid("agent-1"),
 		Name:            "test-agent",
 		Slug:            "test-agent",
-		OwnerID:         "user-1",
-		ProjectID:       "project-1",
-		RuntimeBrokerID: "host-1",
+		OwnerID:         tid("user-1"),
+		ProjectID:       tid("project-1"),
+		RuntimeBrokerID: tid("host-1"),
 		AppliedConfig: &store.AgentAppliedConfig{
 			Env: map[string]string{
 				"GITHUB_TOKEN": "ghp_user_pat_xyz",
@@ -3148,7 +3154,7 @@ func TestBuildCreateRequest_GitHubAppTokenWhenNoUserToken(t *testing.T) {
 	}
 
 	project := &store.Project{
-		ID:                   "project-1",
+		ID:                   tid("project-1"),
 		Name:                 "test-project",
 		Slug:                 "test-project",
 		GitHubInstallationID: &installID,
@@ -3158,7 +3164,7 @@ func TestBuildCreateRequest_GitHubAppTokenWhenNoUserToken(t *testing.T) {
 	}
 
 	broker := &store.RuntimeBroker{
-		ID:       "host-1",
+		ID:       tid("host-1"),
 		Name:     "test-host",
 		Slug:     "test-host",
 		Endpoint: "http://localhost:9800",
@@ -3178,12 +3184,12 @@ func TestBuildCreateRequest_GitHubAppTokenWhenNoUserToken(t *testing.T) {
 	dispatcher.SetGitHubAppMinter(minter)
 
 	agent := &store.Agent{
-		ID:              "agent-1",
+		ID:              tid("agent-1"),
 		Name:            "test-agent",
 		Slug:            "test-agent",
-		OwnerID:         "user-1",
-		ProjectID:       "project-1",
-		RuntimeBrokerID: "host-1",
+		OwnerID:         tid("user-1"),
+		ProjectID:       tid("project-1"),
+		RuntimeBrokerID: tid("host-1"),
 		AppliedConfig:   &store.AgentAppliedConfig{},
 	}
 

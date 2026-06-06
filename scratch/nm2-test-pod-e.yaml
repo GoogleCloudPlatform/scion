@@ -1,0 +1,97 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: nm2-test-agent-e
+  namespace: scion-agents
+  labels:
+    test: nm2-scenario-e
+    scion.dev/project-id: test-project-epsilon
+spec:
+  securityContext:
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+  initContainers:
+  - name: workspace-provision
+    image: alpine/git:latest
+    command:
+    - sh
+    - -c
+    - |
+      set -e
+      SENTINEL="/workspace/.scion-provisioned"
+      if [ -f "$SENTINEL" ]; then
+        echo "PROVISION: sentinel found, skipping clone"
+        exit 0
+      fi
+      echo "PROVISION: cloning workspace..."
+      git clone --depth 1 https://github.com/ptone/scion.git /workspace
+      echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$SENTINEL"
+      echo "PROVISION: clone complete"
+    volumeMounts:
+    - name: workspace
+      mountPath: /workspace
+      subPath: projects/test-project-epsilon/workspace
+    resources:
+      requests:
+        cpu: 250m
+        memory: 512Mi
+  - name: shared-dir-provision
+    image: busybox:1.36
+    command:
+    - sh
+    - -c
+    - |
+      echo "SHARED-DIR: ensuring directory exists..."
+      mkdir -p /shared/test-data
+      echo "shared-dir-test-content" > /shared/test-data/readme.txt
+      ls -la /shared/
+      echo "SHARED-DIR: provisioned"
+    volumeMounts:
+    - name: shared-dir-0
+      mountPath: /shared
+      subPath: projects/test-project-epsilon/shared-dirs/test-data
+    resources:
+      requests:
+        cpu: 250m
+        memory: 128Mi
+  containers:
+  - name: agent
+    image: busybox:1.36
+    command:
+    - sh
+    - -c
+    - |
+      echo "=== WORKSPACE ==="
+      ls -la /workspace/ | head -10
+      echo "=== SHARED DIR (/scion-volumes/test-data) ==="
+      ls -la /scion-volumes/test-data/
+      cat /scion-volumes/test-data/readme.txt
+      echo "=== MOUNT VERIFICATION ==="
+      echo "Workspace and shared dir are on same PVC with different subPaths"
+      echo "=== TEST COMPLETE (e) ==="
+      sleep 30
+    volumeMounts:
+    - name: workspace
+      mountPath: /workspace
+      subPath: projects/test-project-epsilon/workspace
+    - name: shared-dir-0
+      mountPath: /scion-volumes/test-data
+      subPath: projects/test-project-epsilon/shared-dirs/test-data
+    resources:
+      requests:
+        cpu: 250m
+        memory: 256Mi
+  volumes:
+  - name: workspace
+    persistentVolumeClaim:
+      claimName: scion-workspaces
+  - name: shared-dir-0
+    persistentVolumeClaim:
+      claimName: scion-workspaces
+  restartPolicy: Never
+  tolerations:
+  - key: "kubernetes.io/arch"
+    operator: "Equal"
+    value: "amd64"
+    effect: "NoSchedule"

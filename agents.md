@@ -86,6 +86,13 @@ All icons in the web frontend use the Shoelace `<sl-icon>` component (Bootstrap 
 
 > **Canonical engineering glossary:** See [`GLOSSARY.md`](./GLOSSARY.md) at the repo root for the canonical, opinionated terminology used throughout the codebase — the preferred term for each concept and the synonyms to avoid. Prefer these terms in new code, comments, and docs.
 
+These terms may be used in shorthand with prompts
+
+- **hub-broker, combo server** References running the server command with both the hub function and the broker function running in the same invocation.
+- **hub-native, hub-project** A special variant of a project/project space, that is created on a hub server for use by agents dispatched from clients. These live in ~/.scion/projects/<hub-project-name> on any broker that is a provider to the hub project. This is in contrast to the arbitrary local path on a broker for a linked project.
+- **agent-home** The directory that gets mounted as the home folder of the container user in the agent container
+- **linked-project** A project and project folder that pre-existed on a broker machine, and is linked as a hub resource project for visibility, metadata, and agent management across other brokers that may have such a linked project. May be based on name or git-URI
+
 ## Project use of the scion cli itself
 Do not commit changes in the project's own `.scion` folder to git as part of committing progress on code and docs. These are managed and committed manually when template defaults are intentionally updated.
 
@@ -143,6 +150,20 @@ Learned the hard way; these are specific to running inside this container.
 1.  When you are finished, rebase your branch on main, favoring main, running tests again if you had to resolve conflicts
 1.  Notify the user you have completed the task
 
+
+## What NOT to commit
+
+Follow these rules to keep the repository clean and the git history lean.
+
+- **No binary files** (images, photos, compiled artifacts) unless they are part of the shipped product UI. Development screenshots, Telegram downloads, and similar media must never be committed.
+- **No development screenshots.** Use PR comments or issue attachments to share before/after visuals — not files in the repo.
+- **No agent orchestration state files.** Files like `.coordinator-state.md`, `.eng-manager-state.md`, or other runtime state produced by the Scion agent system are ephemeral and must not be tracked.
+- **No test artifacts or generated data files.** One-off debugging scripts (`test_json.go`), format-conversion utilities (`format_callouts.py`), and generated fixtures belong in scratch space or should be gitignored.
+- **No scratch or task-tracking files.** The `.scratch/` and `.tasks/` directories are gitignored. Do not force-add files into them (`git add -f`).
+- **No PR review artifacts.** Code-review notes (`pr-*-review*.md`) belong in the PR discussion thread, not as committed files.
+- **The `downloads/` directory is gitignored.** Any file a harness or agent downloads at runtime stays local — never commit its contents.
+
+When in doubt, check `.gitignore` before staging. If a new category of generated or ephemeral file appears, add a `.gitignore` entry in the same PR that introduces the workflow.
 
 ## Agent memory & durable notes (IMPORTANT)
 

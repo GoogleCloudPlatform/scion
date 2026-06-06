@@ -38,7 +38,7 @@ func TestEvaluateEndpoint_UserDirectPolicy(t *testing.T) {
 
 	// Create user
 	require.NoError(t, s.CreateUser(ctx, &store.User{
-		ID: "eval-user-1", Email: "eval1@test.com", DisplayName: "Eval User", Role: "member", Status: "active",
+		ID: tid("eval-user-1"), Email: "eval1@test.com", DisplayName: "Eval User", Role: "member", Status: "active",
 	}))
 
 	// Create policy via API
@@ -58,7 +58,7 @@ func TestEvaluateEndpoint_UserDirectPolicy(t *testing.T) {
 	// Add binding via API
 	bindReq := AddPolicyBindingRequest{
 		PrincipalType: "user",
-		PrincipalID:   "eval-user-1",
+		PrincipalID:   tid("eval-user-1"),
 	}
 	rec = doRequest(t, srv, http.MethodPost, "/api/v1/policies/"+createdPolicy.ID+"/bindings", bindReq)
 	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
@@ -66,9 +66,9 @@ func TestEvaluateEndpoint_UserDirectPolicy(t *testing.T) {
 	// Evaluate via API
 	evalReq := EvaluateRequest{
 		PrincipalType: "user",
-		PrincipalID:   "eval-user-1",
+		PrincipalID:   tid("eval-user-1"),
 		ResourceType:  "agent",
-		ResourceID:    "agent-1",
+		ResourceID:    tid("agent-1"),
 		Action:        "read",
 	}
 	rec = doRequest(t, srv, http.MethodPost, "/api/v1/policies/evaluate", evalReq)
@@ -85,12 +85,12 @@ func TestEvaluateEndpoint_DefaultDeny(t *testing.T) {
 	ctx := context.Background()
 
 	require.NoError(t, s.CreateUser(ctx, &store.User{
-		ID: "eval-user-none", Email: "none@test.com", DisplayName: "No Policy", Role: "member", Status: "active",
+		ID: tid("eval-user-none"), Email: "none@test.com", DisplayName: "No Policy", Role: "member", Status: "active",
 	}))
 
 	evalReq := EvaluateRequest{
 		PrincipalType: "user",
-		PrincipalID:   "eval-user-none",
+		PrincipalID:   tid("eval-user-none"),
 		ResourceType:  "agent",
 		Action:        "delete",
 	}
@@ -108,33 +108,33 @@ func TestEvaluateEndpoint_ScopeOverride(t *testing.T) {
 	ctx := context.Background()
 
 	require.NoError(t, s.CreateUser(ctx, &store.User{
-		ID: "eval-user-scope", Email: "scope@test.com", DisplayName: "Scope User", Role: "member", Status: "active",
+		ID: tid("eval-user-scope"), Email: "scope@test.com", DisplayName: "Scope User", Role: "member", Status: "active",
 	}))
 
 	// Create hub-level deny
 	hubPolicy := &store.Policy{
-		ID: "hub-deny-1", Name: "Hub Deny", ScopeType: "hub",
+		ID: tid("hub-deny-1"), Name: "Hub Deny", ScopeType: "hub",
 		ResourceType: "agent", Actions: []string{"read"}, Effect: "deny",
 	}
 	require.NoError(t, s.CreatePolicy(ctx, hubPolicy))
 	require.NoError(t, s.AddPolicyBinding(ctx, &store.PolicyBinding{
-		PolicyID: "hub-deny-1", PrincipalType: "user", PrincipalID: "eval-user-scope",
+		PolicyID: tid("hub-deny-1"), PrincipalType: "user", PrincipalID: tid("eval-user-scope"),
 	}))
 
 	// Create project-level allow (should override hub deny)
 	projectPolicy := &store.Policy{
-		ID: "project-allow-1", Name: "Project Allow", ScopeType: "project",
+		ID: tid("project-allow-1"), Name: "Project Allow", ScopeType: "project",
 		ScopeID: "project-scope-1", ResourceType: "agent",
 		Actions: []string{"read"}, Effect: "allow",
 	}
 	require.NoError(t, s.CreatePolicy(ctx, projectPolicy))
 	require.NoError(t, s.AddPolicyBinding(ctx, &store.PolicyBinding{
-		PolicyID: "project-allow-1", PrincipalType: "user", PrincipalID: "eval-user-scope",
+		PolicyID: tid("project-allow-1"), PrincipalType: "user", PrincipalID: tid("eval-user-scope"),
 	}))
 
 	evalReq := EvaluateRequest{
 		PrincipalType: "user",
-		PrincipalID:   "eval-user-scope",
+		PrincipalID:   tid("eval-user-scope"),
 		ResourceType:  "agent",
 		Action:        "read",
 	}
@@ -153,26 +153,26 @@ func TestEvaluateEndpoint_AgentPolicy(t *testing.T) {
 
 	// Create project and agent
 	require.NoError(t, s.CreateProject(ctx, &store.Project{
-		ID: "project-eval", Name: "Eval Project", Slug: "project-eval",
+		ID: tid("project-eval"), Name: "Eval Project", Slug: tid("project-eval"),
 	}))
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
-		ID: "agent-eval", Slug: "agent-eval", Name: "Eval Agent",
-		ProjectID: "project-eval", Phase: string(state.PhaseRunning),
+		ID: tid("agent-eval"), Slug: tid("agent-eval"), Name: "Eval Agent",
+		ProjectID: tid("project-eval"), Phase: string(state.PhaseRunning),
 	}))
 
 	// Create and bind policy to agent
 	policy := &store.Policy{
-		ID: "agent-policy-eval", Name: "Agent Read", ScopeType: "hub",
+		ID: tid("agent-policy-eval"), Name: "Agent Read", ScopeType: "hub",
 		ResourceType: "project", Actions: []string{"read"}, Effect: "allow",
 	}
 	require.NoError(t, s.CreatePolicy(ctx, policy))
 	require.NoError(t, s.AddPolicyBinding(ctx, &store.PolicyBinding{
-		PolicyID: "agent-policy-eval", PrincipalType: "agent", PrincipalID: "agent-eval",
+		PolicyID: tid("agent-policy-eval"), PrincipalType: "agent", PrincipalID: tid("agent-eval"),
 	}))
 
 	evalReq := EvaluateRequest{
 		PrincipalType: "agent",
-		PrincipalID:   "agent-eval",
+		PrincipalID:   tid("agent-eval"),
 		ResourceType:  "project",
 		Action:        "read",
 	}
@@ -190,11 +190,11 @@ func TestEvaluateEndpoint_AgentBinding(t *testing.T) {
 
 	// Create project and agent
 	require.NoError(t, s.CreateProject(ctx, &store.Project{
-		ID: "project-bind", Name: "Bind Project", Slug: "project-bind",
+		ID: tid("project-bind"), Name: "Bind Project", Slug: tid("project-bind"),
 	}))
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
-		ID: "agent-bind", Slug: "agent-bind", Name: "Bind Agent",
-		ProjectID: "project-bind", Phase: string(state.PhaseRunning),
+		ID: tid("agent-bind"), Slug: tid("agent-bind"), Name: "Bind Agent",
+		ProjectID: tid("project-bind"), Phase: string(state.PhaseRunning),
 	}))
 
 	// Create policy via API
@@ -214,7 +214,7 @@ func TestEvaluateEndpoint_AgentBinding(t *testing.T) {
 	// Bind to agent (tests that "agent" is now a valid principal type)
 	bindReq := AddPolicyBindingRequest{
 		PrincipalType: "agent",
-		PrincipalID:   "agent-bind",
+		PrincipalID:   tid("agent-bind"),
 	}
 	rec = doRequest(t, srv, http.MethodPost, "/api/v1/policies/"+createdPolicy.ID+"/bindings", bindReq)
 	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())

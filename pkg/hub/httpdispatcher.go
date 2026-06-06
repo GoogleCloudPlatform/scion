@@ -17,6 +17,8 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -24,9 +26,12 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/GoogleCloudPlatform/scion/pkg/observability/dispatchmetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/go-jose/go-jose/v4/jwt"
+	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 // HTTPRuntimeBrokerClient is an HTTP-based implementation of RuntimeBrokerClient.
@@ -59,6 +64,10 @@ func (c *HTTPRuntimeBrokerClient) StopAgent(ctx context.Context, brokerID, broke
 
 func (c *HTTPRuntimeBrokerClient) RestartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, resolvedEnv map[string]string) error {
 	return c.transport.RestartAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, resolvedEnv)
+}
+
+func (c *HTTPRuntimeBrokerClient) ResetAuthAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID, token string) error {
+	return c.transport.ResetAuthAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, token)
 }
 
 func (c *HTTPRuntimeBrokerClient) DeleteAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, deleteFiles, removeBranch, softDelete bool, deletedAt time.Time) error {
@@ -95,8 +104,8 @@ func (c *HTTPRuntimeBrokerClient) ExecAgent(ctx context.Context, brokerID, broke
 	return c.transport.ExecAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, command, timeout)
 }
 
-func (c *HTTPRuntimeBrokerClient) CleanupProject(ctx context.Context, brokerID, brokerEndpoint, projectSlug string) error {
-	return c.transport.CleanupProject(ctx, brokerID, brokerEndpoint, projectSlug)
+func (c *HTTPRuntimeBrokerClient) CleanupProject(ctx context.Context, brokerID, brokerEndpoint, projectSlug, projectID string) error {
+	return c.transport.CleanupProject(ctx, brokerID, brokerEndpoint, projectSlug, projectID)
 }
 
 // GetClient returns the underlying RuntimeBrokerClient.
@@ -121,17 +130,28 @@ type GitHubAppTokenMinter interface {
 // It looks up the runtime broker endpoint from the store and uses HTTPRuntimeBrokerClient
 // to make the actual API calls.
 type HTTPAgentDispatcher struct {
-	store           store.Store
-	client          RuntimeBrokerClient
-	tokenGenerator  AgentTokenGenerator
-	secretBackend   secret.SecretBackend
-	authzService    *AuthzService        // Optional authz service for progeny secret verification
-	githubAppMinter GitHubAppTokenMinter // Optional GitHub App token minter
-	hubEndpoint     string               // Hub endpoint URL for agents to call back
-	hubID           string               // Hub instance ID for hub-scoped queries
-	devAuthToken    string               // Dev auth token to inject into agent env (dev-auth mode only)
-	debug           bool
-	log             *slog.Logger
+	store             store.Store
+	client            RuntimeBrokerClient
+	tokenGenerator    AgentTokenGenerator
+	secretBackend     secret.SecretBackend
+	authzService      *AuthzService        // Optional authz service for progeny secret verification
+	githubAppMinter   GitHubAppTokenMinter // Optional GitHub App token minter
+	hubEndpoint       string               // Hub endpoint URL for agents to call back
+	hubID             string               // Hub instance ID for hub-scoped queries
+	devAuthToken      string               // Dev auth token to inject into agent env (dev-auth mode only)
+	transportMinter   TransportTokenMinter // Optional transport token minter for OIDC dispatch
+	transportAudience string               // OIDC audience for transport tokens
+	debug             bool
+	log               *slog.Logger
+
+	// Cross-node dispatch deps (B4-2). When events + commandBus are non-nil
+	// and client.StartAgent/StopAgent/RestartAgent returns ErrLifecycleDeferred,
+	// the dispatcher writes durable intent + signals the owning node + waits
+	// for the terminal phase transition. Nil = cross-node dispatch disabled
+	// (single-node / SQLite mode: all brokers are local).
+	events          EventPublisher
+	commandBus      CommandBus
+	dispatchMetrics dispatchmetrics.Recorder
 }
 
 // NewHTTPAgentDispatcher creates a new HTTP-based agent dispatcher.
@@ -185,10 +205,31 @@ func (d *HTTPAgentDispatcher) SetAuthzService(a *AuthzService) {
 	d.authzService = a
 }
 
+// SetTransportMinter sets the transport token minter and audience for injecting
+// transport-layer OIDC tokens into agent dispatch payloads.
+func (d *HTTPAgentDispatcher) SetTransportMinter(minter TransportTokenMinter, audience string) {
+	d.transportMinter = minter
+	d.transportAudience = audience
+}
+
 // SetGitHubAppMinter sets the GitHub App token minter for resolving
 // GitHub App installation tokens during agent credential resolution.
 func (d *HTTPAgentDispatcher) SetGitHubAppMinter(m GitHubAppTokenMinter) {
 	d.githubAppMinter = m
+}
+
+// SetCrossNodeDeps wires the event publisher and command bus needed for
+// cross-node lifecycle dispatch (B4-2). When both are set and a lifecycle
+// op returns ErrLifecycleDeferred, the dispatcher writes durable intent,
+// signals the owning node, and waits for the terminal phase.
+func (d *HTTPAgentDispatcher) SetCrossNodeDeps(events EventPublisher, bus CommandBus) {
+	d.events = events
+	d.commandBus = bus
+}
+
+// SetDispatchMetrics wires the dispatch metrics recorder (B5-2).
+func (d *HTTPAgentDispatcher) SetDispatchMetrics(rec dispatchmetrics.Recorder) {
+	d.dispatchMetrics = rec
 }
 
 // getBrokerEndpoint retrieves the endpoint URL for a runtime broker.
@@ -282,7 +323,7 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 		workspace := agent.AppliedConfig.Workspace
 		gitClone := agent.AppliedConfig.GitClone
 		// When the broker has a local provider path for this project, clear
-		// the hub-managed workspace path — the broker will derive its own
+		// the hub-native workspace path — the broker will derive its own
 		// workspace location from the project path. However, keep GitClone
 		// config: all hub-linked projects with a git remote use clone-based
 		// provisioning (HTTPS + GitHub token) rather than worktree-based,
@@ -300,21 +341,19 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 			}
 		}
 		req.Config = &RemoteAgentConfig{
-			Template:          agent.Template,
-			Image:             agent.AppliedConfig.Image,
-			HarnessConfig:     agent.AppliedConfig.HarnessConfig,
-			HarnessAuth:       agent.AppliedConfig.HarnessAuth,
-			Task:              agent.AppliedConfig.Task,
-			Workspace:         workspace,
-			Profile:           agent.AppliedConfig.Profile,
-			Branch:            agent.AppliedConfig.Branch,
-			TemplateID:        agent.AppliedConfig.TemplateID,
-			TemplateHash:      agent.AppliedConfig.TemplateHash,
-			HarnessConfigID:   agent.AppliedConfig.HarnessConfigID,
-			HarnessConfigHash: agent.AppliedConfig.HarnessConfigHash,
-			GitClone:          gitClone,
-			SharedWorkspace:   projectInfo.sharedWorkspace,
-			GCPIdentity:       remoteGCPIdentity,
+			Template:        agent.Template,
+			Image:           agent.AppliedConfig.Image,
+			HarnessConfig:   agent.AppliedConfig.HarnessConfig,
+			HarnessAuth:     agent.AppliedConfig.HarnessAuth,
+			Task:            agent.AppliedConfig.Task,
+			Workspace:       workspace,
+			Profile:         agent.AppliedConfig.Profile,
+			Branch:          agent.AppliedConfig.Branch,
+			TemplateID:      agent.AppliedConfig.TemplateID,
+			TemplateHash:    agent.AppliedConfig.TemplateHash,
+			GitClone:        gitClone,
+			SharedWorkspace: projectInfo.sharedWorkspace,
+			GCPIdentity:     remoteGCPIdentity,
 		}
 		req.ResolvedEnv = agent.AppliedConfig.Env
 
@@ -486,6 +525,23 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 		req.ResolvedEnv["SCION_DEV_TOKEN"] = d.devAuthToken
 	}
 
+	// Transport token minting for platform-layer auth (IAP / Cloud Run invoker)
+	if d.transportMinter != nil && d.transportAudience != "" {
+		tToken, tExpiry, tErr := d.transportMinter.MintIDToken(ctx, d.transportAudience)
+		if tErr != nil {
+			if d.debug {
+				d.log.Warn("buildCreateRequest: failed to mint transport token", "error", tErr)
+			}
+		} else if tToken != "" {
+			if req.ResolvedEnv == nil {
+				req.ResolvedEnv = make(map[string]string)
+			}
+			req.ResolvedEnv["SCION_TRANSPORT_TOKEN"] = tToken
+			req.ResolvedEnv["SCION_TRANSPORT_AUDIENCE"] = d.transportAudience
+			req.ResolvedEnv["SCION_TRANSPORT_TOKEN_EXPIRY"] = tExpiry.UTC().Format(time.RFC3339)
+		}
+	}
+
 	return req, nil
 }
 
@@ -504,7 +560,7 @@ func (d *HTTPAgentDispatcher) resolveDispatchProjectPath(ctx context.Context, ag
 
 func (d *HTTPAgentDispatcher) resolveDispatchProjectInfo(ctx context.Context, agent *store.Agent) projectDispatchInfo {
 	// Look up the local path for this project on the target runtime broker.
-	// A provider LocalPath (linked project) takes precedence over hub-managed
+	// A provider LocalPath (linked project) takes precedence over hub-native
 	// slug resolution, even for projects without a git remote. Only when there
 	// is no provider path and no git remote do we fall back to projectSlug so
 	// the broker resolves the conventional ~/.scion/projects/<slug> path.
@@ -537,7 +593,7 @@ func (d *HTTPAgentDispatcher) resolveDispatchProjectInfo(ctx context.Context, ag
 		}
 	}
 	// If no provider path was found, let the broker resolve the path via
-	// slug. This applies to both hub-managed projects (no git remote) and
+	// slug. This applies to both hub-native projects (no git remote) and
 	// git-anchored projects — the broker needs a project identity to create
 	// agent directories under ~/.scion/projects/<slug>/ rather than falling
 	// back to the global project.
@@ -697,6 +753,9 @@ func (d *HTTPAgentDispatcher) DispatchAgentCreateWithGather(ctx context.Context,
 		"agent_id", agent.ID, "agent", agent.Name,
 		"brokerElapsed", time.Since(brokerCallStart).String(),
 		"totalElapsed", time.Since(dispatchStart).String())
+	if errors.Is(err, ErrLifecycleDeferred) {
+		return d.deferredCreateWithGather(ctx, agent)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -711,6 +770,22 @@ func (d *HTTPAgentDispatcher) DispatchAgentCreateWithGather(ctx context.Context,
 	return nil, nil
 }
 
+// deferredCreateWithGather handles a cross-node create-with-gather via durable dispatch.
+func (d *HTTPAgentDispatcher) deferredCreateWithGather(ctx context.Context, agent *store.Agent) (*RemoteEnvRequirementsResponse, error) {
+	result, err := d.deferredDataOpResult(ctx, agent, "create", &CreateWithGatherDispatchArgs{})
+	if err != nil {
+		return nil, err
+	}
+	if result.Result == "" {
+		return nil, nil
+	}
+	var cr CreateWithGatherResult
+	if err := json.Unmarshal([]byte(result.Result), &cr); err != nil {
+		return nil, fmt.Errorf("unmarshal create result: %w", err)
+	}
+	return cr.EnvRequirements, nil
+}
+
 // DispatchFinalizeEnv sends gathered env vars to the broker to complete agent creation.
 func (d *HTTPAgentDispatcher) DispatchFinalizeEnv(ctx context.Context, agent *store.Agent, env map[string]string) error {
 	if err := requireRuntimeBrokerAssigned(agent); err != nil {
@@ -723,6 +798,9 @@ func (d *HTTPAgentDispatcher) DispatchFinalizeEnv(ctx context.Context, agent *st
 	}
 
 	resp, err := d.client.FinalizeEnv(ctx, agent.RuntimeBrokerID, endpoint, agent.ID, env)
+	if errors.Is(err, ErrLifecycleDeferred) {
+		return d.deferredFinalizeEnv(ctx, agent, env)
+	}
 	if err != nil {
 		return err
 	}
@@ -731,6 +809,11 @@ func (d *HTTPAgentDispatcher) DispatchFinalizeEnv(ctx context.Context, agent *st
 		d.applyBrokerResponse(agent, resp)
 	}
 	return nil
+}
+
+// deferredFinalizeEnv handles a cross-node finalize_env via durable dispatch.
+func (d *HTTPAgentDispatcher) deferredFinalizeEnv(ctx context.Context, agent *store.Agent, env map[string]string) error {
+	return d.deferredDataOp(ctx, agent, "finalize_env", &FinalizeEnvDispatchArgs{Env: env})
 }
 
 // resolveEnvFromStorage queries Hub env var storage for all applicable scopes
@@ -1003,6 +1086,20 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 		}
 	}
 
+	// Transport token minting for platform-layer auth (IAP / Cloud Run invoker)
+	if d.transportMinter != nil && d.transportAudience != "" {
+		tToken, tExpiry, tErr := d.transportMinter.MintIDToken(ctx, d.transportAudience)
+		if tErr != nil {
+			if d.debug {
+				d.log.Warn("DispatchAgentStart: failed to mint transport token", "error", tErr)
+			}
+		} else if tToken != "" {
+			resolvedEnv["SCION_TRANSPORT_TOKEN"] = tToken
+			resolvedEnv["SCION_TRANSPORT_AUDIENCE"] = d.transportAudience
+			resolvedEnv["SCION_TRANSPORT_TOKEN_EXPIRY"] = tExpiry.UTC().Format(time.RFC3339)
+		}
+	}
+
 	// GitHub App token minting for agent start
 	if d.githubAppMinter != nil && agent.ProjectID != "" {
 		project, projectErr := d.store.GetProject(ctx, agent.ProjectID)
@@ -1066,6 +1163,11 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 	}
 
 	resp, err := d.client.StartAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID, task, projectPath, projectSlug, harnessConfig, resolvedEnv, resolvedSecrets, inlineConfig, projectInfo.sharedDirs, projectInfo.sharedWorkspace)
+	if errors.Is(err, ErrLifecycleDeferred) {
+		return d.deferredStart(ctx, agent, &StartDispatchArgs{
+			Task: task,
+		})
+	}
 	if err != nil {
 		return err
 	}
@@ -1087,7 +1189,11 @@ func (d *HTTPAgentDispatcher) DispatchAgentStop(ctx context.Context, agent *stor
 		return err
 	}
 
-	return d.client.StopAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID)
+	err = d.client.StopAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID)
+	if errors.Is(err, ErrLifecycleDeferred) {
+		return d.deferredStop(ctx, agent)
+	}
+	return err
 }
 
 // DispatchAgentRestart restarts an agent on the runtime broker.
@@ -1141,7 +1247,61 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 		}
 	}
 
-	return d.client.RestartAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID, resolvedEnv)
+	// Transport token minting for platform-layer auth (IAP / Cloud Run invoker)
+	if d.transportMinter != nil && d.transportAudience != "" {
+		tToken, tExpiry, tErr := d.transportMinter.MintIDToken(ctx, d.transportAudience)
+		if tErr != nil {
+			if d.debug {
+				d.log.Warn("DispatchAgentRestart: failed to mint transport token", "error", tErr)
+			}
+		} else if tToken != "" {
+			resolvedEnv["SCION_TRANSPORT_TOKEN"] = tToken
+			resolvedEnv["SCION_TRANSPORT_AUDIENCE"] = d.transportAudience
+			resolvedEnv["SCION_TRANSPORT_TOKEN_EXPIRY"] = tExpiry.UTC().Format(time.RFC3339)
+		}
+	}
+
+	err = d.client.RestartAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID, resolvedEnv)
+	if errors.Is(err, ErrLifecycleDeferred) {
+		return d.deferredRestart(ctx, agent)
+	}
+	return err
+}
+
+// DispatchAgentResetAuth injects a fresh auth token into a running agent without
+// restarting it. It generates a new token and sends it to the broker's reset-auth
+// endpoint, which writes it into the container and signals the agent process.
+func (d *HTTPAgentDispatcher) DispatchAgentResetAuth(ctx context.Context, agent *store.Agent) error {
+	if err := requireRuntimeBrokerAssigned(agent); err != nil {
+		return err
+	}
+
+	endpoint, err := d.getBrokerEndpoint(ctx, agent.RuntimeBrokerID)
+	if err != nil {
+		return err
+	}
+
+	var token string
+	if d.tokenGenerator != nil {
+		var additionalScopes []AgentTokenScope
+		if agent.AppliedConfig != nil {
+			for _, s := range agent.AppliedConfig.HubAccessScopes {
+				additionalScopes = append(additionalScopes, AgentTokenScope(s))
+			}
+			if gcpID := agent.AppliedConfig.GCPIdentity; gcpID != nil && gcpID.MetadataMode == store.GCPMetadataModeAssign && gcpID.ServiceAccountID != "" {
+				additionalScopes = append(additionalScopes, GCPTokenScopeForSA(gcpID.ServiceAccountID))
+			}
+		}
+		token, err = d.tokenGenerator.GenerateAgentToken(agent.ID, agent.ProjectID, agent.Ancestry, additionalScopes...)
+		if err != nil {
+			return fmt.Errorf("DispatchAgentResetAuth: failed to generate agent token: %w", err)
+		}
+	}
+	if token == "" {
+		return fmt.Errorf("DispatchAgentResetAuth: no token generated for agent %s", agent.ID)
+	}
+
+	return d.client.ResetAuthAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID, token)
 }
 
 // DispatchAgentDelete deletes an agent from the runtime broker.
@@ -1155,7 +1315,11 @@ func (d *HTTPAgentDispatcher) DispatchAgentDelete(ctx context.Context, agent *st
 		return err
 	}
 
-	return d.client.DeleteAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID, deleteFiles, removeBranch, softDelete, deletedAt)
+	err = d.client.DeleteAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID, deleteFiles, removeBranch, softDelete, deletedAt)
+	if errors.Is(err, ErrLifecycleDeferred) {
+		return d.deferredDelete(ctx, agent, deleteFiles, removeBranch, softDelete, deletedAt)
+	}
+	return err
 }
 
 // DispatchAgentMessage sends a message to an agent on the runtime broker.
@@ -1211,7 +1375,205 @@ func (d *HTTPAgentDispatcher) DispatchCheckAgentPrompt(ctx context.Context, agen
 		return false, err
 	}
 
-	return d.client.CheckAgentPrompt(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID)
+	hasPrompt, err := d.client.CheckAgentPrompt(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID)
+	if errors.Is(err, ErrLifecycleDeferred) {
+		return d.deferredCheckPrompt(ctx, agent)
+	}
+	return hasPrompt, err
+}
+
+// deferredCheckPrompt handles a cross-node check_prompt via durable dispatch.
+func (d *HTTPAgentDispatcher) deferredCheckPrompt(ctx context.Context, agent *store.Agent) (bool, error) {
+	result, err := d.deferredDataOpResult(ctx, agent, "check_prompt", &CheckPromptDispatchArgs{})
+	if err != nil {
+		return false, err
+	}
+	var cr CheckPromptResult
+	if result.Result != "" {
+		if err := json.Unmarshal([]byte(result.Result), &cr); err != nil {
+			return false, fmt.Errorf("unmarshal check_prompt result: %w", err)
+		}
+	}
+	return cr.HasPrompt, nil
+}
+
+// =============================================================================
+// Cross-node lifecycle dispatch (B4-2)
+// =============================================================================
+
+// isStartTerminal returns true for terminal phases of a start/restart op.
+func isStartTerminal(phase string) bool { return phase == "running" || phase == "error" }
+
+// isStopTerminal returns true for terminal phases of a stop op.
+func isStopTerminal(phase string) bool { return phase == "stopped" || phase == "error" }
+
+// deferredStart handles a cross-node agent start: subscribe → write intent →
+// signal → wait for the terminal phase. Called when client.StartAgent returns
+// ErrLifecycleDeferred (broker not locally connected).
+func (d *HTTPAgentDispatcher) deferredStart(ctx context.Context, agent *store.Agent, args *StartDispatchArgs) error {
+	return d.deferredLifecycle(ctx, agent, "start", args, isStartTerminal)
+}
+
+// deferredStop handles a cross-node agent stop.
+func (d *HTTPAgentDispatcher) deferredStop(ctx context.Context, agent *store.Agent) error {
+	return d.deferredLifecycle(ctx, agent, "stop", &StopDispatchArgs{}, isStopTerminal)
+}
+
+// deferredRestart handles a cross-node agent restart.
+func (d *HTTPAgentDispatcher) deferredRestart(ctx context.Context, agent *store.Agent) error {
+	return d.deferredLifecycle(ctx, agent, "restart", &RestartDispatchArgs{}, isStartTerminal)
+}
+
+// deferredDelete handles a cross-node agent delete: subscribe → write intent →
+// signal → wait for the dispatch row to reach terminal state. Delete is
+// idempotent: 404 from the owner is treated as success.
+func (d *HTTPAgentDispatcher) deferredDelete(ctx context.Context, agent *store.Agent, deleteFiles, removeBranch, softDelete bool, deletedAt time.Time) error {
+	args := &DeleteDispatchArgs{
+		DeleteFiles:  deleteFiles,
+		RemoveBranch: removeBranch,
+		SoftDelete:   softDelete,
+		DeletedAt:    deletedAt,
+	}
+	return d.deferredDataOp(ctx, agent, "delete", args)
+}
+
+// deferredDataOp is the common flow for cross-node ops that return a result
+// via the dispatch row (delete, finalize_env, check_prompt, create):
+//  1. Subscribe to broker.dispatch.<id>.done BEFORE writing intent
+//  2. InsertBrokerDispatch with serialized args
+//  3. Best-effort SignalBrokerCmd
+//  4. waitForDispatchDone (reads result from the DB row — authoritative)
+func (d *HTTPAgentDispatcher) deferredDataOp(
+	ctx context.Context,
+	agent *store.Agent,
+	op string,
+	args interface{},
+) error {
+	_, err := d.deferredDataOpResult(ctx, agent, op, args)
+	return err
+}
+
+// deferredDataOpResult is like deferredDataOp but returns the completed
+// dispatch row so callers can read the result JSON.
+func (d *HTTPAgentDispatcher) deferredDataOpResult(
+	ctx context.Context,
+	agent *store.Agent,
+	op string,
+	args interface{},
+) (*store.BrokerDispatch, error) {
+	if d.events == nil || d.commandBus == nil {
+		return nil, fmt.Errorf("cross-node dispatch not available: events or command bus not configured")
+	}
+
+	dispatchID := uuid.NewString()
+
+	// 1. Subscribe BEFORE writing intent so we don't miss events.
+	eventCh, unsub := d.events.Subscribe("broker.dispatch." + dispatchID + ".done")
+
+	// 2. Serialize args and insert the durable intent row.
+	argsJSON, err := MarshalDispatchArgs(args)
+	if err != nil {
+		unsub()
+		return nil, fmt.Errorf("marshal dispatch args: %w", err)
+	}
+
+	dispatch := &store.BrokerDispatch{
+		ID:        dispatchID,
+		BrokerID:  agent.RuntimeBrokerID,
+		AgentID:   agent.ID,
+		AgentSlug: agent.Slug,
+		ProjectID: agent.ProjectID,
+		Op:        op,
+		Args:      argsJSON,
+	}
+	if err := d.store.InsertBrokerDispatch(ctx, dispatch); err != nil {
+		unsub()
+		return nil, fmt.Errorf("insert dispatch intent: %w", err)
+	}
+	if rec := d.dispatchMetrics; rec != nil {
+		rec.IncPublished(ctx, 1, attribute.String("op", op))
+	}
+
+	// 3. Best-effort signal.
+	if err := d.commandBus.SignalBrokerCmd(ctx, agent.RuntimeBrokerID); err != nil {
+		d.log.Warn("deferredDataOp: signal failed (durable intent is backstop)",
+			"op", op, "brokerID", agent.RuntimeBrokerID, "error", err)
+	}
+
+	// 4. Wait for completion — reads result from the DB row (authoritative).
+	result, err := waitForDispatchDone(ctx, eventCh, unsub, d.store, dispatchID)
+	if err != nil {
+		return nil, err
+	}
+	if result.State == store.DispatchStateFailed {
+		return nil, fmt.Errorf("dispatch %s failed: %s", op, result.Error)
+	}
+	return result, nil
+}
+
+// deferredLifecycle is the common flow for cross-node start/stop/restart:
+//  1. Subscribe to agent.<id>.status BEFORE writing intent (no missed events)
+//  2. InsertBrokerDispatch with serialized resolved args
+//  3. Best-effort SignalBrokerCmd (the row is durable; reconnect-drain backstop)
+//  4. waitForAgentTransition with the op's terminal set
+//  5. Return nil on success-terminal, ErrDispatchFailed on timeout, wrapped
+//     error on error-terminal
+func (d *HTTPAgentDispatcher) deferredLifecycle(
+	ctx context.Context,
+	agent *store.Agent,
+	op string,
+	args interface{},
+	terminal func(string) bool,
+) error {
+	if d.events == nil || d.commandBus == nil {
+		return fmt.Errorf("cross-node dispatch not available: events or command bus not configured")
+	}
+
+	// 1. Subscribe BEFORE writing intent so we don't miss events.
+	eventCh, unsub := d.events.Subscribe("agent." + agent.ID + ".status")
+
+	// 2. Serialize args and insert the durable intent row.
+	argsJSON, err := MarshalDispatchArgs(args)
+	if err != nil {
+		unsub()
+		return fmt.Errorf("marshal dispatch args: %w", err)
+	}
+
+	dispatch := &store.BrokerDispatch{
+		ID:        uuid.NewString(),
+		BrokerID:  agent.RuntimeBrokerID,
+		AgentID:   agent.ID,
+		AgentSlug: agent.Slug,
+		ProjectID: agent.ProjectID,
+		Op:        op,
+		Args:      argsJSON,
+	}
+	if err := d.store.InsertBrokerDispatch(ctx, dispatch); err != nil {
+		unsub()
+		return fmt.Errorf("insert dispatch intent: %w", err)
+	}
+	if rec := d.dispatchMetrics; rec != nil {
+		rec.IncPublished(ctx, 1, attribute.String("op", op))
+	}
+
+	// 3. Best-effort signal — the row is the durable intent; reconnect-drain
+	//    is the backstop if the signal is missed or no node owns the broker.
+	if err := d.commandBus.SignalBrokerCmd(ctx, agent.RuntimeBrokerID); err != nil {
+		d.log.Warn("deferredLifecycle: signal failed (durable intent is backstop)",
+			"op", op, "brokerID", agent.RuntimeBrokerID, "error", err)
+	}
+
+	// 4. Wait for terminal phase.
+	phase, err := waitForAgentTransition(ctx, eventCh, unsub, terminal)
+	if err != nil {
+		return err
+	}
+
+	// 5. Map terminal phase.
+	if phase == "error" {
+		return fmt.Errorf("agent entered error phase during %s", op)
+	}
+	return nil
 }
 
 // resolveSecrets queries secrets from all applicable scopes and merges them

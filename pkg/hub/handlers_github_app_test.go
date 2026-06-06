@@ -188,7 +188,7 @@ func TestHandleProjectGitHubInstallation(t *testing.T) {
 
 	// Create a project
 	project := &store.Project{
-		ID:         "project_gh_test",
+		ID:         tid("project_gh_test"),
 		Slug:       "gh-test-project",
 		Name:       "GH Test Project",
 		GitRemote:  "https://github.com/acme/widgets",
@@ -213,7 +213,7 @@ func TestHandleProjectGitHubInstallation(t *testing.T) {
 	}
 
 	// Associate project with installation
-	rec := doRequest(t, srv, http.MethodPut, "/api/v1/projects/project_gh_test/github-installation", map[string]interface{}{
+	rec := doRequest(t, srv, http.MethodPut, fmt.Sprintf("/api/v1/projects/%s/github-installation", tid("project_gh_test")), map[string]interface{}{
 		"installation_id": 54321,
 	})
 	if rec.Code != http.StatusOK {
@@ -221,7 +221,7 @@ func TestHandleProjectGitHubInstallation(t *testing.T) {
 	}
 
 	// Verify project has installation ID
-	updatedProject, err := s.GetProject(ctx, "project_gh_test")
+	updatedProject, err := s.GetProject(ctx, tid("project_gh_test"))
 	if err != nil {
 		t.Fatalf("failed to get project: %v", err)
 	}
@@ -233,19 +233,19 @@ func TestHandleProjectGitHubInstallation(t *testing.T) {
 	}
 
 	// Get status
-	rec = doRequest(t, srv, http.MethodGet, "/api/v1/projects/project_gh_test/github-status", nil)
+	rec = doRequest(t, srv, http.MethodGet, fmt.Sprintf("/api/v1/projects/%s/github-status", tid("project_gh_test")), nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 
 	// Remove association
-	rec = doRequest(t, srv, http.MethodDelete, "/api/v1/projects/project_gh_test/github-installation", nil)
+	rec = doRequest(t, srv, http.MethodDelete, fmt.Sprintf("/api/v1/projects/%s/github-installation", tid("project_gh_test")), nil)
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("expected 204, got %d: %s", rec.Code, rec.Body.String())
 	}
 
 	// Verify removed
-	clearedProject, err := s.GetProject(ctx, "project_gh_test")
+	clearedProject, err := s.GetProject(ctx, tid("project_gh_test"))
 	if err != nil {
 		t.Fatalf("failed to get project: %v", err)
 	}
@@ -259,7 +259,7 @@ func TestHandleProjectGitHubStatus_PostNoInstallation(t *testing.T) {
 	ctx := context.Background()
 
 	project := &store.Project{
-		ID: "project_gh_status_check", Slug: "gh-status-check", Name: "GH Status Check",
+		ID: tid("project_gh_status_check"), Slug: "gh-status-check", Name: "GH Status Check",
 		GitRemote: "https://github.com/acme/widgets",
 		Created:   time.Now(), Updated: time.Now(), Visibility: "private",
 	}
@@ -268,7 +268,7 @@ func TestHandleProjectGitHubStatus_PostNoInstallation(t *testing.T) {
 	}
 
 	// POST without installation should return 400
-	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/project_gh_status_check/github-status", nil)
+	rec := doRequest(t, srv, http.MethodPost, fmt.Sprintf("/api/v1/projects/%s/github-status", tid("project_gh_status_check")), nil)
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("expected 400 for project without installation, got %d: %s", rec.Code, rec.Body.String())
 	}
@@ -292,7 +292,7 @@ func TestHandleProjectGitHubStatus_PostWithInstallation(t *testing.T) {
 	}
 
 	project := &store.Project{
-		ID: "project_gh_status_check2", Slug: "gh-status-check2", Name: "GH Status Check 2",
+		ID: tid("project_gh_status_check2"), Slug: "gh-status-check2", Name: "GH Status Check 2",
 		GitRemote: "https://github.com/acme/widgets",
 		Created:   time.Now(), Updated: time.Now(), Visibility: "private",
 	}
@@ -308,7 +308,7 @@ func TestHandleProjectGitHubStatus_PostWithInstallation(t *testing.T) {
 	// POST should succeed (though minting will fail because no GitHub App
 	// is configured — the endpoint should still return 200 with the error
 	// captured in the response and project status updated to error)
-	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/project_gh_status_check2/github-status", nil)
+	rec := doRequest(t, srv, http.MethodPost, fmt.Sprintf("/api/v1/projects/%s/github-status", tid("project_gh_status_check2")), nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
@@ -338,14 +338,14 @@ func TestHandleProjectGitHubInstallation_NotFoundInstallation(t *testing.T) {
 	ctx := context.Background()
 
 	project := &store.Project{
-		ID: "project_gh_notfound", Slug: "gh-nf", Name: "GH NF",
+		ID: tid("project_gh_notfound"), Slug: "gh-nf", Name: "GH NF",
 		Created: time.Now(), Updated: time.Now(), Visibility: "private",
 	}
 	if err := s.CreateProject(ctx, project); err != nil {
 		t.Fatalf("failed to create project: %v", err)
 	}
 
-	rec := doRequest(t, srv, http.MethodPut, "/api/v1/projects/project_gh_notfound/github-installation", map[string]interface{}{
+	rec := doRequest(t, srv, http.MethodPut, fmt.Sprintf("/api/v1/projects/%s/github-installation", tid("project_gh_notfound")), map[string]interface{}{
 		"installation_id": 99999,
 	})
 	if rec.Code != http.StatusNotFound {
@@ -362,7 +362,7 @@ func TestHandleProjectGitHubPermissions(t *testing.T) {
 	ctx := context.Background()
 
 	project := &store.Project{
-		ID: "project_gh_perms", Slug: "gh-perms", Name: "GH Perms",
+		ID: tid("project_gh_perms"), Slug: "gh-perms", Name: "GH Perms",
 		Created: time.Now(), Updated: time.Now(), Visibility: "private",
 	}
 	if err := s.CreateProject(ctx, project); err != nil {
@@ -370,7 +370,7 @@ func TestHandleProjectGitHubPermissions(t *testing.T) {
 	}
 
 	// Get defaults
-	rec := doRequest(t, srv, http.MethodGet, "/api/v1/projects/project_gh_perms/github-permissions", nil)
+	rec := doRequest(t, srv, http.MethodGet, fmt.Sprintf("/api/v1/projects/%s/github-permissions", tid("project_gh_perms")), nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", rec.Code)
 	}
@@ -384,7 +384,7 @@ func TestHandleProjectGitHubPermissions(t *testing.T) {
 	}
 
 	// Set custom permissions
-	rec = doRequest(t, srv, http.MethodPut, "/api/v1/projects/project_gh_perms/github-permissions", map[string]interface{}{
+	rec = doRequest(t, srv, http.MethodPut, fmt.Sprintf("/api/v1/projects/%s/github-permissions", tid("project_gh_perms")), map[string]interface{}{
 		"contents": "read",
 		"metadata": "read",
 	})
@@ -393,7 +393,7 @@ func TestHandleProjectGitHubPermissions(t *testing.T) {
 	}
 
 	// Verify stored
-	updatedProject, err := s.GetProject(ctx, "project_gh_perms")
+	updatedProject, err := s.GetProject(ctx, tid("project_gh_perms"))
 	if err != nil {
 		t.Fatalf("failed to get project: %v", err)
 	}
@@ -402,12 +402,12 @@ func TestHandleProjectGitHubPermissions(t *testing.T) {
 	}
 
 	// Reset to defaults
-	rec = doRequest(t, srv, http.MethodDelete, "/api/v1/projects/project_gh_perms/github-permissions", nil)
+	rec = doRequest(t, srv, http.MethodDelete, fmt.Sprintf("/api/v1/projects/%s/github-permissions", tid("project_gh_perms")), nil)
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("expected 204, got %d", rec.Code)
 	}
 
-	clearedProject, err := s.GetProject(ctx, "project_gh_perms")
+	clearedProject, err := s.GetProject(ctx, tid("project_gh_perms"))
 	if err != nil {
 		t.Fatalf("failed to get project: %v", err)
 	}
@@ -449,7 +449,7 @@ func TestHandleAgentGitHubTokenRefresh_NoAuth(t *testing.T) {
 
 	// Create a project and agent
 	project := &store.Project{
-		ID:   "project_gh_refresh",
+		ID:   tid("project_gh_refresh"),
 		Name: "Test Project",
 		Slug: "test-project",
 	}
@@ -458,7 +458,7 @@ func TestHandleAgentGitHubTokenRefresh_NoAuth(t *testing.T) {
 	}
 
 	agent := &store.Agent{
-		ID:        "agent_gh_refresh",
+		ID:        tid("agent_gh_refresh"),
 		Name:      "test-agent",
 		Slug:      "test-agent",
 		ProjectID: project.ID,
@@ -481,7 +481,7 @@ func TestHandleAgentGitHubTokenRefresh_DevAuth(t *testing.T) {
 
 	// Create a project and agent
 	project := &store.Project{
-		ID:   "project_gh_refresh2",
+		ID:   tid("project_gh_refresh2"),
 		Name: "Test Project 2",
 		Slug: "test-project-2",
 	}
@@ -490,7 +490,7 @@ func TestHandleAgentGitHubTokenRefresh_DevAuth(t *testing.T) {
 	}
 
 	agent := &store.Agent{
-		ID:        "agent_gh_refresh2",
+		ID:        tid("agent_gh_refresh2"),
 		Name:      "test-agent-2",
 		Slug:      "test-agent-2",
 		ProjectID: project.ID,
@@ -513,7 +513,7 @@ func TestHandleAgentGitHubTokenRefresh_SelfAccess(t *testing.T) {
 
 	// Create a project and agent
 	project := &store.Project{
-		ID:   "project_gh_refresh3",
+		ID:   tid("project_gh_refresh3"),
 		Name: "Test Project 3",
 		Slug: "test-project-3",
 	}
@@ -522,7 +522,7 @@ func TestHandleAgentGitHubTokenRefresh_SelfAccess(t *testing.T) {
 	}
 
 	agent := &store.Agent{
-		ID:        "agent_gh_refresh3",
+		ID:        tid("agent_gh_refresh3"),
 		Name:      "test-agent-3",
 		Slug:      "test-agent-3",
 		ProjectID: project.ID,
@@ -537,7 +537,7 @@ func TestHandleAgentGitHubTokenRefresh_SelfAccess(t *testing.T) {
 
 	// Generate an agent token with refresh scope
 	agentToken, err := srv.agentTokenService.GenerateAgentToken(
-		"agent_gh_refresh3", project.ID,
+		tid("agent_gh_refresh3"), project.ID,
 		[]AgentTokenScope{ScopeAgentTokenRefresh}, nil)
 	if err != nil {
 		t.Fatalf("failed to generate agent token: %v", err)
@@ -557,7 +557,7 @@ func TestHandleAgentGitHubTokenRefresh_NoInstallation(t *testing.T) {
 
 	// Create a project WITHOUT a GitHub App installation
 	project := &store.Project{
-		ID:   "project_gh_refresh4",
+		ID:   tid("project_gh_refresh4"),
 		Name: "Test Project 4",
 		Slug: "test-project-4",
 	}
@@ -566,7 +566,7 @@ func TestHandleAgentGitHubTokenRefresh_NoInstallation(t *testing.T) {
 	}
 
 	agent := &store.Agent{
-		ID:        "agent_gh_refresh4",
+		ID:        tid("agent_gh_refresh4"),
 		Name:      "test-agent-4",
 		Slug:      "test-agent-4",
 		ProjectID: project.ID,
@@ -580,7 +580,7 @@ func TestHandleAgentGitHubTokenRefresh_NoInstallation(t *testing.T) {
 	}
 
 	agentToken, err := srv.agentTokenService.GenerateAgentToken(
-		"agent_gh_refresh4", project.ID,
+		tid("agent_gh_refresh4"), project.ID,
 		[]AgentTokenScope{ScopeAgentTokenRefresh}, nil)
 	if err != nil {
 		t.Fatalf("failed to generate agent token: %v", err)

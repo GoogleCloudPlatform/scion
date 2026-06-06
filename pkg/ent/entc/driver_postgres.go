@@ -14,4 +14,4 @@
 
 package entc
 
-import _ "github.com/lib/pq" // PostgreSQL driver
+import _ "github.com/jackc/pgx/v5/stdlib" // PostgreSQL driver (pgx stdlib, registers as "pgx")

@@ -150,8 +150,8 @@ func TestAdminModeMiddleware_AgentIdentity(t *testing.T) {
 	mw := adminModeMiddleware(state)(passthrough)
 
 	agent := &agentIdentityWrapper{&AgentTokenClaims{
-		Claims:    jwt.Claims{Subject: "agent-1"},
-		ProjectID: "project-1",
+		Claims:    jwt.Claims{Subject: tid("agent-1")},
+		ProjectID: tid("project-1"),
 	}}
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/agents", nil)
 	req = req.WithContext(contextWithIdentity(req.Context(), agent))
@@ -167,7 +167,7 @@ func TestAdminModeMiddleware_BrokerIdentity(t *testing.T) {
 	state := NewMaintenanceState(true, "")
 	mw := adminModeMiddleware(state)(passthrough)
 
-	broker := NewBrokerIdentity("broker-1")
+	broker := NewBrokerIdentity(tid("broker-1"))
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/agents", nil)
 	ctx := contextWithIdentity(req.Context(), broker)
 	ctx = contextWithBrokerIdentity(ctx, broker)

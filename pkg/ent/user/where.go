@@ -81,6 +81,11 @@ func LastLogin(v time.Time) predicate.User {
 	return predicate.User(sql.FieldEQ(FieldLastLogin, v))
 }
 
+// LastSeen applies equality check predicate on the "last_seen" field. It's identical to LastSeenEQ.
+func LastSeen(v time.Time) predicate.User {
+	return predicate.User(sql.FieldEQ(FieldLastSeen, v))
+}
+
 // EmailEQ applies the EQ predicate on the "email" field.
 func EmailEQ(v string) predicate.User {
 	return predicate.User(sql.FieldEQ(FieldEmail, v))
@@ -426,50 +431,54 @@ func LastLoginNotNil() predicate.User {
 	return predicate.User(sql.FieldNotNull(FieldLastLogin))
 }
 
-// HasCreatedAgents applies the HasEdge predicate on the "created_agents" edge.
-func HasCreatedAgents() predicate.User {
-	return predicate.User(func(s *sql.Selector) {
-		step := sqlgraph.NewStep(
-			sqlgraph.From(Table, FieldID),
-			sqlgraph.Edge(sqlgraph.O2M, false, CreatedAgentsTable, CreatedAgentsColumn),
-		)
-		sqlgraph.HasNeighbors(s, step)
-	})
+// LastSeenEQ applies the EQ predicate on the "last_seen" field.
+func LastSeenEQ(v time.Time) predicate.User {
+	return predicate.User(sql.FieldEQ(FieldLastSeen, v))
 }
 
-// HasCreatedAgentsWith applies the HasEdge predicate on the "created_agents" edge with a given conditions (other predicates).
-func HasCreatedAgentsWith(preds ...predicate.Agent) predicate.User {
-	return predicate.User(func(s *sql.Selector) {
-		step := newCreatedAgentsStep()
-		sqlgraph.HasNeighborsWith(s, step, func(s *sql.Selector) {
-			for _, p := range preds {
-				p(s)
-			}
-		})
-	})
+// LastSeenNEQ applies the NEQ predicate on the "last_seen" field.
+func LastSeenNEQ(v time.Time) predicate.User {
+	return predicate.User(sql.FieldNEQ(FieldLastSeen, v))
 }
 
-// HasOwnedAgents applies the HasEdge predicate on the "owned_agents" edge.
-func HasOwnedAgents() predicate.User {
-	return predicate.User(func(s *sql.Selector) {
-		step := sqlgraph.NewStep(
-			sqlgraph.From(Table, FieldID),
-			sqlgraph.Edge(sqlgraph.O2M, false, OwnedAgentsTable, OwnedAgentsColumn),
-		)
-		sqlgraph.HasNeighbors(s, step)
-	})
+// LastSeenIn applies the In predicate on the "last_seen" field.
+func LastSeenIn(vs ...time.Time) predicate.User {
+	return predicate.User(sql.FieldIn(FieldLastSeen, vs...))
 }
 
-// HasOwnedAgentsWith applies the HasEdge predicate on the "owned_agents" edge with a given conditions (other predicates).
-func HasOwnedAgentsWith(preds ...predicate.Agent) predicate.User {
-	return predicate.User(func(s *sql.Selector) {
-		step := newOwnedAgentsStep()
-		sqlgraph.HasNeighborsWith(s, step, func(s *sql.Selector) {
-			for _, p := range preds {
-				p(s)
-			}
-		})
-	})
+// LastSeenNotIn applies the NotIn predicate on the "last_seen" field.
+func LastSeenNotIn(vs ...time.Time) predicate.User {
+	return predicate.User(sql.FieldNotIn(FieldLastSeen, vs...))
+}
+
+// LastSeenGT applies the GT predicate on the "last_seen" field.
+func LastSeenGT(v time.Time) predicate.User {
+	return predicate.User(sql.FieldGT(FieldLastSeen, v))
+}
+
+// LastSeenGTE applies the GTE predicate on the "last_seen" field.
+func LastSeenGTE(v time.Time) predicate.User {
+	return predicate.User(sql.FieldGTE(FieldLastSeen, v))
+}
+
+// LastSeenLT applies the LT predicate on the "last_seen" field.
+func LastSeenLT(v time.Time) predicate.User {
+	return predicate.User(sql.FieldLT(FieldLastSeen, v))
+}
+
+// LastSeenLTE applies the LTE predicate on the "last_seen" field.
+func LastSeenLTE(v time.Time) predicate.User {
+	return predicate.User(sql.FieldLTE(FieldLastSeen, v))
+}
+
+// LastSeenIsNil applies the IsNil predicate on the "last_seen" field.
+func LastSeenIsNil() predicate.User {
+	return predicate.User(sql.FieldIsNull(FieldLastSeen))
+}
+
+// LastSeenNotNil applies the NotNil predicate on the "last_seen" field.
+func LastSeenNotNil() predicate.User {
+	return predicate.User(sql.FieldNotNull(FieldLastSeen))
 }
 
 // HasOwnedGroups applies the HasEdge predicate on the "owned_groups" edge.

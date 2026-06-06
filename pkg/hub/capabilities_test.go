@@ -42,11 +42,11 @@ func TestComputeCapabilities_OwnerGetsAllActions(t *testing.T) {
 	ctx := context.Background()
 
 	require.NoError(t, s.CreateUser(ctx, &store.User{
-		ID: "user-owner-cap", Email: "owner-cap@test.com", DisplayName: "Owner", Role: "member", Status: "active",
+		ID: tid("user-owner-cap"), Email: "owner-cap@test.com", DisplayName: "Owner", Role: "member", Status: "active",
 	}))
 
-	user := NewAuthenticatedUser("user-owner-cap", "owner-cap@test.com", "Owner", "member", "api")
-	resource := Resource{Type: "agent", ID: "agent-1", OwnerID: "user-owner-cap"}
+	user := NewAuthenticatedUser(tid("user-owner-cap"), "owner-cap@test.com", "Owner", "member", "api")
+	resource := Resource{Type: "agent", ID: tid("agent-1"), OwnerID: tid("user-owner-cap")}
 
 	caps := srv.authzService.ComputeCapabilities(ctx, user, resource)
 	assert.Equal(t, []string{"read", "update", "delete", "start", "stop", "message", "attach"}, caps.Actions)
@@ -57,20 +57,20 @@ func TestComputeCapabilities_PolicySubset(t *testing.T) {
 	ctx := context.Background()
 
 	require.NoError(t, s.CreateUser(ctx, &store.User{
-		ID: "user-readonly-cap", Email: "readonly-cap@test.com", DisplayName: "ReadOnly", Role: "member", Status: "active",
+		ID: tid("user-readonly-cap"), Email: "readonly-cap@test.com", DisplayName: "ReadOnly", Role: "member", Status: "active",
 	}))
 
 	policy := &store.Policy{
-		ID: "policy-ro-cap", Name: "Read Only", ScopeType: "hub",
+		ID: tid("policy-ro-cap"), Name: "Read Only", ScopeType: "hub",
 		ResourceType: "agent", Actions: []string{"read"}, Effect: "allow",
 	}
 	require.NoError(t, s.CreatePolicy(ctx, policy))
 	require.NoError(t, s.AddPolicyBinding(ctx, &store.PolicyBinding{
-		PolicyID: "policy-ro-cap", PrincipalType: "user", PrincipalID: "user-readonly-cap",
+		PolicyID: tid("policy-ro-cap"), PrincipalType: "user", PrincipalID: tid("user-readonly-cap"),
 	}))
 
-	user := NewAuthenticatedUser("user-readonly-cap", "readonly-cap@test.com", "ReadOnly", "member", "api")
-	resource := Resource{Type: "agent", ID: "agent-1"}
+	user := NewAuthenticatedUser(tid("user-readonly-cap"), "readonly-cap@test.com", "ReadOnly", "member", "api")
+	resource := Resource{Type: "agent", ID: tid("agent-1")}
 
 	caps := srv.authzService.ComputeCapabilities(ctx, user, resource)
 	assert.Equal(t, []string{"read"}, caps.Actions)
@@ -81,11 +81,11 @@ func TestComputeCapabilities_DefaultDenyEmpty(t *testing.T) {
 	ctx := context.Background()
 
 	require.NoError(t, s.CreateUser(ctx, &store.User{
-		ID: "user-nopolicy-cap", Email: "nopolicy-cap@test.com", DisplayName: "NoPolicy", Role: "member", Status: "active",
+		ID: tid("user-nopolicy-cap"), Email: "nopolicy-cap@test.com", DisplayName: "NoPolicy", Role: "member", Status: "active",
 	}))
 
-	user := NewAuthenticatedUser("user-nopolicy-cap", "nopolicy-cap@test.com", "NoPolicy", "member", "api")
-	resource := Resource{Type: "agent", ID: "agent-1"}
+	user := NewAuthenticatedUser(tid("user-nopolicy-cap"), "nopolicy-cap@test.com", "NoPolicy", "member", "api")
+	resource := Resource{Type: "agent", ID: tid("agent-1")}
 
 	caps := srv.authzService.ComputeCapabilities(ctx, user, resource)
 	assert.Equal(t, []string{}, caps.Actions)
@@ -97,9 +97,9 @@ func TestComputeCapabilitiesBatch_AdminGetsAll(t *testing.T) {
 
 	admin := NewAuthenticatedUser("admin-batch", "admin-batch@example.com", "Admin", "admin", "api")
 	resources := []Resource{
-		{Type: "agent", ID: "agent-1"},
-		{Type: "agent", ID: "agent-2"},
-		{Type: "agent", ID: "agent-3"},
+		{Type: "agent", ID: tid("agent-1")},
+		{Type: "agent", ID: tid("agent-2")},
+		{Type: "agent", ID: tid("agent-3")},
 	}
 
 	caps := srv.authzService.ComputeCapabilitiesBatch(ctx, admin, resources, "agent")
@@ -114,23 +114,23 @@ func TestComputeCapabilitiesBatch_MixedOwnership(t *testing.T) {
 	ctx := context.Background()
 
 	require.NoError(t, s.CreateUser(ctx, &store.User{
-		ID: "user-mixed-cap", Email: "mixed-cap@test.com", DisplayName: "Mixed", Role: "member", Status: "active",
+		ID: tid("user-mixed-cap"), Email: "mixed-cap@test.com", DisplayName: "Mixed", Role: "member", Status: "active",
 	}))
 
 	// Policy grants read-only on agents
 	policy := &store.Policy{
-		ID: "policy-mixed-cap", Name: "Read Only", ScopeType: "hub",
+		ID: tid("policy-mixed-cap"), Name: "Read Only", ScopeType: "hub",
 		ResourceType: "agent", Actions: []string{"read"}, Effect: "allow",
 	}
 	require.NoError(t, s.CreatePolicy(ctx, policy))
 	require.NoError(t, s.AddPolicyBinding(ctx, &store.PolicyBinding{
-		PolicyID: "policy-mixed-cap", PrincipalType: "user", PrincipalID: "user-mixed-cap",
+		PolicyID: tid("policy-mixed-cap"), PrincipalType: "user", PrincipalID: tid("user-mixed-cap"),
 	}))
 
-	user := NewAuthenticatedUser("user-mixed-cap", "mixed-cap@test.com", "Mixed", "member", "api")
+	user := NewAuthenticatedUser(tid("user-mixed-cap"), "mixed-cap@test.com", "Mixed", "member", "api")
 	resources := []Resource{
-		{Type: "agent", ID: "agent-owned", OwnerID: "user-mixed-cap"}, // Owned
-		{Type: "agent", ID: "agent-other", OwnerID: "other-user"},     // Not owned
+		{Type: "agent", ID: "agent-owned", OwnerID: tid("user-mixed-cap")},  // Owned
+		{Type: "agent", ID: tid("agent-other"), OwnerID: tid("other-user")}, // Not owned
 	}
 
 	caps := srv.authzService.ComputeCapabilitiesBatch(ctx, user, resources, "agent")
@@ -148,15 +148,15 @@ func TestComputeCapabilities_AncestorGetsAllActions(t *testing.T) {
 	ctx := context.Background()
 
 	require.NoError(t, s.CreateUser(ctx, &store.User{
-		ID: "user-ancestor-cap", Email: "ancestor-cap@test.com", DisplayName: "Ancestor", Role: "member", Status: "active",
+		ID: tid("user-ancestor-cap"), Email: "ancestor-cap@test.com", DisplayName: "Ancestor", Role: "member", Status: "active",
 	}))
 
-	user := NewAuthenticatedUser("user-ancestor-cap", "ancestor-cap@test.com", "Ancestor", "member", "api")
+	user := NewAuthenticatedUser(tid("user-ancestor-cap"), "ancestor-cap@test.com", "Ancestor", "member", "api")
 	resource := Resource{
 		Type:     "agent",
 		ID:       "agent-descendant",
 		OwnerID:  "someone-else",
-		Ancestry: []string{"user-ancestor-cap", "agent-middle"},
+		Ancestry: []string{tid("user-ancestor-cap"), "agent-middle"},
 	}
 
 	caps := srv.authzService.ComputeCapabilities(ctx, user, resource)
@@ -168,13 +168,13 @@ func TestComputeCapabilitiesBatch_AncestryAccess(t *testing.T) {
 	ctx := context.Background()
 
 	require.NoError(t, s.CreateUser(ctx, &store.User{
-		ID: "user-batch-ancestor", Email: "batch-ancestor@test.com", DisplayName: "BatchAnc", Role: "member", Status: "active",
+		ID: tid("user-batch-ancestor"), Email: "batch-ancestor@test.com", DisplayName: "BatchAnc", Role: "member", Status: "active",
 	}))
 
-	user := NewAuthenticatedUser("user-batch-ancestor", "batch-ancestor@test.com", "BatchAnc", "member", "api")
+	user := NewAuthenticatedUser(tid("user-batch-ancestor"), "batch-ancestor@test.com", "BatchAnc", "member", "api")
 	resources := []Resource{
-		{Type: "agent", ID: "agent-descendant-1", OwnerID: "other", Ancestry: []string{"user-batch-ancestor", "agent-A"}},
-		{Type: "agent", ID: "agent-unrelated", OwnerID: "other", Ancestry: []string{"other-user"}},
+		{Type: "agent", ID: "agent-descendant-1", OwnerID: "other", Ancestry: []string{tid("user-batch-ancestor"), "agent-A"}},
+		{Type: "agent", ID: "agent-unrelated", OwnerID: "other", Ancestry: []string{tid("other-user")}},
 	}
 
 	caps := srv.authzService.ComputeCapabilitiesBatch(ctx, user, resources, "agent")
@@ -202,10 +202,10 @@ func TestComputeScopeCapabilities_NoPolicy(t *testing.T) {
 	ctx := context.Background()
 
 	require.NoError(t, s.CreateUser(ctx, &store.User{
-		ID: "user-noscope-cap", Email: "noscope-cap@test.com", DisplayName: "NoScope", Role: "member", Status: "active",
+		ID: tid("user-noscope-cap"), Email: "noscope-cap@test.com", DisplayName: "NoScope", Role: "member", Status: "active",
 	}))
 
-	user := NewAuthenticatedUser("user-noscope-cap", "noscope-cap@test.com", "NoScope", "member", "api")
+	user := NewAuthenticatedUser(tid("user-noscope-cap"), "noscope-cap@test.com", "NoScope", "member", "api")
 	caps := srv.authzService.ComputeScopeCapabilities(ctx, user, "", "", "agent")
 	assert.Equal(t, []string{}, caps.Actions)
 }
@@ -312,22 +312,22 @@ func TestComputeCapabilitiesBatch_EmptyList(t *testing.T) {
 
 func TestResourceBuilders(t *testing.T) {
 	t.Run("agentResource", func(t *testing.T) {
-		a := &store.Agent{ID: "a1", OwnerID: "u1", ProjectID: "g1", Labels: map[string]string{"env": "prod"}, Ancestry: []string{"u1"}}
+		a := &store.Agent{ID: "a1", OwnerID: "u1", ProjectID: tid("g1"), Labels: map[string]string{"env": "prod"}, Ancestry: []string{"u1"}}
 		r := agentResource(a)
 		assert.Equal(t, "agent", r.Type)
 		assert.Equal(t, "a1", r.ID)
 		assert.Equal(t, "u1", r.OwnerID)
 		assert.Equal(t, "project", r.ParentType)
-		assert.Equal(t, "g1", r.ParentID)
+		assert.Equal(t, tid("g1"), r.ParentID)
 		assert.Equal(t, "prod", r.Labels["env"])
 		assert.Equal(t, []string{"u1"}, r.Ancestry)
 	})
 
 	t.Run("projectResource", func(t *testing.T) {
-		g := &store.Project{ID: "g1", OwnerID: "u1"}
+		g := &store.Project{ID: tid("g1"), OwnerID: "u1"}
 		r := projectResource(g)
 		assert.Equal(t, "project", r.Type)
-		assert.Equal(t, "g1", r.ID)
+		assert.Equal(t, tid("g1"), r.ID)
 		assert.Equal(t, "u1", r.OwnerID)
 	})
 

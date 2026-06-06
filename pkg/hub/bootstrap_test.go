@@ -33,7 +33,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
-	"github.com/GoogleCloudPlatform/scion/pkg/store/sqlite"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 )
 
@@ -159,6 +158,9 @@ func (d *mockDispatcher) DispatchAgentStop(_ context.Context, _ *store.Agent) er
 func (d *mockDispatcher) DispatchAgentRestart(_ context.Context, _ *store.Agent) error {
 	return nil
 }
+func (d *mockDispatcher) DispatchAgentResetAuth(_ context.Context, _ *store.Agent) error {
+	return nil
+}
 func (d *mockDispatcher) DispatchAgentDelete(_ context.Context, _ *store.Agent, _, _, _ bool, _ time.Time) error {
 	return nil
 }
@@ -184,7 +186,7 @@ func (d *mockDispatcher) DispatchFinalizeEnv(_ context.Context, _ *store.Agent, 
 // testBootstrapServer creates a test server with storage and dispatcher configured.
 func testBootstrapServer(t *testing.T) (*Server, store.Store, *mockStorage, *mockDispatcher) {
 	t.Helper()
-	s, err := sqlite.New(":memory:")
+	s, err := newTestStore(":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
@@ -239,7 +241,7 @@ func setupProjectAndBroker(t *testing.T, s store.Store) (string, string) {
 	ctx := context.Background()
 
 	broker := &store.RuntimeBroker{
-		ID:     "broker_bootstrap_test",
+		ID:     tid("broker_bootstrap_test"),
 		Slug:   "bootstrap-host",
 		Name:   "Bootstrap Host",
 		Status: store.BrokerStatusOnline,
@@ -249,7 +251,7 @@ func setupProjectAndBroker(t *testing.T, s store.Store) (string, string) {
 	}
 
 	project := &store.Project{
-		ID:                     "project_bootstrap_test",
+		ID:                     tid("project_bootstrap_test"),
 		Slug:                   "bootstrap-project",
 		Name:                   "Bootstrap Project",
 		GitRemote:              "https://github.com/test/bootstrap",
@@ -410,7 +412,7 @@ func TestCreateAgentWithWorkspaceBootstrap_ExistingFiles(t *testing.T) {
 
 func TestCreateAgentWithWorkspaceBootstrap_NoStorage(t *testing.T) {
 	// Create server without storage
-	s, err := sqlite.New(":memory:")
+	s, err := newTestStore(":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
@@ -489,7 +491,7 @@ func TestCreateAgentWithWorkspaceBootstrap_LocalProvider(t *testing.T) {
 
 	// Create broker and project
 	broker := &store.RuntimeBroker{
-		ID:     "broker_local_path_test",
+		ID:     tid("broker_local_path_test"),
 		Slug:   "local-path-host",
 		Name:   "Local Path Host",
 		Status: store.BrokerStatusOnline,
@@ -499,7 +501,7 @@ func TestCreateAgentWithWorkspaceBootstrap_LocalProvider(t *testing.T) {
 	}
 
 	project := &store.Project{
-		ID:                     "project_local_path_test",
+		ID:                     tid("project_local_path_test"),
 		Slug:                   "local-path-project",
 		Name:                   "Local Path Project",
 		GitRemote:              "https://github.com/test/local-path",
@@ -721,11 +723,11 @@ func TestSyncToFinalize_BootstrapMode(t *testing.T) {
 
 	// Create an agent in provisioning status (simulating post-bootstrap-create)
 	agent := &store.Agent{
-		ID:              "agent_bootstrap_finalize",
+		ID:              tid("agent_bootstrap_finalize"),
 		Slug:            "bootstrap-finalize",
 		Name:            "Bootstrap Finalize",
 		ProjectID:       projectID,
-		RuntimeBrokerID: "broker_bootstrap_test",
+		RuntimeBrokerID: tid("broker_bootstrap_test"),
 		Phase:           string(state.PhaseProvisioning),
 		Visibility:      store.VisibilityPrivate,
 		AppliedConfig: &store.AgentAppliedConfig{
@@ -737,7 +739,7 @@ func TestSyncToFinalize_BootstrapMode(t *testing.T) {
 	}
 
 	// Pre-populate the files in mock storage
-	storagePath := "workspaces/" + projectID + "/agent_bootstrap_finalize"
+	storagePath := "workspaces/" + projectID + "/" + tid("agent_bootstrap_finalize")
 	stor.objects[storagePath+"/files/main.go"] = &storage.Object{
 		Name: storagePath + "/files/main.go",
 	}
@@ -757,7 +759,7 @@ func TestSyncToFinalize_BootstrapMode(t *testing.T) {
 		Manifest: manifest,
 	}
 
-	rec := doBootstrapRequest(t, srv, http.MethodPost, "/api/v1/agents/agent_bootstrap_finalize/workspace/sync-to/finalize", finalizeReq)
+	rec := doBootstrapRequest(t, srv, http.MethodPost, fmt.Sprintf("/api/v1/agents/%s/workspace/sync-to/finalize", tid("agent_bootstrap_finalize")), finalizeReq)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
@@ -787,7 +789,7 @@ func TestSyncToFinalize_BootstrapMode(t *testing.T) {
 	}
 
 	dispatched := disp.dispatchedAgents[0]
-	if dispatched.ID != "agent_bootstrap_finalize" {
+	if dispatched.ID != tid("agent_bootstrap_finalize") {
 		t.Errorf("expected dispatched agent ID 'agent_bootstrap_finalize', got %q", dispatched.ID)
 	}
 
@@ -807,11 +809,11 @@ func TestSyncToFinalize_BootstrapMode_MissingFile(t *testing.T) {
 
 	// Create an agent in provisioning status
 	agent := &store.Agent{
-		ID:              "agent_bootstrap_missing",
+		ID:              tid("agent_bootstrap_missing"),
 		Slug:            "bootstrap-missing",
 		Name:            "Bootstrap Missing",
 		ProjectID:       projectID,
-		RuntimeBrokerID: "broker_bootstrap_test",
+		RuntimeBrokerID: tid("broker_bootstrap_test"),
 		Phase:           string(state.PhaseProvisioning),
 		Visibility:      store.VisibilityPrivate,
 	}
@@ -820,7 +822,7 @@ func TestSyncToFinalize_BootstrapMode_MissingFile(t *testing.T) {
 	}
 
 	// Only put one file in storage
-	storagePath := "workspaces/" + projectID + "/agent_bootstrap_missing"
+	storagePath := "workspaces/" + projectID + "/" + tid("agent_bootstrap_missing")
 	stor.objects[storagePath+"/files/main.go"] = &storage.Object{
 		Name: storagePath + "/files/main.go",
 	}
@@ -837,7 +839,7 @@ func TestSyncToFinalize_BootstrapMode_MissingFile(t *testing.T) {
 		Manifest: manifest,
 	}
 
-	rec := doBootstrapRequest(t, srv, http.MethodPost, "/api/v1/agents/agent_bootstrap_missing/workspace/sync-to/finalize", finalizeReq)
+	rec := doBootstrapRequest(t, srv, http.MethodPost, fmt.Sprintf("/api/v1/agents/%s/workspace/sync-to/finalize", tid("agent_bootstrap_missing")), finalizeReq)
 
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("expected status 400, got %d: %s", rec.Code, rec.Body.String())
@@ -851,11 +853,11 @@ func TestSyncToFinalize_RejectsStoppedAgent(t *testing.T) {
 
 	// Create an agent in stopped status
 	agent := &store.Agent{
-		ID:              "agent_bootstrap_stopped",
+		ID:              tid("agent_bootstrap_stopped"),
 		Slug:            "bootstrap-stopped",
 		Name:            "Bootstrap Stopped",
 		ProjectID:       projectID,
-		RuntimeBrokerID: "broker_bootstrap_test",
+		RuntimeBrokerID: tid("broker_bootstrap_test"),
 		Phase:           string(state.PhaseStopped),
 		Visibility:      store.VisibilityPrivate,
 	}
@@ -869,7 +871,7 @@ func TestSyncToFinalize_RejectsStoppedAgent(t *testing.T) {
 	}
 	finalizeReq := SyncToFinalizeRequest{Manifest: manifest}
 
-	rec := doBootstrapRequest(t, srv, http.MethodPost, "/api/v1/agents/agent_bootstrap_stopped/workspace/sync-to/finalize", finalizeReq)
+	rec := doBootstrapRequest(t, srv, http.MethodPost, fmt.Sprintf("/api/v1/agents/%s/workspace/sync-to/finalize", tid("agent_bootstrap_stopped")), finalizeReq)
 
 	if rec.Code != http.StatusConflict {
 		t.Errorf("expected status 409, got %d: %s", rec.Code, rec.Body.String())
@@ -878,7 +880,7 @@ func TestSyncToFinalize_RejectsStoppedAgent(t *testing.T) {
 
 func TestSyncToFinalize_BootstrapMode_NoDispatcher(t *testing.T) {
 	// Create server without dispatcher
-	s, err := sqlite.New(":memory:")
+	s, err := newTestStore(":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
@@ -901,11 +903,11 @@ func TestSyncToFinalize_BootstrapMode_NoDispatcher(t *testing.T) {
 	ctx := context.Background()
 
 	agent := &store.Agent{
-		ID:              "agent_bootstrap_nodisp",
+		ID:              tid("agent_bootstrap_nodisp"),
 		Slug:            "bootstrap-nodisp",
 		Name:            "Bootstrap No Dispatcher",
 		ProjectID:       projectID,
-		RuntimeBrokerID: "broker_bootstrap_test",
+		RuntimeBrokerID: tid("broker_bootstrap_test"),
 		Phase:           string(state.PhaseProvisioning),
 		Visibility:      store.VisibilityPrivate,
 	}
@@ -913,7 +915,7 @@ func TestSyncToFinalize_BootstrapMode_NoDispatcher(t *testing.T) {
 		t.Fatalf("failed to create agent: %v", err)
 	}
 
-	storagePath := "workspaces/" + projectID + "/agent_bootstrap_nodisp"
+	storagePath := "workspaces/" + projectID + "/" + tid("agent_bootstrap_nodisp")
 	stor.objects[storagePath+"/files/main.go"] = &storage.Object{
 		Name: storagePath + "/files/main.go",
 	}
@@ -924,7 +926,7 @@ func TestSyncToFinalize_BootstrapMode_NoDispatcher(t *testing.T) {
 	}
 	finalizeReq := SyncToFinalizeRequest{Manifest: manifest}
 
-	rec := doBootstrapRequest(t, srv, http.MethodPost, "/api/v1/agents/agent_bootstrap_nodisp/workspace/sync-to/finalize", finalizeReq)
+	rec := doBootstrapRequest(t, srv, http.MethodPost, fmt.Sprintf("/api/v1/agents/%s/workspace/sync-to/finalize", tid("agent_bootstrap_nodisp")), finalizeReq)
 
 	if rec.Code != http.StatusBadGateway {
 		t.Errorf("expected status 502, got %d: %s", rec.Code, rec.Body.String())
@@ -942,7 +944,7 @@ func TestDispatcherPassesWorkspaceStoragePath(t *testing.T) {
 		ID:              "agent_with_storage_path",
 		Slug:            "storage-path-agent",
 		Name:            "Storage Path Agent",
-		ProjectID:       "project_test",
+		ProjectID:       tid("project_test"),
 		RuntimeBrokerID: "broker_test",
 		Phase:           string(state.PhaseProvisioning),
 		AppliedConfig: &store.AgentAppliedConfig{

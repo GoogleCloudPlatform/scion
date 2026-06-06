@@ -79,40 +79,42 @@ func TestDispatchAgentStart(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
 	mgr := &mockAgentManager{}
-	brokerID := "test-broker"
+	brokerID := tid("test-broker")
 
 	adapter := newAgentDispatcherAdapter(mgr, s, brokerID)
 
-	// Create test project and broker
-	project := &store.Project{
-		ID:   "proj-1",
-		Slug: "test-project",
+	// Create test grove and broker
+	grove := &store.Project{
+		ID:   tid("grove-1"),
+		Slug: "test-grove",
 		Name: "Test Project",
 	}
-	err := s.CreateProject(ctx, project)
+	err := s.CreateProject(ctx, grove)
 	require.NoError(t, err)
 
 	broker := &store.RuntimeBroker{
 		ID:   brokerID,
 		Name: "test-broker",
+		Slug: "test-broker",
 	}
 	err = s.CreateRuntimeBroker(ctx, broker)
 	require.NoError(t, err)
 
 	provider := &store.ProjectProvider{
-		ProjectID: project.ID,
-		BrokerID:  brokerID,
-		LocalPath: "/tmp/fake/project",
+		ProjectID:  grove.ID,
+		BrokerID:   brokerID,
+		BrokerName: "test-broker",
+		LocalPath:  "/tmp/fake/grove",
 	}
 	err = s.AddProjectProvider(ctx, provider)
 	require.NoError(t, err)
 
 	// Create agent
 	agent := &store.Agent{
-		ID:        "agent-1",
+		ID:        tid("agent-1"),
 		Slug:      "test-agent",
 		Name:      "test-agent",
-		ProjectID: project.ID,
+		ProjectID: grove.ID,
 		Template:  "gemini",
 		Image:     "test-image",
 		Detached:  true,
@@ -133,7 +135,7 @@ func TestDispatchAgentStart(t *testing.T) {
 	assert.Equal(t, "test-agent", mgr.startOpts.Name)
 	assert.Equal(t, true, mgr.startOpts.Resume)
 	assert.Equal(t, "new task", mgr.startOpts.Task)
-	assert.Equal(t, "/tmp/fake/project", mgr.startOpts.ProjectPath)
+	assert.Equal(t, "/tmp/fake/grove", mgr.startOpts.ProjectPath)
 	assert.Equal(t, "gemini", mgr.startOpts.Template)
 	assert.Equal(t, "BAR", mgr.startOpts.Env["FOO"])
 
@@ -149,24 +151,24 @@ func TestDispatchAgentRestart(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
 	mgr := &mockAgentManager{}
-	brokerID := "test-broker"
+	brokerID := tid("test-broker")
 
 	adapter := newAgentDispatcherAdapter(mgr, s, brokerID)
 
-	// Create test project and agent
-	project := &store.Project{
-		ID:   "proj-1",
-		Slug: "test-project",
+	// Create test grove and agent
+	grove := &store.Project{
+		ID:   tid("grove-1"),
+		Slug: "test-grove",
 		Name: "Test Project",
 	}
-	err := s.CreateProject(ctx, project)
+	err := s.CreateProject(ctx, grove)
 	require.NoError(t, err)
 
 	agent := &store.Agent{
-		ID:        "agent-1",
+		ID:        tid("agent-1"),
 		Slug:      "test-agent",
 		Name:      "test-agent",
-		ProjectID: project.ID,
+		ProjectID: grove.ID,
 	}
 	err = s.CreateAgent(ctx, agent)
 	require.NoError(t, err)

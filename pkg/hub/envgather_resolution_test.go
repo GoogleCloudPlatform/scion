@@ -33,19 +33,19 @@ func TestResolution_PlainEnvVar(t *testing.T) {
 	memStore := createTestStore(t)
 
 	broker := &store.RuntimeBroker{
-		ID: "broker-res-1", Name: "res-broker", Slug: "res-broker",
+		ID: tid("broker-res-1"), Name: "res-broker", Slug: "res-broker",
 		Endpoint: "http://localhost:9800", Status: store.BrokerStatusOnline,
 	}
 	if err := memStore.CreateRuntimeBroker(ctx, broker); err != nil {
 		t.Fatal(err)
 	}
 
-	project := &store.Project{ID: "project-res-1", Name: "res-project", Slug: "res-project"}
+	project := &store.Project{ID: tid("project-res-1"), Name: "res-project", Slug: "res-project"}
 	if err := memStore.CreateProject(ctx, project); err != nil {
 		t.Fatal(err)
 	}
 	if err := memStore.AddProjectProvider(ctx, &store.ProjectProvider{
-		ProjectID: "project-res-1", BrokerID: "broker-res-1",
+		ProjectID: tid("project-res-1"), BrokerID: tid("broker-res-1"), BrokerName: "test-broker",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -69,9 +69,9 @@ func TestResolution_PlainEnvVar(t *testing.T) {
 		ID:              "agent-res-1",
 		Name:            "res-agent",
 		Slug:            "res-agent",
-		ProjectID:       "project-res-1",
+		ProjectID:       tid("project-res-1"),
 		OwnerID:         "user-res-1",
-		RuntimeBrokerID: "broker-res-1",
+		RuntimeBrokerID: tid("broker-res-1"),
 		AppliedConfig:   &store.AgentAppliedConfig{},
 	}
 
@@ -94,19 +94,19 @@ func TestResolution_SecretUserScope(t *testing.T) {
 	memStore := createTestStore(t)
 
 	broker := &store.RuntimeBroker{
-		ID: "broker-res-2", Name: "res-broker-2", Slug: "res-broker-2",
+		ID: tid("broker-res-2"), Name: "res-broker-2", Slug: "res-broker-2",
 		Endpoint: "http://localhost:9800", Status: store.BrokerStatusOnline,
 	}
 	if err := memStore.CreateRuntimeBroker(ctx, broker); err != nil {
 		t.Fatal(err)
 	}
 
-	project := &store.Project{ID: "project-res-2", Name: "res-project-2", Slug: "res-project-2"}
+	project := &store.Project{ID: tid("project-res-2"), Name: "res-project-2", Slug: "res-project-2"}
 	if err := memStore.CreateProject(ctx, project); err != nil {
 		t.Fatal(err)
 	}
 	if err := memStore.AddProjectProvider(ctx, &store.ProjectProvider{
-		ProjectID: "project-res-2", BrokerID: "broker-res-2",
+		ProjectID: tid("project-res-2"), BrokerID: tid("broker-res-2"), BrokerName: "test-broker",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -132,9 +132,9 @@ func TestResolution_SecretUserScope(t *testing.T) {
 		ID:              "agent-res-2",
 		Name:            "res-agent-2",
 		Slug:            "res-agent-2",
-		ProjectID:       "project-res-2",
+		ProjectID:       tid("project-res-2"),
 		OwnerID:         "user-res-2",
-		RuntimeBrokerID: "broker-res-2",
+		RuntimeBrokerID: tid("broker-res-2"),
 		AppliedConfig:   &store.AgentAppliedConfig{},
 	}
 
@@ -170,19 +170,19 @@ func TestResolution_ProjectEnvVar(t *testing.T) {
 	memStore := createTestStore(t)
 
 	broker := &store.RuntimeBroker{
-		ID: "broker-res-3", Name: "res-broker-3", Slug: "res-broker-3",
+		ID: tid("broker-res-3"), Name: "res-broker-3", Slug: "res-broker-3",
 		Endpoint: "http://localhost:9800", Status: store.BrokerStatusOnline,
 	}
 	if err := memStore.CreateRuntimeBroker(ctx, broker); err != nil {
 		t.Fatal(err)
 	}
 
-	project := &store.Project{ID: "project-res-3", Name: "res-project-3", Slug: "res-project-3"}
+	project := &store.Project{ID: tid("project-res-3"), Name: "res-project-3", Slug: "res-project-3"}
 	if err := memStore.CreateProject(ctx, project); err != nil {
 		t.Fatal(err)
 	}
 	if err := memStore.AddProjectProvider(ctx, &store.ProjectProvider{
-		ProjectID: "project-res-3", BrokerID: "broker-res-3",
+		ProjectID: tid("project-res-3"), BrokerID: tid("broker-res-3"), BrokerName: "test-broker",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -193,7 +193,7 @@ func TestResolution_ProjectEnvVar(t *testing.T) {
 		Key:     "GROVE_VAR",
 		Value:   "project-var-value",
 		Scope:   "project",
-		ScopeID: "project-res-3",
+		ScopeID: tid("project-res-3"),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -206,9 +206,9 @@ func TestResolution_ProjectEnvVar(t *testing.T) {
 		ID:              "agent-res-3",
 		Name:            "res-agent-3",
 		Slug:            "res-agent-3",
-		ProjectID:       "project-res-3",
+		ProjectID:       tid("project-res-3"),
 		OwnerID:         "user-res-3",
-		RuntimeBrokerID: "broker-res-3",
+		RuntimeBrokerID: tid("broker-res-3"),
 		AppliedConfig:   &store.AgentAppliedConfig{},
 	}
 
@@ -233,19 +233,19 @@ func TestResolution_SecretPromotedEnvVar(t *testing.T) {
 	memStore := createTestStore(t)
 
 	broker := &store.RuntimeBroker{
-		ID: "broker-res-4", Name: "res-broker-4", Slug: "res-broker-4",
+		ID: tid("broker-res-4"), Name: "res-broker-4", Slug: "res-broker-4",
 		Endpoint: "http://localhost:9800", Status: store.BrokerStatusOnline,
 	}
 	if err := memStore.CreateRuntimeBroker(ctx, broker); err != nil {
 		t.Fatal(err)
 	}
 
-	project := &store.Project{ID: "project-res-4", Name: "res-project-4", Slug: "res-project-4"}
+	project := &store.Project{ID: tid("project-res-4"), Name: "res-project-4", Slug: "res-project-4"}
 	if err := memStore.CreateProject(ctx, project); err != nil {
 		t.Fatal(err)
 	}
 	if err := memStore.AddProjectProvider(ctx, &store.ProjectProvider{
-		ProjectID: "project-res-4", BrokerID: "broker-res-4",
+		ProjectID: tid("project-res-4"), BrokerID: tid("broker-res-4"), BrokerName: "test-broker",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -294,9 +294,9 @@ func TestResolution_SecretPromotedEnvVar(t *testing.T) {
 		ID:              "agent-res-4",
 		Name:            "res-agent-4",
 		Slug:            "res-agent-4",
-		ProjectID:       "project-res-4",
+		ProjectID:       tid("project-res-4"),
 		OwnerID:         "user-res-4",
-		RuntimeBrokerID: "broker-res-4",
+		RuntimeBrokerID: tid("broker-res-4"),
 		AppliedConfig:   &store.AgentAppliedConfig{},
 	}
 

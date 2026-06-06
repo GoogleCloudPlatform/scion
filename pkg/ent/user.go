@@ -36,6 +36,8 @@ type User struct {
 	Created time.Time `json:"created,omitempty"`
 	// LastLogin holds the value of the "last_login" field.
 	LastLogin *time.Time `json:"last_login,omitempty"`
+	// LastSeen holds the value of the "last_seen" field.
+	LastSeen *time.Time `json:"last_seen,omitempty"`
 	// Edges holds the relations/edges for other nodes in the graph.
 	// The values are being populated by the UserQuery when eager-loading is set.
 	Edges        UserEdges `json:"edges"`
@@ -44,10 +46,6 @@ type User struct {
 
 // UserEdges holds the relations/edges for other nodes in the graph.
 type UserEdges struct {
-	// CreatedAgents holds the value of the created_agents edge.
-	CreatedAgents []*Agent `json:"created_agents,omitempty"`
-	// OwnedAgents holds the value of the owned_agents edge.
-	OwnedAgents []*Agent `json:"owned_agents,omitempty"`
 	// OwnedGroups holds the value of the owned_groups edge.
 	OwnedGroups []*Group `json:"owned_groups,omitempty"`
 	// Memberships holds the value of the memberships edge.
@@ -56,31 +54,13 @@ type UserEdges struct {
 	PolicyBindings []*PolicyBinding `json:"policy_bindings,omitempty"`
 	// loadedTypes holds the information for reporting if a
 	// type was loaded (or requested) in eager-loading or not.
-	loadedTypes [5]bool
-}
-
-// CreatedAgentsOrErr returns the CreatedAgents value or an error if the edge
-// was not loaded in eager-loading.
-func (e UserEdges) CreatedAgentsOrErr() ([]*Agent, error) {
-	if e.loadedTypes[0] {
-		return e.CreatedAgents, nil
-	}
-	return nil, &NotLoadedError{edge: "created_agents"}
-}
-
-// OwnedAgentsOrErr returns the OwnedAgents value or an error if the edge
-// was not loaded in eager-loading.
-func (e UserEdges) OwnedAgentsOrErr() ([]*Agent, error) {
-	if e.loadedTypes[1] {
-		return e.OwnedAgents, nil
-	}
-	return nil, &NotLoadedError{edge: "owned_agents"}
+	loadedTypes [3]bool
 }
 
 // OwnedGroupsOrErr returns the OwnedGroups value or an error if the edge
 // was not loaded in eager-loading.
 func (e UserEdges) OwnedGroupsOrErr() ([]*Group, error) {
-	if e.loadedTypes[2] {
+	if e.loadedTypes[0] {
 		return e.OwnedGroups, nil
 	}
 	return nil, &NotLoadedError{edge: "owned_groups"}
@@ -89,7 +69,7 @@ func (e UserEdges) OwnedGroupsOrErr() ([]*Group, error) {
 // MembershipsOrErr returns the Memberships value or an error if the edge
 // was not loaded in eager-loading.
 func (e UserEdges) MembershipsOrErr() ([]*GroupMembership, error) {
-	if e.loadedTypes[3] {
+	if e.loadedTypes[1] {
 		return e.Memberships, nil
 	}
 	return nil, &NotLoadedError{edge: "memberships"}
@@ -98,7 +78,7 @@ func (e UserEdges) MembershipsOrErr() ([]*GroupMembership, error) {
 // PolicyBindingsOrErr returns the PolicyBindings value or an error if the edge
 // was not loaded in eager-loading.
 func (e UserEdges) PolicyBindingsOrErr() ([]*PolicyBinding, error) {
-	if e.loadedTypes[4] {
+	if e.loadedTypes[2] {
 		return e.PolicyBindings, nil
 	}
 	return nil, &NotLoadedError{edge: "policy_bindings"}
@@ -113,7 +93,7 @@ func (*User) scanValues(columns []string) ([]any, error) {
 			values[i] = new([]byte)
 		case user.FieldEmail, user.FieldDisplayName, user.FieldAvatarURL, user.FieldRole, user.FieldStatus:
 			values[i] = new(sql.NullString)
-		case user.FieldCreated, user.FieldLastLogin:
+		case user.FieldCreated, user.FieldLastLogin, user.FieldLastSeen:
 			values[i] = new(sql.NullTime)
 		case user.FieldID:
 			values[i] = new(uuid.UUID)
@@ -189,6 +169,13 @@ func (_m *User) assignValues(columns []string, values []any) error {
 				_m.LastLogin = new(time.Time)
 				*_m.LastLogin = value.Time
 			}
+		case user.FieldLastSeen:
+			if value, ok := values[i].(*sql.NullTime); !ok {
+				return fmt.Errorf("unexpected type %T for field last_seen", values[i])
+			} else if value.Valid {
+				_m.LastSeen = new(time.Time)
+				*_m.LastSeen = value.Time
+			}
 		default:
 			_m.selectValues.Set(columns[i], values[i])
 		}
@@ -200,16 +187,6 @@ func (_m *User) assignValues(columns []string, values []any) error {
 // This includes values selected through modifiers, order, etc.
 func (_m *User) Value(name string) (ent.Value, error) {
 	return _m.selectValues.Get(name)
-}
-
-// QueryCreatedAgents queries the "created_agents" edge of the User entity.
-func (_m *User) QueryCreatedAgents() *AgentQuery {
-	return NewUserClient(_m.config).QueryCreatedAgents(_m)
-}
-
-// QueryOwnedAgents queries the "owned_agents" edge of the User entity.
-func (_m *User) QueryOwnedAgents() *AgentQuery {
-	return NewUserClient(_m.config).QueryOwnedAgents(_m)
 }
 
 // QueryOwnedGroups queries the "owned_groups" edge of the User entity.
@@ -273,6 +250,11 @@ func (_m *User) String() string {
 	builder.WriteString(", ")
 	if v := _m.LastLogin; v != nil {
 		builder.WriteString("last_login=")
+		builder.WriteString(v.Format(time.ANSIC))
+	}
+	builder.WriteString(", ")
+	if v := _m.LastSeen; v != nil {
+		builder.WriteString("last_seen=")
 		builder.WriteString(v.Format(time.ANSIC))
 	}
 	builder.WriteByte(')')

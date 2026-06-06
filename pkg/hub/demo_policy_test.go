@@ -68,7 +68,7 @@ func setupDemoPolicyTest(t *testing.T) (*Server, store.Store, *store.User, *stor
 
 	// Create users
 	alice := &store.User{
-		ID:          "user-alice",
+		ID:          tid("user-alice"),
 		Email:       "alice@test.com",
 		DisplayName: "Alice",
 		Role:        store.UserRoleMember,
@@ -78,7 +78,7 @@ func setupDemoPolicyTest(t *testing.T) (*Server, store.Store, *store.User, *stor
 	require.NoError(t, s.CreateUser(ctx, alice))
 
 	bob := &store.User{
-		ID:          "user-bob",
+		ID:          tid("user-bob"),
 		Email:       "bob@test.com",
 		DisplayName: "Bob",
 		Role:        store.UserRoleMember,
@@ -93,7 +93,7 @@ func setupDemoPolicyTest(t *testing.T) (*Server, store.Store, *store.User, *stor
 
 	// Create a project owned by alice
 	project := &store.Project{
-		ID:        "project-demo",
+		ID:        tid("project-demo"),
 		Name:      "Demo Project",
 		Slug:      "demo-project",
 		OwnerID:   alice.ID,
@@ -145,7 +145,7 @@ func TestDemoPolicy_AgentCreate_AdminBypass(t *testing.T) {
 
 	// Create an admin user (not a project member)
 	admin := &store.User{
-		ID:          "user-admin",
+		ID:          tid("user-admin"),
 		Email:       "admin@test.com",
 		DisplayName: "Admin",
 		Role:        store.UserRoleAdmin,
@@ -173,8 +173,8 @@ func TestDemoPolicy_AgentDelete_OwnerAllowed(t *testing.T) {
 
 	// Create an agent owned by alice
 	agent := &store.Agent{
-		ID:           "agent-del-owner",
-		Slug:         "agent-del-owner",
+		ID:           tid("agent-del-owner"),
+		Slug:         tid("agent-del-owner"),
 		Name:         "Agent to Delete",
 		ProjectID:    project.ID,
 		OwnerID:      alice.ID,
@@ -199,8 +199,8 @@ func TestDemoPolicy_AgentDelete_NonOwnerDenied(t *testing.T) {
 
 	// Create an agent owned by alice
 	agent := &store.Agent{
-		ID:           "agent-del-nonowner",
-		Slug:         "agent-del-nonowner",
+		ID:           tid("agent-del-nonowner"),
+		Slug:         tid("agent-del-nonowner"),
 		Name:         "Agent to Delete",
 		ProjectID:    project.ID,
 		OwnerID:      alice.ID,
@@ -224,7 +224,7 @@ func TestDemoPolicy_AgentDelete_AdminBypass(t *testing.T) {
 	ctx := context.Background()
 
 	admin := &store.User{
-		ID:          "user-admin-del",
+		ID:          tid("user-admin-del"),
 		Email:       "admin-del@test.com",
 		DisplayName: "Admin",
 		Role:        store.UserRoleAdmin,
@@ -234,8 +234,8 @@ func TestDemoPolicy_AgentDelete_AdminBypass(t *testing.T) {
 	require.NoError(t, s.CreateUser(ctx, admin))
 
 	agent := &store.Agent{
-		ID:           "agent-del-admin",
-		Slug:         "agent-del-admin",
+		ID:           tid("agent-del-admin"),
+		Slug:         tid("agent-del-admin"),
 		Name:         "Agent for Admin Delete",
 		ProjectID:    project.ID,
 		OwnerID:      alice.ID,
@@ -259,8 +259,8 @@ func TestDemoPolicy_AgentDelete_DirectPath_NonOwnerDenied(t *testing.T) {
 	ctx := context.Background()
 
 	agent := &store.Agent{
-		ID:           "agent-del-direct",
-		Slug:         "agent-del-direct",
+		ID:           tid("agent-del-direct"),
+		Slug:         tid("agent-del-direct"),
 		Name:         "Agent Direct Delete",
 		ProjectID:    project.ID,
 		OwnerID:      alice.ID,
@@ -288,8 +288,8 @@ func TestDemoPolicy_AgentAction_OwnerAllowed(t *testing.T) {
 	ctx := context.Background()
 
 	agent := &store.Agent{
-		ID:           "agent-action-owner",
-		Slug:         "agent-action-owner",
+		ID:           tid("agent-action-owner"),
+		Slug:         tid("agent-action-owner"),
 		Name:         "Agent Action Test",
 		ProjectID:    project.ID,
 		OwnerID:      alice.ID,
@@ -318,8 +318,8 @@ func TestDemoPolicy_AgentAction_NonOwnerDenied(t *testing.T) {
 	ctx := context.Background()
 
 	agent := &store.Agent{
-		ID:           "agent-action-nonowner",
-		Slug:         "agent-action-nonowner",
+		ID:           tid("agent-action-nonowner"),
+		Slug:         tid("agent-action-nonowner"),
 		Name:         "Agent Action Test",
 		ProjectID:    project.ID,
 		OwnerID:      alice.ID,
@@ -347,7 +347,7 @@ func TestDemoPolicy_AgentAction_AdminBypass(t *testing.T) {
 	ctx := context.Background()
 
 	admin := &store.User{
-		ID:          "user-admin-action",
+		ID:          tid("user-admin-action"),
 		Email:       "admin-action@test.com",
 		DisplayName: "Admin",
 		Role:        store.UserRoleAdmin,
@@ -357,8 +357,8 @@ func TestDemoPolicy_AgentAction_AdminBypass(t *testing.T) {
 	require.NoError(t, s.CreateUser(ctx, admin))
 
 	agent := &store.Agent{
-		ID:           "agent-action-admin",
-		Slug:         "agent-action-admin",
+		ID:           tid("agent-action-admin"),
+		Slug:         tid("agent-action-admin"),
 		Name:         "Agent Admin Action",
 		ProjectID:    project.ID,
 		OwnerID:      alice.ID,
@@ -382,8 +382,8 @@ func TestDemoPolicy_AgentAction_DirectPath_NonOwnerDenied(t *testing.T) {
 	ctx := context.Background()
 
 	agent := &store.Agent{
-		ID:           "agent-action-direct",
-		Slug:         "agent-action-direct",
+		ID:           tid("agent-action-direct"),
+		Slug:         tid("agent-action-direct"),
 		Name:         "Agent Direct Action",
 		ProjectID:    project.ID,
 		OwnerID:      alice.ID,
@@ -466,7 +466,7 @@ func TestDemoPolicy_EndToEnd_ProjectCreatorCanCreateAgent(t *testing.T) {
 
 	// Create a non-admin user
 	alice := &store.User{
-		ID:          "user-e2e-alice",
+		ID:          tid("user-e2e-alice"),
 		Email:       "e2e-alice@test.com",
 		DisplayName: "E2E Alice",
 		Role:        store.UserRoleMember,
@@ -504,7 +504,7 @@ func TestDemoPolicy_HubMembershipOnLogin(t *testing.T) {
 
 	// Create a user and add to hub-members (simulating login)
 	user := &store.User{
-		ID:          "user-login-test",
+		ID:          tid("user-login-test"),
 		Email:       "login@test.com",
 		DisplayName: "Login User",
 		Role:        store.UserRoleMember,
@@ -535,7 +535,7 @@ func TestDemoPolicy_ProjectRecreation_CreatorCanCreateAgent(t *testing.T) {
 	ctx := context.Background()
 
 	alice := &store.User{
-		ID:          "user-recreate-alice",
+		ID:          tid("user-recreate-alice"),
 		Email:       "recreate-alice@test.com",
 		DisplayName: "Alice",
 		Role:        store.UserRoleMember,
@@ -593,7 +593,7 @@ func TestDemoPolicy_ProjectMembersGroupIdempotent(t *testing.T) {
 	ctx := context.Background()
 
 	alice := &store.User{
-		ID:          "user-idempotent-alice",
+		ID:          tid("user-idempotent-alice"),
 		Email:       "idempotent-alice@test.com",
 		DisplayName: "Alice",
 		Role:        store.UserRoleMember,
@@ -604,7 +604,7 @@ func TestDemoPolicy_ProjectMembersGroupIdempotent(t *testing.T) {
 	ensureHubMembership(ctx, s, alice.ID)
 
 	project := &store.Project{
-		ID:        "project-idempotent",
+		ID:        tid("project-idempotent"),
 		Name:      "Idempotent Project",
 		Slug:      "idempotent-project",
 		OwnerID:   alice.ID,
@@ -641,7 +641,7 @@ func TestDemoPolicy_ProjectDeleteCleansUpGroupsAndPolicies(t *testing.T) {
 	ctx := context.Background()
 
 	alice := &store.User{
-		ID:          "user-cleanup-alice",
+		ID:          tid("user-cleanup-alice"),
 		Email:       "cleanup-alice@test.com",
 		DisplayName: "Alice",
 		Role:        store.UserRoleMember,

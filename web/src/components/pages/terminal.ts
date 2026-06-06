@@ -68,6 +68,9 @@ export class ScionPageTerminal extends LitElement {
   private connected = false;
 
   @state()
+  private wasConnected = false;
+
+  @state()
   private error: string | null = null;
 
   @state()
@@ -228,10 +231,41 @@ export class ScionPageTerminal extends LitElement {
       opacity: 0.4;
     }
 
-    .terminal-container {
+    .terminal-wrapper {
       flex: 1;
       position: relative;
       overflow: hidden;
+    }
+
+    .terminal-container {
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+    }
+
+    .disconnected-overlay {
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background: rgba(0, 0, 0, 0.5);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      z-index: 10;
+      pointer-events: none;
+    }
+
+    .disconnected-overlay .overlay-text {
+      color: #ef4444;
+      font-size: 2rem;
+      font-weight: 700;
+      letter-spacing: 0.15em;
+      text-shadow: 0 2px 8px rgba(0, 0, 0, 0.6);
     }
 
     .loading-state,
@@ -588,6 +622,7 @@ export class ScionPageTerminal extends LitElement {
     this.socket.onopen = () => {
       console.debug('[Terminal] WebSocket connected');
       this.connected = true;
+      this.wasConnected = true;
       this.error = null;
       // Re-fit now that the connection is live so tmux gets accurate dimensions
       if (this.fitAddon) {
@@ -683,6 +718,7 @@ export class ScionPageTerminal extends LitElement {
     }
     this.fitAddon = null;
     this.clipboardAddon = null;
+    this.wasConnected = false;
   }
 
   /**
@@ -809,7 +845,14 @@ export class ScionPageTerminal extends LitElement {
             </div>
           `
         : ''}
-      <div class="terminal-container"></div>
+      <div class="terminal-wrapper">
+        <div class="terminal-container"></div>
+        ${!this.connected && this.wasConnected
+          ? html`<div class="disconnected-overlay">
+              <span class="overlay-text">DISCONNECTED</span>
+            </div>`
+          : ''}
+      </div>
     `;
   }
 }

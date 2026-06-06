@@ -22,42 +22,34 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
-	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
-	"github.com/GoogleCloudPlatform/scion/pkg/store/sqlite"
+	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-// newTestCompositeStore creates a CompositeStore with a real SQLite base store
-// and a separate Ent client, simulating the production dual-database layout.
+// newTestCompositeStore creates a CompositeStore backed by a single in-memory
+// Ent database, matching the production single-database layout.
 func newTestCompositeStore(t *testing.T) *CompositeStore {
 	t.Helper()
 
-	// Create the base SQLite store (main database)
-	base, err := sqlite.New(":memory:")
-	require.NoError(t, err)
-	require.NoError(t, base.Migrate(context.Background()))
+	entClient := enttest.NewClient(t)
 
-	// Create a separate Ent-managed database (permissions database)
-	entClient, err := entc.OpenSQLite("file:" + t.Name() + "?mode=memory&cache=shared")
-	require.NoError(t, err)
-	require.NoError(t, entc.AutoMigrate(context.Background(), entClient))
-
-	cs := NewCompositeStore(base, entClient)
+	cs := NewCompositeStore(entClient)
 	t.Cleanup(func() { cs.Close() })
 
 	return cs
 }
 
-func TestCompositeStore_AddGroupMember_UserShadowRecord(t *testing.T) {
+func TestCompositeStore_AddGroupMember_User(t *testing.T) {
 	cs := newTestCompositeStore(t)
 	ctx := context.Background()
 
-	// Create a user in the base store only (simulating normal user creation)
+	// Create a user. With a single Ent-backed database the user, group, and
+	// membership all live in the same store and the FK resolves natively.
 	userID := uuid.New().String()
-	err := cs.Store.CreateUser(ctx, &store.User{
+	err := cs.CreateUser(ctx, &store.User{
 		ID:          userID,
 		Email:       "test@example.com",
 		DisplayName: "Test User",
@@ -67,7 +59,7 @@ func TestCompositeStore_AddGroupMember_UserShadowRecord(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// Create a group in Ent
+	// Create a group.
 	groupID := uuid.New().String()
 	err = cs.CreateGroup(ctx, &store.Group{
 		ID:        groupID,
@@ -77,79 +69,33 @@ func TestCompositeStore_AddGroupMember_UserShadowRecord(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// Add the user as a member — this should succeed because the CompositeStore
-	// creates a shadow user record in the Ent database before adding the membership.
+	// Add the user as a member.
 	err = cs.AddGroupMember(ctx, &store.GroupMember{
 		GroupID:    groupID,
 		MemberType: store.GroupMemberTypeUser,
 		MemberID:   userID,
 		Role:       store.GroupMemberRoleMember,
 	})
-	require.NoError(t, err, "AddGroupMember should succeed for user that exists only in base store")
+	require.NoError(t, err, "AddGroupMember should succeed for an existing user")
 
-	// Verify the membership was created
+	// Verify the membership was created.
 	membership, err := cs.GetGroupMembership(ctx, groupID, store.GroupMemberTypeUser, userID)
 	require.NoError(t, err)
 	assert.Equal(t, userID, membership.MemberID)
 
-	// Verify the user appears in effective groups
+	// Verify the user appears in effective groups.
 	groups, err := cs.GetEffectiveGroups(ctx, userID)
 	require.NoError(t, err)
 	assert.Contains(t, groups, groupID)
 }
 
-func TestCompositeStore_AddGroupMember_UserAlreadyInEnt(t *testing.T) {
+func TestCompositeStore_AddGroupMember_Agent(t *testing.T) {
 	cs := newTestCompositeStore(t)
 	ctx := context.Background()
 
-	userID := uuid.New().String()
-	userUID, _ := uuid.Parse(userID)
-
-	// Create user in both base store and Ent
-	err := cs.Store.CreateUser(ctx, &store.User{
-		ID:          userID,
-		Email:       "already@example.com",
-		DisplayName: "Already Here",
-		Role:        store.UserRoleMember,
-		Status:      "active",
-		Created:     time.Now(),
-	})
-	require.NoError(t, err)
-
-	_, err = cs.client.User.Create().
-		SetID(userUID).
-		SetEmail("already@example.com").
-		SetDisplayName("Already Here").
-		Save(ctx)
-	require.NoError(t, err)
-
-	// Create a group
-	groupID := uuid.New().String()
-	err = cs.CreateGroup(ctx, &store.Group{
-		ID:        groupID,
-		Name:      "Test Group 2",
-		Slug:      "test-group-2",
-		GroupType: store.GroupTypeExplicit,
-	})
-	require.NoError(t, err)
-
-	// Should work without issues (no duplicate creation)
-	err = cs.AddGroupMember(ctx, &store.GroupMember{
-		GroupID:    groupID,
-		MemberType: store.GroupMemberTypeUser,
-		MemberID:   userID,
-		Role:       store.GroupMemberRoleMember,
-	})
-	require.NoError(t, err)
-}
-
-func TestCompositeStore_AddGroupMember_AgentShadowRecord(t *testing.T) {
-	cs := newTestCompositeStore(t)
-	ctx := context.Background()
-
-	// Create a project in the base store
+	// Create a project.
 	projectID := uuid.New().String()
-	err := cs.Store.CreateProject(ctx, &store.Project{
+	err := cs.CreateProject(ctx, &store.Project{
 		ID:      projectID,
 		Name:    "Test Project",
 		Slug:    "test-project",
@@ -158,9 +104,9 @@ func TestCompositeStore_AddGroupMember_AgentShadowRecord(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// Create an agent in the base store only
+	// Create an agent referencing the project.
 	agentID := uuid.New().String()
-	err = cs.Store.CreateAgent(ctx, &store.Agent{
+	err = cs.CreateAgent(ctx, &store.Agent{
 		ID:           agentID,
 		Name:         "Test Agent",
 		Slug:         "test-agent",
@@ -172,7 +118,7 @@ func TestCompositeStore_AddGroupMember_AgentShadowRecord(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// Create a group
+	// Create a group.
 	groupID := uuid.New().String()
 	err = cs.CreateGroup(ctx, &store.Group{
 		ID:        groupID,
@@ -182,16 +128,16 @@ func TestCompositeStore_AddGroupMember_AgentShadowRecord(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// Add the agent as a member — should create shadow agent and project records
+	// Add the agent as a member.
 	err = cs.AddGroupMember(ctx, &store.GroupMember{
 		GroupID:    groupID,
 		MemberType: store.GroupMemberTypeAgent,
 		MemberID:   agentID,
 		Role:       store.GroupMemberRoleMember,
 	})
-	require.NoError(t, err, "AddGroupMember should succeed for agent that exists only in base store")
+	require.NoError(t, err, "AddGroupMember should succeed for an existing agent")
 
-	// Verify membership
+	// Verify membership.
 	membership, err := cs.GetGroupMembership(ctx, groupID, store.GroupMemberTypeAgent, agentID)
 	require.NoError(t, err)
 	assert.Equal(t, agentID, membership.MemberID)
@@ -202,7 +148,7 @@ func TestCompositeStore_AddGroupMember_Idempotent(t *testing.T) {
 	ctx := context.Background()
 
 	userID := uuid.New().String()
-	err := cs.Store.CreateUser(ctx, &store.User{
+	err := cs.CreateUser(ctx, &store.User{
 		ID:          userID,
 		Email:       "idempotent@example.com",
 		DisplayName: "Idempotent User",
@@ -221,7 +167,7 @@ func TestCompositeStore_AddGroupMember_Idempotent(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// First add should succeed
+	// First add should succeed.
 	member := &store.GroupMember{
 		GroupID:    groupID,
 		MemberType: store.GroupMemberTypeUser,
@@ -231,48 +177,41 @@ func TestCompositeStore_AddGroupMember_Idempotent(t *testing.T) {
 	err = cs.AddGroupMember(ctx, member)
 	require.NoError(t, err)
 
-	// Second add of same membership should return ErrAlreadyExists
+	// Second add of same membership should return ErrAlreadyExists.
 	err = cs.AddGroupMember(ctx, member)
 	assert.ErrorIs(t, err, store.ErrAlreadyExists)
 }
 
-// TestCompositeStore_CreateGroup_WithProjectID tests that creating a group with a
-// project ID succeeds even though the project only exists in the base (SQLite) store.
-// The CompositeStore should create a shadow project record in the Ent database to
-// satisfy the foreign key constraint.
+// TestCompositeStore_CreateGroup_WithProjectID verifies that creating a group
+// referencing a project succeeds when the project lives in the same Ent store.
 func TestCompositeStore_CreateGroup_WithProjectID(t *testing.T) {
 	cs := newTestCompositeStore(t)
 	ctx := context.Background()
 
-	// Create a project in the base store only (not in Ent)
 	projectID := uuid.New().String()
-	err := cs.Store.CreateProject(ctx, &store.Project{
+	err := cs.CreateProject(ctx, &store.Project{
 		ID:      projectID,
-		Name:    "Shadow Project",
-		Slug:    "shadow-project",
+		Name:    "Project",
+		Slug:    "project",
 		Created: time.Now(),
 		Updated: time.Now(),
 	})
 	require.NoError(t, err)
 
-	// Create a group with project_id — this should succeed because the
-	// CompositeStore creates a shadow project record in Ent before creating
-	// the group.
 	groupID := uuid.New().String()
 	err = cs.CreateGroup(ctx, &store.Group{
 		ID:        groupID,
-		Name:      "Shadow Project Agents",
-		Slug:      "project:shadow-project:agents",
+		Name:      "Project Agents",
+		Slug:      "project:project:agents",
 		GroupType: store.GroupTypeProjectAgents,
 		ProjectID: projectID,
 	})
-	require.NoError(t, err, "CreateGroup should succeed for project that exists only in base store")
+	require.NoError(t, err, "CreateGroup should succeed for an existing project")
 
-	// Verify the group was created with the correct project ID
 	group, err := cs.GetGroup(ctx, groupID)
 	require.NoError(t, err)
 	assert.Equal(t, projectID, group.ProjectID)
-	assert.Equal(t, "project:shadow-project:agents", group.Slug)
+	assert.Equal(t, "project:project:agents", group.Slug)
 }
 
 // TestCompositeStore_CreateGroup_MultipleGroupsPerProject verifies that multiple
@@ -283,7 +222,7 @@ func TestCompositeStore_CreateGroup_MultipleGroupsPerProject(t *testing.T) {
 	ctx := context.Background()
 
 	projectID := uuid.New().String()
-	err := cs.Store.CreateProject(ctx, &store.Project{
+	err := cs.CreateProject(ctx, &store.Project{
 		ID:      projectID,
 		Name:    "Multi-Group Project",
 		Slug:    "multi-group-project",
@@ -292,7 +231,7 @@ func TestCompositeStore_CreateGroup_MultipleGroupsPerProject(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// Create agents group
+	// Create agents group.
 	agentsGroupID := uuid.New().String()
 	err = cs.CreateGroup(ctx, &store.Group{
 		ID:        agentsGroupID,
@@ -303,7 +242,7 @@ func TestCompositeStore_CreateGroup_MultipleGroupsPerProject(t *testing.T) {
 	})
 	require.NoError(t, err, "agents group creation should succeed")
 
-	// Create members group for the same project — this must NOT fail
+	// Create members group for the same project — this must NOT fail.
 	membersGroupID := uuid.New().String()
 	err = cs.CreateGroup(ctx, &store.Group{
 		ID:        membersGroupID,
@@ -314,7 +253,7 @@ func TestCompositeStore_CreateGroup_MultipleGroupsPerProject(t *testing.T) {
 	})
 	require.NoError(t, err, "members group creation should succeed for same project")
 
-	// Verify both groups exist with the correct project ID
+	// Verify both groups exist with the correct project ID.
 	agents, err := cs.GetGroup(ctx, agentsGroupID)
 	require.NoError(t, err)
 	assert.Equal(t, projectID, agents.ProjectID)

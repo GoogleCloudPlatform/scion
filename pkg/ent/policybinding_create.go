@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"time"
 
+	"entgo.io/ent/dialect"
+	"entgo.io/ent/dialect/sql"
 	"entgo.io/ent/dialect/sql/sqlgraph"
 	"entgo.io/ent/schema/field"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/accesspolicy"
@@ -23,6 +25,7 @@ type PolicyBindingCreate struct {
 	config
 	mutation *PolicyBindingMutation
 	hooks    []Hook
+	conflict []sql.ConflictOption
 }
 
 // SetPrincipalType sets the "principal_type" field.
@@ -238,6 +241,7 @@ func (_c *PolicyBindingCreate) createSpec() (*PolicyBinding, *sqlgraph.CreateSpe
 		_node = &PolicyBinding{config: _c.config}
 		_spec = sqlgraph.NewCreateSpec(policybinding.Table, sqlgraph.NewFieldSpec(policybinding.FieldID, field.TypeUUID))
 	)
+	_spec.OnConflict = _c.conflict
 	if id, ok := _c.mutation.ID(); ok {
 		_node.ID = id
 		_spec.ID.Value = &id
@@ -325,11 +329,371 @@ func (_c *PolicyBindingCreate) createSpec() (*PolicyBinding, *sqlgraph.CreateSpe
 	return _node, _spec
 }
 
+// OnConflict allows configuring the `ON CONFLICT` / `ON DUPLICATE KEY` clause
+// of the `INSERT` statement. For example:
+//
+//	client.PolicyBinding.Create().
+//		SetPrincipalType(v).
+//		OnConflict(
+//			// Update the row with the new values
+//			// the was proposed for insertion.
+//			sql.ResolveWithNewValues(),
+//		).
+//		// Override some of the fields with custom
+//		// update values.
+//		Update(func(u *ent.PolicyBindingUpsert) {
+//			SetPrincipalType(v+v).
+//		}).
+//		Exec(ctx)
+func (_c *PolicyBindingCreate) OnConflict(opts ...sql.ConflictOption) *PolicyBindingUpsertOne {
+	_c.conflict = opts
+	return &PolicyBindingUpsertOne{
+		create: _c,
+	}
+}
+
+// OnConflictColumns calls `OnConflict` and configures the columns
+// as conflict target. Using this option is equivalent to using:
+//
+//	client.PolicyBinding.Create().
+//		OnConflict(sql.ConflictColumns(columns...)).
+//		Exec(ctx)
+func (_c *PolicyBindingCreate) OnConflictColumns(columns ...string) *PolicyBindingUpsertOne {
+	_c.conflict = append(_c.conflict, sql.ConflictColumns(columns...))
+	return &PolicyBindingUpsertOne{
+		create: _c,
+	}
+}
+
+type (
+	// PolicyBindingUpsertOne is the builder for "upsert"-ing
+	//  one PolicyBinding node.
+	PolicyBindingUpsertOne struct {
+		create *PolicyBindingCreate
+	}
+
+	// PolicyBindingUpsert is the "OnConflict" setter.
+	PolicyBindingUpsert struct {
+		*sql.UpdateSet
+	}
+)
+
+// SetPrincipalType sets the "principal_type" field.
+func (u *PolicyBindingUpsert) SetPrincipalType(v policybinding.PrincipalType) *PolicyBindingUpsert {
+	u.Set(policybinding.FieldPrincipalType, v)
+	return u
+}
+
+// UpdatePrincipalType sets the "principal_type" field to the value that was provided on create.
+func (u *PolicyBindingUpsert) UpdatePrincipalType() *PolicyBindingUpsert {
+	u.SetExcluded(policybinding.FieldPrincipalType)
+	return u
+}
+
+// SetCreatedBy sets the "created_by" field.
+func (u *PolicyBindingUpsert) SetCreatedBy(v string) *PolicyBindingUpsert {
+	u.Set(policybinding.FieldCreatedBy, v)
+	return u
+}
+
+// UpdateCreatedBy sets the "created_by" field to the value that was provided on create.
+func (u *PolicyBindingUpsert) UpdateCreatedBy() *PolicyBindingUpsert {
+	u.SetExcluded(policybinding.FieldCreatedBy)
+	return u
+}
+
+// ClearCreatedBy clears the value of the "created_by" field.
+func (u *PolicyBindingUpsert) ClearCreatedBy() *PolicyBindingUpsert {
+	u.SetNull(policybinding.FieldCreatedBy)
+	return u
+}
+
+// SetPolicyID sets the "policy_id" field.
+func (u *PolicyBindingUpsert) SetPolicyID(v uuid.UUID) *PolicyBindingUpsert {
+	u.Set(policybinding.FieldPolicyID, v)
+	return u
+}
+
+// UpdatePolicyID sets the "policy_id" field to the value that was provided on create.
+func (u *PolicyBindingUpsert) UpdatePolicyID() *PolicyBindingUpsert {
+	u.SetExcluded(policybinding.FieldPolicyID)
+	return u
+}
+
+// ClearPolicyID clears the value of the "policy_id" field.
+func (u *PolicyBindingUpsert) ClearPolicyID() *PolicyBindingUpsert {
+	u.SetNull(policybinding.FieldPolicyID)
+	return u
+}
+
+// SetUserID sets the "user_id" field.
+func (u *PolicyBindingUpsert) SetUserID(v uuid.UUID) *PolicyBindingUpsert {
+	u.Set(policybinding.FieldUserID, v)
+	return u
+}
+
+// UpdateUserID sets the "user_id" field to the value that was provided on create.
+func (u *PolicyBindingUpsert) UpdateUserID() *PolicyBindingUpsert {
+	u.SetExcluded(policybinding.FieldUserID)
+	return u
+}
+
+// ClearUserID clears the value of the "user_id" field.
+func (u *PolicyBindingUpsert) ClearUserID() *PolicyBindingUpsert {
+	u.SetNull(policybinding.FieldUserID)
+	return u
+}
+
+// SetGroupID sets the "group_id" field.
+func (u *PolicyBindingUpsert) SetGroupID(v uuid.UUID) *PolicyBindingUpsert {
+	u.Set(policybinding.FieldGroupID, v)
+	return u
+}
+
+// UpdateGroupID sets the "group_id" field to the value that was provided on create.
+func (u *PolicyBindingUpsert) UpdateGroupID() *PolicyBindingUpsert {
+	u.SetExcluded(policybinding.FieldGroupID)
+	return u
+}
+
+// ClearGroupID clears the value of the "group_id" field.
+func (u *PolicyBindingUpsert) ClearGroupID() *PolicyBindingUpsert {
+	u.SetNull(policybinding.FieldGroupID)
+	return u
+}
+
+// SetAgentID sets the "agent_id" field.
+func (u *PolicyBindingUpsert) SetAgentID(v uuid.UUID) *PolicyBindingUpsert {
+	u.Set(policybinding.FieldAgentID, v)
+	return u
+}
+
+// UpdateAgentID sets the "agent_id" field to the value that was provided on create.
+func (u *PolicyBindingUpsert) UpdateAgentID() *PolicyBindingUpsert {
+	u.SetExcluded(policybinding.FieldAgentID)
+	return u
+}
+
+// ClearAgentID clears the value of the "agent_id" field.
+func (u *PolicyBindingUpsert) ClearAgentID() *PolicyBindingUpsert {
+	u.SetNull(policybinding.FieldAgentID)
+	return u
+}
+
+// UpdateNewValues updates the mutable fields using the new values that were set on create except the ID field.
+// Using this option is equivalent to using:
+//
+//	client.PolicyBinding.Create().
+//		OnConflict(
+//			sql.ResolveWithNewValues(),
+//			sql.ResolveWith(func(u *sql.UpdateSet) {
+//				u.SetIgnore(policybinding.FieldID)
+//			}),
+//		).
+//		Exec(ctx)
+func (u *PolicyBindingUpsertOne) UpdateNewValues() *PolicyBindingUpsertOne {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWithNewValues())
+	u.create.conflict = append(u.create.conflict, sql.ResolveWith(func(s *sql.UpdateSet) {
+		if _, exists := u.create.mutation.ID(); exists {
+			s.SetIgnore(policybinding.FieldID)
+		}
+		if _, exists := u.create.mutation.Created(); exists {
+			s.SetIgnore(policybinding.FieldCreated)
+		}
+	}))
+	return u
+}
+
+// Ignore sets each column to itself in case of conflict.
+// Using this option is equivalent to using:
+//
+//	client.PolicyBinding.Create().
+//	    OnConflict(sql.ResolveWithIgnore()).
+//	    Exec(ctx)
+func (u *PolicyBindingUpsertOne) Ignore() *PolicyBindingUpsertOne {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWithIgnore())
+	return u
+}
+
+// DoNothing configures the conflict_action to `DO NOTHING`.
+// Supported only by SQLite and PostgreSQL.
+func (u *PolicyBindingUpsertOne) DoNothing() *PolicyBindingUpsertOne {
+	u.create.conflict = append(u.create.conflict, sql.DoNothing())
+	return u
+}
+
+// Update allows overriding fields `UPDATE` values. See the PolicyBindingCreate.OnConflict
+// documentation for more info.
+func (u *PolicyBindingUpsertOne) Update(set func(*PolicyBindingUpsert)) *PolicyBindingUpsertOne {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWith(func(update *sql.UpdateSet) {
+		set(&PolicyBindingUpsert{UpdateSet: update})
+	}))
+	return u
+}
+
+// SetPrincipalType sets the "principal_type" field.
+func (u *PolicyBindingUpsertOne) SetPrincipalType(v policybinding.PrincipalType) *PolicyBindingUpsertOne {
+	return u.Update(func(s *PolicyBindingUpsert) {
+		s.SetPrincipalType(v)
+	})
+}
+
+// UpdatePrincipalType sets the "principal_type" field to the value that was provided on create.
+func (u *PolicyBindingUpsertOne) UpdatePrincipalType() *PolicyBindingUpsertOne {
+	return u.Update(func(s *PolicyBindingUpsert) {
+		s.UpdatePrincipalType()
+	})
+}
+
+// SetCreatedBy sets the "created_by" field.
+func (u *PolicyBindingUpsertOne) SetCreatedBy(v string) *PolicyBindingUpsertOne {
+	return u.Update(func(s *PolicyBindingUpsert) {
+		s.SetCreatedBy(v)
+	})
+}
+
+// UpdateCreatedBy sets the "created_by" field to the value that was provided on create.
+func (u *PolicyBindingUpsertOne) UpdateCreatedBy() *PolicyBindingUpsertOne {
+	return u.Update(func(s *PolicyBindingUpsert) {
+		s.UpdateCreatedBy()
+	})
+}
+
+// ClearCreatedBy clears the value of the "created_by" field.
+func (u *PolicyBindingUpsertOne) ClearCreatedBy() *PolicyBindingUpsertOne {
+	return u.Update(func(s *PolicyBindingUpsert) {
+		s.ClearCreatedBy()
+	})
+}
+
+// SetPolicyID sets the "policy_id" field.
+func (u *PolicyBindingUpsertOne) SetPolicyID(v uuid.UUID) *PolicyBindingUpsertOne {
+	return u.Update(func(s *PolicyBindingUpsert) {
+		s.SetPolicyID(v)
+	})
+}
+
+// UpdatePolicyID sets the "policy_id" field to the value that was provided on create.
+func (u *PolicyBindingUpsertOne) UpdatePolicyID() *PolicyBindingUpsertOne {
+	return u.Update(func(s *PolicyBindingUpsert) {
+		s.UpdatePolicyID()
+	})
+}
+
+// ClearPolicyID clears the value of the "policy_id" field.
+func (u *PolicyBindingUpsertOne) ClearPolicyID() *PolicyBindingUpsertOne {
+	return u.Update(func(s *PolicyBindingUpsert) {
+		s.ClearPolicyID()
+	})
+}
+
+// SetUserID sets the "user_id" field.
+func (u *PolicyBindingUpsertOne) SetUserID(v uuid.UUID) *PolicyBindingUpsertOne {
+	return u.Update(func(s *PolicyBindingUpsert) {
+		s.SetUserID(v)
+	})
+}
+
+// UpdateUserID sets the "user_id" field to the value that was provided on create.
+func (u *PolicyBindingUpsertOne) UpdateUserID() *PolicyBindingUpsertOne {
+	return u.Update(func(s *PolicyBindingUpsert) {
+		s.UpdateUserID()
+	})
+}
+
+// ClearUserID clears the value of the "user_id" field.
+func (u *PolicyBindingUpsertOne) ClearUserID() *PolicyBindingUpsertOne {
+	return u.Update(func(s *PolicyBindingUpsert) {
+		s.ClearUserID()
+	})
+}
+
+// SetGroupID sets the "group_id" field.
+func (u *PolicyBindingUpsertOne) SetGroupID(v uuid.UUID) *PolicyBindingUpsertOne {
+	return u.Update(func(s *PolicyBindingUpsert) {
+		s.SetGroupID(v)
+	})
+}
+
+// UpdateGroupID sets the "group_id" field to the value that was provided on create.
+func (u *PolicyBindingUpsertOne) UpdateGroupID() *PolicyBindingUpsertOne {
+	return u.Update(func(s *PolicyBindingUpsert) {
+		s.UpdateGroupID()
+	})
+}
+
+// ClearGroupID clears the value of the "group_id" field.
+func (u *PolicyBindingUpsertOne) ClearGroupID() *PolicyBindingUpsertOne {
+	return u.Update(func(s *PolicyBindingUpsert) {
+		s.ClearGroupID()
+	})
+}
+
+// SetAgentID sets the "agent_id" field.
+func (u *PolicyBindingUpsertOne) SetAgentID(v uuid.UUID) *PolicyBindingUpsertOne {
+	return u.Update(func(s *PolicyBindingUpsert) {
+		s.SetAgentID(v)
+	})
+}
+
+// UpdateAgentID sets the "agent_id" field to the value that was provided on create.
+func (u *PolicyBindingUpsertOne) UpdateAgentID() *PolicyBindingUpsertOne {
+	return u.Update(func(s *PolicyBindingUpsert) {
+		s.UpdateAgentID()
+	})
+}
+
+// ClearAgentID clears the value of the "agent_id" field.
+func (u *PolicyBindingUpsertOne) ClearAgentID() *PolicyBindingUpsertOne {
+	return u.Update(func(s *PolicyBindingUpsert) {
+		s.ClearAgentID()
+	})
+}
+
+// Exec executes the query.
+func (u *PolicyBindingUpsertOne) Exec(ctx context.Context) error {
+	if len(u.create.conflict) == 0 {
+		return errors.New("ent: missing options for PolicyBindingCreate.OnConflict")
+	}
+	return u.create.Exec(ctx)
+}
+
+// ExecX is like Exec, but panics if an error occurs.
+func (u *PolicyBindingUpsertOne) ExecX(ctx context.Context) {
+	if err := u.create.Exec(ctx); err != nil {
+		panic(err)
+	}
+}
+
+// Exec executes the UPSERT query and returns the inserted/updated ID.
+func (u *PolicyBindingUpsertOne) ID(ctx context.Context) (id uuid.UUID, err error) {
+	if u.create.driver.Dialect() == dialect.MySQL {
+		// In case of "ON CONFLICT", there is no way to get back non-numeric ID
+		// fields from the database since MySQL does not support the RETURNING clause.
+		return id, errors.New("ent: PolicyBindingUpsertOne.ID is not supported by MySQL driver. Use PolicyBindingUpsertOne.Exec instead")
+	}
+	node, err := u.create.Save(ctx)
+	if err != nil {
+		return id, err
+	}
+	return node.ID, nil
+}
+
+// IDX is like ID, but panics if an error occurs.
+func (u *PolicyBindingUpsertOne) IDX(ctx context.Context) uuid.UUID {
+	id, err := u.ID(ctx)
+	if err != nil {
+		panic(err)
+	}
+	return id
+}
+
 // PolicyBindingCreateBulk is the builder for creating many PolicyBinding entities in bulk.
 type PolicyBindingCreateBulk struct {
 	config
 	err      error
 	builders []*PolicyBindingCreate
+	conflict []sql.ConflictOption
 }
 
 // Save creates the PolicyBinding entities in the database.
@@ -359,6 +723,7 @@ func (_c *PolicyBindingCreateBulk) Save(ctx context.Context) ([]*PolicyBinding, 
 					_, err = mutators[i+1].Mutate(root, _c.builders[i+1].mutation)
 				} else {
 					spec := &sqlgraph.BatchCreateSpec{Nodes: specs}
+					spec.OnConflict = _c.conflict
 					// Invoke the actual operation on the latest mutation in the chain.
 					if err = sqlgraph.BatchCreate(ctx, _c.driver, spec); err != nil {
 						if sqlgraph.IsConstraintError(err) {
@@ -405,6 +770,242 @@ func (_c *PolicyBindingCreateBulk) Exec(ctx context.Context) error {
 // ExecX is like Exec, but panics if an error occurs.
 func (_c *PolicyBindingCreateBulk) ExecX(ctx context.Context) {
 	if err := _c.Exec(ctx); err != nil {
+		panic(err)
+	}
+}
+
+// OnConflict allows configuring the `ON CONFLICT` / `ON DUPLICATE KEY` clause
+// of the `INSERT` statement. For example:
+//
+//	client.PolicyBinding.CreateBulk(builders...).
+//		OnConflict(
+//			// Update the row with the new values
+//			// the was proposed for insertion.
+//			sql.ResolveWithNewValues(),
+//		).
+//		// Override some of the fields with custom
+//		// update values.
+//		Update(func(u *ent.PolicyBindingUpsert) {
+//			SetPrincipalType(v+v).
+//		}).
+//		Exec(ctx)
+func (_c *PolicyBindingCreateBulk) OnConflict(opts ...sql.ConflictOption) *PolicyBindingUpsertBulk {
+	_c.conflict = opts
+	return &PolicyBindingUpsertBulk{
+		create: _c,
+	}
+}
+
+// OnConflictColumns calls `OnConflict` and configures the columns
+// as conflict target. Using this option is equivalent to using:
+//
+//	client.PolicyBinding.Create().
+//		OnConflict(sql.ConflictColumns(columns...)).
+//		Exec(ctx)
+func (_c *PolicyBindingCreateBulk) OnConflictColumns(columns ...string) *PolicyBindingUpsertBulk {
+	_c.conflict = append(_c.conflict, sql.ConflictColumns(columns...))
+	return &PolicyBindingUpsertBulk{
+		create: _c,
+	}
+}
+
+// PolicyBindingUpsertBulk is the builder for "upsert"-ing
+// a bulk of PolicyBinding nodes.
+type PolicyBindingUpsertBulk struct {
+	create *PolicyBindingCreateBulk
+}
+
+// UpdateNewValues updates the mutable fields using the new values that
+// were set on create. Using this option is equivalent to using:
+//
+//	client.PolicyBinding.Create().
+//		OnConflict(
+//			sql.ResolveWithNewValues(),
+//			sql.ResolveWith(func(u *sql.UpdateSet) {
+//				u.SetIgnore(policybinding.FieldID)
+//			}),
+//		).
+//		Exec(ctx)
+func (u *PolicyBindingUpsertBulk) UpdateNewValues() *PolicyBindingUpsertBulk {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWithNewValues())
+	u.create.conflict = append(u.create.conflict, sql.ResolveWith(func(s *sql.UpdateSet) {
+		for _, b := range u.create.builders {
+			if _, exists := b.mutation.ID(); exists {
+				s.SetIgnore(policybinding.FieldID)
+			}
+			if _, exists := b.mutation.Created(); exists {
+				s.SetIgnore(policybinding.FieldCreated)
+			}
+		}
+	}))
+	return u
+}
+
+// Ignore sets each column to itself in case of conflict.
+// Using this option is equivalent to using:
+//
+//	client.PolicyBinding.Create().
+//		OnConflict(sql.ResolveWithIgnore()).
+//		Exec(ctx)
+func (u *PolicyBindingUpsertBulk) Ignore() *PolicyBindingUpsertBulk {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWithIgnore())
+	return u
+}
+
+// DoNothing configures the conflict_action to `DO NOTHING`.
+// Supported only by SQLite and PostgreSQL.
+func (u *PolicyBindingUpsertBulk) DoNothing() *PolicyBindingUpsertBulk {
+	u.create.conflict = append(u.create.conflict, sql.DoNothing())
+	return u
+}
+
+// Update allows overriding fields `UPDATE` values. See the PolicyBindingCreateBulk.OnConflict
+// documentation for more info.
+func (u *PolicyBindingUpsertBulk) Update(set func(*PolicyBindingUpsert)) *PolicyBindingUpsertBulk {
+	u.create.conflict = append(u.create.conflict, sql.ResolveWith(func(update *sql.UpdateSet) {
+		set(&PolicyBindingUpsert{UpdateSet: update})
+	}))
+	return u
+}
+
+// SetPrincipalType sets the "principal_type" field.
+func (u *PolicyBindingUpsertBulk) SetPrincipalType(v policybinding.PrincipalType) *PolicyBindingUpsertBulk {
+	return u.Update(func(s *PolicyBindingUpsert) {
+		s.SetPrincipalType(v)
+	})
+}
+
+// UpdatePrincipalType sets the "principal_type" field to the value that was provided on create.
+func (u *PolicyBindingUpsertBulk) UpdatePrincipalType() *PolicyBindingUpsertBulk {
+	return u.Update(func(s *PolicyBindingUpsert) {
+		s.UpdatePrincipalType()
+	})
+}
+
+// SetCreatedBy sets the "created_by" field.
+func (u *PolicyBindingUpsertBulk) SetCreatedBy(v string) *PolicyBindingUpsertBulk {
+	return u.Update(func(s *PolicyBindingUpsert) {
+		s.SetCreatedBy(v)
+	})
+}
+
+// UpdateCreatedBy sets the "created_by" field to the value that was provided on create.
+func (u *PolicyBindingUpsertBulk) UpdateCreatedBy() *PolicyBindingUpsertBulk {
+	return u.Update(func(s *PolicyBindingUpsert) {
+		s.UpdateCreatedBy()
+	})
+}
+
+// ClearCreatedBy clears the value of the "created_by" field.
+func (u *PolicyBindingUpsertBulk) ClearCreatedBy() *PolicyBindingUpsertBulk {
+	return u.Update(func(s *PolicyBindingUpsert) {
+		s.ClearCreatedBy()
+	})
+}
+
+// SetPolicyID sets the "policy_id" field.
+func (u *PolicyBindingUpsertBulk) SetPolicyID(v uuid.UUID) *PolicyBindingUpsertBulk {
+	return u.Update(func(s *PolicyBindingUpsert) {
+		s.SetPolicyID(v)
+	})
+}
+
+// UpdatePolicyID sets the "policy_id" field to the value that was provided on create.
+func (u *PolicyBindingUpsertBulk) UpdatePolicyID() *PolicyBindingUpsertBulk {
+	return u.Update(func(s *PolicyBindingUpsert) {
+		s.UpdatePolicyID()
+	})
+}
+
+// ClearPolicyID clears the value of the "policy_id" field.
+func (u *PolicyBindingUpsertBulk) ClearPolicyID() *PolicyBindingUpsertBulk {
+	return u.Update(func(s *PolicyBindingUpsert) {
+		s.ClearPolicyID()
+	})
+}
+
+// SetUserID sets the "user_id" field.
+func (u *PolicyBindingUpsertBulk) SetUserID(v uuid.UUID) *PolicyBindingUpsertBulk {
+	return u.Update(func(s *PolicyBindingUpsert) {
+		s.SetUserID(v)
+	})
+}
+
+// UpdateUserID sets the "user_id" field to the value that was provided on create.
+func (u *PolicyBindingUpsertBulk) UpdateUserID() *PolicyBindingUpsertBulk {
+	return u.Update(func(s *PolicyBindingUpsert) {
+		s.UpdateUserID()
+	})
+}
+
+// ClearUserID clears the value of the "user_id" field.
+func (u *PolicyBindingUpsertBulk) ClearUserID() *PolicyBindingUpsertBulk {
+	return u.Update(func(s *PolicyBindingUpsert) {
+		s.ClearUserID()
+	})
+}
+
+// SetGroupID sets the "group_id" field.
+func (u *PolicyBindingUpsertBulk) SetGroupID(v uuid.UUID) *PolicyBindingUpsertBulk {
+	return u.Update(func(s *PolicyBindingUpsert) {
+		s.SetGroupID(v)
+	})
+}
+
+// UpdateGroupID sets the "group_id" field to the value that was provided on create.
+func (u *PolicyBindingUpsertBulk) UpdateGroupID() *PolicyBindingUpsertBulk {
+	return u.Update(func(s *PolicyBindingUpsert) {
+		s.UpdateGroupID()
+	})
+}
+
+// ClearGroupID clears the value of the "group_id" field.
+func (u *PolicyBindingUpsertBulk) ClearGroupID() *PolicyBindingUpsertBulk {
+	return u.Update(func(s *PolicyBindingUpsert) {
+		s.ClearGroupID()
+	})
+}
+
+// SetAgentID sets the "agent_id" field.
+func (u *PolicyBindingUpsertBulk) SetAgentID(v uuid.UUID) *PolicyBindingUpsertBulk {
+	return u.Update(func(s *PolicyBindingUpsert) {
+		s.SetAgentID(v)
+	})
+}
+
+// UpdateAgentID sets the "agent_id" field to the value that was provided on create.
+func (u *PolicyBindingUpsertBulk) UpdateAgentID() *PolicyBindingUpsertBulk {
+	return u.Update(func(s *PolicyBindingUpsert) {
+		s.UpdateAgentID()
+	})
+}
+
+// ClearAgentID clears the value of the "agent_id" field.
+func (u *PolicyBindingUpsertBulk) ClearAgentID() *PolicyBindingUpsertBulk {
+	return u.Update(func(s *PolicyBindingUpsert) {
+		s.ClearAgentID()
+	})
+}
+
+// Exec executes the query.
+func (u *PolicyBindingUpsertBulk) Exec(ctx context.Context) error {
+	if u.create.err != nil {
+		return u.create.err
+	}
+	for i, b := range u.create.builders {
+		if len(b.conflict) != 0 {
+			return fmt.Errorf("ent: OnConflict was set for builder %d. Set it on the PolicyBindingCreateBulk instead", i)
+		}
+	}
+	if len(u.create.conflict) == 0 {
+		return errors.New("ent: missing options for PolicyBindingCreateBulk.OnConflict")
+	}
+	return u.create.Exec(ctx)
+}
+
+// ExecX is like Exec, but panics if an error occurs.
+func (u *PolicyBindingUpsertBulk) ExecX(ctx context.Context) {
+	if err := u.create.Exec(ctx); err != nil {
 		panic(err)
 	}
 }

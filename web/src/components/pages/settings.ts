@@ -160,13 +160,16 @@ export class ScionPageSettings extends LitElement {
               kind="template"
               scope="global"
               canImport
-              @resource-imported=${() => this.refreshList('templates-list')}
+              @resource-changed=${() => this.refreshList('templates-list')}
             ></scion-resource-import>
             <scion-resource-list
               id="templates-list"
               kind="template"
               scope="global"
               detailBasePath="/settings"
+              canClone
+              canDelete
+              @resource-changed=${() => this.refreshList('templates-list')}
             ></scion-resource-list>
           </sl-tab-panel>
 
@@ -178,13 +181,16 @@ export class ScionPageSettings extends LitElement {
               kind="harness-config"
               scope="global"
               canImport
-              @resource-imported=${() => this.refreshList('harness-configs-list')}
+              @resource-changed=${() => this.refreshList('harness-configs-list')}
             ></scion-resource-import>
             <scion-resource-list
               id="harness-configs-list"
               kind="harness-config"
               scope="global"
               detailBasePath="/settings"
+              canClone
+              canDelete
+              @resource-changed=${() => this.refreshList('harness-configs-list')}
             ></scion-resource-list>
           </sl-tab-panel>
         </sl-tab-group>

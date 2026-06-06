@@ -252,17 +252,18 @@ type V1ServerConfig struct {
 	// Mode selects the server operating mode: "workstation" (default) or "hosted".
 	// When set to "hosted", the server behaves as if --hosted were passed.
 	// The legacy value "production" is also accepted for backward compatibility.
-	Mode      string             `json:"mode,omitempty" yaml:"mode,omitempty" koanf:"mode"`
-	Env       string             `json:"env,omitempty" yaml:"env,omitempty" koanf:"env"`
-	Hub       *V1ServerHubConfig `json:"hub,omitempty" yaml:"hub,omitempty" koanf:"hub"`
-	Broker    *V1BrokerConfig    `json:"broker,omitempty" yaml:"broker,omitempty" koanf:"broker"`
-	Database  *V1DatabaseConfig  `json:"database,omitempty" yaml:"database,omitempty" koanf:"database"`
-	Auth      *V1AuthConfig      `json:"auth,omitempty" yaml:"auth,omitempty" koanf:"auth"`
-	OAuth     *V1OAuthConfig     `json:"oauth,omitempty" yaml:"oauth,omitempty" koanf:"oauth"`
-	Storage   *V1StorageConfig   `json:"storage,omitempty" yaml:"storage,omitempty" koanf:"storage"`
-	Secrets   *V1SecretsConfig   `json:"secrets,omitempty" yaml:"secrets,omitempty" koanf:"secrets"`
-	LogLevel  string             `json:"log_level,omitempty" yaml:"log_level,omitempty" koanf:"log_level"`
-	LogFormat string             `json:"log_format,omitempty" yaml:"log_format,omitempty" koanf:"log_format"`
+	Mode             string                    `json:"mode,omitempty" yaml:"mode,omitempty" koanf:"mode"`
+	Env              string                    `json:"env,omitempty" yaml:"env,omitempty" koanf:"env"`
+	Hub              *V1ServerHubConfig        `json:"hub,omitempty" yaml:"hub,omitempty" koanf:"hub"`
+	Broker           *V1BrokerConfig           `json:"broker,omitempty" yaml:"broker,omitempty" koanf:"broker"`
+	Database         *V1DatabaseConfig         `json:"database,omitempty" yaml:"database,omitempty" koanf:"database"`
+	Auth             *V1AuthConfig             `json:"auth,omitempty" yaml:"auth,omitempty" koanf:"auth"`
+	OAuth            *V1OAuthConfig            `json:"oauth,omitempty" yaml:"oauth,omitempty" koanf:"oauth"`
+	Storage          *V1StorageConfig          `json:"storage,omitempty" yaml:"storage,omitempty" koanf:"storage"`
+	WorkspaceStorage *V1WorkspaceStorageConfig `json:"workspace_storage,omitempty" yaml:"workspace_storage,omitempty" koanf:"workspace_storage"`
+	Secrets          *V1SecretsConfig          `json:"secrets,omitempty" yaml:"secrets,omitempty" koanf:"secrets"`
+	LogLevel         string                    `json:"log_level,omitempty" yaml:"log_level,omitempty" koanf:"log_level"`
+	LogFormat        string                    `json:"log_format,omitempty" yaml:"log_format,omitempty" koanf:"log_format"`
 
 	// NotificationChannels configures external notification delivery channels.
 	// Secrets (webhook URLs, API tokens) are held in memory only — never persisted to a database.
@@ -375,17 +376,56 @@ type V1BrokerConfig struct {
 
 // V1DatabaseConfig holds database settings.
 type V1DatabaseConfig struct {
-	Driver string `json:"driver,omitempty" yaml:"driver,omitempty" koanf:"driver"`
-	URL    string `json:"url,omitempty" yaml:"url,omitempty" koanf:"url"`
+	Driver          string `json:"driver,omitempty" yaml:"driver,omitempty" koanf:"driver"`
+	URL             string `json:"url,omitempty" yaml:"url,omitempty" koanf:"url"`
+	MaxOpenConns    int    `json:"max_open_conns,omitempty" yaml:"max_open_conns,omitempty" koanf:"max_open_conns"`
+	MaxIdleConns    int    `json:"max_idle_conns,omitempty" yaml:"max_idle_conns,omitempty" koanf:"max_idle_conns"`
+	ConnMaxLifetime string `json:"conn_max_lifetime,omitempty" yaml:"conn_max_lifetime,omitempty" koanf:"conn_max_lifetime"`
+	ConnMaxIdleTime string `json:"conn_max_idle_time,omitempty" yaml:"conn_max_idle_time,omitempty" koanf:"conn_max_idle_time"`
 }
 
-// V1AuthConfig holds development authentication settings.
+// V1AuthConfig holds authentication settings.
 type V1AuthConfig struct {
-	DevMode           bool     `json:"dev_mode,omitempty" yaml:"dev_mode,omitempty" koanf:"dev_mode"`
-	DevToken          string   `json:"dev_token,omitempty" yaml:"dev_token,omitempty" koanf:"dev_token"`
-	DevTokenFile      string   `json:"dev_token_file,omitempty" yaml:"dev_token_file,omitempty" koanf:"dev_token_file"`
-	AuthorizedDomains []string `json:"authorized_domains,omitempty" yaml:"authorized_domains,omitempty" koanf:"authorized_domains"`
-	UserAccessMode    string   `json:"user_access_mode,omitempty" yaml:"user_access_mode,omitempty" koanf:"user_access_mode"`
+	// Mode selects the exclusive human auth mode: "oauth" (default), "proxy", or "dev".
+	// In proxy mode, OAuth handlers are disabled; in dev mode, dev token auth is used.
+	Mode              string             `json:"mode,omitempty" yaml:"mode,omitempty" koanf:"mode"`
+	DevMode           bool               `json:"dev_mode,omitempty" yaml:"dev_mode,omitempty" koanf:"dev_mode"`
+	DevToken          string             `json:"dev_token,omitempty" yaml:"dev_token,omitempty" koanf:"dev_token"`
+	DevTokenFile      string             `json:"dev_token_file,omitempty" yaml:"dev_token_file,omitempty" koanf:"dev_token_file"`
+	AuthorizedDomains []string           `json:"authorized_domains,omitempty" yaml:"authorized_domains,omitempty" koanf:"authorized_domains"`
+	UserAccessMode    string             `json:"user_access_mode,omitempty" yaml:"user_access_mode,omitempty" koanf:"user_access_mode"`
+	Proxy             *V1ProxyConfig     `json:"proxy,omitempty" yaml:"proxy,omitempty" koanf:"proxy"`
+	Transport         *V1TransportConfig `json:"transport,omitempty" yaml:"transport,omitempty" koanf:"transport"`
+}
+
+// V1TransportConfig holds transport-layer auth settings for agent outbound requests.
+type V1TransportConfig struct {
+	// Mode selects the transport auth mode: "none" (default), "cloudrun_invoker", or "iap".
+	Mode string `json:"mode,omitempty" yaml:"mode,omitempty" koanf:"mode"`
+	// OIDCAudience is the OIDC audience for transport tokens.
+	OIDCAudience string `json:"oidc_audience,omitempty" yaml:"oidc_audience,omitempty" koanf:"oidc_audience"`
+	// PlatformAuthSA is the dedicated SA email used for transport-layer auth.
+	PlatformAuthSA string `json:"platform_auth_sa,omitempty" yaml:"platform_auth_sa,omitempty" koanf:"platform_auth_sa"`
+}
+
+// V1ProxyConfig holds proxy authentication settings (consulted when auth.mode == "proxy").
+type V1ProxyConfig struct {
+	// Provider selects the proxy auth provider: "iap" or "header".
+	Provider string `json:"provider,omitempty" yaml:"provider,omitempty" koanf:"provider"`
+	// IAP holds Google IAP-specific settings.
+	IAP *V1IAPConfig `json:"iap,omitempty" yaml:"iap,omitempty" koanf:"iap"`
+	// RequireTrustedProxyIP enables defense-in-depth IP allowlisting.
+	RequireTrustedProxyIP bool `json:"require_trusted_proxy_ip,omitempty" yaml:"require_trusted_proxy_ip,omitempty" koanf:"require_trusted_proxy_ip"`
+}
+
+// V1IAPConfig holds Google IAP-specific settings.
+type V1IAPConfig struct {
+	// Audience is the expected audience claim — MANDATORY for IAP.
+	Audience string `json:"audience,omitempty" yaml:"audience,omitempty" koanf:"audience"`
+	// Issuer overrides the default IAP issuer (for testing).
+	Issuer string `json:"issuer,omitempty" yaml:"issuer,omitempty" koanf:"issuer"`
+	// JWKSURL overrides the default IAP JWKS URL (for testing).
+	JWKSURL string `json:"jwks_url,omitempty" yaml:"jwks_url,omitempty" koanf:"jwks_url"`
 }
 
 // V1OAuthConfig holds OAuth provider configurations.
@@ -412,6 +452,80 @@ type V1StorageConfig struct {
 	Provider  string `json:"provider,omitempty" yaml:"provider,omitempty" koanf:"provider"`
 	Bucket    string `json:"bucket,omitempty" yaml:"bucket,omitempty" koanf:"bucket"`
 	LocalPath string `json:"local_path,omitempty" yaml:"local_path,omitempty" koanf:"local_path"`
+}
+
+// V1WorkspaceStorageConfig selects the workspace storage backend.
+// Backend defaults to "local" (today's node-local behavior). When set to "nfs",
+// the NFS sub-block configures shared network-attached workspace storage.
+type V1WorkspaceStorageConfig struct {
+	Backend string       `json:"backend,omitempty" yaml:"backend,omitempty" koanf:"backend"` // "local" (default) | "nfs"
+	NFS     *V1NFSConfig `json:"nfs,omitempty" yaml:"nfs,omitempty" koanf:"nfs"`
+}
+
+// V1NFSConfig holds NFS workspace storage settings.
+type V1NFSConfig struct {
+	// MountRoot is the local base under which each share is mounted at <MountRoot>/<share.ID>.
+	MountRoot string `json:"mount_root,omitempty" yaml:"mount_root,omitempty" koanf:"mount_root"`
+	// MountOptions are passed to mount.nfs. Default "vers=3,hard,nconnect=4,_netdev".
+	// NFSv4.1 requires Filestore Enterprise/zonal or self-hosted NFS; basic/HDD
+	// (BASIC_HDD) supports NFSv3 only. We use Postgres advisory locks, not NFS
+	// flock, so v3 is fine for correctness.
+	MountOptions string       `json:"mount_options,omitempty" yaml:"mount_options,omitempty" koanf:"mount_options"`
+	Shares       []V1NFSShare `json:"shares,omitempty" yaml:"shares,omitempty" koanf:"shares"`
+
+	// Stable, node-independent ownership for NFS-backed trees.
+	// Default 1000:1000 to converge with the K8s pod UID/GID.
+	UID int `json:"uid,omitempty" yaml:"uid,omitempty" koanf:"uid"` // default 1000
+	GID int `json:"gid,omitempty" yaml:"gid,omitempty" koanf:"gid"` // default 1000
+
+	// Kubernetes realization
+	StorageClass string `json:"storage_class,omitempty" yaml:"storage_class,omitempty" koanf:"storage_class"`
+	SubPathRoot  string `json:"subpath_root,omitempty" yaml:"subpath_root,omitempty" koanf:"subpath_root"` // default "projects"
+}
+
+// V1NFSShare identifies a single NFS export that may be mounted by a Runtime Broker.
+type V1NFSShare struct {
+	ID     string `json:"id,omitempty" yaml:"id,omitempty" koanf:"id"`                // stable share id → mount dir + (K8s) PV name
+	Server string `json:"server,omitempty" yaml:"server,omitempty" koanf:"server"`    // e.g. 10.0.0.2 or Filestore IP
+	Export string `json:"export,omitempty" yaml:"export,omitempty" koanf:"export"`    // server export path, e.g. /scion-workspaces
+	PVName string `json:"pv_name,omitempty" yaml:"pv_name,omitempty" koanf:"pv_name"` // K8s static PV+subPath strategy
+}
+
+// ApplyNFSDefaults fills default values for NFS sub-fields when Backend is "nfs".
+// When Backend is empty or "local", the NFS block is left as-is (no materialization).
+// This is idempotent and safe to call multiple times.
+func (ws *V1WorkspaceStorageConfig) ApplyNFSDefaults() {
+	if ws == nil || strings.ToLower(ws.Backend) != "nfs" {
+		return
+	}
+	if ws.NFS == nil {
+		ws.NFS = &V1NFSConfig{}
+	}
+	if ws.NFS.MountOptions == "" {
+		ws.NFS.MountOptions = "vers=3,hard,nconnect=4,_netdev"
+	}
+	if ws.NFS.UID == 0 {
+		ws.NFS.UID = 1000
+	}
+	if ws.NFS.GID == 0 {
+		ws.NFS.GID = 1000
+	}
+	if ws.NFS.SubPathRoot == "" {
+		ws.NFS.SubPathRoot = "projects"
+	}
+}
+
+// ValidateNFS returns an error if Backend is "nfs" but the NFS block is
+// misconfigured (e.g. no shares defined). Call after ApplyNFSDefaults.
+func (ws *V1WorkspaceStorageConfig) ValidateNFS() error {
+	if ws == nil || strings.ToLower(ws.Backend) != "nfs" {
+		return nil
+	}
+	if ws.NFS == nil || len(ws.NFS.Shares) == 0 {
+		return fmt.Errorf("workspace_storage.backend is \"nfs\" but no NFS shares are defined; " +
+			"add at least one entry under workspace_storage.nfs.shares")
+	}
+	return nil
 }
 
 // V1SecretsConfig holds secrets backend settings.
@@ -811,9 +925,13 @@ func versionedEnvKeyMapper(s string) string {
 // These must be recognized as single fields rather than split into nested keys.
 // IMPORTANT: Sorted longest-first so that "dev_token_file" matches before "dev_token".
 var knownCompoundFields = []string{
+	"require_trusted_proxy_ip",
 	"soft_delete_retain_files",
 	"soft_delete_retention",
 	"authorized_domains",
+	"platform_auth_sa",
+	"oidc_audience",
+	"jwks_url",
 	"broker_nickname",
 	"allowed_origins",
 	"allowed_methods",
@@ -906,7 +1024,7 @@ func mapEnvKeyRecursive(key string) string {
 func isSectionName(name string) bool {
 	switch name {
 	case "hub", "broker", "database", "auth", "oauth", "storage", "secrets", "cors",
-		"web", "cli", "device", "google", "github":
+		"web", "cli", "device", "google", "github", "proxy", "iap", "transport":
 		return true
 	}
 	return false
@@ -1140,10 +1258,25 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 		if v1.Database.URL != "" {
 			gc.Database.URL = v1.Database.URL
 		}
+		if v1.Database.MaxOpenConns != 0 {
+			gc.Database.MaxOpenConns = v1.Database.MaxOpenConns
+		}
+		if v1.Database.MaxIdleConns != 0 {
+			gc.Database.MaxIdleConns = v1.Database.MaxIdleConns
+		}
+		if v1.Database.ConnMaxLifetime != "" {
+			gc.Database.ConnMaxLifetime = v1.Database.ConnMaxLifetime
+		}
+		if v1.Database.ConnMaxIdleTime != "" {
+			gc.Database.ConnMaxIdleTime = v1.Database.ConnMaxIdleTime
+		}
 	}
 
 	// Auth config
 	if v1.Auth != nil {
+		if v1.Auth.Mode != "" {
+			gc.Auth.Mode = v1.Auth.Mode
+		}
 		gc.Auth.Enabled = v1.Auth.DevMode
 		gc.Auth.Token = v1.Auth.DevToken
 		gc.Auth.TokenFile = v1.Auth.DevTokenFile
@@ -1152,6 +1285,26 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 		}
 		if v1.Auth.UserAccessMode != "" {
 			gc.Auth.UserAccessMode = v1.Auth.UserAccessMode
+		}
+		if v1.Auth.Proxy != nil {
+			gc.Auth.Proxy = &ProxyAuthConfig{
+				Provider:              v1.Auth.Proxy.Provider,
+				RequireTrustedProxyIP: v1.Auth.Proxy.RequireTrustedProxyIP,
+			}
+			if v1.Auth.Proxy.IAP != nil {
+				gc.Auth.Proxy.IAP = &IAPAuthConfig{
+					Audience: v1.Auth.Proxy.IAP.Audience,
+					Issuer:   v1.Auth.Proxy.IAP.Issuer,
+					JWKSURL:  v1.Auth.Proxy.IAP.JWKSURL,
+				}
+			}
+		}
+		if v1.Auth.Transport != nil {
+			gc.Auth.Transport = &TransportAuthConfig{
+				Mode:           v1.Auth.Transport.Mode,
+				OIDCAudience:   v1.Auth.Transport.OIDCAudience,
+				PlatformAuthSA: v1.Auth.Transport.PlatformAuthSA,
+			}
 		}
 	}
 
@@ -1213,6 +1366,11 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 		if v1.Secrets.GCPCredentials != "" {
 			gc.Secrets.GCPCredentials = v1.Secrets.GCPCredentials
 		}
+	}
+
+	// Workspace storage NFS defaults (conditional on backend=nfs)
+	if v1.WorkspaceStorage != nil {
+		v1.WorkspaceStorage.ApplyNFSDefaults()
 	}
 
 	// GitHub App
@@ -1291,17 +1449,42 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 
 	// Database config
 	v1.Database = &V1DatabaseConfig{
-		Driver: gc.Database.Driver,
-		URL:    gc.Database.URL,
+		Driver:          gc.Database.Driver,
+		URL:             gc.Database.URL,
+		MaxOpenConns:    gc.Database.MaxOpenConns,
+		MaxIdleConns:    gc.Database.MaxIdleConns,
+		ConnMaxLifetime: gc.Database.ConnMaxLifetime,
+		ConnMaxIdleTime: gc.Database.ConnMaxIdleTime,
 	}
 
 	// Auth config
 	v1.Auth = &V1AuthConfig{
+		Mode:              gc.Auth.Mode,
 		DevMode:           gc.Auth.Enabled,
 		DevToken:          gc.Auth.Token,
 		DevTokenFile:      gc.Auth.TokenFile,
 		AuthorizedDomains: gc.Auth.AuthorizedDomains,
 		UserAccessMode:    gc.Auth.UserAccessMode,
+	}
+	if gc.Auth.Proxy != nil {
+		v1.Auth.Proxy = &V1ProxyConfig{
+			Provider:              gc.Auth.Proxy.Provider,
+			RequireTrustedProxyIP: gc.Auth.Proxy.RequireTrustedProxyIP,
+		}
+		if gc.Auth.Proxy.IAP != nil {
+			v1.Auth.Proxy.IAP = &V1IAPConfig{
+				Audience: gc.Auth.Proxy.IAP.Audience,
+				Issuer:   gc.Auth.Proxy.IAP.Issuer,
+				JWKSURL:  gc.Auth.Proxy.IAP.JWKSURL,
+			}
+		}
+	}
+	if gc.Auth.Transport != nil {
+		v1.Auth.Transport = &V1TransportConfig{
+			Mode:           gc.Auth.Transport.Mode,
+			OIDCAudience:   gc.Auth.Transport.OIDCAudience,
+			PlatformAuthSA: gc.Auth.Transport.PlatformAuthSA,
+		}
 	}
 
 	// OAuth config

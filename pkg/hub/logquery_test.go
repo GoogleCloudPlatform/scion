@@ -180,7 +180,7 @@ func TestConvertLogEntry(t *testing.T) {
 			Payload:   "Agent started processing task",
 			Labels: map[string]string{
 				"agent_id":   "abc123",
-				"project_id": "my-project",
+				"project_id": tid("my-project"),
 			},
 			InsertID: "insert-1",
 		}

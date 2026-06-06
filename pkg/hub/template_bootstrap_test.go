@@ -32,14 +32,13 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
-	"github.com/GoogleCloudPlatform/scion/pkg/store/sqlite"
 )
 
 // testTemplateBootstrapServer creates a hub Server backed by an in-memory
 // SQLite store and a mock storage, suitable for template bootstrap tests.
 func testTemplateBootstrapServer(t *testing.T) (*Server, store.Store, *mockStorage) {
 	t.Helper()
-	s, err := sqlite.New(":memory:")
+	s, err := newTestStore(":memory:")
 	if err != nil {
 		if strings.Contains(err.Error(), "sqlite driver not registered") {
 			t.Skip("Skipping: sqlite driver not registered")
@@ -133,7 +132,7 @@ func TestBootstrapTemplatesFromDir_ImportsNewAlongsideExisting(t *testing.T) {
 
 	// Pre-create a template in the store
 	existing := &store.Template{
-		ID:     "existing-id",
+		ID:     tid("existing-id"),
 		Name:   "existing",
 		Slug:   "existing",
 		Scope:  store.TemplateScopeGlobal,
@@ -246,7 +245,7 @@ func TestBootstrapTemplatesFromDir_SkipsUnchangedTemplate(t *testing.T) {
 
 func TestBootstrapTemplatesFromDir_NoopWhenNoStorage(t *testing.T) {
 	// Create server without storage
-	s, err := sqlite.New(":memory:")
+	s, err := newTestStore(":memory:")
 	if err != nil {
 		if strings.Contains(err.Error(), "sqlite driver not registered") {
 			t.Skip("Skipping: sqlite driver not registered")
@@ -767,7 +766,7 @@ func setupWorkspaceProject(t *testing.T, projectName string) (*Server, store.Sto
 	workspaceRoot := t.TempDir()
 
 	project := &store.Project{
-		ID:        "project-ws-" + projectName,
+		ID:        tid("project-ws-" + projectName),
 		Name:      projectName,
 		Slug:      projectName,
 		GitRemote: "https://github.com/test/" + projectName,
@@ -776,10 +775,11 @@ func setupWorkspaceProject(t *testing.T, projectName string) (*Server, store.Sto
 		t.Fatalf("failed to create project: %v", err)
 	}
 
-	brokerID := "broker-ws-" + projectName
+	brokerID := tid("broker-ws-" + projectName)
 	broker := &store.RuntimeBroker{
 		ID:       brokerID,
 		Name:     "ws-broker",
+		Slug:     "ws-broker",
 		Endpoint: "http://localhost:9090",
 		Status:   store.BrokerStatusOnline,
 	}

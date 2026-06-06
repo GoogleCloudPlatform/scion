@@ -249,10 +249,11 @@ type VolumeMount struct {
 	Source   string `json:"source" yaml:"source"`
 	Target   string `json:"target" yaml:"target"`
 	ReadOnly bool   `json:"read_only,omitempty" yaml:"read_only,omitempty"`
-	Type     string `json:"type,omitempty" yaml:"type,omitempty"`     // "local" (default) or "gcs"
+	Type     string `json:"type,omitempty" yaml:"type,omitempty"`     // "local" (default), "gcs", or "nfs"
 	Bucket   string `json:"bucket,omitempty" yaml:"bucket,omitempty"` // For GCS
 	Prefix   string `json:"prefix,omitempty" yaml:"prefix,omitempty"` // For GCS
 	Mode     string `json:"mode,omitempty" yaml:"mode,omitempty"`     // Mount options
+	Server   string `json:"server,omitempty" yaml:"server,omitempty"` // NFS: server host/IP
 }
 
 // Validate checks that a VolumeMount has the required fields and valid values.
@@ -271,8 +272,15 @@ func (v VolumeMount) Validate() error {
 		if v.Bucket == "" {
 			return fmt.Errorf("GCS volume mount for target %q missing required field: bucket", v.Target)
 		}
+	case "nfs":
+		if v.Server == "" {
+			return fmt.Errorf("NFS volume mount for target %q missing required field: server", v.Target)
+		}
+		if v.Source == "" {
+			return fmt.Errorf("NFS volume mount for target %q missing required field: source (server export path)", v.Target)
+		}
 	default:
-		return fmt.Errorf("volume mount for target %q has invalid type %q (must be \"local\" or \"gcs\")", v.Target, v.Type)
+		return fmt.Errorf("volume mount for target %q has invalid type %q (must be \"local\", \"gcs\", or \"nfs\")", v.Target, v.Type)
 	}
 
 	return nil

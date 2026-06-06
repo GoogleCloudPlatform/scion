@@ -31,7 +31,7 @@ import (
 // newTestClient creates an in-memory SQLite Ent client with auto-migration.
 func newTestClient(t *testing.T) *ent.Client {
 	t.Helper()
-	client, err := OpenSQLite("file:" + t.Name() + "?mode=memory&cache=shared")
+	client, err := OpenSQLite("file:"+t.Name()+"?mode=memory&cache=shared", PoolConfig{})
 	require.NoError(t, err)
 	t.Cleanup(func() { client.Close() })
 	require.NoError(t, AutoMigrate(context.Background(), client))
@@ -39,7 +39,7 @@ func newTestClient(t *testing.T) *ent.Client {
 }
 
 func TestOpenSQLite(t *testing.T) {
-	client, err := OpenSQLite("file:TestOpenSQLite?mode=memory&cache=shared")
+	client, err := OpenSQLite("file:TestOpenSQLite?mode=memory&cache=shared", PoolConfig{})
 	require.NoError(t, err)
 	defer client.Close()
 	require.NoError(t, AutoMigrate(context.Background(), client))
@@ -326,21 +326,14 @@ func TestGroupProjectEdge(t *testing.T) {
 	require.Len(t, groups, 2)
 }
 
-func TestAgentOwnerAndCreatorEdges(t *testing.T) {
+// TestAgentCreatedByOwnerPrincipalFields verifies that created_by/owner_id are
+// plain polymorphic principal references with no foreign key to the users table:
+// an agent that spawns a sub-agent records its own (agent) ID there, which has no
+// users-table row. A User-typed FK on these columns rejected every such
+// agent-created sub-agent with a constraint violation.
+func TestAgentCreatedByOwnerPrincipalFields(t *testing.T) {
 	client := newTestClient(t)
 	ctx := context.Background()
-
-	creator, err := client.User.Create().
-		SetEmail("creator@example.com").
-		SetDisplayName("Creator").
-		Save(ctx)
-	require.NoError(t, err)
-
-	owner, err := client.User.Create().
-		SetEmail("owner@example.com").
-		SetDisplayName("Owner").
-		Save(ctx)
-	require.NoError(t, err)
 
 	gv, err := client.Project.Create().
 		SetName("gv").
@@ -348,25 +341,24 @@ func TestAgentOwnerAndCreatorEdges(t *testing.T) {
 		Save(ctx)
 	require.NoError(t, err)
 
+	// A principal ID that is NOT a user (e.g. a creating agent). No users row exists.
+	principalID := uuid.New()
+
 	a, err := client.Agent.Create().
 		SetSlug("owned-agent").
 		SetName("Owned Agent").
 		SetProject(gv).
-		SetCreator(creator).
-		SetOwner(owner).
+		SetCreatedBy(principalID).
+		SetOwnerID(principalID).
 		SetDelegationEnabled(true).
 		Save(ctx)
-	require.NoError(t, err)
+	require.NoError(t, err, "non-user principal in created_by/owner_id must not violate a foreign key")
 	assert.True(t, a.DelegationEnabled)
 
-	// Verify edges
-	createdAgents, err := client.User.QueryCreatedAgents(creator).All(ctx)
+	got, err := client.Agent.Get(ctx, a.ID)
 	require.NoError(t, err)
-	require.Len(t, createdAgents, 1)
-	assert.Equal(t, a.ID, createdAgents[0].ID)
-
-	ownedAgents, err := client.User.QueryOwnedAgents(owner).All(ctx)
-	require.NoError(t, err)
-	require.Len(t, ownedAgents, 1)
-	assert.Equal(t, a.ID, ownedAgents[0].ID)
+	require.NotNil(t, got.CreatedBy)
+	require.NotNil(t, got.OwnerID)
+	assert.Equal(t, principalID, *got.CreatedBy)
+	assert.Equal(t, principalID, *got.OwnerID)
 }

@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strings"
 	"text/tabwriter"
 	"time"
 
@@ -35,11 +36,20 @@ import (
 )
 
 var (
-	listAll     bool
-	listDeleted bool
-	listRunning bool
-	sortByTime  bool
+	listAll        bool
+	listDeleted    bool
+	listRunning    bool
+	sortByTime     bool
+	filterPhase    string
+	filterActivity string
+	filterTemplate string
+	sortField      string
+	sortReverse    bool
 )
+
+var validSortFields = map[string]bool{
+	"name": true, "phase": true, "created": true, "updated": true, "last-seen": true,
+}
 
 // listCmd represents the list command
 var listCmd = &cobra.Command{
@@ -47,6 +57,10 @@ var listCmd = &cobra.Command{
 	Aliases: []string{"ls"},
 	Short:   "List running scion agents",
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if err := validateListFlags(); err != nil {
+			return err
+		}
+
 		// Check if Hub should be used
 		hubCtx, err := CheckHubAvailability(projectPath)
 		if err != nil {
@@ -108,6 +122,7 @@ func listAgentsViaHub(hubCtx *HubContext) error {
 
 	opts := &hubclient.ListAgentsOptions{
 		IncludeDeleted: listDeleted,
+		Phase:          filterPhase,
 	}
 	agentSvc := hubCtx.Client.Agents()
 
@@ -269,6 +284,93 @@ func filterRunningAgents(agents []api.AgentInfo) []api.AgentInfo {
 	return filtered
 }
 
+// validateListFlags checks that filter and sort flag values are valid.
+func validateListFlags() error {
+	if filterPhase != "" {
+		filterPhase = strings.ToLower(filterPhase)
+		if !state.Phase(filterPhase).IsValid() {
+			valid := make([]string, 0, len(state.Phases()))
+			for _, p := range state.Phases() {
+				valid = append(valid, string(p))
+			}
+			return fmt.Errorf("invalid phase %q; valid values: %s", filterPhase, strings.Join(valid, ", "))
+		}
+	}
+	if filterActivity != "" {
+		filterActivity = strings.ToLower(filterActivity)
+		if !state.Activity(filterActivity).IsValid() {
+			valid := make([]string, 0, len(state.Activities()))
+			for _, a := range state.Activities() {
+				valid = append(valid, string(a))
+			}
+			return fmt.Errorf("invalid activity %q; valid values: %s", filterActivity, strings.Join(valid, ", "))
+		}
+	}
+	if sortField != "" {
+		sortField = strings.ToLower(sortField)
+		if !validSortFields[sortField] {
+			valid := make([]string, 0, len(validSortFields))
+			for k := range validSortFields {
+				valid = append(valid, k)
+			}
+			sort.Strings(valid)
+			return fmt.Errorf("invalid sort field %q; valid values: %s", sortField, strings.Join(valid, ", "))
+		}
+	}
+	return nil
+}
+
+// filterAgentsByFlags applies --phase, --activity, and --template filters.
+func filterAgentsByFlags(agents []api.AgentInfo) []api.AgentInfo {
+	if filterPhase == "" && filterActivity == "" && filterTemplate == "" {
+		return agents
+	}
+	filtered := make([]api.AgentInfo, 0, len(agents))
+	for _, a := range agents {
+		if filterPhase != "" && !strings.EqualFold(a.Phase, filterPhase) {
+			continue
+		}
+		if filterActivity != "" && !strings.EqualFold(a.Activity, filterActivity) {
+			continue
+		}
+		if filterTemplate != "" && !strings.EqualFold(a.Template, filterTemplate) {
+			continue
+		}
+		filtered = append(filtered, a)
+	}
+	return filtered
+}
+
+// sortAgentsByField sorts agents by the --sort field.
+func sortAgentsByField(agents []api.AgentInfo) {
+	if sortField == "" {
+		return
+	}
+	sort.SliceStable(agents, func(i, j int) bool {
+		var less bool
+		switch sortField {
+		case "name":
+			less = strings.ToLower(agents[i].Name) < strings.ToLower(agents[j].Name)
+		case "phase":
+			less = agents[i].Phase < agents[j].Phase
+		case "created":
+			less = agents[i].Created.Before(agents[j].Created)
+		case "updated":
+			less = agents[i].Updated.Before(agents[j].Updated)
+		case "last-seen":
+			less = agents[i].LastSeen.Before(agents[j].LastSeen)
+		default:
+			return false
+		}
+		// Timestamps default to descending (newest first); name/phase default to ascending
+		descByDefault := sortField == "created" || sortField == "updated" || sortField == "last-seen"
+		if descByDefault != sortReverse {
+			return !less
+		}
+		return less
+	})
+}
+
 func displayAgents(agents []api.AgentInfo, all bool, hubMode bool) error {
 	if listRunning {
 		agents = filterRunningAgents(agents)
@@ -281,7 +383,12 @@ func displayAgents(agents []api.AgentInfo, all bool, hubMode bool) error {
 		agents[i].Template = config.FriendlyTemplateName(agents[i].Template)
 	}
 
-	if sortByTime {
+	// Apply --phase, --activity, --template filters
+	agents = filterAgentsByFlags(agents)
+
+	if sortField != "" {
+		sortAgentsByField(agents)
+	} else if sortByTime {
 		sort.Slice(agents, func(i, j int) bool {
 			return agents[i].LastSeen.After(agents[j].LastSeen)
 		})
@@ -574,4 +681,9 @@ func init() {
 	listCmd.Flags().BoolVar(&listDeleted, "deleted", false, "Include soft-deleted agents in listing")
 	listCmd.Flags().BoolVarP(&listRunning, "running", "r", false, "Only show agents that are not stopped or errored")
 	listCmd.Flags().BoolVarP(&sortByTime, "time", "t", false, "Sort by last activity, most recent first")
+	listCmd.Flags().StringVar(&filterPhase, "phase", "", "Filter by lifecycle phase (running, stopped, error, ...)")
+	listCmd.Flags().StringVar(&filterActivity, "activity", "", "Filter by runtime activity (thinking, waiting_for_input, ...)")
+	listCmd.Flags().StringVar(&filterTemplate, "template", "", "Filter by template name")
+	listCmd.Flags().StringVar(&sortField, "sort", "", "Sort by field (name, phase, created, updated, last-seen)")
+	listCmd.Flags().BoolVar(&sortReverse, "reverse", false, "Reverse sort order")
 }

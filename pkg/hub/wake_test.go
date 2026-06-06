@@ -37,14 +37,14 @@ func createWakeTestFixtures(t *testing.T, agentPhase string) (*Server, store.Sto
 	ctx := context.Background()
 
 	project := &store.Project{
-		ID:   "project-wake-" + agentPhase,
+		ID:   tid("project-wake-" + agentPhase),
 		Name: "Wake Test Project",
 		Slug: "wake-test-project-" + agentPhase,
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
 
 	broker := &store.RuntimeBroker{
-		ID:     "broker-wake-" + agentPhase,
+		ID:     tid("broker-wake-" + agentPhase),
 		Name:   "Wake Test Broker",
 		Slug:   "wake-test-broker-" + agentPhase,
 		Status: store.BrokerStatusOnline,
@@ -59,7 +59,7 @@ func createWakeTestFixtures(t *testing.T, agentPhase string) (*Server, store.Sto
 	}))
 
 	agent := &store.Agent{
-		ID:              "agent-wake-" + agentPhase,
+		ID:              tid("agent-wake-" + agentPhase),
 		Slug:            "agent-wake-" + agentPhase,
 		Name:            "Wake Agent",
 		ProjectID:       project.ID,

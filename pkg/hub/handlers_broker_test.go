@@ -42,7 +42,7 @@ func setupBrokerAuthzTest(t *testing.T) (srv *Server, s store.Store, alice, bob,
 	ctx := context.Background()
 
 	alice = &store.User{
-		ID:          "user-broker-alice",
+		ID:          tid("user-broker-alice"),
 		Email:       "broker-alice@test.com",
 		DisplayName: "Alice",
 		Role:        store.UserRoleMember,
@@ -52,7 +52,7 @@ func setupBrokerAuthzTest(t *testing.T) (srv *Server, s store.Store, alice, bob,
 	require.NoError(t, s.CreateUser(ctx, alice))
 
 	bob = &store.User{
-		ID:          "user-broker-bob",
+		ID:          tid("user-broker-bob"),
 		Email:       "broker-bob@test.com",
 		DisplayName: "Bob",
 		Role:        store.UserRoleMember,
@@ -62,7 +62,7 @@ func setupBrokerAuthzTest(t *testing.T) (srv *Server, s store.Store, alice, bob,
 	require.NoError(t, s.CreateUser(ctx, bob))
 
 	admin = &store.User{
-		ID:          "user-broker-admin",
+		ID:          tid("user-broker-admin"),
 		Email:       "broker-admin@test.com",
 		DisplayName: "Admin",
 		Role:        store.UserRoleAdmin,
@@ -77,7 +77,7 @@ func setupBrokerAuthzTest(t *testing.T) (srv *Server, s store.Store, alice, bob,
 
 	// Create a project owned by alice
 	project = &store.Project{
-		ID:        "project-broker-test",
+		ID:        tid("project-broker-test"),
 		Name:      "Broker Test Project",
 		Slug:      "broker-test-project",
 		OwnerID:   alice.ID,
@@ -100,7 +100,7 @@ func setupBrokerAuthzTest(t *testing.T) (srv *Server, s store.Store, alice, bob,
 
 	// Create a broker owned by alice directly in the store
 	broker = &store.RuntimeBroker{
-		ID:        "broker-alice-owned",
+		ID:        tid("broker-alice-owned"),
 		Name:      "Alice Broker",
 		Slug:      "alice-broker",
 		Status:    store.BrokerStatusOnline,
@@ -361,7 +361,7 @@ func TestAgentCreate_BrokerResolution(t *testing.T) {
 
 	// Create a runtime broker
 	broker := &store.RuntimeBroker{
-		ID:     "broker_id_123",
+		ID:     tid("broker_id_123"),
 		Name:   "My Laptop",
 		Slug:   "my-laptop",
 		Status: store.BrokerStatusOnline,
@@ -370,7 +370,7 @@ func TestAgentCreate_BrokerResolution(t *testing.T) {
 
 	// Create a project
 	project := &store.Project{
-		ID:      "project_1",
+		ID:      tid("project_1"),
 		Slug:    "test-project",
 		Name:    "Test Project",
 		Created: time.Now(),
@@ -391,14 +391,14 @@ func TestAgentCreate_BrokerResolution(t *testing.T) {
 		body := map[string]interface{}{
 			"name":            "Agent ID",
 			"projectId":       project.ID,
-			"runtimeBrokerId": "broker_id_123",
+			"runtimeBrokerId": tid("broker_id_123"),
 		}
 		rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", body)
 		assert.Equal(t, http.StatusCreated, rec.Code)
 
 		var resp CreateAgentResponse
 		require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
-		assert.Equal(t, "broker_id_123", resp.Agent.RuntimeBrokerID)
+		assert.Equal(t, tid("broker_id_123"), resp.Agent.RuntimeBrokerID)
 	})
 
 	t.Run("Resolve by Name", func(t *testing.T) {
@@ -412,7 +412,7 @@ func TestAgentCreate_BrokerResolution(t *testing.T) {
 
 		var resp CreateAgentResponse
 		require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
-		assert.Equal(t, "broker_id_123", resp.Agent.RuntimeBrokerID)
+		assert.Equal(t, tid("broker_id_123"), resp.Agent.RuntimeBrokerID)
 	})
 
 	t.Run("Resolve by Slug", func(t *testing.T) {
@@ -426,7 +426,7 @@ func TestAgentCreate_BrokerResolution(t *testing.T) {
 
 		var resp CreateAgentResponse
 		require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
-		assert.Equal(t, "broker_id_123", resp.Agent.RuntimeBrokerID)
+		assert.Equal(t, tid("broker_id_123"), resp.Agent.RuntimeBrokerID)
 	})
 
 	t.Run("Invalid broker", func(t *testing.T) {

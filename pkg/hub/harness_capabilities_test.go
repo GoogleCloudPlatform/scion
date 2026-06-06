@@ -33,11 +33,11 @@ func seedCreatedAgentForHarnessTest(t *testing.T, s store.Store, id, harnessConf
 	t.Helper()
 	ctx := context.Background()
 
-	project := &store.Project{ID: "project-" + id, Name: "Project " + id, Slug: "project-" + id}
+	project := &store.Project{ID: tid("project-" + id), Name: "Project " + id, Slug: "project-" + id}
 	require.NoError(t, s.CreateProject(ctx, project))
 
 	agent := &store.Agent{
-		ID:        "agent-" + id,
+		ID:        tid("agent-" + id),
 		Slug:      "agent-" + id,
 		Name:      "Agent " + id,
 		ProjectID: project.ID,
@@ -127,7 +127,7 @@ func TestGetAgent_CustomHarnessTypeFromHarnessConfig(t *testing.T) {
 	ctx := context.Background()
 
 	hc := &store.HarnessConfig{
-		ID:         "hc-custom",
+		ID:         tid("hc-custom"),
 		Name:       "custom-harness",
 		Slug:       "custom-harness",
 		Harness:    "custom-harness",

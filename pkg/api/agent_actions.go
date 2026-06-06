@@ -37,6 +37,7 @@ const (
 	AgentActionStats             = "stats"
 	AgentActionHasPrompt         = "has-prompt"
 	AgentActionFinalizeEnv       = "finalize-env"
+	AgentActionResetAuth         = "reset-auth"
 )
 
 // RuntimeBrokerAgentActionMethod returns the HTTP method for actions routed
@@ -46,7 +47,7 @@ func RuntimeBrokerAgentActionMethod(action string) (string, bool) {
 	switch action {
 	case AgentActionLogs, AgentActionStats, AgentActionHasPrompt:
 		return http.MethodGet, true
-	case AgentActionStart, AgentActionStop, AgentActionSuspend, AgentActionRestart, AgentActionMessage, AgentActionExec, AgentActionFinalizeEnv:
+	case AgentActionStart, AgentActionStop, AgentActionSuspend, AgentActionRestart, AgentActionMessage, AgentActionExec, AgentActionFinalizeEnv, AgentActionResetAuth:
 		return http.MethodPost, true
 	default:
 		return "", false

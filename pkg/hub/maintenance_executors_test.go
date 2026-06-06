@@ -28,11 +28,10 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
-	"github.com/GoogleCloudPlatform/scion/pkg/store/sqlite"
 )
 
 func TestSecretMigrationExecutor_NoGCPBackend(t *testing.T) {
-	s, err := sqlite.New(":memory:")
+	s, err := newTestStore(":memory:")
 	if err != nil {
 		t.Fatalf("failed to create sqlite store: %v", err)
 	}

@@ -27,7 +27,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
-	"github.com/GoogleCloudPlatform/scion/pkg/store/sqlite"
 )
 
 // brokerMockDispatcher records dispatched messages for test assertions.
@@ -56,6 +55,9 @@ func (d *brokerMockDispatcher) DispatchAgentStop(ctx context.Context, agent *sto
 	return nil
 }
 func (d *brokerMockDispatcher) DispatchAgentRestart(ctx context.Context, agent *store.Agent) error {
+	return nil
+}
+func (d *brokerMockDispatcher) DispatchAgentResetAuth(_ context.Context, _ *store.Agent) error {
 	return nil
 }
 func (d *brokerMockDispatcher) DispatchAgentDelete(ctx context.Context, agent *store.Agent, deleteFiles, removeBranch, softDelete bool, deletedAt time.Time) error {
@@ -98,7 +100,7 @@ func (d *brokerMockDispatcher) getMessages() []brokerDispatchedMsg {
 
 func newBrokerTestStore(t *testing.T) store.Store {
 	t.Helper()
-	s, err := sqlite.New(":memory:")
+	s, err := newTestStore(":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
@@ -115,7 +117,7 @@ func setupBrokerTestProject(t *testing.T, s store.Store) string {
 
 	// Create a runtime broker for agent FK constraints
 	rb := &store.RuntimeBroker{
-		ID:       "broker-1",
+		ID:       tid("broker-1"),
 		Name:     "test-broker",
 		Slug:     "test-broker",
 		Endpoint: "http://localhost:9800",
@@ -146,7 +148,7 @@ func setupBrokerTestAgent(t *testing.T, s store.Store, projectID, slug, phase st
 		Slug:            slug,
 		ProjectID:       projectID,
 		Phase:           phase,
-		RuntimeBrokerID: "broker-1",
+		RuntimeBrokerID: tid("broker-1"),
 		Visibility:      store.VisibilityPrivate,
 	}
 	if err := s.CreateAgent(context.Background(), agent); err != nil {
@@ -239,7 +241,7 @@ func TestMessageBrokerProxy_BroadcastSkipsSender(t *testing.T) {
 	s := newBrokerTestStore(t)
 	projectID := setupBrokerTestProject(t, s)
 	setupBrokerTestAgent(t, s, projectID, "sender-agent", "running")
-	setupBrokerTestAgent(t, s, projectID, "other-agent", "running")
+	setupBrokerTestAgent(t, s, projectID, tid("other-agent"), "running")
 
 	events := NewChannelEventPublisher()
 	defer events.Close()
@@ -265,7 +267,7 @@ func TestMessageBrokerProxy_BroadcastSkipsSender(t *testing.T) {
 	if len(dispatched) != 1 {
 		t.Fatalf("expected 1 message (sender excluded), got %d", len(dispatched))
 	}
-	if dispatched[0].agentSlug != "other-agent" {
+	if dispatched[0].agentSlug != tid("other-agent") {
 		t.Errorf("expected message delivered to 'other-agent', got %q", dispatched[0].agentSlug)
 	}
 }

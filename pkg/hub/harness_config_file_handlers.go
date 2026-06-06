@@ -174,11 +174,6 @@ func (s *Server) handleHarnessConfigFileWrite(w http.ResponseWriter, r *http.Req
 		writeErrorFromErr(w, err, "")
 		return
 	}
-	if hc.Locked {
-		Forbidden(w)
-		return
-	}
-
 	// Limit request body size for both JSON and raw content paths.
 	r.Body = http.MaxBytesReader(w, r.Body, maxHarnessConfigFileSize+4096)
 
@@ -273,11 +268,6 @@ func (s *Server) handleHarnessConfigFileUpload(w http.ResponseWriter, r *http.Re
 		writeErrorFromErr(w, err, "")
 		return
 	}
-	if hc.Locked {
-		Forbidden(w)
-		return
-	}
-
 	// Apply total request body size limit
 	r.Body = http.MaxBytesReader(w, r.Body, maxUploadTotalSize)
 
@@ -391,11 +381,6 @@ func (s *Server) handleHarnessConfigFileDelete(w http.ResponseWriter, r *http.Re
 		writeErrorFromErr(w, err, "")
 		return
 	}
-	if hc.Locked {
-		Forbidden(w)
-		return
-	}
-
 	stor := s.GetStorage()
 	if stor == nil {
 		RuntimeError(w, "Storage not configured")

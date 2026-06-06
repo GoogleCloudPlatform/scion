@@ -21,10 +21,14 @@ const (
 	FieldSlug = "slug"
 	// FieldGitRemote holds the string denoting the git_remote field in the database.
 	FieldGitRemote = "git_remote"
+	// FieldDefaultRuntimeBrokerID holds the string denoting the default_runtime_broker_id field in the database.
+	FieldDefaultRuntimeBrokerID = "default_runtime_broker_id"
 	// FieldLabels holds the string denoting the labels field in the database.
 	FieldLabels = "labels"
 	// FieldAnnotations holds the string denoting the annotations field in the database.
 	FieldAnnotations = "annotations"
+	// FieldSharedDirs holds the string denoting the shared_dirs field in the database.
+	FieldSharedDirs = "shared_dirs"
 	// FieldCreated holds the string denoting the created field in the database.
 	FieldCreated = "created"
 	// FieldUpdated holds the string denoting the updated field in the database.
@@ -35,6 +39,14 @@ const (
 	FieldOwnerID = "owner_id"
 	// FieldVisibility holds the string denoting the visibility field in the database.
 	FieldVisibility = "visibility"
+	// FieldGithubInstallationID holds the string denoting the github_installation_id field in the database.
+	FieldGithubInstallationID = "github_installation_id"
+	// FieldGithubPermissions holds the string denoting the github_permissions field in the database.
+	FieldGithubPermissions = "github_permissions"
+	// FieldGithubAppStatus holds the string denoting the github_app_status field in the database.
+	FieldGithubAppStatus = "github_app_status"
+	// FieldGitIdentity holds the string denoting the git_identity field in the database.
+	FieldGitIdentity = "git_identity"
 	// EdgeAgents holds the string denoting the agents edge name in mutations.
 	EdgeAgents = "agents"
 	// Table holds the table name of the project in the database.
@@ -54,13 +66,19 @@ var Columns = []string{
 	FieldName,
 	FieldSlug,
 	FieldGitRemote,
+	FieldDefaultRuntimeBrokerID,
 	FieldLabels,
 	FieldAnnotations,
+	FieldSharedDirs,
 	FieldCreated,
 	FieldUpdated,
 	FieldCreatedBy,
 	FieldOwnerID,
 	FieldVisibility,
+	FieldGithubInstallationID,
+	FieldGithubPermissions,
+	FieldGithubAppStatus,
+	FieldGitIdentity,
 }
 
 // ValidColumn reports if the column name is valid (part of the table columns).
@@ -113,6 +131,16 @@ func ByGitRemote(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldGitRemote, opts...).ToFunc()
 }
 
+// ByDefaultRuntimeBrokerID orders the results by the default_runtime_broker_id field.
+func ByDefaultRuntimeBrokerID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldDefaultRuntimeBrokerID, opts...).ToFunc()
+}
+
+// BySharedDirs orders the results by the shared_dirs field.
+func BySharedDirs(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldSharedDirs, opts...).ToFunc()
+}
+
 // ByCreated orders the results by the created field.
 func ByCreated(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldCreated, opts...).ToFunc()
@@ -136,6 +164,26 @@ func ByOwnerID(opts ...sql.OrderTermOption) OrderOption {
 // ByVisibility orders the results by the visibility field.
 func ByVisibility(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldVisibility, opts...).ToFunc()
+}
+
+// ByGithubInstallationID orders the results by the github_installation_id field.
+func ByGithubInstallationID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldGithubInstallationID, opts...).ToFunc()
+}
+
+// ByGithubPermissions orders the results by the github_permissions field.
+func ByGithubPermissions(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldGithubPermissions, opts...).ToFunc()
+}
+
+// ByGithubAppStatus orders the results by the github_app_status field.
+func ByGithubAppStatus(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldGithubAppStatus, opts...).ToFunc()
+}
+
+// ByGitIdentity orders the results by the git_identity field.
+func ByGitIdentity(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldGitIdentity, opts...).ToFunc()
 }
 
 // ByAgentsCount orders the results by agents count.

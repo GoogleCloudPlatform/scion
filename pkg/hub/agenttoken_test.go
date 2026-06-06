@@ -118,7 +118,7 @@ func TestAgentTokenService_AgentCreateAndLifecycleScopes(t *testing.T) {
 	require.NoError(t, err)
 
 	// Generate a token with agent create and lifecycle scopes
-	token, err := service.GenerateAgentToken("agent-sub", "project-parent", []AgentTokenScope{
+	token, err := service.GenerateAgentToken("agent-sub", tid("project-parent"), []AgentTokenScope{
 		ScopeAgentStatusUpdate,
 		ScopeAgentCreate,
 		ScopeAgentLifecycle,
@@ -130,7 +130,7 @@ func TestAgentTokenService_AgentCreateAndLifecycleScopes(t *testing.T) {
 	claims, err := service.ValidateAgentToken(token)
 	require.NoError(t, err)
 	assert.Equal(t, "agent-sub", claims.Subject)
-	assert.Equal(t, "project-parent", claims.ProjectID)
+	assert.Equal(t, tid("project-parent"), claims.ProjectID)
 	assert.True(t, claims.HasScope(ScopeAgentStatusUpdate))
 	assert.True(t, claims.HasScope(ScopeAgentCreate))
 	assert.True(t, claims.HasScope(ScopeAgentLifecycle))
@@ -396,7 +396,7 @@ func TestGCPTokenScope_InToken(t *testing.T) {
 	gcpScope := GCPTokenScopeForSA(saID)
 	scopes := []AgentTokenScope{ScopeAgentStatusUpdate, gcpScope}
 
-	token, err := service.GenerateAgentToken("agent-1", "project-1", scopes, nil)
+	token, err := service.GenerateAgentToken(tid("agent-1"), tid("project-1"), scopes, nil)
 	require.NoError(t, err)
 
 	claims, err := service.ValidateAgentToken(token)

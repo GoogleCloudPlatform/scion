@@ -189,12 +189,12 @@ func newTestUATService() (*UserAccessTokenService, *mockUATStore, *mockUserStore
 	tokenStore := newMockUATStore()
 	userStore := &mockUserStore{
 		users: map[string]*store.User{
-			"user-1": {ID: "user-1", Email: "test@example.com", DisplayName: "Test User", Role: "member"},
+			tid("user-1"): {ID: tid("user-1"), Email: "test@example.com", DisplayName: "Test User", Role: "member"},
 		},
 	}
 	projectStore := &mockProjectStore{
 		projects: map[string]*store.Project{
-			"project-1": {ID: "project-1", Name: "test-project"},
+			tid("project-1"): {ID: tid("project-1"), Name: "test-project"},
 		},
 	}
 	svc := NewUserAccessTokenService(tokenStore, userStore, projectStore)
@@ -206,7 +206,7 @@ func TestCreateToken(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("basic creation", func(t *testing.T) {
-		key, token, err := svc.CreateToken(ctx, "user-1", "ci-token", "project-1",
+		key, token, err := svc.CreateToken(ctx, tid("user-1"), "ci-token", tid("project-1"),
 			[]string{"agent:dispatch", "agent:read"}, nil)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
@@ -217,7 +217,7 @@ func TestCreateToken(t *testing.T) {
 		if token.Name != "ci-token" {
 			t.Errorf("expected name 'ci-token', got %q", token.Name)
 		}
-		if token.ProjectID != "project-1" {
+		if token.ProjectID != tid("project-1") {
 			t.Errorf("expected projectID 'project-1', got %q", token.ProjectID)
 		}
 		if len(token.Scopes) != 2 {
@@ -229,7 +229,7 @@ func TestCreateToken(t *testing.T) {
 	})
 
 	t.Run("expands agent:manage", func(t *testing.T) {
-		_, token, err := svc.CreateToken(ctx, "user-1", "manage-token", "project-1",
+		_, token, err := svc.CreateToken(ctx, tid("user-1"), "manage-token", tid("project-1"),
 			[]string{"agent:manage"}, nil)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
@@ -240,7 +240,7 @@ func TestCreateToken(t *testing.T) {
 	})
 
 	t.Run("rejects invalid scope", func(t *testing.T) {
-		_, _, err := svc.CreateToken(ctx, "user-1", "bad-token", "project-1",
+		_, _, err := svc.CreateToken(ctx, tid("user-1"), "bad-token", tid("project-1"),
 			[]string{"invalid:scope"}, nil)
 		if !errors.Is(err, ErrInvalidUATScope) {
 			t.Errorf("expected ErrInvalidUATScope, got %v", err)
@@ -248,7 +248,7 @@ func TestCreateToken(t *testing.T) {
 	})
 
 	t.Run("rejects missing project", func(t *testing.T) {
-		_, _, err := svc.CreateToken(ctx, "user-1", "bad-token", "nonexistent",
+		_, _, err := svc.CreateToken(ctx, tid("user-1"), "bad-token", "nonexistent",
 			[]string{"agent:read"}, nil)
 		if err == nil {
 			t.Error("expected error for nonexistent project")
@@ -257,7 +257,7 @@ func TestCreateToken(t *testing.T) {
 
 	t.Run("rejects expiry too long", func(t *testing.T) {
 		tooFar := time.Now().Add(400 * 24 * time.Hour)
-		_, _, err := svc.CreateToken(ctx, "user-1", "bad-token", "project-1",
+		_, _, err := svc.CreateToken(ctx, tid("user-1"), "bad-token", tid("project-1"),
 			[]string{"agent:read"}, &tooFar)
 		if !errors.Is(err, ErrUATExpiryTooLong) {
 			t.Errorf("expected ErrUATExpiryTooLong, got %v", err)
@@ -265,7 +265,7 @@ func TestCreateToken(t *testing.T) {
 	})
 
 	t.Run("rejects empty scopes", func(t *testing.T) {
-		_, _, err := svc.CreateToken(ctx, "user-1", "bad-token", "project-1",
+		_, _, err := svc.CreateToken(ctx, tid("user-1"), "bad-token", tid("project-1"),
 			[]string{}, nil)
 		if err == nil {
 			t.Error("expected error for empty scopes")
@@ -277,7 +277,7 @@ func TestValidateToken(t *testing.T) {
 	svc, _, _ := newTestUATService()
 	ctx := context.Background()
 
-	key, _, err := svc.CreateToken(ctx, "user-1", "test-token", "project-1",
+	key, _, err := svc.CreateToken(ctx, tid("user-1"), "test-token", tid("project-1"),
 		[]string{"agent:dispatch", "agent:read"}, nil)
 	if err != nil {
 		t.Fatalf("failed to create token: %v", err)
@@ -288,10 +288,10 @@ func TestValidateToken(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if identity.ID() != "user-1" {
+		if identity.ID() != tid("user-1") {
 			t.Errorf("expected user ID 'user-1', got %q", identity.ID())
 		}
-		if identity.ScopedProjectID() != "project-1" {
+		if identity.ScopedProjectID() != tid("project-1") {
 			t.Errorf("expected project 'project-1', got %q", identity.ScopedProjectID())
 		}
 		if !identity.HasScope("agent:dispatch") {
@@ -321,14 +321,14 @@ func TestRevokeToken(t *testing.T) {
 	svc, _, _ := newTestUATService()
 	ctx := context.Background()
 
-	key, token, err := svc.CreateToken(ctx, "user-1", "test-token", "project-1",
+	key, token, err := svc.CreateToken(ctx, tid("user-1"), "test-token", tid("project-1"),
 		[]string{"agent:read"}, nil)
 	if err != nil {
 		t.Fatalf("failed to create token: %v", err)
 	}
 
 	// Revoke it
-	if err := svc.RevokeToken(ctx, "user-1", token.ID); err != nil {
+	if err := svc.RevokeToken(ctx, tid("user-1"), token.ID); err != nil {
 		t.Fatalf("failed to revoke token: %v", err)
 	}
 
@@ -339,7 +339,7 @@ func TestRevokeToken(t *testing.T) {
 	}
 
 	// Wrong user can't revoke
-	if err := svc.RevokeToken(ctx, "other-user", token.ID); !errors.Is(err, store.ErrNotFound) {
+	if err := svc.RevokeToken(ctx, tid("other-user"), token.ID); !errors.Is(err, store.ErrNotFound) {
 		t.Errorf("expected ErrNotFound for wrong user, got %v", err)
 	}
 }
@@ -348,13 +348,13 @@ func TestDeleteToken(t *testing.T) {
 	svc, _, _ := newTestUATService()
 	ctx := context.Background()
 
-	key, token, err := svc.CreateToken(ctx, "user-1", "test-token", "project-1",
+	key, token, err := svc.CreateToken(ctx, tid("user-1"), "test-token", tid("project-1"),
 		[]string{"agent:read"}, nil)
 	if err != nil {
 		t.Fatalf("failed to create token: %v", err)
 	}
 
-	if err := svc.DeleteToken(ctx, "user-1", token.ID); err != nil {
+	if err := svc.DeleteToken(ctx, tid("user-1"), token.ID); err != nil {
 		t.Fatalf("failed to delete token: %v", err)
 	}
 
@@ -371,7 +371,7 @@ func TestTokenLimit(t *testing.T) {
 
 	// Create max tokens
 	for i := 0; i < store.UATMaxPerUser; i++ {
-		_, _, err := svc.CreateToken(ctx, "user-1", "token-"+string(rune('a'+i%26))+string(rune('0'+i/26)), "project-1",
+		_, _, err := svc.CreateToken(ctx, tid("user-1"), "token-"+string(rune('a'+i%26))+string(rune('0'+i/26)), tid("project-1"),
 			[]string{"agent:read"}, nil)
 		if err != nil {
 			t.Fatalf("failed to create token %d: %v", i, err)
@@ -379,7 +379,7 @@ func TestTokenLimit(t *testing.T) {
 	}
 
 	// Next one should fail
-	_, _, err := svc.CreateToken(ctx, "user-1", "one-too-many", "project-1",
+	_, _, err := svc.CreateToken(ctx, tid("user-1"), "one-too-many", tid("project-1"),
 		[]string{"agent:read"}, nil)
 	if !errors.Is(err, ErrUATLimitExceeded) {
 		t.Errorf("expected ErrUATLimitExceeded, got %v", err)
@@ -392,14 +392,14 @@ func TestListTokens(t *testing.T) {
 
 	// Create 3 tokens
 	for i := 0; i < 3; i++ {
-		_, _, err := svc.CreateToken(ctx, "user-1", "token-"+string(rune('a'+i)), "project-1",
+		_, _, err := svc.CreateToken(ctx, tid("user-1"), "token-"+string(rune('a'+i)), tid("project-1"),
 			[]string{"agent:read"}, nil)
 		if err != nil {
 			t.Fatalf("failed to create token: %v", err)
 		}
 	}
 
-	tokens, err := svc.ListTokens(ctx, "user-1")
+	tokens, err := svc.ListTokens(ctx, tid("user-1"))
 	if err != nil {
 		t.Fatalf("failed to list tokens: %v", err)
 	}
@@ -441,16 +441,16 @@ func TestExpandScopes(t *testing.T) {
 }
 
 func TestScopedUserIdentity(t *testing.T) {
-	base := NewAuthenticatedUser("user-1", "test@example.com", "Test", "member", "api")
-	scoped := NewScopedUserIdentity(base, "project-1", []string{"agent:dispatch", "agent:read"})
+	base := NewAuthenticatedUser(tid("user-1"), "test@example.com", "Test", "member", "api")
+	scoped := NewScopedUserIdentity(base, tid("project-1"), []string{"agent:dispatch", "agent:read"})
 
-	if scoped.ID() != "user-1" {
+	if scoped.ID() != tid("user-1") {
 		t.Errorf("expected ID 'user-1', got %q", scoped.ID())
 	}
 	if scoped.Email() != "test@example.com" {
 		t.Errorf("expected email 'test@example.com', got %q", scoped.Email())
 	}
-	if scoped.ScopedProjectID() != "project-1" {
+	if scoped.ScopedProjectID() != tid("project-1") {
 		t.Errorf("expected project 'project-1', got %q", scoped.ScopedProjectID())
 	}
 	if !scoped.HasScope("agent:dispatch") {

@@ -85,14 +85,14 @@ func TestAuthz_ProjectOwnerBypass_NonCreatorAdminCanDeleteAgent(t *testing.T) {
 	ctx := context.Background()
 
 	// Bob joins the project as admin (not creator, not direct OwnerID).
-	bob := makeProjectMemberUser(t, s, project, "user-bob-admin", "Bob Admin", store.GroupMemberRoleAdmin)
+	bob := makeProjectMemberUser(t, s, project, tid("user-bob-admin"), "Bob Admin", store.GroupMemberRoleAdmin)
 
 	// Alice creates the agent.
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
-		ID: "alice-agent-1", Slug: "alice-agent-1", Name: "Alice Agent",
+		ID: tid("alice-agent-1"), Slug: tid("alice-agent-1"), Name: "Alice Agent",
 		ProjectID: project.ID, OwnerID: alice.ID, Phase: string(state.PhaseRunning),
 	}))
-	a, err := s.GetAgent(ctx, "alice-agent-1")
+	a, err := s.GetAgent(ctx, tid("alice-agent-1"))
 	require.NoError(t, err)
 
 	user := NewAuthenticatedUser(bob.ID, bob.Email, bob.DisplayName, "member", "api")
@@ -105,7 +105,7 @@ func TestAuthz_ProjectOwnerBypass_RegularMemberCannotUpdateProject(t *testing.T)
 	srv, s, _, _, project := setupDemoPolicyTest(t)
 	ctx := context.Background()
 
-	carol := makeProjectMemberUser(t, s, project, "user-carol-member", "Carol", store.GroupMemberRoleMember)
+	carol := makeProjectMemberUser(t, s, project, tid("user-carol-member"), "Carol", store.GroupMemberRoleMember)
 
 	user := NewAuthenticatedUser(carol.ID, carol.Email, carol.DisplayName, "member", "api")
 	decision := srv.authzService.CheckAccess(ctx, user, projectResource(project), ActionUpdate)
@@ -116,14 +116,14 @@ func TestAuthz_ProjectOwnerBypass_RegularMemberCannotDeleteOthersAgent(t *testin
 	srv, s, alice, _, project := setupDemoPolicyTest(t)
 	ctx := context.Background()
 
-	carol := makeProjectMemberUser(t, s, project, "user-carol-member", "Carol", store.GroupMemberRoleMember)
+	carol := makeProjectMemberUser(t, s, project, tid("user-carol-member"), "Carol", store.GroupMemberRoleMember)
 
 	// Alice creates the agent; carol is just a regular member.
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
-		ID: "alice-agent-2", Slug: "alice-agent-2", Name: "Alice Agent 2",
+		ID: tid("alice-agent-2"), Slug: tid("alice-agent-2"), Name: "Alice Agent 2",
 		ProjectID: project.ID, OwnerID: alice.ID, Phase: string(state.PhaseRunning),
 	}))
-	a, err := s.GetAgent(ctx, "alice-agent-2")
+	a, err := s.GetAgent(ctx, tid("alice-agent-2"))
 	require.NoError(t, err)
 
 	user := NewAuthenticatedUser(carol.ID, carol.Email, carol.DisplayName, "member", "api")
@@ -146,7 +146,7 @@ func TestAuthz_ProjectOwnerBypass_AppliesToProjectMembersGroup(t *testing.T) {
 	srv, s, _, _, project := setupDemoPolicyTest(t)
 	ctx := context.Background()
 
-	bob := makeProjectMemberUser(t, s, project, "user-bob-owner", "Bob Owner", store.GroupMemberRoleOwner)
+	bob := makeProjectMemberUser(t, s, project, tid("user-bob-owner"), "Bob Owner", store.GroupMemberRoleOwner)
 
 	membersGroup, err := s.GetGroupBySlug(ctx, "project:"+project.Slug+":members")
 	require.NoError(t, err)
@@ -165,7 +165,7 @@ func TestCapabilities_ProjectOwnerBypass_ProjectAllActions(t *testing.T) {
 	srv, s, _, _, project := setupDemoPolicyTest(t)
 	ctx := context.Background()
 
-	bob := makeProjectMemberUser(t, s, project, "user-bob-cap", "Bob", store.GroupMemberRoleOwner)
+	bob := makeProjectMemberUser(t, s, project, tid("user-bob-cap"), "Bob", store.GroupMemberRoleOwner)
 
 	user := NewAuthenticatedUser(bob.ID, bob.Email, bob.DisplayName, "member", "api")
 	caps := srv.authzService.ComputeCapabilities(ctx, user, projectResource(project))
@@ -179,13 +179,13 @@ func TestCapabilities_ProjectOwnerBypass_AgentAllActions(t *testing.T) {
 	srv, s, alice, _, project := setupDemoPolicyTest(t)
 	ctx := context.Background()
 
-	bob := makeProjectMemberUser(t, s, project, "user-bob-cap-a", "Bob", store.GroupMemberRoleOwner)
+	bob := makeProjectMemberUser(t, s, project, tid("user-bob-cap-a"), "Bob", store.GroupMemberRoleOwner)
 
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
-		ID: "alice-agent-cap", Slug: "alice-agent-cap", Name: "Alice Agent Cap",
+		ID: tid("alice-agent-cap"), Slug: tid("alice-agent-cap"), Name: "Alice Agent Cap",
 		ProjectID: project.ID, OwnerID: alice.ID, Phase: string(state.PhaseRunning),
 	}))
-	a, err := s.GetAgent(ctx, "alice-agent-cap")
+	a, err := s.GetAgent(ctx, tid("alice-agent-cap"))
 	require.NoError(t, err)
 
 	user := NewAuthenticatedUser(bob.ID, bob.Email, bob.DisplayName, "member", "api")
@@ -200,21 +200,21 @@ func TestCapabilities_ProjectOwnerBypass_BatchAllActions(t *testing.T) {
 	srv, s, alice, _, project := setupDemoPolicyTest(t)
 	ctx := context.Background()
 
-	bob := makeProjectMemberUser(t, s, project, "user-bob-batch", "Bob", store.GroupMemberRoleOwner)
+	bob := makeProjectMemberUser(t, s, project, tid("user-bob-batch"), "Bob", store.GroupMemberRoleOwner)
 
 	// Two agents: one owned by alice, one by bob.
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
-		ID: "agent-alice-b", Slug: "agent-alice-b", Name: "AliceB",
+		ID: tid("agent-alice-b"), Slug: tid("agent-alice-b"), Name: "AliceB",
 		ProjectID: project.ID, OwnerID: alice.ID, Phase: string(state.PhaseRunning),
 	}))
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
-		ID: "agent-bob-b", Slug: "agent-bob-b", Name: "BobB",
+		ID: tid("agent-bob-b"), Slug: tid("agent-bob-b"), Name: "BobB",
 		ProjectID: project.ID, OwnerID: bob.ID, Phase: string(state.PhaseRunning),
 	}))
 
-	a1, err := s.GetAgent(ctx, "agent-alice-b")
+	a1, err := s.GetAgent(ctx, tid("agent-alice-b"))
 	require.NoError(t, err)
-	a2, err := s.GetAgent(ctx, "agent-bob-b")
+	a2, err := s.GetAgent(ctx, tid("agent-bob-b"))
 	require.NoError(t, err)
 
 	user := NewAuthenticatedUser(bob.ID, bob.Email, bob.DisplayName, "member", "api")
@@ -233,7 +233,7 @@ func TestCapabilities_ProjectOwnerBypass_ScopeAllActions(t *testing.T) {
 	srv, s, _, _, project := setupDemoPolicyTest(t)
 	ctx := context.Background()
 
-	bob := makeProjectMemberUser(t, s, project, "user-bob-scope", "Bob", store.GroupMemberRoleOwner)
+	bob := makeProjectMemberUser(t, s, project, tid("user-bob-scope"), "Bob", store.GroupMemberRoleOwner)
 
 	user := NewAuthenticatedUser(bob.ID, bob.Email, bob.DisplayName, "member", "api")
 	caps := srv.authzService.ComputeScopeCapabilities(ctx, user, "project", project.ID, "agent")
@@ -247,13 +247,13 @@ func TestCapabilities_RegularMember_AgentLimitedActions(t *testing.T) {
 	srv, s, alice, _, project := setupDemoPolicyTest(t)
 	ctx := context.Background()
 
-	carol := makeProjectMemberUser(t, s, project, "user-carol-cap", "Carol", store.GroupMemberRoleMember)
+	carol := makeProjectMemberUser(t, s, project, tid("user-carol-cap"), "Carol", store.GroupMemberRoleMember)
 
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
-		ID: "alice-agent-cap2", Slug: "alice-agent-cap2", Name: "Alice Agent Cap2",
+		ID: tid("alice-agent-cap2"), Slug: tid("alice-agent-cap2"), Name: "Alice Agent Cap2",
 		ProjectID: project.ID, OwnerID: alice.ID, Phase: string(state.PhaseRunning),
 	}))
-	a, err := s.GetAgent(ctx, "alice-agent-cap2")
+	a, err := s.GetAgent(ctx, tid("alice-agent-cap2"))
 	require.NoError(t, err)
 
 	user := NewAuthenticatedUser(carol.ID, carol.Email, carol.DisplayName, "member", "api")
@@ -270,7 +270,7 @@ func TestCapabilities_RegularMember_AgentLimitedActions(t *testing.T) {
 
 func TestUpdateProject_NonCreatorOwnerAllowed(t *testing.T) {
 	srv, s, _, _, project := setupDemoPolicyTest(t)
-	bob := makeProjectMemberUser(t, s, project, "user-bob-http-owner", "Bob HTTP", store.GroupMemberRoleOwner)
+	bob := makeProjectMemberUser(t, s, project, tid("user-bob-http-owner"), "Bob HTTP", store.GroupMemberRoleOwner)
 
 	body := map[string]string{"description": "updated by bob"}
 	rec := doRequestAsUser(t, srv, bob, http.MethodPatch, "/api/v1/projects/"+project.ID, body)
@@ -280,7 +280,7 @@ func TestUpdateProject_NonCreatorOwnerAllowed(t *testing.T) {
 
 func TestUpdateProject_RegularMemberDenied(t *testing.T) {
 	srv, s, _, _, project := setupDemoPolicyTest(t)
-	carol := makeProjectMemberUser(t, s, project, "user-carol-http", "Carol HTTP", store.GroupMemberRoleMember)
+	carol := makeProjectMemberUser(t, s, project, tid("user-carol-http"), "Carol HTTP", store.GroupMemberRoleMember)
 
 	body := map[string]string{"description": "updated by carol"}
 	rec := doRequestAsUser(t, srv, carol, http.MethodPatch, "/api/v1/projects/"+project.ID, body)

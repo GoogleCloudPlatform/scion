@@ -49,13 +49,15 @@ func createTestLinkedProject(t *testing.T, srv *Server, s store.Store, name, rem
 	// Create a provider broker record with a local path
 	brokerLocalPath := t.TempDir()
 	broker := &store.RuntimeBroker{
-		ID:   "test-broker-remote",
+		ID:   tid("test-broker-remote"),
 		Name: "remote-broker",
+		Slug: "remote-broker",
 	}
 	require.NoError(t, s.CreateRuntimeBroker(context.Background(), broker))
 	require.NoError(t, s.AddProjectProvider(context.Background(), &store.ProjectProvider{
-		ProjectID: project.ID,
-		BrokerID:  broker.ID,
+		ProjectID:  project.ID,
+		BrokerID:   broker.ID,
+		BrokerName: broker.Name,
 		// LocalPath is set to simulate a linked project with workspace on broker
 		LocalPath: brokerLocalPath,
 	}))
@@ -101,18 +103,20 @@ func TestResolveProjectWebDAVPath_LinkedProject_EmbeddedBroker(t *testing.T) {
 	project := createTestGitProject(t, srv, "WebDAV Embedded", "https://github.com/org/embedded-repo.git")
 
 	embeddedPath := t.TempDir()
-	embeddedBrokerID := "test-embedded-broker"
+	embeddedBrokerID := tid("test-embedded-broker")
 	srv.SetEmbeddedBrokerID(embeddedBrokerID)
 
 	broker := &store.RuntimeBroker{
 		ID:   embeddedBrokerID,
 		Name: "embedded-broker",
+		Slug: "embedded-broker",
 	}
 	require.NoError(t, s.CreateRuntimeBroker(context.Background(), broker))
 	require.NoError(t, s.AddProjectProvider(context.Background(), &store.ProjectProvider{
-		ProjectID: project.ID,
-		BrokerID:  embeddedBrokerID,
-		LocalPath: embeddedPath,
+		ProjectID:  project.ID,
+		BrokerID:   embeddedBrokerID,
+		BrokerName: broker.Name,
+		LocalPath:  embeddedPath,
 	}))
 
 	// For embedded broker, should serve directly from local path
@@ -143,15 +147,16 @@ func TestIsLinkedProject_EmbeddedBrokerOnly(t *testing.T) {
 	srv, s := testServer(t)
 	project := createTestGitProject(t, srv, "IsLinked Embedded", "https://github.com/org/emb.git")
 
-	embeddedBrokerID := "embedded-only"
+	embeddedBrokerID := tid("embedded-only")
 	srv.SetEmbeddedBrokerID(embeddedBrokerID)
 
-	broker := &store.RuntimeBroker{ID: embeddedBrokerID, Name: "emb"}
+	broker := &store.RuntimeBroker{ID: embeddedBrokerID, Name: "emb", Slug: "emb"}
 	require.NoError(t, s.CreateRuntimeBroker(context.Background(), broker))
 	require.NoError(t, s.AddProjectProvider(context.Background(), &store.ProjectProvider{
-		ProjectID: project.ID,
-		BrokerID:  embeddedBrokerID,
-		LocalPath: "/some/path",
+		ProjectID:  project.ID,
+		BrokerID:   embeddedBrokerID,
+		BrokerName: broker.Name,
+		LocalPath:  "/some/path",
 	}))
 
 	// Embedded broker with local path should NOT be considered "linked" (it's co-located)

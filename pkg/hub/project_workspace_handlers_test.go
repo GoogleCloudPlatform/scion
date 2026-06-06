@@ -884,7 +884,7 @@ func TestSharedDirFiles_GitProjectWithEmbeddedBroker(t *testing.T) {
 
 	// Create a broker and set it as the embedded broker
 	broker := &store.RuntimeBroker{
-		ID:       "embedded-broker-001",
+		ID:       tid("embedded-broker-001"),
 		Name:     "local-broker",
 		Slug:     "local-broker",
 		Endpoint: "http://localhost:9090",
@@ -937,7 +937,7 @@ func TestSharedDirFiles_GitProjectMultipleProviders(t *testing.T) {
 
 	// Create embedded broker
 	embeddedBroker := &store.RuntimeBroker{
-		ID:       "embedded-broker-002",
+		ID:       tid("embedded-broker-002"),
 		Name:     "local-broker",
 		Slug:     "local-broker-2",
 		Endpoint: "http://localhost:9090",
@@ -948,7 +948,7 @@ func TestSharedDirFiles_GitProjectMultipleProviders(t *testing.T) {
 
 	// Create a second (remote) broker
 	remoteBroker := &store.RuntimeBroker{
-		ID:       "remote-broker-001",
+		ID:       tid("remote-broker-001"),
 		Name:     "remote-broker",
 		Slug:     "remote-broker",
 		Endpoint: "http://remote:9090",
@@ -1091,7 +1091,7 @@ func TestProjectWorkspacePull_MethodNotAllowed(t *testing.T) {
 
 	// Create shared-workspace project directly in the store to avoid clone attempt
 	project := store.Project{
-		ID:        "pull-method-test-id",
+		ID:        tid("pull-method-test-id"),
 		Name:      "Pull Method Test",
 		Slug:      "pull-method-test",
 		GitRemote: "github.com/test/pull-method",

@@ -699,3 +699,48 @@ hub:
 		t.Fatal("expected not to find server config in settings.yaml")
 	}
 }
+
+// TestApplyDatabasePoolDefaults_PostgresOverridesLeakedSqliteDefault is a
+// regression test for the production incident where both hubs served every API
+// request in ~55s. The struct-level default for MaxOpenConns/MaxIdleConns is 1
+// (required by SQLite to serialize writes). A postgres deployment configured via
+// env/driver override inherits that 1, and the original `<= 0` guard left the
+// pool at a single connection. With a pool of 1, a singleton scheduler handler
+// that holds the lone connection for an advisory lock self-deadlocks waiting for
+// a second connection to do its work, and all traffic serializes behind it.
+func TestApplyDatabasePoolDefaults_PostgresOverridesLeakedSqliteDefault(t *testing.T) {
+	// Mirrors the production path: start from the embedded defaults (which set
+	// MaxOpenConns=1 for the SQLite default) and switch the driver to postgres.
+	db := DefaultGlobalConfig().Database
+	db.Driver = "postgres"
+	db.URL = "host=db port=5432 dbname=scion sslmode=require"
+
+	applyDatabasePoolDefaults(&db)
+
+	if db.MaxOpenConns < 2 {
+		t.Fatalf("postgres MaxOpenConns must be a real pool, got %d (leaked SQLite default of 1 not overridden)", db.MaxOpenConns)
+	}
+	if db.MaxIdleConns < 2 {
+		t.Fatalf("postgres MaxIdleConns must be > 1, got %d", db.MaxIdleConns)
+	}
+}
+
+// TestApplyDatabasePoolDefaults_PostgresRespectsExplicitPool ensures an operator
+// who explicitly sizes the pool (>= 2) is not clobbered by the default.
+func TestApplyDatabasePoolDefaults_PostgresRespectsExplicitPool(t *testing.T) {
+	db := DatabaseConfig{Driver: "postgres", MaxOpenConns: 25, MaxIdleConns: 12}
+	applyDatabasePoolDefaults(&db)
+	if db.MaxOpenConns != 25 || db.MaxIdleConns != 12 {
+		t.Fatalf("explicit pool sizing clobbered: open=%d idle=%d", db.MaxOpenConns, db.MaxIdleConns)
+	}
+}
+
+// TestApplyDatabasePoolDefaults_SqliteStaysSingleConnection guards the
+// load-bearing invariant that SQLite always serializes through one connection.
+func TestApplyDatabasePoolDefaults_SqliteStaysSingleConnection(t *testing.T) {
+	db := DefaultGlobalConfig().Database // Driver defaults to sqlite
+	applyDatabasePoolDefaults(&db)
+	if db.MaxOpenConns != 1 {
+		t.Fatalf("sqlite MaxOpenConns must be 1, got %d", db.MaxOpenConns)
+	}
+}

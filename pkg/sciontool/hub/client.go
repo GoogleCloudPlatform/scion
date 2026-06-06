@@ -21,6 +21,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -29,10 +30,19 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"testing"
 	"time"
 
 	state "github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 )
+
+// ErrTokenRefreshUnauthorized indicates the hub rejected the token refresh
+// request because the presented token is no longer accepted (HTTP 401/403).
+// This typically happens after a hub signing-key rotation invalidates all
+// previously-issued agent JWTs. It is terminal for the current token: retrying
+// with the same token can never succeed, so recovery requires a fresh token
+// injected out-of-band (e.g. via the broker reset-auth path / SIGUSR2).
+var ErrTokenRefreshUnauthorized = errors.New("token refresh unauthorized")
 
 const (
 	// TokenFile is the canonical token file name. The SCION_AUTH_TOKEN env var
@@ -150,6 +160,7 @@ type Client struct {
 	maxRetries     int
 	retryBaseDelay time.Duration
 	retryMaxDelay  time.Duration
+	oidcSource     oidcTokenSource // transport-layer OIDC token source (nil = disabled)
 }
 
 // NewClient creates a new Hub client from environment variables.
@@ -174,7 +185,7 @@ func NewClient() *Client {
 		return nil
 	}
 
-	return &Client{
+	c := &Client{
 		hubURL:         hubURL,
 		token:          token,
 		agentID:        agentID,
@@ -185,6 +196,8 @@ func NewClient() *Client {
 			Timeout: DefaultTimeout,
 		},
 	}
+	c.configureOIDCTransport()
+	return c
 }
 
 // NewClientWithConfig creates a new Hub client with explicit configuration.
@@ -332,10 +345,23 @@ func (c *Client) ReportState(ctx context.Context, phase state.Phase, activity st
 	})
 }
 
+// RefreshTokenEntry represents a single token in the generalized refresh response.
+// Mirrors the hub's RefreshTokenEntry type.
+type RefreshTokenEntry struct {
+	Layer     string `json:"layer"`              // "app" | "transport"
+	Type      string `json:"type"`               // "scion_access" | "scion_refresh" | "google_oidc"
+	Value     string `json:"value"`              // the token value
+	ExpiresIn int    `json:"expiresIn"`          // seconds until expiry
+	Audience  string `json:"audience,omitempty"` // only for transport tokens
+}
+
 // RefreshTokenResponse is the response from the token refresh endpoint.
+// Includes both legacy single-token fields (backward compat) and the
+// generalized tokens[] array.
 type RefreshTokenResponse struct {
-	Token     string `json:"token"`
-	ExpiresAt string `json:"expires_at"`
+	Token     string              `json:"token"`
+	ExpiresAt string              `json:"expires_at"`
+	Tokens    []RefreshTokenEntry `json:"tokens,omitempty"`
 }
 
 // RefreshToken calls the Hub to refresh the agent's authentication token.
@@ -371,6 +397,15 @@ func (c *Client) RefreshToken(ctx context.Context) (string, time.Time, error) {
 	respBody, _ := io.ReadAll(resp.Body)
 
 	if resp.StatusCode != http.StatusOK {
+		// 401/403 mean the presented token is rejected (e.g. after a hub
+		// signing-key rotation). Tag these so the refresh loop can distinguish a
+		// terminal auth failure from a transient (network/5xx) one. The literal
+		// "token refresh failed with status %d" wording is preserved for the
+		// non-auth path because existing log-based tooling matches on it.
+		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+			return "", time.Time{}, fmt.Errorf("%w: token refresh failed with status %d: %s",
+				ErrTokenRefreshUnauthorized, resp.StatusCode, string(respBody))
+		}
 		return "", time.Time{}, fmt.Errorf("token refresh failed with status %d: %s",
 			resp.StatusCode, string(respBody))
 	}
@@ -397,7 +432,56 @@ func (c *Client) RefreshToken(ctx context.Context) (string, time.Time, error) {
 		_ = err
 	}
 
+	// Process the generalized tokens[] array if present.
+	// Apply each entry to the appropriate subsystem by layer/type.
+	if len(result.Tokens) > 0 {
+		c.applyRefreshTokens(result.Tokens)
+	}
+
 	return result.Token, expiresAt, nil
+}
+
+// applyRefreshTokens processes the tokens[] array from a refresh response,
+// applying each entry to the appropriate subsystem.
+func (c *Client) applyRefreshTokens(tokens []RefreshTokenEntry) {
+	for _, entry := range tokens {
+		switch {
+		case entry.Layer == "transport" && entry.Type == "google_oidc":
+			// Update the OIDC transport's token source
+			if c.oidcSource != nil {
+				entryExpiry := time.Now().Add(time.Duration(entry.ExpiresIn) * time.Second)
+				c.oidcSource.setToken(entry.Value, entryExpiry)
+			}
+			// app/scion_access is already handled via the legacy token field above
+		}
+	}
+}
+
+// adjustRefreshForTransportTokens checks if the OIDC source has a shorter
+// expiry than the proposed refresh time and returns the earlier of the two.
+// Transport tokens (~1h) use a 5-minute refresh margin vs the app token's
+// 2-hour margin.
+func (c *Client) adjustRefreshForTransportTokens(proposed time.Time) time.Time {
+	if c.oidcSource == nil {
+		return proposed
+	}
+
+	// Read the transport token expiry from the source
+	switch src := c.oidcSource.(type) {
+	case *injectedTokenSource:
+		src.mu.RLock()
+		expiry := src.expiresAt
+		src.mu.RUnlock()
+		if !expiry.IsZero() {
+			transportRefresh := expiry.Add(-oidcRefreshMargin)
+			if transportRefresh.Before(proposed) {
+				return transportRefresh
+			}
+		}
+	case *metadataTokenSource:
+		// Metadata source self-refreshes; no need to drive refresh from here.
+	}
+	return proposed
 }
 
 // TokenRefreshConfig configures the token refresh loop.
@@ -417,15 +501,60 @@ type TokenRefreshConfig struct {
 	OnError func(error)
 	// OnAuthLost is called when auth is terminally lost (token expired, cannot refresh).
 	OnAuthLost func()
+	// RetryBaseDelay overrides the initial backoff between failed refresh
+	// attempts. Zero uses tokenRefreshRetryBaseDelay.
+	RetryBaseDelay time.Duration
+	// RetryMaxDelay overrides the cap on backoff between failed refresh attempts.
+	// Zero uses tokenRefreshRetryMaxDelay.
+	RetryMaxDelay time.Duration
 }
 
 // DefaultTokenRefreshTimeout is the default timeout for token refresh requests.
 const DefaultTokenRefreshTimeout = 30 * time.Second
 
+const (
+	// tokenRefreshRetryBaseDelay is the initial delay before retrying a failed
+	// token refresh.
+	tokenRefreshRetryBaseDelay = 30 * time.Second
+	// tokenRefreshRetryMaxDelay caps the backoff between failed refresh attempts.
+	// A persistently failing refresh (e.g. after a hub signing-key rotation that
+	// invalidates the current token) must not hot-loop, but should still retry
+	// often enough to recover promptly once the hub is healthy again or an
+	// out-of-band reset-auth injects a fresh token.
+	tokenRefreshRetryMaxDelay = 5 * time.Minute
+)
+
+// tokenRefreshBackoff returns the delay before the next refresh retry after the
+// given number of consecutive failures, using exponential backoff (starting at
+// base, doubling each attempt) capped at max.
+func tokenRefreshBackoff(consecutiveFailures int, base, max time.Duration) time.Duration {
+	if consecutiveFailures < 1 {
+		consecutiveFailures = 1
+	}
+	delay := base
+	for i := 1; i < consecutiveFailures; i++ {
+		delay *= 2
+		if delay >= max {
+			return max
+		}
+	}
+	if delay > max {
+		delay = max
+	}
+	return delay
+}
+
 // StartTokenRefresh starts a background goroutine that refreshes the agent token
 // before it expires. After a successful refresh, the next refresh is scheduled
 // based on the new token's expiry (2 hours before expiry for a 10-hour token).
-// Returns a channel that will be closed when the refresh loop exits.
+//
+// On failure the loop retries with exponential backoff (capped at
+// tokenRefreshRetryMaxDelay) instead of exiting, so the agent recovers
+// automatically once the hub is healthy again or a fresh token is injected
+// out-of-band (e.g. via reset-auth). When the current token has actually expired
+// and refresh still fails, OnAuthLost is invoked once for observability; the loop
+// keeps retrying so recovery remains possible. The loop only exits when ctx is
+// cancelled. Returns a channel that is closed when the loop exits.
 func (c *Client) StartTokenRefresh(ctx context.Context, config *TokenRefreshConfig) <-chan struct{} {
 	done := make(chan struct{})
 
@@ -434,24 +563,42 @@ func (c *Client) StartTokenRefresh(ctx context.Context, config *TokenRefreshConf
 		timeout = config.Timeout
 	}
 
+	retryBase := tokenRefreshRetryBaseDelay
+	if config != nil && config.RetryBaseDelay > 0 {
+		retryBase = config.RetryBaseDelay
+	}
+	retryMax := tokenRefreshRetryMaxDelay
+	if config != nil && config.RetryMaxDelay > 0 {
+		retryMax = config.RetryMaxDelay
+	}
+	if retryMax < retryBase {
+		retryMax = retryBase
+	}
+
 	go func() {
 		defer close(done)
 
+		// tokenExpiry tracks the actual expiry of the token currently held by the
+		// client. refreshAt (the scheduled wake time) is rewritten on every retry,
+		// so it cannot be used to decide when auth is terminally lost — we must
+		// compare against the real expiry instead. Seed it from the current token,
+		// falling back to the configured refresh time plus the standard 2h
+		// pre-expiry margin when the token is not a parseable JWT.
+		tokenExpiry := config.RefreshAt.Add(2 * time.Hour)
+		if exp, parseErr := ParseTokenExpiry(c.GetToken()); parseErr == nil {
+			tokenExpiry = exp
+		}
+
 		refreshAt := config.RefreshAt
+		consecutiveFailures := 0
+		authLostNotified := false
+
 		for {
-			now := time.Now()
-			delay := refreshAt.Sub(now)
-			if delay <= 0 {
-				// Refresh time has already passed; try immediately
+			delay := time.Until(refreshAt)
+			if delay < 0 {
 				delay = 0
 			}
-
-			var timer *time.Timer
-			if delay > 0 {
-				timer = time.NewTimer(delay)
-			} else {
-				timer = time.NewTimer(0) // fire immediately
-			}
+			timer := time.NewTimer(delay)
 
 			select {
 			case <-ctx.Done():
@@ -469,18 +616,31 @@ func (c *Client) StartTokenRefresh(ctx context.Context, config *TokenRefreshConf
 					config.OnError(err)
 				}
 
-				// If the token has already expired, auth is terminally lost
-				if time.Now().After(refreshAt.Add(2 * time.Hour)) {
+				// Once the current token has actually expired and refresh still
+				// fails, auth is lost. Surface it once (for observability and to
+				// trigger out-of-band recovery such as reset-auth) — but keep
+				// retrying with capped backoff rather than exiting, so the agent
+				// self-heals if the hub recovers (e.g. its signing key is restored)
+				// or a fresh token is injected. The previous implementation reset
+				// the expiry estimate on every retry, so OnAuthLost never fired and
+				// the loop hot-looped every 30s indefinitely.
+				if !authLostNotified && !time.Now().Before(tokenExpiry) {
+					authLostNotified = true
 					if config != nil && config.OnAuthLost != nil {
 						config.OnAuthLost()
 					}
-					return
 				}
 
-				// Retry in 30 seconds
-				refreshAt = time.Now().Add(30 * time.Second)
+				consecutiveFailures++
+				refreshAt = time.Now().Add(tokenRefreshBackoff(consecutiveFailures, retryBase, retryMax))
 				continue
 			}
+
+			// Successful refresh: reset failure tracking and clear any prior
+			// auth-lost state so a later loss is reported again.
+			consecutiveFailures = 0
+			authLostNotified = false
+			tokenExpiry = newExpiry
 
 			// Fix ownership after atomic rewrite (init runs as root).
 			if config.ChownUID > 0 {
@@ -495,8 +655,13 @@ func (c *Client) StartTokenRefresh(ctx context.Context, config *TokenRefreshConf
 				config.OnRefreshed(newExpiry)
 			}
 
-			// Schedule next refresh: 2 hours before new expiry
+			// Schedule next refresh: 2 hours before new expiry for the app token.
 			refreshAt = newExpiry.Add(-2 * time.Hour)
+
+			// If transport tokens are present, use the shortest-lived entry
+			// to drive refresh timing (transport tokens ~1h need a tighter margin).
+			refreshAt = c.adjustRefreshForTransportTokens(refreshAt)
+
 			if refreshAt.Before(time.Now()) {
 				// Token duration is very short; refresh in 1 minute
 				refreshAt = time.Now().Add(1 * time.Minute)
@@ -515,6 +680,14 @@ func (c *Client) GetToken() string {
 	c.tokenMu.RLock()
 	defer c.tokenMu.RUnlock()
 	return c.token
+}
+
+// SetToken updates the client's in-memory auth token. This is used during
+// auth reset to inject a freshly-issued token without restarting the client.
+func (c *Client) SetToken(token string) {
+	c.tokenMu.Lock()
+	c.token = token
+	c.tokenMu.Unlock()
 }
 
 // Environment variable and file path constants for GitHub App token refresh.
@@ -856,12 +1029,24 @@ func resolveTokenHome() string {
 	return home
 }
 
+// tokenHomeOverridden reports whether SetTokenHome has installed a test
+// override. WriteTokenFile refuses to write under `go test` unless this is set,
+// so a test that forgets SetTokenHome can never clobber a live
+// ~/.scion/scion-token (as happened when the suite was run inside an agent
+// container, where resolveTokenHome finds the real scion user).
+var tokenHomeOverridden bool
+
 // SetTokenHome overrides the token home directory for testing.
 // Returns a cleanup function that restores the original resolver.
 func SetTokenHome(dir string) func() {
 	orig := tokenHomeResolver
+	origOverridden := tokenHomeOverridden
 	tokenHomeResolver = func() string { return dir }
-	return func() { tokenHomeResolver = orig }
+	tokenHomeOverridden = true
+	return func() {
+		tokenHomeResolver = orig
+		tokenHomeOverridden = origOverridden
+	}
 }
 
 // TokenFilePath returns the path to the canonical token file.
@@ -876,6 +1061,17 @@ func TokenFilePath() string {
 // Called by sciontool init to seed the initial value and by the refresh
 // loop to persist updated tokens. Written atomically via temp file + rename.
 func WriteTokenFile(token string) error {
+	// Guardrail: under `go test`, refuse to write the real token file unless a
+	// test has explicitly isolated it via SetTokenHome. resolveTokenHome
+	// resolves to the live scion user's home inside agent containers, so a test
+	// that forgets to isolate would silently overwrite a running agent's token
+	// (seen in the wild: a refresh test persisted the literal "refreshed-token",
+	// 401-ing the agent). Fail loudly instead of corrupting live state.
+	if testing.Testing() && !tokenHomeOverridden {
+		panic("scion/hub: WriteTokenFile called during a test without SetTokenHome(); " +
+			"call SetTokenHome(t.TempDir()) so tests never overwrite the real ~/.scion/scion-token")
+	}
+
 	path := TokenFilePath()
 	dir := filepath.Dir(path)
 
