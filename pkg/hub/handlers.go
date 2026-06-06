@@ -275,6 +275,13 @@ func (s *Server) handleAgents(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
+
+	identity := GetIdentityFromContext(ctx)
+	if identity == nil {
+		Unauthorized(w)
+		return
+	}
+
 	query := r.URL.Query()
 
 	filter := store.AgentFilter{
@@ -331,36 +338,22 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 	// Enrich agents with project and broker names
 	s.enrichAgents(ctx, result.Items)
 
-	// Compute per-item and scope capabilities
-	identity := GetIdentityFromContext(ctx)
+	// Compute per-item and scope capabilities (identity guaranteed non-nil)
 	agents := make([]AgentWithCapabilities, 0, len(result.Items))
-	if identity != nil {
-		resources := make([]Resource, len(result.Items))
-		for i := range result.Items {
-			resources[i] = agentResource(&result.Items[i])
+	resources := make([]Resource, len(result.Items))
+	for i := range result.Items {
+		resources[i] = agentResource(&result.Items[i])
+	}
+	caps := s.authzService.ComputeCapabilitiesBatch(ctx, identity, resources, "agent")
+	for i := range result.Items {
+		if !capabilityAllows(caps[i], ActionRead) {
+			continue
 		}
-		caps := s.authzService.ComputeCapabilitiesBatch(ctx, identity, resources, "agent")
-		for i := range result.Items {
-			if !capabilityAllows(caps[i], ActionRead) {
-				continue
-			}
-			agents = append(agents, AgentWithCapabilities{Agent: result.Items[i], Cap: caps[i]})
-		}
-	} else {
-		for i := range result.Items {
-			agents = append(agents, AgentWithCapabilities{Agent: result.Items[i]})
-		}
+		agents = append(agents, AgentWithCapabilities{Agent: result.Items[i], Cap: caps[i]})
 	}
 
-	var scopeCap *Capabilities
-	if identity != nil {
-		scopeCap = s.authzService.ComputeScopeCapabilities(ctx, identity, "", "", "agent")
-	}
-
-	totalCount := result.TotalCount
-	if identity != nil {
-		totalCount = len(agents)
-	}
+	scopeCap := s.authzService.ComputeScopeCapabilities(ctx, identity, "", "", "agent")
+	totalCount := len(agents)
 
 	writeJSON(w, http.StatusOK, ListAgentsResponse{
 		Agents:       agents,
@@ -3399,6 +3392,13 @@ func (s *Server) handleProjects(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) listProjects(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
+
+	identity := GetIdentityFromContext(ctx)
+	if identity == nil {
+		Unauthorized(w)
+		return
+	}
+
 	query := r.URL.Query()
 
 	filter := store.ProjectFilter{
@@ -3424,12 +3424,10 @@ func (s *Server) listProjects(w http.ResponseWriter, r *http.Request) {
 				filter.MemberProjectIDs = projectIDs
 				filter.ExcludeOwnerID = userIdent.ID()
 			} else {
-				// User has no group memberships — return empty result
 				filter.MemberProjectIDs = []string{"__none__"}
 			}
 		}
 	default:
-		// Legacy mine=true support
 		if query.Get("mine") == "true" {
 			if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
 				filter.OwnerID = userIdent.ID()
@@ -3459,36 +3457,22 @@ func (s *Server) listProjects(w http.ResponseWriter, r *http.Request) {
 	// Enrich owner display names
 	s.enrichProjectOwnerNames(ctx, result.Items)
 
-	// Compute per-item and scope capabilities
-	identity := GetIdentityFromContext(ctx)
+	// Compute per-item and scope capabilities (identity guaranteed non-nil)
 	projects := make([]ProjectWithCapabilities, 0, len(result.Items))
-	if identity != nil {
-		resources := make([]Resource, len(result.Items))
-		for i := range result.Items {
-			resources[i] = projectResource(&result.Items[i])
+	resources := make([]Resource, len(result.Items))
+	for i := range result.Items {
+		resources[i] = projectResource(&result.Items[i])
+	}
+	caps := s.authzService.ComputeCapabilitiesBatch(ctx, identity, resources, "project")
+	for i := range result.Items {
+		if !capabilityAllows(caps[i], ActionRead) {
+			continue
 		}
-		caps := s.authzService.ComputeCapabilitiesBatch(ctx, identity, resources, "project")
-		for i := range result.Items {
-			if !capabilityAllows(caps[i], ActionRead) {
-				continue
-			}
-			projects = append(projects, ProjectWithCapabilities{Project: result.Items[i], Cap: caps[i]})
-		}
-	} else {
-		for i := range result.Items {
-			projects = append(projects, ProjectWithCapabilities{Project: result.Items[i]})
-		}
+		projects = append(projects, ProjectWithCapabilities{Project: result.Items[i], Cap: caps[i]})
 	}
 
-	var scopeCap *Capabilities
-	if identity != nil {
-		scopeCap = s.authzService.ComputeScopeCapabilities(ctx, identity, "", "", "project")
-	}
-
-	totalCount := result.TotalCount
-	if identity != nil {
-		totalCount = len(projects)
-	}
+	scopeCap := s.authzService.ComputeScopeCapabilities(ctx, identity, "", "", "project")
+	totalCount := len(projects)
 
 	writeJSON(w, http.StatusOK, ListProjectsResponse{
 		Projects:     projects,
@@ -4945,6 +4929,12 @@ func (s *Server) createProjectAgent(w http.ResponseWriter, r *http.Request, proj
 func (s *Server) getProjectAgent(w http.ResponseWriter, r *http.Request, projectID, agentID string) {
 	ctx := r.Context()
 
+	identity := GetIdentityFromContext(ctx)
+	if identity == nil {
+		Unauthorized(w)
+		return
+	}
+
 	// Try to get by slug first (more common case)
 	agent, err := s.store.GetAgentBySlug(ctx, projectID, agentID)
 	if err != nil {
@@ -4964,6 +4954,13 @@ func (s *Server) getProjectAgent(w http.ResponseWriter, r *http.Request, project
 			writeErrorFromErr(w, err, "")
 			return
 		}
+	}
+
+	// Gate read access
+	decision := s.authzService.CheckAccess(ctx, identity, agentResource(agent), ActionRead)
+	if !decision.Allowed {
+		NotFound(w, "Agent")
+		return
 	}
 
 	// Enrich agent with project and broker names
@@ -5221,9 +5218,23 @@ func (s *Server) handleProjectByID(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) getProject(w http.ResponseWriter, r *http.Request, id string) {
 	ctx := r.Context()
+
+	identity := GetIdentityFromContext(ctx)
+	if identity == nil {
+		Unauthorized(w)
+		return
+	}
+
 	project, err := s.store.GetProject(ctx, id)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	// Gate read access
+	decision := s.authzService.CheckAccess(ctx, identity, projectResource(project), ActionRead)
+	if !decision.Allowed {
+		NotFound(w, "Project")
 		return
 	}
 
@@ -5244,9 +5255,7 @@ func (s *Server) getProject(w http.ResponseWriter, r *http.Request, id string) {
 	}
 
 	resp := ProjectWithCapabilities{Project: *project, CloudLogging: s.logQueryService != nil}
-	if identity := GetIdentityFromContext(ctx); identity != nil {
-		resp.Cap = s.authzService.ComputeCapabilities(ctx, identity, projectResource(project))
-	}
+	resp.Cap = s.authzService.ComputeCapabilities(ctx, identity, projectResource(project))
 
 	writeJSON(w, http.StatusOK, resp)
 }
