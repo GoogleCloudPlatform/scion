@@ -5791,6 +5791,19 @@ func (s *Server) handleRuntimeBrokers(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) listRuntimeBrokers(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
+
+	ident := GetIdentityFromContext(ctx)
+	if ident == nil {
+		Unauthorized(w)
+		return
+	}
+
+	// Pre-compute and cache the user's project IDs for canReadBroker checks.
+	if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
+		r = s.storeUserProjectIDsInContext(r, userIdent.ID())
+		ctx = r.Context()
+	}
+
 	query := r.URL.Query()
 
 	projectID := query.Get("projectId")
@@ -5816,91 +5829,81 @@ func (s *Server) listRuntimeBrokers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Batch-resolve CreatedByName for all brokers
-	s.enrichBrokerCreatorNames(ctx, result.Items)
+	// Filter to brokers the user can read (owner, admin, or member of a contributing project)
+	readable := make([]store.RuntimeBroker, 0, len(result.Items))
+	for i := range result.Items {
+		if s.canReadBroker(ctx, ident, &result.Items[i]) {
+			readable = append(readable, result.Items[i])
+		}
+	}
+
+	// Batch-resolve CreatedByName for readable brokers
+	s.enrichBrokerCreatorNames(ctx, readable)
 
 	// Compute capabilities for the requesting user
-	ident := GetIdentityFromContext(ctx)
-	var caps []*Capabilities
-	if ident != nil {
-		resources := make([]Resource, len(result.Items))
-		for i := range result.Items {
-			resources[i] = brokerResource(&result.Items[i])
-		}
-		caps = s.authzService.ComputeCapabilitiesBatch(ctx, ident, resources, "broker")
-		// Auto-provide brokers grant dispatch to all authenticated users.
-		for i, broker := range result.Items {
-			if broker.AutoProvide && i < len(caps) && !capabilityAllows(caps[i], ActionDispatch) {
-				caps[i].Actions = append(caps[i].Actions, string(ActionDispatch))
-			}
+	resources := make([]Resource, len(readable))
+	for i := range readable {
+		resources[i] = brokerResource(&readable[i])
+	}
+	caps := s.authzService.ComputeCapabilitiesBatch(ctx, ident, resources, "broker")
+	for i, broker := range readable {
+		if broker.AutoProvide && i < len(caps) && !capabilityAllows(caps[i], ActionDispatch) {
+			caps[i].Actions = append(caps[i].Actions, string(ActionDispatch))
 		}
 	}
 
 	// If filtering by projectId, include project-specific provider data (like localPath)
 	if projectID != "" {
-		// Get provider data for this project to include localPath
 		providers, err := s.store.GetProjectProviders(ctx, projectID)
 		if err != nil {
 			writeErrorFromErr(w, err, "")
 			return
 		}
 
-		// Build a map of brokerId -> localPath for quick lookup
 		brokerLocalPaths := make(map[string]string)
 		for _, p := range providers {
 			brokerLocalPaths[p.BrokerID] = p.LocalPath
 		}
 
-		// Build extended broker list with provider data
-		extendedBrokers := make([]RuntimeBrokerWithProvider, 0, len(result.Items))
-		for i, broker := range result.Items {
-			if caps != nil && !capabilityAllows(caps[i], ActionRead) {
+		extendedBrokers := make([]RuntimeBrokerWithProvider, 0, len(readable))
+		for i, broker := range readable {
+			if !capabilityAllows(caps[i], ActionRead) {
 				continue
 			}
 			eb := RuntimeBrokerWithProvider{
 				RuntimeBroker: broker,
 				LocalPath:     brokerLocalPaths[broker.ID],
 			}
-			if caps != nil && i < len(caps) {
+			if i < len(caps) {
 				eb.Cap = caps[i]
 			}
 			extendedBrokers = append(extendedBrokers, eb)
 		}
 
-		totalCount := result.TotalCount
-		if ident != nil {
-			totalCount = len(extendedBrokers)
-		}
-
 		writeJSON(w, http.StatusOK, ListRuntimeBrokersWithProviderResponse{
 			Brokers:    extendedBrokers,
 			NextCursor: result.NextCursor,
-			TotalCount: totalCount,
+			TotalCount: len(extendedBrokers),
 		})
 		return
 	}
 
-	brokersWithCaps := make([]RuntimeBrokerWithCapabilities, 0, len(result.Items))
-	for i, broker := range result.Items {
-		if caps != nil && !capabilityAllows(caps[i], ActionRead) {
+	brokersWithCaps := make([]RuntimeBrokerWithCapabilities, 0, len(readable))
+	for i, broker := range readable {
+		if !capabilityAllows(caps[i], ActionRead) {
 			continue
 		}
 		resp := RuntimeBrokerWithCapabilities{RuntimeBroker: broker}
-		if caps != nil && i < len(caps) {
+		if i < len(caps) {
 			resp.Cap = caps[i]
 		}
 		brokersWithCaps = append(brokersWithCaps, resp)
 	}
 
-	totalCount := result.TotalCount
-	if ident != nil {
-		totalCount = len(brokersWithCaps)
-	}
-
 	writeJSON(w, http.StatusOK, ListRuntimeBrokersWithCapsResponse{
 		Brokers:    brokersWithCaps,
 		NextCursor: result.NextCursor,
-		TotalCount: totalCount,
+		TotalCount: len(brokersWithCaps),
 	})
 }
 
@@ -6009,11 +6012,53 @@ func (s *Server) handleRuntimeBrokerByID(w http.ResponseWriter, r *http.Request)
 	}
 }
 
+// canReadBroker checks whether the user can read a broker: owner, hub admin,
+// or member of any project the broker contributes to.
+func (s *Server) canReadBroker(ctx context.Context, identity Identity, broker *store.RuntimeBroker) bool {
+	// Admin bypass
+	if user, ok := identity.(UserIdentity); ok && user.Role() == "admin" {
+		return true
+	}
+	// Owner bypass
+	if broker.CreatedBy != "" && broker.CreatedBy == identity.ID() {
+		return true
+	}
+	// Check if the broker contributes to any project the user is a member of
+	providers, err := s.store.GetBrokerProjects(ctx, broker.ID)
+	if err != nil || len(providers) == 0 {
+		return false
+	}
+	userProjectIDs := s.resolveUserProjectIDsCached(ctx, identity.ID())
+	userProjectSet := make(map[string]struct{}, len(userProjectIDs))
+	for _, pid := range userProjectIDs {
+		userProjectSet[pid] = struct{}{}
+	}
+	for _, p := range providers {
+		if _, ok := userProjectSet[p.ProjectID]; ok {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *Server) getRuntimeBroker(w http.ResponseWriter, r *http.Request, id string) {
 	ctx := r.Context()
+
+	identity := GetIdentityFromContext(ctx)
+	if identity == nil {
+		Unauthorized(w)
+		return
+	}
+
 	broker, err := s.store.GetRuntimeBroker(ctx, id)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	// Gate read access
+	if !s.canReadBroker(ctx, identity, broker) {
+		NotFound(w, "RuntimeBroker")
 		return
 	}
 
@@ -6030,12 +6075,9 @@ func (s *Server) getRuntimeBroker(w http.ResponseWriter, r *http.Request, id str
 
 	// Compute capabilities for the requesting user
 	resp := RuntimeBrokerWithCapabilities{RuntimeBroker: *broker}
-	if ident := GetIdentityFromContext(ctx); ident != nil {
-		resp.Cap = s.authzService.ComputeCapabilities(ctx, ident, brokerResource(broker))
-		// Auto-provide brokers grant dispatch to all authenticated users.
-		if broker.AutoProvide && !capabilityAllows(resp.Cap, ActionDispatch) {
-			resp.Cap.Actions = append(resp.Cap.Actions, string(ActionDispatch))
-		}
+	resp.Cap = s.authzService.ComputeCapabilities(ctx, identity, brokerResource(broker))
+	if broker.AutoProvide && !capabilityAllows(resp.Cap, ActionDispatch) {
+		resp.Cap.Actions = append(resp.Cap.Actions, string(ActionDispatch))
 	}
 
 	writeJSON(w, http.StatusOK, resp)
@@ -6532,10 +6574,21 @@ type ListBrokerProjectsResponse struct {
 func (s *Server) getBrokerProjects(w http.ResponseWriter, r *http.Request, brokerID string) {
 	ctx := r.Context()
 
-	// Verify broker exists
-	_, err := s.store.GetRuntimeBroker(ctx, brokerID)
+	identity := GetIdentityFromContext(ctx)
+	if identity == nil {
+		Unauthorized(w)
+		return
+	}
+
+	broker, err := s.store.GetRuntimeBroker(ctx, brokerID)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	// Gate read access on the broker itself
+	if !s.canReadBroker(ctx, identity, broker) {
+		NotFound(w, "RuntimeBroker")
 		return
 	}
 
