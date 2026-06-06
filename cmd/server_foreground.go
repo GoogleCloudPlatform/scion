@@ -949,6 +949,15 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 		SharedSigningSecret: resolveSessionSecret(),
 	}
 
+	// In hosted mode every replica must share the same session secret for
+	// cookies and JWT signing keys to work across the load balancer. Running
+	// without one means each replica generates its own ephemeral key, which
+	// breaks session persistence and causes login loops.
+	if hostedMode && hubCfg.SharedSigningSecret == "" {
+		log.Println("WARNING: hosted mode is enabled but no session secret is configured. " +
+			"Set --session-secret or SCION_SERVER_SESSION_SECRET to avoid cross-replica session failures.")
+	}
+
 	// Construct proxy authenticator when auth mode is "proxy"
 	if cfg.Auth.Mode == "proxy" && cfg.Auth.Proxy != nil {
 		switch cfg.Auth.Proxy.Provider {

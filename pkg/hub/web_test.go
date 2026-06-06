@@ -1361,6 +1361,7 @@ func TestSessionStore_DifferentSecretCannotDecode(t *testing.T) {
 	// A cookie authenticated/encrypted with a different secret fails to decode:
 	// gorilla returns a decode error together with a fresh, empty session.
 	// Either way, the state must not leak across mismatched secrets.
+	require.NotNil(t, sessC, "session store must return a non-nil session even on decode error")
 	if err == nil {
 		assert.True(t, sessC.IsNew, "session from a mismatched secret should be new/empty")
 	}

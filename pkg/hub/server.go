@@ -536,14 +536,14 @@ type Server struct {
 	notificationDispatcher *NotificationDispatcher // Notification dispatcher for agent status events
 	// reconcile op executors (seams): default to executeDispatch/deliverMessage;
 	// Phase 3/4 supply the real local-tunnel ops; tests override for exactly-once.
-	execDispatch func(ctx context.Context, d store.BrokerDispatch) (string, error)
-	deliverMsg   func(ctx context.Context, m *store.Message) error
-	maintenance            *MaintenanceState       // Runtime maintenance mode state
-	hubID                  string                  // Unique hub instance ID for secret namespacing
-	instanceID             string                  // Unique per-process ID (uuid); affinity key for broker dispatch
-	embeddedBrokerID       string                  // Broker ID when running in hub+broker combo mode
-	scheduler              *Scheduler              // Unified scheduler for recurring tasks
-	cleanupOnce            sync.Once               // Ensures CleanupResources runs only once
+	execDispatch     func(ctx context.Context, d store.BrokerDispatch) (string, error)
+	deliverMsg       func(ctx context.Context, m *store.Message) error
+	maintenance      *MaintenanceState // Runtime maintenance mode state
+	hubID            string            // Unique hub instance ID for secret namespacing
+	instanceID       string            // Unique per-process ID (uuid); affinity key for broker dispatch
+	embeddedBrokerID string            // Broker ID when running in hub+broker combo mode
+	scheduler        *Scheduler        // Unified scheduler for recurring tasks
+	cleanupOnce      sync.Once         // Ensures CleanupResources runs only once
 
 	logQueryService *LogQueryService // Cloud Logging query service (nil = disabled)
 
@@ -919,6 +919,15 @@ func (s *Server) ensureSigningKey(ctx context.Context, keyName string, existingK
 			"key_len", len(key),
 			"sha256_prefix", hex.EncodeToString(fp[:8]),
 		)
+		// Sync the derived key to the secret backend so that external consumers
+		// (e.g. scion-chat-app) that discover signing keys via label-based
+		// auto-discovery in GCP Secret Manager can still find them.
+		encodedKey := base64.StdEncoding.EncodeToString(key)
+		_, isGCPBackend := s.secretBackend.(*secret.GCPBackend)
+		if err := s.syncSigningKeyToBackend(ctx, keyName, encodedKey, s.hubID, isGCPBackend); err != nil {
+			slog.Warn("Failed to sync shared-secret-derived key to secret backend",
+				"key", keyName, "error", err)
+		}
 		return key, nil
 	}
 
