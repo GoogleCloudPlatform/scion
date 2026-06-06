@@ -72,7 +72,7 @@ Requires Hub connectivity.`,
 			return err
 		}
 
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
 		defer cancel()
 
 		project, err := resolveProjectByNameOrID(ctx, client, projectRef)

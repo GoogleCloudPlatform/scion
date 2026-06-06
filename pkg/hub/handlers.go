@@ -5291,6 +5291,10 @@ func (s *Server) updateProject(w http.ResponseWriter, r *http.Request, id string
 		}
 		if newSlug != oldSlug {
 			existing, err := s.store.GetProjectBySlug(ctx, newSlug)
+			if err != nil && err != store.ErrNotFound {
+				writeErrorFromErr(w, err, "")
+				return
+			}
 			if err == nil && existing.ID != project.ID {
 				writeError(w, http.StatusConflict, ErrCodeConflict,
 					fmt.Sprintf("A project with slug %q already exists", newSlug), nil)
@@ -5339,6 +5343,9 @@ func (s *Server) migrateProjectSlug(ctx context.Context, project *store.Project,
 			slog.Warn("failed to migrate project agents group slug",
 				"project_id", project.ID, "old_slug", oldAgentsSlug, "new_slug", newAgentsSlug, "error", err)
 		}
+	} else if err != store.ErrNotFound {
+		slog.Warn("failed to retrieve project agents group for migration",
+			"project_id", project.ID, "old_slug", oldAgentsSlug, "error", err)
 	}
 
 	// Migrate the project members group slug.
@@ -5351,6 +5358,24 @@ func (s *Server) migrateProjectSlug(ctx context.Context, project *store.Project,
 			slog.Warn("failed to migrate project members group slug",
 				"project_id", project.ID, "old_slug", oldMembersSlug, "new_slug", newMembersSlug, "error", err)
 		}
+	} else if err != store.ErrNotFound {
+		slog.Warn("failed to retrieve project members group for migration",
+			"project_id", project.ID, "old_slug", oldMembersSlug, "error", err)
+	}
+
+	// Migrate the project member policy name.
+	oldPolicyName := "project:" + oldSlug + ":member-create-agents"
+	newPolicyName := "project:" + newSlug + ":member-create-agents"
+	if policies, err := s.store.ListPolicies(ctx, store.PolicyFilter{Name: oldPolicyName}, store.ListOptions{Limit: 1}); err == nil && len(policies.Items) > 0 {
+		policy := &policies.Items[0]
+		policy.Name = newPolicyName
+		if err := s.store.UpdatePolicy(ctx, policy); err != nil {
+			slog.Warn("failed to migrate project member policy name",
+				"project_id", project.ID, "old_policy", oldPolicyName, "new_policy", newPolicyName, "error", err)
+		}
+	} else if err != nil {
+		slog.Warn("failed to retrieve project member policy for migration",
+			"project_id", project.ID, "old_policy", oldPolicyName, "error", err)
 	}
 
 	// Migrate hub-managed project filesystem paths (best-effort).
