@@ -47,18 +47,32 @@ func seedDefaultPoliciesAndGroups(ctx context.Context, s store.Store) {
 		slog.Info("seeded hub-members group", "id", group.ID)
 	}
 
-	// 2. Seed hub-member-read-all policy
-	seedPolicy(ctx, s, group.ID, &store.Policy{
-		ID:           api.NewUUID(),
-		Name:         "hub-member-read-all",
-		Description:  "Allow hub members to read all resources",
-		ScopeType:    "hub",
-		ResourceType: "*",
-		Actions:      []string{"read", "list"},
-		Effect:       "allow",
-	})
+	// 2. Migrate: remove legacy hub-member-read-all wildcard policy if present.
+	// This policy granted read/list on ResourceType:"*" which is too broad —
+	// project, agent, broker visibility is now membership-gated.
+	retirePolicy(ctx, s, group.ID, "hub-member-read-all")
 
-	// 3. Seed hub-member-create-projects policy
+	// 3. Seed explicit per-type read/list policies for hub-readable types only.
+	// GATE (membership-derived, NOT seeded here): project, agent, broker.
+	// SENSITIVE (NOT seeded here): policy, gcp_service_account, secret, environment, variable.
+	for _, rt := range []struct{ name, desc, resourceType string }{
+		{"hub-member-read-user", "Allow hub members to read users", "user"},
+		{"hub-member-read-group", "Allow hub members to read groups", "group"},
+		{"hub-member-read-template", "Allow hub members to read templates", "template"},
+		{"hub-member-read-harness-config", "Allow hub members to read harness configs", "harness_config"},
+	} {
+		seedPolicy(ctx, s, group.ID, &store.Policy{
+			ID:           api.NewUUID(),
+			Name:         rt.name,
+			Description:  rt.desc,
+			ScopeType:    "hub",
+			ResourceType: rt.resourceType,
+			Actions:      []string{"read", "list"},
+			Effect:       "allow",
+		})
+	}
+
+	// 4. Seed hub-member-create-projects policy
 	seedPolicy(ctx, s, group.ID, &store.Policy{
 		ID:           api.NewUUID(),
 		Name:         "hub-member-create-projects",
@@ -68,6 +82,24 @@ func seedDefaultPoliciesAndGroups(ctx context.Context, s store.Store) {
 		Actions:      []string{"create"},
 		Effect:       "allow",
 	})
+}
+
+// retirePolicy removes a policy by name and its binding to the given group.
+// No-op if the policy does not exist.
+func retirePolicy(ctx context.Context, s store.Store, groupID, policyName string) {
+	existing, err := s.ListPolicies(ctx, store.PolicyFilter{Name: policyName}, store.ListOptions{Limit: 1})
+	if err != nil || existing.TotalCount == 0 {
+		return
+	}
+	p := existing.Items[0]
+	if err := s.RemovePolicyBinding(ctx, p.ID, "group", groupID); err != nil {
+		slog.Warn("failed to remove binding for retired policy", "name", policyName, "error", err)
+	}
+	if err := s.DeletePolicy(ctx, p.ID); err != nil {
+		slog.Warn("failed to delete retired policy", "name", policyName, "error", err)
+	} else {
+		slog.Info("retired legacy policy", "name", policyName, "id", p.ID)
+	}
 }
 
 // seedPolicy creates a policy and binds it to the given group, skipping
