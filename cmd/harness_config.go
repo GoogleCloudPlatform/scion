@@ -163,13 +163,12 @@ This overwrites config.yaml and home directory files with the built-in versions.
 			return fmt.Errorf("harness-config %q not found at %s: %w", name, targetDir, err)
 		}
 
-		// Reset always seeds from the built-in defaults of the underlying
-		// harness type, so use the legacy New() shim here rather than
-		// Resolve(); the latter would dispatch container-script when
-		// activated, but reset must restore the embedded built-in fileset.
 		h := harness.New(hcDir.Config.Harness)
 
-		// Reset by re-seeding with force=true
+		if _, basePath := h.GetHarnessEmbedsFS(); basePath == "" {
+			return fmt.Errorf("cannot reset %q: it is installed from a bundle and has no built-in defaults; reinstall with: scion harness-config install harnesses/%s", name, hcDir.Config.Harness)
+		}
+
 		if err := config.SeedHarnessConfig(targetDir, h, true); err != nil {
 			return fmt.Errorf("failed to reset harness-config %q: %w", name, err)
 		}
