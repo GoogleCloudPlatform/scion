@@ -1662,19 +1662,25 @@ func (s *Server) resetAuth(w http.ResponseWriter, r *http.Request, id, projectID
 	}
 
 	// Signal sciontool init (PID 1) to re-read the token and restart refresh.
+	// Best-effort: the token refresh loop will pick up the new token even
+	// without the signal, so a failure here should not fail the request.
 	signalCmd := []string{"kill", "-USR2", "1"}
+	signaled := true
 	if _, err := rt.Exec(ctx, target, signalCmd); err != nil {
-		s.agentLifecycleLog.Error("reset-auth: failed to signal PID 1", "agent_id", id, "error", err)
-		RuntimeError(w, "Token written but failed to signal init: "+err.Error())
-		return
+		s.agentLifecycleLog.Warn("reset-auth: failed to signal PID 1 (best-effort)", "agent_id", id, "error", err)
+		signaled = false
 	}
 
-	s.agentLifecycleLog.Info("Auth reset completed", "agent_id", id)
+	s.agentLifecycleLog.Info("Auth reset completed", "agent_id", id, "signaled", signaled)
 
 	s.forceHeartbeatAll("reset-auth", id)
 
+	msg := "Auth reset: token written and init signaled"
+	if !signaled {
+		msg = "Auth reset: token written (signal skipped — refresh loop will pick it up)"
+	}
 	writeJSON(w, http.StatusOK, ResetAuthResponse{
-		Message: "Auth reset: token written and init signaled",
+		Message: msg,
 	})
 }
 
