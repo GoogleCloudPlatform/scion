@@ -26,8 +26,6 @@ func getTestHarnesses() []api.Harness {
 	return []api.Harness{
 		&harness.GeminiCLI{},
 		&harness.ClaudeCode{},
-		&harness.OpenCode{},
-		&harness.Codex{},
 	}
 }
 

@@ -17,6 +17,7 @@ package harness
 import (
 	"context"
 	"fmt"
+	"log/slog"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -110,6 +111,12 @@ func Resolve(_ context.Context, opts ResolveOptions) (*ResolvedHarness, error) {
 		}, nil
 	}
 
+	// Hint: known harness names that lack a compiled-in Go implementation
+	// need an installed bundle to provide their full functionality.
+	if hcDir == nil && (entry.Harness == "opencode" || entry.Harness == "codex") {
+		slog.Warn("harness is not installed; run: scion harness-config install harnesses/"+entry.Harness, "harness", entry.Harness)
+	}
+
 	// 3. Declarative generic. If config.yaml has declarative metadata
 	// (command/env_template/capabilities), use the declarative wrapper so
 	// callers get those fields. Otherwise fall back to the legacy Generic.
@@ -140,10 +147,6 @@ func newBuiltin(harnessName string) api.Harness {
 		return &ClaudeCode{}
 	case "gemini":
 		return &GeminiCLI{}
-	case "opencode":
-		return &OpenCode{}
-	case "codex":
-		return &Codex{}
 	}
 	return nil
 }

@@ -27,8 +27,6 @@ func TestNew_BuiltinHarnesses(t *testing.T) {
 	}{
 		{"claude", "claude"},
 		{"gemini", "gemini"},
-		{"opencode", "opencode"},
-		{"codex", "codex"},
 	}
 
 	for _, tt := range tests {

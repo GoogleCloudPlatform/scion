@@ -18,7 +18,6 @@ import (
 	"context"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"testing"
 
@@ -41,32 +40,6 @@ func repoRoot(t *testing.T) string {
 func bundlePath(t *testing.T, name string) string {
 	t.Helper()
 	return filepath.Join(repoRoot(t), "harnesses", name)
-}
-
-// collectRelPaths walks a directory and returns a sorted list of relative
-// file paths (no directories).
-func collectRelPaths(t *testing.T, root string) []string {
-	t.Helper()
-	var paths []string
-	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		if info.IsDir() {
-			return nil
-		}
-		rel, err := filepath.Rel(root, path)
-		if err != nil {
-			return err
-		}
-		paths = append(paths, filepath.ToSlash(rel))
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("collectRelPaths(%s): %v", root, err)
-	}
-	sort.Strings(paths)
-	return paths
 }
 
 // TestBundleInstall_OpenCode validates that the harnesses/opencode/ bundle
@@ -123,59 +96,7 @@ func TestBundleInstall_OpenCode(t *testing.T) {
 		}
 	}
 
-	// 5. Compare against the Go embed seeded layout. The embed path uses
-	// SeedHarnessConfig which runs mapEmbedFileToHomePath; the bundle uses
-	// explicit home/** paths. They must produce identical home/ trees.
-	embedDir := t.TempDir()
-	if err := config.SeedHarnessConfig(embedDir, &OpenCode{}, false); err != nil {
-		t.Fatalf("SeedHarnessConfig (embed): %v", err)
-	}
-
-	embedHomeFiles := collectRelPaths(t, filepath.Join(embedDir, "home"))
-	bundleHomeFiles := collectRelPaths(t, filepath.Join(installDir, "home"))
-	if len(embedHomeFiles) != len(bundleHomeFiles) {
-		t.Errorf("home/ file count mismatch: embed=%v bundle=%v", embedHomeFiles, bundleHomeFiles)
-	}
-	for i := range embedHomeFiles {
-		if i >= len(bundleHomeFiles) {
-			break
-		}
-		if embedHomeFiles[i] != bundleHomeFiles[i] {
-			t.Errorf("home/ path mismatch at [%d]: embed=%q bundle=%q", i, embedHomeFiles[i], bundleHomeFiles[i])
-		}
-	}
-
-	// Compare file contents of home/ files.
-	for _, rel := range embedHomeFiles {
-		embedContent, err := os.ReadFile(filepath.Join(embedDir, "home", filepath.FromSlash(rel)))
-		if err != nil {
-			t.Fatalf("read embed home/%s: %v", rel, err)
-		}
-		bundleContent, err := os.ReadFile(filepath.Join(installDir, "home", filepath.FromSlash(rel)))
-		if err != nil {
-			t.Fatalf("read bundle home/%s: %v", rel, err)
-		}
-		if string(embedContent) != string(bundleContent) {
-			t.Errorf("home/%s content differs between embed and bundle", rel)
-		}
-	}
-
-	// Compare root support files (provision.py, config.yaml).
-	for _, name := range []string{"config.yaml", "provision.py"} {
-		embedContent, err := os.ReadFile(filepath.Join(embedDir, name))
-		if err != nil {
-			t.Fatalf("read embed %s: %v", name, err)
-		}
-		bundleContent, err := os.ReadFile(filepath.Join(installDir, name))
-		if err != nil {
-			t.Fatalf("read bundle %s: %v", name, err)
-		}
-		if string(embedContent) != string(bundleContent) {
-			t.Errorf("%s content differs between embed and bundle", name)
-		}
-	}
-
-	// 6. Provision from the installed bundle — verify staging produces the
+	// 5. Provision from the installed bundle — verify staging produces the
 	// expected bundle structure in agent home.
 	scripted, err := NewContainerScriptHarness(installDir, installedHC.Config)
 	if err != nil {
@@ -251,55 +172,7 @@ func TestBundleInstall_Codex(t *testing.T) {
 		}
 	}
 
-	// 5. Compare against Go embed seeded layout.
-	embedDir := t.TempDir()
-	if err := config.SeedHarnessConfig(embedDir, &Codex{}, false); err != nil {
-		t.Fatalf("SeedHarnessConfig (embed): %v", err)
-	}
-
-	embedHomeFiles := collectRelPaths(t, filepath.Join(embedDir, "home"))
-	bundleHomeFiles := collectRelPaths(t, filepath.Join(installDir, "home"))
-	if len(embedHomeFiles) != len(bundleHomeFiles) {
-		t.Errorf("home/ file count mismatch: embed=%v bundle=%v", embedHomeFiles, bundleHomeFiles)
-	}
-	for i := range embedHomeFiles {
-		if i >= len(bundleHomeFiles) {
-			break
-		}
-		if embedHomeFiles[i] != bundleHomeFiles[i] {
-			t.Errorf("home/ path mismatch at [%d]: embed=%q bundle=%q", i, embedHomeFiles[i], bundleHomeFiles[i])
-		}
-	}
-
-	for _, rel := range embedHomeFiles {
-		embedContent, err := os.ReadFile(filepath.Join(embedDir, "home", filepath.FromSlash(rel)))
-		if err != nil {
-			t.Fatalf("read embed home/%s: %v", rel, err)
-		}
-		bundleContent, err := os.ReadFile(filepath.Join(installDir, "home", filepath.FromSlash(rel)))
-		if err != nil {
-			t.Fatalf("read bundle home/%s: %v", rel, err)
-		}
-		if string(embedContent) != string(bundleContent) {
-			t.Errorf("home/%s content differs between embed and bundle", rel)
-		}
-	}
-
-	for _, name := range []string{"config.yaml", "provision.py"} {
-		embedContent, err := os.ReadFile(filepath.Join(embedDir, name))
-		if err != nil {
-			t.Fatalf("read embed %s: %v", name, err)
-		}
-		bundleContent, err := os.ReadFile(filepath.Join(installDir, name))
-		if err != nil {
-			t.Fatalf("read bundle %s: %v", name, err)
-		}
-		if string(embedContent) != string(bundleContent) {
-			t.Errorf("%s content differs between embed and bundle", name)
-		}
-	}
-
-	// 6. Provision from the installed bundle.
+	// 5. Provision from the installed bundle.
 	scripted, err := NewContainerScriptHarness(installDir, installedHC.Config)
 	if err != nil {
 		t.Fatalf("NewContainerScriptHarness: %v", err)

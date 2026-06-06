@@ -91,8 +91,6 @@ func TestRequiredAuthEnvKeysFromConfig_ParityWithCompiled(t *testing.T) {
 	}{
 		{"claude", []string{"", "api-key", "oauth-token", "auth-file", "vertex-ai", "unknown"}},
 		{"gemini", []string{"", "api-key", "auth-file", "vertex-ai", "unknown"}},
-		{"opencode", []string{"", "api-key", "auth-file", "unknown"}},
-		{"codex", []string{"", "api-key", "auth-file", "unknown"}},
 	}
 	for _, tc := range cases {
 		authMeta := loadAuthMetaFromHarness(t, tc.harness)
@@ -207,9 +205,6 @@ func TestDetectAuthTypeFromFileSecretsFromConfig(t *testing.T) {
 		{"claude", "auth-file wins over vertex-ai", []string{"CLAUDE_AUTH", "gcloud-adc"}, "auth-file"},
 		{"gemini", "OAUTH wins", []string{"GEMINI_OAUTH_CREDS", "gcloud-adc"}, "auth-file"},
 		{"gemini", "gcloud-adc only", []string{"gcloud-adc"}, "vertex-ai"},
-		{"codex", "CODEX_AUTH", []string{"CODEX_AUTH"}, "auth-file"},
-		{"opencode", "OPENCODE_AUTH", []string{"OPENCODE_AUTH"}, "auth-file"},
-		{"opencode", "no files", nil, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.harness+"/"+tc.name, func(t *testing.T) {
@@ -232,9 +227,6 @@ func TestDetectAuthTypeFromGCPIdentityFromConfig(t *testing.T) {
 		{"claude", false, ""},
 		{"gemini", true, "vertex-ai"},
 		{"gemini", false, ""},
-		{"codex", true, ""},     // no vertex-ai type declared
-		{"opencode", true, ""},  // no vertex-ai type declared
-		{"opencode", false, ""}, // no vertex-ai type declared
 	}
 	for _, tc := range cases {
 		t.Run(tc.harness, func(t *testing.T) {
