@@ -121,12 +121,9 @@ fi
 # ── 3. Generate kubeconfig from live cluster info ────────────────────────────
 
 log "Fetching GKE cluster details"
-ENDPOINT=$(gcloud container clusters describe "$GKE_CLUSTER" \
+read -r ENDPOINT CA_CERT < <(gcloud container clusters describe "$GKE_CLUSTER" \
   --region "$REGION" --project "$PROJECT" \
-  --format="value(endpoint)")
-CA_CERT=$(gcloud container clusters describe "$GKE_CLUSTER" \
-  --region "$REGION" --project "$PROJECT" \
-  --format="value(masterAuth.clusterCaCertificate)")
+  --format="value(endpoint,masterAuth.clusterCaCertificate)")
 
 [[ -n "$ENDPOINT" ]] || die "Could not fetch cluster endpoint"
 [[ -n "$CA_CERT"  ]] || die "Could not fetch cluster CA certificate"
@@ -182,7 +179,10 @@ ensure_secret "${SERVICE_NAME}-settings"   "$SETTINGS_CONTENT"
 # ── 7. Ensure K8s namespace ─────────────────────────────────────────────────
 
 log "Ensuring namespace ${K8S_NAMESPACE} exists in ${GKE_CLUSTER}"
-kubectl create namespace "$K8S_NAMESPACE" --dry-run=client -o yaml | kubectl apply -f - || true
+LOCAL_KUBECONFIG=$(mktemp)
+echo "$KUBECONFIG_CONTENT" > "$LOCAL_KUBECONFIG"
+KUBECONFIG="$LOCAL_KUBECONFIG" kubectl create namespace "$K8S_NAMESPACE" --dry-run=client -o yaml | KUBECONFIG="$LOCAL_KUBECONFIG" kubectl apply -f - || true
+rm -f "$LOCAL_KUBECONFIG"
 
 # ── 8. Create Artifact Registry repo (if needed) ────────────────────────────
 

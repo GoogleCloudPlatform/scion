@@ -307,15 +307,14 @@ func (c *jwksCache) refresh() error {
 	c.lastAttempted = time.Now()
 	c.mu.Unlock()
 
-	// Perform the network fetch outside the lock to avoid holding it across I/O.
-	resp, err := c.client.Get(c.url)
-
-	c.mu.Lock()
 	defer func() {
+		c.mu.Lock()
 		c.refreshing = false
 		c.mu.Unlock()
 	}()
 
+	// All network I/O and response processing happens with no lock held.
+	resp, err := c.client.Get(c.url)
 	if err != nil {
 		slog.Warn("jwks fetch failed, serving last-good keys", "url", c.url, "error", err)
 		return err
@@ -345,8 +344,11 @@ func (c *jwksCache) refresh() error {
 		}
 	}
 
+	// Re-acquire lock only to swap the cached keys.
+	c.mu.Lock()
 	c.keys = newKeys
 	c.lastFetched = time.Now()
+	c.mu.Unlock()
 
 	slog.Debug("jwks cache refreshed", "url", c.url, "keyCount", len(newKeys))
 	return nil

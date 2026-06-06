@@ -530,11 +530,21 @@ func NewProxyUserCache() *ProxyUserCache {
 // Get returns a cached user identity if present and not expired.
 func (c *ProxyUserCache) Get(email string) (UserIdentity, bool) {
 	c.mu.RLock()
-	defer c.mu.RUnlock()
 	entry, ok := c.cache[email]
-	if !ok || time.Now().After(entry.expiresAt) {
+	if !ok {
+		c.mu.RUnlock()
 		return nil, false
 	}
+	if time.Now().After(entry.expiresAt) {
+		c.mu.RUnlock()
+		c.mu.Lock()
+		if entry, ok = c.cache[email]; ok && time.Now().After(entry.expiresAt) {
+			delete(c.cache, email)
+		}
+		c.mu.Unlock()
+		return nil, false
+	}
+	defer c.mu.RUnlock()
 	return entry.identity, true
 }
 
