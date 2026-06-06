@@ -28,11 +28,19 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 )
 
-// newTestBridge creates a Bridge with a real SQLite store for lifecycle tests.
+// newLifecycleTestBridge creates a Bridge with a real SQLite store for lifecycle tests.
 // The broker worker and janitor goroutines are started; callers must call
 // b.Shutdown() (or defer it) to avoid goroutine leaks.
-func newLifecycleTestBridge(t *testing.T) (*Bridge, *state.Store) {
+// An optional *Metrics can be passed to wire metrics from the start, avoiding
+// data races from assigning b.metrics after background goroutines are running.
+func newLifecycleTestBridge(t *testing.T, opts ...func(*lifecycleTestOpts)) (*Bridge, *state.Store) {
 	t.Helper()
+
+	o := &lifecycleTestOpts{}
+	for _, fn := range opts {
+		fn(o)
+	}
+
 	dir := t.TempDir()
 	store, err := state.New(filepath.Join(dir, "lifecycle-test.db"))
 	if err != nil {
@@ -45,9 +53,17 @@ func newLifecycleTestBridge(t *testing.T) (*Bridge, *state.Store) {
 		Hub:      HubConfig{User: "test-user"},
 		Timeouts: TimeoutConfig{SendMessage: 5 * time.Second},
 	}
-	b := New(store, nil, nil, cfg, nil, log)
+	b := New(store, nil, nil, cfg, o.metrics, log)
 	t.Cleanup(func() { b.Shutdown() })
 	return b, store
+}
+
+type lifecycleTestOpts struct {
+	metrics *Metrics
+}
+
+func withMetrics(m *Metrics) func(*lifecycleTestOpts) {
+	return func(o *lifecycleTestOpts) { o.metrics = m }
 }
 
 // seedTask creates and registers a task in both the store and the bridge's
@@ -793,12 +809,9 @@ func TestDispatchToWaiterSkipsStateChange(t *testing.T) {
 // --- Metrics test ---
 
 func TestContentMessageDoesNotIncrementCompletedMetric(t *testing.T) {
-	b, store := newLifecycleTestBridge(t)
-
-	// Create a fresh bridge with metrics enabled using a local registry.
 	reg := prometheus.NewRegistry()
 	metrics := NewMetrics(reg)
-	b.metrics = metrics
+	b, store := newLifecycleTestBridge(t, withMetrics(metrics))
 
 	taskID := "no-metric-1"
 	seedTask(t, b, store, taskID, "proj1", "agent-a")
@@ -1132,6 +1145,102 @@ func TestStateChangeTerminalityTableDriven(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// --- Stream close regression tests ---
+
+func TestTerminalStateClosesStreamChannel(t *testing.T) {
+	b, store := newLifecycleTestBridge(t)
+	taskID := "stream-close-1"
+	seedTask(t, b, store, taskID, "proj1", "agent-a")
+
+	ch, cleanup, err := b.streams.Subscribe(taskID)
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+	defer cleanup()
+
+	// Send a terminal state-change.
+	completedMsg := &messages.StructuredMessage{
+		Version:   1,
+		Timestamp: time.Now().UTC().Format(time.RFC3339),
+		Sender:    "agent:agent-a",
+		Recipient: "user:test-user",
+		Msg:       "COMPLETED",
+		Type:      messages.TypeStateChange,
+		Metadata:  map[string]string{"a2aTaskId": taskID},
+	}
+	if err := b.HandleBrokerMessage(context.Background(), "scion.project.proj1.user.test-user.messages", completedMsg); err != nil {
+		t.Fatalf("HandleBrokerMessage: %v", err)
+	}
+
+	// The channel should be closed after the broker worker processes the message.
+	// Read all events; the channel must close (range exits).
+	done := make(chan struct{})
+	var events []StreamEvent
+	go func() {
+		defer close(done)
+		for ev := range ch {
+			events = append(events, ev)
+		}
+	}()
+
+	select {
+	case <-done:
+		// Good — channel was closed.
+	case <-time.After(2 * time.Second):
+		t.Fatal("stream channel was not closed after terminal state-change (CloseAll missing?)")
+	}
+
+	// Verify we received the final event.
+	var foundFinal bool
+	for _, ev := range events {
+		if ev.StatusUpdate != nil && ev.StatusUpdate.Final {
+			foundFinal = true
+		}
+	}
+	if !foundFinal {
+		t.Error("expected final StatusUpdate before channel close")
+	}
+}
+
+func TestTerminalStateFailedClosesStreamChannel(t *testing.T) {
+	b, store := newLifecycleTestBridge(t)
+	taskID := "stream-close-fail-1"
+	seedTask(t, b, store, taskID, "proj1", "agent-a")
+
+	ch, cleanup, err := b.streams.Subscribe(taskID)
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+	defer cleanup()
+
+	failMsg := &messages.StructuredMessage{
+		Version:   1,
+		Timestamp: time.Now().UTC().Format(time.RFC3339),
+		Sender:    "agent:agent-a",
+		Recipient: "user:test-user",
+		Msg:       "ERROR",
+		Type:      messages.TypeStateChange,
+		Metadata:  map[string]string{"a2aTaskId": taskID},
+	}
+	if err := b.HandleBrokerMessage(context.Background(), "scion.project.proj1.user.test-user.messages", failMsg); err != nil {
+		t.Fatalf("HandleBrokerMessage: %v", err)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for range ch {
+		}
+	}()
+
+	select {
+	case <-done:
+		// Good.
+	case <-time.After(2 * time.Second):
+		t.Fatal("stream channel was not closed after ERROR state-change")
 	}
 }
 

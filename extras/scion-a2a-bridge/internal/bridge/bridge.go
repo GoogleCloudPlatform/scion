@@ -611,8 +611,6 @@ func (b *Bridge) dispatchToWaiter(taskID string, msg *messages.StructuredMessage
 
 // dispatchToActiveTask routes a broker message to streaming/push subscribers for a task.
 func (b *Bridge) dispatchToActiveTask(ctx context.Context, taskID, agentSlug string, msg *messages.StructuredMessage) {
-	a2aMsg, artifacts := TranslateScionToA2A(msg)
-
 	if msg.Type == messages.TypeStateChange {
 		taskState := MapActivityToTaskState(msg.Msg)
 		if err := b.store.UpdateTaskState(taskID, taskState); err != nil {
@@ -637,40 +635,44 @@ func (b *Bridge) dispatchToActiveTask(ctx context.Context, taskID, agentSlug str
 			aKey := b.activeTasks[taskID].aKey
 			b.tasksMu.RUnlock()
 			b.unregisterActiveTask(taskID, aKey)
+			b.streams.CloseAll(taskID)
 		}
-	} else {
-		// Content message — broadcast to subscribers but keep task alive.
-		// Task lifecycle is driven by state-change messages, not content.
-		// Touch the DB timestamp so the janitor doesn't reap active tasks
-		// whose only recent activity is content messages.
-		if err := b.store.UpdateTaskState(taskID, TaskStateWorking); err != nil {
-			b.log.Error("failed to refresh task timestamp for content message",
-				"task_id", taskID, "error", err)
-		}
-		for _, art := range artifacts {
-			artEvent := StreamEvent{
-				ArtifactUpdate: &TaskArtifactUpdate{
-					TaskID:   taskID,
-					Artifact: art,
-				},
-			}
-			b.streams.Broadcast(taskID, artEvent)
-			b.push.Dispatch(ctx, taskID, artEvent)
-		}
+		return
+	}
 
-		statusEvent := StreamEvent{
-			StatusUpdate: &TaskStatusUpdate{
-				TaskID: taskID,
-				Status: TaskStatus{
-					State:   TaskStateWorking,
-					Message: &a2aMsg,
-				},
-				Final: false,
+	// Content message — broadcast to subscribers but keep task alive.
+	// Task lifecycle is driven by state-change messages, not content.
+	// Touch the DB timestamp so the janitor doesn't reap active tasks
+	// whose only recent activity is content messages.
+	a2aMsg, artifacts := TranslateScionToA2A(msg)
+
+	if err := b.store.UpdateTaskState(taskID, TaskStateWorking); err != nil {
+		b.log.Error("failed to refresh task timestamp for content message",
+			"task_id", taskID, "error", err)
+	}
+	for _, art := range artifacts {
+		artEvent := StreamEvent{
+			ArtifactUpdate: &TaskArtifactUpdate{
+				TaskID:   taskID,
+				Artifact: art,
 			},
 		}
-		b.streams.Broadcast(taskID, statusEvent)
-		b.push.Dispatch(ctx, taskID, statusEvent)
+		b.streams.Broadcast(taskID, artEvent)
+		b.push.Dispatch(ctx, taskID, artEvent)
 	}
+
+	statusEvent := StreamEvent{
+		StatusUpdate: &TaskStatusUpdate{
+			TaskID: taskID,
+			Status: TaskStatus{
+				State:   TaskStateWorking,
+				Message: &a2aMsg,
+			},
+			Final: false,
+		},
+	}
+	b.streams.Broadcast(taskID, statusEvent)
+	b.push.Dispatch(ctx, taskID, statusEvent)
 }
 
 func truncate(s string, n int) string {
