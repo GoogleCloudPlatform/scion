@@ -2177,11 +2177,14 @@ func TestListAgents_HarnessConfigEnriched(t *testing.T) {
 	ctx := context.Background()
 
 	project := &store.Project{
-		ID:   tid("project-harness-enrich"),
-		Name: "Harness Enrichment Project",
-		Slug: "harness-enrich-project",
+		ID:        tid("project-harness-enrich"),
+		Name:      "Harness Enrichment Project",
+		Slug:      "harness-enrich-project",
+		OwnerID:   DevUserID,
+		CreatedBy: DevUserID,
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
+	srv.createProjectMembersGroupAndPolicy(ctx, project)
 
 	agent := &store.Agent{
 		ID:        tid("agent-harness-enrich"),
