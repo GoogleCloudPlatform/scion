@@ -189,6 +189,12 @@ func TestBrokerAuthz_Dispatch_AutoProvide_NonOwnerAllowed(t *testing.T) {
 	srv, s, _, bob, _, project, broker := setupBrokerAuthzTest(t)
 	ctx := context.Background()
 
+	// Promote Bob to admin in the project so he can create agents (role=member is
+	// read-only under the new model; create/stop require admin/owner).
+	membersGroup, err := s.GetGroupBySlug(ctx, "project:"+project.Slug+":members")
+	require.NoError(t, err)
+	require.NoError(t, s.UpdateGroupMemberRole(ctx, membersGroup.ID, store.GroupMemberTypeUser, bob.ID, store.GroupMemberRoleAdmin))
+
 	// Mark the broker as auto-provide — shared infrastructure available to all users
 	broker.AutoProvide = true
 	require.NoError(t, s.UpdateRuntimeBroker(ctx, broker))
