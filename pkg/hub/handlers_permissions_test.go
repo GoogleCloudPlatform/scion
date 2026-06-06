@@ -1239,9 +1239,9 @@ func TestPolicyList(t *testing.T) {
 		t.Fatalf("failed to decode response: %v", err)
 	}
 
-	// 3 test policies + 2 seeded policies (hub-member-read-all, hub-member-create-projects) = 5
-	if len(resp.Policies) != 5 {
-		t.Errorf("expected 5 policies (3 test + 2 seeded), got %d", len(resp.Policies))
+	// 3 test policies + 5 seeded policies (hub-member-read-{user,group,template,harness-config}, hub-member-create-projects) = 8
+	if len(resp.Policies) != 8 {
+		t.Errorf("expected 8 policies (3 test + 5 seeded), got %d", len(resp.Policies))
 	}
 }
 
