@@ -87,6 +87,16 @@ type ServerConfig struct {
 	// other replica behind the load balancer. When empty, signing keys fall
 	// back to per-hub storage in the secret backend / store.
 	SharedSigningSecret string
+	// RequireStableSigningKey makes hub startup fail rather than silently
+	// generate a brand-new signing key when no existing key can be resolved.
+	// Generating a new key invalidates every token previously issued by this
+	// hub — agents get crypto verification errors and cannot self-refresh. After
+	// a restart that changed the hub identity (e.g. a new pod hostname -> new
+	// HubID) without a SharedSigningSecret, that silently orphans every live
+	// agent. Enabling this turns that silent outage into a loud fail-fast.
+	// Operators enabling it must provide a SharedSigningSecret or pre-provision
+	// the signing keys; otherwise first boot will (correctly) refuse to start.
+	RequireStableSigningKey bool
 	// AuthMode is the exclusive human auth mode: "oauth" (default), "proxy", "dev".
 	AuthMode string
 	// ProxyAuthenticator is the configured proxy authenticator (when AuthMode == "proxy").
@@ -663,7 +673,11 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 	// Initialize agent token service
 	agentKey, err := srv.ensureSigningKey(ctx, SecretKeyAgentSigningKey, cfg.AgentTokenConfig.SigningKey)
 	if err != nil {
-		if isGCPBackend {
+		// Fail-fast for a GCP backend (production) or when stable keys are
+		// required. Otherwise a non-fatal error would fall through to
+		// NewAgentTokenService generating an ephemeral random key, reintroducing
+		// the silent token-invalidation this guard exists to prevent.
+		if isGCPBackend || cfg.RequireStableSigningKey {
 			return nil, fmt.Errorf("agent signing key: %w", err)
 		}
 		logSigningKeyFailure("agent", err)
@@ -682,7 +696,7 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 	// Initialize user token service
 	userKey, err := srv.ensureSigningKey(ctx, SecretKeyUserSigningKey, cfg.UserTokenConfig.SigningKey)
 	if err != nil {
-		if isGCPBackend {
+		if isGCPBackend || cfg.RequireStableSigningKey {
 			return nil, fmt.Errorf("user signing key: %w", err)
 		}
 		logSigningKeyFailure("user", err)
@@ -1058,7 +1072,29 @@ func (s *Server) ensureSigningKey(ctx context.Context, keyName string, existingK
 		}
 	}
 
-	// Not found anywhere, generate a new one
+	// Not found anywhere — we must generate a new key. Generating a new signing
+	// key invalidates EVERY token previously issued by this hub: live agents see
+	// "failed to verify token" crypto errors and, because the self-service
+	// refresh endpoint authenticates with the (now-invalid) token, cannot
+	// recover on their own. This is expected on genuine first boot, but after a
+	// restart that changed the hub identity (e.g. a new pod hostname -> new
+	// HubID) without a SharedSigningSecret it silently orphans every live agent.
+	//
+	// Fail-fast when the operator has opted into stable-key enforcement, and
+	// otherwise make the token-invalidating event loud (error-level) so it is
+	// alertable rather than buried in a warning.
+	if s.config.RequireStableSigningKey {
+		return nil, fmt.Errorf("refusing to generate a new signing key %q: RequireStableSigningKey is set and no existing key was found "+
+			"(generating one would invalidate all live agent/user tokens); provide a SharedSigningSecret or pre-provision the key", keyName)
+	}
+	if hasSecretBackend {
+		slog.Error("ensureSigningKey: no existing signing key found despite a configured secret backend; generating a NEW key — ALL previously issued tokens are now INVALID",
+			"key", keyName,
+			"hub_id", hubID,
+			"hint", "set a SharedSigningSecret (SESSION_SECRET) or pin a stable HubID so signing keys persist across restarts/redeploys",
+		)
+	}
+
 	slog.Warn("Signing key not found in any source, generating new key", "key", keyName, "hub_id", hubID)
 	newKey := make([]byte, 32)
 	if _, err := rand.Read(newKey); err != nil {

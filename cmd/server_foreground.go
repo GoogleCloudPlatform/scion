@@ -947,6 +947,12 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 		// HubID. Without this, a JWT minted by one replica fails validation on
 		// another (cross-replica "session_expired" login loop).
 		SharedSigningSecret: resolveSessionSecret(),
+		// When SCION_REQUIRE_STABLE_SIGNING_KEY is truthy, the hub refuses to
+		// start rather than silently mint a new signing key it cannot resolve
+		// (which would invalidate every live token after, e.g., a redeploy onto a
+		// new host that changed the HubID). Operators enabling this must supply a
+		// session secret or pre-provision the signing keys.
+		RequireStableSigningKey: os.Getenv("SCION_REQUIRE_STABLE_SIGNING_KEY") == "true",
 	}
 
 	// Construct proxy authenticator when auth mode is "proxy"

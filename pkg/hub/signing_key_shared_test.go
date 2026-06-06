@@ -17,8 +17,87 @@ package hub
 import (
 	"bytes"
 	"context"
+	"strings"
 	"testing"
 )
+
+// TestEnsureSigningKey_RequireStableRefusesGeneration verifies that, with
+// RequireStableSigningKey set and no existing key resolvable, ensureSigningKey
+// fails fast instead of silently minting a new key (which would invalidate every
+// live token). This is the regression guard for the hub-restart auth deadlock.
+func TestEnsureSigningKey_RequireStableRefusesGeneration(t *testing.T) {
+	st, err := newTestStore(":memory:")
+	if err != nil {
+		t.Fatalf("newTestStore: %v", err)
+	}
+	defer st.Close()
+
+	s := &Server{
+		hubID:  "host-with-no-key",
+		store:  st,
+		config: ServerConfig{RequireStableSigningKey: true},
+	}
+
+	_, err = s.ensureSigningKey(context.Background(), SecretKeyAgentSigningKey, nil)
+	if err == nil {
+		t.Fatal("expected ensureSigningKey to refuse generating a new key when RequireStableSigningKey is set")
+	}
+	if !strings.Contains(err.Error(), "RequireStableSigningKey") {
+		t.Fatalf("error should explain the refusal, got: %v", err)
+	}
+}
+
+// TestEnsureSigningKey_RequireStableAllowsSharedSecret verifies that stable-key
+// enforcement still works when the operator supplies a SharedSigningSecret: the
+// key is derived deterministically and no generation (or store access) occurs.
+func TestEnsureSigningKey_RequireStableAllowsSharedSecret(t *testing.T) {
+	// Nil store is fine: shared-secret derivation returns before any store access.
+	s := &Server{
+		hubID:  "host1",
+		config: ServerConfig{RequireStableSigningKey: true, SharedSigningSecret: "deployment-secret"},
+	}
+
+	key, err := s.ensureSigningKey(context.Background(), SecretKeyAgentSigningKey, nil)
+	if err != nil {
+		t.Fatalf("ensureSigningKey with shared secret should succeed under require-stable, got: %v", err)
+	}
+	if len(key) != 32 {
+		t.Fatalf("expected a 32-byte derived key, got %d bytes", len(key))
+	}
+	if !bytes.Equal(key, deriveSharedSigningKey("deployment-secret", SecretKeyAgentSigningKey)) {
+		t.Fatal("require-stable should derive the same key as deriveSharedSigningKey")
+	}
+}
+
+// TestEnsureSigningKey_GeneratesWhenNotRequired verifies the default behavior is
+// preserved: without RequireStableSigningKey, a missing key is generated and
+// persisted rather than erroring.
+func TestEnsureSigningKey_GeneratesWhenNotRequired(t *testing.T) {
+	st, err := newTestStore(":memory:")
+	if err != nil {
+		t.Fatalf("newTestStore: %v", err)
+	}
+	defer st.Close()
+
+	s := &Server{hubID: "host1", store: st, config: ServerConfig{}}
+
+	key, err := s.ensureSigningKey(context.Background(), SecretKeyAgentSigningKey, nil)
+	if err != nil {
+		t.Fatalf("ensureSigningKey should generate a key by default, got: %v", err)
+	}
+	if len(key) != 32 {
+		t.Fatalf("expected a 32-byte generated key, got %d bytes", len(key))
+	}
+
+	// The generated key is persisted, so a second resolve returns the same key.
+	key2, err := s.ensureSigningKey(context.Background(), SecretKeyAgentSigningKey, nil)
+	if err != nil {
+		t.Fatalf("second ensureSigningKey: %v", err)
+	}
+	if !bytes.Equal(key, key2) {
+		t.Fatal("a generated key must persist and be returned on subsequent resolves")
+	}
+}
 
 // TestDeriveSharedSigningKey_Deterministic verifies that the derivation is
 // stable for a given (secret, keyName) pair and domain-separated across key
