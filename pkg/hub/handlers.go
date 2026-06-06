@@ -324,13 +324,13 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		} else {
-			// Default scope: restrict to user's projects (membership-gated)
+			// Default scope: agents in the user's projects OR owned by the user
+			// (membership-gated). OwnerID is always set so a user with no group
+			// memberships still sees the agents they own (mirrors listProjects).
 			if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
+				filter.OwnerID = userIdent.ID()
 				if projectIDs := s.resolveUserProjectIDsCached(ctx, userIdent.ID()); len(projectIDs) > 0 {
 					filter.MemberOrOwnerProjectIDs = projectIDs
-					filter.OwnerID = userIdent.ID()
-				} else {
-					filter.MemberProjectIDs = []string{"__none__"}
 				}
 			}
 		}
@@ -3918,6 +3918,38 @@ func (s *Server) createProjectMembersGroupAndPolicy(ctx context.Context, project
 	})
 }
 
+// backfillProjectVisibility iterates every existing project and ensures its
+// groups and project-scoped member read policies exist, and that the one-time
+// members→admin migration has run (createProjectMembersGroupAndPolicy is
+// idempotent and uses the legacy create-agents policy as its migration marker).
+// Run once at startup so the read gates in getProject/getProjectAgent evaluate
+// correctly for existing projects from the first request. Best-effort.
+func (s *Server) backfillProjectVisibility(ctx context.Context) {
+	const pageSize = 200
+	cursor := ""
+	migrated := 0
+	for {
+		result, err := s.store.ListProjects(ctx, store.ProjectFilter{}, store.ListOptions{Limit: pageSize, Cursor: cursor})
+		if err != nil {
+			slog.Warn("project visibility backfill: failed to list projects", "error", err.Error())
+			return
+		}
+		for i := range result.Items {
+			project := &result.Items[i]
+			s.createProjectGroup(ctx, project)
+			s.createProjectMembersGroupAndPolicy(ctx, project)
+			migrated++
+		}
+		if result.NextCursor == "" {
+			break
+		}
+		cursor = result.NextCursor
+	}
+	if migrated > 0 {
+		slog.Info("project visibility backfill complete", "projects", migrated)
+	}
+}
+
 // hubManagedProjectPath returns the filesystem path for a hub-managed project workspace.
 // It prefers groves/<slug> (the actual git checkout mounted as /workspace in agents)
 // over projects/<slug> (which only contains project metadata).
@@ -5263,17 +5295,21 @@ func (s *Server) getProject(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 
-	// Gate read access
+	// Ensure associated groups exist (backfill for projects created before
+	// group support was added). These calls are idempotent and also seed the
+	// project-scoped member read policies + run the one-time members→admin
+	// migration. They MUST run before the read gate below, otherwise a member
+	// of a not-yet-backfilled project would be spuriously denied because the
+	// read policy would not exist yet.
+	s.createProjectGroup(ctx, project)
+	s.createProjectMembersGroupAndPolicy(ctx, project)
+
+	// Gate read access (after backfill, so member read policies are in place).
 	decision := s.authzService.CheckAccess(ctx, identity, projectResource(project), ActionRead)
 	if !decision.Allowed {
 		NotFound(w, "Project")
 		return
 	}
-
-	// Ensure associated groups exist (backfill for projects created before
-	// group support was added). These calls are idempotent.
-	s.createProjectGroup(ctx, project)
-	s.createProjectMembersGroupAndPolicy(ctx, project)
 
 	// Enrich owner display name
 	if project.OwnerID != "" {

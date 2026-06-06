@@ -831,6 +831,13 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 	// Seed default policies and groups (idempotent)
 	seedDefaultPoliciesAndGroups(ctx, s)
 
+	// Backfill project visibility policies for existing projects (idempotent).
+	// This seeds the project-scoped member read policies and runs the one-time
+	// members→admin migration for every existing project, so the read gates in
+	// getProject/getProjectAgent evaluate correctly from the first request
+	// (a member must not be locked out waiting for a lazy backfill).
+	srv.backfillProjectVisibility(ctx)
+
 	// Seed the dev user when dev-auth is enabled so that Ent FK constraints
 	// on owner_id are satisfied when the dev user creates projects/groups.
 	if cfg.DevAuthToken != "" {
