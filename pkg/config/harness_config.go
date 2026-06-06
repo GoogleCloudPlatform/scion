@@ -345,8 +345,17 @@ func ComputeHarnessConfigRevision(dirPath string) string {
 		Hash string
 	}
 	var hashes []fileHash
+	skipBasenames := map[string]bool{
+		"Dockerfile":      true,
+		"cloudbuild.yaml": true,
+		"README.md":       true,
+		".gitkeep":        true,
+	}
 	walk := func(path string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil || d.IsDir() {
+			return nil
+		}
+		if skipBasenames[d.Name()] {
 			return nil
 		}
 		rel, relErr := filepath.Rel(dirPath, path)

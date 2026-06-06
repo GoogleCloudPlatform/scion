@@ -435,6 +435,33 @@ func TestSeedHarnessConfigFromFS(t *testing.T) {
 	}
 }
 
+func TestComputeHarnessConfigRevision_SkipsNonRuntimeFiles(t *testing.T) {
+	dir := t.TempDir()
+
+	os.WriteFile(filepath.Join(dir, "config.yaml"), []byte("harness: opencode\n"), 0644)
+	os.MkdirAll(filepath.Join(dir, "home", ".config"), 0755)
+	os.WriteFile(filepath.Join(dir, "home", ".config", "settings.json"), []byte("{}"), 0644)
+
+	baseRev := ComputeHarnessConfigRevision(dir)
+	if baseRev == "" {
+		t.Fatal("expected non-empty revision")
+	}
+
+	for _, skip := range []string{"Dockerfile", "cloudbuild.yaml", "README.md", ".gitkeep"} {
+		os.WriteFile(filepath.Join(dir, skip), []byte("should be ignored"), 0644)
+	}
+	afterSkipped := ComputeHarnessConfigRevision(dir)
+	if afterSkipped != baseRev {
+		t.Errorf("adding non-runtime files changed revision: %s -> %s", baseRev, afterSkipped)
+	}
+
+	os.WriteFile(filepath.Join(dir, "config.yaml"), []byte("harness: opencode\nimage: new\n"), 0644)
+	afterConfig := ComputeHarnessConfigRevision(dir)
+	if afterConfig == baseRev {
+		t.Error("changing config.yaml should change revision")
+	}
+}
+
 func TestMapEmbedFileToHarnessConfigPath_RootSupportFiles(t *testing.T) {
 	targetDir := "/tmp/hc"
 	homeDir := filepath.Join(targetDir, "home")
