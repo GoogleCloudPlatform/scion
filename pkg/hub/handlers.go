@@ -291,8 +291,15 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 		IncludeDeleted:  query.Get("includeDeleted") == "true",
 	}
 
+	// Pre-compute and cache the user's project IDs for reuse within this request.
+	if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
+		r = s.storeUserProjectIDsInContext(r, userIdent.ID())
+		ctx = r.Context()
+	}
+
 	// scope=mine: agents the current user created
 	// scope=shared: agents in projects the user is a member of, but not created by them
+	// default (no scope): agents in the user's projects (membership-gated)
 	// mine=true (legacy): agents the user created or in projects they own/are a member of
 	switch query.Get("scope") {
 	case "mine":
@@ -301,7 +308,7 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 		}
 	case "shared":
 		if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
-			if projectIDs := s.resolveUserProjectIDs(ctx, userIdent.ID()); len(projectIDs) > 0 {
+			if projectIDs := s.resolveUserProjectIDsCached(ctx, userIdent.ID()); len(projectIDs) > 0 {
 				filter.MemberProjectIDs = projectIDs
 				filter.ExcludeOwnerID = userIdent.ID()
 			} else {
@@ -312,8 +319,18 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 		if query.Get("mine") == "true" {
 			if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
 				filter.OwnerID = userIdent.ID()
-				if projectIDs := s.resolveUserProjectIDs(ctx, userIdent.ID()); len(projectIDs) > 0 {
+				if projectIDs := s.resolveUserProjectIDsCached(ctx, userIdent.ID()); len(projectIDs) > 0 {
 					filter.MemberOrOwnerProjectIDs = projectIDs
+				}
+			}
+		} else {
+			// Default scope: restrict to user's projects (membership-gated)
+			if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
+				if projectIDs := s.resolveUserProjectIDsCached(ctx, userIdent.ID()); len(projectIDs) > 0 {
+					filter.MemberOrOwnerProjectIDs = projectIDs
+					filter.OwnerID = userIdent.ID()
+				} else {
+					filter.MemberProjectIDs = []string{"__none__"}
 				}
 			}
 		}
@@ -3410,8 +3427,15 @@ func (s *Server) listProjects(w http.ResponseWriter, r *http.Request) {
 		Slug:       query.Get("slug"),
 	}
 
+	// Pre-compute and cache the user's project IDs for reuse within this request.
+	if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
+		r = s.storeUserProjectIDsInContext(r, userIdent.ID())
+		ctx = r.Context()
+	}
+
 	// scope=mine: projects the current user owns
 	// scope=shared: projects where the user is a member/admin but not the owner
+	// default (no scope): projects the user owns or is a member of (membership-gated)
 	// mine=true (legacy): projects the user owns or is a member of
 	switch query.Get("scope") {
 	case "mine":
@@ -3420,7 +3444,7 @@ func (s *Server) listProjects(w http.ResponseWriter, r *http.Request) {
 		}
 	case "shared":
 		if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
-			if projectIDs := s.resolveUserProjectIDs(ctx, userIdent.ID()); len(projectIDs) > 0 {
+			if projectIDs := s.resolveUserProjectIDsCached(ctx, userIdent.ID()); len(projectIDs) > 0 {
 				filter.MemberProjectIDs = projectIDs
 				filter.ExcludeOwnerID = userIdent.ID()
 			} else {
@@ -3431,7 +3455,15 @@ func (s *Server) listProjects(w http.ResponseWriter, r *http.Request) {
 		if query.Get("mine") == "true" {
 			if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
 				filter.OwnerID = userIdent.ID()
-				if projectIDs := s.resolveUserProjectIDs(ctx, userIdent.ID()); len(projectIDs) > 0 {
+				if projectIDs := s.resolveUserProjectIDsCached(ctx, userIdent.ID()); len(projectIDs) > 0 {
+					filter.MemberOrOwnerIDs = projectIDs
+				}
+			}
+		} else {
+			// Default scope: restrict to user's projects (membership-gated)
+			if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
+				filter.OwnerID = userIdent.ID()
+				if projectIDs := s.resolveUserProjectIDsCached(ctx, userIdent.ID()); len(projectIDs) > 0 {
 					filter.MemberOrOwnerIDs = projectIDs
 				}
 			}
@@ -6199,6 +6231,26 @@ func (s *Server) enrichProjectOwnerNames(ctx context.Context, projects []store.P
 			projects[i].OwnerName = name
 		}
 	}
+}
+
+type projectIDsCacheKey struct{}
+
+// resolveUserProjectIDsCached returns resolveUserProjectIDs results, cached in
+// the request context so the BFS is run at most once per HTTP request.
+func (s *Server) resolveUserProjectIDsCached(ctx context.Context, userID string) []string {
+	if cached, ok := ctx.Value(projectIDsCacheKey{}).([]string); ok {
+		return cached
+	}
+	ids := s.resolveUserProjectIDs(ctx, userID)
+	return ids
+}
+
+// storeUserProjectIDsInContext computes and stores the user's project IDs in the
+// request context for reuse within the same request.
+func (s *Server) storeUserProjectIDsInContext(r *http.Request, userID string) *http.Request {
+	ids := s.resolveUserProjectIDs(r.Context(), userID)
+	ctx := context.WithValue(r.Context(), projectIDsCacheKey{}, ids)
+	return r.WithContext(ctx)
 }
 
 // resolveUserProjectIDs returns project IDs from the user's group memberships,
