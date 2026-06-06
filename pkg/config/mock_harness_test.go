@@ -71,7 +71,5 @@ func GetMockHarnesses() []api.Harness {
 	return []api.Harness{
 		&MockHarness{NameVal: "gemini", EmbedDirVal: "gemini", ConfigDirVal: ".gemini"},
 		&MockHarness{NameVal: "claude", EmbedDirVal: "claude", ConfigDirVal: ".claude"},
-		&MockHarness{NameVal: "opencode", EmbedDirVal: "opencode", ConfigDirVal: ".config/opencode"},
-		&MockHarness{NameVal: "codex", EmbedDirVal: "codex", ConfigDirVal: ""},
 	}
 }

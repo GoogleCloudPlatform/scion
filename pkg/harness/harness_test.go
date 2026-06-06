@@ -44,13 +44,11 @@ func TestNew_UnknownFallsToGeneric(t *testing.T) {
 
 func TestAll_ReturnsBuiltins(t *testing.T) {
 	all := All()
-	assert.Len(t, all, 4)
+	assert.Len(t, all, 2)
 	names := make([]string, len(all))
 	for i, h := range all {
 		names[i] = h.Name()
 	}
 	assert.Contains(t, names, "gemini")
 	assert.Contains(t, names, "claude")
-	assert.Contains(t, names, "opencode")
-	assert.Contains(t, names, "codex")
 }

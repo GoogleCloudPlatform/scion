@@ -388,7 +388,7 @@ func TestInitProject_CreatesEmptyTemplatesDir(t *testing.T) {
 	}
 
 	// Verify per-harness templates were NOT created
-	for _, name := range []string{"gemini", "claude", "opencode", "codex"} {
+	for _, name := range []string{"gemini", "claude"} {
 		perHarnessDir := filepath.Join(tempDir, "templates", name)
 		if _, err := os.Stat(perHarnessDir); !os.IsNotExist(err) {
 			t.Errorf("Expected per-harness template %s to NOT be created at project level", name)

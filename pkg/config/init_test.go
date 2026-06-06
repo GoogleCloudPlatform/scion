@@ -371,7 +371,7 @@ func TestInitProject_NoHarnessConfigs(t *testing.T) {
 	}
 
 	// Verify per-harness template directories were NOT created
-	for _, name := range []string{"gemini", "claude", "opencode", "codex"} {
+	for _, name := range []string{"gemini", "claude"} {
 		perHarnessTplDir := filepath.Join(projectDir, "templates", name)
 		if _, err := os.Stat(perHarnessTplDir); !os.IsNotExist(err) {
 			t.Errorf("expected per-harness template dir %s to NOT exist at project level", perHarnessTplDir)
@@ -410,7 +410,7 @@ func TestInitMachine_SeedsAll(t *testing.T) {
 	}
 
 	// Verify per-harness template directories were NOT created
-	for _, name := range []string{"gemini", "claude", "opencode", "codex"} {
+	for _, name := range []string{"gemini", "claude"} {
 		perHarnessTplDir := filepath.Join(globalDir, "templates", name)
 		if _, err := os.Stat(perHarnessTplDir); !os.IsNotExist(err) {
 			t.Errorf("expected per-harness template dir %s to NOT exist", perHarnessTplDir)
