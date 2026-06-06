@@ -1,0 +1,30 @@
+schema_version: "1"
+image_registry: "us-central1-docker.pkg.dev/deploy-demo-test/public-docker"
+active_profile: default
+server:
+  database:
+    driver: sqlite
+    url: /tmp/scion.db
+  auth:
+    session_secret: "__SESSION_SECRET__"
+    mode: proxy
+    proxy:
+      provider: iap
+      iap:
+        audience: "__IAP_AUDIENCE__"
+  transport:
+    mode: iap
+    oidcAudience: "__IAP_AUDIENCE__"
+    platformAuthSA: "__TRANSPORT_SA_EMAIL__"
+  runtimeBroker:
+    port: 9810
+profiles:
+  default:
+    runtime: kubernetes
+runtimes:
+  kubernetes:
+    type: kubernetes
+    gke: true
+    context: scion-demo-cluster
+    namespace: scion-agents
+    list_all_namespaces: false

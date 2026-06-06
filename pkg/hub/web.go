@@ -673,6 +673,7 @@ func (ws *WebServer) sessionToBearerMiddleware(next http.Handler) http.Handler {
 // registerRoutes sets up the web server routes.
 func (ws *WebServer) registerRoutes() {
 	ws.mux.HandleFunc("/healthz", ws.handleHealthz)
+	ws.mux.HandleFunc("/health", ws.handleHealthz)
 	ws.mux.Handle("/assets/", ws.staticHandler())
 	ws.mux.Handle("/shoelace/", ws.staticHandler())
 	// Auth routes (no session auth required)
@@ -1100,7 +1101,7 @@ func isAllowedSubjectChar(c rune) bool {
 // isPublicRoute returns true for routes that do not require authentication.
 func isPublicRoute(path string) bool {
 	switch {
-	case path == "/healthz":
+	case path == "/healthz" || path == "/health":
 		return true
 	case strings.HasPrefix(path, "/assets/"):
 		return true

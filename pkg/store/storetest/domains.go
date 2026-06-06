@@ -442,7 +442,8 @@ func newOracleAgent(slug string) *store.Agent {
 		Name:       slug,
 		Template:   "default",
 		ProjectID:  agentDomainProjectID,
-		Phase: "running",
+		Phase:      "running",
+		Visibility: "private",
 	}
 }
 
@@ -476,9 +477,10 @@ func AgentDomain() Domain[store.Agent] {
 				Name:       fmt.Sprintf("Agent %d", seq),
 				Template:   "default",
 				ProjectID:  agentDomainProjectID,
-				Phase:    "running",
-				Activity: "thinking",
-				Labels:   map[string]string{"seq": fmt.Sprintf("%d", seq)},
+				Phase:      "running",
+				Activity:   "thinking",
+				Visibility: "private",
+				Labels:     map[string]string{"seq": fmt.Sprintf("%d", seq)},
 			}
 		},
 		GetID: func(a *store.Agent) string { return a.ID },

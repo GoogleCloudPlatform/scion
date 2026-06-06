@@ -81,8 +81,9 @@ type Agent struct {
 	DeletedAt         time.Time `json:"deletedAt,omitempty"`
 
 	// Ownership
-	CreatedBy string `json:"createdBy,omitempty"`
-	OwnerID   string `json:"ownerId,omitempty"`
+	CreatedBy  string `json:"createdBy,omitempty"`
+	OwnerID    string `json:"ownerId,omitempty"`
+	Visibility string `json:"visibility"` // private, team, public
 
 	// Ancestry chain for transitive access control.
 	// Ordered list of ancestor IDs: [root, ..., parent].
@@ -469,7 +470,7 @@ type Template struct {
 	OwnerID    string `json:"ownerId,omitempty"`
 	CreatedBy  string `json:"createdBy,omitempty"`
 	UpdatedBy  string `json:"updatedBy,omitempty"`
-	Visibility string `json:"visibility"` // private, team, public
+	Visibility string `json:"visibility"` // private, project, public
 
 	// Timestamps
 	Created time.Time `json:"created"`
@@ -562,7 +563,7 @@ type HarnessConfig struct {
 	OwnerID    string `json:"ownerId,omitempty"`
 	CreatedBy  string `json:"createdBy,omitempty"`
 	UpdatedBy  string `json:"updatedBy,omitempty"`
-	Visibility string `json:"visibility"` // private, team, public
+	Visibility string `json:"visibility"` // private, project, public
 
 	// Timestamps
 	Created time.Time `json:"created"`
@@ -1658,9 +1659,10 @@ func (a *Agent) ToAPI() *api.AgentInfo {
 		DeletedAt: a.DeletedAt,
 
 		// Ownership
-		CreatedBy: a.CreatedBy,
-		OwnerID:   a.OwnerID,
-		Ancestry:  a.Ancestry,
+		CreatedBy:  a.CreatedBy,
+		OwnerID:    a.OwnerID,
+		Visibility: a.Visibility,
+		Ancestry:   a.Ancestry,
 
 		// Optimistic locking
 		StateVersion: a.StateVersion,

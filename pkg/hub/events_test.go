@@ -166,6 +166,7 @@ func TestChannelEventPublisher_PublishAgentCreated(t *testing.T) {
 		Runtime:         "docker",
 		RuntimeBrokerID: "b1",
 		CreatedBy:       "user1",
+		Visibility:      "private",
 	}
 
 	pub.PublishAgentCreated(context.Background(), agent)

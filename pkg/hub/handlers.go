@@ -275,13 +275,6 @@ func (s *Server) handleAgents(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-
-	identity := GetIdentityFromContext(ctx)
-	if identity == nil {
-		Unauthorized(w)
-		return
-	}
-
 	query := r.URL.Query()
 
 	filter := store.AgentFilter{
@@ -291,15 +284,8 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 		IncludeDeleted:  query.Get("includeDeleted") == "true",
 	}
 
-	// Pre-compute and cache the user's project IDs for reuse within this request.
-	if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
-		r = s.storeUserProjectIDsInContext(r, userIdent.ID())
-		ctx = r.Context()
-	}
-
 	// scope=mine: agents the current user created
 	// scope=shared: agents in projects the user is a member of, but not created by them
-	// default (no scope): agents in the user's projects (membership-gated)
 	// mine=true (legacy): agents the user created or in projects they own/are a member of
 	switch query.Get("scope") {
 	case "mine":
@@ -308,7 +294,7 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 		}
 	case "shared":
 		if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
-			if projectIDs := s.resolveUserProjectIDsCached(ctx, userIdent.ID()); len(projectIDs) > 0 {
+			if projectIDs := s.resolveUserProjectIDs(ctx, userIdent.ID()); len(projectIDs) > 0 {
 				filter.MemberProjectIDs = projectIDs
 				filter.ExcludeOwnerID = userIdent.ID()
 			} else {
@@ -319,17 +305,7 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 		if query.Get("mine") == "true" {
 			if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
 				filter.OwnerID = userIdent.ID()
-				if projectIDs := s.resolveUserProjectIDsCached(ctx, userIdent.ID()); len(projectIDs) > 0 {
-					filter.MemberOrOwnerProjectIDs = projectIDs
-				}
-			}
-		} else {
-			// Default scope: agents in the user's projects OR owned by the user
-			// (membership-gated). OwnerID is always set so a user with no group
-			// memberships still sees the agents they own (mirrors listProjects).
-			if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
-				filter.OwnerID = userIdent.ID()
-				if projectIDs := s.resolveUserProjectIDsCached(ctx, userIdent.ID()); len(projectIDs) > 0 {
+				if projectIDs := s.resolveUserProjectIDs(ctx, userIdent.ID()); len(projectIDs) > 0 {
 					filter.MemberOrOwnerProjectIDs = projectIDs
 				}
 			}
@@ -355,22 +331,36 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 	// Enrich agents with project and broker names
 	s.enrichAgents(ctx, result.Items)
 
-	// Compute per-item and scope capabilities (identity guaranteed non-nil)
+	// Compute per-item and scope capabilities
+	identity := GetIdentityFromContext(ctx)
 	agents := make([]AgentWithCapabilities, 0, len(result.Items))
-	resources := make([]Resource, len(result.Items))
-	for i := range result.Items {
-		resources[i] = agentResource(&result.Items[i])
-	}
-	caps := s.authzService.ComputeCapabilitiesBatch(ctx, identity, resources, "agent")
-	for i := range result.Items {
-		if !capabilityAllows(caps[i], ActionRead) {
-			continue
+	if identity != nil {
+		resources := make([]Resource, len(result.Items))
+		for i := range result.Items {
+			resources[i] = agentResource(&result.Items[i])
 		}
-		agents = append(agents, AgentWithCapabilities{Agent: result.Items[i], Cap: caps[i]})
+		caps := s.authzService.ComputeCapabilitiesBatch(ctx, identity, resources, "agent")
+		for i := range result.Items {
+			if !capabilityAllows(caps[i], ActionRead) {
+				continue
+			}
+			agents = append(agents, AgentWithCapabilities{Agent: result.Items[i], Cap: caps[i]})
+		}
+	} else {
+		for i := range result.Items {
+			agents = append(agents, AgentWithCapabilities{Agent: result.Items[i]})
+		}
 	}
 
-	scopeCap := s.authzService.ComputeScopeCapabilities(ctx, identity, "", "", "agent")
-	totalCount := len(agents)
+	var scopeCap *Capabilities
+	if identity != nil {
+		scopeCap = s.authzService.ComputeScopeCapabilities(ctx, identity, "", "", "agent")
+	}
+
+	totalCount := result.TotalCount
+	if identity != nil {
+		totalCount = len(agents)
+	}
 
 	writeJSON(w, http.StatusOK, ListAgentsResponse{
 		Agents:       agents,
@@ -637,6 +627,7 @@ func (s *Server) createAgentInProject(
 		RuntimeBrokerID: runtimeBrokerID,
 		Phase:           string(state.PhaseCreated),
 		Labels:          req.Labels,
+		Visibility:      store.VisibilityPrivate,
 		CreatedBy:       createdBy,
 		OwnerID:         createdBy,
 		Ancestry:        ancestry,
@@ -3409,13 +3400,6 @@ func (s *Server) handleProjects(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) listProjects(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-
-	identity := GetIdentityFromContext(ctx)
-	if identity == nil {
-		Unauthorized(w)
-		return
-	}
-
 	query := r.URL.Query()
 
 	filter := store.ProjectFilter{
@@ -3427,15 +3411,8 @@ func (s *Server) listProjects(w http.ResponseWriter, r *http.Request) {
 		Slug:       query.Get("slug"),
 	}
 
-	// Pre-compute and cache the user's project IDs for reuse within this request.
-	if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
-		r = s.storeUserProjectIDsInContext(r, userIdent.ID())
-		ctx = r.Context()
-	}
-
 	// scope=mine: projects the current user owns
 	// scope=shared: projects where the user is a member/admin but not the owner
-	// default (no scope): projects the user owns or is a member of (membership-gated)
 	// mine=true (legacy): projects the user owns or is a member of
 	switch query.Get("scope") {
 	case "mine":
@@ -3444,26 +3421,20 @@ func (s *Server) listProjects(w http.ResponseWriter, r *http.Request) {
 		}
 	case "shared":
 		if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
-			if projectIDs := s.resolveUserProjectIDsCached(ctx, userIdent.ID()); len(projectIDs) > 0 {
+			if projectIDs := s.resolveUserProjectIDs(ctx, userIdent.ID()); len(projectIDs) > 0 {
 				filter.MemberProjectIDs = projectIDs
 				filter.ExcludeOwnerID = userIdent.ID()
 			} else {
+				// User has no group memberships — return empty result
 				filter.MemberProjectIDs = []string{"__none__"}
 			}
 		}
 	default:
+		// Legacy mine=true support
 		if query.Get("mine") == "true" {
 			if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
 				filter.OwnerID = userIdent.ID()
-				if projectIDs := s.resolveUserProjectIDsCached(ctx, userIdent.ID()); len(projectIDs) > 0 {
-					filter.MemberOrOwnerIDs = projectIDs
-				}
-			}
-		} else {
-			// Default scope: restrict to user's projects (membership-gated)
-			if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
-				filter.OwnerID = userIdent.ID()
-				if projectIDs := s.resolveUserProjectIDsCached(ctx, userIdent.ID()); len(projectIDs) > 0 {
+				if projectIDs := s.resolveUserProjectIDs(ctx, userIdent.ID()); len(projectIDs) > 0 {
 					filter.MemberOrOwnerIDs = projectIDs
 				}
 			}
@@ -3489,22 +3460,36 @@ func (s *Server) listProjects(w http.ResponseWriter, r *http.Request) {
 	// Enrich owner display names
 	s.enrichProjectOwnerNames(ctx, result.Items)
 
-	// Compute per-item and scope capabilities (identity guaranteed non-nil)
+	// Compute per-item and scope capabilities
+	identity := GetIdentityFromContext(ctx)
 	projects := make([]ProjectWithCapabilities, 0, len(result.Items))
-	resources := make([]Resource, len(result.Items))
-	for i := range result.Items {
-		resources[i] = projectResource(&result.Items[i])
-	}
-	caps := s.authzService.ComputeCapabilitiesBatch(ctx, identity, resources, "project")
-	for i := range result.Items {
-		if !capabilityAllows(caps[i], ActionRead) {
-			continue
+	if identity != nil {
+		resources := make([]Resource, len(result.Items))
+		for i := range result.Items {
+			resources[i] = projectResource(&result.Items[i])
 		}
-		projects = append(projects, ProjectWithCapabilities{Project: result.Items[i], Cap: caps[i]})
+		caps := s.authzService.ComputeCapabilitiesBatch(ctx, identity, resources, "project")
+		for i := range result.Items {
+			if !capabilityAllows(caps[i], ActionRead) {
+				continue
+			}
+			projects = append(projects, ProjectWithCapabilities{Project: result.Items[i], Cap: caps[i]})
+		}
+	} else {
+		for i := range result.Items {
+			projects = append(projects, ProjectWithCapabilities{Project: result.Items[i]})
+		}
 	}
 
-	scopeCap := s.authzService.ComputeScopeCapabilities(ctx, identity, "", "", "project")
-	totalCount := len(projects)
+	var scopeCap *Capabilities
+	if identity != nil {
+		scopeCap = s.authzService.ComputeScopeCapabilities(ctx, identity, "", "", "project")
+	}
+
+	totalCount := result.TotalCount
+	if identity != nil {
+		totalCount = len(projects)
+	}
 
 	writeJSON(w, http.StatusOK, ListProjectsResponse{
 		Projects:     projects,
@@ -3601,7 +3586,7 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 		Slug:       slug,
 		GitRemote:  normalizedRemote,
 		Labels:     req.Labels,
-		Visibility: api.NormalizeVisibility(req.Visibility),
+		Visibility: req.Visibility,
 	}
 
 	if project.Visibility == "" {
@@ -3751,7 +3736,7 @@ func (s *Server) createProjectGroup(ctx context.Context, project *store.Project)
 }
 
 // createProjectMembersGroupAndPolicy creates an explicit members group for a project
-// and read policies for project/agent visibility. Best-effort; failures are logged.
+// and a policy allowing members to create agents. Best-effort; failures are logged.
 // If the group already exists (e.g., project was deleted and recreated with the same
 // slug), the existing group is reused and the creator is still added as a member.
 // callerUserID, when non-empty, is also added as an owner of the members group
@@ -3853,103 +3838,66 @@ func (s *Server) createProjectMembersGroupAndPolicy(ctx context.Context, project
 		}
 	}
 
-	// WP-B2/B3 migration: the old 'member-create-agents' policy is the
-	// "not yet migrated" marker.  If present → bump user members to admin
-	// (preserving create ability via isProjectOwnerOrAdmin bypass), then
-	// retire the old policy.  Create/stop_all are no longer policy-granted;
-	// they flow from the admin/owner role bypass.
-	oldPolicyName := "project:" + project.Slug + ":member-create-agents"
-	oldPolicies, lookupErr := s.store.ListPolicies(ctx, store.PolicyFilter{Name: oldPolicyName}, store.ListOptions{Limit: 1})
-	if lookupErr == nil && len(oldPolicies.Items) > 0 {
-		// B3: bump every USER member with role=member → admin
-		members, mErr := s.store.GetGroupMembers(ctx, membersGroup.ID)
-		if mErr == nil {
-			for _, m := range members {
-				if m.MemberType == store.GroupMemberTypeUser && m.Role == store.GroupMemberRoleMember {
-					if promErr := s.store.UpdateGroupMemberRole(ctx, membersGroup.ID,
-						m.MemberType, m.MemberID, store.GroupMemberRoleAdmin); promErr != nil {
-						slog.Warn("failed to bump member to admin during migration",
-							"project_id", project.ID, "user", m.MemberID, "error", promErr.Error())
-					} else {
-						slog.Info("migrated project member to admin",
-							"project_id", project.ID, "user", m.MemberID)
-					}
-				}
-			}
-		}
-
-		// Remove old policy
-		oldP := oldPolicies.Items[0]
-		if unbindErr := s.store.RemovePolicyBinding(ctx, oldP.ID, "group", membersGroup.ID); unbindErr != nil {
-			slog.Warn("failed to remove binding for retired create-agents policy",
-				"project_id", project.ID, "error", unbindErr.Error())
-		}
-		if delErr := s.store.DeletePolicy(ctx, oldP.ID); delErr != nil {
-			slog.Warn("failed to delete old create-agents policy",
-				"project_id", project.ID, "error", delErr.Error())
-		} else {
-			slog.Info("retired old member-create-agents policy",
-				"project_id", project.ID, "policy", oldPolicyName)
-		}
-	}
-
-	// Seed project-scoped read policies bound to the members group.
-	// ResourceID is pinned for the project policy because project resources
-	// have empty ParentType — without pinning, matchesResource would leak
-	// read to other projects.
-	seedPolicy(ctx, s.store, membersGroup.ID, &store.Policy{
+	// Create project-level policy for member agent creation and stop-all
+	policyName := "project:" + project.Slug + ":member-create-agents"
+	policy := &store.Policy{
 		ID:           api.NewUUID(),
-		Name:         "project:" + project.Slug + ":member-read-project",
-		Description:  "Allow project members to read this project",
-		ScopeType:    "project",
-		ScopeID:      project.ID,
-		ResourceType: "project",
-		ResourceID:   project.ID,
-		Actions:      []string{"read", "list"},
-		Effect:       "allow",
-	})
-
-	seedPolicy(ctx, s.store, membersGroup.ID, &store.Policy{
-		ID:           api.NewUUID(),
-		Name:         "project:" + project.Slug + ":member-read-agents",
-		Description:  "Allow project members to read agents in this project",
+		Name:         policyName,
+		Description:  "Allow project members to create and stop agents",
 		ScopeType:    "project",
 		ScopeID:      project.ID,
 		ResourceType: "agent",
-		Actions:      []string{"read", "list"},
+		Actions:      []string{"create", "stop_all"},
 		Effect:       "allow",
-	})
-}
-
-// backfillProjectVisibility iterates every existing project and ensures its
-// groups and project-scoped member read policies exist, and that the one-time
-// members→admin migration has run (createProjectMembersGroupAndPolicy is
-// idempotent and uses the legacy create-agents policy as its migration marker).
-// Run once at startup so the read gates in getProject/getProjectAgent evaluate
-// correctly for existing projects from the first request. Best-effort.
-func (s *Server) backfillProjectVisibility(ctx context.Context) {
-	const pageSize = 200
-	cursor := ""
-	migrated := 0
-	for {
-		result, err := s.store.ListProjects(ctx, store.ProjectFilter{}, store.ListOptions{Limit: pageSize, Cursor: cursor})
-		if err != nil {
-			slog.Warn("project visibility backfill: failed to list projects", "error", err.Error())
+	}
+	if err := s.store.CreatePolicy(ctx, policy); err != nil {
+		if !errors.Is(err, store.ErrAlreadyExists) {
+			slog.Warn("failed to create project member policy",
+				"project_id", project.ID, "policy", policyName, "error", err.Error())
 			return
 		}
-		for i := range result.Items {
-			project := &result.Items[i]
-			s.createProjectGroup(ctx, project)
-			s.createProjectMembersGroupAndPolicy(ctx, project)
-			migrated++
+		// Policy already exists — look it up and update its scope ID in case the
+		// project was recreated. Also ensure the binding to the current members group.
+		existing, lookupErr := s.store.ListPolicies(ctx, store.PolicyFilter{Name: policyName}, store.ListOptions{Limit: 1})
+		if lookupErr != nil || len(existing.Items) == 0 {
+			slog.Warn("failed to look up existing project member policy",
+				"project_id", project.ID, "policy", policyName, "error", lookupErr)
+			return
 		}
-		if result.NextCursor == "" {
-			break
+		policy = &existing.Items[0]
+		needsUpdate := false
+		if policy.ScopeID != project.ID {
+			policy.ScopeID = project.ID
+			needsUpdate = true
 		}
-		cursor = result.NextCursor
+		// Backfill: ensure stop_all action is present for existing projects
+		hasStopAll := false
+		for _, a := range policy.Actions {
+			if a == "stop_all" {
+				hasStopAll = true
+				break
+			}
+		}
+		if !hasStopAll {
+			policy.Actions = append(policy.Actions, "stop_all")
+			needsUpdate = true
+		}
+		if needsUpdate {
+			if updateErr := s.store.UpdatePolicy(ctx, policy); updateErr != nil {
+				slog.Warn("failed to update existing project member policy",
+					"project_id", project.ID, "policy", policyName, "error", updateErr.Error())
+			}
+		}
 	}
-	if migrated > 0 {
-		slog.Info("project visibility backfill complete", "projects", migrated)
+
+	// Bind policy to the members group
+	if err := s.store.AddPolicyBinding(ctx, &store.PolicyBinding{
+		PolicyID:      policy.ID,
+		PrincipalType: "group",
+		PrincipalID:   membersGroup.ID,
+	}); err != nil && !errors.Is(err, store.ErrAlreadyExists) {
+		slog.Warn("failed to bind project member policy",
+			"project_id", project.ID, "policy", policyName, "error", err.Error())
 	}
 }
 
@@ -4996,12 +4944,6 @@ func (s *Server) createProjectAgent(w http.ResponseWriter, r *http.Request, proj
 func (s *Server) getProjectAgent(w http.ResponseWriter, r *http.Request, projectID, agentID string) {
 	ctx := r.Context()
 
-	identity := GetIdentityFromContext(ctx)
-	if identity == nil {
-		Unauthorized(w)
-		return
-	}
-
 	// Try to get by slug first (more common case)
 	agent, err := s.store.GetAgentBySlug(ctx, projectID, agentID)
 	if err != nil {
@@ -5021,13 +4963,6 @@ func (s *Server) getProjectAgent(w http.ResponseWriter, r *http.Request, project
 			writeErrorFromErr(w, err, "")
 			return
 		}
-	}
-
-	// Gate read access
-	decision := s.authzService.CheckAccess(ctx, identity, agentResource(agent), ActionRead)
-	if !decision.Allowed {
-		NotFound(w, "Agent")
-		return
 	}
 
 	// Enrich agent with project and broker names
@@ -5285,28 +5220,16 @@ func (s *Server) handleProjectByID(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) getProject(w http.ResponseWriter, r *http.Request, id string) {
 	ctx := r.Context()
-
-	identity := GetIdentityFromContext(ctx)
-	if identity == nil {
-		Unauthorized(w)
-		return
-	}
-
 	project, err := s.store.GetProject(ctx, id)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
 	}
 
-	// Gate read access. The project's groups + member read policies are seeded
-	// at project-creation time and backfilled for all existing projects at
-	// startup (backfillProjectVisibility), so they are guaranteed present here —
-	// no need to run the write-heavy backfill on this read path.
-	decision := s.authzService.CheckAccess(ctx, identity, projectResource(project), ActionRead)
-	if !decision.Allowed {
-		NotFound(w, "Project")
-		return
-	}
+	// Ensure associated groups exist (backfill for projects created before
+	// group support was added). These calls are idempotent.
+	s.createProjectGroup(ctx, project)
+	s.createProjectMembersGroupAndPolicy(ctx, project)
 
 	// Enrich owner display name
 	if project.OwnerID != "" {
@@ -5320,7 +5243,9 @@ func (s *Server) getProject(w http.ResponseWriter, r *http.Request, id string) {
 	}
 
 	resp := ProjectWithCapabilities{Project: *project, CloudLogging: s.logQueryService != nil}
-	resp.Cap = s.authzService.ComputeCapabilities(ctx, identity, projectResource(project))
+	if identity := GetIdentityFromContext(ctx); identity != nil {
+		resp.Cap = s.authzService.ComputeCapabilities(ctx, identity, projectResource(project))
+	}
 
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -5385,7 +5310,7 @@ func (s *Server) updateProject(w http.ResponseWriter, r *http.Request, id string
 		project.Labels = updates.Labels
 	}
 	if updates.Visibility != "" {
-		project.Visibility = api.NormalizeVisibility(updates.Visibility)
+		project.Visibility = updates.Visibility
 	}
 	if updates.DefaultRuntimeBrokerID != "" {
 		project.DefaultRuntimeBrokerID = updates.DefaultRuntimeBrokerID
@@ -5824,19 +5749,6 @@ func (s *Server) handleRuntimeBrokers(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) listRuntimeBrokers(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-
-	ident := GetIdentityFromContext(ctx)
-	if ident == nil {
-		Unauthorized(w)
-		return
-	}
-
-	// Pre-compute and cache the user's project IDs for canReadBroker checks.
-	if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
-		r = s.storeUserProjectIDsInContext(r, userIdent.ID())
-		ctx = r.Context()
-	}
-
 	query := r.URL.Query()
 
 	projectID := query.Get("projectId")
@@ -5862,93 +5774,91 @@ func (s *Server) listRuntimeBrokers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Filter to brokers the user can read (owner, admin, or member of a
-	// contributing project). To avoid an N+1 (one GetBrokerProjects per broker),
-	// resolve the set of broker IDs reachable through the caller's projects once.
-	isHubAdmin := false
-	if u, ok := ident.(UserIdentity); ok && u.Role() == "admin" {
-		isHubAdmin = true
-	}
-	readableViaProjects := s.readableBrokerIDsForUser(ctx, ident.ID())
-	readable := make([]store.RuntimeBroker, 0, len(result.Items))
-	for i := range result.Items {
-		b := &result.Items[i]
-		if isHubAdmin || (b.CreatedBy != "" && b.CreatedBy == ident.ID()) {
-			readable = append(readable, *b)
-			continue
-		}
-		if _, ok := readableViaProjects[b.ID]; ok {
-			readable = append(readable, *b)
-		}
-	}
-
-	// Batch-resolve CreatedByName for readable brokers
-	s.enrichBrokerCreatorNames(ctx, readable)
+	// Batch-resolve CreatedByName for all brokers
+	s.enrichBrokerCreatorNames(ctx, result.Items)
 
 	// Compute capabilities for the requesting user
-	resources := make([]Resource, len(readable))
-	for i := range readable {
-		resources[i] = brokerResource(&readable[i])
-	}
-	caps := s.authzService.ComputeCapabilitiesBatch(ctx, ident, resources, "broker")
-	for i, broker := range readable {
-		if broker.AutoProvide && i < len(caps) && !capabilityAllows(caps[i], ActionDispatch) {
-			caps[i].Actions = append(caps[i].Actions, string(ActionDispatch))
+	ident := GetIdentityFromContext(ctx)
+	var caps []*Capabilities
+	if ident != nil {
+		resources := make([]Resource, len(result.Items))
+		for i := range result.Items {
+			resources[i] = brokerResource(&result.Items[i])
+		}
+		caps = s.authzService.ComputeCapabilitiesBatch(ctx, ident, resources, "broker")
+		// Auto-provide brokers grant dispatch to all authenticated users.
+		for i, broker := range result.Items {
+			if broker.AutoProvide && i < len(caps) && !capabilityAllows(caps[i], ActionDispatch) {
+				caps[i].Actions = append(caps[i].Actions, string(ActionDispatch))
+			}
 		}
 	}
 
 	// If filtering by projectId, include project-specific provider data (like localPath)
 	if projectID != "" {
+		// Get provider data for this project to include localPath
 		providers, err := s.store.GetProjectProviders(ctx, projectID)
 		if err != nil {
 			writeErrorFromErr(w, err, "")
 			return
 		}
 
+		// Build a map of brokerId -> localPath for quick lookup
 		brokerLocalPaths := make(map[string]string)
 		for _, p := range providers {
 			brokerLocalPaths[p.BrokerID] = p.LocalPath
 		}
 
-		extendedBrokers := make([]RuntimeBrokerWithProvider, 0, len(readable))
-		for i, broker := range readable {
-			if !capabilityAllows(caps[i], ActionRead) {
+		// Build extended broker list with provider data
+		extendedBrokers := make([]RuntimeBrokerWithProvider, 0, len(result.Items))
+		for i, broker := range result.Items {
+			if caps != nil && !capabilityAllows(caps[i], ActionRead) {
 				continue
 			}
 			eb := RuntimeBrokerWithProvider{
 				RuntimeBroker: broker,
 				LocalPath:     brokerLocalPaths[broker.ID],
 			}
-			if i < len(caps) {
+			if caps != nil && i < len(caps) {
 				eb.Cap = caps[i]
 			}
 			extendedBrokers = append(extendedBrokers, eb)
 		}
 
+		totalCount := result.TotalCount
+		if ident != nil {
+			totalCount = len(extendedBrokers)
+		}
+
 		writeJSON(w, http.StatusOK, ListRuntimeBrokersWithProviderResponse{
 			Brokers:    extendedBrokers,
 			NextCursor: result.NextCursor,
-			TotalCount: len(extendedBrokers),
+			TotalCount: totalCount,
 		})
 		return
 	}
 
-	brokersWithCaps := make([]RuntimeBrokerWithCapabilities, 0, len(readable))
-	for i, broker := range readable {
-		if !capabilityAllows(caps[i], ActionRead) {
+	brokersWithCaps := make([]RuntimeBrokerWithCapabilities, 0, len(result.Items))
+	for i, broker := range result.Items {
+		if caps != nil && !capabilityAllows(caps[i], ActionRead) {
 			continue
 		}
 		resp := RuntimeBrokerWithCapabilities{RuntimeBroker: broker}
-		if i < len(caps) {
+		if caps != nil && i < len(caps) {
 			resp.Cap = caps[i]
 		}
 		brokersWithCaps = append(brokersWithCaps, resp)
 	}
 
+	totalCount := result.TotalCount
+	if ident != nil {
+		totalCount = len(brokersWithCaps)
+	}
+
 	writeJSON(w, http.StatusOK, ListRuntimeBrokersWithCapsResponse{
 		Brokers:    brokersWithCaps,
 		NextCursor: result.NextCursor,
-		TotalCount: len(brokersWithCaps),
+		TotalCount: totalCount,
 	})
 }
 
@@ -6057,71 +5967,11 @@ func (s *Server) handleRuntimeBrokerByID(w http.ResponseWriter, r *http.Request)
 	}
 }
 
-// readableBrokerIDsForUser returns the set of broker IDs that contribute to any
-// project the user is a member of. It resolves user→projects→brokers once (one
-// GetProjectProviders per user project), avoiding an N+1 over the broker list.
-func (s *Server) readableBrokerIDsForUser(ctx context.Context, userID string) map[string]struct{} {
-	set := make(map[string]struct{})
-	for _, pid := range s.resolveUserProjectIDsCached(ctx, userID) {
-		providers, err := s.store.GetProjectProviders(ctx, pid)
-		if err != nil {
-			continue
-		}
-		for _, p := range providers {
-			set[p.BrokerID] = struct{}{}
-		}
-	}
-	return set
-}
-
-// canReadBroker checks whether the user can read a broker: owner, hub admin,
-// or member of any project the broker contributes to. Used on single-broker
-// read paths; the list path uses readableBrokerIDsForUser to avoid an N+1.
-func (s *Server) canReadBroker(ctx context.Context, identity Identity, broker *store.RuntimeBroker) bool {
-	// Admin bypass
-	if user, ok := identity.(UserIdentity); ok && user.Role() == "admin" {
-		return true
-	}
-	// Owner bypass
-	if broker.CreatedBy != "" && broker.CreatedBy == identity.ID() {
-		return true
-	}
-	// Check if the broker contributes to any project the user is a member of
-	providers, err := s.store.GetBrokerProjects(ctx, broker.ID)
-	if err != nil || len(providers) == 0 {
-		return false
-	}
-	userProjectIDs := s.resolveUserProjectIDsCached(ctx, identity.ID())
-	userProjectSet := make(map[string]struct{}, len(userProjectIDs))
-	for _, pid := range userProjectIDs {
-		userProjectSet[pid] = struct{}{}
-	}
-	for _, p := range providers {
-		if _, ok := userProjectSet[p.ProjectID]; ok {
-			return true
-		}
-	}
-	return false
-}
-
 func (s *Server) getRuntimeBroker(w http.ResponseWriter, r *http.Request, id string) {
 	ctx := r.Context()
-
-	identity := GetIdentityFromContext(ctx)
-	if identity == nil {
-		Unauthorized(w)
-		return
-	}
-
 	broker, err := s.store.GetRuntimeBroker(ctx, id)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
-		return
-	}
-
-	// Gate read access
-	if !s.canReadBroker(ctx, identity, broker) {
-		NotFound(w, "RuntimeBroker")
 		return
 	}
 
@@ -6138,9 +5988,12 @@ func (s *Server) getRuntimeBroker(w http.ResponseWriter, r *http.Request, id str
 
 	// Compute capabilities for the requesting user
 	resp := RuntimeBrokerWithCapabilities{RuntimeBroker: *broker}
-	resp.Cap = s.authzService.ComputeCapabilities(ctx, identity, brokerResource(broker))
-	if broker.AutoProvide && !capabilityAllows(resp.Cap, ActionDispatch) {
-		resp.Cap.Actions = append(resp.Cap.Actions, string(ActionDispatch))
+	if ident := GetIdentityFromContext(ctx); ident != nil {
+		resp.Cap = s.authzService.ComputeCapabilities(ctx, ident, brokerResource(broker))
+		// Auto-provide brokers grant dispatch to all authenticated users.
+		if broker.AutoProvide && !capabilityAllows(resp.Cap, ActionDispatch) {
+			resp.Cap.Actions = append(resp.Cap.Actions, string(ActionDispatch))
+		}
 	}
 
 	writeJSON(w, http.StatusOK, resp)
@@ -6336,37 +6189,6 @@ func (s *Server) enrichProjectOwnerNames(ctx context.Context, projects []store.P
 			projects[i].OwnerName = name
 		}
 	}
-}
-
-type projectIDsCacheKey struct{}
-
-// projectIDsCache lazily memoizes a user's resolved project IDs for the lifetime
-// of a single request. The BFS runs at most once, on first use.
-type projectIDsCache struct {
-	once sync.Once
-	ids  []string
-}
-
-// resolveUserProjectIDsCached returns resolveUserProjectIDs results, cached in
-// the request context so the BFS is run at most once per HTTP request. The cache
-// is lazy and self-populating: if the context carries a cache it is filled on
-// first use; if not, it falls back to an uncached resolve.
-func (s *Server) resolveUserProjectIDsCached(ctx context.Context, userID string) []string {
-	if cache, ok := ctx.Value(projectIDsCacheKey{}).(*projectIDsCache); ok {
-		cache.once.Do(func() {
-			cache.ids = s.resolveUserProjectIDs(ctx, userID)
-		})
-		return cache.ids
-	}
-	return s.resolveUserProjectIDs(ctx, userID)
-}
-
-// storeUserProjectIDsInContext installs a lazy project-IDs cache in the request
-// context. The BFS is not run here — it runs on the first resolveUserProjectIDsCached
-// call, so handlers that return early never pay for it.
-func (s *Server) storeUserProjectIDsInContext(r *http.Request, _ string) *http.Request {
-	ctx := context.WithValue(r.Context(), projectIDsCacheKey{}, &projectIDsCache{})
-	return r.WithContext(ctx)
 }
 
 // resolveUserProjectIDs returns project IDs from the user's group memberships,
@@ -6648,21 +6470,10 @@ type ListBrokerProjectsResponse struct {
 func (s *Server) getBrokerProjects(w http.ResponseWriter, r *http.Request, brokerID string) {
 	ctx := r.Context()
 
-	identity := GetIdentityFromContext(ctx)
-	if identity == nil {
-		Unauthorized(w)
-		return
-	}
-
-	broker, err := s.store.GetRuntimeBroker(ctx, brokerID)
+	// Verify broker exists
+	_, err := s.store.GetRuntimeBroker(ctx, brokerID)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
-		return
-	}
-
-	// Gate read access on the broker itself
-	if !s.canReadBroker(ctx, identity, broker) {
-		NotFound(w, "RuntimeBroker")
 		return
 	}
 
@@ -6813,7 +6624,6 @@ func (s *Server) createTemplate(w http.ResponseWriter, r *http.Request) {
 	if template.Scope == "" {
 		template.Scope = "global"
 	}
-	template.Visibility = api.NormalizeVisibility(template.Visibility)
 	if template.Visibility == "" {
 		template.Visibility = store.VisibilityPrivate
 	}

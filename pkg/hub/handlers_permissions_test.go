@@ -51,7 +51,7 @@ func permSeedAgent(t *testing.T, ctx context.Context, s store.Store, id string) 
 	_ = s.CreateProject(ctx, &store.Project{ID: projectID, Name: "Perm Agent Project", Slug: "perm-agent-project"})
 	err := s.CreateAgent(ctx, &store.Agent{
 		ID: id, Name: "Seed Agent", Slug: "seed-agent-" + id[:8],
-		ProjectID: projectID, Phase: "stopped",
+		ProjectID: projectID, Phase: "stopped", Visibility: store.VisibilityPrivate,
 	})
 	if err != nil && !errors.Is(err, store.ErrAlreadyExists) {
 		t.Fatalf("seed agent %s: %v", id, err)
@@ -1239,9 +1239,9 @@ func TestPolicyList(t *testing.T) {
 		t.Fatalf("failed to decode response: %v", err)
 	}
 
-	// 3 test policies + 5 seeded policies (hub-member-read-{user,group,template,harness-config}, hub-member-create-projects) = 8
-	if len(resp.Policies) != 8 {
-		t.Errorf("expected 8 policies (3 test + 5 seeded), got %d", len(resp.Policies))
+	// 3 test policies + 2 seeded policies (hub-member-read-all, hub-member-create-projects) = 5
+	if len(resp.Policies) != 5 {
+		t.Errorf("expected 5 policies (3 test + 2 seeded), got %d", len(resp.Policies))
 	}
 }
 

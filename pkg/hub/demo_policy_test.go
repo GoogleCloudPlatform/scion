@@ -416,23 +416,14 @@ func TestDemoPolicy_SeedGroupsAndPolicies(t *testing.T) {
 	assert.Equal(t, "Hub Members", group.Name)
 	assert.Equal(t, store.GroupTypeExplicit, group.GroupType)
 
-	// Verify seed policies exist — per-type read policies replaced the old hub-member-read-all wildcard
-	for _, name := range []string{
-		"hub-member-read-user",
-		"hub-member-read-group",
-		"hub-member-read-template",
-		"hub-member-read-harness-config",
-		"hub-member-create-projects",
-	} {
-		policies, err := s.ListPolicies(ctx, store.PolicyFilter{Name: name}, store.ListOptions{Limit: 1})
-		require.NoError(t, err)
-		assert.Equal(t, 1, policies.TotalCount, "%s policy should exist", name)
-	}
-
-	// The old wildcard policy should NOT exist
+	// Verify seed policies exist
 	policies, err := s.ListPolicies(ctx, store.PolicyFilter{Name: "hub-member-read-all"}, store.ListOptions{Limit: 1})
 	require.NoError(t, err)
-	assert.Equal(t, 0, policies.TotalCount, "hub-member-read-all policy should be retired")
+	assert.Equal(t, 1, policies.TotalCount, "hub-member-read-all policy should exist")
+
+	policies, err = s.ListPolicies(ctx, store.PolicyFilter{Name: "hub-member-create-projects"}, store.ListOptions{Limit: 1})
+	require.NoError(t, err)
+	assert.Equal(t, 1, policies.TotalCount, "hub-member-create-projects policy should exist")
 }
 
 func TestDemoPolicy_ProjectCreationSetsUpMembersGroupAndPolicy(t *testing.T) {
@@ -458,22 +449,12 @@ func TestDemoPolicy_ProjectCreationSetsUpMembersGroupAndPolicy(t *testing.T) {
 	_, err = s.GetGroupMembership(ctx, membersGroup.ID, store.GroupMemberTypeUser, alice.ID)
 	assert.NoError(t, err, "project creator should be a member of the project members group")
 
-	// Verify project-level read policies were created (member-read-project and member-read-agents)
-	for _, suffix := range []string{"member-read-project", "member-read-agents"} {
-		policyName := "project:" + createdProject.Slug + ":" + suffix
-		policies, err := s.ListPolicies(ctx,
-			store.PolicyFilter{Name: policyName},
-			store.ListOptions{Limit: 1})
-		require.NoError(t, err)
-		assert.Equal(t, 1, policies.TotalCount, "%s policy should exist", policyName)
-	}
-
-	// The old member-create-agents policy should NOT exist
+	// Verify project-level agent creation policy was created
 	policies, err := s.ListPolicies(ctx,
 		store.PolicyFilter{Name: "project:" + createdProject.Slug + ":member-create-agents"},
 		store.ListOptions{Limit: 1})
 	require.NoError(t, err)
-	assert.Equal(t, 0, policies.TotalCount, "old member-create-agents policy should not exist")
+	assert.Equal(t, 1, policies.TotalCount, "project member-create-agents policy should exist")
 }
 
 // TestDemoPolicy_EndToEnd_ProjectCreatorCanCreateAgent tests the complete flow:
@@ -679,18 +660,15 @@ func TestDemoPolicy_ProjectDeleteCleansUpGroupsAndPolicies(t *testing.T) {
 	var project store.Project
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&project))
 
-	// Verify groups and policies exist before deletion
+	// Verify groups and policy exist
 	_, err := s.GetGroupBySlug(ctx, "project:"+project.Slug+":members")
 	require.NoError(t, err, "members group should exist before deletion")
 
-	for _, suffix := range []string{"member-read-project", "member-read-agents"} {
-		policyName := "project:" + project.Slug + ":" + suffix
-		policies, err := s.ListPolicies(ctx,
-			store.PolicyFilter{Name: policyName},
-			store.ListOptions{Limit: 1})
-		require.NoError(t, err)
-		assert.Equal(t, 1, policies.TotalCount, "%s should exist before deletion", policyName)
-	}
+	policies, err := s.ListPolicies(ctx,
+		store.PolicyFilter{Name: "project:" + project.Slug + ":member-create-agents"},
+		store.ListOptions{Limit: 1})
+	require.NoError(t, err)
+	assert.Equal(t, 1, policies.TotalCount, "policy should exist before deletion")
 
 	// Delete project
 	delRec := doRequestAsUser(t, srv, alice, http.MethodDelete, "/api/v1/projects/"+project.ID, nil)
@@ -700,13 +678,10 @@ func TestDemoPolicy_ProjectDeleteCleansUpGroupsAndPolicies(t *testing.T) {
 	_, err = s.GetGroupBySlug(ctx, "project:"+project.Slug+":members")
 	assert.Error(t, err, "members group should be deleted after project deletion")
 
-	// Verify policies are cleaned up
-	for _, suffix := range []string{"member-read-project", "member-read-agents"} {
-		policyName := "project:" + project.Slug + ":" + suffix
-		policies, err := s.ListPolicies(ctx,
-			store.PolicyFilter{Name: policyName},
-			store.ListOptions{Limit: 1})
-		require.NoError(t, err)
-		assert.Equal(t, 0, policies.TotalCount, "%s should be deleted after project deletion", policyName)
-	}
+	// Verify policy is cleaned up
+	policies, err = s.ListPolicies(ctx,
+		store.PolicyFilter{Name: "project:" + project.Slug + ":member-create-agents"},
+		store.ListOptions{Limit: 1})
+	require.NoError(t, err)
+	assert.Equal(t, 0, policies.TotalCount, "policy should be deleted after project deletion")
 }

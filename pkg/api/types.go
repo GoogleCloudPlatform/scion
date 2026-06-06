@@ -568,9 +568,10 @@ type AgentInfo struct {
 	DeletedAt time.Time `json:"deletedAt,omitempty"` // When the agent was soft-deleted
 
 	// Ownership & access
-	CreatedBy string   `json:"createdBy,omitempty"` // User/system that created the agent
-	OwnerID   string   `json:"ownerId,omitempty"`   // Current owner user ID
-	Ancestry  []string `json:"ancestry,omitempty"`  // Ordered ancestor chain [root, ..., parent] for transitive access
+	CreatedBy  string   `json:"createdBy,omitempty"`  // User/system that created the agent
+	OwnerID    string   `json:"ownerId,omitempty"`    // Current owner user ID
+	Visibility string   `json:"visibility,omitempty"` // Access level: private, team, public
+	Ancestry   []string `json:"ancestry,omitempty"`   // Ordered ancestor chain [root, ..., parent] for transitive access
 
 	// Hosted/distributed mode fields
 	RuntimeBrokerID   string `json:"runtimeBrokerId,omitempty"`   // ID of the Runtime Broker managing this agent
@@ -813,17 +814,6 @@ const (
 	VisibilityTeam    = "team"    // Team members can access
 	VisibilityPublic  = "public"  // Anyone can access (read-only)
 )
-
-// NormalizeVisibility maps legacy visibility values to their canonical form.
-// "grove" and "project" are accepted as aliases for "team" for backward compatibility.
-func NormalizeVisibility(v string) string {
-	switch v {
-	case "grove", "project":
-		return VisibilityTeam
-	default:
-		return v
-	}
-}
 
 // ProjectInfo contains metadata about a project (project/agent group).
 // It supports both local/solo mode and hosted/distributed mode.
