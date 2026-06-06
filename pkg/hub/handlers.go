@@ -9034,7 +9034,10 @@ func (s *Server) handleExistingAgent(
 				return existingAgentErrored
 			}
 
-			if req.Task != "" && existingAgent.AppliedConfig != nil {
+			if req.Task != "" {
+				if existingAgent.AppliedConfig == nil {
+					existingAgent.AppliedConfig = &store.AgentAppliedConfig{}
+				}
 				existingAgent.AppliedConfig.Task = req.Task
 				existingAgent.AppliedConfig.Attach = req.Attach
 			}
@@ -9045,7 +9048,7 @@ func (s *Server) handleExistingAgent(
 			}
 
 			existingAgent.Phase = string(state.PhaseRunning)
-			if err := s.store.UpdateAgent(ctx, existingAgent); err != nil {
+			if err := s.updateAgentAfterDispatch(ctx, existingAgent); err != nil {
 				s.agentLifecycleLog.Warn("Failed to update agent status after resume", "agent_id", existingAgent.ID, "error", err)
 			}
 
