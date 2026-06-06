@@ -1358,6 +1358,7 @@ func TestSessionStore_DifferentSecretCannotDecode(t *testing.T) {
 		reqC.AddCookie(c)
 	}
 	sessC, err := replicaC.sessionStore.Get(reqC, webSessionName)
+	require.NotNil(t, sessC)
 	// A cookie authenticated/encrypted with a different secret fails to decode:
 	// gorilla returns a decode error together with a fresh, empty session.
 	// Either way, the state must not leak across mismatched secrets.

@@ -861,13 +861,21 @@ func parseAdminEmails(cfg *config.GlobalConfig) []string {
 
 // resolveSessionSecret resolves the deployment-wide session secret from the
 // --session-secret flag, falling back to the SCION_SERVER_SESSION_SECRET env
-// var. The same value backs both the web session cookie store and the hub JWT
-// signing keys so that all replicas behind the load balancer agree.
+// var (then SESSION_SECRET for compatibility). The same value backs both the
+// web session cookie store and the hub JWT signing keys so that all replicas
+// behind the load balancer agree.
 func resolveSessionSecret() string {
-	if webSessionSecret != "" {
-		return webSessionSecret
+	secret := webSessionSecret
+	if secret == "" {
+		secret = os.Getenv("SCION_SERVER_SESSION_SECRET")
 	}
-	return os.Getenv("SCION_SERVER_SESSION_SECRET")
+	if secret == "" {
+		secret = os.Getenv("SESSION_SECRET")
+	}
+	if secret == "" && hostedMode {
+		slog.Warn("No session secret configured in hosted mode! Replicas will not be able to share sessions or agree on JWT signing keys, leading to login loops.")
+	}
+	return secret
 }
 
 // initHubServer creates and configures the Hub server.
