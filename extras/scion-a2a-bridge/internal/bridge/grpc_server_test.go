@@ -375,6 +375,40 @@ func TestStreamEventToProto(t *testing.T) {
 		}
 	})
 
+	t.Run("status update with message", func(t *testing.T) {
+		event := StreamEvent{
+			StatusUpdate: &TaskStatusUpdate{
+				TaskID: "t-2b",
+				Status: TaskStatus{
+					State: TaskStateFailed,
+					Message: &Message{
+						MessageID: "err-1",
+						Role:      RoleAgent,
+						Parts:     []Part{{Text: "something went wrong"}},
+					},
+				},
+				Final: true,
+			},
+		}
+		resp := streamEventToProto("t-2b", event)
+		if resp == nil {
+			t.Fatal("nil response")
+		}
+		statusResp, ok := resp.Payload.(*pb.StreamResponse_StatusUpdate)
+		if !ok {
+			t.Fatalf("expected status_update payload, got %T", resp.Payload)
+		}
+		if statusResp.StatusUpdate.Status.Message == nil {
+			t.Fatal("status message should not be nil when set on the event")
+		}
+		if statusResp.StatusUpdate.Status.Message.MessageId != "err-1" {
+			t.Errorf("message_id = %q, want %q", statusResp.StatusUpdate.Status.Message.MessageId, "err-1")
+		}
+		if len(statusResp.StatusUpdate.Status.Message.Parts) != 1 {
+			t.Fatalf("parts count = %d, want 1", len(statusResp.StatusUpdate.Status.Message.Parts))
+		}
+	})
+
 	t.Run("artifact update event", func(t *testing.T) {
 		event := StreamEvent{
 			ArtifactUpdate: &TaskArtifactUpdate{
@@ -395,6 +429,30 @@ func TestStreamEventToProto(t *testing.T) {
 		}
 		if artResp.ArtifactUpdate.TaskId != "t-3" {
 			t.Errorf("task id = %q, want %q", artResp.ArtifactUpdate.TaskId, "t-3")
+		}
+	})
+
+	t.Run("artifact update with last_chunk", func(t *testing.T) {
+		event := StreamEvent{
+			ArtifactUpdate: &TaskArtifactUpdate{
+				TaskID: "t-3b",
+				Artifact: Artifact{
+					ArtifactID: "art-final",
+					Parts:      []Part{{Text: "done"}},
+					LastChunk:  true,
+				},
+			},
+		}
+		resp := streamEventToProto("t-3b", event)
+		if resp == nil {
+			t.Fatal("nil response")
+		}
+		artResp, ok := resp.Payload.(*pb.StreamResponse_ArtifactUpdate)
+		if !ok {
+			t.Fatalf("expected artifact_update payload, got %T", resp.Payload)
+		}
+		if !artResp.ArtifactUpdate.LastChunk {
+			t.Error("expected LastChunk=true, got false")
 		}
 	})
 

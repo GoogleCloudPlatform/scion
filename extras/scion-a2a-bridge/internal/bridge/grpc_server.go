@@ -597,13 +597,17 @@ func streamEventToProto(taskID string, event StreamEvent) *pb.StreamResponse {
 		}
 
 	case event.StatusUpdate != nil:
+		pbStatus := &pb.TaskStatus{
+			State: taskStateToProto(event.StatusUpdate.Status.State),
+		}
+		if event.StatusUpdate.Status.Message != nil {
+			pbStatus.Message = messageToProto(event.StatusUpdate.Status.Message)
+		}
 		return &pb.StreamResponse{
 			Payload: &pb.StreamResponse_StatusUpdate{
 				StatusUpdate: &pb.TaskStatusUpdateEvent{
 					TaskId: event.StatusUpdate.TaskID,
-					Status: &pb.TaskStatus{
-						State: taskStateToProto(event.StatusUpdate.Status.State),
-					},
+					Status: pbStatus,
 				},
 			},
 		}
@@ -612,8 +616,9 @@ func streamEventToProto(taskID string, event StreamEvent) *pb.StreamResponse {
 		return &pb.StreamResponse{
 			Payload: &pb.StreamResponse_ArtifactUpdate{
 				ArtifactUpdate: &pb.TaskArtifactUpdateEvent{
-					TaskId:   event.ArtifactUpdate.TaskID,
-					Artifact: artifactToProto(&event.ArtifactUpdate.Artifact),
+					TaskId:    event.ArtifactUpdate.TaskID,
+					Artifact:  artifactToProto(&event.ArtifactUpdate.Artifact),
+					LastChunk: event.ArtifactUpdate.Artifact.LastChunk,
 				},
 			},
 		}
