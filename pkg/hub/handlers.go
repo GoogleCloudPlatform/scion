@@ -3880,7 +3880,10 @@ func (s *Server) createProjectMembersGroupAndPolicy(ctx context.Context, project
 
 		// Remove old policy
 		oldP := oldPolicies.Items[0]
-		_ = s.store.RemovePolicyBinding(ctx, oldP.ID, "group", membersGroup.ID)
+		if unbindErr := s.store.RemovePolicyBinding(ctx, oldP.ID, "group", membersGroup.ID); unbindErr != nil {
+			slog.Warn("failed to remove binding for retired create-agents policy",
+				"project_id", project.ID, "error", unbindErr.Error())
+		}
 		if delErr := s.store.DeletePolicy(ctx, oldP.ID); delErr != nil {
 			slog.Warn("failed to delete old create-agents policy",
 				"project_id", project.ID, "error", delErr.Error())
@@ -5295,16 +5298,10 @@ func (s *Server) getProject(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 
-	// Ensure associated groups exist (backfill for projects created before
-	// group support was added). These calls are idempotent and also seed the
-	// project-scoped member read policies + run the one-time members→admin
-	// migration. They MUST run before the read gate below, otherwise a member
-	// of a not-yet-backfilled project would be spuriously denied because the
-	// read policy would not exist yet.
-	s.createProjectGroup(ctx, project)
-	s.createProjectMembersGroupAndPolicy(ctx, project)
-
-	// Gate read access (after backfill, so member read policies are in place).
+	// Gate read access. The project's groups + member read policies are seeded
+	// at project-creation time and backfilled for all existing projects at
+	// startup (backfillProjectVisibility), so they are guaranteed present here —
+	// no need to run the write-heavy backfill on this read path.
 	decision := s.authzService.CheckAccess(ctx, identity, projectResource(project), ActionRead)
 	if !decision.Allowed {
 		NotFound(w, "Project")
@@ -5865,11 +5862,23 @@ func (s *Server) listRuntimeBrokers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Filter to brokers the user can read (owner, admin, or member of a contributing project)
+	// Filter to brokers the user can read (owner, admin, or member of a
+	// contributing project). To avoid an N+1 (one GetBrokerProjects per broker),
+	// resolve the set of broker IDs reachable through the caller's projects once.
+	isHubAdmin := false
+	if u, ok := ident.(UserIdentity); ok && u.Role() == "admin" {
+		isHubAdmin = true
+	}
+	readableViaProjects := s.readableBrokerIDsForUser(ctx, ident.ID())
 	readable := make([]store.RuntimeBroker, 0, len(result.Items))
 	for i := range result.Items {
-		if s.canReadBroker(ctx, ident, &result.Items[i]) {
-			readable = append(readable, result.Items[i])
+		b := &result.Items[i]
+		if isHubAdmin || (b.CreatedBy != "" && b.CreatedBy == ident.ID()) {
+			readable = append(readable, *b)
+			continue
+		}
+		if _, ok := readableViaProjects[b.ID]; ok {
+			readable = append(readable, *b)
 		}
 	}
 
@@ -6048,8 +6057,26 @@ func (s *Server) handleRuntimeBrokerByID(w http.ResponseWriter, r *http.Request)
 	}
 }
 
+// readableBrokerIDsForUser returns the set of broker IDs that contribute to any
+// project the user is a member of. It resolves user→projects→brokers once (one
+// GetProjectProviders per user project), avoiding an N+1 over the broker list.
+func (s *Server) readableBrokerIDsForUser(ctx context.Context, userID string) map[string]struct{} {
+	set := make(map[string]struct{})
+	for _, pid := range s.resolveUserProjectIDsCached(ctx, userID) {
+		providers, err := s.store.GetProjectProviders(ctx, pid)
+		if err != nil {
+			continue
+		}
+		for _, p := range providers {
+			set[p.BrokerID] = struct{}{}
+		}
+	}
+	return set
+}
+
 // canReadBroker checks whether the user can read a broker: owner, hub admin,
-// or member of any project the broker contributes to.
+// or member of any project the broker contributes to. Used on single-broker
+// read paths; the list path uses readableBrokerIDsForUser to avoid an N+1.
 func (s *Server) canReadBroker(ctx context.Context, identity Identity, broker *store.RuntimeBroker) bool {
 	// Admin bypass
 	if user, ok := identity.(UserIdentity); ok && user.Role() == "admin" {
@@ -6313,21 +6340,32 @@ func (s *Server) enrichProjectOwnerNames(ctx context.Context, projects []store.P
 
 type projectIDsCacheKey struct{}
 
-// resolveUserProjectIDsCached returns resolveUserProjectIDs results, cached in
-// the request context so the BFS is run at most once per HTTP request.
-func (s *Server) resolveUserProjectIDsCached(ctx context.Context, userID string) []string {
-	if cached, ok := ctx.Value(projectIDsCacheKey{}).([]string); ok {
-		return cached
-	}
-	ids := s.resolveUserProjectIDs(ctx, userID)
-	return ids
+// projectIDsCache lazily memoizes a user's resolved project IDs for the lifetime
+// of a single request. The BFS runs at most once, on first use.
+type projectIDsCache struct {
+	once sync.Once
+	ids  []string
 }
 
-// storeUserProjectIDsInContext computes and stores the user's project IDs in the
-// request context for reuse within the same request.
-func (s *Server) storeUserProjectIDsInContext(r *http.Request, userID string) *http.Request {
-	ids := s.resolveUserProjectIDs(r.Context(), userID)
-	ctx := context.WithValue(r.Context(), projectIDsCacheKey{}, ids)
+// resolveUserProjectIDsCached returns resolveUserProjectIDs results, cached in
+// the request context so the BFS is run at most once per HTTP request. The cache
+// is lazy and self-populating: if the context carries a cache it is filled on
+// first use; if not, it falls back to an uncached resolve.
+func (s *Server) resolveUserProjectIDsCached(ctx context.Context, userID string) []string {
+	if cache, ok := ctx.Value(projectIDsCacheKey{}).(*projectIDsCache); ok {
+		cache.once.Do(func() {
+			cache.ids = s.resolveUserProjectIDs(ctx, userID)
+		})
+		return cache.ids
+	}
+	return s.resolveUserProjectIDs(ctx, userID)
+}
+
+// storeUserProjectIDsInContext installs a lazy project-IDs cache in the request
+// context. The BFS is not run here — it runs on the first resolveUserProjectIDsCached
+// call, so handlers that return early never pay for it.
+func (s *Server) storeUserProjectIDsInContext(r *http.Request, _ string) *http.Request {
+	ctx := context.WithValue(r.Context(), projectIDsCacheKey{}, &projectIDsCache{})
 	return r.WithContext(ctx)
 }
 
