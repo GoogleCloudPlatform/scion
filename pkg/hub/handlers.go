@@ -5379,14 +5379,39 @@ func (s *Server) migrateProjectSlug(ctx context.Context, project *store.Project,
 	}
 
 	// Migrate hub-managed project filesystem paths (best-effort).
+	// Derive newPath from oldPath's parent to preserve the directory type (groves/ vs projects/).
 	if oldPath, err := hubManagedProjectPath(oldSlug); err == nil {
-		if newPath, err := hubManagedProjectPath(newSlug); err == nil {
-			// Only rename if the old path exists and the new path doesn't.
-			if _, statErr := os.Stat(oldPath); statErr == nil {
-				if _, statErr := os.Stat(newPath); os.IsNotExist(statErr) {
-					if err := os.Rename(oldPath, newPath); err != nil {
-						slog.Warn("failed to rename project workspace directory",
-							"project_id", project.ID, "old_path", oldPath, "new_path", newPath, "error", err)
+		if _, statErr := os.Stat(oldPath); statErr == nil {
+			newPath := filepath.Join(filepath.Dir(oldPath), newSlug)
+			if _, statErr := os.Stat(newPath); os.IsNotExist(statErr) {
+				if err := os.Rename(oldPath, newPath); err != nil {
+					slog.Warn("failed to rename project workspace directory",
+						"project_id", project.ID, "old_path", oldPath, "new_path", newPath, "error", err)
+				}
+			}
+		}
+	}
+
+	// Migrate the project config directory (~/.scion/project-configs/<slug>__<short-uuid>/).
+	oldMarker := &config.ProjectMarker{
+		ProjectID:   project.ID,
+		ProjectSlug: oldSlug,
+	}
+	newMarker := &config.ProjectMarker{
+		ProjectID:   project.ID,
+		ProjectSlug: newSlug,
+	}
+	if oldConfigPath, err := oldMarker.ExternalProjectPath(); err == nil {
+		if newConfigPath, err := newMarker.ExternalProjectPath(); err == nil {
+			oldConfigDir := filepath.Dir(oldConfigPath)
+			newConfigDir := filepath.Dir(newConfigPath)
+			if _, statErr := os.Stat(oldConfigDir); statErr == nil {
+				if _, statErr := os.Stat(newConfigDir); os.IsNotExist(statErr) {
+					if err := os.MkdirAll(filepath.Dir(newConfigDir), 0755); err == nil {
+						if err := os.Rename(oldConfigDir, newConfigDir); err != nil {
+							slog.Warn("failed to rename project config directory",
+								"project_id", project.ID, "old_path", oldConfigDir, "new_path", newConfigDir, "error", err)
+						}
 					}
 				}
 			}
