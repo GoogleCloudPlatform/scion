@@ -414,6 +414,63 @@ func TestSeedHarnessConfig_MockHarness(t *testing.T) {
 	}
 }
 
+func TestSeedHarnessConfig_AdditiveOnly(t *testing.T) {
+	tmpDir := t.TempDir()
+	hcBase := filepath.Join(tmpDir, "harness-configs")
+
+	// Pre-create a legacy "opencode" harness-config dir with custom content.
+	opencodeDir := filepath.Join(hcBase, "opencode")
+	if err := os.MkdirAll(filepath.Join(opencodeDir, "home", ".config", "opencode"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	customConfig := "harness: opencode\nimage: my-custom-opencode:v2\nuser: scion\nprovisioner:\n  type: container-script\n  interface_version: 1\n"
+	if err := os.WriteFile(filepath.Join(opencodeDir, "config.yaml"), []byte(customConfig), 0644); err != nil {
+		t.Fatal(err)
+	}
+	customSettings := `{"custom": true}`
+	settingsPath := filepath.Join(opencodeDir, "home", ".config", "opencode", "opencode.json")
+	if err := os.WriteFile(settingsPath, []byte(customSettings), 0644); err != nil {
+		t.Fatal(err)
+	}
+	customProvision := "#!/usr/bin/env python3\n# custom provisioner"
+	if err := os.WriteFile(filepath.Join(opencodeDir, "provision.py"), []byte(customProvision), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Seed only the default set (claude, gemini) — simulates what InitMachine does.
+	for _, h := range GetMockHarnesses() {
+		if err := SeedHarnessConfig(filepath.Join(hcBase, h.Name()), h, false); err != nil {
+			t.Fatalf("SeedHarnessConfig(%s) failed: %v", h.Name(), err)
+		}
+	}
+
+	// Verify the opencode directory and all its custom content survive.
+	if _, err := os.Stat(opencodeDir); err != nil {
+		t.Fatal("opencode harness-config dir should still exist after seeding defaults")
+	}
+	data, err := os.ReadFile(filepath.Join(opencodeDir, "config.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != customConfig {
+		t.Errorf("opencode config.yaml was modified; got:\n%s", data)
+	}
+	data, err = os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != customSettings {
+		t.Errorf("opencode opencode.json was modified; got: %s", data)
+	}
+	data, err = os.ReadFile(filepath.Join(opencodeDir, "provision.py"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != customProvision {
+		t.Errorf("opencode provision.py was modified; got: %s", data)
+	}
+}
+
 func TestSeedHarnessConfigFromFS(t *testing.T) {
 	tmpDir := t.TempDir()
 
