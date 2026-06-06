@@ -1981,12 +1981,13 @@ func TestCreateProject_ListByGitRemote_ReturnsMultiple(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
-	// Pre-create two projects for the same git remote.
+	// Pre-create two projects for the same git remote, owned by the dev user.
 	for _, g := range []*store.Project{
-		{ID: tid("g1"), Name: "widgets", Slug: "widgets", GitRemote: "github.com/acme/widgets"},
-		{ID: tid("g2"), Name: "widgets (1)", Slug: "widgets-1", GitRemote: "github.com/acme/widgets"},
+		{ID: tid("g1"), Name: "widgets", Slug: "widgets", GitRemote: "github.com/acme/widgets", OwnerID: DevUserID, CreatedBy: DevUserID},
+		{ID: tid("g2"), Name: "widgets (1)", Slug: "widgets-1", GitRemote: "github.com/acme/widgets", OwnerID: DevUserID, CreatedBy: DevUserID},
 	} {
 		require.NoError(t, s.CreateProject(ctx, g))
+		srv.createProjectMembersGroupAndPolicy(ctx, g)
 	}
 
 	// List projects by git remote should return both.
