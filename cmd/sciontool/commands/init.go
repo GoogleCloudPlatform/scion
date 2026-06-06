@@ -1731,8 +1731,14 @@ func writeEnvFile(agentHome string, uid, gid int) {
 	}
 
 	envPath := filepath.Join(scionDir, "scion-env")
-	if err := os.WriteFile(envPath, []byte(strings.Join(lines, "\n")+"\n"), 0644); err != nil {
-		log.Error("Failed to write scion-env file: %v", err)
+	tmpPath := envPath + ".tmp"
+	if err := os.WriteFile(tmpPath, []byte(strings.Join(lines, "\n")+"\n"), 0644); err != nil {
+		log.Error("Failed to write temporary scion-env file: %v", err)
+		return
+	}
+	if err := os.Rename(tmpPath, envPath); err != nil {
+		log.Error("Failed to atomically rename scion-env file: %v", err)
+		os.Remove(tmpPath)
 		return
 	}
 
