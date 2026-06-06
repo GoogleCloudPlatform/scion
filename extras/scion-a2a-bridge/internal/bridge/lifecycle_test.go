@@ -71,37 +71,6 @@ func seedTask(t *testing.T, b *Bridge, store *state.Store, taskID, projectID, ag
 	b.registerActiveTask(taskID, aKey)
 }
 
-// collectEvents subscribes to a task's stream and collects events until
-// the stream is closed or the context is cancelled.
-func collectEvents(ctx context.Context, b *Bridge, taskID string) ([]StreamEvent, func(), error) {
-	ch, cleanup, err := b.streams.Subscribe(taskID)
-	if err != nil {
-		return nil, nil, err
-	}
-	var events []StreamEvent
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		for {
-			select {
-			case ev, ok := <-ch:
-				if !ok {
-					return
-				}
-				events = append(events, ev)
-			case <-ctx.Done():
-				return
-			}
-		}
-	}()
-	wait := func() {
-		<-done
-		cleanup()
-	}
-	return events, wait, nil // Note: caller reads events after wait()
-	// Actually the events slice is shared, we need a different approach.
-}
-
 // --- Tests for dispatchToActiveTask with content messages ---
 
 func TestContentMessageDoesNotCompleteTask(t *testing.T) {
@@ -1163,6 +1132,130 @@ func TestStateChangeTerminalityTableDriven(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// --- Fix regression tests ---
+
+func TestDispatchToWaiterPersistsTerminalState(t *testing.T) {
+	b, store := newLifecycleTestBridge(t)
+	taskID := "waiter-persist-terminal-1"
+	seedTask(t, b, store, taskID, "proj1", "agent-a")
+
+	// Set up a blocking waiter as SendMessage would.
+	responseCh := make(chan *messages.StructuredMessage, 1)
+	b.addWaiter(taskID, &waiter{
+		ch:        responseCh,
+		agentSlug: "agent-a",
+		projectID: "proj1",
+	})
+	defer b.removeWaiter(taskID)
+
+	// Dispatch a COMPLETED state-change via dispatchToWaiter.
+	completedMsg := &messages.StructuredMessage{
+		Version: 1,
+		Sender:  "agent:agent-a",
+		Msg:     "COMPLETED",
+		Type:    messages.TypeStateChange,
+	}
+	handled := b.dispatchToWaiter(taskID, completedMsg)
+	if !handled {
+		t.Fatal("dispatchToWaiter should return true for state-change")
+	}
+
+	// The waiter channel should NOT have received the message (state-changes are skipped).
+	select {
+	case <-responseCh:
+		t.Error("waiter should NOT receive state-change messages")
+	default:
+	}
+
+	// But the DB state must be updated to completed.
+	task, err := store.GetTask(taskID)
+	if err != nil {
+		t.Fatalf("GetTask: %v", err)
+	}
+	if task.State != TaskStateCompleted {
+		t.Errorf("task state = %q, want %q — terminal state-change must persist even when waiter exists", task.State, TaskStateCompleted)
+	}
+}
+
+func TestDispatchToWaiterDoesNotPersistNonTerminalState(t *testing.T) {
+	b, store := newLifecycleTestBridge(t)
+	taskID := "waiter-no-persist-nonterminal-1"
+	seedTask(t, b, store, taskID, "proj1", "agent-a")
+
+	responseCh := make(chan *messages.StructuredMessage, 1)
+	b.addWaiter(taskID, &waiter{
+		ch:        responseCh,
+		agentSlug: "agent-a",
+		projectID: "proj1",
+	})
+	defer b.removeWaiter(taskID)
+
+	// Dispatch a WORKING state-change (non-terminal).
+	workingMsg := &messages.StructuredMessage{
+		Version: 1,
+		Sender:  "agent:agent-a",
+		Msg:     "WORKING",
+		Type:    messages.TypeStateChange,
+	}
+	handled := b.dispatchToWaiter(taskID, workingMsg)
+	if !handled {
+		t.Fatal("dispatchToWaiter should return true for state-change")
+	}
+
+	// DB state should remain working (seedTask sets it to working).
+	task, err := store.GetTask(taskID)
+	if err != nil {
+		t.Fatalf("GetTask: %v", err)
+	}
+	if task.State != TaskStateWorking {
+		t.Errorf("task state = %q, want %q — non-terminal state-change should not alter DB from waiter path", task.State, TaskStateWorking)
+	}
+}
+
+func TestContentMessageRefreshesTimestamp(t *testing.T) {
+	b, store := newLifecycleTestBridge(t)
+	taskID := "timestamp-refresh-1"
+	seedTask(t, b, store, taskID, "proj1", "agent-a")
+
+	// Record the initial timestamp.
+	taskBefore, err := store.GetTask(taskID)
+	if err != nil {
+		t.Fatalf("GetTask (before): %v", err)
+	}
+	initialUpdatedAt := taskBefore.UpdatedAt
+
+	// Sleep briefly to ensure timestamp moves forward.
+	time.Sleep(50 * time.Millisecond)
+
+	// Send a content message through the broker.
+	contentMsg := &messages.StructuredMessage{
+		Version:   1,
+		Timestamp: time.Now().UTC().Format(time.RFC3339),
+		Sender:    "agent:agent-a",
+		Recipient: "user:test-user",
+		Msg:       "Still working...",
+		Type:      messages.TypeAssistantReply,
+		Metadata:  map[string]string{"a2aTaskId": taskID},
+	}
+	if err := b.HandleBrokerMessage(context.Background(), "scion.project.proj1.user.test-user.messages", contentMsg); err != nil {
+		t.Fatalf("HandleBrokerMessage: %v", err)
+	}
+	time.Sleep(100 * time.Millisecond)
+
+	// The task's UpdatedAt should have been refreshed.
+	taskAfter, err := store.GetTask(taskID)
+	if err != nil {
+		t.Fatalf("GetTask (after): %v", err)
+	}
+	if !taskAfter.UpdatedAt.After(initialUpdatedAt) {
+		t.Errorf("UpdatedAt was not refreshed: before=%v, after=%v — content messages must refresh timestamp to prevent janitor reaping",
+			initialUpdatedAt, taskAfter.UpdatedAt)
+	}
+	if taskAfter.State != TaskStateWorking {
+		t.Errorf("task state = %q, want %q", taskAfter.State, TaskStateWorking)
 	}
 }
 

@@ -591,6 +591,14 @@ func (b *Bridge) dispatchToWaiter(taskID string, msg *messages.StructuredMessage
 		return false
 	}
 	if msg.Type == messages.TypeStateChange {
+		// Terminal state-changes must still be persisted to the DB even though
+		// we skip the waiter — otherwise the task's stored state is never updated.
+		if taskState := MapActivityToTaskState(msg.Msg); IsTerminalState(taskState) {
+			if err := b.store.UpdateTaskState(taskID, taskState); err != nil {
+				b.log.Error("failed to persist terminal state from waiter path",
+					"task_id", taskID, "state", taskState, "error", err)
+			}
+		}
 		return true
 	}
 	select {
@@ -633,6 +641,12 @@ func (b *Bridge) dispatchToActiveTask(ctx context.Context, taskID, agentSlug str
 	} else {
 		// Content message — broadcast to subscribers but keep task alive.
 		// Task lifecycle is driven by state-change messages, not content.
+		// Touch the DB timestamp so the janitor doesn't reap active tasks
+		// whose only recent activity is content messages.
+		if err := b.store.UpdateTaskState(taskID, TaskStateWorking); err != nil {
+			b.log.Error("failed to refresh task timestamp for content message",
+				"task_id", taskID, "error", err)
+		}
 		for _, art := range artifacts {
 			artEvent := StreamEvent{
 				ArtifactUpdate: &TaskArtifactUpdate{
