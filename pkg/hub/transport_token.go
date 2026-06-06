@@ -86,7 +86,7 @@ func (m *gcpTransportMinter) getOrCreateService() (*iamcredentials.Service, erro
 	m.svcOnce.Do(func() {
 		var opts []option.ClientOption
 		if m.iamEndpoint != "" {
-			opts = append(opts, option.WithEndpoint(m.iamEndpoint))
+			opts = append(opts, option.WithEndpoint(m.iamEndpoint), option.WithoutAuthentication())
 		}
 		m.svc, m.svcErr = iamcredentials.NewService(context.Background(), opts...)
 	})
