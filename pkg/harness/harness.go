@@ -37,7 +37,5 @@ func All() []api.Harness {
 	return []api.Harness{
 		&GeminiCLI{},
 		&ClaudeCode{},
-		&OpenCode{},
-		&Codex{},
 	}
 }
