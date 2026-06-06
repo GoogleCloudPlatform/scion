@@ -495,9 +495,15 @@ func TestSeedHarnessConfigFromFS(t *testing.T) {
 func TestComputeHarnessConfigRevision_SkipsNonRuntimeFiles(t *testing.T) {
 	dir := t.TempDir()
 
-	os.WriteFile(filepath.Join(dir, "config.yaml"), []byte("harness: opencode\n"), 0644)
-	os.MkdirAll(filepath.Join(dir, "home", ".config"), 0755)
-	os.WriteFile(filepath.Join(dir, "home", ".config", "settings.json"), []byte("{}"), 0644)
+	if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte("harness: opencode\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "home", ".config"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "home", ".config", "settings.json"), []byte("{}"), 0644); err != nil {
+		t.Fatal(err)
+	}
 
 	baseRev := ComputeHarnessConfigRevision(dir)
 	if baseRev == "" {
@@ -505,14 +511,18 @@ func TestComputeHarnessConfigRevision_SkipsNonRuntimeFiles(t *testing.T) {
 	}
 
 	for _, skip := range []string{"Dockerfile", "cloudbuild.yaml", "README.md", ".gitkeep"} {
-		os.WriteFile(filepath.Join(dir, skip), []byte("should be ignored"), 0644)
+		if err := os.WriteFile(filepath.Join(dir, skip), []byte("should be ignored"), 0644); err != nil {
+			t.Fatal(err)
+		}
 	}
 	afterSkipped := ComputeHarnessConfigRevision(dir)
 	if afterSkipped != baseRev {
 		t.Errorf("adding non-runtime files changed revision: %s -> %s", baseRev, afterSkipped)
 	}
 
-	os.WriteFile(filepath.Join(dir, "config.yaml"), []byte("harness: opencode\nimage: new\n"), 0644)
+	if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte("harness: opencode\nimage: new\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
 	afterConfig := ComputeHarnessConfigRevision(dir)
 	if afterConfig == baseRev {
 		t.Error("changing config.yaml should change revision")

@@ -35,9 +35,7 @@ func TestHarnessConfigList(t *testing.T) {
 	)
 	defer restore()
 
-	origHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", origHome)
-	os.Setenv("HOME", tmpDir)
+	t.Setenv("HOME", tmpDir)
 
 	// Seed harness-configs via InitMachine
 	harnesses := harness.All()
@@ -72,9 +70,7 @@ func TestHarnessConfigReset(t *testing.T) {
 	)
 	defer restore()
 
-	origHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", origHome)
-	os.Setenv("HOME", tmpDir)
+	t.Setenv("HOME", tmpDir)
 
 	// Seed harness-configs via InitMachine
 	harnesses := harness.All()
@@ -118,9 +114,7 @@ func TestHarnessConfigReset(t *testing.T) {
 func TestHarnessConfigReset_BundleHarnessReturnsError(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	origHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", origHome)
-	os.Setenv("HOME", tmpDir)
+	t.Setenv("HOME", tmpDir)
 
 	globalDir, err := config.GetGlobalDir()
 	require.NoError(t, err)
