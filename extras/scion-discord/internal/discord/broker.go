@@ -187,12 +187,24 @@ func (b *DiscordBroker) Configure(config map[string]string) error {
 		}
 		b.config = cfg
 
-		// Initialize SQLite store.
-		store, err := NewSQLiteStore(cfg.DBPath)
-		if err != nil {
-			return fmt.Errorf("init store: %w", err)
+		// Initialize store: use PostgreSQL when hub injects database config,
+		// otherwise fall back to SQLite.
+		dbDriver, hasDriver := config["database_driver"]
+		dbURL, hasURL := config["database_url"]
+		if hasDriver && dbDriver == "postgres" && hasURL && dbURL != "" {
+			store, err := NewPostgresStore(dbURL)
+			if err != nil {
+				return fmt.Errorf("init postgres store: %w", err)
+			}
+			b.store = store
+			b.log.Info("Using PostgreSQL store for Discord broker")
+		} else {
+			store, err := NewSQLiteStore(cfg.DBPath)
+			if err != nil {
+				return fmt.Errorf("init sqlite store: %w", err)
+			}
+			b.store = store
 		}
-		b.store = store
 
 		// Initialize send queue with rate limiting.
 		sqSize := 0

@@ -368,6 +368,10 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 									hubCreds["project_slug_map"] = string(jsonBytes)
 								}
 							}
+							if cfg.Database.Driver != "" && cfg.Database.Driver != "sqlite" {
+								hubCreds["database_driver"] = cfg.Database.Driver
+								hubCreds["database_url"] = cfg.Database.URL
+							}
 							if cfgErr := pluginMgr.ConfigureBroker(bt, hubCreds); cfgErr != nil {
 								log.Printf("Warning: failed to inject hub credentials into broker plugin %q: %v", bt, cfgErr)
 							} else {
