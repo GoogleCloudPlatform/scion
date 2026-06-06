@@ -1,0 +1,18 @@
+steps:
+  # Pull scion-base from ptone-misc (public)
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'pull'
+      - 'us-docker.pkg.dev/ptone-misc/scion-alt/scion-base:latest'
+  # Build antigravity image on top of scion-base
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '--build-arg'
+      - 'BASE_IMAGE=us-docker.pkg.dev/ptone-misc/scion-alt/scion-base:latest'
+      - '-t'
+      - 'us-docker.pkg.dev/ptone-misc/scion-alt/scion-antigravity:latest'
+      - '.'
+images:
+  - 'us-docker.pkg.dev/ptone-misc/scion-alt/scion-antigravity:latest'
+timeout: '600s'

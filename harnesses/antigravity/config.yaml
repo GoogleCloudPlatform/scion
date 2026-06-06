@@ -1,0 +1,66 @@
+harness: antigravity
+image: scion-antigravity:latest
+user: scion
+
+provisioner:
+  type: container-script
+  interface_version: 1
+  command: ["python3", "/home/scion/.scion/harness/provision.py"]
+  timeout: 30s
+  lifecycle_events:
+    - pre-start
+  required_image_tools:
+    - python3
+    - jq
+
+config_dir: .gemini/antigravity-cli
+skills_dir: .gemini/antigravity-cli/skills
+interrupt_key: C-c
+instructions_file: .gemini/GEMINI.md
+system_prompt_file: GEMINI.md
+system_prompt_mode: prepend_to_instructions
+
+command:
+  base: ["/home/scion/.scion/harness/agy-wrapper.sh"]
+  task_flag: "-prompt-interactive"
+  task_position: after_base_args
+  resume_flag: "-continue"
+
+env_template:
+  SCION_AGENT_NAME: "{{ .AgentName }}"
+
+mcp:
+  global_config_file: .gemini/config/mcp_config.json
+  global_config_path: mcpServers
+  transport_field: type
+  transport_map:
+    stdio: stdio
+    sse: sse
+    streamable-http: streamable-http
+
+capabilities:
+  limits:
+    max_turns: { support: "yes" }
+    max_model_calls: { support: "no", reason: "AGY events do not distinguish model calls from invocations" }
+    max_duration: { support: "yes" }
+  telemetry:
+    enabled: { support: "no", reason: "AGY has no native OTEL integration" }
+    native_emitter: { support: "no" }
+  prompts:
+    system_prompt: { support: "partial", reason: "System prompt is downgraded to GEMINI.md preamble" }
+    agent_instructions: { support: "yes" }
+  auth:
+    api_key: { support: "no", reason: "AGY uses OAuth via gnome-keyring, not API keys" }
+    auth_file: { support: "no", reason: "AGY uses OAuth via gnome-keyring" }
+    oauth_token: { support: "yes", reason: "Via gnome-keyring population from AGY_KEYRING_TOKEN secret" }
+    vertex_ai: { support: "yes", reason: "Enterprise/GCP mode via AGY_KEYRING_TOKEN + GOOGLE_CLOUD_PROJECT" }
+
+auth:
+  types:
+    oauth-token:
+      required_env:
+        - any_of: ["AGY_KEYRING_TOKEN"]
+    vertex-ai: {}
+  autodetect:
+    env:
+      AGY_KEYRING_TOKEN: oauth-token

@@ -1,0 +1,21 @@
+dialect: antigravity
+event_name_field: hook_event_name
+mappings:
+  PreInvocation:
+    event: model-start
+  PostInvocation:
+    event: model-end
+  PreToolUse:
+    event: tool-start
+    fields:
+      tool_name: .toolCall.name
+  PostToolUse:
+    event: tool-end
+    fields:
+      tool_name: .toolCall.name
+      error: .error
+  Stop:
+    event: agent-end
+    fields:
+      reason: .terminationReason
+      error: .error
