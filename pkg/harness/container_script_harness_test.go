@@ -407,3 +407,49 @@ command:
 		t.Errorf("GetCommand=%v", cmd)
 	}
 }
+
+func TestResolve_LegacyBuiltinOpencode(t *testing.T) {
+	home := t.TempDir()
+	configsDir := filepath.Join(home, ".scion", "harness-configs")
+	hcDir := filepath.Join(configsDir, "opencode")
+
+	// Legacy opencode config with provisioner.type: builtin (no container-script).
+	writeFile(t, filepath.Join(hcDir, "config.yaml"), `harness: opencode
+image: scion-opencode:latest
+user: scion
+provisioner:
+  type: builtin
+  interface_version: 1
+command:
+  base: ["opencode"]
+`)
+	writeFile(t, filepath.Join(hcDir, "provision.py"), "#!/usr/bin/env python3\n")
+
+	t.Setenv("HOME", home)
+
+	resolved, err := Resolve(context.Background(), ResolveOptions{Name: "opencode"})
+	if err != nil {
+		t.Fatalf("Resolve should not error for legacy-builtin config: %v", err)
+	}
+	// Should fall through to declarative-generic (has command metadata).
+	if resolved.Implementation != "generic" {
+		t.Errorf("Implementation=%q want generic", resolved.Implementation)
+	}
+	if _, ok := resolved.Harness.(*DeclarativeGenericHarness); !ok {
+		t.Errorf("expected DeclarativeGenericHarness, got %T", resolved.Harness)
+	}
+}
+
+func TestResolve_LegacyBuiltinCodexNoDir(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+
+	// No on-disk directory at all — should fall to Generic without error.
+	resolved, err := Resolve(context.Background(), ResolveOptions{Name: "codex"})
+	if err != nil {
+		t.Fatalf("Resolve should not error for missing codex: %v", err)
+	}
+	if resolved.Implementation != "generic" {
+		t.Errorf("Implementation=%q want generic", resolved.Implementation)
+	}
+}
