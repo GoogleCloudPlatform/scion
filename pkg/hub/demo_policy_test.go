@@ -416,14 +416,23 @@ func TestDemoPolicy_SeedGroupsAndPolicies(t *testing.T) {
 	assert.Equal(t, "Hub Members", group.Name)
 	assert.Equal(t, store.GroupTypeExplicit, group.GroupType)
 
-	// Verify seed policies exist
+	// Verify seed policies exist — per-type read policies replaced the old hub-member-read-all wildcard
+	for _, name := range []string{
+		"hub-member-read-user",
+		"hub-member-read-group",
+		"hub-member-read-template",
+		"hub-member-read-harness-config",
+		"hub-member-create-projects",
+	} {
+		policies, err := s.ListPolicies(ctx, store.PolicyFilter{Name: name}, store.ListOptions{Limit: 1})
+		require.NoError(t, err)
+		assert.Equal(t, 1, policies.TotalCount, "%s policy should exist", name)
+	}
+
+	// The old wildcard policy should NOT exist
 	policies, err := s.ListPolicies(ctx, store.PolicyFilter{Name: "hub-member-read-all"}, store.ListOptions{Limit: 1})
 	require.NoError(t, err)
-	assert.Equal(t, 1, policies.TotalCount, "hub-member-read-all policy should exist")
-
-	policies, err = s.ListPolicies(ctx, store.PolicyFilter{Name: "hub-member-create-projects"}, store.ListOptions{Limit: 1})
-	require.NoError(t, err)
-	assert.Equal(t, 1, policies.TotalCount, "hub-member-create-projects policy should exist")
+	assert.Equal(t, 0, policies.TotalCount, "hub-member-read-all policy should be retired")
 }
 
 func TestDemoPolicy_ProjectCreationSetsUpMembersGroupAndPolicy(t *testing.T) {
