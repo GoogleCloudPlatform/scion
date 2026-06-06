@@ -2578,9 +2578,9 @@ type GroupMessageRecipientResult struct {
 
 // GroupMessageResponse is the JSON response for a set[] message delivery.
 type GroupMessageResponse struct {
-	GroupID   string                      `json:"group_id"`
-	Delivered int                         `json:"delivered"`
-	Failed    int                         `json:"failed"`
+	GroupID   string                        `json:"group_id"`
+	Delivered int                           `json:"delivered"`
+	Failed    int                           `json:"failed"`
 	Results   []GroupMessageRecipientResult `json:"results"`
 }
 
@@ -9450,6 +9450,7 @@ func (s *Server) handleProjectImportTemplates(w http.ResponseWriter, r *http.Req
 		Count:     len(imported),
 	})
 }
+
 // ImportResourcesRequest is the body for the unified import endpoint
 // (POST /api/v1/resources/import). It imports a single kind of resource from a
 // remote source URL into the given scope.

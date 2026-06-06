@@ -35,7 +35,7 @@ import (
 type NotificationDispatcher struct {
 	store           store.Store
 	events          EventPublisher
-	getDispatcher   func() AgentDispatcher // lazy getter; dispatcher may be set after startup
+	getDispatcher   func() AgentDispatcher                              // lazy getter; dispatcher may be set after startup
 	signalDeferred  func(ctx context.Context, brokerID, agentID string) // NOTIFY wakeup for deferred messages
 	log             *slog.Logger
 	messageLog      *slog.Logger        // dedicated message audit logger (nil = disabled)

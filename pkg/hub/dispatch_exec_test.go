@@ -37,20 +37,22 @@ import (
 // lifecycleTestDispatcher captures which lifecycle op was called and with
 // what args, so we can verify executeDispatch routes correctly.
 type lifecycleTestDispatcher struct {
-	startCalled        atomic.Int32
-	stopCalled         atomic.Int32
-	restartCalled      atomic.Int32
-	deleteCalled       atomic.Int32
-	checkPromptCalled  atomic.Int32
-	finalizeEnvCalled  atomic.Int32
-	createCalled       atomic.Int32
-	lastTask           string
-	checkPromptResult  bool
-	lastDeleteFiles    bool
-	lastFinalizeEnv    map[string]string
+	startCalled       atomic.Int32
+	stopCalled        atomic.Int32
+	restartCalled     atomic.Int32
+	deleteCalled      atomic.Int32
+	checkPromptCalled atomic.Int32
+	finalizeEnvCalled atomic.Int32
+	createCalled      atomic.Int32
+	lastTask          string
+	checkPromptResult bool
+	lastDeleteFiles   bool
+	lastFinalizeEnv   map[string]string
 }
 
-func (d *lifecycleTestDispatcher) DispatchAgentCreate(context.Context, *store.Agent) error { return nil }
+func (d *lifecycleTestDispatcher) DispatchAgentCreate(context.Context, *store.Agent) error {
+	return nil
+}
 func (d *lifecycleTestDispatcher) DispatchAgentProvision(context.Context, *store.Agent) error {
 	return nil
 }

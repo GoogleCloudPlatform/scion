@@ -333,5 +333,5 @@ type NoopCommandBus struct{}
 var _ CommandBus = NoopCommandBus{}
 
 func (NoopCommandBus) NotifyBrokerCmd(context.Context, pgExecutor, string) error { return nil }
-func (NoopCommandBus) SignalBrokerCmd(context.Context, string) error              { return nil }
+func (NoopCommandBus) SignalBrokerCmd(context.Context, string) error             { return nil }
 func (NoopCommandBus) Close()                                                    {}

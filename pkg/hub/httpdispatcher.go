@@ -29,9 +29,9 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/dispatchmetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
-	"go.opentelemetry.io/otel/attribute"
 	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 // HTTPRuntimeBrokerClient is an HTTP-based implementation of RuntimeBrokerClient.
@@ -130,14 +130,14 @@ type GitHubAppTokenMinter interface {
 // It looks up the runtime broker endpoint from the store and uses HTTPRuntimeBrokerClient
 // to make the actual API calls.
 type HTTPAgentDispatcher struct {
-	store           store.Store
-	client          RuntimeBrokerClient
-	tokenGenerator  AgentTokenGenerator
-	secretBackend   secret.SecretBackend
-	authzService    *AuthzService        // Optional authz service for progeny secret verification
-	githubAppMinter GitHubAppTokenMinter // Optional GitHub App token minter
-	hubEndpoint     string               // Hub endpoint URL for agents to call back
-	hubID           string               // Hub instance ID for hub-scoped queries
+	store             store.Store
+	client            RuntimeBrokerClient
+	tokenGenerator    AgentTokenGenerator
+	secretBackend     secret.SecretBackend
+	authzService      *AuthzService        // Optional authz service for progeny secret verification
+	githubAppMinter   GitHubAppTokenMinter // Optional GitHub App token minter
+	hubEndpoint       string               // Hub endpoint URL for agents to call back
+	hubID             string               // Hub instance ID for hub-scoped queries
 	devAuthToken      string               // Dev auth token to inject into agent env (dev-auth mode only)
 	transportMinter   TransportTokenMinter // Optional transport token minter for OIDC dispatch
 	transportAudience string               // OIDC audience for transport tokens

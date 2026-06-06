@@ -434,7 +434,7 @@ func (c *Client) applyRefreshTokens(tokens []RefreshTokenEntry) {
 				entryExpiry := time.Now().Add(time.Duration(entry.ExpiresIn) * time.Second)
 				c.oidcSource.setToken(entry.Value, entryExpiry)
 			}
-		// app/scion_access is already handled via the legacy token field above
+			// app/scion_access is already handled via the legacy token field above
 		}
 	}
 }

@@ -50,7 +50,10 @@ func TestReconcileBroker_DrainsDispatchOnce(t *testing.T) {
 	cs := entadapter.NewCompositeStore(enttest.NewClient(t))
 	var execN int32
 	s := newReconcileServer(cs,
-		func(context.Context, store.BrokerDispatch) (string, error) { atomic.AddInt32(&execN, 1); return `{"ok":true}`, nil },
+		func(context.Context, store.BrokerDispatch) (string, error) {
+			atomic.AddInt32(&execN, 1)
+			return `{"ok":true}`, nil
+		},
 		func(context.Context, *store.Message) error { return nil })
 
 	broker := uuid.NewString()
@@ -70,7 +73,10 @@ func TestReconcileBroker_ConcurrentDrainsExecuteOnce(t *testing.T) {
 	cs := entadapter.NewCompositeStore(enttest.NewClient(t))
 	var execN int32
 	s := newReconcileServer(cs,
-		func(context.Context, store.BrokerDispatch) (string, error) { atomic.AddInt32(&execN, 1); return "", nil },
+		func(context.Context, store.BrokerDispatch) (string, error) {
+			atomic.AddInt32(&execN, 1)
+			return "", nil
+		},
 		func(context.Context, *store.Message) error { return nil })
 
 	broker := uuid.NewString()
@@ -204,7 +210,9 @@ type reconcileTestDispatcher struct {
 	onMessage func(agent *store.Agent, msg string) error
 }
 
-func (d *reconcileTestDispatcher) DispatchAgentCreate(context.Context, *store.Agent) error { return nil }
+func (d *reconcileTestDispatcher) DispatchAgentCreate(context.Context, *store.Agent) error {
+	return nil
+}
 func (d *reconcileTestDispatcher) DispatchAgentProvision(context.Context, *store.Agent) error {
 	return nil
 }

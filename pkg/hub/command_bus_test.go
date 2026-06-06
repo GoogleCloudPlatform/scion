@@ -473,4 +473,3 @@ func TestCommandBusIntegration_CloseIsIdempotent(t *testing.T) {
 	bus.Close()
 	bus.Close() // must not panic
 }
-

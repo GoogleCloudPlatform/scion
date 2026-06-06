@@ -24,15 +24,15 @@ import (
 const instrumentationName = "github.com/GoogleCloudPlatform/scion/pkg/observability/dispatchmetrics"
 
 const (
-	MetricDispatchPublished  = "scion.dispatch.published"
-	MetricDispatchClaimed    = "scion.dispatch.claimed"
-	MetricDispatchDone       = "scion.dispatch.done"
-	MetricDispatchFailed     = "scion.dispatch.failed"
-	MetricDispatchLatency    = "scion.dispatch.intent_to_done.duration"
-	MetricMessageDispatched  = "scion.dispatch.message.dispatched"
-	MetricMessageStuck       = "scion.dispatch.message.stuck"
-	MetricCmdBusReconnects   = "scion.dispatch.cmdbus.reconnects"
-	MetricReconcileDrainDur  = "scion.dispatch.reconcile.drain.duration"
+	MetricDispatchPublished = "scion.dispatch.published"
+	MetricDispatchClaimed   = "scion.dispatch.claimed"
+	MetricDispatchDone      = "scion.dispatch.done"
+	MetricDispatchFailed    = "scion.dispatch.failed"
+	MetricDispatchLatency   = "scion.dispatch.intent_to_done.duration"
+	MetricMessageDispatched = "scion.dispatch.message.dispatched"
+	MetricMessageStuck      = "scion.dispatch.message.stuck"
+	MetricCmdBusReconnects  = "scion.dispatch.cmdbus.reconnects"
+	MetricReconcileDrainDur = "scion.dispatch.reconcile.drain.duration"
 )
 
 // Recorder is the interface callers use to record broker-dispatch metrics.
@@ -59,11 +59,11 @@ type Recorder interface {
 type recorder struct {
 	enabled bool
 
-	published  metric.Int64Counter
-	claimed    metric.Int64Counter
-	done       metric.Int64Counter
-	failed     metric.Int64Counter
-	latency    metric.Float64Histogram
+	published metric.Int64Counter
+	claimed   metric.Int64Counter
+	done      metric.Int64Counter
+	failed    metric.Int64Counter
+	latency   metric.Float64Histogram
 
 	msgDispatched metric.Int64Counter
 	msgStuck      metric.Int64Gauge

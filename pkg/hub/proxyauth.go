@@ -235,9 +235,9 @@ type jwksCache struct {
 
 	mu            sync.RWMutex
 	keys          map[string]jose.JSONWebKey // kid -> key
-	lastFetched   time.Time                 // last successful fetch
-	lastAttempted time.Time                 // last fetch attempt (success or failure), for stampede prevention
-	refreshing    bool                      // true while a refresh is in-flight
+	lastFetched   time.Time                  // last successful fetch
+	lastAttempted time.Time                  // last fetch attempt (success or failure), for stampede prevention
+	refreshing    bool                       // true while a refresh is in-flight
 }
 
 // GetKey returns the public key for the given kid. If the kid is not found

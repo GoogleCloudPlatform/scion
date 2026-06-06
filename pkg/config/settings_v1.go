@@ -252,13 +252,13 @@ type V1ServerConfig struct {
 	// Mode selects the server operating mode: "workstation" (default) or "hosted".
 	// When set to "hosted", the server behaves as if --hosted were passed.
 	// The legacy value "production" is also accepted for backward compatibility.
-	Mode      string             `json:"mode,omitempty" yaml:"mode,omitempty" koanf:"mode"`
-	Env       string             `json:"env,omitempty" yaml:"env,omitempty" koanf:"env"`
-	Hub       *V1ServerHubConfig `json:"hub,omitempty" yaml:"hub,omitempty" koanf:"hub"`
-	Broker    *V1BrokerConfig    `json:"broker,omitempty" yaml:"broker,omitempty" koanf:"broker"`
-	Database  *V1DatabaseConfig  `json:"database,omitempty" yaml:"database,omitempty" koanf:"database"`
-	Auth      *V1AuthConfig      `json:"auth,omitempty" yaml:"auth,omitempty" koanf:"auth"`
-	OAuth     *V1OAuthConfig     `json:"oauth,omitempty" yaml:"oauth,omitempty" koanf:"oauth"`
+	Mode             string                    `json:"mode,omitempty" yaml:"mode,omitempty" koanf:"mode"`
+	Env              string                    `json:"env,omitempty" yaml:"env,omitempty" koanf:"env"`
+	Hub              *V1ServerHubConfig        `json:"hub,omitempty" yaml:"hub,omitempty" koanf:"hub"`
+	Broker           *V1BrokerConfig           `json:"broker,omitempty" yaml:"broker,omitempty" koanf:"broker"`
+	Database         *V1DatabaseConfig         `json:"database,omitempty" yaml:"database,omitempty" koanf:"database"`
+	Auth             *V1AuthConfig             `json:"auth,omitempty" yaml:"auth,omitempty" koanf:"auth"`
+	OAuth            *V1OAuthConfig            `json:"oauth,omitempty" yaml:"oauth,omitempty" koanf:"oauth"`
 	Storage          *V1StorageConfig          `json:"storage,omitempty" yaml:"storage,omitempty" koanf:"storage"`
 	WorkspaceStorage *V1WorkspaceStorageConfig `json:"workspace_storage,omitempty" yaml:"workspace_storage,omitempty" koanf:"workspace_storage"`
 	Secrets          *V1SecretsConfig          `json:"secrets,omitempty" yaml:"secrets,omitempty" koanf:"secrets"`
@@ -388,12 +388,12 @@ type V1DatabaseConfig struct {
 type V1AuthConfig struct {
 	// Mode selects the exclusive human auth mode: "oauth" (default), "proxy", or "dev".
 	// In proxy mode, OAuth handlers are disabled; in dev mode, dev token auth is used.
-	Mode              string         `json:"mode,omitempty" yaml:"mode,omitempty" koanf:"mode"`
-	DevMode           bool           `json:"dev_mode,omitempty" yaml:"dev_mode,omitempty" koanf:"dev_mode"`
-	DevToken          string         `json:"dev_token,omitempty" yaml:"dev_token,omitempty" koanf:"dev_token"`
-	DevTokenFile      string         `json:"dev_token_file,omitempty" yaml:"dev_token_file,omitempty" koanf:"dev_token_file"`
-	AuthorizedDomains []string       `json:"authorized_domains,omitempty" yaml:"authorized_domains,omitempty" koanf:"authorized_domains"`
-	UserAccessMode    string         `json:"user_access_mode,omitempty" yaml:"user_access_mode,omitempty" koanf:"user_access_mode"`
+	Mode              string             `json:"mode,omitempty" yaml:"mode,omitempty" koanf:"mode"`
+	DevMode           bool               `json:"dev_mode,omitempty" yaml:"dev_mode,omitempty" koanf:"dev_mode"`
+	DevToken          string             `json:"dev_token,omitempty" yaml:"dev_token,omitempty" koanf:"dev_token"`
+	DevTokenFile      string             `json:"dev_token_file,omitempty" yaml:"dev_token_file,omitempty" koanf:"dev_token_file"`
+	AuthorizedDomains []string           `json:"authorized_domains,omitempty" yaml:"authorized_domains,omitempty" koanf:"authorized_domains"`
+	UserAccessMode    string             `json:"user_access_mode,omitempty" yaml:"user_access_mode,omitempty" koanf:"user_access_mode"`
 	Proxy             *V1ProxyConfig     `json:"proxy,omitempty" yaml:"proxy,omitempty" koanf:"proxy"`
 	Transport         *V1TransportConfig `json:"transport,omitempty" yaml:"transport,omitempty" koanf:"transport"`
 }

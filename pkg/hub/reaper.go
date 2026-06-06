@@ -30,8 +30,8 @@ import (
 // gives the rolling-timeout wait ample time to fail organically before the
 // reaper force-transitions the row.
 const (
-	affinityStaleAge  = 2 * defaultAffinityFreshness  // 180s
-	dispatchStuckAge  = 3 * dispatchRollingTimeout     // 270s
+	affinityStaleAge   = 2 * defaultAffinityFreshness // 180s
+	dispatchStuckAge   = 3 * dispatchRollingTimeout   // 270s
 	dispatchMaxRetries = 3
 )
 
