@@ -47,6 +47,9 @@ export class ScionGroupMemberEditor extends LitElement {
   /** Section description override */
   @property() sectionDescription = '';
 
+  /** Show a hint about adding hub-members group for project-wide visibility */
+  @property({ type: Boolean }) showProjectMembersHint = false;
+
   @state() private loading = true;
   @state() private members: GroupMember[] = [];
   @state() private error: string | null = null;
@@ -406,6 +409,23 @@ export class ScionGroupMemberEditor extends LitElement {
       color: var(--scion-text-muted, #64748b);
     }
 
+    .project-members-hint {
+      display: flex;
+      align-items: flex-start;
+      gap: 0.5rem;
+      font-size: 0.8125rem;
+      color: var(--scion-text-muted, #64748b);
+      padding: 0.625rem 0.75rem;
+      background: var(--scion-bg-subtle, #f1f5f9);
+      border-radius: var(--scion-radius, 0.5rem);
+      margin-top: 1rem;
+    }
+
+    .project-members-hint sl-icon {
+      flex-shrink: 0;
+      margin-top: 0.125rem;
+    }
+
     @media (max-width: 768px) {
       .hide-mobile {
         display: none;
@@ -706,6 +726,14 @@ export class ScionGroupMemberEditor extends LitElement {
           : this.members.length === 0
             ? this.renderEmptyMembers()
             : this.renderMembersTable()}
+        ${this.showProjectMembersHint
+          ? html`
+              <div class="project-members-hint">
+                <sl-icon name="info-circle"></sl-icon>
+                <span>To make this project visible to all hub users, add the <strong>hub-members</strong> group.</span>
+              </div>
+            `
+          : nothing}
         ${this.renderAddDialog()}
       </div>
     `;

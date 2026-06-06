@@ -61,9 +61,6 @@ export class ScionPageProjectCreate extends LitElement {
   private branch = 'main';
 
   @state()
-  private visibility = 'private';
-
-  @state()
   private mode: ProjectMode = 'hub';
 
   @state()
@@ -370,7 +367,6 @@ export class ScionPageProjectCreate extends LitElement {
     try {
       const body: Record<string, unknown> = {
         name: this.name.trim(),
-        visibility: this.visibility,
       };
 
       if (this.slug.trim()) {
@@ -605,21 +601,6 @@ export class ScionPageProjectCreate extends LitElement {
                 </div>
               `
             : nothing}
-
-          <div class="form-field">
-            <label for="visibility">Visibility</label>
-            <sl-select
-              id="visibility"
-              .value=${this.visibility}
-              @sl-change=${(e: Event) => {
-                this.visibility = (e.target as HTMLElement & { value: string }).value;
-              }}
-            >
-              <sl-option value="private">Private</sl-option>
-              <sl-option value="team">Team</sl-option>
-              <sl-option value="public">Public</sl-option>
-            </sl-select>
-          </div>
 
           <div class="form-actions">
             <sl-button

@@ -1054,8 +1054,9 @@ export class ScionPageProjectSettings extends LitElement {
               groupId=${this.membersGroup.id}
               ?readOnly=${!canAny(this.project._capabilities, 'update', 'manage')}
               compact
+              showProjectMembersHint
               sectionTitle="Members"
-              sectionDescription="Users and groups who can create and manage agents in this project."
+              sectionDescription="Users and groups who can access this project and its agents."
             ></scion-group-member-editor>
           `
         : ''}
