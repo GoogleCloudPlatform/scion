@@ -4595,11 +4595,13 @@ func TestListAgents_GlobalEndpointReturnsAllAgents(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
-	// Create two projects with agents in each
-	project1 := &store.Project{ID: tid("project-global-1"), Name: "Project One", Slug: "project-one"}
-	project2 := &store.Project{ID: tid("project-global-2"), Name: "Project Two", Slug: "project-two"}
+	// Create two projects owned by the dev user (list is membership-gated)
+	project1 := &store.Project{ID: tid("project-global-1"), Name: "Project One", Slug: "project-one", OwnerID: DevUserID, CreatedBy: DevUserID}
+	project2 := &store.Project{ID: tid("project-global-2"), Name: "Project Two", Slug: "project-two", OwnerID: DevUserID, CreatedBy: DevUserID}
 	require.NoError(t, s.CreateProject(ctx, project1))
 	require.NoError(t, s.CreateProject(ctx, project2))
+	srv.createProjectMembersGroupAndPolicy(ctx, project1)
+	srv.createProjectMembersGroupAndPolicy(ctx, project2)
 
 	agent1 := &store.Agent{
 		ID: tid("agent-g1"), Slug: tid("agent-g1"), Name: "Agent G1",
@@ -4619,7 +4621,7 @@ func TestListAgents_GlobalEndpointReturnsAllAgents(t *testing.T) {
 	var resp ListAgentsResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 
-	assert.Len(t, resp.Agents, 2, "global list should return agents from all projects")
+	assert.Len(t, resp.Agents, 2, "global list should return agents from the user's projects")
 	assert.Equal(t, 2, resp.TotalCount, "TotalCount should match number of agents")
 
 	// Verify both agents are present
