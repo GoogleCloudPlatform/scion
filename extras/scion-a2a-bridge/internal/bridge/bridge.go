@@ -403,6 +403,19 @@ func (b *Bridge) sendFollowUp(ctx context.Context, projectSlug, agentSlug, taskI
 	scionMsg.Recipient = fmt.Sprintf("agent:%s", task.AgentSlug)
 	scionMsg.Metadata = map[string]string{"a2aTaskId": taskID}
 
+	// Re-request broker subscriptions in case the broker reconnected since
+	// the original task was created (subscriptions may have been lost).
+	if b.broker != nil {
+		pattern := fmt.Sprintf("scion.project.%s.user.%s.messages", task.ProjectID, b.config.Hub.User)
+		if err := b.broker.RequestSubscription(pattern); err != nil {
+			b.log.Warn("failed to re-request subscription for follow-up", "pattern", pattern, "error", err)
+		}
+		legacyPattern := fmt.Sprintf("scion.grove.%s.user.%s.messages", task.ProjectID, b.config.Hub.User)
+		if err := b.broker.RequestSubscription(legacyPattern); err != nil {
+			b.log.Warn("failed to re-request legacy subscription for follow-up", "pattern", legacyPattern, "error", err)
+		}
+	}
+
 	if err := b.store.UpdateTaskState(taskID, TaskStateWorking); err != nil {
 		b.log.Error("failed to update task state for follow-up", "error", err, "task_id", taskID)
 	}
@@ -416,9 +429,7 @@ func (b *Bridge) sendFollowUp(ctx context.Context, projectSlug, agentSlug, taskI
 		defer b.unregisterActiveTask(taskID, aKey)
 
 		if err := b.hubClient.Agents().SendStructuredMessage(ctx, agentID, scionMsg, false, false, false); err != nil {
-			if stateErr := b.store.UpdateTaskState(taskID, TaskStateFailed); stateErr != nil {
-				b.log.Error("failed to update task state", "error", stateErr, "task_id", taskID)
-			}
+			b.failFollowUpTask(taskID)
 			return nil, fmt.Errorf("send follow-up to agent: %w", err)
 		}
 
@@ -442,14 +453,10 @@ func (b *Bridge) sendFollowUp(ctx context.Context, projectSlug, agentSlug, taskI
 				Artifacts: artifacts,
 			}, nil
 		case <-timer.C:
-			if err := b.store.UpdateTaskState(taskID, TaskStateFailed); err != nil {
-				b.log.Error("failed to update task state", "error", err, "task_id", taskID)
-			}
+			b.failFollowUpTask(taskID)
 			return nil, fmt.Errorf("timeout waiting for agent response after %v", timeout)
 		case <-ctx.Done():
-			if err := b.store.UpdateTaskState(taskID, TaskStateFailed); err != nil {
-				b.log.Error("failed to update task state", "error", err, "task_id", taskID)
-			}
+			b.failFollowUpTask(taskID)
 			return nil, ctx.Err()
 		}
 	}
@@ -464,9 +471,7 @@ func (b *Bridge) sendFollowUp(ctx context.Context, projectSlug, agentSlug, taskI
 		defer cancel()
 		if err := b.hubClient.Agents().SendStructuredMessage(sendCtx, agentID, scionMsg, false, false, false); err != nil {
 			b.log.Error("non-blocking follow-up send failed", "error", err, "task_id", taskID)
-			if err := b.store.UpdateTaskState(taskID, TaskStateFailed); err != nil {
-				b.log.Error("failed to update task state", "error", err, "task_id", taskID)
-			}
+			b.failFollowUpTask(taskID)
 			b.unregisterActiveTask(taskID, aKey)
 		}
 	}()
@@ -783,6 +788,29 @@ func (b *Bridge) dispatchToActiveTask(ctx context.Context, taskID, agentSlug str
 	}
 }
 
+// failFollowUpTask centralises the failure-notification pattern for follow-up
+// messages: update DB state, increment metrics, broadcast a final failure event
+// to SSE/push subscribers, and close streams.  The caller is responsible for
+// unregistering the active task and removing any waiter.
+func (b *Bridge) failFollowUpTask(taskID string) {
+	if err := b.store.UpdateTaskState(taskID, TaskStateFailed); err != nil {
+		b.log.Error("failed to update task state", "error", err, "task_id", taskID)
+	}
+	if b.metrics != nil {
+		b.metrics.TasksCompleted.WithLabelValues(TaskStateFailed).Inc()
+	}
+	failEvent := StreamEvent{
+		StatusUpdate: &TaskStatusUpdate{
+			TaskID: taskID,
+			Status: TaskStatus{State: TaskStateFailed},
+			Final:  true,
+		},
+	}
+	b.streams.Broadcast(taskID, failEvent)
+	b.push.Dispatch(b.shutdownCtx, taskID, failEvent)
+	b.streams.CloseAll(taskID)
+}
+
 func truncate(s string, n int) string {
 	if len(s) <= n {
 		return s
@@ -1012,8 +1040,12 @@ func (b *Bridge) resolveContext(ctx context.Context, projectSlug, agentSlug, con
 func (b *Bridge) registerActiveTask(taskID, aKey string) {
 	b.tasksMu.Lock()
 	defer b.tasksMu.Unlock()
+	// Only append to agentTasks if the task is not already registered,
+	// preventing duplicate entries from concurrent follow-ups.
+	if _, exists := b.activeTasks[taskID]; !exists {
+		b.agentTasks[aKey] = append(b.agentTasks[aKey], taskID)
+	}
 	b.activeTasks[taskID] = activeTaskEntry{aKey: aKey, createdAt: time.Now()}
-	b.agentTasks[aKey] = append(b.agentTasks[aKey], taskID)
 }
 
 func (b *Bridge) unregisterActiveTask(taskID, aKey string) {

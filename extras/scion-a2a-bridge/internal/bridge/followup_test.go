@@ -1014,9 +1014,14 @@ func TestHandleSendMessage_NoTaskID_RoutesToNewTask(t *testing.T) {
 		t.Fatalf("unexpected error: code=%d msg=%s", rpcResp.Error.Code, rpcResp.Error.Message)
 	}
 
-	resultBytes, _ := json.Marshal(rpcResp.Result)
+	resultBytes, err2 := json.Marshal(rpcResp.Result)
+	if err2 != nil {
+		t.Fatalf("marshal result: %v", err2)
+	}
 	var result TaskResult
-	json.Unmarshal(resultBytes, &result)
+	if err2 = json.Unmarshal(resultBytes, &result); err2 != nil {
+		t.Fatalf("unmarshal result: %v", err2)
+	}
 
 	if result.ID == "" {
 		t.Error("expected non-empty task ID for new task")
@@ -1080,6 +1085,21 @@ func TestSendFollowUp_ConcurrentFollowUps_SameTask(t *testing.T) {
 		default:
 			time.Sleep(10 * time.Millisecond)
 		}
+	}
+
+	// Verify that agentTasks has at most one entry for the task — concurrent
+	// registerActiveTask calls must not produce duplicate entries.
+	b.tasksMu.RLock()
+	taskIDs := b.agentTasks["proj-1:agent-a"]
+	dupes := 0
+	for _, id := range taskIDs {
+		if id == "task-1" {
+			dupes++
+		}
+	}
+	b.tasksMu.RUnlock()
+	if dupes > 1 {
+		t.Errorf("agentTasks has %d entries for task-1, want at most 1", dupes)
 	}
 }
 
