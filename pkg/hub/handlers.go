@@ -570,10 +570,13 @@ func (s *Server) createAgentInProject(
 	switch s.handleExistingAgent(ctx, w, existingAgent, project, runtimeBrokerID, req, notifySubscriberType, notifySubscriberID, createdBy) {
 	case existingAgentStarted, existingAgentErrored:
 		return // Response already written.
+	case existingAgentConflict:
+		Conflict(w, fmt.Sprintf("agent %q already exists in this project", slug))
+		return
 	case existingAgentDeleted:
 		// Fall through to create a new agent below.
 	case existingAgentNone:
-		// No existing agent (or unhandled status) — fall through to create.
+		// No existing agent — fall through to create.
 	}
 
 	// Apply project-level default template if no template specified in request
@@ -8907,6 +8910,8 @@ const (
 	existingAgentStarted
 	// existingAgentErrored means an error occurred; response already written.
 	existingAgentErrored
+	// existingAgentConflict means an active agent with the same slug exists; caller should return 409.
+	existingAgentConflict
 )
 
 // createNotifySubscription creates a notification subscription for the given agent
@@ -9009,28 +9014,53 @@ func (s *Server) handleExistingAgent(
 		return existingAgentStarted
 	}
 
-	// Phase 1: Stale cleanup — agent is running/stopped/error and caller wants a real start.
-	// The old agent is deleted so a fresh one can be created with a new ID.
+	// Phase 1: Agent is running/stopped/error.
+	// Resume=true for stopped agents restarts in-place; otherwise reject as duplicate.
 	if !req.ProvisionOnly &&
 		(existingAgent.Phase == string(state.PhaseRunning) ||
 			existingAgent.Phase == string(state.PhaseStopped) ||
 			existingAgent.Phase == string(state.PhaseError)) {
-		dispatcher := s.GetDispatcher()
-		if dispatcher != nil && existingAgent.RuntimeBrokerID != "" {
-			if err := dispatcher.DispatchAgentDelete(ctx, existingAgent, false, false, false, time.Time{}); err != nil {
-				if cleanupMode != "force" {
-					RuntimeError(w, "Failed to clean up existing agent before recreate: "+err.Error())
-					return existingAgentErrored
-				}
-				s.agentLifecycleLog.Warn("Proceeding after stale-agent cleanup failure due to cleanupMode=force",
-					"agent_id", existingAgent.ID, "agentName", existingAgent.Name, "error", err)
+
+		// Resume a stopped agent in-place when explicitly requested.
+		if req.Resume && existingAgent.Phase == string(state.PhaseStopped) {
+			if existingAgent.RuntimeBrokerID == "" && runtimeBrokerID != "" {
+				existingAgent.RuntimeBrokerID = runtimeBrokerID
 			}
+
+			dispatcher := s.GetDispatcher()
+			if dispatcher == nil || existingAgent.RuntimeBrokerID == "" {
+				writeError(w, http.StatusBadRequest, ErrCodeValidationError,
+					"cannot resume agent: no runtime broker available", nil)
+				return existingAgentErrored
+			}
+
+			if req.Task != "" && existingAgent.AppliedConfig != nil {
+				existingAgent.AppliedConfig.Task = req.Task
+				existingAgent.AppliedConfig.Attach = req.Attach
+			}
+
+			if err := dispatcher.DispatchAgentStart(ctx, existingAgent, req.Task); err != nil {
+				RuntimeError(w, "Failed to resume stopped agent: "+err.Error())
+				return existingAgentErrored
+			}
+
+			existingAgent.Phase = string(state.PhaseRunning)
+			if err := s.store.UpdateAgent(ctx, existingAgent); err != nil {
+				s.agentLifecycleLog.Warn("Failed to update agent status after resume", "agent_id", existingAgent.ID, "error", err)
+			}
+
+			if req.Notify {
+				s.createNotifySubscription(ctx, existingAgent.ID, existingAgent.ProjectID, notifySubscriberType, notifySubscriberID, createdBy)
+			}
+
+			s.enrichAgent(ctx, existingAgent, project, nil)
+			writeJSON(w, http.StatusOK, CreateAgentResponse{
+				Agent: existingAgent,
+			})
+			return existingAgentStarted
 		}
-		if err := s.store.DeleteAgent(ctx, existingAgent.ID); err != nil {
-			writeErrorFromErr(w, err, "")
-			return existingAgentErrored
-		}
-		return existingAgentDeleted
+
+		return existingAgentConflict
 	}
 
 	// Phase 2: Env-gather re-provisioning — provisioning + GatherEnv requested.
@@ -9106,7 +9136,7 @@ func (s *Server) handleExistingAgent(
 		return existingAgentStarted
 	}
 
-	return existingAgentNone
+	return existingAgentConflict
 }
 
 // resolveRuntimeBroker determines which runtime broker should run the agent.

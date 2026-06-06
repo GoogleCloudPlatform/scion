@@ -1135,7 +1135,7 @@ func TestCreateAgent_RecreateFromRunningStatus(t *testing.T) {
 	srv, s, project := setupCreateAgentServer(t, disp)
 	ctx := context.Background()
 
-	// Pre-create an agent in "running" status (stale — container may have died)
+	// Pre-create an agent in "running" status
 	runningAgent := &store.Agent{
 		ID:              tid("agent-running-stale"),
 		Slug:            "running-agent",
@@ -1146,29 +1146,19 @@ func TestCreateAgent_RecreateFromRunningStatus(t *testing.T) {
 	}
 	require.NoError(t, s.CreateAgent(ctx, runningAgent))
 
-	// Start with the same name — should delete old agent and create new one
+	// Creating with the same name should return 409 Conflict
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
 		Name:      "running-agent",
 		ProjectID: project.ID,
 		Task:      "new task",
 	})
 
-	require.Equal(t, http.StatusCreated, rec.Code,
-		"re-creating agent from running status should succeed with 201")
+	require.Equal(t, http.StatusConflict, rec.Code,
+		"creating agent with duplicate slug should return 409")
 
-	// Old agent should be deleted
+	// Old agent should still exist
 	_, err := s.GetAgent(ctx, tid("agent-running-stale"))
-	assert.ErrorIs(t, err, store.ErrNotFound, "old agent should be deleted")
-
-	// Dispatcher should have been asked to delete
-	assert.True(t, disp.deleteCalled, "dispatcher should have been asked to delete old agent")
-
-	// New agent should exist
-	var resp CreateAgentResponse
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-	require.NotNil(t, resp.Agent)
-	assert.NotEqual(t, tid("agent-running-stale"), resp.Agent.ID, "new agent should have a different ID")
-	assert.Equal(t, string(state.PhaseRunning), resp.Agent.Phase)
+	require.NoError(t, err, "existing agent should not be deleted")
 }
 
 func TestCreateAgent_RecreateFromErrorStatus(t *testing.T) {
@@ -1187,19 +1177,19 @@ func TestCreateAgent_RecreateFromErrorStatus(t *testing.T) {
 	}
 	require.NoError(t, s.CreateAgent(ctx, errorAgent))
 
-	// Start with the same name — should delete and recreate
+	// Creating with the same name should return 409 Conflict
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
 		Name:      "error-agent",
 		ProjectID: project.ID,
 		Task:      "retry after error",
 	})
 
-	require.Equal(t, http.StatusCreated, rec.Code,
-		"re-creating agent from error status should succeed with 201")
+	require.Equal(t, http.StatusConflict, rec.Code,
+		"creating agent with duplicate slug in error state should return 409")
 
-	// Old agent should be deleted
+	// Old agent should still exist
 	_, err := s.GetAgent(ctx, tid("agent-errored"))
-	assert.ErrorIs(t, err, store.ErrNotFound, "old errored agent should be deleted")
+	require.NoError(t, err, "existing agent should not be deleted")
 }
 
 func TestCreateAgent_RecreateFromStoppedStatus(t *testing.T) {
@@ -1218,22 +1208,24 @@ func TestCreateAgent_RecreateFromStoppedStatus(t *testing.T) {
 	}
 	require.NoError(t, s.CreateAgent(ctx, stoppedAgent))
 
+	// Creating with the same name (no Resume) should return 409 Conflict
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
 		Name:      "stopped-agent",
 		ProjectID: project.ID,
 		Task:      "restart after stop",
 	})
 
-	require.Equal(t, http.StatusCreated, rec.Code,
-		"re-creating agent from stopped status should succeed with 201")
+	require.Equal(t, http.StatusConflict, rec.Code,
+		"creating agent with duplicate slug in stopped state should return 409")
 
+	// Old agent should still exist
 	_, err := s.GetAgent(ctx, tid("agent-stopped"))
-	assert.ErrorIs(t, err, store.ErrNotFound, "old stopped agent should be deleted")
+	require.NoError(t, err, "existing agent should not be deleted")
 }
 
 // TestCreateAgent_ResumeFromStoppedStatus verifies that sending Resume=true for a
 // stopped agent restarts it in-place (preserving the agent ID and record) rather
-// than deleting and recreating it.
+// than returning 409 Conflict.
 func TestCreateAgent_ResumeFromStoppedStatus(t *testing.T) {
 	disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
 	srv, s, project := setupCreateAgentServer(t, disp)
@@ -1241,11 +1233,11 @@ func TestCreateAgent_ResumeFromStoppedStatus(t *testing.T) {
 
 	// Pre-create an agent in "stopped" status
 	stoppedAgent := &store.Agent{
-		ID:              "agent-resume-stopped",
+		ID:              tid("agent-resume-stopped"),
 		Slug:            "resume-stopped-agent",
 		Name:            "resume-stopped-agent",
 		ProjectID:       project.ID,
-		RuntimeBrokerID: "broker-create",
+		RuntimeBrokerID: tid("broker-create"),
 		Phase:           string(state.PhaseStopped),
 	}
 	require.NoError(t, s.CreateAgent(ctx, stoppedAgent))
@@ -1261,7 +1253,7 @@ func TestCreateAgent_ResumeFromStoppedStatus(t *testing.T) {
 		"resuming a stopped agent should return 200 (existing agent reused)")
 
 	// The original agent should still exist in the store
-	agent, err := s.GetAgent(ctx, "agent-resume-stopped")
+	agent, err := s.GetAgent(ctx, tid("agent-resume-stopped"))
 	require.NoError(t, err, "original agent should still exist after resume")
 	assert.Equal(t, string(state.PhaseRunning), agent.Phase, "resumed agent should be in running phase")
 
@@ -1271,7 +1263,7 @@ func TestCreateAgent_ResumeFromStoppedStatus(t *testing.T) {
 }
 
 // TestCreateAgent_StartFromStoppedStatus_NoResume verifies that without Resume=true,
-// a stopped agent is still deleted and recreated (the existing behavior).
+// a stopped agent blocks creation with 409 Conflict.
 func TestCreateAgent_StartFromStoppedStatus_NoResume(t *testing.T) {
 	disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
 	srv, s, project := setupCreateAgentServer(t, disp)
@@ -1279,11 +1271,11 @@ func TestCreateAgent_StartFromStoppedStatus_NoResume(t *testing.T) {
 
 	// Pre-create an agent in "stopped" status
 	stoppedAgent := &store.Agent{
-		ID:              "agent-start-stopped",
+		ID:              tid("agent-start-stopped"),
 		Slug:            "start-stopped-agent",
 		Name:            "start-stopped-agent",
 		ProjectID:       project.ID,
-		RuntimeBrokerID: "broker-create",
+		RuntimeBrokerID: tid("broker-create"),
 		Phase:           string(state.PhaseStopped),
 	}
 	require.NoError(t, s.CreateAgent(ctx, stoppedAgent))
@@ -1291,19 +1283,130 @@ func TestCreateAgent_StartFromStoppedStatus_NoResume(t *testing.T) {
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
 		Name:      "start-stopped-agent",
 		ProjectID: project.ID,
-		// Resume is NOT set — this is a "start" not a "resume"
-		Task: "restart after stop",
+		Task:      "restart after stop",
 	})
 
-	require.Equal(t, http.StatusCreated, rec.Code,
-		"starting (not resuming) a stopped agent should recreate with 201")
+	require.Equal(t, http.StatusConflict, rec.Code,
+		"creating agent with duplicate slug (no Resume) should return 409")
 
-	// The old agent should be deleted
-	_, err := s.GetAgent(ctx, "agent-start-stopped")
-	assert.ErrorIs(t, err, store.ErrNotFound, "old stopped agent should be deleted when not resuming")
+	// The old agent should still exist
+	_, err := s.GetAgent(ctx, tid("agent-start-stopped"))
+	require.NoError(t, err, "existing agent should not be deleted")
 
-	// DispatchAgentDelete should have been called
-	assert.True(t, disp.deleteCalled, "DispatchAgentDelete should be called when not resuming")
+	// DispatchAgentDelete should NOT have been called
+	assert.False(t, disp.deleteCalled, "DispatchAgentDelete should not be called for 409 conflict")
+}
+
+func TestCreateAgent_DuplicateSlugRunning_Returns409(t *testing.T) {
+	disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
+	srv, s, project := setupCreateAgentServer(t, disp)
+	ctx := context.Background()
+
+	existing := &store.Agent{
+		ID:              tid("dup-running"),
+		Slug:            "my-agent",
+		Name:            "my-agent",
+		ProjectID:       project.ID,
+		RuntimeBrokerID: tid("broker-create"),
+		Phase:           string(state.PhaseRunning),
+	}
+	require.NoError(t, s.CreateAgent(ctx, existing))
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
+		Name:      "my-agent",
+		ProjectID: project.ID,
+		Task:      "duplicate task",
+	})
+
+	require.Equal(t, http.StatusConflict, rec.Code)
+	assert.Contains(t, rec.Body.String(), "already exists in this project")
+
+	// Original agent untouched
+	got, err := s.GetAgent(ctx, tid("dup-running"))
+	require.NoError(t, err)
+	assert.Equal(t, string(state.PhaseRunning), got.Phase)
+}
+
+func TestCreateAgent_DuplicateSlugStopped_Returns409(t *testing.T) {
+	disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
+	srv, s, project := setupCreateAgentServer(t, disp)
+	ctx := context.Background()
+
+	existing := &store.Agent{
+		ID:              tid("dup-stopped"),
+		Slug:            "my-stopped-agent",
+		Name:            "my-stopped-agent",
+		ProjectID:       project.ID,
+		RuntimeBrokerID: tid("broker-create"),
+		Phase:           string(state.PhaseStopped),
+	}
+	require.NoError(t, s.CreateAgent(ctx, existing))
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
+		Name:      "my-stopped-agent",
+		ProjectID: project.ID,
+		Task:      "duplicate task",
+	})
+
+	require.Equal(t, http.StatusConflict, rec.Code)
+	assert.Contains(t, rec.Body.String(), "already exists in this project")
+}
+
+func TestCreateAgent_DuplicateSlugError_Returns409(t *testing.T) {
+	disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
+	srv, s, project := setupCreateAgentServer(t, disp)
+	ctx := context.Background()
+
+	existing := &store.Agent{
+		ID:              tid("dup-error"),
+		Slug:            "my-error-agent",
+		Name:            "my-error-agent",
+		ProjectID:       project.ID,
+		RuntimeBrokerID: tid("broker-create"),
+		Phase:           string(state.PhaseError),
+	}
+	require.NoError(t, s.CreateAgent(ctx, existing))
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
+		Name:      "my-error-agent",
+		ProjectID: project.ID,
+		Task:      "duplicate task",
+	})
+
+	require.Equal(t, http.StatusConflict, rec.Code)
+	assert.Contains(t, rec.Body.String(), "already exists in this project")
+}
+
+func TestCreateAgent_DuplicateSlugStopped_ResumeAllowed(t *testing.T) {
+	disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
+	srv, s, project := setupCreateAgentServer(t, disp)
+	ctx := context.Background()
+
+	existing := &store.Agent{
+		ID:              tid("dup-resume"),
+		Slug:            "resumable-agent",
+		Name:            "resumable-agent",
+		ProjectID:       project.ID,
+		RuntimeBrokerID: tid("broker-create"),
+		Phase:           string(state.PhaseStopped),
+	}
+	require.NoError(t, s.CreateAgent(ctx, existing))
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
+		Name:      "resumable-agent",
+		ProjectID: project.ID,
+		Resume:    true,
+		Task:      "continue working",
+	})
+
+	require.Equal(t, http.StatusOK, rec.Code,
+		"Resume=true for stopped agent should return 200")
+
+	got, err := s.GetAgent(ctx, tid("dup-resume"))
+	require.NoError(t, err)
+	assert.Equal(t, string(state.PhaseRunning), got.Phase)
+	assert.True(t, disp.startCalled, "DispatchAgentStart should be called")
+	assert.False(t, disp.deleteCalled, "agent should not be deleted on resume")
 }
 
 // TestAgentCreate_LocalTemplateWithLocalBroker tests that agent creation succeeds
@@ -2361,19 +2464,11 @@ func TestCreateProjectAgent_RecreateFromRunningStatus(t *testing.T) {
 			Task: "new task",
 		})
 
-	require.Equal(t, http.StatusCreated, rec.Code,
-		"re-creating a running project agent should succeed with 201")
+	require.Equal(t, http.StatusConflict, rec.Code,
+		"creating project agent with duplicate slug should return 409")
 
 	_, err := s.GetAgent(ctx, tid("project-agent-running"))
-	assert.ErrorIs(t, err, store.ErrNotFound, "old running agent should be deleted")
-
-	assert.True(t, disp.deleteCalled, "dispatcher should have been asked to delete old agent")
-
-	var resp CreateAgentResponse
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-	require.NotNil(t, resp.Agent)
-	assert.NotEqual(t, tid("project-agent-running"), resp.Agent.ID)
-	assert.Equal(t, string(state.PhaseRunning), resp.Agent.Phase)
+	require.NoError(t, err, "existing agent should not be deleted")
 }
 
 func TestCreateProjectAgent_RecreateFromStoppedStatus(t *testing.T) {
@@ -2398,11 +2493,11 @@ func TestCreateProjectAgent_RecreateFromStoppedStatus(t *testing.T) {
 			Task: "restart after stop",
 		})
 
-	require.Equal(t, http.StatusCreated, rec.Code,
-		"re-creating a stopped project agent should succeed with 201")
+	require.Equal(t, http.StatusConflict, rec.Code,
+		"creating project agent with duplicate slug in stopped state should return 409")
 
 	_, err := s.GetAgent(ctx, tid("project-agent-stopped"))
-	assert.ErrorIs(t, err, store.ErrNotFound, "old stopped agent should be deleted")
+	require.NoError(t, err, "existing agent should not be deleted")
 }
 
 // TestCreateProjectAgent_ResumeFromStoppedStatus verifies that sending Resume=true
@@ -2413,11 +2508,11 @@ func TestCreateProjectAgent_ResumeFromStoppedStatus(t *testing.T) {
 	ctx := context.Background()
 
 	stoppedAgent := &store.Agent{
-		ID:              "project-agent-resume-stopped",
+		ID:              tid("project-agent-resume-stopped"),
 		Slug:            "resume-stopped-project-agent",
 		Name:            "resume-stopped-project-agent",
 		ProjectID:       project.ID,
-		RuntimeBrokerID: "broker-create",
+		RuntimeBrokerID: tid("broker-create"),
 		Phase:           string(state.PhaseStopped),
 	}
 	require.NoError(t, s.CreateAgent(ctx, stoppedAgent))
@@ -2433,7 +2528,7 @@ func TestCreateProjectAgent_ResumeFromStoppedStatus(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code,
 		"resuming a stopped project agent should return 200 (existing agent reused)")
 
-	agent, err := s.GetAgent(ctx, "project-agent-resume-stopped")
+	agent, err := s.GetAgent(ctx, tid("project-agent-resume-stopped"))
 	require.NoError(t, err, "original project agent should still exist after resume")
 	assert.Equal(t, string(state.PhaseRunning), agent.Phase, "resumed agent should be in running phase")
 
@@ -2463,11 +2558,11 @@ func TestCreateProjectAgent_RecreateFromErrorStatus(t *testing.T) {
 			Task: "retry after error",
 		})
 
-	require.Equal(t, http.StatusCreated, rec.Code,
-		"re-creating an errored project agent should succeed with 201")
+	require.Equal(t, http.StatusConflict, rec.Code,
+		"creating project agent with duplicate slug in error state should return 409")
 
 	_, err := s.GetAgent(ctx, tid("project-agent-errored"))
-	assert.ErrorIs(t, err, store.ErrNotFound, "old errored agent should be deleted")
+	require.NoError(t, err, "existing agent should not be deleted")
 }
 
 func TestCreateProjectAgent_RestartFromProvisioningStatus(t *testing.T) {
@@ -2644,7 +2739,7 @@ func TestCreateAgent_BrokerIDRecovery(t *testing.T) {
 		"RuntimeBrokerID should be recovered from resolved broker")
 }
 
-func TestCreateAgent_CleanupModeStrictFailsOnBrokerDeleteError(t *testing.T) {
+func TestCreateAgent_CleanupModeStrictReturns409ForDuplicate(t *testing.T) {
 	disp := &createAgentDispatcher{
 		createPhase: string(state.PhaseRunning),
 		deleteErr:   fmt.Errorf("broker delete failed"),
@@ -2667,15 +2762,15 @@ func TestCreateAgent_CleanupModeStrictFailsOnBrokerDeleteError(t *testing.T) {
 		ProjectID:   project.ID,
 		CleanupMode: "strict",
 	})
-	require.Equal(t, http.StatusBadGateway, rec.Code)
-	assert.True(t, disp.deleteCalled, "expected broker delete attempt in strict mode")
+	require.Equal(t, http.StatusConflict, rec.Code,
+		"duplicate slug should return 409 regardless of cleanupMode")
 
 	persisted, err := s.GetAgent(ctx, existingAgent.ID)
 	require.NoError(t, err)
-	assert.Equal(t, existingAgent.ID, persisted.ID, "strict mode should keep existing DB record")
+	assert.Equal(t, existingAgent.ID, persisted.ID, "existing agent should be preserved")
 }
 
-func TestCreateAgent_CleanupModeForceContinuesOnBrokerDeleteError(t *testing.T) {
+func TestCreateAgent_CleanupModeForceReturns409ForDuplicate(t *testing.T) {
 	disp := &createAgentDispatcher{
 		createPhase: string(state.PhaseRunning),
 		deleteErr:   fmt.Errorf("broker delete failed"),
@@ -2698,11 +2793,11 @@ func TestCreateAgent_CleanupModeForceContinuesOnBrokerDeleteError(t *testing.T) 
 		ProjectID:   project.ID,
 		CleanupMode: "force",
 	})
-	require.Equal(t, http.StatusCreated, rec.Code)
-	assert.True(t, disp.deleteCalled, "expected broker delete attempt in force mode")
+	require.Equal(t, http.StatusConflict, rec.Code,
+		"duplicate slug should return 409 regardless of cleanupMode")
 
 	_, err := s.GetAgent(ctx, existingAgent.ID)
-	assert.ErrorIs(t, err, store.ErrNotFound, "force mode should replace stale DB record")
+	require.NoError(t, err, "existing agent should be preserved even with force cleanup mode")
 }
 
 func TestCreateAgent_InvalidCleanupMode(t *testing.T) {
