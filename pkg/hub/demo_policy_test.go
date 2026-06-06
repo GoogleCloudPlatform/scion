@@ -458,12 +458,22 @@ func TestDemoPolicy_ProjectCreationSetsUpMembersGroupAndPolicy(t *testing.T) {
 	_, err = s.GetGroupMembership(ctx, membersGroup.ID, store.GroupMemberTypeUser, alice.ID)
 	assert.NoError(t, err, "project creator should be a member of the project members group")
 
-	// Verify project-level agent creation policy was created
+	// Verify project-level read policies were created (member-read-project and member-read-agents)
+	for _, suffix := range []string{"member-read-project", "member-read-agents"} {
+		policyName := "project:" + createdProject.Slug + ":" + suffix
+		policies, err := s.ListPolicies(ctx,
+			store.PolicyFilter{Name: policyName},
+			store.ListOptions{Limit: 1})
+		require.NoError(t, err)
+		assert.Equal(t, 1, policies.TotalCount, "%s policy should exist", policyName)
+	}
+
+	// The old member-create-agents policy should NOT exist
 	policies, err := s.ListPolicies(ctx,
 		store.PolicyFilter{Name: "project:" + createdProject.Slug + ":member-create-agents"},
 		store.ListOptions{Limit: 1})
 	require.NoError(t, err)
-	assert.Equal(t, 1, policies.TotalCount, "project member-create-agents policy should exist")
+	assert.Equal(t, 0, policies.TotalCount, "old member-create-agents policy should not exist")
 }
 
 // TestDemoPolicy_EndToEnd_ProjectCreatorCanCreateAgent tests the complete flow:
