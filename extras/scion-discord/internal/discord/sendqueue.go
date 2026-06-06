@@ -120,12 +120,15 @@ func (sq *SendQueue) enqueue(channelID string, req *sendRequest) error {
 	select {
 	case cq.ch <- req:
 	default:
-		dropped := <-cq.ch
-		if dropped.result != nil {
-			dropped.result <- &sendResult{err: errors.New("dropped: send queue overflow")}
+		select {
+		case dropped := <-cq.ch:
+			if dropped.result != nil {
+				dropped.result <- &sendResult{err: errors.New("dropped: send queue overflow")}
+			}
+			sq.log.Warn("Send queue overflow, dropped oldest message",
+				"channel_id", channelID, "queue_size", sq.maxSize)
+		default:
 		}
-		sq.log.Warn("Send queue overflow, dropped oldest message",
-			"channel_id", channelID, "queue_size", sq.maxSize)
 		cq.ch <- req
 	}
 

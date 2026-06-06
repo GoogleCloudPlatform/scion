@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log/slog"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -246,7 +248,11 @@ func (s *sqliteStore) migrateSchema() {
 		`ALTER TABLE channel_links ADD COLUMN show_state_changes INTEGER NOT NULL DEFAULT 1`,
 	}
 	for _, m := range migrations {
-		s.db.Exec(m)
+		if _, err := s.db.Exec(m); err != nil {
+			if !strings.Contains(err.Error(), "duplicate column name") {
+				slog.Warn("Failed to run migration", "migration", m, "error", err)
+			}
+		}
 	}
 }
 

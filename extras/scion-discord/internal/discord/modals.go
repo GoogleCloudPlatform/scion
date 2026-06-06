@@ -146,8 +146,9 @@ func HandleModalSubmit(
 	// Edit the original ask-user message to disable buttons.
 	if pending.MessageID != "" && pending.ChannelID != "" {
 		truncated := responseText
-		if len(truncated) > 100 {
-			truncated = truncated[:97] + "..."
+		runes := []rune(responseText)
+		if len(runes) > 100 {
+			truncated = string(runes[:97]) + "..."
 		}
 		editContent := fmt.Sprintf("✅ Responded: %s", truncated)
 		empty := []discordgo.MessageComponent{}

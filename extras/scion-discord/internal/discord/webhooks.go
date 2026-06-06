@@ -1,6 +1,7 @@
 package discord
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -166,7 +167,7 @@ func isWebhookNotFound(err error) bool {
 
 	// discordgo wraps REST errors as *discordgo.RESTError.
 	var restErr *discordgo.RESTError
-	if ok := errorAs(err, &restErr); ok {
+	if errors.As(err, &restErr) {
 		if restErr.Response != nil && restErr.Response.StatusCode == http.StatusNotFound {
 			return true
 		}
@@ -181,23 +182,6 @@ func isWebhookNotFound(err error) bool {
 	return strings.Contains(s, "10015") || strings.Contains(s, "Unknown Webhook")
 }
 
-// errorAs is a thin wrapper around errors.As that works with the generic
-// target type. This avoids an import of "errors" just for As.
-func errorAs[T any](err error, target *T) bool {
-	for err != nil {
-		if t, ok := err.(T); ok {
-			*target = t
-			return true
-		}
-		if u, ok := err.(interface{ Unwrap() error }); ok {
-			err = u.Unwrap()
-		} else {
-			return false
-		}
-	}
-	return false
-}
-
 // isDiscordHTTPError checks whether err represents a specific HTTP status code
 // from the Discord API. Used for error classification in retry logic.
 func isDiscordHTTPError(err error, statusCode int) bool {
@@ -205,7 +189,7 @@ func isDiscordHTTPError(err error, statusCode int) bool {
 		return false
 	}
 	var restErr *discordgo.RESTError
-	if ok := errorAs(err, &restErr); ok {
+	if errors.As(err, &restErr) {
 		return restErr.Response != nil && restErr.Response.StatusCode == statusCode
 	}
 	// Fallback: check for status code in error string.

@@ -381,6 +381,10 @@ func (b *DiscordBroker) Publish(ctx context.Context, topic string, msg *messages
 		return fmt.Errorf("discord broker not configured")
 	}
 
+	if msg == nil {
+		return fmt.Errorf("message is nil")
+	}
+
 	// Channel filtering: if the message targets a specific channel that
 	// isn't ours, skip it. FanOutEventBus already does this, but
 	// belt-and-suspenders.
