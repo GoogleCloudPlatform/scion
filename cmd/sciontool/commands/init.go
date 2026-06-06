@@ -429,7 +429,8 @@ func runInit(args []string) int {
 		}{code, err}
 	}()
 
-	// Heartbeat and token refresh control variables - declared here so they're accessible during shutdown
+	// Heartbeat and token refresh control variables - declared here so they're accessible during shutdown and auth reset
+	var hubClient *hub.Client
 	var heartbeatCancel context.CancelFunc
 	var heartbeatDone <-chan struct{}
 	var tokenRefreshCancel context.CancelFunc
@@ -458,7 +459,7 @@ func runInit(args []string) int {
 		}
 
 		// Report running status to Hub if in hosted mode
-		hubClient := hub.NewClient()
+		hubClient = hub.NewClient()
 		log.Debug("Hub client check: client=%v, configured=%v", hubClient != nil, hubClient != nil && hubClient.IsConfigured())
 		log.Debug("Hub env: SCION_HUB_ENDPOINT=%q, SCION_HUB_URL=%q, token_file=%v, SCION_AGENT_ID=%q",
 			os.Getenv("SCION_HUB_ENDPOINT"), os.Getenv("SCION_HUB_URL"), hub.ReadTokenFile() != "", os.Getenv("SCION_AGENT_ID"))
@@ -645,6 +646,13 @@ func runInit(args []string) int {
 	signal.Notify(usr1Chan, syscall.SIGUSR1)
 	defer signal.Stop(usr1Chan)
 
+	// Set up SIGUSR2 handler for auth reset. When the broker writes a fresh
+	// token to ~/.scion/scion-token and sends SIGUSR2, init re-reads the
+	// token, updates the hub client, and restarts the token refresh loop.
+	usr2Chan := make(chan os.Signal, 1)
+	signal.Notify(usr2Chan, syscall.SIGUSR2)
+	defer signal.Stop(usr2Chan)
+
 	// Set up duration timer if max_duration is configured
 	var durationTimer <-chan time.Time
 	maxDurStr := os.Getenv("SCION_MAX_DURATION")
@@ -688,37 +696,48 @@ func runInit(args []string) int {
 		go watchLimitsTriggerFile(triggerCtx, triggerChan)
 	}
 
-	// Wait for child to exit, duration limit, SIGUSR1, or trigger file
+	// Wait for child to exit, duration limit, SIGUSR1, SIGUSR2, or trigger file.
+	// The loop allows SIGUSR2 (auth reset) to be handled without terminating.
 	var result struct {
 		code int
 		err  error
 	}
 	limitsExceeded := false
 
-	select {
-	case r := <-exitChan:
-		result = r
-	case <-durationTimer:
-		limitsExceeded = true
-		handleLimitsExceeded(sup, "duration", fmt.Sprintf("max_duration of %s exceeded", maxDurStr))
-		result = <-exitChan
-	case <-usr1Chan:
-		// SIGUSR1 received from hook handler - limits already set in agent-info.json
-		limitsExceeded = true
-		log.TaggedInfo("LIMITS_EXCEEDED", "Received SIGUSR1: limit exceeded, initiating shutdown")
-		// Initiate graceful shutdown of the child process
-		if err := sup.Signal(syscall.SIGTERM); err != nil {
-			log.Error("Failed to send SIGTERM to child: %v", err)
+waitLoop:
+	for {
+		select {
+		case r := <-exitChan:
+			result = r
+			break waitLoop
+		case <-durationTimer:
+			limitsExceeded = true
+			handleLimitsExceeded(sup, "duration", fmt.Sprintf("max_duration of %s exceeded", maxDurStr))
+			result = <-exitChan
+			break waitLoop
+		case <-usr1Chan:
+			// SIGUSR1 received from hook handler - limits already set in agent-info.json
+			limitsExceeded = true
+			log.TaggedInfo("LIMITS_EXCEEDED", "Received SIGUSR1: limit exceeded, initiating shutdown")
+			if err := sup.Signal(syscall.SIGTERM); err != nil {
+				log.Error("Failed to send SIGTERM to child: %v", err)
+			}
+			result = <-exitChan
+			break waitLoop
+		case <-usr2Chan:
+			// SIGUSR2: auth reset — re-read token file and restart refresh loop.
+			handleAuthReset(hubClient, &tokenRefreshCancel, &tokenRefreshDone, statusHandler, targetUID, targetGID)
+			// Continue waiting — this is non-terminal.
+		case <-triggerChan:
+			// Trigger file detected from hook handler - limits already set in agent-info.json
+			limitsExceeded = true
+			log.TaggedInfo("LIMITS_EXCEEDED", "Trigger file detected: limit exceeded, initiating shutdown")
+			if err := sup.Signal(syscall.SIGTERM); err != nil {
+				log.Error("Failed to send SIGTERM to child: %v", err)
+			}
+			result = <-exitChan
+			break waitLoop
 		}
-		result = <-exitChan
-	case <-triggerChan:
-		// Trigger file detected from hook handler - limits already set in agent-info.json
-		limitsExceeded = true
-		log.TaggedInfo("LIMITS_EXCEEDED", "Trigger file detected: limit exceeded, initiating shutdown")
-		if err := sup.Signal(syscall.SIGTERM); err != nil {
-			log.Error("Failed to send SIGTERM to child: %v", err)
-		}
-		result = <-exitChan
 	}
 
 	// Stop token refresh loops and heartbeat before reporting shutdown status to prevent races
@@ -886,6 +905,88 @@ func handleLimitsExceeded(sup *supervisor.Supervisor, limitType, message string)
 	// 4. Send SIGTERM to child process
 	if err := sup.Signal(syscall.SIGTERM); err != nil {
 		log.Error("Failed to send SIGTERM to child: %v", err)
+	}
+}
+
+// handleAuthReset re-reads the token file, updates the hub client, and
+// restarts the token refresh loop. Called when SIGUSR2 is received from the
+// broker's reset-auth handler.
+func handleAuthReset(hubClient *hub.Client, tokenRefreshCancel *context.CancelFunc, tokenRefreshDone *<-chan struct{}, statusHandler *handlers.StatusHandler, targetUID, targetGID int) {
+	log.TaggedInfo("AUTH_RESET", "Received SIGUSR2: auth reset requested")
+
+	newToken := hub.ReadTokenFile()
+	if newToken == "" {
+		log.Error("AUTH_RESET: Token file is empty after SIGUSR2, cannot reset auth")
+		return
+	}
+
+	tokenExpiry, err := hub.ParseTokenExpiry(newToken)
+	if err != nil {
+		log.Error("AUTH_RESET: Cannot parse new token expiry: %v", err)
+		return
+	}
+
+	// Cancel the existing token refresh loop if running.
+	if *tokenRefreshCancel != nil {
+		(*tokenRefreshCancel)()
+		if *tokenRefreshDone != nil {
+			<-*tokenRefreshDone
+		}
+	}
+
+	// Update the hub client's in-memory token.
+	if hubClient != nil {
+		hubClient.SetToken(newToken)
+	}
+
+	// Clear any AUTH_LOST message from agent-info.json.
+	statusHandler.SetMessage("")
+
+	// Schedule refresh 2 hours before the new token's expiry.
+	refreshAt := tokenExpiry.Add(-2 * time.Hour)
+	if refreshAt.Before(time.Now()) {
+		if time.Now().Before(tokenExpiry) {
+			refreshAt = time.Now().Add(1 * time.Minute)
+		} else {
+			log.Error("AUTH_RESET: New token is already expired at %s", tokenExpiry.Format(time.RFC3339))
+			return
+		}
+	}
+
+	// Start a new token refresh loop.
+	var tokenRefreshCtx context.Context
+	var cancel context.CancelFunc
+	tokenRefreshCtx, cancel = context.WithCancel(context.Background())
+	*tokenRefreshCancel = cancel
+	*tokenRefreshDone = hubClient.StartTokenRefresh(tokenRefreshCtx, &hub.TokenRefreshConfig{
+		RefreshAt: refreshAt,
+		ChownUID:  targetUID,
+		ChownGID:  targetGID,
+		OnRefreshed: func(newExpiry time.Time) {
+			log.Info("Token refreshed successfully, new expiry: %s", newExpiry.Format(time.RFC3339))
+		},
+		OnError: func(err error) {
+			log.Error("Token refresh failed: %v", err)
+		},
+		OnAuthLost: func() {
+			log.Error("AUTH_LOST: Agent token has expired and could not be refreshed - hub communication is no longer possible")
+			log.Error("AUTH_LOST: Agent limits (max-duration, max-turns, max-model-calls) are enforced locally and remain active")
+			statusHandler.SetMessage("AUTH_LOST: Hub token expired and could not be refreshed")
+		},
+	})
+
+	log.TaggedInfo("AUTH_RESET", "Auth reset complete — new token expires %s, refresh at %s",
+		tokenExpiry.Format(time.RFC3339), refreshAt.Format(time.RFC3339))
+
+	// Send an immediate heartbeat with the new token.
+	if hubClient != nil && hubClient.IsConfigured() {
+		hubCtx, hubCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if err := hubClient.Heartbeat(hubCtx); err != nil {
+			log.Error("AUTH_RESET: Post-reset heartbeat failed: %v", err)
+		} else {
+			log.Info("AUTH_RESET: Post-reset heartbeat sent successfully")
+		}
+		hubCancel()
 	}
 }
 

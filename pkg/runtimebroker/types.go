@@ -512,6 +512,16 @@ type ExecRequest struct {
 	Timeout int      `json:"timeout,omitempty"` // Timeout in seconds
 }
 
+// ResetAuthRequest is the request body for resetting auth on a running agent.
+type ResetAuthRequest struct {
+	Token string `json:"token"`
+}
+
+// ResetAuthResponse is the response for auth reset.
+type ResetAuthResponse struct {
+	Message string `json:"message"`
+}
+
 // ExecResponse is the response for command execution.
 type ExecResponse struct {
 	Output   string `json:"output"`

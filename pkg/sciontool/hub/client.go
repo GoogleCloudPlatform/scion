@@ -518,6 +518,14 @@ func (c *Client) GetToken() string {
 	return c.token
 }
 
+// SetToken updates the client's in-memory auth token. This is used during
+// auth reset to inject a freshly-issued token without restarting the client.
+func (c *Client) SetToken(token string) {
+	c.tokenMu.Lock()
+	c.token = token
+	c.tokenMu.Unlock()
+}
+
 // Environment variable and file path constants for GitHub App token refresh.
 const (
 	// EnvGitHubAppEnabled indicates whether GitHub App token refresh is active.

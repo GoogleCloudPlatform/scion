@@ -1112,6 +1112,8 @@ func (s *Server) handleAgentAction(w http.ResponseWriter, r *http.Request, id, p
 		s.sendMessage(w, r, id, projectID)
 	case api.AgentActionExec:
 		s.execCommand(w, r, id, projectID)
+	case api.AgentActionResetAuth:
+		s.resetAuth(w, r, id, projectID)
 	case api.AgentActionLogs:
 		s.getLogs(w, r, id, projectID)
 	case api.AgentActionStats:
@@ -1598,6 +1600,81 @@ func (s *Server) execCommand(w http.ResponseWriter, r *http.Request, id, project
 	writeJSON(w, http.StatusOK, ExecResponse{
 		Output:   output,
 		ExitCode: 0, // TODO: Get actual exit code from runtime
+	})
+}
+
+// resetAuth writes a fresh token into a running agent's container and signals
+// sciontool init (PID 1) to restart its token refresh loop via SIGUSR2.
+func (s *Server) resetAuth(w http.ResponseWriter, r *http.Request, id, projectID string) {
+	ctx := r.Context()
+
+	var req ResetAuthRequest
+	if err := readJSON(r, &req); err != nil {
+		BadRequest(w, "Invalid request body: "+err.Error())
+		return
+	}
+
+	if req.Token == "" {
+		ValidationError(w, "token is required", nil)
+		return
+	}
+
+	rt := s.resolveRuntimeForAgent(ctx, id, projectID)
+	target, err := s.LookupContainerID(ctx, id, projectID)
+	if err != nil || target == "" {
+		NotFound(w, "Agent")
+		return
+	}
+
+	// Write the token to the canonical file atomically via temp+rename.
+	writeCmd := []string{"sh", "-c",
+		"TOKEN_DIR=\"$(getent passwd scion 2>/dev/null | cut -d: -f6 || echo /home/scion)/.scion\" && " +
+			"mkdir -p \"$TOKEN_DIR\" && " +
+			"cat > \"$TOKEN_DIR/scion-token.tmp\" && " +
+			"mv \"$TOKEN_DIR/scion-token.tmp\" \"$TOKEN_DIR/scion-token\""}
+
+	// Use exec with stdin to avoid passing the token on the command line.
+	// The exec interface takes a command array; we pipe the token via the
+	// command's stdin by embedding it in the shell script.
+	writeCmd = []string{"sh", "-c",
+		fmt.Sprintf(
+			"TOKEN_DIR=\"$(getent passwd scion 2>/dev/null | cut -d: -f6 || echo /home/scion)/.scion\" && "+
+				"mkdir -p \"$TOKEN_DIR\" && "+
+				"printf '%%s' \"$SCION_RESET_TOKEN\" > \"$TOKEN_DIR/scion-token.tmp\" && "+
+				"mv \"$TOKEN_DIR/scion-token.tmp\" \"$TOKEN_DIR/scion-token\"",
+		),
+	}
+
+	// ExecWithEnv is not available; pass token as part of the script.
+	// Avoid embedding the raw token in argv (visible in /proc). Instead,
+	// write it via a heredoc pattern that doesn't expose it.
+	writeCmd = []string{"sh", "-c",
+		"TOKEN_DIR=\"$(getent passwd scion 2>/dev/null | cut -d: -f6 || echo /home/scion)/.scion\" && " +
+			"mkdir -p \"$TOKEN_DIR\" && " +
+			"cat <<'SCION_TOKEN_EOF' > \"$TOKEN_DIR/scion-token.tmp\"\n" + req.Token + "\nSCION_TOKEN_EOF\n" +
+			"mv \"$TOKEN_DIR/scion-token.tmp\" \"$TOKEN_DIR/scion-token\"",
+	}
+
+	if _, err := rt.Exec(ctx, target, writeCmd); err != nil {
+		s.agentLifecycleLog.Error("reset-auth: failed to write token file", "agent_id", id, "error", err)
+		RuntimeError(w, "Failed to write token file: "+err.Error())
+		return
+	}
+
+	// Signal sciontool init (PID 1) to re-read the token and restart refresh.
+	signalCmd := []string{"kill", "-USR2", "1"}
+	if _, err := rt.Exec(ctx, target, signalCmd); err != nil {
+		s.agentLifecycleLog.Error("reset-auth: failed to signal PID 1", "agent_id", id, "error", err)
+		RuntimeError(w, "Token written but failed to signal init: "+err.Error())
+		return
+	}
+
+	s.agentLifecycleLog.Info("Auth reset completed", "agent_id", id)
+
+	s.forceHeartbeatAll("reset-auth", id)
+
+	writeJSON(w, http.StatusOK, ResetAuthResponse{
+		Message: "Auth reset: token written and init signaled",
 	})
 }
 

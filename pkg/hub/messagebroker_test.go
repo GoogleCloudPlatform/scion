@@ -57,6 +57,9 @@ func (d *brokerMockDispatcher) DispatchAgentStop(ctx context.Context, agent *sto
 func (d *brokerMockDispatcher) DispatchAgentRestart(ctx context.Context, agent *store.Agent) error {
 	return nil
 }
+func (d *brokerMockDispatcher) DispatchAgentResetAuth(_ context.Context, _ *store.Agent) error {
+	return nil
+}
 func (d *brokerMockDispatcher) DispatchAgentDelete(ctx context.Context, agent *store.Agent, deleteFiles, removeBranch, softDelete bool, deletedAt time.Time) error {
 	return nil
 }

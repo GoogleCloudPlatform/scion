@@ -49,6 +49,9 @@ func (f *fakeHTTPClient) StopAgent(context.Context, string, string, string, stri
 func (f *fakeHTTPClient) RestartAgent(context.Context, string, string, string, string, map[string]string) error {
 	return nil
 }
+func (f *fakeHTTPClient) ResetAuthAgent(context.Context, string, string, string, string, string) error {
+	return nil
+}
 func (f *fakeHTTPClient) DeleteAgent(context.Context, string, string, string, string, bool, bool, bool, time.Time) error {
 	return nil
 }

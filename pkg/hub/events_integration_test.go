@@ -42,7 +42,8 @@ func (noopDispatcher) DispatchAgentStart(_ context.Context, _ *store.Agent, _ st
 	return nil
 }
 func (noopDispatcher) DispatchAgentStop(_ context.Context, _ *store.Agent) error    { return nil }
-func (noopDispatcher) DispatchAgentRestart(_ context.Context, _ *store.Agent) error { return nil }
+func (noopDispatcher) DispatchAgentRestart(_ context.Context, _ *store.Agent) error   { return nil }
+func (noopDispatcher) DispatchAgentResetAuth(_ context.Context, _ *store.Agent) error { return nil }
 func (noopDispatcher) DispatchAgentDelete(_ context.Context, _ *store.Agent, _, _, _ bool, _ time.Time) error {
 	return nil
 }

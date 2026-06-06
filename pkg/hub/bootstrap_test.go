@@ -158,6 +158,9 @@ func (d *mockDispatcher) DispatchAgentStop(_ context.Context, _ *store.Agent) er
 func (d *mockDispatcher) DispatchAgentRestart(_ context.Context, _ *store.Agent) error {
 	return nil
 }
+func (d *mockDispatcher) DispatchAgentResetAuth(_ context.Context, _ *store.Agent) error {
+	return nil
+}
 func (d *mockDispatcher) DispatchAgentDelete(_ context.Context, _ *store.Agent, _, _, _ bool, _ time.Time) error {
 	return nil
 }

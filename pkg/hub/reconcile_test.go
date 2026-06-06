@@ -215,6 +215,9 @@ func (d *reconcileTestDispatcher) DispatchAgentStop(context.Context, *store.Agen
 func (d *reconcileTestDispatcher) DispatchAgentRestart(context.Context, *store.Agent) error {
 	return nil
 }
+func (d *reconcileTestDispatcher) DispatchAgentResetAuth(_ context.Context, _ *store.Agent) error {
+	return nil
+}
 func (d *reconcileTestDispatcher) DispatchAgentDelete(_ context.Context, _ *store.Agent, _, _, _ bool, _ time.Time) error {
 	return nil
 }

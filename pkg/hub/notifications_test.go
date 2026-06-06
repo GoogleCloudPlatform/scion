@@ -76,6 +76,9 @@ func (d *recordingDispatcher) DispatchAgentStop(_ context.Context, _ *store.Agen
 func (d *recordingDispatcher) DispatchAgentRestart(_ context.Context, _ *store.Agent) error {
 	return nil
 }
+func (d *recordingDispatcher) DispatchAgentResetAuth(_ context.Context, _ *store.Agent) error {
+	return nil
+}
 func (d *recordingDispatcher) DispatchAgentDelete(_ context.Context, _ *store.Agent, _, _, _ bool, _ time.Time) error {
 	return nil
 }

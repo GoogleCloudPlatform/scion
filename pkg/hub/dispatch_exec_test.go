@@ -67,6 +67,9 @@ func (d *lifecycleTestDispatcher) DispatchAgentRestart(_ context.Context, _ *sto
 	d.restartCalled.Add(1)
 	return nil
 }
+func (d *lifecycleTestDispatcher) DispatchAgentResetAuth(_ context.Context, _ *store.Agent) error {
+	return nil
+}
 func (d *lifecycleTestDispatcher) DispatchAgentDelete(_ context.Context, _ *store.Agent, deleteFiles, _, _ bool, _ time.Time) error {
 	d.deleteCalled.Add(1)
 	d.lastDeleteFiles = deleteFiles

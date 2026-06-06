@@ -228,6 +228,9 @@ type AgentDispatcher interface {
 	// DispatchAgentRestart restarts an agent on the runtime broker.
 	DispatchAgentRestart(ctx context.Context, agent *store.Agent) error
 
+	// DispatchAgentResetAuth injects a fresh token into a running agent without restarting it.
+	DispatchAgentResetAuth(ctx context.Context, agent *store.Agent) error
+
 	// DispatchAgentDelete removes an agent from the runtime broker.
 	// deleteFiles indicates whether to delete workspace files.
 	// removeBranch indicates whether to remove the git branch.
@@ -291,6 +294,11 @@ type RuntimeBrokerClient interface {
 	// resolvedEnv carries fresh auth tokens and identity vars so the restarted
 	// container retains Hub connectivity.
 	RestartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, resolvedEnv map[string]string) error
+
+	// ResetAuthAgent injects a fresh auth token into a running agent without restarting it.
+	// brokerID is used for HMAC authentication lookup.
+	// projectID scopes the lookup to a specific project (required for uniqueness).
+	ResetAuthAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID, token string) error
 
 	// DeleteAgent deletes an agent from a remote runtime broker.
 	// brokerID is used for HMAC authentication lookup.

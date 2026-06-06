@@ -168,6 +168,22 @@ func (c *ControlChannelBrokerClient) RestartAgent(ctx context.Context, brokerID,
 	return err
 }
 
+// ResetAuthAgent injects a fresh auth token into a running agent via the control channel.
+func (c *ControlChannelBrokerClient) ResetAuthAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID, token string) error {
+	_ = brokerEndpoint
+	path := fmt.Sprintf("/api/v1/agents/%s/reset-auth", url.PathEscape(agentID))
+	query := ""
+	if projectID != "" {
+		query = "projectId=" + url.QueryEscape(projectID)
+	}
+	body, err := json.Marshal(map[string]string{"token": token})
+	if err != nil {
+		return fmt.Errorf("failed to marshal reset-auth request: %w", err)
+	}
+	_, err = c.doRequest(ctx, brokerID, "POST", path, query, body)
+	return err
+}
+
 // DeleteAgent deletes an agent via control channel.
 func (c *ControlChannelBrokerClient) DeleteAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, deleteFiles, removeBranch, softDelete bool, deletedAt time.Time) error {
 	_ = brokerEndpoint
@@ -526,6 +542,19 @@ func (c *HybridBrokerClient) RestartAgent(ctx context.Context, brokerID, brokerE
 		return c.controlChannel.RestartAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, resolvedEnv)
 	case routeHTTP:
 		return c.httpClient.RestartAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, resolvedEnv)
+	default:
+		return ErrLifecycleDeferred
+	}
+}
+
+// ResetAuthAgent injects a fresh auth token into a running agent, using route()
+// to decide the delivery path.
+func (c *HybridBrokerClient) ResetAuthAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID, token string) error {
+	switch c.route(ctx, brokerID, brokerEndpoint) {
+	case routeLocal:
+		return c.controlChannel.ResetAuthAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, token)
+	case routeHTTP:
+		return c.httpClient.ResetAuthAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, token)
 	default:
 		return ErrLifecycleDeferred
 	}

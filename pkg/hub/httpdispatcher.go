@@ -66,6 +66,10 @@ func (c *HTTPRuntimeBrokerClient) RestartAgent(ctx context.Context, brokerID, br
 	return c.transport.RestartAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, resolvedEnv)
 }
 
+func (c *HTTPRuntimeBrokerClient) ResetAuthAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID, token string) error {
+	return c.transport.ResetAuthAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, token)
+}
+
 func (c *HTTPRuntimeBrokerClient) DeleteAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, deleteFiles, removeBranch, softDelete bool, deletedAt time.Time) error {
 	return c.transport.DeleteAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, deleteFiles, removeBranch, softDelete, deletedAt)
 }
@@ -1208,6 +1212,42 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 		return d.deferredRestart(ctx, agent)
 	}
 	return err
+}
+
+// DispatchAgentResetAuth injects a fresh auth token into a running agent without
+// restarting it. It generates a new token and sends it to the broker's reset-auth
+// endpoint, which writes it into the container and signals the agent process.
+func (d *HTTPAgentDispatcher) DispatchAgentResetAuth(ctx context.Context, agent *store.Agent) error {
+	if err := requireRuntimeBrokerAssigned(agent); err != nil {
+		return err
+	}
+
+	endpoint, err := d.getBrokerEndpoint(ctx, agent.RuntimeBrokerID)
+	if err != nil {
+		return err
+	}
+
+	var token string
+	if d.tokenGenerator != nil {
+		var additionalScopes []AgentTokenScope
+		if agent.AppliedConfig != nil {
+			for _, s := range agent.AppliedConfig.HubAccessScopes {
+				additionalScopes = append(additionalScopes, AgentTokenScope(s))
+			}
+			if gcpID := agent.AppliedConfig.GCPIdentity; gcpID != nil && gcpID.MetadataMode == store.GCPMetadataModeAssign && gcpID.ServiceAccountID != "" {
+				additionalScopes = append(additionalScopes, GCPTokenScopeForSA(gcpID.ServiceAccountID))
+			}
+		}
+		token, err = d.tokenGenerator.GenerateAgentToken(agent.ID, agent.ProjectID, agent.Ancestry, additionalScopes...)
+		if err != nil {
+			return fmt.Errorf("DispatchAgentResetAuth: failed to generate agent token: %w", err)
+		}
+	}
+	if token == "" {
+		return fmt.Errorf("DispatchAgentResetAuth: no token generated for agent %s", agent.ID)
+	}
+
+	return d.client.ResetAuthAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID, token)
 }
 
 // DispatchAgentDelete deletes an agent from the runtime broker.

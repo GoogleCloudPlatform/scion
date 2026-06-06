@@ -136,6 +136,10 @@ func (m *mockRuntimeBrokerClient) RestartAgent(ctx context.Context, brokerID, br
 	return m.returnErr
 }
 
+func (m *mockRuntimeBrokerClient) ResetAuthAgent(_ context.Context, _, _, _, _, _ string) error {
+	return m.returnErr
+}
+
 func (m *mockRuntimeBrokerClient) DeleteAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, deleteFiles, removeBranch, softDelete bool, deletedAt time.Time) error {
 	m.deleteCalled = true
 	m.lastBrokerID = brokerID
