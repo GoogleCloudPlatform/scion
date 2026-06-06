@@ -3735,7 +3735,7 @@ func (s *Server) createProjectGroup(ctx context.Context, project *store.Project)
 }
 
 // createProjectMembersGroupAndPolicy creates an explicit members group for a project
-// and a policy allowing members to create agents. Best-effort; failures are logged.
+// and read policies for project/agent visibility. Best-effort; failures are logged.
 // If the group already exists (e.g., project was deleted and recreated with the same
 // slug), the existing group is reused and the creator is still added as a member.
 // callerUserID, when non-empty, is also added as an owner of the members group
@@ -3837,67 +3837,69 @@ func (s *Server) createProjectMembersGroupAndPolicy(ctx context.Context, project
 		}
 	}
 
-	// Create project-level policy for member agent creation and stop-all
-	policyName := "project:" + project.Slug + ":member-create-agents"
-	policy := &store.Policy{
-		ID:           api.NewUUID(),
-		Name:         policyName,
-		Description:  "Allow project members to create and stop agents",
-		ScopeType:    "project",
-		ScopeID:      project.ID,
-		ResourceType: "agent",
-		Actions:      []string{"create", "stop_all"},
-		Effect:       "allow",
-	}
-	if err := s.store.CreatePolicy(ctx, policy); err != nil {
-		if !errors.Is(err, store.ErrAlreadyExists) {
-			slog.Warn("failed to create project member policy",
-				"project_id", project.ID, "policy", policyName, "error", err.Error())
-			return
-		}
-		// Policy already exists — look it up and update its scope ID in case the
-		// project was recreated. Also ensure the binding to the current members group.
-		existing, lookupErr := s.store.ListPolicies(ctx, store.PolicyFilter{Name: policyName}, store.ListOptions{Limit: 1})
-		if lookupErr != nil || len(existing.Items) == 0 {
-			slog.Warn("failed to look up existing project member policy",
-				"project_id", project.ID, "policy", policyName, "error", lookupErr)
-			return
-		}
-		policy = &existing.Items[0]
-		needsUpdate := false
-		if policy.ScopeID != project.ID {
-			policy.ScopeID = project.ID
-			needsUpdate = true
-		}
-		// Backfill: ensure stop_all action is present for existing projects
-		hasStopAll := false
-		for _, a := range policy.Actions {
-			if a == "stop_all" {
-				hasStopAll = true
-				break
+	// WP-B2/B3 migration: the old 'member-create-agents' policy is the
+	// "not yet migrated" marker.  If present → bump user members to admin
+	// (preserving create ability via isProjectOwnerOrAdmin bypass), then
+	// retire the old policy.  Create/stop_all are no longer policy-granted;
+	// they flow from the admin/owner role bypass.
+	oldPolicyName := "project:" + project.Slug + ":member-create-agents"
+	oldPolicies, lookupErr := s.store.ListPolicies(ctx, store.PolicyFilter{Name: oldPolicyName}, store.ListOptions{Limit: 1})
+	if lookupErr == nil && len(oldPolicies.Items) > 0 {
+		// B3: bump every USER member with role=member → admin
+		members, mErr := s.store.GetGroupMembers(ctx, membersGroup.ID)
+		if mErr == nil {
+			for _, m := range members {
+				if m.MemberType == store.GroupMemberTypeUser && m.Role == store.GroupMemberRoleMember {
+					if promErr := s.store.UpdateGroupMemberRole(ctx, membersGroup.ID,
+						m.MemberType, m.MemberID, store.GroupMemberRoleAdmin); promErr != nil {
+						slog.Warn("failed to bump member to admin during migration",
+							"project_id", project.ID, "user", m.MemberID, "error", promErr.Error())
+					} else {
+						slog.Info("migrated project member to admin",
+							"project_id", project.ID, "user", m.MemberID)
+					}
+				}
 			}
 		}
-		if !hasStopAll {
-			policy.Actions = append(policy.Actions, "stop_all")
-			needsUpdate = true
-		}
-		if needsUpdate {
-			if updateErr := s.store.UpdatePolicy(ctx, policy); updateErr != nil {
-				slog.Warn("failed to update existing project member policy",
-					"project_id", project.ID, "policy", policyName, "error", updateErr.Error())
-			}
+
+		// Remove old policy
+		oldP := oldPolicies.Items[0]
+		_ = s.store.RemovePolicyBinding(ctx, oldP.ID, "group", membersGroup.ID)
+		if delErr := s.store.DeletePolicy(ctx, oldP.ID); delErr != nil {
+			slog.Warn("failed to delete old create-agents policy",
+				"project_id", project.ID, "error", delErr.Error())
+		} else {
+			slog.Info("retired old member-create-agents policy",
+				"project_id", project.ID, "policy", oldPolicyName)
 		}
 	}
 
-	// Bind policy to the members group
-	if err := s.store.AddPolicyBinding(ctx, &store.PolicyBinding{
-		PolicyID:      policy.ID,
-		PrincipalType: "group",
-		PrincipalID:   membersGroup.ID,
-	}); err != nil && !errors.Is(err, store.ErrAlreadyExists) {
-		slog.Warn("failed to bind project member policy",
-			"project_id", project.ID, "policy", policyName, "error", err.Error())
-	}
+	// Seed project-scoped read policies bound to the members group.
+	// ResourceID is pinned for the project policy because project resources
+	// have empty ParentType — without pinning, matchesResource would leak
+	// read to other projects.
+	seedPolicy(ctx, s.store, membersGroup.ID, &store.Policy{
+		ID:           api.NewUUID(),
+		Name:         "project:" + project.Slug + ":member-read-project",
+		Description:  "Allow project members to read this project",
+		ScopeType:    "project",
+		ScopeID:      project.ID,
+		ResourceType: "project",
+		ResourceID:   project.ID,
+		Actions:      []string{"read", "list"},
+		Effect:       "allow",
+	})
+
+	seedPolicy(ctx, s.store, membersGroup.ID, &store.Policy{
+		ID:           api.NewUUID(),
+		Name:         "project:" + project.Slug + ":member-read-agents",
+		Description:  "Allow project members to read agents in this project",
+		ScopeType:    "project",
+		ScopeID:      project.ID,
+		ResourceType: "agent",
+		Actions:      []string{"read", "list"},
+		Effect:       "allow",
+	})
 }
 
 // hubManagedProjectPath returns the filesystem path for a hub-managed project workspace.
