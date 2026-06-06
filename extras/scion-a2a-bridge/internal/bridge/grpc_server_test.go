@@ -129,6 +129,60 @@ func TestInternalPartToProto(t *testing.T) {
 	}
 }
 
+func TestInternalPartToProto_StructuredData(t *testing.T) {
+	tests := []struct {
+		name string
+		data interface{}
+	}{
+		{
+			name: "map data",
+			data: map[string]interface{}{
+				"key":    "value",
+				"nested": map[string]interface{}{"a": float64(1)},
+			},
+		},
+		{
+			name: "slice data",
+			data: []interface{}{"a", "b", "c"},
+		},
+		{
+			name: "string data",
+			data: "just-a-string",
+		},
+		{
+			name: "numeric data",
+			data: float64(42),
+		},
+		{
+			name: "boolean data",
+			data: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			part := Part{Data: tc.data, MediaType: "application/json"}
+			pbPart := internalPartToProto(part)
+
+			dataPart, ok := pbPart.Content.(*pb.Part_Data)
+			if !ok {
+				t.Fatalf("expected Part_Data, got %T", pbPart.Content)
+			}
+			if dataPart.Data == nil {
+				t.Fatal("data value is nil")
+			}
+		})
+	}
+}
+
+func TestInternalPartToProto_NilDataIgnored(t *testing.T) {
+	part := Part{MediaType: "text/plain"}
+	pbPart := internalPartToProto(part)
+	if pbPart.Content != nil {
+		t.Errorf("expected nil content for empty part, got %T", pbPart.Content)
+	}
+}
+
 func TestTaskStateToProto(t *testing.T) {
 	tests := []struct {
 		state string
@@ -377,26 +431,88 @@ func TestBridgeErrToGRPC(t *testing.T) {
 	}
 }
 
-func TestSplitTenant(t *testing.T) {
+func TestResolveProject(t *testing.T) {
+	cfg := &Config{
+		Projects: []ProjectConfig{
+			{Slug: "default-project"},
+		},
+	}
+	s := &GRPCServer{config: cfg}
+
 	tests := []struct {
-		tenant string
-		want   []string
+		name        string
+		tenant      string
+		wantProject string
+		wantAgent   string
+		wantErr     bool
 	}{
-		{"project/agent", []string{"project", "agent"}},
-		{"project", []string{"project"}},
-		{"a/b/c", []string{"a", "b/c"}},
+		{
+			name:        "full resource name",
+			tenant:      "projects/my-project/agents/my-agent",
+			wantProject: "my-project",
+			wantAgent:   "my-agent",
+		},
+		{
+			name:        "simple two-part format",
+			tenant:      "my-project/my-agent",
+			wantProject: "my-project",
+			wantAgent:   "my-agent",
+		},
+		{
+			name:        "full resource name with hyphens and numbers",
+			tenant:      "projects/proj-123/agents/agent-456",
+			wantProject: "proj-123",
+			wantAgent:   "agent-456",
+		},
+		{
+			name:    "empty tenant falls back with error",
+			tenant:  "",
+			wantErr: true,
+		},
+		{
+			name:    "single segment is missing agent",
+			tenant:  "just-project",
+			wantErr: true,
+		},
+		{
+			name:    "three segments is invalid",
+			tenant:  "a/b/c",
+			wantErr: true,
+		},
+		{
+			name:    "empty project in full format",
+			tenant:  "projects//agents/my-agent",
+			wantErr: true,
+		},
+		{
+			name:    "empty agent in full format",
+			tenant:  "projects/my-project/agents/",
+			wantErr: true,
+		},
+		{
+			name:    "empty parts in simple format",
+			tenant:  "/my-agent",
+			wantErr: true,
+		},
 	}
 
 	for _, tc := range tests {
-		t.Run(tc.tenant, func(t *testing.T) {
-			got := splitTenant(tc.tenant)
-			if len(got) != len(tc.want) {
-				t.Fatalf("len = %d, want %d", len(got), len(tc.want))
-			}
-			for i, v := range got {
-				if v != tc.want[i] {
-					t.Errorf("part[%d] = %q, want %q", i, v, tc.want[i])
+		t.Run(tc.name, func(t *testing.T) {
+			project, agent, err := s.resolveProject(tc.tenant)
+			if tc.wantErr {
+				if err == nil {
+					t.Errorf("expected error, got project=%q agent=%q", project, agent)
 				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if project != tc.wantProject {
+				t.Errorf("project = %q, want %q", project, tc.wantProject)
+			}
+			if agent != tc.wantAgent {
+				t.Errorf("agent = %q, want %q", agent, tc.wantAgent)
 			}
 		})
 	}
@@ -593,6 +709,49 @@ func TestGRPCDeletePushNotification_MissingTaskID(t *testing.T) {
 	client, _ := newTestGRPCServer(t)
 
 	_, err := client.DeleteTaskPushNotificationConfig(context.Background(), &pb.DeleteTaskPushNotificationConfigRequest{})
+	if err == nil {
+		t.Fatal("expected error for missing task_id")
+	}
+	st, _ := grpcstatus.FromError(err)
+	if st.Code() != codes.InvalidArgument {
+		t.Errorf("code = %v, want InvalidArgument", st.Code())
+	}
+}
+
+func TestGRPCDeletePushNotification_MissingID(t *testing.T) {
+	client, _ := newTestGRPCServer(t)
+
+	_, err := client.DeleteTaskPushNotificationConfig(context.Background(), &pb.DeleteTaskPushNotificationConfigRequest{
+		TaskId: "some-task",
+	})
+	if err == nil {
+		t.Fatal("expected error for missing id")
+	}
+	st, _ := grpcstatus.FromError(err)
+	if st.Code() != codes.InvalidArgument {
+		t.Errorf("code = %v, want InvalidArgument", st.Code())
+	}
+}
+
+func TestGRPCGetPushNotification_MissingID(t *testing.T) {
+	client, _ := newTestGRPCServer(t)
+
+	_, err := client.GetTaskPushNotificationConfig(context.Background(), &pb.GetTaskPushNotificationConfigRequest{
+		TaskId: "some-task",
+	})
+	if err == nil {
+		t.Fatal("expected error for missing id")
+	}
+	st, _ := grpcstatus.FromError(err)
+	if st.Code() != codes.InvalidArgument {
+		t.Errorf("code = %v, want InvalidArgument", st.Code())
+	}
+}
+
+func TestGRPCGetPushNotification_MissingTaskID(t *testing.T) {
+	client, _ := newTestGRPCServer(t)
+
+	_, err := client.GetTaskPushNotificationConfig(context.Background(), &pb.GetTaskPushNotificationConfigRequest{})
 	if err == nil {
 		t.Fatal("expected error for missing task_id")
 	}

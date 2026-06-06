@@ -16,14 +16,17 @@ package bridge
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	grpcstatus "google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/emptypb"
+	"google.golang.org/protobuf/types/known/structpb"
 
 	pb "github.com/GoogleCloudPlatform/scion/extras/scion-a2a-bridge/internal/a2apb"
 	"github.com/GoogleCloudPlatform/scion/extras/scion-a2a-bridge/internal/state"
@@ -55,8 +58,11 @@ func (s *GRPCServer) Register(srv *grpc.Server) {
 }
 
 // resolveProject extracts the project and agent slugs from the tenant field.
-// Tenant format: "projects/{projectSlug}/agents/{agentSlug}"
-// For simplicity, if no tenant is provided we fall back to the first configured project.
+// Supported formats:
+//   - "projects/{projectSlug}/agents/{agentSlug}"
+//   - "{projectSlug}/{agentSlug}"
+//
+// If no tenant is provided we fall back to the first configured project.
 func (s *GRPCServer) resolveProject(tenant string) (projectSlug, agentSlug string, err error) {
 	if tenant == "" {
 		// Use first configured project if available, but no agent slug.
@@ -65,43 +71,31 @@ func (s *GRPCServer) resolveProject(tenant string) (projectSlug, agentSlug strin
 		}
 		return "", "", fmt.Errorf("tenant is required")
 	}
-	// Parse "projects/<projectSlug>/agents/<agentSlug>" format.
-	var p, a string
-	n, _ := fmt.Sscanf(tenant, "projects/%s", &p)
-	if n == 1 {
-		// Check for /agents/ suffix
-		var rest string
-		n2, _ := fmt.Sscanf(tenant, "projects/"+p+"/agents/%s", &rest)
-		if n2 == 1 {
-			return p, rest, nil
+
+	parts := strings.Split(tenant, "/")
+
+	// "projects/{project}/agents/{agent}" → 4 segments
+	if len(parts) == 4 && parts[0] == "projects" && parts[2] == "agents" {
+		if parts[1] == "" || parts[3] == "" {
+			return "", "", fmt.Errorf("invalid tenant format: %s", tenant)
 		}
-		return p, "", fmt.Errorf("tenant missing agent slug: %s", tenant)
-	}
-	// Try simple "projectSlug/agentSlug" format.
-	n, _ = fmt.Sscanf(tenant, "%s", &p)
-	if n == 1 {
-		parts := splitTenant(tenant)
-		if len(parts) == 2 {
-			return parts[0], parts[1], nil
-		}
-		return tenant, "", fmt.Errorf("tenant missing agent slug: %s", tenant)
+		return parts[1], parts[3], nil
 	}
 
-	_ = a
+	// "{project}/{agent}" → 2 segments
+	if len(parts) == 2 {
+		if parts[0] == "" || parts[1] == "" {
+			return "", "", fmt.Errorf("invalid tenant format: %s", tenant)
+		}
+		return parts[0], parts[1], nil
+	}
+
+	// Single segment → project only, missing agent slug.
+	if len(parts) == 1 {
+		return parts[0], "", fmt.Errorf("tenant missing agent slug: %s", tenant)
+	}
+
 	return "", "", fmt.Errorf("invalid tenant format: %s", tenant)
-}
-
-// splitTenant splits a "project/agent" tenant string.
-func splitTenant(tenant string) []string {
-	var parts []string
-	for i := 0; i < len(tenant); i++ {
-		if tenant[i] == '/' {
-			parts = append(parts, tenant[:i])
-			parts = append(parts, tenant[i+1:])
-			return parts
-		}
-	}
-	return []string{tenant}
 }
 
 // SendMessage handles the SendMessage RPC.
@@ -269,6 +263,9 @@ func (s *GRPCServer) GetTaskPushNotificationConfig(ctx context.Context, req *pb.
 	if req.GetTaskId() == "" {
 		return nil, grpcstatus.Errorf(codes.InvalidArgument, "task_id is required")
 	}
+	if req.GetId() == "" {
+		return nil, grpcstatus.Errorf(codes.InvalidArgument, "id is required")
+	}
 
 	configs, err := s.bridge.GetPushNotificationConfig(ctx, req.GetTaskId())
 	if err != nil {
@@ -321,6 +318,9 @@ func (s *GRPCServer) GetExtendedAgentCard(ctx context.Context, req *pb.GetExtend
 func (s *GRPCServer) DeleteTaskPushNotificationConfig(ctx context.Context, req *pb.DeleteTaskPushNotificationConfigRequest) (*emptypb.Empty, error) {
 	if req.GetTaskId() == "" {
 		return nil, grpcstatus.Errorf(codes.InvalidArgument, "task_id is required")
+	}
+	if req.GetId() == "" {
+		return nil, grpcstatus.Errorf(codes.InvalidArgument, "id is required")
 	}
 
 	if err := s.bridge.DeletePushNotificationConfig(ctx, req.GetTaskId(), req.GetId()); err != nil {
@@ -392,6 +392,32 @@ func internalPartToProto(p Part) *pb.Part {
 		pbPart.Content = &pb.Part_Text{Text: p.Text}
 	case p.URL != "":
 		pbPart.Content = &pb.Part_Url{Url: p.URL}
+	case p.Data != nil:
+		// Convert structured data to a protobuf Value.
+		// First try direct conversion; fall back to JSON round-trip for
+		// complex types (e.g. maps with non-string keys).
+		val, err := structpb.NewValue(p.Data)
+		if err != nil {
+			// structpb.NewValue doesn't handle all Go types directly.
+			// Round-trip through JSON to normalize to JSON-compatible types.
+			b, jerr := json.Marshal(p.Data)
+			if jerr != nil {
+				// Last resort: emit as text so data is not silently lost.
+				pbPart.Content = &pb.Part_Text{Text: fmt.Sprintf("%v", p.Data)}
+				break
+			}
+			var raw interface{}
+			if err2 := json.Unmarshal(b, &raw); err2 != nil {
+				pbPart.Content = &pb.Part_Text{Text: string(b)}
+				break
+			}
+			val, err = structpb.NewValue(raw)
+			if err != nil {
+				pbPart.Content = &pb.Part_Text{Text: string(b)}
+				break
+			}
+		}
+		pbPart.Content = &pb.Part_Data{Data: val}
 	}
 	return pbPart
 }
