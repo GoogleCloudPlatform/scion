@@ -405,6 +405,15 @@ func TestSendFollowUp_BlockingTimeout_CleansUpActiveTask(t *testing.T) {
 	if waiterExists {
 		t.Error("expected waiter to be cleaned up after timeout")
 	}
+
+	// Verify the DB state was set to failed on timeout.
+	task, getErr := store.GetTask("task-1")
+	if getErr != nil {
+		t.Fatalf("GetTask: %v", getErr)
+	}
+	if task.State != TaskStateFailed {
+		t.Errorf("task state = %q, want %q after blocking timeout", task.State, TaskStateFailed)
+	}
 }
 
 func TestSendFollowUp_BlockingSendFailure_CleansUpActiveTask(t *testing.T) {
@@ -428,6 +437,15 @@ func TestSendFollowUp_BlockingSendFailure_CleansUpActiveTask(t *testing.T) {
 	b.tasksMu.RUnlock()
 	if exists {
 		t.Error("expected activeTask to be cleaned up after send failure")
+	}
+
+	// Verify the DB state was set to failed on send failure.
+	task, getErr := store.GetTask("task-1")
+	if getErr != nil {
+		t.Fatalf("GetTask: %v", getErr)
+	}
+	if task.State != TaskStateFailed {
+		t.Errorf("task state = %q, want %q after blocking send failure", task.State, TaskStateFailed)
 	}
 }
 
@@ -602,6 +620,15 @@ func TestSendFollowUp_BlockingSuccess_CleansUpActiveTask(t *testing.T) {
 	if exists {
 		t.Error("expected activeTask to be cleaned up after successful blocking follow-up")
 	}
+
+	// Verify the DB state was refreshed to working on success.
+	task, getErr := store.GetTask("task-1")
+	if getErr != nil {
+		t.Fatalf("GetTask: %v", getErr)
+	}
+	if task.State != TaskStateWorking {
+		t.Errorf("task state = %q, want %q after blocking success", task.State, TaskStateWorking)
+	}
 }
 
 func TestSendFollowUp_BlockingContextCancel_CleansUp(t *testing.T) {
@@ -654,6 +681,15 @@ func TestSendFollowUp_BlockingContextCancel_CleansUp(t *testing.T) {
 	b.tasksMu.RUnlock()
 	if exists {
 		t.Error("expected activeTask to be cleaned up after context cancel")
+	}
+
+	// Verify the DB state was set to failed on context cancel.
+	task, getErr := store.GetTask("task-1")
+	if getErr != nil {
+		t.Fatalf("GetTask: %v", getErr)
+	}
+	if task.State != TaskStateFailed {
+		t.Errorf("task state = %q, want %q after context cancel", task.State, TaskStateFailed)
 	}
 }
 

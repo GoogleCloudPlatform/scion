@@ -416,6 +416,9 @@ func (b *Bridge) sendFollowUp(ctx context.Context, projectSlug, agentSlug, taskI
 		defer b.unregisterActiveTask(taskID, aKey)
 
 		if err := b.hubClient.Agents().SendStructuredMessage(ctx, agentID, scionMsg, false, false, false); err != nil {
+			if stateErr := b.store.UpdateTaskState(taskID, TaskStateFailed); stateErr != nil {
+				b.log.Error("failed to update task state", "error", stateErr, "task_id", taskID)
+			}
 			return nil, fmt.Errorf("send follow-up to agent: %w", err)
 		}
 
@@ -428,6 +431,9 @@ func (b *Bridge) sendFollowUp(ctx context.Context, projectSlug, agentSlug, taskI
 
 		select {
 		case response := <-responseCh:
+			if err := b.store.UpdateTaskState(taskID, TaskStateWorking); err != nil {
+				b.log.Error("failed to update task state", "error", err, "task_id", taskID)
+			}
 			msg, artifacts := TranslateScionToA2A(response)
 			return &TaskResult{
 				ID:        taskID,
@@ -436,8 +442,14 @@ func (b *Bridge) sendFollowUp(ctx context.Context, projectSlug, agentSlug, taskI
 				Artifacts: artifacts,
 			}, nil
 		case <-timer.C:
+			if err := b.store.UpdateTaskState(taskID, TaskStateFailed); err != nil {
+				b.log.Error("failed to update task state", "error", err, "task_id", taskID)
+			}
 			return nil, fmt.Errorf("timeout waiting for agent response after %v", timeout)
 		case <-ctx.Done():
+			if err := b.store.UpdateTaskState(taskID, TaskStateFailed); err != nil {
+				b.log.Error("failed to update task state", "error", err, "task_id", taskID)
+			}
 			return nil, ctx.Err()
 		}
 	}
