@@ -118,7 +118,11 @@ func (m *AgentManager) Stop(ctx context.Context, agentID string, projectPath str
 					return stopErr
 				}
 				if m.PortPool != nil {
-					m.PortPool.Release(a.Name)
+					// Release using the user-facing agent name (agentID),
+					// which matches the key used in Start()'s Allocate call.
+					// a.Name is the container name (e.g. "project--agent")
+					// and would never match the port pool key.
+					m.PortPool.Release(agentID)
 				}
 				return nil
 			}

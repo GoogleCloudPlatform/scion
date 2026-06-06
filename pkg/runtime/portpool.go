@@ -28,14 +28,26 @@ type PortPool struct {
 	allocated map[int]string // port -> agentName
 }
 
-func NewPortPool(min, max, perAgent int, hostURL string) *PortPool {
+func NewPortPool(min, max, perAgent int, hostURL string) (*PortPool, error) {
+	if min < 1 || max > 65535 {
+		return nil, fmt.Errorf("port range [%d, %d] out of bounds (must be 1–65535)", min, max)
+	}
+	if min > max {
+		return nil, fmt.Errorf("port range min (%d) > max (%d)", min, max)
+	}
+	if perAgent <= 0 {
+		return nil, fmt.Errorf("perAgent must be positive, got %d", perAgent)
+	}
+	if perAgent > 26 {
+		return nil, fmt.Errorf("perAgent must be ≤ 26 (env var suffixes use A–Z), got %d", perAgent)
+	}
 	return &PortPool{
 		min:       min,
 		max:       max,
 		perAgent:  perAgent,
 		hostURL:   hostURL,
 		allocated: make(map[int]string),
-	}
+	}, nil
 }
 
 // HostURL returns the base URL for constructing agent port URLs.
@@ -50,6 +62,13 @@ func (p *PortPool) PerAgent() int {
 
 // Allocate picks the lowest available ports for the given agent.
 func (p *PortPool) Allocate(agentName string, count int) ([]int, error) {
+	if agentName == "" {
+		return nil, fmt.Errorf("agent name must not be empty")
+	}
+	if count <= 0 {
+		return nil, fmt.Errorf("count must be positive, got %d", count)
+	}
+
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -81,6 +100,7 @@ func (p *PortPool) Release(agentName string) {
 }
 
 // AllocatedPorts returns the ports currently allocated to the given agent.
+// The returned slice is sorted in ascending order.
 func (p *PortPool) AllocatedPorts(agentName string) []int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -92,4 +112,17 @@ func (p *PortPool) AllocatedPorts(agentName string) []int {
 		}
 	}
 	return ports
+}
+
+// Total returns the total number of ports in the pool (allocated + free).
+func (p *PortPool) Total() int {
+	return p.max - p.min + 1
+}
+
+// Available returns the number of unallocated ports.
+func (p *PortPool) Available() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	return p.Total() - len(p.allocated)
 }

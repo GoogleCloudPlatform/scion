@@ -477,6 +477,51 @@ func TestValidateServices(t *testing.T) {
 	}
 }
 
+func TestParsePortRange(t *testing.T) {
+	tests := []struct {
+		name           string
+		input          string
+		wantMin        int
+		wantMax        int
+		wantErr        bool
+		wantErrContain string
+	}{
+		{"valid range", "8000-9000", 8000, 9000, false, ""},
+		{"single port", "8080-8080", 8080, 8080, false, ""},
+		{"edge low", "1-100", 1, 100, false, ""},
+		{"edge high", "65000-65535", 65000, 65535, false, ""},
+		{"with spaces", " 8000 - 9000 ", 8000, 9000, false, ""},
+		{"missing dash", "8000", 0, 0, true, "expected format"},
+		{"empty string", "", 0, 0, true, "expected format"},
+		{"non-numeric min", "abc-9000", 0, 0, true, "bad min"},
+		{"non-numeric max", "8000-xyz", 0, 0, true, "bad max"},
+		{"min zero", "0-9000", 0, 0, true, "must be between 1 and 65535"},
+		{"max exceeds 65535", "8000-70000", 0, 0, true, "must be between 1 and 65535"},
+		{"min > max", "9000-8000", 0, 0, true, "min (9000) > max (8000)"},
+		{"negative min", "-1-9000", 0, 0, true, "bad min"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			min, max, err := ParsePortRange(tt.input)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("ParsePortRange(%q) = (%d, %d, nil), want error", tt.input, min, max)
+				}
+				if tt.wantErrContain != "" && !strings.Contains(err.Error(), tt.wantErrContain) {
+					t.Errorf("error %q does not contain %q", err, tt.wantErrContain)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ParsePortRange(%q) unexpected error: %v", tt.input, err)
+			}
+			if min != tt.wantMin || max != tt.wantMax {
+				t.Errorf("ParsePortRange(%q) = (%d, %d), want (%d, %d)", tt.input, min, max, tt.wantMin, tt.wantMax)
+			}
+		})
+	}
+}
+
 func TestParseDuration(t *testing.T) {
 	tests := []struct {
 		input string

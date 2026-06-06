@@ -2019,8 +2019,14 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 			if err != nil {
 				log.Printf("Warning: invalid port_pool range %q: %v", portRange, err)
 			} else {
-				mgr.PortPool = runtime.NewPortPool(pMin, pMax, perAgent, strings.TrimRight(pp.HostURL, "/"))
-				log.Printf("Port pool initialized: range %d-%d, %d ports per agent, host_url=%q", pMin, pMax, perAgent, pp.HostURL)
+				pool, poolErr := runtime.NewPortPool(pMin, pMax, perAgent, strings.TrimRight(pp.HostURL, "/"))
+				if poolErr != nil {
+					log.Printf("Warning: failed to initialize port pool: %v", poolErr)
+				} else {
+					mgr.PortPool = pool
+					log.Printf("Port pool initialized: range %d-%d (%d ports, %d agents max), %d per agent, host_url=%q",
+						pMin, pMax, pool.Total(), pool.Total()/perAgent, perAgent, pp.HostURL)
+				}
 			}
 		}
 	}

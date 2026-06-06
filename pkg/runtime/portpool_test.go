@@ -16,9 +16,20 @@ package runtime
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 )
+
+// mustNewPortPool creates a PortPool or fails the test.
+func mustNewPortPool(t *testing.T, min, max, perAgent int, hostURL string) *PortPool {
+	t.Helper()
+	pool, err := NewPortPool(min, max, perAgent, hostURL)
+	if err != nil {
+		t.Fatalf("NewPortPool(%d, %d, %d, %q) = %v", min, max, perAgent, hostURL, err)
+	}
+	return pool
+}
 
 func TestPortPoolAllocate(t *testing.T) {
 	tests := []struct {
@@ -70,7 +81,7 @@ func TestPortPoolAllocate(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			pool := NewPortPool(tt.min, tt.max, tt.perAgent, "")
+			pool := mustNewPortPool(t, tt.min, tt.max, tt.perAgent, "")
 			ports, err := pool.Allocate(tt.agent, tt.count)
 			if tt.wantErr {
 				if err == nil {
@@ -94,7 +105,7 @@ func TestPortPoolAllocate(t *testing.T) {
 }
 
 func TestPortPoolAllocateMultipleAgents(t *testing.T) {
-	pool := NewPortPool(8000, 8005, 2, "")
+	pool := mustNewPortPool(t, 8000, 8005, 2, "")
 
 	ports1, err := pool.Allocate("agent-1", 2)
 	if err != nil {
@@ -128,7 +139,7 @@ func TestPortPoolAllocateMultipleAgents(t *testing.T) {
 }
 
 func TestPortPoolRelease(t *testing.T) {
-	pool := NewPortPool(8000, 8003, 2, "")
+	pool := mustNewPortPool(t, 8000, 8003, 2, "")
 
 	pool.Allocate("agent-1", 2)
 	pool.Allocate("agent-2", 2)
@@ -146,13 +157,13 @@ func TestPortPoolRelease(t *testing.T) {
 }
 
 func TestPortPoolReleaseNonexistent(t *testing.T) {
-	pool := NewPortPool(8000, 8001, 2, "")
+	pool := mustNewPortPool(t, 8000, 8001, 2, "")
 	// Should not panic
 	pool.Release("does-not-exist")
 }
 
 func TestPortPoolAllocatedPorts(t *testing.T) {
-	pool := NewPortPool(8000, 8005, 2, "")
+	pool := mustNewPortPool(t, 8000, 8005, 2, "")
 
 	pool.Allocate("agent-1", 2)
 	pool.Allocate("agent-2", 3)
@@ -189,9 +200,9 @@ func TestPortPoolHostURLTrailingSlash(t *testing.T) {
 			want:    "http://example.com",
 		},
 		{
-			name:    "trailing slash trimmed by caller",
-			hostURL: "http://example.com",
-			want:    "http://example.com",
+			name:    "trailing slash preserved (caller trims)",
+			hostURL: "http://example.com/",
+			want:    "http://example.com/",
 		},
 		{
 			name:    "empty host URL",
@@ -202,7 +213,7 @@ func TestPortPoolHostURLTrailingSlash(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			pool := NewPortPool(8000, 9000, 2, tt.hostURL)
+			pool := mustNewPortPool(t, 8000, 9000, 2, tt.hostURL)
 			if got := pool.HostURL(); got != tt.want {
 				t.Errorf("HostURL() = %q, want %q", got, tt.want)
 			}
@@ -211,7 +222,7 @@ func TestPortPoolHostURLTrailingSlash(t *testing.T) {
 }
 
 func TestPortPoolConcurrency(t *testing.T) {
-	pool := NewPortPool(8000, 8099, 2, "")
+	pool := mustNewPortPool(t, 8000, 8099, 2, "")
 
 	var wg sync.WaitGroup
 	errs := make(chan error, 50)
@@ -249,5 +260,155 @@ func TestPortPoolConcurrency(t *testing.T) {
 			}
 			seen[p] = true
 		}
+	}
+}
+
+func TestNewPortPoolValidation(t *testing.T) {
+	tests := []struct {
+		name             string
+		min, max         int
+		perAgent         int
+		wantErrSubstring string
+	}{
+		{"min > max", 9000, 8000, 2, "min (9000) > max (8000)"},
+		{"min zero", 0, 8000, 2, "out of bounds"},
+		{"max exceeds 65535", 1, 70000, 2, "out of bounds"},
+		{"perAgent zero", 8000, 9000, 0, "perAgent must be positive"},
+		{"perAgent negative", 8000, 9000, -1, "perAgent must be positive"},
+		{"perAgent exceeds 26", 8000, 9000, 27, "must be ≤ 26"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pool, err := NewPortPool(tt.min, tt.max, tt.perAgent, "")
+			if err == nil {
+				t.Fatalf("expected error containing %q, got pool %+v", tt.wantErrSubstring, pool)
+			}
+			if !strings.Contains(err.Error(), tt.wantErrSubstring) {
+				t.Errorf("error %q does not contain %q", err, tt.wantErrSubstring)
+			}
+		})
+	}
+}
+
+func TestAllocateValidation(t *testing.T) {
+	pool := mustNewPortPool(t, 8000, 9000, 2, "")
+
+	// Empty agent name
+	if _, err := pool.Allocate("", 2); err == nil {
+		t.Fatal("expected error for empty agent name")
+	}
+
+	// Zero count
+	if _, err := pool.Allocate("agent-a", 0); err == nil {
+		t.Fatal("expected error for count=0")
+	}
+
+	// Negative count
+	if _, err := pool.Allocate("agent-b", -1); err == nil {
+		t.Fatal("expected error for count=-1")
+	}
+}
+
+func TestAllocateDoubleAllocateSameAgent(t *testing.T) {
+	pool := mustNewPortPool(t, 8000, 8005, 2, "")
+
+	ports1, err := pool.Allocate("agent-1", 2)
+	if err != nil {
+		t.Fatalf("first allocate: %v", err)
+	}
+	if ports1[0] != 8000 || ports1[1] != 8001 {
+		t.Errorf("first allocate got %v, want [8000 8001]", ports1)
+	}
+
+	// Second allocation for the same agent gets new ports
+	ports2, err := pool.Allocate("agent-1", 2)
+	if err != nil {
+		t.Fatalf("second allocate: %v", err)
+	}
+	if ports2[0] != 8002 || ports2[1] != 8003 {
+		t.Errorf("second allocate got %v, want [8002 8003]", ports2)
+	}
+
+	// All four ports are listed for agent-1
+	all := pool.AllocatedPorts("agent-1")
+	if len(all) != 4 {
+		t.Fatalf("expected 4 ports for agent-1, got %d: %v", len(all), all)
+	}
+}
+
+func TestAllocatedPortsAfterRelease(t *testing.T) {
+	pool := mustNewPortPool(t, 8000, 8003, 2, "")
+	pool.Allocate("agent-1", 2)
+
+	pool.Release("agent-1")
+
+	// After release, AllocatedPorts should return nil
+	if ports := pool.AllocatedPorts("agent-1"); ports != nil {
+		t.Errorf("expected nil after release, got %v", ports)
+	}
+}
+
+func TestPortPoolTotalAndAvailable(t *testing.T) {
+	pool := mustNewPortPool(t, 8000, 8009, 2, "")
+
+	if pool.Total() != 10 {
+		t.Errorf("Total() = %d, want 10", pool.Total())
+	}
+	if pool.Available() != 10 {
+		t.Errorf("Available() = %d, want 10", pool.Available())
+	}
+
+	pool.Allocate("agent-1", 3)
+
+	if pool.Available() != 7 {
+		t.Errorf("Available() after allocating 3 = %d, want 7", pool.Available())
+	}
+
+	pool.Release("agent-1")
+
+	if pool.Available() != 10 {
+		t.Errorf("Available() after release = %d, want 10", pool.Available())
+	}
+}
+
+func TestPortPoolConcurrentAllocateRelease(t *testing.T) {
+	// Stress test: 20 goroutines each allocate 2 ports, release, and re-allocate.
+	// The pool has 100 ports (8000-8099), so 50 concurrent 2-port allocations
+	// are the max. By releasing between rounds, we exercise the concurrent
+	// interleaving of allocate and release.
+	pool := mustNewPortPool(t, 8000, 8099, 2, "")
+
+	var wg sync.WaitGroup
+	errs := make(chan error, 200)
+
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			name := fmt.Sprintf("agent-%d", idx)
+			for round := 0; round < 5; round++ {
+				ports, err := pool.Allocate(name, 2)
+				if err != nil {
+					errs <- fmt.Errorf("agent-%d round %d allocate: %w", idx, round, err)
+					return
+				}
+				if len(ports) != 2 {
+					errs <- fmt.Errorf("agent-%d round %d: got %d ports", idx, round, len(ports))
+					return
+				}
+				pool.Release(name)
+			}
+		}(i)
+	}
+	wg.Wait()
+	close(errs)
+
+	for err := range errs {
+		t.Error(err)
+	}
+
+	// After all releases, pool should be fully available
+	if pool.Available() != 100 {
+		t.Errorf("Available() = %d, want 100 after all releases", pool.Available())
 	}
 }
