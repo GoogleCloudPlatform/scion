@@ -181,18 +181,21 @@ func TestAgentList(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
-	// Create a project first (agents reference projects)
+	// Create a project owned by the dev user (list is membership-gated)
 	project := &store.Project{
 		ID:        tid("project_test123"),
 		Slug:      "test-project",
 		Name:      "Test Project",
 		GitRemote: "https://github.com/test/repo",
+		OwnerID:   DevUserID,
+		CreatedBy: DevUserID,
 		Created:   time.Now(),
 		Updated:   time.Now(),
 	}
 	if err := s.CreateProject(ctx, project); err != nil {
 		t.Fatalf("failed to create project: %v", err)
 	}
+	srv.createProjectMembersGroupAndPolicy(ctx, project)
 
 	// Create some test agents
 	for i := 0; i < 3; i++ {
