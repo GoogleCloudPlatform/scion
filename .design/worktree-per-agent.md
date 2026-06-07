@@ -322,11 +322,12 @@ Agent deletion already does the right thing for worktrees
 
 New work for the base repo:
 
-- **Last-agent teardown.** When the final worktree for a project is removed on a node,
-  optionally GC and/or remove `base/` (policy: keep for fast re-provision vs reclaim
-  disk). Guard the decision under the same advisory lock.
-- **Orphan base detection.** A maintenance sweep that prunes worktrees and, if none
-  remain, applies the teardown policy — analogous to existing project-prune flows.
+- **Last-agent teardown. [DEFERRED — Q3 RESOLVED: keep base]** The base is kept after
+  the last agent exits (fast re-provision); the broker never removes `base/`. GC-on-teardown
+  (Q2) is likewise deferred and not a current priority. Disk reclamation may return as a
+  later opt-in maintenance sweep.
+- **Orphan base detection. [DEFERRED]** Follows the same Q3 decision — a future maintenance
+  sweep could reclaim disk, but it is out of scope while "keep base" is the policy.
 
 ---
 
@@ -378,16 +379,23 @@ the git-version gate, and define base-repo teardown.
    explicit `--branch main`, which holds the `main` worktree like any other agent and can
    merge sibling branches locally from the shared object store. The Hub enforces a
    single owner per branch (see §4.2a). Bare-base variant deferred as a later refinement.
-2. **Q2 — GC policy.** Disable auto-gc entirely and GC only on teardown, or allow
-   scheduled GC under the project lock?
-3. **Q3 — Base teardown.** Keep `base/` after the last agent (fast re-provision) or
-   reclaim disk immediately? Configurable via settings?
+2. **Q2 — GC policy. [RESOLVED 2026-06-07 — ptone]** GC only on teardown
+   (auto-gc stays disabled via `gc.auto 0`); no scheduled GC. GC is **not a
+   priority yet** — defer the teardown-time GC implementation until base teardown
+   is actually built (which is itself deferred, see Q3).
+3. **Q3 — Base teardown. [RESOLVED 2026-06-07 — ptone]** **Keep `base/` after the
+   last agent** (fast re-provision; do not reclaim disk on last-agent exit). The
+   "last-agent teardown / remove base" work in §8 is therefore **deferred** — the
+   broker only ever tears down per-agent worktrees, never the base. An orphan-base
+   maintenance sweep may revisit disk reclamation later, but it is out of scope.
 4. **Q4 — K8s node-local.** Support node-local worktrees on K8s in v1, or restrict
-   worktree-per-agent to NFS on K8s?
+   worktree-per-agent to NFS on K8s? (Open — Phase 3.)
 5. **Q5 — Migration.** Any opt-in path to convert a running clone-per-agent project to
-   worktree-per-agent, or strictly new-projects-only?
-6. **Q6 — Default mode.** Should worktree-per-agent become the default for new
-   git-backed hub-managed projects once proven, with clone-per-agent as opt-out?
+   worktree-per-agent, or strictly new-projects-only? (Open.)
+6. **Q6 — Default mode. [RESOLVED 2026-06-07 — ptone]** **Clone-per-agent remains
+   the default** for new git-backed hub-managed projects; worktree-per-agent is
+   strictly **opt-in**. The UI must make the workspace-mode options obvious at
+   project/agent creation so users can choose deliberately.
 7. **Q7 — Explicit shared worktree (multi-agent mount).** Requirement (maintainer,
    2026-06-06): support **>1 agent mounting the same branch/worktree** when explicitly
    requested. Since git forbids the same branch in two *separate* worktrees, this means N
@@ -404,10 +412,14 @@ the git-version gate, and define base-repo teardown.
 
 ## 12. Phased rollout (proposed)
 
-- **Phase 0 (this doc).** Design + issue #158.
-- **Phase 1.** Factor `ensureBaseAndWorktree`; implement `localBackend.Provision` for
-  worktree mode; broker dispatch branches on mode; git-version gate. Docker × node-local
-  only.
-- **Phase 2.** NFS parity validated end-to-end (largely existing); base teardown +
-  orphan sweep.
-- **Phase 3.** K8s story (NFS-first); decide default-mode question (Q6).
+- **Phase 0 (this doc).** Design + issue #158. **DONE** (merged via storage epic #169).
+- **Phase 1.** `provisionShared` worktree path; `localBackend.Resolve` for worktree mode;
+  broker dispatch branches on mode; git-version gate. Docker × node-local only.
+  **DONE** (merged upstream via #350; re-homed onto the `pkg/provision` leaf from #169).
+- **Phase 2 (worktree lifecycle).** (a) Delete-path teardown for the hub-managed worktree
+  layout — remove the agent's worktree + branch and prune `.git/worktrees/<id>`, never the
+  base or siblings; (b) NFS worktree-per-agent end-to-end validation (provisioning unified
+  by #169); (c) UI surfacing of the workspace-mode options (Q6 — opt-in clarity).
+  Base teardown / orphan sweep / GC are **deferred** (Q2/Q3 resolved: keep base, GC later).
+- **Phase 3.** K8s node-local worktree story (Q4; NFS-first). Default mode stays
+  clone-per-agent (Q6 resolved) — no flip planned.
