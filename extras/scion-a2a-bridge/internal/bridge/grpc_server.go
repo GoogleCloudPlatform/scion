@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"strings"
 
 	"google.golang.org/grpc"
@@ -123,6 +124,7 @@ func (s *GRPCServer) SendMessage(ctx context.Context, req *pb.SendMessageRequest
 
 	result, err := s.bridge.SendMessage(ctx, projectSlug, agentSlug, contextID, parts, blocking)
 	if err != nil {
+		s.log.Error("SendMessage failed", "project", projectSlug, "agent", agentSlug, "error", err)
 		return nil, bridgeErrToGRPC(err)
 	}
 
@@ -155,6 +157,7 @@ func (s *GRPCServer) SendStreamingMessage(req *pb.SendMessageRequest, stream grp
 
 	taskID, events, cleanup, err := s.bridge.SendStreamingMessage(ctx, projectSlug, agentSlug, contextID, parts)
 	if err != nil {
+		s.log.Error("SendStreamingMessage failed", "project", projectSlug, "agent", agentSlug, "error", err)
 		return bridgeErrToGRPC(err)
 	}
 	defer cleanup()
@@ -170,7 +173,8 @@ func (s *GRPCServer) GetTask(ctx context.Context, req *pb.GetTaskRequest) (*pb.T
 
 	result, err := s.bridge.GetTask(ctx, req.GetId())
 	if err != nil {
-		return nil, grpcstatus.Errorf(codes.Internal, "get task: %v", err)
+		s.log.Error("GetTask failed", "task_id", req.GetId(), "error", err)
+		return nil, grpcstatus.Errorf(codes.Internal, "failed to retrieve task")
 	}
 	if result == nil {
 		return nil, grpcstatus.Errorf(codes.NotFound, "task not found")
@@ -187,7 +191,8 @@ func (s *GRPCServer) ListTasks(ctx context.Context, req *pb.ListTasksRequest) (*
 
 	results, err := s.bridge.ListTasks(ctx, req.GetContextId())
 	if err != nil {
-		return nil, grpcstatus.Errorf(codes.Internal, "list tasks: %v", err)
+		s.log.Error("ListTasks failed", "context_id", req.GetContextId(), "error", err)
+		return nil, grpcstatus.Errorf(codes.Internal, "failed to list tasks")
 	}
 
 	tasks := make([]*pb.Task, len(results))
@@ -209,7 +214,10 @@ func (s *GRPCServer) CancelTask(ctx context.Context, req *pb.CancelTaskRequest) 
 
 	result, err := s.bridge.CancelTask(ctx, req.GetId())
 	if err != nil {
-		return nil, grpcstatus.Errorf(codes.Internal, "cancel task: %v", err)
+		if strings.Contains(err.Error(), "terminal state") {
+			return nil, grpcstatus.Errorf(codes.FailedPrecondition, "task cannot be canceled")
+		}
+		return nil, grpcstatus.Errorf(codes.Internal, "cancel task failed")
 	}
 	if result == nil {
 		return nil, grpcstatus.Errorf(codes.NotFound, "task not found")
@@ -228,7 +236,8 @@ func (s *GRPCServer) SubscribeToTask(req *pb.SubscribeToTaskRequest, stream grpc
 
 	events, cleanup, err := s.bridge.SubscribeToTask(ctx, req.GetId())
 	if err != nil {
-		return grpcstatus.Errorf(codes.Internal, "subscribe to task: %v", err)
+		s.log.Error("SubscribeToTask failed", "task_id", req.GetId(), "error", err)
+		return grpcstatus.Errorf(codes.Internal, "failed to subscribe to task")
 	}
 	defer cleanup()
 
@@ -244,6 +253,12 @@ func (s *GRPCServer) CreateTaskPushNotificationConfig(ctx context.Context, req *
 		return nil, grpcstatus.Errorf(codes.InvalidArgument, "url is required")
 	}
 
+	// Validate URL format (scheme + host) before bridge call — matches HTTP handler.
+	parsed, err := url.Parse(req.GetUrl())
+	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		return nil, grpcstatus.Errorf(codes.InvalidArgument, "url must be an absolute http or https URL")
+	}
+
 	var authScheme, authCredentials string
 	if req.GetAuthentication() != nil {
 		authScheme = req.GetAuthentication().GetScheme()
@@ -252,7 +267,8 @@ func (s *GRPCServer) CreateTaskPushNotificationConfig(ctx context.Context, req *
 
 	cfg, err := s.bridge.SetPushNotificationConfig(ctx, req.GetTaskId(), req.GetUrl(), req.GetToken(), authScheme, authCredentials)
 	if err != nil {
-		return nil, grpcstatus.Errorf(codes.Internal, "set push config: %v", err)
+		s.log.Error("SetPushNotificationConfig failed", "task_id", req.GetTaskId(), "error", err)
+		return nil, grpcstatus.Errorf(codes.Internal, "failed to set push notification config")
 	}
 
 	return pushConfigToProto(cfg), nil
@@ -269,7 +285,8 @@ func (s *GRPCServer) GetTaskPushNotificationConfig(ctx context.Context, req *pb.
 
 	configs, err := s.bridge.GetPushNotificationConfig(ctx, req.GetTaskId())
 	if err != nil {
-		return nil, grpcstatus.Errorf(codes.Internal, "get push config: %v", err)
+		s.log.Error("GetPushNotificationConfig failed", "task_id", req.GetTaskId(), "error", err)
+		return nil, grpcstatus.Errorf(codes.Internal, "failed to get push notification config")
 	}
 
 	// Return the specific config by ID if provided.
@@ -290,7 +307,8 @@ func (s *GRPCServer) ListTaskPushNotificationConfigs(ctx context.Context, req *p
 
 	configs, err := s.bridge.GetPushNotificationConfig(ctx, req.GetTaskId())
 	if err != nil {
-		return nil, grpcstatus.Errorf(codes.Internal, "list push configs: %v", err)
+		s.log.Error("ListTaskPushNotificationConfigs failed", "task_id", req.GetTaskId(), "error", err)
+		return nil, grpcstatus.Errorf(codes.Internal, "failed to list push notification configs")
 	}
 
 	pbConfigs := make([]*pb.TaskPushNotificationConfig, len(configs))
@@ -324,7 +342,8 @@ func (s *GRPCServer) DeleteTaskPushNotificationConfig(ctx context.Context, req *
 	}
 
 	if err := s.bridge.DeletePushNotificationConfig(ctx, req.GetTaskId(), req.GetId()); err != nil {
-		return nil, grpcstatus.Errorf(codes.Internal, "delete push config: %v", err)
+		s.log.Error("DeletePushNotificationConfig failed", "task_id", req.GetTaskId(), "config_id", req.GetId(), "error", err)
+		return nil, grpcstatus.Errorf(codes.Internal, "failed to delete push notification config")
 	}
 
 	return &emptypb.Empty{}, nil
@@ -628,6 +647,7 @@ func streamEventToProto(taskID string, event StreamEvent) *pb.StreamResponse {
 }
 
 // bridgeErrToGRPC translates bridge errors to appropriate gRPC status codes.
+// Error messages are kept generic to avoid leaking implementation details.
 func bridgeErrToGRPC(err error) error {
 	switch {
 	case errors.Is(err, ErrAgentNotFound):
@@ -635,7 +655,7 @@ func bridgeErrToGRPC(err error) error {
 	case errors.Is(err, ErrContextUnknown):
 		return grpcstatus.Errorf(codes.InvalidArgument, "unknown context ID")
 	default:
-		return grpcstatus.Errorf(codes.Internal, "internal error: %v", err)
+		return grpcstatus.Errorf(codes.Internal, "internal error")
 	}
 }
 

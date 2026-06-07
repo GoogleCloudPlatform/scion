@@ -20,6 +20,7 @@ import (
 	"log/slog"
 	"net"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"google.golang.org/grpc"
@@ -830,6 +831,68 @@ func TestGRPCListPushNotificationConfigs(t *testing.T) {
 	}
 	if len(resp.Configs) != 0 {
 		t.Errorf("expected 0 configs, got %d", len(resp.Configs))
+	}
+}
+
+func TestGRPCCancelTask_AlreadyTerminal(t *testing.T) {
+	client, store := newTestGRPCServer(t)
+
+	// Create a task that's already completed.
+	task := &state.Task{
+		ID:        "task-terminal-1",
+		ContextID: "ctx-1",
+		ProjectID: "test-project",
+		AgentSlug: "test-agent",
+		State:     TaskStateCompleted,
+		Metadata:  "{}",
+	}
+	if err := store.CreateTask(task); err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+
+	_, err := client.CancelTask(context.Background(), &pb.CancelTaskRequest{Id: "task-terminal-1"})
+	if err == nil {
+		t.Fatal("expected error for terminal task")
+	}
+	st, ok := grpcstatus.FromError(err)
+	if !ok {
+		t.Fatalf("expected gRPC status, got %v", err)
+	}
+	if st.Code() != codes.FailedPrecondition {
+		t.Errorf("code = %v, want FailedPrecondition", st.Code())
+	}
+	// Verify error message does not leak internal state.
+	if strings.Contains(st.Message(), "completed") || strings.Contains(st.Message(), "task-terminal-1") {
+		t.Errorf("error message leaks internal details: %q", st.Message())
+	}
+}
+
+func TestGRPCCreatePushNotificationConfig_InvalidURL(t *testing.T) {
+	client, _ := newTestGRPCServer(t)
+
+	tests := []struct {
+		name string
+		url  string
+	}{
+		{"ftp scheme", "ftp://example.com/hook"},
+		{"no host", "https:///path"},
+		{"empty scheme", "://example.com/hook"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := client.CreateTaskPushNotificationConfig(context.Background(), &pb.TaskPushNotificationConfig{
+				TaskId: "some-task",
+				Url:    tc.url,
+			})
+			if err == nil {
+				t.Fatal("expected error for invalid URL")
+			}
+			st, _ := grpcstatus.FromError(err)
+			if st.Code() != codes.InvalidArgument {
+				t.Errorf("code = %v, want InvalidArgument", st.Code())
+			}
+		})
 	}
 }
 
