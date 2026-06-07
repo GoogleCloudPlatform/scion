@@ -21,7 +21,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/provision"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
 
@@ -236,5 +239,159 @@ func TestDeleteAgentFiles_CleansWorktreeWithGitFile(t *testing.T) {
 	// Verify agent directory was removed
 	if _, err := os.Stat(agentDir); !os.IsNotExist(err) {
 		t.Errorf("expected agent directory to be removed")
+	}
+}
+
+// initBareRepo creates a bare git repo seeded with one commit, for use as a
+// clone URL in worktree-per-agent provisioning tests.
+func initBareRepo(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	bare := filepath.Join(dir, "remote.git")
+	wc := filepath.Join(dir, "wc")
+	run := func(args ...string) {
+		cmd := exec.Command("git", args...)
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t",
+			"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %s", args, strings.TrimSpace(string(out)))
+		}
+	}
+	run("init", "--bare", "-b", "main", bare)
+	run("clone", bare, wc)
+	if err := os.WriteFile(filepath.Join(wc, "README.md"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run("-C", wc, "add", "-A")
+	run("-C", wc, "commit", "-m", "init")
+	run("-C", wc, "push", "origin", "main")
+	return bare
+}
+
+// TestDeleteAgentFiles_WorktreePerAgent_DeletesOnlyTargetWorktree is the
+// regression test for Phase 2 T2: verifies that deleting one agent in a
+// worktree-per-agent layout removes only that agent's worktree directory
+// and .git/worktrees registration, while leaving the shared base and
+// sibling worktrees intact.
+func TestDeleteAgentFiles_WorktreePerAgent_DeletesOnlyTargetWorktree(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+
+	tmpDir := t.TempDir()
+	oldWd, _ := os.Getwd()
+	defer os.Chdir(oldWd)
+	os.Chdir(tmpDir)
+	t.Setenv("HOME", tmpDir)
+
+	bare := initBareRepo(t)
+	gc := &api.GitCloneConfig{URL: bare, Branch: "main", Depth: 0}
+
+	// Set up a hub-managed project layout: projectPath with .scion inside.
+	projectPath := filepath.Join(tmpDir, "proj")
+	scionDir := filepath.Join(projectPath, config.DotScion)
+	if err := os.MkdirAll(filepath.Join(scionDir, "agents"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// The workspace backend computes HostPath = projectPath + "/workspace".
+	base := filepath.Join(projectPath, "workspace")
+	resolved := provision.ResolvedWorkspace{
+		HostPath: base,
+		Backend:  "local",
+	}
+
+	// Provision agent-a.
+	if err := provision.ProvisionShared(provision.ProvisionInput{
+		Resolved:  resolved,
+		Mode:      store.SharingModeWorktreePerAgent,
+		ProjectID: "p1", AgentID: "agent-a", AgentName: "agent-a",
+		GitClone: gc,
+	}); err != nil {
+		t.Fatalf("provision agent-a: %v", err)
+	}
+
+	// Provision agent-b.
+	if err := provision.ProvisionShared(provision.ProvisionInput{
+		Resolved:  resolved,
+		Mode:      store.SharingModeWorktreePerAgent,
+		ProjectID: "p1", AgentID: "agent-b", AgentName: "agent-b",
+		GitClone: gc,
+	}); err != nil {
+		t.Fatalf("provision agent-b: %v", err)
+	}
+
+	wtA := provision.WorktreePath(base, "agent-a")
+	wtB := provision.WorktreePath(base, "agent-b")
+
+	// Sanity: both worktrees + base exist.
+	for _, p := range []string{
+		filepath.Join(base, ".git"),
+		wtA, wtB,
+	} {
+		if _, err := os.Stat(p); err != nil {
+			t.Fatalf("setup: expected %s to exist: %v", p, err)
+		}
+	}
+
+	// Create agent config dirs (as the broker would).
+	for _, name := range []string{"agent-a", "agent-b"} {
+		agentDir := filepath.Join(scionDir, "agents", name)
+		if err := os.MkdirAll(agentDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Delete agent-b via DeleteAgentFiles (pass projectPath, not scionDir,
+	// to match the hub-managed broker flow).
+	branchDeleted, err := DeleteAgentFiles("agent-b", projectPath, true)
+	if err != nil {
+		t.Fatalf("DeleteAgentFiles(agent-b): %v", err)
+	}
+
+	// --- Assertions ---
+
+	// 1. agent-b's worktree directory is gone.
+	if _, err := os.Stat(wtB); !os.IsNotExist(err) {
+		t.Errorf("agent-b worktree dir should be removed, stat err=%v", err)
+	}
+
+	// 2. agent-b's .git/worktrees registration is pruned.
+	wtListStr := listWorktrees(t, base)
+	if strings.Contains(wtListStr, "agent-b") {
+		t.Errorf("agent-b should be pruned from worktree list:\n%s", wtListStr)
+	}
+
+	// 3. agent-b's branch is deleted.
+	if !branchDeleted {
+		t.Error("expected agent-b branch to be deleted")
+	}
+	branchCheck := exec.Command("git", "-C", base, "branch", "--list", "agent-b")
+	if out, _ := branchCheck.Output(); strings.TrimSpace(string(out)) != "" {
+		t.Errorf("agent-b branch should be gone, got: %s", strings.TrimSpace(string(out)))
+	}
+
+	// 4. Shared base .git survives.
+	if _, err := os.Stat(filepath.Join(base, ".git")); err != nil {
+		t.Errorf("shared base .git should survive: %v", err)
+	}
+
+	// 5. Sibling agent-a worktree survives.
+	if _, err := os.Stat(wtA); err != nil {
+		t.Errorf("sibling agent-a worktree should survive: %v", err)
+	}
+
+	// 6. Sibling agent-a is still registered.
+	if !strings.Contains(wtListStr, "agent-a") {
+		t.Errorf("agent-a should still be in worktree list:\n%s", wtListStr)
+	}
+
+	// 7. agent-b config dir is removed.
+	if _, err := os.Stat(filepath.Join(scionDir, "agents", "agent-b")); !os.IsNotExist(err) {
+		t.Errorf("agent-b config dir should be removed, stat err=%v", err)
+	}
+
+	// 8. agent-a config dir survives.
+	if _, err := os.Stat(filepath.Join(scionDir, "agents", "agent-a")); err != nil {
+		t.Errorf("agent-a config dir should survive: %v", err)
 	}
 }

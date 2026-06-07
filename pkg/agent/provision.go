@@ -37,12 +37,37 @@ func DeleteAgentFiles(agentName string, projectPath string, removeBranch bool) (
 	branchDeleted := false
 	var repoRoot string
 	var externalAgentDir string
+	var worktreeDir string // worktree-per-agent: agent's worktree path
 	if projectDir, err := config.GetResolvedProjectDir(projectPath); err == nil {
 		agentsDirs = append(agentsDirs, filepath.Join(projectDir, "agents"))
-		// Determine repo root for worktree pruning and branch cleanup
-		if root, err := util.RepoRootDir(filepath.Dir(projectDir)); err == nil {
-			repoRoot = root
+
+		// Determine repo root for worktree pruning and branch cleanup.
+		// For worktree-per-agent the shared base lives at
+		// <projectRoot>/workspace where projectRoot is the actual project
+		// directory. GetResolvedProjectDir may have appended .scion
+		// (e.g. hub-managed projects), so strip that suffix to match the
+		// path the workspace backend used during provisioning.
+		projectRoot := projectDir
+		if filepath.Base(projectDir) == config.DotScion {
+			projectRoot = filepath.Dir(projectDir)
 		}
+		sharedBase := filepath.Join(projectRoot, "workspace")
+		if info, statErr := os.Stat(filepath.Join(sharedBase, ".git")); statErr == nil && info.IsDir() {
+			repoRoot = sharedBase
+			wtPath := filepath.Join(sharedBase, "worktrees", agentName)
+			if _, statErr := os.Stat(wtPath); statErr == nil {
+				worktreeDir = wtPath
+			}
+		}
+
+		// Fallback: resolve repo root from the project's parent directory
+		// (clone-per-agent layout where each agent workspace is a full clone).
+		if repoRoot == "" {
+			if root, err := util.RepoRootDir(filepath.Dir(projectDir)); err == nil {
+				repoRoot = root
+			}
+		}
+
 		// Check for external agent home (git project split storage)
 		if extDir, err := config.GetGitProjectExternalAgentsDir(projectDir); err == nil && extDir != "" {
 			externalAgentDir = filepath.Join(extDir, agentName)
@@ -57,6 +82,27 @@ func DeleteAgentFiles(agentName string, projectPath string, removeBranch bool) (
 	// No background deletions happen here to avoid triggering macOS autofs
 	// in a goroutine that could block git subprocess I/O system-wide.
 	var dirsToDelete []string
+
+	// Worktree-per-agent: remove the agent's worktree from the shared base.
+	// The worktree lives at <projectDir>/workspace/worktrees/<agentName>,
+	// separate from the agent config dir under agents/.
+	if worktreeDir != "" {
+		if _, err := os.Stat(filepath.Join(worktreeDir, ".git")); err == nil {
+			util.Debugf("delete: removing worktree-per-agent workspace at %s", worktreeDir)
+			worktreeStart := time.Now()
+			if deleted, err := util.RemoveWorktree(worktreeDir, removeBranch); err == nil {
+				if deleted {
+					branchDeleted = true
+				}
+				util.Debugf("delete: worktree-per-agent removal completed in %v (branch deleted: %v)", time.Since(worktreeStart), deleted)
+			} else {
+				util.Debugf("delete: worktree-per-agent removal failed in %v: %v", time.Since(worktreeStart), err)
+				_ = util.RemoveAllSafe(worktreeDir)
+			}
+		} else {
+			_ = util.RemoveAllSafe(worktreeDir)
+		}
+	}
 
 	for _, dir := range agentsDirs {
 		agentDir := filepath.Join(dir, agentName)
