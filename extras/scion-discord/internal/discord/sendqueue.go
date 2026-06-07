@@ -11,8 +11,8 @@ import (
 )
 
 const (
-	defaultSendQueueSize = 100
-	defaultSendMinDelay  = 50 * time.Millisecond
+	defaultSendQueueSize   = 100
+	defaultSendMinDelay    = 50 * time.Millisecond
 	defaultSendIdleTimeout = 5 * time.Minute
 )
 

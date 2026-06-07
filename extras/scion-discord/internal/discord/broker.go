@@ -49,7 +49,7 @@ const (
 type Config struct {
 	BotToken       string
 	ApplicationID  string
-	PublicKey       string
+	PublicKey      string
 	GuildID        string // empty = global commands
 	DBPath         string
 	MentionRouting bool
@@ -57,7 +57,7 @@ type Config struct {
 
 // inboundPayload is the JSON body sent to the hub API inbound endpoint.
 type inboundPayload struct {
-	Topic   string                     `json:"topic"`
+	Topic   string                      `json:"topic"`
 	Message *messages.StructuredMessage `json:"message"`
 }
 
@@ -172,8 +172,8 @@ func (b *DiscordBroker) Configure(config map[string]string) error {
 		cfg := &Config{
 			BotToken:       botToken,
 			ApplicationID:  config["application_id"],
-			PublicKey:       config["public_key"],
-			GuildID:         config["guild_id"],
+			PublicKey:      config["public_key"],
+			GuildID:        config["guild_id"],
 			MentionRouting: true, // default
 		}
 

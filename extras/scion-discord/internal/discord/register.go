@@ -37,7 +37,7 @@ type RegistrationHandler struct {
 type pendingLinkReg struct {
 	Code             string
 	DiscordUserID    string
-	DiscordUsername   string
+	DiscordUsername  string
 	ChannelID        string
 	InteractionToken string // for follow-up messages
 	ExpiresAt        time.Time
@@ -52,7 +52,7 @@ type discordLinkRequest struct {
 
 // identityLinkStatusResponse is the JSON response from checking a linking status.
 type identityLinkStatusResponse struct {
-	Status string           `json:"status"` // "pending", "confirmed", "expired", "not_found"
+	Status string            `json:"status"` // "pending", "confirmed", "expired", "not_found"
 	User   *identityLinkUser `json:"user,omitempty"`
 }
 
@@ -145,7 +145,7 @@ func (h *RegistrationHandler) HandleRegister(s *discordgo.Session, i *discordgo.
 	reg := &pendingLinkReg{
 		Code:             code,
 		DiscordUserID:    discordUserID,
-		DiscordUsername:   discordUsername,
+		DiscordUsername:  discordUsername,
 		ChannelID:        i.ChannelID,
 		InteractionToken: i.Token,
 		ExpiresAt:        time.Now().Add(linkingCodeExpiry),
@@ -264,11 +264,11 @@ func (h *RegistrationHandler) completeRegistration(s *discordgo.Session, interac
 	defer cancel()
 
 	mapping := &DiscordUserMapping{
-		DiscordUserID:  reg.DiscordUserID,
+		DiscordUserID:   reg.DiscordUserID,
 		DiscordUsername: reg.DiscordUsername,
-		ScionUserID:    statusResp.User.ID,
-		ScionEmail:     statusResp.User.Email,
-		LinkedAt:       time.Now(),
+		ScionUserID:     statusResp.User.ID,
+		ScionEmail:      statusResp.User.Email,
+		LinkedAt:        time.Now(),
 	}
 
 	if err := h.store.CreateUserMapping(ctx, mapping); err != nil {

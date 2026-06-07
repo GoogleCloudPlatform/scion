@@ -130,8 +130,8 @@ func HandleModalSubmit(
 			Type:      messages.TypeInstruction,
 			Metadata: map[string]string{
 				"discord_channel_id": pending.ChannelID,
-				"project_id":        pending.ProjectID,
-				"ask_request_id":    pending.RequestID,
+				"project_id":         pending.ProjectID,
+				"ask_request_id":     pending.RequestID,
 			},
 		}
 

@@ -38,13 +38,13 @@ const (
 
 // Embed sidebar colors keyed by activity/status string.
 const (
-	colorCompleted  = 0x2ECC71 // Green
-	colorInputWait  = 0xF1C40F // Yellow
-	colorError      = 0xE74C3C // Red
-	colorStalled    = 0xE67E22 // Orange
-	colorDeleted    = 0x95A5A6 // Gray
-	colorRunning    = 0x3498DB // Blue
-	colorDefault    = 0x1A1A2E // Dark
+	colorCompleted = 0x2ECC71 // Green
+	colorInputWait = 0xF1C40F // Yellow
+	colorError     = 0xE74C3C // Red
+	colorStalled   = 0xE67E22 // Orange
+	colorDeleted   = 0x95A5A6 // Gray
+	colorRunning   = 0x3498DB // Blue
+	colorDefault   = 0x1A1A2E // Dark
 )
 
 // FormatMessage converts a StructuredMessage to Discord-compatible text.

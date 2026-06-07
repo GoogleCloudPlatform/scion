@@ -1014,8 +1014,8 @@ const DefaultHeartbeatTimeout = 10 * time.Second
 var tokenHomeResolver = resolveTokenHome
 
 var (
-	resolvedTokenHome     string
-	resolveTokenHomeOnce  sync.Once
+	resolvedTokenHome    string
+	resolveTokenHomeOnce sync.Once
 )
 
 // resolveTokenHome returns the home directory to use for the token file.

@@ -77,11 +77,11 @@ type ChannelLink struct {
 
 // DiscordUserMapping links a Discord user to a Scion user identity.
 type DiscordUserMapping struct {
-	DiscordUserID  string
+	DiscordUserID   string
 	DiscordUsername string
-	ScionUserID    string
-	ScionEmail     string
-	LinkedAt       time.Time
+	ScionUserID     string
+	ScionEmail      string
+	LinkedAt        time.Time
 }
 
 // ConversationContext tracks the last chat context for a user+project+agent tuple.

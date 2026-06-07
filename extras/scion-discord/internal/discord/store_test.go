@@ -252,11 +252,11 @@ func TestUserMappingCRUD(t *testing.T) {
 		ctx := context.Background()
 
 		mapping := &DiscordUserMapping{
-			DiscordUserID:  "456789012345678901",
+			DiscordUserID:   "456789012345678901",
 			DiscordUsername: "alice",
-			ScionUserID:    "user-123",
-			ScionEmail:     "alice@example.com",
-			LinkedAt:       time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC),
+			ScionUserID:     "user-123",
+			ScionEmail:      "alice@example.com",
+			LinkedAt:        time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC),
 		}
 		require.NoError(t, store.CreateUserMapping(ctx, mapping))
 
@@ -323,17 +323,17 @@ func TestUserMappingCRUD(t *testing.T) {
 		ctx := context.Background()
 
 		require.NoError(t, store.CreateUserMapping(ctx, &DiscordUserMapping{
-			DiscordUserID:  "456",
+			DiscordUserID:   "456",
 			DiscordUsername: "alice",
-			ScionEmail:     "alice@old.com",
-			LinkedAt:       time.Now().UTC(),
+			ScionEmail:      "alice@old.com",
+			LinkedAt:        time.Now().UTC(),
 		}))
 
 		require.NoError(t, store.CreateUserMapping(ctx, &DiscordUserMapping{
-			DiscordUserID:  "456",
+			DiscordUserID:   "456",
 			DiscordUsername: "alice_new",
-			ScionEmail:     "alice@new.com",
-			LinkedAt:       time.Now().UTC(),
+			ScionEmail:      "alice@new.com",
+			LinkedAt:        time.Now().UTC(),
 		}))
 
 		got, err := store.GetUserMapping(ctx, "456")
