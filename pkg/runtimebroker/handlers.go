@@ -1643,14 +1643,17 @@ func (s *Server) resetAuth(w http.ResponseWriter, r *http.Request, id, projectID
 		return
 	}
 
-	// Signal sciontool init (PID 1) to re-read the token and restart refresh.
-	// Best-effort: the token refresh loop will pick up the new token even
-	// without the signal, so a failure here should not fail the request.
+	// Signal sciontool init (PID 1) to re-read the token and restart its refresh
+	// loop immediately. The token was already written above, and the agent also
+	// polls the token file as a UID-safe fallback, so it recovers within a few
+	// seconds even if this signal fails. In rootless containers the broker execs
+	// as the scion user and `kill -USR2 1` against the root-owned PID 1 fails
+	// with EPERM — this is expected and not an error since the token is on disk.
 	signalCmd := []string{"kill", "-USR2", "1"}
 	signaled := true
 	if _, err := rt.Exec(ctx, target, signalCmd); err != nil {
-		s.agentLifecycleLog.Warn("reset-auth: failed to signal PID 1 (best-effort)", "agent_id", id, "error", err)
 		signaled = false
+		s.agentLifecycleLog.Warn("reset-auth: failed to signal PID 1 (token still written, poller will reload)", "agent_id", id, "error", err)
 	}
 
 	s.agentLifecycleLog.Info("Auth reset completed", "agent_id", id, "signaled", signaled)
@@ -1659,7 +1662,7 @@ func (s *Server) resetAuth(w http.ResponseWriter, r *http.Request, id, projectID
 
 	msg := "Auth reset: token written and init signaled"
 	if !signaled {
-		msg = "Auth reset: token written (signal skipped — refresh loop will pick it up)"
+		msg = "Auth reset: token written; signal failed (poller will reload)"
 	}
 	writeJSON(w, http.StatusOK, ResetAuthResponse{
 		Message: msg,
