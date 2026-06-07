@@ -1013,20 +1013,29 @@ const DefaultHeartbeatTimeout = 10 * time.Second
 // Override in tests via SetTokenHome to use a temp directory.
 var tokenHomeResolver = resolveTokenHome
 
+var (
+	resolvedTokenHome     string
+	resolveTokenHomeOnce  sync.Once
+)
+
 // resolveTokenHome returns the home directory to use for the token file.
 // Inside agent containers, sciontool init runs as root (HOME=/root) while
 // child processes run as the scion user (HOME=/home/scion). Both must
 // resolve to the same token file path — the scion user's home.
+// The result is cached because user.Lookup is expensive and the home
+// directory does not change at runtime.
 func resolveTokenHome() string {
-	// Prefer the scion user's home when it exists (inside containers).
-	if u, err := user.Lookup("scion"); err == nil && u.HomeDir != "" {
-		return u.HomeDir
-	}
-	home := os.Getenv("HOME")
-	if home == "" {
-		home = "/home/scion"
-	}
-	return home
+	resolveTokenHomeOnce.Do(func() {
+		if u, err := user.Lookup("scion"); err == nil && u.HomeDir != "" {
+			resolvedTokenHome = u.HomeDir
+			return
+		}
+		resolvedTokenHome = os.Getenv("HOME")
+		if resolvedTokenHome == "" {
+			resolvedTokenHome = "/home/scion"
+		}
+	})
+	return resolvedTokenHome
 }
 
 // tokenHomeOverridden reports whether SetTokenHome has installed a test

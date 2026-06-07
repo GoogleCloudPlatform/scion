@@ -25,7 +25,7 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
-	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
+	scionrt "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
 // resetAuthAgents returns a single-agent manager fixture used by the
@@ -42,7 +42,8 @@ func resetAuthAgents() *filteringMockManager {
 	return mgr
 }
 
-func doResetAuth(srv *Server, token string) *httptest.ResponseRecorder {
+func doResetAuth(t *testing.T, srv *Server, token string) *httptest.ResponseRecorder {
+	t.Helper()
 	body, _ := json.Marshal(ResetAuthRequest{Token: token})
 	r := httptest.NewRequest(http.MethodPost,
 		"/api/v1/agents/coordinator/reset-auth?projectId=grove-A", bytes.NewReader(body))
@@ -59,7 +60,7 @@ func TestResetAuth_SignalFailureStillReturns200(t *testing.T) {
 	mgr := resetAuthAgents()
 
 	var wroteToken bool
-	rt := &runtime.MockRuntime{
+	rt := &scionrt.MockRuntime{
 		NameFunc: func() string { return "docker" },
 		ExecFunc: func(_ context.Context, _ string, cmd []string) (string, error) {
 			if len(cmd) > 0 && cmd[0] == "kill" {
@@ -71,7 +72,7 @@ func TestResetAuth_SignalFailureStillReturns200(t *testing.T) {
 	}
 	srv := New(DefaultServerConfig(), mgr, rt)
 
-	w := doResetAuth(srv, "fresh-token")
+	w := doResetAuth(t, srv, "fresh-token")
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200 even when the reset signal fails, got %d (%s)", w.Code, w.Body.String())
@@ -90,7 +91,7 @@ func TestResetAuth_SignalSuccessReturns200(t *testing.T) {
 	mgr := resetAuthAgents()
 
 	var signaled bool
-	rt := &runtime.MockRuntime{
+	rt := &scionrt.MockRuntime{
 		NameFunc: func() string { return "docker" },
 		ExecFunc: func(_ context.Context, _ string, cmd []string) (string, error) {
 			if len(cmd) > 0 && cmd[0] == "kill" {
@@ -101,7 +102,7 @@ func TestResetAuth_SignalSuccessReturns200(t *testing.T) {
 	}
 	srv := New(DefaultServerConfig(), mgr, rt)
 
-	w := doResetAuth(srv, "fresh-token")
+	w := doResetAuth(t, srv, "fresh-token")
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200 on success, got %d (%s)", w.Code, w.Body.String())
@@ -115,7 +116,7 @@ func TestResetAuth_SignalSuccessReturns200(t *testing.T) {
 // rejected before any container interaction.
 func TestResetAuth_MissingTokenIsValidationError(t *testing.T) {
 	mgr := resetAuthAgents()
-	rt := &runtime.MockRuntime{
+	rt := &scionrt.MockRuntime{
 		NameFunc: func() string { return "docker" },
 		ExecFunc: func(_ context.Context, _ string, _ []string) (string, error) {
 			t.Error("Exec must not be called when token is missing")
@@ -124,7 +125,7 @@ func TestResetAuth_MissingTokenIsValidationError(t *testing.T) {
 	}
 	srv := New(DefaultServerConfig(), mgr, rt)
 
-	w := doResetAuth(srv, "")
+	w := doResetAuth(t, srv, "")
 
 	if w.Code != http.StatusBadRequest && w.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("expected a client error for missing token, got %d (%s)", w.Code, w.Body.String())
