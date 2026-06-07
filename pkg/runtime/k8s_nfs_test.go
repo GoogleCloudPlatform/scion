@@ -1266,7 +1266,6 @@ func TestAcquireProvisionLock_ContextCancellation(t *testing.T) {
 	// When the context is cancelled while waiting for a lock, acquireProvisionLock
 	// must return promptly with a context error instead of sleeping for the full
 	// retry duration (30 × 1s = 30s).
-	backend := &nfsBackend{}
 	locker := &alwaysLoseLocker{} // lock never acquired
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1279,7 +1278,7 @@ func TestAcquireProvisionLock_ContextCancellation(t *testing.T) {
 	}
 
 	start := time.Now()
-	_, err := backend.acquireProvisionLock(ctx, in)
+	_, err := acquireProvisionLock(ctx, in)
 	elapsed := time.Since(start)
 
 	require.Error(t, err)

@@ -655,20 +655,9 @@ func TestBackendNames(t *testing.T) {
 	}
 }
 
-// --- Provision stub tests ---
+// --- provisionShared tests (from workspace_backend_test.go) ---
 
-func TestLocalBackendProvision_NoOp(t *testing.T) {
-	b := NewLocalBackend()
-	err := b.Provision(ProvisionInput{
-		ProjectID: "proj1",
-		Mode:      store.SharingModeSharedPlain,
-	})
-	if err != nil {
-		t.Errorf("localBackend.Provision should be no-op, got error: %v", err)
-	}
-}
-
-func TestNFSBackendProvision_NonGit(t *testing.T) {
+func TestProvisionShared_NonGit(t *testing.T) {
 	mountRoot := t.TempDir()
 	nfsCfg := &config.V1NFSConfig{
 		MountRoot: mountRoot,
@@ -684,12 +673,12 @@ func TestNFSBackendProvision_NonGit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
-	err = b.Provision(ProvisionInput{
+	err = provisionShared(ProvisionInput{
 		Resolved:  res,
 		ProjectID: "proj1",
 		Mode:      store.SharingModeSharedPlain,
 	})
 	if err != nil {
-		t.Errorf("nfsBackend.Provision for non-git project should succeed, got error: %v", err)
+		t.Errorf("provisionShared for non-git project should succeed, got error: %v", err)
 	}
 }

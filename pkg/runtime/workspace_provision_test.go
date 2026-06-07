@@ -155,8 +155,7 @@ func runIn(t *testing.T, dir, name string, args ...string) {
 // --- ClonePerAgent rejection ---
 
 func TestNFSProvision_RejectsClonePerAgent(t *testing.T) {
-	b, _, _ := nfsTestBackend(t)
-	err := b.Provision(ProvisionInput{
+	err := provisionShared(ProvisionInput{
 		ProjectID: "proj-1",
 		Mode:      store.SharingModeClonePerAgent,
 		Resolved: ResolvedWorkspace{
@@ -186,7 +185,7 @@ func TestNFSProvision_SharedPlain_NonGit(t *testing.T) {
 		t.Fatalf("Resolve: %v", err)
 	}
 
-	err = b.Provision(ProvisionInput{
+	err = provisionShared(ProvisionInput{
 		Resolved:  res,
 		ProjectID: projectID,
 		Mode:      store.SharingModeSharedPlain,
@@ -231,7 +230,7 @@ func TestNFSProvision_SharedPlain_GitClone(t *testing.T) {
 		t.Fatalf("Resolve: %v", err)
 	}
 
-	err = b.Provision(ProvisionInput{
+	err = provisionShared(ProvisionInput{
 		Resolved:  res,
 		ProjectID: projectID,
 		Mode:      store.SharingModeSharedPlain,
@@ -292,12 +291,12 @@ func TestNFSProvision_Idempotent(t *testing.T) {
 	}
 
 	// First provision.
-	if err := b.Provision(input); err != nil {
+	if err := provisionShared(input); err != nil {
 		t.Fatalf("first Provision: %v", err)
 	}
 
 	// Second provision — should succeed without re-cloning.
-	if err := b.Provision(input); err != nil {
+	if err := provisionShared(input); err != nil {
 		t.Fatalf("second Provision: %v", err)
 	}
 
@@ -334,7 +333,7 @@ func TestNFSProvision_SentinelShortCircuits(t *testing.T) {
 	}
 
 	// Provision with a git URL that would fail if actually attempted.
-	err = b.Provision(ProvisionInput{
+	err = provisionShared(ProvisionInput{
 		Resolved:  res,
 		ProjectID: projectID,
 		Mode:      store.SharingModeSharedPlain,
@@ -366,7 +365,7 @@ func TestNFSProvision_WorktreePerAgent(t *testing.T) {
 		t.Fatalf("Resolve: %v", err)
 	}
 
-	err = b.Provision(ProvisionInput{
+	err = provisionShared(ProvisionInput{
 		Resolved:  res,
 		ProjectID: projectID,
 		AgentID:   agentID,
@@ -414,7 +413,7 @@ func TestNFSProvision_WorktreePerAgent_TwoAgents(t *testing.T) {
 	}
 
 	// First agent.
-	err = b.Provision(ProvisionInput{
+	err = provisionShared(ProvisionInput{
 		Resolved:  res,
 		ProjectID: projectID,
 		AgentID:   "agent-1",
@@ -432,7 +431,7 @@ func TestNFSProvision_WorktreePerAgent_TwoAgents(t *testing.T) {
 	}
 
 	// Second agent (sentinel exists, so clone is skipped — just adds worktree).
-	err = b.Provision(ProvisionInput{
+	err = provisionShared(ProvisionInput{
 		Resolved:  res,
 		ProjectID: projectID,
 		AgentID:   "agent-2",
@@ -477,12 +476,12 @@ func TestNFSProvision_LockPerProject_Independent(t *testing.T) {
 	res2, _ := b.Resolve(ResolveInput{ProjectID: "proj-B", Mode: store.SharingModeSharedPlain})
 
 	// Provision both — they should not block each other.
-	if err := b.Provision(ProvisionInput{
+	if err := provisionShared(ProvisionInput{
 		Resolved: res1, ProjectID: "proj-A", Mode: store.SharingModeSharedPlain, Locker: locker,
 	}); err != nil {
 		t.Fatalf("Provision proj-A: %v", err)
 	}
-	if err := b.Provision(ProvisionInput{
+	if err := provisionShared(ProvisionInput{
 		Resolved: res2, ProjectID: "proj-B", Mode: store.SharingModeSharedPlain, Locker: locker,
 	}); err != nil {
 		t.Fatalf("Provision proj-B: %v", err)
@@ -503,7 +502,7 @@ func TestNFSProvision_LockPerProject_MutualExclusion(t *testing.T) {
 
 	res, _ := b.Resolve(ResolveInput{ProjectID: "proj-locked", Mode: store.SharingModeSharedPlain})
 
-	err := b.Provision(ProvisionInput{
+	err := provisionShared(ProvisionInput{
 		Resolved:  res,
 		ProjectID: "proj-locked",
 		Mode:      store.SharingModeSharedPlain,
@@ -544,7 +543,7 @@ func TestNFSProvision_NoLocker_DegradedMode(t *testing.T) {
 
 	res, _ := b.Resolve(ResolveInput{ProjectID: "proj-nolock", Mode: store.SharingModeSharedPlain})
 
-	err := b.Provision(ProvisionInput{
+	err := provisionShared(ProvisionInput{
 		Resolved:  res,
 		ProjectID: "proj-nolock",
 		Mode:      store.SharingModeSharedPlain,
@@ -558,8 +557,7 @@ func TestNFSProvision_NoLocker_DegradedMode(t *testing.T) {
 // --- Missing required fields ---
 
 func TestNFSProvision_MissingHostPath(t *testing.T) {
-	b, _, _ := nfsTestBackend(t)
-	err := b.Provision(ProvisionInput{
+	err := provisionShared(ProvisionInput{
 		ProjectID: "proj-1",
 		Mode:      store.SharingModeSharedPlain,
 		Resolved:  ResolvedWorkspace{},
@@ -570,8 +568,7 @@ func TestNFSProvision_MissingHostPath(t *testing.T) {
 }
 
 func TestNFSProvision_MissingProjectID(t *testing.T) {
-	b, _, _ := nfsTestBackend(t)
-	err := b.Provision(ProvisionInput{
+	err := provisionShared(ProvisionInput{
 		Mode: store.SharingModeSharedPlain,
 		Resolved: ResolvedWorkspace{
 			HostPath: "/some/path",
@@ -591,7 +588,7 @@ func TestNFSProvision_WorktreePerAgent_MissingAgentID(t *testing.T) {
 	bareRepo := initBareGitRepo(t)
 	res, _ := b.Resolve(ResolveInput{ProjectID: "proj-noagent", Mode: store.SharingModeWorktreePerAgent})
 
-	err := b.Provision(ProvisionInput{
+	err := provisionShared(ProvisionInput{
 		Resolved:  res,
 		ProjectID: "proj-noagent",
 		AgentID:   "", // missing
