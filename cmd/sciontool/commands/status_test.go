@@ -21,6 +21,7 @@ func TestStatusCommand(t *testing.T) {
 	originalHome := os.Getenv("HOME")
 	os.Setenv("HOME", tempDir)
 	defer os.Setenv("HOME", originalHome)
+	scrubScionEnv(t)
 
 	tests := []struct {
 		name            string
@@ -127,6 +128,7 @@ func TestStatusCommandUnknownType(t *testing.T) {
 	originalHome := os.Getenv("HOME")
 	os.Setenv("HOME", tempDir)
 	defer os.Setenv("HOME", originalHome)
+	scrubScionEnv(t)
 
 	buf := new(bytes.Buffer)
 	rootCmd.SetOut(buf)

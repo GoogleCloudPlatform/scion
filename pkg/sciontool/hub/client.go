@@ -168,12 +168,22 @@ type Client struct {
 // The token is read from the canonical token file (~/.scion/scion-token), falling
 // back to the SCION_AUTH_TOKEN env var for bootstrap (before init has run).
 // Returns nil if the required environment variables are not set.
+//
+// Defense-in-depth: when running under `go test`, refuses to create a client
+// that would talk to a non-localhost hub. Tests that need a hub client must
+// scrub SCION_* env vars and point at an httptest server (see scrubHubEnv
+// in hub_test.go). Without this guard, a test that forgets env sandboxing
+// leaks real status updates to the hub under the container's agent identity.
 func NewClient() *Client {
 	hubURL := os.Getenv(EnvHubEndpoint)
 	if hubURL == "" {
 		hubURL = os.Getenv(EnvHubURL)
 	}
 	agentID := os.Getenv(EnvAgentID)
+
+	if testing.Testing() && !hubTestSandboxed && hubURL != "" && !isLocalhostURL(hubURL) {
+		return nil
+	}
 
 	// Prefer the canonical token file; fall back to env var for bootstrap.
 	token := ReadTokenFile()
@@ -991,6 +1001,22 @@ func ParseTokenExpiry(tokenString string) (time.Time, error) {
 	return time.Unix(claims.Exp, 0), nil
 }
 
+// isLocalhostURL returns true if the URL points to localhost or 127.0.0.1,
+// indicating a test server rather than a real hub endpoint.
+func isLocalhostURL(rawURL string) bool {
+	lower := strings.ToLower(rawURL)
+	for _, prefix := range []string{
+		"http://localhost", "https://localhost",
+		"http://127.0.0.1", "https://127.0.0.1",
+		"http://[::1]", "https://[::1]",
+	} {
+		if strings.HasPrefix(lower, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 // HeartbeatConfig configures the heartbeat loop.
 type HeartbeatConfig struct {
 	// Interval is the time between heartbeats. Default: 30 seconds.
@@ -1036,6 +1062,22 @@ func resolveTokenHome() string {
 		}
 	})
 	return resolvedTokenHome
+}
+
+// hubTestSandboxed reports whether the calling test has explicitly declared
+// that it has sandboxed the hub environment (e.g. by calling scrubHubEnv and
+// setting test values). NewClient refuses to connect to a non-localhost hub
+// under `go test` unless this flag is set, preventing accidental leakage of
+// status updates to a real hub when tests run inside an agent container.
+var hubTestSandboxed bool
+
+// SetHubTestSandboxed marks the current test as having properly sandboxed the
+// hub environment. Call this in tests that deliberately set non-localhost hub
+// URLs (e.g. for verifying URL preference logic). Returns a cleanup function.
+func SetHubTestSandboxed() func() {
+	orig := hubTestSandboxed
+	hubTestSandboxed = true
+	return func() { hubTestSandboxed = orig }
 }
 
 // tokenHomeOverridden reports whether SetTokenHome has installed a test

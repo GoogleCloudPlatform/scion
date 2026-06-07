@@ -16,6 +16,7 @@ import (
 )
 
 func TestInitLimitsFile(t *testing.T) {
+	scrubHubEnv(t)
 	tmpDir := t.TempDir()
 	limitsPath := filepath.Join(tmpDir, "agent-limits.json")
 
@@ -37,6 +38,7 @@ func TestInitLimitsFile(t *testing.T) {
 }
 
 func TestInitLimitsFile_ZeroValues(t *testing.T) {
+	scrubHubEnv(t)
 	tmpDir := t.TempDir()
 	limitsPath := filepath.Join(tmpDir, "agent-limits.json")
 
@@ -55,6 +57,7 @@ func TestInitLimitsFile_ZeroValues(t *testing.T) {
 }
 
 func TestLimitsHandler_TurnCounting(t *testing.T) {
+	scrubHubEnv(t)
 	tmpDir := t.TempDir()
 	limitsPath := filepath.Join(tmpDir, "agent-limits.json")
 
@@ -82,6 +85,7 @@ func TestLimitsHandler_TurnCounting(t *testing.T) {
 }
 
 func TestLimitsHandler_ModelCallCounting(t *testing.T) {
+	scrubHubEnv(t)
 	tmpDir := t.TempDir()
 	limitsPath := filepath.Join(tmpDir, "agent-limits.json")
 
@@ -107,6 +111,7 @@ func TestLimitsHandler_ModelCallCounting(t *testing.T) {
 }
 
 func TestLimitsHandler_IgnoresIrrelevantEvents(t *testing.T) {
+	scrubHubEnv(t)
 	tmpDir := t.TempDir()
 	limitsPath := filepath.Join(tmpDir, "agent-limits.json")
 
@@ -140,12 +145,14 @@ func TestLimitsHandler_IgnoresIrrelevantEvents(t *testing.T) {
 }
 
 func TestLimitsHandler_NilHandler(t *testing.T) {
+	scrubHubEnv(t)
 	var h *LimitsHandler
 	err := h.Handle(&hooks.Event{Name: hooks.EventAgentEnd})
 	assert.NoError(t, err)
 }
 
 func TestLimitsHandler_NoLimitsConfigured(t *testing.T) {
+	scrubHubEnv(t)
 	// When maxTurns=0 and maxModelCalls=0, events are silently ignored
 	tmpDir := t.TempDir()
 	limitsPath := filepath.Join(tmpDir, "agent-limits.json")
@@ -174,6 +181,7 @@ func TestLimitsHandler_NoLimitsConfigured(t *testing.T) {
 }
 
 func TestLimitsHandler_TurnLimitDetection(t *testing.T) {
+	scrubHubEnv(t)
 	// Test that the handler detects when the turn limit is reached.
 	// We can't test the SIGUSR1 signal in unit tests (it would kill the test process),
 	// so we verify the status file is updated and the limits file has the right count.
@@ -216,6 +224,7 @@ func TestLimitsHandler_TurnLimitDetection(t *testing.T) {
 }
 
 func TestLimitsHandler_ModelCallLimitDetection(t *testing.T) {
+	scrubHubEnv(t)
 	tmpDir := t.TempDir()
 	limitsPath := filepath.Join(tmpDir, "agent-limits.json")
 	statusPath := filepath.Join(tmpDir, "agent-info.json")
@@ -250,6 +259,7 @@ func TestLimitsHandler_ModelCallLimitDetection(t *testing.T) {
 }
 
 func TestLimitsHandler_BothLimitsIndependent(t *testing.T) {
+	scrubHubEnv(t)
 	// Verify both counters are tracked independently
 	tmpDir := t.TempDir()
 	limitsPath := filepath.Join(tmpDir, "agent-limits.json")
@@ -282,6 +292,7 @@ func TestLimitsHandler_BothLimitsIndependent(t *testing.T) {
 }
 
 func TestLimitsHandler_MissingLimitsFile(t *testing.T) {
+	scrubHubEnv(t)
 	tmpDir := t.TempDir()
 	limitsPath := filepath.Join(tmpDir, "nonexistent", "agent-limits.json")
 
@@ -347,6 +358,7 @@ func TestExitCodeLimitsExceeded(t *testing.T) {
 }
 
 func TestWriteLimitsState_AtomicWrite(t *testing.T) {
+	scrubHubEnv(t)
 	tmpDir := t.TempDir()
 	limitsPath := filepath.Join(tmpDir, "agent-limits.json")
 
@@ -381,6 +393,7 @@ func TestLimitsTriggerFileConstant(t *testing.T) {
 }
 
 func TestSignalLimitsExceeded_CreatesTriggerFile(t *testing.T) {
+	scrubHubEnv(t)
 	tmpDir := t.TempDir()
 	triggerPath := filepath.Join(tmpDir, "scion-limits-exceeded")
 

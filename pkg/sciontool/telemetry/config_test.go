@@ -576,4 +576,6 @@ func clearTelemetryEnv() {
 	os.Unsetenv(EnvGCPCredentials)
 	os.Unsetenv(EnvCloudProvider)
 	os.Unsetenv(EnvMetricsDebug)
+	// Mark as sandboxed so LoadConfig's test guard doesn't force-disable cloud.
+	telemetryTestSandboxed = true
 }

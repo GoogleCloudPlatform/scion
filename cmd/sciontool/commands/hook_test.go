@@ -15,12 +15,35 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// scrubScionEnv clears all Hub and telemetry environment variables for the
+// duration of the test, preventing accidental communication with a real Hub
+// or telemetry backend when tests run inside an agent container.
+func scrubScionEnv(t *testing.T) {
+	t.Helper()
+	for _, key := range []string{
+		"SCION_HUB_ENDPOINT",
+		"SCION_HUB_URL",
+		"SCION_AUTH_TOKEN",
+		"SCION_AGENT_ID",
+		"SCION_AGENT_MODE",
+		"SCION_TELEMETRY_ENABLED",
+		"SCION_TELEMETRY_CLOUD_ENABLED",
+		"SCION_OTEL_ENDPOINT",
+		"SCION_OTEL_GCP_CREDENTIALS",
+		"SCION_GCP_PROJECT_ID",
+		"OTEL_EXPORTER_OTLP_ENDPOINT",
+	} {
+		t.Setenv(key, "")
+	}
+}
+
 func TestProcessHookData_Claude(t *testing.T) {
 	// Set up temp home directory for status/log files
 	tmpDir := t.TempDir()
 	oldHome := os.Getenv("HOME")
 	os.Setenv("HOME", tmpDir)
 	defer os.Setenv("HOME", oldHome)
+	scrubScionEnv(t)
 	log.SetLogPath(filepath.Join(tmpDir, "agent.log"))
 
 	hookDialect = "claude"
@@ -58,6 +81,7 @@ func TestProcessHookData_Gemini(t *testing.T) {
 	oldHome := os.Getenv("HOME")
 	os.Setenv("HOME", tmpDir)
 	defer os.Setenv("HOME", oldHome)
+	scrubScionEnv(t)
 	log.SetLogPath(filepath.Join(tmpDir, "agent.log"))
 
 	hookDialect = "gemini"
@@ -88,6 +112,7 @@ func TestProcessHookData_SessionEvents(t *testing.T) {
 	oldHome := os.Getenv("HOME")
 	os.Setenv("HOME", tmpDir)
 	defer os.Setenv("HOME", oldHome)
+	scrubScionEnv(t)
 	log.SetLogPath(filepath.Join(tmpDir, "agent.log"))
 
 	hookDialect = "claude"
@@ -130,6 +155,7 @@ func TestProcessHookData_CodexCompletion(t *testing.T) {
 	oldHome := os.Getenv("HOME")
 	os.Setenv("HOME", tmpDir)
 	defer os.Setenv("HOME", oldHome)
+	scrubScionEnv(t)
 	log.SetLogPath(filepath.Join(tmpDir, "agent.log"))
 
 	hookDialect = "codex"

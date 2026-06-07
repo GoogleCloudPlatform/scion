@@ -60,6 +60,7 @@ func scrubHubEnv(t *testing.T) {
 	} {
 		t.Setenv(key, "")
 	}
+	t.Cleanup(SetHubTestSandboxed())
 }
 
 func TestNewClient_FromEnvironment(t *testing.T) {

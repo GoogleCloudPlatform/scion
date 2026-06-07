@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"testing"
 )
 
 // Environment variable names for telemetry configuration.
@@ -113,7 +114,25 @@ type FilterConfig struct {
 // As a fallback, LoadConfig probes this path when the env var is absent.
 const WellKnownGCPCredentialsPath = ".scion/telemetry-gcp-credentials.json"
 
+// telemetryTestSandboxed reports whether the calling test has explicitly
+// declared that it has sandboxed the telemetry environment. LoadConfig
+// force-disables cloud export under `go test` unless this flag is set.
+var telemetryTestSandboxed bool
+
+// SetTelemetryTestSandboxed marks the current test as having properly
+// sandboxed the telemetry environment. Returns a cleanup function.
+func SetTelemetryTestSandboxed() func() {
+	orig := telemetryTestSandboxed
+	telemetryTestSandboxed = true
+	return func() { telemetryTestSandboxed = orig }
+}
+
 // LoadConfig loads telemetry configuration from environment variables.
+//
+// Defense-in-depth: when running under `go test`, cloud telemetry export is
+// force-disabled to prevent test code from accidentally exporting spans/logs
+// to a real backend under a live agent identity. Local telemetry (receiver,
+// pipeline) remains available for tests that need it.
 func LoadConfig() *Config {
 	cfg := &Config{
 		Enabled:      parseBoolEnv(EnvEnabled, true),
@@ -178,6 +197,16 @@ func LoadConfig() *Config {
 	// Apply default hash fields if not explicitly set
 	if len(cfg.Redaction.Hash) == 0 && os.Getenv(EnvHashFields) == "" {
 		cfg.Redaction.Hash = DefaultHashFields
+	}
+
+	// Defense-in-depth: force-disable cloud export under `go test` so that
+	// a test running inside an agent container never ships spans to a real
+	// backend under the container's agent identity. Tests that specifically
+	// need to verify cloud config behavior should call SetTelemetryTestSandboxed.
+	if testing.Testing() && !telemetryTestSandboxed {
+		cfg.CloudEnabled = false
+		cfg.Endpoint = ""
+		cfg.GCPCredentialsFile = ""
 	}
 
 	return cfg
