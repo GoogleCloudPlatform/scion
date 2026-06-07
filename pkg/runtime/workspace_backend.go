@@ -165,6 +165,9 @@ type RealizeInput struct {
 // mounts (HostPath → Target), K8s PVC+subPath, and Cloud Run NFS volumes.
 type MountDescriptor struct {
 	// Type is "local" for a host bind mount or "nfs" for a direct NFS mount.
+	// Tier-3 seam: future vendor mount types (e.g. "cloudrun-volume",
+	// "gke-shared-volume") will be added here as new Type values. "nfs"
+	// remains the literal NFS protocol mount.
 	Type string
 
 	// HostPath is the source for a Docker bind mount (populated for local).

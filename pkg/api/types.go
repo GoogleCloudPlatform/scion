@@ -249,11 +249,14 @@ type VolumeMount struct {
 	Source   string `json:"source" yaml:"source"`
 	Target   string `json:"target" yaml:"target"`
 	ReadOnly bool   `json:"read_only,omitempty" yaml:"read_only,omitempty"`
-	Type     string `json:"type,omitempty" yaml:"type,omitempty"`     // "local" (default), "gcs", or "nfs"
-	Bucket   string `json:"bucket,omitempty" yaml:"bucket,omitempty"` // For GCS
-	Prefix   string `json:"prefix,omitempty" yaml:"prefix,omitempty"` // For GCS
-	Mode     string `json:"mode,omitempty" yaml:"mode,omitempty"`     // Mount options
-	Server   string `json:"server,omitempty" yaml:"server,omitempty"` // NFS: server host/IP
+	// Tier-3 seam: future vendor mount types (e.g. "cloudrun-volume",
+	// "gke-shared-volume") will be added as new Type values here. "nfs"
+	// remains the literal NFS protocol mount.
+	Type   string `json:"type,omitempty" yaml:"type,omitempty"`     // "local" (default), "gcs", or "nfs"
+	Bucket string `json:"bucket,omitempty" yaml:"bucket,omitempty"` // For GCS
+	Prefix string `json:"prefix,omitempty" yaml:"prefix,omitempty"` // For GCS
+	Mode   string `json:"mode,omitempty" yaml:"mode,omitempty"`     // Mount options
+	Server string `json:"server,omitempty" yaml:"server,omitempty"` // NFS: server host/IP
 }
 
 // Validate checks that a VolumeMount has the required fields and valid values.
