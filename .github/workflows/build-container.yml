@@ -1,0 +1,130 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: Build Hub Container Image
+
+on:
+  push:
+    tags:
+      - "*"
+
+jobs:
+  build:
+    name: Build and Push Hub Image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    outputs:
+      digest: ${{ steps.build-image.outputs.digest }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: "go.mod"
+          cache: true
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: "npm"
+          cache-dependency-path: "web/package-lock.json"
+
+      - name: Build Web UI
+        working-directory: ./web
+        run: |
+          npm ci
+          npm run build
+
+      - name: Setup ko
+        uses: ko-build/setup-ko@v0.9
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set version metadata
+        id: meta
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          COMMIT="${GITHUB_SHA}"
+          BUILD_TIME="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "commit=${COMMIT}" >> "$GITHUB_OUTPUT"
+          echo "build_time=${BUILD_TIME}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push image
+        id: build-image
+        env:
+          KO_DOCKER_REPO: ghcr.io/${{ github.repository }}
+          VERSION: ${{ steps.meta.outputs.version }}
+          COMMIT: ${{ steps.meta.outputs.commit }}
+          BUILD_TIME: ${{ steps.meta.outputs.build_time }}
+        run: |
+          ko build ./cmd/scion \
+            --platform=linux/amd64,linux/arm64 \
+            --tags="${VERSION},latest" \
+            --bare \
+            --image-refs=./image-digest \
+            --image-label org.opencontainers.image.title=scion \
+            --image-label org.opencontainers.image.description="Scion AI agent orchestration platform" \
+            --image-label org.opencontainers.image.url=${{ github.server_url }}/${{ github.repository }} \
+            --image-label org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }} \
+            --image-label org.opencontainers.image.revision=${{ github.sha }} \
+            --image-label org.opencontainers.image.version=${VERSION} \
+            --image-label org.opencontainers.image.created="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+
+          # Extract manifest index digest for signing (first line is the index)
+          MANIFEST_DIGEST=$(head -1 ./image-digest | cut -d@ -f2)
+          echo "digest=${MANIFEST_DIGEST}" >> "$GITHUB_OUTPUT"
+          echo "Manifest index digest: ${MANIFEST_DIGEST}"
+
+  sign:
+    name: Sign Container Image
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    steps:
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Sign manifest index
+        env:
+          DIGEST: ${{ needs.build.outputs.digest }}
+          REPO: ghcr.io/${{ github.repository }}
+        run: |
+          echo "Signing manifest index: ${REPO}@${DIGEST}"
+          cosign sign --yes "${REPO}@${DIGEST}"
+          echo "To verify: cosign verify --certificate-oidc-issuer https://token.actions.githubusercontent.com --certificate-identity-regexp 'github.com/${{ github.repository }}' ${REPO}@${DIGEST}"
