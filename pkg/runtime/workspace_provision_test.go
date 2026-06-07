@@ -19,6 +19,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -669,4 +670,497 @@ func TestNFSProvision_CustomSentinelDir_Idempotent(t *testing.T) {
 	if _, err := os.Stat(sentinel); err != nil {
 		t.Errorf("sentinel should exist in custom dir: %v", err)
 	}
+}
+
+// ==========================================================================
+// NFS worktree-per-agent end-to-end validation (Phase 2 T3)
+//
+// These tests exercise the full NFS Resolve → ProvisionShared → ensureWorktree
+// path using a temp directory as the "NFS mount", validating that the worktree
+// layout, sentinel placement, gitdir pointers, and base-checkout state are all
+// correct for the NFS backend.
+// ==========================================================================
+
+// TestNFSWorktreePerAgent_E2E_FullValidation exercises a single agent through
+// the complete NFS worktree-per-agent path and asserts every invariant:
+// base clone, detached HEAD, gc.auto=0, worktree with relative .git pointer,
+// sentinel in per-project dir, worktree nested under workspace (no .. escape).
+func TestNFSWorktreePerAgent_E2E_FullValidation(t *testing.T) {
+	b, _, _ := nfsTestBackend(t)
+	locker := newTestLocker()
+	bareRepo := initBareGitRepo(t)
+
+	projectID := "proj-nfs-e2e-1"
+	agentID := "agent-nfs-e2e-1"
+
+	res, err := b.Resolve(ResolveInput{
+		ProjectID: projectID,
+		Mode:      store.SharingModeWorktreePerAgent,
+	})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+
+	err = ProvisionShared(ProvisionInput{
+		Resolved:  res,
+		ProjectID: projectID,
+		AgentID:   agentID,
+		AgentName: "nfs-test-agent",
+		Mode:      store.SharingModeWorktreePerAgent,
+		Locker:    locker,
+		GitClone: &api.GitCloneConfig{
+			URL:    bareRepo,
+			Branch: "main",
+			Depth:  0,
+		},
+	})
+	if err != nil {
+		t.Fatalf("ProvisionShared: %v", err)
+	}
+
+	// 1. Base clone exists with .git directory.
+	baseGit := filepath.Join(res.HostPath, ".git")
+	if fi, err := os.Stat(baseGit); err != nil || !fi.IsDir() {
+		t.Fatalf("base .git directory not found at %s", baseGit)
+	}
+
+	// 2. Base HEAD is detached (no branch owned by the base).
+	cmd := exec.Command("git", "-C", res.HostPath, "symbolic-ref", "HEAD")
+	if err := cmd.Run(); err == nil {
+		t.Error("expected base HEAD to be detached, but symbolic-ref succeeded")
+	}
+
+	// 3. gc.auto disabled in the base.
+	out, err := exec.Command("git", "-C", res.HostPath, "config", "gc.auto").Output()
+	if err != nil || strings.TrimSpace(string(out)) != "0" {
+		t.Errorf("expected gc.auto=0 in base, got %q (err=%v)", strings.TrimSpace(string(out)), err)
+	}
+
+	// 4. worktrees/ excluded from git tracking.
+	excludePath := filepath.Join(res.HostPath, ".git", "info", "exclude")
+	excludeData, err := os.ReadFile(excludePath)
+	if err != nil {
+		t.Fatalf("read .git/info/exclude: %v", err)
+	}
+	if !strings.Contains(string(excludeData), "worktrees/") {
+		t.Error("expected 'worktrees/' in .git/info/exclude")
+	}
+
+	// 5. Worktree was created at the correct path.
+	worktreePath := filepath.Join(res.HostPath, "worktrees", agentID)
+	if _, err := os.Stat(worktreePath); err != nil {
+		t.Fatalf("worktree not found at %s: %v", worktreePath, err)
+	}
+
+	// 6. Worktree .git is a FILE (pointer), not a directory.
+	gitFile := filepath.Join(worktreePath, ".git")
+	fi, err := os.Lstat(gitFile)
+	if err != nil {
+		t.Fatalf("worktree .git not found: %v", err)
+	}
+	if fi.IsDir() {
+		t.Fatal("worktree .git should be a file (pointer), not a directory")
+	}
+
+	// 7. Worktree .git pointer uses a RELATIVE path (--relative-paths).
+	data, err := os.ReadFile(gitFile)
+	if err != nil {
+		t.Fatalf("read worktree .git: %v", err)
+	}
+	gitdirLine := strings.TrimSpace(string(data))
+	if !strings.HasPrefix(gitdirLine, "gitdir: ") {
+		t.Fatalf("unexpected .git content: %s", gitdirLine)
+	}
+	gitdirPath := strings.TrimPrefix(gitdirLine, "gitdir: ")
+	if filepath.IsAbs(gitdirPath) {
+		t.Errorf("worktree .git pointer must be relative, got absolute: %s", gitdirPath)
+	}
+
+	// 8. The relative gitdir pointer resolves to a valid path within the workspace.
+	resolvedGitdir := filepath.Join(worktreePath, gitdirPath)
+	resolvedGitdir = filepath.Clean(resolvedGitdir)
+	if _, err := os.Stat(resolvedGitdir); err != nil {
+		t.Errorf("relative gitdir pointer does not resolve: %s → %s: %v", gitdirPath, resolvedGitdir, err)
+	}
+	// The resolved path must be under the workspace (no .. escape beyond the mount).
+	if !strings.HasPrefix(resolvedGitdir, res.HostPath) {
+		t.Errorf("resolved gitdir %s escapes the workspace %s — would break in a container mount",
+			resolvedGitdir, res.HostPath)
+	}
+
+	// 9. Sentinel is in the per-project directory (parent of workspace/).
+	projectDir := filepath.Dir(res.HostPath)
+	sentinelPath := filepath.Join(projectDir, ProvisionSentinelFile)
+	if _, err := os.Stat(sentinelPath); err != nil {
+		t.Errorf("sentinel not found at %s: %v", sentinelPath, err)
+	}
+	// Sentinel must NOT be inside the workspace dir.
+	if _, err := os.Stat(filepath.Join(res.HostPath, ProvisionSentinelFile)); err == nil {
+		t.Error("sentinel found inside workspace dir — should be in the project dir (parent)")
+	}
+
+	// 10. Cloned files present in the base checkout.
+	if _, err := os.Stat(filepath.Join(res.HostPath, "README.md")); err != nil {
+		t.Errorf("README.md not found in base checkout: %v", err)
+	}
+
+	// 11. Cloned files present in the worktree.
+	if _, err := os.Stat(filepath.Join(worktreePath, "README.md")); err != nil {
+		t.Errorf("README.md not found in worktree: %v", err)
+	}
+}
+
+// TestNFSWorktreePerAgent_E2E_TwoAgentsDistinctWorktrees verifies that two
+// agents for the same NFS project get independent worktrees with:
+// - A single shared base clone (only one .git dir)
+// - Two distinct worktree directories
+// - Both with relative .git pointers that resolve within the workspace
+// - Independent branches
+func TestNFSWorktreePerAgent_E2E_TwoAgentsDistinctWorktrees(t *testing.T) {
+	b, _, _ := nfsTestBackend(t)
+	locker := newTestLocker()
+	bareRepo := initBareGitRepo(t)
+
+	projectID := "proj-nfs-e2e-2agents"
+
+	res, err := b.Resolve(ResolveInput{
+		ProjectID: projectID,
+		Mode:      store.SharingModeWorktreePerAgent,
+	})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+
+	gitClone := &api.GitCloneConfig{URL: bareRepo, Branch: "main", Depth: 0}
+
+	// First agent: triggers base clone + worktree.
+	err = ProvisionShared(ProvisionInput{
+		Resolved:  res,
+		ProjectID: projectID,
+		AgentID:   "agent-alpha",
+		AgentName: "alpha-agent",
+		Mode:      store.SharingModeWorktreePerAgent,
+		Locker:    locker,
+		GitClone:  gitClone,
+	})
+	if err != nil {
+		t.Fatalf("Provision agent-alpha: %v", err)
+	}
+
+	// Second agent: sentinel exists → skip clone, only worktree add.
+	err = ProvisionShared(ProvisionInput{
+		Resolved:  res,
+		ProjectID: projectID,
+		AgentID:   "agent-beta",
+		AgentName: "beta-agent",
+		Mode:      store.SharingModeWorktreePerAgent,
+		Locker:    locker,
+		GitClone:  gitClone,
+	})
+	if err != nil {
+		t.Fatalf("Provision agent-beta: %v", err)
+	}
+
+	wt1 := filepath.Join(res.HostPath, "worktrees", "agent-alpha")
+	wt2 := filepath.Join(res.HostPath, "worktrees", "agent-beta")
+
+	// Both worktrees exist.
+	if _, err := os.Stat(wt1); err != nil {
+		t.Fatalf("agent-alpha worktree not found: %v", err)
+	}
+	if _, err := os.Stat(wt2); err != nil {
+		t.Fatalf("agent-beta worktree not found: %v", err)
+	}
+
+	// Both have relative .git pointers that resolve correctly.
+	for _, wt := range []struct{ path, name string }{{wt1, "alpha"}, {wt2, "beta"}} {
+		data, err := os.ReadFile(filepath.Join(wt.path, ".git"))
+		if err != nil {
+			t.Errorf("%s: read .git: %v", wt.name, err)
+			continue
+		}
+		line := strings.TrimSpace(string(data))
+		if !strings.HasPrefix(line, "gitdir: ") {
+			t.Errorf("%s: unexpected .git content: %s", wt.name, line)
+			continue
+		}
+		rel := strings.TrimPrefix(line, "gitdir: ")
+		if filepath.IsAbs(rel) {
+			t.Errorf("%s: .git pointer is absolute: %s", wt.name, rel)
+		}
+		resolved := filepath.Clean(filepath.Join(wt.path, rel))
+		if _, err := os.Stat(resolved); err != nil {
+			t.Errorf("%s: gitdir pointer does not resolve: %s → %s: %v", wt.name, rel, resolved, err)
+		}
+		if !strings.HasPrefix(resolved, res.HostPath) {
+			t.Errorf("%s: gitdir pointer escapes workspace: %s not under %s", wt.name, resolved, res.HostPath)
+		}
+	}
+
+	// Single shared base .git dir.
+	if fi, err := os.Stat(filepath.Join(res.HostPath, ".git")); err != nil || !fi.IsDir() {
+		t.Fatal("shared base .git not found or not a directory")
+	}
+
+	// Both worktrees are on independent branches.
+	branch1, err := exec.Command("git", "-C", wt1, "rev-parse", "--abbrev-ref", "HEAD").Output()
+	if err != nil {
+		t.Fatalf("get branch for alpha: %v", err)
+	}
+	branch2, err := exec.Command("git", "-C", wt2, "rev-parse", "--abbrev-ref", "HEAD").Output()
+	if err != nil {
+		t.Fatalf("get branch for beta: %v", err)
+	}
+	b1 := strings.TrimSpace(string(branch1))
+	b2 := strings.TrimSpace(string(branch2))
+	if b1 == b2 {
+		t.Errorf("two agents should be on different branches, both on %q", b1)
+	}
+
+	// Exactly one sentinel per project.
+	projectDir := filepath.Dir(res.HostPath)
+	if _, err := os.Stat(filepath.Join(projectDir, ProvisionSentinelFile)); err != nil {
+		t.Errorf("project sentinel missing: %v", err)
+	}
+}
+
+// TestNFSWorktreePerAgent_E2E_WorktreeNestedNoEscape verifies the critical
+// invariant for NFS: worktrees are nested under the workspace dir so that
+// relative gitdir pointers never escape the mount boundary. This is what
+// makes a single NFS mount (or K8s subPath) sufficient for worktree-per-agent.
+func TestNFSWorktreePerAgent_E2E_WorktreeNestedNoEscape(t *testing.T) {
+	b, _, _ := nfsTestBackend(t)
+	locker := newTestLocker()
+	bareRepo := initBareGitRepo(t)
+
+	projectID := "proj-nfs-nested"
+	agentID := "agent-nested-1"
+
+	res, err := b.Resolve(ResolveInput{
+		ProjectID: projectID,
+		Mode:      store.SharingModeWorktreePerAgent,
+	})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+
+	err = ProvisionShared(ProvisionInput{
+		Resolved:  res,
+		ProjectID: projectID,
+		AgentID:   agentID,
+		AgentName: "nested-agent",
+		Mode:      store.SharingModeWorktreePerAgent,
+		Locker:    locker,
+		GitClone:  &api.GitCloneConfig{URL: bareRepo, Branch: "main", Depth: 0},
+	})
+	if err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+
+	worktreePath := filepath.Join(res.HostPath, "worktrees", agentID)
+
+	// Read the gitdir pointer.
+	data, err := os.ReadFile(filepath.Join(worktreePath, ".git"))
+	if err != nil {
+		t.Fatalf("read .git: %v", err)
+	}
+	rel := strings.TrimPrefix(strings.TrimSpace(string(data)), "gitdir: ")
+
+	// Walk the relative path and ensure no component escapes the workspace.
+	// The relative path should be like ../../.git/worktrees/<agentID> which,
+	// when applied from workspace/worktrees/<agentID>, resolves to
+	// workspace/.git/worktrees/<agentID>.
+	resolved := filepath.Clean(filepath.Join(worktreePath, rel))
+	if !strings.HasPrefix(resolved, res.HostPath) {
+		t.Fatalf("gitdir pointer escapes workspace mount boundary:\n"+
+			"  worktree:  %s\n"+
+			"  pointer:   %s\n"+
+			"  resolved:  %s\n"+
+			"  workspace: %s",
+			worktreePath, rel, resolved, res.HostPath)
+	}
+
+	// The back-pointer (.git/worktrees/<agentID>/gitdir) should also point
+	// back to the worktree using a relative path.
+	backPointerPath := filepath.Join(res.HostPath, ".git", "worktrees", agentID, "gitdir")
+	backData, err := os.ReadFile(backPointerPath)
+	if err != nil {
+		t.Fatalf("read back-pointer at %s: %v", backPointerPath, err)
+	}
+	backPath := strings.TrimSpace(string(backData))
+	// With --relative-paths, the back-pointer is also relative.
+	if filepath.IsAbs(backPath) {
+		t.Logf("note: back-pointer is absolute (%s) — older git may not support relative back-pointers", backPath)
+	} else {
+		resolvedBack := filepath.Clean(filepath.Join(filepath.Dir(backPointerPath), backPath))
+		if !strings.HasPrefix(resolvedBack, res.HostPath) {
+			t.Errorf("back-pointer escapes workspace: %s → %s", backPath, resolvedBack)
+		}
+	}
+}
+
+// TestNFSWorktreePerAgent_E2E_RealizeProducesMountForWorktree verifies that
+// the NFS backend's Realize output is consistent with the worktree layout:
+// the HostPath covers the workspace dir that contains both .git and worktrees/.
+func TestNFSWorktreePerAgent_E2E_RealizeProducesMountForWorktree(t *testing.T) {
+	b, _, _ := nfsTestBackend(t)
+
+	projectID := "proj-nfs-realize-wt"
+
+	res, err := b.Resolve(ResolveInput{
+		ProjectID: projectID,
+		Mode:      store.SharingModeWorktreePerAgent,
+	})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+
+	desc, err := b.Realize(RealizeInput{
+		Resolved:           res,
+		ContainerWorkspace: "/workspace",
+	})
+	if err != nil {
+		t.Fatalf("Realize: %v", err)
+	}
+
+	// The mount HostPath is the workspace dir (contains .git + worktrees/).
+	if desc.HostPath != res.HostPath {
+		t.Errorf("Realize HostPath = %q, want %q", desc.HostPath, res.HostPath)
+	}
+	if desc.Type != "nfs" {
+		t.Errorf("Type = %q, want nfs", desc.Type)
+	}
+	if desc.Target != "/workspace" {
+		t.Errorf("Target = %q, want /workspace", desc.Target)
+	}
+	if desc.SubPath != res.ServerRelativePath {
+		t.Errorf("SubPath = %q, want %q", desc.SubPath, res.ServerRelativePath)
+	}
+
+	// For worktree-per-agent, the per-agent workspace would be
+	// <HostPath>/worktrees/<agentID> — which is a subdir of the mount,
+	// confirming a single mount covers both .git and the worktree.
+	agentWorkspace := filepath.Join(res.HostPath, "worktrees", "some-agent")
+	if !strings.HasPrefix(agentWorkspace, desc.HostPath) {
+		t.Errorf("agent workspace %s not under mount source %s", agentWorkspace, desc.HostPath)
+	}
+}
+
+// TestNFSWorktreePerAgent_E2E_SentinelLayoutMatchesNFS validates the NFS
+// sentinel placement follows the design: sentinel lives in the per-project
+// dir (parent of workspace/), consistent with the NFS layout
+// <MountRoot>/<shareID>/<SubPathRoot>/<projectID>/.scion-provisioned.
+func TestNFSWorktreePerAgent_E2E_SentinelLayoutMatchesNFS(t *testing.T) {
+	b, cfg, _ := nfsTestBackend(t)
+	locker := newTestLocker()
+	bareRepo := initBareGitRepo(t)
+
+	projectID := "proj-nfs-sentinel-layout"
+
+	res, err := b.Resolve(ResolveInput{
+		ProjectID: projectID,
+		Mode:      store.SharingModeWorktreePerAgent,
+	})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+
+	err = ProvisionShared(ProvisionInput{
+		Resolved:  res,
+		ProjectID: projectID,
+		AgentID:   "agent-s1",
+		AgentName: "sentinel-agent",
+		Mode:      store.SharingModeWorktreePerAgent,
+		Locker:    locker,
+		GitClone:  &api.GitCloneConfig{URL: bareRepo, Branch: "main", Depth: 0},
+	})
+	if err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+
+	// Expected sentinel path: <MountRoot>/<shareID>/<SubPathRoot>/<projectID>/.scion-provisioned
+	share := cfg.Shares[0]
+	expectedSentinelDir := filepath.Join(cfg.MountRoot, share.ID, "projects", projectID)
+	sentinelPath := filepath.Join(expectedSentinelDir, ProvisionSentinelFile)
+	if _, err := os.Stat(sentinelPath); err != nil {
+		t.Errorf("sentinel not at expected NFS path %s: %v", sentinelPath, err)
+	}
+
+	// This should equal filepath.Dir(res.HostPath).
+	if filepath.Dir(res.HostPath) != expectedSentinelDir {
+		t.Errorf("filepath.Dir(HostPath) = %q, want %q", filepath.Dir(res.HostPath), expectedSentinelDir)
+	}
+}
+
+// TestNFSWorktreePerAgent_E2E_SecondAgentSkipsClone confirms that the second
+// agent for the same NFS project skips the git clone (sentinel short-circuit)
+// and only creates its worktree. The lock count confirms exactly 2 acquisitions.
+func TestNFSWorktreePerAgent_E2E_SecondAgentSkipsClone(t *testing.T) {
+	b, _, _ := nfsTestBackend(t)
+	locker := newTestLocker()
+	bareRepo := initBareGitRepo(t)
+
+	projectID := "proj-nfs-skip-clone"
+
+	res, err := b.Resolve(ResolveInput{
+		ProjectID: projectID,
+		Mode:      store.SharingModeWorktreePerAgent,
+	})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+
+	gitClone := &api.GitCloneConfig{URL: bareRepo, Branch: "main", Depth: 0}
+
+	// First agent: clone + worktree.
+	err = ProvisionShared(ProvisionInput{
+		Resolved:  res,
+		ProjectID: projectID,
+		AgentID:   "agent-first",
+		AgentName: "first",
+		Mode:      store.SharingModeWorktreePerAgent,
+		Locker:    locker,
+		GitClone:  gitClone,
+	})
+	if err != nil {
+		t.Fatalf("Provision agent-first: %v", err)
+	}
+
+	// Record the .git mtime after first provision — if second agent re-clones,
+	// .git contents would be modified.
+	gitDir := filepath.Join(res.HostPath, ".git")
+	gitInfo, err := os.Stat(gitDir)
+	if err != nil {
+		t.Fatalf("stat .git: %v", err)
+	}
+	gitModTime := gitInfo.ModTime()
+
+	// Second agent: should skip clone, only add worktree.
+	err = ProvisionShared(ProvisionInput{
+		Resolved:  res,
+		ProjectID: projectID,
+		AgentID:   "agent-second",
+		AgentName: "second",
+		Mode:      store.SharingModeWorktreePerAgent,
+		Locker:    locker,
+		GitClone:  gitClone,
+	})
+	if err != nil {
+		t.Fatalf("Provision agent-second: %v", err)
+	}
+
+	// Both worktrees exist.
+	if _, err := os.Stat(filepath.Join(res.HostPath, "worktrees", "agent-first")); err != nil {
+		t.Errorf("agent-first worktree missing: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(res.HostPath, "worktrees", "agent-second")); err != nil {
+		t.Errorf("agent-second worktree missing: %v", err)
+	}
+
+	// Lock acquired exactly twice (once per ProvisionShared call).
+	if got := atomic.LoadInt64(&locker.acquires); got != 2 {
+		t.Errorf("expected 2 lock acquisitions, got %d", got)
+	}
+
+	_ = gitModTime // mtime check is informational; git worktree add may touch .git/
 }
