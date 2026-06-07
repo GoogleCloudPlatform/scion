@@ -48,6 +48,8 @@ export class CommsPanel {
   private startMs: number | null = null;
   private count = 0;
   private collapsed = false;
+  /** Pending requestAnimationFrame handle for the deferred scroll-to-bottom. */
+  private scrollRafId: number | null = null;
   /** Dedup state for broadcasts: `sender::content` -> last event time (ms). */
   private readonly recentBroadcasts = new Map<string, number>();
 
@@ -86,6 +88,10 @@ export class CommsPanel {
 
   /** Clear the transcript (called on a new manifest and before snapshot replay). */
   reset(): void {
+    if (this.scrollRafId !== null) {
+      cancelAnimationFrame(this.scrollRafId);
+      this.scrollRafId = null;
+    }
     this.bodyEl.innerHTML = '';
     this.count = 0;
     this.recentBroadcasts.clear();
@@ -102,16 +108,31 @@ export class CommsPanel {
       this.recentBroadcasts.set(key, t);
     }
 
+    const animate = opts.animate ?? true;
+
     // Only auto-scroll when the user is already near the bottom, so manual
-    // scroll-back to read history isn't yanked away by new arrivals.
+    // scroll-back to read history isn't yanked away by new arrivals. Skip the
+    // layout-reading measurement during non-animated batch loads (snapshot
+    // replay on seek): interleaving these reads with appendChild in that loop
+    // would cause layout thrashing.
     const nearBottom =
+      animate &&
       this.bodyEl.scrollTop + this.bodyEl.clientHeight >= this.bodyEl.scrollHeight - 60;
 
-    this.bodyEl.appendChild(this.makeCard(event, timestamp, opts.animate ?? true));
+    this.bodyEl.appendChild(this.makeCard(event, timestamp, animate));
     this.count++;
     this.updateCount();
 
-    if (nearBottom) this.bodyEl.scrollTop = this.bodyEl.scrollHeight;
+    if (animate) {
+      if (nearBottom) this.bodyEl.scrollTop = this.bodyEl.scrollHeight;
+    } else {
+      // Defer a single scroll-to-bottom until after the synchronous replay loop.
+      if (this.scrollRafId !== null) cancelAnimationFrame(this.scrollRafId);
+      this.scrollRafId = requestAnimationFrame(() => {
+        this.bodyEl.scrollTop = this.bodyEl.scrollHeight;
+        this.scrollRafId = null;
+      });
+    }
   }
 
   private setCollapsed(collapsed: boolean): void {
