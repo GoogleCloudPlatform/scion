@@ -215,9 +215,8 @@ func ProvisionShared(in ProvisionInput) error {
 
 	// Chown to stable NFS UID/GID (design §9.1). This is a ONE-TIME operation
 	// under the advisory lock — per-start chown is skipped for NFS (see N1-5).
-	// Chown the workspace dir itself (sentinelDir may differ from project root
-	// when running inside a k8s init container with a subPath mount).
-	chownRoot := filepath.Dir(in.Resolved.HostPath)
+	//
+	chownRoot := chownTarget(in.Resolved.HostPath)
 	uid, gid := resolveUID(in), resolveGID(in)
 	if err := chownProjectTree(chownRoot, uid, gid); err != nil {
 		slog.Warn("nfsBackend.Provision: chown failed (non-fatal, may lack privileges)",
@@ -403,6 +402,23 @@ func sanitizeBranchName(name string) string {
 		return "agent"
 	}
 	return result
+}
+
+// chownTarget returns the directory to recursively chown for a freshly
+// provisioned workspace.
+//
+// Broker-side, the project root is the parent of the workspace dir (it also
+// holds the shared-dirs siblings), so we chown the parent. But inside a k8s
+// init container only the workspace dir itself is mounted (subPath), so its
+// parent resolves to the filesystem root "/". Chowning "/" recursively is
+// wrong — and a latent security hazard if the pod's security context is ever
+// relaxed — so fall back to chowning the workspace dir itself in that case.
+func chownTarget(hostPath string) string {
+	parent := filepath.Dir(hostPath)
+	if parent == "/" || parent == "." {
+		return hostPath
+	}
+	return parent
 }
 
 // chownProjectTree sets ownership of the project root and its contents to the

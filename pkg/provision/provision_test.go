@@ -98,6 +98,30 @@ func TestSanitizeBranchName(t *testing.T) {
 	}
 }
 
+func TestChownTarget(t *testing.T) {
+	tests := []struct {
+		name     string
+		hostPath string
+		want     string
+	}{
+		// Broker-side: chown the project root (parent of the workspace dir).
+		{"broker project root", "/srv/nfs/share1/proj-abc/workspace", "/srv/nfs/share1/proj-abc"},
+		// k8s init container subPath mount: parent is "/", fall back to the
+		// workspace dir itself rather than chown -R the whole container root.
+		{"k8s workspace mount", "/workspace", "/workspace"},
+		// Relative path has no real parent ("."); fall back to the path itself.
+		{"relative path", "workspace", "workspace"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := chownTarget(tt.hostPath); got != tt.want {
+				t.Errorf("chownTarget(%q) = %q, want %q", tt.hostPath, got, tt.want)
+			}
+		})
+	}
+}
+
 // --- writeSentinel ---
 
 func TestWriteSentinel_Atomic(t *testing.T) {
