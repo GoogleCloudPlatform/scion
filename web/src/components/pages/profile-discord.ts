@@ -37,9 +37,6 @@ export class ScionPageProfileDiscord extends LitElement {
   private _message = '';
 
   @state()
-  private _linkedDiscordId = '';
-
-  @state()
   private _discordUsername = '';
 
   override connectedCallback(): void {
@@ -70,13 +67,7 @@ export class ScionPageProfileDiscord extends LitElement {
       });
 
       if (resp.ok) {
-        const data = (await resp.json()) as {
-          status: string;
-          discordUserId: string;
-          user: { id: string; email: string };
-        };
         this._status = 'success';
-        this._linkedDiscordId = data.discordUserId;
         this._message = 'Discord account linked successfully! You can close this page and return to Discord.';
         this._code = '';
       } else {
@@ -239,13 +230,7 @@ export class ScionPageProfileDiscord extends LitElement {
       });
 
       if (resp.ok) {
-        const data = (await resp.json()) as {
-          status: string;
-          discordUserId: string;
-          user: { id: string; email: string };
-        };
         this._status = 'success';
-        this._linkedDiscordId = data.discordUserId;
         this._message = 'Discord account linked successfully! You can close this page and return to Discord.';
         this._code = '';
       } else {
