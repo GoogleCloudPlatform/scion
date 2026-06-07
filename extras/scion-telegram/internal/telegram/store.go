@@ -72,6 +72,10 @@ type Store interface {
 	SetTopicDefault(ctx context.Context, chatID int64, threadID int64, agentSlug string) error
 	DeleteTopicDefault(ctx context.Context, chatID int64, threadID int64) error
 
+	// MigrateGroupLink atomically moves a group_link and its topic_defaults
+	// from oldChatID to newChatID (used when Telegram upgrades a group to a supergroup).
+	MigrateGroupLink(ctx context.Context, oldChatID, newChatID int64) error
+
 	// Lifecycle
 	Close() error
 }
@@ -315,6 +319,44 @@ func (s *sqliteStore) GetAllGroupLinks(ctx context.Context) ([]*GroupLink, error
 func (s *sqliteStore) DeleteGroupLink(ctx context.Context, chatID int64) error {
 	_, err := s.db.ExecContext(ctx, `DELETE FROM group_links WHERE chat_id = ?`, chatID)
 	return err
+}
+
+func (s *sqliteStore) MigrateGroupLink(ctx context.Context, oldChatID, newChatID int64) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	// Copy the group_link to the new chat_id.
+	_, err = tx.ExecContext(ctx, `
+INSERT OR REPLACE INTO group_links
+  (chat_id, chat_title, project_id, project_slug, default_agent, linked_by, linked_at, active, show_agent_to_agent, notify_in_group, show_assistant_reply)
+SELECT ?, chat_title, project_id, project_slug, default_agent, linked_by, linked_at, active, show_agent_to_agent, notify_in_group, show_assistant_reply
+FROM group_links WHERE chat_id = ?`, newChatID, oldChatID)
+	if err != nil {
+		return fmt.Errorf("copy group_link: %w", err)
+	}
+
+	_, err = tx.ExecContext(ctx, `DELETE FROM group_links WHERE chat_id = ?`, oldChatID)
+	if err != nil {
+		return fmt.Errorf("delete old group_link: %w", err)
+	}
+
+	// Migrate any topic_defaults rows to the new chat_id.
+	_, err = tx.ExecContext(ctx, `
+INSERT OR REPLACE INTO topic_defaults (chat_id, thread_id, agent_slug)
+SELECT ?, thread_id, agent_slug FROM topic_defaults WHERE chat_id = ?`, newChatID, oldChatID)
+	if err != nil {
+		return fmt.Errorf("copy topic_defaults: %w", err)
+	}
+
+	_, err = tx.ExecContext(ctx, `DELETE FROM topic_defaults WHERE chat_id = ?`, oldChatID)
+	if err != nil {
+		return fmt.Errorf("delete old topic_defaults: %w", err)
+	}
+
+	return tx.Commit()
 }
 
 // --- ConversationContext ---

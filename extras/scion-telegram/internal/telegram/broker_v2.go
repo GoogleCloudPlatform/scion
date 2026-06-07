@@ -722,9 +722,32 @@ func (b *TelegramBrokerV2) Publish(ctx context.Context, topic string, msg *messa
 				continue
 			}
 			if errors.As(err, &apiErr) && apiErr.IsMigrated() {
-				b.log.Warn("Group upgraded to supergroup, skipping message",
-					"old_chat_id", chatID, "new_chat_id", apiErr.MigrateToChatID)
-				continue // TODO: migrate group_links record to new chat_id
+				newChatID := apiErr.MigrateToChatID
+				b.log.Info("Group upgraded to supergroup, migrating",
+					"old_chat_id", chatID, "new_chat_id", newChatID)
+				if store != nil {
+					if merr := store.MigrateGroupLink(ctx, chatID, newChatID); merr != nil {
+						b.log.Error("Failed to migrate group_link", "error", merr)
+					}
+				}
+				// Retry send with the new chat_id.
+				if sq != nil {
+					var keyboard *InlineKeyboardMarkup
+					if replyToMsgID > 0 {
+						_, err = sq.Send(ctx, newChatID, text, "", keyboard, replyToMsgID, threadOpts...)
+					} else {
+						_, err = sq.Send(ctx, newChatID, text, "", nil, 0, threadOpts...)
+					}
+				} else if replyToMsgID > 0 {
+					_, err = api.SendMessageWithKeyboard(ctx, newChatID, text, "", nil, replyToMsgID, threadOpts...)
+				} else {
+					_, err = api.SendMessage(ctx, newChatID, text, "", threadOpts...)
+				}
+				if err != nil {
+					b.log.Error("Retry after migration failed", "chat_id", newChatID, "error", err)
+					errs = append(errs, err)
+				}
+				continue
 			}
 			b.log.Error("Failed to send Telegram message",
 				"chat_id", chatID, "error", err)
@@ -864,9 +887,42 @@ func (b *TelegramBrokerV2) publishInputNeeded(ctx context.Context, api *Telegram
 				continue
 			}
 			if errors.As(err, &apiErr) && apiErr.IsMigrated() {
-				b.log.Warn("Group upgraded to supergroup, skipping input-needed",
-					"old_chat_id", chatID, "new_chat_id", apiErr.MigrateToChatID)
-				continue // TODO: migrate group_links record to new chat_id
+				newChatID := apiErr.MigrateToChatID
+				b.log.Info("Group upgraded to supergroup, migrating",
+					"old_chat_id", chatID, "new_chat_id", newChatID)
+				if b.store != nil {
+					if merr := b.store.MigrateGroupLink(ctx, chatID, newChatID); merr != nil {
+						b.log.Error("Failed to migrate group_link", "error", merr)
+					}
+				}
+				// Retry send with the new chat_id.
+				keyboard = buildAskUserKeyboard(requestID, choices)
+				if sq != nil {
+					sent, err = sq.Send(ctx, newChatID, text, "", keyboard, 0)
+				} else if keyboard == nil {
+					sent, err = api.SendMessage(ctx, newChatID, text, "")
+				} else {
+					sent, err = api.SendMessageWithKeyboard(ctx, newChatID, text, "", keyboard, 0)
+				}
+				if err != nil {
+					b.log.Error("Retry after migration failed", "chat_id", newChatID, "error", err)
+					errs = append(errs, err)
+					continue
+				}
+				// Save PendingAskUser with the new chat_id.
+				pending := &PendingAskUser{
+					RequestID: requestID,
+					MessageID: sent.MessageID,
+					ChatID:    newChatID,
+					AgentSlug: agentSlug,
+					ProjectID: projectID,
+					Choices:   choices,
+					ExpiresAt: time.Now().Add(askUserExpiry),
+				}
+				if perr := b.store.SavePendingAskUser(ctx, pending); perr != nil {
+					b.log.Error("Failed to save pending ask user after migration", "error", perr)
+				}
+				continue
 			}
 			b.log.Error("Failed to send input-needed message",
 				"chat_id", chatID, "error", err)
