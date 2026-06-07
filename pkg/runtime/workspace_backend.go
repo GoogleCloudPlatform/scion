@@ -20,13 +20,16 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
-// WorkspaceBackend abstracts workspace storage so callers can resolve, provision,
-// and realize workspace paths without knowing whether storage is node-local or
-// NFS-backed. The three methods map to the design's three questions (§3):
+// WorkspaceBackend abstracts workspace storage so callers can resolve and
+// realize workspace paths without knowing whether storage is node-local or
+// NFS-backed. The two methods map to the design's questions (§3):
 //
 //   - Resolve: given project/agent/mode, what is the storage location?
-//   - Provision: ensure the directory exists (clone, worktree, etc.).
 //   - Realize: emit the runtime mount descriptor for Docker/K8s/Cloud Run.
+//
+// Provisioning (clone, worktree, mkdir) is handled by the standalone
+// provisionShared function (Tier 1) — it is vendor-agnostic and operates
+// solely on ProvisionInput fields, not on any backend configuration.
 //
 // Implementations: localBackend (today's node-local behavior, default) and
 // nfsBackend (shared network storage).
@@ -42,13 +45,6 @@ type WorkspaceBackend interface {
 	// For localBackend, ResolvedWorkspace.HostPath holds the absolute local
 	// host path (today's behavior) and ServerRelativePath is empty.
 	Resolve(in ResolveInput) (ResolvedWorkspace, error)
-
-	// Provision ensures the workspace directory exists and is ready for use.
-	// For git projects this includes cloning/worktree setup. Idempotent.
-	//
-	// N1-1 scope: localBackend delegates to existing local flow; nfsBackend
-	// returns a stub sentinel — full implementation lands in N1-4.
-	Provision(in ProvisionInput) error
 
 	// Realize emits the runtime mount descriptor (bind mount source, NFS
 	// volume, etc.) that the container runtime should use to expose the

@@ -60,15 +60,6 @@ func (b *localBackend) Resolve(in ResolveInput) (ResolvedWorkspace, error) {
 	return res, nil
 }
 
-// Provision is a no-op for localBackend — the existing local flow handles
-// directory creation and git cloning elsewhere in the broker lifecycle.
-func (b *localBackend) Provision(in ProvisionInput) error {
-	// Today's local provisioning (mkdir, git clone) is handled by the
-	// broker/runtime code paths. This backend delegates to that existing
-	// flow, so Provision is a no-op here.
-	return nil
-}
-
 // Realize returns a local bind-mount descriptor pointing at the resolved
 // host path. This mirrors today's Docker `-v HOST:/workspace` behavior.
 func (b *localBackend) Realize(in RealizeInput) (MountDescriptor, error) {
