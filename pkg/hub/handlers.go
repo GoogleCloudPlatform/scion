@@ -3324,7 +3324,7 @@ type CreateProjectRequest struct {
 	Slug          string            `json:"slug,omitempty"`
 	Name          string            `json:"name"`
 	GitRemote     string            `json:"gitRemote,omitempty"`
-	WorkspaceMode string            `json:"workspaceMode,omitempty"` // "shared" or "per-agent" (default); only meaningful when gitRemote is set
+	WorkspaceMode string            `json:"workspaceMode,omitempty"` // "shared", "worktree-per-agent", or "per-agent" (default); only meaningful when gitRemote is set
 	Visibility    string            `json:"visibility,omitempty"`
 	Labels        map[string]string `json:"labels,omitempty"`
 	GitHubToken   string            `json:"githubToken,omitempty"`
@@ -3578,12 +3578,15 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 		displayName = api.DisplayNameWithSerial(req.Name, slug, baseSlug)
 	}
 
-	// Apply workspace mode label for git projects with shared workspace mode.
-	if normalizedRemote != "" && req.WorkspaceMode == store.WorkspaceModeShared {
-		if req.Labels == nil {
-			req.Labels = make(map[string]string)
+	// Apply workspace mode label for git projects with explicit workspace mode.
+	if normalizedRemote != "" {
+		switch req.WorkspaceMode {
+		case store.WorkspaceModeShared, store.WorkspaceModeWorktreePerAgent:
+			if req.Labels == nil {
+				req.Labels = make(map[string]string)
+			}
+			req.Labels[store.LabelWorkspaceMode] = req.WorkspaceMode
 		}
-		req.Labels[store.LabelWorkspaceMode] = store.WorkspaceModeShared
 	}
 
 	project := &store.Project{

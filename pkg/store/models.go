@@ -184,9 +184,10 @@ const (
 // When a git project has the workspace mode label set to "shared", it uses a
 // single shared clone mounted by all agents instead of per-agent clones.
 const (
-	LabelWorkspaceMode    = "scion.dev/workspace-mode"
-	WorkspaceModeShared   = "shared"
-	WorkspaceModePerAgent = "per-agent"
+	LabelWorkspaceMode             = "scion.dev/workspace-mode"
+	WorkspaceModeShared            = "shared"
+	WorkspaceModePerAgent          = "per-agent"
+	WorkspaceModeWorktreePerAgent  = "worktree-per-agent"
 )
 
 // WorkspaceSharingMode is the canonical set of workspace sharing modes from the
@@ -222,7 +223,7 @@ func ResolveWorkspaceSharingMode(label string) WorkspaceSharingMode {
 		return SharingModeSharedPlain
 	case WorkspaceModePerAgent, "clone-per-agent":
 		return SharingModeClonePerAgent
-	case "worktree-per-agent":
+	case WorkspaceModeWorktreePerAgent:
 		return SharingModeWorktreePerAgent
 	default:
 		// Empty or unrecognized: default to shared-plain.
@@ -322,6 +323,12 @@ func (p *Project) UnmarshalJSON(data []byte) error {
 // single shared workspace clone instead of per-agent clones.
 func (p *Project) IsSharedWorkspace() bool {
 	return p.GitRemote != "" && p.Labels[LabelWorkspaceMode] == WorkspaceModeShared
+}
+
+// IsWorktreePerAgent returns true if this is a git project configured to use
+// per-agent git worktrees over a shared base clone.
+func (p *Project) IsWorktreePerAgent() bool {
+	return p.GitRemote != "" && p.Labels[LabelWorkspaceMode] == WorkspaceModeWorktreePerAgent
 }
 
 // RuntimeBroker represents a compute node in the Hub database.

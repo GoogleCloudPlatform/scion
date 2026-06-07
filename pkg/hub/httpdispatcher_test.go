@@ -603,6 +603,59 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_WithProjectProviderPath(t *test
 	}
 }
 
+func TestHTTPAgentDispatcher_DispatchAgentCreate_ThreadsWorkspaceMode(t *testing.T) {
+	ctx := context.Background()
+	memStore := createTestStore(t)
+
+	project := &store.Project{
+		ID:        tid("project-wt"),
+		Name:      "worktree-project",
+		Slug:      "worktree-project",
+		GitRemote: "https://github.com/example/repo.git",
+		Labels: map[string]string{
+			store.LabelWorkspaceMode: store.WorkspaceModeWorktreePerAgent,
+		},
+	}
+	if err := memStore.CreateProject(ctx, project); err != nil {
+		t.Fatalf("failed to create project: %v", err)
+	}
+
+	broker := &store.RuntimeBroker{
+		ID:       tid("broker-wt"),
+		Name:     "test-broker",
+		Slug:     "test-broker",
+		Endpoint: "http://localhost:9800",
+		Status:   store.BrokerStatusOnline,
+	}
+	if err := memStore.CreateRuntimeBroker(ctx, broker); err != nil {
+		t.Fatalf("failed to create runtime broker: %v", err)
+	}
+
+	mockClient := &mockRuntimeBrokerClient{}
+	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
+
+	agent := &store.Agent{
+		ID:              tid("agent-wt"),
+		Name:            "test-agent",
+		Slug:            "test-agent",
+		ProjectID:       tid("project-wt"),
+		RuntimeBrokerID: tid("broker-wt"),
+	}
+
+	err := dispatcher.DispatchAgentCreate(ctx, agent)
+	if err != nil {
+		t.Fatalf("DispatchAgentCreate failed: %v", err)
+	}
+
+	if !mockClient.createCalled {
+		t.Fatal("expected CreateAgent to be called")
+	}
+	if mockClient.lastCreateReq.WorkspaceMode != store.WorkspaceModeWorktreePerAgent {
+		t.Errorf("expected WorkspaceMode %q, got %q",
+			store.WorkspaceModeWorktreePerAgent, mockClient.lastCreateReq.WorkspaceMode)
+	}
+}
+
 func TestHTTPAgentDispatcher_DispatchAgentCreate_MissingBrokerEndpoint(t *testing.T) {
 	// When a broker has no HTTP endpoint configured (e.g. control-channel-only
 	// brokers behind NAT), the dispatcher should still pass the call through

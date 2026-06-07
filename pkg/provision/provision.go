@@ -222,6 +222,13 @@ func ProvisionShared(in ProvisionInput) error {
 		}
 	}
 
+	// For worktree-per-agent: detach HEAD, disable gc, exclude worktrees/.
+	if in.Mode == store.SharingModeWorktreePerAgent {
+		if err := prepareBaseForWorktrees(ctx, in.Resolved.HostPath); err != nil {
+			return fmt.Errorf("ProvisionShared: prepare base: %w", err)
+		}
+	}
+
 	// Chown to stable NFS UID/GID (design §9.1). This is a ONE-TIME operation
 	// under the advisory lock — per-start chown is skipped for NFS (see N1-5).
 	//
@@ -373,6 +380,12 @@ func removeDirContents(dir string) error {
 	return nil
 }
 
+// WorktreePath returns the canonical worktree path for a given agent within
+// a shared base checkout: <hostPath>/worktrees/<agentID>.
+func WorktreePath(hostPath, agentID string) string {
+	return filepath.Join(hostPath, "worktrees", agentID)
+}
+
 // ensureWorktree creates a per-agent worktree if the mode is WorktreePerAgent.
 // For SharedPlain mode this is a no-op.
 // The worktree add is done under the already-held advisory lock (design §9.2:
@@ -386,8 +399,7 @@ func ensureWorktree(ctx context.Context, in ProvisionInput) error {
 		return fmt.Errorf("ProvisionShared: AgentID is required for WorktreePerAgent mode")
 	}
 
-	// Worktree path: <workspace>/worktrees/<agentID>
-	worktreePath := filepath.Join(in.Resolved.HostPath, "worktrees", in.AgentID)
+	worktreePath := WorktreePath(in.Resolved.HostPath, in.AgentID)
 
 	// If the worktree already exists, skip.
 	if _, err := os.Stat(worktreePath); err == nil {
@@ -409,28 +421,103 @@ func ensureWorktree(ctx context.Context, in ProvisionInput) error {
 		branchName = sanitizeBranchName(in.AgentName)
 	}
 
+	// Ensure worktrees parent directory exists.
+	worktreesDir := filepath.Join(in.Resolved.HostPath, "worktrees")
+	if err := os.MkdirAll(worktreesDir, 0770); err != nil {
+		return fmt.Errorf("ProvisionShared: mkdir worktrees dir: %w", err)
+	}
+
 	slog.Info("ProvisionShared: creating worktree",
 		"agent_id", in.AgentID, "branch", branchName, "path", worktreePath)
 
-	// git worktree add <path> -b <branch>
-	cmd := exec.CommandContext(ctx, "git", "worktree", "add", "-b", branchName, worktreePath)
+	// git worktree add --relative-paths -b <branch> <path>
+	// --relative-paths is mandatory for container path-identity (design §6).
+	cmd := exec.CommandContext(ctx, "git", "worktree", "add", "--relative-paths", "-b", branchName, worktreePath)
 	cmd.Dir = in.Resolved.HostPath
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		outputStr := strings.TrimSpace(string(output))
-		// If branch already exists, try without -b.
+		// If the branch is already checked out in another worktree, surface a
+		// clear error instead of a confusing git message.
+		if strings.Contains(outputStr, "already checked out") || strings.Contains(outputStr, "already used by worktree") {
+			return fmt.Errorf("git worktree add: branch %q is already checked out in another worktree: %s",
+				branchName, outputStr)
+		}
+		// If branch already exists, try without -b (reuse existing branch).
 		if strings.Contains(outputStr, "already exists") {
-			cmd = exec.CommandContext(ctx, "git", "worktree", "add", worktreePath, branchName)
+			cmd = exec.CommandContext(ctx, "git", "worktree", "add", "--relative-paths", worktreePath, branchName)
 			cmd.Dir = in.Resolved.HostPath
 			output, err = cmd.CombinedOutput()
 			if err != nil {
-				return fmt.Errorf("git worktree add (reuse branch): %s", strings.TrimSpace(string(output)))
+				reuse := strings.TrimSpace(string(output))
+				if strings.Contains(reuse, "already checked out") || strings.Contains(reuse, "already used by worktree") {
+					return fmt.Errorf("git worktree add: branch %q is already checked out in another worktree: %s",
+						branchName, reuse)
+				}
+				return fmt.Errorf("git worktree add (reuse branch): %s", reuse)
 			}
 			return nil
 		}
 		return fmt.Errorf("git worktree add: %s", outputStr)
 	}
 	return nil
+}
+
+// prepareBaseForWorktrees configures a freshly cloned base checkout for
+// worktree-per-agent use: detaches HEAD (so no branch is "owned" by the base),
+// disables auto-gc, and excludes worktrees/ from untracked file lists.
+func prepareBaseForWorktrees(ctx context.Context, hostPath string) error {
+	if err := gitDetach(ctx, hostPath); err != nil {
+		return err
+	}
+
+	cmd := exec.CommandContext(ctx, "git", "-C", hostPath, "config", "gc.auto", "0")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("git config gc.auto 0: %s", strings.TrimSpace(string(output)))
+	}
+
+	return appendGitExclude(hostPath, "worktrees/")
+}
+
+// gitDetach detaches HEAD in the repo at hostPath so the base checkout owns
+// no branch. Tries 'git switch --detach' first, falls back to 'git checkout
+// --detach' for older git versions.
+func gitDetach(ctx context.Context, hostPath string) error {
+	cmd := exec.CommandContext(ctx, "git", "-C", hostPath, "switch", "--detach")
+	if _, err := cmd.CombinedOutput(); err == nil {
+		return nil
+	}
+	cmd = exec.CommandContext(ctx, "git", "-C", hostPath, "checkout", "--detach")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("git detach: %s", strings.TrimSpace(string(output)))
+	}
+	return nil
+}
+
+// appendGitExclude appends a pattern to .git/info/exclude if not already present.
+func appendGitExclude(hostPath, pattern string) error {
+	excludePath := filepath.Join(hostPath, ".git", "info", "exclude")
+	if err := os.MkdirAll(filepath.Dir(excludePath), 0755); err != nil {
+		return fmt.Errorf("mkdir .git/info: %w", err)
+	}
+	data, _ := os.ReadFile(excludePath)
+	if strings.Contains(string(data), pattern) {
+		return nil
+	}
+	f, err := os.OpenFile(excludePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	if len(data) > 0 && data[len(data)-1] != '\n' {
+		if _, err := f.WriteString("\n"); err != nil {
+			return err
+		}
+	}
+	_, err = f.WriteString(pattern + "\n")
+	return err
 }
 
 // sanitizeBranchName produces a git-safe branch name from an agent name.

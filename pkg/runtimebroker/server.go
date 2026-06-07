@@ -225,6 +225,12 @@ type Server struct {
 	auxiliaryRuntimes   map[string]auxiliaryRuntime
 	auxiliaryRuntimesMu sync.RWMutex
 
+	// projectProvisionMu serializes worktree provisioning per project on this
+	// node. Without this, concurrent agent creations for the same project could
+	// race inside ProvisionShared (double-clone / corrupt .git state).
+	// Key: ProjectID (or ProjectPath if ID is empty).
+	projectProvisionMu sync.Map
+
 	// NFS mount reconciler (nil when backend != "nfs")
 	nfsMountReconciler *NFSMountReconciler
 

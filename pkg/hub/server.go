@@ -421,6 +421,11 @@ type RemoteCreateAgentRequest struct {
 	// Resolved by the Hub from the project record and passed to the broker
 	// so it can provision host-side directories and inject volume mounts.
 	SharedDirs []api.SharedDir `json:"sharedDirs,omitempty"`
+
+	// WorkspaceMode is the resolved workspace sharing mode for the project
+	// (e.g. "shared", "per-agent", "worktree-per-agent"). Threaded from the
+	// Hub so the broker can branch dispatch without re-deriving from labels.
+	WorkspaceMode string `json:"workspaceMode,omitempty"`
 }
 
 // ResolvedSecret represents a secret resolved by the Hub for projection into an agent container.

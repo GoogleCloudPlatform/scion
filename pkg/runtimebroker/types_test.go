@@ -420,3 +420,34 @@ func TestAgentInfoToResponseProfile(t *testing.T) {
 		t.Errorf("Profile = %q, want %q", resp.Profile, "docker-dev")
 	}
 }
+
+func TestCreateAgentRequest_WorkspaceMode_JSON(t *testing.T) {
+	req := CreateAgentRequest{
+		Name:          "test-agent",
+		ProjectID:     "project-1",
+		WorkspaceMode: "worktree-per-agent",
+	}
+	data, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("Marshal failed: %v", err)
+	}
+
+	var decoded CreateAgentRequest
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatalf("Unmarshal failed: %v", err)
+	}
+	if decoded.WorkspaceMode != "worktree-per-agent" {
+		t.Errorf("WorkspaceMode = %q, want %q", decoded.WorkspaceMode, "worktree-per-agent")
+	}
+
+	// Verify omitempty: field should be absent when empty
+	req2 := CreateAgentRequest{Name: "agent-no-mode"}
+	data2, _ := json.Marshal(req2)
+	var m map[string]interface{}
+	if err := json.Unmarshal(data2, &m); err != nil {
+		t.Fatalf("Unmarshal map failed: %v", err)
+	}
+	if _, exists := m["workspaceMode"]; exists {
+		t.Error("workspaceMode should be omitted when empty")
+	}
+}

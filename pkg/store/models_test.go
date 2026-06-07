@@ -70,4 +70,61 @@ func TestWorkspaceSharingMode_Constants(t *testing.T) {
 	if SharingModeWorktreePerAgent != "worktree-per-agent" {
 		t.Errorf("SharingModeWorktreePerAgent = %q, want %q", SharingModeWorktreePerAgent, "worktree-per-agent")
 	}
+	if WorkspaceModeWorktreePerAgent != "worktree-per-agent" {
+		t.Errorf("WorkspaceModeWorktreePerAgent = %q, want %q", WorkspaceModeWorktreePerAgent, "worktree-per-agent")
+	}
+}
+
+func TestProject_IsWorktreePerAgent(t *testing.T) {
+	tests := []struct {
+		name    string
+		project Project
+		want    bool
+	}{
+		{
+			name: "worktree-per-agent git project",
+			project: Project{
+				GitRemote: "github.com/test/repo",
+				Labels:    map[string]string{LabelWorkspaceMode: WorkspaceModeWorktreePerAgent},
+			},
+			want: true,
+		},
+		{
+			name: "shared git project",
+			project: Project{
+				GitRemote: "github.com/test/repo",
+				Labels:    map[string]string{LabelWorkspaceMode: WorkspaceModeShared},
+			},
+			want: false,
+		},
+		{
+			name: "per-agent git project",
+			project: Project{
+				GitRemote: "github.com/test/repo",
+				Labels:    map[string]string{LabelWorkspaceMode: WorkspaceModePerAgent},
+			},
+			want: false,
+		},
+		{
+			name: "worktree label but no git remote",
+			project: Project{
+				Labels: map[string]string{LabelWorkspaceMode: WorkspaceModeWorktreePerAgent},
+			},
+			want: false,
+		},
+		{
+			name:    "no labels",
+			project: Project{GitRemote: "github.com/test/repo"},
+			want:    false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := tt.project.IsWorktreePerAgent()
+			if got != tt.want {
+				t.Errorf("IsWorktreePerAgent() = %v, want %v", got, tt.want)
+			}
+		})
+	}
 }

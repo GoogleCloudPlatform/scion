@@ -19,11 +19,13 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 func newTestServerForStartContext(t *testing.T, cfg ServerConfig) *Server {
@@ -672,5 +674,189 @@ func TestBuildStartContext_GCPMetadataPassthroughFromResolvedEnv(t *testing.T) {
 	}
 	if sc.Opts.Env["GCE_METADATA_HOST"] != "" {
 		t.Errorf("expected no GCE_METADATA_HOST for passthrough, got %q", sc.Opts.Env["GCE_METADATA_HOST"])
+	}
+}
+
+// --- resolveWorktreeProvision tests ---
+
+func TestResolveWorktreeProvision_Eligible(t *testing.T) {
+	projectDir := t.TempDir()
+
+	result := resolveWorktreeProvision(worktreeProvisionInput{
+		WorkspaceMode: store.WorkspaceModeWorktreePerAgent,
+		GitClone: &api.GitCloneConfig{
+			URL:    "https://github.com/org/repo.git",
+			Branch: "main",
+			Depth:  1,
+		},
+		ProjectPath: projectDir,
+		ProjectID:   "proj-1",
+		ProjectSlug: "my-project",
+		AgentID:     "agent-1",
+		AgentName:   "test-agent",
+	})
+
+	eligible, _ := runtime.WorktreeModeEligible()
+	if !eligible {
+		if result.ShouldProvision {
+			t.Fatal("expected ShouldProvision=false when git is too old")
+		}
+		t.Skip("git < 2.47, worktree mode not eligible on this host")
+	}
+
+	if !result.ShouldProvision {
+		t.Fatalf("expected ShouldProvision=true, got false (reason: %s)", result.Reason)
+	}
+
+	expectedPath := filepath.Join(projectDir, "workspace", "worktrees", "agent-1")
+	if result.WorktreePath != expectedPath {
+		t.Errorf("expected WorktreePath=%q, got %q", expectedPath, result.WorktreePath)
+	}
+
+	expectedRoot := filepath.Join(projectDir, "workspace")
+	if result.ProjectRoot != expectedRoot {
+		t.Errorf("expected ProjectRoot=%q, got %q", expectedRoot, result.ProjectRoot)
+	}
+
+	pi := result.ProvisionInput
+	if pi.Mode != store.SharingModeWorktreePerAgent {
+		t.Errorf("expected Mode=worktree-per-agent, got %v", pi.Mode)
+	}
+	if pi.ProjectID != "proj-1" {
+		t.Errorf("expected ProjectID='proj-1', got %q", pi.ProjectID)
+	}
+	if pi.AgentID != "agent-1" {
+		t.Errorf("expected AgentID='agent-1', got %q", pi.AgentID)
+	}
+	if pi.GitClone == nil || pi.GitClone.URL != "https://github.com/org/repo.git" {
+		t.Errorf("expected GitClone.URL set, got %v", pi.GitClone)
+	}
+	if pi.Locker != nil {
+		t.Error("expected Locker=nil for node-local single-broker")
+	}
+}
+
+func TestResolveWorktreeProvision_BranchOverridesAgentName(t *testing.T) {
+	projectDir := t.TempDir()
+	eligible, _ := runtime.WorktreeModeEligible()
+	if !eligible {
+		t.Skip("git < 2.47, worktree mode not eligible on this host")
+	}
+
+	result := resolveWorktreeProvision(worktreeProvisionInput{
+		WorkspaceMode: store.WorkspaceModeWorktreePerAgent,
+		GitClone:      &api.GitCloneConfig{URL: "https://example.com/repo.git"},
+		ProjectPath:   projectDir,
+		ProjectID:     "proj-1",
+		AgentID:       "agent-1",
+		AgentName:     "test-agent",
+		Branch:        "feature-branch",
+	})
+
+	if !result.ShouldProvision {
+		t.Fatalf("expected ShouldProvision=true, reason: %s", result.Reason)
+	}
+	if result.ProvisionInput.AgentName != "feature-branch" {
+		t.Errorf("expected AgentName='feature-branch' (from Branch), got %q", result.ProvisionInput.AgentName)
+	}
+}
+
+func TestResolveWorktreeProvision_WrongMode(t *testing.T) {
+	result := resolveWorktreeProvision(worktreeProvisionInput{
+		WorkspaceMode: store.WorkspaceModePerAgent,
+		GitClone:      &api.GitCloneConfig{URL: "https://example.com/repo.git"},
+		ProjectPath:   "/some/path",
+		ProjectID:     "proj-1",
+		AgentID:       "agent-1",
+	})
+
+	if result.ShouldProvision {
+		t.Fatal("expected ShouldProvision=false for non-worktree mode")
+	}
+	if !strings.Contains(result.Reason, "not worktree-per-agent") {
+		t.Errorf("expected reason to mention mode mismatch, got %q", result.Reason)
+	}
+}
+
+func TestResolveWorktreeProvision_NoGitClone(t *testing.T) {
+	result := resolveWorktreeProvision(worktreeProvisionInput{
+		WorkspaceMode: store.WorkspaceModeWorktreePerAgent,
+		GitClone:      nil,
+		ProjectPath:   "/some/path",
+		ProjectID:     "proj-1",
+		AgentID:       "agent-1",
+	})
+
+	if result.ShouldProvision {
+		t.Fatal("expected ShouldProvision=false when GitClone is nil")
+	}
+	if !strings.Contains(result.Reason, "not git-backed") {
+		t.Errorf("expected reason to mention non-git, got %q", result.Reason)
+	}
+}
+
+func TestResolveWorktreeProvision_GitTooOld_Fallback(t *testing.T) {
+	projectDir := t.TempDir()
+
+	result := resolveWorktreeProvision(worktreeProvisionInput{
+		WorkspaceMode: store.WorkspaceModeWorktreePerAgent,
+		GitClone: &api.GitCloneConfig{
+			URL:    "https://github.com/org/repo.git",
+			Branch: "main",
+			Depth:  1,
+		},
+		ProjectPath: projectDir,
+		ProjectID:   "proj-1",
+		ProjectSlug: "my-project",
+		AgentID:     "agent-1",
+		AgentName:   "test-agent",
+		eligibilityOverride: func() (bool, string) {
+			return false, "git >= 2.47.0 required for worktree-per-agent mode (--relative-paths), found 2.39.0"
+		},
+	})
+
+	if result.ShouldProvision {
+		t.Fatal("expected ShouldProvision=false when git is too old")
+	}
+	if !strings.Contains(result.Reason, "2.47") {
+		t.Errorf("expected reason to mention git 2.47 requirement, got %q", result.Reason)
+	}
+	if result.ProvisionInput.ProjectID != "" {
+		t.Error("expected empty ProvisionInput when ineligible")
+	}
+}
+
+func TestResolveWorktreeProvision_FullCloneDepth(t *testing.T) {
+	eligible, _ := runtime.WorktreeModeEligible()
+	if !eligible {
+		t.Skip("git < 2.47, worktree mode not eligible on this host")
+	}
+
+	projectDir := t.TempDir()
+	originalGC := &api.GitCloneConfig{
+		URL:    "https://github.com/org/repo.git",
+		Branch: "main",
+		Depth:  1,
+	}
+
+	result := resolveWorktreeProvision(worktreeProvisionInput{
+		WorkspaceMode: store.WorkspaceModeWorktreePerAgent,
+		GitClone:      originalGC,
+		ProjectPath:   projectDir,
+		ProjectID:     "proj-1",
+		ProjectSlug:   "my-project",
+		AgentID:       "agent-1",
+	})
+
+	if !result.ShouldProvision {
+		t.Fatalf("expected ShouldProvision=true, reason: %s", result.Reason)
+	}
+
+	if result.ProvisionInput.GitClone.Depth != -1 {
+		t.Errorf("expected GitClone.Depth=-1 (full clone), got %d", result.ProvisionInput.GitClone.Depth)
+	}
+
+	if originalGC.Depth != 1 {
+		t.Errorf("original GitClone.Depth was mutated: got %d, want 1", originalGC.Depth)
 	}
 }

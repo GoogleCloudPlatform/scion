@@ -16,8 +16,10 @@ package runtime
 
 import (
 	"fmt"
+	"path/filepath"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 // localBackend wraps today's node-local workspace behavior. Resolve delegates
@@ -40,8 +42,17 @@ func (b *localBackend) Resolve(in ResolveInput) (ResolvedWorkspace, error) {
 		return ResolvedWorkspace{}, fmt.Errorf("localBackend.Resolve: ProjectDir is required")
 	}
 
+	hostPath := in.ProjectDir
+	// For worktree-per-agent mode, the shared base checkout lives under a
+	// "workspace" subdirectory within the project dir. This gives
+	// ProvisionShared a per-project sentinel dir (filepath.Dir(HostPath)
+	// == ProjectDir) so different projects don't collide.
+	if in.Mode == store.SharingModeWorktreePerAgent {
+		hostPath = filepath.Join(in.ProjectDir, "workspace")
+	}
+
 	res := ResolvedWorkspace{
-		HostPath:   in.ProjectDir,
+		HostPath:   hostPath,
 		Backend:    "local",
 		SharedDirs: make(map[string]ResolvedSharedDir, len(in.SharedDirNames)),
 	}

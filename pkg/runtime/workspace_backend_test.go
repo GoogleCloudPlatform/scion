@@ -491,6 +491,16 @@ func TestLocalBackendResolve(t *testing.T) {
 			wantBackend: "local",
 		},
 		{
+			name: "worktree-per-agent uses workspace subdir",
+			input: ResolveInput{
+				ProjectDir: "/home/user/.scion.projects/my-project",
+				ProjectID:  "proj1",
+				Mode:       store.SharingModeWorktreePerAgent,
+			},
+			wantPath:    "/home/user/.scion.projects/my-project/workspace",
+			wantBackend: "local",
+		},
+		{
 			name: "missing ProjectDir",
 			input: ResolveInput{
 				ProjectID: "proj1",

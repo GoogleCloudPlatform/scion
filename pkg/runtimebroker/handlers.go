@@ -594,6 +594,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		ResolvedEnv:     req.ResolvedEnv,
 		ResolvedSecrets: req.ResolvedSecrets,
 		Attach:          req.Attach,
+		WorkspaceMode:   req.WorkspaceMode,
 		HTTPRequest:     r,
 	})
 	if err != nil {

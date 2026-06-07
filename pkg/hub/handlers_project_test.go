@@ -1528,6 +1528,45 @@ func TestCreateProject_PerAgentGit_NoWorkspaceLabel(t *testing.T) {
 	assert.False(t, project.IsSharedWorkspace())
 }
 
+func TestCreateProject_WorktreePerAgent_StampsLabel(t *testing.T) {
+	srv, _ := testServer(t)
+
+	body := CreateProjectRequest{
+		Name:          "Worktree Project",
+		GitRemote:     "github.com/test/worktree",
+		WorkspaceMode: "worktree-per-agent",
+	}
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects", body)
+	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+
+	var project store.Project
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&project))
+
+	assert.Equal(t, store.WorkspaceModeWorktreePerAgent, project.Labels[store.LabelWorkspaceMode],
+		"worktree-per-agent label should be stamped")
+	assert.True(t, project.IsWorktreePerAgent(), "project should report as worktree-per-agent")
+	assert.False(t, project.IsSharedWorkspace(), "project should not report as shared workspace")
+}
+
+func TestCreateProject_WorktreePerAgent_NonGit_NoLabel(t *testing.T) {
+	srv, _ := testServer(t)
+
+	body := CreateProjectRequest{
+		Name:          "Non-Git Worktree",
+		WorkspaceMode: "worktree-per-agent",
+	}
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects", body)
+	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+
+	var project store.Project
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&project))
+
+	assert.Empty(t, project.Labels[store.LabelWorkspaceMode],
+		"worktree-per-agent label should not be set on non-git projects")
+}
+
 func TestPopulateAgentConfig_SharedWorkspace_SetsWorkspaceNotClone(t *testing.T) {
 	srv, _ := testServer(t)
 
@@ -1612,6 +1651,35 @@ func TestPopulateAgentConfig_SharedWorkspace_DefaultsBranch(t *testing.T) {
 
 	assert.Equal(t, "main", agent3.AppliedConfig.Branch,
 		"Branch should default to 'main' when no default-branch label is set")
+}
+
+func TestPopulateAgentConfig_WorktreePerAgent_SetsCloneNotWorkspace(t *testing.T) {
+	srv, _ := testServer(t)
+
+	project := &store.Project{
+		ID:        tid("project-wt"),
+		Name:      "Worktree Project",
+		Slug:      "worktree-proj",
+		GitRemote: "github.com/test/worktree",
+		Labels: map[string]string{
+			store.LabelWorkspaceMode:   store.WorkspaceModeWorktreePerAgent,
+			"scion.dev/default-branch": "main",
+		},
+	}
+
+	agent := &store.Agent{
+		ID:            "agent-worktree",
+		AppliedConfig: &store.AgentAppliedConfig{},
+	}
+
+	srv.populateAgentConfig(context.Background(), agent, project, nil)
+
+	assert.NotNil(t, agent.AppliedConfig.GitClone,
+		"GitClone should be set for worktree-per-agent projects (broker decides how to use it)")
+	assert.Contains(t, agent.AppliedConfig.GitClone.URL, "worktree",
+		"GitClone URL should reference the project remote")
+	assert.Empty(t, agent.AppliedConfig.Workspace,
+		"Workspace should NOT be set for worktree-per-agent projects")
 }
 
 func TestCloneSharedWorkspaceProject_Success(t *testing.T) {

@@ -253,16 +253,17 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 
 	// Build the remote create request
 	req := &RemoteCreateAgentRequest{
-		RequestID:   api.NewUUID(),
-		ID:          agent.ID,
-		Slug:        agent.Slug,
-		Name:        agent.Name,
-		ProjectID:   agent.ProjectID,
-		UserID:      agent.OwnerID,
-		HubEndpoint: d.hubEndpoint,
-		ProjectPath: projectInfo.projectPath,
-		ProjectSlug: projectInfo.projectSlug,
-		SharedDirs:  projectInfo.sharedDirs,
+		RequestID:     api.NewUUID(),
+		ID:            agent.ID,
+		Slug:          agent.Slug,
+		Name:          agent.Name,
+		ProjectID:     agent.ProjectID,
+		UserID:        agent.OwnerID,
+		HubEndpoint:   d.hubEndpoint,
+		ProjectPath:   projectInfo.projectPath,
+		ProjectSlug:   projectInfo.projectSlug,
+		SharedDirs:    projectInfo.sharedDirs,
+		WorkspaceMode: projectInfo.workspaceMode,
 	}
 
 	// Propagate attach mode from applied config
@@ -550,7 +551,8 @@ type projectDispatchInfo struct {
 	projectPath     string
 	projectSlug     string
 	sharedDirs      []api.SharedDir
-	sharedWorkspace bool // true for git-workspace hybrid projects
+	sharedWorkspace bool   // true for git-workspace hybrid projects
+	workspaceMode   string // resolved workspace mode label (e.g. "shared", "worktree-per-agent")
 }
 
 func (d *HTTPAgentDispatcher) resolveDispatchProjectPath(ctx context.Context, agent *store.Agent) (string, string) {
@@ -577,6 +579,7 @@ func (d *HTTPAgentDispatcher) resolveDispatchProjectInfo(ctx context.Context, ag
 
 	info.sharedDirs = project.SharedDirs
 	info.sharedWorkspace = project.IsSharedWorkspace()
+	info.workspaceMode = project.Labels[store.LabelWorkspaceMode]
 
 	// First check if the broker has a registered local path for this project.
 	if agent.RuntimeBrokerID != "" {
