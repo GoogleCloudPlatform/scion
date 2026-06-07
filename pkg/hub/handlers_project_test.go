@@ -44,14 +44,12 @@ func TestHubManagedProjectPath(t *testing.T) {
 	homeDir, err := os.UserHomeDir()
 	require.NoError(t, err)
 
-	// Default (no content in either dir) should resolve to groves/ —
-	// that's where the actual git checkout lives (mounted as /workspace in agents).
-	expected := filepath.Join(homeDir, ".scion", "groves", "my-test-project")
+	// Default (no content in either dir) should resolve to projects/
+	expected := filepath.Join(homeDir, ".scion", "projects", "my-test-project")
 	assert.Equal(t, expected, path)
 }
 
-func TestHubManagedProjectPath_PrefersGrovesOverProjects(t *testing.T) {
-	// Use a temp directory as HOME to avoid polluting real ~/.scion
+func TestHubManagedProjectPath_PrefersProjectsOverGroves(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
 
@@ -67,37 +65,35 @@ func TestHubManagedProjectPath_PrefersGrovesOverProjects(t *testing.T) {
 	require.NoError(t, os.MkdirAll(grovesDir, 0755))
 	require.NoError(t, os.WriteFile(filepath.Join(grovesDir, "README.md"), []byte("# workspace"), 0644))
 
-	// hubManagedProjectPath should prefer groves/ — that's the actual git checkout
+	// hubManagedProjectPath should prefer projects/ over legacy groves/
 	path, err := hubManagedProjectPath(slug)
 	require.NoError(t, err)
-	assert.Equal(t, grovesDir, path, "should prefer groves path over projects path")
+	assert.Equal(t, projectsDir, path, "should prefer projects path over groves path")
 }
 
-func TestHubManagedProjectPath_FallsBackToProjectsWhenGrovesEmpty(t *testing.T) {
-	// Use a temp directory as HOME to avoid polluting real ~/.scion
+func TestHubManagedProjectPath_FallsBackToGrovesWhenProjectsEmpty(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
 
-	slug := "groves-empty-projects-has-content"
+	slug := "projects-empty-groves-has-content"
 	globalDir := filepath.Join(tmpHome, ".scion")
 
-	// Create groves/{slug} with only infrastructure dirs (no real content)
-	grovesDir := filepath.Join(globalDir, "groves", slug)
-	require.NoError(t, os.MkdirAll(filepath.Join(grovesDir, ".scion"), 0755))
-
-	// Create projects/{slug} with actual workspace content
+	// Create projects/{slug} with only infrastructure dirs (no real content)
 	projectsDir := filepath.Join(globalDir, "projects", slug)
-	require.NoError(t, os.MkdirAll(projectsDir, 0755))
-	require.NoError(t, os.WriteFile(filepath.Join(projectsDir, "README.md"), []byte("# workspace"), 0644))
+	require.NoError(t, os.MkdirAll(filepath.Join(projectsDir, ".scion"), 0755))
 
-	// hubManagedProjectPath should fall back to projects/ since groves/ has no real content
+	// Create groves/{slug} with actual workspace content (legacy)
+	grovesDir := filepath.Join(globalDir, "groves", slug)
+	require.NoError(t, os.MkdirAll(grovesDir, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(grovesDir, "README.md"), []byte("# workspace"), 0644))
+
+	// hubManagedProjectPath should fall back to groves/ for backward compatibility
 	path, err := hubManagedProjectPath(slug)
 	require.NoError(t, err)
-	assert.Equal(t, projectsDir, path, "should fall back to projects path when groves dir only contains infrastructure dirs")
+	assert.Equal(t, grovesDir, path, "should fall back to legacy groves path when projects dir only contains infrastructure dirs")
 }
 
-func TestHubManagedProjectPath_DefaultsToGrovesWhenNeitherHasContent(t *testing.T) {
-	// Use a temp directory as HOME to avoid polluting real ~/.scion
+func TestHubManagedProjectPath_DefaultsToProjectsWhenNeitherHasContent(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
 
@@ -111,10 +107,10 @@ func TestHubManagedProjectPath_DefaultsToGrovesWhenNeitherHasContent(t *testing.
 	projectsDir := filepath.Join(globalDir, "projects", slug)
 	require.NoError(t, os.MkdirAll(filepath.Join(projectsDir, "shared-dirs"), 0755))
 
-	// When neither has content, should default to groves/
+	// When neither has content, should default to projects/
 	path, err := hubManagedProjectPath(slug)
 	require.NoError(t, err)
-	assert.Equal(t, grovesDir, path, "should default to groves path when neither dir has workspace content")
+	assert.Equal(t, projectsDir, path, "should default to projects path when neither dir has workspace content")
 }
 
 func TestHubManagedProjectPath_EmptySlug(t *testing.T) {
