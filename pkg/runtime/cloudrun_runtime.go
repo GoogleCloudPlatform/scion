@@ -87,6 +87,10 @@ func (r *CloudRunRuntime) provisionWorkspace(ctx context.Context, cfg RunConfig)
 		return fmt.Errorf("ProjectID is required for workspace provisioning")
 	}
 
+	// Cloud Run uses a shared, plain workspace for now: the initial runtime
+	// scope provisions a single broker-side workspace per project. Per-agent
+	// worktrees (SharingModeWorktreePerAgent) are a follow-up once Cloud Run
+	// multi-agent lifecycle lands, so the mode is fixed rather than derived.
 	mode := store.SharingModeSharedPlain
 	backend := SelectWorkspaceBackend(r.WorkspaceStorage, mode)
 
