@@ -240,26 +240,17 @@ func TestBuildPod_NFSBackend_InitContainer_Present(t *testing.T) {
 		t.Errorf("init container workspace subPath = %q, want %q", wsMount.SubPath, "projects/proj-123/workspace")
 	}
 
-	// Command should reference env vars (not inline URL/branch) and contain sentinel check
-	if len(ic.Command) < 3 {
-		t.Fatalf("init container command too short: %v", ic.Command)
-	}
-	script := ic.Command[2] // sh -c <script>
-	if !contains(script, ".scion-provisioned") {
-		t.Errorf("init script does not reference sentinel file .scion-provisioned")
-	}
-	// URL and branch must be passed via env vars, NOT interpolated into script
-	if !contains(script, "$SCION_CLONE_URL") {
-		t.Errorf("init script does not reference $SCION_CLONE_URL env var")
-	}
-	if contains(script, "https://github.com/example/repo.git") {
-		t.Errorf("init script contains inline URL — must use env var for injection safety")
-	}
-	if !contains(script, "$SCION_CLONE_BRANCH") {
-		t.Errorf("init script does not reference $SCION_CLONE_BRANCH env var")
+	// Command must invoke sciontool provision (not sh -c)
+	assert.Equal(t, "sciontool", ic.Command[0], "init container should invoke sciontool")
+	assert.Equal(t, "provision", ic.Command[1], "init container should invoke provision subcommand")
+	// URL must NOT appear in the command args (injection safety)
+	for _, arg := range ic.Command {
+		if arg == "https://github.com/example/repo.git" {
+			t.Error("init container command must NOT contain inline URL (injection safety)")
+		}
 	}
 
-	// Verify env vars are set on the container
+	// Verify env vars are set on the container (URL/branch via env, not args)
 	var hasURL, hasBranch bool
 	for _, env := range ic.Env {
 		if env.Name == "SCION_CLONE_URL" && env.Value == "https://github.com/example/repo.git" {
@@ -321,69 +312,53 @@ func TestBuildPod_LocalBackend_NoInitContainer_EvenWithGitClone(t *testing.T) {
 	}
 }
 
-func TestNFSInitProvisionScript_SentinelCheck(t *testing.T) {
+func TestNFSProvisionCommand_ShallowClone(t *testing.T) {
 	gc := &api.GitCloneConfig{
 		URL:    "https://github.com/example/repo.git",
 		Branch: "main",
 		Depth:  1,
 	}
 
-	script := nfsInitProvisionScript(gc)
+	cmd := nfsProvisionCommand(gc)
 
-	// Must check sentinel before cloning
-	if !contains(script, ".scion-provisioned") {
-		t.Error("script missing sentinel check")
-	}
+	assert.Equal(t, "sciontool", cmd[0])
+	assert.Equal(t, "provision", cmd[1])
+	assert.Contains(t, cmd, "--depth")
+	assert.Contains(t, cmd, "1")
 
-	// Script must reference $SCION_CLONE_URL env var (not inline URL)
-	if !contains(script, "$SCION_CLONE_URL") {
-		t.Error("script missing $SCION_CLONE_URL env var reference")
-	}
-
-	// URL must NOT be interpolated into script text (shell injection prevention)
-	if contains(script, gc.URL) {
-		t.Error("script contains inline URL — must use env var instead")
-	}
-
-	// Must contain git clone command
-	if !contains(script, "git") || !contains(script, "clone") {
-		t.Error("script missing git clone command")
-	}
-
-	// Must write sentinel after successful clone
-	if !contains(script, "provisioned_at=") {
-		t.Error("script does not write provisioning timestamp to sentinel")
+	// URL must NOT appear in command args (injection safety)
+	for _, arg := range cmd {
+		assert.NotEqual(t, gc.URL, arg, "URL must not be in command args")
+		assert.NotEqual(t, gc.Branch, arg, "branch must not be in command args")
 	}
 }
 
-func TestNFSInitProvisionScript_NilConfig(t *testing.T) {
-	script := nfsInitProvisionScript(nil)
-	if !contains(script, "skipping") {
-		t.Error("nil config: expected skip message")
-	}
+func TestNFSProvisionCommand_NilConfig(t *testing.T) {
+	cmd := nfsProvisionCommand(nil)
+	assert.Equal(t, []string{"sciontool", "provision"}, cmd)
 }
 
-func TestNFSInitProvisionScript_FullClone(t *testing.T) {
+func TestNFSProvisionCommand_FullClone(t *testing.T) {
 	gc := &api.GitCloneConfig{
 		URL:   "https://github.com/example/repo.git",
-		Depth: -1, // full clone (depth < 0 means no --depth flag)
+		Depth: -1,
 	}
 
-	script := nfsInitProvisionScript(gc)
+	cmd := nfsProvisionCommand(gc)
 
-	// With depth -1, should not include --depth flag
-	if contains(script, "--depth") {
-		t.Error("full clone (depth=-1): should not include --depth flag")
-	}
+	assert.Equal(t, "sciontool", cmd[0])
+	assert.Equal(t, "provision", cmd[1])
+	assert.Contains(t, cmd, "--depth")
+	assert.Contains(t, cmd, "-1")
 }
 
-func TestNFSInitProvisionEnv(t *testing.T) {
+func TestNFSProvisionEnv(t *testing.T) {
 	t.Run("includes URL and branch", func(t *testing.T) {
 		gc := &api.GitCloneConfig{
 			URL:    "https://github.com/example/repo.git",
 			Branch: "main",
 		}
-		envs := nfsInitProvisionEnv(gc)
+		envs := nfsProvisionEnv(gc)
 		require.Len(t, envs, 2)
 		assert.Equal(t, "SCION_CLONE_URL", envs[0].Name)
 		assert.Equal(t, gc.URL, envs[0].Value)
@@ -395,46 +370,36 @@ func TestNFSInitProvisionEnv(t *testing.T) {
 		gc := &api.GitCloneConfig{
 			URL: "https://github.com/example/repo.git",
 		}
-		envs := nfsInitProvisionEnv(gc)
+		envs := nfsProvisionEnv(gc)
 		require.Len(t, envs, 1)
 		assert.Equal(t, "SCION_CLONE_URL", envs[0].Name)
 	})
 
 	t.Run("nil config returns nil", func(t *testing.T) {
-		envs := nfsInitProvisionEnv(nil)
+		envs := nfsProvisionEnv(nil)
 		assert.Nil(t, envs)
 	})
 }
 
-func TestNFSInitProvisionScript_BranchEnvVar(t *testing.T) {
+func TestNFSProvisionCommand_InjectionSafety(t *testing.T) {
 	gc := &api.GitCloneConfig{
 		URL:    "https://github.com/example/repo.git",
-		Branch: "feat/test",
-	}
-	script := nfsInitProvisionScript(gc)
-
-	// Branch must NOT appear in script text (injection prevention)
-	if contains(script, gc.Branch) {
-		t.Error("script contains inline branch — must use env var instead")
+		Branch: "feat/test; rm -rf /",
 	}
 
-	// Script must reference $SCION_CLONE_BRANCH env var
-	if !contains(script, "$SCION_CLONE_BRANCH") {
-		t.Error("script missing $SCION_CLONE_BRANCH env var reference")
+	cmd := nfsProvisionCommand(gc)
+
+	// Branch and URL must NOT appear in command args
+	for _, arg := range cmd {
+		assert.NotEqual(t, gc.URL, arg, "URL must not be in command args")
+		assert.NotEqual(t, gc.Branch, arg, "branch must not be in command args")
 	}
 }
 
-func contains(s, substr string) bool {
-	return len(s) > 0 && len(substr) > 0 && containsSubstring(s, substr)
-}
-
-func containsSubstring(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsHelper(s, substr))
-}
-
-func containsHelper(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
+// hasFlag checks if a string slice contains the given flag value.
+func hasFlag(args []string, val string) bool {
+	for _, a := range args {
+		if a == val {
 			return true
 		}
 	}
@@ -480,23 +445,16 @@ func TestBuildPod_NFSLockWinner_InjectsCloneInitContainer(t *testing.T) {
 		t.Errorf("init container name = %q, want %q", ic.Name, "workspace-provision")
 	}
 
-	script := ic.Command[2]
-	if !contains(script, "git") {
-		t.Error("winner init script should contain git clone command")
-	}
-	// URL must be passed via env var, not interpolated into script
-	if !contains(script, "$SCION_CLONE_URL") {
-		t.Error("winner init script should reference $SCION_CLONE_URL env var")
-	}
-	if contains(script, "https://github.com/example/repo.git") {
-		t.Error("winner init script must NOT contain inline URL (shell injection risk)")
-	}
-	if !contains(script, ".scion-provisioned") {
-		t.Error("winner init script should reference sentinel file")
-	}
-	// Must NOT contain wait-for-sentinel messaging
-	if contains(script, "Another node is provisioning") {
-		t.Error("winner init script should not contain wait-for-sentinel messaging")
+	// Winner must invoke sciontool provision (clone mode, no --wait-for-sentinel)
+	assert.Equal(t, "sciontool", ic.Command[0])
+	assert.Equal(t, "provision", ic.Command[1])
+	assert.False(t, hasFlag(ic.Command, "--wait-for-sentinel"),
+		"winner should NOT have --wait-for-sentinel flag")
+
+	// URL must NOT appear in command args (injection safety — passed via env)
+	for _, arg := range ic.Command {
+		assert.NotEqual(t, "https://github.com/example/repo.git", arg,
+			"URL must not be in command args")
 	}
 
 	// Verify env vars are set on the init container
@@ -536,20 +494,11 @@ func TestBuildPod_NFSLockLoser_InjectsWaitInitContainer(t *testing.T) {
 		t.Errorf("init container name = %q, want %q", ic.Name, "workspace-provision")
 	}
 
-	script := ic.Command[2]
-	// Wait script must poll for sentinel, NOT clone
-	if contains(script, "git") {
-		t.Error("loser init script should NOT contain git commands")
-	}
-	if !contains(script, ".scion-provisioned") {
-		t.Error("loser init script should reference sentinel file")
-	}
-	if !contains(script, "Another node is provisioning") {
-		t.Error("loser init script should contain wait messaging")
-	}
-	if !contains(script, "TIMEOUT=300") {
-		t.Error("loser init script should have bounded timeout")
-	}
+	// Loser must invoke sciontool provision --wait-for-sentinel
+	assert.Equal(t, "sciontool", ic.Command[0])
+	assert.Equal(t, "provision", ic.Command[1])
+	assert.True(t, hasFlag(ic.Command, "--wait-for-sentinel"),
+		"loser should have --wait-for-sentinel flag")
 }
 
 func TestBuildPod_NFSNoLocker_InjectsCloneInitContainer(t *testing.T) {
@@ -566,10 +515,12 @@ func TestBuildPod_NFSNoLocker_InjectsCloneInitContainer(t *testing.T) {
 		t.Fatalf("expected 1 init container, got %d", len(pod.Spec.InitContainers))
 	}
 
-	script := pod.Spec.InitContainers[0].Command[2]
-	if !contains(script, "git") {
-		t.Error("no-locker: should get clone init script (sentinel-only fallback)")
-	}
+	ic := pod.Spec.InitContainers[0]
+	// No-locker: should get clone init command (provision without --wait-for-sentinel)
+	assert.Equal(t, "sciontool", ic.Command[0])
+	assert.Equal(t, "provision", ic.Command[1])
+	assert.False(t, hasFlag(ic.Command, "--wait-for-sentinel"),
+		"no-locker: should get clone init command (sentinel-only fallback)")
 }
 
 func TestBuildPod_LocalBackend_LockLostIgnored(t *testing.T) {
@@ -589,27 +540,6 @@ func TestBuildPod_LocalBackend_LockLostIgnored(t *testing.T) {
 	// Local backend: no init containers regardless of lock flag
 	if len(pod.Spec.InitContainers) != 0 {
 		t.Errorf("local backend: expected no init containers, got %d", len(pod.Spec.InitContainers))
-	}
-}
-
-func TestNFSWaitForSentinelScript(t *testing.T) {
-	script := nfsWaitForSentinelScript()
-
-	if !contains(script, ".scion-provisioned") {
-		t.Error("wait script missing sentinel file reference")
-	}
-	if !contains(script, "TIMEOUT=300") {
-		t.Error("wait script missing timeout")
-	}
-	if !contains(script, "sleep") {
-		t.Error("wait script missing sleep/poll")
-	}
-	if !contains(script, "exit 1") {
-		t.Error("wait script should exit 1 on timeout")
-	}
-	// Must NOT contain git commands
-	if contains(script, "git") {
-		t.Error("wait script should NOT contain git commands")
 	}
 }
 
@@ -642,15 +572,15 @@ func TestBuildPod_NFSConcurrentProjects_IndependentLocks(t *testing.T) {
 		t.Fatalf("project B: expected 1 init container, got %d", len(podB.Spec.InitContainers))
 	}
 
-	// Both should be cloning (winner) init containers
-	scriptA := podA.Spec.InitContainers[0].Command[2]
-	scriptB := podB.Spec.InitContainers[0].Command[2]
-	if !contains(scriptA, "git") {
-		t.Error("project A: should get clone init script")
-	}
-	if !contains(scriptB, "git") {
-		t.Error("project B: should get clone init script")
-	}
+	// Both should be clone (winner) init containers — sciontool provision without --wait
+	icA := podA.Spec.InitContainers[0]
+	icB := podB.Spec.InitContainers[0]
+	assert.Equal(t, "sciontool", icA.Command[0])
+	assert.Equal(t, "provision", icA.Command[1])
+	assert.False(t, hasFlag(icA.Command, "--wait-for-sentinel"))
+	assert.Equal(t, "sciontool", icB.Command[0])
+	assert.Equal(t, "provision", icB.Command[1])
+	assert.False(t, hasFlag(icB.Command, "--wait-for-sentinel"))
 }
 
 func TestBuildPod_NFSSameProject_WinnerAndLoser(t *testing.T) {
@@ -674,20 +604,18 @@ func TestBuildPod_NFSSameProject_WinnerAndLoser(t *testing.T) {
 		t.Fatal("both pods should have exactly 1 init container")
 	}
 
-	winnerScript := podWinner.Spec.InitContainers[0].Command[2]
-	loserScript := podLoser.Spec.InitContainers[0].Command[2]
+	winnerCmd := podWinner.Spec.InitContainers[0].Command
+	loserCmd := podLoser.Spec.InitContainers[0].Command
 
-	// Winner clones
-	if !contains(winnerScript, "git") {
-		t.Error("winner should have clone script")
-	}
-	// Loser waits
-	if contains(loserScript, "git") {
-		t.Error("loser should NOT have clone script")
-	}
-	if !contains(loserScript, "Another node is provisioning") {
-		t.Error("loser should have wait-for-sentinel script")
-	}
+	// Winner: sciontool provision (clone mode)
+	assert.Equal(t, "sciontool", winnerCmd[0])
+	assert.Equal(t, "provision", winnerCmd[1])
+	assert.False(t, hasFlag(winnerCmd, "--wait-for-sentinel"))
+
+	// Loser: sciontool provision --wait-for-sentinel
+	assert.Equal(t, "sciontool", loserCmd[0])
+	assert.Equal(t, "provision", loserCmd[1])
+	assert.True(t, hasFlag(loserCmd, "--wait-for-sentinel"))
 }
 
 // --- N2-2b: Run()-level advisory lock integration tests ---
@@ -776,13 +704,11 @@ func TestRun_NFSLockLost_CreatesWaitPod(t *testing.T) {
 		t.Fatalf("expected 1 init container, got %d", len(pod.Spec.InitContainers))
 	}
 
-	script := pod.Spec.InitContainers[0].Command[2]
-	if strings.Contains(script, "git") {
-		t.Error("lock-lost pod should have wait-for-sentinel script, not clone script")
-	}
-	if !strings.Contains(script, "Another node is provisioning") {
-		t.Error("lock-lost pod should have wait-for-sentinel messaging")
-	}
+	cmd := pod.Spec.InitContainers[0].Command
+	assert.Equal(t, "sciontool", cmd[0])
+	assert.Equal(t, "provision", cmd[1])
+	assert.True(t, hasFlag(cmd, "--wait-for-sentinel"),
+		"lock-lost pod should have --wait-for-sentinel flag")
 }
 
 func TestRun_NFSLockWon_CreatesClonePod(t *testing.T) {
@@ -812,13 +738,11 @@ func TestRun_NFSLockWon_CreatesClonePod(t *testing.T) {
 		t.Fatalf("expected 1 init container, got %d", len(pod.Spec.InitContainers))
 	}
 
-	script := pod.Spec.InitContainers[0].Command[2]
-	if !strings.Contains(script, "git") {
-		t.Error("lock-won pod should have clone script")
-	}
-	if strings.Contains(script, "Another node is provisioning") {
-		t.Error("lock-won pod should not have wait-for-sentinel messaging")
-	}
+	cmd := pod.Spec.InitContainers[0].Command
+	assert.Equal(t, "sciontool", cmd[0])
+	assert.Equal(t, "provision", cmd[1])
+	assert.False(t, hasFlag(cmd, "--wait-for-sentinel"),
+		"lock-won pod should NOT have --wait-for-sentinel flag")
 }
 
 func TestRun_LocalBackend_NoLockAttempt(t *testing.T) {
