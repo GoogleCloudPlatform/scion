@@ -450,6 +450,8 @@ func (p *MessageBrokerProxy) deliverToUser(ctx context.Context, projectID, topic
 		Urgent:      msg.Urgent,
 		Broadcasted: msg.Broadcasted,
 		AgentID:     agentID,
+		Channel:     msg.Channel,
+		ThreadID:    msg.ThreadID,
 		CreatedAt:   time.Now(),
 	}
 	if err := p.store.CreateMessage(ctx, storeMsg); err != nil {

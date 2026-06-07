@@ -2002,6 +2002,8 @@ type OutboundMessageRequest struct {
 	Type        string   `json:"type,omitempty"`
 	Urgent      bool     `json:"urgent,omitempty"`
 	Attachments []string `json:"attachments,omitempty"`
+	Channel     string   `json:"channel,omitempty"`
+	ThreadID    string   `json:"thread_id,omitempty"`
 }
 
 // handleAgentOutboundMessage handles POST /api/v1/agents/{id}/outbound-message.
@@ -2113,6 +2115,8 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		Type:        req.Type,
 		Urgent:      req.Urgent,
 		AgentID:     agent.ID,
+		Channel:     req.Channel,
+		ThreadID:    req.ThreadID,
 		CreatedAt:   time.Now(),
 	}
 
@@ -2126,6 +2130,8 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		Type:        storeMsg.Type,
 		Urgent:      storeMsg.Urgent,
 		Attachments: req.Attachments,
+		Channel:     req.Channel,
+		ThreadID:    req.ThreadID,
 	}
 
 	// Route through broker when available; otherwise persist and publish
