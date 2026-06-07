@@ -18,7 +18,7 @@
  * Git Remote Display component
  *
  * Renders a git remote URL with trailing decorator icons:
- * - Workspace mode: folder (shared) or robot (clone per agent)
+ * - Workspace mode: folder (shared), diagram-3 (worktree per agent), or robot (clone per agent)
  * - GitHub App status badge
  *
  * Used in both project detail and project list views.
@@ -28,7 +28,7 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property } from 'lit/decorators.js';
 
 import type { Project } from '../../shared/types.js';
-import { isSharedWorkspace } from '../../shared/types.js';
+import { isSharedWorkspace, isWorktreeWorkspace } from '../../shared/types.js';
 
 @customElement('scion-git-remote-display')
 export class ScionGitRemoteDisplay extends LitElement {
@@ -98,10 +98,13 @@ export class ScionGitRemoteDisplay extends LitElement {
       ? html`<a href="${ghLink.url}" target="_blank" rel="noopener noreferrer" @click=${this.handleLinkClick}>${ghLink.display}</a>`
       : project.gitRemote;
 
+    const worktree = isWorktreeWorkspace(project);
     const shared = isSharedWorkspace(project);
     const workspaceModeIcon = shared
       ? html`<sl-tooltip content="Shared workspace"><sl-icon name="folder-fill" class="decorator-icon"></sl-icon></sl-tooltip>`
-      : html`<sl-tooltip content="Clone per agent"><sl-icon name="robot" class="decorator-icon"></sl-icon></sl-tooltip>`;
+      : worktree
+        ? html`<sl-tooltip content="Worktree per agent"><sl-icon name="diagram-3-fill" class="decorator-icon"></sl-icon></sl-tooltip>`
+        : html`<sl-tooltip content="Clone per agent"><sl-icon name="robot" class="decorator-icon"></sl-icon></sl-tooltip>`;
 
     const githubIcon = project.githubInstallationId != null
       ? html`<sl-tooltip content="GitHub App installed"><sl-icon name="github" class="decorator-icon"></sl-icon></sl-tooltip>`

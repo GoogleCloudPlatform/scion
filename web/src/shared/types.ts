@@ -174,6 +174,13 @@ export function isSharedWorkspace(project: Project): boolean {
 }
 
 /**
+ * Check whether a project uses worktree-per-agent workspace mode.
+ */
+export function isWorktreeWorkspace(project: Project): boolean {
+  return !!project.gitRemote && project.labels?.['scion.dev/workspace-mode'] === 'worktree-per-agent';
+}
+
+/**
  * Agent lifecycle phase (from canonical agent state model)
  */
 export type AgentPhase =

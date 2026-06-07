@@ -27,7 +27,7 @@ import { extractApiError } from '../../client/api.js';
 import '../shared/status-badge.js';
 
 type ProjectMode = 'git' | 'hub';
-type GitWorkspaceMode = 'per-agent' | 'shared';
+type GitWorkspaceMode = 'per-agent' | 'worktree-per-agent' | 'shared';
 
 @customElement('scion-page-project-create')
 export class ScionPageProjectCreate extends LitElement {
@@ -395,6 +395,9 @@ export class ScionPageProjectCreate extends LitElement {
         if (this.gitWorkspaceMode === 'shared') {
           labels['scion.dev/workspace-mode'] = 'shared';
           body.workspaceMode = 'shared';
+        } else if (this.gitWorkspaceMode === 'worktree-per-agent') {
+          labels['scion.dev/workspace-mode'] = 'worktree-per-agent';
+          body.workspaceMode = 'worktree-per-agent';
         }
         body.labels = labels;
         if (this.githubToken.trim()) {
@@ -549,20 +552,28 @@ export class ScionPageProjectCreate extends LitElement {
                       this.gitWorkspaceMode = (e.target as HTMLElement & { value: string }).value as GitWorkspaceMode;
                     }}
                   >
-                    <sl-radio-button value="per-agent">Per-agent clone</sl-radio-button>
+                    <sl-radio-button value="per-agent">Clone per agent</sl-radio-button>
+                    <sl-radio-button value="worktree-per-agent">Worktree per agent</sl-radio-button>
                     <sl-radio-button value="shared">Shared workspace</sl-radio-button>
                   </sl-radio-group>
                   <div class="hint">
                     ${this.gitWorkspaceMode === 'per-agent'
-                      ? 'Each agent gets its own independent clone of the repository.'
-                      : 'A single git clone is shared by all agents in this project.'}
+                      ? 'Each agent gets its own full clone. Most isolated.'
+                      : this.gitWorkspaceMode === 'worktree-per-agent'
+                        ? 'Agents share one base clone via git worktrees — fast startup, low disk.'
+                        : 'A single git clone is shared by all agents in this project.'}
                   </div>
-                  ${this.gitWorkspaceMode === 'shared'
+                  ${this.gitWorkspaceMode === 'worktree-per-agent'
                     ? html`<div class="workspace-mode-note">
-                        A single git clone will be created on the hub and shared by all agents.
-                        Agents can commit, push, and pull but must coordinate branch changes.
+                        A single base clone is created, and each agent gets a lightweight git worktree.
+                        Requires git ≥ 2.47 on the node.
                       </div>`
-                    : nothing}
+                    : this.gitWorkspaceMode === 'shared'
+                      ? html`<div class="workspace-mode-note">
+                          A single git clone will be created on the hub and shared by all agents.
+                          Agents can commit, push, and pull but must coordinate branch changes.
+                        </div>`
+                      : nothing}
                 </div>
               `
             : nothing}
