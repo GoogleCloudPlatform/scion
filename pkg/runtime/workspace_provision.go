@@ -27,10 +27,10 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
-// provisionSentinelFile is the name of the sentinel file written atomically
+// ProvisionSentinelFile is the name of the sentinel file written atomically
 // after a successful workspace clone/setup. Its presence short-circuits
 // subsequent ProvisionShared calls — the workspace is already ready.
-const provisionSentinelFile = ".scion-provisioned"
+const ProvisionSentinelFile = ".scion-provisioned"
 
 // provisionLockRetries is the number of times to retry acquiring the
 // per-project advisory lock before giving up. Each retry sleeps briefly
@@ -101,7 +101,7 @@ func ProvisionShared(in ProvisionInput) error {
 	}()
 
 	// --- Step 2: Check sentinel ---
-	sentinelPath := filepath.Join(sentinelDir, provisionSentinelFile)
+	sentinelPath := filepath.Join(sentinelDir, ProvisionSentinelFile)
 	if _, err := os.Stat(sentinelPath); err == nil {
 		// Already provisioned — skip to worktree setup if needed.
 		slog.Debug("nfsBackend.Provision: workspace already provisioned (sentinel exists)",

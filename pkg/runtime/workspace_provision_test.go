@@ -201,7 +201,7 @@ func TestNFSProvision_SharedPlain_NonGit(t *testing.T) {
 	}
 
 	// Verify sentinel was written.
-	sentinelPath := filepath.Join(filepath.Dir(res.HostPath), provisionSentinelFile)
+	sentinelPath := filepath.Join(filepath.Dir(res.HostPath), ProvisionSentinelFile)
 	if _, err := os.Stat(sentinelPath); err != nil {
 		t.Errorf("sentinel not written: %v", err)
 	}
@@ -256,7 +256,7 @@ func TestNFSProvision_SharedPlain_GitClone(t *testing.T) {
 	}
 
 	// Verify sentinel.
-	sentinelPath := filepath.Join(filepath.Dir(res.HostPath), provisionSentinelFile)
+	sentinelPath := filepath.Join(filepath.Dir(res.HostPath), ProvisionSentinelFile)
 	if _, err := os.Stat(sentinelPath); err != nil {
 		t.Errorf("sentinel not written: %v", err)
 	}
@@ -327,7 +327,7 @@ func TestNFSProvision_SentinelShortCircuits(t *testing.T) {
 		t.Fatal(err)
 	}
 	projectRoot := filepath.Dir(res.HostPath)
-	sentinelPath := filepath.Join(projectRoot, provisionSentinelFile)
+	sentinelPath := filepath.Join(projectRoot, ProvisionSentinelFile)
 	if err := os.WriteFile(sentinelPath, []byte("test"), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -659,13 +659,13 @@ func TestNFSProvision_DefaultSentinelDir_IsParent(t *testing.T) {
 	}
 
 	// Sentinel should be in the parent of HostPath (project root).
-	parentSentinel := filepath.Join(filepath.Dir(res.HostPath), provisionSentinelFile)
+	parentSentinel := filepath.Join(filepath.Dir(res.HostPath), ProvisionSentinelFile)
 	if _, err := os.Stat(parentSentinel); err != nil {
 		t.Errorf("default sentinel should be in parent dir: %v", err)
 	}
 
 	// Sentinel should NOT be inside workspace dir.
-	workspaceSentinel := filepath.Join(res.HostPath, provisionSentinelFile)
+	workspaceSentinel := filepath.Join(res.HostPath, ProvisionSentinelFile)
 	if _, err := os.Stat(workspaceSentinel); err == nil {
 		t.Errorf("default sentinel should not be inside workspace dir")
 	}
@@ -696,7 +696,7 @@ func TestNFSProvision_CustomSentinelDir(t *testing.T) {
 	}
 
 	// Sentinel should be inside the workspace dir.
-	workspaceSentinel := filepath.Join(res.HostPath, provisionSentinelFile)
+	workspaceSentinel := filepath.Join(res.HostPath, ProvisionSentinelFile)
 	if _, err := os.Stat(workspaceSentinel); err != nil {
 		t.Errorf("custom sentinel should be inside workspace dir: %v", err)
 	}
@@ -737,7 +737,7 @@ func TestNFSProvision_CustomSentinelDir_Idempotent(t *testing.T) {
 	}
 
 	// Sentinel exists in the custom dir.
-	sentinel := filepath.Join(res.HostPath, provisionSentinelFile)
+	sentinel := filepath.Join(res.HostPath, ProvisionSentinelFile)
 	if _, err := os.Stat(sentinel); err != nil {
 		t.Errorf("sentinel should exist in custom dir: %v", err)
 	}
@@ -747,7 +747,7 @@ func TestNFSProvision_CustomSentinelDir_Idempotent(t *testing.T) {
 
 func TestWriteSentinel_Atomic(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, provisionSentinelFile)
+	path := filepath.Join(dir, ProvisionSentinelFile)
 
 	if err := writeSentinel(path); err != nil {
 		t.Fatalf("writeSentinel: %v", err)
