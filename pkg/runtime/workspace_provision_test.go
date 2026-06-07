@@ -19,7 +19,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -149,24 +148,6 @@ func runIn(t *testing.T, dir, name string, args ...string) {
 	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("%s %v (in %s): %s\n%s", name, args, dir, err, output)
-	}
-}
-
-// --- ClonePerAgent rejection ---
-
-func TestNFSProvision_RejectsClonePerAgent(t *testing.T) {
-	err := ProvisionShared(ProvisionInput{
-		ProjectID: "proj-1",
-		Mode:      store.SharingModeClonePerAgent,
-		Resolved: ResolvedWorkspace{
-			HostPath: "/some/path",
-		},
-	})
-	if err == nil {
-		t.Fatal("expected error for ClonePerAgent on NFS backend")
-	}
-	if !strings.Contains(err.Error(), "ClonePerAgent") {
-		t.Errorf("error should mention ClonePerAgent, got: %v", err)
 	}
 }
 
@@ -554,31 +535,6 @@ func TestNFSProvision_NoLocker_DegradedMode(t *testing.T) {
 	}
 }
 
-// --- Missing required fields ---
-
-func TestNFSProvision_MissingHostPath(t *testing.T) {
-	err := ProvisionShared(ProvisionInput{
-		ProjectID: "proj-1",
-		Mode:      store.SharingModeSharedPlain,
-		Resolved:  ResolvedWorkspace{},
-	})
-	if err == nil {
-		t.Fatal("expected error for empty HostPath")
-	}
-}
-
-func TestNFSProvision_MissingProjectID(t *testing.T) {
-	err := ProvisionShared(ProvisionInput{
-		Mode: store.SharingModeSharedPlain,
-		Resolved: ResolvedWorkspace{
-			HostPath: "/some/path",
-		},
-	})
-	if err == nil {
-		t.Fatal("expected error for empty ProjectID")
-	}
-}
-
 // --- WorktreePerAgent missing AgentID ---
 
 func TestNFSProvision_WorktreePerAgent_MissingAgentID(t *testing.T) {
@@ -601,34 +557,6 @@ func TestNFSProvision_WorktreePerAgent_MissingAgentID(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected error for missing AgentID in WorktreePerAgent")
-	}
-}
-
-// --- sanitizeBranchName ---
-
-func TestSanitizeBranchName(t *testing.T) {
-	tests := []struct {
-		input string
-		want  string
-	}{
-		{"simple", "simple"},
-		{"with spaces", "with-spaces"},
-		{"with/slash", "with-slash"},
-		{"with..dots", "with-dots"},
-		{"with~tilde", "with-tilde"},
-		{".leading-dot", "leading-dot"},
-		{"-leading-dash", "leading-dash"},
-		{"trailing-.", "trailing"},
-		{"", "agent"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.input, func(t *testing.T) {
-			got := sanitizeBranchName(tt.input)
-			if got != tt.want {
-				t.Errorf("sanitizeBranchName(%q) = %q, want %q", tt.input, got, tt.want)
-			}
-		})
 	}
 }
 
@@ -740,29 +668,5 @@ func TestNFSProvision_CustomSentinelDir_Idempotent(t *testing.T) {
 	sentinel := filepath.Join(res.HostPath, ProvisionSentinelFile)
 	if _, err := os.Stat(sentinel); err != nil {
 		t.Errorf("sentinel should exist in custom dir: %v", err)
-	}
-}
-
-// --- writeSentinel ---
-
-func TestWriteSentinel_Atomic(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, ProvisionSentinelFile)
-
-	if err := writeSentinel(path); err != nil {
-		t.Fatalf("writeSentinel: %v", err)
-	}
-
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read sentinel: %v", err)
-	}
-	if !strings.Contains(string(data), "provisioned_at=") {
-		t.Errorf("sentinel content unexpected: %s", string(data))
-	}
-
-	// Overwrite should also work (idempotent).
-	if err := writeSentinel(path); err != nil {
-		t.Fatalf("writeSentinel overwrite: %v", err)
 	}
 }

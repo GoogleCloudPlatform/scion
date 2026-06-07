@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
-	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
+	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/spf13/cobra"
@@ -93,8 +93,8 @@ func runProvision() error {
 
 	mode := store.ResolveWorkspaceSharingMode(provisionMode)
 
-	in := runtime.ProvisionInput{
-		Resolved: runtime.ResolvedWorkspace{
+	in := provision.ProvisionInput{
+		Resolved: provision.ResolvedWorkspace{
 			HostPath: provisionWorkspace,
 		},
 		ProjectID:   projectID,
@@ -107,7 +107,7 @@ func runProvision() error {
 	}
 
 	log.Info("Provisioning workspace at %s (mode=%s, project=%s)", provisionWorkspace, mode, projectID)
-	if err := runtime.ProvisionShared(in); err != nil {
+	if err := provision.ProvisionShared(in); err != nil {
 		return fmt.Errorf("provision failed: %w", err)
 	}
 	log.Info("Workspace provisioned successfully")
@@ -115,7 +115,7 @@ func runProvision() error {
 }
 
 func runWaitForSentinel() error {
-	sentinelPath := filepath.Join(provisionWorkspace, runtime.ProvisionSentinelFile)
+	sentinelPath := filepath.Join(provisionWorkspace, provision.ProvisionSentinelFile)
 	timeout := time.Duration(provisionTimeout) * time.Second
 	interval := time.Duration(provisionPollInterval) * time.Second
 	deadline := time.Now().Add(timeout)

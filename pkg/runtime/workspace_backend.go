@@ -15,10 +15,15 @@
 package runtime
 
 import (
-	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
+
+// Backward-compatible type aliases for types moved to pkg/provision.
+type ProvisionInput = provision.ProvisionInput
+type ResolvedWorkspace = provision.ResolvedWorkspace
+type ResolvedSharedDir = provision.ResolvedSharedDir
 
 // WorkspaceBackend abstracts workspace storage so callers can resolve and
 // realize workspace paths without knowing whether storage is node-local or
@@ -82,81 +87,6 @@ type ResolveInput struct {
 	// localBackend to delegate to existing path-resolution helpers).
 	// Empty for nfsBackend (paths are derived from IDs, not host state).
 	ProjectDir string
-}
-
-// ResolvedWorkspace holds the deterministic path resolution result.
-type ResolvedWorkspace struct {
-	// HostPath is the absolute host-side path for the workspace.
-	// For localBackend this is the existing project path (e.g.
-	// ~/.scion.projects/<slug>/). For nfsBackend this is
-	// <MountRoot>/<shareID>/<ServerRelativePath>.
-	HostPath string
-
-	// ServerRelativePath is the path relative to the NFS export root.
-	// Empty for localBackend. For nfsBackend, e.g. "projects/<pid>/workspace".
-	ServerRelativePath string
-
-	// HostBase is the host mount prefix for NFS-backed workspaces
-	// (<MountRoot>/<shareID>). Empty for localBackend.
-	HostBase string
-
-	// SharedDirs maps shared-dir name → resolved path info.
-	SharedDirs map[string]ResolvedSharedDir
-
-	// Backend identifies which backend produced this resolution ("local" or "nfs").
-	Backend string
-}
-
-// ResolvedSharedDir holds path resolution for a single shared directory.
-type ResolvedSharedDir struct {
-	// HostPath is the absolute host path for this shared dir.
-	HostPath string
-
-	// ServerRelativePath is the NFS export-relative path (empty for local).
-	ServerRelativePath string
-}
-
-// ProvisionInput holds parameters for workspace provisioning.
-type ProvisionInput struct {
-	// Resolved is the output of a prior Resolve call.
-	Resolved ResolvedWorkspace
-
-	// ProjectID is the project's stable UUID.
-	ProjectID string
-
-	// AgentID is the agent's stable UUID.
-	AgentID string
-
-	// AgentName is a human-readable agent name (used for worktree branch names).
-	AgentName string
-
-	// Mode is the workspace sharing mode.
-	Mode store.WorkspaceSharingMode
-
-	// GitClone holds git-clone config when the project is git-backed; nil otherwise.
-	GitClone *api.GitCloneConfig
-
-	// Locker provides the per-project advisory lock for the NFS first-access
-	// provisioning guard (design §7, risk RN1). On Postgres-backed deployments
-	// this uses pg_try_advisory_lock(classid, objid) for cross-node mutual
-	// exclusion; on SQLite it's a no-op (single-writer serializes already).
-	//
-	// May be nil — nfsBackend.Provision degrades to sentinel-only guarding
-	// (correct for single-node but NOT safe for multi-node).
-	Locker store.AdvisoryLocker
-
-	// NFSUID and NFSGID are the stable NFS ownership values (default 1000:1000).
-	// Used for one-time chown of newly provisioned workspace directories.
-	NFSUID int
-	NFSGID int
-
-	// SentinelDir overrides the directory where the provisioning sentinel file
-	// (.scion-provisioned) is written and checked. When empty, defaults to
-	// filepath.Dir(Resolved.HostPath) — the project root parent of the workspace
-	// dir. This is needed for k8s init containers where only the workspace dir
-	// itself is mounted (not its parent), so the sentinel must live inside the
-	// workspace mount.
-	SentinelDir string
 }
 
 // RealizeInput holds parameters for emitting a runtime mount descriptor.

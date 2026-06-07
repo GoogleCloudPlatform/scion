@@ -1183,30 +1183,3 @@ func findVolumeMount(container *corev1.Container, name string) *corev1.VolumeMou
 	}
 	return nil
 }
-
-// --- acquireProvisionLock context cancellation test ---
-
-func TestAcquireProvisionLock_ContextCancellation(t *testing.T) {
-	// When the context is cancelled while waiting for a lock, acquireProvisionLock
-	// must return promptly with a context error instead of sleeping for the full
-	// retry duration (30 × 1s = 30s).
-	locker := &alwaysLoseLocker{} // lock never acquired
-
-	ctx, cancel := context.WithCancel(context.Background())
-	// Cancel immediately so the first select on ctx.Done() fires
-	cancel()
-
-	in := ProvisionInput{
-		ProjectID: "proj-cancel-test",
-		Locker:    locker,
-	}
-
-	start := time.Now()
-	_, err := acquireProvisionLock(ctx, in)
-	elapsed := time.Since(start)
-
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "context cancelled")
-	// Must return within 2s, not 30s (provisionLockRetries × provisionLockRetryDelay)
-	assert.Less(t, elapsed, 2*time.Second, "should return promptly on context cancellation, not wait for all retries")
-}
