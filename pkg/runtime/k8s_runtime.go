@@ -1254,21 +1254,21 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 	// injected — the sentinel provides idempotent protection but NOT
 	// cross-node mutual exclusion.
 	if config.WorkspaceBackendName == "nfs" && config.NFSPVClaimName != "" && config.GitCloneForInit != nil {
-		var initScript string
+		var initCommand []string
 		if config.nfsProvisionLockLost {
 			// Lock loser: wait for the sentinel written by the winning node's
 			// cloning init container. Does NOT clone.
-			initScript = nfsWaitForSentinelScript()
+			initCommand = []string{"sciontool", "provision", "--wait-for-sentinel"}
 		} else {
 			// Lock winner (or no locker available): clone if sentinel is absent,
-			// skip if already provisioned. The script is idempotent.
-			initScript = nfsInitProvisionScript(config.GitCloneForInit)
+			// skip if already provisioned. The command is idempotent.
+			initCommand = nfsProvisionCommand(config.GitCloneForInit)
 		}
 		initContainer := corev1.Container{
 			Name:    "workspace-provision",
 			Image:   config.Image,
-			Command: []string{"sh", "-c", initScript},
-			Env:     nfsInitProvisionEnv(config.GitCloneForInit),
+			Command: initCommand,
+			Env:     nfsProvisionEnv(config.GitCloneForInit),
 			VolumeMounts: []corev1.VolumeMount{
 				workspaceVolumeMount,
 			},
@@ -2418,6 +2418,41 @@ func nfsSharedDirSubPath(workspaceSubPath, sharedDirName string) string {
 	// We need "projects/<pid>/shared-dirs/<name>"
 	parent := filepath.Dir(workspaceSubPath) // "projects/<pid>"
 	return filepath.Join(parent, "shared-dirs", sharedDirName)
+}
+
+// nfsProvisionCommand builds the Command slice for the lock-winner init
+// container. It invokes `sciontool provision` with numeric/enum flags for
+// depth and mode. URL and branch are passed via env vars (nfsProvisionEnv)
+// to prevent shell injection.
+func nfsProvisionCommand(gc *api.GitCloneConfig) []string {
+	if gc == nil || gc.URL == "" {
+		return []string{"sciontool", "provision"}
+	}
+
+	depth := gc.Depth
+	if depth == 0 {
+		depth = 1
+	}
+
+	return []string{
+		"sciontool", "provision",
+		"--depth", fmt.Sprintf("%d", depth),
+	}
+}
+
+// nfsProvisionEnv returns the environment variables for the NFS init
+// container. URL and branch are passed as env vars to prevent shell injection.
+func nfsProvisionEnv(gc *api.GitCloneConfig) []corev1.EnvVar {
+	if gc == nil {
+		return nil
+	}
+	envs := []corev1.EnvVar{
+		{Name: "SCION_CLONE_URL", Value: gc.URL},
+	}
+	if gc.Branch != "" {
+		envs = append(envs, corev1.EnvVar{Name: "SCION_CLONE_BRANCH", Value: gc.Branch})
+	}
+	return envs
 }
 
 // nfsInitProvisionScript generates the shell script for the NFS workspace
