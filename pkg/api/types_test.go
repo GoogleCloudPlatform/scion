@@ -218,6 +218,42 @@ func TestVolumeMountValidate(t *testing.T) {
 			},
 			wantErr: "missing required field: bucket",
 		},
+		// cloudrun-volume tests
+		{
+			name: "valid cloudrun-volume",
+			vol: VolumeMount{
+				Target:     "/workspace",
+				Type:       "cloudrun-volume",
+				VolumeName: "workspace-vol",
+			},
+			wantErr: "",
+		},
+		{
+			name: "cloudrun-volume missing volume_name",
+			vol: VolumeMount{
+				Target: "/workspace",
+				Type:   "cloudrun-volume",
+			},
+			wantErr: "missing required field: volume_name",
+		},
+		// gke-shared-volume tests
+		{
+			name: "valid gke-shared-volume",
+			vol: VolumeMount{
+				Target:     "/workspace",
+				Type:       "gke-shared-volume",
+				VolumeName: "shared-ws",
+			},
+			wantErr: "",
+		},
+		{
+			name: "gke-shared-volume missing volume_name",
+			vol: VolumeMount{
+				Target: "/workspace",
+				Type:   "gke-shared-volume",
+			},
+			wantErr: "missing required field: volume_name",
+		},
 	}
 
 	for _, tt := range tests {

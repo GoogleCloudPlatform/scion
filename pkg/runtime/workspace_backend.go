@@ -100,15 +100,22 @@ type RealizeInput struct {
 
 // MountDescriptor describes how the container runtime should mount the
 // workspace. It is intentionally expressive enough to cover Docker bind
-// mounts (HostPath → Target), K8s PVC+subPath, and Cloud Run NFS volumes.
+// mounts (HostPath → Target), K8s PVC+subPath, Cloud Run NFS volumes,
+// and vendor-managed volume types.
+//
+// Type values:
+//   - "local":             Docker bind mount. Fields: HostPath, Target.
+//   - "nfs":               Literal NFS protocol mount (server + export).
+//     Fields: HostPath, Target, NFSServer, NFSExportPath, SubPath, PVClaimName.
+//   - "cloudrun-volume":   Cloud Run managed volume (in-memory or NFS-backed).
+//     Fields: Target, VolumeName, SubPath.
+//   - "gke-shared-volume": GKE-provided shared volume (e.g. Filestore CSI).
+//     Fields: Target, VolumeName, SubPath, PVClaimName.
 type MountDescriptor struct {
-	// Type is "local" for a host bind mount or "nfs" for a direct NFS mount.
-	// Tier-3 seam: future vendor mount types (e.g. "cloudrun-volume",
-	// "gke-shared-volume") will be added here as new Type values. "nfs"
-	// remains the literal NFS protocol mount.
+	// Type discriminates the mount kind. See type-level doc for valid values.
 	Type string
 
-	// HostPath is the source for a Docker bind mount (populated for local).
+	// HostPath is the source for a Docker bind mount (populated for local/nfs).
 	HostPath string
 
 	// Target is the container-side mount path (e.g. "/workspace").
@@ -120,11 +127,17 @@ type MountDescriptor struct {
 	// NFSExportPath is the server-side export path (populated for nfs type).
 	NFSExportPath string
 
-	// SubPath is the sub-path within the volume (K8s PVC subPath).
+	// SubPath is the sub-path within the volume (K8s PVC subPath,
+	// Cloud Run volume subPath, or GKE shared volume subPath).
 	SubPath string
 
-	// PVClaimName is the K8s PVC name for NFS-backed mounts.
+	// PVClaimName is the K8s PVC name (populated for nfs and gke-shared-volume).
 	PVClaimName string
+
+	// VolumeName is the Cloud Run volume name or GKE volume name.
+	// For cloudrun-volume: the Cloud Run volume resource name.
+	// For gke-shared-volume: the volume name referencing the PVC.
+	VolumeName string
 }
 
 // SelectWorkspaceBackend returns the appropriate WorkspaceBackend based on

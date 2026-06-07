@@ -249,14 +249,18 @@ type VolumeMount struct {
 	Source   string `json:"source" yaml:"source"`
 	Target   string `json:"target" yaml:"target"`
 	ReadOnly bool   `json:"read_only,omitempty" yaml:"read_only,omitempty"`
-	// Tier-3 seam: future vendor mount types (e.g. "cloudrun-volume",
-	// "gke-shared-volume") will be added as new Type values here. "nfs"
-	// remains the literal NFS protocol mount.
-	Type   string `json:"type,omitempty" yaml:"type,omitempty"`     // "local" (default), "gcs", or "nfs"
-	Bucket string `json:"bucket,omitempty" yaml:"bucket,omitempty"` // For GCS
-	Prefix string `json:"prefix,omitempty" yaml:"prefix,omitempty"` // For GCS
-	Mode   string `json:"mode,omitempty" yaml:"mode,omitempty"`     // Mount options
-	Server string `json:"server,omitempty" yaml:"server,omitempty"` // NFS: server host/IP
+	// Type discriminates the volume kind:
+	//   "local" (default) — host bind mount; requires Source.
+	//   "gcs"             — GCS FUSE mount; requires Bucket.
+	//   "nfs"             — literal NFS protocol mount; requires Server, Source.
+	//   "cloudrun-volume" — Cloud Run managed volume; requires VolumeName.
+	//   "gke-shared-volume" — GKE-provided shared volume (e.g. Filestore CSI PVC); requires VolumeName.
+	Type       string `json:"type,omitempty" yaml:"type,omitempty"`
+	Bucket     string `json:"bucket,omitempty" yaml:"bucket,omitempty"`           // GCS bucket name
+	Prefix     string `json:"prefix,omitempty" yaml:"prefix,omitempty"`           // GCS object prefix
+	Mode       string `json:"mode,omitempty" yaml:"mode,omitempty"`               // Mount options
+	Server     string `json:"server,omitempty" yaml:"server,omitempty"`           // NFS: server host/IP
+	VolumeName string `json:"volume_name,omitempty" yaml:"volume_name,omitempty"` // Cloud Run / GKE volume name
 }
 
 // Validate checks that a VolumeMount has the required fields and valid values.
@@ -282,8 +286,16 @@ func (v VolumeMount) Validate() error {
 		if v.Source == "" {
 			return fmt.Errorf("NFS volume mount for target %q missing required field: source (server export path)", v.Target)
 		}
+	case "cloudrun-volume":
+		if v.VolumeName == "" {
+			return fmt.Errorf("cloudrun-volume mount for target %q missing required field: volume_name", v.Target)
+		}
+	case "gke-shared-volume":
+		if v.VolumeName == "" {
+			return fmt.Errorf("gke-shared-volume mount for target %q missing required field: volume_name", v.Target)
+		}
 	default:
-		return fmt.Errorf("volume mount for target %q has invalid type %q (must be \"local\", \"gcs\", or \"nfs\")", v.Target, v.Type)
+		return fmt.Errorf("volume mount for target %q has invalid type %q (must be \"local\", \"gcs\", \"nfs\", \"cloudrun-volume\", or \"gke-shared-volume\")", v.Target, v.Type)
 	}
 
 	return nil
