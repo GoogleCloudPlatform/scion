@@ -144,17 +144,31 @@ type MountDescriptor struct {
 // configuration and workspace sharing mode. The selection rules (design §3.1):
 //
 //   - nfsBackend when cfg.Backend == "nfs" AND mode is SharedPlain or WorktreePerAgent.
-//   - localBackend otherwise — including ClonePerAgent even when Backend=nfs
+//   - cloudrunVolumeBackend when cfg.Backend == "cloudrun-volume" AND mode is SharedPlain or WorktreePerAgent.
+//   - gkeSharedVolumeBackend when cfg.Backend == "gke-shared-volume" AND mode is SharedPlain or WorktreePerAgent.
+//   - localBackend otherwise — including ClonePerAgent even when Backend is a shared type
 //     (the deliberate node-local escape hatch).
 //   - Backend empty or "local" always yields localBackend.
 func SelectWorkspaceBackend(cfg *config.V1WorkspaceStorageConfig, mode store.WorkspaceSharingMode) WorkspaceBackend {
-	if cfg != nil && cfg.Backend == "nfs" {
-		switch mode {
-		case store.SharingModeSharedPlain, store.SharingModeWorktreePerAgent:
-			return NewNFSBackend(cfg.NFS)
+	if cfg != nil {
+		switch cfg.Backend {
+		case "nfs":
+			switch mode {
+			case store.SharingModeSharedPlain, store.SharingModeWorktreePerAgent:
+				return NewNFSBackend(cfg.NFS)
+			}
+		case "cloudrun-volume":
+			switch mode {
+			case store.SharingModeSharedPlain, store.SharingModeWorktreePerAgent:
+				return NewCloudRunVolumeBackend(cfg.CloudRunVolume)
+			}
+		case "gke-shared-volume":
+			switch mode {
+			case store.SharingModeSharedPlain, store.SharingModeWorktreePerAgent:
+				return NewGKESharedVolumeBackend(cfg.GKESharedVolume)
+			}
 		}
-		// ClonePerAgent (and any unknown mode) → local, even when Backend=nfs.
 	}
-	// Backend empty, "local", or nil config → local.
+	// Backend empty, "local", nil config, or ClonePerAgent → local.
 	return NewLocalBackend()
 }

@@ -457,9 +457,12 @@ type V1StorageConfig struct {
 // V1WorkspaceStorageConfig selects the workspace storage backend.
 // Backend defaults to "local" (today's node-local behavior). When set to "nfs",
 // the NFS sub-block configures shared network-attached workspace storage.
+// "cloudrun-volume" and "gke-shared-volume" select vendor-managed volume backends.
 type V1WorkspaceStorageConfig struct {
-	Backend string       `json:"backend,omitempty" yaml:"backend,omitempty" koanf:"backend"` // "local" (default) | "nfs"
-	NFS     *V1NFSConfig `json:"nfs,omitempty" yaml:"nfs,omitempty" koanf:"nfs"`
+	Backend         string                   `json:"backend,omitempty" yaml:"backend,omitempty" koanf:"backend"` // "local" | "nfs" | "cloudrun-volume" | "gke-shared-volume"
+	NFS             *V1NFSConfig             `json:"nfs,omitempty" yaml:"nfs,omitempty" koanf:"nfs"`
+	CloudRunVolume  *V1CloudRunVolumeConfig  `json:"cloudrun_volume,omitempty" yaml:"cloudrun_volume,omitempty" koanf:"cloudrun_volume"`
+	GKESharedVolume *V1GKESharedVolumeConfig `json:"gke_shared_volume,omitempty" yaml:"gke_shared_volume,omitempty" koanf:"gke_shared_volume"`
 }
 
 // V1NFSConfig holds NFS workspace storage settings.
@@ -489,6 +492,27 @@ type V1NFSShare struct {
 	Server string `json:"server,omitempty" yaml:"server,omitempty" koanf:"server"`    // e.g. 10.0.0.2 or Filestore IP
 	Export string `json:"export,omitempty" yaml:"export,omitempty" koanf:"export"`    // server export path, e.g. /scion-workspaces
 	PVName string `json:"pv_name,omitempty" yaml:"pv_name,omitempty" koanf:"pv_name"` // K8s static PV+subPath strategy
+}
+
+// V1CloudRunVolumeConfig holds Cloud Run managed volume settings.
+// Cloud Run volumes are declared in the service spec and mounted by the
+// platform — no host path or NFS server is needed.
+type V1CloudRunVolumeConfig struct {
+	// VolumeName is the Cloud Run volume resource name declared in the service YAML.
+	VolumeName string `json:"volume_name,omitempty" yaml:"volume_name,omitempty" koanf:"volume_name"`
+	// SubPathRoot is the sub-directory prefix within the volume. Default "projects".
+	SubPathRoot string `json:"subpath_root,omitempty" yaml:"subpath_root,omitempty" koanf:"subpath_root"`
+}
+
+// V1GKESharedVolumeConfig holds GKE-provided shared volume settings
+// (e.g. a Filestore CSI-backed PVC that GKE manages).
+type V1GKESharedVolumeConfig struct {
+	// VolumeName is the K8s volume name referencing the PVC.
+	VolumeName string `json:"volume_name,omitempty" yaml:"volume_name,omitempty" koanf:"volume_name"`
+	// PVClaimName is the PVC name bound to the GKE-managed shared storage.
+	PVClaimName string `json:"pv_claim_name,omitempty" yaml:"pv_claim_name,omitempty" koanf:"pv_claim_name"`
+	// SubPathRoot is the sub-directory prefix within the volume. Default "projects".
+	SubPathRoot string `json:"subpath_root,omitempty" yaml:"subpath_root,omitempty" koanf:"subpath_root"`
 }
 
 // ApplyNFSDefaults fills default values for NFS sub-fields when Backend is "nfs".

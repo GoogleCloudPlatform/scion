@@ -655,6 +655,283 @@ func TestBackendNames(t *testing.T) {
 	}
 }
 
+// --- SelectWorkspaceBackend tests for new backends ---
+
+func TestSelectWorkspaceBackend_CloudRunVolume(t *testing.T) {
+	cfg := &config.V1WorkspaceStorageConfig{
+		Backend: "cloudrun-volume",
+		CloudRunVolume: &config.V1CloudRunVolumeConfig{
+			VolumeName:  "workspace-vol",
+			SubPathRoot: "projects",
+		},
+	}
+
+	tests := []struct {
+		name        string
+		mode        store.WorkspaceSharingMode
+		wantBackend string
+	}{
+		{"SharedPlain", store.SharingModeSharedPlain, "cloudrun-volume"},
+		{"WorktreePerAgent", store.SharingModeWorktreePerAgent, "cloudrun-volume"},
+		{"ClonePerAgent", store.SharingModeClonePerAgent, "local"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			b := SelectWorkspaceBackend(cfg, tt.mode)
+			if got := b.Name(); got != tt.wantBackend {
+				t.Errorf("SelectWorkspaceBackend(cloudrun-volume, %s) = %q, want %q", tt.mode, got, tt.wantBackend)
+			}
+		})
+	}
+}
+
+func TestSelectWorkspaceBackend_GKESharedVolume(t *testing.T) {
+	cfg := &config.V1WorkspaceStorageConfig{
+		Backend: "gke-shared-volume",
+		GKESharedVolume: &config.V1GKESharedVolumeConfig{
+			VolumeName:  "shared-ws",
+			PVClaimName: "shared-pvc",
+			SubPathRoot: "projects",
+		},
+	}
+
+	tests := []struct {
+		name        string
+		mode        store.WorkspaceSharingMode
+		wantBackend string
+	}{
+		{"SharedPlain", store.SharingModeSharedPlain, "gke-shared-volume"},
+		{"WorktreePerAgent", store.SharingModeWorktreePerAgent, "gke-shared-volume"},
+		{"ClonePerAgent", store.SharingModeClonePerAgent, "local"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			b := SelectWorkspaceBackend(cfg, tt.mode)
+			if got := b.Name(); got != tt.wantBackend {
+				t.Errorf("SelectWorkspaceBackend(gke-shared-volume, %s) = %q, want %q", tt.mode, got, tt.wantBackend)
+			}
+		})
+	}
+}
+
+// --- CloudRunVolume Backend tests ---
+
+func TestCloudRunVolumeBackendResolve(t *testing.T) {
+	cfg := &config.V1CloudRunVolumeConfig{
+		VolumeName:  "workspace-vol",
+		SubPathRoot: "projects",
+	}
+
+	b := NewCloudRunVolumeBackend(cfg)
+	res, err := b.Resolve(ResolveInput{
+		ProjectID:      "proj-abc-123",
+		Mode:           store.SharingModeSharedPlain,
+		SharedDirNames: []string{"data"},
+	})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+
+	if res.Backend != "cloudrun-volume" {
+		t.Errorf("Backend = %q, want %q", res.Backend, "cloudrun-volume")
+	}
+	wantRelPath := filepath.Join("projects", "proj-abc-123", "workspace")
+	if res.ServerRelativePath != wantRelPath {
+		t.Errorf("ServerRelativePath = %q, want %q", res.ServerRelativePath, wantRelPath)
+	}
+	if res.HostPath != "" {
+		t.Errorf("HostPath = %q, want empty for cloudrun-volume", res.HostPath)
+	}
+
+	sd, ok := res.SharedDirs["data"]
+	if !ok {
+		t.Fatal("shared dir 'data' not found")
+	}
+	wantSDRel := filepath.Join("projects", "proj-abc-123", "shared-dirs", "data")
+	if sd.ServerRelativePath != wantSDRel {
+		t.Errorf("SharedDirs[data].ServerRelativePath = %q, want %q", sd.ServerRelativePath, wantSDRel)
+	}
+}
+
+func TestCloudRunVolumeBackendResolve_Errors(t *testing.T) {
+	t.Run("missing ProjectID", func(t *testing.T) {
+		b := NewCloudRunVolumeBackend(&config.V1CloudRunVolumeConfig{VolumeName: "v"})
+		_, err := b.Resolve(ResolveInput{Mode: store.SharingModeSharedPlain})
+		if err == nil {
+			t.Error("expected error for missing ProjectID")
+		}
+	})
+	t.Run("nil config", func(t *testing.T) {
+		b := NewCloudRunVolumeBackend(nil)
+		_, err := b.Resolve(ResolveInput{ProjectID: "p", Mode: store.SharingModeSharedPlain})
+		if err == nil {
+			t.Error("expected error for nil config")
+		}
+	})
+	t.Run("missing volume_name", func(t *testing.T) {
+		b := NewCloudRunVolumeBackend(&config.V1CloudRunVolumeConfig{})
+		_, err := b.Resolve(ResolveInput{ProjectID: "p", Mode: store.SharingModeSharedPlain})
+		if err == nil {
+			t.Error("expected error for missing volume_name")
+		}
+	})
+}
+
+func TestCloudRunVolumeBackendRealize(t *testing.T) {
+	cfg := &config.V1CloudRunVolumeConfig{
+		VolumeName:  "workspace-vol",
+		SubPathRoot: "projects",
+	}
+
+	b := NewCloudRunVolumeBackend(cfg)
+	desc, err := b.Realize(RealizeInput{
+		Resolved: ResolvedWorkspace{
+			ServerRelativePath: "projects/proj1/workspace",
+			Backend:            "cloudrun-volume",
+		},
+		ContainerWorkspace: "/workspace",
+	})
+	if err != nil {
+		t.Fatalf("Realize: %v", err)
+	}
+
+	if desc.Type != "cloudrun-volume" {
+		t.Errorf("Type = %q, want %q", desc.Type, "cloudrun-volume")
+	}
+	if desc.VolumeName != "workspace-vol" {
+		t.Errorf("VolumeName = %q, want %q", desc.VolumeName, "workspace-vol")
+	}
+	if desc.SubPath != "projects/proj1/workspace" {
+		t.Errorf("SubPath = %q, want %q", desc.SubPath, "projects/proj1/workspace")
+	}
+	if desc.Target != "/workspace" {
+		t.Errorf("Target = %q, want %q", desc.Target, "/workspace")
+	}
+	if desc.HostPath != "" {
+		t.Errorf("HostPath = %q, want empty for cloudrun-volume", desc.HostPath)
+	}
+}
+
+// --- GKESharedVolume Backend tests ---
+
+func TestGKESharedVolumeBackendResolve(t *testing.T) {
+	cfg := &config.V1GKESharedVolumeConfig{
+		VolumeName:  "shared-ws",
+		PVClaimName: "shared-pvc",
+		SubPathRoot: "projects",
+	}
+
+	b := NewGKESharedVolumeBackend(cfg)
+	res, err := b.Resolve(ResolveInput{
+		ProjectID:      "proj-abc-123",
+		Mode:           store.SharingModeSharedPlain,
+		SharedDirNames: []string{"cache"},
+	})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+
+	if res.Backend != "gke-shared-volume" {
+		t.Errorf("Backend = %q, want %q", res.Backend, "gke-shared-volume")
+	}
+	wantRelPath := filepath.Join("projects", "proj-abc-123", "workspace")
+	if res.ServerRelativePath != wantRelPath {
+		t.Errorf("ServerRelativePath = %q, want %q", res.ServerRelativePath, wantRelPath)
+	}
+	if res.HostPath != "" {
+		t.Errorf("HostPath = %q, want empty for gke-shared-volume", res.HostPath)
+	}
+
+	sd, ok := res.SharedDirs["cache"]
+	if !ok {
+		t.Fatal("shared dir 'cache' not found")
+	}
+	wantSDRel := filepath.Join("projects", "proj-abc-123", "shared-dirs", "cache")
+	if sd.ServerRelativePath != wantSDRel {
+		t.Errorf("SharedDirs[cache].ServerRelativePath = %q, want %q", sd.ServerRelativePath, wantSDRel)
+	}
+}
+
+func TestGKESharedVolumeBackendResolve_Errors(t *testing.T) {
+	t.Run("missing ProjectID", func(t *testing.T) {
+		b := NewGKESharedVolumeBackend(&config.V1GKESharedVolumeConfig{VolumeName: "v"})
+		_, err := b.Resolve(ResolveInput{Mode: store.SharingModeSharedPlain})
+		if err == nil {
+			t.Error("expected error for missing ProjectID")
+		}
+	})
+	t.Run("nil config", func(t *testing.T) {
+		b := NewGKESharedVolumeBackend(nil)
+		_, err := b.Resolve(ResolveInput{ProjectID: "p", Mode: store.SharingModeSharedPlain})
+		if err == nil {
+			t.Error("expected error for nil config")
+		}
+	})
+	t.Run("missing volume_name", func(t *testing.T) {
+		b := NewGKESharedVolumeBackend(&config.V1GKESharedVolumeConfig{})
+		_, err := b.Resolve(ResolveInput{ProjectID: "p", Mode: store.SharingModeSharedPlain})
+		if err == nil {
+			t.Error("expected error for missing volume_name")
+		}
+	})
+}
+
+func TestGKESharedVolumeBackendRealize(t *testing.T) {
+	cfg := &config.V1GKESharedVolumeConfig{
+		VolumeName:  "shared-ws",
+		PVClaimName: "shared-pvc",
+		SubPathRoot: "projects",
+	}
+
+	b := NewGKESharedVolumeBackend(cfg)
+	desc, err := b.Realize(RealizeInput{
+		Resolved: ResolvedWorkspace{
+			ServerRelativePath: "projects/proj1/workspace",
+			Backend:            "gke-shared-volume",
+		},
+		ContainerWorkspace: "/workspace",
+	})
+	if err != nil {
+		t.Fatalf("Realize: %v", err)
+	}
+
+	if desc.Type != "gke-shared-volume" {
+		t.Errorf("Type = %q, want %q", desc.Type, "gke-shared-volume")
+	}
+	if desc.VolumeName != "shared-ws" {
+		t.Errorf("VolumeName = %q, want %q", desc.VolumeName, "shared-ws")
+	}
+	if desc.PVClaimName != "shared-pvc" {
+		t.Errorf("PVClaimName = %q, want %q", desc.PVClaimName, "shared-pvc")
+	}
+	if desc.SubPath != "projects/proj1/workspace" {
+		t.Errorf("SubPath = %q, want %q", desc.SubPath, "projects/proj1/workspace")
+	}
+	if desc.Target != "/workspace" {
+		t.Errorf("Target = %q, want %q", desc.Target, "/workspace")
+	}
+	if desc.HostPath != "" {
+		t.Errorf("HostPath = %q, want empty for gke-shared-volume", desc.HostPath)
+	}
+}
+
+func TestGKESharedVolumeBackendRealize_DefaultTarget(t *testing.T) {
+	cfg := &config.V1GKESharedVolumeConfig{VolumeName: "v"}
+	b := NewGKESharedVolumeBackend(cfg)
+	desc, err := b.Realize(RealizeInput{
+		Resolved:           ResolvedWorkspace{Backend: "gke-shared-volume"},
+		ContainerWorkspace: "",
+	})
+	if err != nil {
+		t.Fatalf("Realize: %v", err)
+	}
+	if desc.Target != "/workspace" {
+		t.Errorf("Target = %q, want /workspace (default)", desc.Target)
+	}
+}
+
 // --- ProvisionShared tests (from workspace_backend_test.go) ---
 
 func TestProvisionShared_NonGit(t *testing.T) {
