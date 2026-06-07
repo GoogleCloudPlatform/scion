@@ -7,6 +7,7 @@ A standalone tool that replays agent activity from Google Cloud Logging exports 
 - **File graph** -- force-directed graph of the project's file/directory tree (center)
 - **Agent ring** -- agents distributed radially around the file graph, with color-coded state icons
 - **Messages** -- transient directional pulse lines between agents, fading after ~0.5s
+- **Agent Communications panel** -- right-side scrolling transcript of inter-agent messages, kept in sync with playback (and rebuilt on seek); broadcasts are highlighted and de-duplicated. Collapse it with the −/+ button. It reads the same `message` events that drive the on-graph pulses, so no extra data source is needed.
 - **File edits** -- particles traveling from agent to file node; new files materialize with an expand effect
 - **Playback controls** -- play/pause, speed (1x--100x), time scrubber, agent and event type filters
 

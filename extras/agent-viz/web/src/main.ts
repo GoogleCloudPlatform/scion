@@ -22,6 +22,7 @@ import { FileEditRenderer } from './files';
 import { DestroyBeamRenderer } from './destroy-beam';
 import { CreateBeamRenderer } from './create-beam';
 import { PlaybackControls } from './playback';
+import { CommsPanel } from './comms';
 import type {
   PlaybackManifest,
   PlaybackEvent,
@@ -41,6 +42,7 @@ let fileEditRenderer: FileEditRenderer;
 let destroyBeamRenderer: DestroyBeamRenderer;
 let createBeamRenderer: CreateBeamRenderer;
 let playbackControls: PlaybackControls;
+let commsPanel: CommsPanel;
 let overlayCanvas: HTMLCanvasElement;
 let overlayCtx: CanvasRenderingContext2D;
 let animFrameId: number;
@@ -86,6 +88,10 @@ function init(): void {
   messageRenderer.setAgentRing(agentRing);
   destroyBeamRenderer.setAgentRing(agentRing);
   createBeamRenderer.setAgentRing(agentRing);
+
+  // Agent Communications transcript panel — consumes the same message events.
+  commsPanel = new CommsPanel();
+  commsPanel.setAgentRing(agentRing);
 
   // WebSocket
   const ws = new WSClient();
@@ -157,6 +163,10 @@ function handleManifest(m: PlaybackManifest): void {
   playbackControls.setTimeRange(m.timeRange.start, m.timeRange.end);
   playbackControls.setAgents(m.agents);
 
+  // Anchor relative timestamps in the communications panel to playback start.
+  commsPanel.setStartTime(m.timeRange.start);
+  commsPanel.reset();
+
   // Update info display
   updateInfoDisplay();
 }
@@ -187,6 +197,7 @@ function resetState(): void {
   fileEditRenderer.reset();
   destroyBeamRenderer.reset();
   createBeamRenderer.reset();
+  commsPanel.reset();
 
   // Re-init empty state
   const w = overlayCanvas.width;
@@ -201,7 +212,9 @@ function handleEventInstant(evt: PlaybackEvent): void {
       agentRing.updateState(evt.data as AgentStateEvent);
       break;
     case 'message':
-      // Skip message animations during replay
+      // Skip the on-graph pulse animation during replay, but still record the
+      // message in the transcript so the panel reflects the seek position.
+      commsPanel.addMessage(evt.data as MessageEvent, evt.timestamp, { animate: false });
       break;
     case 'file_edit':
     case 'file_read': {
@@ -248,6 +261,7 @@ function handleEvent(evt: PlaybackEvent): void {
       break;
     case 'message':
       messageRenderer.addMessage(evt.data as MessageEvent, agentRing);
+      commsPanel.addMessage(evt.data as MessageEvent, evt.timestamp);
       break;
     case 'file_edit':
     case 'file_read': {
