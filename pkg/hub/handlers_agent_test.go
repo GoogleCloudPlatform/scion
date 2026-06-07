@@ -4870,3 +4870,97 @@ func TestBrokerHeartbeat_RejectsPhaseRegression(t *testing.T) {
 	assert.Equal(t, string(state.PhaseRunning), updated.Phase,
 		"heartbeat should not regress phase from running to starting")
 }
+
+// TestAgentStatusUpdate_SuspendedIsStickyAgainstStatusPost verifies that a
+// dying container's async sciontool /status POST (phase=stopped,
+// activity=crashed) cannot clobber a suspended agent's phase. If it did, a
+// subsequent /start would not see suspended and would skip the harness
+// --continue (resume) flag.
+func TestAgentStatusUpdate_SuspendedIsStickyAgainstStatusPost(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	project := &store.Project{ID: tid("proj-susp-status"), Name: "Suspend Status Project", Slug: "susp-status-project"}
+	require.NoError(t, s.CreateProject(ctx, project))
+
+	agent := &store.Agent{
+		ID: tid("agent-susp-status"), Slug: "susp-status-slug", Name: "Suspend Status Agent",
+		ProjectID: project.ID, Phase: string(state.PhaseSuspended),
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	tokenSvc := srv.GetAgentTokenService()
+	require.NotNil(t, tokenSvc)
+	token, err := tokenSvc.GenerateAgentToken(agent.ID, project.ID, []AgentTokenScope{ScopeAgentStatusUpdate}, nil)
+	require.NoError(t, err)
+
+	// The dying container reports stopped+crashed via the async status POST.
+	status := store.AgentStatusUpdate{
+		Phase:    string(state.PhaseStopped),
+		Activity: string(state.ActivityCrashed),
+	}
+	body, _ := json.Marshal(status)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+agent.ID+"/status", bytes.NewReader(body))
+	req.Header.Set("X-Scion-Agent-Token", token)
+	req.Header.Set("Content-Type", "application/json")
+
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusOK, rec.Code)
+
+	// Phase should remain suspended and no crashed activity should stick.
+	updated, err := s.GetAgent(ctx, agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, string(state.PhaseSuspended), updated.Phase,
+		"suspended phase must be sticky against async status POST")
+	assert.NotEqual(t, string(state.ActivityCrashed), updated.Activity,
+		"crashed activity must not stick on a suspended agent")
+}
+
+// TestBrokerHeartbeat_DoesNotRevertSuspendedAgent verifies that a racing broker
+// heartbeat reporting stopped/crashed for a suspended agent leaves it suspended.
+func TestBrokerHeartbeat_DoesNotRevertSuspendedAgent(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	project := &store.Project{ID: tid("proj-susp-hb"), Name: "Suspend HB Project", Slug: "susp-hb-project"}
+	require.NoError(t, s.CreateProject(ctx, project))
+
+	broker := &store.RuntimeBroker{
+		ID: tid("broker-susp-hb"), Name: "Suspend HB Broker", Slug: "susp-hb-broker",
+		Status: store.BrokerStatusOnline,
+	}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+
+	agent := &store.Agent{
+		ID: tid("agent-susp-hb"), Slug: "susp-hb-slug", Name: "Suspend HB Agent",
+		ProjectID: project.ID, RuntimeBrokerID: broker.ID,
+		Phase: string(state.PhaseSuspended),
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	// The dying container's broker reports stopped+crashed via heartbeat.
+	hb := brokerHeartbeatRequest{
+		Status: "online",
+		Projects: []brokerProjectHeartbeat{{
+			ProjectID:  project.ID,
+			AgentCount: 1,
+			Agents: []brokerAgentHeartbeat{{
+				Slug:            agent.Slug,
+				Phase:           string(state.PhaseStopped),
+				Activity:        string(state.ActivityCrashed),
+				ContainerStatus: "exited",
+			}},
+		}},
+	}
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/runtime-brokers/"+broker.ID+"/heartbeat", hb)
+	assert.Equal(t, http.StatusOK, rec.Code)
+
+	// Agent should remain suspended — heartbeat must not revert the suspended phase.
+	updated, err := s.GetAgent(ctx, agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, string(state.PhaseSuspended), updated.Phase,
+		"heartbeat should not revert suspended phase")
+	assert.NotEqual(t, string(state.ActivityCrashed), updated.Activity,
+		"heartbeat should not stick crashed activity on a suspended agent")
+}

@@ -2988,6 +2988,19 @@ func (s *Server) updateAgentStatus(w http.ResponseWriter, r *http.Request, id st
 func guardAgentPhaseTransition(agent *store.Agent, status *store.AgentStatusUpdate) {
 	currentPhase := state.Phase(agent.Phase)
 
+	// Guard 0: suspended is sticky against async status updates. When an agent
+	// is suspended, its container is being torn down, and the dying container's
+	// async sciontool /status POST (e.g. phase=stopped, activity=crashed) must
+	// not clobber the suspended phase — otherwise a subsequent /start would not
+	// see suspended and would skip the harness --continue (resume) flag.
+	// Only explicit start/stop lifecycle actions may leave the suspended phase,
+	// and those write phase directly without going through this guard.
+	if currentPhase == state.PhaseSuspended {
+		status.Phase = ""
+		status.Activity = ""
+		return
+	}
+
 	// Guard 1: reject phase regressions within the forward-progress lifecycle.
 	if status.Phase != "" {
 		newPhase := state.Phase(status.Phase)
@@ -6348,8 +6361,20 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 			agentInTerminalPhase := agent.Phase == string(state.PhaseStopped) ||
 				agent.Phase == string(state.PhaseError)
 
+			// Suspended is sticky: a suspended agent's container is being torn
+			// down, so a racing heartbeat reporting stopped/crashed must not
+			// revert the suspended phase (which would defeat resume on the next
+			// /start). Like the terminal case, suppress any phase change and any
+			// terminal activity (crashed, etc.) from the heartbeat. Only explicit
+			// start/stop lifecycle actions may leave the suspended phase.
+			agentSuspended := agent.Phase == string(state.PhaseSuspended)
+
 			if agentHB.Phase != "" {
-				if agentInTerminalPhase {
+				if agentSuspended {
+					// Do not let the heartbeat change the phase or propagate
+					// terminal activities while suspended; leave statusUpdate.Phase
+					// unset so the hub's authoritative suspended phase is kept.
+				} else if agentInTerminalPhase {
 					// Keep the hub's authoritative terminal phase; only
 					// allow the heartbeat to confirm it (not revert it).
 					if agentHB.Phase == agent.Phase {
@@ -6396,13 +6421,13 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 						}
 					}
 				}
-			} else if !agentInTerminalPhase {
+			} else if !agentInTerminalPhase && !agentSuspended {
 				// Legacy path: no structured fields, derive from ContainerStatus
 				// Derive phase from container status to ensure agents
 				// registered via sync (not started via hub) get proper state.
 				// Terminal container states (exited/stopped) override agent phase.
-				// Skipped when agent is already in a terminal phase to avoid
-				// reverting an authoritative hub-set state.
+				// Skipped when agent is already in a terminal phase or suspended
+				// to avoid reverting an authoritative hub-set state.
 				if agentHB.ContainerStatus != "" {
 					containerStatusLower := strings.ToLower(agentHB.ContainerStatus)
 					switch {

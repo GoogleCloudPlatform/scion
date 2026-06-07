@@ -132,6 +132,27 @@ Thread an explicit `resume bool` from the hub (source of truth) to `RunConfig.Re
    message. (Flag if this turns out larger than expected.)
 Optional follow-up: add a first-class `AgentActionResume` + `/resume` route for clarity.
 
+### Fix plan (Part 1b) — phase-overwrite race (found during verification of 80c1579)
+
+The threading fix is correct but its precondition fails: the hub sets `phase=suspended`
+*after* dispatching the stop, then the dying container's async sciontool `/status` report
+(and/or a broker heartbeat) reports `stopped`/`crashed` and overwrites `suspended` back to
+`stopped` before the start handler reads it — so `resume := phase==suspended` is false.
+The existing regression guards are ordinal-based and only cover *active* phases; both
+`suspended` and `stopped` are ordinal 0, so the transition slips through.
+
+Make `suspended` sticky against async status updates (explicit lifecycle start/stop bypass
+these guards, so they can still leave suspended):
+1. `pkg/hub/handlers.go` `guardAgentPhaseTransition` (~2988): if current phase is
+   `suspended`, drop `status.Phase` and `status.Activity` from async `/status` reports.
+2. `pkg/hub/handlers.go` broker-heartbeat path (~6345): treat `suspended` like a sticky
+   phase — do not let a heartbeat-reported phase/terminal-activity revert it.
+Add unit tests (suspended stickiness for both paths).
+
+NOTE: a related but broader issue (stale reports from the OLD container landing AFTER a
+resume and falsely setting `crashed` — the "false crash" side finding) is tracked under
+Part 2 / task #4; not fixed here.
+
 ---
 
 ## Part 2 — Crashes never produce an error state
