@@ -19,6 +19,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -554,17 +555,31 @@ func (s *Server) tryProvisionWorktree(ctx context.Context, in startContextInputs
 	if err := provision.ProvisionShared(result.ProvisionInput); err != nil {
 		slog.Warn("worktree-per-agent: provisioning failed, falling back to clone-per-agent",
 			"agent_id", in.AgentID, "error", err)
-		// Clean up ONLY this agent's partial worktree — never Resolved.HostPath,
-		// which is the shared base clone holding the common .git and every other
-		// agent's worktree under worktrees/<agentID>. Removing it would destroy
-		// the workspaces of all other running agents for this project. A partial
-		// base clone is self-healed by provision.gitCloneWorkspace on retry.
-		if result.WorktreePath != "" {
-			if cleanErr := os.RemoveAll(result.WorktreePath); cleanErr != nil {
-				slog.Warn("worktree-per-agent: failed to clean up partial worktree",
-					"agent_id", in.AgentID, "path", result.WorktreePath, "error", cleanErr)
+		// Clean up ONLY this agent's partial worktree — never result.ProjectRoot,
+		// the shared base clone holding the common .git and every other agent's
+		// worktree under worktrees/<agentID>. Removing the base would destroy the
+		// workspaces of all other running agents for this project. A partial base
+		// clone is self-healed by provision.gitCloneWorkspace on retry.
+		//
+		// Use `git worktree remove --force` so the worktree's admin metadata in
+		// the base's .git/worktrees/<id> is unregistered too — a bare os.RemoveAll
+		// would leave a stale registration that makes git refuse to recreate the
+		// worktree at that path on retry. Fall back to os.RemoveAll + prune.
+		if result.WorktreePath != "" && result.ProjectRoot != "" {
+			rm := exec.CommandContext(ctx, "git", "-C", result.ProjectRoot,
+				"worktree", "remove", "--force", result.WorktreePath)
+			if out, rmErr := rm.CombinedOutput(); rmErr != nil {
+				slog.Warn("worktree-per-agent: git worktree remove failed, falling back to os.RemoveAll+prune",
+					"agent_id", in.AgentID, "path", result.WorktreePath,
+					"error", rmErr, "output", strings.TrimSpace(string(out)))
+				if cleanErr := os.RemoveAll(result.WorktreePath); cleanErr != nil {
+					slog.Warn("worktree-per-agent: failed to clean up partial worktree",
+						"agent_id", in.AgentID, "path", result.WorktreePath, "error", cleanErr)
+				}
+				// Prune the now-stale .git/worktrees/<id> registration so retries succeed.
+				_ = exec.CommandContext(ctx, "git", "-C", result.ProjectRoot, "worktree", "prune").Run()
 			} else {
-				slog.Info("worktree-per-agent: cleaned up partial worktree",
+				slog.Info("worktree-per-agent: cleaned up partial worktree and unregistered from git",
 					"agent_id", in.AgentID, "path", result.WorktreePath)
 			}
 		}

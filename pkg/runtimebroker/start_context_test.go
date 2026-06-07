@@ -28,6 +28,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
 
 func newTestServerForStartContext(t *testing.T, cfg ServerConfig) *Server {
@@ -957,5 +958,70 @@ func TestTryProvisionWorktree_FailureDoesNotDeleteSharedBase(t *testing.T) {
 	// Only the failing agent's partial worktree should be cleaned up.
 	if _, err := os.Stat(provision.WorktreePath(base, "agent-b")); !os.IsNotExist(err) {
 		t.Errorf("agent-b partial worktree should have been cleaned up, stat err=%v", err)
+	}
+}
+
+// TestWorktreeWorkspace_RepoRootDerivesToBase validates that the container
+// dual-mount inputs resolve correctly for the worktree layout WITHOUT any
+// explicit opts.RepoRoot (api.StartOptions has no such field). pkg/agent/run.go
+// derives repoRoot from the workspace itself: IsGitRepoDir(worktree) is true
+// (git rev-parse --is-inside-work-tree works through the worktree .git pointer
+// file), and GetCommonGitDir(worktree) returns the SHARED base .git, so
+// repoRoot = filepath.Dir(commonDir) == the base checkout. The worktree then
+// sits at <base>/worktrees/<id>, giving a non-".." relative path that triggers
+// common.go's .git + worktree dual-mount. (Regression guard for the #350 review
+// claim that opts.RepoRoot must be set explicitly.)
+func TestWorktreeWorkspace_RepoRootDerivesToBase(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+
+	bare := initBareRepoWithCommit(t)
+	gc := &api.GitCloneConfig{URL: bare, Branch: "main", Depth: 0}
+
+	projectPath := filepath.Join(t.TempDir(), "proj")
+	if err := os.MkdirAll(projectPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	resolved, err := runtime.NewLocalBackend().Resolve(runtime.ResolveInput{
+		ProjectDir: projectPath, ProjectID: "p1", AgentID: "agent-a",
+		Mode: store.SharingModeWorktreePerAgent,
+	})
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if err := provision.ProvisionShared(provision.ProvisionInput{
+		Resolved: resolved, Mode: store.SharingModeWorktreePerAgent,
+		ProjectID: "p1", AgentID: "agent-a", AgentName: "agent-a", GitClone: gc,
+	}); err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+
+	base := resolved.HostPath // <projectPath>/workspace — the shared base checkout
+	worktree := provision.WorktreePath(base, "agent-a")
+
+	// Replicate pkg/agent/run.go's repoRoot derivation from the workspace.
+	if !util.IsGitRepoDir(worktree) {
+		t.Fatal("IsGitRepoDir(worktree) = false; run.go would not derive repoRoot from the worktree")
+	}
+	commonDir, err := util.GetCommonGitDir(worktree)
+	if err != nil {
+		t.Fatalf("GetCommonGitDir(worktree): %v", err)
+	}
+	repoRoot := filepath.Dir(commonDir)
+	if repoRoot != base {
+		t.Errorf("derived repoRoot = %q, want base %q", repoRoot, base)
+	}
+
+	// The dual-mount in common.go only fires when rel(repoRoot, workspace) is a
+	// non-".." subpath — confirm the worktree is nested inside the base.
+	rel, err := filepath.Rel(repoRoot, worktree)
+	if err != nil {
+		t.Fatalf("Rel: %v", err)
+	}
+	if rel != filepath.Join("worktrees", "agent-a") {
+		t.Errorf("rel(repoRoot, worktree) = %q, want %q", rel, filepath.Join("worktrees", "agent-a"))
+	}
+	if strings.HasPrefix(rel, "..") {
+		t.Errorf("rel %q starts with .. — common.go dual-mount would NOT fire", rel)
 	}
 }
