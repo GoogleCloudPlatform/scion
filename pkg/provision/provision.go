@@ -105,7 +105,7 @@ type ProvisionInput struct {
 	// this uses pg_try_advisory_lock(classid, objid) for cross-node mutual
 	// exclusion; on SQLite it's a no-op (single-writer serializes already).
 	//
-	// May be nil — nfsBackend.Provision degrades to sentinel-only guarding
+	// May be nil — ProvisionShared degrades to sentinel-only guarding
 	// (correct for single-node but NOT safe for multi-node).
 	Locker store.AdvisoryLocker
 
@@ -148,15 +148,15 @@ func ProvisionShared(in ProvisionInput) error {
 	// Guard: ClonePerAgent must never use the NFS path. SelectWorkspaceBackend
 	// already routes it to localBackend, but assert here as defense in depth.
 	if in.Mode == store.SharingModeClonePerAgent {
-		return fmt.Errorf("nfsBackend.Provision: ClonePerAgent mode must not use NFS backend " +
+		return fmt.Errorf("ProvisionShared: ClonePerAgent mode must not use NFS backend " +
 			"(should be routed to localBackend by SelectWorkspaceBackend)")
 	}
 
 	if in.Resolved.HostPath == "" {
-		return fmt.Errorf("nfsBackend.Provision: Resolved.HostPath is required")
+		return fmt.Errorf("ProvisionShared: Resolved.HostPath is required")
 	}
 	if in.ProjectID == "" {
-		return fmt.Errorf("nfsBackend.Provision: ProjectID is required")
+		return fmt.Errorf("ProvisionShared: ProjectID is required")
 	}
 
 	// Determine the sentinel directory: explicit override or default to parent.
@@ -172,11 +172,11 @@ func ProvisionShared(in ProvisionInput) error {
 	// --- Step 1: Acquire per-project advisory lock ---
 	release, err := acquireProvisionLock(ctx, in)
 	if err != nil {
-		return fmt.Errorf("nfsBackend.Provision: failed to acquire lock for project %s: %w", in.ProjectID, err)
+		return fmt.Errorf("ProvisionShared: failed to acquire lock for project %s: %w", in.ProjectID, err)
 	}
 	defer func() {
 		if releaseErr := release(); releaseErr != nil {
-			slog.Warn("nfsBackend.Provision: failed to release advisory lock",
+			slog.Warn("ProvisionShared: failed to release advisory lock",
 				"project_id", in.ProjectID, "error", releaseErr)
 		}
 	}()
@@ -185,31 +185,31 @@ func ProvisionShared(in ProvisionInput) error {
 	sentinelPath := filepath.Join(sentinelDir, ProvisionSentinelFile)
 	if _, err := os.Stat(sentinelPath); err == nil {
 		// Already provisioned — skip to worktree setup if needed.
-		slog.Debug("nfsBackend.Provision: workspace already provisioned (sentinel exists)",
+		slog.Debug("ProvisionShared: workspace already provisioned (sentinel exists)",
 			"project_id", in.ProjectID, "sentinel", sentinelPath)
 		return ensureWorktree(in)
 	}
 
 	// --- Step 3: Provision (mkdir + clone + chown + sentinel) ---
-	slog.Info("nfsBackend.Provision: provisioning workspace",
+	slog.Info("ProvisionShared: provisioning workspace",
 		"project_id", in.ProjectID, "host_path", in.Resolved.HostPath)
 
 	// Create workspace directory.
 	if err := os.MkdirAll(in.Resolved.HostPath, 0770); err != nil {
-		return fmt.Errorf("nfsBackend.Provision: mkdir workspace %s: %w", in.Resolved.HostPath, err)
+		return fmt.Errorf("ProvisionShared: mkdir workspace %s: %w", in.Resolved.HostPath, err)
 	}
 
 	// Create shared-dir directories.
 	for name, sd := range in.Resolved.SharedDirs {
 		if err := os.MkdirAll(sd.HostPath, 0770); err != nil {
-			return fmt.Errorf("nfsBackend.Provision: mkdir shared-dir %q %s: %w", name, sd.HostPath, err)
+			return fmt.Errorf("ProvisionShared: mkdir shared-dir %q %s: %w", name, sd.HostPath, err)
 		}
 	}
 
 	// Git clone if project is git-backed.
 	if in.GitClone != nil && in.GitClone.URL != "" {
 		if err := gitCloneWorkspace(in); err != nil {
-			return fmt.Errorf("nfsBackend.Provision: git clone: %w", err)
+			return fmt.Errorf("ProvisionShared: git clone: %w", err)
 		}
 	}
 
@@ -219,17 +219,17 @@ func ProvisionShared(in ProvisionInput) error {
 	chownRoot := chownTarget(in.Resolved.HostPath)
 	uid, gid := resolveUID(in), resolveGID(in)
 	if err := chownProjectTree(chownRoot, uid, gid); err != nil {
-		slog.Warn("nfsBackend.Provision: chown failed (non-fatal, may lack privileges)",
+		slog.Warn("ProvisionShared: chown failed (non-fatal, may lack privileges)",
 			"project_id", in.ProjectID, "path", chownRoot, "uid", uid, "gid", gid, "error", err)
 		// Non-fatal: operator may have pre-chowned. Continue to write sentinel.
 	}
 
 	// Write sentinel atomically.
 	if err := writeSentinel(sentinelPath); err != nil {
-		return fmt.Errorf("nfsBackend.Provision: write sentinel: %w", err)
+		return fmt.Errorf("ProvisionShared: write sentinel: %w", err)
 	}
 
-	slog.Info("nfsBackend.Provision: workspace provisioned successfully",
+	slog.Info("ProvisionShared: workspace provisioned successfully",
 		"project_id", in.ProjectID, "host_path", in.Resolved.HostPath)
 
 	// --- Step 4: Worktree setup (if WorktreePerAgent) ---
@@ -245,7 +245,7 @@ func acquireProvisionLock(ctx context.Context, in ProvisionInput) (func() error,
 	if in.Locker == nil {
 		// No locker available — degrade to unguarded (correct for single-node,
 		// unsafe for multi-node). Log a warning.
-		slog.Warn("nfsBackend.Provision: no advisory locker available — provisioning is unguarded",
+		slog.Warn("ProvisionShared: no advisory locker available — provisioning is unguarded",
 			"project_id", in.ProjectID)
 		return func() error { return nil }, nil
 	}
@@ -264,7 +264,7 @@ func acquireProvisionLock(ctx context.Context, in ProvisionInput) (func() error,
 		}
 		// Another node holds the lock — it's provisioning this project.
 		// Wait briefly and retry, but honour context cancellation.
-		slog.Debug("nfsBackend.Provision: lock held by another node, retrying",
+		slog.Debug("ProvisionShared: lock held by another node, retrying",
 			"project_id", in.ProjectID, "attempt", attempt+1)
 		select {
 		case <-ctx.Done():
@@ -313,7 +313,7 @@ func gitCloneWorkspace(in ProvisionInput) error {
 		// If workspace is not empty (e.g. a partially-failed prior attempt),
 		// the clone will fail. Check and handle.
 		if strings.Contains(string(output), "already exists and is not an empty directory") {
-			slog.Warn("nfsBackend.Provision: workspace directory not empty, assuming prior partial clone",
+			slog.Warn("ProvisionShared: workspace directory not empty, assuming prior partial clone",
 				"project_id", in.ProjectID, "path", in.Resolved.HostPath)
 			// The sentinel wasn't written, so this is a prior failed attempt.
 			// Reuse what's there — if .git exists, it may be usable.
@@ -337,7 +337,7 @@ func ensureWorktree(in ProvisionInput) error {
 	}
 
 	if in.AgentID == "" {
-		return fmt.Errorf("nfsBackend.Provision: AgentID is required for WorktreePerAgent mode")
+		return fmt.Errorf("ProvisionShared: AgentID is required for WorktreePerAgent mode")
 	}
 
 	// Worktree path: <workspace>/worktrees/<agentID>
@@ -345,7 +345,7 @@ func ensureWorktree(in ProvisionInput) error {
 
 	// If the worktree already exists, skip.
 	if _, err := os.Stat(worktreePath); err == nil {
-		slog.Debug("nfsBackend.Provision: worktree already exists",
+		slog.Debug("ProvisionShared: worktree already exists",
 			"agent_id", in.AgentID, "path", worktreePath)
 		return nil
 	}
@@ -353,7 +353,7 @@ func ensureWorktree(in ProvisionInput) error {
 	// Verify the shared checkout exists (.git dir present).
 	gitDir := filepath.Join(in.Resolved.HostPath, ".git")
 	if _, err := os.Stat(gitDir); err != nil {
-		return fmt.Errorf("nfsBackend.Provision: shared checkout .git not found at %s — "+
+		return fmt.Errorf("ProvisionShared: shared checkout .git not found at %s — "+
 			"cannot create worktree without a cloned repository", gitDir)
 	}
 
@@ -363,7 +363,7 @@ func ensureWorktree(in ProvisionInput) error {
 		branchName = sanitizeBranchName(in.AgentName)
 	}
 
-	slog.Info("nfsBackend.Provision: creating worktree",
+	slog.Info("ProvisionShared: creating worktree",
 		"agent_id", in.AgentID, "branch", branchName, "path", worktreePath)
 
 	// git worktree add <path> -b <branch>
