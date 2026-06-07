@@ -186,6 +186,10 @@ func upgradeLegacyBuiltinConfig(absTarget string, plan *HarnessConfigUpgradePlan
 	if err := yaml.Unmarshal(configData, &cfg); err != nil {
 		return plan, nil
 	}
+	if cfg == nil {
+		// Empty or comment-only config.yaml: nothing to upgrade.
+		return plan, nil
+	}
 
 	harnessName, _ := cfg["harness"].(string)
 	if harnessName != "opencode" && harnessName != "codex" {

@@ -60,7 +60,12 @@ auth:
     oauth-token:
       required_env:
         - any_of: ["AGY_KEYRING_TOKEN"]
-    vertex-ai: {}
+    vertex-ai:
+      # Enterprise/GCP mode: the keyring token is still required (provision.py
+      # validates AGY_KEYRING_TOKEN), plus the GCP project for Vertex routing.
+      required_env:
+        - any_of: ["AGY_KEYRING_TOKEN"]
+        - any_of: ["GOOGLE_CLOUD_PROJECT"]
   autodetect:
     env:
       AGY_KEYRING_TOKEN: oauth-token

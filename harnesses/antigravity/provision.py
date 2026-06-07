@@ -104,170 +104,6 @@ def _parse_env_output(output: str, env: dict[str, str]) -> None:
                 env[var] = val
 
 
-def _init_keyring() -> tuple[dict[str, str], bool]:
-    """Start dbus and unlock gnome-keyring. Returns (env_vars, success).
-
-    Mirrors the proven bootstrap sequence from keyring-bootstrap.sh:
-      1. dbus-launch --sh-syntax
-      2. echo "test" | gnome-keyring-daemon --unlock
-      3. gnome-keyring-daemon --start --components=secrets,pkcs11,ssh
-    """
-    try:
-        dbus = subprocess.run(
-            ["dbus-launch", "--sh-syntax"],
-            capture_output=True, text=True, timeout=10,
-        )
-        if dbus.returncode != 0:
-            print(
-                f"antigravity provision: dbus-launch failed: {dbus.stderr}",
-                file=sys.stderr,
-            )
-            return {}, False
-
-        keyring_env: dict[str, str] = {}
-        _parse_env_output(dbus.stdout, keyring_env)
-
-        if "DBUS_SESSION_BUS_ADDRESS" not in keyring_env:
-            print(
-                "antigravity provision: dbus-launch did not set "
-                "DBUS_SESSION_BUS_ADDRESS",
-                file=sys.stderr,
-            )
-            return {}, False
-
-        merged_env = {**os.environ, **keyring_env}
-
-        # Unlock with password "test" — matches the bootstrap script.
-        # The keyring is ephemeral (container lifetime only).
-        unlock = subprocess.run(
-            ["gnome-keyring-daemon", "--unlock"],
-            input=b"test\n",
-            capture_output=True, timeout=10,
-            env=merged_env,
-        )
-        if unlock.returncode != 0:
-            print(
-                f"antigravity provision: gnome-keyring-daemon --unlock "
-                f"failed: {unlock.stderr.decode(errors='replace')}",
-                file=sys.stderr,
-            )
-            return {}, False
-
-        _parse_env_output(unlock.stdout.decode(errors="replace"), keyring_env)
-        merged_env = {**os.environ, **keyring_env}
-
-        # Start all components so AGY can use the keyring for OAuth tokens.
-        start = subprocess.run(
-            ["gnome-keyring-daemon", "--start",
-             "--components=secrets,pkcs11,ssh"],
-            capture_output=True, timeout=10,
-            env=merged_env,
-        )
-        if start.returncode != 0:
-            print(
-                f"antigravity provision: gnome-keyring-daemon --start "
-                f"failed: {start.stderr.decode(errors='replace')}",
-                file=sys.stderr,
-            )
-            return {}, False
-
-        _parse_env_output(start.stdout.decode(errors="replace"), keyring_env)
-
-        print(
-            f"antigravity provision: keyring initialized "
-            f"(DBUS={keyring_env.get('DBUS_SESSION_BUS_ADDRESS', '?')}, "
-            f"CONTROL={keyring_env.get('GNOME_KEYRING_CONTROL', '?')})",
-            file=sys.stderr,
-        )
-        return keyring_env, True
-
-    except FileNotFoundError as exc:
-        print(
-            f"antigravity provision: keyring binary not found: {exc}",
-            file=sys.stderr,
-        )
-        return {}, False
-    except subprocess.TimeoutExpired:
-        print(
-            "antigravity provision: keyring initialization timed out",
-            file=sys.stderr,
-        )
-        return {}, False
-
-
-def _store_keyring_token(token_json: str, keyring_env: dict[str, str]) -> bool:
-    """Store OAuth token JSON in gnome-keyring for AGY."""
-    merged_env = {**os.environ, **keyring_env}
-    try:
-        result = subprocess.run(
-            [
-                "secret-tool", "store",
-                "--label=Password for antigravity on gemini",
-                "service", "gemini",
-                "username", "antigravity",
-            ],
-            input=token_json.encode("utf-8"),
-            capture_output=True, timeout=10,
-            env=merged_env,
-        )
-        if result.returncode != 0:
-            print(
-                f"antigravity provision: secret-tool store failed: "
-                f"{result.stderr.decode(errors='replace')}",
-                file=sys.stderr,
-            )
-            return False
-        print(
-            "antigravity provision: token stored in keyring",
-            file=sys.stderr,
-        )
-        return True
-    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
-        print(
-            f"antigravity provision: secret-tool failed: {exc}",
-            file=sys.stderr,
-        )
-        return False
-
-
-def _provision_keyring(
-    secret_files: dict[str, str],
-) -> tuple[dict[str, str], bool]:
-    """Initialize keyring and store OAuth token. Returns (env_vars, success)."""
-    token_raw = _read_secret(secret_files, "AGY_KEYRING_TOKEN")
-    if not token_raw:
-        print(
-            "antigravity provision: AGY_KEYRING_TOKEN secret is empty or missing",
-            file=sys.stderr,
-        )
-        return {}, False
-
-    try:
-        token_obj = json.loads(token_raw)
-    except json.JSONDecodeError as exc:
-        print(
-            f"antigravity provision: AGY_KEYRING_TOKEN is not valid JSON: {exc}",
-            file=sys.stderr,
-        )
-        return {}, False
-
-    if not isinstance(token_obj, dict) or "refresh_token" not in token_obj:
-        print(
-            "antigravity provision: AGY_KEYRING_TOKEN must contain refresh_token",
-            file=sys.stderr,
-        )
-        return {}, False
-
-    keyring_env, ok = _init_keyring()
-    if not ok:
-        return {}, False
-
-    if not _store_keyring_token(token_raw, keyring_env):
-        return {}, False
-
-    return keyring_env, True
-
-
 def _select_auth_method(
     explicit: str, env_keys: set[str]
 ) -> tuple[str, str]:
@@ -394,6 +230,11 @@ def _generate_wrapper_script(
         os.makedirs(os.path.dirname(enterprise_marker), exist_ok=True)
         with open(enterprise_marker, "w") as f:
             f.write("1")
+    elif os.path.exists(enterprise_marker):
+        # Idempotent reprovision: if the auth mode switched away from
+        # vertex-ai (e.g. to oauth-token), remove the stale marker so the
+        # wrapper does not keep running in enterprise/GCP mode.
+        os.remove(enterprise_marker)
 
     script = f"""#!/bin/bash
 # Generated by antigravity provision.py {PROVISION_VERSION}
