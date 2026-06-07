@@ -655,7 +655,7 @@ func TestBackendNames(t *testing.T) {
 	}
 }
 
-// --- provisionShared tests (from workspace_backend_test.go) ---
+// --- ProvisionShared tests (from workspace_backend_test.go) ---
 
 func TestProvisionShared_NonGit(t *testing.T) {
 	mountRoot := t.TempDir()
@@ -673,12 +673,12 @@ func TestProvisionShared_NonGit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
-	err = provisionShared(ProvisionInput{
+	err = ProvisionShared(ProvisionInput{
 		Resolved:  res,
 		ProjectID: "proj1",
 		Mode:      store.SharingModeSharedPlain,
 	})
 	if err != nil {
-		t.Errorf("provisionShared for non-git project should succeed, got error: %v", err)
+		t.Errorf("ProvisionShared for non-git project should succeed, got error: %v", err)
 	}
 }

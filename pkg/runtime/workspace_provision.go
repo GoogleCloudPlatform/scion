@@ -29,7 +29,7 @@ import (
 
 // provisionSentinelFile is the name of the sentinel file written atomically
 // after a successful workspace clone/setup. Its presence short-circuits
-// subsequent provisionShared calls — the workspace is already ready.
+// subsequent ProvisionShared calls — the workspace is already ready.
 const provisionSentinelFile = ".scion-provisioned"
 
 // provisionLockRetries is the number of times to retry acquiring the
@@ -42,7 +42,7 @@ const provisionLockRetries = 30
 // short retry cadence is appropriate.
 const provisionLockRetryDelay = 1 * time.Second
 
-// provisionShared is the universal, vendor-agnostic workspace provisioning
+// ProvisionShared is the universal, vendor-agnostic workspace provisioning
 // function (Tier 1). It ensures the workspace directory exists and is ready
 // for use. For git projects this includes cloning/worktree setup. Idempotent.
 //
@@ -63,7 +63,7 @@ const provisionLockRetryDelay = 1 * time.Second
 // The flow is idempotent and race-safe: two agents for the same project
 // starting on two different nodes contend on the advisory lock; exactly one
 // clones, the second sees the sentinel and reuses the workspace.
-func provisionShared(in ProvisionInput) error {
+func ProvisionShared(in ProvisionInput) error {
 	// Guard: ClonePerAgent must never use the NFS path. SelectWorkspaceBackend
 	// already routes it to localBackend, but assert here as defense in depth.
 	if in.Mode == store.SharingModeClonePerAgent {

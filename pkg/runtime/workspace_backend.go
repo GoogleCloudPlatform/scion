@@ -28,7 +28,7 @@ import (
 //   - Realize: emit the runtime mount descriptor for Docker/K8s/Cloud Run.
 //
 // Provisioning (clone, worktree, mkdir) is handled by the standalone
-// provisionShared function (Tier 1) — it is vendor-agnostic and operates
+// ProvisionShared function (Tier 1) — it is vendor-agnostic and operates
 // solely on ProvisionInput fields, not on any backend configuration.
 //
 // Implementations: localBackend (today's node-local behavior, default) and
