@@ -511,13 +511,13 @@ func writeSentinel(path string) error {
 	// Write a timestamp for debugging.
 	_, _ = fmt.Fprintf(tmp, "provisioned_at=%s\n", time.Now().UTC().Format(time.RFC3339))
 	if err := tmp.Close(); err != nil {
-		os.Remove(tmpName)
+		_ = os.Remove(tmpName)
 		return fmt.Errorf("close temp sentinel: %w", err)
 	}
 
 	// Atomic rename.
 	if err := os.Rename(tmpName, path); err != nil {
-		os.Remove(tmpName)
+		_ = os.Remove(tmpName)
 		return fmt.Errorf("rename sentinel: %w", err)
 	}
 	return nil

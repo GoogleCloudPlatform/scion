@@ -93,7 +93,7 @@ func TestProvisionCmd_WaitForSentinel_DelayedWrite(t *testing.T) {
 	go func() {
 		time.Sleep(2 * time.Second)
 		sentinelPath := filepath.Join(dir, ".scion-provisioned")
-		os.WriteFile(sentinelPath, []byte("provisioned_at=test\n"), 0644)
+		_ = os.WriteFile(sentinelPath, []byte("provisioned_at=test\n"), 0644)
 	}()
 
 	if err := runWaitForSentinel(context.Background()); err != nil {
