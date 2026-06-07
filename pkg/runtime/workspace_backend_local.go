@@ -21,7 +21,7 @@ import (
 )
 
 // localBackend wraps today's node-local workspace behavior. Resolve delegates
-// to existing path helpers; Provision and Realize mirror the current local flow.
+// to existing path helpers; Realize mirrors the current local flow.
 // This is the default backend — selecting it produces zero behavior change.
 type localBackend struct{}
 
