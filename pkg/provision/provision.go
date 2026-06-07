@@ -82,6 +82,12 @@ type ResolvedSharedDir struct {
 
 // ProvisionInput holds parameters for workspace provisioning.
 type ProvisionInput struct {
+	// Ctx is the context for cancellation and timeouts. Optional: when nil,
+	// ProvisionShared falls back to context.Background(). Keeping it as a struct
+	// field (rather than a ProvisionShared parameter) preserves the existing
+	// function signature for callers.
+	Ctx context.Context
+
 	// Resolved is the output of a prior Resolve call.
 	Resolved ResolvedWorkspace
 
@@ -167,7 +173,10 @@ func ProvisionShared(in ProvisionInput) error {
 		sentinelDir = filepath.Dir(in.Resolved.HostPath)
 	}
 
-	ctx := context.Background()
+	ctx := in.Ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
 
 	// --- Step 1: Acquire per-project advisory lock ---
 	release, err := acquireProvisionLock(ctx, in)
@@ -187,7 +196,7 @@ func ProvisionShared(in ProvisionInput) error {
 		// Already provisioned — skip to worktree setup if needed.
 		slog.Debug("ProvisionShared: workspace already provisioned (sentinel exists)",
 			"project_id", in.ProjectID, "sentinel", sentinelPath)
-		return ensureWorktree(in)
+		return ensureWorktree(ctx, in)
 	}
 
 	// --- Step 3: Provision (mkdir + clone + chown + sentinel) ---
@@ -208,7 +217,7 @@ func ProvisionShared(in ProvisionInput) error {
 
 	// Git clone if project is git-backed.
 	if in.GitClone != nil && in.GitClone.URL != "" {
-		if err := gitCloneWorkspace(in); err != nil {
+		if err := gitCloneWorkspace(ctx, in); err != nil {
 			return fmt.Errorf("ProvisionShared: git clone: %w", err)
 		}
 	}
@@ -218,7 +227,7 @@ func ProvisionShared(in ProvisionInput) error {
 	//
 	chownRoot := chownTarget(in.Resolved.HostPath)
 	uid, gid := resolveUID(in), resolveGID(in)
-	if err := chownProjectTree(chownRoot, uid, gid); err != nil {
+	if err := chownProjectTree(ctx, chownRoot, uid, gid); err != nil {
 		slog.Warn("ProvisionShared: chown failed (non-fatal, may lack privileges)",
 			"project_id", in.ProjectID, "path", chownRoot, "uid", uid, "gid", gid, "error", err)
 		// Non-fatal: operator may have pre-chowned. Continue to write sentinel.
@@ -233,7 +242,7 @@ func ProvisionShared(in ProvisionInput) error {
 		"project_id", in.ProjectID, "host_path", in.Resolved.HostPath)
 
 	// --- Step 4: Worktree setup (if WorktreePerAgent) ---
-	return ensureWorktree(in)
+	return ensureWorktree(ctx, in)
 }
 
 // acquireProvisionLock acquires the per-project advisory lock, retrying briefly
@@ -279,50 +288,87 @@ func acquireProvisionLock(ctx context.Context, in ProvisionInput) (func() error,
 }
 
 // gitCloneWorkspace performs the git clone into the workspace directory.
-// It clones into the workspace path (in.Resolved.HostPath).
-func gitCloneWorkspace(in ProvisionInput) error {
+// It clones into the workspace path (in.Resolved.HostPath). The clone runs
+// under ctx via exec.CommandContext so that a cancelled/timed-out context
+// kills the git process instead of leaving it orphaned.
+func gitCloneWorkspace(ctx context.Context, in ProvisionInput) error {
 	gc := in.GitClone
 
-	args := []string{"clone"}
+	runClone := func() ([]byte, error) {
+		args := []string{"clone"}
 
-	// Set depth (default: 1 for shallow clone, 0 = full).
-	depth := gc.Depth
-	if depth == 0 {
-		depth = 1
-	}
-	if depth > 0 {
-		args = append(args, "--depth", fmt.Sprintf("%d", depth))
-	}
-
-	// Set branch if specified.
-	if gc.Branch != "" {
-		args = append(args, "--branch", gc.Branch)
-	}
-
-	// Clone into the workspace directory.
-	args = append(args, gc.URL, in.Resolved.HostPath)
-
-	cmd := exec.Command("git", args...)
-	cmd.Env = append(os.Environ(),
-		// Disable interactive prompts during provisioning.
-		"GIT_TERMINAL_PROMPT=0",
-	)
-
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		// If workspace is not empty (e.g. a partially-failed prior attempt),
-		// the clone will fail. Check and handle.
-		if strings.Contains(string(output), "already exists and is not an empty directory") {
-			slog.Warn("ProvisionShared: workspace directory not empty, assuming prior partial clone",
-				"project_id", in.ProjectID, "path", in.Resolved.HostPath)
-			// The sentinel wasn't written, so this is a prior failed attempt.
-			// Reuse what's there — if .git exists, it may be usable.
-			if _, statErr := os.Stat(filepath.Join(in.Resolved.HostPath, ".git")); statErr == nil {
-				return nil // .git exists, treat as provisioned
-			}
-			return fmt.Errorf("git clone failed and no .git in %s: %s", in.Resolved.HostPath, string(output))
+		// Set depth (default: 1 for shallow clone, 0 = full).
+		depth := gc.Depth
+		if depth == 0 {
+			depth = 1
 		}
-		return fmt.Errorf("git clone %s: %s", gc.URL, strings.TrimSpace(string(output)))
+		if depth > 0 {
+			args = append(args, "--depth", fmt.Sprintf("%d", depth))
+		}
+
+		// Set branch if specified.
+		if gc.Branch != "" {
+			args = append(args, "--branch", gc.Branch)
+		}
+
+		// Clone into the workspace directory.
+		args = append(args, gc.URL, in.Resolved.HostPath)
+
+		cmd := exec.CommandContext(ctx, "git", args...)
+		cmd.Env = append(os.Environ(),
+			// Disable interactive prompts during provisioning.
+			"GIT_TERMINAL_PROMPT=0",
+		)
+		return cmd.CombinedOutput()
+	}
+
+	output, err := runClone()
+	if err == nil {
+		return nil
+	}
+
+	// If the workspace is not empty, the clone fails with "already exists and
+	// is not an empty directory". This happens after a partially-failed prior
+	// attempt (the sentinel was never written, else we'd have skipped cloning).
+	if strings.Contains(string(output), "already exists and is not an empty directory") {
+		// If .git is present a prior clone completed — reuse it as-is.
+		if _, statErr := os.Stat(filepath.Join(in.Resolved.HostPath, ".git")); statErr == nil {
+			slog.Warn("ProvisionShared: workspace not empty but .git present, reusing prior clone",
+				"project_id", in.ProjectID, "path", in.Resolved.HostPath)
+			return nil
+		}
+
+		// No .git — the prior attempt died mid-clone, leaving partial contents
+		// behind. Clear the directory so provisioning self-heals on retry
+		// without manual intervention, then clone once more.
+		slog.Warn("ProvisionShared: workspace not empty and no .git (incomplete prior clone), cleaning and retrying",
+			"project_id", in.ProjectID, "path", in.Resolved.HostPath)
+		if cleanErr := removeDirContents(in.Resolved.HostPath); cleanErr != nil {
+			return fmt.Errorf("git clone failed (dir not empty) and cleanup of %s failed: %w",
+				in.Resolved.HostPath, cleanErr)
+		}
+		if output, err = runClone(); err == nil {
+			return nil
+		}
+		return fmt.Errorf("git clone %s (after cleanup retry): %s", gc.URL, strings.TrimSpace(string(output)))
+	}
+
+	return fmt.Errorf("git clone %s: %s", gc.URL, strings.TrimSpace(string(output)))
+}
+
+// removeDirContents removes every entry inside dir while leaving dir itself in
+// place. The workspace directory is frequently a mount point (e.g. a k8s PVC
+// subPath), so it cannot be removed outright — only its contents can be cleared.
+func removeDirContents(dir string) error {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return fmt.Errorf("read dir %s: %w", dir, err)
+	}
+	for _, e := range entries {
+		p := filepath.Join(dir, e.Name())
+		if err := os.RemoveAll(p); err != nil {
+			return fmt.Errorf("remove %s: %w", p, err)
+		}
 	}
 	return nil
 }
@@ -331,7 +377,7 @@ func gitCloneWorkspace(in ProvisionInput) error {
 // For SharedPlain mode this is a no-op.
 // The worktree add is done under the already-held advisory lock (design §9.2:
 // worktree add/remove touches shared .git metadata).
-func ensureWorktree(in ProvisionInput) error {
+func ensureWorktree(ctx context.Context, in ProvisionInput) error {
 	if in.Mode != store.SharingModeWorktreePerAgent {
 		return nil // SharedPlain: nothing to do
 	}
@@ -367,14 +413,14 @@ func ensureWorktree(in ProvisionInput) error {
 		"agent_id", in.AgentID, "branch", branchName, "path", worktreePath)
 
 	// git worktree add <path> -b <branch>
-	cmd := exec.Command("git", "worktree", "add", "-b", branchName, worktreePath)
+	cmd := exec.CommandContext(ctx, "git", "worktree", "add", "-b", branchName, worktreePath)
 	cmd.Dir = in.Resolved.HostPath
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		outputStr := strings.TrimSpace(string(output))
 		// If branch already exists, try without -b.
 		if strings.Contains(outputStr, "already exists") {
-			cmd = exec.Command("git", "worktree", "add", worktreePath, branchName)
+			cmd = exec.CommandContext(ctx, "git", "worktree", "add", worktreePath, branchName)
 			cmd.Dir = in.Resolved.HostPath
 			output, err = cmd.CombinedOutput()
 			if err != nil {
@@ -425,9 +471,9 @@ func chownTarget(hostPath string) string {
 // given UID/GID. This is a ONE-TIME operation done under the advisory lock
 // during first provisioning (design §9.1). Per-start chown is NOT done for
 // NFS (slow/racy over the network).
-func chownProjectTree(projectRoot string, uid, gid int) error {
+func chownProjectTree(ctx context.Context, projectRoot string, uid, gid int) error {
 	// Use chown -R for recursive ownership change.
-	cmd := exec.Command("chown", "-R", fmt.Sprintf("%d:%d", uid, gid), projectRoot)
+	cmd := exec.CommandContext(ctx, "chown", "-R", fmt.Sprintf("%d:%d", uid, gid), projectRoot)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("chown -R %d:%d %s: %s", uid, gid, projectRoot, strings.TrimSpace(string(output)))

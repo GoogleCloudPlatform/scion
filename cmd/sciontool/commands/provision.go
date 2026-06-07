@@ -4,6 +4,7 @@ Copyright 2026 The Scion Authors.
 package commands
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -47,9 +48,9 @@ to prevent shell injection via crafted values.`,
 	SilenceUsage:  true,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if provisionWaitSentinel {
-			return runWaitForSentinel()
+			return runWaitForSentinel(cmd.Context())
 		}
-		return runProvision()
+		return runProvision(cmd.Context())
 	},
 }
 
@@ -74,7 +75,7 @@ func init() {
 		"Poll interval in seconds for --wait-for-sentinel mode")
 }
 
-func runProvision() error {
+func runProvision(ctx context.Context) error {
 	cloneURL := os.Getenv("SCION_CLONE_URL")
 	cloneBranch := os.Getenv("SCION_CLONE_BRANCH")
 	projectID := os.Getenv("SCION_PROJECT_ID")
@@ -94,6 +95,7 @@ func runProvision() error {
 	mode := store.ResolveWorkspaceSharingMode(provisionMode)
 
 	in := provision.ProvisionInput{
+		Ctx: ctx,
 		Resolved: provision.ResolvedWorkspace{
 			HostPath: provisionWorkspace,
 		},
@@ -114,18 +116,18 @@ func runProvision() error {
 	return nil
 }
 
-func runWaitForSentinel() error {
+func runWaitForSentinel(ctx context.Context) error {
 	sentinelPath := filepath.Join(provisionWorkspace, provision.ProvisionSentinelFile)
 	timeout := time.Duration(provisionTimeout) * time.Second
 	interval := time.Duration(provisionPollInterval) * time.Second
-	deadline := time.Now().Add(timeout)
+	start := time.Now()
+	deadline := start.Add(timeout)
 
 	log.Info("Waiting for sentinel %s (timeout=%s, interval=%s)", sentinelPath, timeout, interval)
 
 	for {
 		if _, err := os.Stat(sentinelPath); err == nil {
-			elapsed := timeout - time.Until(deadline)
-			log.Info("Sentinel found after %s", elapsed.Truncate(time.Second))
+			log.Info("Sentinel found after %s", time.Since(start).Truncate(time.Second))
 			return nil
 		}
 
@@ -133,6 +135,12 @@ func runWaitForSentinel() error {
 			return fmt.Errorf("timed out waiting for sentinel %s after %s", sentinelPath, timeout)
 		}
 
-		time.Sleep(interval)
+		// Sleep for the poll interval, but wake immediately on cancellation
+		// (SIGTERM/SIGINT) so the init container exits promptly.
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("cancelled while waiting for sentinel %s: %w", sentinelPath, ctx.Err())
+		case <-time.After(interval):
+		}
 	}
 }
