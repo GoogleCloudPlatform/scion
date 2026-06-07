@@ -503,8 +503,12 @@ func appendGitExclude(hostPath, pattern string) error {
 		return fmt.Errorf("mkdir .git/info: %w", err)
 	}
 	data, _ := os.ReadFile(excludePath)
-	if strings.Contains(string(data), pattern) {
-		return nil
+	// Exact line match — strings.Contains would false-positive on e.g.
+	// "my-worktrees/" or "worktrees/agent-1" and skip appending the pattern.
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.TrimSpace(line) == strings.TrimSpace(pattern) {
+			return nil
+		}
 	}
 	f, err := os.OpenFile(excludePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {

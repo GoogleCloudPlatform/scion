@@ -18,12 +18,14 @@ import (
 	"context"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -858,5 +860,102 @@ func TestResolveWorktreeProvision_FullCloneDepth(t *testing.T) {
 
 	if originalGC.Depth != 1 {
 		t.Errorf("original GitClone.Depth was mutated: got %d, want 1", originalGC.Depth)
+	}
+}
+
+// initBareRepoWithCommit creates a bare git repo (default branch main) seeded
+// with one commit, and returns its path for use as a GitClone URL.
+func initBareRepoWithCommit(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	bare := filepath.Join(dir, "remote.git")
+	wc := filepath.Join(dir, "wc")
+	run := func(args ...string) {
+		cmd := exec.Command("git", args...)
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t",
+			"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %s", args, strings.TrimSpace(string(out)))
+		}
+	}
+	run("init", "--bare", "-b", "main", bare)
+	run("clone", bare, wc)
+	if err := os.WriteFile(filepath.Join(wc, "README.md"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run("-C", wc, "add", "-A")
+	run("-C", wc, "commit", "-m", "init")
+	run("-C", wc, "push", "origin", "main")
+	return bare
+}
+
+// TestTryProvisionWorktree_FailureDoesNotDeleteSharedBase is the regression for
+// the critical review finding on upstream PR #350: when provisioning fails for
+// one agent, only that agent's worktree may be removed — never the shared base
+// clone (Resolved.HostPath), which holds the common .git and every sibling
+// agent's worktree. Deleting it would destroy all other agents' workspaces.
+func TestTryProvisionWorktree_FailureDoesNotDeleteSharedBase(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+
+	cfg := DefaultServerConfig()
+	cfg.StateDir = t.TempDir()
+	srv := newTestServerForStartContext(t, cfg)
+
+	bare := initBareRepoWithCommit(t)
+	gc := &api.GitCloneConfig{URL: bare, Branch: "main", Depth: 0}
+
+	projectPath := filepath.Join(t.TempDir(), "proj")
+	if err := os.MkdirAll(projectPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Set up the shared base + a sibling worktree owning branch "agent-a".
+	resolved, err := runtime.NewLocalBackend().Resolve(runtime.ResolveInput{
+		ProjectDir: projectPath, ProjectID: "p1", AgentID: "agent-a",
+		Mode: store.SharingModeWorktreePerAgent,
+	})
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if err := provision.ProvisionShared(provision.ProvisionInput{
+		Resolved: resolved, Mode: store.SharingModeWorktreePerAgent,
+		ProjectID: "p1", AgentID: "agent-a", AgentName: "agent-a", GitClone: gc,
+	}); err != nil {
+		t.Fatalf("setup agent-a: %v", err)
+	}
+	base := resolved.HostPath
+	siblingWt := provision.WorktreePath(base, "agent-a")
+	if _, err := os.Stat(filepath.Join(base, ".git")); err != nil {
+		t.Fatalf("base .git missing after setup: %v", err)
+	}
+	if _, err := os.Stat(siblingWt); err != nil {
+		t.Fatalf("sibling worktree missing after setup: %v", err)
+	}
+
+	// Provision agent-b with a branch colliding with agent-a's → ensureWorktree
+	// fails ("already checked out"), exercising the cleanup-on-failure path.
+	opts := &api.StartOptions{}
+	ok := srv.tryProvisionWorktree(context.Background(), startContextInputs{
+		Name: "agent-b", AgentID: "agent-b",
+		ProjectID: "p1", ProjectSlug: "proj", ProjectPath: projectPath,
+		WorkspaceMode: store.WorkspaceModeWorktreePerAgent,
+		Config:        &CreateAgentConfig{GitClone: gc, Branch: "agent-a"},
+	}, opts, map[string]string{})
+
+	if ok {
+		t.Fatal("expected provisioning to fail (branch collision) and fall back, got ok=true")
+	}
+
+	// CRITICAL: the shared base and the sibling worktree must survive.
+	if _, err := os.Stat(filepath.Join(base, ".git")); err != nil {
+		t.Errorf("shared base .git was destroyed by a failed sibling provision: %v", err)
+	}
+	if _, err := os.Stat(siblingWt); err != nil {
+		t.Errorf("sibling agent-a worktree was destroyed by a failed sibling provision: %v", err)
+	}
+	// Only the failing agent's partial worktree should be cleaned up.
+	if _, err := os.Stat(provision.WorktreePath(base, "agent-b")); !os.IsNotExist(err) {
+		t.Errorf("agent-b partial worktree should have been cleaned up, stat err=%v", err)
 	}
 }

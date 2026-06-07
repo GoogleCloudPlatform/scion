@@ -554,15 +554,18 @@ func (s *Server) tryProvisionWorktree(ctx context.Context, in startContextInputs
 	if err := provision.ProvisionShared(result.ProvisionInput); err != nil {
 		slog.Warn("worktree-per-agent: provisioning failed, falling back to clone-per-agent",
 			"agent_id", in.AgentID, "error", err)
-		// Clean up partially-provisioned base so a later attempt re-clones
-		// cleanly instead of reusing broken state.
-		if result.ProvisionInput.Resolved.HostPath != "" {
-			if cleanErr := os.RemoveAll(result.ProvisionInput.Resolved.HostPath); cleanErr != nil {
-				slog.Warn("worktree-per-agent: failed to clean up partial provision",
-					"agent_id", in.AgentID, "path", result.ProvisionInput.Resolved.HostPath, "error", cleanErr)
+		// Clean up ONLY this agent's partial worktree — never Resolved.HostPath,
+		// which is the shared base clone holding the common .git and every other
+		// agent's worktree under worktrees/<agentID>. Removing it would destroy
+		// the workspaces of all other running agents for this project. A partial
+		// base clone is self-healed by provision.gitCloneWorkspace on retry.
+		if result.WorktreePath != "" {
+			if cleanErr := os.RemoveAll(result.WorktreePath); cleanErr != nil {
+				slog.Warn("worktree-per-agent: failed to clean up partial worktree",
+					"agent_id", in.AgentID, "path", result.WorktreePath, "error", cleanErr)
 			} else {
-				slog.Info("worktree-per-agent: cleaned up partial provision",
-					"agent_id", in.AgentID, "path", result.ProvisionInput.Resolved.HostPath)
+				slog.Info("worktree-per-agent: cleaned up partial worktree",
+					"agent_id", in.AgentID, "path", result.WorktreePath)
 			}
 		}
 		return false
