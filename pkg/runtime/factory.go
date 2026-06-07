@@ -45,7 +45,7 @@ func GetRuntime(projectPath string, profileName string) Runtime {
 			util.Debugf("GetRuntime: ResolveRuntime failed: %v", err)
 			// If profile resolution fails, we might be passed a direct runtime type
 			// Fallback to legacy behavior for now if profileName matches a known type
-			if profileName == "docker" || profileName == "podman" || profileName == "kubernetes" || profileName == "k8s" || profileName == "container" || profileName == "remote" || profileName == "local" {
+			if profileName == "docker" || profileName == "podman" || profileName == "kubernetes" || profileName == "k8s" || profileName == "container" || profileName == "remote" || profileName == "local" || profileName == "cloudrun" {
 				runtimeType = profileName
 				util.Debugf("GetRuntime: using profileName as runtimeType: %s", runtimeType)
 			} else {
@@ -129,6 +129,12 @@ func GetRuntime(projectPath string, profileName string) Runtime {
 			util.Debugf("GetRuntime: auto-detected GKE cluster, enabling Autopilot scheduling tolerance")
 		}
 		rt.ListAllNamespaces = rtConfig.ListAllNamespaces
+		return rt
+	case "cloudrun":
+		rt := NewCloudRunRuntime(rtConfig.CloudRun)
+		if vs != nil && vs.Server != nil {
+			rt.WorkspaceStorage = vs.Server.WorkspaceStorage
+		}
 		return rt
 	}
 

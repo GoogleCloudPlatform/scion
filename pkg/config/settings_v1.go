@@ -660,6 +660,14 @@ type V1TelemetrySamplingConfig struct {
 	Rates   map[string]float64 `json:"rates,omitempty" yaml:"rates,omitempty" koanf:"rates"`
 }
 
+// V1CloudRunConfig holds Cloud Run runtime settings.
+type V1CloudRunConfig struct {
+	// Project is the GCP project ID for Cloud Run API calls.
+	Project string `json:"project,omitempty" yaml:"project,omitempty" koanf:"project"`
+	// Region is the GCP region for Cloud Run services (e.g. "us-central1").
+	Region string `json:"region,omitempty" yaml:"region,omitempty" koanf:"region"`
+}
+
 // V1RuntimeConfig extends RuntimeConfig with a Type field.
 type V1RuntimeConfig struct {
 	Type              string            `json:"type,omitempty" yaml:"type,omitempty" koanf:"type"`
@@ -670,6 +678,8 @@ type V1RuntimeConfig struct {
 	Sync              string            `json:"sync,omitempty" yaml:"sync,omitempty" koanf:"sync"`
 	GKE               bool              `json:"gke,omitempty" yaml:"gke,omitempty" koanf:"gke"`
 	ListAllNamespaces bool              `json:"list_all_namespaces,omitempty" yaml:"list_all_namespaces,omitempty" koanf:"list_all_namespaces"`
+	// CloudRun holds Cloud Run-specific settings when Type is "cloudrun".
+	CloudRun *V1CloudRunConfig `json:"cloudrun,omitempty" yaml:"cloudrun,omitempty" koanf:"cloudrun"`
 }
 
 // HarnessConfigEntry defines a harness configuration entry in versioned settings.
