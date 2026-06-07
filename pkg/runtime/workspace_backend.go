@@ -149,6 +149,14 @@ type ProvisionInput struct {
 	// Used for one-time chown of newly provisioned workspace directories.
 	NFSUID int
 	NFSGID int
+
+	// SentinelDir overrides the directory where the provisioning sentinel file
+	// (.scion-provisioned) is written and checked. When empty, defaults to
+	// filepath.Dir(Resolved.HostPath) — the project root parent of the workspace
+	// dir. This is needed for k8s init containers where only the workspace dir
+	// itself is mounted (not its parent), so the sentinel must live inside the
+	// workspace mount.
+	SentinelDir string
 }
 
 // RealizeInput holds parameters for emitting a runtime mount descriptor.

@@ -632,6 +632,117 @@ func TestSanitizeBranchName(t *testing.T) {
 	}
 }
 
+// --- SentinelDir override ---
+
+func TestNFSProvision_DefaultSentinelDir_IsParent(t *testing.T) {
+	b, _, _ := nfsTestBackend(t)
+	locker := newTestLocker()
+
+	projectID := "proj-sentinel-default"
+	res, err := b.Resolve(ResolveInput{
+		ProjectID: projectID,
+		Mode:      store.SharingModeSharedPlain,
+	})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+
+	err = ProvisionShared(ProvisionInput{
+		Resolved:  res,
+		ProjectID: projectID,
+		Mode:      store.SharingModeSharedPlain,
+		Locker:    locker,
+		// SentinelDir is empty → default to parent
+	})
+	if err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+
+	// Sentinel should be in the parent of HostPath (project root).
+	parentSentinel := filepath.Join(filepath.Dir(res.HostPath), provisionSentinelFile)
+	if _, err := os.Stat(parentSentinel); err != nil {
+		t.Errorf("default sentinel should be in parent dir: %v", err)
+	}
+
+	// Sentinel should NOT be inside workspace dir.
+	workspaceSentinel := filepath.Join(res.HostPath, provisionSentinelFile)
+	if _, err := os.Stat(workspaceSentinel); err == nil {
+		t.Errorf("default sentinel should not be inside workspace dir")
+	}
+}
+
+func TestNFSProvision_CustomSentinelDir(t *testing.T) {
+	b, _, _ := nfsTestBackend(t)
+	locker := newTestLocker()
+
+	projectID := "proj-sentinel-custom"
+	res, err := b.Resolve(ResolveInput{
+		ProjectID: projectID,
+		Mode:      store.SharingModeSharedPlain,
+	})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+
+	err = ProvisionShared(ProvisionInput{
+		Resolved:    res,
+		ProjectID:   projectID,
+		Mode:        store.SharingModeSharedPlain,
+		Locker:      locker,
+		SentinelDir: res.HostPath, // sentinel inside workspace dir
+	})
+	if err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+
+	// Sentinel should be inside the workspace dir.
+	workspaceSentinel := filepath.Join(res.HostPath, provisionSentinelFile)
+	if _, err := os.Stat(workspaceSentinel); err != nil {
+		t.Errorf("custom sentinel should be inside workspace dir: %v", err)
+	}
+}
+
+func TestNFSProvision_CustomSentinelDir_Idempotent(t *testing.T) {
+	b, _, _ := nfsTestBackend(t)
+	locker := newTestLocker()
+	bareRepo := initBareGitRepo(t)
+
+	projectID := "proj-sentinel-idem"
+	res, err := b.Resolve(ResolveInput{
+		ProjectID: projectID,
+		Mode:      store.SharingModeSharedPlain,
+	})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+
+	input := ProvisionInput{
+		Resolved:    res,
+		ProjectID:   projectID,
+		Mode:        store.SharingModeSharedPlain,
+		Locker:      locker,
+		SentinelDir: res.HostPath,
+		GitClone: &api.GitCloneConfig{
+			URL:    bareRepo,
+			Branch: "main",
+			Depth:  1,
+		},
+	}
+
+	if err := ProvisionShared(input); err != nil {
+		t.Fatalf("first Provision: %v", err)
+	}
+	if err := ProvisionShared(input); err != nil {
+		t.Fatalf("second Provision (should be idempotent): %v", err)
+	}
+
+	// Sentinel exists in the custom dir.
+	sentinel := filepath.Join(res.HostPath, provisionSentinelFile)
+	if _, err := os.Stat(sentinel); err != nil {
+		t.Errorf("sentinel should exist in custom dir: %v", err)
+	}
+}
+
 // --- writeSentinel ---
 
 func TestWriteSentinel_Atomic(t *testing.T) {

@@ -78,9 +78,13 @@ func ProvisionShared(in ProvisionInput) error {
 		return fmt.Errorf("nfsBackend.Provision: ProjectID is required")
 	}
 
-	// The project root is the parent of the workspace dir:
-	// <MountRoot>/<shareID>/<SubPathRoot>/<projectID>/ contains workspace/ + shared-dirs/.
-	projectRoot := filepath.Dir(in.Resolved.HostPath)
+	// Determine the sentinel directory: explicit override or default to parent.
+	sentinelDir := in.SentinelDir
+	if sentinelDir == "" {
+		// The project root is the parent of the workspace dir:
+		// <MountRoot>/<shareID>/<SubPathRoot>/<projectID>/ contains workspace/ + shared-dirs/.
+		sentinelDir = filepath.Dir(in.Resolved.HostPath)
+	}
 
 	ctx := context.Background()
 
@@ -97,7 +101,7 @@ func ProvisionShared(in ProvisionInput) error {
 	}()
 
 	// --- Step 2: Check sentinel ---
-	sentinelPath := filepath.Join(projectRoot, provisionSentinelFile)
+	sentinelPath := filepath.Join(sentinelDir, provisionSentinelFile)
 	if _, err := os.Stat(sentinelPath); err == nil {
 		// Already provisioned — skip to worktree setup if needed.
 		slog.Debug("nfsBackend.Provision: workspace already provisioned (sentinel exists)",
@@ -130,10 +134,13 @@ func ProvisionShared(in ProvisionInput) error {
 
 	// Chown to stable NFS UID/GID (design §9.1). This is a ONE-TIME operation
 	// under the advisory lock — per-start chown is skipped for NFS (see N1-5).
+	// Chown the workspace dir itself (sentinelDir may differ from project root
+	// when running inside a k8s init container with a subPath mount).
+	chownRoot := filepath.Dir(in.Resolved.HostPath)
 	uid, gid := resolveUID(in), resolveGID(in)
-	if err := chownProjectTree(projectRoot, uid, gid); err != nil {
+	if err := chownProjectTree(chownRoot, uid, gid); err != nil {
 		slog.Warn("nfsBackend.Provision: chown failed (non-fatal, may lack privileges)",
-			"project_id", in.ProjectID, "path", projectRoot, "uid", uid, "gid", gid, "error", err)
+			"project_id", in.ProjectID, "path", chownRoot, "uid", uid, "gid", gid, "error", err)
 		// Non-fatal: operator may have pre-chowned. Continue to write sentinel.
 	}
 
