@@ -211,7 +211,7 @@ func TestAuthenticatedBrokerClient_StartAgent(t *testing.T) {
 	client := NewAuthenticatedBrokerClient(db, false)
 
 	// Make request
-	resp, err := client.StartAgent(context.Background(), brokerID, server.URL, "my-agent", "", "", "", "", "", nil, nil, nil, nil, false)
+	resp, err := client.StartAgent(context.Background(), brokerID, server.URL, "my-agent", "", "", "", "", "", nil, nil, nil, nil, false, false)
 	if err != nil {
 		t.Fatalf("StartAgent failed: %v", err)
 	}
@@ -404,7 +404,7 @@ func TestAuthenticatedBrokerClient_StartAgent_InvalidJSONFails(t *testing.T) {
 	defer server.Close()
 
 	client := NewAuthenticatedBrokerClient(db, false)
-	_, err = client.StartAgent(context.Background(), brokerID, server.URL, tid("agent-1"), "", "", "", "", "", nil, nil, nil, nil, false)
+	_, err = client.StartAgent(context.Background(), brokerID, server.URL, tid("agent-1"), "", "", "", "", "", nil, nil, nil, nil, false, false)
 	if err == nil {
 		t.Fatal("expected StartAgent to fail on invalid JSON response")
 	}
@@ -492,7 +492,7 @@ func TestAuthenticatedBrokerClient_AllOperations(t *testing.T) {
 		t.Errorf("CreateAgent failed: %v", err)
 	}
 
-	_, err = client.StartAgent(ctx, brokerID, server.URL, "test-agent", "", "", "", "", "", nil, nil, nil, nil, false)
+	_, err = client.StartAgent(ctx, brokerID, server.URL, "test-agent", "", "", "", "", "", nil, nil, nil, nil, false, false)
 	if err != nil {
 		t.Errorf("StartAgent failed: %v", err)
 	}

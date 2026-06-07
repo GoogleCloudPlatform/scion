@@ -36,10 +36,10 @@ questions are flagged inline and consolidated at the end.
 - Access is proxied by the `state-fix-instance-manager` agent (this workstream lacks
   compute perms on the project). Deploy loop: push branch → instance-manager pulls on
   VM, `go build -o scion ./cmd/scion`, swap binary, restart hub.
-- **OPEN — branch base:** state-fixes is currently `== origin/main`. The integration VM
-  runs the Postgres branch, so a main-based binary may not run cleanly against the
-  existing Postgres DB. Decide whether to base state-fixes on `main` or on
-  `postgres/wave-b-integration`.
+- **Branch base — DECIDED:** state-fixes is based on `main` (currently zero code delta).
+  `postgres/wave-b-integration` was an unrelated project and is being replaced on the VM.
+  Workflow: push `scion/state-fixes` → redeploy on the integration VM → retest. The VM's
+  Postgres DB from the wave-b work is reset as needed for a clean main-based deploy.
 
 ## Background: how state works today
 
@@ -88,17 +88,49 @@ flag is missing" but one or more of:
    the resume args are mis-quoted or the harness re-execs with a filtered env, the
    resume flag could be dropped. Needs runtime-specific confirmation.
 
-### Proposed scope (draft)
-- Reproduce on each runtime (Docker, k8s, Cloud Run) and pin down which failure mode(s)
-  actually bite. (**OPEN Q1** — which runtime is the user seeing this on?)
-- If home-loss is the cause: make harness session state survive resume. Options:
-  - (a) Persist agent home to NFS / a dedicated NFS subpath (ties into Part 3).
-  - (b) Sync home to GCS on suspend, restore on resume.
-  - (c) Restart the *existing* stopped container (`docker start`) instead of recreating,
-    where the runtime supports it — but this doesn't help k8s/Cloud Run.
-- Add an explicit post-resume assertion: verify the harness actually attached to a prior
-  session (e.g., detect "no conversation found" and surface it instead of silently
-  starting fresh).
+### CONFIRMED ROOT CAUSE (Docker, hub/broker path — repro on the integration VM, June 2026)
+
+The resume flag is accepted at the API layer (`CreateAgentRequest.Resume`) but is **never
+threaded through the hub→broker→runtime pipeline**, so `Harness.GetCommand` is called with
+`resume=false` and `--continue` is never added. The resumed container runs the identical
+command as a fresh start (and even re-injects the original task). Everything else is
+correct: the new container reuses the same home bind-mount, the workspace/cwd is identical
+(`/workspace`, encoded `-workspace`), and the prior Claude session `.jsonl` survives in
+`~/.claude/projects/-workspace/` — only the flag is missing.
+
+Trace of the gap:
+- `pkg/hub/handlers.go` CreateAgent handler (~9149-9170) and wake handler (~2399) call
+  `dispatcher.DispatchAgentStart(ctx, agent, task)` **without** any resume intent. No
+  special handling for `suspended` agents.
+- `pkg/hub/httpdispatcher.go` `DispatchAgentStart` (~966) has no resume param; calls
+  `client.StartAgent(...)` (~1165) without it. `dispatch_args.go` `StartDispatchArgs` has
+  only `Task`.
+- `pkg/hub/broker_http_transport.go` `StartAgent` (~164) builds a payload with no
+  `resume` field. `pkg/hub/brokerclient.go` interface (~47) signature lacks it.
+- `pkg/runtimebroker/handlers.go` `startAgent` (~1128) has a fallback: read
+  `GetSavedPhase` from disk and set `opts.Resume=true` if `suspended` (~1208-1214) — but
+  this only works for local-filesystem projects, NOT hub-managed projects, so it fails on
+  the deployed hub.
+- `pkg/runtime/common.go:428` `GetCommand(task, config.Resume, args)` and the Claude
+  harness (`pkg/harness/claude_code.go:78`, adds `--continue` when resume) are already
+  correct — they just never receive `resume=true`.
+- There is no `AgentActionResume` and no `/resume` HTTP route — start and resume are the
+  same action (explains the `/resume` 404).
+
+### Fix plan (Part 1)
+Thread an explicit `resume bool` from the hub (source of truth) to `RunConfig.Resume`:
+1. Hub computes `resume := existingAgent.Phase == PhaseSuspended` (mirrors local
+   `effectiveResume`: suspended→resume, stopped→fresh) in the CreateAgent and wake paths,
+   and passes it to `DispatchAgentStart`.
+2. Add `resume` param through `DispatchAgentStart` → `StartDispatchArgs` →
+   `BrokerClient.StartAgent` → HTTP payload (`"resume": true`).
+3. Broker `startReq` gains `Resume bool`; handler sets `opts.Resume` from it (keep the
+   `GetSavedPhase` read as a fallback only).
+4. `opts.Resume → RunConfig.Resume → GetCommand` is already wired — no change needed.
+5. On a pure resume (no new message), do **not** re-inject the original creation task
+   (pass empty task so the harness just continues); a wake-with-message still passes that
+   message. (Flag if this turns out larger than expected.)
+Optional follow-up: add a first-class `AgentActionResume` + `/resume` route for clarity.
 
 ---
 

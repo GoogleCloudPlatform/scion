@@ -781,7 +781,7 @@ func (d *createAgentDispatcher) DispatchAgentProvision(_ context.Context, agent 
 	agent.Phase = string(state.PhaseCreated)
 	return nil
 }
-func (d *createAgentDispatcher) DispatchAgentStart(_ context.Context, _ *store.Agent, _ string) error {
+func (d *createAgentDispatcher) DispatchAgentStart(_ context.Context, _ *store.Agent, _ string, _ bool) error {
 	d.startCalled = true
 	return nil
 }

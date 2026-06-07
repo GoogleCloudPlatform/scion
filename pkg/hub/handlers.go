@@ -2396,7 +2396,9 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 				return
 			}
 
-			if err := dispatcher.DispatchAgentStart(ctx, agent, ""); err != nil {
+			// Wake always resumes a suspended agent, so the harness must
+			// continue its prior session.
+			if err := dispatcher.DispatchAgentStart(ctx, agent, "", true); err != nil {
 				RuntimeError(w, "Failed to wake agent: "+err.Error())
 				return
 			}
@@ -3030,7 +3032,9 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 	case api.AgentActionStart:
 		newPhase = string(state.PhaseRunning)
 		if dispatcher != nil && agent.RuntimeBrokerID != "" {
-			dispatchErr = dispatcher.DispatchAgentStart(ctx, agent, "")
+			// Resume the harness session only when the agent was suspended.
+			resume := agent.Phase == string(state.PhaseSuspended)
+			dispatchErr = dispatcher.DispatchAgentStart(ctx, agent, "", resume)
 			// DispatchAgentStart applies the broker response in-place;
 			// use the broker-reported phase if it was set.
 			if dispatchErr == nil && agent.Phase != "" {
@@ -3082,7 +3086,8 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 				slog.Warn("Restart: stop dispatch failed, proceeding with start",
 					"agent_id", id, "error", stopErr)
 			}
-			dispatchErr = dispatcher.DispatchAgentStart(ctx, agent, "")
+			// Restart is stop + start: a fresh harness session, not a resume.
+			dispatchErr = dispatcher.DispatchAgentStart(ctx, agent, "", false)
 			// DispatchAgentStart applies the broker response in-place;
 			// use the broker-reported phase if it was set.
 			if dispatchErr == nil && agent.Phase != "" {
@@ -9119,7 +9124,10 @@ func (s *Server) handleExistingAgent(
 			existingAgent.AppliedConfig.Attach = req.Attach
 		}
 
-		if err := dispatcher.DispatchAgentStart(ctx, existingAgent, req.Task); err != nil {
+		// This branch only runs for suspended agents, so resume the harness
+		// session (Claude --continue) rather than starting fresh.
+		resume := existingAgent.Phase == string(state.PhaseSuspended)
+		if err := dispatcher.DispatchAgentStart(ctx, existingAgent, req.Task, resume); err != nil {
 			RuntimeError(w, "Failed to resume suspended agent: "+err.Error())
 			return existingAgentErrored
 		}
@@ -9170,7 +9178,9 @@ func (s *Server) handleExistingAgent(
 				existingAgent.AppliedConfig.Attach = req.Attach
 			}
 
-			if err := dispatcher.DispatchAgentStart(ctx, existingAgent, req.Task); err != nil {
+			// A stopped agent restarts with a fresh harness session even when
+			// resume was requested (mirrors the local CLI's effectiveResume).
+			if err := dispatcher.DispatchAgentStart(ctx, existingAgent, req.Task, false); err != nil {
 				RuntimeError(w, "Failed to resume stopped agent: "+err.Error())
 				return existingAgentErrored
 			}
@@ -9239,7 +9249,8 @@ func (s *Server) handleExistingAgent(
 
 		// Dispatch start action — DispatchAgentStart applies the broker's
 		// response (status, container info) onto existingAgent in-place.
-		if err := dispatcher.DispatchAgentStart(ctx, existingAgent, req.Task); err != nil {
+		// A created/provisioning agent has no prior session to resume.
+		if err := dispatcher.DispatchAgentStart(ctx, existingAgent, req.Task, false); err != nil {
 			RuntimeError(w, "Failed to start agent: "+err.Error())
 			return existingAgentErrored
 		}

@@ -216,7 +216,7 @@ func (d *reconcileTestDispatcher) DispatchAgentCreate(context.Context, *store.Ag
 func (d *reconcileTestDispatcher) DispatchAgentProvision(context.Context, *store.Agent) error {
 	return nil
 }
-func (d *reconcileTestDispatcher) DispatchAgentStart(context.Context, *store.Agent, string) error {
+func (d *reconcileTestDispatcher) DispatchAgentStart(context.Context, *store.Agent, string, bool) error {
 	return nil
 }
 func (d *reconcileTestDispatcher) DispatchAgentStop(context.Context, *store.Agent) error { return nil }

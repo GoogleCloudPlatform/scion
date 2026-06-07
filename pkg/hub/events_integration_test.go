@@ -38,7 +38,7 @@ func (noopDispatcher) DispatchAgentCreate(_ context.Context, agent *store.Agent)
 	return nil
 }
 func (noopDispatcher) DispatchAgentProvision(_ context.Context, _ *store.Agent) error { return nil }
-func (noopDispatcher) DispatchAgentStart(_ context.Context, _ *store.Agent, _ string) error {
+func (noopDispatcher) DispatchAgentStart(_ context.Context, _ *store.Agent, _ string, _ bool) error {
 	return nil
 }
 func (noopDispatcher) DispatchAgentStop(_ context.Context, _ *store.Agent) error      { return nil }

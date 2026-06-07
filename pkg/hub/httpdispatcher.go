@@ -54,8 +54,8 @@ func (c *HTTPRuntimeBrokerClient) CreateAgent(ctx context.Context, brokerID, bro
 	return c.transport.CreateAgent(ctx, brokerID, brokerEndpoint, req)
 }
 
-func (c *HTTPRuntimeBrokerClient) StartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID, task, projectPath, projectSlug, harnessConfig string, resolvedEnv map[string]string, resolvedSecrets []ResolvedSecret, inlineConfig *api.ScionConfig, sharedDirs []api.SharedDir, sharedWorkspace bool) (*RemoteAgentResponse, error) {
-	return c.transport.StartAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, task, projectPath, projectSlug, harnessConfig, resolvedEnv, resolvedSecrets, inlineConfig, sharedDirs, sharedWorkspace)
+func (c *HTTPRuntimeBrokerClient) StartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID, task, projectPath, projectSlug, harnessConfig string, resolvedEnv map[string]string, resolvedSecrets []ResolvedSecret, inlineConfig *api.ScionConfig, sharedDirs []api.SharedDir, sharedWorkspace, resume bool) (*RemoteAgentResponse, error) {
+	return c.transport.StartAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, task, projectPath, projectSlug, harnessConfig, resolvedEnv, resolvedSecrets, inlineConfig, sharedDirs, sharedWorkspace, resume)
 }
 
 func (c *HTTPRuntimeBrokerClient) StopAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string) error {
@@ -965,8 +965,12 @@ func (d *HTTPAgentDispatcher) buildEnvSources(ctx context.Context, agent *store.
 	return sources
 }
 
-// DispatchAgentStart starts an agent on the runtime broker.
-func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *store.Agent, task string) error {
+// DispatchAgentStart starts an agent on the runtime broker. When resume is
+// true, the harness is asked to continue its prior session (e.g. Claude
+// --continue) instead of starting a fresh conversation. The hub is the source
+// of truth for resume: callers compute it from the agent's stored phase
+// (suspended → resume).
+func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *store.Agent, task string, resume bool) error {
 	if err := requireRuntimeBrokerAssigned(agent); err != nil {
 		return err
 	}
@@ -976,8 +980,11 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 		return err
 	}
 
-	// If no explicit task provided, fall back to the agent's applied config task
-	if task == "" && agent.AppliedConfig != nil {
+	// If no explicit task provided, fall back to the agent's applied config
+	// task. Skip this on a pure resume (no new message): the harness should
+	// just continue its prior session rather than be re-handed the original
+	// creation task. A wake-with-message still passes that message as task.
+	if task == "" && !resume && agent.AppliedConfig != nil {
 		task = agent.AppliedConfig.Task
 	}
 
@@ -1165,10 +1172,11 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 		inlineConfig = agent.AppliedConfig.InlineConfig
 	}
 
-	resp, err := d.client.StartAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID, task, projectPath, projectSlug, harnessConfig, resolvedEnv, resolvedSecrets, inlineConfig, projectInfo.sharedDirs, projectInfo.sharedWorkspace)
+	resp, err := d.client.StartAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID, task, projectPath, projectSlug, harnessConfig, resolvedEnv, resolvedSecrets, inlineConfig, projectInfo.sharedDirs, projectInfo.sharedWorkspace, resume)
 	if errors.Is(err, ErrLifecycleDeferred) {
 		return d.deferredStart(ctx, agent, &StartDispatchArgs{
-			Task: task,
+			Task:   task,
+			Resume: resume,
 		})
 	}
 	if err != nil {

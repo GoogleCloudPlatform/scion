@@ -243,7 +243,9 @@ type AgentDispatcher interface {
 
 	// DispatchAgentStart resumes a stopped agent on the runtime broker.
 	// task is an optional task string to pass to the agent on start.
-	DispatchAgentStart(ctx context.Context, agent *store.Agent, task string) error
+	// resume requests harness session continuation (e.g. Claude --continue);
+	// callers compute it from the agent's stored phase (suspended → resume).
+	DispatchAgentStart(ctx context.Context, agent *store.Agent, task string, resume bool) error
 
 	// DispatchAgentStop stops a running agent on the runtime broker.
 	DispatchAgentStop(ctx context.Context, agent *store.Agent) error
@@ -304,7 +306,7 @@ type RuntimeBrokerClient interface {
 	// sharedWorkspace indicates the project uses a shared workspace mount
 	// (hub-project / git-workspace hybrid) so the broker must not create a
 	// per-agent worktree on (re-)start.
-	StartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID, task, projectPath, projectSlug, harnessConfig string, resolvedEnv map[string]string, resolvedSecrets []ResolvedSecret, inlineConfig *api.ScionConfig, sharedDirs []api.SharedDir, sharedWorkspace bool) (*RemoteAgentResponse, error)
+	StartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID, task, projectPath, projectSlug, harnessConfig string, resolvedEnv map[string]string, resolvedSecrets []ResolvedSecret, inlineConfig *api.ScionConfig, sharedDirs []api.SharedDir, sharedWorkspace, resume bool) (*RemoteAgentResponse, error)
 
 	// StopAgent stops an agent on a remote runtime broker.
 	// brokerID is used for HMAC authentication lookup.

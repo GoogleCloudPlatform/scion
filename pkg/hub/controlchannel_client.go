@@ -75,7 +75,7 @@ func (c *ControlChannelBrokerClient) CreateAgent(ctx context.Context, brokerID, 
 }
 
 // StartAgent starts an agent via control channel.
-func (c *ControlChannelBrokerClient) StartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID, task, projectPath, projectSlug, harnessConfig string, resolvedEnv map[string]string, resolvedSecrets []ResolvedSecret, inlineConfig *api.ScionConfig, sharedDirs []api.SharedDir, sharedWorkspace bool) (*RemoteAgentResponse, error) {
+func (c *ControlChannelBrokerClient) StartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID, task, projectPath, projectSlug, harnessConfig string, resolvedEnv map[string]string, resolvedSecrets []ResolvedSecret, inlineConfig *api.ScionConfig, sharedDirs []api.SharedDir, sharedWorkspace, resume bool) (*RemoteAgentResponse, error) {
 	_ = brokerEndpoint
 	path := fmt.Sprintf("/api/v1/agents/%s/start", url.PathEscape(agentID))
 	if projectID != "" {
@@ -109,6 +109,9 @@ func (c *ControlChannelBrokerClient) StartAgent(ctx context.Context, brokerID, b
 	}
 	if sharedWorkspace {
 		payload["sharedWorkspace"] = true
+	}
+	if resume {
+		payload["resume"] = true
 	}
 
 	var body []byte
@@ -508,12 +511,12 @@ func (c *HybridBrokerClient) CreateAgent(ctx context.Context, brokerID, brokerEn
 // routeLocal uses the control-channel tunnel (unchanged fast path), routeHTTP
 // falls back to the broker's HTTP endpoint, and routeForward/routeUndeliverable
 // return ErrLifecycleDeferred so the caller can write durable intent + wait.
-func (c *HybridBrokerClient) StartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID, task, projectPath, projectSlug, harnessConfig string, resolvedEnv map[string]string, resolvedSecrets []ResolvedSecret, inlineConfig *api.ScionConfig, sharedDirs []api.SharedDir, sharedWorkspace bool) (*RemoteAgentResponse, error) {
+func (c *HybridBrokerClient) StartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID, task, projectPath, projectSlug, harnessConfig string, resolvedEnv map[string]string, resolvedSecrets []ResolvedSecret, inlineConfig *api.ScionConfig, sharedDirs []api.SharedDir, sharedWorkspace, resume bool) (*RemoteAgentResponse, error) {
 	switch c.route(ctx, brokerID, brokerEndpoint) {
 	case routeLocal:
-		return c.controlChannel.StartAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, task, projectPath, projectSlug, harnessConfig, resolvedEnv, resolvedSecrets, inlineConfig, sharedDirs, sharedWorkspace)
+		return c.controlChannel.StartAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, task, projectPath, projectSlug, harnessConfig, resolvedEnv, resolvedSecrets, inlineConfig, sharedDirs, sharedWorkspace, resume)
 	case routeHTTP:
-		return c.httpClient.StartAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, task, projectPath, projectSlug, harnessConfig, resolvedEnv, resolvedSecrets, inlineConfig, sharedDirs, sharedWorkspace)
+		return c.httpClient.StartAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, task, projectPath, projectSlug, harnessConfig, resolvedEnv, resolvedSecrets, inlineConfig, sharedDirs, sharedWorkspace, resume)
 	default:
 		return nil, ErrLifecycleDeferred
 	}

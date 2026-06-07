@@ -47,13 +47,13 @@ func TestHybridBrokerClient_StartAgent_RouteGate(t *testing.T) {
 
 	t.Run("routeForward returns ErrLifecycleDeferred", func(t *testing.T) {
 		c.SetAffinityLookup(func(context.Context, string) (string, bool) { return "hubA", true })
-		_, err := c.StartAgent(context.Background(), remoteBroker, "", "a1", "p1", "", "", "", "", nil, nil, nil, nil, false)
+		_, err := c.StartAgent(context.Background(), remoteBroker, "", "a1", "p1", "", "", "", "", nil, nil, nil, nil, false, false)
 		assert.ErrorIs(t, err, ErrLifecycleDeferred)
 	})
 
 	t.Run("routeUndeliverable returns ErrLifecycleDeferred", func(t *testing.T) {
 		c.SetAffinityLookup(func(context.Context, string) (string, bool) { return "", false })
-		_, err := c.StartAgent(context.Background(), remoteBroker, "", "a1", "p1", "", "", "", "", nil, nil, nil, nil, false)
+		_, err := c.StartAgent(context.Background(), remoteBroker, "", "a1", "p1", "", "", "", "", nil, nil, nil, nil, false, false)
 		assert.ErrorIs(t, err, ErrLifecycleDeferred)
 	})
 }

@@ -56,7 +56,7 @@ func (d *lifecycleTestDispatcher) DispatchAgentCreate(context.Context, *store.Ag
 func (d *lifecycleTestDispatcher) DispatchAgentProvision(context.Context, *store.Agent) error {
 	return nil
 }
-func (d *lifecycleTestDispatcher) DispatchAgentStart(_ context.Context, _ *store.Agent, task string) error {
+func (d *lifecycleTestDispatcher) DispatchAgentStart(_ context.Context, _ *store.Agent, task string, _ bool) error {
 	d.startCalled.Add(1)
 	d.lastTask = task
 	return nil
@@ -258,7 +258,7 @@ type deferredTestClient struct {
 	startCalled atomic.Int32
 }
 
-func (c *deferredTestClient) StartAgent(_ context.Context, brokerID, _, _, _, _, _, _, _ string, _ map[string]string, _ []ResolvedSecret, _ *api.ScionConfig, _ []api.SharedDir, _ bool) (*RemoteAgentResponse, error) {
+func (c *deferredTestClient) StartAgent(_ context.Context, brokerID, _, _, _, _, _, _, _ string, _ map[string]string, _ []ResolvedSecret, _ *api.ScionConfig, _ []api.SharedDir, _, _ bool) (*RemoteAgentResponse, error) {
 	c.startCalled.Add(1)
 	if brokerID != c.localBroker {
 		return nil, ErrLifecycleDeferred
@@ -304,7 +304,7 @@ func TestDeferredStart_WritesIntentAndWaits(t *testing.T) {
 		events.PublishAgentStatus(ctx, &updatedAgent)
 	}()
 
-	err := dispatcher.DispatchAgentStart(ctx, agent, "my-task")
+	err := dispatcher.DispatchAgentStart(ctx, agent, "my-task", false)
 	require.NoError(t, err, "deferred start should succeed when 'running' event arrives")
 
 	// Verify a broker_dispatch row was written (intent is durable). No owner
@@ -340,7 +340,7 @@ func TestDeferredStart_ReturnsErrorOnErrorPhase(t *testing.T) {
 		events.PublishAgentStatus(ctx, &updatedAgent)
 	}()
 
-	err := dispatcher.DispatchAgentStart(ctx, agent, "")
+	err := dispatcher.DispatchAgentStart(ctx, agent, "", false)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "error phase")
 }
@@ -361,7 +361,7 @@ func TestLocalStart_SkipsIntentRow(t *testing.T) {
 
 	agent := seedAgentWithBrokerID(t, cs, localBroker)
 
-	err := dispatcher.DispatchAgentStart(ctx, agent, "local-task")
+	err := dispatcher.DispatchAgentStart(ctx, agent, "local-task", false)
 	require.NoError(t, err, "local start should succeed directly")
 
 	// Verify no broker_dispatch row was written (local path skips intent).

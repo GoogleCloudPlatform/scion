@@ -150,7 +150,7 @@ func (d *mockDispatcher) DispatchAgentProvision(_ context.Context, agent *store.
 	agent.Phase = string(state.PhaseCreated)
 	return nil
 }
-func (d *mockDispatcher) DispatchAgentStart(_ context.Context, agent *store.Agent, _ string) error {
+func (d *mockDispatcher) DispatchAgentStart(_ context.Context, agent *store.Agent, _ string, _ bool) error {
 	d.startedAgents = append(d.startedAgents, agent)
 	return nil
 }

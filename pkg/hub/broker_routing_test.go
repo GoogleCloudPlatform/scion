@@ -40,7 +40,7 @@ func (f *fakeHTTPClient) MessageAgent(context.Context, string, string, string, s
 func (f *fakeHTTPClient) CreateAgent(context.Context, string, string, *RemoteCreateAgentRequest) (*RemoteAgentResponse, error) {
 	return nil, nil
 }
-func (f *fakeHTTPClient) StartAgent(context.Context, string, string, string, string, string, string, string, string, map[string]string, []ResolvedSecret, *api.ScionConfig, []api.SharedDir, bool) (*RemoteAgentResponse, error) {
+func (f *fakeHTTPClient) StartAgent(context.Context, string, string, string, string, string, string, string, string, map[string]string, []ResolvedSecret, *api.ScionConfig, []api.SharedDir, bool, bool) (*RemoteAgentResponse, error) {
 	return nil, nil
 }
 func (f *fakeHTTPClient) StopAgent(context.Context, string, string, string, string) error {

@@ -94,7 +94,7 @@ func (m *mockRuntimeBrokerClient) CreateAgent(ctx context.Context, brokerID, bro
 	}, nil
 }
 
-func (m *mockRuntimeBrokerClient) StartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID, task, projectPath, projectSlug, harnessConfig string, resolvedEnv map[string]string, resolvedSecrets []ResolvedSecret, inlineConfig *api.ScionConfig, sharedDirs []api.SharedDir, sharedWorkspace bool) (*RemoteAgentResponse, error) {
+func (m *mockRuntimeBrokerClient) StartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID, task, projectPath, projectSlug, harnessConfig string, resolvedEnv map[string]string, resolvedSecrets []ResolvedSecret, inlineConfig *api.ScionConfig, sharedDirs []api.SharedDir, sharedWorkspace, resume bool) (*RemoteAgentResponse, error) {
 	m.startCalled = true
 	m.lastBrokerID = brokerID
 	m.lastEndpoint = brokerEndpoint
@@ -446,7 +446,7 @@ func TestHTTPRuntimeBrokerClient_StartAgent_InvalidJSONFails(t *testing.T) {
 	defer server.Close()
 
 	client := NewHTTPRuntimeBrokerClient()
-	_, err := client.StartAgent(context.Background(), tid("host-1"), server.URL, "test-agent", "", "", "", "", "", nil, nil, nil, nil, false)
+	_, err := client.StartAgent(context.Background(), tid("host-1"), server.URL, "test-agent", "", "", "", "", "", nil, nil, nil, nil, false, false)
 	if err == nil {
 		t.Fatal("expected StartAgent to fail on invalid JSON response")
 	}
@@ -1124,7 +1124,7 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_WithProjectProviderPath(t *testi
 		RuntimeBrokerID: tid("broker-1"),
 	}
 
-	err := dispatcher.DispatchAgentStart(ctx, agent, "do task")
+	err := dispatcher.DispatchAgentStart(ctx, agent, "do task", false)
 	if err != nil {
 		t.Fatalf("DispatchAgentStart failed: %v", err)
 	}
@@ -1199,7 +1199,7 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_IncludesAgentIdentity(t *testing
 		RuntimeBrokerID: tid("broker-1"),
 	}
 
-	err := dispatcher.DispatchAgentStart(ctx, agent, "")
+	err := dispatcher.DispatchAgentStart(ctx, agent, "", false)
 	if err != nil {
 		t.Fatalf("DispatchAgentStart failed: %v", err)
 	}
@@ -1268,7 +1268,7 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_HubManagedProject(t *testing.T) 
 		RuntimeBrokerID: tid("broker-1"),
 	}
 
-	err := dispatcher.DispatchAgentStart(ctx, agent, "")
+	err := dispatcher.DispatchAgentStart(ctx, agent, "", false)
 	if err != nil {
 		t.Fatalf("DispatchAgentStart failed: %v", err)
 	}
@@ -1325,7 +1325,7 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_ProjectSlugSetForGitRemoteWithou
 		RuntimeBrokerID: tid("broker-1"),
 	}
 
-	err := dispatcher.DispatchAgentStart(ctx, agent, "")
+	err := dispatcher.DispatchAgentStart(ctx, agent, "", false)
 	if err != nil {
 		t.Fatalf("DispatchAgentStart failed: %v", err)
 	}
@@ -1416,7 +1416,7 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_ResolvesEnvFromStorage(t *testin
 		},
 	}
 
-	err := dispatcher.DispatchAgentStart(ctx, agent, "")
+	err := dispatcher.DispatchAgentStart(ctx, agent, "", false)
 	if err != nil {
 		t.Fatalf("DispatchAgentStart failed: %v", err)
 	}
@@ -1497,7 +1497,7 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_ConfigEnvTakesPrecedence(t *test
 		},
 	}
 
-	err := dispatcher.DispatchAgentStart(ctx, agent, "")
+	err := dispatcher.DispatchAgentStart(ctx, agent, "", false)
 	if err != nil {
 		t.Fatalf("DispatchAgentStart failed: %v", err)
 	}
@@ -1564,7 +1564,7 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_StorageOverridesEmptyConfigEnv(t
 		},
 	}
 
-	err := dispatcher.DispatchAgentStart(ctx, agent, "")
+	err := dispatcher.DispatchAgentStart(ctx, agent, "", false)
 	if err != nil {
 		t.Fatalf("DispatchAgentStart failed: %v", err)
 	}
@@ -1756,7 +1756,7 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_AppliesBrokerResponse(t *testing
 		Phase:           string(state.PhaseCreated),
 	}
 
-	err := dispatcher.DispatchAgentStart(ctx, agent, "")
+	err := dispatcher.DispatchAgentStart(ctx, agent, "", false)
 	if err != nil {
 		t.Fatalf("DispatchAgentStart failed: %v", err)
 	}
@@ -2726,7 +2726,7 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_IncludesAgentIDAndSlug(t *testin
 		},
 	}
 
-	err := dispatcher.DispatchAgentStart(ctx, agent, "do something")
+	err := dispatcher.DispatchAgentStart(ctx, agent, "do something", false)
 	if err != nil {
 		t.Fatalf("DispatchAgentStart failed: %v", err)
 	}
@@ -2804,7 +2804,7 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_IncludesInlineConfig(t *testing.
 		},
 	}
 
-	err := dispatcher.DispatchAgentStart(ctx, agent, "")
+	err := dispatcher.DispatchAgentStart(ctx, agent, "", false)
 	if err != nil {
 		t.Fatalf("DispatchAgentStart failed: %v", err)
 	}
@@ -2855,7 +2855,7 @@ func TestDispatchAgentStart_IncludesHubEndpoint(t *testing.T) {
 		},
 	}
 
-	err := dispatcher.DispatchAgentStart(ctx, agent, "")
+	err := dispatcher.DispatchAgentStart(ctx, agent, "", false)
 	if err != nil {
 		t.Fatalf("DispatchAgentStart failed: %v", err)
 	}
@@ -3006,7 +3006,7 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_InjectsGCPIdentityEnv(t *testing
 		},
 	}
 
-	err := dispatcher.DispatchAgentStart(ctx, agent, "")
+	err := dispatcher.DispatchAgentStart(ctx, agent, "", false)
 	if err != nil {
 		t.Fatalf("DispatchAgentStart failed: %v", err)
 	}
@@ -3079,7 +3079,7 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_GCPBlockMode(t *testing.T) {
 		},
 	}
 
-	err := dispatcher.DispatchAgentStart(ctx, agent, "")
+	err := dispatcher.DispatchAgentStart(ctx, agent, "", false)
 	if err != nil {
 		t.Fatalf("DispatchAgentStart failed: %v", err)
 	}

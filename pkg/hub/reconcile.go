@@ -165,14 +165,16 @@ func (s *Server) execDispatchStart(ctx context.Context, d store.BrokerDispatch) 
 		return "", fmt.Errorf("no dispatcher available")
 	}
 	var task string
+	var resume bool
 	if d.Args != "" {
 		args, err := UnmarshalStartArgs(d.Args)
 		if err != nil {
 			return "", fmt.Errorf("unmarshal start args: %w", err)
 		}
 		task = args.Task
+		resume = args.Resume
 	}
-	if err := dispatcher.DispatchAgentStart(ctx, agent, task); err != nil {
+	if err := dispatcher.DispatchAgentStart(ctx, agent, task, resume); err != nil {
 		return "", fmt.Errorf("dispatch start: %w", err)
 	}
 	return "", nil
