@@ -64,6 +64,9 @@ func (m *mockAgentService) Create(ctx context.Context, req *hubclient.CreateAgen
 func (m *mockAgentService) Update(ctx context.Context, agentID string, req *hubclient.UpdateAgentRequest) (*hubclient.Agent, error) {
 	return nil, fmt.Errorf("not implemented")
 }
+func (m *mockAgentService) ResetAuth(ctx context.Context, agentID string) error {
+	return fmt.Errorf("not implemented")
+}
 func (m *mockAgentService) Delete(ctx context.Context, agentID string, opts *hubclient.DeleteAgentOptions) error {
 	return fmt.Errorf("not implemented")
 }
