@@ -98,28 +98,34 @@ func DeleteAgentFiles(agentName string, projectPath string, removeBranch bool) (
 	// which has no advisory locker.
 	refcountHandled := false
 	if repoRoot != "" {
-		if branch, _, found, findErr := provision.FindBranchForAgent(repoRoot, agentName); findErr == nil && found {
+		// Do NOT silently swallow registry errors and fall through to the legacy
+		// path — that path could delete the shared worktree out from under live
+		// joiners. On a real registry I/O error, fail loudly instead.
+		branch, _, found, findErr := provision.FindBranchForAgent(repoRoot, agentName)
+		if findErr != nil {
+			return branchDeleted, fmt.Errorf("delete: FindBranchForAgent for %s: %w", agentName, findErr)
+		}
+		if found {
 			remaining, wtPath, unregErr := provision.UnregisterSharer(repoRoot, branch, agentName)
-			if unregErr == nil {
-				if len(remaining) == 0 {
-					util.Debugf("delete: last sharer for branch %s, removing worktree at %s", branch, wtPath)
-					worktreeStart := time.Now()
-					if deleted, err := util.RemoveWorktree(wtPath, removeBranch); err == nil {
-						if deleted {
-							branchDeleted = true
-						}
-						util.Debugf("delete: shared worktree removal completed in %v (branch deleted: %v)", time.Since(worktreeStart), deleted)
-					} else {
-						util.Debugf("delete: shared worktree removal failed in %v: %v", time.Since(worktreeStart), err)
-						_ = util.RemoveAllSafe(wtPath)
-					}
-				} else {
-					util.Debugf("delete: %d sharers remain for branch %s, detaching agent %s", len(remaining), branch, agentName)
-				}
-				refcountHandled = true
-			} else {
-				util.Debugf("delete: UnregisterSharer failed for branch %s agent %s: %v", branch, agentName, unregErr)
+			if unregErr != nil {
+				return branchDeleted, fmt.Errorf("delete: UnregisterSharer for branch %s agent %s: %w", branch, agentName, unregErr)
 			}
+			if len(remaining) == 0 {
+				util.Debugf("delete: last sharer for branch %s, removing worktree at %s", branch, wtPath)
+				worktreeStart := time.Now()
+				if deleted, err := util.RemoveWorktree(wtPath, removeBranch); err == nil {
+					if deleted {
+						branchDeleted = true
+					}
+					util.Debugf("delete: shared worktree removal completed in %v (branch deleted: %v)", time.Since(worktreeStart), deleted)
+				} else {
+					util.Debugf("delete: shared worktree removal failed in %v: %v", time.Since(worktreeStart), err)
+					_ = util.RemoveAllSafe(wtPath)
+				}
+			} else {
+				util.Debugf("delete: %d sharers remain for branch %s, detaching agent %s", len(remaining), branch, agentName)
+			}
+			refcountHandled = true
 		}
 	}
 
@@ -515,9 +521,14 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 				agentWorkspace = "" // Using external worktree
 				usedExistingWorktree = true
 				fmt.Printf("Warning: Relying on existing worktree for branch '%s' at '%s'\n", targetBranch, existingPath)
-				// Register as sharer for refcounted teardown (I3).
-				if root, rootErr := util.RepoRootDir(filepath.Dir(projectDir)); rootErr == nil {
-					_ = provision.RegisterSharer(root, targetBranch, existingPath, agentName)
+				// Register as sharer for refcounted teardown (I3). Fail loudly:
+				// an untracked agent breaks the refcount (premature/leaked removal).
+				root, rootErr := util.RepoRootDir(filepath.Dir(projectDir))
+				if rootErr != nil {
+					return "", "", nil, fmt.Errorf("resolve repo root for sharer registration: %w", rootErr)
+				}
+				if regErr := provision.RegisterSharer(root, targetBranch, existingPath, agentName); regErr != nil {
+					return "", "", nil, fmt.Errorf("register sharer (attach): %w", regErr)
 				}
 			}
 		}
@@ -565,9 +576,14 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 			return "", "", nil, fmt.Errorf("failed to create git worktree: %w", err)
 		}
 		util.Debugf("provision: worktree created in %s", time.Since(worktreeStart))
-		// Register as sharer for refcounted teardown (I3).
-		if root, rootErr := util.RepoRootDir(filepath.Dir(projectDir)); rootErr == nil {
-			_ = provision.RegisterSharer(root, worktreeBranch, agentWorkspace, agentName)
+		// Register as sharer for refcounted teardown (I3). Fail loudly:
+		// an untracked agent breaks the refcount (premature/leaked removal).
+		root, rootErr := util.RepoRootDir(filepath.Dir(projectDir))
+		if rootErr != nil {
+			return "", "", nil, fmt.Errorf("resolve repo root for sharer registration: %w", rootErr)
+		}
+		if regErr := provision.RegisterSharer(root, worktreeBranch, agentWorkspace, agentName); regErr != nil {
+			return "", "", nil, fmt.Errorf("register sharer (create): %w", regErr)
 		}
 
 		// Write a .scion project marker into the worktree so in-container CLI
