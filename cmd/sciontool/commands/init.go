@@ -515,41 +515,40 @@ func runInit(args []string) int {
 				// Schedule refresh 2 hours before expiry
 				refreshAt := tokenExpiry.Add(-2 * time.Hour)
 				if refreshAt.Before(time.Now()) {
-					// Token is already within the refresh window or expired
+					// Token is already within the refresh window or expired —
+					// refresh immediately in both cases. On resume the persisted
+					// token may have expired while the agent was stopped; always
+					// starting the refresh loop lets StartTokenRefresh retry with
+					// backoff and fire OnAuthLost if recovery fails, instead of
+					// silently giving up.
+					refreshAt = time.Now()
 					if time.Now().Before(tokenExpiry) {
-						// Still valid, refresh immediately
-						refreshAt = time.Now()
 						log.Info("Token within refresh window, refreshing immediately (expires: %s)", tokenExpiry.Format(time.RFC3339))
 					} else {
-						// Token has already expired
-						log.Error("AUTH_EXPIRED: Agent token has expired at %s - hub communication will fail", tokenExpiry.Format(time.RFC3339))
-						log.Error("AUTH_EXPIRED: Agent limits (max-duration, max-turns, max-model-calls) are enforced locally and remain active")
-						refreshAt = time.Time{} // signal not to start refresh
+						log.Error("AUTH_EXPIRED: Agent token has expired at %s - attempting refresh", tokenExpiry.Format(time.RFC3339))
 					}
 				} else {
 					log.Info("Token refresh scheduled at %s (token expires: %s)",
 						refreshAt.Format(time.RFC3339), tokenExpiry.Format(time.RFC3339))
 				}
 
-				if !refreshAt.IsZero() {
-					var tokenRefreshCtx context.Context
-					tokenRefreshCtx, tokenRefreshCancel = context.WithCancel(context.Background())
-					tokenRefreshDone = hubClient.StartTokenRefresh(tokenRefreshCtx, &hub.TokenRefreshConfig{
-						RefreshAt: refreshAt,
-						ChownUID:  targetUID,
-						ChownGID:  targetGID,
-						OnRefreshed: func(newExpiry time.Time) {
-							log.Info("Token refreshed successfully, new expiry: %s", newExpiry.Format(time.RFC3339))
-						},
-						OnError: func(err error) {
-							log.Error("Token refresh failed: %v", err)
-						},
-						OnAuthLost: func() {
-							log.Error("AUTH_LOST: Agent token has expired and could not be refreshed - hub communication is no longer possible")
-							log.Error("AUTH_LOST: Agent limits (max-duration, max-turns, max-model-calls) are enforced locally and remain active")
-						},
-					})
-				}
+				var tokenRefreshCtx context.Context
+				tokenRefreshCtx, tokenRefreshCancel = context.WithCancel(context.Background())
+				tokenRefreshDone = hubClient.StartTokenRefresh(tokenRefreshCtx, &hub.TokenRefreshConfig{
+					RefreshAt: refreshAt,
+					ChownUID:  targetUID,
+					ChownGID:  targetGID,
+					OnRefreshed: func(newExpiry time.Time) {
+						log.Info("Token refreshed successfully, new expiry: %s", newExpiry.Format(time.RFC3339))
+					},
+					OnError: func(err error) {
+						log.Error("Token refresh failed: %v", err)
+					},
+					OnAuthLost: func() {
+						log.Error("AUTH_LOST: Agent token has expired and could not be refreshed - hub communication is no longer possible")
+						log.Error("AUTH_LOST: Agent limits (max-duration, max-turns, max-model-calls) are enforced locally and remain active")
+					},
+				})
 			}
 		} else {
 			log.Debug("Hub client not configured - skipping status report")

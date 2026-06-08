@@ -319,7 +319,67 @@ func checkGCPMetadata(failures *int) {
 	} else {
 		fmt.Printf("[FAIL] Metadata server returned %d\n", resp.StatusCode)
 		*failures++
+		return
 	}
+
+	// In assign mode, verify we can actually acquire a GCP access token.
+	// This is what gcloud auth print-access-token exercises end-to-end:
+	// metadata server → hub token broker → GCP token.
+	if mode == "assign" {
+		checkGCPTokenAcquisition(client, port, failures)
+	}
+}
+
+func checkGCPTokenAcquisition(client *http.Client, port int, failures *int) {
+	tokenURL := fmt.Sprintf("http://127.0.0.1:%d/computeMetadata/v1/instance/service-accounts/default/token", port)
+
+	req, err := http.NewRequest("GET", tokenURL, nil)
+	if err != nil {
+		fmt.Printf("[FAIL] GCP token check: failed to create request: %v\n", err)
+		*failures++
+		return
+	}
+	req.Header.Set("Metadata-Flavor", "Google")
+
+	// Token brokering involves a hub round-trip; use a longer timeout.
+	tokenClient := &http.Client{Timeout: 10 * time.Second}
+	resp, err := tokenClient.Do(req)
+	if err != nil {
+		fmt.Printf("[FAIL] GCP token check: request failed: %v\n", err)
+		*failures++
+		return
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+
+	if resp.StatusCode != http.StatusOK {
+		fmt.Printf("[FAIL] GCP token check: metadata server returned %d: %s\n",
+			resp.StatusCode, doctorTruncate(string(body), 120))
+		fmt.Println("[!] gcloud auth print-access-token will fail in this state")
+		fmt.Println("[!] Run from the host:  scion agent reset-auth <agent-name>")
+		*failures++
+		return
+	}
+
+	var tokenResp struct {
+		AccessToken string `json:"access_token"`
+		ExpiresIn   int    `json:"expires_in"`
+		TokenType   string `json:"token_type"`
+	}
+	if err := json.Unmarshal(body, &tokenResp); err != nil {
+		fmt.Printf("[FAIL] GCP token check: invalid token response: %v\n", err)
+		*failures++
+		return
+	}
+
+	if tokenResp.AccessToken == "" {
+		fmt.Println("[FAIL] GCP token check: response missing access_token")
+		*failures++
+		return
+	}
+
+	fmt.Printf("[ OK ] GCP access token retrievable (expires_in=%ds)\n", tokenResp.ExpiresIn)
 }
 
 func checkGitHubToken(failures *int) {
