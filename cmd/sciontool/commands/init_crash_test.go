@@ -9,6 +9,7 @@ import (
 	"os"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks/handlers"
 )
 
@@ -103,23 +104,23 @@ func TestClassifyExit(t *testing.T) {
 
 func TestReadHarnessExitCode(t *testing.T) {
 	// Missing file -> nil.
-	_ = os.Remove(harnessExitCodeFile)
+	_ = os.Remove(state.HarnessExitCodeFile)
 	if got := readHarnessExitCode(); got != nil {
 		t.Errorf("expected nil for missing file, got %v", *got)
 	}
 
 	// Valid code.
-	if err := os.WriteFile(harnessExitCodeFile, []byte("137\n"), 0o644); err != nil {
+	if err := os.WriteFile(state.HarnessExitCodeFile, []byte("137\n"), 0o644); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	t.Cleanup(func() { _ = os.Remove(harnessExitCodeFile) })
+	t.Cleanup(func() { _ = os.Remove(state.HarnessExitCodeFile) })
 	got := readHarnessExitCode()
 	if got == nil || *got != 137 {
 		t.Errorf("expected 137, got %v", got)
 	}
 
 	// Unparseable -> nil.
-	if err := os.WriteFile(harnessExitCodeFile, []byte("garbage"), 0o644); err != nil {
+	if err := os.WriteFile(state.HarnessExitCodeFile, []byte("garbage"), 0o644); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 	if got := readHarnessExitCode(); got != nil {

@@ -1768,7 +1768,14 @@ func (s *Server) agentAutoSuspendHandler() func(ctx context.Context) {
 				continue
 			}
 
-			if err := s.suspendAgent(ctx, agent); err != nil {
+			// Bound each suspension with its own timeout so a slow or
+			// unresponsive broker cannot block the whole scheduler loop.
+			err := func() error {
+				childCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+				defer cancel()
+				return s.suspendAgent(childCtx, agent)
+			}()
+			if err != nil {
 				s.agentLifecycleLog.Warn("Scheduler: auto-suspend failed",
 					"agent_id", agent.ID, "error", err)
 				continue

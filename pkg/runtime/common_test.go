@@ -269,7 +269,7 @@ func TestBuildCommonRunArgs(t *testing.T) {
 			wantIn: []string{
 				"-e FOO=BAR",
 				// The harness now runs inside an `sh -c` wrapper that captures
-				// its exit code to a fixed file (see harnessExitCodeFile).
+				// its exit code to a fixed file (see state.HarnessExitCodeFile).
 				"tmux new-session -d -s scion -n agent sh -c ",
 				`'\''gemini'\'' '\''--yolo'\'' '\''--resume'\'' '\''--prompt-interactive'\'' '\''hello'\''`,
 				"; echo $? > /tmp/scion-harness-exit-code",

@@ -813,7 +813,7 @@ waitLoop:
 	// or OOM-killed before the harness could write), fall back to result.code.
 	harnessCode := readHarnessExitCode()
 	if harnessCode != nil {
-		log.Info("Recovered harness exit code %d from %s", *harnessCode, harnessExitCodeFile)
+		log.Info("Recovered harness exit code %d from %s", *harnessCode, state.HarnessExitCodeFile)
 	}
 
 	outcome := classifyExit(result.code, result.err, harnessCode, limitsExceeded)
@@ -889,16 +889,11 @@ waitLoop:
 	return result.code
 }
 
-// harnessExitCodeFile is the container-local path where the tmux agent-window
-// wrapper records the harness's real exit code (see pkg/runtime). It must match
-// the path used when building the tmux command.
-const harnessExitCodeFile = "/tmp/scion-harness-exit-code"
-
 // readHarnessExitCode reads and parses the harness exit-code file written by the
 // tmux agent-window wrapper. Returns nil if the file is missing or unparseable
 // (e.g. the container was SIGKILLed/OOM-killed before the harness could write).
 func readHarnessExitCode() *int {
-	data, err := os.ReadFile(harnessExitCodeFile)
+	data, err := os.ReadFile(state.HarnessExitCodeFile)
 	if err != nil {
 		return nil
 	}

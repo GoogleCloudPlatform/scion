@@ -898,9 +898,9 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 	}
 	cmdLine := strings.Join(quotedArgs, " ")
 	// Wrap the harness so it records its real exit code to a fixed file (see
-	// harnessExitCodeFile / buildCommonRunArgs for rationale). `sciontool init`
+	// state.HarnessExitCodeFile / buildCommonRunArgs for rationale). `sciontool init`
 	// reads this to report crashes accurately.
-	agentWindowCmd := "sh -c " + shellQuote(cmdLine+"; echo $? > "+harnessExitCodeFile)
+	agentWindowCmd := "sh -c " + shellQuote(cmdLine+"; echo $? > "+state.HarnessExitCodeFile)
 	// Create session with "agent" window running the harness, plus a "shell" window.
 	tmuxCmd := fmt.Sprintf(
 		"tmux new-session -d -s scion -n agent %s \\; set-option -g window-size latest \\; new-window -t scion -n shell \\; select-window -t scion:agent \\; attach-session -t scion",

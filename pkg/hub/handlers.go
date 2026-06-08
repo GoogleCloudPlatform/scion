@@ -36,6 +36,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/githubapp"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	scionruntime "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -6375,33 +6376,6 @@ type brokerAgentHeartbeat struct {
 	Profile         string `json:"profile,omitempty"`     // Settings profile used
 }
 
-// exitCodeFromContainerStatus extracts the exit code from a container-runtime
-// status string such as "Exited (137) 2 minutes ago" (Docker/Podman). It
-// returns (code, true) when an exited status with a parseable code is present,
-// otherwise (0, false). A plain "stopped" (no embedded code) yields (0, false).
-func exitCodeFromContainerStatus(status string) (int, bool) {
-	lower := strings.ToLower(status)
-	idx := strings.Index(lower, "exited")
-	if idx < 0 {
-		return 0, false
-	}
-	rest := status[idx+len("exited"):]
-	open := strings.Index(rest, "(")
-	if open < 0 {
-		return 0, false
-	}
-	close := strings.Index(rest[open:], ")")
-	if close < 0 {
-		return 0, false
-	}
-	numStr := strings.TrimSpace(rest[open+1 : open+close])
-	code, err := strconv.Atoi(numStr)
-	if err != nil {
-		return 0, false
-	}
-	return code, true
-}
-
 func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, id string) {
 	ctx := r.Context()
 
@@ -6499,7 +6473,7 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 					// exit code recorded so the UI can show it. This works even
 					// if sciontool's own crash report never reached the hub.
 					if hbPhase == state.PhaseStopped {
-						if code, ok := exitCodeFromContainerStatus(agentHB.ContainerStatus); ok && code != 0 {
+						if code, ok := scionruntime.ExitCodeFromContainerStatus(agentHB.ContainerStatus); ok && code != 0 {
 							hbPhase = state.PhaseError
 							agentHB.Phase = string(state.PhaseError)
 							c := code
@@ -6551,7 +6525,7 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 					case strings.HasPrefix(containerStatusLower, "exited") || containerStatusLower == "stopped":
 						// A non-zero exit code means the agent crashed → error
 						// (restartable); a zero/absent code is a clean stop.
-						if code, ok := exitCodeFromContainerStatus(agentHB.ContainerStatus); ok && code != 0 {
+						if code, ok := scionruntime.ExitCodeFromContainerStatus(agentHB.ContainerStatus); ok && code != 0 {
 							statusUpdate.Phase = string(state.PhaseError)
 							c := code
 							statusUpdate.ExitCode = &c

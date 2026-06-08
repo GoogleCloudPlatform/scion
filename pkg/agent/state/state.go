@@ -19,6 +19,14 @@ package state
 
 import "fmt"
 
+// HarnessExitCodeFile is the container-local path where the tmux agent-window
+// wrapper records the harness's real exit code, read by `sciontool init`.
+// There is one agent per container, so a fixed path is safe. It is a shared
+// contract: the runtime writes the file and `sciontool init` reads it to
+// recover the authoritative harness exit code (the harness runs as a tmux
+// grandchild whose exit code is otherwise invisible to the supervisor).
+const HarnessExitCodeFile = "/tmp/scion-harness-exit-code"
+
 // Phase represents the infrastructure lifecycle phase of an agent.
 // Phase is controlled by platform operations (broker commands, heartbeats,
 // container events) — not by the LLM agent itself.

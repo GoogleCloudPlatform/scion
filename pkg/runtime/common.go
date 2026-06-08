@@ -29,6 +29,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
@@ -69,13 +70,6 @@ func ResolveContainerWorkspace(repoRoot, workspace string, gitClone *api.GitClon
 	}
 	return "/workspace"
 }
-
-// harnessExitCodeFile is the container-local path where the harness's real
-// exit code is recorded by the tmux agent-window wrapper. There is one agent
-// per container, so a fixed path is safe. `sciontool init` reads this file to
-// recover the authoritative harness exit code (the harness runs as a tmux
-// grandchild whose exit code is otherwise invisible to the supervisor).
-const harnessExitCodeFile = "/tmp/scion-harness-exit-code"
 
 // shellQuote returns s quoted for safe embedding in a POSIX shell command.
 // It uses single quotes, which prevent all shell interpretation (variable
@@ -454,7 +448,7 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 	// the sh/container exit code). Writing $? lets init read the authoritative
 	// harness exit code and report crashes correctly. The whole wrapper is
 	// single-quoted again so tmux's command parser treats it as one word.
-	agentWindowCmd := "sh -c " + shellQuote(cmdLine+"; echo $? > "+harnessExitCodeFile)
+	agentWindowCmd := "sh -c " + shellQuote(cmdLine+"; echo $? > "+state.HarnessExitCodeFile)
 
 	// Build tmux command: create session with "agent" window running the harness,
 	// then add a "shell" window and switch back to the agent window.
