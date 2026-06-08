@@ -21,6 +21,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -28,6 +29,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
@@ -178,10 +180,13 @@ func (s *Server) buildMux() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.handleRoot)
 	mux.HandleFunc("/computeMetadata/v1/", s.handleMetadata)
+	mux.HandleFunc("/_scion/shutdown", s.handleShutdown)
 	return s.requireMetadataFlavor(mux)
 }
 
 // Start starts the metadata server in the background. Returns immediately.
+// If the port is already in use (e.g. a stale metadata server from a previous
+// init cycle), Start attempts to gracefully shut it down and retry.
 func (s *Server) Start(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	s.cancel = cancel
@@ -193,6 +198,21 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 
 	ln, err := net.Listen("tcp", addr)
+	if err != nil && errors.Is(err, syscall.EADDRINUSE) {
+		log.Info("Metadata server port %d already in use, attempting to reclaim", s.config.Port)
+		s.shutdownExisting()
+		for attempt := 1; attempt <= 3; attempt++ {
+			time.Sleep(time.Duration(attempt) * 250 * time.Millisecond)
+			ln, err = net.Listen("tcp", addr)
+			if err == nil {
+				log.Info("Reclaimed metadata server port %d after %d retries", s.config.Port, attempt)
+				break
+			}
+			if !errors.Is(err, syscall.EADDRINUSE) {
+				break
+			}
+		}
+	}
 	if err != nil {
 		cancel()
 		return fmt.Errorf("metadata server listen: %w", err)
@@ -290,6 +310,42 @@ func (s *Server) Stop() {
 	if s.cancel != nil {
 		s.cancel()
 	}
+}
+
+// shutdownExisting tries to shut down an existing metadata server on the port
+// by sending a POST to its /_scion/shutdown endpoint. This handles the case
+// where a stale server from a previous init cycle holds the port.
+func (s *Server) shutdownExisting() {
+	client := &http.Client{Timeout: 2 * time.Second}
+	url := fmt.Sprintf("http://127.0.0.1:%d/_scion/shutdown", s.config.Port)
+	req, err := http.NewRequest(http.MethodPost, url, nil)
+	if err != nil {
+		return
+	}
+	req.Header.Set("Metadata-Flavor", "Google")
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Debug("Could not reach existing metadata server for shutdown: %v", err)
+		return
+	}
+	resp.Body.Close()
+	log.Info("Sent shutdown request to existing metadata server on port %d (status=%d)", s.config.Port, resp.StatusCode)
+}
+
+// handleShutdown handles POST /_scion/shutdown requests, allowing a new
+// metadata server instance to reclaim the port from a stale server.
+func (s *Server) handleShutdown(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	log.Info("Shutdown requested via /_scion/shutdown, stopping metadata server")
+	w.WriteHeader(http.StatusOK)
+	fmt.Fprint(w, "shutting down")
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		s.Stop()
+	}()
 }
 
 func (s *Server) probeHealth() bool {

@@ -716,3 +716,120 @@ func TestMetadataServer_RestartLimit(t *testing.T) {
 		t.Fatal("expected server to be marked abandoned")
 	}
 }
+
+func TestMetadataServer_ShutdownEndpoint(t *testing.T) {
+	port := freePort(t)
+	srv := New(Config{
+		Mode:      "block",
+		Port:      port,
+		ProjectID: "test-project",
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := srv.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Stop()
+	time.Sleep(50 * time.Millisecond)
+
+	// Verify server is running
+	if !srv.probeHealth() {
+		t.Fatal("expected server to be healthy")
+	}
+
+	// GET should be rejected
+	req, _ := http.NewRequest(http.MethodGet, fmt.Sprintf("http://127.0.0.1:%d/_scion/shutdown", port), nil)
+	req.Header.Set("Metadata-Flavor", "Google")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405 for GET, got %d", resp.StatusCode)
+	}
+
+	// POST without Metadata-Flavor header should be rejected
+	req, _ = http.NewRequest(http.MethodPost, fmt.Sprintf("http://127.0.0.1:%d/_scion/shutdown", port), nil)
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403 without Metadata-Flavor, got %d", resp.StatusCode)
+	}
+
+	// POST with Metadata-Flavor should succeed and shut down
+	req, _ = http.NewRequest(http.MethodPost, fmt.Sprintf("http://127.0.0.1:%d/_scion/shutdown", port), nil)
+	req.Header.Set("Metadata-Flavor", "Google")
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	if string(body) != "shutting down" {
+		t.Fatalf("expected 'shutting down', got %q", string(body))
+	}
+
+	// Wait for shutdown to complete
+	time.Sleep(200 * time.Millisecond)
+
+	// Server should no longer be reachable
+	if srv.probeHealth() {
+		t.Fatal("expected server to be unreachable after shutdown")
+	}
+}
+
+func TestMetadataServer_StartReclaimsPort(t *testing.T) {
+	port := freePort(t)
+
+	// Start a first metadata server on the port
+	srv1 := New(Config{
+		Mode:      "block",
+		Port:      port,
+		ProjectID: "old-project",
+	})
+	ctx1, cancel1 := context.WithCancel(context.Background())
+	defer cancel1()
+
+	if err := srv1.Start(ctx1); err != nil {
+		t.Fatal(err)
+	}
+	defer srv1.Stop()
+	time.Sleep(50 * time.Millisecond)
+
+	if !srv1.probeHealth() {
+		t.Fatal("first server not healthy")
+	}
+
+	// Start a second server on the same port — should reclaim it
+	srv2 := New(Config{
+		Mode:      "block",
+		Port:      port,
+		ProjectID: "new-project",
+	})
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	defer cancel2()
+
+	if err := srv2.Start(ctx2); err != nil {
+		t.Fatalf("second Start() should succeed by reclaiming port: %v", err)
+	}
+	defer srv2.Stop()
+	time.Sleep(50 * time.Millisecond)
+
+	// The new server should be serving with the new config
+	resp, body := metadataGet(t, port, "/computeMetadata/v1/project/project-id")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	if body != "new-project" {
+		t.Fatalf("expected new-project from replacement server, got %q", body)
+	}
+}
