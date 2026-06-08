@@ -29,6 +29,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
+	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
 
@@ -471,6 +472,10 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 				agentWorkspace = "" // Using external worktree
 				usedExistingWorktree = true
 				fmt.Printf("Warning: Relying on existing worktree for branch '%s' at '%s'\n", targetBranch, existingPath)
+				// Register as sharer for refcounted teardown (I3).
+				if root, rootErr := util.RepoRootDir(filepath.Dir(projectDir)); rootErr == nil {
+					_ = provision.RegisterSharer(root, targetBranch, existingPath, agentName)
+				}
 			}
 		}
 
@@ -517,6 +522,10 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 			return "", "", nil, fmt.Errorf("failed to create git worktree: %w", err)
 		}
 		util.Debugf("provision: worktree created in %s", time.Since(worktreeStart))
+		// Register as sharer for refcounted teardown (I3).
+		if root, rootErr := util.RepoRootDir(filepath.Dir(projectDir)); rootErr == nil {
+			_ = provision.RegisterSharer(root, worktreeBranch, agentWorkspace, agentName)
+		}
 
 		// Write a .scion project marker into the worktree so in-container CLI
 		// can discover the project context. Worktrees don't contain .scion

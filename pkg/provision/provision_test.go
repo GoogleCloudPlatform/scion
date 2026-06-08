@@ -598,3 +598,150 @@ func TestWorktreePath(t *testing.T) {
 		t.Errorf("WorktreePath() = %q, want %q", got, want)
 	}
 }
+
+// --- Create-or-Attach + Sharer Registration ---
+
+func TestProvision_WorktreePerAgent_CreateAndJoin(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+	locker := newTestLocker()
+	bareRepo := initBareGitRepo(t)
+
+	projectDir := t.TempDir()
+	hostPath := filepath.Join(projectDir, "workspace")
+
+	// Agent A creates worktree on branch "shared-branch".
+	err := ProvisionShared(ProvisionInput{
+		Resolved:  ResolvedWorkspace{HostPath: hostPath, Backend: "local"},
+		ProjectID: "proj-join-1",
+		AgentID:   "agent-a",
+		AgentName: "shared-branch",
+		Mode:      store.SharingModeWorktreePerAgent,
+		Locker:    locker,
+		GitClone:  &api.GitCloneConfig{URL: bareRepo, Branch: "main", Depth: -1},
+	})
+	require.NoError(t, err)
+
+	// Verify worktree created for A.
+	wtA := WorktreePath(hostPath, "agent-a")
+	require.DirExists(t, wtA)
+
+	// Verify sharers=[A].
+	sharers, wtPath, err := ListSharers(hostPath, "shared-branch")
+	require.NoError(t, err)
+	assert.Equal(t, wtA, wtPath)
+	assert.Equal(t, []string{"agent-a"}, sharers)
+
+	// Agent B joins same branch "shared-branch" (JOIN).
+	err = ProvisionShared(ProvisionInput{
+		Resolved:  ResolvedWorkspace{HostPath: hostPath, Backend: "local"},
+		ProjectID: "proj-join-1",
+		AgentID:   "agent-b",
+		AgentName: "shared-branch",
+		Mode:      store.SharingModeWorktreePerAgent,
+		Locker:    locker,
+		GitClone:  &api.GitCloneConfig{URL: bareRepo, Branch: "main", Depth: -1},
+	})
+	require.NoError(t, err)
+
+	// Verify NO second worktree created for B.
+	wtB := WorktreePath(hostPath, "agent-b")
+	_, statErr := os.Stat(wtB)
+	assert.True(t, os.IsNotExist(statErr), "JOIN should NOT create a second worktree at %s", wtB)
+
+	// Verify sharers=[A,B] and B's registered path == A's path.
+	sharers, wtPath, err = ListSharers(hostPath, "shared-branch")
+	require.NoError(t, err)
+	assert.Equal(t, wtA, wtPath, "B's resolved worktree path should equal A's")
+	assert.Len(t, sharers, 2)
+	assert.Contains(t, sharers, "agent-a")
+	assert.Contains(t, sharers, "agent-b")
+}
+
+func TestProvision_WorktreePerAgent_UniqueBranches_SoleSharers(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+	locker := newTestLocker()
+	bareRepo := initBareGitRepo(t)
+
+	projectDir := t.TempDir()
+	hostPath := filepath.Join(projectDir, "workspace")
+
+	// Agent A with unique branch.
+	err := ProvisionShared(ProvisionInput{
+		Resolved:  ResolvedWorkspace{HostPath: hostPath, Backend: "local"},
+		ProjectID: "proj-unique-1",
+		AgentID:   "agent-a",
+		AgentName: "agent-alpha",
+		Mode:      store.SharingModeWorktreePerAgent,
+		Locker:    locker,
+		GitClone:  &api.GitCloneConfig{URL: bareRepo, Branch: "main", Depth: -1},
+	})
+	require.NoError(t, err)
+
+	// Agent B with unique branch.
+	err = ProvisionShared(ProvisionInput{
+		Resolved:  ResolvedWorkspace{HostPath: hostPath, Backend: "local"},
+		ProjectID: "proj-unique-1",
+		AgentID:   "agent-b",
+		AgentName: "agent-beta",
+		Mode:      store.SharingModeWorktreePerAgent,
+		Locker:    locker,
+		GitClone:  &api.GitCloneConfig{URL: bareRepo, Branch: "main", Depth: -1},
+	})
+	require.NoError(t, err)
+
+	// Both have their own worktrees.
+	wtA := WorktreePath(hostPath, "agent-a")
+	wtB := WorktreePath(hostPath, "agent-b")
+	require.DirExists(t, wtA)
+	require.DirExists(t, wtB)
+	assert.NotEqual(t, wtA, wtB)
+
+	// Each is sole sharer of its own branch.
+	sharersA, pathA, err := ListSharers(hostPath, "agent-alpha")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"agent-a"}, sharersA)
+	assert.Equal(t, wtA, pathA)
+
+	sharersB, pathB, err := ListSharers(hostPath, "agent-beta")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"agent-b"}, sharersB)
+	assert.Equal(t, wtB, pathB)
+}
+
+func TestProvision_WorktreePerAgent_ExistingRegistration_Idempotent(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+	locker := newTestLocker()
+	bareRepo := initBareGitRepo(t)
+
+	projectDir := t.TempDir()
+	hostPath := filepath.Join(projectDir, "workspace")
+
+	// Provision agent once.
+	err := ProvisionShared(ProvisionInput{
+		Resolved:  ResolvedWorkspace{HostPath: hostPath, Backend: "local"},
+		ProjectID: "proj-idem-1",
+		AgentID:   "agent-a",
+		AgentName: "idem-branch",
+		Mode:      store.SharingModeWorktreePerAgent,
+		Locker:    locker,
+		GitClone:  &api.GitCloneConfig{URL: bareRepo, Branch: "main", Depth: -1},
+	})
+	require.NoError(t, err)
+
+	// Provision the same agent again (idempotent).
+	err = ProvisionShared(ProvisionInput{
+		Resolved:  ResolvedWorkspace{HostPath: hostPath, Backend: "local"},
+		ProjectID: "proj-idem-1",
+		AgentID:   "agent-a",
+		AgentName: "idem-branch",
+		Mode:      store.SharingModeWorktreePerAgent,
+		Locker:    locker,
+		GitClone:  &api.GitCloneConfig{URL: bareRepo, Branch: "main", Depth: -1},
+	})
+	require.NoError(t, err)
+
+	// Should still have exactly one sharer.
+	sharers, _, err := ListSharers(hostPath, "idem-branch")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"agent-a"}, sharers)
+}

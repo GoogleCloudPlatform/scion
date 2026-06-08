@@ -891,12 +891,11 @@ func initBareRepoWithCommit(t *testing.T) string {
 	return bare
 }
 
-// TestTryProvisionWorktree_FailureDoesNotDeleteSharedBase is the regression for
-// the critical review finding on upstream PR #350: when provisioning fails for
-// one agent, only that agent's worktree may be removed — never the shared base
-// clone (Resolved.HostPath), which holds the common .git and every sibling
-// agent's worktree. Deleting it would destroy all other agents' workspaces.
-func TestTryProvisionWorktree_FailureDoesNotDeleteSharedBase(t *testing.T) {
+// TestTryProvisionWorktree_JoinResolvesSharedPath verifies that when agent-b
+// is provisioned with --branch pointing to an already-checked-out branch
+// (agent-a's), provisioning succeeds as a JOIN and opts.Workspace is set to
+// agent-a's worktree path (not WorktreePath(base, agent-b)).
+func TestTryProvisionWorktree_JoinResolvesSharedPath(t *testing.T) {
 	t.Setenv("SCION_HOST_UID", "")
 
 	cfg := DefaultServerConfig()
@@ -911,7 +910,7 @@ func TestTryProvisionWorktree_FailureDoesNotDeleteSharedBase(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Set up the shared base + a sibling worktree owning branch "agent-a".
+	// Set up the shared base + agent-a's worktree on branch "agent-a".
 	resolved, err := runtime.NewLocalBackend().Resolve(runtime.ResolveInput{
 		ProjectDir: projectPath, ProjectID: "p1", AgentID: "agent-a",
 		Mode: store.SharingModeWorktreePerAgent,
@@ -926,16 +925,12 @@ func TestTryProvisionWorktree_FailureDoesNotDeleteSharedBase(t *testing.T) {
 		t.Fatalf("setup agent-a: %v", err)
 	}
 	base := resolved.HostPath
-	siblingWt := provision.WorktreePath(base, "agent-a")
-	if _, err := os.Stat(filepath.Join(base, ".git")); err != nil {
-		t.Fatalf("base .git missing after setup: %v", err)
-	}
-	if _, err := os.Stat(siblingWt); err != nil {
-		t.Fatalf("sibling worktree missing after setup: %v", err)
+	agentAWt := provision.WorktreePath(base, "agent-a")
+	if _, err := os.Stat(agentAWt); err != nil {
+		t.Fatalf("agent-a worktree missing after setup: %v", err)
 	}
 
-	// Provision agent-b with a branch colliding with agent-a's → ensureWorktree
-	// fails ("already checked out"), exercising the cleanup-on-failure path.
+	// Provision agent-b with --branch "agent-a" → should JOIN, not fail.
 	opts := &api.StartOptions{}
 	ok := srv.tryProvisionWorktree(context.Background(), startContextInputs{
 		Name: "agent-b", AgentID: "agent-b",
@@ -944,20 +939,39 @@ func TestTryProvisionWorktree_FailureDoesNotDeleteSharedBase(t *testing.T) {
 		Config:        &CreateAgentConfig{GitClone: gc, Branch: "agent-a"},
 	}, opts, map[string]string{})
 
-	if ok {
-		t.Fatal("expected provisioning to fail (branch collision) and fall back, got ok=true")
+	if !ok {
+		t.Fatal("expected JOIN to succeed, got ok=false (fell back to clone-per-agent)")
 	}
 
-	// CRITICAL: the shared base and the sibling worktree must survive.
+	// opts.Workspace must point to agent-a's worktree (the shared path).
+	if opts.Workspace != agentAWt {
+		t.Errorf("opts.Workspace = %q, want %q (agent-a's worktree)", opts.Workspace, agentAWt)
+	}
+
+	// No separate worktree created for agent-b.
+	agentBWt := provision.WorktreePath(base, "agent-b")
+	if _, err := os.Stat(agentBWt); !os.IsNotExist(err) {
+		t.Errorf("agent-b should NOT have its own worktree, stat err=%v", err)
+	}
+
+	// Both agents registered as sharers.
+	sharers, wtPath, err := provision.ListSharers(base, "agent-a")
+	if err != nil {
+		t.Fatalf("ListSharers: %v", err)
+	}
+	if wtPath != agentAWt {
+		t.Errorf("registry worktreePath = %q, want %q", wtPath, agentAWt)
+	}
+	if len(sharers) != 2 {
+		t.Fatalf("expected 2 sharers, got %d: %v", len(sharers), sharers)
+	}
+
+	// Shared base and agent-a worktree are intact.
 	if _, err := os.Stat(filepath.Join(base, ".git")); err != nil {
-		t.Errorf("shared base .git was destroyed by a failed sibling provision: %v", err)
+		t.Errorf("shared base .git was destroyed: %v", err)
 	}
-	if _, err := os.Stat(siblingWt); err != nil {
-		t.Errorf("sibling agent-a worktree was destroyed by a failed sibling provision: %v", err)
-	}
-	// Only the failing agent's partial worktree should be cleaned up.
-	if _, err := os.Stat(provision.WorktreePath(base, "agent-b")); !os.IsNotExist(err) {
-		t.Errorf("agent-b partial worktree should have been cleaned up, stat err=%v", err)
+	if _, err := os.Stat(agentAWt); err != nil {
+		t.Errorf("agent-a worktree was destroyed: %v", err)
 	}
 }
 

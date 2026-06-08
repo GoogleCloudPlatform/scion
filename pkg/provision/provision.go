@@ -386,8 +386,16 @@ func WorktreePath(hostPath, agentID string) string {
 	return filepath.Join(hostPath, "worktrees", agentID)
 }
 
-// ensureWorktree creates a per-agent worktree if the mode is WorktreePerAgent.
-// For SharedPlain mode this is a no-op.
+// ensureWorktree creates or attaches to a per-agent worktree if the mode is
+// WorktreePerAgent. For SharedPlain mode this is a no-op.
+//
+// Create-or-attach logic (D3 hub-join):
+//   - If a worktree for the requested branch already exists (found via the
+//     sharer registry or git worktree list), the agent ATTACHES to it (JOIN)
+//     and registers as a sharer — no second worktree is created.
+//   - Otherwise, a new worktree is created and the agent registers as its
+//     first sharer.
+//
 // The worktree add is done under the already-held advisory lock (design §9.2:
 // worktree add/remove touches shared .git metadata).
 func ensureWorktree(ctx context.Context, in ProvisionInput) error {
@@ -399,21 +407,8 @@ func ensureWorktree(ctx context.Context, in ProvisionInput) error {
 		return fmt.Errorf("ProvisionShared: AgentID is required for WorktreePerAgent mode")
 	}
 
-	worktreePath := WorktreePath(in.Resolved.HostPath, in.AgentID)
-
-	// If the worktree already exists, skip.
-	if _, err := os.Stat(worktreePath); err == nil {
-		slog.Debug("ProvisionShared: worktree already exists",
-			"agent_id", in.AgentID, "path", worktreePath)
-		return nil
-	}
-
-	// Verify the shared checkout exists (.git dir present).
-	gitDir := filepath.Join(in.Resolved.HostPath, ".git")
-	if _, err := os.Stat(gitDir); err != nil {
-		return fmt.Errorf("ProvisionShared: shared checkout .git not found at %s — "+
-			"cannot create worktree without a cloned repository", gitDir)
-	}
+	base := in.Resolved.HostPath
+	worktreePath := WorktreePath(base, in.AgentID)
 
 	// Derive a branch name from the agent name or ID.
 	branchName := in.AgentID
@@ -421,8 +416,49 @@ func ensureWorktree(ctx context.Context, in ProvisionInput) error {
 		branchName = sanitizeBranchName(in.AgentName)
 	}
 
-	// Ensure worktrees parent directory exists.
-	worktreesDir := filepath.Join(in.Resolved.HostPath, "worktrees")
+	// If this agent's own worktree directory already exists, register
+	// (idempotent) and return.
+	if _, err := os.Stat(worktreePath); err == nil {
+		slog.Debug("ProvisionShared: worktree already exists",
+			"agent_id", in.AgentID, "path", worktreePath)
+		return RegisterSharer(base, branchName, worktreePath, in.AgentID)
+	}
+
+	// Verify the shared checkout exists (.git dir present).
+	gitDir := filepath.Join(base, ".git")
+	if _, err := os.Stat(gitDir); err != nil {
+		return fmt.Errorf("ProvisionShared: shared checkout .git not found at %s — "+
+			"cannot create worktree without a cloned repository", gitDir)
+	}
+
+	// --- JOIN check: does a worktree for this branch already exist? ---
+
+	// 1. Check the sharer registry.
+	sharers, existingWtPath, err := ListSharers(base, branchName)
+	if err != nil {
+		return fmt.Errorf("ProvisionShared: list sharers for branch %q: %w", branchName, err)
+	}
+	if len(sharers) > 0 && existingWtPath != "" {
+		if _, statErr := os.Stat(existingWtPath); statErr == nil {
+			slog.Info("ProvisionShared: joining existing worktree (registry)",
+				"agent_id", in.AgentID, "branch", branchName, "path", existingWtPath,
+				"existing_sharers", sharers)
+			return RegisterSharer(base, branchName, existingWtPath, in.AgentID)
+		}
+		slog.Warn("ProvisionShared: registry points to missing path, will create new worktree",
+			"agent_id", in.AgentID, "branch", branchName, "stale_path", existingWtPath)
+	}
+
+	// 2. Check git worktree list for a prior-run worktree without a registry entry.
+	if existingPath, findErr := findWorktreeForBranch(ctx, base, branchName); findErr == nil && existingPath != "" {
+		slog.Info("ProvisionShared: joining pre-existing worktree (git)",
+			"agent_id", in.AgentID, "branch", branchName, "path", existingPath)
+		return RegisterSharer(base, branchName, existingPath, in.AgentID)
+	}
+
+	// --- CREATE: no existing worktree for this branch ---
+
+	worktreesDir := filepath.Join(base, "worktrees")
 	if err := os.MkdirAll(worktreesDir, 0770); err != nil {
 		return fmt.Errorf("ProvisionShared: mkdir worktrees dir: %w", err)
 	}
@@ -433,34 +469,71 @@ func ensureWorktree(ctx context.Context, in ProvisionInput) error {
 	// git worktree add --relative-paths -b <branch> <path>
 	// --relative-paths is mandatory for container path-identity (design §6).
 	cmd := exec.CommandContext(ctx, "git", "worktree", "add", "--relative-paths", "-b", branchName, worktreePath)
-	cmd.Dir = in.Resolved.HostPath
+	cmd.Dir = base
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		outputStr := strings.TrimSpace(string(output))
-		// If the branch is already checked out in another worktree, surface a
-		// clear error instead of a confusing git message.
+
+		// Branch collision: the proactive JOIN checks above should catch this,
+		// but handle defensively in case of a race or stale state.
 		if strings.Contains(outputStr, "already checked out") || strings.Contains(outputStr, "already used by worktree") {
-			return fmt.Errorf("git worktree add: branch %q is already checked out in another worktree: %s",
+			if attachPath, findErr := findWorktreeForBranch(ctx, base, branchName); findErr == nil && attachPath != "" {
+				slog.Info("ProvisionShared: attaching to existing worktree (git fallback)",
+					"agent_id", in.AgentID, "branch", branchName, "path", attachPath)
+				return RegisterSharer(base, branchName, attachPath, in.AgentID)
+			}
+			return fmt.Errorf("git worktree add: branch %q already checked out but cannot find existing worktree: %s",
 				branchName, outputStr)
 		}
-		// If branch already exists, try without -b (reuse existing branch).
+
+		// If branch already exists (but not checked out), try without -b.
 		if strings.Contains(outputStr, "already exists") {
 			cmd = exec.CommandContext(ctx, "git", "worktree", "add", "--relative-paths", worktreePath, branchName)
-			cmd.Dir = in.Resolved.HostPath
+			cmd.Dir = base
 			output, err = cmd.CombinedOutput()
 			if err != nil {
 				reuse := strings.TrimSpace(string(output))
 				if strings.Contains(reuse, "already checked out") || strings.Contains(reuse, "already used by worktree") {
-					return fmt.Errorf("git worktree add: branch %q is already checked out in another worktree: %s",
-						branchName, reuse)
+					if attachPath, findErr := findWorktreeForBranch(ctx, base, branchName); findErr == nil && attachPath != "" {
+						slog.Info("ProvisionShared: attaching to existing worktree (reuse fallback)",
+							"agent_id", in.AgentID, "branch", branchName, "path", attachPath)
+						return RegisterSharer(base, branchName, attachPath, in.AgentID)
+					}
+					return fmt.Errorf("git worktree add: branch %q already checked out: %s", branchName, reuse)
 				}
 				return fmt.Errorf("git worktree add (reuse branch): %s", reuse)
 			}
-			return nil
+			return RegisterSharer(base, branchName, worktreePath, in.AgentID)
 		}
+
 		return fmt.Errorf("git worktree add: %s", outputStr)
 	}
-	return nil
+
+	return RegisterSharer(base, branchName, worktreePath, in.AgentID)
+}
+
+// findWorktreeForBranch parses 'git worktree list --porcelain' output to find
+// the worktree path for a given branch. Returns "" if no worktree has that
+// branch checked out.
+func findWorktreeForBranch(ctx context.Context, repoDir, branch string) (string, error) {
+	cmd := exec.CommandContext(ctx, "git", "-C", repoDir, "worktree", "list", "--porcelain")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("git worktree list: %w", err)
+	}
+	var currentPath string
+	for _, line := range strings.Split(string(output), "\n") {
+		if strings.HasPrefix(line, "worktree ") {
+			currentPath = strings.TrimPrefix(line, "worktree ")
+		}
+		if strings.HasPrefix(line, "branch refs/heads/") {
+			b := strings.TrimPrefix(line, "branch refs/heads/")
+			if b == branch {
+				return currentPath, nil
+			}
+		}
+	}
+	return "", nil
 }
 
 // prepareBaseForWorktrees configures a freshly cloned base checkout for

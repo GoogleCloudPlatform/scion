@@ -586,15 +586,27 @@ func (s *Server) tryProvisionWorktree(ctx context.Context, in startContextInputs
 		return false
 	}
 
+	// Source the authoritative worktree path from the sharer registry.
+	// For a JOIN, the agent shares an existing worktree rather than having
+	// its own at WorktreePath(base, agentID).
+	actualWorkspace := result.WorktreePath
+	branch := result.ProvisionInput.AgentName
+	if branch == "" {
+		branch = in.AgentID
+	}
+	if _, regPath, err := provision.ListSharers(result.ProjectRoot, branch); err == nil && regPath != "" {
+		actualWorkspace = regPath
+	}
+
 	// Write .scion workspace marker so the in-container CLI discovers project context.
 	if in.ProjectID != "" && in.ProjectSlug != "" {
-		if err := config.WriteWorkspaceMarker(result.WorktreePath, in.ProjectID, in.ProjectSlug, in.ProjectSlug); err != nil {
+		if err := config.WriteWorkspaceMarker(actualWorkspace, in.ProjectID, in.ProjectSlug, in.ProjectSlug); err != nil {
 			slog.Warn("worktree-per-agent: failed to write workspace marker (non-fatal)",
-				"path", result.WorktreePath, "error", err)
+				"path", actualWorkspace, "error", err)
 		}
 	}
 
-	opts.Workspace = result.WorktreePath
+	opts.Workspace = actualWorkspace
 	if s.config.Debug {
 		s.agentLifecycleLog.Debug("Worktree-per-agent mode enabled",
 			"agent_id", in.AgentID,
