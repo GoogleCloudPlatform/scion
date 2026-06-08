@@ -337,8 +337,9 @@ func TestConfigureOIDCTransport_MetadataMode(t *testing.T) {
 	cleanup := overrideGCPDetection(true)
 	defer cleanup()
 
-	// Ensure no injected token
+	// Ensure no injected token and no scion metadata server
 	os.Unsetenv(EnvTransportToken)
+	os.Unsetenv("SCION_METADATA_MODE")
 
 	c := &Client{
 		hubURL: "https://hub.example.com",
@@ -358,6 +359,7 @@ func TestConfigureOIDCTransport_MetadataMode_AudienceOverride(t *testing.T) {
 	defer cleanup()
 
 	os.Unsetenv(EnvTransportToken)
+	os.Unsetenv("SCION_METADATA_MODE")
 	os.Setenv(EnvHubOIDCAudience, "https://custom-audience.example.com")
 	defer os.Unsetenv(EnvHubOIDCAudience)
 
@@ -388,6 +390,24 @@ func TestConfigureOIDCTransport_NotOnGCP(t *testing.T) {
 
 	assert.Nil(t, c.oidcSource, "should not configure OIDC when not on GCP and no injected token")
 	assert.Nil(t, c.client.Transport, "transport should not be wrapped")
+}
+
+func TestConfigureOIDCTransport_SkipsMetadataWhenScionMetadataActive(t *testing.T) {
+	cleanup := overrideGCPDetection(true)
+	defer cleanup()
+
+	os.Unsetenv(EnvTransportToken)
+	os.Setenv("SCION_METADATA_MODE", "assign")
+	defer os.Unsetenv("SCION_METADATA_MODE")
+
+	c := &Client{
+		hubURL: "https://hub.example.com",
+		client: &http.Client{Timeout: DefaultTimeout},
+	}
+
+	c.configureOIDCTransport()
+
+	assert.Nil(t, c.oidcSource, "should not configure OIDC metadata mode when scion metadata server is active")
 }
 
 func TestConfigureOIDCTransport_InjectedPriority(t *testing.T) {

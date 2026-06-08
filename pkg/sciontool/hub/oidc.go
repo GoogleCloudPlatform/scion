@@ -219,8 +219,19 @@ func (c *Client) configureOIDCTransport() {
 		return
 	}
 
-	// Fall back to GCE metadata server if on GCP
+	// Fall back to GCE metadata server if on GCP — but only when the scion
+	// metadata server is NOT active. When SCION_METADATA_MODE is "assign",
+	// iptables redirects the metadata IP (169.254.169.254) to the local scion
+	// metadata server on port 18380. This makes the real GCE metadata server
+	// unreachable, causing OIDC token fetches to time out and creating a
+	// circular dependency (hub client → GCE metadata → scion metadata → hub
+	// client). If no transport token was injected and scion metadata is active,
+	// the Hub doesn't require transport-layer OIDC auth.
 	if !isOnGCPFunc() {
+		return
+	}
+	if mode := os.Getenv("SCION_METADATA_MODE"); mode != "" {
+		log.Debug("Skipping OIDC metadata mode: scion metadata server active (mode=%s), GCE metadata IP is redirected", mode)
 		return
 	}
 
