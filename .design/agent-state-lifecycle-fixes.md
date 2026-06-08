@@ -230,6 +230,27 @@ already protected by `preserveTerminalPhase`, so it won't be reverted by async u
   - On transition to stopped/error on crash, **clear a stale `stalled` activity** (replace
     with `crashed`). The `stalled` overwrite is a sticky-activity bug.
 
+### Resume 401 — ROOT CAUSE CONFIRMED
+`DispatchAgentStart` mints a valid agent JWT and places it in
+`resolvedEnv["SCION_AUTH_TOKEN"]` (`pkg/hub/httpdispatcher.go:1086`). The broker's
+`startAgent` passes `ResolvedEnv` into `buildStartContext` but does **not** set
+`AgentToken` (`pkg/runtimebroker/handlers.go:1169`). In `buildStartContext`
+(`pkg/runtimebroker/start_context.go:192-221`): step 1 copies the valid token from
+`resolvedEnv` into `env`, then step 3 — because `in.AgentToken == ""` — takes the `else`
+branch and **overwrites** `env["SCION_AUTH_TOKEN"]` with the broker's OWN
+`os.Getenv("SCION_AUTH_TOKEN")` (a dev token that is not a valid 3-part JWT) → 401. The
+CreateAgent path sets `req.AgentToken` (`handlers.go:592`), so initial start works; the
+resume/start path doesn't, so it's clobbered. In production (broker has no
+`SCION_AUTH_TOKEN`) the resolvedEnv token survives — so it manifests only under dev-auth,
+but the start-vs-create asymmetry is a real latent bug.
+
+**Recommended fix (minimal, provisioning-time):** in `buildStartContext`, only apply the
+broker's dev `SCION_AUTH_TOKEN` when `env` does NOT already have one — i.e. never clobber a
+hub-resolved token with the dev fallback. (Optionally also set `AgentToken` from
+`resolvedEnv["SCION_AUTH_TOKEN"]` in the broker start path for parity with create.) This is
+cleaner than a post-resume re-inject; the existing reset-auth/SIGUSR2 path
+(`handlers.go:1617`) stays for genuine hub-disruption recovery.
+
 ### Separate bug found: resumed containers get a malformed hub token (401)
 Resumed containers logged persistent `401 invalid agent token: ... compact JWS format must
 have three parts` on every sciontool status/heartbeat call. The harness ran fine (Part 1

@@ -168,6 +168,92 @@ func TestBuildStartContext_EnvMerging(t *testing.T) {
 	}
 }
 
+// TestBuildStartContext_AuthTokenPrecedence verifies the SCION_AUTH_TOKEN
+// resolution precedence in buildStartContext step 3:
+//  1. in.AgentToken (explicit hub-provided field) wins.
+//  2. an existing token from ResolvedEnv (start/resume path) is kept and must
+//     NOT be clobbered by the broker's own dev SCION_AUTH_TOKEN. This is the
+//     regression case for the resume 401 ("compact JWS format must have three
+//     parts").
+//  3. the broker dev token is used only when neither of the above is present.
+func TestBuildStartContext_AuthTokenPrecedence(t *testing.T) {
+	// Valid-looking JWT (three dot-separated parts) minted by the hub.
+	const hubToken = "header.payload.signature"
+	const devToken = "broker-dev-token"
+	const explicitToken = "explicit.agent.token"
+
+	t.Run("resolvedEnv token kept over broker dev token", func(t *testing.T) {
+		// Broker has its own (invalid-as-JWT) dev token in the environment.
+		t.Setenv("SCION_AUTH_TOKEN", devToken)
+
+		cfg := DefaultServerConfig()
+		cfg.StateDir = t.TempDir()
+		srv := newTestServerForStartContext(t, cfg)
+
+		r := httptest.NewRequest("POST", "/api/v1/agents", nil)
+		sc, err := srv.buildStartContext(context.Background(), startContextInputs{
+			Name: "agent-resume",
+			// Hub minted the agent JWT into resolvedEnv on the start/resume path.
+			ResolvedEnv: map[string]string{
+				"SCION_AUTH_TOKEN": hubToken,
+			},
+			// AgentToken intentionally empty (start/resume path).
+			HTTPRequest: r,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := sc.Opts.Env["SCION_AUTH_TOKEN"]; got != hubToken {
+			t.Errorf("expected SCION_AUTH_TOKEN to keep hub-minted token %q, got %q (broker dev token must not clobber)", hubToken, got)
+		}
+	})
+
+	t.Run("explicit AgentToken wins", func(t *testing.T) {
+		t.Setenv("SCION_AUTH_TOKEN", devToken)
+
+		cfg := DefaultServerConfig()
+		cfg.StateDir = t.TempDir()
+		srv := newTestServerForStartContext(t, cfg)
+
+		r := httptest.NewRequest("POST", "/api/v1/agents", nil)
+		sc, err := srv.buildStartContext(context.Background(), startContextInputs{
+			Name:       "agent-create",
+			AgentToken: explicitToken,
+			ResolvedEnv: map[string]string{
+				"SCION_AUTH_TOKEN": hubToken,
+			},
+			HTTPRequest: r,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := sc.Opts.Env["SCION_AUTH_TOKEN"]; got != explicitToken {
+			t.Errorf("expected SCION_AUTH_TOKEN=%q (explicit AgentToken wins), got %q", explicitToken, got)
+		}
+	})
+
+	t.Run("broker dev token used as last resort", func(t *testing.T) {
+		t.Setenv("SCION_AUTH_TOKEN", devToken)
+
+		cfg := DefaultServerConfig()
+		cfg.StateDir = t.TempDir()
+		srv := newTestServerForStartContext(t, cfg)
+
+		r := httptest.NewRequest("POST", "/api/v1/agents", nil)
+		sc, err := srv.buildStartContext(context.Background(), startContextInputs{
+			Name: "agent-plain-broker",
+			// No AgentToken and no SCION_AUTH_TOKEN in resolvedEnv.
+			HTTPRequest: r,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := sc.Opts.Env["SCION_AUTH_TOKEN"]; got != devToken {
+			t.Errorf("expected SCION_AUTH_TOKEN=%q (broker dev fallback), got %q", devToken, got)
+		}
+	})
+}
+
 func TestBuildStartContext_TelemetryOverride(t *testing.T) {
 	cfg := DefaultServerConfig()
 	cfg.StateDir = t.TempDir()

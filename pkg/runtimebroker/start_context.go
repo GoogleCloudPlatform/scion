@@ -218,11 +218,24 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		}
 	}
 
-	// 3. Hub auth token
+	// 3. Hub auth token. Precedence (highest first):
+	//   1. in.AgentToken — the explicit hub-provided dedicated field (create path).
+	//   2. an existing env["SCION_AUTH_TOKEN"] already populated from in.ResolvedEnv
+	//      above — on the start/resume path the hub mints the agent JWT into
+	//      resolvedEnv, so it is already present here and must be kept.
+	//   3. the broker's own dev SCION_AUTH_TOKEN — last resort only.
+	// The dev-token fallback must NOT clobber a token resolved from the hub:
+	// resume mints a valid JWT into resolvedEnv, and overwriting it with the
+	// broker's dev token caused 401s ("compact JWS format must have three parts").
 	if in.AgentToken != "" {
 		env["SCION_AUTH_TOKEN"] = in.AgentToken
 		if s.config.Debug {
 			s.agentLifecycleLog.Debug("SCION_AUTH_TOKEN set from agent token", "agent_id", in.AgentID, "length", len(in.AgentToken))
+		}
+	} else if env["SCION_AUTH_TOKEN"] != "" {
+		// Token already resolved from the hub via resolvedEnv (start/resume path); keep it.
+		if s.config.Debug {
+			s.agentLifecycleLog.Debug("SCION_AUTH_TOKEN kept from resolved env", "agent_id", in.AgentID, "length", len(env["SCION_AUTH_TOKEN"]))
 		}
 	} else if devToken := os.Getenv("SCION_AUTH_TOKEN"); devToken != "" {
 		env["SCION_AUTH_TOKEN"] = devToken

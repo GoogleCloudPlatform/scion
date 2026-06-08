@@ -1167,6 +1167,13 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		}
 	}
 
+	// Parity with the create path: populate the dedicated AgentToken field from
+	// the hub-minted token in ResolvedEnv so buildStartContext treats it as an
+	// explicit token rather than relying on the resolvedEnv-kept fallback. The
+	// precedence in buildStartContext step 3 keeps this token regardless, but
+	// setting it here makes the start path behave like create.
+	startContextAgentToken := startReq.ResolvedEnv["SCION_AUTH_TOKEN"]
+
 	sc, err := s.buildStartContext(ctx, startContextInputs{
 		Name:            id,
 		ProjectPath:     startReq.ProjectPath,
@@ -1175,6 +1182,7 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		ResolvedEnv:     startReq.ResolvedEnv,
 		ResolvedSecrets: startReq.ResolvedSecrets,
 		SharedDirs:      startReq.SharedDirs,
+		AgentToken:      startContextAgentToken,
 		HTTPRequest:     r,
 	})
 	if err != nil {
