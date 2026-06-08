@@ -199,9 +199,28 @@ func main() {
 	}()
 
 	// Start gRPC server if configured.
+	// NOTE: gRPC and REST transports require a single-project, single-agent
+	// configuration because they lack per-request project/agent routing. The
+	// executor injects the configured default route into every request context.
+	// Auth is also not applied to these transports — secure them via network
+	// policy or a proxy.
 	var grpcServer *grpc.Server
 	if cfg.Bridge.GRPCListenAddress != "" {
-		grpcServer = grpc.NewServer()
+		if len(cfg.Projects) == 0 || len(cfg.Projects[0].ExposedAgents) == 0 {
+			log.Error("gRPC transport requires at least one project with exposed agents in config")
+			os.Exit(1)
+		}
+		defaultRoute := bridge.RouteInfo{
+			ProjectSlug: cfg.Projects[0].Slug,
+			AgentSlug:   cfg.Projects[0].ExposedAgents[0],
+		}
+		log.Warn("gRPC transport uses fixed routing — all requests go to the first configured agent",
+			"project", defaultRoute.ProjectSlug, "agent", defaultRoute.AgentSlug)
+
+		grpcServer = grpc.NewServer(
+			grpc.UnaryInterceptor(bridge.RouteInfoUnaryInterceptor(defaultRoute)),
+			grpc.StreamInterceptor(bridge.RouteInfoStreamInterceptor(defaultRoute)),
+		)
 		grpcHandler := a2agrpc.NewHandler(sdkRequestHandler)
 		grpcHandler.RegisterWith(grpcServer)
 
@@ -222,9 +241,22 @@ func main() {
 	// Start REST server if configured.
 	var restServer *http.Server
 	if cfg.Bridge.RESTListenAddress != "" {
-		restHandler := a2asrv.NewRESTHandler(
-			sdkRequestHandler,
-			a2asrv.WithTransportKeepAlive(cfg.Timeouts.SSEKeepalive),
+		if len(cfg.Projects) == 0 || len(cfg.Projects[0].ExposedAgents) == 0 {
+			log.Error("REST transport requires at least one project with exposed agents in config")
+			os.Exit(1)
+		}
+		defaultRoute := bridge.RouteInfo{
+			ProjectSlug: cfg.Projects[0].Slug,
+			AgentSlug:   cfg.Projects[0].ExposedAgents[0],
+		}
+		log.Warn("REST transport uses fixed routing — all requests go to the first configured agent",
+			"project", defaultRoute.ProjectSlug, "agent", defaultRoute.AgentSlug)
+
+		restHandler := bridge.RouteInfoMiddleware(defaultRoute,
+			a2asrv.NewRESTHandler(
+				sdkRequestHandler,
+				a2asrv.WithTransportKeepAlive(cfg.Timeouts.SSEKeepalive),
+			),
 		)
 
 		restServer = &http.Server{

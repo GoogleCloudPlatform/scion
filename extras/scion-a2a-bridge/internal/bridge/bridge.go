@@ -730,9 +730,27 @@ func (b *Bridge) dispatchBrokerMessage(topic string, msg *messages.StructuredMes
 	// If the message carries a task correlation ID, dispatch only to that task
 	// after verifying the message's agent matches the task's owner.
 	if taskID := msg.Metadata["a2aTaskId"]; taskID != "" {
+		// Try waiter first — SDK-created tasks (via AgentExecutor) may not
+		// be stored in the local SQLite store, but they register a waiter
+		// for blocking response correlation. Check the waiter before the
+		// store to avoid dropping responses for SDK-managed tasks.
+		if b.dispatchToWaiter(taskID, msg) {
+			return
+		}
+
 		task, err := b.store.GetTask(taskID)
 		if err != nil || task == nil {
-			b.log.Debug("ignoring message for unknown task", "task_id", taskID)
+			// Also check if the task is registered as active (SDK executor
+			// registers in activeTasks even without a store entry).
+			b.tasksMu.RLock()
+			_, isActive := b.activeTasks[taskID]
+			b.tasksMu.RUnlock()
+			if !isActive {
+				b.log.Debug("ignoring message for unknown task", "task_id", taskID)
+				return
+			}
+			// Active but not in store — SDK-managed task, dispatch via active path.
+			b.dispatchToActiveTask(ctx, taskID, agentSlug, msg)
 			return
 		}
 		if task.AgentSlug != agentSlug {
@@ -741,9 +759,6 @@ func (b *Bridge) dispatchBrokerMessage(topic string, msg *messages.StructuredMes
 			return
 		}
 
-		if b.dispatchToWaiter(taskID, msg) {
-			return
-		}
 		b.tasksMu.RLock()
 		_, isActive := b.activeTasks[taskID]
 		b.tasksMu.RUnlock()
@@ -1015,7 +1030,7 @@ func (b *Bridge) GenerateAgentCard(ctx context.Context, projectSlug, agentSlug s
 		"version":     "1.0.0",
 		"capabilities": map[string]bool{
 			"streaming":         true,
-			"pushNotifications": true,
+			"pushNotifications": false,
 		},
 		"defaultInputModes":  []string{"text/plain", "application/json"},
 		"defaultOutputModes": []string{"text/plain", "application/json"},

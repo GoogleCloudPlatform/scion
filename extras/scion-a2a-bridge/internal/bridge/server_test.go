@@ -555,3 +555,32 @@ func TestRouteInfoContextMissing(t *testing.T) {
 		t.Fatal("expected no route info in empty context")
 	}
 }
+
+func TestRouteInfoMiddleware(t *testing.T) {
+	route := RouteInfo{ProjectSlug: "test-proj", AgentSlug: "test-agent"}
+
+	var capturedRoute RouteInfo
+	var capturedOK bool
+
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedRoute, capturedOK = RouteInfoFrom(r.Context())
+		w.WriteHeader(http.StatusOK)
+	})
+
+	handler := RouteInfoMiddleware(route, inner)
+	ts := httptest.NewServer(handler)
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/test")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	resp.Body.Close()
+
+	if !capturedOK {
+		t.Fatal("expected route info in context")
+	}
+	if capturedRoute.ProjectSlug != "test-proj" || capturedRoute.AgentSlug != "test-agent" {
+		t.Errorf("RouteInfo = %+v, want {test-proj, test-agent}", capturedRoute)
+	}
+}

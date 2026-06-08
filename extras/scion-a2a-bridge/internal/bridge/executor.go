@@ -19,10 +19,12 @@ import (
 	"fmt"
 	"iter"
 	"log/slog"
+	"net/http"
 	"time"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
+	"google.golang.org/grpc"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
@@ -85,6 +87,9 @@ func (e *ScionExecutor) Execute(ctx context.Context, execCtx *a2asrv.ExecutorCon
 		}
 
 		// Resolve the Scion agent context (agent ID, project ID).
+		// TODO(multi-turn): Pass execCtx.ContextID here to reuse existing
+		// Scion contexts for multi-turn conversations. Currently always creates
+		// a new context, breaking agents that use input-required → completed flows.
 		agentCtx, err := e.bridge.resolveContext(ctx, route.ProjectSlug, route.AgentSlug, "")
 		if err != nil {
 			yield(nil, fmt.Errorf("resolve agent: %w", err))
@@ -219,7 +224,7 @@ func (e *ScionExecutor) Cancel(ctx context.Context, execCtx *a2asrv.ExecutorCont
 	return func(yield func(a2a.Event, error) bool) {
 		taskID := execCtx.TaskID
 
-		// Look up the stored task to find the agent.
+		// Look up the stored task to find the agent and send an interrupt.
 		if execCtx.StoredTask != nil && e.bridge.hubClient != nil {
 			route, ok := RouteInfoFrom(ctx)
 			if !ok {
@@ -260,4 +265,41 @@ func (e *ScionExecutor) Cancel(ctx context.Context, execCtx *a2asrv.ExecutorCont
 
 		yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateCanceled, nil), nil)
 	}
+}
+
+// RouteInfoMiddleware wraps an http.Handler to inject a fixed RouteInfo into the
+// request context. Used for transports (REST) that don't have per-request
+// project/agent routing.
+func RouteInfoMiddleware(route RouteInfo, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx := WithRouteInfo(r.Context(), route)
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+// RouteInfoUnaryInterceptor returns a gRPC unary server interceptor that injects
+// a fixed RouteInfo into the request context.
+func RouteInfoUnaryInterceptor(route RouteInfo) grpc.UnaryServerInterceptor {
+	return func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
+		return handler(WithRouteInfo(ctx, route), req)
+	}
+}
+
+// RouteInfoStreamInterceptor returns a gRPC stream server interceptor that
+// injects a fixed RouteInfo into the stream context.
+func RouteInfoStreamInterceptor(route RouteInfo) grpc.StreamServerInterceptor {
+	return func(srv interface{}, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
+		wrapped := &routeInfoServerStream{ServerStream: ss, ctx: WithRouteInfo(ss.Context(), route)}
+		return handler(srv, wrapped)
+	}
+}
+
+// routeInfoServerStream wraps a grpc.ServerStream to override its Context.
+type routeInfoServerStream struct {
+	grpc.ServerStream
+	ctx context.Context
+}
+
+func (s *routeInfoServerStream) Context() context.Context {
+	return s.ctx
 }
