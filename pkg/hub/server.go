@@ -36,6 +36,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
+	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/githubapp"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/dbmetrics"
@@ -1747,12 +1748,24 @@ func (s *Server) agentStalledDetectionHandler() func(ctx context.Context) {
 
 // autoSuspendStalledAgents suspends agents that were just marked stalled.
 // It stops the container via the dispatcher and transitions the phase to suspended.
+// Agents whose harness does not support resume are skipped.
 func (s *Server) autoSuspendStalledAgents(ctx context.Context, agents []store.Agent) {
 	dispatcher := s.GetDispatcher()
 	suspended := 0
 
 	for i := range agents {
 		agent := &agents[i]
+
+		// Skip agents whose harness does not support resume — suspending
+		// them would imply resumability that doesn't exist.
+		if agent.AppliedConfig != nil && agent.AppliedConfig.HarnessConfig != "" {
+			h := harness.New(agent.AppliedConfig.HarnessConfig)
+			if h.AdvancedCapabilities().Resume.Support == api.SupportNo {
+				slog.Debug("Scheduler: skipping auto-suspend for non-resumable harness",
+					"agent_id", agent.ID, "harness", agent.AppliedConfig.HarnessConfig)
+				continue
+			}
+		}
 
 		if dispatcher != nil && agent.RuntimeBrokerID != "" {
 			s.syncWorkspaceOnStop(ctx, agent)
