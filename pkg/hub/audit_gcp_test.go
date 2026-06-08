@@ -39,6 +39,14 @@ func (m *mockAuditLogger) LogInviteAuditEvent(_ context.Context, _ *InviteAuditE
 	return nil
 }
 
+func (m *mockAuditLogger) LogLifecycleHookEvent(_ context.Context, _ *LifecycleHookEvent) error {
+	return nil
+}
+
+func (m *mockAuditLogger) LogLifecycleHookExecutionEvent(_ context.Context, _ *LifecycleHookExecutionEvent) error {
+	return nil
+}
+
 func TestLogGCPTokenGeneration_Success(t *testing.T) {
 	mock := &mockAuditLogger{}
 	ctx := context.Background()
