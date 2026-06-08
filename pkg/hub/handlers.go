@@ -3022,6 +3022,72 @@ func guardAgentPhaseTransition(agent *store.Agent, status *store.AgentStatusUpda
 	}
 }
 
+// errHarnessNoResume is returned by suspendAgent when the agent's harness does
+// not support session resume, so suspending would strand it. The wrapped reason
+// carries harness-supplied context for the caller's error message.
+type errHarnessNoResume struct {
+	reason string
+}
+
+func (e *errHarnessNoResume) Error() string {
+	if e.reason != "" {
+		return e.reason
+	}
+	return "harness does not support session resume"
+}
+
+// harnessSupportsResume reports whether the agent's configured harness supports
+// resuming a session. An empty harness name (no applied config) is treated as
+// supported, matching the HTTP suspend handler's prior behavior of only
+// rejecting when a harness was explicitly resolved and declared SupportNo.
+func (s *Server) harnessSupportsResume(agent *store.Agent) (bool, string) {
+	harnessName := ""
+	if agent.AppliedConfig != nil {
+		harnessName = agent.AppliedConfig.HarnessConfig
+	}
+	if harnessName == "" {
+		return true, ""
+	}
+	caps := harness.New(harnessName).AdvancedCapabilities()
+	if caps.Resume.Support == api.SupportNo {
+		return false, caps.Resume.Reason
+	}
+	return true, ""
+}
+
+// suspendAgent performs the core SUSPEND action shared by the HTTP lifecycle
+// handler and the auto-suspend scheduler: it validates harness resume support,
+// syncs the workspace on stop, dispatches the container stop to the runtime
+// broker, persists phase=suspended (container_status=stopped, activity cleared),
+// and publishes the resulting status event. It returns *errHarnessNoResume when
+// the harness cannot resume so callers can decline to suspend.
+func (s *Server) suspendAgent(ctx context.Context, agent *store.Agent) error {
+	if ok, reason := s.harnessSupportsResume(agent); !ok {
+		return &errHarnessNoResume{reason: reason}
+	}
+
+	dispatcher := s.GetDispatcher()
+	if dispatcher != nil && agent.RuntimeBrokerID != "" {
+		s.syncWorkspaceOnStop(ctx, agent)
+		if err := dispatcher.DispatchAgentStop(ctx, agent); err != nil {
+			return err
+		}
+	}
+
+	newPhase := string(state.PhaseSuspended)
+	if err := s.store.UpdateAgentStatus(ctx, agent.ID, store.AgentStatusUpdate{
+		Phase:           newPhase,
+		ContainerStatus: "stopped",
+		Activity:        "",
+	}); err != nil {
+		return err
+	}
+
+	agent.Phase = newPhase
+	s.events.PublishAgentStatus(ctx, agent)
+	return nil
+}
+
 func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id, action string) {
 	ctx := r.Context()
 
@@ -3063,29 +3129,21 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			dispatchErr = dispatcher.DispatchAgentStop(ctx, agent)
 		}
 	case api.AgentActionSuspend:
-		// Validate that the agent's harness supports session resume.
-		harnessName := ""
-		if agent.AppliedConfig != nil {
-			harnessName = agent.AppliedConfig.HarnessConfig
-		}
-		if harnessName != "" {
-			h := harness.New(harnessName)
-			caps := h.AdvancedCapabilities()
-			if caps.Resume.Support == api.SupportNo {
-				reason := caps.Resume.Reason
-				if reason == "" {
-					reason = "harness does not support session resume"
-				}
+		// Suspend is fully handled by the shared suspendAgent helper, which
+		// validates harness resume support, dispatches the stop, persists
+		// phase=suspended, and publishes the status event.
+		if err := s.suspendAgent(ctx, agent); err != nil {
+			var noResume *errHarnessNoResume
+			if errors.As(err, &noResume) {
 				writeError(w, http.StatusBadRequest, ErrCodeValidationError,
-					fmt.Sprintf("Cannot suspend agent: %s. Use 'stop' instead.", reason), nil)
+					fmt.Sprintf("Cannot suspend agent: %s. Use 'stop' instead.", noResume.Error()), nil)
 				return
 			}
+			RuntimeError(w, "Failed to dispatch to runtime broker: "+err.Error())
+			return
 		}
-		newPhase = string(state.PhaseSuspended)
-		if dispatcher != nil && agent.RuntimeBrokerID != "" {
-			s.syncWorkspaceOnStop(ctx, agent)
-			dispatchErr = dispatcher.DispatchAgentStop(ctx, agent)
-		}
+		writeJSON(w, http.StatusOK, agent)
+		return
 	case api.AgentActionRestart:
 		newPhase = string(state.PhaseRunning)
 		if dispatcher != nil && agent.RuntimeBrokerID != "" {
@@ -3118,9 +3176,10 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 	statusUpdate := store.AgentStatusUpdate{
 		Phase: newPhase,
 	}
-	// When stopping or suspending, also update container status so the hub immediately
+	// When stopping, also update container status so the hub immediately
 	// reflects the stopped state without waiting for the next heartbeat.
-	if action == api.AgentActionStop || action == api.AgentActionSuspend {
+	// (Suspend is handled earlier via suspendAgent and returns before here.)
+	if action == api.AgentActionStop {
 		statusUpdate.ContainerStatus = "stopped"
 		statusUpdate.Activity = ""
 	}

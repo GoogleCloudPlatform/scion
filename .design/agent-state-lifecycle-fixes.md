@@ -263,6 +263,35 @@ auth, or only dev-auth?).
 
 ## Part 3 — Auto-suspend (hibernate) stalled agents to reclaim resources
 
+### DECISIONS (user)
+- **Q6 home persistence: DEFER sync for now**, presume GCS later. Key realization: on
+  Docker the agent home is a host bind-mount that survives container removal, so reclaiming
+  the container and later resuming works WITHOUT any sync — the now-fixed suspend/resume
+  handles it. GCS sync only matters for runtimes with ephemeral home (k8s/Cloud Run), which
+  are gated on NFS anyway. So Part 3 on Docker needs no home-persistence work.
+- **Q7 policy: hardwired** — auto-suspend after an ADDITIONAL 5 min of being stalled (≈10
+  min total inactivity = StalledThreshold + 5m). Not configurable yet.
+- **Deploy tip (user):** `make container-binaries` + `export SCION_DEV_BINARIES=<.build/
+  container>` makes the hub bind-mount dev `scion`+`sciontool` into agent containers
+  (`pkg/runtime/common.go:358`), so sciontool changes can be side-loaded WITHOUT an image
+  rebuild. There's also an admin maintenance action that runs the rebuild.
+
+### Implementation plan (Part 3, minimal)
+- Add a recurring scheduler handler (mirror `agentStalledDetectionHandler` in
+  `pkg/hub/server.go`): find agents with `activity==stalled` whose `last_activity_event` is
+  older than `StalledThreshold + 5m`, heartbeat still recent (alive/resumable), and whose
+  harness supports resume; auto-suspend them.
+- Factor the suspend core out of `handleAgentLifecycle` (case `AgentActionSuspend`,
+  ~handlers.go:3052) into a reusable internal `suspendAgent(ctx, agent)` (validate resume
+  capability, set phase=suspended, syncWorkspaceOnStop, DispatchAgentStop) called by both
+  the HTTP handler and the scheduler.
+- Guardrails: only `running`+`stalled` agents; skip harnesses without resume support (can't
+  hibernate what we can't resume — leave them stalled); `blocked`/`waiting_for_input` are
+  already not `stalled`.
+- Hardwired `autoSuspendStalledGrace = 5 * time.Minute`.
+
+### Original survey notes
+
 ### What we found
 - Stall detection already exists and is reliable (`MarkStalledAgents`), distinguishing
   `stalled` (alive but idle) from `offline` (no heartbeat) and exempting `blocked`.
