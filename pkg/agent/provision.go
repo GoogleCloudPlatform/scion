@@ -52,7 +52,10 @@ func DeleteAgentFiles(agentName string, projectPath string, removeBranch bool) (
 			projectRoot = filepath.Dir(projectDir)
 		}
 		sharedBase := filepath.Join(projectRoot, "workspace")
-		if info, statErr := os.Stat(filepath.Join(sharedBase, ".git")); statErr == nil && info.IsDir() {
+		// Accept .git as either a directory (normal clone) or a file (gitdir
+		// pointer, e.g. if the base is itself a linked worktree/submodule) —
+		// existence is enough to identify a valid repo root. (upstream #351 review)
+		if _, statErr := os.Stat(filepath.Join(sharedBase, ".git")); statErr == nil {
 			repoRoot = sharedBase
 			wtPath := filepath.Join(sharedBase, "worktrees", agentName)
 			if _, statErr := os.Stat(wtPath); statErr == nil {
