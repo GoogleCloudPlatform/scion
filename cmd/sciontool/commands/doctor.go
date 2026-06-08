@@ -326,11 +326,11 @@ func checkGCPMetadata(failures *int) {
 	// This is what gcloud auth print-access-token exercises end-to-end:
 	// metadata server → hub token broker → GCP token.
 	if mode == "assign" {
-		checkGCPTokenAcquisition(client, port, failures)
+		checkGCPTokenAcquisition(port, failures)
 	}
 }
 
-func checkGCPTokenAcquisition(client *http.Client, port int, failures *int) {
+func checkGCPTokenAcquisition(port int, failures *int) {
 	tokenURL := fmt.Sprintf("http://127.0.0.1:%d/computeMetadata/v1/instance/service-accounts/default/token", port)
 
 	req, err := http.NewRequest("GET", tokenURL, nil)
