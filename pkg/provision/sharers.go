@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"slices"
@@ -169,7 +170,12 @@ func FindBranchForAgent(base, agentID string) (branch, worktreePath string, foun
 		}
 		m, err := readMarker(filepath.Join(dir, e.Name()))
 		if err != nil {
-			return "", "", false, err
+			// A single corrupted/unreadable marker must not block the whole
+			// scan (and thus all agent deletions). Skip it and keep looking;
+			// dir-level failures are still returned above.
+			slog.Warn("FindBranchForAgent: skipping unreadable sharer marker",
+				"file", e.Name(), "error", err)
+			continue
 		}
 		if m != nil && slices.Contains(m.Sharers, agentID) {
 			return m.Branch, m.WorktreePath, true, nil

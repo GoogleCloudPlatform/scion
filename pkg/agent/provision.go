@@ -61,10 +61,13 @@ func DeleteAgentFiles(agentName string, projectPath string, removeBranch bool) (
 			}
 		}
 
-		// Fallback: resolve repo root from the project's parent directory
-		// (clone-per-agent layout where each agent workspace is a full clone).
+		// Fallback: resolve repo root from projectDir itself. Passing projectDir
+		// (not its parent) is robust for both local projects (where projectDir is
+		// the repo root) and hub-managed projects (where it is the .scion subdir).
+		// MUST match the base used at sharer registration (ProvisionAgent), or the
+		// refcount lookup (FindBranchForAgent/UnregisterSharer) would miss.
 		if repoRoot == "" {
-			if root, err := util.RepoRootDir(filepath.Dir(projectDir)); err == nil {
+			if root, err := util.RepoRootDir(projectDir); err == nil {
 				repoRoot = root
 			}
 		}
@@ -121,6 +124,14 @@ func DeleteAgentFiles(agentName string, projectPath string, removeBranch bool) (
 				} else {
 					util.Debugf("delete: shared worktree removal failed in %v: %v", time.Since(worktreeStart), err)
 					_ = util.RemoveAllSafe(wtPath)
+					// Worktree removal failed, so the branch wasn't deleted by it —
+					// fall back to deleting the branch by name (like the legacy path).
+					if removeBranch && !branchDeleted {
+						if util.DeleteBranchIn(repoRoot, branch) {
+							branchDeleted = true
+							util.Debugf("delete: deleted branch %s via fallback after worktree removal failure", branch)
+						}
+					}
 				}
 			} else {
 				util.Debugf("delete: %d sharers remain for branch %s, detaching agent %s", len(remaining), branch, agentName)
@@ -523,7 +534,7 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 				fmt.Printf("Warning: Relying on existing worktree for branch '%s' at '%s'\n", targetBranch, existingPath)
 				// Register as sharer for refcounted teardown (I3). Fail loudly:
 				// an untracked agent breaks the refcount (premature/leaked removal).
-				root, rootErr := util.RepoRootDir(filepath.Dir(projectDir))
+				root, rootErr := util.RepoRootDir(projectDir)
 				if rootErr != nil {
 					return "", "", nil, fmt.Errorf("resolve repo root for sharer registration: %w", rootErr)
 				}
@@ -578,7 +589,7 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 		util.Debugf("provision: worktree created in %s", time.Since(worktreeStart))
 		// Register as sharer for refcounted teardown (I3). Fail loudly:
 		// an untracked agent breaks the refcount (premature/leaked removal).
-		root, rootErr := util.RepoRootDir(filepath.Dir(projectDir))
+		root, rootErr := util.RepoRootDir(projectDir)
 		if rootErr != nil {
 			return "", "", nil, fmt.Errorf("resolve repo root for sharer registration: %w", rootErr)
 		}

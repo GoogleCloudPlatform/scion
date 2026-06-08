@@ -516,6 +516,9 @@ func ensureWorktree(ctx context.Context, in ProvisionInput) error {
 // the worktree path for a given branch. Returns "" if no worktree has that
 // branch checked out.
 func findWorktreeForBranch(ctx context.Context, repoDir, branch string) (string, error) {
+	// Prune first so a worktree dir removed on disk (but not unregistered in git)
+	// isn't returned as a stale join target pointing at a non-existent path.
+	_ = exec.CommandContext(ctx, "git", "-C", repoDir, "worktree", "prune").Run()
 	cmd := exec.CommandContext(ctx, "git", "-C", repoDir, "worktree", "list", "--porcelain")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
