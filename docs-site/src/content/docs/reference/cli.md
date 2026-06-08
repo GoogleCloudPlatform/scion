@@ -74,8 +74,12 @@ use `stop` instead). See [Agent Lifecycle](/scion/advanced-local/agent-lifecycle
 Resumes an existing agent. For a **suspended** agent, the harness session is
 continued (Claude Code receives `--continue`, Gemini CLI `--resume`, etc.). For
 a **stopped** agent, there is no session to continue, so a fresh session is
-started. Any `[task]` arguments are appended to the resumed session as a new
-prompt, when the harness supports it.
+started.
+
+A plain `scion resume <agent-name>` (no task) simply **continues** the prior
+session — the agent's original creation task is *not* re-injected. If you pass an
+explicit prompt, it is sent as a **new message** on top of the continued
+session.
 
 **Usage:** `scion resume <agent-name> [task] [flags]`
 

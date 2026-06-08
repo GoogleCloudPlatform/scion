@@ -48,7 +48,7 @@ The working directory mounted into an agent container, typically managed as a Gi
 The infrastructure lifecycle stage of an agent, controlled by the platform: `created`, `provisioning`, `cloning`, `starting`, `running`, `stopping`, `stopped`, `suspended`, or `error`.
 
 ### Activity
-What a running agent is doing within the `running` phase (e.g. `thinking`, `executing`, `waiting_for_input`, `blocked`, `completed`, `stalled`, `offline`, `crashed`). Activity is only meaningful while the phase is `running`.
+What a running agent is doing within the `running` phase (e.g. `thinking`, `executing`, `waiting_for_input`, `blocked`, `completed`, `stalled`, `offline`). Activity is only meaningful while the phase is `running`.
 
 ### Suspend / Resume
 **Suspend** tears down an agent's container while recording the intent to resume it later (phase `suspended`). **Resume** brings the agent back and *continues* its previous harness conversation (e.g. `--continue` for Claude Code, `--resume` for Gemini CLI) rather than starting fresh. Distinct from `stop`/`start`, which always begin a new session. Requires a harness that supports session resume.
@@ -57,7 +57,7 @@ What a running agent is doing within the `running` phase (e.g. `thinking`, `exec
 The phase an agent enters when its process or container exits non-zero (a crash, OOM, or `SIGKILL`), carrying a message like `Agent crashed with exit code N`. The `error` phase is restartable: `scion start` clears it and runs a fresh session. A clean exit goes to `stopped` instead.
 
 ### Crashed
-A terminal activity indicating *how* an agent ended — its process exited non-zero. Pairs with the `error` phase.
+A value in the activity enum referring to an agent whose process exited non-zero. Note that a real crash now surfaces as the `error` *phase* (with the activity cleared and the detail in the agent's message), not as a `crashed` activity.
 
 ### Stalled
 A platform-set activity for an agent whose heartbeat is still arriving (the process is alive) but that has produced no activity events within the stall threshold (default 5 minutes). Indicates a hung agent. Agents that have declared themselves `blocked` are excluded.

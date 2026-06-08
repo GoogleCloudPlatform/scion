@@ -63,6 +63,7 @@ Agent state uses a **layered model** with three dimensions:
 
 - **Activity** — What the agent is doing within the `running` phase:
   `working`, `thinking`, `executing`, `waiting_for_input`, `blocked`, `completed`, `limits_exceeded`, `stalled`, `offline`, `crashed`
+  (the `crashed` value exists in the enum, but a real crash now surfaces as the `error` *phase* — see below — rather than as an activity)
 
 - **Detail** — Freeform context about the current activity (tool name, message, task summary).
 
@@ -72,13 +73,17 @@ This separation allows the UI and API consumers to distinguish between infrastru
 
 `suspended` is distinct from `stopped`. Both tear down the container, but `suspended` records the **intent to resume**: when the agent is started again, its harness conversation is continued (Claude Code receives `--continue`, Gemini CLI receives `--resume`, and so on) rather than starting fresh. This is true session continuation, not a restart from a blank slate. Suspension is only available for harnesses that support session resume — see [Agent Lifecycle: Suspend & Resume](/scion/advanced-local/agent-lifecycle/).
 
-#### Error phase (crashes)
+#### Error phase (crashes and setup failures)
 
-`error` means the agent process or container **crashed** — it exited non-zero (for example, an out-of-memory kill or a `SIGKILL`). Scion distinguishes this from a clean shutdown:
+The most common cause of `error` is a **crash**: the agent process or container exited non-zero (for example, an out-of-memory kill or a `SIGKILL`). Scion distinguishes this from a clean shutdown:
 
 - A clean exit (exit code 0, including the graceful `SIGTERM` that a normal `stop` triggers) → `stopped`.
-- Hitting a configured turn/duration/cost limit → `stopped` with the terminal activity `limits_exceeded`.
-- A genuine crash → `error`, with a message such as `Agent crashed with exit code 137`. The matching terminal activity is `crashed`.
+- Hitting a configured limit on turns, model calls, or duration → `stopped` with the terminal activity `limits_exceeded`.
+- A genuine crash → `error` (activity cleared), with the detail carried in the agent's message, such as `Agent crashed with exit code 137`.
+
+A crash can be set from two places: `sciontool` reports it from the recovered exit code (authoritative), and the Hub also derives `error` from a non-zero container exit in the broker heartbeat (for cases where the container died before `sciontool` could report).
+
+The `error` phase is not limited to runtime crashes — it also covers **setup failures** that happen before an agent ever reaches `running`, such as a failed git clone or a provisioning error. In all cases the phase is restartable.
 
 The `error` phase is **restartable**: running `scion start` clears the error and launches a fresh session. See [Crash Recovery](/scion/advanced-local/agent-lifecycle/#crash-recovery-the-error-phase).
 

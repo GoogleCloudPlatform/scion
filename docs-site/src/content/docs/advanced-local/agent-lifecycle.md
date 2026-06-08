@@ -104,8 +104,15 @@ ends, then classifies it:
 | Outcome | Phase | Activity |
 | :--- | :--- | :--- |
 | Clean exit (code 0) | `stopped` | — |
-| Limits reached (turns/duration/cost) | `stopped` | `limits_exceeded` |
-| Crash / OOM / `SIGKILL` (non-zero) | `error` | `crashed` |
+| Limits reached (turns, model calls, or duration) | `stopped` | `limits_exceeded` |
+| Crash / OOM / `SIGKILL` (non-zero) | `error` | — (cleared) |
+
+A crash surfaces as the **`error` phase** — the activity is cleared, and the
+crash detail is carried in the agent's message (e.g. `Agent crashed with exit
+code 137`). Two paths can set `error`: `sciontool` reports it from the recovered
+exit code (the authoritative path), and the Hub also derives `error` from a
+non-zero container exit reported in the broker heartbeat — which covers cases
+where the container died before `sciontool` could report.
 
 :::note
 A normal `scion stop` sends `SIGTERM`, which harnesses like Claude Code handle
@@ -157,16 +164,20 @@ Hub's scheduler being operational.
 
 ## Runtime caveats
 
-Suspend/resume and auto-suspend reclaim the container but keep the agent's home
-directory, where the harness stores its conversation state.
+Session continuation works only when the agent's **home directory** — where the
+harness stores its conversation state — survives the container being reclaimed.
+Treat suspend/resume and auto-suspend *session continuation* as a Docker-proven
+capability, with this caveat for other runtimes:
 
 - **Docker** — the proven path. The agent home is a host bind-mount that
-  survives the container being reclaimed, so suspend/resume and auto-suspend work
-  with no additional configuration.
-- **Kubernetes / Cloud Run** — these runtimes can have an ephemeral home, so
-  durable home persistence (for example, backing the home with a network
-  filesystem or object storage) is required for session continuation. This is
-  future work, and these runtimes are gated on NFS-style persistence regardless.
+  survives the container being reclaimed, so suspend/resume and auto-suspend
+  continue the harness session with no additional configuration. The same holds
+  for any setup with a persistent or NFS-backed home.
+- **Kubernetes / Cloud Run** — these runtimes can have an ephemeral home. Without
+  durable home persistence, resume restarts the container but the harness session
+  **may not continue**. Durable home persistence (for example, object storage
+  such as GCS) is future work, and these runtimes are gated on NFS-style
+  persistence regardless — so do not assume full suspend/resume parity here yet.
 
 ## See also
 
