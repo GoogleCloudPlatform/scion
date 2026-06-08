@@ -47,6 +47,7 @@ interface V1ServerHubConfig {
   admin_emails?: string[];
   soft_delete_retention?: string;
   soft_delete_retain_files?: boolean;
+  auto_suspend_stalled?: boolean;
 }
 
 interface V1BrokerConfig {
@@ -303,6 +304,7 @@ export class ScionPageAdminServerConfig extends LitElement {
   @state() private hubAdminEmails = '';
   @state() private hubSoftDeleteRetention = '';
   @state() private hubSoftDeleteRetainFiles = false;
+  @state() private hubAutoSuspendStalled = false;
 
   // Runtime Broker
   @state() private brokerEnabled = false;
@@ -731,6 +733,7 @@ export class ScionPageAdminServerConfig extends LitElement {
         this.hubAdminEmails = (srv.hub.admin_emails || []).join(', ');
         this.hubSoftDeleteRetention = srv.hub.soft_delete_retention || '';
         this.hubSoftDeleteRetainFiles = srv.hub.soft_delete_retain_files || false;
+        this.hubAutoSuspendStalled = srv.hub.auto_suspend_stalled || false;
       }
 
       // Broker
@@ -862,6 +865,7 @@ export class ScionPageAdminServerConfig extends LitElement {
     }
     if (this.hubSoftDeleteRetention) hub.soft_delete_retention = this.hubSoftDeleteRetention;
     hub.soft_delete_retain_files = this.hubSoftDeleteRetainFiles;
+    hub.auto_suspend_stalled = this.hubAutoSuspendStalled;
     server.hub = hub;
 
     // Broker
@@ -1504,6 +1508,20 @@ export class ScionPageAdminServerConfig extends LitElement {
                 this.hubSoftDeleteRetainFiles = (e.target as HTMLInputElement).checked;
               }}
               >Retain files on soft delete</sl-switch
+            >
+          </div>
+          <div class="form-field">
+            <sl-switch
+              ?checked=${this.hubAutoSuspendStalled}
+              @sl-change=${(e: Event) => {
+                this.hubAutoSuspendStalled = (e.target as HTMLInputElement).checked;
+              }}
+              >Auto-suspend stalled agents</sl-switch
+            >
+            <span class="field-description"
+              >When enabled, agents detected as stalled are automatically
+              suspended (container stopped, session preserved for
+              resume).</span
             >
           </div>
         </div>

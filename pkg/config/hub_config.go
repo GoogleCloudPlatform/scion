@@ -69,6 +69,10 @@ type HubServerConfig struct {
 	// GCPProjectID is the GCP project ID used for minting service accounts.
 	// If empty, auto-detected from the metadata server when running on GCE/Cloud Run.
 	GCPProjectID string `json:"gcpProjectId,omitempty" yaml:"gcpProjectId,omitempty" koanf:"gcpProjectId"`
+
+	// AutoSuspendStalled controls whether stalled agents are automatically
+	// suspended (container stopped, phase set to "suspended"). Default: false.
+	AutoSuspendStalled bool `json:"autoSuspendStalled" yaml:"autoSuspendStalled" koanf:"autoSuspendStalled"`
 }
 
 // DefaultHubID generates a deterministic hub instance ID from the machine hostname.

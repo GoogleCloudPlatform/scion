@@ -33,6 +33,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/githubapp"
@@ -124,6 +125,9 @@ type ServerConfig struct {
 	// before being marked as stalled (default: 5 minutes). Only applies to
 	// agents with a recent heartbeat (not already offline).
 	StalledThreshold time.Duration
+	// AutoSuspendStalled controls whether stalled agents are automatically
+	// suspended (container stopped, phase set to "suspended"). Default: false.
+	AutoSuspendStalled bool
 	// SoftDeleteRetention is how long soft-deleted agents are retained before purging.
 	// Zero means soft-delete is disabled (hard-delete immediately).
 	SoftDeleteRetention time.Duration
@@ -1708,6 +1712,8 @@ func (s *Server) agentHeartbeatTimeoutHandler() func(ctx context.Context) {
 // but they still have a recent heartbeat (process alive but hung).
 // It publishes status events for each affected agent so SSE subscribers and the
 // notification system are informed.
+// When AutoSuspendStalled is enabled, stalled agents are additionally suspended
+// (container stopped, phase set to "suspended").
 func (s *Server) agentStalledDetectionHandler() func(ctx context.Context) {
 	return func(ctx context.Context) {
 		activityThreshold := time.Now().Add(-s.config.StalledThreshold)
@@ -1727,6 +1733,54 @@ func (s *Server) agentStalledDetectionHandler() func(ctx context.Context) {
 			slog.Info("Scheduler: marked stalled agents",
 				"count", len(agents), "threshold", s.config.StalledThreshold)
 		}
+
+		// Auto-suspend stalled agents if enabled.
+		s.mu.RLock()
+		autoSuspend := s.config.AutoSuspendStalled
+		s.mu.RUnlock()
+
+		if autoSuspend && len(agents) > 0 {
+			s.autoSuspendStalledAgents(ctx, agents)
+		}
+	}
+}
+
+// autoSuspendStalledAgents suspends agents that were just marked stalled.
+// It stops the container via the dispatcher and transitions the phase to suspended.
+func (s *Server) autoSuspendStalledAgents(ctx context.Context, agents []store.Agent) {
+	dispatcher := s.GetDispatcher()
+	suspended := 0
+
+	for i := range agents {
+		agent := &agents[i]
+
+		if dispatcher != nil && agent.RuntimeBrokerID != "" {
+			s.syncWorkspaceOnStop(ctx, agent)
+			if err := dispatcher.DispatchAgentStop(ctx, agent); err != nil {
+				slog.Error("Scheduler: auto-suspend dispatch failed",
+					"agent_id", agent.ID, "agent_name", agent.Name, "error", err)
+				continue
+			}
+		}
+
+		statusUpdate := store.AgentStatusUpdate{
+			Phase:           string(state.PhaseSuspended),
+			ContainerStatus: "stopped",
+			Activity:        "",
+		}
+		if err := s.store.UpdateAgentStatus(ctx, agent.ID, statusUpdate); err != nil {
+			slog.Error("Scheduler: auto-suspend status update failed",
+				"agent_id", agent.ID, "agent_name", agent.Name, "error", err)
+			continue
+		}
+
+		agent.Phase = string(state.PhaseSuspended)
+		s.events.PublishAgentStatus(ctx, agent)
+		suspended++
+	}
+
+	if suspended > 0 {
+		slog.Info("Scheduler: auto-suspended stalled agents", "count", suspended)
 	}
 }
 

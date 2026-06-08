@@ -435,6 +435,139 @@ func TestNew_DefaultsStalledThresholdWhenZero(t *testing.T) {
 	}
 }
 
+func TestAgentStalledDetectionHandler_AutoSuspendDisabled(t *testing.T) {
+	srv, s, ep := setupStalledTestServer(t)
+	ctx := context.Background()
+
+	project := &store.Project{
+		ID:         api.NewUUID(),
+		Name:       "AutoSuspend Disabled Project",
+		Slug:       "autosuspend-disabled-project",
+		Visibility: store.VisibilityPrivate,
+	}
+	if err := s.CreateProject(ctx, project); err != nil {
+		t.Fatalf("failed to create project: %v", err)
+	}
+
+	agent := &store.Agent{
+		ID:         api.NewUUID(),
+		Slug:       "autosuspend-disabled-agent",
+		Name:       "AutoSuspend Disabled Agent",
+		Template:   "claude",
+		ProjectID:  project.ID,
+		Phase:      string(state.PhaseCreated),
+		Visibility: store.VisibilityPrivate,
+	}
+	if err := s.CreateAgent(ctx, agent); err != nil {
+		t.Fatalf("failed to create agent: %v", err)
+	}
+
+	if err := s.UpdateAgentStatus(ctx, agent.ID, store.AgentStatusUpdate{
+		Phase:    string(state.PhaseRunning),
+		Activity: string(state.ActivityThinking),
+	}); err != nil {
+		t.Fatalf("failed to update agent status: %v", err)
+	}
+
+	staleActivity := time.Now().Add(-10 * time.Minute)
+	recentHB := time.Now().Add(-30 * time.Second)
+	db := s.(*entadapter.CompositeStore).DB()
+	if _, err := db.ExecContext(ctx,
+		"UPDATE agents SET last_activity_event = ?, last_seen = ? WHERE id = ?",
+		staleActivity, recentHB, agent.ID); err != nil {
+		t.Fatalf("failed to set stale activity: %v", err)
+	}
+
+	// AutoSuspendStalled is false (default) — agent should be marked stalled but NOT suspended
+	handler := srv.agentStalledDetectionHandler()
+	handler(ctx)
+
+	a, err := s.GetAgent(ctx, agent.ID)
+	if err != nil {
+		t.Fatalf("failed to get agent: %v", err)
+	}
+	if a.Activity != string(state.ActivityStalled) {
+		t.Errorf("agent activity = %q, want %q", a.Activity, string(state.ActivityStalled))
+	}
+	if a.Phase != string(state.PhaseRunning) {
+		t.Errorf("agent phase = %q, want %q (should NOT be suspended when auto-suspend disabled)",
+			a.Phase, string(state.PhaseRunning))
+	}
+
+	// Exactly 1 event: the stall marking. No suspend event.
+	published := ep.publishedAgents()
+	if len(published) != 1 {
+		t.Fatalf("expected 1 published event (stall only), got %d", len(published))
+	}
+}
+
+func TestAgentStalledDetectionHandler_AutoSuspendEnabled(t *testing.T) {
+	srv, s, ep := setupStalledTestServer(t)
+	srv.config.AutoSuspendStalled = true
+	ctx := context.Background()
+
+	project := &store.Project{
+		ID:         api.NewUUID(),
+		Name:       "AutoSuspend Enabled Project",
+		Slug:       "autosuspend-enabled-project",
+		Visibility: store.VisibilityPrivate,
+	}
+	if err := s.CreateProject(ctx, project); err != nil {
+		t.Fatalf("failed to create project: %v", err)
+	}
+
+	agent := &store.Agent{
+		ID:         api.NewUUID(),
+		Slug:       "autosuspend-enabled-agent",
+		Name:       "AutoSuspend Enabled Agent",
+		Template:   "claude",
+		ProjectID:  project.ID,
+		Phase:      string(state.PhaseCreated),
+		Visibility: store.VisibilityPrivate,
+	}
+	if err := s.CreateAgent(ctx, agent); err != nil {
+		t.Fatalf("failed to create agent: %v", err)
+	}
+
+	if err := s.UpdateAgentStatus(ctx, agent.ID, store.AgentStatusUpdate{
+		Phase:    string(state.PhaseRunning),
+		Activity: string(state.ActivityThinking),
+	}); err != nil {
+		t.Fatalf("failed to update agent status: %v", err)
+	}
+
+	staleActivity := time.Now().Add(-10 * time.Minute)
+	recentHB := time.Now().Add(-30 * time.Second)
+	db := s.(*entadapter.CompositeStore).DB()
+	if _, err := db.ExecContext(ctx,
+		"UPDATE agents SET last_activity_event = ?, last_seen = ? WHERE id = ?",
+		staleActivity, recentHB, agent.ID); err != nil {
+		t.Fatalf("failed to set stale activity: %v", err)
+	}
+
+	// AutoSuspendStalled is true — agent should be stalled AND then auto-suspended
+	handler := srv.agentStalledDetectionHandler()
+	handler(ctx)
+
+	a, err := s.GetAgent(ctx, agent.ID)
+	if err != nil {
+		t.Fatalf("failed to get agent: %v", err)
+	}
+	if a.Phase != string(state.PhaseSuspended) {
+		t.Errorf("agent phase = %q, want %q (should be suspended when auto-suspend enabled)",
+			a.Phase, string(state.PhaseSuspended))
+	}
+	if a.ContainerStatus != "stopped" {
+		t.Errorf("agent container_status = %q, want %q", a.ContainerStatus, "stopped")
+	}
+
+	// Should have 2 events: stall marking + suspend
+	published := ep.publishedAgents()
+	if len(published) != 2 {
+		t.Fatalf("expected 2 published events (stall + suspend), got %d", len(published))
+	}
+}
+
 func TestAgentStalledDetectionHandler_SchedulerIntegration(t *testing.T) {
 	srv, s, _ := setupStalledTestServer(t)
 

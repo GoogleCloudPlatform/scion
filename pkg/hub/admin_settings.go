@@ -249,6 +249,13 @@ func (s *Server) reloadSettings() map[string]interface{} {
 		applied = append(applied, "admin_emails")
 	}
 
+	// Reload auto-suspend stalled setting
+	oldAutoSuspend := s.config.AutoSuspendStalled
+	s.config.AutoSuspendStalled = gc.Hub.AutoSuspendStalled
+	if oldAutoSuspend != gc.Hub.AutoSuspendStalled {
+		applied = append(applied, "auto_suspend_stalled")
+	}
+
 	// Reload user access mode
 	if gc.Auth.UserAccessMode != "" {
 		s.config.UserAccessMode = gc.Auth.UserAccessMode
