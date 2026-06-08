@@ -340,6 +340,50 @@ func TestAgentStore_TerminalPhaseClearsStalledActivity(t *testing.T) {
 	})
 }
 
+// TestAgentStore_RunningPhaseClearsStaleMessage verifies that a (re)start to the
+// running phase clears a lingering terminal message (e.g. a crash message) and
+// any leftover stalled marker, while an explicit message in the same update is
+// preserved.
+func TestAgentStore_RunningPhaseClearsStaleMessage(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("crash message cleared on restart", func(t *testing.T) {
+		s, projectID := newTestAgentStore(t)
+		a := makeAgent(projectID, "crash-clear")
+		a.Phase = "error"
+		a.Activity = "crashed"
+		a.Message = "Agent crashed with exit code 1"
+		a.StalledFromActivity = "working"
+		require.NoError(t, s.CreateAgent(ctx, a))
+
+		require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{
+			Phase:    "running",
+			Activity: "working",
+		}))
+		got, err := s.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		assert.Equal(t, "running", got.Phase)
+		assert.Equal(t, "", got.Message, "stale crash message must be cleared on restart")
+		assert.Equal(t, "", got.StalledFromActivity, "stalled marker must be cleared on restart")
+	})
+
+	t.Run("explicit message preserved on restart", func(t *testing.T) {
+		s, projectID := newTestAgentStore(t)
+		a := makeAgent(projectID, "msg-keep")
+		a.Phase = "error"
+		a.Message = "Agent crashed with exit code 1"
+		require.NoError(t, s.CreateAgent(ctx, a))
+
+		require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{
+			Phase:   "running",
+			Message: "Restarting",
+		}))
+		got, err := s.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		assert.Equal(t, "Restarting", got.Message, "explicit message must be kept on restart")
+	})
+}
+
 func TestAgentStore_MarkStaleAgentsOffline(t *testing.T) {
 	ctx := context.Background()
 	s, projectID := newTestAgentStore(t)

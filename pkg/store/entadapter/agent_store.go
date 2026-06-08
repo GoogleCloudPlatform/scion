@@ -560,6 +560,19 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 		}
 	}
 
+	// A (re)start — a transition from a terminal phase (stopped/error) to running
+	// — clears terminal remnants from the prior stop/crash: the stale crash/stop
+	// message and any leftover stalled marker. This is gated on the CURRENT phase
+	// being terminal so routine running→running heartbeats (which carry their own
+	// sticky-stalled rules in the broker handler) are left untouched. An explicit
+	// message in the same update (su.Message != "") wins and is set below.
+	if su.Phase == "running" && (current.Phase == "stopped" || current.Phase == "error") {
+		if su.Message == "" {
+			upd.SetMessage("")
+		}
+		upd.SetStalledFromActivity("")
+	}
+
 	if su.Message != "" {
 		upd.SetMessage(su.Message)
 	}
