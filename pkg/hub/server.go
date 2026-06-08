@@ -1810,7 +1810,12 @@ func (s *Server) autoSuspendStalledAgents(ctx context.Context, agents []store.Ag
 			}
 		}
 
-		if dispatcher != nil && agent.RuntimeBrokerID != "" {
+		if agent.RuntimeBrokerID != "" {
+			if dispatcher == nil {
+				slog.Error("Scheduler: cannot auto-suspend agent because dispatcher is nil",
+					"agent_id", agent.ID, "agent_name", agent.Name)
+				continue
+			}
 			s.syncWorkspaceOnStop(ctx, agent)
 			if err := dispatcher.DispatchAgentStop(ctx, agent); err != nil {
 				slog.Error("Scheduler: auto-suspend dispatch failed",
@@ -1831,6 +1836,8 @@ func (s *Server) autoSuspendStalledAgents(ctx context.Context, agents []store.Ag
 		}
 
 		agent.Phase = string(state.PhaseSuspended)
+		agent.ContainerStatus = "stopped"
+		agent.Activity = ""
 		s.events.PublishAgentStatus(ctx, agent)
 		suspended++
 	}

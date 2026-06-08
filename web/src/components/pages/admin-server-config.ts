@@ -1518,7 +1518,7 @@ export class ScionPageAdminServerConfig extends LitElement {
               }}
               >Auto-suspend stalled agents</sl-switch
             >
-            <span class="field-description"
+            <span class="hint"
               >When enabled, agents detected as stalled are automatically
               suspended (container stopped, session preserved for
               resume).</span
