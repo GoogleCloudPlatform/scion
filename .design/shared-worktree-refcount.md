@@ -19,7 +19,12 @@ Shared worktrees (N agents on one branch) use an **implicit owner model with no 
 A real **last-sharer teardown**: a shared worktree (and its branch) is removed only when the
 final mounting agent exits. Apply uniformly to **local + hub-managed**.
 
-## Decisions needed (recommendations in **bold**)
+## Decisions — RESOLVED 2026-06-08 (ptone)
+- **D1 = marker file** in the shared base (no schema migration; unified local + hub).
+- **D2 = project owns the worktree** (ownerless; last sharer tears down).
+- **D3 = include hub-join** (a 2nd `--branch` agent attaches to the existing worktree).
+
+## Decisions (original options, for reference; recommendations in **bold**)
 
 ### D1 — How to track the agent→worktree association
 - **(A) Refs marker file in the shared base** — a small file per worktree (e.g.
