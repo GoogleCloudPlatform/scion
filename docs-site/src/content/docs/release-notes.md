@@ -2,6 +2,17 @@
 title: Release Notes
 ---
 
+## Jun 8, 2026
+
+This release strengthens the agent state and container lifecycle: agents can now be suspended and resumed with their harness session intact, crashes are surfaced as a restartable `error` state, and stalled agents are auto-suspended to reclaim resources.
+
+### 🚀 Features
+* **Suspend & Resume with Session Continuation:** `scion suspend <agent>` (and `--all`) now tears down an agent's container while preserving the intent to resume. Resuming — or simply running `scion start` on a suspended agent — *continues* the prior harness conversation (Claude Code via `--continue`, Gemini CLI via `--resume`) instead of starting fresh. Suspend is available for harnesses that support session resume and is also exposed in the Web Dashboard's lifecycle controls. See [Agent Lifecycle](/scion/advanced-local/agent-lifecycle/).
+* **Auto-Suspend of Stalled Agents:** The Hub now automatically suspends agents that remain `stalled` past a grace period (~10 minutes of inactivity), reclaiming their containers. Such agents resume automatically on the next message, as long as their harness supports resume and the container is still alive.
+
+### 🐛 Fixes
+* **Crash → Restartable `error` State:** Agents that exit non-zero (a genuine crash, OOM, or `SIGKILL`) now transition to the `error` phase with a descriptive message like `Agent crashed with exit code N`, distinct from a clean `stopped` exit or a `limits_exceeded` stop. The `error` phase is restartable — `scion start` clears it and launches a fresh session. (A graceful `stop` sends `SIGTERM`, which harnesses handle cleanly, so stopping never leaves an agent in `error`.)
+
 ## Mar 17, 2026
 
 This release introduces a major new GCP Identity implementation allowing agents to authenticate via metadata server emulation, alongside comprehensive new Grove Settings and Agent Limits configurations in the UI.

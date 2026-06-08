@@ -22,7 +22,10 @@ These flags are available on all commands:
 
 ### `scion start` (or `run`)
 
-Starts a new agent or resumes an existing one.
+Starts a new agent or resumes an existing one. Starting a **suspended** agent
+implicitly resumes its harness session (continuing the prior conversation);
+starting a **stopped** or **error** agent runs a fresh session. See
+[`scion suspend`](#scion-suspend) and [`scion resume`](#scion-resume).
 
 **Usage:** `scion start <agent-name> [task] [flags]`
 
@@ -44,15 +47,37 @@ Starts a new agent or resumes an existing one.
 
 ### `scion stop`
 
-Stops a running agent.
+Stops a running agent. This is a graceful shutdown (`SIGTERM`); the agent's
+phase becomes `stopped` and the next `start` runs a fresh session.
 
 **Usage:** `scion stop <agent-name>`
 
+### `scion suspend`
+
+Suspends a running agent, preserving its harness session for a later resume.
+Unlike `stop`, suspending sets the agent's phase to `suspended`, and the next
+`start` (or `resume`) **continues** the prior conversation instead of starting
+fresh.
+
+Only running agents can be suspended, and the agent's harness must support
+session resume (Claude Code and Gemini CLI do; the generic harness does not —
+use `stop` instead). See [Agent Lifecycle](/scion/advanced-local/agent-lifecycle/).
+
+**Usage:** `scion suspend <agent-name> [flags]`
+
+- **Flags:**
+    - `-a, --all`: Suspend all running agents in the current project. Agents
+      whose harness does not support resume are skipped.
+
 ### `scion resume`
 
-Resumes a stopped agent.
+Resumes an existing agent. For a **suspended** agent, the harness session is
+continued (Claude Code receives `--continue`, Gemini CLI `--resume`, etc.). For
+a **stopped** agent, there is no session to continue, so a fresh session is
+started. Any `[task]` arguments are appended to the resumed session as a new
+prompt, when the harness supports it.
 
-**Usage:** `scion resume <agent-name> [flags]`
+**Usage:** `scion resume <agent-name> [task] [flags]`
 
 - **Flags:**
     - `-a, --attach`: Attach to the agent immediately.

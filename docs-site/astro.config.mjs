@@ -55,6 +55,7 @@ export default defineConfig({
 					label: 'Advanced Local Usage',
 					items: [
 						{ label: 'Local Configuration', slug: 'advanced-local/local-governance' },
+						{ label: 'Agent Lifecycle', slug: 'advanced-local/agent-lifecycle' },
 						{ label: 'Templates & Roles', slug: 'advanced-local/templates' },
 						{ label: 'Custom Images', slug: 'advanced-local/custom-images' },
 						{ label: 'Agent Credentials', slug: 'advanced-local/agent-credentials' },

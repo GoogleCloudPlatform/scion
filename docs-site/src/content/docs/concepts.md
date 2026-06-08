@@ -58,14 +58,33 @@ A **Runtime Broker** is a compute node (e.g., a server, laptop, or K8s cluster) 
 Agent state uses a **layered model** with three dimensions:
 
 - **Phase** — The lifecycle stage of the agent container:
-  `created` → `provisioning` → `cloning` → `starting` → `running` → `stopping` → `stopped` (or `error`)
+  `created` → `provisioning` → `cloning` → `starting` → `running` → `stopping` → `stopped`
+  with two off-the-happy-path destinations: `suspended` (paused for later resume) and `error` (the agent crashed).
 
 - **Activity** — What the agent is doing within the `running` phase:
-  `working`, `thinking`, `executing`, `waiting_for_input`, `blocked`, `completed`, `limits_exceeded`, `offline`
+  `working`, `thinking`, `executing`, `waiting_for_input`, `blocked`, `completed`, `limits_exceeded`, `stalled`, `offline`, `crashed`
 
 - **Detail** — Freeform context about the current activity (tool name, message, task summary).
 
 This separation allows the UI and API consumers to distinguish between infrastructure lifecycle events (provisioning, stopping) and the agent's cognitive state (thinking, waiting for input). Activities like `completed`, `blocked`, and `limits_exceeded` are "sticky" — they persist until the agent is explicitly restarted or stopped. The `blocked` activity is set by agents themselves when they are intentionally waiting for an expected event (such as a child agent completing), which prevents the system from falsely marking them as stalled.
+
+#### Suspended phase
+
+`suspended` is distinct from `stopped`. Both tear down the container, but `suspended` records the **intent to resume**: when the agent is started again, its harness conversation is continued (Claude Code receives `--continue`, Gemini CLI receives `--resume`, and so on) rather than starting fresh. This is true session continuation, not a restart from a blank slate. Suspension is only available for harnesses that support session resume — see [Agent Lifecycle: Suspend & Resume](/scion/advanced-local/agent-lifecycle/).
+
+#### Error phase (crashes)
+
+`error` means the agent process or container **crashed** — it exited non-zero (for example, an out-of-memory kill or a `SIGKILL`). Scion distinguishes this from a clean shutdown:
+
+- A clean exit (exit code 0, including the graceful `SIGTERM` that a normal `stop` triggers) → `stopped`.
+- Hitting a configured turn/duration/cost limit → `stopped` with the terminal activity `limits_exceeded`.
+- A genuine crash → `error`, with a message such as `Agent crashed with exit code 137`. The matching terminal activity is `crashed`.
+
+The `error` phase is **restartable**: running `scion start` clears the error and launches a fresh session. See [Crash Recovery](/scion/advanced-local/agent-lifecycle/#crash-recovery-the-error-phase).
+
+#### Stalled, offline, and auto-suspend
+
+The `stalled` activity is set by the platform when an agent's heartbeat is still arriving (the process is alive) but no activity events have been seen for a while (default: 5 minutes). It flags an agent that appears hung. Agents that have declared themselves `blocked` are excluded from stalled detection. An agent that stays stalled long enough may be **auto-suspended** to reclaim its container — see [Auto-Suspend of Stalled Agents](/scion/advanced-local/agent-lifecycle/#auto-suspend-of-stalled-agents).
 
 The `offline` activity status occurs when an agent heartbeat has not been heard from for some time. Currently, this may be due to an agent being unable to refresh its auth token, which disconnects it from sending its heartbeat and other updates. These agents can be stopped and restarted to be provisioned with a new auth token. They should be able to refresh this token as long as they can maintain a connection to the Hub.
 

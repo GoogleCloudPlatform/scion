@@ -21,12 +21,16 @@ Most endpoints require a `Bearer` token in the `Authorization` header.
 - `GET /`: List agents (filterable by project, user, phase).
 - `POST /`: Dispatch a new agent.
 - `GET /:id`: Get detailed agent state (phase, activity, detail).
+- `POST /:id/suspend`: Suspend a running agent, preserving its harness session for a later resume. Sets the phase to `suspended`. Requires a harness that supports session resume.
+- `POST /:id/start`, `POST /:id/restart`: Start/restart an agent. Starting a `suspended` agent resumes (continues) its harness session; starting a `stopped` or `error` agent runs a fresh session.
 - `DELETE /:id`: Stop and remove an agent.
 - `GET /:id/logs`: Stream agent logs (WebSocket).
 
+A `suspended` agent is also resumed automatically when a message is delivered to it with the `wake` option set.
+
 Agent state uses a layered model:
-- **Phase**: Lifecycle stage (`created`, `provisioning`, `cloning`, `running`, `stopped`, `error`).
-- **Activity**: Runtime activity within the `running` phase (`working`, `thinking`, `executing`, `waiting_for_input`, `completed`, `limits_exceeded`, `offline`). Note: `offline` occurs when an agent heartbeat has not been heard for some time, often due to an expired auth token that the agent failed to refresh.
+- **Phase**: Lifecycle stage (`created`, `provisioning`, `cloning`, `starting`, `running`, `stopping`, `stopped`), plus `suspended` (paused for resume) and `error` (the agent crashed — restartable).
+- **Activity**: Runtime activity within the `running` phase (`working`, `thinking`, `executing`, `waiting_for_input`, `blocked`, `completed`, `limits_exceeded`, `stalled`, `offline`, `crashed`). Note: `offline` occurs when an agent heartbeat has not been heard for some time, often due to an expired auth token that the agent failed to refresh; `stalled` flags a live-but-hung agent and can trigger auto-suspend.
 - **Detail**: Freeform context (tool name, message, task summary).
 
 #### Projects (`/api/v1/projects`)
