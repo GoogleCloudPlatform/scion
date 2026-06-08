@@ -100,20 +100,37 @@ func hubEndpointFromProjectSettings(projectPath string) string {
 	return projectSettings.GetHubEndpoint()
 }
 
+// bridgeHostnames are the special Docker/Podman hostnames that resolve to the
+// host's gateway. When the ContainerHubEndpoint uses one of these, the localhost
+// endpoint's port must be grafted onto it; a real public domain is used as-is.
+var bridgeHostnames = map[string]struct{}{
+	"host.docker.internal":     {},
+	"host.containers.internal": {},
+}
+
 func applyContainerBridgeOverride(endpoint, containerHubEndpoint, runtimeName string) string {
 	if containerHubEndpoint == "" || runtimeName == "kubernetes" || !isLocalhostEndpoint(endpoint) {
 		return endpoint
 	}
+	bridgeURL, err := url.Parse(containerHubEndpoint)
+	if err != nil {
+		return containerHubEndpoint
+	}
+	// When the override target is a public domain (colocated Docker routing
+	// agents at the Caddy domain) rather than a bridge hostname, use it
+	// wholesale. The domain's scheme/port (https, implicit 443) must be
+	// preserved, not replaced with the localhost endpoint's port (e.g. combo
+	// web port 8080).
+	if _, isBridge := bridgeHostnames[bridgeURL.Hostname()]; !isBridge {
+		return containerHubEndpoint
+	}
+	// Otherwise the override target is a bridge hostname (host.docker.internal).
 	// Preserve the port from the actual endpoint rather than using the
 	// pre-computed containerHubEndpoint wholesale. The containerHubEndpoint
 	// is computed once at server startup and may have a different port
 	// (e.g. standalone hub port 9810) than the endpoint being overridden
 	// (e.g. combo-mode web port 8080).
 	epURL, err := url.Parse(endpoint)
-	if err != nil {
-		return containerHubEndpoint
-	}
-	bridgeURL, err := url.Parse(containerHubEndpoint)
 	if err != nil {
 		return containerHubEndpoint
 	}

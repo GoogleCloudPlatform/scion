@@ -1122,6 +1122,7 @@ func TestResolveDockerNetworking(t *testing.T) {
 		name        string
 		runtimeName string
 		env         map[string]string
+		forceHost   bool // set SCION_FORCE_HOST_NETWORK for this case
 		wantMode    string
 		wantEP      string // expected SCION_HUB_ENDPOINT after call (empty = unchanged/absent)
 	}{
@@ -1195,10 +1196,50 @@ func TestResolveDockerNetworking(t *testing.T) {
 			wantMode: "host",
 			wantEP:   "", // SCION_HUB_ENDPOINT not set
 		},
+		{
+			name:        "force-host overrides domain endpoint",
+			runtimeName: "docker",
+			env: map[string]string{
+				"SCION_HUB_ENDPOINT": "https://hub.example.com",
+			},
+			forceHost: true,
+			wantMode:  "host",
+			wantEP:    "https://hub.example.com",
+		},
+		{
+			name:        "force-host with localhost endpoint",
+			runtimeName: "docker",
+			env: map[string]string{
+				"SCION_HUB_ENDPOINT": "http://localhost:8080",
+			},
+			forceHost: true,
+			wantMode:  "host",
+			wantEP:    "http://localhost:8080",
+		},
+		{
+			name:        "force-host ignored for non-docker",
+			runtimeName: "podman",
+			env: map[string]string{
+				"SCION_HUB_ENDPOINT": "http://localhost:8080",
+			},
+			forceHost: true,
+			wantMode:  "",
+			wantEP:    "http://localhost:8080",
+		},
+		{
+			name:        "force-host with no endpoint yields no override",
+			runtimeName: "docker",
+			env:         map[string]string{},
+			forceHost:   true,
+			wantMode:    "",
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			if tt.forceHost {
+				t.Setenv(ForceHostNetworkEnvVar, "1")
+			}
 			// Copy env to avoid mutation across subtests
 			env := make(map[string]string)
 			for k, v := range tt.env {
@@ -1497,6 +1538,33 @@ func TestExitCodeFromContainerStatus(t *testing.T) {
 			}
 			if code != tc.wantCode {
 				t.Errorf("code = %d, want %d", code, tc.wantCode)
+			}
+		})
+	}
+}
+
+func TestParseDockerServerVersion(t *testing.T) {
+	tests := []struct {
+		in        string
+		wantMajor int
+		wantMinor int
+		wantOK    bool
+	}{
+		{"24.0.7", 24, 0, true},
+		{"20.10.21", 20, 10, true},
+		{"19.03.15", 19, 3, true},
+		{"27.5", 27, 5, true},
+		{"", 0, 0, false},
+		{"garbage", 0, 0, false},
+		{"x.y.z", 0, 0, false},
+		{"20", 0, 0, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.in, func(t *testing.T) {
+			major, minor, ok := parseDockerServerVersion(tt.in)
+			if ok != tt.wantOK || major != tt.wantMajor || minor != tt.wantMinor {
+				t.Errorf("parseDockerServerVersion(%q) = (%d, %d, %v), want (%d, %d, %v)",
+					tt.in, major, minor, ok, tt.wantMajor, tt.wantMinor, tt.wantOK)
 			}
 		})
 	}

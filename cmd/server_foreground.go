@@ -1372,12 +1372,47 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 		}
 	}
 
-	// Auto-compute ContainerHubEndpoint
+	// Auto-compute ContainerHubEndpoint.
+	//
+	// For colocated Docker agents we prefer to route them at the public domain
+	// (served by Caddy) so each agent runs in its own network namespace under
+	// bridge networking. This avoids the host-global metadata-server (:18380)
+	// and telemetry (:4317) port collisions that --network=host causes for
+	// concurrent agents. We fall back to the legacy host.docker.internal (host
+	// networking) path when:
+	//   - the escape hatch SCION_FORCE_HOST_NETWORK is set,
+	//   - the Docker daemon lacks host-gateway support, or
+	//   - no public domain is configured (can't reach Caddy without one).
 	containerHubEndpoint := cfg.RuntimeBroker.ContainerHubEndpoint
 	if containerHubEndpoint == "" && enableHub && hubEndpointForRH != "" && rt != nil {
-		if computed := containerBridgeEndpoint(hubEndpointForRH, rt.Name()); computed != "" {
-			containerHubEndpoint = computed
-			log.Printf("Auto-computed ContainerHubEndpoint for %s runtime: %s", rt.Name(), containerHubEndpoint)
+		forceHost := os.Getenv(runtime.ForceHostNetworkEnvVar) != ""
+		isDocker := rt.Name() == "docker"
+		publicDomain := ""
+		if hubEndpoint != "" && !isLocalhostURL(hubEndpoint) {
+			publicDomain = strings.TrimRight(hubEndpoint, "/")
+		}
+
+		if isDocker && !forceHost && !runtime.DockerSupportsHostGateway(ctx, "") {
+			log.Printf("WARNING: Docker daemon lacks host-gateway support; colocated agents will use host networking (re-introduces metadata-server port contention for concurrent agents). Upgrade Docker Engine to >= 20.10 to enable per-agent bridge networking.")
+			forceHost = true
+		}
+
+		switch {
+		case isDocker && !forceHost && publicDomain != "":
+			// Route agents to the public domain so they reach the hub via Caddy
+			// under bridge networking (colocatedExtraHosts maps the domain to
+			// host-gateway). applyContainerBridgeOverride returns it wholesale.
+			containerHubEndpoint = publicDomain
+			log.Printf("Colocated %s agents routed via public domain %s (bridge networking)", rt.Name(), containerHubEndpoint)
+		default:
+			if computed := containerBridgeEndpoint(hubEndpointForRH, rt.Name()); computed != "" {
+				containerHubEndpoint = computed
+				if isDocker && !forceHost {
+					// publicDomain == "" here: no domain configured to reach Caddy.
+					log.Printf("WARNING: no public domain configured for colocated Docker agents; falling back to host networking. Set SCION_SERVER_BASE_URL=https://<domain> to enable per-agent bridge networking.")
+				}
+				log.Printf("Auto-computed ContainerHubEndpoint for %s runtime: %s", rt.Name(), containerHubEndpoint)
+			}
 		}
 	}
 

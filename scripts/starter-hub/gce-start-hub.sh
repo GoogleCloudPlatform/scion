@@ -189,6 +189,11 @@ EnvironmentFile=/home/scion/.scion/hub.env
 Environment=\"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/lib/google-cloud-sdk/bin\"
 Environment=\"HOME=/home/scion\"
 Environment=\"USE_GKE_GCLOUD_AUTH_PLUGIN=True\"
+# Public base URL dispatched to agents. This makes the broker route colocated
+# Docker agents through Caddy on the public domain so each runs under bridge
+# networking (own netns) instead of host networking, avoiding metadata-server
+# and telemetry port collisions between concurrent agents.
+Environment=\"SCION_SERVER_BASE_URL=https://${HUB_DOMAIN}\"
 # Use journald for log management
 StandardOutput=journal
 StandardError=journal

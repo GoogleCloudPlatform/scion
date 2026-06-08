@@ -275,6 +275,20 @@ func TestApplyContainerBridgeOverride(t *testing.T) {
 			runtimeName:          "podman",
 			want:                 "http://host.containers.internal:9810",
 		},
+		{
+			name:                 "domain container endpoint used wholesale, no port graft",
+			endpoint:             "http://localhost:8080",
+			containerHubEndpoint: "https://hub.example.com",
+			runtimeName:          "docker",
+			want:                 "https://hub.example.com",
+		},
+		{
+			name:                 "domain container endpoint preserves its own explicit port",
+			endpoint:             "http://localhost:8080",
+			containerHubEndpoint: "https://hub.example.com:8443",
+			runtimeName:          "docker",
+			want:                 "https://hub.example.com:8443",
+		},
 	}
 
 	for _, tt := range tests {

@@ -14,7 +14,80 @@
 
 package agent
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
+)
+
+// TestColocatedDockerNetworkComposition mirrors how run.go assembles a
+// container's RunConfig.NetworkMode and ExtraHosts (run.go:672, 891-892) for a
+// colocated Docker agent. The broker supplies the public-domain host-gateway
+// mapping via opts.ExtraHosts (from colocatedExtraHosts); the agent path
+// derives NetworkMode from ResolveDockerNetworking and merges BridgeExtraHosts.
+func TestColocatedDockerNetworkComposition(t *testing.T) {
+	const domainHostGateway = "hub.example.com:host-gateway"
+
+	tests := []struct {
+		name           string
+		forceHost      bool
+		hubEndpoint    string
+		brokerExtra    []string // opts.ExtraHosts supplied by the broker
+		wantNetMode    string
+		wantExtraHosts []string
+	}{
+		{
+			name:           "colocated docker domain uses bridge with host-gateway",
+			hubEndpoint:    "https://hub.example.com",
+			brokerExtra:    []string{domainHostGateway},
+			wantNetMode:    "",
+			wantExtraHosts: []string{domainHostGateway},
+		},
+		{
+			name:           "force-host falls back to host networking",
+			forceHost:      true,
+			hubEndpoint:    "https://hub.example.com",
+			brokerExtra:    []string{domainHostGateway},
+			wantNetMode:    "host",
+			wantExtraHosts: []string{domainHostGateway},
+		},
+		{
+			// Legacy fallback: ResolveDockerNetworking rewrites the bridge
+			// hostname back to localhost (reachable under host networking), so
+			// by the time agentEnv is built no host-gateway add-host is needed.
+			name:           "host.docker.internal fallback uses host networking",
+			hubEndpoint:    "http://host.docker.internal:8080",
+			brokerExtra:    nil,
+			wantNetMode:    "host",
+			wantExtraHosts: nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.forceHost {
+				t.Setenv(runtime.ForceHostNetworkEnvVar, "1")
+			}
+			env := map[string]string{"SCION_HUB_ENDPOINT": tt.hubEndpoint}
+			gotMode := runtime.ResolveDockerNetworking("docker", env)
+			if gotMode != tt.wantNetMode {
+				t.Errorf("NetworkMode = %q, want %q", gotMode, tt.wantNetMode)
+			}
+
+			// Mirror run.go: agentEnv is built from opts.Env after the rewrite.
+			agentEnv := []string{"SCION_HUB_ENDPOINT=" + env["SCION_HUB_ENDPOINT"]}
+			gotExtra := mergeExtraHosts(tt.brokerExtra, runtime.BridgeExtraHosts("docker", agentEnv))
+			if len(gotExtra) != len(tt.wantExtraHosts) {
+				t.Fatalf("ExtraHosts = %v, want %v", gotExtra, tt.wantExtraHosts)
+			}
+			for i := range gotExtra {
+				if gotExtra[i] != tt.wantExtraHosts[i] {
+					t.Errorf("ExtraHosts[%d] = %q, want %q", i, gotExtra[i], tt.wantExtraHosts[i])
+				}
+			}
+		})
+	}
+}
 
 func TestMergeExtraHosts(t *testing.T) {
 	tests := []struct {

@@ -590,12 +590,25 @@ func expandTildeTarget(target, containerHome string) string {
 	return target
 }
 
+// ForceHostNetworkEnvVar, when set to a non-empty value in the broker's
+// environment, forces colocated Docker agents back onto host networking. It is
+// the escape hatch that reverts to the pre-bridge behavior without a redeploy.
+const ForceHostNetworkEnvVar = "SCION_FORCE_HOST_NETWORK"
+
+// forceHostNetworking reports whether the host-networking escape hatch is set.
+func forceHostNetworking() bool {
+	return os.Getenv(ForceHostNetworkEnvVar) != ""
+}
+
 // ResolveDockerNetworking checks whether Docker host networking should be used
 // to allow containers to reach services on the host's loopback interface.
 // When the hub endpoint is localhost or was translated to a Docker bridge
 // hostname (host.docker.internal), it returns "host" and rewrites any bridge
 // hostnames back to localhost in the env map. This avoids the need for the
 // server to bind to 0.0.0.0.
+//
+// When the SCION_FORCE_HOST_NETWORK escape hatch is set, host networking is
+// forced regardless of the endpoint, reverting to the legacy behavior.
 //
 // For non-Docker runtimes or non-localhost endpoints, returns "" (no override).
 func ResolveDockerNetworking(runtimeName string, env map[string]string) string {
@@ -611,14 +624,17 @@ func ResolveDockerNetworking(runtimeName string, env map[string]string) string {
 		return ""
 	}
 
+	// Escape hatch: force host networking regardless of endpoint so a
+	// deployment can revert to the legacy behavior without a redeploy.
+	if forceHostNetworking() {
+		rewriteBridgeHostToLocalhost(env)
+		return "host"
+	}
+
 	// If endpoint uses the Docker bridge hostname (translated from localhost),
 	// rewrite back to localhost since host networking makes it reachable directly.
 	if strings.Contains(ep, "host.docker.internal") {
-		for _, key := range []string{"SCION_HUB_ENDPOINT", "SCION_HUB_URL"} {
-			if v, ok := env[key]; ok {
-				env[key] = strings.Replace(v, "host.docker.internal", "localhost", 1)
-			}
-		}
+		rewriteBridgeHostToLocalhost(env)
 		return "host"
 	}
 
@@ -633,6 +649,67 @@ func ResolveDockerNetworking(runtimeName string, env map[string]string) string {
 	}
 
 	return ""
+}
+
+// rewriteBridgeHostToLocalhost rewrites any host.docker.internal references in
+// the hub endpoint env vars back to localhost, since host networking makes the
+// host loopback reachable directly.
+func rewriteBridgeHostToLocalhost(env map[string]string) {
+	for _, key := range []string{"SCION_HUB_ENDPOINT", "SCION_HUB_URL"} {
+		if v, ok := env[key]; ok {
+			env[key] = strings.Replace(v, "host.docker.internal", "localhost", 1)
+		}
+	}
+}
+
+// DockerSupportsHostGateway reports whether the Docker daemon supports the
+// special "host-gateway" address used by --add-host. Support was added in
+// Docker Engine 20.10; older daemons cannot map a domain to the host, so
+// colocated bridge networking would be unable to reach Caddy and the broker
+// must fall back to host networking. On any probe failure we conservatively
+// assume support is present (the common case on modern hosts) so we don't
+// needlessly disable the fix; a genuinely old daemon will surface the missing
+// host-gateway when the container fails to start, which is rare in practice.
+func DockerSupportsHostGateway(ctx context.Context, command string) bool {
+	if command == "" {
+		command = "docker"
+	}
+	out, err := runSimpleCommand(ctx, command, "version", "--format", "{{.Server.Version}}")
+	if err != nil {
+		runtimeLog.Debug("Unable to probe Docker server version for host-gateway support", "error", err)
+		return true
+	}
+	major, minor, ok := parseDockerServerVersion(strings.TrimSpace(out))
+	if !ok {
+		runtimeLog.Debug("Unable to parse Docker server version for host-gateway support", "version", out)
+		return true
+	}
+	// host-gateway requires Docker Engine >= 20.10.
+	if major > 20 || (major == 20 && minor >= 10) {
+		return true
+	}
+	return false
+}
+
+// parseDockerServerVersion parses the leading "major.minor" of a Docker server
+// version string (e.g. "24.0.7" or "20.10.21").
+func parseDockerServerVersion(v string) (major, minor int, ok bool) {
+	if v == "" {
+		return 0, 0, false
+	}
+	parts := strings.SplitN(v, ".", 3)
+	if len(parts) < 2 {
+		return 0, 0, false
+	}
+	major, err := strconv.Atoi(parts[0])
+	if err != nil {
+		return 0, 0, false
+	}
+	minor, err = strconv.Atoi(parts[1])
+	if err != nil {
+		return 0, 0, false
+	}
+	return major, minor, true
 }
 
 // BridgeExtraHosts returns the --add-host entries needed for the given runtime
