@@ -84,10 +84,50 @@ func DeleteAgentFiles(agentName string, projectPath string, removeBranch bool) (
 	// in a goroutine that could block git subprocess I/O system-wide.
 	var dirsToDelete []string
 
+	// --- Refcount path: shared-worktree teardown (#168 I3) ---
+	//
+	// Before the legacy worktree-removal blocks, check the sharer registry.
+	// If this agent is registered as a sharer, unregister it and decide
+	// whether to remove the shared worktree based on remaining sharers.
+	//
+	// NOTE: teardown does not hold the per-project advisory lock. The
+	// provisioning path (ensureWorktree / ProvisionShared) holds the lock
+	// during registration. A concurrent provision+delete race on the same
+	// branch is unlikely in practice (the hub serialises agent lifecycle)
+	// but not structurally excluded. Acceptable for single-node local mode
+	// which has no advisory locker.
+	refcountHandled := false
+	if repoRoot != "" {
+		if branch, _, found, findErr := provision.FindBranchForAgent(repoRoot, agentName); findErr == nil && found {
+			remaining, wtPath, unregErr := provision.UnregisterSharer(repoRoot, branch, agentName)
+			if unregErr == nil {
+				if len(remaining) == 0 {
+					util.Debugf("delete: last sharer for branch %s, removing worktree at %s", branch, wtPath)
+					worktreeStart := time.Now()
+					if deleted, err := util.RemoveWorktree(wtPath, removeBranch); err == nil {
+						if deleted {
+							branchDeleted = true
+						}
+						util.Debugf("delete: shared worktree removal completed in %v (branch deleted: %v)", time.Since(worktreeStart), deleted)
+					} else {
+						util.Debugf("delete: shared worktree removal failed in %v: %v", time.Since(worktreeStart), err)
+						_ = util.RemoveAllSafe(wtPath)
+					}
+				} else {
+					util.Debugf("delete: %d sharers remain for branch %s, detaching agent %s", len(remaining), branch, agentName)
+				}
+				refcountHandled = true
+			} else {
+				util.Debugf("delete: UnregisterSharer failed for branch %s agent %s: %v", branch, agentName, unregErr)
+			}
+		}
+	}
+
 	// Worktree-per-agent: remove the agent's worktree from the shared base.
 	// The worktree lives at <projectDir>/workspace/worktrees/<agentName>,
 	// separate from the agent config dir under agents/.
-	if worktreeDir != "" {
+	// Skip when the refcount path already handled removal/detach.
+	if worktreeDir != "" && !refcountHandled {
 		if _, err := os.Stat(filepath.Join(worktreeDir, ".git")); err == nil {
 			util.Debugf("delete: removing worktree-per-agent workspace at %s", worktreeDir)
 			worktreeStart := time.Now()
@@ -112,21 +152,22 @@ func DeleteAgentFiles(agentName string, projectPath string, removeBranch bool) (
 		}
 
 		agentWorkspace := filepath.Join(agentDir, "workspace")
-		// Check if it's a worktree before trying to remove it
-		if _, err := os.Stat(filepath.Join(agentWorkspace, ".git")); err == nil {
-			util.Debugf("delete: removing workspace at %s", agentWorkspace)
-			worktreeStart := time.Now()
-			if deleted, err := util.RemoveWorktree(agentWorkspace, removeBranch); err == nil {
-				if deleted {
-					branchDeleted = true
+		// Check if it's a worktree before trying to remove it.
+		// Skip when the refcount path already handled removal/detach —
+		// the shared worktree must not be removed while other sharers remain.
+		if !refcountHandled {
+			if _, err := os.Stat(filepath.Join(agentWorkspace, ".git")); err == nil {
+				util.Debugf("delete: removing workspace at %s", agentWorkspace)
+				worktreeStart := time.Now()
+				if deleted, err := util.RemoveWorktree(agentWorkspace, removeBranch); err == nil {
+					if deleted {
+						branchDeleted = true
+					}
+					util.Debugf("delete: worktree removal completed in %v (branch deleted: %v)", time.Since(worktreeStart), deleted)
+				} else {
+					util.Debugf("delete: worktree removal failed in %v: %v", time.Since(worktreeStart), err)
+					_ = util.RemoveAllSafe(agentWorkspace)
 				}
-				util.Debugf("delete: worktree removal completed in %v (branch deleted: %v)", time.Since(worktreeStart), deleted)
-			} else {
-				util.Debugf("delete: worktree removal failed in %v: %v", time.Since(worktreeStart), err)
-				// Ensure the workspace directory is gone even if worktree
-				// removal only partially succeeded, so that PruneWorktreesIn
-				// can detect the stale .git/worktrees entry.
-				_ = util.RemoveAllSafe(agentWorkspace)
 			}
 		}
 
@@ -144,7 +185,9 @@ func DeleteAgentFiles(agentName string, projectPath string, removeBranch bool) (
 
 		// If the branch wasn't already deleted via RemoveWorktree (e.g. because
 		// the workspace .git file didn't exist), try to delete it by name.
-		if removeBranch && !branchDeleted {
+		// Skip when refcount handled teardown — branch lifecycle is managed
+		// by the refcount path (last-sharer removes; others detach).
+		if removeBranch && !branchDeleted && !refcountHandled {
 			branchName := api.Slugify(agentName)
 			if util.DeleteBranchIn(repoRoot, branchName) {
 				branchDeleted = true

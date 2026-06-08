@@ -395,3 +395,265 @@ func TestDeleteAgentFiles_WorktreePerAgent_DeletesOnlyTargetWorktree(t *testing.
 		t.Errorf("agent-a config dir should survive: %v", err)
 	}
 }
+
+// TestDeleteAgentFiles_SharedWorktree_DeleteCreatorWhileJoinerRemains verifies
+// that deleting the creator agent of a shared worktree does NOT remove the
+// shared worktree or branch when another sharer (joiner) remains.
+func TestDeleteAgentFiles_SharedWorktree_DeleteCreatorWhileJoinerRemains(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+
+	tmpDir := t.TempDir()
+	oldWd, _ := os.Getwd()
+	defer os.Chdir(oldWd)
+	os.Chdir(tmpDir)
+	t.Setenv("HOME", tmpDir)
+
+	bare := initBareRepo(t)
+	gc := &api.GitCloneConfig{URL: bare, Branch: "main", Depth: 0}
+
+	projectPath := filepath.Join(tmpDir, "proj")
+	scionDir := filepath.Join(projectPath, config.DotScion)
+	if err := os.MkdirAll(filepath.Join(scionDir, "agents"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	base := filepath.Join(projectPath, "workspace")
+	resolved := provision.ResolvedWorkspace{HostPath: base, Backend: "local"}
+
+	// Agent A creates worktree on branch "shared-branch".
+	if err := provision.ProvisionShared(provision.ProvisionInput{
+		Resolved: resolved, Mode: store.SharingModeWorktreePerAgent,
+		ProjectID: "p1", AgentID: "agent-a", AgentName: "shared-branch",
+		GitClone: gc,
+	}); err != nil {
+		t.Fatalf("provision agent-a: %v", err)
+	}
+
+	// Agent B joins the same branch "shared-branch".
+	if err := provision.ProvisionShared(provision.ProvisionInput{
+		Resolved: resolved, Mode: store.SharingModeWorktreePerAgent,
+		ProjectID: "p1", AgentID: "agent-b", AgentName: "shared-branch",
+		GitClone: gc,
+	}); err != nil {
+		t.Fatalf("provision agent-b: %v", err)
+	}
+
+	// The shared worktree lives under agent-a's path (it was the creator).
+	wtA := provision.WorktreePath(base, "agent-a")
+	if _, err := os.Stat(wtA); err != nil {
+		t.Fatalf("setup: shared worktree should exist at %s: %v", wtA, err)
+	}
+
+	// Sanity: both are registered.
+	sharers, _, err := provision.ListSharers(base, "shared-branch")
+	if err != nil || len(sharers) != 2 {
+		t.Fatalf("setup: expected 2 sharers, got %v (err=%v)", sharers, err)
+	}
+
+	// Create agent config dirs (as the broker would).
+	for _, name := range []string{"agent-a", "agent-b"} {
+		if err := os.MkdirAll(filepath.Join(scionDir, "agents", name), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Delete agent-a (the creator) while agent-b (joiner) remains.
+	branchDeleted, err := DeleteAgentFiles("agent-a", projectPath, true)
+	if err != nil {
+		t.Fatalf("DeleteAgentFiles(agent-a): %v", err)
+	}
+
+	// 1. Shared worktree PERSISTS (dir + .git still present).
+	if _, err := os.Stat(wtA); err != nil {
+		t.Errorf("shared worktree should persist while joiner remains: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(wtA, ".git")); err != nil {
+		t.Errorf("shared worktree .git should persist: %v", err)
+	}
+
+	// 2. Branch NOT deleted.
+	if branchDeleted {
+		t.Error("branch should NOT be deleted while other sharers remain")
+	}
+	branchCheck := exec.Command("git", "-C", base, "branch", "--list", "shared-branch")
+	if out, _ := branchCheck.Output(); strings.TrimSpace(string(out)) == "" {
+		t.Error("branch 'shared-branch' should still exist in the repo")
+	}
+
+	// 3. agent-b is still registered as a sharer.
+	sharers, _, err = provision.ListSharers(base, "shared-branch")
+	if err != nil {
+		t.Fatalf("ListSharers after delete: %v", err)
+	}
+	if len(sharers) != 1 || sharers[0] != "agent-b" {
+		t.Errorf("expected sharers=[agent-b], got %v", sharers)
+	}
+
+	// 4. agent-a is no longer registered.
+	_, _, found, _ := provision.FindBranchForAgent(base, "agent-a")
+	if found {
+		t.Error("agent-a should no longer be in the sharer registry")
+	}
+
+	// 5. agent-a's config dir is removed.
+	if _, err := os.Stat(filepath.Join(scionDir, "agents", "agent-a")); !os.IsNotExist(err) {
+		t.Errorf("agent-a config dir should be removed, stat err=%v", err)
+	}
+}
+
+// TestDeleteAgentFiles_SharedWorktree_DeleteLastSharer_RemovesWorktree verifies
+// that deleting the last remaining sharer removes the shared worktree and
+// optionally the branch.
+func TestDeleteAgentFiles_SharedWorktree_DeleteLastSharer_RemovesWorktree(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+
+	tmpDir := t.TempDir()
+	oldWd, _ := os.Getwd()
+	defer os.Chdir(oldWd)
+	os.Chdir(tmpDir)
+	t.Setenv("HOME", tmpDir)
+
+	bare := initBareRepo(t)
+	gc := &api.GitCloneConfig{URL: bare, Branch: "main", Depth: 0}
+
+	projectPath := filepath.Join(tmpDir, "proj")
+	scionDir := filepath.Join(projectPath, config.DotScion)
+	if err := os.MkdirAll(filepath.Join(scionDir, "agents"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	base := filepath.Join(projectPath, "workspace")
+	resolved := provision.ResolvedWorkspace{HostPath: base, Backend: "local"}
+
+	// Agent A creates, Agent B joins.
+	for _, id := range []string{"agent-a", "agent-b"} {
+		if err := provision.ProvisionShared(provision.ProvisionInput{
+			Resolved: resolved, Mode: store.SharingModeWorktreePerAgent,
+			ProjectID: "p1", AgentID: id, AgentName: "shared-branch",
+			GitClone: gc,
+		}); err != nil {
+			t.Fatalf("provision %s: %v", id, err)
+		}
+		if err := os.MkdirAll(filepath.Join(scionDir, "agents", id), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	wtA := provision.WorktreePath(base, "agent-a")
+
+	// Delete agent-a first (not last → detach only).
+	if _, err := DeleteAgentFiles("agent-a", projectPath, true); err != nil {
+		t.Fatalf("DeleteAgentFiles(agent-a): %v", err)
+	}
+
+	// Worktree should still exist.
+	if _, err := os.Stat(wtA); err != nil {
+		t.Fatalf("worktree should persist after deleting first sharer: %v", err)
+	}
+
+	// Now delete agent-b (last sharer) with removeBranch=true.
+	branchDeleted, err := DeleteAgentFiles("agent-b", projectPath, true)
+	if err != nil {
+		t.Fatalf("DeleteAgentFiles(agent-b): %v", err)
+	}
+
+	// 1. Shared worktree is removed.
+	if _, err := os.Stat(wtA); !os.IsNotExist(err) {
+		t.Errorf("shared worktree should be removed after last sharer deleted, stat err=%v", err)
+	}
+
+	// 2. Branch is deleted.
+	if !branchDeleted {
+		t.Error("expected branch to be deleted when last sharer is removed with removeBranch=true")
+	}
+	branchCheck := exec.Command("git", "-C", base, "branch", "--list", "shared-branch")
+	if out, _ := branchCheck.Output(); strings.TrimSpace(string(out)) != "" {
+		t.Errorf("branch 'shared-branch' should be gone, got: %s", strings.TrimSpace(string(out)))
+	}
+
+	// 3. Sharer registry is empty.
+	sharers, _, err := provision.ListSharers(base, "shared-branch")
+	if err != nil {
+		t.Fatalf("ListSharers: %v", err)
+	}
+	if len(sharers) != 0 {
+		t.Errorf("expected no sharers remaining, got %v", sharers)
+	}
+
+	// 4. agent-b's config dir is removed.
+	if _, err := os.Stat(filepath.Join(scionDir, "agents", "agent-b")); !os.IsNotExist(err) {
+		t.Errorf("agent-b config dir should be removed, stat err=%v", err)
+	}
+}
+
+// TestDeleteAgentFiles_SharedWorktree_SoleSharer_DeleteRemoves verifies that a
+// unique-branch agent (sole sharer in the registry) still has its worktree
+// removed on delete — no regression from the refcount path.
+func TestDeleteAgentFiles_SharedWorktree_SoleSharer_DeleteRemoves(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+
+	tmpDir := t.TempDir()
+	oldWd, _ := os.Getwd()
+	defer os.Chdir(oldWd)
+	os.Chdir(tmpDir)
+	t.Setenv("HOME", tmpDir)
+
+	bare := initBareRepo(t)
+	gc := &api.GitCloneConfig{URL: bare, Branch: "main", Depth: 0}
+
+	projectPath := filepath.Join(tmpDir, "proj")
+	scionDir := filepath.Join(projectPath, config.DotScion)
+	if err := os.MkdirAll(filepath.Join(scionDir, "agents"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	base := filepath.Join(projectPath, "workspace")
+	resolved := provision.ResolvedWorkspace{HostPath: base, Backend: "local"}
+
+	// Provision a single agent with a unique branch name.
+	if err := provision.ProvisionShared(provision.ProvisionInput{
+		Resolved: resolved, Mode: store.SharingModeWorktreePerAgent,
+		ProjectID: "p1", AgentID: "solo-agent", AgentName: "solo-agent",
+		GitClone: gc,
+	}); err != nil {
+		t.Fatalf("provision solo-agent: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(scionDir, "agents", "solo-agent"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	wtPath := provision.WorktreePath(base, "solo-agent")
+	if _, err := os.Stat(wtPath); err != nil {
+		t.Fatalf("setup: worktree should exist at %s: %v", wtPath, err)
+	}
+
+	// Delete the sole sharer.
+	branchDeleted, err := DeleteAgentFiles("solo-agent", projectPath, true)
+	if err != nil {
+		t.Fatalf("DeleteAgentFiles(solo-agent): %v", err)
+	}
+
+	// Worktree is removed.
+	if _, err := os.Stat(wtPath); !os.IsNotExist(err) {
+		t.Errorf("sole agent's worktree should be removed, stat err=%v", err)
+	}
+
+	// Branch is deleted.
+	if !branchDeleted {
+		t.Error("expected branch to be deleted for sole sharer")
+	}
+
+	// No sharers remain.
+	sharers, _, err := provision.ListSharers(base, "solo-agent")
+	if err != nil {
+		t.Fatalf("ListSharers: %v", err)
+	}
+	if len(sharers) != 0 {
+		t.Errorf("expected no sharers remaining, got %v", sharers)
+	}
+
+	// Shared base .git survives.
+	if _, err := os.Stat(filepath.Join(base, ".git")); err != nil {
+		t.Errorf("shared base .git should survive: %v", err)
+	}
+}
