@@ -120,6 +120,13 @@ type GCPServiceAccountResolver interface {
 func ValidateHook(ctx context.Context, hook *store.LifecycleHook, saResolver GCPServiceAccountResolver) error {
 	var errs []FieldError
 
+	// Default an empty scope to hub (matching the store default) BEFORE the
+	// checks below. Otherwise an empty ScopeType would silently bypass the
+	// execution-identity scope validation (which keys off ScopeType).
+	if hook.ScopeType == "" {
+		hook.ScopeType = store.LifecycleHookScopeHub
+	}
+
 	// --- trigger ---
 	if !validTriggers[hook.Trigger] {
 		errs = append(errs, FieldError{

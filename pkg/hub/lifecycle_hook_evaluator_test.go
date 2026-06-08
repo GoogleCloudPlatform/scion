@@ -688,9 +688,10 @@ func TestLifecycleHookColdStart_SeedsMultipleAgents(t *testing.T) {
 // Tests: Pruning on terminal phases (F3)
 // ---------------------------------------------------------------------------
 
-func TestLifecycleHookPruning_TerminalPhaseRemovesEntry(t *testing.T) {
-	// After a "stopped" or "error" event, the agent's deduper entry is
-	// removed, and a subsequent terminal→running transition is detected.
+func TestLifecycleHookPruning_TerminalPhaseRetainsEntryNoRefire(t *testing.T) {
+	// A terminal ("stopped"/"error") event fires once, the deduper entry is
+	// RETAINED (not pruned), a redelivered terminal event does not re-fire, and
+	// a subsequent terminal→running transition is still detected.
 	for _, terminalPhase := range []state.Phase{state.PhaseStopped, state.PhaseError} {
 		t.Run(string(terminalPhase), func(t *testing.T) {
 			s := testEvaluatorStore(t)
@@ -719,12 +720,20 @@ func TestLifecycleHookPruning_TerminalPhaseRemovesEntry(t *testing.T) {
 			events.PublishAgentStatus(context.Background(), agent)
 			exec.waitForCalls(t, 1, 5*time.Second)
 
-			// The entry should be pruned after a terminal phase (memory deduper).
+			// The entry is intentionally NOT pruned on terminal phases — pruning
+			// would re-arm the transition check and let a redelivered terminal
+			// event re-fire the hook. The entry persists (last_phase=terminal).
 			md := memDeduper(ev)
-			assert.False(t, md.previousPhaseHas(agent.ID),
-				"terminal phase should prune the agent's deduper entry")
+			assert.True(t, md.previousPhaseHas(agent.ID),
+				"terminal phase must NOT prune the deduper entry (guards against redelivery)")
 
-			// A subsequent transition to running should be detected (prev="" != "running").
+			// Redelivered terminal event (pub/sub redelivery / heartbeat while
+			// terminal): must be a non-transition and must NOT re-fire the hook.
+			events.PublishAgentStatus(context.Background(), agent)
+			exec.assertNoMoreCalls(t, 500*time.Millisecond)
+
+			// A subsequent genuine transition back to running is still detected
+			// (prev=terminal != running).
 			agent.Phase = string(state.PhaseRunning)
 			require.NoError(t, s.UpdateAgentStatus(context.Background(), agent.ID, store.AgentStatusUpdate{Phase: string(state.PhaseRunning)}))
 			events.PublishAgentStatus(context.Background(), agent)

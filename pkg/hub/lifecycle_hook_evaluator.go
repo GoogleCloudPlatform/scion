@@ -368,8 +368,6 @@ func (e *LifecycleHookEvaluator) handleEvent(evt Event) {
 
 	// Check for actual transition via the deduper.
 	ctx := context.Background()
-	phase := state.Phase(statusEvt.Phase)
-	isTerminal := phase == state.PhaseStopped || phase == state.PhaseError
 
 	changed, err := e.deduper.IsTransition(ctx, statusEvt.AgentID, statusEvt.Phase)
 	if err != nil {
@@ -379,14 +377,13 @@ func (e *LifecycleHookEvaluator) handleEvent(evt Event) {
 		return
 	}
 
-	// For terminal phases, prune the deduper entry to avoid unbounded growth.
-	// This is done AFTER the CAS so we still detect the transition itself.
-	if isTerminal {
-		if forgetErr := e.deduper.Forget(ctx, statusEvt.AgentID); forgetErr != nil {
-			e.log.Error("Failed to prune deduper entry for terminal phase",
-				"agent_id", statusEvt.AgentID, "error", forgetErr)
-		}
-	}
+	// NOTE: we intentionally do NOT prune the deduper entry on terminal phases
+	// (stopped/error). Pruning here re-arms the transition check, so a
+	// redelivered terminal event (pub/sub redelivery under HA, retries, or
+	// heartbeats while the agent stays terminal) would be seen as a fresh
+	// transition and fire the hook again. The entry is pruned only on agent
+	// deletion (handleDeletedEvent). One entry per agent is negligible overhead
+	// (bounded by the agents table) and buys robust exactly-once firing.
 
 	if !changed {
 		return // same phase re-published (e.g., heartbeat), not a transition
