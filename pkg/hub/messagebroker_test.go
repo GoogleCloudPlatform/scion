@@ -195,6 +195,130 @@ func TestMessageBrokerProxy_DirectMessage(t *testing.T) {
 	}
 }
 
+func TestMessageBrokerProxy_InterruptPrefix(t *testing.T) {
+	s := newBrokerTestStore(t)
+	projectID := setupBrokerTestProject(t, s)
+	setupBrokerTestAgent(t, s, projectID, "test-agent", "running")
+
+	events := NewChannelEventPublisher()
+	defer events.Close()
+
+	b := eventbus.NewInProcessEventBus(slog.Default())
+	defer b.Close()
+
+	dispatcher := &brokerMockDispatcher{}
+
+	proxy := NewMessageBrokerProxy(b, s, events, func() AgentDispatcher { return dispatcher }, slog.Default())
+	proxy.Start()
+	defer proxy.Stop()
+
+	proxy.subscribeAgent(projectID, "test-agent")
+
+	msg := messages.NewInstruction("user:alice", "agent:test-agent", "!restart now")
+	if err := proxy.PublishMessage(context.Background(), projectID, msg); err != nil {
+		t.Fatal(err)
+	}
+
+	time.Sleep(100 * time.Millisecond)
+
+	dispatched := dispatcher.getMessages()
+	if len(dispatched) != 1 {
+		t.Fatalf("expected 1 dispatched message, got %d", len(dispatched))
+	}
+	if dispatched[0].msg != "restart now" {
+		t.Errorf("expected message 'restart now' (! stripped), got %q", dispatched[0].msg)
+	}
+	if !dispatched[0].interrupt {
+		t.Error("expected interrupt=true for !-prefixed message")
+	}
+	if !dispatched[0].structured.Urgent {
+		t.Error("expected structured message Urgent=true for !-prefixed message")
+	}
+}
+
+func TestMessageBrokerProxy_InterruptPrefixNotStrippedWithoutBang(t *testing.T) {
+	s := newBrokerTestStore(t)
+	projectID := setupBrokerTestProject(t, s)
+	setupBrokerTestAgent(t, s, projectID, "test-agent", "running")
+
+	events := NewChannelEventPublisher()
+	defer events.Close()
+
+	b := eventbus.NewInProcessEventBus(slog.Default())
+	defer b.Close()
+
+	dispatcher := &brokerMockDispatcher{}
+
+	proxy := NewMessageBrokerProxy(b, s, events, func() AgentDispatcher { return dispatcher }, slog.Default())
+	proxy.Start()
+	defer proxy.Stop()
+
+	proxy.subscribeAgent(projectID, "test-agent")
+
+	msg := messages.NewInstruction("user:alice", "agent:test-agent", "hello agent")
+	if err := proxy.PublishMessage(context.Background(), projectID, msg); err != nil {
+		t.Fatal(err)
+	}
+
+	time.Sleep(100 * time.Millisecond)
+
+	dispatched := dispatcher.getMessages()
+	if len(dispatched) != 1 {
+		t.Fatalf("expected 1 dispatched message, got %d", len(dispatched))
+	}
+	if dispatched[0].msg != "hello agent" {
+		t.Errorf("expected message 'hello agent' unchanged, got %q", dispatched[0].msg)
+	}
+	if dispatched[0].interrupt {
+		t.Error("expected interrupt=false for non-!-prefixed message")
+	}
+}
+
+func TestMessageBrokerProxy_InterruptPrefixPersistence(t *testing.T) {
+	s := newBrokerTestStore(t)
+	projectID := setupBrokerTestProject(t, s)
+	agent := setupBrokerTestAgent(t, s, projectID, "persist-agent", "running")
+
+	events := NewChannelEventPublisher()
+	defer events.Close()
+
+	b := eventbus.NewInProcessEventBus(slog.Default())
+	defer b.Close()
+
+	dispatcher := &brokerMockDispatcher{}
+
+	proxy := NewMessageBrokerProxy(b, s, events, func() AgentDispatcher { return dispatcher }, slog.Default())
+	proxy.Start()
+	defer proxy.Stop()
+
+	proxy.subscribeAgent(projectID, "persist-agent")
+
+	msg := messages.NewInstruction("user:alice", "agent:persist-agent", "!urgent task")
+	msg.SenderID = "user-alice-id"
+	msg.RecipientID = agent.ID
+	if err := proxy.PublishMessage(context.Background(), projectID, msg); err != nil {
+		t.Fatal(err)
+	}
+
+	time.Sleep(100 * time.Millisecond)
+
+	// Verify the persisted message has the stripped content and urgent flag
+	ctx := context.Background()
+	result, err := s.ListMessages(ctx, store.MessageFilter{AgentID: agent.ID}, store.ListOptions{})
+	if err != nil {
+		t.Fatalf("failed to list messages: %v", err)
+	}
+	if len(result.Items) != 1 {
+		t.Fatalf("expected 1 persisted message, got %d", len(result.Items))
+	}
+	if result.Items[0].Msg != "urgent task" {
+		t.Errorf("expected persisted msg 'urgent task', got %q", result.Items[0].Msg)
+	}
+	if !result.Items[0].Urgent {
+		t.Error("expected persisted message Urgent=true")
+	}
+}
+
 func TestMessageBrokerProxy_ProjectBroadcast(t *testing.T) {
 	s := newBrokerTestStore(t)
 	projectID := setupBrokerTestProject(t, s)

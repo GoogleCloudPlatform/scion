@@ -495,6 +495,14 @@ func (p *MessageBrokerProxy) deliverToAgent(ctx context.Context, projectID, agen
 		return
 	}
 
+	// A leading "!" in the message body acts as an inline interrupt signal:
+	// strip the prefix and promote to urgent so the harness is interrupted
+	// before delivery — equivalent to --interrupt on the CLI.
+	if strings.HasPrefix(msg.Msg, "!") {
+		msg.Msg = msg.Msg[1:]
+		msg.Urgent = true
+	}
+
 	dispatcher := p.getDispatcher()
 	if dispatcher == nil {
 		p.log.Warn("No dispatcher available, cannot deliver broker message",
