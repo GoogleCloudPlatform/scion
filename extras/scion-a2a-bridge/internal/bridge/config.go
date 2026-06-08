@@ -34,10 +34,12 @@ type Config struct {
 
 // BridgeConfig holds the A2A protocol server settings.
 type BridgeConfig struct {
-	ListenAddress  string         `yaml:"listen_address"`
-	ExternalURL    string         `yaml:"external_url"`
-	MaxSubscribers int            `yaml:"max_subscribers"`
-	Provider       ProviderConfig `yaml:"provider"`
+	ListenAddress     string         `yaml:"listen_address"`
+	GRPCListenAddress string         `yaml:"grpc_listen_address"`
+	RESTListenAddress string         `yaml:"rest_listen_address"`
+	ExternalURL       string         `yaml:"external_url"`
+	MaxSubscribers    int            `yaml:"max_subscribers"`
+	Provider          ProviderConfig `yaml:"provider"`
 }
 
 // ProviderConfig describes the bridge operator.

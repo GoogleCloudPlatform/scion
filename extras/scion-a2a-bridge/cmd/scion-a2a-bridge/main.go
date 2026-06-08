@@ -29,12 +29,16 @@ import (
 	"syscall"
 	"time"
 
+	"net"
+
 	secretmanager "cloud.google.com/go/secretmanager/apiv1"
 	smpb "cloud.google.com/go/secretmanager/apiv1/secretmanagerpb"
 	"github.com/a2aproject/a2a-go/v2/a2a"
+	a2agrpc "github.com/a2aproject/a2a-go/v2/a2agrpc/v0"
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
 	"github.com/a2aproject/a2a-go/v2/a2asrv/taskstore"
 	"github.com/prometheus/client_golang/prometheus"
+	"google.golang.org/grpc"
 	"gopkg.in/yaml.v3"
 
 	"github.com/GoogleCloudPlatform/scion/extras/scion-a2a-bridge/internal/bridge"
@@ -194,8 +198,61 @@ func main() {
 		}
 	}()
 
+	// Start gRPC server if configured.
+	var grpcServer *grpc.Server
+	if cfg.Bridge.GRPCListenAddress != "" {
+		grpcServer = grpc.NewServer()
+		grpcHandler := a2agrpc.NewHandler(sdkRequestHandler)
+		grpcHandler.RegisterWith(grpcServer)
+
+		grpcListener, err := net.Listen("tcp", cfg.Bridge.GRPCListenAddress)
+		if err != nil {
+			log.Error("failed to listen for gRPC", "address", cfg.Bridge.GRPCListenAddress, "error", err)
+			os.Exit(1)
+		}
+
+		go func() {
+			log.Info("gRPC transport starting", "address", cfg.Bridge.GRPCListenAddress)
+			if err := grpcServer.Serve(grpcListener); err != nil {
+				errCh <- fmt.Errorf("gRPC server: %w", err)
+			}
+		}()
+	}
+
+	// Start REST server if configured.
+	var restServer *http.Server
+	if cfg.Bridge.RESTListenAddress != "" {
+		restHandler := a2asrv.NewRESTHandler(
+			sdkRequestHandler,
+			a2asrv.WithTransportKeepAlive(cfg.Timeouts.SSEKeepalive),
+		)
+
+		restServer = &http.Server{
+			Addr:           cfg.Bridge.RESTListenAddress,
+			Handler:        restHandler,
+			ReadTimeout:    30 * time.Second,
+			WriteTimeout:   0,
+			IdleTimeout:    120 * time.Second,
+			MaxHeaderBytes: 1 << 20,
+		}
+
+		go func() {
+			log.Info("REST transport starting", "address", cfg.Bridge.RESTListenAddress)
+			if err := restServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				errCh <- fmt.Errorf("REST server: %w", err)
+			}
+		}()
+	}
+
+	transports := []string{"JSON-RPC"}
+	if cfg.Bridge.GRPCListenAddress != "" {
+		transports = append(transports, "gRPC")
+	}
+	if cfg.Bridge.RESTListenAddress != "" {
+		transports = append(transports, "REST")
+	}
 	log.Info("scion-a2a-bridge ready",
-		"transport", "JSON-RPC",
+		"transports", transports,
 		"sdk", "a2a-go/v2",
 	)
 
@@ -215,6 +272,18 @@ func main() {
 
 	if err := httpServer.Shutdown(shutdownCtx); err != nil {
 		log.Error("failed to stop A2A server", "error", err)
+	}
+
+	if grpcServer != nil {
+		grpcServer.GracefulStop()
+		log.Info("gRPC server stopped")
+	}
+
+	if restServer != nil {
+		if err := restServer.Shutdown(shutdownCtx); err != nil {
+			log.Error("failed to stop REST server", "error", err)
+		}
+		log.Info("REST server stopped")
 	}
 
 	// Drain background goroutines before closing the store.
