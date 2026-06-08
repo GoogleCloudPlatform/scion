@@ -110,6 +110,65 @@ type InviteAuditEvent struct {
 	Details    map[string]string    `json:"details,omitempty"`
 }
 
+// ---------------------------------------------------------------------------
+// Lifecycle Hook admin audit events
+// ---------------------------------------------------------------------------
+
+// LifecycleHookEventType defines the type of lifecycle-hook admin event.
+type LifecycleHookEventType string
+
+const (
+	LifecycleHookEventCreate  LifecycleHookEventType = "lifecycle_hook_create"
+	LifecycleHookEventUpdate  LifecycleHookEventType = "lifecycle_hook_update"
+	LifecycleHookEventEnable  LifecycleHookEventType = "lifecycle_hook_enable"
+	LifecycleHookEventDisable LifecycleHookEventType = "lifecycle_hook_disable"
+	LifecycleHookEventDelete  LifecycleHookEventType = "lifecycle_hook_delete"
+)
+
+// LifecycleHookEvent represents an auditable lifecycle-hook admin event.
+type LifecycleHookEvent struct {
+	EventType  LifecycleHookEventType `json:"eventType"`
+	HookID     string                 `json:"hookId"`
+	HookName   string                 `json:"hookName"`
+	Actor      string                 `json:"actor"`
+	Success    bool                   `json:"success"`
+	FailReason string                 `json:"failReason,omitempty"`
+	Timestamp  time.Time              `json:"timestamp"`
+}
+
+// ---------------------------------------------------------------------------
+// Lifecycle Hook execution audit events (used by M5 evaluator)
+// ---------------------------------------------------------------------------
+
+// LifecycleHookExecutionEventType defines the type of lifecycle-hook execution event.
+type LifecycleHookExecutionEventType string
+
+const (
+	LifecycleHookExecEventExecute LifecycleHookExecutionEventType = "lifecycle_hook_execute"
+)
+
+// LifecycleHookExecutionEvent represents an auditable lifecycle-hook execution event.
+// Security: this event MUST NOT contain response bodies, rendered Authorization
+// header values, or any secret material. Only request metadata (method, host,
+// hook id) and outcome (status code, latency, error class) are recorded.
+type LifecycleHookExecutionEvent struct {
+	EventType         LifecycleHookExecutionEventType `json:"eventType"`
+	HookID            string                          `json:"hookId"`
+	HookName          string                          `json:"hookName"`
+	Trigger           string                          `json:"trigger"`
+	AgentID           string                          `json:"agentId"`
+	ExecutionIdentity string                          `json:"executionIdentity"` // SA email or record ID
+	ActionType        string                          `json:"actionType"`        // "http" | "webhook"
+	Method            string                          `json:"method"`
+	Host              string                          `json:"host"` // URL host only, not full URL (avoid leaking path tokens)
+	Success           bool                            `json:"success"`
+	HTTPStatusCode    int                             `json:"httpStatusCode,omitempty"`
+	FailReason        string                          `json:"failReason,omitempty"`
+	LatencyMs         int64                           `json:"latencyMs"`
+	Attempt           int                             `json:"attempt"`
+	Timestamp         time.Time                       `json:"timestamp"`
+}
+
 // AuditLogger defines the interface for logging audit events.
 type AuditLogger interface {
 	// LogBrokerAuthEvent logs a broker authentication event.
@@ -118,6 +177,10 @@ type AuditLogger interface {
 	LogGCPTokenEvent(ctx context.Context, event *GCPTokenEvent) error
 	// LogInviteAuditEvent logs an invite/allow-list audit event.
 	LogInviteAuditEvent(ctx context.Context, event *InviteAuditEvent) error
+	// LogLifecycleHookEvent logs a lifecycle-hook admin event.
+	LogLifecycleHookEvent(ctx context.Context, event *LifecycleHookEvent) error
+	// LogLifecycleHookExecutionEvent logs a lifecycle-hook execution event (M5).
+	LogLifecycleHookExecutionEvent(ctx context.Context, event *LifecycleHookExecutionEvent) error
 }
 
 // LogAuditLogger is a simple implementation that logs to the standard logger.
@@ -201,6 +264,60 @@ func (l *LogAuditLogger) LogGCPTokenEvent(ctx context.Context, event *GCPTokenEv
 	}
 
 	slog.LogAttrs(ctx, level, "GCP token audit event", attrs...)
+
+	return nil
+}
+
+// LogLifecycleHookEvent logs a lifecycle-hook admin event to the standard logger.
+func (l *LogAuditLogger) LogLifecycleHookEvent(ctx context.Context, event *LifecycleHookEvent) error {
+	level := slog.LevelInfo
+	if !event.Success {
+		level = slog.LevelWarn
+	}
+
+	attrs := []slog.Attr{
+		slog.String("event_type", string(event.EventType)),
+		slog.String("hook_id", event.HookID),
+		slog.String("hook_name", event.HookName),
+		slog.String("actor", event.Actor),
+		slog.Bool("success", event.Success),
+	}
+	if event.FailReason != "" {
+		attrs = append(attrs, slog.String("fail_reason", event.FailReason))
+	}
+
+	slog.LogAttrs(ctx, level, "lifecycle hook audit event", attrs...)
+
+	return nil
+}
+
+// LogLifecycleHookExecutionEvent logs a lifecycle-hook execution event to the standard logger.
+func (l *LogAuditLogger) LogLifecycleHookExecutionEvent(ctx context.Context, event *LifecycleHookExecutionEvent) error {
+	level := slog.LevelInfo
+	if !event.Success {
+		level = slog.LevelWarn
+	}
+
+	attrs := []slog.Attr{
+		slog.String("event_type", string(event.EventType)),
+		slog.String("hook_id", event.HookID),
+		slog.String("hook_name", event.HookName),
+		slog.String("trigger", event.Trigger),
+		slog.String("agent_id", event.AgentID),
+		slog.String("execution_identity", event.ExecutionIdentity),
+		slog.String("action_type", event.ActionType),
+		slog.String("method", event.Method),
+		slog.String("host", event.Host),
+		slog.Bool("success", event.Success),
+		slog.Int("http_status_code", event.HTTPStatusCode),
+		slog.Int64("latency_ms", event.LatencyMs),
+		slog.Int("attempt", event.Attempt),
+	}
+	if event.FailReason != "" {
+		attrs = append(attrs, slog.String("fail_reason", event.FailReason))
+	}
+
+	slog.LogAttrs(ctx, level, "lifecycle hook execution event", attrs...)
 
 	return nil
 }
@@ -461,4 +578,33 @@ func LogInviteAuditFailure(ctx context.Context, logger AuditLogger, eventType In
 	}
 
 	_ = logger.LogInviteAuditEvent(ctx, event)
+}
+
+// LogLifecycleHookEvent logs a lifecycle-hook admin event through the
+// AuditLogger interface so custom logger implementations can capture it.
+func LogLifecycleHookEvent(ctx context.Context, logger AuditLogger, eventType LifecycleHookEventType, hookID, hookName, actor string, success bool, failReason string) {
+	if logger == nil {
+		return
+	}
+
+	event := &LifecycleHookEvent{
+		EventType:  eventType,
+		HookID:     hookID,
+		HookName:   hookName,
+		Actor:      actor,
+		Success:    success,
+		FailReason: failReason,
+		Timestamp:  time.Now(),
+	}
+
+	_ = logger.LogLifecycleHookEvent(ctx, event)
+}
+
+// LogLifecycleHookExecutionEvent logs a lifecycle-hook execution event through
+// the AuditLogger interface. Used by M5 evaluator.
+func LogLifecycleHookExecutionEvent(ctx context.Context, logger AuditLogger, event *LifecycleHookExecutionEvent) {
+	if logger == nil {
+		return
+	}
+	_ = logger.LogLifecycleHookExecutionEvent(ctx, event)
 }
