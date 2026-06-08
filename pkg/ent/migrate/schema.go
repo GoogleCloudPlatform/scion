@@ -450,6 +450,58 @@ var (
 			},
 		},
 	}
+	// LifecycleHooksColumns holds the columns for the "lifecycle_hooks" table.
+	LifecycleHooksColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "name", Type: field.TypeString},
+		{Name: "scope_type", Type: field.TypeEnum, Enums: []string{"hub", "project"}, Default: "hub"},
+		{Name: "scope_id", Type: field.TypeString, Nullable: true},
+		{Name: "selector", Type: field.TypeJSON, Nullable: true},
+		{Name: "trigger", Type: field.TypeEnum, Enums: []string{"running", "suspended", "stopped", "error"}},
+		{Name: "action", Type: field.TypeJSON, Nullable: true},
+		{Name: "execution_identity", Type: field.TypeString, Nullable: true},
+		{Name: "enabled", Type: field.TypeBool, Default: true},
+		{Name: "created", Type: field.TypeTime},
+		{Name: "updated", Type: field.TypeTime},
+		{Name: "created_by", Type: field.TypeString, Nullable: true},
+		{Name: "state_version", Type: field.TypeInt64, Default: 1},
+	}
+	// LifecycleHooksTable holds the schema information for the "lifecycle_hooks" table.
+	LifecycleHooksTable = &schema.Table{
+		Name:       "lifecycle_hooks",
+		Columns:    LifecycleHooksColumns,
+		PrimaryKey: []*schema.Column{LifecycleHooksColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "lifecyclehook_scope_type_scope_id",
+				Unique:  false,
+				Columns: []*schema.Column{LifecycleHooksColumns[2], LifecycleHooksColumns[3]},
+			},
+			{
+				Name:    "lifecyclehook_trigger",
+				Unique:  false,
+				Columns: []*schema.Column{LifecycleHooksColumns[5]},
+			},
+			{
+				Name:    "lifecyclehook_enabled",
+				Unique:  false,
+				Columns: []*schema.Column{LifecycleHooksColumns[8]},
+			},
+		},
+	}
+	// LifecycleHookAgentPhasesColumns holds the columns for the "lifecycle_hook_agent_phases" table.
+	LifecycleHookAgentPhasesColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeInt, Increment: true},
+		{Name: "agent_id", Type: field.TypeString, Unique: true},
+		{Name: "last_phase", Type: field.TypeString},
+		{Name: "updated_at", Type: field.TypeTime},
+	}
+	// LifecycleHookAgentPhasesTable holds the schema information for the "lifecycle_hook_agent_phases" table.
+	LifecycleHookAgentPhasesTable = &schema.Table{
+		Name:       "lifecycle_hook_agent_phases",
+		Columns:    LifecycleHookAgentPhasesColumns,
+		PrimaryKey: []*schema.Column{LifecycleHookAgentPhasesColumns[0]},
+	}
 	// MaintenanceOperationsColumns holds the columns for the "maintenance_operations" table.
 	MaintenanceOperationsColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeUUID},
@@ -1056,6 +1108,8 @@ var (
 		GroupMembershipsTable,
 		HarnessConfigsTable,
 		InviteCodesTable,
+		LifecycleHooksTable,
+		LifecycleHookAgentPhasesTable,
 		MaintenanceOperationsTable,
 		MaintenanceOperationRunsTable,
 		MessagesTable,
@@ -1112,6 +1166,9 @@ func init() {
 	}
 	InviteCodesTable.Annotation = &entsql.Annotation{
 		Table: "invite_codes",
+	}
+	LifecycleHookAgentPhasesTable.Annotation = &entsql.Annotation{
+		Table: "lifecycle_hook_agent_phases",
 	}
 	MaintenanceOperationsTable.Annotation = &entsql.Annotation{
 		Table: "maintenance_operations",

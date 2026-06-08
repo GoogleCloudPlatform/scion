@@ -25,6 +25,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/groupmembership"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/harnessconfig"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/invitecode"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/lifecyclehook"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/lifecyclehookagentphase"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/maintenanceoperation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/maintenanceoperationrun"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/message"
@@ -70,6 +72,8 @@ const (
 	TypeGroupMembership          = "GroupMembership"
 	TypeHarnessConfig            = "HarnessConfig"
 	TypeInviteCode               = "InviteCode"
+	TypeLifecycleHook            = "LifecycleHook"
+	TypeLifecycleHookAgentPhase  = "LifecycleHookAgentPhase"
 	TypeMaintenanceOperation     = "MaintenanceOperation"
 	TypeMaintenanceOperationRun  = "MaintenanceOperationRun"
 	TypeMessage                  = "Message"
@@ -15433,6 +15437,1500 @@ func (m *InviteCodeMutation) ClearEdge(name string) error {
 // It returns an error if the edge is not defined in the schema.
 func (m *InviteCodeMutation) ResetEdge(name string) error {
 	return fmt.Errorf("unknown InviteCode edge %s", name)
+}
+
+// LifecycleHookMutation represents an operation that mutates the LifecycleHook nodes in the graph.
+type LifecycleHookMutation struct {
+	config
+	op                 Op
+	typ                string
+	id                 *uuid.UUID
+	name               *string
+	scope_type         *lifecyclehook.ScopeType
+	scope_id           *string
+	selector           **schema.LifecycleHookSelector
+	trigger            *lifecyclehook.Trigger
+	action             **schema.LifecycleHookAction
+	execution_identity *string
+	enabled            *bool
+	created            *time.Time
+	updated            *time.Time
+	created_by         *string
+	state_version      *int64
+	addstate_version   *int64
+	clearedFields      map[string]struct{}
+	done               bool
+	oldValue           func(context.Context) (*LifecycleHook, error)
+	predicates         []predicate.LifecycleHook
+}
+
+var _ ent.Mutation = (*LifecycleHookMutation)(nil)
+
+// lifecyclehookOption allows management of the mutation configuration using functional options.
+type lifecyclehookOption func(*LifecycleHookMutation)
+
+// newLifecycleHookMutation creates new mutation for the LifecycleHook entity.
+func newLifecycleHookMutation(c config, op Op, opts ...lifecyclehookOption) *LifecycleHookMutation {
+	m := &LifecycleHookMutation{
+		config:        c,
+		op:            op,
+		typ:           TypeLifecycleHook,
+		clearedFields: make(map[string]struct{}),
+	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
+}
+
+// withLifecycleHookID sets the ID field of the mutation.
+func withLifecycleHookID(id uuid.UUID) lifecyclehookOption {
+	return func(m *LifecycleHookMutation) {
+		var (
+			err   error
+			once  sync.Once
+			value *LifecycleHook
+		)
+		m.oldValue = func(ctx context.Context) (*LifecycleHook, error) {
+			once.Do(func() {
+				if m.done {
+					err = errors.New("querying old values post mutation is not allowed")
+				} else {
+					value, err = m.Client().LifecycleHook.Get(ctx, id)
+				}
+			})
+			return value, err
+		}
+		m.id = &id
+	}
+}
+
+// withLifecycleHook sets the old LifecycleHook of the mutation.
+func withLifecycleHook(node *LifecycleHook) lifecyclehookOption {
+	return func(m *LifecycleHookMutation) {
+		m.oldValue = func(context.Context) (*LifecycleHook, error) {
+			return node, nil
+		}
+		m.id = &node.ID
+	}
+}
+
+// Client returns a new `ent.Client` from the mutation. If the mutation was
+// executed in a transaction (ent.Tx), a transactional client is returned.
+func (m LifecycleHookMutation) Client() *Client {
+	client := &Client{config: m.config}
+	client.init()
+	return client
+}
+
+// Tx returns an `ent.Tx` for mutations that were executed in transactions;
+// it returns an error otherwise.
+func (m LifecycleHookMutation) Tx() (*Tx, error) {
+	if _, ok := m.driver.(*txDriver); !ok {
+		return nil, errors.New("ent: mutation is not running in a transaction")
+	}
+	tx := &Tx{config: m.config}
+	tx.init()
+	return tx, nil
+}
+
+// SetID sets the value of the id field. Note that this
+// operation is only accepted on creation of LifecycleHook entities.
+func (m *LifecycleHookMutation) SetID(id uuid.UUID) {
+	m.id = &id
+}
+
+// ID returns the ID value in the mutation. Note that the ID is only available
+// if it was provided to the builder or after it was returned from the database.
+func (m *LifecycleHookMutation) ID() (id uuid.UUID, exists bool) {
+	if m.id == nil {
+		return
+	}
+	return *m.id, true
+}
+
+// IDs queries the database and returns the entity ids that match the mutation's predicate.
+// That means, if the mutation is applied within a transaction with an isolation level such
+// as sql.LevelSerializable, the returned ids match the ids of the rows that will be updated
+// or updated by the mutation.
+func (m *LifecycleHookMutation) IDs(ctx context.Context) ([]uuid.UUID, error) {
+	switch {
+	case m.op.Is(OpUpdateOne | OpDeleteOne):
+		id, exists := m.ID()
+		if exists {
+			return []uuid.UUID{id}, nil
+		}
+		fallthrough
+	case m.op.Is(OpUpdate | OpDelete):
+		return m.Client().LifecycleHook.Query().Where(m.predicates...).IDs(ctx)
+	default:
+		return nil, fmt.Errorf("IDs is not allowed on %s operations", m.op)
+	}
+}
+
+// SetName sets the "name" field.
+func (m *LifecycleHookMutation) SetName(s string) {
+	m.name = &s
+}
+
+// Name returns the value of the "name" field in the mutation.
+func (m *LifecycleHookMutation) Name() (r string, exists bool) {
+	v := m.name
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldName returns the old "name" field's value of the LifecycleHook entity.
+// If the LifecycleHook object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *LifecycleHookMutation) OldName(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldName is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldName requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldName: %w", err)
+	}
+	return oldValue.Name, nil
+}
+
+// ResetName resets all changes to the "name" field.
+func (m *LifecycleHookMutation) ResetName() {
+	m.name = nil
+}
+
+// SetScopeType sets the "scope_type" field.
+func (m *LifecycleHookMutation) SetScopeType(lt lifecyclehook.ScopeType) {
+	m.scope_type = &lt
+}
+
+// ScopeType returns the value of the "scope_type" field in the mutation.
+func (m *LifecycleHookMutation) ScopeType() (r lifecyclehook.ScopeType, exists bool) {
+	v := m.scope_type
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldScopeType returns the old "scope_type" field's value of the LifecycleHook entity.
+// If the LifecycleHook object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *LifecycleHookMutation) OldScopeType(ctx context.Context) (v lifecyclehook.ScopeType, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldScopeType is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldScopeType requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldScopeType: %w", err)
+	}
+	return oldValue.ScopeType, nil
+}
+
+// ResetScopeType resets all changes to the "scope_type" field.
+func (m *LifecycleHookMutation) ResetScopeType() {
+	m.scope_type = nil
+}
+
+// SetScopeID sets the "scope_id" field.
+func (m *LifecycleHookMutation) SetScopeID(s string) {
+	m.scope_id = &s
+}
+
+// ScopeID returns the value of the "scope_id" field in the mutation.
+func (m *LifecycleHookMutation) ScopeID() (r string, exists bool) {
+	v := m.scope_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldScopeID returns the old "scope_id" field's value of the LifecycleHook entity.
+// If the LifecycleHook object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *LifecycleHookMutation) OldScopeID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldScopeID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldScopeID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldScopeID: %w", err)
+	}
+	return oldValue.ScopeID, nil
+}
+
+// ClearScopeID clears the value of the "scope_id" field.
+func (m *LifecycleHookMutation) ClearScopeID() {
+	m.scope_id = nil
+	m.clearedFields[lifecyclehook.FieldScopeID] = struct{}{}
+}
+
+// ScopeIDCleared returns if the "scope_id" field was cleared in this mutation.
+func (m *LifecycleHookMutation) ScopeIDCleared() bool {
+	_, ok := m.clearedFields[lifecyclehook.FieldScopeID]
+	return ok
+}
+
+// ResetScopeID resets all changes to the "scope_id" field.
+func (m *LifecycleHookMutation) ResetScopeID() {
+	m.scope_id = nil
+	delete(m.clearedFields, lifecyclehook.FieldScopeID)
+}
+
+// SetSelector sets the "selector" field.
+func (m *LifecycleHookMutation) SetSelector(shs *schema.LifecycleHookSelector) {
+	m.selector = &shs
+}
+
+// Selector returns the value of the "selector" field in the mutation.
+func (m *LifecycleHookMutation) Selector() (r *schema.LifecycleHookSelector, exists bool) {
+	v := m.selector
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldSelector returns the old "selector" field's value of the LifecycleHook entity.
+// If the LifecycleHook object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *LifecycleHookMutation) OldSelector(ctx context.Context) (v *schema.LifecycleHookSelector, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldSelector is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldSelector requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldSelector: %w", err)
+	}
+	return oldValue.Selector, nil
+}
+
+// ClearSelector clears the value of the "selector" field.
+func (m *LifecycleHookMutation) ClearSelector() {
+	m.selector = nil
+	m.clearedFields[lifecyclehook.FieldSelector] = struct{}{}
+}
+
+// SelectorCleared returns if the "selector" field was cleared in this mutation.
+func (m *LifecycleHookMutation) SelectorCleared() bool {
+	_, ok := m.clearedFields[lifecyclehook.FieldSelector]
+	return ok
+}
+
+// ResetSelector resets all changes to the "selector" field.
+func (m *LifecycleHookMutation) ResetSelector() {
+	m.selector = nil
+	delete(m.clearedFields, lifecyclehook.FieldSelector)
+}
+
+// SetTrigger sets the "trigger" field.
+func (m *LifecycleHookMutation) SetTrigger(l lifecyclehook.Trigger) {
+	m.trigger = &l
+}
+
+// Trigger returns the value of the "trigger" field in the mutation.
+func (m *LifecycleHookMutation) Trigger() (r lifecyclehook.Trigger, exists bool) {
+	v := m.trigger
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldTrigger returns the old "trigger" field's value of the LifecycleHook entity.
+// If the LifecycleHook object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *LifecycleHookMutation) OldTrigger(ctx context.Context) (v lifecyclehook.Trigger, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldTrigger is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldTrigger requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldTrigger: %w", err)
+	}
+	return oldValue.Trigger, nil
+}
+
+// ResetTrigger resets all changes to the "trigger" field.
+func (m *LifecycleHookMutation) ResetTrigger() {
+	m.trigger = nil
+}
+
+// SetAction sets the "action" field.
+func (m *LifecycleHookMutation) SetAction(sha *schema.LifecycleHookAction) {
+	m.action = &sha
+}
+
+// Action returns the value of the "action" field in the mutation.
+func (m *LifecycleHookMutation) Action() (r *schema.LifecycleHookAction, exists bool) {
+	v := m.action
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldAction returns the old "action" field's value of the LifecycleHook entity.
+// If the LifecycleHook object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *LifecycleHookMutation) OldAction(ctx context.Context) (v *schema.LifecycleHookAction, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldAction is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldAction requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldAction: %w", err)
+	}
+	return oldValue.Action, nil
+}
+
+// ClearAction clears the value of the "action" field.
+func (m *LifecycleHookMutation) ClearAction() {
+	m.action = nil
+	m.clearedFields[lifecyclehook.FieldAction] = struct{}{}
+}
+
+// ActionCleared returns if the "action" field was cleared in this mutation.
+func (m *LifecycleHookMutation) ActionCleared() bool {
+	_, ok := m.clearedFields[lifecyclehook.FieldAction]
+	return ok
+}
+
+// ResetAction resets all changes to the "action" field.
+func (m *LifecycleHookMutation) ResetAction() {
+	m.action = nil
+	delete(m.clearedFields, lifecyclehook.FieldAction)
+}
+
+// SetExecutionIdentity sets the "execution_identity" field.
+func (m *LifecycleHookMutation) SetExecutionIdentity(s string) {
+	m.execution_identity = &s
+}
+
+// ExecutionIdentity returns the value of the "execution_identity" field in the mutation.
+func (m *LifecycleHookMutation) ExecutionIdentity() (r string, exists bool) {
+	v := m.execution_identity
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldExecutionIdentity returns the old "execution_identity" field's value of the LifecycleHook entity.
+// If the LifecycleHook object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *LifecycleHookMutation) OldExecutionIdentity(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldExecutionIdentity is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldExecutionIdentity requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldExecutionIdentity: %w", err)
+	}
+	return oldValue.ExecutionIdentity, nil
+}
+
+// ClearExecutionIdentity clears the value of the "execution_identity" field.
+func (m *LifecycleHookMutation) ClearExecutionIdentity() {
+	m.execution_identity = nil
+	m.clearedFields[lifecyclehook.FieldExecutionIdentity] = struct{}{}
+}
+
+// ExecutionIdentityCleared returns if the "execution_identity" field was cleared in this mutation.
+func (m *LifecycleHookMutation) ExecutionIdentityCleared() bool {
+	_, ok := m.clearedFields[lifecyclehook.FieldExecutionIdentity]
+	return ok
+}
+
+// ResetExecutionIdentity resets all changes to the "execution_identity" field.
+func (m *LifecycleHookMutation) ResetExecutionIdentity() {
+	m.execution_identity = nil
+	delete(m.clearedFields, lifecyclehook.FieldExecutionIdentity)
+}
+
+// SetEnabled sets the "enabled" field.
+func (m *LifecycleHookMutation) SetEnabled(b bool) {
+	m.enabled = &b
+}
+
+// Enabled returns the value of the "enabled" field in the mutation.
+func (m *LifecycleHookMutation) Enabled() (r bool, exists bool) {
+	v := m.enabled
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldEnabled returns the old "enabled" field's value of the LifecycleHook entity.
+// If the LifecycleHook object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *LifecycleHookMutation) OldEnabled(ctx context.Context) (v bool, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldEnabled is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldEnabled requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldEnabled: %w", err)
+	}
+	return oldValue.Enabled, nil
+}
+
+// ResetEnabled resets all changes to the "enabled" field.
+func (m *LifecycleHookMutation) ResetEnabled() {
+	m.enabled = nil
+}
+
+// SetCreated sets the "created" field.
+func (m *LifecycleHookMutation) SetCreated(t time.Time) {
+	m.created = &t
+}
+
+// Created returns the value of the "created" field in the mutation.
+func (m *LifecycleHookMutation) Created() (r time.Time, exists bool) {
+	v := m.created
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCreated returns the old "created" field's value of the LifecycleHook entity.
+// If the LifecycleHook object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *LifecycleHookMutation) OldCreated(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCreated is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCreated requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCreated: %w", err)
+	}
+	return oldValue.Created, nil
+}
+
+// ResetCreated resets all changes to the "created" field.
+func (m *LifecycleHookMutation) ResetCreated() {
+	m.created = nil
+}
+
+// SetUpdated sets the "updated" field.
+func (m *LifecycleHookMutation) SetUpdated(t time.Time) {
+	m.updated = &t
+}
+
+// Updated returns the value of the "updated" field in the mutation.
+func (m *LifecycleHookMutation) Updated() (r time.Time, exists bool) {
+	v := m.updated
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldUpdated returns the old "updated" field's value of the LifecycleHook entity.
+// If the LifecycleHook object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *LifecycleHookMutation) OldUpdated(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldUpdated is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldUpdated requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldUpdated: %w", err)
+	}
+	return oldValue.Updated, nil
+}
+
+// ResetUpdated resets all changes to the "updated" field.
+func (m *LifecycleHookMutation) ResetUpdated() {
+	m.updated = nil
+}
+
+// SetCreatedBy sets the "created_by" field.
+func (m *LifecycleHookMutation) SetCreatedBy(s string) {
+	m.created_by = &s
+}
+
+// CreatedBy returns the value of the "created_by" field in the mutation.
+func (m *LifecycleHookMutation) CreatedBy() (r string, exists bool) {
+	v := m.created_by
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCreatedBy returns the old "created_by" field's value of the LifecycleHook entity.
+// If the LifecycleHook object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *LifecycleHookMutation) OldCreatedBy(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCreatedBy is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCreatedBy requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCreatedBy: %w", err)
+	}
+	return oldValue.CreatedBy, nil
+}
+
+// ClearCreatedBy clears the value of the "created_by" field.
+func (m *LifecycleHookMutation) ClearCreatedBy() {
+	m.created_by = nil
+	m.clearedFields[lifecyclehook.FieldCreatedBy] = struct{}{}
+}
+
+// CreatedByCleared returns if the "created_by" field was cleared in this mutation.
+func (m *LifecycleHookMutation) CreatedByCleared() bool {
+	_, ok := m.clearedFields[lifecyclehook.FieldCreatedBy]
+	return ok
+}
+
+// ResetCreatedBy resets all changes to the "created_by" field.
+func (m *LifecycleHookMutation) ResetCreatedBy() {
+	m.created_by = nil
+	delete(m.clearedFields, lifecyclehook.FieldCreatedBy)
+}
+
+// SetStateVersion sets the "state_version" field.
+func (m *LifecycleHookMutation) SetStateVersion(i int64) {
+	m.state_version = &i
+	m.addstate_version = nil
+}
+
+// StateVersion returns the value of the "state_version" field in the mutation.
+func (m *LifecycleHookMutation) StateVersion() (r int64, exists bool) {
+	v := m.state_version
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldStateVersion returns the old "state_version" field's value of the LifecycleHook entity.
+// If the LifecycleHook object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *LifecycleHookMutation) OldStateVersion(ctx context.Context) (v int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldStateVersion is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldStateVersion requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldStateVersion: %w", err)
+	}
+	return oldValue.StateVersion, nil
+}
+
+// AddStateVersion adds i to the "state_version" field.
+func (m *LifecycleHookMutation) AddStateVersion(i int64) {
+	if m.addstate_version != nil {
+		*m.addstate_version += i
+	} else {
+		m.addstate_version = &i
+	}
+}
+
+// AddedStateVersion returns the value that was added to the "state_version" field in this mutation.
+func (m *LifecycleHookMutation) AddedStateVersion() (r int64, exists bool) {
+	v := m.addstate_version
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetStateVersion resets all changes to the "state_version" field.
+func (m *LifecycleHookMutation) ResetStateVersion() {
+	m.state_version = nil
+	m.addstate_version = nil
+}
+
+// Where appends a list predicates to the LifecycleHookMutation builder.
+func (m *LifecycleHookMutation) Where(ps ...predicate.LifecycleHook) {
+	m.predicates = append(m.predicates, ps...)
+}
+
+// WhereP appends storage-level predicates to the LifecycleHookMutation builder. Using this method,
+// users can use type-assertion to append predicates that do not depend on any generated package.
+func (m *LifecycleHookMutation) WhereP(ps ...func(*sql.Selector)) {
+	p := make([]predicate.LifecycleHook, len(ps))
+	for i := range ps {
+		p[i] = ps[i]
+	}
+	m.Where(p...)
+}
+
+// Op returns the operation name.
+func (m *LifecycleHookMutation) Op() Op {
+	return m.op
+}
+
+// SetOp allows setting the mutation operation.
+func (m *LifecycleHookMutation) SetOp(op Op) {
+	m.op = op
+}
+
+// Type returns the node type of this mutation (LifecycleHook).
+func (m *LifecycleHookMutation) Type() string {
+	return m.typ
+}
+
+// Fields returns all fields that were changed during this mutation. Note that in
+// order to get all numeric fields that were incremented/decremented, call
+// AddedFields().
+func (m *LifecycleHookMutation) Fields() []string {
+	fields := make([]string, 0, 12)
+	if m.name != nil {
+		fields = append(fields, lifecyclehook.FieldName)
+	}
+	if m.scope_type != nil {
+		fields = append(fields, lifecyclehook.FieldScopeType)
+	}
+	if m.scope_id != nil {
+		fields = append(fields, lifecyclehook.FieldScopeID)
+	}
+	if m.selector != nil {
+		fields = append(fields, lifecyclehook.FieldSelector)
+	}
+	if m.trigger != nil {
+		fields = append(fields, lifecyclehook.FieldTrigger)
+	}
+	if m.action != nil {
+		fields = append(fields, lifecyclehook.FieldAction)
+	}
+	if m.execution_identity != nil {
+		fields = append(fields, lifecyclehook.FieldExecutionIdentity)
+	}
+	if m.enabled != nil {
+		fields = append(fields, lifecyclehook.FieldEnabled)
+	}
+	if m.created != nil {
+		fields = append(fields, lifecyclehook.FieldCreated)
+	}
+	if m.updated != nil {
+		fields = append(fields, lifecyclehook.FieldUpdated)
+	}
+	if m.created_by != nil {
+		fields = append(fields, lifecyclehook.FieldCreatedBy)
+	}
+	if m.state_version != nil {
+		fields = append(fields, lifecyclehook.FieldStateVersion)
+	}
+	return fields
+}
+
+// Field returns the value of a field with the given name. The second boolean
+// return value indicates that this field was not set, or was not defined in the
+// schema.
+func (m *LifecycleHookMutation) Field(name string) (ent.Value, bool) {
+	switch name {
+	case lifecyclehook.FieldName:
+		return m.Name()
+	case lifecyclehook.FieldScopeType:
+		return m.ScopeType()
+	case lifecyclehook.FieldScopeID:
+		return m.ScopeID()
+	case lifecyclehook.FieldSelector:
+		return m.Selector()
+	case lifecyclehook.FieldTrigger:
+		return m.Trigger()
+	case lifecyclehook.FieldAction:
+		return m.Action()
+	case lifecyclehook.FieldExecutionIdentity:
+		return m.ExecutionIdentity()
+	case lifecyclehook.FieldEnabled:
+		return m.Enabled()
+	case lifecyclehook.FieldCreated:
+		return m.Created()
+	case lifecyclehook.FieldUpdated:
+		return m.Updated()
+	case lifecyclehook.FieldCreatedBy:
+		return m.CreatedBy()
+	case lifecyclehook.FieldStateVersion:
+		return m.StateVersion()
+	}
+	return nil, false
+}
+
+// OldField returns the old value of the field from the database. An error is
+// returned if the mutation operation is not UpdateOne, or the query to the
+// database failed.
+func (m *LifecycleHookMutation) OldField(ctx context.Context, name string) (ent.Value, error) {
+	switch name {
+	case lifecyclehook.FieldName:
+		return m.OldName(ctx)
+	case lifecyclehook.FieldScopeType:
+		return m.OldScopeType(ctx)
+	case lifecyclehook.FieldScopeID:
+		return m.OldScopeID(ctx)
+	case lifecyclehook.FieldSelector:
+		return m.OldSelector(ctx)
+	case lifecyclehook.FieldTrigger:
+		return m.OldTrigger(ctx)
+	case lifecyclehook.FieldAction:
+		return m.OldAction(ctx)
+	case lifecyclehook.FieldExecutionIdentity:
+		return m.OldExecutionIdentity(ctx)
+	case lifecyclehook.FieldEnabled:
+		return m.OldEnabled(ctx)
+	case lifecyclehook.FieldCreated:
+		return m.OldCreated(ctx)
+	case lifecyclehook.FieldUpdated:
+		return m.OldUpdated(ctx)
+	case lifecyclehook.FieldCreatedBy:
+		return m.OldCreatedBy(ctx)
+	case lifecyclehook.FieldStateVersion:
+		return m.OldStateVersion(ctx)
+	}
+	return nil, fmt.Errorf("unknown LifecycleHook field %s", name)
+}
+
+// SetField sets the value of a field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *LifecycleHookMutation) SetField(name string, value ent.Value) error {
+	switch name {
+	case lifecyclehook.FieldName:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetName(v)
+		return nil
+	case lifecyclehook.FieldScopeType:
+		v, ok := value.(lifecyclehook.ScopeType)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetScopeType(v)
+		return nil
+	case lifecyclehook.FieldScopeID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetScopeID(v)
+		return nil
+	case lifecyclehook.FieldSelector:
+		v, ok := value.(*schema.LifecycleHookSelector)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetSelector(v)
+		return nil
+	case lifecyclehook.FieldTrigger:
+		v, ok := value.(lifecyclehook.Trigger)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetTrigger(v)
+		return nil
+	case lifecyclehook.FieldAction:
+		v, ok := value.(*schema.LifecycleHookAction)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetAction(v)
+		return nil
+	case lifecyclehook.FieldExecutionIdentity:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetExecutionIdentity(v)
+		return nil
+	case lifecyclehook.FieldEnabled:
+		v, ok := value.(bool)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetEnabled(v)
+		return nil
+	case lifecyclehook.FieldCreated:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCreated(v)
+		return nil
+	case lifecyclehook.FieldUpdated:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetUpdated(v)
+		return nil
+	case lifecyclehook.FieldCreatedBy:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCreatedBy(v)
+		return nil
+	case lifecyclehook.FieldStateVersion:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetStateVersion(v)
+		return nil
+	}
+	return fmt.Errorf("unknown LifecycleHook field %s", name)
+}
+
+// AddedFields returns all numeric fields that were incremented/decremented during
+// this mutation.
+func (m *LifecycleHookMutation) AddedFields() []string {
+	var fields []string
+	if m.addstate_version != nil {
+		fields = append(fields, lifecyclehook.FieldStateVersion)
+	}
+	return fields
+}
+
+// AddedField returns the numeric value that was incremented/decremented on a field
+// with the given name. The second boolean return value indicates that this field
+// was not set, or was not defined in the schema.
+func (m *LifecycleHookMutation) AddedField(name string) (ent.Value, bool) {
+	switch name {
+	case lifecyclehook.FieldStateVersion:
+		return m.AddedStateVersion()
+	}
+	return nil, false
+}
+
+// AddField adds the value to the field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *LifecycleHookMutation) AddField(name string, value ent.Value) error {
+	switch name {
+	case lifecyclehook.FieldStateVersion:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddStateVersion(v)
+		return nil
+	}
+	return fmt.Errorf("unknown LifecycleHook numeric field %s", name)
+}
+
+// ClearedFields returns all nullable fields that were cleared during this
+// mutation.
+func (m *LifecycleHookMutation) ClearedFields() []string {
+	var fields []string
+	if m.FieldCleared(lifecyclehook.FieldScopeID) {
+		fields = append(fields, lifecyclehook.FieldScopeID)
+	}
+	if m.FieldCleared(lifecyclehook.FieldSelector) {
+		fields = append(fields, lifecyclehook.FieldSelector)
+	}
+	if m.FieldCleared(lifecyclehook.FieldAction) {
+		fields = append(fields, lifecyclehook.FieldAction)
+	}
+	if m.FieldCleared(lifecyclehook.FieldExecutionIdentity) {
+		fields = append(fields, lifecyclehook.FieldExecutionIdentity)
+	}
+	if m.FieldCleared(lifecyclehook.FieldCreatedBy) {
+		fields = append(fields, lifecyclehook.FieldCreatedBy)
+	}
+	return fields
+}
+
+// FieldCleared returns a boolean indicating if a field with the given name was
+// cleared in this mutation.
+func (m *LifecycleHookMutation) FieldCleared(name string) bool {
+	_, ok := m.clearedFields[name]
+	return ok
+}
+
+// ClearField clears the value of the field with the given name. It returns an
+// error if the field is not defined in the schema.
+func (m *LifecycleHookMutation) ClearField(name string) error {
+	switch name {
+	case lifecyclehook.FieldScopeID:
+		m.ClearScopeID()
+		return nil
+	case lifecyclehook.FieldSelector:
+		m.ClearSelector()
+		return nil
+	case lifecyclehook.FieldAction:
+		m.ClearAction()
+		return nil
+	case lifecyclehook.FieldExecutionIdentity:
+		m.ClearExecutionIdentity()
+		return nil
+	case lifecyclehook.FieldCreatedBy:
+		m.ClearCreatedBy()
+		return nil
+	}
+	return fmt.Errorf("unknown LifecycleHook nullable field %s", name)
+}
+
+// ResetField resets all changes in the mutation for the field with the given name.
+// It returns an error if the field is not defined in the schema.
+func (m *LifecycleHookMutation) ResetField(name string) error {
+	switch name {
+	case lifecyclehook.FieldName:
+		m.ResetName()
+		return nil
+	case lifecyclehook.FieldScopeType:
+		m.ResetScopeType()
+		return nil
+	case lifecyclehook.FieldScopeID:
+		m.ResetScopeID()
+		return nil
+	case lifecyclehook.FieldSelector:
+		m.ResetSelector()
+		return nil
+	case lifecyclehook.FieldTrigger:
+		m.ResetTrigger()
+		return nil
+	case lifecyclehook.FieldAction:
+		m.ResetAction()
+		return nil
+	case lifecyclehook.FieldExecutionIdentity:
+		m.ResetExecutionIdentity()
+		return nil
+	case lifecyclehook.FieldEnabled:
+		m.ResetEnabled()
+		return nil
+	case lifecyclehook.FieldCreated:
+		m.ResetCreated()
+		return nil
+	case lifecyclehook.FieldUpdated:
+		m.ResetUpdated()
+		return nil
+	case lifecyclehook.FieldCreatedBy:
+		m.ResetCreatedBy()
+		return nil
+	case lifecyclehook.FieldStateVersion:
+		m.ResetStateVersion()
+		return nil
+	}
+	return fmt.Errorf("unknown LifecycleHook field %s", name)
+}
+
+// AddedEdges returns all edge names that were set/added in this mutation.
+func (m *LifecycleHookMutation) AddedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// AddedIDs returns all IDs (to other nodes) that were added for the given edge
+// name in this mutation.
+func (m *LifecycleHookMutation) AddedIDs(name string) []ent.Value {
+	return nil
+}
+
+// RemovedEdges returns all edge names that were removed in this mutation.
+func (m *LifecycleHookMutation) RemovedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// RemovedIDs returns all IDs (to other nodes) that were removed for the edge with
+// the given name in this mutation.
+func (m *LifecycleHookMutation) RemovedIDs(name string) []ent.Value {
+	return nil
+}
+
+// ClearedEdges returns all edge names that were cleared in this mutation.
+func (m *LifecycleHookMutation) ClearedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// EdgeCleared returns a boolean which indicates if the edge with the given name
+// was cleared in this mutation.
+func (m *LifecycleHookMutation) EdgeCleared(name string) bool {
+	return false
+}
+
+// ClearEdge clears the value of the edge with the given name. It returns an error
+// if that edge is not defined in the schema.
+func (m *LifecycleHookMutation) ClearEdge(name string) error {
+	return fmt.Errorf("unknown LifecycleHook unique edge %s", name)
+}
+
+// ResetEdge resets all changes to the edge with the given name in this mutation.
+// It returns an error if the edge is not defined in the schema.
+func (m *LifecycleHookMutation) ResetEdge(name string) error {
+	return fmt.Errorf("unknown LifecycleHook edge %s", name)
+}
+
+// LifecycleHookAgentPhaseMutation represents an operation that mutates the LifecycleHookAgentPhase nodes in the graph.
+type LifecycleHookAgentPhaseMutation struct {
+	config
+	op            Op
+	typ           string
+	id            *int
+	agent_id      *string
+	last_phase    *string
+	updated_at    *time.Time
+	clearedFields map[string]struct{}
+	done          bool
+	oldValue      func(context.Context) (*LifecycleHookAgentPhase, error)
+	predicates    []predicate.LifecycleHookAgentPhase
+}
+
+var _ ent.Mutation = (*LifecycleHookAgentPhaseMutation)(nil)
+
+// lifecyclehookagentphaseOption allows management of the mutation configuration using functional options.
+type lifecyclehookagentphaseOption func(*LifecycleHookAgentPhaseMutation)
+
+// newLifecycleHookAgentPhaseMutation creates new mutation for the LifecycleHookAgentPhase entity.
+func newLifecycleHookAgentPhaseMutation(c config, op Op, opts ...lifecyclehookagentphaseOption) *LifecycleHookAgentPhaseMutation {
+	m := &LifecycleHookAgentPhaseMutation{
+		config:        c,
+		op:            op,
+		typ:           TypeLifecycleHookAgentPhase,
+		clearedFields: make(map[string]struct{}),
+	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
+}
+
+// withLifecycleHookAgentPhaseID sets the ID field of the mutation.
+func withLifecycleHookAgentPhaseID(id int) lifecyclehookagentphaseOption {
+	return func(m *LifecycleHookAgentPhaseMutation) {
+		var (
+			err   error
+			once  sync.Once
+			value *LifecycleHookAgentPhase
+		)
+		m.oldValue = func(ctx context.Context) (*LifecycleHookAgentPhase, error) {
+			once.Do(func() {
+				if m.done {
+					err = errors.New("querying old values post mutation is not allowed")
+				} else {
+					value, err = m.Client().LifecycleHookAgentPhase.Get(ctx, id)
+				}
+			})
+			return value, err
+		}
+		m.id = &id
+	}
+}
+
+// withLifecycleHookAgentPhase sets the old LifecycleHookAgentPhase of the mutation.
+func withLifecycleHookAgentPhase(node *LifecycleHookAgentPhase) lifecyclehookagentphaseOption {
+	return func(m *LifecycleHookAgentPhaseMutation) {
+		m.oldValue = func(context.Context) (*LifecycleHookAgentPhase, error) {
+			return node, nil
+		}
+		m.id = &node.ID
+	}
+}
+
+// Client returns a new `ent.Client` from the mutation. If the mutation was
+// executed in a transaction (ent.Tx), a transactional client is returned.
+func (m LifecycleHookAgentPhaseMutation) Client() *Client {
+	client := &Client{config: m.config}
+	client.init()
+	return client
+}
+
+// Tx returns an `ent.Tx` for mutations that were executed in transactions;
+// it returns an error otherwise.
+func (m LifecycleHookAgentPhaseMutation) Tx() (*Tx, error) {
+	if _, ok := m.driver.(*txDriver); !ok {
+		return nil, errors.New("ent: mutation is not running in a transaction")
+	}
+	tx := &Tx{config: m.config}
+	tx.init()
+	return tx, nil
+}
+
+// ID returns the ID value in the mutation. Note that the ID is only available
+// if it was provided to the builder or after it was returned from the database.
+func (m *LifecycleHookAgentPhaseMutation) ID() (id int, exists bool) {
+	if m.id == nil {
+		return
+	}
+	return *m.id, true
+}
+
+// IDs queries the database and returns the entity ids that match the mutation's predicate.
+// That means, if the mutation is applied within a transaction with an isolation level such
+// as sql.LevelSerializable, the returned ids match the ids of the rows that will be updated
+// or updated by the mutation.
+func (m *LifecycleHookAgentPhaseMutation) IDs(ctx context.Context) ([]int, error) {
+	switch {
+	case m.op.Is(OpUpdateOne | OpDeleteOne):
+		id, exists := m.ID()
+		if exists {
+			return []int{id}, nil
+		}
+		fallthrough
+	case m.op.Is(OpUpdate | OpDelete):
+		return m.Client().LifecycleHookAgentPhase.Query().Where(m.predicates...).IDs(ctx)
+	default:
+		return nil, fmt.Errorf("IDs is not allowed on %s operations", m.op)
+	}
+}
+
+// SetAgentID sets the "agent_id" field.
+func (m *LifecycleHookAgentPhaseMutation) SetAgentID(s string) {
+	m.agent_id = &s
+}
+
+// AgentID returns the value of the "agent_id" field in the mutation.
+func (m *LifecycleHookAgentPhaseMutation) AgentID() (r string, exists bool) {
+	v := m.agent_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldAgentID returns the old "agent_id" field's value of the LifecycleHookAgentPhase entity.
+// If the LifecycleHookAgentPhase object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *LifecycleHookAgentPhaseMutation) OldAgentID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldAgentID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldAgentID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldAgentID: %w", err)
+	}
+	return oldValue.AgentID, nil
+}
+
+// ResetAgentID resets all changes to the "agent_id" field.
+func (m *LifecycleHookAgentPhaseMutation) ResetAgentID() {
+	m.agent_id = nil
+}
+
+// SetLastPhase sets the "last_phase" field.
+func (m *LifecycleHookAgentPhaseMutation) SetLastPhase(s string) {
+	m.last_phase = &s
+}
+
+// LastPhase returns the value of the "last_phase" field in the mutation.
+func (m *LifecycleHookAgentPhaseMutation) LastPhase() (r string, exists bool) {
+	v := m.last_phase
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldLastPhase returns the old "last_phase" field's value of the LifecycleHookAgentPhase entity.
+// If the LifecycleHookAgentPhase object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *LifecycleHookAgentPhaseMutation) OldLastPhase(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldLastPhase is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldLastPhase requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldLastPhase: %w", err)
+	}
+	return oldValue.LastPhase, nil
+}
+
+// ResetLastPhase resets all changes to the "last_phase" field.
+func (m *LifecycleHookAgentPhaseMutation) ResetLastPhase() {
+	m.last_phase = nil
+}
+
+// SetUpdatedAt sets the "updated_at" field.
+func (m *LifecycleHookAgentPhaseMutation) SetUpdatedAt(t time.Time) {
+	m.updated_at = &t
+}
+
+// UpdatedAt returns the value of the "updated_at" field in the mutation.
+func (m *LifecycleHookAgentPhaseMutation) UpdatedAt() (r time.Time, exists bool) {
+	v := m.updated_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldUpdatedAt returns the old "updated_at" field's value of the LifecycleHookAgentPhase entity.
+// If the LifecycleHookAgentPhase object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *LifecycleHookAgentPhaseMutation) OldUpdatedAt(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldUpdatedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldUpdatedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldUpdatedAt: %w", err)
+	}
+	return oldValue.UpdatedAt, nil
+}
+
+// ResetUpdatedAt resets all changes to the "updated_at" field.
+func (m *LifecycleHookAgentPhaseMutation) ResetUpdatedAt() {
+	m.updated_at = nil
+}
+
+// Where appends a list predicates to the LifecycleHookAgentPhaseMutation builder.
+func (m *LifecycleHookAgentPhaseMutation) Where(ps ...predicate.LifecycleHookAgentPhase) {
+	m.predicates = append(m.predicates, ps...)
+}
+
+// WhereP appends storage-level predicates to the LifecycleHookAgentPhaseMutation builder. Using this method,
+// users can use type-assertion to append predicates that do not depend on any generated package.
+func (m *LifecycleHookAgentPhaseMutation) WhereP(ps ...func(*sql.Selector)) {
+	p := make([]predicate.LifecycleHookAgentPhase, len(ps))
+	for i := range ps {
+		p[i] = ps[i]
+	}
+	m.Where(p...)
+}
+
+// Op returns the operation name.
+func (m *LifecycleHookAgentPhaseMutation) Op() Op {
+	return m.op
+}
+
+// SetOp allows setting the mutation operation.
+func (m *LifecycleHookAgentPhaseMutation) SetOp(op Op) {
+	m.op = op
+}
+
+// Type returns the node type of this mutation (LifecycleHookAgentPhase).
+func (m *LifecycleHookAgentPhaseMutation) Type() string {
+	return m.typ
+}
+
+// Fields returns all fields that were changed during this mutation. Note that in
+// order to get all numeric fields that were incremented/decremented, call
+// AddedFields().
+func (m *LifecycleHookAgentPhaseMutation) Fields() []string {
+	fields := make([]string, 0, 3)
+	if m.agent_id != nil {
+		fields = append(fields, lifecyclehookagentphase.FieldAgentID)
+	}
+	if m.last_phase != nil {
+		fields = append(fields, lifecyclehookagentphase.FieldLastPhase)
+	}
+	if m.updated_at != nil {
+		fields = append(fields, lifecyclehookagentphase.FieldUpdatedAt)
+	}
+	return fields
+}
+
+// Field returns the value of a field with the given name. The second boolean
+// return value indicates that this field was not set, or was not defined in the
+// schema.
+func (m *LifecycleHookAgentPhaseMutation) Field(name string) (ent.Value, bool) {
+	switch name {
+	case lifecyclehookagentphase.FieldAgentID:
+		return m.AgentID()
+	case lifecyclehookagentphase.FieldLastPhase:
+		return m.LastPhase()
+	case lifecyclehookagentphase.FieldUpdatedAt:
+		return m.UpdatedAt()
+	}
+	return nil, false
+}
+
+// OldField returns the old value of the field from the database. An error is
+// returned if the mutation operation is not UpdateOne, or the query to the
+// database failed.
+func (m *LifecycleHookAgentPhaseMutation) OldField(ctx context.Context, name string) (ent.Value, error) {
+	switch name {
+	case lifecyclehookagentphase.FieldAgentID:
+		return m.OldAgentID(ctx)
+	case lifecyclehookagentphase.FieldLastPhase:
+		return m.OldLastPhase(ctx)
+	case lifecyclehookagentphase.FieldUpdatedAt:
+		return m.OldUpdatedAt(ctx)
+	}
+	return nil, fmt.Errorf("unknown LifecycleHookAgentPhase field %s", name)
+}
+
+// SetField sets the value of a field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *LifecycleHookAgentPhaseMutation) SetField(name string, value ent.Value) error {
+	switch name {
+	case lifecyclehookagentphase.FieldAgentID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetAgentID(v)
+		return nil
+	case lifecyclehookagentphase.FieldLastPhase:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetLastPhase(v)
+		return nil
+	case lifecyclehookagentphase.FieldUpdatedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetUpdatedAt(v)
+		return nil
+	}
+	return fmt.Errorf("unknown LifecycleHookAgentPhase field %s", name)
+}
+
+// AddedFields returns all numeric fields that were incremented/decremented during
+// this mutation.
+func (m *LifecycleHookAgentPhaseMutation) AddedFields() []string {
+	return nil
+}
+
+// AddedField returns the numeric value that was incremented/decremented on a field
+// with the given name. The second boolean return value indicates that this field
+// was not set, or was not defined in the schema.
+func (m *LifecycleHookAgentPhaseMutation) AddedField(name string) (ent.Value, bool) {
+	return nil, false
+}
+
+// AddField adds the value to the field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *LifecycleHookAgentPhaseMutation) AddField(name string, value ent.Value) error {
+	switch name {
+	}
+	return fmt.Errorf("unknown LifecycleHookAgentPhase numeric field %s", name)
+}
+
+// ClearedFields returns all nullable fields that were cleared during this
+// mutation.
+func (m *LifecycleHookAgentPhaseMutation) ClearedFields() []string {
+	return nil
+}
+
+// FieldCleared returns a boolean indicating if a field with the given name was
+// cleared in this mutation.
+func (m *LifecycleHookAgentPhaseMutation) FieldCleared(name string) bool {
+	_, ok := m.clearedFields[name]
+	return ok
+}
+
+// ClearField clears the value of the field with the given name. It returns an
+// error if the field is not defined in the schema.
+func (m *LifecycleHookAgentPhaseMutation) ClearField(name string) error {
+	return fmt.Errorf("unknown LifecycleHookAgentPhase nullable field %s", name)
+}
+
+// ResetField resets all changes in the mutation for the field with the given name.
+// It returns an error if the field is not defined in the schema.
+func (m *LifecycleHookAgentPhaseMutation) ResetField(name string) error {
+	switch name {
+	case lifecyclehookagentphase.FieldAgentID:
+		m.ResetAgentID()
+		return nil
+	case lifecyclehookagentphase.FieldLastPhase:
+		m.ResetLastPhase()
+		return nil
+	case lifecyclehookagentphase.FieldUpdatedAt:
+		m.ResetUpdatedAt()
+		return nil
+	}
+	return fmt.Errorf("unknown LifecycleHookAgentPhase field %s", name)
+}
+
+// AddedEdges returns all edge names that were set/added in this mutation.
+func (m *LifecycleHookAgentPhaseMutation) AddedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// AddedIDs returns all IDs (to other nodes) that were added for the given edge
+// name in this mutation.
+func (m *LifecycleHookAgentPhaseMutation) AddedIDs(name string) []ent.Value {
+	return nil
+}
+
+// RemovedEdges returns all edge names that were removed in this mutation.
+func (m *LifecycleHookAgentPhaseMutation) RemovedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// RemovedIDs returns all IDs (to other nodes) that were removed for the edge with
+// the given name in this mutation.
+func (m *LifecycleHookAgentPhaseMutation) RemovedIDs(name string) []ent.Value {
+	return nil
+}
+
+// ClearedEdges returns all edge names that were cleared in this mutation.
+func (m *LifecycleHookAgentPhaseMutation) ClearedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// EdgeCleared returns a boolean which indicates if the edge with the given name
+// was cleared in this mutation.
+func (m *LifecycleHookAgentPhaseMutation) EdgeCleared(name string) bool {
+	return false
+}
+
+// ClearEdge clears the value of the edge with the given name. It returns an error
+// if that edge is not defined in the schema.
+func (m *LifecycleHookAgentPhaseMutation) ClearEdge(name string) error {
+	return fmt.Errorf("unknown LifecycleHookAgentPhase unique edge %s", name)
+}
+
+// ResetEdge resets all changes to the edge with the given name in this mutation.
+// It returns an error if the edge is not defined in the schema.
+func (m *LifecycleHookAgentPhaseMutation) ResetEdge(name string) error {
+	return fmt.Errorf("unknown LifecycleHookAgentPhase edge %s", name)
 }
 
 // MaintenanceOperationMutation represents an operation that mutates the MaintenanceOperation nodes in the graph.

@@ -30,6 +30,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/groupmembership"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/harnessconfig"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/invitecode"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/lifecyclehook"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/lifecyclehookagentphase"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/maintenanceoperation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/maintenanceoperationrun"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/message"
@@ -82,6 +84,10 @@ type Client struct {
 	HarnessConfig *HarnessConfigClient
 	// InviteCode is the client for interacting with the InviteCode builders.
 	InviteCode *InviteCodeClient
+	// LifecycleHook is the client for interacting with the LifecycleHook builders.
+	LifecycleHook *LifecycleHookClient
+	// LifecycleHookAgentPhase is the client for interacting with the LifecycleHookAgentPhase builders.
+	LifecycleHookAgentPhase *LifecycleHookAgentPhaseClient
 	// MaintenanceOperation is the client for interacting with the MaintenanceOperation builders.
 	MaintenanceOperation *MaintenanceOperationClient
 	// MaintenanceOperationRun is the client for interacting with the MaintenanceOperationRun builders.
@@ -141,6 +147,8 @@ func (c *Client) init() {
 	c.GroupMembership = NewGroupMembershipClient(c.config)
 	c.HarnessConfig = NewHarnessConfigClient(c.config)
 	c.InviteCode = NewInviteCodeClient(c.config)
+	c.LifecycleHook = NewLifecycleHookClient(c.config)
+	c.LifecycleHookAgentPhase = NewLifecycleHookAgentPhaseClient(c.config)
 	c.MaintenanceOperation = NewMaintenanceOperationClient(c.config)
 	c.MaintenanceOperationRun = NewMaintenanceOperationRunClient(c.config)
 	c.Message = NewMessageClient(c.config)
@@ -264,6 +272,8 @@ func (c *Client) Tx(ctx context.Context) (*Tx, error) {
 		GroupMembership:          NewGroupMembershipClient(cfg),
 		HarnessConfig:            NewHarnessConfigClient(cfg),
 		InviteCode:               NewInviteCodeClient(cfg),
+		LifecycleHook:            NewLifecycleHookClient(cfg),
+		LifecycleHookAgentPhase:  NewLifecycleHookAgentPhaseClient(cfg),
 		MaintenanceOperation:     NewMaintenanceOperationClient(cfg),
 		MaintenanceOperationRun:  NewMaintenanceOperationRunClient(cfg),
 		Message:                  NewMessageClient(cfg),
@@ -314,6 +324,8 @@ func (c *Client) BeginTx(ctx context.Context, opts *sql.TxOptions) (*Tx, error) 
 		GroupMembership:          NewGroupMembershipClient(cfg),
 		HarnessConfig:            NewHarnessConfigClient(cfg),
 		InviteCode:               NewInviteCodeClient(cfg),
+		LifecycleHook:            NewLifecycleHookClient(cfg),
+		LifecycleHookAgentPhase:  NewLifecycleHookAgentPhaseClient(cfg),
 		MaintenanceOperation:     NewMaintenanceOperationClient(cfg),
 		MaintenanceOperationRun:  NewMaintenanceOperationRunClient(cfg),
 		Message:                  NewMessageClient(cfg),
@@ -363,11 +375,11 @@ func (c *Client) Use(hooks ...Hook) {
 		c.AccessPolicy, c.Agent, c.AllowListEntry, c.ApiKey, c.BrokerDispatch,
 		c.BrokerJoinToken, c.BrokerSecret, c.EnvVar, c.GCPServiceAccount,
 		c.GithubInstallation, c.Group, c.GroupMembership, c.HarnessConfig,
-		c.InviteCode, c.MaintenanceOperation, c.MaintenanceOperationRun, c.Message,
-		c.Notification, c.NotificationSubscription, c.PolicyBinding, c.Project,
-		c.ProjectContributor, c.ProjectSyncState, c.RuntimeBroker, c.Schedule,
-		c.ScheduledEvent, c.Secret, c.SubscriptionTemplate, c.Template, c.User,
-		c.UserAccessToken,
+		c.InviteCode, c.LifecycleHook, c.LifecycleHookAgentPhase,
+		c.MaintenanceOperation, c.MaintenanceOperationRun, c.Message, c.Notification,
+		c.NotificationSubscription, c.PolicyBinding, c.Project, c.ProjectContributor,
+		c.ProjectSyncState, c.RuntimeBroker, c.Schedule, c.ScheduledEvent, c.Secret,
+		c.SubscriptionTemplate, c.Template, c.User, c.UserAccessToken,
 	} {
 		n.Use(hooks...)
 	}
@@ -380,11 +392,11 @@ func (c *Client) Intercept(interceptors ...Interceptor) {
 		c.AccessPolicy, c.Agent, c.AllowListEntry, c.ApiKey, c.BrokerDispatch,
 		c.BrokerJoinToken, c.BrokerSecret, c.EnvVar, c.GCPServiceAccount,
 		c.GithubInstallation, c.Group, c.GroupMembership, c.HarnessConfig,
-		c.InviteCode, c.MaintenanceOperation, c.MaintenanceOperationRun, c.Message,
-		c.Notification, c.NotificationSubscription, c.PolicyBinding, c.Project,
-		c.ProjectContributor, c.ProjectSyncState, c.RuntimeBroker, c.Schedule,
-		c.ScheduledEvent, c.Secret, c.SubscriptionTemplate, c.Template, c.User,
-		c.UserAccessToken,
+		c.InviteCode, c.LifecycleHook, c.LifecycleHookAgentPhase,
+		c.MaintenanceOperation, c.MaintenanceOperationRun, c.Message, c.Notification,
+		c.NotificationSubscription, c.PolicyBinding, c.Project, c.ProjectContributor,
+		c.ProjectSyncState, c.RuntimeBroker, c.Schedule, c.ScheduledEvent, c.Secret,
+		c.SubscriptionTemplate, c.Template, c.User, c.UserAccessToken,
 	} {
 		n.Intercept(interceptors...)
 	}
@@ -421,6 +433,10 @@ func (c *Client) Mutate(ctx context.Context, m Mutation) (Value, error) {
 		return c.HarnessConfig.mutate(ctx, m)
 	case *InviteCodeMutation:
 		return c.InviteCode.mutate(ctx, m)
+	case *LifecycleHookMutation:
+		return c.LifecycleHook.mutate(ctx, m)
+	case *LifecycleHookAgentPhaseMutation:
+		return c.LifecycleHookAgentPhase.mutate(ctx, m)
 	case *MaintenanceOperationMutation:
 		return c.MaintenanceOperation.mutate(ctx, m)
 	case *MaintenanceOperationRunMutation:
@@ -2511,6 +2527,272 @@ func (c *InviteCodeClient) mutate(ctx context.Context, m *InviteCodeMutation) (V
 		return (&InviteCodeDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
 	default:
 		return nil, fmt.Errorf("ent: unknown InviteCode mutation op: %q", m.Op())
+	}
+}
+
+// LifecycleHookClient is a client for the LifecycleHook schema.
+type LifecycleHookClient struct {
+	config
+}
+
+// NewLifecycleHookClient returns a client for the LifecycleHook from the given config.
+func NewLifecycleHookClient(c config) *LifecycleHookClient {
+	return &LifecycleHookClient{config: c}
+}
+
+// Use adds a list of mutation hooks to the hooks stack.
+// A call to `Use(f, g, h)` equals to `lifecyclehook.Hooks(f(g(h())))`.
+func (c *LifecycleHookClient) Use(hooks ...Hook) {
+	c.hooks.LifecycleHook = append(c.hooks.LifecycleHook, hooks...)
+}
+
+// Intercept adds a list of query interceptors to the interceptors stack.
+// A call to `Intercept(f, g, h)` equals to `lifecyclehook.Intercept(f(g(h())))`.
+func (c *LifecycleHookClient) Intercept(interceptors ...Interceptor) {
+	c.inters.LifecycleHook = append(c.inters.LifecycleHook, interceptors...)
+}
+
+// Create returns a builder for creating a LifecycleHook entity.
+func (c *LifecycleHookClient) Create() *LifecycleHookCreate {
+	mutation := newLifecycleHookMutation(c.config, OpCreate)
+	return &LifecycleHookCreate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// CreateBulk returns a builder for creating a bulk of LifecycleHook entities.
+func (c *LifecycleHookClient) CreateBulk(builders ...*LifecycleHookCreate) *LifecycleHookCreateBulk {
+	return &LifecycleHookCreateBulk{config: c.config, builders: builders}
+}
+
+// MapCreateBulk creates a bulk creation builder from the given slice. For each item in the slice, the function creates
+// a builder and applies setFunc on it.
+func (c *LifecycleHookClient) MapCreateBulk(slice any, setFunc func(*LifecycleHookCreate, int)) *LifecycleHookCreateBulk {
+	rv := reflect.ValueOf(slice)
+	if rv.Kind() != reflect.Slice {
+		return &LifecycleHookCreateBulk{err: fmt.Errorf("calling to LifecycleHookClient.MapCreateBulk with wrong type %T, need slice", slice)}
+	}
+	builders := make([]*LifecycleHookCreate, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		builders[i] = c.Create()
+		setFunc(builders[i], i)
+	}
+	return &LifecycleHookCreateBulk{config: c.config, builders: builders}
+}
+
+// Update returns an update builder for LifecycleHook.
+func (c *LifecycleHookClient) Update() *LifecycleHookUpdate {
+	mutation := newLifecycleHookMutation(c.config, OpUpdate)
+	return &LifecycleHookUpdate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOne returns an update builder for the given entity.
+func (c *LifecycleHookClient) UpdateOne(_m *LifecycleHook) *LifecycleHookUpdateOne {
+	mutation := newLifecycleHookMutation(c.config, OpUpdateOne, withLifecycleHook(_m))
+	return &LifecycleHookUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOneID returns an update builder for the given id.
+func (c *LifecycleHookClient) UpdateOneID(id uuid.UUID) *LifecycleHookUpdateOne {
+	mutation := newLifecycleHookMutation(c.config, OpUpdateOne, withLifecycleHookID(id))
+	return &LifecycleHookUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// Delete returns a delete builder for LifecycleHook.
+func (c *LifecycleHookClient) Delete() *LifecycleHookDelete {
+	mutation := newLifecycleHookMutation(c.config, OpDelete)
+	return &LifecycleHookDelete{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// DeleteOne returns a builder for deleting the given entity.
+func (c *LifecycleHookClient) DeleteOne(_m *LifecycleHook) *LifecycleHookDeleteOne {
+	return c.DeleteOneID(_m.ID)
+}
+
+// DeleteOneID returns a builder for deleting the given entity by its id.
+func (c *LifecycleHookClient) DeleteOneID(id uuid.UUID) *LifecycleHookDeleteOne {
+	builder := c.Delete().Where(lifecyclehook.ID(id))
+	builder.mutation.id = &id
+	builder.mutation.op = OpDeleteOne
+	return &LifecycleHookDeleteOne{builder}
+}
+
+// Query returns a query builder for LifecycleHook.
+func (c *LifecycleHookClient) Query() *LifecycleHookQuery {
+	return &LifecycleHookQuery{
+		config: c.config,
+		ctx:    &QueryContext{Type: TypeLifecycleHook},
+		inters: c.Interceptors(),
+	}
+}
+
+// Get returns a LifecycleHook entity by its id.
+func (c *LifecycleHookClient) Get(ctx context.Context, id uuid.UUID) (*LifecycleHook, error) {
+	return c.Query().Where(lifecyclehook.ID(id)).Only(ctx)
+}
+
+// GetX is like Get, but panics if an error occurs.
+func (c *LifecycleHookClient) GetX(ctx context.Context, id uuid.UUID) *LifecycleHook {
+	obj, err := c.Get(ctx, id)
+	if err != nil {
+		panic(err)
+	}
+	return obj
+}
+
+// Hooks returns the client hooks.
+func (c *LifecycleHookClient) Hooks() []Hook {
+	return c.hooks.LifecycleHook
+}
+
+// Interceptors returns the client interceptors.
+func (c *LifecycleHookClient) Interceptors() []Interceptor {
+	return c.inters.LifecycleHook
+}
+
+func (c *LifecycleHookClient) mutate(ctx context.Context, m *LifecycleHookMutation) (Value, error) {
+	switch m.Op() {
+	case OpCreate:
+		return (&LifecycleHookCreate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdate:
+		return (&LifecycleHookUpdate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdateOne:
+		return (&LifecycleHookUpdateOne{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpDelete, OpDeleteOne:
+		return (&LifecycleHookDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
+	default:
+		return nil, fmt.Errorf("ent: unknown LifecycleHook mutation op: %q", m.Op())
+	}
+}
+
+// LifecycleHookAgentPhaseClient is a client for the LifecycleHookAgentPhase schema.
+type LifecycleHookAgentPhaseClient struct {
+	config
+}
+
+// NewLifecycleHookAgentPhaseClient returns a client for the LifecycleHookAgentPhase from the given config.
+func NewLifecycleHookAgentPhaseClient(c config) *LifecycleHookAgentPhaseClient {
+	return &LifecycleHookAgentPhaseClient{config: c}
+}
+
+// Use adds a list of mutation hooks to the hooks stack.
+// A call to `Use(f, g, h)` equals to `lifecyclehookagentphase.Hooks(f(g(h())))`.
+func (c *LifecycleHookAgentPhaseClient) Use(hooks ...Hook) {
+	c.hooks.LifecycleHookAgentPhase = append(c.hooks.LifecycleHookAgentPhase, hooks...)
+}
+
+// Intercept adds a list of query interceptors to the interceptors stack.
+// A call to `Intercept(f, g, h)` equals to `lifecyclehookagentphase.Intercept(f(g(h())))`.
+func (c *LifecycleHookAgentPhaseClient) Intercept(interceptors ...Interceptor) {
+	c.inters.LifecycleHookAgentPhase = append(c.inters.LifecycleHookAgentPhase, interceptors...)
+}
+
+// Create returns a builder for creating a LifecycleHookAgentPhase entity.
+func (c *LifecycleHookAgentPhaseClient) Create() *LifecycleHookAgentPhaseCreate {
+	mutation := newLifecycleHookAgentPhaseMutation(c.config, OpCreate)
+	return &LifecycleHookAgentPhaseCreate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// CreateBulk returns a builder for creating a bulk of LifecycleHookAgentPhase entities.
+func (c *LifecycleHookAgentPhaseClient) CreateBulk(builders ...*LifecycleHookAgentPhaseCreate) *LifecycleHookAgentPhaseCreateBulk {
+	return &LifecycleHookAgentPhaseCreateBulk{config: c.config, builders: builders}
+}
+
+// MapCreateBulk creates a bulk creation builder from the given slice. For each item in the slice, the function creates
+// a builder and applies setFunc on it.
+func (c *LifecycleHookAgentPhaseClient) MapCreateBulk(slice any, setFunc func(*LifecycleHookAgentPhaseCreate, int)) *LifecycleHookAgentPhaseCreateBulk {
+	rv := reflect.ValueOf(slice)
+	if rv.Kind() != reflect.Slice {
+		return &LifecycleHookAgentPhaseCreateBulk{err: fmt.Errorf("calling to LifecycleHookAgentPhaseClient.MapCreateBulk with wrong type %T, need slice", slice)}
+	}
+	builders := make([]*LifecycleHookAgentPhaseCreate, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		builders[i] = c.Create()
+		setFunc(builders[i], i)
+	}
+	return &LifecycleHookAgentPhaseCreateBulk{config: c.config, builders: builders}
+}
+
+// Update returns an update builder for LifecycleHookAgentPhase.
+func (c *LifecycleHookAgentPhaseClient) Update() *LifecycleHookAgentPhaseUpdate {
+	mutation := newLifecycleHookAgentPhaseMutation(c.config, OpUpdate)
+	return &LifecycleHookAgentPhaseUpdate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOne returns an update builder for the given entity.
+func (c *LifecycleHookAgentPhaseClient) UpdateOne(_m *LifecycleHookAgentPhase) *LifecycleHookAgentPhaseUpdateOne {
+	mutation := newLifecycleHookAgentPhaseMutation(c.config, OpUpdateOne, withLifecycleHookAgentPhase(_m))
+	return &LifecycleHookAgentPhaseUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOneID returns an update builder for the given id.
+func (c *LifecycleHookAgentPhaseClient) UpdateOneID(id int) *LifecycleHookAgentPhaseUpdateOne {
+	mutation := newLifecycleHookAgentPhaseMutation(c.config, OpUpdateOne, withLifecycleHookAgentPhaseID(id))
+	return &LifecycleHookAgentPhaseUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// Delete returns a delete builder for LifecycleHookAgentPhase.
+func (c *LifecycleHookAgentPhaseClient) Delete() *LifecycleHookAgentPhaseDelete {
+	mutation := newLifecycleHookAgentPhaseMutation(c.config, OpDelete)
+	return &LifecycleHookAgentPhaseDelete{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// DeleteOne returns a builder for deleting the given entity.
+func (c *LifecycleHookAgentPhaseClient) DeleteOne(_m *LifecycleHookAgentPhase) *LifecycleHookAgentPhaseDeleteOne {
+	return c.DeleteOneID(_m.ID)
+}
+
+// DeleteOneID returns a builder for deleting the given entity by its id.
+func (c *LifecycleHookAgentPhaseClient) DeleteOneID(id int) *LifecycleHookAgentPhaseDeleteOne {
+	builder := c.Delete().Where(lifecyclehookagentphase.ID(id))
+	builder.mutation.id = &id
+	builder.mutation.op = OpDeleteOne
+	return &LifecycleHookAgentPhaseDeleteOne{builder}
+}
+
+// Query returns a query builder for LifecycleHookAgentPhase.
+func (c *LifecycleHookAgentPhaseClient) Query() *LifecycleHookAgentPhaseQuery {
+	return &LifecycleHookAgentPhaseQuery{
+		config: c.config,
+		ctx:    &QueryContext{Type: TypeLifecycleHookAgentPhase},
+		inters: c.Interceptors(),
+	}
+}
+
+// Get returns a LifecycleHookAgentPhase entity by its id.
+func (c *LifecycleHookAgentPhaseClient) Get(ctx context.Context, id int) (*LifecycleHookAgentPhase, error) {
+	return c.Query().Where(lifecyclehookagentphase.ID(id)).Only(ctx)
+}
+
+// GetX is like Get, but panics if an error occurs.
+func (c *LifecycleHookAgentPhaseClient) GetX(ctx context.Context, id int) *LifecycleHookAgentPhase {
+	obj, err := c.Get(ctx, id)
+	if err != nil {
+		panic(err)
+	}
+	return obj
+}
+
+// Hooks returns the client hooks.
+func (c *LifecycleHookAgentPhaseClient) Hooks() []Hook {
+	return c.hooks.LifecycleHookAgentPhase
+}
+
+// Interceptors returns the client interceptors.
+func (c *LifecycleHookAgentPhaseClient) Interceptors() []Interceptor {
+	return c.inters.LifecycleHookAgentPhase
+}
+
+func (c *LifecycleHookAgentPhaseClient) mutate(ctx context.Context, m *LifecycleHookAgentPhaseMutation) (Value, error) {
+	switch m.Op() {
+	case OpCreate:
+		return (&LifecycleHookAgentPhaseCreate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdate:
+		return (&LifecycleHookAgentPhaseUpdate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdateOne:
+		return (&LifecycleHookAgentPhaseUpdateOne{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpDelete, OpDeleteOne:
+		return (&LifecycleHookAgentPhaseDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
+	default:
+		return nil, fmt.Errorf("ent: unknown LifecycleHookAgentPhase mutation op: %q", m.Op())
 	}
 }
 
@@ -4908,19 +5190,19 @@ type (
 	hooks struct {
 		AccessPolicy, Agent, AllowListEntry, ApiKey, BrokerDispatch, BrokerJoinToken,
 		BrokerSecret, EnvVar, GCPServiceAccount, GithubInstallation, Group,
-		GroupMembership, HarnessConfig, InviteCode, MaintenanceOperation,
-		MaintenanceOperationRun, Message, Notification, NotificationSubscription,
-		PolicyBinding, Project, ProjectContributor, ProjectSyncState, RuntimeBroker,
-		Schedule, ScheduledEvent, Secret, SubscriptionTemplate, Template, User,
-		UserAccessToken []ent.Hook
+		GroupMembership, HarnessConfig, InviteCode, LifecycleHook,
+		LifecycleHookAgentPhase, MaintenanceOperation, MaintenanceOperationRun,
+		Message, Notification, NotificationSubscription, PolicyBinding, Project,
+		ProjectContributor, ProjectSyncState, RuntimeBroker, Schedule, ScheduledEvent,
+		Secret, SubscriptionTemplate, Template, User, UserAccessToken []ent.Hook
 	}
 	inters struct {
 		AccessPolicy, Agent, AllowListEntry, ApiKey, BrokerDispatch, BrokerJoinToken,
 		BrokerSecret, EnvVar, GCPServiceAccount, GithubInstallation, Group,
-		GroupMembership, HarnessConfig, InviteCode, MaintenanceOperation,
-		MaintenanceOperationRun, Message, Notification, NotificationSubscription,
-		PolicyBinding, Project, ProjectContributor, ProjectSyncState, RuntimeBroker,
-		Schedule, ScheduledEvent, Secret, SubscriptionTemplate, Template, User,
-		UserAccessToken []ent.Interceptor
+		GroupMembership, HarnessConfig, InviteCode, LifecycleHook,
+		LifecycleHookAgentPhase, MaintenanceOperation, MaintenanceOperationRun,
+		Message, Notification, NotificationSubscription, PolicyBinding, Project,
+		ProjectContributor, ProjectSyncState, RuntimeBroker, Schedule, ScheduledEvent,
+		Secret, SubscriptionTemplate, Template, User, UserAccessToken []ent.Interceptor
 	}
 )

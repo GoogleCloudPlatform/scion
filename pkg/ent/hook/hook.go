@@ -177,6 +177,30 @@ func (f InviteCodeFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, 
 	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.InviteCodeMutation", m)
 }
 
+// The LifecycleHookFunc type is an adapter to allow the use of ordinary
+// function as LifecycleHook mutator.
+type LifecycleHookFunc func(context.Context, *ent.LifecycleHookMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f LifecycleHookFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.LifecycleHookMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.LifecycleHookMutation", m)
+}
+
+// The LifecycleHookAgentPhaseFunc type is an adapter to allow the use of ordinary
+// function as LifecycleHookAgentPhase mutator.
+type LifecycleHookAgentPhaseFunc func(context.Context, *ent.LifecycleHookAgentPhaseMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f LifecycleHookAgentPhaseFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.LifecycleHookAgentPhaseMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.LifecycleHookAgentPhaseMutation", m)
+}
+
 // The MaintenanceOperationFunc type is an adapter to allow the use of ordinary
 // function as MaintenanceOperation mutator.
 type MaintenanceOperationFunc func(context.Context, *ent.MaintenanceOperationMutation) (ent.Value, error)

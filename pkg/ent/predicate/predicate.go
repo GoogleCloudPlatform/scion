@@ -48,6 +48,12 @@ type HarnessConfig func(*sql.Selector)
 // InviteCode is the predicate function for invitecode builders.
 type InviteCode func(*sql.Selector)
 
+// LifecycleHook is the predicate function for lifecyclehook builders.
+type LifecycleHook func(*sql.Selector)
+
+// LifecycleHookAgentPhase is the predicate function for lifecyclehookagentphase builders.
+type LifecycleHookAgentPhase func(*sql.Selector)
+
 // MaintenanceOperation is the predicate function for maintenanceoperation builders.
 type MaintenanceOperation func(*sql.Selector)
 

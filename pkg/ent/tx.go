@@ -40,6 +40,10 @@ type Tx struct {
 	HarnessConfig *HarnessConfigClient
 	// InviteCode is the client for interacting with the InviteCode builders.
 	InviteCode *InviteCodeClient
+	// LifecycleHook is the client for interacting with the LifecycleHook builders.
+	LifecycleHook *LifecycleHookClient
+	// LifecycleHookAgentPhase is the client for interacting with the LifecycleHookAgentPhase builders.
+	LifecycleHookAgentPhase *LifecycleHookAgentPhaseClient
 	// MaintenanceOperation is the client for interacting with the MaintenanceOperation builders.
 	MaintenanceOperation *MaintenanceOperationClient
 	// MaintenanceOperationRun is the client for interacting with the MaintenanceOperationRun builders.
@@ -219,6 +223,8 @@ func (tx *Tx) init() {
 	tx.GroupMembership = NewGroupMembershipClient(tx.config)
 	tx.HarnessConfig = NewHarnessConfigClient(tx.config)
 	tx.InviteCode = NewInviteCodeClient(tx.config)
+	tx.LifecycleHook = NewLifecycleHookClient(tx.config)
+	tx.LifecycleHookAgentPhase = NewLifecycleHookAgentPhaseClient(tx.config)
 	tx.MaintenanceOperation = NewMaintenanceOperationClient(tx.config)
 	tx.MaintenanceOperationRun = NewMaintenanceOperationRunClient(tx.config)
 	tx.Message = NewMessageClient(tx.config)

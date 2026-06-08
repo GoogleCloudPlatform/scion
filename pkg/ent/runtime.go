@@ -19,6 +19,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/groupmembership"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/harnessconfig"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/invitecode"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/lifecyclehook"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/lifecyclehookagentphase"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/maintenanceoperation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/maintenanceoperationrun"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/message"
@@ -442,6 +444,50 @@ func init() {
 	invitecodeDescID := invitecodeFields[0].Descriptor()
 	// invitecode.DefaultID holds the default value on creation for the id field.
 	invitecode.DefaultID = invitecodeDescID.Default.(func() uuid.UUID)
+	lifecyclehookFields := schema.LifecycleHook{}.Fields()
+	_ = lifecyclehookFields
+	// lifecyclehookDescName is the schema descriptor for name field.
+	lifecyclehookDescName := lifecyclehookFields[1].Descriptor()
+	// lifecyclehook.NameValidator is a validator for the "name" field. It is called by the builders before save.
+	lifecyclehook.NameValidator = lifecyclehookDescName.Validators[0].(func(string) error)
+	// lifecyclehookDescEnabled is the schema descriptor for enabled field.
+	lifecyclehookDescEnabled := lifecyclehookFields[8].Descriptor()
+	// lifecyclehook.DefaultEnabled holds the default value on creation for the enabled field.
+	lifecyclehook.DefaultEnabled = lifecyclehookDescEnabled.Default.(bool)
+	// lifecyclehookDescCreated is the schema descriptor for created field.
+	lifecyclehookDescCreated := lifecyclehookFields[9].Descriptor()
+	// lifecyclehook.DefaultCreated holds the default value on creation for the created field.
+	lifecyclehook.DefaultCreated = lifecyclehookDescCreated.Default.(func() time.Time)
+	// lifecyclehookDescUpdated is the schema descriptor for updated field.
+	lifecyclehookDescUpdated := lifecyclehookFields[10].Descriptor()
+	// lifecyclehook.DefaultUpdated holds the default value on creation for the updated field.
+	lifecyclehook.DefaultUpdated = lifecyclehookDescUpdated.Default.(func() time.Time)
+	// lifecyclehook.UpdateDefaultUpdated holds the default value on update for the updated field.
+	lifecyclehook.UpdateDefaultUpdated = lifecyclehookDescUpdated.UpdateDefault.(func() time.Time)
+	// lifecyclehookDescStateVersion is the schema descriptor for state_version field.
+	lifecyclehookDescStateVersion := lifecyclehookFields[12].Descriptor()
+	// lifecyclehook.DefaultStateVersion holds the default value on creation for the state_version field.
+	lifecyclehook.DefaultStateVersion = lifecyclehookDescStateVersion.Default.(int64)
+	// lifecyclehookDescID is the schema descriptor for id field.
+	lifecyclehookDescID := lifecyclehookFields[0].Descriptor()
+	// lifecyclehook.DefaultID holds the default value on creation for the id field.
+	lifecyclehook.DefaultID = lifecyclehookDescID.Default.(func() uuid.UUID)
+	lifecyclehookagentphaseFields := schema.LifecycleHookAgentPhase{}.Fields()
+	_ = lifecyclehookagentphaseFields
+	// lifecyclehookagentphaseDescAgentID is the schema descriptor for agent_id field.
+	lifecyclehookagentphaseDescAgentID := lifecyclehookagentphaseFields[0].Descriptor()
+	// lifecyclehookagentphase.AgentIDValidator is a validator for the "agent_id" field. It is called by the builders before save.
+	lifecyclehookagentphase.AgentIDValidator = lifecyclehookagentphaseDescAgentID.Validators[0].(func(string) error)
+	// lifecyclehookagentphaseDescLastPhase is the schema descriptor for last_phase field.
+	lifecyclehookagentphaseDescLastPhase := lifecyclehookagentphaseFields[1].Descriptor()
+	// lifecyclehookagentphase.LastPhaseValidator is a validator for the "last_phase" field. It is called by the builders before save.
+	lifecyclehookagentphase.LastPhaseValidator = lifecyclehookagentphaseDescLastPhase.Validators[0].(func(string) error)
+	// lifecyclehookagentphaseDescUpdatedAt is the schema descriptor for updated_at field.
+	lifecyclehookagentphaseDescUpdatedAt := lifecyclehookagentphaseFields[2].Descriptor()
+	// lifecyclehookagentphase.DefaultUpdatedAt holds the default value on creation for the updated_at field.
+	lifecyclehookagentphase.DefaultUpdatedAt = lifecyclehookagentphaseDescUpdatedAt.Default.(func() time.Time)
+	// lifecyclehookagentphase.UpdateDefaultUpdatedAt holds the default value on update for the updated_at field.
+	lifecyclehookagentphase.UpdateDefaultUpdatedAt = lifecyclehookagentphaseDescUpdatedAt.UpdateDefault.(func() time.Time)
 	maintenanceoperationFields := schema.MaintenanceOperation{}.Fields()
 	_ = maintenanceoperationFields
 	// maintenanceoperationDescKey is the schema descriptor for key field.
