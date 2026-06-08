@@ -1246,6 +1246,104 @@ const (
 )
 
 // =============================================================================
+// Lifecycle Hooks (Configurable Agent Lifecycle Hooks)
+// =============================================================================
+
+// LifecycleHook is a Hub database record, authored by hub administrators, that
+// fires an HTTP/webhook action when a matching agent crosses an authoritative
+// phase transition (trigger). It is a sibling of Policy.
+type LifecycleHook struct {
+	// Identity
+	ID   string `json:"id"`   // UUID primary key
+	Name string `json:"name"` // Human-friendly label (not an identity)
+
+	// Scope
+	ScopeType string `json:"scopeType"`         // "hub" (v1); "project" reserved
+	ScopeID   string `json:"scopeId,omitempty"` // Empty for hub scope
+
+	// Selection: which agents this hook applies to (stored as JSON)
+	Selector *LifecycleHookSelector `json:"selector,omitempty"`
+
+	// Trigger: authoritative phase transition that fires the hook.
+	Trigger string `json:"trigger"` // running | suspended | stopped | error
+
+	// Action: HTTP/webhook request to perform (stored as JSON)
+	Action *LifecycleHookAction `json:"action,omitempty"`
+
+	// ExecutionIdentity references the managed GCP service account record ID
+	// (UUID) the hook runs as.
+	ExecutionIdentity string `json:"executionIdentity,omitempty"`
+
+	// Enabled gates whether the hook fires.
+	Enabled bool `json:"enabled"`
+
+	// Timestamps
+	Created time.Time `json:"created"`
+	Updated time.Time `json:"updated"`
+
+	// Authorship
+	CreatedBy string `json:"createdBy,omitempty"`
+
+	// Optimistic locking (existing pattern, mirrors Agent.StateVersion).
+	StateVersion int64 `json:"stateVersion"`
+}
+
+// LifecycleHookSelector describes which agents a lifecycle hook applies to.
+// Matching is performed against attributes persisted on the agent. v1 supports
+// project_id and template; label-based selection is a future enhancement.
+type LifecycleHookSelector struct {
+	ProjectID string `json:"projectId,omitempty"`
+	Template  string `json:"template,omitempty"`
+}
+
+// LifecycleHookAction describes the HTTP/webhook request a lifecycle hook
+// performs when it fires.
+type LifecycleHookAction struct {
+	Type           string            `json:"type,omitempty"`           // "http" | "webhook"
+	Method         string            `json:"method,omitempty"`
+	URL            string            `json:"url,omitempty"`
+	Headers        map[string]string `json:"headers,omitempty"`
+	Body           string            `json:"body,omitempty"`
+	OnError        string            `json:"onError,omitempty"`        // "log" (default) | "retry"
+	TimeoutSeconds int               `json:"timeoutSeconds,omitempty"` // Per-action timeout in seconds
+
+	// AllowedUntrustedVars is the admin-curated allow-list of untrusted
+	// variable names that may appear in the action body. Untrusted variables
+	// used anywhere in the action are rejected unless listed here, and even
+	// allow-listed variables are permitted only in the body (never URL
+	// host/path, query, or headers). The admin must consciously opt-in each
+	// untrusted variable, preventing e.g. an agent-controlled callback_url
+	// from being substituted under the service-account's authority.
+	AllowedUntrustedVars []string `json:"allowedUntrustedVars,omitempty"`
+}
+
+// LifecycleHookScopeType constants
+const (
+	LifecycleHookScopeHub     = "hub"
+	LifecycleHookScopeProject = "project"
+)
+
+// LifecycleHookTrigger constants (v1 authoritative phase transitions).
+const (
+	LifecycleHookTriggerRunning   = "running"
+	LifecycleHookTriggerSuspended = "suspended"
+	LifecycleHookTriggerStopped   = "stopped"
+	LifecycleHookTriggerError     = "error"
+)
+
+// LifecycleHookActionType constants (v1).
+const (
+	LifecycleHookActionHTTP    = "http"
+	LifecycleHookActionWebhook = "webhook"
+)
+
+// LifecycleHookActionOnError constants
+const (
+	LifecycleHookOnErrorLog   = "log"
+	LifecycleHookOnErrorRetry = "retry"
+)
+
+// =============================================================================
 // User Access Tokens (UATs)
 // =============================================================================
 

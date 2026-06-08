@@ -111,6 +111,9 @@ type Store interface {
 
 	// Invite Code operations (User Invitation System)
 	InviteCodeStore
+
+	// LifecycleHook operations (Configurable Agent Lifecycle Hooks)
+	LifecycleHookStore
 }
 
 // AgentStore defines agent-related persistence operations.
@@ -1176,4 +1179,53 @@ type ProjectSyncStateStore interface {
 	// DeleteProjectSyncState removes sync state for a project and optional broker.
 	// Returns ErrNotFound if the state doesn't exist.
 	DeleteProjectSyncState(ctx context.Context, projectID, brokerID string) error
+}
+
+// =============================================================================
+// Lifecycle Hooks (Configurable Agent Lifecycle Hooks)
+// =============================================================================
+
+// LifecycleHookStore defines lifecycle-hook persistence operations.
+type LifecycleHookStore interface {
+	// CreateLifecycleHook creates a new lifecycle hook record.
+	// Returns ErrAlreadyExists if a hook with the same ID exists.
+	CreateLifecycleHook(ctx context.Context, hook *LifecycleHook) error
+
+	// GetLifecycleHook retrieves a lifecycle hook by ID.
+	// Returns ErrNotFound if the hook doesn't exist.
+	GetLifecycleHook(ctx context.Context, id string) (*LifecycleHook, error)
+
+	// UpdateLifecycleHook updates an existing lifecycle hook.
+	// Uses optimistic locking via StateVersion.
+	// Returns ErrNotFound if the hook doesn't exist.
+	// Returns ErrVersionConflict if the version doesn't match.
+	UpdateLifecycleHook(ctx context.Context, hook *LifecycleHook) error
+
+	// DeleteLifecycleHook removes a lifecycle hook by ID.
+	// Returns ErrNotFound if the hook doesn't exist.
+	DeleteLifecycleHook(ctx context.Context, id string) error
+
+	// ListLifecycleHooks returns lifecycle hooks matching the filter criteria.
+	ListLifecycleHooks(ctx context.Context, filter LifecycleHookFilter, opts ListOptions) (*ListResult[LifecycleHook], error)
+
+	// CompareAndSetHookPhase atomically records newPhase as the last-processed
+	// phase for an agent's lifecycle-hook evaluation. It returns changed=true
+	// ONLY when the stored phase actually differed from newPhase (or no row
+	// existed yet). This is used for HA transition de-duplication: across
+	// multiple hub instances the single instance whose CAS succeeds "wins" and
+	// fires hooks; all others see changed=false and skip.
+	CompareAndSetHookPhase(ctx context.Context, agentID, newPhase string) (changed bool, err error)
+
+	// DeleteHookPhase removes the stored last-processed phase for an agent.
+	// Called on terminal phases (stopped/error) and agent deletion to prevent
+	// unbounded growth. No error is returned if the row does not exist.
+	DeleteHookPhase(ctx context.Context, agentID string) error
+}
+
+// LifecycleHookFilter defines criteria for filtering lifecycle hooks.
+type LifecycleHookFilter struct {
+	ScopeType string // Filter by scope type (hub, project)
+	ScopeID   string // Filter by scope ID
+	Trigger   string // Filter by trigger (running, suspended, stopped, error)
+	Enabled   *bool  // Filter by enabled status (nil = no filter)
 }
