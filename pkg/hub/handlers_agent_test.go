@@ -5043,3 +5043,42 @@ func TestBrokerHeartbeat_DoesNotRevertSuspendedAgent(t *testing.T) {
 	assert.NotEqual(t, string(state.ActivityCrashed), updated.Activity,
 		"heartbeat should not stick crashed activity on a suspended agent")
 }
+
+// TestAgentLifecycleSuspend_RejectsNonRunningAgent verifies that the suspend
+// lifecycle action returns HTTP 400 for an agent that is not in the running
+// phase, and does not change the agent's phase.
+func TestAgentLifecycleSuspend_RejectsNonRunningAgent(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	project := &store.Project{
+		ID:   tid("proj-susp-guard"),
+		Name: "Suspend Guard Project",
+		Slug: "susp-guard-project",
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+
+	agent := &store.Agent{
+		ID:        tid("agent-susp-guard"),
+		Slug:      "susp-guard-slug",
+		Name:      "Suspend Guard Agent",
+		ProjectID: project.ID,
+		Phase:     string(state.PhaseStopped),
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+agent.ID+"/suspend", nil)
+	req.Header.Set("Authorization", "Bearer "+testDevToken)
+
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code,
+		"suspending a non-running agent should return 400")
+
+	// Phase must be unchanged.
+	updated, err := s.GetAgent(ctx, agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, string(state.PhaseStopped), updated.Phase,
+		"rejected suspend must not change the agent's phase")
+}

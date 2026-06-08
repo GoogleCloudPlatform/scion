@@ -3084,6 +3084,8 @@ func (s *Server) suspendAgent(ctx context.Context, agent *store.Agent) error {
 	}
 
 	agent.Phase = newPhase
+	agent.ContainerStatus = "stopped"
+	agent.Activity = ""
 	s.events.PublishAgentStatus(ctx, agent)
 	return nil
 }
@@ -3129,6 +3131,14 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			dispatchErr = dispatcher.DispatchAgentStop(ctx, agent)
 		}
 	case api.AgentActionSuspend:
+		// Only running agents can be suspended via the HTTP lifecycle handler.
+		// (The auto-suspend scheduler calls suspendAgent directly and already
+		// restricts itself to running+stalled agents.)
+		if agent.Phase != string(state.PhaseRunning) {
+			writeError(w, http.StatusBadRequest, ErrCodeValidationError,
+				fmt.Sprintf("Cannot suspend agent in phase %q. Only running agents can be suspended.", agent.Phase), nil)
+			return
+		}
 		// Suspend is fully handled by the shared suspendAgent helper, which
 		// validates harness resume support, dispatches the stop, persists
 		// phase=suspended, and publishes the status event.

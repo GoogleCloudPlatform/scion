@@ -134,6 +134,14 @@ func TestAgentAutoSuspendHandler_SuspendsStalledBeyondGrace(t *testing.T) {
 	if published[0].Phase != string(state.PhaseSuspended) {
 		t.Errorf("published phase = %q, want %q", published[0].Phase, string(state.PhaseSuspended))
 	}
+	// The published event must reflect the persisted container_status/activity,
+	// not stale values from before the suspend.
+	if published[0].ContainerStatus != "stopped" {
+		t.Errorf("published container status = %q, want %q", published[0].ContainerStatus, "stopped")
+	}
+	if published[0].Activity != "" {
+		t.Errorf("published activity = %q, want empty", published[0].Activity)
+	}
 }
 
 func TestAgentAutoSuspendHandler_NotSuspendedWithinGrace(t *testing.T) {
