@@ -18,88 +18,35 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"net/url"
 	"regexp"
 	"strings"
-	"time"
+
+	"github.com/a2aproject/a2a-go/v2/a2asrv"
 )
 
 var slugRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
 
-// A2A JSON-RPC error codes.
-const (
-	ErrCodeParseError        = -32700
-	ErrCodeInvalidRequest    = -32600
-	ErrCodeMethodNotFound    = -32601
-	ErrCodeInvalidParams     = -32602
-	ErrCodeInternalError     = -32603
-	ErrCodeTaskNotFound      = -32001
-	ErrCodeTaskNotCancelable = -32002
-	ErrCodeUnsupportedOp     = -32004
-)
-
-// JSONRPCRequest represents an incoming JSON-RPC 2.0 request.
-type JSONRPCRequest struct {
-	JSONRPC string          `json:"jsonrpc"`
-	ID      interface{}     `json:"id"`
-	Method  string          `json:"method"`
-	Params  json.RawMessage `json:"params"`
-}
-
-// JSONRPCResponse represents an outgoing JSON-RPC 2.0 response.
-type JSONRPCResponse struct {
-	JSONRPC string        `json:"jsonrpc"`
-	ID      interface{}   `json:"id"`
-	Result  interface{}   `json:"result,omitempty"`
-	Error   *JSONRPCError `json:"error,omitempty"`
-}
-
-// JSONRPCError represents a JSON-RPC 2.0 error.
-type JSONRPCError struct {
-	Code    int         `json:"code"`
-	Message string      `json:"message"`
-	Data    interface{} `json:"data,omitempty"`
-}
-
-// SendMessageParams holds parameters for the SendMessage RPC method.
-type SendMessageParams struct {
-	Message       Message            `json:"message"`
-	Configuration *SendMessageConfig `json:"configuration,omitempty"`
-	ContextID     string             `json:"contextId,omitempty"`
-	TaskID        string             `json:"taskId,omitempty"`
-}
-
-// SendMessageConfig holds SendMessage configuration options.
-type SendMessageConfig struct {
-	AcceptedOutputModes []string `json:"acceptedOutputModes,omitempty"`
-	Blocking            *bool    `json:"blocking,omitempty"`
-}
-
-// TaskQueryParams holds parameters for GetTask/ListTasks.
-type TaskQueryParams struct {
-	ID        string `json:"id,omitempty"`
-	ContextID string `json:"contextId,omitempty"`
-}
-
-// Server is the A2A HTTP server that handles JSON-RPC requests.
+// Server is the A2A HTTP server that routes requests to the SDK handler.
 type Server struct {
-	bridge  *Bridge
-	config  *Config
-	metrics *Metrics
-	log     *slog.Logger
+	bridge     *Bridge
+	config     *Config
+	metrics    *Metrics
+	log        *slog.Logger
+	sdkHandler http.Handler // SDK JSON-RPC handler
 }
 
-// NewServer creates a new A2A protocol server.
-func NewServer(bridge *Bridge, cfg *Config, metrics *Metrics, log *slog.Logger) *Server {
+// NewServer creates a new A2A protocol server backed by the SDK.
+func NewServer(bridge *Bridge, cfg *Config, metrics *Metrics, log *slog.Logger, sdkHandler http.Handler) *Server {
 	return &Server{
-		bridge:  bridge,
-		config:  cfg,
-		metrics: metrics,
-		log:     log,
+		bridge:     bridge,
+		config:     cfg,
+		metrics:    metrics,
+		log:        log,
+		sdkHandler: sdkHandler,
 	}
 }
 
@@ -160,7 +107,7 @@ func (s *Server) Handler() http.Handler {
 	// Top-level well-known agent card (registry).
 	mux.HandleFunc("GET /.well-known/agent-card.json", s.handleWellKnownAgentCard)
 
-	// Per-agent routes.
+	// Per-agent routes — the SDK handler handles JSON-RPC protocol.
 	mux.HandleFunc("GET /projects/{projectSlug}/agents/{agentSlug}/.well-known/agent-card.json", s.handleAgentCard)
 	mux.HandleFunc("POST /projects/{projectSlug}/agents/{agentSlug}/jsonrpc", s.handleJSONRPC)
 
@@ -178,6 +125,14 @@ func (s *Server) Handler() http.Handler {
 	handler = RateLimitMiddleware(handler, s.config.RateLimit)
 	handler = InstrumentHandler(handler, s.metrics)
 	return handler
+}
+
+// SDKRequestHandler returns the a2asrv.RequestHandler for use with other transports (gRPC, REST).
+// Returns nil if the server was created without an SDK handler.
+func (s *Server) SDKRequestHandler() a2asrv.RequestHandler {
+	// The SDK handler is stored as http.Handler but we also need the RequestHandler
+	// for gRPC/REST transports. This is set via SetSDKRequestHandler.
+	return s.bridge.sdkRequestHandler
 }
 
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
@@ -225,7 +180,7 @@ func (s *Server) handleWellKnownAgentCard(w http.ResponseWriter, r *http.Request
 		"version":     "1.0.0",
 		"capabilities": map[string]bool{
 			"streaming":         true,
-			"pushNotifications": true,
+			"pushNotifications": false,
 		},
 	}
 
@@ -281,484 +236,50 @@ func (s *Server) handleAgentCard(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// handleJSONRPC validates the project/agent routing and delegates to the SDK handler.
 func (s *Server) handleJSONRPC(w http.ResponseWriter, r *http.Request) {
 	projectSlug := r.PathValue("projectSlug")
 	agentSlug := r.PathValue("agentSlug")
 
 	if !slugRE.MatchString(projectSlug) || !slugRE.MatchString(agentSlug) {
-		s.writeRPCError(w, nil, ErrCodeInvalidParams, "invalid slug format")
+		writeJSONRPCError(w, nil, -32602, "invalid slug format")
 		return
 	}
 
 	if err := s.bridge.AuthorizeExposed(projectSlug, agentSlug); err != nil {
-		s.writeRPCError(w, nil, ErrCodeInvalidParams, "agent not found")
+		writeJSONRPCError(w, nil, -32602, "agent not found")
 		return
 	}
 
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
-
-	var req JSONRPCRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		s.writeRPCError(w, nil, ErrCodeParseError, "parse error")
-		return
-	}
-
-	if req.JSONRPC != "2.0" {
-		s.writeRPCError(w, req.ID, ErrCodeInvalidRequest, "invalid JSON-RPC version")
-		return
-	}
-
-	// JSON-RPC 2.0 §4.1: notifications (id absent/null) must not receive responses.
-	if req.ID == nil {
-		s.log.Debug("ignoring JSON-RPC notification", "method", req.Method)
-		return
-	}
-
-	s.log.Debug("JSON-RPC request",
-		"method", req.Method,
-		"project", projectSlug,
-		"agent", agentSlug,
-	)
-
-	switch req.Method {
-	case "message/send":
-		s.handleSendMessage(w, r, req, projectSlug, agentSlug)
-	case "message/stream":
-		s.handleStreamMessage(w, r, req, projectSlug, agentSlug)
-	case "tasks/get":
-		s.handleGetTask(w, r, req, projectSlug, agentSlug)
-	case "tasks/list":
-		s.handleListTasks(w, r, req, projectSlug, agentSlug)
-	case "tasks/cancel":
-		s.handleCancelTask(w, r, req, projectSlug, agentSlug)
-	case "tasks/pushNotification/set":
-		s.handleSetPushNotification(w, r, req, projectSlug, agentSlug)
-	case "tasks/pushNotification/get":
-		s.handleGetPushNotification(w, r, req, projectSlug, agentSlug)
-	case "tasks/pushNotification/delete":
-		s.handleDeletePushNotification(w, r, req, projectSlug, agentSlug)
-	case "tasks/resubscribe":
-		s.handleResubscribe(w, r, req, projectSlug, agentSlug)
-	default:
-		s.writeRPCError(w, req.ID, ErrCodeMethodNotFound, fmt.Sprintf("method %q not found", req.Method))
-	}
-}
-
-func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request, req JSONRPCRequest, projectSlug, agentSlug string) {
-	var params SendMessageParams
-	if err := json.Unmarshal(req.Params, &params); err != nil {
-		s.log.Warn("invalid SendMessage params", "error", err)
-		s.writeRPCError(w, req.ID, ErrCodeInvalidParams, "invalid parameters")
-		return
-	}
-
-	if len(params.Message.Parts) == 0 {
-		s.writeRPCError(w, req.ID, ErrCodeInvalidParams, "message.parts must be non-empty")
-		return
-	}
-	if params.Message.Role != "" && params.Message.Role != RoleUser {
-		s.writeRPCError(w, req.ID, ErrCodeInvalidParams, "message.role must be 'user'")
-		return
-	}
-
-	blocking := true
-	if params.Configuration != nil && params.Configuration.Blocking != nil {
-		blocking = *params.Configuration.Blocking
-	}
-
-	result, err := s.bridge.SendMessage(r.Context(), projectSlug, agentSlug, params.ContextID, params.TaskID, params.Message.Parts, blocking)
-	if err != nil {
-		s.log.Error("SendMessage failed", "error", err, "project", projectSlug, "agent", agentSlug)
-		switch {
-		case errors.Is(err, ErrAgentNotFound):
-			s.writeRPCError(w, req.ID, ErrCodeInvalidParams, "agent not found")
-		case errors.Is(err, ErrContextUnknown):
-			s.writeRPCError(w, req.ID, ErrCodeInvalidParams, "unknown context ID")
-		case errors.Is(err, ErrTaskTerminal):
-			s.writeRPCError(w, req.ID, ErrCodeInvalidParams, "task is in a terminal state")
-		default:
-			s.writeRPCError(w, req.ID, ErrCodeInternalError, "internal error")
-		}
-		return
-	}
-
-	s.writeRPCResult(w, req.ID, result)
-}
-
-func (s *Server) handleGetTask(w http.ResponseWriter, r *http.Request, req JSONRPCRequest, projectSlug, agentSlug string) {
-	var params TaskQueryParams
-	if err := json.Unmarshal(req.Params, &params); err != nil {
-		s.log.Warn("invalid GetTask params", "error", err)
-		s.writeRPCError(w, req.ID, ErrCodeInvalidParams, "invalid parameters")
-		return
-	}
-
-	if params.ID == "" {
-		s.writeRPCError(w, req.ID, ErrCodeInvalidParams, "id is required")
-		return
-	}
-
-	task, err := s.bridge.AuthorizeTask(params.ID, projectSlug, agentSlug)
-	if err != nil {
-		s.log.Error("GetTask failed", "error", err, "taskID", params.ID)
-		s.writeRPCError(w, req.ID, ErrCodeInternalError, "internal error")
-		return
-	}
-	if task == nil {
-		s.writeRPCError(w, req.ID, ErrCodeTaskNotFound, "task not found")
-		return
-	}
-
-	s.writeRPCResult(w, req.ID, &TaskResult{
-		ID:        task.ID,
-		ContextID: task.ContextID,
-		Status:    TaskStatus{State: task.State},
+	// Inject routing info into context for the executor.
+	ctx := WithRouteInfo(r.Context(), RouteInfo{
+		ProjectSlug: projectSlug,
+		AgentSlug:   agentSlug,
 	})
+	r = r.WithContext(ctx)
+
+	// Delegate to SDK JSON-RPC handler.
+	s.sdkHandler.ServeHTTP(w, r)
 }
 
-func (s *Server) handleListTasks(w http.ResponseWriter, r *http.Request, req JSONRPCRequest, projectSlug, agentSlug string) {
-	var params TaskQueryParams
-	if err := json.Unmarshal(req.Params, &params); err != nil {
-		s.log.Warn("invalid ListTasks params", "error", err)
-		s.writeRPCError(w, req.ID, ErrCodeInvalidParams, "invalid parameters")
-		return
+// writeJSONRPCError writes a minimal JSON-RPC error response.
+func writeJSONRPCError(w http.ResponseWriter, id interface{}, code int, message string) {
+	type jsonrpcError struct {
+		Code    int    `json:"code"`
+		Message string `json:"message"`
 	}
-
-	if params.ContextID == "" {
-		s.writeRPCError(w, req.ID, ErrCodeInvalidParams, "contextId is required")
-		return
+	type jsonrpcResponse struct {
+		JSONRPC string       `json:"jsonrpc"`
+		ID      interface{}  `json:"id"`
+		Error   *jsonrpcError `json:"error,omitempty"`
 	}
-
-	authorized, authErr := s.bridge.AuthorizeContext(params.ContextID, projectSlug, agentSlug)
-	if authErr != nil {
-		s.log.Error("AuthorizeContext failed", "error", authErr, "contextID", params.ContextID)
-		s.writeRPCError(w, req.ID, ErrCodeInternalError, "internal error")
-		return
-	}
-	if !authorized {
-		s.writeRPCError(w, req.ID, ErrCodeTaskNotFound, "context not found")
-		return
-	}
-
-	tasks, err := s.bridge.ListTasks(r.Context(), params.ContextID)
-	if err != nil {
-		s.log.Error("ListTasks failed", "error", err, "contextID", params.ContextID)
-		s.writeRPCError(w, req.ID, ErrCodeInternalError, "internal error")
-		return
-	}
-
-	s.writeRPCResult(w, req.ID, tasks)
-}
-
-func (s *Server) handleCancelTask(w http.ResponseWriter, r *http.Request, req JSONRPCRequest, projectSlug, agentSlug string) {
-	var params TaskQueryParams
-	if err := json.Unmarshal(req.Params, &params); err != nil {
-		s.log.Warn("invalid CancelTask params", "error", err)
-		s.writeRPCError(w, req.ID, ErrCodeInvalidParams, "invalid parameters")
-		return
-	}
-
-	if params.ID == "" {
-		s.writeRPCError(w, req.ID, ErrCodeInvalidParams, "id is required")
-		return
-	}
-
-	task, err := s.bridge.AuthorizeTask(params.ID, projectSlug, agentSlug)
-	if err != nil {
-		s.log.Error("CancelTask auth failed", "error", err, "taskID", params.ID)
-		s.writeRPCError(w, req.ID, ErrCodeInternalError, "internal error")
-		return
-	}
-	if task == nil {
-		s.writeRPCError(w, req.ID, ErrCodeTaskNotFound, "task not found")
-		return
-	}
-
-	result, err := s.bridge.CancelTask(r.Context(), params.ID)
-	if err != nil {
-		s.log.Error("CancelTask failed", "error", err, "taskID", params.ID)
-		s.writeRPCError(w, req.ID, ErrCodeTaskNotCancelable, "task cannot be canceled")
-		return
-	}
-	if result == nil {
-		s.writeRPCError(w, req.ID, ErrCodeTaskNotFound, "task not found")
-		return
-	}
-
-	s.writeRPCResult(w, req.ID, result)
-}
-
-func (s *Server) handleStreamMessage(w http.ResponseWriter, r *http.Request, req JSONRPCRequest, projectSlug, agentSlug string) {
-	var params SendMessageParams
-	if err := json.Unmarshal(req.Params, &params); err != nil {
-		s.log.Warn("invalid StreamMessage params", "error", err)
-		s.writeRPCError(w, req.ID, ErrCodeInvalidParams, "invalid parameters")
-		return
-	}
-
-	if len(params.Message.Parts) == 0 {
-		s.writeRPCError(w, req.ID, ErrCodeInvalidParams, "message.parts must be non-empty")
-		return
-	}
-	if params.Message.Role != "" && params.Message.Role != RoleUser {
-		s.writeRPCError(w, req.ID, ErrCodeInvalidParams, "message.role must be 'user'")
-		return
-	}
-
-	taskID, events, cleanup, err := s.bridge.SendStreamingMessage(r.Context(), projectSlug, agentSlug, params.ContextID, params.Message.Parts)
-	if err != nil {
-		s.log.Error("SendStreamingMessage failed", "error", err, "project", projectSlug, "agent", agentSlug)
-		s.writeRPCError(w, req.ID, ErrCodeInternalError, "internal error")
-		return
-	}
-	defer cleanup()
-
-	s.writeSSEStream(w, r, taskID, events)
-}
-
-func (s *Server) handleResubscribe(w http.ResponseWriter, r *http.Request, req JSONRPCRequest, projectSlug, agentSlug string) {
-	var params TaskQueryParams
-	if err := json.Unmarshal(req.Params, &params); err != nil {
-		s.log.Warn("invalid Resubscribe params", "error", err)
-		s.writeRPCError(w, req.ID, ErrCodeInvalidParams, "invalid parameters")
-		return
-	}
-
-	if params.ID == "" {
-		s.writeRPCError(w, req.ID, ErrCodeInvalidParams, "id is required")
-		return
-	}
-
-	task, err := s.bridge.AuthorizeTask(params.ID, projectSlug, agentSlug)
-	if err != nil {
-		s.log.Error("Resubscribe auth failed", "error", err, "taskID", params.ID)
-		s.writeRPCError(w, req.ID, ErrCodeInternalError, "internal error")
-		return
-	}
-	if task == nil {
-		s.writeRPCError(w, req.ID, ErrCodeTaskNotFound, "task not found")
-		return
-	}
-
-	events, cleanup, err := s.bridge.SubscribeToTask(r.Context(), params.ID)
-	if err != nil {
-		s.log.Error("SubscribeToTask failed", "error", err, "taskID", params.ID)
-		s.writeRPCError(w, req.ID, ErrCodeInternalError, "internal error")
-		return
-	}
-	defer cleanup()
-
-	s.writeSSEStream(w, r, params.ID, events)
-}
-
-func (s *Server) writeSSEStream(w http.ResponseWriter, r *http.Request, taskID string, events <-chan StreamEvent) {
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		http.Error(w, "streaming not supported", http.StatusInternalServerError)
-		return
-	}
-
-	// Disable the global WriteTimeout for this long-lived SSE connection.
-	rc := http.NewResponseController(w)
-	if err := rc.SetWriteDeadline(time.Time{}); err != nil {
-		s.log.Warn("failed to disable write deadline for SSE", "error", err)
-	}
-
-	if s.metrics != nil {
-		s.metrics.ActiveSSE.Inc()
-		defer s.metrics.ActiveSSE.Dec()
-	}
-
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	w.WriteHeader(http.StatusOK)
-	flusher.Flush()
-
-	keepalive := s.config.Timeouts.SSEKeepalive
-	if keepalive == 0 {
-		keepalive = 30 * time.Second
-	}
-	ticker := time.NewTicker(keepalive)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case event, ok := <-events:
-			if !ok {
-				return
-			}
-			data, err := json.Marshal(event)
-			if err != nil {
-				s.log.Error("marshal SSE event", "error", err)
-				continue
-			}
-			// SSE spec: each line of a multi-line payload must be prefixed with "data: ".
-			dataStr := string(data)
-			lines := strings.Split(dataStr, "\n")
-			for _, line := range lines {
-				fmt.Fprintf(w, "data: %s\n", line)
-			}
-			fmt.Fprintf(w, "\n")
-			flusher.Flush()
-
-			if event.StatusUpdate != nil && event.StatusUpdate.Final {
-				return
-			}
-		case <-ticker.C:
-			fmt.Fprintf(w, ": keepalive\n\n")
-			flusher.Flush()
-		case <-r.Context().Done():
-			return
-		}
-	}
-}
-
-// PushNotificationParams holds parameters for push notification operations.
-type PushNotificationParams struct {
-	TaskID          string `json:"taskId"`
-	ID              string `json:"id,omitempty"`
-	URL             string `json:"url,omitempty"`
-	Token           string `json:"token,omitempty"`
-	AuthScheme      string `json:"authScheme,omitempty"`
-	AuthCredentials string `json:"authCredentials,omitempty"`
-}
-
-func (s *Server) handleSetPushNotification(w http.ResponseWriter, r *http.Request, req JSONRPCRequest, projectSlug, agentSlug string) {
-	var params PushNotificationParams
-	if err := json.Unmarshal(req.Params, &params); err != nil {
-		s.log.Warn("invalid SetPushNotification params", "error", err)
-		s.writeRPCError(w, req.ID, ErrCodeInvalidParams, "invalid parameters")
-		return
-	}
-
-	task, err := s.bridge.AuthorizeTask(params.TaskID, projectSlug, agentSlug)
-	if err != nil {
-		s.log.Error("SetPushNotification auth failed", "error", err, "taskID", params.TaskID)
-		s.writeRPCError(w, req.ID, ErrCodeInternalError, "internal error")
-		return
-	}
-	if task == nil {
-		s.writeRPCError(w, req.ID, ErrCodeTaskNotFound, "task not found")
-		return
-	}
-
-	parsed, err := url.Parse(params.URL)
-	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
-		s.writeRPCError(w, req.ID, ErrCodeInvalidParams, "url must be an absolute http or https URL")
-		return
-	}
-
-	// SSRF validation is also enforced inside SetPushNotificationConfig (defense-in-depth).
-	cfg, err := s.bridge.SetPushNotificationConfig(r.Context(), params.TaskID, params.URL, params.Token, params.AuthScheme, params.AuthCredentials)
-	if err != nil {
-		s.log.Error("SetPushNotificationConfig failed", "error", err, "taskID", params.TaskID)
-		s.writeRPCError(w, req.ID, ErrCodeInternalError, "internal error")
-		return
-	}
-
-	s.writeRPCResult(w, req.ID, cfg)
-}
-
-func (s *Server) handleGetPushNotification(w http.ResponseWriter, r *http.Request, req JSONRPCRequest, projectSlug, agentSlug string) {
-	var params PushNotificationParams
-	if err := json.Unmarshal(req.Params, &params); err != nil {
-		s.log.Warn("invalid GetPushNotification params", "error", err)
-		s.writeRPCError(w, req.ID, ErrCodeInvalidParams, "invalid parameters")
-		return
-	}
-
-	task, err := s.bridge.AuthorizeTask(params.TaskID, projectSlug, agentSlug)
-	if err != nil {
-		s.log.Error("GetPushNotification auth failed", "error", err, "taskID", params.TaskID)
-		s.writeRPCError(w, req.ID, ErrCodeInternalError, "internal error")
-		return
-	}
-	if task == nil {
-		s.writeRPCError(w, req.ID, ErrCodeTaskNotFound, "task not found")
-		return
-	}
-
-	configs, err := s.bridge.GetPushNotificationConfig(r.Context(), params.TaskID)
-	if err != nil {
-		s.log.Error("GetPushNotificationConfig failed", "error", err, "taskID", params.TaskID)
-		s.writeRPCError(w, req.ID, ErrCodeInternalError, "internal error")
-		return
-	}
-
-	s.writeRPCResult(w, req.ID, configs)
-}
-
-func (s *Server) handleDeletePushNotification(w http.ResponseWriter, r *http.Request, req JSONRPCRequest, projectSlug, agentSlug string) {
-	var params PushNotificationParams
-	if err := json.Unmarshal(req.Params, &params); err != nil {
-		s.log.Warn("invalid DeletePushNotification params", "error", err)
-		s.writeRPCError(w, req.ID, ErrCodeInvalidParams, "invalid parameters")
-		return
-	}
-
-	if params.TaskID == "" {
-		s.writeRPCError(w, req.ID, ErrCodeInvalidParams, "taskId is required")
-		return
-	}
-
-	task, err := s.bridge.AuthorizeTask(params.TaskID, projectSlug, agentSlug)
-	if err != nil {
-		s.log.Error("DeletePushNotification auth failed", "error", err, "taskID", params.TaskID)
-		s.writeRPCError(w, req.ID, ErrCodeInternalError, "internal error")
-		return
-	}
-	if task == nil {
-		s.writeRPCError(w, req.ID, ErrCodeTaskNotFound, "task not found")
-		return
-	}
-
-	if err := s.bridge.DeletePushNotificationConfig(r.Context(), params.TaskID, params.ID); err != nil {
-		s.log.Error("DeletePushNotificationConfig failed", "error", err, "pushID", params.ID)
-		s.writeRPCError(w, req.ID, ErrCodeInternalError, "internal error")
-		return
-	}
-
-	s.writeRPCResult(w, req.ID, map[string]bool{"ok": true})
-}
-
-// normalizeJSONRPCID ensures the id conforms to JSON-RPC 2.0 (string, number, or null).
-// Per §4, fractional numbers and structured values (object/array) are forbidden as IDs.
-// We coerce invalid types to null rather than echoing them, accepting that this makes
-// client-side correlation impossible for malformed requests.
-func normalizeJSONRPCID(id interface{}) interface{} {
-	switch id.(type) {
-	case float64, string:
-		return id
-	case nil:
-		return nil
-	default:
-		return nil
-	}
-}
-
-func (s *Server) writeRPCResult(w http.ResponseWriter, id interface{}, result interface{}) {
-	resp := JSONRPCResponse{
+	resp := jsonrpcResponse{
 		JSONRPC: "2.0",
-		ID:      normalizeJSONRPCID(id),
-		Result:  result,
+		ID:      id,
+		Error:   &jsonrpcError{Code: code, Message: message},
 	}
 	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(resp); err != nil {
-		s.log.Error("failed to encode RPC result", "error", err)
-	}
-}
-
-func (s *Server) writeRPCError(w http.ResponseWriter, id interface{}, code int, message string) {
-	resp := JSONRPCResponse{
-		JSONRPC: "2.0",
-		ID:      normalizeJSONRPCID(id),
-		Error:   &JSONRPCError{Code: code, Message: message},
-	}
-	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(resp); err != nil {
-		s.log.Error("failed to encode RPC error", "error", err)
-	}
+	json.NewEncoder(w).Encode(resp)
 }
 
 // authMiddleware validates API key authentication on non-public endpoints.

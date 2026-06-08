@@ -31,6 +31,8 @@ import (
 
 	secretmanager "cloud.google.com/go/secretmanager/apiv1"
 	smpb "cloud.google.com/go/secretmanager/apiv1/secretmanagerpb"
+	"github.com/a2aproject/a2a-go/v2/a2a"
+	"github.com/a2aproject/a2a-go/v2/a2asrv"
 	"github.com/prometheus/client_golang/prometheus"
 	"gopkg.in/yaml.v3"
 
@@ -136,20 +138,39 @@ func main() {
 	// Wire broker into the bridge for subscription management.
 	b.SetBroker(broker)
 
+	// Create SDK executor and request handler.
+	executor := bridge.NewScionExecutor(b, log.With("component", "executor"))
+	sdkRequestHandler := a2asrv.NewHandler(
+		executor,
+		a2asrv.WithLogger(log.With("component", "a2a-sdk")),
+		a2asrv.WithCapabilityChecks(&a2a.AgentCapabilities{
+			Streaming:         true,
+			PushNotifications: false,
+		}),
+		a2asrv.WithAgentInactivityTimeout(cfg.Timeouts.SendMessage),
+	)
+	b.SetSDKRequestHandler(sdkRequestHandler)
+
+	// Create SDK JSON-RPC transport handler.
+	sdkJSONRPCHandler := a2asrv.NewJSONRPCHandler(
+		sdkRequestHandler,
+		a2asrv.WithTransportKeepAlive(cfg.Timeouts.SSEKeepalive),
+	)
+
 	// Start A2A HTTP server.
 	listenAddr := cfg.Bridge.ListenAddress
 	if listenAddr == "" {
 		listenAddr = ":8443"
 	}
 
-	srv := bridge.NewServer(b, cfg, metrics, log.With("component", "a2a-server"))
+	srv := bridge.NewServer(b, cfg, metrics, log.With("component", "a2a-server"), sdkJSONRPCHandler)
 	srv.WarnOnOpenAuth()
 
 	httpServer := &http.Server{
 		Addr:           listenAddr,
 		Handler:        srv.Handler(),
 		ReadTimeout:    30 * time.Second,
-		WriteTimeout:   30 * time.Second,
+		WriteTimeout:   0, // Disabled for SSE connections; SDK handles timeouts.
 		IdleTimeout:    120 * time.Second,
 		MaxHeaderBytes: 1 << 20,
 	}
@@ -163,7 +184,10 @@ func main() {
 		}
 	}()
 
-	log.Info("scion-a2a-bridge ready")
+	log.Info("scion-a2a-bridge ready",
+		"transport", "JSON-RPC",
+		"sdk", "a2a-go/v2",
+	)
 
 	// Wait for shutdown signal.
 	sigCh := make(chan os.Signal, 1)

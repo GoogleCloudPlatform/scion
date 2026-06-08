@@ -23,6 +23,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/a2aproject/a2a-go/v2/a2asrv"
 	"github.com/google/uuid"
 
 	"github.com/GoogleCloudPlatform/scion/extras/scion-a2a-bridge/internal/identity"
@@ -57,6 +58,9 @@ type Bridge struct {
 	push      *PushDispatcher
 	metrics   *Metrics
 	log       *slog.Logger
+
+	// sdkRequestHandler holds the SDK RequestHandler for multi-transport use (gRPC, REST).
+	sdkRequestHandler a2asrv.RequestHandler
 
 	// waiters tracks channels waiting for agent responses, keyed by taskID.
 	mu      sync.RWMutex
@@ -227,6 +231,11 @@ func (b *Bridge) Shutdown() {
 // SetBroker wires the broker server for subscription management.
 func (b *Bridge) SetBroker(broker *BrokerServer) {
 	b.broker = broker
+}
+
+// SetSDKRequestHandler stores the SDK RequestHandler for multi-transport access.
+func (b *Bridge) SetSDKRequestHandler(h a2asrv.RequestHandler) {
+	b.sdkRequestHandler = h
 }
 
 // agentKey returns a composite key for project-scoped agent isolation.

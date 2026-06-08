@@ -19,6 +19,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/a2aproject/a2a-go/v2/a2a"
+
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/google/uuid"
 )
@@ -176,4 +178,93 @@ func TranslateScionToA2A(msg *messages.StructuredMessage) (Message, []Artifact) 
 	}
 
 	return message, artifacts
+}
+
+// --- SDK-compatible translation functions ---
+
+// TranslateA2APartsToScion converts SDK a2a.ContentParts into a Scion StructuredMessage.
+func TranslateA2APartsToScion(parts a2a.ContentParts) *messages.StructuredMessage {
+	var textContent strings.Builder
+	var attachments []string
+
+	for _, part := range parts {
+		switch v := part.Content.(type) {
+		case a2a.Text:
+			if textContent.Len() > 0 {
+				textContent.WriteString("\n")
+			}
+			textContent.WriteString(string(v))
+		case a2a.URL:
+			attachments = append(attachments, string(v))
+		case a2a.Data:
+			jsonBytes, err := json.Marshal(v.Value)
+			if err == nil {
+				if textContent.Len() > 0 {
+					textContent.WriteString("\n")
+				}
+				textContent.WriteString(string(jsonBytes))
+			}
+		}
+	}
+
+	msg := textContent.String()
+	if msg == "" {
+		if len(attachments) > 0 {
+			msg = "[A2A request with attachments only]"
+		} else {
+			msg = "[empty A2A request]"
+		}
+	}
+
+	return &messages.StructuredMessage{
+		Version:     1,
+		Timestamp:   time.Now().UTC().Format(time.RFC3339),
+		Msg:         msg,
+		Type:        messages.TypeInstruction,
+		Attachments: attachments,
+	}
+}
+
+// TranslateScionToA2AParts converts a Scion StructuredMessage into SDK a2a types.
+// Returns parts for the agent message and artifacts for content delivery.
+func TranslateScionToA2AParts(msg *messages.StructuredMessage) (*a2a.Message, []*a2a.Artifact) {
+	var sdkParts []*a2a.Part
+	sdkParts = append(sdkParts, &a2a.Part{Content: a2a.Text(msg.Msg), MediaType: "text/plain"})
+
+	for _, att := range msg.Attachments {
+		sdkParts = append(sdkParts, &a2a.Part{Content: a2a.URL(att)})
+	}
+
+	message := a2a.NewMessage(a2a.MessageRoleAgent, sdkParts...)
+
+	var artifacts []*a2a.Artifact
+	switch msg.Type {
+	case "", messages.TypeInstruction, messages.TypeAssistantReply:
+		artifacts = append(artifacts, &a2a.Artifact{
+			ID:    a2a.NewArtifactID(),
+			Parts: sdkParts,
+		})
+	}
+
+	return message, artifacts
+}
+
+// MapActivityToSDKTaskState maps a Scion agent activity string to an SDK a2a.TaskState.
+func MapActivityToSDKTaskState(activity string) a2a.TaskState {
+	switch strings.ToUpper(activity) {
+	case "WORKING":
+		return a2a.TaskStateWorking
+	case "THINKING", "EXECUTING":
+		return a2a.TaskStateWorking
+	case "WAITING_FOR_INPUT":
+		return a2a.TaskStateInputRequired
+	case "COMPLETED":
+		return a2a.TaskStateCompleted
+	case "ERROR":
+		return a2a.TaskStateFailed
+	case "STALLED", "LIMITS_EXCEEDED", "OFFLINE":
+		return a2a.TaskStateFailed
+	default:
+		return a2a.TaskStateWorking
+	}
 }
