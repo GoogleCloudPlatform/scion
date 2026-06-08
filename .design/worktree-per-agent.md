@@ -305,7 +305,9 @@ Backend × runtime matrix:
 | **node-local** | base clone on host, dual bind-mount (§6) | base on node, worktrees per pod via hostPath/emptyDir — **needs validation** |
 | **NFS** | base + worktrees on export, NFS mount | base + worktrees on RWX PVC + subPath (existing NFS design §9) |
 
-The K8s × node-local cell is the least-proven and may be restricted to NFS in v1.
+The K8s × node-local cell is **NOT supported in v1** (Q4 RESOLVED — NFS-only on K8s):
+worktree-per-agent on Kubernetes requires the NFS backend; node-local-on-K8s is rejected
+with a clear error (or falls back to clone-per-agent).
 
 ---
 
@@ -388,8 +390,12 @@ the git-version gate, and define base-repo teardown.
    "last-agent teardown / remove base" work in §8 is therefore **deferred** — the
    broker only ever tears down per-agent worktrees, never the base. An orphan-base
    maintenance sweep may revisit disk reclamation later, but it is out of scope.
-4. **Q4 — K8s node-local.** Support node-local worktrees on K8s in v1, or restrict
-   worktree-per-agent to NFS on K8s? (Open — Phase 3.)
+4. **Q4 — K8s node-local. [RESOLVED 2026-06-08 — ptone] NFS-only on K8s in v1.**
+   worktree-per-agent on Kubernetes is supported **only** with the NFS backend
+   (base + worktrees on the RWX export, provisioned by the init-container path from
+   #169). **Node-local worktrees on K8s are NOT supported in v1** — that combination
+   must be rejected (or fall back to clone-per-agent) with a clear message rather than
+   producing a broken host-bind mount. Phase 3 = that guardrail + K8s×NFS validation.
 5. **Q5 — Migration.** Any opt-in path to convert a running clone-per-agent project to
    worktree-per-agent, or strictly new-projects-only? (Open.)
 6. **Q6 — Default mode. [RESOLVED 2026-06-07 — ptone]** **Clone-per-agent remains
