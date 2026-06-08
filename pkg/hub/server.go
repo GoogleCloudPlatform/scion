@@ -1561,7 +1561,8 @@ func (s *Server) StartLifecycleHookEvaluator(opts ...EvaluatorOption) {
 		allOpts = append([]EvaluatorOption{WithDBDriver(driver)}, opts...)
 	}
 
-	ev := NewLifecycleHookEvaluator(s.store, s.events, nil /* LoggingExecutor default */, logging.Subsystem("hub.lifecycle-hooks"), allOpts...)
+	executor := NewHTTPExecutor(s.store, s.gcpTokenGenerator, s.auditLogger, logging.Subsystem("hub.lifecycle-hooks.executor"))
+	ev := NewLifecycleHookEvaluator(s.store, s.events, executor, logging.Subsystem("hub.lifecycle-hooks"), allOpts...)
 	s.lifecycleHookEvaluator = ev
 	s.lifecycleHookEvaluator.Start()
 }
