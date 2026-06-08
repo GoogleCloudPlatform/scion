@@ -1551,9 +1551,13 @@ func TestParseDockerServerVersion(t *testing.T) {
 		wantOK    bool
 	}{
 		{"24.0.7", 24, 0, true},
+		{"v24.0.7", 24, 0, true},
+		{"V24.0.7", 24, 0, true},
 		{"20.10.21", 20, 10, true},
 		{"19.03.15", 19, 3, true},
 		{"27.5", 27, 5, true},
+		{"  24.0.7  ", 24, 0, true},
+		{"WARNING: something\n24.0.7", 24, 0, true},
 		{"", 0, 0, false},
 		{"garbage", 0, 0, false},
 		{"x.y.z", 0, 0, false},

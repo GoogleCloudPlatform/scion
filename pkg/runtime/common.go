@@ -674,7 +674,12 @@ func DockerSupportsHostGateway(ctx context.Context, command string) bool {
 	if command == "" {
 		command = "docker"
 	}
-	out, err := runSimpleCommand(ctx, command, "version", "--format", "{{.Server.Version}}")
+	// Bound the probe so an unresponsive Docker daemon cannot hang server
+	// startup indefinitely; on timeout we fall through to the conservative
+	// "assume support" path below.
+	probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	out, err := runSimpleCommand(probeCtx, command, "version", "--format", "{{.Server.Version}}")
 	if err != nil {
 		runtimeLog.Debug("Unable to probe Docker server version for host-gateway support", "error", err)
 		return true
@@ -692,24 +697,28 @@ func DockerSupportsHostGateway(ctx context.Context, command string) bool {
 }
 
 // parseDockerServerVersion parses the leading "major.minor" of a Docker server
-// version string (e.g. "24.0.7" or "20.10.21").
+// version string (e.g. "24.0.7" or "20.10.21"). It tolerates a leading "v"/"V"
+// prefix and scans line-by-line so daemon warnings or other noise mixed into the
+// command output (runSimpleCommand combines stdout and stderr) do not defeat the
+// probe.
 func parseDockerServerVersion(v string) (major, minor int, ok bool) {
-	if v == "" {
-		return 0, 0, false
+	for _, line := range strings.Split(v, "\n") {
+		line = strings.TrimLeft(strings.TrimSpace(line), "vV")
+		parts := strings.SplitN(line, ".", 3)
+		if len(parts) < 2 {
+			continue
+		}
+		major, err := strconv.Atoi(parts[0])
+		if err != nil {
+			continue
+		}
+		minor, err = strconv.Atoi(parts[1])
+		if err != nil {
+			continue
+		}
+		return major, minor, true
 	}
-	parts := strings.SplitN(v, ".", 3)
-	if len(parts) < 2 {
-		return 0, 0, false
-	}
-	major, err := strconv.Atoi(parts[0])
-	if err != nil {
-		return 0, 0, false
-	}
-	minor, err = strconv.Atoi(parts[1])
-	if err != nil {
-		return 0, 0, false
-	}
-	return major, minor, true
+	return 0, 0, false
 }
 
 // BridgeExtraHosts returns the --add-host entries needed for the given runtime
