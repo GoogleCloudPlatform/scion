@@ -723,32 +723,6 @@ func (s *AgentStore) MarkStalledAgents(ctx context.Context, activityThreshold, h
 	return updated, nil
 }
 
-// FindAutoSuspendCandidates returns running agents currently marked "stalled"
-// whose last activity event predates activityThreshold (the stall threshold
-// plus the auto-suspend grace) but whose heartbeat is still recent
-// (last_seen >= heartbeatRecency). These are agents whose container is still
-// alive and can be reclaimed via suspend. This is a read-only query; the caller
-// performs the actual suspension after verifying harness resume support.
-func (s *AgentStore) FindAutoSuspendCandidates(ctx context.Context, activityThreshold, heartbeatRecency time.Time) ([]store.Agent, error) {
-	candidates, err := s.client.Agent.Query().Where(
-		agent.LastActivityEventNotNil(),
-		agent.LastActivityEventLT(activityThreshold),
-		agent.LastSeenNotNil(),
-		agent.LastSeenGTE(heartbeatRecency),
-		agent.PhaseEQ("running"),
-		agent.ActivityEQ("stalled"),
-	).All(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	result := make([]store.Agent, 0, len(candidates))
-	for _, a := range candidates {
-		result = append(result, *entAgentToStore(a))
-	}
-	return result, nil
-}
-
 // --- helpers ---
 
 // isTerminalActivity reports whether the activity is a terminal/sticky state

@@ -459,53 +459,6 @@ func TestAgentStore_MarkStalledAgents(t *testing.T) {
 	assert.Equal(t, "executing", gotActive.Activity)
 }
 
-func TestAgentStore_FindAutoSuspendCandidates(t *testing.T) {
-	ctx := context.Background()
-	s, projectID := newTestAgentStore(t)
-
-	now := time.Now()
-	// Stall threshold (5m) + grace (5m) = 10m back.
-	activityThreshold := now.Add(-10 * time.Minute)
-	heartbeatRecency := now.Add(-2 * time.Minute)
-
-	// Stalled beyond grace with a recent heartbeat -> candidate.
-	candidate := makeAgent(projectID, "candidate")
-	candidate.Phase = "running"
-	candidate.Activity = "stalled"
-	candidate.LastActivityEvent = now.Add(-30 * time.Minute)
-	candidate.LastSeen = now
-	require.NoError(t, s.CreateAgent(ctx, candidate))
-
-	// Stalled but only within the grace window -> not yet a candidate.
-	withinGrace := makeAgent(projectID, "within-grace")
-	withinGrace.Phase = "running"
-	withinGrace.Activity = "stalled"
-	withinGrace.LastActivityEvent = now.Add(-7 * time.Minute)
-	withinGrace.LastSeen = now
-	require.NoError(t, s.CreateAgent(ctx, withinGrace))
-
-	// Stalled beyond grace but heartbeat is stale (offline) -> not a candidate.
-	offline := makeAgent(projectID, "offline")
-	offline.Phase = "running"
-	offline.Activity = "stalled"
-	offline.LastActivityEvent = now.Add(-30 * time.Minute)
-	offline.LastSeen = now.Add(-30 * time.Minute)
-	require.NoError(t, s.CreateAgent(ctx, offline))
-
-	// Stale but not yet marked stalled (still executing) -> not a candidate.
-	executing := makeAgent(projectID, "executing")
-	executing.Phase = "running"
-	executing.Activity = "executing"
-	executing.LastActivityEvent = now.Add(-30 * time.Minute)
-	executing.LastSeen = now
-	require.NoError(t, s.CreateAgent(ctx, executing))
-
-	got, err := s.FindAutoSuspendCandidates(ctx, activityThreshold, heartbeatRecency)
-	require.NoError(t, err)
-	require.Len(t, got, 1)
-	assert.Equal(t, candidate.ID, got[0].ID)
-}
-
 func TestAgentStore_PurgeDeletedAgents(t *testing.T) {
 	ctx := context.Background()
 	s, projectID := newTestAgentStore(t)

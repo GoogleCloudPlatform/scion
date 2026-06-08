@@ -48,9 +48,6 @@ const (
 	LockAgentHeartbeatTimeout AdvisoryLockKey = 0x5C100002
 	// LockAgentStalledDetection guards the stalled-agent sweep.
 	LockAgentStalledDetection AdvisoryLockKey = 0x5C100003
-	// LockAgentAutoSuspend guards the auto-suspend sweep that reclaims
-	// containers backing agents stalled beyond the extra grace period.
-	LockAgentAutoSuspend AdvisoryLockKey = 0x5C100008
 	// LockSoftDeletePurge guards the soft-deleted-agent / old-event purge.
 	LockSoftDeletePurge AdvisoryLockKey = 0x5C100004
 	// LockGitHubAppHealthCheck guards the periodic GitHub App installation

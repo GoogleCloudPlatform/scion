@@ -1741,11 +1741,6 @@ func (s *Server) agentHeartbeatTimeoutHandler() func(ctx context.Context) {
 	}
 }
 
-// autoSuspendStalledGrace is the extra time an agent must remain stalled,
-// beyond StalledThreshold, before it is automatically suspended to reclaim its
-// container. The agent resumes correctly on its next message.
-const autoSuspendStalledGrace = 5 * time.Minute
-
 // agentStalledDetectionHandler returns a recurring handler function that marks
 // agents as stalled when their last activity event exceeds the stalled threshold
 // but they still have a recent heartbeat (process alive but hung).
@@ -1769,61 +1764,6 @@ func (s *Server) agentStalledDetectionHandler() func(ctx context.Context) {
 		if len(agents) > 0 {
 			slog.Info("Scheduler: marked stalled agents",
 				"count", len(agents), "threshold", s.config.StalledThreshold)
-		}
-	}
-}
-
-// agentAutoSuspendHandler returns a recurring handler function that reclaims the
-// container backing an agent that has been stalled for an extra grace period
-// beyond StalledThreshold. It suspends the agent (stops the container, sets
-// phase=suspended); the agent resumes correctly on its next message. Agents
-// whose harness cannot resume are never auto-suspended and are left stalled.
-func (s *Server) agentAutoSuspendHandler() func(ctx context.Context) {
-	return func(ctx context.Context) {
-		// Require the agent to have been stalled an additional grace period
-		// beyond the stall threshold before reclaiming its container.
-		activityThreshold := time.Now().Add(-(s.config.StalledThreshold + autoSuspendStalledGrace))
-		// Only reclaim agents whose container is still alive/resumable, using
-		// the same heartbeat recency window as the stall detector.
-		heartbeatRecency := time.Now().Add(-2 * time.Minute)
-
-		candidates, err := s.store.FindAutoSuspendCandidates(ctx, activityThreshold, heartbeatRecency)
-		if err != nil {
-			slog.Error("Scheduler: auto-suspend candidate lookup failed", "error", err)
-			return
-		}
-
-		suspended := 0
-		for i := range candidates {
-			agent := &candidates[i]
-
-			// Never auto-suspend an agent we cannot resume; leave it stalled.
-			if ok, reason := s.harnessSupportsResume(agent); !ok {
-				slog.Info("Scheduler: skipping auto-suspend, harness does not support resume",
-					"agent_id", agent.ID, "reason", reason)
-				continue
-			}
-
-			// Bound each suspension with its own timeout so a slow or
-			// unresponsive broker cannot block the whole scheduler loop.
-			err := func() error {
-				childCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
-				defer cancel()
-				return s.suspendAgent(childCtx, agent)
-			}()
-			if err != nil {
-				s.agentLifecycleLog.Warn("Scheduler: auto-suspend failed",
-					"agent_id", agent.ID, "error", err)
-				continue
-			}
-			suspended++
-			s.agentLifecycleLog.Info("Scheduler: auto-suspended stalled agent",
-				"agent_id", agent.ID, "threshold", s.config.StalledThreshold+autoSuspendStalledGrace)
-		}
-
-		if suspended > 0 {
-			slog.Info("Scheduler: auto-suspended stalled agents",
-				"count", suspended, "threshold", s.config.StalledThreshold+autoSuspendStalledGrace)
 		}
 	}
 }
@@ -2192,8 +2132,7 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 	// CONCURRENCY-AUDIT.md §"Singleton / leader".
 	s.scheduler.RegisterRecurringSingleton("agent-heartbeat-timeout", 1, store.LockAgentHeartbeatTimeout, s.agentHeartbeatTimeoutHandler())
 	s.scheduler.RegisterRecurringSingleton("agent-stalled-detection", 1, store.LockAgentStalledDetection, s.agentStalledDetectionHandler())
-	s.scheduler.RegisterRecurringSingleton("agent-auto-suspend", 1, store.LockAgentAutoSuspend, s.agentAutoSuspendHandler())
-	if s.config.SoftDeleteRetention > 0 {
+if s.config.SoftDeleteRetention > 0 {
 		s.scheduler.RegisterRecurringSingleton("soft-delete-purge", 60, store.LockSoftDeletePurge, s.purgeHandler())
 	}
 	s.scheduler.RegisterEventHandler("message", s.messageEventHandler())

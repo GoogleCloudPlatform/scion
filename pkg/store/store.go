@@ -164,13 +164,6 @@ type AgentStore interface {
 	// Returns the updated agent records for event publishing.
 	MarkStalledAgents(ctx context.Context, activityThreshold, heartbeatRecency time.Time) ([]Agent, error)
 
-	// FindAutoSuspendCandidates returns running agents already marked stalled
-	// whose last activity event is older than activityThreshold (stall threshold
-	// plus the auto-suspend grace) but whose heartbeat is still recent
-	// (last_seen >= heartbeatRecency), i.e. the container is still alive and
-	// resumable. It is a read-only finder; the caller decides which agents to
-	// suspend (e.g. after checking harness resume support).
-	FindAutoSuspendCandidates(ctx context.Context, activityThreshold, heartbeatRecency time.Time) ([]Agent, error)
 }
 
 // AgentFilter defines criteria for filtering agents.

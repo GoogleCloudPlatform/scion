@@ -59,7 +59,6 @@ func TestAdvisoryLockKeys_NonOverlapping(t *testing.T) {
 		LockScheduleEvaluator,
 		LockAgentHeartbeatTimeout,
 		LockAgentStalledDetection,
-		LockAgentAutoSuspend,
 		LockSoftDeletePurge,
 		LockGitHubAppHealthCheck,
 	}
