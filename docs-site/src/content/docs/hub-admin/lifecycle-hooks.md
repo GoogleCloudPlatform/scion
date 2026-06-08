@@ -314,8 +314,11 @@ on the configured database backend:
   The in-memory map is seeded from the store on evaluator startup to survive
   restarts within the same process.
 
-Terminal phases (`stopped`, `error`) automatically prune their deduper entries to
-prevent unbounded growth.
+Deduper entries are pruned only when an agent is **deleted**, not on terminal
+phases. Retaining the entry after `stopped`/`error` ensures a redelivered terminal
+event (pub/sub redelivery, retries, or heartbeats while terminal) is recognized as
+a non-transition and does not re-fire the hook. The overhead is at most one entry
+per agent (bounded by the agents table).
 
 ## Example: register / deregister flow
 
