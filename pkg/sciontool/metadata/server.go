@@ -56,6 +56,16 @@ type Config struct {
 	// When "host", iptables interception is skipped to avoid leaking
 	// redirect rules into the host's network namespace.
 	NetworkMode string
+
+	// FetchGCPToken, if set, is called to obtain a GCP access token from the
+	// Hub instead of making a direct HTTP call. This allows the metadata
+	// server to use the hub client's OIDC transport and correct auth headers.
+	// If nil, the server falls back to direct HTTP requests.
+	FetchGCPToken func(ctx context.Context, scopes []string) (*GCPAccessTokenResponse, error)
+
+	// FetchGCPIdentityToken, if set, is called to obtain a GCP identity
+	// token from the Hub. Same motivation as FetchGCPToken.
+	FetchGCPIdentityToken func(ctx context.Context, audience string) (string, error)
 }
 
 const (
@@ -105,7 +115,7 @@ type Server struct {
 
 	// Token cache
 	mu          sync.RWMutex
-	cachedToken *cachedAccessToken
+	cachedToken *GCPAccessTokenResponse
 	// Identity token cache (keyed by audience)
 	idTokenMu      sync.RWMutex
 	cachedIDTokens map[string]*cachedIDToken
@@ -141,7 +151,8 @@ func (s *Server) authToken() string {
 	return s.config.AuthToken
 }
 
-type cachedAccessToken struct {
+// GCPAccessTokenResponse is the response from a GCP access token fetch.
+type GCPAccessTokenResponse struct {
 	AccessToken string    `json:"access_token"`
 	ExpiresIn   int       `json:"expires_in"`
 	TokenType   string    `json:"token_type"`
@@ -656,7 +667,30 @@ func (s *Server) handleIdentityToken(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprint(w, token.Token)
 }
 
-func (s *Server) fetchAccessToken(ctx context.Context) (*cachedAccessToken, error) {
+func (s *Server) fetchAccessToken(ctx context.Context) (*GCPAccessTokenResponse, error) {
+	var token *GCPAccessTokenResponse
+	var err error
+
+	if s.config.FetchGCPToken != nil {
+		token, err = s.config.FetchGCPToken(ctx, []string{"https://www.googleapis.com/auth/cloud-platform"})
+	} else {
+		token, err = s.fetchAccessTokenDirect(ctx)
+	}
+
+	if err != nil {
+		return nil, err
+	}
+
+	token.FetchedAt = time.Now()
+
+	s.mu.Lock()
+	s.cachedToken = token
+	s.mu.Unlock()
+
+	return token, nil
+}
+
+func (s *Server) fetchAccessTokenDirect(ctx context.Context) (*GCPAccessTokenResponse, error) {
 	endpoint := fmt.Sprintf("%s/api/v1/agent/gcp-token", strings.TrimSuffix(s.config.HubURL, "/"))
 
 	body, _ := json.Marshal(map[string][]string{
@@ -682,16 +716,10 @@ func (s *Server) fetchAccessToken(ctx context.Context) (*cachedAccessToken, erro
 		return nil, fmt.Errorf("hub returned %d: %s", resp.StatusCode, string(respBody))
 	}
 
-	var token cachedAccessToken
+	var token GCPAccessTokenResponse
 	if err := json.Unmarshal(respBody, &token); err != nil {
 		return nil, fmt.Errorf("parse response: %w", err)
 	}
-	token.FetchedAt = time.Now()
-
-	// Cache
-	s.mu.Lock()
-	s.cachedToken = &token
-	s.mu.Unlock()
 
 	return &token, nil
 }
@@ -701,38 +729,23 @@ type hubIDTokenResponse struct {
 }
 
 func (s *Server) fetchIdentityToken(ctx context.Context, audience string) (*cachedIDToken, error) {
-	endpoint := fmt.Sprintf("%s/api/v1/agent/gcp-identity-token", strings.TrimSuffix(s.config.HubURL, "/"))
+	var tokenStr string
+	var err error
 
-	body, _ := json.Marshal(map[string]string{"audience": audience})
+	if s.config.FetchGCPIdentityToken != nil {
+		tokenStr, err = s.config.FetchGCPIdentityToken(ctx, audience)
+	} else {
+		tokenStr, err = s.fetchIdentityTokenDirect(ctx, audience)
+	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
-		return nil, fmt.Errorf("create request: %w", err)
-	}
-
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+s.authToken())
-
-	resp, err := s.client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("hub request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	respBody, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("hub returned %d: %s", resp.StatusCode, string(respBody))
-	}
-
-	var result hubIDTokenResponse
-	if err := json.Unmarshal(respBody, &result); err != nil {
-		return nil, fmt.Errorf("parse response: %w", err)
+		return nil, err
 	}
 
 	cached := &cachedIDToken{
-		Token:     result.Token,
+		Token:     tokenStr,
 		FetchedAt: time.Now(),
-		ExpiresAt: time.Now().Add(55 * time.Minute), // Conservative: ID tokens are ~1hr
+		ExpiresAt: time.Now().Add(55 * time.Minute),
 	}
 
 	s.idTokenMu.Lock()
@@ -740,6 +753,38 @@ func (s *Server) fetchIdentityToken(ctx context.Context, audience string) (*cach
 	s.idTokenMu.Unlock()
 
 	return cached, nil
+}
+
+func (s *Server) fetchIdentityTokenDirect(ctx context.Context, audience string) (string, error) {
+	endpoint := fmt.Sprintf("%s/api/v1/agent/gcp-identity-token", strings.TrimSuffix(s.config.HubURL, "/"))
+
+	body, _ := json.Marshal(map[string]string{"audience": audience})
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return "", fmt.Errorf("create request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+s.authToken())
+
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("hub request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("hub returned %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var result hubIDTokenResponse
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return "", fmt.Errorf("parse response: %w", err)
+	}
+
+	return result.Token, nil
 }
 
 func (s *Server) proactiveRefreshLoop(ctx context.Context) {

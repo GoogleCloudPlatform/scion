@@ -349,6 +349,10 @@ func runInit(args []string) int {
 		}
 	}
 
+	// Declare hubClient early so the metadata server's fetch callbacks can
+	// capture it. It is populated later, after the child process starts.
+	var hubClient *hub.Client
+
 	// Start GCP metadata server if configured
 	var metadataServer *metadata.Server
 	if metaCfg := metadata.ConfigFromEnv(); metaCfg != nil {
@@ -363,6 +367,34 @@ func runInit(args []string) int {
 		// uses the latest agent token after refresh, not the startup value.
 		metaCfg.TokenFunc = func() string {
 			return hub.ReadTokenFile()
+		}
+		// Delegate GCP token fetching to the hub client so the metadata
+		// server uses the correct auth headers (X-Scion-Agent-Token) and
+		// OIDC transport layer. The hub client is created after the metadata
+		// server starts, so the closures capture the hubClient variable
+		// which is set later. Token requests only arrive after the child
+		// process has started, so the hub client is always available by then.
+		metaCfg.FetchGCPToken = func(ctx context.Context, scopes []string) (*metadata.GCPAccessTokenResponse, error) {
+			hc := hubClient
+			if hc == nil || !hc.IsConfigured() {
+				return nil, fmt.Errorf("hub client not initialized")
+			}
+			hubResp, err := hc.FetchGCPToken(ctx, scopes)
+			if err != nil {
+				return nil, err
+			}
+			return &metadata.GCPAccessTokenResponse{
+				AccessToken: hubResp.AccessToken,
+				ExpiresIn:   hubResp.ExpiresIn,
+				TokenType:   hubResp.TokenType,
+			}, nil
+		}
+		metaCfg.FetchGCPIdentityToken = func(ctx context.Context, audience string) (string, error) {
+			hc := hubClient
+			if hc == nil || !hc.IsConfigured() {
+				return "", fmt.Errorf("hub client not initialized")
+			}
+			return hc.FetchGCPIdentityToken(ctx, audience)
 		}
 		metadataServer = metadata.New(*metaCfg)
 		metaCtx := context.Background()
@@ -430,7 +462,6 @@ func runInit(args []string) int {
 	}()
 
 	// Heartbeat and token refresh control variables - declared here so they're accessible during shutdown and auth reset
-	var hubClient *hub.Client
 	var heartbeatCancel context.CancelFunc
 	var heartbeatDone <-chan struct{}
 	var tokenRefreshCancel context.CancelFunc

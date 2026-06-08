@@ -1256,3 +1256,100 @@ func (c *Client) StartHeartbeat(ctx context.Context, config *HeartbeatConfig) <-
 
 	return done
 }
+
+// GCPAccessTokenResponse is the Hub's response for a GCP access token request.
+type GCPAccessTokenResponse struct {
+	AccessToken string `json:"access_token"`
+	ExpiresIn   int    `json:"expires_in"`
+	TokenType   string `json:"token_type"`
+}
+
+// FetchGCPToken obtains a GCP access token from the Hub's /api/v1/agent/gcp-token
+// endpoint. Uses the hub client's OIDC transport and X-Scion-Agent-Token auth.
+func (c *Client) FetchGCPToken(ctx context.Context, scopes []string) (*GCPAccessTokenResponse, error) {
+	if !c.IsConfigured() {
+		return nil, fmt.Errorf("hub client not configured")
+	}
+
+	endpoint := fmt.Sprintf("%s/api/v1/agent/gcp-token",
+		strings.TrimSuffix(c.hubURL, "/"))
+
+	body, _ := json.Marshal(map[string][]string{
+		"scopes": scopes,
+	})
+
+	c.tokenMu.RLock()
+	currentToken := c.token
+	c.tokenMu.RUnlock()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Scion-Agent-Token", currentToken)
+
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("hub request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("hub returned %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var token GCPAccessTokenResponse
+	if err := json.Unmarshal(respBody, &token); err != nil {
+		return nil, fmt.Errorf("parse response: %w", err)
+	}
+
+	return &token, nil
+}
+
+// FetchGCPIdentityToken obtains a GCP identity token from the Hub's
+// /api/v1/agent/gcp-identity-token endpoint.
+func (c *Client) FetchGCPIdentityToken(ctx context.Context, audience string) (string, error) {
+	if !c.IsConfigured() {
+		return "", fmt.Errorf("hub client not configured")
+	}
+
+	endpoint := fmt.Sprintf("%s/api/v1/agent/gcp-identity-token",
+		strings.TrimSuffix(c.hubURL, "/"))
+
+	body, _ := json.Marshal(map[string]string{
+		"audience": audience,
+	})
+
+	c.tokenMu.RLock()
+	currentToken := c.token
+	c.tokenMu.RUnlock()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return "", fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Scion-Agent-Token", currentToken)
+
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("hub request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("hub returned %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var result struct {
+		Token string `json:"token"`
+	}
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return "", fmt.Errorf("parse response: %w", err)
+	}
+
+	return result.Token, nil
+}
