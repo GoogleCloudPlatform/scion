@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -405,9 +406,13 @@ func runInit(args []string) int {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Set up signal handling with pre-stop hook for graceful shutdown
+	// Set up signal handling with pre-stop hook for graceful shutdown.
+	// requestedShutdown tracks whether the process received an intentional
+	// SIGTERM/SIGINT so classifyExit can distinguish a clean stop from a crash.
+	var requestedShutdown atomic.Bool
 	sigHandler := supervisor.NewSignalHandler(sup, cancel).
 		WithPreStopHook(func() error {
+			requestedShutdown.Store(true)
 			log.Info("Running pre-stop hooks...")
 			return lifecycleManager.RunPreStop()
 		})
@@ -816,7 +821,7 @@ waitLoop:
 		log.Info("Recovered harness exit code %d from %s", *harnessCode, state.HarnessExitCodeFile)
 	}
 
-	outcome := classifyExit(result.code, result.err, harnessCode, limitsExceeded)
+	outcome := classifyExit(result.code, result.err, harnessCode, limitsExceeded, requestedShutdown.Load())
 	finalCode := outcome.exitCode
 	limitsExceeded = outcome.limitsExceeded
 
@@ -917,13 +922,16 @@ type exitOutcome struct {
 //
 //   - limitsExceeded                  → stopped + limits_exceeded (handled by caller)
 //   - clean exit (code 0, no error)   → stopped
+//   - requestedShutdown + code -1     → stopped (signal-killed by intentional SIGTERM)
 //   - unexpected non-zero exit/error  → error (crash), restartable
 //
 // harnessCode, when non-nil, is the authoritative harness exit code recovered
 // from the exit-code file and overrides the supervised child's code for the
 // crash decision. supervisorErr is the supervisor's own error (a synthetic
-// failure not reflected in supervisedCode).
-func classifyExit(supervisedCode int, supervisorErr error, harnessCode *int, limitsExceeded bool) exitOutcome {
+// failure not reflected in supervisedCode). requestedShutdown is true when
+// init received SIGTERM/SIGINT, indicating the container was intentionally
+// stopped — a signal-killed child (exit code -1) is expected, not a crash.
+func classifyExit(supervisedCode int, supervisorErr error, harnessCode *int, limitsExceeded bool, requestedShutdown bool) exitOutcome {
 	if !limitsExceeded && supervisedCode == handlers.ExitCodeLimitsExceeded {
 		limitsExceeded = true
 	}
@@ -937,6 +945,12 @@ func classifyExit(supervisedCode int, supervisorErr error, harnessCode *int, lim
 
 	if limitsExceeded {
 		return exitOutcome{exitCode: handlers.ExitCodeLimitsExceeded, limitsExceeded: true}
+	}
+
+	// When init was told to shut down (SIGTERM/SIGINT), the child is killed by
+	// signal and Go reports exit code -1. This is expected, not a crash.
+	if requestedShutdown && finalCode == -1 {
+		return exitOutcome{exitCode: 0}
 	}
 
 	// A supervisor error with a zero exit code is itself a failure.

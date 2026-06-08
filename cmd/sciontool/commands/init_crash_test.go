@@ -17,15 +17,16 @@ func intPtr(i int) *int { return &i }
 
 func TestClassifyExit(t *testing.T) {
 	tests := []struct {
-		name           string
-		supervisedCode int
-		supervisorErr  error
-		harnessCode    *int
-		limitsExceeded bool
-		wantCode       int
-		wantCrash      bool
-		wantLimits     bool
-		wantMsg        string
+		name              string
+		supervisedCode    int
+		supervisorErr     error
+		harnessCode       *int
+		limitsExceeded    bool
+		requestedShutdown bool
+		wantCode          int
+		wantCrash         bool
+		wantLimits        bool
+		wantMsg           string
 	}{
 		{
 			name:           "clean exit code 0",
@@ -78,11 +79,41 @@ func TestClassifyExit(t *testing.T) {
 			wantCrash:      true,
 			wantMsg:        "Agent crashed (supervisor error: boom)",
 		},
+		{
+			name:              "signal-killed without requested shutdown is crash",
+			supervisedCode:    -1,
+			wantCode:          -1,
+			wantCrash:         true,
+			wantMsg:           "Agent crashed with exit code -1",
+		},
+		{
+			name:              "signal-killed with requested shutdown is clean stop",
+			supervisedCode:    -1,
+			requestedShutdown: true,
+			wantCode:          0,
+			wantCrash:         false,
+		},
+		{
+			name:              "requested shutdown with non-signal exit code is still crash",
+			supervisedCode:    1,
+			requestedShutdown: true,
+			wantCode:          1,
+			wantCrash:         true,
+			wantMsg:           "Agent crashed with exit code 1",
+		},
+		{
+			name:              "harness code -1 with requested shutdown is clean stop",
+			supervisedCode:    0,
+			harnessCode:       intPtr(-1),
+			requestedShutdown: true,
+			wantCode:          0,
+			wantCrash:         false,
+		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := classifyExit(tc.supervisedCode, tc.supervisorErr, tc.harnessCode, tc.limitsExceeded)
+			got := classifyExit(tc.supervisedCode, tc.supervisorErr, tc.harnessCode, tc.limitsExceeded, tc.requestedShutdown)
 			if got.exitCode != tc.wantCode {
 				t.Errorf("exitCode = %d, want %d", got.exitCode, tc.wantCode)
 			}
