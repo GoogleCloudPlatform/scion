@@ -1550,7 +1550,18 @@ func (s *Server) StartLifecycleHookEvaluator(opts ...EvaluatorOption) {
 		return
 	}
 
-	ev := NewLifecycleHookEvaluator(s.store, s.events, nil /* LoggingExecutor default */, logging.Subsystem("hub.lifecycle-hooks"), opts...)
+	// In multi-instance HA the active publisher is *PostgresEventPublisher,
+	// which broadcasts every transition to ALL hub instances. With the in-memory
+	// deduper each instance would fire the hook independently (duplicate
+	// register/deregister), so the broadcast publisher MUST use the durable
+	// store-backed CAS deduper. Select it from the publisher type; explicit
+	// caller opts still take precedence (they are applied last).
+	allOpts := opts
+	if driver := deduperDriverForPublisher(s.events); driver != "" {
+		allOpts = append([]EvaluatorOption{WithDBDriver(driver)}, opts...)
+	}
+
+	ev := NewLifecycleHookEvaluator(s.store, s.events, nil /* LoggingExecutor default */, logging.Subsystem("hub.lifecycle-hooks"), allOpts...)
 	s.lifecycleHookEvaluator = ev
 	s.lifecycleHookEvaluator.Start()
 }

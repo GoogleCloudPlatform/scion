@@ -182,6 +182,20 @@ func (d *memoryDeduper) previousPhaseHas(agentID string) bool {
 // evaluator is constructed with this driver, it uses the durable storeDeduper.
 const DBDriverPostgres = "postgres"
 
+// deduperDriverForPublisher returns the DB-driver sentinel that selects the
+// transition-deduper backend from the event publisher's broadcast semantics.
+// *PostgresEventPublisher broadcasts every event to ALL hub instances (multi-
+// instance HA), so it requires the durable store-backed CAS deduper
+// (DBDriverPostgres) to guarantee exactly-once firing. Purely in-process
+// publishers (ChannelEventPublisher) are single-instance and need only the
+// in-memory deduper.
+func deduperDriverForPublisher(ep EventPublisher) string {
+	if _, ok := ep.(*PostgresEventPublisher); ok {
+		return DBDriverPostgres
+	}
+	return ""
+}
+
 // NewTransitionDeduper selects and returns the appropriate deduper for the
 // given database driver. Postgres uses the durable store-backed CAS;
 // everything else (sqlite, "", etc.) uses the in-memory map.

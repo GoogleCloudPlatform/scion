@@ -1100,6 +1100,23 @@ func TestLifecycleHookEvaluator_WithDBDriver_DefaultSelectsMemoryDeduper(t *test
 	assert.Equal(t, "", ev.dbDriver)
 }
 
+// deduperDriverForPublisher ties the deduper backend to the publisher's
+// broadcast semantics. A *PostgresEventPublisher broadcasts to all hub
+// instances, so it must select the durable store-backed deduper; a typed-nil is
+// sufficient to exercise the type assertion without a live DB connection.
+func TestLifecycleHookDeduperDriverForPublisher_PostgresBroadcastUsesStoreDriver(t *testing.T) {
+	var pub *PostgresEventPublisher
+	assert.Equal(t, DBDriverPostgres, deduperDriverForPublisher(pub),
+		"broadcast PostgresEventPublisher must select the postgres (store) deduper")
+}
+
+func TestLifecycleHookDeduperDriverForPublisher_ChannelUsesMemoryDriver(t *testing.T) {
+	pub := NewChannelEventPublisher()
+	defer pub.Close()
+	assert.Equal(t, "", deduperDriverForPublisher(pub),
+		"in-process ChannelEventPublisher must select the in-memory deduper")
+}
+
 // ---------------------------------------------------------------------------
 // Tests: storeDeduper end-to-end via evaluator (full event flow)
 // ---------------------------------------------------------------------------
