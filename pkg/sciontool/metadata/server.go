@@ -167,6 +167,14 @@ type cachedIDToken struct {
 	ExpiresAt time.Time
 }
 
+// activeServer tracks the most recently started Server in this process so that
+// a new Start() call can forcefully close a stale listener without relying on
+// an HTTP endpoint (which may not exist on older binaries).
+var (
+	activeServerMu sync.Mutex
+	activeServer   *Server
+)
+
 // New creates a new metadata server.
 func New(cfg Config) *Server {
 	return &Server{
@@ -200,7 +208,22 @@ func (s *Server) Start(ctx context.Context) error {
 	ln, err := net.Listen("tcp", addr)
 	if err != nil && errors.Is(err, syscall.EADDRINUSE) {
 		log.Info("Metadata server port %d already in use, attempting to reclaim", s.config.Port)
-		s.shutdownExisting()
+
+		// Primary: forcefully close a stale server in this process via the
+		// package-level reference. This is reliable regardless of which
+		// binary version started the old server.
+		activeServerMu.Lock()
+		prev := activeServer
+		activeServerMu.Unlock()
+		if prev != nil && prev.srv != nil {
+			log.Info("Forcefully closing previous metadata server instance")
+			prev.srv.Close()
+		} else {
+			// Fallback: try the HTTP shutdown endpoint (cross-process or
+			// the package-level reference was lost).
+			s.shutdownExisting()
+		}
+
 		for attempt := 1; attempt <= 3; attempt++ {
 			time.Sleep(time.Duration(attempt) * 250 * time.Millisecond)
 			ln, err = net.Listen("tcp", addr)
@@ -217,6 +240,11 @@ func (s *Server) Start(ctx context.Context) error {
 		cancel()
 		return fmt.Errorf("metadata server listen: %w", err)
 	}
+
+	// Track this server so a future Start() can forcefully close it.
+	activeServerMu.Lock()
+	activeServer = s
+	activeServerMu.Unlock()
 
 	go func() {
 		log.Info("Metadata server started on %s (mode=%s)", addr, s.config.Mode)
@@ -305,8 +333,26 @@ func (s *Server) configureMetadataInterception(uid int) {
 	s.metadataBlocked = method
 }
 
-// Stop gracefully shuts down the server.
+// Stop gracefully shuts down the server. It closes the listener synchronously
+// so the port is released before Stop returns. The background goroutine handles
+// iptables cleanup separately.
 func (s *Server) Stop() {
+	activeServerMu.Lock()
+	if activeServer == s {
+		activeServer = nil
+	}
+	activeServerMu.Unlock()
+
+	// Close the listener and drain connections immediately so the port is
+	// released before the caller proceeds. The context-cancellation goroutine
+	// still runs for iptables cleanup; http.Server.Shutdown is safe to call
+	// more than once.
+	if s.srv != nil {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 2*time.Second)
+		s.srv.Shutdown(shutdownCtx)
+		shutdownCancel()
+	}
+
 	if s.cancel != nil {
 		s.cancel()
 	}
