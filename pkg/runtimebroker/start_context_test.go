@@ -829,6 +829,92 @@ func TestResolveWorktreeProvision_GitTooOld_Fallback(t *testing.T) {
 	}
 }
 
+func TestResolveWorktreeProvision_KubernetesNodeLocal_Rejected(t *testing.T) {
+	projectDir := t.TempDir()
+
+	result := resolveWorktreeProvision(worktreeProvisionInput{
+		WorkspaceMode: store.WorkspaceModeWorktreePerAgent,
+		GitClone: &api.GitCloneConfig{
+			URL:    "https://github.com/org/repo.git",
+			Branch: "main",
+		},
+		ProjectPath: projectDir,
+		ProjectID:   "proj-1",
+		ProjectSlug: "my-project",
+		AgentID:     "agent-1",
+		AgentName:   "test-agent",
+		RuntimeName: "kubernetes",
+		eligibilityOverride: func() (bool, string) {
+			return true, ""
+		},
+	})
+
+	if result.ShouldProvision {
+		t.Fatal("expected ShouldProvision=false for Kubernetes without NFS backend")
+	}
+	if !strings.Contains(result.Reason, "Kubernetes") {
+		t.Errorf("expected reason to mention Kubernetes, got %q", result.Reason)
+	}
+	if !strings.Contains(result.Reason, "NFS") {
+		t.Errorf("expected reason to mention NFS requirement, got %q", result.Reason)
+	}
+	if result.ProvisionInput.ProjectID != "" {
+		t.Error("expected empty ProvisionInput when rejected")
+	}
+}
+
+func TestResolveWorktreeProvision_DockerRuntime_NotRejected(t *testing.T) {
+	eligible, _ := runtime.WorktreeModeEligible()
+	if !eligible {
+		t.Skip("git < 2.47, worktree mode not eligible on this host")
+	}
+
+	projectDir := t.TempDir()
+
+	result := resolveWorktreeProvision(worktreeProvisionInput{
+		WorkspaceMode: store.WorkspaceModeWorktreePerAgent,
+		GitClone: &api.GitCloneConfig{
+			URL:    "https://github.com/org/repo.git",
+			Branch: "main",
+		},
+		ProjectPath: projectDir,
+		ProjectID:   "proj-1",
+		ProjectSlug: "my-project",
+		AgentID:     "agent-1",
+		AgentName:   "test-agent",
+		RuntimeName: "docker",
+	})
+
+	if !result.ShouldProvision {
+		t.Fatalf("expected ShouldProvision=true for Docker runtime, got false (reason: %s)", result.Reason)
+	}
+}
+
+func TestResolveWorktreeProvision_EmptyRuntime_NotRejected(t *testing.T) {
+	eligible, _ := runtime.WorktreeModeEligible()
+	if !eligible {
+		t.Skip("git < 2.47, worktree mode not eligible on this host")
+	}
+
+	projectDir := t.TempDir()
+
+	result := resolveWorktreeProvision(worktreeProvisionInput{
+		WorkspaceMode: store.WorkspaceModeWorktreePerAgent,
+		GitClone: &api.GitCloneConfig{
+			URL:    "https://github.com/org/repo.git",
+			Branch: "main",
+		},
+		ProjectPath: projectDir,
+		ProjectID:   "proj-1",
+		AgentID:     "agent-1",
+		RuntimeName: "",
+	})
+
+	if !result.ShouldProvision {
+		t.Fatalf("expected ShouldProvision=true for empty RuntimeName, got false (reason: %s)", result.Reason)
+	}
+}
+
 func TestResolveWorktreeProvision_FullCloneDepth(t *testing.T) {
 	eligible, _ := runtime.WorktreeModeEligible()
 	if !eligible {

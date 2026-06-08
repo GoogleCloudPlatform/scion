@@ -1164,6 +1164,41 @@ func TestCreateSharedDirPVCs_LocalBackend_CreatesPVCs(t *testing.T) {
 	}
 }
 
+// --- Phase 3 guardrail regression: K8s + NFS + worktree-per-agent ---
+
+func TestBuildPod_NFSBackend_WorktreeSubPath_StillRouted(t *testing.T) {
+	r := newNFSTestK8sRuntime()
+	config := RunConfig{
+		Name:                 "test-nfs-worktree",
+		Image:                "test-image",
+		UnixUsername:         "scion",
+		WorkspaceBackendName: "nfs",
+		NFSPVClaimName:       "scion-workspaces",
+		NFSSubPath:           "projects/proj-123/workspace/worktrees/agent-1",
+		GitCloneForInit: &api.GitCloneConfig{
+			URL:    "https://github.com/org/repo.git",
+			Branch: "main",
+		},
+	}
+
+	pod, err := r.buildPod("default", config)
+	require.NoError(t, err)
+
+	wsVol := findVolume(pod, "workspace")
+	require.NotNil(t, wsVol, "workspace volume must exist")
+	require.NotNil(t, wsVol.VolumeSource.PersistentVolumeClaim,
+		"NFS worktree backend must use PVC, not EmptyDir")
+	assert.Equal(t, "scion-workspaces", wsVol.VolumeSource.PersistentVolumeClaim.ClaimName)
+
+	wsMount := findVolumeMount(&pod.Spec.Containers[0], "workspace")
+	require.NotNil(t, wsMount, "workspace mount must exist")
+	assert.Equal(t, "projects/proj-123/workspace/worktrees/agent-1", wsMount.SubPath,
+		"worktree subPath must route through NFS PVC")
+
+	require.NotEmpty(t, pod.Spec.InitContainers,
+		"NFS+worktree must still inject the provisioning init container")
+}
+
 // findVolume finds a volume by name in a pod spec.
 func findVolume(pod *corev1.Pod, name string) *corev1.Volume {
 	for i := range pod.Spec.Volumes {

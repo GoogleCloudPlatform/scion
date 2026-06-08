@@ -566,7 +566,7 @@ export class ScionPageProjectCreate extends LitElement {
                   ${this.gitWorkspaceMode === 'worktree-per-agent'
                     ? html`<div class="workspace-mode-note">
                         A single base clone is created, and each agent gets a lightweight git worktree.
-                        Requires git ≥ 2.47 on the node.
+                        Requires git ≥ 2.47 on the node. On Kubernetes, requires the NFS backend.
                       </div>`
                     : this.gitWorkspaceMode === 'shared'
                       ? html`<div class="workspace-mode-note">

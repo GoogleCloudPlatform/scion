@@ -524,6 +524,11 @@ func (e *startContextError) Error() string {
 // in-container clone). On failure or if git is too old, it logs a warning and
 // returns false so the caller falls through to clone-per-agent.
 func (s *Server) tryProvisionWorktree(ctx context.Context, in startContextInputs, opts *api.StartOptions, env map[string]string) bool {
+	runtimeName := ""
+	if s.runtime != nil {
+		runtimeName = s.runtime.Name()
+	}
+
 	result := resolveWorktreeProvision(worktreeProvisionInput{
 		WorkspaceMode: in.WorkspaceMode,
 		GitClone:      in.Config.GitClone,
@@ -533,6 +538,7 @@ func (s *Server) tryProvisionWorktree(ctx context.Context, in startContextInputs
 		AgentID:       in.AgentID,
 		AgentName:     in.Name,
 		Branch:        in.Config.Branch,
+		RuntimeName:   runtimeName,
 	})
 
 	if !result.ShouldProvision {
@@ -640,6 +646,12 @@ type worktreeProvisionInput struct {
 	AgentName     string
 	Branch        string
 
+	// RuntimeName is the name of the container runtime ("kubernetes", "docker",
+	// etc.) from runtime.Name(). Used to reject host-side worktree provisioning
+	// on Kubernetes where pods cannot bind-mount host worktrees — worktree-per-agent
+	// on K8s requires the NFS backend (init-container path).
+	RuntimeName string
+
 	// eligibilityOverride, when non-nil, replaces the runtime.WorktreeModeEligible
 	// check. Used in tests to simulate git-too-old without requiring a specific
 	// git binary.
@@ -675,6 +687,18 @@ func resolveWorktreeProvision(in worktreeProvisionInput) worktreeProvisionResult
 	eligible, reason := eligCheck()
 	if !eligible {
 		return worktreeProvisionResult{Reason: reason}
+	}
+
+	// On Kubernetes, host-side worktree provisioning does not work: pods
+	// cannot bind-mount a host worktree. Worktree-per-agent on K8s is
+	// supported only via the NFS backend (init-container path in
+	// k8s_runtime.go). When the broker's host-side path is reached for a
+	// K8s runtime, fall back to clone-per-agent.
+	if in.RuntimeName == "kubernetes" {
+		return worktreeProvisionResult{
+			Reason: "worktree-per-agent on Kubernetes requires the NFS backend; " +
+				"node-local host-side provisioning is not supported (pods cannot bind-mount host worktrees)",
+		}
 	}
 
 	mode := store.SharingModeWorktreePerAgent
