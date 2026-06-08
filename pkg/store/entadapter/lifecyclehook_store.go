@@ -365,6 +365,15 @@ func (s *LifecycleHookStore) CompareAndSetHookPhase(ctx context.Context, agentID
 			SetAgentID(agentID).
 			SetLastPhase(newPhase).
 			Exec(ctx); err != nil {
+			// On Postgres, a concurrent first-insert race means two
+			// transactions both see NotFound and attempt INSERT. The
+			// loser hits a unique-constraint violation. This is safe
+			// (no double-fire) — treat it as "another instance won the
+			// first insert" and return changed=false.
+			if ent.IsConstraintError(err) {
+				// The tx is now poisoned; rollback is handled by defer.
+				return false, nil
+			}
 			return false, fmt.Errorf("compare-and-set hook phase: insert: %w", err)
 		}
 		return true, tx.Commit()

@@ -409,6 +409,55 @@ func TestCompareAndSetHookPhase_ConcurrentDedup(t *testing.T) {
 		"exactly one concurrent CAS should win (changed=true)")
 }
 
+// TestCompareAndSetHookPhase_ConcurrentFirstInsertRace validates that when
+// two goroutines both see "not found" and race to INSERT, the loser gets
+// changed=false (not an error). On SQLite this is serialised by the
+// single-writer lock so only one goroutine enters the Insert path at a time;
+// on Postgres both transactions see NotFound concurrently and the loser hits
+// a unique-constraint violation that the code now handles gracefully.
+//
+// NOTE: True concurrent-insert contention cannot be reproduced on SQLite
+// because SQLite serialises all writes. This test documents the expected
+// contract and verifies the graceful handling path compiles and runs
+// correctly; full Postgres concurrency testing requires a Postgres backend.
+func TestCompareAndSetHookPhase_ConcurrentFirstInsertRace(t *testing.T) {
+	s := newTestLifecycleHookStore(t)
+	ctx := context.Background()
+
+	agentID := uuid.New().String()
+
+	// N goroutines race to do the FIRST insert (no pre-existing row).
+	// Exactly one should win (changed=true), all others should get
+	// changed=false with NO error.
+	const N = 10
+	var (
+		wg      sync.WaitGroup
+		winners int64
+		errors  int64
+	)
+	wg.Add(N)
+	for i := 0; i < N; i++ {
+		go func() {
+			defer wg.Done()
+			c, e := s.CompareAndSetHookPhase(ctx, agentID, "running")
+			if e != nil {
+				atomic.AddInt64(&errors, 1)
+				t.Errorf("unexpected error in concurrent first-insert CAS: %v", e)
+				return
+			}
+			if c {
+				atomic.AddInt64(&winners, 1)
+			}
+		}()
+	}
+	wg.Wait()
+
+	assert.Equal(t, int64(0), errors,
+		"no errors should be returned — constraint violations should be handled gracefully")
+	assert.Equal(t, int64(1), winners,
+		"exactly one concurrent first-insert CAS should win (changed=true)")
+}
+
 func TestDeleteHookPhase(t *testing.T) {
 	s := newTestLifecycleHookStore(t)
 	ctx := context.Background()
