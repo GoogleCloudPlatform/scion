@@ -86,6 +86,7 @@ export default defineConfig({
 						{ label: 'Security', slug: 'hub-admin/auth' },
 						{ label: 'Proxy Auth (IAP)', slug: 'hub-admin/auth-proxy-iap' },
 						{ label: 'Permissions', slug: 'hub-admin/permissions' },
+						{ label: 'Lifecycle Hooks', slug: 'hub-admin/lifecycle-hooks' },
 						{ label: 'Observability', slug: 'hub-admin/observability' },
 						{ label: 'Metrics', slug: 'hub-admin/metrics' },
 					],
