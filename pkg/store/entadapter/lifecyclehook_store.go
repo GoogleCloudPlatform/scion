@@ -376,7 +376,18 @@ func (s *LifecycleHookStore) CompareAndSetHookPhase(ctx context.Context, agentID
 			}
 			return false, fmt.Errorf("compare-and-set hook phase: insert: %w", err)
 		}
-		return true, tx.Commit()
+		// Only report a transition if the commit actually succeeds. A failed
+		// commit rolls the insert back, so returning true would falsely signal
+		// a recorded transition and could cause a duplicate hook firing. A
+		// deferred unique-constraint violation at commit time means another
+		// instance won the first insert — safe, treat as no transition.
+		if err := tx.Commit(); err != nil {
+			if ent.IsConstraintError(err) {
+				return false, nil
+			}
+			return false, fmt.Errorf("compare-and-set hook phase: commit insert: %w", err)
+		}
+		return true, nil
 	}
 	if err != nil {
 		return false, fmt.Errorf("compare-and-set hook phase: query: %w", err)
@@ -393,7 +404,12 @@ func (s *LifecycleHookStore) CompareAndSetHookPhase(ctx context.Context, agentID
 		Exec(ctx); err != nil {
 		return false, fmt.Errorf("compare-and-set hook phase: update: %w", err)
 	}
-	return true, tx.Commit()
+	// As with the insert path, only report a transition if the commit lands —
+	// a failed commit rolls back the update.
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("compare-and-set hook phase: commit update: %w", err)
+	}
+	return true, nil
 }
 
 // DeleteHookPhase removes the stored last-processed phase for an agent.

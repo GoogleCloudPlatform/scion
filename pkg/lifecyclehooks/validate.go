@@ -128,6 +128,25 @@ func ValidateHook(ctx context.Context, hook *store.LifecycleHook, saResolver GCP
 		})
 	}
 
+	// --- scope_type / scope_id ---
+	// An empty scope_type defaults to "hub" at the store layer. Reject any
+	// other unknown value here so it surfaces as a 400 validation error rather
+	// than a generic 500 from a downstream ent validation failure.
+	if hook.ScopeType != "" &&
+		hook.ScopeType != store.LifecycleHookScopeHub &&
+		hook.ScopeType != store.LifecycleHookScopeProject {
+		errs = append(errs, FieldError{
+			Field:   "scopeType",
+			Message: fmt.Sprintf("must be one of: hub, project; got %q", hook.ScopeType),
+		})
+	}
+	if hook.ScopeType == store.LifecycleHookScopeProject && hook.ScopeID == "" {
+		errs = append(errs, FieldError{
+			Field:   "scopeId",
+			Message: "required when scopeType is project",
+		})
+	}
+
 	// --- action ---
 	if hook.Action == nil {
 		errs = append(errs, FieldError{Field: "action", Message: "required"})

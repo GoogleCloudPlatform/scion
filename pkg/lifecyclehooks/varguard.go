@@ -411,10 +411,12 @@ func renderTrustedSubstitution(s string, vars RenderVars) string {
 // defense-in-depth protections:
 //   - Untrusted variables are blanked (replaced with empty string) rather
 //     than substituted, even if the static validator were bypassed.
-//   - All substituted values have CR (\r) and LF (\n) stripped to prevent
-//     HTTP header injection.
+//   - The fully rendered value has CR (\r) and LF (\n) stripped to prevent
+//     HTTP header injection — sanitization is applied after all substitutions
+//     so CR/LF in the static template (or introduced by concatenation) is also
+//     removed, not just CR/LF inside individual variable values.
 func renderHeaderValue(s string, vars RenderVars) string {
-	return varPattern.ReplaceAllStringFunc(s, func(match string) string {
+	rendered := varPattern.ReplaceAllStringFunc(s, func(match string) string {
 		name := varPattern.FindStringSubmatch(match)[1]
 		value, ok := vars[name]
 		if !ok {
@@ -424,9 +426,9 @@ func renderHeaderValue(s string, vars RenderVars) string {
 		if ClassifyVar(name) == Untrusted {
 			return "" // Blank untrusted values at render time.
 		}
-		// Strip CR/LF from trusted values as an extra safety measure.
-		return sanitizeHeaderValue(value)
+		return value
 	})
+	return sanitizeHeaderValue(rendered)
 }
 
 // sanitizeHeaderValue removes CR and LF characters from a header value

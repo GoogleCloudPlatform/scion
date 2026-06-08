@@ -139,6 +139,39 @@ func TestValidateHook_Triggers(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// ValidateHook — scope validation
+// ---------------------------------------------------------------------------
+
+func TestValidateHook_ScopeType(t *testing.T) {
+	tests := []struct {
+		name      string
+		scopeType string
+		scopeID   string
+		wantErr   bool
+	}{
+		{"valid: hub", store.LifecycleHookScopeHub, "", false},
+		{"valid: empty defaults to hub", "", "", false},
+		{"invalid: arbitrary", "datacenter", "", true},
+		{"invalid: project without scopeId", store.LifecycleHookScopeProject, "", true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			h := validHTTPHook()
+			h.ScopeType = tc.scopeType
+			h.ScopeID = tc.scopeID
+			err := ValidateHook(context.Background(), h, defaultResolver())
+			if tc.wantErr && err == nil {
+				t.Errorf("expected validation error for scopeType=%q scopeID=%q, got nil", tc.scopeType, tc.scopeID)
+			}
+			if !tc.wantErr && err != nil {
+				t.Errorf("unexpected error for scopeType=%q scopeID=%q: %v", tc.scopeType, tc.scopeID, err)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
 // ValidateHook — action type validation
 // ---------------------------------------------------------------------------
 

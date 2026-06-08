@@ -353,6 +353,13 @@ func (e *LifecycleHookEvaluator) handleEvent(evt Event) {
 		return
 	}
 
+	// Defensive: an empty AgentID would fail downstream deduper/store queries
+	// with validation errors. Skip such malformed events.
+	if statusEvt.AgentID == "" {
+		e.log.Error("Received agent status event with empty AgentID for lifecycle hooks")
+		return
+	}
+
 	// Only process v1 triggers.
 	trigger, ok := v1Triggers[state.Phase(statusEvt.Phase)]
 	if !ok {

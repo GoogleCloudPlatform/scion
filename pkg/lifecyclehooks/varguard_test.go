@@ -972,6 +972,31 @@ func TestRenderAction_HeaderCRLFSanitization(t *testing.T) {
 	}
 }
 
+// CR/LF present in the STATIC part of a header template (not inside a variable
+// value) must also be stripped, since sanitization runs on the fully rendered
+// value.
+func TestRenderAction_HeaderCRLFSanitization_StaticTemplate(t *testing.T) {
+	action := &store.LifecycleHookAction{
+		Type:   "http",
+		Method: "POST",
+		URL:    "https://registry.example.com/agents",
+		Headers: map[string]string{
+			"X-Static": "safe\r\nX-Injected: true",
+		},
+		TimeoutSeconds: 10,
+	}
+
+	rendered := RenderAction(action, RenderVars{})
+
+	got := rendered.Headers["X-Static"]
+	if strings.Contains(got, "\r") || strings.Contains(got, "\n") {
+		t.Errorf("CR/LF not stripped from static header template: %q", got)
+	}
+	if want := "safeX-Injected: true"; got != want {
+		t.Errorf("expected sanitized static value %q, got %q", want, got)
+	}
+}
+
 func TestRenderAction_UnresolvedVarsLeftAsIs(t *testing.T) {
 	action := &store.LifecycleHookAction{
 		Type:           "http",

@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/lifecyclehooks"
@@ -71,6 +72,26 @@ type HTTPExecutor struct {
 	// Defaults to newSSRFSafeClient. Tests may override this to inject
 	// a client that allows loopback connections for httptest servers.
 	newHTTPClient func() *http.Client
+
+	// client is the lazily-initialized, shared http.Client reused across all
+	// executions. http.Transport maintains an internal connection pool, so a
+	// single client must be reused to enable connection reuse and avoid
+	// socket/file-descriptor exhaustion under load.
+	client     *http.Client
+	clientOnce sync.Once
+}
+
+// httpClient lazily initializes and returns the shared http.Client. It is
+// safe for concurrent use.
+func (e *HTTPExecutor) httpClient() *http.Client {
+	e.clientOnce.Do(func() {
+		if e.newHTTPClient != nil {
+			e.client = e.newHTTPClient()
+		} else {
+			e.client = newSSRFSafeClient()
+		}
+	})
+	return e.client
 }
 
 // NewHTTPExecutor creates a new HTTPExecutor.
@@ -130,9 +151,10 @@ func (e *HTTPExecutor) Execute(ctx context.Context, hook *store.LifecycleHook, a
 	}
 
 	// -----------------------------------------------------------------------
-	// 4. Create a single SSRF-safe HTTP client reused across attempts
+	// 4. Use the shared SSRF-safe HTTP client (connection pool reused across
+	//    attempts AND across executions).
 	// -----------------------------------------------------------------------
-	client := e.newHTTPClient()
+	client := e.httpClient()
 
 	// -----------------------------------------------------------------------
 	// 5. Execute with timeout + retry
@@ -180,12 +202,16 @@ func (e *HTTPExecutor) Execute(ctx context.Context, hook *store.LifecycleHook, a
 			"error", lastErr,
 		)
 
-		// Backoff before retry (unless this was the last attempt).
+		// Backoff before retry (unless this was the last attempt). Use a
+		// time.Timer (not time.After) so the timer is stopped on context
+		// cancellation, avoiding a leaked runtime timer per cancelled request.
 		if attempt < attempts {
 			backoff := time.Duration(1<<uint(attempt-1)) * 500 * time.Millisecond
+			timer := time.NewTimer(backoff)
 			select {
-			case <-time.After(backoff):
+			case <-timer.C:
 			case <-ctx.Done():
+				timer.Stop()
 				return ctx.Err()
 			}
 		}
@@ -369,7 +395,10 @@ func isBlockedSSRFTarget(ip net.IP) bool {
 	}
 	return ip.IsLoopback() ||
 		ip.IsLinkLocalUnicast() ||
-		ip.IsLinkLocalMulticast()
+		ip.IsLinkLocalMulticast() ||
+		// Unspecified addresses (0.0.0.0, ::) route to loopback on many
+		// platforms and would otherwise bypass the loopback block.
+		ip.IsUnspecified()
 }
 
 // doHTTPRequest executes a single HTTP request with the per-action timeout.

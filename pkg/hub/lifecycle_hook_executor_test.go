@@ -896,6 +896,10 @@ func TestIsBlockedSSRFTarget(t *testing.T) {
 		{"link-local multicast IPv4", net.ParseIP("224.0.0.1"), true},
 		{"link-local multicast IPv6", net.ParseIP("ff02::1"), true},
 
+		// Unspecified/any — MUST block (routes to loopback on many platforms)
+		{"unspecified IPv4", net.ParseIP("0.0.0.0"), true},
+		{"unspecified IPv6", net.ParseIP("::"), true},
+
 		// RFC1918 — MUST ALLOW (architect decision: internal service registries)
 		{"RFC1918 10.x", net.ParseIP("10.0.0.1"), false},
 		{"RFC1918 172.16.x", net.ParseIP("172.16.0.1"), false},
