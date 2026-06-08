@@ -17,6 +17,10 @@ package entadapter
 import (
 	"context"
 	"fmt"
+	"sync"
+
+	"entgo.io/ent/dialect"
+	entsql "entgo.io/ent/dialect/sql"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/lifecyclehook"
@@ -27,12 +31,26 @@ import (
 
 // LifecycleHookStore implements store.LifecycleHookStore using Ent ORM.
 type LifecycleHookStore struct {
-	client *ent.Client
+	client      *ent.Client
+	dialectOnce sync.Once
+	dialectName string
 }
 
 // NewLifecycleHookStore creates a new Ent-backed LifecycleHookStore.
 func NewLifecycleHookStore(client *ent.Client) *LifecycleHookStore {
 	return &LifecycleHookStore{client: client}
+}
+
+// usesRowLocks returns true when the underlying database supports SELECT …
+// FOR UPDATE (i.e. Postgres). SQLite uses a single-writer lock instead, so
+// ForUpdate must be skipped — it returns an error on SQLite.
+func (s *LifecycleHookStore) usesRowLocks(ctx context.Context) bool {
+	s.dialectOnce.Do(func() {
+		_, _ = s.client.LifecycleHookAgentPhase.Query().
+			Where(func(sel *entsql.Selector) { s.dialectName = sel.Dialect() }).
+			Exist(ctx)
+	})
+	return s.dialectName == dialect.Postgres
 }
 
 // entLifecycleHookToStore converts an Ent LifecycleHook entity to a store model.
@@ -319,6 +337,11 @@ func (s *LifecycleHookStore) ListLifecycleHooks(ctx context.Context, filter stor
 // implicit serialization (SQLite) to achieve atomicity across concurrent hub
 // instances.
 func (s *LifecycleHookStore) CompareAndSetHookPhase(ctx context.Context, agentID, newPhase string) (bool, error) {
+	// Detect dialect BEFORE opening a transaction — with SQLite's
+	// MaxOpenConns=1 the dialect-probe query would deadlock if the
+	// tx already held the single connection.
+	useLock := s.usesRowLocks(ctx)
+
 	tx, err := s.client.Tx(ctx)
 	if err != nil {
 		return false, fmt.Errorf("compare-and-set hook phase: begin tx: %w", err)
@@ -327,11 +350,14 @@ func (s *LifecycleHookStore) CompareAndSetHookPhase(ctx context.Context, agentID
 	defer tx.Rollback()
 
 	// Query for existing row. ForUpdate serialises concurrent CAS
-	// attempts in Postgres; in SQLite the single-writer lock suffices.
-	existing, err := tx.LifecycleHookAgentPhase.Query().
-		Where(lifecyclehookagentphase.AgentIDEQ(agentID)).
-		ForUpdate().
-		Only(ctx)
+	// attempts in Postgres; in SQLite the single-writer lock suffices
+	// and ForUpdate is not supported.
+	q := tx.LifecycleHookAgentPhase.Query().
+		Where(lifecyclehookagentphase.AgentIDEQ(agentID))
+	if useLock {
+		q = q.ForUpdate()
+	}
+	existing, err := q.Only(ctx)
 
 	if ent.IsNotFound(err) {
 		// No existing row — first transition for this agent.
