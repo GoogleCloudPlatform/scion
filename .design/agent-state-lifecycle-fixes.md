@@ -157,32 +157,86 @@ Part 2 / task #4; not fixed here.
 
 ## Part 2 — Crashes never produce an error state
 
-### What we found
-Two distinct gaps:
+### What we found (corrected after deeper survey)
 
-1. **The supervised child is `tmux`, not the harness.** `sciontool init` runs
-   `childArgs`, which is the tmux command (`init.go:1683` comment; `common.go:444`
-   builds `tmux new-session ... '<harness>'`). tmux exits with **its own** status, not
-   the harness pane's. A harness crash (non-zero exit) is masked → `result.code == 0` →
-   `isCrash` is false (`init.go:814`). So the crash path is essentially never taken.
-2. **Even when detected, "crash" ≠ "error".** The crash path sets phase=`stopped` +
-   activity=`crashed` (`init.go:831`), not `PhaseError`. The user expects an *error
-   state*. (**OPEN Q4** — should a crash be terminal `error`, or `stopped`+`crashed`?)
-3. **Local Docker has no supervisor at all.** The local `docker run` CMD is
-   `sh -c "tmux ..."` (`common.go:465`) with no `sciontool init` wrapping, so none of
-   the crash-detection logic runs for local runs.
+**Correction:** `sciontool init` IS the supervisor on ALL runtimes, including local Docker
+— the agent image sets `ENTRYPOINT ["sciontool","init","--"]`
+(`image-build/scion-base/Dockerfile:101`), so `docker run … sh -c "tmux …"` actually runs
+`sciontool init -- sh -c "tmux …"`. The earlier "local Docker has no supervisor" claim was
+wrong. This makes the fix unified across runtimes.
 
-### Proposed scope (draft)
-- Make the harness exit code observable to the supervisor. Options:
-  - (a) Run the harness with `tmux ... ; echo $? > /exit-code` style capture, or set
-    `set-option remain-on-exit` + poll pane dead status + `#{pane_dead_status}`.
-  - (b) Have the harness invoked under a thin wrapper that writes its real exit code to
-    a known file that `sciontool init` reads after tmux returns.
-  - (c) Longer-term: don't wrap the supervised harness in detached tmux for exit-code
-    purposes — supervise the harness directly and attach tmux as a viewer.
-- Decide the target state (Q4) and wire it consistently into Hub status + DB + display.
-- Decide whether local Docker runs need crash→error parity (**OPEN Q5**), since they
-  lack the supervisor today.
+The real, universal gap:
+1. **The supervised child is `sh -c "tmux new-session -d …"`, not the harness.** Because
+   the tmux session is detached (`-d`) and the command chain ends with `attach-session`,
+   the supervised `sh` exits with tmux/attach's status — never the harness pane's. So
+   `result.code == 0` even when the harness exits non-zero → `isCrash` is false
+   (`init.go:814`) → the crash path is essentially never taken. This is why crashes are
+   never surfaced. (`pkg/runtime/common.go:444`, `pkg/sciontool/supervisor/supervisor.go`
+   captures the child=sh exit code faithfully — it's just the wrong process.)
+2. **"crash" ≠ "error" today.** Even when `isCrash` fires, it sets phase=`stopped` +
+   activity=`crashed` (`init.go:831`), not `PhaseError`. `PhaseError` is currently set
+   only on provisioning/clone failures (`pkg/agent/list.go:174`), never on a running-agent
+   crash. (**OPEN Q4** — see below.)
+3. **False crash observed:** the hub showed `activity=crashed`, `exit code -1` while the
+   agent ran fine. Source not yet found in code (no `-1` literal; `runtimebroker/
+   handlers.go:1611` hardcodes `ExitCode:0 // TODO`). Needs live log evidence from a real
+   crash test on the VM. Likely a container-exit inspection or a stale report from a prior
+   container instance landing after a (re)start.
+
+### Q4 DECISION (hybrid)
+Crash target state is hybrid: clean exit (code 0) → `stopped`; limits → `stopped` +
+`limits_exceeded`; unexpected non-zero exit → **`PhaseError`** (restartable — `start`
+clears it and runs a fresh session). To avoid state-validation conflicts (`crashed` is only
+valid on `stopped`), represent a crash as `Phase=error`, activity cleared, with
+`message="Agent crashed with exit code N"` and the exit code recorded. `PhaseError` is
+already protected by `preserveTerminalPhase`, so it won't be reverted by async updates.
+
+### Fix plan (Part 2)
+- **Recover the harness's real exit code from tmux** (the core fix, all runtimes). Cleanest
+  option: wrap the harness inside the tmux window so it writes its exit code to a known
+  file — e.g. `tmux new-session -d -s scion -n agent 'sh -c "<harness>; echo $? >
+  ~/.scion/agent-exit-code"'`. After the supervised `sh` returns, `sciontool init` reads
+  that file and uses it as `finalCode` for the `isCrash` decision (fall back to the
+  supervised code if the file is missing). Localized to `pkg/runtime/common.go` (tmux
+  command) + `cmd/sciontool/commands/init.go` (read the file). Apply the same wrapping in
+  the k8s tmux command (`pkg/runtime/k8s_runtime.go:901`).
+- **Target state (pending Q4):** wire the chosen crash representation consistently through
+  init.go → Hub status → DB → DisplayStatus.
+- **False crash:** find and fix the path that sets crashed/-1 without a real harness exit
+  (attribute crash reports to a specific container instance so stale reports are ignored).
+- **Distinguish exit kinds:** clean exit (0) → stopped; limits → stopped+limits_exceeded;
+  unexpected non-zero → the Q4 target. (Q5 about local-Docker parity is now moot — same
+  path.)
+
+### VM crash-evidence findings (instance-manager, commit a3c8ece)
+- Process tree confirmed: `sciontool(PID1) → sh → tmux-client → tmux-server → claude`.
+  The harness is a tmux **grandchild**, so its exit code is structurally invisible to the
+  supervisor — confirms the exit-code-file fix is the right bridge.
+- **`-1` source identified:** when killed by signal, **tmux-server is reaped as a zombie
+  with exit code -1** by sciontool's zombie reaper. That's the spurious `-1` seen earlier.
+  The fix (read a real exit-code file + use Docker `State.ExitCode`) avoids surfacing the
+  reaper's -1.
+- **Hard crash (SIGKILL claude → container exit 137):** the container DOES exit (session
+  collapses → sh exits). But the hub ended up `phase=stopped`, **`activity=stalled`**
+  (stale — a stopped agent should never be `stalled`), `message="Agent crashed with exit
+  code 137"`. The message came from the **broker heartbeat inspecting Docker `Exited(137)`**
+  — because sciontool's own status/shutdown report **401'd** (see below). So even today's
+  partial crash signal comes from the broker, not sciontool.
+- Implications for the fix:
+  - The **broker-heartbeat path** that derives state from Docker `Exited(code)` must set
+    the crash target (Q4) + `crashed` activity when `ExitCode != 0`, since it's the path
+    that works even when sciontool can't report. Find where Docker exited-status is mapped
+    to phase and enhance it.
+  - On transition to stopped/error on crash, **clear a stale `stalled` activity** (replace
+    with `crashed`). The `stalled` overwrite is a sticky-activity bug.
+
+### Separate bug found: resumed containers get a malformed hub token (401)
+Resumed containers logged persistent `401 invalid agent token: ... compact JWS format must
+have three parts` on every sciontool status/heartbeat call. The harness ran fine (Part 1
+works), but the resumed agent cannot report status/heartbeat → broken observability, and it
+exacerbates crash invisibility. May be a dev-auth-mode artifact on the VM or a real resume
+token-provisioning gap. Tracked as its own task; needs isolation (does it occur with real
+auth, or only dev-auth?).
 
 ---
 

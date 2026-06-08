@@ -166,10 +166,19 @@ func (m *AgentManager) List(ctx context.Context, filter map[string]string) ([]ap
 			agents[i].Phase = string(state.PhaseRunning)
 		}
 		if isContainerStopped {
+			// A non-zero exit code means the agent crashed; map to error
+			// (restartable) rather than a clean stop. A zero exit (or a plain
+			// "stopped" with no embedded code) is a clean stop.
+			exitCode, hasCode := scionruntime.ExitCodeFromContainerStatus(agents[i].ContainerStatus)
+			crashed := hasCode && exitCode != 0
 			p := state.Phase(agents[i].Phase)
 			switch p {
 			case state.PhaseRunning:
-				agents[i].Phase = string(state.PhaseStopped)
+				if crashed {
+					agents[i].Phase = string(state.PhaseError)
+				} else {
+					agents[i].Phase = string(state.PhaseStopped)
+				}
 				agents[i].Activity = ""
 			case state.PhaseCloning, state.PhaseStarting, state.PhaseProvisioning:
 				// Container exited during a pre-running phase (e.g. clone failure

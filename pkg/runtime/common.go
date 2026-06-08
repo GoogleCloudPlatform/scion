@@ -24,6 +24,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -67,6 +69,13 @@ func ResolveContainerWorkspace(repoRoot, workspace string, gitClone *api.GitClon
 	}
 	return "/workspace"
 }
+
+// harnessExitCodeFile is the container-local path where the harness's real
+// exit code is recorded by the tmux agent-window wrapper. There is one agent
+// per container, so a fixed path is safe. `sciontool init` reads this file to
+// recover the authoritative harness exit code (the harness runs as a tmux
+// grandchild whose exit code is otherwise invisible to the supervisor).
+const harnessExitCodeFile = "/tmp/scion-harness-exit-code"
 
 // shellQuote returns s quoted for safe embedding in a POSIX shell command.
 // It uses single quotes, which prevent all shell interpretation (variable
@@ -439,11 +448,19 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 	}
 	cmdLine := strings.Join(quotedArgs, " ")
 
+	// Wrap the harness in a shell that records its real exit code to a fixed
+	// file. The harness runs as a tmux grandchild, so its exit code is
+	// otherwise invisible to the `sciontool init` supervisor (which only sees
+	// the sh/container exit code). Writing $? lets init read the authoritative
+	// harness exit code and report crashes correctly. The whole wrapper is
+	// single-quoted again so tmux's command parser treats it as one word.
+	agentWindowCmd := "sh -c " + shellQuote(cmdLine+"; echo $? > "+harnessExitCodeFile)
+
 	// Build tmux command: create session with "agent" window running the harness,
 	// then add a "shell" window and switch back to the agent window.
 	tmuxCmd := fmt.Sprintf(
 		"tmux new-session -d -s scion -n agent %s \\; set-option -g window-size latest \\; new-window -t scion -n shell \\; select-window -t scion:agent \\; attach-session -t scion",
-		cmdLine,
+		agentWindowCmd,
 	)
 
 	if len(fuseMounts) > 0 {
@@ -851,4 +868,24 @@ func phaseFromContainerStatus(status string) string {
 	default:
 		return "created"
 	}
+}
+
+// exitedStatusRe matches the exit code in container-runtime status strings such
+// as "Exited (137) 2 minutes ago" (Docker/Podman) or "exited (0)".
+var exitedStatusRe = regexp.MustCompile(`(?i)exited\s*\((\d+)\)`)
+
+// ExitCodeFromContainerStatus extracts the exit code from a container status
+// string like "Exited (137) 2 minutes ago". It returns (code, true) when an
+// exited status with a parseable code is present, otherwise (0, false). A plain
+// "stopped" (no embedded code) yields (0, false).
+func ExitCodeFromContainerStatus(status string) (int, bool) {
+	m := exitedStatusRe.FindStringSubmatch(status)
+	if m == nil {
+		return 0, false
+	}
+	code, err := strconv.Atoi(m[1])
+	if err != nil {
+		return 0, false
+	}
+	return code, true
 }

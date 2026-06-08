@@ -6306,6 +6306,33 @@ type brokerAgentHeartbeat struct {
 	Profile         string `json:"profile,omitempty"`     // Settings profile used
 }
 
+// exitCodeFromContainerStatus extracts the exit code from a container-runtime
+// status string such as "Exited (137) 2 minutes ago" (Docker/Podman). It
+// returns (code, true) when an exited status with a parseable code is present,
+// otherwise (0, false). A plain "stopped" (no embedded code) yields (0, false).
+func exitCodeFromContainerStatus(status string) (int, bool) {
+	lower := strings.ToLower(status)
+	idx := strings.Index(lower, "exited")
+	if idx < 0 {
+		return 0, false
+	}
+	rest := status[idx+len("exited"):]
+	open := strings.Index(rest, "(")
+	if open < 0 {
+		return 0, false
+	}
+	close := strings.Index(rest[open:], ")")
+	if close < 0 {
+		return 0, false
+	}
+	numStr := strings.TrimSpace(rest[open+1 : open+close])
+	code, err := strconv.Atoi(numStr)
+	if err != nil {
+		return 0, false
+	}
+	return code, true
+}
+
 func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, id string) {
 	ctx := r.Context()
 
@@ -6395,6 +6422,25 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 					// must not move a running agent back to starting/etc.
 					hbPhase := state.Phase(agentHB.Phase)
 					curPhase := state.Phase(agent.Phase)
+
+					// Derive a crash from the container exit code even when the
+					// broker reports a plain "stopped" (its phase derivation is
+					// based on the container being exited, not on the exit code).
+					// A non-zero exit means the agent crashed → error, with the
+					// exit code recorded so the UI can show it. This works even
+					// if sciontool's own crash report never reached the hub.
+					if hbPhase == state.PhaseStopped {
+						if code, ok := exitCodeFromContainerStatus(agentHB.ContainerStatus); ok && code != 0 {
+							hbPhase = state.PhaseError
+							agentHB.Phase = string(state.PhaseError)
+							c := code
+							statusUpdate.ExitCode = &c
+							if statusUpdate.Message == "" {
+								statusUpdate.Message = fmt.Sprintf("Agent crashed with exit code %d", code)
+							}
+						}
+					}
+
 					if curPhase.IsActivePhase() && hbPhase.IsActivePhase() &&
 						hbPhase.Ordinal() < curPhase.Ordinal() {
 						// Suppress the regression — keep the hub's phase.
@@ -6434,7 +6480,18 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 					case strings.HasPrefix(containerStatusLower, "up") || containerStatusLower == "running":
 						statusUpdate.Phase = string(state.PhaseRunning)
 					case strings.HasPrefix(containerStatusLower, "exited") || containerStatusLower == "stopped":
-						statusUpdate.Phase = string(state.PhaseStopped)
+						// A non-zero exit code means the agent crashed → error
+						// (restartable); a zero/absent code is a clean stop.
+						if code, ok := exitCodeFromContainerStatus(agentHB.ContainerStatus); ok && code != 0 {
+							statusUpdate.Phase = string(state.PhaseError)
+							c := code
+							statusUpdate.ExitCode = &c
+							if statusUpdate.Message == "" {
+								statusUpdate.Message = fmt.Sprintf("Agent crashed with exit code %d", code)
+							}
+						} else {
+							statusUpdate.Phase = string(state.PhaseStopped)
+						}
 						statusUpdate.Activity = ""
 					case containerStatusLower == "created":
 						// Don't downgrade a running agent to provisioning — the

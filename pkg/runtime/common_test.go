@@ -268,7 +268,11 @@ func TestBuildCommonRunArgs(t *testing.T) {
 			},
 			wantIn: []string{
 				"-e FOO=BAR",
-				"tmux new-session -d -s scion -n agent 'gemini' '--yolo' '--resume' '--prompt-interactive' 'hello'",
+				// The harness now runs inside an `sh -c` wrapper that captures
+				// its exit code to a fixed file (see harnessExitCodeFile).
+				"tmux new-session -d -s scion -n agent sh -c ",
+				`'\''gemini'\'' '\''--yolo'\'' '\''--resume'\'' '\''--prompt-interactive'\'' '\''hello'\''`,
+				"; echo $? > /tmp/scion-harness-exit-code",
 			},
 		},
 		{
@@ -281,7 +285,9 @@ func TestBuildCommonRunArgs(t *testing.T) {
 				Resume:  true,
 			},
 			wantIn: []string{
-				"tmux new-session -d -s scion -n agent 'gemini' '--yolo' '--resume' '--prompt-interactive' 'hello'",
+				"tmux new-session -d -s scion -n agent sh -c ",
+				`'\''gemini'\'' '\''--yolo'\'' '\''--resume'\'' '\''--prompt-interactive'\'' '\''hello'\''`,
+				"; echo $? > /tmp/scion-harness-exit-code",
 			},
 		},
 		{
@@ -1449,11 +1455,48 @@ func TestBuildCommonRunArgs_ShellMetacharsInPrompt(t *testing.T) {
 			}
 
 			// The last arg is the tmux command passed to "sh -c".
-			// Verify the prompt is single-quoted (not double-quoted).
+			// Verify the prompt is single-quoted (not double-quoted). The harness
+			// arg is single-quoted once (shellQuote), and the whole agent-window
+			// script is single-quoted again for the `sh -c` exit-code wrapper, so
+			// the inner single quotes are re-escaped as '\''.
 			shCmd := args[len(args)-1]
 			quoted := shellQuote(tt.task)
-			if !strings.Contains(shCmd, quoted) {
-				t.Errorf("expected single-quoted prompt %q in sh -c arg, got: %s", quoted, shCmd)
+			reEscaped := strings.ReplaceAll(quoted, "'", `'\''`)
+			if !strings.Contains(shCmd, reEscaped) {
+				t.Errorf("expected re-escaped single-quoted prompt %q in sh -c arg, got: %s", reEscaped, shCmd)
+			}
+			// Ensure the prompt is never double-quoted (which would let the shell
+			// interpret metacharacters like $ and backticks).
+			if strings.Contains(shCmd, `"`+tt.task+`"`) {
+				t.Errorf("prompt was double-quoted in sh -c arg, got: %s", shCmd)
+			}
+		})
+	}
+}
+
+func TestExitCodeFromContainerStatus(t *testing.T) {
+	tests := []struct {
+		status   string
+		wantCode int
+		wantOK   bool
+	}{
+		{"Exited (0) 3 hours ago", 0, true},
+		{"Exited (137) 2 minutes ago", 137, true},
+		{"exited (1)", 1, true},
+		{"Up 5 minutes", 0, false},
+		{"running", 0, false},
+		{"stopped", 0, false},
+		{"Created", 0, false},
+		{"", 0, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.status, func(t *testing.T) {
+			code, ok := ExitCodeFromContainerStatus(tc.status)
+			if ok != tc.wantOK {
+				t.Fatalf("ok = %v, want %v", ok, tc.wantOK)
+			}
+			if code != tc.wantCode {
+				t.Errorf("code = %d, want %d", code, tc.wantCode)
 			}
 		})
 	}

@@ -547,6 +547,17 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 		upd.SetStalledFromActivity("")
 		upd.SetLastActivityEvent(now)
 		upd.SetToolName(su.ToolName)
+	} else if su.Phase == "stopped" || su.Phase == "error" {
+		// Transitioning to a terminal phase without an explicit activity: clear
+		// any leftover live activity (e.g. a lingering "stalled" set by the
+		// platform) so a stopped/crashed agent never displays a stale activity.
+		// A terminal activity (crashed/limits_exceeded) carries information about
+		// HOW the agent stopped and is preserved.
+		if current.Activity != "" && !isTerminalActivity(current.Activity) {
+			upd.SetActivity("")
+			upd.SetStalledFromActivity("")
+			upd.SetToolName("")
+		}
 	}
 
 	if su.Message != "" {

@@ -805,31 +805,30 @@ waitLoop:
 	if !limitsExceeded && result.code == handlers.ExitCodeLimitsExceeded {
 		limitsExceeded = true
 	}
-	finalCode := result.code
-	if limitsExceeded {
-		finalCode = handlers.ExitCodeLimitsExceeded
-	} else if result.err != nil && result.code == 0 {
-		finalCode = 1
-	}
-	isCrash := !limitsExceeded && finalCode != 0
 
-	// Build crash message: distinguish real child exit codes from
-	// synthetic ones produced by supervisor errors.
-	var crashMsg string
-	if isCrash {
-		if result.err != nil && result.code == 0 {
-			crashMsg = fmt.Sprintf("Agent crashed (supervisor error: %v)", result.err)
-		} else {
-			crashMsg = fmt.Sprintf("Agent crashed with exit code %d", finalCode)
-		}
+	// The harness runs as a tmux grandchild, so the supervised child's exit
+	// code (result.code) reflects sh/tmux, not the harness itself. The tmux
+	// agent-window wrapper records the harness's real exit code to a fixed
+	// file; prefer it when present. If absent (e.g. the container was SIGKILLed
+	// or OOM-killed before the harness could write), fall back to result.code.
+	harnessCode := readHarnessExitCode()
+	if harnessCode != nil {
+		log.Info("Recovered harness exit code %d from %s", *harnessCode, harnessExitCodeFile)
 	}
+
+	outcome := classifyExit(result.code, result.err, harnessCode, limitsExceeded)
+	finalCode := outcome.exitCode
+	limitsExceeded = outcome.limitsExceeded
 
 	// Update local agent-info.json BEFORE the Hub report so the broker
 	// heartbeat can relay crash/limits state even if the Hub call is slow
 	// or fails entirely.
-	if isCrash {
-		statusHandler.UpdatePhase(state.PhaseStopped, state.ActivityCrashed, "")
-		statusHandler.SetMessage(crashMsg)
+	if outcome.isCrash {
+		// HYBRID mapping: an unexpected non-zero exit becomes PhaseError with
+		// the activity cleared (crash detail lives in the message + exitCode).
+		// `crashed` activity is only valid on PhaseStopped per state validation.
+		statusHandler.UpdatePhase(state.PhaseError, "", "")
+		statusHandler.SetMessage(outcome.message)
 	} else if limitsExceeded {
 		statusHandler.UpdatePhase(state.PhaseStopped, state.ActivityLimitsExceeded, "")
 		statusHandler.SetMessage("limits exceeded")
@@ -839,13 +838,13 @@ waitLoop:
 	if hubClient := hub.NewClient(); hubClient != nil && hubClient.IsConfigured() {
 		hubCtx, hubCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		var hubErr error
-		if isCrash {
-			s := state.AgentState{Phase: state.PhaseStopped, Activity: state.ActivityCrashed}
+		if outcome.isCrash {
+			s := state.AgentState{Phase: state.PhaseError}
 			hubErr = hubClient.UpdateStatus(hubCtx, hub.StatusUpdate{
-				Phase:    state.PhaseStopped,
-				Activity: state.ActivityCrashed,
+				Phase:    state.PhaseError,
+				Activity: "",
 				Status:   s.DisplayStatus(),
-				Message:  crashMsg,
+				Message:  outcome.message,
 				ExitCode: &finalCode,
 			})
 		} else if limitsExceeded {
@@ -863,7 +862,7 @@ waitLoop:
 		if hubErr != nil {
 			log.Error("Failed to report final status to Hub: %v", hubErr)
 		} else {
-			log.Info("Reported final status to Hub (exitCode=%d, crash=%v)", finalCode, isCrash)
+			log.Info("Reported final status to Hub (exitCode=%d, crash=%v)", finalCode, outcome.isCrash)
 		}
 		hubCancel()
 	}
@@ -873,6 +872,14 @@ waitLoop:
 		return handlers.ExitCodeLimitsExceeded
 	}
 
+	if outcome.isCrash {
+		// Propagate the authoritative crash code (which may have come from the
+		// harness exit-code file rather than the supervised child) so the
+		// container's exit status reflects the real failure.
+		log.Error("Agent crashed with exit code %d", finalCode)
+		return finalCode
+	}
+
 	if result.err != nil {
 		log.Error("Supervisor error: %v", result.err)
 		return 1
@@ -880,6 +887,81 @@ waitLoop:
 
 	log.Info("Child exited with code %d", result.code)
 	return result.code
+}
+
+// harnessExitCodeFile is the container-local path where the tmux agent-window
+// wrapper records the harness's real exit code (see pkg/runtime). It must match
+// the path used when building the tmux command.
+const harnessExitCodeFile = "/tmp/scion-harness-exit-code"
+
+// readHarnessExitCode reads and parses the harness exit-code file written by the
+// tmux agent-window wrapper. Returns nil if the file is missing or unparseable
+// (e.g. the container was SIGKILLed/OOM-killed before the harness could write).
+func readHarnessExitCode() *int {
+	data, err := os.ReadFile(harnessExitCodeFile)
+	if err != nil {
+		return nil
+	}
+	code, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil {
+		return nil
+	}
+	return &code
+}
+
+// exitOutcome captures the classified result of a supervised agent exit.
+type exitOutcome struct {
+	exitCode       int
+	limitsExceeded bool
+	isCrash        bool
+	message        string
+}
+
+// classifyExit applies the HYBRID exit mapping. It is a pure function so it can
+// be unit-tested independently of the supervisor/hub machinery.
+//
+//   - limitsExceeded                  → stopped + limits_exceeded (handled by caller)
+//   - clean exit (code 0, no error)   → stopped
+//   - unexpected non-zero exit/error  → error (crash), restartable
+//
+// harnessCode, when non-nil, is the authoritative harness exit code recovered
+// from the exit-code file and overrides the supervised child's code for the
+// crash decision. supervisorErr is the supervisor's own error (a synthetic
+// failure not reflected in supervisedCode).
+func classifyExit(supervisedCode int, supervisorErr error, harnessCode *int, limitsExceeded bool) exitOutcome {
+	if !limitsExceeded && supervisedCode == handlers.ExitCodeLimitsExceeded {
+		limitsExceeded = true
+	}
+
+	// Choose the authoritative exit code: prefer the harness file, then the
+	// supervised child code.
+	finalCode := supervisedCode
+	if harnessCode != nil {
+		finalCode = *harnessCode
+	}
+
+	if limitsExceeded {
+		return exitOutcome{exitCode: handlers.ExitCodeLimitsExceeded, limitsExceeded: true}
+	}
+
+	// A supervisor error with a zero exit code is itself a failure.
+	supervisorFailed := supervisorErr != nil && finalCode == 0
+	if supervisorFailed {
+		finalCode = 1
+	}
+
+	isCrash := finalCode != 0
+	if !isCrash {
+		return exitOutcome{exitCode: 0}
+	}
+
+	var msg string
+	if supervisorFailed {
+		msg = fmt.Sprintf("Agent crashed (supervisor error: %v)", supervisorErr)
+	} else {
+		msg = fmt.Sprintf("Agent crashed with exit code %d", finalCode)
+	}
+	return exitOutcome{exitCode: finalCode, isCrash: true, message: msg}
 }
 
 // handleLimitsExceeded is called when a limit is exceeded (duration timer or SIGUSR1).

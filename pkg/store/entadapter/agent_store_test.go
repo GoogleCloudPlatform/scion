@@ -288,6 +288,58 @@ func TestAgentStore_UpdateAgentStatus(t *testing.T) {
 	assert.ErrorIs(t, s.UpdateAgentStatus(ctx, uuid.NewString(), store.AgentStatusUpdate{Phase: "running"}), store.ErrNotFound)
 }
 
+// TestAgentStore_TerminalPhaseClearsStalledActivity verifies that transitioning
+// to a terminal phase (stopped/error) without an explicit activity clears a
+// lingering live activity such as "stalled", while preserving terminal
+// activities like "crashed".
+func TestAgentStore_TerminalPhaseClearsStalledActivity(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("stalled cleared on stop", func(t *testing.T) {
+		s, projectID := newTestAgentStore(t)
+		a := makeAgent(projectID, "stalled-stop")
+		a.Phase = "running"
+		a.Activity = "stalled"
+		require.NoError(t, s.CreateAgent(ctx, a))
+
+		require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{Phase: "stopped"}))
+		got, err := s.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		assert.Equal(t, "stopped", got.Phase)
+		assert.Equal(t, "", got.Activity, "stalled activity must be cleared on stop")
+	})
+
+	t.Run("stalled cleared on error", func(t *testing.T) {
+		s, projectID := newTestAgentStore(t)
+		a := makeAgent(projectID, "stalled-error")
+		a.Phase = "running"
+		a.Activity = "stalled"
+		require.NoError(t, s.CreateAgent(ctx, a))
+
+		require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{Phase: "error"}))
+		got, err := s.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		assert.Equal(t, "error", got.Phase)
+		assert.Equal(t, "", got.Activity, "stalled activity must be cleared on error")
+	})
+
+	t.Run("terminal activity preserved when explicitly provided", func(t *testing.T) {
+		s, projectID := newTestAgentStore(t)
+		a := makeAgent(projectID, "crashed-keep")
+		a.Phase = "running"
+		a.Activity = "stalled"
+		require.NoError(t, s.CreateAgent(ctx, a))
+
+		require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{
+			Phase:    "stopped",
+			Activity: "crashed",
+		}))
+		got, err := s.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		assert.Equal(t, "crashed", got.Activity, "explicit terminal activity must be kept")
+	})
+}
+
 func TestAgentStore_MarkStaleAgentsOffline(t *testing.T) {
 	ctx := context.Background()
 	s, projectID := newTestAgentStore(t)
