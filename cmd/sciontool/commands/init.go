@@ -349,9 +349,9 @@ func runInit(args []string) int {
 		}
 	}
 
-	// Declare hubClient early so the metadata server's fetch callbacks can
-	// capture it. It is populated later, after the child process starts.
-	var hubClient *hub.Client
+	// Initialize hubClient early so the metadata server's fetch callbacks
+	// can use it without data races or startup race conditions.
+	hubClient := hub.NewClient()
 
 	// Start GCP metadata server if configured
 	var metadataServer *metadata.Server
@@ -490,7 +490,6 @@ func runInit(args []string) int {
 		}
 
 		// Report running status to Hub if in hosted mode
-		hubClient = hub.NewClient()
 		log.Debug("Hub client check: client=%v, configured=%v", hubClient != nil, hubClient != nil && hubClient.IsConfigured())
 		log.Debug("Hub env: SCION_HUB_ENDPOINT=%q, SCION_HUB_URL=%q, token_file=%v, SCION_AGENT_ID=%q",
 			os.Getenv("SCION_HUB_ENDPOINT"), os.Getenv("SCION_HUB_URL"), hub.ReadTokenFile() != "", os.Getenv("SCION_AGENT_ID"))
