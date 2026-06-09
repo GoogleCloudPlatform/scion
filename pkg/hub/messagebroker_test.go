@@ -276,11 +276,11 @@ func TestMessageBrokerProxy_InterruptPrefixNotStrippedWithoutBang(t *testing.T) 
 
 func TestMessageBrokerProxy_InterruptPrefixEdgeCases(t *testing.T) {
 	tests := []struct {
-		name         string
-		input        string
-		wantMsg      string
+		name          string
+		input         string
+		wantMsg       string
 		wantInterrupt bool
-		wantUrgent   bool
+		wantUrgent    bool
 	}{
 		{"bare bang", "!", "interrupt", true, true},
 		{"bang with trailing spaces", "!   ", "interrupt", true, true},
