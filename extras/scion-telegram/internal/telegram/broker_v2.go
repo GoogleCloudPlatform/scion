@@ -2274,7 +2274,7 @@ func FormatMessageV2(msg *messages.StructuredMessage, agentSlug string, recipien
 	}
 
 	b.WriteString("\n\n")
-	b.WriteString(msg.Msg)
+	b.WriteString(unescapeNewlines(msg.Msg))
 
 	text := b.String()
 	return truncateMessage(text)

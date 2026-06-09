@@ -67,7 +67,7 @@ func FormatMessage(msg *messages.StructuredMessage) string {
 
 	// Add message body
 	b.WriteString("\n\n")
-	b.WriteString(msg.Msg)
+	b.WriteString(unescapeNewlines(msg.Msg))
 
 	// Add call-to-action for input-needed
 	if msg.Type == messages.TypeInputNeeded {
@@ -330,6 +330,14 @@ func truncateHTMLMessage(text string) string {
 		}
 	}
 	return truncated + truncationSuffix
+}
+
+// unescapeNewlines replaces literal escape sequences (\n, \t) with their actual
+// characters. Message text may arrive with these sequences when it passes through
+// JSON encoding (e.g. FormatForDelivery) and is later forwarded without decoding,
+// or when shell arguments carry un-interpreted backslash escapes.
+func unescapeNewlines(s string) string {
+	return strings.NewReplacer(`\n`, "\n", `\t`, "\t").Replace(s)
 }
 
 // truncateMessage ensures the text does not exceed Telegram's message limit.

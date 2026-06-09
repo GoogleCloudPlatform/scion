@@ -123,6 +123,47 @@ func TestFormatMessage_Nil(t *testing.T) {
 	assert.Equal(t, "", text)
 }
 
+func TestFormatMessage_UnescapesLiteralNewlines(t *testing.T) {
+	msg := messages.NewInstruction("agent:coder", "user:alice", `Found issues:\n\n1. Bug A\n2. Bug B`)
+	text := FormatMessage(msg)
+	assert.Contains(t, text, "Found issues:\n\n1. Bug A\n2. Bug B")
+	assert.NotContains(t, text, `\n`)
+}
+
+func TestFormatMessageV2_UnescapesLiteralNewlines(t *testing.T) {
+	msg := &messages.StructuredMessage{
+		Version:   messages.Version,
+		Sender:    "agent:coder",
+		Recipient: "user:alice",
+		Msg:       `Hello\n\nWorld`,
+	}
+	text := FormatMessageV2(msg, "coder")
+	assert.Contains(t, text, "Hello\n\nWorld")
+	assert.NotContains(t, text, `\n`)
+}
+
+func TestUnescapeNewlines(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"no escapes", "hello world", "hello world"},
+		{"single newline", `hello\nworld`, "hello\nworld"},
+		{"double newline", `hello\n\nworld`, "hello\n\nworld"},
+		{"tab", `col1\tcol2`, "col1\tcol2"},
+		{"mixed", `line1\n\tindented`, "line1\n\tindented"},
+		{"actual newlines unchanged", "hello\nworld", "hello\nworld"},
+		{"empty string", "", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := unescapeNewlines(tt.input)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
 // --- FormatStateChangeCard tests ---
 
 func TestFormatStateChangeCard_Running(t *testing.T) {
