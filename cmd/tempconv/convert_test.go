@@ -2,6 +2,8 @@ package main
 
 import (
 	"math"
+	"os"
+	"strings"
 	"testing"
 )
 
@@ -72,5 +74,102 @@ func TestConvert(t *testing.T) {
 				t.Errorf("convert(%v, %v, %v) = %v, want %v", tt.value, tt.from, tt.to, got, tt.want)
 			}
 		})
+	}
+}
+
+func runCLI(t *testing.T, args ...string) (stdout, stderr string, exitCode int) {
+	t.Helper()
+	outFile, _ := os.CreateTemp(t.TempDir(), "stdout")
+	errFile, _ := os.CreateTemp(t.TempDir(), "stderr")
+	defer outFile.Close()
+	defer errFile.Close()
+
+	exitCode = run(args, outFile, errFile)
+
+	outFile.Seek(0, 0)
+	outBytes, _ := os.ReadFile(outFile.Name())
+	errFile.Seek(0, 0)
+	errBytes, _ := os.ReadFile(errFile.Name())
+
+	return string(outBytes), string(errBytes), exitCode
+}
+
+func TestCLI_AC007_UnknownScale(t *testing.T) {
+	stdout, stderr, code := runCLI(t, "--from", "rankine", "--to", "celsius", "100")
+	if code == 0 {
+		t.Fatal("expected non-zero exit code for unknown scale")
+	}
+	if !strings.Contains(stderr, "unknown temperature scale") {
+		t.Errorf("expected error about unknown scale, got stderr: %q, stdout: %q", stderr, stdout)
+	}
+}
+
+func TestCLI_AC008_MissingValue(t *testing.T) {
+	_, stderr, code := runCLI(t, "--from", "celsius", "--to", "fahrenheit")
+	if code == 0 {
+		t.Fatal("expected non-zero exit code for missing value")
+	}
+	if !strings.Contains(stderr, "usage:") {
+		t.Errorf("expected usage message, got stderr: %q", stderr)
+	}
+}
+
+func TestCLI_AC009_NegativeValue(t *testing.T) {
+	stdout, stderr, code := runCLI(t, "--from", "celsius", "--to", "fahrenheit", "-40")
+	if code != 0 {
+		t.Fatalf("expected exit code 0, got %d; stderr: %q", code, stderr)
+	}
+	if strings.TrimSpace(stdout) != "-40.00" {
+		t.Errorf("expected -40.00, got %q", strings.TrimSpace(stdout))
+	}
+}
+
+func TestCLI_NaN(t *testing.T) {
+	_, stderr, code := runCLI(t, "--from", "celsius", "--to", "fahrenheit", "NaN")
+	if code == 0 {
+		t.Fatal("expected non-zero exit code for NaN input")
+	}
+	if !strings.Contains(stderr, "invalid temperature value") {
+		t.Errorf("expected invalid value error, got stderr: %q", stderr)
+	}
+}
+
+func TestCLI_Inf(t *testing.T) {
+	_, stderr, code := runCLI(t, "--from", "celsius", "--to", "fahrenheit", "Inf")
+	if code == 0 {
+		t.Fatal("expected non-zero exit code for Inf input")
+	}
+	if !strings.Contains(stderr, "invalid temperature value") {
+		t.Errorf("expected invalid value error, got stderr: %q", stderr)
+	}
+}
+
+func TestCLI_NegativeInf(t *testing.T) {
+	_, stderr, code := runCLI(t, "--from", "celsius", "--to", "fahrenheit", "-Inf")
+	if code == 0 {
+		t.Fatal("expected non-zero exit code for -Inf input")
+	}
+	if !strings.Contains(stderr, "invalid temperature value") {
+		t.Errorf("expected invalid value error, got stderr: %q", stderr)
+	}
+}
+
+func TestCLI_AC006_BelowAbsoluteZero(t *testing.T) {
+	_, stderr, code := runCLI(t, "--from", "kelvin", "--to", "celsius", "-1")
+	if code == 0 {
+		t.Fatal("expected non-zero exit code for below absolute zero")
+	}
+	if !strings.Contains(stderr, "below absolute zero") {
+		t.Errorf("expected absolute zero error, got stderr: %q", stderr)
+	}
+}
+
+func TestCLI_AC001_CelsiusToFahrenheit(t *testing.T) {
+	stdout, stderr, code := runCLI(t, "--from", "celsius", "--to", "fahrenheit", "100")
+	if code != 0 {
+		t.Fatalf("expected exit code 0, got %d; stderr: %q", code, stderr)
+	}
+	if strings.TrimSpace(stdout) != "212.00" {
+		t.Errorf("expected 212.00, got %q", strings.TrimSpace(stdout))
 	}
 }
