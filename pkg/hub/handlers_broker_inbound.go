@@ -18,9 +18,9 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
 )
 
 // inboundMessageRequest is the JSON body sent by broker plugins to deliver
@@ -37,8 +37,9 @@ type inboundMessageRequest struct {
 // Authentication: Requires broker HMAC authentication (X-Scion-Broker-ID header
 // validated by BrokerAuthMiddleware).
 //
-// The topic string is parsed to extract the project ID and agent slug using the
-// standard topic format: scion.project.<projectID>.agent.<agentSlug>.messages
+// The topic string is parsed to extract the project ID and agent slug. Canonical
+// broker topics use scion.project; legacy scion.grove topics are accepted here
+// as an external compatibility adapter.
 func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		MethodNotAllowed(w)
@@ -145,15 +146,15 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 }
 
 // parseAgentMessageTopic extracts the project ID and agent slug from a topic string.
-// Expected format: scion.project.<projectID>.agent.<agentSlug>.messages
+// Expected canonical format: scion.project.<projectID>.agent.<agentSlug>.messages.
+// Legacy scion.grove topics are accepted at this adapter boundary.
 func parseAgentMessageTopic(topic string) (projectID, agentSlug string, err error) {
-	parts := strings.Split(topic, ".")
-	// scion.project.<projectID>.agent.<agentSlug>.messages = 6 parts
-	if len(parts) != 6 {
-		return "", "", fmt.Errorf("expected format scion.project.<projectId>.agent.<agentSlug>.messages, got %d segments", len(parts))
+	parsed, err := projectcompat.ParseTopic(topic)
+	if err != nil {
+		return "", "", err
 	}
-	if parts[0] != "scion" || parts[1] != "project" || parts[3] != "agent" || parts[5] != "messages" {
+	if parsed.Kind != projectcompat.TopicKindAgent {
 		return "", "", fmt.Errorf("expected format scion.project.<projectId>.agent.<agentSlug>.messages")
 	}
-	return parts[2], parts[4], nil
+	return parsed.ProjectID, parsed.Actor, nil
 }

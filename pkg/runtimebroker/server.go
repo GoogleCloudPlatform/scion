@@ -35,6 +35,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/brokercredentials"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
 	scionrt "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/templatecache"
@@ -1016,12 +1017,19 @@ func (s *Server) LookupContainerID(ctx context.Context, slug, projectID string) 
 
 	filter := map[string]string{"scion.name": slug}
 	if projectID != "" {
-		filter["scion.grove_id"] = projectID
+		filter[projectcompat.LabelProjectID] = projectID
 	}
 
 	agents, err := s.manager.List(ctx, filter)
 	if err != nil {
 		return "", fmt.Errorf("failed to list agents: %w", err)
+	}
+	if len(agents) == 0 && projectID != "" {
+		legacyFilter := map[string]string{"scion.name": slug, projectcompat.LabelGroveID: projectID}
+		agents, err = s.manager.List(ctx, legacyFilter)
+		if err != nil {
+			return "", fmt.Errorf("failed to list agents with legacy project label: %w", err)
+		}
 	}
 
 	// Fall back to auxiliary runtimes (e.g. kubernetes when default is docker)
@@ -1035,6 +1043,10 @@ func (s *Server) LookupContainerID(ctx context.Context, slug, projectID string) 
 
 		for rtName, aux := range auxRuntimes {
 			auxAgents, auxErr := aux.Manager.List(ctx, filter)
+			if auxErr == nil && len(auxAgents) == 0 && projectID != "" {
+				legacyFilter := map[string]string{"scion.name": slug, projectcompat.LabelGroveID: projectID}
+				auxAgents, auxErr = aux.Manager.List(ctx, legacyFilter)
+			}
 			if auxErr == nil && len(auxAgents) > 0 {
 				agents = auxAgents
 				slog.Debug("Agent found via auxiliary runtime", "slug", slug, "runtime", rtName)
@@ -1105,13 +1117,20 @@ func (s *Server) LookupAgent(ctx context.Context, slug, projectID string) (*Agen
 	slug = strings.ToLower(slug)
 	filter := map[string]string{"scion.name": slug}
 	if projectID != "" {
-		filter["scion.grove_id"] = projectID
+		filter[projectcompat.LabelProjectID] = projectID
 	}
 
 	// Try default manager first
 	agents, err := s.manager.List(ctx, filter)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list agents: %w", err)
+	}
+	if len(agents) == 0 && projectID != "" {
+		legacyFilter := map[string]string{"scion.name": slug, projectcompat.LabelGroveID: projectID}
+		agents, err = s.manager.List(ctx, legacyFilter)
+		if err != nil {
+			return nil, fmt.Errorf("failed to list agents with legacy project label: %w", err)
+		}
 	}
 
 	runtimeName := s.runtime.Name()
@@ -1128,6 +1147,10 @@ func (s *Server) LookupAgent(ctx context.Context, slug, projectID string) (*Agen
 
 		for rtName, aux := range auxRuntimes {
 			auxAgents, auxErr := aux.Manager.List(ctx, filter)
+			if auxErr == nil && len(auxAgents) == 0 && projectID != "" {
+				legacyFilter := map[string]string{"scion.name": slug, projectcompat.LabelGroveID: projectID}
+				auxAgents, auxErr = aux.Manager.List(ctx, legacyFilter)
+			}
 			if auxErr == nil && len(auxAgents) > 0 {
 				agents = auxAgents
 				runtimeName = rtName

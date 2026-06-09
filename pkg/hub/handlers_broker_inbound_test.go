@@ -42,6 +42,12 @@ func TestParseAgentMessageTopic(t *testing.T) {
 			agentSlug: "code-reviewer",
 		},
 		{
+			name:      "legacy grove topic",
+			topic:     "scion.grove.my-project-123.agent.coder.messages",
+			projectID: "my-project-123",
+			agentSlug: "coder",
+		},
+		{
 			name:    "too few segments",
 			topic:   "scion.project.g1.agent.coder",
 			wantErr: true,

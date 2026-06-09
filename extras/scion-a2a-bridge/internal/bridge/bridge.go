@@ -29,6 +29,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/extras/scion-a2a-bridge/internal/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
 )
 
 var (
@@ -267,12 +268,12 @@ func (b *Bridge) SendMessage(ctx context.Context, projectSlug, agentSlug, contex
 	scionMsg.Metadata = map[string]string{"a2aTaskId": taskID}
 
 	if b.broker != nil {
-		pattern := fmt.Sprintf("scion.project.%s.user.%s.messages", agentCtx.ProjectID, b.config.Hub.User)
+		pattern := projectcompat.UserTopic(agentCtx.ProjectID, b.config.Hub.User)
 		if err := b.broker.RequestSubscription(pattern); err != nil {
 			b.log.Warn("failed to request subscription", "pattern", pattern, "error", err)
 		}
 		// Subscribe to legacy grove topic as well during transition.
-		legacyPattern := fmt.Sprintf("scion.grove.%s.user.%s.messages", agentCtx.ProjectID, b.config.Hub.User)
+		legacyPattern := projectcompat.LegacyUserTopic(agentCtx.ProjectID, b.config.Hub.User)
 		if err := b.broker.RequestSubscription(legacyPattern); err != nil {
 			b.log.Warn("failed to request legacy subscription", "pattern", legacyPattern, "error", err)
 		}
@@ -937,19 +938,16 @@ func (b *Bridge) removeWaiter(taskID string) {
 }
 
 // parseTopic extracts project and agent identifiers from a broker topic string.
-// Expected format: scion.project.<projectID>.user.<user>.messages (6 segments).
-// The 5-segment agent form (scion.project.<g>.agent.<a>) is parsed but currently
-// unused — the bridge only subscribes to user-scoped topics.
+// Canonical scion.project topics and legacy scion.grove topics are accepted.
 func parseTopic(topic string) (projectID, agentSlug string, err error) {
-	parts := strings.Split(topic, ".")
-	if len(parts) < 3 || parts[0] != "scion" || (parts[1] != "project" && parts[1] != "grove") {
+	parsed, err := projectcompat.ParseTopic(topic)
+	if err != nil {
 		return "", "", fmt.Errorf("malformed topic: %s", topic)
 	}
-	projectID = parts[2]
-	if len(parts) >= 5 && parts[3] == "agent" {
-		agentSlug = parts[4]
+	if parsed.Kind == projectcompat.TopicKindAgent {
+		agentSlug = parsed.Actor
 	}
-	return projectID, agentSlug, nil
+	return parsed.ProjectID, agentSlug, nil
 }
 
 func extractProjectIDFromTopic(topic string) string {

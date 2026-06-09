@@ -1,6 +1,6 @@
 module github.com/GoogleCloudPlatform/scion/extras/scion-a2a-bridge
 
-go 1.25.4
+go 1.26.1
 
 require (
 	cloud.google.com/go/secretmanager v1.16.0
@@ -9,6 +9,8 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/hashicorp/go-plugin v1.7.0
 	github.com/mattn/go-sqlite3 v1.14.28
+	github.com/prometheus/client_golang v1.23.2
+	github.com/prometheus/client_model v0.6.2
 	gopkg.in/yaml.v3 v3.0.1
 )
 
@@ -33,8 +35,6 @@ require (
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/oklog/run v1.1.0 // indirect
-	github.com/prometheus/client_golang v1.23.2 // indirect
-	github.com/prometheus/client_model v0.6.2 // indirect
 	github.com/prometheus/common v0.67.2 // indirect
 	github.com/prometheus/procfs v0.19.2 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect

@@ -11,6 +11,7 @@ import (
 	"github.com/bwmarrin/discordgo"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
 )
 
 // CallbackHandler processes Discord message component interactions (buttons, selects).
@@ -412,7 +413,7 @@ func (h *CallbackHandler) deliverAskUserResponse(ctx context.Context, i *discord
 		sender = "user:" + mapping.ScionEmail
 	}
 
-	topic := fmt.Sprintf("scion.project.%s.agent.%s.messages", pending.ProjectID, pending.AgentSlug)
+	topic := projectcompat.AgentTopic(pending.ProjectID, pending.AgentSlug)
 	recipient := "agent:" + pending.AgentSlug
 
 	msg := &messages.StructuredMessage{

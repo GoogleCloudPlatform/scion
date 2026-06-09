@@ -38,7 +38,7 @@ func TestInProcessEventBus_PublishSubscribe(t *testing.T) {
 	var wg sync.WaitGroup
 	wg.Add(1)
 
-	_, err := b.Subscribe("scion.grove.g1.agent.myagent.messages", func(ctx context.Context, topic string, msg *messages.StructuredMessage) {
+	_, err := b.Subscribe("scion.project.g1.agent.myagent.messages", func(ctx context.Context, topic string, msg *messages.StructuredMessage) {
 		receivedTopic = topic
 		received = msg
 		wg.Done()
@@ -48,7 +48,7 @@ func TestInProcessEventBus_PublishSubscribe(t *testing.T) {
 	}
 
 	msg := messages.NewInstruction("user:alice", "agent:myagent", "hello")
-	err = b.Publish(context.Background(), "scion.grove.g1.agent.myagent.messages", msg)
+	err = b.Publish(context.Background(), "scion.project.g1.agent.myagent.messages", msg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -61,8 +61,8 @@ func TestInProcessEventBus_PublishSubscribe(t *testing.T) {
 	if received.Msg != "hello" {
 		t.Errorf("expected msg 'hello', got %q", received.Msg)
 	}
-	if receivedTopic != "scion.grove.g1.agent.myagent.messages" {
-		t.Errorf("expected topic 'scion.grove.g1.agent.myagent.messages', got %q", receivedTopic)
+	if receivedTopic != "scion.project.g1.agent.myagent.messages" {
+		t.Errorf("expected topic 'scion.project.g1.agent.myagent.messages', got %q", receivedTopic)
 	}
 }
 
@@ -74,7 +74,7 @@ func TestInProcessEventBus_WildcardSubscribe(t *testing.T) {
 	var received []string
 
 	// Subscribe with wildcard — match all agent messages in project g1
-	_, err := b.Subscribe("scion.grove.g1.agent.*.messages", func(ctx context.Context, topic string, msg *messages.StructuredMessage) {
+	_, err := b.Subscribe("scion.project.g1.agent.*.messages", func(ctx context.Context, topic string, msg *messages.StructuredMessage) {
 		mu.Lock()
 		received = append(received, msg.Msg)
 		mu.Unlock()
@@ -87,12 +87,12 @@ func TestInProcessEventBus_WildcardSubscribe(t *testing.T) {
 	msg1 := messages.NewInstruction("user:alice", "agent:a1", "msg1")
 	msg2 := messages.NewInstruction("user:alice", "agent:a2", "msg2")
 
-	b.Publish(ctx, "scion.grove.g1.agent.a1.messages", msg1)
-	b.Publish(ctx, "scion.grove.g1.agent.a2.messages", msg2)
+	b.Publish(ctx, "scion.project.g1.agent.a1.messages", msg1)
+	b.Publish(ctx, "scion.project.g1.agent.a2.messages", msg2)
 
 	// Should NOT match a different project
 	msg3 := messages.NewInstruction("user:alice", "agent:a3", "msg3")
-	b.Publish(ctx, "scion.grove.g2.agent.a3.messages", msg3)
+	b.Publish(ctx, "scion.project.g2.agent.a3.messages", msg3)
 
 	// Wait for delivery
 	time.Sleep(50 * time.Millisecond)
@@ -112,7 +112,7 @@ func TestInProcessEventBus_GreaterThanWildcard(t *testing.T) {
 	var received []string
 
 	// Subscribe with > wildcard — match everything under project g1
-	_, err := b.Subscribe("scion.grove.g1.>", func(ctx context.Context, topic string, msg *messages.StructuredMessage) {
+	_, err := b.Subscribe("scion.project.g1.>", func(ctx context.Context, topic string, msg *messages.StructuredMessage) {
 		mu.Lock()
 		received = append(received, topic)
 		mu.Unlock()
@@ -122,9 +122,9 @@ func TestInProcessEventBus_GreaterThanWildcard(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	b.Publish(ctx, "scion.grove.g1.agent.a1.messages", messages.NewInstruction("u:a", "a:b", "m1"))
-	b.Publish(ctx, "scion.grove.g1.broadcast", messages.NewInstruction("u:a", "grove:g1", "m2"))
-	b.Publish(ctx, "scion.grove.g2.broadcast", messages.NewInstruction("u:a", "grove:g2", "m3")) // should NOT match
+	b.Publish(ctx, "scion.project.g1.agent.a1.messages", messages.NewInstruction("u:a", "a:b", "m1"))
+	b.Publish(ctx, "scion.project.g1.broadcast", messages.NewInstruction("u:a", "project:g1", "m2"))
+	b.Publish(ctx, "scion.project.g2.broadcast", messages.NewInstruction("u:a", "project:g2", "m3")) // should NOT match
 
 	time.Sleep(50 * time.Millisecond)
 
@@ -144,7 +144,7 @@ func TestInProcessEventBus_BroadcastTopic(t *testing.T) {
 
 	// Two subscribers listening to the project broadcast topic
 	for i := 0; i < 2; i++ {
-		_, err := b.Subscribe("scion.grove.g1.broadcast", func(ctx context.Context, topic string, msg *messages.StructuredMessage) {
+		_, err := b.Subscribe("scion.project.g1.broadcast", func(ctx context.Context, topic string, msg *messages.StructuredMessage) {
 			wg.Done()
 		})
 		if err != nil {
@@ -152,9 +152,9 @@ func TestInProcessEventBus_BroadcastTopic(t *testing.T) {
 		}
 	}
 
-	msg := messages.NewInstruction("agent:lead", "grove:g1", "hello all")
+	msg := messages.NewInstruction("agent:lead", "project:g1", "hello all")
 	msg.Broadcasted = true
-	b.Publish(context.Background(), "scion.grove.g1.broadcast", msg)
+	b.Publish(context.Background(), "scion.project.g1.broadcast", msg)
 
 	wg.Wait()
 }
@@ -171,7 +171,7 @@ func TestInProcessEventBus_PropagatesPublisherContext(t *testing.T) {
 	const key ctxKey = "trace"
 
 	got := make(chan string, 1)
-	_, err := b.Subscribe("scion.grove.g1.broadcast", func(ctx context.Context, topic string, msg *messages.StructuredMessage) {
+	_, err := b.Subscribe("scion.project.g1.broadcast", func(ctx context.Context, topic string, msg *messages.StructuredMessage) {
 		v, _ := ctx.Value(key).(string)
 		got <- v
 	})
@@ -180,8 +180,8 @@ func TestInProcessEventBus_PropagatesPublisherContext(t *testing.T) {
 	}
 
 	ctx := context.WithValue(context.Background(), key, "abc123")
-	msg := messages.NewInstruction("u:a", "grove:g1", "hi")
-	if err := b.Publish(ctx, "scion.grove.g1.broadcast", msg); err != nil {
+	msg := messages.NewInstruction("u:a", "project:g1", "hi")
+	if err := b.Publish(ctx, "scion.project.g1.broadcast", msg); err != nil {
 		t.Fatal(err)
 	}
 
@@ -200,7 +200,7 @@ func TestInProcessEventBus_Unsubscribe(t *testing.T) {
 	defer b.Close()
 
 	var callCount atomic.Int32
-	sub, err := b.Subscribe("scion.grove.g1.broadcast", func(ctx context.Context, topic string, msg *messages.StructuredMessage) {
+	sub, err := b.Subscribe("scion.project.g1.broadcast", func(ctx context.Context, topic string, msg *messages.StructuredMessage) {
 		callCount.Add(1)
 	})
 	if err != nil {
@@ -208,7 +208,7 @@ func TestInProcessEventBus_Unsubscribe(t *testing.T) {
 	}
 
 	msg := messages.NewInstruction("u:a", "g:g1", "m1")
-	b.Publish(context.Background(), "scion.grove.g1.broadcast", msg)
+	b.Publish(context.Background(), "scion.project.g1.broadcast", msg)
 	time.Sleep(50 * time.Millisecond)
 
 	if callCount.Load() != 1 {
@@ -217,7 +217,7 @@ func TestInProcessEventBus_Unsubscribe(t *testing.T) {
 
 	sub.Unsubscribe()
 
-	b.Publish(context.Background(), "scion.grove.g1.broadcast", msg)
+	b.Publish(context.Background(), "scion.project.g1.broadcast", msg)
 	time.Sleep(50 * time.Millisecond)
 
 	if callCount.Load() != 1 {
@@ -238,7 +238,7 @@ func TestInProcessEventBus_CloseStopsDelivery(t *testing.T) {
 
 	b.Close()
 
-	err = b.Publish(context.Background(), "scion.grove.g1.broadcast",
+	err = b.Publish(context.Background(), "scion.project.g1.broadcast",
 		messages.NewInstruction("u:a", "g:g1", "after close"))
 	if err != ErrEventBusClosed {
 		t.Fatalf("expected ErrEventBusClosed, got %v", err)
@@ -255,14 +255,14 @@ func TestInProcessEventBus_NoMatchNoDelivery(t *testing.T) {
 	defer b.Close()
 
 	callCount := 0
-	_, err := b.Subscribe("scion.grove.g1.agent.specific.messages", func(ctx context.Context, topic string, msg *messages.StructuredMessage) {
+	_, err := b.Subscribe("scion.project.g1.agent.specific.messages", func(ctx context.Context, topic string, msg *messages.StructuredMessage) {
 		callCount++
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	b.Publish(context.Background(), "scion.grove.g1.agent.other.messages",
+	b.Publish(context.Background(), "scion.project.g1.agent.other.messages",
 		messages.NewInstruction("u:a", "a:other", "should not match"))
 	time.Sleep(50 * time.Millisecond)
 
@@ -277,10 +277,10 @@ func TestTopicHelpers(t *testing.T) {
 		got      string
 		expected string
 	}{
-		{"agent messages", TopicAgentMessages("g1", "myagent"), "scion.grove.g1.agent.myagent.messages"},
-		{"project broadcast", TopicProjectBroadcast("g1"), "scion.grove.g1.broadcast"},
+		{"agent messages", TopicAgentMessages("g1", "myagent"), "scion.project.g1.agent.myagent.messages"},
+		{"project broadcast", TopicProjectBroadcast("g1"), "scion.project.g1.broadcast"},
 		{"global broadcast", TopicGlobalBroadcast(), "scion.global.broadcast"},
-		{"all agent messages", TopicAllAgentMessages("g1"), "scion.grove.g1.agent.*.messages"},
+		{"all agent messages", TopicAllAgentMessages("g1"), "scion.project.g1.agent.*.messages"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -306,9 +306,9 @@ func TestSubjectMatchesPattern(t *testing.T) {
 		{"a.>", "a.b.c", true},
 		{"a.>", "a.b.c.d", true},
 		{"a.>", "b.c", false},
-		{"scion.grove.*.broadcast", "scion.grove.g1.broadcast", true},
-		{"scion.grove.g1.agent.*.messages", "scion.grove.g1.agent.myagent.messages", true},
-		{"scion.grove.g1.agent.*.messages", "scion.grove.g2.agent.myagent.messages", false},
+		{"scion.project.*.broadcast", "scion.project.g1.broadcast", true},
+		{"scion.project.g1.agent.*.messages", "scion.project.g1.agent.myagent.messages", true},
+		{"scion.project.g1.agent.*.messages", "scion.project.g2.agent.myagent.messages", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.pattern+"_"+tt.subject, func(t *testing.T) {

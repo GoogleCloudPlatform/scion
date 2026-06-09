@@ -37,6 +37,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/plugin"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
 )
 
 const (
@@ -447,19 +448,24 @@ func (b *TelegramBrokerV2) importV1UserMappings(ctx context.Context, mappingsJSO
 	}
 }
 
-// parseTopicComponents extracts projectID and agentSlug from a topic string.
-// Example: "scion.grove.myproj.agent.coder.messages" → ("myproj", "coder")
+// parseTopicComponents extracts projectID and agentSlug from a broker topic.
+// Legacy scion.grove topics are accepted by projectcompat at this adapter boundary.
 func parseTopicComponents(topic string) (projectID, agentSlug string) {
-	parts := strings.Split(topic, ".")
-	for i, part := range parts {
-		if part == "grove" && i+1 < len(parts) {
-			projectID = parts[i+1]
+	parsed, err := projectcompat.ParseTopic(topic)
+	if err == nil {
+		projectID = parsed.ProjectID
+		if parsed.Kind == projectcompat.TopicKindAgent {
+			agentSlug = parsed.Actor
 		}
-		if part == "project" && i+1 < len(parts) {
-			projectID = parts[i+1]
-		}
-		if part == "agent" && i+1 < len(parts) {
-			agentSlug = parts[i+1]
+	} else {
+		parts := strings.Split(topic, ".")
+		for i, part := range parts {
+			if (part == "grove" || part == "project") && i+1 < len(parts) {
+				projectID = parts[i+1]
+			}
+			if part == "agent" && i+1 < len(parts) {
+				agentSlug = parts[i+1]
+			}
 		}
 	}
 	if projectID == "" {
@@ -1793,7 +1799,7 @@ func (b *TelegramBrokerV2) handleGroupMessage(tgMsg *TGMessage) {
 			}
 		}
 
-		topic := fmt.Sprintf("scion.project.%s.agent.%s.messages", link.ProjectID, agentSlug)
+		topic := projectcompat.AgentTopic(link.ProjectID, agentSlug)
 		recipient := "agent:" + agentSlug
 
 		msg := &messages.StructuredMessage{
@@ -2033,7 +2039,7 @@ func (b *TelegramBrokerV2) handleCallbackQuery(ctx context.Context, cb *Callback
 	}
 
 	// Deliver the ask-user response to the hub.
-	topic := fmt.Sprintf("scion.project.%s.agent.%s.messages", resp.ProjectID, resp.AgentSlug)
+	topic := projectcompat.AgentTopic(resp.ProjectID, resp.AgentSlug)
 
 	// Determine sender identity from the callback user.
 	sender := "telegram:unknown"
@@ -2106,7 +2112,7 @@ func (b *TelegramBrokerV2) getProjectAgents(ctx context.Context, projectID strin
 // --- Dynamic subscription management ---
 
 func (b *TelegramBrokerV2) subscribeForProject(projectID string) {
-	pattern := fmt.Sprintf("scion.project.%s.>", projectID)
+	pattern := projectcompat.ProjectPattern(projectID)
 
 	b.mu.RLock()
 	hc := b.hostCallbacks
@@ -2121,7 +2127,7 @@ func (b *TelegramBrokerV2) subscribeForProject(projectID string) {
 }
 
 func (b *TelegramBrokerV2) unsubscribeForProject(projectID string) {
-	pattern := fmt.Sprintf("scion.project.%s.>", projectID)
+	pattern := projectcompat.ProjectPattern(projectID)
 
 	b.mu.RLock()
 	hc := b.hostCallbacks

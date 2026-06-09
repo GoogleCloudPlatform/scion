@@ -23,8 +23,8 @@
 //
 // Topic hierarchy:
 //
-//	scion.grove.<grove-id>.agent.<agent-slug>.messages   - direct messages to an agent
-//	scion.grove.<grove-id>.broadcast                      - project-wide broadcasts
+//	scion.project.<project-id>.agent.<agent-slug>.messages - direct messages to an agent
+//	scion.project.<project-id>.broadcast                    - project-wide broadcasts
 //	scion.global.broadcast                                - global broadcasts
 package eventbus
 
@@ -32,6 +32,7 @@ import (
 	"context"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
 )
 
 // EventBus abstracts message routing and delivery.
@@ -61,12 +62,12 @@ type Subscription interface {
 
 // TopicAgentMessages returns the topic for direct messages to an agent.
 func TopicAgentMessages(projectID, agentSlug string) string {
-	return "scion.grove." + projectID + ".agent." + agentSlug + ".messages"
+	return projectcompat.AgentTopic(projectID, agentSlug)
 }
 
 // TopicProjectBroadcast returns the topic for project-wide broadcast messages.
 func TopicProjectBroadcast(projectID string) string {
-	return "scion.grove." + projectID + ".broadcast"
+	return projectcompat.BroadcastTopic(projectID)
 }
 
 // TopicGlobalBroadcast returns the topic for global broadcast messages.
@@ -77,16 +78,16 @@ func TopicGlobalBroadcast() string {
 // TopicAllAgentMessages returns a wildcard pattern matching all agent message
 // topics in a project.
 func TopicAllAgentMessages(projectID string) string {
-	return "scion.grove." + projectID + ".agent.*.messages"
+	return projectcompat.AllAgentTopic(projectID)
 }
 
 // TopicUserMessages returns the topic for messages directed at a specific user in a project.
 func TopicUserMessages(projectID, userID string) string {
-	return "scion.grove." + projectID + ".user." + userID + ".messages"
+	return projectcompat.UserTopic(projectID, userID)
 }
 
 // TopicAllUserMessages returns a wildcard pattern matching all user message
 // topics in a project.
 func TopicAllUserMessages(projectID string) string {
-	return "scion.grove." + projectID + ".user.*.messages"
+	return projectcompat.AllUserTopic(projectID)
 }

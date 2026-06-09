@@ -33,6 +33,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/gcp"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
 	scionrt "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/templatecache"
@@ -50,8 +51,9 @@ func matchesAgent(a api.AgentInfo, id, projectID string) bool {
 	if projectID == "" {
 		return true
 	}
-	// Check grove_id label first (authoritative), then ProjectID field
-	if labelProjectID := a.Labels["scion.grove_id"]; labelProjectID != "" {
+	// Check runtime labels first (canonical project_id, then legacy grove_id),
+	// then ProjectID field.
+	if labelProjectID := projectcompat.ProjectIDFromLabels(a.Labels); labelProjectID != "" {
 		return labelProjectID == projectID
 	}
 	if a.ProjectID != "" {
@@ -249,10 +251,7 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 	agentKey := func(a api.AgentInfo) string {
 		pid := a.ProjectID
 		if pid == "" {
-			pid = a.Labels["scion.project_id"]
-		}
-		if pid == "" {
-			pid = a.Labels["scion.grove_id"]
+			pid = projectcompat.ProjectIDFromLabels(a.Labels)
 		}
 		return a.Name + "\x00" + pid
 	}

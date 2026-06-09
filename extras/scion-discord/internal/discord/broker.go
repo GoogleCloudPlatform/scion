@@ -28,6 +28,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/plugin"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
 )
 
 const (
@@ -290,7 +291,7 @@ func (b *DiscordBroker) Configure(config map[string]string) error {
 				if hc == nil {
 					continue
 				}
-				if err := hc.RequestSubscription("scion.project.>"); err != nil {
+				if err := hc.RequestSubscription(projectcompat.AllProjectsPattern()); err != nil {
 					b.log.Warn("Failed to request bootstrap subscription", "error", err)
 					continue
 				}
@@ -915,7 +916,7 @@ func (b *DiscordBroker) handleIncomingMessage(s *discordgo.Session, m *discordgo
 			b.log.Warn("Failed to save conversation context", "error", err)
 		}
 
-		topic := fmt.Sprintf("scion.project.%s.agent.%s.messages", link.ProjectID, agentSlug)
+		topic := projectcompat.AgentTopic(link.ProjectID, agentSlug)
 		recipient := "agent:" + agentSlug
 
 		msg := &messages.StructuredMessage{
@@ -1066,7 +1067,7 @@ func (b *DiscordBroker) getProjectAgents(ctx context.Context, projectID string) 
 // --- Dynamic subscription management ---
 
 func (b *DiscordBroker) subscribeForProject(projectID string) {
-	pattern := fmt.Sprintf("scion.project.%s.>", projectID)
+	pattern := projectcompat.ProjectPattern(projectID)
 
 	b.mu.RLock()
 	hc := b.hostCallbacks
@@ -1081,7 +1082,7 @@ func (b *DiscordBroker) subscribeForProject(projectID string) {
 }
 
 func (b *DiscordBroker) unsubscribeForProject(projectID string) {
-	pattern := fmt.Sprintf("scion.project.%s.>", projectID)
+	pattern := projectcompat.ProjectPattern(projectID)
 
 	b.mu.RLock()
 	hc := b.hostCallbacks
@@ -1162,19 +1163,24 @@ func (b *DiscordBroker) resolveStaleChannelSlugs(ctx context.Context) {
 
 // --- Topic parsing ---
 
-// parseTopicComponents extracts projectID and agentSlug from a topic string.
-// Example: "scion.project.myproj.agent.coder.messages" -> ("myproj", "coder")
+// parseTopicComponents extracts projectID and agentSlug from a broker topic.
+// Legacy scion.grove topics are accepted by projectcompat at this adapter boundary.
 func parseTopicComponents(topic string) (projectID, agentSlug string) {
-	parts := strings.Split(topic, ".")
-	for i, part := range parts {
-		if part == "grove" && i+1 < len(parts) {
-			projectID = parts[i+1]
+	parsed, err := projectcompat.ParseTopic(topic)
+	if err == nil {
+		projectID = parsed.ProjectID
+		if parsed.Kind == projectcompat.TopicKindAgent {
+			agentSlug = parsed.Actor
 		}
-		if part == "project" && i+1 < len(parts) {
-			projectID = parts[i+1]
-		}
-		if part == "agent" && i+1 < len(parts) {
-			agentSlug = parts[i+1]
+	} else {
+		parts := strings.Split(topic, ".")
+		for i, part := range parts {
+			if (part == "grove" || part == "project") && i+1 < len(parts) {
+				projectID = parts[i+1]
+			}
+			if part == "agent" && i+1 < len(parts) {
+				agentSlug = parts[i+1]
+			}
 		}
 	}
 	if projectID == "" {

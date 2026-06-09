@@ -34,6 +34,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/gcp"
 	"github.com/GoogleCloudPlatform/scion/pkg/k8s"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"golang.org/x/term"
 	corev1 "k8s.io/api/core/v1"
@@ -761,10 +762,7 @@ func (r *KubernetesRuntime) createSharedDirPVCs(ctx context.Context, namespace s
 		return nil
 	}
 
-	projectID := config.Labels["scion.project_id"]
-	if projectID == "" {
-		projectID = config.Labels["scion.grove_id"]
-	}
+	projectID := projectcompat.ProjectIDFromLabels(config.Labels)
 
 	projectName := config.Labels["scion.project"]
 	if projectName == "" {
@@ -838,8 +836,9 @@ func (r *KubernetesRuntime) ensureProjectRWXClaim(
 	}
 
 	if projectID != "" {
-		pvc.Labels["scion.project_id"] = projectID
-		pvc.Labels["scion.grove_id"] = projectID
+		for k, v := range projectcompat.ProjectIDLabels(projectID, true) {
+			pvc.Labels[k] = v
+		}
 	}
 
 	if storageClass != "" {

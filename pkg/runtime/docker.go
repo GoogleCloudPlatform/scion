@@ -24,6 +24,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/gcp"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
 
@@ -211,12 +212,7 @@ func (r *DockerRuntime) List(ctx context.Context, labelFilter map[string]string)
 					}
 					return labels["scion.grove"]
 				}(),
-				ProjectID: func() string {
-					if p := labels["scion.project_id"]; p != "" {
-						return p
-					}
-					return labels["scion.grove_id"]
-				}(),
+				ProjectID: projectcompat.ProjectIDFromLabels(labels),
 				ProjectPath: func() string {
 					if p := labels["scion.project_path"]; p != "" {
 						return p
