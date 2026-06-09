@@ -80,11 +80,11 @@ func TestClassifyExit(t *testing.T) {
 			wantMsg:        "Agent crashed (supervisor error: boom)",
 		},
 		{
-			name:              "signal-killed without requested shutdown is crash",
-			supervisedCode:    -1,
-			wantCode:          -1,
-			wantCrash:         true,
-			wantMsg:           "Agent crashed with exit code -1",
+			name:           "signal-killed without requested shutdown is crash",
+			supervisedCode: -1,
+			wantCode:       -1,
+			wantCrash:      true,
+			wantMsg:        "Agent crashed with exit code -1",
 		},
 		{
 			name:              "signal-killed with requested shutdown is clean stop",

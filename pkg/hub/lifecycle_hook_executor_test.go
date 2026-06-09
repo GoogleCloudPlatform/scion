@@ -1232,7 +1232,7 @@ func TestSSRFDialer_MixedIPsDialsFirstAllowed(t *testing.T) {
 	resolver := &fakeResolver{
 		ips: []net.IPAddr{
 			{IP: net.ParseIP("127.0.0.1")}, // blocked
-			{IP: allowedIP},                  // allowed — should be dialed
+			{IP: allowedIP},                // allowed — should be dialed
 		},
 	}
 

@@ -555,8 +555,8 @@ type Server struct {
 	authzService           *AuthzService           // Authorization service for policy evaluation
 	events                 EventPublisher          // Event publisher for real-time SSE updates
 	commandBus             CommandBus              // Inter-node dispatch signal bus (nil-safe; nil = no-op)
-	notificationDispatcher   *NotificationDispatcher   // Notification dispatcher for agent status events
-	lifecycleHookEvaluator   *LifecycleHookEvaluator   // Lifecycle hook evaluator for agent phase transitions
+	notificationDispatcher *NotificationDispatcher // Notification dispatcher for agent status events
+	lifecycleHookEvaluator *LifecycleHookEvaluator // Lifecycle hook evaluator for agent phase transitions
 	// reconcile op executors (seams): default to executeDispatch/deliverMessage;
 	// Phase 3/4 supply the real local-tunnel ops; tests override for exactly-once.
 	execDispatch     func(ctx context.Context, d store.BrokerDispatch) (string, error)
@@ -2206,7 +2206,7 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 	// CONCURRENCY-AUDIT.md §"Singleton / leader".
 	s.scheduler.RegisterRecurringSingleton("agent-heartbeat-timeout", 1, store.LockAgentHeartbeatTimeout, s.agentHeartbeatTimeoutHandler())
 	s.scheduler.RegisterRecurringSingleton("agent-stalled-detection", 1, store.LockAgentStalledDetection, s.agentStalledDetectionHandler())
-if s.config.SoftDeleteRetention > 0 {
+	if s.config.SoftDeleteRetention > 0 {
 		s.scheduler.RegisterRecurringSingleton("soft-delete-purge", 60, store.LockSoftDeletePurge, s.purgeHandler())
 	}
 	s.scheduler.RegisterEventHandler("message", s.messageEventHandler())
