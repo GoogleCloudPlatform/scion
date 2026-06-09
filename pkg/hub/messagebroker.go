@@ -498,9 +498,12 @@ func (p *MessageBrokerProxy) deliverToAgent(ctx context.Context, projectID, agen
 	// A leading "!" in the message body acts as an inline interrupt signal:
 	// strip the prefix and promote to urgent so the harness is interrupted
 	// before delivery — equivalent to --interrupt on the CLI.
+	// Shallow-copy to avoid mutating the event-bus pointer shared across subscribers.
 	if strings.HasPrefix(msg.Msg, "!") {
-		msg.Msg = msg.Msg[1:]
-		msg.Urgent = true
+		stripped := *msg
+		stripped.Msg = msg.Msg[1:]
+		stripped.Urgent = true
+		msg = &stripped
 	}
 
 	dispatcher := p.getDispatcher()
