@@ -1,13 +1,34 @@
-# Tasks — tempconv
+# Task Breakdown — Hello-World CLI
 
-## Task 1: Core conversion logic and unit tests
-**Acceptance criteria:** AC-001, AC-002, AC-003, AC-004, AC-005, AC-006, AC-009, AC-010
-**Subtasks:**
-- [ ] Implement: Create `cmd/tempconv/convert.go` with conversion functions for all scale pairs, absolute zero validation, and scale normalization. Create `cmd/tempconv/convert_test.go` with table-driven tests covering all conversion paths, edge cases, and error conditions.
-- [ ] Review: verify against AC-001 through AC-006, AC-009, AC-010
+## Task 1: Build the greeting package
 
-## Task 2: CLI entry point, flag parsing, and integration tests
-**Acceptance criteria:** AC-001, AC-006, AC-007, AC-008
+**Acceptance criteria:** AC-005, AC-006, AC-007
+
+Create `pkg/greeting/greet.go` with a `Greet(name string, now time.Time) string` function that:
+- Returns `"Hello, <name>! The current time is <HH:MM:SS>."` 
+- Defaults to `"World"` if name is empty
+
 **Subtasks:**
-- [ ] Implement: Create `cmd/tempconv/main.go` with flag parsing (--from, --to, positional value), error handling for missing/invalid args, and formatted output. Create integration-level tests for CLI argument handling.
-- [ ] Review: verify against AC-007, AC-008, and end-to-end AC-001, AC-006
+- [ ] Implement: Write `pkg/greeting/greet.go` and `pkg/greeting/greet_test.go` together. Tests must cover: default name, custom name, empty name with fixed time injection. Use `testify/assert`.
+- [ ] Review: Verify against AC-005, AC-006, AC-007. Confirm deterministic time output in tests.
+
+## Task 2: Build the CLI command and entry point
+
+**Acceptance criteria:** AC-001, AC-002, AC-003, AC-004
+
+Create `cmd/hello/main.go` with a cobra root command that:
+- Accepts `--name` string flag (default: "World")
+- Calls `greeting.Greet()` with the flag value and `time.Now()`
+- Prints the result to stdout
+
+**Subtasks:**
+- [ ] Implement: Write `cmd/hello/main.go` with cobra command wiring and integration test in `cmd/hello/main_test.go`. Tests should build the binary and run it as a subprocess to verify end-to-end output format. Use `testify/assert` and `testify/require`.
+- [ ] Review: Verify against AC-001, AC-002, AC-003, AC-004. Confirm `--name` flag works, empty name defaults correctly, and names with spaces are handled.
+
+## Task 3: Verify build and test pipeline
+
+**Acceptance criteria:** AC-001 through AC-007
+
+**Subtasks:**
+- [ ] Implement: Run `go build ./cmd/hello/` and `go test ./pkg/greeting/ ./cmd/hello/` to confirm everything compiles and passes. Fix any issues.
+- [ ] Review: Verify all 7 acceptance criteria are covered by at least one passing test. Confirm the binary runs and produces expected output.

@@ -1,89 +1,70 @@
-# Acceptance Criteria — tempconv
+# Acceptance Criteria — Hello-World CLI
 
-## Feature: Temperature Conversion
+## Feature: Greeting Output
 
-### AC-001: Celsius to Fahrenheit
 ```gherkin
-@smoke
-Scenario: Convert Celsius to Fahrenheit
-  Given the user runs tempconv with --from celsius --to fahrenheit 100
-  When the conversion is performed
-  Then the output is "212.00"
+Feature: Hello greeting with current time
+
+  @smoke
+  Scenario: Default greeting without flags
+    Given the hello CLI is built
+    When the user runs the hello command with no arguments
+    Then the output contains "Hello, World!"
+    And the output contains "The current time is"
+    And the time is in HH:MM:SS format
+
+  @smoke
+  Scenario: Personalized greeting with --name flag
+    Given the hello CLI is built
+    When the user runs the hello command with "--name Alice"
+    Then the output contains "Hello, Alice!"
+    And the output contains "The current time is"
+
+  @edge
+  Scenario: Empty name flag defaults to World
+    Given the hello CLI is built
+    When the user runs the hello command with "--name ''"
+    Then the output contains "Hello, World!"
+
+  @edge
+  Scenario: Name with spaces
+    Given the hello CLI is built
+    When the user runs the hello command with "--name 'Jane Doe'"
+    Then the output contains "Hello, Jane Doe!"
 ```
 
-### AC-002: Fahrenheit to Celsius
+## Feature: Greeting Package Unit Tests
+
 ```gherkin
-@smoke
-Scenario: Convert Fahrenheit to Celsius
-  Given the user runs tempconv with --from fahrenheit --to celsius 32
-  When the conversion is performed
-  Then the output is "0.00"
+Feature: Greeting function with injected time
+
+  @smoke
+  Scenario: Greet returns formatted string with given name and time
+    Given a fixed time of 2026-06-09 14:30:45
+    When Greet is called with name "World"
+    Then the result is "Hello, World! The current time is 14:30:45."
+
+  @smoke
+  Scenario: Greet uses provided name
+    Given a fixed time of 2026-06-09 09:00:00
+    When Greet is called with name "Alice"
+    Then the result is "Hello, Alice! The current time is 09:00:00."
+
+  @edge
+  Scenario: Greet with empty name defaults to World
+    Given a fixed time of 2026-06-09 12:00:00
+    When Greet is called with name ""
+    Then the result is "Hello, World! The current time is 12:00:00."
 ```
 
-### AC-003: Celsius to Kelvin
-```gherkin
-@smoke
-Scenario: Convert Celsius to Kelvin
-  Given the user runs tempconv with --from celsius --to kelvin 0
-  When the conversion is performed
-  Then the output is "273.15"
-```
+## Acceptance Criteria Index
 
-### AC-004: Kelvin to Fahrenheit
-```gherkin
-Scenario: Convert Kelvin to Fahrenheit
-  Given the user runs tempconv with --from kelvin --to fahrenheit 373.15
-  When the conversion is performed
-  Then the output is "212.00"
-```
-
-### AC-005: Same-scale conversion (identity)
-```gherkin
-Scenario: Same scale returns input unchanged
-  Given the user runs tempconv with --from celsius --to celsius 42
-  When the conversion is performed
-  Then the output is "42.00"
-```
-
-### AC-006: Below absolute zero error
-```gherkin
-@edge
-Scenario: Reject temperature below absolute zero
-  Given the user runs tempconv with --from kelvin --to celsius -1
-  When the conversion is performed
-  Then the tool exits with an error indicating the temperature is below absolute zero
-```
-
-### AC-007: Invalid scale name
-```gherkin
-@edge
-Scenario: Reject unknown temperature scale
-  Given the user runs tempconv with --from rankine --to celsius 100
-  When the conversion is performed
-  Then the tool exits with an error indicating an unknown scale
-```
-
-### AC-008: Missing value argument
-```gherkin
-@edge
-Scenario: Error when no temperature value provided
-  Given the user runs tempconv with --from celsius --to fahrenheit but no value
-  When the tool is invoked
-  Then the tool exits with a usage error
-```
-
-### AC-009: Negative Celsius values
-```gherkin
-Scenario: Convert negative Celsius to Fahrenheit
-  Given the user runs tempconv with --from celsius --to fahrenheit -40
-  When the conversion is performed
-  Then the output is "-40.00"
-```
-
-### AC-010: Decimal precision
-```gherkin
-Scenario: Output has two decimal places
-  Given the user runs tempconv with --from fahrenheit --to celsius 100
-  When the conversion is performed
-  Then the output is "37.78"
-```
+| ID     | Scenario                          | Tag    |
+|--------|-----------------------------------|--------|
+| AC-001 | Default greeting without flags    | @smoke |
+| AC-002 | Personalized greeting with --name | @smoke |
+| AC-003 | Empty name defaults to World      | @edge  |
+| AC-004 | Name with spaces                  | @edge  |
+| AC-005 | Greet function with fixed time    | @smoke |
+| AC-006 | Greet uses provided name          | @smoke |
+| AC-007 | Greet empty name defaults         | @edge  |
