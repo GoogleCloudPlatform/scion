@@ -1,70 +1,44 @@
-# Acceptance Criteria — Hello-World CLI
+# Acceptance Criteria: hello-sdlc
 
 ## Feature: Greeting Output
 
 ```gherkin
-Feature: Hello greeting with current time
+Feature: hello-sdlc greeting
 
   @smoke
-  Scenario: Default greeting without flags
-    Given the hello CLI is built
-    When the user runs the hello command with no arguments
-    Then the output contains "Hello, World!"
-    And the output contains "The current time is"
-    And the time is in HH:MM:SS format
+  Scenario: Default greeting with no flags
+    Given the hello-sdlc binary is built
+    When the user runs hello-sdlc with no arguments
+    Then stdout contains exactly "Hello, World! Built by the SDLC pipeline."
+    And the exit code is 0
 
   @smoke
-  Scenario: Personalized greeting with --name flag
-    Given the hello CLI is built
-    When the user runs the hello command with "--name Alice"
-    Then the output contains "Hello, Alice!"
-    And the output contains "The current time is"
+  Scenario: Custom name via --name flag
+    Given the hello-sdlc binary is built
+    When the user runs hello-sdlc with --name Alice
+    Then stdout contains exactly "Hello, Alice! Built by the SDLC pipeline."
+    And the exit code is 0
 
   @edge
-  Scenario: Empty name flag defaults to World
-    Given the hello CLI is built
-    When the user runs the hello command with "--name ''"
-    Then the output contains "Hello, World!"
+  Scenario: Empty string name
+    Given the hello-sdlc binary is built
+    When the user runs hello-sdlc with --name ""
+    Then stdout contains exactly "Hello, ! Built by the SDLC pipeline."
+    And the exit code is 0
 
   @edge
   Scenario: Name with spaces
-    Given the hello CLI is built
-    When the user runs the hello command with "--name 'Jane Doe'"
-    Then the output contains "Hello, Jane Doe!"
-```
-
-## Feature: Greeting Package Unit Tests
-
-```gherkin
-Feature: Greeting function with injected time
-
-  @smoke
-  Scenario: Greet returns formatted string with given name and time
-    Given a fixed time of 2026-06-09 14:30:45
-    When Greet is called with name "World"
-    Then the result is "Hello, World! The current time is 14:30:45."
-
-  @smoke
-  Scenario: Greet uses provided name
-    Given a fixed time of 2026-06-09 09:00:00
-    When Greet is called with name "Alice"
-    Then the result is "Hello, Alice! The current time is 09:00:00."
-
-  @edge
-  Scenario: Greet with empty name defaults to World
-    Given a fixed time of 2026-06-09 12:00:00
-    When Greet is called with name ""
-    Then the result is "Hello, World! The current time is 12:00:00."
+    Given the hello-sdlc binary is built
+    When the user runs hello-sdlc with --name "Jane Doe"
+    Then stdout contains exactly "Hello, Jane Doe! Built by the SDLC pipeline."
+    And the exit code is 0
 ```
 
 ## Acceptance Criteria Index
 
-| ID     | Scenario                          | Tag    |
-|--------|-----------------------------------|--------|
-| AC-001 | Default greeting without flags    | @smoke |
-| AC-002 | Personalized greeting with --name | @smoke |
-| AC-003 | Empty name defaults to World      | @edge  |
-| AC-004 | Name with spaces                  | @edge  |
-| AC-005 | Greet function with fixed time    | @smoke |
-| AC-006 | Greet uses provided name          | @smoke |
-| AC-007 | Greet empty name defaults         | @edge  |
+| ID     | Scenario                        | Tag    |
+|--------|---------------------------------|--------|
+| AC-001 | Default greeting with no flags  | @smoke |
+| AC-002 | Custom name via --name flag     | @smoke |
+| AC-003 | Empty string name               | @edge  |
+| AC-004 | Name with spaces                | @edge  |

@@ -1,17 +1,16 @@
-# Risk Register — Hello-World CLI
+# Risk Register: hello-sdlc
 
-## P0 (must-fix before shipping)
+## Assessment
 
-*None identified.* This is a standalone hello-world tool with no external dependencies, no I/O beyond stdout, no persistence, and no auth.
+This is a minimal CLI tool with no external dependencies, no network access, no data storage, and no authentication. Risk surface is negligible.
 
-## P1 (should-fix before shipping)
+## P0 (must-fix-before-shipping)
 
-### R-001: Time zone ambiguity
-- **Category:** Integration
-- **Risk:** The greeting displays local time, which varies by environment. CI and containers may have different `TZ` settings.
-- **Mitigation:** Document that the tool uses the system's local time. Tests use fixed `time.Time` values so they are timezone-independent. Integration tests should assert format (`HH:MM:SS`) rather than specific time values.
+*None identified.* The tool is a pure function with string formatting — no security, data, integration, or performance risks.
 
-### R-002: Module dependency footprint
-- **Category:** Performance
-- **Risk:** Adding cobra as a dependency for a trivial CLI may feel heavy. However, the project already depends on cobra, so no new dependency is introduced.
-- **Mitigation:** No action needed — cobra is already in `go.mod`.
+## P1 (should-fix-before-shipping)
+
+| Risk | Category | Description | Mitigation |
+|------|----------|-------------|------------|
+| R-001 | Integration | Missing Apache 2.0 license header on new files would fail CI lint checks | Include standard Google LLC copyright header on all new .go files |
+| R-002 | Integration | Binary name collision if `hello-sdlc` conflicts with an existing target in Makefile | Check Makefile before adding build targets (if applicable) |

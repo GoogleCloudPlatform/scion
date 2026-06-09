@@ -1,34 +1,25 @@
-# Task Breakdown — Hello-World CLI
+# Tasks: hello-sdlc
 
-## Task 1: Build the greeting package
-
-**Acceptance criteria:** AC-005, AC-006, AC-007
-
-Create `pkg/greeting/greet.go` with a `Greet(name string, now time.Time) string` function that:
-- Returns `"Hello, <name>! The current time is <HH:MM:SS>."` 
-- Defaults to `"World"` if name is empty
-
-**Subtasks:**
-- [ ] Implement: Write `pkg/greeting/greet.go` and `pkg/greeting/greet_test.go` together. Tests must cover: default name, custom name, empty name with fixed time injection. Use `testify/assert`.
-- [ ] Review: Verify against AC-005, AC-006, AC-007. Confirm deterministic time output in tests.
-
-## Task 2: Build the CLI command and entry point
+## Task 1: Build hello-sdlc CLI with greeting logic and flag parsing
 
 **Acceptance criteria:** AC-001, AC-002, AC-003, AC-004
 
-Create `cmd/hello/main.go` with a cobra root command that:
-- Accepts `--name` string flag (default: "World")
-- Calls `greeting.Greet()` with the flag value and `time.Now()`
-- Prints the result to stdout
+**Description:** Create `cmd/hello-sdlc/main.go` with a `Greet(name string) string` function that returns the formatted greeting, and a `main()` that parses `--name` (default `"World"`) and prints the result. Write unit tests for `Greet()` covering all four acceptance criteria.
+
+**Files to create:**
+- `cmd/hello-sdlc/main.go` — entrypoint with flag parsing + `Greet()` function
+- `cmd/hello-sdlc/main_test.go` — unit tests for `Greet()` covering AC-001 through AC-004
 
 **Subtasks:**
-- [ ] Implement: Write `cmd/hello/main.go` with cobra command wiring and integration test in `cmd/hello/main_test.go`. Tests should build the binary and run it as a subprocess to verify end-to-end output format. Use `testify/assert` and `testify/require`.
-- [ ] Review: Verify against AC-001, AC-002, AC-003, AC-004. Confirm `--name` flag works, empty name defaults correctly, and names with spaces are handled.
+- [ ] Implement: Create main.go with `Greet()` function and `--name` flag parsing; create main_test.go with table-driven tests for default name, custom name, empty name, and name with spaces
+- [ ] Review: Verify against AC-001, AC-002, AC-003, AC-004 — run `go test ./cmd/hello-sdlc/...` and `go build ./cmd/hello-sdlc/` to confirm all pass
 
-## Task 3: Verify build and test pipeline
+## Task 2: Validate end-to-end behavior
 
-**Acceptance criteria:** AC-001 through AC-007
+**Acceptance criteria:** AC-001, AC-002
+
+**Description:** Build the binary and run it manually (or via test script) to confirm the exact output format matches the spec for both default and custom name scenarios.
 
 **Subtasks:**
-- [ ] Implement: Run `go build ./cmd/hello/` and `go test ./pkg/greeting/ ./cmd/hello/` to confirm everything compiles and passes. Fix any issues.
-- [ ] Review: Verify all 7 acceptance criteria are covered by at least one passing test. Confirm the binary runs and produces expected output.
+- [ ] Implement: Build binary with `go build -o hello-sdlc ./cmd/hello-sdlc/` and run smoke tests: `./hello-sdlc` and `./hello-sdlc --name Alice`
+- [ ] Review: Verify stdout output matches exact strings from AC-001 and AC-002
