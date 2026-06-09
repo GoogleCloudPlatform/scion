@@ -274,6 +274,66 @@ func TestMessageBrokerProxy_InterruptPrefixNotStrippedWithoutBang(t *testing.T) 
 	}
 }
 
+func TestMessageBrokerProxy_InterruptPrefixEdgeCases(t *testing.T) {
+	tests := []struct {
+		name         string
+		input        string
+		wantMsg      string
+		wantInterrupt bool
+		wantUrgent   bool
+	}{
+		{"bare bang", "!", "interrupt", true, true},
+		{"bang with trailing spaces", "!   ", "interrupt", true, true},
+		{"leading whitespace before bang", "  !restart", "restart", true, true},
+		{"whitespace between bang and content", "!  restart", "restart", true, true},
+		{"leading and inner whitespace", "  !  restart now  ", "restart now", true, true},
+		{"normal message no prefix", "hello", "hello", false, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newBrokerTestStore(t)
+			projectID := setupBrokerTestProject(t, s)
+			setupBrokerTestAgent(t, s, projectID, "test-agent", "running")
+
+			events := NewChannelEventPublisher()
+			defer events.Close()
+
+			bus := eventbus.NewInProcessEventBus(slog.Default())
+			defer bus.Close()
+
+			dispatcher := &brokerMockDispatcher{}
+
+			proxy := NewMessageBrokerProxy(bus, s, events, func() AgentDispatcher { return dispatcher }, slog.Default())
+			proxy.Start()
+			defer proxy.Stop()
+
+			proxy.subscribeAgent(projectID, "test-agent")
+
+			msg := messages.NewInstruction("user:alice", "agent:test-agent", tt.input)
+			if err := proxy.PublishMessage(context.Background(), projectID, msg); err != nil {
+				t.Fatal(err)
+			}
+
+			time.Sleep(100 * time.Millisecond)
+
+			dispatched := dispatcher.getMessages()
+			if len(dispatched) != 1 {
+				t.Fatalf("expected 1 dispatched message, got %d", len(dispatched))
+			}
+			if dispatched[0].msg != tt.wantMsg {
+				t.Errorf("msg = %q, want %q", dispatched[0].msg, tt.wantMsg)
+			}
+			if dispatched[0].interrupt != tt.wantInterrupt {
+				t.Errorf("interrupt = %v, want %v", dispatched[0].interrupt, tt.wantInterrupt)
+			}
+			if dispatched[0].structured.Urgent != tt.wantUrgent {
+				t.Errorf("Urgent = %v, want %v", dispatched[0].structured.Urgent, tt.wantUrgent)
+			}
+		})
+	}
+}
+
 func TestMessageBrokerProxy_InterruptPrefixPersistence(t *testing.T) {
 	s := newBrokerTestStore(t)
 	projectID := setupBrokerTestProject(t, s)

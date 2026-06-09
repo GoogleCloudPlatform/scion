@@ -499,9 +499,13 @@ func (p *MessageBrokerProxy) deliverToAgent(ctx context.Context, projectID, agen
 	// strip the prefix and promote to urgent so the harness is interrupted
 	// before delivery — equivalent to --interrupt on the CLI.
 	// Shallow-copy to avoid mutating the event-bus pointer shared across subscribers.
-	if strings.HasPrefix(msg.Msg, "!") {
+	if trimmed := strings.TrimSpace(msg.Msg); strings.HasPrefix(trimmed, "!") {
 		stripped := *msg
-		stripped.Msg = msg.Msg[1:]
+		content := strings.TrimSpace(trimmed[1:])
+		if content == "" {
+			content = "interrupt"
+		}
+		stripped.Msg = content
 		stripped.Urgent = true
 		msg = &stripped
 	}
