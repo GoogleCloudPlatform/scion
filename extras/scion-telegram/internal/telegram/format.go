@@ -332,12 +332,14 @@ func truncateHTMLMessage(text string) string {
 	return truncated + truncationSuffix
 }
 
-// unescapeNewlines replaces literal escape sequences (\n, \t) with their actual
+// newlineReplacer replaces literal escape sequences (\n, \t) with their actual
 // characters. Message text may arrive with these sequences when it passes through
 // JSON encoding (e.g. FormatForDelivery) and is later forwarded without decoding,
 // or when shell arguments carry un-interpreted backslash escapes.
+var newlineReplacer = strings.NewReplacer(`\n`, "\n", `\t`, "\t")
+
 func unescapeNewlines(s string) string {
-	return strings.NewReplacer(`\n`, "\n", `\t`, "\t").Replace(s)
+	return newlineReplacer.Replace(s)
 }
 
 // truncateMessage ensures the text does not exceed Telegram's message limit.
