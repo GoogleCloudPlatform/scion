@@ -283,7 +283,9 @@ func TestApplyModeRestrictions_Agent(t *testing.T) {
 		"notifications.ack", "notifications.subscribe", "notifications.subscriptions",
 		"notifications.unsubscribe", "notifications.update",
 		"resume",
-		"schedule", "schedule.cancel", "schedule.get", "schedule.history", "schedule.list",
+		"schedule", "schedule.cancel", "schedule.create", "schedule.create-recurring",
+		"schedule.delete", "schedule.get", "schedule.history", "schedule.list",
+		"schedule.pause", "schedule.resume",
 		"shared-dir", "shared-dir.info", "shared-dir.list",
 		"start", "stop",
 		"template",
@@ -334,11 +336,11 @@ func TestApplyModeRestrictions_AgentScheduleSubcommands(t *testing.T) {
 	assert.Contains(t, remaining, "schedule.cancel")
 	assert.Contains(t, remaining, "schedule.history")
 
-	assert.NotContains(t, remaining, "schedule.create")
-	assert.NotContains(t, remaining, "schedule.create-recurring")
-	assert.NotContains(t, remaining, "schedule.pause")
-	assert.NotContains(t, remaining, "schedule.resume")
-	assert.NotContains(t, remaining, "schedule.delete")
+	assert.Contains(t, remaining, "schedule.create")
+	assert.Contains(t, remaining, "schedule.create-recurring")
+	assert.Contains(t, remaining, "schedule.pause")
+	assert.Contains(t, remaining, "schedule.resume")
+	assert.Contains(t, remaining, "schedule.delete")
 }
 
 func TestApplyModeRestrictions_HelpAlwaysKept(t *testing.T) {
@@ -413,6 +415,7 @@ func TestAgentAllowedList(t *testing.T) {
 		"resume", "version",
 		"notifications",
 		"schedule", "schedule.list", "schedule.get", "schedule.cancel", "schedule.history",
+		"schedule.create", "schedule.create-recurring", "schedule.pause", "schedule.resume", "schedule.delete",
 		"shared-dir", "shared-dir.list", "shared-dir.info",
 		"templates", "templates.list", "templates.show", "templates.create",
 		"templates.clone", "templates.delete", "templates.update-default",
@@ -436,8 +439,6 @@ func TestAgentAllowedList(t *testing.T) {
 		"hub.auth", "hub.token", "hub.groves", "hub.brokers",
 		"hub.env", "hub.secret", "hub.status", "hub.notifications",
 		"messages.read",
-		"schedule.create", "schedule.create-recurring", "schedule.delete",
-		"schedule.pause", "schedule.resume",
 		"shared-dir.create", "shared-dir.remove",
 	}
 	for _, path := range notAllowed {
