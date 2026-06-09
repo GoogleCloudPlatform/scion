@@ -137,6 +137,10 @@ type WebServerConfig struct {
 	AdminMode bool
 	// MaintenanceMessage is the custom message shown during admin mode.
 	MaintenanceMessage string
+	// EnableTestLogin enables the POST /api/v1/auth/test-login endpoint
+	// for integration testing. Disabled by default; must never be enabled
+	// in production.
+	EnableTestLogin bool
 }
 
 // WebServer serves the web frontend SPA shell and static assets.
@@ -683,6 +687,8 @@ func (ws *WebServer) registerRoutes() {
 	ws.mux.HandleFunc("/auth/me", ws.handleAuthMe)
 	ws.mux.HandleFunc("/auth/providers", ws.handleAuthProviders)
 	ws.mux.HandleFunc("/auth/debug", ws.handleAuthDebug)
+	// Test-login endpoint for integration testing (gated by EnableTestLogin)
+	ws.mux.HandleFunc("/api/v1/auth/test-login", ws.handleTestLogin)
 	// SSE event stream (protected by session auth middleware)
 	ws.mux.HandleFunc("/events", ws.handleSSE)
 	// SPA catch-all (protected by session auth middleware)

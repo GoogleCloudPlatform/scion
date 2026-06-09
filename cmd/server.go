@@ -31,6 +31,7 @@ var (
 	dbURL               string
 	noAutoMigrate       bool
 	enableDevAuth       bool
+	enableTestLogin     bool
 	enableDebug         bool
 	storageBucket       string
 	storageDir          string
@@ -247,6 +248,7 @@ func init() {
 
 	// Auth flags
 	serverStartCmd.Flags().BoolVar(&enableDevAuth, "dev-auth", false, "Enable development authentication (auto-generates token)")
+	serverStartCmd.Flags().BoolVar(&enableTestLogin, "enable-test-login", false, "Enable the test-login endpoint for integration testing (do not use in production)")
 
 	// Debug flags
 	serverStartCmd.Flags().BoolVar(&enableDebug, "debug", false, "Enable debug logging (verbose output)")

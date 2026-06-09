@@ -1255,6 +1255,7 @@ func initWebServer(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Se
 		UserAccessMode:     cfg.Auth.UserAccessMode,
 		AdminMode:          adminMode,
 		MaintenanceMessage: maintenanceMessage,
+		EnableTestLogin:    enableTestLogin,
 	}
 	webSrv := hub.NewWebServer(webCfg)
 	webSrv.SetRequestLogger(requestLogger)
