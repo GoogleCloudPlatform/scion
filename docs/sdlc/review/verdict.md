@@ -50,4 +50,4 @@ Adds a Go CLI tool (`cmd/hello-sdlc/`) that prints a greeting with an optional `
 ## Review Notes
 - Tests cover Greet() directly but not main()'s flag-parsing wiring. For a 30-line demo CLI, this is acceptable. The binary was verified manually against all 4 ACs.
 - Code follows existing repo patterns: cmd/<tool>/ structure, testify/assert, Apache 2.0 headers.
-- Branch also contains tempconv artifacts from a prior iteration — those are out of scope for this review.
+- Tempconv artifacts from a prior iteration were cleaned up before shipping.
