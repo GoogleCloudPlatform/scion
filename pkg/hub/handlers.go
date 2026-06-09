@@ -9831,6 +9831,7 @@ func (s *Server) handleProjectImportHarnessConfigs(w http.ResponseWriter, r *htt
 	if req.WorkspacePath != "" {
 		imported, err = s.importHarnessConfigsFromWorkspace(ctx, project, req.WorkspacePath)
 	} else {
+		req.SourceURL = config.NormalizeTemplateSourceURL(req.SourceURL)
 		imported, err = s.importHarnessConfigsFromRemote(ctx, projectID, req.SourceURL)
 	}
 	if err != nil {
