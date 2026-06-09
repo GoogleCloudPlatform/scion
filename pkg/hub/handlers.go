@@ -9798,13 +9798,13 @@ func (s *Server) handleProjectImportHarnessConfigs(w http.ResponseWriter, r *htt
 			return
 		}
 	} else {
-		writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required", nil)
+		writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized, "Authentication required", nil)
 		return
 	}
 
 	var req ImportHarnessConfigsRequest
 	if err := readJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_request", "Invalid request body", nil)
+		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "Invalid request body", nil)
 		return
 	}
 
