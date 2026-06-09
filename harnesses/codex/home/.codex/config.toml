@@ -20,13 +20,14 @@ approval_policy = "never"
 # TODO remove and replace when codex lands full hook support
 # notify = "sh ~/.codex/scion_notify.sh"
 
-model = "gpt-5.4"
+model = "gpt-5.5"
 model_reasoning_effort = "medium"
 
 [notice.model_migrations]
 "gpt-5.1-codex-mini" = "gpt-5.2-codex"
 "gpt-5.2-codex" = "gpt-5.3-codex"
 "gpt-5.3-codex" = "gpt-5.4"
+"gpt-5.4" = "gpt-5.5"
 
 [projects."/workspace"]
 trust_level = "trusted"
