@@ -204,7 +204,7 @@ func TestMessageBrokerProxy_InterruptPrefix(t *testing.T) {
 	defer events.Close()
 
 	b := eventbus.NewInProcessEventBus(slog.Default())
-	defer b.Close()
+	t.Cleanup(func() { _ = b.Close() })
 
 	dispatcher := &brokerMockDispatcher{}
 
@@ -245,7 +245,7 @@ func TestMessageBrokerProxy_InterruptPrefixNotStrippedWithoutBang(t *testing.T) 
 	defer events.Close()
 
 	b := eventbus.NewInProcessEventBus(slog.Default())
-	defer b.Close()
+	t.Cleanup(func() { _ = b.Close() })
 
 	dispatcher := &brokerMockDispatcher{}
 
@@ -300,7 +300,7 @@ func TestMessageBrokerProxy_InterruptPrefixEdgeCases(t *testing.T) {
 			defer events.Close()
 
 			bus := eventbus.NewInProcessEventBus(slog.Default())
-			defer bus.Close()
+			t.Cleanup(func() { _ = bus.Close() })
 
 			dispatcher := &brokerMockDispatcher{}
 
@@ -343,7 +343,7 @@ func TestMessageBrokerProxy_InterruptPrefixPersistence(t *testing.T) {
 	defer events.Close()
 
 	b := eventbus.NewInProcessEventBus(slog.Default())
-	defer b.Close()
+	t.Cleanup(func() { _ = b.Close() })
 
 	dispatcher := &brokerMockDispatcher{}
 
