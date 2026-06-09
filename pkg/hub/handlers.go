@@ -4770,6 +4770,12 @@ func (s *Server) handleProjectRoutes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Check for nested /import-harness-configs path
+	if subPath == "import-harness-configs" {
+		s.handleProjectImportHarnessConfigs(w, r, projectID)
+		return
+	}
+
 	// Check for nested /dav/ path (WebDAV endpoint for project workspace sync)
 	if strings.HasPrefix(subPath, "dav") {
 		davPath := strings.TrimPrefix(subPath, "dav")
@@ -9745,6 +9751,96 @@ func (s *Server) handleProjectImportTemplates(w http.ResponseWriter, r *http.Req
 	writeJSON(w, http.StatusOK, ImportTemplatesResponse{
 		Templates: imported,
 		Count:     len(imported),
+	})
+}
+
+// ImportHarnessConfigsRequest is the request body for direct harness-config import.
+// Exactly one of SourceURL or WorkspacePath should be provided.
+type ImportHarnessConfigsRequest struct {
+	SourceURL     string `json:"sourceUrl"`
+	WorkspacePath string `json:"workspacePath"`
+}
+
+// ImportHarnessConfigsResponse is returned after a direct harness-config import completes.
+type ImportHarnessConfigsResponse struct {
+	HarnessConfigs []string `json:"harnessConfigs"`
+	Count          int      `json:"count"`
+}
+
+// handleProjectImportHarnessConfigs imports harness-configs directly from a
+// remote URL or workspace path into the project's harness-config store.
+func (s *Server) handleProjectImportHarnessConfigs(w http.ResponseWriter, r *http.Request, projectID string) {
+	if r.Method != http.MethodPost {
+		MethodNotAllowed(w)
+		return
+	}
+
+	ctx := r.Context()
+
+	if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
+		if !agentIdent.HasScope(ScopeAgentCreate) {
+			writeError(w, http.StatusForbidden, ErrCodeForbidden, "Missing required scope: project:agent:create", nil)
+			return
+		}
+		if projectID != agentIdent.ProjectID() {
+			writeError(w, http.StatusForbidden, ErrCodeForbidden, "Agents can only import harness-configs within their own project", nil)
+			return
+		}
+	} else if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
+		decision := s.authzService.CheckAccess(ctx, userIdent, Resource{
+			Type:       "harness_config",
+			ParentType: "project",
+			ParentID:   projectID,
+		}, ActionCreate)
+		if !decision.Allowed {
+			writeError(w, http.StatusForbidden, ErrCodeForbidden,
+				"You don't have permission to import harness-configs in this project", nil)
+			return
+		}
+	} else {
+		writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required", nil)
+		return
+	}
+
+	var req ImportHarnessConfigsRequest
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", "Invalid request body", nil)
+		return
+	}
+
+	if req.SourceURL == "" && req.WorkspacePath == "" {
+		req.WorkspacePath = "/.scion/harness-configs"
+	}
+
+	project, err := s.store.GetProject(ctx, projectID)
+	if err != nil {
+		if err == store.ErrNotFound {
+			NotFound(w, "Project")
+			return
+		}
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	if s.GetStorage() == nil {
+		writeError(w, http.StatusServiceUnavailable, "storage_unavailable", "Harness-config storage is not configured", nil)
+		return
+	}
+
+	var imported []string
+	if req.WorkspacePath != "" {
+		imported, err = s.importHarnessConfigsFromWorkspace(ctx, project, req.WorkspacePath)
+	} else {
+		imported, err = s.importHarnessConfigsFromRemote(ctx, projectID, req.SourceURL)
+	}
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "import_failed", err.Error(), nil)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, ImportHarnessConfigsResponse{
+		HarnessConfigs: imported,
+		Count:          len(imported),
 	})
 }
 

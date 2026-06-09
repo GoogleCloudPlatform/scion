@@ -2532,6 +2532,9 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/discord/link/verify", s.handleDiscordLinkVerify)
 	s.mux.HandleFunc("/api/v1/discord/link/status", s.handleDiscordLinkStatus)
 
+	// Unified resource import endpoint (templates + harness-configs, global + project)
+	s.mux.HandleFunc("/api/v1/resources/import", s.handleResourcesImport)
+
 	// GitHub App webhook and setup callback (unauthenticated — uses webhook signature)
 	s.mux.HandleFunc("/api/v1/webhooks/github", s.handleGitHubWebhook)
 	s.mux.HandleFunc("/github-app/setup", s.handleGitHubAppSetup)

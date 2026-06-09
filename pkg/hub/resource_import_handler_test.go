@@ -334,6 +334,201 @@ func TestHandleResourcesImport_InvalidKind(t *testing.T) {
 	}
 }
 
+// mockHarnessConfigTarball installs a mock HTTP transport that serves a gzip
+// tarball containing a single harness-config directory, and returns a cleanup
+// func. It must not be used with t.Parallel().
+func mockHarnessConfigTarball(t *testing.T) func() {
+	t.Helper()
+	old := http.DefaultClient.Transport
+	http.DefaultClient.Transport = &mockRoundTripper{
+		roundTrip: func(req *http.Request) (*http.Response, error) {
+			var buf bytes.Buffer
+			gzw := gzip.NewWriter(&buf)
+			tw := tar.NewWriter(gzw)
+			files := map[string]string{
+				"repo-main/harness-configs/my-config/config.yaml": "harness: claude\n",
+				"repo-main/harness-configs/my-config/README.md":   "hello",
+			}
+			for name, body := range files {
+				if err := tw.WriteHeader(&tar.Header{Name: name, Mode: 0600, Size: int64(len(body))}); err != nil {
+					return nil, err
+				}
+				if _, err := tw.Write([]byte(body)); err != nil {
+					return nil, err
+				}
+			}
+			if err := tw.Close(); err != nil {
+				return nil, err
+			}
+			if err := gzw.Close(); err != nil {
+				return nil, err
+			}
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewReader(buf.Bytes()))}, nil
+		},
+	}
+	return func() { http.DefaultClient.Transport = old }
+}
+
+// mockSingleHarnessConfigTarball serves a tarball where the pointed-to path IS
+// the harness-config (leaf), not a parent of configs.
+func mockSingleHarnessConfigTarball(t *testing.T) func() {
+	t.Helper()
+	old := http.DefaultClient.Transport
+	http.DefaultClient.Transport = &mockRoundTripper{
+		roundTrip: func(req *http.Request) (*http.Response, error) {
+			var buf bytes.Buffer
+			gzw := gzip.NewWriter(&buf)
+			tw := tar.NewWriter(gzw)
+			files := map[string]string{
+				"repo-main/harnesses/antigravity/config.yaml": "harness: claude\n",
+				"repo-main/harnesses/antigravity/README.md":   "hello",
+			}
+			for name, body := range files {
+				if err := tw.WriteHeader(&tar.Header{Name: name, Mode: 0600, Size: int64(len(body))}); err != nil {
+					return nil, err
+				}
+				if _, err := tw.Write([]byte(body)); err != nil {
+					return nil, err
+				}
+			}
+			if err := tw.Close(); err != nil {
+				return nil, err
+			}
+			if err := gzw.Close(); err != nil {
+				return nil, err
+			}
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewReader(buf.Bytes()))}, nil
+		},
+	}
+	return func() { http.DefaultClient.Transport = old }
+}
+
+// TestHandleResourcesImport_HarnessConfigGlobal verifies importing harness-configs
+// via the unified endpoint with global scope.
+func TestHandleResourcesImport_HarnessConfigGlobal(t *testing.T) {
+	srv, s, _ := testTemplateBootstrapServer(t)
+	ctx := context.Background()
+
+	admin := &store.User{ID: tid("user-admin-hc"), Email: "admin-hc@test.com", DisplayName: "Admin", Role: store.UserRoleAdmin}
+	if err := s.CreateUser(ctx, admin); err != nil {
+		t.Fatal(err)
+	}
+	ensureHubMembership(ctx, s, admin.ID)
+
+	defer mockHarnessConfigTarball(t)()
+
+	rec := doRequestAsUser(t, srv, admin, http.MethodPost, "/api/v1/resources/import", ImportResourcesRequest{
+		Kind:      "harness-config",
+		Scope:     "global",
+		SourceURL: "https://github.com/acme/repo/tree/main/harness-configs",
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp ImportResourcesResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Count != 1 || len(resp.Imported) != 1 || resp.Imported[0] != "my-config" {
+		t.Fatalf("expected [my-config], got %+v", resp)
+	}
+
+	result, err := s.ListHarnessConfigs(ctx, store.HarnessConfigFilter{Scope: store.HarnessConfigScopeGlobal}, store.ListOptions{Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.TotalCount != 1 {
+		t.Fatalf("expected 1 global harness-config, got %d", result.TotalCount)
+	}
+	if result.Items[0].Scope != store.HarnessConfigScopeGlobal {
+		t.Errorf("expected global scope, got %q", result.Items[0].Scope)
+	}
+}
+
+// TestHandleResourcesImport_SingleHarnessConfig verifies importing a single
+// harness-config directory (not a directory-of-directories) works correctly.
+func TestHandleResourcesImport_SingleHarnessConfig(t *testing.T) {
+	srv, s, _ := testTemplateBootstrapServer(t)
+	ctx := context.Background()
+
+	admin := &store.User{ID: tid("user-admin-single-hc"), Email: "admin-single-hc@test.com", DisplayName: "Admin", Role: store.UserRoleAdmin}
+	if err := s.CreateUser(ctx, admin); err != nil {
+		t.Fatal(err)
+	}
+	ensureHubMembership(ctx, s, admin.ID)
+
+	defer mockSingleHarnessConfigTarball(t)()
+
+	rec := doRequestAsUser(t, srv, admin, http.MethodPost, "/api/v1/resources/import", ImportResourcesRequest{
+		Kind:      "harness-config",
+		Scope:     "global",
+		SourceURL: "https://github.com/acme/repo/tree/main/harnesses/antigravity",
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp ImportResourcesResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Count != 1 || len(resp.Imported) != 1 || resp.Imported[0] != "antigravity" {
+		t.Fatalf("expected [antigravity], got %+v", resp)
+	}
+
+	result, err := s.ListHarnessConfigs(ctx, store.HarnessConfigFilter{Scope: store.HarnessConfigScopeGlobal}, store.ListOptions{Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.TotalCount != 1 {
+		t.Fatalf("expected 1 global harness-config, got %d", result.TotalCount)
+	}
+}
+
+// TestHandleProjectImportHarnessConfigs verifies the per-project endpoint
+// POST /api/v1/projects/{id}/import-harness-configs works for remote URLs.
+func TestHandleProjectImportHarnessConfigs(t *testing.T) {
+	srv, s, project, _ := setupWorkspaceProject(t, "hc-proj-import")
+	ctx := context.Background()
+
+	admin := &store.User{ID: tid("user-admin-proj-hc"), Email: "admin-proj-hc@test.com", DisplayName: "Admin", Role: store.UserRoleAdmin}
+	if err := s.CreateUser(ctx, admin); err != nil {
+		t.Fatal(err)
+	}
+	ensureHubMembership(ctx, s, admin.ID)
+
+	defer mockHarnessConfigTarball(t)()
+
+	rec := doRequestAsUser(t, srv, admin, http.MethodPost,
+		"/api/v1/projects/"+project.ID+"/import-harness-configs",
+		ImportHarnessConfigsRequest{
+			SourceURL: "https://github.com/acme/repo/tree/main/harness-configs",
+		})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp ImportHarnessConfigsResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Count != 1 || len(resp.HarnessConfigs) != 1 || resp.HarnessConfigs[0] != "my-config" {
+		t.Fatalf("expected [my-config], got %+v", resp)
+	}
+
+	result, err := s.ListHarnessConfigs(ctx, store.HarnessConfigFilter{
+		Scope:     store.HarnessConfigScopeProject,
+		ProjectID: project.ID,
+	}, store.ListOptions{Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.TotalCount != 1 {
+		t.Fatalf("expected 1 project-scoped harness-config, got %d", result.TotalCount)
+	}
+}
+
 // TestHandleResourcesImport_MissingSourceURL verifies sourceUrl is required.
 func TestHandleResourcesImport_MissingSourceURL(t *testing.T) {
 	srv, s, _ := testTemplateBootstrapServer(t)
