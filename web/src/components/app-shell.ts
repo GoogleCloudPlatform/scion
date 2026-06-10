@@ -339,6 +339,12 @@ export class ScionApp extends LitElement {
     if (this.currentPath.startsWith('/brokers/')) {
       return 'Broker';
     }
+    if (this.currentPath.match(/^\/settings\/harness-configs\/[^/]+$/)) {
+      return 'Harness Config';
+    }
+    if (this.currentPath.match(/^\/settings\/templates\/[^/]+$/)) {
+      return 'Template';
+    }
     if (this.currentPath.match(/^\/admin\/groups\/[^/]+$/)) {
       return 'Group';
     }
