@@ -30,11 +30,11 @@ import (
 // Manager owns the lifecycle of all loaded plugins.
 // It handles discovery, loading, dispensing, and shutdown of plugin processes.
 type Manager struct {
-	clients         map[string]*goplugin.Client       // "type:name" -> client
-	dispensed       map[string]interface{}             // "type:name" -> dispensed interface (cached)
-	selfManaged     map[string]bool                    // "type:name" -> true if self-managed
-	grpcBrokers     map[string]ConfigurableEventBus    // "type:name" -> gRPC broker adapter
-	configs         map[string]DiscoveredPlugin        // "type:name" -> original config (for reconnection)
+	clients         map[string]*goplugin.Client     // "type:name" -> client
+	dispensed       map[string]interface{}          // "type:name" -> dispensed interface (cached)
+	selfManaged     map[string]bool                 // "type:name" -> true if self-managed
+	grpcBrokers     map[string]ConfigurableEventBus // "type:name" -> gRPC broker adapter
+	configs         map[string]DiscoveredPlugin     // "type:name" -> original config (for reconnection)
 	mu              sync.RWMutex
 	logger          *slog.Logger
 	brokerCallbacks *HostCallbacksForwarder // lazily-wired host callbacks for broker plugins
@@ -278,7 +278,7 @@ func (m *Manager) loadGRPCBroker(dp DiscoveredPlugin) error {
 		return fmt.Errorf("failed to create gRPC broker adapter for %s/%s: %w", dp.Type, dp.Name, err)
 	}
 
-	if dp.Config != nil && len(dp.Config) > 0 {
+	if len(dp.Config) > 0 {
 		if cfgErr := adapter.Configure(dp.Config); cfgErr != nil {
 			_ = adapter.Close()
 			return fmt.Errorf("failed to configure gRPC broker plugin %s: %w", dp.Name, cfgErr)

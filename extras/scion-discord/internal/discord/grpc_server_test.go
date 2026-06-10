@@ -40,7 +40,7 @@ func TestStructuredMessageRoundTrip(t *testing.T) {
 		Attachments:  []string{"file1.txt", "file2.png"},
 		Metadata: map[string]string{
 			"discord_channel_id": "ch-789",
-			"project_id":        "proj-abc",
+			"project_id":         "proj-abc",
 		},
 		Channel:    "discord",
 		ThreadID:   "thread-001",

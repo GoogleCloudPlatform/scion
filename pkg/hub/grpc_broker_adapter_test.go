@@ -30,8 +30,8 @@ import (
 // fakeBrokerServer records calls for assertions.
 type fakeBrokerServer struct {
 	brokerv1.UnimplementedBrokerServiceServer
-	published   []*brokerv1.PublishRequest
-	subscribed  []string
+	published    []*brokerv1.PublishRequest
+	subscribed   []string
 	unsubscribed []string
 }
 
@@ -86,15 +86,15 @@ func TestGRPCBrokerAdapter_Publish(t *testing.T) {
 	adapter := newTestAdapter(t, addr)
 
 	msg := &messages.StructuredMessage{
-		Version:   1,
-		Sender:    "alice",
-		SenderID:  "a1",
-		Recipient: "bob",
-		Msg:       "hello",
-		Type:      "instruction",
-		Plain:     true,
-		Channel:   "test-channel",
-		Metadata:  map[string]string{"key": "val"},
+		Version:     1,
+		Sender:      "alice",
+		SenderID:    "a1",
+		Recipient:   "bob",
+		Msg:         "hello",
+		Type:        "instruction",
+		Plain:       true,
+		Channel:     "test-channel",
+		Metadata:    map[string]string{"key": "val"},
 		Attachments: []string{"att1"},
 	}
 

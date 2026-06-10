@@ -38,9 +38,9 @@ type GRPCBrokerAdapter struct {
 	channel string
 	log     *slog.Logger
 
-	mu         sync.RWMutex
-	subs       map[string]eventbus.EventHandler
-	closed     bool
+	mu     sync.RWMutex
+	subs   map[string]eventbus.EventHandler
+	closed bool
 }
 
 // NewGRPCBrokerAdapter dials the broker gRPC service at address and returns an
