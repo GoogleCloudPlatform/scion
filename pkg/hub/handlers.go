@@ -9139,10 +9139,18 @@ func (s *Server) populateAgentConfig(ctx context.Context, agent *store.Agent, pr
 	if hcName != "" && agent.AppliedConfig.HarnessConfigID == "" {
 		var hc *store.HarnessConfig
 		if project != nil {
-			hc, _ = s.store.GetHarnessConfigBySlug(ctx, hcName, store.HarnessConfigScopeProject, project.ID)
+			var err error
+			hc, err = s.store.GetHarnessConfigBySlug(ctx, hcName, store.HarnessConfigScopeProject, project.ID)
+			if err != nil && !errors.Is(err, store.ErrNotFound) {
+				s.agentLifecycleLog.Warn("failed to get project harness config by slug", "slug", hcName, "project_id", project.ID, "error", err)
+			}
 		}
 		if hc == nil {
-			hc, _ = s.store.GetHarnessConfigBySlug(ctx, hcName, store.HarnessConfigScopeGlobal, "")
+			var err error
+			hc, err = s.store.GetHarnessConfigBySlug(ctx, hcName, store.HarnessConfigScopeGlobal, "")
+			if err != nil && !errors.Is(err, store.ErrNotFound) {
+				s.agentLifecycleLog.Warn("failed to get global harness config by slug", "slug", hcName, "error", err)
+			}
 		}
 		if hc != nil {
 			agent.AppliedConfig.HarnessConfigID = hc.ID

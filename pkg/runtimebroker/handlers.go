@@ -834,7 +834,7 @@ func (s *Server) hydrateTemplate(ctx context.Context, cfg *CreateAgentConfig, co
 // consume path that makes harness-configs usable from a broker that lacks the
 // config on its local filesystem.
 func (s *Server) hydrateHarnessConfig(ctx context.Context, cfg *CreateAgentConfig, conn *HubConnection) (string, error) {
-	if cfg == nil || (cfg.HarnessConfigID == "" && cfg.HarnessConfigHash == "" && cfg.HarnessConfig == "") {
+	if cfg == nil || (cfg.HarnessConfigID == "" && cfg.HarnessConfigHash == "") {
 		return "", nil
 	}
 
