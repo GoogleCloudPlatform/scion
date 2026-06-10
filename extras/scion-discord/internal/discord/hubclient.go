@@ -49,7 +49,7 @@ type hubAgent struct {
 }
 
 func (c *httpHubClient) ListProjects(ctx context.Context) ([]ProjectOption, error) {
-	url := c.hubURL + "/api/v1/groves"
+	url := c.hubURL + "/api/v1/projects"
 
 	slog.Debug("Listing projects from hub", "url", url, "broker_id", c.brokerID)
 
@@ -127,7 +127,7 @@ func (c *httpHubClient) ListProjectsFresh(ctx context.Context) ([]ProjectOption,
 }
 
 func (c *httpHubClient) ListProjectsForUser(ctx context.Context, ownerID string) ([]ProjectOption, error) {
-	url := c.hubURL + "/api/v1/groves?ownerId=" + ownerID
+	url := c.hubURL + "/api/v1/projects?ownerId=" + ownerID
 
 	slog.Debug("Listing projects for user from hub", "url", url, "owner_id", ownerID)
 
@@ -163,7 +163,7 @@ func (c *httpHubClient) ListProjectsForUser(ctx context.Context, ownerID string)
 }
 
 func (c *httpHubClient) ListAgents(ctx context.Context, projectID string) ([]AgentInfo, error) {
-	url := fmt.Sprintf("%s/api/v1/groves/%s/agents", c.hubURL, projectID)
+	url := fmt.Sprintf("%s/api/v1/projects/%s/agents", c.hubURL, projectID)
 
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
