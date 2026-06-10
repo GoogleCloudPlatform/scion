@@ -192,7 +192,7 @@ func TestStartAgentViaHub_EnvGatherFailureCleansUp(t *testing.T) {
 
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects":
 			json.NewEncoder(w).Encode(map[string]interface{}{
-				"groves": []map[string]interface{}{{"id": projectID, "name": "test"}},
+				"projects": []map[string]interface{}{{"id": projectID, "name": "test"}},
 			})
 
 		default:
