@@ -21,6 +21,7 @@ import (
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
 	"gopkg.in/yaml.v3"
 )
 
@@ -186,8 +187,8 @@ func IsOldStyleNonGitProject(scionPath string) bool {
 func IsHubContext() bool {
 	return os.Getenv("SCION_HUB_ENDPOINT") != "" ||
 		os.Getenv("SCION_HUB_URL") != "" ||
-		os.Getenv("SCION_GROVE_ID") != "" ||
-		os.Getenv("SCION_PROJECT_ID") != ""
+		os.Getenv(projectcompat.EnvGroveID) != "" ||
+		os.Getenv(projectcompat.EnvProjectID) != ""
 }
 
 // WriteWorkspaceMarker writes a minimal .scion marker file into a workspace
@@ -219,7 +220,7 @@ func ExtractSlugFromExternalDir(dirName string) string {
 // Checks project-id first, then falls back to grove-id for legacy projects.
 func ReadProjectID(projectDir string) (string, error) {
 	// 1. Try project-id
-	data, err := os.ReadFile(filepath.Join(projectDir, "project-id"))
+	data, err := os.ReadFile(filepath.Join(projectDir, projectcompat.ProjectIDFile))
 	if err == nil {
 		return strings.TrimSpace(string(data)), nil
 	}
@@ -228,7 +229,7 @@ func ReadProjectID(projectDir string) (string, error) {
 	}
 
 	// 2. Fallback to legacy grove-id
-	data, err = os.ReadFile(filepath.Join(projectDir, "grove-id"))
+	data, err = os.ReadFile(filepath.Join(projectDir, projectcompat.GroveIDFile))
 	if err != nil {
 		return "", err
 	}
@@ -237,7 +238,7 @@ func ReadProjectID(projectDir string) (string, error) {
 
 // WriteProjectID writes a project-id file to a git project's .scion directory.
 func WriteProjectID(projectDir string, projectID string) error {
-	return os.WriteFile(filepath.Join(projectDir, "project-id"), []byte(projectID+"\n"), 0644)
+	return os.WriteFile(filepath.Join(projectDir, projectcompat.ProjectIDFile), []byte(projectID+"\n"), 0644)
 }
 
 // GetGitProjectExternalConfigDir returns the external config directory for a git project.

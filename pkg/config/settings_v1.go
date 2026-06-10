@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
 	"github.com/knadh/koanf/parsers/yaml"
 	"github.com/knadh/koanf/providers/confmap"
 	"github.com/knadh/koanf/providers/env"
@@ -898,7 +899,7 @@ func LoadVersionedSettings(projectPath string) (*VersionedSettings, error) {
 		if projectPath != globalDir {
 			if projectID, err := ReadProjectID(projectPath); err == nil && projectID != "" {
 				_ = k.Load(confmap.Provider(map[string]interface{}{
-					"hub.grove_id": projectID,
+					projectcompat.ConfigHubGroveIDKey: projectID,
 				}, "."), nil)
 			}
 		}
@@ -906,9 +907,9 @@ func LoadVersionedSettings(projectPath string) (*VersionedSettings, error) {
 
 	// Remap hub.project_id to hub.grove_id for backward compatibility with V1 structs.
 	// SCION_HUB_PROJECT_ID maps to hub.project_id via versionedEnvKeyMapper.
-	if k.Exists("hub.project_id") && !k.Exists("hub.grove_id") {
+	if k.Exists(projectcompat.ConfigHubProjectIDKey) && !k.Exists(projectcompat.ConfigHubGroveIDKey) {
 		_ = k.Load(confmap.Provider(map[string]interface{}{
-			"hub.grove_id": k.String("hub.project_id"),
+			projectcompat.ConfigHubGroveIDKey: k.String(projectcompat.ConfigHubProjectIDKey),
 		}, "."), nil)
 	}
 
@@ -929,6 +930,9 @@ func LoadVersionedSettings(projectPath string) (*VersionedSettings, error) {
 // versionedEnvKeyMapper maps SCION_* environment variables to versioned settings keys.
 // All keys are snake_case so no camelCase conversion is needed.
 func versionedEnvKeyMapper(s string) string {
+	if mapped, ok := projectcompat.EnvProjectIDConfigKey(s, false); ok {
+		return mapped
+	}
 	key := strings.ToLower(strings.TrimPrefix(s, "SCION_"))
 
 	// Handle nested hub keys (single level: hub.endpoint, hub.grove_id, etc.)
@@ -1908,6 +1912,14 @@ func UpdateVersionedSetting(dir string, key string, value string) error {
 		return err
 	}
 
+	if projectcompat.IsProjectIDConfigKey(key) || projectcompat.IsHubProjectIDConfigKey(key) {
+		if vs.Hub == nil {
+			vs.Hub = &V1HubClientConfig{}
+		}
+		vs.Hub.ProjectID = value
+		return SaveVersionedSettings(dir, vs)
+	}
+
 	switch key {
 	// --- Direct mappings (same in both formats) ---
 	case "active_profile":
@@ -1927,13 +1939,6 @@ func UpdateVersionedSetting(dir string, key string, value string) error {
 		autohelp := value == "true"
 		vs.CLI.AutoHelp = &autohelp
 
-	// --- grove_id: top-level in legacy, hub.grove_id in v1 ---
-	case "project_id", "grove_id":
-		if vs.Hub == nil {
-			vs.Hub = &V1HubClientConfig{}
-		}
-		vs.Hub.ProjectID = value
-
 	// --- Hub client settings ---
 	case "hub.enabled":
 		if vs.Hub == nil {
@@ -1952,11 +1957,6 @@ func UpdateVersionedSetting(dir string, key string, value string) error {
 			vs.Hub = &V1HubClientConfig{}
 		}
 		vs.Hub.Endpoint = value
-	case "hub.project_id", "hub.grove_id", "hub.projectId", "hub.groveId":
-		if vs.Hub == nil {
-			vs.Hub = &V1HubClientConfig{}
-		}
-		vs.Hub.ProjectID = value
 	case "hub.local_only":
 		if vs.Hub == nil {
 			vs.Hub = &V1HubClientConfig{}
@@ -2014,6 +2014,13 @@ func UpdateVersionedSetting(dir string, key string, value string) error {
 // GetVersionedSettingValue retrieves a specific setting value from a VersionedSettings struct.
 // It mirrors the keys supported by UpdateVersionedSetting for read access.
 func GetVersionedSettingValue(vs *VersionedSettings, key string) (string, error) {
+	if projectcompat.IsProjectIDConfigKey(key) || projectcompat.IsHubProjectIDConfigKey(key) {
+		if vs.Hub != nil {
+			return vs.Hub.ProjectID, nil
+		}
+		return "", nil
+	}
+
 	switch key {
 	case "active_profile":
 		return vs.ActiveProfile, nil
@@ -2031,11 +2038,6 @@ func GetVersionedSettingValue(vs *VersionedSettings, key string) (string, error)
 				return "true", nil
 			}
 			return "false", nil
-		}
-		return "", nil
-	case "project_id", "grove_id":
-		if vs.Hub != nil {
-			return vs.Hub.ProjectID, nil
 		}
 		return "", nil
 	case "hub.enabled":
@@ -2057,11 +2059,6 @@ func GetVersionedSettingValue(vs *VersionedSettings, key string) (string, error)
 	case "hub.endpoint":
 		if vs.Hub != nil {
 			return vs.Hub.Endpoint, nil
-		}
-		return "", nil
-	case "hub.project_id", "hub.grove_id", "hub.projectId", "hub.groveId":
-		if vs.Hub != nil {
-			return vs.Hub.ProjectID, nil
 		}
 		return "", nil
 	case "hub.local_only":

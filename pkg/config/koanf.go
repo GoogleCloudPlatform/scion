@@ -22,6 +22,7 @@ import (
 	goruntime "runtime"
 	"strings"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
 	"github.com/knadh/koanf/parsers/json"
 	"github.com/knadh/koanf/parsers/yaml"
 	"github.com/knadh/koanf/providers/confmap"
@@ -74,23 +75,19 @@ func LoadSettingsKoanf(projectPath string) (*Settings, error) {
 	//       SCION_HUB_BROKER_ID -> hub.brokerId
 	//       SCION_HUB_BROKER_TOKEN -> hub.brokerToken
 	_ = k.Load(env.Provider("SCION_", ".", func(s string) string {
+		if mapped, ok := projectcompat.EnvProjectIDConfigKey(s, true); ok {
+			return mapped
+		}
 		key := strings.ToLower(strings.TrimPrefix(s, "SCION_"))
 		// Handle nested bucket keys
 		if strings.HasPrefix(key, "bucket_") {
 			return "bucket." + strings.TrimPrefix(key, "bucket_")
-		}
-		// Handle legacy grove_id
-		if key == "grove_id" {
-			return "project_id"
 		}
 		// Handle nested hub keys
 		if strings.HasPrefix(key, "hub_") {
 			subkey := strings.TrimPrefix(key, "hub_")
 			// Convert snake_case to camelCase for specific keys
 			switch subkey {
-			case "grove_id", "project_id":
-				// SCION_HUB_GROVE_ID or SCION_HUB_PROJECT_ID maps to top-level project_id, not hub.projectId
-				return "project_id"
 			case "api_key":
 				return "hub.apiKey"
 			case "broker_id":
@@ -114,24 +111,24 @@ func LoadSettingsKoanf(projectPath string) (*Settings, error) {
 	// take precedence over any top-level project_id inherited from global.
 	// Support both hub.grove_id and hub.project_id from v1 settings.
 	hubProjectID := ""
-	if k.Exists("hub.project_id") {
-		hubProjectID = k.String("hub.project_id")
-	} else if k.Exists("hub.grove_id") {
-		hubProjectID = k.String("hub.grove_id")
+	if k.Exists(projectcompat.ConfigHubProjectIDKey) {
+		hubProjectID = k.String(projectcompat.ConfigHubProjectIDKey)
+	} else if k.Exists(projectcompat.ConfigHubGroveIDKey) {
+		hubProjectID = k.String(projectcompat.ConfigHubGroveIDKey)
 	}
 
 	if hubProjectID != "" {
 		_ = k.Load(confmap.Provider(map[string]interface{}{
-			"project_id": hubProjectID,
+			projectcompat.ConfigProjectIDKey: hubProjectID,
 		}, "."), nil)
 		// Also remap to hub.projectId (camelCase) so the legacy
 		// HubClientConfig.ProjectID field (koanf tag "projectId") is populated.
 		// Without this, GetHubProjectID() returns "" for V1 settings, causing
 		// EnsureHubReady to fall back to the local project_id and loop on
 		// project registration when the hub project ID differs from the local ID.
-		if !k.Exists("hub.projectId") {
+		if !k.Exists(projectcompat.ConfigHubProjectIDJSON) {
 			_ = k.Load(confmap.Provider(map[string]interface{}{
-				"hub.projectId": hubProjectID,
+				projectcompat.ConfigHubProjectIDJSON: hubProjectID,
 			}, "."), nil)
 		}
 	}
@@ -144,7 +141,7 @@ func LoadSettingsKoanf(projectPath string) (*Settings, error) {
 	if projectPath != "" && projectPath != globalDir {
 		if projectID, err := ReadProjectID(projectPath); err == nil && projectID != "" {
 			_ = k.Load(confmap.Provider(map[string]interface{}{
-				"project_id": projectID,
+				projectcompat.ConfigProjectIDKey: projectID,
 			}, "."), nil)
 		}
 	}

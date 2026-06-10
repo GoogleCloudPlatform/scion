@@ -22,6 +22,7 @@ import (
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"gopkg.in/yaml.v3"
 )
@@ -552,8 +553,8 @@ func UpdateSetting(projectPath string, key string, value string, global bool) er
 		// Phase 5: Migrate .scion/grove-id to project-id if it exists.
 		// This ensures that subsequent reads prefer the new filename.
 		if projectPath != "" {
-			legacyIDFile := filepath.Join(projectPath, "grove-id")
-			projectIDFile := filepath.Join(projectPath, "project-id")
+			legacyIDFile := filepath.Join(projectPath, projectcompat.GroveIDFile)
+			projectIDFile := filepath.Join(projectPath, projectcompat.ProjectIDFile)
 			if _, err := os.Stat(legacyIDFile); err == nil {
 				if _, err := os.Stat(projectIDFile); os.IsNotExist(err) {
 					_ = os.Rename(legacyIDFile, projectIDFile)
@@ -615,121 +616,123 @@ func updateSettingLegacy(dir string, key string, value string) error {
 	}
 
 	// Update the field
-	switch key {
-	case "project_id", "grove_id":
+	if projectcompat.IsProjectIDConfigKey(key) {
 		current.ProjectID = value
-	case "active_profile":
-		current.ActiveProfile = value
-	case "default_template":
-		current.DefaultTemplate = value
-	case "workspace_path":
-		current.WorkspacePath = value
-	case "bucket.provider":
-		if current.Bucket == nil {
-			current.Bucket = &BucketConfig{}
-		}
-		current.Bucket.Provider = value
-	case "bucket.name":
-		if current.Bucket == nil {
-			current.Bucket = &BucketConfig{}
-		}
-		current.Bucket.Name = value
-	case "bucket.prefix":
-		if current.Bucket == nil {
-			current.Bucket = &BucketConfig{}
-		}
-		current.Bucket.Prefix = value
-	case "hub.endpoint":
-		if current.Hub == nil {
-			current.Hub = &HubClientConfig{}
-		}
-		current.Hub.Endpoint = value
-	case "hub.token":
-		if current.Hub == nil {
-			current.Hub = &HubClientConfig{}
-		}
-		current.Hub.Token = value
-	case "hub.apiKey":
-		if current.Hub == nil {
-			current.Hub = &HubClientConfig{}
-		}
-		current.Hub.APIKey = value
-	case "hub.projectId", "hub.groveId":
+	} else if projectcompat.IsHubProjectIDConfigKey(key) {
 		if current.Hub == nil {
 			current.Hub = &HubClientConfig{}
 		}
 		current.Hub.ProjectID = value
-	case "hub.brokerId":
-		if current.Hub == nil {
-			current.Hub = &HubClientConfig{}
-		}
-		current.Hub.BrokerID = value
-	case "hub.brokerToken":
-		if current.Hub == nil {
-			current.Hub = &HubClientConfig{}
-		}
-		current.Hub.BrokerToken = value
-	case "hub.brokerNickname":
-		if current.Hub == nil {
-			current.Hub = &HubClientConfig{}
-		}
-		current.Hub.BrokerNickname = value
-	case "hub.enabled":
-		if current.Hub == nil {
-			current.Hub = &HubClientConfig{}
-		}
-		enabled := value == "true"
-		current.Hub.Enabled = &enabled
-	case "hub.linked":
-		if current.Hub == nil {
-			current.Hub = &HubClientConfig{}
-		}
-		linked := value == "true"
-		current.Hub.Linked = &linked
-	case "hub.local_only":
-		if current.Hub == nil {
-			current.Hub = &HubClientConfig{}
-		}
-		localOnly := value == "true"
-		current.Hub.LocalOnly = &localOnly
-	case "hub.lastSyncedAt":
-		if current.Hub == nil {
-			current.Hub = &HubClientConfig{}
-		}
-		current.Hub.LastSyncedAt = value
-	case "cli.autohelp":
-		if current.CLI == nil {
-			current.CLI = &CLIConfig{}
-		}
-		autohelp := value == "true"
-		current.CLI.AutoHelp = &autohelp
-	case "cli.mode":
-		if current.CLI == nil {
-			current.CLI = &CLIConfig{}
-		}
-		current.CLI.Mode = value
-	default:
-		// Handle hub_connections.<name>.endpoint keys
-		if strings.HasPrefix(key, "hub_connections.") {
-			parts := strings.SplitN(key, ".", 3)
-			if len(parts) != 3 {
-				return fmt.Errorf("invalid hub_connections key: %s (expected hub_connections.<name>.<field>)", key)
+	} else {
+		switch key {
+		case "active_profile":
+			current.ActiveProfile = value
+		case "default_template":
+			current.DefaultTemplate = value
+		case "workspace_path":
+			current.WorkspacePath = value
+		case "bucket.provider":
+			if current.Bucket == nil {
+				current.Bucket = &BucketConfig{}
 			}
-			connName := parts[1]
-			field := parts[2]
+			current.Bucket.Provider = value
+		case "bucket.name":
+			if current.Bucket == nil {
+				current.Bucket = &BucketConfig{}
+			}
+			current.Bucket.Name = value
+		case "bucket.prefix":
+			if current.Bucket == nil {
+				current.Bucket = &BucketConfig{}
+			}
+			current.Bucket.Prefix = value
+		case "hub.endpoint":
+			if current.Hub == nil {
+				current.Hub = &HubClientConfig{}
+			}
+			current.Hub.Endpoint = value
+		case "hub.token":
+			if current.Hub == nil {
+				current.Hub = &HubClientConfig{}
+			}
+			current.Hub.Token = value
+		case "hub.apiKey":
+			if current.Hub == nil {
+				current.Hub = &HubClientConfig{}
+			}
+			current.Hub.APIKey = value
+		case "hub.brokerId":
+			if current.Hub == nil {
+				current.Hub = &HubClientConfig{}
+			}
+			current.Hub.BrokerID = value
+		case "hub.brokerToken":
+			if current.Hub == nil {
+				current.Hub = &HubClientConfig{}
+			}
+			current.Hub.BrokerToken = value
+		case "hub.brokerNickname":
+			if current.Hub == nil {
+				current.Hub = &HubClientConfig{}
+			}
+			current.Hub.BrokerNickname = value
+		case "hub.enabled":
+			if current.Hub == nil {
+				current.Hub = &HubClientConfig{}
+			}
+			enabled := value == "true"
+			current.Hub.Enabled = &enabled
+		case "hub.linked":
+			if current.Hub == nil {
+				current.Hub = &HubClientConfig{}
+			}
+			linked := value == "true"
+			current.Hub.Linked = &linked
+		case "hub.local_only":
+			if current.Hub == nil {
+				current.Hub = &HubClientConfig{}
+			}
+			localOnly := value == "true"
+			current.Hub.LocalOnly = &localOnly
+		case "hub.lastSyncedAt":
+			if current.Hub == nil {
+				current.Hub = &HubClientConfig{}
+			}
+			current.Hub.LastSyncedAt = value
+		case "cli.autohelp":
+			if current.CLI == nil {
+				current.CLI = &CLIConfig{}
+			}
+			autohelp := value == "true"
+			current.CLI.AutoHelp = &autohelp
+		case "cli.mode":
+			if current.CLI == nil {
+				current.CLI = &CLIConfig{}
+			}
+			current.CLI.Mode = value
+		default:
+			// Handle hub_connections.<name>.endpoint keys
+			if strings.HasPrefix(key, "hub_connections.") {
+				parts := strings.SplitN(key, ".", 3)
+				if len(parts) != 3 {
+					return fmt.Errorf("invalid hub_connections key: %s (expected hub_connections.<name>.<field>)", key)
+				}
+				connName := parts[1]
+				field := parts[2]
 
-			if field != "endpoint" {
-				return fmt.Errorf("unknown hub_connections field: %s (supported: endpoint)", field)
-			}
+				if field != "endpoint" {
+					return fmt.Errorf("unknown hub_connections field: %s (supported: endpoint)", field)
+				}
 
-			if current.HubConnections == nil {
-				current.HubConnections = make(map[string]HubConnectionConfig)
+				if current.HubConnections == nil {
+					current.HubConnections = make(map[string]HubConnectionConfig)
+				}
+				conn := current.HubConnections[connName]
+				conn.Endpoint = value
+				current.HubConnections[connName] = conn
+			} else {
+				return fmt.Errorf("unknown or complex setting key: %s (manual edit recommended for registries)", key)
 			}
-			conn := current.HubConnections[connName]
-			conn.Endpoint = value
-			current.HubConnections[connName] = conn
-		} else {
-			return fmt.Errorf("unknown or complex setting key: %s (manual edit recommended for registries)", key)
 		}
 	}
 
@@ -754,9 +757,16 @@ func updateSettingLegacy(dir string, key string, value string) error {
 }
 
 func GetSettingValue(s *Settings, key string) (string, error) {
-	switch key {
-	case "project_id", "grove_id":
+	if projectcompat.IsProjectIDConfigKey(key) {
 		return s.ProjectID, nil
+	}
+	if projectcompat.IsHubProjectIDConfigKey(key) {
+		if s.Hub != nil {
+			return s.Hub.ProjectID, nil
+		}
+		return "", nil
+	}
+	switch key {
 	case "active_profile":
 		return s.ActiveProfile, nil
 	case "default_template":
@@ -789,11 +799,6 @@ func GetSettingValue(s *Settings, key string) (string, error) {
 	case "hub.apiKey":
 		if s.Hub != nil {
 			return s.Hub.APIKey, nil
-		}
-		return "", nil
-	case "hub.projectId", "hub.groveId":
-		if s.Hub != nil {
-			return s.Hub.ProjectID, nil
 		}
 		return "", nil
 	case "hub.brokerId":
