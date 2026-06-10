@@ -203,9 +203,9 @@ allowed_paths=(
   "^pkg/wsprotocol/protocol.go$"
 )
 
-allowlist="$(printf '%s\n' "${allowed_paths[@]}" | paste -sd '|' -)"
+allowlist="$(printf '%s\n' "${allowed_paths[@]}" | sed 's/\$$/:/' | paste -sd '|' -)"
 
-violations="$(awk -F: -v allowlist="$allowlist" '$1 !~ allowlist { print }' "$tmp")"
+violations="$(grep -Ev "$allowlist" "$tmp" || true)"
 if [[ -n "$violations" ]]; then
   echo "Legacy grove literals found outside the project compatibility allowlist:" >&2
   echo "$violations" >&2
