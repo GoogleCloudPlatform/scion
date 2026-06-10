@@ -418,9 +418,8 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 		addArg("--label", fmt.Sprintf("scion.grove=%s", config.Project))
 	}
 	if config.ProjectID != "" {
-		for k, v := range projectcompat.ProjectIDLabels(config.ProjectID, true) {
-			addArg("--label", fmt.Sprintf("%s=%s", k, v))
-		}
+		addArg("--label", fmt.Sprintf("%s=%s", projectcompat.LabelProjectID, config.ProjectID))
+		addArg("--label", fmt.Sprintf("%s=%s", projectcompat.LabelGroveID, config.ProjectID))
 	}
 
 	if config.Template != "" {
