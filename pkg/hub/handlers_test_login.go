@@ -106,7 +106,9 @@ func (ws *WebServer) handleTestLogin(w http.ResponseWriter, r *http.Request) {
 		if req.DisplayName != user.Email {
 			user.DisplayName = req.DisplayName
 		}
-		_ = ws.store.UpdateUser(ctx, user)
+		if err := ws.store.UpdateUser(ctx, user); err != nil {
+			slog.Warn("test-login: failed to update user", "email", req.Email, "error", err)
+		}
 	}
 
 	ensureHubMembership(ctx, ws.store, user.ID)

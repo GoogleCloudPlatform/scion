@@ -1257,6 +1257,9 @@ func initWebServer(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Se
 		MaintenanceMessage: maintenanceMessage,
 		EnableTestLogin:    enableTestLogin,
 	}
+	if enableTestLogin {
+		slog.Warn("Test login endpoint is enabled (--enable-test-login). This allows bypass of authentication and MUST NOT be used in production!")
+	}
 	webSrv := hub.NewWebServer(webCfg)
 	webSrv.SetRequestLogger(requestLogger)
 
