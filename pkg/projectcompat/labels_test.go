@@ -51,6 +51,64 @@ func TestProjectIDLabels(t *testing.T) {
 	}
 }
 
+func TestProjectNameFromLabels(t *testing.T) {
+	tests := []struct {
+		name   string
+		labels map[string]string
+		want   string
+	}{
+		{"nil", nil, ""},
+		{"canonical", map[string]string{LabelProject: "p1"}, "p1"},
+		{"legacy", map[string]string{LabelGrove: "p1"}, "p1"},
+		{"canonical wins", map[string]string{LabelProject: "p1", LabelGrove: "old"}, "p1"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ProjectNameFromLabels(tt.labels); got != tt.want {
+				t.Fatalf("ProjectNameFromLabels() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestProjectPathFromLabels(t *testing.T) {
+	tests := []struct {
+		name   string
+		labels map[string]string
+		want   string
+	}{
+		{"nil", nil, ""},
+		{"canonical", map[string]string{LabelProjectPath: "/projects/p1"}, "/projects/p1"},
+		{"legacy", map[string]string{LabelGrovePath: "/groves/p1"}, "/groves/p1"},
+		{"canonical wins", map[string]string{LabelProjectPath: "/projects/p1", LabelGrovePath: "/groves/p1"}, "/projects/p1"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ProjectPathFromLabels(tt.labels); got != tt.want {
+				t.Fatalf("ProjectPathFromLabels() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestProjectNameAndPathLabels(t *testing.T) {
+	nameLabels := ProjectNameLabels("p1", true)
+	if nameLabels[LabelProject] != "p1" || nameLabels[LabelGrove] != "p1" {
+		t.Fatalf("ProjectNameLabels(includeLegacy=true) = %#v", nameLabels)
+	}
+	if _, ok := ProjectNameLabels("p1", false)[LabelGrove]; ok {
+		t.Fatalf("ProjectNameLabels(includeLegacy=false) included legacy label")
+	}
+
+	pathLabels := ProjectPathLabels("/projects/p1", true)
+	if pathLabels[LabelProjectPath] != "/projects/p1" || pathLabels[LabelGrovePath] != "/projects/p1" {
+		t.Fatalf("ProjectPathLabels(includeLegacy=true) = %#v", pathLabels)
+	}
+	if _, ok := ProjectPathLabels("/projects/p1", false)[LabelGrovePath]; ok {
+		t.Fatalf("ProjectPathLabels(includeLegacy=false) included legacy label")
+	}
+}
+
 func TestCanonicalFieldAliases(t *testing.T) {
 	tests := []struct {
 		in        string

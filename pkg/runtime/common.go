@@ -414,8 +414,8 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 
 	// Phase 5: Standard project labels
 	if config.Project != "" {
-		addArg("--label", fmt.Sprintf("scion.project=%s", config.Project))
-		addArg("--label", fmt.Sprintf("scion.grove=%s", config.Project))
+		addArg("--label", fmt.Sprintf("%s=%s", projectcompat.LabelProject, config.Project))
+		addArg("--label", fmt.Sprintf("%s=%s", projectcompat.LabelGrove, config.Project))
 	}
 	if config.ProjectID != "" {
 		addArg("--label", fmt.Sprintf("%s=%s", projectcompat.LabelProjectID, config.ProjectID))

@@ -26,12 +26,52 @@ func ProjectIDFromLabels(labels map[string]string) string {
 	return labels[LabelGroveID]
 }
 
+func ProjectNameFromLabels(labels map[string]string) string {
+	if labels == nil {
+		return ""
+	}
+	if projectName := labels[LabelProject]; projectName != "" {
+		return projectName
+	}
+	return labels[LabelGrove]
+}
+
+func ProjectPathFromLabels(labels map[string]string) string {
+	if labels == nil {
+		return ""
+	}
+	if projectPath := labels[LabelProjectPath]; projectPath != "" {
+		return projectPath
+	}
+	return labels[LabelGrovePath]
+}
+
 func ProjectIDLabels(projectID string, includeLegacy bool) map[string]string {
 	labels := map[string]string{
 		LabelProjectID: projectID,
 	}
 	if includeLegacy {
 		labels[LabelGroveID] = projectID
+	}
+	return labels
+}
+
+func ProjectNameLabels(projectName string, includeLegacy bool) map[string]string {
+	labels := map[string]string{
+		LabelProject: projectName,
+	}
+	if includeLegacy {
+		labels[LabelGrove] = projectName
+	}
+	return labels
+}
+
+func ProjectPathLabels(projectPath string, includeLegacy bool) map[string]string {
+	labels := map[string]string{
+		LabelProjectPath: projectPath,
+	}
+	if includeLegacy {
+		labels[LabelGrovePath] = projectPath
 	}
 	return labels
 }

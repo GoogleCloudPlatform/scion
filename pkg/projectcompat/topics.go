@@ -27,8 +27,12 @@ const (
 	CanonicalTopicPrefix = "scion.project"
 	LegacyTopicPrefix    = "scion.grove"
 
-	LabelProjectID = "scion.project_id"
-	LabelGroveID   = "scion.grove_id"
+	LabelProjectID   = "scion.project_id"
+	LabelGroveID     = "scion.grove_id"
+	LabelProject     = "scion.project"
+	LabelGrove       = "scion.grove"
+	LabelProjectPath = "scion.project_path"
+	LabelGrovePath   = "scion.grove_path"
 )
 
 type TopicKind string

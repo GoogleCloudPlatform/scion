@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
 
@@ -191,7 +192,18 @@ func (r *AppleContainerRuntime) List(ctx context.Context, labelFilter map[string
 		if len(labelFilter) > 0 {
 			match := true
 			for k, v := range labelFilter {
-				if lv, ok := c.Configuration.Labels[k]; !ok || lv != v {
+				actual := c.Configuration.Labels[k]
+				if actual == "" {
+					switch k {
+					case projectcompat.LabelProject:
+						actual = projectcompat.ProjectNameFromLabels(c.Configuration.Labels)
+					case projectcompat.LabelProjectID:
+						actual = projectcompat.ProjectIDFromLabels(c.Configuration.Labels)
+					case projectcompat.LabelProjectPath:
+						actual = projectcompat.ProjectPathFromLabels(c.Configuration.Labels)
+					}
+				}
+				if actual != v {
 					match = false
 					break
 				}
@@ -207,9 +219,9 @@ func (r *AppleContainerRuntime) List(ctx context.Context, labelFilter map[string
 			Template:        c.Configuration.Labels["scion.template"],
 			HarnessConfig:   c.Configuration.Labels["scion.harness_config"],
 			HarnessAuth:     c.Configuration.Labels["scion.harness_auth"],
-			Project:         c.Configuration.Labels["scion.grove"],
-			ProjectID:       c.Configuration.Labels["scion.grove_id"],
-			ProjectPath:     c.Configuration.Labels["scion.grove_path"],
+			Project:         projectcompat.ProjectNameFromLabels(c.Configuration.Labels),
+			ProjectID:       projectcompat.ProjectIDFromLabels(c.Configuration.Labels),
+			ProjectPath:     projectcompat.ProjectPathFromLabels(c.Configuration.Labels),
 			Labels:          c.Configuration.Labels,
 			Annotations:     c.Configuration.Labels,
 			ContainerStatus: c.Status,

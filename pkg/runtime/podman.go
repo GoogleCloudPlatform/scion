@@ -27,6 +27,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/gcp"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
 
@@ -284,7 +285,18 @@ func (r *PodmanRuntime) List(ctx context.Context, labelFilter map[string]string)
 		// Filter by labels if requested
 		match := true
 		for k, v := range labelFilter {
-			if labels[k] != v {
+			actual := labels[k]
+			if actual == "" {
+				switch k {
+				case projectcompat.LabelProject:
+					actual = projectcompat.ProjectNameFromLabels(labels)
+				case projectcompat.LabelProjectID:
+					actual = projectcompat.ProjectIDFromLabels(labels)
+				case projectcompat.LabelProjectPath:
+					actual = projectcompat.ProjectPathFromLabels(labels)
+				}
+			}
+			if actual != v {
 				match = false
 				break
 			}
@@ -310,9 +322,9 @@ func (r *PodmanRuntime) List(ctx context.Context, labelFilter map[string]string)
 				Template:        labels["scion.template"],
 				HarnessConfig:   labels["scion.harness_config"],
 				HarnessAuth:     labels["scion.harness_auth"],
-				Project:         labels["scion.grove"],
-				ProjectID:       labels["scion.grove_id"],
-				ProjectPath:     labels["scion.grove_path"],
+				Project:         projectcompat.ProjectNameFromLabels(labels),
+				ProjectID:       projectcompat.ProjectIDFromLabels(labels),
+				ProjectPath:     projectcompat.ProjectPathFromLabels(labels),
 				Runtime:         r.Name(),
 			})
 		}

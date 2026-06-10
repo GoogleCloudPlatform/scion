@@ -764,11 +764,7 @@ func (r *KubernetesRuntime) createSharedDirPVCs(ctx context.Context, namespace s
 
 	projectID := projectcompat.ProjectIDFromLabels(config.Labels)
 
-	projectName := config.Labels["scion.project"]
-	if projectName == "" {
-		projectName = config.Labels["scion.grove"]
-	}
-
+	projectName := projectcompat.ProjectNameFromLabels(config.Labels)
 	if projectName == "" {
 		return fmt.Errorf("cannot create shared dir PVCs: missing scion.project or scion.grove label")
 	}
@@ -820,8 +816,6 @@ func (r *KubernetesRuntime) ensureProjectRWXClaim(
 			Name:      pvcName,
 			Namespace: namespace,
 			Labels: map[string]string{
-				"scion.project":    projectName,
-				"scion.grove":      projectName,
 				"scion.shared-dir": dirName,
 			},
 		},
@@ -835,6 +829,9 @@ func (r *KubernetesRuntime) ensureProjectRWXClaim(
 		},
 	}
 
+	for k, v := range projectcompat.ProjectNameLabels(projectName, true) {
+		pvc.Labels[k] = v
+	}
 	if projectID != "" {
 		for k, v := range projectcompat.ProjectIDLabels(projectID, true) {
 			pvc.Labels[k] = v
@@ -1423,7 +1420,7 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 			})
 		} else {
 			// Local backend: each shared dir gets its own PVC (existing behavior).
-			projectName := config.Labels["scion.grove"]
+			projectName := projectcompat.ProjectNameFromLabels(config.Labels)
 			pvcName := sharedDirPVCName(projectName, sd.Name)
 			volName := fmt.Sprintf("shared-dir-%d", i)
 
@@ -1842,12 +1839,12 @@ func (r *KubernetesRuntime) List(ctx context.Context, labelFilter map[string]str
 			// Since new pods have both labels and old pods only have grove labels,
 			// filtering by the grove label variant finds both.
 			switch k {
-			case "scion.project":
-				key = "scion.grove"
-			case "scion.project_id":
-				key = "scion.grove_id"
-			case "scion.project_path":
-				key = "scion.grove_path"
+			case projectcompat.LabelProject:
+				key = projectcompat.LabelGrove
+			case projectcompat.LabelProjectID:
+				key = projectcompat.LabelGroveID
+			case projectcompat.LabelProjectPath:
+				key = projectcompat.LabelGrovePath
 			}
 			selectors = append(selectors, fmt.Sprintf("%s=%s", key, v))
 		}
@@ -1903,15 +1900,9 @@ func (r *KubernetesRuntime) List(ctx context.Context, labelFilter map[string]str
 			}
 		}
 
-		projectPath := p.Annotations["scion.project_path"]
+		projectPath := projectcompat.ProjectPathFromLabels(p.Annotations)
 		if projectPath == "" {
-			projectPath = p.Labels["scion.project_path"]
-		}
-		if projectPath == "" {
-			projectPath = p.Annotations["scion.grove_path"]
-		}
-		if projectPath == "" {
-			projectPath = p.Labels["scion.grove_path"]
+			projectPath = projectcompat.ProjectPathFromLabels(p.Labels)
 		}
 
 		var agentImage string
@@ -1923,21 +1914,11 @@ func (r *KubernetesRuntime) List(ctx context.Context, labelFilter map[string]str
 		}
 
 		agents = append(agents, api.AgentInfo{
-			ContainerID: p.Name, // Pod name serves as the container identifier
-			Name:        p.Labels["scion.name"],
-			Template:    p.Labels["scion.template"],
-			Project: func() string {
-				if p := p.Labels["scion.project"]; p != "" {
-					return p
-				}
-				return p.Labels["scion.grove"]
-			}(),
-			ProjectID: func() string {
-				if p := p.Labels["scion.project_id"]; p != "" {
-					return p
-				}
-				return p.Labels["scion.grove_id"]
-			}(),
+			ContainerID:     p.Name, // Pod name serves as the container identifier
+			Name:            p.Labels["scion.name"],
+			Template:        p.Labels["scion.template"],
+			Project:         projectcompat.ProjectNameFromLabels(p.Labels),
+			ProjectID:       projectcompat.ProjectIDFromLabels(p.Labels),
 			ProjectPath:     projectPath,
 			Labels:          p.Labels,
 			Annotations:     p.Annotations,
