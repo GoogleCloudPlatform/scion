@@ -74,8 +74,7 @@ var scheduleCancelCmd = &cobra.Command{
 var scheduleCreateCmd = &cobra.Command{
 	Use:   "create",
 	Short: "Create a one-shot scheduled event",
-	Long: `Create a one-shot scheduled event. Requires --type message, timing (--in or --at),
---agent, and --message.`,
+	Long: `Create a one-shot scheduled event. Requires timing (--in or --at), --agent, and --message.`,
 	RunE: runScheduleCreate,
 }
 
@@ -83,8 +82,7 @@ var scheduleCreateCmd = &cobra.Command{
 var scheduleCreateRecurringCmd = &cobra.Command{
 	Use:   "create-recurring",
 	Short: "Create a recurring schedule",
-	Long: `Create a recurring schedule with a cron expression. Requires --name, --cron,
---type message, --agent, and --message.`,
+	Long: `Create a recurring schedule with a cron expression. Requires --name, --cron, --agent, and --message.`,
 	RunE: runScheduleCreateRecurring,
 }
 
@@ -405,9 +403,6 @@ func runScheduleCancel(cmd *cobra.Command, args []string) error {
 }
 
 func runScheduleCreate(cmd *cobra.Command, args []string) error {
-	if scheduleType == "" {
-		return fmt.Errorf("--type is required")
-	}
 	if scheduleIn == "" && scheduleAt == "" {
 		return fmt.Errorf("either --in or --at is required")
 	}
@@ -484,10 +479,6 @@ func runScheduleCreateRecurring(cmd *cobra.Command, args []string) error {
 	if scheduleCron == "" {
 		return fmt.Errorf("--cron is required")
 	}
-	if scheduleType == "" {
-		return fmt.Errorf("--type is required")
-	}
-
 	// Validate type-specific flags
 	switch scheduleType {
 	case "message":
@@ -788,7 +779,7 @@ func init() {
 	scheduleListCmd.Flags().StringVar(&scheduleListType, "show", "", "Filter by resource type: events, recurring, or all (default: all)")
 
 	// Create one-shot flags
-	scheduleCreateCmd.Flags().StringVar(&scheduleType, "type", "", "Event type (required: message)")
+	scheduleCreateCmd.Flags().StringVar(&scheduleType, "type", "message", "Event type")
 	scheduleCreateCmd.Flags().StringVar(&scheduleIn, "in", "", "Schedule after a duration (e.g. 30m, 1h)")
 	scheduleCreateCmd.Flags().StringVar(&scheduleAt, "at", "", "Schedule at an absolute time (ISO 8601)")
 	scheduleCreateCmd.Flags().StringVar(&scheduleAgent, "agent", "", "Target agent name")
@@ -798,7 +789,7 @@ func init() {
 	// Create recurring flags
 	scheduleCreateRecurringCmd.Flags().StringVar(&scheduleName, "name", "", "Schedule name (required)")
 	scheduleCreateRecurringCmd.Flags().StringVar(&scheduleCron, "cron", "", "Cron expression (required, 5-field: minute hour day month weekday, UTC)")
-	scheduleCreateRecurringCmd.Flags().StringVar(&scheduleType, "type", "", "Event type (required: message)")
+	scheduleCreateRecurringCmd.Flags().StringVar(&scheduleType, "type", "message", "Event type")
 	scheduleCreateRecurringCmd.Flags().StringVar(&scheduleAgent, "agent", "", "Target agent name")
 	scheduleCreateRecurringCmd.Flags().StringVar(&scheduleMessage, "message", "", "Message body")
 	scheduleCreateRecurringCmd.Flags().BoolVar(&scheduleInterrupt, "interrupt", false, "Interrupt the agent")

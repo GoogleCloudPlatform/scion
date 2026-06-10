@@ -81,12 +81,12 @@ func TestScheduleCreateValidation(t *testing.T) {
 		scheduleMessage = origMessage
 	}()
 
-	t.Run("missing type", func(t *testing.T) {
+	t.Run("empty type rejected", func(t *testing.T) {
 		scheduleType = ""
 		scheduleIn = "30m"
 		err := runScheduleCreate(nil, nil)
 		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "--type is required")
+		assert.Contains(t, err.Error(), "unsupported event type")
 	})
 
 	t.Run("missing timing", func(t *testing.T) {
