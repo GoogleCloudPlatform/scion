@@ -1018,7 +1018,7 @@ export class ScionFileBrowser extends LitElement {
       countLabel = `${this.files.length.toLocaleString()} of ${this.totalCount.toLocaleString()} files${sizeStr} · most recent`;
     } else {
       const n = base.length;
-      const visibleSize = base.reduce((sum, f) => sum + f.size, 0);
+      const visibleSize = base.reduce((sum, f) => sum + (f.size ?? 0), 0);
       const sizeStr = visibleSize > 0 ? ` (${formatFileSize(visibleSize)})` : '';
       countLabel = `${n} file${n !== 1 ? 's' : ''}${sizeStr}`;
     }
