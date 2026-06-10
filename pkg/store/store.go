@@ -114,6 +114,9 @@ type Store interface {
 
 	// LifecycleHook operations (Configurable Agent Lifecycle Hooks)
 	LifecycleHookStore
+
+	// DiscordPendingLink operations (Discord Account Linking)
+	DiscordPendingLinkStore
 }
 
 // AgentStore defines agent-related persistence operations.
@@ -1228,4 +1231,16 @@ type LifecycleHookFilter struct {
 	ScopeID   string // Filter by scope ID
 	Trigger   string // Filter by trigger (running, suspended, stopped, error)
 	Enabled   *bool  // Filter by enabled status (nil = no filter)
+}
+
+// DiscordPendingLinkStore defines persistence operations for Discord account
+// link codes, used by DiscordLinkService.
+type DiscordPendingLinkStore interface {
+	CreateDiscordPendingLink(ctx context.Context, link *DiscordPendingLink) error
+	GetDiscordPendingLinkByCode(ctx context.Context, code string) (*DiscordPendingLink, error)
+	GetDiscordPendingLinkByDiscordUser(ctx context.Context, discordUserID string) (*DiscordPendingLink, error)
+	UpdateDiscordPendingLink(ctx context.Context, link *DiscordPendingLink) error
+	DeleteDiscordPendingLink(ctx context.Context, code string) error
+	DeleteDiscordPendingLinksByDiscordUser(ctx context.Context, discordUserID string) error
+	DeleteExpiredDiscordPendingLinks(ctx context.Context) (int, error)
 }

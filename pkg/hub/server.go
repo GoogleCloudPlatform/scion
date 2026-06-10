@@ -746,8 +746,8 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 	// Initialize Telegram link service
 	srv.telegramLinkService = NewTelegramLinkService()
 
-	// Initialize Discord link service
-	srv.discordLinkService = NewDiscordLinkService()
+	// Initialize Discord link service (DB-backed for HA)
+	srv.discordLinkService = NewDiscordLinkService(s)
 
 	// Initialize OAuth service if configured
 	if cfg.OAuthConfig.IsConfigured() {
