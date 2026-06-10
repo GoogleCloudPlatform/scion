@@ -16,7 +16,7 @@ GOLANGCI_LINT := $(shell command -v golangci-lint 2>/dev/null || echo $(shell go
 
 .DEFAULT_GOAL := help
 
-.PHONY: all build install test test-fast vet lint golangci-lint web web-typecheck fmt fmt-check ci ci-full clean help container-sciontool container-scion container-binaries
+.PHONY: all build install test test-fast vet lint compat-literals golangci-lint web web-typecheck fmt fmt-check ci ci-full clean help container-sciontool container-scion container-binaries
 
 ## all: Build the web frontend, then compile the Go binary with embedded assets
 all: web install
@@ -64,6 +64,10 @@ vet:
 ## lint: Run go vet (no SQLite, memory-safe)
 lint:
 	@go vet -tags no_sqlite ./...
+
+## compat-literals: Check legacy grove literals stay in compatibility surfaces
+compat-literals:
+	@./hack/check-project-compat-literals.sh
 
 ## golangci-lint: Run golangci-lint on new issues only (install via: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest)
 golangci-lint:
@@ -128,13 +132,13 @@ fmt-check:
 	fi
 	@echo "Go formatting OK."
 
-## ci: Run fast CI checks (format check, vet, tests, build)
-ci: fmt-check lint test-fast build
+## ci: Run fast CI checks (format check, vet, compatibility guardrails, tests, build)
+ci: fmt-check lint compat-literals test-fast build
 	@echo ""
 	@echo "CI passed."
 
 ## ci-full: Run the full CI pipeline locally (mirrors GitHub Actions, includes web + golangci-lint)
-ci-full: fmt-check web web-typecheck lint golangci-lint test-fast build
+ci-full: fmt-check web web-typecheck lint compat-literals golangci-lint test-fast build
 	@echo ""
 	@echo "CI (full) passed."
 
