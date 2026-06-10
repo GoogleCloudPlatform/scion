@@ -483,7 +483,8 @@ func (b *DiscordBroker) Publish(ctx context.Context, topic string, msg *messages
 		strings.HasPrefix(msg.Sender, "agent:") &&
 		strings.HasPrefix(msg.Recipient, "agent:")
 	isStateChange := msg != nil && msg.Type == messages.TypeStateChange
-	needsFilter := isAgentToAgent || isStateChange
+	isAssistantReply := msg != nil && msg.Type == messages.TypeAssistantReply
+	needsFilter := isAgentToAgent || isStateChange || isAssistantReply
 
 	// Send to each target channel.
 	var errs []error
@@ -497,6 +498,10 @@ func (b *DiscordBroker) Publish(ctx context.Context, topic string, msg *messages
 				}
 				if isStateChange && !link.ShowStateChanges {
 					b.log.Debug("Filtering state change notification", "channel_id", channelID)
+					continue
+				}
+				if isAssistantReply && !link.ShowAssistantReply {
+					b.log.Debug("Filtering assistant-reply message", "channel_id", channelID)
 					continue
 				}
 			}
