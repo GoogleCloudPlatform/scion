@@ -14,6 +14,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -155,9 +156,6 @@ func serveStandalone() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	lockHeld := false
-	go runAdvisoryLockLoop(ctx, log, lockStore, broker, &lockHeld)
-
 	lis, err := net.Listen("tcp", listenAddr)
 	if err != nil {
 		log.Error("Failed to listen", "address", listenAddr, "error", err)
@@ -169,7 +167,10 @@ func serveStandalone() {
 
 	healthServer := health.NewServer()
 	healthpb.RegisterHealthServer(grpcServer, healthServer)
-	healthServer.SetServingStatus("", healthpb.HealthCheckResponse_SERVING)
+	healthServer.SetServingStatus("", healthpb.HealthCheckResponse_NOT_SERVING)
+
+	var lockHeld atomic.Bool
+	go runAdvisoryLockLoop(ctx, log, lockStore, broker, &lockHeld, healthServer)
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
@@ -185,7 +186,7 @@ func serveStandalone() {
 			log.Warn("Error closing broker", "error", err)
 		}
 
-		if lockHeld {
+		if lockHeld.Load() {
 			if err := lockStore.ReleaseAdvisoryLock(context.Background(), int64(store.LockDiscordGateway)); err != nil {
 				log.Warn("Error releasing advisory lock", "error", err)
 			}
@@ -205,7 +206,7 @@ func serveStandalone() {
 	}
 }
 
-func runAdvisoryLockLoop(ctx context.Context, log *slog.Logger, lockStore discord.Store, broker *discord.DiscordBroker, lockHeld *bool) {
+func runAdvisoryLockLoop(ctx context.Context, log *slog.Logger, lockStore discord.Store, broker *discord.DiscordBroker, lockHeld *atomic.Bool, healthServer *health.Server) {
 	const retryInterval = 30 * time.Second
 
 	for {
@@ -216,11 +217,13 @@ func runAdvisoryLockLoop(ctx context.Context, log *slog.Logger, lockStore discor
 			}
 			log.Error("Failed to try advisory lock", "error", err)
 		} else if acquired {
-			*lockHeld = true
+			lockHeld.Store(true)
 			log.Info("Acquired gateway lock, starting as primary")
 			if err := broker.Subscribe(">"); err != nil {
 				log.Error("Failed to subscribe (start gateway)", "error", err)
+				return
 			}
+			healthServer.SetServingStatus("", healthpb.HealthCheckResponse_SERVING)
 			return
 		} else {
 			log.Info("Another instance holds gateway lock, standing by")

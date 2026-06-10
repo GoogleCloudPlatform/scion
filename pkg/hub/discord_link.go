@@ -103,6 +103,9 @@ func (s *DiscordLinkService) VerifyCode(code, userID, userEmail string) (discord
 	link.UserID = userID
 	link.UserEmail = userEmail
 	if dbErr := s.store.UpdateDiscordPendingLink(ctx, link); dbErr != nil {
+		if errors.Is(dbErr, store.ErrVersionConflict) {
+			return "", "code_not_found"
+		}
 		slog.Error("discord link: failed to update pending link", "error", dbErr)
 		return "", "code_not_found"
 	}

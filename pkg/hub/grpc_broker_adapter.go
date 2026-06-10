@@ -75,15 +75,19 @@ func (a *GRPCBrokerAdapter) Configure(config map[string]string) error {
 		a.mu.RUnlock()
 		return fmt.Errorf("adapter is closed")
 	}
+	client := a.client
 	a.mu.RUnlock()
 
-	_, err := a.client.Configure(context.Background(), &brokerv1.ConfigureRequest{Config: config})
+	_, err := client.Configure(context.Background(), &brokerv1.ConfigureRequest{Config: config})
 	if err != nil {
 		a.log.Warn("Configure failed, attempting reconnect", "error", err)
 		if reconnErr := a.tryReconnect(); reconnErr != nil {
 			return fmt.Errorf("configure failed: %w (reconnect also failed: %v)", err, reconnErr)
 		}
-		_, err = a.client.Configure(context.Background(), &brokerv1.ConfigureRequest{Config: config})
+		a.mu.RLock()
+		client = a.client
+		a.mu.RUnlock()
+		_, err = client.Configure(context.Background(), &brokerv1.ConfigureRequest{Config: config})
 	}
 	return err
 }
@@ -96,16 +100,20 @@ func (a *GRPCBrokerAdapter) Publish(ctx context.Context, topic string, msg *mess
 		a.mu.RUnlock()
 		return fmt.Errorf("adapter is closed")
 	}
+	client := a.client
 	a.mu.RUnlock()
 
 	req := structuredMessageToPublishRequest(topic, msg)
-	_, err := a.client.Publish(ctx, req)
+	_, err := client.Publish(ctx, req)
 	if err != nil {
 		a.log.Warn("Publish failed", "topic", topic, "error", err)
 		if reconnErr := a.tryReconnect(); reconnErr != nil {
 			return fmt.Errorf("publish failed: %w (reconnect also failed: %v)", err, reconnErr)
 		}
-		_, err = a.client.Publish(ctx, req)
+		a.mu.RLock()
+		client = a.client
+		a.mu.RUnlock()
+		_, err = client.Publish(ctx, req)
 	}
 	return err
 }
@@ -165,20 +173,19 @@ func (a *GRPCBrokerAdapter) tryReconnect() error {
 		return fmt.Errorf("reconnect dial failed: %w", err)
 	}
 
+	a.mu.Lock()
 	oldConn := a.conn
 	a.conn = conn
 	a.client = brokerv1.NewBrokerServiceClient(conn)
-
-	if oldConn != nil {
-		_ = oldConn.Close()
-	}
-
-	a.mu.RLock()
 	patterns := make([]string, 0, len(a.subs))
 	for p := range a.subs {
 		patterns = append(patterns, p)
 	}
-	a.mu.RUnlock()
+	a.mu.Unlock()
+
+	if oldConn != nil {
+		_ = oldConn.Close()
+	}
 
 	for _, pattern := range patterns {
 		if _, subErr := a.client.Subscribe(context.Background(), &brokerv1.SubscribeRequest{Pattern: pattern}); subErr != nil {

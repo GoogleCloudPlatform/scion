@@ -5,12 +5,15 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"sync"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
 type postgresStore struct {
-	db *sql.DB
+	db       *sql.DB
+	mu       sync.Mutex
+	lockConn *sql.Conn
 }
 
 func NewPostgresStore(databaseURL string) (Store, error) {
@@ -436,13 +439,36 @@ func (s *postgresStore) GetNotificationPrefs(ctx context.Context, discordUserID,
 // --- Advisory locking ---
 
 func (s *postgresStore) TryAdvisoryLock(ctx context.Context, key int64) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return false, err
+	}
 	var acquired bool
-	err := s.db.QueryRowContext(ctx, "SELECT pg_try_advisory_lock($1)", key).Scan(&acquired)
-	return acquired, err
+	err = conn.QueryRowContext(ctx, "SELECT pg_try_advisory_lock($1)", key).Scan(&acquired)
+	if err != nil {
+		conn.Close()
+		return false, err
+	}
+	if !acquired {
+		conn.Close()
+		return false, nil
+	}
+	s.lockConn = conn
+	return true, nil
 }
 
 func (s *postgresStore) ReleaseAdvisoryLock(ctx context.Context, key int64) error {
-	_, err := s.db.ExecContext(ctx, "SELECT pg_advisory_unlock($1)", key)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.lockConn == nil {
+		return nil
+	}
+	_, err := s.lockConn.ExecContext(ctx, "SELECT pg_advisory_unlock($1)", key)
+	s.lockConn.Close()
+	s.lockConn = nil
 	return err
 }
 

@@ -102,12 +102,20 @@ func (s *DiscordPendingLinkStore) UpdateDiscordPendingLink(ctx context.Context, 
 	if err != nil {
 		return err
 	}
-	if err := s.client.DiscordPendingLink.UpdateOneID(uid).
+	n, err := s.client.DiscordPendingLink.Update().
+		Where(
+			discordpendinglink.IDEQ(uid),
+			discordpendinglink.StatusEQ("pending"),
+		).
 		SetStatus(link.Status).
 		SetUserID(link.UserID).
 		SetUserEmail(link.UserEmail).
-		Exec(ctx); err != nil {
+		Save(ctx)
+	if err != nil {
 		return mapError(err)
+	}
+	if n == 0 {
+		return store.ErrVersionConflict
 	}
 	return nil
 }
