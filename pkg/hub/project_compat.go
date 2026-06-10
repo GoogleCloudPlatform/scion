@@ -46,10 +46,6 @@ func legacyProjectIDFromJSON(data []byte) (string, error) {
 	}
 
 	for _, key := range []string{"grove_id", "groveId"} {
-		canonical, legacy := projectcompat.CanonicalFieldAliases(key)
-		if !legacy || (canonical != "project_id" && canonical != "projectId") {
-			continue
-		}
 		raw, ok := fields[key]
 		if !ok {
 			continue
