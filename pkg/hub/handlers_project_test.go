@@ -257,8 +257,9 @@ func TestPopulateAgentConfig_StampsHarnessConfigID(t *testing.T) {
 	srv, st := testServer(t)
 	ctx := context.Background()
 
+	hcID := "a0000000-0000-0000-0000-000000000001"
 	hc := &store.HarnessConfig{
-		ID:          "hc-claude-1",
+		ID:          hcID,
 		Name:        "claude",
 		Slug:        "claude",
 		Harness:     "claude",
@@ -280,8 +281,8 @@ func TestPopulateAgentConfig_StampsHarnessConfigID(t *testing.T) {
 
 	srv.populateAgentConfig(ctx, agent, project, nil)
 
-	if agent.AppliedConfig.HarnessConfigID != "hc-claude-1" {
-		t.Errorf("expected HarnessConfigID 'hc-claude-1', got %q", agent.AppliedConfig.HarnessConfigID)
+	if agent.AppliedConfig.HarnessConfigID != hcID {
+		t.Errorf("expected HarnessConfigID %q, got %q", hcID, agent.AppliedConfig.HarnessConfigID)
 	}
 	if agent.AppliedConfig.HarnessConfigHash != "deadbeef" {
 		t.Errorf("expected HarnessConfigHash 'deadbeef', got %q", agent.AppliedConfig.HarnessConfigHash)
@@ -295,8 +296,9 @@ func TestPopulateAgentConfig_HarnessConfigFromTemplateDefault(t *testing.T) {
 	srv, st := testServer(t)
 	ctx := context.Background()
 
+	hcID := "b0000000-0000-0000-0000-000000000002"
 	hc := &store.HarnessConfig{
-		ID:          "hc-web-1",
+		ID:          hcID,
 		Name:        "claude-web",
 		Slug:        "claude-web",
 		Harness:     "claude",
@@ -317,8 +319,8 @@ func TestPopulateAgentConfig_HarnessConfigFromTemplateDefault(t *testing.T) {
 
 	srv.populateAgentConfig(ctx, agent, project, template)
 
-	if agent.AppliedConfig.HarnessConfigID != "hc-web-1" {
-		t.Errorf("expected HarnessConfigID 'hc-web-1' from template default, got %q", agent.AppliedConfig.HarnessConfigID)
+	if agent.AppliedConfig.HarnessConfigID != hcID {
+		t.Errorf("expected HarnessConfigID %q from template default, got %q", hcID, agent.AppliedConfig.HarnessConfigID)
 	}
 	if agent.AppliedConfig.HarnessConfigHash != "cafef00d" {
 		t.Errorf("expected HarnessConfigHash 'cafef00d', got %q", agent.AppliedConfig.HarnessConfigHash)
