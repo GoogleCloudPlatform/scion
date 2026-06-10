@@ -328,6 +328,13 @@ func (s *UserTokenService) ValidateTestLoginToken(tokenString string) error {
 		return fmt.Errorf("failed to verify token: %w", err)
 	}
 
+	// go-jose only validates exp when it is present — a token without exp
+	// would pass and never expire. Require it explicitly so a challenge
+	// token cannot be replayed indefinitely.
+	if claims.Expiry == nil {
+		return fmt.Errorf("token validation failed: missing exp claim")
+	}
+
 	expected := jwt.Expected{
 		Issuer:      UserTokenIssuer,
 		AnyAudience: jwt.Audience{TestLoginAudience},

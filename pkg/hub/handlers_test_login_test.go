@@ -381,3 +381,58 @@ func TestHandleTestLogin_AuthNotBearer(t *testing.T) {
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
 	assert.Contains(t, rec.Body.String(), "authorization required")
 }
+
+func TestHandleTestLogin_BearerCaseInsensitive(t *testing.T) {
+	ws, tokenSvc := newTestLoginWebServer(t, true)
+
+	token, err := tokenSvc.GenerateTestLoginToken("test")
+	require.NoError(t, err)
+
+	// RFC 7235: auth scheme is case-insensitive
+	for _, scheme := range []string{"bearer", "BEARER", "Bearer"} {
+		t.Run(scheme, func(t *testing.T) {
+			body := `{"email":"ci@example.com","role":"member"}`
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/test-login", strings.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Authorization", scheme+" "+token)
+			rec := httptest.NewRecorder()
+
+			ws.handleTestLogin(rec, req)
+
+			assert.Equal(t, http.StatusOK, rec.Code, "scheme %q should be accepted", scheme)
+		})
+	}
+}
+
+func TestHandleTestLogin_NoExpiryClaim(t *testing.T) {
+	ws, _ := newTestLoginWebServer(t, true)
+
+	// Craft a token with no exp claim to verify it is rejected.
+	signer, err := jose.NewSigner(
+		jose.SigningKey{Algorithm: jose.HS256, Key: ws.userTokenSvc.config.SigningKey},
+		(&jose.SignerOptions{}).WithType("JWT"),
+	)
+	require.NoError(t, err)
+
+	now := time.Now()
+	claims := jwt.Claims{
+		Issuer:   UserTokenIssuer,
+		Subject:  "test",
+		Audience: jwt.Audience{TestLoginAudience},
+		IssuedAt: jwt.NewNumericDate(now),
+		// Expiry intentionally omitted
+	}
+	token, err := jwt.Signed(signer).Claims(claims).Serialize()
+	require.NoError(t, err)
+
+	body := `{"email":"test@example.com","role":"admin"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/test-login", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+
+	ws.handleTestLogin(rec, req)
+
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+	assert.Contains(t, rec.Body.String(), "invalid test-login token")
+}
