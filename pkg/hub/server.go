@@ -2436,10 +2436,11 @@ func (s *Server) registerRoutes() {
 	// This handler must come before the generic project-by-id handler
 	s.mux.HandleFunc("/api/v1/projects/", s.handleProjectRoutes)
 
-	// Aliases for /api/v1/groves -> /api/v1/projects (Phase 3)
-	s.mux.HandleFunc("/api/v1/groves", s.deprecateLegacyEndpoint(s.handleProjects))
-	s.mux.HandleFunc("/api/v1/groves/register", s.deprecateLegacyEndpoint(s.handleProjectRegister))
-	s.mux.HandleFunc("/api/v1/groves/", s.deprecateLegacyEndpoint(s.handleProjectRoutes))
+	// Legacy /api/v1/groves aliases are external compatibility adapters for
+	// the canonical /api/v1/projects handlers.
+	s.mux.HandleFunc("/api/v1/groves", s.handleLegacyGroveRoute(s.handleProjects))
+	s.mux.HandleFunc("/api/v1/groves/register", s.handleLegacyGroveRoute(s.handleProjectRegister))
+	s.mux.HandleFunc("/api/v1/groves/", s.handleLegacyGroveRoute(s.handleProjectRoutes))
 
 	s.mux.HandleFunc("/api/v1/runtime-brokers", s.handleRuntimeBrokers)
 	s.mux.HandleFunc("/api/v1/runtime-brokers/", s.handleRuntimeBrokerRoutes)
@@ -2772,17 +2773,6 @@ func extractAction(r *http.Request, prefix string) (id, action string) {
 		action = parts[1]
 	}
 	return
-}
-
-// deprecateLegacyEndpoint wraps an http.HandlerFunc with deprecation headers
-// for legacy /groves/ endpoints that have been renamed to /projects/.
-func (s *Server) deprecateLegacyEndpoint(h http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Deprecation", "true")
-		w.Header().Set("Sunset", "Sun, 01 Nov 2026 00:00:00 GMT")
-		w.Header().Set("Link", `</api/v1/projects/>; rel="successor-version"`)
-		h(w, r)
-	}
 }
 
 // handleRuntimeBrokerConnect handles WebSocket upgrade for Runtime Broker control channel.

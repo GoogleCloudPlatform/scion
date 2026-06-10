@@ -2063,3 +2063,51 @@ func TestCreateProject_ListByGitRemote_ReturnsMultiple(t *testing.T) {
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
 	assert.Len(t, resp.Projects, 2, "listing by git remote should return all matching projects")
 }
+
+func TestProjectRouteDeprecationHeaders(t *testing.T) {
+	srv, _ := testServer(t)
+
+	canonical := doRequest(t, srv, http.MethodGet, "/api/v1/projects", nil)
+	require.Equal(t, http.StatusOK, canonical.Code, "body: %s", canonical.Body.String())
+	assert.Empty(t, canonical.Header().Get("Deprecation"))
+	assert.Empty(t, canonical.Header().Get("Sunset"))
+	assert.Empty(t, canonical.Header().Get("Link"))
+
+	legacy := doRequest(t, srv, http.MethodGet, "/api/v1/groves", nil)
+	require.Equal(t, http.StatusOK, legacy.Code, "body: %s", legacy.Body.String())
+	assert.Equal(t, "true", legacy.Header().Get("Deprecation"))
+	assert.Equal(t, legacyGroveRouteSunset, legacy.Header().Get("Sunset"))
+	assert.Contains(t, legacy.Header().Get("Link"), "/api/v1/projects/")
+}
+
+func TestRegisterProjectRequestLegacyIDAliases(t *testing.T) {
+	var legacyCamel RegisterProjectRequest
+	require.NoError(t, json.Unmarshal([]byte(`{"name":"Legacy","gitRemote":"github.com/acme/legacy","groveId":"legacy-camel"}`), &legacyCamel))
+	assert.Equal(t, "legacy-camel", legacyCamel.ID)
+
+	var legacySnake RegisterProjectRequest
+	require.NoError(t, json.Unmarshal([]byte(`{"name":"Legacy","gitRemote":"github.com/acme/legacy","grove_id":"legacy-snake"}`), &legacySnake))
+	assert.Equal(t, "legacy-snake", legacySnake.ID)
+
+	var canonicalWins RegisterProjectRequest
+	require.NoError(t, json.Unmarshal([]byte(`{"id":"canonical","name":"Canonical","gitRemote":"github.com/acme/canonical","groveId":"legacy"}`), &canonicalWins))
+	assert.Equal(t, "canonical", canonicalWins.ID)
+}
+
+func TestProjectRegisterAcceptsLegacyJSONID(t *testing.T) {
+	srv, _ := testServer(t)
+
+	body := map[string]interface{}{
+		"groveId":   tid("legacy_register_id"),
+		"gitRemote": "https://github.com/test/legacy-register.git",
+		"name":      "Legacy Register",
+	}
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/register", body)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	var resp RegisterProjectResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	require.NotNil(t, resp.Project)
+	assert.Equal(t, tid("legacy_register_id"), resp.Project.ID)
+}

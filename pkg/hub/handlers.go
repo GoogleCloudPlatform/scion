@@ -3429,12 +3429,10 @@ type RegisterProjectRequest struct {
 	Labels    map[string]string          `json:"labels,omitempty"`
 }
 
-// UnmarshalJSON implements custom unmarshaling to support legacy groveId keys.
+// UnmarshalJSON accepts legacy grove ID aliases at the Hub JSON adapter boundary.
 func (r *RegisterProjectRequest) UnmarshalJSON(data []byte) error {
 	type Alias RegisterProjectRequest
 	aux := &struct {
-		GroveID  string `json:"groveId"`
-		Grove_ID string `json:"grove_id"`
 		*Alias
 	}{
 		Alias: (*Alias)(r),
@@ -3443,11 +3441,11 @@ func (r *RegisterProjectRequest) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	if r.ID == "" {
-		if aux.Grove_ID != "" {
-			r.ID = aux.Grove_ID
-		} else if aux.GroveID != "" {
-			r.ID = aux.GroveID
+		legacyID, err := legacyProjectIDFromJSON(data)
+		if err != nil {
+			return err
 		}
+		r.ID = legacyID
 	}
 	return nil
 }
