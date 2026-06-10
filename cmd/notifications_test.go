@@ -28,7 +28,7 @@ import (
 
 func TestResolveAgentIDForSubscription_Found(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/v1/groves/grove-1/agents" && r.Method == http.MethodGet {
+		if r.URL.Path == "/api/v1/projects/grove-1/agents" && r.Method == http.MethodGet {
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]interface{}{
 				"agents": []map[string]interface{}{
@@ -58,7 +58,7 @@ func TestResolveAgentIDForSubscription_Found(t *testing.T) {
 
 func TestResolveAgentIDForSubscription_NotFound(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/v1/groves/grove-1/agents" && r.Method == http.MethodGet {
+		if r.URL.Path == "/api/v1/projects/grove-1/agents" && r.Method == http.MethodGet {
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]interface{}{
 				"agents": []map[string]interface{}{
@@ -84,7 +84,7 @@ func TestResolveAgentIDForSubscription_NotFound(t *testing.T) {
 
 func TestResolveAgentIDForSubscription_BySlugified(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/v1/groves/grove-1/agents" && r.Method == http.MethodGet {
+		if r.URL.Path == "/api/v1/projects/grove-1/agents" && r.Method == http.MethodGet {
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]interface{}{
 				"agents": []map[string]interface{}{

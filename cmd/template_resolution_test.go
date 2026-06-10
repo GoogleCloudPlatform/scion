@@ -315,7 +315,7 @@ func TestBrokerHasLocalAccess(t *testing.T) {
 	t.Run("returns true when broker has local path", func(t *testing.T) {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
-			if r.URL.Path == "/api/v1/groves/"+projectID+"/providers" && r.Method == http.MethodGet {
+			if r.URL.Path == "/api/v1/projects/"+projectID+"/providers" && r.Method == http.MethodGet {
 				json.NewEncoder(w).Encode(map[string]interface{}{
 					"providers": []map[string]interface{}{
 						{
@@ -350,7 +350,7 @@ func TestBrokerHasLocalAccess(t *testing.T) {
 	t.Run("returns false when broker has no local path", func(t *testing.T) {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
-			if r.URL.Path == "/api/v1/groves/"+projectID+"/providers" && r.Method == http.MethodGet {
+			if r.URL.Path == "/api/v1/projects/"+projectID+"/providers" && r.Method == http.MethodGet {
 				json.NewEncoder(w).Encode(map[string]interface{}{
 					"providers": []map[string]interface{}{
 						{
@@ -384,7 +384,7 @@ func TestBrokerHasLocalAccess(t *testing.T) {
 	t.Run("returns false when broker ID does not match", func(t *testing.T) {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
-			if r.URL.Path == "/api/v1/groves/"+projectID+"/providers" && r.Method == http.MethodGet {
+			if r.URL.Path == "/api/v1/projects/"+projectID+"/providers" && r.Method == http.MethodGet {
 				json.NewEncoder(w).Encode(map[string]interface{}{
 					"providers": []map[string]interface{}{
 						{

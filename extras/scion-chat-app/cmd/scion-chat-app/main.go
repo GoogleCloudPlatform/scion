@@ -350,7 +350,7 @@ func verifyHubConnectivity(ctx context.Context, log *slog.Logger, minter *identi
 
 	// Step 4: Make an HTTP-level request to confirm connectivity & auth,
 	// logging request/response details.
-	verifyURL := strings.TrimRight(hubEndpoint, "/") + "/api/v1/groves"
+	verifyURL := strings.TrimRight(hubEndpoint, "/") + "/api/v1/projects"
 	log.Info("hub-verify: sending manual HTTP GET", "url", verifyURL)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, verifyURL, nil)

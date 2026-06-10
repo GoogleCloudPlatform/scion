@@ -129,7 +129,7 @@ func TestRunTemplateDelete_ProtectedTemplate(t *testing.T) {
 
 // newMockHubServer creates a mock Hub server that handles the endpoints
 // required by CheckHubAvailabilityWithOptions and template operations.
-// projectID is the grove ID to recognize. templates is the list of templates to return.
+// projectID is the project ID to recognize. templates is the list of templates to return.
 // Returns the server and a pointer to a bool that tracks if delete was called.
 func newMockHubServer(t *testing.T, projectID string, templates []map[string]interface{}) (*httptest.Server, *bool) {
 	t.Helper()
@@ -143,11 +143,11 @@ func newMockHubServer(t *testing.T, projectID string, templates []map[string]int
 		case r.URL.Path == "/healthz" && r.Method == http.MethodGet:
 			json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
 
-		// Project lookup (for isGroveRegistered)
-		case strings.HasPrefix(r.URL.Path, "/api/v1/groves/") && r.Method == http.MethodGet:
+		// Project lookup.
+		case strings.HasPrefix(r.URL.Path, "/api/v1/projects/") && r.Method == http.MethodGet:
 			json.NewEncoder(w).Encode(map[string]interface{}{
 				"id":   projectID,
-				"name": "test-grove",
+				"name": "test-project",
 			})
 
 		// Template list
@@ -333,10 +333,10 @@ func newMockHubServerForSync(t *testing.T, projectID string, existingTemplates [
 		case r.URL.Path == "/healthz" && r.Method == http.MethodGet:
 			json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
 
-		case strings.HasPrefix(r.URL.Path, "/api/v1/groves/") && r.Method == http.MethodGet:
+		case strings.HasPrefix(r.URL.Path, "/api/v1/projects/") && r.Method == http.MethodGet:
 			json.NewEncoder(w).Encode(map[string]interface{}{
 				"id":   projectID,
-				"name": "test-grove",
+				"name": "test-project",
 			})
 
 		case r.URL.Path == "/api/v1/templates" && r.Method == http.MethodGet:

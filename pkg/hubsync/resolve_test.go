@@ -99,7 +99,7 @@ func TestIsHubProjectRef_PathSeparator(t *testing.T) {
 func TestResolveProjectOnHub_ByUUID(t *testing.T) {
 	projectID := "550e8400-e29b-41d4-a716-446655440000"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/v1/groves/"+projectID {
+		if r.URL.Path == "/api/v1/projects/"+projectID {
 			json.NewEncoder(w).Encode(hubclient.Project{
 				ID:   projectID,
 				Name: "Test Project",
@@ -122,11 +122,11 @@ func TestResolveProjectOnHub_ByUUID(t *testing.T) {
 
 func TestResolveProjectOnHub_BySlug(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/v1/groves" {
+		if r.URL.Path == "/api/v1/projects" {
 			slug := r.URL.Query().Get("slug")
 			if slug == "my-project" {
 				json.NewEncoder(w).Encode(map[string]interface{}{
-					"groves": []hubclient.Project{
+					"projects": []hubclient.Project{
 						{ID: "abc-123", Name: "My Project", Slug: "my-project"},
 					},
 					"totalCount": 1,
@@ -135,7 +135,7 @@ func TestResolveProjectOnHub_BySlug(t *testing.T) {
 			}
 			// Empty for name fallback
 			json.NewEncoder(w).Encode(map[string]interface{}{
-				"groves":     []hubclient.Project{},
+				"projects":   []hubclient.Project{},
 				"totalCount": 0,
 			})
 			return
@@ -155,20 +155,20 @@ func TestResolveProjectOnHub_BySlug(t *testing.T) {
 
 func TestResolveProjectOnHub_ByName(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/v1/groves" {
+		if r.URL.Path == "/api/v1/projects" {
 			name := r.URL.Query().Get("name")
 			slug := r.URL.Query().Get("slug")
 			if slug != "" {
 				// Slug query returns nothing
 				json.NewEncoder(w).Encode(map[string]interface{}{
-					"groves":     []hubclient.Project{},
+					"projects":   []hubclient.Project{},
 					"totalCount": 0,
 				})
 				return
 			}
 			if name == "My Project" {
 				json.NewEncoder(w).Encode(map[string]interface{}{
-					"groves": []hubclient.Project{
+					"projects": []hubclient.Project{
 						{ID: "abc-456", Name: "My Project", Slug: "my-project"},
 					},
 					"totalCount": 1,
@@ -176,7 +176,7 @@ func TestResolveProjectOnHub_ByName(t *testing.T) {
 				return
 			}
 			json.NewEncoder(w).Encode(map[string]interface{}{
-				"groves":     []hubclient.Project{},
+				"projects":   []hubclient.Project{},
 				"totalCount": 0,
 			})
 			return
@@ -195,11 +195,11 @@ func TestResolveProjectOnHub_ByName(t *testing.T) {
 
 func TestResolveProjectOnHub_ByGitURL(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/v1/groves" {
+		if r.URL.Path == "/api/v1/projects" {
 			gitRemote := r.URL.Query().Get("gitRemote")
 			if gitRemote != "" {
 				json.NewEncoder(w).Encode(map[string]interface{}{
-					"groves": []hubclient.Project{
+					"projects": []hubclient.Project{
 						{ID: "git-grove-1", Name: "Git Project", Slug: "git-project"},
 					},
 					"totalCount": 1,
@@ -207,7 +207,7 @@ func TestResolveProjectOnHub_ByGitURL(t *testing.T) {
 				return
 			}
 			json.NewEncoder(w).Encode(map[string]interface{}{
-				"groves":     []hubclient.Project{},
+				"projects":   []hubclient.Project{},
 				"totalCount": 0,
 			})
 			return
@@ -226,9 +226,9 @@ func TestResolveProjectOnHub_ByGitURL(t *testing.T) {
 
 func TestResolveProjectOnHub_NotFound(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/v1/groves" {
+		if r.URL.Path == "/api/v1/projects" {
 			json.NewEncoder(w).Encode(map[string]interface{}{
-				"groves":     []hubclient.Project{},
+				"projects":   []hubclient.Project{},
 				"totalCount": 0,
 			})
 			return
@@ -247,19 +247,19 @@ func TestResolveProjectOnHub_NotFound(t *testing.T) {
 
 func TestResolveProjectOnHub_MultipleByName(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/v1/groves" {
+		if r.URL.Path == "/api/v1/projects" {
 			slug := r.URL.Query().Get("slug")
 			if slug != "" {
 				// No slug match
 				json.NewEncoder(w).Encode(map[string]interface{}{
-					"groves":     []hubclient.Project{},
+					"projects":   []hubclient.Project{},
 					"totalCount": 0,
 				})
 				return
 			}
 			// Name returns multiple
 			json.NewEncoder(w).Encode(map[string]interface{}{
-				"groves": []hubclient.Project{
+				"projects": []hubclient.Project{
 					{ID: "id-1", Name: "dupe", Slug: "dupe-1"},
 					{ID: "id-2", Name: "dupe", Slug: "dupe-2"},
 				},

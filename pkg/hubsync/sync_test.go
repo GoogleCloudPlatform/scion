@@ -51,7 +51,7 @@ func TestEnsureHubReady_GlobalFallbackWithHubEnabled(t *testing.T) {
 		switch {
 		case r.URL.Path == "/healthz":
 			json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
-		case r.URL.Path == "/api/v1/groves/"+projectID:
+		case r.URL.Path == "/api/v1/projects/"+projectID:
 			// Project is already registered
 			json.NewEncoder(w).Encode(map[string]interface{}{
 				"id":   projectID,
@@ -127,7 +127,7 @@ func TestEnsureHubReady_EndpointOverrideBeatsSettings(t *testing.T) {
 		switch {
 		case r.URL.Path == "/healthz":
 			json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
-		case r.URL.Path == "/api/v1/groves/"+projectID:
+		case r.URL.Path == "/api/v1/projects/"+projectID:
 			json.NewEncoder(w).Encode(map[string]interface{}{
 				"id":   projectID,
 				"name": "Override",
@@ -310,7 +310,7 @@ func TestEnsureHubReady_HubContextSkipsSyncAndRegistration(t *testing.T) {
 		switch {
 		case r.URL.Path == "/healthz":
 			json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
-		case r.URL.Path == "/api/v1/groves/"+projectID:
+		case r.URL.Path == "/api/v1/projects/"+projectID:
 			// Project lookup — should not reach here in container context
 			registrationCalled = true
 			json.NewEncoder(w).Encode(map[string]interface{}{
@@ -1426,7 +1426,7 @@ func TestCreateHubClient_FallsBackToDevAuth(t *testing.T) {
 func TestIsProjectRegistered_Found(t *testing.T) {
 	projectID := "test-project-uuid-1234"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/v1/groves/"+projectID {
+		if r.URL.Path == "/api/v1/projects/"+projectID {
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]string{"id": projectID, "name": "my-project"})
 			return
@@ -1509,7 +1509,7 @@ func TestIsProjectRegistered_NonNotFoundError(t *testing.T) {
 func TestFindProjectByID_Found(t *testing.T) {
 	projectID := "exact-match-uuid-5678"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/v1/groves/"+projectID {
+		if r.URL.Path == "/api/v1/projects/"+projectID {
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]string{
 				"id":   projectID,

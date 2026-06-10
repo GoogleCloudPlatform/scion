@@ -247,14 +247,14 @@ func newEnvProjectResolveMockServer(t *testing.T, projectID, projectName, projec
 		case r.URL.Path == "/healthz" && r.Method == http.MethodGet:
 			json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
 
-		case r.URL.Path == "/api/v1/groves/"+projectID && r.Method == http.MethodGet:
+		case r.URL.Path == "/api/v1/projects/"+projectID && r.Method == http.MethodGet:
 			json.NewEncoder(w).Encode(map[string]interface{}{
 				"id":   projectID,
 				"name": projectName,
 				"slug": projectSlug,
 			})
 
-		case r.URL.Path == "/api/v1/groves" && r.Method == http.MethodGet:
+		case r.URL.Path == "/api/v1/projects" && r.Method == http.MethodGet:
 			slug := r.URL.Query().Get("slug")
 			name := r.URL.Query().Get("name")
 			var groves []map[string]interface{}

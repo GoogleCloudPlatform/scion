@@ -173,7 +173,7 @@ func TestStartAgentViaHub_EnvGatherFailureCleansUp(t *testing.T) {
 		case r.URL.Path == "/healthz" && r.Method == http.MethodGet:
 			json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
 
-		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/groves/"+projectID+"/agents":
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/projects/"+projectID+"/agents":
 			// CreateAgent — return 202 with env-gather requirements
 			w.WriteHeader(http.StatusAccepted)
 			json.NewEncoder(w).Encode(map[string]interface{}{
@@ -190,7 +190,7 @@ func TestStartAgentViaHub_EnvGatherFailureCleansUp(t *testing.T) {
 			deleteCalled = true
 			w.WriteHeader(http.StatusNoContent)
 
-		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/groves":
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects":
 			json.NewEncoder(w).Encode(map[string]interface{}{
 				"groves": []map[string]interface{}{{"id": projectID, "name": "test"}},
 			})
@@ -245,12 +245,12 @@ func TestStartAgentViaHub_GlobalGroveSkipsWorkspaceBootstrap(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/groves/"+projectID:
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects/"+projectID:
 			json.NewEncoder(w).Encode(map[string]interface{}{
 				"id":   projectID,
 				"name": "global",
 			})
-		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/groves/"+projectID+"/agents":
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/projects/"+projectID+"/agents":
 			var req hubclient.CreateAgentRequest
 			require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
 			captured = &req
