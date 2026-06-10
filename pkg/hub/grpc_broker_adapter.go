@@ -38,9 +38,10 @@ type GRPCBrokerAdapter struct {
 	channel string
 	log     *slog.Logger
 
-	mu     sync.RWMutex
-	subs   map[string]eventbus.EventHandler
-	closed bool
+	mu              sync.RWMutex
+	subs            map[string]eventbus.EventHandler
+	closed          bool
+	lastReconnectAt time.Time
 }
 
 // NewGRPCBrokerAdapter dials the broker gRPC service at address and returns an
@@ -78,7 +79,9 @@ func (a *GRPCBrokerAdapter) Configure(config map[string]string) error {
 	client := a.client
 	a.mu.RUnlock()
 
-	_, err := client.Configure(context.Background(), &brokerv1.ConfigureRequest{Config: config})
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	_, err := client.Configure(ctx, &brokerv1.ConfigureRequest{Config: config})
+	cancel()
 	if err != nil {
 		a.log.Warn("Configure failed, attempting reconnect", "error", err)
 		if reconnErr := a.tryReconnect(); reconnErr != nil {
@@ -87,7 +90,9 @@ func (a *GRPCBrokerAdapter) Configure(config map[string]string) error {
 		a.mu.RLock()
 		client = a.client
 		a.mu.RUnlock()
-		_, err = client.Configure(context.Background(), &brokerv1.ConfigureRequest{Config: config})
+		ctx2, cancel2 := context.WithTimeout(context.Background(), 10*time.Second)
+		_, err = client.Configure(ctx2, &brokerv1.ConfigureRequest{Config: config})
+		cancel2()
 	}
 	return err
 }
@@ -129,7 +134,9 @@ func (a *GRPCBrokerAdapter) Subscribe(pattern string, handler eventbus.EventHand
 		return nil, fmt.Errorf("adapter is closed")
 	}
 
-	_, err := a.client.Subscribe(context.Background(), &brokerv1.SubscribeRequest{Pattern: pattern})
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	_, err := a.client.Subscribe(ctx, &brokerv1.SubscribeRequest{Pattern: pattern})
+	cancel()
 	if err != nil {
 		a.log.Warn("Subscribe failed, attempting reconnect", "pattern", pattern, "error", err)
 		a.mu.Unlock()
@@ -138,7 +145,9 @@ func (a *GRPCBrokerAdapter) Subscribe(pattern string, handler eventbus.EventHand
 		if reconnErr != nil {
 			return nil, fmt.Errorf("subscribe failed: %w (reconnect also failed: %v)", err, reconnErr)
 		}
-		_, err = a.client.Subscribe(context.Background(), &brokerv1.SubscribeRequest{Pattern: pattern})
+		ctx2, cancel2 := context.WithTimeout(context.Background(), 10*time.Second)
+		_, err = a.client.Subscribe(ctx2, &brokerv1.SubscribeRequest{Pattern: pattern})
+		cancel2()
 		if err != nil {
 			return nil, err
 		}
@@ -157,8 +166,19 @@ func (a *GRPCBrokerAdapter) Close() error {
 }
 
 // tryReconnect re-establishes the gRPC connection and re-subscribes all active
-// patterns on the new connection.
+// patterns on the new connection. It guards against thundering-herd reconnects
+// by skipping if another goroutine already reconnected or if the last reconnect
+// was within the past 5 seconds.
 func (a *GRPCBrokerAdapter) tryReconnect() error {
+	a.mu.Lock()
+	if time.Since(a.lastReconnectAt) < 5*time.Second {
+		a.mu.Unlock()
+		a.log.Debug("Skipping reconnect, another goroutine reconnected recently")
+		return nil
+	}
+	failedConn := a.conn
+	a.mu.Unlock()
+
 	a.log.Info("Attempting reconnect to broker service")
 
 	conn, err := grpc.NewClient(a.address,
@@ -174,9 +194,16 @@ func (a *GRPCBrokerAdapter) tryReconnect() error {
 	}
 
 	a.mu.Lock()
+	if a.conn != failedConn {
+		a.mu.Unlock()
+		_ = conn.Close()
+		a.log.Debug("Skipping reconnect, connection already replaced by another goroutine")
+		return nil
+	}
 	oldConn := a.conn
 	a.conn = conn
 	a.client = brokerv1.NewBrokerServiceClient(conn)
+	a.lastReconnectAt = time.Now()
 	patterns := make([]string, 0, len(a.subs))
 	for p := range a.subs {
 		patterns = append(patterns, p)
@@ -188,9 +215,11 @@ func (a *GRPCBrokerAdapter) tryReconnect() error {
 	}
 
 	for _, pattern := range patterns {
-		if _, subErr := a.client.Subscribe(context.Background(), &brokerv1.SubscribeRequest{Pattern: pattern}); subErr != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		if _, subErr := a.client.Subscribe(ctx, &brokerv1.SubscribeRequest{Pattern: pattern}); subErr != nil {
 			a.log.Warn("Failed to re-subscribe after reconnect", "pattern", pattern, "error", subErr)
 		}
+		cancel()
 	}
 
 	a.log.Info("Successfully reconnected to broker service", "resubscribed", len(patterns))
@@ -292,6 +321,8 @@ func (s *grpcSubscription) Unsubscribe() error {
 	s.adapter.mu.Lock()
 	defer s.adapter.mu.Unlock()
 	delete(s.adapter.subs, s.pattern)
-	_, err := s.adapter.client.Unsubscribe(context.Background(), &brokerv1.UnsubscribeRequest{Pattern: s.pattern})
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_, err := s.adapter.client.Unsubscribe(ctx, &brokerv1.UnsubscribeRequest{Pattern: s.pattern})
 	return err
 }

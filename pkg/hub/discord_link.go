@@ -79,8 +79,7 @@ func (s *DiscordLinkService) RegisterCode(code, discordUserID string) {
 
 // VerifyCode attempts to confirm a pending link code with the given user.
 // Returns the discordUserID on success, or empty string with a reason.
-func (s *DiscordLinkService) VerifyCode(code, userID, userEmail string) (discordUserID string, err string) {
-	ctx := context.Background()
+func (s *DiscordLinkService) VerifyCode(ctx context.Context, code, userID, userEmail string) (discordUserID string, err string) {
 	upperCode := strings.ToUpper(code)
 
 	link, dbErr := s.store.GetDiscordPendingLinkByCode(ctx, upperCode)
@@ -289,7 +288,7 @@ func (s *Server) handleDiscordLinkVerify(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	discordUserID, errReason := s.discordLinkService.VerifyCode(req.Code, user.ID(), user.Email())
+	discordUserID, errReason := s.discordLinkService.VerifyCode(r.Context(), req.Code, user.ID(), user.Email())
 	if errReason != "" {
 		switch errReason {
 		case "code_not_found":

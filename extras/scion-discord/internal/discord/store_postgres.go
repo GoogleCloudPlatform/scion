@@ -442,6 +442,10 @@ func (s *postgresStore) TryAdvisoryLock(ctx context.Context, key int64) (bool, e
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if s.lockConn != nil {
+		return false, fmt.Errorf("advisory lock connection already held")
+	}
+
 	conn, err := s.db.Conn(ctx)
 	if err != nil {
 		return false, err
@@ -458,6 +462,15 @@ func (s *postgresStore) TryAdvisoryLock(ctx context.Context, key int64) (bool, e
 	}
 	s.lockConn = conn
 	return true, nil
+}
+
+func (s *postgresStore) PingLockConn(ctx context.Context) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.lockConn == nil {
+		return fmt.Errorf("no lock connection")
+	}
+	return s.lockConn.PingContext(ctx)
 }
 
 func (s *postgresStore) ReleaseAdvisoryLock(ctx context.Context, key int64) error {

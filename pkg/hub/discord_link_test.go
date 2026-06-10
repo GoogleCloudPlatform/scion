@@ -132,7 +132,7 @@ func TestDiscordLinkService_RegisterAndVerify(t *testing.T) {
 
 	svc.RegisterCode("abc123", "discord-user-1")
 
-	discordUserID, errReason := svc.VerifyCode("ABC123", "user-1", "user1@example.com")
+	discordUserID, errReason := svc.VerifyCode(context.Background(), "ABC123", "user-1", "user1@example.com")
 	assert.Empty(t, errReason)
 	assert.Equal(t, "discord-user-1", discordUserID)
 }
@@ -141,7 +141,7 @@ func TestDiscordLinkService_VerifyNotFound(t *testing.T) {
 	svc, _ := newTestDiscordLinkService()
 	defer svc.Close()
 
-	_, errReason := svc.VerifyCode("NONEXISTENT", "user-1", "user1@example.com")
+	_, errReason := svc.VerifyCode(context.Background(), "NONEXISTENT", "user-1", "user1@example.com")
 	assert.Equal(t, "code_not_found", errReason)
 }
 
@@ -156,7 +156,7 @@ func TestDiscordLinkService_VerifyExpired(t *testing.T) {
 	ms.links["EXP001"].ExpiresAt = time.Now().Add(-1 * time.Minute)
 	ms.mu.Unlock()
 
-	_, errReason := svc.VerifyCode("EXP001", "user-2", "user2@example.com")
+	_, errReason := svc.VerifyCode(context.Background(), "EXP001", "user-2", "user2@example.com")
 	assert.Equal(t, "code_expired", errReason)
 }
 
@@ -168,11 +168,11 @@ func TestDiscordLinkService_RegisterReplacesExisting(t *testing.T) {
 	svc.RegisterCode("second", "discord-user-3")
 
 	// First code should be gone.
-	_, errReason := svc.VerifyCode("FIRST", "user-3", "user3@example.com")
+	_, errReason := svc.VerifyCode(context.Background(), "FIRST", "user-3", "user3@example.com")
 	assert.Equal(t, "code_not_found", errReason)
 
 	// Second code should work.
-	discordUserID, errReason := svc.VerifyCode("SECOND", "user-3", "user3@example.com")
+	discordUserID, errReason := svc.VerifyCode(context.Background(), "SECOND", "user-3", "user3@example.com")
 	assert.Empty(t, errReason)
 	assert.Equal(t, "discord-user-3", discordUserID)
 }
@@ -192,7 +192,7 @@ func TestDiscordLinkService_GetStatusByDiscordUser(t *testing.T) {
 	assert.Equal(t, "pending", status)
 
 	// Confirmed after verification.
-	svc.VerifyCode("STAT001", "user-4", "user4@example.com")
+	svc.VerifyCode(context.Background(), "STAT001", "user-4", "user4@example.com")
 	status, userID, userEmail := svc.GetStatusByDiscordUser("discord-user-4")
 	assert.Equal(t, "confirmed", status)
 	assert.Equal(t, "user-4", userID)
@@ -204,7 +204,7 @@ func TestDiscordLinkService_ConsumePending(t *testing.T) {
 	defer svc.Close()
 
 	svc.RegisterCode("con001", "discord-user-5")
-	svc.VerifyCode("CON001", "user-5", "user5@example.com")
+	svc.VerifyCode(context.Background(), "CON001", "user-5", "user5@example.com")
 	svc.ConsumePending("discord-user-5")
 
 	status, _, _ := svc.GetStatusByDiscordUser("discord-user-5")
@@ -229,12 +229,12 @@ func TestDiscordLinkService_VerifyAlreadyConfirmed(t *testing.T) {
 	defer svc.Close()
 
 	svc.RegisterCode("conf001", "discord-user-6")
-	discordUserID, errReason := svc.VerifyCode("CONF001", "user-6", "user6@example.com")
+	discordUserID, errReason := svc.VerifyCode(context.Background(), "CONF001", "user-6", "user6@example.com")
 	assert.Empty(t, errReason)
 	assert.Equal(t, "discord-user-6", discordUserID)
 
 	// Verify again should return the confirmed discord user ID.
-	discordUserID, errReason = svc.VerifyCode("CONF001", "user-other", "other@example.com")
+	discordUserID, errReason = svc.VerifyCode(context.Background(), "CONF001", "user-other", "other@example.com")
 	assert.Empty(t, errReason)
 	assert.Equal(t, "discord-user-6", discordUserID)
 }

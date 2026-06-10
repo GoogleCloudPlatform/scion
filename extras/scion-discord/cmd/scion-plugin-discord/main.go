@@ -179,35 +179,33 @@ func serveStandalone() {
 		<-sigCh
 		log.Info("Received shutdown signal")
 		cancel()
-
 		grpcServer.GracefulStop()
-
-		if err := broker.Close(); err != nil {
-			log.Warn("Error closing broker", "error", err)
-		}
-
-		if lockHeld.Load() {
-			if err := lockStore.ReleaseAdvisoryLock(context.Background(), int64(store.LockDiscordGateway)); err != nil {
-				log.Warn("Error releasing advisory lock", "error", err)
-			}
-		}
-
-		if err := lockStore.Close(); err != nil {
-			log.Warn("Error closing lock store", "error", err)
-		}
-
-		os.Exit(0)
 	}()
 
 	log.Info("gRPC server listening", "address", listenAddr)
 	if err := grpcServer.Serve(lis); err != nil {
 		log.Error("gRPC server failed", "error", err)
-		os.Exit(1)
+	}
+
+	// Cleanup after Serve() returns (triggered by GracefulStop or error).
+	if err := broker.Close(); err != nil {
+		log.Warn("Error closing broker", "error", err)
+	}
+
+	if lockHeld.Load() {
+		if err := lockStore.ReleaseAdvisoryLock(context.Background(), int64(store.LockDiscordGateway)); err != nil {
+			log.Warn("Error releasing advisory lock", "error", err)
+		}
+	}
+
+	if err := lockStore.Close(); err != nil {
+		log.Warn("Error closing lock store", "error", err)
 	}
 }
 
 func runAdvisoryLockLoop(ctx context.Context, log *slog.Logger, lockStore discord.Store, broker *discord.DiscordBroker, lockHeld *atomic.Bool, healthServer *health.Server) {
 	const retryInterval = 30 * time.Second
+	const pingInterval = 30 * time.Second
 
 	for {
 		acquired, err := lockStore.TryAdvisoryLock(ctx, int64(store.LockDiscordGateway))
@@ -221,14 +219,34 @@ func runAdvisoryLockLoop(ctx context.Context, log *slog.Logger, lockStore discor
 			log.Info("Acquired gateway lock, starting as primary")
 			if err := broker.Subscribe(">"); err != nil {
 				log.Error("Failed to subscribe (start gateway)", "error", err)
-				return
+				lockHeld.Store(false)
+				goto waitRetry
 			}
 			healthServer.SetServingStatus("", healthpb.HealthCheckResponse_SERVING)
-			return
+
+			// Monitor the lock connection; demote if it drops.
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(pingInterval):
+				}
+				if err := lockStore.PingLockConn(ctx); err != nil {
+					log.Warn("Lock connection lost, demoting to standby", "error", err)
+					if closeErr := broker.Close(); closeErr != nil {
+						log.Warn("Error closing broker after lock loss", "error", closeErr)
+					}
+					_ = lockStore.ReleaseAdvisoryLock(context.Background(), int64(store.LockDiscordGateway))
+					lockHeld.Store(false)
+					healthServer.SetServingStatus("", healthpb.HealthCheckResponse_NOT_SERVING)
+					break
+				}
+			}
 		} else {
 			log.Info("Another instance holds gateway lock, standing by")
 		}
 
+	waitRetry:
 		select {
 		case <-ctx.Done():
 			return

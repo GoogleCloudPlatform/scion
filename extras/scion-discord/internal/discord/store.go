@@ -57,6 +57,7 @@ type Store interface {
 	// Advisory locking (for standalone HA leader election)
 	TryAdvisoryLock(ctx context.Context, key int64) (bool, error)
 	ReleaseAdvisoryLock(ctx context.Context, key int64) error
+	PingLockConn(ctx context.Context) error
 
 	// Lifecycle
 	Close() error
@@ -693,6 +694,10 @@ func scanUserMapping(row *sql.Row) (*DiscordUserMapping, error) {
 
 func (s *sqliteStore) TryAdvisoryLock(_ context.Context, _ int64) (bool, error) {
 	return true, nil
+}
+
+func (s *sqliteStore) PingLockConn(_ context.Context) error {
+	return nil
 }
 
 func (s *sqliteStore) ReleaseAdvisoryLock(_ context.Context, _ int64) error {
