@@ -178,7 +178,7 @@ CREATE TABLE IF NOT EXISTS channel_links (
 	linked_at TEXT NOT NULL,
 	active INTEGER NOT NULL DEFAULT 1,
 	show_agent_to_agent INTEGER NOT NULL DEFAULT 0,
-	show_assistant_reply INTEGER NOT NULL DEFAULT 1,
+	show_assistant_reply INTEGER NOT NULL DEFAULT 0,
 	show_state_changes INTEGER NOT NULL DEFAULT 1,
 	notify_in_group INTEGER NOT NULL DEFAULT 1,
 	chat_only INTEGER NOT NULL DEFAULT 0
