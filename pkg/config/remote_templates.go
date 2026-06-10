@@ -394,9 +394,9 @@ func sparseGitCheckout(ctx context.Context, parts *GitHubURLParts, destPath stri
 	}
 
 	// If there's a path, only check out that path; otherwise, check out everything
-	sparsePattern := "/*"
+	sparsePattern := "/**"
 	if parts.Path != "" {
-		sparsePattern = parts.Path + "/*"
+		sparsePattern = parts.Path + "/**"
 	}
 	if err := os.WriteFile(sparseCheckoutPath, []byte(sparsePattern+"\n"), 0644); err != nil {
 		return fmt.Errorf("failed to write sparse-checkout config: %w", err)
