@@ -32,12 +32,20 @@ const (
 	UserTokenIssuer = "scion-hub"
 	// UserTokenAudience is the audience claim for user tokens.
 	UserTokenAudience = "scion-hub-api"
+	// TestLoginAudience is the audience claim for test-login challenge tokens.
+	// It is distinct from UserTokenAudience so a test-login token cannot be
+	// used as a regular access token and vice versa.
+	TestLoginAudience = "scion-test-login"
 	// DefaultAccessTokenDuration is the default validity for access tokens.
 	DefaultAccessTokenDuration = 15 * time.Minute
 	// DefaultCLIAccessTokenDuration is the longer validity for CLI access tokens.
 	DefaultCLIAccessTokenDuration = 30 * 24 * time.Hour // 30 days
 	// DefaultRefreshTokenDuration is the default validity for refresh tokens.
 	DefaultRefreshTokenDuration = 7 * 24 * time.Hour // 7 days
+	// DefaultTestLoginTokenDuration is the default validity for test-login
+	// challenge tokens. Kept short because these are single-use-ish tokens
+	// minted immediately before calling the test-login endpoint.
+	DefaultTestLoginTokenDuration = 5 * time.Minute
 )
 
 // UserTokenType represents the type of user token.
@@ -279,6 +287,58 @@ func (s *UserTokenService) GetTokenExpiry(tokenString string) (time.Time, error)
 	}
 
 	return claims.Expiry.Time(), nil
+}
+
+// GenerateTestLoginToken mints a short-lived JWT for authenticating to the
+// test-login endpoint. The token uses the same signing key as user tokens
+// but a dedicated audience ("scion-test-login") so it cannot be used as a
+// regular access token and vice versa.
+func (s *UserTokenService) GenerateTestLoginToken(subject string) (string, error) {
+	now := time.Now()
+
+	claims := jwt.Claims{
+		Issuer:    UserTokenIssuer,
+		Subject:   subject,
+		Audience:  jwt.Audience{TestLoginAudience},
+		IssuedAt:  jwt.NewNumericDate(now),
+		Expiry:    jwt.NewNumericDate(now.Add(DefaultTestLoginTokenDuration)),
+		NotBefore: jwt.NewNumericDate(now),
+		ID:        generateUserTokenID(),
+	}
+
+	token, err := jwt.Signed(s.signer).Claims(claims).Serialize()
+	if err != nil {
+		return "", fmt.Errorf("failed to sign test-login token: %w", err)
+	}
+
+	return token, nil
+}
+
+// ValidateTestLoginToken validates a test-login challenge JWT. It verifies
+// the signature, issuer, audience ("scion-test-login"), and expiry. Returns
+// nil on success or an error describing the validation failure.
+func (s *UserTokenService) ValidateTestLoginToken(tokenString string) error {
+	token, err := jwt.ParseSigned(tokenString, []jose.SignatureAlgorithm{jose.HS256})
+	if err != nil {
+		return fmt.Errorf("failed to parse token: %w", err)
+	}
+
+	var claims jwt.Claims
+	if err := token.Claims(s.config.SigningKey, &claims); err != nil {
+		return fmt.Errorf("failed to verify token: %w", err)
+	}
+
+	expected := jwt.Expected{
+		Issuer:      UserTokenIssuer,
+		AnyAudience: jwt.Audience{TestLoginAudience},
+		Time:        time.Now(),
+	}
+
+	if err := claims.Validate(expected); err != nil {
+		return fmt.Errorf("token validation failed: %w", err)
+	}
+
+	return nil
 }
 
 // generateUserTokenID generates a unique token ID.

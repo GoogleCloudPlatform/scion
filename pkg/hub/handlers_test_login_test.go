@@ -25,6 +25,8 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/go-jose/go-jose/v4"
+	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -59,7 +61,9 @@ func (s *testLoginStore) GetGroupBySlug(_ context.Context, _ string) (*store.Gro
 	return nil, fmt.Errorf("not found")
 }
 
-func newTestLoginWebServer(t *testing.T, enableTestLogin bool) *WebServer {
+// newTestLoginWebServer creates a WebServer for test-login tests and returns
+// the UserTokenService so callers can mint challenge tokens.
+func newTestLoginWebServer(t *testing.T, enableTestLogin bool) (*WebServer, *UserTokenService) {
 	t.Helper()
 	cfg := WebServerConfig{
 		EnableTestLogin: enableTestLogin,
@@ -69,15 +73,25 @@ func newTestLoginWebServer(t *testing.T, enableTestLogin bool) *WebServer {
 	require.NoError(t, err)
 	ws.SetUserTokenService(tokenSvc)
 	ws.SetStore(newTestLoginStore())
-	return ws
+	return ws, tokenSvc
+}
+
+// testLoginAuthHeader mints a valid test-login challenge token and returns
+// the value for the Authorization header ("Bearer <token>").
+func testLoginAuthHeader(t *testing.T, svc *UserTokenService) string {
+	t.Helper()
+	token, err := svc.GenerateTestLoginToken("test")
+	require.NoError(t, err)
+	return "Bearer " + token
 }
 
 func TestHandleTestLogin_Success(t *testing.T) {
-	ws := newTestLoginWebServer(t, true)
+	ws, tokenSvc := newTestLoginWebServer(t, true)
 
 	body := `{"email":"test@example.com","role":"admin","displayName":"Test User"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/test-login", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", testLoginAuthHeader(t, tokenSvc))
 	rec := httptest.NewRecorder()
 
 	ws.handleTestLogin(rec, req)
@@ -106,11 +120,12 @@ func TestHandleTestLogin_Success(t *testing.T) {
 }
 
 func TestHandleTestLogin_DefaultRole(t *testing.T) {
-	ws := newTestLoginWebServer(t, true)
+	ws, tokenSvc := newTestLoginWebServer(t, true)
 
 	body := `{"email":"member@example.com"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/test-login", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", testLoginAuthHeader(t, tokenSvc))
 	rec := httptest.NewRecorder()
 
 	ws.handleTestLogin(rec, req)
@@ -124,11 +139,12 @@ func TestHandleTestLogin_DefaultRole(t *testing.T) {
 }
 
 func TestHandleTestLogin_Disabled(t *testing.T) {
-	ws := newTestLoginWebServer(t, false)
+	ws, tokenSvc := newTestLoginWebServer(t, false)
 
 	body := `{"email":"test@example.com","role":"admin"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/test-login", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", testLoginAuthHeader(t, tokenSvc))
 	rec := httptest.NewRecorder()
 
 	ws.handleTestLogin(rec, req)
@@ -137,7 +153,7 @@ func TestHandleTestLogin_Disabled(t *testing.T) {
 }
 
 func TestHandleTestLogin_MethodNotAllowed(t *testing.T) {
-	ws := newTestLoginWebServer(t, true)
+	ws, _ := newTestLoginWebServer(t, true)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/auth/test-login", nil)
 	rec := httptest.NewRecorder()
@@ -148,11 +164,12 @@ func TestHandleTestLogin_MethodNotAllowed(t *testing.T) {
 }
 
 func TestHandleTestLogin_MissingEmail(t *testing.T) {
-	ws := newTestLoginWebServer(t, true)
+	ws, tokenSvc := newTestLoginWebServer(t, true)
 
 	body := `{"role":"admin"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/test-login", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", testLoginAuthHeader(t, tokenSvc))
 	rec := httptest.NewRecorder()
 
 	ws.handleTestLogin(rec, req)
@@ -161,11 +178,12 @@ func TestHandleTestLogin_MissingEmail(t *testing.T) {
 }
 
 func TestHandleTestLogin_InvalidRole(t *testing.T) {
-	ws := newTestLoginWebServer(t, true)
+	ws, tokenSvc := newTestLoginWebServer(t, true)
 
 	body := `{"email":"test@example.com","role":"superadmin"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/test-login", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", testLoginAuthHeader(t, tokenSvc))
 	rec := httptest.NewRecorder()
 
 	ws.handleTestLogin(rec, req)
@@ -174,10 +192,11 @@ func TestHandleTestLogin_InvalidRole(t *testing.T) {
 }
 
 func TestHandleTestLogin_InvalidJSON(t *testing.T) {
-	ws := newTestLoginWebServer(t, true)
+	ws, tokenSvc := newTestLoginWebServer(t, true)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/test-login", strings.NewReader("not json"))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", testLoginAuthHeader(t, tokenSvc))
 	rec := httptest.NewRecorder()
 
 	ws.handleTestLogin(rec, req)
@@ -186,7 +205,7 @@ func TestHandleTestLogin_InvalidJSON(t *testing.T) {
 }
 
 func TestHandleTestLogin_ExistingUser(t *testing.T) {
-	ws := newTestLoginWebServer(t, true)
+	ws, tokenSvc := newTestLoginWebServer(t, true)
 
 	// Pre-populate a user
 	mockStore := ws.store.(*testLoginStore)
@@ -202,6 +221,7 @@ func TestHandleTestLogin_ExistingUser(t *testing.T) {
 	body := `{"email":"existing@example.com","role":"admin","displayName":"New Name"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/test-login", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", testLoginAuthHeader(t, tokenSvc))
 	rec := httptest.NewRecorder()
 
 	ws.handleTestLogin(rec, req)
@@ -217,11 +237,12 @@ func TestHandleTestLogin_ExistingUser(t *testing.T) {
 func TestHandleTestLogin_AllRoles(t *testing.T) {
 	for _, role := range []string{"admin", "member", "viewer"} {
 		t.Run(role, func(t *testing.T) {
-			ws := newTestLoginWebServer(t, true)
+			ws, tokenSvc := newTestLoginWebServer(t, true)
 
 			body := fmt.Sprintf(`{"email":"user@example.com","role":"%s"}`, role)
 			req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/test-login", strings.NewReader(body))
 			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Authorization", testLoginAuthHeader(t, tokenSvc))
 			rec := httptest.NewRecorder()
 
 			ws.handleTestLogin(rec, req)
@@ -233,4 +254,130 @@ func TestHandleTestLogin_AllRoles(t *testing.T) {
 			assert.Equal(t, role, resp.User.Role)
 		})
 	}
+}
+
+// --- Auth failure tests ---
+
+func TestHandleTestLogin_MissingAuth(t *testing.T) {
+	ws, _ := newTestLoginWebServer(t, true)
+
+	body := `{"email":"test@example.com","role":"admin"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/test-login", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	// No Authorization header
+	rec := httptest.NewRecorder()
+
+	ws.handleTestLogin(rec, req)
+
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+	assert.Contains(t, rec.Body.String(), "authorization required")
+}
+
+func TestHandleTestLogin_InvalidToken(t *testing.T) {
+	ws, _ := newTestLoginWebServer(t, true)
+
+	body := `{"email":"test@example.com","role":"admin"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/test-login", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer not-a-valid-jwt")
+	rec := httptest.NewRecorder()
+
+	ws.handleTestLogin(rec, req)
+
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+	assert.Contains(t, rec.Body.String(), "invalid test-login token")
+}
+
+func TestHandleTestLogin_WrongSigningKey(t *testing.T) {
+	ws, _ := newTestLoginWebServer(t, true)
+
+	// Mint a token with a different signing key
+	otherSvc, err := NewUserTokenService(UserTokenConfig{})
+	require.NoError(t, err)
+	token, err := otherSvc.GenerateTestLoginToken("attacker")
+	require.NoError(t, err)
+
+	body := `{"email":"test@example.com","role":"admin"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/test-login", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+
+	ws.handleTestLogin(rec, req)
+
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+	assert.Contains(t, rec.Body.String(), "invalid test-login token")
+}
+
+func TestHandleTestLogin_WrongAudience(t *testing.T) {
+	ws, tokenSvc := newTestLoginWebServer(t, true)
+
+	// Mint a regular user access token (audience "scion-hub-api") instead of
+	// a test-login token (audience "scion-test-login").
+	userToken, _, _, err := tokenSvc.GenerateTokenPair(
+		"uid", "test@example.com", "Test", "admin", ClientTypeWeb,
+	)
+	require.NoError(t, err)
+
+	body := `{"email":"test@example.com","role":"admin"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/test-login", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+userToken)
+	rec := httptest.NewRecorder()
+
+	ws.handleTestLogin(rec, req)
+
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+	assert.Contains(t, rec.Body.String(), "invalid test-login token")
+}
+
+func TestHandleTestLogin_ExpiredToken(t *testing.T) {
+	ws, _ := newTestLoginWebServer(t, true)
+
+	// Manually create an expired test-login token using the same signing key.
+	// We reach into the UserTokenService's signer to build an expired JWT.
+	signer, err := jose.NewSigner(
+		jose.SigningKey{Algorithm: jose.HS256, Key: ws.userTokenSvc.config.SigningKey},
+		(&jose.SignerOptions{}).WithType("JWT"),
+	)
+	require.NoError(t, err)
+
+	past := time.Now().Add(-10 * time.Minute)
+	claims := jwt.Claims{
+		Issuer:    UserTokenIssuer,
+		Subject:   "test",
+		Audience:  jwt.Audience{TestLoginAudience},
+		IssuedAt:  jwt.NewNumericDate(past),
+		Expiry:    jwt.NewNumericDate(past.Add(5 * time.Minute)), // expired 5 min ago
+		NotBefore: jwt.NewNumericDate(past),
+		ID:        "expired-test-id",
+	}
+	token, err := jwt.Signed(signer).Claims(claims).Serialize()
+	require.NoError(t, err)
+
+	body := `{"email":"test@example.com","role":"admin"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/test-login", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+
+	ws.handleTestLogin(rec, req)
+
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+	assert.Contains(t, rec.Body.String(), "invalid test-login token")
+}
+
+func TestHandleTestLogin_AuthNotBearer(t *testing.T) {
+	ws, _ := newTestLoginWebServer(t, true)
+
+	body := `{"email":"test@example.com","role":"admin"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/test-login", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Basic dXNlcjpwYXNz")
+	rec := httptest.NewRecorder()
+
+	ws.handleTestLogin(rec, req)
+
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+	assert.Contains(t, rec.Body.String(), "authorization required")
 }
