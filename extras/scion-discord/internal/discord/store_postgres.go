@@ -433,6 +433,19 @@ func (s *postgresStore) GetNotificationPrefs(ctx context.Context, discordUserID,
 	return prefs, rows.Err()
 }
 
+// --- Advisory locking ---
+
+func (s *postgresStore) TryAdvisoryLock(ctx context.Context, key int64) (bool, error) {
+	var acquired bool
+	err := s.db.QueryRowContext(ctx, "SELECT pg_try_advisory_lock($1)", key).Scan(&acquired)
+	return acquired, err
+}
+
+func (s *postgresStore) ReleaseAdvisoryLock(ctx context.Context, key int64) error {
+	_, err := s.db.ExecContext(ctx, "SELECT pg_advisory_unlock($1)", key)
+	return err
+}
+
 // --- scan helpers ---
 
 func pgScanChannelLink(row *sql.Row) (*ChannelLink, error) {

@@ -54,6 +54,10 @@ type Store interface {
 	SetNotificationPref(ctx context.Context, pref *NotificationPref) error
 	GetNotificationPrefs(ctx context.Context, discordUserID, projectID string) ([]*NotificationPref, error)
 
+	// Advisory locking (for standalone HA leader election)
+	TryAdvisoryLock(ctx context.Context, key int64) (bool, error)
+	ReleaseAdvisoryLock(ctx context.Context, key int64) error
+
 	// Lifecycle
 	Close() error
 }
@@ -683,6 +687,16 @@ func scanUserMapping(row *sql.Row) (*DiscordUserMapping, error) {
 		return nil, fmt.Errorf("parse linked_at: %w", err)
 	}
 	return &m, nil
+}
+
+// --- Advisory locking (SQLite: no-op, always succeeds) ---
+
+func (s *sqliteStore) TryAdvisoryLock(_ context.Context, _ int64) (bool, error) {
+	return true, nil
+}
+
+func (s *sqliteStore) ReleaseAdvisoryLock(_ context.Context, _ int64) error {
+	return nil
 }
 
 func boolToInt(b bool) int {
