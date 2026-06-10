@@ -27,6 +27,7 @@ type V1PluginEntryLike struct {
 	Config      map[string]string
 	SelfManaged bool
 	Address     string
+	Mode        string
 }
 
 // PluginsConfigFromEntries builds a PluginsConfig from a broker entry map.

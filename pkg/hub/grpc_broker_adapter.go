@@ -68,6 +68,26 @@ func NewGRPCBrokerAdapter(address string, channel string, log *slog.Logger) (*GR
 	}, nil
 }
 
+// Configure sends a configuration map to the remote broker via gRPC.
+func (a *GRPCBrokerAdapter) Configure(config map[string]string) error {
+	a.mu.RLock()
+	if a.closed {
+		a.mu.RUnlock()
+		return fmt.Errorf("adapter is closed")
+	}
+	a.mu.RUnlock()
+
+	_, err := a.client.Configure(context.Background(), &brokerv1.ConfigureRequest{Config: config})
+	if err != nil {
+		a.log.Warn("Configure failed, attempting reconnect", "error", err)
+		if reconnErr := a.tryReconnect(); reconnErr != nil {
+			return fmt.Errorf("configure failed: %w (reconnect also failed: %v)", err, reconnErr)
+		}
+		_, err = a.client.Configure(context.Background(), &brokerv1.ConfigureRequest{Config: config})
+	}
+	return err
+}
+
 // Publish converts the StructuredMessage to its proto representation and sends
 // it to the remote broker via gRPC.
 func (a *GRPCBrokerAdapter) Publish(ctx context.Context, topic string, msg *messages.StructuredMessage) error {

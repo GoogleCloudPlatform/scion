@@ -331,9 +331,14 @@ type V1PluginEntry struct {
 	// SelfManaged indicates the plugin manages its own process lifecycle.
 	// The Hub connects to the plugin's RPC server rather than starting it.
 	SelfManaged bool `json:"self_managed,omitempty" yaml:"self_managed,omitempty" koanf:"self_managed"`
-	// Address is the RPC address for self-managed plugins (e.g. "localhost:9090").
-	// Required when SelfManaged is true.
+	// Address is the network address for self-managed or gRPC plugins.
+	// Required when SelfManaged is true or Mode is "grpc".
 	Address string `json:"address,omitempty" yaml:"address,omitempty" koanf:"address"`
+	// Mode selects the plugin communication mode: "" or "plugin" (default go-plugin
+	// subprocess), "grpc" (standalone gRPC broker), "self-managed" (go-plugin RPC to
+	// an externally-managed process). When empty, falls back to SelfManaged for
+	// backward compatibility.
+	Mode string `json:"mode,omitempty" yaml:"mode,omitempty" koanf:"mode"`
 }
 
 // V1ServerHubConfig holds the Hub API server settings (when running scion-server).
