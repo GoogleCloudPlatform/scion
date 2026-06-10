@@ -66,6 +66,9 @@ jobs:
       - name: Vet Code
         run: make lint
 
+      - name: Check Compatibility Literals
+        run: make compat-literals
+
       - name: Run Tests
         run: make test-fast
 
