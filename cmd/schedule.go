@@ -74,16 +74,16 @@ var scheduleCancelCmd = &cobra.Command{
 var scheduleCreateCmd = &cobra.Command{
 	Use:   "create",
 	Short: "Create a one-shot scheduled event",
-	Long: `Create a one-shot scheduled event. Requires timing (--in or --at), --agent, and --message.`,
-	RunE: runScheduleCreate,
+	Long:  `Create a one-shot scheduled event. Requires timing (--in or --at), --agent, and --message.`,
+	RunE:  runScheduleCreate,
 }
 
 // scheduleCreateRecurringCmd creates a new recurring schedule.
 var scheduleCreateRecurringCmd = &cobra.Command{
 	Use:   "create-recurring",
 	Short: "Create a recurring schedule",
-	Long: `Create a recurring schedule with a cron expression. Requires --name, --cron, --agent, and --message.`,
-	RunE: runScheduleCreateRecurring,
+	Long:  `Create a recurring schedule with a cron expression. Requires --name, --cron, --agent, and --message.`,
+	RunE:  runScheduleCreateRecurring,
 }
 
 // schedulePauseCmd pauses an active recurring schedule.
