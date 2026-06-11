@@ -229,7 +229,13 @@ func (s *SkillStore) ListSkills(ctx context.Context, filter store.SkillFilter, o
 		query.Where(entskill.Or(
 			entskill.NameContainsFold(filter.Search),
 			entskill.DescriptionContainsFold(filter.Search),
+			entskill.TagsContainsFold(filter.Search),
 		))
+	}
+	if len(filter.Tags) > 0 {
+		for _, tag := range filter.Tags {
+			query.Where(entskill.TagsContains(tag))
+		}
 	}
 
 	totalCount, err := query.Clone().Count(ctx)

@@ -18,6 +18,7 @@ import (
 	"context"
 	"io"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -114,6 +115,7 @@ type ListSkillsOptions struct {
 	OwnerID string
 	Search  string
 	Status  string
+	Tags    []string
 	Page    apiclient.PageOptions
 }
 
@@ -230,6 +232,9 @@ func (s *skillService) List(ctx context.Context, opts *ListSkillsOptions) (*List
 		}
 		if opts.Status != "" {
 			query.Set("status", opts.Status)
+		}
+		if len(opts.Tags) > 0 {
+			query.Set("tags", strings.Join(opts.Tags, ","))
 		}
 		opts.Page.ToQuery(query)
 	}

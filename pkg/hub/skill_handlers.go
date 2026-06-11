@@ -204,6 +204,9 @@ func (s *Server) listSkills(w http.ResponseWriter, r *http.Request) {
 		Status:  query.Get("status"),
 		Search:  query.Get("search"),
 	}
+	if tagsParam := query.Get("tags"); tagsParam != "" {
+		filter.Tags = strings.Split(tagsParam, ",")
+	}
 
 	if filter.Status == "" {
 		filter.Status = "active"

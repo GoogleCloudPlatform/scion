@@ -54,11 +54,15 @@ func runSkillsList(cmd *cobra.Command, args []string) error {
 
 	scope, _ := cmd.Flags().GetString("scope")
 	search, _ := cmd.Flags().GetString("search")
+	tags, _ := cmd.Flags().GetString("tags")
 
 	opts := &hubclient.ListSkillsOptions{
 		Scope:  scope,
 		Search: search,
 		Status: "active",
+	}
+	if tags != "" {
+		opts.Tags = strings.Split(tags, ",")
 	}
 
 	resp, err := hubCtx.Client.Skills().List(ctx, opts)
@@ -567,7 +571,8 @@ func init() {
 
 	// Flags for list command
 	skillsListCmd.Flags().String("scope", "", "Filter by scope (core, global, project, user)")
-	skillsListCmd.Flags().String("search", "", "Search skills by name or description")
+	skillsListCmd.Flags().String("search", "", "Search skills by name, description, or tags")
+	skillsListCmd.Flags().String("tags", "", "Filter by tags (comma-separated, AND semantics)")
 
 	// Flags for publish command
 	skillsPublishCmd.Flags().String("version", "", "Semver version to publish (required)")
