@@ -180,7 +180,7 @@ func installResolvedSkills(
 		if err != nil {
 			return nil, fmt.Errorf("skill %q installation failed: %w", skill.URI, err)
 		}
-		entry.InstalledPath = filepath.Join(filepath.Base(skillsDest), dest)
+		entry.InstalledPath = filepath.ToSlash(filepath.Join(filepath.Base(skillsDest), dest))
 		record.Skills = append(record.Skills, *entry)
 	}
 
@@ -398,6 +398,7 @@ func downloadSkillFile(ctx context.Context, fileURL, destPath string, maxSize in
 		return fmt.Errorf("failed to write file: %w", err)
 	}
 	if n > maxSize {
+		f.Close()
 		_ = os.Remove(destPath)
 		return fmt.Errorf("file exceeds maximum size of %d bytes", maxSize)
 	}
@@ -445,7 +446,7 @@ func enumerateLocalSkills(agentHome, skillsDir string) []SkillResolutionEntry {
 		}
 		entry := SkillResolutionEntry{
 			Name:          e.Name(),
-			InstalledPath: filepath.Join(skillsDir, e.Name()),
+			InstalledPath: filepath.ToSlash(filepath.Join(skillsDir, e.Name())),
 			Source:        "local",
 		}
 		result = append(result, entry)

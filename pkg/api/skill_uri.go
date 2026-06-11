@@ -105,11 +105,22 @@ func ParseSkillURI(raw string) (*SkillURI, error) {
 func parseFullURI(raw string, uri *SkillURI) (*SkillURI, error) {
 	rest := raw[len(skillURIScheme):]
 
-	// Split off version at last @
+	// Split off version at @ after the last path separator so that
+	// authority credentials (skill://user:pass@host/...) are not confused
+	// with version specifiers.
 	var version string
-	if idx := strings.LastIndex(rest, "@"); idx >= 0 {
-		version = rest[idx+1:]
-		rest = rest[:idx]
+	lastSlash := strings.LastIndex(rest, "/")
+	tail := rest
+	if lastSlash >= 0 {
+		tail = rest[lastSlash:]
+	}
+	if idx := strings.LastIndex(tail, "@"); idx >= 0 {
+		absIdx := idx
+		if lastSlash >= 0 {
+			absIdx += lastSlash
+		}
+		version = rest[absIdx+1:]
+		rest = rest[:absIdx]
 		if version == "" {
 			return nil, fmt.Errorf("invalid skill URI %q: empty version after @", raw)
 		}

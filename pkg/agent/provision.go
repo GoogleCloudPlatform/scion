@@ -799,6 +799,9 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 			}
 
 			if len(result.Resolved) > 0 {
+				if skillsDir == "" {
+					return "", "", nil, fmt.Errorf("harness does not support skills (no skills directory configured)")
+				}
 				skillsDest := filepath.Join(agentHome, skillsDir)
 				record, err := installResolvedSkills(ctx, result.Resolved, skillsDest, agentHome)
 				if err != nil {
