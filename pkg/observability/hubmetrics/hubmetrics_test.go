@@ -55,14 +55,14 @@ func TestGroupDropViewsDisabledZero(t *testing.T) {
 
 func TestIsGroupDisabled(t *testing.T) {
 	tests := []struct {
-		value    string
-		disabled bool
+		value string
+		want  bool
 	}{
 		{"", false},
 		{"true", false},
 		{"1", false},
-		{"false", false},
-		{"0", false},
+		{"false", true},
+		{"0", true},
 	}
 
 	for _, tc := range tests {
@@ -74,16 +74,8 @@ func TestIsGroupDisabled(t *testing.T) {
 			} else {
 				os.Unsetenv(envVar)
 			}
-			got := isGroupDisabled(envVar)
-			// Re-check directly since we test the env var we set
-			if tc.value == "false" || tc.value == "0" {
-				if !got {
-					t.Errorf("isGroupDisabled(%q=%q) = false, want true", envVar, tc.value)
-				}
-			} else {
-				if got {
-					t.Errorf("isGroupDisabled(%q=%q) = true, want false", envVar, tc.value)
-				}
+			if got := isGroupDisabled(envVar); got != tc.want {
+				t.Errorf("isGroupDisabled(%q=%q) = %v, want %v", envVar, tc.value, got, tc.want)
 			}
 		})
 	}
