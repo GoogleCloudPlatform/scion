@@ -58,7 +58,10 @@ func (r *HubSkillResolver) Resolve(ctx context.Context, refs []api.SkillReferenc
 	}
 
 	for _, rs := range resp.Resolved {
-		ref := refByURI[rs.URI]
+		ref, ok := refByURI[rs.URI]
+		if !ok {
+			continue
+		}
 		files := make([]ResolvedFile, len(rs.Files))
 		for i, f := range rs.Files {
 			files[i] = ResolvedFile{

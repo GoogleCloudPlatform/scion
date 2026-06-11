@@ -793,13 +793,53 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 				return "", "", nil, fmt.Errorf("skill resolution failed: %w", err)
 			}
 
+			// S1 completeness: build requested URI set
+			requestedURIs := make(map[string]*api.SkillReference, len(finalScionCfg.Skills))
+			for i := range finalScionCfg.Skills {
+				requestedURIs[finalScionCfg.Skills[i].URI] = &finalScionCfg.Skills[i]
+			}
+
+			resolvedURIs := make(map[string]bool)
+			errorURIs := make(map[string]bool)
+
+			for _, rs := range result.Resolved {
+				if _, ok := requestedURIs[rs.URI]; !ok {
+					return "", "", nil, fmt.Errorf(
+						"resolver returned unrequested skill %q — possible resolver bug or injection", rs.URI)
+				}
+				if resolvedURIs[rs.URI] {
+					return "", "", nil, fmt.Errorf(
+						"resolver returned duplicate resolved skill %q", rs.URI)
+				}
+				resolvedURIs[rs.URI] = true
+			}
+
 			for _, re := range result.Errors {
-				ref := findRefByURI(finalScionCfg.Skills, re.URI)
+				errorURIs[re.URI] = true
+				ref := requestedURIs[re.URI]
 				if ref == nil || !ref.Optional {
 					return "", "", nil, fmt.Errorf(
 						"required skill %q could not be resolved: %s", re.URI, re.Message)
 				}
 				util.Debugf("provision: optional skill %q skipped: %s", re.URI, re.Message)
+			}
+
+			// S1: verify every requested URI has an outcome
+			for uri, ref := range requestedURIs {
+				if !resolvedURIs[uri] && !errorURIs[uri] {
+					if ref.Optional {
+						util.Debugf("provision: optional skill %q missing from resolver response, skipping", uri)
+					} else {
+						return "", "", nil, fmt.Errorf(
+							"required skill %q missing from resolver response — S1 fail-closed", uri)
+					}
+				}
+			}
+
+			// Capture local skills before installing registry skills (M2: avoid duplication)
+			var localSkills []SkillResolutionEntry
+			if skillsDir != "" {
+				localSkills = enumerateLocalSkills(agentHome, skillsDir)
 			}
 
 			if len(result.Resolved) > 0 {
@@ -812,6 +852,7 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 					return "", "", nil, fmt.Errorf("skill installation failed: %w", err)
 				}
 				record.Resolver = resolverName(resolver)
+				record.Skills = append(localSkills, record.Skills...)
 				resolvedSkillsRecord = record
 			}
 		}
@@ -819,12 +860,6 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 
 	// Write resolution record (S4)
 	if resolvedSkillsRecord != nil {
-		if skillsDir != "" {
-			resolvedSkillsRecord.Skills = append(
-				enumerateLocalSkills(agentHome, skillsDir),
-				resolvedSkillsRecord.Skills...,
-			)
-		}
 		recordPath := filepath.Join(agentHome, ".scion", "resolved-skills.json")
 		if err := writeResolutionRecord(recordPath, resolvedSkillsRecord); err != nil {
 			util.Debugf("provision: failed to write resolution record: %v", err)
