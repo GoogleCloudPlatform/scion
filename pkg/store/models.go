@@ -1643,6 +1643,7 @@ const (
 	ScheduledEventFired     = "fired"
 	ScheduledEventCancelled = "cancelled"
 	ScheduledEventExpired   = "expired" // Loaded on startup past its fire time
+	ScheduledEventFailed    = "failed"
 )
 
 // ScheduledEventFilter for listing events.

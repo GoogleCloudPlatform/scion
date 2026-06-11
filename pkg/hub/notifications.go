@@ -522,6 +522,12 @@ func formatNotificationMessage(agent *store.Agent, status string) string {
 		return msg
 	case "DELETED":
 		return fmt.Sprintf("%s has been DELETED", agent.Slug)
+	case "DELIVERY_FAILED":
+		msg := fmt.Sprintf("Message delivery to %s failed", agent.Slug)
+		if agent.Message != "" {
+			msg += ": " + agent.Message
+		}
+		return msg
 	default:
 		return fmt.Sprintf("%s has reached status: %s", agent.Slug, upper)
 	}

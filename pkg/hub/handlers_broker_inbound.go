@@ -18,9 +18,11 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 // inboundMessageRequest is the JSON body sent by broker plugins to deliver
@@ -93,8 +95,47 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		log.Warn("Agent not found for inbound message",
 			"project_id", projectID, "agent_slug", agentSlug, "error", err)
-		writeErrorFromErr(w, err, "")
+		if errors.Is(err, store.ErrNotFound) {
+			writeError(w, http.StatusNotFound, ErrCodeAgentNotFound,
+				fmt.Sprintf("Agent %q not found in project", agentSlug),
+				map[string]interface{}{
+					"agent_slug":  agentSlug,
+					"project_id":  projectID,
+					"remediation": "Use /agents to see available agents, or /default to change the default.",
+				})
+		} else {
+			writeErrorFromErr(w, err, "")
+		}
 		return
+	}
+
+	// Enforce ActionAttach permission for user-identity senders. Agent-identity
+	// and system senders (scheduled events, internal) skip this check — they
+	// use broker HMAC trust which is infrastructure-level authorization.
+	if strings.HasPrefix(req.Message.Sender, "user:") {
+		senderEmail := strings.TrimPrefix(req.Message.Sender, "user:")
+		senderUser, err := s.store.GetUserByEmail(r.Context(), senderEmail)
+		if err != nil {
+			log.Warn("Could not resolve sender identity for permission check",
+				"sender", req.Message.Sender, "error", err)
+			writeError(w, http.StatusForbidden, ErrCodeForbidden,
+				"sender identity could not be resolved", map[string]interface{}{
+					"sender": req.Message.Sender,
+				})
+			return
+		}
+		userIdent := NewAuthenticatedUser(senderUser.ID, senderUser.Email, senderUser.DisplayName, senderUser.Role, "integration")
+		decision := s.authzService.CheckAccess(r.Context(), userIdent, agentResource(agent), ActionAttach)
+		if !decision.Allowed {
+			log.Warn("User lacks permission to message agent via integration",
+				"sender", req.Message.Sender, "agent_slug", agentSlug, "reason", decision.Reason)
+			writeError(w, http.StatusForbidden, ErrCodeForbidden,
+				"user does not have permission to message this agent", map[string]interface{}{
+					"sender":     req.Message.Sender,
+					"agent_slug": agentSlug,
+				})
+			return
+		}
 	}
 
 	// Dispatch directly to the agent, bypassing the broker to avoid circular delivery

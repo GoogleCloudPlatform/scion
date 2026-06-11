@@ -1027,55 +1027,67 @@ func TestExpiredEventsFromDowntimeStillFire(t *testing.T) {
 
 func TestMessageEventHandler_AgentNotFound(t *testing.T) {
 	// When a message event fires for an agent that has been deleted,
-	// the handler should return a clear error indicating the agent
-	// no longer exists (not a generic "failed to resolve" error).
+	// the handler should mark the event as failed (not return an error
+	// that would be stored with the wrong status).
 	ms := newMockStore()
 
-	// Create a Server with the mock store — no agents registered
-	srv := &Server{store: ms}
-	handler := srv.messageEventHandler()
-
+	// Create the event in the mock store so UpdateScheduledEventStatus finds it.
 	ctx := context.Background()
-
 	evt := store.ScheduledEvent{
 		ID:        "msg-no-agent-1",
 		ProjectID: "project-1",
 		EventType: "message",
 		Payload:   `{"agentName":"deleted-agent","message":"hello?"}`,
+		Status:    store.ScheduledEventPending,
 	}
+	ms.CreateScheduledEvent(ctx, &evt)
+
+	// Create a Server with the mock store — no agents registered
+	srv := &Server{store: ms}
+	handler := srv.messageEventHandler()
 
 	err := handler(ctx, evt)
-	if err == nil {
-		t.Fatal("expected error when agent does not exist")
+	if err != nil {
+		t.Fatalf("handler should return nil for deleted agents (handles failure internally), got: %s", err)
 	}
-	if !strings.Contains(err.Error(), "no longer exists") {
-		t.Errorf("expected 'no longer exists' in error, got: %s", err)
+
+	// Verify the event was marked as failed.
+	e := ms.getEvent("msg-no-agent-1")
+	if e.Status != store.ScheduledEventFailed {
+		t.Errorf("expected status %q, got %q", store.ScheduledEventFailed, e.Status)
 	}
-	if !strings.Contains(err.Error(), "deleted-agent") {
-		t.Errorf("expected agent name in error, got: %s", err)
+	if e.Error != "target agent deleted" {
+		t.Errorf("expected error %q, got %q", "target agent deleted", e.Error)
 	}
 }
 
 func TestMessageEventHandler_AgentNotFoundByID(t *testing.T) {
 	ms := newMockStore()
-	srv := &Server{store: ms}
-	handler := srv.messageEventHandler()
 
 	ctx := context.Background()
-
 	evt := store.ScheduledEvent{
 		ID:        "msg-no-agent-2",
 		ProjectID: "project-1",
 		EventType: "message",
 		Payload:   `{"agentId":"nonexistent-id","message":"hello?"}`,
+		Status:    store.ScheduledEventPending,
 	}
+	ms.CreateScheduledEvent(ctx, &evt)
+
+	srv := &Server{store: ms}
+	handler := srv.messageEventHandler()
 
 	err := handler(ctx, evt)
-	if err == nil {
-		t.Fatal("expected error when agent does not exist")
+	if err != nil {
+		t.Fatalf("handler should return nil for deleted agents (handles failure internally), got: %s", err)
 	}
-	if !strings.Contains(err.Error(), "no longer exists") {
-		t.Errorf("expected 'no longer exists' in error, got: %s", err)
+
+	e := ms.getEvent("msg-no-agent-2")
+	if e.Status != store.ScheduledEventFailed {
+		t.Errorf("expected status %q, got %q", store.ScheduledEventFailed, e.Status)
+	}
+	if e.Error != "target agent deleted" {
+		t.Errorf("expected error %q, got %q", "target agent deleted", e.Error)
 	}
 }
 

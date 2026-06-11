@@ -92,6 +92,9 @@ type TelegramBrokerV2 struct {
 	InboundHandler func(topic string, msg *messages.StructuredMessage)
 
 	hostCallbacks plugin.HostCallbacks
+
+	errorCooldown   map[string]time.Time // key: "chatID:threadID:errorType" → last sent time
+	errorCooldownMu sync.Mutex
 }
 
 // NewV2 creates a new TelegramBrokerV2 with the given logger.
@@ -106,6 +109,7 @@ func NewV2(log *slog.Logger) *TelegramBrokerV2 {
 		pluginName:    "telegram",
 		httpClient:    &http.Client{Timeout: 10 * time.Second},
 		agentCacheTTL: defaultAgentCacheTTL,
+		errorCooldown: make(map[string]time.Time),
 	}
 }
 
@@ -1674,6 +1678,22 @@ func (b *TelegramBrokerV2) handleGroupMessage(tgMsg *TGMessage) {
 		text := strings.TrimSpace(tgMsg.Text)
 		textRoutes := text != "" && !strings.HasPrefix(text, "/") && !strings.HasPrefix(text, "@") && !hasNonBotUserMention(tgMsg, botUsername, agents)
 		if textRoutes || hasAttachment {
+			// Validate default agent against the cached agent list before routing.
+			if !slices.Contains(agents, effectiveDefault) {
+				threadID := 0
+				if tgMsg.MessageThreadID != 0 {
+					threadID = int(tgMsg.MessageThreadID)
+				}
+				if !b.shouldSuppressError(chatID, threadID, "default_agent_not_found") {
+					replyTo := ""
+					if tgMsg.MessageID != 0 {
+						replyTo = strconv.FormatInt(int64(tgMsg.MessageID), 10)
+					}
+					errMsg := fmt.Sprintf("Default agent %q is no longer available. Use /agents to see available agents, or /default to change the default.", effectiveDefault)
+					b.api.SendMessage(ctx, chatID, errMsg, replyTo) //nolint:errcheck
+				}
+				return
+			}
 			b.log.Debug("Using default agent", "agent", effectiveDefault)
 			targets = []string{effectiveDefault}
 		}
@@ -1839,7 +1859,26 @@ func (b *TelegramBrokerV2) handleGroupMessage(tgMsg *TGMessage) {
 		b.log.Debug("Delivering inbound message",
 			"topic", topic, "sender", sender, "agent", agentSlug)
 
-		b.deliverInbound(topic, msg)
+		statusCode, deliveryErr := b.deliverInboundWithFeedback(ctx, topic, msg)
+		if statusCode >= 400 && deliveryErr != "" {
+			threadID := 0
+			if tgMsg.MessageThreadID != 0 {
+				threadID = int(tgMsg.MessageThreadID)
+			}
+			errorType := "delivery_error"
+			if statusCode == http.StatusNotFound {
+				errorType = "agent_not_found"
+			} else if statusCode == http.StatusForbidden {
+				errorType = "permission_denied"
+			}
+			if !b.shouldSuppressError(chatID, threadID, errorType) {
+				replyTo := ""
+				if tgMsg.MessageID != 0 {
+					replyTo = strconv.FormatInt(int64(tgMsg.MessageID), 10)
+				}
+				b.api.SendMessage(ctx, chatID, "Message delivery failed: "+deliveryErr, replyTo) //nolint:errcheck
+			}
+		}
 	}
 }
 
@@ -2201,6 +2240,105 @@ func (b *TelegramBrokerV2) deliverInbound(topic string, msg *messages.Structured
 		b.log.Error("Hub rejected inbound message",
 			"status", resp.StatusCode, "topic", topic)
 	}
+}
+
+const errorCooldownDuration = 5 * time.Minute
+
+// shouldSuppressError checks whether an error of the given type was already
+// reported to the given chat+thread within the cooldown window. If not, it
+// records the current time and returns false (do not suppress).
+func (b *TelegramBrokerV2) shouldSuppressError(chatID int64, threadID int, errorType string) bool {
+	key := fmt.Sprintf("%d:%d:%s", chatID, threadID, errorType)
+
+	b.errorCooldownMu.Lock()
+	defer b.errorCooldownMu.Unlock()
+
+	if last, ok := b.errorCooldown[key]; ok && time.Since(last) < errorCooldownDuration {
+		return true
+	}
+	b.errorCooldown[key] = time.Now()
+	return false
+}
+
+// deliverInboundWithFeedback delivers an inbound message to the Hub and
+// returns the HTTP status code and parsed error message (if any) so the
+// caller can report delivery failures back to the originating chat.
+func (b *TelegramBrokerV2) deliverInboundWithFeedback(ctx context.Context, topic string, msg *messages.StructuredMessage) (statusCode int, errMsg string) {
+	b.mu.RLock()
+	handler := b.InboundHandler
+	hubURL := b.hubURL
+	hmacKey := b.hmacKey
+	brokerID := b.brokerID
+	pluginName := b.pluginName
+	b.mu.RUnlock()
+
+	if handler != nil {
+		handler(topic, msg)
+		return http.StatusOK, ""
+	}
+
+	if hubURL == "" {
+		b.log.Debug("No hub URL configured, dropping inbound message", "topic", topic)
+		return http.StatusOK, ""
+	}
+
+	payload := inboundPayload{
+		Topic:   topic,
+		Message: msg,
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		b.log.Error("Failed to marshal inbound message", "error", err)
+		return http.StatusInternalServerError, "internal error"
+	}
+
+	inboundURL := hubURL + "/api/v1/broker/inbound"
+	req, err := http.NewRequestWithContext(ctx, "POST", inboundURL, bytes.NewReader(body))
+	if err != nil {
+		b.log.Error("Failed to create inbound request", "error", err)
+		return http.StatusInternalServerError, "internal error"
+	}
+	req.ContentLength = int64(len(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Scion-Plugin-Name", pluginName)
+
+	if brokerID != "" && hmacKey != "" {
+		if err := signInboundRequest(req, brokerID, hmacKey); err != nil {
+			b.log.Error("Failed to sign inbound request", "error", err)
+			return http.StatusInternalServerError, "internal error"
+		}
+	}
+
+	resp, err := b.httpClient.Do(req)
+	if err != nil {
+		b.log.Error("Failed to deliver inbound message", "error", err, "topic", topic)
+		return http.StatusBadGateway, "delivery failed"
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		b.log.Error("Hub rejected inbound message",
+			"status", resp.StatusCode, "topic", topic)
+		// Parse the Hub error response for a human-readable message.
+		var hubErr struct {
+			Error struct {
+				Message     string                 `json:"message"`
+				Code        string                 `json:"code"`
+				Details     map[string]interface{} `json:"details,omitempty"`
+			} `json:"error"`
+		}
+		if decErr := json.NewDecoder(resp.Body).Decode(&hubErr); decErr == nil && hubErr.Error.Message != "" {
+			errDetail := hubErr.Error.Message
+			if rem, ok := hubErr.Error.Details["remediation"].(string); ok && rem != "" {
+				errDetail += " " + rem
+			}
+			return resp.StatusCode, errDetail
+		}
+		return resp.StatusCode, fmt.Sprintf("delivery failed (HTTP %d)", resp.StatusCode)
+	}
+
+	io.Copy(io.Discard, resp.Body)
+	return resp.StatusCode, ""
 }
 
 // signInboundRequest signs an HTTP request with HMAC auth.

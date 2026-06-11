@@ -2091,24 +2091,8 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 	}
 
 	if recipientID == "" && recipient == "" {
-		// No explicit recipient — default to the agent's owner/creator.
-		recipientID = agent.OwnerID
-		if recipientID == "" {
-			recipientID = agent.CreatedBy
-		}
-		// Resolve display name from user record if possible.
-		if recipientID != "" {
-			if u, err := s.store.GetUser(ctx, recipientID); err == nil {
-				name := u.DisplayName
-				if name == "" {
-					name = u.Email
-				}
-				recipient = "user:" + name
-			}
-		}
-		if recipient == "" && recipientID != "" {
-			recipient = "user:" + recipientID
-		}
+		ValidationError(w, "recipient is required — specify a user with 'user:<name>' or 'user:<email>'", nil)
+		return
 	}
 
 	storeMsg := &store.Message{
@@ -2144,17 +2128,25 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 	// Route through broker when available; otherwise persist and publish
 	// directly. The broker's deliverToUser callback handles persistence
 	// and SSE, so doing both here would create duplicate messages.
+	responseStatus := http.StatusOK
+	deliveryStatus := "sent"
+
 	if bp := s.GetMessageBrokerProxy(); bp != nil {
 		if err := bp.PublishUserMessage(ctx, agent.ProjectID, recipientID, structuredMsg); err != nil {
 			s.messageLog.Error("Failed to dispatch outbound message through broker",
 				"agent_id", agent.ID, "recipient_id", recipientID, "error", err)
-		} else {
-			s.messageLog.Info("Outbound message dispatched through broker",
-				"agent_id", agent.ID, "recipient_id", recipientID, "project_id", agent.ProjectID)
+			writeError(w, http.StatusBadGateway, ErrCodeDeliveryFailed,
+				"Message persisted but delivery failed: "+err.Error(), nil)
+			return
 		}
+		s.messageLog.Info("Outbound message dispatched through broker",
+			"agent_id", agent.ID, "recipient_id", recipientID, "project_id", agent.ProjectID)
 	} else {
 		if err := s.store.CreateMessage(ctx, storeMsg); err != nil {
 			s.messageLog.Error("Failed to persist outbound message", "error", err)
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+				"Failed to persist message", nil)
+			return
 		}
 		s.events.PublishUserMessage(ctx, storeMsg)
 		if s.channelRegistry != nil && s.channelRegistry.Len() > 0 {
@@ -2170,7 +2162,12 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		"msg_type", req.Type,
 	)
 
-	w.WriteHeader(http.StatusOK)
+	writeJSON(w, responseStatus, map[string]interface{}{
+		"message_id":   storeMsg.ID,
+		"status":       deliveryStatus,
+		"recipient":    recipient,
+		"recipient_id": recipientID,
+	})
 }
 
 // handleAgentGitHubTokenRefresh handles POST /api/v1/agents/{id}/refresh-token.
@@ -2419,7 +2416,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			agent.Phase = string(state.PhaseStarting)
 			s.events.PublishAgentStatus(ctx, agent)
 
-			if err := s.waitForAgentReady(ctx, id, 15*time.Second); err != nil {
+			if err := s.waitForAgentReady(ctx, id, 30*time.Second); err != nil {
 				// On failure, set agent to an error state for clarity.
 				_ = s.store.UpdateAgentStatus(ctx, id, store.AgentStatusUpdate{Phase: string(state.PhaseError), Message: "Failed to become ready after wake"})
 				RuntimeError(w, "Agent resumed but did not become ready: "+err.Error())
@@ -2453,6 +2450,13 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 				fmt.Sprintf("Agent is not yet running (phase: %s) — wait for it to reach running state", agent.Phase), nil)
 			return
 		}
+	}
+
+	// Reject messages to suspended agents when --wake is not set.
+	if !req.Wake && state.Phase(agent.Phase) == state.PhaseSuspended {
+		writeError(w, http.StatusBadRequest, ErrCodeValidationError,
+			fmt.Sprintf("Agent %q is suspended. Use --wake to resume and deliver.", agent.Slug), nil)
+		return
 	}
 
 	// Populate recipient slug and ID from the resolved agent.
@@ -2540,7 +2544,11 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		w.WriteHeader(http.StatusAccepted)
 		return
 	} else if err != nil {
-		RuntimeError(w, "Failed to send message to runtime broker: "+err.Error())
+		if req.Wake {
+			RuntimeError(w, "Agent resumed successfully but message delivery failed: "+err.Error())
+		} else {
+			RuntimeError(w, "Failed to send message to runtime broker: "+err.Error())
+		}
 		return
 	}
 
@@ -5231,11 +5239,15 @@ func (s *Server) handleProjectAgentAction(w http.ResponseWriter, r *http.Request
 		if err == store.ErrNotFound {
 			agent, err = s.store.GetAgent(ctx, agentID)
 			if err != nil {
-				writeErrorFromErr(w, err, "")
+				writeError(w, http.StatusNotFound, ErrCodeAgentNotFound,
+					fmt.Sprintf("Agent %q not found in project", agentID),
+					map[string]interface{}{"agent_slug": agentID, "project_id": projectID})
 				return
 			}
 			if agent.ProjectID != projectID {
-				NotFound(w, "Agent")
+				writeError(w, http.StatusNotFound, ErrCodeAgentNotFound,
+					fmt.Sprintf("Agent %q not found in project", agentID),
+					map[string]interface{}{"agent_slug": agentID, "project_id": projectID})
 				return
 			}
 		} else {

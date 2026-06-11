@@ -1926,13 +1926,15 @@ func (s *Server) messageEventHandler() EventHandler {
 		}
 		if err != nil {
 			if errors.Is(err, store.ErrNotFound) {
-				slog.Warn("Scheduler: target agent no longer exists, dropping scheduled message",
+				slog.Warn("Scheduler: target agent no longer exists, marking event as failed",
 					"eventID", evt.ID,
 					"agentName", payload.AgentName,
 					"agent_id", payload.AgentID,
 					"projectID", evt.ProjectID,
 					"message", payload.Message)
-				return fmt.Errorf("target agent %q no longer exists", targetName)
+				now := time.Now()
+				_ = s.store.UpdateScheduledEventStatus(ctx, evt.ID, store.ScheduledEventFailed, &now, "target agent deleted")
+				return nil
 			}
 			return fmt.Errorf("failed to resolve agent %q: %w", targetName, err)
 		}

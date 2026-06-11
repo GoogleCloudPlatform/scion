@@ -517,10 +517,12 @@ func (p *MessageBrokerProxy) deliverToAgent(ctx context.Context, projectID, agen
 		return
 	}
 
+	// Validate agent existence BEFORE persisting to avoid orphan message rows.
 	agent, err := p.store.GetAgentBySlug(ctx, projectID, agentSlug)
 	if err != nil {
-		p.log.Error("Failed to find agent for broker message delivery",
+		p.log.Warn("Agent not found for broker message delivery",
 			"agentSlug", agentSlug, "projectID", projectID, "error", err)
+		p.publishDeliveryFailed(ctx, projectID, agentSlug, msg)
 		return
 	}
 
@@ -530,8 +532,8 @@ func (p *MessageBrokerProxy) deliverToAgent(ctx context.Context, projectID, agen
 		return
 	}
 
-	// Persist to message store first so the row is durable intent for
-	// cross-node dispatch (dispatch_state defaults to pending).
+	// Persist to message store after agent validation so the row is durable
+	// intent for cross-node dispatch (dispatch_state defaults to pending).
 	storeMsg := &store.Message{
 		ID:          api.NewUUID(),
 		ProjectID:   projectID,
@@ -650,6 +652,40 @@ func recipientSlug(recipient string) string {
 		}
 	}
 	return recipient
+}
+
+// publishDeliveryFailed publishes a DELIVERY_FAILED notification event when
+// a broker message targets a non-existent agent. If the sender is an agent,
+// the notification is dispatched to the sender so it learns about the failure.
+func (p *MessageBrokerProxy) publishDeliveryFailed(ctx context.Context, projectID, agentSlug string, msg *messages.StructuredMessage) {
+	if !strings.HasPrefix(msg.Sender, "agent:") || msg.SenderID == "" {
+		return
+	}
+	senderAgent, err := p.store.GetAgent(ctx, msg.SenderID)
+	if err != nil {
+		p.log.Warn("Could not resolve sender agent for DELIVERY_FAILED notification",
+			"senderID", msg.SenderID, "error", err)
+		return
+	}
+
+	failMsg := fmt.Sprintf("Message delivery failed: agent %q not found in project", agentSlug)
+	structuredMsg := &messages.StructuredMessage{
+		Sender:    "system",
+		Recipient: msg.Sender,
+		Msg:       failMsg,
+		Type:      messages.TypeStateChange,
+		Status:    "DELIVERY_FAILED",
+	}
+	structuredMsg.RecipientID = senderAgent.ID
+
+	dispatcher := p.getDispatcher()
+	if dispatcher == nil {
+		return
+	}
+	if err := dispatcher.DispatchAgentMessage(ctx, senderAgent, failMsg, false, structuredMsg); err != nil {
+		p.log.Warn("Failed to dispatch DELIVERY_FAILED notification",
+			"senderID", msg.SenderID, "error", err)
+	}
 }
 
 // containsSuffix checks if a dot-separated subject string ends with the given suffix.
