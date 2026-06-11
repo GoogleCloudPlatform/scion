@@ -162,14 +162,14 @@ func serveStandalone() {
 		os.Exit(1)
 	}
 
+	var lockHeld atomic.Bool
+
 	grpcServer := grpc.NewServer()
-	brokerv1.RegisterBrokerServiceServer(grpcServer, discord.NewBrokerGRPCServer(broker, log))
+	brokerv1.RegisterBrokerServiceServer(grpcServer, discord.NewBrokerGRPCServer(broker, log, &lockHeld))
 
 	healthServer := health.NewServer()
 	healthpb.RegisterHealthServer(grpcServer, healthServer)
 	healthServer.SetServingStatus("", healthpb.HealthCheckResponse_NOT_SERVING)
-
-	var lockHeld atomic.Bool
 	go runAdvisoryLockLoop(ctx, log, lockStore, broker, &lockHeld, healthServer)
 
 	sigCh := make(chan os.Signal, 1)

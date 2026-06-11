@@ -154,6 +154,11 @@ func (b *DiscordBroker) Configure(config map[string]string) error {
 	// Phase 1: Bot token configuration.
 	botToken, hasBotToken := config["bot_token"]
 	if hasBotToken && botToken != "" {
+		if b.session != nil {
+			_ = b.session.Close()
+			b.session = nil
+		}
+
 		// Create a discordgo session but do NOT open the gateway yet.
 		// Gateway connection happens on first Subscribe().
 		session, err := discordgo.New("Bot " + botToken)

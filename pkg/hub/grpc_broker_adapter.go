@@ -203,6 +203,7 @@ func (a *GRPCBrokerAdapter) tryReconnect() error {
 	oldConn := a.conn
 	a.conn = conn
 	a.client = brokerv1.NewBrokerServiceClient(conn)
+	client := a.client
 	a.lastReconnectAt = time.Now()
 	patterns := make([]string, 0, len(a.subs))
 	for p := range a.subs {
@@ -216,7 +217,7 @@ func (a *GRPCBrokerAdapter) tryReconnect() error {
 
 	for _, pattern := range patterns {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		if _, subErr := a.client.Subscribe(ctx, &brokerv1.SubscribeRequest{Pattern: pattern}); subErr != nil {
+		if _, subErr := client.Subscribe(ctx, &brokerv1.SubscribeRequest{Pattern: pattern}); subErr != nil {
 			a.log.Warn("Failed to re-subscribe after reconnect", "pattern", pattern, "error", subErr)
 		}
 		cancel()

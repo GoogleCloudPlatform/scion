@@ -167,7 +167,7 @@ func TestPluginInfoToProto_Empty(t *testing.T) {
 
 func TestNewBrokerGRPCServer(t *testing.T) {
 	broker := NewBroker(nil)
-	srv := NewBrokerGRPCServer(broker, nil)
+	srv := NewBrokerGRPCServer(broker, nil, nil)
 	assert.NotNil(t, srv)
 
 	_, ok := srv.(brokerv1.BrokerServiceServer)

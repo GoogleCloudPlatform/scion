@@ -3,8 +3,11 @@ package discord
 import (
 	"context"
 	"log/slog"
+	"sync/atomic"
 
 	brokerv1 "github.com/GoogleCloudPlatform/scion/proto/broker/v1"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/plugin"
@@ -12,22 +15,28 @@ import (
 
 type brokerGRPCServer struct {
 	brokerv1.UnimplementedBrokerServiceServer
-	broker *DiscordBroker
-	log    *slog.Logger
+	broker   *DiscordBroker
+	log      *slog.Logger
+	isLeader *atomic.Bool
 }
 
 // NewBrokerGRPCServer creates a gRPC server that delegates to the given DiscordBroker.
-func NewBrokerGRPCServer(broker *DiscordBroker, log *slog.Logger) brokerv1.BrokerServiceServer {
+// The isLeader flag gates mutating RPCs so that standby instances reject requests.
+func NewBrokerGRPCServer(broker *DiscordBroker, log *slog.Logger, isLeader *atomic.Bool) brokerv1.BrokerServiceServer {
 	if log == nil {
 		log = slog.Default()
 	}
 	return &brokerGRPCServer{
-		broker: broker,
-		log:    log,
+		broker:   broker,
+		log:      log,
+		isLeader: isLeader,
 	}
 }
 
 func (s *brokerGRPCServer) Configure(_ context.Context, req *brokerv1.ConfigureRequest) (*brokerv1.ConfigureResponse, error) {
+	if s.isLeader != nil && !s.isLeader.Load() {
+		return nil, status.Error(codes.Unavailable, "this instance is not the leader")
+	}
 	if err := s.broker.Configure(req.GetConfig()); err != nil {
 		return nil, err
 	}
@@ -35,6 +44,9 @@ func (s *brokerGRPCServer) Configure(_ context.Context, req *brokerv1.ConfigureR
 }
 
 func (s *brokerGRPCServer) Publish(ctx context.Context, req *brokerv1.PublishRequest) (*brokerv1.PublishResponse, error) {
+	if s.isLeader != nil && !s.isLeader.Load() {
+		return nil, status.Error(codes.Unavailable, "this instance is not the leader")
+	}
 	msg := protoToStructuredMessage(req.GetMessage())
 	if err := s.broker.Publish(ctx, req.GetTopic(), msg); err != nil {
 		return nil, err
@@ -43,6 +55,9 @@ func (s *brokerGRPCServer) Publish(ctx context.Context, req *brokerv1.PublishReq
 }
 
 func (s *brokerGRPCServer) Subscribe(_ context.Context, req *brokerv1.SubscribeRequest) (*brokerv1.SubscribeResponse, error) {
+	if s.isLeader != nil && !s.isLeader.Load() {
+		return nil, status.Error(codes.Unavailable, "this instance is not the leader")
+	}
 	if err := s.broker.Subscribe(req.GetPattern()); err != nil {
 		return nil, err
 	}
