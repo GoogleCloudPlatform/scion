@@ -220,7 +220,6 @@ func installResolvedSkills(
 		if err != nil {
 			return nil, fmt.Errorf("skill %q installation failed: %w", skill.URI, err)
 		}
-		entry.InstalledPath = filepath.ToSlash(filepath.Join(filepath.Base(skillsDest), dest))
 		record.Skills = append(record.Skills, *entry)
 	}
 
@@ -228,6 +227,22 @@ func installResolvedSkills(
 }
 
 func installOneSkill(ctx context.Context, skill ResolvedSkill, dest, skillsDest string) (*SkillResolutionEntry, error) {
+	// Check cache before downloading
+	cache := SkillCacheFromContext(ctx)
+	if cache != nil && skill.Hash != "" {
+		if cachedPath, hit := cache.Get(skill.Hash); hit {
+			finalDest := filepath.Join(skillsDest, dest)
+			if _, err := os.Stat(finalDest); err == nil {
+				_ = os.RemoveAll(finalDest)
+			}
+			if err := cache.CopyToDir(cachedPath, finalDest); err == nil {
+				util.Debugf("provision: skill installed from cache: %s@%s", skill.Name, skill.Version)
+				return buildSkillEntry(skill, dest, skillsDest)
+			}
+			// Cache copy failed — fall through to download
+		}
+	}
+
 	// Create staging directory
 	stagingDir, err := os.MkdirTemp(skillsDest, stagingDirPrefix)
 	if err != nil {
@@ -310,11 +325,28 @@ func installOneSkill(ctx context.Context, skill ResolvedSkill, dest, skillsDest 
 		return nil, fmt.Errorf("failed to install skill %s: %w", dest, err)
 	}
 
-	// Parse URI for scope info
+	// Populate cache after successful download+verify+install
+	if cache != nil && skill.Hash != "" {
+		populateSkillCache(cache, skill, finalDest)
+	}
+
+	return buildSkillEntry(skill, dest, skillsDest)
+}
+
+// buildSkillEntry creates a SkillResolutionEntry for a successfully installed skill.
+func buildSkillEntry(skill ResolvedSkill, dest, skillsDest string) (*SkillResolutionEntry, error) {
 	var scope string
 	parsed, err := api.ParseSkillURI(skill.URI)
 	if err == nil {
 		scope = parsed.Scope
+	}
+
+	var fileEntries []FileEntry
+	for _, f := range skill.Files {
+		fileEntries = append(fileEntries, FileEntry{
+			Path: f.Path,
+			Hash: f.Hash,
+		})
 	}
 
 	return &SkillResolutionEntry{
@@ -324,9 +356,28 @@ func installOneSkill(ctx context.Context, skill ResolvedSkill, dest, skillsDest 
 		ResolvedVersion: skill.Version,
 		ContentHash:     skill.Hash,
 		Scope:           scope,
+		InstalledPath:   filepath.ToSlash(filepath.Join(filepath.Base(skillsDest), dest)),
 		Source:          "registry",
 		Files:           fileEntries,
 	}, nil
+}
+
+// populateSkillCache stores downloaded skill files in the cache.
+func populateSkillCache(cache interface{ Put(string, map[string][]byte) (string, error) }, skill ResolvedSkill, installedDir string) {
+	files := make(map[string][]byte, len(skill.Files))
+	for _, f := range skill.Files {
+		content, err := os.ReadFile(filepath.Join(installedDir, f.Path))
+		if err != nil {
+			util.Debugf("provision: failed to read skill file for caching: %s: %v", f.Path, err)
+			return
+		}
+		files[f.Path] = content
+	}
+	if _, err := cache.Put(skill.Hash, files); err != nil {
+		util.Debugf("provision: failed to cache skill %s@%s: %v", skill.Name, skill.Version, err)
+	} else {
+		util.Debugf("provision: cached skill %s@%s (%s)", skill.Name, skill.Version, skill.Hash)
+	}
 }
 
 // validateFilePath checks that a relative path is safe for extraction.

@@ -680,7 +680,10 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 
 	// Inject skill resolver from Hub connection for skill provisioning.
 	if conn := s.resolveHubConnection(r); conn != nil && conn.HubClient != nil {
-		resolver := agent.NewHubSkillResolver(conn.HubClient.Skills())
+		var resolver agent.SkillResolver = agent.NewHubSkillResolver(conn.HubClient.Skills())
+		if s.skCache != nil {
+			resolver = agent.NewCachingSkillResolver(resolver, s.skCache)
+		}
 		ctx = agent.ContextWithSkillResolver(ctx, resolver)
 		if req.ProjectID != "" {
 			ctx = agent.ContextWithResolveProjectID(ctx, req.ProjectID)

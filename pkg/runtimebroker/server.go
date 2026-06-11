@@ -200,6 +200,10 @@ type Server struct {
 	// accounting or collide on identical-content hashes.
 	hcCache *templatecache.Cache
 
+	// Shared skill cache (content-addressed). Independent from templates and
+	// harness-configs so skill eviction doesn't affect other resource kinds.
+	skCache *templatecache.Cache
+
 	// Multi-key auth middleware
 	brokerAuthMiddleware *MultiKeyBrokerAuthMiddleware
 
@@ -381,6 +385,16 @@ func (s *Server) initHubIntegration() error {
 		return fmt.Errorf("failed to initialize harness-config cache: %w", err)
 	}
 	s.hcCache = hcCache
+
+	// 1c. Initialize the skill cache for broker-side caching of resolved
+	// skill content, keyed by content hash.
+	skCacheDir := filepath.Join(filepath.Dir(cacheDir), "skills")
+	skCacheMaxSize := int64(500 * 1024 * 1024) // 500MB default
+	skCache, err := templatecache.New(skCacheDir, skCacheMaxSize)
+	if err != nil {
+		return fmt.Errorf("failed to initialize skill cache: %w", err)
+	}
+	s.skCache = skCache
 
 	// 2. Initialize hub connections map (already done in New)
 
