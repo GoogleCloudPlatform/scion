@@ -200,8 +200,24 @@ func (h *slogHandler) Enabled(_ context.Context, level slog.Level) bool {
 func (h *slogHandler) Handle(_ context.Context, r slog.Record) error {
 	level := r.Level.String()
 	msg := r.Message
-	// In a real implementation we might want to include attributes,
-	// but for sciontool we keep it simple for now.
+	if r.NumAttrs() > 0 || len(h.attrs) > 0 {
+		var buf []byte
+		buf = append(buf, msg...)
+		for _, a := range h.attrs {
+			buf = append(buf, ' ')
+			buf = append(buf, a.Key...)
+			buf = append(buf, '=')
+			buf = append(buf, a.Value.String()...)
+		}
+		r.Attrs(func(a slog.Attr) bool {
+			buf = append(buf, ' ')
+			buf = append(buf, a.Key...)
+			buf = append(buf, '=')
+			buf = append(buf, a.Value.String()...)
+			return true
+		})
+		msg = string(buf)
+	}
 	write(level, "slog", "%s", msg)
 	return nil
 }

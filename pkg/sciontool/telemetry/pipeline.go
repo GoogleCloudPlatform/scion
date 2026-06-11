@@ -6,24 +6,35 @@ package telemetry
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log/slog"
 	"os"
+	"strings"
 	"sync"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
+	"go.opentelemetry.io/otel/attribute"
+	otelmetric "go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/metric/noop"
 	logspb "go.opentelemetry.io/proto/otlp/logs/v1"
 	metricpb "go.opentelemetry.io/proto/otlp/metrics/v1"
 	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
+	"google.golang.org/api/googleapi"
 )
 
 // Pipeline orchestrates the telemetry collection and forwarding.
 type Pipeline struct {
-	config   *Config
-	receiver *Receiver
-	exporter *CloudExporter
-	filter   *Filter
-	mu       sync.Mutex
-	running  bool
+	config       *Config
+	receiver     *Receiver
+	exporter     *CloudExporter
+	filter       *Filter
+	mu           sync.Mutex
+	running      bool
+	healthCancel context.CancelFunc
+	exportErrors otelmetric.Int64Counter
+	meter        otelmetric.Meter
 }
 
 // New creates a new telemetry pipeline.
@@ -69,10 +80,21 @@ func (p *Pipeline) Start(ctx context.Context) error {
 		if envVal := os.Getenv(EnvGCPCredentials); envVal == "" {
 			source = "well-known-path"
 		}
-		log.Info("GCP telemetry credentials: %s (source: %s, project: %s)",
-			p.config.GCPCredentialsFile, source, p.config.ProjectID)
+		slog.Info("telemetry pipeline credential resolution",
+			"credentials_file", p.config.GCPCredentialsFile,
+			"source", source,
+			"project_id", p.config.ProjectID,
+			"provider", p.config.CloudProvider,
+			"cloud_configured", p.config.IsCloudConfigured(),
+		)
 	} else if p.config.IsCloudConfigured() {
-		log.Info("GCP telemetry credentials: none (using ADC fallback)")
+		slog.Info("telemetry pipeline credential resolution",
+			"credentials_file", "",
+			"source", "adc",
+			"project_id", p.config.ProjectID,
+			"provider", p.config.CloudProvider,
+			"cloud_configured", true,
+		)
 	}
 
 	// Create cloud exporter if configured
@@ -93,7 +115,11 @@ func (p *Pipeline) Start(ctx context.Context) error {
 			log.Info("Cloud exporter initialized (%s, project: %s)", mode, p.config.ProjectID)
 		}
 	} else {
-		log.Debug("Cloud export not configured - telemetry will only be received locally")
+		slog.Warn("telemetry cloud export not configured",
+			"reason", "no credentials or endpoint",
+			"env_checked", EnvGCPCredentials,
+			"well_known_path", WellKnownGCPCredentialsPath,
+		)
 	}
 
 	// Create receiver with span and metric handlers
@@ -108,6 +134,12 @@ func (p *Pipeline) Start(ctx context.Context) error {
 	}
 
 	p.running = true
+
+	// Register pipeline health gauge and export error counter.
+	if p.config.IsCloudConfigured() && p.exporter != nil {
+		p.initSelfMetrics(ctx)
+	}
+
 	log.Info("Telemetry pipeline started (gRPC: %d, HTTP: %d)", p.config.GRPCPort, p.config.HTTPPort)
 
 	return nil
@@ -127,6 +159,12 @@ func (p *Pipeline) Stop(ctx context.Context) error {
 	}
 
 	var errs []error
+
+	// Stop health gauge ticker
+	if p.healthCancel != nil {
+		p.healthCancel()
+		p.healthCancel = nil
+	}
 
 	// Stop receiver first
 	if p.receiver != nil {
@@ -188,6 +226,7 @@ func (p *Pipeline) handleSpans(ctx context.Context, resourceSpans []*tracepb.Res
 	// Forward to cloud exporter if available
 	if p.exporter != nil {
 		if err := p.exporter.ExportProtoSpans(ctx, filtered); err != nil {
+			p.recordExportError(ctx, "spans", err)
 			log.Error("Failed to export spans to cloud: %v", err)
 			return err
 		}
@@ -249,6 +288,7 @@ func (p *Pipeline) handleMetrics(ctx context.Context, resourceMetrics []*metricp
 	// directly via a MeterProvider.
 	if p.exporter != nil {
 		if err := p.exporter.ExportProtoMetrics(ctx, resourceMetrics); err != nil {
+			p.recordExportError(ctx, "metrics", err)
 			log.Error("Failed to export metrics to cloud: %v", err)
 			return err
 		}
@@ -274,6 +314,7 @@ func (p *Pipeline) handleLogs(ctx context.Context, resourceLogs []*logspb.Resour
 	// Forward to cloud exporter if available
 	if p.exporter != nil {
 		if err := p.exporter.ExportProtoLogs(ctx, resourceLogs); err != nil {
+			p.recordExportError(ctx, "logs", err)
 			log.Error("Failed to export logs to cloud: %v", err)
 			return err
 		}
@@ -281,4 +322,116 @@ func (p *Pipeline) handleLogs(ctx context.Context, resourceLogs []*logspb.Resour
 	}
 
 	return nil
+}
+
+// initSelfMetrics creates a minimal MeterProvider for self-monitoring metrics
+// (pipeline health gauge and export error counter) and starts the health ticker.
+func (p *Pipeline) initSelfMetrics(ctx context.Context) {
+	providers, err := NewProviders(ctx, p.config, true)
+	if err != nil || providers == nil || providers.MeterProvider == nil {
+		log.Debug("Could not create MeterProvider for pipeline self-metrics: %v", err)
+		p.meter = noop.Meter{}
+	} else {
+		p.meter = providers.MeterProvider.Meter("github.com/GoogleCloudPlatform/scion/pkg/sciontool/telemetry")
+	}
+
+	p.exportErrors, err = p.meter.Int64Counter("scion.telemetry.export.errors",
+		otelmetric.WithDescription("Count of telemetry export failures by signal type"),
+		otelmetric.WithUnit("{error}"),
+	)
+	if err != nil {
+		log.Debug("Failed to create export error counter: %v", err)
+	}
+
+	p.startHealthGauge(ctx, providers)
+}
+
+// startHealthGauge registers the scion.telemetry.pipeline.status gauge and
+// starts a background ticker that reports value 1 every 60 seconds.
+func (p *Pipeline) startHealthGauge(ctx context.Context, providers *Providers) {
+	gauge, err := p.meter.Int64Gauge("scion.telemetry.pipeline.status",
+		otelmetric.WithDescription("Pipeline health status (1=running)"),
+		otelmetric.WithUnit("{status}"),
+	)
+	if err != nil {
+		log.Debug("Failed to create pipeline health gauge: %v", err)
+		return
+	}
+
+	attrs := otelmetric.WithAttributes(
+		attribute.String("scion.telemetry.provider", p.config.CloudProvider),
+		attribute.String("scion.telemetry.project_id", p.config.ProjectID),
+	)
+
+	healthCtx, cancel := context.WithCancel(ctx)
+	p.healthCancel = cancel
+
+	gauge.Record(healthCtx, 1, attrs)
+
+	go func() {
+		ticker := time.NewTicker(60 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-healthCtx.Done():
+				if providers != nil && providers.MeterProvider != nil {
+					shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+					providers.MeterProvider.Shutdown(shutdownCtx)
+					shutdownCancel()
+				}
+				return
+			case <-ticker.C:
+				gauge.Record(healthCtx, 1, attrs)
+			}
+		}
+	}()
+}
+
+// recordExportError increments the export error counter if registered.
+func (p *Pipeline) recordExportError(ctx context.Context, signal string, err error) {
+	if p.exportErrors == nil {
+		return
+	}
+	p.exportErrors.Add(ctx, 1,
+		otelmetric.WithAttributes(
+			attribute.String("signal", signal),
+			attribute.String("error_type", classifyError(err)),
+		),
+	)
+}
+
+// classifyError buckets an export error into a category for metric attributes.
+func classifyError(err error) string {
+	if err == nil {
+		return "none"
+	}
+
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "timeout"
+	}
+	if errors.Is(err, context.Canceled) {
+		return "timeout"
+	}
+
+	var gapiErr *googleapi.Error
+	if errors.As(err, &gapiErr) {
+		switch {
+		case gapiErr.Code == 401 || gapiErr.Code == 403:
+			return "auth"
+		case gapiErr.Code == 429:
+			return "quota"
+		}
+	}
+
+	msg := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(msg, "unauthorized") || strings.Contains(msg, "unauthenticated") || strings.Contains(msg, "permission denied"):
+		return "auth"
+	case strings.Contains(msg, "quota") || strings.Contains(msg, "rate limit") || strings.Contains(msg, "resource exhausted"):
+		return "quota"
+	case strings.Contains(msg, "deadline exceeded") || strings.Contains(msg, "timeout"):
+		return "timeout"
+	}
+
+	return "other"
 }
