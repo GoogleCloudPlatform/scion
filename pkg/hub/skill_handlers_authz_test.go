@@ -129,6 +129,37 @@ func TestSkillAuthz_GetSkill_HubMemberAllowed(t *testing.T) {
 }
 
 // ============================================================================
+// H1: listSkillVersions / getSkillVersion ActionRead tests
+// ============================================================================
+
+func TestSkillAuthz_ListSkillVersions_NonMemberDenied(t *testing.T) {
+	srv, s, alice, bob, project := setupSkillAuthzTest(t)
+	skill := createTestSkill(t, s, "versioned-skill", store.SkillScopeProject, project.ID, alice.ID)
+
+	rec := doRequestAsUser(t, srv, bob, http.MethodGet, "/api/v1/skills/"+skill.ID+"/versions", nil)
+	assert.Equal(t, http.StatusNotFound, rec.Code,
+		"non-member should not be able to list versions; got: %s", rec.Body.String())
+}
+
+func TestSkillAuthz_GetSkillVersion_NonMemberDenied(t *testing.T) {
+	srv, s, alice, bob, project := setupSkillAuthzTest(t)
+	skill := createTestSkill(t, s, "ver-check-skill", store.SkillScopeProject, project.ID, alice.ID)
+
+	sv := &store.SkillVersion{
+		ID:      api.NewUUID(),
+		SkillID: skill.ID,
+		Version: "1.0.0",
+		Status:  store.SkillVersionStatusPublished,
+		Created: time.Now(),
+	}
+	require.NoError(t, s.CreateSkillVersion(context.Background(), sv))
+
+	rec := doRequestAsUser(t, srv, bob, http.MethodGet, "/api/v1/skills/"+skill.ID+"/versions/"+sv.ID, nil)
+	assert.Equal(t, http.StatusNotFound, rec.Code,
+		"non-member should not be able to get version; got: %s", rec.Body.String())
+}
+
+// ============================================================================
 // H1: listSkills ActionRead filtering tests
 // ============================================================================
 

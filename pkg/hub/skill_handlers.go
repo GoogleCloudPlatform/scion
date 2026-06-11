@@ -531,10 +531,19 @@ func (s *Server) handleSkillVersionByID(w http.ResponseWriter, r *http.Request, 
 func (s *Server) listSkillVersions(w http.ResponseWriter, r *http.Request, skillID string) {
 	ctx := r.Context()
 
-	// Verify skill exists
-	if _, err := s.store.GetSkill(ctx, skillID); err != nil {
+	skill, err := s.store.GetSkill(ctx, skillID)
+	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
+	}
+
+	identity := GetIdentityFromContext(ctx)
+	if identity != nil {
+		decision := s.authzService.CheckAccess(ctx, identity, skillResource(skill), ActionRead)
+		if !decision.Allowed {
+			NotFound(w, "Skill")
+			return
+		}
 	}
 
 	result, err := s.store.ListSkillVersions(ctx, skillID, store.ListOptions{
@@ -551,6 +560,21 @@ func (s *Server) listSkillVersions(w http.ResponseWriter, r *http.Request, skill
 // getSkillVersion retrieves a specific skill version.
 func (s *Server) getSkillVersion(w http.ResponseWriter, r *http.Request, skillID, versionID string) {
 	ctx := r.Context()
+
+	skill, err := s.store.GetSkill(ctx, skillID)
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	identity := GetIdentityFromContext(ctx)
+	if identity != nil {
+		decision := s.authzService.CheckAccess(ctx, identity, skillResource(skill), ActionRead)
+		if !decision.Allowed {
+			NotFound(w, "Skill")
+			return
+		}
+	}
 
 	sv, err := s.store.GetSkillVersion(ctx, versionID)
 	if err != nil {
