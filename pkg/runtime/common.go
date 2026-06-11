@@ -435,6 +435,8 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 	}
 
 	// When NoAuth is set, drop to a shell instead of launching the harness CLI.
+	// TODO: Only drop-to-shell is currently implemented. show-setup-instructions
+	// and run-setup-wizard are defined in config but not yet handled.
 	if config.NoAuth {
 		if config.NoAuthMessage != "" {
 			harnessArgs = []string{"sh", "-c", fmt.Sprintf("echo %s; exec bash", shellQuote(config.NoAuthMessage))}

@@ -342,6 +342,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	var harnessConfigRevision string
 	var resolvedImpl string
 	var noAuthMessage string
+	var resolvedAuthMeta *config.HarnessAuthMetadata
 	if harnessConfigName != "" {
 		var resolveTemplatePaths []string
 		if opts.Template != "" {
@@ -375,6 +376,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 			if opts.NoAuth && resolved.Config.NoAuth != nil {
 				noAuthMessage = resolved.Config.NoAuth.Message
 			}
+			resolvedAuthMeta = resolved.Config.Auth
 		}
 	} else {
 		h = harness.New(harnessName)
@@ -429,7 +431,11 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	if !opts.NoAuth {
 		auth = harness.GatherAuthWithEnv(authEnvOverlay, !opts.BrokerMode)
 		if opts.BrokerMode {
-			harness.OverlayFileSecrets(&auth, opts.ResolvedSecrets)
+			if resolvedAuthMeta != nil {
+				harness.OverlayFileSecretsFromConfig(&auth, opts.ResolvedSecrets, resolvedAuthMeta)
+			} else {
+				harness.OverlayFileSecrets(&auth, opts.ResolvedSecrets)
+			}
 		}
 		util.Debugf("auth: gathered credentials — selectedType=%q, hasGeminiKey=%t, hasGoogleKey=%t, hasOAuth=%t, hasADC=%t, hasAnthropicKey=%t, hasClaudeOAuthToken=%t, hasClaudeAuthFile=%t, cloudProject=%q, gcpMetadataMode=%q, brokerMode=%t",
 			auth.SelectedType,

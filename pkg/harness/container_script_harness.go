@@ -22,6 +22,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -685,6 +686,9 @@ func StageCaptureAuthAssets(agentHome, configDirPath string, authMeta *config.Ha
 	var creds []credEntry
 	for _, authType := range authMeta.Types {
 		for _, rf := range authType.RequiredFiles {
+			// Entries with empty TargetSuffix (e.g. gcloud-adc) are intentionally
+			// excluded — these credentials come from well-known system paths and don't
+			// use the suffix-based source derivation.
 			if rf.Name == "" || rf.TargetSuffix == "" {
 				continue
 			}
@@ -705,6 +709,8 @@ func StageCaptureAuthAssets(agentHome, configDirPath string, authMeta *config.Ha
 	if len(creds) == 0 {
 		return nil
 	}
+
+	sort.Slice(creds, func(i, j int) bool { return creds[i].Key < creds[j].Key })
 
 	payload := map[string]interface{}{
 		"schema_version": 1,
