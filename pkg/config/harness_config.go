@@ -346,7 +346,6 @@ func ComputeHarnessConfigRevision(dirPath string) string {
 	}
 	var hashes []fileHash
 	skipBasenames := map[string]bool{
-		"Dockerfile":      true,
 		"cloudbuild.yaml": true,
 		"README.md":       true,
 		".gitkeep":        true,

@@ -510,7 +510,7 @@ func TestComputeHarnessConfigRevision_SkipsNonRuntimeFiles(t *testing.T) {
 		t.Fatal("expected non-empty revision")
 	}
 
-	for _, skip := range []string{"Dockerfile", "cloudbuild.yaml", "README.md", ".gitkeep"} {
+	for _, skip := range []string{"cloudbuild.yaml", "README.md", ".gitkeep"} {
 		if err := os.WriteFile(filepath.Join(dir, skip), []byte("should be ignored"), 0644); err != nil {
 			t.Fatal(err)
 		}
@@ -518,6 +518,14 @@ func TestComputeHarnessConfigRevision_SkipsNonRuntimeFiles(t *testing.T) {
 	afterSkipped := ComputeHarnessConfigRevision(dir)
 	if afterSkipped != baseRev {
 		t.Errorf("adding non-runtime files changed revision: %s -> %s", baseRev, afterSkipped)
+	}
+
+	if err := os.WriteFile(filepath.Join(dir, "Dockerfile"), []byte("FROM scratch"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	afterDockerfile := ComputeHarnessConfigRevision(dir)
+	if afterDockerfile == afterSkipped {
+		t.Error("adding Dockerfile should change revision")
 	}
 
 	if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte("harness: opencode\nimage: new\n"), 0644); err != nil {
