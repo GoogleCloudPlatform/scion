@@ -390,7 +390,9 @@ func buildSkillEntry(skill ResolvedSkill, dest, skillsDest string) (*SkillResolu
 }
 
 // populateSkillCache stores downloaded skill files in the cache.
-func populateSkillCache(cache interface{ Put(string, map[string][]byte) (string, error) }, skill ResolvedSkill, installedDir string) {
+func populateSkillCache(cache interface {
+	Put(string, map[string][]byte) (string, error)
+}, skill ResolvedSkill, installedDir string) {
 	files := make(map[string][]byte, len(skill.Files))
 	for _, f := range skill.Files {
 		content, err := os.ReadFile(filepath.Join(installedDir, f.Path))
