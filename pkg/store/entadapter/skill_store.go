@@ -235,7 +235,7 @@ func (s *SkillStore) ListSkills(ctx context.Context, filter store.SkillFilter, o
 	}
 	if len(filter.Tags) > 0 {
 		for _, tag := range filter.Tags {
-			query.Where(entskill.TagsContains(`"` + tag + `"`))
+			query.Where(entskill.TagsContainsFold(`"` + tag + `"`))
 		}
 	}
 

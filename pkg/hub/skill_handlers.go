@@ -573,6 +573,10 @@ func (s *Server) deprecateSkillVersion(w http.ResponseWriter, r *http.Request, s
 		BadRequest(w, "Invalid request body: "+err.Error())
 		return
 	}
+	if req.Message == "" {
+		ValidationError(w, "message is required for deprecation", nil)
+		return
+	}
 
 	sv, err := s.store.GetSkillVersion(ctx, versionID)
 	if err != nil {
