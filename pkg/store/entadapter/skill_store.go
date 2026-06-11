@@ -235,7 +235,7 @@ func (s *SkillStore) ListSkills(ctx context.Context, filter store.SkillFilter, o
 	}
 	if len(filter.Tags) > 0 {
 		for _, tag := range filter.Tags {
-			query.Where(entskill.TagsContains(tag))
+			query.Where(entskill.TagsContains(`"` + tag + `"`))
 		}
 	}
 
@@ -431,7 +431,13 @@ func (s *SkillStore) ResolveSkillVersion(ctx context.Context, skillID, constrain
 	})
 
 	if constraint == "latest" || constraint == "" {
-		// Return highest non-prerelease published version
+		// Prefer published over deprecated for latest
+		for _, v := range versions {
+			if v.ver.Prerelease() == "" && v.sv.Status == entskillversion.StatusPublished {
+				return entSkillVersionToStore(v.sv), nil
+			}
+		}
+		// Fallback: if all non-prerelease versions are deprecated, return highest
 		for _, v := range versions {
 			if v.ver.Prerelease() == "" {
 				return entSkillVersionToStore(v.sv), nil
@@ -440,7 +446,7 @@ func (s *SkillStore) ResolveSkillVersion(ctx context.Context, skillID, constrain
 		return nil, store.ErrNotFound
 	}
 
-	// Try exact match first
+	// Exact match — return regardless of status (pinned consumers get what they asked for)
 	exactVer, err := semver.NewVersion(constraint)
 	if err == nil {
 		for _, v := range versions {
@@ -457,7 +463,13 @@ func (s *SkillStore) ResolveSkillVersion(ctx context.Context, skillID, constrain
 		return nil, fmt.Errorf("invalid version constraint %q: %w", constraint, err)
 	}
 
-	// Return highest matching version (excluding pre-releases)
+	// Prefer published over deprecated for constraint-based resolution
+	for _, v := range versions {
+		if v.ver.Prerelease() == "" && c.Check(v.ver) && v.sv.Status == entskillversion.StatusPublished {
+			return entSkillVersionToStore(v.sv), nil
+		}
+	}
+	// Fallback: return highest matching deprecated version
 	for _, v := range versions {
 		if v.ver.Prerelease() == "" && c.Check(v.ver) {
 			return entSkillVersionToStore(v.sv), nil
