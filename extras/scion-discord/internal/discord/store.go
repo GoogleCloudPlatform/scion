@@ -54,11 +54,6 @@ type Store interface {
 	SetNotificationPref(ctx context.Context, pref *NotificationPref) error
 	GetNotificationPrefs(ctx context.Context, discordUserID, projectID string) ([]*NotificationPref, error)
 
-	// Advisory locking (for standalone HA leader election)
-	TryAdvisoryLock(ctx context.Context, key int64) (bool, error)
-	ReleaseAdvisoryLock(ctx context.Context, key int64) error
-	PingLockConn(ctx context.Context) error
-
 	// Lifecycle
 	Close() error
 }
@@ -179,7 +174,7 @@ CREATE TABLE IF NOT EXISTS channel_links (
 	linked_at TEXT NOT NULL,
 	active INTEGER NOT NULL DEFAULT 1,
 	show_agent_to_agent INTEGER NOT NULL DEFAULT 0,
-	show_assistant_reply INTEGER NOT NULL DEFAULT 0,
+	show_assistant_reply INTEGER NOT NULL DEFAULT 1,
 	show_state_changes INTEGER NOT NULL DEFAULT 1,
 	notify_in_group INTEGER NOT NULL DEFAULT 1,
 	chat_only INTEGER NOT NULL DEFAULT 0
@@ -688,20 +683,6 @@ func scanUserMapping(row *sql.Row) (*DiscordUserMapping, error) {
 		return nil, fmt.Errorf("parse linked_at: %w", err)
 	}
 	return &m, nil
-}
-
-// --- Advisory locking (SQLite: no-op, always succeeds) ---
-
-func (s *sqliteStore) TryAdvisoryLock(_ context.Context, _ int64) (bool, error) {
-	return true, nil
-}
-
-func (s *sqliteStore) PingLockConn(_ context.Context) error {
-	return nil
-}
-
-func (s *sqliteStore) ReleaseAdvisoryLock(_ context.Context, _ int64) error {
-	return nil
 }
 
 func boolToInt(b bool) int {

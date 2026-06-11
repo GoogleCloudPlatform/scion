@@ -326,6 +326,10 @@ type CreateAgentRequest struct {
 	// (e.g. "shared", "per-agent", "worktree-per-agent"). Threaded from the
 	// Hub so the broker can branch dispatch without re-deriving from labels.
 	WorkspaceMode string `json:"workspaceMode,omitempty"`
+
+	// NoAuth indicates the agent should start with zero injected credentials.
+	// When true, the broker skips credential injection.
+	NoAuth bool `json:"noAuth,omitempty"`
 }
 
 // UnmarshalJSON implements custom unmarshaling to support legacy grove fields.

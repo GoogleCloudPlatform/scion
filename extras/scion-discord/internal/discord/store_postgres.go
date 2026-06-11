@@ -5,15 +5,12 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"sync"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
 type postgresStore struct {
-	db       *sql.DB
-	mu       sync.Mutex
-	lockConn *sql.Conn
+	db *sql.DB
 }
 
 func NewPostgresStore(databaseURL string) (Store, error) {
@@ -47,7 +44,7 @@ CREATE TABLE IF NOT EXISTS discord_channel_links (
 	linked_at TIMESTAMPTZ NOT NULL,
 	active BOOLEAN NOT NULL DEFAULT TRUE,
 	show_agent_to_agent BOOLEAN NOT NULL DEFAULT FALSE,
-	show_assistant_reply BOOLEAN NOT NULL DEFAULT FALSE,
+	show_assistant_reply BOOLEAN NOT NULL DEFAULT TRUE,
 	show_state_changes BOOLEAN NOT NULL DEFAULT TRUE,
 	notify_in_group BOOLEAN NOT NULL DEFAULT TRUE,
 	chat_only BOOLEAN NOT NULL DEFAULT FALSE
@@ -434,55 +431,6 @@ func (s *postgresStore) GetNotificationPrefs(ctx context.Context, discordUserID,
 		prefs = append(prefs, &p)
 	}
 	return prefs, rows.Err()
-}
-
-// --- Advisory locking ---
-
-func (s *postgresStore) TryAdvisoryLock(ctx context.Context, key int64) (bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if s.lockConn != nil {
-		return false, fmt.Errorf("advisory lock connection already held")
-	}
-
-	conn, err := s.db.Conn(ctx)
-	if err != nil {
-		return false, err
-	}
-	var acquired bool
-	err = conn.QueryRowContext(ctx, "SELECT pg_try_advisory_lock($1)", key).Scan(&acquired)
-	if err != nil {
-		conn.Close()
-		return false, err
-	}
-	if !acquired {
-		conn.Close()
-		return false, nil
-	}
-	s.lockConn = conn
-	return true, nil
-}
-
-func (s *postgresStore) PingLockConn(ctx context.Context) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.lockConn == nil {
-		return fmt.Errorf("no lock connection")
-	}
-	return s.lockConn.PingContext(ctx)
-}
-
-func (s *postgresStore) ReleaseAdvisoryLock(ctx context.Context, key int64) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.lockConn == nil {
-		return nil
-	}
-	_, err := s.lockConn.ExecContext(ctx, "SELECT pg_advisory_unlock($1)", key)
-	s.lockConn.Close()
-	s.lockConn = nil
-	return err
 }
 
 // --- scan helpers ---

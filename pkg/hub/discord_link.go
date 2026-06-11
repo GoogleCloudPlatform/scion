@@ -15,26 +15,30 @@
 package hub
 
 import (
-	"context"
-	"errors"
 	"log/slog"
 	"net"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 const discordLinkCodeTTL = 15 * time.Minute
 
+// discordPendingLink holds state for a pending Discord account linking.
+type discordPendingLink struct {
+	Code          string
+	DiscordUserID string
+	ExpiresAt     time.Time
+	Status        string // "pending", "confirmed"
+	UserID        string
+	UserEmail     string
+}
+
 // DiscordLinkService manages pending Discord account link codes.
-// Pending codes are stored in the database so that a code registered on one
-// hub instance can be verified on another (HA mode).
-// IP-based rate limiting remains in-memory (per-instance by design).
 type DiscordLinkService struct {
-	store store.DiscordPendingLinkStore
+	mu      sync.Mutex
+	pending map[string]*discordPendingLink // code → pending link
 
 	verifyMu       sync.Mutex
 	verifyLimiters map[string]*tokenBucket // IP → token bucket
@@ -43,93 +47,88 @@ type DiscordLinkService struct {
 	done      chan struct{}
 }
 
-// NewDiscordLinkService creates a new DiscordLinkService backed by the given
-// store and starts a background goroutine that periodically removes expired
-// entries.
-func NewDiscordLinkService(s store.DiscordPendingLinkStore) *DiscordLinkService {
-	svc := &DiscordLinkService{
-		store:          s,
+// NewDiscordLinkService creates a new DiscordLinkService and starts
+// a background goroutine that periodically removes expired entries.
+func NewDiscordLinkService() *DiscordLinkService {
+	s := &DiscordLinkService{
+		pending:        make(map[string]*discordPendingLink),
 		verifyLimiters: make(map[string]*tokenBucket),
 		done:           make(chan struct{}),
 	}
-	go svc.cleanupLoop()
-	return svc
+	go s.cleanupLoop()
+	return s
 }
 
 // RegisterCode stores a pending link code from the Discord plugin.
 func (s *DiscordLinkService) RegisterCode(code, discordUserID string) {
-	ctx := context.Background()
-	upperCode := strings.ToUpper(code)
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
 	// Remove any existing pending code for this discord user.
-	if err := s.store.DeleteDiscordPendingLinksByDiscordUser(ctx, discordUserID); err != nil {
-		slog.Error("discord link: failed to delete existing links", "error", err)
+	for c, p := range s.pending {
+		if p.DiscordUserID == discordUserID {
+			delete(s.pending, c)
+		}
 	}
 
-	link := &store.DiscordPendingLink{
-		Code:          upperCode,
+	s.pending[strings.ToUpper(code)] = &discordPendingLink{
+		Code:          strings.ToUpper(code),
 		DiscordUserID: discordUserID,
-		Status:        "pending",
 		ExpiresAt:     time.Now().Add(discordLinkCodeTTL),
-	}
-	if err := s.store.CreateDiscordPendingLink(ctx, link); err != nil {
-		slog.Error("discord link: failed to create pending link", "error", err)
+		Status:        "pending",
 	}
 }
 
 // VerifyCode attempts to confirm a pending link code with the given user.
 // Returns the discordUserID on success, or empty string with a reason.
-func (s *DiscordLinkService) VerifyCode(ctx context.Context, code, userID, userEmail string) (discordUserID string, err string) {
-	upperCode := strings.ToUpper(code)
+func (s *DiscordLinkService) VerifyCode(code, userID, userEmail string) (discordUserID string, err string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
-	link, dbErr := s.store.GetDiscordPendingLinkByCode(ctx, upperCode)
-	if dbErr != nil {
-		if errors.Is(dbErr, store.ErrNotFound) {
-			return "", "code_not_found"
-		}
-		slog.Error("discord link: failed to get pending link", "error", dbErr)
+	p, ok := s.pending[strings.ToUpper(code)]
+	if !ok {
 		return "", "code_not_found"
 	}
-	if time.Now().After(link.ExpiresAt) {
-		_ = s.store.DeleteDiscordPendingLink(ctx, upperCode)
+	if time.Now().After(p.ExpiresAt) {
+		delete(s.pending, strings.ToUpper(code))
 		return "", "code_expired"
 	}
-	if link.Status == "confirmed" {
-		return link.DiscordUserID, ""
+	if p.Status == "confirmed" {
+		return p.DiscordUserID, ""
 	}
 
-	link.Status = "confirmed"
-	link.UserID = userID
-	link.UserEmail = userEmail
-	if dbErr := s.store.UpdateDiscordPendingLink(ctx, link); dbErr != nil {
-		if errors.Is(dbErr, store.ErrVersionConflict) {
-			return "", "code_not_found"
-		}
-		slog.Error("discord link: failed to update pending link", "error", dbErr)
-		return "", "code_not_found"
-	}
-	return link.DiscordUserID, ""
+	p.Status = "confirmed"
+	p.UserID = userID
+	p.UserEmail = userEmail
+	return p.DiscordUserID, ""
 }
 
 // GetStatusByDiscordUser returns the linking status for a given Discord user ID.
 func (s *DiscordLinkService) GetStatusByDiscordUser(discordUserID string) (status, userID, userEmail string) {
-	ctx := context.Background()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
-	link, err := s.store.GetDiscordPendingLinkByDiscordUser(ctx, discordUserID)
-	if err != nil {
-		return "not_found", "", ""
+	for _, p := range s.pending {
+		if p.DiscordUserID == discordUserID {
+			if time.Now().After(p.ExpiresAt) {
+				return "expired", "", ""
+			}
+			return p.Status, p.UserID, p.UserEmail
+		}
 	}
-	if time.Now().After(link.ExpiresAt) {
-		return "expired", "", ""
-	}
-	return link.Status, link.UserID, link.UserEmail
+	return "not_found", "", ""
 }
 
 // ConsumePending removes a confirmed entry so it isn't returned again.
 func (s *DiscordLinkService) ConsumePending(discordUserID string) {
-	ctx := context.Background()
-	if err := s.store.DeleteDiscordPendingLinksByDiscordUser(ctx, discordUserID); err != nil {
-		slog.Error("discord link: failed to consume pending link", "error", err)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for code, p := range s.pending {
+		if p.DiscordUserID == discordUserID {
+			delete(s.pending, code)
+			return
+		}
 	}
 }
 
@@ -178,16 +177,17 @@ func (s *DiscordLinkService) cleanupLoop() {
 		case <-s.done:
 			return
 		case <-ticker.C:
-			ctx := context.Background()
+			now := time.Now()
 
-			if n, err := s.store.DeleteExpiredDiscordPendingLinks(ctx); err != nil {
-				slog.Error("discord link: failed to cleanup expired links", "error", err)
-			} else if n > 0 {
-				slog.Debug("discord link: cleaned up expired links", "count", n)
+			s.mu.Lock()
+			for code, p := range s.pending {
+				if now.After(p.ExpiresAt) {
+					delete(s.pending, code)
+				}
 			}
+			s.mu.Unlock()
 
 			// Clean up stale verify rate limiter entries.
-			now := time.Now()
 			s.verifyMu.Lock()
 			cutoff := now.Add(-30 * time.Minute)
 			for ip, b := range s.verifyLimiters {
@@ -288,7 +288,7 @@ func (s *Server) handleDiscordLinkVerify(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	discordUserID, errReason := s.discordLinkService.VerifyCode(r.Context(), req.Code, user.ID(), user.Email())
+	discordUserID, errReason := s.discordLinkService.VerifyCode(req.Code, user.ID(), user.Email())
 	if errReason != "" {
 		switch errReason {
 		case "code_not_found":

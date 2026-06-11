@@ -1211,3 +1211,54 @@ func TestWorktreeWorkspace_RepoRootDerivesToBase(t *testing.T) {
 		t.Errorf("rel %q starts with .. — common.go dual-mount would NOT fire", rel)
 	}
 }
+
+func TestBuildStartContext_NoAuth(t *testing.T) {
+	cfg := DefaultServerConfig()
+	cfg.StateDir = t.TempDir()
+	srv := newTestServerForStartContext(t, cfg)
+
+	secrets := []api.ResolvedSecret{
+		{Name: "CLAUDE_AUTH", Type: "file", Value: "secret-data", Target: "~/.claude/.credentials.json"},
+		{Name: "API_KEY", Type: "environment", Value: "key-value", Target: "API_KEY"},
+	}
+
+	t.Run("NoAuth=true nils out secrets and sets opts.NoAuth", func(t *testing.T) {
+		r := httptest.NewRequest("POST", "/api/v1/agents", nil)
+		sc, err := srv.buildStartContext(context.Background(), startContextInputs{
+			Name:            "noauth-agent",
+			ResolvedSecrets: secrets,
+			NoAuth:          true,
+			HTTPRequest:     r,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if !sc.Opts.NoAuth {
+			t.Error("expected opts.NoAuth to be true")
+		}
+		if sc.Opts.ResolvedSecrets != nil {
+			t.Errorf("expected nil ResolvedSecrets with NoAuth, got %d", len(sc.Opts.ResolvedSecrets))
+		}
+	})
+
+	t.Run("NoAuth=false passes secrets through", func(t *testing.T) {
+		r := httptest.NewRequest("POST", "/api/v1/agents", nil)
+		sc, err := srv.buildStartContext(context.Background(), startContextInputs{
+			Name:            "auth-agent",
+			ResolvedSecrets: secrets,
+			NoAuth:          false,
+			HTTPRequest:     r,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if sc.Opts.NoAuth {
+			t.Error("expected opts.NoAuth to be false")
+		}
+		if len(sc.Opts.ResolvedSecrets) != 2 {
+			t.Errorf("expected 2 resolved secrets, got %d", len(sc.Opts.ResolvedSecrets))
+		}
+	})
+}

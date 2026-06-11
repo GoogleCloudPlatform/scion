@@ -57,9 +57,6 @@ const (
 	LockBrokerAffinityReap AdvisoryLockKey = 0x5C100006
 	// LockBrokerMessageSweep guards the periodic stuck-pending-message sweep (B5-2).
 	LockBrokerMessageSweep AdvisoryLockKey = 0x5C100007
-	// LockDiscordGateway guards the Discord Gateway connection so that only
-	// one standalone Discord bot instance opens the Gateway at a time.
-	LockDiscordGateway AdvisoryLockKey = 0x5C100008
 
 	// LockWorkspaceProvision is the CLASS ID for per-project workspace
 	// provisioning locks. It is used with the two-int advisory lock form

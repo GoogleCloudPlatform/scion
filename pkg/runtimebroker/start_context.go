@@ -77,6 +77,7 @@ type startContextInputs struct {
 
 	// Behavior
 	Attach bool
+	NoAuth bool
 
 	// WorkspaceMode is the resolved workspace sharing mode for the project
 	// (e.g. "worktree-per-agent"). Threaded from CreateAgentRequest so the
@@ -367,6 +368,7 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		Name:        in.Name,
 		BrokerMode:  true,
 		ProjectPath: in.ProjectPath,
+		NoAuth:      in.NoAuth,
 	}
 
 	if in.Attach {
@@ -501,7 +503,9 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		opts.TelemetryOverride = &enabled
 	}
 
-	if len(in.ResolvedSecrets) > 0 {
+	if in.NoAuth {
+		opts.ResolvedSecrets = nil
+	} else if len(in.ResolvedSecrets) > 0 {
 		opts.ResolvedSecrets = in.ResolvedSecrets
 		if s.config.Debug {
 			s.envSecretLog.Debug("Received resolved secrets", "count", len(in.ResolvedSecrets))

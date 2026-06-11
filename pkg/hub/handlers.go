@@ -217,6 +217,9 @@ type CreateAgentRequest struct {
 	// rather than create a brand-new one. When true and a stopped agent with
 	// the same name exists, the Hub recovers it instead of creating fresh.
 	Resume bool `json:"resume,omitempty"`
+	// NoAuth indicates the agent should start with zero injected credentials.
+	// When true, the Hub skips secret resolution and the broker skips credential injection.
+	NoAuth bool `json:"noAuth,omitempty"`
 	// GCPIdentity specifies the GCP identity assignment for the agent.
 	// Controls metadata server behavior and optional service account binding.
 	GCPIdentity *GCPIdentityAssignment `json:"gcp_identity,omitempty"`
@@ -9191,6 +9194,8 @@ func (s *Server) buildAppliedConfig(req CreateAgentRequest, harnessConfig string
 		Workspace:     req.Workspace,
 		CreatorName:   creatorName,
 	}
+
+	ac.NoAuth = req.NoAuth
 
 	if req.Config != nil {
 		ac.Image = req.Config.Image

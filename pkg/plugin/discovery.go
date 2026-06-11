@@ -32,7 +32,6 @@ type DiscoveredPlugin struct {
 	FromConfig  bool   // true if found via settings, false if auto-discovered
 	SelfManaged bool   // true if the plugin manages its own process lifecycle
 	Address     string // RPC address for self-managed plugins
-	Mode        string // "grpc", "self-managed", or "" (default go-plugin subprocess)
 }
 
 // DiscoverPlugins finds all available plugins from settings configuration and
@@ -45,18 +44,7 @@ func DiscoverPlugins(cfg PluginsConfig, pluginsDir string, logger *slog.Logger) 
 
 	// 1. From settings configuration
 	for name, entry := range cfg.Broker {
-		if entry.Mode == "grpc" {
-			discovered = append(discovered, DiscoveredPlugin{
-				Name:       name,
-				Type:       PluginTypeBroker,
-				Config:     entry.Config,
-				FromConfig: true,
-				Address:    entry.Address,
-				Mode:       "grpc",
-			})
-			continue
-		}
-		if entry.SelfManaged || entry.Mode == "self-managed" {
+		if entry.SelfManaged {
 			discovered = append(discovered, DiscoveredPlugin{
 				Name:        name,
 				Type:        PluginTypeBroker,
@@ -64,7 +52,6 @@ func DiscoverPlugins(cfg PluginsConfig, pluginsDir string, logger *slog.Logger) 
 				FromConfig:  true,
 				SelfManaged: true,
 				Address:     entry.Address,
-				Mode:        entry.Mode,
 			})
 			continue
 		}
@@ -79,7 +66,6 @@ func DiscoverPlugins(cfg PluginsConfig, pluginsDir string, logger *slog.Logger) 
 			Path:       path,
 			Config:     entry.Config,
 			FromConfig: true,
-			Mode:       entry.Mode,
 		})
 	}
 

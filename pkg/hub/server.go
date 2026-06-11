@@ -433,6 +433,10 @@ type RemoteCreateAgentRequest struct {
 	// (e.g. "shared", "per-agent", "worktree-per-agent"). Threaded from the
 	// Hub so the broker can branch dispatch without re-deriving from labels.
 	WorkspaceMode string `json:"workspaceMode,omitempty"`
+
+	// NoAuth indicates the agent should start with zero injected credentials.
+	// When true, the broker skips credential injection.
+	NoAuth bool `json:"noAuth,omitempty"`
 }
 
 // ResolvedSecret represents a secret resolved by the Hub for projection into an agent container.
@@ -746,8 +750,8 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 	// Initialize Telegram link service
 	srv.telegramLinkService = NewTelegramLinkService()
 
-	// Initialize Discord link service (DB-backed for HA)
-	srv.discordLinkService = NewDiscordLinkService(s)
+	// Initialize Discord link service
+	srv.discordLinkService = NewDiscordLinkService()
 
 	// Initialize OAuth service if configured
 	if cfg.OAuthConfig.IsConfigured() {

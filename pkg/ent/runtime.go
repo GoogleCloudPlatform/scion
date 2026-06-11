@@ -12,7 +12,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokerdispatch"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokerjointoken"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokersecret"
-	"github.com/GoogleCloudPlatform/scion/pkg/ent/discordpendinglink"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/envvar"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/gcpserviceaccount"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/githubinstallation"
@@ -229,36 +228,6 @@ func init() {
 	brokersecretDescCreated := brokersecretFields[6].Descriptor()
 	// brokersecret.DefaultCreated holds the default value on creation for the created field.
 	brokersecret.DefaultCreated = brokersecretDescCreated.Default.(func() time.Time)
-	discordpendinglinkFields := schema.DiscordPendingLink{}.Fields()
-	_ = discordpendinglinkFields
-	// discordpendinglinkDescCode is the schema descriptor for code field.
-	discordpendinglinkDescCode := discordpendinglinkFields[1].Descriptor()
-	// discordpendinglink.CodeValidator is a validator for the "code" field. It is called by the builders before save.
-	discordpendinglink.CodeValidator = discordpendinglinkDescCode.Validators[0].(func(string) error)
-	// discordpendinglinkDescDiscordUserID is the schema descriptor for discord_user_id field.
-	discordpendinglinkDescDiscordUserID := discordpendinglinkFields[2].Descriptor()
-	// discordpendinglink.DiscordUserIDValidator is a validator for the "discord_user_id" field. It is called by the builders before save.
-	discordpendinglink.DiscordUserIDValidator = discordpendinglinkDescDiscordUserID.Validators[0].(func(string) error)
-	// discordpendinglinkDescStatus is the schema descriptor for status field.
-	discordpendinglinkDescStatus := discordpendinglinkFields[3].Descriptor()
-	// discordpendinglink.DefaultStatus holds the default value on creation for the status field.
-	discordpendinglink.DefaultStatus = discordpendinglinkDescStatus.Default.(string)
-	// discordpendinglinkDescUserID is the schema descriptor for user_id field.
-	discordpendinglinkDescUserID := discordpendinglinkFields[4].Descriptor()
-	// discordpendinglink.DefaultUserID holds the default value on creation for the user_id field.
-	discordpendinglink.DefaultUserID = discordpendinglinkDescUserID.Default.(string)
-	// discordpendinglinkDescUserEmail is the schema descriptor for user_email field.
-	discordpendinglinkDescUserEmail := discordpendinglinkFields[5].Descriptor()
-	// discordpendinglink.DefaultUserEmail holds the default value on creation for the user_email field.
-	discordpendinglink.DefaultUserEmail = discordpendinglinkDescUserEmail.Default.(string)
-	// discordpendinglinkDescCreatedAt is the schema descriptor for created_at field.
-	discordpendinglinkDescCreatedAt := discordpendinglinkFields[7].Descriptor()
-	// discordpendinglink.DefaultCreatedAt holds the default value on creation for the created_at field.
-	discordpendinglink.DefaultCreatedAt = discordpendinglinkDescCreatedAt.Default.(func() time.Time)
-	// discordpendinglinkDescID is the schema descriptor for id field.
-	discordpendinglinkDescID := discordpendinglinkFields[0].Descriptor()
-	// discordpendinglink.DefaultID holds the default value on creation for the id field.
-	discordpendinglink.DefaultID = discordpendinglinkDescID.Default.(func() uuid.UUID)
 	envvarFields := schema.EnvVar{}.Fields()
 	_ = envvarFields
 	// envvarDescKey is the schema descriptor for key field.

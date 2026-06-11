@@ -29,6 +29,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -3268,4 +3269,105 @@ func TestBuildCreateRequest_GitHubAppTokenWhenNoUserToken(t *testing.T) {
 	if !minter.called {
 		t.Error("expected GitHub App minter to be called when no user GITHUB_TOKEN exists")
 	}
+}
+
+// mockSecretBackend is a test implementation of secret.SecretBackend that
+// returns a fixed set of secrets from Resolve.
+type mockSecretBackend struct {
+	secrets []secret.SecretWithValue
+}
+
+func (m *mockSecretBackend) Get(ctx context.Context, name, scope, scopeID string) (*secret.SecretWithValue, error) {
+	return nil, nil
+}
+func (m *mockSecretBackend) Set(ctx context.Context, input *secret.SetSecretInput) (bool, *secret.SecretMeta, error) {
+	return false, nil, nil
+}
+func (m *mockSecretBackend) Delete(ctx context.Context, name, scope, scopeID string) error {
+	return nil
+}
+func (m *mockSecretBackend) List(ctx context.Context, filter secret.Filter) ([]secret.SecretMeta, error) {
+	return nil, nil
+}
+func (m *mockSecretBackend) GetMeta(ctx context.Context, name, scope, scopeID string) (*secret.SecretMeta, error) {
+	return nil, nil
+}
+func (m *mockSecretBackend) Resolve(ctx context.Context, userID, projectID, brokerID string, opts *secret.ResolveOpts) ([]secret.SecretWithValue, error) {
+	return m.secrets, nil
+}
+func (m *mockSecretBackend) HubID() string { return "test-hub" }
+
+func TestBuildCreateRequest_NoAuth_SkipsSecrets(t *testing.T) {
+	ctx := context.Background()
+	memStore := createTestStore(t)
+
+	broker := &store.RuntimeBroker{
+		ID:       tid("host-1"),
+		Name:     "test-host",
+		Slug:     "test-host",
+		Endpoint: "http://localhost:9800",
+		Status:   store.BrokerStatusOnline,
+	}
+	if err := memStore.CreateRuntimeBroker(ctx, broker); err != nil {
+		t.Fatalf("failed to create runtime broker: %v", err)
+	}
+
+	mockClient := &mockRuntimeBrokerClient{}
+	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
+	dispatcher.SetSecretBackend(&mockSecretBackend{
+		secrets: []secret.SecretWithValue{
+			{SecretMeta: secret.SecretMeta{Name: "CLAUDE_AUTH", SecretType: "file", Target: "~/.claude/.credentials.json"}, Value: "secret-data"},
+			{SecretMeta: secret.SecretMeta{Name: "API_KEY", SecretType: "environment", Target: "API_KEY"}, Value: "key-value"},
+		},
+	})
+
+	t.Run("NoAuth=true skips secret resolution", func(t *testing.T) {
+		agent := &store.Agent{
+			ID:              tid("agent-1"),
+			Name:            "noauth-agent",
+			Slug:            "noauth-agent",
+			OwnerID:         tid("user-1"),
+			RuntimeBrokerID: tid("host-1"),
+			AppliedConfig:   &store.AgentAppliedConfig{NoAuth: true},
+		}
+
+		req, err := dispatcher.buildCreateRequest(ctx, agent, "TestNoAuth")
+		if err != nil {
+			t.Fatalf("buildCreateRequest failed: %v", err)
+		}
+
+		if !req.NoAuth {
+			t.Error("expected req.NoAuth to be true")
+		}
+		if len(req.ResolvedSecrets) != 0 {
+			t.Errorf("expected no resolved secrets with NoAuth, got %d", len(req.ResolvedSecrets))
+		}
+		// Env-type secrets should not have been injected into ResolvedEnv
+		if v, ok := req.ResolvedEnv["API_KEY"]; ok && v != "" {
+			t.Errorf("expected API_KEY to not be injected into ResolvedEnv with NoAuth, got %q", v)
+		}
+	})
+
+	t.Run("NoAuth=false resolves secrets normally", func(t *testing.T) {
+		agent := &store.Agent{
+			ID:              tid("agent-2"),
+			Name:            "auth-agent",
+			Slug:            "auth-agent",
+			OwnerID:         tid("user-1"),
+			RuntimeBrokerID: tid("host-1"),
+			AppliedConfig:   &store.AgentAppliedConfig{},
+		}
+
+		req, err := dispatcher.buildCreateRequest(ctx, agent, "TestWithAuth")
+		if err != nil {
+			t.Fatalf("buildCreateRequest failed: %v", err)
+		}
+
+		if req.NoAuth {
+			t.Error("expected req.NoAuth to be false")
+		}
+		if len(req.ResolvedSecrets) != 2 {
+			t.Errorf("expected 2 resolved secrets, got %d", len(req.ResolvedSecrets))
+		}
+	})
 }

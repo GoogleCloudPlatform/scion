@@ -17,12 +17,6 @@
 // processes using hashicorp/go-plugin.
 package plugin
 
-import (
-	"log/slog"
-
-	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
-)
-
 const (
 	// PluginTypeBroker is the plugin type for message broker implementations.
 	PluginTypeBroker = "broker"
@@ -63,26 +57,10 @@ type PluginEntry struct {
 	// The plugin is responsible for its own startup and shutdown.
 	SelfManaged bool `json:"self_managed,omitempty" yaml:"self_managed,omitempty" koanf:"self_managed"`
 
-	// Address is the network address for self-managed or gRPC plugins.
-	// Required when SelfManaged is true or Mode is "grpc".
+	// Address is the RPC address for self-managed plugins (e.g. "localhost:9090").
+	// Required when SelfManaged is true.
 	Address string `json:"address,omitempty" yaml:"address,omitempty" koanf:"address"`
-
-	// Mode selects the plugin communication mode: "" or "plugin" (default go-plugin
-	// subprocess), "grpc" (standalone gRPC broker), "self-managed" (go-plugin RPC to
-	// an externally-managed process).
-	Mode string `json:"mode,omitempty" yaml:"mode,omitempty" koanf:"mode"`
 }
-
-// ConfigurableEventBus extends eventbus.EventBus with a Configure method.
-// Implemented by gRPC broker adapters that need runtime configuration.
-type ConfigurableEventBus interface {
-	eventbus.EventBus
-	Configure(config map[string]string) error
-}
-
-// GRPCBrokerFactory creates a ConfigurableEventBus for a gRPC broker at the
-// given address. The channel parameter is the broker name (e.g. "discord").
-type GRPCBrokerFactory func(address, channel string, log *slog.Logger) (ConfigurableEventBus, error)
 
 // PluginInfo contains metadata reported by a plugin via the GetInfo() RPC call.
 type PluginInfo struct {

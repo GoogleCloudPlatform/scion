@@ -53,7 +53,6 @@ type CompositeStore struct {
 	*PolicyStore
 	*BrokerDispatchStore
 	*LifecycleHookStore
-	*DiscordPendingLinkStore
 	*SkillStore
 
 	client *ent.Client
@@ -69,25 +68,24 @@ var _ store.Store = (*CompositeStore)(nil)
 // agent -> project) resolve natively without any shadow synchronization.
 func NewCompositeStore(client *ent.Client) *CompositeStore {
 	return &CompositeStore{
-		AgentStore:              NewAgentStore(client),
-		ProjectStore:            NewProjectStore(client),
-		UserStore:               NewUserStore(client),
-		SecretStore:             NewSecretStore(client),
-		TemplateStore:           NewTemplateStore(client),
-		NotificationStore:       NewNotificationStore(client),
-		ScheduleStore:           NewScheduleStore(client),
-		MaintenanceStore:        NewMaintenanceStore(client),
-		MessageStore:            NewMessageStore(client),
-		ExternalStore:           NewExternalStore(client),
-		BrokerSecretStore:       NewBrokerSecretStore(client),
-		AllowListStore:          NewAllowListStore(client),
-		GroupStore:              NewGroupStore(client),
-		PolicyStore:             NewPolicyStore(client),
-		BrokerDispatchStore:     NewBrokerDispatchStore(client),
-		LifecycleHookStore:      NewLifecycleHookStore(client),
-		DiscordPendingLinkStore: NewDiscordPendingLinkStore(client),
-		SkillStore:              NewSkillStore(client),
-		client:                  client,
+		AgentStore:          NewAgentStore(client),
+		ProjectStore:        NewProjectStore(client),
+		UserStore:           NewUserStore(client),
+		SecretStore:         NewSecretStore(client),
+		TemplateStore:       NewTemplateStore(client),
+		NotificationStore:   NewNotificationStore(client),
+		ScheduleStore:       NewScheduleStore(client),
+		MaintenanceStore:    NewMaintenanceStore(client),
+		MessageStore:        NewMessageStore(client),
+		ExternalStore:       NewExternalStore(client),
+		BrokerSecretStore:   NewBrokerSecretStore(client),
+		AllowListStore:      NewAllowListStore(client),
+		GroupStore:          NewGroupStore(client),
+		PolicyStore:         NewPolicyStore(client),
+		BrokerDispatchStore: NewBrokerDispatchStore(client),
+		LifecycleHookStore:  NewLifecycleHookStore(client),
+		SkillStore:          NewSkillStore(client),
+		client:              client,
 	}
 }
 

@@ -1569,11 +1569,6 @@ func initPluginManager() *scionplugin.Manager {
 		return mgr
 	}
 
-	// Set up the gRPC broker factory before loading plugins.
-	mgr.SetGRPCBrokerFactory(func(address, channel string, log *slog.Logger) (scionplugin.ConfigurableEventBus, error) {
-		return hub.NewGRPCBrokerAdapter(address, channel, log)
-	})
-
 	// Convert V1PluginsConfig to plugin.PluginsConfig
 	pluginsCfg := scionplugin.PluginsConfig{
 		Broker: make(map[string]scionplugin.PluginEntry),
@@ -1584,7 +1579,6 @@ func initPluginManager() *scionplugin.Manager {
 			Config:      entry.Config,
 			SelfManaged: entry.SelfManaged,
 			Address:     entry.Address,
-			Mode:        entry.Mode,
 		}
 	}
 

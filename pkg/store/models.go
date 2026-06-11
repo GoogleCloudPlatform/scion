@@ -165,6 +165,10 @@ type AgentAppliedConfig struct {
 	// broker so it can apply the full configuration during agent provisioning.
 	InlineConfig *api.ScionConfig `json:"inlineConfig,omitempty"`
 
+	// NoAuth indicates the agent should start with zero injected credentials.
+	// Stored on the agent record so restarts preserve the intent.
+	NoAuth bool `json:"noAuth,omitempty"`
+
 	// GCPIdentity holds the GCP identity assignment for this agent.
 	GCPIdentity *GCPIdentityConfig `json:"gcpIdentity,omitempty"`
 }
@@ -1973,18 +1977,6 @@ func (s *ProjectSyncState) UnmarshalJSON(data []byte) error {
 		s.ProjectID = aux.GroveID
 	}
 	return nil
-}
-
-// DiscordPendingLink holds state for a pending Discord account linking.
-type DiscordPendingLink struct {
-	ID            string    `json:"id"`
-	Code          string    `json:"code"`
-	DiscordUserID string    `json:"discordUserId"`
-	Status        string    `json:"status"`
-	UserID        string    `json:"userId"`
-	UserEmail     string    `json:"userEmail"`
-	ExpiresAt     time.Time `json:"expiresAt"`
-	CreatedAt     time.Time `json:"createdAt"`
 }
 
 // =============================================================================
