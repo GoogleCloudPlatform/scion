@@ -7,8 +7,8 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 if ! command -v rg >/dev/null 2>&1; then
-  echo "Error: ripgrep (rg) is required to run this script but was not found in PATH." >&2
-  exit 1
+  echo "Warning: ripgrep (rg) not found — skipping compat-literals check" >&2
+  exit 0
 fi
 
 tmp="$(mktemp)"

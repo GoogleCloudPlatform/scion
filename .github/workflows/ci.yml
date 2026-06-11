@@ -66,6 +66,12 @@ jobs:
       - name: Vet Code
         run: make lint
 
+      - name: Install ripgrep
+        run: |
+          if ! command -v rg &> /dev/null; then
+            sudo apt-get install -y ripgrep
+          fi
+
       - name: Check Compatibility Literals
         run: make compat-literals
 
