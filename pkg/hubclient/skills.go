@@ -61,6 +61,9 @@ type SkillService interface {
 	// DownloadFile downloads a file from the given signed URL.
 	DownloadFile(ctx context.Context, url string) ([]byte, error)
 
+	// DeprecateVersion marks a published version as deprecated.
+	DeprecateVersion(ctx context.Context, skillID, versionID string, req *DeprecateVersionRequest) (*SkillVersion, error)
+
 	// Resolve performs batch skill resolution.
 	Resolve(ctx context.Context, req *ResolveSkillsRequest) (*ResolveSkillsResponse, error)
 }
@@ -175,6 +178,12 @@ type FinalizeSkillVersionRequest struct {
 // SkillManifest is the manifest of uploaded skill files.
 type SkillManifest struct {
 	Files []TemplateFile `json:"files"`
+}
+
+// DeprecateVersionRequest is the request for deprecating a skill version.
+type DeprecateVersionRequest struct {
+	Message        string `json:"message"`
+	ReplacementURI string `json:"replacementUri,omitempty"`
 }
 
 // ResolveSkillsRequest is the request for batch skill resolution.
@@ -353,6 +362,15 @@ func (s *skillService) UploadFile(ctx context.Context, signedURL string, method 
 func (s *skillService) DownloadFile(ctx context.Context, signedURL string) ([]byte, error) {
 	tc := s.getTransferClient()
 	return tc.DownloadFile(ctx, signedURL)
+}
+
+// DeprecateVersion marks a published version as deprecated.
+func (s *skillService) DeprecateVersion(ctx context.Context, skillID, versionID string, req *DeprecateVersionRequest) (*SkillVersion, error) {
+	resp, err := s.c.post(ctx, "/api/v1/skills/"+skillID+"/versions/"+versionID+"/deprecate", req, nil)
+	if err != nil {
+		return nil, err
+	}
+	return apiclient.DecodeResponse[SkillVersion](resp)
 }
 
 // Resolve performs batch skill resolution.

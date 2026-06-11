@@ -450,6 +450,82 @@ func runSkillsDelete(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+var skillsDeprecateCmd = &cobra.Command{
+	Use:   "deprecate <name-or-id>",
+	Short: "Deprecate a skill version",
+	Args:  cobra.ExactArgs(1),
+	RunE:  runSkillsDeprecate,
+}
+
+func runSkillsDeprecate(cmd *cobra.Command, args []string) error {
+	hubCtx, err := CheckHubAvailability(projectPath)
+	if err != nil {
+		return fmt.Errorf("Hub connection required: %w", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	nameOrID := args[0]
+	version, _ := cmd.Flags().GetString("version")
+	message, _ := cmd.Flags().GetString("message")
+	replacement, _ := cmd.Flags().GetString("replacement")
+
+	if version == "" {
+		return fmt.Errorf("--version is required")
+	}
+	if message == "" {
+		return fmt.Errorf("--message is required")
+	}
+
+	skillSvc := hubCtx.Client.Skills()
+
+	// Find skill
+	skill, err := skillSvc.Get(ctx, nameOrID)
+	if err != nil {
+		listResp, listErr := skillSvc.List(ctx, &hubclient.ListSkillsOptions{Name: nameOrID})
+		if listErr != nil || len(listResp.Skills) == 0 {
+			return fmt.Errorf("skill %q not found: %w", nameOrID, err)
+		}
+		skill = &listResp.Skills[0]
+	}
+
+	// Find the specific version
+	versions, err := skillSvc.ListVersions(ctx, skill.ID)
+	if err != nil {
+		return fmt.Errorf("failed to list versions: %w", err)
+	}
+
+	var versionID string
+	for _, v := range versions.Items {
+		if v.Version == version {
+			versionID = v.ID
+			break
+		}
+	}
+	if versionID == "" {
+		return fmt.Errorf("version %q not found for skill %q", version, skill.Name)
+	}
+
+	sv, err := skillSvc.DeprecateVersion(ctx, skill.ID, versionID, &hubclient.DeprecateVersionRequest{
+		Message:        message,
+		ReplacementURI: replacement,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to deprecate version: %w", err)
+	}
+
+	if isJSONOutput() {
+		return json.NewEncoder(os.Stdout).Encode(sv)
+	}
+
+	fmt.Printf("Version %s of %q marked as deprecated.\n", sv.Version, skill.Name)
+	if replacement != "" {
+		fmt.Printf("Replacement: %s\n", replacement)
+	}
+	return nil
+}
+
 var skillsVersionsCmd = &cobra.Command{
 	Use:   "versions <name-or-id>",
 	Short: "List versions of a skill",
@@ -566,6 +642,7 @@ func init() {
 	skillsCmd.AddCommand(skillsCreateCmd)
 	skillsCmd.AddCommand(skillsPublishCmd)
 	skillsCmd.AddCommand(skillsDeleteCmd)
+	skillsCmd.AddCommand(skillsDeprecateCmd)
 	skillsCmd.AddCommand(skillsVersionsCmd)
 	skillsCmd.AddCommand(skillsResolveCmd)
 
@@ -573,6 +650,11 @@ func init() {
 	skillsListCmd.Flags().String("scope", "", "Filter by scope (core, global, project, user)")
 	skillsListCmd.Flags().String("search", "", "Search skills by name, description, or tags")
 	skillsListCmd.Flags().String("tags", "", "Filter by tags (comma-separated, AND semantics)")
+
+	// Flags for deprecate command
+	skillsDeprecateCmd.Flags().String("version", "", "Version to deprecate (required)")
+	skillsDeprecateCmd.Flags().String("message", "", "Deprecation message (required)")
+	skillsDeprecateCmd.Flags().String("replacement", "", "Replacement skill URI")
 
 	// Flags for publish command
 	skillsPublishCmd.Flags().String("version", "", "Semver version to publish (required)")

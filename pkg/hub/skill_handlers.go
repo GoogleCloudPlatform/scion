@@ -122,6 +122,12 @@ type UpdateSkillRequest struct {
 	Tags        []string `json:"tags,omitempty"`
 }
 
+// DeprecateVersionRequest is the request body for deprecating a skill version.
+type DeprecateVersionRequest struct {
+	Message        string `json:"message"`
+	ReplacementURI string `json:"replacementUri,omitempty"`
+}
+
 // handleSkills dispatches /api/v1/skills (GET=list, POST=create).
 func (s *Server) handleSkills(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
@@ -480,8 +486,13 @@ func (s *Server) handleSkillVersions(w http.ResponseWriter, r *http.Request, ski
 	}
 }
 
-// handleSkillVersionByID handles /api/v1/skills/{id}/versions/{versionId}.
+// handleSkillVersionByID handles /api/v1/skills/{id}/versions/{versionId}[/deprecate].
 func (s *Server) handleSkillVersionByID(w http.ResponseWriter, r *http.Request, skillID, versionID string) {
+	if strings.HasSuffix(versionID, "/deprecate") {
+		vid := strings.TrimSuffix(versionID, "/deprecate")
+		s.deprecateSkillVersion(w, r, skillID, vid)
+		return
+	}
 	if r.Method != http.MethodGet {
 		MethodNotAllowed(w)
 		return
@@ -522,6 +533,65 @@ func (s *Server) getSkillVersion(w http.ResponseWriter, r *http.Request, skillID
 
 	if sv.SkillID != skillID {
 		NotFound(w, "SkillVersion")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, sv)
+}
+
+// deprecateSkillVersion marks a published skill version as deprecated.
+func (s *Server) deprecateSkillVersion(w http.ResponseWriter, r *http.Request, skillID, versionID string) {
+	if r.Method != http.MethodPost {
+		MethodNotAllowed(w)
+		return
+	}
+
+	ctx := r.Context()
+
+	skill, err := s.store.GetSkill(ctx, skillID)
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	identity := GetIdentityFromContext(ctx)
+	if identity == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required", nil)
+		return
+	}
+	decision := s.authzService.CheckAccess(ctx, identity, skillResource(skill), ActionUpdate)
+	if !decision.Allowed {
+		writeError(w, http.StatusForbidden, ErrCodeForbidden, "You do not have permission to deprecate versions of this skill", nil)
+		return
+	}
+
+	var req DeprecateVersionRequest
+	if err := readJSON(r, &req); err != nil {
+		BadRequest(w, "Invalid request body: "+err.Error())
+		return
+	}
+
+	sv, err := s.store.GetSkillVersion(ctx, versionID)
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+	if sv.SkillID != skillID {
+		NotFound(w, "SkillVersion")
+		return
+	}
+	if sv.Status != store.SkillVersionStatusPublished {
+		writeError(w, http.StatusConflict, "conflict",
+			fmt.Sprintf("only published versions can be deprecated (current status: %s)", sv.Status), nil)
+		return
+	}
+
+	sv.Status = store.SkillVersionStatusDeprecated
+	sv.DeprecationMessage = req.Message
+	sv.ReplacementURI = req.ReplacementURI
+
+	if err := s.store.UpdateSkillVersion(ctx, sv); err != nil {
+		writeErrorFromErr(w, err, "")
 		return
 	}
 
