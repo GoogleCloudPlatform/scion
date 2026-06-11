@@ -152,7 +152,10 @@ func (r *OTelMetricsRecorder) RecordRotation(brokerID string) {
 
 func (r *OTelMetricsRecorder) RecordDispatch(brokerID string, operation string, success bool, latency time.Duration) {
 	ctx := context.Background()
-	attrs := metric.WithAttributes(attribute.String("broker_id", brokerID))
+	attrs := metric.WithAttributes(
+		attribute.String("broker_id", brokerID),
+		attribute.String("operation", operation),
+	)
 	r.dispatchAttempts.Add(ctx, 1, attrs)
 	if !success {
 		r.dispatchFailures.Add(ctx, 1, attrs)
