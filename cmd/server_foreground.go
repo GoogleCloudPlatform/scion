@@ -243,7 +243,11 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 			if mpErr != nil {
 				log.Printf("WARNING: hub metrics export disabled: %v", mpErr)
 			} else {
-				defer mp.Shutdown(context.Background())
+				defer func() {
+					shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+					defer cancel()
+					_ = mp.Shutdown(shutdownCtx)
+				}()
 
 				dbRec, dbErr := dbmetrics.New(mp)
 				if dbErr != nil {
