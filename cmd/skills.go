@@ -180,7 +180,7 @@ description: <describe your skill>
 # %s
 
 [Your skill instructions here]
-`, name, strings.ReplaceAll(strings.Title(strings.ReplaceAll(name, "-", " ")), " ", " "))
+`, name, skillDisplayName(name))
 
 	skillPath := filepath.Join(dir, "SKILL.md")
 	if err := os.WriteFile(skillPath, []byte(skillMD), 0o644); err != nil {
@@ -377,6 +377,16 @@ type publishFile struct {
 	path    string
 	absPath string
 	size    int64
+}
+
+func skillDisplayName(slug string) string {
+	words := strings.Split(strings.ReplaceAll(slug, "-", " "), " ")
+	for i, w := range words {
+		if len(w) > 0 {
+			words[i] = strings.ToUpper(w[:1]) + w[1:]
+		}
+	}
+	return strings.Join(words, " ")
 }
 
 func hashFile(path string) (string, error) {

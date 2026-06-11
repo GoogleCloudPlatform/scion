@@ -18,6 +18,7 @@ import (
 	"context"
 	"io"
 	"net/url"
+	"sync"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
@@ -67,6 +68,7 @@ type SkillService interface {
 type skillService struct {
 	c              *client
 	transferClient *transfer.Client
+	transferOnce   sync.Once
 }
 
 // Skill represents a skill from the Hub API.
@@ -358,8 +360,8 @@ func (s *skillService) Resolve(ctx context.Context, req *ResolveSkillsRequest) (
 }
 
 func (s *skillService) getTransferClient() *transfer.Client {
-	if s.transferClient == nil {
+	s.transferOnce.Do(func() {
 		s.transferClient = transfer.NewClient(s.c.transport.AuthenticatedHTTPClient())
-	}
+	})
 	return s.transferClient
 }

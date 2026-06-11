@@ -142,10 +142,9 @@ func (s *SkillStore) GetSkillBySlug(ctx context.Context, slug, scope, scopeID st
 		Where(
 			entskill.SlugEQ(slug),
 			entskill.ScopeEQ(scope),
+			entskill.ScopeIDEQ(scopeID),
+			entskill.StatusEQ(entskill.StatusActive),
 		)
-	if scopeID != "" {
-		query.Where(entskill.ScopeIDEQ(scopeID))
-	}
 
 	e, err := query.First(ctx)
 	if err != nil {

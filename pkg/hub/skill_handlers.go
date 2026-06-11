@@ -270,6 +270,54 @@ func (s *Server) createSkill(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Validate scope
+	scope := req.Scope
+	if scope == "" {
+		scope = store.SkillScopeGlobal
+	}
+	switch scope {
+	case store.SkillScopeGlobal, store.SkillScopeProject, store.SkillScopeUser, store.SkillScopeCore:
+	default:
+		ValidationError(w, fmt.Sprintf("invalid scope %q: must be one of global, project, user, core", scope), nil)
+		return
+	}
+
+	// Authorize
+	if scope == store.SkillScopeGlobal || scope == store.SkillScopeCore {
+		userIdent := GetUserIdentityFromContext(ctx)
+		if userIdent == nil {
+			writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required", nil)
+			return
+		}
+		decision := s.authzService.CheckAccess(ctx, userIdent, Resource{Type: "skill"}, ActionCreate)
+		if !decision.Allowed {
+			writeError(w, http.StatusForbidden, ErrCodeForbidden, "You do not have permission to create global skills", nil)
+			return
+		}
+	} else if scope == store.SkillScopeProject {
+		if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
+			if !agentIdent.HasScope(ScopeAgentCreate) {
+				writeError(w, http.StatusForbidden, ErrCodeForbidden, "Missing required scope", nil)
+				return
+			}
+			if req.ScopeID != agentIdent.ProjectID() {
+				writeError(w, http.StatusForbidden, ErrCodeForbidden, "Agents can only manage resources within their own project", nil)
+				return
+			}
+		} else if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
+			decision := s.authzService.CheckAccess(ctx, userIdent, Resource{
+				Type: "skill", ParentType: "project", ParentID: req.ScopeID,
+			}, ActionCreate)
+			if !decision.Allowed {
+				writeError(w, http.StatusForbidden, ErrCodeForbidden, "You do not have permission to create skills in this project", nil)
+				return
+			}
+		} else {
+			writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required", nil)
+			return
+		}
+	}
+
 	slug := api.Slugify(req.Name)
 
 	skill := &store.Skill{
@@ -278,14 +326,10 @@ func (s *Server) createSkill(w http.ResponseWriter, r *http.Request) {
 		Slug:        slug,
 		Description: req.Description,
 		Tags:        req.Tags,
-		Scope:       req.Scope,
+		Scope:       scope,
 		ScopeID:     req.ScopeID,
 		Visibility:  req.Visibility,
 		Status:      "active",
-	}
-
-	if skill.Scope == "" {
-		skill.Scope = store.SkillScopeGlobal
 	}
 	if skill.Visibility == "" {
 		skill.Visibility = store.VisibilityPrivate
@@ -347,6 +391,18 @@ func (s *Server) updateSkill(w http.ResponseWriter, r *http.Request, id string) 
 		return
 	}
 
+	// Authorize
+	identity := GetIdentityFromContext(ctx)
+	if identity == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required", nil)
+		return
+	}
+	decision := s.authzService.CheckAccess(ctx, identity, skillResource(existing), ActionUpdate)
+	if !decision.Allowed {
+		writeError(w, http.StatusForbidden, ErrCodeForbidden, "You do not have permission to update this skill", nil)
+		return
+	}
+
 	var updates UpdateSkillRequest
 	if err := readJSON(r, &updates); err != nil {
 		BadRequest(w, "Invalid request body: "+err.Error())
@@ -383,8 +439,21 @@ func (s *Server) updateSkill(w http.ResponseWriter, r *http.Request, id string) 
 func (s *Server) deleteSkill(w http.ResponseWriter, r *http.Request, id string) {
 	ctx := r.Context()
 
-	if _, err := s.store.GetSkill(ctx, id); err != nil {
+	existing, err := s.store.GetSkill(ctx, id)
+	if err != nil {
 		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	// Authorize
+	identity := GetIdentityFromContext(ctx)
+	if identity == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required", nil)
+		return
+	}
+	decision := s.authzService.CheckAccess(ctx, identity, skillResource(existing), ActionDelete)
+	if !decision.Allowed {
+		writeError(w, http.StatusForbidden, ErrCodeForbidden, "You do not have permission to delete this skill", nil)
 		return
 	}
 
@@ -463,6 +532,18 @@ func (s *Server) publishSkillVersion(w http.ResponseWriter, r *http.Request, ski
 	skill, err := s.store.GetSkill(ctx, skillID)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	// Authorize: publishing a version is an update on the skill
+	identity := GetIdentityFromContext(ctx)
+	if identity == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required", nil)
+		return
+	}
+	decision := s.authzService.CheckAccess(ctx, identity, skillResource(skill), ActionUpdate)
+	if !decision.Allowed {
+		writeError(w, http.StatusForbidden, ErrCodeForbidden, "You do not have permission to publish versions for this skill", nil)
 		return
 	}
 
@@ -551,6 +632,18 @@ func (s *Server) handleSkillUpload(w http.ResponseWriter, r *http.Request, skill
 		return
 	}
 
+	// Authorize
+	identity := GetIdentityFromContext(ctx)
+	if identity == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required", nil)
+		return
+	}
+	decision := s.authzService.CheckAccess(ctx, identity, skillResource(skill), ActionUpdate)
+	if !decision.Allowed {
+		writeError(w, http.StatusForbidden, ErrCodeForbidden, "You do not have permission to upload files for this skill", nil)
+		return
+	}
+
 	stor := s.GetStorage()
 	if stor == nil {
 		RuntimeError(w, "Storage not configured")
@@ -605,6 +698,18 @@ func (s *Server) handleSkillFinalize(w http.ResponseWriter, r *http.Request, ski
 	skill, err := s.store.GetSkill(ctx, skillID)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	// Authorize
+	identity := GetIdentityFromContext(ctx)
+	if identity == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required", nil)
+		return
+	}
+	decision := s.authzService.CheckAccess(ctx, identity, skillResource(skill), ActionUpdate)
+	if !decision.Allowed {
+		writeError(w, http.StatusForbidden, ErrCodeForbidden, "You do not have permission to finalize versions for this skill", nil)
 		return
 	}
 
@@ -805,7 +910,7 @@ func (s *Server) handleSkillsResolve(w http.ResponseWriter, r *http.Request) {
 		// Expand scope aliases from request context
 		expandScopeAliases(uri, req.ProjectID, req.UserID)
 
-		skill, sv, err := s.resolveSkill(ctx, uri)
+		skill, sv, err := s.resolveSkill(ctx, uri, req.ProjectID)
 		if err != nil {
 			resolveErrors = append(resolveErrors, ResolveSkillError{
 				URI: skillRef.URI, Code: "not_found", Message: err.Error(),
@@ -843,10 +948,16 @@ func (s *Server) handleSkillsResolve(w http.ResponseWriter, r *http.Request) {
 }
 
 // resolveSkill finds a skill and version by URI, searching scopes in priority order.
-func (s *Server) resolveSkill(ctx context.Context, uri *api.SkillURI) (*store.Skill, *store.SkillVersion, error) {
-	scopes := determineScopeSearchOrder(uri)
+func (s *Server) resolveSkill(ctx context.Context, uri *api.SkillURI, projectID string) (*store.Skill, *store.SkillVersion, error) {
+	scopes := determineScopeSearchOrder(uri, projectID)
 
+	var versionErr error
 	for _, sc := range scopes {
+		// Skip scoped lookups that require a scopeID when none is available
+		if sc.scopeID == "" && (sc.scope == store.SkillScopeProject || sc.scope == store.SkillScopeUser) {
+			continue
+		}
+
 		skill, err := s.store.GetSkillBySlug(ctx, uri.Name, sc.scope, sc.scopeID)
 		if err != nil {
 			continue
@@ -854,10 +965,14 @@ func (s *Server) resolveSkill(ctx context.Context, uri *api.SkillURI) (*store.Sk
 
 		sv, err := s.store.ResolveSkillVersion(ctx, skill.ID, uri.Version)
 		if err != nil {
+			versionErr = err
 			continue
 		}
 
 		return skill, sv, nil
+	}
+	if versionErr != nil {
+		return nil, nil, fmt.Errorf("skill %q found but version %q could not be resolved: %w", uri.Name, uri.Version, versionErr)
 	}
 	return nil, nil, fmt.Errorf("skill %q not found in any scope", uri.Name)
 }
@@ -868,7 +983,7 @@ type scopeEntry struct {
 }
 
 // determineScopeSearchOrder returns the scope search order for skill resolution.
-func determineScopeSearchOrder(uri *api.SkillURI) []scopeEntry {
+func determineScopeSearchOrder(uri *api.SkillURI, projectID string) []scopeEntry {
 	// If explicit scope is set, search only that scope.
 	if uri.Scope != "" {
 		return []scopeEntry{{scope: uri.Scope, scopeID: uri.ScopeID}}
@@ -878,6 +993,9 @@ func determineScopeSearchOrder(uri *api.SkillURI) []scopeEntry {
 	var order []scopeEntry
 	if uri.ScopeID != "" {
 		order = append(order, scopeEntry{scope: store.SkillScopeUser, scopeID: uri.ScopeID})
+	}
+	if projectID != "" {
+		order = append(order, scopeEntry{scope: store.SkillScopeProject, scopeID: projectID})
 	}
 	order = append(order,
 		scopeEntry{scope: store.SkillScopeGlobal},
