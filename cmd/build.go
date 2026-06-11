@@ -53,18 +53,25 @@ field is updated to reference the built image.`,
 		}
 
 		dockerfilePath := filepath.Join(hcDir.Path, "Dockerfile")
-		if _, err := os.Stat(dockerfilePath); os.IsNotExist(err) {
-			return fmt.Errorf("harness-config %q does not contain a Dockerfile", harnessConfigName)
+		if _, err := os.Stat(dockerfilePath); err != nil {
+			if os.IsNotExist(err) {
+				return fmt.Errorf("harness-config %q does not contain a Dockerfile", harnessConfigName)
+			}
+			return fmt.Errorf("cannot access Dockerfile in harness-config %q: %w", harnessConfigName, err)
 		}
 
 		tag := buildTag
 
-		baseImage := buildBaseImage
-		if baseImage == "" {
-			settings, _, err := config.LoadEffectiveSettings(projectPath)
+		var settings *config.VersionedSettings
+		if buildBaseImage == "" || buildPush {
+			settings, _, err = config.LoadEffectiveSettings(projectPath)
 			if err != nil {
 				return fmt.Errorf("failed to load settings: %w", err)
 			}
+		}
+
+		baseImage := buildBaseImage
+		if baseImage == "" {
 			imageRegistry := ""
 			if settings != nil {
 				imageRegistry = settings.ResolveImageRegistry(profile)
@@ -82,10 +89,6 @@ field is updated to reference the built image.`,
 
 		outputImage := harnessConfigName + ":" + tag
 		if buildPush {
-			settings, _, err := config.LoadEffectiveSettings(projectPath)
-			if err != nil {
-				return fmt.Errorf("failed to load settings: %w", err)
-			}
 			imageRegistry := ""
 			if settings != nil {
 				imageRegistry = settings.ResolveImageRegistry(profile)
@@ -131,12 +134,28 @@ field is updated to reference the built image.`,
 		if err != nil {
 			return fmt.Errorf("failed to read config.yaml for update: %w", err)
 		}
-		var configEntry config.HarnessConfigEntry
-		if err := yaml.Unmarshal(configData, &configEntry); err != nil {
+		var doc yaml.Node
+		if err := yaml.Unmarshal(configData, &doc); err != nil {
 			return fmt.Errorf("failed to parse config.yaml: %w", err)
 		}
-		configEntry.Image = outputImage
-		updatedData, err := yaml.Marshal(&configEntry)
+		if doc.Content != nil && len(doc.Content) > 0 {
+			mapping := doc.Content[0]
+			found := false
+			for i := 0; i < len(mapping.Content)-1; i += 2 {
+				if mapping.Content[i].Value == "image" {
+					mapping.Content[i+1].Value = outputImage
+					found = true
+					break
+				}
+			}
+			if !found {
+				mapping.Content = append(mapping.Content,
+					&yaml.Node{Kind: yaml.ScalarNode, Value: "image"},
+					&yaml.Node{Kind: yaml.ScalarNode, Value: outputImage},
+				)
+			}
+		}
+		updatedData, err := yaml.Marshal(&doc)
 		if err != nil {
 			return fmt.Errorf("failed to marshal updated config.yaml: %w", err)
 		}

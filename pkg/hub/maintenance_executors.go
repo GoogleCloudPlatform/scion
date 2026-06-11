@@ -221,7 +221,6 @@ func (e *PullImagesExecutor) Run(ctx context.Context, logger io.Writer, params m
 	return nil
 }
 
-
 // RebuildServerExecutor rebuilds the server binary from git and restarts via systemd.
 type RebuildServerExecutor struct {
 	repoPath    string // path to scion source checkout
