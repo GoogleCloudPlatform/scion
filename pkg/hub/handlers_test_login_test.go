@@ -33,7 +33,8 @@ import (
 
 type testLoginStore struct {
 	store.Store
-	users map[string]*store.User
+	users       map[string]*store.User
+	errOnLookup error
 }
 
 func newTestLoginStore() *testLoginStore {
@@ -41,10 +42,13 @@ func newTestLoginStore() *testLoginStore {
 }
 
 func (s *testLoginStore) GetUserByEmail(_ context.Context, email string) (*store.User, error) {
+	if s.errOnLookup != nil {
+		return nil, s.errOnLookup
+	}
 	if u, ok := s.users[email]; ok {
 		return u, nil
 	}
-	return nil, fmt.Errorf("user not found")
+	return nil, store.ErrNotFound
 }
 
 func (s *testLoginStore) CreateUser(_ context.Context, user *store.User) error {
@@ -175,6 +179,38 @@ func TestHandleTestLogin_MissingEmail(t *testing.T) {
 	ws.handleTestLogin(rec, req)
 
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+func TestHandleTestLogin_InvalidEmail(t *testing.T) {
+	ws, tokenSvc := newTestLoginWebServer(t, true)
+
+	body := `{"email":"nope","role":"admin"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/test-login", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", testLoginAuthHeader(t, tokenSvc))
+	rec := httptest.NewRecorder()
+
+	ws.handleTestLogin(rec, req)
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "email must contain @")
+}
+
+func TestHandleTestLogin_DBError(t *testing.T) {
+	ws, tokenSvc := newTestLoginWebServer(t, true)
+	mockStore := ws.store.(*testLoginStore)
+	mockStore.errOnLookup = fmt.Errorf("connection refused")
+
+	body := `{"email":"test@example.com","role":"admin"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/test-login", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", testLoginAuthHeader(t, tokenSvc))
+	rec := httptest.NewRecorder()
+
+	ws.handleTestLogin(rec, req)
+
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
+	assert.Contains(t, rec.Body.String(), "failed to look up user")
 }
 
 func TestHandleTestLogin_InvalidRole(t *testing.T) {

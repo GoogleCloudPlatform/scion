@@ -16,6 +16,7 @@ package hub
 
 import (
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -76,6 +77,8 @@ func (ws *WebServer) handleTestLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	r.Body = http.MaxBytesReader(w, r.Body, 4096)
+
 	var req TestLoginRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid request body", http.StatusBadRequest)
@@ -84,6 +87,11 @@ func (ws *WebServer) handleTestLogin(w http.ResponseWriter, r *http.Request) {
 
 	if req.Email == "" {
 		http.Error(w, "email is required", http.StatusBadRequest)
+		return
+	}
+
+	if !strings.Contains(req.Email, "@") {
+		http.Error(w, "email must contain @", http.StatusBadRequest)
 		return
 	}
 
@@ -96,6 +104,7 @@ func (ws *WebServer) handleTestLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	displayNameProvided := req.DisplayName != ""
 	if req.DisplayName == "" {
 		req.DisplayName = req.Email
 	}
@@ -104,6 +113,11 @@ func (ws *WebServer) handleTestLogin(w http.ResponseWriter, r *http.Request) {
 
 	// Find or create user
 	user, err := ws.store.GetUserByEmail(ctx, req.Email)
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		slog.Error("test-login: failed to look up user", "email", req.Email, "error", err)
+		http.Error(w, "failed to look up user", http.StatusInternalServerError)
+		return
+	}
 	if err != nil {
 		user = &store.User{
 			ID:          generateID(),
@@ -122,7 +136,7 @@ func (ws *WebServer) handleTestLogin(w http.ResponseWriter, r *http.Request) {
 	} else {
 		user.LastLogin = time.Now()
 		user.Role = req.Role
-		if req.DisplayName != user.Email {
+		if displayNameProvided {
 			user.DisplayName = req.DisplayName
 		}
 		if err := ws.store.UpdateUser(ctx, user); err != nil {

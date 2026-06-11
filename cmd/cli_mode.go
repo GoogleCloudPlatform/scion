@@ -86,6 +86,16 @@ var agentAllowed = map[string]bool{
 	"template.push":               true,
 	"template.pull":               true,
 	"template.status":             true,
+	"harness-config":               true,
+	"harness-config.list":          true,
+	"harness-config.show":          true,
+	"harness-config.install":       true,
+	"harness-config.sync":          true,
+	"harness-config.push":          true,
+	"harness-config.pull":          true,
+	"harness-config.delete":        true,
+	"harness-config.reset":         true,
+	"harness-config.upgrade":       true,
 }
 
 // resolveMode determines the active CLI mode from environment and settings.
