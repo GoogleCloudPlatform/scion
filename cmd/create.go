@@ -131,7 +131,24 @@ arguments are provided, an empty prompt.md is created for later editing.`,
 			return fmt.Errorf("agent '%s' already exists. Use 'scion delete %s' first to recreate it", agentName, agentName)
 		}
 
-		_, err = mgr.Provision(context.Background(), opts)
+		ctx := context.Background()
+		// Attempt Hub connection for skill resolution in local mode.
+		// If Hub is not configured, this returns nil and provisioning
+		// proceeds without a resolver (S1 fail-closed for required skills).
+		hctx, hubErr := hubsync.EnsureHubReady(projectPath, hubsync.EnsureHubReadyOptions{
+			NoHub:       noHub,
+			AutoConfirm: true,
+			SkipSync:    true,
+		})
+		if hubErr == nil && hctx != nil && hctx.Client != nil {
+			resolver := agent.NewHubSkillResolver(hctx.Client.Skills())
+			ctx = agent.ContextWithSkillResolver(ctx, resolver)
+			if hctx.ProjectID != "" {
+				ctx = agent.ContextWithResolveProjectID(ctx, hctx.ProjectID)
+			}
+		}
+
+		_, err = mgr.Provision(ctx, opts)
 		if err != nil {
 			return err
 		}

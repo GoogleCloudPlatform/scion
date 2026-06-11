@@ -32,6 +32,8 @@ func NewHubSkillResolver(client hubclient.SkillService) *HubSkillResolver {
 	return &HubSkillResolver{client: client}
 }
 
+func (r *HubSkillResolver) ResolverName() string { return "hub" }
+
 func (r *HubSkillResolver) Resolve(ctx context.Context, refs []api.SkillReference, opts ResolveOpts) (*ResolveResult, error) {
 	skillRefs := make([]hubclient.ResolveSkillRef, len(refs))
 	for i, ref := range refs {

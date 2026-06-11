@@ -110,6 +110,46 @@ func SkillResolverFromContext(ctx context.Context) SkillResolver {
 	return r
 }
 
+// ResolverNamer is an optional interface a SkillResolver can implement
+// to provide a name for the resolution record.
+type ResolverNamer interface {
+	ResolverName() string
+}
+
+// resolverName returns the name to record for a resolver. If the resolver
+// implements ResolverNamer, its name is used; otherwise "unknown".
+func resolverName(r SkillResolver) string {
+	if n, ok := r.(ResolverNamer); ok {
+		return n.ResolverName()
+	}
+	return "unknown"
+}
+
+type resolveProjectIDKey struct{}
+type resolveUserIDKey struct{}
+
+// ContextWithResolveProjectID returns a context carrying the project ID for skill resolution.
+func ContextWithResolveProjectID(ctx context.Context, id string) context.Context {
+	return context.WithValue(ctx, resolveProjectIDKey{}, id)
+}
+
+// ResolveProjectIDFromContext retrieves the project ID for skill resolution.
+func ResolveProjectIDFromContext(ctx context.Context) string {
+	v, _ := ctx.Value(resolveProjectIDKey{}).(string)
+	return v
+}
+
+// ContextWithResolveUserID returns a context carrying the user ID for skill resolution.
+func ContextWithResolveUserID(ctx context.Context, id string) context.Context {
+	return context.WithValue(ctx, resolveUserIDKey{}, id)
+}
+
+// ResolveUserIDFromContext retrieves the user ID for skill resolution.
+func ResolveUserIDFromContext(ctx context.Context) string {
+	v, _ := ctx.Value(resolveUserIDKey{}).(string)
+	return v
+}
+
 // --- Resolution record types ---
 
 // SkillResolutionRecord is written to agentHome/.scion/resolved-skills.json

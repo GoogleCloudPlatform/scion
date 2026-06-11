@@ -779,9 +779,13 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 			}
 			util.Debugf("provision: %d optional skill(s) declared but no resolver available, skipping", len(finalScionCfg.Skills))
 		} else {
-			projectID, _ := config.ReadProjectID(projectDir)
+			projectID := ResolveProjectIDFromContext(ctx)
+			if projectID == "" {
+				projectID, _ = config.ReadProjectID(projectDir)
+			}
 			resolveOpts := ResolveOpts{
 				ProjectID: projectID,
+				UserID:    ResolveUserIDFromContext(ctx),
 			}
 
 			result, err := resolver.Resolve(ctx, finalScionCfg.Skills, resolveOpts)
@@ -807,6 +811,7 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 				if err != nil {
 					return "", "", nil, fmt.Errorf("skill installation failed: %w", err)
 				}
+				record.Resolver = resolverName(resolver)
 				resolvedSkillsRecord = record
 			}
 		}
