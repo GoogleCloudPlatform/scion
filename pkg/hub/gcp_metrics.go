@@ -20,6 +20,14 @@ import (
 	"time"
 )
 
+// GCPTokenMetricsRecorder is the interface for recording GCP token metrics.
+type GCPTokenMetricsRecorder interface {
+	RecordAccessTokenRequest(success bool, latency time.Duration)
+	RecordIDTokenRequest(success bool, latency time.Duration)
+	RecordRateLimitRejection()
+	GetSnapshot() *GCPTokenMetricsSnapshot
+}
+
 // GCPTokenMetrics tracks metrics for GCP token operations.
 type GCPTokenMetrics struct {
 	// Access token counters

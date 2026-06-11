@@ -264,6 +264,20 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 					hubSrv.SetDispatchMetrics(dispRec)
 				}
 
+				otelMetrics, otelAuthErr := hub.NewOTelMetricsRecorder(mp)
+				if otelAuthErr != nil {
+					log.Printf("WARNING: hub auth metrics OTel export disabled: %v", otelAuthErr)
+				} else {
+					hubSrv.SetMetrics(otelMetrics)
+				}
+
+				otelGCP, otelGCPErr := hub.NewOTelGCPTokenMetrics(mp)
+				if otelGCPErr != nil {
+					log.Printf("WARNING: hub GCP token metrics OTel export disabled: %v", otelGCPErr)
+				} else {
+					hubSrv.SetGCPTokenMetrics(otelGCP)
+				}
+
 				log.Printf("Hub OTel metrics export enabled (project: %s)", cfg.Hub.GCPProjectID)
 			}
 		}

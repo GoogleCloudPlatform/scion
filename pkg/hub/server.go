@@ -602,7 +602,7 @@ type Server struct {
 	gcpTokenRateLimiter *GCPTokenRateLimiter
 
 	// GCP token metrics tracker (nil = disabled)
-	gcpTokenMetrics *GCPTokenMetrics
+	gcpTokenMetrics GCPTokenMetricsRecorder
 
 	// Database connection-pool / notify metrics recorder (P0-5). Defaults to a
 	// disabled no-op recorder; SetDBMetrics wires a real exporter. Drives the
@@ -1470,6 +1470,13 @@ func (s *Server) SetDispatchMetrics(rec dispatchmetrics.Recorder) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.dispatchMetrics = rec
+}
+
+// SetGCPTokenMetrics wires the GCP token metrics recorder.
+func (s *Server) SetGCPTokenMetrics(m GCPTokenMetricsRecorder) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.gcpTokenMetrics = m
 }
 
 // GetMaintenanceState returns the runtime maintenance state.
