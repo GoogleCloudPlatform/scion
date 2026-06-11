@@ -2128,15 +2128,12 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 	// Route through broker when available; otherwise persist and publish
 	// directly. The broker's deliverToUser callback handles persistence
 	// and SSE, so doing both here would create duplicate messages.
-	responseStatus := http.StatusOK
-	deliveryStatus := "sent"
-
 	if bp := s.GetMessageBrokerProxy(); bp != nil {
 		if err := bp.PublishUserMessage(ctx, agent.ProjectID, recipientID, structuredMsg); err != nil {
 			s.messageLog.Error("Failed to dispatch outbound message through broker",
 				"agent_id", agent.ID, "recipient_id", recipientID, "error", err)
 			writeError(w, http.StatusBadGateway, ErrCodeDeliveryFailed,
-				"Message persisted but delivery failed: "+err.Error(), nil)
+				"Message delivery failed: "+err.Error(), nil)
 			return
 		}
 		s.messageLog.Info("Outbound message dispatched through broker",
@@ -2162,9 +2159,9 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		"msg_type", req.Type,
 	)
 
-	writeJSON(w, responseStatus, map[string]interface{}{
+	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"message_id":   storeMsg.ID,
-		"status":       deliveryStatus,
+		"status":       "sent",
 		"recipient":    recipient,
 		"recipient_id": recipientID,
 	})

@@ -2253,10 +2253,20 @@ func (b *TelegramBrokerV2) shouldSuppressError(chatID int64, threadID int, error
 	b.errorCooldownMu.Lock()
 	defer b.errorCooldownMu.Unlock()
 
-	if last, ok := b.errorCooldown[key]; ok && time.Since(last) < errorCooldownDuration {
+	now := time.Now()
+
+	if len(b.errorCooldown) > 1000 {
+		for k, v := range b.errorCooldown {
+			if now.Sub(v) >= errorCooldownDuration {
+				delete(b.errorCooldown, k)
+			}
+		}
+	}
+
+	if last, ok := b.errorCooldown[key]; ok && now.Sub(last) < errorCooldownDuration {
 		return true
 	}
-	b.errorCooldown[key] = time.Now()
+	b.errorCooldown[key] = now
 	return false
 }
 
