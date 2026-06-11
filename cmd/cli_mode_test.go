@@ -276,6 +276,7 @@ func TestApplyModeRestrictions_Agent(t *testing.T) {
 	// These commands should be present in agent mode
 	expected := []string{
 		"create", "delete",
+		"harness-config", "harness-config.install", "harness-config.list",
 		"help",
 		"list", "logs", "look",
 		"message",
@@ -304,7 +305,7 @@ func TestApplyModeRestrictions_Agent(t *testing.T) {
 	// These should be removed
 	absent := []string{
 		"attach", "broker", "cdw", "clean", "completion", "config", "doctor",
-		"grove", "harness-config", "hub",
+		"grove", "hub",
 		"init", "messages", "restore", "server", "sync",
 	}
 	for _, cmd := range absent {
@@ -423,6 +424,9 @@ func TestAgentAllowedList(t *testing.T) {
 		"template", "template.list", "template.show", "template.clone",
 		"template.delete", "template.import", "template.sync",
 		"template.push", "template.pull", "template.status",
+		"harness-config", "harness-config.list", "harness-config.show", "harness-config.install",
+		"harness-config.sync", "harness-config.push", "harness-config.pull",
+		"harness-config.delete", "harness-config.reset", "harness-config.upgrade",
 	}
 	for _, path := range expectedAllowed {
 		assert.True(t, agentAllowed[path], "agentAllowed should contain %s", path)
@@ -432,7 +436,6 @@ func TestAgentAllowedList(t *testing.T) {
 		"attach", "restore", "sync", "clean", "cdw", "init",
 		"completion", "config", "doctor", "hub", "messages",
 		"server", "broker", "grove",
-		"harness-config",
 		"config.set", "config.validate", "config.migrate",
 		"config.list", "config.get", "config.dir", "config.schema",
 		"hub.enable", "hub.disable", "hub.link", "hub.unlink",
