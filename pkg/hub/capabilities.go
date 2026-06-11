@@ -30,6 +30,7 @@ type Capabilities struct {
 var ResourceActions = map[string][]Action{
 	"agent":               {ActionRead, ActionUpdate, ActionDelete, ActionStart, ActionStop, ActionMessage, ActionAttach},
 	"project":             {ActionRead, ActionUpdate, ActionDelete, ActionManage, ActionRegister},
+	"skill":               {ActionRead, ActionUpdate, ActionDelete},
 	"template":            {ActionRead, ActionUpdate, ActionDelete},
 	"harness_config":      {ActionRead, ActionUpdate, ActionDelete},
 	"group":               {ActionRead, ActionUpdate, ActionDelete, ActionAddMember, ActionRemoveMember},
@@ -43,6 +44,7 @@ var ResourceActions = map[string][]Action{
 var ScopeActions = map[string][]Action{
 	"agent":               {ActionCreate, ActionList, ActionStopAll},
 	"project":             {ActionCreate, ActionList},
+	"skill":               {ActionCreate, ActionList},
 	"template":            {ActionCreate, ActionList},
 	"harness_config":      {ActionCreate, ActionList},
 	"group":               {ActionCreate, ActionList},

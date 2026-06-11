@@ -1,0 +1,911 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package hub
+
+import (
+	"context"
+	"fmt"
+	"net/http"
+	"strconv"
+	"strings"
+
+	"github.com/Masterminds/semver/v3"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/storage"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
+)
+
+// CreateSkillRequest is the request body for creating a skill.
+type CreateSkillRequest struct {
+	Name        string   `json:"name"`
+	Description string   `json:"description,omitempty"`
+	Scope       string   `json:"scope"`
+	ScopeID     string   `json:"scopeId,omitempty"`
+	Visibility  string   `json:"visibility,omitempty"`
+	Tags        []string `json:"tags,omitempty"`
+}
+
+// CreateSkillResponse is the response for skill creation.
+type CreateSkillResponse struct {
+	Skill *store.Skill `json:"skill"`
+}
+
+// ListSkillsResponse is the response for listing skills.
+type ListSkillsResponse struct {
+	Skills       []SkillWithCapabilities `json:"skills"`
+	NextCursor   string                  `json:"nextCursor,omitempty"`
+	TotalCount   int                     `json:"totalCount"`
+	Capabilities *Capabilities           `json:"_capabilities,omitempty"`
+}
+
+// SkillWithCapabilities wraps a store.Skill with capability annotations.
+type SkillWithCapabilities struct {
+	store.Skill
+	Cap *Capabilities `json:"_capabilities,omitempty"`
+}
+
+// PublishVersionRequest is the request body for creating a skill version.
+type PublishVersionRequest struct {
+	Version string            `json:"version"`
+	Files   []FileUploadRequest `json:"files,omitempty"`
+}
+
+// PublishVersionResponse is the response for version creation.
+type PublishVersionResponse struct {
+	Version    *store.SkillVersion `json:"version"`
+	UploadURLs []UploadURLInfo     `json:"uploadUrls,omitempty"`
+}
+
+// FinalizeSkillVersionRequest is the request body for finalizing a skill version.
+type FinalizeSkillVersionRequest struct {
+	Version  string         `json:"version"`
+	Manifest *SkillManifest `json:"manifest"`
+}
+
+// SkillManifest is the manifest of uploaded skill files.
+type SkillManifest struct {
+	Files []store.TemplateFile `json:"files"`
+}
+
+// ResolveSkillsRequest is the request body for batch skill resolution.
+type ResolveSkillsRequest struct {
+	Skills    []ResolveSkillRef `json:"skills"`
+	ProjectID string            `json:"projectId,omitempty"`
+	UserID    string            `json:"userId,omitempty"`
+}
+
+// ResolveSkillRef is a reference to a skill to resolve.
+type ResolveSkillRef struct {
+	URI string `json:"uri"`
+}
+
+// ResolveSkillsResponse is the response for batch skill resolution.
+type ResolveSkillsResponse struct {
+	Resolved []ResolvedSkillResponse `json:"resolved"`
+	Errors   []ResolveSkillError     `json:"errors,omitempty"`
+}
+
+// ResolvedSkillResponse is a single resolved skill in the batch response.
+type ResolvedSkillResponse struct {
+	URI             string          `json:"uri"`
+	Name            string          `json:"name"`
+	ResolvedVersion string          `json:"resolvedVersion"`
+	ContentHash     string          `json:"contentHash"`
+	Files           []DownloadURLInfo `json:"files"`
+}
+
+// ResolveSkillError describes a resolution failure for a single skill.
+type ResolveSkillError struct {
+	URI     string `json:"uri"`
+	Code    string `json:"code"`
+	Message string `json:"message"`
+}
+
+// UpdateSkillRequest is the request body for updating a skill.
+type UpdateSkillRequest struct {
+	Name        string   `json:"name,omitempty"`
+	Description string   `json:"description,omitempty"`
+	Visibility  string   `json:"visibility,omitempty"`
+	Tags        []string `json:"tags,omitempty"`
+}
+
+// handleSkills dispatches /api/v1/skills (GET=list, POST=create).
+func (s *Server) handleSkills(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		s.listSkills(w, r)
+	case http.MethodPost:
+		s.createSkill(w, r)
+	default:
+		MethodNotAllowed(w)
+	}
+}
+
+// handleSkillByID dispatches /api/v1/skills/{id}[/{action}[/{subId}]].
+func (s *Server) handleSkillByID(w http.ResponseWriter, r *http.Request) {
+	path := strings.TrimPrefix(r.URL.Path, "/api/v1/skills/")
+	if path == "" {
+		NotFound(w, "Skill")
+		return
+	}
+
+	parts := strings.SplitN(path, "/", 3)
+	skillID := parts[0]
+
+	// Batch resolve is routed through a non-UUID path segment.
+	if skillID == "resolve" {
+		s.handleSkillsResolve(w, r)
+		return
+	}
+
+	if len(parts) == 1 {
+		s.handleSkillCRUD(w, r, skillID)
+		return
+	}
+
+	action := parts[1]
+	switch action {
+	case "versions":
+		if len(parts) == 3 {
+			s.handleSkillVersionByID(w, r, skillID, parts[2])
+		} else {
+			s.handleSkillVersions(w, r, skillID)
+		}
+	case "upload":
+		s.handleSkillUpload(w, r, skillID)
+	case "finalize":
+		s.handleSkillFinalize(w, r, skillID)
+	case "download":
+		s.handleSkillDownload(w, r, skillID)
+	case "resolve":
+		s.handleSkillResolveSingle(w, r, skillID)
+	default:
+		NotFound(w, "Skill action")
+	}
+}
+
+// handleSkillCRUD handles basic skill CRUD operations.
+func (s *Server) handleSkillCRUD(w http.ResponseWriter, r *http.Request, id string) {
+	switch r.Method {
+	case http.MethodGet:
+		s.getSkill(w, r, id)
+	case http.MethodPatch:
+		s.updateSkill(w, r, id)
+	case http.MethodDelete:
+		s.deleteSkill(w, r, id)
+	default:
+		MethodNotAllowed(w)
+	}
+}
+
+// listSkills lists skills with filtering.
+func (s *Server) listSkills(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	query := r.URL.Query()
+
+	filter := store.SkillFilter{
+		Name:    query.Get("name"),
+		Scope:   query.Get("scope"),
+		ScopeID: query.Get("scopeId"),
+		OwnerID: query.Get("ownerId"),
+		Status:  query.Get("status"),
+		Search:  query.Get("search"),
+	}
+
+	if filter.Status == "" {
+		filter.Status = "active"
+	}
+
+	limit := 50
+	if l := query.Get("limit"); l != "" {
+		if parsed, err := strconv.Atoi(l); err == nil && parsed > 0 {
+			limit = parsed
+		}
+	}
+
+	result, err := s.store.ListSkills(ctx, filter, store.ListOptions{
+		Limit:  limit,
+		Cursor: query.Get("cursor"),
+	})
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	identity := GetIdentityFromContext(ctx)
+	skills := make([]SkillWithCapabilities, len(result.Items))
+	if identity != nil {
+		resources := make([]Resource, len(result.Items))
+		for i := range result.Items {
+			resources[i] = skillResource(&result.Items[i])
+		}
+		caps := s.authzService.ComputeCapabilitiesBatch(ctx, identity, resources, "skill")
+		for i := range result.Items {
+			skills[i] = SkillWithCapabilities{Skill: result.Items[i], Cap: caps[i]}
+		}
+	} else {
+		for i := range result.Items {
+			skills[i] = SkillWithCapabilities{Skill: result.Items[i]}
+		}
+	}
+
+	var scopeCap *Capabilities
+	if identity != nil {
+		scopeCap = s.authzService.ComputeScopeCapabilities(ctx, identity, "", "", "skill")
+	}
+
+	writeJSON(w, http.StatusOK, ListSkillsResponse{
+		Skills:       skills,
+		NextCursor:   result.NextCursor,
+		TotalCount:   result.TotalCount,
+		Capabilities: scopeCap,
+	})
+}
+
+// createSkill creates a new skill record.
+func (s *Server) createSkill(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	var req CreateSkillRequest
+	if err := readJSON(r, &req); err != nil {
+		BadRequest(w, "Invalid request body: "+err.Error())
+		return
+	}
+
+	if req.Name == "" {
+		ValidationError(w, "name is required", nil)
+		return
+	}
+
+	slug := api.Slugify(req.Name)
+
+	skill := &store.Skill{
+		ID:          api.NewUUID(),
+		Name:        req.Name,
+		Slug:        slug,
+		Description: req.Description,
+		Tags:        req.Tags,
+		Scope:       req.Scope,
+		ScopeID:     req.ScopeID,
+		Visibility:  req.Visibility,
+		Status:      "active",
+	}
+
+	if skill.Scope == "" {
+		skill.Scope = store.SkillScopeGlobal
+	}
+	if skill.Visibility == "" {
+		skill.Visibility = store.VisibilityPrivate
+	}
+
+	// Set owner from identity
+	if identity := GetIdentityFromContext(ctx); identity != nil {
+		skill.OwnerID = identity.ID()
+		skill.CreatedBy = identity.ID()
+		skill.UpdatedBy = identity.ID()
+	}
+
+	// Generate storage path and URI
+	storagePath := storage.SkillStoragePath(skill.Scope, skill.ScopeID, skill.Slug)
+	skill.StoragePath = storagePath
+
+	stor := s.GetStorage()
+	if stor != nil {
+		skill.StorageBucket = stor.Bucket()
+		skill.StorageURI = storage.SkillStorageURI(stor.Bucket(), skill.Scope, skill.ScopeID, skill.Slug)
+	}
+
+	if err := s.store.CreateSkill(ctx, skill); err != nil {
+		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+			writeError(w, http.StatusConflict, "conflict", "A skill with this slug already exists in the target scope", nil)
+			return
+		}
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, CreateSkillResponse{Skill: skill})
+}
+
+// getSkill retrieves a skill with capabilities.
+func (s *Server) getSkill(w http.ResponseWriter, r *http.Request, id string) {
+	ctx := r.Context()
+	skill, err := s.store.GetSkill(ctx, id)
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	resp := SkillWithCapabilities{Skill: *skill}
+	if identity := GetIdentityFromContext(ctx); identity != nil {
+		resp.Cap = s.authzService.ComputeCapabilities(ctx, identity, skillResource(skill))
+	}
+
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// updateSkill updates specific skill fields.
+func (s *Server) updateSkill(w http.ResponseWriter, r *http.Request, id string) {
+	ctx := r.Context()
+
+	existing, err := s.store.GetSkill(ctx, id)
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	var updates UpdateSkillRequest
+	if err := readJSON(r, &updates); err != nil {
+		BadRequest(w, "Invalid request body: "+err.Error())
+		return
+	}
+
+	if updates.Name != "" {
+		existing.Name = updates.Name
+		existing.Slug = api.Slugify(updates.Name)
+	}
+	if updates.Description != "" {
+		existing.Description = updates.Description
+	}
+	if updates.Visibility != "" {
+		existing.Visibility = updates.Visibility
+	}
+	if updates.Tags != nil {
+		existing.Tags = updates.Tags
+	}
+
+	if identity := GetIdentityFromContext(ctx); identity != nil {
+		existing.UpdatedBy = identity.ID()
+	}
+
+	if err := s.store.UpdateSkill(ctx, existing); err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, existing)
+}
+
+// deleteSkill soft-deletes a skill by setting status to archived.
+func (s *Server) deleteSkill(w http.ResponseWriter, r *http.Request, id string) {
+	ctx := r.Context()
+
+	if _, err := s.store.GetSkill(ctx, id); err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	if err := s.store.DeleteSkill(ctx, id); err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleSkillVersions handles /api/v1/skills/{id}/versions (GET=list, POST=create).
+func (s *Server) handleSkillVersions(w http.ResponseWriter, r *http.Request, skillID string) {
+	switch r.Method {
+	case http.MethodGet:
+		s.listSkillVersions(w, r, skillID)
+	case http.MethodPost:
+		s.publishSkillVersion(w, r, skillID)
+	default:
+		MethodNotAllowed(w)
+	}
+}
+
+// handleSkillVersionByID handles /api/v1/skills/{id}/versions/{versionId}.
+func (s *Server) handleSkillVersionByID(w http.ResponseWriter, r *http.Request, skillID, versionID string) {
+	if r.Method != http.MethodGet {
+		MethodNotAllowed(w)
+		return
+	}
+	s.getSkillVersion(w, r, skillID, versionID)
+}
+
+// listSkillVersions lists versions for a skill.
+func (s *Server) listSkillVersions(w http.ResponseWriter, r *http.Request, skillID string) {
+	ctx := r.Context()
+
+	// Verify skill exists
+	if _, err := s.store.GetSkill(ctx, skillID); err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	result, err := s.store.ListSkillVersions(ctx, skillID, store.ListOptions{
+		Limit: 100,
+	})
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, result)
+}
+
+// getSkillVersion retrieves a specific skill version.
+func (s *Server) getSkillVersion(w http.ResponseWriter, r *http.Request, skillID, versionID string) {
+	ctx := r.Context()
+
+	sv, err := s.store.GetSkillVersion(ctx, versionID)
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	if sv.SkillID != skillID {
+		NotFound(w, "SkillVersion")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, sv)
+}
+
+// publishSkillVersion creates a new draft version and returns upload URLs.
+func (s *Server) publishSkillVersion(w http.ResponseWriter, r *http.Request, skillID string) {
+	ctx := r.Context()
+
+	skill, err := s.store.GetSkill(ctx, skillID)
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	var req PublishVersionRequest
+	if err := readJSON(r, &req); err != nil {
+		BadRequest(w, "Invalid request body: "+err.Error())
+		return
+	}
+
+	if req.Version == "" {
+		ValidationError(w, "version is required", nil)
+		return
+	}
+
+	// Validate semver
+	if _, err := semver.NewVersion(req.Version); err != nil {
+		ValidationError(w, fmt.Sprintf("invalid semver version %q: %s", req.Version, err.Error()), nil)
+		return
+	}
+
+	// Check for existing published version (immutability)
+	existing, err := s.store.GetSkillVersionByNumber(ctx, skillID, req.Version)
+	if err == nil && existing.Status == store.SkillVersionStatusPublished {
+		writeError(w, http.StatusConflict, "conflict",
+			fmt.Sprintf("version %s is already published and immutable; publish a new version instead", req.Version), nil)
+		return
+	}
+
+	// Create draft version
+	sv := &store.SkillVersion{
+		ID:      api.NewUUID(),
+		SkillID: skillID,
+		Version: req.Version,
+		Status:  store.SkillVersionStatusDraft,
+	}
+
+	if identity := GetIdentityFromContext(ctx); identity != nil {
+		sv.PublisherID = identity.ID()
+	}
+
+	if err := s.store.CreateSkillVersion(ctx, sv); err != nil {
+		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+			writeError(w, http.StatusConflict, "conflict",
+				fmt.Sprintf("version %s already exists for this skill", req.Version), nil)
+			return
+		}
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	response := PublishVersionResponse{
+		Version: sv,
+	}
+
+	// Generate upload URLs if files were specified and storage is available
+	if len(req.Files) > 0 {
+		stor := s.GetStorage()
+		if stor != nil {
+			versionPath := skill.StoragePath + "/" + req.Version
+			uploadURLs, _, err := generateUploadURLs(ctx, stor, versionPath, req.Files)
+			if err == nil && len(uploadURLs) > 0 {
+				if stor.Provider() == storage.ProviderLocal {
+					hubURL := requestBaseURL(r)
+					uploadURLs = rewriteLocalUploadURLs(uploadURLs, hubURL, "skills", skillID)
+				}
+				response.UploadURLs = uploadURLs
+			}
+		}
+	}
+
+	writeJSON(w, http.StatusCreated, response)
+}
+
+// handleSkillUpload handles requests for upload URLs for a skill.
+func (s *Server) handleSkillUpload(w http.ResponseWriter, r *http.Request, skillID string) {
+	if r.Method != http.MethodPost {
+		MethodNotAllowed(w)
+		return
+	}
+
+	ctx := r.Context()
+
+	skill, err := s.store.GetSkill(ctx, skillID)
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	stor := s.GetStorage()
+	if stor == nil {
+		RuntimeError(w, "Storage not configured")
+		return
+	}
+
+	var req struct {
+		Version string            `json:"version"`
+		Files   []FileUploadRequest `json:"files"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		BadRequest(w, "Invalid request body: "+err.Error())
+		return
+	}
+
+	if req.Version == "" {
+		ValidationError(w, "version is required", nil)
+		return
+	}
+	if len(req.Files) == 0 {
+		ValidationError(w, "at least one file is required", nil)
+		return
+	}
+
+	versionPath := skill.StoragePath + "/" + req.Version
+	uploadURLs, manifestURL, err := generateUploadURLs(ctx, stor, versionPath, req.Files)
+	if err != nil {
+		RuntimeError(w, "Failed to generate upload URLs: "+err.Error())
+		return
+	}
+
+	if stor.Provider() == storage.ProviderLocal {
+		hubURL := requestBaseURL(r)
+		uploadURLs = rewriteLocalUploadURLs(uploadURLs, hubURL, "skills", skillID)
+	}
+
+	writeJSON(w, http.StatusOK, UploadResponse{
+		UploadURLs:  uploadURLs,
+		ManifestURL: manifestURL,
+	})
+}
+
+// handleSkillFinalize finalizes a skill version after file upload.
+func (s *Server) handleSkillFinalize(w http.ResponseWriter, r *http.Request, skillID string) {
+	if r.Method != http.MethodPost {
+		MethodNotAllowed(w)
+		return
+	}
+
+	ctx := r.Context()
+
+	skill, err := s.store.GetSkill(ctx, skillID)
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	stor := s.GetStorage()
+	if stor == nil {
+		RuntimeError(w, "Storage not configured")
+		return
+	}
+
+	var req FinalizeSkillVersionRequest
+	if err := readJSON(r, &req); err != nil {
+		BadRequest(w, "Invalid request body: "+err.Error())
+		return
+	}
+
+	if req.Version == "" {
+		ValidationError(w, "version is required", nil)
+		return
+	}
+	if req.Manifest == nil || len(req.Manifest.Files) == 0 {
+		ValidationError(w, "manifest with files is required", nil)
+		return
+	}
+
+	// Validate SKILL.md is present
+	hasSkillMD := false
+	for _, f := range req.Manifest.Files {
+		if f.Path == "SKILL.md" {
+			hasSkillMD = true
+			break
+		}
+	}
+	if !hasSkillMD {
+		ValidationError(w, "SKILL.md is required in the manifest", nil)
+		return
+	}
+
+	// Validate file count and sizes
+	if len(req.Manifest.Files) > 50 {
+		ValidationError(w, "too many files (max 50)", nil)
+		return
+	}
+	var totalSize int64
+	for _, f := range req.Manifest.Files {
+		if f.Size > 10*1024*1024 {
+			ValidationError(w, fmt.Sprintf("file %q exceeds 10MB limit", f.Path), nil)
+			return
+		}
+		totalSize += f.Size
+	}
+	if totalSize > 50*1024*1024 {
+		ValidationError(w, "total file size exceeds 50MB limit", nil)
+		return
+	}
+
+	// Look up the draft version
+	sv, err := s.store.GetSkillVersionByNumber(ctx, skillID, req.Version)
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+	if sv.Status == store.SkillVersionStatusPublished {
+		writeError(w, http.StatusConflict, "conflict",
+			fmt.Sprintf("version %s is already published and immutable", req.Version), nil)
+		return
+	}
+
+	// Verify files exist in storage and compute content hash
+	versionPath := skill.StoragePath + "/" + req.Version
+	contentHash, err := verifyAndFinalizeFiles(ctx, stor, versionPath, req.Manifest.Files)
+	if err != nil {
+		ValidationError(w, err.Error(), nil)
+		return
+	}
+
+	// Update version to published
+	sv.Files = req.Manifest.Files
+	sv.ContentHash = contentHash
+	sv.Status = store.SkillVersionStatusPublished
+
+	if err := s.store.UpdateSkillVersion(ctx, sv); err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, sv)
+}
+
+// handleSkillDownload returns signed URLs for downloading skill version files.
+func (s *Server) handleSkillDownload(w http.ResponseWriter, r *http.Request, skillID string) {
+	if r.Method != http.MethodGet {
+		MethodNotAllowed(w)
+		return
+	}
+
+	ctx := r.Context()
+	query := r.URL.Query()
+	version := query.Get("version")
+	if version == "" {
+		version = "latest"
+	}
+
+	skill, err := s.store.GetSkill(ctx, skillID)
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	stor := s.GetStorage()
+	if stor == nil {
+		RuntimeError(w, "Storage not configured")
+		return
+	}
+
+	// Resolve version
+	sv, err := s.store.ResolveSkillVersion(ctx, skillID, version)
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	if len(sv.Files) == 0 {
+		ValidationError(w, "version has no files", nil)
+		return
+	}
+
+	versionPath := skill.StoragePath + "/" + sv.Version
+	downloadURLs, manifestURL, expires, _ := generateDownloadURLs(ctx, stor, versionPath, sv.Files)
+
+	if stor.Provider() == storage.ProviderLocal {
+		hubURL := requestBaseURL(r)
+		downloadURLs = rewriteLocalDownloadURLs(downloadURLs, hubURL, "skills", skillID)
+	}
+
+	writeJSON(w, http.StatusOK, DownloadResponse{
+		Files:       downloadURLs,
+		ManifestURL: manifestURL,
+		Expires:     expires,
+	})
+}
+
+// handleSkillResolveSingle resolves a single skill version (for debug/test).
+func (s *Server) handleSkillResolveSingle(w http.ResponseWriter, r *http.Request, skillID string) {
+	if r.Method != http.MethodGet {
+		MethodNotAllowed(w)
+		return
+	}
+
+	ctx := r.Context()
+	version := r.URL.Query().Get("version")
+	if version == "" {
+		version = "latest"
+	}
+
+	sv, err := s.store.ResolveSkillVersion(ctx, skillID, version)
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, sv)
+}
+
+// handleSkillsResolve handles batch skill resolution: POST /api/v1/skills/resolve.
+func (s *Server) handleSkillsResolve(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		MethodNotAllowed(w)
+		return
+	}
+
+	ctx := r.Context()
+
+	var req ResolveSkillsRequest
+	if err := readJSON(r, &req); err != nil {
+		BadRequest(w, "Invalid request body: "+err.Error())
+		return
+	}
+
+	if len(req.Skills) == 0 {
+		ValidationError(w, "at least one skill reference is required", nil)
+		return
+	}
+
+	stor := s.GetStorage()
+
+	var resolved []ResolvedSkillResponse
+	var resolveErrors []ResolveSkillError
+
+	for _, skillRef := range req.Skills {
+		uri, err := api.ParseSkillURI(skillRef.URI)
+		if err != nil {
+			resolveErrors = append(resolveErrors, ResolveSkillError{
+				URI: skillRef.URI, Code: "invalid_uri", Message: err.Error(),
+			})
+			continue
+		}
+
+		// Expand scope aliases from request context
+		expandScopeAliases(uri, req.ProjectID, req.UserID)
+
+		skill, sv, err := s.resolveSkill(ctx, uri)
+		if err != nil {
+			resolveErrors = append(resolveErrors, ResolveSkillError{
+				URI: skillRef.URI, Code: "not_found", Message: err.Error(),
+			})
+			continue
+		}
+
+		entry := ResolvedSkillResponse{
+			URI:             skillRef.URI,
+			Name:            skill.Name,
+			ResolvedVersion: sv.Version,
+			ContentHash:     sv.ContentHash,
+		}
+
+		// Generate download URLs for the resolved version's files
+		if stor != nil && len(sv.Files) > 0 {
+			versionPath := skill.StoragePath + "/" + sv.Version
+			downloadURLs, _, _, dlErr := generateDownloadURLs(ctx, stor, versionPath, sv.Files)
+			if dlErr == nil {
+				if stor.Provider() == storage.ProviderLocal {
+					hubURL := requestBaseURL(r)
+					downloadURLs = rewriteLocalDownloadURLs(downloadURLs, hubURL, "skills", skill.ID)
+				}
+				entry.Files = downloadURLs
+			}
+		}
+
+		resolved = append(resolved, entry)
+	}
+
+	writeJSON(w, http.StatusOK, ResolveSkillsResponse{
+		Resolved: resolved,
+		Errors:   resolveErrors,
+	})
+}
+
+// resolveSkill finds a skill and version by URI, searching scopes in priority order.
+func (s *Server) resolveSkill(ctx context.Context, uri *api.SkillURI) (*store.Skill, *store.SkillVersion, error) {
+	scopes := determineScopeSearchOrder(uri)
+
+	for _, sc := range scopes {
+		skill, err := s.store.GetSkillBySlug(ctx, uri.Name, sc.scope, sc.scopeID)
+		if err != nil {
+			continue
+		}
+
+		sv, err := s.store.ResolveSkillVersion(ctx, skill.ID, uri.Version)
+		if err != nil {
+			continue
+		}
+
+		return skill, sv, nil
+	}
+	return nil, nil, fmt.Errorf("skill %q not found in any scope", uri.Name)
+}
+
+type scopeEntry struct {
+	scope   string
+	scopeID string
+}
+
+// determineScopeSearchOrder returns the scope search order for skill resolution.
+func determineScopeSearchOrder(uri *api.SkillURI) []scopeEntry {
+	// If explicit scope is set, search only that scope.
+	if uri.Scope != "" {
+		return []scopeEntry{{scope: uri.Scope, scopeID: uri.ScopeID}}
+	}
+
+	// Default search order: user > project > global > core
+	var order []scopeEntry
+	if uri.ScopeID != "" {
+		order = append(order, scopeEntry{scope: store.SkillScopeUser, scopeID: uri.ScopeID})
+	}
+	order = append(order,
+		scopeEntry{scope: store.SkillScopeGlobal},
+		scopeEntry{scope: store.SkillScopeCore},
+	)
+	return order
+}
+
+// expandScopeAliases fills in scope IDs from request context.
+func expandScopeAliases(uri *api.SkillURI, projectID, userID string) {
+	if uri.Scope == store.SkillScopeProject && uri.ScopeID == "" && projectID != "" {
+		uri.ScopeID = projectID
+	}
+	if uri.Scope == store.SkillScopeUser && uri.ScopeID == "" && userID != "" {
+		uri.ScopeID = userID
+	}
+}
+
+// skillResource constructs a Resource from a store.Skill for capability computation.
+func skillResource(s *store.Skill) Resource {
+	r := Resource{
+		Type:    "skill",
+		ID:      s.ID,
+		OwnerID: s.OwnerID,
+	}
+	if s.Scope == store.SkillScopeProject && s.ScopeID != "" {
+		r.ParentType = "project"
+		r.ParentID = s.ScopeID
+	}
+	return r
+}

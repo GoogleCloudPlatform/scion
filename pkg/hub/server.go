@@ -2457,6 +2457,9 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/templates", s.handleTemplatesV2)
 	s.mux.HandleFunc("/api/v1/templates/", s.handleTemplateByIDV2)
 
+	s.mux.HandleFunc("/api/v1/skills", s.handleSkills)
+	s.mux.HandleFunc("/api/v1/skills/", s.handleSkillByID)
+
 	s.mux.HandleFunc("/api/v1/harness-configs", s.handleHarnessConfigs)
 	s.mux.HandleFunc("/api/v1/harness-configs/", s.handleHarnessConfigByID)
 
