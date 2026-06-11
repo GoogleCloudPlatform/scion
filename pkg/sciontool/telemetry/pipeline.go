@@ -332,6 +332,14 @@ func (p *Pipeline) initSelfMetrics(ctx context.Context) {
 		log.Debug("Could not create MeterProvider for pipeline self-metrics: %v", err)
 		p.meter = noop.Meter{}
 	} else {
+		// Shut down TracerProvider and LoggerProvider immediately — we only
+		// need the MeterProvider for self-monitoring metrics.
+		if providers.TracerProvider != nil {
+			providers.TracerProvider.Shutdown(ctx)
+		}
+		if providers.LoggerProvider != nil {
+			providers.LoggerProvider.Shutdown(ctx)
+		}
 		p.meter = providers.MeterProvider.Meter("github.com/GoogleCloudPlatform/scion/pkg/sciontool/telemetry")
 	}
 
