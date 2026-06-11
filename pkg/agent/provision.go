@@ -795,7 +795,7 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 
 			for _, re := range result.Errors {
 				ref := findRefByURI(finalScionCfg.Skills, re.URI)
-				if ref != nil && !ref.Optional {
+				if ref == nil || !ref.Optional {
 					return "", "", nil, fmt.Errorf(
 						"required skill %q could not be resolved: %s", re.URI, re.Message)
 				}

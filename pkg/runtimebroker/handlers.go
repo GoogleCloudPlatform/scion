@@ -685,6 +685,9 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		if req.ProjectID != "" {
 			ctx = agent.ContextWithResolveProjectID(ctx, req.ProjectID)
 		}
+		if req.UserID != "" {
+			ctx = agent.ContextWithResolveUserID(ctx, req.UserID)
+		}
 	}
 
 	// Branch based on provision-only flag
