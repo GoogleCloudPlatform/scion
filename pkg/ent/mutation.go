@@ -43,6 +43,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/scheduledevent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/schema"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/secret"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/skill"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/skillversion"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/subscriptiontemplate"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/template"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/user"
@@ -89,6 +91,8 @@ const (
 	TypeSchedule                 = "Schedule"
 	TypeScheduledEvent           = "ScheduledEvent"
 	TypeSecret                   = "Secret"
+	TypeSkill                    = "Skill"
+	TypeSkillVersion             = "SkillVersion"
 	TypeSubscriptionTemplate     = "SubscriptionTemplate"
 	TypeTemplate                 = "Template"
 	TypeUser                     = "User"
@@ -31249,6 +31253,2184 @@ func (m *SecretMutation) ClearEdge(name string) error {
 // It returns an error if the edge is not defined in the schema.
 func (m *SecretMutation) ResetEdge(name string) error {
 	return fmt.Errorf("unknown Secret edge %s", name)
+}
+
+// SkillMutation represents an operation that mutates the Skill nodes in the graph.
+type SkillMutation struct {
+	config
+	op             Op
+	typ            string
+	id             *uuid.UUID
+	name           *string
+	slug           *string
+	description    *string
+	tags           *string
+	scope          *string
+	scope_id       *string
+	storage_uri    *string
+	storage_bucket *string
+	storage_path   *string
+	status         *skill.Status
+	owner_id       *string
+	created_by     *string
+	updated_by     *string
+	visibility     *string
+	created        *time.Time
+	updated        *time.Time
+	clearedFields  map[string]struct{}
+	done           bool
+	oldValue       func(context.Context) (*Skill, error)
+	predicates     []predicate.Skill
+}
+
+var _ ent.Mutation = (*SkillMutation)(nil)
+
+// skillOption allows management of the mutation configuration using functional options.
+type skillOption func(*SkillMutation)
+
+// newSkillMutation creates new mutation for the Skill entity.
+func newSkillMutation(c config, op Op, opts ...skillOption) *SkillMutation {
+	m := &SkillMutation{
+		config:        c,
+		op:            op,
+		typ:           TypeSkill,
+		clearedFields: make(map[string]struct{}),
+	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
+}
+
+// withSkillID sets the ID field of the mutation.
+func withSkillID(id uuid.UUID) skillOption {
+	return func(m *SkillMutation) {
+		var (
+			err   error
+			once  sync.Once
+			value *Skill
+		)
+		m.oldValue = func(ctx context.Context) (*Skill, error) {
+			once.Do(func() {
+				if m.done {
+					err = errors.New("querying old values post mutation is not allowed")
+				} else {
+					value, err = m.Client().Skill.Get(ctx, id)
+				}
+			})
+			return value, err
+		}
+		m.id = &id
+	}
+}
+
+// withSkill sets the old Skill of the mutation.
+func withSkill(node *Skill) skillOption {
+	return func(m *SkillMutation) {
+		m.oldValue = func(context.Context) (*Skill, error) {
+			return node, nil
+		}
+		m.id = &node.ID
+	}
+}
+
+// Client returns a new `ent.Client` from the mutation. If the mutation was
+// executed in a transaction (ent.Tx), a transactional client is returned.
+func (m SkillMutation) Client() *Client {
+	client := &Client{config: m.config}
+	client.init()
+	return client
+}
+
+// Tx returns an `ent.Tx` for mutations that were executed in transactions;
+// it returns an error otherwise.
+func (m SkillMutation) Tx() (*Tx, error) {
+	if _, ok := m.driver.(*txDriver); !ok {
+		return nil, errors.New("ent: mutation is not running in a transaction")
+	}
+	tx := &Tx{config: m.config}
+	tx.init()
+	return tx, nil
+}
+
+// SetID sets the value of the id field. Note that this
+// operation is only accepted on creation of Skill entities.
+func (m *SkillMutation) SetID(id uuid.UUID) {
+	m.id = &id
+}
+
+// ID returns the ID value in the mutation. Note that the ID is only available
+// if it was provided to the builder or after it was returned from the database.
+func (m *SkillMutation) ID() (id uuid.UUID, exists bool) {
+	if m.id == nil {
+		return
+	}
+	return *m.id, true
+}
+
+// IDs queries the database and returns the entity ids that match the mutation's predicate.
+// That means, if the mutation is applied within a transaction with an isolation level such
+// as sql.LevelSerializable, the returned ids match the ids of the rows that will be updated
+// or updated by the mutation.
+func (m *SkillMutation) IDs(ctx context.Context) ([]uuid.UUID, error) {
+	switch {
+	case m.op.Is(OpUpdateOne | OpDeleteOne):
+		id, exists := m.ID()
+		if exists {
+			return []uuid.UUID{id}, nil
+		}
+		fallthrough
+	case m.op.Is(OpUpdate | OpDelete):
+		return m.Client().Skill.Query().Where(m.predicates...).IDs(ctx)
+	default:
+		return nil, fmt.Errorf("IDs is not allowed on %s operations", m.op)
+	}
+}
+
+// SetName sets the "name" field.
+func (m *SkillMutation) SetName(s string) {
+	m.name = &s
+}
+
+// Name returns the value of the "name" field in the mutation.
+func (m *SkillMutation) Name() (r string, exists bool) {
+	v := m.name
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldName returns the old "name" field's value of the Skill entity.
+// If the Skill object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *SkillMutation) OldName(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldName is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldName requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldName: %w", err)
+	}
+	return oldValue.Name, nil
+}
+
+// ResetName resets all changes to the "name" field.
+func (m *SkillMutation) ResetName() {
+	m.name = nil
+}
+
+// SetSlug sets the "slug" field.
+func (m *SkillMutation) SetSlug(s string) {
+	m.slug = &s
+}
+
+// Slug returns the value of the "slug" field in the mutation.
+func (m *SkillMutation) Slug() (r string, exists bool) {
+	v := m.slug
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldSlug returns the old "slug" field's value of the Skill entity.
+// If the Skill object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *SkillMutation) OldSlug(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldSlug is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldSlug requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldSlug: %w", err)
+	}
+	return oldValue.Slug, nil
+}
+
+// ResetSlug resets all changes to the "slug" field.
+func (m *SkillMutation) ResetSlug() {
+	m.slug = nil
+}
+
+// SetDescription sets the "description" field.
+func (m *SkillMutation) SetDescription(s string) {
+	m.description = &s
+}
+
+// Description returns the value of the "description" field in the mutation.
+func (m *SkillMutation) Description() (r string, exists bool) {
+	v := m.description
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldDescription returns the old "description" field's value of the Skill entity.
+// If the Skill object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *SkillMutation) OldDescription(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldDescription is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldDescription requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldDescription: %w", err)
+	}
+	return oldValue.Description, nil
+}
+
+// ClearDescription clears the value of the "description" field.
+func (m *SkillMutation) ClearDescription() {
+	m.description = nil
+	m.clearedFields[skill.FieldDescription] = struct{}{}
+}
+
+// DescriptionCleared returns if the "description" field was cleared in this mutation.
+func (m *SkillMutation) DescriptionCleared() bool {
+	_, ok := m.clearedFields[skill.FieldDescription]
+	return ok
+}
+
+// ResetDescription resets all changes to the "description" field.
+func (m *SkillMutation) ResetDescription() {
+	m.description = nil
+	delete(m.clearedFields, skill.FieldDescription)
+}
+
+// SetTags sets the "tags" field.
+func (m *SkillMutation) SetTags(s string) {
+	m.tags = &s
+}
+
+// Tags returns the value of the "tags" field in the mutation.
+func (m *SkillMutation) Tags() (r string, exists bool) {
+	v := m.tags
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldTags returns the old "tags" field's value of the Skill entity.
+// If the Skill object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *SkillMutation) OldTags(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldTags is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldTags requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldTags: %w", err)
+	}
+	return oldValue.Tags, nil
+}
+
+// ClearTags clears the value of the "tags" field.
+func (m *SkillMutation) ClearTags() {
+	m.tags = nil
+	m.clearedFields[skill.FieldTags] = struct{}{}
+}
+
+// TagsCleared returns if the "tags" field was cleared in this mutation.
+func (m *SkillMutation) TagsCleared() bool {
+	_, ok := m.clearedFields[skill.FieldTags]
+	return ok
+}
+
+// ResetTags resets all changes to the "tags" field.
+func (m *SkillMutation) ResetTags() {
+	m.tags = nil
+	delete(m.clearedFields, skill.FieldTags)
+}
+
+// SetScope sets the "scope" field.
+func (m *SkillMutation) SetScope(s string) {
+	m.scope = &s
+}
+
+// Scope returns the value of the "scope" field in the mutation.
+func (m *SkillMutation) Scope() (r string, exists bool) {
+	v := m.scope
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldScope returns the old "scope" field's value of the Skill entity.
+// If the Skill object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *SkillMutation) OldScope(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldScope is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldScope requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldScope: %w", err)
+	}
+	return oldValue.Scope, nil
+}
+
+// ResetScope resets all changes to the "scope" field.
+func (m *SkillMutation) ResetScope() {
+	m.scope = nil
+}
+
+// SetScopeID sets the "scope_id" field.
+func (m *SkillMutation) SetScopeID(s string) {
+	m.scope_id = &s
+}
+
+// ScopeID returns the value of the "scope_id" field in the mutation.
+func (m *SkillMutation) ScopeID() (r string, exists bool) {
+	v := m.scope_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldScopeID returns the old "scope_id" field's value of the Skill entity.
+// If the Skill object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *SkillMutation) OldScopeID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldScopeID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldScopeID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldScopeID: %w", err)
+	}
+	return oldValue.ScopeID, nil
+}
+
+// ClearScopeID clears the value of the "scope_id" field.
+func (m *SkillMutation) ClearScopeID() {
+	m.scope_id = nil
+	m.clearedFields[skill.FieldScopeID] = struct{}{}
+}
+
+// ScopeIDCleared returns if the "scope_id" field was cleared in this mutation.
+func (m *SkillMutation) ScopeIDCleared() bool {
+	_, ok := m.clearedFields[skill.FieldScopeID]
+	return ok
+}
+
+// ResetScopeID resets all changes to the "scope_id" field.
+func (m *SkillMutation) ResetScopeID() {
+	m.scope_id = nil
+	delete(m.clearedFields, skill.FieldScopeID)
+}
+
+// SetStorageURI sets the "storage_uri" field.
+func (m *SkillMutation) SetStorageURI(s string) {
+	m.storage_uri = &s
+}
+
+// StorageURI returns the value of the "storage_uri" field in the mutation.
+func (m *SkillMutation) StorageURI() (r string, exists bool) {
+	v := m.storage_uri
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldStorageURI returns the old "storage_uri" field's value of the Skill entity.
+// If the Skill object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *SkillMutation) OldStorageURI(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldStorageURI is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldStorageURI requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldStorageURI: %w", err)
+	}
+	return oldValue.StorageURI, nil
+}
+
+// ClearStorageURI clears the value of the "storage_uri" field.
+func (m *SkillMutation) ClearStorageURI() {
+	m.storage_uri = nil
+	m.clearedFields[skill.FieldStorageURI] = struct{}{}
+}
+
+// StorageURICleared returns if the "storage_uri" field was cleared in this mutation.
+func (m *SkillMutation) StorageURICleared() bool {
+	_, ok := m.clearedFields[skill.FieldStorageURI]
+	return ok
+}
+
+// ResetStorageURI resets all changes to the "storage_uri" field.
+func (m *SkillMutation) ResetStorageURI() {
+	m.storage_uri = nil
+	delete(m.clearedFields, skill.FieldStorageURI)
+}
+
+// SetStorageBucket sets the "storage_bucket" field.
+func (m *SkillMutation) SetStorageBucket(s string) {
+	m.storage_bucket = &s
+}
+
+// StorageBucket returns the value of the "storage_bucket" field in the mutation.
+func (m *SkillMutation) StorageBucket() (r string, exists bool) {
+	v := m.storage_bucket
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldStorageBucket returns the old "storage_bucket" field's value of the Skill entity.
+// If the Skill object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *SkillMutation) OldStorageBucket(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldStorageBucket is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldStorageBucket requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldStorageBucket: %w", err)
+	}
+	return oldValue.StorageBucket, nil
+}
+
+// ClearStorageBucket clears the value of the "storage_bucket" field.
+func (m *SkillMutation) ClearStorageBucket() {
+	m.storage_bucket = nil
+	m.clearedFields[skill.FieldStorageBucket] = struct{}{}
+}
+
+// StorageBucketCleared returns if the "storage_bucket" field was cleared in this mutation.
+func (m *SkillMutation) StorageBucketCleared() bool {
+	_, ok := m.clearedFields[skill.FieldStorageBucket]
+	return ok
+}
+
+// ResetStorageBucket resets all changes to the "storage_bucket" field.
+func (m *SkillMutation) ResetStorageBucket() {
+	m.storage_bucket = nil
+	delete(m.clearedFields, skill.FieldStorageBucket)
+}
+
+// SetStoragePath sets the "storage_path" field.
+func (m *SkillMutation) SetStoragePath(s string) {
+	m.storage_path = &s
+}
+
+// StoragePath returns the value of the "storage_path" field in the mutation.
+func (m *SkillMutation) StoragePath() (r string, exists bool) {
+	v := m.storage_path
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldStoragePath returns the old "storage_path" field's value of the Skill entity.
+// If the Skill object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *SkillMutation) OldStoragePath(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldStoragePath is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldStoragePath requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldStoragePath: %w", err)
+	}
+	return oldValue.StoragePath, nil
+}
+
+// ClearStoragePath clears the value of the "storage_path" field.
+func (m *SkillMutation) ClearStoragePath() {
+	m.storage_path = nil
+	m.clearedFields[skill.FieldStoragePath] = struct{}{}
+}
+
+// StoragePathCleared returns if the "storage_path" field was cleared in this mutation.
+func (m *SkillMutation) StoragePathCleared() bool {
+	_, ok := m.clearedFields[skill.FieldStoragePath]
+	return ok
+}
+
+// ResetStoragePath resets all changes to the "storage_path" field.
+func (m *SkillMutation) ResetStoragePath() {
+	m.storage_path = nil
+	delete(m.clearedFields, skill.FieldStoragePath)
+}
+
+// SetStatus sets the "status" field.
+func (m *SkillMutation) SetStatus(s skill.Status) {
+	m.status = &s
+}
+
+// Status returns the value of the "status" field in the mutation.
+func (m *SkillMutation) Status() (r skill.Status, exists bool) {
+	v := m.status
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldStatus returns the old "status" field's value of the Skill entity.
+// If the Skill object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *SkillMutation) OldStatus(ctx context.Context) (v skill.Status, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldStatus is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldStatus requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldStatus: %w", err)
+	}
+	return oldValue.Status, nil
+}
+
+// ResetStatus resets all changes to the "status" field.
+func (m *SkillMutation) ResetStatus() {
+	m.status = nil
+}
+
+// SetOwnerID sets the "owner_id" field.
+func (m *SkillMutation) SetOwnerID(s string) {
+	m.owner_id = &s
+}
+
+// OwnerID returns the value of the "owner_id" field in the mutation.
+func (m *SkillMutation) OwnerID() (r string, exists bool) {
+	v := m.owner_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldOwnerID returns the old "owner_id" field's value of the Skill entity.
+// If the Skill object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *SkillMutation) OldOwnerID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldOwnerID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldOwnerID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldOwnerID: %w", err)
+	}
+	return oldValue.OwnerID, nil
+}
+
+// ClearOwnerID clears the value of the "owner_id" field.
+func (m *SkillMutation) ClearOwnerID() {
+	m.owner_id = nil
+	m.clearedFields[skill.FieldOwnerID] = struct{}{}
+}
+
+// OwnerIDCleared returns if the "owner_id" field was cleared in this mutation.
+func (m *SkillMutation) OwnerIDCleared() bool {
+	_, ok := m.clearedFields[skill.FieldOwnerID]
+	return ok
+}
+
+// ResetOwnerID resets all changes to the "owner_id" field.
+func (m *SkillMutation) ResetOwnerID() {
+	m.owner_id = nil
+	delete(m.clearedFields, skill.FieldOwnerID)
+}
+
+// SetCreatedBy sets the "created_by" field.
+func (m *SkillMutation) SetCreatedBy(s string) {
+	m.created_by = &s
+}
+
+// CreatedBy returns the value of the "created_by" field in the mutation.
+func (m *SkillMutation) CreatedBy() (r string, exists bool) {
+	v := m.created_by
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCreatedBy returns the old "created_by" field's value of the Skill entity.
+// If the Skill object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *SkillMutation) OldCreatedBy(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCreatedBy is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCreatedBy requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCreatedBy: %w", err)
+	}
+	return oldValue.CreatedBy, nil
+}
+
+// ClearCreatedBy clears the value of the "created_by" field.
+func (m *SkillMutation) ClearCreatedBy() {
+	m.created_by = nil
+	m.clearedFields[skill.FieldCreatedBy] = struct{}{}
+}
+
+// CreatedByCleared returns if the "created_by" field was cleared in this mutation.
+func (m *SkillMutation) CreatedByCleared() bool {
+	_, ok := m.clearedFields[skill.FieldCreatedBy]
+	return ok
+}
+
+// ResetCreatedBy resets all changes to the "created_by" field.
+func (m *SkillMutation) ResetCreatedBy() {
+	m.created_by = nil
+	delete(m.clearedFields, skill.FieldCreatedBy)
+}
+
+// SetUpdatedBy sets the "updated_by" field.
+func (m *SkillMutation) SetUpdatedBy(s string) {
+	m.updated_by = &s
+}
+
+// UpdatedBy returns the value of the "updated_by" field in the mutation.
+func (m *SkillMutation) UpdatedBy() (r string, exists bool) {
+	v := m.updated_by
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldUpdatedBy returns the old "updated_by" field's value of the Skill entity.
+// If the Skill object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *SkillMutation) OldUpdatedBy(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldUpdatedBy is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldUpdatedBy requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldUpdatedBy: %w", err)
+	}
+	return oldValue.UpdatedBy, nil
+}
+
+// ClearUpdatedBy clears the value of the "updated_by" field.
+func (m *SkillMutation) ClearUpdatedBy() {
+	m.updated_by = nil
+	m.clearedFields[skill.FieldUpdatedBy] = struct{}{}
+}
+
+// UpdatedByCleared returns if the "updated_by" field was cleared in this mutation.
+func (m *SkillMutation) UpdatedByCleared() bool {
+	_, ok := m.clearedFields[skill.FieldUpdatedBy]
+	return ok
+}
+
+// ResetUpdatedBy resets all changes to the "updated_by" field.
+func (m *SkillMutation) ResetUpdatedBy() {
+	m.updated_by = nil
+	delete(m.clearedFields, skill.FieldUpdatedBy)
+}
+
+// SetVisibility sets the "visibility" field.
+func (m *SkillMutation) SetVisibility(s string) {
+	m.visibility = &s
+}
+
+// Visibility returns the value of the "visibility" field in the mutation.
+func (m *SkillMutation) Visibility() (r string, exists bool) {
+	v := m.visibility
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldVisibility returns the old "visibility" field's value of the Skill entity.
+// If the Skill object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *SkillMutation) OldVisibility(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldVisibility is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldVisibility requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldVisibility: %w", err)
+	}
+	return oldValue.Visibility, nil
+}
+
+// ResetVisibility resets all changes to the "visibility" field.
+func (m *SkillMutation) ResetVisibility() {
+	m.visibility = nil
+}
+
+// SetCreated sets the "created" field.
+func (m *SkillMutation) SetCreated(t time.Time) {
+	m.created = &t
+}
+
+// Created returns the value of the "created" field in the mutation.
+func (m *SkillMutation) Created() (r time.Time, exists bool) {
+	v := m.created
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCreated returns the old "created" field's value of the Skill entity.
+// If the Skill object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *SkillMutation) OldCreated(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCreated is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCreated requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCreated: %w", err)
+	}
+	return oldValue.Created, nil
+}
+
+// ResetCreated resets all changes to the "created" field.
+func (m *SkillMutation) ResetCreated() {
+	m.created = nil
+}
+
+// SetUpdated sets the "updated" field.
+func (m *SkillMutation) SetUpdated(t time.Time) {
+	m.updated = &t
+}
+
+// Updated returns the value of the "updated" field in the mutation.
+func (m *SkillMutation) Updated() (r time.Time, exists bool) {
+	v := m.updated
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldUpdated returns the old "updated" field's value of the Skill entity.
+// If the Skill object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *SkillMutation) OldUpdated(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldUpdated is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldUpdated requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldUpdated: %w", err)
+	}
+	return oldValue.Updated, nil
+}
+
+// ResetUpdated resets all changes to the "updated" field.
+func (m *SkillMutation) ResetUpdated() {
+	m.updated = nil
+}
+
+// Where appends a list predicates to the SkillMutation builder.
+func (m *SkillMutation) Where(ps ...predicate.Skill) {
+	m.predicates = append(m.predicates, ps...)
+}
+
+// WhereP appends storage-level predicates to the SkillMutation builder. Using this method,
+// users can use type-assertion to append predicates that do not depend on any generated package.
+func (m *SkillMutation) WhereP(ps ...func(*sql.Selector)) {
+	p := make([]predicate.Skill, len(ps))
+	for i := range ps {
+		p[i] = ps[i]
+	}
+	m.Where(p...)
+}
+
+// Op returns the operation name.
+func (m *SkillMutation) Op() Op {
+	return m.op
+}
+
+// SetOp allows setting the mutation operation.
+func (m *SkillMutation) SetOp(op Op) {
+	m.op = op
+}
+
+// Type returns the node type of this mutation (Skill).
+func (m *SkillMutation) Type() string {
+	return m.typ
+}
+
+// Fields returns all fields that were changed during this mutation. Note that in
+// order to get all numeric fields that were incremented/decremented, call
+// AddedFields().
+func (m *SkillMutation) Fields() []string {
+	fields := make([]string, 0, 16)
+	if m.name != nil {
+		fields = append(fields, skill.FieldName)
+	}
+	if m.slug != nil {
+		fields = append(fields, skill.FieldSlug)
+	}
+	if m.description != nil {
+		fields = append(fields, skill.FieldDescription)
+	}
+	if m.tags != nil {
+		fields = append(fields, skill.FieldTags)
+	}
+	if m.scope != nil {
+		fields = append(fields, skill.FieldScope)
+	}
+	if m.scope_id != nil {
+		fields = append(fields, skill.FieldScopeID)
+	}
+	if m.storage_uri != nil {
+		fields = append(fields, skill.FieldStorageURI)
+	}
+	if m.storage_bucket != nil {
+		fields = append(fields, skill.FieldStorageBucket)
+	}
+	if m.storage_path != nil {
+		fields = append(fields, skill.FieldStoragePath)
+	}
+	if m.status != nil {
+		fields = append(fields, skill.FieldStatus)
+	}
+	if m.owner_id != nil {
+		fields = append(fields, skill.FieldOwnerID)
+	}
+	if m.created_by != nil {
+		fields = append(fields, skill.FieldCreatedBy)
+	}
+	if m.updated_by != nil {
+		fields = append(fields, skill.FieldUpdatedBy)
+	}
+	if m.visibility != nil {
+		fields = append(fields, skill.FieldVisibility)
+	}
+	if m.created != nil {
+		fields = append(fields, skill.FieldCreated)
+	}
+	if m.updated != nil {
+		fields = append(fields, skill.FieldUpdated)
+	}
+	return fields
+}
+
+// Field returns the value of a field with the given name. The second boolean
+// return value indicates that this field was not set, or was not defined in the
+// schema.
+func (m *SkillMutation) Field(name string) (ent.Value, bool) {
+	switch name {
+	case skill.FieldName:
+		return m.Name()
+	case skill.FieldSlug:
+		return m.Slug()
+	case skill.FieldDescription:
+		return m.Description()
+	case skill.FieldTags:
+		return m.Tags()
+	case skill.FieldScope:
+		return m.Scope()
+	case skill.FieldScopeID:
+		return m.ScopeID()
+	case skill.FieldStorageURI:
+		return m.StorageURI()
+	case skill.FieldStorageBucket:
+		return m.StorageBucket()
+	case skill.FieldStoragePath:
+		return m.StoragePath()
+	case skill.FieldStatus:
+		return m.Status()
+	case skill.FieldOwnerID:
+		return m.OwnerID()
+	case skill.FieldCreatedBy:
+		return m.CreatedBy()
+	case skill.FieldUpdatedBy:
+		return m.UpdatedBy()
+	case skill.FieldVisibility:
+		return m.Visibility()
+	case skill.FieldCreated:
+		return m.Created()
+	case skill.FieldUpdated:
+		return m.Updated()
+	}
+	return nil, false
+}
+
+// OldField returns the old value of the field from the database. An error is
+// returned if the mutation operation is not UpdateOne, or the query to the
+// database failed.
+func (m *SkillMutation) OldField(ctx context.Context, name string) (ent.Value, error) {
+	switch name {
+	case skill.FieldName:
+		return m.OldName(ctx)
+	case skill.FieldSlug:
+		return m.OldSlug(ctx)
+	case skill.FieldDescription:
+		return m.OldDescription(ctx)
+	case skill.FieldTags:
+		return m.OldTags(ctx)
+	case skill.FieldScope:
+		return m.OldScope(ctx)
+	case skill.FieldScopeID:
+		return m.OldScopeID(ctx)
+	case skill.FieldStorageURI:
+		return m.OldStorageURI(ctx)
+	case skill.FieldStorageBucket:
+		return m.OldStorageBucket(ctx)
+	case skill.FieldStoragePath:
+		return m.OldStoragePath(ctx)
+	case skill.FieldStatus:
+		return m.OldStatus(ctx)
+	case skill.FieldOwnerID:
+		return m.OldOwnerID(ctx)
+	case skill.FieldCreatedBy:
+		return m.OldCreatedBy(ctx)
+	case skill.FieldUpdatedBy:
+		return m.OldUpdatedBy(ctx)
+	case skill.FieldVisibility:
+		return m.OldVisibility(ctx)
+	case skill.FieldCreated:
+		return m.OldCreated(ctx)
+	case skill.FieldUpdated:
+		return m.OldUpdated(ctx)
+	}
+	return nil, fmt.Errorf("unknown Skill field %s", name)
+}
+
+// SetField sets the value of a field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *SkillMutation) SetField(name string, value ent.Value) error {
+	switch name {
+	case skill.FieldName:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetName(v)
+		return nil
+	case skill.FieldSlug:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetSlug(v)
+		return nil
+	case skill.FieldDescription:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetDescription(v)
+		return nil
+	case skill.FieldTags:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetTags(v)
+		return nil
+	case skill.FieldScope:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetScope(v)
+		return nil
+	case skill.FieldScopeID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetScopeID(v)
+		return nil
+	case skill.FieldStorageURI:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetStorageURI(v)
+		return nil
+	case skill.FieldStorageBucket:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetStorageBucket(v)
+		return nil
+	case skill.FieldStoragePath:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetStoragePath(v)
+		return nil
+	case skill.FieldStatus:
+		v, ok := value.(skill.Status)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetStatus(v)
+		return nil
+	case skill.FieldOwnerID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetOwnerID(v)
+		return nil
+	case skill.FieldCreatedBy:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCreatedBy(v)
+		return nil
+	case skill.FieldUpdatedBy:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetUpdatedBy(v)
+		return nil
+	case skill.FieldVisibility:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetVisibility(v)
+		return nil
+	case skill.FieldCreated:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCreated(v)
+		return nil
+	case skill.FieldUpdated:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetUpdated(v)
+		return nil
+	}
+	return fmt.Errorf("unknown Skill field %s", name)
+}
+
+// AddedFields returns all numeric fields that were incremented/decremented during
+// this mutation.
+func (m *SkillMutation) AddedFields() []string {
+	return nil
+}
+
+// AddedField returns the numeric value that was incremented/decremented on a field
+// with the given name. The second boolean return value indicates that this field
+// was not set, or was not defined in the schema.
+func (m *SkillMutation) AddedField(name string) (ent.Value, bool) {
+	return nil, false
+}
+
+// AddField adds the value to the field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *SkillMutation) AddField(name string, value ent.Value) error {
+	switch name {
+	}
+	return fmt.Errorf("unknown Skill numeric field %s", name)
+}
+
+// ClearedFields returns all nullable fields that were cleared during this
+// mutation.
+func (m *SkillMutation) ClearedFields() []string {
+	var fields []string
+	if m.FieldCleared(skill.FieldDescription) {
+		fields = append(fields, skill.FieldDescription)
+	}
+	if m.FieldCleared(skill.FieldTags) {
+		fields = append(fields, skill.FieldTags)
+	}
+	if m.FieldCleared(skill.FieldScopeID) {
+		fields = append(fields, skill.FieldScopeID)
+	}
+	if m.FieldCleared(skill.FieldStorageURI) {
+		fields = append(fields, skill.FieldStorageURI)
+	}
+	if m.FieldCleared(skill.FieldStorageBucket) {
+		fields = append(fields, skill.FieldStorageBucket)
+	}
+	if m.FieldCleared(skill.FieldStoragePath) {
+		fields = append(fields, skill.FieldStoragePath)
+	}
+	if m.FieldCleared(skill.FieldOwnerID) {
+		fields = append(fields, skill.FieldOwnerID)
+	}
+	if m.FieldCleared(skill.FieldCreatedBy) {
+		fields = append(fields, skill.FieldCreatedBy)
+	}
+	if m.FieldCleared(skill.FieldUpdatedBy) {
+		fields = append(fields, skill.FieldUpdatedBy)
+	}
+	return fields
+}
+
+// FieldCleared returns a boolean indicating if a field with the given name was
+// cleared in this mutation.
+func (m *SkillMutation) FieldCleared(name string) bool {
+	_, ok := m.clearedFields[name]
+	return ok
+}
+
+// ClearField clears the value of the field with the given name. It returns an
+// error if the field is not defined in the schema.
+func (m *SkillMutation) ClearField(name string) error {
+	switch name {
+	case skill.FieldDescription:
+		m.ClearDescription()
+		return nil
+	case skill.FieldTags:
+		m.ClearTags()
+		return nil
+	case skill.FieldScopeID:
+		m.ClearScopeID()
+		return nil
+	case skill.FieldStorageURI:
+		m.ClearStorageURI()
+		return nil
+	case skill.FieldStorageBucket:
+		m.ClearStorageBucket()
+		return nil
+	case skill.FieldStoragePath:
+		m.ClearStoragePath()
+		return nil
+	case skill.FieldOwnerID:
+		m.ClearOwnerID()
+		return nil
+	case skill.FieldCreatedBy:
+		m.ClearCreatedBy()
+		return nil
+	case skill.FieldUpdatedBy:
+		m.ClearUpdatedBy()
+		return nil
+	}
+	return fmt.Errorf("unknown Skill nullable field %s", name)
+}
+
+// ResetField resets all changes in the mutation for the field with the given name.
+// It returns an error if the field is not defined in the schema.
+func (m *SkillMutation) ResetField(name string) error {
+	switch name {
+	case skill.FieldName:
+		m.ResetName()
+		return nil
+	case skill.FieldSlug:
+		m.ResetSlug()
+		return nil
+	case skill.FieldDescription:
+		m.ResetDescription()
+		return nil
+	case skill.FieldTags:
+		m.ResetTags()
+		return nil
+	case skill.FieldScope:
+		m.ResetScope()
+		return nil
+	case skill.FieldScopeID:
+		m.ResetScopeID()
+		return nil
+	case skill.FieldStorageURI:
+		m.ResetStorageURI()
+		return nil
+	case skill.FieldStorageBucket:
+		m.ResetStorageBucket()
+		return nil
+	case skill.FieldStoragePath:
+		m.ResetStoragePath()
+		return nil
+	case skill.FieldStatus:
+		m.ResetStatus()
+		return nil
+	case skill.FieldOwnerID:
+		m.ResetOwnerID()
+		return nil
+	case skill.FieldCreatedBy:
+		m.ResetCreatedBy()
+		return nil
+	case skill.FieldUpdatedBy:
+		m.ResetUpdatedBy()
+		return nil
+	case skill.FieldVisibility:
+		m.ResetVisibility()
+		return nil
+	case skill.FieldCreated:
+		m.ResetCreated()
+		return nil
+	case skill.FieldUpdated:
+		m.ResetUpdated()
+		return nil
+	}
+	return fmt.Errorf("unknown Skill field %s", name)
+}
+
+// AddedEdges returns all edge names that were set/added in this mutation.
+func (m *SkillMutation) AddedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// AddedIDs returns all IDs (to other nodes) that were added for the given edge
+// name in this mutation.
+func (m *SkillMutation) AddedIDs(name string) []ent.Value {
+	return nil
+}
+
+// RemovedEdges returns all edge names that were removed in this mutation.
+func (m *SkillMutation) RemovedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// RemovedIDs returns all IDs (to other nodes) that were removed for the edge with
+// the given name in this mutation.
+func (m *SkillMutation) RemovedIDs(name string) []ent.Value {
+	return nil
+}
+
+// ClearedEdges returns all edge names that were cleared in this mutation.
+func (m *SkillMutation) ClearedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// EdgeCleared returns a boolean which indicates if the edge with the given name
+// was cleared in this mutation.
+func (m *SkillMutation) EdgeCleared(name string) bool {
+	return false
+}
+
+// ClearEdge clears the value of the edge with the given name. It returns an error
+// if that edge is not defined in the schema.
+func (m *SkillMutation) ClearEdge(name string) error {
+	return fmt.Errorf("unknown Skill unique edge %s", name)
+}
+
+// ResetEdge resets all changes to the edge with the given name in this mutation.
+// It returns an error if the edge is not defined in the schema.
+func (m *SkillMutation) ResetEdge(name string) error {
+	return fmt.Errorf("unknown Skill edge %s", name)
+}
+
+// SkillVersionMutation represents an operation that mutates the SkillVersion nodes in the graph.
+type SkillVersionMutation struct {
+	config
+	op                  Op
+	typ                 string
+	id                  *uuid.UUID
+	skill_id            *string
+	version             *string
+	status              *skillversion.Status
+	content_hash        *string
+	files               *string
+	publisher_id        *string
+	deprecation_message *string
+	replacement_uri     *string
+	created             *time.Time
+	clearedFields       map[string]struct{}
+	done                bool
+	oldValue            func(context.Context) (*SkillVersion, error)
+	predicates          []predicate.SkillVersion
+}
+
+var _ ent.Mutation = (*SkillVersionMutation)(nil)
+
+// skillversionOption allows management of the mutation configuration using functional options.
+type skillversionOption func(*SkillVersionMutation)
+
+// newSkillVersionMutation creates new mutation for the SkillVersion entity.
+func newSkillVersionMutation(c config, op Op, opts ...skillversionOption) *SkillVersionMutation {
+	m := &SkillVersionMutation{
+		config:        c,
+		op:            op,
+		typ:           TypeSkillVersion,
+		clearedFields: make(map[string]struct{}),
+	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
+}
+
+// withSkillVersionID sets the ID field of the mutation.
+func withSkillVersionID(id uuid.UUID) skillversionOption {
+	return func(m *SkillVersionMutation) {
+		var (
+			err   error
+			once  sync.Once
+			value *SkillVersion
+		)
+		m.oldValue = func(ctx context.Context) (*SkillVersion, error) {
+			once.Do(func() {
+				if m.done {
+					err = errors.New("querying old values post mutation is not allowed")
+				} else {
+					value, err = m.Client().SkillVersion.Get(ctx, id)
+				}
+			})
+			return value, err
+		}
+		m.id = &id
+	}
+}
+
+// withSkillVersion sets the old SkillVersion of the mutation.
+func withSkillVersion(node *SkillVersion) skillversionOption {
+	return func(m *SkillVersionMutation) {
+		m.oldValue = func(context.Context) (*SkillVersion, error) {
+			return node, nil
+		}
+		m.id = &node.ID
+	}
+}
+
+// Client returns a new `ent.Client` from the mutation. If the mutation was
+// executed in a transaction (ent.Tx), a transactional client is returned.
+func (m SkillVersionMutation) Client() *Client {
+	client := &Client{config: m.config}
+	client.init()
+	return client
+}
+
+// Tx returns an `ent.Tx` for mutations that were executed in transactions;
+// it returns an error otherwise.
+func (m SkillVersionMutation) Tx() (*Tx, error) {
+	if _, ok := m.driver.(*txDriver); !ok {
+		return nil, errors.New("ent: mutation is not running in a transaction")
+	}
+	tx := &Tx{config: m.config}
+	tx.init()
+	return tx, nil
+}
+
+// SetID sets the value of the id field. Note that this
+// operation is only accepted on creation of SkillVersion entities.
+func (m *SkillVersionMutation) SetID(id uuid.UUID) {
+	m.id = &id
+}
+
+// ID returns the ID value in the mutation. Note that the ID is only available
+// if it was provided to the builder or after it was returned from the database.
+func (m *SkillVersionMutation) ID() (id uuid.UUID, exists bool) {
+	if m.id == nil {
+		return
+	}
+	return *m.id, true
+}
+
+// IDs queries the database and returns the entity ids that match the mutation's predicate.
+// That means, if the mutation is applied within a transaction with an isolation level such
+// as sql.LevelSerializable, the returned ids match the ids of the rows that will be updated
+// or updated by the mutation.
+func (m *SkillVersionMutation) IDs(ctx context.Context) ([]uuid.UUID, error) {
+	switch {
+	case m.op.Is(OpUpdateOne | OpDeleteOne):
+		id, exists := m.ID()
+		if exists {
+			return []uuid.UUID{id}, nil
+		}
+		fallthrough
+	case m.op.Is(OpUpdate | OpDelete):
+		return m.Client().SkillVersion.Query().Where(m.predicates...).IDs(ctx)
+	default:
+		return nil, fmt.Errorf("IDs is not allowed on %s operations", m.op)
+	}
+}
+
+// SetSkillID sets the "skill_id" field.
+func (m *SkillVersionMutation) SetSkillID(s string) {
+	m.skill_id = &s
+}
+
+// SkillID returns the value of the "skill_id" field in the mutation.
+func (m *SkillVersionMutation) SkillID() (r string, exists bool) {
+	v := m.skill_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldSkillID returns the old "skill_id" field's value of the SkillVersion entity.
+// If the SkillVersion object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *SkillVersionMutation) OldSkillID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldSkillID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldSkillID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldSkillID: %w", err)
+	}
+	return oldValue.SkillID, nil
+}
+
+// ResetSkillID resets all changes to the "skill_id" field.
+func (m *SkillVersionMutation) ResetSkillID() {
+	m.skill_id = nil
+}
+
+// SetVersion sets the "version" field.
+func (m *SkillVersionMutation) SetVersion(s string) {
+	m.version = &s
+}
+
+// Version returns the value of the "version" field in the mutation.
+func (m *SkillVersionMutation) Version() (r string, exists bool) {
+	v := m.version
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldVersion returns the old "version" field's value of the SkillVersion entity.
+// If the SkillVersion object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *SkillVersionMutation) OldVersion(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldVersion is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldVersion requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldVersion: %w", err)
+	}
+	return oldValue.Version, nil
+}
+
+// ResetVersion resets all changes to the "version" field.
+func (m *SkillVersionMutation) ResetVersion() {
+	m.version = nil
+}
+
+// SetStatus sets the "status" field.
+func (m *SkillVersionMutation) SetStatus(s skillversion.Status) {
+	m.status = &s
+}
+
+// Status returns the value of the "status" field in the mutation.
+func (m *SkillVersionMutation) Status() (r skillversion.Status, exists bool) {
+	v := m.status
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldStatus returns the old "status" field's value of the SkillVersion entity.
+// If the SkillVersion object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *SkillVersionMutation) OldStatus(ctx context.Context) (v skillversion.Status, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldStatus is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldStatus requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldStatus: %w", err)
+	}
+	return oldValue.Status, nil
+}
+
+// ResetStatus resets all changes to the "status" field.
+func (m *SkillVersionMutation) ResetStatus() {
+	m.status = nil
+}
+
+// SetContentHash sets the "content_hash" field.
+func (m *SkillVersionMutation) SetContentHash(s string) {
+	m.content_hash = &s
+}
+
+// ContentHash returns the value of the "content_hash" field in the mutation.
+func (m *SkillVersionMutation) ContentHash() (r string, exists bool) {
+	v := m.content_hash
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldContentHash returns the old "content_hash" field's value of the SkillVersion entity.
+// If the SkillVersion object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *SkillVersionMutation) OldContentHash(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldContentHash is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldContentHash requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldContentHash: %w", err)
+	}
+	return oldValue.ContentHash, nil
+}
+
+// ClearContentHash clears the value of the "content_hash" field.
+func (m *SkillVersionMutation) ClearContentHash() {
+	m.content_hash = nil
+	m.clearedFields[skillversion.FieldContentHash] = struct{}{}
+}
+
+// ContentHashCleared returns if the "content_hash" field was cleared in this mutation.
+func (m *SkillVersionMutation) ContentHashCleared() bool {
+	_, ok := m.clearedFields[skillversion.FieldContentHash]
+	return ok
+}
+
+// ResetContentHash resets all changes to the "content_hash" field.
+func (m *SkillVersionMutation) ResetContentHash() {
+	m.content_hash = nil
+	delete(m.clearedFields, skillversion.FieldContentHash)
+}
+
+// SetFiles sets the "files" field.
+func (m *SkillVersionMutation) SetFiles(s string) {
+	m.files = &s
+}
+
+// Files returns the value of the "files" field in the mutation.
+func (m *SkillVersionMutation) Files() (r string, exists bool) {
+	v := m.files
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldFiles returns the old "files" field's value of the SkillVersion entity.
+// If the SkillVersion object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *SkillVersionMutation) OldFiles(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldFiles is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldFiles requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldFiles: %w", err)
+	}
+	return oldValue.Files, nil
+}
+
+// ClearFiles clears the value of the "files" field.
+func (m *SkillVersionMutation) ClearFiles() {
+	m.files = nil
+	m.clearedFields[skillversion.FieldFiles] = struct{}{}
+}
+
+// FilesCleared returns if the "files" field was cleared in this mutation.
+func (m *SkillVersionMutation) FilesCleared() bool {
+	_, ok := m.clearedFields[skillversion.FieldFiles]
+	return ok
+}
+
+// ResetFiles resets all changes to the "files" field.
+func (m *SkillVersionMutation) ResetFiles() {
+	m.files = nil
+	delete(m.clearedFields, skillversion.FieldFiles)
+}
+
+// SetPublisherID sets the "publisher_id" field.
+func (m *SkillVersionMutation) SetPublisherID(s string) {
+	m.publisher_id = &s
+}
+
+// PublisherID returns the value of the "publisher_id" field in the mutation.
+func (m *SkillVersionMutation) PublisherID() (r string, exists bool) {
+	v := m.publisher_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldPublisherID returns the old "publisher_id" field's value of the SkillVersion entity.
+// If the SkillVersion object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *SkillVersionMutation) OldPublisherID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldPublisherID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldPublisherID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldPublisherID: %w", err)
+	}
+	return oldValue.PublisherID, nil
+}
+
+// ClearPublisherID clears the value of the "publisher_id" field.
+func (m *SkillVersionMutation) ClearPublisherID() {
+	m.publisher_id = nil
+	m.clearedFields[skillversion.FieldPublisherID] = struct{}{}
+}
+
+// PublisherIDCleared returns if the "publisher_id" field was cleared in this mutation.
+func (m *SkillVersionMutation) PublisherIDCleared() bool {
+	_, ok := m.clearedFields[skillversion.FieldPublisherID]
+	return ok
+}
+
+// ResetPublisherID resets all changes to the "publisher_id" field.
+func (m *SkillVersionMutation) ResetPublisherID() {
+	m.publisher_id = nil
+	delete(m.clearedFields, skillversion.FieldPublisherID)
+}
+
+// SetDeprecationMessage sets the "deprecation_message" field.
+func (m *SkillVersionMutation) SetDeprecationMessage(s string) {
+	m.deprecation_message = &s
+}
+
+// DeprecationMessage returns the value of the "deprecation_message" field in the mutation.
+func (m *SkillVersionMutation) DeprecationMessage() (r string, exists bool) {
+	v := m.deprecation_message
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldDeprecationMessage returns the old "deprecation_message" field's value of the SkillVersion entity.
+// If the SkillVersion object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *SkillVersionMutation) OldDeprecationMessage(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldDeprecationMessage is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldDeprecationMessage requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldDeprecationMessage: %w", err)
+	}
+	return oldValue.DeprecationMessage, nil
+}
+
+// ClearDeprecationMessage clears the value of the "deprecation_message" field.
+func (m *SkillVersionMutation) ClearDeprecationMessage() {
+	m.deprecation_message = nil
+	m.clearedFields[skillversion.FieldDeprecationMessage] = struct{}{}
+}
+
+// DeprecationMessageCleared returns if the "deprecation_message" field was cleared in this mutation.
+func (m *SkillVersionMutation) DeprecationMessageCleared() bool {
+	_, ok := m.clearedFields[skillversion.FieldDeprecationMessage]
+	return ok
+}
+
+// ResetDeprecationMessage resets all changes to the "deprecation_message" field.
+func (m *SkillVersionMutation) ResetDeprecationMessage() {
+	m.deprecation_message = nil
+	delete(m.clearedFields, skillversion.FieldDeprecationMessage)
+}
+
+// SetReplacementURI sets the "replacement_uri" field.
+func (m *SkillVersionMutation) SetReplacementURI(s string) {
+	m.replacement_uri = &s
+}
+
+// ReplacementURI returns the value of the "replacement_uri" field in the mutation.
+func (m *SkillVersionMutation) ReplacementURI() (r string, exists bool) {
+	v := m.replacement_uri
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldReplacementURI returns the old "replacement_uri" field's value of the SkillVersion entity.
+// If the SkillVersion object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *SkillVersionMutation) OldReplacementURI(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldReplacementURI is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldReplacementURI requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldReplacementURI: %w", err)
+	}
+	return oldValue.ReplacementURI, nil
+}
+
+// ClearReplacementURI clears the value of the "replacement_uri" field.
+func (m *SkillVersionMutation) ClearReplacementURI() {
+	m.replacement_uri = nil
+	m.clearedFields[skillversion.FieldReplacementURI] = struct{}{}
+}
+
+// ReplacementURICleared returns if the "replacement_uri" field was cleared in this mutation.
+func (m *SkillVersionMutation) ReplacementURICleared() bool {
+	_, ok := m.clearedFields[skillversion.FieldReplacementURI]
+	return ok
+}
+
+// ResetReplacementURI resets all changes to the "replacement_uri" field.
+func (m *SkillVersionMutation) ResetReplacementURI() {
+	m.replacement_uri = nil
+	delete(m.clearedFields, skillversion.FieldReplacementURI)
+}
+
+// SetCreated sets the "created" field.
+func (m *SkillVersionMutation) SetCreated(t time.Time) {
+	m.created = &t
+}
+
+// Created returns the value of the "created" field in the mutation.
+func (m *SkillVersionMutation) Created() (r time.Time, exists bool) {
+	v := m.created
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCreated returns the old "created" field's value of the SkillVersion entity.
+// If the SkillVersion object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *SkillVersionMutation) OldCreated(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCreated is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCreated requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCreated: %w", err)
+	}
+	return oldValue.Created, nil
+}
+
+// ResetCreated resets all changes to the "created" field.
+func (m *SkillVersionMutation) ResetCreated() {
+	m.created = nil
+}
+
+// Where appends a list predicates to the SkillVersionMutation builder.
+func (m *SkillVersionMutation) Where(ps ...predicate.SkillVersion) {
+	m.predicates = append(m.predicates, ps...)
+}
+
+// WhereP appends storage-level predicates to the SkillVersionMutation builder. Using this method,
+// users can use type-assertion to append predicates that do not depend on any generated package.
+func (m *SkillVersionMutation) WhereP(ps ...func(*sql.Selector)) {
+	p := make([]predicate.SkillVersion, len(ps))
+	for i := range ps {
+		p[i] = ps[i]
+	}
+	m.Where(p...)
+}
+
+// Op returns the operation name.
+func (m *SkillVersionMutation) Op() Op {
+	return m.op
+}
+
+// SetOp allows setting the mutation operation.
+func (m *SkillVersionMutation) SetOp(op Op) {
+	m.op = op
+}
+
+// Type returns the node type of this mutation (SkillVersion).
+func (m *SkillVersionMutation) Type() string {
+	return m.typ
+}
+
+// Fields returns all fields that were changed during this mutation. Note that in
+// order to get all numeric fields that were incremented/decremented, call
+// AddedFields().
+func (m *SkillVersionMutation) Fields() []string {
+	fields := make([]string, 0, 9)
+	if m.skill_id != nil {
+		fields = append(fields, skillversion.FieldSkillID)
+	}
+	if m.version != nil {
+		fields = append(fields, skillversion.FieldVersion)
+	}
+	if m.status != nil {
+		fields = append(fields, skillversion.FieldStatus)
+	}
+	if m.content_hash != nil {
+		fields = append(fields, skillversion.FieldContentHash)
+	}
+	if m.files != nil {
+		fields = append(fields, skillversion.FieldFiles)
+	}
+	if m.publisher_id != nil {
+		fields = append(fields, skillversion.FieldPublisherID)
+	}
+	if m.deprecation_message != nil {
+		fields = append(fields, skillversion.FieldDeprecationMessage)
+	}
+	if m.replacement_uri != nil {
+		fields = append(fields, skillversion.FieldReplacementURI)
+	}
+	if m.created != nil {
+		fields = append(fields, skillversion.FieldCreated)
+	}
+	return fields
+}
+
+// Field returns the value of a field with the given name. The second boolean
+// return value indicates that this field was not set, or was not defined in the
+// schema.
+func (m *SkillVersionMutation) Field(name string) (ent.Value, bool) {
+	switch name {
+	case skillversion.FieldSkillID:
+		return m.SkillID()
+	case skillversion.FieldVersion:
+		return m.Version()
+	case skillversion.FieldStatus:
+		return m.Status()
+	case skillversion.FieldContentHash:
+		return m.ContentHash()
+	case skillversion.FieldFiles:
+		return m.Files()
+	case skillversion.FieldPublisherID:
+		return m.PublisherID()
+	case skillversion.FieldDeprecationMessage:
+		return m.DeprecationMessage()
+	case skillversion.FieldReplacementURI:
+		return m.ReplacementURI()
+	case skillversion.FieldCreated:
+		return m.Created()
+	}
+	return nil, false
+}
+
+// OldField returns the old value of the field from the database. An error is
+// returned if the mutation operation is not UpdateOne, or the query to the
+// database failed.
+func (m *SkillVersionMutation) OldField(ctx context.Context, name string) (ent.Value, error) {
+	switch name {
+	case skillversion.FieldSkillID:
+		return m.OldSkillID(ctx)
+	case skillversion.FieldVersion:
+		return m.OldVersion(ctx)
+	case skillversion.FieldStatus:
+		return m.OldStatus(ctx)
+	case skillversion.FieldContentHash:
+		return m.OldContentHash(ctx)
+	case skillversion.FieldFiles:
+		return m.OldFiles(ctx)
+	case skillversion.FieldPublisherID:
+		return m.OldPublisherID(ctx)
+	case skillversion.FieldDeprecationMessage:
+		return m.OldDeprecationMessage(ctx)
+	case skillversion.FieldReplacementURI:
+		return m.OldReplacementURI(ctx)
+	case skillversion.FieldCreated:
+		return m.OldCreated(ctx)
+	}
+	return nil, fmt.Errorf("unknown SkillVersion field %s", name)
+}
+
+// SetField sets the value of a field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *SkillVersionMutation) SetField(name string, value ent.Value) error {
+	switch name {
+	case skillversion.FieldSkillID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetSkillID(v)
+		return nil
+	case skillversion.FieldVersion:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetVersion(v)
+		return nil
+	case skillversion.FieldStatus:
+		v, ok := value.(skillversion.Status)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetStatus(v)
+		return nil
+	case skillversion.FieldContentHash:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetContentHash(v)
+		return nil
+	case skillversion.FieldFiles:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetFiles(v)
+		return nil
+	case skillversion.FieldPublisherID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetPublisherID(v)
+		return nil
+	case skillversion.FieldDeprecationMessage:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetDeprecationMessage(v)
+		return nil
+	case skillversion.FieldReplacementURI:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetReplacementURI(v)
+		return nil
+	case skillversion.FieldCreated:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCreated(v)
+		return nil
+	}
+	return fmt.Errorf("unknown SkillVersion field %s", name)
+}
+
+// AddedFields returns all numeric fields that were incremented/decremented during
+// this mutation.
+func (m *SkillVersionMutation) AddedFields() []string {
+	return nil
+}
+
+// AddedField returns the numeric value that was incremented/decremented on a field
+// with the given name. The second boolean return value indicates that this field
+// was not set, or was not defined in the schema.
+func (m *SkillVersionMutation) AddedField(name string) (ent.Value, bool) {
+	return nil, false
+}
+
+// AddField adds the value to the field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *SkillVersionMutation) AddField(name string, value ent.Value) error {
+	switch name {
+	}
+	return fmt.Errorf("unknown SkillVersion numeric field %s", name)
+}
+
+// ClearedFields returns all nullable fields that were cleared during this
+// mutation.
+func (m *SkillVersionMutation) ClearedFields() []string {
+	var fields []string
+	if m.FieldCleared(skillversion.FieldContentHash) {
+		fields = append(fields, skillversion.FieldContentHash)
+	}
+	if m.FieldCleared(skillversion.FieldFiles) {
+		fields = append(fields, skillversion.FieldFiles)
+	}
+	if m.FieldCleared(skillversion.FieldPublisherID) {
+		fields = append(fields, skillversion.FieldPublisherID)
+	}
+	if m.FieldCleared(skillversion.FieldDeprecationMessage) {
+		fields = append(fields, skillversion.FieldDeprecationMessage)
+	}
+	if m.FieldCleared(skillversion.FieldReplacementURI) {
+		fields = append(fields, skillversion.FieldReplacementURI)
+	}
+	return fields
+}
+
+// FieldCleared returns a boolean indicating if a field with the given name was
+// cleared in this mutation.
+func (m *SkillVersionMutation) FieldCleared(name string) bool {
+	_, ok := m.clearedFields[name]
+	return ok
+}
+
+// ClearField clears the value of the field with the given name. It returns an
+// error if the field is not defined in the schema.
+func (m *SkillVersionMutation) ClearField(name string) error {
+	switch name {
+	case skillversion.FieldContentHash:
+		m.ClearContentHash()
+		return nil
+	case skillversion.FieldFiles:
+		m.ClearFiles()
+		return nil
+	case skillversion.FieldPublisherID:
+		m.ClearPublisherID()
+		return nil
+	case skillversion.FieldDeprecationMessage:
+		m.ClearDeprecationMessage()
+		return nil
+	case skillversion.FieldReplacementURI:
+		m.ClearReplacementURI()
+		return nil
+	}
+	return fmt.Errorf("unknown SkillVersion nullable field %s", name)
+}
+
+// ResetField resets all changes in the mutation for the field with the given name.
+// It returns an error if the field is not defined in the schema.
+func (m *SkillVersionMutation) ResetField(name string) error {
+	switch name {
+	case skillversion.FieldSkillID:
+		m.ResetSkillID()
+		return nil
+	case skillversion.FieldVersion:
+		m.ResetVersion()
+		return nil
+	case skillversion.FieldStatus:
+		m.ResetStatus()
+		return nil
+	case skillversion.FieldContentHash:
+		m.ResetContentHash()
+		return nil
+	case skillversion.FieldFiles:
+		m.ResetFiles()
+		return nil
+	case skillversion.FieldPublisherID:
+		m.ResetPublisherID()
+		return nil
+	case skillversion.FieldDeprecationMessage:
+		m.ResetDeprecationMessage()
+		return nil
+	case skillversion.FieldReplacementURI:
+		m.ResetReplacementURI()
+		return nil
+	case skillversion.FieldCreated:
+		m.ResetCreated()
+		return nil
+	}
+	return fmt.Errorf("unknown SkillVersion field %s", name)
+}
+
+// AddedEdges returns all edge names that were set/added in this mutation.
+func (m *SkillVersionMutation) AddedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// AddedIDs returns all IDs (to other nodes) that were added for the given edge
+// name in this mutation.
+func (m *SkillVersionMutation) AddedIDs(name string) []ent.Value {
+	return nil
+}
+
+// RemovedEdges returns all edge names that were removed in this mutation.
+func (m *SkillVersionMutation) RemovedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// RemovedIDs returns all IDs (to other nodes) that were removed for the edge with
+// the given name in this mutation.
+func (m *SkillVersionMutation) RemovedIDs(name string) []ent.Value {
+	return nil
+}
+
+// ClearedEdges returns all edge names that were cleared in this mutation.
+func (m *SkillVersionMutation) ClearedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// EdgeCleared returns a boolean which indicates if the edge with the given name
+// was cleared in this mutation.
+func (m *SkillVersionMutation) EdgeCleared(name string) bool {
+	return false
+}
+
+// ClearEdge clears the value of the edge with the given name. It returns an error
+// if that edge is not defined in the schema.
+func (m *SkillVersionMutation) ClearEdge(name string) error {
+	return fmt.Errorf("unknown SkillVersion unique edge %s", name)
+}
+
+// ResetEdge resets all changes to the edge with the given name in this mutation.
+// It returns an error if the edge is not defined in the schema.
+func (m *SkillVersionMutation) ResetEdge(name string) error {
+	return fmt.Errorf("unknown SkillVersion edge %s", name)
 }
 
 // SubscriptionTemplateMutation represents an operation that mutates the SubscriptionTemplate nodes in the graph.

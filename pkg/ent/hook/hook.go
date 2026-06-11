@@ -369,6 +369,30 @@ func (f SecretFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, erro
 	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.SecretMutation", m)
 }
 
+// The SkillFunc type is an adapter to allow the use of ordinary
+// function as Skill mutator.
+type SkillFunc func(context.Context, *ent.SkillMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f SkillFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.SkillMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.SkillMutation", m)
+}
+
+// The SkillVersionFunc type is an adapter to allow the use of ordinary
+// function as SkillVersion mutator.
+type SkillVersionFunc func(context.Context, *ent.SkillVersionMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f SkillVersionFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.SkillVersionMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.SkillVersionMutation", m)
+}
+
 // The SubscriptionTemplateFunc type is an adapter to allow the use of ordinary
 // function as SubscriptionTemplate mutator.
 type SubscriptionTemplateFunc func(context.Context, *ent.SubscriptionTemplateMutation) (ent.Value, error)

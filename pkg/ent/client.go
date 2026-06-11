@@ -46,6 +46,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/schedule"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/scheduledevent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/secret"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/skill"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/skillversion"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/subscriptiontemplate"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/template"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/user"
@@ -117,6 +119,10 @@ type Client struct {
 	ScheduledEvent *ScheduledEventClient
 	// Secret is the client for interacting with the Secret builders.
 	Secret *SecretClient
+	// Skill is the client for interacting with the Skill builders.
+	Skill *SkillClient
+	// SkillVersion is the client for interacting with the SkillVersion builders.
+	SkillVersion *SkillVersionClient
 	// SubscriptionTemplate is the client for interacting with the SubscriptionTemplate builders.
 	SubscriptionTemplate *SubscriptionTemplateClient
 	// Template is the client for interacting with the Template builders.
@@ -166,6 +172,8 @@ func (c *Client) init() {
 	c.Schedule = NewScheduleClient(c.config)
 	c.ScheduledEvent = NewScheduledEventClient(c.config)
 	c.Secret = NewSecretClient(c.config)
+	c.Skill = NewSkillClient(c.config)
+	c.SkillVersion = NewSkillVersionClient(c.config)
 	c.SubscriptionTemplate = NewSubscriptionTemplateClient(c.config)
 	c.Template = NewTemplateClient(c.config)
 	c.User = NewUserClient(c.config)
@@ -292,6 +300,8 @@ func (c *Client) Tx(ctx context.Context) (*Tx, error) {
 		Schedule:                 NewScheduleClient(cfg),
 		ScheduledEvent:           NewScheduledEventClient(cfg),
 		Secret:                   NewSecretClient(cfg),
+		Skill:                    NewSkillClient(cfg),
+		SkillVersion:             NewSkillVersionClient(cfg),
 		SubscriptionTemplate:     NewSubscriptionTemplateClient(cfg),
 		Template:                 NewTemplateClient(cfg),
 		User:                     NewUserClient(cfg),
@@ -345,6 +355,8 @@ func (c *Client) BeginTx(ctx context.Context, opts *sql.TxOptions) (*Tx, error) 
 		Schedule:                 NewScheduleClient(cfg),
 		ScheduledEvent:           NewScheduledEventClient(cfg),
 		Secret:                   NewSecretClient(cfg),
+		Skill:                    NewSkillClient(cfg),
+		SkillVersion:             NewSkillVersionClient(cfg),
 		SubscriptionTemplate:     NewSubscriptionTemplateClient(cfg),
 		Template:                 NewTemplateClient(cfg),
 		User:                     NewUserClient(cfg),
@@ -385,7 +397,8 @@ func (c *Client) Use(hooks ...Hook) {
 		c.MaintenanceOperation, c.MaintenanceOperationRun, c.Message, c.Notification,
 		c.NotificationSubscription, c.PolicyBinding, c.Project, c.ProjectContributor,
 		c.ProjectSyncState, c.RuntimeBroker, c.Schedule, c.ScheduledEvent, c.Secret,
-		c.SubscriptionTemplate, c.Template, c.User, c.UserAccessToken,
+		c.Skill, c.SkillVersion, c.SubscriptionTemplate, c.Template, c.User,
+		c.UserAccessToken,
 	} {
 		n.Use(hooks...)
 	}
@@ -402,7 +415,8 @@ func (c *Client) Intercept(interceptors ...Interceptor) {
 		c.MaintenanceOperation, c.MaintenanceOperationRun, c.Message, c.Notification,
 		c.NotificationSubscription, c.PolicyBinding, c.Project, c.ProjectContributor,
 		c.ProjectSyncState, c.RuntimeBroker, c.Schedule, c.ScheduledEvent, c.Secret,
-		c.SubscriptionTemplate, c.Template, c.User, c.UserAccessToken,
+		c.Skill, c.SkillVersion, c.SubscriptionTemplate, c.Template, c.User,
+		c.UserAccessToken,
 	} {
 		n.Intercept(interceptors...)
 	}
@@ -471,6 +485,10 @@ func (c *Client) Mutate(ctx context.Context, m Mutation) (Value, error) {
 		return c.ScheduledEvent.mutate(ctx, m)
 	case *SecretMutation:
 		return c.Secret.mutate(ctx, m)
+	case *SkillMutation:
+		return c.Skill.mutate(ctx, m)
+	case *SkillVersionMutation:
+		return c.SkillVersion.mutate(ctx, m)
 	case *SubscriptionTemplateMutation:
 		return c.SubscriptionTemplate.mutate(ctx, m)
 	case *TemplateMutation:
@@ -4746,6 +4764,272 @@ func (c *SecretClient) mutate(ctx context.Context, m *SecretMutation) (Value, er
 	}
 }
 
+// SkillClient is a client for the Skill schema.
+type SkillClient struct {
+	config
+}
+
+// NewSkillClient returns a client for the Skill from the given config.
+func NewSkillClient(c config) *SkillClient {
+	return &SkillClient{config: c}
+}
+
+// Use adds a list of mutation hooks to the hooks stack.
+// A call to `Use(f, g, h)` equals to `skill.Hooks(f(g(h())))`.
+func (c *SkillClient) Use(hooks ...Hook) {
+	c.hooks.Skill = append(c.hooks.Skill, hooks...)
+}
+
+// Intercept adds a list of query interceptors to the interceptors stack.
+// A call to `Intercept(f, g, h)` equals to `skill.Intercept(f(g(h())))`.
+func (c *SkillClient) Intercept(interceptors ...Interceptor) {
+	c.inters.Skill = append(c.inters.Skill, interceptors...)
+}
+
+// Create returns a builder for creating a Skill entity.
+func (c *SkillClient) Create() *SkillCreate {
+	mutation := newSkillMutation(c.config, OpCreate)
+	return &SkillCreate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// CreateBulk returns a builder for creating a bulk of Skill entities.
+func (c *SkillClient) CreateBulk(builders ...*SkillCreate) *SkillCreateBulk {
+	return &SkillCreateBulk{config: c.config, builders: builders}
+}
+
+// MapCreateBulk creates a bulk creation builder from the given slice. For each item in the slice, the function creates
+// a builder and applies setFunc on it.
+func (c *SkillClient) MapCreateBulk(slice any, setFunc func(*SkillCreate, int)) *SkillCreateBulk {
+	rv := reflect.ValueOf(slice)
+	if rv.Kind() != reflect.Slice {
+		return &SkillCreateBulk{err: fmt.Errorf("calling to SkillClient.MapCreateBulk with wrong type %T, need slice", slice)}
+	}
+	builders := make([]*SkillCreate, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		builders[i] = c.Create()
+		setFunc(builders[i], i)
+	}
+	return &SkillCreateBulk{config: c.config, builders: builders}
+}
+
+// Update returns an update builder for Skill.
+func (c *SkillClient) Update() *SkillUpdate {
+	mutation := newSkillMutation(c.config, OpUpdate)
+	return &SkillUpdate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOne returns an update builder for the given entity.
+func (c *SkillClient) UpdateOne(_m *Skill) *SkillUpdateOne {
+	mutation := newSkillMutation(c.config, OpUpdateOne, withSkill(_m))
+	return &SkillUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOneID returns an update builder for the given id.
+func (c *SkillClient) UpdateOneID(id uuid.UUID) *SkillUpdateOne {
+	mutation := newSkillMutation(c.config, OpUpdateOne, withSkillID(id))
+	return &SkillUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// Delete returns a delete builder for Skill.
+func (c *SkillClient) Delete() *SkillDelete {
+	mutation := newSkillMutation(c.config, OpDelete)
+	return &SkillDelete{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// DeleteOne returns a builder for deleting the given entity.
+func (c *SkillClient) DeleteOne(_m *Skill) *SkillDeleteOne {
+	return c.DeleteOneID(_m.ID)
+}
+
+// DeleteOneID returns a builder for deleting the given entity by its id.
+func (c *SkillClient) DeleteOneID(id uuid.UUID) *SkillDeleteOne {
+	builder := c.Delete().Where(skill.ID(id))
+	builder.mutation.id = &id
+	builder.mutation.op = OpDeleteOne
+	return &SkillDeleteOne{builder}
+}
+
+// Query returns a query builder for Skill.
+func (c *SkillClient) Query() *SkillQuery {
+	return &SkillQuery{
+		config: c.config,
+		ctx:    &QueryContext{Type: TypeSkill},
+		inters: c.Interceptors(),
+	}
+}
+
+// Get returns a Skill entity by its id.
+func (c *SkillClient) Get(ctx context.Context, id uuid.UUID) (*Skill, error) {
+	return c.Query().Where(skill.ID(id)).Only(ctx)
+}
+
+// GetX is like Get, but panics if an error occurs.
+func (c *SkillClient) GetX(ctx context.Context, id uuid.UUID) *Skill {
+	obj, err := c.Get(ctx, id)
+	if err != nil {
+		panic(err)
+	}
+	return obj
+}
+
+// Hooks returns the client hooks.
+func (c *SkillClient) Hooks() []Hook {
+	return c.hooks.Skill
+}
+
+// Interceptors returns the client interceptors.
+func (c *SkillClient) Interceptors() []Interceptor {
+	return c.inters.Skill
+}
+
+func (c *SkillClient) mutate(ctx context.Context, m *SkillMutation) (Value, error) {
+	switch m.Op() {
+	case OpCreate:
+		return (&SkillCreate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdate:
+		return (&SkillUpdate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdateOne:
+		return (&SkillUpdateOne{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpDelete, OpDeleteOne:
+		return (&SkillDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
+	default:
+		return nil, fmt.Errorf("ent: unknown Skill mutation op: %q", m.Op())
+	}
+}
+
+// SkillVersionClient is a client for the SkillVersion schema.
+type SkillVersionClient struct {
+	config
+}
+
+// NewSkillVersionClient returns a client for the SkillVersion from the given config.
+func NewSkillVersionClient(c config) *SkillVersionClient {
+	return &SkillVersionClient{config: c}
+}
+
+// Use adds a list of mutation hooks to the hooks stack.
+// A call to `Use(f, g, h)` equals to `skillversion.Hooks(f(g(h())))`.
+func (c *SkillVersionClient) Use(hooks ...Hook) {
+	c.hooks.SkillVersion = append(c.hooks.SkillVersion, hooks...)
+}
+
+// Intercept adds a list of query interceptors to the interceptors stack.
+// A call to `Intercept(f, g, h)` equals to `skillversion.Intercept(f(g(h())))`.
+func (c *SkillVersionClient) Intercept(interceptors ...Interceptor) {
+	c.inters.SkillVersion = append(c.inters.SkillVersion, interceptors...)
+}
+
+// Create returns a builder for creating a SkillVersion entity.
+func (c *SkillVersionClient) Create() *SkillVersionCreate {
+	mutation := newSkillVersionMutation(c.config, OpCreate)
+	return &SkillVersionCreate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// CreateBulk returns a builder for creating a bulk of SkillVersion entities.
+func (c *SkillVersionClient) CreateBulk(builders ...*SkillVersionCreate) *SkillVersionCreateBulk {
+	return &SkillVersionCreateBulk{config: c.config, builders: builders}
+}
+
+// MapCreateBulk creates a bulk creation builder from the given slice. For each item in the slice, the function creates
+// a builder and applies setFunc on it.
+func (c *SkillVersionClient) MapCreateBulk(slice any, setFunc func(*SkillVersionCreate, int)) *SkillVersionCreateBulk {
+	rv := reflect.ValueOf(slice)
+	if rv.Kind() != reflect.Slice {
+		return &SkillVersionCreateBulk{err: fmt.Errorf("calling to SkillVersionClient.MapCreateBulk with wrong type %T, need slice", slice)}
+	}
+	builders := make([]*SkillVersionCreate, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		builders[i] = c.Create()
+		setFunc(builders[i], i)
+	}
+	return &SkillVersionCreateBulk{config: c.config, builders: builders}
+}
+
+// Update returns an update builder for SkillVersion.
+func (c *SkillVersionClient) Update() *SkillVersionUpdate {
+	mutation := newSkillVersionMutation(c.config, OpUpdate)
+	return &SkillVersionUpdate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOne returns an update builder for the given entity.
+func (c *SkillVersionClient) UpdateOne(_m *SkillVersion) *SkillVersionUpdateOne {
+	mutation := newSkillVersionMutation(c.config, OpUpdateOne, withSkillVersion(_m))
+	return &SkillVersionUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOneID returns an update builder for the given id.
+func (c *SkillVersionClient) UpdateOneID(id uuid.UUID) *SkillVersionUpdateOne {
+	mutation := newSkillVersionMutation(c.config, OpUpdateOne, withSkillVersionID(id))
+	return &SkillVersionUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// Delete returns a delete builder for SkillVersion.
+func (c *SkillVersionClient) Delete() *SkillVersionDelete {
+	mutation := newSkillVersionMutation(c.config, OpDelete)
+	return &SkillVersionDelete{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// DeleteOne returns a builder for deleting the given entity.
+func (c *SkillVersionClient) DeleteOne(_m *SkillVersion) *SkillVersionDeleteOne {
+	return c.DeleteOneID(_m.ID)
+}
+
+// DeleteOneID returns a builder for deleting the given entity by its id.
+func (c *SkillVersionClient) DeleteOneID(id uuid.UUID) *SkillVersionDeleteOne {
+	builder := c.Delete().Where(skillversion.ID(id))
+	builder.mutation.id = &id
+	builder.mutation.op = OpDeleteOne
+	return &SkillVersionDeleteOne{builder}
+}
+
+// Query returns a query builder for SkillVersion.
+func (c *SkillVersionClient) Query() *SkillVersionQuery {
+	return &SkillVersionQuery{
+		config: c.config,
+		ctx:    &QueryContext{Type: TypeSkillVersion},
+		inters: c.Interceptors(),
+	}
+}
+
+// Get returns a SkillVersion entity by its id.
+func (c *SkillVersionClient) Get(ctx context.Context, id uuid.UUID) (*SkillVersion, error) {
+	return c.Query().Where(skillversion.ID(id)).Only(ctx)
+}
+
+// GetX is like Get, but panics if an error occurs.
+func (c *SkillVersionClient) GetX(ctx context.Context, id uuid.UUID) *SkillVersion {
+	obj, err := c.Get(ctx, id)
+	if err != nil {
+		panic(err)
+	}
+	return obj
+}
+
+// Hooks returns the client hooks.
+func (c *SkillVersionClient) Hooks() []Hook {
+	return c.hooks.SkillVersion
+}
+
+// Interceptors returns the client interceptors.
+func (c *SkillVersionClient) Interceptors() []Interceptor {
+	return c.inters.SkillVersion
+}
+
+func (c *SkillVersionClient) mutate(ctx context.Context, m *SkillVersionMutation) (Value, error) {
+	switch m.Op() {
+	case OpCreate:
+		return (&SkillVersionCreate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdate:
+		return (&SkillVersionUpdate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdateOne:
+		return (&SkillVersionUpdateOne{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpDelete, OpDeleteOne:
+		return (&SkillVersionDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
+	default:
+		return nil, fmt.Errorf("ent: unknown SkillVersion mutation op: %q", m.Op())
+	}
+}
+
 // SubscriptionTemplateClient is a client for the SubscriptionTemplate schema.
 type SubscriptionTemplateClient struct {
 	config
@@ -5335,8 +5619,8 @@ type (
 		LifecycleHook, LifecycleHookAgentPhase, MaintenanceOperation,
 		MaintenanceOperationRun, Message, Notification, NotificationSubscription,
 		PolicyBinding, Project, ProjectContributor, ProjectSyncState, RuntimeBroker,
-		Schedule, ScheduledEvent, Secret, SubscriptionTemplate, Template, User,
-		UserAccessToken []ent.Hook
+		Schedule, ScheduledEvent, Secret, Skill, SkillVersion, SubscriptionTemplate,
+		Template, User, UserAccessToken []ent.Hook
 	}
 	inters struct {
 		AccessPolicy, Agent, AllowListEntry, ApiKey, BrokerDispatch, BrokerJoinToken,
@@ -5345,7 +5629,7 @@ type (
 		LifecycleHook, LifecycleHookAgentPhase, MaintenanceOperation,
 		MaintenanceOperationRun, Message, Notification, NotificationSubscription,
 		PolicyBinding, Project, ProjectContributor, ProjectSyncState, RuntimeBroker,
-		Schedule, ScheduledEvent, Secret, SubscriptionTemplate, Template, User,
-		UserAccessToken []ent.Interceptor
+		Schedule, ScheduledEvent, Secret, Skill, SkillVersion, SubscriptionTemplate,
+		Template, User, UserAccessToken []ent.Interceptor
 	}
 )

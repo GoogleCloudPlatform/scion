@@ -1986,3 +1986,58 @@ type DiscordPendingLink struct {
 	ExpiresAt     time.Time `json:"expiresAt"`
 	CreatedAt     time.Time `json:"createdAt"`
 }
+
+// =============================================================================
+// Skills (Skill Bank)
+// =============================================================================
+
+// Skill represents a skill record in the Hub database.
+type Skill struct {
+	ID            string    `json:"id"`
+	Name          string    `json:"name"`
+	Slug          string    `json:"slug"`
+	Description   string    `json:"description,omitempty"`
+	Tags          []string  `json:"tags,omitempty"`
+	Scope         string    `json:"scope"`
+	ScopeID       string    `json:"scopeId,omitempty"`
+	StorageURI    string    `json:"storageUri,omitempty"`
+	StorageBucket string    `json:"storageBucket,omitempty"`
+	StoragePath   string    `json:"storagePath,omitempty"`
+	Status        string    `json:"status"`
+	OwnerID       string    `json:"ownerId,omitempty"`
+	CreatedBy     string    `json:"createdBy,omitempty"`
+	UpdatedBy     string    `json:"updatedBy,omitempty"`
+	Visibility    string    `json:"visibility"`
+	Created       time.Time `json:"created"`
+	Updated       time.Time `json:"updated"`
+}
+
+// SkillVersion represents a published version of a skill.
+type SkillVersion struct {
+	ID                 string         `json:"id"`
+	SkillID            string         `json:"skillId"`
+	Version            string         `json:"version"`
+	Status             string         `json:"status"`
+	ContentHash        string         `json:"contentHash,omitempty"`
+	Files              []TemplateFile `json:"files,omitempty"`
+	PublisherID        string         `json:"publisherId,omitempty"`
+	DeprecationMessage string         `json:"deprecationMessage,omitempty"`
+	ReplacementURI     string         `json:"replacementUri,omitempty"`
+	Created            time.Time      `json:"created"`
+}
+
+// SkillScope constants
+const (
+	SkillScopeCore    = "core"
+	SkillScopeGlobal  = "global"
+	SkillScopeProject = "project"
+	SkillScopeUser    = "user"
+)
+
+// SkillVersionStatus constants
+const (
+	SkillVersionStatusDraft      = "draft"
+	SkillVersionStatusPublished  = "published"
+	SkillVersionStatusDeprecated = "deprecated"
+	SkillVersionStatusArchived   = "archived"
+)

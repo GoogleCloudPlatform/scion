@@ -96,6 +96,12 @@ type ScheduledEvent func(*sql.Selector)
 // Secret is the predicate function for secret builders.
 type Secret func(*sql.Selector)
 
+// Skill is the predicate function for skill builders.
+type Skill func(*sql.Selector)
+
+// SkillVersion is the predicate function for skillversion builders.
+type SkillVersion func(*sql.Selector)
+
 // SubscriptionTemplate is the predicate function for subscriptiontemplate builders.
 type SubscriptionTemplate func(*sql.Selector)
 

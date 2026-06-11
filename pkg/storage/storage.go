@@ -211,6 +211,8 @@ const (
 	ResourceKindTemplate ResourceKind = "template"
 	// ResourceKindHarnessConfig is a harness configuration bundle.
 	ResourceKindHarnessConfig ResourceKind = "harness-config"
+	// ResourceKindSkill is a skill bank skill.
+	ResourceKindSkill ResourceKind = "skill"
 )
 
 // resourcePrefix returns the top-level storage prefix for a resource kind.
@@ -218,6 +220,8 @@ func resourcePrefix(kind ResourceKind) string {
 	switch kind {
 	case ResourceKindHarnessConfig:
 		return "harness-configs"
+	case ResourceKindSkill:
+		return "skills"
 	default:
 		return "templates"
 	}
@@ -255,6 +259,17 @@ func TemplateStoragePath(scope, scopeID, templateSlug string) string {
 // TemplateStorageURI returns the full storage URI for a template.
 func TemplateStorageURI(bucket, scope, scopeID, templateSlug string) string {
 	return ResourceStorageURI(bucket, ResourceKindTemplate, scope, scopeID, templateSlug)
+}
+
+// SkillStoragePath returns the storage path for a skill.
+// Skills are stored under the /skills prefix with scope-based organization.
+func SkillStoragePath(scope, scopeID, slug string) string {
+	return ResourceStoragePath(ResourceKindSkill, scope, scopeID, slug)
+}
+
+// SkillStorageURI returns the full storage URI for a skill.
+func SkillStorageURI(bucket, scope, scopeID, slug string) string {
+	return ResourceStorageURI(bucket, ResourceKindSkill, scope, scopeID, slug)
 }
 
 // HarnessConfigStoragePath returns the storage path for a harness config.

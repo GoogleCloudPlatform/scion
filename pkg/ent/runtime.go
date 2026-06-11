@@ -36,6 +36,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/scheduledevent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/schema"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/secret"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/skill"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/skillversion"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/subscriptiontemplate"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/template"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/user"
@@ -897,6 +899,56 @@ func init() {
 	secretDescID := secretFields[0].Descriptor()
 	// secret.DefaultID holds the default value on creation for the id field.
 	secret.DefaultID = secretDescID.Default.(func() uuid.UUID)
+	skillFields := schema.Skill{}.Fields()
+	_ = skillFields
+	// skillDescName is the schema descriptor for name field.
+	skillDescName := skillFields[1].Descriptor()
+	// skill.NameValidator is a validator for the "name" field. It is called by the builders before save.
+	skill.NameValidator = skillDescName.Validators[0].(func(string) error)
+	// skillDescSlug is the schema descriptor for slug field.
+	skillDescSlug := skillFields[2].Descriptor()
+	// skill.SlugValidator is a validator for the "slug" field. It is called by the builders before save.
+	skill.SlugValidator = skillDescSlug.Validators[0].(func(string) error)
+	// skillDescScope is the schema descriptor for scope field.
+	skillDescScope := skillFields[5].Descriptor()
+	// skill.DefaultScope holds the default value on creation for the scope field.
+	skill.DefaultScope = skillDescScope.Default.(string)
+	// skillDescVisibility is the schema descriptor for visibility field.
+	skillDescVisibility := skillFields[14].Descriptor()
+	// skill.DefaultVisibility holds the default value on creation for the visibility field.
+	skill.DefaultVisibility = skillDescVisibility.Default.(string)
+	// skillDescCreated is the schema descriptor for created field.
+	skillDescCreated := skillFields[15].Descriptor()
+	// skill.DefaultCreated holds the default value on creation for the created field.
+	skill.DefaultCreated = skillDescCreated.Default.(func() time.Time)
+	// skillDescUpdated is the schema descriptor for updated field.
+	skillDescUpdated := skillFields[16].Descriptor()
+	// skill.DefaultUpdated holds the default value on creation for the updated field.
+	skill.DefaultUpdated = skillDescUpdated.Default.(func() time.Time)
+	// skill.UpdateDefaultUpdated holds the default value on update for the updated field.
+	skill.UpdateDefaultUpdated = skillDescUpdated.UpdateDefault.(func() time.Time)
+	// skillDescID is the schema descriptor for id field.
+	skillDescID := skillFields[0].Descriptor()
+	// skill.DefaultID holds the default value on creation for the id field.
+	skill.DefaultID = skillDescID.Default.(func() uuid.UUID)
+	skillversionFields := schema.SkillVersion{}.Fields()
+	_ = skillversionFields
+	// skillversionDescSkillID is the schema descriptor for skill_id field.
+	skillversionDescSkillID := skillversionFields[1].Descriptor()
+	// skillversion.SkillIDValidator is a validator for the "skill_id" field. It is called by the builders before save.
+	skillversion.SkillIDValidator = skillversionDescSkillID.Validators[0].(func(string) error)
+	// skillversionDescVersion is the schema descriptor for version field.
+	skillversionDescVersion := skillversionFields[2].Descriptor()
+	// skillversion.VersionValidator is a validator for the "version" field. It is called by the builders before save.
+	skillversion.VersionValidator = skillversionDescVersion.Validators[0].(func(string) error)
+	// skillversionDescCreated is the schema descriptor for created field.
+	skillversionDescCreated := skillversionFields[9].Descriptor()
+	// skillversion.DefaultCreated holds the default value on creation for the created field.
+	skillversion.DefaultCreated = skillversionDescCreated.Default.(func() time.Time)
+	// skillversionDescID is the schema descriptor for id field.
+	skillversionDescID := skillversionFields[0].Descriptor()
+	// skillversion.DefaultID holds the default value on creation for the id field.
+	skillversion.DefaultID = skillversionDescID.Default.(func() uuid.UUID)
 	subscriptiontemplateFields := schema.SubscriptionTemplate{}.Fields()
 	_ = subscriptiontemplateFields
 	// subscriptiontemplateDescName is the schema descriptor for name field.

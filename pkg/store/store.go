@@ -117,6 +117,9 @@ type Store interface {
 
 	// DiscordPendingLink operations (Discord Account Linking)
 	DiscordPendingLinkStore
+
+	// Skill operations (Skill Bank)
+	SkillStore
 }
 
 // AgentStore defines agent-related persistence operations.
@@ -1243,4 +1246,37 @@ type DiscordPendingLinkStore interface {
 	DeleteDiscordPendingLink(ctx context.Context, code string) error
 	DeleteDiscordPendingLinksByDiscordUser(ctx context.Context, discordUserID string) error
 	DeleteExpiredDiscordPendingLinks(ctx context.Context) (int, error)
+}
+
+// =============================================================================
+// Skills (Skill Bank)
+// =============================================================================
+
+// SkillStore defines skill-related persistence operations.
+type SkillStore interface {
+	CreateSkill(ctx context.Context, skill *Skill) error
+	GetSkill(ctx context.Context, id string) (*Skill, error)
+	GetSkillBySlug(ctx context.Context, slug, scope, scopeID string) (*Skill, error)
+	UpdateSkill(ctx context.Context, skill *Skill) error
+	DeleteSkill(ctx context.Context, id string) error
+	ListSkills(ctx context.Context, filter SkillFilter, opts ListOptions) (*ListResult[Skill], error)
+
+	CreateSkillVersion(ctx context.Context, version *SkillVersion) error
+	GetSkillVersion(ctx context.Context, id string) (*SkillVersion, error)
+	GetSkillVersionByNumber(ctx context.Context, skillID, version string) (*SkillVersion, error)
+	ListSkillVersions(ctx context.Context, skillID string, opts ListOptions) (*ListResult[SkillVersion], error)
+	UpdateSkillVersion(ctx context.Context, version *SkillVersion) error
+
+	ResolveSkillVersion(ctx context.Context, skillID, constraint string) (*SkillVersion, error)
+}
+
+// SkillFilter defines criteria for filtering skills.
+type SkillFilter struct {
+	Name    string
+	Scope   string
+	ScopeID string
+	OwnerID string
+	Status  string
+	Search  string
+	Tags    []string
 }

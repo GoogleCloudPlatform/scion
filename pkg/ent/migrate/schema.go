@@ -960,6 +960,80 @@ var (
 			},
 		},
 	}
+	// SkillsColumns holds the columns for the "skills" table.
+	SkillsColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "name", Type: field.TypeString},
+		{Name: "slug", Type: field.TypeString},
+		{Name: "description", Type: field.TypeString, Nullable: true},
+		{Name: "tags", Type: field.TypeString, Nullable: true},
+		{Name: "scope", Type: field.TypeString, Default: "global"},
+		{Name: "scope_id", Type: field.TypeString, Nullable: true},
+		{Name: "storage_uri", Type: field.TypeString, Nullable: true},
+		{Name: "storage_bucket", Type: field.TypeString, Nullable: true},
+		{Name: "storage_path", Type: field.TypeString, Nullable: true},
+		{Name: "status", Type: field.TypeEnum, Enums: []string{"active", "archived"}, Default: "active"},
+		{Name: "owner_id", Type: field.TypeString, Nullable: true},
+		{Name: "created_by", Type: field.TypeString, Nullable: true},
+		{Name: "updated_by", Type: field.TypeString, Nullable: true},
+		{Name: "visibility", Type: field.TypeString, Default: "private"},
+		{Name: "created", Type: field.TypeTime},
+		{Name: "updated", Type: field.TypeTime},
+	}
+	// SkillsTable holds the schema information for the "skills" table.
+	SkillsTable = &schema.Table{
+		Name:       "skills",
+		Columns:    SkillsColumns,
+		PrimaryKey: []*schema.Column{SkillsColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "skill_slug_scope_scope_id",
+				Unique:  true,
+				Columns: []*schema.Column{SkillsColumns[2], SkillsColumns[5], SkillsColumns[6]},
+			},
+			{
+				Name:    "skill_scope_scope_id",
+				Unique:  false,
+				Columns: []*schema.Column{SkillsColumns[5], SkillsColumns[6]},
+			},
+			{
+				Name:    "skill_status",
+				Unique:  false,
+				Columns: []*schema.Column{SkillsColumns[10]},
+			},
+		},
+	}
+	// SkillVersionsColumns holds the columns for the "skill_versions" table.
+	SkillVersionsColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "skill_id", Type: field.TypeString},
+		{Name: "version", Type: field.TypeString},
+		{Name: "status", Type: field.TypeEnum, Enums: []string{"draft", "published", "deprecated", "archived"}, Default: "draft"},
+		{Name: "content_hash", Type: field.TypeString, Nullable: true},
+		{Name: "files", Type: field.TypeString, Nullable: true},
+		{Name: "publisher_id", Type: field.TypeString, Nullable: true},
+		{Name: "deprecation_message", Type: field.TypeString, Nullable: true},
+		{Name: "replacement_uri", Type: field.TypeString, Nullable: true},
+		{Name: "created", Type: field.TypeTime},
+	}
+	// SkillVersionsTable holds the schema information for the "skill_versions" table.
+	SkillVersionsTable = &schema.Table{
+		Name:       "skill_versions",
+		Columns:    SkillVersionsColumns,
+		PrimaryKey: []*schema.Column{SkillVersionsColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "skillversion_skill_id_version",
+				Unique:  true,
+				Columns: []*schema.Column{SkillVersionsColumns[1], SkillVersionsColumns[2]},
+			},
+			{
+				Name:    "skillversion_skill_id_status",
+				Unique:  false,
+				Columns: []*schema.Column{SkillVersionsColumns[1], SkillVersionsColumns[3]},
+			},
+		},
+	}
 	// SubscriptionTemplatesColumns holds the columns for the "subscription_templates" table.
 	SubscriptionTemplatesColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeUUID},
@@ -1153,6 +1227,8 @@ var (
 		SchedulesTable,
 		ScheduledEventsTable,
 		SecretsTable,
+		SkillsTable,
+		SkillVersionsTable,
 		SubscriptionTemplatesTable,
 		TemplatesTable,
 		UsersTable,
@@ -1242,6 +1318,12 @@ func init() {
 	}
 	SecretsTable.Annotation = &entsql.Annotation{
 		Table: "secrets",
+	}
+	SkillsTable.Annotation = &entsql.Annotation{
+		Table: "skills",
+	}
+	SkillVersionsTable.Annotation = &entsql.Annotation{
+		Table: "skill_versions",
 	}
 	SubscriptionTemplatesTable.Annotation = &entsql.Annotation{
 		Table: "subscription_templates",

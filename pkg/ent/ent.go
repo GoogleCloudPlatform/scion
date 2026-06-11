@@ -42,6 +42,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/schedule"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/scheduledevent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/secret"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/skill"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/skillversion"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/subscriptiontemplate"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/template"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/user"
@@ -136,6 +138,8 @@ func checkColumn(t, c string) error {
 			schedule.Table:                 schedule.ValidColumn,
 			scheduledevent.Table:           scheduledevent.ValidColumn,
 			secret.Table:                   secret.ValidColumn,
+			skill.Table:                    skill.ValidColumn,
+			skillversion.Table:             skillversion.ValidColumn,
 			subscriptiontemplate.Table:     subscriptiontemplate.ValidColumn,
 			template.Table:                 template.ValidColumn,
 			user.Table:                     user.ValidColumn,
