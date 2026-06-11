@@ -2912,10 +2912,21 @@ func (s *Server) handleProjectBroadcast(w http.ResponseWriter, r *http.Request, 
 		skipped += c
 	}
 
+	// Collect running agents from the already-fetched list for direct fan-out.
+	var runningAgents []store.Agent
+	for _, agent := range allResult.Items {
+		if req.StructuredMessage.Sender == "agent:"+agent.Slug {
+			continue
+		}
+		if agent.Phase == string(state.PhaseRunning) {
+			runningAgents = append(runningAgents, agent)
+		}
+	}
+
 	proxy := s.GetMessageBrokerProxy()
 	if proxy == nil {
 		// Fallback: no broker configured, do direct fan-out
-		if !s.broadcastDirect(w, r, projectID, req.StructuredMessage, req.Interrupt) {
+		if !s.broadcastDirect(w, r, projectID, req.StructuredMessage, req.Interrupt, runningAgents) {
 			return
 		}
 		s.writeBroadcastResponse(w, targeted+skipped, targeted, skipped, skippedBreakdown)
@@ -2959,11 +2970,11 @@ func (s *Server) writeBroadcastResponse(w http.ResponseWriter, total, targeted, 
 	json.NewEncoder(w).Encode(resp)
 }
 
-// broadcastDirect fans out a broadcast message directly to all running agents
-// in the project without using the message broker. This is the fallback when
-// no broker is configured. Returns true on success (caller writes 202 response),
-// false if an error response was already written.
-func (s *Server) broadcastDirect(w http.ResponseWriter, r *http.Request, projectID string, msg *messages.StructuredMessage, interrupt bool) bool {
+// broadcastDirect fans out a broadcast message directly to the given running agents
+// without using the message broker. The caller provides pre-filtered running agents
+// (already excluding the sender) from the same ListAgents query used for targeting counts.
+// Returns true on success (caller writes 202 response), false if an error response was written.
+func (s *Server) broadcastDirect(w http.ResponseWriter, r *http.Request, projectID string, msg *messages.StructuredMessage, interrupt bool, runningAgents []store.Agent) bool {
 	ctx := r.Context()
 	dispatcher := s.GetDispatcher()
 	if dispatcher == nil {
@@ -2971,19 +2982,7 @@ func (s *Server) broadcastDirect(w http.ResponseWriter, r *http.Request, project
 		return false
 	}
 
-	result, err := s.store.ListAgents(ctx, store.AgentFilter{
-		ProjectID: projectID,
-		Phase:     "running",
-	}, store.ListOptions{})
-	if err != nil {
-		writeErrorFromErr(w, err, "")
-		return false
-	}
-
-	for _, agent := range result.Items {
-		if msg.Sender == "agent:"+agent.Slug {
-			continue
-		}
+	for _, agent := range runningAgents {
 		agentMsg := *msg
 		agentMsg.Recipient = "agent:" + agent.Slug
 		agentMsg.RecipientID = agent.ID

@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"text/tabwriter"
@@ -408,6 +409,8 @@ func sendMessageViaHub(hubCtx *HubContext, agentName string, message string, int
 	// Global broadcast (--all): fan-out at client level across projects.
 	// Each project doesn't have a global broadcast endpoint, so we list all
 	// running agents and send individually.
+	// TODO: upgrade to P3 model (targeting breakdown, DELIVERY_FAILED notifications)
+	// once a global broadcast endpoint exists.
 	if all {
 		agentSvc := hubCtx.Client.Agents()
 
@@ -488,10 +491,23 @@ func printBroadcastAccepted(resp *hubclient.BroadcastResponse) {
 		fmt.Println("Broadcast accepted.")
 		return
 	}
+	if resp.Targeted == 0 {
+		if resp.Skipped > 0 {
+			fmt.Printf("No running agents to broadcast to (%d agents skipped).\n", resp.Skipped)
+		} else {
+			fmt.Println("No running agents found to broadcast to.")
+		}
+		return
+	}
 	if resp.Skipped > 0 {
-		parts := make([]string, 0, len(resp.SkippedBreakdown))
-		for phase, count := range resp.SkippedBreakdown {
-			parts = append(parts, fmt.Sprintf("%d %s", count, phase))
+		phases := make([]string, 0, len(resp.SkippedBreakdown))
+		for phase := range resp.SkippedBreakdown {
+			phases = append(phases, phase)
+		}
+		sort.Strings(phases)
+		parts := make([]string, 0, len(phases))
+		for _, phase := range phases {
+			parts = append(parts, fmt.Sprintf("%d %s", resp.SkippedBreakdown[phase], phase))
 		}
 		fmt.Printf("Broadcast accepted (%d running agents targeted, %d skipped: %s).\n",
 			resp.Targeted, resp.Skipped, strings.Join(parts, ", "))
