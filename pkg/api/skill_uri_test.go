@@ -141,7 +141,7 @@ func TestParseSkillURI_InvalidForms(t *testing.T) {
 		{"", "empty URI"},
 		{"skill://scion/core/@^1.0", "empty name"},
 		{"skill://scion/core/My_Skill@1.0", "name not kebab-case"},
-		{"skill://scion/grove/team/name@1.0", "grove is not a valid scope"},
+		{"skill://scion/invalid-scope/team/name@1.0", "invalid-scope is not a valid scope"},
 		{"skill://scion/core/name@", "empty version after @"},
 		{"skill://scion/unknown-scope/name@1.0", "unrecognized scope keyword"},
 		{"../traversal", "path traversal in bare name"},
