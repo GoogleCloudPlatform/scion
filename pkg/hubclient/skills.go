@@ -206,11 +206,14 @@ type ResolveSkillsResponse struct {
 
 // ResolvedSkill is a single resolved skill in the batch response.
 type ResolvedSkill struct {
-	URI             string          `json:"uri"`
-	Name            string          `json:"name"`
-	ResolvedVersion string          `json:"resolvedVersion"`
-	ContentHash     string          `json:"contentHash"`
-	Files           []DownloadURLInfo `json:"files"`
+	URI                string            `json:"uri"`
+	Name               string            `json:"name"`
+	ResolvedVersion    string            `json:"resolvedVersion"`
+	ContentHash        string            `json:"contentHash"`
+	Files              []DownloadURLInfo `json:"files"`
+	Deprecated         bool              `json:"deprecated,omitempty"`
+	DeprecationMessage string            `json:"deprecationMessage,omitempty"`
+	ReplacementURI     string            `json:"replacementUri,omitempty"`
 }
 
 // ResolveSkillError describes a resolution failure for a single skill.

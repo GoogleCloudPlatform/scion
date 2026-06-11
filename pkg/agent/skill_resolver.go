@@ -67,12 +67,15 @@ type ResolveError struct {
 
 // ResolvedSkill is a skill that was successfully resolved to downloadable files.
 type ResolvedSkill struct {
-	Name    string
-	URI     string
-	As      string
-	Version string
-	Hash    string // Bundle content hash (sha256:...)
-	Files   []ResolvedFile
+	Name               string
+	URI                string
+	As                 string
+	Version            string
+	Hash               string // Bundle content hash (sha256:...)
+	Files              []ResolvedFile
+	Deprecated         bool   `json:"-"`
+	DeprecationMessage string `json:"-"`
+	ReplacementURI     string `json:"-"`
 }
 
 // DestName returns the directory name to use when installing this skill.
@@ -162,15 +165,18 @@ type SkillResolutionRecord struct {
 
 // SkillResolutionEntry records a single installed skill.
 type SkillResolutionEntry struct {
-	URI             string      `json:"uri"`
-	Name            string      `json:"name"`
-	As              string      `json:"as,omitempty"`
-	ResolvedVersion string      `json:"resolvedVersion"`
-	ContentHash     string      `json:"contentHash"`
-	Scope           string      `json:"scope"`
-	InstalledPath   string      `json:"installedPath"`
-	Source          string      `json:"source"`
-	Files           []FileEntry `json:"files"`
+	URI                string      `json:"uri"`
+	Name               string      `json:"name"`
+	As                 string      `json:"as,omitempty"`
+	ResolvedVersion    string      `json:"resolvedVersion"`
+	ContentHash        string      `json:"contentHash"`
+	Scope              string      `json:"scope"`
+	InstalledPath      string      `json:"installedPath"`
+	Source             string      `json:"source"`
+	Files              []FileEntry `json:"files"`
+	Deprecated         bool        `json:"deprecated,omitempty"`
+	DeprecationMessage string      `json:"deprecationMessage,omitempty"`
+	ReplacementURI     string      `json:"replacementUri,omitempty"`
 }
 
 // FileEntry records a single file within an installed skill.
@@ -221,6 +227,17 @@ func installResolvedSkills(
 			return nil, fmt.Errorf("skill %q installation failed: %w", skill.URI, err)
 		}
 		record.Skills = append(record.Skills, *entry)
+
+		if skill.Deprecated {
+			msg := fmt.Sprintf("WARNING: skill %s@%s is deprecated", skill.Name, skill.Version)
+			if skill.DeprecationMessage != "" {
+				msg += ": " + skill.DeprecationMessage
+			}
+			if skill.ReplacementURI != "" {
+				msg += fmt.Sprintf(" (replacement: %s)", skill.ReplacementURI)
+			}
+			util.Warnf(msg)
+		}
 	}
 
 	return record, nil
@@ -350,15 +367,18 @@ func buildSkillEntry(skill ResolvedSkill, dest, skillsDest string) (*SkillResolu
 	}
 
 	return &SkillResolutionEntry{
-		URI:             skill.URI,
-		Name:            skill.Name,
-		As:              skill.As,
-		ResolvedVersion: skill.Version,
-		ContentHash:     skill.Hash,
-		Scope:           scope,
-		InstalledPath:   filepath.ToSlash(filepath.Join(filepath.Base(skillsDest), dest)),
-		Source:          "registry",
-		Files:           fileEntries,
+		URI:                skill.URI,
+		Name:               skill.Name,
+		As:                 skill.As,
+		ResolvedVersion:    skill.Version,
+		ContentHash:        skill.Hash,
+		Scope:              scope,
+		InstalledPath:      filepath.ToSlash(filepath.Join(filepath.Base(skillsDest), dest)),
+		Source:             "registry",
+		Files:              fileEntries,
+		Deprecated:         skill.Deprecated,
+		DeprecationMessage: skill.DeprecationMessage,
+		ReplacementURI:     skill.ReplacementURI,
 	}, nil
 }
 

@@ -69,12 +69,15 @@ func (r *HubSkillResolver) Resolve(ctx context.Context, refs []api.SkillReferenc
 			}
 		}
 		result.Resolved = append(result.Resolved, ResolvedSkill{
-			Name:    rs.Name,
-			URI:     rs.URI,
-			As:      ref.As,
-			Version: rs.ResolvedVersion,
-			Hash:    rs.ContentHash,
-			Files:   files,
+			Name:               rs.Name,
+			URI:                rs.URI,
+			As:                 ref.As,
+			Version:            rs.ResolvedVersion,
+			Hash:               rs.ContentHash,
+			Files:              files,
+			Deprecated:         rs.Deprecated,
+			DeprecationMessage: rs.DeprecationMessage,
+			ReplacementURI:     rs.ReplacementURI,
 		})
 	}
 

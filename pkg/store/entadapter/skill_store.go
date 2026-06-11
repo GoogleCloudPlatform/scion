@@ -393,11 +393,11 @@ func (s *SkillStore) ResolveSkillVersion(ctx context.Context, skillID, constrain
 		return entSkillVersionToStore(e), nil
 	}
 
-	// Fetch all published versions for this skill
+	// Fetch all published and deprecated versions for this skill
 	rows, err := s.client.SkillVersion.Query().
 		Where(
 			entskillversion.SkillIDEQ(skillID),
-			entskillversion.StatusEQ(entskillversion.StatusPublished),
+			entskillversion.StatusIn(entskillversion.StatusPublished, entskillversion.StatusDeprecated),
 		).
 		All(ctx)
 	if err != nil {

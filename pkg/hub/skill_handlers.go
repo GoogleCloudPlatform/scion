@@ -100,11 +100,14 @@ type ResolveSkillsResponse struct {
 
 // ResolvedSkillResponse is a single resolved skill in the batch response.
 type ResolvedSkillResponse struct {
-	URI             string          `json:"uri"`
-	Name            string          `json:"name"`
-	ResolvedVersion string          `json:"resolvedVersion"`
-	ContentHash     string          `json:"contentHash"`
-	Files           []DownloadURLInfo `json:"files"`
+	URI                string            `json:"uri"`
+	Name               string            `json:"name"`
+	ResolvedVersion    string            `json:"resolvedVersion"`
+	ContentHash        string            `json:"contentHash"`
+	Files              []DownloadURLInfo `json:"files"`
+	Deprecated         bool              `json:"deprecated,omitempty"`
+	DeprecationMessage string            `json:"deprecationMessage,omitempty"`
+	ReplacementURI     string            `json:"replacementUri,omitempty"`
 }
 
 // ResolveSkillError describes a resolution failure for a single skill.
@@ -996,6 +999,12 @@ func (s *Server) handleSkillsResolve(w http.ResponseWriter, r *http.Request) {
 			Name:            skill.Name,
 			ResolvedVersion: sv.Version,
 			ContentHash:     sv.ContentHash,
+		}
+
+		if sv.Status == store.SkillVersionStatusDeprecated {
+			entry.Deprecated = true
+			entry.DeprecationMessage = sv.DeprecationMessage
+			entry.ReplacementURI = sv.ReplacementURI
 		}
 
 		// Generate download URLs for the resolved version's files
