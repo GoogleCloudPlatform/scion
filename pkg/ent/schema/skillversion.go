@@ -53,6 +53,8 @@ func (SkillVersion) Fields() []ent.Field {
 			Optional(),
 		field.String("replacement_uri").
 			Optional(),
+		field.Int64("download_count").
+			Default(0),
 		field.Time("created").
 			Default(time.Now).
 			Immutable(),

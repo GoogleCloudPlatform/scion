@@ -1268,6 +1268,8 @@ type SkillStore interface {
 	UpdateSkillVersion(ctx context.Context, version *SkillVersion) error
 
 	ResolveSkillVersion(ctx context.Context, skillID, constraint string) (*SkillVersion, error)
+
+	IncrementSkillVersionDownloadCount(ctx context.Context, versionID string) error
 }
 
 // SkillFilter defines criteria for filtering skills.

@@ -90,6 +90,11 @@ func ReplacementURI(v string) predicate.SkillVersion {
 	return predicate.SkillVersion(sql.FieldEQ(FieldReplacementURI, v))
 }
 
+// DownloadCount applies equality check predicate on the "download_count" field. It's identical to DownloadCountEQ.
+func DownloadCount(v int64) predicate.SkillVersion {
+	return predicate.SkillVersion(sql.FieldEQ(FieldDownloadCount, v))
+}
+
 // Created applies equality check predicate on the "created" field. It's identical to CreatedEQ.
 func Created(v time.Time) predicate.SkillVersion {
 	return predicate.SkillVersion(sql.FieldEQ(FieldCreated, v))
@@ -618,6 +623,46 @@ func ReplacementURIEqualFold(v string) predicate.SkillVersion {
 // ReplacementURIContainsFold applies the ContainsFold predicate on the "replacement_uri" field.
 func ReplacementURIContainsFold(v string) predicate.SkillVersion {
 	return predicate.SkillVersion(sql.FieldContainsFold(FieldReplacementURI, v))
+}
+
+// DownloadCountEQ applies the EQ predicate on the "download_count" field.
+func DownloadCountEQ(v int64) predicate.SkillVersion {
+	return predicate.SkillVersion(sql.FieldEQ(FieldDownloadCount, v))
+}
+
+// DownloadCountNEQ applies the NEQ predicate on the "download_count" field.
+func DownloadCountNEQ(v int64) predicate.SkillVersion {
+	return predicate.SkillVersion(sql.FieldNEQ(FieldDownloadCount, v))
+}
+
+// DownloadCountIn applies the In predicate on the "download_count" field.
+func DownloadCountIn(vs ...int64) predicate.SkillVersion {
+	return predicate.SkillVersion(sql.FieldIn(FieldDownloadCount, vs...))
+}
+
+// DownloadCountNotIn applies the NotIn predicate on the "download_count" field.
+func DownloadCountNotIn(vs ...int64) predicate.SkillVersion {
+	return predicate.SkillVersion(sql.FieldNotIn(FieldDownloadCount, vs...))
+}
+
+// DownloadCountGT applies the GT predicate on the "download_count" field.
+func DownloadCountGT(v int64) predicate.SkillVersion {
+	return predicate.SkillVersion(sql.FieldGT(FieldDownloadCount, v))
+}
+
+// DownloadCountGTE applies the GTE predicate on the "download_count" field.
+func DownloadCountGTE(v int64) predicate.SkillVersion {
+	return predicate.SkillVersion(sql.FieldGTE(FieldDownloadCount, v))
+}
+
+// DownloadCountLT applies the LT predicate on the "download_count" field.
+func DownloadCountLT(v int64) predicate.SkillVersion {
+	return predicate.SkillVersion(sql.FieldLT(FieldDownloadCount, v))
+}
+
+// DownloadCountLTE applies the LTE predicate on the "download_count" field.
+func DownloadCountLTE(v int64) predicate.SkillVersion {
+	return predicate.SkillVersion(sql.FieldLTE(FieldDownloadCount, v))
 }
 
 // CreatedEQ applies the EQ predicate on the "created" field.

@@ -32585,6 +32585,8 @@ type SkillVersionMutation struct {
 	publisher_id        *string
 	deprecation_message *string
 	replacement_uri     *string
+	download_count      *int64
+	adddownload_count   *int64
 	created             *time.Time
 	clearedFields       map[string]struct{}
 	done                bool
@@ -33049,6 +33051,62 @@ func (m *SkillVersionMutation) ResetReplacementURI() {
 	delete(m.clearedFields, skillversion.FieldReplacementURI)
 }
 
+// SetDownloadCount sets the "download_count" field.
+func (m *SkillVersionMutation) SetDownloadCount(i int64) {
+	m.download_count = &i
+	m.adddownload_count = nil
+}
+
+// DownloadCount returns the value of the "download_count" field in the mutation.
+func (m *SkillVersionMutation) DownloadCount() (r int64, exists bool) {
+	v := m.download_count
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldDownloadCount returns the old "download_count" field's value of the SkillVersion entity.
+// If the SkillVersion object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *SkillVersionMutation) OldDownloadCount(ctx context.Context) (v int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldDownloadCount is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldDownloadCount requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldDownloadCount: %w", err)
+	}
+	return oldValue.DownloadCount, nil
+}
+
+// AddDownloadCount adds i to the "download_count" field.
+func (m *SkillVersionMutation) AddDownloadCount(i int64) {
+	if m.adddownload_count != nil {
+		*m.adddownload_count += i
+	} else {
+		m.adddownload_count = &i
+	}
+}
+
+// AddedDownloadCount returns the value that was added to the "download_count" field in this mutation.
+func (m *SkillVersionMutation) AddedDownloadCount() (r int64, exists bool) {
+	v := m.adddownload_count
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetDownloadCount resets all changes to the "download_count" field.
+func (m *SkillVersionMutation) ResetDownloadCount() {
+	m.download_count = nil
+	m.adddownload_count = nil
+}
+
 // SetCreated sets the "created" field.
 func (m *SkillVersionMutation) SetCreated(t time.Time) {
 	m.created = &t
@@ -33119,7 +33177,7 @@ func (m *SkillVersionMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *SkillVersionMutation) Fields() []string {
-	fields := make([]string, 0, 9)
+	fields := make([]string, 0, 10)
 	if m.skill_id != nil {
 		fields = append(fields, skillversion.FieldSkillID)
 	}
@@ -33143,6 +33201,9 @@ func (m *SkillVersionMutation) Fields() []string {
 	}
 	if m.replacement_uri != nil {
 		fields = append(fields, skillversion.FieldReplacementURI)
+	}
+	if m.download_count != nil {
+		fields = append(fields, skillversion.FieldDownloadCount)
 	}
 	if m.created != nil {
 		fields = append(fields, skillversion.FieldCreated)
@@ -33171,6 +33232,8 @@ func (m *SkillVersionMutation) Field(name string) (ent.Value, bool) {
 		return m.DeprecationMessage()
 	case skillversion.FieldReplacementURI:
 		return m.ReplacementURI()
+	case skillversion.FieldDownloadCount:
+		return m.DownloadCount()
 	case skillversion.FieldCreated:
 		return m.Created()
 	}
@@ -33198,6 +33261,8 @@ func (m *SkillVersionMutation) OldField(ctx context.Context, name string) (ent.V
 		return m.OldDeprecationMessage(ctx)
 	case skillversion.FieldReplacementURI:
 		return m.OldReplacementURI(ctx)
+	case skillversion.FieldDownloadCount:
+		return m.OldDownloadCount(ctx)
 	case skillversion.FieldCreated:
 		return m.OldCreated(ctx)
 	}
@@ -33265,6 +33330,13 @@ func (m *SkillVersionMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetReplacementURI(v)
 		return nil
+	case skillversion.FieldDownloadCount:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetDownloadCount(v)
+		return nil
 	case skillversion.FieldCreated:
 		v, ok := value.(time.Time)
 		if !ok {
@@ -33279,13 +33351,21 @@ func (m *SkillVersionMutation) SetField(name string, value ent.Value) error {
 // AddedFields returns all numeric fields that were incremented/decremented during
 // this mutation.
 func (m *SkillVersionMutation) AddedFields() []string {
-	return nil
+	var fields []string
+	if m.adddownload_count != nil {
+		fields = append(fields, skillversion.FieldDownloadCount)
+	}
+	return fields
 }
 
 // AddedField returns the numeric value that was incremented/decremented on a field
 // with the given name. The second boolean return value indicates that this field
 // was not set, or was not defined in the schema.
 func (m *SkillVersionMutation) AddedField(name string) (ent.Value, bool) {
+	switch name {
+	case skillversion.FieldDownloadCount:
+		return m.AddedDownloadCount()
+	}
 	return nil, false
 }
 
@@ -33294,6 +33374,13 @@ func (m *SkillVersionMutation) AddedField(name string) (ent.Value, bool) {
 // type.
 func (m *SkillVersionMutation) AddField(name string, value ent.Value) error {
 	switch name {
+	case skillversion.FieldDownloadCount:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddDownloadCount(v)
+		return nil
 	}
 	return fmt.Errorf("unknown SkillVersion numeric field %s", name)
 }
@@ -33377,6 +33464,9 @@ func (m *SkillVersionMutation) ResetField(name string) error {
 		return nil
 	case skillversion.FieldReplacementURI:
 		m.ResetReplacementURI()
+		return nil
+	case skillversion.FieldDownloadCount:
+		m.ResetDownloadCount()
 		return nil
 	case skillversion.FieldCreated:
 		m.ResetCreated()

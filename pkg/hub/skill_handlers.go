@@ -1020,6 +1020,10 @@ func (s *Server) handleSkillsResolve(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
+		go func(versionID string) {
+			_ = s.store.IncrementSkillVersionDownloadCount(context.Background(), versionID)
+		}(sv.ID)
+
 		resolved = append(resolved, entry)
 	}
 

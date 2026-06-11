@@ -120,6 +120,20 @@ func (_c *SkillVersionCreate) SetNillableReplacementURI(v *string) *SkillVersion
 	return _c
 }
 
+// SetDownloadCount sets the "download_count" field.
+func (_c *SkillVersionCreate) SetDownloadCount(v int64) *SkillVersionCreate {
+	_c.mutation.SetDownloadCount(v)
+	return _c
+}
+
+// SetNillableDownloadCount sets the "download_count" field if the given value is not nil.
+func (_c *SkillVersionCreate) SetNillableDownloadCount(v *int64) *SkillVersionCreate {
+	if v != nil {
+		_c.SetDownloadCount(*v)
+	}
+	return _c
+}
+
 // SetCreated sets the "created" field.
 func (_c *SkillVersionCreate) SetCreated(v time.Time) *SkillVersionCreate {
 	_c.mutation.SetCreated(v)
@@ -187,6 +201,10 @@ func (_c *SkillVersionCreate) defaults() {
 		v := skillversion.DefaultStatus
 		_c.mutation.SetStatus(v)
 	}
+	if _, ok := _c.mutation.DownloadCount(); !ok {
+		v := skillversion.DefaultDownloadCount
+		_c.mutation.SetDownloadCount(v)
+	}
 	if _, ok := _c.mutation.Created(); !ok {
 		v := skillversion.DefaultCreated()
 		_c.mutation.SetCreated(v)
@@ -222,6 +240,9 @@ func (_c *SkillVersionCreate) check() error {
 		if err := skillversion.StatusValidator(v); err != nil {
 			return &ValidationError{Name: "status", err: fmt.Errorf(`ent: validator failed for field "SkillVersion.status": %w`, err)}
 		}
+	}
+	if _, ok := _c.mutation.DownloadCount(); !ok {
+		return &ValidationError{Name: "download_count", err: errors.New(`ent: missing required field "SkillVersion.download_count"`)}
 	}
 	if _, ok := _c.mutation.Created(); !ok {
 		return &ValidationError{Name: "created", err: errors.New(`ent: missing required field "SkillVersion.created"`)}
@@ -293,6 +314,10 @@ func (_c *SkillVersionCreate) createSpec() (*SkillVersion, *sqlgraph.CreateSpec)
 	if value, ok := _c.mutation.ReplacementURI(); ok {
 		_spec.SetField(skillversion.FieldReplacementURI, field.TypeString, value)
 		_node.ReplacementURI = value
+	}
+	if value, ok := _c.mutation.DownloadCount(); ok {
+		_spec.SetField(skillversion.FieldDownloadCount, field.TypeInt64, value)
+		_node.DownloadCount = value
 	}
 	if value, ok := _c.mutation.Created(); ok {
 		_spec.SetField(skillversion.FieldCreated, field.TypeTime, value)
@@ -473,6 +498,24 @@ func (u *SkillVersionUpsert) UpdateReplacementURI() *SkillVersionUpsert {
 // ClearReplacementURI clears the value of the "replacement_uri" field.
 func (u *SkillVersionUpsert) ClearReplacementURI() *SkillVersionUpsert {
 	u.SetNull(skillversion.FieldReplacementURI)
+	return u
+}
+
+// SetDownloadCount sets the "download_count" field.
+func (u *SkillVersionUpsert) SetDownloadCount(v int64) *SkillVersionUpsert {
+	u.Set(skillversion.FieldDownloadCount, v)
+	return u
+}
+
+// UpdateDownloadCount sets the "download_count" field to the value that was provided on create.
+func (u *SkillVersionUpsert) UpdateDownloadCount() *SkillVersionUpsert {
+	u.SetExcluded(skillversion.FieldDownloadCount)
+	return u
+}
+
+// AddDownloadCount adds v to the "download_count" field.
+func (u *SkillVersionUpsert) AddDownloadCount(v int64) *SkillVersionUpsert {
+	u.Add(skillversion.FieldDownloadCount, v)
 	return u
 }
 
@@ -671,6 +714,27 @@ func (u *SkillVersionUpsertOne) UpdateReplacementURI() *SkillVersionUpsertOne {
 func (u *SkillVersionUpsertOne) ClearReplacementURI() *SkillVersionUpsertOne {
 	return u.Update(func(s *SkillVersionUpsert) {
 		s.ClearReplacementURI()
+	})
+}
+
+// SetDownloadCount sets the "download_count" field.
+func (u *SkillVersionUpsertOne) SetDownloadCount(v int64) *SkillVersionUpsertOne {
+	return u.Update(func(s *SkillVersionUpsert) {
+		s.SetDownloadCount(v)
+	})
+}
+
+// AddDownloadCount adds v to the "download_count" field.
+func (u *SkillVersionUpsertOne) AddDownloadCount(v int64) *SkillVersionUpsertOne {
+	return u.Update(func(s *SkillVersionUpsert) {
+		s.AddDownloadCount(v)
+	})
+}
+
+// UpdateDownloadCount sets the "download_count" field to the value that was provided on create.
+func (u *SkillVersionUpsertOne) UpdateDownloadCount() *SkillVersionUpsertOne {
+	return u.Update(func(s *SkillVersionUpsert) {
+		s.UpdateDownloadCount()
 	})
 }
 
@@ -1036,6 +1100,27 @@ func (u *SkillVersionUpsertBulk) UpdateReplacementURI() *SkillVersionUpsertBulk 
 func (u *SkillVersionUpsertBulk) ClearReplacementURI() *SkillVersionUpsertBulk {
 	return u.Update(func(s *SkillVersionUpsert) {
 		s.ClearReplacementURI()
+	})
+}
+
+// SetDownloadCount sets the "download_count" field.
+func (u *SkillVersionUpsertBulk) SetDownloadCount(v int64) *SkillVersionUpsertBulk {
+	return u.Update(func(s *SkillVersionUpsert) {
+		s.SetDownloadCount(v)
+	})
+}
+
+// AddDownloadCount adds v to the "download_count" field.
+func (u *SkillVersionUpsertBulk) AddDownloadCount(v int64) *SkillVersionUpsertBulk {
+	return u.Update(func(s *SkillVersionUpsert) {
+		s.AddDownloadCount(v)
+	})
+}
+
+// UpdateDownloadCount sets the "download_count" field to the value that was provided on create.
+func (u *SkillVersionUpsertBulk) UpdateDownloadCount() *SkillVersionUpsertBulk {
+	return u.Update(func(s *SkillVersionUpsert) {
+		s.UpdateDownloadCount()
 	})
 }
 

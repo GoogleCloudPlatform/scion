@@ -34,6 +34,8 @@ type SkillVersion struct {
 	DeprecationMessage string `json:"deprecation_message,omitempty"`
 	// ReplacementURI holds the value of the "replacement_uri" field.
 	ReplacementURI string `json:"replacement_uri,omitempty"`
+	// DownloadCount holds the value of the "download_count" field.
+	DownloadCount int64 `json:"download_count,omitempty"`
 	// Created holds the value of the "created" field.
 	Created      time.Time `json:"created,omitempty"`
 	selectValues sql.SelectValues
@@ -44,6 +46,8 @@ func (*SkillVersion) scanValues(columns []string) ([]any, error) {
 	values := make([]any, len(columns))
 	for i := range columns {
 		switch columns[i] {
+		case skillversion.FieldDownloadCount:
+			values[i] = new(sql.NullInt64)
 		case skillversion.FieldSkillID, skillversion.FieldVersion, skillversion.FieldStatus, skillversion.FieldContentHash, skillversion.FieldFiles, skillversion.FieldPublisherID, skillversion.FieldDeprecationMessage, skillversion.FieldReplacementURI:
 			values[i] = new(sql.NullString)
 		case skillversion.FieldCreated:
@@ -119,6 +123,12 @@ func (_m *SkillVersion) assignValues(columns []string, values []any) error {
 			} else if value.Valid {
 				_m.ReplacementURI = value.String
 			}
+		case skillversion.FieldDownloadCount:
+			if value, ok := values[i].(*sql.NullInt64); !ok {
+				return fmt.Errorf("unexpected type %T for field download_count", values[i])
+			} else if value.Valid {
+				_m.DownloadCount = value.Int64
+			}
 		case skillversion.FieldCreated:
 			if value, ok := values[i].(*sql.NullTime); !ok {
 				return fmt.Errorf("unexpected type %T for field created", values[i])
@@ -184,6 +194,9 @@ func (_m *SkillVersion) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("replacement_uri=")
 	builder.WriteString(_m.ReplacementURI)
+	builder.WriteString(", ")
+	builder.WriteString("download_count=")
+	builder.WriteString(fmt.Sprintf("%v", _m.DownloadCount))
 	builder.WriteString(", ")
 	builder.WriteString("created=")
 	builder.WriteString(_m.Created.Format(time.ANSIC))

@@ -146,11 +146,11 @@ func runSkillsShow(cmd *cobra.Command, args []string) error {
 	if err == nil && len(versions.Items) > 0 {
 		fmt.Println("\nVersions:")
 		for _, v := range versions.Items {
-			hash := v.ContentHash
-			if len(hash) > 20 {
-				hash = hash[:20] + "..."
+			line := fmt.Sprintf("  %-10s (%s)   downloads: %d", v.Version, v.Status, v.DownloadCount)
+			if v.Status == "deprecated" && v.DeprecationMessage != "" {
+				line += "  ⚠ " + v.DeprecationMessage
 			}
-			fmt.Printf("  %-10s %-12s %s  %s\n", v.Version, v.Status, v.Created.Format("2006-01-02"), hash)
+			fmt.Println(line)
 		}
 	}
 

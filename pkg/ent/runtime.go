@@ -941,8 +941,12 @@ func init() {
 	skillversionDescVersion := skillversionFields[2].Descriptor()
 	// skillversion.VersionValidator is a validator for the "version" field. It is called by the builders before save.
 	skillversion.VersionValidator = skillversionDescVersion.Validators[0].(func(string) error)
+	// skillversionDescDownloadCount is the schema descriptor for download_count field.
+	skillversionDescDownloadCount := skillversionFields[9].Descriptor()
+	// skillversion.DefaultDownloadCount holds the default value on creation for the download_count field.
+	skillversion.DefaultDownloadCount = skillversionDescDownloadCount.Default.(int64)
 	// skillversionDescCreated is the schema descriptor for created field.
-	skillversionDescCreated := skillversionFields[9].Descriptor()
+	skillversionDescCreated := skillversionFields[10].Descriptor()
 	// skillversion.DefaultCreated holds the default value on creation for the created field.
 	skillversion.DefaultCreated = skillversionDescCreated.Default.(func() time.Time)
 	// skillversionDescID is the schema descriptor for id field.

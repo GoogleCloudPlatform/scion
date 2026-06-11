@@ -169,6 +169,27 @@ func (_u *SkillVersionUpdate) ClearReplacementURI() *SkillVersionUpdate {
 	return _u
 }
 
+// SetDownloadCount sets the "download_count" field.
+func (_u *SkillVersionUpdate) SetDownloadCount(v int64) *SkillVersionUpdate {
+	_u.mutation.ResetDownloadCount()
+	_u.mutation.SetDownloadCount(v)
+	return _u
+}
+
+// SetNillableDownloadCount sets the "download_count" field if the given value is not nil.
+func (_u *SkillVersionUpdate) SetNillableDownloadCount(v *int64) *SkillVersionUpdate {
+	if v != nil {
+		_u.SetDownloadCount(*v)
+	}
+	return _u
+}
+
+// AddDownloadCount adds value to the "download_count" field.
+func (_u *SkillVersionUpdate) AddDownloadCount(v int64) *SkillVersionUpdate {
+	_u.mutation.AddDownloadCount(v)
+	return _u
+}
+
 // Mutation returns the SkillVersionMutation object of the builder.
 func (_u *SkillVersionUpdate) Mutation() *SkillVersionMutation {
 	return _u.mutation
@@ -271,6 +292,12 @@ func (_u *SkillVersionUpdate) sqlSave(ctx context.Context) (_node int, err error
 	}
 	if _u.mutation.ReplacementURICleared() {
 		_spec.ClearField(skillversion.FieldReplacementURI, field.TypeString)
+	}
+	if value, ok := _u.mutation.DownloadCount(); ok {
+		_spec.SetField(skillversion.FieldDownloadCount, field.TypeInt64, value)
+	}
+	if value, ok := _u.mutation.AddedDownloadCount(); ok {
+		_spec.AddField(skillversion.FieldDownloadCount, field.TypeInt64, value)
 	}
 	if _node, err = sqlgraph.UpdateNodes(ctx, _u.driver, _spec); err != nil {
 		if _, ok := err.(*sqlgraph.NotFoundError); ok {
@@ -434,6 +461,27 @@ func (_u *SkillVersionUpdateOne) ClearReplacementURI() *SkillVersionUpdateOne {
 	return _u
 }
 
+// SetDownloadCount sets the "download_count" field.
+func (_u *SkillVersionUpdateOne) SetDownloadCount(v int64) *SkillVersionUpdateOne {
+	_u.mutation.ResetDownloadCount()
+	_u.mutation.SetDownloadCount(v)
+	return _u
+}
+
+// SetNillableDownloadCount sets the "download_count" field if the given value is not nil.
+func (_u *SkillVersionUpdateOne) SetNillableDownloadCount(v *int64) *SkillVersionUpdateOne {
+	if v != nil {
+		_u.SetDownloadCount(*v)
+	}
+	return _u
+}
+
+// AddDownloadCount adds value to the "download_count" field.
+func (_u *SkillVersionUpdateOne) AddDownloadCount(v int64) *SkillVersionUpdateOne {
+	_u.mutation.AddDownloadCount(v)
+	return _u
+}
+
 // Mutation returns the SkillVersionMutation object of the builder.
 func (_u *SkillVersionUpdateOne) Mutation() *SkillVersionMutation {
 	return _u.mutation
@@ -566,6 +614,12 @@ func (_u *SkillVersionUpdateOne) sqlSave(ctx context.Context) (_node *SkillVersi
 	}
 	if _u.mutation.ReplacementURICleared() {
 		_spec.ClearField(skillversion.FieldReplacementURI, field.TypeString)
+	}
+	if value, ok := _u.mutation.DownloadCount(); ok {
+		_spec.SetField(skillversion.FieldDownloadCount, field.TypeInt64, value)
+	}
+	if value, ok := _u.mutation.AddedDownloadCount(); ok {
+		_spec.AddField(skillversion.FieldDownloadCount, field.TypeInt64, value)
 	}
 	_node = &SkillVersion{config: _u.config}
 	_spec.Assign = _node.assignValues

@@ -74,6 +74,7 @@ func entSkillVersionToStore(e *ent.SkillVersion) *store.SkillVersion {
 		PublisherID:        e.PublisherID,
 		DeprecationMessage: e.DeprecationMessage,
 		ReplacementURI:     e.ReplacementURI,
+		DownloadCount:      e.DownloadCount,
 		Created:            e.Created,
 	}
 	unmarshalJSONString(e.Files, &sv.Files)
@@ -463,4 +464,12 @@ func (s *SkillStore) ResolveSkillVersion(ctx context.Context, skillID, constrain
 		}
 	}
 	return nil, store.ErrNotFound
+}
+
+func (s *SkillStore) IncrementSkillVersionDownloadCount(ctx context.Context, versionID string) error {
+	uid, err := parseUUID(versionID)
+	if err != nil {
+		return err
+	}
+	return s.client.SkillVersion.UpdateOneID(uid).AddDownloadCount(1).Exec(ctx)
 }

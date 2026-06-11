@@ -1014,6 +1014,7 @@ var (
 		{Name: "publisher_id", Type: field.TypeString, Nullable: true},
 		{Name: "deprecation_message", Type: field.TypeString, Nullable: true},
 		{Name: "replacement_uri", Type: field.TypeString, Nullable: true},
+		{Name: "download_count", Type: field.TypeInt64, Default: 0},
 		{Name: "created", Type: field.TypeTime},
 	}
 	// SkillVersionsTable holds the schema information for the "skill_versions" table.

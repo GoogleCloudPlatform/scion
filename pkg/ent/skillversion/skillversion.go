@@ -31,6 +31,8 @@ const (
 	FieldDeprecationMessage = "deprecation_message"
 	// FieldReplacementURI holds the string denoting the replacement_uri field in the database.
 	FieldReplacementURI = "replacement_uri"
+	// FieldDownloadCount holds the string denoting the download_count field in the database.
+	FieldDownloadCount = "download_count"
 	// FieldCreated holds the string denoting the created field in the database.
 	FieldCreated = "created"
 	// Table holds the table name of the skillversion in the database.
@@ -48,6 +50,7 @@ var Columns = []string{
 	FieldPublisherID,
 	FieldDeprecationMessage,
 	FieldReplacementURI,
+	FieldDownloadCount,
 	FieldCreated,
 }
 
@@ -66,6 +69,8 @@ var (
 	SkillIDValidator func(string) error
 	// VersionValidator is a validator for the "version" field. It is called by the builders before save.
 	VersionValidator func(string) error
+	// DefaultDownloadCount holds the default value on creation for the "download_count" field.
+	DefaultDownloadCount int64
 	// DefaultCreated holds the default value on creation for the "created" field.
 	DefaultCreated func() time.Time
 	// DefaultID holds the default value on creation for the "id" field.
@@ -146,6 +151,11 @@ func ByDeprecationMessage(opts ...sql.OrderTermOption) OrderOption {
 // ByReplacementURI orders the results by the replacement_uri field.
 func ByReplacementURI(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldReplacementURI, opts...).ToFunc()
+}
+
+// ByDownloadCount orders the results by the download_count field.
+func ByDownloadCount(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldDownloadCount, opts...).ToFunc()
 }
 
 // ByCreated orders the results by the created field.

@@ -2023,6 +2023,7 @@ type SkillVersion struct {
 	PublisherID        string         `json:"publisherId,omitempty"`
 	DeprecationMessage string         `json:"deprecationMessage,omitempty"`
 	ReplacementURI     string         `json:"replacementUri,omitempty"`
+	DownloadCount      int64          `json:"downloadCount"`
 	Created            time.Time      `json:"created"`
 }
 
