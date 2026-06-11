@@ -1685,3 +1685,155 @@ func TestGetAgent_MissingWorkspaceNonGit(t *testing.T) {
 		t.Errorf("expected empty workspace for non-git project, got: %s", wsPath)
 	}
 }
+
+func TestProvisionAgent_SkillsWithMockResolver(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	oldWd, _ := os.Getwd()
+	os.Chdir(tmpDir)
+	defer os.Chdir(oldWd)
+
+	originalHome := os.Getenv("HOME")
+	defer os.Setenv("HOME", originalHome)
+	os.Setenv("HOME", tmpDir)
+
+	globalScionDir := filepath.Join(tmpDir, ".scion")
+	globalTemplatesDir := filepath.Join(globalScionDir, "templates")
+	os.MkdirAll(globalTemplatesDir, 0755)
+	seedTestHarnessConfig(t, globalScionDir, "claude", "claude")
+
+	// Create template with skills references
+	tplDir := filepath.Join(globalTemplatesDir, "skill-ref-tpl")
+	os.MkdirAll(tplDir, 0755)
+	tplConfig := `{
+		"default_harness_config": "claude",
+		"skills": [
+			{"uri": "skill://scion/core/test-skill@1.0"}
+		]
+	}`
+	os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(tplConfig), 0644)
+
+	projectDir := filepath.Join(tmpDir, "project")
+	projectScionDir := filepath.Join(projectDir, ".scion")
+	os.MkdirAll(projectScionDir, 0755)
+
+	// Set up mock resolver via context
+	skillContent := []byte("# Test Skill\nDescription here.")
+	contentHash := "sha256:test-hash-placeholder"
+
+	resolver := &mockResolver{
+		resolved: []ResolvedSkill{
+			{
+				Name:    "test-skill",
+				URI:     "skill://scion/core/test-skill@1.0",
+				Version: "1.0.0",
+				Hash:    "", // Skip bundle hash verification for integration test
+				Files:   []ResolvedFile{},
+			},
+		},
+	}
+	// For this test, we just verify the fail-closed and success path logic
+	// without downloading — the download tests are in skill_resolver_test.go
+	_ = skillContent
+	_ = contentHash
+
+	ctx := ContextWithSkillResolver(context.Background(), resolver)
+	agentHome, _, _, err := ProvisionAgent(ctx, "skill-ref-agent", "skill-ref-tpl", "", "", projectScionDir, "", "", "", "")
+	if err != nil {
+		t.Fatalf("ProvisionAgent failed: %v", err)
+	}
+
+	// Verify resolution record was written
+	recordPath := filepath.Join(agentHome, ".scion", "resolved-skills.json")
+	data, err := os.ReadFile(recordPath)
+	if err != nil {
+		t.Fatalf("expected resolved-skills.json at %s, got error: %v", recordPath, err)
+	}
+	if !strings.Contains(string(data), "test-skill") {
+		t.Errorf("resolution record should contain skill name, got: %s", string(data))
+	}
+	if !strings.Contains(string(data), "1.0.0") {
+		t.Errorf("resolution record should contain version, got: %s", string(data))
+	}
+}
+
+func TestProvisionAgent_RequiredSkillsNoResolver(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	oldWd, _ := os.Getwd()
+	os.Chdir(tmpDir)
+	defer os.Chdir(oldWd)
+
+	originalHome := os.Getenv("HOME")
+	defer os.Setenv("HOME", originalHome)
+	os.Setenv("HOME", tmpDir)
+
+	globalScionDir := filepath.Join(tmpDir, ".scion")
+	globalTemplatesDir := filepath.Join(globalScionDir, "templates")
+	os.MkdirAll(globalTemplatesDir, 0755)
+	seedTestHarnessConfig(t, globalScionDir, "claude", "claude")
+
+	tplDir := filepath.Join(globalTemplatesDir, "required-skill-tpl")
+	os.MkdirAll(tplDir, 0755)
+	tplConfig := `{
+		"default_harness_config": "claude",
+		"skills": [
+			{"uri": "skill://scion/core/scion@^1.0"},
+			{"uri": "skill://scion/core/team-creation@^1.0"}
+		]
+	}`
+	os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(tplConfig), 0644)
+
+	projectDir := filepath.Join(tmpDir, "project")
+	projectScionDir := filepath.Join(projectDir, ".scion")
+	os.MkdirAll(projectScionDir, 0755)
+
+	// No resolver on context → should fail for required skills
+	_, _, _, err := ProvisionAgent(context.Background(), "no-resolver-agent", "required-skill-tpl", "", "", projectScionDir, "", "", "", "")
+	if err == nil {
+		t.Fatal("expected provisioning to fail with required skills and no resolver")
+	}
+	if !strings.Contains(err.Error(), "no skill resolver available") {
+		t.Errorf("error should mention no resolver, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "skill://scion/core/scion@^1.0") {
+		t.Errorf("error should list the required skill URIs, got: %v", err)
+	}
+}
+
+func TestProvisionAgent_OptionalSkillsNoResolver(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	oldWd, _ := os.Getwd()
+	os.Chdir(tmpDir)
+	defer os.Chdir(oldWd)
+
+	originalHome := os.Getenv("HOME")
+	defer os.Setenv("HOME", originalHome)
+	os.Setenv("HOME", tmpDir)
+
+	globalScionDir := filepath.Join(tmpDir, ".scion")
+	globalTemplatesDir := filepath.Join(globalScionDir, "templates")
+	os.MkdirAll(globalTemplatesDir, 0755)
+	seedTestHarnessConfig(t, globalScionDir, "claude", "claude")
+
+	tplDir := filepath.Join(globalTemplatesDir, "optional-skill-tpl")
+	os.MkdirAll(tplDir, 0755)
+	tplConfig := `{
+		"default_harness_config": "claude",
+		"skills": [
+			{"uri": "skill://scion/core/optional-skill@latest", "optional": true}
+		]
+	}`
+	os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(tplConfig), 0644)
+
+	projectDir := filepath.Join(tmpDir, "project")
+	projectScionDir := filepath.Join(projectDir, ".scion")
+	os.MkdirAll(projectScionDir, 0755)
+
+	// No resolver on context → should succeed for optional-only skills
+	_, _, _, err := ProvisionAgent(context.Background(), "optional-agent", "optional-skill-tpl", "", "", projectScionDir, "", "", "", "")
+	if err != nil {
+		t.Fatalf("expected provisioning to succeed with optional-only skills and no resolver, got: %v", err)
+	}
+}
