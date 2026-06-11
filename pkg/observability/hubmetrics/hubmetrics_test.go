@@ -25,7 +25,9 @@ func TestNewMeterProviderEmptyProjectID(t *testing.T) {
 
 func TestGroupDropViewsAllEnabled(t *testing.T) {
 	for _, g := range metricGroups {
-		os.Unsetenv(g.EnvVar)
+		if err := os.Unsetenv(g.EnvVar); err != nil {
+			t.Fatalf("Unsetenv(%s): %v", g.EnvVar, err)
+		}
 	}
 	views := groupDropViews()
 	if len(views) != 0 {
@@ -34,8 +36,7 @@ func TestGroupDropViewsAllEnabled(t *testing.T) {
 }
 
 func TestGroupDropViewsDisabled(t *testing.T) {
-	os.Setenv("SCION_METRICS_DB_NOTIFY", "false")
-	t.Cleanup(func() { os.Unsetenv("SCION_METRICS_DB_NOTIFY") })
+	t.Setenv("SCION_METRICS_DB_NOTIFY", "false")
 
 	views := groupDropViews()
 	if len(views) != 1 {
@@ -44,8 +45,7 @@ func TestGroupDropViewsDisabled(t *testing.T) {
 }
 
 func TestGroupDropViewsDisabledZero(t *testing.T) {
-	os.Setenv("SCION_METRICS_DISPATCH", "0")
-	t.Cleanup(func() { os.Unsetenv("SCION_METRICS_DISPATCH") })
+	t.Setenv("SCION_METRICS_DISPATCH", "0")
 
 	views := groupDropViews()
 	if len(views) != 1 {
@@ -69,10 +69,11 @@ func TestIsGroupDisabled(t *testing.T) {
 		t.Run(tc.value, func(t *testing.T) {
 			envVar := "SCION_METRICS_TEST_GROUP"
 			if tc.value != "" {
-				os.Setenv(envVar, tc.value)
-				t.Cleanup(func() { os.Unsetenv(envVar) })
+				t.Setenv(envVar, tc.value)
 			} else {
-				os.Unsetenv(envVar)
+				if err := os.Unsetenv(envVar); err != nil {
+					t.Fatalf("Unsetenv(%s): %v", envVar, err)
+				}
 			}
 			if got := isGroupDisabled(envVar); got != tc.want {
 				t.Errorf("isGroupDisabled(%q=%q) = %v, want %v", envVar, tc.value, got, tc.want)
@@ -104,8 +105,7 @@ func TestRecordersEnabledWithRealProvider(t *testing.T) {
 }
 
 func TestDropViewPreventsExport(t *testing.T) {
-	os.Setenv("SCION_METRICS_DB_NOTIFY", "false")
-	t.Cleanup(func() { os.Unsetenv("SCION_METRICS_DB_NOTIFY") })
+	t.Setenv("SCION_METRICS_DB_NOTIFY", "false")
 
 	reader := metric.NewManualReader()
 	mpOpts := []metric.Option{metric.WithReader(reader)}
@@ -138,8 +138,7 @@ func TestDropViewPreventsExport(t *testing.T) {
 }
 
 func TestPoolMetricsNotDroppedWhenNotifyDisabled(t *testing.T) {
-	os.Setenv("SCION_METRICS_DB_NOTIFY", "false")
-	t.Cleanup(func() { os.Unsetenv("SCION_METRICS_DB_NOTIFY") })
+	t.Setenv("SCION_METRICS_DB_NOTIFY", "false")
 
 	reader := metric.NewManualReader()
 	mpOpts := []metric.Option{metric.WithReader(reader)}

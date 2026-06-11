@@ -335,10 +335,10 @@ func (p *Pipeline) initSelfMetrics(ctx context.Context) {
 		// Shut down TracerProvider and LoggerProvider immediately — we only
 		// need the MeterProvider for self-monitoring metrics.
 		if providers.TracerProvider != nil {
-			providers.TracerProvider.Shutdown(ctx)
+			_ = providers.TracerProvider.Shutdown(ctx)
 		}
 		if providers.LoggerProvider != nil {
-			providers.LoggerProvider.Shutdown(ctx)
+			_ = providers.LoggerProvider.Shutdown(ctx)
 		}
 		p.meter = providers.MeterProvider.Meter("github.com/GoogleCloudPlatform/scion/pkg/sciontool/telemetry")
 	}
@@ -363,6 +363,9 @@ func (p *Pipeline) startHealthGauge(ctx context.Context, providers *Providers) {
 	)
 	if err != nil {
 		log.Debug("Failed to create pipeline health gauge: %v", err)
+		if providers != nil && providers.MeterProvider != nil {
+			_ = providers.MeterProvider.Shutdown(ctx)
+		}
 		return
 	}
 
@@ -384,7 +387,7 @@ func (p *Pipeline) startHealthGauge(ctx context.Context, providers *Providers) {
 			case <-healthCtx.Done():
 				if providers != nil && providers.MeterProvider != nil {
 					shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
-					providers.MeterProvider.Shutdown(shutdownCtx)
+					_ = providers.MeterProvider.Shutdown(shutdownCtx)
 					shutdownCancel()
 				}
 				return
@@ -423,10 +426,10 @@ func classifyError(err error) string {
 
 	var gapiErr *googleapi.Error
 	if errors.As(err, &gapiErr) {
-		switch {
-		case gapiErr.Code == 401 || gapiErr.Code == 403:
+		switch gapiErr.Code {
+		case 401, 403:
 			return "auth"
-		case gapiErr.Code == 429:
+		case 429:
 			return "quota"
 		}
 	}

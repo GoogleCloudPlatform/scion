@@ -40,8 +40,10 @@ func TestPipeline_HealthGauge_Registers(t *testing.T) {
 	}
 	defer func() {
 		stopCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		pipeline.Stop(stopCtx)
-		cancel()
+		defer cancel()
+		if err := pipeline.Stop(stopCtx); err != nil {
+			t.Errorf("pipeline.Stop: %v", err)
+		}
 	}()
 
 	// Without cloud configured, health gauge should not be started
