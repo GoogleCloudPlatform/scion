@@ -286,6 +286,45 @@ func TestAgentSecrets_InvalidKeyChars(t *testing.T) {
 	}
 }
 
+func TestAgentSecrets_NoSecretBackend(t *testing.T) {
+	srv, s := testServer(t)
+	// Deliberately do NOT set a secret backend.
+	ctx := context.Background()
+
+	projectID := tid("project-no-backend")
+	project := &store.Project{
+		ID: projectID, Name: "No Backend Project", Slug: "no-backend-project",
+		Created: time.Now(), Updated: time.Now(),
+	}
+	if err := s.CreateProject(ctx, project); err != nil {
+		t.Fatalf("failed to create project: %v", err)
+	}
+
+	agentID := tid("agent-no-backend")
+	agent := &store.Agent{
+		ID: agentID, Slug: "no-backend-agent", Name: "No Backend Agent",
+		ProjectID: projectID, Phase: string(state.PhaseRunning), StateVersion: 1,
+		Created: time.Now(), Updated: time.Now(),
+	}
+	if err := s.CreateAgent(ctx, agent); err != nil {
+		t.Fatalf("failed to create agent: %v", err)
+	}
+
+	agentToken, err := srv.agentTokenService.GenerateAgentToken(agentID, projectID, nil, nil)
+	if err != nil {
+		t.Fatalf("failed to generate agent token: %v", err)
+	}
+
+	body := AgentSetSecretRequest{
+		Value: base64.StdEncoding.EncodeToString([]byte("value")),
+	}
+	rec := doRequestWithAgentToken(t, srv, http.MethodPut,
+		"/api/v1/agents/"+agentID+"/secrets/MY_KEY", body, agentToken)
+	if rec.Code != http.StatusNotImplemented {
+		t.Fatalf("expected 501 when secret backend is nil, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestAgentSecrets_CreatedByIsAgent(t *testing.T) {
 	srv, s, agentID, projectID, agentToken := setupAgentSecretTest(t)
 
