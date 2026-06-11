@@ -44,6 +44,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/dbmetrics"
+	"github.com/GoogleCloudPlatform/scion/pkg/observability/dispatchmetrics"
+	"github.com/GoogleCloudPlatform/scion/pkg/observability/hubmetrics"
 	scionplugin "github.com/GoogleCloudPlatform/scion/pkg/plugin"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtimebroker"
@@ -211,6 +213,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	// 11. Start Hub
 	var hubSrv *hub.Server
 	var secretBackend secret.SecretBackend
+	var hubDBRec dbmetrics.Recorder
 	if enableHub {
 		// Initialize secret backend early so signing keys can be loaded from it
 		// during hub server creation. This prevents the previous bug where
@@ -232,13 +235,42 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 			log.Fatalf("Hub server failed to start: %v", hubInitErr)
 		}
 
+		// Wire hub OTel metrics export to Cloud Monitoring.
+		if cfg.Hub.GCPProjectID != "" {
+			mp, mpErr := hubmetrics.NewMeterProvider(ctx, cfg.Hub.GCPProjectID,
+				hubmetrics.WithHubID(hubSrv.HubID()),
+			)
+			if mpErr != nil {
+				log.Printf("WARNING: hub metrics export disabled: %v", mpErr)
+			} else {
+				defer mp.Shutdown(context.Background())
+
+				dbRec, dbErr := dbmetrics.New(mp)
+				if dbErr != nil {
+					log.Printf("WARNING: hub db metrics disabled: %v", dbErr)
+				} else {
+					hubDBRec = dbRec
+					hubSrv.SetDBMetrics(dbRec)
+				}
+
+				dispRec, dispErr := dispatchmetrics.New(mp)
+				if dispErr != nil {
+					log.Printf("WARNING: hub dispatch metrics disabled: %v", dispErr)
+				} else {
+					hubSrv.SetDispatchMetrics(dispRec)
+				}
+
+				log.Printf("Hub OTel metrics export enabled (project: %s)", cfg.Hub.GCPProjectID)
+			}
+		}
+
 		// Wire command bus for cross-node dispatch (B2-4).
 		cmdBus := newCommandBus(ctx, cfg, hubSrv)
 		hubSrv.SetCommandBus(cmdBus)
 
 		if !enableWeb {
 			// Hub runs its own HTTP server (standalone mode).
-			eventPub := newEventPublisher(ctx, cfg)
+			eventPub := newEventPublisher(ctx, cfg, hubDBRec)
 			hubSrv.SetEventPublisher(eventPub)
 
 			log.Printf("Starting Hub API server on %s:%d", cfg.Hub.Host, cfg.Hub.Port)
@@ -266,7 +298,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	// 12. Start Web
 	var webSrv *hub.WebServer
 	if enableWeb {
-		webSrv = initWebServer(ctx, cfg, hubSrv, devAuthToken, adminEmailList, adminMode, maintenanceMessage, requestLogger)
+		webSrv = initWebServer(ctx, cfg, hubSrv, devAuthToken, adminEmailList, adminMode, maintenanceMessage, requestLogger, hubDBRec)
 
 		// In combined mode, start Hub background services now that the
 		// ChannelEventPublisher has been wired by initWebServer.
@@ -1167,11 +1199,12 @@ func initHubStorage(ctx context.Context, hubSrv *hub.Server, cfg *config.GlobalC
 // ChannelEventPublisher. If the Postgres publisher cannot be started it falls
 // back to the in-process publisher so a single instance still functions, logging
 // a prominent warning since cross-replica SSE delivery will be unavailable.
-func newEventPublisher(ctx context.Context, cfg *config.GlobalConfig) hub.EventPublisher {
+func newEventPublisher(ctx context.Context, cfg *config.GlobalConfig, dbRec dbmetrics.Recorder) hub.EventPublisher {
 	if strings.EqualFold(cfg.Database.Driver, "postgres") {
-		// Metrics export is wired separately (see pkg/observability/dbmetrics);
-		// use a disabled recorder until a MeterProvider is configured.
-		pub, err := hub.NewPostgresEventPublisher(ctx, cfg.Database.URL, dbmetrics.NewDisabled(), logging.Subsystem("hub.events"))
+		if dbRec == nil {
+			dbRec = dbmetrics.NewDisabled()
+		}
+		pub, err := hub.NewPostgresEventPublisher(ctx, cfg.Database.URL, dbRec, logging.Subsystem("hub.events"))
 		if err != nil {
 			log.Printf("WARNING: failed to start Postgres event publisher (%v); falling back to in-process events. Cross-replica SSE will not work.", err)
 			return hub.NewChannelEventPublisher()
@@ -1208,7 +1241,7 @@ func newCommandBus(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Se
 // initWebServer creates and configures the Web server. The provided context is
 // threaded to the event publisher so that the Postgres LISTEN/NOTIFY goroutine
 // is cancelled cleanly on shutdown, preventing connection leaks.
-func initWebServer(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Server, devAuthToken string, adminEmailList []string, adminMode bool, maintenanceMessage string, requestLogger *slog.Logger) *hub.WebServer {
+func initWebServer(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Server, devAuthToken string, adminEmailList []string, adminMode bool, maintenanceMessage string, requestLogger *slog.Logger, dbRec dbmetrics.Recorder) *hub.WebServer {
 	webHost := cfg.Hub.Host
 	if webHost == "" {
 		webHost = "0.0.0.0"
@@ -1264,7 +1297,7 @@ func initWebServer(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Se
 	webSrv.SetRequestLogger(requestLogger)
 
 	// Create shared event publisher for real-time SSE
-	eventPub := newEventPublisher(ctx, cfg)
+	eventPub := newEventPublisher(ctx, cfg, dbRec)
 	webSrv.SetEventPublisher(eventPub)
 
 	// Wire Hub services into WebServer if Hub is enabled
