@@ -51,6 +51,9 @@ field is updated to reference the built image.`,
 		if err != nil {
 			return fmt.Errorf("harness-config %q not found: %w", harnessConfigName, err)
 		}
+		if hcDir.Path == "" {
+			return fmt.Errorf("harness-config %q does not have a local directory path", harnessConfigName)
+		}
 
 		dockerfilePath := filepath.Join(hcDir.Path, "Dockerfile")
 		if _, err := os.Stat(dockerfilePath); err != nil {
@@ -138,7 +141,7 @@ field is updated to reference the built image.`,
 		if err := yaml.Unmarshal(configData, &doc); err != nil {
 			return fmt.Errorf("failed to parse config.yaml: %w", err)
 		}
-		if doc.Content != nil && len(doc.Content) > 0 {
+		if len(doc.Content) > 0 && doc.Content[0].Kind == yaml.MappingNode {
 			mapping := doc.Content[0]
 			found := false
 			for i := 0; i < len(mapping.Content)-1; i += 2 {
