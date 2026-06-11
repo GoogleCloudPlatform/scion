@@ -266,6 +266,26 @@ func TestAgentSecrets_MissingKey(t *testing.T) {
 	}
 }
 
+func TestAgentSecrets_InvalidKeyChars(t *testing.T) {
+	srv, _, agentID, _, agentToken := setupAgentSecretTest(t)
+
+	// URL-encode keys that contain invalid characters. httptest.NewRequest
+	// panics on raw spaces/tabs, so we use percent-encoding as a real client would.
+	for _, tc := range []struct{ label, key string }{
+		{"space", "MY%20KEY"},
+		{"equals", "MY=KEY"},
+	} {
+		body := AgentSetSecretRequest{
+			Value: base64.StdEncoding.EncodeToString([]byte("value")),
+		}
+		rec := doRequestWithAgentToken(t, srv, http.MethodPut,
+			"/api/v1/agents/"+agentID+"/secrets/"+tc.key, body, agentToken)
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("expected 400 for key with %s, got %d: %s", tc.label, rec.Code, rec.Body.String())
+		}
+	}
+}
+
 func TestAgentSecrets_CreatedByIsAgent(t *testing.T) {
 	srv, s, agentID, projectID, agentToken := setupAgentSecretTest(t)
 

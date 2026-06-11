@@ -7904,6 +7904,15 @@ func (s *Server) handleAgentSecrets(w http.ResponseWriter, r *http.Request, agen
 		return
 	}
 
+	// Validate key characters.
+	if strings.ContainsAny(key, "= \t\n") {
+		ValidationError(w, "secret key cannot contain spaces, tabs, newlines, or '='", map[string]interface{}{
+			"field": "key",
+			"value": key,
+		})
+		return
+	}
+
 	ctx := r.Context()
 
 	// Agent-only: require agent identity from JWT.
@@ -7925,6 +7934,9 @@ func (s *Server) handleAgentSecrets(w http.ResponseWriter, r *http.Request, agen
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, "Agent token lacks project context", nil)
 		return
 	}
+
+	// Limit request body to 128 KiB (64 KiB value limit + headroom for JSON envelope).
+	r.Body = http.MaxBytesReader(w, r.Body, 128*1024)
 
 	var req AgentSetSecretRequest
 	if err := readJSON(r, &req); err != nil {
@@ -7979,13 +7991,14 @@ func (s *Server) handleAgentSecrets(w http.ResponseWriter, r *http.Request, agen
 	}
 
 	// Check for existing secret when force is not set.
+	// Note: the backend's UpsertSecret has the same check-then-write pattern
+	// internally, so this is consistent with the existing TOCTOU window.
 	if !req.Force {
 		_, err := s.secretBackend.GetMeta(ctx, key, store.ScopeProject, projectID)
 		if err == nil {
 			Conflict(w, fmt.Sprintf("Secret %q already exists at project scope. Use force=true to overwrite.", key))
 			return
 		}
-		// Any error other than not-found is unexpected.
 		if !errors.Is(err, store.ErrNotFound) {
 			writeErrorFromErr(w, err, "")
 			return
