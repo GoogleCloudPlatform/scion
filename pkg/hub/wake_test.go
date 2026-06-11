@@ -260,7 +260,7 @@ func TestHandleAgentMessage_SuspendedWithoutWake(t *testing.T) {
 		"message": "hello",
 	})
 
-	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Equal(t, http.StatusConflict, rec.Code)
 	assert.Contains(t, rec.Body.String(), "suspended")
 	assert.Contains(t, rec.Body.String(), "--wake")
 }

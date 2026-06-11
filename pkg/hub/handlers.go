@@ -2449,11 +2449,28 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		}
 	}
 
-	// Reject messages to suspended agents when --wake is not set.
-	if !req.Wake && state.Phase(agent.Phase) == state.PhaseSuspended {
-		writeError(w, http.StatusBadRequest, ErrCodeValidationError,
-			fmt.Sprintf("Agent %q is suspended. Use --wake to resume and deliver.", agent.Slug), nil)
-		return
+	// Reject messages to non-running agents when --wake is not set.
+	if !req.Wake {
+		switch state.Phase(agent.Phase) {
+		case state.PhaseRunning:
+			// OK — proceed to deliver
+		case state.PhaseSuspended:
+			writeError(w, http.StatusConflict, ErrCodeAgentNotRunning,
+				fmt.Sprintf("Agent %q is suspended. Use --wake to resume and deliver.", agent.Slug), nil)
+			return
+		case state.PhaseStopped:
+			writeError(w, http.StatusConflict, ErrCodeAgentNotRunning,
+				fmt.Sprintf("Agent %q is stopped. Use 'scion start' to start a new session.", agent.Slug), nil)
+			return
+		case state.PhaseError:
+			writeError(w, http.StatusConflict, ErrCodeAgentNotRunning,
+				fmt.Sprintf("Agent %q is in error state. Use 'scion start' to restart.", agent.Slug), nil)
+			return
+		default:
+			writeError(w, http.StatusConflict, ErrCodeAgentNotRunning,
+				fmt.Sprintf("Agent %q is not yet running (phase: %s). Wait for it to reach running state.", agent.Slug, agent.Phase), nil)
+			return
+		}
 	}
 
 	// Populate recipient slug and ID from the resolved agent.
@@ -2589,7 +2606,22 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		s.createNotifySubscription(ctx, agent.ID, agent.ProjectID, notifySubscriberType, notifySubscriberID, createdBy)
 	}
 
+	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(MessageDeliveryResponse{
+		MessageID:  persistedMsgID,
+		Status:     "delivered",
+		Agent:      agent.Slug,
+		AgentPhase: agent.Phase,
+	})
+}
+
+// MessageDeliveryResponse is the JSON response for a successful agent message delivery.
+type MessageDeliveryResponse struct {
+	MessageID  string `json:"message_id"`
+	Status     string `json:"status"`
+	Agent      string `json:"agent"`
+	AgentPhase string `json:"agent_phase"`
 }
 
 // GroupMessageRecipientResult represents the delivery status for one recipient in a set[] delivery.
@@ -2854,10 +2886,39 @@ func (s *Server) handleProjectBroadcast(w http.ResponseWriter, r *http.Request, 
 		}
 	}
 
+	// Compute broadcast targeting: list all agents, classify by phase.
+	allResult, err := s.store.ListAgents(ctx, store.AgentFilter{
+		ProjectID: projectID,
+	}, store.ListOptions{})
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	var targeted int
+	skippedBreakdown := make(map[string]int)
+	for _, agent := range allResult.Items {
+		if req.StructuredMessage.Sender == "agent:"+agent.Slug {
+			continue
+		}
+		if agent.Phase == string(state.PhaseRunning) {
+			targeted++
+		} else {
+			skippedBreakdown[agent.Phase]++
+		}
+	}
+	skipped := 0
+	for _, c := range skippedBreakdown {
+		skipped += c
+	}
+
 	proxy := s.GetMessageBrokerProxy()
 	if proxy == nil {
 		// Fallback: no broker configured, do direct fan-out
-		s.broadcastDirect(w, r, projectID, req.StructuredMessage, req.Interrupt)
+		if !s.broadcastDirect(w, r, projectID, req.StructuredMessage, req.Interrupt) {
+			return
+		}
+		s.writeBroadcastResponse(w, targeted+skipped, targeted, skipped, skippedBreakdown)
 		return
 	}
 
@@ -2871,18 +2932,43 @@ func (s *Server) handleProjectBroadcast(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	w.WriteHeader(http.StatusOK)
+	s.writeBroadcastResponse(w, targeted+skipped, targeted, skipped, skippedBreakdown)
+}
+
+// BroadcastAcceptedResponse is the JSON response for a broadcast message.
+type BroadcastAcceptedResponse struct {
+	Status           string         `json:"status"`
+	Total            int            `json:"total"`
+	Targeted         int            `json:"targeted"`
+	Skipped          int            `json:"skipped"`
+	SkippedBreakdown map[string]int `json:"skipped_breakdown,omitempty"`
+}
+
+func (s *Server) writeBroadcastResponse(w http.ResponseWriter, total, targeted, skipped int, skippedBreakdown map[string]int) {
+	resp := BroadcastAcceptedResponse{
+		Status:   "accepted",
+		Total:    total,
+		Targeted: targeted,
+		Skipped:  skipped,
+	}
+	if len(skippedBreakdown) > 0 {
+		resp.SkippedBreakdown = skippedBreakdown
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusAccepted)
+	json.NewEncoder(w).Encode(resp)
 }
 
 // broadcastDirect fans out a broadcast message directly to all running agents
 // in the project without using the message broker. This is the fallback when
-// no broker is configured.
-func (s *Server) broadcastDirect(w http.ResponseWriter, r *http.Request, projectID string, msg *messages.StructuredMessage, interrupt bool) {
+// no broker is configured. Returns true on success (caller writes 202 response),
+// false if an error response was already written.
+func (s *Server) broadcastDirect(w http.ResponseWriter, r *http.Request, projectID string, msg *messages.StructuredMessage, interrupt bool) bool {
 	ctx := r.Context()
 	dispatcher := s.GetDispatcher()
 	if dispatcher == nil {
 		ServiceNotReady(w, "Message dispatch is not available yet — the server may still be starting up")
-		return
+		return false
 	}
 
 	result, err := s.store.ListAgents(ctx, store.AgentFilter{
@@ -2891,11 +2977,10 @@ func (s *Server) broadcastDirect(w http.ResponseWriter, r *http.Request, project
 	}, store.ListOptions{})
 	if err != nil {
 		writeErrorFromErr(w, err, "")
-		return
+		return false
 	}
 
 	for _, agent := range result.Items {
-		// Skip the sender if it's an agent
 		if msg.Sender == "agent:"+agent.Slug {
 			continue
 		}
@@ -2909,10 +2994,10 @@ func (s *Server) broadcastDirect(w http.ResponseWriter, r *http.Request, project
 			s.messageLog.Error("Failed to deliver broadcast message to agent",
 				"agent_id", agent.ID,
 				"agentSlug", agent.Slug, "error", err)
+			s.publishBroadcastDeliveryFailed(ctx, &agent, &agentMsg, err)
 		} else {
 			dispatched = true
 		}
-		// Persist broadcast message per recipient (non-fatal)
 		storeMsg := &store.Message{
 			ID:          api.NewUUID(),
 			ProjectID:   projectID,
@@ -2930,14 +3015,43 @@ func (s *Server) broadcastDirect(w http.ResponseWriter, r *http.Request, project
 		if err := s.store.CreateMessage(ctx, storeMsg); err != nil {
 			s.messageLog.Error("Failed to persist broadcast message", "agent_id", agent.ID, "error", err)
 		} else if dispatched {
-			// Mark dispatched so reconcileBroker does not re-deliver.
 			if _, err := s.store.MarkMessageDispatched(ctx, storeMsg.ID); err != nil {
 				s.messageLog.Error("Failed to mark broadcast message dispatched", "id", storeMsg.ID, "error", err)
 			}
 		}
 	}
+	return true
+}
 
-	w.WriteHeader(http.StatusOK)
+// publishBroadcastDeliveryFailed publishes a DELIVERY_FAILED notification to the
+// message sender when a per-agent broadcast delivery fails.
+func (s *Server) publishBroadcastDeliveryFailed(ctx context.Context, targetAgent *store.Agent, msg *messages.StructuredMessage, deliveryErr error) {
+	if !strings.HasPrefix(msg.Sender, "agent:") || msg.SenderID == "" {
+		return
+	}
+	senderAgent, err := s.store.GetAgent(ctx, msg.SenderID)
+	if err != nil {
+		return
+	}
+
+	failMsg := fmt.Sprintf("Broadcast delivery failed to agent %q: %v", targetAgent.Slug, deliveryErr)
+	structuredMsg := &messages.StructuredMessage{
+		Sender:      "system",
+		Recipient:   msg.Sender,
+		RecipientID: senderAgent.ID,
+		Msg:         failMsg,
+		Type:        messages.TypeStateChange,
+		Status:      "DELIVERY_FAILED",
+	}
+
+	dispatcher := s.GetDispatcher()
+	if dispatcher == nil {
+		return
+	}
+	if err := dispatcher.DispatchAgentMessage(ctx, senderAgent, failMsg, false, structuredMsg); err != nil {
+		s.messageLog.Error("Failed to dispatch broadcast DELIVERY_FAILED notification",
+			"sender_id", msg.SenderID, "target_agent", targetAgent.Slug, "error", err)
+	}
 }
 
 func (s *Server) updateAgentStatus(w http.ResponseWriter, r *http.Request, id string) {

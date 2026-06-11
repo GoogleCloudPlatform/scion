@@ -381,7 +381,7 @@ func sendMessageViaHub(hubCtx *HubContext, agentName string, message string, int
 	// Resolve sender identity for structured messages
 	sender := resolveSenderIdentity(hubCtx)
 
-	// Grove-scoped broadcast: list running agents, then fan-out individually.
+	// Grove-scoped broadcast: send via Hub broadcast endpoint.
 	if broadcast && !all {
 		projectID, err := GetProjectID(hubCtx)
 		if err != nil {
@@ -392,39 +392,16 @@ func sendMessageViaHub(hubCtx *HubContext, agentName string, message string, int
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 
-		resp, err := agentSvc.List(ctx, &hubclient.ListAgentsOptions{Phase: "running"})
+		msg := buildStructuredMessage(sender, "", message)
+		msg.Broadcasted = true
+		bcastResp, err := agentSvc.BroadcastMessage(ctx, msg, interrupt)
 		if err != nil {
-			return wrapHubError(fmt.Errorf("failed to list agents via Hub: %w", err))
-		}
-
-		if len(resp.Agents) == 0 {
-			fmt.Println("No running agents found to broadcast to.")
-			return nil
+			return wrapHubError(fmt.Errorf("failed to broadcast message via Hub: %w", err))
 		}
 
 		if !isJSONOutput() {
-			fmt.Printf("Broadcasting message to %d agents...\n", len(resp.Agents))
+			printBroadcastAccepted(bcastResp)
 		}
-
-		var wg sync.WaitGroup
-		for _, a := range resp.Agents {
-			wg.Add(1)
-			go func(name string) {
-				defer wg.Done()
-				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-				defer cancel()
-
-				msg := buildStructuredMessage(sender, "agent:"+name, message)
-				if err := agentSvc.SendStructuredMessage(ctx, name, msg, interrupt, false, false); err != nil {
-					fmt.Printf("Warning: failed to send message to agent '%s' via Hub: %s\n", name, err)
-					return
-				}
-				if !isJSONOutput() {
-					fmt.Printf("Message delivered to agent '%s' via Hub.\n", name)
-				}
-			}(a.Name)
-		}
-		wg.Wait()
 		return nil
 	}
 
@@ -460,7 +437,7 @@ func sendMessageViaHub(hubCtx *HubContext, agentName string, message string, int
 				defer cancel()
 
 				msg := buildStructuredMessage(sender, "agent:"+name, message)
-				if err := agentSvc.SendStructuredMessage(ctx, name, msg, interrupt, false, false); err != nil {
+				if _, err := agentSvc.SendStructuredMessage(ctx, name, msg, interrupt, false, false); err != nil {
 					fmt.Printf("Warning: failed to send message to agent '%s' via Hub: %s\n", name, err)
 					return
 				}
@@ -488,17 +465,39 @@ func sendMessageViaHub(hubCtx *HubContext, agentName string, message string, int
 	defer cancel()
 
 	msg := buildStructuredMessage(sender, "agent:"+agentName, message)
-	if err := agentSvc.SendStructuredMessage(ctx, agentName, msg, interrupt, notify, wake); err != nil {
+	deliveryResp, err := agentSvc.SendStructuredMessage(ctx, agentName, msg, interrupt, notify, wake)
+	if err != nil {
 		return wrapHubError(fmt.Errorf("failed to send message to agent '%s' via Hub: %w", agentName, err))
 	}
 
 	if !isJSONOutput() {
-		fmt.Printf("Message sent to agent '%s' via Hub.\n", agentName)
+		if deliveryResp != nil && deliveryResp.Status == "delivered" {
+			fmt.Printf("Message delivered to agent '%s'.\n", agentName)
+		} else {
+			fmt.Printf("Message accepted for agent '%s' (delivery deferred — agent's broker is not currently connected).\n", agentName)
+		}
 		if notify {
 			fmt.Printf("Subscribed to notifications for agent '%s'.\n", agentName)
 		}
 	}
 	return nil
+}
+
+func printBroadcastAccepted(resp *hubclient.BroadcastResponse) {
+	if resp == nil {
+		fmt.Println("Broadcast accepted.")
+		return
+	}
+	if resp.Skipped > 0 {
+		parts := make([]string, 0, len(resp.SkippedBreakdown))
+		for phase, count := range resp.SkippedBreakdown {
+			parts = append(parts, fmt.Sprintf("%d %s", count, phase))
+		}
+		fmt.Printf("Broadcast accepted (%d running agents targeted, %d skipped: %s).\n",
+			resp.Targeted, resp.Skipped, strings.Join(parts, ", "))
+	} else {
+		fmt.Printf("Broadcast accepted (%d running agents targeted).\n", resp.Targeted)
+	}
 }
 
 func sendOutboundMessageViaHub(hubCtx *HubContext, userRecipient string, message string, urgent bool) error {
@@ -582,7 +581,7 @@ func sendGroupMessageViaHub(hubCtx *HubContext, recipients []messages.GroupRecip
 				slug := api.Slugify(recip.Name)
 				msg := buildStructuredMessage(sender, "agent:"+slug, message)
 				msg.Metadata = map[string]string{"group_id": groupID}
-				if err := agentSvc.SendStructuredMessage(ctx, slug, msg, interrupt, false, false); err != nil {
+				if _, err := agentSvc.SendStructuredMessage(ctx, slug, msg, interrupt, false, false); err != nil {
 					results[idx] = recipientResult{Recipient: recipStr, Status: "failed", Error: err.Error()}
 					if !isJSONOutput() {
 						fmt.Printf("  Failed: %s: %s\n", recipStr, err)

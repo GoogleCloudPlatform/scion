@@ -62,8 +62,9 @@ const (
 	ErrCodePullFailed     = "pull_failed"
 
 	// Delivery error codes
-	ErrCodeAgentNotFound  = "agent_not_found"
-	ErrCodeDeliveryFailed = "delivery_failed"
+	ErrCodeAgentNotFound   = "agent_not_found"
+	ErrCodeDeliveryFailed  = "delivery_failed"
+	ErrCodeAgentNotRunning = "agent_not_running"
 
 	// Broker authentication error codes
 	ErrCodeInvalidJoinToken = "invalid_join_token"

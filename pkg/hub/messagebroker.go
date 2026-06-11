@@ -563,6 +563,7 @@ func (p *MessageBrokerProxy) deliverToAgent(ctx context.Context, projectID, agen
 	} else if err != nil {
 		p.log.Error("Failed to dispatch broker message to agent",
 			"agentSlug", agentSlug, "error", err)
+		p.publishDeliveryFailed(ctx, projectID, agentSlug, msg)
 		return
 	}
 

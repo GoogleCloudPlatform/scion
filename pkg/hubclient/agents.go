@@ -71,12 +71,12 @@ type AgentService interface {
 	// SendStructuredMessage sends a structured message to an agent.
 	// If notify is true, the sender subscribes to status notifications for the target agent.
 	// If wake is true, a suspended agent will be resumed before delivering the message.
-	SendStructuredMessage(ctx context.Context, agentID string, msg *messages.StructuredMessage, interrupt bool, notify bool, wake bool) error
+	SendStructuredMessage(ctx context.Context, agentID string, msg *messages.StructuredMessage, interrupt bool, notify bool, wake bool) (*MessageResponse, error)
 
 	// BroadcastMessage broadcasts a structured message to all running agents in the project.
 	// Uses the Hub's broadcast endpoint which routes through the message broker (if available)
 	// or performs direct fan-out as a fallback.
-	BroadcastMessage(ctx context.Context, msg *messages.StructuredMessage, interrupt bool) error
+	BroadcastMessage(ctx context.Context, msg *messages.StructuredMessage, interrupt bool) (*BroadcastResponse, error)
 
 	// SubmitEnv submits gathered environment variables for an agent after a 202 env-gather response.
 	SubmitEnv(ctx context.Context, agentID string, req *SubmitEnvRequest) (*CreateAgentResponse, error)
@@ -483,10 +483,18 @@ func (s *agentService) SendMessage(ctx context.Context, agentID string, message 
 	return apiclient.CheckResponse(resp)
 }
 
+// MessageResponse is the parsed response from a successful agent message delivery.
+type MessageResponse struct {
+	MessageID  string `json:"message_id"`
+	Status     string `json:"status"`
+	Agent      string `json:"agent"`
+	AgentPhase string `json:"agent_phase"`
+}
+
 // SendStructuredMessage sends a structured message to an agent.
 // If notify is true, the sender subscribes to status notifications for the target agent.
 // If wake is true, a suspended agent will be resumed before delivering the message.
-func (s *agentService) SendStructuredMessage(ctx context.Context, agentID string, msg *messages.StructuredMessage, interrupt bool, notify bool, wake bool) error {
+func (s *agentService) SendStructuredMessage(ctx context.Context, agentID string, msg *messages.StructuredMessage, interrupt bool, notify bool, wake bool) (*MessageResponse, error) {
 	body := struct {
 		StructuredMessage *messages.StructuredMessage `json:"structured_message"`
 		Interrupt         bool                        `json:"interrupt,omitempty"`
@@ -500,9 +508,9 @@ func (s *agentService) SendStructuredMessage(ctx context.Context, agentID string
 	}
 	resp, err := s.c.post(ctx, s.agentPath(agentID)+"/message", body, nil)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	return apiclient.CheckResponse(resp)
+	return apiclient.DecodeResponse[MessageResponse](resp)
 }
 
 // OutboundMessageRequest is the request body for sending an agent-to-human outbound message.
@@ -526,10 +534,19 @@ func (s *agentService) SendOutboundMessage(ctx context.Context, agentID string, 
 	return apiclient.CheckResponse(resp)
 }
 
+// BroadcastResponse is the parsed response from a broadcast message delivery.
+type BroadcastResponse struct {
+	Status          string         `json:"status"`
+	Total           int            `json:"total"`
+	Targeted        int            `json:"targeted"`
+	Skipped         int            `json:"skipped"`
+	SkippedBreakdown map[string]int `json:"skipped_breakdown,omitempty"`
+}
+
 // BroadcastMessage broadcasts a structured message to all running agents in the project.
-func (s *agentService) BroadcastMessage(ctx context.Context, msg *messages.StructuredMessage, interrupt bool) error {
+func (s *agentService) BroadcastMessage(ctx context.Context, msg *messages.StructuredMessage, interrupt bool) (*BroadcastResponse, error) {
 	if s.projectID == "" {
-		return fmt.Errorf("broadcast requires a project-scoped agent service")
+		return nil, fmt.Errorf("broadcast requires a project-scoped agent service")
 	}
 	body := struct {
 		StructuredMessage *messages.StructuredMessage `json:"structured_message"`
@@ -540,9 +557,9 @@ func (s *agentService) BroadcastMessage(ctx context.Context, msg *messages.Struc
 	}
 	resp, err := s.c.post(ctx, "/api/v1/projects/"+s.projectID+"/broadcast", body, nil)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	return apiclient.CheckResponse(resp)
+	return apiclient.DecodeResponse[BroadcastResponse](resp)
 }
 
 // Exec executes a command in an agent container.
