@@ -461,6 +461,9 @@ type ScionConfig struct {
 
 	Secrets []RequiredSecret `json:"secrets,omitempty" yaml:"secrets,omitempty"`
 
+	// Skills declares skill references to resolve at provision time.
+	Skills []SkillReference `json:"skills,omitempty" yaml:"skills,omitempty" koanf:"skills"`
+
 	// Agnostic template fields
 	AgentInstructions    string `json:"agent_instructions,omitempty" yaml:"agent_instructions,omitempty"`
 	SystemPrompt         string `json:"system_prompt,omitempty" yaml:"system_prompt,omitempty"`
@@ -662,6 +665,13 @@ type RequiredSecret struct {
 	// the file secret is not required. For example, GOOGLE_APPLICATION_CREDENTIALS
 	// can substitute for a gcloud-adc file secret.
 	AlternativeEnvKeys []string `json:"alternative_env_keys,omitempty" yaml:"alternative_env_keys,omitempty"`
+}
+
+// SkillReference declares a skill dependency in a template's scion-agent.yaml.
+type SkillReference struct {
+	URI      string `json:"uri" yaml:"uri" koanf:"uri"`
+	As       string `json:"as,omitempty" yaml:"as,omitempty" koanf:"as"`
+	Optional bool   `json:"optional,omitempty" yaml:"optional,omitempty" koanf:"optional"`
 }
 
 // SecretKeyInfo provides metadata about a required secret key, including

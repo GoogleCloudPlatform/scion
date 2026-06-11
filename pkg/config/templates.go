@@ -818,6 +818,11 @@ func MergeScionConfig(base, override *api.ScionConfig) *api.ScionConfig {
 		}
 	}
 
+	// Skills: append (deferred override semantics per #230).
+	if len(override.Skills) > 0 {
+		result.Skills = append(result.Skills, override.Skills...)
+	}
+
 	return &result
 }
 

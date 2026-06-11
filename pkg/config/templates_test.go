@@ -1879,3 +1879,62 @@ func TestResolveContentInChain(t *testing.T) {
 		}
 	})
 }
+
+func TestMergeScionConfig_Skills(t *testing.T) {
+	t.Run("base has skills, override has none", func(t *testing.T) {
+		base := &api.ScionConfig{
+			Skills: []api.SkillReference{
+				{URI: "skill://scion/core/scion@^1.0"},
+			},
+		}
+		override := &api.ScionConfig{}
+		got := MergeScionConfig(base, override)
+		if len(got.Skills) != 1 {
+			t.Fatalf("expected 1 skill, got %d", len(got.Skills))
+		}
+		if got.Skills[0].URI != "skill://scion/core/scion@^1.0" {
+			t.Errorf("expected base skill preserved, got %q", got.Skills[0].URI)
+		}
+	})
+
+	t.Run("both have skills - concatenated", func(t *testing.T) {
+		base := &api.ScionConfig{
+			Skills: []api.SkillReference{
+				{URI: "skill://scion/core/scion@^1.0"},
+			},
+		}
+		override := &api.ScionConfig{
+			Skills: []api.SkillReference{
+				{URI: "skill://scion/core/security-audit@latest", Optional: true},
+			},
+		}
+		got := MergeScionConfig(base, override)
+		if len(got.Skills) != 2 {
+			t.Fatalf("expected 2 skills, got %d", len(got.Skills))
+		}
+		if got.Skills[0].URI != "skill://scion/core/scion@^1.0" {
+			t.Errorf("first skill = %q, want base skill", got.Skills[0].URI)
+		}
+		if got.Skills[1].URI != "skill://scion/core/security-audit@latest" {
+			t.Errorf("second skill = %q, want override skill", got.Skills[1].URI)
+		}
+		if !got.Skills[1].Optional {
+			t.Error("expected second skill to be optional")
+		}
+	})
+
+	t.Run("base nil, override has skills", func(t *testing.T) {
+		override := &api.ScionConfig{
+			Skills: []api.SkillReference{
+				{URI: "scion", As: "my-scion"},
+			},
+		}
+		got := MergeScionConfig(nil, override)
+		if len(got.Skills) != 1 {
+			t.Fatalf("expected 1 skill, got %d", len(got.Skills))
+		}
+		if got.Skills[0].As != "my-scion" {
+			t.Errorf("expected As field preserved, got %q", got.Skills[0].As)
+		}
+	})
+}
