@@ -570,3 +570,141 @@ func TestInstallResolvedSkills_NestedFiles(t *testing.T) {
 		t.Errorf("nested file content = %q, want %q", string(data), string(content2))
 	}
 }
+
+func TestInstallResolvedSkills_BundleHashMismatch(t *testing.T) {
+	content := []byte("# Skill Content")
+	contentHash := transfer.HashBytes(content)
+	wrongBundleHash := "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write(content)
+	}))
+	defer srv.Close()
+
+	agentHome := t.TempDir()
+	skillsDest := filepath.Join(agentHome, ".claude", "skills")
+
+	skills := []ResolvedSkill{
+		{
+			Name:    "bundle-mismatch",
+			URI:     "skill://scion/core/bundle-mismatch@1.0",
+			Version: "1.0.0",
+			Hash:    wrongBundleHash,
+			Files: []ResolvedFile{
+				{Path: "SKILL.md", URL: srv.URL + "/SKILL.md", Hash: contentHash},
+			},
+		},
+	}
+
+	origTransport := http.DefaultTransport
+	http.DefaultTransport = srv.Client().Transport
+	defer func() { http.DefaultTransport = origTransport }()
+
+	_, err := installResolvedSkills(context.Background(), skills, skillsDest, agentHome)
+	if err == nil {
+		t.Fatal("expected error for bundle hash mismatch")
+	}
+	if !strings.Contains(err.Error(), "bundle hash mismatch") {
+		t.Errorf("error should mention bundle hash mismatch, got: %v", err)
+	}
+}
+
+func TestEnumerateLocalSkills(t *testing.T) {
+	agentHome := t.TempDir()
+	skillsDir := ".claude/skills"
+	skillsPath := filepath.Join(agentHome, skillsDir)
+
+	// Create some local skill directories
+	os.MkdirAll(filepath.Join(skillsPath, "local-skill-1"), 0755)
+	os.MkdirAll(filepath.Join(skillsPath, "local-skill-2"), 0755)
+	// Hidden dirs should be excluded
+	os.MkdirAll(filepath.Join(skillsPath, ".staging-temp"), 0755)
+	// Files should be excluded
+	os.WriteFile(filepath.Join(skillsPath, "README.md"), []byte("test"), 0644)
+
+	entries := enumerateLocalSkills(agentHome, skillsDir)
+	if len(entries) != 2 {
+		t.Fatalf("expected 2 local skills, got %d", len(entries))
+	}
+
+	names := map[string]bool{}
+	for _, e := range entries {
+		names[e.Name] = true
+		if e.Source != "local" {
+			t.Errorf("expected source 'local', got %q", e.Source)
+		}
+	}
+	if !names["local-skill-1"] || !names["local-skill-2"] {
+		t.Errorf("expected local-skill-1 and local-skill-2, got %v", names)
+	}
+}
+
+func TestEnumerateLocalSkills_NonExistentDir(t *testing.T) {
+	entries := enumerateLocalSkills(t.TempDir(), ".claude/skills")
+	if len(entries) != 0 {
+		t.Errorf("expected 0 entries for non-existent dir, got %d", len(entries))
+	}
+}
+
+func TestInstallResolvedSkills_OverridesExistingLocalSkill(t *testing.T) {
+	content := []byte("# Updated Skill")
+	contentHash := transfer.HashBytes(content)
+	bundleHash := transfer.ComputeContentHash([]transfer.FileInfo{
+		{Path: "SKILL.md", Hash: contentHash},
+	})
+
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write(content)
+	}))
+	defer srv.Close()
+
+	agentHome := t.TempDir()
+	skillsDest := filepath.Join(agentHome, ".claude", "skills")
+
+	// Pre-create a local skill that will be overridden
+	os.MkdirAll(filepath.Join(skillsDest, "my-skill"), 0755)
+	os.WriteFile(filepath.Join(skillsDest, "my-skill", "SKILL.md"), []byte("# Old"), 0644)
+
+	skills := []ResolvedSkill{
+		{
+			Name:    "my-skill",
+			URI:     "skill://scion/core/my-skill@1.0",
+			Version: "1.0.0",
+			Hash:    bundleHash,
+			Files: []ResolvedFile{
+				{Path: "SKILL.md", URL: srv.URL + "/SKILL.md", Hash: contentHash},
+			},
+		},
+	}
+
+	origTransport := http.DefaultTransport
+	http.DefaultTransport = srv.Client().Transport
+	defer func() { http.DefaultTransport = origTransport }()
+
+	_, err := installResolvedSkills(context.Background(), skills, skillsDest, agentHome)
+	if err != nil {
+		t.Fatalf("installResolvedSkills() error: %v", err)
+	}
+
+	// Verify the new content replaced the old
+	data, err := os.ReadFile(filepath.Join(skillsDest, "my-skill", "SKILL.md"))
+	if err != nil {
+		t.Fatalf("failed to read installed file: %v", err)
+	}
+	if string(data) != string(content) {
+		t.Errorf("expected updated content, got %q", string(data))
+	}
+}
+
+func TestInstallResolvedSkills_EmptySkillsList(t *testing.T) {
+	agentHome := t.TempDir()
+	skillsDest := filepath.Join(agentHome, ".claude", "skills")
+
+	record, err := installResolvedSkills(context.Background(), nil, skillsDest, agentHome)
+	if err != nil {
+		t.Fatalf("installResolvedSkills(nil) error: %v", err)
+	}
+	if len(record.Skills) != 0 {
+		t.Errorf("expected empty skills in record, got %d", len(record.Skills))
+	}
+}

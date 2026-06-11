@@ -1837,3 +1837,94 @@ func TestProvisionAgent_OptionalSkillsNoResolver(t *testing.T) {
 		t.Fatalf("expected provisioning to succeed with optional-only skills and no resolver, got: %v", err)
 	}
 }
+
+func TestProvisionAgent_SkillsYAMLParsing(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	oldWd, _ := os.Getwd()
+	os.Chdir(tmpDir)
+	defer os.Chdir(oldWd)
+
+	originalHome := os.Getenv("HOME")
+	defer os.Setenv("HOME", originalHome)
+	os.Setenv("HOME", tmpDir)
+
+	globalScionDir := filepath.Join(tmpDir, ".scion")
+	globalTemplatesDir := filepath.Join(globalScionDir, "templates")
+	os.MkdirAll(globalTemplatesDir, 0755)
+	seedTestHarnessConfig(t, globalScionDir, "claude", "claude")
+
+	// Test YAML skills parsing with hyphenated keys
+	tplDir := filepath.Join(globalTemplatesDir, "yaml-skills-tpl")
+	os.MkdirAll(tplDir, 0755)
+	tplConfig := `default_harness_config: claude
+skills:
+  - uri: "skill://scion/core/scion@^1.0"
+  - uri: "skill://project/custom@latest"
+    as: my-custom
+    optional: true
+`
+	os.WriteFile(filepath.Join(tplDir, "scion-agent.yaml"), []byte(tplConfig), 0644)
+
+	projectDir := filepath.Join(tmpDir, "project")
+	projectScionDir := filepath.Join(projectDir, ".scion")
+	os.MkdirAll(projectScionDir, 0755)
+
+	// This should fail because there's no resolver for the required skill
+	_, _, _, err := ProvisionAgent(context.Background(), "yaml-skills-agent", "yaml-skills-tpl", "", "", projectScionDir, "", "", "", "")
+	if err == nil {
+		t.Fatal("expected error for required skill with no resolver")
+	}
+	// Verify the error mentions the correct URI from YAML
+	if !strings.Contains(err.Error(), "skill://scion/core/scion@^1.0") {
+		t.Errorf("error should list the YAML-parsed skill URI, got: %v", err)
+	}
+	// The optional skill should not appear in the error
+	if strings.Contains(err.Error(), "skill://project/custom@latest") {
+		t.Errorf("error should not list optional skill, got: %v", err)
+	}
+}
+
+func TestProvisionAgent_SkillsResolverError(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	oldWd, _ := os.Getwd()
+	os.Chdir(tmpDir)
+	defer os.Chdir(oldWd)
+
+	originalHome := os.Getenv("HOME")
+	defer os.Setenv("HOME", originalHome)
+	os.Setenv("HOME", tmpDir)
+
+	globalScionDir := filepath.Join(tmpDir, ".scion")
+	globalTemplatesDir := filepath.Join(globalScionDir, "templates")
+	os.MkdirAll(globalTemplatesDir, 0755)
+	seedTestHarnessConfig(t, globalScionDir, "claude", "claude")
+
+	tplDir := filepath.Join(globalTemplatesDir, "resolver-err-tpl")
+	os.MkdirAll(tplDir, 0755)
+	tplConfig := `{
+		"default_harness_config": "claude",
+		"skills": [{"uri": "skill://scion/core/scion@^1.0"}]
+	}`
+	os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(tplConfig), 0644)
+
+	projectDir := filepath.Join(tmpDir, "project")
+	projectScionDir := filepath.Join(projectDir, ".scion")
+	os.MkdirAll(projectScionDir, 0755)
+
+	// Resolver that returns a per-skill error for a required skill
+	resolver := &mockResolver{
+		errors: []ResolveError{
+			{URI: "skill://scion/core/scion@^1.0", Code: "not_found", Message: "skill not found in registry"},
+		},
+	}
+	ctx := ContextWithSkillResolver(context.Background(), resolver)
+	_, _, _, err := ProvisionAgent(ctx, "resolver-err-agent", "resolver-err-tpl", "", "", projectScionDir, "", "", "", "")
+	if err == nil {
+		t.Fatal("expected error for required skill resolution failure")
+	}
+	if !strings.Contains(err.Error(), "could not be resolved") {
+		t.Errorf("error should mention resolution failure, got: %v", err)
+	}
+}
