@@ -238,7 +238,7 @@ func (s *Server) listSkills(w http.ResponseWriter, r *http.Request) {
 	}
 
 	identity := GetIdentityFromContext(ctx)
-	skills := make([]SkillWithCapabilities, len(result.Items))
+	skills := make([]SkillWithCapabilities, 0, len(result.Items))
 	if identity != nil {
 		resources := make([]Resource, len(result.Items))
 		for i := range result.Items {
@@ -246,11 +246,14 @@ func (s *Server) listSkills(w http.ResponseWriter, r *http.Request) {
 		}
 		caps := s.authzService.ComputeCapabilitiesBatch(ctx, identity, resources, "skill")
 		for i := range result.Items {
-			skills[i] = SkillWithCapabilities{Skill: result.Items[i], Cap: caps[i]}
+			if !capabilityAllows(caps[i], ActionRead) {
+				continue
+			}
+			skills = append(skills, SkillWithCapabilities{Skill: result.Items[i], Cap: caps[i]})
 		}
 	} else {
 		for i := range result.Items {
-			skills[i] = SkillWithCapabilities{Skill: result.Items[i]}
+			skills = append(skills, SkillWithCapabilities{Skill: result.Items[i]})
 		}
 	}
 
@@ -259,10 +262,15 @@ func (s *Server) listSkills(w http.ResponseWriter, r *http.Request) {
 		scopeCap = s.authzService.ComputeScopeCapabilities(ctx, identity, "", "", "skill")
 	}
 
+	totalCount := result.TotalCount
+	if identity != nil {
+		totalCount = len(skills)
+	}
+
 	writeJSON(w, http.StatusOK, ListSkillsResponse{
 		Skills:       skills,
 		NextCursor:   result.NextCursor,
-		TotalCount:   result.TotalCount,
+		TotalCount:   totalCount,
 		Capabilities: scopeCap,
 	})
 }
@@ -328,6 +336,13 @@ func (s *Server) createSkill(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required", nil)
 			return
 		}
+	} else if scope == store.SkillScopeUser {
+		userIdent := GetUserIdentityFromContext(ctx)
+		if userIdent == nil {
+			writeError(w, http.StatusUnauthorized, "unauthorized", "User authentication required for user-scoped skills", nil)
+			return
+		}
+		req.ScopeID = userIdent.ID()
 	}
 
 	slug := api.Slugify(req.Name)
@@ -385,8 +400,17 @@ func (s *Server) getSkill(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 
+	identity := GetIdentityFromContext(ctx)
+	if identity != nil {
+		decision := s.authzService.CheckAccess(ctx, identity, skillResource(skill), ActionRead)
+		if !decision.Allowed {
+			NotFound(w, "Skill")
+			return
+		}
+	}
+
 	resp := SkillWithCapabilities{Skill: *skill}
-	if identity := GetIdentityFromContext(ctx); identity != nil {
+	if identity != nil {
 		resp.Cap = s.authzService.ComputeCapabilities(ctx, identity, skillResource(skill))
 	}
 
@@ -898,6 +922,15 @@ func (s *Server) handleSkillDownload(w http.ResponseWriter, r *http.Request, ski
 		return
 	}
 
+	identity := GetIdentityFromContext(ctx)
+	if identity != nil {
+		decision := s.authzService.CheckAccess(ctx, identity, skillResource(skill), ActionRead)
+		if !decision.Allowed {
+			NotFound(w, "Skill")
+			return
+		}
+	}
+
 	stor := s.GetStorage()
 	if stor == nil {
 		RuntimeError(w, "Storage not configured")
@@ -939,6 +972,22 @@ func (s *Server) handleSkillResolveSingle(w http.ResponseWriter, r *http.Request
 	}
 
 	ctx := r.Context()
+
+	skill, err := s.store.GetSkill(ctx, skillID)
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	identity := GetIdentityFromContext(ctx)
+	if identity != nil {
+		decision := s.authzService.CheckAccess(ctx, identity, skillResource(skill), ActionRead)
+		if !decision.Allowed {
+			NotFound(w, "Skill")
+			return
+		}
+	}
+
 	version := r.URL.Query().Get("version")
 	if version == "" {
 		version = "latest"
@@ -973,6 +1022,12 @@ func (s *Server) handleSkillsResolve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	const maxResolveItems = 50
+	if len(req.Skills) > maxResolveItems {
+		ValidationError(w, fmt.Sprintf("too many skills in request (max %d)", maxResolveItems), nil)
+		return
+	}
+
 	stor := s.GetStorage()
 
 	var resolved []ResolvedSkillResponse
@@ -996,6 +1051,18 @@ func (s *Server) handleSkillsResolve(w http.ResponseWriter, r *http.Request) {
 				URI: skillRef.URI, Code: "not_found", Message: err.Error(),
 			})
 			continue
+		}
+
+		identity := GetIdentityFromContext(ctx)
+		if identity != nil {
+			decision := s.authzService.CheckAccess(ctx, identity, skillResource(skill), ActionRead)
+			if !decision.Allowed {
+				resolveErrors = append(resolveErrors, ResolveSkillError{
+					URI: skillRef.URI, Code: "forbidden",
+					Message: "you do not have permission to access this skill",
+				})
+				continue
+			}
 		}
 
 		entry := ResolvedSkillResponse{
