@@ -355,6 +355,79 @@ func (c *Client) ReportState(ctx context.Context, phase state.Phase, activity st
 	})
 }
 
+// SetSecretRequest is the request body for agent-initiated secret creation.
+type SetSecretRequest struct {
+	Value  string `json:"value"`
+	Type   string `json:"type,omitempty"`
+	Target string `json:"target,omitempty"`
+	Force  bool   `json:"force,omitempty"`
+}
+
+// SetSecretResponse is the response from the agent secret creation endpoint.
+type SetSecretResponse struct {
+	Key     string `json:"key"`
+	Scope   string `json:"scope"`
+	ScopeID string `json:"scopeId"`
+}
+
+// SetSecret stores a project-scoped secret via the Hub API.
+// The value should already be base64-encoded.
+func (c *Client) SetSecret(ctx context.Context, key, value, secretType, target string, force bool) (*SetSecretResponse, error) {
+	if !c.IsConfigured() {
+		return nil, fmt.Errorf("hub client not configured (is SCION_HUB_ENDPOINT set?)")
+	}
+
+	endpoint := fmt.Sprintf("%s/api/v1/agents/%s/secrets/%s",
+		strings.TrimSuffix(c.hubURL, "/"), c.agentID, key)
+
+	reqBody := SetSecretRequest{
+		Value:  value,
+		Type:   secretType,
+		Target: target,
+		Force:  force,
+	}
+
+	body, err := json.Marshal(reqBody)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	c.tokenMu.RLock()
+	currentToken := c.token
+	c.tokenMu.RUnlock()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Scion-Agent-Token", currentToken)
+
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to send request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+
+	switch resp.StatusCode {
+	case http.StatusCreated:
+		var result SetSecretResponse
+		if err := json.Unmarshal(respBody, &result); err != nil {
+			return nil, fmt.Errorf("failed to parse response: %w", err)
+		}
+		return &result, nil
+	case http.StatusNoContent:
+		return &SetSecretResponse{Key: key, Scope: "project"}, nil
+	case http.StatusConflict:
+		return nil, fmt.Errorf("secret %q already exists (use --force to overwrite)", key)
+	default:
+		return nil, fmt.Errorf("hub returned error %d: %s", resp.StatusCode, string(respBody))
+	}
+}
+
 // RefreshTokenEntry represents a single token in the generalized refresh response.
 // Mirrors the hub's RefreshTokenEntry type.
 type RefreshTokenEntry struct {

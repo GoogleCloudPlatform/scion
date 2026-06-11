@@ -1431,6 +1431,12 @@ func (s *Server) handleAgentByID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Handle agent-scoped secret creation: PUT /api/v1/agents/{id}/secrets/{key}
+	if action == "secrets" || strings.HasPrefix(action, "secrets/") {
+		s.handleAgentSecrets(w, r, id, strings.TrimPrefix(action, "secrets"))
+		return
+	}
+
 	// Handle actions
 	if action != "" {
 		s.handleAgentAction(w, r, id, action)
@@ -7862,6 +7868,156 @@ func (s *Server) deleteSecret(w http.ResponseWriter, r *http.Request, key string
 	}
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// ============================================================================
+// Agent-Scoped Secret Creation
+// ============================================================================
+
+// AgentSetSecretRequest is the request body for agent-initiated secret creation.
+type AgentSetSecretRequest struct {
+	Value  string `json:"value"`            // Base64-encoded secret value
+	Type   string `json:"type,omitempty"`   // environment (default), variable, file
+	Target string `json:"target,omitempty"` // Injection target path
+	Force  bool   `json:"force,omitempty"`  // Overwrite existing secret
+}
+
+// AgentSetSecretResponse is returned on successful agent secret creation.
+type AgentSetSecretResponse struct {
+	Key     string `json:"key"`
+	Scope   string `json:"scope"`
+	ScopeID string `json:"scopeId"`
+}
+
+// handleAgentSecrets handles PUT /api/v1/agents/{agentID}/secrets/{key}.
+// Only agents may call this endpoint. The secret is always scoped to the
+// agent's project (derived from the JWT).
+func (s *Server) handleAgentSecrets(w http.ResponseWriter, r *http.Request, agentID, subPath string) {
+	key := strings.TrimPrefix(subPath, "/")
+	if key == "" {
+		BadRequest(w, "Secret key is required in the URL path")
+		return
+	}
+
+	if r.Method != http.MethodPut {
+		MethodNotAllowed(w)
+		return
+	}
+
+	ctx := r.Context()
+
+	// Agent-only: require agent identity from JWT.
+	agentIdent := GetAgentIdentityFromContext(ctx)
+	if agentIdent == nil {
+		writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized, "This endpoint requires agent authentication", nil)
+		return
+	}
+
+	// The agentID in the URL path must match the JWT subject.
+	if agentIdent.ID() != agentID {
+		writeError(w, http.StatusForbidden, ErrCodeForbidden, "Agent token does not match the agent ID in the URL", nil)
+		return
+	}
+
+	// Extract project ID from agent token claims.
+	projectID := agentIdent.ProjectID()
+	if projectID == "" {
+		writeError(w, http.StatusForbidden, ErrCodeForbidden, "Agent token lacks project context", nil)
+		return
+	}
+
+	var req AgentSetSecretRequest
+	if err := readJSON(r, &req); err != nil {
+		BadRequest(w, "Invalid request body: "+err.Error())
+		return
+	}
+
+	if req.Value == "" {
+		ValidationError(w, "value is required", nil)
+		return
+	}
+
+	// Validate and default secret type.
+	secretType := req.Type
+	if secretType == "" {
+		secretType = store.SecretTypeEnvironment
+	}
+	switch secretType {
+	case store.SecretTypeEnvironment, store.SecretTypeVariable, store.SecretTypeFile:
+		// valid
+	default:
+		ValidationError(w, "type must be one of: environment, variable, file", map[string]interface{}{
+			"field": "type",
+			"value": secretType,
+		})
+		return
+	}
+
+	// Default target to key name.
+	target := req.Target
+	if target == "" {
+		target = key
+	}
+
+	// Validate file-specific constraints.
+	if secretType == store.SecretTypeFile {
+		if !strings.HasPrefix(target, "/") && !strings.HasPrefix(target, "~/") {
+			ValidationError(w, "file secret target must be an absolute path (or start with ~/)", map[string]interface{}{
+				"field": "target",
+				"value": target,
+			})
+			return
+		}
+		if len(req.Value) > 64*1024 {
+			ValidationError(w, "file secret value exceeds 64 KiB limit", map[string]interface{}{
+				"field": "value",
+				"limit": "65536 bytes",
+				"size":  len(req.Value),
+			})
+			return
+		}
+	}
+
+	// Check for existing secret when force is not set.
+	if !req.Force {
+		_, err := s.secretBackend.GetMeta(ctx, key, store.ScopeProject, projectID)
+		if err == nil {
+			Conflict(w, fmt.Sprintf("Secret %q already exists at project scope. Use force=true to overwrite.", key))
+			return
+		}
+		// Any error other than not-found is unexpected.
+		if !errors.Is(err, store.ErrNotFound) {
+			writeErrorFromErr(w, err, "")
+			return
+		}
+	}
+
+	input := &secret.SetSecretInput{
+		Name:       key,
+		Value:      req.Value,
+		SecretType: secretType,
+		Target:     target,
+		Scope:      store.ScopeProject,
+		ScopeID:    projectID,
+		CreatedBy:  fmt.Sprintf("agent:%s", agentID),
+		UpdatedBy:  fmt.Sprintf("agent:%s", agentID),
+	}
+
+	created, _, err := s.secretBackend.Set(ctx, input)
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	if created {
+		writeJSON(w, http.StatusCreated, AgentSetSecretResponse{
+			Key:     key,
+			Scope:   store.ScopeProject,
+			ScopeID: projectID,
+		})
+	} else {
+		w.WriteHeader(http.StatusNoContent)
+	}
 }
 
 // ============================================================================

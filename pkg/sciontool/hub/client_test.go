@@ -1330,3 +1330,95 @@ func TestClient_StartHeartbeat_DefaultConfig(t *testing.T) {
 	done := client.StartHeartbeat(ctx, nil)
 	<-done
 }
+
+func TestClient_SetSecret_Created(t *testing.T) {
+	var receivedReq SetSecretRequest
+	var receivedToken string
+	var receivedMethod string
+	var receivedPath string
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedMethod = r.Method
+		receivedPath = r.URL.Path
+		receivedToken = r.Header.Get("X-Scion-Agent-Token")
+		if err := json.NewDecoder(r.Body).Decode(&receivedReq); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(SetSecretResponse{
+			Key:     "MY_KEY",
+			Scope:   "project",
+			ScopeID: "project-123",
+		})
+	}))
+	defer server.Close()
+
+	client := NewClientWithConfig(server.URL, "test-token", "agent-123")
+	resp, err := client.SetSecret(context.Background(), "MY_KEY", "c2VjcmV0", "file", "~/.config/auth.json", false)
+
+	require.NoError(t, err)
+	assert.Equal(t, http.MethodPut, receivedMethod)
+	assert.Equal(t, "/api/v1/agents/agent-123/secrets/MY_KEY", receivedPath)
+	assert.Equal(t, "test-token", receivedToken)
+	assert.Equal(t, "c2VjcmV0", receivedReq.Value)
+	assert.Equal(t, "file", receivedReq.Type)
+	assert.Equal(t, "~/.config/auth.json", receivedReq.Target)
+	assert.False(t, receivedReq.Force)
+
+	require.NotNil(t, resp)
+	assert.Equal(t, "MY_KEY", resp.Key)
+	assert.Equal(t, "project", resp.Scope)
+	assert.Equal(t, "project-123", resp.ScopeID)
+}
+
+func TestClient_SetSecret_NoContent(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	client := NewClientWithConfig(server.URL, "test-token", "agent-123")
+	resp, err := client.SetSecret(context.Background(), "MY_KEY", "dmFsdWU=", "", "", true)
+
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	assert.Equal(t, "MY_KEY", resp.Key)
+	assert.Equal(t, "project", resp.Scope)
+}
+
+func TestClient_SetSecret_Conflict(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusConflict)
+		w.Write([]byte(`{"error":"exists"}`))
+	}))
+	defer server.Close()
+
+	client := NewClientWithConfig(server.URL, "test-token", "agent-123")
+	_, err := client.SetSecret(context.Background(), "MY_KEY", "dmFsdWU=", "", "", false)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "already exists")
+}
+
+func TestClient_SetSecret_NotConfigured(t *testing.T) {
+	client := &Client{}
+	_, err := client.SetSecret(context.Background(), "KEY", "VAL", "", "", false)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not configured")
+}
+
+func TestClient_SetSecret_ServerError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte("internal error"))
+	}))
+	defer server.Close()
+
+	client := NewClientWithConfig(server.URL, "test-token", "agent-123")
+	_, err := client.SetSecret(context.Background(), "KEY", "dmFsdWU=", "", "", false)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "500")
+}
