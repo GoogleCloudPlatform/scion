@@ -22,11 +22,11 @@ import (
 	"time"
 
 	entsql "entgo.io/ent/dialect/sql"
-	"github.com/Masterminds/semver/v3"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	entskill "github.com/GoogleCloudPlatform/scion/pkg/ent/skill"
 	entskillversion "github.com/GoogleCloudPlatform/scion/pkg/ent/skillversion"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/Masterminds/semver/v3"
 )
 
 // SkillStore implements store.SkillStore using Ent ORM.

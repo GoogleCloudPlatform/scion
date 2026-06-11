@@ -160,7 +160,7 @@ type UpdateSkillRequest struct {
 
 // PublishVersionRequest is the request for creating a skill version.
 type PublishVersionRequest struct {
-	Version string            `json:"version"`
+	Version string              `json:"version"`
 	Files   []FileUploadRequest `json:"files,omitempty"`
 }
 
@@ -172,7 +172,7 @@ type PublishVersionResponse struct {
 
 // FinalizeSkillVersionRequest is the request for finalizing a skill version.
 type FinalizeSkillVersionRequest struct {
-	Version  string        `json:"version"`
+	Version  string         `json:"version"`
 	Manifest *SkillManifest `json:"manifest"`
 }
 
@@ -201,7 +201,7 @@ type ResolveSkillRef struct {
 
 // ResolveSkillsResponse is the response for batch skill resolution.
 type ResolveSkillsResponse struct {
-	Resolved []ResolvedSkill    `json:"resolved"`
+	Resolved []ResolvedSkill     `json:"resolved"`
 	Errors   []ResolveSkillError `json:"errors,omitempty"`
 }
 
@@ -343,7 +343,7 @@ func (s *skillService) FinalizeVersion(ctx context.Context, skillID string, req 
 // RequestUploadURLs requests signed upload URLs for a skill version's files.
 func (s *skillService) RequestUploadURLs(ctx context.Context, skillID string, version string, files []FileUploadRequest) (*UploadResponse, error) {
 	req := struct {
-		Version string            `json:"version"`
+		Version string              `json:"version"`
 		Files   []FileUploadRequest `json:"files"`
 	}{
 		Version: version,
