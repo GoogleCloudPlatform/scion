@@ -27,6 +27,8 @@ import (
 	"strings"
 	"time"
 
+	"crypto/sha256"
+
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
@@ -253,8 +255,13 @@ func installOneSkill(ctx context.Context, skill ResolvedSkill, dest, skillsDest 
 				_ = os.RemoveAll(finalDest)
 			}
 			if err := cache.CopyToDir(cachedPath, finalDest); err == nil {
-				util.Debugf("provision: skill installed from cache: %s@%s", skill.Name, skill.Version)
-				return buildSkillEntry(skill, dest, skillsDest)
+				if err := verifyInstalledSkillHash(finalDest, skill); err != nil {
+					util.Debugf("provision: cached skill failed verification, falling through to download: %v", err)
+					_ = os.RemoveAll(finalDest)
+				} else {
+					util.Debugf("provision: skill installed from cache: %s@%s", skill.Name, skill.Version)
+					return buildSkillEntry(skill, dest, skillsDest)
+				}
 			}
 			// Cache copy failed — fall through to download
 		}
@@ -398,6 +405,21 @@ func populateSkillCache(cache interface{ Put(string, map[string][]byte) (string,
 	} else {
 		util.Debugf("provision: cached skill %s@%s (%s)", skill.Name, skill.Version, skill.Hash)
 	}
+}
+
+func verifyInstalledSkillHash(dir string, skill ResolvedSkill) error {
+	for _, f := range skill.Files {
+		path := filepath.Join(dir, f.Path)
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return fmt.Errorf("missing file %s: %w", f.Path, err)
+		}
+		computed := fmt.Sprintf("sha256:%x", sha256.Sum256(data))
+		if computed != f.Hash {
+			return fmt.Errorf("hash mismatch for %s: expected %s, got %s", f.Path, f.Hash, computed)
+		}
+	}
+	return nil
 }
 
 // validateFilePath checks that a relative path is safe for extraction.

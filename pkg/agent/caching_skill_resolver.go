@@ -35,6 +35,9 @@ type CachingSkillResolver struct {
 // NewCachingSkillResolver returns a decorator that injects the skill
 // cache into the context before delegating resolution to inner.
 func NewCachingSkillResolver(inner SkillResolver, cache *templatecache.Cache) *CachingSkillResolver {
+	if cache == nil {
+		panic("NewCachingSkillResolver: cache must not be nil")
+	}
 	return &CachingSkillResolver{inner: inner, cache: cache}
 }
 
