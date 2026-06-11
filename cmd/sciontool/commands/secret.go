@@ -7,7 +7,6 @@ package commands
 import (
 	"context"
 	"encoding/base64"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -60,11 +59,11 @@ Examples:
 		value := args[1]
 
 		if key == "" {
-			fmt.Fprintln(cmd.ErrOrStderr(), "Error: key cannot be empty")
+			log.Error("key cannot be empty")
 			os.Exit(1)
 		}
 		if strings.ContainsAny(key, "= \t\n") {
-			fmt.Fprintln(cmd.ErrOrStderr(), "Error: key cannot contain spaces, tabs, newlines, or '='")
+			log.Error("key cannot contain spaces, tabs, newlines, or '='")
 			os.Exit(1)
 		}
 
@@ -77,14 +76,14 @@ Examples:
 			if strings.HasPrefix(filePath, "~/") {
 				home, err := os.UserHomeDir()
 				if err != nil {
-					fmt.Fprintf(cmd.ErrOrStderr(), "Error: failed to expand home directory: %v\n", err)
+					log.Error("Failed to expand home directory: %v", err)
 					os.Exit(1)
 				}
 				filePath = home + filePath[1:]
 			}
 			data, err := os.ReadFile(filePath)
 			if err != nil {
-				fmt.Fprintf(cmd.ErrOrStderr(), "Error: failed to read file %s: %v\n", filePath, err)
+				log.Error("Failed to read file %s: %v", filePath, err)
 				os.Exit(1)
 			}
 			value = base64.StdEncoding.EncodeToString(data)
@@ -94,7 +93,7 @@ Examples:
 			if localTarget == "" {
 				absPath, err := filepath.Abs(filePath)
 				if err != nil {
-					fmt.Fprintf(cmd.ErrOrStderr(), "Error: failed to resolve absolute path for %s: %v\n", filePath, err)
+					log.Error("Failed to resolve absolute path for %s: %v", filePath, err)
 					os.Exit(1)
 				}
 				home, err := os.UserHomeDir()
@@ -110,7 +109,7 @@ Examples:
 
 		hubClient := hub.NewClient()
 		if hubClient == nil || !hubClient.IsConfigured() {
-			fmt.Fprintln(cmd.ErrOrStderr(), "Error: Hub client not configured. Is SCION_HUB_ENDPOINT set?")
+			log.Error("Hub client not configured. Is SCION_HUB_ENDPOINT set?")
 			os.Exit(1)
 		}
 
@@ -119,7 +118,7 @@ Examples:
 
 		resp, err := hubClient.SetSecret(ctx, key, value, localType, localTarget, secretForce)
 		if err != nil {
-			fmt.Fprintf(cmd.ErrOrStderr(), "Error: %v\n", err)
+			log.Error("%v", err)
 			os.Exit(1)
 		}
 

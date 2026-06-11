@@ -408,7 +408,7 @@ func (c *Client) SetSecret(ctx context.Context, key, value, secretType, target s
 	if err != nil {
 		return nil, fmt.Errorf("failed to send request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	respBody, _ := io.ReadAll(resp.Body)
 

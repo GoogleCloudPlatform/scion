@@ -1347,7 +1347,7 @@ func TestClient_SetSecret_Created(t *testing.T) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
-		json.NewEncoder(w).Encode(SetSecretResponse{
+		_ = json.NewEncoder(w).Encode(SetSecretResponse{
 			Key:     "MY_KEY",
 			Scope:   "project",
 			ScopeID: "project-123",
@@ -1391,7 +1391,7 @@ func TestClient_SetSecret_NoContent(t *testing.T) {
 func TestClient_SetSecret_Conflict(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusConflict)
-		w.Write([]byte(`{"error":"exists"}`))
+		_, _ = w.Write([]byte(`{"error":"exists"}`))
 	}))
 	defer server.Close()
 
@@ -1412,7 +1412,7 @@ func TestClient_SetSecret_NotConfigured(t *testing.T) {
 func TestClient_SetSecret_ServerError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
-		w.Write([]byte("internal error"))
+		_, _ = w.Write([]byte("internal error"))
 	}))
 	defer server.Close()
 

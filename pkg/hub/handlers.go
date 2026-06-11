@@ -7987,7 +7987,7 @@ func (s *Server) handleAgentSecrets(w http.ResponseWriter, r *http.Request, agen
 			})
 			return
 		}
-		if (len(req.Value)*3/4) > 64*1024 {
+		if (len(req.Value) * 3 / 4) > 64*1024 {
 			ValidationError(w, "file secret value exceeds 64 KiB limit", map[string]interface{}{
 				"field": "value",
 				"limit": "65536 bytes",
