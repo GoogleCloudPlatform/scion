@@ -339,6 +339,11 @@ func (c *ContainerScriptHarness) Provision(ctx context.Context, agentName, agent
 		}
 	}
 
+	// Stage capture_auth.py and capture-auth-config.json into the bundle.
+	if err := c.stageCaptureAuthConfig(agentHome); err != nil {
+		return fmt.Errorf("stage capture-auth assets: %w", err)
+	}
+
 	// Copy dialect.yaml if present.
 	dialectSrc := filepath.Join(c.configDirPath, "dialect.yaml")
 	if fileExistsHelper(dialectSrc) {
@@ -528,6 +533,13 @@ func (c *ContainerScriptHarness) ApplyTelemetrySettings(agentHome string, teleme
 	return c.stageInputFile(agentHome, "telemetry.json", data)
 }
 
+// stageCaptureAuthConfig delegates to the shared StageCaptureAuthAssets
+// helper to generate inputs/capture-auth-config.json from the harness
+// config's auth.types.*.required_files declarations.
+func (c *ContainerScriptHarness) stageCaptureAuthConfig(agentHome string) error {
+	return StageCaptureAuthAssets(agentHome, c.configDirPath, c.entry.Auth)
+}
+
 // stageInputFile writes content under agent_home/.scion/harness/inputs/<name>.
 // Inputs are not secrets; mode 0644 is fine.
 func (c *ContainerScriptHarness) stageInputFile(agentHome, name string, content []byte) error {
@@ -628,4 +640,79 @@ func expandEnvTemplate(value, agentName, agentHome, unixUsername string) string 
 		out = strings.ReplaceAll(out, placeholder, replacement)
 	}
 	return out
+}
+
+// StageCaptureAuthAssets stages capture_auth.py and its config file into the
+// harness bundle directory at agentHome/.scion/harness/. This is a shared
+// helper called by both container-script and builtin harness Provision methods
+// so the capture script is available at a known path in the container.
+//
+// configDirPath is the harness-config directory containing capture_auth.py.
+// authMeta provides the required_files declarations used to generate the
+// capture-auth-config.json input.
+func StageCaptureAuthAssets(agentHome, configDirPath string, authMeta *config.HarnessAuthMetadata) error {
+	bundleDir := filepath.Join(agentHome, ".scion", "harness")
+	inputsDir := filepath.Join(bundleDir, "inputs")
+
+	for _, dir := range []string{bundleDir, inputsDir} {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			return fmt.Errorf("create dir %q: %w", dir, err)
+		}
+	}
+
+	captureAuthSrc := filepath.Join(configDirPath, "capture_auth.py")
+	if fileExistsHelper(captureAuthSrc) {
+		dst := filepath.Join(bundleDir, "capture_auth.py")
+		if err := copyHarnessConfigFile(captureAuthSrc, dst); err != nil {
+			return fmt.Errorf("stage capture_auth.py: %w", err)
+		}
+		if err := os.Chmod(dst, 0755); err != nil {
+			return fmt.Errorf("chmod capture_auth.py: %w", err)
+		}
+	}
+
+	if authMeta == nil || len(authMeta.Types) == 0 {
+		return nil
+	}
+
+	type credEntry struct {
+		Key    string `json:"key"`
+		Source string `json:"source"`
+		Type   string `json:"type"`
+		Target string `json:"target"`
+	}
+
+	var creds []credEntry
+	for _, authType := range authMeta.Types {
+		for _, rf := range authType.RequiredFiles {
+			if rf.Name == "" || rf.TargetSuffix == "" {
+				continue
+			}
+			fileType := rf.Type
+			if fileType == "" {
+				fileType = "file"
+			}
+			source := "~" + rf.TargetSuffix
+			creds = append(creds, credEntry{
+				Key:    rf.Name,
+				Source: source,
+				Type:   fileType,
+				Target: source,
+			})
+		}
+	}
+
+	if len(creds) == 0 {
+		return nil
+	}
+
+	payload := map[string]interface{}{
+		"schema_version": 1,
+		"credentials":    creds,
+	}
+	data, err := json.MarshalIndent(payload, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal capture-auth config: %w", err)
+	}
+	return os.WriteFile(filepath.Join(inputsDir, "capture-auth-config.json"), data, 0644)
 }

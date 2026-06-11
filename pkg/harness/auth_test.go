@@ -15,12 +15,14 @@
 package harness
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 )
 
 func TestGatherAuth_EnvVars(t *testing.T) {
@@ -977,4 +979,202 @@ func TestOverlayFileSecrets(t *testing.T) {
 			tt.check(t, auth)
 		})
 	}
+}
+
+func TestOverlayFileSecretsFromConfig(t *testing.T) {
+	claudeAuthMeta := &config.HarnessAuthMetadata{
+		DefaultType: "api-key",
+		Types: map[string]config.HarnessAuthTypeMetadata{
+			"auth-file": {
+				RequiredFiles: []config.HarnessAuthFileRequirement{
+					{Name: "CLAUDE_AUTH", Type: "file", TargetSuffix: "/.claude/.credentials.json", Field: "ClaudeAuthFile"},
+				},
+			},
+			"vertex-ai": {
+				RequiredFiles: []config.HarnessAuthFileRequirement{
+					{Name: "gcloud-adc", Type: "file", TargetSuffix: "", Field: "GoogleAppCredentials", Required: true},
+				},
+			},
+		},
+	}
+
+	tests := []struct {
+		name    string
+		meta    *config.HarnessAuthMetadata
+		secrets []api.ResolvedSecret
+		check   func(t *testing.T, auth api.AuthConfig)
+	}{
+		{
+			name: "config-driven field mapping for CLAUDE_AUTH",
+			meta: claudeAuthMeta,
+			secrets: []api.ResolvedSecret{
+				{Name: "CLAUDE_AUTH", Type: "file", Target: "/home/agent/.claude/.credentials.json"},
+			},
+			check: func(t *testing.T, auth api.AuthConfig) {
+				if auth.ClaudeAuthFile != "/home/agent/.claude/.credentials.json" {
+					t.Errorf("ClaudeAuthFile = %q, want credentials path", auth.ClaudeAuthFile)
+				}
+			},
+		},
+		{
+			name: "fallback to target suffix for unknown secret name",
+			meta: claudeAuthMeta,
+			secrets: []api.ResolvedSecret{
+				{Name: "my-custom-claude-creds", Type: "file", Target: "/home/agent/.claude/.credentials.json"},
+			},
+			check: func(t *testing.T, auth api.AuthConfig) {
+				if auth.ClaudeAuthFile != "/home/agent/.claude/.credentials.json" {
+					t.Errorf("ClaudeAuthFile = %q, want credentials path from suffix fallback", auth.ClaudeAuthFile)
+				}
+			},
+		},
+		{
+			name: "config-driven matches hardcoded behavior",
+			meta: claudeAuthMeta,
+			secrets: []api.ResolvedSecret{
+				{Name: "CLAUDE_AUTH", Type: "file", Target: "/home/agent/.claude/.credentials.json"},
+			},
+			check: func(t *testing.T, auth api.AuthConfig) {
+				hardcoded := api.AuthConfig{}
+				OverlayFileSecrets(&hardcoded, []api.ResolvedSecret{
+					{Name: "CLAUDE_AUTH", Type: "file", Target: "/home/agent/.claude/.credentials.json"},
+				})
+				if auth.ClaudeAuthFile != hardcoded.ClaudeAuthFile {
+					t.Errorf("config-driven ClaudeAuthFile = %q, hardcoded = %q", auth.ClaudeAuthFile, hardcoded.ClaudeAuthFile)
+				}
+			},
+		},
+		{
+			name: "non-file secrets are skipped",
+			meta: claudeAuthMeta,
+			secrets: []api.ResolvedSecret{
+				{Name: "CLAUDE_AUTH", Type: "environment", Target: "CLAUDE_AUTH", Value: "some-value"},
+			},
+			check: func(t *testing.T, auth api.AuthConfig) {
+				if auth.ClaudeAuthFile != "" {
+					t.Errorf("ClaudeAuthFile = %q, want empty (env-type should be skipped)", auth.ClaudeAuthFile)
+				}
+			},
+		},
+		{
+			name: "nil auth metadata falls back to suffix matching",
+			meta: nil,
+			secrets: []api.ResolvedSecret{
+				{Name: "CLAUDE_AUTH", Type: "file", Target: "/home/agent/.claude/.credentials.json"},
+			},
+			check: func(t *testing.T, auth api.AuthConfig) {
+				if auth.ClaudeAuthFile != "/home/agent/.claude/.credentials.json" {
+					t.Errorf("ClaudeAuthFile = %q, want credentials path from suffix fallback", auth.ClaudeAuthFile)
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			auth := api.AuthConfig{}
+			OverlayFileSecretsFromConfig(&auth, tt.secrets, tt.meta)
+			tt.check(t, auth)
+		})
+	}
+}
+
+func TestStageCaptureAuthAssets(t *testing.T) {
+	authMeta := &config.HarnessAuthMetadata{
+		Types: map[string]config.HarnessAuthTypeMetadata{
+			"auth-file": {
+				RequiredFiles: []config.HarnessAuthFileRequirement{
+					{Name: "CLAUDE_AUTH", Type: "file", TargetSuffix: "/.claude/.credentials.json", Field: "ClaudeAuthFile"},
+				},
+			},
+			"vertex-ai": {
+				RequiredFiles: []config.HarnessAuthFileRequirement{
+					{Name: "gcloud-adc", Type: "file", TargetSuffix: "", Field: "GoogleAppCredentials"},
+				},
+			},
+		},
+	}
+
+	t.Run("stages capture-auth-config.json from auth metadata", func(t *testing.T) {
+		agentHome := t.TempDir()
+		configDir := t.TempDir()
+
+		if err := os.WriteFile(filepath.Join(configDir, "capture_auth.py"), []byte("#!/usr/bin/env python3\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		if err := StageCaptureAuthAssets(agentHome, configDir, authMeta); err != nil {
+			t.Fatalf("StageCaptureAuthAssets failed: %v", err)
+		}
+
+		scriptPath := filepath.Join(agentHome, ".scion", "harness", "capture_auth.py")
+		if _, err := os.Stat(scriptPath); err != nil {
+			t.Errorf("capture_auth.py not staged: %v", err)
+		}
+
+		configPath := filepath.Join(agentHome, ".scion", "harness", "inputs", "capture-auth-config.json")
+		data, err := os.ReadFile(configPath)
+		if err != nil {
+			t.Fatalf("capture-auth-config.json not staged: %v", err)
+		}
+
+		var payload map[string]interface{}
+		if err := json.Unmarshal(data, &payload); err != nil {
+			t.Fatalf("invalid JSON: %v", err)
+		}
+
+		creds, ok := payload["credentials"].([]interface{})
+		if !ok {
+			t.Fatal("credentials field missing or not an array")
+		}
+
+		// Only CLAUDE_AUTH has a TargetSuffix, so only it should appear
+		if len(creds) != 1 {
+			t.Fatalf("expected 1 credential entry, got %d", len(creds))
+		}
+
+		entry := creds[0].(map[string]interface{})
+		if entry["key"] != "CLAUDE_AUTH" {
+			t.Errorf("key = %q, want CLAUDE_AUTH", entry["key"])
+		}
+		if entry["source"] != "~/.claude/.credentials.json" {
+			t.Errorf("source = %q, want ~/.claude/.credentials.json", entry["source"])
+		}
+	})
+
+	t.Run("no-op with nil auth metadata", func(t *testing.T) {
+		agentHome := t.TempDir()
+		configDir := t.TempDir()
+
+		if err := StageCaptureAuthAssets(agentHome, configDir, nil); err != nil {
+			t.Fatalf("StageCaptureAuthAssets failed: %v", err)
+		}
+
+		configPath := filepath.Join(agentHome, ".scion", "harness", "inputs", "capture-auth-config.json")
+		if _, err := os.Stat(configPath); !os.IsNotExist(err) {
+			t.Error("expected no capture-auth-config.json with nil auth metadata")
+		}
+	})
+
+	t.Run("script is executable", func(t *testing.T) {
+		agentHome := t.TempDir()
+		configDir := t.TempDir()
+
+		if err := os.WriteFile(filepath.Join(configDir, "capture_auth.py"), []byte("#!/usr/bin/env python3\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		if err := StageCaptureAuthAssets(agentHome, configDir, authMeta); err != nil {
+			t.Fatal(err)
+		}
+
+		scriptPath := filepath.Join(agentHome, ".scion", "harness", "capture_auth.py")
+		info, err := os.Stat(scriptPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode()&0111 == 0 {
+			t.Error("capture_auth.py should be executable")
+		}
+	})
 }

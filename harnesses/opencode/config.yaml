@@ -78,9 +78,16 @@ auth:
         - name: OPENCODE_AUTH
           type: file
           target_suffix: "/.local/share/opencode/auth.json"
+          field: OpenCodeAuthFile
   autodetect:
     env:
       ANTHROPIC_API_KEY: api-key
       OPENAI_API_KEY: api-key
     files:
       OPENCODE_AUTH: auth-file
+no_auth:
+  behavior: drop-to-shell
+  message: |
+    This agent started without credentials.
+    Set ANTHROPIC_API_KEY or OPENAI_API_KEY, or authenticate interactively.
+    Then capture credentials: python3 ~/.scion/harness/capture_auth.py

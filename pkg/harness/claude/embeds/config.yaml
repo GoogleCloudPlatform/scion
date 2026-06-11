@@ -66,6 +66,7 @@ auth:
         - name: CLAUDE_AUTH
           type: file
           target_suffix: "/.claude/.credentials.json"
+          field: ClaudeAuthFile
     vertex-ai:
       required_env:
         - any_of: ["GOOGLE_CLOUD_PROJECT"]
@@ -74,6 +75,7 @@ auth:
         - name: gcloud-adc
           type: file
           description: "Google Cloud Application Default Credentials (ADC) file for vertex-ai authentication"
+          field: GoogleAppCredentials
           alternative_env_keys: ["GOOGLE_APPLICATION_CREDENTIALS"]
           skipped_when_gcp_service_account_assigned: true
           required: true
@@ -86,3 +88,9 @@ auth:
     files:
       CLAUDE_AUTH: auth-file
       gcloud-adc: vertex-ai
+no_auth:
+  behavior: drop-to-shell
+  message: |
+    This agent started without credentials.
+    To authenticate, run: claude login
+    Then capture credentials: python3 ~/.scion/harness/capture_auth.py

@@ -341,6 +341,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	var h api.Harness
 	var harnessConfigRevision string
 	var resolvedImpl string
+	var noAuthMessage string
 	if harnessConfigName != "" {
 		var resolveTemplatePaths []string
 		if opts.Template != "" {
@@ -371,6 +372,9 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 				harnessConfigRevision = config.ComputeHarnessConfigRevision(resolved.ConfigDir.Path)
 			}
 			util.Debugf("harness resolution: implementation=%s harness=%q", resolved.Implementation, resolved.Config.Harness)
+			if opts.NoAuth && resolved.Config.NoAuth != nil {
+				noAuthMessage = resolved.Config.NoAuth.Message
+			}
 		}
 	} else {
 		h = harness.New(harnessName)
@@ -886,7 +890,9 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		GitClone:             opts.GitClone,
 		SharedDirs:           effectiveSharedDirs,
 		BrokerMode:           opts.BrokerMode,
-		Debug:                util.DebugEnabled(),
+		NoAuth:        opts.NoAuth,
+		NoAuthMessage: noAuthMessage,
+		Debug:         util.DebugEnabled(),
 		Resume:               opts.Resume,
 		MetadataInterception: hasMetadataInterception(agentEnv),
 		ExtraHosts:           mergeExtraHosts(opts.ExtraHosts, runtime.BridgeExtraHosts(m.Runtime.Name(), agentEnv)),

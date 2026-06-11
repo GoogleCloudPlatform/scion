@@ -151,6 +151,80 @@ func OverlayFileSecrets(auth *api.AuthConfig, secrets []api.ResolvedSecret) {
 	}
 }
 
+// OverlayFileSecretsFromConfig is the config-driven counterpart of
+// OverlayFileSecrets. It reads field mappings from the harness config's
+// auth.types entries and sets the corresponding AuthConfig fields. When a
+// secret's Name matches a declared field mapping, the config-driven path is
+// used. For secrets that don't match any declared Name, it falls back to
+// target-path-suffix matching (preserving backward compatibility with secrets
+// created before field mappings were added to config.yaml).
+func OverlayFileSecretsFromConfig(auth *api.AuthConfig, secrets []api.ResolvedSecret, authMeta *config.HarnessAuthMetadata) {
+	fieldMap := buildFieldMap(authMeta)
+
+	for _, s := range secrets {
+		if s.Type != "file" {
+			continue
+		}
+		if fieldName, ok := fieldMap[s.Name]; ok && fieldName != "" {
+			setAuthConfigField(auth, fieldName, s.Target)
+			continue
+		}
+		// Fallback: match by target path suffix for backward compat
+		setAuthConfigFieldByTargetSuffix(auth, s.Target)
+	}
+}
+
+// buildFieldMap collects secret-name -> AuthConfig field mappings from all
+// auth types declared in the harness config.
+func buildFieldMap(authMeta *config.HarnessAuthMetadata) map[string]string {
+	m := make(map[string]string)
+	if authMeta == nil {
+		return m
+	}
+	for _, authType := range authMeta.Types {
+		for _, rf := range authType.RequiredFiles {
+			if rf.Name != "" && rf.Field != "" {
+				m[rf.Name] = rf.Field
+			}
+		}
+	}
+	return m
+}
+
+// setAuthConfigField sets the named field on AuthConfig to the given value.
+// Field names must match AuthConfig struct fields exactly.
+func setAuthConfigField(auth *api.AuthConfig, field, value string) {
+	switch field {
+	case "GoogleAppCredentials":
+		auth.GoogleAppCredentials = value
+	case "OAuthCreds":
+		auth.OAuthCreds = value
+	case "CodexAuthFile":
+		auth.CodexAuthFile = value
+	case "OpenCodeAuthFile":
+		auth.OpenCodeAuthFile = value
+	case "ClaudeAuthFile":
+		auth.ClaudeAuthFile = value
+	}
+}
+
+// setAuthConfigFieldByTargetSuffix matches a file secret's target path to an
+// AuthConfig field using the same suffix rules as the original OverlayFileSecrets.
+func setAuthConfigFieldByTargetSuffix(auth *api.AuthConfig, target string) {
+	switch {
+	case strings.HasSuffix(target, "/application_default_credentials.json"):
+		auth.GoogleAppCredentials = target
+	case strings.HasSuffix(target, "/oauth_creds.json"):
+		auth.OAuthCreds = target
+	case strings.HasSuffix(target, "/.codex/auth.json"):
+		auth.CodexAuthFile = target
+	case strings.HasSuffix(target, "/opencode/auth.json"):
+		auth.OpenCodeAuthFile = target
+	case strings.HasSuffix(target, "/.claude/.credentials.json"):
+		auth.ClaudeAuthFile = target
+	}
+}
+
 // OverlaySettings applies settings-based overrides to an AuthConfig.
 // It reads AuthSelectedType from scion-agent.json (top-level), which is
 // populated from scion's settings chain during provisioning.

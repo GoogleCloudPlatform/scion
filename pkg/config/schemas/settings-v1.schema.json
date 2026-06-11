@@ -328,6 +328,10 @@
           "$ref": "#/$defs/harnessAuthMetadata",
           "description": "Declarative auth preflight metadata for broker and hosted dispatch."
         },
+        "no_auth": {
+          "$ref": "#/$defs/harnessNoAuthConfig",
+          "description": "Defines behavior when an agent starts with --no-auth (no credentials)."
+        },
         "mcp": {
           "$ref": "#/$defs/harnessMCPMapping",
           "description": "Declarative mapping for translating universal mcp_servers into the harness's native MCP config (used by scion_harness.apply_mcp_servers_simple). Harnesses with bespoke MCP formats (e.g. OpenCode) leave this empty and translate themselves in provision.py."
@@ -336,6 +340,21 @@
           "type": "object",
           "description": "Optional hook dialect metadata.",
           "additionalProperties": true
+        }
+      },
+      "additionalProperties": false
+    },
+    "harnessNoAuthConfig": {
+      "type": "object",
+      "properties": {
+        "behavior": {
+          "type": "string",
+          "enum": ["drop-to-shell", "show-setup-instructions", "run-setup-wizard"],
+          "description": "How the container starts when no credentials are present."
+        },
+        "message": {
+          "type": "string",
+          "description": "Message displayed to the user when the agent starts without credentials."
         }
       },
       "additionalProperties": false
@@ -528,6 +547,7 @@
         "type": { "type": "string" },
         "description": { "type": "string" },
         "target_suffix": { "type": "string" },
+        "field": { "type": "string" },
         "alternative_env_keys": {
           "type": "array",
           "items": { "type": "string" }

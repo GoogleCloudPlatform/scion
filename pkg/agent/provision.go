@@ -1144,6 +1144,14 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 		return "", "", nil, fmt.Errorf("harness provisioning failed: %w", err)
 	}
 
+	// Stage capture-auth assets (capture_auth.py + capture-auth-config.json)
+	// into the harness bundle so they are available at a known path in the
+	// container. Container-script harnesses stage these during their own
+	// Provision(); for builtin harnesses this is the only staging opportunity.
+	if err := harness.StageCaptureAuthAssets(agentHome, hcDir.Path, hcDir.Config.Auth); err != nil {
+		util.Debugf("provision: capture-auth asset staging failed (non-fatal): %v", err)
+	}
+
 	// Reload config to get harness updates (e.g. Env vars injected by harness)
 	reloadTpl := &config.Template{Path: agentDir}
 	if updatedCfg, err := reloadTpl.LoadConfig(); err == nil {

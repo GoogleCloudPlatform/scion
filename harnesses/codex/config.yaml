@@ -82,9 +82,16 @@ auth:
         - name: CODEX_AUTH
           type: file
           target_suffix: "/.codex/auth.json"
+          field: CodexAuthFile
   autodetect:
     env:
       CODEX_API_KEY: api-key
       OPENAI_API_KEY: api-key
     files:
       CODEX_AUTH: auth-file
+no_auth:
+  behavior: drop-to-shell
+  message: |
+    This agent started without credentials.
+    Set CODEX_API_KEY or OPENAI_API_KEY, or authenticate interactively.
+    Then capture credentials: python3 ~/.scion/harness/capture_auth.py
