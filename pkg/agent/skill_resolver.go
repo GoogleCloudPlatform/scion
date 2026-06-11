@@ -229,14 +229,14 @@ func installResolvedSkills(
 		record.Skills = append(record.Skills, *entry)
 
 		if skill.Deprecated {
-			msg := fmt.Sprintf("WARNING: skill %s@%s is deprecated", skill.Name, skill.Version)
+			msg := fmt.Sprintf("Warning: skill %s@%s is deprecated", skill.Name, skill.Version)
 			if skill.DeprecationMessage != "" {
 				msg += ": " + skill.DeprecationMessage
 			}
 			if skill.ReplacementURI != "" {
 				msg += fmt.Sprintf(" (replacement: %s)", skill.ReplacementURI)
 			}
-			util.Warnf(msg)
+			fmt.Fprintln(os.Stderr, msg)
 		}
 	}
 

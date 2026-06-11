@@ -68,6 +68,9 @@ func (m *mockSkillService) RequestUploadURLs(context.Context, string, string, []
 func (m *mockSkillService) UploadFile(context.Context, string, string, map[string]string, io.Reader) error {
 	return nil
 }
+func (m *mockSkillService) DeprecateVersion(context.Context, string, string, *hubclient.DeprecateVersionRequest) (*hubclient.SkillVersion, error) {
+	return nil, nil
+}
 func (m *mockSkillService) DownloadFile(context.Context, string) ([]byte, error) { return nil, nil }
 
 func TestHubSkillResolver_Resolve(t *testing.T) {

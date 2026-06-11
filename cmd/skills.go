@@ -80,13 +80,17 @@ func runSkillsList(cmd *cobra.Command, args []string) error {
 	}
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "NAME\tSCOPE\tSTATUS\tDESCRIPTION")
+	fmt.Fprintln(w, "NAME\tSCOPE\tSTATUS\tTAGS\tDESCRIPTION")
 	for _, s := range resp.Skills {
 		desc := s.Description
-		if len(desc) > 60 {
-			desc = desc[:57] + "..."
+		if len(desc) > 50 {
+			desc = desc[:47] + "..."
 		}
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", s.Name, s.Scope, s.Status, desc)
+		tags := strings.Join(s.Tags, ",")
+		if len(tags) > 20 {
+			tags = tags[:17] + "..."
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", s.Name, s.Scope, s.Status, tags, desc)
 	}
 	return w.Flush()
 }
