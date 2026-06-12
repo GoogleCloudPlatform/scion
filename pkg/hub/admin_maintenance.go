@@ -293,6 +293,16 @@ func (s *Server) resolveMaintenanceExecutor(key string) (MaintenanceExecutor, er
 		return &RebuildContainerBinariesExecutor{
 			repoPath: mc.RepoPath,
 		}, nil
+	case "build-harness-config-image":
+		log.Debug("Resolved build-harness-config-image executor",
+			"runtime_bin", mc.RuntimeBin, "registry", mc.ImageRegistry, "tag", mc.ImageTag)
+		return &BuildHarnessConfigImageExecutor{
+			store:      s.store,
+			storage:    s.GetStorage(),
+			runtimeBin: mc.RuntimeBin,
+			registry:   mc.ImageRegistry,
+			tag:        mc.ImageTag,
+		}, nil
 	default:
 		return nil, fmt.Errorf("no executor registered for operation %q", key)
 	}
