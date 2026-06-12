@@ -682,7 +682,25 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	// Inject skill resolver from Hub connection for skill provisioning.
 	if conn := s.resolveHubConnection(r); conn != nil && conn.HubClient != nil {
 		hubResolver := agent.NewHubSkillResolver(conn.HubClient.Skills())
-		var resolver agent.SkillResolver = agent.NewRoutingSkillResolver(hubResolver)
+		router := agent.NewRoutingSkillResolver(hubResolver)
+
+		// GCP resolver uses Hub API for registry alias lookup.
+		registrySvc := conn.HubClient.SkillRegistries()
+		gcpLookup := func(ctx context.Context, name string) (*agent.RegistryLookupResult, error) {
+			reg, err := registrySvc.Get(ctx, name)
+			if err != nil {
+				return nil, err
+			}
+			return &agent.RegistryLookupResult{
+				Name:     reg.Name,
+				Endpoint: reg.Endpoint,
+				Type:     reg.Type,
+				Status:   reg.Status,
+			}, nil
+		}
+		router.Register("gcp-skill", agent.NewGCPSkillResolver(gcpLookup))
+
+		var resolver agent.SkillResolver = router
 		if s.skCache != nil {
 			resolver = agent.NewCachingSkillResolver(resolver, s.skCache)
 		}
