@@ -1726,6 +1726,9 @@ func (s *Server) performAgentDelete(w http.ResponseWriter, r *http.Request, agen
 		}
 	}
 
+	// Cancel pending scheduled events targeting this agent
+	s.cancelScheduledEventsForAgent(ctx, agent)
+
 	if softDelete {
 		// Soft delete: mark agent as deleted with timestamp
 		agent.Phase = string(state.PhaseStopped)
@@ -1747,6 +1750,61 @@ func (s *Server) performAgentDelete(w http.ResponseWriter, r *http.Request, agen
 	}
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// cancelScheduledEventsForAgent cancels all pending scheduled events that
+// target the given agent, preventing orphaned events from firing after deletion.
+func (s *Server) cancelScheduledEventsForAgent(ctx context.Context, agent *store.Agent) {
+	result, err := s.store.ListScheduledEvents(ctx, store.ScheduledEventFilter{
+		ProjectID: agent.ProjectID,
+		Status:    store.ScheduledEventPending,
+	}, store.ListOptions{Limit: 1000})
+	if err != nil {
+		s.agentLifecycleLog.Warn("Failed to list scheduled events for cleanup",
+			"agent_id", agent.ID, "error", err)
+		return
+	}
+
+	var cancelled int
+	for _, evt := range result.Items {
+		if !eventTargetsAgent(evt, agent) {
+			continue
+		}
+		if err := s.store.UpdateScheduledEventStatus(ctx, evt.ID,
+			store.ScheduledEventCancelled, nil, "target agent deleted"); err != nil {
+			s.agentLifecycleLog.Warn("Failed to cancel scheduled event",
+				"event_id", evt.ID, "agent_id", agent.ID, "error", err)
+			continue
+		}
+		if s.scheduler != nil {
+			s.scheduler.CancelEvent(ctx, evt.ID)
+		}
+		cancelled++
+	}
+
+	if cancelled > 0 {
+		s.agentLifecycleLog.Info("Cancelled scheduled events for deleted agent",
+			"agent_id", agent.ID, "agent_name", agent.Name, "cancelled", cancelled)
+	}
+}
+
+// eventTargetsAgent checks whether a scheduled event's payload targets the
+// given agent by matching agent ID or name/slug.
+func eventTargetsAgent(evt store.ScheduledEvent, agent *store.Agent) bool {
+	var payload struct {
+		AgentID   string `json:"agentId"`
+		AgentName string `json:"agentName"`
+	}
+	if err := json.Unmarshal([]byte(evt.Payload), &payload); err != nil {
+		return false
+	}
+	if payload.AgentID != "" && payload.AgentID == agent.ID {
+		return true
+	}
+	if payload.AgentName != "" && (payload.AgentName == agent.Name || payload.AgentName == agent.Slug) {
+		return true
+	}
+	return false
 }
 
 func (s *Server) handleAgentAction(w http.ResponseWriter, r *http.Request, id, action string) {
@@ -2095,6 +2153,32 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	// Validate channel against registered channels
+	if req.Channel != "" {
+		if bp := s.GetMessageBrokerProxy(); bp != nil {
+			channels := bp.ListChannels()
+			found := false
+			for _, ch := range channels {
+				if ch.Name == req.Channel {
+					found = true
+					break
+				}
+			}
+			if !found {
+				available := make([]string, len(channels))
+				for i, ch := range channels {
+					available[i] = ch.Name
+				}
+				if len(available) == 0 {
+					ValidationError(w, fmt.Sprintf("channel %q is not registered; no channels are currently available", req.Channel), nil)
+				} else {
+					ValidationError(w, fmt.Sprintf("channel %q is not registered; available channels: %s", req.Channel, strings.Join(available, ", ")), nil)
+				}
+				return
+			}
+		}
+	}
+
 	storeMsg := &store.Message{
 		ID:          api.NewUUID(),
 		ProjectID:   agent.ProjectID,
@@ -2368,8 +2452,8 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		return
 	}
 
-	// Detect set[] recipient for multi-target fan-out.
-	if structuredMsg != nil && messages.IsSetRecipient(structuredMsg.Recipient) {
+	// Detect group[] recipient for multi-target fan-out.
+	if structuredMsg != nil && messages.IsGroupRecipient(structuredMsg.Recipient) {
 		s.handleGroupMessage(w, r, id, structuredMsg, plainMessage, req.Interrupt)
 		return
 	}
@@ -2509,7 +2593,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			AgentID:     agent.ID,
 			CreatedAt:   time.Now(),
 		}
-		// Propagate GroupID from metadata so CLI-originated set[] messages
+		// Propagate GroupID from metadata so CLI-originated group[] messages
 		// preserve correlation in the store.
 		if structuredMsg.Metadata != nil {
 			if gid, ok := structuredMsg.Metadata["group_id"]; ok {
@@ -2624,14 +2708,14 @@ type MessageDeliveryResponse struct {
 	AgentPhase string `json:"agent_phase"`
 }
 
-// GroupMessageRecipientResult represents the delivery status for one recipient in a set[] delivery.
+// GroupMessageRecipientResult represents the delivery status for one recipient in a group[] delivery.
 type GroupMessageRecipientResult struct {
 	Recipient string `json:"recipient"`
 	Status    string `json:"status"`
 	Error     string `json:"error,omitempty"`
 }
 
-// GroupMessageResponse is the JSON response for a set[] message delivery.
+// GroupMessageResponse is the JSON response for a group[] message delivery.
 type GroupMessageResponse struct {
 	GroupID   string                        `json:"group_id"`
 	Delivered int                           `json:"delivered"`
@@ -2639,13 +2723,13 @@ type GroupMessageResponse struct {
 	Results   []GroupMessageRecipientResult `json:"results"`
 }
 
-// handleGroupMessage fans out a structured message to multiple recipients parsed from set[].
+// handleGroupMessage fans out a structured message to multiple recipients parsed from group[].
 func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anchorID string, msg *messages.StructuredMessage, plainMessage string, interrupt bool) {
 	ctx := r.Context()
 
-	recipients, err := messages.ParseSetRecipient(msg.Recipient)
+	recipients, err := messages.ParseGroupRecipient(msg.Recipient)
 	if err != nil {
-		ValidationError(w, "invalid set[] recipient: "+err.Error(), nil)
+		ValidationError(w, "invalid group[] recipient: "+err.Error(), nil)
 		return
 	}
 
@@ -2734,7 +2818,7 @@ func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anch
 					observerMsg := agentMsg
 					observerMsg.ObserverOnly = true
 					if err := bp.PublishMessage(ctx, projectID, &observerMsg); err != nil {
-						s.messageLog.Error("Failed to publish set[] observer message",
+						s.messageLog.Error("Failed to publish group[] observer message",
 							"recipient", recipStr, "error", err)
 					}
 				}

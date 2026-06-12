@@ -16,12 +16,14 @@ package messages
 
 import (
 	"fmt"
+	"log/slog"
 	"strings"
 )
 
 const (
-	// SetPrefix is the wire-format prefix for the group recipient syntax.
-	// Retained as "set[" for backward compatibility with existing CLI usage.
+	// GroupPrefix is the canonical prefix for the group recipient syntax.
+	GroupPrefix = "group["
+	// SetPrefix is the legacy prefix, kept for backward compatibility.
 	SetPrefix = "set["
 	// SetSuffix is the wire-format suffix for the group recipient syntax.
 	SetSuffix = "]"
@@ -53,9 +55,9 @@ func (r GroupRecipient) String() string {
 // Deprecated: Use GroupRecipient instead.
 type SetRecipient = GroupRecipient
 
-// IsGroupRecipient reports whether s uses the group recipient syntax (set[...]).
+// IsGroupRecipient reports whether s uses the group recipient syntax (group[...] or legacy set[...]).
 func IsGroupRecipient(s string) bool {
-	return strings.HasPrefix(s, SetPrefix) && strings.HasSuffix(s, SetSuffix)
+	return (strings.HasPrefix(s, GroupPrefix) || strings.HasPrefix(s, SetPrefix)) && strings.HasSuffix(s, SetSuffix)
 }
 
 // IsSetRecipient is a deprecated alias for IsGroupRecipient.
@@ -64,20 +66,28 @@ func IsSetRecipient(s string) bool {
 	return IsGroupRecipient(s)
 }
 
-// ParseGroupRecipient parses a group recipient string (e.g. "set[agent:a,user:b]")
-// into a slice of GroupRecipient values.
+// ParseGroupRecipient parses a group recipient string (e.g. "group[agent:a,user:b]")
+// into a slice of GroupRecipient values. The legacy "set[...]" syntax is also accepted
+// but logs a deprecation warning.
 func ParseGroupRecipient(s string) ([]GroupRecipient, error) {
 	if !IsGroupRecipient(s) {
-		return nil, fmt.Errorf("not a group recipient: must start with %q and end with %q", SetPrefix, SetSuffix)
+		return nil, fmt.Errorf("not a group recipient: must start with %q and end with %q", GroupPrefix, SetSuffix)
 	}
 
-	inner := s[len(SetPrefix) : len(s)-len(SetSuffix)]
-	if strings.Contains(inner, SetPrefix) {
-		return nil, fmt.Errorf("nested set[] recipients are not allowed")
+	var inner string
+	if strings.HasPrefix(s, GroupPrefix) {
+		inner = s[len(GroupPrefix) : len(s)-len(SetSuffix)]
+	} else {
+		slog.Warn("set[] syntax is deprecated; use group[] instead")
+		inner = s[len(SetPrefix) : len(s)-len(SetSuffix)]
+	}
+
+	if strings.Contains(inner, SetPrefix) || strings.Contains(inner, GroupPrefix) {
+		return nil, fmt.Errorf("nested group[] recipients are not allowed")
 	}
 
 	if strings.TrimSpace(inner) == "" {
-		return nil, fmt.Errorf("empty set[] recipient")
+		return nil, fmt.Errorf("empty group[] recipient")
 	}
 
 	parts := strings.Split(inner, ",")
@@ -105,13 +115,13 @@ func ParseGroupRecipient(s string) ([]GroupRecipient, error) {
 	}
 
 	if len(recipients) == 0 {
-		return nil, fmt.Errorf("empty set[] recipient")
+		return nil, fmt.Errorf("empty group[] recipient")
 	}
 	if len(recipients) == 1 {
-		return nil, fmt.Errorf("set[] must contain at least 2 recipients; use a direct recipient instead")
+		return nil, fmt.Errorf("group[] must contain at least 2 recipients; use a direct recipient instead")
 	}
 	if len(recipients) > MaxGroupRecipients {
-		return nil, fmt.Errorf("set[] contains %d recipients, maximum is %d", len(recipients), MaxGroupRecipients)
+		return nil, fmt.Errorf("group[] contains %d recipients, maximum is %d", len(recipients), MaxGroupRecipients)
 	}
 
 	return recipients, nil
@@ -129,7 +139,7 @@ func ParseSetRecipient(s string) ([]GroupRecipient, error) {
 // (e.g. "user:alice", "agent:coder").
 func FormatGroupRecipients(sender string, recipients []string) string {
 	var b strings.Builder
-	b.WriteString(SetPrefix)
+	b.WriteString(GroupPrefix)
 	b.WriteString(sender)
 	for _, r := range recipients {
 		b.WriteByte(',')
@@ -149,14 +159,14 @@ func classifyRecipient(s string) (GroupRecipient, error) {
 	if strings.HasPrefix(s, "agent:") {
 		name := strings.TrimPrefix(s, "agent:")
 		if name == "" {
-			return GroupRecipient{}, fmt.Errorf("empty agent name in set[] element %q", s)
+			return GroupRecipient{}, fmt.Errorf("empty agent name in group[] element %q", s)
 		}
 		return GroupRecipient{Kind: RecipientAgent, Name: name}, nil
 	}
 	if strings.HasPrefix(s, "user:") {
 		name := strings.TrimPrefix(s, "user:")
 		if name == "" {
-			return GroupRecipient{}, fmt.Errorf("empty user name in set[] element %q", s)
+			return GroupRecipient{}, fmt.Errorf("empty user name in group[] element %q", s)
 		}
 		return GroupRecipient{Kind: RecipientUser, Name: name}, nil
 	}
@@ -165,7 +175,7 @@ func classifyRecipient(s string) (GroupRecipient, error) {
 	}
 	if strings.Contains(s, ":") {
 		prefix := s[:strings.Index(s, ":")]
-		return GroupRecipient{}, fmt.Errorf("unknown recipient prefix %q in set[] element %q", prefix, s)
+		return GroupRecipient{}, fmt.Errorf("unknown recipient prefix %q in group[] element %q", prefix, s)
 	}
 	return GroupRecipient{Kind: RecipientAgent, Name: s}, nil
 }
