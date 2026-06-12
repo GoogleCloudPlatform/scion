@@ -24,10 +24,12 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
+	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
 )
 
@@ -52,6 +54,9 @@ type GCPSkillResolver struct {
 	registryLookup RegistryLookup
 	httpClient     *http.Client
 	tokenSource    func(ctx context.Context) (string, error)
+	tokenOnce      sync.Once
+	cachedTS       oauth2.TokenSource
+	tokenErr       error
 }
 
 // NewGCPSkillResolver creates a resolver for gcp-skill:// URIs.
@@ -93,6 +98,9 @@ func (r *GCPSkillResolver) resolveOne(ctx context.Context, gcpRef *GCPSkillRef, 
 	registry, err := r.registryLookup(ctx, gcpRef.Alias)
 	if err != nil {
 		return nil, fmt.Errorf("registry alias %q not found: %w", gcpRef.Alias, err)
+	}
+	if registry == nil {
+		return nil, fmt.Errorf("registry alias %q lookup returned nil", gcpRef.Alias)
 	}
 	if registry.Status != "active" {
 		return nil, fmt.Errorf("registry %q is disabled", gcpRef.Alias)
@@ -166,17 +174,24 @@ func (r *GCPSkillResolver) getADCToken(ctx context.Context) (string, error) {
 		return r.tokenSource(ctx)
 	}
 
-	creds, err := google.FindDefaultCredentials(ctx, gcpScope)
-	if err != nil {
-		return "", fmt.Errorf("no GCP credentials found (set GOOGLE_APPLICATION_CREDENTIALS or use 'gcloud auth application-default login'): %w", err)
+	r.tokenOnce.Do(func() {
+		creds, err := google.FindDefaultCredentials(ctx, gcpScope)
+		if err != nil {
+			r.tokenErr = fmt.Errorf("no GCP credentials found (set GOOGLE_APPLICATION_CREDENTIALS or use 'gcloud auth application-default login'): %w", err)
+			return
+		}
+		r.cachedTS = creds.TokenSource
+	})
+	if r.tokenErr != nil {
+		return "", r.tokenErr
 	}
 
-	token, err := creds.TokenSource.Token()
+	tok, err := r.cachedTS.Token()
 	if err != nil {
 		return "", fmt.Errorf("failed to obtain GCP token: %w", err)
 	}
 
-	return token.AccessToken, nil
+	return tok.AccessToken, nil
 }
 
 // gcpSkillResponse represents the GCP Vertex AI skill metadata response.
@@ -277,7 +292,7 @@ func validateFileURL(fileURL, registryHost string) error {
 		return fmt.Errorf("HTTPS required for file downloads (got %s)", u.Scheme)
 	}
 
-	if isBlockedHost(host) {
+	if isBlockedHost(host) && !isLocalhost(host) {
 		return fmt.Errorf("file URL targets blocked address: %s", host)
 	}
 
@@ -301,22 +316,5 @@ func isBlockedHost(host string) bool {
 		return false
 	}
 
-	// Link-local (169.254.x.x — includes GCP metadata 169.254.169.254)
-	if ip4 := ip.To4(); ip4 != nil && ip4[0] == 169 && ip4[1] == 254 {
-		return true
-	}
-
-	// RFC 1918
-	rfc1918 := []net.IPNet{
-		{IP: net.IP{10, 0, 0, 0}, Mask: net.CIDRMask(8, 32)},
-		{IP: net.IP{172, 16, 0, 0}, Mask: net.CIDRMask(12, 32)},
-		{IP: net.IP{192, 168, 0, 0}, Mask: net.CIDRMask(16, 32)},
-	}
-	for _, cidr := range rfc1918 {
-		if cidr.Contains(ip) {
-			return true
-		}
-	}
-
-	return false
+	return ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsPrivate()
 }

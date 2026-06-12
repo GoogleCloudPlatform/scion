@@ -223,8 +223,10 @@ func parseScopedPath(raw string, uri *SkillURI, segments []string, version strin
 	return uri, nil
 }
 
-// SkillURIScheme returns the scheme portion of a skill URI, or "skill"
-// for bare names. This is used for routing dispatch, not full parsing.
+// SkillURIScheme returns the raw scheme prefix of a skill URI.
+// Note: This is NOT used for routing dispatch. The RoutingSkillResolver
+// uses detectScheme() which maps full GitHub URLs to the 'gh' scheme.
+// This function is a lightweight utility for non-routing scheme checks.
 func SkillURIScheme(uri string) string {
 	if idx := strings.Index(uri, "://"); idx > 0 {
 		return uri[:idx]

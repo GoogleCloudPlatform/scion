@@ -56,6 +56,9 @@ func (s *Server) federateResolve(ctx context.Context, registryName string, skill
 	if resolvePath == "" {
 		resolvePath = "/api/v1/skills/resolve"
 	}
+	if !strings.HasPrefix(resolvePath, "/") {
+		resolvePath = "/" + resolvePath
+	}
 	resolveURL := strings.TrimRight(registry.Endpoint, "/") + resolvePath
 
 	proxyReq := &ResolveSkillsRequest{

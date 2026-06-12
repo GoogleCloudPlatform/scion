@@ -693,6 +693,9 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				return nil, err
 			}
+			if reg == nil {
+				return nil, fmt.Errorf("registry %q not found", name)
+			}
 			return &agent.RegistryLookupResult{
 				Name:     reg.Name,
 				Endpoint: reg.Endpoint,
