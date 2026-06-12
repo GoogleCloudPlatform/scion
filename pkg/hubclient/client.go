@@ -45,6 +45,9 @@ type Client interface {
 	// Skills returns the skill operations interface.
 	Skills() SkillService
 
+	// SkillRegistries returns the skill registry operations interface.
+	SkillRegistries() SkillRegistryService
+
 	// Templates returns the template operations interface.
 	Templates() TemplateService
 
@@ -108,6 +111,7 @@ type client struct {
 	projects              *projectService
 	runtimeBrokers        *runtimeBrokerService
 	skills                *skillService
+	skillRegistries       *skillRegistryService
 	templates             *templateService
 	harnessConfigs        *harnessConfigService
 	workspace             *workspaceService
@@ -139,6 +143,7 @@ func New(baseURL string, opts ...Option) (Client, error) {
 	c.projects = &projectService{c: c}
 	c.runtimeBrokers = &runtimeBrokerService{c: c}
 	c.skills = &skillService{c: c}
+	c.skillRegistries = &skillRegistryService{c: c}
 	c.templates = &templateService{c: c}
 	c.harnessConfigs = &harnessConfigService{c: c}
 	c.workspace = &workspaceService{c: c}
@@ -180,6 +185,11 @@ func (c *client) RuntimeBrokers() RuntimeBrokerService {
 // Skills returns the skill operations interface.
 func (c *client) Skills() SkillService {
 	return c.skills
+}
+
+// SkillRegistries returns the skill registry operations interface.
+func (c *client) SkillRegistries() SkillRegistryService {
+	return c.skillRegistries
 }
 
 // Templates returns the template operations interface.
