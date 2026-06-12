@@ -162,3 +162,23 @@ func TestParseSkillURI_InvalidForms(t *testing.T) {
 		})
 	}
 }
+
+func TestSkillURIScheme(t *testing.T) {
+	tests := []struct {
+		uri    string
+		scheme string
+	}{
+		{"skill://scion/core/my-skill", "skill"},
+		{"gh://owner/repo/name", "gh"},
+		{"gcp-skill://alias/ID", "gcp-skill"},
+		{"https://github.com/owner/repo/tree/main/skills/s", "https"},
+		{"my-skill", "skill"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.uri, func(t *testing.T) {
+			if got := SkillURIScheme(tt.uri); got != tt.scheme {
+				t.Errorf("SkillURIScheme(%q) = %q, want %q", tt.uri, got, tt.scheme)
+			}
+		})
+	}
+}
