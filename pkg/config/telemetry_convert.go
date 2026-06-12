@@ -48,6 +48,8 @@ func ConvertV1TelemetryToAPI(v1 *V1TelemetryConfig) *api.TelemetryConfig {
 				Enabled:            v1.Cloud.TLS.Enabled,
 				InsecureSkipVerify: v1.Cloud.TLS.InsecureSkipVerify,
 				CAFile:             v1.Cloud.TLS.CAFile,
+				CertFile:           v1.Cloud.TLS.CertFile,
+				KeyFile:            v1.Cloud.TLS.KeyFile,
 			}
 		}
 		if v1.Cloud.Batch != nil {

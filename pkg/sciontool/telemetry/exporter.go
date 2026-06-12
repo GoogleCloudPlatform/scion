@@ -6,9 +6,6 @@ package telemetry
 
 import (
 	"context"
-	"crypto/tls"
-	"crypto/x509"
-	"errors"
 	"fmt"
 	"os"
 
@@ -25,27 +22,6 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/oauth"
 )
-
-var errOTLPCACertsNotFound = errors.New("parsing OTLP CA file: no certificates found")
-
-func loadOTLPTLSConfig(caFile string) (*tls.Config, error) {
-	tlsConfig := &tls.Config{}
-	if caFile == "" {
-		return tlsConfig, nil
-	}
-
-	pemBytes, err := os.ReadFile(caFile)
-	if err != nil {
-		return nil, fmt.Errorf("reading OTLP CA file: %w", err)
-	}
-
-	roots := x509.NewCertPool()
-	if !roots.AppendCertsFromPEM(pemBytes) {
-		return nil, errOTLPCACertsNotFound
-	}
-	tlsConfig.RootCAs = roots
-	return tlsConfig, nil
-}
 
 // loadGCPDialOptions loads GCP credentials from a service account key file
 // and returns gRPC dial options for per-RPC authentication. Returns (nil, nil)

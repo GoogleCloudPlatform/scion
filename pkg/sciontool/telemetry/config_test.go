@@ -37,6 +37,12 @@ func TestLoadConfig_Defaults(t *testing.T) {
 	if cfg.CAFile != "" {
 		t.Errorf("Expected CAFile to be empty by default, got %q", cfg.CAFile)
 	}
+	if cfg.CertFile != "" {
+		t.Errorf("Expected CertFile to be empty by default, got %q", cfg.CertFile)
+	}
+	if cfg.KeyFile != "" {
+		t.Errorf("Expected KeyFile to be empty by default, got %q", cfg.KeyFile)
+	}
 	if cfg.MetricsDebug {
 		t.Error("Expected MetricsDebug to be false by default")
 	}
@@ -56,6 +62,12 @@ func TestLoadConfig_EnvOverrides(t *testing.T) {
 	os.Setenv(EnvInsecure, "true")
 	if err := os.Setenv(EnvCAFile, "/etc/ssl/certs/custom-root.pem"); err != nil {
 		t.Fatalf("failed to set %s: %v", EnvCAFile, err)
+	}
+	if err := os.Setenv(EnvCertFile, "/etc/ssl/certs/client.pem"); err != nil {
+		t.Fatalf("failed to set %s: %v", EnvCertFile, err)
+	}
+	if err := os.Setenv(EnvKeyFile, "/etc/ssl/private/client-key.pem"); err != nil {
+		t.Fatalf("failed to set %s: %v", EnvKeyFile, err)
 	}
 	os.Setenv(EnvGRPCPort, "14317")
 	os.Setenv(EnvHTTPPort, "14318")
@@ -84,6 +96,12 @@ func TestLoadConfig_EnvOverrides(t *testing.T) {
 	}
 	if cfg.CAFile != "/etc/ssl/certs/custom-root.pem" {
 		t.Errorf("Expected CAFile to be '/etc/ssl/certs/custom-root.pem', got %q", cfg.CAFile)
+	}
+	if cfg.CertFile != "/etc/ssl/certs/client.pem" {
+		t.Errorf("Expected CertFile to be '/etc/ssl/certs/client.pem', got %q", cfg.CertFile)
+	}
+	if cfg.KeyFile != "/etc/ssl/private/client-key.pem" {
+		t.Errorf("Expected KeyFile to be '/etc/ssl/private/client-key.pem', got %q", cfg.KeyFile)
 	}
 	if cfg.GRPCPort != 14317 {
 		t.Errorf("Expected GRPCPort to be 14317, got %d", cfg.GRPCPort)
@@ -566,6 +584,12 @@ func clearTelemetryEnv() {
 	os.Unsetenv(EnvProtocol)
 	os.Unsetenv(EnvInsecure)
 	if err := os.Unsetenv(EnvCAFile); err != nil {
+		panic(err)
+	}
+	if err := os.Unsetenv(EnvCertFile); err != nil {
+		panic(err)
+	}
+	if err := os.Unsetenv(EnvKeyFile); err != nil {
 		panic(err)
 	}
 	os.Unsetenv(EnvGRPCPort)

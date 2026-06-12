@@ -74,11 +74,17 @@ func TestOTelConfig(t *testing.T) {
 		Endpoint:  "localhost:4317",
 		Protocol:  "grpc",
 		Insecure:  true,
+		CAFile:    "/etc/ssl/certs/custom-root.pem",
+		CertFile:  "/etc/ssl/certs/client.pem",
+		KeyFile:   "/etc/ssl/private/client-key.pem",
 		ProjectID: "test-project",
 	}
 
 	if cfg.Endpoint != "localhost:4317" {
 		t.Error("Endpoint not set correctly")
+	}
+	if cfg.CAFile != "/etc/ssl/certs/custom-root.pem" || cfg.CertFile != "/etc/ssl/certs/client.pem" || cfg.KeyFile != "/etc/ssl/private/client-key.pem" {
+		t.Error("TLS file paths not set correctly")
 	}
 }
 
@@ -153,6 +159,9 @@ func TestEnvVarConstants(t *testing.T) {
 	}
 	if EnvOTelInsecure != "SCION_OTEL_INSECURE" {
 		t.Errorf("EnvOTelInsecure = %s, want SCION_OTEL_INSECURE", EnvOTelInsecure)
+	}
+	if EnvOTelCAFile != "SCION_OTEL_CA_FILE" || EnvOTelCertFile != "SCION_OTEL_CERT_FILE" || EnvOTelKeyFile != "SCION_OTEL_KEY_FILE" {
+		t.Error("OTel TLS env constants not set correctly")
 	}
 	if EnvOTelLogEnable != "SCION_OTEL_LOG_ENABLED" {
 		t.Errorf("EnvOTelLogEnable = %s, want SCION_OTEL_LOG_ENABLED", EnvOTelLogEnable)

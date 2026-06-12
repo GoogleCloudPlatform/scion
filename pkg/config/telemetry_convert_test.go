@@ -36,6 +36,8 @@ func TestConvertV1TelemetryToAPI_Full(t *testing.T) {
 	insecure := false
 	tlsEnabled := true
 	caFile := "/etc/ssl/certs/custom-root.pem"
+	certFile := "/etc/ssl/certs/client.pem"
+	keyFile := "/etc/ssl/private/client-key.pem"
 	hubEnabled := true
 	localEnabled := true
 	console := false
@@ -53,6 +55,8 @@ func TestConvertV1TelemetryToAPI_Full(t *testing.T) {
 				Enabled:            &tlsEnabled,
 				InsecureSkipVerify: &insecure,
 				CAFile:             caFile,
+				CertFile:           certFile,
+				KeyFile:            keyFile,
 			},
 			Batch: &V1TelemetryBatchConfig{
 				MaxSize: 512,
@@ -115,6 +119,12 @@ func TestConvertV1TelemetryToAPI_Full(t *testing.T) {
 	}
 	if result.Cloud.TLS.CAFile != caFile {
 		t.Errorf("Cloud.TLS.CAFile = %q, want %q", result.Cloud.TLS.CAFile, caFile)
+	}
+	if result.Cloud.TLS.CertFile != certFile {
+		t.Errorf("Cloud.TLS.CertFile = %q, want %q", result.Cloud.TLS.CertFile, certFile)
+	}
+	if result.Cloud.TLS.KeyFile != keyFile {
+		t.Errorf("Cloud.TLS.KeyFile = %q, want %q", result.Cloud.TLS.KeyFile, keyFile)
 	}
 	if result.Cloud.Batch == nil {
 		t.Fatal("Cloud.Batch is nil")

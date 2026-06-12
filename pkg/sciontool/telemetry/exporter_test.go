@@ -12,6 +12,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"math/big"
 	"os"
 	"path/filepath"
@@ -95,7 +96,7 @@ func TestLoadGCPDialOptions_ValidKey(t *testing.T) {
 }
 
 func TestLoadOTLPTLSConfig_EmptyPath(t *testing.T) {
-	tlsConfig, err := loadOTLPTLSConfig("")
+	tlsConfig, err := LoadOTLPTLSConfig("", "", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -108,7 +109,7 @@ func TestLoadOTLPTLSConfig_EmptyPath(t *testing.T) {
 }
 
 func TestLoadOTLPTLSConfig_InvalidPath(t *testing.T) {
-	_, err := loadOTLPTLSConfig("/nonexistent/path/root.pem")
+	_, err := LoadOTLPTLSConfig("/nonexistent/path/root.pem", "", "")
 	if err == nil {
 		t.Fatal("expected error for missing CA file")
 	}
@@ -122,7 +123,7 @@ func TestLoadOTLPTLSConfig_ValidCAFile(t *testing.T) {
 		t.Fatalf("failed to write CA file: %v", err)
 	}
 
-	tlsConfig, err := loadOTLPTLSConfig(caPath)
+	tlsConfig, err := LoadOTLPTLSConfig(caPath, "", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -139,6 +140,34 @@ func TestLoadOTLPTLSConfig_ValidCAFile(t *testing.T) {
 	}
 	if _, err := cert.Verify(x509.VerifyOptions{Roots: tlsConfig.RootCAs}); err != nil {
 		t.Fatalf("expected generated certificate to verify against loaded RootCAs: %v", err)
+	}
+}
+
+func TestLoadOTLPTLSConfig_MissingClientKeyPair(t *testing.T) {
+	_, err := LoadOTLPTLSConfig("", "/tmp/client.pem", "")
+	if !errors.Is(err, errOTLPMissingClientKeyPair) {
+		t.Fatalf("expected errOTLPMissingClientKeyPair, got %v", err)
+	}
+}
+
+func TestLoadOTLPTLSConfig_ClientKeyPair(t *testing.T) {
+	tmpDir := t.TempDir()
+	certPEM, keyPEM := generateTestClientKeyPairPEM(t)
+	certPath := filepath.Join(tmpDir, "client.pem")
+	keyPath := filepath.Join(tmpDir, "client-key.pem")
+	if err := os.WriteFile(certPath, certPEM, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(keyPath, keyPEM, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	tlsConfig, err := LoadOTLPTLSConfig("", certPath, keyPath)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(tlsConfig.Certificates) != 1 {
+		t.Fatalf("expected one client certificate, got %d", len(tlsConfig.Certificates))
 	}
 }
 
@@ -171,4 +200,30 @@ func generateTestCertificatePEM(t *testing.T) []byte {
 		Type:  "CERTIFICATE",
 		Bytes: derBytes,
 	})
+}
+
+func generateTestClientKeyPairPEM(t *testing.T) ([]byte, []byte) {
+	t.Helper()
+
+	privKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("failed to generate RSA key: %v", err)
+	}
+
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(2),
+		Subject:      pkix.Name{CommonName: "scion-test-client"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+	}
+
+	derBytes, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &privKey.PublicKey, privKey)
+	if err != nil {
+		t.Fatalf("failed to create test client certificate: %v", err)
+	}
+
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: derBytes})
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(privKey)})
+	return certPEM, keyPEM
 }
