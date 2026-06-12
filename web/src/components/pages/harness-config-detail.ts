@@ -519,7 +519,7 @@ export class ScionPageHarnessConfigDetail extends LitElement {
       }
 
       const result = await response.json();
-      this.buildRunId = result.run_id ?? '';
+      this.buildRunId = result.runId ?? '';
       this.startBuildPolling();
     } catch (err) {
       this.buildError = err instanceof Error ? err.message : 'Failed to start build';
@@ -542,7 +542,12 @@ export class ScionPageHarnessConfigDetail extends LitElement {
   }
 
   private async pollBuildStatus(): Promise<void> {
-    if (!this.buildRunId) return;
+    if (!this.buildRunId) {
+      this.buildRunning = false;
+      this.buildStatus = 'failed';
+      this.buildError = 'Build started but no run ID was returned';
+      return;
+    }
 
     try {
       const resp = await apiFetch(
