@@ -145,6 +145,25 @@ arguments are provided, an empty prompt.md is created for later editing.`,
 			resolver := agent.NewRoutingSkillResolver(hubResolver)
 			ghResolver := agent.NewGitHubSkillResolver()
 			resolver.Register("gh", ghResolver)
+
+			registrySvc := hctx.Client.SkillRegistries()
+			gcpLookup := func(ctx context.Context, name string) (*agent.RegistryLookupResult, error) {
+				reg, err := registrySvc.Get(ctx, name)
+				if err != nil {
+					return nil, err
+				}
+				if reg == nil {
+					return nil, fmt.Errorf("registry %q not found", name)
+				}
+				return &agent.RegistryLookupResult{
+					Name:     reg.Name,
+					Endpoint: reg.Endpoint,
+					Type:     reg.Type,
+					Status:   reg.Status,
+				}, nil
+			}
+			resolver.Register("gcp-skill", agent.NewGCPSkillResolver(gcpLookup))
+
 			ctx = agent.ContextWithSkillResolver(ctx, resolver)
 			if hctx.ProjectID != "" {
 				ctx = agent.ContextWithResolveProjectID(ctx, hctx.ProjectID)

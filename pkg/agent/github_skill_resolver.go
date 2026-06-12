@@ -195,8 +195,9 @@ func (r *GitHubSkillResolver) resolveCommitSHA(ctx context.Context, ghRef *GitHu
 }
 
 func (r *GitHubSkillResolver) listContents(ctx context.Context, ghRef *GitHubSkillRef, commitSHA string) ([]githubContentEntry, error) {
+	escapedPath := escapePathSegments(ghRef.SkillPath)
 	reqURL := fmt.Sprintf("%s/repos/%s/%s/contents/%s?ref=%s",
-		r.apiBase, url.PathEscape(ghRef.Owner), url.PathEscape(ghRef.Repo), ghRef.SkillPath, url.QueryEscape(commitSHA))
+		r.apiBase, url.PathEscape(ghRef.Owner), url.PathEscape(ghRef.Repo), escapedPath, url.QueryEscape(commitSHA))
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
 	if err != nil {
@@ -258,7 +259,15 @@ func (r *GitHubSkillResolver) downloadRawFile(ctx context.Context, ghRef *GitHub
 
 func (r *GitHubSkillResolver) rawContentURL(ghRef *GitHubSkillRef, commitSHA, filePath string) string {
 	return fmt.Sprintf("%s/%s/%s/%s/%s",
-		r.rawBase, ghRef.Owner, ghRef.Repo, commitSHA, filePath)
+		r.rawBase, ghRef.Owner, ghRef.Repo, commitSHA, escapePathSegments(filePath))
+}
+
+func escapePathSegments(p string) string {
+	segments := strings.Split(p, "/")
+	for i, s := range segments {
+		segments[i] = url.PathEscape(s)
+	}
+	return strings.Join(segments, "/")
 }
 
 func (r *GitHubSkillResolver) setAuthHeader(req *http.Request) {

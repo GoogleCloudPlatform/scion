@@ -61,8 +61,12 @@ func (s *Server) federateResolve(ctx context.Context, registryName string, skill
 	}
 	resolveURL := strings.TrimRight(registry.Endpoint, "/") + resolvePath
 
+	remoteURI := skillRef.URI
+	if prefix := "skill://" + registryName + "/"; strings.HasPrefix(remoteURI, prefix) {
+		remoteURI = "skill:///" + strings.TrimPrefix(remoteURI, prefix)
+	}
 	proxyReq := &ResolveSkillsRequest{
-		Skills: []ResolveSkillRef{{URI: skillRef.URI}},
+		Skills: []ResolveSkillRef{{URI: remoteURI}},
 	}
 	body, err := json.Marshal(proxyReq)
 	if err != nil {

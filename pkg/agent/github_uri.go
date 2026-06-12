@@ -75,6 +75,9 @@ func parseGHShorthand(uri string) (*GitHubSkillRef, error) {
 	if strings.Contains(parts[2], "..") {
 		return nil, fmt.Errorf("invalid gh:// URI %q: skill name must not contain '..'", uri)
 	}
+	if strings.ContainsAny(parts[2], "?#&=") {
+		return nil, fmt.Errorf("invalid gh:// URI %q: skill name contains invalid characters", uri)
+	}
 
 	return &GitHubSkillRef{
 		Owner:     parts[0],

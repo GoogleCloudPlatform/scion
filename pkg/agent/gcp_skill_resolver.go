@@ -114,7 +114,10 @@ func (r *GCPSkillResolver) resolveOne(ctx context.Context, gcpRef *GCPSkillRef, 
 		return nil, fmt.Errorf("registry %q is type %q, expected gcp", gcpRef.Alias, registry.Type)
 	}
 
-	resourceURL := strings.TrimRight(registry.Endpoint, "/") + "/" + gcpRef.SkillID
+	resourceURL, err := url.JoinPath(registry.Endpoint, gcpRef.SkillID)
+	if err != nil {
+		return nil, fmt.Errorf("invalid registry endpoint URL: %w", err)
+	}
 
 	token, err := r.getADCToken(ctx)
 	if err != nil {

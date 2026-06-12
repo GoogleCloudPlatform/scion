@@ -16,8 +16,11 @@ package agent
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 )
+
+var validGCPComponent = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]*$`)
 
 // GCPSkillRef is the parsed representation of a GCP skill URI.
 type GCPSkillRef struct {
@@ -58,6 +61,13 @@ func ParseGCPSkillURI(uri string) (*GCPSkillRef, error) {
 
 	if strings.Contains(parts[1], "/") {
 		return nil, fmt.Errorf("invalid gcp-skill URI %q: SKILL_ID must not contain slashes", uri)
+	}
+
+	if !validGCPComponent.MatchString(parts[0]) {
+		return nil, fmt.Errorf("invalid gcp-skill URI %q: invalid alias %q", uri, parts[0])
+	}
+	if !validGCPComponent.MatchString(parts[1]) {
+		return nil, fmt.Errorf("invalid gcp-skill URI %q: invalid skill ID %q", uri, parts[1])
 	}
 
 	return &GCPSkillRef{
