@@ -26,14 +26,19 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
-func newFederationTestServer(t *testing.T) (*Server, store.Store) {
+func newFederationTestServer(t *testing.T, mock *httptest.Server) (*Server, store.Store) {
 	t.Helper()
 	s, err := newTestStore(":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
 	t.Cleanup(func() { s.Close() })
-	srv := &Server{store: s}
+	fedClient := mock.Client()
+	fedClient.Timeout = federationTimeout
+	fedClient.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	srv := &Server{store: s, federationClient: fedClient}
 	return srv, s
 }
 
@@ -45,8 +50,6 @@ func newFederationMockRegistry(t *testing.T, handler http.HandlerFunc) *httptest
 }
 
 func TestFederateResolve_TrustedHappyPath(t *testing.T) {
-	srv, s := newFederationTestServer(t)
-
 	mockResp := ResolveSkillsResponse{
 		Resolved: []ResolvedSkillResponse{{
 			URI:             "skill://ext-registry/core/test-skill@1.0",
@@ -64,6 +67,8 @@ func TestFederateResolve_TrustedHappyPath(t *testing.T) {
 		json.NewEncoder(w).Encode(mockResp)
 	})
 
+	srv, s := newFederationTestServer(t, mock)
+
 	registry := &store.SkillRegistry{
 		Name:        "ext-registry",
 		Endpoint:    mock.URL,
@@ -75,11 +80,6 @@ func TestFederateResolve_TrustedHappyPath(t *testing.T) {
 	if err := s.CreateSkillRegistry(t.Context(), registry); err != nil {
 		t.Fatalf("failed to create registry: %v", err)
 	}
-
-	// Use mock's TLS client for the federation call
-	origTransport := http.DefaultTransport
-	http.DefaultTransport = mock.Client().Transport
-	defer func() { http.DefaultTransport = origTransport }()
 
 	resolved, resolveErr := srv.federateResolve(t.Context(), "ext-registry", ResolveSkillRef{URI: "skill://ext-registry/core/test-skill@1.0"})
 	if resolveErr != nil {
@@ -94,8 +94,6 @@ func TestFederateResolve_TrustedHappyPath(t *testing.T) {
 }
 
 func TestFederateResolve_PinnedHappyPath(t *testing.T) {
-	srv, s := newFederationTestServer(t)
-
 	mockResp := ResolveSkillsResponse{
 		Resolved: []ResolvedSkillResponse{{
 			URI:             "skill://ext-registry/core/pinned-skill@1.0",
@@ -109,6 +107,8 @@ func TestFederateResolve_PinnedHappyPath(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(mockResp)
 	})
+
+	srv, s := newFederationTestServer(t, mock)
 
 	registry := &store.SkillRegistry{
 		Name:        "ext-registry",
@@ -126,10 +126,6 @@ func TestFederateResolve_PinnedHappyPath(t *testing.T) {
 		t.Fatalf("failed to pin hash: %v", err)
 	}
 
-	origTransport := http.DefaultTransport
-	http.DefaultTransport = mock.Client().Transport
-	defer func() { http.DefaultTransport = origTransport }()
-
 	resolved, resolveErr := srv.federateResolve(t.Context(), "ext-registry", ResolveSkillRef{URI: "skill://ext-registry/core/pinned-skill@1.0"})
 	if resolveErr != nil {
 		t.Fatalf("unexpected error: %s", resolveErr.Message)
@@ -140,8 +136,6 @@ func TestFederateResolve_PinnedHappyPath(t *testing.T) {
 }
 
 func TestFederateResolve_PinnedHashMismatch(t *testing.T) {
-	srv, s := newFederationTestServer(t)
-
 	mockResp := ResolveSkillsResponse{
 		Resolved: []ResolvedSkillResponse{{
 			URI:             "skill://ext-registry/core/bad-skill@1.0",
@@ -155,6 +149,8 @@ func TestFederateResolve_PinnedHashMismatch(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(mockResp)
 	})
+
+	srv, s := newFederationTestServer(t, mock)
 
 	registry := &store.SkillRegistry{
 		Name:        "ext-registry",
@@ -171,10 +167,6 @@ func TestFederateResolve_PinnedHashMismatch(t *testing.T) {
 		t.Fatalf("failed to pin hash: %v", err)
 	}
 
-	origTransport := http.DefaultTransport
-	http.DefaultTransport = mock.Client().Transport
-	defer func() { http.DefaultTransport = origTransport }()
-
 	_, resolveErr := srv.federateResolve(t.Context(), "ext-registry", ResolveSkillRef{URI: "skill://ext-registry/core/bad-skill@1.0"})
 	if resolveErr == nil {
 		t.Fatal("expected trust_violation error")
@@ -188,8 +180,6 @@ func TestFederateResolve_PinnedHashMismatch(t *testing.T) {
 }
 
 func TestFederateResolve_NoPinConfigured(t *testing.T) {
-	srv, s := newFederationTestServer(t)
-
 	mockResp := ResolveSkillsResponse{
 		Resolved: []ResolvedSkillResponse{{
 			URI:             "skill://ext-registry/core/unpinned@1.0",
@@ -204,6 +194,8 @@ func TestFederateResolve_NoPinConfigured(t *testing.T) {
 		json.NewEncoder(w).Encode(mockResp)
 	})
 
+	srv, s := newFederationTestServer(t, mock)
+
 	registry := &store.SkillRegistry{
 		Name:        "ext-registry",
 		Endpoint:    mock.URL,
@@ -215,10 +207,6 @@ func TestFederateResolve_NoPinConfigured(t *testing.T) {
 	if err := s.CreateSkillRegistry(t.Context(), registry); err != nil {
 		t.Fatalf("failed to create registry: %v", err)
 	}
-
-	origTransport := http.DefaultTransport
-	http.DefaultTransport = mock.Client().Transport
-	defer func() { http.DefaultTransport = origTransport }()
 
 	_, resolveErr := srv.federateResolve(t.Context(), "ext-registry", ResolveSkillRef{URI: "skill://ext-registry/core/unpinned@1.0"})
 	if resolveErr == nil {
@@ -233,7 +221,8 @@ func TestFederateResolve_NoPinConfigured(t *testing.T) {
 }
 
 func TestFederateResolve_UnknownRegistry(t *testing.T) {
-	srv, _ := newFederationTestServer(t)
+	mock := newFederationMockRegistry(t, func(w http.ResponseWriter, r *http.Request) {})
+	srv, _ := newFederationTestServer(t, mock)
 
 	_, resolveErr := srv.federateResolve(t.Context(), "nonexistent", ResolveSkillRef{URI: "skill://nonexistent/core/test@1.0"})
 	if resolveErr == nil {
@@ -245,7 +234,8 @@ func TestFederateResolve_UnknownRegistry(t *testing.T) {
 }
 
 func TestFederateResolve_DisabledRegistry(t *testing.T) {
-	srv, s := newFederationTestServer(t)
+	mock := newFederationMockRegistry(t, func(w http.ResponseWriter, r *http.Request) {})
+	srv, s := newFederationTestServer(t, mock)
 
 	registry := &store.SkillRegistry{
 		Name:       "disabled-reg",
@@ -268,7 +258,8 @@ func TestFederateResolve_DisabledRegistry(t *testing.T) {
 }
 
 func TestFederateResolve_WrongRegistryType(t *testing.T) {
-	srv, s := newFederationTestServer(t)
+	mock := newFederationMockRegistry(t, func(w http.ResponseWriter, r *http.Request) {})
+	srv, s := newFederationTestServer(t, mock)
 
 	registry := &store.SkillRegistry{
 		Name:       "gcp-reg",
@@ -291,12 +282,12 @@ func TestFederateResolve_WrongRegistryType(t *testing.T) {
 }
 
 func TestFederateResolve_ExternalRegistryDown(t *testing.T) {
-	srv, s := newFederationTestServer(t)
-
 	mock := newFederationMockRegistry(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 		w.Write([]byte("internal error"))
 	})
+
+	srv, s := newFederationTestServer(t, mock)
 
 	registry := &store.SkillRegistry{
 		Name:       "down-reg",
@@ -309,10 +300,6 @@ func TestFederateResolve_ExternalRegistryDown(t *testing.T) {
 		t.Fatalf("failed to create registry: %v", err)
 	}
 
-	origTransport := http.DefaultTransport
-	http.DefaultTransport = mock.Client().Transport
-	defer func() { http.DefaultTransport = origTransport }()
-
 	_, resolveErr := srv.federateResolve(t.Context(), "down-reg", ResolveSkillRef{URI: "skill://down-reg/core/test@1.0"})
 	if resolveErr == nil {
 		t.Fatal("expected federation_error")
@@ -323,8 +310,6 @@ func TestFederateResolve_ExternalRegistryDown(t *testing.T) {
 }
 
 func TestFederateResolve_AuthTokenSent(t *testing.T) {
-	srv, s := newFederationTestServer(t)
-
 	var receivedAuth string
 	mock := newFederationMockRegistry(t, func(w http.ResponseWriter, r *http.Request) {
 		receivedAuth = r.Header.Get("Authorization")
@@ -340,6 +325,8 @@ func TestFederateResolve_AuthTokenSent(t *testing.T) {
 		json.NewEncoder(w).Encode(resp)
 	})
 
+	srv, s := newFederationTestServer(t, mock)
+
 	registry := &store.SkillRegistry{
 		Name:       "auth-reg",
 		Endpoint:   mock.URL,
@@ -352,10 +339,6 @@ func TestFederateResolve_AuthTokenSent(t *testing.T) {
 		t.Fatalf("failed to create registry: %v", err)
 	}
 
-	origTransport := http.DefaultTransport
-	http.DefaultTransport = mock.Client().Transport
-	defer func() { http.DefaultTransport = origTransport }()
-
 	_, resolveErr := srv.federateResolve(t.Context(), "auth-reg", ResolveSkillRef{URI: "skill://auth-reg/core/test@1.0"})
 	if resolveErr != nil {
 		t.Fatalf("unexpected error: %s", resolveErr.Message)
@@ -366,8 +349,6 @@ func TestFederateResolve_AuthTokenSent(t *testing.T) {
 }
 
 func TestFederateResolve_CustomResolvePath(t *testing.T) {
-	srv, s := newFederationTestServer(t)
-
 	var receivedPath string
 	mock := newFederationMockRegistry(t, func(w http.ResponseWriter, r *http.Request) {
 		receivedPath = r.URL.Path
@@ -383,6 +364,8 @@ func TestFederateResolve_CustomResolvePath(t *testing.T) {
 		json.NewEncoder(w).Encode(resp)
 	})
 
+	srv, s := newFederationTestServer(t, mock)
+
 	registry := &store.SkillRegistry{
 		Name:        "custom-reg",
 		Endpoint:    mock.URL,
@@ -394,10 +377,6 @@ func TestFederateResolve_CustomResolvePath(t *testing.T) {
 	if err := s.CreateSkillRegistry(t.Context(), registry); err != nil {
 		t.Fatalf("failed to create registry: %v", err)
 	}
-
-	origTransport := http.DefaultTransport
-	http.DefaultTransport = mock.Client().Transport
-	defer func() { http.DefaultTransport = origTransport }()
 
 	_, resolveErr := srv.federateResolve(t.Context(), "custom-reg", ResolveSkillRef{URI: "skill://custom-reg/core/test@1.0"})
 	if resolveErr != nil {

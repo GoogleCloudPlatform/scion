@@ -643,6 +643,9 @@ type Server struct {
 
 	// Cached rate limit info from the most recent GitHub App API call
 	githubAppRateLimit *githubapp.RateLimitInfo
+
+	// Shared HTTP client for federation proxy calls (no redirect following).
+	federationClient *http.Client
 }
 
 func newInstanceID() string {
@@ -681,6 +684,15 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 		templateLog:       logging.Subsystem("hub.templates"),
 		workspaceLog:      logging.Subsystem("hub.workspace"),
 		maintenanceLog:    logging.Subsystem("hub.maintenance"),
+	}
+
+	// Shared federation HTTP client: no redirect following to prevent
+	// credential leakage via Authorization header on cross-origin redirects.
+	srv.federationClient = &http.Client{
+		Timeout: federationTimeout,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
 	}
 
 	// Set secret backend from config so ensureSigningKey can use it.

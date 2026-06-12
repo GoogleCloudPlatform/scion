@@ -25,7 +25,10 @@ import (
 	"time"
 )
 
-const federationTimeout = 30 * time.Second
+const (
+	federationTimeout     = 30 * time.Second
+	federationMaxBodySize = 10 * 1024 * 1024 // 10MB
+)
 
 // federateResolve proxies a skill resolve request to an external registry.
 func (s *Server) federateResolve(ctx context.Context, registryName string, skillRef ResolveSkillRef) (*ResolvedSkillResponse, *ResolveSkillError) {
@@ -72,8 +75,7 @@ func (s *Server) federateResolve(ctx context.Context, registryName string, skill
 		httpReq.Header.Set("Authorization", "Bearer "+registry.AuthToken)
 	}
 
-	client := &http.Client{Timeout: federationTimeout}
-	resp, err := client.Do(httpReq)
+	resp, err := s.federationClient.Do(httpReq)
 	if err != nil {
 		return nil, &ResolveSkillError{
 			URI: skillRef.URI, Code: "federation_error",
@@ -91,7 +93,7 @@ func (s *Server) federateResolve(ctx context.Context, registryName string, skill
 	}
 
 	var resolveResp ResolveSkillsResponse
-	if err := json.NewDecoder(resp.Body).Decode(&resolveResp); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, federationMaxBodySize)).Decode(&resolveResp); err != nil {
 		return nil, &ResolveSkillError{
 			URI: skillRef.URI, Code: "federation_error",
 			Message: fmt.Sprintf("failed to decode response from registry %q: %v", registryName, err),
