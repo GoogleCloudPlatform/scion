@@ -17,6 +17,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -514,7 +515,9 @@ func (p *MessageBrokerProxy) deliverToAgent(ctx context.Context, projectID, agen
 	if err != nil {
 		p.log.Warn("Agent not found for broker message delivery",
 			"agentSlug", agentSlug, "projectID", projectID, "error", err)
-		p.publishDeliveryFailed(ctx, projectID, agentSlug, msg)
+		if errors.Is(err, store.ErrNotFound) {
+			p.publishDeliveryFailed(ctx, projectID, agentSlug, msg, err)
+		}
 		return
 	}
 
@@ -553,7 +556,7 @@ func (p *MessageBrokerProxy) deliverToAgent(ctx context.Context, projectID, agen
 		if markErr := p.store.MarkMessageFailed(ctx, storeMsg.ID, err.Error()); markErr != nil {
 			p.log.Error("Failed to mark broker message as failed", "id", storeMsg.ID, "error", markErr)
 		}
-		p.publishDeliveryFailed(ctx, projectID, agentSlug, msg)
+		p.publishDeliveryFailed(ctx, projectID, agentSlug, msg, err)
 		return
 	}
 
@@ -640,9 +643,11 @@ func recipientSlug(recipient string) string {
 }
 
 // publishDeliveryFailed publishes a DELIVERY_FAILED notification event when
-// a broker message targets a non-existent agent. If the sender is an agent,
+// a broker message cannot be delivered to an agent. If the sender is an agent,
 // the notification is dispatched to the sender so it learns about the failure.
-func (p *MessageBrokerProxy) publishDeliveryFailed(ctx context.Context, projectID, agentSlug string, msg *messages.StructuredMessage) {
+// When deliveryErr is a non-ErrNotFound error, the message includes the actual
+// error; otherwise it reports the agent as not found.
+func (p *MessageBrokerProxy) publishDeliveryFailed(ctx context.Context, projectID, agentSlug string, msg *messages.StructuredMessage, deliveryErr error) {
 	if !strings.HasPrefix(msg.Sender, "agent:") || msg.SenderID == "" {
 		return
 	}
@@ -653,7 +658,12 @@ func (p *MessageBrokerProxy) publishDeliveryFailed(ctx context.Context, projectI
 		return
 	}
 
-	failMsg := fmt.Sprintf("Message delivery failed: agent %q not found in project", agentSlug)
+	var failMsg string
+	if deliveryErr != nil && !errors.Is(deliveryErr, store.ErrNotFound) {
+		failMsg = fmt.Sprintf("Message delivery failed to agent %q: %v", agentSlug, deliveryErr)
+	} else {
+		failMsg = fmt.Sprintf("Message delivery failed: agent %q not found in project", agentSlug)
+	}
 	structuredMsg := &messages.StructuredMessage{
 		Sender:    "system",
 		Recipient: msg.Sender,

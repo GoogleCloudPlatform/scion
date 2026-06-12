@@ -120,10 +120,15 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			log.Warn("Could not resolve sender identity for permission check",
 				"sender", req.Message.Sender, "error", err)
-			writeError(w, http.StatusForbidden, ErrCodeForbidden,
-				"sender identity could not be resolved", map[string]interface{}{
-					"sender": req.Message.Sender,
-				})
+			if errors.Is(err, store.ErrNotFound) {
+				writeError(w, http.StatusForbidden, ErrCodeForbidden,
+					"sender identity could not be resolved", map[string]interface{}{
+						"sender": req.Message.Sender,
+					})
+			} else {
+				writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+					"internal error resolving sender identity", nil)
+			}
 			return
 		}
 		userIdent := NewAuthenticatedUser(senderUser.ID, senderUser.Email, senderUser.DisplayName, senderUser.Role, "integration")

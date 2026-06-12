@@ -93,8 +93,9 @@ type TelegramBrokerV2 struct {
 
 	hostCallbacks plugin.HostCallbacks
 
-	errorCooldown   map[string]time.Time // key: "chatID:threadID:errorType" → last sent time
-	errorCooldownMu sync.Mutex
+	errorCooldown          map[string]time.Time // key: "chatID:threadID:errorType" → last sent time
+	errorCooldownMu        sync.Mutex
+	errorCooldownCheckCount int
 }
 
 // NewV2 creates a new TelegramBrokerV2 with the given logger.
@@ -2255,7 +2256,8 @@ func (b *TelegramBrokerV2) shouldSuppressError(chatID int64, threadID int, error
 
 	now := time.Now()
 
-	if len(b.errorCooldown) > 1000 {
+	b.errorCooldownCheckCount++
+	if len(b.errorCooldown) > 1000 && b.errorCooldownCheckCount%100 == 0 {
 		for k, v := range b.errorCooldown {
 			if now.Sub(v) >= errorCooldownDuration {
 				delete(b.errorCooldown, k)
