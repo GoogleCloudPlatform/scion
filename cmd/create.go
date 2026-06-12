@@ -143,6 +143,8 @@ arguments are provided, an empty prompt.md is created for later editing.`,
 		if hubErr == nil && hctx != nil && hctx.Client != nil {
 			hubResolver := agent.NewHubSkillResolver(hctx.Client.Skills())
 			resolver := agent.NewRoutingSkillResolver(hubResolver)
+			ghResolver := agent.NewGitHubSkillResolver()
+			resolver.Register("gh", ghResolver)
 			ctx = agent.ContextWithSkillResolver(ctx, resolver)
 			if hctx.ProjectID != "" {
 				ctx = agent.ContextWithResolveProjectID(ctx, hctx.ProjectID)
