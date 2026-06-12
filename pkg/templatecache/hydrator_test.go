@@ -114,10 +114,11 @@ func (m *mockHubClient) Schedules(projectID string) hubclient.ScheduleService   
 func (m *mockHubClient) GCPServiceAccounts(projectID string) hubclient.GCPServiceAccountService {
 	return nil
 }
-func (m *mockHubClient) Messages() hubclient.MessageService    { return nil }
-func (m *mockHubClient) AllowList() hubclient.AllowListService { return nil }
-func (m *mockHubClient) Invites() hubclient.InviteService      { return nil }
-func (m *mockHubClient) Skills() hubclient.SkillService        { return nil }
+func (m *mockHubClient) Messages() hubclient.MessageService              { return nil }
+func (m *mockHubClient) AllowList() hubclient.AllowListService           { return nil }
+func (m *mockHubClient) Invites() hubclient.InviteService                { return nil }
+func (m *mockHubClient) Skills() hubclient.SkillService                  { return nil }
+func (m *mockHubClient) SkillRegistries() hubclient.SkillRegistryService { return nil }
 func (m *mockHubClient) Health(ctx context.Context) (*hubclient.HealthResponse, error) {
 	return nil, nil
 }
