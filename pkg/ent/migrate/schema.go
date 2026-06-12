@@ -592,6 +592,7 @@ var (
 		{Name: "agent_id", Type: field.TypeString, Nullable: true},
 		{Name: "group_id", Type: field.TypeString, Nullable: true},
 		{Name: "dispatch_state", Type: field.TypeString, Default: "pending"},
+		{Name: "dispatch_failure_reason", Type: field.TypeString, Nullable: true},
 		{Name: "dispatched_at", Type: field.TypeTime, Nullable: true},
 		{Name: "created", Type: field.TypeTime},
 	}
@@ -614,7 +615,7 @@ var (
 			{
 				Name:    "message_created",
 				Unique:  false,
-				Columns: []*schema.Column{MessagesColumns[15]},
+				Columns: []*schema.Column{MessagesColumns[16]},
 			},
 		},
 	}

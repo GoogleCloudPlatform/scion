@@ -235,6 +235,26 @@ func (_u *MessageUpdate) SetNillableDispatchState(v *string) *MessageUpdate {
 	return _u
 }
 
+// SetDispatchFailureReason sets the "dispatch_failure_reason" field.
+func (_u *MessageUpdate) SetDispatchFailureReason(v string) *MessageUpdate {
+	_u.mutation.SetDispatchFailureReason(v)
+	return _u
+}
+
+// SetNillableDispatchFailureReason sets the "dispatch_failure_reason" field if the given value is not nil.
+func (_u *MessageUpdate) SetNillableDispatchFailureReason(v *string) *MessageUpdate {
+	if v != nil {
+		_u.SetDispatchFailureReason(*v)
+	}
+	return _u
+}
+
+// ClearDispatchFailureReason clears the value of the "dispatch_failure_reason" field.
+func (_u *MessageUpdate) ClearDispatchFailureReason() *MessageUpdate {
+	_u.mutation.ClearDispatchFailureReason()
+	return _u
+}
+
 // SetDispatchedAt sets the "dispatched_at" field.
 func (_u *MessageUpdate) SetDispatchedAt(v time.Time) *MessageUpdate {
 	_u.mutation.SetDispatchedAt(v)
@@ -369,6 +389,12 @@ func (_u *MessageUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	}
 	if value, ok := _u.mutation.DispatchState(); ok {
 		_spec.SetField(message.FieldDispatchState, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.DispatchFailureReason(); ok {
+		_spec.SetField(message.FieldDispatchFailureReason, field.TypeString, value)
+	}
+	if _u.mutation.DispatchFailureReasonCleared() {
+		_spec.ClearField(message.FieldDispatchFailureReason, field.TypeString)
 	}
 	if value, ok := _u.mutation.DispatchedAt(); ok {
 		_spec.SetField(message.FieldDispatchedAt, field.TypeTime, value)
@@ -602,6 +628,26 @@ func (_u *MessageUpdateOne) SetNillableDispatchState(v *string) *MessageUpdateOn
 	return _u
 }
 
+// SetDispatchFailureReason sets the "dispatch_failure_reason" field.
+func (_u *MessageUpdateOne) SetDispatchFailureReason(v string) *MessageUpdateOne {
+	_u.mutation.SetDispatchFailureReason(v)
+	return _u
+}
+
+// SetNillableDispatchFailureReason sets the "dispatch_failure_reason" field if the given value is not nil.
+func (_u *MessageUpdateOne) SetNillableDispatchFailureReason(v *string) *MessageUpdateOne {
+	if v != nil {
+		_u.SetDispatchFailureReason(*v)
+	}
+	return _u
+}
+
+// ClearDispatchFailureReason clears the value of the "dispatch_failure_reason" field.
+func (_u *MessageUpdateOne) ClearDispatchFailureReason() *MessageUpdateOne {
+	_u.mutation.ClearDispatchFailureReason()
+	return _u
+}
+
 // SetDispatchedAt sets the "dispatched_at" field.
 func (_u *MessageUpdateOne) SetDispatchedAt(v time.Time) *MessageUpdateOne {
 	_u.mutation.SetDispatchedAt(v)
@@ -766,6 +812,12 @@ func (_u *MessageUpdateOne) sqlSave(ctx context.Context) (_node *Message, err er
 	}
 	if value, ok := _u.mutation.DispatchState(); ok {
 		_spec.SetField(message.FieldDispatchState, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.DispatchFailureReason(); ok {
+		_spec.SetField(message.FieldDispatchFailureReason, field.TypeString, value)
+	}
+	if _u.mutation.DispatchFailureReasonCleared() {
+		_spec.ClearField(message.FieldDispatchFailureReason, field.TypeString)
 	}
 	if value, ok := _u.mutation.DispatchedAt(); ok {
 		_spec.SetField(message.FieldDispatchedAt, field.TypeTime, value)

@@ -44,6 +44,8 @@ type Message struct {
 	GroupID string `json:"group_id,omitempty"`
 	// DispatchState holds the value of the "dispatch_state" field.
 	DispatchState string `json:"dispatch_state,omitempty"`
+	// DispatchFailureReason holds the value of the "dispatch_failure_reason" field.
+	DispatchFailureReason *string `json:"dispatch_failure_reason,omitempty"`
 	// DispatchedAt holds the value of the "dispatched_at" field.
 	DispatchedAt *time.Time `json:"dispatched_at,omitempty"`
 	// Created holds the value of the "created" field.
@@ -58,7 +60,7 @@ func (*Message) scanValues(columns []string) ([]any, error) {
 		switch columns[i] {
 		case message.FieldUrgent, message.FieldBroadcasted, message.FieldRead:
 			values[i] = new(sql.NullBool)
-		case message.FieldSender, message.FieldSenderID, message.FieldRecipient, message.FieldRecipientID, message.FieldMsg, message.FieldType, message.FieldAgentID, message.FieldGroupID, message.FieldDispatchState:
+		case message.FieldSender, message.FieldSenderID, message.FieldRecipient, message.FieldRecipientID, message.FieldMsg, message.FieldType, message.FieldAgentID, message.FieldGroupID, message.FieldDispatchState, message.FieldDispatchFailureReason:
 			values[i] = new(sql.NullString)
 		case message.FieldDispatchedAt, message.FieldCreated:
 			values[i] = new(sql.NullTime)
@@ -163,6 +165,13 @@ func (_m *Message) assignValues(columns []string, values []any) error {
 			} else if value.Valid {
 				_m.DispatchState = value.String
 			}
+		case message.FieldDispatchFailureReason:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field dispatch_failure_reason", values[i])
+			} else if value.Valid {
+				_m.DispatchFailureReason = new(string)
+				*_m.DispatchFailureReason = value.String
+			}
 		case message.FieldDispatchedAt:
 			if value, ok := values[i].(*sql.NullTime); !ok {
 				return fmt.Errorf("unexpected type %T for field dispatched_at", values[i])
@@ -250,6 +259,11 @@ func (_m *Message) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("dispatch_state=")
 	builder.WriteString(_m.DispatchState)
+	builder.WriteString(", ")
+	if v := _m.DispatchFailureReason; v != nil {
+		builder.WriteString("dispatch_failure_reason=")
+		builder.WriteString(*v)
+	}
 	builder.WriteString(", ")
 	if v := _m.DispatchedAt; v != nil {
 		builder.WriteString("dispatched_at=")

@@ -120,6 +120,11 @@ func DispatchState(v string) predicate.Message {
 	return predicate.Message(sql.FieldEQ(FieldDispatchState, v))
 }
 
+// DispatchFailureReason applies equality check predicate on the "dispatch_failure_reason" field. It's identical to DispatchFailureReasonEQ.
+func DispatchFailureReason(v string) predicate.Message {
+	return predicate.Message(sql.FieldEQ(FieldDispatchFailureReason, v))
+}
+
 // DispatchedAt applies equality check predicate on the "dispatched_at" field. It's identical to DispatchedAtEQ.
 func DispatchedAt(v time.Time) predicate.Message {
 	return predicate.Message(sql.FieldEQ(FieldDispatchedAt, v))
@@ -823,6 +828,81 @@ func DispatchStateEqualFold(v string) predicate.Message {
 // DispatchStateContainsFold applies the ContainsFold predicate on the "dispatch_state" field.
 func DispatchStateContainsFold(v string) predicate.Message {
 	return predicate.Message(sql.FieldContainsFold(FieldDispatchState, v))
+}
+
+// DispatchFailureReasonEQ applies the EQ predicate on the "dispatch_failure_reason" field.
+func DispatchFailureReasonEQ(v string) predicate.Message {
+	return predicate.Message(sql.FieldEQ(FieldDispatchFailureReason, v))
+}
+
+// DispatchFailureReasonNEQ applies the NEQ predicate on the "dispatch_failure_reason" field.
+func DispatchFailureReasonNEQ(v string) predicate.Message {
+	return predicate.Message(sql.FieldNEQ(FieldDispatchFailureReason, v))
+}
+
+// DispatchFailureReasonIn applies the In predicate on the "dispatch_failure_reason" field.
+func DispatchFailureReasonIn(vs ...string) predicate.Message {
+	return predicate.Message(sql.FieldIn(FieldDispatchFailureReason, vs...))
+}
+
+// DispatchFailureReasonNotIn applies the NotIn predicate on the "dispatch_failure_reason" field.
+func DispatchFailureReasonNotIn(vs ...string) predicate.Message {
+	return predicate.Message(sql.FieldNotIn(FieldDispatchFailureReason, vs...))
+}
+
+// DispatchFailureReasonGT applies the GT predicate on the "dispatch_failure_reason" field.
+func DispatchFailureReasonGT(v string) predicate.Message {
+	return predicate.Message(sql.FieldGT(FieldDispatchFailureReason, v))
+}
+
+// DispatchFailureReasonGTE applies the GTE predicate on the "dispatch_failure_reason" field.
+func DispatchFailureReasonGTE(v string) predicate.Message {
+	return predicate.Message(sql.FieldGTE(FieldDispatchFailureReason, v))
+}
+
+// DispatchFailureReasonLT applies the LT predicate on the "dispatch_failure_reason" field.
+func DispatchFailureReasonLT(v string) predicate.Message {
+	return predicate.Message(sql.FieldLT(FieldDispatchFailureReason, v))
+}
+
+// DispatchFailureReasonLTE applies the LTE predicate on the "dispatch_failure_reason" field.
+func DispatchFailureReasonLTE(v string) predicate.Message {
+	return predicate.Message(sql.FieldLTE(FieldDispatchFailureReason, v))
+}
+
+// DispatchFailureReasonContains applies the Contains predicate on the "dispatch_failure_reason" field.
+func DispatchFailureReasonContains(v string) predicate.Message {
+	return predicate.Message(sql.FieldContains(FieldDispatchFailureReason, v))
+}
+
+// DispatchFailureReasonHasPrefix applies the HasPrefix predicate on the "dispatch_failure_reason" field.
+func DispatchFailureReasonHasPrefix(v string) predicate.Message {
+	return predicate.Message(sql.FieldHasPrefix(FieldDispatchFailureReason, v))
+}
+
+// DispatchFailureReasonHasSuffix applies the HasSuffix predicate on the "dispatch_failure_reason" field.
+func DispatchFailureReasonHasSuffix(v string) predicate.Message {
+	return predicate.Message(sql.FieldHasSuffix(FieldDispatchFailureReason, v))
+}
+
+// DispatchFailureReasonIsNil applies the IsNil predicate on the "dispatch_failure_reason" field.
+func DispatchFailureReasonIsNil() predicate.Message {
+	return predicate.Message(sql.FieldIsNull(FieldDispatchFailureReason))
+}
+
+// DispatchFailureReasonNotNil applies the NotNil predicate on the "dispatch_failure_reason" field.
+func DispatchFailureReasonNotNil() predicate.Message {
+	return predicate.Message(sql.FieldNotNull(FieldDispatchFailureReason))
+}
+
+// DispatchFailureReasonEqualFold applies the EqualFold predicate on the "dispatch_failure_reason" field.
+func DispatchFailureReasonEqualFold(v string) predicate.Message {
+	return predicate.Message(sql.FieldEqualFold(FieldDispatchFailureReason, v))
+}
+
+// DispatchFailureReasonContainsFold applies the ContainsFold predicate on the "dispatch_failure_reason" field.
+func DispatchFailureReasonContainsFold(v string) predicate.Message {
+	return predicate.Message(sql.FieldContainsFold(FieldDispatchFailureReason, v))
 }
 
 // DispatchedAtEQ applies the EQ predicate on the "dispatched_at" field.

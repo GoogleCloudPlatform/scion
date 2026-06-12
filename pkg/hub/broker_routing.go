@@ -23,10 +23,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
-// ErrMessageDeferred is returned by HybridBrokerClient.MessageAgent when the
-// broker is not locally connected and has no HTTP endpoint: the message row
-// (already persisted with dispatch_state=pending) is the durable intent, and
-// the caller should emit a NOTIFY wakeup and return 202 Accepted.
+// ErrMessageDeferred signals that broker dispatch failed transiently and should
+// be retried. Consumed by dispatchWithBrokerRetry.
 var ErrMessageDeferred = errors.New("message deferred: broker not locally reachable")
 
 // ErrBrokerTimeout is returned by dispatchWithBrokerRetry when the broker

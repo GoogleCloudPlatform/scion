@@ -174,6 +174,20 @@ func (_c *MessageCreate) SetNillableDispatchState(v *string) *MessageCreate {
 	return _c
 }
 
+// SetDispatchFailureReason sets the "dispatch_failure_reason" field.
+func (_c *MessageCreate) SetDispatchFailureReason(v string) *MessageCreate {
+	_c.mutation.SetDispatchFailureReason(v)
+	return _c
+}
+
+// SetNillableDispatchFailureReason sets the "dispatch_failure_reason" field if the given value is not nil.
+func (_c *MessageCreate) SetNillableDispatchFailureReason(v *string) *MessageCreate {
+	if v != nil {
+		_c.SetDispatchFailureReason(*v)
+	}
+	return _c
+}
+
 // SetDispatchedAt sets the "dispatched_at" field.
 func (_c *MessageCreate) SetDispatchedAt(v time.Time) *MessageCreate {
 	_c.mutation.SetDispatchedAt(v)
@@ -416,6 +430,10 @@ func (_c *MessageCreate) createSpec() (*Message, *sqlgraph.CreateSpec) {
 		_spec.SetField(message.FieldDispatchState, field.TypeString, value)
 		_node.DispatchState = value
 	}
+	if value, ok := _c.mutation.DispatchFailureReason(); ok {
+		_spec.SetField(message.FieldDispatchFailureReason, field.TypeString, value)
+		_node.DispatchFailureReason = &value
+	}
 	if value, ok := _c.mutation.DispatchedAt(); ok {
 		_spec.SetField(message.FieldDispatchedAt, field.TypeTime, value)
 		_node.DispatchedAt = &value
@@ -653,6 +671,24 @@ func (u *MessageUpsert) SetDispatchState(v string) *MessageUpsert {
 // UpdateDispatchState sets the "dispatch_state" field to the value that was provided on create.
 func (u *MessageUpsert) UpdateDispatchState() *MessageUpsert {
 	u.SetExcluded(message.FieldDispatchState)
+	return u
+}
+
+// SetDispatchFailureReason sets the "dispatch_failure_reason" field.
+func (u *MessageUpsert) SetDispatchFailureReason(v string) *MessageUpsert {
+	u.Set(message.FieldDispatchFailureReason, v)
+	return u
+}
+
+// UpdateDispatchFailureReason sets the "dispatch_failure_reason" field to the value that was provided on create.
+func (u *MessageUpsert) UpdateDispatchFailureReason() *MessageUpsert {
+	u.SetExcluded(message.FieldDispatchFailureReason)
+	return u
+}
+
+// ClearDispatchFailureReason clears the value of the "dispatch_failure_reason" field.
+func (u *MessageUpsert) ClearDispatchFailureReason() *MessageUpsert {
+	u.SetNull(message.FieldDispatchFailureReason)
 	return u
 }
 
@@ -932,6 +968,27 @@ func (u *MessageUpsertOne) SetDispatchState(v string) *MessageUpsertOne {
 func (u *MessageUpsertOne) UpdateDispatchState() *MessageUpsertOne {
 	return u.Update(func(s *MessageUpsert) {
 		s.UpdateDispatchState()
+	})
+}
+
+// SetDispatchFailureReason sets the "dispatch_failure_reason" field.
+func (u *MessageUpsertOne) SetDispatchFailureReason(v string) *MessageUpsertOne {
+	return u.Update(func(s *MessageUpsert) {
+		s.SetDispatchFailureReason(v)
+	})
+}
+
+// UpdateDispatchFailureReason sets the "dispatch_failure_reason" field to the value that was provided on create.
+func (u *MessageUpsertOne) UpdateDispatchFailureReason() *MessageUpsertOne {
+	return u.Update(func(s *MessageUpsert) {
+		s.UpdateDispatchFailureReason()
+	})
+}
+
+// ClearDispatchFailureReason clears the value of the "dispatch_failure_reason" field.
+func (u *MessageUpsertOne) ClearDispatchFailureReason() *MessageUpsertOne {
+	return u.Update(func(s *MessageUpsert) {
+		s.ClearDispatchFailureReason()
 	})
 }
 
@@ -1381,6 +1438,27 @@ func (u *MessageUpsertBulk) SetDispatchState(v string) *MessageUpsertBulk {
 func (u *MessageUpsertBulk) UpdateDispatchState() *MessageUpsertBulk {
 	return u.Update(func(s *MessageUpsert) {
 		s.UpdateDispatchState()
+	})
+}
+
+// SetDispatchFailureReason sets the "dispatch_failure_reason" field.
+func (u *MessageUpsertBulk) SetDispatchFailureReason(v string) *MessageUpsertBulk {
+	return u.Update(func(s *MessageUpsert) {
+		s.SetDispatchFailureReason(v)
+	})
+}
+
+// UpdateDispatchFailureReason sets the "dispatch_failure_reason" field to the value that was provided on create.
+func (u *MessageUpsertBulk) UpdateDispatchFailureReason() *MessageUpsertBulk {
+	return u.Update(func(s *MessageUpsert) {
+		s.UpdateDispatchFailureReason()
+	})
+}
+
+// ClearDispatchFailureReason clears the value of the "dispatch_failure_reason" field.
+func (u *MessageUpsertBulk) ClearDispatchFailureReason() *MessageUpsertBulk {
+	return u.Update(func(s *MessageUpsert) {
+		s.ClearDispatchFailureReason()
 	})
 }
 

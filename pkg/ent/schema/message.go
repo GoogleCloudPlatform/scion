@@ -64,11 +64,14 @@ func (Message) Fields() []ent.Field {
 			Optional(),
 		field.String("group_id").
 			Optional(),
-		// dispatch_state tracks cross-node delivery (the message row IS the durable
-		// dispatch intent): pending|dispatched|failed. The owning node CAS-flips
-		// pending->dispatched after tunneling. Default keeps existing rows valid.
+		// dispatch_state tracks cross-node delivery: pending|dispatched|failed.
+		// After Phase 4 (no-queuing delivery), new rows are created as "dispatched";
+		// any pending rows indicate a bug — monitored by brokerMessageSweepHandler.
 		field.String("dispatch_state").
 			Default("pending"),
+		field.String("dispatch_failure_reason").
+			Optional().
+			Nillable(),
 		field.Time("dispatched_at").
 			Optional().
 			Nillable(),

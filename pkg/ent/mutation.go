@@ -19265,28 +19265,29 @@ func (m *MaintenanceOperationRunMutation) ResetEdge(name string) error {
 // MessageMutation represents an operation that mutates the Message nodes in the graph.
 type MessageMutation struct {
 	config
-	op             Op
-	typ            string
-	id             *uuid.UUID
-	project_id     *uuid.UUID
-	sender         *string
-	sender_id      *string
-	recipient      *string
-	recipient_id   *string
-	msg            *string
-	_type          *string
-	urgent         *bool
-	broadcasted    *bool
-	read           *bool
-	agent_id       *string
-	group_id       *string
-	dispatch_state *string
-	dispatched_at  *time.Time
-	created        *time.Time
-	clearedFields  map[string]struct{}
-	done           bool
-	oldValue       func(context.Context) (*Message, error)
-	predicates     []predicate.Message
+	op                      Op
+	typ                     string
+	id                      *uuid.UUID
+	project_id              *uuid.UUID
+	sender                  *string
+	sender_id               *string
+	recipient               *string
+	recipient_id            *string
+	msg                     *string
+	_type                   *string
+	urgent                  *bool
+	broadcasted             *bool
+	read                    *bool
+	agent_id                *string
+	group_id                *string
+	dispatch_state          *string
+	dispatch_failure_reason *string
+	dispatched_at           *time.Time
+	created                 *time.Time
+	clearedFields           map[string]struct{}
+	done                    bool
+	oldValue                func(context.Context) (*Message, error)
+	predicates              []predicate.Message
 }
 
 var _ ent.Mutation = (*MessageMutation)(nil)
@@ -19913,6 +19914,55 @@ func (m *MessageMutation) ResetDispatchState() {
 	m.dispatch_state = nil
 }
 
+// SetDispatchFailureReason sets the "dispatch_failure_reason" field.
+func (m *MessageMutation) SetDispatchFailureReason(s string) {
+	m.dispatch_failure_reason = &s
+}
+
+// DispatchFailureReason returns the value of the "dispatch_failure_reason" field in the mutation.
+func (m *MessageMutation) DispatchFailureReason() (r string, exists bool) {
+	v := m.dispatch_failure_reason
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldDispatchFailureReason returns the old "dispatch_failure_reason" field's value of the Message entity.
+// If the Message object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *MessageMutation) OldDispatchFailureReason(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldDispatchFailureReason is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldDispatchFailureReason requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldDispatchFailureReason: %w", err)
+	}
+	return oldValue.DispatchFailureReason, nil
+}
+
+// ClearDispatchFailureReason clears the value of the "dispatch_failure_reason" field.
+func (m *MessageMutation) ClearDispatchFailureReason() {
+	m.dispatch_failure_reason = nil
+	m.clearedFields[message.FieldDispatchFailureReason] = struct{}{}
+}
+
+// DispatchFailureReasonCleared returns if the "dispatch_failure_reason" field was cleared in this mutation.
+func (m *MessageMutation) DispatchFailureReasonCleared() bool {
+	_, ok := m.clearedFields[message.FieldDispatchFailureReason]
+	return ok
+}
+
+// ResetDispatchFailureReason resets all changes to the "dispatch_failure_reason" field.
+func (m *MessageMutation) ResetDispatchFailureReason() {
+	m.dispatch_failure_reason = nil
+	delete(m.clearedFields, message.FieldDispatchFailureReason)
+}
+
 // SetDispatchedAt sets the "dispatched_at" field.
 func (m *MessageMutation) SetDispatchedAt(t time.Time) {
 	m.dispatched_at = &t
@@ -20032,7 +20082,7 @@ func (m *MessageMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *MessageMutation) Fields() []string {
-	fields := make([]string, 0, 15)
+	fields := make([]string, 0, 16)
 	if m.project_id != nil {
 		fields = append(fields, message.FieldProjectID)
 	}
@@ -20071,6 +20121,9 @@ func (m *MessageMutation) Fields() []string {
 	}
 	if m.dispatch_state != nil {
 		fields = append(fields, message.FieldDispatchState)
+	}
+	if m.dispatch_failure_reason != nil {
+		fields = append(fields, message.FieldDispatchFailureReason)
 	}
 	if m.dispatched_at != nil {
 		fields = append(fields, message.FieldDispatchedAt)
@@ -20112,6 +20165,8 @@ func (m *MessageMutation) Field(name string) (ent.Value, bool) {
 		return m.GroupID()
 	case message.FieldDispatchState:
 		return m.DispatchState()
+	case message.FieldDispatchFailureReason:
+		return m.DispatchFailureReason()
 	case message.FieldDispatchedAt:
 		return m.DispatchedAt()
 	case message.FieldCreated:
@@ -20151,6 +20206,8 @@ func (m *MessageMutation) OldField(ctx context.Context, name string) (ent.Value,
 		return m.OldGroupID(ctx)
 	case message.FieldDispatchState:
 		return m.OldDispatchState(ctx)
+	case message.FieldDispatchFailureReason:
+		return m.OldDispatchFailureReason(ctx)
 	case message.FieldDispatchedAt:
 		return m.OldDispatchedAt(ctx)
 	case message.FieldCreated:
@@ -20255,6 +20312,13 @@ func (m *MessageMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetDispatchState(v)
 		return nil
+	case message.FieldDispatchFailureReason:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetDispatchFailureReason(v)
+		return nil
 	case message.FieldDispatchedAt:
 		v, ok := value.(time.Time)
 		if !ok {
@@ -20311,6 +20375,9 @@ func (m *MessageMutation) ClearedFields() []string {
 	if m.FieldCleared(message.FieldGroupID) {
 		fields = append(fields, message.FieldGroupID)
 	}
+	if m.FieldCleared(message.FieldDispatchFailureReason) {
+		fields = append(fields, message.FieldDispatchFailureReason)
+	}
 	if m.FieldCleared(message.FieldDispatchedAt) {
 		fields = append(fields, message.FieldDispatchedAt)
 	}
@@ -20339,6 +20406,9 @@ func (m *MessageMutation) ClearField(name string) error {
 		return nil
 	case message.FieldGroupID:
 		m.ClearGroupID()
+		return nil
+	case message.FieldDispatchFailureReason:
+		m.ClearDispatchFailureReason()
 		return nil
 	case message.FieldDispatchedAt:
 		m.ClearDispatchedAt()
@@ -20389,6 +20459,9 @@ func (m *MessageMutation) ResetField(name string) error {
 		return nil
 	case message.FieldDispatchState:
 		m.ResetDispatchState()
+		return nil
+	case message.FieldDispatchFailureReason:
+		m.ResetDispatchFailureReason()
 		return nil
 	case message.FieldDispatchedAt:
 		m.ResetDispatchedAt()

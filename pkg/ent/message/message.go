@@ -40,6 +40,8 @@ const (
 	FieldGroupID = "group_id"
 	// FieldDispatchState holds the string denoting the dispatch_state field in the database.
 	FieldDispatchState = "dispatch_state"
+	// FieldDispatchFailureReason holds the string denoting the dispatch_failure_reason field in the database.
+	FieldDispatchFailureReason = "dispatch_failure_reason"
 	// FieldDispatchedAt holds the string denoting the dispatched_at field in the database.
 	FieldDispatchedAt = "dispatched_at"
 	// FieldCreated holds the string denoting the created field in the database.
@@ -64,6 +66,7 @@ var Columns = []string{
 	FieldAgentID,
 	FieldGroupID,
 	FieldDispatchState,
+	FieldDispatchFailureReason,
 	FieldDispatchedAt,
 	FieldCreated,
 }
@@ -172,6 +175,11 @@ func ByGroupID(opts ...sql.OrderTermOption) OrderOption {
 // ByDispatchState orders the results by the dispatch_state field.
 func ByDispatchState(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldDispatchState, opts...).ToFunc()
+}
+
+// ByDispatchFailureReason orders the results by the dispatch_failure_reason field.
+func ByDispatchFailureReason(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldDispatchFailureReason, opts...).ToFunc()
 }
 
 // ByDispatchedAt orders the results by the dispatched_at field.

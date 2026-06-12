@@ -251,21 +251,19 @@ func (s *BrokerDispatchStore) MarkMessageDispatched(ctx context.Context, id stri
 	return affected == 1, nil
 }
 
-// MarkMessageFailed sets a message's dispatch_state to "failed".
+// MarkMessageFailed sets a message's dispatch_state to "failed" and records the reason.
 func (s *BrokerDispatchStore) MarkMessageFailed(ctx context.Context, id string, reason string) error {
 	uid, err := parseUUID(id)
 	if err != nil {
 		return err
 	}
-	affected, err := s.client.Message.Update().
+	_, err = s.client.Message.Update().
 		Where(message.IDEQ(uid), message.DispatchStateNEQ(store.MessageDispatchFailed)).
 		SetDispatchState(store.MessageDispatchFailed).
+		SetNillableDispatchFailureReason(&reason).
 		Save(ctx)
 	if err != nil {
 		return mapError(err)
-	}
-	if affected == 0 {
-		return nil
 	}
 	return nil
 }

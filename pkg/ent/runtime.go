@@ -612,7 +612,7 @@ func init() {
 	// message.DefaultDispatchState holds the default value on creation for the dispatch_state field.
 	message.DefaultDispatchState = messageDescDispatchState.Default.(string)
 	// messageDescCreated is the schema descriptor for created field.
-	messageDescCreated := messageFields[15].Descriptor()
+	messageDescCreated := messageFields[16].Descriptor()
 	// message.DefaultCreated holds the default value on creation for the created field.
 	message.DefaultCreated = messageDescCreated.Default.(func() time.Time)
 	// messageDescID is the schema descriptor for id field.

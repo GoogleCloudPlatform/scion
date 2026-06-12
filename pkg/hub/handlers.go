@@ -2739,6 +2739,8 @@ func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anch
 
 	dispatcher := s.GetDispatcher()
 
+	// Note: retries are sequential — large groups with unreachable members
+	// may block for up to N × 30s. Future work: parallel dispatch.
 	for i, recip := range recipients {
 		recipStr := recip.String()
 
@@ -3054,17 +3056,6 @@ func (s *Server) broadcastDirect(w http.ResponseWriter, r *http.Request, project
 		agentMsg.Recipient = "agent:" + agent.Slug
 		agentMsg.RecipientID = agent.ID
 
-		retryCtx, retryCancel := context.WithTimeout(ctx, 30*time.Second)
-		dispatchErr := dispatchWithBrokerRetry(retryCtx, dispatcher, &agent, agentMsg.Msg, interrupt, &agentMsg)
-		retryCancel()
-
-		if dispatchErr != nil {
-			s.messageLog.Error("Failed to deliver broadcast message to agent",
-				"agent_id", agent.ID,
-				"agentSlug", agent.Slug, "error", dispatchErr)
-			s.publishBroadcastDeliveryFailed(ctx, &agent, &agentMsg, dispatchErr)
-		}
-
 		storeMsg := &store.Message{
 			ID:            api.NewUUID(),
 			ProjectID:     projectID,
@@ -3082,10 +3073,20 @@ func (s *Server) broadcastDirect(w http.ResponseWriter, r *http.Request, project
 		}
 		if err := s.store.CreateMessage(ctx, storeMsg); err != nil {
 			s.messageLog.Error("Failed to persist broadcast message", "agent_id", agent.ID, "error", err)
-		} else if dispatchErr != nil {
+		}
+
+		retryCtx, retryCancel := context.WithTimeout(ctx, 30*time.Second)
+		dispatchErr := dispatchWithBrokerRetry(retryCtx, dispatcher, &agent, agentMsg.Msg, interrupt, &agentMsg)
+		retryCancel()
+
+		if dispatchErr != nil {
+			s.messageLog.Error("Failed to deliver broadcast message to agent",
+				"agent_id", agent.ID,
+				"agentSlug", agent.Slug, "error", dispatchErr)
 			if markErr := s.store.MarkMessageFailed(ctx, storeMsg.ID, dispatchErr.Error()); markErr != nil {
 				s.messageLog.Error("Failed to mark broadcast message as failed", "id", storeMsg.ID, "error", markErr)
 			}
+			s.publishBroadcastDeliveryFailed(ctx, &agent, &agentMsg, dispatchErr)
 		}
 	}
 	return true

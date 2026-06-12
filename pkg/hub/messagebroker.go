@@ -545,6 +545,8 @@ func (p *MessageBrokerProxy) deliverToAgent(ctx context.Context, projectID, agen
 		return
 	}
 
+	// The 30s brokerCallbackTimeout is shared with pre-dispatch work above
+	// (agent lookup, persistence), so retries get slightly less than 30s.
 	if err := dispatchWithBrokerRetry(ctx, dispatcher, agent, msg.Msg, msg.Urgent, msg); err != nil {
 		p.log.Error("Failed to dispatch broker message to agent",
 			"agentSlug", agentSlug, "error", err)

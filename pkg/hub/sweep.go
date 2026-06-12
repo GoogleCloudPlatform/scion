@@ -23,7 +23,9 @@ const stuckMessageThreshold = 5 * time.Minute
 
 // brokerMessageSweepHandler returns a handler that counts messages still in
 // dispatch_state='pending' beyond the stuck threshold and logs/emits metrics.
-// Registered as a RecurringSingleton guarded by LockBrokerMessageSweep (B5-2).
+// After Phase 4 (no-queuing delivery), no code path creates pending rows — any
+// count > 0 indicates a bug. Registered as a RecurringSingleton guarded by
+// LockBrokerMessageSweep (B5-2).
 func (s *Server) brokerMessageSweepHandler() func(ctx context.Context) {
 	return func(ctx context.Context) {
 		cutoff := time.Now().Add(-stuckMessageThreshold)
