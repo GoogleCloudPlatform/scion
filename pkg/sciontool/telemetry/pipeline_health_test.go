@@ -7,7 +7,6 @@ package telemetry
 import (
 	"context"
 	"errors"
-	"os"
 	"testing"
 	"time"
 
@@ -16,10 +15,10 @@ import (
 
 func TestPipeline_HealthGauge_Registers(t *testing.T) {
 	clearTelemetryEnv()
-	os.Setenv(EnvEnabled, "true")
-	os.Setenv(EnvCloudEnabled, "false")
-	os.Setenv(EnvGRPCPort, "54401")
-	os.Setenv(EnvHTTPPort, "54402")
+	t.Setenv(EnvEnabled, "true")
+	t.Setenv(EnvCloudEnabled, "false")
+	t.Setenv(EnvGRPCPort, "54401")
+	t.Setenv(EnvHTTPPort, "54402")
 	defer clearTelemetryEnv()
 
 	cfg := &Config{
@@ -54,10 +53,10 @@ func TestPipeline_HealthGauge_Registers(t *testing.T) {
 
 func TestPipeline_HealthGauge_StopsOnStop(t *testing.T) {
 	clearTelemetryEnv()
-	os.Setenv(EnvEnabled, "true")
-	os.Setenv(EnvCloudEnabled, "false")
-	os.Setenv(EnvGRPCPort, "54403")
-	os.Setenv(EnvHTTPPort, "54404")
+	t.Setenv(EnvEnabled, "true")
+	t.Setenv(EnvCloudEnabled, "false")
+	t.Setenv(EnvGRPCPort, "54403")
+	t.Setenv(EnvHTTPPort, "54404")
 	defer clearTelemetryEnv()
 
 	cfg := &Config{

@@ -70,37 +70,8 @@ export class ScionPageHarnessConfigDetail extends LitElement {
   @state()
   private editorInitialPreview = false;
 
-  @state()
-  private hasDockerfile = false;
-
-  @state()
-  private buildDialogOpen = false;
-
-  @state()
-  private buildRunning = false;
-
-  @state()
-  private buildTag = 'latest';
-
-  @state()
-  private buildPush = false;
-
-  @state()
-  private buildLog = '';
-
-  @state()
-  private buildStatus = '';
-
-  @state()
-  private buildRunId = '';
-
-  @state()
-  private buildError = '';
-
   private fileBrowserDataSource: FileBrowserDataSource | null = null;
   private fileEditorDataSource: FileEditorDataSource | null = null;
-  private buildPollTimer: ReturnType<typeof setTimeout> | null = null;
-  private buildPollErrors = 0;
 
   static override styles = css`
     :host {
@@ -184,52 +155,6 @@ export class ScionPageHarnessConfigDetail extends LitElement {
       margin-bottom: 0.5rem;
     }
 
-    .header-actions {
-      margin-left: auto;
-    }
-
-    .build-log-section {
-      margin-top: 1.5rem;
-    }
-    .build-log-section h3 {
-      font-size: 0.95rem;
-      font-weight: 600;
-      margin: 0 0 0.5rem;
-      display: flex;
-      align-items: center;
-      gap: 0.5rem;
-    }
-    .build-log {
-      background: var(--sl-color-neutral-50);
-      border: 1px solid var(--sl-color-neutral-200);
-      border-radius: var(--sl-border-radius-medium);
-      padding: 1rem;
-      font-family: var(--sl-font-mono);
-      font-size: 0.8rem;
-      line-height: 1.5;
-      white-space: pre-wrap;
-      word-break: break-all;
-      max-height: 400px;
-      overflow-y: auto;
-    }
-
-    .build-status-badge {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.25rem;
-      font-size: 0.75rem;
-      font-weight: 500;
-    }
-    .build-status-badge.running { color: var(--sl-color-primary-600); }
-    .build-status-badge.completed { color: var(--sl-color-success-600); }
-    .build-status-badge.failed { color: var(--sl-color-danger-600); }
-
-    .build-error {
-      color: var(--sl-color-danger-600);
-      font-size: 0.85rem;
-      margin-top: 0.5rem;
-    }
-
     .error-state,
     .loading-state {
       text-align: center;
@@ -289,7 +214,6 @@ export class ScionPageHarnessConfigDetail extends LitElement {
         throw new Error(await extractApiError(response, `HTTP ${response.status}`));
       }
       this.harnessConfig = (await response.json()) as HarnessConfig;
-      this.hasDockerfile = this.harnessConfig.files?.some(f => f.path === 'Dockerfile') ?? false;
       dispatchPageTitle(
         this,
         this.harnessConfig.displayName || this.harnessConfig.name || this.harnessConfigId,
@@ -369,7 +293,7 @@ export class ScionPageHarnessConfigDetail extends LitElement {
         )}
       </div>
 
-      ${this.renderHeader()} ${this.renderFilesSection()} ${this.renderBuildDialog()} ${this.renderBuildLog()}
+      ${this.renderHeader()} ${this.renderFilesSection()}
     `;
   }
 
@@ -384,19 +308,6 @@ export class ScionPageHarnessConfigDetail extends LitElement {
           ></sl-icon>
           <h1>${hc.displayName || hc.name}</h1>
           ${hc.harness ? html`<span class="harness-badge">${hc.harness}</span>` : ''}
-          ${this.hasDockerfile ? html`
-            <div class="header-actions">
-              <sl-button
-                size="small"
-                variant="primary"
-                @click=${this.openBuildDialog}
-                ?disabled=${this.buildRunning}
-              >
-                <sl-icon slot="prefix" name="hammer"></sl-icon>
-                ${this.buildRunning ? 'Building...' : 'Build Image'}
-              </sl-button>
-            </div>
-          ` : nothing}
         </div>
         ${hc.description ? html`<p class="resource-description">${hc.description}</p>` : ''}
         <div class="resource-meta-row">
@@ -449,182 +360,6 @@ export class ScionPageHarnessConfigDetail extends LitElement {
             `}
       </div>
     `;
-  }
-  // ── Build Image ──
-
-  private openBuildDialog(): void {
-    this.buildTag = 'latest';
-    this.buildPush = false;
-    this.buildError = '';
-    this.buildDialogOpen = true;
-  }
-
-  private renderBuildDialog() {
-    return html`
-      <sl-dialog
-        label="Build Image"
-        ?open=${this.buildDialogOpen}
-        @sl-request-close=${() => (this.buildDialogOpen = false)}
-      >
-        <sl-input
-          label="Image Tag"
-          .value=${this.buildTag}
-          @sl-input=${(e: Event) => (this.buildTag = (e.target as HTMLInputElement).value)}
-        ></sl-input>
-        <br />
-        <sl-checkbox ?checked=${this.buildPush} @sl-change=${(e: Event) => (this.buildPush = (e.target as HTMLInputElement).checked)}>
-          Push to registry after building
-        </sl-checkbox>
-        ${this.buildError ? html`<p class="build-error">${this.buildError}</p>` : nothing}
-        <sl-button slot="footer" variant="primary" @click=${this.startBuild} ?loading=${this.buildRunning}>
-          Build
-        </sl-button>
-        <sl-button slot="footer" variant="default" @click=${() => (this.buildDialogOpen = false)}>
-          Cancel
-        </sl-button>
-      </sl-dialog>
-    `;
-  }
-
-  private async startBuild(): Promise<void> {
-    this.buildDialogOpen = false;
-    this.buildRunning = true;
-    this.buildLog = '';
-    this.buildStatus = 'running';
-    this.buildError = '';
-    this.buildPollErrors = 0;
-
-    try {
-      const response = await apiFetch(
-        '/api/v1/admin/maintenance/operations/build-harness-config-image/run',
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            params: {
-              harness_config_id: this.harnessConfigId,
-              tag: this.buildTag || 'latest',
-              push: this.buildPush ? 'true' : 'false',
-            },
-          }),
-        },
-      );
-
-      if (!response.ok) {
-        const errMsg = await extractApiError(response, `HTTP ${response.status}`);
-        this.buildError = errMsg;
-        this.buildRunning = false;
-        this.buildStatus = 'failed';
-        return;
-      }
-
-      const result = await response.json();
-      if (!result?.runId) {
-        this.buildError = 'Build started but no run ID was returned';
-        this.buildRunning = false;
-        this.buildStatus = 'failed';
-        return;
-      }
-      this.buildRunId = result.runId;
-      this.startBuildPolling();
-    } catch (err) {
-      this.buildError = err instanceof Error ? err.message : 'Failed to start build';
-      this.buildRunning = false;
-      this.buildStatus = 'failed';
-    }
-  }
-
-  private startBuildPolling(): void {
-    if (this.buildPollTimer) return;
-    this.buildPollErrors = 0;
-    void this.pollBuildStatus();
-  }
-
-  private stopBuildPolling(): void {
-    if (this.buildPollTimer) {
-      clearTimeout(this.buildPollTimer);
-      this.buildPollTimer = null;
-    }
-  }
-
-  private async pollBuildStatus(): Promise<void> {
-    if (!this.buildRunId) return;
-
-    try {
-      const resp = await apiFetch(
-        `/api/v1/admin/maintenance/operations/build-harness-config-image/runs/${this.buildRunId}`,
-      );
-      if (!resp.ok) {
-        this.buildPollErrors++;
-        if (this.buildPollErrors >= 5) {
-          this.buildRunning = false;
-          this.buildStatus = 'failed';
-          this.buildError = 'Lost connection to build';
-          this.stopBuildPolling();
-        } else if (this.buildRunning) {
-          this.buildPollTimer = setTimeout(() => void this.pollBuildStatus(), 3000);
-        }
-        return;
-      }
-
-      this.buildPollErrors = 0;
-      const run = await resp.json();
-      this.buildLog = run.log ?? '';
-      this.buildStatus = run.status ?? '';
-      void this.updateComplete.then(() => this.scrollBuildLog());
-
-      if (run.status !== 'running') {
-        this.buildRunning = false;
-        this.stopBuildPolling();
-        if (run.status === 'completed') {
-          await this.loadHarnessConfig();
-        }
-      } else if (this.buildRunning) {
-        this.buildPollTimer = setTimeout(() => void this.pollBuildStatus(), 3000);
-      }
-    } catch {
-      this.buildPollErrors++;
-      if (this.buildPollErrors >= 5) {
-        this.buildRunning = false;
-        this.buildStatus = 'failed';
-        this.buildError = 'Lost connection to build';
-        this.stopBuildPolling();
-      } else if (this.buildRunning) {
-        this.buildPollTimer = setTimeout(() => void this.pollBuildStatus(), 3000);
-      }
-    }
-  }
-
-  private scrollBuildLog(): void {
-    const el = this.renderRoot?.querySelector('.build-log');
-    if (el) {
-      el.scrollTop = el.scrollHeight;
-    }
-  }
-
-  private renderBuildLog() {
-    if (!this.buildLog && !this.buildRunning) return nothing;
-
-    const statusClass = this.buildStatus === 'completed' ? 'completed' : this.buildStatus === 'running' ? 'running' : 'failed';
-
-    return html`
-      <div class="build-log-section">
-        <h3>
-          Build Output
-          <span class="build-status-badge ${statusClass}">
-            ${this.buildStatus === 'running'
-              ? html`<sl-spinner style="font-size: 0.75rem;"></sl-spinner> Running`
-              : this.buildStatus}
-          </span>
-        </h3>
-        <pre class="build-log">${this.buildLog}</pre>
-      </div>
-    `;
-  }
-
-  override disconnectedCallback(): void {
-    super.disconnectedCallback();
-    this.stopBuildPolling();
   }
 }
 

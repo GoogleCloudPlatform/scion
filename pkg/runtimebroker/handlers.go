@@ -592,8 +592,8 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		CreatorName:     req.CreatorName,
 		ResolvedEnv:     req.ResolvedEnv,
 		ResolvedSecrets: req.ResolvedSecrets,
-		Attach:          req.Attach,
 		NoAuth:          req.NoAuth,
+		Attach:          req.Attach,
 		WorkspaceMode:   req.WorkspaceMode,
 		HTTPRequest:     r,
 	})
@@ -2326,6 +2326,7 @@ func (s *Server) finalizeEnv(w http.ResponseWriter, r *http.Request, id string) 
 		CreatorName:     origReq.CreatorName,
 		ResolvedEnv:     pending.MergedEnv,
 		ResolvedSecrets: origReq.ResolvedSecrets,
+		NoAuth:          origReq.NoAuth,
 		Attach:          origReq.Attach,
 		HTTPRequest:     r,
 	})

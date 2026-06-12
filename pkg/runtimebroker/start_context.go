@@ -76,8 +76,8 @@ type startContextInputs struct {
 	ResolvedSecrets []api.ResolvedSecret
 
 	// Behavior
-	Attach bool
 	NoAuth bool
+	Attach bool
 
 	// WorkspaceMode is the resolved workspace sharing mode for the project
 	// (e.g. "worktree-per-agent"). Threaded from CreateAgentRequest so the

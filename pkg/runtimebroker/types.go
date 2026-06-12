@@ -286,6 +286,8 @@ type CreateAgentRequest struct {
 	// CreatorName is the human-readable identity of who created this agent.
 	// Injected as the SCION_CREATOR environment variable in the agent container.
 	CreatorName string `json:"creatorName,omitempty"`
+	// NoAuth indicates the agent should start without any injected credentials.
+	NoAuth bool `json:"noAuth,omitempty"`
 	// Attach indicates the agent should start in interactive attach mode (not detached).
 	Attach bool `json:"attach,omitempty"`
 	// ProvisionOnly indicates the agent should be provisioned (dirs, worktree, templates)
@@ -326,10 +328,6 @@ type CreateAgentRequest struct {
 	// (e.g. "shared", "per-agent", "worktree-per-agent"). Threaded from the
 	// Hub so the broker can branch dispatch without re-deriving from labels.
 	WorkspaceMode string `json:"workspaceMode,omitempty"`
-
-	// NoAuth indicates the agent should start with zero injected credentials.
-	// When true, the broker skips credential injection.
-	NoAuth bool `json:"noAuth,omitempty"`
 }
 
 // UnmarshalJSON implements custom unmarshaling to support legacy grove fields.

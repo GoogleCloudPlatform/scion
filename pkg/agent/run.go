@@ -341,8 +341,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	var h api.Harness
 	var harnessConfigRevision string
 	var resolvedImpl string
-	var noAuthMessage string
-	var resolvedAuthMeta *config.HarnessAuthMetadata
+	var noAuthConfig *config.HarnessNoAuthConfig
 	if harnessConfigName != "" {
 		var resolveTemplatePaths []string
 		if opts.Template != "" {
@@ -369,14 +368,11 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		} else {
 			h = resolved.Harness
 			resolvedImpl = resolved.Implementation
+			noAuthConfig = resolved.Config.NoAuthConfig
 			if resolved.ConfigDir != nil {
 				harnessConfigRevision = config.ComputeHarnessConfigRevision(resolved.ConfigDir.Path)
 			}
 			util.Debugf("harness resolution: implementation=%s harness=%q", resolved.Implementation, resolved.Config.Harness)
-			if opts.NoAuth && resolved.Config.NoAuth != nil {
-				noAuthMessage = resolved.Config.NoAuth.Message
-			}
-			resolvedAuthMeta = resolved.Config.Auth
 		}
 	} else {
 		h = harness.New(harnessName)
@@ -431,11 +427,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	if !opts.NoAuth {
 		auth = harness.GatherAuthWithEnv(authEnvOverlay, !opts.BrokerMode)
 		if opts.BrokerMode {
-			if resolvedAuthMeta != nil {
-				harness.OverlayFileSecretsFromConfig(&auth, opts.ResolvedSecrets, resolvedAuthMeta)
-			} else {
-				harness.OverlayFileSecrets(&auth, opts.ResolvedSecrets)
-			}
+			harness.OverlayFileSecrets(&auth, opts.ResolvedSecrets)
 		}
 		util.Debugf("auth: gathered credentials — selectedType=%q, hasGeminiKey=%t, hasGoogleKey=%t, hasOAuth=%t, hasADC=%t, hasAnthropicKey=%t, hasClaudeOAuthToken=%t, hasClaudeAuthFile=%t, cloudProject=%q, gcpMetadataMode=%q, brokerMode=%t",
 			auth.SelectedType,
@@ -893,11 +885,16 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 			}
 			return nil
 		}(),
-		GitClone:             opts.GitClone,
-		SharedDirs:           effectiveSharedDirs,
-		BrokerMode:           opts.BrokerMode,
-		NoAuth:               opts.NoAuth,
-		NoAuthMessage:        noAuthMessage,
+		GitClone:   opts.GitClone,
+		SharedDirs: effectiveSharedDirs,
+		BrokerMode: opts.BrokerMode,
+		NoAuth:     opts.NoAuth && noAuthConfig != nil && noAuthConfig.Behavior == "drop-to-shell",
+		NoAuthMessage: func() string {
+			if opts.NoAuth && noAuthConfig != nil && noAuthConfig.Behavior == "drop-to-shell" {
+				return noAuthConfig.Message
+			}
+			return ""
+		}(),
 		Debug:                util.DebugEnabled(),
 		Resume:               opts.Resume,
 		MetadataInterception: hasMetadataInterception(agentEnv),

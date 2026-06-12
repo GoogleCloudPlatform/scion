@@ -67,6 +67,12 @@ capabilities:
     sse: { support: "yes" }
     streamable_http: { support: "yes" }
     project_scope: { support: "no", reason: "OpenCode does not distinguish project-scoped MCP" }
+no_auth:
+  behavior: drop-to-shell
+  message: |
+    This agent started without credentials.
+    Run your OpenCode authentication setup.
+    Then run: python3 /home/scion/.scion/harness/capture_auth.py
 auth:
   default_type: api-key
   types:
@@ -85,9 +91,3 @@ auth:
       OPENAI_API_KEY: api-key
     files:
       OPENCODE_AUTH: auth-file
-no_auth:
-  behavior: drop-to-shell
-  message: |
-    This agent started without credentials.
-    Set ANTHROPIC_API_KEY or OPENAI_API_KEY, or authenticate interactively.
-    Then capture credentials: python3 ~/.scion/harness/capture_auth.py

@@ -51,6 +51,12 @@ capabilities:
     auth_file: { support: "yes" }
     oauth_token: { support: "no" }
     vertex_ai: { support: "yes" }
+no_auth:
+  behavior: drop-to-shell
+  message: |
+    This agent started without credentials.
+    Run your Gemini authentication setup.
+    Then run: python3 /home/scion/.scion/harness/capture_auth.py
 auth:
   default_type: api-key
   types:
@@ -85,9 +91,3 @@ auth:
     files:
       GEMINI_OAUTH_CREDS: auth-file
       gcloud-adc: vertex-ai
-no_auth:
-  behavior: drop-to-shell
-  message: |
-    This agent started without credentials.
-    To authenticate, run: gcloud auth application-default login
-    Then capture credentials: python3 ~/.scion/harness/capture_auth.py

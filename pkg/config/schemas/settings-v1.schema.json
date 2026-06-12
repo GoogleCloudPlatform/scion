@@ -269,8 +269,8 @@
         },
         "auth_selected_type": {
           "type": "string",
-          "enum": ["api-key", "oauth-token", "auth-file", "vertex-ai"],
-          "description": "Authentication mechanism to use (e.g., api-key, oauth-token, vertex-ai, auth-file)."
+          "enum": ["api-key", "oauth-token", "auth-file", "vertex-ai", "none"],
+          "description": "Authentication mechanism to use (e.g., api-key, oauth-token, vertex-ai, auth-file, none)."
         },
         "secrets": {
           "type": "array",
@@ -328,13 +328,13 @@
           "$ref": "#/$defs/harnessAuthMetadata",
           "description": "Declarative auth preflight metadata for broker and hosted dispatch."
         },
-        "no_auth": {
-          "$ref": "#/$defs/harnessNoAuthConfig",
-          "description": "Defines behavior when an agent starts with --no-auth (no credentials)."
-        },
         "mcp": {
           "$ref": "#/$defs/harnessMCPMapping",
           "description": "Declarative mapping for translating universal mcp_servers into the harness's native MCP config (used by scion_harness.apply_mcp_servers_simple). Harnesses with bespoke MCP formats (e.g. OpenCode) leave this empty and translate themselves in provision.py."
+        },
+        "no_auth": {
+          "$ref": "#/$defs/harnessNoAuthConfig",
+          "description": "Behavior when an agent starts without credentials (NoAuth mode)."
         },
         "dialect": {
           "type": "object",
@@ -350,11 +350,11 @@
         "behavior": {
           "type": "string",
           "enum": ["drop-to-shell", "show-setup-instructions", "run-setup-wizard"],
-          "description": "How the container starts when no credentials are present."
+          "description": "What the harness should do when no credentials are provided."
         },
         "message": {
           "type": "string",
-          "description": "Message displayed to the user when the agent starts without credentials."
+          "description": "Message to display to the user in no-auth mode."
         }
       },
       "additionalProperties": false
@@ -547,13 +547,13 @@
         "type": { "type": "string" },
         "description": { "type": "string" },
         "target_suffix": { "type": "string" },
-        "field": { "type": "string" },
         "alternative_env_keys": {
           "type": "array",
           "items": { "type": "string" }
         },
         "skipped_when_gcp_service_account_assigned": { "type": "boolean" },
-        "required": { "type": "boolean" }
+        "required": { "type": "boolean" },
+        "field": { "type": "string" }
       },
       "additionalProperties": false
     },

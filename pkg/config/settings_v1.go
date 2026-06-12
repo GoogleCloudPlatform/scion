@@ -331,9 +331,14 @@ type V1PluginEntry struct {
 	// SelfManaged indicates the plugin manages its own process lifecycle.
 	// The Hub connects to the plugin's RPC server rather than starting it.
 	SelfManaged bool `json:"self_managed,omitempty" yaml:"self_managed,omitempty" koanf:"self_managed"`
-	// Address is the RPC address for self-managed plugins (e.g. "localhost:9090").
-	// Required when SelfManaged is true.
+	// Address is the network address for self-managed or gRPC plugins.
+	// Required when SelfManaged is true or Mode is "grpc".
 	Address string `json:"address,omitempty" yaml:"address,omitempty" koanf:"address"`
+	// Mode selects the plugin communication mode: "" or "plugin" (default go-plugin
+	// subprocess), "grpc" (standalone gRPC broker), "self-managed" (go-plugin RPC to
+	// an externally-managed process). When empty, falls back to SelfManaged for
+	// backward compatibility.
+	Mode string `json:"mode,omitempty" yaml:"mode,omitempty" koanf:"mode"`
 }
 
 // V1ServerHubConfig holds the Hub API server settings (when running scion-server).
@@ -715,7 +720,7 @@ type HarnessConfigEntry struct {
 	EnvTemplate      map[string]string                `json:"env_template,omitempty" yaml:"env_template,omitempty" koanf:"env_template"`
 	Capabilities     *api.HarnessAdvancedCapabilities `json:"capabilities,omitempty" yaml:"capabilities,omitempty" koanf:"capabilities"`
 	Auth             *HarnessAuthMetadata             `json:"auth,omitempty" yaml:"auth,omitempty" koanf:"auth"`
-	NoAuth           *HarnessNoAuthConfig             `json:"no_auth,omitempty" yaml:"no_auth,omitempty" koanf:"no_auth"`
+	NoAuthConfig     *HarnessNoAuthConfig             `json:"no_auth,omitempty" yaml:"no_auth,omitempty" koanf:"no_auth"`
 	MCP              *HarnessMCPConfig                `json:"mcp,omitempty" yaml:"mcp,omitempty" koanf:"mcp"`
 	Dialect          map[string]interface{}           `json:"dialect,omitempty" yaml:"dialect,omitempty" koanf:"dialect"`
 }
@@ -793,18 +798,10 @@ type HarnessAuthAutodetect struct {
 	Files map[string]string `json:"files,omitempty" yaml:"files,omitempty" koanf:"files"`
 }
 
-// HarnessNoAuthConfig defines what happens when an agent starts with
-// --no-auth (no credentials injected). The behavior field determines
-// how the container starts.
+// HarnessNoAuthConfig defines harness behavior when an agent starts without credentials.
 type HarnessNoAuthConfig struct {
-	// Behavior controls the container startup when no credentials are present.
-	// Supported values:
-	//   "drop-to-shell" — start the container but don't launch the harness CLI
-	//   "show-setup-instructions" — launch normally but display setup instructions
-	//   "run-setup-wizard" — execute a setup script before the main process
 	Behavior string `json:"behavior,omitempty" yaml:"behavior,omitempty" koanf:"behavior"`
-	// Message is displayed to the user when the agent starts without credentials.
-	Message string `json:"message,omitempty" yaml:"message,omitempty" koanf:"message"`
+	Message  string `json:"message,omitempty" yaml:"message,omitempty" koanf:"message"`
 }
 
 // HarnessMCPConfig is the declarative mapping that lets a harness's

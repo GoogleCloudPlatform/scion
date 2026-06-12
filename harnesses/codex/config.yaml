@@ -71,6 +71,12 @@ capabilities:
     sse: { support: "partial", reason: "Codex maps SSE to its single HTTP server type (url + http_headers)" }
     streamable_http: { support: "yes" }
     project_scope: { support: "no", reason: "Project-scoped MCP (.codex/mcp_servers.json) is not implemented yet; project entries are demoted to global" }
+no_auth:
+  behavior: drop-to-shell
+  message: |
+    This agent started without credentials.
+    Run your Codex authentication setup.
+    Then run: python3 /home/scion/.scion/harness/capture_auth.py
 auth:
   default_type: api-key
   types:
@@ -89,9 +95,3 @@ auth:
       OPENAI_API_KEY: api-key
     files:
       CODEX_AUTH: auth-file
-no_auth:
-  behavior: drop-to-shell
-  message: |
-    This agent started without credentials.
-    Set CODEX_API_KEY or OPENAI_API_KEY, or authenticate interactively.
-    Then capture credentials: python3 ~/.scion/harness/capture_auth.py

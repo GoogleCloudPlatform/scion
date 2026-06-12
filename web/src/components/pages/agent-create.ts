@@ -1180,6 +1180,7 @@ private selectBrokerForProject(): void {
               <sl-option value="oauth-token">OAuth Token (env var)</sl-option>
               <sl-option value="vertex-ai">Vertex Model Garden</sl-option>
               <sl-option value="auth-file">Harness credential file</sl-option>
+              <sl-option value="none">No Authentication</sl-option>
             </sl-select>
             <div class="hint">Override the authentication method for the harness.</div>
           </div>
