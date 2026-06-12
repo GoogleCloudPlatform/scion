@@ -2019,6 +2019,41 @@ type SkillVersion struct {
 	Created            time.Time      `json:"created"`
 }
 
+// SkillRegistry represents an external skill registry for federation.
+type SkillRegistry struct {
+	ID           string            `json:"id"`
+	Name         string            `json:"name"`
+	Endpoint     string            `json:"endpoint"`
+	Description  string            `json:"description,omitempty"`
+	Type         string            `json:"type"`
+	TrustLevel   string            `json:"trustLevel"`
+	AuthToken    string            `json:"-"`
+	ResolvePath  string            `json:"resolvePath,omitempty"`
+	PinnedHashes map[string]string `json:"-"`
+	Status       string            `json:"status"`
+	CreatedBy    string            `json:"createdBy,omitempty"`
+	Created      time.Time         `json:"created"`
+	Updated      time.Time         `json:"updated"`
+}
+
+// SkillRegistryStatus constants
+const (
+	SkillRegistryStatusActive   = "active"
+	SkillRegistryStatusDisabled = "disabled"
+)
+
+// SkillRegistryTrustLevel constants
+const (
+	SkillRegistryTrustTrusted = "trusted"
+	SkillRegistryTrustPinned  = "pinned"
+)
+
+// SkillRegistryType constants
+const (
+	SkillRegistryTypeHub = "hub"
+	SkillRegistryTypeGCP = "gcp"
+)
+
 // SkillScope constants
 const (
 	SkillScopeCore    = "core"

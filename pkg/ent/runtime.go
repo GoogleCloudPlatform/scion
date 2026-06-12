@@ -36,6 +36,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/schema"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/skill"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/skillregistry"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/skillversion"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/subscriptiontemplate"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/template"
@@ -900,6 +901,38 @@ func init() {
 	skillDescID := skillFields[0].Descriptor()
 	// skill.DefaultID holds the default value on creation for the id field.
 	skill.DefaultID = skillDescID.Default.(func() uuid.UUID)
+	skillregistryFields := schema.SkillRegistry{}.Fields()
+	_ = skillregistryFields
+	// skillregistryDescName is the schema descriptor for name field.
+	skillregistryDescName := skillregistryFields[1].Descriptor()
+	// skillregistry.NameValidator is a validator for the "name" field. It is called by the builders before save.
+	skillregistry.NameValidator = skillregistryDescName.Validators[0].(func(string) error)
+	// skillregistryDescEndpoint is the schema descriptor for endpoint field.
+	skillregistryDescEndpoint := skillregistryFields[2].Descriptor()
+	// skillregistry.EndpointValidator is a validator for the "endpoint" field. It is called by the builders before save.
+	skillregistry.EndpointValidator = skillregistryDescEndpoint.Validators[0].(func(string) error)
+	// skillregistryDescDescription is the schema descriptor for description field.
+	skillregistryDescDescription := skillregistryFields[3].Descriptor()
+	// skillregistry.DefaultDescription holds the default value on creation for the description field.
+	skillregistry.DefaultDescription = skillregistryDescDescription.Default.(string)
+	// skillregistryDescResolvePath is the schema descriptor for resolve_path field.
+	skillregistryDescResolvePath := skillregistryFields[7].Descriptor()
+	// skillregistry.DefaultResolvePath holds the default value on creation for the resolve_path field.
+	skillregistry.DefaultResolvePath = skillregistryDescResolvePath.Default.(string)
+	// skillregistryDescCreated is the schema descriptor for created field.
+	skillregistryDescCreated := skillregistryFields[11].Descriptor()
+	// skillregistry.DefaultCreated holds the default value on creation for the created field.
+	skillregistry.DefaultCreated = skillregistryDescCreated.Default.(func() time.Time)
+	// skillregistryDescUpdated is the schema descriptor for updated field.
+	skillregistryDescUpdated := skillregistryFields[12].Descriptor()
+	// skillregistry.DefaultUpdated holds the default value on creation for the updated field.
+	skillregistry.DefaultUpdated = skillregistryDescUpdated.Default.(func() time.Time)
+	// skillregistry.UpdateDefaultUpdated holds the default value on update for the updated field.
+	skillregistry.UpdateDefaultUpdated = skillregistryDescUpdated.UpdateDefault.(func() time.Time)
+	// skillregistryDescID is the schema descriptor for id field.
+	skillregistryDescID := skillregistryFields[0].Descriptor()
+	// skillregistry.DefaultID holds the default value on creation for the id field.
+	skillregistry.DefaultID = skillregistryDescID.Default.(func() uuid.UUID)
 	skillversionFields := schema.SkillVersion{}.Fields()
 	_ = skillversionFields
 	// skillversionDescSkillID is the schema descriptor for skill_id field.

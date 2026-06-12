@@ -96,6 +96,9 @@ type Secret func(*sql.Selector)
 // Skill is the predicate function for skill builders.
 type Skill func(*sql.Selector)
 
+// SkillRegistry is the predicate function for skillregistry builders.
+type SkillRegistry func(*sql.Selector)
+
 // SkillVersion is the predicate function for skillversion builders.
 type SkillVersion func(*sql.Selector)
 

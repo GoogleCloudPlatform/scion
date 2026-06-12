@@ -117,6 +117,9 @@ type Store interface {
 
 	// Skill operations (Skill Bank)
 	SkillStore
+
+	// Skill Registry operations (Hub-to-Hub Federation)
+	SkillRegistryStore
 }
 
 // AgentStore defines agent-related persistence operations.
@@ -1266,4 +1269,20 @@ type SkillFilter struct {
 	Status  string
 	Search  string
 	Tags    []string
+}
+
+// =============================================================================
+// Skill Registries (Hub-to-Hub Federation)
+// =============================================================================
+
+// SkillRegistryStore defines skill registry persistence operations.
+type SkillRegistryStore interface {
+	CreateSkillRegistry(ctx context.Context, registry *SkillRegistry) error
+	GetSkillRegistry(ctx context.Context, id string) (*SkillRegistry, error)
+	GetSkillRegistryByName(ctx context.Context, name string) (*SkillRegistry, error)
+	UpdateSkillRegistry(ctx context.Context, registry *SkillRegistry) error
+	DeleteSkillRegistry(ctx context.Context, id string) error
+	ListSkillRegistries(ctx context.Context, opts ListOptions) (*ListResult[SkillRegistry], error)
+	PinSkillHash(ctx context.Context, registryID string, uri string, hash string) error
+	GetPinnedHash(ctx context.Context, registryID string, uri string) (string, error)
 }

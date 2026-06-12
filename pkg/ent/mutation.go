@@ -43,6 +43,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/schema"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/skill"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/skillregistry"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/skillversion"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/subscriptiontemplate"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/template"
@@ -90,6 +91,7 @@ const (
 	TypeScheduledEvent           = "ScheduledEvent"
 	TypeSecret                   = "Secret"
 	TypeSkill                    = "Skill"
+	TypeSkillRegistry            = "SkillRegistry"
 	TypeSkillVersion             = "SkillVersion"
 	TypeSubscriptionTemplate     = "SubscriptionTemplate"
 	TypeTemplate                 = "Template"
@@ -31911,6 +31913,1030 @@ func (m *SkillMutation) ClearEdge(name string) error {
 // It returns an error if the edge is not defined in the schema.
 func (m *SkillMutation) ResetEdge(name string) error {
 	return fmt.Errorf("unknown Skill edge %s", name)
+}
+
+// SkillRegistryMutation represents an operation that mutates the SkillRegistry nodes in the graph.
+type SkillRegistryMutation struct {
+	config
+	op            Op
+	typ           string
+	id            *uuid.UUID
+	name          *string
+	endpoint      *string
+	description   *string
+	_type         *skillregistry.Type
+	trust_level   *skillregistry.TrustLevel
+	auth_token    *string
+	resolve_path  *string
+	pinned_hashes *string
+	status        *skillregistry.Status
+	created_by    *string
+	created       *time.Time
+	updated       *time.Time
+	clearedFields map[string]struct{}
+	done          bool
+	oldValue      func(context.Context) (*SkillRegistry, error)
+	predicates    []predicate.SkillRegistry
+}
+
+var _ ent.Mutation = (*SkillRegistryMutation)(nil)
+
+// skillregistryOption allows management of the mutation configuration using functional options.
+type skillregistryOption func(*SkillRegistryMutation)
+
+// newSkillRegistryMutation creates new mutation for the SkillRegistry entity.
+func newSkillRegistryMutation(c config, op Op, opts ...skillregistryOption) *SkillRegistryMutation {
+	m := &SkillRegistryMutation{
+		config:        c,
+		op:            op,
+		typ:           TypeSkillRegistry,
+		clearedFields: make(map[string]struct{}),
+	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
+}
+
+// withSkillRegistryID sets the ID field of the mutation.
+func withSkillRegistryID(id uuid.UUID) skillregistryOption {
+	return func(m *SkillRegistryMutation) {
+		var (
+			err   error
+			once  sync.Once
+			value *SkillRegistry
+		)
+		m.oldValue = func(ctx context.Context) (*SkillRegistry, error) {
+			once.Do(func() {
+				if m.done {
+					err = errors.New("querying old values post mutation is not allowed")
+				} else {
+					value, err = m.Client().SkillRegistry.Get(ctx, id)
+				}
+			})
+			return value, err
+		}
+		m.id = &id
+	}
+}
+
+// withSkillRegistry sets the old SkillRegistry of the mutation.
+func withSkillRegistry(node *SkillRegistry) skillregistryOption {
+	return func(m *SkillRegistryMutation) {
+		m.oldValue = func(context.Context) (*SkillRegistry, error) {
+			return node, nil
+		}
+		m.id = &node.ID
+	}
+}
+
+// Client returns a new `ent.Client` from the mutation. If the mutation was
+// executed in a transaction (ent.Tx), a transactional client is returned.
+func (m SkillRegistryMutation) Client() *Client {
+	client := &Client{config: m.config}
+	client.init()
+	return client
+}
+
+// Tx returns an `ent.Tx` for mutations that were executed in transactions;
+// it returns an error otherwise.
+func (m SkillRegistryMutation) Tx() (*Tx, error) {
+	if _, ok := m.driver.(*txDriver); !ok {
+		return nil, errors.New("ent: mutation is not running in a transaction")
+	}
+	tx := &Tx{config: m.config}
+	tx.init()
+	return tx, nil
+}
+
+// SetID sets the value of the id field. Note that this
+// operation is only accepted on creation of SkillRegistry entities.
+func (m *SkillRegistryMutation) SetID(id uuid.UUID) {
+	m.id = &id
+}
+
+// ID returns the ID value in the mutation. Note that the ID is only available
+// if it was provided to the builder or after it was returned from the database.
+func (m *SkillRegistryMutation) ID() (id uuid.UUID, exists bool) {
+	if m.id == nil {
+		return
+	}
+	return *m.id, true
+}
+
+// IDs queries the database and returns the entity ids that match the mutation's predicate.
+// That means, if the mutation is applied within a transaction with an isolation level such
+// as sql.LevelSerializable, the returned ids match the ids of the rows that will be updated
+// or updated by the mutation.
+func (m *SkillRegistryMutation) IDs(ctx context.Context) ([]uuid.UUID, error) {
+	switch {
+	case m.op.Is(OpUpdateOne | OpDeleteOne):
+		id, exists := m.ID()
+		if exists {
+			return []uuid.UUID{id}, nil
+		}
+		fallthrough
+	case m.op.Is(OpUpdate | OpDelete):
+		return m.Client().SkillRegistry.Query().Where(m.predicates...).IDs(ctx)
+	default:
+		return nil, fmt.Errorf("IDs is not allowed on %s operations", m.op)
+	}
+}
+
+// SetName sets the "name" field.
+func (m *SkillRegistryMutation) SetName(s string) {
+	m.name = &s
+}
+
+// Name returns the value of the "name" field in the mutation.
+func (m *SkillRegistryMutation) Name() (r string, exists bool) {
+	v := m.name
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldName returns the old "name" field's value of the SkillRegistry entity.
+// If the SkillRegistry object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *SkillRegistryMutation) OldName(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldName is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldName requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldName: %w", err)
+	}
+	return oldValue.Name, nil
+}
+
+// ResetName resets all changes to the "name" field.
+func (m *SkillRegistryMutation) ResetName() {
+	m.name = nil
+}
+
+// SetEndpoint sets the "endpoint" field.
+func (m *SkillRegistryMutation) SetEndpoint(s string) {
+	m.endpoint = &s
+}
+
+// Endpoint returns the value of the "endpoint" field in the mutation.
+func (m *SkillRegistryMutation) Endpoint() (r string, exists bool) {
+	v := m.endpoint
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldEndpoint returns the old "endpoint" field's value of the SkillRegistry entity.
+// If the SkillRegistry object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *SkillRegistryMutation) OldEndpoint(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldEndpoint is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldEndpoint requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldEndpoint: %w", err)
+	}
+	return oldValue.Endpoint, nil
+}
+
+// ResetEndpoint resets all changes to the "endpoint" field.
+func (m *SkillRegistryMutation) ResetEndpoint() {
+	m.endpoint = nil
+}
+
+// SetDescription sets the "description" field.
+func (m *SkillRegistryMutation) SetDescription(s string) {
+	m.description = &s
+}
+
+// Description returns the value of the "description" field in the mutation.
+func (m *SkillRegistryMutation) Description() (r string, exists bool) {
+	v := m.description
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldDescription returns the old "description" field's value of the SkillRegistry entity.
+// If the SkillRegistry object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *SkillRegistryMutation) OldDescription(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldDescription is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldDescription requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldDescription: %w", err)
+	}
+	return oldValue.Description, nil
+}
+
+// ClearDescription clears the value of the "description" field.
+func (m *SkillRegistryMutation) ClearDescription() {
+	m.description = nil
+	m.clearedFields[skillregistry.FieldDescription] = struct{}{}
+}
+
+// DescriptionCleared returns if the "description" field was cleared in this mutation.
+func (m *SkillRegistryMutation) DescriptionCleared() bool {
+	_, ok := m.clearedFields[skillregistry.FieldDescription]
+	return ok
+}
+
+// ResetDescription resets all changes to the "description" field.
+func (m *SkillRegistryMutation) ResetDescription() {
+	m.description = nil
+	delete(m.clearedFields, skillregistry.FieldDescription)
+}
+
+// SetType sets the "type" field.
+func (m *SkillRegistryMutation) SetType(s skillregistry.Type) {
+	m._type = &s
+}
+
+// GetType returns the value of the "type" field in the mutation.
+func (m *SkillRegistryMutation) GetType() (r skillregistry.Type, exists bool) {
+	v := m._type
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldType returns the old "type" field's value of the SkillRegistry entity.
+// If the SkillRegistry object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *SkillRegistryMutation) OldType(ctx context.Context) (v skillregistry.Type, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldType is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldType requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldType: %w", err)
+	}
+	return oldValue.Type, nil
+}
+
+// ResetType resets all changes to the "type" field.
+func (m *SkillRegistryMutation) ResetType() {
+	m._type = nil
+}
+
+// SetTrustLevel sets the "trust_level" field.
+func (m *SkillRegistryMutation) SetTrustLevel(sl skillregistry.TrustLevel) {
+	m.trust_level = &sl
+}
+
+// TrustLevel returns the value of the "trust_level" field in the mutation.
+func (m *SkillRegistryMutation) TrustLevel() (r skillregistry.TrustLevel, exists bool) {
+	v := m.trust_level
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldTrustLevel returns the old "trust_level" field's value of the SkillRegistry entity.
+// If the SkillRegistry object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *SkillRegistryMutation) OldTrustLevel(ctx context.Context) (v skillregistry.TrustLevel, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldTrustLevel is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldTrustLevel requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldTrustLevel: %w", err)
+	}
+	return oldValue.TrustLevel, nil
+}
+
+// ResetTrustLevel resets all changes to the "trust_level" field.
+func (m *SkillRegistryMutation) ResetTrustLevel() {
+	m.trust_level = nil
+}
+
+// SetAuthToken sets the "auth_token" field.
+func (m *SkillRegistryMutation) SetAuthToken(s string) {
+	m.auth_token = &s
+}
+
+// AuthToken returns the value of the "auth_token" field in the mutation.
+func (m *SkillRegistryMutation) AuthToken() (r string, exists bool) {
+	v := m.auth_token
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldAuthToken returns the old "auth_token" field's value of the SkillRegistry entity.
+// If the SkillRegistry object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *SkillRegistryMutation) OldAuthToken(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldAuthToken is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldAuthToken requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldAuthToken: %w", err)
+	}
+	return oldValue.AuthToken, nil
+}
+
+// ClearAuthToken clears the value of the "auth_token" field.
+func (m *SkillRegistryMutation) ClearAuthToken() {
+	m.auth_token = nil
+	m.clearedFields[skillregistry.FieldAuthToken] = struct{}{}
+}
+
+// AuthTokenCleared returns if the "auth_token" field was cleared in this mutation.
+func (m *SkillRegistryMutation) AuthTokenCleared() bool {
+	_, ok := m.clearedFields[skillregistry.FieldAuthToken]
+	return ok
+}
+
+// ResetAuthToken resets all changes to the "auth_token" field.
+func (m *SkillRegistryMutation) ResetAuthToken() {
+	m.auth_token = nil
+	delete(m.clearedFields, skillregistry.FieldAuthToken)
+}
+
+// SetResolvePath sets the "resolve_path" field.
+func (m *SkillRegistryMutation) SetResolvePath(s string) {
+	m.resolve_path = &s
+}
+
+// ResolvePath returns the value of the "resolve_path" field in the mutation.
+func (m *SkillRegistryMutation) ResolvePath() (r string, exists bool) {
+	v := m.resolve_path
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldResolvePath returns the old "resolve_path" field's value of the SkillRegistry entity.
+// If the SkillRegistry object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *SkillRegistryMutation) OldResolvePath(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldResolvePath is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldResolvePath requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldResolvePath: %w", err)
+	}
+	return oldValue.ResolvePath, nil
+}
+
+// ClearResolvePath clears the value of the "resolve_path" field.
+func (m *SkillRegistryMutation) ClearResolvePath() {
+	m.resolve_path = nil
+	m.clearedFields[skillregistry.FieldResolvePath] = struct{}{}
+}
+
+// ResolvePathCleared returns if the "resolve_path" field was cleared in this mutation.
+func (m *SkillRegistryMutation) ResolvePathCleared() bool {
+	_, ok := m.clearedFields[skillregistry.FieldResolvePath]
+	return ok
+}
+
+// ResetResolvePath resets all changes to the "resolve_path" field.
+func (m *SkillRegistryMutation) ResetResolvePath() {
+	m.resolve_path = nil
+	delete(m.clearedFields, skillregistry.FieldResolvePath)
+}
+
+// SetPinnedHashes sets the "pinned_hashes" field.
+func (m *SkillRegistryMutation) SetPinnedHashes(s string) {
+	m.pinned_hashes = &s
+}
+
+// PinnedHashes returns the value of the "pinned_hashes" field in the mutation.
+func (m *SkillRegistryMutation) PinnedHashes() (r string, exists bool) {
+	v := m.pinned_hashes
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldPinnedHashes returns the old "pinned_hashes" field's value of the SkillRegistry entity.
+// If the SkillRegistry object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *SkillRegistryMutation) OldPinnedHashes(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldPinnedHashes is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldPinnedHashes requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldPinnedHashes: %w", err)
+	}
+	return oldValue.PinnedHashes, nil
+}
+
+// ClearPinnedHashes clears the value of the "pinned_hashes" field.
+func (m *SkillRegistryMutation) ClearPinnedHashes() {
+	m.pinned_hashes = nil
+	m.clearedFields[skillregistry.FieldPinnedHashes] = struct{}{}
+}
+
+// PinnedHashesCleared returns if the "pinned_hashes" field was cleared in this mutation.
+func (m *SkillRegistryMutation) PinnedHashesCleared() bool {
+	_, ok := m.clearedFields[skillregistry.FieldPinnedHashes]
+	return ok
+}
+
+// ResetPinnedHashes resets all changes to the "pinned_hashes" field.
+func (m *SkillRegistryMutation) ResetPinnedHashes() {
+	m.pinned_hashes = nil
+	delete(m.clearedFields, skillregistry.FieldPinnedHashes)
+}
+
+// SetStatus sets the "status" field.
+func (m *SkillRegistryMutation) SetStatus(s skillregistry.Status) {
+	m.status = &s
+}
+
+// Status returns the value of the "status" field in the mutation.
+func (m *SkillRegistryMutation) Status() (r skillregistry.Status, exists bool) {
+	v := m.status
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldStatus returns the old "status" field's value of the SkillRegistry entity.
+// If the SkillRegistry object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *SkillRegistryMutation) OldStatus(ctx context.Context) (v skillregistry.Status, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldStatus is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldStatus requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldStatus: %w", err)
+	}
+	return oldValue.Status, nil
+}
+
+// ResetStatus resets all changes to the "status" field.
+func (m *SkillRegistryMutation) ResetStatus() {
+	m.status = nil
+}
+
+// SetCreatedBy sets the "created_by" field.
+func (m *SkillRegistryMutation) SetCreatedBy(s string) {
+	m.created_by = &s
+}
+
+// CreatedBy returns the value of the "created_by" field in the mutation.
+func (m *SkillRegistryMutation) CreatedBy() (r string, exists bool) {
+	v := m.created_by
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCreatedBy returns the old "created_by" field's value of the SkillRegistry entity.
+// If the SkillRegistry object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *SkillRegistryMutation) OldCreatedBy(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCreatedBy is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCreatedBy requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCreatedBy: %w", err)
+	}
+	return oldValue.CreatedBy, nil
+}
+
+// ClearCreatedBy clears the value of the "created_by" field.
+func (m *SkillRegistryMutation) ClearCreatedBy() {
+	m.created_by = nil
+	m.clearedFields[skillregistry.FieldCreatedBy] = struct{}{}
+}
+
+// CreatedByCleared returns if the "created_by" field was cleared in this mutation.
+func (m *SkillRegistryMutation) CreatedByCleared() bool {
+	_, ok := m.clearedFields[skillregistry.FieldCreatedBy]
+	return ok
+}
+
+// ResetCreatedBy resets all changes to the "created_by" field.
+func (m *SkillRegistryMutation) ResetCreatedBy() {
+	m.created_by = nil
+	delete(m.clearedFields, skillregistry.FieldCreatedBy)
+}
+
+// SetCreated sets the "created" field.
+func (m *SkillRegistryMutation) SetCreated(t time.Time) {
+	m.created = &t
+}
+
+// Created returns the value of the "created" field in the mutation.
+func (m *SkillRegistryMutation) Created() (r time.Time, exists bool) {
+	v := m.created
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCreated returns the old "created" field's value of the SkillRegistry entity.
+// If the SkillRegistry object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *SkillRegistryMutation) OldCreated(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCreated is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCreated requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCreated: %w", err)
+	}
+	return oldValue.Created, nil
+}
+
+// ResetCreated resets all changes to the "created" field.
+func (m *SkillRegistryMutation) ResetCreated() {
+	m.created = nil
+}
+
+// SetUpdated sets the "updated" field.
+func (m *SkillRegistryMutation) SetUpdated(t time.Time) {
+	m.updated = &t
+}
+
+// Updated returns the value of the "updated" field in the mutation.
+func (m *SkillRegistryMutation) Updated() (r time.Time, exists bool) {
+	v := m.updated
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldUpdated returns the old "updated" field's value of the SkillRegistry entity.
+// If the SkillRegistry object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *SkillRegistryMutation) OldUpdated(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldUpdated is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldUpdated requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldUpdated: %w", err)
+	}
+	return oldValue.Updated, nil
+}
+
+// ResetUpdated resets all changes to the "updated" field.
+func (m *SkillRegistryMutation) ResetUpdated() {
+	m.updated = nil
+}
+
+// Where appends a list predicates to the SkillRegistryMutation builder.
+func (m *SkillRegistryMutation) Where(ps ...predicate.SkillRegistry) {
+	m.predicates = append(m.predicates, ps...)
+}
+
+// WhereP appends storage-level predicates to the SkillRegistryMutation builder. Using this method,
+// users can use type-assertion to append predicates that do not depend on any generated package.
+func (m *SkillRegistryMutation) WhereP(ps ...func(*sql.Selector)) {
+	p := make([]predicate.SkillRegistry, len(ps))
+	for i := range ps {
+		p[i] = ps[i]
+	}
+	m.Where(p...)
+}
+
+// Op returns the operation name.
+func (m *SkillRegistryMutation) Op() Op {
+	return m.op
+}
+
+// SetOp allows setting the mutation operation.
+func (m *SkillRegistryMutation) SetOp(op Op) {
+	m.op = op
+}
+
+// Type returns the node type of this mutation (SkillRegistry).
+func (m *SkillRegistryMutation) Type() string {
+	return m.typ
+}
+
+// Fields returns all fields that were changed during this mutation. Note that in
+// order to get all numeric fields that were incremented/decremented, call
+// AddedFields().
+func (m *SkillRegistryMutation) Fields() []string {
+	fields := make([]string, 0, 12)
+	if m.name != nil {
+		fields = append(fields, skillregistry.FieldName)
+	}
+	if m.endpoint != nil {
+		fields = append(fields, skillregistry.FieldEndpoint)
+	}
+	if m.description != nil {
+		fields = append(fields, skillregistry.FieldDescription)
+	}
+	if m._type != nil {
+		fields = append(fields, skillregistry.FieldType)
+	}
+	if m.trust_level != nil {
+		fields = append(fields, skillregistry.FieldTrustLevel)
+	}
+	if m.auth_token != nil {
+		fields = append(fields, skillregistry.FieldAuthToken)
+	}
+	if m.resolve_path != nil {
+		fields = append(fields, skillregistry.FieldResolvePath)
+	}
+	if m.pinned_hashes != nil {
+		fields = append(fields, skillregistry.FieldPinnedHashes)
+	}
+	if m.status != nil {
+		fields = append(fields, skillregistry.FieldStatus)
+	}
+	if m.created_by != nil {
+		fields = append(fields, skillregistry.FieldCreatedBy)
+	}
+	if m.created != nil {
+		fields = append(fields, skillregistry.FieldCreated)
+	}
+	if m.updated != nil {
+		fields = append(fields, skillregistry.FieldUpdated)
+	}
+	return fields
+}
+
+// Field returns the value of a field with the given name. The second boolean
+// return value indicates that this field was not set, or was not defined in the
+// schema.
+func (m *SkillRegistryMutation) Field(name string) (ent.Value, bool) {
+	switch name {
+	case skillregistry.FieldName:
+		return m.Name()
+	case skillregistry.FieldEndpoint:
+		return m.Endpoint()
+	case skillregistry.FieldDescription:
+		return m.Description()
+	case skillregistry.FieldType:
+		return m.GetType()
+	case skillregistry.FieldTrustLevel:
+		return m.TrustLevel()
+	case skillregistry.FieldAuthToken:
+		return m.AuthToken()
+	case skillregistry.FieldResolvePath:
+		return m.ResolvePath()
+	case skillregistry.FieldPinnedHashes:
+		return m.PinnedHashes()
+	case skillregistry.FieldStatus:
+		return m.Status()
+	case skillregistry.FieldCreatedBy:
+		return m.CreatedBy()
+	case skillregistry.FieldCreated:
+		return m.Created()
+	case skillregistry.FieldUpdated:
+		return m.Updated()
+	}
+	return nil, false
+}
+
+// OldField returns the old value of the field from the database. An error is
+// returned if the mutation operation is not UpdateOne, or the query to the
+// database failed.
+func (m *SkillRegistryMutation) OldField(ctx context.Context, name string) (ent.Value, error) {
+	switch name {
+	case skillregistry.FieldName:
+		return m.OldName(ctx)
+	case skillregistry.FieldEndpoint:
+		return m.OldEndpoint(ctx)
+	case skillregistry.FieldDescription:
+		return m.OldDescription(ctx)
+	case skillregistry.FieldType:
+		return m.OldType(ctx)
+	case skillregistry.FieldTrustLevel:
+		return m.OldTrustLevel(ctx)
+	case skillregistry.FieldAuthToken:
+		return m.OldAuthToken(ctx)
+	case skillregistry.FieldResolvePath:
+		return m.OldResolvePath(ctx)
+	case skillregistry.FieldPinnedHashes:
+		return m.OldPinnedHashes(ctx)
+	case skillregistry.FieldStatus:
+		return m.OldStatus(ctx)
+	case skillregistry.FieldCreatedBy:
+		return m.OldCreatedBy(ctx)
+	case skillregistry.FieldCreated:
+		return m.OldCreated(ctx)
+	case skillregistry.FieldUpdated:
+		return m.OldUpdated(ctx)
+	}
+	return nil, fmt.Errorf("unknown SkillRegistry field %s", name)
+}
+
+// SetField sets the value of a field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *SkillRegistryMutation) SetField(name string, value ent.Value) error {
+	switch name {
+	case skillregistry.FieldName:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetName(v)
+		return nil
+	case skillregistry.FieldEndpoint:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetEndpoint(v)
+		return nil
+	case skillregistry.FieldDescription:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetDescription(v)
+		return nil
+	case skillregistry.FieldType:
+		v, ok := value.(skillregistry.Type)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetType(v)
+		return nil
+	case skillregistry.FieldTrustLevel:
+		v, ok := value.(skillregistry.TrustLevel)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetTrustLevel(v)
+		return nil
+	case skillregistry.FieldAuthToken:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetAuthToken(v)
+		return nil
+	case skillregistry.FieldResolvePath:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetResolvePath(v)
+		return nil
+	case skillregistry.FieldPinnedHashes:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetPinnedHashes(v)
+		return nil
+	case skillregistry.FieldStatus:
+		v, ok := value.(skillregistry.Status)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetStatus(v)
+		return nil
+	case skillregistry.FieldCreatedBy:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCreatedBy(v)
+		return nil
+	case skillregistry.FieldCreated:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCreated(v)
+		return nil
+	case skillregistry.FieldUpdated:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetUpdated(v)
+		return nil
+	}
+	return fmt.Errorf("unknown SkillRegistry field %s", name)
+}
+
+// AddedFields returns all numeric fields that were incremented/decremented during
+// this mutation.
+func (m *SkillRegistryMutation) AddedFields() []string {
+	return nil
+}
+
+// AddedField returns the numeric value that was incremented/decremented on a field
+// with the given name. The second boolean return value indicates that this field
+// was not set, or was not defined in the schema.
+func (m *SkillRegistryMutation) AddedField(name string) (ent.Value, bool) {
+	return nil, false
+}
+
+// AddField adds the value to the field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *SkillRegistryMutation) AddField(name string, value ent.Value) error {
+	switch name {
+	}
+	return fmt.Errorf("unknown SkillRegistry numeric field %s", name)
+}
+
+// ClearedFields returns all nullable fields that were cleared during this
+// mutation.
+func (m *SkillRegistryMutation) ClearedFields() []string {
+	var fields []string
+	if m.FieldCleared(skillregistry.FieldDescription) {
+		fields = append(fields, skillregistry.FieldDescription)
+	}
+	if m.FieldCleared(skillregistry.FieldAuthToken) {
+		fields = append(fields, skillregistry.FieldAuthToken)
+	}
+	if m.FieldCleared(skillregistry.FieldResolvePath) {
+		fields = append(fields, skillregistry.FieldResolvePath)
+	}
+	if m.FieldCleared(skillregistry.FieldPinnedHashes) {
+		fields = append(fields, skillregistry.FieldPinnedHashes)
+	}
+	if m.FieldCleared(skillregistry.FieldCreatedBy) {
+		fields = append(fields, skillregistry.FieldCreatedBy)
+	}
+	return fields
+}
+
+// FieldCleared returns a boolean indicating if a field with the given name was
+// cleared in this mutation.
+func (m *SkillRegistryMutation) FieldCleared(name string) bool {
+	_, ok := m.clearedFields[name]
+	return ok
+}
+
+// ClearField clears the value of the field with the given name. It returns an
+// error if the field is not defined in the schema.
+func (m *SkillRegistryMutation) ClearField(name string) error {
+	switch name {
+	case skillregistry.FieldDescription:
+		m.ClearDescription()
+		return nil
+	case skillregistry.FieldAuthToken:
+		m.ClearAuthToken()
+		return nil
+	case skillregistry.FieldResolvePath:
+		m.ClearResolvePath()
+		return nil
+	case skillregistry.FieldPinnedHashes:
+		m.ClearPinnedHashes()
+		return nil
+	case skillregistry.FieldCreatedBy:
+		m.ClearCreatedBy()
+		return nil
+	}
+	return fmt.Errorf("unknown SkillRegistry nullable field %s", name)
+}
+
+// ResetField resets all changes in the mutation for the field with the given name.
+// It returns an error if the field is not defined in the schema.
+func (m *SkillRegistryMutation) ResetField(name string) error {
+	switch name {
+	case skillregistry.FieldName:
+		m.ResetName()
+		return nil
+	case skillregistry.FieldEndpoint:
+		m.ResetEndpoint()
+		return nil
+	case skillregistry.FieldDescription:
+		m.ResetDescription()
+		return nil
+	case skillregistry.FieldType:
+		m.ResetType()
+		return nil
+	case skillregistry.FieldTrustLevel:
+		m.ResetTrustLevel()
+		return nil
+	case skillregistry.FieldAuthToken:
+		m.ResetAuthToken()
+		return nil
+	case skillregistry.FieldResolvePath:
+		m.ResetResolvePath()
+		return nil
+	case skillregistry.FieldPinnedHashes:
+		m.ResetPinnedHashes()
+		return nil
+	case skillregistry.FieldStatus:
+		m.ResetStatus()
+		return nil
+	case skillregistry.FieldCreatedBy:
+		m.ResetCreatedBy()
+		return nil
+	case skillregistry.FieldCreated:
+		m.ResetCreated()
+		return nil
+	case skillregistry.FieldUpdated:
+		m.ResetUpdated()
+		return nil
+	}
+	return fmt.Errorf("unknown SkillRegistry field %s", name)
+}
+
+// AddedEdges returns all edge names that were set/added in this mutation.
+func (m *SkillRegistryMutation) AddedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// AddedIDs returns all IDs (to other nodes) that were added for the given edge
+// name in this mutation.
+func (m *SkillRegistryMutation) AddedIDs(name string) []ent.Value {
+	return nil
+}
+
+// RemovedEdges returns all edge names that were removed in this mutation.
+func (m *SkillRegistryMutation) RemovedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// RemovedIDs returns all IDs (to other nodes) that were removed for the edge with
+// the given name in this mutation.
+func (m *SkillRegistryMutation) RemovedIDs(name string) []ent.Value {
+	return nil
+}
+
+// ClearedEdges returns all edge names that were cleared in this mutation.
+func (m *SkillRegistryMutation) ClearedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// EdgeCleared returns a boolean which indicates if the edge with the given name
+// was cleared in this mutation.
+func (m *SkillRegistryMutation) EdgeCleared(name string) bool {
+	return false
+}
+
+// ClearEdge clears the value of the edge with the given name. It returns an error
+// if that edge is not defined in the schema.
+func (m *SkillRegistryMutation) ClearEdge(name string) error {
+	return fmt.Errorf("unknown SkillRegistry unique edge %s", name)
+}
+
+// ResetEdge resets all changes to the edge with the given name in this mutation.
+// It returns an error if the edge is not defined in the schema.
+func (m *SkillRegistryMutation) ResetEdge(name string) error {
+	return fmt.Errorf("unknown SkillRegistry edge %s", name)
 }
 
 // SkillVersionMutation represents an operation that mutates the SkillVersion nodes in the graph.

@@ -974,6 +974,40 @@ var (
 			},
 		},
 	}
+	// SkillRegistriesColumns holds the columns for the "skill_registries" table.
+	SkillRegistriesColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "name", Type: field.TypeString, Unique: true},
+		{Name: "endpoint", Type: field.TypeString},
+		{Name: "description", Type: field.TypeString, Nullable: true, Default: ""},
+		{Name: "type", Type: field.TypeEnum, Enums: []string{"hub", "gcp"}, Default: "hub"},
+		{Name: "trust_level", Type: field.TypeEnum, Enums: []string{"trusted", "pinned"}, Default: "pinned"},
+		{Name: "auth_token", Type: field.TypeString, Nullable: true},
+		{Name: "resolve_path", Type: field.TypeString, Nullable: true, Default: "/api/v1/skills/resolve"},
+		{Name: "pinned_hashes", Type: field.TypeString, Nullable: true},
+		{Name: "status", Type: field.TypeEnum, Enums: []string{"active", "disabled"}, Default: "active"},
+		{Name: "created_by", Type: field.TypeString, Nullable: true},
+		{Name: "created", Type: field.TypeTime},
+		{Name: "updated", Type: field.TypeTime},
+	}
+	// SkillRegistriesTable holds the schema information for the "skill_registries" table.
+	SkillRegistriesTable = &schema.Table{
+		Name:       "skill_registries",
+		Columns:    SkillRegistriesColumns,
+		PrimaryKey: []*schema.Column{SkillRegistriesColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "skillregistry_name",
+				Unique:  true,
+				Columns: []*schema.Column{SkillRegistriesColumns[1]},
+			},
+			{
+				Name:    "skillregistry_status",
+				Unique:  false,
+				Columns: []*schema.Column{SkillRegistriesColumns[9]},
+			},
+		},
+	}
 	// SkillVersionsColumns holds the columns for the "skill_versions" table.
 	SkillVersionsColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeUUID},
@@ -1199,6 +1233,7 @@ var (
 		ScheduledEventsTable,
 		SecretsTable,
 		SkillsTable,
+		SkillRegistriesTable,
 		SkillVersionsTable,
 		SubscriptionTemplatesTable,
 		TemplatesTable,
@@ -1289,6 +1324,9 @@ func init() {
 	}
 	SkillsTable.Annotation = &entsql.Annotation{
 		Table: "skills",
+	}
+	SkillRegistriesTable.Annotation = &entsql.Annotation{
+		Table: "skill_registries",
 	}
 	SkillVersionsTable.Annotation = &entsql.Annotation{
 		Table: "skill_versions",
