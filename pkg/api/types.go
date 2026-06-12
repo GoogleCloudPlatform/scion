@@ -502,9 +502,11 @@ type AuthConfig struct {
 	OAuthCreds           string
 
 	// Anthropic auth
-	AnthropicAPIKey  string
-	ClaudeOAuthToken string // CLAUDE_CODE_OAUTH_TOKEN (long-lived, from `claude setup-token`)
-	ClaudeAuthFile   string // ~/.claude/.credentials.json path (rotating refresh-token store)
+	AnthropicAPIKey   string
+	AnthropicAuthToken string // ANTHROPIC_AUTH_TOKEN (alias used by LLM proxies)
+	AnthropicBaseURL   string // ANTHROPIC_BASE_URL (custom API endpoint, e.g. LiteLLM proxy)
+	ClaudeOAuthToken  string // CLAUDE_CODE_OAUTH_TOKEN (long-lived, from `claude setup-token`)
+	ClaudeAuthFile    string // ~/.claude/.credentials.json path (rotating refresh-token store)
 
 	// OpenAI/Codex auth
 	OpenAIAPIKey     string

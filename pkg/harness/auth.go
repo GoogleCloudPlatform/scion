@@ -56,12 +56,14 @@ func GatherAuthWithEnv(env map[string]string, localSources bool) api.AuthConfig 
 
 	auth := api.AuthConfig{
 		// Env-var sourced fields
-		GeminiAPIKey:     lookup("GEMINI_API_KEY"),
-		GoogleAPIKey:     lookup("GOOGLE_API_KEY"),
-		AnthropicAPIKey:  lookup("ANTHROPIC_API_KEY"),
-		ClaudeOAuthToken: lookup("CLAUDE_CODE_OAUTH_TOKEN"),
-		OpenAIAPIKey:     lookup("OPENAI_API_KEY"),
-		CodexAPIKey:      lookup("CODEX_API_KEY"),
+		GeminiAPIKey:       lookup("GEMINI_API_KEY"),
+		GoogleAPIKey:       lookup("GOOGLE_API_KEY"),
+		AnthropicAPIKey:    lookup("ANTHROPIC_API_KEY"),
+		AnthropicAuthToken: lookup("ANTHROPIC_AUTH_TOKEN"),
+		AnthropicBaseURL:   lookup("ANTHROPIC_BASE_URL"),
+		ClaudeOAuthToken:   lookup("CLAUDE_CODE_OAUTH_TOKEN"),
+		OpenAIAPIKey:       lookup("OPENAI_API_KEY"),
+		CodexAPIKey:        lookup("CODEX_API_KEY"),
 		GoogleCloudProject: util.FirstNonEmpty(
 			lookup("GOOGLE_CLOUD_PROJECT"),
 			lookup("GCP_PROJECT"),
@@ -366,6 +368,9 @@ func DetectAuthTypeFromEnvVars(harnessName string, envKeys map[string]struct{}) 
 
 	switch harnessName {
 	case "claude":
+		if _, ok := envKeys["ANTHROPIC_BASE_URL"]; ok {
+			return "llm-gateway"
+		}
 		if _, ok := envKeys["ANTHROPIC_API_KEY"]; ok {
 			return ""
 		}
@@ -429,6 +434,8 @@ func RequiredAuthEnvKeys(harnessName, authSelectedType string) [][]string {
 			return nil
 		case "vertex-ai":
 			return [][]string{{"GOOGLE_CLOUD_PROJECT"}, {"GOOGLE_CLOUD_REGION", "CLOUD_ML_REGION", "GOOGLE_CLOUD_LOCATION"}}
+		case "llm-gateway":
+			return [][]string{{"ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY"}, {"ANTHROPIC_BASE_URL"}}
 		}
 	case "gemini":
 		switch effectiveType {

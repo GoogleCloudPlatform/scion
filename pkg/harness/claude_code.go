@@ -57,6 +57,7 @@ func (c *ClaudeCode) AdvancedCapabilities() api.HarnessAdvancedCapabilities {
 			AuthFile:   api.CapabilityField{Support: api.SupportYes},
 			OAuthToken: api.CapabilityField{Support: api.SupportYes},
 			VertexAI:   api.CapabilityField{Support: api.SupportYes},
+			LLMGateway: api.CapabilityField{Support: api.SupportYes},
 		},
 		Resume: api.CapabilityField{Support: api.SupportYes},
 	}
@@ -138,6 +139,11 @@ func (c *ClaudeCode) Provision(ctx context.Context, agentName, agentDir, agentHo
 			"CLAUDE_CODE_USE_VERTEX":      "1",
 			"ANTHROPIC_VERTEX_PROJECT_ID": "${GOOGLE_CLOUD_PROJECT}",
 			"CLOUD_ML_REGION":             "${GOOGLE_CLOUD_REGION}",
+		}
+	case "llm-gateway":
+		envUpdates = map[string]string{
+			"ANTHROPIC_AUTH_TOKEN": "${ANTHROPIC_AUTH_TOKEN}",
+			"ANTHROPIC_BASE_URL":   "${ANTHROPIC_BASE_URL}",
 		}
 	}
 
@@ -242,10 +248,15 @@ func (c *ClaudeCode) provisionClaudeJSON(ctx context.Context, agentHome, agentWo
 // api-key auth. This pre-approves the API key so Claude Code does not prompt
 // for confirmation.
 func (c *ClaudeCode) ApplyAuthSettings(agentHome string, resolved *api.ResolvedAuth) error {
-	if resolved.Method != "api-key" {
+	var apiKey string
+	switch resolved.Method {
+	case "api-key":
+		apiKey = resolved.EnvVars["ANTHROPIC_API_KEY"]
+	case "llm-gateway":
+		apiKey = resolved.EnvVars["ANTHROPIC_AUTH_TOKEN"]
+	default:
 		return nil
 	}
-	apiKey := resolved.EnvVars["ANTHROPIC_API_KEY"]
 	if apiKey == "" {
 		return nil
 	}
@@ -376,12 +387,48 @@ func (c *ClaudeCode) ResolveAuth(auth api.AuthConfig) (*api.ResolvedAuth, error)
 				return nil, fmt.Errorf("claude: auth type %q selected but GOOGLE_CLOUD_PROJECT and/or GOOGLE_CLOUD_REGION not set", auth.SelectedType)
 			}
 			return c.resolveVertexAI(auth), nil
+		case "llm-gateway":
+			token := auth.AnthropicAuthToken
+			if token == "" {
+				token = auth.AnthropicAPIKey
+			}
+			if token == "" {
+				return nil, fmt.Errorf("claude: auth type %q selected but no token found; set ANTHROPIC_AUTH_TOKEN or ANTHROPIC_API_KEY", auth.SelectedType)
+			}
+			if auth.AnthropicBaseURL == "" {
+				return nil, fmt.Errorf("claude: auth type %q selected but ANTHROPIC_BASE_URL is not set", auth.SelectedType)
+			}
+			return &api.ResolvedAuth{
+				Method: "llm-gateway",
+				EnvVars: map[string]string{
+					"ANTHROPIC_AUTH_TOKEN": token,
+					"ANTHROPIC_BASE_URL":   auth.AnthropicBaseURL,
+				},
+			}, nil
 		default:
-			return nil, fmt.Errorf("claude: unknown auth type %q; valid types are: api-key, oauth-token, auth-file, vertex-ai", auth.SelectedType)
+			return nil, fmt.Errorf("claude: unknown auth type %q; valid types are: api-key, oauth-token, auth-file, vertex-ai, llm-gateway", auth.SelectedType)
 		}
 	}
 
-	// Auto-detect preference order: API key → OAuth token → credentials file → Vertex AI → error
+	// Auto-detect preference order: LLM Gateway → API key → OAuth token → credentials file → Vertex AI → error
+
+	// 0. LLM proxy (ANTHROPIC_BASE_URL + (ANTHROPIC_AUTH_TOKEN or ANTHROPIC_API_KEY))
+	if auth.AnthropicBaseURL != "" {
+		token := auth.AnthropicAuthToken
+		if token == "" {
+			token = auth.AnthropicAPIKey
+		}
+		if token == "" {
+			return nil, fmt.Errorf("claude: ANTHROPIC_BASE_URL is set but no token found; set ANTHROPIC_AUTH_TOKEN or ANTHROPIC_API_KEY")
+		}
+		return &api.ResolvedAuth{
+			Method: "llm-gateway",
+			EnvVars: map[string]string{
+				"ANTHROPIC_AUTH_TOKEN": token,
+				"ANTHROPIC_BASE_URL":   auth.AnthropicBaseURL,
+			},
+		}, nil
+	}
 
 	// 1. Anthropic API key (direct)
 	if auth.AnthropicAPIKey != "" {
@@ -424,7 +471,7 @@ func (c *ClaudeCode) ResolveAuth(auth api.AuthConfig) (*api.ResolvedAuth, error)
 		return c.resolveVertexAI(auth), nil
 	}
 
-	return nil, fmt.Errorf("claude: no valid auth method found; set ANTHROPIC_API_KEY for direct API access, CLAUDE_CODE_OAUTH_TOKEN (from `claude setup-token`) or ~/.claude/.credentials.json for subscription auth, or provide ADC (gcloud-adc secret, GCP service account, or ~/.config/gcloud/application_default_credentials.json) + GOOGLE_CLOUD_PROJECT + GOOGLE_CLOUD_REGION for Vertex AI")
+	return nil, fmt.Errorf("claude: no valid auth method found; set ANTHROPIC_API_KEY for direct API access, ANTHROPIC_AUTH_TOKEN + ANTHROPIC_BASE_URL for LLM proxy (e.g. LiteLLM), CLAUDE_CODE_OAUTH_TOKEN (from `claude setup-token`) or ~/.claude/.credentials.json for subscription auth, or provide ADC (gcloud-adc secret, GCP service account, or ~/.config/gcloud/application_default_credentials.json) + GOOGLE_CLOUD_PROJECT + GOOGLE_CLOUD_REGION for Vertex AI")
 }
 
 func (c *ClaudeCode) resolveVertexAI(auth api.AuthConfig) *api.ResolvedAuth {

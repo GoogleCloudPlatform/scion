@@ -52,6 +52,7 @@ capabilities:
     auth_file: { support: "yes" }
     oauth_token: { support: "yes" }
     vertex_ai: { support: "yes" }
+    llm_gateway: { support: "yes" }
 auth:
   default_type: api-key
   types:
@@ -79,8 +80,13 @@ auth:
           alternative_env_keys: ["GOOGLE_APPLICATION_CREDENTIALS"]
           skipped_when_gcp_service_account_assigned: true
           required: true
+    llm-gateway:
+      required_env:
+        - any_of: ["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY"]
+        - any_of: ["ANTHROPIC_BASE_URL"]
   autodetect:
     env:
+      ANTHROPIC_BASE_URL: llm-gateway
       CLAUDE_CODE_OAUTH_TOKEN: oauth-token
       GOOGLE_APPLICATION_CREDENTIALS: vertex-ai
       GOOGLE_CLOUD_PROJECT: vertex-ai

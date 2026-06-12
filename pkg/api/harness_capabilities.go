@@ -54,6 +54,7 @@ type HarnessAuthCapabilities struct {
 	AuthFile   CapabilityField `json:"auth_file" yaml:"auth_file"`
 	OAuthToken CapabilityField `json:"oauth_token" yaml:"oauth_token"`
 	VertexAI   CapabilityField `json:"vertex_ai" yaml:"vertex_ai"`
+	LLMGateway CapabilityField `json:"llm_gateway" yaml:"llm_gateway"`
 }
 
 // HarnessMCPCapabilities describes MCP transport support for a harness.

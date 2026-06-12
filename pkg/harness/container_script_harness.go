@@ -222,6 +222,8 @@ func (c *ContainerScriptHarness) ResolveAuth(auth api.AuthConfig) (*api.Resolved
 		}
 	}
 	addIfPresent("ANTHROPIC_API_KEY", auth.AnthropicAPIKey)
+	addIfPresent("ANTHROPIC_AUTH_TOKEN", auth.AnthropicAuthToken)
+	addIfPresent("ANTHROPIC_BASE_URL", auth.AnthropicBaseURL)
 	addIfPresent("CLAUDE_CODE_OAUTH_TOKEN", auth.ClaudeOAuthToken)
 	addIfPresent("OPENAI_API_KEY", auth.OpenAIAPIKey)
 	addIfPresent("GEMINI_API_KEY", auth.GeminiAPIKey)
