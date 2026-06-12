@@ -536,10 +536,10 @@ func (s *agentService) SendOutboundMessage(ctx context.Context, agentID string, 
 
 // BroadcastResponse is the parsed response from a broadcast message delivery.
 type BroadcastResponse struct {
-	Status          string         `json:"status"`
-	Total           int            `json:"total"`
-	Targeted        int            `json:"targeted"`
-	Skipped         int            `json:"skipped"`
+	Status           string         `json:"status"`
+	Total            int            `json:"total"`
+	Targeted         int            `json:"targeted"`
+	Skipped          int            `json:"skipped"`
 	SkippedBreakdown map[string]int `json:"skipped_breakdown,omitempty"`
 }
 

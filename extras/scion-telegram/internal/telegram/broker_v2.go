@@ -2332,9 +2332,9 @@ func (b *TelegramBrokerV2) deliverInboundWithFeedback(ctx context.Context, topic
 		// Parse the Hub error response for a human-readable message.
 		var hubErr struct {
 			Error struct {
-				Message     string                 `json:"message"`
-				Code        string                 `json:"code"`
-				Details     map[string]interface{} `json:"details,omitempty"`
+				Message string                 `json:"message"`
+				Code    string                 `json:"code"`
+				Details map[string]interface{} `json:"details,omitempty"`
 			} `json:"error"`
 		}
 		if decErr := json.NewDecoder(resp.Body).Decode(&hubErr); decErr == nil && hubErr.Error.Message != "" {
