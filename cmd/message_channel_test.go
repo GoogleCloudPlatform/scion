@@ -31,11 +31,11 @@ func newChannelMockServer(t *testing.T, channels []map[string]string) *httptest.
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		switch {
-		case r.URL.Path == "/healthz":
-			json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
-		case r.URL.Path == "/api/v1/message-channels":
-			json.NewEncoder(w).Encode(map[string]interface{}{"channels": channels})
+		switch r.URL.Path {
+		case "/healthz":
+			_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+		case "/api/v1/message-channels":
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"channels": channels})
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}

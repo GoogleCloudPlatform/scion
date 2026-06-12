@@ -313,4 +313,3 @@ func (s *Server) deliverMessage(ctx context.Context, m *store.Message) error {
 	}
 	return dispatcher.DispatchAgentMessage(ctx, agent, m.Msg, m.Urgent, nil)
 }
-

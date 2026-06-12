@@ -1040,7 +1040,7 @@ func TestMessageEventHandler_AgentNotFound(t *testing.T) {
 		Payload:   `{"agentName":"deleted-agent","message":"hello?"}`,
 		Status:    store.ScheduledEventPending,
 	}
-	ms.CreateScheduledEvent(ctx, &evt)
+	_ = ms.CreateScheduledEvent(ctx, &evt)
 
 	// Create a Server with the mock store — no agents registered
 	srv := &Server{store: ms}
@@ -1072,7 +1072,7 @@ func TestMessageEventHandler_AgentNotFoundByID(t *testing.T) {
 		Payload:   `{"agentId":"nonexistent-id","message":"hello?"}`,
 		Status:    store.ScheduledEventPending,
 	}
-	ms.CreateScheduledEvent(ctx, &evt)
+	_ = ms.CreateScheduledEvent(ctx, &evt)
 
 	srv := &Server{store: ms}
 	handler := srv.messageEventHandler()

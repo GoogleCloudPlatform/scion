@@ -1777,7 +1777,10 @@ func (s *Server) cancelScheduledEventsForAgent(ctx context.Context, agent *store
 			continue
 		}
 		if s.scheduler != nil {
-			s.scheduler.CancelEvent(ctx, evt.ID)
+			if cancelErr := s.scheduler.CancelEvent(ctx, evt.ID); cancelErr != nil {
+				s.agentLifecycleLog.Warn("Failed to cancel in-memory scheduler timer",
+					"event_id", evt.ID, "error", cancelErr)
+			}
 		}
 		cancelled++
 	}
@@ -2684,7 +2687,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(MessageDeliveryResponse{
+	_ = json.NewEncoder(w).Encode(MessageDeliveryResponse{
 		MessageID:  persistedMsgID,
 		Status:     "delivered",
 		Agent:      agent.Slug,

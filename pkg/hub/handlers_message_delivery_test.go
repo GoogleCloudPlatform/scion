@@ -142,7 +142,7 @@ func TestHandleAgentMessage_StoppedReturns409(t *testing.T) {
 	}
 
 	var errResp ErrorResponse
-	json.NewDecoder(rec.Body).Decode(&errResp)
+	_ = json.NewDecoder(rec.Body).Decode(&errResp)
 	if errResp.Error.Code != ErrCodeAgentNotRunning {
 		t.Errorf("expected error code %q, got %q", ErrCodeAgentNotRunning, errResp.Error.Code)
 	}
@@ -186,7 +186,7 @@ func TestHandleAgentMessage_ErrorReturns409(t *testing.T) {
 	}
 
 	var errResp ErrorResponse
-	json.NewDecoder(rec.Body).Decode(&errResp)
+	_ = json.NewDecoder(rec.Body).Decode(&errResp)
 	if errResp.Error.Code != ErrCodeAgentNotRunning {
 		t.Errorf("expected error code %q, got %q", ErrCodeAgentNotRunning, errResp.Error.Code)
 	}
@@ -230,7 +230,7 @@ func TestHandleAgentMessage_ProvisioningReturns409(t *testing.T) {
 	}
 
 	var errResp ErrorResponse
-	json.NewDecoder(rec.Body).Decode(&errResp)
+	_ = json.NewDecoder(rec.Body).Decode(&errResp)
 	if errResp.Error.Code != ErrCodeAgentNotRunning {
 		t.Errorf("expected error code %q, got %q", ErrCodeAgentNotRunning, errResp.Error.Code)
 	}
@@ -482,7 +482,7 @@ func TestHandleAgentMessage_BrokerError502(t *testing.T) {
 	}
 
 	var errResp ErrorResponse
-	json.NewDecoder(rec.Body).Decode(&errResp)
+	_ = json.NewDecoder(rec.Body).Decode(&errResp)
 	if errResp.Error.Code != ErrCodeRuntimeError {
 		t.Errorf("expected error code %q, got %q", ErrCodeRuntimeError, errResp.Error.Code)
 	}
@@ -510,7 +510,7 @@ func TestHandleAgentMessage_BrokerTimeout504(t *testing.T) {
 	}
 
 	var errResp ErrorResponse
-	json.NewDecoder(rec.Body).Decode(&errResp)
+	_ = json.NewDecoder(rec.Body).Decode(&errResp)
 	if errResp.Error.Code != ErrCodeBrokerTimeout {
 		t.Errorf("expected error code %q, got %q", ErrCodeBrokerTimeout, errResp.Error.Code)
 	}
