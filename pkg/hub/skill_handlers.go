@@ -1066,6 +1066,17 @@ func (s *Server) handleSkillsResolve(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
+		// Federation: non-scion registry → proxy to external
+		if uri.Registry != "scion" && uri.Registry != "" {
+			fedResolved, resolveErr := s.federateResolve(ctx, uri.Registry, skillRef)
+			if resolveErr != nil {
+				resolveErrors = append(resolveErrors, *resolveErr)
+			} else {
+				resolved = append(resolved, *fedResolved)
+			}
+			continue
+		}
+
 		// Expand scope aliases from request context
 		expandScopeAliases(uri, req.ProjectID, req.UserID)
 
