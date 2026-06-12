@@ -63,7 +63,12 @@ type GCPSkillResolver struct {
 func NewGCPSkillResolver(lookup RegistryLookup) *GCPSkillResolver {
 	return &GCPSkillResolver{
 		registryLookup: lookup,
-		httpClient:     &http.Client{Timeout: gcpAPITimeout},
+		httpClient: &http.Client{
+			Timeout: gcpAPITimeout,
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		},
 	}
 }
 
@@ -175,7 +180,7 @@ func (r *GCPSkillResolver) getADCToken(ctx context.Context) (string, error) {
 	}
 
 	r.tokenOnce.Do(func() {
-		creds, err := google.FindDefaultCredentials(ctx, gcpScope)
+		creds, err := google.FindDefaultCredentials(context.Background(), gcpScope)
 		if err != nil {
 			r.tokenErr = fmt.Errorf("no GCP credentials found (set GOOGLE_APPLICATION_CREDENTIALS or use 'gcloud auth application-default login'): %w", err)
 			return

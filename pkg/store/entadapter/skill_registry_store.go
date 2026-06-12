@@ -198,7 +198,17 @@ func (s *SkillRegistryStore) PinSkillHash(ctx context.Context, registryID string
 	if err != nil {
 		return store.ErrNotFound
 	}
-	e, err := s.client.SkillRegistry.Get(ctx, uid)
+
+	tx, err := s.client.Tx(ctx)
+	if err != nil {
+		return mapError(err)
+	}
+	defer tx.Rollback()
+
+	e, err := tx.SkillRegistry.Query().
+		Where(entskillregistry.ID(uid)).
+		ForUpdate().
+		Only(ctx)
 	if err != nil {
 		return mapError(err)
 	}
@@ -210,10 +220,14 @@ func (s *SkillRegistryStore) PinSkillHash(ctx context.Context, registryID string
 	hashes[uri] = hash
 
 	b, _ := json.Marshal(hashes)
-	_, err = s.client.SkillRegistry.UpdateOneID(uid).
+	_, err = tx.SkillRegistry.UpdateOneID(uid).
 		SetPinnedHashes(string(b)).
 		Save(ctx)
-	return mapError(err)
+	if err != nil {
+		return mapError(err)
+	}
+
+	return mapError(tx.Commit())
 }
 
 func (s *SkillRegistryStore) GetPinnedHash(ctx context.Context, registryID string, uri string) (string, error) {
