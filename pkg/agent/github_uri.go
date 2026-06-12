@@ -16,8 +16,11 @@ package agent
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 )
+
+var validGitHubComponent = regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
 
 // GitHubSkillRef is the parsed representation of a GitHub skill URI.
 type GitHubSkillRef struct {
@@ -63,6 +66,15 @@ func parseGHShorthand(uri string) (*GitHubSkillRef, error) {
 			return nil, fmt.Errorf("invalid gh:// URI %q: empty path component", uri)
 		}
 	}
+	if !validGitHubComponent.MatchString(parts[0]) {
+		return nil, fmt.Errorf("invalid gh:// URI %q: invalid owner %q", uri, parts[0])
+	}
+	if !validGitHubComponent.MatchString(parts[1]) {
+		return nil, fmt.Errorf("invalid gh:// URI %q: invalid repo %q", uri, parts[1])
+	}
+	if strings.Contains(parts[2], "..") {
+		return nil, fmt.Errorf("invalid gh:// URI %q: skill name must not contain '..'", uri)
+	}
 
 	return &GitHubSkillRef{
 		Owner:     parts[0],
@@ -96,6 +108,12 @@ func parseGitHubFullURL(uri string) (*GitHubSkillRef, error) {
 
 	owner := parts[0]
 	repo := parts[1]
+	if !validGitHubComponent.MatchString(owner) {
+		return nil, fmt.Errorf("invalid GitHub URL %q: invalid owner %q", uri, owner)
+	}
+	if !validGitHubComponent.MatchString(repo) {
+		return nil, fmt.Errorf("invalid GitHub URL %q: invalid repo %q", uri, repo)
+	}
 	refAndPath := parts[3] + "/" + parts[4]
 
 	// Split ref from path: assume first segment is the ref.
@@ -111,6 +129,9 @@ func parseGitHubFullURL(uri string) (*GitHubSkillRef, error) {
 	skillName := pathParts[len(pathParts)-1]
 	if skillName == "" {
 		return nil, fmt.Errorf("invalid GitHub URL %q: empty skill name", uri)
+	}
+	if strings.Contains(skillFullPath, "..") {
+		return nil, fmt.Errorf("invalid GitHub URL %q: path must not contain '..'", uri)
 	}
 
 	return &GitHubSkillRef{

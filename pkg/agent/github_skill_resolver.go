@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -102,8 +103,12 @@ func (r *GitHubSkillResolver) resolveOne(ctx context.Context, ghRef *GitHubSkill
 	var resolvedFiles []ResolvedFile
 	var fileInfos []transfer.FileInfo
 
+	expectedPrefix := ghRef.SkillPath + "/"
 	for _, entry := range contents {
 		if entry.Type != "file" {
+			continue
+		}
+		if !strings.HasPrefix(entry.Path, expectedPrefix) {
 			continue
 		}
 
@@ -156,8 +161,9 @@ func (r *GitHubSkillResolver) resolveCommitSHA(ctx context.Context, ghRef *GitHu
 		ref = "HEAD"
 	}
 
-	url := fmt.Sprintf("%s/repos/%s/%s/commits/%s", r.apiBase, ghRef.Owner, ghRef.Repo, ref)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	reqURL := fmt.Sprintf("%s/repos/%s/%s/commits/%s", r.apiBase,
+		url.PathEscape(ghRef.Owner), url.PathEscape(ghRef.Repo), url.PathEscape(ref))
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
 	if err != nil {
 		return "", err
 	}
@@ -189,10 +195,10 @@ func (r *GitHubSkillResolver) resolveCommitSHA(ctx context.Context, ghRef *GitHu
 }
 
 func (r *GitHubSkillResolver) listContents(ctx context.Context, ghRef *GitHubSkillRef, commitSHA string) ([]githubContentEntry, error) {
-	url := fmt.Sprintf("%s/repos/%s/%s/contents/%s?ref=%s",
-		r.apiBase, ghRef.Owner, ghRef.Repo, ghRef.SkillPath, commitSHA)
+	reqURL := fmt.Sprintf("%s/repos/%s/%s/contents/%s?ref=%s",
+		r.apiBase, url.PathEscape(ghRef.Owner), url.PathEscape(ghRef.Repo), ghRef.SkillPath, url.QueryEscape(commitSHA))
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -214,16 +220,17 @@ func (r *GitHubSkillResolver) listContents(ctx context.Context, ghRef *GitHubSki
 	}
 
 	var entries []githubContentEntry
-	if err := json.NewDecoder(resp.Body).Decode(&entries); err != nil {
+	limited := io.LimitReader(resp.Body, 5*1024*1024)
+	if err := json.NewDecoder(limited).Decode(&entries); err != nil {
 		return nil, fmt.Errorf("failed to decode GitHub API response: %w", err)
 	}
 	return entries, nil
 }
 
 func (r *GitHubSkillResolver) downloadRawFile(ctx context.Context, ghRef *GitHubSkillRef, commitSHA, filePath string) ([]byte, error) {
-	url := r.rawContentURL(ghRef, commitSHA, filePath)
+	reqURL := r.rawContentURL(ghRef, commitSHA, filePath)
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
 	if err != nil {
 		return nil, err
 	}
