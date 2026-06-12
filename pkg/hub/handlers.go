@@ -2576,22 +2576,24 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 	}
 	s.logMessage("message dispatched", logAttrs...)
 
-	// Persist to message store (write-through; non-fatal if store fails)
+	// Persist to message store before delivery attempt. Set dispatch_state
+	// to "dispatched" (no new pending rows per delivery policy).
 	var persistedMsgID string
 	if structuredMsg != nil {
 		storeMsg := &store.Message{
-			ID:          api.NewUUID(),
-			ProjectID:   agent.ProjectID,
-			Sender:      structuredMsg.Sender,
-			SenderID:    structuredMsg.SenderID,
-			Recipient:   structuredMsg.Recipient,
-			RecipientID: structuredMsg.RecipientID,
-			Msg:         structuredMsg.Msg,
-			Type:        structuredMsg.Type,
-			Urgent:      structuredMsg.Urgent,
-			Broadcasted: structuredMsg.Broadcasted,
-			AgentID:     agent.ID,
-			CreatedAt:   time.Now(),
+			ID:            api.NewUUID(),
+			ProjectID:     agent.ProjectID,
+			Sender:        structuredMsg.Sender,
+			SenderID:      structuredMsg.SenderID,
+			Recipient:     structuredMsg.Recipient,
+			RecipientID:   structuredMsg.RecipientID,
+			Msg:           structuredMsg.Msg,
+			Type:          structuredMsg.Type,
+			Urgent:        structuredMsg.Urgent,
+			Broadcasted:   structuredMsg.Broadcasted,
+			AgentID:       agent.ID,
+			DispatchState: store.MessageDispatchDispatched,
+			CreatedAt:     time.Now(),
 		}
 		// Propagate GroupID from metadata so CLI-originated group[] messages
 		// preserve correlation in the store.
@@ -2621,41 +2623,25 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		ServiceNotReady(w, "Agent has no runtime broker assigned — the server may still be starting up")
 		return
 	}
-	if err := dispatcher.DispatchAgentMessage(ctx, agent, plainMessage, req.Interrupt, structuredMsg); errors.Is(err, ErrMessageDeferred) {
-		s.signalDeferredMessage(ctx, agent.RuntimeBrokerID, agent.ID)
-		// Create notification subscription if requested (before returning 202)
-		if req.Notify {
-			var notifySubscriberType, notifySubscriberID, createdBy string
-			if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
-				createdBy = agentIdent.ID()
-				if creatorAgent, err := s.store.GetAgent(ctx, agentIdent.ID()); err == nil {
-					notifySubscriberType = store.SubscriberTypeAgent
-					notifySubscriberID = creatorAgent.Slug
-				}
-			} else if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
-				createdBy = userIdent.ID()
-				notifySubscriberType = store.SubscriberTypeUser
-				notifySubscriberID = userIdent.ID()
+
+	// Synchronous delivery with 30s retry deadline for transient broker failures.
+	retryCtx, retryCancel := context.WithTimeout(ctx, 30*time.Second)
+	defer retryCancel()
+
+	if err := dispatchWithBrokerRetry(retryCtx, dispatcher, agent, plainMessage, req.Interrupt, structuredMsg); err != nil {
+		if persistedMsgID != "" {
+			if markErr := s.store.MarkMessageFailed(ctx, persistedMsgID, err.Error()); markErr != nil {
+				s.messageLog.Error("Failed to mark message as failed", "id", persistedMsgID, "error", markErr)
 			}
-			s.createNotifySubscription(ctx, agent.ID, agent.ProjectID, notifySubscriberType, notifySubscriberID, createdBy)
 		}
-		w.WriteHeader(http.StatusAccepted)
-		return
-	} else if err != nil {
-		if req.Wake {
+		if errors.Is(err, ErrBrokerTimeout) {
+			GatewayTimeout(w, "Broker unreachable after 30s deadline")
+		} else if req.Wake {
 			RuntimeError(w, "Agent resumed successfully but message delivery failed: "+err.Error())
 		} else {
 			RuntimeError(w, "Failed to send message to runtime broker: "+err.Error())
 		}
 		return
-	}
-
-	// Mark the message as dispatched so reconcileBroker does not
-	// re-deliver it on the next broker reconnect.
-	if persistedMsgID != "" {
-		if _, err := s.store.MarkMessageDispatched(ctx, persistedMsgID); err != nil {
-			s.messageLog.Error("Failed to mark message dispatched", "id", persistedMsgID, "error", err)
-		}
 	}
 
 	// Publish agent-to-agent messages through the broker so plugin observers
@@ -2770,47 +2756,44 @@ func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anch
 			agentMsg.Recipients = recipientsSet
 
 			storeMsg := &store.Message{
-				ID:          api.NewUUID(),
-				ProjectID:   projectID,
-				Sender:      agentMsg.Sender,
-				SenderID:    agentMsg.SenderID,
-				Recipient:   agentMsg.Recipient,
-				RecipientID: agentMsg.RecipientID,
-				Msg:         agentMsg.Msg,
-				Type:        agentMsg.Type,
-				Urgent:      agentMsg.Urgent,
-				AgentID:     agent.ID,
-				GroupID:     groupID,
-				CreatedAt:   time.Now(),
+				ID:            api.NewUUID(),
+				ProjectID:     projectID,
+				Sender:        agentMsg.Sender,
+				SenderID:      agentMsg.SenderID,
+				Recipient:     agentMsg.Recipient,
+				RecipientID:   agentMsg.RecipientID,
+				Msg:           agentMsg.Msg,
+				Type:          agentMsg.Type,
+				Urgent:        agentMsg.Urgent,
+				AgentID:       agent.ID,
+				GroupID:       groupID,
+				DispatchState: store.MessageDispatchDispatched,
+				CreatedAt:     time.Now(),
 			}
 			if err := s.store.CreateMessage(ctx, storeMsg); err != nil {
 				s.messageLog.Error("Failed to persist set message", "recipient", recipStr, "error", err)
 			}
 			s.events.PublishUserMessage(ctx, storeMsg)
 
-			if dispatcher != nil && agent.RuntimeBrokerID != "" {
-				if err := dispatcher.DispatchAgentMessage(ctx, agent, plainMessage, interrupt, &agentMsg); errors.Is(err, ErrMessageDeferred) {
-					s.signalDeferredMessage(ctx, agent.RuntimeBrokerID, agent.ID)
-					results[i] = GroupMessageRecipientResult{Recipient: recipStr, Status: "deferred"}
-					delivered++
-					continue
-				} else if err != nil {
-					results[i] = GroupMessageRecipientResult{Recipient: recipStr, Status: "failed", Error: err.Error()}
-					continue
-				}
-			} else if dispatcher == nil {
+			if dispatcher == nil {
 				results[i] = GroupMessageRecipientResult{Recipient: recipStr, Status: "failed", Error: "dispatcher not available"}
 				continue
-			} else {
+			}
+			if agent.RuntimeBrokerID == "" {
 				results[i] = GroupMessageRecipientResult{Recipient: recipStr, Status: "failed", Error: "agent has no runtime broker"}
 				continue
 			}
 
-			// Mark the message as dispatched so reconcileBroker does not
-			// re-deliver it on the next broker reconnect.
-			if _, err := s.store.MarkMessageDispatched(ctx, storeMsg.ID); err != nil {
-				s.messageLog.Error("Failed to mark set message dispatched", "id", storeMsg.ID, "error", err)
+			retryCtx, retryCancel := context.WithTimeout(ctx, 30*time.Second)
+			if err := dispatchWithBrokerRetry(retryCtx, dispatcher, agent, plainMessage, interrupt, &agentMsg); err != nil {
+				retryCancel()
+				if markErr := s.store.MarkMessageFailed(ctx, storeMsg.ID, err.Error()); markErr != nil {
+					s.messageLog.Error("Failed to mark set message as failed", "id", storeMsg.ID, "error", markErr)
+				}
+				results[i] = GroupMessageRecipientResult{Recipient: recipStr, Status: "failed", Error: err.Error()}
+				continue
 			}
+			retryCancel()
 
 			// Publish agent-to-agent messages through the broker for plugin observers.
 			if strings.HasPrefix(agentMsg.Sender, "agent:") {
@@ -3070,36 +3053,38 @@ func (s *Server) broadcastDirect(w http.ResponseWriter, r *http.Request, project
 		agentMsg := *msg
 		agentMsg.Recipient = "agent:" + agent.Slug
 		agentMsg.RecipientID = agent.ID
-		dispatched := false
-		if err := dispatcher.DispatchAgentMessage(ctx, &agent, agentMsg.Msg, interrupt, &agentMsg); errors.Is(err, ErrMessageDeferred) {
-			s.signalDeferredMessage(ctx, agent.RuntimeBrokerID, agent.ID)
-		} else if err != nil {
+
+		retryCtx, retryCancel := context.WithTimeout(ctx, 30*time.Second)
+		dispatchErr := dispatchWithBrokerRetry(retryCtx, dispatcher, &agent, agentMsg.Msg, interrupt, &agentMsg)
+		retryCancel()
+
+		if dispatchErr != nil {
 			s.messageLog.Error("Failed to deliver broadcast message to agent",
 				"agent_id", agent.ID,
-				"agentSlug", agent.Slug, "error", err)
-			s.publishBroadcastDeliveryFailed(ctx, &agent, &agentMsg, err)
-		} else {
-			dispatched = true
+				"agentSlug", agent.Slug, "error", dispatchErr)
+			s.publishBroadcastDeliveryFailed(ctx, &agent, &agentMsg, dispatchErr)
 		}
+
 		storeMsg := &store.Message{
-			ID:          api.NewUUID(),
-			ProjectID:   projectID,
-			Sender:      agentMsg.Sender,
-			SenderID:    agentMsg.SenderID,
-			Recipient:   agentMsg.Recipient,
-			RecipientID: agentMsg.RecipientID,
-			Msg:         agentMsg.Msg,
-			Type:        agentMsg.Type,
-			Urgent:      agentMsg.Urgent,
-			Broadcasted: true,
-			AgentID:     agent.ID,
-			CreatedAt:   time.Now(),
+			ID:            api.NewUUID(),
+			ProjectID:     projectID,
+			Sender:        agentMsg.Sender,
+			SenderID:      agentMsg.SenderID,
+			Recipient:     agentMsg.Recipient,
+			RecipientID:   agentMsg.RecipientID,
+			Msg:           agentMsg.Msg,
+			Type:          agentMsg.Type,
+			Urgent:        agentMsg.Urgent,
+			Broadcasted:   true,
+			AgentID:       agent.ID,
+			DispatchState: store.MessageDispatchDispatched,
+			CreatedAt:     time.Now(),
 		}
 		if err := s.store.CreateMessage(ctx, storeMsg); err != nil {
 			s.messageLog.Error("Failed to persist broadcast message", "agent_id", agent.ID, "error", err)
-		} else if dispatched {
-			if _, err := s.store.MarkMessageDispatched(ctx, storeMsg.ID); err != nil {
-				s.messageLog.Error("Failed to mark broadcast message dispatched", "id", storeMsg.ID, "error", err)
+		} else if dispatchErr != nil {
+			if markErr := s.store.MarkMessageFailed(ctx, storeMsg.ID, dispatchErr.Error()); markErr != nil {
+				s.messageLog.Error("Failed to mark broadcast message as failed", "id", storeMsg.ID, "error", markErr)
 			}
 		}
 	}

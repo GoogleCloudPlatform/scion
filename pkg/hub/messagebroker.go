@@ -17,7 +17,6 @@ package hub
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -44,13 +43,12 @@ const brokerCallbackTimeout = 30 * time.Second
 //   - Manages subscriptions based on agent lifecycle events (created/deleted)
 //   - Handles broadcast fan-out from a single broker publish to individual agent deliveries
 type MessageBrokerProxy struct {
-	bus            eventbus.EventBus
-	store          store.Store
-	events         EventPublisher
-	getDispatcher  func() AgentDispatcher
-	signalDeferred func(ctx context.Context, brokerID, agentID string) // NOTIFY wakeup for deferred messages
-	log            *slog.Logger
-	messageLog     *slog.Logger
+	bus           eventbus.EventBus
+	store         store.Store
+	events        EventPublisher
+	getDispatcher func() AgentDispatcher
+	log           *slog.Logger
+	messageLog    *slog.Logger
 
 	mu                  sync.Mutex
 	subscriptions       map[string][]eventbus.Subscription // projectID -> active subscriptions
@@ -80,12 +78,6 @@ func NewMessageBrokerProxy(
 		subscribedTopics:    make(map[string]bool),
 		stopCh:              make(chan struct{}),
 	}
-}
-
-// SetSignalDeferred injects the callback used to emit a NOTIFY wakeup when a
-// message dispatch is deferred (broker not locally connected).
-func (p *MessageBrokerProxy) SetSignalDeferred(fn func(ctx context.Context, brokerID, agentID string)) {
-	p.signalDeferred = fn
 }
 
 // Start subscribes to agent lifecycle events and sets up broker subscriptions
@@ -532,45 +524,35 @@ func (p *MessageBrokerProxy) deliverToAgent(ctx context.Context, projectID, agen
 		return
 	}
 
-	// Persist to message store after agent validation so the row is durable
-	// intent for cross-node dispatch (dispatch_state defaults to pending).
+	// Persist to message store before delivery attempt (no pending rows).
 	storeMsg := &store.Message{
-		ID:          api.NewUUID(),
-		ProjectID:   projectID,
-		Sender:      msg.Sender,
-		SenderID:    msg.SenderID,
-		Recipient:   msg.Recipient,
-		RecipientID: msg.RecipientID,
-		Msg:         msg.Msg,
-		Type:        msg.Type,
-		Urgent:      msg.Urgent,
-		Broadcasted: msg.Broadcasted,
-		AgentID:     agent.ID,
-		CreatedAt:   time.Now(),
+		ID:            api.NewUUID(),
+		ProjectID:     projectID,
+		Sender:        msg.Sender,
+		SenderID:      msg.SenderID,
+		Recipient:     msg.Recipient,
+		RecipientID:   msg.RecipientID,
+		Msg:           msg.Msg,
+		Type:          msg.Type,
+		Urgent:        msg.Urgent,
+		Broadcasted:   msg.Broadcasted,
+		AgentID:       agent.ID,
+		DispatchState: store.MessageDispatchDispatched,
+		CreatedAt:     time.Now(),
 	}
 	if err := p.store.CreateMessage(ctx, storeMsg); err != nil {
 		p.log.Error("Failed to persist broker message to store", "agentSlug", agentSlug, "error", err)
-		// Without a durable row, a deferred signal has nothing for the
-		// owning node to reconcile — abort dispatch entirely.
 		return
 	}
 
-	if err := dispatcher.DispatchAgentMessage(ctx, agent, msg.Msg, msg.Urgent, msg); errors.Is(err, ErrMessageDeferred) {
-		if p.signalDeferred != nil {
-			p.signalDeferred(ctx, agent.RuntimeBrokerID, agent.ID)
-		}
-		return
-	} else if err != nil {
+	if err := dispatchWithBrokerRetry(ctx, dispatcher, agent, msg.Msg, msg.Urgent, msg); err != nil {
 		p.log.Error("Failed to dispatch broker message to agent",
 			"agentSlug", agentSlug, "error", err)
+		if markErr := p.store.MarkMessageFailed(ctx, storeMsg.ID, err.Error()); markErr != nil {
+			p.log.Error("Failed to mark broker message as failed", "id", storeMsg.ID, "error", markErr)
+		}
 		p.publishDeliveryFailed(ctx, projectID, agentSlug, msg)
 		return
-	}
-
-	// Mark the message as dispatched so reconcileBroker does not
-	// re-deliver it on the next broker reconnect.
-	if _, err := p.store.MarkMessageDispatched(ctx, storeMsg.ID); err != nil {
-		p.log.Error("Failed to mark broker message dispatched", "id", storeMsg.ID, "error", err)
 	}
 
 	// Log to dedicated message audit log

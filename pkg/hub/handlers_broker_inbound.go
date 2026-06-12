@@ -15,10 +15,12 @@
 package hub
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
@@ -146,9 +148,11 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := dispatcher.DispatchAgentMessage(r.Context(), agent, req.Message.Msg, req.Message.Urgent, req.Message); errors.Is(err, ErrMessageDeferred) {
-		s.signalDeferredMessage(r.Context(), agent.RuntimeBrokerID, agent.ID)
-		w.WriteHeader(http.StatusAccepted)
+	retryCtx, retryCancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer retryCancel()
+
+	if err := dispatchWithBrokerRetry(retryCtx, dispatcher, agent, req.Message.Msg, req.Message.Urgent, req.Message); errors.Is(err, ErrBrokerTimeout) {
+		GatewayTimeout(w, "Broker unreachable after 30s deadline")
 		return
 	} else if err != nil {
 		log.Error("Failed to dispatch inbound message",

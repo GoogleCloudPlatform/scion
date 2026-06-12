@@ -111,7 +111,7 @@ func TestReconcileBroker_FailedOpMarkedFailed(t *testing.T) {
 	assert.Empty(t, pending, "a failed op leaves no pending row (it is marked failed, not retried in-loop)")
 }
 
-func TestReconcileBroker_DrainsPendingMessageOnce(t *testing.T) {
+func TestReconcileBroker_SkipsPendingMessages(t *testing.T) {
 	ctx := context.Background()
 	client := enttest.NewClient(t)
 	cs := entadapter.NewCompositeStore(client)
@@ -123,21 +123,15 @@ func TestReconcileBroker_DrainsPendingMessageOnce(t *testing.T) {
 	broker := uuid.NewString()
 	proj := &store.Project{ID: uuid.NewString(), Name: "p", Slug: "p-" + uuid.NewString()[:8], Visibility: store.VisibilityPrivate, OwnerID: uuid.NewString()}
 	require.NoError(t, cs.CreateProject(ctx, proj))
-	agent, err := client.Agent.Create().
+	_, err := client.Agent.Create().
 		SetSlug("a-" + uuid.NewString()[:8]).SetName("a").
 		SetProjectID(uuid.MustParse(proj.ID)).SetRuntimeBrokerID(broker).
 		Save(ctx)
 	require.NoError(t, err)
 
-	msg := &store.Message{ID: uuid.NewString(), ProjectID: proj.ID, Sender: "user:x", Recipient: "agent:a", Msg: "hi", AgentID: agent.ID.String()}
-	require.NoError(t, cs.CreateMessage(ctx, msg))
-
 	s.reconcileBroker(ctx, broker)
 
-	assert.Equal(t, int32(1), atomic.LoadInt32(&deliverN), "pending message delivered once")
-	got, err := cs.GetMessage(ctx, msg.ID)
-	require.NoError(t, err)
-	assert.Equal(t, store.MessageDispatchDispatched, got.DispatchState)
+	assert.Equal(t, int32(0), atomic.LoadInt32(&deliverN), "reconcileBroker no longer drains pending messages")
 }
 
 // TestDeliverMessage_TunnelsViaDispatcher verifies that deliverMessage resolves

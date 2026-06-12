@@ -19,6 +19,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -27,6 +28,10 @@ import (
 // (already persisted with dispatch_state=pending) is the durable intent, and
 // the caller should emit a NOTIFY wakeup and return 202 Accepted.
 var ErrMessageDeferred = errors.New("message deferred: broker not locally reachable")
+
+// ErrBrokerTimeout is returned by dispatchWithBrokerRetry when the broker
+// remains unreachable after the context deadline. Callers map this to 504.
+var ErrBrokerTimeout = errors.New("broker unreachable after deadline")
 
 // ErrLifecycleDeferred is returned by HybridBrokerClient.StartAgent/StopAgent/
 // RestartAgent when the broker is not locally connected and has no HTTP
@@ -101,6 +106,38 @@ func (c *HybridBrokerClient) route(ctx context.Context, brokerID, brokerEndpoint
 // server to a store-backed lookup (StoreAffinityLookup).
 func (c *HybridBrokerClient) SetAffinityLookup(fn func(ctx context.Context, brokerID string) (owner string, alive bool)) {
 	c.affinity = fn
+}
+
+const (
+	brokerRetryInitialBackoff = 500 * time.Millisecond
+	brokerRetryMaxBackoff     = 5 * time.Second
+)
+
+// dispatchWithBrokerRetry attempts to deliver a message to an agent via the
+// dispatcher, retrying with exponential backoff when the broker is temporarily
+// unreachable (ErrMessageDeferred). The caller must set a deadline on ctx
+// (typically 30s). Returns nil on success, ErrBrokerTimeout if the deadline
+// expires while still retrying, or the original error for non-transient failures.
+func dispatchWithBrokerRetry(ctx context.Context, dispatcher AgentDispatcher, agent *store.Agent, msg string, urgent bool, structuredMsg *messages.StructuredMessage) error {
+	backoff := brokerRetryInitialBackoff
+	for {
+		err := dispatcher.DispatchAgentMessage(ctx, agent, msg, urgent, structuredMsg)
+		if err == nil {
+			return nil
+		}
+		if !errors.Is(err, ErrMessageDeferred) {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return ErrBrokerTimeout
+		case <-time.After(backoff):
+			backoff *= 2
+			if backoff > brokerRetryMaxBackoff {
+				backoff = brokerRetryMaxBackoff
+			}
+		}
+	}
 }
 
 // StoreAffinityLookup returns an affinity lookup backed by runtime_brokers: the

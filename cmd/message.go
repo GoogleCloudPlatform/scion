@@ -475,17 +475,12 @@ func sendMessageViaHub(hubCtx *HubContext, agentName string, message string, int
 	defer cancel()
 
 	msg := buildStructuredMessage(sender, "agent:"+agentName, message)
-	deliveryResp, err := agentSvc.SendStructuredMessage(ctx, agentName, msg, interrupt, notify, wake)
-	if err != nil {
+	if _, err := agentSvc.SendStructuredMessage(ctx, agentName, msg, interrupt, notify, wake); err != nil {
 		return wrapHubError(fmt.Errorf("failed to send message to agent '%s' via Hub: %w", agentName, err))
 	}
 
 	if !isJSONOutput() {
-		if deliveryResp != nil && deliveryResp.Status == "delivered" {
-			fmt.Printf("Message delivered to agent '%s'.\n", agentName)
-		} else {
-			fmt.Printf("Message accepted for agent '%s' (delivery deferred — agent's broker is not currently connected).\n", agentName)
-		}
+		fmt.Printf("Message delivered to agent '%s'.\n", agentName)
 		if notify {
 			fmt.Printf("Subscribed to notifications for agent '%s'.\n", agentName)
 		}

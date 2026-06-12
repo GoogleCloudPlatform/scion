@@ -381,6 +381,9 @@ type BrokerDispatchStore interface {
 	// MarkMessageDispatched CAS-flips a message pending->dispatched (dedupes drains).
 	MarkMessageDispatched(ctx context.Context, id string) (dispatched bool, err error)
 
+	// MarkMessageFailed sets a message's dispatch_state to "failed" with a reason.
+	MarkMessageFailed(ctx context.Context, id string, reason string) error
+
 	// ListPendingMessages returns pending messages whose target agent is on the broker.
 	ListPendingMessages(ctx context.Context, brokerID string) ([]Message, error)
 

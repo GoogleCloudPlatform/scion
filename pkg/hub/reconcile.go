@@ -18,7 +18,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log/slog"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -101,32 +100,6 @@ func (s *Server) reconcileBroker(ctx context.Context, brokerID string) {
 		}
 	}
 
-	// 2. Pending messages destined for agents on this broker.
-	msgs, err := s.store.ListPendingMessages(ctx, brokerID)
-	if err != nil {
-		s.agentLifecycleLog.Error("reconcile: list pending messages failed", "brokerID", brokerID, "error", err)
-		return
-	}
-	for i := range msgs {
-		m := msgs[i]
-		dispatched, err := s.store.MarkMessageDispatched(ctx, m.ID)
-		if err != nil {
-			s.agentLifecycleLog.Error("reconcile: mark message dispatched failed", "id", m.ID, "error", err)
-			continue
-		}
-		if !dispatched {
-			continue // another drain already took it (dedupe)
-		}
-		if rec := s.dispatchMetrics; rec != nil {
-			rec.IncMessageDispatched(ctx, 1)
-		}
-		if err := s.deliverMsg(ctx, &m); err != nil {
-			// At-least-once: the row is already marked dispatched; a delivery
-			// failure is surfaced by the pending-message sweep (B5-2). Phase 3
-			// (B3-3) supplies the real local tunnel + failure handling.
-			s.agentLifecycleLog.Warn("reconcile: message delivery failed", "id", m.ID, "error", err)
-		}
-	}
 }
 
 // executeDispatch runs a claimed dispatch intent's op via the LOCAL broker
@@ -341,13 +314,3 @@ func (s *Server) deliverMessage(ctx context.Context, m *store.Message) error {
 	return dispatcher.DispatchAgentMessage(ctx, agent, m.Msg, m.Urgent, nil)
 }
 
-// signalDeferredMessage emits a best-effort NOTIFY wakeup so the broker's
-// owning node drains the pending message. Called when route() returns
-// routeForward or routeUndeliverable (the message row is already durable).
-func (s *Server) signalDeferredMessage(ctx context.Context, brokerID, agentID string) {
-	if s.commandBus != nil {
-		if err := s.commandBus.SignalBrokerCmd(ctx, brokerID); err != nil {
-			slog.Warn("failed to signal deferred message", "brokerID", brokerID, "agentID", agentID, "error", err)
-		}
-	}
-}

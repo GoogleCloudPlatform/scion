@@ -54,6 +54,9 @@ func (f *fakeDispatchStore) ListPendingDispatch(_ context.Context, _ string) ([]
 func (f *fakeDispatchStore) MarkMessageDispatched(_ context.Context, _ string) (bool, error) {
 	return false, nil
 }
+func (f *fakeDispatchStore) MarkMessageFailed(_ context.Context, _, _ string) error {
+	return nil
+}
 func (f *fakeDispatchStore) ListPendingMessages(_ context.Context, _ string) ([]store.Message, error) {
 	return nil, nil
 }

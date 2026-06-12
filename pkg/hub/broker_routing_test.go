@@ -16,12 +16,15 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"log/slog"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -160,4 +163,64 @@ func TestHybridBrokerClient_MessageAgent_RouteGate(t *testing.T) {
 		err := c.MessageAgent(context.Background(), remoteBroker, "", "a1", "p1", "hi", false, nil)
 		assert.ErrorIs(t, err, ErrMessageDeferred)
 	})
+}
+
+// retryMockDispatcher is a mock that returns ErrMessageDeferred a configurable
+// number of times before succeeding (or returning a custom error).
+type retryMockDispatcher struct {
+	brokerMockDispatcher
+	deferCount int32
+	failErr    error
+	calls      atomic.Int32
+}
+
+func (d *retryMockDispatcher) DispatchAgentMessage(_ context.Context, agent *store.Agent, msg string, urgent bool, structuredMsg *messages.StructuredMessage) error {
+	n := d.calls.Add(1)
+	if int32(n) <= atomic.LoadInt32(&d.deferCount) {
+		return ErrMessageDeferred
+	}
+	if d.failErr != nil {
+		return d.failErr
+	}
+	return nil
+}
+
+func TestDispatchWithBrokerRetry_ImmediateSuccess(t *testing.T) {
+	d := &retryMockDispatcher{}
+	agent := &store.Agent{ID: "a1", Slug: "test"}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err := dispatchWithBrokerRetry(ctx, d, agent, "hello", false, nil)
+	assert.NoError(t, err)
+	assert.Equal(t, int32(1), d.calls.Load())
+}
+
+func TestDispatchWithBrokerRetry_RetryThenSuccess(t *testing.T) {
+	d := &retryMockDispatcher{deferCount: 3}
+	agent := &store.Agent{ID: "a1", Slug: "test"}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err := dispatchWithBrokerRetry(ctx, d, agent, "hello", false, nil)
+	assert.NoError(t, err)
+	assert.Equal(t, int32(4), d.calls.Load())
+}
+
+func TestDispatchWithBrokerRetry_Timeout(t *testing.T) {
+	d := &retryMockDispatcher{deferCount: 1000}
+	agent := &store.Agent{ID: "a1", Slug: "test"}
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	err := dispatchWithBrokerRetry(ctx, d, agent, "hello", false, nil)
+	assert.ErrorIs(t, err, ErrBrokerTimeout)
+}
+
+func TestDispatchWithBrokerRetry_NonTransientError(t *testing.T) {
+	nonTransient := errors.New("connection refused")
+	d := &retryMockDispatcher{failErr: nonTransient}
+	agent := &store.Agent{ID: "a1", Slug: "test"}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err := dispatchWithBrokerRetry(ctx, d, agent, "hello", false, nil)
+	assert.ErrorIs(t, err, nonTransient)
+	assert.Equal(t, int32(1), d.calls.Load())
 }

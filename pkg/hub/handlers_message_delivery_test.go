@@ -19,8 +19,10 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -436,5 +438,158 @@ func TestHandleProjectBroadcast_NoAgents(t *testing.T) {
 	}
 	if resp.Targeted != 0 {
 		t.Errorf("expected targeted 0, got %d", resp.Targeted)
+	}
+}
+
+// --- Stream D: Synchronous broker retry tests ---
+
+// errorDispatcher wraps brokerMockDispatcher to return a fixed error.
+type errorDispatcher struct {
+	brokerMockDispatcher
+	err        error
+	deferCount int32
+	calls      atomic.Int32
+}
+
+func (d *errorDispatcher) DispatchAgentMessage(_ context.Context, agent *store.Agent, msg string, urgent bool, structuredMsg *messages.StructuredMessage) error {
+	n := d.calls.Add(1)
+	if d.deferCount > 0 && int32(n) <= atomic.LoadInt32(&d.deferCount) {
+		return ErrMessageDeferred
+	}
+	if d.err != nil {
+		return d.err
+	}
+	return nil
+}
+
+func TestHandleAgentMessage_BrokerError502(t *testing.T) {
+	srv, s := testServer(t)
+	_, agentID := setupMessageTestAgent(t, s, string(state.PhaseRunning))
+
+	srv.SetDispatcher(&errorDispatcher{err: errors.New("connection refused")})
+
+	body := map[string]interface{}{
+		"structured_message": &messages.StructuredMessage{
+			Sender: "user:test", Recipient: "agent:msg-agent",
+			Msg: "hello", Type: messages.TypeInstruction,
+		},
+	}
+
+	rec := doRequest(t, srv, http.MethodPost, fmt.Sprintf("/api/v1/agents/%s/message", agentID), body)
+
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("expected 502 Bad Gateway, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var errResp ErrorResponse
+	json.NewDecoder(rec.Body).Decode(&errResp)
+	if errResp.Error.Code != ErrCodeRuntimeError {
+		t.Errorf("expected error code %q, got %q", ErrCodeRuntimeError, errResp.Error.Code)
+	}
+}
+
+func TestHandleAgentMessage_BrokerTimeout504(t *testing.T) {
+	srv, s := testServer(t)
+	_, agentID := setupMessageTestAgent(t, s, string(state.PhaseRunning))
+
+	// Always returns ErrMessageDeferred — the 30s retry deadline will be exceeded.
+	// We override the retry timeout via a very short request context.
+	srv.SetDispatcher(&errorDispatcher{deferCount: 10000})
+
+	body := map[string]interface{}{
+		"structured_message": &messages.StructuredMessage{
+			Sender: "user:test", Recipient: "agent:msg-agent",
+			Msg: "hello", Type: messages.TypeInstruction,
+		},
+	}
+
+	rec := doRequest(t, srv, http.MethodPost, fmt.Sprintf("/api/v1/agents/%s/message", agentID), body)
+
+	if rec.Code != http.StatusGatewayTimeout {
+		t.Fatalf("expected 504 Gateway Timeout, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var errResp ErrorResponse
+	json.NewDecoder(rec.Body).Decode(&errResp)
+	if errResp.Error.Code != ErrCodeBrokerTimeout {
+		t.Errorf("expected error code %q, got %q", ErrCodeBrokerTimeout, errResp.Error.Code)
+	}
+}
+
+func TestHandleAgentMessage_NoPendingRows(t *testing.T) {
+	srv, s := testServer(t)
+	_, agentID := setupMessageTestAgent(t, s, string(state.PhaseRunning))
+
+	srv.SetDispatcher(&brokerMockDispatcher{})
+
+	body := map[string]interface{}{
+		"structured_message": &messages.StructuredMessage{
+			Sender: "user:test", Recipient: "agent:msg-agent",
+			Msg: "hello no pending", Type: messages.TypeInstruction,
+		},
+	}
+
+	rec := doRequest(t, srv, http.MethodPost, fmt.Sprintf("/api/v1/agents/%s/message", agentID), body)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp MessageDeliveryResponse
+	json.NewDecoder(rec.Body).Decode(&resp)
+	if resp.MessageID == "" {
+		t.Fatal("expected non-empty message_id")
+	}
+
+	// Verify no pending messages exist — all new rows should be "dispatched"
+	count, err := s.CountStuckPendingMessages(context.Background(), time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatalf("failed to count pending messages: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("expected 0 pending messages, got %d", count)
+	}
+}
+
+func TestHandleAgentMessage_DispatchStateFailed(t *testing.T) {
+	srv, s := testServer(t)
+	_, agentID := setupMessageTestAgent(t, s, string(state.PhaseRunning))
+
+	srv.SetDispatcher(&errorDispatcher{err: errors.New("broker crashed")})
+
+	body := map[string]interface{}{
+		"structured_message": &messages.StructuredMessage{
+			Sender: "user:test", Recipient: "agent:msg-agent",
+			Msg: "should fail", Type: messages.TypeInstruction,
+		},
+	}
+
+	rec := doRequest(t, srv, http.MethodPost, fmt.Sprintf("/api/v1/agents/%s/message", agentID), body)
+
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("expected 502 Bad Gateway, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// List messages and verify the persisted message has dispatch_state=failed
+	msgs, err := s.ListMessages(context.Background(), store.MessageFilter{
+		AgentID: agentID,
+	}, store.ListOptions{Limit: 10})
+	if err != nil {
+		t.Fatalf("failed to list messages: %v", err)
+	}
+	if len(msgs.Items) == 0 {
+		t.Fatal("expected at least one persisted message")
+	}
+	found := false
+	for _, m := range msgs.Items {
+		if m.Msg == "should fail" {
+			found = true
+			if m.DispatchState != store.MessageDispatchFailed {
+				t.Errorf("expected dispatch_state %q, got %q", store.MessageDispatchFailed, m.DispatchState)
+			}
+		}
+	}
+	if !found {
+		t.Error("expected to find the 'should fail' message in store")
 	}
 }
