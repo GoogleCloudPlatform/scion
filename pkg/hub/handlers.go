@@ -2153,29 +2153,35 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	// Validate channel against registered channels
+	// Validate channel against registered channels.
+	// Fail closed: if broker proxy is unavailable, reject the message rather than
+	// silently skipping validation.
 	if req.Channel != "" {
-		if bp := s.GetMessageBrokerProxy(); bp != nil {
-			channels := bp.ListChannels()
-			found := false
-			for _, ch := range channels {
-				if ch.Name == req.Channel {
-					found = true
-					break
-				}
+		bp := s.GetMessageBrokerProxy()
+		if bp == nil {
+			writeError(w, http.StatusServiceUnavailable, "broker_unavailable",
+				"cannot validate channel: message broker is not available", nil)
+			return
+		}
+		channels := bp.ListChannels()
+		found := false
+		for _, ch := range channels {
+			if ch.Name == req.Channel {
+				found = true
+				break
 			}
-			if !found {
-				available := make([]string, len(channels))
-				for i, ch := range channels {
-					available[i] = ch.Name
-				}
-				if len(available) == 0 {
-					ValidationError(w, fmt.Sprintf("channel %q is not registered; no channels are currently available", req.Channel), nil)
-				} else {
-					ValidationError(w, fmt.Sprintf("channel %q is not registered; available channels: %s", req.Channel, strings.Join(available, ", ")), nil)
-				}
-				return
+		}
+		if !found {
+			available := make([]string, len(channels))
+			for i, ch := range channels {
+				available[i] = ch.Name
 			}
+			if len(available) == 0 {
+				ValidationError(w, fmt.Sprintf("channel %q is not registered; no channels are currently available", req.Channel), nil)
+			} else {
+				ValidationError(w, fmt.Sprintf("channel %q is not registered; available channels: %s", req.Channel, strings.Join(available, ", ")), nil)
+			}
+			return
 		}
 	}
 
@@ -2731,7 +2737,7 @@ func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anch
 	for i, r := range recipients {
 		recipientStrs[i] = r.String()
 	}
-	recipientsSet := messages.FormatSetRecipients(msg.Sender, recipientStrs)
+	recipientsSet := messages.FormatGroupRecipients(msg.Sender, recipientStrs)
 
 	groupID := api.NewUUID()
 	results := make([]GroupMessageRecipientResult, len(recipients))

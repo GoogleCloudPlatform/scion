@@ -193,14 +193,11 @@ func (s *messageService) ListChannels(ctx context.Context) ([]MessageChannel, er
 	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = resp.Body.Close() }()
-	if err := apiclient.CheckResponse(resp); err != nil {
-		return nil, err
-	}
-	var result struct {
+	type channelsResponse struct {
 		Channels []MessageChannel `json:"channels"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	result, err := apiclient.DecodeResponse[channelsResponse](resp)
+	if err != nil {
 		return nil, fmt.Errorf("decoding message channels: %w", err)
 	}
 	return result.Channels, nil

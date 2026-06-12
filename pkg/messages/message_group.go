@@ -133,7 +133,7 @@ func ParseSetRecipient(s string) ([]GroupRecipient, error) {
 	return ParseGroupRecipient(s)
 }
 
-// FormatGroupRecipients builds a set[...] string from a sender identity and a
+// FormatGroupRecipients builds a group[...] string from a sender identity and a
 // list of recipient identities. The sender is included as the first element so
 // that the full group is represented. All identities should be prefixed
 // (e.g. "user:alice", "agent:coder").
