@@ -20,7 +20,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -111,10 +113,23 @@ func (r *GCPSkillResolver) resolveOne(ctx context.Context, gcpRef *GCPSkillRef, 
 		return nil, err
 	}
 
+	if gcpRef.Version != "" && skill.Version != gcpRef.Version {
+		return nil, fmt.Errorf("requested version %q but GCP API returned %q", gcpRef.Version, skill.Version)
+	}
+
+	registryHost, err := urlHost(registry.Endpoint)
+	if err != nil {
+		return nil, fmt.Errorf("invalid registry endpoint: %w", err)
+	}
+
 	var resolvedFiles []ResolvedFile
 	var fileInfos []transfer.FileInfo
 
 	for _, f := range skill.Files {
+		if err := validateFileURL(f.URL, registryHost); err != nil {
+			return nil, fmt.Errorf("unsafe file URL for %s: %w", f.Path, err)
+		}
+
 		content, err := r.downloadFile(ctx, f.URL, token)
 		if err != nil {
 			return nil, fmt.Errorf("failed to download %s: %w", f.Path, err)
@@ -201,8 +216,9 @@ func (r *GCPSkillResolver) fetchSkillMetadata(ctx context.Context, resourceURL, 
 		return nil, fmt.Errorf("GCP API error (%d): %s", resp.StatusCode, string(body))
 	}
 
+	const maxMetadataSize = 1 * 1024 * 1024 // 1MB
 	var skill gcpSkillResponse
-	if err := json.NewDecoder(resp.Body).Decode(&skill); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxMetadataSize)).Decode(&skill); err != nil {
 		return nil, fmt.Errorf("failed to decode GCP API response: %w", err)
 	}
 
@@ -236,4 +252,71 @@ func (r *GCPSkillResolver) downloadFile(ctx context.Context, fileURL, token stri
 		return nil, fmt.Errorf("file exceeds maximum size of %d bytes", defaultMaxFileSize)
 	}
 	return content, nil
+}
+
+func urlHost(rawURL string) (string, error) {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return "", err
+	}
+	return u.Hostname(), nil
+}
+
+// validateFileURL checks that a file download URL is safe to fetch:
+// it must use HTTPS, share the same host as the registry endpoint,
+// and not target internal/link-local addresses.
+func validateFileURL(fileURL, registryHost string) error {
+	u, err := url.Parse(fileURL)
+	if err != nil {
+		return fmt.Errorf("invalid URL: %w", err)
+	}
+
+	host := u.Hostname()
+
+	if u.Scheme != "https" && !isLocalhost(host) {
+		return fmt.Errorf("HTTPS required for file downloads (got %s)", u.Scheme)
+	}
+
+	if isBlockedHost(host) {
+		return fmt.Errorf("file URL targets blocked address: %s", host)
+	}
+
+	if !strings.EqualFold(host, registryHost) {
+		return fmt.Errorf("file URL host %q does not match registry host %q", host, registryHost)
+	}
+
+	return nil
+}
+
+func isBlockedHost(host string) bool {
+	blocked := []string{"metadata.google.internal", "metadata.google.internal."}
+	for _, b := range blocked {
+		if strings.EqualFold(host, b) {
+			return true
+		}
+	}
+
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return false
+	}
+
+	// Link-local (169.254.x.x — includes GCP metadata 169.254.169.254)
+	if ip4 := ip.To4(); ip4 != nil && ip4[0] == 169 && ip4[1] == 254 {
+		return true
+	}
+
+	// RFC 1918
+	rfc1918 := []net.IPNet{
+		{IP: net.IP{10, 0, 0, 0}, Mask: net.CIDRMask(8, 32)},
+		{IP: net.IP{172, 16, 0, 0}, Mask: net.CIDRMask(12, 32)},
+		{IP: net.IP{192, 168, 0, 0}, Mask: net.CIDRMask(16, 32)},
+	}
+	for _, cidr := range rfc1918 {
+		if cidr.Contains(ip) {
+			return true
+		}
+	}
+
+	return false
 }

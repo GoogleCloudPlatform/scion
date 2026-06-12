@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -430,6 +431,129 @@ func TestGCPSkillResolver_AsAlias(t *testing.T) {
 	}
 	if result.Resolved[0].As != "custom-name" {
 		t.Errorf("As = %q, want %q", result.Resolved[0].As, "custom-name")
+	}
+}
+
+func TestGCPSkillResolver_VersionMismatch(t *testing.T) {
+	mux := http.NewServeMux()
+	var server *httptest.Server
+
+	mux.HandleFunc("/skills/my-skill", func(w http.ResponseWriter, _ *http.Request) {
+		json.NewEncoder(w).Encode(gcpSkillResponse{
+			Name:    "my-skill",
+			Version: "v3",
+			Files: []gcpSkillFile{
+				{Path: "SKILL.md", URL: server.URL + "/files/SKILL.md"},
+			},
+		})
+	})
+
+	server = httptest.NewServer(mux)
+	defer server.Close()
+
+	resolver := &GCPSkillResolver{
+		registryLookup: func(_ context.Context, _ string) (*RegistryLookupResult, error) {
+			return &RegistryLookupResult{
+				Name: "reg", Endpoint: server.URL + "/skills", Type: "gcp", Status: "active",
+			}, nil
+		},
+		httpClient:  server.Client(),
+		tokenSource: func(context.Context) (string, error) { return "tok", nil },
+	}
+
+	result, err := resolver.Resolve(context.Background(), []api.SkillReference{
+		{URI: "gcp-skill://reg/my-skill@v2"},
+	}, ResolveOpts{})
+	if err != nil {
+		t.Fatalf("Resolve() hard error: %v", err)
+	}
+	if len(result.Errors) != 1 {
+		t.Fatalf("got %d errors, want 1", len(result.Errors))
+	}
+	if !strings.Contains(result.Errors[0].Message, "v2") || !strings.Contains(result.Errors[0].Message, "v3") {
+		t.Errorf("error message should mention both versions, got: %s", result.Errors[0].Message)
+	}
+}
+
+func TestGCPSkillResolver_SSRFBlocked(t *testing.T) {
+	mux := http.NewServeMux()
+	var server *httptest.Server
+
+	mux.HandleFunc("/skills/evil-skill", func(w http.ResponseWriter, _ *http.Request) {
+		json.NewEncoder(w).Encode(gcpSkillResponse{
+			Name:    "evil-skill",
+			Version: "1.0.0",
+			Files: []gcpSkillFile{
+				{Path: "SKILL.md", URL: "http://169.254.169.254/computeMetadata/v1/"},
+			},
+		})
+	})
+
+	server = httptest.NewServer(mux)
+	defer server.Close()
+
+	resolver := &GCPSkillResolver{
+		registryLookup: func(_ context.Context, _ string) (*RegistryLookupResult, error) {
+			return &RegistryLookupResult{
+				Name: "reg", Endpoint: server.URL + "/skills", Type: "gcp", Status: "active",
+			}, nil
+		},
+		httpClient:  server.Client(),
+		tokenSource: func(context.Context) (string, error) { return "tok", nil },
+	}
+
+	result, err := resolver.Resolve(context.Background(), []api.SkillReference{
+		{URI: "gcp-skill://reg/evil-skill"},
+	}, ResolveOpts{})
+	if err != nil {
+		t.Fatalf("Resolve() hard error: %v", err)
+	}
+	if len(result.Errors) != 1 {
+		t.Fatalf("got %d errors, want 1", len(result.Errors))
+	}
+	if !strings.Contains(result.Errors[0].Message, "unsafe file URL") {
+		t.Errorf("error should mention unsafe file URL, got: %s", result.Errors[0].Message)
+	}
+}
+
+func TestGCPSkillResolver_SSRFCrossHost(t *testing.T) {
+	mux := http.NewServeMux()
+	var server *httptest.Server
+
+	mux.HandleFunc("/skills/cross-host", func(w http.ResponseWriter, _ *http.Request) {
+		json.NewEncoder(w).Encode(gcpSkillResponse{
+			Name:    "cross-host",
+			Version: "1.0.0",
+			Files: []gcpSkillFile{
+				{Path: "SKILL.md", URL: "https://evil.example.com/malicious"},
+			},
+		})
+	})
+
+	server = httptest.NewServer(mux)
+	defer server.Close()
+
+	resolver := &GCPSkillResolver{
+		registryLookup: func(_ context.Context, _ string) (*RegistryLookupResult, error) {
+			return &RegistryLookupResult{
+				Name: "reg", Endpoint: server.URL + "/skills", Type: "gcp", Status: "active",
+			}, nil
+		},
+		httpClient:  server.Client(),
+		tokenSource: func(context.Context) (string, error) { return "tok", nil },
+	}
+
+	result, err := resolver.Resolve(context.Background(), []api.SkillReference{
+		{URI: "gcp-skill://reg/cross-host"},
+	}, ResolveOpts{})
+	if err != nil {
+		t.Fatalf("Resolve() hard error: %v", err)
+	}
+	if len(result.Errors) != 1 {
+		t.Fatalf("got %d errors, want 1", len(result.Errors))
+	}
+	if !strings.Contains(result.Errors[0].Message, "does not match") {
+		t.Errorf("error should mention host mismatch, got: %s", result.Errors[0].Message)
 	}
 }
 
