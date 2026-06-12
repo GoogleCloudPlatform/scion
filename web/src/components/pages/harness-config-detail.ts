@@ -99,7 +99,7 @@ export class ScionPageHarnessConfigDetail extends LitElement {
 
   private fileBrowserDataSource: FileBrowserDataSource | null = null;
   private fileEditorDataSource: FileEditorDataSource | null = null;
-  private buildPollTimer: ReturnType<typeof setInterval> | null = null;
+  private buildPollTimer: ReturnType<typeof setTimeout> | null = null;
   private buildPollErrors = 0;
 
   static override styles = css`
@@ -531,13 +531,12 @@ export class ScionPageHarnessConfigDetail extends LitElement {
   private startBuildPolling(): void {
     if (this.buildPollTimer) return;
     this.buildPollErrors = 0;
-    this.buildPollTimer = setInterval(() => void this.pollBuildStatus(), 3000);
     void this.pollBuildStatus();
   }
 
   private stopBuildPolling(): void {
     if (this.buildPollTimer) {
-      clearInterval(this.buildPollTimer);
+      clearTimeout(this.buildPollTimer);
       this.buildPollTimer = null;
     }
   }
@@ -556,6 +555,8 @@ export class ScionPageHarnessConfigDetail extends LitElement {
           this.buildStatus = 'failed';
           this.buildError = 'Lost connection to build';
           this.stopBuildPolling();
+        } else if (this.buildRunning) {
+          this.buildPollTimer = setTimeout(() => void this.pollBuildStatus(), 3000);
         }
         return;
       }
@@ -572,6 +573,8 @@ export class ScionPageHarnessConfigDetail extends LitElement {
         if (run.status === 'completed') {
           await this.loadHarnessConfig();
         }
+      } else if (this.buildRunning) {
+        this.buildPollTimer = setTimeout(() => void this.pollBuildStatus(), 3000);
       }
     } catch {
       this.buildPollErrors++;
@@ -580,6 +583,8 @@ export class ScionPageHarnessConfigDetail extends LitElement {
         this.buildStatus = 'failed';
         this.buildError = 'Lost connection to build';
         this.stopBuildPolling();
+      } else if (this.buildRunning) {
+        this.buildPollTimer = setTimeout(() => void this.pollBuildStatus(), 3000);
       }
     }
   }

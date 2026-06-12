@@ -458,6 +458,7 @@ func (e *BuildHarnessConfigImageExecutor) Run(ctx context.Context, logger io.Wri
 	if v := params["registry"]; v != "" {
 		registry = v
 	}
+	registry = strings.TrimSuffix(registry, "/")
 
 	hc, err := e.store.GetHarnessConfig(ctx, harnessConfigID)
 	if err != nil {
@@ -495,6 +496,7 @@ func (e *BuildHarnessConfigImageExecutor) Run(ctx context.Context, logger io.Wri
 
 		destPath := filepath.Join(tmpDir, f.Path)
 		if !strings.HasPrefix(destPath, tmpDir+string(os.PathSeparator)) {
+			_ = reader.Close()
 			return fmt.Errorf("invalid file path %q: escapes build directory", f.Path)
 		}
 		if dir := filepath.Dir(destPath); dir != tmpDir {
