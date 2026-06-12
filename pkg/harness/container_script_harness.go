@@ -696,7 +696,11 @@ func StageCaptureAuthAssets(agentHome, configDirPath string, authMeta *config.Ha
 			if fileType == "" {
 				fileType = "file"
 			}
-			source := "~" + rf.TargetSuffix
+			suffix := rf.TargetSuffix
+			if !strings.HasPrefix(suffix, "/") {
+				suffix = "/" + suffix
+			}
+			source := "~" + suffix
 			creds = append(creds, credEntry{
 				Key:    rf.Name,
 				Source: source,

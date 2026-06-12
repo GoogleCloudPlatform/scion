@@ -56,7 +56,10 @@ def _load_config(bundle: str) -> list[dict[str, Any]]:
     if not os.path.isfile(config_path):
         return []
     with open(config_path, "r", encoding="utf-8") as f:
-        data = json.load(f)
+        try:
+            data = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            return []
     creds = data.get("credentials")
     if not isinstance(creds, list):
         return []
