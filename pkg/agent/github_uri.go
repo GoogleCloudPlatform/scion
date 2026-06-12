@@ -74,6 +74,51 @@ func parseGHShorthand(uri string) (*GitHubSkillRef, error) {
 	}, nil
 }
 
+// parseGitHubFullURL parses a full GitHub URL into a GitHubSkillRef.
+// Supports:
+//
+//	https://github.com/owner/repo/tree/ref/path/to/skill-name
+//	https://github.com/owner/repo/tree/ref/skills/skill-name
 func parseGitHubFullURL(uri string) (*GitHubSkillRef, error) {
-	return nil, fmt.Errorf("full GitHub URL parsing not yet implemented: %q", uri)
+	rest := uri
+	for _, prefix := range []string{"https://github.com/", "http://github.com/"} {
+		if strings.HasPrefix(rest, prefix) {
+			rest = strings.TrimPrefix(rest, prefix)
+			break
+		}
+	}
+
+	// Expected: owner/repo/tree/ref/path/to/skill-name
+	parts := strings.SplitN(rest, "/", 5)
+	if len(parts) < 5 || parts[2] != "tree" {
+		return nil, fmt.Errorf("invalid GitHub URL %q: expected https://github.com/owner/repo/tree/ref/path/to/skill", uri)
+	}
+
+	owner := parts[0]
+	repo := parts[1]
+	refAndPath := parts[3] + "/" + parts[4]
+
+	// Split ref from path: assume first segment is the ref.
+	// For ambiguous cases (multi-segment refs), use gh:// shorthand with @ref.
+	refParts := strings.SplitN(refAndPath, "/", 2)
+	if len(refParts) < 2 {
+		return nil, fmt.Errorf("invalid GitHub URL %q: missing skill path after ref", uri)
+	}
+	ref := refParts[0]
+	skillFullPath := refParts[1]
+
+	pathParts := strings.Split(skillFullPath, "/")
+	skillName := pathParts[len(pathParts)-1]
+	if skillName == "" {
+		return nil, fmt.Errorf("invalid GitHub URL %q: empty skill name", uri)
+	}
+
+	return &GitHubSkillRef{
+		Owner:     owner,
+		Repo:      repo,
+		SkillName: skillName,
+		Ref:       ref,
+		SkillPath: skillFullPath,
+		Raw:       uri,
+	}, nil
 }

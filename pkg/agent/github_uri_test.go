@@ -129,3 +129,89 @@ func TestParseGHShorthand(t *testing.T) {
 		})
 	}
 }
+
+func TestParseGitHubFullURL(t *testing.T) {
+	tests := []struct {
+		name      string
+		uri       string
+		want      *GitHubSkillRef
+		wantError bool
+	}{
+		{
+			name: "standard skills path",
+			uri:  "https://github.com/owner/repo/tree/main/skills/my-skill",
+			want: &GitHubSkillRef{
+				Owner:     "owner",
+				Repo:      "repo",
+				SkillName: "my-skill",
+				Ref:       "main",
+				SkillPath: "skills/my-skill",
+			},
+		},
+		{
+			name: "with tag ref",
+			uri:  "https://github.com/owner/repo/tree/v1.0/skills/my-skill",
+			want: &GitHubSkillRef{
+				Owner:     "owner",
+				Repo:      "repo",
+				SkillName: "my-skill",
+				Ref:       "v1.0",
+				SkillPath: "skills/my-skill",
+			},
+		},
+		{
+			name: "custom path",
+			uri:  "https://github.com/owner/repo/tree/abc123/custom/path/skill",
+			want: &GitHubSkillRef{
+				Owner:     "owner",
+				Repo:      "repo",
+				SkillName: "skill",
+				Ref:       "abc123",
+				SkillPath: "custom/path/skill",
+			},
+		},
+		{
+			name:      "missing tree segment",
+			uri:       "https://github.com/owner/repo",
+			wantError: true,
+		},
+		{
+			name:      "blob instead of tree",
+			uri:       "https://github.com/owner/repo/blob/main/file.go",
+			wantError: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ParseGitHubSkillURI(tt.uri)
+			if tt.wantError {
+				if err == nil {
+					t.Fatalf("expected error, got %+v", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got.Owner != tt.want.Owner {
+				t.Errorf("Owner = %q, want %q", got.Owner, tt.want.Owner)
+			}
+			if got.Repo != tt.want.Repo {
+				t.Errorf("Repo = %q, want %q", got.Repo, tt.want.Repo)
+			}
+			if got.SkillName != tt.want.SkillName {
+				t.Errorf("SkillName = %q, want %q", got.SkillName, tt.want.SkillName)
+			}
+			if got.Ref != tt.want.Ref {
+				t.Errorf("Ref = %q, want %q", got.Ref, tt.want.Ref)
+			}
+			if got.SkillPath != tt.want.SkillPath {
+				t.Errorf("SkillPath = %q, want %q", got.SkillPath, tt.want.SkillPath)
+			}
+			if got.Raw != tt.uri {
+				t.Errorf("Raw = %q, want %q", got.Raw, tt.uri)
+			}
+		})
+	}
+}
