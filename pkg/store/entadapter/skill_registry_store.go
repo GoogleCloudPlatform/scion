@@ -207,7 +207,6 @@ func (s *SkillRegistryStore) PinSkillHash(ctx context.Context, registryID string
 
 	e, err := tx.SkillRegistry.Query().
 		Where(entskillregistry.ID(uid)).
-		ForUpdate().
 		Only(ctx)
 	if err != nil {
 		return mapError(err)
