@@ -869,15 +869,19 @@ export class ScionPageSkillDetail extends LitElement {
     }
 
     return html`
-      <div class="version-selector">
+      <div class="version-selector" style="display: flex; align-items: center; gap: 0.75rem;">
         <sl-select
           size="small"
           .value=${this.selectedVersionForFiles}
           @sl-change=${(e: Event) => this.onFilesVersionChange(e)}
           style="max-width: 200px;"
+          placeholder="Select version"
         >
-          ${published.map((v) => html`<sl-option value=${v.version}>${v.version}</sl-option>`)}
+          ${published.map((v) => html`<sl-option value=${v.version}>v${v.version}</sl-option>`)}
         </sl-select>
+        ${!this.filesLoading && this.fileUrls.length > 0 ? html`
+          <span style="font-size: 0.875rem; color: var(--scion-text-muted, #64748b);">${this.fileUrls.length} file${this.fileUrls.length !== 1 ? 's' : ''}</span>
+        ` : nothing}
       </div>
 
       ${this.filesLoading ? html`
