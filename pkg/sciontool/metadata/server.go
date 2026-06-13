@@ -20,6 +20,8 @@ package metadata
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -27,6 +29,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -142,6 +145,9 @@ type Server struct {
 	healthMu     sync.Mutex
 	restartCount int
 	abandoned    bool
+
+	shutdownToken     string
+	shutdownTokenPath string
 }
 
 // authToken returns the current auth token, preferring the dynamic TokenFunc
@@ -200,10 +206,6 @@ func (s *Server) Start(ctx context.Context) error {
 	s.cancel = cancel
 
 	addr := fmt.Sprintf("127.0.0.1:%d", s.config.Port)
-	s.srv = &http.Server{
-		Addr:    addr,
-		Handler: s.buildMux(),
-	}
 
 	ln, err := net.Listen("tcp", addr)
 	if err != nil && errors.Is(err, syscall.EADDRINUSE) {
@@ -239,6 +241,16 @@ func (s *Server) Start(ctx context.Context) error {
 	if err != nil {
 		cancel()
 		return fmt.Errorf("metadata server listen: %w", err)
+	}
+
+	if err := s.ensureShutdownToken(); err != nil {
+		cancel()
+		ln.Close()
+		return fmt.Errorf("metadata server shutdown token: %w", err)
+	}
+	s.srv = &http.Server{
+		Addr:    addr,
+		Handler: s.buildMux(),
 	}
 
 	// Track this server so a future Start() can forcefully close it.
@@ -352,6 +364,11 @@ func (s *Server) Stop() {
 		s.srv.Shutdown(shutdownCtx)
 		shutdownCancel()
 	}
+	if s.shutdownTokenPath != "" {
+		if err := os.Remove(s.shutdownTokenPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			log.Debug("Failed to remove metadata shutdown token file %s: %v", s.shutdownTokenPath, err)
+		}
+	}
 
 	if s.cancel != nil {
 		s.cancel()
@@ -369,6 +386,12 @@ func (s *Server) shutdownExisting() {
 		return
 	}
 	req.Header.Set("Metadata-Flavor", "Google")
+	token, err := os.ReadFile(shutdownTokenPath(s.config.Port))
+	if err != nil {
+		log.Debug("Could not read metadata shutdown token for port %d: %v", s.config.Port, err)
+		return
+	}
+	req.Header.Set("X-Scion-Shutdown-Token", strings.TrimSpace(string(token)))
 	resp, err := client.Do(req)
 	if err != nil {
 		log.Debug("Could not reach existing metadata server for shutdown: %v", err)
@@ -385,6 +408,10 @@ func (s *Server) handleShutdown(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	if s.shutdownToken == "" || r.Header.Get("X-Scion-Shutdown-Token") != s.shutdownToken {
+		http.Error(w, "Forbidden", http.StatusForbidden)
+		return
+	}
 	log.Info("Shutdown requested via /_scion/shutdown, stopping metadata server")
 	w.WriteHeader(http.StatusOK)
 	fmt.Fprint(w, "shutting down")
@@ -392,6 +419,39 @@ func (s *Server) handleShutdown(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(50 * time.Millisecond)
 		s.Stop()
 	}()
+}
+
+func shutdownTokenPath(port int) string {
+	return filepath.Join(os.TempDir(), fmt.Sprintf("scion-metadata-shutdown-%d.token", port))
+}
+
+func (s *Server) ensureShutdownToken() error {
+	if s.shutdownToken != "" {
+		return nil
+	}
+	tokenBytes := make([]byte, 32)
+	if _, err := rand.Read(tokenBytes); err != nil {
+		return err
+	}
+	s.shutdownToken = hex.EncodeToString(tokenBytes)
+	s.shutdownTokenPath = shutdownTokenPath(s.config.Port)
+	return writeShutdownToken(s.shutdownTokenPath, s.shutdownToken)
+}
+
+func writeShutdownToken(path, token string) error {
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0600)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	if _, err := f.WriteString(token + "\n"); err != nil {
+		_ = os.Remove(path)
+		return err
+	}
+	return nil
 }
 
 func (s *Server) probeHealth() bool {
