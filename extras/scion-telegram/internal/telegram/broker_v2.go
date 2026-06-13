@@ -93,8 +93,8 @@ type TelegramBrokerV2 struct {
 
 	hostCallbacks plugin.HostCallbacks
 
-	errorCooldown          map[string]time.Time // key: "chatID:threadID:errorType" → last sent time
-	errorCooldownMu        sync.Mutex
+	errorCooldown           map[string]time.Time // key: "chatID:threadID:errorType" → last sent time
+	errorCooldownMu         sync.Mutex
 	errorCooldownCheckCount int
 }
 
