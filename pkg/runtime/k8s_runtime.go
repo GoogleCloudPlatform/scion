@@ -881,8 +881,12 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 	// Command Resolution
 	var cmd []string
 	var harnessArgs []string
-	if config.NoAuth && config.NoAuthMessage != "" {
-		harnessArgs = []string{"sh", "-c", fmt.Sprintf("printf '%%s\\n' %s; exec bash", shellQuote(config.NoAuthMessage))}
+	if config.NoAuth {
+		if config.NoAuthMessage != "" {
+			harnessArgs = []string{"sh", "-c", fmt.Sprintf("printf '%%s\\n' %s; exec bash", shellQuote(config.NoAuthMessage))}
+		} else {
+			harnessArgs = []string{"bash"}
+		}
 	} else if config.Harness != nil {
 		harnessArgs = config.Harness.GetCommand(config.Task, config.Resume, config.CommandArgs)
 	} else {
