@@ -910,6 +910,16 @@ export class ScionPageOnboarding extends LitElement {
       <h2>Container Images</h2>
       <p>Pull or build the container images for your selected harnesses.</p>
 
+      ${!this.runtimeAvailable ? html`
+        <div class="alert alert-warning">
+          <strong>No container runtime detected.</strong>
+          <p>
+            Install Docker or Podman to pull or build images. You can skip this
+            step and configure a runtime later.
+          </p>
+        </div>
+      ` : nothing}
+
       <div class="image-list">
         ${harnesses.map(h => {
           const s = this.imageStatuses.get(h);

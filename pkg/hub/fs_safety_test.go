@@ -20,12 +20,12 @@ import (
 	"context"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
-	"github.com/GoogleCloudPlatform/scion/pkg/store/sqlite"
 )
 
 func TestClassifyPath_NonExistent(t *testing.T) {
@@ -121,22 +121,16 @@ func TestClassifyPath_NotManaged(t *testing.T) {
 }
 
 func TestClassifyPath_AlreadyLinked(t *testing.T) {
-	s, err := sqlite.New(":memory:")
+	s, err := newTestStore(":memory:")
 	if err != nil {
-		if strings.Contains(err.Error(), "sqlite driver not registered") {
-			t.Skip("sqlite driver not registered")
-		}
 		t.Fatal(err)
 	}
 	ctx := context.Background()
-	if err := s.Migrate(ctx); err != nil {
-		t.Fatal(err)
-	}
 
 	dir := t.TempDir()
 
 	broker := &store.RuntimeBroker{
-		ID:     "broker_linked_test",
+		ID:     uuid.NewString(),
 		Name:   "test-broker",
 		Slug:   "test-broker",
 		Status: "online",
@@ -145,7 +139,7 @@ func TestClassifyPath_AlreadyLinked(t *testing.T) {
 		t.Fatal(err)
 	}
 	proj := &store.Project{
-		ID:      "proj_linked_test",
+		ID:      uuid.NewString(),
 		Slug:    "linked-test",
 		Name:    "Linked Test",
 		Created: time.Now(),
@@ -155,10 +149,11 @@ func TestClassifyPath_AlreadyLinked(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := s.AddProjectProvider(ctx, &store.ProjectProvider{
-		ProjectID: proj.ID,
-		BrokerID:  broker.ID,
-		LocalPath: dir,
-		Status:    "online",
+		ProjectID:  proj.ID,
+		BrokerID:   broker.ID,
+		BrokerName: broker.Name,
+		LocalPath:  dir,
+		Status:     "online",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -173,23 +168,17 @@ func TestClassifyPath_AlreadyLinked(t *testing.T) {
 }
 
 func TestClassifyPath_NotLinked(t *testing.T) {
-	s, err := sqlite.New(":memory:")
+	s, err := newTestStore(":memory:")
 	if err != nil {
-		if strings.Contains(err.Error(), "sqlite driver not registered") {
-			t.Skip("sqlite driver not registered")
-		}
 		t.Fatal(err)
 	}
 	ctx := context.Background()
-	if err := s.Migrate(ctx); err != nil {
-		t.Fatal(err)
-	}
 
 	linkedDir := t.TempDir()
 	otherDir := t.TempDir()
 
 	broker := &store.RuntimeBroker{
-		ID:     "broker_notlinked_test",
+		ID:     uuid.NewString(),
 		Name:   "test-broker-nl",
 		Slug:   "test-broker-nl",
 		Status: "online",
@@ -198,7 +187,7 @@ func TestClassifyPath_NotLinked(t *testing.T) {
 		t.Fatal(err)
 	}
 	proj := &store.Project{
-		ID:      "proj_notlinked_test",
+		ID:      uuid.NewString(),
 		Slug:    "notlinked-test",
 		Name:    "Not Linked Test",
 		Created: time.Now(),
@@ -208,10 +197,11 @@ func TestClassifyPath_NotLinked(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := s.AddProjectProvider(ctx, &store.ProjectProvider{
-		ProjectID: proj.ID,
-		BrokerID:  broker.ID,
-		LocalPath: linkedDir,
-		Status:    "online",
+		ProjectID:  proj.ID,
+		BrokerID:   broker.ID,
+		BrokerName: broker.Name,
+		LocalPath:  linkedDir,
+		Status:     "online",
 	}); err != nil {
 		t.Fatal(err)
 	}

@@ -229,7 +229,7 @@ func TestPrintWorkstationQuickstart(t *testing.T) {
 	r, w, _ := os.Pipe()
 	os.Stdout = w
 
-	printWorkstationQuickstart(dir, "127.0.0.1", 8080, true, true)
+	printWorkstationQuickstart(false, dir, "127.0.0.1", 8080, true, true)
 
 	w.Close()
 	os.Stdout = old
@@ -249,7 +249,7 @@ func TestPrintWorkstationQuickstart_NoWeb(t *testing.T) {
 	r, w, _ := os.Pipe()
 	os.Stdout = w
 
-	printWorkstationQuickstart(dir, "127.0.0.1", 8080, false, false)
+	printWorkstationQuickstart(false, dir, "127.0.0.1", 8080, false, false)
 
 	w.Close()
 	os.Stdout = old
@@ -269,7 +269,7 @@ func TestPrintWorkstationQuickstart_WildcardHost(t *testing.T) {
 	r, w, _ := os.Pipe()
 	os.Stdout = w
 
-	printWorkstationQuickstart(dir, "0.0.0.0", 9090, true, false)
+	printWorkstationQuickstart(false, dir, "0.0.0.0", 9090, true, false)
 
 	w.Close()
 	os.Stdout = old

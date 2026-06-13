@@ -582,6 +582,13 @@ func (p *eventBuilder) PublishDispatchDone(_ context.Context, dispatchID string)
 	})
 }
 
+// PublishRaw publishes an arbitrary event on the given subject. It is used by
+// workstation features (e.g. image-pull progress) that emit ad-hoc SSE events
+// not modeled by the typed Publish* methods.
+func (p *eventBuilder) PublishRaw(subject string, data interface{}) {
+	p.sink(subject, data)
+}
+
 // subjectMatchesPattern checks if a subject matches a NATS-style pattern.
 // '*' matches exactly one token, '>' matches one or more remaining tokens.
 // Tokens are dot-separated.
