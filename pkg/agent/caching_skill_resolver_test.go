@@ -52,7 +52,7 @@ func TestCachingSkillResolver_InjectsCache(t *testing.T) {
 
 	var capturedCtx context.Context
 	inner := &ctxCapturingResolver{
-		inner: &mockResolver{resolved: []ResolvedSkill{{Name: "s", Hash: "h"}}},
+		inner:   &mockResolver{resolved: []ResolvedSkill{{Name: "s", Hash: "h"}}},
 		capture: func(ctx context.Context) { capturedCtx = ctx },
 	}
 

@@ -31,10 +31,10 @@ type SkillURI struct {
 }
 
 const (
-	skillURIScheme   = "skill://"
-	defaultRegistry  = "scion"
-	defaultVersion   = "latest"
-	maxSkillNameLen  = 64
+	skillURIScheme  = "skill://"
+	defaultRegistry = "scion"
+	defaultVersion  = "latest"
+	maxSkillNameLen = 64
 )
 
 var validScopes = map[string]bool{

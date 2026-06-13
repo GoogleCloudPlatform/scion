@@ -59,7 +59,7 @@ type SkillWithCapabilities struct {
 
 // PublishVersionRequest is the request body for creating a skill version.
 type PublishVersionRequest struct {
-	Version string            `json:"version"`
+	Version string              `json:"version"`
 	Files   []FileUploadRequest `json:"files,omitempty"`
 }
 
@@ -779,7 +779,7 @@ func (s *Server) handleSkillUpload(w http.ResponseWriter, r *http.Request, skill
 	}
 
 	var req struct {
-		Version string            `json:"version"`
+		Version string              `json:"version"`
 		Files   []FileUploadRequest `json:"files"`
 	}
 	if err := readJSON(r, &req); err != nil {
