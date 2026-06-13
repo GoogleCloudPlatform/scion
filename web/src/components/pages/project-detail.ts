@@ -702,13 +702,13 @@ export class ScionPageProjectDetail extends LitElement {
     }
 
     // Read persisted phase filter
-    const storedPhase = localStorage.getItem('scion-filter-project-agents-phase');
+    const storedPhase = localStorage.getItem(`scion-filter-project-agents-phase-${this.projectId}`);
     if (storedPhase === 'running' || storedPhase === 'stopped' || storedPhase === 'suspended' || storedPhase === 'error') {
       this.phaseFilter = storedPhase;
     }
 
     // Read persisted sort
-    const storedSort = localStorage.getItem('scion-sort-project-agents');
+    const storedSort = localStorage.getItem(`scion-sort-project-agents-${this.projectId}`);
     if (storedSort) {
       try {
         const parsed = JSON.parse(storedSort);
@@ -1064,10 +1064,10 @@ export class ScionPageProjectDetail extends LitElement {
           cmp = getAgentDisplayStatus(a).localeCompare(getAgentDisplayStatus(b));
           break;
         case 'created':
-          cmp = (a.created || '').localeCompare(b.created || '');
+          cmp = (a.created || a.createdAt || '').localeCompare(b.created || b.createdAt || '');
           break;
         case 'updated':
-          cmp = (a.updated || '').localeCompare(b.updated || '');
+          cmp = (a.updated || a.updatedAt || '').localeCompare(b.updated || b.updatedAt || '');
           break;
       }
       return this.sortDir === 'asc' ? cmp : -cmp;
@@ -1079,9 +1079,9 @@ export class ScionPageProjectDetail extends LitElement {
     if (this.phaseFilter === phase) return;
     this.phaseFilter = phase;
     if (phase) {
-      localStorage.setItem('scion-filter-project-agents-phase', phase);
+      localStorage.setItem(`scion-filter-project-agents-phase-${this.projectId}`, phase);
     } else {
-      localStorage.removeItem('scion-filter-project-agents-phase');
+      localStorage.removeItem(`scion-filter-project-agents-phase-${this.projectId}`);
     }
   }
 
@@ -1092,7 +1092,7 @@ export class ScionPageProjectDetail extends LitElement {
       this.sortField = field;
       this.sortDir = field === 'name' ? 'asc' : 'desc';
     }
-    localStorage.setItem('scion-sort-project-agents', JSON.stringify({ field: this.sortField, dir: this.sortDir }));
+    localStorage.setItem(`scion-sort-project-agents-${this.projectId}`, JSON.stringify({ field: this.sortField, dir: this.sortDir }));
   }
 
   private sortIndicator(field: AgentSortField): string {
@@ -1653,7 +1653,7 @@ export class ScionPageProjectDetail extends LitElement {
             size="small"
           ></scion-status-badge>
         </td>
-        <td class="hide-mobile">${agent.updated ? this.formatRelativeTime(agent.updated) : '\u2014'}</td>
+        <td class="hide-mobile">${(agent.updated || agent.updatedAt) ? this.formatRelativeTime(agent.updated || agent.updatedAt!) : '\u2014'}</td>
         <td class="hide-mobile">
           <span class="task-cell">${agent.taskSummary || '\u2014'}</span>
         </td>
