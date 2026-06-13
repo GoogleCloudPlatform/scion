@@ -176,6 +176,20 @@ func (s *Store) GetTask(id string) (*Task, error) {
 	return t, nil
 }
 
+// TouchTask updates only the updated_at timestamp without changing state.
+// Use this for content messages that should keep the task alive for the
+// janitor without overwriting the current state (e.g. input-required).
+func (s *Store) TouchTask(id string) error {
+	_, err := s.db.Exec(
+		`UPDATE tasks SET updated_at = ? WHERE id = ?`,
+		time.Now(), id,
+	)
+	if err != nil {
+		return fmt.Errorf("touch task: %w", err)
+	}
+	return nil
+}
+
 // UpdateTaskState updates a task's state and updated_at timestamp.
 // Terminal states (completed, failed, canceled, rejected) are protected:
 // once a task reaches a terminal state, further updates are silently ignored.

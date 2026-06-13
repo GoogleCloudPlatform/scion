@@ -68,7 +68,7 @@ func withMetrics(m *Metrics) func(*lifecycleTestOpts) {
 
 // seedTask creates and registers a task in both the store and the bridge's
 // activeTasks map, mimicking what SendMessage does for non-blocking sends.
-func seedTask(t *testing.T, b *Bridge, store *state.Store, taskID, projectID, agentSlug string) {
+func seedLifecycleTask(t *testing.T, b *Bridge, store *state.Store, taskID, projectID, agentSlug string) {
 	t.Helper()
 	now := time.Now()
 	if err := store.CreateTask(&state.Task{
@@ -92,7 +92,7 @@ func seedTask(t *testing.T, b *Bridge, store *state.Store, taskID, projectID, ag
 func TestContentMessageDoesNotCompleteTask(t *testing.T) {
 	b, store := newLifecycleTestBridge(t)
 	taskID := "content-no-complete-1"
-	seedTask(t, b, store, taskID, "proj1", "agent-a")
+	seedLifecycleTask(t, b, store, taskID, "proj1", "agent-a")
 
 	// Subscribe to the task's stream.
 	ch, cleanup, err := b.streams.Subscribe(taskID)
@@ -161,10 +161,82 @@ func TestContentMessageDoesNotCompleteTask(t *testing.T) {
 	}
 }
 
+func TestContentMessagePreservesInputRequiredState(t *testing.T) {
+	b, store := newLifecycleTestBridge(t)
+	taskID := "content-preserves-ir-1"
+	seedLifecycleTask(t, b, store, taskID, "proj1", "agent-a")
+
+	ch, cleanup, err := b.streams.Subscribe(taskID)
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+	defer cleanup()
+
+	topic := "scion.project.proj1.user.test-user.messages"
+
+	// Transition to input-required via state-change.
+	stateMsg := &messages.StructuredMessage{
+		Version:   1,
+		Timestamp: time.Now().UTC().Format(time.RFC3339),
+		Sender:    "agent:agent-a",
+		Recipient: "user:test-user",
+		Msg:       "WAITING_FOR_INPUT",
+		Type:      messages.TypeStateChange,
+		Metadata:  map[string]string{"a2aTaskId": taskID},
+	}
+	if err := b.HandleBrokerMessage(context.Background(), topic, stateMsg); err != nil {
+		t.Fatalf("HandleBrokerMessage(state): %v", err)
+	}
+	time.Sleep(50 * time.Millisecond)
+
+	// Send a content message while in input-required state.
+	contentMsg := &messages.StructuredMessage{
+		Version:   1,
+		Timestamp: time.Now().UTC().Format(time.RFC3339),
+		Sender:    "agent:agent-a",
+		Recipient: "user:test-user",
+		Msg:       "Please provide more details",
+		Type:      messages.TypeAssistantReply,
+		Metadata:  map[string]string{"a2aTaskId": taskID},
+	}
+	if err := b.HandleBrokerMessage(context.Background(), topic, contentMsg); err != nil {
+		t.Fatalf("HandleBrokerMessage(content): %v", err)
+	}
+	time.Sleep(100 * time.Millisecond)
+
+	// State must still be input-required — content must not overwrite it.
+	task, err := store.GetTask(taskID)
+	if err != nil {
+		t.Fatalf("GetTask: %v", err)
+	}
+	if task.State != TaskStateInputRequired {
+		t.Errorf("task state = %q, want %q — content message must not overwrite input-required",
+			task.State, TaskStateInputRequired)
+	}
+
+	// The streamed status update for the content message must also carry input-required.
+	var events []StreamEvent
+	drainLoop(ch, &events)
+
+	var foundContentStatus bool
+	for _, ev := range events {
+		if ev.StatusUpdate != nil && ev.StatusUpdate.Status.Message != nil {
+			if ev.StatusUpdate.Status.State != TaskStateInputRequired {
+				t.Errorf("content StatusUpdate.State = %q, want %q",
+					ev.StatusUpdate.Status.State, TaskStateInputRequired)
+			}
+			foundContentStatus = true
+		}
+	}
+	if !foundContentStatus {
+		t.Error("no StatusUpdate with message content found in stream events")
+	}
+}
+
 func TestContentMessageBroadcastsWorkingNonFinal(t *testing.T) {
 	b, store := newLifecycleTestBridge(t)
 	taskID := "broadcast-working-1"
-	seedTask(t, b, store, taskID, "proj1", "agent-a")
+	seedLifecycleTask(t, b, store, taskID, "proj1", "agent-a")
 
 	ch, cleanup, err := b.streams.Subscribe(taskID)
 	if err != nil {
@@ -223,7 +295,7 @@ func TestContentMessageBroadcastsWorkingNonFinal(t *testing.T) {
 func TestMultipleContentMessagesKeepTaskAlive(t *testing.T) {
 	b, store := newLifecycleTestBridge(t)
 	taskID := "multi-content-1"
-	seedTask(t, b, store, taskID, "proj1", "agent-a")
+	seedLifecycleTask(t, b, store, taskID, "proj1", "agent-a")
 
 	ch, cleanup, err := b.streams.Subscribe(taskID)
 	if err != nil {
@@ -290,7 +362,7 @@ func TestMultipleContentMessagesKeepTaskAlive(t *testing.T) {
 func TestStateChangeCompletedAfterContentClosesTask(t *testing.T) {
 	b, store := newLifecycleTestBridge(t)
 	taskID := "complete-after-content-1"
-	seedTask(t, b, store, taskID, "proj1", "agent-a")
+	seedLifecycleTask(t, b, store, taskID, "proj1", "agent-a")
 
 	ch, cleanup, err := b.streams.Subscribe(taskID)
 	if err != nil {
@@ -366,7 +438,7 @@ func TestStateChangeCompletedAfterContentClosesTask(t *testing.T) {
 func TestStateChangeInputRequiredKeepsTaskAlive(t *testing.T) {
 	b, store := newLifecycleTestBridge(t)
 	taskID := "input-required-1"
-	seedTask(t, b, store, taskID, "proj1", "agent-a")
+	seedLifecycleTask(t, b, store, taskID, "proj1", "agent-a")
 
 	ch, cleanup, err := b.streams.Subscribe(taskID)
 	if err != nil {
@@ -427,7 +499,7 @@ func TestStateChangeInputRequiredKeepsTaskAlive(t *testing.T) {
 func TestStateChangeFailedClosesTask(t *testing.T) {
 	b, store := newLifecycleTestBridge(t)
 	taskID := "failed-close-1"
-	seedTask(t, b, store, taskID, "proj1", "agent-a")
+	seedLifecycleTask(t, b, store, taskID, "proj1", "agent-a")
 
 	failMsg := &messages.StructuredMessage{
 		Version:   1,
@@ -586,7 +658,7 @@ func TestBlockingSendMessageErrorCleansUpActiveTask(t *testing.T) {
 func TestFullMultiTurnLifecycle(t *testing.T) {
 	b, store := newLifecycleTestBridge(t)
 	taskID := "multi-turn-full-1"
-	seedTask(t, b, store, taskID, "proj1", "agent-a")
+	seedLifecycleTask(t, b, store, taskID, "proj1", "agent-a")
 
 	ch, cleanup, err := b.streams.Subscribe(taskID)
 	if err != nil {
@@ -717,7 +789,7 @@ func TestFullMultiTurnLifecycle(t *testing.T) {
 func TestSlugFallbackContentDoesNotCloseTask(t *testing.T) {
 	b, store := newLifecycleTestBridge(t)
 	taskID := "slug-fallback-1"
-	seedTask(t, b, store, taskID, "proj1", "agent-a")
+	seedLifecycleTask(t, b, store, taskID, "proj1", "agent-a")
 
 	// Send a content message WITHOUT a2aTaskId (slug-based correlation).
 	contentMsg := &messages.StructuredMessage{
@@ -814,7 +886,7 @@ func TestContentMessageDoesNotIncrementCompletedMetric(t *testing.T) {
 	b, store := newLifecycleTestBridge(t, withMetrics(metrics))
 
 	taskID := "no-metric-1"
-	seedTask(t, b, store, taskID, "proj1", "agent-a")
+	seedLifecycleTask(t, b, store, taskID, "proj1", "agent-a")
 
 	contentMsg := &messages.StructuredMessage{
 		Version:   1,
@@ -843,7 +915,7 @@ func TestContentMessageDoesNotIncrementCompletedMetric(t *testing.T) {
 func TestContentAfterCompletedIsIgnored(t *testing.T) {
 	b, store := newLifecycleTestBridge(t)
 	taskID := "content-after-complete-1"
-	seedTask(t, b, store, taskID, "proj1", "agent-a")
+	seedLifecycleTask(t, b, store, taskID, "proj1", "agent-a")
 	topic := "scion.project.proj1.user.test-user.messages"
 
 	// First complete the task via state-change.
@@ -898,7 +970,7 @@ func TestContentAfterCompletedIsIgnored(t *testing.T) {
 func TestDoubleCompletedIsIdempotent(t *testing.T) {
 	b, store := newLifecycleTestBridge(t)
 	taskID := "double-complete-1"
-	seedTask(t, b, store, taskID, "proj1", "agent-a")
+	seedLifecycleTask(t, b, store, taskID, "proj1", "agent-a")
 	topic := "scion.project.proj1.user.test-user.messages"
 
 	for i := 0; i < 2; i++ {
@@ -935,7 +1007,7 @@ func TestDoubleCompletedIsIdempotent(t *testing.T) {
 func TestNonBlockingSendKeepsTaskAlive(t *testing.T) {
 	b, store := newLifecycleTestBridge(t)
 	taskID := "nonblock-alive-1"
-	seedTask(t, b, store, taskID, "proj1", "agent-a")
+	seedLifecycleTask(t, b, store, taskID, "proj1", "agent-a")
 	topic := "scion.project.proj1.user.test-user.messages"
 
 	// Send content message to a task registered the non-blocking way.
@@ -970,7 +1042,7 @@ func TestNonBlockingSendKeepsTaskAlive(t *testing.T) {
 func TestStateChangeWorkingDoesNotCloseTask(t *testing.T) {
 	b, store := newLifecycleTestBridge(t)
 	taskID := "working-nonterminal-1"
-	seedTask(t, b, store, taskID, "proj1", "agent-a")
+	seedLifecycleTask(t, b, store, taskID, "proj1", "agent-a")
 	topic := "scion.project.proj1.user.test-user.messages"
 
 	// WORKING state-change is non-terminal.
@@ -1005,8 +1077,8 @@ func TestMultipleAgentTasksContentDoesNotClose(t *testing.T) {
 	b, store := newLifecycleTestBridge(t)
 	taskID1 := "multi-agent-task-1"
 	taskID2 := "multi-agent-task-2"
-	seedTask(t, b, store, taskID1, "proj1", "agent-a")
-	seedTask(t, b, store, taskID2, "proj1", "agent-a")
+	seedLifecycleTask(t, b, store, taskID1, "proj1", "agent-a")
+	seedLifecycleTask(t, b, store, taskID2, "proj1", "agent-a")
 	topic := "scion.project.proj1.user.test-user.messages"
 
 	// Send content without a2aTaskId — slug fallback should hit both tasks.
@@ -1091,7 +1163,7 @@ func TestStateChangeTerminalityTableDriven(t *testing.T) {
 		t.Run(tc.activity, func(t *testing.T) {
 			b, store := newLifecycleTestBridge(t)
 			taskID := "term-" + tc.activity
-			seedTask(t, b, store, taskID, "proj1", "agent-a")
+			seedLifecycleTask(t, b, store, taskID, "proj1", "agent-a")
 
 			ch, cleanup, err := b.streams.Subscribe(taskID)
 			if err != nil {
@@ -1153,7 +1225,7 @@ func TestStateChangeTerminalityTableDriven(t *testing.T) {
 func TestTerminalStateClosesStreamChannel(t *testing.T) {
 	b, store := newLifecycleTestBridge(t)
 	taskID := "stream-close-1"
-	seedTask(t, b, store, taskID, "proj1", "agent-a")
+	seedLifecycleTask(t, b, store, taskID, "proj1", "agent-a")
 
 	ch, cleanup, err := b.streams.Subscribe(taskID)
 	if err != nil {
@@ -1208,7 +1280,7 @@ func TestTerminalStateClosesStreamChannel(t *testing.T) {
 func TestTerminalStateFailedClosesStreamChannel(t *testing.T) {
 	b, store := newLifecycleTestBridge(t)
 	taskID := "stream-close-fail-1"
-	seedTask(t, b, store, taskID, "proj1", "agent-a")
+	seedLifecycleTask(t, b, store, taskID, "proj1", "agent-a")
 
 	ch, cleanup, err := b.streams.Subscribe(taskID)
 	if err != nil {
@@ -1249,7 +1321,7 @@ func TestTerminalStateFailedClosesStreamChannel(t *testing.T) {
 func TestDispatchToWaiterPersistsTerminalState(t *testing.T) {
 	b, store := newLifecycleTestBridge(t)
 	taskID := "waiter-persist-terminal-1"
-	seedTask(t, b, store, taskID, "proj1", "agent-a")
+	seedLifecycleTask(t, b, store, taskID, "proj1", "agent-a")
 
 	// Set up a blocking waiter as SendMessage would.
 	responseCh := make(chan *messages.StructuredMessage, 1)
@@ -1292,7 +1364,7 @@ func TestDispatchToWaiterPersistsTerminalState(t *testing.T) {
 func TestDispatchToWaiterDoesNotPersistNonTerminalState(t *testing.T) {
 	b, store := newLifecycleTestBridge(t)
 	taskID := "waiter-no-persist-nonterminal-1"
-	seedTask(t, b, store, taskID, "proj1", "agent-a")
+	seedLifecycleTask(t, b, store, taskID, "proj1", "agent-a")
 
 	responseCh := make(chan *messages.StructuredMessage, 1)
 	b.addWaiter(taskID, &waiter{
@@ -1327,7 +1399,7 @@ func TestDispatchToWaiterDoesNotPersistNonTerminalState(t *testing.T) {
 func TestContentMessageRefreshesTimestamp(t *testing.T) {
 	b, store := newLifecycleTestBridge(t)
 	taskID := "timestamp-refresh-1"
-	seedTask(t, b, store, taskID, "proj1", "agent-a")
+	seedLifecycleTask(t, b, store, taskID, "proj1", "agent-a")
 
 	// Record the initial timestamp.
 	taskBefore, err := store.GetTask(taskID)

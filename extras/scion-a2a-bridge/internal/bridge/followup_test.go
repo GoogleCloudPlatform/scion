@@ -37,15 +37,15 @@ import (
 
 // mockAgentService implements hubclient.AgentService for testing.
 type mockAgentService struct {
-	sendFn func(ctx context.Context, agentID string, msg *messages.StructuredMessage, interrupt, notify, wake bool) error
+	sendFn func(ctx context.Context, agentID string, msg *messages.StructuredMessage, interrupt, notify, wake bool) (*hubclient.MessageResponse, error)
 	listFn func(ctx context.Context, opts *hubclient.ListAgentsOptions) (*hubclient.ListAgentsResponse, error)
 }
 
-func (m *mockAgentService) SendStructuredMessage(ctx context.Context, agentID string, msg *messages.StructuredMessage, interrupt, notify, wake bool) error {
+func (m *mockAgentService) SendStructuredMessage(ctx context.Context, agentID string, msg *messages.StructuredMessage, interrupt, notify, wake bool) (*hubclient.MessageResponse, error) {
 	if m.sendFn != nil {
 		return m.sendFn(ctx, agentID, msg, interrupt, notify, wake)
 	}
-	return nil
+	return nil, nil
 }
 
 func (m *mockAgentService) List(ctx context.Context, opts *hubclient.ListAgentsOptions) (*hubclient.ListAgentsResponse, error) {
@@ -88,8 +88,8 @@ func (m *mockAgentService) StopAll(ctx context.Context) (*hubclient.StopAllRespo
 func (m *mockAgentService) SendMessage(ctx context.Context, agentID string, message string, interrupt bool) error {
 	return fmt.Errorf("not implemented")
 }
-func (m *mockAgentService) BroadcastMessage(ctx context.Context, msg *messages.StructuredMessage, interrupt bool) error {
-	return fmt.Errorf("not implemented")
+func (m *mockAgentService) BroadcastMessage(ctx context.Context, msg *messages.StructuredMessage, interrupt bool) (*hubclient.BroadcastResponse, error) {
+	return nil, fmt.Errorf("not implemented")
 }
 func (m *mockAgentService) SubmitEnv(ctx context.Context, agentID string, req *hubclient.SubmitEnvRequest) (*hubclient.CreateAgentResponse, error) {
 	return nil, fmt.Errorf("not implemented")
@@ -138,7 +138,9 @@ func (m *mockHubClient) Schedules(string) hubclient.ScheduleService { return nil
 func (m *mockHubClient) GCPServiceAccounts(string) hubclient.GCPServiceAccountService { return nil }
 func (m *mockHubClient) Messages() hubclient.MessageService       { return nil }
 func (m *mockHubClient) AllowList() hubclient.AllowListService     { return nil }
-func (m *mockHubClient) Invites() hubclient.InviteService          { return nil }
+func (m *mockHubClient) Invites() hubclient.InviteService               { return nil }
+func (m *mockHubClient) Skills() hubclient.SkillService                 { return nil }
+func (m *mockHubClient) SkillRegistries() hubclient.SkillRegistryService { return nil }
 func (m *mockHubClient) Health(ctx context.Context) (*hubclient.HealthResponse, error) {
 	return &hubclient.HealthResponse{}, nil
 }
@@ -205,12 +207,12 @@ func TestSendFollowUp_ValidTaskRoutesMessage(t *testing.T) {
 	}
 
 	agents := &mockAgentService{
-		sendFn: func(ctx context.Context, agentID string, msg *messages.StructuredMessage, interrupt, notify, wake bool) error {
+		sendFn: func(ctx context.Context, agentID string, msg *messages.StructuredMessage, interrupt, notify, wake bool) (*hubclient.MessageResponse, error) {
 			captured.mu.Lock()
 			defer captured.mu.Unlock()
 			captured.agentID = agentID
 			captured.msg = msg
-			return nil
+			return nil, nil
 		},
 	}
 	b, store := newFollowUpTestBridge(t, agents)
@@ -332,8 +334,8 @@ func TestSendFollowUp_WrongAgentReturnsError(t *testing.T) {
 
 func TestSendFollowUp_UpdatesTaskStateToWorking(t *testing.T) {
 	agents := &mockAgentService{
-		sendFn: func(ctx context.Context, agentID string, msg *messages.StructuredMessage, interrupt, notify, wake bool) error {
-			return nil
+		sendFn: func(ctx context.Context, agentID string, msg *messages.StructuredMessage, interrupt, notify, wake bool) (*hubclient.MessageResponse, error) {
+			return nil, nil
 		},
 	}
 	b, store := newFollowUpTestBridge(t, agents)
@@ -357,8 +359,8 @@ func TestSendFollowUp_UpdatesTaskStateToWorking(t *testing.T) {
 func TestSendFollowUp_BlockingTimeout_CleansUpActiveTask(t *testing.T) {
 	// Create a send function that succeeds but never triggers a response.
 	agents := &mockAgentService{
-		sendFn: func(ctx context.Context, agentID string, msg *messages.StructuredMessage, interrupt, notify, wake bool) error {
-			return nil
+		sendFn: func(ctx context.Context, agentID string, msg *messages.StructuredMessage, interrupt, notify, wake bool) (*hubclient.MessageResponse, error) {
+			return nil, nil
 		},
 	}
 
@@ -422,8 +424,8 @@ func TestSendFollowUp_BlockingTimeout_CleansUpActiveTask(t *testing.T) {
 func TestSendFollowUp_BlockingSendFailure_CleansUpActiveTask(t *testing.T) {
 	sendErr := fmt.Errorf("hub unreachable")
 	agents := &mockAgentService{
-		sendFn: func(ctx context.Context, agentID string, msg *messages.StructuredMessage, interrupt, notify, wake bool) error {
-			return sendErr
+		sendFn: func(ctx context.Context, agentID string, msg *messages.StructuredMessage, interrupt, notify, wake bool) (*hubclient.MessageResponse, error) {
+			return nil, sendErr
 		},
 	}
 	b, store := newFollowUpTestBridge(t, agents)
@@ -455,9 +457,9 @@ func TestSendFollowUp_BlockingSendFailure_CleansUpActiveTask(t *testing.T) {
 func TestSendFollowUp_NonBlocking_RegistersActiveTask(t *testing.T) {
 	sendCh := make(chan struct{})
 	agents := &mockAgentService{
-		sendFn: func(ctx context.Context, agentID string, msg *messages.StructuredMessage, interrupt, notify, wake bool) error {
+		sendFn: func(ctx context.Context, agentID string, msg *messages.StructuredMessage, interrupt, notify, wake bool) (*hubclient.MessageResponse, error) {
 			<-sendCh // Block until test releases
-			return nil
+			return nil, nil
 		},
 	}
 	b, store := newFollowUpTestBridge(t, agents)
@@ -503,8 +505,8 @@ func TestSendFollowUp_NonBlocking_RegistersActiveTask(t *testing.T) {
 
 func TestSendFollowUp_NonBlocking_SendFailure_CleansUp(t *testing.T) {
 	agents := &mockAgentService{
-		sendFn: func(ctx context.Context, agentID string, msg *messages.StructuredMessage, interrupt, notify, wake bool) error {
-			return fmt.Errorf("connection refused")
+		sendFn: func(ctx context.Context, agentID string, msg *messages.StructuredMessage, interrupt, notify, wake bool) (*hubclient.MessageResponse, error) {
+			return nil, fmt.Errorf("connection refused")
 		},
 	}
 	b, store := newFollowUpTestBridge(t, agents)
@@ -550,8 +552,8 @@ func TestSendFollowUp_NonBlocking_SendFailure_CleansUp(t *testing.T) {
 
 func TestSendFollowUp_BlockingSuccess_CleansUpActiveTask(t *testing.T) {
 	agents := &mockAgentService{
-		sendFn: func(ctx context.Context, agentID string, msg *messages.StructuredMessage, interrupt, notify, wake bool) error {
-			return nil
+		sendFn: func(ctx context.Context, agentID string, msg *messages.StructuredMessage, interrupt, notify, wake bool) (*hubclient.MessageResponse, error) {
+			return nil, nil
 		},
 	}
 	b, store := newFollowUpTestBridge(t, agents)
@@ -636,8 +638,8 @@ func TestSendFollowUp_BlockingSuccess_CleansUpActiveTask(t *testing.T) {
 
 func TestSendFollowUp_BlockingContextCancel_CleansUp(t *testing.T) {
 	agents := &mockAgentService{
-		sendFn: func(ctx context.Context, agentID string, msg *messages.StructuredMessage, interrupt, notify, wake bool) error {
-			return nil
+		sendFn: func(ctx context.Context, agentID string, msg *messages.StructuredMessage, interrupt, notify, wake bool) (*hubclient.MessageResponse, error) {
+			return nil, nil
 		},
 	}
 	b, store := newFollowUpTestBridge(t, agents)
@@ -698,8 +700,8 @@ func TestSendFollowUp_BlockingContextCancel_CleansUp(t *testing.T) {
 
 func TestSendFollowUp_InputRequiredToWorking(t *testing.T) {
 	agents := &mockAgentService{
-		sendFn: func(ctx context.Context, agentID string, msg *messages.StructuredMessage, interrupt, notify, wake bool) error {
-			return nil
+		sendFn: func(ctx context.Context, agentID string, msg *messages.StructuredMessage, interrupt, notify, wake bool) (*hubclient.MessageResponse, error) {
+			return nil, nil
 		},
 	}
 	b, store := newFollowUpTestBridge(t, agents)
@@ -725,8 +727,8 @@ func TestSendFollowUp_InputRequiredToWorking(t *testing.T) {
 
 func TestSendFollowUp_SubmittedStateAllowed(t *testing.T) {
 	agents := &mockAgentService{
-		sendFn: func(ctx context.Context, agentID string, msg *messages.StructuredMessage, interrupt, notify, wake bool) error {
-			return nil
+		sendFn: func(ctx context.Context, agentID string, msg *messages.StructuredMessage, interrupt, notify, wake bool) (*hubclient.MessageResponse, error) {
+			return nil, nil
 		},
 	}
 	b, store := newFollowUpTestBridge(t, agents)
@@ -742,11 +744,11 @@ func TestSendFollowUp_ResolvesAgentIDViaLookup(t *testing.T) {
 	var mu sync.Mutex
 	var capturedAgentID string
 	agents := &mockAgentService{
-		sendFn: func(ctx context.Context, agentID string, msg *messages.StructuredMessage, interrupt, notify, wake bool) error {
+		sendFn: func(ctx context.Context, agentID string, msg *messages.StructuredMessage, interrupt, notify, wake bool) (*hubclient.MessageResponse, error) {
 			mu.Lock()
 			defer mu.Unlock()
 			capturedAgentID = agentID
-			return nil
+			return nil, nil
 		},
 		listFn: func(ctx context.Context, opts *hubclient.ListAgentsOptions) (*hubclient.ListAgentsResponse, error) {
 			return &hubclient.ListAgentsResponse{
@@ -802,11 +804,11 @@ func TestHandleSendMessage_PassesTaskIDToSendMessage(t *testing.T) {
 	var mu sync.Mutex
 	var capturedMeta map[string]string
 	agents := &mockAgentService{
-		sendFn: func(ctx context.Context, agentID string, msg *messages.StructuredMessage, interrupt, notify, wake bool) error {
+		sendFn: func(ctx context.Context, agentID string, msg *messages.StructuredMessage, interrupt, notify, wake bool) (*hubclient.MessageResponse, error) {
 			mu.Lock()
 			defer mu.Unlock()
 			capturedMeta = msg.Metadata
-			return nil
+			return nil, nil
 		},
 	}
 
@@ -980,8 +982,8 @@ func TestHandleSendMessage_NoTaskID_RoutesToNewTask(t *testing.T) {
 				},
 			}, nil
 		},
-		sendFn: func(ctx context.Context, agentID string, msg *messages.StructuredMessage, interrupt, notify, wake bool) error {
-			return nil
+		sendFn: func(ctx context.Context, agentID string, msg *messages.StructuredMessage, interrupt, notify, wake bool) (*hubclient.MessageResponse, error) {
+			return nil, nil
 		},
 	}
 	cfg := &Config{
@@ -1051,11 +1053,11 @@ func TestSendFollowUp_ConcurrentFollowUps_SameTask(t *testing.T) {
 	var mu sync.Mutex
 	sendCount := 0
 	agents := &mockAgentService{
-		sendFn: func(ctx context.Context, agentID string, msg *messages.StructuredMessage, interrupt, notify, wake bool) error {
+		sendFn: func(ctx context.Context, agentID string, msg *messages.StructuredMessage, interrupt, notify, wake bool) (*hubclient.MessageResponse, error) {
 			mu.Lock()
 			defer mu.Unlock()
 			sendCount++
-			return nil
+			return nil, nil
 		},
 	}
 	b, store := newFollowUpTestBridge(t, agents)
@@ -1110,9 +1112,9 @@ func TestSendFollowUp_MessageContentTranslated(t *testing.T) {
 	// Verify the A2A parts are correctly translated to Scion format.
 	var capturedMsg *messages.StructuredMessage
 	agents := &mockAgentService{
-		sendFn: func(ctx context.Context, agentID string, msg *messages.StructuredMessage, interrupt, notify, wake bool) error {
+		sendFn: func(ctx context.Context, agentID string, msg *messages.StructuredMessage, interrupt, notify, wake bool) (*hubclient.MessageResponse, error) {
 			capturedMsg = msg
-			return nil
+			return nil, nil
 		},
 	}
 	b, store := newFollowUpTestBridge(t, agents)

@@ -408,11 +408,11 @@ func (b *Bridge) sendFollowUp(ctx context.Context, projectSlug, agentSlug, taskI
 	// Re-request broker subscriptions in case the broker reconnected since
 	// the original task was created (subscriptions may have been lost).
 	if b.broker != nil {
-		pattern := fmt.Sprintf("scion.project.%s.user.%s.messages", task.ProjectID, b.config.Hub.User)
+		pattern := projectcompat.UserTopic(task.ProjectID, b.config.Hub.User)
 		if err := b.broker.RequestSubscription(pattern); err != nil {
 			b.log.Warn("failed to re-request subscription for follow-up", "pattern", pattern, "error", err)
 		}
-		legacyPattern := fmt.Sprintf("scion.grove.%s.user.%s.messages", task.ProjectID, b.config.Hub.User)
+		legacyPattern := projectcompat.LegacyUserTopic(task.ProjectID, b.config.Hub.User)
 		if err := b.broker.RequestSubscription(legacyPattern); err != nil {
 			b.log.Warn("failed to re-request legacy subscription for follow-up", "pattern", legacyPattern, "error", err)
 		}
@@ -430,7 +430,7 @@ func (b *Bridge) sendFollowUp(ctx context.Context, projectSlug, agentSlug, taskI
 		defer b.removeWaiter(taskID)
 		defer b.unregisterActiveTask(taskID, aKey)
 
-		if err := b.hubClient.Agents().SendStructuredMessage(ctx, agentID, scionMsg, false, false, false); err != nil {
+		if _, err := b.hubClient.Agents().SendStructuredMessage(ctx, agentID, scionMsg, false, false, false); err != nil {
 			b.failFollowUpTask(taskID)
 			return nil, fmt.Errorf("send follow-up to agent: %w", err)
 		}
@@ -471,7 +471,7 @@ func (b *Bridge) sendFollowUp(ctx context.Context, projectSlug, agentSlug, taskI
 		defer b.wg.Done()
 		sendCtx, cancel := context.WithTimeout(b.shutdownCtx, 30*time.Second)
 		defer cancel()
-		if err := b.hubClient.Agents().SendStructuredMessage(sendCtx, agentID, scionMsg, false, false, false); err != nil {
+		if _, err := b.hubClient.Agents().SendStructuredMessage(sendCtx, agentID, scionMsg, false, false, false); err != nil {
 			b.log.Error("non-blocking follow-up send failed", "error", err, "task_id", taskID)
 			b.failFollowUpTask(taskID)
 			b.unregisterActiveTask(taskID, aKey)
@@ -758,9 +758,19 @@ func (b *Bridge) dispatchToActiveTask(ctx context.Context, taskID, agentSlug str
 	// Task lifecycle is driven by state-change messages, not content.
 	// Touch the DB timestamp so the janitor doesn't reap active tasks
 	// whose only recent activity is content messages.
+	// Use TouchTask (not UpdateTaskState) to preserve the current state —
+	// content messages must not overwrite input-required.
 	a2aMsg, artifacts := TranslateScionToA2A(msg)
 
-	if err := b.store.UpdateTaskState(taskID, TaskStateWorking); err != nil {
+	currentState := TaskStateWorking
+	if task, err := b.store.GetTask(taskID); err != nil {
+		b.log.Error("failed to get task for content message",
+			"task_id", taskID, "error", err)
+	} else if task != nil {
+		currentState = task.State
+	}
+
+	if err := b.store.TouchTask(taskID); err != nil {
 		b.log.Error("failed to refresh task timestamp for content message",
 			"task_id", taskID, "error", err)
 	}
@@ -779,7 +789,7 @@ func (b *Bridge) dispatchToActiveTask(ctx context.Context, taskID, agentSlug str
 		StatusUpdate: &TaskStatusUpdate{
 			TaskID: taskID,
 			Status: TaskStatus{
-				State:   TaskStateWorking,
+				State:   currentState,
 				Message: &a2aMsg,
 			},
 			Final: false,
