@@ -23,10 +23,14 @@
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
+import type { Capabilities } from '../../shared/types.js';
+import { can } from '../../shared/types.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 
 @customElement('scion-page-skill-create')
 export class ScionPageSkillCreate extends LitElement {
+  @state() private loading = true;
+  @state() private canCreate = false;
   @state() private submitting = false;
   @state() private error: string | null = null;
   @state() private name = '';
@@ -159,6 +163,26 @@ export class ScionPageSkillCreate extends LitElement {
     }
   `;
 
+  override connectedCallback(): void {
+    super.connectedCallback();
+    void this.checkCapabilities();
+  }
+
+  private async checkCapabilities(): Promise<void> {
+    this.loading = true;
+    try {
+      const res = await apiFetch('/api/v1/skills');
+      if (res.ok) {
+        const data = (await res.json()) as { _capabilities?: Capabilities };
+        this.canCreate = can(data._capabilities, 'create');
+      }
+    } catch {
+      // fail-closed
+    } finally {
+      this.loading = false;
+    }
+  }
+
   private get parsedTags(): string[] {
     if (!this.tagsInput.trim()) return [];
     return this.tagsInput
@@ -224,6 +248,35 @@ export class ScionPageSkillCreate extends LitElement {
   }
 
   override render() {
+    if (this.loading) {
+      return html`
+        <div style="display: flex; flex-direction: column; align-items: center; padding: 4rem 2rem; color: var(--scion-text-muted, #64748b);">
+          <sl-spinner style="font-size: 2rem; margin-bottom: 1rem;"></sl-spinner>
+          <p>Loading...</p>
+        </div>
+      `;
+    }
+
+    if (!this.canCreate) {
+      return html`
+        <a href="/skills" class="back-link">
+          <sl-icon name="arrow-left"></sl-icon>
+          Back to Skills
+        </a>
+        <div style="text-align: center; padding: 3rem 2rem; background: var(--scion-surface, #ffffff); border: 1px solid var(--scion-border, #e2e8f0); border-radius: var(--scion-radius-lg, 0.75rem);">
+          <sl-icon name="shield-lock" style="font-size: 3rem; color: var(--scion-text-muted, #64748b); margin-bottom: 1rem;"></sl-icon>
+          <h2 style="font-size: 1.25rem; font-weight: 600; color: var(--scion-text, #1e293b); margin: 0 0 0.5rem 0;">Access Denied</h2>
+          <p style="color: var(--scion-text-muted, #64748b); margin: 0 0 1rem 0;">You do not have permission to create skills.</p>
+          <a href="/skills" style="text-decoration: none;">
+            <sl-button variant="primary">
+              <sl-icon slot="prefix" name="arrow-left"></sl-icon>
+              Back to Skills
+            </sl-button>
+          </a>
+        </div>
+      `;
+    }
+
     return html`
       <a href="/skills" class="back-link">
         <sl-icon name="arrow-left"></sl-icon>

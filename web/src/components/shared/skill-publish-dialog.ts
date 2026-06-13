@@ -396,13 +396,14 @@ export class ScionSkillPublishDialog extends LitElement {
     }
   }
 
-  private async uploadFiles(uploadUrls: SkillUploadUrl[]): Promise<void> {
+  private async uploadFiles(uploadUrls: SkillUploadUrl[], indices?: number[]): Promise<void> {
     const concurrency = 4;
-    let index = 0;
+    const queue = indices ?? Array.from({ length: this.selectedFiles.length }, (_, i) => i);
+    let queuePos = 0;
 
     const uploadOne = async (): Promise<void> => {
-      while (index < this.selectedFiles.length) {
-        const i = index++;
+      while (queuePos < queue.length) {
+        const i = queue[queuePos++];
         const sf = this.selectedFiles[i];
         const urlInfo = uploadUrls.find((u) => u.path === sf.path);
         if (!urlInfo) {
@@ -459,7 +460,7 @@ export class ScionSkillPublishDialog extends LitElement {
       }
     };
 
-    const workers = Array.from({ length: Math.min(concurrency, this.selectedFiles.length) }, () => uploadOne());
+    const workers = Array.from({ length: Math.min(concurrency, queue.length) }, () => uploadOne());
     await Promise.all(workers);
   }
 
@@ -473,7 +474,7 @@ export class ScionSkillPublishDialog extends LitElement {
       .filter((x) => x.result.status === 'failed');
 
     try {
-      const filesPayload = failedFiles.map((x) => ({ path: x.file.path, size: x.file.size }));
+      const filesPayload = failedFiles.map((x) => ({ path: x.file.path, size: x.file.file.size }));
       const createRes = await apiFetch(`/api/v1/skills/${this.skillId}/versions`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -489,12 +490,15 @@ export class ScionSkillPublishDialog extends LitElement {
 
       // Reset failed to pending
       for (const f of failedFiles) {
-        this.uploadResults = this.uploadResults.map((r, ri) =>
-          ri === f.index ? { ...r, status: 'pending' as const, error: undefined } : r
-        );
+        this.uploadResults = this.uploadResults.map((r, ri) => {
+          if (ri !== f.index) return r;
+          const { error: _, ...rest } = r;
+          return { ...rest, status: 'pending' as const };
+        });
       }
 
-      await this.uploadFiles(uploadUrls);
+      const failedIndices = failedFiles.map((f) => f.index);
+      await this.uploadFiles(uploadUrls, failedIndices);
 
       const stillFailed = this.uploadResults.filter((r) => r.status === 'failed');
       if (stillFailed.length > 0) {

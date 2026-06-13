@@ -42,7 +42,7 @@ export class ScionPageAdminSkillRegistryDetail extends LitElement {
 
   // Edit mode
   @state() private editing = false;
-  @state() private editForm: Partial<{ name: string; endpoint: string; description: string; type: string; trustLevel: string; resolvePath: string; authToken: string }> = {};
+  @state() private editForm: Partial<{ endpoint: string; description: string; trustLevel: string; resolvePath: string; authToken: string }> = {};
   @state() private saving = false;
 
   // Pinned hashes
@@ -327,10 +327,8 @@ export class ScionPageAdminSkillRegistryDetail extends LitElement {
   private startEditing(): void {
     if (!this.registry) return;
     this.editForm = {
-      name: this.registry.name,
       endpoint: this.registry.endpoint,
       description: this.registry.description || '',
-      type: this.registry.type,
       trustLevel: this.registry.trustLevel,
       resolvePath: this.registry.resolvePath || '',
       authToken: '',
@@ -348,10 +346,8 @@ export class ScionPageAdminSkillRegistryDetail extends LitElement {
     this.saving = true;
     try {
       const body: Record<string, unknown> = {};
-      if (this.editForm.name !== undefined && this.editForm.name !== this.registry.name) body.name = this.editForm.name;
       if (this.editForm.endpoint !== undefined && this.editForm.endpoint !== this.registry.endpoint) body.endpoint = this.editForm.endpoint;
       if (this.editForm.description !== undefined) body.description = this.editForm.description;
-      if (this.editForm.type !== undefined && this.editForm.type !== this.registry.type) body.type = this.editForm.type;
       if (this.editForm.trustLevel !== undefined && this.editForm.trustLevel !== this.registry.trustLevel) body.trustLevel = this.editForm.trustLevel;
       if (this.editForm.resolvePath !== undefined) body.resolvePath = this.editForm.resolvePath;
       if (this.editForm.authToken) body.authToken = this.editForm.authToken;
@@ -586,10 +582,11 @@ export class ScionPageAdminSkillRegistryDetail extends LitElement {
         </div>
         <div class="edit-field">
           <label>Name</label>
-          <sl-input
-            .value=${this.editForm.name || ''}
-            @sl-input=${(e: Event) => { this.editForm = { ...this.editForm, name: (e.target as HTMLElement & { value: string }).value }; }}
-          ></sl-input>
+          <span class="info-value">${this.registry!.name}</span>
+        </div>
+        <div class="edit-field">
+          <label>Type</label>
+          <span class="info-value"><span class="type-badge">${this.registry!.type}</span></span>
         </div>
         <div class="edit-field">
           <label>Endpoint</label>
@@ -597,16 +594,6 @@ export class ScionPageAdminSkillRegistryDetail extends LitElement {
             .value=${this.editForm.endpoint || ''}
             @sl-input=${(e: Event) => { this.editForm = { ...this.editForm, endpoint: (e.target as HTMLElement & { value: string }).value }; }}
           ></sl-input>
-        </div>
-        <div class="edit-field">
-          <label>Type</label>
-          <sl-select
-            .value=${this.editForm.type || 'hub'}
-            @sl-change=${(e: Event) => { this.editForm = { ...this.editForm, type: (e.target as HTMLElement & { value: string }).value }; }}
-          >
-            <sl-option value="hub">Hub</sl-option>
-            <sl-option value="gcp">GCP</sl-option>
-          </sl-select>
         </div>
         <div class="edit-field">
           <label>Trust Level</label>
@@ -624,6 +611,7 @@ export class ScionPageAdminSkillRegistryDetail extends LitElement {
             .value=${this.editForm.description || ''}
             @sl-input=${(e: Event) => { this.editForm = { ...this.editForm, description: (e.target as HTMLElement & { value: string }).value }; }}
             rows="2"
+            help-text="Once set, this field cannot be cleared."
           ></sl-textarea>
         </div>
         <div class="edit-field">
@@ -631,6 +619,7 @@ export class ScionPageAdminSkillRegistryDetail extends LitElement {
           <sl-input
             .value=${this.editForm.resolvePath || ''}
             @sl-input=${(e: Event) => { this.editForm = { ...this.editForm, resolvePath: (e.target as HTMLElement & { value: string }).value }; }}
+            help-text="Once set, this field cannot be cleared."
           ></sl-input>
         </div>
         <div class="edit-field">

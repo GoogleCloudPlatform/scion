@@ -761,6 +761,7 @@ export class ScionPageSkillDetail extends LitElement {
             .value=${this.editForm.description || ''}
             @sl-input=${(e: Event) => { this.editForm = { ...this.editForm, description: (e.target as HTMLElement & { value: string }).value }; }}
             rows="3"
+            help-text="Once set, this field cannot be cleared."
           ></sl-textarea>
         </div>
         <div class="edit-field">
@@ -920,7 +921,13 @@ export class ScionPageSkillDetail extends LitElement {
                       : '—'}
                   </td>
                   <td style="text-align: right">
-                    <sl-button size="small" variant="default" outline @click=${() => window.open(f.url, '_blank')}>
+                    <sl-button size="small" variant="default" outline @click=${() => {
+                      const a = document.createElement('a');
+                      a.href = f.url;
+                      a.target = '_blank';
+                      a.rel = 'noopener noreferrer';
+                      a.click();
+                    }}>
                       <sl-icon slot="prefix" name="download"></sl-icon>
                       Download
                     </sl-button>
