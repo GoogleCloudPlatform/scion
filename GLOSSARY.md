@@ -230,6 +230,25 @@ A time-based trigger that fires an action — sending a message or dispatching (
 _Avoid_: cron job (recurring only), scheduled message (too narrow), reminder, timer
 _See also_: Dispatch
 
+## Observability
+
+Scion produces two distinct families of metrics. They serve different audiences, use different prefixes, and flow through different pipelines — but both export to the same Cloud Monitoring backend.
+
+**Infrastructure metrics**:
+Operational health metrics for Scion as a system — the Hub process, its database connections, dispatch pipeline, broker authentication, and GCP token minting. These answer "is Scion itself healthy?" and are consumed by platform operators. Prefixes: `scion.hub.*`, `scion.db.*`, `scion.dispatch.*`. Produced by the Hub process; exported directly to Cloud Monitoring via an OTel MeterProvider with a GCP exporter.
+_Avoid_: system metrics, platform metrics, server metrics
+_See also_: Agent metrics (the other family)
+
+**Agent metrics**:
+Telemetry about what agents and their harnesses are doing — token usage, tool calls, model API latency, session counts, and cost signals. These answer "what are the agents doing and what do they cost?" and are consumed by users and project owners. Prefixes: `gen_ai.*`, `agent.*` (following OpenTelemetry Generative AI semantic conventions). Produced inside agent containers by the harness and sciontool; exported to Cloud Monitoring via the telemetry pipeline (`pkg/sciontool/telemetry`).
+_Avoid_: harness metrics, user metrics, LLM metrics
+_See also_: Infrastructure metrics (the other family), Telemetry pipeline
+
+**Telemetry pipeline**:
+The in-container OTLP receiver and forwarding pipeline (`pkg/sciontool/telemetry`) that collects traces, metrics, and logs from the harness and exports them to a cloud backend (GCP Cloud Monitoring, Cloud Trace, Cloud Logging). Requires the `scion-telemetry-gcp-credentials` secret for cloud export; runs in local-only mode without it.
+_Avoid_: metrics pipeline, collector, OTel collector
+_See also_: Agent metrics
+
 ## Potential Future Additions
 
 Terms that recur in the codebase and may warrant canonical entries, but are **not yet defined** here. Listed so they aren't lost; promote to full entries (verified against the code) as the glossary matures.
