@@ -771,6 +771,67 @@ export interface PolicyConditions {
   delegatedFromGroup?: string;
 }
 
+// ---------------------------------------------------------------------------
+// Skills
+// ---------------------------------------------------------------------------
+
+export type SkillScope = 'core' | 'global' | 'project' | 'user';
+export type SkillVisibility = 'public' | 'private';
+export type SkillVersionStatus = 'draft' | 'published' | 'deprecated' | 'archived';
+
+export interface Skill {
+  id: string;
+  name: string;
+  slug: string;
+  description?: string;
+  tags?: string[];
+  scope: SkillScope;
+  scopeId?: string;
+  status: string;
+  ownerId?: string;
+  createdBy?: string;
+  visibility: SkillVisibility;
+  created: string;
+  updated: string;
+  _capabilities?: Capabilities;
+}
+
+export interface SkillVersion {
+  id: string;
+  skillId: string;
+  version: string;
+  status: SkillVersionStatus;
+  contentHash?: string;
+  files?: SkillFile[];
+  publisherId?: string;
+  deprecationMessage?: string;
+  replacementUri?: string;
+  downloadCount: number;
+  created: string;
+}
+
+export interface SkillFile {
+  path: string;
+  size: number;
+  hash?: string;
+  mode?: string;
+}
+
+export interface SkillUploadUrl {
+  path: string;
+  url: string;
+  method: string;
+  headers?: Record<string, string>;
+  expires: string;
+}
+
+export interface SkillDownloadUrl {
+  path: string;
+  url: string;
+  size: number;
+  hash?: string;
+}
+
 /**
  * Policy effect: allow or deny.
  */

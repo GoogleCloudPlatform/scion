@@ -829,6 +829,10 @@ func resolveAPIPath(urlPath string) string {
 	case strings.HasPrefix(p, "/projects/") && strings.Count(p, "/") == 2:
 		// /projects/{id} -> /api/v1/projects/{id}
 		return "/api/v1" + p
+	case p == "/skills":
+		return "/api/v1/skills"
+	case strings.HasPrefix(p, "/skills/") && strings.Count(p, "/") == 2:
+		return "/api/v1" + p
 	default:
 		return ""
 	}

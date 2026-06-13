@@ -62,6 +62,7 @@ const USED_ICONS = [
   'clipboard',
   'clipboard-check',
   'clock',
+  'cloud-arrow-down',
   'clock-history',
   'code',
   'code-square',

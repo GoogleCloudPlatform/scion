@@ -133,6 +133,11 @@ const ROUTES: RouteConfig[] = [
   { pattern: /^\/agents$/, tag: 'scion-page-agents', load: () => import('../components/pages/agents.js') },
   { pattern: /^\/brokers$/, tag: 'scion-page-brokers', load: () => import('../components/pages/brokers.js') },
   { pattern: /^\/brokers\/[^/]+$/, tag: 'scion-page-broker-detail', load: () => import('../components/pages/broker-detail.js') },
+  { pattern: /^\/skills$/, tag: 'scion-page-skills', load: () => import('../components/pages/skills.js') },
+  { pattern: /^\/skills\/new$/, tag: 'scion-page-skill-create', load: () => import('../components/pages/skill-create.js') },
+  { pattern: /^\/skills\/[^/]+$/, tag: 'scion-page-skill-detail', load: () => import('../components/pages/skill-detail.js') },
+  { pattern: /^\/admin\/skill-registries$/, tag: 'scion-page-admin-skill-registries', load: () => import('../components/pages/admin-skill-registries.js') },
+  { pattern: /^\/admin\/skill-registries\/[^/]+$/, tag: 'scion-page-admin-skill-registry-detail', load: () => import('../components/pages/admin-skill-registry-detail.js') },
   { pattern: /^\/admin\/scheduler$/, tag: 'scion-page-admin-scheduler', load: () => import('../components/pages/admin-scheduler.js') },
   { pattern: /^\/admin\/users$/, tag: 'scion-page-admin-users', load: () => import('../components/pages/admin-users.js') },
   { pattern: /^\/admin\/groups$/, tag: 'scion-page-admin-groups', load: () => import('../components/pages/admin-groups.js') },
@@ -175,7 +180,7 @@ const PROFILE_ROUTES = new Set(['scion-page-profile-env-vars', 'scion-page-profi
 /**
  * Routes that require admin role. Non-admin users are redirected to dashboard.
  */
-const ADMIN_ROUTES = new Set(['scion-page-settings', 'scion-page-admin-scheduler', 'scion-page-admin-maintenance', 'scion-page-admin-users', 'scion-page-admin-groups', 'scion-page-admin-group-detail', 'scion-page-admin-server-config']);
+const ADMIN_ROUTES = new Set(['scion-page-settings', 'scion-page-admin-scheduler', 'scion-page-admin-maintenance', 'scion-page-admin-users', 'scion-page-admin-groups', 'scion-page-admin-group-detail', 'scion-page-admin-server-config', 'scion-page-admin-skill-registries', 'scion-page-admin-skill-registry-detail']);
 
 /**
  * Initialize the client-side application
