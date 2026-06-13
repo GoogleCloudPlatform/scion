@@ -18,6 +18,8 @@ import (
 	"context"
 	"encoding/json"
 
+	"entgo.io/ent/dialect"
+
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	entskillregistry "github.com/GoogleCloudPlatform/scion/pkg/ent/skillregistry"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -205,9 +207,15 @@ func (s *SkillRegistryStore) PinSkillHash(ctx context.Context, registryID string
 	}
 	defer tx.Rollback()
 
-	e, err := tx.SkillRegistry.Query().
-		Where(entskillregistry.ID(uid)).
-		Only(ctx)
+	query := tx.SkillRegistry.Query().
+		Where(entskillregistry.ID(uid))
+	// ForUpdate prevents lost updates from concurrent PinSkillHash calls on
+	// Postgres (read-modify-write on PinnedHashes JSON). SQLite does not
+	// support SELECT ... FOR UPDATE but serialises writes at the engine level.
+	if s.client.Driver().Dialect() == dialect.Postgres {
+		query = query.ForUpdate()
+	}
+	e, err := query.Only(ctx)
 	if err != nil {
 		return mapError(err)
 	}
