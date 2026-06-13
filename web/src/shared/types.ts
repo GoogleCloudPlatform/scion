@@ -832,6 +832,26 @@ export interface SkillDownloadUrl {
   hash?: string;
 }
 
+// Skill Registry types (admin only)
+
+export type SkillRegistryStatus = 'active' | 'disabled';
+export type SkillRegistryTrustLevel = 'trusted' | 'pinned';
+export type SkillRegistryType = 'hub' | 'gcp';
+
+export interface SkillRegistry {
+  id: string;
+  name: string;
+  endpoint: string;
+  description?: string;
+  type: SkillRegistryType;
+  trustLevel: SkillRegistryTrustLevel;
+  resolvePath?: string;
+  status: SkillRegistryStatus;
+  createdBy?: string;
+  created: string;
+  updated: string;
+}
+
 /**
  * Policy effect: allow or deny.
  */

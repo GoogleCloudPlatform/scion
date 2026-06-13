@@ -237,6 +237,64 @@ func (s *SkillRegistryStore) PinSkillHash(ctx context.Context, registryID string
 	return mapError(tx.Commit())
 }
 
+func (s *SkillRegistryStore) UnpinSkillHash(ctx context.Context, registryID string, uri string) error {
+	uid, err := parseUUID(registryID)
+	if err != nil {
+		return store.ErrNotFound
+	}
+
+	tx, err := s.client.Tx(ctx)
+	if err != nil {
+		return mapError(err)
+	}
+	defer tx.Rollback()
+
+	query := tx.SkillRegistry.Query().
+		Where(entskillregistry.ID(uid))
+	if s.client.Driver().Dialect() == dialect.Postgres {
+		query = query.ForUpdate()
+	}
+	e, err := query.Only(ctx)
+	if err != nil {
+		return mapError(err)
+	}
+
+	hashes := make(map[string]string)
+	if e.PinnedHashes != "" {
+		_ = json.Unmarshal([]byte(e.PinnedHashes), &hashes)
+	}
+	delete(hashes, uri)
+
+	b, _ := json.Marshal(hashes)
+	_, err = tx.SkillRegistry.UpdateOneID(uid).
+		SetPinnedHashes(string(b)).
+		Save(ctx)
+	if err != nil {
+		return mapError(err)
+	}
+
+	return mapError(tx.Commit())
+}
+
+func (s *SkillRegistryStore) ListPinnedHashes(ctx context.Context, registryID string) (map[string]string, error) {
+	uid, err := parseUUID(registryID)
+	if err != nil {
+		return nil, store.ErrNotFound
+	}
+	e, err := s.client.SkillRegistry.Get(ctx, uid)
+	if err != nil {
+		return nil, mapError(err)
+	}
+
+	hashes := make(map[string]string)
+	if e.PinnedHashes != "" {
+		if err := json.Unmarshal([]byte(e.PinnedHashes), &hashes); err != nil {
+			return hashes, nil
+		}
+	}
+	return hashes, nil
+}
+
 func (s *SkillRegistryStore) GetPinnedHash(ctx context.Context, registryID string, uri string) (string, error) {
 	uid, err := parseUUID(registryID)
 	if err != nil {

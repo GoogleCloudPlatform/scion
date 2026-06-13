@@ -71,8 +71,15 @@ func (s *Server) handleSkillRegistryByID(w http.ResponseWriter, r *http.Request)
 	}
 
 	if parts := strings.SplitN(id, "/", 2); len(parts) == 2 {
-		if parts[1] == "pin" {
+		switch parts[1] {
+		case "pin":
 			s.pinSkillHash(w, r, parts[0])
+			return
+		case "pins":
+			s.listPinnedHashes(w, r, parts[0])
+			return
+		case "unpin":
+			s.unpinSkillHash(w, r, parts[0])
 			return
 		}
 	}
@@ -80,7 +87,7 @@ func (s *Server) handleSkillRegistryByID(w http.ResponseWriter, r *http.Request)
 	switch r.Method {
 	case http.MethodGet:
 		s.getSkillRegistry(w, r, id)
-	case http.MethodPut:
+	case http.MethodPut, http.MethodPatch:
 		s.updateSkillRegistry(w, r, id)
 	case http.MethodDelete:
 		s.deleteSkillRegistry(w, r, id)
@@ -339,4 +346,83 @@ func (s *Server) pinSkillHash(w http.ResponseWriter, r *http.Request, id string)
 		"uri":    req.URI,
 		"hash":   req.Hash,
 	})
+}
+
+func (s *Server) listPinnedHashes(w http.ResponseWriter, r *http.Request, id string) {
+	if r.Method != http.MethodGet {
+		MethodNotAllowed(w)
+		return
+	}
+
+	if _, ok := s.requireAdmin(w, r); !ok {
+		return
+	}
+
+	ctx := r.Context()
+	registry, err := s.store.GetSkillRegistry(ctx, id)
+	if err != nil {
+		registry, err = s.store.GetSkillRegistryByName(ctx, id)
+		if err != nil {
+			NotFound(w, "Skill Registry")
+			return
+		}
+	}
+
+	hashes, err := s.store.ListPinnedHashes(ctx, registry.ID)
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	type pinEntry struct {
+		URI  string `json:"uri"`
+		Hash string `json:"hash"`
+	}
+
+	pins := make([]pinEntry, 0, len(hashes))
+	for uri, hash := range hashes {
+		pins = append(pins, pinEntry{URI: uri, Hash: hash})
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"pins": pins})
+}
+
+func (s *Server) unpinSkillHash(w http.ResponseWriter, r *http.Request, id string) {
+	if r.Method != http.MethodPost {
+		MethodNotAllowed(w)
+		return
+	}
+
+	if _, ok := s.requireAdmin(w, r); !ok {
+		return
+	}
+
+	ctx := r.Context()
+	registry, err := s.store.GetSkillRegistry(ctx, id)
+	if err != nil {
+		registry, err = s.store.GetSkillRegistryByName(ctx, id)
+		if err != nil {
+			NotFound(w, "Skill Registry")
+			return
+		}
+	}
+
+	var req struct {
+		URI string `json:"uri"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		BadRequest(w, "Invalid request body: "+err.Error())
+		return
+	}
+	if req.URI == "" {
+		ValidationError(w, "uri is required", nil)
+		return
+	}
+
+	if err := s.store.UnpinSkillHash(ctx, registry.ID, req.URI); err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "unpinned", "uri": req.URI})
 }

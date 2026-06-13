@@ -1287,5 +1287,7 @@ type SkillRegistryStore interface {
 	DeleteSkillRegistry(ctx context.Context, id string) error
 	ListSkillRegistries(ctx context.Context, opts ListOptions) (*ListResult[SkillRegistry], error)
 	PinSkillHash(ctx context.Context, registryID string, uri string, hash string) error
+	UnpinSkillHash(ctx context.Context, registryID string, uri string) error
 	GetPinnedHash(ctx context.Context, registryID string, uri string) (string, error)
+	ListPinnedHashes(ctx context.Context, registryID string) (map[string]string, error)
 }
