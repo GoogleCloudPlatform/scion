@@ -23,7 +23,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokerdispatch"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokerjointoken"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokersecret"
-	"github.com/GoogleCloudPlatform/scion/pkg/ent/discordpendinglink"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/envvar"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/gcpserviceaccount"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/githubinstallation"
@@ -74,8 +73,6 @@ type Client struct {
 	BrokerJoinToken *BrokerJoinTokenClient
 	// BrokerSecret is the client for interacting with the BrokerSecret builders.
 	BrokerSecret *BrokerSecretClient
-	// DiscordPendingLink is the client for interacting with the DiscordPendingLink builders.
-	DiscordPendingLink *DiscordPendingLinkClient
 	// EnvVar is the client for interacting with the EnvVar builders.
 	EnvVar *EnvVarClient
 	// GCPServiceAccount is the client for interacting with the GCPServiceAccount builders.
@@ -152,7 +149,6 @@ func (c *Client) init() {
 	c.BrokerDispatch = NewBrokerDispatchClient(c.config)
 	c.BrokerJoinToken = NewBrokerJoinTokenClient(c.config)
 	c.BrokerSecret = NewBrokerSecretClient(c.config)
-	c.DiscordPendingLink = NewDiscordPendingLinkClient(c.config)
 	c.EnvVar = NewEnvVarClient(c.config)
 	c.GCPServiceAccount = NewGCPServiceAccountClient(c.config)
 	c.GithubInstallation = NewGithubInstallationClient(c.config)
@@ -281,7 +277,6 @@ func (c *Client) Tx(ctx context.Context) (*Tx, error) {
 		BrokerDispatch:           NewBrokerDispatchClient(cfg),
 		BrokerJoinToken:          NewBrokerJoinTokenClient(cfg),
 		BrokerSecret:             NewBrokerSecretClient(cfg),
-		DiscordPendingLink:       NewDiscordPendingLinkClient(cfg),
 		EnvVar:                   NewEnvVarClient(cfg),
 		GCPServiceAccount:        NewGCPServiceAccountClient(cfg),
 		GithubInstallation:       NewGithubInstallationClient(cfg),
@@ -337,7 +332,6 @@ func (c *Client) BeginTx(ctx context.Context, opts *sql.TxOptions) (*Tx, error) 
 		BrokerDispatch:           NewBrokerDispatchClient(cfg),
 		BrokerJoinToken:          NewBrokerJoinTokenClient(cfg),
 		BrokerSecret:             NewBrokerSecretClient(cfg),
-		DiscordPendingLink:       NewDiscordPendingLinkClient(cfg),
 		EnvVar:                   NewEnvVarClient(cfg),
 		GCPServiceAccount:        NewGCPServiceAccountClient(cfg),
 		GithubInstallation:       NewGithubInstallationClient(cfg),
@@ -397,9 +391,9 @@ func (c *Client) Close() error {
 func (c *Client) Use(hooks ...Hook) {
 	for _, n := range []interface{ Use(...Hook) }{
 		c.AccessPolicy, c.Agent, c.AllowListEntry, c.ApiKey, c.BrokerDispatch,
-		c.BrokerJoinToken, c.BrokerSecret, c.DiscordPendingLink, c.EnvVar,
-		c.GCPServiceAccount, c.GithubInstallation, c.Group, c.GroupMembership,
-		c.HarnessConfig, c.InviteCode, c.LifecycleHook, c.LifecycleHookAgentPhase,
+		c.BrokerJoinToken, c.BrokerSecret, c.EnvVar, c.GCPServiceAccount,
+		c.GithubInstallation, c.Group, c.GroupMembership, c.HarnessConfig,
+		c.InviteCode, c.LifecycleHook, c.LifecycleHookAgentPhase,
 		c.MaintenanceOperation, c.MaintenanceOperationRun, c.Message, c.Notification,
 		c.NotificationSubscription, c.PolicyBinding, c.Project, c.ProjectContributor,
 		c.ProjectSyncState, c.RuntimeBroker, c.Schedule, c.ScheduledEvent, c.Secret,
@@ -415,9 +409,9 @@ func (c *Client) Use(hooks ...Hook) {
 func (c *Client) Intercept(interceptors ...Interceptor) {
 	for _, n := range []interface{ Intercept(...Interceptor) }{
 		c.AccessPolicy, c.Agent, c.AllowListEntry, c.ApiKey, c.BrokerDispatch,
-		c.BrokerJoinToken, c.BrokerSecret, c.DiscordPendingLink, c.EnvVar,
-		c.GCPServiceAccount, c.GithubInstallation, c.Group, c.GroupMembership,
-		c.HarnessConfig, c.InviteCode, c.LifecycleHook, c.LifecycleHookAgentPhase,
+		c.BrokerJoinToken, c.BrokerSecret, c.EnvVar, c.GCPServiceAccount,
+		c.GithubInstallation, c.Group, c.GroupMembership, c.HarnessConfig,
+		c.InviteCode, c.LifecycleHook, c.LifecycleHookAgentPhase,
 		c.MaintenanceOperation, c.MaintenanceOperationRun, c.Message, c.Notification,
 		c.NotificationSubscription, c.PolicyBinding, c.Project, c.ProjectContributor,
 		c.ProjectSyncState, c.RuntimeBroker, c.Schedule, c.ScheduledEvent, c.Secret,
@@ -445,8 +439,6 @@ func (c *Client) Mutate(ctx context.Context, m Mutation) (Value, error) {
 		return c.BrokerJoinToken.mutate(ctx, m)
 	case *BrokerSecretMutation:
 		return c.BrokerSecret.mutate(ctx, m)
-	case *DiscordPendingLinkMutation:
-		return c.DiscordPendingLink.mutate(ctx, m)
 	case *EnvVarMutation:
 		return c.EnvVar.mutate(ctx, m)
 	case *GCPServiceAccountMutation:
@@ -1502,139 +1494,6 @@ func (c *BrokerSecretClient) mutate(ctx context.Context, m *BrokerSecretMutation
 		return (&BrokerSecretDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
 	default:
 		return nil, fmt.Errorf("ent: unknown BrokerSecret mutation op: %q", m.Op())
-	}
-}
-
-// DiscordPendingLinkClient is a client for the DiscordPendingLink schema.
-type DiscordPendingLinkClient struct {
-	config
-}
-
-// NewDiscordPendingLinkClient returns a client for the DiscordPendingLink from the given config.
-func NewDiscordPendingLinkClient(c config) *DiscordPendingLinkClient {
-	return &DiscordPendingLinkClient{config: c}
-}
-
-// Use adds a list of mutation hooks to the hooks stack.
-// A call to `Use(f, g, h)` equals to `discordpendinglink.Hooks(f(g(h())))`.
-func (c *DiscordPendingLinkClient) Use(hooks ...Hook) {
-	c.hooks.DiscordPendingLink = append(c.hooks.DiscordPendingLink, hooks...)
-}
-
-// Intercept adds a list of query interceptors to the interceptors stack.
-// A call to `Intercept(f, g, h)` equals to `discordpendinglink.Intercept(f(g(h())))`.
-func (c *DiscordPendingLinkClient) Intercept(interceptors ...Interceptor) {
-	c.inters.DiscordPendingLink = append(c.inters.DiscordPendingLink, interceptors...)
-}
-
-// Create returns a builder for creating a DiscordPendingLink entity.
-func (c *DiscordPendingLinkClient) Create() *DiscordPendingLinkCreate {
-	mutation := newDiscordPendingLinkMutation(c.config, OpCreate)
-	return &DiscordPendingLinkCreate{config: c.config, hooks: c.Hooks(), mutation: mutation}
-}
-
-// CreateBulk returns a builder for creating a bulk of DiscordPendingLink entities.
-func (c *DiscordPendingLinkClient) CreateBulk(builders ...*DiscordPendingLinkCreate) *DiscordPendingLinkCreateBulk {
-	return &DiscordPendingLinkCreateBulk{config: c.config, builders: builders}
-}
-
-// MapCreateBulk creates a bulk creation builder from the given slice. For each item in the slice, the function creates
-// a builder and applies setFunc on it.
-func (c *DiscordPendingLinkClient) MapCreateBulk(slice any, setFunc func(*DiscordPendingLinkCreate, int)) *DiscordPendingLinkCreateBulk {
-	rv := reflect.ValueOf(slice)
-	if rv.Kind() != reflect.Slice {
-		return &DiscordPendingLinkCreateBulk{err: fmt.Errorf("calling to DiscordPendingLinkClient.MapCreateBulk with wrong type %T, need slice", slice)}
-	}
-	builders := make([]*DiscordPendingLinkCreate, rv.Len())
-	for i := 0; i < rv.Len(); i++ {
-		builders[i] = c.Create()
-		setFunc(builders[i], i)
-	}
-	return &DiscordPendingLinkCreateBulk{config: c.config, builders: builders}
-}
-
-// Update returns an update builder for DiscordPendingLink.
-func (c *DiscordPendingLinkClient) Update() *DiscordPendingLinkUpdate {
-	mutation := newDiscordPendingLinkMutation(c.config, OpUpdate)
-	return &DiscordPendingLinkUpdate{config: c.config, hooks: c.Hooks(), mutation: mutation}
-}
-
-// UpdateOne returns an update builder for the given entity.
-func (c *DiscordPendingLinkClient) UpdateOne(_m *DiscordPendingLink) *DiscordPendingLinkUpdateOne {
-	mutation := newDiscordPendingLinkMutation(c.config, OpUpdateOne, withDiscordPendingLink(_m))
-	return &DiscordPendingLinkUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
-}
-
-// UpdateOneID returns an update builder for the given id.
-func (c *DiscordPendingLinkClient) UpdateOneID(id uuid.UUID) *DiscordPendingLinkUpdateOne {
-	mutation := newDiscordPendingLinkMutation(c.config, OpUpdateOne, withDiscordPendingLinkID(id))
-	return &DiscordPendingLinkUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
-}
-
-// Delete returns a delete builder for DiscordPendingLink.
-func (c *DiscordPendingLinkClient) Delete() *DiscordPendingLinkDelete {
-	mutation := newDiscordPendingLinkMutation(c.config, OpDelete)
-	return &DiscordPendingLinkDelete{config: c.config, hooks: c.Hooks(), mutation: mutation}
-}
-
-// DeleteOne returns a builder for deleting the given entity.
-func (c *DiscordPendingLinkClient) DeleteOne(_m *DiscordPendingLink) *DiscordPendingLinkDeleteOne {
-	return c.DeleteOneID(_m.ID)
-}
-
-// DeleteOneID returns a builder for deleting the given entity by its id.
-func (c *DiscordPendingLinkClient) DeleteOneID(id uuid.UUID) *DiscordPendingLinkDeleteOne {
-	builder := c.Delete().Where(discordpendinglink.ID(id))
-	builder.mutation.id = &id
-	builder.mutation.op = OpDeleteOne
-	return &DiscordPendingLinkDeleteOne{builder}
-}
-
-// Query returns a query builder for DiscordPendingLink.
-func (c *DiscordPendingLinkClient) Query() *DiscordPendingLinkQuery {
-	return &DiscordPendingLinkQuery{
-		config: c.config,
-		ctx:    &QueryContext{Type: TypeDiscordPendingLink},
-		inters: c.Interceptors(),
-	}
-}
-
-// Get returns a DiscordPendingLink entity by its id.
-func (c *DiscordPendingLinkClient) Get(ctx context.Context, id uuid.UUID) (*DiscordPendingLink, error) {
-	return c.Query().Where(discordpendinglink.ID(id)).Only(ctx)
-}
-
-// GetX is like Get, but panics if an error occurs.
-func (c *DiscordPendingLinkClient) GetX(ctx context.Context, id uuid.UUID) *DiscordPendingLink {
-	obj, err := c.Get(ctx, id)
-	if err != nil {
-		panic(err)
-	}
-	return obj
-}
-
-// Hooks returns the client hooks.
-func (c *DiscordPendingLinkClient) Hooks() []Hook {
-	return c.hooks.DiscordPendingLink
-}
-
-// Interceptors returns the client interceptors.
-func (c *DiscordPendingLinkClient) Interceptors() []Interceptor {
-	return c.inters.DiscordPendingLink
-}
-
-func (c *DiscordPendingLinkClient) mutate(ctx context.Context, m *DiscordPendingLinkMutation) (Value, error) {
-	switch m.Op() {
-	case OpCreate:
-		return (&DiscordPendingLinkCreate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
-	case OpUpdate:
-		return (&DiscordPendingLinkUpdate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
-	case OpUpdateOne:
-		return (&DiscordPendingLinkUpdateOne{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
-	case OpDelete, OpDeleteOne:
-		return (&DiscordPendingLinkDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
-	default:
-		return nil, fmt.Errorf("ent: unknown DiscordPendingLink mutation op: %q", m.Op())
 	}
 }
 
@@ -5755,22 +5614,22 @@ func (c *UserAccessTokenClient) mutate(ctx context.Context, m *UserAccessTokenMu
 type (
 	hooks struct {
 		AccessPolicy, Agent, AllowListEntry, ApiKey, BrokerDispatch, BrokerJoinToken,
-		BrokerSecret, DiscordPendingLink, EnvVar, GCPServiceAccount,
-		GithubInstallation, Group, GroupMembership, HarnessConfig, InviteCode,
-		LifecycleHook, LifecycleHookAgentPhase, MaintenanceOperation,
-		MaintenanceOperationRun, Message, Notification, NotificationSubscription,
-		PolicyBinding, Project, ProjectContributor, ProjectSyncState, RuntimeBroker,
-		Schedule, ScheduledEvent, Secret, Skill, SkillRegistry, SkillVersion,
-		SubscriptionTemplate, Template, User, UserAccessToken []ent.Hook
+		BrokerSecret, EnvVar, GCPServiceAccount, GithubInstallation, Group,
+		GroupMembership, HarnessConfig, InviteCode, LifecycleHook,
+		LifecycleHookAgentPhase, MaintenanceOperation, MaintenanceOperationRun,
+		Message, Notification, NotificationSubscription, PolicyBinding, Project,
+		ProjectContributor, ProjectSyncState, RuntimeBroker, Schedule, ScheduledEvent,
+		Secret, Skill, SkillRegistry, SkillVersion, SubscriptionTemplate, Template,
+		User, UserAccessToken []ent.Hook
 	}
 	inters struct {
 		AccessPolicy, Agent, AllowListEntry, ApiKey, BrokerDispatch, BrokerJoinToken,
-		BrokerSecret, DiscordPendingLink, EnvVar, GCPServiceAccount,
-		GithubInstallation, Group, GroupMembership, HarnessConfig, InviteCode,
-		LifecycleHook, LifecycleHookAgentPhase, MaintenanceOperation,
-		MaintenanceOperationRun, Message, Notification, NotificationSubscription,
-		PolicyBinding, Project, ProjectContributor, ProjectSyncState, RuntimeBroker,
-		Schedule, ScheduledEvent, Secret, Skill, SkillRegistry, SkillVersion,
-		SubscriptionTemplate, Template, User, UserAccessToken []ent.Interceptor
+		BrokerSecret, EnvVar, GCPServiceAccount, GithubInstallation, Group,
+		GroupMembership, HarnessConfig, InviteCode, LifecycleHook,
+		LifecycleHookAgentPhase, MaintenanceOperation, MaintenanceOperationRun,
+		Message, Notification, NotificationSubscription, PolicyBinding, Project,
+		ProjectContributor, ProjectSyncState, RuntimeBroker, Schedule, ScheduledEvent,
+		Secret, Skill, SkillRegistry, SkillVersion, SubscriptionTemplate, Template,
+		User, UserAccessToken []ent.Interceptor
 	}
 )
