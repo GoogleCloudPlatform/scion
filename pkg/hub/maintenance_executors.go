@@ -27,6 +27,7 @@ import (
 
 	scionruntime "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
+	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 )
@@ -425,6 +426,162 @@ func (e *RebuildContainerBinariesExecutor) Run(ctx context.Context, logger io.Wr
 
 	log.Info("Container binaries rebuild complete")
 	fmt.Fprintln(logger, "\nContainer binaries rebuild complete.")
+	return nil
+}
+
+// BuildHarnessConfigImageExecutor builds a container image from a harness-config's Dockerfile.
+type BuildHarnessConfigImageExecutor struct {
+	store      store.Store
+	storage    storage.Storage
+	runtimeBin string
+	registry   string
+	tag        string
+}
+
+func (e *BuildHarnessConfigImageExecutor) Run(ctx context.Context, logger io.Writer, params map[string]string) error {
+	log := logging.Subsystem("hub.maintenance.build-harness-config-image")
+
+	harnessConfigID := params["harness_config_id"]
+	if harnessConfigID == "" {
+		return fmt.Errorf("missing required parameter: harness_config_id")
+	}
+
+	tag := e.tag
+	if tag == "" {
+		tag = "latest"
+	}
+	if v := params["tag"]; v != "" {
+		tag = v
+	}
+
+	registry := e.registry
+	if v := params["registry"]; v != "" {
+		registry = v
+	}
+	registry = strings.TrimSuffix(registry, "/")
+
+	hc, err := e.store.GetHarnessConfig(ctx, harnessConfigID)
+	if err != nil {
+		return fmt.Errorf("failed to load harness-config %q: %w", harnessConfigID, err)
+	}
+
+	hasDockerfile := false
+	for _, f := range hc.Files {
+		if f.Path == "Dockerfile" {
+			hasDockerfile = true
+			break
+		}
+	}
+	if !hasDockerfile {
+		return fmt.Errorf("harness-config %q does not contain a Dockerfile", hc.Name)
+	}
+
+	if e.storage == nil {
+		return fmt.Errorf("storage not configured")
+	}
+
+	tmpDir, err := os.MkdirTemp("", "scion-build-*")
+	if err != nil {
+		return fmt.Errorf("failed to create temp directory: %w", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	fmt.Fprintf(logger, "Materializing %d file(s) from harness-config %q...\n", len(hc.Files), hc.Name)
+	for _, f := range hc.Files {
+		objectPath := hc.StoragePath + "/" + f.Path
+		reader, _, err := e.storage.Download(ctx, objectPath)
+		if err != nil {
+			return fmt.Errorf("failed to download %q from storage: %w", f.Path, err)
+		}
+
+		destPath := filepath.Join(tmpDir, f.Path)
+		if !strings.HasPrefix(destPath, tmpDir+string(os.PathSeparator)) {
+			_ = reader.Close()
+			return fmt.Errorf("invalid file path %q: escapes build directory", f.Path)
+		}
+		if dir := filepath.Dir(destPath); dir != tmpDir {
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				_ = reader.Close()
+				return fmt.Errorf("failed to create directory for %q: %w", f.Path, err)
+			}
+		}
+
+		outFile, err := os.Create(destPath)
+		if err != nil {
+			_ = reader.Close()
+			return fmt.Errorf("failed to create file %q: %w", f.Path, err)
+		}
+		_, err = io.Copy(outFile, reader)
+		_ = reader.Close()
+		_ = outFile.Close()
+		if err != nil {
+			return fmt.Errorf("failed to write file %q: %w", f.Path, err)
+		}
+
+		if f.Mode != "" {
+			mode := os.FileMode(0o644)
+			if _, err := fmt.Sscanf(f.Mode, "%o", &mode); err == nil {
+				_ = os.Chmod(destPath, mode)
+			}
+		}
+	}
+
+	baseImage := "scion-base:" + tag
+	if registry != "" {
+		baseImage = registry + "/scion-base:" + tag
+	}
+	fmt.Fprintf(logger, "Base image: %s\n", baseImage)
+
+	runtimeBin := e.runtimeBin
+	if runtimeBin == "" {
+		runtimeBin = scionruntime.DetectContainerRuntime()
+	}
+	if runtimeBin == "" {
+		return fmt.Errorf("no container runtime found (tried docker, podman)")
+	}
+
+	imageName := hc.Slug
+	if imageName == "" {
+		imageName = hc.Name
+	}
+	outputImage := imageName + ":" + tag
+	fmt.Fprintf(logger, "Building %s from harness-config %q...\n", outputImage, hc.Name)
+	log.Debug("Starting container build",
+		"image", outputImage, "base_image", baseImage,
+		"runtime", runtimeBin, "harness_config", hc.Name)
+
+	cmd := exec.CommandContext(ctx, runtimeBin, "build",
+		"--build-arg", "BASE_IMAGE="+baseImage,
+		"-t", outputImage,
+		tmpDir)
+	cmd.Stdout = logger
+	cmd.Stderr = logger
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("build failed: %w", err)
+	}
+
+	if params["push"] == "true" && registry != "" {
+		pushImage := registry + "/" + outputImage
+		fmt.Fprintf(logger, "Tagging %s as %s...\n", outputImage, pushImage)
+		tagCmd := exec.CommandContext(ctx, runtimeBin, "tag", outputImage, pushImage)
+		tagCmd.Stdout = logger
+		tagCmd.Stderr = logger
+		if err := tagCmd.Run(); err != nil {
+			return fmt.Errorf("tag failed: %w", err)
+		}
+
+		fmt.Fprintf(logger, "Pushing %s...\n", pushImage)
+		pushCmd := exec.CommandContext(ctx, runtimeBin, "push", pushImage)
+		pushCmd.Stdout = logger
+		pushCmd.Stderr = logger
+		if err := pushCmd.Run(); err != nil {
+			return fmt.Errorf("push failed: %w", err)
+		}
+		outputImage = pushImage
+	}
+
+	fmt.Fprintf(logger, "\nBuild complete: %s\n", outputImage)
+	log.Info("Build complete", "image", outputImage, "harness_config", hc.Name)
 	return nil
 }
 

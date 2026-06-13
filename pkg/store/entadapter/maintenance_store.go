@@ -74,6 +74,12 @@ var defaultSeedOperations = []store.MaintenanceOperation{
 		Description: "Rebuilds scion and sciontool binaries for Linux containers (make container-binaries). Only available when SCION_DEV_BINARIES is set. Binaries are written to .build/container/ in the source checkout.",
 		Category:    store.MaintenanceCategoryOperation,
 	},
+	{
+		Key:         "build-harness-config-image",
+		Title:       "Build Harness Config Image",
+		Description: "Builds a container image from a harness-config's bundled Dockerfile. The base image is resolved from the configured image registry.",
+		Category:    store.MaintenanceCategoryOperation,
+	},
 }
 
 // ============================================================================
