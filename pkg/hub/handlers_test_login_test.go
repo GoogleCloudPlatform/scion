@@ -193,7 +193,7 @@ func TestHandleTestLogin_InvalidEmail(t *testing.T) {
 	ws.handleTestLogin(rec, req)
 
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
-	assert.Contains(t, rec.Body.String(), "invalid email address")
+	assert.Contains(t, rec.Body.String(), "email must contain @")
 }
 
 func TestHandleTestLogin_DBError(t *testing.T) {

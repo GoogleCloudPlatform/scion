@@ -19,7 +19,6 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
-	"net/mail"
 	"strings"
 	"time"
 
@@ -91,8 +90,8 @@ func (ws *WebServer) handleTestLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if _, err := mail.ParseAddress(req.Email); err != nil {
-		http.Error(w, "invalid email address", http.StatusBadRequest)
+	if !strings.Contains(req.Email, "@") {
+		http.Error(w, "email must contain @", http.StatusBadRequest)
 		return
 	}
 

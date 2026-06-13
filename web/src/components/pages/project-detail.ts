@@ -23,7 +23,7 @@
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
-import type { PageData, Project, Agent, Capabilities } from '../../shared/types.js';
+import type { PageData, Project, Agent, AgentPhase, Capabilities } from '../../shared/types.js';
 import { can, canAny, getAgentDisplayStatus, isAgentRunning, isTerminalAvailable, isSharedWorkspace } from '../../shared/types.js';
 import type { StatusType } from '../shared/status-badge.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
@@ -40,6 +40,9 @@ import { WorkspaceFileBrowserDataSource, SharedDirFileBrowserDataSource } from '
 import type { FileBrowserDataSource } from '../shared/file-browser.js';
 import { WorkspaceFileEditorDataSource, SharedDirFileEditorDataSource } from '../shared/file-editor.js';
 import type { FileEditorDataSource } from '../shared/file-editor.js';
+
+type AgentSortField = 'name' | 'status' | 'created' | 'updated';
+type SortDir = 'asc' | 'desc';
 
 @customElement('scion-page-project-detail')
 export class ScionPageProjectDetail extends LitElement {
@@ -113,6 +116,15 @@ export class ScionPageProjectDetail extends LitElement {
    */
   @state()
   private viewMode: ViewMode = 'grid';
+
+  @state()
+  private phaseFilter: AgentPhase | '' = '';
+
+  @state()
+  private sortField: AgentSortField = 'updated';
+
+  @state()
+  private sortDir: SortDir = 'desc';
 
   /**
    * Whether a git pull is in progress
@@ -585,6 +597,83 @@ export class ScionPageProjectDetail extends LitElement {
       margin-right: 0.375rem;
     }
 
+    .filter-bar {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      margin-bottom: 1rem;
+      flex-wrap: wrap;
+    }
+
+    .filter-bar .label {
+      font-size: 0.8125rem;
+      color: var(--scion-text-muted, #64748b);
+      font-weight: 500;
+    }
+
+    .scope-toggle {
+      display: inline-flex;
+      border: 1px solid var(--scion-border, #e2e8f0);
+      border-radius: var(--scion-radius, 0.5rem);
+      overflow: hidden;
+    }
+
+    .scope-toggle button {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.25rem;
+      height: 2rem;
+      border: none;
+      background: var(--scion-surface, #ffffff);
+      color: var(--scion-text-muted, #64748b);
+      cursor: pointer;
+      padding: 0 0.625rem;
+      font-size: 0.8125rem;
+      font-family: inherit;
+      transition: all 150ms ease;
+      white-space: nowrap;
+    }
+
+    .scope-toggle button:not(:last-child) {
+      border-right: 1px solid var(--scion-border, #e2e8f0);
+    }
+
+    .scope-toggle button:hover:not(.active) {
+      background: var(--scion-bg-subtle, #f1f5f9);
+    }
+
+    .scope-toggle button.active {
+      background: var(--scion-primary, #3b82f6);
+      color: white;
+    }
+
+    th.sortable {
+      cursor: pointer;
+      user-select: none;
+    }
+
+    th.sortable:hover {
+      color: var(--scion-text, #1e293b);
+    }
+
+    .sort-indicator {
+      display: inline-block;
+      margin-left: 0.25rem;
+      font-size: 0.625rem;
+      vertical-align: middle;
+      opacity: 0.4;
+    }
+
+    th.sorted .sort-indicator {
+      opacity: 1;
+    }
+
+    .empty-filter-state {
+      text-align: center;
+      padding: 3rem 2rem;
+      color: var(--scion-text-muted, #64748b);
+    }
+
     @media (max-width: 768px) {
       .hide-mobile {
         display: none;
@@ -610,6 +699,28 @@ export class ScionPageProjectDetail extends LitElement {
     const stored = localStorage.getItem('scion-view-project-agents') as ViewMode | null;
     if (stored === 'grid' || stored === 'list') {
       this.viewMode = stored;
+    }
+
+    // Read persisted phase filter
+    const storedPhase = localStorage.getItem('scion-filter-project-agents-phase');
+    if (storedPhase === 'running' || storedPhase === 'stopped' || storedPhase === 'suspended' || storedPhase === 'error') {
+      this.phaseFilter = storedPhase;
+    }
+
+    // Read persisted sort
+    const storedSort = localStorage.getItem('scion-sort-project-agents');
+    if (storedSort) {
+      try {
+        const parsed = JSON.parse(storedSort);
+        if (
+          parsed &&
+          (parsed.field === 'name' || parsed.field === 'status' || parsed.field === 'created' || parsed.field === 'updated') &&
+          (parsed.dir === 'asc' || parsed.dir === 'desc')
+        ) {
+          this.sortField = parsed.field;
+          this.sortDir = parsed.dir;
+        }
+      } catch { /* ignore invalid stored sort */ }
     }
 
     void this.loadData();
@@ -937,6 +1048,117 @@ export class ScionPageProjectDetail extends LitElement {
     this.viewMode = e.detail.view;
   }
 
+  private get displayAgents(): Agent[] {
+    let list = this.agents;
+    if (this.phaseFilter) {
+      list = list.filter(a => a.phase === this.phaseFilter);
+    }
+    const sorted = [...list];
+    sorted.sort((a, b) => {
+      let cmp = 0;
+      switch (this.sortField) {
+        case 'name':
+          cmp = (a.name || '').localeCompare(b.name || '');
+          break;
+        case 'status':
+          cmp = getAgentDisplayStatus(a).localeCompare(getAgentDisplayStatus(b));
+          break;
+        case 'created':
+          cmp = (a.created || '').localeCompare(b.created || '');
+          break;
+        case 'updated':
+          cmp = (a.updated || '').localeCompare(b.updated || '');
+          break;
+      }
+      return this.sortDir === 'asc' ? cmp : -cmp;
+    });
+    return sorted;
+  }
+
+  private setPhaseFilter(phase: AgentPhase | ''): void {
+    if (this.phaseFilter === phase) return;
+    this.phaseFilter = phase;
+    if (phase) {
+      localStorage.setItem('scion-filter-project-agents-phase', phase);
+    } else {
+      localStorage.removeItem('scion-filter-project-agents-phase');
+    }
+  }
+
+  private toggleSort(field: AgentSortField): void {
+    if (this.sortField === field) {
+      this.sortDir = this.sortDir === 'asc' ? 'desc' : 'asc';
+    } else {
+      this.sortField = field;
+      this.sortDir = field === 'name' ? 'asc' : 'desc';
+    }
+    localStorage.setItem('scion-sort-project-agents', JSON.stringify({ field: this.sortField, dir: this.sortDir }));
+  }
+
+  private sortIndicator(field: AgentSortField): string {
+    return this.sortField === field ? (this.sortDir === 'asc' ? '▲' : '▼') : '▲';
+  }
+
+  private formatRelativeTime(isoString: string): string {
+    const date = new Date(isoString);
+    if (isNaN(date.getTime())) return '—';
+    const now = Date.now();
+    const diffMs = now - date.getTime();
+    if (diffMs < 0) return 'just now';
+    const seconds = Math.floor(diffMs / 1000);
+    if (seconds < 60) return 'just now';
+    const minutes = Math.floor(seconds / 60);
+    if (minutes < 60) return `${minutes}m ago`;
+    const hours = Math.floor(minutes / 60);
+    if (hours < 24) return `${hours}h ago`;
+    const days = Math.floor(hours / 24);
+    return `${days}d ago`;
+  }
+
+  private renderFilterBar() {
+    return html`
+      <div class="filter-bar">
+        <span class="label">Status:</span>
+        <div class="scope-toggle">
+          <button
+            class=${this.phaseFilter === '' ? 'active' : ''}
+            @click=${() => this.setPhaseFilter('')}
+          >All</button>
+          <button
+            class=${this.phaseFilter === 'running' ? 'active' : ''}
+            @click=${() => this.setPhaseFilter('running')}
+          >Running</button>
+          <button
+            class=${this.phaseFilter === 'stopped' ? 'active' : ''}
+            @click=${() => this.setPhaseFilter('stopped')}
+          >Stopped</button>
+          <button
+            class=${this.phaseFilter === 'suspended' ? 'active' : ''}
+            @click=${() => this.setPhaseFilter('suspended')}
+          >Suspended</button>
+          <button
+            class=${this.phaseFilter === 'error' ? 'active' : ''}
+            @click=${() => this.setPhaseFilter('error')}
+          >Error</button>
+        </div>
+        ${this.viewMode === 'grid' ? html`
+          <sl-dropdown>
+            <sl-button slot="trigger" size="small" outline>
+              <sl-icon slot="prefix" name=${this.sortDir === 'asc' ? 'sort-alpha-down' : 'sort-alpha-down-alt'}></sl-icon>
+              Sort: ${this.sortField}
+            </sl-button>
+            <sl-menu @sl-select=${(e: CustomEvent<{ item: { value: string } }>) => this.toggleSort(e.detail.item.value as AgentSortField)}>
+              <sl-menu-item value="name" ?checked=${this.sortField === 'name'}>Name</sl-menu-item>
+              <sl-menu-item value="status" ?checked=${this.sortField === 'status'}>Status</sl-menu-item>
+              <sl-menu-item value="created" ?checked=${this.sortField === 'created'}>Created</sl-menu-item>
+              <sl-menu-item value="updated" ?checked=${this.sortField === 'updated'}>Updated</sl-menu-item>
+            </sl-menu>
+          </sl-dropdown>
+        ` : nothing}
+      </div>
+    `;
+  }
+
   private hasRunningAgents(): boolean {
     return this.agents.some((a) => isAgentRunning(a));
   }
@@ -1156,7 +1378,12 @@ export class ScionPageProjectDetail extends LitElement {
 
       ${this.agents.length === 0
         ? this.renderEmptyAgents()
-        : this.viewMode === 'grid' ? this.renderAgentGrid() : this.renderAgentTable()}
+        : html`
+          ${this.renderFilterBar()}
+          ${this.displayAgents.length === 0
+            ? html`<div class="empty-filter-state">No agents match the current filter.</div>`
+            : this.viewMode === 'grid' ? this.renderAgentGrid() : this.renderAgentTable()}
+        `}
 
       ${this.project?.cloudLogging ? this.renderMessagesSection() : nothing}
 
@@ -1363,7 +1590,7 @@ export class ScionPageProjectDetail extends LitElement {
 
   private renderAgentGrid() {
     return html`
-      <div class="agent-grid">${this.agents.map((agent) => this.renderAgentCard(agent))}</div>
+      <div class="agent-grid">${this.displayAgents.map((agent) => this.renderAgentCard(agent))}</div>
     `;
   }
 
@@ -1373,16 +1600,26 @@ export class ScionPageProjectDetail extends LitElement {
         <table>
           <thead>
             <tr>
-              <th>Name</th>
+              <th
+                class="sortable ${this.sortField === 'name' ? 'sorted' : ''}"
+                @click=${() => this.toggleSort('name')}
+              >Name <span class="sort-indicator">${this.sortIndicator('name')}</span></th>
               <th class="hide-mobile">Template</th>
               <th class="hide-mobile">Broker</th>
-              <th class="status-col">Status</th>
+              <th
+                class="status-col sortable ${this.sortField === 'status' ? 'sorted' : ''}"
+                @click=${() => this.toggleSort('status')}
+              >Status <span class="sort-indicator">${this.sortIndicator('status')}</span></th>
+              <th
+                class="hide-mobile sortable ${this.sortField === 'updated' ? 'sorted' : ''}"
+                @click=${() => this.toggleSort('updated')}
+              >Updated <span class="sort-indicator">${this.sortIndicator('updated')}</span></th>
               <th class="hide-mobile">Task</th>
               <th style="text-align: right">Actions</th>
             </tr>
           </thead>
           <tbody>
-            ${this.agents.map((agent) => this.renderAgentRow(agent))}
+            ${this.displayAgents.map((agent) => this.renderAgentRow(agent))}
           </tbody>
         </table>
       </div>
@@ -1416,6 +1653,7 @@ export class ScionPageProjectDetail extends LitElement {
             size="small"
           ></scion-status-badge>
         </td>
+        <td class="hide-mobile">${agent.updated ? this.formatRelativeTime(agent.updated) : '\u2014'}</td>
         <td class="hide-mobile">
           <span class="task-cell">${agent.taskSummary || '\u2014'}</span>
         </td>
