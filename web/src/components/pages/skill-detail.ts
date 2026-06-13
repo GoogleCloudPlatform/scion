@@ -29,6 +29,7 @@ import type { StatusType } from '../shared/status-badge.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import '../shared/status-badge.js';
 import '../shared/hash-display.js';
+import '../shared/skill-publish-dialog.js';
 
 @customElement('scion-page-skill-detail')
 export class ScionPageSkillDetail extends LitElement {
@@ -43,6 +44,9 @@ export class ScionPageSkillDetail extends LitElement {
   @state() private editForm: Partial<{ name: string; description: string; visibility: string; tags: string }> = {};
   @state() private saving = false;
   @state() private actionLoading: Record<string, boolean> = {};
+
+  // Publish dialog state
+  @state() private publishDialogOpen = false;
 
   // Deprecate dialog state
   @state() private deprecateVersionId: string | null = null;
@@ -604,6 +608,7 @@ export class ScionPageSkillDetail extends LitElement {
       </sl-tab-group>
 
       ${this.renderDeprecateDialog()}
+      ${this.renderPublishDialog()}
     `;
   }
 
@@ -636,10 +641,7 @@ export class ScionPageSkillDetail extends LitElement {
             <sl-button
               variant="primary"
               size="small"
-              @click=${() => {
-                const dialog = this.shadowRoot?.querySelector('scion-skill-publish-dialog') as HTMLElement & { open: boolean } | null;
-                if (dialog) dialog.open = true;
-              }}
+              @click=${() => { this.publishDialogOpen = true; }}
             >
               <sl-icon slot="prefix" name="upload"></sl-icon>
               Publish Version
@@ -960,6 +962,25 @@ export class ScionPageSkillDetail extends LitElement {
           Deprecate
         </sl-button>
       </sl-dialog>
+    `;
+  }
+
+  private get latestPublishedVersion(): string {
+    const published = this.versions
+      .filter((v) => v.status === 'published')
+      .sort((a, b) => (b.created || '').localeCompare(a.created || ''));
+    return published.length > 0 ? published[0].version : '';
+  }
+
+  private renderPublishDialog() {
+    return html`
+      <scion-skill-publish-dialog
+        .skillId=${this.skillId}
+        ?open=${this.publishDialogOpen}
+        .latestVersion=${this.latestPublishedVersion}
+        @sl-after-hide=${() => { this.publishDialogOpen = false; }}
+        @skill-version-published=${() => { this.publishDialogOpen = false; void this.loadData(); }}
+      ></scion-skill-publish-dialog>
     `;
   }
 
