@@ -325,11 +325,22 @@ def _provision(manifest: dict[str, Any]) -> int:
     env_keys = _present_env_keys(candidates)
     file_paths = _present_file_paths(candidates)
 
-    try:
-        method, env_key = _select_auth_method(explicit, env_keys, file_paths)
-    except ValueError as exc:
-        print(str(exc), file=sys.stderr)
-        return EXIT_ERROR
+    # No-auth mode: when no auth candidates were staged and the harness config
+    # declares a no_auth behavior, skip auth setup entirely.
+    harness_cfg = manifest.get("harness_config") or {}
+    no_auth_cfg = harness_cfg.get("no_auth") or {}
+    no_auth_behavior = str(no_auth_cfg.get("behavior") or "").strip()
+
+    if not candidates and no_auth_behavior:
+        print(f"opencode provision: no-auth mode (behavior={no_auth_behavior}), skipping auth setup", file=sys.stderr)
+        method = "none"
+        env_key = ""
+    else:
+        try:
+            method, env_key = _select_auth_method(explicit, env_keys, file_paths)
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            return EXIT_ERROR
 
     outputs = manifest.get("outputs") or {}
     env_out = _expand(outputs.get("env") or os.path.join(bundle, "outputs", "env.json"))

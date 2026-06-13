@@ -559,11 +559,23 @@ def _provision(manifest: dict[str, Any]) -> int:
     file_paths = _present_file_paths(candidates)
     secret_files = _env_secret_files(candidates)
 
-    try:
-        method, env_key = _select_auth_method(explicit, env_keys, file_paths)
-    except ValueError as exc:
-        print(str(exc), file=sys.stderr)
-        return EXIT_ERROR
+    # No-auth mode: when no auth candidates were staged and the harness config
+    # declares a no_auth behavior, skip auth setup entirely. The agent will
+    # drop to shell so the user can authenticate interactively.
+    harness_cfg = manifest.get("harness_config") or {}
+    no_auth_cfg = harness_cfg.get("no_auth") or {}
+    no_auth_behavior = str(no_auth_cfg.get("behavior") or "").strip()
+
+    if not candidates and no_auth_behavior:
+        print(f"codex provision: no-auth mode (behavior={no_auth_behavior}), skipping auth setup", file=sys.stderr)
+        method = "none"
+        env_key = ""
+    else:
+        try:
+            method, env_key = _select_auth_method(explicit, env_keys, file_paths)
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            return EXIT_ERROR
 
     # Apply api-key auth: read the staged secret value and write .codex/auth.json.
     if method == "api-key":
