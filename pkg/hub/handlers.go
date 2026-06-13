@@ -7937,6 +7937,8 @@ func (s *Server) getSecret(w http.ResponseWriter, r *http.Request, key string) {
 func (s *Server) setSecret(w http.ResponseWriter, r *http.Request, key string) {
 	ctx := r.Context()
 
+	r.Body = http.MaxBytesReader(w, r.Body, 128*1024)
+
 	var req SetSecretRequest
 	if err := readJSON(r, &req); err != nil {
 		BadRequest(w, "Invalid request body: "+err.Error())
@@ -7950,7 +7952,7 @@ func (s *Server) setSecret(w http.ResponseWriter, r *http.Request, key string) {
 
 	decoded, err := base64.StdEncoding.DecodeString(req.Value)
 	if err != nil {
-		http.Error(w, "value must be base64-encoded", http.StatusBadRequest)
+		BadRequest(w, "value must be base64-encoded")
 		return
 	}
 
@@ -7979,7 +7981,7 @@ func (s *Server) setSecret(w http.ResponseWriter, r *http.Request, key string) {
 	// Validate file-specific constraints
 	if secretType == store.SecretTypeFile {
 		if strings.Contains(target, "..") {
-			http.Error(w, "target path must not contain '..'", http.StatusBadRequest)
+			BadRequest(w, "target path must not contain '..'")
 			return
 		}
 		if !strings.HasPrefix(target, "/") && !strings.HasPrefix(target, "~/") {
@@ -7989,9 +7991,8 @@ func (s *Server) setSecret(w http.ResponseWriter, r *http.Request, key string) {
 			})
 			return
 		}
-		const maxSecretSize = 64 * 1024
-		if len(decoded) > maxSecretSize {
-			http.Error(w, "secret value exceeds 64KB limit", http.StatusBadRequest)
+		if len(decoded) > 64*1024 {
+			BadRequest(w, "secret value exceeds 64KB limit")
 			return
 		}
 	}
@@ -8017,7 +8018,7 @@ func (s *Server) setSecret(w http.ResponseWriter, r *http.Request, key string) {
 
 	input := &secret.SetSecretInput{
 		Name:          key,
-		Value:         req.Value,
+		Value:         string(decoded),
 		SecretType:    secretType,
 		Target:        target,
 		Scope:         scope,
@@ -8169,7 +8170,7 @@ func (s *Server) handleAgentSecrets(w http.ResponseWriter, r *http.Request, agen
 
 	decoded, err := base64.StdEncoding.DecodeString(req.Value)
 	if err != nil {
-		http.Error(w, "value must be base64-encoded", http.StatusBadRequest)
+		BadRequest(w, "value must be base64-encoded")
 		return
 	}
 
@@ -8198,7 +8199,7 @@ func (s *Server) handleAgentSecrets(w http.ResponseWriter, r *http.Request, agen
 	// Validate file-specific constraints.
 	if secretType == store.SecretTypeFile {
 		if strings.Contains(target, "..") {
-			http.Error(w, "target path must not contain '..'", http.StatusBadRequest)
+			BadRequest(w, "target path must not contain '..'")
 			return
 		}
 		if !strings.HasPrefix(target, "/") && !strings.HasPrefix(target, "~/") {
@@ -8208,9 +8209,8 @@ func (s *Server) handleAgentSecrets(w http.ResponseWriter, r *http.Request, agen
 			})
 			return
 		}
-		const maxSecretSize = 64 * 1024
-		if len(decoded) > maxSecretSize {
-			http.Error(w, "secret value exceeds 64KB limit", http.StatusBadRequest)
+		if len(decoded) > 64*1024 {
+			BadRequest(w, "secret value exceeds 64KB limit")
 			return
 		}
 	}
@@ -8232,7 +8232,7 @@ func (s *Server) handleAgentSecrets(w http.ResponseWriter, r *http.Request, agen
 
 	input := &secret.SetSecretInput{
 		Name:       key,
-		Value:      req.Value,
+		Value:      string(decoded),
 		SecretType: secretType,
 		Target:     target,
 		Scope:      store.ScopeProject,
@@ -8654,6 +8654,7 @@ func (s *Server) handleProjectSecretByKey(w http.ResponseWriter, r *http.Request
 		writeJSON(w, http.StatusOK, metaToStoreSecret(*meta))
 
 	case http.MethodPut:
+		r.Body = http.MaxBytesReader(w, r.Body, 128*1024)
 		var req SetSecretRequest
 		if err := readJSON(r, &req); err != nil {
 			BadRequest(w, "Invalid request body: "+err.Error())
@@ -8665,7 +8666,7 @@ func (s *Server) handleProjectSecretByKey(w http.ResponseWriter, r *http.Request
 		}
 		decoded, err := base64.StdEncoding.DecodeString(req.Value)
 		if err != nil {
-			http.Error(w, "value must be base64-encoded", http.StatusBadRequest)
+			BadRequest(w, "value must be base64-encoded")
 			return
 		}
 		secretType := req.Type
@@ -8684,22 +8685,21 @@ func (s *Server) handleProjectSecretByKey(w http.ResponseWriter, r *http.Request
 		}
 		if secretType == store.SecretTypeFile {
 			if strings.Contains(target, "..") {
-				http.Error(w, "target path must not contain '..'", http.StatusBadRequest)
+				BadRequest(w, "target path must not contain '..'")
 				return
 			}
 			if !strings.HasPrefix(target, "/") && !strings.HasPrefix(target, "~/") {
 				ValidationError(w, "file secret target must be an absolute path (or start with ~/)", map[string]interface{}{"field": "target", "value": target})
 				return
 			}
-			const maxSecretSize = 64 * 1024
-			if len(decoded) > maxSecretSize {
-				http.Error(w, "secret value exceeds 64KB limit", http.StatusBadRequest)
+			if len(decoded) > 64*1024 {
+				BadRequest(w, "secret value exceeds 64KB limit")
 				return
 			}
 		}
 		input := &secret.SetSecretInput{
 			Name:          key,
-			Value:         req.Value,
+			Value:         string(decoded),
 			SecretType:    secretType,
 			Target:        target,
 			Scope:         store.ScopeProject,
@@ -9289,6 +9289,7 @@ func (s *Server) handleBrokerSecretByKey(w http.ResponseWriter, r *http.Request,
 		writeJSON(w, http.StatusOK, metaToStoreSecret(*meta))
 
 	case http.MethodPut:
+		r.Body = http.MaxBytesReader(w, r.Body, 128*1024)
 		var req SetSecretRequest
 		if err := readJSON(r, &req); err != nil {
 			BadRequest(w, "Invalid request body: "+err.Error())
@@ -9300,7 +9301,7 @@ func (s *Server) handleBrokerSecretByKey(w http.ResponseWriter, r *http.Request,
 		}
 		decoded, err := base64.StdEncoding.DecodeString(req.Value)
 		if err != nil {
-			http.Error(w, "value must be base64-encoded", http.StatusBadRequest)
+			BadRequest(w, "value must be base64-encoded")
 			return
 		}
 		secretType := req.Type
@@ -9319,22 +9320,21 @@ func (s *Server) handleBrokerSecretByKey(w http.ResponseWriter, r *http.Request,
 		}
 		if secretType == store.SecretTypeFile {
 			if strings.Contains(target, "..") {
-				http.Error(w, "target path must not contain '..'", http.StatusBadRequest)
+				BadRequest(w, "target path must not contain '..'")
 				return
 			}
 			if !strings.HasPrefix(target, "/") && !strings.HasPrefix(target, "~/") {
 				ValidationError(w, "file secret target must be an absolute path (or start with ~/)", map[string]interface{}{"field": "target", "value": target})
 				return
 			}
-			const maxSecretSize = 64 * 1024
-			if len(decoded) > maxSecretSize {
-				http.Error(w, "secret value exceeds 64KB limit", http.StatusBadRequest)
+			if len(decoded) > 64*1024 {
+				BadRequest(w, "secret value exceeds 64KB limit")
 				return
 			}
 		}
 		input := &secret.SetSecretInput{
 			Name:          key,
-			Value:         req.Value,
+			Value:         string(decoded),
 			SecretType:    secretType,
 			Target:        target,
 			Scope:         store.ScopeRuntimeBroker,

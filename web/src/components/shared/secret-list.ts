@@ -142,7 +142,7 @@ export class ScionSecretList extends LitElement {
 
     try {
       const body: Record<string, unknown> = {
-        value: this.dialogValue,
+        value: btoa(Array.from(new TextEncoder().encode(this.dialogValue), b => String.fromCharCode(b)).join('')),
         scope: this.scope,
         description: this.dialogDescription || undefined,
         type: this.dialogType,
