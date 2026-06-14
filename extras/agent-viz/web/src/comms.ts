@@ -14,8 +14,14 @@
  * limitations under the License.
  */
 
+import { marked } from 'marked';
+
 import type { MessageEvent } from './types';
 import type { AgentRing } from './agents';
+
+// Render message bodies as inline-friendly HTML: no leading <h1> ids, GitHub-style
+// line breaks so single newlines in agent output become visible breaks.
+marked.setOptions({ breaks: true, gfm: true });
 
 /**
  * Window (in event-time ms) for collapsing duplicate broadcast deliveries into a
@@ -165,20 +171,43 @@ export class CommsPanel {
       : '';
     const bcastBadge = broadcast ? '<span class="comms-badge">BROADCAST</span>' : '';
 
+    // Render the message body as Markdown. `marked.parse` is synchronous and
+    // HTML-escapes the text it emits, so agent output like "## Plan" shows as a
+    // heading instead of literal "## Plan". This is a local dev tool rendering
+    // trusted agent output, so injecting the result via innerHTML is acceptable
+    // and we don't pull in a sanitizer (e.g. DOMPurify).
+    const contentHtml = marked.parse(event.content ?? '') as string;
+
+    // A one-line plain-text summary shown while the message is collapsed (the default). Strips
+    // markdown punctuation + collapses whitespace so long bodies (e.g. JSON) stay one line.
+    const summary = (event.content ?? '')
+      .replace(/[#*`>_~\[\]]/g, '')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 120);
+
     card.innerHTML = `
-      <div class="comms-msg-meta">
-        <span class="comms-time">${this.formatTime(timestamp)}</span>
-        ${bcastBadge}
-        <span class="comms-index">#${this.count + 1}</span>
+      <div class="comms-msg-header">
+        <div class="comms-msg-meta">
+          <span class="comms-time">${this.formatTime(timestamp)}</span>
+          ${bcastBadge}
+          <span class="comms-index">#${this.count + 1}</span>
+        </div>
+        <div class="comms-route">
+          <span class="comms-msg-toggle">▸</span>
+          <span style="color:${senderColor}">${escapeHtml(event.sender || '?')}</span>
+          <span class="comms-arrow">${arrow}</span>
+          <span style="color:${recipientColor}">${escapeHtml(recipientLabel)}</span>
+          ${typeTag}
+        </div>
+        <div class="comms-summary">${escapeHtml(summary)}</div>
       </div>
-      <div class="comms-route">
-        <span style="color:${senderColor}">${escapeHtml(event.sender || '?')}</span>
-        <span class="comms-arrow">${arrow}</span>
-        <span style="color:${recipientColor}">${escapeHtml(recipientLabel)}</span>
-        ${typeTag}
-      </div>
-      <div class="comms-content">${escapeHtml(event.content ?? '')}</div>
+      <div class="comms-content markdown">${contentHtml}</div>
     `;
+    // Collapsed by default — clicking the header toggles the full markdown content.
+    card.querySelector('.comms-msg-header')?.addEventListener('click', () => {
+      card.classList.toggle('expanded');
+    });
     return card;
   }
 

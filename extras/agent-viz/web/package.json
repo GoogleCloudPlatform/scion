@@ -13,7 +13,8 @@
     "vite": "~6.4.2"
   },
   "dependencies": {
+    "d3-force": "^3.0.0",
     "force-graph": "^1.47.0",
-    "d3-force": "^3.0.0"
+    "marked": "^18.0.5"
   }
 }
