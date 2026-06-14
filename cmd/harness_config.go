@@ -441,6 +441,9 @@ var harnessConfigShowCmd = &cobra.Command{
 						fmt.Printf("Content Hash: %s\n", truncateHash(hc.ContentHash))
 						fmt.Printf("Scope:        %s\n", hc.Scope)
 						fmt.Printf("Files:        %d\n", len(hc.Files))
+						if hc.SourceURL != "" {
+							fmt.Printf("Source URL:   %s\n", hc.SourceURL)
+						}
 						return nil
 					}
 				}
@@ -834,6 +837,7 @@ func init() {
 	harnessConfigCmd.AddCommand(harnessConfigShowCmd)
 	harnessConfigCmd.AddCommand(harnessConfigDeleteCmd)
 	harnessConfigCmd.AddCommand(harnessConfigInstallCmd)
+	harnessConfigCmd.AddCommand(harnessConfigUpdateCmd)
 
 	// Flags for list command
 	harnessConfigListCmd.Flags().Bool("hub", false, "Include Hub results")

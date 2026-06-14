@@ -67,6 +67,9 @@ type HarnessConfigService interface {
 
 	// ReadFile reads a harness config file through the Hub API.
 	ReadFile(ctx context.Context, id, filePath string) ([]byte, error)
+
+	// Reimport re-imports a harness config from its stored source URL or an override.
+	Reimport(ctx context.Context, id string, sourceURL string) (*ReimportHarnessConfigResponse, error)
 }
 
 // harnessConfigService is the implementation of HarnessConfigService.
@@ -131,6 +134,17 @@ type HarnessConfigManifest struct {
 // HarnessConfigFinalizeRequest is the request body for finalizing a harness config upload.
 type HarnessConfigFinalizeRequest struct {
 	Manifest *HarnessConfigManifest `json:"manifest"`
+}
+
+// ReimportHarnessConfigRequest is the request body for reimporting a harness config.
+type ReimportHarnessConfigRequest struct {
+	SourceURL string `json:"sourceUrl,omitempty"`
+}
+
+// ReimportHarnessConfigResponse is the response from reimporting a harness config.
+type ReimportHarnessConfigResponse struct {
+	HarnessConfigs []string `json:"harnessConfigs"`
+	Count          int      `json:"count"`
 }
 
 type harnessConfigFileContentResponse struct {
@@ -313,6 +327,16 @@ func (s *harnessConfigService) ReadFile(ctx context.Context, id, filePath string
 		return nil, err
 	}
 	return []byte(result.Content), nil
+}
+
+// Reimport re-imports a harness config from its stored source URL or an override.
+func (s *harnessConfigService) Reimport(ctx context.Context, id string, sourceURL string) (*ReimportHarnessConfigResponse, error) {
+	req := ReimportHarnessConfigRequest{SourceURL: sourceURL}
+	resp, err := s.c.post(ctx, "/api/v1/harness-configs/"+id+"/reimport", req, nil)
+	if err != nil {
+		return nil, err
+	}
+	return apiclient.DecodeResponse[ReimportHarnessConfigResponse](resp)
 }
 
 func (s *harnessConfigService) getTransferClient() *transfer.Client {

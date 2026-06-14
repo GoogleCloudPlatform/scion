@@ -538,6 +538,7 @@ type HarnessConfig struct {
 	StorageBucket string             `json:"storageBucket,omitempty"`
 	StoragePath   string             `json:"storagePath,omitempty"`
 	Files         []TemplateFile     `json:"files,omitempty"`
+	SourceURL     string             `json:"sourceUrl,omitempty"`
 	Locked        bool               `json:"locked,omitempty"`
 	Status        string             `json:"status"`
 	OwnerID       string             `json:"ownerId,omitempty"`
