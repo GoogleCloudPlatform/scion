@@ -89,6 +89,7 @@ func entTemplateRowToStore(e *ent.Template) *store.Template {
 		StorageBucket:        e.StorageBucket,
 		StoragePath:          e.StoragePath,
 		BaseTemplate:         e.BaseTemplate,
+		SourceURL:            e.SourceURL,
 		Status:               string(e.Status),
 		OwnerID:              e.OwnerID,
 		CreatedBy:            e.CreatedBy,
@@ -136,6 +137,7 @@ func (s *TemplateStore) CreateTemplate(ctx context.Context, template *store.Temp
 		SetStoragePath(template.StoragePath).
 		SetFiles(marshalJSONString(template.Files)).
 		SetBaseTemplate(template.BaseTemplate).
+		SetSourceURL(template.SourceURL).
 		SetStatus(enttemplate.Status(template.Status)).
 		SetOwnerID(template.OwnerID).
 		SetCreatedBy(template.CreatedBy).
@@ -216,6 +218,7 @@ func (s *TemplateStore) UpdateTemplate(ctx context.Context, template *store.Temp
 		SetStoragePath(template.StoragePath).
 		SetFiles(marshalJSONString(template.Files)).
 		SetBaseTemplate(template.BaseTemplate).
+		SetSourceURL(template.SourceURL).
 		SetStatus(enttemplate.Status(template.Status)).
 		SetOwnerID(template.OwnerID).
 		SetUpdatedBy(template.UpdatedBy).
@@ -357,6 +360,7 @@ func entHarnessConfigToStore(e *ent.HarnessConfig) *store.HarnessConfig {
 		StorageURI:    e.StorageURI,
 		StorageBucket: e.StorageBucket,
 		StoragePath:   e.StoragePath,
+		SourceURL:     e.SourceURL,
 		Status:        string(e.Status),
 		OwnerID:       e.OwnerID,
 		CreatedBy:     e.CreatedBy,
@@ -400,6 +404,7 @@ func (s *TemplateStore) CreateHarnessConfig(ctx context.Context, hc *store.Harne
 		SetStorageBucket(hc.StorageBucket).
 		SetStoragePath(hc.StoragePath).
 		SetFiles(marshalJSONString(hc.Files)).
+		SetSourceURL(hc.SourceURL).
 		SetStatus(entharnessconfig.Status(hc.Status)).
 		SetOwnerID(hc.OwnerID).
 		SetCreatedBy(hc.CreatedBy).
@@ -468,6 +473,7 @@ func (s *TemplateStore) UpdateHarnessConfig(ctx context.Context, hc *store.Harne
 		SetStorageBucket(hc.StorageBucket).
 		SetStoragePath(hc.StoragePath).
 		SetFiles(marshalJSONString(hc.Files)).
+		SetSourceURL(hc.SourceURL).
 		SetStatus(entharnessconfig.Status(hc.Status)).
 		SetOwnerID(hc.OwnerID).
 		SetUpdatedBy(hc.UpdatedBy).

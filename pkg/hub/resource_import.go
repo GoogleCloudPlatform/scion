@@ -51,7 +51,7 @@ const resourceImportConcurrency = 6
 // naming, the create-or-sync loop — is shared here.
 
 // resourceDir pairs a derived resource name with its on-disk directory.
-type resourceDir struct{ name, path string }
+type resourceDir struct{ name, path, sourceURL string }
 
 // skippedDir pairs a child directory name with the reason it was skipped during
 // discovery (e.g. it lacks the kind's marker file, so it is not a resource).
@@ -314,7 +314,7 @@ func discoverResourceDirs(root, sourceURL string, kind resourceImportKind) ([]re
 				name = derived
 			}
 		}
-		return []resourceDir{{name, root}}, nil, nil
+		return []resourceDir{{name, root, sourceURL}}, nil, nil
 	}
 
 	entries, err := os.ReadDir(root)
@@ -335,7 +335,7 @@ func discoverResourceDirs(root, sourceURL string, kind resourceImportKind) ([]re
 		}
 		dir := filepath.Join(root, entry.Name())
 		if kind.isResourceDir(dir) {
-			dirs = append(dirs, resourceDir{entry.Name(), dir})
+			dirs = append(dirs, resourceDir{entry.Name(), dir, sourceURL})
 		} else {
 			skipped = append(skipped, skippedDir{entry.Name(), "no " + kind.marker})
 		}
@@ -405,7 +405,7 @@ func (s *Server) importResourceDirs(ctx context.Context, dirs []resourceDir, ski
 
 			rstore, err := kind.newStore(rd.path)
 			if err == nil {
-				_, err = rstore.Bootstrap(ctx, rd.name, rd.path, scope, scopeID, true)
+				_, err = rstore.Bootstrap(ctx, rd.name, rd.path, scope, scopeID, rd.sourceURL, true)
 			}
 			done := int(completed.Add(1))
 			if err != nil {

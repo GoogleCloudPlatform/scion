@@ -112,14 +112,14 @@ func (s *Server) BootstrapTemplatesFromDir(ctx context.Context, templatesDir str
 // behavior (harness detection, DefaultHarnessConfig backfill, bundled
 // harness-config import) lives in templatePersistence.
 func (s *Server) syncExistingTemplate(ctx context.Context, existing *store.Template, templatePath string, force bool) (bool, error) {
-	return s.templateStore().Bootstrap(ctx, existing.Name, templatePath, existing.Scope, existing.ScopeID, force)
+	return s.templateStore().Bootstrap(ctx, existing.Name, templatePath, existing.Scope, existing.ScopeID, "", force)
 }
 
 // bootstrapSingleTemplate imports one local template directory into the
 // Hub's database and storage backend under the given scope and projectID.
 // For global templates pass store.TemplateScopeGlobal and "".
 func (s *Server) bootstrapSingleTemplate(ctx context.Context, name, templatePath, scope, projectID string) error {
-	_, err := s.templateStore().Bootstrap(ctx, name, templatePath, scope, projectID, false)
+	_, err := s.templateStore().Bootstrap(ctx, name, templatePath, scope, projectID, "", false)
 	return err
 }
 

@@ -481,6 +481,7 @@ type Template struct {
 	OwnerID    string `json:"ownerId,omitempty"`
 	CreatedBy  string `json:"createdBy,omitempty"`
 	UpdatedBy  string `json:"updatedBy,omitempty"`
+	SourceURL  string `json:"sourceUrl,omitempty"`
 	Visibility string `json:"visibility"` // private, project, public
 
 	// Timestamps
@@ -574,6 +575,7 @@ type HarnessConfig struct {
 	OwnerID    string `json:"ownerId,omitempty"`
 	CreatedBy  string `json:"createdBy,omitempty"`
 	UpdatedBy  string `json:"updatedBy,omitempty"`
+	SourceURL  string `json:"sourceUrl,omitempty"`
 	Visibility string `json:"visibility"` // private, project, public
 
 	// Timestamps

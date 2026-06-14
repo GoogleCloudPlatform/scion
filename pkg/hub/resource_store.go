@@ -54,6 +54,7 @@ type ResourceRecord struct {
 	StoragePath   string
 	Files         []store.TemplateFile
 	Status        string
+	SourceURL     string
 	Visibility    string
 }
 
@@ -118,7 +119,7 @@ func (s *Server) harnessConfigStore(harness string) *ResourceStore {
 // storage backend + DB. When force is true it always re-uploads and reconciles
 // stale objects; when false it short-circuits if the aggregate content hash
 // already matches what is stored. Returns whether the stored content changed.
-func (rs *ResourceStore) Bootstrap(ctx context.Context, name, dir, scope, scopeID string, force bool) (bool, error) {
+func (rs *ResourceStore) Bootstrap(ctx context.Context, name, dir, scope, scopeID, sourceURL string, force bool) (bool, error) {
 	srv := rs.srv
 	p := rs.pers
 	kind := p.Kind()
@@ -152,6 +153,7 @@ func (rs *ResourceStore) Bootstrap(ctx context.Context, name, dir, scope, scopeI
 			StoragePath:   storagePath,
 			StorageBucket: stor.Bucket(),
 			StorageURI:    storage.ResourceStorageURI(stor.Bucket(), kind, scope, scopeID, slug),
+			SourceURL:     sourceURL,
 			Visibility:    p.DefaultVisibility(),
 		}
 		if err := p.Create(ctx, rec, dir); err != nil {
@@ -206,6 +208,9 @@ func (rs *ResourceStore) Bootstrap(ctx context.Context, name, dir, scope, scopeI
 
 	existing.Files = uploaded
 	existing.ContentHash = newHash
+	if sourceURL != "" {
+		existing.SourceURL = sourceURL
+	}
 	// Activate the record now that the upload succeeded. This also recovers a
 	// record left in "pending" by a prior bootstrap that failed mid-upload: the
 	// retry re-syncs and flips it to active rather than leaving it stuck.
@@ -253,6 +258,7 @@ func (p *templatePersistence) Create(ctx context.Context, rec *ResourceRecord, d
 		StoragePath:   rec.StoragePath,
 		StorageBucket: rec.StorageBucket,
 		StorageURI:    rec.StorageURI,
+		SourceURL:     rec.SourceURL,
 		Visibility:    rec.Visibility,
 	}
 	p.applyDirMeta(t, dir, rec)
@@ -265,6 +271,9 @@ func (p *templatePersistence) Update(ctx context.Context, rec *ResourceRecord, d
 	t.Files = rec.Files
 	t.ContentHash = rec.ContentHash
 	t.Status = rec.Status
+	if rec.SourceURL != "" {
+		t.SourceURL = rec.SourceURL
+	}
 	p.applyDirMeta(t, dir, rec)
 	return p.s.store.UpdateTemplate(ctx, t)
 }
@@ -322,6 +331,7 @@ func templateToRecord(t *store.Template) *ResourceRecord {
 		StoragePath:   t.StoragePath,
 		Files:         t.Files,
 		Status:        t.Status,
+		SourceURL:     t.SourceURL,
 		Visibility:    t.Visibility,
 	}
 }
@@ -364,6 +374,7 @@ func (p *harnessConfigPersistence) Create(ctx context.Context, rec *ResourceReco
 		StoragePath:   rec.StoragePath,
 		StorageBucket: rec.StorageBucket,
 		StorageURI:    rec.StorageURI,
+		SourceURL:     rec.SourceURL,
 		Visibility:    rec.Visibility,
 	}
 	rec.Harness = p.harness
@@ -378,6 +389,9 @@ func (p *harnessConfigPersistence) Update(ctx context.Context, rec *ResourceReco
 	hc.Status = rec.Status
 	hc.Harness = p.harness
 	rec.Harness = p.harness
+	if rec.SourceURL != "" {
+		hc.SourceURL = rec.SourceURL
+	}
 	return p.s.store.UpdateHarnessConfig(ctx, hc)
 }
 
@@ -406,6 +420,7 @@ func harnessConfigToRecord(hc *store.HarnessConfig) *ResourceRecord {
 		StoragePath:   hc.StoragePath,
 		Files:         hc.Files,
 		Status:        hc.Status,
+		SourceURL:     hc.SourceURL,
 		Visibility:    hc.Visibility,
 	}
 }
