@@ -294,6 +294,20 @@ func (_c *TemplateCreate) SetNillableUpdatedBy(v *string) *TemplateCreate {
 	return _c
 }
 
+// SetSourceURL sets the "source_url" field.
+func (_c *TemplateCreate) SetSourceURL(v string) *TemplateCreate {
+	_c.mutation.SetSourceURL(v)
+	return _c
+}
+
+// SetNillableSourceURL sets the "source_url" field if the given value is not nil.
+func (_c *TemplateCreate) SetNillableSourceURL(v *string) *TemplateCreate {
+	if v != nil {
+		_c.SetSourceURL(*v)
+	}
+	return _c
+}
+
 // SetVisibility sets the "visibility" field.
 func (_c *TemplateCreate) SetVisibility(v string) *TemplateCreate {
 	_c.mutation.SetVisibility(v)
@@ -571,6 +585,10 @@ func (_c *TemplateCreate) createSpec() (*Template, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.UpdatedBy(); ok {
 		_spec.SetField(template.FieldUpdatedBy, field.TypeString, value)
 		_node.UpdatedBy = value
+	}
+	if value, ok := _c.mutation.SourceURL(); ok {
+		_spec.SetField(template.FieldSourceURL, field.TypeString, value)
+		_node.SourceURL = value
 	}
 	if value, ok := _c.mutation.Visibility(); ok {
 		_spec.SetField(template.FieldVisibility, field.TypeString, value)
@@ -981,6 +999,24 @@ func (u *TemplateUpsert) UpdateUpdatedBy() *TemplateUpsert {
 // ClearUpdatedBy clears the value of the "updated_by" field.
 func (u *TemplateUpsert) ClearUpdatedBy() *TemplateUpsert {
 	u.SetNull(template.FieldUpdatedBy)
+	return u
+}
+
+// SetSourceURL sets the "source_url" field.
+func (u *TemplateUpsert) SetSourceURL(v string) *TemplateUpsert {
+	u.Set(template.FieldSourceURL, v)
+	return u
+}
+
+// UpdateSourceURL sets the "source_url" field to the value that was provided on create.
+func (u *TemplateUpsert) UpdateSourceURL() *TemplateUpsert {
+	u.SetExcluded(template.FieldSourceURL)
+	return u
+}
+
+// ClearSourceURL clears the value of the "source_url" field.
+func (u *TemplateUpsert) ClearSourceURL() *TemplateUpsert {
+	u.SetNull(template.FieldSourceURL)
 	return u
 }
 
@@ -1462,6 +1498,27 @@ func (u *TemplateUpsertOne) UpdateUpdatedBy() *TemplateUpsertOne {
 func (u *TemplateUpsertOne) ClearUpdatedBy() *TemplateUpsertOne {
 	return u.Update(func(s *TemplateUpsert) {
 		s.ClearUpdatedBy()
+	})
+}
+
+// SetSourceURL sets the "source_url" field.
+func (u *TemplateUpsertOne) SetSourceURL(v string) *TemplateUpsertOne {
+	return u.Update(func(s *TemplateUpsert) {
+		s.SetSourceURL(v)
+	})
+}
+
+// UpdateSourceURL sets the "source_url" field to the value that was provided on create.
+func (u *TemplateUpsertOne) UpdateSourceURL() *TemplateUpsertOne {
+	return u.Update(func(s *TemplateUpsert) {
+		s.UpdateSourceURL()
+	})
+}
+
+// ClearSourceURL clears the value of the "source_url" field.
+func (u *TemplateUpsertOne) ClearSourceURL() *TemplateUpsertOne {
+	return u.Update(func(s *TemplateUpsert) {
+		s.ClearSourceURL()
 	})
 }
 
@@ -2114,6 +2171,27 @@ func (u *TemplateUpsertBulk) UpdateUpdatedBy() *TemplateUpsertBulk {
 func (u *TemplateUpsertBulk) ClearUpdatedBy() *TemplateUpsertBulk {
 	return u.Update(func(s *TemplateUpsert) {
 		s.ClearUpdatedBy()
+	})
+}
+
+// SetSourceURL sets the "source_url" field.
+func (u *TemplateUpsertBulk) SetSourceURL(v string) *TemplateUpsertBulk {
+	return u.Update(func(s *TemplateUpsert) {
+		s.SetSourceURL(v)
+	})
+}
+
+// UpdateSourceURL sets the "source_url" field to the value that was provided on create.
+func (u *TemplateUpsertBulk) UpdateSourceURL() *TemplateUpsertBulk {
+	return u.Update(func(s *TemplateUpsert) {
+		s.UpdateSourceURL()
+	})
+}
+
+// ClearSourceURL clears the value of the "source_url" field.
+func (u *TemplateUpsertBulk) ClearSourceURL() *TemplateUpsertBulk {
+	return u.Update(func(s *TemplateUpsert) {
+		s.ClearSourceURL()
 	})
 }
 

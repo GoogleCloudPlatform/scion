@@ -238,6 +238,20 @@ func (_c *HarnessConfigCreate) SetNillableUpdatedBy(v *string) *HarnessConfigCre
 	return _c
 }
 
+// SetSourceURL sets the "source_url" field.
+func (_c *HarnessConfigCreate) SetSourceURL(v string) *HarnessConfigCreate {
+	_c.mutation.SetSourceURL(v)
+	return _c
+}
+
+// SetNillableSourceURL sets the "source_url" field if the given value is not nil.
+func (_c *HarnessConfigCreate) SetNillableSourceURL(v *string) *HarnessConfigCreate {
+	if v != nil {
+		_c.SetSourceURL(*v)
+	}
+	return _c
+}
+
 // SetVisibility sets the "visibility" field.
 func (_c *HarnessConfigCreate) SetVisibility(v string) *HarnessConfigCreate {
 	_c.mutation.SetVisibility(v)
@@ -504,6 +518,10 @@ func (_c *HarnessConfigCreate) createSpec() (*HarnessConfig, *sqlgraph.CreateSpe
 	if value, ok := _c.mutation.UpdatedBy(); ok {
 		_spec.SetField(harnessconfig.FieldUpdatedBy, field.TypeString, value)
 		_node.UpdatedBy = value
+	}
+	if value, ok := _c.mutation.SourceURL(); ok {
+		_spec.SetField(harnessconfig.FieldSourceURL, field.TypeString, value)
+		_node.SourceURL = value
 	}
 	if value, ok := _c.mutation.Visibility(); ok {
 		_spec.SetField(harnessconfig.FieldVisibility, field.TypeString, value)
@@ -842,6 +860,24 @@ func (u *HarnessConfigUpsert) UpdateUpdatedBy() *HarnessConfigUpsert {
 // ClearUpdatedBy clears the value of the "updated_by" field.
 func (u *HarnessConfigUpsert) ClearUpdatedBy() *HarnessConfigUpsert {
 	u.SetNull(harnessconfig.FieldUpdatedBy)
+	return u
+}
+
+// SetSourceURL sets the "source_url" field.
+func (u *HarnessConfigUpsert) SetSourceURL(v string) *HarnessConfigUpsert {
+	u.Set(harnessconfig.FieldSourceURL, v)
+	return u
+}
+
+// UpdateSourceURL sets the "source_url" field to the value that was provided on create.
+func (u *HarnessConfigUpsert) UpdateSourceURL() *HarnessConfigUpsert {
+	u.SetExcluded(harnessconfig.FieldSourceURL)
+	return u
+}
+
+// ClearSourceURL clears the value of the "source_url" field.
+func (u *HarnessConfigUpsert) ClearSourceURL() *HarnessConfigUpsert {
+	u.SetNull(harnessconfig.FieldSourceURL)
 	return u
 }
 
@@ -1239,6 +1275,27 @@ func (u *HarnessConfigUpsertOne) UpdateUpdatedBy() *HarnessConfigUpsertOne {
 func (u *HarnessConfigUpsertOne) ClearUpdatedBy() *HarnessConfigUpsertOne {
 	return u.Update(func(s *HarnessConfigUpsert) {
 		s.ClearUpdatedBy()
+	})
+}
+
+// SetSourceURL sets the "source_url" field.
+func (u *HarnessConfigUpsertOne) SetSourceURL(v string) *HarnessConfigUpsertOne {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.SetSourceURL(v)
+	})
+}
+
+// UpdateSourceURL sets the "source_url" field to the value that was provided on create.
+func (u *HarnessConfigUpsertOne) UpdateSourceURL() *HarnessConfigUpsertOne {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.UpdateSourceURL()
+	})
+}
+
+// ClearSourceURL clears the value of the "source_url" field.
+func (u *HarnessConfigUpsertOne) ClearSourceURL() *HarnessConfigUpsertOne {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.ClearSourceURL()
 	})
 }
 
@@ -1807,6 +1864,27 @@ func (u *HarnessConfigUpsertBulk) UpdateUpdatedBy() *HarnessConfigUpsertBulk {
 func (u *HarnessConfigUpsertBulk) ClearUpdatedBy() *HarnessConfigUpsertBulk {
 	return u.Update(func(s *HarnessConfigUpsert) {
 		s.ClearUpdatedBy()
+	})
+}
+
+// SetSourceURL sets the "source_url" field.
+func (u *HarnessConfigUpsertBulk) SetSourceURL(v string) *HarnessConfigUpsertBulk {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.SetSourceURL(v)
+	})
+}
+
+// UpdateSourceURL sets the "source_url" field to the value that was provided on create.
+func (u *HarnessConfigUpsertBulk) UpdateSourceURL() *HarnessConfigUpsertBulk {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.UpdateSourceURL()
+	})
+}
+
+// ClearSourceURL clears the value of the "source_url" field.
+func (u *HarnessConfigUpsertBulk) ClearSourceURL() *HarnessConfigUpsertBulk {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.ClearSourceURL()
 	})
 }
 

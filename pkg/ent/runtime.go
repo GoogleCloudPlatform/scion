@@ -392,15 +392,15 @@ func init() {
 	// harnessconfig.DefaultScope holds the default value on creation for the scope field.
 	harnessconfig.DefaultScope = harnessconfigDescScope.Default.(string)
 	// harnessconfigDescVisibility is the schema descriptor for visibility field.
-	harnessconfigDescVisibility := harnessconfigFields[18].Descriptor()
+	harnessconfigDescVisibility := harnessconfigFields[19].Descriptor()
 	// harnessconfig.DefaultVisibility holds the default value on creation for the visibility field.
 	harnessconfig.DefaultVisibility = harnessconfigDescVisibility.Default.(string)
 	// harnessconfigDescCreated is the schema descriptor for created field.
-	harnessconfigDescCreated := harnessconfigFields[19].Descriptor()
+	harnessconfigDescCreated := harnessconfigFields[20].Descriptor()
 	// harnessconfig.DefaultCreated holds the default value on creation for the created field.
 	harnessconfig.DefaultCreated = harnessconfigDescCreated.Default.(func() time.Time)
 	// harnessconfigDescUpdated is the schema descriptor for updated field.
-	harnessconfigDescUpdated := harnessconfigFields[20].Descriptor()
+	harnessconfigDescUpdated := harnessconfigFields[21].Descriptor()
 	// harnessconfig.DefaultUpdated holds the default value on creation for the updated field.
 	harnessconfig.DefaultUpdated = harnessconfigDescUpdated.Default.(func() time.Time)
 	// harnessconfig.UpdateDefaultUpdated holds the default value on update for the updated field.
@@ -992,15 +992,15 @@ func init() {
 	// template.DefaultScope holds the default value on creation for the scope field.
 	template.DefaultScope = templateDescScope.Default.(string)
 	// templateDescVisibility is the schema descriptor for visibility field.
-	templateDescVisibility := templateFields[22].Descriptor()
+	templateDescVisibility := templateFields[23].Descriptor()
 	// template.DefaultVisibility holds the default value on creation for the visibility field.
 	template.DefaultVisibility = templateDescVisibility.Default.(string)
 	// templateDescCreated is the schema descriptor for created field.
-	templateDescCreated := templateFields[23].Descriptor()
+	templateDescCreated := templateFields[24].Descriptor()
 	// template.DefaultCreated holds the default value on creation for the created field.
 	template.DefaultCreated = templateDescCreated.Default.(func() time.Time)
 	// templateDescUpdated is the schema descriptor for updated field.
-	templateDescUpdated := templateFields[24].Descriptor()
+	templateDescUpdated := templateFields[25].Descriptor()
 	// template.DefaultUpdated holds the default value on creation for the updated field.
 	template.DefaultUpdated = templateDescUpdated.Default.(func() time.Time)
 	// template.UpdateDefaultUpdated holds the default value on update for the updated field.

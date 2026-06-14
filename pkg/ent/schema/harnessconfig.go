@@ -74,6 +74,8 @@ func (HarnessConfig) Fields() []ent.Field {
 			Optional(),
 		field.String("updated_by").
 			Optional(),
+		field.String("source_url").
+			Optional(),
 		field.String("visibility").
 			Default("private"),
 		field.Time("created").

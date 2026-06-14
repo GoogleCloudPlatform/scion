@@ -13046,6 +13046,7 @@ type HarnessConfigMutation struct {
 	owner_id       *string
 	created_by     *string
 	updated_by     *string
+	source_url     *string
 	visibility     *string
 	created        *time.Time
 	updated        *time.Time
@@ -13927,6 +13928,55 @@ func (m *HarnessConfigMutation) ResetUpdatedBy() {
 	delete(m.clearedFields, harnessconfig.FieldUpdatedBy)
 }
 
+// SetSourceURL sets the "source_url" field.
+func (m *HarnessConfigMutation) SetSourceURL(s string) {
+	m.source_url = &s
+}
+
+// SourceURL returns the value of the "source_url" field in the mutation.
+func (m *HarnessConfigMutation) SourceURL() (r string, exists bool) {
+	v := m.source_url
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldSourceURL returns the old "source_url" field's value of the HarnessConfig entity.
+// If the HarnessConfig object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *HarnessConfigMutation) OldSourceURL(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldSourceURL is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldSourceURL requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldSourceURL: %w", err)
+	}
+	return oldValue.SourceURL, nil
+}
+
+// ClearSourceURL clears the value of the "source_url" field.
+func (m *HarnessConfigMutation) ClearSourceURL() {
+	m.source_url = nil
+	m.clearedFields[harnessconfig.FieldSourceURL] = struct{}{}
+}
+
+// SourceURLCleared returns if the "source_url" field was cleared in this mutation.
+func (m *HarnessConfigMutation) SourceURLCleared() bool {
+	_, ok := m.clearedFields[harnessconfig.FieldSourceURL]
+	return ok
+}
+
+// ResetSourceURL resets all changes to the "source_url" field.
+func (m *HarnessConfigMutation) ResetSourceURL() {
+	m.source_url = nil
+	delete(m.clearedFields, harnessconfig.FieldSourceURL)
+}
+
 // SetVisibility sets the "visibility" field.
 func (m *HarnessConfigMutation) SetVisibility(s string) {
 	m.visibility = &s
@@ -14069,7 +14119,7 @@ func (m *HarnessConfigMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *HarnessConfigMutation) Fields() []string {
-	fields := make([]string, 0, 20)
+	fields := make([]string, 0, 21)
 	if m.name != nil {
 		fields = append(fields, harnessconfig.FieldName)
 	}
@@ -14120,6 +14170,9 @@ func (m *HarnessConfigMutation) Fields() []string {
 	}
 	if m.updated_by != nil {
 		fields = append(fields, harnessconfig.FieldUpdatedBy)
+	}
+	if m.source_url != nil {
+		fields = append(fields, harnessconfig.FieldSourceURL)
 	}
 	if m.visibility != nil {
 		fields = append(fields, harnessconfig.FieldVisibility)
@@ -14172,6 +14225,8 @@ func (m *HarnessConfigMutation) Field(name string) (ent.Value, bool) {
 		return m.CreatedBy()
 	case harnessconfig.FieldUpdatedBy:
 		return m.UpdatedBy()
+	case harnessconfig.FieldSourceURL:
+		return m.SourceURL()
 	case harnessconfig.FieldVisibility:
 		return m.Visibility()
 	case harnessconfig.FieldCreated:
@@ -14221,6 +14276,8 @@ func (m *HarnessConfigMutation) OldField(ctx context.Context, name string) (ent.
 		return m.OldCreatedBy(ctx)
 	case harnessconfig.FieldUpdatedBy:
 		return m.OldUpdatedBy(ctx)
+	case harnessconfig.FieldSourceURL:
+		return m.OldSourceURL(ctx)
 	case harnessconfig.FieldVisibility:
 		return m.OldVisibility(ctx)
 	case harnessconfig.FieldCreated:
@@ -14355,6 +14412,13 @@ func (m *HarnessConfigMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetUpdatedBy(v)
 		return nil
+	case harnessconfig.FieldSourceURL:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetSourceURL(v)
+		return nil
 	case harnessconfig.FieldVisibility:
 		v, ok := value.(string)
 		if !ok {
@@ -14442,6 +14506,9 @@ func (m *HarnessConfigMutation) ClearedFields() []string {
 	if m.FieldCleared(harnessconfig.FieldUpdatedBy) {
 		fields = append(fields, harnessconfig.FieldUpdatedBy)
 	}
+	if m.FieldCleared(harnessconfig.FieldSourceURL) {
+		fields = append(fields, harnessconfig.FieldSourceURL)
+	}
 	return fields
 }
 
@@ -14491,6 +14558,9 @@ func (m *HarnessConfigMutation) ClearField(name string) error {
 		return nil
 	case harnessconfig.FieldUpdatedBy:
 		m.ClearUpdatedBy()
+		return nil
+	case harnessconfig.FieldSourceURL:
+		m.ClearSourceURL()
 		return nil
 	}
 	return fmt.Errorf("unknown HarnessConfig nullable field %s", name)
@@ -14550,6 +14620,9 @@ func (m *HarnessConfigMutation) ResetField(name string) error {
 		return nil
 	case harnessconfig.FieldUpdatedBy:
 		m.ResetUpdatedBy()
+		return nil
+	case harnessconfig.FieldSourceURL:
+		m.ResetSourceURL()
 		return nil
 	case harnessconfig.FieldVisibility:
 		m.ResetVisibility()
@@ -34561,6 +34634,7 @@ type TemplateMutation struct {
 	owner_id               *string
 	created_by             *string
 	updated_by             *string
+	source_url             *string
 	visibility             *string
 	created                *time.Time
 	updated                *time.Time
@@ -35638,6 +35712,55 @@ func (m *TemplateMutation) ResetUpdatedBy() {
 	delete(m.clearedFields, template.FieldUpdatedBy)
 }
 
+// SetSourceURL sets the "source_url" field.
+func (m *TemplateMutation) SetSourceURL(s string) {
+	m.source_url = &s
+}
+
+// SourceURL returns the value of the "source_url" field in the mutation.
+func (m *TemplateMutation) SourceURL() (r string, exists bool) {
+	v := m.source_url
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldSourceURL returns the old "source_url" field's value of the Template entity.
+// If the Template object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TemplateMutation) OldSourceURL(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldSourceURL is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldSourceURL requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldSourceURL: %w", err)
+	}
+	return oldValue.SourceURL, nil
+}
+
+// ClearSourceURL clears the value of the "source_url" field.
+func (m *TemplateMutation) ClearSourceURL() {
+	m.source_url = nil
+	m.clearedFields[template.FieldSourceURL] = struct{}{}
+}
+
+// SourceURLCleared returns if the "source_url" field was cleared in this mutation.
+func (m *TemplateMutation) SourceURLCleared() bool {
+	_, ok := m.clearedFields[template.FieldSourceURL]
+	return ok
+}
+
+// ResetSourceURL resets all changes to the "source_url" field.
+func (m *TemplateMutation) ResetSourceURL() {
+	m.source_url = nil
+	delete(m.clearedFields, template.FieldSourceURL)
+}
+
 // SetVisibility sets the "visibility" field.
 func (m *TemplateMutation) SetVisibility(s string) {
 	m.visibility = &s
@@ -35780,7 +35903,7 @@ func (m *TemplateMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *TemplateMutation) Fields() []string {
-	fields := make([]string, 0, 24)
+	fields := make([]string, 0, 25)
 	if m.name != nil {
 		fields = append(fields, template.FieldName)
 	}
@@ -35844,6 +35967,9 @@ func (m *TemplateMutation) Fields() []string {
 	if m.updated_by != nil {
 		fields = append(fields, template.FieldUpdatedBy)
 	}
+	if m.source_url != nil {
+		fields = append(fields, template.FieldSourceURL)
+	}
 	if m.visibility != nil {
 		fields = append(fields, template.FieldVisibility)
 	}
@@ -35903,6 +36029,8 @@ func (m *TemplateMutation) Field(name string) (ent.Value, bool) {
 		return m.CreatedBy()
 	case template.FieldUpdatedBy:
 		return m.UpdatedBy()
+	case template.FieldSourceURL:
+		return m.SourceURL()
 	case template.FieldVisibility:
 		return m.Visibility()
 	case template.FieldCreated:
@@ -35960,6 +36088,8 @@ func (m *TemplateMutation) OldField(ctx context.Context, name string) (ent.Value
 		return m.OldCreatedBy(ctx)
 	case template.FieldUpdatedBy:
 		return m.OldUpdatedBy(ctx)
+	case template.FieldSourceURL:
+		return m.OldSourceURL(ctx)
 	case template.FieldVisibility:
 		return m.OldVisibility(ctx)
 	case template.FieldCreated:
@@ -36122,6 +36252,13 @@ func (m *TemplateMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetUpdatedBy(v)
 		return nil
+	case template.FieldSourceURL:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetSourceURL(v)
+		return nil
 	case template.FieldVisibility:
 		v, ok := value.(string)
 		if !ok {
@@ -36221,6 +36358,9 @@ func (m *TemplateMutation) ClearedFields() []string {
 	if m.FieldCleared(template.FieldUpdatedBy) {
 		fields = append(fields, template.FieldUpdatedBy)
 	}
+	if m.FieldCleared(template.FieldSourceURL) {
+		fields = append(fields, template.FieldSourceURL)
+	}
 	return fields
 }
 
@@ -36282,6 +36422,9 @@ func (m *TemplateMutation) ClearField(name string) error {
 		return nil
 	case template.FieldUpdatedBy:
 		m.ClearUpdatedBy()
+		return nil
+	case template.FieldSourceURL:
+		m.ClearSourceURL()
 		return nil
 	}
 	return fmt.Errorf("unknown Template nullable field %s", name)
@@ -36353,6 +36496,9 @@ func (m *TemplateMutation) ResetField(name string) error {
 		return nil
 	case template.FieldUpdatedBy:
 		m.ResetUpdatedBy()
+		return nil
+	case template.FieldSourceURL:
+		m.ResetSourceURL()
 		return nil
 	case template.FieldVisibility:
 		m.ResetVisibility()

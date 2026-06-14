@@ -57,6 +57,8 @@ const (
 	FieldCreatedBy = "created_by"
 	// FieldUpdatedBy holds the string denoting the updated_by field in the database.
 	FieldUpdatedBy = "updated_by"
+	// FieldSourceURL holds the string denoting the source_url field in the database.
+	FieldSourceURL = "source_url"
 	// FieldVisibility holds the string denoting the visibility field in the database.
 	FieldVisibility = "visibility"
 	// FieldCreated holds the string denoting the created field in the database.
@@ -91,6 +93,7 @@ var Columns = []string{
 	FieldOwnerID,
 	FieldCreatedBy,
 	FieldUpdatedBy,
+	FieldSourceURL,
 	FieldVisibility,
 	FieldCreated,
 	FieldUpdated,
@@ -263,6 +266,11 @@ func ByCreatedBy(opts ...sql.OrderTermOption) OrderOption {
 // ByUpdatedBy orders the results by the updated_by field.
 func ByUpdatedBy(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldUpdatedBy, opts...).ToFunc()
+}
+
+// BySourceURL orders the results by the source_url field.
+func BySourceURL(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldSourceURL, opts...).ToFunc()
 }
 
 // ByVisibility orders the results by the visibility field.

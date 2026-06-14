@@ -338,6 +338,26 @@ func (_u *HarnessConfigUpdate) ClearUpdatedBy() *HarnessConfigUpdate {
 	return _u
 }
 
+// SetSourceURL sets the "source_url" field.
+func (_u *HarnessConfigUpdate) SetSourceURL(v string) *HarnessConfigUpdate {
+	_u.mutation.SetSourceURL(v)
+	return _u
+}
+
+// SetNillableSourceURL sets the "source_url" field if the given value is not nil.
+func (_u *HarnessConfigUpdate) SetNillableSourceURL(v *string) *HarnessConfigUpdate {
+	if v != nil {
+		_u.SetSourceURL(*v)
+	}
+	return _u
+}
+
+// ClearSourceURL clears the value of the "source_url" field.
+func (_u *HarnessConfigUpdate) ClearSourceURL() *HarnessConfigUpdate {
+	_u.mutation.ClearSourceURL()
+	return _u
+}
+
 // SetVisibility sets the "visibility" field.
 func (_u *HarnessConfigUpdate) SetVisibility(v string) *HarnessConfigUpdate {
 	_u.mutation.SetVisibility(v)
@@ -522,6 +542,12 @@ func (_u *HarnessConfigUpdate) sqlSave(ctx context.Context) (_node int, err erro
 	}
 	if _u.mutation.UpdatedByCleared() {
 		_spec.ClearField(harnessconfig.FieldUpdatedBy, field.TypeString)
+	}
+	if value, ok := _u.mutation.SourceURL(); ok {
+		_spec.SetField(harnessconfig.FieldSourceURL, field.TypeString, value)
+	}
+	if _u.mutation.SourceURLCleared() {
+		_spec.ClearField(harnessconfig.FieldSourceURL, field.TypeString)
 	}
 	if value, ok := _u.mutation.Visibility(); ok {
 		_spec.SetField(harnessconfig.FieldVisibility, field.TypeString, value)
@@ -859,6 +885,26 @@ func (_u *HarnessConfigUpdateOne) ClearUpdatedBy() *HarnessConfigUpdateOne {
 	return _u
 }
 
+// SetSourceURL sets the "source_url" field.
+func (_u *HarnessConfigUpdateOne) SetSourceURL(v string) *HarnessConfigUpdateOne {
+	_u.mutation.SetSourceURL(v)
+	return _u
+}
+
+// SetNillableSourceURL sets the "source_url" field if the given value is not nil.
+func (_u *HarnessConfigUpdateOne) SetNillableSourceURL(v *string) *HarnessConfigUpdateOne {
+	if v != nil {
+		_u.SetSourceURL(*v)
+	}
+	return _u
+}
+
+// ClearSourceURL clears the value of the "source_url" field.
+func (_u *HarnessConfigUpdateOne) ClearSourceURL() *HarnessConfigUpdateOne {
+	_u.mutation.ClearSourceURL()
+	return _u
+}
+
 // SetVisibility sets the "visibility" field.
 func (_u *HarnessConfigUpdateOne) SetVisibility(v string) *HarnessConfigUpdateOne {
 	_u.mutation.SetVisibility(v)
@@ -1073,6 +1119,12 @@ func (_u *HarnessConfigUpdateOne) sqlSave(ctx context.Context) (_node *HarnessCo
 	}
 	if _u.mutation.UpdatedByCleared() {
 		_spec.ClearField(harnessconfig.FieldUpdatedBy, field.TypeString)
+	}
+	if value, ok := _u.mutation.SourceURL(); ok {
+		_spec.SetField(harnessconfig.FieldSourceURL, field.TypeString, value)
+	}
+	if _u.mutation.SourceURLCleared() {
+		_spec.ClearField(harnessconfig.FieldSourceURL, field.TypeString)
 	}
 	if value, ok := _u.mutation.Visibility(); ok {
 		_spec.SetField(harnessconfig.FieldVisibility, field.TypeString, value)

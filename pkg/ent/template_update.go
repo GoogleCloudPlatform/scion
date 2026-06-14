@@ -418,6 +418,26 @@ func (_u *TemplateUpdate) ClearUpdatedBy() *TemplateUpdate {
 	return _u
 }
 
+// SetSourceURL sets the "source_url" field.
+func (_u *TemplateUpdate) SetSourceURL(v string) *TemplateUpdate {
+	_u.mutation.SetSourceURL(v)
+	return _u
+}
+
+// SetNillableSourceURL sets the "source_url" field if the given value is not nil.
+func (_u *TemplateUpdate) SetNillableSourceURL(v *string) *TemplateUpdate {
+	if v != nil {
+		_u.SetSourceURL(*v)
+	}
+	return _u
+}
+
+// ClearSourceURL clears the value of the "source_url" field.
+func (_u *TemplateUpdate) ClearSourceURL() *TemplateUpdate {
+	_u.mutation.ClearSourceURL()
+	return _u
+}
+
 // SetVisibility sets the "visibility" field.
 func (_u *TemplateUpdate) SetVisibility(v string) *TemplateUpdate {
 	_u.mutation.SetVisibility(v)
@@ -621,6 +641,12 @@ func (_u *TemplateUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	}
 	if _u.mutation.UpdatedByCleared() {
 		_spec.ClearField(template.FieldUpdatedBy, field.TypeString)
+	}
+	if value, ok := _u.mutation.SourceURL(); ok {
+		_spec.SetField(template.FieldSourceURL, field.TypeString, value)
+	}
+	if _u.mutation.SourceURLCleared() {
+		_spec.ClearField(template.FieldSourceURL, field.TypeString)
 	}
 	if value, ok := _u.mutation.Visibility(); ok {
 		_spec.SetField(template.FieldVisibility, field.TypeString, value)
@@ -1038,6 +1064,26 @@ func (_u *TemplateUpdateOne) ClearUpdatedBy() *TemplateUpdateOne {
 	return _u
 }
 
+// SetSourceURL sets the "source_url" field.
+func (_u *TemplateUpdateOne) SetSourceURL(v string) *TemplateUpdateOne {
+	_u.mutation.SetSourceURL(v)
+	return _u
+}
+
+// SetNillableSourceURL sets the "source_url" field if the given value is not nil.
+func (_u *TemplateUpdateOne) SetNillableSourceURL(v *string) *TemplateUpdateOne {
+	if v != nil {
+		_u.SetSourceURL(*v)
+	}
+	return _u
+}
+
+// ClearSourceURL clears the value of the "source_url" field.
+func (_u *TemplateUpdateOne) ClearSourceURL() *TemplateUpdateOne {
+	_u.mutation.ClearSourceURL()
+	return _u
+}
+
 // SetVisibility sets the "visibility" field.
 func (_u *TemplateUpdateOne) SetVisibility(v string) *TemplateUpdateOne {
 	_u.mutation.SetVisibility(v)
@@ -1271,6 +1317,12 @@ func (_u *TemplateUpdateOne) sqlSave(ctx context.Context) (_node *Template, err 
 	}
 	if _u.mutation.UpdatedByCleared() {
 		_spec.ClearField(template.FieldUpdatedBy, field.TypeString)
+	}
+	if value, ok := _u.mutation.SourceURL(); ok {
+		_spec.SetField(template.FieldSourceURL, field.TypeString, value)
+	}
+	if _u.mutation.SourceURLCleared() {
+		_spec.ClearField(template.FieldSourceURL, field.TypeString)
 	}
 	if value, ok := _u.mutation.Visibility(); ok {
 		_spec.SetField(template.FieldVisibility, field.TypeString, value)

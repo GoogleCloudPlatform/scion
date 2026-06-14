@@ -155,6 +155,11 @@ func UpdatedBy(v string) predicate.Template {
 	return predicate.Template(sql.FieldEQ(FieldUpdatedBy, v))
 }
 
+// SourceURL applies equality check predicate on the "source_url" field. It's identical to SourceURLEQ.
+func SourceURL(v string) predicate.Template {
+	return predicate.Template(sql.FieldEQ(FieldSourceURL, v))
+}
+
 // Visibility applies equality check predicate on the "visibility" field. It's identical to VisibilityEQ.
 func Visibility(v string) predicate.Template {
 	return predicate.Template(sql.FieldEQ(FieldVisibility, v))
@@ -1648,6 +1653,81 @@ func UpdatedByEqualFold(v string) predicate.Template {
 // UpdatedByContainsFold applies the ContainsFold predicate on the "updated_by" field.
 func UpdatedByContainsFold(v string) predicate.Template {
 	return predicate.Template(sql.FieldContainsFold(FieldUpdatedBy, v))
+}
+
+// SourceURLEQ applies the EQ predicate on the "source_url" field.
+func SourceURLEQ(v string) predicate.Template {
+	return predicate.Template(sql.FieldEQ(FieldSourceURL, v))
+}
+
+// SourceURLNEQ applies the NEQ predicate on the "source_url" field.
+func SourceURLNEQ(v string) predicate.Template {
+	return predicate.Template(sql.FieldNEQ(FieldSourceURL, v))
+}
+
+// SourceURLIn applies the In predicate on the "source_url" field.
+func SourceURLIn(vs ...string) predicate.Template {
+	return predicate.Template(sql.FieldIn(FieldSourceURL, vs...))
+}
+
+// SourceURLNotIn applies the NotIn predicate on the "source_url" field.
+func SourceURLNotIn(vs ...string) predicate.Template {
+	return predicate.Template(sql.FieldNotIn(FieldSourceURL, vs...))
+}
+
+// SourceURLGT applies the GT predicate on the "source_url" field.
+func SourceURLGT(v string) predicate.Template {
+	return predicate.Template(sql.FieldGT(FieldSourceURL, v))
+}
+
+// SourceURLGTE applies the GTE predicate on the "source_url" field.
+func SourceURLGTE(v string) predicate.Template {
+	return predicate.Template(sql.FieldGTE(FieldSourceURL, v))
+}
+
+// SourceURLLT applies the LT predicate on the "source_url" field.
+func SourceURLLT(v string) predicate.Template {
+	return predicate.Template(sql.FieldLT(FieldSourceURL, v))
+}
+
+// SourceURLLTE applies the LTE predicate on the "source_url" field.
+func SourceURLLTE(v string) predicate.Template {
+	return predicate.Template(sql.FieldLTE(FieldSourceURL, v))
+}
+
+// SourceURLContains applies the Contains predicate on the "source_url" field.
+func SourceURLContains(v string) predicate.Template {
+	return predicate.Template(sql.FieldContains(FieldSourceURL, v))
+}
+
+// SourceURLHasPrefix applies the HasPrefix predicate on the "source_url" field.
+func SourceURLHasPrefix(v string) predicate.Template {
+	return predicate.Template(sql.FieldHasPrefix(FieldSourceURL, v))
+}
+
+// SourceURLHasSuffix applies the HasSuffix predicate on the "source_url" field.
+func SourceURLHasSuffix(v string) predicate.Template {
+	return predicate.Template(sql.FieldHasSuffix(FieldSourceURL, v))
+}
+
+// SourceURLIsNil applies the IsNil predicate on the "source_url" field.
+func SourceURLIsNil() predicate.Template {
+	return predicate.Template(sql.FieldIsNull(FieldSourceURL))
+}
+
+// SourceURLNotNil applies the NotNil predicate on the "source_url" field.
+func SourceURLNotNil() predicate.Template {
+	return predicate.Template(sql.FieldNotNull(FieldSourceURL))
+}
+
+// SourceURLEqualFold applies the EqualFold predicate on the "source_url" field.
+func SourceURLEqualFold(v string) predicate.Template {
+	return predicate.Template(sql.FieldEqualFold(FieldSourceURL, v))
+}
+
+// SourceURLContainsFold applies the ContainsFold predicate on the "source_url" field.
+func SourceURLContainsFold(v string) predicate.Template {
+	return predicate.Template(sql.FieldContainsFold(FieldSourceURL, v))
 }
 
 // VisibilityEQ applies the EQ predicate on the "visibility" field.
