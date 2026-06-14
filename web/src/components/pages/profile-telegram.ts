@@ -17,8 +17,9 @@
 /**
  * Profile Telegram linking page
  *
- * Allows users to link their Telegram account by entering a 6-character
- * code provided by the Telegram bot.
+ * When opened via the bot's registration link (?code=…), automatically
+ * verifies the code and shows a confirmation. Otherwise shows a manual
+ * code-entry form.
  */
 
 import { LitElement, html, css, nothing } from 'lit';
@@ -36,6 +37,9 @@ export class ScionPageProfileTelegram extends LitElement {
   @state()
   private _message = '';
 
+  @state()
+  private _autoLinked = false;
+
   override connectedCallback(): void {
     super.connectedCallback();
     const params = new URLSearchParams(window.location.search);
@@ -43,6 +47,7 @@ export class ScionPageProfileTelegram extends LitElement {
     if (code) {
       this._code = code.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 6);
       if (this._code.length === 6) {
+        this._autoLinked = true;
         this._autoSubmit();
       }
     }
@@ -50,7 +55,7 @@ export class ScionPageProfileTelegram extends LitElement {
 
   private async _autoSubmit(): Promise<void> {
     this._status = 'submitting';
-    this._message = 'Linking your account…';
+    this._message = 'Linking your Telegram account…';
 
     try {
       const resp = await apiFetch('/api/v1/telegram/link/verify', {
@@ -186,6 +191,15 @@ export class ScionPageProfileTelegram extends LitElement {
       color: var(--sl-color-danger-700, #b91c1c);
       border: 1px solid var(--sl-color-danger-200, #fecaca);
     }
+
+    .auto-link-status {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      font-size: 0.9375rem;
+      color: var(--scion-text-muted, #64748b);
+      padding: 0.5rem 0;
+    }
   `;
 
   private _handleInput(e: Event): void {
@@ -231,15 +245,44 @@ export class ScionPageProfileTelegram extends LitElement {
     }
   }
 
-  override render() {
+  private _renderAutoLink() {
     return html`
-      <div class="page-header">
-        <div class="page-header-info">
-          <h1>Telegram</h1>
-          <p>Link your Telegram account to receive notifications and interact with agents.</p>
-        </div>
-      </div>
+      <div class="settings-card">
+        <h2 class="section-title">
+          <sl-icon name="link-45deg"></sl-icon>
+          Link Telegram Account
+        </h2>
 
+        ${this._status === 'submitting'
+          ? html`
+              <div class="auto-link-status">
+                <sl-spinner></sl-spinner>
+                <span>${this._message}</span>
+              </div>
+            `
+          : nothing}
+        ${this._status === 'success'
+          ? html`
+              <div class="result-message result-success">
+                <sl-icon name="check-circle"></sl-icon>
+                ${this._message}
+              </div>
+            `
+          : nothing}
+        ${this._status === 'error'
+          ? html`
+              <div class="result-message result-error">
+                <sl-icon name="exclamation-circle"></sl-icon>
+                ${this._message}
+              </div>
+            `
+          : nothing}
+      </div>
+    `;
+  }
+
+  private _renderForm() {
+    return html`
       <div class="settings-card">
         <h2 class="section-title">
           <sl-icon name="link-45deg"></sl-icon>
@@ -293,6 +336,19 @@ export class ScionPageProfileTelegram extends LitElement {
             `
           : nothing}
       </div>
+    `;
+  }
+
+  override render() {
+    return html`
+      <div class="page-header">
+        <div class="page-header-info">
+          <h1>Telegram</h1>
+          <p>Link your Telegram account to receive notifications and interact with agents.</p>
+        </div>
+      </div>
+
+      ${this._autoLinked ? this._renderAutoLink() : this._renderForm()}
     `;
   }
 }
