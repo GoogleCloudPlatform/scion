@@ -56,6 +56,10 @@ func (m *mockHarnessConfigService) Update(ctx context.Context, id string, req *h
 
 func (m *mockHarnessConfigService) Delete(ctx context.Context, id string) error { return nil }
 
+func (m *mockHarnessConfigService) Reimport(ctx context.Context, id string, sourceURL string) (*hubclient.ReimportHarnessConfigResponse, error) {
+	return nil, nil
+}
+
 func (m *mockHarnessConfigService) RequestUploadURLs(ctx context.Context, id string, files []hubclient.FileUploadRequest) (*hubclient.UploadResponse, error) {
 	return nil, nil
 }
