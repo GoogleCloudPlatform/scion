@@ -73,6 +73,10 @@ func NewScionExecutor(bridge *Bridge, log *slog.Logger) *ScionExecutor {
 // to a Scion agent and yields events as the agent responds.
 func (e *ScionExecutor) Execute(ctx context.Context, execCtx *a2asrv.ExecutorContext) iter.Seq2[a2a.Event, error] {
 	return func(yield func(a2a.Event, error) bool) {
+		if execCtx == nil {
+			yield(nil, fmt.Errorf("executor context is nil: %w", a2a.ErrInternalError))
+			return
+		}
 		route, ok := RouteInfoFrom(ctx)
 		if !ok {
 			yield(nil, fmt.Errorf("missing route info in context: %w", a2a.ErrInternalError))
