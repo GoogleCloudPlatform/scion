@@ -309,7 +309,12 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	// Apply image_registry rewrite to whatever image was resolved above.
 	// This rewrites the registry prefix for scion-* images. An explicit
 	// --image flag below takes full precedence (no rewrite).
-	if settings != nil && resolvedImage != "" {
+	// When image_pinned is set in the agent/template config, the image is
+	// used as-is without registry rewriting.
+	imagePinned := finalScionCfg != nil && finalScionCfg.ImagePinned
+	if imagePinned {
+		util.Debugf("image resolution: image_pinned=true, skipping registry rewrite")
+	} else if settings != nil && resolvedImage != "" {
 		imageRegistry := settings.ResolveImageRegistry(opts.Profile)
 		if imageRegistry != "" {
 			rewritten := config.RewriteImageRegistry(resolvedImage, imageRegistry)

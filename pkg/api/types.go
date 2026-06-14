@@ -447,8 +447,9 @@ type ScionConfig struct {
 	Kubernetes       *KubernetesConfig `json:"kubernetes,omitempty" yaml:"kubernetes,omitempty"`
 	AuthSelectedType string            `json:"auth_selectedType,omitempty" yaml:"auth_selectedType,omitempty"`
 	Resources        *ResourceSpec     `json:"resources,omitempty" yaml:"resources,omitempty"`
-	Image            string            `json:"image,omitempty" yaml:"image,omitempty"`
-	Services         []ServiceSpec     `json:"services,omitempty" yaml:"services,omitempty"`
+	Image       string        `json:"image,omitempty" yaml:"image,omitempty"`
+	ImagePinned bool          `json:"image_pinned,omitempty" yaml:"image_pinned,omitempty"`
+	Services    []ServiceSpec `json:"services,omitempty" yaml:"services,omitempty"`
 	// MCPServers is the universal MCP server map. Keys are server names; values
 	// are the transport-agnostic config translated by each harness's
 	// container-side provisioner into native format.
