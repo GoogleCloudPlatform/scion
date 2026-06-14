@@ -97,6 +97,15 @@ export class ScionPageHarnessConfigDetail extends LitElement {
   @state()
   private buildError = '';
 
+  @state()
+  private reimportRunning = false;
+
+  @state()
+  private reimportStatus = '';
+
+  @state()
+  private reimportError = '';
+
   private fileBrowserDataSource: FileBrowserDataSource | null = null;
   private fileEditorDataSource: FileEditorDataSource | null = null;
   private buildPollTimer: ReturnType<typeof setTimeout> | null = null;
@@ -223,6 +232,25 @@ export class ScionPageHarnessConfigDetail extends LitElement {
     .build-status-badge.running { color: var(--sl-color-primary-600); }
     .build-status-badge.completed { color: var(--sl-color-success-600); }
     .build-status-badge.failed { color: var(--sl-color-danger-600); }
+
+    .source-url {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.25rem;
+    }
+    .source-url a {
+      color: var(--sl-color-primary-600);
+      text-decoration: none;
+    }
+    .source-url a:hover {
+      text-decoration: underline;
+    }
+    .reimport-status {
+      font-size: 0.85rem;
+      margin-top: 0.5rem;
+    }
+    .reimport-status.success { color: var(--sl-color-success-600); }
+    .reimport-status.error { color: var(--sl-color-danger-600); }
 
     .build-error {
       color: var(--sl-color-danger-600);
@@ -384,8 +412,20 @@ export class ScionPageHarnessConfigDetail extends LitElement {
           ></sl-icon>
           <h1>${hc.displayName || hc.name}</h1>
           ${hc.harness ? html`<span class="harness-badge">${hc.harness}</span>` : ''}
-          ${this.hasDockerfile ? html`
-            <div class="header-actions">
+          <div class="header-actions">
+            ${hc.sourceUrl ? html`
+              <sl-button
+                size="small"
+                variant="default"
+                @click=${this.startReimport}
+                ?disabled=${this.reimportRunning}
+                ?loading=${this.reimportRunning}
+              >
+                <sl-icon slot="prefix" name="arrow-repeat"></sl-icon>
+                Refresh from Source
+              </sl-button>
+            ` : nothing}
+            ${this.hasDockerfile ? html`
               <sl-button
                 size="small"
                 variant="primary"
@@ -395,8 +435,8 @@ export class ScionPageHarnessConfigDetail extends LitElement {
                 <sl-icon slot="prefix" name="hammer"></sl-icon>
                 ${this.buildRunning ? 'Building...' : 'Build Image'}
               </sl-button>
-            </div>
-          ` : nothing}
+            ` : nothing}
+          </div>
         </div>
         ${hc.description ? html`<p class="resource-description">${hc.description}</p>` : ''}
         <div class="resource-meta-row">
@@ -408,7 +448,14 @@ export class ScionPageHarnessConfigDetail extends LitElement {
                 <scion-hash-display .hash=${hc.contentHash} max-width="14ch"></scion-hash-display
               ></span>`
             : ''}
+          ${hc.sourceUrl
+            ? html`<span class="source-url">Source:
+                <a href=${hc.sourceUrl} target="_blank" rel="noopener">${hc.sourceUrl}</a>
+              </span>`
+            : ''}
         </div>
+        ${this.reimportStatus ? html`<p class="reimport-status success">${this.reimportStatus}</p>` : ''}
+        ${this.reimportError ? html`<p class="reimport-status error">${this.reimportError}</p>` : ''}
       </div>
     `;
   }
@@ -450,6 +497,41 @@ export class ScionPageHarnessConfigDetail extends LitElement {
       </div>
     `;
   }
+  // ── Refresh from Source ──
+
+  private async startReimport(): Promise<void> {
+    if (!this.harnessConfig?.id) return;
+    this.reimportRunning = true;
+    this.reimportStatus = '';
+    this.reimportError = '';
+
+    try {
+      const response = await apiFetch(
+        `/api/v1/harness-configs/${this.harnessConfig.id}/reimport`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({}),
+        },
+      );
+
+      if (!response.ok) {
+        const errMsg = await extractApiError(response, `HTTP ${response.status}`);
+        this.reimportError = errMsg;
+        return;
+      }
+
+      const result = await response.json();
+      const count = result?.count ?? result?.harnessConfigs?.length ?? 0;
+      this.reimportStatus = `Refreshed successfully (${count} config${count !== 1 ? 's' : ''} updated).`;
+      await this.loadHarnessConfig();
+    } catch (err) {
+      this.reimportError = err instanceof Error ? err.message : 'Failed to refresh from source';
+    } finally {
+      this.reimportRunning = false;
+    }
+  }
+
   // ── Build Image ──
 
   private openBuildDialog(): void {

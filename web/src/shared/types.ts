@@ -471,6 +471,7 @@ export interface HarnessConfig {
   scope: string;
   scopeId?: string;
   contentHash?: string;
+  sourceUrl?: string;
   files?: TemplateFileInfo[];
   created?: string;
   updated?: string;
