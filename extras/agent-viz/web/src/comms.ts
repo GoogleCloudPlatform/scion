@@ -21,7 +21,7 @@ import type { AgentRing } from './agents';
 
 // Render message bodies as inline-friendly HTML: no leading <h1> ids, GitHub-style
 // line breaks so single newlines in agent output become visible breaks.
-marked.setOptions({ breaks: true, gfm: true });
+marked.use({ breaks: true, gfm: true });
 
 /**
  * Window (in event-time ms) for collapsing duplicate broadcast deliveries into a
@@ -171,16 +171,16 @@ export class CommsPanel {
       : '';
     const bcastBadge = broadcast ? '<span class="comms-badge">BROADCAST</span>' : '';
 
-    // Render the message body as Markdown. `marked.parse` is synchronous and
-    // HTML-escapes the text it emits, so agent output like "## Plan" shows as a
-    // heading instead of literal "## Plan". This is a local dev tool rendering
-    // trusted agent output, so injecting the result via innerHTML is acceptable
-    // and we don't pull in a sanitizer (e.g. DOMPurify).
-    const contentHtml = marked.parse(event.content ?? '') as string;
+    // The raw message body. Rendered as Markdown lazily on first expand (below), so
+    // collapsed cards — the default, and every card during snapshot replay — pay no
+    // parse cost.
+    const rawContent = event.content ?? '';
 
-    // A one-line plain-text summary shown while the message is collapsed (the default). Strips
-    // markdown punctuation + collapses whitespace so long bodies (e.g. JSON) stay one line.
-    const summary = (event.content ?? '')
+    // A one-line plain-text summary shown while the message is collapsed (the default).
+    // Slice first so a huge payload (e.g. a large JSON blob) can't block the main thread
+    // in the regex; strip markdown punctuation + collapse whitespace to keep it one line.
+    const summary = rawContent
+      .slice(0, 1000)
       .replace(/[#*`>_~\[\]]/g, '')
       .replace(/\s+/g, ' ')
       .trim()
@@ -202,10 +202,19 @@ export class CommsPanel {
         </div>
         <div class="comms-summary">${escapeHtml(summary)}</div>
       </div>
-      <div class="comms-content markdown">${contentHtml}</div>
+      <div class="comms-content markdown"></div>
     `;
-    // Collapsed by default — clicking the header toggles the full markdown content.
+    // Collapsed by default. Parse + render the Markdown only on first expand, escaping the
+    // raw body first: marked does NOT strip raw HTML, so escaping neutralizes any
+    // <script>/<img onerror> in agent output before it reaches innerHTML. (Trade-off: `>`
+    // is escaped too, so Markdown blockquotes render as literal text — acceptable here.)
+    let rendered = false;
     card.querySelector('.comms-msg-header')?.addEventListener('click', () => {
+      if (!rendered) {
+        const contentEl = card.querySelector('.comms-content');
+        if (contentEl) contentEl.innerHTML = marked.parse(escapeHtml(rawContent)) as string;
+        rendered = true;
+      }
       card.classList.toggle('expanded');
     });
     return card;
