@@ -48,6 +48,8 @@ const PAGE_TITLES: Record<string, string> = {
   '/admin/users': 'Users',
   '/admin/groups': 'Groups',
   '/admin/server-config': 'Server Config',
+  '/admin/skill-registries': 'Skill Registries',
+  '/skills': 'Skills',
   '/github-app/installed': 'GitHub App Setup',
 };
 
@@ -350,6 +352,15 @@ export class ScionApp extends LitElement {
     }
     if (this.currentPath === '/admin/maintenance') {
       return 'Maintenance';
+    }
+    if (this.currentPath === '/skills/new') {
+      return 'Create Skill';
+    }
+    if (this.currentPath.startsWith('/skills/')) {
+      return 'Skill';
+    }
+    if (this.currentPath.match(/^\/admin\/skill-registries\/[^/]+$/)) {
+      return 'Skill Registry';
     }
 
     return 'Page Not Found';

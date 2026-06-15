@@ -376,6 +376,7 @@ export class ScionPageSkills extends LitElement {
           @sl-change=${(e: Event) => this.onScopeFilterChange(e)}
           style="min-width: 140px;"
         >
+          <sl-option value="">All Scopes</sl-option>
           <sl-option value="core">Core</sl-option>
           <sl-option value="global">Global</sl-option>
           <sl-option value="project">Project</sl-option>

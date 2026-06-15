@@ -474,7 +474,11 @@ export class ScionPageSkillDetail extends LitElement {
         throw new Error(await extractApiError(res, 'Failed to update skill'));
       }
 
-      this.skill = (await res.json()) as Skill;
+      const updated = (await res.json()) as Skill;
+      if (!updated._capabilities && this.skill?._capabilities) {
+        updated._capabilities = this.skill._capabilities;
+      }
+      this.skill = updated;
       this.editing = false;
     } catch (err) {
       console.error('Failed to save skill:', err);
