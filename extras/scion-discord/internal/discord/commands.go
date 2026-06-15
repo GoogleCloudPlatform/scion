@@ -7,6 +7,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
 	"github.com/bwmarrin/discordgo"
 )
 
@@ -44,29 +46,31 @@ type HubClient interface {
 
 // CommandHandler manages Discord slash command registration and dispatch.
 type CommandHandler struct {
-	store         Store
-	session       *discordgo.Session
-	hubClient     HubClient
-	log           *slog.Logger
-	appID         string
-	guildID       string // empty = global commands
-	agentCacheTTL time.Duration
+	store          Store
+	session        *discordgo.Session
+	hubClient      HubClient
+	log            *slog.Logger
+	appID          string
+	guildID        string // empty = global commands
+	agentCacheTTL  time.Duration
+	deliverInbound func(topic string, msg *messages.StructuredMessage)
 }
 
 // NewCommandHandler creates a new CommandHandler. agentCacheTTL controls how
 // long agent lists are cached before refreshing from the Hub API.
-func NewCommandHandler(store Store, session *discordgo.Session, hubClient HubClient, appID, guildID string, agentCacheTTL time.Duration, log *slog.Logger) *CommandHandler {
+func NewCommandHandler(store Store, session *discordgo.Session, hubClient HubClient, deliverInbound func(string, *messages.StructuredMessage), appID, guildID string, agentCacheTTL time.Duration, log *slog.Logger) *CommandHandler {
 	if log == nil {
 		log = slog.Default()
 	}
 	return &CommandHandler{
-		store:         store,
-		session:       session,
-		hubClient:     hubClient,
-		log:           log,
-		appID:         appID,
-		guildID:       guildID,
-		agentCacheTTL: agentCacheTTL,
+		store:          store,
+		session:        session,
+		hubClient:      hubClient,
+		deliverInbound: deliverInbound,
+		log:            log,
+		appID:          appID,
+		guildID:        guildID,
+		agentCacheTTL:  agentCacheTTL,
 	}
 }
 
@@ -677,7 +681,7 @@ func (h *CommandHandler) HandleStop(s *discordgo.Session, i *discordgo.Interacti
 	h.followup(s, i, fmt.Sprintf("Stopping agent **%s** is not yet implemented.", agentSlug))
 }
 
-// HandleMessage is a placeholder for sending a message to an agent (Phase 4).
+// HandleMessage sends a message to an agent via the hub.
 func (h *CommandHandler) HandleMessage(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	agentSlug := getSubcommandOption(i, "agent")
 	text := getSubcommandOption(i, "text")
@@ -685,7 +689,92 @@ func (h *CommandHandler) HandleMessage(s *discordgo.Session, i *discordgo.Intera
 		h.followup(s, i, "Please specify both an agent name and message text.")
 		return
 	}
-	h.followup(s, i, fmt.Sprintf("Sending messages to agents via slash command is not yet implemented.\nAgent: **%s**\nMessage: %s", agentSlug, text))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	link, err := h.store.GetChannelLink(ctx, i.ChannelID)
+	if err != nil || link == nil {
+		h.followup(s, i, "This channel is not linked to a project. Use `/scion setup` first.")
+		return
+	}
+
+	discordUserID := interactionUserID(i)
+	if discordUserID == "" {
+		h.followup(s, i, "Could not identify your user.")
+		return
+	}
+
+	mapping, err := h.store.GetUserMapping(ctx, discordUserID)
+	if err != nil || mapping == nil {
+		h.followup(s, i, "Please link your Discord account first with `/scion register`.")
+		return
+	}
+
+	sender := "user:" + mapping.ScionEmail
+	if mapping.ScionEmail == "" {
+		sender = "discord:" + mapping.DiscordUsername
+	}
+
+	// Verify the agent exists.
+	agents, err := h.hubClient.ListAgents(ctx, link.ProjectID)
+	if err != nil {
+		h.followup(s, i, "Failed to verify agent. Please try again.")
+		return
+	}
+	found := false
+	for _, a := range agents {
+		if a.Slug == agentSlug {
+			found = true
+			break
+		}
+	}
+	if !found {
+		h.followup(s, i, fmt.Sprintf("Agent **%s** not found in this project. Use `/scion agents` to see available agents.", agentSlug))
+		return
+	}
+
+	// Save conversation context so the agent's reply routes back here.
+	cc := &ConversationContext{
+		DiscordUserID: discordUserID,
+		ProjectID:     link.ProjectID,
+		AgentSlug:     agentSlug,
+		LastChannelID: i.ChannelID,
+		LastMessageAt: time.Now(),
+	}
+	if err := h.store.SetConversationContext(ctx, cc); err != nil {
+		h.log.Warn("Failed to save conversation context", "error", err)
+	}
+
+	if h.deliverInbound == nil {
+		h.followup(s, i, "Message delivery is not configured.")
+		return
+	}
+
+	topic := projectcompat.AgentTopic(link.ProjectID, agentSlug)
+	msg := &messages.StructuredMessage{
+		Version:   messages.Version,
+		Timestamp: time.Now().UTC().Format(time.RFC3339),
+		Channel:   "discord",
+		ThreadID:  i.ChannelID,
+		Sender:    sender,
+		SenderID:  discordUserID,
+		Recipient: "agent:" + agentSlug,
+		Msg:       text,
+		Type:      messages.TypeInstruction,
+		Metadata: map[string]string{
+			"discord_channel_id": i.ChannelID,
+			"discord_guild_id":   i.GuildID,
+			"project_id":         link.ProjectID,
+		},
+	}
+
+	h.deliverInbound(topic, msg)
+
+	h.log.Info("Slash command message delivered",
+		"agent", agentSlug, "sender", sender, "channel_id", i.ChannelID)
+
+	h.followup(s, i, fmt.Sprintf("Message sent to **%s**: %s", agentSlug, text))
 }
 
 // HandleLogs is a placeholder for viewing agent logs (Phase 4).
