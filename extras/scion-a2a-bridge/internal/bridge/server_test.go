@@ -28,6 +28,7 @@ import (
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
+	"github.com/a2aproject/a2a-go/v2/a2asrv/taskstore"
 
 	"context"
 
@@ -91,6 +92,11 @@ func newTestServer(t *testing.T) (*Server, *httptest.Server, *state.Store) {
 
 	// Create a minimal SDK executor and handler for testing.
 	executor := NewScionExecutor(b, log)
+	routeAuth := RouteKeyAuthenticator()
+	innerStore := taskstore.NewInMemory(&taskstore.InMemoryStoreConfig{
+		Authenticator: routeAuth,
+	})
+	scopedStore := NewScopedTaskStore(innerStore)
 	sdkRequestHandler := a2asrv.NewHandler(
 		executor,
 		a2asrv.WithLogger(log),
@@ -98,6 +104,7 @@ func newTestServer(t *testing.T) (*Server, *httptest.Server, *state.Store) {
 			Streaming:         true,
 			PushNotifications: false,
 		}),
+		a2asrv.WithTaskStore(scopedStore),
 	)
 	b.SetSDKRequestHandler(sdkRequestHandler)
 	sdkJSONRPCHandler := a2asrv.NewJSONRPCHandler(sdkRequestHandler)

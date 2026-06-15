@@ -228,6 +228,11 @@ func TranslateA2APartsToScion(parts a2a.ContentParts) *messages.StructuredMessag
 // TranslateScionToA2AParts converts a Scion StructuredMessage into SDK a2a types.
 // Returns parts for the agent message and artifacts for content delivery.
 func TranslateScionToA2AParts(msg *messages.StructuredMessage) (*a2a.Message, []*a2a.Artifact) {
+	if msg == nil {
+		empty := a2a.NewMessage(a2a.MessageRoleAgent, a2a.NewTextPart("[empty response]"))
+		return empty, nil
+	}
+
 	var sdkParts []*a2a.Part
 	sdkParts = append(sdkParts, &a2a.Part{Content: a2a.Text(msg.Msg), MediaType: "text/plain"})
 

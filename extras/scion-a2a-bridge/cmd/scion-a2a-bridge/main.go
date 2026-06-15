@@ -33,6 +33,7 @@ import (
 	smpb "cloud.google.com/go/secretmanager/apiv1/secretmanagerpb"
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
+	"github.com/a2aproject/a2a-go/v2/a2asrv/taskstore"
 	"github.com/prometheus/client_golang/prometheus"
 	"gopkg.in/yaml.v3"
 
@@ -139,7 +140,15 @@ func main() {
 	b.SetBroker(broker)
 
 	// Create SDK executor and request handler.
+	// Use a route-key authenticator so the in-memory task store associates tasks
+	// with the correct project/agent pair, and a ScopedTaskStore wrapper that
+	// enforces ownership on Get/Update to prevent cross-tenant access.
 	executor := bridge.NewScionExecutor(b, log.With("component", "executor"))
+	routeAuthenticator := bridge.RouteKeyAuthenticator()
+	innerTaskStore := taskstore.NewInMemory(&taskstore.InMemoryStoreConfig{
+		Authenticator: routeAuthenticator,
+	})
+	scopedTaskStore := bridge.NewScopedTaskStore(innerTaskStore)
 	sdkRequestHandler := a2asrv.NewHandler(
 		executor,
 		a2asrv.WithLogger(log.With("component", "a2a-sdk")),
@@ -148,6 +157,7 @@ func main() {
 			PushNotifications: false,
 		}),
 		a2asrv.WithAgentInactivityTimeout(cfg.Timeouts.SendMessage),
+		a2asrv.WithTaskStore(scopedTaskStore),
 	)
 	b.SetSDKRequestHandler(sdkRequestHandler)
 
@@ -170,7 +180,7 @@ func main() {
 		Addr:           listenAddr,
 		Handler:        srv.Handler(),
 		ReadTimeout:    30 * time.Second,
-		WriteTimeout:   0, // Disabled for SSE connections; SDK handles timeouts.
+		WriteTimeout:   30 * time.Second,
 		IdleTimeout:    120 * time.Second,
 		MaxHeaderBytes: 1 << 20,
 	}

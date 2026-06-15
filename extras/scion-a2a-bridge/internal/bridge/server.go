@@ -251,6 +251,9 @@ func (s *Server) handleJSONRPC(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Enforce request body size limit to prevent memory exhaustion.
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MB
+
 	// Inject routing info into context for the executor.
 	ctx := WithRouteInfo(r.Context(), RouteInfo{
 		ProjectSlug: projectSlug,

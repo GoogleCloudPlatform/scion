@@ -140,6 +140,19 @@ func TestTranslateScionToA2A(t *testing.T) {
 	}
 }
 
+func TestTranslateScionToA2APartsNilMessage(t *testing.T) {
+	msg, artifacts := TranslateScionToA2AParts(nil)
+	if msg == nil {
+		t.Fatal("expected non-nil message for nil input")
+	}
+	if len(msg.Parts) != 1 {
+		t.Fatalf("Parts = %d, want 1", len(msg.Parts))
+	}
+	if artifacts != nil {
+		t.Errorf("Artifacts = %v, want nil for nil input", artifacts)
+	}
+}
+
 func TestTranslateScionToA2AStateChange(t *testing.T) {
 	scionMsg := &messages.StructuredMessage{
 		Version: 1,

@@ -77,7 +77,6 @@ func (e *ScionExecutor) Execute(ctx context.Context, execCtx *a2asrv.ExecutorCon
 		}
 
 		taskID := execCtx.TaskID
-		contextID := execCtx.ContextID
 
 		if e.bridge.hubClient == nil {
 			yield(nil, fmt.Errorf("hub client not configured: %w", a2a.ErrInternalError))
@@ -133,7 +132,8 @@ func (e *ScionExecutor) Execute(ctx context.Context, execCtx *a2asrv.ExecutorCon
 
 		// Send to Hub.
 		if err := e.bridge.hubClient.Agents().SendStructuredMessage(ctx, agentCtx.AgentID, scionMsg, false, false, false); err != nil {
-			failMsg := a2a.NewMessage(a2a.MessageRoleAgent, a2a.NewTextPart(fmt.Sprintf("Failed to send message to agent: %v", err)))
+			e.log.Error("failed to send message to agent", "error", err, "task_id", taskID, "agent_id", agentCtx.AgentID)
+			failMsg := a2a.NewMessage(a2a.MessageRoleAgent, a2a.NewTextPart("Failed to route message to agent"))
 			yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateFailed, failMsg), nil)
 			return
 		}
@@ -156,23 +156,23 @@ func (e *ScionExecutor) Execute(ctx context.Context, execCtx *a2asrv.ExecutorCon
 		defer timer.Stop()
 
 		select {
-		case response := <-responseCh:
-			agentMsg, artifacts := TranslateScionToA2AParts(response)
+		case response, ok := <-responseCh:
+			if !ok || response == nil {
+				failMsg := a2a.NewMessage(a2a.MessageRoleAgent, a2a.NewTextPart("Agent response channel closed unexpectedly"))
+				yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateFailed, failMsg), nil)
 
-			// Emit artifact events.
-			for _, art := range artifacts {
-				artEvent := &a2a.TaskArtifactUpdateEvent{
-					TaskID:    taskID,
-					ContextID: contextID,
-					Artifact:  art,
-					LastChunk: true,
+				if e.bridge.metrics != nil {
+					e.bridge.metrics.TasksCompleted.WithLabelValues("failed").Inc()
 				}
-				if !yield(artEvent, nil) {
-					return
-				}
+				return
 			}
 
-			// Emit completed status with agent message.
+			agentMsg, _ := TranslateScionToA2AParts(response)
+
+			// Emit completed status with agent message. Content is delivered
+			// in the status message only — emitting it again as an artifact
+			// would duplicate it and confuse A2A clients that aggregate
+			// artifacts separately from status messages.
 			statusMsg := a2a.NewMessageForTask(a2a.MessageRoleAgent, execCtx, agentMsg.Parts...)
 			yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateCompleted, statusMsg), nil)
 
@@ -207,7 +207,12 @@ func (e *ScionExecutor) Cancel(ctx context.Context, execCtx *a2asrv.ExecutorCont
 
 		// Look up the stored task to find the agent.
 		if execCtx.StoredTask != nil && e.bridge.hubClient != nil {
-			route, _ := RouteInfoFrom(ctx)
+			route, ok := RouteInfoFrom(ctx)
+			if !ok {
+				e.log.Error("cancel: missing route info in context", "task_id", taskID)
+				yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateCanceled, nil), nil)
+				return
+			}
 			if agent := e.bridge.lookupAgent(ctx, route.ProjectSlug, route.AgentSlug); agent != nil {
 				interruptMsg := &messages.StructuredMessage{
 					Version:   1,
