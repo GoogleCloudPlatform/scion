@@ -28,7 +28,6 @@ import (
 	"github.com/jackc/pgx/v5/stdlib"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
-	"github.com/GoogleCloudPlatform/scion/pkg/ent/migrate"
 )
 
 // PoolConfig holds connection pool settings applied to the underlying
@@ -171,7 +170,7 @@ func applyKeepalives(params map[string]string) {
 
 // AutoMigrate runs automatic schema migration on the given client.
 func AutoMigrate(ctx context.Context, client *ent.Client) error {
-	if err := client.Schema.Create(ctx, migrate.WithDropIndex(true), migrate.WithDropColumn(true)); err != nil {
+	if err := client.Schema.Create(ctx); err != nil {
 		return fmt.Errorf("running auto-migration: %w", err)
 	}
 	return nil
