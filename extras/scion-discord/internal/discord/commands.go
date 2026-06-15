@@ -1014,9 +1014,16 @@ func interactionUserID(i *discordgo.InteractionCreate) string {
 // threadParentID returns the parent channel ID if channelID is a thread,
 // or empty string if it is not a thread or the lookup fails.
 func threadParentID(s *discordgo.Session, channelID string) string {
-	ch, err := s.Channel(channelID)
-	if err != nil {
-		return ""
+	var ch *discordgo.Channel
+	var err error
+	if s.State != nil {
+		ch, err = s.State.Channel(channelID)
+	}
+	if ch == nil || err != nil {
+		ch, err = s.Channel(channelID)
+		if err != nil {
+			return ""
+		}
 	}
 	if ch.Type == discordgo.ChannelTypeGuildPublicThread ||
 		ch.Type == discordgo.ChannelTypeGuildPrivateThread ||

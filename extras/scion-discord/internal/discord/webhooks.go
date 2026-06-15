@@ -3,6 +3,7 @@ package discord
 import (
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -141,6 +142,7 @@ func (wm *WebhookManager) SendAsAgent(channelID, agentSlug, content string, embe
 			if err2 != nil {
 				return nil, fmt.Errorf("recreate webhook after 404: %w", err2)
 			}
+			resetFileReaders(files)
 			msg, err = wm.session.WebhookExecute(wh2.ID, wh2.Token, true, params)
 			if err != nil {
 				return nil, fmt.Errorf("webhook send after recreate: %w", err)
@@ -183,6 +185,7 @@ func (wm *WebhookManager) SendAsAgentInThread(parentChannelID, threadID, agentSl
 			if err2 != nil {
 				return nil, fmt.Errorf("recreate webhook after 404: %w", err2)
 			}
+			resetFileReaders(files)
 			msg, err = wm.session.WebhookThreadExecute(wh2.ID, wh2.Token, true, threadID, params)
 			if err != nil {
 				return nil, fmt.Errorf("webhook send after recreate: %w", err)
@@ -225,8 +228,14 @@ func isWebhookNotFound(err error) bool {
 	return strings.Contains(s, "10015") || strings.Contains(s, "Unknown Webhook")
 }
 
-// isDiscordHTTPError checks whether err represents a specific HTTP status code
-// from the Discord API. Used for error classification in retry logic.
+func resetFileReaders(files []*discordgo.File) {
+	for _, f := range files {
+		if seeker, ok := f.Reader.(io.Seeker); ok {
+			_, _ = seeker.Seek(0, io.SeekStart)
+		}
+	}
+}
+
 func isDiscordHTTPError(err error, statusCode int) bool {
 	if err == nil {
 		return false

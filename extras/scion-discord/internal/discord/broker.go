@@ -508,6 +508,15 @@ func (b *DiscordBroker) Publish(ctx context.Context, topic string, msg *messages
 			if resolved == "" {
 				continue
 			}
+			fi, statErr := os.Stat(resolved)
+			if statErr != nil {
+				b.log.Error("Failed to stat attachment file", "path", resolved, "error", statErr)
+				continue
+			}
+			if fi.Size() > 25*1024*1024 {
+				b.log.Error("Attachment file too large for Discord", "path", resolved, "size", fi.Size())
+				continue
+			}
 			data, readErr := os.ReadFile(resolved)
 			if readErr != nil {
 				b.log.Error("Failed to read attachment file",
@@ -1202,9 +1211,17 @@ func (b *DiscordBroker) resolveThreadParent(channelID string) (parentID string, 
 		return "", false
 	}
 
-	ch, err := session.Channel(channelID)
-	if err != nil {
-		return "", false
+	// Try the local state cache first to avoid REST API rate limits.
+	var ch *discordgo.Channel
+	var err error
+	if session.State != nil {
+		ch, err = session.State.Channel(channelID)
+	}
+	if ch == nil || err != nil {
+		ch, err = session.Channel(channelID)
+		if err != nil {
+			return "", false
+		}
 	}
 
 	// Thread types: GuildPublicThread (11), GuildPrivateThread (12), GuildNewsThread (15)
