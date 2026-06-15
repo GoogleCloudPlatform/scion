@@ -188,6 +188,14 @@ export class ScionPageSkills extends LitElement {
     `,
   ];
 
+  override disconnectedCallback(): void {
+    super.disconnectedCallback();
+    if (this.searchTimer) {
+      clearTimeout(this.searchTimer);
+      this.searchTimer = null;
+    }
+  }
+
   override connectedCallback(): void {
     super.connectedCallback();
 

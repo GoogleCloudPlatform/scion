@@ -197,6 +197,11 @@ export class ScionPageSkillCreate extends LitElement {
       return;
     }
 
+    if ((this.scope === 'project' || this.scope === 'user') && !this.scopeId.trim()) {
+      this.error = `${this.scope === 'project' ? 'Project' : 'User'} ID is required for ${this.scope} scope.`;
+      return;
+    }
+
     this.submitting = true;
     this.error = null;
 

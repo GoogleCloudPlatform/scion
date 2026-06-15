@@ -289,7 +289,7 @@ func (s *SkillRegistryStore) ListPinnedHashes(ctx context.Context, registryID st
 	hashes := make(map[string]string)
 	if e.PinnedHashes != "" {
 		if err := json.Unmarshal([]byte(e.PinnedHashes), &hashes); err != nil {
-			return hashes, nil
+			return nil, mapError(err)
 		}
 	}
 	return hashes, nil

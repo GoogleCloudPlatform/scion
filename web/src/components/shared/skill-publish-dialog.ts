@@ -196,6 +196,7 @@ export class ScionSkillPublishDialog extends LitElement {
   `;
 
   override updated(changed: Map<PropertyKey, unknown>): void {
+    super.updated(changed);
     if (changed.has('open') && this.open) {
       this.reset();
       if (this.latestVersion) {
@@ -397,6 +398,10 @@ export class ScionSkillPublishDialog extends LitElement {
   }
 
   private async uploadFiles(uploadUrls: SkillUploadUrl[], indices?: number[]): Promise<void> {
+    if (!window.crypto || !window.crypto.subtle) {
+      throw new Error('Cryptography APIs (crypto.subtle) are not available. This feature requires a secure context (HTTPS or localhost).');
+    }
+
     const concurrency = 4;
     const queue = indices ?? Array.from({ length: this.selectedFiles.length }, (_, i) => i);
     let queuePos = 0;
