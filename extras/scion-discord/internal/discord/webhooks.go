@@ -111,7 +111,7 @@ func (wm *WebhookManager) invalidate(channelID string) {
 // SendAsAgent sends a message via webhook with the agent's identity (name + avatar).
 // If the webhook has been deleted externally (404/Unknown Webhook), the cache
 // entry is invalidated and a new webhook is created for a retry.
-func (wm *WebhookManager) SendAsAgent(channelID, agentSlug, content string, embeds []*discordgo.MessageEmbed, components []discordgo.MessageComponent) (*discordgo.Message, error) {
+func (wm *WebhookManager) SendAsAgent(channelID, agentSlug, content string, embeds []*discordgo.MessageEmbed, components []discordgo.MessageComponent, files []*discordgo.File) (*discordgo.Message, error) {
 	wh, err := wm.getOrCreateWebhook(channelID)
 	if err != nil {
 		return nil, fmt.Errorf("get webhook for channel %s: %w", channelID, err)
@@ -123,6 +123,7 @@ func (wm *WebhookManager) SendAsAgent(channelID, agentSlug, content string, embe
 		AvatarURL:  agentIconURL(agentSlug),
 		Embeds:     embeds,
 		Components: components,
+		Files:      files,
 	}
 
 	// wait=true so discordgo returns the created Message object.
@@ -155,7 +156,7 @@ func (wm *WebhookManager) SendAsAgent(channelID, agentSlug, content string, embe
 // SendAsAgentInThread sends a message via webhook with the agent's identity,
 // targeting a specific thread. For forum channels, the webhook is created on
 // the parent channel and executed with thread_id to post in the correct thread.
-func (wm *WebhookManager) SendAsAgentInThread(parentChannelID, threadID, agentSlug, content string, embeds []*discordgo.MessageEmbed, components []discordgo.MessageComponent) (*discordgo.Message, error) {
+func (wm *WebhookManager) SendAsAgentInThread(parentChannelID, threadID, agentSlug, content string, embeds []*discordgo.MessageEmbed, components []discordgo.MessageComponent, files []*discordgo.File) (*discordgo.Message, error) {
 	wh, err := wm.getOrCreateWebhook(parentChannelID)
 	if err != nil {
 		return nil, fmt.Errorf("get webhook for channel %s: %w", parentChannelID, err)
@@ -167,6 +168,7 @@ func (wm *WebhookManager) SendAsAgentInThread(parentChannelID, threadID, agentSl
 		AvatarURL:  agentIconURL(agentSlug),
 		Embeds:     embeds,
 		Components: components,
+		Files:      files,
 	}
 
 	msg, err := wm.session.WebhookThreadExecute(wh.ID, wh.Token, true, threadID, params)

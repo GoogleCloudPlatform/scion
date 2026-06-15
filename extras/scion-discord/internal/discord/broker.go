@@ -18,6 +18,8 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -490,6 +492,25 @@ func (b *DiscordBroker) Publish(ctx context.Context, topic string, msg *messages
 		return nil
 	}
 
+	// Open attachment files if present. Read the file into memory once so
+	// we can create a fresh bytes.Reader for each target channel.
+	var fileData []byte
+	var fileName string
+	if msg != nil && len(msg.Attachments) > 0 {
+		attachPath := msg.Attachments[0]
+		if attachPath != "" {
+			attachPath = b.resolveAttachmentPath(ctx, attachPath, projectID)
+			data, readErr := os.ReadFile(attachPath)
+			if readErr != nil {
+				b.log.Error("Failed to read attachment file",
+					"path", attachPath, "error", readErr)
+			} else {
+				fileData = data
+				fileName = filepath.Base(attachPath)
+			}
+		}
+	}
+
 	// Per-channel filtering based on channel link settings.
 	isAgentToAgent := msg != nil &&
 		strings.HasPrefix(msg.Sender, "agent:") &&
@@ -514,6 +535,15 @@ func (b *DiscordBroker) Publish(ctx context.Context, topic string, msg *messages
 			}
 		}
 
+		// Build per-channel file slice; each channel gets a fresh reader.
+		var files []*discordgo.File
+		if fileData != nil {
+			files = []*discordgo.File{{
+				Name:   fileName,
+				Reader: bytes.NewReader(fileData),
+			}}
+		}
+
 		var err error
 
 		if useWebhook {
@@ -522,9 +552,9 @@ func (b *DiscordBroker) Publish(ctx context.Context, topic string, msg *messages
 			// webhook on the parent channel and execute with thread_id.
 			parentID, isThread := b.resolveThreadParent(channelID)
 			if isThread && parentID != "" {
-				_, err = webhooks.SendAsAgentInThread(parentID, channelID, senderSlug, text, nil, nil)
+				_, err = webhooks.SendAsAgentInThread(parentID, channelID, senderSlug, text, nil, nil, files)
 			} else {
-				_, err = webhooks.SendAsAgent(channelID, senderSlug, text, nil, nil)
+				_, err = webhooks.SendAsAgent(channelID, senderSlug, text, nil, nil, files)
 			}
 			if err != nil {
 				// Fallback to bot API if webhook send fails.
@@ -533,18 +563,35 @@ func (b *DiscordBroker) Publish(ctx context.Context, topic string, msg *messages
 					"agent", senderSlug,
 					"error", err)
 				botText := formatMessage(msg, agentSlug)
+				// Reset file reader for fallback send.
+				if fileData != nil {
+					files = []*discordgo.File{{
+						Name:   fileName,
+						Reader: bytes.NewReader(fileData),
+					}}
+				}
 				if sendQueue != nil {
-					_, err = sendQueue.Send(ctx, channelID, botText, nil, nil)
+					_, err = sendQueue.Send(ctx, channelID, botText, nil, nil, files)
 				} else {
-					_, err = session.ChannelMessageSend(channelID, botText)
+					_, err = session.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{
+						Content: botText,
+						Files:   files,
+					})
 				}
 			}
 		} else {
 			// Send via bot API (state changes, input-needed, non-agent messages).
 			if sendQueue != nil {
-				_, err = sendQueue.Send(ctx, channelID, text, nil, nil)
+				_, err = sendQueue.Send(ctx, channelID, text, nil, nil, files)
 			} else {
-				_, err = session.ChannelMessageSend(channelID, text)
+				if len(files) > 0 {
+					_, err = session.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{
+						Content: text,
+						Files:   files,
+					})
+				} else {
+					_, err = session.ChannelMessageSend(channelID, text)
+				}
 			}
 		}
 
@@ -1232,6 +1279,71 @@ func (b *DiscordBroker) resolveStaleChannelSlugs(ctx context.Context) {
 			}
 		}
 	}
+}
+
+// --- Attachment helpers ---
+
+// resolveAttachmentPath translates an agent-relative /workspace path to the
+// host-side path under /home/scion/.scion/projects/<slug>/. Agent containers
+// mount /home/scion/.scion/projects/<slug> as /workspace.
+func (b *DiscordBroker) resolveAttachmentPath(ctx context.Context, attachPath, projectID string) string {
+	originalPath := attachPath
+
+	var relPath string
+	switch {
+	case strings.HasPrefix(attachPath, "/workspace/"):
+		relPath = strings.TrimPrefix(attachPath, "/workspace/")
+	case attachPath == "/workspace":
+		relPath = "."
+	case strings.HasPrefix(attachPath, "workspace/"):
+		relPath = strings.TrimPrefix(attachPath, "workspace/")
+	case attachPath == "workspace":
+		relPath = "."
+	case !strings.HasPrefix(attachPath, "/"):
+		relPath = attachPath
+	default:
+		return attachPath
+	}
+
+	relPath = filepath.Clean(relPath)
+	if strings.HasPrefix(relPath, "..") || (filepath.IsAbs(relPath) && relPath != ".") {
+		b.log.Warn("Attachment path escapes workspace, ignoring translation",
+			"attach_path", attachPath, "rel_path", relPath)
+		return attachPath
+	}
+
+	// Look up project slug from channel links, falling back to the injected slug map.
+	slug := ""
+	if b.store != nil && projectID != "" {
+		links, err := b.store.GetChannelLinksForProject(ctx, projectID)
+		if err == nil && len(links) > 0 && links[0].ProjectSlug != "" {
+			slug = links[0].ProjectSlug
+		}
+	}
+	if slug == "" && projectID != "" {
+		slug = b.projectSlugMap[projectID]
+	}
+	if slug == "" {
+		b.log.Debug("Attachment path unchanged, no project slug found",
+			"original", originalPath, "project_id", projectID)
+		return attachPath
+	}
+
+	projectDir := filepath.Join("/home/scion/.scion/projects", slug)
+	var hostPath string
+	if relPath == "." {
+		hostPath = projectDir
+	} else {
+		hostPath = filepath.Join(projectDir, relPath)
+		if !strings.HasPrefix(hostPath, projectDir+"/") {
+			b.log.Warn("Resolved attachment path escapes project directory",
+				"host_path", hostPath, "expected_prefix", projectDir+"/")
+			return attachPath
+		}
+	}
+
+	b.log.Debug("Resolved attachment path", "original", originalPath, "resolved", hostPath)
+	return hostPath
 }
 
 // --- Topic parsing ---

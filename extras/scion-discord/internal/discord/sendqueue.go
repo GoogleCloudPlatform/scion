@@ -22,6 +22,7 @@ type sendRequest struct {
 	content    string
 	embeds     []*discordgo.MessageEmbed
 	components []discordgo.MessageComponent
+	files      []*discordgo.File
 	result     chan *sendResult
 }
 
@@ -73,7 +74,7 @@ func NewSendQueue(session *discordgo.Session, log *slog.Logger, queueSize int, m
 
 // Send enqueues a message and blocks until it is sent (or the context is
 // cancelled). It returns the Discord API response or an error.
-func (sq *SendQueue) Send(ctx context.Context, channelID, content string, embeds []*discordgo.MessageEmbed, components []discordgo.MessageComponent) (*discordgo.Message, error) {
+func (sq *SendQueue) Send(ctx context.Context, channelID, content string, embeds []*discordgo.MessageEmbed, components []discordgo.MessageComponent, files []*discordgo.File) (*discordgo.Message, error) {
 	resultCh := make(chan *sendResult, 1)
 
 	req := &sendRequest{
@@ -81,6 +82,7 @@ func (sq *SendQueue) Send(ctx context.Context, channelID, content string, embeds
 		content:    content,
 		embeds:     embeds,
 		components: components,
+		files:      files,
 		result:     resultCh,
 	}
 
@@ -183,6 +185,7 @@ func (sq *SendQueue) sendOne(req *sendRequest) (*discordgo.Message, error) {
 		Content:    req.content,
 		Embeds:     req.embeds,
 		Components: req.components,
+		Files:      req.files,
 	}
 	return sq.session.ChannelMessageSendComplex(req.channelID, data)
 }
