@@ -429,7 +429,11 @@ func (b *DiscordBroker) Publish(ctx context.Context, topic string, msg *messages
 
 	// Priority 2: Look up via ConversationContext for the recipient.
 	if len(channelIDs) == 0 && msg != nil && msg.Recipient != "" && store != nil {
-		channelIDs = b.resolveRecipientChannels(ctx, msg.Recipient, projectID, agentSlug)
+		ccSlug := agentSlug
+		if ccSlug == "" && msg.Sender != "" && strings.HasPrefix(msg.Sender, "agent:") {
+			ccSlug = strings.TrimPrefix(msg.Sender, "agent:")
+		}
+		channelIDs = b.resolveRecipientChannels(ctx, msg.Recipient, projectID, ccSlug)
 	}
 
 	// Priority 3: Broadcast to all ChannelLinks for the project.
@@ -1124,12 +1128,21 @@ func (b *DiscordBroker) resolveRecipientChannels(ctx context.Context, recipient,
 		return nil
 	}
 
-	cc, err := store.GetConversationContext(ctx, mapping.DiscordUserID, projectID, agentSlug)
-	if err != nil || cc == nil {
-		return nil
+	// Try exact agent match first.
+	if agentSlug != "" {
+		cc, err := store.GetConversationContext(ctx, mapping.DiscordUserID, projectID, agentSlug)
+		if err == nil && cc != nil {
+			return []string{cc.LastChannelID}
+		}
 	}
 
-	return []string{cc.LastChannelID}
+	// Fallback: latest conversation context for this user+project (any agent).
+	cc, err := store.GetLatestConversationContext(ctx, mapping.DiscordUserID, projectID)
+	if err == nil && cc != nil {
+		return []string{cc.LastChannelID}
+	}
+
+	return nil
 }
 
 // resolveStaleChannelSlugs updates ChannelLinks where ProjectSlug equals
