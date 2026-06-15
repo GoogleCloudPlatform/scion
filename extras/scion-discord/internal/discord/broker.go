@@ -94,6 +94,8 @@ type DiscordBroker struct {
 	sendQueue *SendQueue
 	webhooks  *WebhookManager
 
+	threadParents map[string]string // channelID -> parentID (cached thread lookups)
+
 	agentCacheTTL  time.Duration
 	projectSlugMap map[string]string // injected by hub: projectID -> slug
 
@@ -516,7 +518,14 @@ func (b *DiscordBroker) Publish(ctx context.Context, topic string, msg *messages
 
 		if useWebhook {
 			// Send via webhook with per-agent identity.
-			_, err = webhooks.SendAsAgent(channelID, senderSlug, text, nil, nil)
+			// For threads (forum channels, text channel threads), create the
+			// webhook on the parent channel and execute with thread_id.
+			parentID, isThread := b.resolveThreadParent(channelID)
+			if isThread && parentID != "" {
+				_, err = webhooks.SendAsAgentInThread(parentID, channelID, senderSlug, text, nil, nil)
+			} else {
+				_, err = webhooks.SendAsAgent(channelID, senderSlug, text, nil, nil)
+			}
 			if err != nil {
 				// Fallback to bot API if webhook send fails.
 				b.log.Warn("Webhook send failed, falling back to bot API",
@@ -1107,6 +1116,51 @@ func (b *DiscordBroker) unsubscribeForProject(projectID string) {
 }
 
 // --- Routing helpers ---
+
+// resolveThreadParent checks if a Discord channel ID refers to a thread.
+// If so, it returns the parent channel ID. Otherwise it returns empty strings.
+// Results are cached to avoid repeated API calls.
+func (b *DiscordBroker) resolveThreadParent(channelID string) (parentID string, isThread bool) {
+	// Check cache first.
+	b.mu.RLock()
+	if parent, ok := b.threadParents[channelID]; ok {
+		b.mu.RUnlock()
+		return parent, parent != ""
+	}
+	b.mu.RUnlock()
+
+	session := b.session
+	if session == nil {
+		return "", false
+	}
+
+	ch, err := session.Channel(channelID)
+	if err != nil {
+		return "", false
+	}
+
+	// Thread types: GuildPublicThread (11), GuildPrivateThread (12), GuildNewsThread (15)
+	if ch.Type == discordgo.ChannelTypeGuildPublicThread ||
+		ch.Type == discordgo.ChannelTypeGuildPrivateThread ||
+		ch.Type == discordgo.ChannelTypeGuildNewsThread {
+		b.mu.Lock()
+		if b.threadParents == nil {
+			b.threadParents = make(map[string]string)
+		}
+		b.threadParents[channelID] = ch.ParentID
+		b.mu.Unlock()
+		return ch.ParentID, true
+	}
+
+	// Not a thread — cache negative result as empty string.
+	b.mu.Lock()
+	if b.threadParents == nil {
+		b.threadParents = make(map[string]string)
+	}
+	b.threadParents[channelID] = ""
+	b.mu.Unlock()
+	return "", false
+}
 
 // resolveRecipientChannels looks up target channels for a specific recipient.
 func (b *DiscordBroker) resolveRecipientChannels(ctx context.Context, recipient, projectID, agentSlug string) []string {

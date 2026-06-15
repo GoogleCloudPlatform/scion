@@ -152,6 +152,47 @@ func (wm *WebhookManager) SendAsAgent(channelID, agentSlug, content string, embe
 	return msg, nil
 }
 
+// SendAsAgentInThread sends a message via webhook with the agent's identity,
+// targeting a specific thread. For forum channels, the webhook is created on
+// the parent channel and executed with thread_id to post in the correct thread.
+func (wm *WebhookManager) SendAsAgentInThread(parentChannelID, threadID, agentSlug, content string, embeds []*discordgo.MessageEmbed, components []discordgo.MessageComponent) (*discordgo.Message, error) {
+	wh, err := wm.getOrCreateWebhook(parentChannelID)
+	if err != nil {
+		return nil, fmt.Errorf("get webhook for channel %s: %w", parentChannelID, err)
+	}
+
+	params := &discordgo.WebhookParams{
+		Content:    content,
+		Username:   agentSlug,
+		AvatarURL:  agentIconURL(agentSlug),
+		Embeds:     embeds,
+		Components: components,
+	}
+
+	msg, err := wm.session.WebhookThreadExecute(wh.ID, wh.Token, true, threadID, params)
+	if err != nil {
+		if isWebhookNotFound(err) {
+			wm.log.Warn("Webhook gone (deleted externally), recreating",
+				"channel_id", parentChannelID,
+				"webhook_id", wh.ID)
+			wm.invalidate(parentChannelID)
+
+			wh2, err2 := wm.getOrCreateWebhook(parentChannelID)
+			if err2 != nil {
+				return nil, fmt.Errorf("recreate webhook after 404: %w", err2)
+			}
+			msg, err = wm.session.WebhookThreadExecute(wh2.ID, wh2.Token, true, threadID, params)
+			if err != nil {
+				return nil, fmt.Errorf("webhook send after recreate: %w", err)
+			}
+			return msg, nil
+		}
+		return nil, fmt.Errorf("webhook thread execute: %w", err)
+	}
+
+	return msg, nil
+}
+
 // agentIconURL returns a deterministic avatar URL for an agent using RoboHash.
 // Discord recommends webhook avatars be at least 128×128 pixels.
 func agentIconURL(agentSlug string) string {
