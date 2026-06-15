@@ -801,13 +801,28 @@ func (b *Bridge) dispatchBrokerMessage(topic string, msg *messages.StructuredMes
 // dispatchToWaiter sends a message to a blocking waiter for the given taskID.
 // Returns true if a waiter exists and handled the message (callers should skip
 // further dispatch). State-change messages are skipped so the actual reply
-// lands in the buffer.
+// lands in the buffer. Verifies the message sender's agent slug matches the
+// waiter's expected agent to prevent cross-agent message injection.
 func (b *Bridge) dispatchToWaiter(taskID string, msg *messages.StructuredMessage) bool {
 	b.mu.RLock()
 	w, ok := b.waiters[taskID]
 	b.mu.RUnlock()
 	if !ok {
 		return false
+	}
+	// Verify agent ownership: the waiter's expected agent must match the
+	// message sender's agent slug. This prevents a response from Agent B
+	// being delivered to a task that was started for Agent A.
+	if w.agentSlug != "" {
+		senderAgent := extractAgentIDFromSender(msg.Sender)
+		if senderAgent != "" && senderAgent != w.agentSlug {
+			b.log.Warn("dropping cross-agent message for waiter",
+				"task_id", taskID,
+				"expected_agent", w.agentSlug,
+				"sender_agent", senderAgent,
+			)
+			return true // consumed but rejected — don't fall through to other dispatch paths
+		}
 	}
 	if msg.Type == messages.TypeStateChange {
 		// Terminal state-changes must still be persisted to the DB even though

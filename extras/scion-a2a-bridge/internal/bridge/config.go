@@ -37,6 +37,8 @@ type BridgeConfig struct {
 	ListenAddress     string         `yaml:"listen_address"`
 	GRPCListenAddress string         `yaml:"grpc_listen_address"`
 	RESTListenAddress string         `yaml:"rest_listen_address"`
+	GRPCInsecure      bool           `yaml:"grpc_insecure"`
+	RESTInsecure      bool           `yaml:"rest_insecure"`
 	ExternalURL       string         `yaml:"external_url"`
 	MaxSubscribers    int            `yaml:"max_subscribers"`
 	Provider          ProviderConfig `yaml:"provider"`

@@ -20,11 +20,15 @@ import (
 	"iter"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
@@ -271,6 +275,54 @@ func (e *ScionExecutor) Cancel(ctx context.Context, execCtx *a2asrv.ExecutorCont
 	}
 }
 
+// SSEWriteDeadlineMiddleware wraps an http.Handler to clear the write deadline
+// for SSE (text/event-stream) responses, allowing long-lived streaming
+// connections while keeping WriteTimeout enabled for non-streaming endpoints.
+func SSEWriteDeadlineMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		next.ServeHTTP(&sseDeadlineWriter{ResponseWriter: w}, r)
+	})
+}
+
+// sseDeadlineWriter intercepts WriteHeader to clear the write deadline when
+// the response is an SSE stream (Content-Type: text/event-stream).
+type sseDeadlineWriter struct {
+	http.ResponseWriter
+	cleared bool
+}
+
+func (s *sseDeadlineWriter) WriteHeader(code int) {
+	if !s.cleared {
+		if ct := s.ResponseWriter.Header().Get("Content-Type"); ct == "text/event-stream" {
+			rc := http.NewResponseController(s.ResponseWriter)
+			_ = rc.SetWriteDeadline(time.Time{}) // clear deadline for SSE
+		}
+		s.cleared = true
+	}
+	s.ResponseWriter.WriteHeader(code)
+}
+
+func (s *sseDeadlineWriter) Write(b []byte) (int, error) {
+	if !s.cleared {
+		if ct := s.ResponseWriter.Header().Get("Content-Type"); ct == "text/event-stream" {
+			rc := http.NewResponseController(s.ResponseWriter)
+			_ = rc.SetWriteDeadline(time.Time{}) // clear deadline for SSE
+		}
+		s.cleared = true
+	}
+	return s.ResponseWriter.Write(b)
+}
+
+func (s *sseDeadlineWriter) Flush() {
+	if f, ok := s.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+func (s *sseDeadlineWriter) Unwrap() http.ResponseWriter {
+	return s.ResponseWriter
+}
+
 // RouteInfoMiddleware wraps an http.Handler to inject a fixed RouteInfo into the
 // request context. Used for transports (REST) that don't have per-request
 // project/agent routing.
@@ -279,6 +331,75 @@ func RouteInfoMiddleware(route RouteInfo, next http.Handler) http.Handler {
 		ctx := WithRouteInfo(r.Context(), route)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+// AuthUnaryInterceptor returns a gRPC unary interceptor that validates API key
+// or bearer token credentials from gRPC metadata. Pass insecure=true to skip
+// auth (requires explicit opt-in via config).
+func AuthUnaryInterceptor(cfg *Config) grpc.UnaryServerInterceptor {
+	return func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
+		if cfg.Auth.Scheme == "none" || cfg.Bridge.GRPCInsecure {
+			return handler(ctx, req)
+		}
+		if err := validateGRPCAuth(ctx, cfg); err != nil {
+			return nil, err
+		}
+		return handler(ctx, req)
+	}
+}
+
+// AuthStreamInterceptor returns a gRPC stream interceptor that validates API key
+// or bearer token credentials from gRPC metadata.
+func AuthStreamInterceptor(cfg *Config) grpc.StreamServerInterceptor {
+	return func(srv interface{}, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
+		if cfg.Auth.Scheme == "none" || cfg.Bridge.GRPCInsecure {
+			return handler(srv, ss)
+		}
+		if err := validateGRPCAuth(ss.Context(), cfg); err != nil {
+			return err
+		}
+		return handler(srv, ss)
+	}
+}
+
+// validateGRPCAuth extracts credentials from gRPC metadata and validates them.
+func validateGRPCAuth(ctx context.Context, cfg *Config) error {
+	md, ok := metadata.FromIncomingContext(ctx)
+	if !ok {
+		return status.Error(codes.Unauthenticated, "missing metadata")
+	}
+
+	var credential string
+	switch cfg.Auth.Scheme {
+	case "apiKey":
+		if vals := md.Get("x-api-key"); len(vals) > 0 {
+			credential = vals[0]
+		}
+	case "bearer":
+		if vals := md.Get("authorization"); len(vals) > 0 {
+			auth := vals[0]
+			if strings.HasPrefix(auth, "Bearer ") {
+				credential = strings.TrimPrefix(auth, "Bearer ")
+			}
+		}
+	default:
+		if vals := md.Get("x-api-key"); len(vals) > 0 {
+			credential = vals[0]
+		}
+		if credential == "" {
+			if vals := md.Get("authorization"); len(vals) > 0 {
+				auth := vals[0]
+				if strings.HasPrefix(auth, "Bearer ") {
+					credential = strings.TrimPrefix(auth, "Bearer ")
+				}
+			}
+		}
+	}
+
+	if !verifyCredential(credential, cfg.Auth.APIKey) {
+		return status.Error(codes.Unauthenticated, "invalid credentials")
+	}
+	return nil
 }
 
 // RouteInfoUnaryInterceptor returns a gRPC unary server interceptor that injects

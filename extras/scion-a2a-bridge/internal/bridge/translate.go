@@ -155,6 +155,9 @@ func TranslateA2AToScion(parts []Part) *messages.StructuredMessage {
 
 // TranslateScionToA2A converts a Scion StructuredMessage into an A2A Message and optional Artifacts.
 func TranslateScionToA2A(msg *messages.StructuredMessage) (Message, []Artifact) {
+	if msg == nil {
+		return Message{MessageID: uuid.New().String(), Role: RoleAgent}, nil
+	}
 	parts := []Part{{Text: msg.Msg, MediaType: "text/plain"}}
 
 	for _, att := range msg.Attachments {

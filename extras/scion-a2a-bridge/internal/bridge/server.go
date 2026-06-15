@@ -117,6 +117,13 @@ func ValidateConfig(cfg *Config) error {
 			return fmt.Errorf("bridge.provider.url is invalid: %w", err)
 		}
 	}
+	// Require explicit opt-in for unauthenticated gRPC/REST transports.
+	if cfg.Bridge.GRPCListenAddress != "" && !cfg.Bridge.GRPCInsecure && cfg.Auth.Scheme == "none" {
+		return fmt.Errorf("gRPC transport is configured but auth.scheme is \"none\"; set bridge.grpc_insecure: true to acknowledge unauthenticated gRPC access, or configure auth")
+	}
+	if cfg.Bridge.RESTListenAddress != "" && !cfg.Bridge.RESTInsecure && cfg.Auth.Scheme == "none" {
+		return fmt.Errorf("REST transport is configured but auth.scheme is \"none\"; set bridge.rest_insecure: true to acknowledge unauthenticated REST access, or configure auth")
+	}
 	return nil
 }
 
@@ -288,8 +295,8 @@ func (s *Server) handleJSONRPC(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Enforce request body size limit to prevent memory exhaustion.
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MB
+	// Limit request body to 1 MB to prevent memory exhaustion from oversized payloads.
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 
 	// Inject routing info into context for the executor.
 	ctx := WithRouteInfo(r.Context(), RouteInfo{
@@ -300,6 +307,20 @@ func (s *Server) handleJSONRPC(w http.ResponseWriter, r *http.Request) {
 
 	// Delegate to SDK JSON-RPC handler.
 	s.sdkHandler.ServeHTTP(w, r)
+}
+
+// normalizeJSONRPCID ensures only valid JSON-RPC 2.0 ID types (string, number,
+// null) are echoed back. Arrays, objects, and booleans are replaced with null
+// per JSON-RPC 2.0 §4.1.
+func normalizeJSONRPCID(id interface{}) interface{} {
+	switch id.(type) {
+	case nil, string, float64, int, int64:
+		return id
+	case json.Number:
+		return id
+	default:
+		return nil
+	}
 }
 
 // writeJSONRPCError writes a minimal JSON-RPC error response.
@@ -315,11 +336,46 @@ func writeJSONRPCError(w http.ResponseWriter, id interface{}, code int, message 
 	}
 	resp := jsonrpcResponse{
 		JSONRPC: "2.0",
-		ID:      id,
+		ID:      normalizeJSONRPCID(id),
 		Error:   &jsonrpcError{Code: code, Message: message},
 	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		slog.Default().Error("failed to encode JSON-RPC error response", "error", err)
+	}
+}
+
+// extractCredential extracts the API key or bearer token from an HTTP request
+// based on the configured auth scheme.
+func extractCredential(scheme string, headers http.Header) string {
+	switch scheme {
+	case "apiKey":
+		return headers.Get("X-API-Key")
+	case "bearer":
+		auth := headers.Get("Authorization")
+		if strings.HasPrefix(auth, "Bearer ") {
+			return strings.TrimPrefix(auth, "Bearer ")
+		}
+		return ""
+	default:
+		// When auth.scheme is unset (empty), accept credentials from either
+		// X-API-Key or Authorization: Bearer headers for convenience.
+		apiKey := headers.Get("X-API-Key")
+		if apiKey == "" {
+			auth := headers.Get("Authorization")
+			if strings.HasPrefix(auth, "Bearer ") {
+				apiKey = strings.TrimPrefix(auth, "Bearer ")
+			}
+		}
+		return apiKey
+	}
+}
+
+// verifyCredential checks that the provided credential matches the configured API key.
+func verifyCredential(provided, expected string) bool {
+	expectedHash := sha256.Sum256([]byte(expected))
+	providedHash := sha256.Sum256([]byte(provided))
+	return subtle.ConstantTimeCompare(expectedHash[:], providedHash[:]) == 1
 }
 
 // authMiddleware validates authentication on non-public endpoints.
@@ -426,4 +482,21 @@ func extractBearerOrAPIKey(r *http.Request) string {
 		return token
 	}
 	return r.Header.Get("X-API-Key")
+}
+
+// AuthHTTPMiddleware wraps an http.Handler with API key / bearer token validation.
+// Used for REST transport auth. Requests without valid credentials are rejected
+// with 401. Pass insecure=true to skip auth (requires explicit opt-in via config).
+func AuthHTTPMiddleware(cfg *Config, next http.Handler) http.Handler {
+	if cfg.Auth.Scheme == "none" || cfg.Bridge.RESTInsecure {
+		return next
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		apiKey := extractCredential(cfg.Auth.Scheme, r.Header)
+		if !verifyCredential(apiKey, cfg.Auth.APIKey) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }

@@ -217,9 +217,23 @@ func main() {
 		log.Warn("gRPC transport uses fixed routing — all requests go to the first configured agent",
 			"project", defaultRoute.ProjectSlug, "agent", defaultRoute.AgentSlug)
 
+		if !cfg.Bridge.GRPCInsecure {
+			log.Warn("gRPC transport: auth enabled — clients must provide credentials via gRPC metadata",
+				"scheme", cfg.Auth.Scheme)
+		} else {
+			log.Warn("⚠ gRPC transport: auth DISABLED (grpc_insecure: true) — any client can send requests without credentials",
+				"address", cfg.Bridge.GRPCListenAddress)
+		}
+
 		grpcServer = grpc.NewServer(
-			grpc.UnaryInterceptor(bridge.RouteInfoUnaryInterceptor(defaultRoute)),
-			grpc.StreamInterceptor(bridge.RouteInfoStreamInterceptor(defaultRoute)),
+			grpc.ChainUnaryInterceptor(
+				bridge.AuthUnaryInterceptor(cfg),
+				bridge.RouteInfoUnaryInterceptor(defaultRoute),
+			),
+			grpc.ChainStreamInterceptor(
+				bridge.AuthStreamInterceptor(cfg),
+				bridge.RouteInfoStreamInterceptor(defaultRoute),
+			),
 		)
 		grpcHandler := a2agrpc.NewHandler(sdkRequestHandler)
 		grpcHandler.RegisterWith(grpcServer)
@@ -251,19 +265,28 @@ func main() {
 		}
 		log.Warn("REST transport uses fixed routing — all requests go to the first configured agent",
 			"project", defaultRoute.ProjectSlug, "agent", defaultRoute.AgentSlug)
+		if !cfg.Bridge.RESTInsecure {
+			log.Warn("REST transport: auth enabled — clients must provide credentials via HTTP headers",
+				"scheme", cfg.Auth.Scheme)
+		} else {
+			log.Warn("⚠ REST transport: auth DISABLED (rest_insecure: true) — any client can send requests without credentials",
+				"address", cfg.Bridge.RESTListenAddress)
+		}
 
-		restHandler := bridge.RouteInfoMiddleware(defaultRoute,
-			a2asrv.NewRESTHandler(
-				sdkRequestHandler,
-				a2asrv.WithTransportKeepAlive(cfg.Timeouts.SSEKeepalive),
+		restHandler := bridge.AuthHTTPMiddleware(cfg, bridge.RouteInfoMiddleware(defaultRoute,
+			bridge.SSEWriteDeadlineMiddleware(
+				a2asrv.NewRESTHandler(
+					sdkRequestHandler,
+					a2asrv.WithTransportKeepAlive(cfg.Timeouts.SSEKeepalive),
+				),
 			),
-		)
+		))
 
 		restServer = &http.Server{
 			Addr:           cfg.Bridge.RESTListenAddress,
 			Handler:        restHandler,
 			ReadTimeout:    30 * time.Second,
-			WriteTimeout:   0,
+			WriteTimeout:   30 * time.Second,
 			IdleTimeout:    120 * time.Second,
 			MaxHeaderBytes: 1 << 20,
 		}
@@ -307,8 +330,18 @@ func main() {
 	}
 
 	if grpcServer != nil {
-		grpcServer.GracefulStop()
-		log.Info("gRPC server stopped")
+		grpcStopped := make(chan struct{})
+		go func() {
+			grpcServer.GracefulStop()
+			close(grpcStopped)
+		}()
+		select {
+		case <-grpcStopped:
+			log.Info("gRPC server stopped gracefully")
+		case <-shutdownCtx.Done():
+			log.Warn("gRPC graceful shutdown timed out, forcing stop")
+			grpcServer.Stop()
+		}
 	}
 
 	if restServer != nil {

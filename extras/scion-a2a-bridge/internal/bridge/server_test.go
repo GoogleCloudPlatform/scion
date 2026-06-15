@@ -31,6 +31,7 @@ import (
 	"github.com/a2aproject/a2a-go/v2/a2asrv/taskstore"
 
 	"github.com/GoogleCloudPlatform/scion/extras/scion-a2a-bridge/internal/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 )
 
 // jsonRPCRequest is a test helper for constructing JSON-RPC requests.
@@ -582,5 +583,172 @@ func TestRouteInfoMiddleware(t *testing.T) {
 	}
 	if capturedRoute.ProjectSlug != "test-proj" || capturedRoute.AgentSlug != "test-agent" {
 		t.Errorf("RouteInfo = %+v, want {test-proj, test-agent}", capturedRoute)
+	}
+}
+
+func TestNormalizeJSONRPCID(t *testing.T) {
+	tests := []struct {
+		name string
+		id   interface{}
+		want interface{}
+	}{
+		{"nil", nil, nil},
+		{"string", "abc", "abc"},
+		{"float64", float64(42), float64(42)},
+		{"int", int(7), int(7)},
+		{"json.Number", json.Number("99"), json.Number("99")},
+		{"array rejected", []int{1, 2}, nil},
+		{"object rejected", map[string]int{"a": 1}, nil},
+		{"bool rejected", true, nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := normalizeJSONRPCID(tt.id)
+			if got != tt.want {
+				t.Errorf("normalizeJSONRPCID(%v) = %v (%T), want %v (%T)", tt.id, got, got, tt.want, tt.want)
+			}
+		})
+	}
+}
+
+func TestMaxBytesReaderOnJSONRPC(t *testing.T) {
+	_, ts, _ := newTestServer(t)
+
+	// Send a body larger than 1MB.
+	bigBody := make([]byte, 2<<20) // 2MB
+	for i := range bigBody {
+		bigBody[i] = 'a'
+	}
+
+	httpReq, _ := http.NewRequest(http.MethodPost, ts.URL+"/projects/test-grove/agents/test-agent/jsonrpc", bytes.NewReader(bigBody))
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("X-API-Key", "test-api-key")
+
+	resp, err := http.DefaultClient.Do(httpReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	// MaxBytesReader causes the SDK handler's body read to fail.
+	// The response should either be an error status (413) or contain
+	// a JSON-RPC error (parse error). We accept any non-success outcome.
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode == http.StatusOK {
+		// If 200, verify the JSON-RPC response contains an error.
+		var rpcResp jsonRPCResponse
+		if json.Unmarshal(body, &rpcResp) == nil && rpcResp.Error == nil {
+			t.Error("expected error for oversized request body")
+		}
+	}
+}
+
+func TestValidateConfigGRPCInsecureRequired(t *testing.T) {
+	cfg := &Config{
+		Bridge: BridgeConfig{
+			ExternalURL:       "https://test.example.com",
+			GRPCListenAddress: ":50051",
+			// GRPCInsecure not set
+		},
+		Hub:  HubConfig{Endpoint: "https://hub.example.com", User: "test"},
+		Auth: AuthConfig{Scheme: "none"},
+	}
+	err := ValidateConfig(cfg)
+	if err == nil {
+		t.Fatal("expected error for gRPC without grpc_insecure when auth is none")
+	}
+	if !bytes.Contains([]byte(err.Error()), []byte("grpc_insecure")) {
+		t.Errorf("error should mention grpc_insecure: %v", err)
+	}
+
+	// With GRPCInsecure set, validation should pass (for this check).
+	cfg.Bridge.GRPCInsecure = true
+	err = ValidateConfig(cfg)
+	if err != nil && bytes.Contains([]byte(err.Error()), []byte("grpc_insecure")) {
+		t.Errorf("should not error with grpc_insecure set: %v", err)
+	}
+}
+
+func TestDispatchToWaiterAgentSlugVerification(t *testing.T) {
+	dir := t.TempDir()
+	store, err := state.New(filepath.Join(dir, "waiter-test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	cfg := &Config{
+		Bridge:   BridgeConfig{ExternalURL: "https://a2a.test.example.com"},
+		Timeouts: TimeoutConfig{SendMessage: 10 * time.Second},
+	}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	b := New(store, nil, nil, cfg, nil, log)
+	defer b.Shutdown()
+
+	// Register a waiter for agent-a.
+	ch := make(chan *messages.StructuredMessage, 1)
+	b.addWaiter("task-1", &waiter{
+		ch:        ch,
+		agentSlug: "agent-a",
+		projectID: "proj-1",
+	})
+
+	// Message from the correct agent should be dispatched.
+	correctMsg := &messages.StructuredMessage{
+		Sender: "agent:agent-a",
+		Msg:    "hello from agent-a",
+	}
+	if !b.dispatchToWaiter("task-1", correctMsg) {
+		t.Error("dispatchToWaiter should return true for matching agent")
+	}
+	select {
+	case got := <-ch:
+		if got.Msg != "hello from agent-a" {
+			t.Errorf("expected message from agent-a, got %q", got.Msg)
+		}
+	default:
+		t.Error("expected message in channel for matching agent")
+	}
+
+	// Message from a different agent should be rejected.
+	wrongMsg := &messages.StructuredMessage{
+		Sender: "agent:agent-b",
+		Msg:    "hello from agent-b",
+	}
+	if !b.dispatchToWaiter("task-1", wrongMsg) {
+		t.Error("dispatchToWaiter should return true (consumed) even for wrong agent")
+	}
+	select {
+	case got := <-ch:
+		t.Errorf("should not receive message from wrong agent, got %q", got.Msg)
+	default:
+		// correct — message was rejected
+	}
+
+	b.removeWaiter("task-1")
+}
+
+func TestValidateConfigRESTInsecureRequired(t *testing.T) {
+	cfg := &Config{
+		Bridge: BridgeConfig{
+			ExternalURL:       "https://test.example.com",
+			RESTListenAddress: ":8080",
+			// RESTInsecure not set
+		},
+		Hub:  HubConfig{Endpoint: "https://hub.example.com", User: "test"},
+		Auth: AuthConfig{Scheme: "none"},
+	}
+	err := ValidateConfig(cfg)
+	if err == nil {
+		t.Fatal("expected error for REST without rest_insecure when auth is none")
+	}
+	if !bytes.Contains([]byte(err.Error()), []byte("rest_insecure")) {
+		t.Errorf("error should mention rest_insecure: %v", err)
+	}
+
+	cfg.Bridge.RESTInsecure = true
+	err = ValidateConfig(cfg)
+	if err != nil && bytes.Contains([]byte(err.Error()), []byte("rest_insecure")) {
+		t.Errorf("should not error with rest_insecure set: %v", err)
 	}
 }
