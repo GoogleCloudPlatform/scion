@@ -221,14 +221,16 @@ def _provision(manifest: dict[str, Any]) -> int:
 
     # Read the secret value and project it as AMP_API_KEY so Amp can find it
     # regardless of which source key was used (AMP_API_KEY or ANTHROPIC_API_KEY).
-    api_key = _read_secret(secret_files, env_key)
-    if not api_key:
-        print(
-            f"amp provision: chose api-key ({env_key}) but no secret value "
-            f"was staged at the recorded path; check ApplyAuthSettings",
-            file=sys.stderr,
-        )
-        return EXIT_ERROR
+    api_key = ""
+    if method == "api-key":
+        api_key = _read_secret(secret_files, env_key)
+        if not api_key:
+            print(
+                f"amp provision: chose api-key ({env_key}) but no secret value "
+                f"was staged at the recorded path; check ApplyAuthSettings",
+                file=sys.stderr,
+            )
+            return EXIT_ERROR
 
     # Reconcile settings before writing outputs so any failures are reported
     # before the env overlay is committed.
@@ -249,14 +251,17 @@ def _provision(manifest: dict[str, Any]) -> int:
         "harness": "amp",
         "method": method,
         "explicit_type": explicit or None,
-        "env_var": env_key,
     }
+    if method == "api-key":
+        resolved_payload["env_var"] = env_key
 
     # Project the resolved key as AMP_API_KEY. Amp reads AMP_API_KEY from the
     # environment; normalizing here means the agent process sees a single
     # canonical variable regardless of whether the user supplied AMP_API_KEY or
     # ANTHROPIC_API_KEY.
-    env_payload: dict[str, Any] = {"AMP_API_KEY": api_key}
+    env_payload: dict[str, Any] = {}
+    if api_key:
+        env_payload["AMP_API_KEY"] = api_key
 
     try:
         _write_json(auth_out, resolved_payload)
