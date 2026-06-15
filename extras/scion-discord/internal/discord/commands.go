@@ -363,7 +363,7 @@ func helpText() string {
 		"`/scion status <agent>` — Show agent status\n" +
 		"`/scion start <agent>` — Start an agent\n" +
 		"`/scion stop <agent>` — Stop an agent\n" +
-		"`/scion message <agent> <text>` — Send a message to an agent\n" +
+		"`/scion msg <agent> <text>` — Send a message to an agent\n" +
 		"`/scion logs <agent>` — View agent logs\n" +
 		"`/scion default` — Set or clear the default agent\n" +
 		"`/scion register` — Link your Discord account to Scion Hub\n" +
@@ -695,6 +695,11 @@ func (h *CommandHandler) HandleMessage(s *discordgo.Session, i *discordgo.Intera
 
 	link, err := h.store.GetChannelLink(ctx, i.ChannelID)
 	if err != nil || link == nil {
+		if parentID := threadParentID(s, i.ChannelID); parentID != "" {
+			link, err = h.store.GetChannelLink(ctx, parentID)
+		}
+	}
+	if err != nil || link == nil {
 		h.followup(s, i, "This channel is not linked to a project. Use `/scion setup` first.")
 		return
 	}
@@ -1002,6 +1007,21 @@ func interactionUserID(i *discordgo.InteractionCreate) string {
 	}
 	if i.User != nil {
 		return i.User.ID
+	}
+	return ""
+}
+
+// threadParentID returns the parent channel ID if channelID is a thread,
+// or empty string if it is not a thread or the lookup fails.
+func threadParentID(s *discordgo.Session, channelID string) string {
+	ch, err := s.Channel(channelID)
+	if err != nil {
+		return ""
+	}
+	if ch.Type == discordgo.ChannelTypeGuildPublicThread ||
+		ch.Type == discordgo.ChannelTypeGuildPrivateThread ||
+		ch.Type == discordgo.ChannelTypeGuildNewsThread {
+		return ch.ParentID
 	}
 	return ""
 }

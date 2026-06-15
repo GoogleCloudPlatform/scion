@@ -492,22 +492,32 @@ func (b *DiscordBroker) Publish(ctx context.Context, topic string, msg *messages
 		return nil
 	}
 
-	// Open attachment files if present. Read the file into memory once so
+	// Open attachment files if present. Read files into memory once so
 	// we can create a fresh bytes.Reader for each target channel.
-	var fileData []byte
-	var fileName string
+	type attachmentData struct {
+		name string
+		data []byte
+	}
+	var attachments []attachmentData
 	if msg != nil && len(msg.Attachments) > 0 {
-		attachPath := msg.Attachments[0]
-		if attachPath != "" {
-			attachPath = b.resolveAttachmentPath(ctx, attachPath, projectID)
-			data, readErr := os.ReadFile(attachPath)
+		for _, raw := range msg.Attachments {
+			if raw == "" {
+				continue
+			}
+			resolved := b.resolveAttachmentPath(ctx, raw, projectID)
+			if resolved == "" {
+				continue
+			}
+			data, readErr := os.ReadFile(resolved)
 			if readErr != nil {
 				b.log.Error("Failed to read attachment file",
-					"path", attachPath, "error", readErr)
-			} else {
-				fileData = data
-				fileName = filepath.Base(attachPath)
+					"path", resolved, "error", readErr)
+				continue
 			}
+			attachments = append(attachments, attachmentData{
+				name: filepath.Base(resolved),
+				data: data,
+			})
 		}
 	}
 
@@ -537,11 +547,11 @@ func (b *DiscordBroker) Publish(ctx context.Context, topic string, msg *messages
 
 		// Build per-channel file slice; each channel gets a fresh reader.
 		var files []*discordgo.File
-		if fileData != nil {
-			files = []*discordgo.File{{
-				Name:   fileName,
-				Reader: bytes.NewReader(fileData),
-			}}
+		for _, a := range attachments {
+			files = append(files, &discordgo.File{
+				Name:   a.name,
+				Reader: bytes.NewReader(a.data),
+			})
 		}
 
 		var err error
@@ -563,12 +573,13 @@ func (b *DiscordBroker) Publish(ctx context.Context, topic string, msg *messages
 					"agent", senderSlug,
 					"error", err)
 				botText := formatMessage(msg, agentSlug)
-				// Reset file reader for fallback send.
-				if fileData != nil {
-					files = []*discordgo.File{{
-						Name:   fileName,
-						Reader: bytes.NewReader(fileData),
-					}}
+				// Reset file readers for fallback send.
+				files = nil
+				for _, a := range attachments {
+					files = append(files, &discordgo.File{
+						Name:   a.name,
+						Reader: bytes.NewReader(a.data),
+					})
 				}
 				if sendQueue != nil {
 					_, err = sendQueue.Send(ctx, channelID, botText, nil, nil, files)
@@ -905,6 +916,16 @@ func (b *DiscordBroker) handleIncomingMessage(s *discordgo.Session, m *discordgo
 	if err != nil {
 		b.log.Error("Failed to get channel link", "channel_id", channelID, "error", err)
 		return
+	}
+	// If no direct link, check if this is a thread whose parent channel is linked.
+	if link == nil || !link.Active {
+		if parentID, isThread := b.resolveThreadParent(channelID); isThread && parentID != "" {
+			link, err = store.GetChannelLink(ctx, parentID)
+			if err != nil {
+				b.log.Error("Failed to get parent channel link", "parent_id", parentID, "error", err)
+				return
+			}
+		}
 	}
 	if link == nil || !link.Active {
 		return
@@ -1286,9 +1307,8 @@ func (b *DiscordBroker) resolveStaleChannelSlugs(ctx context.Context) {
 // resolveAttachmentPath translates an agent-relative /workspace path to the
 // host-side path under /home/scion/.scion/projects/<slug>/. Agent containers
 // mount /home/scion/.scion/projects/<slug> as /workspace.
+// Returns empty string if the path is unsafe or cannot be resolved.
 func (b *DiscordBroker) resolveAttachmentPath(ctx context.Context, attachPath, projectID string) string {
-	originalPath := attachPath
-
 	var relPath string
 	switch {
 	case strings.HasPrefix(attachPath, "/workspace/"):
@@ -1302,14 +1322,16 @@ func (b *DiscordBroker) resolveAttachmentPath(ctx context.Context, attachPath, p
 	case !strings.HasPrefix(attachPath, "/"):
 		relPath = attachPath
 	default:
-		return attachPath
+		b.log.Warn("Rejecting absolute attachment path outside /workspace",
+			"attach_path", attachPath)
+		return ""
 	}
 
 	relPath = filepath.Clean(relPath)
 	if strings.HasPrefix(relPath, "..") || (filepath.IsAbs(relPath) && relPath != ".") {
-		b.log.Warn("Attachment path escapes workspace, ignoring translation",
+		b.log.Warn("Attachment path escapes workspace, rejecting",
 			"attach_path", attachPath, "rel_path", relPath)
-		return attachPath
+		return ""
 	}
 
 	// Look up project slug from channel links, falling back to the injected slug map.
@@ -1324,9 +1346,9 @@ func (b *DiscordBroker) resolveAttachmentPath(ctx context.Context, attachPath, p
 		slug = b.projectSlugMap[projectID]
 	}
 	if slug == "" {
-		b.log.Debug("Attachment path unchanged, no project slug found",
-			"original", originalPath, "project_id", projectID)
-		return attachPath
+		b.log.Warn("Cannot resolve attachment path: no project slug found",
+			"attach_path", attachPath, "project_id", projectID)
+		return ""
 	}
 
 	projectDir := filepath.Join("/home/scion/.scion/projects", slug)
@@ -1336,13 +1358,13 @@ func (b *DiscordBroker) resolveAttachmentPath(ctx context.Context, attachPath, p
 	} else {
 		hostPath = filepath.Join(projectDir, relPath)
 		if !strings.HasPrefix(hostPath, projectDir+"/") {
-			b.log.Warn("Resolved attachment path escapes project directory",
+			b.log.Warn("Resolved attachment path escapes project directory, rejecting",
 				"host_path", hostPath, "expected_prefix", projectDir+"/")
-			return attachPath
+			return ""
 		}
 	}
 
-	b.log.Debug("Resolved attachment path", "original", originalPath, "resolved", hostPath)
+	b.log.Debug("Resolved attachment path", "original", attachPath, "resolved", hostPath)
 	return hostPath
 }
 
