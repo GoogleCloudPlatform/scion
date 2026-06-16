@@ -46,10 +46,11 @@ type Pipeline struct {
 	logsDropWarned    sync.Once
 	spansDropWarned   sync.Once
 
-	metricBuf      []*metricpb.ResourceMetrics
-	metricBufMu    sync.Mutex
-	metricFlushCtx context.Context
-	metricFlushCnl context.CancelFunc
+	metricBuf       []*metricpb.ResourceMetrics
+	metricBufMu     sync.Mutex
+	metricFlushCtx  context.Context
+	metricFlushCnl  context.CancelFunc
+	metricLastFlush time.Time
 }
 
 // New creates a new telemetry pipeline.
@@ -354,9 +355,20 @@ func (p *Pipeline) metricFlushLoop() {
 // For cumulative metrics from short-lived hook processes, multiple data points may
 // exist for the same metric+attributes combination. Only the latest data point is
 // kept to avoid Cloud Monitoring sampling-rate violations.
+//
+// Cloud Monitoring requires a minimum 10-second interval between writes for the
+// same time series. This method enforces metricFlushInterval between exports to
+// prevent rapid consecutive flushes (e.g. periodic tick followed by shutdown drain)
+// from triggering sampling-rate rejections.
 func (p *Pipeline) flushMetricBuffer(ctx context.Context) {
 	p.metricBufMu.Lock()
 	buf := p.metricBuf
+	sinceLastFlush := time.Since(p.metricLastFlush)
+	if len(buf) > 0 && sinceLastFlush < metricFlushInterval {
+		p.metricBufMu.Unlock()
+		log.Debug("Skipping metric flush — last export was %v ago (minimum %v)", sinceLastFlush.Round(time.Millisecond), metricFlushInterval)
+		return
+	}
 	p.metricBuf = nil
 	p.metricBufMu.Unlock()
 
@@ -378,6 +390,9 @@ func (p *Pipeline) flushMetricBuffer(ctx context.Context) {
 		log.Error("Failed to export %d buffered metrics to cloud: %v", metricCount, err)
 		return
 	}
+	p.metricBufMu.Lock()
+	p.metricLastFlush = time.Now()
+	p.metricBufMu.Unlock()
 	log.Debug("Exported %d buffered metrics to cloud", metricCount)
 }
 
