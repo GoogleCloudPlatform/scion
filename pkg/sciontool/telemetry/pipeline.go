@@ -35,6 +35,10 @@ type Pipeline struct {
 	healthCancel context.CancelFunc
 	exportErrors otelmetric.Int64Counter
 	meter        otelmetric.Meter
+
+	metricsDropWarned sync.Once
+	logsDropWarned    sync.Once
+	spansDropWarned   sync.Once
 }
 
 // New creates a new telemetry pipeline.
@@ -231,6 +235,10 @@ func (p *Pipeline) handleSpans(ctx context.Context, resourceSpans []*tracepb.Res
 			return err
 		}
 		log.Debug("Exported %d spans to cloud", spanCount)
+	} else {
+		p.spansDropWarned.Do(func() {
+			log.Error("Received %d spans but cloud exporter is not configured — spans will be dropped. Set SCION_GCP_PROJECT_ID or configure telemetry.cloud", spanCount)
+		})
 	}
 
 	return nil
@@ -282,6 +290,13 @@ func (p *Pipeline) handleMetrics(ctx context.Context, resourceMetrics []*metricp
 		return nil
 	}
 
+	metricCount := 0
+	for _, rm := range resourceMetrics {
+		for _, sm := range rm.ScopeMetrics {
+			metricCount += len(sm.Metrics)
+		}
+	}
+
 	// Forward to cloud exporter if available. In GCP-native mode, OTLP metrics
 	// received by this pipeline are converted and forwarded to Cloud Monitoring.
 	// Sciontool's own SDK metrics may still bypass the pipeline and export
@@ -292,6 +307,11 @@ func (p *Pipeline) handleMetrics(ctx context.Context, resourceMetrics []*metricp
 			log.Error("Failed to export metrics to cloud: %v", err)
 			return err
 		}
+		log.Debug("Exported %d metrics to cloud", metricCount)
+	} else {
+		p.metricsDropWarned.Do(func() {
+			log.Error("Received %d metrics but cloud exporter is not configured — metrics will be dropped. Set SCION_GCP_PROJECT_ID or configure telemetry.cloud", metricCount)
+		})
 	}
 
 	return nil
@@ -319,6 +339,10 @@ func (p *Pipeline) handleLogs(ctx context.Context, resourceLogs []*logspb.Resour
 			return err
 		}
 		log.Debug("Exported %d log records to cloud", logCount)
+	} else {
+		p.logsDropWarned.Do(func() {
+			log.Error("Received %d log records but cloud exporter is not configured — logs will be dropped. Set SCION_GCP_PROJECT_ID or configure telemetry.cloud", logCount)
+		})
 	}
 
 	return nil
