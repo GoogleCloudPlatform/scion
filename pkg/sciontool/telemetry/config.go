@@ -7,12 +7,17 @@ Copyright 2025 The Scion Authors.
 package telemetry
 
 import (
+	"context"
 	"encoding/json"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
+
+	"cloud.google.com/go/compute/metadata"
 )
 
 // Environment variable names for telemetry configuration.
@@ -184,6 +189,23 @@ func LoadConfig() *Config {
 		cfg.ProjectID = readProjectIDFromCredentials(cfg.GCPCredentialsFile)
 	}
 
+	// Fallback: resolve project ID from the GCE metadata server. This covers
+	// containers running under the scion metadata emulator (which sets
+	// GCE_METADATA_HOST) and real GCE instances. The metadata package respects
+	// GCE_METADATA_HOST, so it reaches the scion emulator at localhost:18380
+	// transparently. A short timeout prevents blocking startup when no
+	// metadata server is reachable.
+	if cfg.ProjectID == "" {
+		cfg.ProjectID = readProjectIDFromMetadata()
+		if cfg.ProjectID != "" {
+			slog.Info("telemetry: resolved GCP project ID from metadata server",
+				"project_id", cfg.ProjectID)
+			if cfg.CloudProvider == "" {
+				cfg.CloudProvider = "gcp"
+			}
+		}
+	}
+
 	// Apply default exclude list if not explicitly set
 	if len(cfg.Filter.Exclude) == 0 && os.Getenv(EnvFilterExclude) == "" {
 		cfg.Filter.Exclude = DefaultFilterExclude
@@ -207,6 +229,14 @@ func LoadConfig() *Config {
 		cfg.CloudEnabled = false
 		cfg.Endpoint = ""
 		cfg.GCPCredentialsFile = ""
+		// Clear metadata-derived fields so tests don't depend on a live
+		// metadata server that happens to be reachable in the test env.
+		if os.Getenv(EnvProjectID) == "" {
+			cfg.ProjectID = ""
+		}
+		if os.Getenv(EnvCloudProvider) == "" {
+			cfg.CloudProvider = ""
+		}
 	}
 
 	return cfg
@@ -259,6 +289,20 @@ func readProjectIDFromCredentials(path string) string {
 		return ""
 	}
 	return creds.ProjectID
+}
+
+// readProjectIDFromMetadata queries the GCE metadata server for the project ID.
+// Returns empty string if the metadata server is unreachable or returns an error.
+// The compute/metadata package respects GCE_METADATA_HOST, so this transparently
+// reaches the scion metadata emulator when it is running.
+func readProjectIDFromMetadata() string {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	id, err := metadata.ProjectIDWithContext(ctx)
+	if err != nil {
+		return ""
+	}
+	return id
 }
 
 // parseBoolEnv parses a boolean environment variable with a default value.

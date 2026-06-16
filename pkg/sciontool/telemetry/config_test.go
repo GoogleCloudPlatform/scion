@@ -448,11 +448,12 @@ func TestLoadConfig_GCPDefaults(t *testing.T) {
 
 	cfg := LoadConfig()
 
-	// Note: GCPCredentialsFile may be non-empty if the well-known path exists
-	// in the test environment's home directory. Only assert CloudProvider is
-	// empty when no credentials are present.
-	if cfg.GCPCredentialsFile == "" && cfg.CloudProvider != "" {
-		t.Errorf("Expected CloudProvider to be empty when no credentials, got %q", cfg.CloudProvider)
+	// CloudProvider is auto-detected when a credentials file exists at the
+	// well-known path OR when the GCE metadata server is reachable (e.g.
+	// scion metadata emulator). Only assert it is empty when neither source
+	// is available.
+	if cfg.GCPCredentialsFile == "" && cfg.ProjectID == "" && cfg.CloudProvider != "" {
+		t.Errorf("Expected CloudProvider to be empty when no credentials or metadata, got %q", cfg.CloudProvider)
 	}
 }
 
