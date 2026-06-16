@@ -878,8 +878,8 @@ export class ScionPageOnboarding extends LitElement {
       `;
     }
 
-    // No registry configured — show a clear error rather than letting pull hang
-    if (!this.imageRegistry) {
+    // No registry and no local build — show registry setup guidance
+    if (!this.imageRegistry && !this.buildAvailable) {
       return html`
         <h2>Container Images</h2>
         <div class="alert alert-warning">
@@ -943,27 +943,37 @@ export class ScionPageOnboarding extends LitElement {
       </div>
 
       <div class="image-actions">
-        <sl-button
-          variant="primary"
-          size="small"
-          ?loading=${this.imagePulling}
-          ?disabled=${this.imagePulling || this.imageBuilding}
-          @click=${this.handlePullImages}
-        >Pull images</sl-button>
+        ${this.imageRegistry ? html`
+          <sl-button
+            variant="primary"
+            size="small"
+            ?loading=${this.imagePulling}
+            ?disabled=${this.imagePulling || this.imageBuilding}
+            @click=${this.handlePullImages}
+          >Pull images</sl-button>
+        ` : nothing}
 
         ${this.buildAvailable ? html`
           <sl-button
-            variant="default"
+            variant=${this.imageRegistry ? 'default' : 'primary'}
             size="small"
             ?loading=${this.imageBuilding}
             ?disabled=${this.imagePulling || this.imageBuilding}
             @click=${this.handleBuildImages}
           >Build locally</sl-button>
-        ` : html`
+        ` : nothing}
+
+        ${!this.imageRegistry && !this.buildAvailable ? html`
           <p style="font-size:0.8125rem;color:var(--scion-text-muted,#64748b);margin:0;">
             Pre-built images are available via pull. Local builds require a source checkout.
           </p>
-        `}
+        ` : nothing}
+
+        ${!this.imageRegistry && this.buildAvailable ? html`
+          <p style="font-size:0.8125rem;color:var(--scion-text-muted,#64748b);margin:0;">
+            To pull pre-built images instead, configure an image registry.
+          </p>
+        ` : nothing}
       </div>
 
       ${this.buildLogs.length > 0 ? html`
@@ -1065,7 +1075,7 @@ export class ScionPageOnboarding extends LitElement {
         const wrapper = JSON.parse((event as MessageEvent).data) as { subject: string; data: Record<string, unknown> };
         const d = wrapper.data;
 
-        if (mode === 'pull' && d['image']) {
+        if (d['image']) {
           const fullImageName = d['image'] as string;
           const status = d['status'] as string;
           const error = d['error'] as string | undefined;
@@ -1079,7 +1089,7 @@ export class ScionPageOnboarding extends LitElement {
             this.imageStatuses = next;
           }
 
-          if (status === 'done' || status === 'exists' || status === 'error') {
+          if (mode === 'pull' && (status === 'done' || status === 'exists' || status === 'error')) {
             doneCount++;
             if (doneCount >= totalImages) {
               this.imagePulling = false;
@@ -1087,8 +1097,9 @@ export class ScionPageOnboarding extends LitElement {
             }
           }
         } else if (d['status'] === 'error') {
-          this.error = (d['error'] as string) || 'An error occurred during image pull.';
-          this.imagePulling = false;
+          this.error = (d['error'] as string) || 'An error occurred during image operation.';
+          if (mode === 'pull') this.imagePulling = false;
+          if (mode === 'build') this.imageBuilding = false;
           this.cleanupImageEvents();
         }
 

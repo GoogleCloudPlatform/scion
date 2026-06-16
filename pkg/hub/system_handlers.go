@@ -540,6 +540,7 @@ func (s *Server) handleSystemImagesBuild(w http.ResponseWriter, r *http.Request)
 	buildStarted = true
 	jobID := api.NewUUID()
 	subject := "system.images." + jobID
+	requestedHarnesses := req.Harnesses
 
 	go func() {
 		defer s.imageBuildActive.Store(false)
@@ -571,6 +572,12 @@ func (s *Server) handleSystemImagesBuild(w http.ResponseWriter, r *http.Request)
 		if err := cmd.Wait(); err != nil {
 			s.events.PublishRaw(subject, imageBuildLogEvent{Type: "log", Line: "build failed: " + err.Error()})
 		} else {
+			for _, h := range requestedHarnesses {
+				s.events.PublishRaw(subject, map[string]string{
+					"image":  "scion-" + h + ":latest",
+					"status": "done",
+				})
+			}
 			s.events.PublishRaw(subject, imageBuildLogEvent{Type: "log", Line: "build complete"})
 		}
 	}()
