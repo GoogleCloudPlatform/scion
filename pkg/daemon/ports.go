@@ -34,7 +34,7 @@ func DetectOccupiedPorts(ports []int) []int {
 			occupied = append(occupied, port)
 			continue
 		}
-		ln.Close()
+		_ = ln.Close()
 	}
 	return occupied
 }

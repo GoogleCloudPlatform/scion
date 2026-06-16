@@ -102,8 +102,8 @@ type StructuredMessage struct {
 	Status       string            `json:"status,omitempty"`
 	Attachments  []string          `json:"attachments,omitempty"`
 	Metadata     map[string]string `json:"metadata,omitempty"`
-	Channel  string `json:"channel,omitempty"`
-	ThreadID string `json:"thread_id,omitempty"`
+	Channel      string            `json:"channel,omitempty"`
+	ThreadID     string            `json:"thread_id,omitempty"`
 
 	// Visibility controls which consumers see this message.
 	// One of VisibilityNormal, VisibilityVerbose, or VisibilityFull.

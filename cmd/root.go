@@ -66,12 +66,12 @@ return an error instead of blocking.`,
 		}
 
 		// Only check git version for commands that create worktrees (agent-related).
-			// Server, config, hub, and info commands never use worktrees.
-			if util.IsGitRepo() && usesWorktrees(cmd) {
-				if err := util.CheckGitVersion(); err != nil {
-					return fmt.Errorf("git check failed: %w", err)
-				}
+		// Server, config, hub, and info commands never use worktrees.
+		if util.IsGitRepo() && usesWorktrees(cmd) {
+			if err := util.CheckGitVersion(); err != nil {
+				return fmt.Errorf("git check failed: %w", err)
 			}
+		}
 
 		// Determine if this command requires explicit project context
 		// Commands that don't require project context:
@@ -435,10 +435,6 @@ func checkAgentContainerContext(cmd *cobra.Command) error {
 // worktrees — i.e. agent launch commands. Server, config, hub, and info
 // commands never create worktrees and should not be blocked by a git version check.
 func usesWorktrees(cmd *cobra.Command) bool {
-	name := cmd.Name()
-	if cmd.Parent() != nil {
-		name = cmd.Parent().Name() + " " + name
-	}
 	switch cmd.Name() {
 	case "start", "run": // agent launch
 		return true
