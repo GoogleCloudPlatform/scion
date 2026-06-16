@@ -655,6 +655,7 @@ type Server struct {
 	federationClient *http.Client
 
 	imageBuildActive atomic.Bool
+	imagePullActive  atomic.Bool
 }
 
 func newInstanceID() string {

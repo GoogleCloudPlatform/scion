@@ -408,13 +408,20 @@ func (s *Server) handleSystemImagesPull(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	if !s.imagePullActive.CompareAndSwap(false, true) {
+		writeError(w, http.StatusConflict, ErrCodeConflict, "a pull is already in progress", nil)
+		return
+	}
+
 	var req imagePullRequest
 	if err := readJSON(r, &req); err != nil {
+		s.imagePullActive.Store(false)
 		BadRequest(w, "invalid request body")
 		return
 	}
 
 	if len(req.Harnesses) == 0 {
+		s.imagePullActive.Store(false)
 		ValidationError(w, "at least one harness must be specified", nil)
 		return
 	}
@@ -422,6 +429,7 @@ func (s *Server) handleSystemImagesPull(w http.ResponseWriter, r *http.Request) 
 	allowed := map[string]bool{"claude": true, "gemini": true, "codex": true, "opencode": true}
 	for _, h := range req.Harnesses {
 		if !allowed[h] {
+			s.imagePullActive.Store(false)
 			ValidationError(w, fmt.Sprintf("unknown harness %q", h), nil)
 			return
 		}
@@ -435,7 +443,8 @@ func (s *Server) handleSystemImagesPull(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 	if registry == "" {
-		http.Error(w, `{"error":"image_registry is not configured — run 'scion config set --global image_registry <registry>' or reinstall via Homebrew"}`, http.StatusUnprocessableEntity)
+		s.imagePullActive.Store(false)
+		writeError(w, http.StatusUnprocessableEntity, ErrCodeUnprocessable, "image_registry is not configured — run 'scion config set --global image_registry <registry>' or reinstall via Homebrew", nil)
 		return
 	}
 
@@ -444,6 +453,7 @@ func (s *Server) handleSystemImagesPull(w http.ResponseWriter, r *http.Request) 
 	rt := runtime.GetRuntime("", "")
 
 	go func() {
+		defer s.imagePullActive.Store(false)
 		if err := runtime.PullImages(s.ctx, rt, req.Harnesses, registry, func(pr runtime.PullResult) {
 			s.events.PublishRaw("system.images."+jobID, pr)
 		}); err != nil {
@@ -496,7 +506,7 @@ func (s *Server) handleSystemImagesBuild(w http.ResponseWriter, r *http.Request)
 	}
 
 	if !s.imageBuildActive.CompareAndSwap(false, true) {
-		http.Error(w, "a build is already in progress", http.StatusConflict)
+		writeError(w, http.StatusConflict, ErrCodeConflict, "a build is already in progress", nil)
 		return
 	}
 	buildStarted := false
@@ -533,7 +543,7 @@ func (s *Server) handleSystemImagesBuild(w http.ResponseWriter, r *http.Request)
 
 	buildScript := resolveBuildScript()
 	if buildScript == "" {
-		http.Error(w, `{"error":"local builds require a source checkout; use image pull instead","buildUnavailable":true}`, http.StatusUnprocessableEntity)
+		writeError(w, http.StatusUnprocessableEntity, ErrCodeUnprocessable, "local builds require a source checkout; use image pull instead", map[string]interface{}{"buildUnavailable": true})
 		return
 	}
 
@@ -625,6 +635,12 @@ func (s *Server) handleFSList(w http.ResponseWriter, r *http.Request) {
 	} else {
 		resolved = filepath.Clean(resolved)
 	}
+	if !filepath.IsAbs(resolved) {
+		if resolved, err = filepath.Abs(resolved); err != nil {
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "cannot resolve absolute path", nil)
+			return
+		}
+	}
 
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -632,7 +648,7 @@ func (s *Server) handleFSList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sep := string(filepath.Separator)
-	if resolved != home && !strings.HasPrefix(resolved, home+sep) {
+	if !pathEqual(resolved, home) && !pathHasPrefix(resolved, home+sep) {
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, "path must be within the home directory", nil)
 		return
 	}
@@ -714,6 +730,12 @@ func (s *Server) handleFSMkdir(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	resolved = filepath.Clean(resolved)
+	if !filepath.IsAbs(resolved) {
+		if resolved, err = filepath.Abs(resolved); err != nil {
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "cannot resolve absolute path", nil)
+			return
+		}
+	}
 
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -721,7 +743,7 @@ func (s *Server) handleFSMkdir(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sep := string(filepath.Separator)
-	if resolved != home && !strings.HasPrefix(resolved, home+sep) {
+	if !pathEqual(resolved, home) && !pathHasPrefix(resolved, home+sep) {
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, "parent must be within the home directory", nil)
 		return
 	}
@@ -729,7 +751,7 @@ func (s *Server) handleFSMkdir(w http.ResponseWriter, r *http.Request) {
 	managedRoot, _ := managedProjectRoot()
 	if managedRoot != "" {
 		cleanManaged := filepath.Clean(managedRoot)
-		if strings.HasPrefix(resolved, cleanManaged+string(filepath.Separator)) || resolved == cleanManaged {
+		if pathHasPrefix(resolved, cleanManaged+string(filepath.Separator)) || pathEqual(resolved, cleanManaged) {
 			ValidationError(w, "cannot create directories inside the Scion managed directory", nil)
 			return
 		}

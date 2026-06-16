@@ -127,7 +127,7 @@ func StopComponent(component, globalDir string) error {
 		return ErrNotRunning
 	}
 
-	if err := process.Signal(syscall.SIGTERM); err != nil {
+	if err := process.Signal(os.Interrupt); err != nil {
 		_ = RemovePIDComponent(component, globalDir)
 		return ErrNotRunning
 	}

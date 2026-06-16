@@ -209,10 +209,10 @@ export class ScionDirBrowser extends LitElement {
   }
 
   private navigateUp(): void {
-    const parent = this.currentPath.substring(0, this.currentPath.lastIndexOf('/'));
-    if (parent) {
-      void this.navigate(parent);
-    }
+    const lastSlash = this.currentPath.lastIndexOf('/');
+    if (lastSlash < 0) return;
+    const parent = lastSlash === 0 ? '/' : this.currentPath.substring(0, lastSlash);
+    void this.navigate(parent);
   }
 
   private navigateToBreadcrumb(index: number): void {

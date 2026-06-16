@@ -15,12 +15,13 @@
 package daemon
 
 import (
+	"errors"
 	"fmt"
 	"net"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 )
 
@@ -58,7 +59,7 @@ func FindPIDOnPort(port int) int {
 }
 
 // ForceKillPort finds the process listening on the given port and kills it.
-// Sends SIGTERM first, waits up to 3 seconds, then SIGKILL if still running.
+// Sends an interrupt first, waits up to 3 seconds, then force-kills if still running.
 // Returns the PID that was killed, or 0 if no process was found.
 func ForceKillPort(port int) (int, error) {
 	pid := FindPIDOnPort(port)
@@ -66,24 +67,31 @@ func ForceKillPort(port int) (int, error) {
 		return 0, nil
 	}
 
-	if err := syscall.Kill(pid, syscall.SIGTERM); err != nil {
-		return pid, fmt.Errorf("failed to send SIGTERM to PID %d: %w", pid, err)
+	process, err := os.FindProcess(pid)
+	if err != nil {
+		return pid, fmt.Errorf("failed to find process %d: %w", pid, err)
 	}
 
-	// Wait up to 3 seconds for the process to exit.
-	for i := 0; i < 12; i++ {
-		time.Sleep(250 * time.Millisecond)
-		if err := syscall.Kill(pid, 0); err != nil {
+	// Try graceful shutdown via interrupt signal.
+	if err := process.Signal(os.Interrupt); err != nil {
+		_ = process.Kill()
+		return pid, nil
+	}
+
+	// Wait up to 3 seconds for the process to release the port.
+	for i := 0; i < 6; i++ {
+		time.Sleep(500 * time.Millisecond)
+		if FindPIDOnPort(port) == 0 {
 			return pid, nil
 		}
 	}
 
-	// Still running — escalate to SIGKILL.
-	if err := syscall.Kill(pid, syscall.SIGKILL); err != nil {
-		if err == syscall.ESRCH {
+	// Still running — force kill.
+	if err := process.Kill(); err != nil {
+		if errors.Is(err, os.ErrProcessDone) {
 			return pid, nil
 		}
-		return pid, fmt.Errorf("failed to send SIGKILL to PID %d: %w", pid, err)
+		return pid, fmt.Errorf("failed to kill PID %d: %w", pid, err)
 	}
 	return pid, nil
 }

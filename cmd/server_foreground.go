@@ -28,7 +28,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/google/uuid"
@@ -158,7 +157,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	defer cancel()
 
 	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	signal.Notify(sigCh, os.Interrupt)
 
 	go func() {
 		sig := <-sigCh

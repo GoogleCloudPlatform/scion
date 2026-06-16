@@ -1067,13 +1067,14 @@ export class ScionPageOnboarding extends LitElement {
     const es = new EventSource(url);
     this.imageEventSource = es;
 
-    let doneCount = 0;
+    const completedImages = new Set<string>();
     const totalImages = this.selectedHarnesses.size;
 
     es.addEventListener('update', (event: Event) => {
       try {
-        const wrapper = JSON.parse((event as MessageEvent).data) as { subject: string; data: Record<string, unknown> };
+        const wrapper = JSON.parse((event as MessageEvent).data) as { subject: string; data?: Record<string, unknown> };
         const d = wrapper.data;
+        if (!d) return;
 
         if (d['image']) {
           const fullImageName = d['image'] as string;
@@ -1090,8 +1091,8 @@ export class ScionPageOnboarding extends LitElement {
           }
 
           if (mode === 'pull' && (status === 'done' || status === 'exists' || status === 'error')) {
-            doneCount++;
-            if (doneCount >= totalImages) {
+            completedImages.add(fullImageName);
+            if (completedImages.size >= totalImages) {
               this.imagePulling = false;
               this.cleanupImageEvents();
             }

@@ -24,6 +24,18 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
+// pathEqual compares two cleaned absolute paths for equality,
+// case-insensitive on platforms with case-insensitive filesystems (macOS, Windows).
+func pathEqual(a, b string) bool {
+	return strings.EqualFold(a, b)
+}
+
+// pathHasPrefix checks whether path starts with prefix as a directory boundary,
+// case-insensitive on platforms with case-insensitive filesystems (macOS, Windows).
+func pathHasPrefix(path, prefix string) bool {
+	return strings.HasPrefix(strings.ToLower(path), strings.ToLower(prefix))
+}
+
 // PathClass describes what kind of path was resolved.
 type PathClass struct {
 	Resolved      string `json:"resolved"`
@@ -81,13 +93,13 @@ func ClassifyPath(ctx context.Context, s store.Store, path, managedRoot string) 
 
 	if managedRoot != "" {
 		cleanManaged := filepath.Clean(managedRoot)
-		if strings.HasPrefix(resolved, cleanManaged+string(filepath.Separator)) || resolved == cleanManaged {
+		if pathHasPrefix(resolved, cleanManaged+string(filepath.Separator)) || pathEqual(resolved, cleanManaged) {
 			pc.IsManaged = true
 		}
 		// Also check legacy groves path
 		legacyRoot := strings.Replace(cleanManaged, string(filepath.Separator)+"projects", string(filepath.Separator)+"groves", 1)
-		if legacyRoot != cleanManaged {
-			if strings.HasPrefix(resolved, legacyRoot+string(filepath.Separator)) || resolved == legacyRoot {
+		if !pathEqual(legacyRoot, cleanManaged) {
+			if pathHasPrefix(resolved, legacyRoot+string(filepath.Separator)) || pathEqual(resolved, legacyRoot) {
 				pc.IsManaged = true
 			}
 		}
