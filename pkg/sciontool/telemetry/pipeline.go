@@ -18,6 +18,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	otelmetric "go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/metric/noop"
+	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
 	logspb "go.opentelemetry.io/proto/otlp/logs/v1"
 	metricpb "go.opentelemetry.io/proto/otlp/metrics/v1"
 	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
@@ -349,7 +350,10 @@ func (p *Pipeline) metricFlushLoop() {
 	}
 }
 
-// flushMetricBuffer exports all buffered metrics to Cloud Monitoring.
+// flushMetricBuffer deduplicates and exports buffered metrics to Cloud Monitoring.
+// For cumulative metrics from short-lived hook processes, multiple data points may
+// exist for the same metric+attributes combination. Only the latest data point is
+// kept to avoid Cloud Monitoring sampling-rate violations.
 func (p *Pipeline) flushMetricBuffer(ctx context.Context) {
 	p.metricBufMu.Lock()
 	buf := p.metricBuf
@@ -360,19 +364,151 @@ func (p *Pipeline) flushMetricBuffer(ctx context.Context) {
 		return
 	}
 
+	deduped := deduplicateMetrics(buf)
+
 	metricCount := 0
-	for _, rm := range buf {
+	for _, rm := range deduped {
 		for _, sm := range rm.ScopeMetrics {
 			metricCount += len(sm.Metrics)
 		}
 	}
 
-	if err := p.exporter.ExportProtoMetrics(ctx, buf); err != nil {
+	if err := p.exporter.ExportProtoMetrics(ctx, deduped); err != nil {
 		p.recordExportError(ctx, "metrics", err)
 		log.Error("Failed to export %d buffered metrics to cloud: %v", metricCount, err)
 		return
 	}
 	log.Debug("Exported %d buffered metrics to cloud", metricCount)
+}
+
+// deduplicateMetrics merges multiple ResourceMetrics into one, keeping only the
+// latest data point per (metric name, attribute set) for Sum metrics. This
+// prevents Cloud Monitoring sampling-rate violations when multiple hook processes
+// report the same cumulative counter within a short window.
+func deduplicateMetrics(rms []*metricpb.ResourceMetrics) []*metricpb.ResourceMetrics {
+	if len(rms) <= 1 {
+		return rms
+	}
+
+	// Flatten all metrics into a single ResourceMetrics, deduplicating data points.
+	// Key: "scope/metricname" → Metric with deduplicated data points.
+	type metricKey struct {
+		scope  string
+		metric string
+	}
+	latest := make(map[metricKey]*metricpb.Metric)
+
+	var resource *metricpb.ResourceMetrics
+	for _, rm := range rms {
+		if rm == nil {
+			continue
+		}
+		if resource == nil {
+			resource = rm
+		}
+		for _, sm := range rm.ScopeMetrics {
+			scopeName := ""
+			if sm.Scope != nil {
+				scopeName = sm.Scope.Name
+			}
+			for _, m := range sm.Metrics {
+				key := metricKey{scope: scopeName, metric: m.Name}
+				existing, ok := latest[key]
+				if !ok {
+					latest[key] = m
+					continue
+				}
+				// For Sum metrics, keep only the data point with the latest timestamp
+				// per attribute set. For other types, keep the latest metric entirely.
+				merged := mergeMetricDataPoints(existing, m)
+				latest[key] = merged
+			}
+		}
+	}
+
+	if resource == nil || len(latest) == 0 {
+		return nil
+	}
+
+	// Rebuild scope→metrics structure.
+	scopeMetrics := make(map[string][]*metricpb.Metric)
+	for key, m := range latest {
+		scopeMetrics[key.scope] = append(scopeMetrics[key.scope], m)
+	}
+	sms := make([]*metricpb.ScopeMetrics, 0, len(scopeMetrics))
+	for _, metrics := range scopeMetrics {
+		sms = append(sms, &metricpb.ScopeMetrics{Metrics: metrics})
+	}
+	return []*metricpb.ResourceMetrics{{
+		Resource:     resource.Resource,
+		ScopeMetrics: sms,
+	}}
+}
+
+// mergeMetricDataPoints merges two proto metrics with the same name, keeping
+// the latest data point per attribute set for Sum types.
+func mergeMetricDataPoints(a, b *metricpb.Metric) *metricpb.Metric {
+	aSum, aOK := a.Data.(*metricpb.Metric_Sum)
+	bSum, bOK := b.Data.(*metricpb.Metric_Sum)
+	if !aOK || !bOK {
+		// For non-Sum metrics, keep the one with the latest timestamp
+		return b
+	}
+
+	// Dedup by attribute set: keep the data point with the latest TimeUnixNano.
+	type attrKey string
+	pointMap := make(map[attrKey]*metricpb.NumberDataPoint)
+	for _, dp := range aSum.Sum.DataPoints {
+		key := attrKey(attrSetKey(dp.Attributes))
+		pointMap[key] = dp
+	}
+	for _, dp := range bSum.Sum.DataPoints {
+		key := attrKey(attrSetKey(dp.Attributes))
+		existing, ok := pointMap[key]
+		if !ok || dp.TimeUnixNano > existing.TimeUnixNano {
+			pointMap[key] = dp
+		}
+	}
+
+	merged := make([]*metricpb.NumberDataPoint, 0, len(pointMap))
+	for _, dp := range pointMap {
+		merged = append(merged, dp)
+	}
+	return &metricpb.Metric{
+		Name:        a.Name,
+		Description: a.Description,
+		Unit:        a.Unit,
+		Data: &metricpb.Metric_Sum{
+			Sum: &metricpb.Sum{
+				DataPoints:             merged,
+				AggregationTemporality: aSum.Sum.AggregationTemporality,
+				IsMonotonic:            aSum.Sum.IsMonotonic,
+			},
+		},
+	}
+}
+
+// attrSetKey creates a stable string key from a sorted list of proto attributes.
+func attrSetKey(attrs []*commonpb.KeyValue) string {
+	if len(attrs) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	for i, kv := range attrs {
+		if i > 0 {
+			b.WriteByte(';')
+		}
+		b.WriteString(kv.Key)
+		b.WriteByte('=')
+		if kv.Value != nil {
+			if sv := kv.Value.GetStringValue(); sv != "" {
+				b.WriteString(sv)
+			} else if iv := kv.Value.GetIntValue(); iv != 0 {
+				fmt.Fprintf(&b, "%d", iv)
+			}
+		}
+	}
+	return b.String()
 }
 
 // handleLogs processes incoming logs from the receiver.
