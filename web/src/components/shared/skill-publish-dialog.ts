@@ -201,6 +201,8 @@ export class ScionSkillPublishDialog extends LitElement {
       this.reset();
       if (this.latestVersion) {
         this.version = this.bumpPatch(this.latestVersion);
+      } else {
+        this.version = '1.0.0';
       }
     }
   }
@@ -295,8 +297,8 @@ export class ScionSkillPublishDialog extends LitElement {
     if (!this.version.trim()) return 'Version is required.';
     if (!this.validateSemver(this.version.trim())) return 'Version must be valid semver (e.g. 1.0.0).';
     if (this.selectedFiles.length === 0) return 'At least one file is required.';
-    if (!this.selectedFiles.some((f) => f.path.toLowerCase() === 'skill.md'))
-      return 'SKILL.md is required.';
+    if (!this.selectedFiles.some((f) => f.file.name === 'SKILL.md' || f.path === 'SKILL.md'))
+      return 'A file named exactly SKILL.md is required.';
     if (this.selectedFiles.length > 50) return 'Maximum 50 files allowed.';
     const maxSize = 10 * 1024 * 1024;
     const oversize = this.selectedFiles.find((f) => f.file.size > maxSize);
@@ -473,14 +475,14 @@ export class ScionSkillPublishDialog extends LitElement {
     this.error = null;
     this.step = 'uploading';
 
-    // Re-create version to get fresh upload URLs for failed files
     const failedFiles = this.uploadResults
       .map((r, i) => ({ result: r, index: i, file: this.selectedFiles[i] }))
       .filter((x) => x.result.status === 'failed');
 
     try {
+      // Use the upload endpoint to get fresh signed URLs for the existing draft version
       const filesPayload = failedFiles.map((x) => ({ path: x.file.path, size: x.file.file.size }));
-      const createRes = await apiFetch(`/api/v1/skills/${this.skillId}/versions`, {
+      const createRes = await apiFetch(`/api/v1/skills/${this.skillId}/upload`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ version: this.version.trim(), files: filesPayload }),

@@ -35,7 +35,7 @@ export class ScionPageAdminSkillRegistries extends LitElement {
 
   // Create dialog state
   @state() private createOpen = false;
-  @state() private createForm = { name: '', endpoint: '', type: 'hub', trustLevel: 'trusted', description: '', authToken: '', resolvePath: '' };
+  @state() private createForm = { name: '', endpoint: '', type: 'hub', trustLevel: 'pinned', description: '', authToken: '', resolvePath: '' };
   @state() private createError: string | null = null;
   @state() private creating = false;
 
@@ -290,7 +290,7 @@ export class ScionPageAdminSkillRegistries extends LitElement {
       }
 
       this.createOpen = false;
-      this.createForm = { name: '', endpoint: '', type: 'hub', trustLevel: 'trusted', description: '', authToken: '', resolvePath: '' };
+      this.createForm = { name: '', endpoint: '', type: 'hub', trustLevel: 'pinned', description: '', authToken: '', resolvePath: '' };
       void this.loadRegistries();
     } catch (err) {
       this.createError = err instanceof Error ? err.message : 'Failed to create registry';
@@ -412,8 +412,8 @@ export class ScionPageAdminSkillRegistries extends LitElement {
             .value=${this.createForm.trustLevel}
             @sl-change=${(e: Event) => { this.createForm = { ...this.createForm, trustLevel: (e.target as HTMLElement & { value: string }).value }; }}
           >
-            <sl-option value="trusted">Trusted</sl-option>
             <sl-option value="pinned">Pinned</sl-option>
+            <sl-option value="trusted">Trusted</sl-option>
           </sl-select>
           <div class="hint">
             ${this.createForm.trustLevel === 'trusted'

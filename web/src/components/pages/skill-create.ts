@@ -197,8 +197,8 @@ export class ScionPageSkillCreate extends LitElement {
       return;
     }
 
-    if ((this.scope === 'project' || this.scope === 'user') && !this.scopeId.trim()) {
-      this.error = `${this.scope === 'project' ? 'Project' : 'User'} ID is required for ${this.scope} scope.`;
+    if (this.scope === 'project' && !this.scopeId.trim()) {
+      this.error = 'Project ID is required for project scope.';
       return;
     }
 
@@ -216,7 +216,7 @@ export class ScionPageSkillCreate extends LitElement {
         body.description = this.description.trim();
       }
 
-      if (this.scopeId.trim() && (this.scope === 'project' || this.scope === 'user')) {
+      if (this.scope === 'project' && this.scopeId.trim()) {
         body.scopeId = this.scopeId.trim();
       }
 
@@ -346,19 +346,24 @@ export class ScionPageSkillCreate extends LitElement {
                 ? 'Available to all projects and agents.'
                 : this.scope === 'project'
                   ? 'Scoped to a specific project.'
-                  : 'Scoped to a specific user.'}
+                  : 'Scoped to your user account.'}
             </div>
           </div>
 
-          ${this.scope === 'project' || this.scope === 'user' ? html`
+          ${this.scope === 'project' ? html`
             <div class="form-field">
-              <label for="scopeId">${this.scope === 'project' ? 'Project ID' : 'User ID'}</label>
+              <label for="scopeId">Project ID</label>
               <sl-input
                 id="scopeId"
-                placeholder="${this.scope === 'project' ? 'project-uuid' : 'user-uuid'}"
+                placeholder="project-uuid"
                 .value=${this.scopeId}
                 @sl-input=${(e: Event) => { this.scopeId = (e.target as HTMLElement & { value: string }).value; }}
               ></sl-input>
+            </div>
+          ` : nothing}
+          ${this.scope === 'user' ? html`
+            <div class="form-field">
+              <div class="hint">Skills will be created under your user account.</div>
             </div>
           ` : nothing}
 
