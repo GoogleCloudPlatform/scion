@@ -20,6 +20,7 @@
     "SubagentStop": [{"matcher": "*", "hooks": [{"name": "scion-status", "type": "command", "command": "sciontool hook --dialect=claude"}]}],
     "PreToolUse": [{"matcher": "*", "hooks": [{"name": "scion-status", "type": "command", "command": "sciontool hook --dialect=claude"}]}],
     "PostToolUse": [{"matcher": "*", "hooks": [{"name": "scion-status", "type": "command", "command": "sciontool hook --dialect=claude"}]}],
+    "ModelResponse": [{"matcher": "*", "hooks": [{"name": "scion-telemetry", "type": "command", "command": "sciontool hook --dialect=claude"}]}],
     "Notification": [{"matcher": "ToolPermission", "hooks": [{"name": "scion-status", "type": "command", "command": "sciontool hook --dialect=claude"}]}]
   }
 }
