@@ -47,7 +47,7 @@ func TestAdvancedCapabilitiesDefaults(t *testing.T) {
 			name:                "claude",
 			harness:             "claude",
 			expectMaxTurns:      api.SupportYes,
-			expectMaxModelCalls: api.SupportNo,
+			expectMaxModelCalls: api.SupportYes,
 			expectMaxDuration:   api.SupportYes,
 			expectAuthFile:      api.SupportYes,
 			expectVertexAI:      api.SupportYes,
