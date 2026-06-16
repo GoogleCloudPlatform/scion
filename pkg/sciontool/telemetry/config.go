@@ -195,7 +195,7 @@ func LoadConfig() *Config {
 	// GCE_METADATA_HOST, so it reaches the scion emulator at localhost:18380
 	// transparently. A short timeout prevents blocking startup when no
 	// metadata server is reachable.
-	if cfg.ProjectID == "" {
+	if cfg.ProjectID == "" && !testing.Testing() {
 		cfg.ProjectID = readProjectIDFromMetadata()
 		if cfg.ProjectID != "" {
 			slog.Info("telemetry: resolved GCP project ID from metadata server",
@@ -229,14 +229,6 @@ func LoadConfig() *Config {
 		cfg.CloudEnabled = false
 		cfg.Endpoint = ""
 		cfg.GCPCredentialsFile = ""
-		// Clear metadata-derived fields so tests don't depend on a live
-		// metadata server that happens to be reachable in the test env.
-		if os.Getenv(EnvProjectID) == "" {
-			cfg.ProjectID = ""
-		}
-		if os.Getenv(EnvCloudProvider) == "" {
-			cfg.CloudProvider = ""
-		}
 	}
 
 	return cfg
