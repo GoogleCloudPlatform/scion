@@ -1360,6 +1360,10 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 }
 
 // initHubStorage initializes the storage backend for the Hub server.
+// It always ensures a storage backend is configured: if the explicitly
+// configured backend (GCS or local) fails, it falls back to a local
+// filesystem storage at ~/.scion/storage so that template bootstrap
+// and other storage-dependent features still work.
 func initHubStorage(ctx context.Context, hubSrv *hub.Server, cfg *config.GlobalConfig, globalDir string) error {
 	if storageBucket != "" {
 		log.Printf("Initializing GCS storage with bucket: %s", storageBucket)
@@ -1372,11 +1376,12 @@ func initHubStorage(ctx context.Context, hubSrv *hub.Server, cfg *config.GlobalC
 			if hostedHAGuardsRequired(cfg) {
 				return fmt.Errorf("failed to initialize required GCS storage: %w", err)
 			}
-			log.Printf("Warning: failed to initialize GCS storage: %v", err)
+			log.Printf("Warning: failed to initialize GCS storage, falling back to local: %v", err)
+		} else {
+			hubSrv.SetStorage(stor)
+			log.Printf("GCS storage configured: gs://%s", storageBucket)
 			return nil
 		}
-		hubSrv.SetStorage(stor)
-		log.Printf("GCS storage configured: gs://%s", storageBucket)
 	} else if storageDir != "" {
 		log.Printf("Initializing local storage at: %s", storageDir)
 		storageCfg := storage.Config{
@@ -1385,27 +1390,33 @@ func initHubStorage(ctx context.Context, hubSrv *hub.Server, cfg *config.GlobalC
 		}
 		stor, err := storage.New(ctx, storageCfg)
 		if err != nil {
-			log.Printf("Warning: failed to initialize local storage: %v", err)
+			log.Printf("Warning: failed to initialize local storage, falling back to default: %v", err)
+		} else {
+			hubSrv.SetStorage(stor)
+			log.Printf("Local storage configured: %s", storageDir)
 			return nil
 		}
-		hubSrv.SetStorage(stor)
-		log.Printf("Local storage configured: %s", storageDir)
-	} else {
-		defaultStorageDir := filepath.Join(globalDir, "storage")
+	}
+
+	// Always set up a local filesystem fallback so that template bootstrap
+	// and other storage-dependent features work even when no explicit
+	// storage backend is configured (or the configured one failed).
+	defaultStorageDir := filepath.Join(globalDir, "storage")
+	if storageBucket == "" && storageDir == "" {
 		log.Printf("WARNING: No storage backend configured. Using local filesystem storage at: %s", defaultStorageDir)
 		log.Printf("  For production use, configure --storage-bucket (GCS) or --storage-dir (explicit local path)")
-		storageCfg := storage.Config{
-			Provider:  storage.ProviderLocal,
-			LocalPath: defaultStorageDir,
-			Bucket:    "local",
-		}
-		stor, err := storage.New(ctx, storageCfg)
-		if err != nil {
-			log.Printf("Warning: failed to initialize local storage fallback: %v", err)
-			return nil
-		}
-		hubSrv.SetStorage(stor)
 	}
+	storageCfg := storage.Config{
+		Provider:  storage.ProviderLocal,
+		LocalPath: defaultStorageDir,
+		Bucket:    "local",
+	}
+	stor, err := storage.New(ctx, storageCfg)
+	if err != nil {
+		log.Printf("Warning: failed to initialize local storage fallback: %v", err)
+		return nil
+	}
+	hubSrv.SetStorage(stor)
 	return nil
 }
 

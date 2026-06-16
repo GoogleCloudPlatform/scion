@@ -32,8 +32,8 @@ type runtimeCandidate struct {
 
 // localRuntimeCandidates lists container runtimes in preference order.
 var localRuntimeCandidates = []runtimeCandidate{
-	{Name: "podman", Binary: "podman", CheckArgs: []string{"--version"}},
 	{Name: "container", Binary: "container", DarwinOnly: true, CheckArgs: []string{"--version"}},
+	{Name: "podman", Binary: "podman", CheckArgs: []string{"--version"}},
 	{Name: "docker", Binary: "docker", CheckArgs: []string{"--version"}},
 }
 
@@ -52,7 +52,7 @@ var runCheckFunc = func(binary string, args []string) error {
 // DetectLocalRuntime probes the system for an available container runtime.
 // It checks OS compatibility and verifies each candidate is both on PATH
 // and can execute successfully. Candidates are checked in preference order:
-// podman, container (macOS only), docker.
+// container (macOS only), podman, docker.
 // Returns the runtime name or an error if no supported runtime is found.
 func DetectLocalRuntime() (string, error) {
 	for _, c := range localRuntimeCandidates {
@@ -72,6 +72,26 @@ func DetectLocalRuntime() (string, error) {
 		return "", fmt.Errorf("no supported container runtime found: install podman, container (Apple Virtualization), or docker")
 	}
 	return "", fmt.Errorf("no supported container runtime found: install podman or docker")
+}
+
+// DetectAllLocalRuntimes probes the system for all available container runtimes.
+// Unlike DetectLocalRuntime which returns the first match, this function returns
+// every runtime that is both on PATH and can execute successfully.
+func DetectAllLocalRuntimes() []string {
+	var available []string
+	for _, c := range localRuntimeCandidates {
+		if c.DarwinOnly && runtime.GOOS != "darwin" {
+			continue
+		}
+		if _, err := lookPathFunc(c.Binary); err != nil {
+			continue
+		}
+		if err := runCheckFunc(c.Binary, c.CheckArgs); err != nil {
+			continue
+		}
+		available = append(available, c.Name)
+	}
+	return available
 }
 
 // OverrideRuntimeDetection replaces the functions used by DetectLocalRuntime

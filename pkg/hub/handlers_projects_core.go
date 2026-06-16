@@ -1100,6 +1100,16 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		// For linked projects (local directory), initialize the .scion
+		// directory structure so agents and templates directories exist.
+		if localPath != "" {
+			scionDir := filepath.Join(localPath, ".scion")
+			if err := config.InitProject(scionDir, nil, config.InitProjectOpts{SkipRuntimeCheck: true}); err != nil {
+				slog.Warn("failed to initialize .scion in linked project",
+					"project_id", project.ID, "localPath", localPath, "error", err.Error())
+			}
+		}
+
 		// Set as default runtime broker if project doesn't have one
 		if project.DefaultRuntimeBrokerID == "" {
 			project.DefaultRuntimeBrokerID = broker.ID

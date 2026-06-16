@@ -52,6 +52,7 @@ interface RuntimeResponse {
   detected: string;
   configured: string;
   available: boolean;
+  availableRuntimes?: string[];
 }
 
 @customElement('scion-page-onboarding')
@@ -73,6 +74,7 @@ export class ScionPageOnboarding extends LitElement {
   @state() private detectedRuntime = '';
   @state() private configuredRuntime = '';
   @state() private selectedRuntime = '';
+  @state() private availableRuntimes: string[] = [];
 
   // Step 2b: Apple DNS warning (non-blocking)
   @state() private dnsWarning: string | null = null;
@@ -89,6 +91,8 @@ export class ScionPageOnboarding extends LitElement {
   @state() private runtimeAvailable = false;
   @state() private buildAvailable = false;
   @state() private imageRegistry = '';
+  @state() private registryInput = 'ghcr.io/homebrew-scion';
+  @state() private registrySaving = false;
   @state() private gitVersion = '';
   @state() private gitVersionOK = true;
   private imageEventSource: EventSource | null = null;
@@ -752,9 +756,9 @@ export class ScionPageOnboarding extends LitElement {
             value=${this.selectedRuntime}
             @sl-change=${(e: Event) => { this.selectedRuntime = (e.target as HTMLSelectElement).value; }}
           >
-            <sl-option value="docker">Docker</sl-option>
-            <sl-option value="podman">Podman</sl-option>
-            <sl-option value="container">Apple Container</sl-option>
+            ${this.renderRuntimeOption('docker', 'Docker')}
+            ${this.renderRuntimeOption('podman', 'Podman')}
+            ${this.renderRuntimeOption('container', 'Container (Apple Virtualization)')}
           </sl-select>
         </div>
       `}
@@ -785,12 +789,25 @@ export class ScionPageOnboarding extends LitElement {
       const data = (await res.json()) as RuntimeResponse;
       this.detectedRuntime = data.detected;
       this.configuredRuntime = data.configured;
+      this.availableRuntimes = data.availableRuntimes ?? [];
       this.selectedRuntime = data.configured || data.detected || 'docker';
     } catch {
       this.error = 'Failed to connect to the server.';
     } finally {
       this.stepLoading = false;
     }
+  }
+
+  private renderRuntimeOption(value: string, label: string) {
+    const isAvailable = this.availableRuntimes.includes(value);
+    const isDetected = this.detectedRuntime === value;
+    let suffix = '';
+    if (isDetected) {
+      suffix = ' (detected)';
+    } else if (!isAvailable) {
+      suffix = ' (not detected)';
+    }
+    return html`<sl-option value=${value} ?disabled=${!isAvailable}>${label}${suffix}</sl-option>`;
   }
 
   private async handleRuntimeNext(): Promise<void> {
@@ -909,20 +926,26 @@ export class ScionPageOnboarding extends LitElement {
       `;
     }
 
-    // No registry and no local build — show registry setup guidance
+    // No registry and no local build — show registry input
     if (!this.imageRegistry && !this.buildAvailable) {
       return html`
         <h2>Container Images</h2>
-        <div class="alert alert-warning">
-          <strong>No image registry configured.</strong>
-          <p>
-            An image registry is required to pull container images.
-            Run the following to configure one, then restart the server:
-          </p>
-          <code>scion config set --global image_registry ghcr.io/homebrew-scion</code>
-          <p>If you installed via Homebrew, try reinstalling to auto-configure the registry:</p>
-          <code>brew reinstall --HEAD homebrew-scion/scion/scion-workstation</code>
+        <p>An image registry is required to pull container images. Enter one below.</p>
+        <div class="form-group">
+          <label>Image Registry</label>
+          <sl-input
+            placeholder="ghcr.io/your-org"
+            value=${this.registryInput}
+            @sl-input=${(e: Event) => { this.registryInput = (e.target as HTMLInputElement).value; }}
+          ></sl-input>
         </div>
+        <sl-button
+          variant="primary"
+          size="small"
+          ?loading=${this.registrySaving}
+          ?disabled=${!this.registryInput.trim()}
+          @click=${this.handleSaveRegistry}
+        >Save</sl-button>
         <div class="footer">
           <sl-button variant="text" @click=${() => { this.currentStep = 3; }}>Back</sl-button>
           <div class="footer-right">
@@ -1033,6 +1056,29 @@ export class ScionPageOnboarding extends LitElement {
         </div>
       </div>
     `;
+  }
+
+  private async handleSaveRegistry(): Promise<void> {
+    this.error = null;
+    this.registrySaving = true;
+    try {
+      const res = await apiFetch('/api/v1/system/registry', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ image_registry: this.registryInput.trim() }),
+      });
+      if (!res.ok) {
+        this.error = await extractApiError(res, 'Failed to save registry');
+        return;
+      }
+      this.imageRegistry = this.registryInput.trim();
+      // Reload the images step to reflect the new registry
+      void this.loadImagesStep();
+    } catch {
+      this.error = 'Failed to connect to the server.';
+    } finally {
+      this.registrySaving = false;
+    }
   }
 
   private async handlePullImages(): Promise<void> {

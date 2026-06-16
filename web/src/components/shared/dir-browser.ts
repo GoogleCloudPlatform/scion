@@ -39,6 +39,7 @@ export class ScionDirBrowser extends LitElement {
   @state() private entries: DirEntry[] = [];
   @state() private loading = false;
   @state() private error: string | null = null;
+  @state() private filterText = '';
   @state() private newFolderMode = false;
   @state() private newFolderName = '';
   @state() private newFolderError: string | null = null;
@@ -84,6 +85,17 @@ export class ScionDirBrowser extends LitElement {
 
     .breadcrumb-sep {
       color: var(--scion-text-muted, #64748b);
+    }
+
+    .filter-input {
+      flex: 1;
+      min-width: 6rem;
+    }
+
+    .filter-input::part(base) {
+      border: none;
+      background: transparent;
+      box-shadow: none;
     }
 
     .entry-list {
@@ -184,6 +196,7 @@ export class ScionDirBrowser extends LitElement {
   private async navigate(path: string): Promise<void> {
     this.loading = true;
     this.error = null;
+    this.filterText = '';
     this.newFolderMode = false;
 
     try {
@@ -265,7 +278,7 @@ export class ScionDirBrowser extends LitElement {
       }
       this.newFolderMode = false;
       this.newFolderName = '';
-      void this.navigate(this.currentPath);
+      void this.navigate(this.currentPath + '/' + name);
     } catch {
       this.newFolderError = 'Failed to connect to the server.';
     } finally {
@@ -337,6 +350,14 @@ export class ScionDirBrowser extends LitElement {
             <span class="breadcrumb-sep">/</span>
             <button class="breadcrumb-segment" @click=${() => this.navigateToBreadcrumb(i)}>${seg}</button>
           `)}
+          <sl-input
+            class="filter-input"
+            size="small"
+            placeholder="Type to filter..."
+            .value=${this.filterText}
+            @sl-input=${(e: Event) => this.onFilterInput(e)}
+            @keydown=${(e: KeyboardEvent) => this.onFilterKeydown(e)}
+          ></sl-input>
         </div>
 
         ${this.loading ? html`
@@ -366,6 +387,9 @@ export class ScionDirBrowser extends LitElement {
                 <sl-icon name="arrow-up"></sl-icon>
                 <span class="name">..</span>
               </div>
+            ` : nothing}
+            ${this.filteredEntries.length === 0 && this.filterText ? html`
+              <div class="empty-state">No matches for "${this.filterText}"</div>
             ` : nothing}
             ${this.filteredEntries.map(e => html`
               <div class="entry ${e.isDir ? '' : 'is-file'}" @click=${() => this.onEntryClick(e)}>

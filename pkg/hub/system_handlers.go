@@ -109,9 +109,10 @@ func (s *Server) handleSystemCheck(w http.ResponseWriter, r *http.Request) {
 // --- 2.2: Runtime GET/PUT ---
 
 type systemRuntimeResponse struct {
-	Detected   string `json:"detected"`
-	Configured string `json:"configured"`
-	Available  bool   `json:"available"`
+	Detected          string   `json:"detected"`
+	Configured        string   `json:"configured"`
+	Available         bool     `json:"available"`
+	AvailableRuntimes []string `json:"availableRuntimes,omitempty"`
 }
 
 type putRuntimeRequest struct {
@@ -143,6 +144,7 @@ func (s *Server) handleSystemRuntime(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleGetRuntime(w http.ResponseWriter, r *http.Request) {
 	detected, detectErr := config.DetectLocalRuntime()
 	available := detectErr == nil
+	allRuntimes := config.DetectAllLocalRuntimes()
 
 	var configured string
 	globalDir, err := config.GetGlobalDir()
@@ -161,9 +163,10 @@ func (s *Server) handleGetRuntime(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, systemRuntimeResponse{
-		Detected:   detected,
-		Configured: configured,
-		Available:  available,
+		Detected:          detected,
+		Configured:        configured,
+		Available:         available,
+		AvailableRuntimes: allRuntimes,
 	})
 }
 
@@ -212,6 +215,62 @@ func (s *Server) handlePutRuntime(w http.ResponseWriter, r *http.Request) {
 		Detected:   req.Runtime,
 		Configured: req.Runtime,
 		Available:  true,
+	})
+}
+
+// --- 2.2b: Registry PUT ---
+
+type putRegistryRequest struct {
+	ImageRegistry string `json:"image_registry"`
+}
+
+type putRegistryResponse struct {
+	ImageRegistry string `json:"image_registry"`
+}
+
+func (s *Server) handleSystemRegistry(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPut {
+		MethodNotAllowed(w)
+		return
+	}
+
+	if err := assertLoopback(r); err != nil {
+		writeError(w, http.StatusForbidden, ErrCodeForbidden, err.Error(), nil)
+		return
+	}
+
+	var req putRegistryRequest
+	if err := readJSON(r, &req); err != nil {
+		BadRequest(w, "invalid request body")
+		return
+	}
+
+	if req.ImageRegistry == "" {
+		ValidationError(w, "image_registry must not be empty", nil)
+		return
+	}
+
+	globalDir, err := config.GetGlobalDir()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "cannot determine config directory", nil)
+		return
+	}
+
+	vs, err := config.LoadSingleFileVersioned(globalDir)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to load settings", nil)
+		return
+	}
+
+	vs.ImageRegistry = req.ImageRegistry
+
+	if err := config.SaveVersionedSettings(globalDir, vs); err != nil {
+		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to save image registry setting", nil)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, putRegistryResponse{
+		ImageRegistry: req.ImageRegistry,
 	})
 }
 
