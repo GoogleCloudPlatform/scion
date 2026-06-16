@@ -139,20 +139,40 @@ func newGCPProviders(ctx context.Context, config *Config, res *resource.Resource
 		return nil, fmt.Errorf("creating log exporter: %w", err)
 	}
 
-	// Metrics use the GCP Cloud Monitoring exporter (direct to Cloud Monitoring API)
-	metricOpts := []mexporter.Option{
-		mexporter.WithProjectID(config.ProjectID),
+	// Metrics: short-lived processes (hooks, batch=false) route through the
+	// local pipeline receiver via OTLP, just like logs. The long-running
+	// pipeline aggregates and exports to Cloud Monitoring at safe intervals,
+	// avoiding sampling-rate violations that occur when each hook process
+	// creates an independent Cloud Monitoring exporter.
+	// Long-lived processes (init, batch=true) export directly to Cloud
+	// Monitoring since they maintain stable cumulative counters.
+	var metricExporter metric.Exporter
+	if batch {
+		metricOpts := []mexporter.Option{
+			mexporter.WithProjectID(config.ProjectID),
+		}
+		if len(clientOpts) > 0 {
+			metricOpts = append(metricOpts, mexporter.WithMonitoringClientOptions(clientOpts...))
+		}
+		rawMetricExporter, err := mexporter.New(metricOpts...)
+		if err != nil {
+			_ = traceExporter.Shutdown(ctx)
+			_ = logExporter.Shutdown(ctx)
+			return nil, fmt.Errorf("creating GCP metric exporter: %w", err)
+		}
+		metricExporter = rawMetricExporter
+	} else {
+		otlpMetricExp, err := otlpmetricgrpc.New(ctx,
+			otlpmetricgrpc.WithEndpoint(fmt.Sprintf("localhost:%d", config.GRPCPort)),
+			otlpmetricgrpc.WithInsecure(),
+		)
+		if err != nil {
+			_ = traceExporter.Shutdown(ctx)
+			_ = logExporter.Shutdown(ctx)
+			return nil, fmt.Errorf("creating OTLP metric exporter for pipeline: %w", err)
+		}
+		metricExporter = otlpMetricExp
 	}
-	if len(clientOpts) > 0 {
-		metricOpts = append(metricOpts, mexporter.WithMonitoringClientOptions(clientOpts...))
-	}
-	rawMetricExporter, err := mexporter.New(metricOpts...)
-	if err != nil {
-		_ = traceExporter.Shutdown(ctx)
-		_ = logExporter.Shutdown(ctx)
-		return nil, fmt.Errorf("creating GCP metric exporter: %w", err)
-	}
-	var metricExporter metric.Exporter = rawMetricExporter
 	if config.MetricsDebug {
 		metricExporter = newDebugMetricExporter(metricExporter)
 	}

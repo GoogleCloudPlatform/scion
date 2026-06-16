@@ -24,6 +24,11 @@ import (
 	"google.golang.org/api/googleapi"
 )
 
+// metricFlushInterval is the minimum interval between metric exports to Cloud
+// Monitoring. This prevents sampling-rate violations when multiple short-lived
+// processes (hooks) send metrics in rapid succession.
+const metricFlushInterval = 15 * time.Second
+
 // Pipeline orchestrates the telemetry collection and forwarding.
 type Pipeline struct {
 	config       *Config
@@ -39,6 +44,11 @@ type Pipeline struct {
 	metricsDropWarned sync.Once
 	logsDropWarned    sync.Once
 	spansDropWarned   sync.Once
+
+	metricBuf      []*metricpb.ResourceMetrics
+	metricBufMu    sync.Mutex
+	metricFlushCtx context.Context
+	metricFlushCnl context.CancelFunc
 }
 
 // New creates a new telemetry pipeline.
@@ -139,6 +149,12 @@ func (p *Pipeline) Start(ctx context.Context) error {
 
 	p.running = true
 
+	// Start metric flush goroutine for batching exports to Cloud Monitoring.
+	if p.exporter != nil {
+		p.metricFlushCtx, p.metricFlushCnl = context.WithCancel(ctx)
+		go p.metricFlushLoop()
+	}
+
 	// Register pipeline health gauge and export error counter.
 	if p.config.IsCloudConfigured() && p.exporter != nil {
 		p.initSelfMetrics(ctx)
@@ -169,6 +185,13 @@ func (p *Pipeline) Stop(ctx context.Context) error {
 		p.healthCancel()
 		p.healthCancel = nil
 	}
+
+	// Stop metric flush goroutine and drain remaining buffered metrics.
+	if p.metricFlushCnl != nil {
+		p.metricFlushCnl()
+		p.metricFlushCnl = nil
+	}
+	p.flushMetricBuffer(ctx)
 
 	// Stop receiver first
 	if p.receiver != nil {
@@ -284,37 +307,72 @@ func (p *Pipeline) filterSpans(resourceSpans []*tracepb.ResourceSpans) []*tracep
 	return result
 }
 
-// handleMetrics processes incoming metrics from the receiver.
+// handleMetrics buffers incoming metrics for periodic export to Cloud Monitoring.
+// Metrics are accumulated and flushed at metricFlushInterval to avoid
+// sampling-rate violations from rapid writes (e.g. multiple hook processes).
 func (p *Pipeline) handleMetrics(ctx context.Context, resourceMetrics []*metricpb.ResourceMetrics) error {
 	if len(resourceMetrics) == 0 {
 		return nil
 	}
 
-	metricCount := 0
-	for _, rm := range resourceMetrics {
-		for _, sm := range rm.ScopeMetrics {
-			metricCount += len(sm.Metrics)
-		}
-	}
-
-	// Forward to cloud exporter if available. In GCP-native mode, OTLP metrics
-	// received by this pipeline are converted and forwarded to Cloud Monitoring.
-	// Sciontool's own SDK metrics may still bypass the pipeline and export
-	// directly via a MeterProvider.
 	if p.exporter != nil {
-		if err := p.exporter.ExportProtoMetrics(ctx, resourceMetrics); err != nil {
-			p.recordExportError(ctx, "metrics", err)
-			log.Error("Failed to export metrics to cloud: %v", err)
-			return err
-		}
-		log.Debug("Exported %d metrics to cloud", metricCount)
+		p.metricBufMu.Lock()
+		p.metricBuf = append(p.metricBuf, resourceMetrics...)
+		p.metricBufMu.Unlock()
+		log.Debug("Buffered %d resource metric batches for export", len(resourceMetrics))
 	} else {
+		metricCount := 0
+		for _, rm := range resourceMetrics {
+			for _, sm := range rm.ScopeMetrics {
+				metricCount += len(sm.Metrics)
+			}
+		}
 		p.metricsDropWarned.Do(func() {
 			log.Error("Received %d metrics but cloud exporter is not configured — metrics will be dropped. Set SCION_GCP_PROJECT_ID or configure telemetry.cloud", metricCount)
 		})
 	}
 
 	return nil
+}
+
+// metricFlushLoop periodically flushes buffered metrics to Cloud Monitoring.
+func (p *Pipeline) metricFlushLoop() {
+	ticker := time.NewTicker(metricFlushInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-p.metricFlushCtx.Done():
+			return
+		case <-ticker.C:
+			p.flushMetricBuffer(p.metricFlushCtx)
+		}
+	}
+}
+
+// flushMetricBuffer exports all buffered metrics to Cloud Monitoring.
+func (p *Pipeline) flushMetricBuffer(ctx context.Context) {
+	p.metricBufMu.Lock()
+	buf := p.metricBuf
+	p.metricBuf = nil
+	p.metricBufMu.Unlock()
+
+	if len(buf) == 0 || p.exporter == nil {
+		return
+	}
+
+	metricCount := 0
+	for _, rm := range buf {
+		for _, sm := range rm.ScopeMetrics {
+			metricCount += len(sm.Metrics)
+		}
+	}
+
+	if err := p.exporter.ExportProtoMetrics(ctx, buf); err != nil {
+		p.recordExportError(ctx, "metrics", err)
+		log.Error("Failed to export %d buffered metrics to cloud: %v", metricCount, err)
+		return
+	}
+	log.Debug("Exported %d buffered metrics to cloud", metricCount)
 }
 
 // handleLogs processes incoming logs from the receiver.
