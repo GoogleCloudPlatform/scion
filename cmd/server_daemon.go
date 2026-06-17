@@ -25,6 +25,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/daemon"
+	"github.com/GoogleCloudPlatform/scion/pkg/hubsync"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/spf13/cobra"
 )
@@ -189,7 +190,46 @@ func runServerStop(cmd *cobra.Command, args []string) error {
 	}
 
 	if !running {
-		return fmt.Errorf("server daemon is not running")
+		// PID file is missing or stale — probe ports to see if a server is
+		// still listening. This handles the case where the PID file was
+		// deleted while the server was still running.
+		ports := []int{8080, 9800, 9810}
+		occupied := daemon.DetectOccupiedPorts(ports)
+		if len(occupied) == 0 {
+			return fmt.Errorf("server daemon is not running")
+		}
+
+		fmt.Println("No PID file found, but server port(s) appear to be in use:")
+		for _, port := range occupied {
+			fmt.Printf("  port %d\n", port)
+		}
+		fmt.Println()
+
+		if !hubsync.ConfirmAction("Kill the process(es) on these ports?", false, autoConfirm) {
+			fmt.Println("Aborted.")
+			return nil
+		}
+
+		killed := 0
+		for _, port := range occupied {
+			killedPID, err := daemon.ForceKillPort(port)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to kill process on port %d: %v\n", port, err)
+				continue
+			}
+			if killedPID > 0 {
+				fmt.Printf("Killed process %d on port %d\n", killedPID, port)
+				killed++
+			}
+		}
+
+		_ = daemon.RemovePIDComponent(serverDaemonComponent, globalDir)
+
+		if killed == 0 {
+			return fmt.Errorf("failed to kill any processes on occupied ports")
+		}
+		fmt.Println("Server stopped.")
+		return nil
 	}
 
 	fmt.Printf("Stopping server daemon (PID: %d)...\n", pid)
