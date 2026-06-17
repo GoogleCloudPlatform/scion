@@ -1305,6 +1305,10 @@ export class ScionPageOnboarding extends LitElement {
         <scion-dir-browser
           @path-selected=${(e: CustomEvent<{ path: string }>) => {
             this.wsLocalPath = e.detail.path;
+            if (!this.wsProjectName.trim()) {
+              const segments = e.detail.path.replace(/\/+$/, '').split('/');
+              this.wsProjectName = segments[segments.length - 1] || '';
+            }
             void this.wsValidatePath(e.detail.path);
           }}
         ></scion-dir-browser>

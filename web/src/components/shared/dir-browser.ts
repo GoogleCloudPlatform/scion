@@ -269,6 +269,55 @@ export class ScionDirBrowser extends LitElement {
     }
   }
 
+  private get filteredEntries(): DirEntry[] {
+    if (!this.filterText) return this.entries;
+    const lower = this.filterText.toLowerCase();
+    return this.entries.filter(e => e.name.toLowerCase().includes(lower));
+  }
+
+  private onFilterInput(e: Event): void {
+    this.filterText = (e.target as HTMLInputElement).value;
+  }
+
+  private onFilterKeydown(e: KeyboardEvent): void {
+    if (e.key === 'Escape') {
+      this.filterText = '';
+      return;
+    }
+    if (e.key === 'Tab') {
+      e.preventDefault();
+      const dirMatches = this.filteredEntries.filter(entry => entry.isDir);
+      if (dirMatches.length === 1) {
+        void this.navigate(this.currentPath + '/' + dirMatches[0].name);
+      } else if (dirMatches.length > 1) {
+        const prefix = this.commonPrefix(dirMatches.map(d => d.name));
+        if (prefix.length > this.filterText.length) {
+          this.filterText = prefix;
+        }
+      }
+      return;
+    }
+    if (e.key === 'Enter') {
+      const matches = this.filteredEntries.filter(entry => entry.isDir);
+      if (matches.length === 1) {
+        const newPath = this.currentPath + '/' + matches[0].name;
+        void this.navigate(newPath);
+      }
+    }
+  }
+
+  private commonPrefix(strings: string[]): string {
+    if (strings.length === 0) return '';
+    let prefix = strings[0];
+    for (let i = 1; i < strings.length; i++) {
+      while (!strings[i].toLowerCase().startsWith(prefix.toLowerCase())) {
+        prefix = prefix.slice(0, -1);
+        if (!prefix) return '';
+      }
+    }
+    return prefix;
+  }
+
   override render() {
     const segments = this.currentPath.split('/').filter(Boolean);
 

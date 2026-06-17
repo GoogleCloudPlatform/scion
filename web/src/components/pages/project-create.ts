@@ -171,6 +171,16 @@ export class ScionPageProjectCreate extends LitElement {
   private onDirBrowserPathSelected(e: CustomEvent<{ path: string }>): void {
     this.localPath = e.detail.path;
     this.browseDialogOpen = false;
+    if (!this.name) {
+      const segments = e.detail.path.replace(/\/+$/, '').split('/');
+      const derived = segments[segments.length - 1] || '';
+      if (derived) {
+        this.name = derived;
+        if (!this.slugManuallyEdited) {
+          this.slug = this.slugify(derived);
+        }
+      }
+    }
     void this.validateLocalPath(e.detail.path);
   }
 
