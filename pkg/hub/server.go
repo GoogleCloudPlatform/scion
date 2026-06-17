@@ -2604,6 +2604,7 @@ func (s *Server) registerRoutes() {
 
 	// Unified resource import endpoint (templates + harness-configs, global + project)
 	s.mux.HandleFunc("/api/v1/resources/import", s.handleResourcesImport)
+	s.mux.HandleFunc("/api/v1/resources/discover", s.handleResourcesDiscover)
 
 	// GitHub App webhook and setup callback (unauthenticated — uses webhook signature)
 	s.mux.HandleFunc("/api/v1/webhooks/github", s.handleGitHubWebhook)

@@ -130,7 +130,7 @@ func isHarnessConfigDir(dir string) bool {
 // routing through it also gives harness-config remote import the GITHUB_TOKEN
 // secret fallback that templates already had.
 func (s *Server) importHarnessConfigsFromRemote(ctx context.Context, projectID, sourceURL string) ([]string, error) {
-	return s.importFromRemote(ctx, projectID, sourceURL, store.HarnessConfigScopeProject, s.harnessConfigImportKind(), nil)
+	return s.importFromRemote(ctx, projectID, sourceURL, store.HarnessConfigScopeProject, s.harnessConfigImportKind(), nil, nil)
 }
 
 // importHarnessConfigsFromWorkspace imports harness-configs from a path within
@@ -139,7 +139,7 @@ func (s *Server) importHarnessConfigsFromRemote(ctx context.Context, projectID, 
 //
 // This is a thin wrapper over the shared import driver (resource_import.go).
 func (s *Server) importHarnessConfigsFromWorkspace(ctx context.Context, project *store.Project, workspacePath string) ([]string, error) {
-	return s.importFromWorkspace(ctx, project, workspacePath, store.HarnessConfigScopeProject, s.harnessConfigImportKind(), nil)
+	return s.importFromWorkspace(ctx, project, workspacePath, store.HarnessConfigScopeProject, s.harnessConfigImportKind(), nil, nil)
 }
 
 // syncExistingHarnessConfig re-syncs a local harness config directory through

@@ -4976,6 +4976,18 @@ func (s *Server) handleProjectRoutes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Check for nested /discover-templates path
+	if subPath == "discover-templates" {
+		s.handleProjectDiscoverTemplates(w, r, projectID)
+		return
+	}
+
+	// Check for nested /discover-harness-configs path
+	if subPath == "discover-harness-configs" {
+		s.handleProjectDiscoverHarnessConfigs(w, r, projectID)
+		return
+	}
+
 	// Check for nested /import-templates path
 	if subPath == "import-templates" {
 		s.handleProjectImportTemplates(w, r, projectID)
@@ -10118,8 +10130,9 @@ func (s *Server) handlePublicSettings(w http.ResponseWriter, r *http.Request) {
 // ImportTemplatesRequest is the request body for direct template import.
 // Exactly one of SourceURL or WorkspacePath should be provided.
 type ImportTemplatesRequest struct {
-	SourceURL     string `json:"sourceUrl"`
-	WorkspacePath string `json:"workspacePath"`
+	SourceURL     string   `json:"sourceUrl"`
+	WorkspacePath string   `json:"workspacePath"`
+	Names         []string `json:"names,omitempty"`
 }
 
 // ImportTemplatesResponse is returned after a direct template import completes.
@@ -10193,10 +10206,10 @@ func (s *Server) handleProjectImportTemplates(w http.ResponseWriter, r *http.Req
 
 	var imported []string
 	if req.WorkspacePath != "" {
-		imported, err = s.importTemplatesFromWorkspace(ctx, project, req.WorkspacePath)
+		imported, err = s.importFromWorkspace(ctx, project, req.WorkspacePath, store.TemplateScopeProject, s.templateImportKind(), nil, req.Names)
 	} else {
 		req.SourceURL = config.NormalizeTemplateSourceURL(req.SourceURL)
-		imported, err = s.importTemplatesFromRemote(ctx, projectID, req.SourceURL)
+		imported, err = s.importFromRemote(ctx, projectID, req.SourceURL, store.TemplateScopeProject, s.templateImportKind(), nil, req.Names)
 	}
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "import_failed", err.Error(), nil)
@@ -10212,8 +10225,9 @@ func (s *Server) handleProjectImportTemplates(w http.ResponseWriter, r *http.Req
 // ImportHarnessConfigsRequest is the request body for direct harness-config import.
 // Exactly one of SourceURL or WorkspacePath should be provided.
 type ImportHarnessConfigsRequest struct {
-	SourceURL     string `json:"sourceUrl"`
-	WorkspacePath string `json:"workspacePath"`
+	SourceURL     string   `json:"sourceUrl"`
+	WorkspacePath string   `json:"workspacePath"`
+	Names         []string `json:"names,omitempty"`
 }
 
 // ImportHarnessConfigsResponse is returned after a direct harness-config import completes.
@@ -10284,10 +10298,10 @@ func (s *Server) handleProjectImportHarnessConfigs(w http.ResponseWriter, r *htt
 
 	var imported []string
 	if req.WorkspacePath != "" {
-		imported, err = s.importHarnessConfigsFromWorkspace(ctx, project, req.WorkspacePath)
+		imported, err = s.importFromWorkspace(ctx, project, req.WorkspacePath, store.HarnessConfigScopeProject, s.harnessConfigImportKind(), nil, req.Names)
 	} else {
 		req.SourceURL = config.NormalizeTemplateSourceURL(req.SourceURL)
-		imported, err = s.importHarnessConfigsFromRemote(ctx, projectID, req.SourceURL)
+		imported, err = s.importFromRemote(ctx, projectID, req.SourceURL, store.HarnessConfigScopeProject, s.harnessConfigImportKind(), nil, req.Names)
 	}
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "import_failed", err.Error(), nil)
@@ -10313,6 +10327,8 @@ type ImportResourcesRequest struct {
 	// SourceURL is the remote URL to import from. Workspace-path import is not
 	// available on this endpoint (see the per-project endpoints for that).
 	SourceURL string `json:"sourceUrl"`
+	// Names optionally restricts which discovered resources to import.
+	Names []string `json:"names,omitempty"`
 }
 
 // ImportResourcesResponse reports the result of a unified import.
@@ -10420,7 +10436,7 @@ func (s *Server) handleResourcesImport(w http.ResponseWriter, r *http.Request) {
 	}
 
 	run := func(progress importProgressFunc) ([]string, error) {
-		return s.importFromRemote(ctx, projectID, sourceURL, scope, kind, progress)
+		return s.importFromRemote(ctx, projectID, sourceURL, scope, kind, progress, req.Names)
 	}
 
 	if importAcceptsNDJSON(r) {
@@ -10513,6 +10529,288 @@ func (s *Server) authorizeProjectImport(ctx context.Context, w http.ResponseWrit
 	}
 	writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required", nil)
 	return false
+}
+
+// DiscoverResourcesRequest is the body for discover endpoints. Exactly one of
+// SourceURL or WorkspacePath should be provided.
+type DiscoverResourcesRequest struct {
+	SourceURL     string `json:"sourceUrl"`
+	WorkspacePath string `json:"workspacePath"`
+}
+
+// DiscoverResourcesResponse lists the resources found at the given source.
+type DiscoverResourcesResponse struct {
+	Resources []string `json:"resources"`
+	Skipped   []string `json:"skipped,omitempty"`
+	Count     int      `json:"count"`
+}
+
+// handleProjectDiscoverTemplates handles POST /api/v1/projects/{id}/discover-templates:
+// discovers templates at a remote URL or workspace path without importing them.
+func (s *Server) handleProjectDiscoverTemplates(w http.ResponseWriter, r *http.Request, projectID string) {
+	if r.Method != http.MethodPost {
+		MethodNotAllowed(w)
+		return
+	}
+
+	ctx := r.Context()
+
+	if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
+		if !agentIdent.HasScope(ScopeAgentCreate) {
+			writeError(w, http.StatusForbidden, ErrCodeForbidden, "Missing required scope: project:agent:create", nil)
+			return
+		}
+		if projectID != agentIdent.ProjectID() {
+			writeError(w, http.StatusForbidden, ErrCodeForbidden, "Agents can only discover templates within their own project", nil)
+			return
+		}
+	} else if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
+		decision := s.authzService.CheckAccess(ctx, userIdent, Resource{
+			Type:       "agent",
+			ParentType: "project",
+			ParentID:   projectID,
+		}, ActionCreate)
+		if !decision.Allowed {
+			writeError(w, http.StatusForbidden, ErrCodeForbidden,
+				"You don't have permission to discover templates in this project", nil)
+			return
+		}
+	} else {
+		writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required", nil)
+		return
+	}
+
+	var req DiscoverResourcesRequest
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", "Invalid request body", nil)
+		return
+	}
+
+	if req.SourceURL == "" && req.WorkspacePath == "" {
+		writeError(w, http.StatusBadRequest, "invalid_request", "sourceUrl or workspacePath is required", nil)
+		return
+	}
+
+	project, err := s.store.GetProject(ctx, projectID)
+	if err != nil {
+		if err == store.ErrNotFound {
+			NotFound(w, "Project")
+			return
+		}
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	if s.GetStorage() == nil {
+		writeError(w, http.StatusServiceUnavailable, "storage_unavailable", "Template storage is not configured", nil)
+		return
+	}
+
+	var names, skipped []string
+	if req.WorkspacePath != "" {
+		names, skipped, err = s.discoverFromWorkspace(ctx, project, req.WorkspacePath, s.templateImportKind())
+	} else {
+		req.SourceURL = config.NormalizeTemplateSourceURL(req.SourceURL)
+		names, skipped, err = s.discoverFromRemote(ctx, projectID, req.SourceURL, s.templateImportKind())
+	}
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "discover_failed", err.Error(), nil)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, DiscoverResourcesResponse{
+		Resources: names,
+		Skipped:   skipped,
+		Count:     len(names),
+	})
+}
+
+// handleProjectDiscoverHarnessConfigs handles POST /api/v1/projects/{id}/discover-harness-configs:
+// discovers harness-configs at a remote URL or workspace path without importing them.
+func (s *Server) handleProjectDiscoverHarnessConfigs(w http.ResponseWriter, r *http.Request, projectID string) {
+	if r.Method != http.MethodPost {
+		MethodNotAllowed(w)
+		return
+	}
+
+	ctx := r.Context()
+
+	if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
+		if !agentIdent.HasScope(ScopeAgentCreate) {
+			writeError(w, http.StatusForbidden, ErrCodeForbidden, "Missing required scope: project:agent:create", nil)
+			return
+		}
+		if projectID != agentIdent.ProjectID() {
+			writeError(w, http.StatusForbidden, ErrCodeForbidden, "Agents can only discover harness-configs within their own project", nil)
+			return
+		}
+	} else if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
+		decision := s.authzService.CheckAccess(ctx, userIdent, Resource{
+			Type:       "harness_config",
+			ParentType: "project",
+			ParentID:   projectID,
+		}, ActionCreate)
+		if !decision.Allowed {
+			writeError(w, http.StatusForbidden, ErrCodeForbidden,
+				"You don't have permission to discover harness-configs in this project", nil)
+			return
+		}
+	} else {
+		writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized, "Authentication required", nil)
+		return
+	}
+
+	var req DiscoverResourcesRequest
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "Invalid request body", nil)
+		return
+	}
+
+	if req.SourceURL == "" && req.WorkspacePath == "" {
+		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "sourceUrl or workspacePath is required", nil)
+		return
+	}
+
+	project, err := s.store.GetProject(ctx, projectID)
+	if err != nil {
+		if err == store.ErrNotFound {
+			NotFound(w, "Project")
+			return
+		}
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	if s.GetStorage() == nil {
+		writeError(w, http.StatusServiceUnavailable, "storage_unavailable", "Harness-config storage is not configured", nil)
+		return
+	}
+
+	var names, skipped []string
+	if req.WorkspacePath != "" {
+		names, skipped, err = s.discoverFromWorkspace(ctx, project, req.WorkspacePath, s.harnessConfigImportKind())
+	} else {
+		req.SourceURL = config.NormalizeTemplateSourceURL(req.SourceURL)
+		names, skipped, err = s.discoverFromRemote(ctx, projectID, req.SourceURL, s.harnessConfigImportKind())
+	}
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "discover_failed", err.Error(), nil)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, DiscoverResourcesResponse{
+		Resources: names,
+		Skipped:   skipped,
+		Count:     len(names),
+	})
+}
+
+// DiscoverResourcesUnifiedRequest is the body for the unified discover endpoint
+// (POST /api/v1/resources/discover).
+type DiscoverResourcesUnifiedRequest struct {
+	Kind      string `json:"kind"`
+	Scope     string `json:"scope"`
+	ScopeID   string `json:"scopeId"`
+	SourceURL string `json:"sourceUrl"`
+}
+
+// handleResourcesDiscover handles POST /api/v1/resources/discover: a unified,
+// kind/scope-generic discover endpoint that returns discovered resource names
+// without importing them.
+func (s *Server) handleResourcesDiscover(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		MethodNotAllowed(w)
+		return
+	}
+
+	ctx := r.Context()
+
+	var req DiscoverResourcesUnifiedRequest
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", "Invalid request body", nil)
+		return
+	}
+
+	var kind resourceImportKind
+	var authzType string
+	switch storage.ResourceKind(req.Kind) {
+	case storage.ResourceKindTemplate:
+		kind = s.templateImportKind()
+		authzType = "template"
+	case storage.ResourceKindHarnessConfig:
+		kind = s.harnessConfigImportKind()
+		authzType = "harness_config"
+	default:
+		writeError(w, http.StatusBadRequest, "invalid_request",
+			"kind must be 'template' or 'harness-config'", nil)
+		return
+	}
+
+	if req.SourceURL == "" {
+		writeError(w, http.StatusBadRequest, "invalid_request", "sourceUrl is required", nil)
+		return
+	}
+
+	if s.GetStorage() == nil {
+		writeError(w, http.StatusServiceUnavailable, "storage_unavailable",
+			"Resource storage is not configured", nil)
+		return
+	}
+
+	sourceURL := config.NormalizeTemplateSourceURL(req.SourceURL)
+
+	var projectID string
+	switch req.Scope {
+	case "global", "":
+		userIdent := GetUserIdentityFromContext(ctx)
+		if userIdent == nil {
+			writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required", nil)
+			return
+		}
+		decision := s.authzService.CheckAccess(ctx, userIdent, Resource{Type: authzType}, ActionCreate)
+		if !decision.Allowed {
+			writeError(w, http.StatusForbidden, ErrCodeForbidden,
+				"You don't have permission to discover global "+kind.noun, nil)
+			return
+		}
+		projectID = ""
+
+	case "project":
+		if req.ScopeID == "" {
+			writeError(w, http.StatusBadRequest, "invalid_request",
+				"scopeId (project id) is required for project scope", nil)
+			return
+		}
+		if !s.authorizeProjectImport(ctx, w, req.ScopeID, kind.noun) {
+			return
+		}
+		if _, perr := s.store.GetProject(ctx, req.ScopeID); perr != nil {
+			if perr == store.ErrNotFound {
+				NotFound(w, "Project")
+				return
+			}
+			writeErrorFromErr(w, perr, "")
+			return
+		}
+		projectID = req.ScopeID
+
+	default:
+		writeError(w, http.StatusBadRequest, "invalid_request",
+			"scope must be 'global' or 'project'", nil)
+		return
+	}
+
+	names, skipped, err := s.discoverFromRemote(ctx, projectID, sourceURL, kind)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "discover_failed", err.Error(), nil)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, DiscoverResourcesResponse{
+		Resources: names,
+		Skipped:   skipped,
+		Count:     len(names),
+	})
 }
 
 // handleMessageChannels handles GET /api/v1/message-channels.

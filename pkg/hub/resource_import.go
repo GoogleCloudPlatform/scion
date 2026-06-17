@@ -168,7 +168,11 @@ func (s *Server) harnessConfigImportKind() resourceImportKind {
 // kind within it, and create-or-syncs each into the store under the project
 // scope. Returns the names of all resources imported or updated. When progress
 // is non-nil, lifecycle events are emitted as the import proceeds.
-func (s *Server) importFromRemote(ctx context.Context, projectID, sourceURL, scope string, kind resourceImportKind, progress importProgressFunc) ([]string, error) {
+//
+// When nameFilter is non-nil and non-empty, only resources whose names appear in
+// the filter are imported; all others are skipped. When nil or empty, all
+// discovered resources are imported (backward compatible).
+func (s *Server) importFromRemote(ctx context.Context, projectID, sourceURL, scope string, kind resourceImportKind, progress importProgressFunc, nameFilter []string) ([]string, error) {
 	if !config.IsRemoteURI(sourceURL) {
 		return nil, fmt.Errorf("source must be a remote URI (http://, https://, or rclone)")
 	}
@@ -190,6 +194,11 @@ func (s *Server) importFromRemote(ctx context.Context, projectID, sourceURL, sco
 		return nil, fmt.Errorf("no scion %s found at %s", kind.noun, sourceURL)
 	}
 
+	dirs, skipped = applyNameFilter(dirs, skipped, nameFilter)
+	if len(dirs) == 0 {
+		return nil, fmt.Errorf("no scion %s matched the requested names", kind.noun)
+	}
+
 	return s.importResourceDirs(ctx, dirs, skipped, scope, projectID, kind, progress), nil
 }
 
@@ -197,7 +206,11 @@ func (s *Server) importFromRemote(ctx context.Context, projectID, sourceURL, sco
 // project's workspace filesystem. workspacePath is relative to the project's
 // workspace root (e.g. "/.scion/templates"). When progress is non-nil,
 // lifecycle events are emitted as the import proceeds.
-func (s *Server) importFromWorkspace(ctx context.Context, project *store.Project, workspacePath, scope string, kind resourceImportKind, progress importProgressFunc) ([]string, error) {
+//
+// When nameFilter is non-nil and non-empty, only resources whose names appear in
+// the filter are imported; all others are skipped. When nil or empty, all
+// discovered resources are imported (backward compatible).
+func (s *Server) importFromWorkspace(ctx context.Context, project *store.Project, workspacePath, scope string, kind resourceImportKind, progress importProgressFunc, nameFilter []string) ([]string, error) {
 	if s.GetStorage() == nil {
 		return nil, fmt.Errorf("%s storage is not configured", kind.noun)
 	}
@@ -234,6 +247,11 @@ func (s *Server) importFromWorkspace(ctx context.Context, project *store.Project
 	}
 	if len(dirs) == 0 {
 		return nil, fmt.Errorf("no scion %s found at workspace path %s", kind.noun, workspacePath)
+	}
+
+	dirs, skipped = applyNameFilter(dirs, skipped, nameFilter)
+	if len(dirs) == 0 {
+		return nil, fmt.Errorf("no scion %s matched the requested names", kind.noun)
 	}
 
 	return s.importResourceDirs(ctx, dirs, skipped, scope, project.ID, kind, progress), nil
@@ -431,4 +449,108 @@ func compactNames(slots []string) []string {
 		}
 	}
 	return out
+}
+
+// applyNameFilter restricts dirs to only those whose names appear in filter.
+// Filtered-out dirs are appended to skipped. When filter is nil or empty, dirs
+// and skipped are returned unchanged (import-all behavior).
+func applyNameFilter(dirs []resourceDir, skipped []skippedDir, filter []string) ([]resourceDir, []skippedDir) {
+	if len(filter) == 0 {
+		return dirs, skipped
+	}
+	allowed := make(map[string]struct{}, len(filter))
+	for _, n := range filter {
+		allowed[n] = struct{}{}
+	}
+	var filtered []resourceDir
+	for _, d := range dirs {
+		if _, ok := allowed[d.name]; ok {
+			filtered = append(filtered, d)
+		} else {
+			skipped = append(skipped, skippedDir{d.name, "not in requested names"})
+		}
+	}
+	return filtered, skipped
+}
+
+// discoverFromRemote fetches a remote source URL, discovers resources of the
+// given kind within it, and returns their names without importing. The caller
+// receives the discovered names and skipped names for preview purposes.
+func (s *Server) discoverFromRemote(ctx context.Context, projectID, sourceURL string, kind resourceImportKind) ([]string, []string, error) {
+	if !config.IsRemoteURI(sourceURL) {
+		return nil, nil, fmt.Errorf("source must be a remote URI (http://, https://, or rclone)")
+	}
+	if s.GetStorage() == nil {
+		return nil, nil, fmt.Errorf("%s storage is not configured", kind.noun)
+	}
+
+	cachePath, err := s.fetchRemoteForImport(ctx, projectID, sourceURL)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to fetch remote %s: %w", kind.noun, err)
+	}
+	defer func() { _ = os.RemoveAll(cachePath) }()
+
+	dirs, skipped, err := discoverResourceDirs(cachePath, sourceURL, kind)
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(dirs) == 0 {
+		return nil, nil, fmt.Errorf("no scion %s found at %s", kind.noun, sourceURL)
+	}
+
+	names := make([]string, len(dirs))
+	for i, d := range dirs {
+		names[i] = d.name
+	}
+	skippedNames := make([]string, len(skipped))
+	for i, sd := range skipped {
+		skippedNames[i] = sd.name
+	}
+	return names, skippedNames, nil
+}
+
+// discoverFromWorkspace discovers resources of the given kind from a path within
+// the project's workspace filesystem and returns their names without importing.
+func (s *Server) discoverFromWorkspace(ctx context.Context, project *store.Project, workspacePath string, kind resourceImportKind) ([]string, []string, error) {
+	if s.GetStorage() == nil {
+		return nil, nil, fmt.Errorf("%s storage is not configured", kind.noun)
+	}
+
+	projectRoot, err := s.resolveProjectWebDAVPath(ctx, project)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to resolve project workspace: %w", err)
+	}
+
+	rel := strings.TrimPrefix(filepath.Clean(workspacePath), "/")
+	resourcesDir := filepath.Join(projectRoot, rel)
+
+	absRoot, _ := filepath.Abs(projectRoot)
+	absDir, _ := filepath.Abs(resourcesDir)
+	relPath, err := filepath.Rel(absRoot, absDir)
+	if err != nil || strings.HasPrefix(relPath, "..") {
+		return nil, nil, fmt.Errorf("workspace path must be within the project workspace")
+	}
+
+	info, err := os.Stat(resourcesDir)
+	if err != nil || !info.IsDir() {
+		return nil, nil, fmt.Errorf("workspace path not found or not a directory: %s", workspacePath)
+	}
+
+	dirs, skipped, err := discoverResourceDirs(resourcesDir, "", kind)
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(dirs) == 0 {
+		return nil, nil, fmt.Errorf("no scion %s found at workspace path %s", kind.noun, workspacePath)
+	}
+
+	names := make([]string, len(dirs))
+	for i, d := range dirs {
+		names[i] = d.name
+	}
+	skippedNames := make([]string, len(skipped))
+	for i, sd := range skipped {
+		skippedNames[i] = sd.name
+	}
+	return names, skippedNames, nil
 }
