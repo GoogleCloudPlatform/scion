@@ -44,7 +44,6 @@ export class ScionDirBrowser extends LitElement {
   @state() private newFolderName = '';
   @state() private newFolderError: string | null = null;
   @state() private creatingFolder = false;
-  @state() private filterText = '';
 
   static override styles = css`
     :host {
