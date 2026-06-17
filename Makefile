@@ -40,7 +40,7 @@ install:
 	@echo ""
 	@echo "✔ Installed $(BINARY) to $(DESTDIR)$(INSTALL_DIR)/$(BINARY)"
 	@echo ""
-	@echo "  Run 'scion --version' to verify."
+	@echo "  Run 'scion version' to verify."
 	@echo ""
 	@case ":$$PATH:" in \
 		*":$(INSTALL_DIR):"* | *":$(INSTALL_DIR)/:"*) ;; \
