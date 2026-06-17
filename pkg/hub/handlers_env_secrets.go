@@ -1640,6 +1640,16 @@ func (s *Server) addProjectProvider(w http.ResponseWriter, r *http.Request, proj
 		return
 	}
 
+	// For linked projects (local directory), initialize the .scion directory
+	// so agents and templates directories exist before the first agent starts.
+	if req.LocalPath != "" {
+		scionDir := filepath.Join(req.LocalPath, ".scion")
+		if err := config.InitProject(scionDir, nil, config.InitProjectOpts{SkipRuntimeCheck: true}); err != nil {
+			slog.Warn("failed to initialize .scion in linked project",
+				"project_id", projectID, "localPath", req.LocalPath, "error", err.Error())
+		}
+	}
+
 	// Get the project to check if we should set default runtime broker
 	project, err := s.store.GetProject(ctx, projectID)
 	if err == nil && project.DefaultRuntimeBrokerID == "" {
