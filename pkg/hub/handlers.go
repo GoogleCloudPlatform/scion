@@ -10576,18 +10576,18 @@ func (s *Server) handleProjectDiscoverTemplates(w http.ResponseWriter, r *http.R
 			return
 		}
 	} else {
-		writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required", nil)
+		writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized, "Authentication required", nil)
 		return
 	}
 
 	var req DiscoverResourcesRequest
 	if err := readJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_request", "Invalid request body", nil)
+		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "Invalid request body", nil)
 		return
 	}
 
 	if req.SourceURL == "" && req.WorkspacePath == "" {
-		writeError(w, http.StatusBadRequest, "invalid_request", "sourceUrl or workspacePath is required", nil)
+		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "sourceUrl or workspacePath is required", nil)
 		return
 	}
 

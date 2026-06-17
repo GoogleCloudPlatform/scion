@@ -226,6 +226,10 @@ export class ScionResourceImport extends LitElement {
     this.summary = null;
   }
 
+  // Discover-then-import: the remote URL is fetched twice (once for discovery,
+  // once for the actual import) to keep the API stateless. GitHub's CDN caching
+  // makes the second fetch fast in practice; a server-side cache token could
+  // eliminate it later if needed.
   private async handleImport(): Promise<void> {
     this.loading = true;
     this.error = null;
@@ -527,7 +531,7 @@ export class ScionResourceImport extends LitElement {
               this.requestUpdate();
             }}
           >
-            ${allSelected ? 'Uncheck All' : 'Check All'}
+            Select All
           </sl-checkbox>
           <span class="selection-count">
             ${this.selectedNames.size} of ${this.discoveredNames.length} selected
