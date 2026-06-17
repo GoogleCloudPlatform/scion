@@ -19,6 +19,7 @@ import { customElement, state } from 'lit/decorators.js';
 
 import { apiFetch, extractApiError } from '../../client/api.js';
 import '../shared/dir-browser.js';
+import '../shared/resource-import.js';
 
 const ONBOARDING_STATUS_KEY = 'onboardingStatus';
 const TOTAL_STEPS = 6;
@@ -55,6 +56,18 @@ interface RuntimeResponse {
   availableRuntimes?: string[];
 }
 
+interface HarnessConfigInfo {
+  id: string;
+  name: string;
+  slug: string;
+  displayName?: string;
+  harness: string;
+  config?: {
+    image?: string;
+  };
+  files?: Array<{ path: string }>;
+}
+
 @customElement('scion-page-onboarding')
 export class ScionPageOnboarding extends LitElement {
   @state() private currentStep = 0;
@@ -81,6 +94,7 @@ export class ScionPageOnboarding extends LitElement {
 
   // Step 3: Harnesses
   @state() private selectedHarnesses = new Set<string>();
+  @state() private importedHarnessConfigs: HarnessConfigInfo[] = [];
 
   // Step 4: Images
   @state() private imageStatuses = new Map<string, { status: string; error?: string; fullName?: string }>();
@@ -848,7 +862,7 @@ export class ScionPageOnboarding extends LitElement {
   // ── Step 3: Harnesses ──
 
   private renderHarnesses() {
-    const harnesses = [
+    const builtinHarnesses = [
       { id: 'claude', label: 'Claude Code' },
       { id: 'gemini', label: 'Gemini' },
       { id: 'codex', label: 'Codex' },
@@ -860,7 +874,7 @@ export class ScionPageOnboarding extends LitElement {
       <p>Select which AI coding harnesses to configure.</p>
 
       <div class="harness-list">
-        ${harnesses.map(h => html`
+        ${builtinHarnesses.map(h => html`
           <div class="harness-item">
             <sl-checkbox
               ?checked=${this.selectedHarnesses.has(h.id)}
@@ -873,6 +887,30 @@ export class ScionPageOnboarding extends LitElement {
             >${h.label}</sl-checkbox>
           </div>
         `)}
+
+        ${this.importedHarnessConfigs.map(hc => html`
+          <div class="harness-item">
+            <sl-checkbox
+              ?checked=${this.selectedHarnesses.has(hc.slug)}
+              @sl-change=${(e: Event) => {
+                const checked = (e.target as HTMLInputElement).checked;
+                const next = new Set(this.selectedHarnesses);
+                if (checked) { next.add(hc.slug); } else { next.delete(hc.slug); }
+                this.selectedHarnesses = next;
+              }}
+            >${hc.displayName || hc.name} <span style="font-size:0.75rem;color:var(--scion-text-muted,#64748b);">(imported)</span></sl-checkbox>
+          </div>
+        `)}
+      </div>
+
+      <div style="margin-top:1.5rem;">
+        <p style="font-size:0.875rem;margin-bottom:0.5rem;">Import additional harness configurations from URL</p>
+        <scion-resource-import
+          kind="harness-config"
+          scope="global"
+          .canImport=${true}
+          @resource-changed=${this.handleHarnessConfigImported}
+        ></scion-resource-import>
       </div>
 
       <div class="footer">
@@ -887,6 +925,16 @@ export class ScionPageOnboarding extends LitElement {
         </div>
       </div>
     `;
+  }
+
+  private async handleHarnessConfigImported(): Promise<void> {
+    try {
+      const res = await apiFetch('/api/v1/harness-configs?scope=global&status=active');
+      if (!res.ok) return;
+      const data = (await res.json()) as { harnessConfigs: Array<HarnessConfigInfo & { _capabilities?: unknown }> };
+      const builtinSlugs = new Set(['claude', 'gemini', 'codex', 'opencode']);
+      this.importedHarnessConfigs = data.harnessConfigs.filter(hc => !builtinSlugs.has(hc.slug));
+    } catch { /* ignore */ }
   }
 
   private async handleHarnessesNext(): Promise<void> {
@@ -926,8 +974,11 @@ export class ScionPageOnboarding extends LitElement {
       `;
     }
 
-    // No registry and no local build — show registry input
-    if (!this.imageRegistry && !this.buildAvailable) {
+    const importedImages = this.getImportedImages();
+    const hasImportedDockerfiles = importedImages.some(i => i.hasDockerfile);
+
+    // No registry and no local build (neither system-level nor imported Dockerfiles) — show registry input
+    if (!this.imageRegistry && !this.buildAvailable && !hasImportedDockerfiles) {
       return html`
         <h2>Container Images</h2>
         <p>An image registry is required to pull container images. Enter one below.</p>
@@ -978,11 +1029,13 @@ export class ScionPageOnboarding extends LitElement {
         ${harnesses.map(h => {
           const s = this.imageStatuses.get(h);
           const status = s?.status ?? 'pending';
+          const imported = importedImages.find(i => i.slug === h);
           const prefix = this.imageRegistry ? `${this.imageRegistry}/` : '';
-          const displayName = s?.fullName ?? `${prefix}scion-${h}:latest`;
+          const displayName = s?.fullName ?? (imported ? imported.image : `${prefix}scion-${h}:latest`);
           return html`
             <div class="image-item">
               <span class="image-name">${displayName}</span>
+              ${imported?.hasDockerfile ? html`<span style="font-size:0.75rem;color:var(--scion-text-muted,#64748b);">Dockerfile included</span>` : nothing}
               ${status === 'pending' ? nothing : html`
                 <span class="image-status ${status}">
                   ${status === 'pulling' ? html`<sl-spinner></sl-spinner>` : nothing}
@@ -1207,6 +1260,9 @@ export class ScionPageOnboarding extends LitElement {
     for (const h of harnessNames) {
       if (image.includes(`scion-${h}`)) return h;
     }
+    for (const hc of this.importedHarnessConfigs) {
+      if (hc.config?.image && image.includes(hc.config.image)) return hc.slug;
+    }
     return null;
   }
 
@@ -1232,6 +1288,25 @@ export class ScionPageOnboarding extends LitElement {
         this.buildAvailable = data.buildAvailable ?? false;
       }
     } catch { /* ignore */ }
+
+    // Refresh imported harness configs so we have file manifests for Dockerfile detection.
+    if (this.importedHarnessConfigs.length === 0) {
+      await this.handleHarnessConfigImported();
+    }
+  }
+
+  private hasDockerfile(hc: HarnessConfigInfo): boolean {
+    return hc.files?.some(f => f.path === 'Dockerfile' || f.path.endsWith('/Dockerfile')) ?? false;
+  }
+
+  private getImportedImages(): Array<{ slug: string; image: string; hasDockerfile: boolean }> {
+    return this.importedHarnessConfigs
+      .filter(hc => this.selectedHarnesses.has(hc.slug) && hc.config?.image)
+      .map(hc => ({
+        slug: hc.slug,
+        image: hc.config!.image!,
+        hasDockerfile: this.hasDockerfile(hc),
+      }));
   }
 
   // ── Step 5: First Workspace ──
