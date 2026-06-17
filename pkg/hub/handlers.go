@@ -2574,6 +2574,11 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 	structuredMsg.Recipient = "agent:" + agent.Slug
 	structuredMsg.RecipientID = agent.ID
 
+	// Default the channel to "web" for messages sent through the web UI.
+	if structuredMsg.Channel == "" && GetUserIdentityFromContext(ctx) != nil {
+		structuredMsg.Channel = "web"
+	}
+
 	if !s.checkBrokerAvailability(w, r, agent) {
 		return
 	}
@@ -2605,6 +2610,8 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			Urgent:        structuredMsg.Urgent,
 			Broadcasted:   structuredMsg.Broadcasted,
 			AgentID:       agent.ID,
+			Channel:       structuredMsg.Channel,
+			ThreadID:      structuredMsg.ThreadID,
 			DispatchState: store.MessageDispatchDispatched,
 			CreatedAt:     time.Now(),
 		}

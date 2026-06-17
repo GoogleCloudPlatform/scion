@@ -858,17 +858,11 @@ export class ScionAgentMessageViewer extends LitElement {
       });
       const isExpanded = this.expandedIds.has(msg.insertId);
 
-      const arrowIcon = msg.direction === 'sent' ? 'arrow-right' : 'arrow-left';
       const dirIcon = msg.direction === 'sent' ? 'box-arrow-up-right' : 'box-arrow-in-down-left';
 
-      // In agent-scoped view, show the current agent first with direction arrow.
-      // In project-scoped view (no agentId), always show sender → recipient.
-      const fromLabel = this.agentId
-        ? (this.agentName || this.agentId)
-        : (msg.sender || 'unknown');
-      const toLabel = this.agentId
-        ? (msg.direction === 'sent' ? (msg.recipient || 'unknown') : (msg.sender || 'unknown'))
-        : (msg.recipient || 'unknown');
+      // Always show sender on the left and recipient on the right.
+      const fromLabel = msg.sender || 'unknown';
+      const toLabel = msg.recipient || 'unknown';
 
       rows.push(html`
         <div class="message-row" @click=${() => this.toggleExpand(msg.insertId)}>
@@ -878,7 +872,7 @@ export class ScionAgentMessageViewer extends LitElement {
           <div class="msg-content">
             <div class="msg-header">
               <span class="msg-actor">${fromLabel}</span>
-              <sl-icon name=${arrowIcon} class="msg-arrow" style="font-size:0.6875rem"></sl-icon>
+              <sl-icon name="arrow-right" class="msg-arrow" style="font-size:0.6875rem"></sl-icon>
               <span class="msg-target">${toLabel}</span>
               <div class="msg-badges">
                 ${msg.msgType ? html`<span class="msg-badge badge-type">${msg.msgType}</span>` : nothing}

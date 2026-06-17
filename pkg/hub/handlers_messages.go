@@ -15,7 +15,6 @@
 package hub
 
 import (
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -190,8 +189,7 @@ func (s *Server) handleAgentMessages(w http.ResponseWriter, r *http.Request, age
 	}
 
 	filter := store.MessageFilter{
-		AgentID:       agentID,
-		ParticipantID: user.ID(),
+		AgentID: agentID,
 	}
 
 	result, err := s.store.ListMessages(ctx, filter, opts)
@@ -269,7 +267,6 @@ func (s *Server) handleAgentMessagesStream(w http.ResponseWriter, r *http.Reques
 	ch, unsubscribe := ep.Subscribe("agent." + agent.ID + ".message")
 	defer unsubscribe()
 
-	userID := user.ID()
 	heartbeat := time.NewTicker(30 * time.Second)
 	defer heartbeat.Stop()
 
@@ -283,16 +280,6 @@ func (s *Server) handleAgentMessagesStream(w http.ResponseWriter, r *http.Reques
 		case evt, ok := <-ch:
 			if !ok {
 				return
-			}
-			// Filter: only forward events where the current user is a
-			// participant. Without this the stream would include messages
-			// from every other user's conversation with this agent.
-			var payload UserMessageEvent
-			if err := json.Unmarshal(evt.Data, &payload); err != nil {
-				continue
-			}
-			if payload.SenderID != userID && payload.RecipientID != userID {
-				continue
 			}
 			fmt.Fprintf(w, "event: message\ndata: %s\n\n", evt.Data)
 			flusher.Flush()
