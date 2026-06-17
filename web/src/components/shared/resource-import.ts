@@ -98,6 +98,9 @@ export class ScionResourceImport extends LitElement {
   @state() private success: string | null = null;
   @state() private progress: ImportProgress | null = null;
   @state() private summary: ImportSummary | null = null;
+  @state() private discoveredNames: string[] = [];
+  @state() private showSelectionDialog = false;
+  @state() private selectedNames: Set<string> = new Set();
 
   static override styles = css`
     :host {
@@ -162,6 +165,32 @@ export class ScionResourceImport extends LitElement {
     sl-progress-bar {
       --height: 6px;
     }
+
+    .selection-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding-bottom: 0.75rem;
+      border-bottom: 1px solid var(--scion-border, #e2e8f0);
+      margin-bottom: 0.75rem;
+    }
+
+    .selection-count {
+      font-size: 0.75rem;
+      color: var(--sl-color-neutral-500, #64748b);
+    }
+
+    .selection-list {
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+      max-height: 400px;
+      overflow-y: auto;
+    }
+
+    .selection-item {
+      padding: 0.25rem 0;
+    }
   `;
 
   private get noun(): string {
@@ -205,8 +234,70 @@ export class ScionResourceImport extends LitElement {
     this.summary = null;
 
     try {
+      let discoverEndpoint: string;
+      let discoverBody: Record<string, string>;
+
+      if (this.scope === 'global') {
+        discoverEndpoint = '/api/v1/resources/discover';
+        discoverBody = { kind: this.kind, scope: 'global', sourceUrl: this.source };
+      } else {
+        const path =
+          this.kind === 'template' ? 'discover-templates' : 'discover-harness-configs';
+        discoverEndpoint = `/api/v1/projects/${this.scopeId}/${path}`;
+        discoverBody =
+          this.mode === 'workspace'
+            ? { workspacePath: this.source || this.defaultWorkspacePath }
+            : { sourceUrl: this.source };
+      }
+
+      const discoverResponse = await apiFetch(discoverEndpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(discoverBody),
+      });
+
+      if (!discoverResponse.ok) {
+        throw new Error(
+          await extractApiError(discoverResponse, `Failed to discover ${this.noun}`)
+        );
+      }
+
+      const discovered = (await discoverResponse.json()) as {
+        resources: string[];
+        count: number;
+      };
+
+      if (discovered.count === 0) {
+        this.error = `No ${this.noun} found at the specified location`;
+        return;
+      }
+
+      if (discovered.count === 1) {
+        await this.executeImport();
+        return;
+      }
+
+      this.discoveredNames = discovered.resources;
+      this.selectedNames = new Set(discovered.resources);
+      this.showSelectionDialog = true;
+    } catch (err) {
+      console.error(`Failed to discover ${this.noun}:`, err);
+      this.error = err instanceof Error ? err.message : `Failed to discover ${this.noun}`;
+    } finally {
+      this.loading = false;
+    }
+  }
+
+  private async executeImport(names?: string[]): Promise<void> {
+    this.loading = true;
+    this.error = null;
+    this.success = null;
+    this.progress = null;
+    this.summary = null;
+
+    try {
       let endpoint: string;
-      let body: Record<string, string>;
+      let body: Record<string, unknown>;
 
       if (this.scope === 'global') {
         endpoint = '/api/v1/resources/import';
@@ -220,8 +311,10 @@ export class ScionResourceImport extends LitElement {
             : { sourceUrl: this.source };
       }
 
-      // Opt into streaming NDJSON progress; the server falls back to a single
-      // JSON summary for clients that don't ask for it.
+      if (names && names.length > 0) {
+        body.names = names;
+      }
+
       const response = await apiFetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Accept: 'application/x-ndjson' },
@@ -238,7 +331,6 @@ export class ScionResourceImport extends LitElement {
       if (contentType.includes('application/x-ndjson') && response.body) {
         await this.consumeStream(response.body);
       } else {
-        // Non-streaming fallback: single JSON summary.
         const data = (await response.json()) as { count?: number; imported?: string[] };
         this.finishSummary({ imported: data.imported ?? [], skipped: [], failed: [] }, data.count);
       }
@@ -249,6 +341,12 @@ export class ScionResourceImport extends LitElement {
       this.loading = false;
       this.progress = null;
     }
+  }
+
+  private async handleSelectionConfirm(): Promise<void> {
+    const names = Array.from(this.selectedNames);
+    this.showSelectionDialog = false;
+    await this.executeImport(names);
   }
 
   /** Read an NDJSON stream of {@link ImportEvent}s, updating progress state. */
@@ -399,6 +497,81 @@ export class ScionResourceImport extends LitElement {
             </div>
             ${this.renderSummaryDetail()}`
         : ''}
+      ${this.renderSelectionDialog()}
+    `;
+  }
+
+  private renderSelectionDialog() {
+    if (!this.showSelectionDialog) return '';
+
+    const allSelected = this.selectedNames.size === this.discoveredNames.length;
+    const noneSelected = this.selectedNames.size === 0;
+
+    return html`
+      <sl-dialog
+        label="Select ${this.label} to Import"
+        open
+        @sl-request-close=${() => {
+          this.showSelectionDialog = false;
+        }}
+      >
+        <div class="selection-header">
+          <sl-checkbox
+            ?checked=${allSelected}
+            ?indeterminate=${!allSelected && !noneSelected}
+            @sl-change=${(e: Event) => {
+              const checked = (e.target as HTMLInputElement).checked;
+              this.selectedNames = checked
+                ? new Set(this.discoveredNames)
+                : new Set();
+              this.requestUpdate();
+            }}
+          >
+            ${allSelected ? 'Uncheck All' : 'Check All'}
+          </sl-checkbox>
+          <span class="selection-count">
+            ${this.selectedNames.size} of ${this.discoveredNames.length} selected
+          </span>
+        </div>
+        <div class="selection-list">
+          ${this.discoveredNames.map(
+            (name) => html`
+              <div class="selection-item">
+                <sl-checkbox
+                  ?checked=${this.selectedNames.has(name)}
+                  @sl-change=${(e: Event) => {
+                    const checked = (e.target as HTMLInputElement).checked;
+                    const updated = new Set(this.selectedNames);
+                    if (checked) updated.add(name);
+                    else updated.delete(name);
+                    this.selectedNames = updated;
+                  }}
+                >
+                  ${name}
+                </sl-checkbox>
+              </div>
+            `
+          )}
+        </div>
+        <div slot="footer">
+          <sl-button
+            variant="default"
+            @click=${() => {
+              this.showSelectionDialog = false;
+            }}
+          >
+            Cancel
+          </sl-button>
+          <sl-button
+            variant="primary"
+            ?disabled=${noneSelected}
+            @click=${() => this.handleSelectionConfirm()}
+          >
+            <sl-icon slot="prefix" name="download"></sl-icon>
+            Import Selected (${this.selectedNames.size})
+          </sl-button>
+        </div>
+      </sl-dialog>
     `;
   }
 
