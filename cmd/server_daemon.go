@@ -461,6 +461,25 @@ func runServerStatus(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// waitForServerReady polls the server's /healthz endpoint until it returns 200
+// or the timeout expires. Returns true if the server became ready.
+func waitForServerReady(host string, port int, timeout time.Duration) bool {
+	client := &http.Client{Timeout: 2 * time.Second}
+	url := fmt.Sprintf("http://%s:%d/healthz", host, port)
+	deadline := time.Now().Add(timeout)
+
+	for time.Now().Before(deadline) {
+		if resp, err := client.Get(url); err == nil {
+			resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				return true
+			}
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	return false
+}
+
 // printWorkstationQuickstart prints the first-run quickstart information
 // including the developer token and web UI URL after a workstation-mode daemon starts.
 // When the machine hasn't been onboarded yet, it prints and opens the /onboarding URL.
@@ -481,9 +500,13 @@ func printWorkstationQuickstart(needsOnboarding bool, globalDir string, host str
 		url := fmt.Sprintf("http://%s:%d%s", displayHost, wPort, path)
 		fmt.Printf("Web UI:  %s\n", url)
 
-		// Auto-open the browser in interactive terminals
+		// Auto-open the browser in interactive terminals once the server is ready.
 		if os.Getenv("SCION_NO_BROWSER") == "" && util.IsTerminal() && !util.IsHeadlessEnvironment() {
-			_ = util.OpenBrowser(url)
+			if waitForServerReady(displayHost, wPort, 20*time.Second) {
+				_ = util.OpenBrowser(url)
+			} else {
+				fmt.Println("  (server not yet ready — open the URL manually once it starts)")
+			}
 		}
 	}
 
