@@ -55,6 +55,13 @@ capabilities:
     oauth_token: { support: "yes", reason: "Via gnome-keyring population from AGY_KEYRING_TOKEN secret" }
     vertex_ai: { support: "yes", reason: "Enterprise/GCP mode via AGY_KEYRING_TOKEN + GOOGLE_CLOUD_PROJECT" }
 
+no_auth:
+  behavior: drop-to-shell
+  message: |
+    This agent started without credentials.
+    Run: agy auth login
+    Then follow the prompts to authenticate.
+
 auth:
   types:
     oauth-token:
