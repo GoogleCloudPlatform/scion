@@ -330,8 +330,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 		}
 
 		if !web.AssetsEmbedded && webAssetsDir == "" {
-			log.Printf("WARNING: This binary was built without web assets. The web UI will not be available.")
-			log.Printf("Run 'make web' and rebuild to include the web frontend, or use --web-assets-dir.")
+			slog.Warn("This binary was built without web assets. The web UI will not be available. Run 'make web' and rebuild to include the web frontend, or use --web-assets-dir.")
 		}
 		log.Printf("Starting Web Frontend on %s:%d", cfg.Hub.Host, webPort)
 		wg.Add(1)
