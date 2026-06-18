@@ -36,25 +36,25 @@ builder_check() {
 builder_prepare() {
   if [[ "${PUSH:-false}" != "true" ]]; then
     if [[ "${DRY_RUN:-false}" == "true" ]]; then
-      echo "[dry-run] docker buildx use default"
+      echo "[dry-run] export BUILDX_BUILDER=default"
       return 0
     fi
     echo "Using default docker builder for local build..."
-    docker buildx use default
+    export BUILDX_BUILDER="default"
     return 0
   fi
 
   if [[ "${DRY_RUN:-false}" == "true" ]]; then
-    echo "[dry-run] docker buildx create --name ${BUILDX_INSTANCE} --use   # if missing"
+    echo "[dry-run] docker buildx create --name ${BUILDX_INSTANCE}   # if missing"
+    echo "[dry-run] export BUILDX_BUILDER=${BUILDX_INSTANCE}"
     echo "[dry-run] docker buildx inspect --bootstrap"
     return 0
   fi
   if ! docker buildx inspect "${BUILDX_INSTANCE}" >/dev/null 2>&1; then
     echo "Creating buildx builder '${BUILDX_INSTANCE}'..."
-    docker buildx create --name "${BUILDX_INSTANCE}" --use
-  else
-    docker buildx use "${BUILDX_INSTANCE}"
+    docker buildx create --name "${BUILDX_INSTANCE}"
   fi
+  export BUILDX_BUILDER="${BUILDX_INSTANCE}"
   docker buildx inspect --bootstrap >/dev/null
 }
 
