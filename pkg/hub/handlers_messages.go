@@ -210,8 +210,8 @@ func (s *Server) handleAgentMessages(w http.ResponseWriter, r *http.Request, age
 }
 
 // handleAgentMessagesStream handles GET /api/v1/agents/{id}/messages/stream.
-// Streams new messages involving a specific agent in real time, scoped to
-// the conversation between the current authenticated user and the agent.
+// Streams new messages involving a specific agent in real time. Users who
+// can manage the agent see all messages; others see only their own.
 // Unlike /message-logs/stream this does not depend on Cloud Logging: it
 // subscribes to the in-process event bus that handleAgentOutboundMessage
 // and handleAgentMessage already publish to, so it works on any hub

@@ -2575,8 +2575,14 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 	structuredMsg.RecipientID = agent.ID
 
 	// Default the channel to "web" for messages sent through the web UI.
-	if structuredMsg.Channel == "" && GetUserIdentityFromContext(ctx) != nil {
-		structuredMsg.Channel = "web"
+	// Only tag as "web" when the authenticated user's client type is
+	// actually "web" — CLI and API callers should not be tagged.
+	if structuredMsg.Channel == "" {
+		if user := GetUserIdentityFromContext(ctx); user != nil {
+			if au, ok := user.(*AuthenticatedUser); ok && au.ClientType() == "web" {
+				structuredMsg.Channel = "web"
+			}
+		}
 	}
 
 	if !s.checkBrokerAvailability(w, r, agent) {
