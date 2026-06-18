@@ -20,6 +20,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -145,36 +146,41 @@ func (s *MetricsDashboardService) QuerySummary(ctx context.Context, periodDays i
 	start := now.AddDate(0, 0, -periodDays)
 
 	summary := &DashboardSummary{PeriodDays: periodDays}
+	var queryErrors []string
 
 	sessions, err := s.querySum(ctx, "agent.session.count", start, now, nil)
 	if err != nil {
-		slog.Warn("Failed to query session count", "error", err)
+		queryErrors = append(queryErrors, fmt.Sprintf("session count: %v", err))
 	} else {
 		summary.TotalSessions = sessions
 	}
 
 	apiCalls, err := s.querySum(ctx, "gen_ai.api.calls", start, now, nil)
 	if err != nil {
-		slog.Warn("Failed to query API calls", "error", err)
+		queryErrors = append(queryErrors, fmt.Sprintf("API calls: %v", err))
 	} else {
 		summary.TotalAPICalls = apiCalls
 	}
 
 	inputTokens, err := s.querySum(ctx, "gen_ai.tokens.input", start, now, nil)
 	if err != nil {
-		slog.Warn("Failed to query input tokens", "error", err)
+		queryErrors = append(queryErrors, fmt.Sprintf("input tokens: %v", err))
 	}
 	outputTokens, err := s.querySum(ctx, "gen_ai.tokens.output", start, now, nil)
 	if err != nil {
-		slog.Warn("Failed to query output tokens", "error", err)
+		queryErrors = append(queryErrors, fmt.Sprintf("output tokens: %v", err))
 	}
 	summary.TotalTokens = inputTokens + outputTokens
 
 	agents, err := s.queryUniqueLabels(ctx, "agent.session.count", "metric.labels.agent_id", start, now)
 	if err != nil {
-		slog.Warn("Failed to query unique agents", "error", err)
+		queryErrors = append(queryErrors, fmt.Sprintf("unique agents: %v", err))
 	} else {
 		summary.UniqueAgents = len(agents)
+	}
+
+	if len(queryErrors) > 0 {
+		return summary, fmt.Errorf("partial query failures: %s", strings.Join(queryErrors, "; "))
 	}
 
 	s.setCache(cacheKey, summary)
@@ -192,19 +198,24 @@ func (s *MetricsDashboardService) QuerySessions(ctx context.Context, periodDays 
 	start := now.AddDate(0, 0, -periodDays)
 
 	view := &SessionsView{PeriodDays: periodDays}
+	var queryErrors []string
 
 	dailyCounts, err := s.queryDailyTimeSeries(ctx, "agent.session.count", start, now, nil)
 	if err != nil {
-		slog.Warn("Failed to query daily sessions", "error", err)
+		queryErrors = append(queryErrors, fmt.Sprintf("daily sessions: %v", err))
 	} else {
 		view.DailyCounts = dailyCounts
 	}
 
 	activeAgents, err := s.queryDailyUniqueCount(ctx, "agent.session.count", "metric.labels.agent_id", start, now)
 	if err != nil {
-		slog.Warn("Failed to query active agents", "error", err)
+		queryErrors = append(queryErrors, fmt.Sprintf("active agents: %v", err))
 	} else {
 		view.ActiveAgents = activeAgents
+	}
+
+	if len(queryErrors) > 0 {
+		return view, fmt.Errorf("partial query failures: %s", strings.Join(queryErrors, "; "))
 	}
 
 	s.setCache(cacheKey, view)
@@ -222,19 +233,24 @@ func (s *MetricsDashboardService) QueryModelCalls(ctx context.Context, periodDay
 	start := now.AddDate(0, 0, -periodDays)
 
 	view := &ModelCallsView{PeriodDays: periodDays}
+	var queryErrors []string
 
 	byModel, err := s.queryGroupedTimeSeries(ctx, "gen_ai.api.calls", "metric.labels.model", start, now)
 	if err != nil {
-		slog.Warn("Failed to query model calls by model", "error", err)
+		queryErrors = append(queryErrors, fmt.Sprintf("by model: %v", err))
 	} else {
 		view.ByModel = byModel
 	}
 
 	byHarness, err := s.queryGroupedTimeSeries(ctx, "gen_ai.api.calls", "metric.labels.harness", start, now)
 	if err != nil {
-		slog.Warn("Failed to query model calls by harness", "error", err)
+		queryErrors = append(queryErrors, fmt.Sprintf("by harness: %v", err))
 	} else {
 		view.ByHarness = byHarness
+	}
+
+	if len(queryErrors) > 0 {
+		return view, fmt.Errorf("partial query failures: %s", strings.Join(queryErrors, "; "))
 	}
 
 	s.setCache(cacheKey, view)
@@ -252,19 +268,24 @@ func (s *MetricsDashboardService) QueryTokens(ctx context.Context, periodDays in
 	start := now.AddDate(0, 0, -periodDays)
 
 	view := &TokensView{PeriodDays: periodDays}
+	var queryErrors []string
 
 	input, err := s.queryGroupedTimeSeries(ctx, "gen_ai.tokens.input", "metric.labels.model", start, now)
 	if err != nil {
-		slog.Warn("Failed to query input tokens by model", "error", err)
+		queryErrors = append(queryErrors, fmt.Sprintf("input tokens: %v", err))
 	} else {
 		view.Input = input
 	}
 
 	output, err := s.queryGroupedTimeSeries(ctx, "gen_ai.tokens.output", "metric.labels.model", start, now)
 	if err != nil {
-		slog.Warn("Failed to query output tokens by model", "error", err)
+		queryErrors = append(queryErrors, fmt.Sprintf("output tokens: %v", err))
 	} else {
 		view.Output = output
+	}
+
+	if len(queryErrors) > 0 {
+		return view, fmt.Errorf("partial query failures: %s", strings.Join(queryErrors, "; "))
 	}
 
 	s.setCache(cacheKey, view)
@@ -350,9 +371,17 @@ func (s *MetricsDashboardService) queryDailyTimeSeries(ctx context.Context, metr
 	return points, nil
 }
 
+// labelKeyFromGroupBy extracts the short label key from a Cloud Monitoring
+// groupByLabel like "metric.labels.model" → "model".
+func labelKeyFromGroupBy(groupByLabel string) string {
+	parts := strings.Split(groupByLabel, ".")
+	return parts[len(parts)-1]
+}
+
 // queryGroupedTimeSeries returns daily data grouped by a label.
 func (s *MetricsDashboardService) queryGroupedTimeSeries(ctx context.Context, metricName, groupByLabel string, start, end time.Time) ([]LabeledTimeSeries, error) {
 	filter := fmt.Sprintf(`metric.type = "%s%s"`, metricPrefix, metricName)
+	labelKey := labelKeyFromGroupBy(groupByLabel)
 
 	req := &monitoringpb.ListTimeSeriesRequest{
 		Name:   fmt.Sprintf("projects/%s", s.projectID),
@@ -380,15 +409,11 @@ func (s *MetricsDashboardService) queryGroupedTimeSeries(ctx context.Context, me
 			return nil, fmt.Errorf("listing grouped time series for %s: %w", metricName, err)
 		}
 
-		label := ""
-		if ts.GetMetric() != nil {
-			for _, v := range ts.GetMetric().GetLabels() {
+		label := "(unknown)"
+		if labels := ts.GetMetric().GetLabels(); labels != nil {
+			if v, ok := labels[labelKey]; ok && v != "" {
 				label = v
-				break
 			}
-		}
-		if label == "" {
-			label = "(unknown)"
 		}
 
 		for _, p := range ts.GetPoints() {
@@ -409,6 +434,7 @@ func (s *MetricsDashboardService) queryGroupedTimeSeries(ctx context.Context, me
 // queryUniqueLabels returns unique values for a label within a metric's time series.
 func (s *MetricsDashboardService) queryUniqueLabels(ctx context.Context, metricName, groupByLabel string, start, end time.Time) (map[string]bool, error) {
 	filter := fmt.Sprintf(`metric.type = "%s%s"`, metricPrefix, metricName)
+	labelKey := labelKeyFromGroupBy(groupByLabel)
 
 	req := &monitoringpb.ListTimeSeriesRequest{
 		Name:   fmt.Sprintf("projects/%s", s.projectID),
@@ -435,8 +461,8 @@ func (s *MetricsDashboardService) queryUniqueLabels(ctx context.Context, metricN
 		if err != nil {
 			return nil, fmt.Errorf("listing unique labels for %s: %w", metricName, err)
 		}
-		if ts.GetMetric() != nil {
-			for _, v := range ts.GetMetric().GetLabels() {
+		if labels := ts.GetMetric().GetLabels(); labels != nil {
+			if v, ok := labels[labelKey]; ok && v != "" {
 				unique[v] = true
 			}
 		}
@@ -447,6 +473,7 @@ func (s *MetricsDashboardService) queryUniqueLabels(ctx context.Context, metricN
 // queryDailyUniqueCount returns per-day counts of unique label values.
 func (s *MetricsDashboardService) queryDailyUniqueCount(ctx context.Context, metricName, groupByLabel string, start, end time.Time) ([]TimeSeriesPoint, error) {
 	filter := fmt.Sprintf(`metric.type = "%s%s"`, metricPrefix, metricName)
+	labelKey := labelKeyFromGroupBy(groupByLabel)
 
 	req := &monitoringpb.ListTimeSeriesRequest{
 		Name:   fmt.Sprintf("projects/%s", s.projectID),
@@ -475,11 +502,10 @@ func (s *MetricsDashboardService) queryDailyUniqueCount(ctx context.Context, met
 			return nil, fmt.Errorf("listing daily unique for %s: %w", metricName, err)
 		}
 
-		label := ""
-		if ts.GetMetric() != nil {
-			for _, v := range ts.GetMetric().GetLabels() {
+		label := "(unknown)"
+		if labels := ts.GetMetric().GetLabels(); labels != nil {
+			if v, ok := labels[labelKey]; ok && v != "" {
 				label = v
-				break
 			}
 		}
 
@@ -542,36 +568,52 @@ func (s *Server) handleAdminMetricsDashboard(w http.ResponseWriter, r *http.Requ
 	case "summary":
 		data, err := s.metricsDashboard.QuerySummary(ctx, periodDays)
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
-				"Failed to query metrics summary", nil)
-			return
+			if data == nil {
+				writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+					"Failed to query metrics summary", nil)
+				return
+			}
+			slog.Warn("Partial metrics query failure", "view", view, "error", err)
+			w.Header().Set("X-Metrics-Warning", err.Error())
 		}
 		writeJSON(w, http.StatusOK, data)
 
 	case "sessions":
 		data, err := s.metricsDashboard.QuerySessions(ctx, periodDays)
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
-				"Failed to query session metrics", nil)
-			return
+			if data == nil {
+				writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+					"Failed to query session metrics", nil)
+				return
+			}
+			slog.Warn("Partial metrics query failure", "view", view, "error", err)
+			w.Header().Set("X-Metrics-Warning", err.Error())
 		}
 		writeJSON(w, http.StatusOK, data)
 
 	case "model-calls":
 		data, err := s.metricsDashboard.QueryModelCalls(ctx, periodDays)
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
-				"Failed to query model call metrics", nil)
-			return
+			if data == nil {
+				writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+					"Failed to query model call metrics", nil)
+				return
+			}
+			slog.Warn("Partial metrics query failure", "view", view, "error", err)
+			w.Header().Set("X-Metrics-Warning", err.Error())
 		}
 		writeJSON(w, http.StatusOK, data)
 
 	case "tokens":
 		data, err := s.metricsDashboard.QueryTokens(ctx, periodDays)
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
-				"Failed to query token metrics", nil)
-			return
+			if data == nil {
+				writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+					"Failed to query token metrics", nil)
+				return
+			}
+			slog.Warn("Partial metrics query failure", "view", view, "error", err)
+			w.Header().Set("X-Metrics-Warning", err.Error())
 		}
 		writeJSON(w, http.StatusOK, data)
 
