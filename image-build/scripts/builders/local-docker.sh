@@ -34,6 +34,16 @@ builder_check() {
 }
 
 builder_prepare() {
+  if [[ "${PUSH:-false}" != "true" ]]; then
+    if [[ "${DRY_RUN:-false}" == "true" ]]; then
+      echo "[dry-run] docker buildx use default"
+      return 0
+    fi
+    echo "Using default docker builder for local build..."
+    docker buildx use default
+    return 0
+  fi
+
   if [[ "${DRY_RUN:-false}" == "true" ]]; then
     echo "[dry-run] docker buildx create --name ${BUILDX_INSTANCE} --use   # if missing"
     echo "[dry-run] docker buildx inspect --bootstrap"
