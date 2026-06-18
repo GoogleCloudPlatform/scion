@@ -729,7 +729,17 @@ func TestLifecycleHookExecutor_HTTPRequiresExecutionIdentity(t *testing.T) {
 
 func TestLifecycleHookExecutor_RenderVarsCorrectTrustClasses(t *testing.T) {
 	s := executorTestStore(t)
-	projID := seedExecutorProject(t, s, "test-project")
+
+	// Use distinct Name and Slug to verify the code reads the correct field.
+	projID := uuid.New().String()
+	require.NoError(t, s.CreateProject(context.Background(), &store.Project{
+		ID:         projID,
+		Name:       "Test Project Display Name",
+		Slug:       "test-project-slug",
+		Visibility: "private",
+		Created:    time.Now(),
+		Updated:    time.Now(),
+	}))
 
 	executor := newTestExecutor(s, nil, nil, slog.Default())
 	agent := makeTestAgent(projID)
@@ -754,8 +764,8 @@ func TestLifecycleHookExecutor_RenderVarsCorrectTrustClasses(t *testing.T) {
 	assert.Equal(t, "my-agent", vars["AGENT_SLUG"])
 	assert.Equal(t, "sa@test.com", vars["SA_EMAIL"])
 	assert.Equal(t, projID, vars["PROJECT_ID"])
-	assert.Equal(t, "test-project", vars["PROJECT_NAME"])
-	assert.Equal(t, "test-project", vars["PROJECT_SLUG"])
+	assert.Equal(t, "Test Project Display Name", vars["PROJECT_NAME"])
+	assert.Equal(t, "test-project-slug", vars["PROJECT_SLUG"])
 
 	// Verify untrusted variables are present (will be encoded by RenderAction).
 	assert.Equal(t, "Evil Agent", vars["AGENT_NAME"])
