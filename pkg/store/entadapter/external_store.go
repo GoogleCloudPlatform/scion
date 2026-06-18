@@ -62,6 +62,9 @@ func entGCPToStore(e *ent.GCPServiceAccount) *store.GCPServiceAccount {
 		Managed:     e.Managed,
 		ManagedBy:   e.ManagedBy,
 	}
+	if e.Verified {
+		sa.VerificationStatus = "verified"
+	}
 	// default_scopes is stored as a CSV string for parity with the SQLite store.
 	if e.DefaultScopes != "" {
 		sa.DefaultScopes = strings.Split(e.DefaultScopes, ",")

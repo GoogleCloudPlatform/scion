@@ -523,16 +523,19 @@ func TestLifecycleHookIntegration_AgentRegistryA2AFlow(t *testing.T) {
 	// URL from the A2A Bridge (using PROJECT_SLUG and AGENT_SLUG).
 	a2aBridgeBase := "https://a2a.example.com"
 	registerBody := `{` +
-		`"displayName":"${AGENT_SLUG}",` +
+		`"displayName":"Scion Agent: ${PROJECT_SLUG}/${AGENT_SLUG}",` +
 		`"agentSpec":{` +
 		`"type":"A2A_AGENT_CARD",` +
 		`"content":{` +
 		`"name":"${AGENT_SLUG}",` +
-		`"url":"` + a2aBridgeBase + `/projects/${PROJECT_SLUG}/agents/${AGENT_SLUG}",` +
+		`"description":"Scion agent ${AGENT_SLUG} in project ${PROJECT_SLUG}",` +
 		`"version":"1.0.0",` +
+		`"supportedInterfaces":[{"url":"` + a2aBridgeBase + `/projects/${PROJECT_SLUG}/agents/${AGENT_SLUG}","protocolBinding":"JSONRPC","protocolVersion":"0.3"}],` +
 		`"capabilities":{"streaming":true,"pushNotifications":true},` +
 		`"defaultInputModes":["text/plain","application/json"],` +
-		`"defaultOutputModes":["text/plain","application/json"]` +
+		`"defaultOutputModes":["text/plain","application/json"],` +
+		`"skills":[{"id":"${AGENT_SLUG}","name":"${AGENT_SLUG}","description":"Interact with agent ${AGENT_SLUG}","tags":["scion","a2a"]}],` +
+		`"provider":{"organization":"Scion","url":"https://github.com/ptone/scion"}` +
 		`}` +
 		`}` +
 		`}`
@@ -615,7 +618,8 @@ func TestLifecycleHookIntegration_AgentRegistryA2AFlow(t *testing.T) {
 	// per-agent A2A Bridge endpoint URL.
 	var body map[string]interface{}
 	require.NoError(t, json.Unmarshal([]byte(reqs[0].Body), &body))
-	assert.Equal(t, agentSlug, body["displayName"])
+	expectedDisplayName := fmt.Sprintf("Scion Agent: %s/%s", projectSlug, agentSlug)
+	assert.Equal(t, expectedDisplayName, body["displayName"])
 
 	agentSpec, ok := body["agentSpec"].(map[string]interface{})
 	require.True(t, ok, "agentSpec should be a JSON object")
@@ -625,9 +629,16 @@ func TestLifecycleHookIntegration_AgentRegistryA2AFlow(t *testing.T) {
 	require.True(t, ok, "agentSpec.content should be a JSON object")
 	assert.Equal(t, agentSlug, content["name"])
 
+	interfaces, ok := content["supportedInterfaces"].([]interface{})
+	require.True(t, ok, "content.supportedInterfaces should be an array")
+	require.Len(t, interfaces, 1)
+	iface, ok := interfaces[0].(map[string]interface{})
+	require.True(t, ok)
 	expectedA2AURL := fmt.Sprintf("%s/projects/%s/agents/%s", a2aBridgeBase, projectSlug, agentSlug)
-	assert.Equal(t, expectedA2AURL, content["url"],
+	assert.Equal(t, expectedA2AURL, iface["url"],
 		"A2A agent card URL should be the specific per-agent A2A Bridge endpoint")
+	assert.Equal(t, "JSONRPC", iface["protocolBinding"])
+	assert.Equal(t, "0.3", iface["protocolVersion"])
 
 	assert.Equal(t, "Bearer agent-registry-bearer-token",
 		reqs[0].Headers.Get("Authorization"))
