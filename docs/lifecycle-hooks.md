@@ -173,6 +173,7 @@ They may appear in the URL, headers, and body.
 | `TRIGGER`        | Trigger that fired (`running`, etc.) |
 | `PROJECT_ID`     | Agent's project ID              |
 | `PROJECT_NAME`   | Agent's project name            |
+| `PROJECT_SLUG`   | Agent's project slug            |
 | `AGENT_ID`       | Agent record ID                 |
 | `AGENT_SLUG`     | Agent slug (hub-controlled)     |
 | `SA_EMAIL`       | Resolved SA email               |
@@ -341,3 +342,69 @@ starts and deregister it when it stops.
 
 You may also add deregister hooks for the `suspended` and `error` triggers to
 ensure agents are removed from the registry in all terminal/inactive states.
+
+## Example: Google Cloud Agent Registry Integration
+
+Lifecycle hooks can register agents as A2A endpoints in the
+[Google Cloud Agent Registry](https://docs.cloud.google.com/agent-registry/manual-registration).
+When an agent starts, a hook creates a Service in Agent Registry with
+an A2A Agent Card pointing to the agent's specific endpoint on the A2A
+Bridge. When the agent stops, another hook deletes the Service.
+
+**Prerequisites:**
+
+- A GCP service account with the `agentregistry.editor` role on the
+  target project, registered as a managed SA in the Hub.
+- The A2A Bridge deployed and accessible at an external URL.
+
+**Register hook** (fires on `running`):
+
+The hook body constructs an A2A Agent Card with the per-agent endpoint
+URL from the A2A Bridge using the `PROJECT_SLUG` and `AGENT_SLUG`
+variables. The `serviceId` query parameter uses a deterministic name
+so the same hook can cleanly deregister.
+
+```json
+{
+  "name": "agent-registry-register",
+  "scopeType": "hub",
+  "trigger": "running",
+  "action": {
+    "type": "http",
+    "method": "POST",
+    "url": "https://agentregistry.googleapis.com/v1alpha/projects/<gcp-project>/locations/<region>/services?serviceId=scion-${PROJECT_SLUG}-${AGENT_SLUG}",
+    "headers": { "Content-Type": "application/json" },
+    "body": "{\"displayName\":\"${AGENT_SLUG}\",\"agentSpec\":{\"type\":\"A2A_AGENT_CARD\",\"content\":{\"name\":\"${AGENT_SLUG}\",\"url\":\"https://<a2a-bridge-url>/projects/${PROJECT_SLUG}/agents/${AGENT_SLUG}\",\"version\":\"1.0.0\",\"capabilities\":{\"streaming\":true,\"pushNotifications\":true},\"defaultInputModes\":[\"text/plain\",\"application/json\"],\"defaultOutputModes\":[\"text/plain\",\"application/json\"]}}}",
+    "onError": "retry",
+    "timeoutSeconds": 15
+  },
+  "executionIdentity": "<sa-record-id>",
+  "enabled": true
+}
+```
+
+**Deregister hook** (fires on `stopped`):
+
+```json
+{
+  "name": "agent-registry-deregister",
+  "scopeType": "hub",
+  "trigger": "stopped",
+  "action": {
+    "type": "http",
+    "method": "DELETE",
+    "url": "https://agentregistry.googleapis.com/v1alpha/projects/<gcp-project>/locations/<region>/services/scion-${PROJECT_SLUG}-${AGENT_SLUG}",
+    "headers": { "Content-Type": "application/json" },
+    "onError": "retry",
+    "timeoutSeconds": 15
+  },
+  "executionIdentity": "<sa-record-id>",
+  "enabled": true
+}
+```
+
+Add similar deregister hooks for the `suspended` and `error` triggers
+to ensure agents are removed from Agent Registry in all inactive states.
+
+Replace `<gcp-project>`, `<region>`, `<a2a-bridge-url>`, and
+`<sa-record-id>` with your actual values.

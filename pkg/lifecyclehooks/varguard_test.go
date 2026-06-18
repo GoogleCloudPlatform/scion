@@ -35,6 +35,7 @@ func TestClassifyVar(t *testing.T) {
 		// Trusted
 		{"trusted: HOOK_ID", "HOOK_ID", Trusted},
 		{"trusted: PROJECT_ID", "PROJECT_ID", Trusted},
+		{"trusted: PROJECT_SLUG", "PROJECT_SLUG", Trusted},
 		{"trusted: AGENT_ID", "AGENT_ID", Trusted},
 		{"trusted: SA_EMAIL", "SA_EMAIL", Trusted},
 

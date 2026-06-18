@@ -45,10 +45,11 @@ import (
 
 // registryRequest captures a single request received by the mock registry.
 type registryRequest struct {
-	Method  string
-	Path    string
-	Body    string
-	Headers http.Header
+	Method   string
+	Path     string
+	RawQuery string
+	Body     string
+	Headers  http.Header
 }
 
 // mockRegistry is an httptest server that records incoming requests for
@@ -65,10 +66,11 @@ func newMockRegistry() *mockRegistry {
 		body, _ := io.ReadAll(req.Body)
 		r.mu.Lock()
 		r.requests = append(r.requests, registryRequest{
-			Method:  req.Method,
-			Path:    req.URL.Path,
-			Body:    string(body),
-			Headers: req.Header.Clone(),
+			Method:   req.Method,
+			Path:     req.URL.Path,
+			RawQuery: req.URL.RawQuery,
+			Body:     string(body),
+			Headers:  req.Header.Clone(),
 		})
 		r.mu.Unlock()
 		w.WriteHeader(http.StatusOK)
@@ -454,4 +456,206 @@ func TestLifecycleHookIntegration_SuspendedAndErrorDeregister(t *testing.T) {
 	assert.Equal(t, "error", auditEvents[1].Trigger)
 	assert.True(t, auditEvents[0].Success)
 	assert.True(t, auditEvents[1].Success)
+}
+
+// ---------------------------------------------------------------------------
+// TestLifecycleHookIntegration_AgentRegistryA2AFlow
+//
+// End-to-end test of the Google Cloud Agent Registry integration use case:
+//  1. Register hook constructs an A2A agent card body with the per-agent
+//     A2A Bridge endpoint URL built from PROJECT_SLUG and AGENT_SLUG.
+//  2. Deregister hook issues a DELETE using the same slug-based service name.
+//  3. Validates that PROJECT_SLUG is correctly populated and the agent card
+//     body contains the specific per-agent A2A Bridge endpoint URL.
+// ---------------------------------------------------------------------------
+
+func TestLifecycleHookIntegration_AgentRegistryA2AFlow(t *testing.T) {
+	ctx := context.Background()
+	s := integrationTestStore(t)
+
+	projectSlug := "my-scion-project"
+	projectID := uuid.New().String()
+	require.NoError(t, s.CreateProject(ctx, &store.Project{
+		ID:         projectID,
+		Name:       "My Scion Project",
+		Slug:       projectSlug,
+		Visibility: "private",
+		Created:    time.Now(),
+		Updated:    time.Now(),
+	}))
+
+	saID := uuid.New().String()
+	saEmail := "agent-registry-sa@ptone-emblem.iam.gserviceaccount.com"
+	require.NoError(t, s.CreateGCPServiceAccount(ctx, &store.GCPServiceAccount{
+		ID:                 saID,
+		Scope:              store.ScopeProject,
+		ScopeID:            projectID,
+		Email:              saEmail,
+		ProjectID:          "ptone-emblem",
+		DisplayName:        "Agent Registry SA",
+		DefaultScopes:      []string{"https://www.googleapis.com/auth/cloud-platform"},
+		Verified:           true,
+		VerifiedAt:         time.Now(),
+		VerificationStatus: "verified",
+		CreatedBy:          "test-user",
+		CreatedAt:          time.Now(),
+	}))
+
+	agentSlug := "test-a2a-agent"
+	agent := &store.Agent{
+		ID:         uuid.New().String(),
+		Slug:       agentSlug,
+		Name:       "Test A2A Agent",
+		Template:   "claude",
+		ProjectID:  projectID,
+		Phase:      string(state.PhaseStarting),
+		Visibility: "private",
+		Created:    time.Now(),
+		Updated:    time.Now(),
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	registry := newMockRegistry()
+	defer registry.close()
+
+	// The hook body mirrors the real Agent Registry API request format.
+	// It constructs an A2A agent card with the specific per-agent endpoint
+	// URL from the A2A Bridge (using PROJECT_SLUG and AGENT_SLUG).
+	a2aBridgeBase := "https://a2a.example.com"
+	registerBody := `{` +
+		`"displayName":"${AGENT_SLUG}",` +
+		`"agentSpec":{` +
+		`"type":"A2A_AGENT_CARD",` +
+		`"content":{` +
+		`"name":"${AGENT_SLUG}",` +
+		`"url":"` + a2aBridgeBase + `/projects/${PROJECT_SLUG}/agents/${AGENT_SLUG}",` +
+		`"version":"1.0.0",` +
+		`"capabilities":{"streaming":true,"pushNotifications":true},` +
+		`"defaultInputModes":["text/plain","application/json"],` +
+		`"defaultOutputModes":["text/plain","application/json"]` +
+		`}` +
+		`}` +
+		`}`
+
+	registerHook := &store.LifecycleHook{
+		ID:        uuid.New().String(),
+		Name:      "agent-registry-register",
+		ScopeType: store.LifecycleHookScopeHub,
+		Trigger:   store.LifecycleHookTriggerRunning,
+		Action: &store.LifecycleHookAction{
+			Type:           store.LifecycleHookActionHTTP,
+			Method:         "POST",
+			URL:            registry.server.URL + "/v1alpha/projects/ptone-emblem/locations/us-central1/services?serviceId=scion-${PROJECT_SLUG}-${AGENT_SLUG}",
+			Headers:        map[string]string{"Content-Type": "application/json"},
+			Body:           registerBody,
+			OnError:        store.LifecycleHookOnErrorRetry,
+			TimeoutSeconds: 15,
+		},
+		ExecutionIdentity: saID,
+		Enabled:           true,
+		Created:           time.Now(),
+		Updated:           time.Now(),
+	}
+	require.NoError(t, s.CreateLifecycleHook(ctx, registerHook))
+
+	deregisterHook := &store.LifecycleHook{
+		ID:        uuid.New().String(),
+		Name:      "agent-registry-deregister",
+		ScopeType: store.LifecycleHookScopeHub,
+		Trigger:   store.LifecycleHookTriggerStopped,
+		Action: &store.LifecycleHookAction{
+			Type:           store.LifecycleHookActionHTTP,
+			Method:         "DELETE",
+			URL:            registry.server.URL + "/v1alpha/projects/ptone-emblem/locations/us-central1/services/scion-${PROJECT_SLUG}-${AGENT_SLUG}",
+			Headers:        map[string]string{"Content-Type": "application/json"},
+			OnError:        store.LifecycleHookOnErrorRetry,
+			TimeoutSeconds: 15,
+		},
+		ExecutionIdentity: saID,
+		Enabled:           true,
+		Created:           time.Now(),
+		Updated:           time.Now(),
+	}
+	require.NoError(t, s.CreateLifecycleHook(ctx, deregisterHook))
+
+	tokenGen := &mockTokenGenerator{
+		accessToken: "agent-registry-bearer-token",
+		email:       "hub-sa@ptone-emblem.iam.gserviceaccount.com",
+	}
+	auditLog := newCapturingAuditLogger()
+	executor := newTestExecutor(s, tokenGen, auditLog, slog.Default())
+
+	events := NewChannelEventPublisher()
+	defer events.Close()
+
+	evaluator := NewLifecycleHookEvaluator(s, events, executor, slog.Default())
+	evaluator.Start()
+	defer evaluator.Stop()
+
+	// === Transition to running: should register with Agent Registry ===
+
+	agent.Phase = string(state.PhaseRunning)
+	require.NoError(t, s.UpdateAgentStatus(ctx, agent.ID, store.AgentStatusUpdate{
+		Phase: string(state.PhaseRunning),
+	}))
+	events.PublishAgentStatus(ctx, agent)
+
+	registry.waitForRequests(t, 1, 5*time.Second)
+	reqs := registry.getRequests()
+	require.Len(t, reqs, 1)
+
+	// Verify the POST was sent to the correct Agent Registry path with
+	// PROJECT_SLUG and AGENT_SLUG substituted in the query parameter.
+	assert.Equal(t, "POST", reqs[0].Method)
+	expectedServiceID := fmt.Sprintf("scion-%s-%s", projectSlug, agentSlug)
+	assert.Equal(t, "/v1alpha/projects/ptone-emblem/locations/us-central1/services", reqs[0].Path)
+	assert.Equal(t, "serviceId="+expectedServiceID, reqs[0].RawQuery)
+
+	// Verify the body contains a valid A2A agent card with the correct
+	// per-agent A2A Bridge endpoint URL.
+	var body map[string]interface{}
+	require.NoError(t, json.Unmarshal([]byte(reqs[0].Body), &body))
+	assert.Equal(t, agentSlug, body["displayName"])
+
+	agentSpec, ok := body["agentSpec"].(map[string]interface{})
+	require.True(t, ok, "agentSpec should be a JSON object")
+	assert.Equal(t, "A2A_AGENT_CARD", agentSpec["type"])
+
+	content, ok := agentSpec["content"].(map[string]interface{})
+	require.True(t, ok, "agentSpec.content should be a JSON object")
+	assert.Equal(t, agentSlug, content["name"])
+
+	expectedA2AURL := fmt.Sprintf("%s/projects/%s/agents/%s", a2aBridgeBase, projectSlug, agentSlug)
+	assert.Equal(t, expectedA2AURL, content["url"],
+		"A2A agent card URL should be the specific per-agent A2A Bridge endpoint")
+
+	assert.Equal(t, "Bearer agent-registry-bearer-token",
+		reqs[0].Headers.Get("Authorization"))
+
+	// === Transition to stopped: should deregister ===
+
+	agent.Phase = string(state.PhaseStopped)
+	require.NoError(t, s.UpdateAgentStatus(ctx, agent.ID, store.AgentStatusUpdate{
+		Phase: string(state.PhaseStopped),
+	}))
+	events.PublishAgentStatus(ctx, agent)
+
+	registry.waitForRequests(t, 2, 5*time.Second)
+	reqs = registry.getRequests()
+	require.Len(t, reqs, 2)
+
+	assert.Equal(t, "DELETE", reqs[1].Method)
+	expectedDeletePath := fmt.Sprintf("/v1alpha/projects/ptone-emblem/locations/us-central1/services/%s", expectedServiceID)
+	assert.Equal(t, expectedDeletePath, reqs[1].Path)
+	assert.Equal(t, "Bearer agent-registry-bearer-token",
+		reqs[1].Headers.Get("Authorization"))
+
+	// Verify audit trail.
+	auditEvents := auditLog.getEvents()
+	require.Len(t, auditEvents, 2)
+	assert.True(t, auditEvents[0].Success)
+	assert.Equal(t, "running", auditEvents[0].Trigger)
+	assert.Equal(t, saEmail, auditEvents[0].ExecutionIdentity)
+	assert.True(t, auditEvents[1].Success)
+	assert.Equal(t, "stopped", auditEvents[1].Trigger)
 }

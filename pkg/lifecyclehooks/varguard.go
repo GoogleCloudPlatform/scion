@@ -52,6 +52,7 @@ var TrustedVars = map[string]VarTrust{
 	// Project metadata (Hub-controlled)
 	"PROJECT_ID":   Trusted,
 	"PROJECT_NAME": Trusted,
+	"PROJECT_SLUG": Trusted,
 
 	// Hub-controlled agent identity (set by Hub, not agent)
 	"AGENT_ID":   Trusted,

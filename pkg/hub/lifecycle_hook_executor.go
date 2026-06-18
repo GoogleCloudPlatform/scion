@@ -281,6 +281,9 @@ func (e *HTTPExecutor) buildRenderVars(ctx context.Context, hook *store.Lifecycl
 		vars["PROJECT_ID"] = agent.ProjectID
 		if project, err := e.store.GetProject(ctx, agent.ProjectID); err == nil {
 			vars["PROJECT_NAME"] = project.Name
+			if project.Slug != "" {
+				vars["PROJECT_SLUG"] = project.Slug
+			}
 		}
 	}
 

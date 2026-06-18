@@ -755,6 +755,7 @@ func TestLifecycleHookExecutor_RenderVarsCorrectTrustClasses(t *testing.T) {
 	assert.Equal(t, "sa@test.com", vars["SA_EMAIL"])
 	assert.Equal(t, projID, vars["PROJECT_ID"])
 	assert.Equal(t, "test-project", vars["PROJECT_NAME"])
+	assert.Equal(t, "test-project", vars["PROJECT_SLUG"])
 
 	// Verify untrusted variables are present (will be encoded by RenderAction).
 	assert.Equal(t, "Evil Agent", vars["AGENT_NAME"])
