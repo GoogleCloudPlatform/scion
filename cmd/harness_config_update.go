@@ -55,9 +55,10 @@ func runHarnessConfigUpdate(cmd *cobra.Command, args []string) error {
 	var gp string
 	if projectPath != "" {
 		resolved, err := config.GetResolvedProjectDir(projectPath)
-		if err == nil {
-			gp = resolved
+		if err != nil {
+			return fmt.Errorf("failed to resolve project path %q: %w", projectPath, err)
 		}
+		gp = resolved
 	} else if projectDir, err := config.GetResolvedProjectDir(""); err == nil {
 		gp = projectDir
 	}
@@ -121,6 +122,9 @@ func updateSingleHarnessConfig(ctx context.Context, hubCtx *HubContext, name, ur
 	result, err := hubCtx.Client.HarnessConfigs().Reimport(ctx, match.ID, urlOverride)
 	if err != nil {
 		return fmt.Errorf("reimport failed: %w", err)
+	}
+	if result == nil {
+		return fmt.Errorf("reimport returned no result for %q", name)
 	}
 
 	if isJSONOutput() {
