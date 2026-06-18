@@ -30,6 +30,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 	"gopkg.in/yaml.v3"
 )
@@ -607,7 +608,10 @@ func (e *BuildHarnessConfigImageExecutor) syncBuiltImage(ctx context.Context, lo
 	if err := yaml.Unmarshal(configData, &doc); err != nil {
 		return fmt.Errorf("failed to parse config.yaml: %w", err)
 	}
-	if len(doc.Content) > 0 && doc.Content[0].Kind == yaml.MappingNode {
+	if len(doc.Content) == 0 || doc.Content[0].Kind != yaml.MappingNode {
+		return fmt.Errorf("config.yaml root is not a YAML mapping")
+	}
+	{
 		mapping := doc.Content[0]
 		found := false
 		for i := 0; i < len(mapping.Content)-1; i += 2 {
@@ -638,6 +642,17 @@ func (e *BuildHarnessConfigImageExecutor) syncBuiltImage(ctx context.Context, lo
 		}
 		fmt.Fprintf(logger, "Updated config.yaml in storage with image %s\n", outputImage)
 	}
+
+	// Update config.yaml entry in hc.Files manifest with new size and hash.
+	configHash := transfer.HashBytes(updatedData)
+	for i, f := range hc.Files {
+		if f.Path == "config.yaml" {
+			hc.Files[i].Size = int64(len(updatedData))
+			hc.Files[i].Hash = configHash
+			break
+		}
+	}
+	hc.ContentHash = computeContentHash(hc.Files)
 
 	// Update the DB record.
 	if hc.Config == nil {
