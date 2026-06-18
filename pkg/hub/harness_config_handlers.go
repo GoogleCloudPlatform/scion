@@ -719,9 +719,13 @@ func (s *Server) handleHarnessConfigReimport(w http.ResponseWriter, r *http.Requ
 		writeErrorFromErr(w, err, "")
 		return
 	}
+	if hc == nil {
+		NotFound(w, "HarnessConfig")
+		return
+	}
 
 	var req ReimportHarnessConfigRequest
-	if r.ContentLength > 0 {
+	if r.Body != nil && r.Body != http.NoBody {
 		if err := readJSON(r, &req); err != nil {
 			BadRequest(w, "Invalid request body: "+err.Error())
 			return
