@@ -157,11 +157,14 @@ export class CommsPanel {
     const recipientColor = broadcast
       ? '#22c55e'
       : (this.agentRing?.getAgentColor(event.recipient) ?? '#888');
-    const accent = broadcast ? '#22c55e' : senderColor;
 
+    // Colour EACH message by its SENDER (left border + a faint tint of the same colour) so the
+    // transcript is scannable by who-said-what, instead of a uniform broadcast-green. The BROADCAST
+    // badge + the ↯ ALL route still mark broadcasts; broadcasts just get a slightly stronger tint.
     const card = document.createElement('div');
-    card.className = broadcast ? 'comms-msg comms-msg-bcast' : 'comms-msg';
-    card.style.borderLeftColor = accent;
+    card.className = 'comms-msg';
+    card.style.borderLeftColor = senderColor;
+    card.style.background = tintColor(senderColor, broadcast ? 0.16 : 0.09);
     if (!animate) card.style.animation = 'none';
 
     const recipientLabel = broadcast ? 'ALL' : event.recipient || '?';
@@ -176,15 +179,10 @@ export class CommsPanel {
     // parse cost.
     const rawContent = event.content ?? '';
 
-    // A one-line plain-text summary shown while the message is collapsed (the default).
-    // Slice first so a huge payload (e.g. a large JSON blob) can't block the main thread
-    // in the regex; strip markdown punctuation + collapse whitespace to keep it one line.
-    const summary = rawContent
-      .slice(0, 1000)
-      .replace(/[#*`>_~\[\]]/g, '')
-      .replace(/\s+/g, ' ')
-      .trim()
-      .slice(0, 120);
+    // A one-line summary shown while the message is collapsed (the default). Slice first so a
+    // huge payload (e.g. a large JSON blob) can't block the main thread, then derive a headline
+    // that understands structured JSON payloads (else strips markdown to one line).
+    const summary = summarizeForCollapsed(rawContent.slice(0, 1000));
 
     card.innerHTML = `
       <div class="comms-msg-header">
@@ -194,13 +192,13 @@ export class CommsPanel {
           <span class="comms-index">#${this.count + 1}</span>
         </div>
         <div class="comms-route">
-          <span class="comms-msg-toggle">▸</span>
+          ${rawContent ? '<span class="comms-msg-toggle">▸</span>' : ''}
           <span style="color:${senderColor}">${escapeHtml(event.sender || '?')}</span>
           <span class="comms-arrow">${arrow}</span>
           <span style="color:${recipientColor}">${escapeHtml(recipientLabel)}</span>
           ${typeTag}
         </div>
-        <div class="comms-summary">${escapeHtml(summary)}</div>
+        ${summary ? `<div class="comms-summary">${escapeHtml(summary)}</div>` : ''}
       </div>
       <div class="comms-content markdown"></div>
     `;
@@ -208,15 +206,19 @@ export class CommsPanel {
     // raw body first: marked does NOT strip raw HTML, so escaping neutralizes any
     // <script>/<img onerror> in agent output before it reaches innerHTML. (Trade-off: `>`
     // is escaped too, so Markdown blockquotes render as literal text — acceptable here.)
-    let rendered = false;
-    card.querySelector('.comms-msg-header')?.addEventListener('click', () => {
-      if (!rendered) {
-        const contentEl = card.querySelector('.comms-content');
-        if (contentEl) contentEl.innerHTML = marked.parse(escapeHtml(rawContent)) as string;
-        rendered = true;
-      }
-      card.classList.toggle('expanded');
-    });
+    // Only wire up expand when there's a body to reveal — a contentless handoff is just the route.
+    if (rawContent) {
+      card.classList.add('comms-expandable');
+      let rendered = false;
+      card.querySelector('.comms-msg-header')?.addEventListener('click', () => {
+        if (!rendered) {
+          const contentEl = card.querySelector('.comms-content');
+          if (contentEl) contentEl.innerHTML = marked.parse(escapeHtml(rawContent)) as string;
+          rendered = true;
+        }
+        card.classList.toggle('expanded');
+      });
+    }
     return card;
   }
 
@@ -235,4 +237,51 @@ export class CommsPanel {
 
 function escapeHtml(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+/** A short, meaningful one-liner for the COLLAPSED card — so a structured JSON payload shows e.g.
+ *  "12 item(s): Initial draft…" instead of a raw `[ { "title": …` dump. The full body is
+ *  still rendered as Markdown on expand. */
+function summarizeForCollapsed(raw: string): string {
+  let s = raw.trim();
+  if (!s) return '';
+  s = s.replace(/^```[a-zA-Z]*\n?/, '').replace(/\n?```$/, '').trim();
+  if (s[0] === '[' || s[0] === '{') {
+    try {
+      const data = JSON.parse(s);
+      if (Array.isArray(data)) {
+        const t = data.find((d) => d && typeof d === 'object' && d.title)?.title;
+        return (`${data.length} item(s)` + (t ? `: ${t}` : '')).slice(0, 110);
+      }
+      if (data && typeof data === 'object') {
+        const t = data.title || data.summary ||
+          Object.values(data).find((v) => typeof v === 'string' && v.trim());
+        if (t) return String(t).trim().slice(0, 110);
+      }
+    } catch {
+      // Content is often truncated (2k cap) so JSON.parse fails — salvage a title + a count.
+      // `(?:[^"\\]|\\.)*` matches across escaped quotes so a title like "treated as \"unused\""
+      // is captured whole (stop at the real closing quote), then unescape for a clean headline.
+      const unesc = (t: string) => t.replace(/\\"/g, '"').replace(/\\\\/g, '\\');
+      const titles = [...s.matchAll(/"title"\s*:\s*"((?:[^"\\]|\\.)*)"/g)].map((m) => unesc(m[1]));
+      if (titles.length) return ((titles.length > 1 ? `${titles.length} item(s): ` : '') + titles[0]).slice(0, 110);
+      const m = s.match(/"[a-zA-Z_]+"\s*:\s*"((?:[^"\\]|\\.){3,}?)"/);
+      if (m) return unesc(m[1]).slice(0, 110);
+    }
+  }
+  // else: first meaningful (de-marked) line; fall back to a stripped slice.
+  for (const line of s.split('\n')) {
+    const ln = line.replace(/^[#>*\-\s]+/, '').trim();
+    if (ln && !/^[[\]{}(),:"' ]+$/.test(ln)) return ln.slice(0, 120);
+  }
+  return s.replace(/[#*`>_~[\]]/g, '').replace(/\s+/g, ' ').trim().slice(0, 120);
+}
+
+/** A `#rrggbb` colour → an `rgba(...)` string at `alpha`, for a faint per-sender card tint. Falls
+ *  back to a neutral tint when the colour isn't a 6-digit hex (e.g. a CSS name). */
+function tintColor(color: string, alpha: number): string {
+  const m = /^#([0-9a-f]{6})$/i.exec(color || '');
+  if (!m) return `rgba(255,255,255,${alpha * 0.4})`;
+  const n = parseInt(m[1], 16);
+  return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${alpha})`;
 }

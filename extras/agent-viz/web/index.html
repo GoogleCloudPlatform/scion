@@ -189,6 +189,21 @@
       display: inline-block;
     }
 
+    /* Per-agent colour picker in the Agents filter — a small clickable swatch. */
+    .agent-color {
+      width: 14px;
+      height: 14px;
+      padding: 0;
+      border: 1px solid rgba(255, 255, 255, 0.25);
+      border-radius: 50%;
+      background: none;
+      cursor: pointer;
+      flex-shrink: 0;
+    }
+    .agent-color::-webkit-color-swatch-wrapper { padding: 0; }
+    .agent-color::-webkit-color-swatch { border: none; border-radius: 50%; }
+    .agent-color::-moz-color-swatch { border: none; border-radius: 50%; }
+
     .agent-filters,
     .event-filters {
       display: flex;
@@ -349,8 +364,9 @@
       margin-top: 4px;
     }
 
-    /* Per-message collapse: show a one-line summary until the user expands. */
-    .comms-msg-header { cursor: pointer; }
+    /* Per-message collapse: show a one-line summary until the user expands. Only messages with a
+       body are expandable (a contentless handoff is just its route, so no pointer/affordance). */
+    .comms-expandable .comms-msg-header { cursor: pointer; }
     .comms-msg-toggle {
       display: inline-block;
       width: 9px;

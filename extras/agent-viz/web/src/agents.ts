@@ -308,6 +308,18 @@ export class AgentRing {
     return '#888';
   }
 
+  /** Recolour an agent (by id or name) live — the ring redraws with the new colour next frame. */
+  setAgentColor(agentIdOrName: string, color: string): void {
+    const byId = this.agents.get(agentIdOrName);
+    if (byId) {
+      byId.info.color = color;
+      return;
+    }
+    for (const a of this.agents.values()) {
+      if (a.info.name === agentIdOrName) a.info.color = color;
+    }
+  }
+
   reset(): void {
     this.agents.clear();
     this.freezeCount = 0;

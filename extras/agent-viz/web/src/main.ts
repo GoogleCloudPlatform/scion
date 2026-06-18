@@ -48,6 +48,26 @@ let overlayCtx: CanvasRenderingContext2D;
 let animFrameId: number;
 let manifest: PlaybackManifest | null = null;
 
+// Per-agent colour overrides set from the Agents filter panel, persisted by agent NAME so they
+// survive reloads + carry across runs of the same team.
+const COLOR_OVERRIDE_KEY = 'agentviz_agent_colors';
+function loadColorOverrides(): Record<string, string> {
+  try {
+    return JSON.parse(localStorage.getItem(COLOR_OVERRIDE_KEY) || '{}');
+  } catch {
+    return {};
+  }
+}
+function saveColorOverride(name: string, color: string): void {
+  const o = loadColorOverrides();
+  o[name] = color;
+  try {
+    localStorage.setItem(COLOR_OVERRIDE_KEY, JSON.stringify(o));
+  } catch {
+    /* storage unavailable — override stays in-memory for this session */
+  }
+}
+
 /**
  * Clamp a file path to the configured max depth.
  * If the path has more segments than maxDepth, truncate and return a directory path.
@@ -97,6 +117,13 @@ function init(): void {
   const ws = new WSClient();
   playbackControls = new PlaybackControls(controlsContainer, ws);
   playbackControls.setOnShowFileLabelsChange((show) => fileGraph.setShowLabels(show));
+  // Per-agent colour override (Agents filter panel) — recolour the ring live + persist by name.
+  playbackControls.setOnAgentColorChange((id, name, color) => {
+    agentRing.setAgentColor(id, color);
+    saveColorOverride(name, color);
+    const a = manifest?.agents.find((x) => x.id === id || x.name === name);
+    if (a) a.color = color;
+  });
 
   ws.onMessage((msg) => {
     if ('type' in msg) {
@@ -135,6 +162,12 @@ function init(): void {
 
 function handleManifest(m: PlaybackManifest): void {
   manifest = m;
+  // Apply saved per-agent colour overrides to the manifest so BOTH the ring (via resolveAgentInfo)
+  // and the filter dots pick them up.
+  const overrides = loadColorOverrides();
+  for (const a of m.agents) {
+    if (overrides[a.name]) a.color = overrides[a.name];
+  }
   console.log('[agent-viz] Manifest received:', {
     agents: m.agents.length,
     files: m.files.length,

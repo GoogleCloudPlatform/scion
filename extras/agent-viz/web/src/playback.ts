@@ -39,6 +39,7 @@ export class PlaybackControls {
   // Callbacks
   private onFilterChange?: (agents: string[], eventTypes: string[]) => void;
   private onShowFileLabelsChange?: (show: boolean) => void;
+  private onAgentColor?: (id: string, name: string, color: string) => void;
 
   constructor(container: HTMLElement, ws: WSClient) {
     this.container = container;
@@ -60,10 +61,13 @@ export class PlaybackControls {
       label.className = 'filter-item';
       label.innerHTML = `
         <input type="checkbox" checked data-agent-id="${agent.id}">
-        <span class="agent-dot" style="background:${agent.color}"></span>
+        <input type="color" class="agent-color" value="${agent.color}" title="Change ${agent.name} colour">
         ${agent.name}
       `;
-      label.querySelector('input')!.addEventListener('change', () => this.emitFilter());
+      label.querySelector('input[type="checkbox"]')!.addEventListener('change', () => this.emitFilter());
+      const colorInput = label.querySelector('input[type="color"]') as HTMLInputElement;
+      colorInput.addEventListener('click', (e) => e.stopPropagation());  // don't toggle the checkbox
+      colorInput.addEventListener('change', () => this.onAgentColor?.(agent.id, agent.name, colorInput.value));
       list.appendChild(label);
     }
   }
@@ -74,6 +78,10 @@ export class PlaybackControls {
 
   setOnShowFileLabelsChange(cb: (show: boolean) => void): void {
     this.onShowFileLabelsChange = cb;
+  }
+
+  setOnAgentColorChange(cb: (id: string, name: string, color: string) => void): void {
+    this.onAgentColor = cb;
   }
 
   updateStatus(status: StatusUpdate): void {
@@ -93,9 +101,10 @@ export class PlaybackControls {
     this.container.innerHTML = `
       <div class="transport-bar">
         <div class="transport-controls">
-          <button class="transport-btn" id="rewind-btn" title="Rewind">⏮</button>
+          <button class="transport-btn" id="rewind-btn" title="Rewind to start">⏮</button>
           <button class="transport-btn" id="play-btn" title="Play/Pause">▶</button>
-          <button class="transport-btn" id="forward-btn" title="Forward">⏭</button>
+          <button class="transport-btn" id="forward-btn" title="Skip to end">⏭</button>
+          <button class="transport-btn" id="replay-btn" title="Replay from start">↻</button>
         </div>
         <div class="scrubber-container">
           <input type="range" class="scrubber" id="scrubber" min="0" max="0" value="0">
@@ -160,6 +169,12 @@ export class PlaybackControls {
     // Forward
     this.container.querySelector('#forward-btn')!.addEventListener('click', () => {
       this.ws.send({ type: 'seek', timestamp: this.timeEnd });
+    });
+
+    // Replay — jump back to the start AND play, in one click (vs. Rewind then Play).
+    this.container.querySelector('#replay-btn')!.addEventListener('click', () => {
+      this.ws.send({ type: 'seek', timestamp: this.timeStart });
+      this.ws.send({ type: 'play' });
     });
 
     // Speed
