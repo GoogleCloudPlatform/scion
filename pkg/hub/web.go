@@ -765,7 +765,10 @@ func (ws *WebServer) staticHandler() http.Handler {
 
 func (ws *WebServer) serveStaticAsset(w http.ResponseWriter, r *http.Request) {
 	if ws.assetsDisk == "" && ws.assets == nil {
-		http.Error(w, "no assets available", http.StatusNotFound)
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.WriteHeader(http.StatusNotFound)
+		fmt.Fprint(w, noAssetsPage)
 		return
 	}
 
