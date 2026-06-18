@@ -164,6 +164,10 @@ type ServerConfig struct {
 	// GCPProjectID is the GCP project ID used for minting service accounts.
 	// If empty, auto-detected from the metadata server when running on GCE/Cloud Run.
 	GCPProjectID string
+	// TelemetryProjectID is the GCP project where telemetry metrics are stored.
+	// Used by the metrics dashboard to query Cloud Monitoring.
+	// Falls back to GCPProjectID if empty.
+	TelemetryProjectID string
 	// GCPMintCapPerProject is the maximum number of minted service accounts allowed per project.
 	// Zero means unlimited (default).
 	GCPMintCapPerProject int
@@ -588,7 +592,8 @@ type Server struct {
 	ctx              context.Context    // Server-lifetime context; cancelled on Shutdown
 	ctxCancel        context.CancelFunc // Cancels ctx
 
-	logQueryService *LogQueryService // Cloud Logging query service (nil = disabled)
+	logQueryService  *LogQueryService          // Cloud Logging query service (nil = disabled)
+	metricsDashboard *MetricsDashboardService // Cloud Monitoring metrics dashboard (nil = disabled)
 
 	// Telegram link service for code-based account linking (nil = disabled)
 	telegramLinkService *TelegramLinkService
@@ -933,6 +938,25 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 		} else {
 			srv.logQueryService = logQuerySvc
 			slog.Info("Cloud Logging query service initialized", "project", projectID)
+		}
+	}
+
+	// Initialize metrics dashboard service (optional, gated on telemetry project ID)
+	if telemetryProject := cfg.TelemetryProjectID; telemetryProject != "" {
+		metricsSvc, err := NewMetricsDashboardService(ctx, telemetryProject)
+		if err != nil {
+			slog.Warn("Failed to initialize metrics dashboard service", "error", err)
+		} else {
+			srv.metricsDashboard = metricsSvc
+			slog.Info("Metrics dashboard service initialized", "project", telemetryProject)
+		}
+	} else if projectID := cfg.GCPProjectID; projectID != "" {
+		metricsSvc, err := NewMetricsDashboardService(ctx, projectID)
+		if err != nil {
+			slog.Warn("Failed to initialize metrics dashboard service", "error", err)
+		} else {
+			srv.metricsDashboard = metricsSvc
+			slog.Info("Metrics dashboard service initialized (from GCPProjectID)", "project", projectID)
 		}
 	}
 
@@ -2454,6 +2478,9 @@ func (s *Server) CleanupResources(ctx context.Context) error {
 		if s.logQueryService != nil {
 			s.logQueryService.Close()
 		}
+		if s.metricsDashboard != nil {
+			s.metricsDashboard.Close()
+		}
 	})
 	return nil
 }
@@ -2566,6 +2593,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/admin/gcp-quota", s.handleAdminGCPQuota)
 	s.mux.HandleFunc("/api/v1/admin/lifecycle-hooks", s.handleAdminLifecycleHooks)
 	s.mux.HandleFunc("/api/v1/admin/lifecycle-hooks/", s.handleAdminLifecycleHookByID)
+	s.mux.HandleFunc("/api/v1/admin/metrics-dashboard", s.handleAdminMetricsDashboard)
 
 	// Notification endpoints (user-facing)
 	s.mux.HandleFunc("/api/v1/notifications", s.handleNotifications)

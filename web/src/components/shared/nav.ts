@@ -66,6 +66,7 @@ const ADMIN_SECTION: NavSection = {
     { path: '/admin/scheduler', label: 'Scheduler', icon: 'clock' },
     { path: '/admin/users', label: 'Users', icon: 'people' },
     { path: '/admin/groups', label: 'Groups', icon: 'diagram-3' },
+    { path: '/admin/metrics', label: 'Metrics', icon: 'graph-up' },
     { path: '/admin/maintenance', label: 'Maintenance', icon: 'wrench-adjustable' },
     { path: '/admin/skill-registries', label: 'Skill Registries', icon: 'cloud-arrow-down' },
   ],
