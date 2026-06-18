@@ -760,7 +760,7 @@ func (s *Server) handleHarnessConfigReimport(w http.ResponseWriter, r *http.Requ
 
 	kind := s.harnessConfigImportKind()
 	run := func(progress importProgressFunc) ([]string, error) {
-		return s.importFromRemote(ctx, hc.ScopeID, sourceURL, hc.Scope, kind, progress)
+		return s.importFromRemote(ctx, hc.ScopeID, sourceURL, hc.Scope, kind, progress, nil)
 	}
 
 	if importAcceptsNDJSON(r) {
