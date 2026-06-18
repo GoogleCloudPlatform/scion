@@ -277,11 +277,13 @@ function summarizeForCollapsed(raw: string): string {
   return s.replace(/[#*`>_~[\]]/g, '').replace(/\s+/g, ' ').trim().slice(0, 120);
 }
 
-/** A `#rrggbb` colour → an `rgba(...)` string at `alpha`, for a faint per-sender card tint. Falls
- *  back to a neutral tint when the colour isn't a 6-digit hex (e.g. a CSS name). */
+/** A hex colour → an `rgba(...)` string at `alpha`, for a faint per-sender card tint. Accepts 3- or
+ *  6-digit hex (e.g. the default `#888`); falls back to a neutral tint for anything else (e.g. a CSS
+ *  colour name). */
 function tintColor(color: string, alpha: number): string {
-  const m = /^#([0-9a-f]{6})$/i.exec(color || '');
-  if (!m) return `rgba(255,255,255,${alpha * 0.4})`;
-  const n = parseInt(m[1], 16);
+  let hex = (color || '').trim().replace(/^#/, '');
+  if (/^[0-9a-f]{3}$/i.test(hex)) hex = hex.replace(/./g, (c) => c + c);
+  if (!/^[0-9a-f]{6}$/i.test(hex)) return `rgba(255,255,255,${alpha * 0.4})`;
+  const n = parseInt(hex, 16);
   return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${alpha})`;
 }

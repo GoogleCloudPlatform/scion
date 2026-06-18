@@ -308,15 +308,14 @@ export class AgentRing {
     return '#888';
   }
 
-  /** Recolour an agent (by id or name) live — the ring redraws with the new colour next frame. */
+  /** Recolour an agent (by id or name) live — the ring redraws with the new colour next frame.
+   *  Overrides are keyed by name, so recolour EVERY instance that shares the resolved name (an
+   *  agent destroyed + recreated can briefly appear twice with the same name but a different id). */
   setAgentColor(agentIdOrName: string, color: string): void {
     const byId = this.agents.get(agentIdOrName);
-    if (byId) {
-      byId.info.color = color;
-      return;
-    }
+    const name = byId ? byId.info.name : agentIdOrName;
     for (const a of this.agents.values()) {
-      if (a.info.name === agentIdOrName) a.info.color = color;
+      if (a.info.id === agentIdOrName || a.info.name === name) a.info.color = color;
     }
   }
 

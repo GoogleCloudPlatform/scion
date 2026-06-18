@@ -59,9 +59,14 @@ export class PlaybackControls {
     for (const agent of agents) {
       const label = document.createElement('label');
       label.className = 'filter-item';
+      // <input type="color"> requires #rrggbb; expand 3-digit hex (e.g. the default #888) so the
+      // picker shows the real colour instead of silently falling back to black.
+      const swatch = /^#[0-9a-f]{3}$/i.test(agent.color)
+        ? '#' + agent.color.slice(1).replace(/./g, (c) => c + c)
+        : agent.color;
       label.innerHTML = `
         <input type="checkbox" checked data-agent-id="${agent.id}">
-        <input type="color" class="agent-color" value="${agent.color}" title="Change ${agent.name} colour">
+        <input type="color" class="agent-color" value="${swatch}" title="Change ${agent.name} colour">
         ${agent.name}
       `;
       label.querySelector('input[type="checkbox"]')!.addEventListener('change', () => this.emitFilter());

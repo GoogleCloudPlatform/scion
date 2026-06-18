@@ -121,8 +121,10 @@ function init(): void {
   playbackControls.setOnAgentColorChange((id, name, color) => {
     agentRing.setAgentColor(id, color);
     saveColorOverride(name, color);
-    const a = manifest?.agents.find((x) => x.id === id || x.name === name);
-    if (a) a.color = color;
+    // Update every matching manifest entry so later resolveAgentInfo() lookups stay consistent.
+    manifest?.agents.forEach((a) => {
+      if (a.id === id || a.name === name) a.color = color;
+    });
   });
 
   ws.onMessage((msg) => {
