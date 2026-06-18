@@ -277,7 +277,7 @@ export class ScionResourceImport extends LitElement {
       }
 
       if (discovered.count === 1) {
-        await this.executeImport();
+        await this.executeImport(discovered.resources);
         return;
       }
 

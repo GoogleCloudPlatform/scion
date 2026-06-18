@@ -10204,13 +10204,20 @@ func (s *Server) handleProjectImportTemplates(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	var imported []string
-	if req.WorkspacePath != "" {
-		imported, err = s.importFromWorkspace(ctx, project, req.WorkspacePath, store.TemplateScopeProject, s.templateImportKind(), nil, req.Names)
-	} else {
+	run := func(progress importProgressFunc) ([]string, error) {
+		if req.WorkspacePath != "" {
+			return s.importFromWorkspace(ctx, project, req.WorkspacePath, store.TemplateScopeProject, s.templateImportKind(), progress, req.Names)
+		}
 		req.SourceURL = config.NormalizeTemplateSourceURL(req.SourceURL)
-		imported, err = s.importFromRemote(ctx, projectID, req.SourceURL, store.TemplateScopeProject, s.templateImportKind(), nil, req.Names)
+		return s.importFromRemote(ctx, projectID, req.SourceURL, store.TemplateScopeProject, s.templateImportKind(), progress, req.Names)
 	}
+
+	if importAcceptsNDJSON(r) {
+		s.streamImport(w, run)
+		return
+	}
+
+	imported, err := run(nil)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "import_failed", err.Error(), nil)
 		return
@@ -10296,13 +10303,20 @@ func (s *Server) handleProjectImportHarnessConfigs(w http.ResponseWriter, r *htt
 		return
 	}
 
-	var imported []string
-	if req.WorkspacePath != "" {
-		imported, err = s.importFromWorkspace(ctx, project, req.WorkspacePath, store.HarnessConfigScopeProject, s.harnessConfigImportKind(), nil, req.Names)
-	} else {
+	run := func(progress importProgressFunc) ([]string, error) {
+		if req.WorkspacePath != "" {
+			return s.importFromWorkspace(ctx, project, req.WorkspacePath, store.HarnessConfigScopeProject, s.harnessConfigImportKind(), progress, req.Names)
+		}
 		req.SourceURL = config.NormalizeTemplateSourceURL(req.SourceURL)
-		imported, err = s.importFromRemote(ctx, projectID, req.SourceURL, store.HarnessConfigScopeProject, s.harnessConfigImportKind(), nil, req.Names)
+		return s.importFromRemote(ctx, projectID, req.SourceURL, store.HarnessConfigScopeProject, s.harnessConfigImportKind(), progress, req.Names)
 	}
+
+	if importAcceptsNDJSON(r) {
+		s.streamImport(w, run)
+		return
+	}
+
+	imported, err := run(nil)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "import_failed", err.Error(), nil)
 		return
