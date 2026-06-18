@@ -167,6 +167,26 @@ field is updated to reference the built image.`,
 		}
 		fmt.Printf("Updated %s image to %s\n", configPath, outputImage)
 
+		// Sync updated config to Hub so agents pick up the new image.
+		var gp string
+		if projectPath != "" {
+			if resolved, err := config.GetResolvedProjectDir(projectPath); err == nil {
+				gp = resolved
+			}
+		} else if resolved, err := config.GetResolvedProjectDir(""); err == nil {
+			gp = resolved
+		}
+		hubCtx, hubErr := CheckHubAvailabilityWithOptions(gp, true)
+		if hubErr != nil {
+			fmt.Printf("Warning: could not sync to Hub: %v\n", hubErr)
+			fmt.Println("Run 'scion harness-config push " + harnessConfigName + "' to sync manually.")
+		} else if hubCtx != nil {
+			if err := syncHarnessConfigToHub(hubCtx, harnessConfigName, hcDir.Path, "global", "", hcDir.Config.Harness); err != nil {
+				fmt.Printf("Warning: failed to sync to Hub: %v\n", err)
+				fmt.Println("Run 'scion harness-config push " + harnessConfigName + "' to sync manually.")
+			}
+		}
+
 		return nil
 	},
 }

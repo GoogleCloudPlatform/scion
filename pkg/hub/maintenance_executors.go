@@ -15,6 +15,7 @@
 package hub
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -30,6 +31,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
+	"gopkg.in/yaml.v3"
 )
 
 // MaintenanceExecutor defines the interface for a runnable maintenance operation.
@@ -580,8 +582,73 @@ func (e *BuildHarnessConfigImageExecutor) Run(ctx context.Context, logger io.Wri
 		outputImage = pushImage
 	}
 
+	// Update the harness config's image in storage and the DB so agents
+	// pick up the newly-built image instead of the stale upstream reference.
+	if err := e.syncBuiltImage(ctx, logger, hc, tmpDir, outputImage); err != nil {
+		log.Error("Failed to sync built image back to store", "error", err)
+		fmt.Fprintf(logger, "Warning: build succeeded but failed to update harness-config image: %v\n", err)
+	}
+
 	fmt.Fprintf(logger, "\nBuild complete: %s\n", outputImage)
 	log.Info("Build complete", "image", outputImage, "harness_config", hc.Name)
+	return nil
+}
+
+// syncBuiltImage updates the harness config's config.yaml in storage and the
+// DB record to reference the newly-built image.
+func (e *BuildHarnessConfigImageExecutor) syncBuiltImage(ctx context.Context, logger io.Writer, hc *store.HarnessConfig, tmpDir, outputImage string) error {
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	configData, err := os.ReadFile(configPath)
+	if err != nil {
+		return fmt.Errorf("failed to read config.yaml: %w", err)
+	}
+
+	var doc yaml.Node
+	if err := yaml.Unmarshal(configData, &doc); err != nil {
+		return fmt.Errorf("failed to parse config.yaml: %w", err)
+	}
+	if len(doc.Content) > 0 && doc.Content[0].Kind == yaml.MappingNode {
+		mapping := doc.Content[0]
+		found := false
+		for i := 0; i < len(mapping.Content)-1; i += 2 {
+			if mapping.Content[i].Value == "image" {
+				mapping.Content[i+1].Value = outputImage
+				found = true
+				break
+			}
+		}
+		if !found {
+			mapping.Content = append(mapping.Content,
+				&yaml.Node{Kind: yaml.ScalarNode, Value: "image"},
+				&yaml.Node{Kind: yaml.ScalarNode, Value: outputImage},
+			)
+		}
+	}
+
+	updatedData, err := yaml.Marshal(&doc)
+	if err != nil {
+		return fmt.Errorf("failed to marshal updated config.yaml: %w", err)
+	}
+
+	// Upload updated config.yaml to storage.
+	if e.storage != nil && hc.StoragePath != "" {
+		objectPath := hc.StoragePath + "/config.yaml"
+		if _, err := e.storage.Upload(ctx, objectPath, bytes.NewReader(updatedData), storage.UploadOptions{}); err != nil {
+			return fmt.Errorf("failed to upload updated config.yaml to storage: %w", err)
+		}
+		fmt.Fprintf(logger, "Updated config.yaml in storage with image %s\n", outputImage)
+	}
+
+	// Update the DB record.
+	if hc.Config == nil {
+		hc.Config = &store.HarnessConfigData{}
+	}
+	hc.Config.Image = outputImage
+	if err := e.store.UpdateHarnessConfig(ctx, hc); err != nil {
+		return fmt.Errorf("failed to update harness-config record: %w", err)
+	}
+	fmt.Fprintf(logger, "Updated harness-config record image to %s\n", outputImage)
+
 	return nil
 }
 
