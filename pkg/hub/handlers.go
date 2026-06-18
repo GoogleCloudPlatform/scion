@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	gouuid "github.com/google/uuid"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/gcp"
@@ -282,8 +283,15 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	query := r.URL.Query()
 
+	projectID := query.Get("projectId")
+	if projectID != "" && gouuid.Validate(projectID) != nil {
+		if project, err := s.store.GetProjectBySlug(ctx, projectID); err == nil && project != nil {
+			projectID = project.ID
+		}
+	}
+
 	filter := store.AgentFilter{
-		ProjectID:       query.Get("projectId"),
+		ProjectID:       projectID,
 		RuntimeBrokerID: query.Get("runtimeBrokerId"),
 		Phase:           query.Get("phase"),
 		IncludeDeleted:  query.Get("includeDeleted") == "true",
