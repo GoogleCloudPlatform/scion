@@ -111,7 +111,9 @@ func updateSingleHarnessConfig(ctx context.Context, hubCtx *HubContext, name, ur
 		return fmt.Errorf("harness-config %q has no stored source URL. Use --url to specify one.", name)
 	}
 
-	fmt.Printf("Updating %q from %s...\n", name, sourceURL)
+	if !isJSONOutput() {
+		fmt.Printf("Updating %q from %s...\n", name, sourceURL)
+	}
 
 	result, err := hubCtx.Client.HarnessConfigs().Reimport(ctx, match.ID, urlOverride)
 	if err != nil {
@@ -144,23 +146,30 @@ func updateAllHarnessConfigs(ctx context.Context, hubCtx *HubContext) error {
 	}
 
 	var updated, skipped, failed int
+	jsonOut := isJSONOutput()
 	for _, hc := range resp.HarnessConfigs {
 		if hc.SourceURL == "" {
 			skipped++
 			continue
 		}
-		fmt.Printf("Updating %q from %s...\n", hc.Name, hc.SourceURL)
+		if !jsonOut {
+			fmt.Printf("Updating %q from %s...\n", hc.Name, hc.SourceURL)
+		}
 		_, err := hubCtx.Client.HarnessConfigs().Reimport(ctx, hc.ID, "")
 		if err != nil {
-			fmt.Printf("  Failed: %s\n", err)
+			if !jsonOut {
+				fmt.Printf("  Failed: %s\n", err)
+			}
 			failed++
 			continue
 		}
-		fmt.Printf("  Done.\n")
+		if !jsonOut {
+			fmt.Printf("  Done.\n")
+		}
 		updated++
 	}
 
-	if isJSONOutput() {
+	if jsonOut {
 		return outputJSON(ActionResult{
 			Status:  "success",
 			Command: "harness-config update --all",

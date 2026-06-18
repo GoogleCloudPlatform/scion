@@ -721,7 +721,12 @@ func (s *Server) handleHarnessConfigReimport(w http.ResponseWriter, r *http.Requ
 	}
 
 	var req ReimportHarnessConfigRequest
-	_ = readJSON(r, &req)
+	if r.ContentLength > 0 {
+		if err := readJSON(r, &req); err != nil {
+			BadRequest(w, "Invalid request body: "+err.Error())
+			return
+		}
+	}
 
 	sourceURL := req.SourceURL
 	if sourceURL == "" {
@@ -751,6 +756,19 @@ func (s *Server) handleHarnessConfigReimport(w http.ResponseWriter, r *http.Requ
 		if !s.authorizeProjectImport(ctx, w, hc.ScopeID, "harness-configs") {
 			return
 		}
+	} else if hc.Scope == store.HarnessConfigScopeUser {
+		userIdent := GetUserIdentityFromContext(ctx)
+		if userIdent == nil {
+			writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required", nil)
+			return
+		}
+		if hc.OwnerID != userIdent.ID() {
+			writeError(w, http.StatusForbidden, ErrCodeForbidden, "You do not have permission to reimport another user's harness config", nil)
+			return
+		}
+	} else {
+		writeError(w, http.StatusForbidden, ErrCodeForbidden, "Reimport is not supported for this resource scope", nil)
+		return
 	}
 
 	if s.GetStorage() == nil {
