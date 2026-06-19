@@ -1,8 +1,8 @@
 # Antigravity Harness Bundle
 
 Scion harness configuration for
-[Antigravity](https://github.com/ptone/scion-antigravity), a Gemini-based
-coding agent CLI using OAuth via gnome-keyring.
+[Antigravity CLI](https://antigravity.google/product/antigravity-cli), a
+Gemini-based coding agent CLI using OAuth via gnome-keyring.
 
 ## Install
 
