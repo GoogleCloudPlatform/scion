@@ -64,7 +64,7 @@ except ImportError:
 OPENCODE_AUTH_FILE = "~/.local/share/opencode/auth.json"
 OPENCODE_CONFIG_FILE = "~/.config/opencode/opencode.json"
 
-VALID_AUTH_TYPES = ("api-key", "auth-file")
+VALID_AUTH_TYPES = ("api-key", "auth-file", "vertex-ai")
 
 # Exit codes mirror the contract documented in the design doc:
 #   0 = success
@@ -121,7 +121,43 @@ def _opencode_auth_file_present(file_paths: list[str]) -> bool:
     return os.path.isfile(_expand(OPENCODE_AUTH_FILE))
 
 
-def _select_auth_method(explicit: str, env_keys: set[str], file_paths: list[str]) -> tuple[str, str]:
+def _env_secret_files(candidates: dict[str, Any]) -> dict[str, str]:
+    """Map of env-var name -> container path of its 0600 secret value file."""
+    raw = candidates.get("env_secret_files") or {}
+    out: dict[str, str] = {}
+    if not isinstance(raw, dict):
+        return out
+    for k, v in raw.items():
+        if isinstance(k, str) and isinstance(v, str) and v:
+            out[k] = v
+    return out
+
+
+def _read_secret(env_secret_files: dict[str, str], name: str) -> str:
+    """Read the 0600 secret value file for an env var. Returns "" on miss."""
+    path = env_secret_files.get(name)
+    if not path:
+        return ""
+    real = _expand(path)
+    try:
+        with open(real, "r", encoding="utf-8") as f:
+            return f.read().rstrip("\r\n")
+    except OSError:
+        return ""
+
+
+def _resolve_secret(secret_files: dict[str, str], *names: str) -> str:
+    """Return the first non-empty secret value for the given env var names."""
+    for name in names:
+        val = _read_secret(secret_files, name)
+        if val:
+            return val
+    return ""
+
+
+def _select_auth_method(
+    explicit: str, env_keys: set[str], file_paths: list[str], candidates: dict[str, Any]
+) -> tuple[str, str]:
     """Pick an auth method.
 
     Returns (method, env_key_or_empty). env_key is the chosen API key env var
@@ -130,6 +166,12 @@ def _select_auth_method(explicit: str, env_keys: set[str], file_paths: list[str]
     has_anthropic = "ANTHROPIC_API_KEY" in env_keys
     has_openai = "OPENAI_API_KEY" in env_keys
     has_authfile = _opencode_auth_file_present(file_paths)
+
+    has_vertex_project = bool(env_keys & {"GOOGLE_CLOUD_PROJECT", "VERTEXAI_PROJECT"})
+    has_vertex_location = bool(env_keys & {"GOOGLE_CLOUD_REGION", "GOOGLE_CLOUD_LOCATION", "VERTEX_LOCATION"})
+    gcp_meta_mode = str(candidates.get("gcp_metadata_mode") or "").strip()
+    vertex_not_blocked = gcp_meta_mode != "block"
+    has_vertex = has_vertex_project and has_vertex_location and vertex_not_blocked
 
     if explicit:
         if explicit not in VALID_AUTH_TYPES:
@@ -153,18 +195,29 @@ def _select_auth_method(explicit: str, env_keys: set[str], file_paths: list[str]
                     f"found; expected {OPENCODE_AUTH_FILE}"
                 )
             return "auth-file", ""
+        if explicit == "vertex-ai":
+            if not has_vertex_project or not has_vertex_location:
+                raise ValueError(
+                    "opencode: auth type 'vertex-ai' selected but missing "
+                    "GOOGLE_CLOUD_PROJECT/VERTEXAI_PROJECT and/or "
+                    "GOOGLE_CLOUD_REGION/GOOGLE_CLOUD_LOCATION/VERTEX_LOCATION"
+                )
+            return "vertex-ai", ""
 
-    # Auto-detect precedence matches the compiled OpenCode harness.
+    # Auto-detect precedence: api-key > auth-file > vertex-ai.
     if has_anthropic:
         return "api-key", "ANTHROPIC_API_KEY"
     if has_openai:
         return "api-key", "OPENAI_API_KEY"
     if has_authfile:
         return "auth-file", ""
+    if has_vertex:
+        return "vertex-ai", ""
 
     raise ValueError(
         "opencode: no valid auth method found; set ANTHROPIC_API_KEY or "
-        f"OPENAI_API_KEY, or provide auth credentials at {OPENCODE_AUTH_FILE}"
+        f"OPENAI_API_KEY, provide auth credentials at {OPENCODE_AUTH_FILE}, "
+        "or configure GOOGLE_CLOUD_PROJECT + GOOGLE_CLOUD_REGION for Vertex AI"
     )
 
 
@@ -331,13 +384,15 @@ def _provision(manifest: dict[str, Any]) -> int:
     no_auth_cfg = harness_cfg.get("no_auth") or {}
     no_auth_behavior = str(no_auth_cfg.get("behavior") or "").strip()
 
+    secret_files = _env_secret_files(candidates)
+
     if not candidates and no_auth_behavior:
         print(f"opencode provision: no-auth mode (behavior={no_auth_behavior}), skipping auth setup", file=sys.stderr)
         method = "none"
         env_key = ""
     else:
         try:
-            method, env_key = _select_auth_method(explicit, env_keys, file_paths)
+            method, env_key = _select_auth_method(explicit, env_keys, file_paths, candidates)
         except ValueError as exc:
             print(str(exc), file=sys.stderr)
             return EXIT_ERROR
@@ -358,12 +413,21 @@ def _provision(manifest: dict[str, Any]) -> int:
         resolved_payload["env_var"] = env_key
     elif method == "auth-file":
         resolved_payload["auth_file"] = OPENCODE_AUTH_FILE
+    elif method == "vertex-ai":
+        resolved_payload["vertex_project_env"] = "VERTEXAI_PROJECT"
+        resolved_payload["vertex_location_env"] = "VERTEX_LOCATION"
 
-    # OpenCode does not require additional env injection from the script. The
-    # OpenCode CLI reads its own env precedence; the host already projected
-    # all candidate keys. We write an empty overlay so sciontool init has a
-    # well-formed file to consume.
     env_payload: dict[str, Any] = {}
+
+    if method == "vertex-ai":
+        project = _resolve_secret(secret_files, "GOOGLE_CLOUD_PROJECT", "VERTEXAI_PROJECT")
+        location = _resolve_secret(
+            secret_files, "GOOGLE_CLOUD_REGION", "GOOGLE_CLOUD_LOCATION", "VERTEX_LOCATION"
+        )
+        if project:
+            env_payload["VERTEXAI_PROJECT"] = project
+        if location:
+            env_payload["VERTEX_LOCATION"] = location
 
     try:
         _write_json(auth_out, resolved_payload)

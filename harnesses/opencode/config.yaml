@@ -61,7 +61,7 @@ capabilities:
     api_key: { support: "yes" }
     auth_file: { support: "yes" }
     oauth_token: { support: "no" }
-    vertex_ai: { support: "no", reason: "Vertex AI auth is not supported for this harness" }
+    vertex_ai: { support: "yes" }
   mcp:
     stdio: { support: "yes" }
     sse: { support: "yes" }
@@ -85,9 +85,18 @@ auth:
           type: file
           target_suffix: "/.local/share/opencode/auth.json"
           field: OpenCodeAuthFile
+    vertex-ai:
+      required_env:
+        - any_of: ["GOOGLE_CLOUD_PROJECT", "VERTEXAI_PROJECT"]
+        - any_of: ["GOOGLE_CLOUD_REGION", "GOOGLE_CLOUD_LOCATION", "VERTEX_LOCATION"]
   autodetect:
     env:
       ANTHROPIC_API_KEY: api-key
       OPENAI_API_KEY: api-key
+      GOOGLE_CLOUD_PROJECT: vertex-ai
+      VERTEXAI_PROJECT: vertex-ai
+      GOOGLE_CLOUD_REGION: vertex-ai
+      GOOGLE_CLOUD_LOCATION: vertex-ai
+      VERTEX_LOCATION: vertex-ai
     files:
       OPENCODE_AUTH: auth-file
