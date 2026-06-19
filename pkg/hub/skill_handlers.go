@@ -16,6 +16,7 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -697,34 +698,52 @@ func (s *Server) publishSkillVersion(w http.ResponseWriter, r *http.Request, ski
 		return
 	}
 
-	// Check for existing published version (immutability)
+	// Check for an existing version with this number.
+	// - Draft: reuse it (idempotent retry of an incomplete publish).
+	// - Published/deprecated/archived: reject as conflict.
+	var sv *store.SkillVersion
 	existing, err := s.store.GetSkillVersionByNumber(ctx, skillID, req.Version)
-	if err == nil && existing.Status == store.SkillVersionStatusPublished {
-		writeError(w, http.StatusConflict, "conflict",
-			fmt.Sprintf("version %s is already published and immutable; publish a new version instead", req.Version), nil)
-		return
-	}
-
-	// Create draft version
-	sv := &store.SkillVersion{
-		ID:      api.NewUUID(),
-		SkillID: skillID,
-		Version: req.Version,
-		Status:  store.SkillVersionStatusDraft,
-	}
-
-	if identity := GetIdentityFromContext(ctx); identity != nil {
-		sv.PublisherID = identity.ID()
-	}
-
-	if err := s.store.CreateSkillVersion(ctx, sv); err != nil {
-		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
-			writeError(w, http.StatusConflict, "conflict",
-				fmt.Sprintf("version %s already exists for this skill", req.Version), nil)
-			return
-		}
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
 		writeErrorFromErr(w, err, "")
 		return
+	}
+	if err == nil {
+		switch existing.Status {
+		case store.SkillVersionStatusDraft:
+			sv = existing
+		case store.SkillVersionStatusPublished:
+			writeError(w, http.StatusConflict, "conflict",
+				fmt.Sprintf("version %s is already published and immutable; publish a new version instead", req.Version), nil)
+			return
+		default:
+			writeError(w, http.StatusConflict, "conflict",
+				fmt.Sprintf("version %s already exists with status %q", req.Version, existing.Status), nil)
+			return
+		}
+	}
+
+	if sv == nil {
+		// Create new draft version
+		sv = &store.SkillVersion{
+			ID:      api.NewUUID(),
+			SkillID: skillID,
+			Version: req.Version,
+			Status:  store.SkillVersionStatusDraft,
+		}
+
+		if identity := GetIdentityFromContext(ctx); identity != nil {
+			sv.PublisherID = identity.ID()
+		}
+
+		if err := s.store.CreateSkillVersion(ctx, sv); err != nil {
+			if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+				writeError(w, http.StatusConflict, "conflict",
+					fmt.Sprintf("version %s already exists for this skill", req.Version), nil)
+				return
+			}
+			writeErrorFromErr(w, err, "")
+			return
+		}
 	}
 
 	response := PublishVersionResponse{
