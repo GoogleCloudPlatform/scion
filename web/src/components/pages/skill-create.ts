@@ -24,8 +24,6 @@
 
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
-// eslint-disable-next-line @typescript-eslint/ban-ts-comment
-// @ts-ignore — js-yaml ships no type declarations
 import yaml from 'js-yaml';
 
 import type { Capabilities, SkillVersion, SkillUploadUrl } from '../../shared/types.js';
@@ -71,7 +69,7 @@ function parseSkillFrontmatter(content: string): SkillFrontmatter | null {
   if (!match) return null;
 
   try {
-    const parsed = (yaml as { load(s: string): unknown }).load(match[1]) as Record<string, unknown>;
+    const parsed = yaml.load(match[1]) as Record<string, unknown>;
     if (!parsed || typeof parsed !== 'object') return null;
 
     const result: SkillFrontmatter = {};
@@ -134,6 +132,8 @@ export class ScionPageSkillCreate extends LitElement {
 
   private fileInputRef: HTMLInputElement | null = null;
   private skillMdInputRef: HTMLInputElement | null = null;
+  private redirectTimer: ReturnType<typeof setTimeout> | null = null;
+  private versionCreated = false;
 
   static override styles = css`
     :host {
@@ -473,6 +473,7 @@ export class ScionPageSkillCreate extends LitElement {
   override disconnectedCallback(): void {
     super.disconnectedCallback();
     if (this.debounceTimer) clearTimeout(this.debounceTimer);
+    if (this.redirectTimer) clearTimeout(this.redirectTimer);
   }
 
   private async checkCapabilities(): Promise<void> {
@@ -531,7 +532,11 @@ export class ScionPageSkillCreate extends LitElement {
   }
 
   private validateSemver(v: string): boolean {
-    return /^\d+\.\d+\.\d+(-[\w.]+)?$/.test(v.replace(/^v/, ''));
+    return /^\d+\.\d+\.\d+(-[\w.-]+)?(\+[\w.-]+)?$/.test(v.replace(/^v/, ''));
+  }
+
+  private cleanVersion(v: string): string {
+    return v.trim().replace(/^v/, '');
   }
 
   /* ================================================================ */
@@ -701,8 +706,8 @@ export class ScionPageSkillCreate extends LitElement {
     if (!this.name.trim()) return 'Skill name is required.';
     if (this.scope === 'project' && !this.scopeId.trim())
       return 'Project ID is required for project scope.';
-    if (!this.version.trim()) return 'Version is required.';
-    if (!this.validateSemver(this.version.trim()))
+    if (!this.cleanVersion(this.version)) return 'Version is required.';
+    if (!this.validateSemver(this.cleanVersion(this.version)))
       return 'Version must be valid semver (e.g. 1.0.0).';
 
     const files = this.allFiles;
@@ -786,7 +791,7 @@ export class ScionPageSkillCreate extends LitElement {
       const createVersionRes = await apiFetch(`/api/v1/skills/${skillId}/versions`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ version: this.version.trim(), files: filesPayload }),
+        body: JSON.stringify({ version: this.cleanVersion(this.version), files: filesPayload }),
       });
 
       if (!createVersionRes.ok) {
@@ -799,6 +804,7 @@ export class ScionPageSkillCreate extends LitElement {
         urls?: SkillUploadUrl[];
       };
       const uploadUrls = createData.uploadUrls || createData.urls || [];
+      this.versionCreated = true;
 
       // Step 3: Upload files
       await this.uploadFiles(files, uploadUrls);
@@ -816,7 +822,7 @@ export class ScionPageSkillCreate extends LitElement {
 
       // Step 5: Done → redirect
       this.flowState = 'done';
-      setTimeout(() => {
+      this.redirectTimer = setTimeout(() => {
         window.history.pushState({}, '', `/skills/${skillId}`);
         window.dispatchEvent(new PopStateEvent('popstate'));
       }, 1500);
@@ -948,7 +954,7 @@ export class ScionPageSkillCreate extends LitElement {
     const res = await apiFetch(`/api/v1/skills/${skillId}/finalize`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ version: this.version.trim(), manifest }),
+      body: JSON.stringify({ version: this.cleanVersion(this.version), manifest }),
     });
     if (!res.ok) {
       throw new Error(await extractApiError(res, `HTTP ${res.status}`));
@@ -960,6 +966,59 @@ export class ScionPageSkillCreate extends LitElement {
     this.error = null;
 
     const files = this.allFiles;
+
+    // If version creation never completed (step 2 failed), re-attempt from step 2
+    if (!this.versionCreated) {
+      this.flowState = 'uploading';
+      this.uploadResults = files.map((f) => ({
+        path: f.path,
+        size: f.file.size,
+        hash: '',
+        status: 'pending' as const,
+      }));
+
+      try {
+        const filesPayload = files.map((f) => ({ path: f.path, size: f.file.size }));
+        const createVersionRes = await apiFetch(`/api/v1/skills/${this.createdSkillId}/versions`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            version: this.cleanVersion(this.version),
+            files: filesPayload,
+          }),
+        });
+
+        if (!createVersionRes.ok) {
+          throw new Error(
+            await extractApiError(createVersionRes, `HTTP ${createVersionRes.status}`)
+          );
+        }
+
+        const createData = (await createVersionRes.json()) as {
+          version?: SkillVersion;
+          uploadUrls?: SkillUploadUrl[];
+          urls?: SkillUploadUrl[];
+        };
+        const uploadUrls = createData.uploadUrls || createData.urls || [];
+        this.versionCreated = true;
+
+        await this.uploadFiles(files, uploadUrls);
+
+        const failed = this.uploadResults.filter((r) => r.status === 'failed');
+        if (failed.length > 0) {
+          this.flowState = 'error';
+          this.error = `${failed.length} file(s) failed to upload.`;
+          return;
+        }
+      } catch (err) {
+        this.flowState = 'error';
+        this.error = err instanceof Error ? err.message : 'Retry failed';
+        return;
+      }
+
+      // Fall through to finalize below
+    }
+
     const failedFiles = this.uploadResults
       .map((r, i) => ({ result: r, index: i, file: files[i] }))
       .filter((x) => x.result.status === 'failed');
@@ -975,7 +1034,7 @@ export class ScionPageSkillCreate extends LitElement {
         const res = await apiFetch(`/api/v1/skills/${this.createdSkillId}/upload`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ version: this.version.trim(), files: filesPayload }),
+          body: JSON.stringify({ version: this.cleanVersion(this.version), files: filesPayload }),
         });
         if (!res.ok) {
           throw new Error(await extractApiError(res, 'Failed to get upload URLs'));
@@ -1016,7 +1075,7 @@ export class ScionPageSkillCreate extends LitElement {
       this.flowState = 'finalizing';
       await this.finalizeVersion(this.createdSkillId);
       this.flowState = 'done';
-      setTimeout(() => {
+      this.redirectTimer = setTimeout(() => {
         window.history.pushState({}, '', `/skills/${this.createdSkillId}`);
         window.dispatchEvent(new PopStateEvent('popstate'));
       }, 1500);
