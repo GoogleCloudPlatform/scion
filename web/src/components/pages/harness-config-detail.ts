@@ -106,6 +106,18 @@ export class ScionPageHarnessConfigDetail extends LitElement {
   @state()
   private reimportError = '';
 
+  @state()
+  private deleteDialogOpen = false;
+
+  @state()
+  private deleteInProgress = false;
+
+  @state()
+  private deleteFiles = true;
+
+  @state()
+  private deleteError = '';
+
   private fileBrowserDataSource: FileBrowserDataSource | null = null;
   private fileEditorDataSource: FileEditorDataSource | null = null;
   private buildPollTimer: ReturnType<typeof setTimeout> | null = null;
@@ -258,6 +270,67 @@ export class ScionPageHarnessConfigDetail extends LitElement {
       margin-top: 0.5rem;
     }
 
+    .image-section {
+      margin-top: 1.5rem;
+    }
+    .image-section h2 {
+      font-size: 1.1rem;
+      font-weight: 600;
+      margin: 0 0 1rem;
+    }
+    .image-info {
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+      padding: 0.75rem 1rem;
+      background: var(--sl-color-neutral-50);
+      border: 1px solid var(--sl-color-neutral-200);
+      border-radius: var(--sl-border-radius-medium);
+      flex-wrap: wrap;
+    }
+    .image-path {
+      font-family: var(--sl-font-mono);
+      font-size: 0.8125rem;
+      word-break: break-all;
+      flex: 1;
+      min-width: 0;
+    }
+    .image-type-badge {
+      display: inline-block;
+      padding: 0.125rem 0.5rem;
+      border-radius: var(--sl-border-radius-pill);
+      font-size: 0.6875rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      white-space: nowrap;
+    }
+    .image-type-badge.local {
+      background: var(--sl-color-neutral-100);
+      color: var(--sl-color-neutral-700);
+    }
+    .image-type-badge.remote {
+      background: var(--sl-color-primary-50);
+      color: var(--sl-color-primary-700);
+    }
+    .image-meta {
+      font-size: 0.75rem;
+      color: var(--sl-color-neutral-500);
+    }
+
+    .dialog-warning {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      font-size: 0.8125rem;
+      color: var(--sl-color-danger-600);
+      margin-top: 0.75rem;
+    }
+    .dialog-error {
+      color: var(--sl-color-danger-600);
+      font-size: 0.8125rem;
+      margin-top: 0.5rem;
+    }
+
     .error-state,
     .loading-state {
       text-align: center;
@@ -397,7 +470,7 @@ export class ScionPageHarnessConfigDetail extends LitElement {
         )}
       </div>
 
-      ${this.renderHeader()} ${this.renderFilesSection()} ${this.renderBuildDialog()} ${this.renderBuildLog()}
+      ${this.renderHeader()} ${this.renderFilesSection()} ${this.renderImageSection()} ${this.renderBuildDialog()} ${this.renderBuildLog()} ${this.renderDeleteDialog()}
     `;
   }
 
@@ -425,15 +498,15 @@ export class ScionPageHarnessConfigDetail extends LitElement {
                 Refresh from Source
               </sl-button>
             ` : nothing}
-            ${this.hasDockerfile ? html`
+            ${can(hc._capabilities, 'delete') || can(hc._capabilities, 'manage') ? html`
               <sl-button
                 size="small"
-                variant="primary"
-                @click=${this.openBuildDialog}
-                ?disabled=${this.buildRunning}
+                variant="danger"
+                outline
+                @click=${() => { this.deleteDialogOpen = true; this.deleteError = ''; }}
               >
-                <sl-icon slot="prefix" name="hammer"></sl-icon>
-                ${this.buildRunning ? 'Building...' : 'Build Image'}
+                <sl-icon slot="prefix" name="trash"></sl-icon>
+                Delete
               </sl-button>
             ` : nothing}
           </div>
@@ -497,6 +570,49 @@ export class ScionPageHarnessConfigDetail extends LitElement {
       </div>
     `;
   }
+  private isRemoteImage(image: string): boolean {
+    return image.includes('/') && (image.includes('.') || image.includes(':'));
+  }
+
+  private renderImageSection() {
+    const hc = this.harnessConfig!;
+    const image = hc.config?.image;
+    const showSection = image || this.hasDockerfile;
+    if (!showSection) return nothing;
+
+    const isRemote = image ? this.isRemoteImage(image) : false;
+
+    return html`
+      <div class="image-section">
+        <h2>Image</h2>
+        <div class="image-info">
+          ${image ? html`
+            <span class="image-type-badge ${isRemote ? 'remote' : 'local'}">
+              ${isRemote ? 'Remote' : 'Local'}
+            </span>
+            <span class="image-path">${image}</span>
+          ` : html`
+            <span class="image-meta">No image configured</span>
+          `}
+          ${hc.updated ? html`
+            <span class="image-meta">Last updated: ${new Date(hc.updated).toLocaleString()}</span>
+          ` : nothing}
+          ${this.hasDockerfile ? html`
+            <sl-button
+              size="small"
+              variant="primary"
+              @click=${this.openBuildDialog}
+              ?disabled=${this.buildRunning}
+            >
+              <sl-icon slot="prefix" name="hammer"></sl-icon>
+              ${this.buildRunning ? 'Building...' : 'Build Image'}
+            </sl-button>
+          ` : nothing}
+        </div>
+      </div>
+    `;
+  }
+
   // ── Refresh from Source ──
 
   private async startReimport(): Promise<void> {
@@ -702,6 +818,86 @@ export class ScionPageHarnessConfigDetail extends LitElement {
         <pre class="build-log">${this.buildLog}</pre>
       </div>
     `;
+  }
+
+  // ── Delete ──
+
+  private renderDeleteDialog() {
+    if (!this.deleteDialogOpen || !this.harnessConfig) return nothing;
+    const hc = this.harnessConfig;
+    return html`
+      <sl-dialog
+        label="Delete harness config"
+        open
+        @sl-request-close=${(e: Event) => {
+          if (this.deleteInProgress) e.preventDefault();
+          else this.deleteDialogOpen = false;
+        }}
+      >
+        <p>
+          Are you sure you want to delete
+          <strong>${hc.displayName || hc.name}</strong>?
+        </p>
+        <sl-checkbox
+          ?checked=${this.deleteFiles}
+          @sl-change=${(e: Event) => {
+            this.deleteFiles = (e.target as HTMLInputElement).checked;
+          }}
+        >
+          Also delete stored files
+        </sl-checkbox>
+        <div class="dialog-warning">
+          <sl-icon name="exclamation-triangle"></sl-icon>
+          This action cannot be undone.
+        </div>
+        ${this.deleteError ? html`<div class="dialog-error">${this.deleteError}</div>` : nothing}
+        <div slot="footer">
+          <sl-button
+            variant="default"
+            size="small"
+            ?disabled=${this.deleteInProgress}
+            @click=${() => { this.deleteDialogOpen = false; }}
+          >
+            Cancel
+          </sl-button>
+          <sl-button
+            variant="danger"
+            size="small"
+            ?loading=${this.deleteInProgress}
+            ?disabled=${this.deleteInProgress}
+            @click=${() => this.confirmDelete()}
+          >
+            Delete
+          </sl-button>
+        </div>
+      </sl-dialog>
+    `;
+  }
+
+  private async confirmDelete(): Promise<void> {
+    if (!this.harnessConfig) return;
+    this.deleteInProgress = true;
+    this.deleteError = '';
+    try {
+      const params = new URLSearchParams({ deleteFiles: String(this.deleteFiles) });
+      const response = await apiFetch(
+        `/api/v1/harness-configs/${this.harnessConfig.id}?${params.toString()}`,
+        { method: 'DELETE' }
+      );
+      if (!response.ok && response.status !== 204) {
+        throw new Error(
+          await extractApiError(response, `Failed to delete: HTTP ${response.status}`)
+        );
+      }
+      this.deleteDialogOpen = false;
+      // Navigate back to the list view
+      const backLink = this.backLinks()[0];
+      window.location.href = backLink.href;
+    } catch (err) {
+      this.deleteError = err instanceof Error ? err.message : 'Delete failed';
+    } finally {
+      this.deleteInProgress = false;
+    }
   }
 
   override disconnectedCallback(): void {

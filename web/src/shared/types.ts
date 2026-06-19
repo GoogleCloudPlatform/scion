@@ -460,6 +460,15 @@ export interface TemplateFileInfo {
   mode?: string;
 }
 
+export interface HarnessConfigData {
+  harness?: string;
+  image?: string;
+  user?: string;
+  model?: string;
+  args?: string[];
+  env?: Record<string, string>;
+}
+
 export interface HarnessConfig {
   id: string;
   name: string;
@@ -467,6 +476,7 @@ export interface HarnessConfig {
   displayName?: string;
   description?: string;
   harness: string;
+  config?: HarnessConfigData;
   status: string;
   scope: string;
   scopeId?: string;

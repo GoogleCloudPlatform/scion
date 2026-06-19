@@ -942,26 +942,23 @@ export class ScionPageAgentDetail extends LitElement {
 
       <sl-tab-group @sl-tab-show=${this.handleTabShow}>
         <sl-tab slot="nav" panel="status">Status</sl-tab>
-        ${this.agent.cloudLogging ? html`<sl-tab slot="nav" panel="logs">Logs</sl-tab>` : nothing}
+        <sl-tab slot="nav" panel="logs">Logs</sl-tab>
         <sl-tab slot="nav" panel="messages">Messages</sl-tab>
         <sl-tab slot="nav" panel="configuration">Configuration</sl-tab>
 
         <sl-tab-panel name="status">${this.renderStatusTab()}</sl-tab-panel>
-        ${this.agent.cloudLogging
-          ? html`
-              <sl-tab-panel name="logs">
-                <scion-agent-log-viewer
-                  agentId=${this.agentId}
-                  .brokers=${this.agent.runtimeBrokerId
-                    ? {
-                        [this.agent.runtimeBrokerId]:
-                          this.agent.runtimeBrokerName || this.agent.runtimeBrokerId,
-                      }
-                    : {}}
-                ></scion-agent-log-viewer>
-              </sl-tab-panel>
-            `
-          : nothing}
+        <sl-tab-panel name="logs">
+          <scion-agent-log-viewer
+            agentId=${this.agentId}
+            ?cloudLogging=${this.agent.cloudLogging || false}
+            .brokers=${this.agent.runtimeBrokerId
+              ? {
+                  [this.agent.runtimeBrokerId]:
+                    this.agent.runtimeBrokerName || this.agent.runtimeBrokerId,
+                }
+              : {}}
+          ></scion-agent-log-viewer>
+        </sl-tab-panel>
         <sl-tab-panel name="messages">
           <scion-agent-message-viewer
             agentId=${this.agentId}

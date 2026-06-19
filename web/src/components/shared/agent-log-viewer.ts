@@ -54,6 +54,10 @@ export class ScionAgentLogViewer extends LitElement {
   @property()
   agentId = '';
 
+  /** Whether Cloud Logging is available for this agent. */
+  @property({ type: Boolean })
+  cloudLogging = true;
+
   /** Available brokers for filtering (id -> name). */
   @property({ type: Object })
   brokers: Record<string, string> = {};
@@ -67,6 +71,9 @@ export class ScionAgentLogViewer extends LitElement {
   @state() private loaded = false;
   @state() private selectedBrokerId = '';
   @state() private selectedSeverity = '';
+
+  /** Plain-text logs from the broker (fallback when cloud logging is unavailable). */
+  @state() private brokerLogs: string | null = null;
 
   private eventSource: EventSource | null = null;
 
@@ -184,6 +191,20 @@ export class ScionAgentLogViewer extends LitElement {
       background: var(--scion-surface, #ffffff);
     }
 
+    .broker-logs {
+      background: var(--scion-bg-subtle, #f1f5f9);
+      border: 1px solid var(--scion-border, #e2e8f0);
+      border-radius: var(--sl-border-radius-medium, 0.5rem);
+      padding: 1rem;
+      font-family: var(--scion-font-mono, monospace);
+      font-size: 0.8125rem;
+      line-height: 1.6;
+      white-space: pre-wrap;
+      word-break: break-word;
+      max-height: 600px;
+      overflow-y: auto;
+    }
+
     .stream-indicator {
       display: inline-flex;
       align-items: center;
@@ -217,7 +238,11 @@ export class ScionAgentLogViewer extends LitElement {
   loadLogs(): void {
     if (this.loaded) return;
     this.loaded = true;
-    void this.fetchLogs();
+    if (this.cloudLogging) {
+      void this.fetchLogs();
+    } else {
+      void this.fetchBrokerLogs();
+    }
   }
 
   private async fetchLogs(): Promise<void> {
@@ -249,6 +274,34 @@ export class ScionAgentLogViewer extends LitElement {
 
       const data = (await res.json()) as CloudLogsResponse;
       this.mergeEntries(data.entries);
+    } catch (err) {
+      this.error = err instanceof Error ? err.message : 'Failed to fetch logs';
+    } finally {
+      this.loading = false;
+    }
+  }
+
+  private async fetchBrokerLogs(): Promise<void> {
+    if (!this.agentId) return;
+    this.loading = true;
+    this.error = null;
+
+    try {
+      const res = await apiFetch(`/api/v1/agents/${this.agentId}/logs?tail=500`);
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({})) as { error?: { message?: string }; message?: string };
+        throw new Error(
+          (errData.error as { message?: string })?.message || errData.message || `HTTP ${res.status}`
+        );
+      }
+
+      const contentType = res.headers.get('Content-Type') || '';
+      if (contentType.includes('application/json')) {
+        const data = await res.json() as { logs?: string };
+        this.brokerLogs = data.logs || '';
+      } else {
+        this.brokerLogs = await res.text();
+      }
     } catch (err) {
       this.error = err instanceof Error ? err.message : 'Failed to fetch logs';
     } finally {
@@ -371,7 +424,11 @@ export class ScionAgentLogViewer extends LitElement {
   }
 
   private handleRefresh(): void {
-    void this.fetchLogs();
+    if (this.cloudLogging) {
+      void this.fetchLogs();
+    } else {
+      void this.fetchBrokerLogs();
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -379,10 +436,65 @@ export class ScionAgentLogViewer extends LitElement {
   // -------------------------------------------------------------------------
 
   override render() {
+    if (!this.cloudLogging) {
+      return html`
+        ${this.renderBrokerToolbar()}
+        ${this.renderBrokerContent()}
+      `;
+    }
     return html`
       ${this.renderToolbar()}
       ${this.renderContent()}
     `;
+  }
+
+  private renderBrokerToolbar() {
+    return html`
+      <div class="toolbar">
+        <sl-button
+          size="small"
+          variant="default"
+          ?loading=${this.loading}
+          ?disabled=${this.loading}
+          @click=${this.handleRefresh}
+        >
+          <sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>
+          Refresh
+        </sl-button>
+      </div>
+    `;
+  }
+
+  private renderBrokerContent() {
+    if (this.loading && this.brokerLogs === null) {
+      return html`
+        <div class="state-msg">
+          <sl-spinner></sl-spinner>
+          <span>Loading logs...</span>
+        </div>
+      `;
+    }
+
+    if (this.error && this.brokerLogs === null) {
+      return html`
+        <div class="state-msg">
+          <sl-icon name="exclamation-triangle"></sl-icon>
+          <span>${this.error}</span>
+          <sl-button size="small" @click=${this.handleRefresh}>Retry</sl-button>
+        </div>
+      `;
+    }
+
+    if (!this.brokerLogs) {
+      return html`
+        <div class="state-msg">
+          <sl-icon name="file-text"></sl-icon>
+          <span>No log entries found</span>
+        </div>
+      `;
+    }
+
+    return html`<pre class="broker-logs">${this.brokerLogs}</pre>`;
   }
 
   private renderToolbar() {
