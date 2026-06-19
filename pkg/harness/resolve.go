@@ -40,6 +40,7 @@ type ResolveOptions struct {
 	TemplatePaths []string                  // optional template dirs (highest priority)
 	ProfileName   string                    // active profile (for settings overlay)
 	Settings      *config.VersionedSettings // optional settings overlay
+	ConfigDirPath string                    // explicit harness-config dir (Hub-hydrated path); takes priority over name-based lookup
 }
 
 // ResolvedHarness is the result of harness.Resolve. The selected
@@ -67,7 +68,13 @@ func Resolve(_ context.Context, opts ResolveOptions) (*ResolvedHarness, error) {
 		return nil, fmt.Errorf("harness.Resolve requires a name")
 	}
 
-	hcDir, hcErr := config.FindHarnessConfigDir(opts.Name, opts.ProjectPath, opts.TemplatePaths...)
+	var hcDir *config.HarnessConfigDir
+	var hcErr error
+	if opts.ConfigDirPath != "" {
+		hcDir, hcErr = config.LoadHarnessConfigDir(opts.ConfigDirPath)
+	} else {
+		hcDir, hcErr = config.FindHarnessConfigDir(opts.Name, opts.ProjectPath, opts.TemplatePaths...)
+	}
 
 	entry := config.HarnessConfigEntry{Harness: opts.Name}
 	if hcDir != nil {
