@@ -738,6 +738,7 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 		TemplatePaths: templatePaths,
 		ProfileName:   profileName,
 		Settings:      settings,
+		ConfigDirPath: api.HarnessConfigPathFromContext(ctx),
 	})
 	if err != nil {
 		return "", "", nil, fmt.Errorf("failed to resolve harness for %q: %w", harnessConfigName, err)
