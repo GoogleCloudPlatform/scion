@@ -595,7 +595,7 @@ export class ScionPageHarnessConfigDetail extends LitElement {
             <span class="image-meta">No image configured</span>
           `}
           ${hc.updated ? html`
-            <span class="image-meta">Last updated: ${new Date(hc.updated).toLocaleString()}</span>
+            <span class="image-meta">Last updated: ${new Date(hc.updated).toLocaleString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' })}</span>
           ` : nothing}
           ${this.hasDockerfile ? html`
             <sl-button
@@ -884,7 +884,7 @@ export class ScionPageHarnessConfigDetail extends LitElement {
         `/api/v1/harness-configs/${this.harnessConfig.id}?${params.toString()}`,
         { method: 'DELETE' }
       );
-      if (!response.ok && response.status !== 204) {
+      if (!response.ok) {
         throw new Error(
           await extractApiError(response, `Failed to delete: HTTP ${response.status}`)
         );
