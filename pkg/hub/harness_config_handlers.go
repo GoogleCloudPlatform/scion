@@ -411,6 +411,21 @@ func (s *Server) deleteHarnessConfig(w http.ResponseWriter, r *http.Request, id 
 			writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required", nil)
 			return
 		}
+	} else if existing.Scope == store.HarnessConfigScopeUser {
+		userIdent := GetUserIdentityFromContext(ctx)
+		if userIdent == nil {
+			writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required", nil)
+			return
+		}
+		if existing.OwnerID != userIdent.ID() {
+			writeError(w, http.StatusForbidden, ErrCodeForbidden,
+				"You do not have permission to delete another user's harness config", nil)
+			return
+		}
+	} else {
+		writeError(w, http.StatusForbidden, ErrCodeForbidden,
+			"Delete is not supported for this resource scope", nil)
+		return
 	}
 
 	if deleteFiles && existing.StoragePath != "" {

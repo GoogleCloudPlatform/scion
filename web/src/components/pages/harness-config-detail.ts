@@ -113,7 +113,7 @@ export class ScionPageHarnessConfigDetail extends LitElement {
   private deleteInProgress = false;
 
   @state()
-  private deleteFiles = true;
+  private deleteFiles = false;
 
   @state()
   private deleteError = '';
