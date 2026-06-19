@@ -135,6 +135,11 @@ export class ScionPageSkillCreate extends LitElement {
   private redirectTimer: ReturnType<typeof setTimeout> | null = null;
   private versionCreated = false;
 
+  /* --- allFiles cache --- */
+  private cachedAllFiles: SelectedFile[] | null = null;
+  private cachedSkillMdContent = '';
+  private cachedAdditionalFiles: SelectedFile[] = [];
+
   static override styles = css`
     :host {
       display: block;
@@ -508,6 +513,14 @@ export class ScionPageSkillCreate extends LitElement {
   }
 
   private get allFiles(): SelectedFile[] {
+    if (
+      this.cachedAllFiles !== null &&
+      this.cachedSkillMdContent === this.skillMdContent &&
+      this.cachedAdditionalFiles === this.additionalFiles
+    ) {
+      return this.cachedAllFiles;
+    }
+
     const files: SelectedFile[] = [];
     if (this.hasSkillMd) {
       const blob = new Blob([this.skillMdContent], { type: 'text/markdown' });
@@ -518,6 +531,10 @@ export class ScionPageSkillCreate extends LitElement {
       if (f.path === 'SKILL.md' && this.hasSkillMd) continue;
       files.push(f);
     }
+
+    this.cachedAllFiles = files;
+    this.cachedSkillMdContent = this.skillMdContent;
+    this.cachedAdditionalFiles = this.additionalFiles;
     return files;
   }
 
@@ -880,11 +897,13 @@ export class ScionPageSkillCreate extends LitElement {
     const queue = indices ?? Array.from({ length: files.length }, (_, i) => i);
     let queuePos = 0;
 
+    const urlMap = new Map(uploadUrls.map((u) => [u.path, u]));
+
     const uploadOne = async (): Promise<void> => {
       while (queuePos < queue.length) {
         const i = queue[queuePos++];
         const sf = files[i];
-        const urlInfo = uploadUrls.find((u) => u.path === sf.path);
+        const urlInfo = urlMap.get(sf.path);
         if (!urlInfo) {
           this.uploadResults = this.uploadResults.map((r, ri) =>
             ri === i ? { ...r, status: 'failed' as const, error: 'No upload URL' } : r
@@ -905,17 +924,39 @@ export class ScionPageSkillCreate extends LitElement {
           const hash = `sha256:${hashHex}`;
 
           const headers: Record<string, string> = urlInfo.headers || {};
-          let res = await fetch(urlInfo.url, {
-            method: urlInfo.method || 'PUT',
-            headers,
-            body: buffer,
-          });
-          if (!res.ok) {
+          let res: Response;
+          try {
             res = await fetch(urlInfo.url, {
               method: urlInfo.method || 'PUT',
               headers,
               body: buffer,
             });
+          } catch (networkErr) {
+            // Retry once on network failure (DNS, CORS, connection refused, etc.)
+            try {
+              res = await fetch(urlInfo.url, {
+                method: urlInfo.method || 'PUT',
+                headers,
+                body: buffer,
+              });
+            } catch (retryErr) {
+              throw new Error(
+                `Network error: ${retryErr instanceof Error ? retryErr.message : 'Upload failed'}`
+              );
+            }
+          }
+          if (!res.ok) {
+            try {
+              res = await fetch(urlInfo.url, {
+                method: urlInfo.method || 'PUT',
+                headers,
+                body: buffer,
+              });
+            } catch (retryErr) {
+              throw new Error(
+                `Network error: ${retryErr instanceof Error ? retryErr.message : 'Upload failed'}`
+              );
+            }
           }
           if (!res.ok) throw new Error(`Upload failed: ${res.status}`);
 
@@ -1045,16 +1086,15 @@ export class ScionPageSkillCreate extends LitElement {
         };
         const uploadUrls = data.uploadUrls || data.urls || [];
 
-        for (const f of failedFiles) {
-          this.uploadResults = this.uploadResults.map((r, ri) => {
-            if (ri !== f.index) return r;
-            // eslint-disable-next-line @typescript-eslint/no-unused-vars
-            const { error: _discarded, ...rest } = r;
-            return { ...rest, status: 'pending' as const };
-          });
-        }
+        const failedIndexSet = new Set(failedFiles.map((f) => f.index));
+        this.uploadResults = this.uploadResults.map((r, ri) => {
+          if (!failedIndexSet.has(ri)) return r;
+          // eslint-disable-next-line @typescript-eslint/no-unused-vars
+          const { error: _discarded, ...rest } = r;
+          return { ...rest, status: 'pending' as const };
+        });
 
-        const failedIndices = failedFiles.map((f) => f.index);
+        const failedIndices = [...failedIndexSet];
         await this.uploadFiles(files, uploadUrls, failedIndices);
 
         const stillFailed = this.uploadResults.filter((r) => r.status === 'failed');
