@@ -169,6 +169,8 @@ def _select_auth_method(
 
     has_vertex_project = bool(env_keys & {"GOOGLE_CLOUD_PROJECT", "VERTEXAI_PROJECT"})
     has_vertex_location = bool(env_keys & {"GOOGLE_CLOUD_REGION", "GOOGLE_CLOUD_LOCATION", "VERTEX_LOCATION"})
+    # gcp_metadata_mode is not currently populated in auth-candidates.json by
+    # the Go staging layer; this guard is reserved for future use.
     gcp_meta_mode = str(candidates.get("gcp_metadata_mode") or "").strip()
     vertex_not_blocked = gcp_meta_mode != "block"
     has_vertex = has_vertex_project and has_vertex_location and vertex_not_blocked
