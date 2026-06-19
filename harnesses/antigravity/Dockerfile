@@ -22,12 +22,13 @@ RUN mkdir -p /home/scion/.gemini/antigravity-cli \
   && mkdir -p /home/scion/.agents \
   && chown -R scion:scion /home/scion/.gemini /home/scion/.agents
 
-# Install latest Antigravity CLI from the auto-updater manifest
-# Manifest: https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests/<platform>.json
+# Fetch the latest CLI via the auto-updater manifest for the current platform.
+# This trades build reproducibility for staying current, but verifies the
+# download integrity via SHA-512 checksum from the manifest.
 RUN PLATFORM="linux_$(uname -m | sed 's/x86_64/amd64/' | sed 's/aarch64/arm64/')" \
   && MANIFEST=$(curl -fsSL "https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests/${PLATFORM}.json") \
-  && URL=$(echo "$MANIFEST" | sed -n 's/.*"url"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p') \
-  && SHA512=$(echo "$MANIFEST" | sed -n 's/.*"sha512"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p') \
+  && URL=$(echo "$MANIFEST" | python3 -c "import sys, json; print(json.load(sys.stdin)['url'])") \
+  && SHA512=$(echo "$MANIFEST" | python3 -c "import sys, json; print(json.load(sys.stdin)['sha512'])")
   && curl -fsSL -o /tmp/cli.tar.gz "$URL" \
   && echo "${SHA512}  /tmp/cli.tar.gz" | sha512sum -c - \
   && tar -xzf /tmp/cli.tar.gz -C /tmp antigravity \
