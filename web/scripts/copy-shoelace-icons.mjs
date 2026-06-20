@@ -89,6 +89,7 @@ const USED_ICONS = [
   'funnel',
   'gear',
   'github',
+  'graph-up',
   'grid-3x3-gap',
   'google',
   'hdd-rack',
