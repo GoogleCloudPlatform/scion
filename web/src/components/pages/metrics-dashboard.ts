@@ -63,8 +63,8 @@ const CHART_COLORS = [
   '#ec4899', '#06b6d4', '#84cc16', '#f97316', '#6366f1',
 ];
 
-@customElement('scion-page-admin-metrics')
-export class ScionPageAdminMetrics extends LitElement {
+@customElement('scion-page-metrics')
+export class ScionPageMetrics extends LitElement {
   @state() private loading = true;
   @state() private error: string | null = null;
   @state() private activeTab = 'summary';
@@ -247,7 +247,7 @@ export class ScionPageAdminMetrics extends LitElement {
 
     try {
       const response = await apiFetch(
-        `/api/v1/admin/metrics-dashboard?view=${view}&period=${this.periodDays}`
+        `/api/v1/metrics/dashboard?view=${view}&period=${this.periodDays}`
       );
 
       if (!response.ok) {

@@ -530,14 +530,31 @@ func (s *MetricsDashboardService) queryDailyUniqueCount(ctx context.Context, met
 	return points, nil
 }
 
-// handleAdminMetricsDashboard serves the metrics dashboard API.
-func (s *Server) handleAdminMetricsDashboard(w http.ResponseWriter, r *http.Request) {
-	user := GetUserIdentityFromContext(r.Context())
-	if user == nil || user.Role() != "admin" {
-		Forbidden(w)
+// handleMetricsDashboard serves the metrics dashboard API to any authenticated user.
+func (s *Server) handleMetricsDashboard(w http.ResponseWriter, r *http.Request) {
+	identity := GetUserIdentityFromContext(r.Context())
+	if identity == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required", nil)
 		return
 	}
 
+	s.serveMetricsDashboard(w, r)
+}
+
+// handleAdminMetricsDashboard serves the metrics dashboard API (legacy admin-scoped path).
+// Kept for backward compatibility — delegates to the same handler with relaxed auth.
+func (s *Server) handleAdminMetricsDashboard(w http.ResponseWriter, r *http.Request) {
+	identity := GetUserIdentityFromContext(r.Context())
+	if identity == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required", nil)
+		return
+	}
+
+	s.serveMetricsDashboard(w, r)
+}
+
+// serveMetricsDashboard contains the shared metrics dashboard logic.
+func (s *Server) serveMetricsDashboard(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		MethodNotAllowed(w)
 		return

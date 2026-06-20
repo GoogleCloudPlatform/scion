@@ -48,7 +48,7 @@ const PAGE_TITLES: Record<string, string> = {
   '/admin/users': 'Users',
   '/admin/groups': 'Groups',
   '/admin/server-config': 'Server Config',
-  '/admin/metrics': 'Metrics',
+  '/metrics': 'Metrics',
   '/admin/skill-registries': 'Skill Registries',
   '/skills': 'Skills',
   '/github-app/installed': 'GitHub App Setup',
