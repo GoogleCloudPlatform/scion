@@ -340,7 +340,13 @@ func discoverResourceDirs(root, sourceURL string, kind resourceImportKind) ([]re
 		}
 		dir := filepath.Join(root, entry.Name())
 		if kind.isResourceDir(dir) {
-			dirs = append(dirs, resourceDir{entry.Name(), dir, sourceURL})
+			childName := entry.Name()
+			if kind.marker == "config.yaml" {
+				if hcDir, err := config.LoadHarnessConfigDir(dir); err == nil && hcDir.Config.Name != "" {
+					childName = hcDir.Config.Name
+				}
+			}
+			dirs = append(dirs, resourceDir{childName, dir, sourceURL})
 		} else {
 			skipped = append(skipped, skippedDir{entry.Name(), "no " + kind.marker})
 		}

@@ -74,7 +74,11 @@ func LoadHarnessConfigDir(dirPath string) (*HarnessConfigDir, error) {
 
 	name := filepath.Base(absPath)
 	if entry.Name != "" {
-		name = entry.Name
+		cleaned := filepath.Base(entry.Name)
+		if cleaned == "." || cleaned == ".." || cleaned != entry.Name {
+			return nil, fmt.Errorf("invalid name in config.yaml: %q contains path components", entry.Name)
+		}
+		name = cleaned
 	}
 
 	return &HarnessConfigDir{
