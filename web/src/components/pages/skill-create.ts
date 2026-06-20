@@ -561,10 +561,13 @@ export class ScionPageSkillCreate extends LitElement {
   /* ================================================================ */
 
   private onSkillMdInput(e: Event): void {
-    const value = (e.target as HTMLElement & { value: string }).value;
+    const target = e.target as HTMLElement & { value: string };
+    const value = target.value;
 
     if (new Blob([value]).size > MAX_PASTE_SIZE) {
       this.validationError = 'SKILL.md content exceeds 512 KB. Please upload the file instead.';
+      this.skillMdContent = '';
+      target.value = '';
       return;
     }
     this.validationError = null;
@@ -720,6 +723,7 @@ export class ScionPageSkillCreate extends LitElement {
   /* ================================================================ */
 
   private validateForPublish(): string | null {
+    if (this.validationError) return this.validationError;
     if (!this.name.trim()) return 'Skill name is required.';
     if (this.scope === 'project' && !this.scopeId.trim())
       return 'Project ID is required for project scope.';
@@ -739,6 +743,7 @@ export class ScionPageSkillCreate extends LitElement {
   }
 
   private validateForCreate(): string | null {
+    if (this.validationError) return this.validationError;
     if (!this.name.trim()) return 'Skill name is required.';
     if (this.scope === 'project' && !this.scopeId.trim())
       return 'Project ID is required for project scope.';
@@ -924,41 +929,38 @@ export class ScionPageSkillCreate extends LitElement {
           const hash = `sha256:${hashHex}`;
 
           const headers: Record<string, string> = urlInfo.headers || {};
-          let res: Response;
-          try {
-            res = await fetch(urlInfo.url, {
+          const doUpload = () =>
+            fetch(urlInfo.url, {
               method: urlInfo.method || 'PUT',
               headers,
               body: buffer,
             });
-          } catch (networkErr) {
+
+          let res: Response;
+          try {
+            res = await doUpload();
+          } catch {
             // Retry once on network failure (DNS, CORS, connection refused, etc.)
             try {
-              res = await fetch(urlInfo.url, {
-                method: urlInfo.method || 'PUT',
-                headers,
-                body: buffer,
-              });
+              res = await doUpload();
             } catch (retryErr) {
               throw new Error(
                 `Network error: ${retryErr instanceof Error ? retryErr.message : 'Upload failed'}`
               );
             }
           }
+
           if (!res.ok) {
+            // Retry once on HTTP error
             try {
-              res = await fetch(urlInfo.url, {
-                method: urlInfo.method || 'PUT',
-                headers,
-                body: buffer,
-              });
+              res = await doUpload();
             } catch (retryErr) {
               throw new Error(
                 `Network error: ${retryErr instanceof Error ? retryErr.message : 'Upload failed'}`
               );
             }
+            if (!res.ok) throw new Error(`Upload failed: ${res.status}`);
           }
-          if (!res.ok) throw new Error(`Upload failed: ${res.status}`);
 
           this.uploadResults = this.uploadResults.map((r, ri) =>
             ri === i ? { ...r, status: 'done' as const, hash } : r
