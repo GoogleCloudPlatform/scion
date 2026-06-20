@@ -591,6 +591,134 @@ func (s *MetricsDashboardService) queryDailyUniqueCount(ctx context.Context, met
 	return points, nil
 }
 
+// ProjectMetricsSummary contains lightweight scalar metrics for a project's status bar.
+type ProjectMetricsSummary struct {
+	SessionsCount24h int64  `json:"sessionsCount24h"`
+	APICalls24h      int64  `json:"apiCalls24h"`
+	TokenUsage24h    int64  `json:"tokenUsage24h"`
+	ActiveAgents24h  int    `json:"activeAgents24h"`
+	PeriodLabel      string `json:"periodLabel"`
+}
+
+// QueryProjectSummary returns lightweight scalar metrics for a project over the last 24 hours.
+func (s *MetricsDashboardService) QueryProjectSummary(ctx context.Context, projectID string) (*ProjectMetricsSummary, error) {
+	cacheKey := fmt.Sprintf("project-summary:%s", projectID)
+	if cached, ok := s.getCached(cacheKey); ok {
+		return cached.(*ProjectMetricsSummary), nil
+	}
+
+	now := time.Now().UTC()
+	start := now.AddDate(0, 0, -1) // 24 hours
+
+	filter := []string{projectFilter(projectID)}
+
+	summary := &ProjectMetricsSummary{PeriodLabel: "Last 24 hours"}
+	var queryErrors []string
+
+	sessions, err := s.querySum(ctx, "agent.session.count", start, now, filter)
+	if err != nil {
+		queryErrors = append(queryErrors, fmt.Sprintf("sessions: %v", err))
+	} else {
+		summary.SessionsCount24h = sessions
+	}
+
+	apiCalls, err := s.querySum(ctx, "gen_ai.api.calls", start, now, filter)
+	if err != nil {
+		queryErrors = append(queryErrors, fmt.Sprintf("API calls: %v", err))
+	} else {
+		summary.APICalls24h = apiCalls
+	}
+
+	inputTokens, err := s.querySum(ctx, "gen_ai.tokens.input", start, now, filter)
+	if err != nil {
+		queryErrors = append(queryErrors, fmt.Sprintf("input tokens: %v", err))
+	}
+	outputTokens, err := s.querySum(ctx, "gen_ai.tokens.output", start, now, filter)
+	if err != nil {
+		queryErrors = append(queryErrors, fmt.Sprintf("output tokens: %v", err))
+	}
+	summary.TokenUsage24h = inputTokens + outputTokens
+
+	agents, err := s.queryUniqueLabels(ctx, "agent.session.count", "metric.labels.agent_id", start, now, filter)
+	if err != nil {
+		queryErrors = append(queryErrors, fmt.Sprintf("active agents: %v", err))
+	} else {
+		summary.ActiveAgents24h = len(agents)
+	}
+
+	if len(queryErrors) > 0 {
+		return summary, fmt.Errorf("partial query failures: %s", strings.Join(queryErrors, "; "))
+	}
+
+	s.setCache(cacheKey, summary)
+	return summary, nil
+}
+
+// handleProjectMetricsSummary returns lightweight metrics summary for a project.
+func (s *Server) handleProjectMetricsSummary(w http.ResponseWriter, r *http.Request, projectID string) {
+	ctx := r.Context()
+
+	if r.Method != http.MethodGet {
+		MethodNotAllowed(w)
+		return
+	}
+
+	// Verify project exists
+	project, err := s.store.GetProject(ctx, projectID)
+	if err != nil {
+		if err == store.ErrNotFound {
+			NotFound(w, "Project")
+			return
+		}
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	// Authorize: any authenticated user with view access
+	identity := GetIdentityFromContext(ctx)
+	if identity == nil {
+		Unauthorized(w)
+		return
+	}
+
+	if userIdent, ok := identity.(UserIdentity); ok {
+		decision := s.authzService.CheckAccess(ctx, userIdent, Resource{
+			Type:    "project",
+			ID:      project.ID,
+			OwnerID: project.OwnerID,
+		}, ActionRead)
+		if !decision.Allowed {
+			Forbidden(w)
+			return
+		}
+	} else if agentIdent, ok := identity.(AgentIdentity); ok {
+		if agentIdent.ProjectID() != projectID {
+			Forbidden(w)
+			return
+		}
+	} else {
+		Forbidden(w)
+		return
+	}
+
+	// If metrics service is not configured, return unavailable indicator
+	if s.metricsDashboard == nil {
+		writeJSON(w, http.StatusOK, map[string]interface{}{"available": false})
+		return
+	}
+
+	data, err := s.metricsDashboard.QueryProjectSummary(ctx, projectID)
+	if err != nil {
+		if data == nil {
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+				"Failed to query project metrics summary", nil)
+			return
+		}
+		slog.Warn("Partial project metrics summary failure", "projectID", projectID, "error", err)
+	}
+	writeJSON(w, http.StatusOK, data)
+}
+
 // handleMetricsDashboard serves the metrics dashboard API to any authenticated user.
 func (s *Server) handleMetricsDashboard(w http.ResponseWriter, r *http.Request) {
 	identity := GetUserIdentityFromContext(r.Context())

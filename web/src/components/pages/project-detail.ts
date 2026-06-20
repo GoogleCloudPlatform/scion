@@ -144,6 +144,18 @@ export class ScionPageProjectDetail extends LitElement {
   } | null = null;
 
   /**
+   * Metrics summary for the project (null = not loaded or unavailable)
+   */
+  @state()
+  private metricsSummary: {
+    sessionsCount24h: number;
+    apiCalls24h: number;
+    tokenUsage24h: number;
+    activeAgents24h: number;
+    periodLabel: string;
+  } | null = null;
+
+  /**
    * Whether the messages section is expanded (lazy-load trigger)
    */
   @state()
@@ -841,6 +853,9 @@ export class ScionPageProjectDetail extends LitElement {
         this.getTabDataSource(this.project.sharedDirs[0].name);
       }
 
+      // Fetch metrics summary (non-blocking, gracefully degrades)
+      void this.loadMetricsSummary();
+
       // Auto-discover GitHub App installation if project has a GitHub remote but no installation
       if (this.project && this.project.gitRemote && /github\.com[/:]/.test(this.project.gitRemote) && this.project.githubInstallationId == null) {
         void this.autoDiscoverGitHubApp();
@@ -851,6 +866,32 @@ export class ScionPageProjectDetail extends LitElement {
     } finally {
       this.loading = false;
     }
+  }
+
+  private async loadMetricsSummary(): Promise<void> {
+    try {
+      const res = await apiFetch(`/api/v1/projects/${this.projectId}/metrics-summary`);
+      if (!res.ok) {
+        this.metricsSummary = null;
+        return;
+      }
+      const data = await res.json();
+      // If metrics service is unavailable, the backend returns {available: false}
+      if (data && data.available === false) {
+        this.metricsSummary = null;
+        return;
+      }
+      this.metricsSummary = data;
+    } catch {
+      this.metricsSummary = null;
+    }
+  }
+
+  private formatTokenCount(n: number): string {
+    if (n >= 1_000_000_000) return `${(n / 1_000_000_000).toFixed(1)}B`;
+    if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+    if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
+    return n.toLocaleString();
   }
 
   private backgroundRefresh(): void {
@@ -1332,6 +1373,35 @@ export class ScionPageProjectDetail extends LitElement {
           </span>
         </div>
       </div>
+
+      ${this.metricsSummary ? html`
+        <div class="stats-row" style="margin-top: 0.5rem;">
+          <div class="stat">
+            <span class="stat-label">Sessions (24h)</span>
+            <span class="stat-value">${this.metricsSummary.sessionsCount24h}</span>
+          </div>
+          <div class="stat">
+            <span class="stat-label">API Calls (24h)</span>
+            <span class="stat-value">${this.metricsSummary.apiCalls24h}</span>
+          </div>
+          <div class="stat">
+            <span class="stat-label">Tokens (24h)</span>
+            <span class="stat-value">${this.formatTokenCount(this.metricsSummary.tokenUsage24h)}</span>
+          </div>
+          <div class="stat">
+            <span class="stat-label">Active Agents (24h)</span>
+            <span class="stat-value">${this.metricsSummary.activeAgents24h}</span>
+          </div>
+          <div style="display: flex; align-items: center; margin-left: auto;">
+            <a href="/projects/${this.projectId}/metrics" style="text-decoration: none;">
+              <sl-button size="small" variant="text">
+                <sl-icon slot="prefix" name="graph-up"></sl-icon>
+                View Details
+              </sl-button>
+            </a>
+          </div>
+        </div>
+      ` : nothing}
 
       ${this.pullResult
         ? html`
