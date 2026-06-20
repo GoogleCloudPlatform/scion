@@ -1289,6 +1289,12 @@ export class ScionPageProjectDetail extends LitElement {
                 </sl-button>
               `
             : nothing}
+          <a href="/projects/${this.projectId}/metrics" style="text-decoration: none;">
+            <sl-button size="small">
+              <sl-icon slot="prefix" name="graph-up"></sl-icon>
+              Metrics
+            </sl-button>
+          </a>
           ${canAny(this.project?._capabilities, 'update', 'delete', 'manage')
             ? html`
                 <a href="/projects/${this.projectId}/settings" style="text-decoration: none;">

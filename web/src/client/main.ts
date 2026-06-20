@@ -163,6 +163,7 @@ const ROUTES: RouteConfig[] = [
   { pattern: /^\/projects\/[^/]+\/templates\/[^/]+$/, tag: 'scion-page-template-detail', load: () => import('../components/pages/template-detail.js') },
   { pattern: /^\/projects\/[^/]+\/harness-configs\/[^/]+$/, tag: 'scion-page-harness-config-detail', load: () => import('../components/pages/harness-config-detail.js') },
   { pattern: /^\/projects\/[^/]+\/schedules$/, tag: 'scion-page-project-schedules', load: () => import('../components/pages/project-schedules.js') },
+  { pattern: /^\/projects\/[^/]+\/metrics$/, tag: 'scion-page-metrics', load: () => import('../components/pages/metrics-dashboard.js') },
   { pattern: /^\/projects\/[^/]+$/, tag: 'scion-page-project-detail', load: () => import('../components/pages/project-detail.js') },
   { pattern: /^\/agents\/new$/, tag: 'scion-page-agent-create', load: () => import('../components/pages/agent-create.js') },
   { pattern: /^\/agents\/[^/]+\/configure$/, tag: 'scion-page-agent-configure', load: () => import('../components/pages/agent-configure.js') },

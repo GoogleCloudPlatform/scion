@@ -15,7 +15,7 @@
  */
 
 import { LitElement, html, css, nothing } from 'lit';
-import { customElement, state } from 'lit/decorators.js';
+import { customElement, property, state } from 'lit/decorators.js';
 import { Chart, registerables } from 'chart.js';
 
 import { apiFetch, extractApiError } from '../../client/api.js';
@@ -65,6 +65,9 @@ const CHART_COLORS = [
 
 @customElement('scion-page-metrics')
 export class ScionPageMetrics extends LitElement {
+  @property({ type: String })
+  projectId = '';
+
   @state() private loading = true;
   @state() private error: string | null = null;
   @state() private activeTab = 'summary';
@@ -226,6 +229,11 @@ export class ScionPageMetrics extends LitElement {
 
   override connectedCallback(): void {
     super.connectedCallback();
+    // Parse projectId from URL if not set as property (same pattern as project-detail.ts)
+    if (!this.projectId && typeof window !== 'undefined') {
+      const match = window.location.pathname.match(/\/projects\/([^/]+)\/metrics/);
+      if (match) this.projectId = match[1];
+    }
     void this.loadView('summary');
   }
 
@@ -246,8 +254,11 @@ export class ScionPageMetrics extends LitElement {
     this.error = null;
 
     try {
+      const basePath = this.projectId
+        ? `/api/v1/projects/${this.projectId}/metrics`
+        : `/api/v1/metrics/dashboard`;
       const response = await apiFetch(
-        `/api/v1/metrics/dashboard?view=${view}&period=${this.periodDays}`
+        `${basePath}?view=${view}&period=${this.periodDays}`
       );
 
       if (!response.ok) {
@@ -355,7 +366,7 @@ export class ScionPageMetrics extends LitElement {
       <div class="header">
         <div class="header-left">
           <sl-icon name="graph-up"></sl-icon>
-          <h1>Metrics Dashboard</h1>
+          <h1>${this.projectId ? 'Project Metrics' : 'Metrics Dashboard'}</h1>
         </div>
         <div class="period-selector">
           ${[7, 14, 30].map(

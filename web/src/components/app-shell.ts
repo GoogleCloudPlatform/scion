@@ -322,6 +322,9 @@ export class ScionApp extends LitElement {
     if (this.currentPath.match(/^\/projects\/[^/]+\/schedules$/)) {
       return 'Schedules';
     }
+    if (this.currentPath.match(/^\/projects\/[^/]+\/metrics$/)) {
+      return 'Project Metrics';
+    }
     if (this.currentPath.match(/^\/projects\/[^/]+\/templates\/[^/]+$/)) {
       return 'Template';
     }
