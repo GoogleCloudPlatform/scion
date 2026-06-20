@@ -321,12 +321,12 @@ export class ScionPageMetrics extends LitElement {
     labels: string[],
     datasets: { label: string; data: number[]; backgroundColor?: string; borderColor?: string }[]
   ): void {
-    const existing = this.charts.get(canvasId);
-    if (existing) existing.destroy();
-
     requestAnimationFrame(() => {
       const canvas = this.shadowRoot?.getElementById(canvasId) as HTMLCanvasElement | null;
       if (!canvas) return;
+
+      const existing = this.charts.get(canvasId);
+      if (existing) existing.destroy();
 
       const chart = new Chart(canvas, {
         type,

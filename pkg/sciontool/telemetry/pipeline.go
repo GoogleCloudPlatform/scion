@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -51,6 +52,7 @@ type Pipeline struct {
 	metricFlushCtx  context.Context
 	metricFlushCnl  context.CancelFunc
 	metricLastFlush time.Time
+	metricFlushWg   sync.WaitGroup
 }
 
 // New creates a new telemetry pipeline.
@@ -154,7 +156,11 @@ func (p *Pipeline) Start(ctx context.Context) error {
 	// Start metric flush goroutine for batching exports to Cloud Monitoring.
 	if p.exporter != nil {
 		p.metricFlushCtx, p.metricFlushCnl = context.WithCancel(ctx)
-		go p.metricFlushLoop()
+		p.metricFlushWg.Add(1)
+		go func() {
+			defer p.metricFlushWg.Done()
+			p.metricFlushLoop()
+		}()
 	}
 
 	// Register pipeline health gauge and export error counter.
@@ -193,7 +199,8 @@ func (p *Pipeline) Stop(ctx context.Context) error {
 		p.metricFlushCnl()
 		p.metricFlushCnl = nil
 	}
-	p.flushMetricBuffer(ctx)
+	p.metricFlushWg.Wait()
+	p.flushMetricBuffer(ctx, true)
 
 	// Stop receiver first
 	if p.receiver != nil {
@@ -346,7 +353,7 @@ func (p *Pipeline) metricFlushLoop() {
 		case <-p.metricFlushCtx.Done():
 			return
 		case <-ticker.C:
-			p.flushMetricBuffer(p.metricFlushCtx)
+			p.flushMetricBuffer(p.metricFlushCtx, false)
 		}
 	}
 }
@@ -359,12 +366,13 @@ func (p *Pipeline) metricFlushLoop() {
 // Cloud Monitoring requires a minimum 10-second interval between writes for the
 // same time series. This method enforces metricFlushInterval between exports to
 // prevent rapid consecutive flushes (e.g. periodic tick followed by shutdown drain)
-// from triggering sampling-rate rejections.
-func (p *Pipeline) flushMetricBuffer(ctx context.Context) {
+// from triggering sampling-rate rejections. Pass force=true during shutdown to
+// bypass the interval check and drain all remaining buffered metrics.
+func (p *Pipeline) flushMetricBuffer(ctx context.Context, force bool) {
 	p.metricBufMu.Lock()
 	buf := p.metricBuf
 	sinceLastFlush := time.Since(p.metricLastFlush)
-	if len(buf) > 0 && sinceLastFlush < metricFlushInterval {
+	if len(buf) > 0 && !force && sinceLastFlush < metricFlushInterval {
 		p.metricBufMu.Unlock()
 		log.Debug("Skipping metric flush — last export was %v ago (minimum %v)", sinceLastFlush.Round(time.Millisecond), metricFlushInterval)
 		return
@@ -503,13 +511,20 @@ func mergeMetricDataPoints(a, b *metricpb.Metric) *metricpb.Metric {
 	}
 }
 
-// attrSetKey creates a stable string key from a sorted list of proto attributes.
+// attrSetKey creates a stable string key from a list of proto attributes.
+// Attributes are copied and sorted by key to ensure a stable, order-independent key.
 func attrSetKey(attrs []*commonpb.KeyValue) string {
 	if len(attrs) == 0 {
 		return ""
 	}
+	sorted := make([]*commonpb.KeyValue, len(attrs))
+	copy(sorted, attrs)
+	sort.Slice(sorted, func(i, j int) bool {
+		return sorted[i].Key < sorted[j].Key
+	})
+
 	var b strings.Builder
-	for i, kv := range attrs {
+	for i, kv := range sorted {
 		if i > 0 {
 			b.WriteByte(';')
 		}

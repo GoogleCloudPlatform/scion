@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -492,6 +493,9 @@ func (s *MetricsDashboardService) queryGroupedTimeSeries(ctx context.Context, me
 	for label, points := range seriesMap {
 		result = append(result, LabeledTimeSeries{Label: label, Points: points})
 	}
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].Label < result[j].Label
+	})
 	return result, nil
 }
 
@@ -597,6 +601,9 @@ func (s *MetricsDashboardService) queryDailyUniqueCount(ctx context.Context, met
 			Value:     int64(len(agents)),
 		})
 	}
+	sort.Slice(points, func(i, j int) bool {
+		return points[i].Timestamp < points[j].Timestamp
+	})
 	return points, nil
 }
 
