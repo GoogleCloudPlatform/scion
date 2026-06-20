@@ -16,6 +16,8 @@
 ARG BASE_IMAGE
 FROM ${BASE_IMAGE}
 
+ARG TARGETARCH
+
 USER root
 
 RUN mkdir -p /home/scion/.gemini/antigravity-cli \
@@ -25,13 +27,13 @@ RUN mkdir -p /home/scion/.gemini/antigravity-cli \
 # Fetch the latest CLI via the auto-updater manifest for the current platform.
 # This trades build reproducibility for staying current, but verifies the
 # download integrity via SHA-512 checksum from the manifest.
-RUN PLATFORM="linux_$(uname -m | sed 's/x86_64/amd64/' | sed 's/aarch64/arm64/')" \
+RUN PLATFORM="linux_${TARGETARCH:-amd64}" \
   && MANIFEST=$(curl -fsSL "https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests/${PLATFORM}.json") \
   && URL=$(printf '%s\n' "$MANIFEST" | python3 -c "import sys, json; print(json.load(sys.stdin)['url'])") \
   && SHA512=$(printf '%s\n' "$MANIFEST" | python3 -c "import sys, json; print(json.load(sys.stdin)['sha512'])") \
   && curl -fsSL -o /tmp/cli.tar.gz "$URL" \
   && printf '%s  /tmp/cli.tar.gz\n' "$SHA512" | sha512sum -c - \
-  && tar -xzf /tmp/cli.tar.gz -C /tmp \
+  && tar -xzf /tmp/cli.tar.gz -C /tmp antigravity \
   && mv /tmp/antigravity /usr/local/bin/agy \
   && chmod +x /usr/local/bin/agy \
   && rm /tmp/cli.tar.gz
