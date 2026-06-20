@@ -117,6 +117,24 @@ func TestLoadHarnessConfigDir_InvalidUnknownField(t *testing.T) {
 	}
 }
 
+func TestLoadHarnessConfigDir_RejectsPathTraversalName(t *testing.T) {
+	for _, bad := range []string{"../evil", "sub/dir", "etc/passwd", "..", "."} {
+		tmpDir := t.TempDir()
+		configDir := filepath.Join(tmpDir, "legit")
+		if err := os.MkdirAll(configDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		yaml := "harness: claude\nname: " + bad + "\n"
+		if err := os.WriteFile(filepath.Join(configDir, "config.yaml"), []byte(yaml), 0644); err != nil {
+			t.Fatal(err)
+		}
+		_, err := LoadHarnessConfigDir(configDir)
+		if err == nil {
+			t.Errorf("expected error for name %q, got nil", bad)
+		}
+	}
+}
+
 func TestLoadHarnessConfigDir_NotFound(t *testing.T) {
 	_, err := LoadHarnessConfigDir("/nonexistent/path")
 	if err == nil {
