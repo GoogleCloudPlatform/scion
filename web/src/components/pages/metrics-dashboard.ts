@@ -256,7 +256,7 @@ export class ScionPageMetrics extends LitElement {
     try {
       const basePath = this.projectId
         ? `/api/v1/projects/${this.projectId}/metrics`
-        : `/api/v1/metrics/dashboard`;
+        : `/api/v1/metrics/`;
       const response = await apiFetch(
         `${basePath}?view=${view}&period=${this.periodDays}`
       );

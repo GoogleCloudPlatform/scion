@@ -156,6 +156,15 @@ func applyQueryOptions(opts []QueryOption) *queryConfig {
 	return cfg
 }
 
+// cacheKeySuffix returns a cache key suffix for the query config.
+// Returns empty string for global queries, ":projectID" for project-scoped.
+func (c *queryConfig) cacheKeySuffix() string {
+	if c.ProjectID != "" {
+		return ":" + c.ProjectID
+	}
+	return ""
+}
+
 // projectFilter returns the Cloud Monitoring filter clause for a project ID.
 // Metrics are labeled with both grove_id and project_id; we filter on grove_id
 // which is the canonical label used in the GCP metrics exporter.
@@ -166,7 +175,7 @@ func projectFilter(projectID string) string {
 // QuerySummary returns aggregate metric counts for the given period.
 func (s *MetricsDashboardService) QuerySummary(ctx context.Context, periodDays int, opts ...QueryOption) (*DashboardSummary, error) {
 	cfg := applyQueryOptions(opts)
-	cacheKey := fmt.Sprintf("summary:%d:%s", periodDays, cfg.ProjectID)
+	cacheKey := fmt.Sprintf("summary:%d%s", periodDays, cfg.cacheKeySuffix())
 	if cached, ok := s.getCached(cacheKey); ok {
 		return cached.(*DashboardSummary), nil
 	}
@@ -224,7 +233,7 @@ func (s *MetricsDashboardService) QuerySummary(ctx context.Context, periodDays i
 // QuerySessions returns daily session counts and active agent counts.
 func (s *MetricsDashboardService) QuerySessions(ctx context.Context, periodDays int, opts ...QueryOption) (*SessionsView, error) {
 	cfg := applyQueryOptions(opts)
-	cacheKey := fmt.Sprintf("sessions:%d:%s", periodDays, cfg.ProjectID)
+	cacheKey := fmt.Sprintf("sessions:%d%s", periodDays, cfg.cacheKeySuffix())
 	if cached, ok := s.getCached(cacheKey); ok {
 		return cached.(*SessionsView), nil
 	}
@@ -265,7 +274,7 @@ func (s *MetricsDashboardService) QuerySessions(ctx context.Context, periodDays 
 // QueryModelCalls returns API call data grouped by model and harness.
 func (s *MetricsDashboardService) QueryModelCalls(ctx context.Context, periodDays int, opts ...QueryOption) (*ModelCallsView, error) {
 	cfg := applyQueryOptions(opts)
-	cacheKey := fmt.Sprintf("model-calls:%d:%s", periodDays, cfg.ProjectID)
+	cacheKey := fmt.Sprintf("model-calls:%d%s", periodDays, cfg.cacheKeySuffix())
 	if cached, ok := s.getCached(cacheKey); ok {
 		return cached.(*ModelCallsView), nil
 	}
@@ -306,7 +315,7 @@ func (s *MetricsDashboardService) QueryModelCalls(ctx context.Context, periodDay
 // QueryTokens returns token usage data grouped by model.
 func (s *MetricsDashboardService) QueryTokens(ctx context.Context, periodDays int, opts ...QueryOption) (*TokensView, error) {
 	cfg := applyQueryOptions(opts)
-	cacheKey := fmt.Sprintf("tokens:%d:%s", periodDays, cfg.ProjectID)
+	cacheKey := fmt.Sprintf("tokens:%d%s", periodDays, cfg.cacheKeySuffix())
 	if cached, ok := s.getCached(cacheKey); ok {
 		return cached.(*TokensView), nil
 	}
@@ -732,6 +741,10 @@ func (s *Server) handleMetricsDashboard(w http.ResponseWriter, r *http.Request) 
 
 // handleAdminMetricsDashboard serves the metrics dashboard API (legacy admin-scoped path).
 // Kept for backward compatibility — delegates to the same handler with relaxed auth.
+// NOTE: This endpoint intentionally no longer requires admin role. The metrics dashboard
+// was moved from admin-only to all-authenticated-users access as part of the metrics
+// dashboard refactoring. The old admin-scoped URL is maintained for browser bookmark
+// backward compatibility and will be removed in a future release.
 func (s *Server) handleAdminMetricsDashboard(w http.ResponseWriter, r *http.Request) {
 	identity := GetUserIdentityFromContext(r.Context())
 	if identity == nil {
@@ -743,7 +756,7 @@ func (s *Server) handleAdminMetricsDashboard(w http.ResponseWriter, r *http.Requ
 }
 
 // handleProjectMetricsDashboard serves the per-project metrics dashboard.
-func (s *Server) handleProjectMetricsDashboard(w http.ResponseWriter, r *http.Request, projectID, subPath string) {
+func (s *Server) handleProjectMetricsDashboard(w http.ResponseWriter, r *http.Request, projectID, _ string) {
 	ctx := r.Context()
 
 	// Verify project exists
