@@ -696,6 +696,7 @@ type V1RuntimeConfig struct {
 // HarnessConfigEntry defines a harness configuration entry in versioned settings.
 // The Harness field is required and specifies the harness type this config applies to.
 type HarnessConfigEntry struct {
+	Name             string               `json:"name,omitempty" yaml:"name,omitempty" koanf:"name"`
 	Harness          string               `json:"harness" yaml:"harness" koanf:"harness"`
 	Image            string               `json:"image,omitempty" yaml:"image,omitempty" koanf:"image"`
 	User             string               `json:"user,omitempty" yaml:"user,omitempty" koanf:"user"`

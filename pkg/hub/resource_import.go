@@ -314,6 +314,11 @@ func discoverResourceDirs(root, sourceURL string, kind resourceImportKind) ([]re
 				name = derived
 			}
 		}
+		if kind.marker == "config.yaml" {
+			if hcDir, err := config.LoadHarnessConfigDir(root); err == nil && hcDir.Config.Name != "" {
+				name = hcDir.Config.Name
+			}
+		}
 		return []resourceDir{{name, root, sourceURL}}, nil, nil
 	}
 

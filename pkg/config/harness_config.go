@@ -72,8 +72,13 @@ func LoadHarnessConfigDir(dirPath string) (*HarnessConfigDir, error) {
 		return nil, fmt.Errorf("failed to parse config.yaml: %w", err)
 	}
 
+	name := filepath.Base(absPath)
+	if entry.Name != "" {
+		name = entry.Name
+	}
+
 	return &HarnessConfigDir{
-		Name:   filepath.Base(absPath),
+		Name:   name,
 		Path:   absPath,
 		Config: entry,
 	}, nil

@@ -233,6 +233,10 @@
       "type": "object",
       "required": ["harness"],
       "properties": {
+        "name": {
+          "type": "string",
+          "description": "Override name for this harness-config, used instead of the directory name during import/install."
+        },
         "harness": {
           "type": "string",
           "minLength": 1,
