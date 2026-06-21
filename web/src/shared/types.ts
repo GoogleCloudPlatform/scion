@@ -373,6 +373,7 @@ export interface AgentAppliedConfig {
   image?: string;
   harnessConfig?: string;
   harnessAuth?: string;
+  noAuth?: boolean;
   model?: string;
   profile?: string;
   task?: string;
