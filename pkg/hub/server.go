@@ -592,7 +592,7 @@ type Server struct {
 	ctx              context.Context    // Server-lifetime context; cancelled on Shutdown
 	ctxCancel        context.CancelFunc // Cancels ctx
 
-	logQueryService  *LogQueryService          // Cloud Logging query service (nil = disabled)
+	logQueryService  *LogQueryService         // Cloud Logging query service (nil = disabled)
 	metricsDashboard *MetricsDashboardService // Cloud Monitoring metrics dashboard (nil = disabled)
 
 	// Telegram link service for code-based account linking (nil = disabled)
@@ -2479,7 +2479,9 @@ func (s *Server) CleanupResources(ctx context.Context) error {
 			s.logQueryService.Close()
 		}
 		if s.metricsDashboard != nil {
-			s.metricsDashboard.Close()
+			if err := s.metricsDashboard.Close(); err != nil {
+				slog.Warn("Failed to close metrics dashboard", "error", err)
+			}
 		}
 	})
 	return nil

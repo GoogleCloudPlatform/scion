@@ -34,12 +34,12 @@ import (
 )
 
 const (
-	metricPrefix   = "workload.googleapis.com/"
-	cacheTTL       = 5 * time.Minute
-	maxPeriodDays  = 90
-	defaultPeriod  = 7
-	alignmentDay   = 86400 // seconds in a day
-	alignmentHour  = 3600
+	metricPrefix  = "workload.googleapis.com/"
+	cacheTTL      = 5 * time.Minute
+	maxPeriodDays = 90
+	defaultPeriod = 7
+	alignmentDay  = 86400 // seconds in a day
+	alignmentHour = 3600
 )
 
 // MetricsDashboardService queries Google Cloud Monitoring for Scion telemetry metrics.
