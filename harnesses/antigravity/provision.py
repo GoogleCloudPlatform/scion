@@ -18,7 +18,6 @@ import argparse
 import json
 import os
 import shutil
-import subprocess
 import sys
 from typing import Any
 
@@ -58,12 +57,7 @@ def _write_json(path: str, payload: Any) -> None:
 
 def _present_env_keys(candidates: dict[str, Any]) -> set[str]:
     raw = candidates.get("env_vars") or []
-    keys = {str(k) for k in raw if isinstance(k, str)}
-    # Also detect AGY_KEYRING_TOKEN from environment (may be injected
-    # as a plain env var rather than staged through the secret pipeline).
-    if os.environ.get("AGY_KEYRING_TOKEN"):
-        keys.add("AGY_KEYRING_TOKEN")
-    return keys
+    return {str(k) for k in raw if isinstance(k, str)}
 
 
 def _env_secret_files(candidates: dict[str, Any]) -> dict[str, str]:
@@ -91,23 +85,12 @@ def _read_secret(env_secret_files: dict[str, str], name: str) -> str:
     return os.environ.get(name, "")
 
 
-def _parse_env_output(output: str, env: dict[str, str]) -> None:
-    """Parse KEY=VALUE lines from daemon output into env dict."""
-    for line in output.splitlines():
-        for var in (
-            "DBUS_SESSION_BUS_ADDRESS", "DBUS_SESSION_BUS_PID",
-            "GNOME_KEYRING_CONTROL", "SSH_AUTH_SOCK",
-            "GNOME_KEYRING_PID",
-        ):
-            if line.startswith(var + "="):
-                val = line.split("=", 1)[1].rstrip(";").strip("'\"")
-                env[var] = val
-
-
 def _select_auth_method(
-    explicit: str, env_keys: set[str]
+    explicit: str, env_keys: set[str], secret_files: dict[str, str]
 ) -> tuple[str, str]:
-    has_keyring = "AGY_KEYRING_TOKEN" in env_keys
+    has_token = "AGY_TOKEN" in secret_files or bool(_read_secret(secret_files, "AGY_TOKEN"))
+    has_gcp_project = any(k in env_keys for k in ("GOOGLE_CLOUD_PROJECT",))
+    has_gcp_location = any(k in env_keys for k in ("GOOGLE_CLOUD_LOCATION", "GOOGLE_CLOUD_REGION"))
 
     if explicit:
         if explicit not in VALID_AUTH_TYPES:
@@ -116,28 +99,24 @@ def _select_auth_method(
                 f"valid types are: {', '.join(VALID_AUTH_TYPES)}"
             )
         if explicit == "vertex-ai":
-            if has_keyring:
-                return "vertex-ai", "AGY_KEYRING_TOKEN"
-            raise ValueError(
-                "antigravity: auth type 'vertex-ai' selected but "
-                "AGY_KEYRING_TOKEN secret not found"
-            )
+            if not has_token:
+                raise ValueError("antigravity: auth type 'vertex-ai' selected but AGY_TOKEN secret not found")
+            if not has_gcp_project:
+                raise ValueError("antigravity: auth type 'vertex-ai' selected but GOOGLE_CLOUD_PROJECT not found")
+            if not has_gcp_location:
+                raise ValueError("antigravity: auth type 'vertex-ai' selected but GOOGLE_CLOUD_LOCATION/REGION not found")
+            return "vertex-ai", "AGY_TOKEN"
         if explicit == "oauth-token":
-            if has_keyring:
-                return "oauth-token", "AGY_KEYRING_TOKEN"
-            raise ValueError(
-                "antigravity: auth type 'oauth-token' selected but "
-                "AGY_KEYRING_TOKEN secret not found"
-            )
+            if not has_token:
+                raise ValueError("antigravity: auth type 'oauth-token' selected but AGY_TOKEN secret not found")
+            return "oauth-token", "AGY_TOKEN"
         if explicit == "none":
             return "none", ""
 
-    if has_keyring:
-        # AGY_USE_GCP=true promotes to vertex-ai (enterprise) mode
-        use_gcp = os.environ.get("AGY_USE_GCP", "").lower() in ("true", "1", "yes")
-        if use_gcp:
-            return "vertex-ai", "AGY_KEYRING_TOKEN"
-        return "oauth-token", "AGY_KEYRING_TOKEN"
+    if has_token:
+        if has_gcp_project and has_gcp_location:
+            return "vertex-ai", "AGY_TOKEN"
+        return "oauth-token", "AGY_TOKEN"
 
     return "none", ""
 
@@ -194,26 +173,13 @@ def _generate_hooks_json(home: str) -> None:
     )
 
 
-def _generate_wrapper_script(
-    home: str, has_token: bool, is_enterprise: bool,
-) -> None:
-    """Generate agy-wrapper.sh that inits keyring and execs AGY.
+def _generate_wrapper_script(home: str, is_enterprise: bool) -> None:
+    """Generate agy-wrapper.sh that execs AGY.
 
-    The keyring daemons must run in the same process tree as AGY so they
-    stay alive for the duration of the session. A provisioner-started daemon
-    dies when the provisioner exits, so we bootstrap inline here.
-
-    Token injection always includes an env-var fallback because the
-    provisioner runs before scion-env is sourced — AGY_KEYRING_TOKEN may
-    only be available in the child process environment, not during provisioning.
-
-    GCP/enterprise settings are also patched here at runtime for the same
-    reason — GOOGLE_CLOUD_PROJECT/GOOGLE_CLOUD_LOCATION and AGY_USE_GCP
+    GCP/enterprise settings are patched at runtime because
+    GOOGLE_CLOUD_PROJECT/GOOGLE_CLOUD_LOCATION and AGY_USE_GCP
     are only available in the child environment.
     """
-    secret_path = os.path.join(
-        home, ".scion", "harness", "secrets", "AGY_KEYRING_TOKEN"
-    )
     settings_path = os.path.join(
         home, ".gemini", "antigravity-cli", "settings.json"
     )
@@ -221,8 +187,6 @@ def _generate_wrapper_script(
         home, ".gemini", "antigravity-cli", "cache", "onboarding.json"
     )
 
-    # Enterprise marker: provisioner writes this when explicit vertex-ai
-    # is selected. The wrapper checks both this file and AGY_USE_GCP env.
     enterprise_marker = os.path.join(
         home, ".scion", "harness", ".enterprise-mode"
     )
@@ -231,42 +195,11 @@ def _generate_wrapper_script(
         with open(enterprise_marker, "w") as f:
             f.write("1")
     elif os.path.exists(enterprise_marker):
-        # Idempotent reprovision: if the auth mode switched away from
-        # vertex-ai (e.g. to oauth-token), remove the stale marker so the
-        # wrapper does not keep running in enterprise/GCP mode.
         os.remove(enterprise_marker)
 
     script = f"""#!/bin/bash
 # Generated by antigravity provision.py {PROVISION_VERSION}
 set -e
-
-# Initialize DBUS session bus
-eval $(dbus-launch --sh-syntax)
-export DBUS_SESSION_BUS_ADDRESS
-
-# Unlock and start gnome-keyring
-eval $(echo "test" | gnome-keyring-daemon --unlock 2>/dev/null)
-gnome-keyring-daemon --start --components=secrets,pkcs11,ssh > /dev/null 2>&1
-
-echo "agy-wrapper: keyring initialized (DBUS=$DBUS_SESSION_BUS_ADDRESS)" >&2
-
-# Inject OAuth token into keyring (secret file first, env var fallback)
-if [ -f "{secret_path}" ]; then
-    secret-tool store \\
-        --label="Password for antigravity on gemini" \\
-        service gemini username antigravity \\
-        < "{secret_path}" 2>/dev/null \\
-        && echo "agy-wrapper: token injected into keyring (from file)" >&2 \\
-        || echo "agy-wrapper: WARNING: failed to inject token" >&2
-elif [ -n "${{AGY_KEYRING_TOKEN:-}}" ]; then
-    printf '%s' "$AGY_KEYRING_TOKEN" | secret-tool store \\
-        --label="Password for antigravity on gemini" \\
-        service gemini username antigravity 2>/dev/null \\
-        && echo "agy-wrapper: token injected into keyring (from env)" >&2 \\
-        || echo "agy-wrapper: WARNING: failed to inject token" >&2
-else
-    echo "agy-wrapper: no token available, AGY will prompt for login" >&2
-fi
 
 # GCP/enterprise mode: patch settings.json with gcp block and mark
 # enterprise onboarding complete. Triggered by explicit vertex-ai auth
@@ -280,7 +213,7 @@ fi
 
 if [ "$_use_gcp" = "true" ]; then
     _gcp_project="${{GOOGLE_CLOUD_PROJECT:-}}"
-    _gcp_location="${{GOOGLE_CLOUD_LOCATION:-global}}"
+    _gcp_location="${{GOOGLE_CLOUD_LOCATION:-${{GOOGLE_CLOUD_REGION:-global}}}}"
 
     if [ -n "$_gcp_project" ]; then
         python3 -c "
@@ -562,7 +495,7 @@ def _provision(manifest: dict[str, Any]) -> int:
         env_key = ""
     else:
         try:
-            method, env_key = _select_auth_method(explicit, env_keys)
+            method, env_key = _select_auth_method(explicit, env_keys, secret_files)
         except ValueError as exc:
             print(str(exc), file=sys.stderr)
             return EXIT_ERROR
@@ -585,38 +518,32 @@ def _provision(manifest: dict[str, Any]) -> int:
 
     env_payload: dict[str, Any] = {}
 
-    # Validate token if an auth method requiring it was selected
+    # Place the token file for AGY to read directly
     has_token = False
     if method in ("oauth-token", "vertex-ai"):
-        token_raw = _read_secret(secret_files, "AGY_KEYRING_TOKEN")
+        token_raw = _read_secret(secret_files, "AGY_TOKEN")
         if not token_raw:
-            print(
-                "antigravity provision: AGY_KEYRING_TOKEN secret is empty",
-                file=sys.stderr,
-            )
+            print("antigravity provision: AGY_TOKEN secret is empty", file=sys.stderr)
             return EXIT_ERROR
         try:
             token_obj = json.loads(token_raw)
         except json.JSONDecodeError as exc:
-            print(
-                f"antigravity provision: AGY_KEYRING_TOKEN is not valid JSON: {exc}",
-                file=sys.stderr,
-            )
+            print(f"antigravity provision: AGY_TOKEN is not valid JSON: {exc}", file=sys.stderr)
             return EXIT_ERROR
         if not isinstance(token_obj, dict) or "refresh_token" not in token_obj:
-            print(
-                "antigravity provision: AGY_KEYRING_TOKEN must contain refresh_token",
-                file=sys.stderr,
-            )
+            print("antigravity provision: AGY_TOKEN must contain refresh_token", file=sys.stderr)
             return EXIT_ERROR
+
+        token_dest = os.path.join(home, ".gemini", "antigravity-cli", "antigravity-oauth-token")
+        os.makedirs(os.path.dirname(token_dest), exist_ok=True)
+        _write_json(token_dest, token_obj)
+        os.chmod(token_dest, 0o600)
         has_token = True
+        print(f"antigravity provision: placed OAuth token at {token_dest}", file=sys.stderr)
 
     is_enterprise = method == "vertex-ai"
 
-    # Generate wrapper script that inits keyring and execs AGY.
-    # Keyring daemons must run in AGY's process tree (not the
-    # provisioner's) so they stay alive for the session.
-    _generate_wrapper_script(home, has_token, is_enterprise)
+    _generate_wrapper_script(home, is_enterprise)
 
     try:
         _write_json(auth_out, resolved_payload)

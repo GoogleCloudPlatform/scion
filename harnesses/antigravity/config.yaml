@@ -50,29 +50,37 @@ capabilities:
     system_prompt: { support: "partial", reason: "System prompt is downgraded to GEMINI.md preamble" }
     agent_instructions: { support: "yes" }
   auth:
-    api_key: { support: "no", reason: "AGY uses OAuth via gnome-keyring, not API keys" }
-    auth_file: { support: "no", reason: "AGY uses OAuth via gnome-keyring" }
-    oauth_token: { support: "yes", reason: "Via gnome-keyring population from AGY_KEYRING_TOKEN secret" }
-    vertex_ai: { support: "yes", reason: "Enterprise/GCP mode via AGY_KEYRING_TOKEN + GOOGLE_CLOUD_PROJECT" }
+    api_key: { support: "no", reason: "AGY uses OAuth, not API keys" }
+    auth_file: { support: "yes", reason: "Via AGY_TOKEN file secret at ~/.gemini/antigravity-cli/antigravity-oauth-token" }
+    oauth_token: { support: "no", reason: "AGY uses file-based OAuth token, not raw token injection" }
+    vertex_ai: { support: "yes", reason: "Enterprise/GCP mode via AGY_TOKEN + GOOGLE_CLOUD_PROJECT + GOOGLE_CLOUD_LOCATION" }
 
 no_auth:
   behavior: drop-to-shell
   message: |
     This agent started without credentials.
-    Run: agy auth login
-    Then follow the prompts to authenticate.
+    Run: agy
+    Complete the interactive login flow.
+    Then run: python3 /home/scion/.scion/harness/capture_auth.py
 
 auth:
+  default_type: oauth-token
   types:
     oauth-token:
-      required_env:
-        - any_of: ["AGY_KEYRING_TOKEN"]
+      required_files:
+        - name: AGY_TOKEN
+          type: file
+          description: "Antigravity OAuth token JSON file"
+          target_suffix: "/.gemini/antigravity-cli/antigravity-oauth-token"
     vertex-ai:
-      # Enterprise/GCP mode: the keyring token is still required (provision.py
-      # validates AGY_KEYRING_TOKEN), plus the GCP project for Vertex routing.
       required_env:
-        - any_of: ["AGY_KEYRING_TOKEN"]
         - any_of: ["GOOGLE_CLOUD_PROJECT"]
+        - any_of: ["GOOGLE_CLOUD_LOCATION", "GOOGLE_CLOUD_REGION"]
+      required_files:
+        - name: AGY_TOKEN
+          type: file
+          description: "Antigravity OAuth token JSON file"
+          target_suffix: "/.gemini/antigravity-cli/antigravity-oauth-token"
   autodetect:
     env:
-      AGY_KEYRING_TOKEN: oauth-token
+      AGY_TOKEN: oauth-token
