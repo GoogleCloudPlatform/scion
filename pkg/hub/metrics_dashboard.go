@@ -167,10 +167,8 @@ func (c *queryConfig) cacheKeySuffix() string {
 }
 
 // projectFilter returns the Cloud Monitoring filter clause for a project ID.
-// Metrics are labeled with both grove_id and project_id; we filter on grove_id
-// which is the canonical label used in the GCP metrics exporter.
 func projectFilter(projectID string) string {
-	return fmt.Sprintf(`metric.labels.grove_id = "%s"`, projectID)
+	return fmt.Sprintf(`metric.labels.project_id = "%s"`, projectID)
 }
 
 // QuerySummary returns aggregate metric counts for the given period.
