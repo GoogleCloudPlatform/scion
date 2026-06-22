@@ -69,12 +69,12 @@ type CreateSkillRegistryRequest struct {
 
 // UpdateSkillRegistryRequest is the request body for updating a skill registry.
 type UpdateSkillRegistryRequest struct {
-	Endpoint    string `json:"endpoint,omitempty"`
-	Description string `json:"description,omitempty"`
-	TrustLevel  string `json:"trustLevel,omitempty"`
-	AuthToken   string `json:"authToken,omitempty"`
-	ResolvePath string `json:"resolvePath,omitempty"`
-	Status      string `json:"status,omitempty"`
+	Endpoint    *string `json:"endpoint,omitempty"`
+	Description *string `json:"description,omitempty"`
+	TrustLevel  *string `json:"trustLevel,omitempty"`
+	AuthToken   *string `json:"authToken,omitempty"`
+	ResolvePath *string `json:"resolvePath,omitempty"`
+	Status      *string `json:"status,omitempty"`
 }
 
 // PinSkillHashRequest is the request body for pinning a skill hash.

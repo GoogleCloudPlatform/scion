@@ -94,6 +94,28 @@ func TestParseGHShorthand(t *testing.T) {
 			uri:       "skill://my-skill",
 			wantError: true,
 		},
+		{
+			name: "uppercase scheme GH://",
+			uri:  "GH://owner/repo/skill",
+			want: &GitHubSkillRef{
+				Owner:     "owner",
+				Repo:      "repo",
+				SkillName: "skill",
+				Ref:       "",
+				SkillPath: "skills/skill",
+			},
+		},
+		{
+			name: "mixed-case scheme Gh:// with ref",
+			uri:  "Gh://owner/repo/skill@main",
+			want: &GitHubSkillRef{
+				Owner:     "owner",
+				Repo:      "repo",
+				SkillName: "skill",
+				Ref:       "main",
+				SkillPath: "skills/skill",
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -179,6 +201,28 @@ func TestParseGitHubFullURL(t *testing.T) {
 			name:      "blob instead of tree",
 			uri:       "https://github.com/owner/repo/blob/main/file.go",
 			wantError: true,
+		},
+		{
+			name: "uppercase HTTPS scheme and host",
+			uri:  "HTTPS://GITHUB.COM/owner/repo/tree/main/skills/skill",
+			want: &GitHubSkillRef{
+				Owner:     "owner",
+				Repo:      "repo",
+				SkillName: "skill",
+				Ref:       "main",
+				SkillPath: "skills/skill",
+			},
+		},
+		{
+			name: "mixed-case Http scheme and host",
+			uri:  "Http://GitHub.Com/owner/repo/tree/main/skills/skill",
+			want: &GitHubSkillRef{
+				Owner:     "owner",
+				Repo:      "repo",
+				SkillName: "skill",
+				Ref:       "main",
+				SkillPath: "skills/skill",
+			},
 		},
 	}
 

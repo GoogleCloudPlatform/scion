@@ -36,13 +36,30 @@ type GitHubSkillRef struct {
 // into a GitHubSkillRef.
 func ParseGitHubSkillURI(uri string) (*GitHubSkillRef, error) {
 	lower := strings.ToLower(uri)
-	if strings.HasPrefix(lower, "gh://") {
-		return parseGHShorthand(uri)
+
+	var normalized string
+	switch {
+	case strings.HasPrefix(lower, "gh://"):
+		normalized = "gh://" + uri[len("gh://"):]
+	case strings.HasPrefix(lower, "https://github.com/"):
+		normalized = "https://github.com/" + uri[len("https://github.com/"):]
+	case strings.HasPrefix(lower, "http://github.com/"):
+		normalized = "http://github.com/" + uri[len("http://github.com/"):]
+	default:
+		return nil, fmt.Errorf("not a GitHub skill URI: %q", uri)
 	}
-	if strings.HasPrefix(lower, "https://github.com/") || strings.HasPrefix(lower, "http://github.com/") {
-		return parseGitHubFullURL(uri)
+
+	var ref *GitHubSkillRef
+	var err error
+	if strings.HasPrefix(normalized, "gh://") {
+		ref, err = parseGHShorthand(normalized)
+	} else {
+		ref, err = parseGitHubFullURL(normalized)
 	}
-	return nil, fmt.Errorf("not a GitHub skill URI: %q", uri)
+	if ref != nil {
+		ref.Raw = uri
+	}
+	return ref, err
 }
 
 func parseGHShorthand(uri string) (*GitHubSkillRef, error) {

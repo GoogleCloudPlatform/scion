@@ -185,13 +185,24 @@ func runRegistriesUpdate(cmd *cobra.Command, args []string) error {
 	authToken, _ := cmd.Flags().GetString("auth-token")
 	resolvePath, _ := cmd.Flags().GetString("resolve-path")
 
-	req := &hubclient.UpdateSkillRegistryRequest{
-		Endpoint:    endpoint,
-		TrustLevel:  trust,
-		Status:      status,
-		Description: description,
-		AuthToken:   authToken,
-		ResolvePath: resolvePath,
+	req := &hubclient.UpdateSkillRegistryRequest{}
+	if cmd.Flags().Changed("endpoint") {
+		req.Endpoint = &endpoint
+	}
+	if cmd.Flags().Changed("trust") {
+		req.TrustLevel = &trust
+	}
+	if cmd.Flags().Changed("status") {
+		req.Status = &status
+	}
+	if cmd.Flags().Changed("description") {
+		req.Description = &description
+	}
+	if cmd.Flags().Changed("auth-token") {
+		req.AuthToken = &authToken
+	}
+	if cmd.Flags().Changed("resolve-path") {
+		req.ResolvePath = &resolvePath
 	}
 
 	registry, err := hubCtx.Client.SkillRegistries().Update(ctx, args[0], req)
