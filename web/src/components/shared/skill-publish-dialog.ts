@@ -17,29 +17,21 @@
 /**
  * Multi-step publish version dialog for skills.
  *
- * Flow: file select → upload (parallel, concurrency-limited) → finalize.
- * Uses the backend's 2-phase signed-URL upload pattern.
+ * Flow: file select → upload → done.
+ * Uses a single multipart POST for server-side upload.
  */
 
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
-import type { SkillVersion, SkillUploadUrl } from '../../shared/types.js';
+import type { SkillVersion } from '../../shared/types.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 
-type DialogStep = 'input' | 'uploading' | 'finalizing' | 'done' | 'error';
+type DialogStep = 'input' | 'uploading' | 'done' | 'error';
 
 interface SelectedFile {
   file: File;
   path: string;
-}
-
-interface UploadResult {
-  path: string;
-  size: number;
-  hash: string;
-  status: 'pending' | 'uploading' | 'done' | 'failed';
-  error?: string;
 }
 
 @customElement('scion-skill-publish-dialog')
@@ -52,8 +44,6 @@ export class ScionSkillPublishDialog extends LitElement {
   @state() private version = '';
   @state() private selectedFiles: SelectedFile[] = [];
   @state() private validationError: string | null = null;
-  @state() private uploadResults: UploadResult[] = [];
-  @state() private uploadedCount = 0;
   @state() private error: string | null = null;
   @state() private createdVersion: SkillVersion | null = null;
 
@@ -130,15 +120,6 @@ export class ScionSkillPublishDialog extends LitElement {
       font-size: 0.75rem;
       flex-shrink: 0;
     }
-    .file-status {
-      display: flex;
-      align-items: center;
-      gap: 0.25rem;
-      flex-shrink: 0;
-    }
-    .file-status.done { color: var(--sl-color-success-600, #16a34a); }
-    .file-status.failed { color: var(--sl-color-danger-600, #dc2626); }
-    .file-status.uploading { color: var(--scion-primary, #3b82f6); }
 
     .remove-btn {
       cursor: pointer;
@@ -212,8 +193,6 @@ export class ScionSkillPublishDialog extends LitElement {
     this.version = '';
     this.selectedFiles = [];
     this.validationError = null;
-    this.uploadResults = [];
-    this.uploadedCount = 0;
     this.error = null;
     this.createdVersion = null;
   }
@@ -319,72 +298,26 @@ export class ScionSkillPublishDialog extends LitElement {
 
     this.step = 'uploading';
     this.error = null;
-    this.uploadedCount = 0;
-    this.uploadResults = this.selectedFiles.map((f) => ({
-      path: f.path,
-      size: f.file.size,
-      hash: '',
-      status: 'pending' as const,
-    }));
+
+    const formData = new FormData();
+    formData.append('version', this.version.trim());
+    for (const sf of this.selectedFiles) {
+      formData.append('file', sf.file, sf.path);
+    }
 
     try {
-      // Step 1: Create draft version and get upload URLs
-      const filesPayload = this.selectedFiles.map((f) => ({ path: f.path, size: f.file.size }));
-      const createRes = await apiFetch(`/api/v1/skills/${this.skillId}/versions`, {
+      const res = await apiFetch(`/api/v1/skills/${this.skillId}/versions`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ version: this.version.trim(), files: filesPayload }),
+        body: formData,
+        // DO NOT set Content-Type — browser sets it with the multipart boundary
       });
 
-      if (!createRes.ok) {
-        const msg = await extractApiError(createRes, `HTTP ${createRes.status}`);
-        throw new Error(msg);
+      if (!res.ok) {
+        throw new Error(await extractApiError(res, `HTTP ${res.status}`));
       }
 
-      const createData = (await createRes.json()) as {
-        version?: SkillVersion;
-        uploadUrls?: SkillUploadUrl[];
-        urls?: SkillUploadUrl[];
-      };
-
-      const uploadUrls = createData.uploadUrls || createData.urls || [];
-
-      // Step 2: Upload files with concurrency limit
-      await this.uploadFiles(uploadUrls);
-
-      // Check for failures
-      const failed = this.uploadResults.filter((r) => r.status === 'failed');
-      if (failed.length > 0) {
-        this.step = 'error';
-        this.error = `${failed.length} file(s) failed to upload. You can retry.`;
-        return;
-      }
-
-      // Step 3: Finalize
-      this.step = 'finalizing';
-      const manifest = {
-        files: this.uploadResults.map((r) => ({
-          path: r.path,
-          size: r.size,
-          hash: r.hash,
-        })),
-      };
-
-      const finalizeRes = await apiFetch(`/api/v1/skills/${this.skillId}/finalize`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ version: this.version.trim(), manifest }),
-      });
-
-      if (!finalizeRes.ok) {
-        const msg = await extractApiError(finalizeRes, `HTTP ${finalizeRes.status}`);
-        throw new Error(msg);
-      }
-
-      const finalData = (await finalizeRes.json()) as { version?: SkillVersion } | SkillVersion;
-      this.createdVersion = ('version' in finalData && finalData.version)
-        ? finalData.version as SkillVersion
-        : finalData as SkillVersion;
+      const data = (await res.json()) as { version?: SkillVersion };
+      this.createdVersion = data.version ?? null;
       this.step = 'done';
 
       this.dispatchEvent(new CustomEvent('skill-version-published', {
@@ -396,152 +329,6 @@ export class ScionSkillPublishDialog extends LitElement {
       console.error('Publish failed:', err);
       this.step = 'error';
       this.error = err instanceof Error ? err.message : 'Publish failed';
-    }
-  }
-
-  private async uploadFiles(uploadUrls: SkillUploadUrl[], indices?: number[]): Promise<void> {
-    if (!window.crypto || !window.crypto.subtle) {
-      throw new Error('Cryptography APIs (crypto.subtle) are not available. This feature requires a secure context (HTTPS or localhost).');
-    }
-
-    const concurrency = 4;
-    const queue = indices ?? Array.from({ length: this.selectedFiles.length }, (_, i) => i);
-    let queuePos = 0;
-
-    const uploadOne = async (): Promise<void> => {
-      while (queuePos < queue.length) {
-        const i = queue[queuePos++];
-        const sf = this.selectedFiles[i];
-        const urlInfo = uploadUrls.find((u) => u.path === sf.path);
-        if (!urlInfo) {
-          this.uploadResults = this.uploadResults.map((r, ri) =>
-            ri === i ? { ...r, status: 'failed' as const, error: 'No upload URL' } : r
-          );
-          continue;
-        }
-
-        this.uploadResults = this.uploadResults.map((r, ri) =>
-          ri === i ? { ...r, status: 'uploading' as const } : r
-        );
-        this.requestUpdate();
-
-        try {
-          // Compute SHA-256 hash
-          const buffer = await sf.file.arrayBuffer();
-          const hashBuffer = await crypto.subtle.digest('SHA-256', buffer);
-          const hashArray = Array.from(new Uint8Array(hashBuffer));
-          const hashHex = hashArray.map((b) => b.toString(16).padStart(2, '0')).join('');
-          const hash = `sha256:${hashHex}`;
-
-          // Upload
-          const headers: Record<string, string> = urlInfo.headers || {};
-          let res = await fetch(urlInfo.url, {
-            method: urlInfo.method || 'PUT',
-            headers,
-            body: buffer,
-          });
-
-          // Retry once on failure
-          if (!res.ok) {
-            res = await fetch(urlInfo.url, {
-              method: urlInfo.method || 'PUT',
-              headers,
-              body: buffer,
-            });
-          }
-
-          if (!res.ok) {
-            throw new Error(`Upload failed: ${res.status}`);
-          }
-
-          this.uploadResults = this.uploadResults.map((r, ri) =>
-            ri === i ? { ...r, status: 'done' as const, hash } : r
-          );
-          this.uploadedCount++;
-        } catch (err) {
-          this.uploadResults = this.uploadResults.map((r, ri) =>
-            ri === i ? { ...r, status: 'failed' as const, error: err instanceof Error ? err.message : 'Upload failed' } : r
-          );
-        }
-        this.requestUpdate();
-      }
-    };
-
-    const workers = Array.from({ length: Math.min(concurrency, queue.length) }, () => uploadOne());
-    await Promise.all(workers);
-  }
-
-  private async retryFailed(): Promise<void> {
-    this.error = null;
-    this.step = 'uploading';
-
-    const failedFiles = this.uploadResults
-      .map((r, i) => ({ result: r, index: i, file: this.selectedFiles[i] }))
-      .filter((x) => x.result.status === 'failed');
-
-    try {
-      // Use the upload endpoint to get fresh signed URLs for the existing draft version
-      const filesPayload = failedFiles.map((x) => ({ path: x.file.path, size: x.file.file.size }));
-      const createRes = await apiFetch(`/api/v1/skills/${this.skillId}/upload`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ version: this.version.trim(), files: filesPayload }),
-      });
-
-      if (!createRes.ok) {
-        throw new Error(await extractApiError(createRes, 'Failed to get upload URLs'));
-      }
-
-      const data = (await createRes.json()) as { uploadUrls?: SkillUploadUrl[]; urls?: SkillUploadUrl[] };
-      const uploadUrls = data.uploadUrls || data.urls || [];
-
-      // Reset failed to pending
-      for (const f of failedFiles) {
-        this.uploadResults = this.uploadResults.map((r, ri) => {
-          if (ri !== f.index) return r;
-          const { error: _, ...rest } = r;
-          return { ...rest, status: 'pending' as const };
-        });
-      }
-
-      const failedIndices = failedFiles.map((f) => f.index);
-      await this.uploadFiles(uploadUrls, failedIndices);
-
-      const stillFailed = this.uploadResults.filter((r) => r.status === 'failed');
-      if (stillFailed.length > 0) {
-        this.step = 'error';
-        this.error = `${stillFailed.length} file(s) still failed.`;
-      } else {
-        // All done — proceed to finalize
-        this.step = 'finalizing';
-        const manifest = {
-          files: this.uploadResults.map((r) => ({ path: r.path, size: r.size, hash: r.hash })),
-        };
-        const finalizeRes = await apiFetch(`/api/v1/skills/${this.skillId}/finalize`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ version: this.version.trim(), manifest }),
-        });
-
-        if (!finalizeRes.ok) {
-          throw new Error(await extractApiError(finalizeRes, 'Finalize failed'));
-        }
-
-        const finalData = (await finalizeRes.json()) as { version?: SkillVersion } | SkillVersion;
-        this.createdVersion = ('version' in finalData && finalData.version)
-          ? finalData.version as SkillVersion
-          : finalData as SkillVersion;
-        this.step = 'done';
-
-        this.dispatchEvent(new CustomEvent('skill-version-published', {
-          detail: { version: this.createdVersion },
-          bubbles: true,
-          composed: true,
-        }));
-      }
-    } catch (err) {
-      this.step = 'error';
-      this.error = err instanceof Error ? err.message : 'Retry failed';
     }
   }
 
@@ -564,7 +351,6 @@ export class ScionSkillPublishDialog extends LitElement {
       >
         ${this.step === 'input' ? this.renderInput() : nothing}
         ${this.step === 'uploading' ? this.renderUploading() : nothing}
-        ${this.step === 'finalizing' ? this.renderFinalizing() : nothing}
         ${this.step === 'done' ? this.renderDone() : nothing}
         ${this.step === 'error' ? this.renderError() : nothing}
       </sl-dialog>
@@ -638,46 +424,14 @@ export class ScionSkillPublishDialog extends LitElement {
   }
 
   private renderUploading() {
-    const total = this.uploadResults.length;
-    const done = this.uploadResults.filter((r) => r.status === 'done').length;
-    const pct = total > 0 ? Math.round((done / total) * 100) : 0;
-
     return html`
       <div class="step-content">
         <div class="progress-section">
           <div class="progress-label">
-            <span>Uploading files...</span>
-            <span>${done} / ${total}</span>
+            <span>Uploading &amp; publishing...</span>
           </div>
-          <sl-progress-bar value=${pct}></sl-progress-bar>
+          <sl-progress-bar indeterminate></sl-progress-bar>
         </div>
-
-        <ul class="file-list">
-          ${this.uploadResults.map((r) => html`
-            <li class="file-item">
-              <div class="file-info">
-                <sl-icon name="file-earmark"></sl-icon>
-                <span class="file-name">${r.path}</span>
-                <span class="file-size">${this.formatFileSize(r.size)}</span>
-              </div>
-              <div class="file-status ${r.status}">
-                ${r.status === 'done' ? html`<sl-icon name="check-circle"></sl-icon>` : nothing}
-                ${r.status === 'uploading' ? html`<sl-spinner style="font-size: 1rem;"></sl-spinner>` : nothing}
-                ${r.status === 'failed' ? html`<sl-icon name="x-circle"></sl-icon>` : nothing}
-                ${r.status === 'pending' ? html`<sl-icon name="clock"></sl-icon>` : nothing}
-              </div>
-            </li>
-          `)}
-        </ul>
-      </div>
-    `;
-  }
-
-  private renderFinalizing() {
-    return html`
-      <div class="step-content" style="text-align: center; padding: 2rem 0;">
-        <sl-spinner style="font-size: 2rem;"></sl-spinner>
-        <p style="margin-top: 1rem; color: var(--scion-text-muted, #64748b);">Finalizing version ${this.version}...</p>
       </div>
     `;
   }
@@ -703,30 +457,13 @@ export class ScionSkillPublishDialog extends LitElement {
           <sl-icon name="exclamation-triangle"></sl-icon>
           <span>${this.error}</span>
         </div>
-
-        ${this.uploadResults.some((r) => r.status === 'failed') ? html`
-          <ul class="file-list">
-            ${this.uploadResults.filter((r) => r.status === 'failed').map((r) => html`
-              <li class="file-item">
-                <div class="file-info">
-                  <sl-icon name="file-earmark"></sl-icon>
-                  <span class="file-name">${r.path}</span>
-                </div>
-                <div class="file-status failed">
-                  <sl-icon name="x-circle"></sl-icon>
-                  <span style="font-size: 0.75rem;">${r.error || 'Failed'}</span>
-                </div>
-              </li>
-            `)}
-          </ul>
-        ` : nothing}
       </div>
       <sl-button slot="footer" variant="default" @click=${() => { this.open = false; }}>
         Cancel
       </sl-button>
-      <sl-button slot="footer" variant="primary" @click=${() => this.retryFailed()}>
+      <sl-button slot="footer" variant="primary" @click=${() => this.startPublish()}>
         <sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>
-        Retry Failed
+        Retry
       </sl-button>
     `;
   }
