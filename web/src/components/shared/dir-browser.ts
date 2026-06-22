@@ -211,7 +211,10 @@ export class ScionDirBrowser extends LitElement {
   private navigateUp(): void {
     const lastSlash = this.currentPath.lastIndexOf('/');
     if (lastSlash < 0) return;
-    const parent = lastSlash === 0 ? '/' : this.currentPath.substring(0, lastSlash);
+    let parent = lastSlash === 0 ? '/' : this.currentPath.substring(0, lastSlash);
+    if (/^[a-zA-Z]:$/.test(parent)) {
+      parent += '/';
+    }
     void this.navigate(parent);
   }
 

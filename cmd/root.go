@@ -435,8 +435,12 @@ func checkAgentContainerContext(cmd *cobra.Command) error {
 // worktrees — i.e. agent launch commands. Server, config, hub, and info
 // commands never create worktrees and should not be blocked by a git version check.
 func usesWorktrees(cmd *cobra.Command) bool {
-	switch cmd.Name() {
-	case "start", "run": // agent launch
+	if cmd.Name() == "start" || cmd.Name() == "run" {
+		for c := cmd; c != nil; c = c.Parent() {
+			if c.Name() == "server" {
+				return false
+			}
+		}
 		return true
 	}
 	return false

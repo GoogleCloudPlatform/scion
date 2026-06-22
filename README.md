@@ -29,7 +29,7 @@ brew install scion
 scion server start
 ```
 
-Your browser will open to the onboarding wizard at `http://127.0.0.1:9810/onboarding`, which walks you through machine setup, runtime detection, harness selection, and creating your first project.
+Your browser will open to the onboarding wizard at `http://127.0.0.1:8080/onboarding`, which walks you through machine setup, runtime detection, harness selection, and creating your first project.
 
 ### Install from Source
 
