@@ -15,18 +15,22 @@
 package hub
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
 
 	"github.com/Masterminds/semver/v3"
+	"golang.org/x/sync/errgroup"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 )
 
 // CreateSkillRequest is the request body for creating a skill.
@@ -681,6 +685,13 @@ func (s *Server) publishSkillVersion(w http.ResponseWriter, r *http.Request, ski
 		return
 	}
 
+	// Dispatch based on content type: multipart uploads are handled inline,
+	// while JSON requests go through the existing two-phase upload flow.
+	if ct := r.Header.Get("Content-Type"); strings.HasPrefix(ct, "multipart/form-data") {
+		s.publishSkillVersionMultipart(w, r, skill)
+		return
+	}
+
 	var req PublishVersionRequest
 	if err := readJSON(r, &req); err != nil {
 		BadRequest(w, "Invalid request body: "+err.Error())
@@ -767,6 +778,202 @@ func (s *Server) publishSkillVersion(w http.ResponseWriter, r *http.Request, ski
 	}
 
 	writeJSON(w, http.StatusCreated, response)
+}
+
+// publishSkillVersionMultipart handles multipart/form-data skill version
+// publishing. Files are uploaded inline in the request body rather than via
+// the two-phase signed-URL flow. The caller has already authenticated and
+// authorized the request.
+func (s *Server) publishSkillVersionMultipart(w http.ResponseWriter, r *http.Request, skill *store.Skill) {
+	ctx := r.Context()
+
+	// a) Size limit: 50 MB max request body.
+	r.Body = http.MaxBytesReader(w, r.Body, 50<<20)
+
+	// b) Parse multipart form: 10 MB in memory, rest spills to disk.
+	if err := r.ParseMultipartForm(10 << 20); err != nil {
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			writeError(w, http.StatusRequestEntityTooLarge, "request_too_large", "Request body exceeds 50MB limit", nil)
+			return
+		}
+		BadRequest(w, "Failed to parse multipart form: "+err.Error())
+		return
+	}
+	defer r.MultipartForm.RemoveAll()
+
+	// c) Extract and validate version.
+	version := r.FormValue("version")
+	if version == "" {
+		ValidationError(w, "version is required", nil)
+		return
+	}
+	if _, err := semver.NewVersion(version); err != nil {
+		ValidationError(w, fmt.Sprintf("invalid semver version %q: %s", version, err.Error()), nil)
+		return
+	}
+
+	// d) Check for existing published version (immutability).
+	existing, err := s.store.GetSkillVersionByNumber(ctx, skill.ID, version)
+	if err == nil && existing.Status == store.SkillVersionStatusPublished {
+		writeError(w, http.StatusConflict, "conflict",
+			fmt.Sprintf("version %s is already published and immutable; publish a new version instead", version), nil)
+		return
+	}
+
+	// e) Extract and validate files.
+	fileHeaders := r.MultipartForm.File["file"]
+	if len(fileHeaders) == 0 {
+		ValidationError(w, "at least one file is required", nil)
+		return
+	}
+	if len(fileHeaders) > 50 {
+		ValidationError(w, "too many files (max 50)", nil)
+		return
+	}
+
+	hasSkillMD := false
+	seenFilenames := make(map[string]struct{}, len(fileHeaders))
+	for _, fh := range fileHeaders {
+		name := fh.Filename
+
+		// Security: reject dangerous filenames.
+		if name == "" {
+			ValidationError(w, "file has empty filename", nil)
+			return
+		}
+		if strings.Contains(name, "..") {
+			ValidationError(w, fmt.Sprintf("filename %q contains path traversal sequence", name), nil)
+			return
+		}
+		if strings.HasPrefix(name, "/") {
+			ValidationError(w, fmt.Sprintf("filename %q must not start with /", name), nil)
+			return
+		}
+		if strings.ContainsRune(name, 0) {
+			ValidationError(w, fmt.Sprintf("filename %q contains null byte", name), nil)
+			return
+		}
+
+		// Duplicate filename check.
+		if _, dup := seenFilenames[name]; dup {
+			ValidationError(w, fmt.Sprintf("duplicate filename %q", name), nil)
+			return
+		}
+		seenFilenames[name] = struct{}{}
+
+		// Per-file size limit: 10 MB.
+		if fh.Size > 10*1024*1024 {
+			ValidationError(w, fmt.Sprintf("file %q exceeds 10MB limit", name), nil)
+			return
+		}
+
+		if name == "SKILL.md" {
+			hasSkillMD = true
+		}
+	}
+	if !hasSkillMD {
+		ValidationError(w, "SKILL.md is required", nil)
+		return
+	}
+
+	// f) Create draft version.
+	sv := &store.SkillVersion{
+		ID:      api.NewUUID(),
+		SkillID: skill.ID,
+		Version: version,
+		Status:  store.SkillVersionStatusDraft,
+	}
+	if identity := GetIdentityFromContext(ctx); identity != nil {
+		sv.PublisherID = identity.ID()
+	}
+	if err := s.store.CreateSkillVersion(ctx, sv); err != nil {
+		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+			writeError(w, http.StatusConflict, "conflict",
+				fmt.Sprintf("version %s already exists for this skill", version), nil)
+			return
+		}
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	// g) Upload files to storage and compute hashes.
+	stor := s.GetStorage()
+	if stor == nil {
+		RuntimeError(w, "Storage not configured")
+		return
+	}
+
+	type uploadResult struct {
+		file store.TemplateFile
+	}
+	results := make([]uploadResult, len(fileHeaders))
+
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(fileUploadConcurrency)
+	for i, fh := range fileHeaders {
+		i, fh := i, fh
+		g.Go(func() error {
+			if err := gctx.Err(); err != nil {
+				return err
+			}
+
+			f, err := fh.Open()
+			if err != nil {
+				return fmt.Errorf("failed to open file %s: %w", fh.Filename, err)
+			}
+			defer f.Close()
+
+			data, err := io.ReadAll(f)
+			if err != nil {
+				return fmt.Errorf("failed to read file %s: %w", fh.Filename, err)
+			}
+
+			hash := transfer.HashBytes(data)
+			objectPath := skill.StoragePath + "/" + version + "/" + fh.Filename
+
+			if _, err := stor.Upload(gctx, objectPath, bytes.NewReader(data), storage.UploadOptions{}); err != nil {
+				return fmt.Errorf("failed to upload file %s: %w", fh.Filename, err)
+			}
+
+			results[i] = uploadResult{
+				file: store.TemplateFile{
+					Path: fh.Filename,
+					Size: int64(len(data)),
+					Hash: hash,
+				},
+			}
+			return nil
+		})
+	}
+	if err := g.Wait(); err != nil {
+		// h) On upload failure, leave the draft version for cleanup.
+		// TODO: call s.store.DeleteSkillVersion(ctx, sv.ID) once available.
+		_ = s.store.UpdateSkillVersion(ctx, sv) // leave draft as-is
+		RuntimeError(w, "Failed to upload files: "+err.Error())
+		return
+	}
+
+	// Build manifest from results.
+	manifest := make([]store.TemplateFile, len(results))
+	for i, r := range results {
+		manifest[i] = r.file
+	}
+
+	// i) Compute content hash.
+	contentHash := computeContentHash(manifest)
+
+	// j) Update version to published.
+	sv.Status = store.SkillVersionStatusPublished
+	sv.Files = manifest
+	sv.ContentHash = contentHash
+	if err := s.store.UpdateSkillVersion(ctx, sv); err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	// k) Return response.
+	writeJSON(w, http.StatusCreated, PublishVersionResponse{Version: sv})
 }
 
 // handleSkillUpload handles requests for upload URLs for a skill.
