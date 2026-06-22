@@ -90,7 +90,16 @@ field is updated to reference the built image.`,
 			return fmt.Errorf("no container runtime found (tried docker, podman)")
 		}
 
-		outputImage := harnessConfigName + ":" + tag
+		imageBaseName := harnessConfigName
+		if hcDir.Config.Image != "" {
+			name := hcDir.Config.Image
+			if colonIdx := strings.LastIndex(name, ":"); colonIdx >= 0 {
+				name = name[:colonIdx]
+			}
+			imageBaseName = name
+		}
+
+		outputImage := imageBaseName + ":" + tag
 		if buildPush {
 			imageRegistry := ""
 			if settings != nil {
@@ -99,7 +108,7 @@ field is updated to reference the built image.`,
 			if imageRegistry == "" {
 				return fmt.Errorf("--push requires image_registry to be configured")
 			}
-			outputImage = imageRegistry + "/" + harnessConfigName + ":" + tag
+			outputImage = imageRegistry + "/" + imageBaseName + ":" + tag
 		}
 
 		buildArgs := []string{"build",
