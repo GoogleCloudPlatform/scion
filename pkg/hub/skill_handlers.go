@@ -947,9 +947,7 @@ func (s *Server) publishSkillVersionMultipart(w http.ResponseWriter, r *http.Req
 		})
 	}
 	if err := g.Wait(); err != nil {
-		// h) On upload failure, leave the draft version for cleanup.
-		// TODO: call s.store.DeleteSkillVersion(ctx, sv.ID) once available.
-		_ = s.store.UpdateSkillVersion(ctx, sv) // leave draft as-is
+		_ = s.store.DeleteSkillVersion(ctx, sv.ID)
 		RuntimeError(w, "Failed to upload files: "+err.Error())
 		return
 	}
