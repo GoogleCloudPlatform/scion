@@ -261,6 +261,73 @@ func TestSkillRegistryCRUD_AuthTokenNotInResponse(t *testing.T) {
 	}
 }
 
+func TestSkillRegistryCRUD_ClearAuthTokenAndResolvePath(t *testing.T) {
+	srv, st := newRegistryTestServer(t)
+	admin := NewAuthenticatedUser("admin-1", "admin@test.com", "Admin", "admin", "cli")
+
+	// Create registry with non-empty AuthToken and ResolvePath
+	body := `{"name":"clear-reg","endpoint":"https://registry.example.com","authToken":"my-token","resolvePath":"/custom/resolve"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/skill-registries", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	rr := httptest.NewRecorder()
+	srv.handleSkillRegistries(rr, req)
+
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("create: expected 201, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var created store.SkillRegistry
+	if err := json.Unmarshal(rr.Body.Bytes(), &created); err != nil {
+		t.Fatalf("create: invalid JSON: %v", err)
+	}
+
+	// Verify initial values via store (AuthToken is json:"-")
+	got, err := st.GetSkillRegistry(req.Context(), created.ID)
+	if err != nil {
+		t.Fatalf("get after create: %v", err)
+	}
+	if got.AuthToken != "my-token" {
+		t.Fatalf("expected authToken 'my-token', got %q", got.AuthToken)
+	}
+	if got.ResolvePath != "/custom/resolve" {
+		t.Fatalf("expected resolvePath '/custom/resolve', got %q", got.ResolvePath)
+	}
+
+	// Update with explicit empty strings to clear both fields
+	updateBody := `{"authToken":"","resolvePath":""}`
+	req = httptest.NewRequest(http.MethodPut, "/api/v1/skill-registries/"+created.ID, strings.NewReader(updateBody))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	rr = httptest.NewRecorder()
+	srv.handleSkillRegistryByID(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("update: expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	// Verify resolvePath is cleared in response (omitempty means absent when empty)
+	var updatedResp map[string]interface{}
+	if err := json.Unmarshal(rr.Body.Bytes(), &updatedResp); err != nil {
+		t.Fatalf("update response: invalid JSON: %v", err)
+	}
+	if _, ok := updatedResp["resolvePath"]; ok {
+		t.Errorf("expected resolvePath absent from response (omitempty), got %v", updatedResp["resolvePath"])
+	}
+
+	// Verify fields are cleared via store (authoritative check)
+	got, err = st.GetSkillRegistry(req.Context(), created.ID)
+	if err != nil {
+		t.Fatalf("get after update: %v", err)
+	}
+	if got.AuthToken != "" {
+		t.Errorf("expected authToken cleared, got %q", got.AuthToken)
+	}
+	if got.ResolvePath != "" {
+		t.Errorf("expected resolvePath cleared, got %q", got.ResolvePath)
+	}
+}
+
 func TestSkillRegistryPin(t *testing.T) {
 	srv, _ := newRegistryTestServer(t)
 	admin := NewAuthenticatedUser("admin-1", "admin@test.com", "Admin", "admin", "cli")

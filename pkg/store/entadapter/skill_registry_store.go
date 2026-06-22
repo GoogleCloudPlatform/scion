@@ -135,12 +135,8 @@ func (s *SkillRegistryStore) UpdateSkillRegistry(ctx context.Context, registry *
 	if registry.TrustLevel != "" {
 		update.SetTrustLevel(entskillregistry.TrustLevel(registry.TrustLevel))
 	}
-	if registry.AuthToken != "" {
-		update.SetAuthToken(registry.AuthToken)
-	}
-	if registry.ResolvePath != "" {
-		update.SetResolvePath(registry.ResolvePath)
-	}
+	update.SetAuthToken(registry.AuthToken)
+	update.SetResolvePath(registry.ResolvePath)
 	if registry.Status != "" {
 		update.SetStatus(entskillregistry.Status(registry.Status))
 	}
