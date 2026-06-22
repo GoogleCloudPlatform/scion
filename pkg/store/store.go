@@ -1257,6 +1257,7 @@ type SkillStore interface {
 	GetSkillVersionByNumber(ctx context.Context, skillID, version string) (*SkillVersion, error)
 	ListSkillVersions(ctx context.Context, skillID string, opts ListOptions) (*ListResult[SkillVersion], error)
 	UpdateSkillVersion(ctx context.Context, version *SkillVersion) error
+	DeleteSkillVersion(ctx context.Context, id string) error
 
 	ResolveSkillVersion(ctx context.Context, skillID, constraint string) (*SkillVersion, error)
 

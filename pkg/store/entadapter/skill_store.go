@@ -378,6 +378,31 @@ func (s *SkillStore) UpdateSkillVersion(ctx context.Context, version *store.Skil
 	return nil
 }
 
+// DeleteSkillVersion hard-deletes a skill version record.
+// Only draft versions may be deleted; attempting to delete a published,
+// deprecated, or archived version returns an error.
+func (s *SkillStore) DeleteSkillVersion(ctx context.Context, id string) error {
+	uid, err := parseUUID(id)
+	if err != nil {
+		return err
+	}
+
+	// Fetch the version first to check its status.
+	e, err := s.client.SkillVersion.Get(ctx, uid)
+	if err != nil {
+		return mapError(err)
+	}
+
+	if e.Status != entskillversion.StatusDraft {
+		return fmt.Errorf("cannot delete skill version in %q status: only draft versions can be deleted", e.Status)
+	}
+
+	if err := s.client.SkillVersion.DeleteOneID(uid).Exec(ctx); err != nil {
+		return mapError(err)
+	}
+	return nil
+}
+
 // ResolveSkillVersion resolves a version constraint to a specific published version.
 func (s *SkillStore) ResolveSkillVersion(ctx context.Context, skillID, constraint string) (*store.SkillVersion, error) {
 	// Content-addressed lookup

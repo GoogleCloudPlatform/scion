@@ -449,3 +449,60 @@ func TestSkillStore_UniqueSlugPerScope(t *testing.T) {
 	})
 	assert.NoError(t, err)
 }
+
+func TestSkillStore_DeleteSkillVersion(t *testing.T) {
+	cs := newTestCompositeStore(t)
+	ctx := context.Background()
+
+	skillID := uuid.New().String()
+	require.NoError(t, cs.CreateSkill(ctx, &store.Skill{
+		ID:         skillID,
+		Name:       "delete-version-test",
+		Slug:       "delete-version-test",
+		Scope:      "global",
+		Status:     "active",
+		Visibility: "private",
+	}))
+
+	// Create a draft version and delete it successfully.
+	draftID := uuid.New().String()
+	require.NoError(t, cs.CreateSkillVersion(ctx, &store.SkillVersion{
+		ID:      draftID,
+		SkillID: skillID,
+		Version: "1.0.0",
+		Status:  store.SkillVersionStatusDraft,
+	}))
+
+	err := cs.DeleteSkillVersion(ctx, draftID)
+	require.NoError(t, err)
+
+	// Verify the version is gone.
+	_, err = cs.GetSkillVersion(ctx, draftID)
+	assert.ErrorIs(t, err, store.ErrNotFound)
+
+	// Create a published version and verify delete is rejected.
+	pubID := uuid.New().String()
+	require.NoError(t, cs.CreateSkillVersion(ctx, &store.SkillVersion{
+		ID:      pubID,
+		SkillID: skillID,
+		Version: "2.0.0",
+		Status:  store.SkillVersionStatusPublished,
+	}))
+
+	err = cs.DeleteSkillVersion(ctx, pubID)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "only draft versions can be deleted")
+
+	// Verify the published version still exists.
+	got, err := cs.GetSkillVersion(ctx, pubID)
+	require.NoError(t, err)
+	assert.Equal(t, "2.0.0", got.Version)
+}
+
+func TestSkillStore_DeleteSkillVersion_NotFound(t *testing.T) {
+	cs := newTestCompositeStore(t)
+	ctx := context.Background()
+
+	err := cs.DeleteSkillVersion(ctx, uuid.New().String())
+	assert.ErrorIs(t, err, store.ErrNotFound)
+}
