@@ -270,6 +270,8 @@ if [ -f "{enterprise_marker}" ]; then
     _use_gcp=true
 elif [ "${{AGY_USE_GCP:-}}" = "true" ] || [ "${{AGY_USE_GCP:-}}" = "1" ] || [ "${{AGY_USE_GCP:-}}" = "yes" ]; then
     _use_gcp=true
+elif [ -n "${{GOOGLE_CLOUD_PROJECT:-}}" ]; then
+    _use_gcp=true
 fi
 
 if [ "$_use_gcp" = "true" ]; then
