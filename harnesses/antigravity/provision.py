@@ -103,9 +103,16 @@ def _parse_env_output(output: str, env: dict[str, str]) -> None:
 
 
 def _select_auth_method(
-    explicit: str, env_keys: set[str], secret_files: dict[str, str]
+    explicit: str, env_keys: set[str], secret_files: dict[str, str],
+    home: str,
 ) -> tuple[str, str]:
     has_token = "AGY_TOKEN" in secret_files or bool(_read_secret(secret_files, "AGY_TOKEN"))
+    if not has_token:
+        # AGY_TOKEN may be a file-type secret bind-mounted directly to its
+        # target path rather than staged to the env secret directory.
+        has_token = os.path.isfile(os.path.join(
+            home, ".gemini", "antigravity-cli", "antigravity-oauth-token"
+        ))
     has_gcp_project = any(k in env_keys for k in ("GOOGLE_CLOUD_PROJECT",))
     has_gcp_location = any(k in env_keys for k in ("GOOGLE_CLOUD_LOCATION", "GOOGLE_CLOUD_REGION"))
 
@@ -208,6 +215,9 @@ def _generate_wrapper_script(home: str, has_token: bool, is_enterprise: bool) ->
     secret_path = os.path.join(
         home, ".scion", "harness", "secrets", "AGY_TOKEN"
     )
+    oauth_token_path = os.path.join(
+        home, ".gemini", "antigravity-cli", "antigravity-oauth-token"
+    )
     settings_path = os.path.join(
         home, ".gemini", "antigravity-cli", "settings.json"
     )
@@ -244,13 +254,20 @@ gnome-keyring-daemon --start --components=secrets,pkcs11,ssh > /dev/null 2>&1
 
 echo "agy-wrapper: keyring initialized (DBUS=$DBUS_SESSION_BUS_ADDRESS)" >&2
 
-# Inject OAuth token into keyring (secret file first, env var fallback)
+# Inject OAuth token into keyring (staging file, target path, env var fallback)
 if [ -f "{secret_path}" ]; then
     secret-tool store \\
         --label="Password for antigravity on gemini" \\
         service gemini username antigravity \\
         < "{secret_path}" 2>/dev/null \\
-        && echo "agy-wrapper: token injected into keyring (from file)" >&2 \\
+        && echo "agy-wrapper: token injected into keyring (from staging file)" >&2 \\
+        || echo "agy-wrapper: WARNING: failed to inject token" >&2
+elif [ -f "{oauth_token_path}" ]; then
+    secret-tool store \\
+        --label="Password for antigravity on gemini" \\
+        service gemini username antigravity \\
+        < "{oauth_token_path}" 2>/dev/null \\
+        && echo "agy-wrapper: token injected into keyring (from target path)" >&2 \\
         || echo "agy-wrapper: WARNING: failed to inject token" >&2
 elif [ -n "${{AGY_TOKEN:-}}" ]; then
     printf '%s' "$AGY_TOKEN" | secret-tool store \\
@@ -558,7 +575,7 @@ def _provision(manifest: dict[str, Any]) -> int:
         env_key = ""
     else:
         try:
-            method, env_key = _select_auth_method(explicit, env_keys, secret_files)
+            method, env_key = _select_auth_method(explicit, env_keys, secret_files, home)
         except ValueError as exc:
             print(str(exc), file=sys.stderr)
             return EXIT_ERROR
@@ -585,6 +602,23 @@ def _provision(manifest: dict[str, Any]) -> int:
     has_token = False
     if method in ("oauth-token", "vertex-ai"):
         token_raw = _read_secret(secret_files, "AGY_TOKEN")
+        if not token_raw:
+            # AGY_TOKEN may be a file-type secret bind-mounted directly to its
+            # target path rather than staged to the env secret directory.
+            oauth_token_path = os.path.join(
+                home, ".gemini", "antigravity-cli", "antigravity-oauth-token"
+            )
+            try:
+                with open(oauth_token_path, "r", encoding="utf-8") as f:
+                    token_raw = f.read().rstrip("\r\n")
+                if token_raw:
+                    print(
+                        f"antigravity provision: read AGY_TOKEN from "
+                        f"bind-mounted path {oauth_token_path}",
+                        file=sys.stderr,
+                    )
+            except OSError:
+                pass
         if not token_raw:
             print("antigravity provision: AGY_TOKEN secret is empty", file=sys.stderr)
             return EXIT_ERROR
