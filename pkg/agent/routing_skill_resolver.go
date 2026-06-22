@@ -103,20 +103,21 @@ func (r *RoutingSkillResolver) Resolve(ctx context.Context, refs []api.SkillRefe
 
 // detectScheme extracts the routing scheme from a skill URI.
 func detectScheme(uri string) string {
-	if strings.HasPrefix(uri, "gh://") {
+	lower := strings.ToLower(uri)
+	if strings.HasPrefix(lower, "gh://") {
 		return "gh"
 	}
-	if strings.HasPrefix(uri, "gcp-skill://") {
+	if strings.HasPrefix(lower, "gcp-skill://") {
 		return "gcp-skill"
 	}
-	if strings.HasPrefix(uri, "https://github.com/") || strings.HasPrefix(uri, "http://github.com/") {
+	if strings.HasPrefix(lower, "https://github.com/") || strings.HasPrefix(lower, "http://github.com/") {
 		return "gh"
 	}
-	if strings.HasPrefix(uri, "skill://") || !strings.Contains(uri, "://") {
+	if strings.HasPrefix(lower, "skill://") || !strings.Contains(lower, "://") {
 		return "skill"
 	}
-	if idx := strings.Index(uri, "://"); idx > 0 {
-		return uri[:idx]
+	if idx := strings.Index(lower, "://"); idx > 0 {
+		return lower[:idx]
 	}
 	return ""
 }

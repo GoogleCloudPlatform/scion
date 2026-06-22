@@ -23,6 +23,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 const (
@@ -39,13 +41,13 @@ func (s *Server) federateResolve(ctx context.Context, registryName string, skill
 			Message: fmt.Sprintf("registry %q is not configured", registryName),
 		}
 	}
-	if registry.Status != "active" {
+	if registry.Status != store.SkillRegistryStatusActive {
 		return nil, &ResolveSkillError{
 			URI: skillRef.URI, Code: "registry_disabled",
 			Message: fmt.Sprintf("registry %q is disabled", registryName),
 		}
 	}
-	if registry.Type != "hub" {
+	if registry.Type != store.SkillRegistryTypeHub {
 		return nil, &ResolveSkillError{
 			URI: skillRef.URI, Code: "wrong_registry_type",
 			Message: fmt.Sprintf("registry %q is type %q, not hub", registryName, registry.Type),
@@ -124,7 +126,7 @@ func (s *Server) federateResolve(ctx context.Context, registryName string, skill
 	resolved := &resolveResp.Resolved[0]
 
 	// Trust enforcement
-	if registry.TrustLevel == "pinned" {
+	if registry.TrustLevel == store.SkillRegistryTrustPinned {
 		pinnedHash, err := s.store.GetPinnedHash(ctx, registry.ID, skillRef.URI)
 		if err != nil {
 			return nil, &ResolveSkillError{

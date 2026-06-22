@@ -35,10 +35,11 @@ type GitHubSkillRef struct {
 // ParseGitHubSkillURI parses a gh:// shorthand or full GitHub URL
 // into a GitHubSkillRef.
 func ParseGitHubSkillURI(uri string) (*GitHubSkillRef, error) {
-	if strings.HasPrefix(uri, "gh://") {
+	lower := strings.ToLower(uri)
+	if strings.HasPrefix(lower, "gh://") {
 		return parseGHShorthand(uri)
 	}
-	if strings.HasPrefix(uri, "https://github.com/") || strings.HasPrefix(uri, "http://github.com/") {
+	if strings.HasPrefix(lower, "https://github.com/") || strings.HasPrefix(lower, "http://github.com/") {
 		return parseGitHubFullURL(uri)
 	}
 	return nil, fmt.Errorf("not a GitHub skill URI: %q", uri)

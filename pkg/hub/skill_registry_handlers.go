@@ -36,12 +36,12 @@ type CreateSkillRegistryRequest struct {
 
 // UpdateSkillRegistryRequest is the request body for updating a skill registry.
 type UpdateSkillRegistryRequest struct {
-	Endpoint    string `json:"endpoint,omitempty"`
-	Description string `json:"description,omitempty"`
-	TrustLevel  string `json:"trustLevel,omitempty"`
-	AuthToken   string `json:"authToken,omitempty"`
-	ResolvePath string `json:"resolvePath,omitempty"`
-	Status      string `json:"status,omitempty"`
+	Endpoint    *string `json:"endpoint,omitempty"`
+	Description *string `json:"description,omitempty"`
+	TrustLevel  *string `json:"trustLevel,omitempty"`
+	AuthToken   *string `json:"authToken,omitempty"`
+	ResolvePath *string `json:"resolvePath,omitempty"`
+	Status      *string `json:"status,omitempty"`
 }
 
 // PinSkillHashRequest is the request body for pinning a skill hash.
@@ -238,36 +238,36 @@ func (s *Server) updateSkillRegistry(w http.ResponseWriter, r *http.Request, id 
 		return
 	}
 
-	if req.Endpoint != "" {
-		u, err := url.Parse(req.Endpoint)
+	if req.Endpoint != nil {
+		u, err := url.Parse(*req.Endpoint)
 		if err != nil || u.Scheme != "https" || u.Host == "" {
 			ValidationError(w, "endpoint must be a valid HTTPS URL", nil)
 			return
 		}
-		registry.Endpoint = req.Endpoint
+		registry.Endpoint = *req.Endpoint
 	}
-	if req.Description != "" {
-		registry.Description = req.Description
+	if req.Description != nil {
+		registry.Description = *req.Description
 	}
-	if req.TrustLevel != "" {
-		if req.TrustLevel != store.SkillRegistryTrustTrusted && req.TrustLevel != store.SkillRegistryTrustPinned {
+	if req.TrustLevel != nil {
+		if *req.TrustLevel != store.SkillRegistryTrustTrusted && *req.TrustLevel != store.SkillRegistryTrustPinned {
 			ValidationError(w, "trustLevel must be 'trusted' or 'pinned'", nil)
 			return
 		}
-		registry.TrustLevel = req.TrustLevel
+		registry.TrustLevel = *req.TrustLevel
 	}
-	if req.AuthToken != "" {
-		registry.AuthToken = req.AuthToken
+	if req.AuthToken != nil {
+		registry.AuthToken = *req.AuthToken
 	}
-	if req.ResolvePath != "" {
-		registry.ResolvePath = req.ResolvePath
+	if req.ResolvePath != nil {
+		registry.ResolvePath = *req.ResolvePath
 	}
-	if req.Status != "" {
-		if req.Status != store.SkillRegistryStatusActive && req.Status != store.SkillRegistryStatusDisabled {
+	if req.Status != nil {
+		if *req.Status != store.SkillRegistryStatusActive && *req.Status != store.SkillRegistryStatusDisabled {
 			ValidationError(w, "status must be 'active' or 'disabled'", nil)
 			return
 		}
-		registry.Status = req.Status
+		registry.Status = *req.Status
 	}
 
 	if err := s.store.UpdateSkillRegistry(ctx, registry); err != nil {

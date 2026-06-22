@@ -229,7 +229,7 @@ func parseScopedPath(raw string, uri *SkillURI, segments []string, version strin
 // This function is a lightweight utility for non-routing scheme checks.
 func SkillURIScheme(uri string) string {
 	if idx := strings.Index(uri, "://"); idx > 0 {
-		return uri[:idx]
+		return strings.ToLower(uri[:idx])
 	}
 	return "skill"
 }

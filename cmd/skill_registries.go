@@ -44,7 +44,7 @@ func runRegistriesList(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("Hub connection required: %w", err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
 	defer cancel()
 
 	resp, err := hubCtx.Client.SkillRegistries().List(ctx)
@@ -83,7 +83,7 @@ func runRegistriesAdd(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("Hub connection required: %w", err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
 	defer cancel()
 
 	endpoint, _ := cmd.Flags().GetString("endpoint")
@@ -133,7 +133,7 @@ func runRegistriesShow(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("Hub connection required: %w", err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
 	defer cancel()
 
 	registry, err := hubCtx.Client.SkillRegistries().Get(ctx, args[0])
@@ -175,7 +175,7 @@ func runRegistriesUpdate(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("Hub connection required: %w", err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
 	defer cancel()
 
 	endpoint, _ := cmd.Flags().GetString("endpoint")
@@ -220,7 +220,7 @@ func runRegistriesRemove(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("Hub connection required: %w", err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
 	defer cancel()
 
 	if err := hubCtx.Client.SkillRegistries().Delete(ctx, args[0]); err != nil {
@@ -248,7 +248,7 @@ func runRegistriesPin(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("Hub connection required: %w", err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
 	defer cancel()
 
 	hash, _ := cmd.Flags().GetString("hash")
