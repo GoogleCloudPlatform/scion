@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -531,10 +532,15 @@ func attrSetKey(attrs []*commonpb.KeyValue) string {
 		b.WriteString(kv.Key)
 		b.WriteByte('=')
 		if kv.Value != nil {
-			if sv := kv.Value.GetStringValue(); sv != "" {
-				b.WriteString(sv)
-			} else if iv := kv.Value.GetIntValue(); iv != 0 {
-				fmt.Fprintf(&b, "%d", iv)
+			switch v := kv.Value.GetValue().(type) {
+			case *commonpb.AnyValue_StringValue:
+				b.WriteString(v.StringValue)
+			case *commonpb.AnyValue_BoolValue:
+				b.WriteString(strconv.FormatBool(v.BoolValue))
+			case *commonpb.AnyValue_IntValue:
+				fmt.Fprintf(&b, "%d", v.IntValue)
+			case *commonpb.AnyValue_DoubleValue:
+				b.WriteString(strconv.FormatFloat(v.DoubleValue, 'f', -1, 64))
 			}
 		}
 	}

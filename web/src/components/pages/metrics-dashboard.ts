@@ -315,6 +315,101 @@ export class ScionPageMetrics extends LitElement {
     return n.toLocaleString();
   }
 
+  override updated(_changedProperties: Map<string, unknown>): void {
+    super.updated(_changedProperties);
+    this.updateCharts();
+  }
+
+  private updateCharts(): void {
+    switch (this.activeTab) {
+      case 'sessions':
+        if (this.sessions) {
+          if (this.sessions.dailyCounts?.length) {
+            const sorted = this.sortPointsByDate(this.sessions.dailyCounts);
+            this.renderChart('chart-sessions', 'bar', sorted.map(p => p.timestamp), [
+              {
+                label: 'Sessions',
+                data: sorted.map(p => p.value),
+                backgroundColor: CHART_COLORS[0],
+              },
+            ]);
+          }
+          if (this.sessions.activeAgents?.length) {
+            const sorted = this.sortPointsByDate(this.sessions.activeAgents);
+            this.renderChart('chart-agents', 'line', sorted.map(p => p.timestamp), [
+              {
+                label: 'Active Agents',
+                data: sorted.map(p => p.value),
+                borderColor: CHART_COLORS[1],
+                backgroundColor: CHART_COLORS[1] + '33',
+              },
+            ]);
+          }
+        }
+        break;
+      case 'model-calls':
+        if (this.modelCalls) {
+          if (this.modelCalls.byModel?.length) {
+            const allDates = this.collectDates(this.modelCalls.byModel);
+            this.renderChart(
+              'chart-model-calls',
+              'bar',
+              allDates,
+              this.modelCalls.byModel.map((series, i) => ({
+                label: series.label,
+                data: this.alignToDateAxis(series.points, allDates),
+                backgroundColor: CHART_COLORS[i % CHART_COLORS.length],
+              }))
+            );
+          }
+          if (this.modelCalls.byHarness?.length) {
+            const allDates = this.collectDates(this.modelCalls.byHarness);
+            this.renderChart(
+              'chart-harness-calls',
+              'bar',
+              allDates,
+              this.modelCalls.byHarness.map((series, i) => ({
+                label: series.label,
+                data: this.alignToDateAxis(series.points, allDates),
+                backgroundColor: CHART_COLORS[(i + 3) % CHART_COLORS.length],
+              }))
+            );
+          }
+        }
+        break;
+      case 'tokens':
+        if (this.tokens) {
+          if (this.tokens.input?.length) {
+            const allDates = this.collectDates(this.tokens.input);
+            this.renderChart(
+              'chart-tokens-input',
+              'bar',
+              allDates,
+              this.tokens.input.map((series, i) => ({
+                label: series.label,
+                data: this.alignToDateAxis(series.points, allDates),
+                backgroundColor: CHART_COLORS[i % CHART_COLORS.length],
+              }))
+            );
+          }
+          if (this.tokens.output?.length) {
+            const allDates = this.collectDates(this.tokens.output);
+            this.renderChart(
+              'chart-tokens-output',
+              'bar',
+              allDates,
+              this.tokens.output.map((series, i) => ({
+                label: series.label,
+                data: this.alignToDateAxis(series.points, allDates),
+                backgroundColor: CHART_COLORS[(i + 3) % CHART_COLORS.length],
+              }))
+            );
+          }
+        }
+        break;
+    }
+  }
+
   private renderChart(
     canvasId: string,
     type: 'bar' | 'line',
@@ -438,30 +533,6 @@ export class ScionPageMetrics extends LitElement {
 
     const s = this.sessions;
 
-    this.updateComplete.then(() => {
-      if (s.dailyCounts?.length) {
-        const sorted = this.sortPointsByDate(s.dailyCounts);
-        this.renderChart('chart-sessions', 'bar', sorted.map(p => p.timestamp), [
-          {
-            label: 'Sessions',
-            data: sorted.map(p => p.value),
-            backgroundColor: CHART_COLORS[0],
-          },
-        ]);
-      }
-      if (s.activeAgents?.length) {
-        const sorted = this.sortPointsByDate(s.activeAgents);
-        this.renderChart('chart-agents', 'line', sorted.map(p => p.timestamp), [
-          {
-            label: 'Active Agents',
-            data: sorted.map(p => p.value),
-            borderColor: CHART_COLORS[1],
-            backgroundColor: CHART_COLORS[1] + '33',
-          },
-        ]);
-      }
-    });
-
     return html`
       <div class="chart-row">
         <div class="section">
@@ -486,35 +557,6 @@ export class ScionPageMetrics extends LitElement {
 
     const mc = this.modelCalls;
 
-    this.updateComplete.then(() => {
-      if (mc.byModel?.length) {
-        const allDates = this.collectDates(mc.byModel);
-        this.renderChart(
-          'chart-model-calls',
-          'bar',
-          allDates,
-          mc.byModel.map((series, i) => ({
-            label: series.label,
-            data: this.alignToDateAxis(series.points, allDates),
-            backgroundColor: CHART_COLORS[i % CHART_COLORS.length],
-          }))
-        );
-      }
-      if (mc.byHarness?.length) {
-        const allDates = this.collectDates(mc.byHarness);
-        this.renderChart(
-          'chart-harness-calls',
-          'bar',
-          allDates,
-          mc.byHarness.map((series, i) => ({
-            label: series.label,
-            data: this.alignToDateAxis(series.points, allDates),
-            backgroundColor: CHART_COLORS[(i + 3) % CHART_COLORS.length],
-          }))
-        );
-      }
-    });
-
     return html`
       <div class="chart-row">
         <div class="section">
@@ -538,35 +580,6 @@ export class ScionPageMetrics extends LitElement {
     if (!this.tokens) return this.renderEmptyState();
 
     const t = this.tokens;
-
-    this.updateComplete.then(() => {
-      if (t.input?.length) {
-        const allDates = this.collectDates(t.input);
-        this.renderChart(
-          'chart-tokens-input',
-          'bar',
-          allDates,
-          t.input.map((series, i) => ({
-            label: series.label,
-            data: this.alignToDateAxis(series.points, allDates),
-            backgroundColor: CHART_COLORS[i % CHART_COLORS.length],
-          }))
-        );
-      }
-      if (t.output?.length) {
-        const allDates = this.collectDates(t.output);
-        this.renderChart(
-          'chart-tokens-output',
-          'bar',
-          allDates,
-          t.output.map((series, i) => ({
-            label: series.label,
-            data: this.alignToDateAxis(series.points, allDates),
-            backgroundColor: CHART_COLORS[(i + 3) % CHART_COLORS.length],
-          }))
-        );
-      }
-    });
 
     return html`
       <div class="chart-row">

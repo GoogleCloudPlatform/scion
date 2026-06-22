@@ -367,7 +367,7 @@ func (s *MetricsDashboardService) querySum(ctx context.Context, metricName strin
 			EndTime:   timestamppb.New(end),
 		},
 		Aggregation: &monitoringpb.Aggregation{
-			AlignmentPeriod:    durationpb.New(time.Duration(end.Sub(start).Seconds()) * time.Second),
+			AlignmentPeriod:    durationpb.New(end.Sub(start).Truncate(time.Second)),
 			PerSeriesAligner:   monitoringpb.Aggregation_ALIGN_DELTA,
 			CrossSeriesReducer: monitoringpb.Aggregation_REDUCE_SUM,
 		},
@@ -513,7 +513,7 @@ func (s *MetricsDashboardService) queryUniqueLabels(ctx context.Context, metricN
 			EndTime:   timestamppb.New(end),
 		},
 		Aggregation: &monitoringpb.Aggregation{
-			AlignmentPeriod:    durationpb.New(time.Duration(end.Sub(start).Seconds()) * time.Second),
+			AlignmentPeriod:    durationpb.New(end.Sub(start).Truncate(time.Second)),
 			PerSeriesAligner:   monitoringpb.Aggregation_ALIGN_DELTA,
 			CrossSeriesReducer: monitoringpb.Aggregation_REDUCE_SUM,
 			GroupByFields:      []string{groupByLabel},
@@ -843,7 +843,7 @@ func (s *Server) serveMetricsDashboard(w http.ResponseWriter, r *http.Request, o
 				return
 			}
 			slog.Warn("Partial metrics query failure", "view", view, "error", err)
-			w.Header().Set("X-Metrics-Warning", err.Error())
+
 		}
 		writeJSON(w, http.StatusOK, data)
 
@@ -856,7 +856,7 @@ func (s *Server) serveMetricsDashboard(w http.ResponseWriter, r *http.Request, o
 				return
 			}
 			slog.Warn("Partial metrics query failure", "view", view, "error", err)
-			w.Header().Set("X-Metrics-Warning", err.Error())
+
 		}
 		writeJSON(w, http.StatusOK, data)
 
@@ -869,7 +869,7 @@ func (s *Server) serveMetricsDashboard(w http.ResponseWriter, r *http.Request, o
 				return
 			}
 			slog.Warn("Partial metrics query failure", "view", view, "error", err)
-			w.Header().Set("X-Metrics-Warning", err.Error())
+
 		}
 		writeJSON(w, http.StatusOK, data)
 
@@ -882,7 +882,7 @@ func (s *Server) serveMetricsDashboard(w http.ResponseWriter, r *http.Request, o
 				return
 			}
 			slog.Warn("Partial metrics query failure", "view", view, "error", err)
-			w.Header().Set("X-Metrics-Warning", err.Error())
+
 		}
 		writeJSON(w, http.StatusOK, data)
 
