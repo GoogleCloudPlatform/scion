@@ -75,7 +75,11 @@ def _validate_token_file(path: str) -> bool:
     except (json.JSONDecodeError, OSError) as exc:
         print(f"capture-auth: token file is not valid JSON: {exc}", file=sys.stderr)
         return False
-    if not isinstance(obj, dict) or "refresh_token" not in obj:
+    has_refresh = (
+        "refresh_token" in obj
+        or (isinstance(obj.get("token"), dict) and "refresh_token" in obj["token"])
+    )
+    if not isinstance(obj, dict) or not has_refresh:
         print("capture-auth: token file missing refresh_token field", file=sys.stderr)
         return False
     return True

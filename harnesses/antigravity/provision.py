@@ -627,7 +627,11 @@ def _provision(manifest: dict[str, Any]) -> int:
         except json.JSONDecodeError as exc:
             print(f"antigravity provision: AGY_TOKEN is not valid JSON: {exc}", file=sys.stderr)
             return EXIT_ERROR
-        if not isinstance(token_obj, dict) or "refresh_token" not in token_obj:
+        has_refresh = (
+            "refresh_token" in token_obj
+            or (isinstance(token_obj.get("token"), dict) and "refresh_token" in token_obj["token"])
+        )
+        if not isinstance(token_obj, dict) or not has_refresh:
             print("antigravity provision: AGY_TOKEN must contain refresh_token", file=sys.stderr)
             return EXIT_ERROR
         has_token = True
