@@ -114,7 +114,10 @@ def _capture_one(entry: dict[str, Any], force: bool) -> tuple[bool, str | None]:
         return False, f"sciontool timed out for key {key}"
 
     if result.returncode != 0:
-        return False, f"sciontool failed for {key}: {result.stderr.strip()}"
+        stderr = result.stderr.strip()
+        if "already exists" in stderr:
+            return False, None
+        return False, f"sciontool failed for {key}: {stderr}"
 
     return True, None
 
@@ -175,6 +178,15 @@ def main() -> int:
             "type": "file",
             "target": "~/.gemini/antigravity-cli/antigravity-oauth-token",
         }]
+
+    seen_keys: set[str] = set()
+    unique_entries = []
+    for e in entries:
+        k = e.get("key", "") or e.get("name", "")
+        if k not in seen_keys:
+            seen_keys.add(k)
+            unique_entries.append(e)
+    entries = unique_entries
 
     captured = 0
     errors = 0
