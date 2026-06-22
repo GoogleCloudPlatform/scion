@@ -17,15 +17,16 @@
 /**
  * Skill creation page — combined create + publish flow.
  *
- * Form for creating a new skill with name, scope, visibility, description, and tags.
- * Optionally supports a combined create + publish flow via multipart POST.
+ * Supports pasting/uploading SKILL.md with YAML frontmatter auto-populate,
+ * additional file uploads, and an inline progress view for the
+ * create skill + multipart POST publish sequence.
  */
 
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 import yaml from 'js-yaml';
 
-import type { Capabilities, SkillVersion, SkillUploadUrl } from '../../shared/types.js';
+import type { Capabilities } from '../../shared/types.js';
 import { can } from '../../shared/types.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 
@@ -44,15 +45,7 @@ interface SelectedFile {
   path: string;
 }
 
-interface UploadResult {
-  path: string;
-  size: number;
-  hash: string;
-  status: 'pending' | 'uploading' | 'done' | 'failed';
-  error?: string;
-}
-
-type FlowState = 'form' | 'creating' | 'uploading' | 'finalizing' | 'done' | 'error';
+type FlowState = 'form' | 'creating' | 'publishing' | 'done' | 'error';
 
 const MAX_PASTE_SIZE = 512 * 1024; // 512 KB
 const MAX_FILES = 50;
@@ -112,14 +105,29 @@ export class ScionPageSkillCreate extends LitElement {
   @state() private visibility: 'private' | 'public' = 'private';
   @state() private tagsInput = '';
 
-  // Publish-immediately state
-  @state() private publishImmediately = false;
-  @state() private publishVersion = '1.0.0';
-  @state() private publishFiles: Array<{ file: File; path: string }> = [];
-  @state() private publishStep: 'idle' | 'creating' | 'publishing' | 'done' | 'error' = 'idle';
-  @state() private publishError: string | null = null;
-  private createdSkillId: string | null = null;
+  /* --- auto-populate tracking --- */
+  private editedFields = new Set<string>();
+  private debounceTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /* --- additional files --- */
+  @state() private additionalFiles: SelectedFile[] = [];
+  @state() private duplicateSkillMdWarning = false;
+  @state() private version = '1.0.0';
+
+  /* --- flow state --- */
+  @state() private flowState: FlowState = 'form';
+  @state() private error: string | null = null;
+  @state() private validationError: string | null = null;
+  @state() private createdSkillId: string | null = null;
+
   private fileInputRef: HTMLInputElement | null = null;
+  private skillMdInputRef: HTMLInputElement | null = null;
+  private redirectTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /* --- allFiles cache --- */
+  private cachedAllFiles: SelectedFile[] | null = null;
+  private cachedSkillMdContent = '';
+  private cachedAdditionalFiles: SelectedFile[] = [];
 
   static override styles = css`
     :host {
@@ -291,37 +299,7 @@ export class ScionPageSkillCreate extends LitElement {
       color: var(--scion-text, #1e293b);
     }
 
-    /* Publish section styles */
-    .publish-section {
-      margin-top: 1.25rem;
-      padding-top: 1.25rem;
-      border-top: 1px solid var(--scion-border, #e2e8f0);
-    }
-
-    .publish-toggle {
-      display: flex;
-      align-items: center;
-      gap: 0.75rem;
-      margin-bottom: 1rem;
-    }
-
-    .publish-toggle label {
-      font-size: 0.875rem;
-      font-weight: 600;
-      color: var(--scion-text, #1e293b);
-      cursor: pointer;
-    }
-
-    .publish-fields {
-      display: flex;
-      flex-direction: column;
-      gap: 1rem;
-      padding: 1rem;
-      background: var(--scion-bg-subtle, #f1f5f9);
-      border: 1px solid var(--scion-border, #e2e8f0);
-      border-radius: var(--scion-radius, 0.5rem);
-    }
-
+    /* --- drop zone --- */
     .drop-zone {
       border: 2px dashed var(--scion-border, #e2e8f0);
       border-radius: var(--scion-radius, 0.5rem);
@@ -331,9 +309,9 @@ export class ScionPageSkillCreate extends LitElement {
       transition: all 150ms ease;
       color: var(--scion-text-muted, #64748b);
       font-size: 0.875rem;
-      background: var(--scion-surface, #ffffff);
     }
-    .drop-zone:hover, .drop-zone.dragover {
+    .drop-zone:hover,
+    .drop-zone.dragover {
       border-color: var(--scion-primary, #3b82f6);
       background: var(--sl-color-primary-50, #eff6ff);
       color: var(--scion-primary, #3b82f6);
@@ -344,10 +322,11 @@ export class ScionPageSkillCreate extends LitElement {
       margin: 0 auto 0.5rem;
     }
 
+    /* --- file list --- */
     .file-list {
       list-style: none;
       padding: 0;
-      margin: 0;
+      margin: 0.75rem 0 0 0;
       display: flex;
       flex-direction: column;
       gap: 0.375rem;
@@ -357,7 +336,7 @@ export class ScionPageSkillCreate extends LitElement {
       align-items: center;
       justify-content: space-between;
       padding: 0.5rem 0.75rem;
-      background: var(--scion-surface, #ffffff);
+      background: var(--scion-bg-subtle, #f1f5f9);
       border-radius: var(--scion-radius, 0.5rem);
       font-size: 0.875rem;
     }
@@ -372,11 +351,12 @@ export class ScionPageSkillCreate extends LitElement {
       overflow: hidden;
       text-overflow: ellipsis;
     }
-    .file-size {
+    .file-meta {
       color: var(--scion-text-muted, #64748b);
       font-size: 0.75rem;
       flex-shrink: 0;
     }
+
     .remove-btn {
       cursor: pointer;
       background: none;
@@ -385,66 +365,78 @@ export class ScionPageSkillCreate extends LitElement {
       color: var(--scion-text-muted, #64748b);
       line-height: 1;
     }
-    .remove-btn:hover { color: var(--sl-color-danger-600, #dc2626); }
-
-    .validation-error {
-      background: var(--sl-color-danger-50, #fef2f2);
-      border: 1px solid var(--sl-color-danger-200, #fecaca);
-      border-radius: var(--scion-radius, 0.5rem);
-      padding: 0.75rem 1rem;
-      display: flex;
-      align-items: flex-start;
-      gap: 0.5rem;
-      color: var(--sl-color-danger-700, #b91c1c);
-      font-size: 0.875rem;
-    }
-    .validation-error sl-icon {
-      flex-shrink: 0;
-      margin-top: 0.125rem;
+    .remove-btn:hover {
+      color: var(--sl-color-danger-600, #dc2626);
     }
 
-    /* Progress UI styles */
-    .progress-overlay {
+    /* --- progress view --- */
+    .progress-card {
+      background: var(--scion-surface, #ffffff);
+      border: 1px solid var(--scion-border, #e2e8f0);
+      border-radius: var(--scion-radius-lg, 0.75rem);
+      padding: 1.5rem;
+      max-width: 640px;
+    }
+    .progress-title {
+      font-size: 1.125rem;
+      font-weight: 600;
+      color: var(--scion-text, #1e293b);
+      margin: 0 0 1.25rem 0;
+    }
+    .progress-steps {
       display: flex;
       flex-direction: column;
-      gap: 1rem;
+      gap: 0.75rem;
+      margin-bottom: 1.25rem;
     }
-
     .progress-step {
       display: flex;
       align-items: center;
       gap: 0.75rem;
       font-size: 0.875rem;
-      color: var(--scion-text, #1e293b);
+      color: var(--scion-text-muted, #64748b);
     }
-    .progress-step .step-icon {
-      flex-shrink: 0;
-      width: 1.5rem;
-      display: flex;
-      align-items: center;
-      justify-content: center;
+    .progress-step.active {
+      color: var(--scion-primary, #3b82f6);
+      font-weight: 500;
     }
-    .progress-step .step-icon.done {
+    .progress-step.done {
       color: var(--sl-color-success-600, #16a34a);
     }
-    .progress-step .step-icon.active {
-      color: var(--scion-primary, #3b82f6);
+    .progress-step.error {
+      color: var(--sl-color-danger-600, #dc2626);
     }
-    .progress-step .step-icon.pending {
-      color: var(--scion-text-muted, #64748b);
-    }
-    .progress-step .step-label {
+    .step-label {
       flex: 1;
     }
-    .progress-step .step-status {
+    .step-status {
       font-size: 0.75rem;
-      color: var(--scion-text-muted, #64748b);
     }
 
-    .publish-error-actions {
+    .progress-actions {
       display: flex;
       gap: 0.75rem;
-      margin-top: 0.5rem;
+      margin-top: 1.25rem;
+      padding-top: 1.25rem;
+      border-top: 1px solid var(--scion-border, #e2e8f0);
+    }
+
+    .success-banner {
+      background: var(--sl-color-success-50, #f0fdf4);
+      border: 1px solid var(--sl-color-success-200, #bbf7d0);
+      border-radius: var(--scion-radius, 0.5rem);
+      padding: 1rem;
+      text-align: center;
+      color: var(--sl-color-success-700, #15803d);
+    }
+    .success-banner sl-icon {
+      font-size: 2rem;
+      display: block;
+      margin: 0 auto 0.5rem;
+    }
+
+    input[type='file'] {
+      display: none;
     }
   `;
 
@@ -490,7 +482,39 @@ export class ScionPageSkillCreate extends LitElement {
       .filter((t) => t.length > 0);
   }
 
-  // -- File handling for publish section --
+  private get hasSkillMd(): boolean {
+    return this.skillMdContent.trim().length > 0;
+  }
+
+  private get allFiles(): SelectedFile[] {
+    if (
+      this.cachedAllFiles !== null &&
+      this.cachedSkillMdContent === this.skillMdContent &&
+      this.cachedAdditionalFiles === this.additionalFiles
+    ) {
+      return this.cachedAllFiles;
+    }
+
+    const files: SelectedFile[] = [];
+    if (this.hasSkillMd) {
+      const blob = new Blob([this.skillMdContent], { type: 'text/markdown' });
+      const skillMdFile = new File([blob], 'SKILL.md', { type: 'text/markdown' });
+      files.push({ file: skillMdFile, path: 'SKILL.md' });
+    }
+    for (const f of this.additionalFiles) {
+      if (f.path === 'SKILL.md' && this.hasSkillMd) continue;
+      files.push(f);
+    }
+
+    this.cachedAllFiles = files;
+    this.cachedSkillMdContent = this.skillMdContent;
+    this.cachedAdditionalFiles = this.additionalFiles;
+    return files;
+  }
+
+  private get hasFiles(): boolean {
+    return this.allFiles.length > 0;
+  }
 
   private formatFileSize(bytes: number): string {
     if (bytes < 1024) return `${bytes} B`;
@@ -498,82 +522,43 @@ export class ScionPageSkillCreate extends LitElement {
     return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
   }
 
-  private onDropZoneClick(): void {
-    if (!this.fileInputRef) {
-      this.fileInputRef = document.createElement('input');
-      this.fileInputRef.type = 'file';
-      this.fileInputRef.multiple = true;
-      this.fileInputRef.addEventListener('change', () => this.onFilesSelected());
+  private validateSemver(v: string): boolean {
+    return /^\d+\.\d+\.\d+(-[\w.-]+)?(\+[\w.-]+)?$/.test(v.replace(/^v/, ''));
+  }
+
+  private cleanVersion(v: string): string {
+    return v.trim().replace(/^v/, '');
+  }
+
+  /* ================================================================ */
+  /*  SKILL.md content handling                                        */
+  /* ================================================================ */
+
+  private onSkillMdInput(e: Event): void {
+    const target = e.target as HTMLElement & { value: string };
+    const value = target.value;
+
+    if (new Blob([value]).size > MAX_PASTE_SIZE) {
+      this.validationError = 'SKILL.md content exceeds 512 KB. Please upload the file instead.';
+      this.skillMdContent = '';
+      target.value = '';
+      return;
     }
-    this.fileInputRef.click();
+    this.validationError = null;
+    this.skillMdContent = value;
+    this.debounceParseFrontmatter();
   }
 
-  private onFilesSelected(): void {
-    if (!this.fileInputRef?.files) return;
-    const newFiles: Array<{ file: File; path: string }> = [];
-    for (const file of Array.from(this.fileInputRef.files)) {
-      const path = file.webkitRelativePath || file.name;
-      if (!this.publishFiles.some((f) => f.path === path)) {
-        newFiles.push({ file, path });
-      }
-    }
-    this.publishFiles = [...this.publishFiles, ...newFiles];
-    this.publishError = null;
-    this.fileInputRef.value = '';
+  private debounceParseFrontmatter(): void {
+    if (this.debounceTimer) clearTimeout(this.debounceTimer);
+    this.debounceTimer = setTimeout(() => this.applyFrontmatter(), 300);
   }
 
-  private onDrop(e: DragEvent): void {
-    e.preventDefault();
-    const target = e.currentTarget as HTMLElement;
-    target.classList.remove('dragover');
-    if (!e.dataTransfer?.files) return;
-    const newFiles: Array<{ file: File; path: string }> = [];
-    for (const file of Array.from(e.dataTransfer.files)) {
-      const path = file.name;
-      if (!this.publishFiles.some((f) => f.path === path)) {
-        newFiles.push({ file, path });
-      }
-    }
-    this.publishFiles = [...this.publishFiles, ...newFiles];
-    this.publishError = null;
-  }
-
-  private onDragOver(e: DragEvent): void {
-    e.preventDefault();
-    (e.currentTarget as HTMLElement).classList.add('dragover');
-  }
-
-  private onDragLeave(e: DragEvent): void {
-    (e.currentTarget as HTMLElement).classList.remove('dragover');
-  }
-
-  private removeFile(index: number): void {
-    this.publishFiles = this.publishFiles.filter((_, i) => i !== index);
-  }
-
-  // -- Publish file validation --
-
-  private validatePublishFiles(): string | null {
-    if (!this.publishVersion.trim()) return 'Version is required.';
-    if (!/^\d+\.\d+\.\d+(-[\w.]+)?$/.test(this.publishVersion.trim().replace(/^v/, '')))
-      return 'Version must be valid semver (e.g. 1.0.0).';
-    if (this.publishFiles.length === 0) return 'At least one file is required.';
-    if (!this.publishFiles.some((f) => f.file.name === 'SKILL.md' || f.path === 'SKILL.md'))
-      return 'A file named exactly SKILL.md is required.';
-    if (this.publishFiles.length > 50) return 'Maximum 50 files allowed.';
-    const maxSize = 10 * 1024 * 1024;
-    const oversize = this.publishFiles.find((f) => f.file.size > maxSize);
-    if (oversize) return `File "${oversize.path}" exceeds 10 MB limit.`;
-    const totalSize = this.publishFiles.reduce((sum, f) => sum + f.file.size, 0);
-    if (totalSize > 50 * 1024 * 1024) return 'Total file size exceeds 50 MB limit.';
-    return null;
-  }
-
-  // -- Submit flow --
-
-  private async handleSubmit(): Promise<void> {
-    if (!this.name.trim()) {
-      this.error = 'Skill name is required.';
+  private applyFrontmatter(): void {
+    if (!this.hasSkillMd) {
+      if (!this.editedFields.has('name')) this.name = '';
+      if (!this.editedFields.has('description')) this.description = '';
+      if (!this.editedFields.has('tags')) this.tagsInput = '';
       return;
     }
 
@@ -611,18 +596,146 @@ export class ScionPageSkillCreate extends LitElement {
       return;
     }
 
-    if (this.publishImmediately) {
-      const fileErr = this.validatePublishFiles();
-      if (fileErr) {
-        this.publishError = fileErr;
-        return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      this.skillMdContent = reader.result as string;
+      this.validationError = null;
+      this.applyFrontmatter();
+    };
+    reader.readAsText(file);
+    this.skillMdInputRef!.value = '';
+  }
+
+  private isAutoPopulated(field: string): boolean {
+    return this.hasSkillMd && !this.editedFields.has(field);
+  }
+
+  private onFieldInput(field: string, e: Event): void {
+    const value = (e.target as HTMLElement & { value: string }).value;
+    this.editedFields.add(field);
+    switch (field) {
+      case 'name':
+        this.name = value;
+        break;
+      case 'description':
+        this.description = value;
+        break;
+      case 'tags':
+        this.tagsInput = value;
+        break;
+    }
+  }
+
+  private resetFromFrontmatter(): void {
+    this.editedFields.clear();
+    this.applyFrontmatter();
+  }
+
+  /* ================================================================ */
+  /*  Additional file handling                                         */
+  /* ================================================================ */
+
+  private onDropZoneClick(): void {
+    if (!this.fileInputRef) {
+      this.fileInputRef = document.createElement('input');
+      this.fileInputRef.type = 'file';
+      this.fileInputRef.multiple = true;
+      this.fileInputRef.addEventListener('change', () => this.onFilesSelected());
+    }
+    this.fileInputRef.click();
+  }
+
+  private onFilesSelected(): void {
+    if (!this.fileInputRef?.files) return;
+    this.addFiles(Array.from(this.fileInputRef.files));
+    this.fileInputRef.value = '';
+  }
+
+  private onDrop(e: DragEvent): void {
+    e.preventDefault();
+    (e.currentTarget as HTMLElement).classList.remove('dragover');
+    if (!e.dataTransfer?.files) return;
+    this.addFiles(Array.from(e.dataTransfer.files));
+  }
+
+  private onDragOver(e: DragEvent): void {
+    e.preventDefault();
+    (e.currentTarget as HTMLElement).classList.add('dragover');
+  }
+
+  private onDragLeave(e: DragEvent): void {
+    (e.currentTarget as HTMLElement).classList.remove('dragover');
+  }
+
+  private addFiles(files: File[]): void {
+    const newFiles: SelectedFile[] = [];
+    let hasDuplicateSkillMd = false;
+
+    for (const file of files) {
+      const path = file.webkitRelativePath || file.name;
+      if (path === 'SKILL.md' && this.hasSkillMd) {
+        hasDuplicateSkillMd = true;
+        continue;
       }
-      await this.handleCreateAndPublish();
+      if (!this.additionalFiles.some((f) => f.path === path)) {
+        newFiles.push({ file, path });
+      }
+    }
+
+    this.duplicateSkillMdWarning = hasDuplicateSkillMd;
+    this.additionalFiles = [...this.additionalFiles, ...newFiles];
+    this.validationError = null;
+  }
+
+  private removeFile(index: number): void {
+    this.additionalFiles = this.additionalFiles.filter((_, i) => i !== index);
+    this.duplicateSkillMdWarning = false;
+  }
+
+  /* ================================================================ */
+  /*  Validation                                                       */
+  /* ================================================================ */
+
+  private validateForPublish(): string | null {
+    if (this.validationError) return this.validationError;
+    if (!this.name.trim()) return 'Skill name is required.';
+    if (this.scope === 'project' && !this.scopeId.trim())
+      return 'Project ID is required for project scope.';
+    if (!this.cleanVersion(this.version)) return 'Version is required.';
+    if (!this.validateSemver(this.cleanVersion(this.version)))
+      return 'Version must be valid semver (e.g. 1.0.0).';
+
+    const files = this.allFiles;
+    if (!files.some((f) => f.path === 'SKILL.md'))
+      return 'SKILL.md is required when publishing. Paste content above or upload the file.';
+    if (files.length > MAX_FILES) return `Maximum ${MAX_FILES} files allowed.`;
+    const oversize = files.find((f) => f.file.size > MAX_FILE_SIZE);
+    if (oversize) return `File "${oversize.path}" exceeds 10 MB limit.`;
+    const totalSize = files.reduce((sum, f) => sum + f.file.size, 0);
+    if (totalSize > MAX_TOTAL_SIZE) return 'Total file size exceeds 50 MB limit.';
+    return null;
+  }
+
+  private validateForCreate(): string | null {
+    if (this.validationError) return this.validationError;
+    if (!this.name.trim()) return 'Skill name is required.';
+    if (this.scope === 'project' && !this.scopeId.trim())
+      return 'Project ID is required for project scope.';
+    return null;
+  }
+
+  /* ================================================================ */
+  /*  Submit — Create Only                                             */
+  /* ================================================================ */
+
+  private async handleCreateOnly(): Promise<void> {
+    const err = this.validateForCreate();
+    if (err) {
+      this.validationError = err;
       return;
     }
 
-    // Existing create-only flow
-    this.submitting = true;
+    this.flowState = 'creating';
     this.error = null;
     this.validationError = null;
 
@@ -637,7 +750,51 @@ export class ScionPageSkillCreate extends LitElement {
     }
   }
 
-  // -- Combined create + publish flow --
+  /* ================================================================ */
+  /*  Submit — Create & Publish                                        */
+  /* ================================================================ */
+
+  private async handleCreateAndPublish(): Promise<void> {
+    const err = this.validateForPublish();
+    if (err) {
+      this.validationError = err;
+      return;
+    }
+
+    this.validationError = null;
+    this.error = null;
+    this.flowState = 'creating';
+
+    try {
+      // Step 1: Create skill
+      const skillId = await this.createSkill();
+      this.createdSkillId = skillId;
+
+      // Step 2: Publish version via multipart POST
+      this.flowState = 'publishing';
+      await this.publishVersion(skillId);
+
+      // Step 3: Done — redirect
+      this.flowState = 'done';
+      this.redirectTimer = setTimeout(() => {
+        window.history.pushState({}, '', `/skills/${skillId}`);
+        window.dispatchEvent(new PopStateEvent('popstate'));
+      }, 1500);
+    } catch (err) {
+      console.error('Create & publish failed:', err);
+      if (this.flowState === 'creating') {
+        this.flowState = 'form';
+        this.error = err instanceof Error ? err.message : 'Failed to create skill';
+      } else {
+        this.flowState = 'error';
+        this.error = err instanceof Error ? err.message : 'Publishing failed';
+      }
+    }
+  }
+
+  /* ================================================================ */
+  /*  API helpers                                                      */
+  /* ================================================================ */
 
   private async createSkill(): Promise<string> {
     const body: Record<string, unknown> = {
@@ -645,50 +802,38 @@ export class ScionPageSkillCreate extends LitElement {
       scope: this.scope,
       visibility: this.visibility,
     };
-
-    if (this.description.trim()) {
-      body.description = this.description.trim();
-    }
-
-    if (this.scope === 'project' && this.scopeId.trim()) {
-      body.scopeId = this.scopeId.trim();
-    }
-
+    if (this.description.trim()) body.description = this.description.trim();
+    if (this.scope === 'project' && this.scopeId.trim()) body.scopeId = this.scopeId.trim();
     const tags = this.parsedTags;
-    if (tags.length > 0) {
-      body.tags = tags;
-    }
+    if (tags.length > 0) body.tags = tags;
 
-    const response = await apiFetch('/api/v1/skills', {
+    const res = await apiFetch('/api/v1/skills', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     });
-
-    if (!response.ok) {
-      throw new Error(await extractApiError(response, `HTTP ${response.status}`));
+    if (!res.ok) {
+      throw new Error(await extractApiError(res, `HTTP ${res.status}`));
     }
-
-    const result = (await response.json()) as { skill?: { id: string }; id?: string };
+    const result = (await res.json()) as { skill?: { id: string }; id?: string };
     const skillId = result.skill?.id || result.id;
-
-    if (!skillId) {
-      throw new Error('No skill ID in response');
-    }
-
+    if (!skillId) throw new Error('No skill ID in response');
     return skillId;
   }
 
-  private async uploadAndPublishVersion(skillId: string): Promise<void> {
+  private async publishVersion(skillId: string): Promise<void> {
+    const files = this.allFiles;
+
     const formData = new FormData();
-    formData.append('version', this.publishVersion.trim());
-    for (const pf of this.publishFiles) {
-      formData.append('file', pf.file, pf.path);
+    formData.append('version', this.cleanVersion(this.version));
+    for (const sf of files) {
+      formData.append('file', sf.file, sf.path);
     }
 
     const res = await apiFetch(`/api/v1/skills/${skillId}/versions`, {
       method: 'POST',
       body: formData,
+      // Do NOT set Content-Type — the browser auto-sets it with the multipart boundary
     });
 
     if (!res.ok) {
@@ -696,70 +841,28 @@ export class ScionPageSkillCreate extends LitElement {
     }
   }
 
-  private async handleCreateAndPublish(): Promise<void> {
-    this.submitting = true;
-    this.error = null;
-    this.publishError = null;
-    this.publishStep = 'creating';
-
-    try {
-      // Step 1: Create the skill
-      const skillId = await this.createSkill();
-      this.createdSkillId = skillId;
-
-      // Step 2: Publish first version via multipart POST
-      this.publishStep = 'publishing';
-      await this.uploadAndPublishVersion(skillId);
-
-      // Step 3: Done — redirect
-      this.publishStep = 'done';
-      window.history.pushState({}, '', `/skills/${skillId}`);
-      window.dispatchEvent(new PopStateEvent('popstate'));
-    } catch (err) {
-      console.error('Create & publish failed:', err);
-      const message = err instanceof Error ? err.message : 'Operation failed';
-
-      if (this.publishStep === 'creating') {
-        // Step 1 failed — show as regular error
-        this.publishStep = 'idle';
-        this.error = message;
-      } else {
-        // Step 2 failed — skill was created, show publish error with recovery options
-        this.publishStep = 'error';
-        this.publishError = message;
-      }
-    } finally {
-      this.submitting = false;
-    }
-  }
-
   private async retryPublish(): Promise<void> {
     if (!this.createdSkillId) return;
-    this.submitting = true;
-    this.publishError = null;
-    this.publishStep = 'publishing';
+    this.error = null;
+    this.flowState = 'publishing';
 
     try {
-      await this.uploadAndPublishVersion(this.createdSkillId);
-      this.publishStep = 'done';
-      window.history.pushState({}, '', `/skills/${this.createdSkillId}`);
-      window.dispatchEvent(new PopStateEvent('popstate'));
+      await this.publishVersion(this.createdSkillId);
+
+      this.flowState = 'done';
+      this.redirectTimer = setTimeout(() => {
+        window.history.pushState({}, '', `/skills/${this.createdSkillId}`);
+        window.dispatchEvent(new PopStateEvent('popstate'));
+      }, 1500);
     } catch (err) {
-      console.error('Retry publish failed:', err);
-      this.publishStep = 'error';
-      this.publishError = err instanceof Error ? err.message : 'Publish failed';
-    } finally {
-      this.submitting = false;
+      this.flowState = 'error';
+      this.error = err instanceof Error ? err.message : 'Retry failed';
     }
   }
 
-  private navigateToCreatedSkill(): void {
-    if (!this.createdSkillId) return;
-    window.history.pushState({}, '', `/skills/${this.createdSkillId}`);
-    window.dispatchEvent(new PopStateEvent('popstate'));
-  }
-
-  // -- Render --
+  /* ================================================================ */
+  /*  Render                                                           */
+  /* ================================================================ */
 
   override render() {
     if (this.loading) {
@@ -802,11 +905,6 @@ export class ScionPageSkillCreate extends LitElement {
           </a>
         </div>
       `;
-    }
-
-    // Show progress overlay when combined flow is active
-    if (this.publishStep !== 'idle') {
-      return this.renderProgress();
     }
 
     return html`
@@ -866,29 +964,31 @@ export class ScionPageSkillCreate extends LitElement {
             `
           : nothing}
 
-          <!-- Publish first version section -->
-          <div class="publish-section">
-            <div class="publish-toggle">
-              <sl-checkbox
-                ?checked=${this.publishImmediately}
-                @sl-change=${(e: Event) => { this.publishImmediately = (e.target as HTMLInputElement).checked; }}
-              >
-                Publish first version
-              </sl-checkbox>
-            </div>
+        <!-- SKILL.md Content Section -->
+        <h3 class="section-header">SKILL.md Content</h3>
+        <p class="section-desc">
+          Paste your SKILL.md below or upload the file. Metadata fields will auto-populate from
+          frontmatter.
+        </p>
 
-            ${this.publishImmediately ? this.renderPublishFields() : nothing}
-          </div>
-
-          <div class="form-actions">
+        <div class="form-field">
+          <sl-textarea
+            class="skillmd-textarea"
+            rows="12"
+            placeholder=${`---\nname: my-skill\ndescription: What this skill does\ntags: [cli, automation]\n---\n\n# My Skill\n\nInstructions for the agent...`}
+            .value=${this.skillMdContent}
+            @sl-input=${(e: Event) => this.onSkillMdInput(e)}
+            ?disabled=${isSubmitting}
+          ></sl-textarea>
+          <div class="upload-row">
             <sl-button
               variant="text"
               size="small"
               @click=${() => this.onUploadSkillMdClick()}
               ?disabled=${isSubmitting}
             >
-              <sl-icon slot="prefix" name="${this.publishImmediately ? 'upload' : 'lightning-charge'}"></sl-icon>
-              ${this.publishImmediately ? 'Create & Publish' : 'Create Skill'}
+              <sl-icon slot="prefix" name="upload"></sl-icon>
+              Upload SKILL.md
             </sl-button>
             ${this.editedFields.size > 0 && this.hasSkillMd
               ? html`
@@ -1065,7 +1165,7 @@ export class ScionPageSkillCreate extends LitElement {
                         <span class="file-name">${sf.path}</span>
                         <span class="file-meta">
                           ${this.formatFileSize(sf.file.size)}
-                          ${sf.path === 'SKILL.md' && this.hasSkillMd ? '— from content above' : ''}
+                          ${sf.path === 'SKILL.md' && this.hasSkillMd ? '-- from content above' : ''}
                         </span>
                       </div>
                       ${sf.path === 'SKILL.md' && this.hasSkillMd
@@ -1146,142 +1246,111 @@ export class ScionPageSkillCreate extends LitElement {
     `;
   }
 
-  private renderPublishFields() {
+  /* ---------------------------------------------------------------- */
+  /*  Progress view                                                    */
+  /* ---------------------------------------------------------------- */
+
+  private renderProgress() {
+    const stepDone = (s: FlowState) => {
+      const order: FlowState[] = ['creating', 'publishing', 'done'];
+      const current = order.indexOf(this.flowState);
+      const target = order.indexOf(s);
+      return target < current;
+    };
+
+    const stepActive = (s: FlowState) => this.flowState === s;
+    const stepError = (s: FlowState) =>
+      this.flowState === 'error' && s === 'publishing';
+
+    const stepClass = (s: FlowState) => {
+      if (stepDone(s)) return 'progress-step done';
+      if (stepError(s)) return 'progress-step error';
+      if (stepActive(s)) return 'progress-step active';
+      return 'progress-step';
+    };
+
+    const stepIcon = (s: FlowState) => {
+      if (stepDone(s)) return html`<sl-icon name="check-circle"></sl-icon>`;
+      if (stepError(s)) return html`<sl-icon name="x-circle"></sl-icon>`;
+      if (stepActive(s)) return html`<sl-spinner style="font-size: 1rem;"></sl-spinner>`;
+      return html`<sl-icon name="circle"></sl-icon>`;
+    };
+
     return html`
-      <div class="publish-fields">
-        ${this.publishError
+      <div class="progress-card">
+        <h2 class="progress-title">
+          ${this.flowState === 'done'
+            ? `Created & published ${this.name} v${this.version}`
+            : `Creating & Publishing ${this.name} v${this.version}`}
+        </h2>
+
+        ${this.flowState === 'done'
           ? html`
-              <div class="validation-error">
-                <sl-icon name="exclamation-triangle"></sl-icon>
-                <span>${this.publishError}</span>
+              <div class="success-banner">
+                <sl-icon name="check-circle"></sl-icon>
+                <p>
+                  <strong
+                    >Skill "${this.name}" created and version ${this.version} published
+                    successfully!</strong
+                  >
+                </p>
+                <p style="font-size: 0.8125rem; margin-top: 0.5rem;">
+                  Redirecting to skill detail page...
+                </p>
+              </div>
+            `
+          : html`
+              <div class="progress-steps">
+                <div class=${stepClass('creating')}>
+                  ${stepIcon('creating')}
+                  <span class="step-label">Creating skill...</span>
+                  <span class="step-status"
+                    >${stepDone('creating') ? 'done' : ''}</span
+                  >
+                </div>
+                <div class=${stepClass('publishing')}>
+                  ${stepIcon('publishing')}
+                  <span class="step-label">Uploading & publishing...</span>
+                  <span class="step-status"
+                    >${stepDone('publishing') ? 'done' : ''}</span
+                  >
+                </div>
+              </div>
+
+              ${this.flowState === 'publishing'
+                ? html`
+                    <sl-progress-bar indeterminate style="margin-top: 0.75rem;"></sl-progress-bar>
+                  `
+                : nothing}
+              ${this.flowState === 'error'
+                ? html`
+                    <div class="error-banner" style="margin-top: 1rem;">
+                      <sl-icon name="exclamation-triangle"></sl-icon>
+                      <span>${this.error}</span>
+                    </div>
+                  `
+                : nothing}
+            `}
+        ${this.flowState === 'error'
+          ? html`
+              <div class="progress-actions">
+                <sl-button variant="primary" @click=${() => this.retryPublish()}>
+                  <sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>
+                  Retry Publishing
+                </sl-button>
+                ${this.createdSkillId
+                  ? html`
+                      <a href="/skills/${this.createdSkillId}" style="text-decoration: none;">
+                        <sl-button variant="default">
+                          Go to Skill
+                          <sl-icon slot="suffix" name="arrow-right"></sl-icon>
+                        </sl-button>
+                      </a>
+                    `
+                  : nothing}
               </div>
             `
           : nothing}
-
-        <div class="form-field" style="margin-bottom: 0;">
-          <label>Version</label>
-          <sl-input
-            placeholder="1.0.0"
-            .value=${this.publishVersion}
-            @sl-input=${(e: Event) => { this.publishVersion = (e.target as HTMLElement & { value: string }).value; }}
-          ></sl-input>
-        </div>
-
-        <div class="form-field" style="margin-bottom: 0;">
-          <label>Files</label>
-          <div
-            class="drop-zone"
-            @click=${() => this.onDropZoneClick()}
-            @drop=${(e: DragEvent) => this.onDrop(e)}
-            @dragover=${(e: DragEvent) => this.onDragOver(e)}
-            @dragleave=${(e: DragEvent) => this.onDragLeave(e)}
-          >
-            <sl-icon name="upload"></sl-icon>
-            Drop files here or click to browse
-          </div>
-          <div class="hint">SKILL.md is required. Max 50 files, 10 MB each, 50 MB total.</div>
-        </div>
-
-        ${this.publishFiles.length > 0 ? html`
-          <ul class="file-list">
-            ${this.publishFiles.map((sf, i) => html`
-              <li class="file-item">
-                <div class="file-info">
-                  <sl-icon name="file-earmark"></sl-icon>
-                  <span class="file-name">${sf.path}</span>
-                  <span class="file-size">${this.formatFileSize(sf.file.size)}</span>
-                </div>
-                <button class="remove-btn" @click=${() => this.removeFile(i)} title="Remove">
-                  <sl-icon name="x-lg"></sl-icon>
-                </button>
-              </li>
-            `)}
-          </ul>
-        ` : nothing}
-      </div>
-    `;
-  }
-
-  private renderProgress() {
-    const isCreating = this.publishStep === 'creating';
-    const isPublishing = this.publishStep === 'publishing';
-    const isError = this.publishStep === 'error';
-    const createDone = this.publishStep !== 'creating';
-    const publishDone = this.publishStep === 'done';
-
-    return html`
-      <a href="/skills" class="back-link">
-        <sl-icon name="arrow-left"></sl-icon>
-        Back to Skills
-      </a>
-
-      <div class="page-header">
-        <h1>
-          <sl-icon name="lightning-charge"></sl-icon>
-          Create & Publish Skill
-        </h1>
-        <p>${isError ? 'An error occurred during publishing.' : 'Creating your skill and publishing the first version...'}</p>
-      </div>
-
-      <div class="form-card">
-        <div class="progress-overlay">
-          <!-- Step 1: Create skill -->
-          <div class="progress-step">
-            <div class="step-icon ${createDone ? 'done' : 'active'}">
-              ${createDone
-                ? html`<sl-icon name="check-circle"></sl-icon>`
-                : html`<sl-spinner style="font-size: 1.25rem;"></sl-spinner>`}
-            </div>
-            <span class="step-label">Creating skill...</span>
-            <span class="step-status">${isCreating ? '' : 'done'}</span>
-          </div>
-
-          <!-- Step 2: Publish version -->
-          <div class="progress-step">
-            <div class="step-icon ${publishDone ? 'done' : isPublishing ? 'active' : isError ? 'done' : 'pending'}">
-              ${publishDone
-                ? html`<sl-icon name="check-circle"></sl-icon>`
-                : isPublishing
-                  ? html`<sl-spinner style="font-size: 1.25rem;"></sl-spinner>`
-                  : isError
-                    ? html`<sl-icon name="x-circle" style="color: var(--sl-color-danger-600, #dc2626);"></sl-icon>`
-                    : html`<sl-icon name="clock"></sl-icon>`}
-            </div>
-            <span class="step-label">Uploading & publishing version...</span>
-            <span class="step-status">
-              ${publishDone ? 'done' : isPublishing ? '' : isError ? 'failed' : ''}
-            </span>
-          </div>
-
-          ${isPublishing ? html`
-            <sl-progress-bar indeterminate style="margin-top: 0.5rem;"></sl-progress-bar>
-          ` : nothing}
-
-          ${isError && this.publishError ? html`
-            <div class="error-banner" style="margin-top: 0.5rem;">
-              <sl-icon name="exclamation-triangle"></sl-icon>
-              <span>${this.publishError}</span>
-            </div>
-            <div class="publish-error-actions">
-              <sl-button
-                variant="primary"
-                size="small"
-                ?loading=${this.submitting}
-                @click=${() => this.retryPublish()}
-              >
-                <sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>
-                Retry Publishing
-              </sl-button>
-              <sl-button
-                variant="default"
-                size="small"
-                @click=${() => this.navigateToCreatedSkill()}
-              >
-                Go to Skill
-              </sl-button>
-            </div>
-          ` : nothing}
-        </div>
       </div>
     `;
   }
