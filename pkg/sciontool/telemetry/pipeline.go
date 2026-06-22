@@ -538,7 +538,7 @@ func attrSetKey(attrs []*commonpb.KeyValue) string {
 			case *commonpb.AnyValue_BoolValue:
 				b.WriteString(strconv.FormatBool(v.BoolValue))
 			case *commonpb.AnyValue_IntValue:
-				fmt.Fprintf(&b, "%d", v.IntValue)
+				b.WriteString(strconv.FormatInt(v.IntValue, 10))
 			case *commonpb.AnyValue_DoubleValue:
 				b.WriteString(strconv.FormatFloat(v.DoubleValue, 'f', -1, 64))
 			}

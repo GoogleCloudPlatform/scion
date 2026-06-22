@@ -315,9 +315,18 @@ export class ScionPageMetrics extends LitElement {
     return n.toLocaleString();
   }
 
-  override updated(_changedProperties: Map<string, unknown>): void {
-    super.updated(_changedProperties);
-    this.updateCharts();
+  private static readonly CHART_PROPERTIES = new Set([
+    'sessions', 'modelCalls', 'tokens', 'activeTab', 'loading',
+  ]);
+
+  override updated(changedProperties: Map<string, unknown>): void {
+    super.updated(changedProperties);
+    for (const key of changedProperties.keys()) {
+      if (ScionPageMetrics.CHART_PROPERTIES.has(key as string)) {
+        this.updateCharts();
+        break;
+      }
+    }
   }
 
   private updateCharts(): void {
@@ -421,7 +430,15 @@ export class ScionPageMetrics extends LitElement {
       if (!canvas) return;
 
       const existing = this.charts.get(canvasId);
-      if (existing) existing.destroy();
+      if (existing) {
+        if (existing.config.type === type) {
+          existing.data.labels = labels;
+          existing.data.datasets = datasets;
+          existing.update();
+          return;
+        }
+        existing.destroy();
+      }
 
       const chart = new Chart(canvas, {
         type,
