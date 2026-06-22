@@ -900,6 +900,7 @@ func (s *Server) publishSkillVersionMultipart(w http.ResponseWriter, r *http.Req
 	// g) Upload files to storage and compute hashes.
 	stor := s.GetStorage()
 	if stor == nil {
+		_ = s.store.DeleteSkillVersion(ctx, sv.ID)
 		RuntimeError(w, "Storage not configured")
 		return
 	}
@@ -966,6 +967,7 @@ func (s *Server) publishSkillVersionMultipart(w http.ResponseWriter, r *http.Req
 	sv.Files = manifest
 	sv.ContentHash = contentHash
 	if err := s.store.UpdateSkillVersion(ctx, sv); err != nil {
+		_ = s.store.DeleteSkillVersion(ctx, sv.ID)
 		writeErrorFromErr(w, err, "")
 		return
 	}
