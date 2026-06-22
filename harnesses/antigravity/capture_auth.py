@@ -37,6 +37,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 from typing import Any
 
 EXIT_OK = 0
@@ -118,6 +119,43 @@ def _capture_one(entry: dict[str, Any], force: bool) -> tuple[bool, str | None]:
     return True, None
 
 
+def _setup_dbus() -> bool:
+    """Set DBUS_SESSION_BUS_ADDRESS from saved env file if not already set."""
+    if os.environ.get("DBUS_SESSION_BUS_ADDRESS"):
+        return True
+    home = os.environ.get("HOME") or os.path.expanduser("~")
+    dbus_env_file = os.path.join(home, ".scion", "harness", ".dbus-env")
+    try:
+        with open(dbus_env_file, "r") as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("DBUS_SESSION_BUS_ADDRESS="):
+                    addr = line[len("DBUS_SESSION_BUS_ADDRESS="):]
+                    os.environ["DBUS_SESSION_BUS_ADDRESS"] = addr
+                    return True
+    except OSError:
+        pass
+    return False
+
+
+def _extract_from_keyring() -> str | None:
+    """Extract the AGY OAuth token from gnome-keyring via secret-tool."""
+    if not _setup_dbus():
+        print("capture-auth: DBUS session not available for keyring access", file=sys.stderr)
+        return None
+    try:
+        result = subprocess.run(
+            ["secret-tool", "lookup", "service", "gemini", "username", "antigravity"],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        print(f"capture-auth: secret-tool error: {exc}", file=sys.stderr)
+        return None
+    if result.returncode != 0 or not result.stdout.strip():
+        return None
+    return result.stdout.strip()
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Capture Antigravity auth token and store as project secret"
@@ -161,6 +199,33 @@ def main() -> int:
         elif ok:
             print(f"capture-auth: {key}: captured from {source}")
             captured += 1
+
+    # Keyring fallback: AGY may store tokens only in gnome-keyring, not to file
+    if captured == 0 and errors == 0:
+        print("capture-auth: file not found, trying gnome-keyring fallback...")
+        token = _extract_from_keyring()
+        if token:
+            target = "~/.gemini/antigravity-cli/antigravity-oauth-token"
+            fd, tmp_path = tempfile.mkstemp(prefix="agy_token_", suffix=".json")
+            try:
+                with os.fdopen(fd, "w") as f:
+                    f.write(token)
+                cmd = ["sciontool", "secret", "set", "AGY_TOKEN", f"@{tmp_path}",
+                       "--type", "file", "--target", target]
+                if args.force:
+                    cmd.append("--force")
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+                if result.returncode == 0:
+                    print(f"capture-auth: AGY_TOKEN: captured from gnome-keyring")
+                    captured += 1
+                else:
+                    print(f"capture-auth: keyring fallback failed: {result.stderr.strip()}", file=sys.stderr)
+                    errors += 1
+            finally:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
 
     if errors > 0 and captured == 0:
         return EXIT_ERROR

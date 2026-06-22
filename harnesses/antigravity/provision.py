@@ -254,6 +254,9 @@ gnome-keyring-daemon --start --components=secrets,pkcs11,ssh > /dev/null 2>&1
 
 echo "agy-wrapper: keyring initialized (DBUS=$DBUS_SESSION_BUS_ADDRESS)" >&2
 
+# Save DBUS session address so other processes (e.g. capture_auth.py) can use the keyring
+echo "DBUS_SESSION_BUS_ADDRESS=$DBUS_SESSION_BUS_ADDRESS" > ~/.scion/harness/.dbus-env
+
 # Inject OAuth token into keyring (staging file, target path, env var fallback)
 if [ -f "{secret_path}" ]; then
     secret-tool store \\
