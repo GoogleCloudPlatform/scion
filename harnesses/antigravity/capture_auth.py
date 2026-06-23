@@ -116,7 +116,7 @@ def _capture_one(entry: dict[str, Any], force: bool) -> tuple[bool, str | None]:
     if result.returncode != 0:
         stderr = result.stderr.strip()
         if "already exists" in stderr:
-            return False, None
+            return True, None
         return False, f"sciontool failed for {key}: {stderr}"
 
     return True, None
