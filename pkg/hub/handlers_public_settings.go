@@ -14,4 +14,27 @@
 
 package hub
 
-// Handler implementations are split by resource boundary across handlers_*.go.
+import (
+	"net/http"
+)
+
+// PublicSettingsResponse contains non-sensitive server settings for the web UI.
+type PublicSettingsResponse struct {
+	TelemetryEnabled bool `json:"telemetryEnabled"`
+}
+
+func (s *Server) handlePublicSettings(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		MethodNotAllowed(w)
+		return
+	}
+
+	enabled := false
+	if s.config.TelemetryDefault != nil {
+		enabled = *s.config.TelemetryDefault
+	}
+
+	writeJSON(w, http.StatusOK, PublicSettingsResponse{
+		TelemetryEnabled: enabled,
+	})
+}
