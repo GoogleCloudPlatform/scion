@@ -116,6 +116,14 @@ def _select_auth_method(
     has_gcp_project = any(k in env_keys for k in ("GOOGLE_CLOUD_PROJECT",))
     has_gcp_location = any(k in env_keys for k in ("GOOGLE_CLOUD_LOCATION", "GOOGLE_CLOUD_REGION"))
 
+    # The host-side forwarder may not pass GOOGLE_CLOUD_LOCATION through
+    # auth-candidates (only GOOGLE_CLOUD_REGION is forwarded). Fall back
+    # to checking os.environ so the provisioner still detects GCP config.
+    gcp_project = has_gcp_project or bool(os.environ.get("GOOGLE_CLOUD_PROJECT"))
+    gcp_location = has_gcp_location or bool(
+        os.environ.get("GOOGLE_CLOUD_LOCATION") or os.environ.get("GOOGLE_CLOUD_REGION")
+    )
+
     if explicit:
         if explicit not in VALID_AUTH_TYPES:
             raise ValueError(
@@ -123,9 +131,9 @@ def _select_auth_method(
                 f"valid types are: {', '.join(VALID_AUTH_TYPES)}"
             )
         if explicit == "vertex-ai":
-            if not has_gcp_project:
+            if not gcp_project:
                 raise ValueError("antigravity: auth type 'vertex-ai' selected but GOOGLE_CLOUD_PROJECT not found")
-            if not has_gcp_location:
+            if not gcp_location:
                 raise ValueError("antigravity: auth type 'vertex-ai' selected but GOOGLE_CLOUD_LOCATION/REGION not found")
             return "vertex-ai", ""
         if explicit == "oauth-token":
@@ -135,7 +143,7 @@ def _select_auth_method(
         if explicit == "none":
             return "none", ""
 
-    if has_gcp_project and has_gcp_location:
+    if gcp_project and gcp_location:
         return "vertex-ai", ""
     if has_token:
         return "oauth-token", "AGY_TOKEN"
