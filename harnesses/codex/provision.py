@@ -318,14 +318,14 @@ def _build_otel_section(telemetry: dict[str, Any], env: dict[str, str] | None) -
     cloud = telemetry.get("cloud") or {}
     headers = cloud.get("headers") if isinstance(cloud, dict) else None
     if isinstance(headers, dict) and headers:
-        parts = [f'"{k}" = "{v}"' for k, v in headers.items()]
+        parts = [f'"{_toml_escape(k)}" = "{_toml_escape(v)}"' for k, v in headers.items()]
         parts.sort()
         headers_line = f"exporter.\"{exporter_key}\".headers = {{ " + ", ".join(parts) + " }\n"
 
     log_user_prompt_str = "true" if log_user_prompt else "false"
     return (
         f"[otel]\nenabled = true\nlog_user_prompt = {log_user_prompt_str}\n"
-        f'exporter."{exporter_key}".endpoint = "{endpoint}"\n'
+        f'exporter."{exporter_key}".endpoint = "{_toml_escape(endpoint)}"\n'
         f"{headers_line}"
     )
 
