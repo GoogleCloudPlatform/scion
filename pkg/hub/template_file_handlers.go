@@ -266,7 +266,7 @@ func (s *Server) handleTemplateFileRead(w http.ResponseWriter, r *http.Request, 
 		RuntimeError(w, "Failed to read file from storage")
 		return
 	}
-	defer reader.Close()
+	defer func() { _ = reader.Close() }()
 
 	data, err := io.ReadAll(io.LimitReader(reader, maxTemplateFileSize+1))
 	if err != nil {
@@ -518,7 +518,7 @@ func (s *Server) handleTemplateFileUpload(w http.ResponseWriter, r *http.Request
 			}
 
 			data, err := io.ReadAll(src)
-			src.Close()
+			_ = src.Close()
 			if err != nil {
 				RuntimeError(w, "Failed to read uploaded file")
 				return

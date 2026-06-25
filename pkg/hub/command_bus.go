@@ -234,7 +234,7 @@ func (b *PostgresCommandBus) runListener() {
 		backoff = minBackoff
 
 		loopErr := b.listenLoop(conn)
-		conn.Close(context.Background())
+		_ = conn.Close(context.Background())
 
 		if b.ctx.Err() != nil {
 			return

@@ -91,7 +91,7 @@ func (s *Server) federateResolve(ctx context.Context, registryName string, skill
 			Message: fmt.Sprintf("failed to connect to registry %q: %v", registryName, err),
 		}
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))

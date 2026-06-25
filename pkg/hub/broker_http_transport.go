@@ -150,7 +150,7 @@ func (t *brokerHTTPTransport) CreateAgent(ctx context.Context, brokerID, brokerE
 	if err != nil {
 		return nil, fmt.Errorf("failed to send request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= 400 {
 		return nil, brokerHTTPError(resp)
 	}
@@ -211,7 +211,7 @@ func (t *brokerHTTPTransport) StartAgent(ctx context.Context, brokerID, brokerEn
 	if err != nil {
 		return nil, fmt.Errorf("failed to send request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= 400 {
 		return nil, brokerHTTPError(resp)
 	}
@@ -232,7 +232,7 @@ func (t *brokerHTTPTransport) StopAgent(ctx context.Context, brokerID, brokerEnd
 	if err != nil {
 		return fmt.Errorf("failed to send request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= 400 {
 		return brokerHTTPError(resp)
 	}
@@ -259,7 +259,7 @@ func (t *brokerHTTPTransport) RestartAgent(ctx context.Context, brokerID, broker
 	if err != nil {
 		return fmt.Errorf("failed to send request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= 400 {
 		return brokerHTTPError(resp)
 	}
@@ -279,7 +279,7 @@ func (t *brokerHTTPTransport) ResetAuthAgent(ctx context.Context, brokerID, brok
 	if err != nil {
 		return fmt.Errorf("failed to send request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= 400 {
 		return brokerHTTPError(resp)
 	}
@@ -300,7 +300,7 @@ func (t *brokerHTTPTransport) DeleteAgent(ctx context.Context, brokerID, brokerE
 	if err != nil {
 		return fmt.Errorf("failed to send request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= 400 && resp.StatusCode != http.StatusNotFound {
 		return brokerHTTPError(resp)
 	}
@@ -334,7 +334,7 @@ func (t *brokerHTTPTransport) MessageAgent(ctx context.Context, brokerID, broker
 	if err != nil {
 		return fmt.Errorf("failed to send request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= 400 {
 		return brokerHTTPError(resp)
 	}
@@ -350,7 +350,7 @@ func (t *brokerHTTPTransport) CheckAgentPrompt(ctx context.Context, brokerID, br
 	if err != nil {
 		return false, fmt.Errorf("failed to send request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= 400 {
 		return false, brokerHTTPError(resp)
 	}
@@ -371,7 +371,7 @@ func (t *brokerHTTPTransport) CreateAgentWithGather(ctx context.Context, brokerI
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to send request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= 400 {
 		return nil, nil, brokerHTTPError(resp)
 	}
@@ -401,7 +401,7 @@ func (t *brokerHTTPTransport) FinalizeEnv(ctx context.Context, brokerID, brokerE
 	if err != nil {
 		return nil, fmt.Errorf("failed to send request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= 400 {
 		return nil, brokerHTTPError(resp)
 	}
@@ -426,7 +426,7 @@ func (t *brokerHTTPTransport) GetAgentLogs(ctx context.Context, brokerID, broker
 	if err != nil {
 		return "", fmt.Errorf("failed to send request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= 400 {
 		return "", brokerHTTPError(resp)
 	}
@@ -455,7 +455,7 @@ func (t *brokerHTTPTransport) ExecAgent(ctx context.Context, brokerID, brokerEnd
 	if err != nil {
 		return "", 0, fmt.Errorf("failed to send request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= 400 {
 		return "", 0, brokerHTTPError(resp)
 	}
@@ -479,7 +479,7 @@ func (t *brokerHTTPTransport) CleanupProject(ctx context.Context, brokerID, brok
 	if err != nil {
 		return fmt.Errorf("failed to send request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= 400 && resp.StatusCode != http.StatusNotFound {
 		return brokerHTTPError(resp)
 	}

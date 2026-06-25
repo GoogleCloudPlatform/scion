@@ -569,6 +569,7 @@ type projectDispatchInfo struct {
 	workspaceMode   string // resolved workspace mode label (e.g. "shared", "worktree-per-agent")
 }
 
+//nolint:unused // Kept for dispatcher compatibility while dispatch paths are split.
 func (d *HTTPAgentDispatcher) resolveDispatchProjectPath(ctx context.Context, agent *store.Agent) (string, string) {
 	info := d.resolveDispatchProjectInfo(ctx, agent)
 	return info.projectPath, info.projectSlug

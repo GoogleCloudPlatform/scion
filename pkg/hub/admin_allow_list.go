@@ -215,7 +215,7 @@ func (s *Server) handleAdminAllowListImport(w http.ResponseWriter, r *http.Reque
 			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "file field is required", nil)
 			return
 		}
-		defer file.Close()
+		defer func() { _ = file.Close() }()
 
 		parsed, err := parseCSVEmails(file)
 		if err != nil {

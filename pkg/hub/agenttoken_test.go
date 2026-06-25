@@ -167,10 +167,10 @@ func TestAgentAuthMiddleware(t *testing.T) {
 		claims := GetAgentFromContext(r.Context())
 		if claims != nil {
 			w.WriteHeader(http.StatusOK)
-			w.Write([]byte(claims.Subject))
+			_, _ = w.Write([]byte(claims.Subject))
 		} else {
 			w.WriteHeader(http.StatusNotFound)
-			w.Write([]byte("no agent"))
+			_, _ = w.Write([]byte("no agent"))
 		}
 	})
 

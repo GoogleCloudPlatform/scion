@@ -1408,7 +1408,7 @@ func (s *Server) updateAgent(w http.ResponseWriter, r *http.Request, id string) 
 
 	// Apply config updates (only allowed for agents in 'created' phase)
 	if updates.Config != nil {
-		if agent.Phase != "created" {
+		if agent.Phase != string(state.PhaseCreated) {
 			Conflict(w, "Config can only be updated for agents in 'created' phase")
 			return
 		}
@@ -1444,7 +1444,7 @@ func (s *Server) updateAgent(w http.ResponseWriter, r *http.Request, id string) 
 
 	// Apply GCP identity update (only allowed for agents in 'created' phase)
 	if updates.GCPIdentity != nil {
-		if agent.Phase != "created" {
+		if agent.Phase != string(state.PhaseCreated) {
 			Conflict(w, "GCP identity can only be updated for agents in 'created' phase")
 			return
 		}

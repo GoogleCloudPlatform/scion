@@ -124,7 +124,7 @@ func TestHandleGitHubWebhook_Ping(t *testing.T) {
 	}
 
 	var resp map[string]string
-	json.NewDecoder(rec.Body).Decode(&resp)
+	_ = json.NewDecoder(rec.Body).Decode(&resp)
 	if resp["status"] != "pong" {
 		t.Errorf("expected pong, got %s", resp["status"])
 	}
@@ -378,7 +378,7 @@ func TestHandleGitHubWebhook_IgnoredEvent(t *testing.T) {
 	}
 
 	var resp map[string]string
-	json.NewDecoder(rec.Body).Decode(&resp)
+	_ = json.NewDecoder(rec.Body).Decode(&resp)
 	if resp["status"] != "ignored" {
 		t.Errorf("expected ignored status, got %s", resp["status"])
 	}

@@ -221,7 +221,7 @@ func (s *Server) handleAgentCloudLogsStream(w http.ResponseWriter, r *http.Reque
 	tailCh, tailCancel, err := s.logQueryService.Tail(ctx, opts)
 	if err != nil {
 		slog.Error("failed to open tail stream", "agent_id", agentID, "project_id", agent.ProjectID, "error", err)
-		fmt.Fprintf(w, "event: error\ndata: {\"message\":\"failed to open log stream\"}\n\n")
+		_, _ = fmt.Fprintf(w, "event: error\ndata: {\"message\":\"failed to open log stream\"}\n\n")
 		flusher.Flush()
 		return
 	}
@@ -245,13 +245,13 @@ func (s *Server) handleAgentCloudLogsStream(w http.ResponseWriter, r *http.Reque
 			if err != nil {
 				continue
 			}
-			fmt.Fprintf(w, "event: log\ndata: %s\n\n", data)
+			_, _ = fmt.Fprintf(w, "event: log\ndata: %s\n\n", data)
 			flusher.Flush()
 		case <-heartbeat.C:
-			fmt.Fprintf(w, ":heartbeat %d\n\n", time.Now().UnixMilli())
+			_, _ = fmt.Fprintf(w, ":heartbeat %d\n\n", time.Now().UnixMilli())
 			flusher.Flush()
 		case <-timeout.C:
-			fmt.Fprintf(w, "event: timeout\ndata: {\"message\":\"stream timeout, please reconnect\"}\n\n")
+			_, _ = fmt.Fprintf(w, "event: timeout\ndata: {\"message\":\"stream timeout, please reconnect\"}\n\n")
 			flusher.Flush()
 			return
 		case <-ctx.Done():
@@ -384,7 +384,7 @@ func (s *Server) handleAgentMessageLogsStream(w http.ResponseWriter, r *http.Req
 	tailCh, tailCancel, err := s.logQueryService.Tail(ctx, opts)
 	if err != nil {
 		slog.Error("failed to open message log tail stream", "agent_id", agentID, "project_id", agent.ProjectID, "error", err)
-		fmt.Fprintf(w, "event: error\ndata: {\"message\":\"failed to open message log stream\"}\n\n")
+		_, _ = fmt.Fprintf(w, "event: error\ndata: {\"message\":\"failed to open message log stream\"}\n\n")
 		flusher.Flush()
 		return
 	}
@@ -406,13 +406,13 @@ func (s *Server) handleAgentMessageLogsStream(w http.ResponseWriter, r *http.Req
 			if err != nil {
 				continue
 			}
-			fmt.Fprintf(w, "event: log\ndata: %s\n\n", data)
+			_, _ = fmt.Fprintf(w, "event: log\ndata: %s\n\n", data)
 			flusher.Flush()
 		case <-heartbeat.C:
-			fmt.Fprintf(w, ":heartbeat %d\n\n", time.Now().UnixMilli())
+			_, _ = fmt.Fprintf(w, ":heartbeat %d\n\n", time.Now().UnixMilli())
 			flusher.Flush()
 		case <-timeout.C:
-			fmt.Fprintf(w, "event: timeout\ndata: {\"message\":\"stream timeout, please reconnect\"}\n\n")
+			_, _ = fmt.Fprintf(w, "event: timeout\ndata: {\"message\":\"stream timeout, please reconnect\"}\n\n")
 			flusher.Flush()
 			return
 		case <-ctx.Done():
@@ -541,7 +541,7 @@ func (s *Server) handleProjectMessageLogsStream(w http.ResponseWriter, r *http.R
 	tailCh, tailCancel, err := s.logQueryService.Tail(ctx, opts)
 	if err != nil {
 		slog.Error("failed to open project message log tail stream", "project_id", projectID, "error", err)
-		fmt.Fprintf(w, "event: error\ndata: {\"message\":\"failed to open message log stream\"}\n\n")
+		_, _ = fmt.Fprintf(w, "event: error\ndata: {\"message\":\"failed to open message log stream\"}\n\n")
 		flusher.Flush()
 		return
 	}
@@ -563,13 +563,13 @@ func (s *Server) handleProjectMessageLogsStream(w http.ResponseWriter, r *http.R
 			if err != nil {
 				continue
 			}
-			fmt.Fprintf(w, "event: log\ndata: %s\n\n", data)
+			_, _ = fmt.Fprintf(w, "event: log\ndata: %s\n\n", data)
 			flusher.Flush()
 		case <-heartbeat.C:
-			fmt.Fprintf(w, ":heartbeat %d\n\n", time.Now().UnixMilli())
+			_, _ = fmt.Fprintf(w, ":heartbeat %d\n\n", time.Now().UnixMilli())
 			flusher.Flush()
 		case <-timeout.C:
-			fmt.Fprintf(w, "event: timeout\ndata: {\"message\":\"stream timeout, please reconnect\"}\n\n")
+			_, _ = fmt.Fprintf(w, "event: timeout\ndata: {\"message\":\"stream timeout, please reconnect\"}\n\n")
 			flusher.Flush()
 			return
 		case <-ctx.Done():

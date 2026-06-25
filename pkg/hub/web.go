@@ -38,6 +38,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/web"
 	"github.com/gorilla/sessions"
 	"golang.org/x/net/http2"
+	//nolint:staticcheck // h2c is kept for local cleartext HTTP/2 support.
 	"golang.org/x/net/http2/h2c"
 )
 
@@ -635,7 +636,7 @@ func (ws *WebServer) sessionToBearerMiddleware(next http.Handler) http.Handler {
 			if isBrowserRequest(r) {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusUnauthorized)
-				json.NewEncoder(w).Encode(map[string]interface{}{
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
 					"error": map[string]string{
 						"code":    "session_expired",
 						"message": "Your session has expired. Please sign in again.",
@@ -751,7 +752,7 @@ func (ws *WebServer) handleHealthz(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(resp)
+	_ = json.NewEncoder(w).Encode(resp)
 }
 
 // staticHandler returns an http.Handler that serves static assets.
@@ -768,7 +769,7 @@ func (ws *WebServer) serveStaticAsset(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-cache")
 		w.WriteHeader(http.StatusNotFound)
-		fmt.Fprint(w, noAssetsPage)
+		_, _ = fmt.Fprint(w, noAssetsPage)
 		return
 	}
 
@@ -808,7 +809,7 @@ func isHashedAsset(path string) bool {
 		return false
 	}
 	for _, c := range hash {
-		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') && (c < 'A' || c > 'F') {
 			return false
 		}
 	}
@@ -941,7 +942,7 @@ func (ws *WebServer) spaHandler() http.HandlerFunc {
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			w.Header().Set("Cache-Control", "no-cache")
 			w.WriteHeader(http.StatusOK)
-			fmt.Fprint(w, noAssetsPage)
+			_, _ = fmt.Fprint(w, noAssetsPage)
 			return
 		}
 
@@ -987,7 +988,7 @@ func (ws *WebServer) tryServeStaticFile(w http.ResponseWriter, r *http.Request) 
 		if err != nil {
 			return false
 		}
-		f.Close()
+		_ = f.Close()
 	} else {
 		return false
 	}
@@ -1056,11 +1057,11 @@ func (ws *WebServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 			//   data: {"subject":"project.xxx.agent.created","data":{...}}
 			// The client's SSEClient listens for event type "update" and
 			// the StateManager parses the subject to route the event.
-			fmt.Fprintf(w, "id: %d\nevent: update\ndata: {\"subject\":%q,\"data\":%s}\n\n",
+			_, _ = fmt.Fprintf(w, "id: %d\nevent: update\ndata: {\"subject\":%q,\"data\":%s}\n\n",
 				eventID, evt.Subject, evt.Data)
 			flusher.Flush()
 		case <-heartbeat.C:
-			fmt.Fprintf(w, ":heartbeat %d\n\n", time.Now().UnixMilli())
+			_, _ = fmt.Fprintf(w, ":heartbeat %d\n\n", time.Now().UnixMilli())
 			flusher.Flush()
 		case <-r.Context().Done():
 			return
@@ -1282,7 +1283,7 @@ func (ws *WebServer) sessionAuthMiddleware(next http.Handler) http.Handler {
 		// Non-browser request: return 401 JSON
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]string{
+		_ = json.NewEncoder(w).Encode(map[string]string{
 			"error": "authentication required",
 		})
 	})
@@ -1518,7 +1519,7 @@ func (ws *WebServer) handleLogout(w http.ResponseWriter, r *http.Request) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": true,
 			"message": "proxy mode: session is managed by the authenticating proxy",
 		})
@@ -1546,7 +1547,7 @@ func (ws *WebServer) handleLogout(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(map[string]bool{"success": true})
+	_ = json.NewEncoder(w).Encode(map[string]bool{"success": true})
 }
 
 // handleAuthMe returns the current user from the session as JSON.
@@ -1555,7 +1556,7 @@ func (ws *WebServer) handleAuthMe(w http.ResponseWriter, r *http.Request) {
 	// Check context first (set by devAuthMiddleware or sessionAuthMiddleware)
 	if user := getWebSessionUser(r.Context()); user != nil {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(user)
+		_ = json.NewEncoder(w).Encode(user)
 		return
 	}
 
@@ -1564,7 +1565,7 @@ func (ws *WebServer) handleAuthMe(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]string{"error": "authentication required"})
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "authentication required"})
 		return
 	}
 
@@ -1572,7 +1573,7 @@ func (ws *WebServer) handleAuthMe(w http.ResponseWriter, r *http.Request) {
 	if !ok || uid == "" {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]string{"error": "authentication required"})
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "authentication required"})
 		return
 	}
 
@@ -1585,7 +1586,7 @@ func (ws *WebServer) handleAuthMe(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(user)
+	_ = json.NewEncoder(w).Encode(user)
 }
 
 // handleAuthProviders returns which OAuth providers are enabled for web login.
@@ -1603,7 +1604,7 @@ func (ws *WebServer) handleAuthProviders(w http.ResponseWriter, r *http.Request)
 		resp["github"] = ws.oauthService.IsProviderConfiguredForClient(OAuthClientTypeWeb, "github")
 	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
+	_ = json.NewEncoder(w).Encode(resp)
 }
 
 // handleAuthDebug returns session debug info (debug mode only).
@@ -1641,7 +1642,7 @@ func (ws *WebServer) handleAuthDebug(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(debug)
+	_ = json.NewEncoder(w).Encode(debug)
 }
 
 // sessionString is a helper to safely extract a string from session values.
@@ -1732,6 +1733,7 @@ func (ws *WebServer) Start(ctx context.Context) error {
 
 	// Wrap the handler with h2c to support HTTP/2 cleartext upgrades.
 	h2s := &http2.Server{}
+	//nolint:staticcheck // h2c remains intentional for cleartext local deployments.
 	h2cHandler := h2c.NewHandler(handler, h2s)
 
 	ws.httpServer = &http.Server{

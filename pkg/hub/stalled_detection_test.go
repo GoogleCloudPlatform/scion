@@ -38,7 +38,7 @@ func setupStalledTestServer(t *testing.T) (*Server, store.Store, *trackingEventP
 	if err := s.Migrate(context.Background()); err != nil {
 		t.Fatalf("failed to migrate test store: %v", err)
 	}
-	t.Cleanup(func() { s.Close() })
+	t.Cleanup(func() { _ = s.Close() })
 
 	ep := &trackingEventPublisher{}
 
@@ -423,7 +423,7 @@ func TestNew_DefaultsStalledThresholdWhenZero(t *testing.T) {
 	if err := s.Migrate(context.Background()); err != nil {
 		t.Fatalf("failed to migrate test store: %v", err)
 	}
-	t.Cleanup(func() { s.Close() })
+	t.Cleanup(func() { _ = s.Close() })
 
 	// Create server with zero StalledThreshold (simulates cmd/server.go omission)
 	srv, err := New(ServerConfig{}, s)

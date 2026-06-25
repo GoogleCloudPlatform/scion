@@ -410,7 +410,7 @@ func (p *PostgresEventPublisher) runListener() {
 		// channel (resubscribe).
 		active := make(map[string]bool)
 		loopErr := p.listenLoop(conn, active)
-		conn.Close(context.Background())
+		_ = conn.Close(context.Background())
 
 		if p.ctx.Err() != nil {
 			return

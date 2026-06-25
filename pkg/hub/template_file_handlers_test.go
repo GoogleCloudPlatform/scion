@@ -105,7 +105,7 @@ func testTemplateFileServer(t *testing.T) (*Server, store.Store, *contentMockSto
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
-	t.Cleanup(func() { srv.Shutdown(context.Background()) })
+	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
 
 	stor := newContentMockStorage("test-bucket")
 	srv.SetStorage(stor)

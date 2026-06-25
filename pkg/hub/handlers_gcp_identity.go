@@ -806,7 +806,7 @@ func (s *Server) handleAgentGCPToken(w http.ResponseWriter, r *http.Request) {
 	// Parse requested scopes (or default)
 	var req gcpTokenRequest
 	if r.Body != nil {
-		json.NewDecoder(r.Body).Decode(&req)
+		_ = json.NewDecoder(r.Body).Decode(&req)
 	}
 	scopes := req.Scopes
 	if len(scopes) == 0 {

@@ -238,7 +238,7 @@ func (s *UserTokenService) ValidateUserToken(tokenString string) (*UserTokenClai
 		Time:        time.Now(),
 	}
 
-	if err := claims.Claims.Validate(expected); err != nil {
+	if err := claims.Validate(expected); err != nil {
 		return nil, fmt.Errorf("token validation failed: %w", err)
 	}
 

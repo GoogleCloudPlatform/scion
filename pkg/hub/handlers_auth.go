@@ -195,6 +195,8 @@ type ExternalUserInfo struct {
 var ErrAccessDenied = errors.New("access denied")
 
 // handleAuth routes auth-related requests.
+//
+//nolint:unused // Kept as a legacy aggregate router; routes are registered individually.
 func (s *Server) handleAuth(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Path
 	switch {
@@ -507,9 +509,7 @@ func (s *Server) handleAuthLogout(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req AuthLogoutRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		// Empty body is fine for logout
-	}
+	_ = json.NewDecoder(r.Body).Decode(&req) // Empty body is fine for logout.
 
 	// TODO: In production, add the refresh token to a blacklist
 	// For now, just acknowledge the logout

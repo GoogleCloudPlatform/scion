@@ -313,7 +313,8 @@ func (s *Server) createSkill(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Authorize
-	if scope == store.SkillScopeGlobal || scope == store.SkillScopeCore {
+	switch scope {
+	case store.SkillScopeGlobal, store.SkillScopeCore:
 		userIdent := GetUserIdentityFromContext(ctx)
 		if userIdent == nil {
 			writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required", nil)
@@ -324,7 +325,7 @@ func (s *Server) createSkill(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusForbidden, ErrCodeForbidden, "You do not have permission to create global skills", nil)
 			return
 		}
-	} else if scope == store.SkillScopeProject {
+	case store.SkillScopeProject:
 		if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
 			if !agentIdent.HasScope(ScopeAgentCreate) {
 				writeError(w, http.StatusForbidden, ErrCodeForbidden, "Missing required scope", nil)
@@ -346,7 +347,7 @@ func (s *Server) createSkill(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required", nil)
 			return
 		}
-	} else if scope == store.SkillScopeUser {
+	case store.SkillScopeUser:
 		userIdent := GetUserIdentityFromContext(ctx)
 		if userIdent == nil {
 			writeError(w, http.StatusUnauthorized, "unauthorized", "User authentication required for user-scoped skills", nil)
@@ -800,7 +801,7 @@ func (s *Server) publishSkillVersionMultipart(w http.ResponseWriter, r *http.Req
 		BadRequest(w, "Failed to parse multipart form: "+err.Error())
 		return
 	}
-	defer r.MultipartForm.RemoveAll()
+	defer func() { _ = r.MultipartForm.RemoveAll() }()
 
 	// c) Extract and validate version.
 	version := r.FormValue("version")
@@ -923,7 +924,7 @@ func (s *Server) publishSkillVersionMultipart(w http.ResponseWriter, r *http.Req
 			if err != nil {
 				return fmt.Errorf("failed to open file %s: %w", fh.Filename, err)
 			}
-			defer f.Close()
+			defer func() { _ = f.Close() }()
 
 			data, err := io.ReadAll(f)
 			if err != nil {

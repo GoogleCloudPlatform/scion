@@ -16,6 +16,7 @@ package hub
 
 import (
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -492,7 +493,8 @@ func (s *Server) deleteTemplateV2(w http.ResponseWriter, r *http.Request, id str
 	}
 
 	// Authorize: check source scope for ActionDelete
-	if existing.Scope == store.TemplateScopeGlobal {
+	switch existing.Scope {
+	case store.TemplateScopeGlobal:
 		userIdent := GetUserIdentityFromContext(ctx)
 		if userIdent == nil {
 			writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required", nil)
@@ -503,7 +505,7 @@ func (s *Server) deleteTemplateV2(w http.ResponseWriter, r *http.Request, id str
 			writeError(w, http.StatusForbidden, ErrCodeForbidden, "You do not have permission to delete global resources", nil)
 			return
 		}
-	} else if existing.Scope == store.TemplateScopeProject {
+	case store.TemplateScopeProject:
 		if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
 			if !agentIdent.HasScope(ScopeAgentCreate) {
 				writeError(w, http.StatusForbidden, ErrCodeForbidden, "Missing required scope", nil)
@@ -531,7 +533,7 @@ func (s *Server) deleteTemplateV2(w http.ResponseWriter, r *http.Request, id str
 	if deleteFiles && existing.StoragePath != "" {
 		if stor := s.GetStorage(); stor != nil {
 			if err := stor.DeletePrefix(ctx, existing.StoragePath); err != nil {
-				// Log but continue with database deletion
+				slog.Warn("failed to delete template files", "template_id", id, "storage_path", existing.StoragePath, "error", err)
 			}
 		}
 	}
@@ -741,7 +743,8 @@ func (s *Server) handleTemplateClone(w http.ResponseWriter, r *http.Request, id 
 	if destScope == "" {
 		destScope = store.TemplateScopeProject
 	}
-	if destScope == store.TemplateScopeGlobal {
+	switch destScope {
+	case store.TemplateScopeGlobal:
 		userIdent := GetUserIdentityFromContext(ctx)
 		if userIdent == nil {
 			writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required", nil)
@@ -752,7 +755,7 @@ func (s *Server) handleTemplateClone(w http.ResponseWriter, r *http.Request, id 
 			writeError(w, http.StatusForbidden, ErrCodeForbidden, "You do not have permission to create global resources", nil)
 			return
 		}
-	} else if destScope == store.TemplateScopeProject {
+	case store.TemplateScopeProject:
 		if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
 			if !agentIdent.HasScope(ScopeAgentCreate) {
 				writeError(w, http.StatusForbidden, ErrCodeForbidden, "Missing required scope", nil)

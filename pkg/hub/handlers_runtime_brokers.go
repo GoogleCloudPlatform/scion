@@ -261,6 +261,7 @@ func (s *Server) handleRuntimeBrokerByIDInternal(w http.ResponseWriter, r *http.
 	}
 }
 
+//nolint:unused // Kept for legacy route compatibility.
 func (s *Server) handleRuntimeBrokerByID(w http.ResponseWriter, r *http.Request) {
 	id, action := extractAction(r, "/api/v1/runtime-brokers")
 

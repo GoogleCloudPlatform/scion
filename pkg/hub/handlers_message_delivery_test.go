@@ -394,7 +394,7 @@ func TestHandleProjectBroadcast_AllRunning(t *testing.T) {
 	}
 
 	var resp BroadcastAcceptedResponse
-	json.NewDecoder(rec.Body).Decode(&resp)
+	_ = json.NewDecoder(rec.Body).Decode(&resp)
 	if resp.Targeted != 3 {
 		t.Errorf("expected targeted 3, got %d", resp.Targeted)
 	}
@@ -432,7 +432,7 @@ func TestHandleProjectBroadcast_NoAgents(t *testing.T) {
 	}
 
 	var resp BroadcastAcceptedResponse
-	json.NewDecoder(rec.Body).Decode(&resp)
+	_ = json.NewDecoder(rec.Body).Decode(&resp)
 	if resp.Total != 0 {
 		t.Errorf("expected total 0, got %d", resp.Total)
 	}
@@ -536,7 +536,7 @@ func TestHandleAgentMessage_NoPendingRows(t *testing.T) {
 	}
 
 	var resp MessageDeliveryResponse
-	json.NewDecoder(rec.Body).Decode(&resp)
+	_ = json.NewDecoder(rec.Body).Decode(&resp)
 	if resp.MessageID == "" {
 		t.Fatal("expected non-empty message_id")
 	}

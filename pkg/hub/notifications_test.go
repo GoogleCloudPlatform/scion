@@ -156,10 +156,10 @@ func setupNotificationTest(t *testing.T) *notificationTestEnv {
 		t.Fatalf("failed to create test store: %v", err)
 	}
 	require.NoError(t, s.Migrate(context.Background()))
-	t.Cleanup(func() { s.Close() })
+	t.Cleanup(func() { _ = s.Close() })
 
 	pub := NewChannelEventPublisher()
-	t.Cleanup(func() { pub.Close() })
+	t.Cleanup(pub.Close)
 
 	dispatcher := &recordingDispatcher{}
 

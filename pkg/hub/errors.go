@@ -97,7 +97,7 @@ func writeError(w http.ResponseWriter, statusCode int, code, message string, det
 		},
 	}
 
-	json.NewEncoder(w).Encode(resp)
+	_ = json.NewEncoder(w).Encode(resp)
 }
 
 // writeErrorFromErr writes an error response based on a Go error.
@@ -161,7 +161,7 @@ func writeErrorFromErr(w http.ResponseWriter, err error, requestID string) {
 		},
 	}
 
-	json.NewEncoder(w).Encode(resp)
+	_ = json.NewEncoder(w).Encode(resp)
 }
 
 // NotFound writes a 404 Not Found response.

@@ -106,7 +106,7 @@ func newLifecycleTestServer(t *testing.T) (*Server, *lifecycleTestDispatcher, st
 	cs := entadapter.NewCompositeStore(client)
 	disp := &lifecycleTestDispatcher{}
 	events := NewChannelEventPublisher()
-	t.Cleanup(func() { events.Close() })
+	t.Cleanup(events.Close)
 	srv := &Server{
 		store:             cs,
 		instanceID:        "hub-test-" + uuid.NewString()[:8],

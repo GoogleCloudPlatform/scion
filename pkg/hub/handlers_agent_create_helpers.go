@@ -355,7 +355,10 @@ func (s *Server) handleExistingAgent(
 			return existingAgentErrored
 		}
 
-		if req.Task != "" && existingAgent.AppliedConfig != nil {
+		if req.Task != "" {
+			if existingAgent.AppliedConfig == nil {
+				existingAgent.AppliedConfig = &store.AgentAppliedConfig{}
+			}
 			existingAgent.AppliedConfig.Task = req.Task
 			existingAgent.AppliedConfig.Attach = req.Attach
 		}
@@ -478,7 +481,10 @@ func (s *Server) handleExistingAgent(
 		}
 
 		// Update applied config with the task/attach if provided.
-		if req.Task != "" && existingAgent.AppliedConfig != nil {
+		if req.Task != "" {
+			if existingAgent.AppliedConfig == nil {
+				existingAgent.AppliedConfig = &store.AgentAppliedConfig{}
+			}
 			existingAgent.AppliedConfig.Task = req.Task
 			existingAgent.AppliedConfig.Attach = req.Attach
 		}

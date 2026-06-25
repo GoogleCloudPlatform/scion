@@ -218,11 +218,6 @@ func (a *AuthzService) checkAccessForAgent(ctx context.Context, agent AgentIdent
 
 // checkDelegation handles the delegation fallback for agents.
 func (a *AuthzService) checkDelegation(ctx context.Context, agent AgentIdentity, resource Resource, action Action, _ []store.Policy) Decision {
-	// Check if agent has the required scope for delegation
-	if !agent.HasScope(ScopeAgentStatusUpdate) {
-		// Use a basic scope check as proxy — if agent has any scope, delegation may apply
-	}
-
 	// Find policies with delegation conditions that match the resource
 	// We look at all policies that have delegation conditions
 	allPolicies, err := a.store.ListPolicies(ctx, store.PolicyFilter{}, store.ListOptions{Limit: 200})

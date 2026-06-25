@@ -218,7 +218,7 @@ func TestCommandBusIntegration_SignalDelivery(t *testing.T) {
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
-	defer conn.Close(context.Background())
+	defer func() { _ = conn.Close(context.Background()) }()
 
 	sig, _ := json.Marshal(cmdSignal{BrokerID: "owned-broker", Kind: "dispatch"})
 	if _, err := conn.Exec(ctx, `SELECT pg_notify($1, $2)`, pgCommandChannel, string(sig)); err != nil {
@@ -428,7 +428,7 @@ func TestCommandBusIntegration_Reconnect(t *testing.T) {
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
-	defer conn.Close(context.Background())
+	defer func() { _ = conn.Close(context.Background()) }()
 
 	sig, _ := json.Marshal(cmdSignal{BrokerID: "after-reconnect", Kind: "dispatch"})
 	if _, err := conn.Exec(ctx, `SELECT pg_notify($1, $2)`, pgCommandChannel, string(sig)); err != nil {

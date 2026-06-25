@@ -59,7 +59,7 @@ func testServer(t *testing.T) (*Server, store.Store) {
 		t.Fatalf("New() failed: %v", err)
 	}
 	srv.SetHubID("test-hub-id")
-	t.Cleanup(func() { srv.Shutdown(context.Background()) })
+	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
 	return srv, s
 }
 
@@ -1921,7 +1921,7 @@ func testServerWithBrokerAuth(t *testing.T) (*Server, store.Store) {
 		t.Fatalf("New() failed: %v", err)
 	}
 	srv.SetHubID("test-hub-id")
-	t.Cleanup(func() { srv.Shutdown(context.Background()) })
+	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
 	return srv, s
 }
 

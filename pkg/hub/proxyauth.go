@@ -252,7 +252,7 @@ func (c *jwksCache) GetKey(kid string) (interface{}, error) {
 			c.mu.RUnlock()
 			// Proactive background refresh (non-blocking)
 			if needsRefresh {
-				go c.refresh()
+				go func() { _ = c.refresh() }()
 			}
 			return k.Key, nil
 		}
@@ -319,7 +319,7 @@ func (c *jwksCache) refresh() error {
 		slog.Warn("jwks fetch failed, serving last-good keys", "url", c.url, "error", err)
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))

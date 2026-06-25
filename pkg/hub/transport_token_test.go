@@ -96,7 +96,7 @@ func TestGCPTransportMinter_MintIDToken(t *testing.T) {
 		// Return a valid response
 		resp := map[string]string{"token": testToken}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 	}))
 	defer iamServer.Close()
 
@@ -119,7 +119,7 @@ func TestGCPTransportMinter_EmptySA(t *testing.T) {
 func TestGCPTransportMinter_APIError(t *testing.T) {
 	iamServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusForbidden)
-		fmt.Fprintln(w, `{"error": {"code": 403, "message": "Permission denied"}}`)
+		_, _ = fmt.Fprintln(w, `{"error": {"code": 403, "message": "Permission denied"}}`)
 	}))
 	defer iamServer.Close()
 

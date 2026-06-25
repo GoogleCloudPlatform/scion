@@ -378,7 +378,8 @@ func (s *Server) deleteHarnessConfig(w http.ResponseWriter, r *http.Request, id 
 	}
 
 	// Authorize: check source scope for ActionDelete
-	if existing.Scope == store.HarnessConfigScopeGlobal {
+	switch existing.Scope {
+	case store.HarnessConfigScopeGlobal:
 		userIdent := GetUserIdentityFromContext(ctx)
 		if userIdent == nil {
 			writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required", nil)
@@ -389,7 +390,7 @@ func (s *Server) deleteHarnessConfig(w http.ResponseWriter, r *http.Request, id 
 			writeError(w, http.StatusForbidden, ErrCodeForbidden, "You do not have permission to delete global resources", nil)
 			return
 		}
-	} else if existing.Scope == store.HarnessConfigScopeProject {
+	case store.HarnessConfigScopeProject:
 		if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
 			if !agentIdent.HasScope(ScopeAgentCreate) {
 				writeError(w, http.StatusForbidden, ErrCodeForbidden, "Missing required scope", nil)
@@ -411,7 +412,7 @@ func (s *Server) deleteHarnessConfig(w http.ResponseWriter, r *http.Request, id 
 			writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required", nil)
 			return
 		}
-	} else if existing.Scope == store.HarnessConfigScopeUser {
+	case store.HarnessConfigScopeUser:
 		userIdent := GetUserIdentityFromContext(ctx)
 		if userIdent == nil {
 			writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required", nil)
@@ -422,7 +423,7 @@ func (s *Server) deleteHarnessConfig(w http.ResponseWriter, r *http.Request, id 
 				"You do not have permission to delete another user's harness config", nil)
 			return
 		}
-	} else {
+	default:
 		writeError(w, http.StatusForbidden, ErrCodeForbidden,
 			"Delete is not supported for this resource scope", nil)
 		return
@@ -622,7 +623,8 @@ func (s *Server) handleHarnessConfigClone(w http.ResponseWriter, r *http.Request
 	if destScope == "" {
 		destScope = store.HarnessConfigScopeGlobal
 	}
-	if destScope == store.HarnessConfigScopeGlobal {
+	switch destScope {
+	case store.HarnessConfigScopeGlobal:
 		userIdent := GetUserIdentityFromContext(ctx)
 		if userIdent == nil {
 			writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required", nil)
@@ -633,7 +635,7 @@ func (s *Server) handleHarnessConfigClone(w http.ResponseWriter, r *http.Request
 			writeError(w, http.StatusForbidden, ErrCodeForbidden, "You do not have permission to create global resources", nil)
 			return
 		}
-	} else if destScope == store.HarnessConfigScopeProject {
+	case store.HarnessConfigScopeProject:
 		if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
 			if !agentIdent.HasScope(ScopeAgentCreate) {
 				writeError(w, http.StatusForbidden, ErrCodeForbidden, "Missing required scope", nil)
@@ -760,7 +762,8 @@ func (s *Server) handleHarnessConfigReimport(w http.ResponseWriter, r *http.Requ
 	sourceURL = config.NormalizeTemplateSourceURL(sourceURL)
 
 	// Authorize: same as import — harness_config:create on the owning scope.
-	if hc.Scope == store.HarnessConfigScopeGlobal {
+	switch hc.Scope {
+	case store.HarnessConfigScopeGlobal:
 		userIdent := GetUserIdentityFromContext(ctx)
 		if userIdent == nil {
 			writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required", nil)
@@ -771,11 +774,11 @@ func (s *Server) handleHarnessConfigReimport(w http.ResponseWriter, r *http.Requ
 			writeError(w, http.StatusForbidden, ErrCodeForbidden, "You do not have permission to reimport global resources", nil)
 			return
 		}
-	} else if hc.Scope == store.HarnessConfigScopeProject {
+	case store.HarnessConfigScopeProject:
 		if !s.authorizeProjectImport(ctx, w, hc.ScopeID, "harness-configs") {
 			return
 		}
-	} else if hc.Scope == store.HarnessConfigScopeUser {
+	case store.HarnessConfigScopeUser:
 		userIdent := GetUserIdentityFromContext(ctx)
 		if userIdent == nil {
 			writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required", nil)
@@ -785,7 +788,7 @@ func (s *Server) handleHarnessConfigReimport(w http.ResponseWriter, r *http.Requ
 			writeError(w, http.StatusForbidden, ErrCodeForbidden, "You do not have permission to reimport another user's harness config", nil)
 			return
 		}
-	} else {
+	default:
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, "Reimport is not supported for this resource scope", nil)
 		return
 	}

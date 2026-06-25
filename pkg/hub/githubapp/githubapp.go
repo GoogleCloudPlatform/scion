@@ -360,7 +360,7 @@ func (c *Client) MintInstallationToken(ctx context.Context, installationID int64
 			Err:       err,
 		}
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -403,7 +403,7 @@ func (c *Client) MintInstallationToken(ctx context.Context, installationID int64
 // an appropriate error code.
 func classifyGitHubError(statusCode int, body []byte) *TokenMintError {
 	var ghErr githubErrorResponse
-	json.Unmarshal(body, &ghErr) // best effort
+	_ = json.Unmarshal(body, &ghErr) // best effort
 
 	msg := ghErr.Message
 	if msg == "" {
@@ -516,7 +516,7 @@ func (c *Client) GetInstallation(ctx context.Context, installationID int64) (*In
 	if err != nil {
 		return nil, fmt.Errorf("HTTP request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -564,7 +564,7 @@ func (c *Client) ListInstallations(ctx context.Context) ([]Installation, error) 
 		}
 
 		body, err := io.ReadAll(resp.Body)
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		if err != nil {
 			return nil, fmt.Errorf("failed to read response: %w", err)
 		}
@@ -620,7 +620,7 @@ func (c *Client) ListInstallationRepos(ctx context.Context, installationID int64
 		}
 
 		body, err := io.ReadAll(resp.Body)
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		if err != nil {
 			return nil, fmt.Errorf("failed to read response: %w", err)
 		}
@@ -692,7 +692,7 @@ func (c *Client) GetApp(ctx context.Context) (map[string]interface{}, error) {
 	if err != nil {
 		return nil, fmt.Errorf("HTTP request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {

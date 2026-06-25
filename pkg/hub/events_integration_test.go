@@ -75,7 +75,7 @@ func setupEventTestServer(t *testing.T) (*Server, store.Store, *ChannelEventPubl
 
 	pub := NewChannelEventPublisher()
 	srv.SetEventPublisher(pub)
-	t.Cleanup(func() { pub.Close() })
+	t.Cleanup(pub.Close)
 
 	project := &store.Project{
 		ID:         tid("project-evt"),

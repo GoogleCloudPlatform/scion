@@ -204,7 +204,7 @@ func TestEnvVar_UserScope_MemberIsolation(t *testing.T) {
 		t.Fatalf("expected 200, got %d: %s", rec2.Code, rec2.Body.String())
 	}
 	var respA ListEnvVarsResponse
-	json.NewDecoder(rec2.Body).Decode(&respA)
+	_ = json.NewDecoder(rec2.Body).Decode(&respA)
 	if len(respA.EnvVars) != 1 {
 		t.Errorf("expected 1 env var for user A, got %d", len(respA.EnvVars))
 	}
@@ -215,7 +215,7 @@ func TestEnvVar_UserScope_MemberIsolation(t *testing.T) {
 		t.Fatalf("expected 200, got %d: %s", rec3.Code, rec3.Body.String())
 	}
 	var respB ListEnvVarsResponse
-	json.NewDecoder(rec3.Body).Decode(&respB)
+	_ = json.NewDecoder(rec3.Body).Decode(&respB)
 	if len(respB.EnvVars) != 0 {
 		t.Errorf("expected 0 env vars for user B, got %d", len(respB.EnvVars))
 	}
@@ -882,7 +882,7 @@ func TestEnvVar_UnifiedList_Deduplication(t *testing.T) {
 	}
 
 	var resp ListEnvVarsResponse
-	json.NewDecoder(rec2.Body).Decode(&resp)
+	_ = json.NewDecoder(rec2.Body).Decode(&resp)
 
 	count := 0
 	for _, ev := range resp.EnvVars {
@@ -1028,7 +1028,7 @@ func TestEnvVar_NonEnvironmentSecrets_NotMerged(t *testing.T) {
 	}
 
 	var resp ListEnvVarsResponse
-	json.NewDecoder(rec.Body).Decode(&resp)
+	_ = json.NewDecoder(rec.Body).Decode(&resp)
 
 	for _, ev := range resp.EnvVars {
 		if ev.Key == "VARIABLE_SECRET" {
@@ -1097,7 +1097,7 @@ func TestEnvVar_ProjectScope_UnifiedList(t *testing.T) {
 	}
 
 	var resp ListEnvVarsResponse
-	json.NewDecoder(rec2.Body).Decode(&resp)
+	_ = json.NewDecoder(rec2.Body).Decode(&resp)
 
 	if len(resp.EnvVars) != 2 {
 		t.Errorf("expected 2 env vars in project unified list, got %d", len(resp.EnvVars))
@@ -1148,7 +1148,7 @@ func TestEnvVar_ProjectScope_FallbackGet(t *testing.T) {
 	}
 
 	var envVar store.EnvVar
-	json.NewDecoder(rec.Body).Decode(&envVar)
+	_ = json.NewDecoder(rec.Body).Decode(&envVar)
 	if !envVar.Secret {
 		t.Error("expected secret=true from fallback")
 	}

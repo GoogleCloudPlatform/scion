@@ -148,7 +148,7 @@ func TestCreateProject_HubManaged_NoGitRemote(t *testing.T) {
 
 	// Cleanup
 	t.Cleanup(func() {
-		os.RemoveAll(workspacePath)
+		_ = os.RemoveAll(workspacePath)
 	})
 }
 
@@ -668,7 +668,7 @@ func TestCreateProject_HubManaged_AutoProvide(t *testing.T) {
 	// Cleanup hub-managed project filesystem
 	workspacePath, err := hubManagedProjectPath(project.Slug)
 	if err == nil {
-		t.Cleanup(func() { os.RemoveAll(workspacePath) })
+		t.Cleanup(func() { _ = os.RemoveAll(workspacePath) })
 	}
 }
 
@@ -840,7 +840,7 @@ func TestAutoLinkProviders_HubManagedProject_NoLocalPath(t *testing.T) {
 	// Cleanup hub-managed project filesystem
 	workspacePath, err := hubManagedProjectPath(project.Slug)
 	if err == nil {
-		t.Cleanup(func() { os.RemoveAll(workspacePath) })
+		t.Cleanup(func() { _ = os.RemoveAll(workspacePath) })
 	}
 }
 
@@ -1352,7 +1352,7 @@ func TestDeleteProject_CleansUpProjectConfigsDir(t *testing.T) {
 	require.NoError(t, os.MkdirAll(agentsDir, 0755))
 
 	projectConfigDir := filepath.Dir(extPath)
-	t.Cleanup(func() { os.RemoveAll(projectConfigDir) })
+	t.Cleanup(func() { _ = os.RemoveAll(projectConfigDir) })
 
 	// Verify directory exists before deletion
 	_, err = os.Stat(projectConfigDir)
@@ -1501,7 +1501,7 @@ func TestCreateProject_SharedWorkspace_SetsLabelAndInitFilesystem(t *testing.T) 
 	// Verify workspace was cloned (it's a git repo)
 	workspacePath, err := hubManagedProjectPath(project.Slug)
 	require.NoError(t, err)
-	t.Cleanup(func() { os.RemoveAll(workspacePath) })
+	t.Cleanup(func() { _ = os.RemoveAll(workspacePath) })
 
 	assert.True(t, util.IsGitRepoDir(workspacePath), "workspace should be a git repo")
 
@@ -1718,7 +1718,7 @@ func TestCloneSharedWorkspaceProject_Success(t *testing.T) {
 	// Verify the workspace was created with a git repo
 	workspacePath, err := hubManagedProjectPath(project.Slug)
 	require.NoError(t, err)
-	t.Cleanup(func() { os.RemoveAll(workspacePath) })
+	t.Cleanup(func() { _ = os.RemoveAll(workspacePath) })
 
 	assert.True(t, util.IsGitRepoDir(workspacePath), "workspace should be a git repo")
 
@@ -1903,7 +1903,7 @@ func TestCreateProject_AutoAssociatesGitHubInstallation(t *testing.T) {
 	// Clean up the cloned workspace
 	workspacePath, err := hubManagedProjectPath(project.Slug)
 	require.NoError(t, err)
-	t.Cleanup(func() { os.RemoveAll(workspacePath) })
+	t.Cleanup(func() { _ = os.RemoveAll(workspacePath) })
 
 	// Verify the project was auto-associated with the installation
 	updated, err := st.GetProject(ctx, project.ID)

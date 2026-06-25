@@ -32,7 +32,7 @@ func newFederationTestServer(t *testing.T, mock *httptest.Server) (*Server, stor
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
-	t.Cleanup(func() { s.Close() })
+	t.Cleanup(func() { _ = s.Close() })
 	fedClient := mock.Client()
 	fedClient.Timeout = federationTimeout
 	fedClient.CheckRedirect = func(req *http.Request, via []*http.Request) error {
@@ -64,7 +64,7 @@ func TestFederateResolve_TrustedHappyPath(t *testing.T) {
 			t.Errorf("unexpected path: %s", r.URL.Path)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(mockResp)
+		_ = json.NewEncoder(w).Encode(mockResp)
 	})
 
 	srv, s := newFederationTestServer(t, mock)
@@ -105,7 +105,7 @@ func TestFederateResolve_PinnedHappyPath(t *testing.T) {
 
 	mock := newFederationMockRegistry(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(mockResp)
+		_ = json.NewEncoder(w).Encode(mockResp)
 	})
 
 	srv, s := newFederationTestServer(t, mock)
@@ -147,7 +147,7 @@ func TestFederateResolve_PinnedHashMismatch(t *testing.T) {
 
 	mock := newFederationMockRegistry(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(mockResp)
+		_ = json.NewEncoder(w).Encode(mockResp)
 	})
 
 	srv, s := newFederationTestServer(t, mock)
@@ -191,7 +191,7 @@ func TestFederateResolve_NoPinConfigured(t *testing.T) {
 
 	mock := newFederationMockRegistry(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(mockResp)
+		_ = json.NewEncoder(w).Encode(mockResp)
 	})
 
 	srv, s := newFederationTestServer(t, mock)
@@ -284,7 +284,7 @@ func TestFederateResolve_WrongRegistryType(t *testing.T) {
 func TestFederateResolve_ExternalRegistryDown(t *testing.T) {
 	mock := newFederationMockRegistry(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
-		w.Write([]byte("internal error"))
+		_, _ = w.Write([]byte("internal error"))
 	})
 
 	srv, s := newFederationTestServer(t, mock)
@@ -322,7 +322,7 @@ func TestFederateResolve_AuthTokenSent(t *testing.T) {
 			}},
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 	})
 
 	srv, s := newFederationTestServer(t, mock)
@@ -361,7 +361,7 @@ func TestFederateResolve_CustomResolvePath(t *testing.T) {
 			}},
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 	})
 
 	srv, s := newFederationTestServer(t, mock)

@@ -32,7 +32,7 @@ func newRegistryTestServer(t *testing.T) (*Server, store.Store) {
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
-	t.Cleanup(func() { s.Close() })
+	t.Cleanup(func() { _ = s.Close() })
 	srv := &Server{store: s}
 	return srv, s
 }
@@ -249,7 +249,7 @@ func TestSkillRegistryCRUD_AuthTokenNotInResponse(t *testing.T) {
 
 	// Also check GET
 	var created store.SkillRegistry
-	json.Unmarshal(rr.Body.Bytes(), &created)
+	_ = json.Unmarshal(rr.Body.Bytes(), &created)
 
 	req = httptest.NewRequest(http.MethodGet, "/api/v1/skill-registries/"+created.ID, nil)
 	req = req.WithContext(contextWithIdentity(req.Context(), admin))
@@ -344,7 +344,7 @@ func TestSkillRegistryPin(t *testing.T) {
 	}
 
 	var created store.SkillRegistry
-	json.Unmarshal(rr.Body.Bytes(), &created)
+	_ = json.Unmarshal(rr.Body.Bytes(), &created)
 
 	// Pin
 	pinBody := `{"uri":"skill://pin-reg/core/test@1.0","hash":"sha256:abc123"}`

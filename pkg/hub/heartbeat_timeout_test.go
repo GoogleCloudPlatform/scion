@@ -49,6 +49,7 @@ func (t *trackingEventPublisher) publishedAgents() []*store.Agent {
 	return result
 }
 
+//nolint:unused // Kept for test diagnostics when extending heartbeat timeout cases.
 func (t *trackingEventPublisher) reset() {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -65,7 +66,7 @@ func setupHeartbeatTestServer(t *testing.T) (*Server, store.Store, *trackingEven
 	if err := s.Migrate(context.Background()); err != nil {
 		t.Fatalf("failed to migrate test store: %v", err)
 	}
-	t.Cleanup(func() { s.Close() })
+	t.Cleanup(func() { _ = s.Close() })
 
 	ep := &trackingEventPublisher{}
 

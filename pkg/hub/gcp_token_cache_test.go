@@ -89,8 +89,8 @@ func TestCachedGCPTokenGenerator_DifferentSAs(t *testing.T) {
 
 	scopes := []string{"https://www.googleapis.com/auth/cloud-platform"}
 
-	cached.GenerateAccessToken(ctx, "sa1@project.iam.gserviceaccount.com", scopes)
-	cached.GenerateAccessToken(ctx, "sa2@project.iam.gserviceaccount.com", scopes)
+	_, _ = cached.GenerateAccessToken(ctx, "sa1@project.iam.gserviceaccount.com", scopes)
+	_, _ = cached.GenerateAccessToken(ctx, "sa2@project.iam.gserviceaccount.com", scopes)
 
 	if atomic.LoadInt64(&inner.accessCount) != 2 {
 		t.Fatalf("expected 2 inner calls (different SAs), got %d", inner.accessCount)
@@ -102,8 +102,8 @@ func TestCachedGCPTokenGenerator_ScopeOrdering(t *testing.T) {
 	cached := NewCachedGCPTokenGenerator(inner)
 	ctx := context.Background()
 
-	cached.GenerateAccessToken(ctx, "sa@project.iam.gserviceaccount.com", []string{"scope-b", "scope-a"})
-	cached.GenerateAccessToken(ctx, "sa@project.iam.gserviceaccount.com", []string{"scope-a", "scope-b"})
+	_, _ = cached.GenerateAccessToken(ctx, "sa@project.iam.gserviceaccount.com", []string{"scope-b", "scope-a"})
+	_, _ = cached.GenerateAccessToken(ctx, "sa@project.iam.gserviceaccount.com", []string{"scope-a", "scope-b"})
 
 	if atomic.LoadInt64(&inner.accessCount) != 1 {
 		t.Fatalf("expected 1 inner call (same scopes, different order), got %d", inner.accessCount)

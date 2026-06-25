@@ -79,10 +79,8 @@ func TestSchedulerTickZero(t *testing.T) {
 
 	// Wait for tick-0 handler to execute
 	deadline := time.After(500 * time.Millisecond)
-	for {
-		if called.Load() > 0 {
-			break
-		}
+	for called.Load() <= 0 {
+
 		select {
 		case <-deadline:
 			t.Fatal("tick-zero handler was not invoked within timeout")
@@ -481,7 +479,7 @@ func TestOneShotTimerFiresAtCorrectTime(t *testing.T) {
 		Payload:   "{}",
 		Status:    store.ScheduledEventPending,
 	}
-	ms.CreateScheduledEvent(ctx, &evt)
+	_ = ms.CreateScheduledEvent(ctx, &evt)
 
 	// scheduleTimer directly to test the timer mechanism
 	s.scheduleTimer(ctx, evt)
@@ -533,7 +531,7 @@ func TestOneShotExpiredTimerFiresImmediately(t *testing.T) {
 		Payload:   "{}",
 		Status:    store.ScheduledEventPending,
 	}
-	ms.CreateScheduledEvent(ctx, &evt)
+	_ = ms.CreateScheduledEvent(ctx, &evt)
 
 	s := newTestSchedulerWithStore(1*time.Second, ms)
 	s.RegisterEventHandler("message", func(_ context.Context, _ store.ScheduledEvent) error {
@@ -582,7 +580,7 @@ func TestOneShotTimerCancellation(t *testing.T) {
 		Payload:   "{}",
 		Status:    store.ScheduledEventPending,
 	}
-	ms.CreateScheduledEvent(ctx, &evt)
+	_ = ms.CreateScheduledEvent(ctx, &evt)
 
 	// Schedule the timer
 	s.scheduleTimer(ctx, evt)
@@ -675,7 +673,7 @@ func TestStopCancelsAllOneShotTimers(t *testing.T) {
 			Payload:   "{}",
 			Status:    store.ScheduledEventPending,
 		}
-		ms.CreateScheduledEvent(ctx, &evt)
+		_ = ms.CreateScheduledEvent(ctx, &evt)
 		s.scheduleTimer(ctx, evt)
 	}
 
@@ -718,7 +716,7 @@ func TestOneShotHandlerPanicRecovery(t *testing.T) {
 		Payload:   "{}",
 		Status:    store.ScheduledEventPending,
 	}
-	ms.CreateScheduledEvent(ctx, &evt)
+	_ = ms.CreateScheduledEvent(ctx, &evt)
 
 	// Fire the event directly
 	s.fireEvent(ctx, evt, false)
@@ -748,7 +746,7 @@ func TestOneShotUnknownEventTypeReturnsError(t *testing.T) {
 		Payload:   "{}",
 		Status:    store.ScheduledEventPending,
 	}
-	ms.CreateScheduledEvent(ctx, &evt)
+	_ = ms.CreateScheduledEvent(ctx, &evt)
 
 	// Fire the event directly
 	s.fireEvent(ctx, evt, false)
@@ -820,7 +818,7 @@ func TestRegisterEventHandlerAndDispatch(t *testing.T) {
 		Payload:   `{"msg":"hello"}`,
 		Status:    store.ScheduledEventPending,
 	}
-	ms.CreateScheduledEvent(ctx, &evt)
+	_ = ms.CreateScheduledEvent(ctx, &evt)
 
 	s.fireEvent(ctx, evt, false)
 
@@ -861,7 +859,7 @@ func TestEventHandlerErrorIsCaptured(t *testing.T) {
 		Payload:   "{}",
 		Status:    store.ScheduledEventPending,
 	}
-	ms.CreateScheduledEvent(ctx, &evt)
+	_ = ms.CreateScheduledEvent(ctx, &evt)
 
 	s.fireEvent(ctx, evt, false)
 
@@ -890,7 +888,7 @@ func TestUnregisteredEventTypeReturnsError(t *testing.T) {
 		Payload:   "{}",
 		Status:    store.ScheduledEventPending,
 	}
-	ms.CreateScheduledEvent(ctx, &evt)
+	_ = ms.CreateScheduledEvent(ctx, &evt)
 
 	s.fireEvent(ctx, evt, false)
 
@@ -986,7 +984,7 @@ func TestExpiredEventsFromDowntimeStillFire(t *testing.T) {
 			Payload:   `{"msg":"recover me"}`,
 			Status:    store.ScheduledEventPending,
 		}
-		ms.CreateScheduledEvent(ctx, &evt)
+		_ = ms.CreateScheduledEvent(ctx, &evt)
 	}
 
 	s := newTestSchedulerWithStore(1*time.Second, ms)
@@ -1002,10 +1000,8 @@ func TestExpiredEventsFromDowntimeStillFire(t *testing.T) {
 
 	// Wait for all expired events to fire
 	deadline := time.After(1 * time.Second)
-	for {
-		if fired.Load() >= 3 {
-			break
-		}
+	for fired.Load() < 3 {
+
 		select {
 		case <-deadline:
 			t.Fatalf("expected 3 expired events to fire, got %d", fired.Load())
@@ -1118,7 +1114,7 @@ func TestMultipleEventHandlers(t *testing.T) {
 		Payload:   "{}",
 		Status:    store.ScheduledEventPending,
 	}
-	ms.CreateScheduledEvent(ctx, &msgEvt)
+	_ = ms.CreateScheduledEvent(ctx, &msgEvt)
 	s.fireEvent(ctx, msgEvt, false)
 
 	// Fire a status_update event
@@ -1130,7 +1126,7 @@ func TestMultipleEventHandlers(t *testing.T) {
 		Payload:   "{}",
 		Status:    store.ScheduledEventPending,
 	}
-	ms.CreateScheduledEvent(ctx, &statusEvt)
+	_ = ms.CreateScheduledEvent(ctx, &statusEvt)
 	s.fireEvent(ctx, statusEvt, false)
 
 	if got := messageCalled.Load(); got != 1 {

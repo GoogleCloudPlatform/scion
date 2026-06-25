@@ -267,7 +267,7 @@ func TestSPAHandler_NoAssets_APIStillWorks(t *testing.T) {
 	mockHub := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 	})
 	ws.MountHubAPI(mockHub, func(ctx context.Context) error { return nil })
 
@@ -683,7 +683,7 @@ func TestMountHubAPI_RoutesToHub(t *testing.T) {
 	mockHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(map[string]string{"source": "hub", "path": r.URL.Path})
+		_ = json.NewEncoder(w).Encode(map[string]string{"source": "hub", "path": r.URL.Path})
 	})
 	ws.MountHubAPI(mockHandler, func(ctx context.Context) error { return nil })
 
@@ -1399,7 +1399,7 @@ func TestSSEHandler_RequiresSubParam(t *testing.T) {
 	ws := newDevAuthWebServer(t)
 	pub := NewChannelEventPublisher()
 	ws.SetEventPublisher(pub)
-	t.Cleanup(func() { pub.Close() })
+	t.Cleanup(pub.Close)
 
 	req := httptest.NewRequest("GET", "/events", nil)
 	rec := httptest.NewRecorder()
@@ -1416,7 +1416,7 @@ func TestSSEHandler_InvalidSubject(t *testing.T) {
 	ws := newDevAuthWebServer(t)
 	pub := NewChannelEventPublisher()
 	ws.SetEventPublisher(pub)
-	t.Cleanup(func() { pub.Close() })
+	t.Cleanup(pub.Close)
 
 	req := httptest.NewRequest("GET", "/events?sub=foo..bar", nil)
 	rec := httptest.NewRecorder()
@@ -1448,7 +1448,7 @@ func TestSSEHandler_Headers(t *testing.T) {
 	ws := newDevAuthWebServer(t)
 	pub := NewChannelEventPublisher()
 	ws.SetEventPublisher(pub)
-	t.Cleanup(func() { pub.Close() })
+	t.Cleanup(pub.Close)
 
 	// Use a test server so we get a real connection that supports streaming
 	ts := httptest.NewServer(ws.Handler())
@@ -1457,7 +1457,7 @@ func TestSSEHandler_Headers(t *testing.T) {
 	// Make a request that will establish the SSE connection
 	resp, err := http.Get(ts.URL + "/events?sub=project.test.>")
 	require.NoError(t, err)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	assert.Equal(t, "text/event-stream", resp.Header.Get("Content-Type"))
@@ -1469,7 +1469,7 @@ func TestSSEHandler_EventDelivery(t *testing.T) {
 	ws := newDevAuthWebServer(t)
 	pub := NewChannelEventPublisher()
 	ws.SetEventPublisher(pub)
-	t.Cleanup(func() { pub.Close() })
+	t.Cleanup(pub.Close)
 
 	ts := httptest.NewServer(ws.Handler())
 	defer ts.Close()
@@ -1477,7 +1477,7 @@ func TestSSEHandler_EventDelivery(t *testing.T) {
 	// Start SSE connection in background
 	resp, err := http.Get(ts.URL + "/events?sub=project.test123.>")
 	require.NoError(t, err)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 
@@ -1569,7 +1569,7 @@ func TestSSEHandler_RequiresAuth(t *testing.T) {
 	ws := newTestWebServer(t, WebServerConfig{})
 	pub := NewChannelEventPublisher()
 	ws.SetEventPublisher(pub)
-	t.Cleanup(func() { pub.Close() })
+	t.Cleanup(pub.Close)
 
 	// API-style request (no Accept: text/html) should get 401
 	req := httptest.NewRequest("GET", "/events?sub=project.test.>", nil)
@@ -1771,7 +1771,7 @@ func TestSPAShellHandler_ContainsInitialData(t *testing.T) {
 	mockHub := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"agents": []map[string]interface{}{
 				{
 					"id":     tid("agent-1"),
@@ -1904,7 +1904,7 @@ func TestSPAShellHandler_HubAPIError(t *testing.T) {
 	// Mount a Hub handler that returns 500
 	mockHub := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]string{"error": "database down"})
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "database down"})
 	})
 	ws.MountHubAPI(mockHub, func(ctx context.Context) error { return nil })
 

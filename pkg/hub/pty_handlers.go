@@ -127,10 +127,10 @@ func (s *Server) handleAgentPTY(w http.ResponseWriter, r *http.Request) {
 	cols := 80
 	rows := 24
 	if c := r.URL.Query().Get("cols"); c != "" {
-		fmt.Sscanf(c, "%d", &cols)
+		_, _ = fmt.Sscanf(c, "%d", &cols)
 	}
 	if rowStr := r.URL.Query().Get("rows"); rowStr != "" {
-		fmt.Sscanf(rowStr, "%d", &rows)
+		_, _ = fmt.Sscanf(rowStr, "%d", &rows)
 	}
 
 	// Create PTY session
@@ -355,18 +355,18 @@ func (s *PTYSession) Close() {
 
 	// Close stream to broker
 	if s.stream != nil {
-		s.controlChan.CloseStream(s.brokerID, s.stream.streamID, "session closed")
+		_ = s.controlChan.CloseStream(s.brokerID, s.stream.streamID, "session closed")
 	}
 
 	// Close client WebSocket
 	s.writeMu.Lock()
-	s.conn.WriteControl(
+	_ = s.conn.WriteControl(
 		websocket.CloseMessage,
 		websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""),
 		time.Now().Add(ptyWriteWait),
 	)
 	s.writeMu.Unlock()
-	s.conn.Close()
+	_ = s.conn.Close()
 }
 
 // CreatePTYTicket creates a single-use ticket for PTY access.

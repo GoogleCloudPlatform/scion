@@ -218,6 +218,8 @@ func (s *OAuthService) GetAuthorizationURLForClient(clientType OAuthClientType, 
 }
 
 // getGoogleAuthURL generates a Google OAuth authorization URL using the default config.
+//
+//nolint:unused // Kept for direct OAuth flow compatibility.
 func (s *OAuthService) getGoogleAuthURL(callbackURL, state string) (string, error) {
 	return s.getGoogleAuthURLWithConfig(s.config.CLI.Google, callbackURL, state)
 }
@@ -225,7 +227,7 @@ func (s *OAuthService) getGoogleAuthURL(callbackURL, state string) (string, erro
 // getGoogleAuthURLWithConfig generates a Google OAuth authorization URL with the given config.
 func (s *OAuthService) getGoogleAuthURLWithConfig(cfg OAuthProviderConfig, callbackURL, state string) (string, error) {
 	if cfg.ClientID == "" {
-		return "", fmt.Errorf("Google OAuth is not configured")
+		return "", fmt.Errorf("google OAuth is not configured")
 	}
 
 	params := url.Values{
@@ -242,6 +244,8 @@ func (s *OAuthService) getGoogleAuthURLWithConfig(cfg OAuthProviderConfig, callb
 }
 
 // getGitHubAuthURL generates a GitHub OAuth authorization URL using the default config.
+//
+//nolint:unused // Kept for direct OAuth flow compatibility.
 func (s *OAuthService) getGitHubAuthURL(callbackURL, state string) (string, error) {
 	return s.getGitHubAuthURLWithConfig(s.config.CLI.GitHub, callbackURL, state)
 }
@@ -284,6 +288,8 @@ func (s *OAuthService) ExchangeCodeForClient(ctx context.Context, clientType OAu
 }
 
 // exchangeGoogleCode exchanges a Google authorization code for user info.
+//
+//nolint:unused // Kept for direct OAuth flow compatibility.
 func (s *OAuthService) exchangeGoogleCode(ctx context.Context, code, callbackURL string) (*OAuthUserInfo, error) {
 	return s.exchangeGoogleCodeWithConfig(ctx, s.config.CLI.Google, code, callbackURL)
 }
@@ -291,7 +297,7 @@ func (s *OAuthService) exchangeGoogleCode(ctx context.Context, code, callbackURL
 // exchangeGoogleCodeWithConfig exchanges a Google authorization code for user info using the given config.
 func (s *OAuthService) exchangeGoogleCodeWithConfig(ctx context.Context, cfg OAuthProviderConfig, code, callbackURL string) (*OAuthUserInfo, error) {
 	if cfg.ClientID == "" || cfg.ClientSecret == "" {
-		return nil, fmt.Errorf("Google OAuth is not configured")
+		return nil, fmt.Errorf("google OAuth is not configured")
 	}
 
 	// Exchange code for access token
@@ -310,6 +316,8 @@ func (s *OAuthService) exchangeGoogleCodeWithConfig(ctx context.Context, cfg OAu
 }
 
 // exchangeGitHubCode exchanges a GitHub authorization code for user info.
+//
+//nolint:unused // Kept for direct OAuth flow compatibility.
 func (s *OAuthService) exchangeGitHubCode(ctx context.Context, code, callbackURL string) (*OAuthUserInfo, error) {
 	return s.exchangeGitHubCodeWithConfig(ctx, s.config.CLI.GitHub, code, callbackURL)
 }
@@ -364,7 +372,7 @@ func (s *OAuthService) exchangeCodeForToken(ctx context.Context, tokenURL, clien
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
@@ -380,6 +388,8 @@ func (s *OAuthService) exchangeCodeForToken(ctx context.Context, tokenURL, clien
 }
 
 // exchangeGitHubCodeForToken exchanges a GitHub authorization code for an access token.
+//
+//nolint:unused // Kept for direct OAuth flow compatibility.
 func (s *OAuthService) exchangeGitHubCodeForToken(ctx context.Context, code, callbackURL string) (*tokenResponse, error) {
 	return s.exchangeGitHubCodeForTokenWithConfig(ctx, s.config.CLI.GitHub, code, callbackURL)
 }
@@ -404,7 +414,7 @@ func (s *OAuthService) exchangeGitHubCodeForTokenWithConfig(ctx context.Context,
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
@@ -448,7 +458,7 @@ func (s *OAuthService) getGoogleUserInfo(ctx context.Context, accessToken string
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
@@ -499,7 +509,7 @@ func (s *OAuthService) getGitHubUserInfo(ctx context.Context, accessToken string
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
@@ -547,7 +557,7 @@ func (s *OAuthService) getGitHubPrimaryEmail(ctx context.Context, accessToken st
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
@@ -628,7 +638,7 @@ func (s *OAuthService) RequestDeviceCode(ctx context.Context, clientType OAuthCl
 
 func (s *OAuthService) requestGoogleDeviceCode(ctx context.Context, cfg OAuthProviderConfig) (*DeviceCodeResponse, error) {
 	if cfg.ClientID == "" {
-		return nil, fmt.Errorf("Google OAuth is not configured")
+		return nil, fmt.Errorf("google OAuth is not configured")
 	}
 
 	data := url.Values{
@@ -646,7 +656,7 @@ func (s *OAuthService) requestGoogleDeviceCode(ctx context.Context, cfg OAuthPro
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
@@ -690,7 +700,7 @@ func (s *OAuthService) requestGitHubDeviceCode(ctx context.Context, cfg OAuthPro
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
@@ -744,7 +754,7 @@ func (s *OAuthService) pollGoogleDeviceToken(ctx context.Context, cfg OAuthProvi
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -791,7 +801,7 @@ func (s *OAuthService) pollGitHubDeviceToken(ctx context.Context, cfg OAuthProvi
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {

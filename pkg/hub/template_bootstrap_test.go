@@ -54,7 +54,7 @@ func testTemplateBootstrapServer(t *testing.T) (*Server, store.Store, *mockStora
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
-	t.Cleanup(func() { srv.Shutdown(context.Background()) })
+	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
 
 	stor := newMockStorage("test-bucket")
 	srv.SetStorage(stor)
@@ -261,7 +261,7 @@ func TestBootstrapTemplatesFromDir_NoopWhenNoStorage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
-	t.Cleanup(func() { srv.Shutdown(context.Background()) })
+	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
 	// Deliberately not calling srv.SetStorage()
 
 	ctx := context.Background()

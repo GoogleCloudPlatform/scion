@@ -751,7 +751,7 @@ func (s *Server) cloneSharedWorkspaceProject(ctx context.Context, project *store
 	// Perform the clone
 	if err := util.CloneSharedWorkspace(workspacePath, cloneURL, defaultBranch, token); err != nil {
 		// Clean up the workspace directory on failure — return to pre-creation state
-		os.RemoveAll(workspacePath)
+		_ = util.RemoveAllSafe(workspacePath)
 		return fmt.Errorf("shared workspace clone failed: %w", err)
 	}
 
@@ -1961,6 +1961,8 @@ func resolveProjectID(projectIDRaw string) string {
 }
 
 // handleProjectByID is deprecated - use handleProjectRoutes instead
+//
+//nolint:unused // Kept for legacy route compatibility.
 func (s *Server) handleProjectByID(w http.ResponseWriter, r *http.Request) {
 	var id string
 	if strings.HasPrefix(r.URL.Path, "/api/v1/projects") {

@@ -520,13 +520,14 @@ func (s *Server) addGroupMember(w http.ResponseWriter, r *http.Request, group *s
 		isPlatformAdmin := userIdent.Role() == "admin"
 		if !isResourceOwner && !isPlatformAdmin {
 			callerMembership, err := s.store.GetGroupMembership(ctx, groupID, store.GroupMemberTypeUser, userIdent.ID())
-			if req.Role == store.GroupMemberRoleOwner || req.Role == store.GroupMemberRoleAdmin {
+			switch req.Role {
+			case store.GroupMemberRoleOwner, store.GroupMemberRoleAdmin:
 				if err != nil || callerMembership.Role != store.GroupMemberRoleOwner {
 					writeError(w, http.StatusForbidden, ErrCodeForbidden,
 						"Only group owners can add owners or admins", nil)
 					return
 				}
-			} else if req.Role == store.GroupMemberRoleMember {
+			case store.GroupMemberRoleMember:
 				if err != nil {
 					writeError(w, http.StatusForbidden, ErrCodeForbidden,
 						"Only group owners or admins can add members", nil)

@@ -2476,7 +2476,7 @@ func (s *Server) CleanupResources(ctx context.Context) error {
 			s.commandBus.Close()
 		}
 		if s.logQueryService != nil {
-			s.logQueryService.Close()
+			_ = s.logQueryService.Close()
 		}
 		if s.metricsDashboard != nil {
 			if err := s.metricsDashboard.Close(); err != nil {
@@ -2878,7 +2878,7 @@ func logOAuthProviders(clientType string, cfg OAuthClientConfig) {
 func writeJSON(w http.ResponseWriter, statusCode int, data interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(statusCode)
-	json.NewEncoder(w).Encode(data)
+	_ = json.NewEncoder(w).Encode(data)
 }
 
 // readJSON reads JSON from request body.

@@ -255,12 +255,7 @@ func (s *Server) handleProjectWorkspaceList(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	writeJSON(w, http.StatusOK, ProjectWorkspaceListResponse{
-		Files:      result.Files,
-		TotalSize:  result.TotalSize,
-		TotalCount: result.TotalCount,
-		HasMore:    result.HasMore,
-	})
+	writeJSON(w, http.StatusOK, ProjectWorkspaceListResponse(result))
 }
 
 // handleSharedDirFileList lists files in a shared directory, adding provider metadata
@@ -334,7 +329,7 @@ func (s *Server) handleProjectWorkspaceUpload(w http.ResponseWriter, r *http.Req
 			// Create parent directories
 			destPath := filepath.Join(workspacePath, relPath)
 			if err := os.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
-				src.Close()
+				_ = src.Close()
 				InternalError(w)
 				return
 			}
@@ -342,14 +337,14 @@ func (s *Server) handleProjectWorkspaceUpload(w http.ResponseWriter, r *http.Req
 			// Write file to disk
 			dst, err := os.Create(destPath)
 			if err != nil {
-				src.Close()
+				_ = src.Close()
 				InternalError(w)
 				return
 			}
 
 			written, err := io.Copy(dst, src)
-			src.Close()
-			dst.Close()
+			_ = src.Close()
+			_ = dst.Close()
 
 			if err != nil {
 				InternalError(w)
@@ -441,7 +436,7 @@ func (s *Server) handleProjectWorkspaceDownload(w http.ResponseWriter, r *http.R
 		InternalError(w)
 		return
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	// Determine content type from extension, default to octet-stream
 	fileName := filepath.Base(filePath)
@@ -458,7 +453,7 @@ func (s *Server) handleProjectWorkspaceDownload(w http.ResponseWriter, r *http.R
 	w.Header().Set("Content-Disposition", fmt.Sprintf(`%s; filename="%s"`, disposition, fileName))
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", info.Size()))
 
-	io.Copy(w, f)
+	_, _ = io.Copy(w, f)
 }
 
 // writeDirectoryToZip walks dirPath and writes all files into the given zip.Writer,
@@ -505,7 +500,7 @@ func writeDirectoryToZip(zw *zip.Writer, dirPath string) error {
 		if err != nil {
 			return err
 		}
-		defer f.Close()
+		defer func() { _ = f.Close() }()
 
 		_, err = io.Copy(writer, f)
 		return err
@@ -550,7 +545,7 @@ func (s *Server) handleProjectWorkspaceArchive(w http.ResponseWriter, r *http.Re
 	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, archiveName))
 
 	zw := zip.NewWriter(w)
-	defer zw.Close()
+	defer func() { _ = zw.Close() }()
 
 	if err := writeDirectoryToZip(zw, workspacePath); err != nil {
 		// At this point we've already started writing, so we can't send an error response.
@@ -609,7 +604,7 @@ func (s *Server) handleProjectSharedDirArchive(w http.ResponseWriter, r *http.Re
 	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, archiveName))
 
 	zw := zip.NewWriter(w)
-	defer zw.Close()
+	defer func() { _ = zw.Close() }()
 
 	if err := writeDirectoryToZip(zw, sharedDirPath); err != nil {
 		slog.WarnContext(ctx, "failed to complete shared dir archive", "project_id", projectID, "dir", dirName, "error", err)
@@ -975,7 +970,7 @@ func cleanEmptyDirs(rootDir, targetDir string) {
 		if err != nil || len(entries) > 0 {
 			break
 		}
-		os.Remove(targetDir)
+		_ = os.Remove(targetDir)
 		targetDir = filepath.Dir(targetDir)
 	}
 }

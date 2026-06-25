@@ -661,8 +661,8 @@ func TestEnvGather_HubHandler_RetryAfterCancel_GlobalRoute(t *testing.T) {
 	}
 
 	// The stale agent should have been deleted
-	if mockClient.deleteCalled {
-		// Dispatcher was used to clean up on broker side - good
+	if !mockClient.deleteCalled {
+		t.Errorf("expected stale agent to be deleted on broker side")
 	}
 
 	// A new agent should have been created (different ID from stale)

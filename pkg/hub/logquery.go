@@ -95,7 +95,7 @@ func NewLogQueryService(ctx context.Context, projectID string) (*LogQueryService
 	// Create the apiv2 client for TailLogEntries streaming.
 	tailClient, err := logv2.NewClient(ctx)
 	if err != nil {
-		client.Close()
+		_ = client.Close()
 		return nil, fmt.Errorf("creating logging apiv2 client: %w", err)
 	}
 
@@ -274,13 +274,13 @@ func (s *LogQueryService) Tail(ctx context.Context, opts LogQueryOptions) (<-cha
 		BufferWindow:  durationpb.New(2 * time.Second),
 	}
 	if err := stream.Send(req); err != nil {
-		stream.CloseSend()
+		_ = stream.CloseSend()
 		return nil, nil, fmt.Errorf("sending tail request: %w", err)
 	}
 
 	ch := make(chan CloudLogEntry, 64)
 	cancel := func() {
-		stream.CloseSend()
+		_ = stream.CloseSend()
 	}
 
 	go func() {

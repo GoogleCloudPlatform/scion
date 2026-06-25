@@ -64,7 +64,7 @@ func TestLocalhostAuthServer_SuccessfulAuth(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Start failed: %v", err)
 	}
-	defer server.Shutdown()
+	defer func() { _ = server.Shutdown() }()
 
 	// Simulate OAuth callback in a goroutine
 	expectedCode := "test-auth-code-12345"
@@ -78,7 +78,7 @@ func TestLocalhostAuthServer_SuccessfulAuth(t *testing.T) {
 			t.Errorf("callback request failed: %v", err)
 			return
 		}
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 
 		if resp.StatusCode != http.StatusOK {
 			t.Errorf("callback returned status %d, want %d", resp.StatusCode, http.StatusOK)
@@ -107,7 +107,7 @@ func TestLocalhostAuthServer_StateMismatch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Start failed: %v", err)
 	}
-	defer server.Shutdown()
+	defer func() { _ = server.Shutdown() }()
 
 	// Simulate OAuth callback with wrong state
 	go func() {
@@ -120,7 +120,7 @@ func TestLocalhostAuthServer_StateMismatch(t *testing.T) {
 			t.Errorf("callback request failed: %v", err)
 			return
 		}
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 
 		if resp.StatusCode != http.StatusBadRequest {
 			t.Errorf("callback returned status %d, want %d", resp.StatusCode, http.StatusBadRequest)
@@ -145,7 +145,7 @@ func TestLocalhostAuthServer_ErrorResponse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Start failed: %v", err)
 	}
-	defer server.Shutdown()
+	defer func() { _ = server.Shutdown() }()
 
 	// Simulate OAuth error callback
 	go func() {
@@ -158,7 +158,7 @@ func TestLocalhostAuthServer_ErrorResponse(t *testing.T) {
 			t.Errorf("callback request failed: %v", err)
 			return
 		}
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 
 		if resp.StatusCode != http.StatusBadRequest {
 			t.Errorf("callback returned status %d, want %d", resp.StatusCode, http.StatusBadRequest)
@@ -183,7 +183,7 @@ func TestLocalhostAuthServer_Timeout(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Start failed: %v", err)
 	}
-	defer server.Shutdown()
+	defer func() { _ = server.Shutdown() }()
 
 	// Wait for code with short timeout - should timeout
 	ctx, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
@@ -206,7 +206,7 @@ func TestLocalhostAuthServer_DoubleStart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("First Start failed: %v", err)
 	}
-	defer server.Shutdown()
+	defer func() { _ = server.Shutdown() }()
 
 	// Second start should fail
 	_, _, err = server.Start(ctx)

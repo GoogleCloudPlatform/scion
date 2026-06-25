@@ -197,9 +197,9 @@ func TestNewChannelRegistry_MixedValid(t *testing.T) {
 func TestWebhookChannel_Deliver(t *testing.T) {
 	var received []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		defer r.Body.Close()
+		defer func() { _ = r.Body.Close() }()
 		buf := make([]byte, r.ContentLength)
-		r.Body.Read(buf)
+		_, _ = r.Body.Read(buf)
 		received = buf
 		assert.Equal(t, "application/json", r.Header.Get("Content-Type"))
 		assert.Equal(t, "Bearer test-token", r.Header.Get("Authorization"))
@@ -346,9 +346,9 @@ func TestSlackChannel_Validate(t *testing.T) {
 func TestSlackChannel_Deliver(t *testing.T) {
 	var received []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		defer r.Body.Close()
+		defer func() { _ = r.Body.Close() }()
 		buf := make([]byte, r.ContentLength)
-		r.Body.Read(buf)
+		_, _ = r.Body.Read(buf)
 		received = buf
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -377,9 +377,9 @@ func TestSlackChannel_Deliver(t *testing.T) {
 func TestSlackChannel_UrgentMention(t *testing.T) {
 	var received []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		defer r.Body.Close()
+		defer func() { _ = r.Body.Close() }()
 		buf := make([]byte, r.ContentLength)
-		r.Body.Read(buf)
+		_, _ = r.Body.Read(buf)
 		received = buf
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -499,7 +499,7 @@ func TestDiscordChannel_Validate(t *testing.T) {
 func TestDiscordChannel_Deliver(t *testing.T) {
 	var received []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		defer r.Body.Close()
+		defer func() { _ = r.Body.Close() }()
 		b, err := io.ReadAll(r.Body)
 		if err != nil {
 			t.Fatal(err)
@@ -533,7 +533,7 @@ func TestDiscordChannel_Deliver(t *testing.T) {
 func TestDiscordChannel_UsernameAndAvatar(t *testing.T) {
 	var received []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		defer r.Body.Close()
+		defer func() { _ = r.Body.Close() }()
 		b, err := io.ReadAll(r.Body)
 		if err != nil {
 			t.Fatal(err)
@@ -563,7 +563,7 @@ func TestDiscordChannel_UsernameAndAvatar(t *testing.T) {
 func TestDiscordChannel_UrgentMention(t *testing.T) {
 	var received []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		defer r.Body.Close()
+		defer func() { _ = r.Body.Close() }()
 		b, err := io.ReadAll(r.Body)
 		if err != nil {
 			t.Fatal(err)
@@ -629,7 +629,7 @@ func TestDiscordChannel_TruncateLongMsg(t *testing.T) {
 func TestDiscordChannel_DeliverFailure(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusTooManyRequests)
-		w.Write([]byte(`{"message":"You are being rate limited.","retry_after":1.5,"code":0}`))
+		_, _ = w.Write([]byte(`{"message":"You are being rate limited.","retry_after":1.5,"code":0}`))
 	}))
 	defer server.Close()
 

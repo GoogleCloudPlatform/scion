@@ -304,13 +304,13 @@ func (s *Server) handleAgentMessagesStream(w http.ResponseWriter, r *http.Reques
 					continue
 				}
 			}
-			fmt.Fprintf(w, "event: message\ndata: %s\n\n", evt.Data)
+			_, _ = fmt.Fprintf(w, "event: message\ndata: %s\n\n", evt.Data)
 			flusher.Flush()
 		case <-heartbeat.C:
-			fmt.Fprintf(w, ":heartbeat %d\n\n", time.Now().UnixMilli())
+			_, _ = fmt.Fprintf(w, ":heartbeat %d\n\n", time.Now().UnixMilli())
 			flusher.Flush()
 		case <-timeout.C:
-			fmt.Fprintf(w, "event: timeout\ndata: {\"message\":\"stream timeout, please reconnect\"}\n\n")
+			_, _ = fmt.Fprintf(w, "event: timeout\ndata: {\"message\":\"stream timeout, please reconnect\"}\n\n")
 			flusher.Flush()
 			return
 		case <-ctx.Done():

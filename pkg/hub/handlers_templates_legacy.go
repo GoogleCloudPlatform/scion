@@ -37,6 +37,7 @@ type ListHarnessConfigsResponse struct {
 	Capabilities   *Capabilities                   `json:"_capabilities,omitempty"`
 }
 
+//nolint:unused // Legacy template handlers are retained for compatibility.
 func (s *Server) handleTemplates(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
@@ -48,6 +49,7 @@ func (s *Server) handleTemplates(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+//nolint:unused // Legacy template handlers are retained for compatibility.
 func (s *Server) listTemplates(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	query := r.URL.Query()
@@ -105,6 +107,7 @@ func (s *Server) listTemplates(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+//nolint:unused // Legacy template handlers are retained for compatibility.
 func (s *Server) createTemplate(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
@@ -136,6 +139,7 @@ func (s *Server) createTemplate(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, template)
 }
 
+//nolint:unused // Legacy template handlers are retained for compatibility.
 func (s *Server) handleTemplateByID(w http.ResponseWriter, r *http.Request) {
 	id := extractID(r, "/api/v1/templates")
 
@@ -156,6 +160,7 @@ func (s *Server) handleTemplateByID(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+//nolint:unused // Legacy template handlers are retained for compatibility.
 func (s *Server) getTemplate(w http.ResponseWriter, r *http.Request, id string) {
 	ctx := r.Context()
 	template, err := s.store.GetTemplate(ctx, id)
@@ -172,6 +177,7 @@ func (s *Server) getTemplate(w http.ResponseWriter, r *http.Request, id string) 
 	writeJSON(w, http.StatusOK, resp)
 }
 
+//nolint:unused // Legacy template handlers are retained for compatibility.
 func (s *Server) updateTemplate(w http.ResponseWriter, r *http.Request, id string) {
 	ctx := r.Context()
 
@@ -203,6 +209,7 @@ func (s *Server) updateTemplate(w http.ResponseWriter, r *http.Request, id strin
 	writeJSON(w, http.StatusOK, template)
 }
 
+//nolint:unused // Legacy template handlers are retained for compatibility.
 func (s *Server) deleteTemplate(w http.ResponseWriter, r *http.Request, id string) {
 	if err := s.store.DeleteTemplate(r.Context(), id); err != nil {
 		writeErrorFromErr(w, err, "")

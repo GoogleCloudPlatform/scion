@@ -85,9 +85,9 @@ func createTestHubManagedProject(t *testing.T, srv *Server, name string) (*store
 		if extAgentsDir, err := config.GetGitProjectExternalAgentsDir(scionDir); err == nil && extAgentsDir != "" {
 			// extAgentsDir is ~/.scion/project-configs/<slug>__<uuid>/.scion/agents
 			// Go up past "agents" and ".scion" to remove the <slug>__<uuid> parent dir
-			os.RemoveAll(filepath.Dir(filepath.Dir(extAgentsDir)))
+			_ = os.RemoveAll(filepath.Dir(filepath.Dir(extAgentsDir)))
 		}
-		os.RemoveAll(workspacePath)
+		_ = os.RemoveAll(workspacePath)
 	})
 
 	return &project, workspacePath
@@ -491,7 +491,7 @@ func TestProjectWorkspaceArchive_Success(t *testing.T) {
 		require.NoError(t, err)
 		content, err := io.ReadAll(rc)
 		require.NoError(t, err)
-		rc.Close()
+		_ = rc.Close()
 		files[f.Name] = string(content)
 	}
 
@@ -913,9 +913,9 @@ func TestSharedDirFiles_GitProjectWithEmbeddedBroker(t *testing.T) {
 		// Clean up the external project-config directory via marker resolution
 		if resolved, rErr := config.ResolveProjectMarker(scionDir); rErr == nil {
 			// resolved is ~/.scion/project-configs/<slug>__<uuid>/.scion/
-			os.RemoveAll(filepath.Dir(resolved))
+			_ = os.RemoveAll(filepath.Dir(resolved))
 		}
-		os.RemoveAll(workspacePath)
+		_ = os.RemoveAll(workspacePath)
 	})
 
 	// Should now work via marker-based path resolution
@@ -972,9 +972,9 @@ func TestSharedDirFiles_GitProjectMultipleProviders(t *testing.T) {
 
 	t.Cleanup(func() {
 		if resolved, rErr := config.ResolveProjectMarker(scionDir); rErr == nil {
-			os.RemoveAll(filepath.Dir(resolved))
+			_ = os.RemoveAll(filepath.Dir(resolved))
 		}
-		os.RemoveAll(workspacePath)
+		_ = os.RemoveAll(workspacePath)
 	})
 
 	// Request should succeed and report providerCount=2
@@ -1029,9 +1029,9 @@ func createTestSharedWorkspaceProject(t *testing.T, srv *Server, name, remote st
 	t.Cleanup(func() {
 		scionDir := filepath.Join(workspacePath, ".scion")
 		if extAgentsDir, err := config.GetGitProjectExternalAgentsDir(scionDir); err == nil && extAgentsDir != "" {
-			os.RemoveAll(filepath.Dir(filepath.Dir(extAgentsDir)))
+			_ = os.RemoveAll(filepath.Dir(filepath.Dir(extAgentsDir)))
 		}
-		os.RemoveAll(workspacePath)
+		_ = os.RemoveAll(workspacePath)
 	})
 
 	return &project, workspacePath

@@ -204,7 +204,7 @@ func (s *LocalhostAuthServer) handleCallback(w http.ResponseWriter, r *http.Requ
 		s.sendError(fmt.Errorf("state mismatch"))
 		w.Header().Set("Content-Type", "text/html")
 		w.WriteHeader(http.StatusBadRequest)
-		fmt.Fprintf(w, authErrorHTML, "State mismatch - possible CSRF attack")
+		_, _ = fmt.Fprintf(w, authErrorHTML, "State mismatch - possible CSRF attack")
 		return
 	}
 
@@ -217,7 +217,7 @@ func (s *LocalhostAuthServer) handleCallback(w http.ResponseWriter, r *http.Requ
 		s.sendError(fmt.Errorf("auth failed: %s", errDesc))
 		w.Header().Set("Content-Type", "text/html")
 		w.WriteHeader(http.StatusBadRequest)
-		fmt.Fprintf(w, authErrorHTML, errDesc)
+		_, _ = fmt.Fprintf(w, authErrorHTML, errDesc)
 		return
 	}
 
@@ -227,14 +227,14 @@ func (s *LocalhostAuthServer) handleCallback(w http.ResponseWriter, r *http.Requ
 		s.sendError(fmt.Errorf("no authorization code received"))
 		w.Header().Set("Content-Type", "text/html")
 		w.WriteHeader(http.StatusBadRequest)
-		fmt.Fprintf(w, authErrorHTML, "No authorization code received")
+		_, _ = fmt.Fprintf(w, authErrorHTML, "No authorization code received")
 		return
 	}
 
 	// Send success page to browser
 	w.Header().Set("Content-Type", "text/html")
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte(authSuccessHTML))
+	_, _ = w.Write([]byte(authSuccessHTML))
 
 	// Send code through channel
 	select {

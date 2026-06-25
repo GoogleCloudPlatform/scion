@@ -29,7 +29,7 @@ import (
 // passthrough is a simple handler that writes 200 OK.
 var passthrough = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte("OK"))
+	_, _ = w.Write([]byte("OK"))
 })
 
 // --- MaintenanceState unit tests ---
@@ -450,7 +450,7 @@ func TestHandleAdminMaintenance_Get(t *testing.T) {
 	}
 
 	var body map[string]interface{}
-	json.NewDecoder(rr.Body).Decode(&body)
+	_ = json.NewDecoder(rr.Body).Decode(&body)
 	if body["enabled"] != false {
 		t.Errorf("expected enabled=false, got %v", body["enabled"])
 	}
@@ -477,7 +477,7 @@ func TestHandleAdminMaintenance_Put(t *testing.T) {
 	}
 
 	var body map[string]interface{}
-	json.NewDecoder(rr.Body).Decode(&body)
+	_ = json.NewDecoder(rr.Body).Decode(&body)
 	if body["enabled"] != true {
 		t.Errorf("expected enabled=true, got %v", body["enabled"])
 	}

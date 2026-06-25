@@ -65,7 +65,7 @@ func createTestLinkedProject(t *testing.T, srv *Server, s store.Store, name, rem
 	// Set up the hub-side cache directory
 	cachePath, err := hubManagedProjectPath(project.Slug)
 	require.NoError(t, err)
-	t.Cleanup(func() { os.RemoveAll(cachePath) })
+	t.Cleanup(func() { _ = os.RemoveAll(cachePath) })
 
 	return &project, brokerLocalPath
 }

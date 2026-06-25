@@ -690,7 +690,7 @@ func (hc *BrokerConnection) Close() {
 	hc.pendingMu.Unlock()
 
 	// Close WebSocket connection
-	hc.conn.Close()
+	_ = hc.conn.Close()
 }
 
 // GetSessionID returns the session ID.

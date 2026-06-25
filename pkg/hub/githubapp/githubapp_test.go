@@ -229,7 +229,7 @@ func TestMintInstallationToken(t *testing.T) {
 			}
 
 			w.WriteHeader(http.StatusCreated)
-			json.NewEncoder(w).Encode(accessTokenResponse{
+			_ = json.NewEncoder(w).Encode(accessTokenResponse{
 				Token:     "ghs_test_token_123",
 				ExpiresAt: expiresAt,
 				Permissions: map[string]string{
@@ -270,7 +270,7 @@ func TestMintInstallationToken(t *testing.T) {
 	t.Run("installation not found (404)", func(t *testing.T) {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusNotFound)
-			json.NewEncoder(w).Encode(githubErrorResponse{Message: "Not Found"})
+			_ = json.NewEncoder(w).Encode(githubErrorResponse{Message: "Not Found"})
 		}))
 		defer server.Close()
 
@@ -292,7 +292,7 @@ func TestMintInstallationToken(t *testing.T) {
 	t.Run("installation suspended (403)", func(t *testing.T) {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusForbidden)
-			json.NewEncoder(w).Encode(githubErrorResponse{Message: "Installation has been suspended"})
+			_ = json.NewEncoder(w).Encode(githubErrorResponse{Message: "Installation has been suspended"})
 		}))
 		defer server.Close()
 
@@ -311,7 +311,7 @@ func TestMintInstallationToken(t *testing.T) {
 	t.Run("repo not accessible (422)", func(t *testing.T) {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusUnprocessableEntity)
-			json.NewEncoder(w).Encode(githubErrorResponse{Message: "Repository not found"})
+			_ = json.NewEncoder(w).Encode(githubErrorResponse{Message: "Repository not found"})
 		}))
 		defer server.Close()
 
@@ -330,7 +330,7 @@ func TestMintInstallationToken(t *testing.T) {
 	t.Run("unauthorized (401)", func(t *testing.T) {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusUnauthorized)
-			json.NewEncoder(w).Encode(githubErrorResponse{Message: "Bad credentials"})
+			_ = json.NewEncoder(w).Encode(githubErrorResponse{Message: "Bad credentials"})
 		}))
 		defer server.Close()
 
@@ -531,7 +531,7 @@ func TestTrackRateLimit_UpdatesOnAPIResponse(t *testing.T) {
 
 		if r.URL.Path == "/app" {
 			w.WriteHeader(http.StatusOK)
-			json.NewEncoder(w).Encode(map[string]interface{}{
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"id":   1,
 				"name": "test-app",
 			})

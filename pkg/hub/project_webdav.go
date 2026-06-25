@@ -217,7 +217,7 @@ func walkFilteredDirRecursive(root, prefix string, fn func(relPath string, info 
 		}
 
 		if entry.IsDir() {
-			walkFilteredDirRecursive(root, relPath, fn)
+			_ = walkFilteredDirRecursive(root, relPath, fn)
 			continue
 		}
 

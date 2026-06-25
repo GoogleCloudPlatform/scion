@@ -658,7 +658,7 @@ func TestPostgresIntegration_HandlerCreateProjectEmitsNotify(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listen conn: %v", err)
 	}
-	defer lconn.Close(context.Background())
+	defer func() { _ = lconn.Close(context.Background()) }()
 	if _, err := lconn.Exec(ctx, `LISTEN scion_ev_global`); err != nil {
 		t.Fatalf("LISTEN: %v", err)
 	}

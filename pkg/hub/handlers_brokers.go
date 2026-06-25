@@ -132,10 +132,10 @@ func (s *Server) handleBrokerJoin(w http.ResponseWriter, r *http.Request) {
 
 		// Determine error type and return appropriate response
 		errMsg := err.Error()
-		switch {
-		case errMsg == "invalid join token" || errMsg == "join token does not match broker":
+		switch errMsg {
+		case "invalid join token", "join token does not match broker":
 			writeError(w, http.StatusUnauthorized, ErrCodeInvalidJoinToken, errMsg, nil)
-		case errMsg == "join token has expired":
+		case "join token has expired":
 			writeError(w, http.StatusUnauthorized, ErrCodeExpiredJoinToken, errMsg, nil)
 		default:
 			writeError(w, http.StatusInternalServerError, ErrCodeInternalError,

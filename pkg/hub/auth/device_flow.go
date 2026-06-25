@@ -72,12 +72,12 @@ func (d *DeviceFlowAuth) Authenticate(ctx context.Context) (*hubclient.CLITokenR
 		return nil, fmt.Errorf("failed to request device code: %w", err)
 	}
 
-	fmt.Fprintf(d.output, "\nTo authenticate, visit:\n\n  %s\n\n", codeResp.VerificationURL)
-	fmt.Fprintf(d.output, "And enter the code: %s\n\n", codeResp.UserCode)
+	_, _ = fmt.Fprintf(d.output, "\nTo authenticate, visit:\n\n  %s\n\n", codeResp.VerificationURL)
+	_, _ = fmt.Fprintf(d.output, "And enter the code: %s\n\n", codeResp.UserCode)
 	if codeResp.VerificationURLComplete != "" {
-		fmt.Fprintf(d.output, "Or open this URL directly:\n  %s\n\n", codeResp.VerificationURLComplete)
+		_, _ = fmt.Fprintf(d.output, "Or open this URL directly:\n  %s\n\n", codeResp.VerificationURLComplete)
 	}
-	fmt.Fprintf(d.output, "Waiting for authorization...\n")
+	_, _ = fmt.Fprintf(d.output, "Waiting for authorization...\n")
 
 	interval := time.Duration(codeResp.Interval) * time.Second
 	if interval == 0 {

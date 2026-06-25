@@ -157,12 +157,12 @@ func (p *MessageBrokerProxy) Stop() {
 		p.mu.Lock()
 		for projectID, subs := range p.subscriptions {
 			for _, sub := range subs {
-				sub.Unsubscribe()
+				_ = sub.Unsubscribe()
 			}
 			delete(p.subscriptions, projectID)
 		}
 		for pattern, sub := range p.pluginSubscriptions {
-			sub.Unsubscribe()
+			_ = sub.Unsubscribe()
 			delete(p.pluginSubscriptions, pattern)
 		}
 		p.subscribedTopics = make(map[string]bool)

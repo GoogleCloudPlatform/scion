@@ -61,7 +61,7 @@ func setupIntegrationTest(t *testing.T) *integrationTestEnv {
 
 	pub := NewChannelEventPublisher()
 	srv.SetEventPublisher(pub)
-	t.Cleanup(func() { pub.Close() })
+	t.Cleanup(pub.Close)
 
 	recorder := &recordingDispatcher{}
 	srv.SetDispatcher(recorder)
@@ -669,7 +669,7 @@ func TestIntegration_HumanNotification_AckAll(t *testing.T) {
 	require.Eventually(t, func() bool {
 		rec := doRequest(t, env.srv, http.MethodGet, "/api/v1/notifications", nil)
 		var notifs []store.Notification
-		json.NewDecoder(rec.Body).Decode(&notifs)
+		_ = json.NewDecoder(rec.Body).Decode(&notifs)
 		return len(notifs) >= 2
 	}, 2*time.Second, 50*time.Millisecond)
 
@@ -710,7 +710,7 @@ func TestIntegration_HumanNotification_MultipleStatusTransitions(t *testing.T) {
 	require.Eventually(t, func() bool {
 		rec := doRequest(t, env.srv, http.MethodGet, "/api/v1/notifications", nil)
 		var notifs []store.Notification
-		json.NewDecoder(rec.Body).Decode(&notifs)
+		_ = json.NewDecoder(rec.Body).Decode(&notifs)
 		return len(notifs) >= 1
 	}, 2*time.Second, 50*time.Millisecond)
 
@@ -719,7 +719,7 @@ func TestIntegration_HumanNotification_MultipleStatusTransitions(t *testing.T) {
 	require.Eventually(t, func() bool {
 		rec := doRequest(t, env.srv, http.MethodGet, "/api/v1/notifications", nil)
 		var notifs []store.Notification
-		json.NewDecoder(rec.Body).Decode(&notifs)
+		_ = json.NewDecoder(rec.Body).Decode(&notifs)
 		return len(notifs) >= 2
 	}, 2*time.Second, 50*time.Millisecond)
 

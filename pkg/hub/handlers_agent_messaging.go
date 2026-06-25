@@ -1026,7 +1026,7 @@ func (s *Server) writeBroadcastResponse(w http.ResponseWriter, total, targeted, 
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)
-	json.NewEncoder(w).Encode(resp)
+	_ = json.NewEncoder(w).Encode(resp)
 }
 
 // broadcastDirect fans out a broadcast message directly to the given running agents

@@ -81,7 +81,7 @@ func startJWKSServer(t *testing.T, jwksData []byte) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		w.Write(jwksData)
+		_, _ = w.Write(jwksData)
 	}))
 	t.Cleanup(srv.Close)
 	return srv
@@ -336,7 +336,7 @@ func TestIAPAuthenticator_UnknownKidTriggersRefresh(t *testing.T) {
 
 	jwksSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		w.Write(currentJWKS)
+		_, _ = w.Write(currentJWKS)
 	}))
 	t.Cleanup(jwksSrv.Close)
 
@@ -508,7 +508,7 @@ func TestJWKSCache_TransientFailure(t *testing.T) {
 		if failCount <= 1 {
 			// First call succeeds
 			w.Header().Set("Content-Type", "application/json")
-			w.Write(kp.jwksJSON(t))
+			_, _ = w.Write(kp.jwksJSON(t))
 		} else {
 			// Subsequent calls fail
 			w.WriteHeader(http.StatusInternalServerError)
@@ -552,7 +552,7 @@ func TestJWKSCache_StampedePreventionDuringOutage(t *testing.T) {
 		if fetchCount <= 1 {
 			// First call succeeds — populate the cache
 			w.Header().Set("Content-Type", "application/json")
-			w.Write(kp.jwksJSON(t))
+			_, _ = w.Write(kp.jwksJSON(t))
 		} else {
 			// All subsequent calls fail (simulating a persistent outage)
 			w.WriteHeader(http.StatusInternalServerError)

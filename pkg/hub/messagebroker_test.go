@@ -166,7 +166,7 @@ func TestMessageBrokerProxy_DirectMessage(t *testing.T) {
 	defer events.Close()
 
 	b := eventbus.NewInProcessEventBus(slog.Default())
-	defer b.Close()
+	defer func() { _ = b.Close() }()
 
 	dispatcher := &brokerMockDispatcher{}
 
@@ -389,7 +389,7 @@ func TestMessageBrokerProxy_ProjectBroadcast(t *testing.T) {
 	defer events.Close()
 
 	b := eventbus.NewInProcessEventBus(slog.Default())
-	defer b.Close()
+	defer func() { _ = b.Close() }()
 
 	dispatcher := &brokerMockDispatcher{}
 
@@ -431,7 +431,7 @@ func TestMessageBrokerProxy_BroadcastSkipsSender(t *testing.T) {
 	defer events.Close()
 
 	b := eventbus.NewInProcessEventBus(slog.Default())
-	defer b.Close()
+	defer func() { _ = b.Close() }()
 
 	dispatcher := &brokerMockDispatcher{}
 
@@ -443,7 +443,7 @@ func TestMessageBrokerProxy_BroadcastSkipsSender(t *testing.T) {
 
 	msg := messages.NewInstruction("agent:sender-agent", "project:test-project", "any updates?")
 	msg.Broadcasted = true
-	proxy.PublishBroadcast(context.Background(), projectID, msg)
+	_ = proxy.PublishBroadcast(context.Background(), projectID, msg)
 
 	time.Sleep(100 * time.Millisecond)
 
@@ -466,7 +466,7 @@ func TestMessageBrokerProxy_EnsureProjectSubscriptions(t *testing.T) {
 	defer events.Close()
 
 	b := eventbus.NewInProcessEventBus(slog.Default())
-	defer b.Close()
+	defer func() { _ = b.Close() }()
 
 	dispatcher := &brokerMockDispatcher{}
 
@@ -479,7 +479,7 @@ func TestMessageBrokerProxy_EnsureProjectSubscriptions(t *testing.T) {
 	}
 
 	msg := messages.NewInstruction("user:alice", "agent:running-agent", "hello")
-	proxy.PublishMessage(context.Background(), projectID, msg)
+	_ = proxy.PublishMessage(context.Background(), projectID, msg)
 
 	time.Sleep(100 * time.Millisecond)
 
@@ -498,7 +498,7 @@ func TestMessageBrokerProxy_DeliverToAgentPersistence(t *testing.T) {
 	defer events.Close()
 
 	b := eventbus.NewInProcessEventBus(slog.Default())
-	defer b.Close()
+	defer func() { _ = b.Close() }()
 
 	dispatcher := &brokerMockDispatcher{}
 
@@ -549,7 +549,7 @@ func TestMessageBrokerProxy_UserMessageDelivery(t *testing.T) {
 	defer events.Close()
 
 	b := eventbus.NewInProcessEventBus(slog.Default())
-	defer b.Close()
+	defer func() { _ = b.Close() }()
 
 	dispatcher := &brokerMockDispatcher{}
 
@@ -611,7 +611,7 @@ func TestMessageBrokerProxy_EnsureProjectSubscriptionsIncludesUserMessages(t *te
 	defer events.Close()
 
 	b := eventbus.NewInProcessEventBus(slog.Default())
-	defer b.Close()
+	defer func() { _ = b.Close() }()
 
 	dispatcher := &brokerMockDispatcher{}
 
@@ -654,7 +654,7 @@ func TestMessageBrokerProxy_PluginSubscription(t *testing.T) {
 	defer events.Close()
 
 	b := eventbus.NewInProcessEventBus(slog.Default())
-	defer b.Close()
+	defer func() { _ = b.Close() }()
 
 	dispatcher := &brokerMockDispatcher{}
 
@@ -685,7 +685,7 @@ func TestMessageBrokerProxy_PluginSubscriptionDedup(t *testing.T) {
 	defer events.Close()
 
 	b := eventbus.NewInProcessEventBus(slog.Default())
-	defer b.Close()
+	defer func() { _ = b.Close() }()
 
 	dispatcher := &brokerMockDispatcher{}
 
@@ -719,7 +719,7 @@ func TestMessageBrokerProxy_PluginSubscriptionCancel(t *testing.T) {
 	defer events.Close()
 
 	b := eventbus.NewInProcessEventBus(slog.Default())
-	defer b.Close()
+	defer func() { _ = b.Close() }()
 
 	dispatcher := &brokerMockDispatcher{}
 
@@ -757,7 +757,7 @@ func TestMessageBrokerProxy_PluginSubscriptionCleanupOnStop(t *testing.T) {
 	defer events.Close()
 
 	b := eventbus.NewInProcessEventBus(slog.Default())
-	defer b.Close()
+	defer func() { _ = b.Close() }()
 
 	dispatcher := &brokerMockDispatcher{}
 
@@ -790,7 +790,7 @@ func TestMessageBrokerProxy_StartBootstrapsExistingProjects(t *testing.T) {
 	defer events.Close()
 
 	b := eventbus.NewInProcessEventBus(slog.Default())
-	defer b.Close()
+	defer func() { _ = b.Close() }()
 
 	dispatcher := &brokerMockDispatcher{}
 
@@ -847,7 +847,7 @@ func TestMessageBrokerProxy_ProjectSubscriptionDedup(t *testing.T) {
 	defer events.Close()
 
 	b := eventbus.NewInProcessEventBus(slog.Default())
-	defer b.Close()
+	defer func() { _ = b.Close() }()
 
 	dispatcher := &brokerMockDispatcher{}
 
@@ -893,7 +893,7 @@ func TestMessageBrokerProxy_PublishToGroup(t *testing.T) {
 	defer events.Close()
 
 	b := eventbus.NewInProcessEventBus(slog.Default())
-	defer b.Close()
+	defer func() { _ = b.Close() }()
 
 	dispatcher := &brokerMockDispatcher{}
 

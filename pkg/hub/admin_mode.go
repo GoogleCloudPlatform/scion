@@ -118,7 +118,7 @@ func adminModeMiddleware(state *MaintenanceState) func(http.Handler) http.Handle
 			// Block everyone else with 503.
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusServiceUnavailable)
-			json.NewEncoder(w).Encode(map[string]string{
+			_ = json.NewEncoder(w).Encode(map[string]string{
 				"error":   "system_maintenance",
 				"message": state.Message(),
 			})
@@ -174,7 +174,7 @@ func (ws *WebServer) adminModeWebMiddleware(next http.Handler) http.Handler {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
 		w.WriteHeader(http.StatusServiceUnavailable)
-		fmt.Fprint(w, maintenancePageHTML(ws.maintenance.Message()))
+		_, _ = fmt.Fprint(w, maintenancePageHTML(ws.maintenance.Message()))
 	})
 }
 
