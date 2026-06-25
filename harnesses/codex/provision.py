@@ -235,7 +235,12 @@ def _strip_scion_managed_block(content: str) -> str:
         return content
     end = content.find(SCION_MANAGED_END, start)
     if end == -1:
-        return content[:start].rstrip() + "\n"
+        print(
+            f"codex provision: warning: found {SCION_MANAGED_BEGIN} but no matching {SCION_MANAGED_END}. "
+            "Aborting strip to prevent data loss.",
+            file=sys.stderr,
+        )
+        return content
     end += len(SCION_MANAGED_END)
     return (content[:start] + content[end:]).strip() + "\n"
 
@@ -298,10 +303,7 @@ def _apply_instruction_projection(bundle: str, manifest: dict[str, Any]) -> None
     existing = _strip_scion_managed_block(_read_text_if_exists(target))
 
     sections: list[str] = []
-    if system_prompt.strip() and system_prompt_mode == "prepend_to_instructions":
-        sections.append(_markdown_section("System Instruction", system_prompt))
-    elif system_prompt.strip() and system_prompt_mode not in ("none", "prepend_to_instructions"):
-        # Native system prompt is not available for Codex in this harness.
+    if system_prompt.strip() and system_prompt_mode != "none":
         sections.append(_markdown_section("System Instruction", system_prompt))
 
     if instructions.strip():
@@ -310,18 +312,24 @@ def _apply_instruction_projection(bundle: str, manifest: dict[str, Any]) -> None
     if skills:
         sections.append("# Skills\n\n" + "\n".join(skills).strip() + "\n")
 
-    if not sections:
+    if not sections and not existing.strip():
+        if os.path.isfile(target):
+            os.remove(target)
         return
 
-    managed = (
-        f"{SCION_MANAGED_BEGIN}\n\n"
-        + "\n".join(section.strip() for section in sections if section.strip())
-        + f"\n\n{SCION_MANAGED_END}\n"
-    )
+    managed = ""
+    if sections:
+        managed = (
+            f"{SCION_MANAGED_BEGIN}\n\n"
+            + "\n".join(section.strip() for section in sections if section.strip())
+            + f"\n\n{SCION_MANAGED_END}\n"
+        )
 
     unmanaged = ""
     if existing.strip():
-        unmanaged = "\n" + existing.strip() + "\n"
+        unmanaged = existing.strip() + "\n"
+        if managed:
+            unmanaged = "\n" + unmanaged
     content = managed + unmanaged
 
     os.makedirs(os.path.dirname(target), exist_ok=True)

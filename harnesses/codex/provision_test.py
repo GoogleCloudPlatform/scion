@@ -17,8 +17,10 @@ from __future__ import annotations
 
 import os
 import importlib.util
+import io
 import tempfile
 import unittest
+from contextlib import redirect_stderr
 
 PROVISION_PATH = os.path.join(os.path.dirname(__file__), "provision.py")
 SPEC = importlib.util.spec_from_file_location("codex_provision", PROVISION_PATH)
@@ -66,6 +68,83 @@ class CodexProvisionTest(unittest.TestCase):
             self.assertIn("# System Instruction\n\nSystem rules", content)
             self.assertIn("# Agent Instructions\n\nAgent rules", content)
             self.assertIn("# Skills\n\n## example\n\n# Example Skill", content)
+
+    def test_instruction_projection_cleans_stale_managed_block_when_inputs_empty(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = os.path.join(tmp, "home")
+            bundle = os.path.join(tmp, "bundle")
+            os.makedirs(os.path.join(bundle, "inputs"))
+            os.makedirs(os.path.join(home, ".codex"))
+
+            agents_path = os.path.join(home, ".codex", "AGENTS.md")
+            with open(agents_path, "w", encoding="utf-8") as f:
+                f.write(
+                    f"{provision.SCION_MANAGED_BEGIN}\n\n"
+                    "# Agent Instructions\n\nOld managed content\n\n"
+                    f"{provision.SCION_MANAGED_END}\n\n"
+                    "# User Notes\n\nKeep this.\n"
+                )
+
+            manifest = {
+                "agent_home": home,
+                "harness_config": {
+                    "instructions_file": ".codex/AGENTS.md",
+                    "skills_dir": ".codex/skills",
+                    "system_prompt_mode": "prepend_to_instructions",
+                },
+            }
+
+            provision._apply_instruction_projection(bundle, manifest)
+
+            with open(agents_path, "r", encoding="utf-8") as f:
+                content = f.read()
+
+            self.assertNotIn(provision.SCION_MANAGED_BEGIN, content)
+            self.assertNotIn("Old managed content", content)
+            self.assertEqual(content, "# User Notes\n\nKeep this.\n")
+
+    def test_instruction_projection_removes_file_when_only_stale_managed_block_remains(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = os.path.join(tmp, "home")
+            bundle = os.path.join(tmp, "bundle")
+            os.makedirs(os.path.join(bundle, "inputs"))
+            os.makedirs(os.path.join(home, ".codex"))
+
+            agents_path = os.path.join(home, ".codex", "AGENTS.md")
+            with open(agents_path, "w", encoding="utf-8") as f:
+                f.write(
+                    f"{provision.SCION_MANAGED_BEGIN}\n\n"
+                    "# Agent Instructions\n\nOld managed content\n\n"
+                    f"{provision.SCION_MANAGED_END}\n"
+                )
+
+            manifest = {
+                "agent_home": home,
+                "harness_config": {
+                    "instructions_file": ".codex/AGENTS.md",
+                    "skills_dir": ".codex/skills",
+                    "system_prompt_mode": "prepend_to_instructions",
+                },
+            }
+
+            provision._apply_instruction_projection(bundle, manifest)
+
+            self.assertFalse(os.path.exists(agents_path))
+
+    def test_strip_scion_managed_block_preserves_content_when_end_missing(self) -> None:
+        content = (
+            "# Before\n\n"
+            f"{provision.SCION_MANAGED_BEGIN}\n\n"
+            "# Agent Instructions\n\nManaged without an end marker\n\n"
+            "# After\n"
+        )
+        stderr = io.StringIO()
+
+        with redirect_stderr(stderr):
+            got = provision._strip_scion_managed_block(content)
+
+        self.assertEqual(got, content)
+        self.assertIn("Aborting strip to prevent data loss", stderr.getvalue())
 
 
 if __name__ == "__main__":
