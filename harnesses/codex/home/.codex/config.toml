@@ -16,12 +16,49 @@
 check_for_update_on_startup = false
 approval_policy = "never"
 
-# Note this notify script is commented out as experimental
-# TODO remove and replace when codex lands full hook support
-# notify = "sh ~/.codex/scion_notify.sh"
+notify = ["sh", "/home/scion/.codex/scion_notify.sh"]
 
 model = "gpt-5.5"
 model_reasoning_effort = "medium"
+
+[features]
+hooks = true
+
+[[hooks.UserPromptSubmit]]
+matcher = ""
+
+[[hooks.UserPromptSubmit.hooks]]
+type = "command"
+command = "sh /home/scion/.codex/scion_notify.sh"
+timeout = 5
+statusMessage = "Updating Scion status"
+
+[[hooks.PreToolUse]]
+matcher = ".*"
+
+[[hooks.PreToolUse.hooks]]
+type = "command"
+command = "sh /home/scion/.codex/scion_notify.sh"
+timeout = 5
+statusMessage = "Updating Scion status"
+
+[[hooks.PostToolUse]]
+matcher = ".*"
+
+[[hooks.PostToolUse.hooks]]
+type = "command"
+command = "sh /home/scion/.codex/scion_notify.sh"
+timeout = 5
+statusMessage = "Updating Scion status"
+
+[[hooks.Stop]]
+matcher = ""
+
+[[hooks.Stop.hooks]]
+type = "command"
+command = "sh /home/scion/.codex/scion_notify.sh"
+timeout = 5
+statusMessage = "Updating Scion status"
 
 [notice.model_migrations]
 "gpt-5.1-codex-mini" = "gpt-5.2-codex"
@@ -37,7 +74,5 @@ trust_level = "trusted"
 # Scion reconciles these values at agent start time when telemetry is enabled.
 enabled = false
 log_user_prompt = false   # redact user prompts unless explicitly enabled
-exporter = { otlp-grpc = {
-  endpoint = "localhost:4317",
-  headers = { "x-otlp-meta" = "abc123" }
-}}
+exporter."otlp-grpc".endpoint = "localhost:4317"
+exporter."otlp-grpc".headers = { "x-otlp-meta" = "abc123" }
