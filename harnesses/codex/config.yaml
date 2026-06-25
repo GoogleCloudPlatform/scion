@@ -34,7 +34,6 @@ config_dir: .codex
 skills_dir: .codex/skills
 interrupt_key: C-c
 instructions_file: .codex/AGENTS.md
-system_prompt_file: .codex/AGENTS.md
 system_prompt_mode: prepend_to_instructions
 model_aliases:
   small: gpt-5.4-mini
