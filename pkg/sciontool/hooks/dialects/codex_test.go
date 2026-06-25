@@ -48,35 +48,15 @@ func TestCodexDialect_EventMappings(t *testing.T) {
 		{"model-end", hooks.EventModelEnd},
 		{"session-start", hooks.EventSessionStart},
 		{"session-end", hooks.EventSessionEnd},
-		{"UserPromptSubmit", hooks.EventPromptSubmit},
-		{"PreToolUse", hooks.EventToolStart},
-		{"PostToolUse", hooks.EventToolEnd},
-		{"Stop", hooks.EventAgentEnd},
-		{"SubagentStop", hooks.EventSubagentEnd},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.rawName, func(t *testing.T) {
-			event, err := d.Parse(map[string]interface{}{"hook_event_name": tt.rawName})
+			event, err := d.Parse(map[string]interface{}{"type": tt.rawName})
 			require.NoError(t, err)
 			assert.Equal(t, tt.wantName, event.Name)
 		})
 	}
-}
-
-func TestCodexDialectParse_LifecycleFields(t *testing.T) {
-	d := NewCodexDialect()
-	event, err := d.Parse(map[string]interface{}{
-		"hook_event_name":        "UserPromptSubmit",
-		"prompt":                 "Implement hook support",
-		"session_id":             "session-123",
-		"last_assistant_message": "Done",
-	})
-	require.NoError(t, err)
-	assert.Equal(t, hooks.EventPromptSubmit, event.Name)
-	assert.Equal(t, "Implement hook support", event.Data.Prompt)
-	assert.Equal(t, "session-123", event.Data.SessionID)
-	assert.Equal(t, "Done", event.Data.AssistantText)
 }
 
 func TestCodexDialect_TokenExtraction(t *testing.T) {

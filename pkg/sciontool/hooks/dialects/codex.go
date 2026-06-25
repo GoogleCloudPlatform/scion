@@ -32,17 +32,11 @@ func (d *CodexDialect) Parse(data map[string]interface{}) (*hooks.Event, error) 
 		Dialect: "codex",
 		Data: hooks.EventData{
 			Message:   firstNonEmptyString(getString(data, "title"), getString(data, "message")),
-			Prompt:    getString(data, "prompt"),
 			ToolName:  getString(data, "tool_name"),
-			SessionID: firstNonEmptyString(getString(data, "session_id"), getString(data, "thread-id")),
+			SessionID: getString(data, "session_id"),
 			Raw:       data,
 		},
 	}
-
-	event.Data.AssistantText = firstNonEmptyString(
-		getString(data, "last_assistant_message"),
-		getString(data, "last-assistant-message"),
-	)
 
 	// Extract tool input/output if available
 	if val, ok := data["tool_input"]; ok {
@@ -87,20 +81,14 @@ func (d *CodexDialect) normalizeEventName(name string) string {
 		return hooks.EventSessionStart
 	case "session-end", "SessionEnd":
 		return hooks.EventSessionEnd
-	case "tool-start", "BeforeTool", "PreToolUse":
+	case "tool-start", "BeforeTool":
 		return hooks.EventToolStart
-	case "tool-end", "AfterTool", "PostToolUse":
+	case "tool-end", "AfterTool":
 		return hooks.EventToolEnd
 	case "model-start", "BeforeModel":
 		return hooks.EventModelStart
 	case "model-end", "AfterModel":
 		return hooks.EventModelEnd
-	case "UserPromptSubmit":
-		return hooks.EventPromptSubmit
-	case "Stop":
-		return hooks.EventAgentEnd
-	case "SubagentStop":
-		return hooks.EventSubagentEnd
 	default:
 		return name
 	}
