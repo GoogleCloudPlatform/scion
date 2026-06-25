@@ -1,0 +1,80 @@
+# Scion data-driven dialect spec for Codex hook events.
+# Staged to $HOME/.scion/harness/dialect.yaml at agent start.
+dialect: codex
+
+# Backward-compatible single field for current MappingDialect loaders.
+event_name_field: hook_event_name
+
+# Codex uses three possible payload fields for the event name, tried in order.
+event_name_fields:
+  - hook_event_name
+  - type
+  - event
+
+mappings:
+  # Legacy notify path.
+  agent-turn-complete:
+    event: response-complete
+    fields:
+      message: title
+      # Note: Codex may emit last-assistant-message (hyphenated) in older payloads.
+      # MappingDialect does not support field-source fallbacks yet; add if needed.
+      assistant_text: last_assistant_message
+
+  notification:
+    event: notification
+
+  # Session lifecycle.
+  SessionStart:
+    event: session-start
+  session-start:
+    event: session-start
+  SessionEnd:
+    event: session-end
+  session-end:
+    event: session-end
+
+  # Prompt lifecycle.
+  UserPromptSubmit:
+    event: prompt-submit
+    fields:
+      prompt: prompt
+      session_id: session_id
+
+  # Tool lifecycle.
+  PreToolUse:
+    event: tool-start
+    fields:
+      tool_name: tool_name
+      tool_input: tool_input
+  tool-start:
+    event: tool-start
+  BeforeTool:
+    event: tool-start
+  PostToolUse:
+    event: tool-end
+    fields:
+      tool_name: tool_name
+      tool_output: tool_output
+      success: success
+      error: error
+  tool-end:
+    event: tool-end
+  AfterTool:
+    event: tool-end
+
+  # Model lifecycle.
+  BeforeModel:
+    event: model-start
+  model-start:
+    event: model-start
+  AfterModel:
+    event: model-end
+  model-end:
+    event: model-end
+
+  # Agent completion.
+  Stop:
+    event: agent-end
+  SubagentStop:
+    event: subagent-end
