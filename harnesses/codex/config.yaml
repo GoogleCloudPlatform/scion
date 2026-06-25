@@ -37,9 +37,9 @@ interrupt_key: C-c
 instructions_file: .codex/AGENTS.md
 system_prompt_mode: none
 model_aliases:
-  small: gpt-4.1-mini
-  medium: gpt-4.1
-  large: o3
+  small: gpt-5.4-mini
+  medium: gpt-5.4
+  large: gpt-5.5
 command:
   base: ["codex", "--sandbox", "danger-full-access", "--dangerously-bypass-approvals-and-sandbox"]
   # resume_flag is split on whitespace, so "resume --last" emits two argv tokens
