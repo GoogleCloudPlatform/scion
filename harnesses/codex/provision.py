@@ -225,7 +225,7 @@ def _read_text_if_exists(path: str) -> str:
     try:
         with open(path, "r", encoding="utf-8") as f:
             return f.read()
-    except FileNotFoundError:
+    except OSError:
         return ""
 
 
@@ -310,7 +310,7 @@ def _apply_instruction_projection(bundle: str, manifest: dict[str, Any]) -> None
         sections.append(_markdown_section("Agent Instructions", instructions))
 
     if skills:
-        sections.append("# Skills\n\n" + "\n".join(skills).strip() + "\n")
+        sections.append("# Skills\n\n" + "\n\n".join(skill.strip() for skill in skills) + "\n")
 
     if not sections and not existing.strip():
         if os.path.isfile(target):
@@ -321,7 +321,7 @@ def _apply_instruction_projection(bundle: str, manifest: dict[str, Any]) -> None
     if sections:
         managed = (
             f"{SCION_MANAGED_BEGIN}\n\n"
-            + "\n".join(section.strip() for section in sections if section.strip())
+            + "\n\n".join(section.strip() for section in sections if section.strip())
             + f"\n\n{SCION_MANAGED_END}\n"
         )
 

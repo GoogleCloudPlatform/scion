@@ -37,6 +37,7 @@ class CodexProvisionTest(unittest.TestCase):
             bundle = os.path.join(tmp, "bundle")
             os.makedirs(os.path.join(bundle, "inputs"))
             os.makedirs(os.path.join(home, ".codex", "skills", "example"))
+            os.makedirs(os.path.join(home, ".codex", "skills", "second"))
 
             with open(os.path.join(bundle, "inputs", "system-prompt.md"), "w", encoding="utf-8") as f:
                 f.write("System rules")
@@ -48,6 +49,12 @@ class CodexProvisionTest(unittest.TestCase):
                 encoding="utf-8",
             ) as f:
                 f.write("# Example Skill\n\nUse this skill.")
+            with open(
+                os.path.join(home, ".codex", "skills", "second", "SKILL.md"),
+                "w",
+                encoding="utf-8",
+            ) as f:
+                f.write("# Second Skill\n\nUse this other skill.")
 
             manifest = {
                 "agent_home": home,
@@ -68,6 +75,13 @@ class CodexProvisionTest(unittest.TestCase):
             self.assertIn("# System Instruction\n\nSystem rules", content)
             self.assertIn("# Agent Instructions\n\nAgent rules", content)
             self.assertIn("# Skills\n\n## example\n\n# Example Skill", content)
+            self.assertIn("# Skills\n\n## example\n\n# Example Skill\n\nUse this skill.\n\n## second", content)
+            self.assertIn(
+                "# System Instruction\n\nSystem rules\n\n"
+                "# Agent Instructions\n\nAgent rules\n\n"
+                "# Skills\n\n## example",
+                content,
+            )
 
     def test_instruction_projection_cleans_stale_managed_block_when_inputs_empty(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
