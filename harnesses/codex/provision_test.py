@@ -20,6 +20,7 @@ import importlib.util
 import io
 import tempfile
 import unittest
+from contextlib import contextmanager
 from contextlib import redirect_stderr
 
 PROVISION_PATH = os.path.join(os.path.dirname(__file__), "provision.py")
@@ -30,10 +31,24 @@ assert SPEC.loader is not None
 SPEC.loader.exec_module(provision)
 
 
+@contextmanager
+def temporary_home(path: str):
+    old_home = os.environ.get("HOME")
+    os.environ["HOME"] = path
+    try:
+        yield
+    finally:
+        if old_home is None:
+            os.environ.pop("HOME", None)
+        else:
+            os.environ["HOME"] = old_home
+
+
 class CodexProvisionTest(unittest.TestCase):
     def test_instruction_projection_composes_prompts_and_skills(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             home = os.path.join(tmp, "home")
+            manifest_home = os.path.join(tmp, "host-side-home")
             bundle = os.path.join(tmp, "bundle")
             os.makedirs(os.path.join(bundle, "inputs"))
             os.makedirs(os.path.join(home, ".codex", "skills", "example"))
@@ -57,7 +72,7 @@ class CodexProvisionTest(unittest.TestCase):
                 f.write("# Second Skill\n\nUse this other skill.")
 
             manifest = {
-                "agent_home": home,
+                "agent_home": manifest_home,
                 "harness_config": {
                     "instructions_file": ".codex/AGENTS.md",
                     "skills_dir": ".codex/skills",
@@ -65,8 +80,9 @@ class CodexProvisionTest(unittest.TestCase):
                 },
             }
 
-            provision._apply_instruction_projection(bundle, manifest)
-            provision._apply_instruction_projection(bundle, manifest)
+            with temporary_home(home):
+                provision._apply_instruction_projection(bundle, manifest)
+                provision._apply_instruction_projection(bundle, manifest)
 
             with open(os.path.join(home, ".codex", "AGENTS.md"), "r", encoding="utf-8") as f:
                 content = f.read()
@@ -86,6 +102,7 @@ class CodexProvisionTest(unittest.TestCase):
     def test_instruction_projection_cleans_stale_managed_block_when_inputs_empty(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             home = os.path.join(tmp, "home")
+            manifest_home = os.path.join(tmp, "host-side-home")
             bundle = os.path.join(tmp, "bundle")
             os.makedirs(os.path.join(bundle, "inputs"))
             os.makedirs(os.path.join(home, ".codex"))
@@ -100,7 +117,7 @@ class CodexProvisionTest(unittest.TestCase):
                 )
 
             manifest = {
-                "agent_home": home,
+                "agent_home": manifest_home,
                 "harness_config": {
                     "instructions_file": ".codex/AGENTS.md",
                     "skills_dir": ".codex/skills",
@@ -108,7 +125,8 @@ class CodexProvisionTest(unittest.TestCase):
                 },
             }
 
-            provision._apply_instruction_projection(bundle, manifest)
+            with temporary_home(home):
+                provision._apply_instruction_projection(bundle, manifest)
 
             with open(agents_path, "r", encoding="utf-8") as f:
                 content = f.read()
@@ -120,6 +138,7 @@ class CodexProvisionTest(unittest.TestCase):
     def test_instruction_projection_removes_file_when_only_stale_managed_block_remains(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             home = os.path.join(tmp, "home")
+            manifest_home = os.path.join(tmp, "host-side-home")
             bundle = os.path.join(tmp, "bundle")
             os.makedirs(os.path.join(bundle, "inputs"))
             os.makedirs(os.path.join(home, ".codex"))
@@ -133,7 +152,7 @@ class CodexProvisionTest(unittest.TestCase):
                 )
 
             manifest = {
-                "agent_home": home,
+                "agent_home": manifest_home,
                 "harness_config": {
                     "instructions_file": ".codex/AGENTS.md",
                     "skills_dir": ".codex/skills",
@@ -141,7 +160,8 @@ class CodexProvisionTest(unittest.TestCase):
                 },
             }
 
-            provision._apply_instruction_projection(bundle, manifest)
+            with temporary_home(home):
+                provision._apply_instruction_projection(bundle, manifest)
 
             self.assertFalse(os.path.exists(agents_path))
 

@@ -289,7 +289,7 @@ def _apply_instruction_projection(bundle: str, manifest: dict[str, Any]) -> None
     prepend_to_instructions.
     """
     harness_cfg = manifest.get("harness_config") or {}
-    home = _expand(str(manifest.get("agent_home") or "~"))
+    home = os.environ.get("HOME") or _expand("~")
     instructions_file = str(harness_cfg.get("instructions_file") or ".codex/AGENTS.md")
     system_prompt_mode = str(harness_cfg.get("system_prompt_mode") or "none")
     skills_dir = str(harness_cfg.get("skills_dir") or ".codex/skills")
