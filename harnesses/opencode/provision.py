@@ -204,6 +204,11 @@ def _select_auth_method(
                     "GOOGLE_CLOUD_PROJECT/VERTEXAI_PROJECT and/or "
                     "GOOGLE_CLOUD_REGION/GOOGLE_CLOUD_LOCATION/VERTEX_LOCATION"
                 )
+            if not vertex_not_blocked:
+                raise ValueError(
+                    "opencode: auth type 'vertex-ai' selected but GCP metadata "
+                    "access is blocked (gcp_metadata_mode='block')"
+                )
             return "vertex-ai", ""
 
     # Auto-detect precedence: api-key > auth-file > vertex-ai.
@@ -428,8 +433,10 @@ def _provision(manifest: dict[str, Any]) -> int:
         )
         if project:
             env_payload["VERTEXAI_PROJECT"] = project
+            env_payload["GOOGLE_CLOUD_PROJECT"] = project
         if location:
             env_payload["VERTEX_LOCATION"] = location
+            env_payload["GOOGLE_CLOUD_REGION"] = location
 
     try:
         _write_json(auth_out, resolved_payload)
