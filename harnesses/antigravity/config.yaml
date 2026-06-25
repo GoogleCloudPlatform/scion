@@ -53,7 +53,7 @@ capabilities:
     api_key: { support: "no", reason: "AGY uses OAuth, not API keys" }
     auth_file: { support: "yes", reason: "Via AGY_TOKEN file secret at ~/.gemini/antigravity-cli/antigravity-oauth-token" }
     oauth_token: { support: "no", reason: "AGY uses file-based OAuth token, not raw token injection" }
-    vertex_ai: { support: "yes", reason: "Enterprise/GCP mode via ADC (USE_ADC=1) + GOOGLE_CLOUD_PROJECT + GOOGLE_CLOUD_LOCATION" }
+    vertex_ai: { support: "yes", reason: "Enterprise/GCP mode via AGY_TOKEN + GOOGLE_CLOUD_PROJECT + GOOGLE_CLOUD_LOCATION" }
 
 no_auth:
   behavior: drop-to-shell
@@ -76,6 +76,11 @@ auth:
       required_env:
         - any_of: ["GOOGLE_CLOUD_PROJECT"]
         - any_of: ["GOOGLE_CLOUD_LOCATION", "GOOGLE_CLOUD_REGION"]
+      required_files:
+        - name: AGY_TOKEN
+          type: file
+          description: "Antigravity OAuth token JSON file"
+          target_suffix: "/.gemini/antigravity-cli/antigravity-oauth-token"
   autodetect:
     env:
       AGY_TOKEN: oauth-token
