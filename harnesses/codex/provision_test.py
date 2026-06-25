@@ -180,6 +180,63 @@ class CodexProvisionTest(unittest.TestCase):
         self.assertEqual(got, content)
         self.assertIn("Aborting strip to prevent data loss", stderr.getvalue())
 
+    def test_build_otel_section_emits_traces_metrics_environment_and_tls(self) -> None:
+        telemetry = {
+            "enabled": True,
+            "cloud": {
+                "endpoint": "https://otel.example.com/v1/logs",
+                "protocol": "http",
+                "headers": {"x-otlp-meta": "abc123", "authorization": "Bearer token"},
+                "tls": {"ca_file": "/etc/scion/ca.pem"},
+            },
+            "resource": {"deployment.environment": "staging"},
+            "filter": {"events": {"include": ["agent.user.prompt"]}},
+        }
+
+        section = provision._build_otel_section(telemetry, None)
+
+        self.assertIn('environment = "staging"', section)
+        self.assertIn("log_user_prompt = true", section)
+        self.assertIn('metrics_exporter = "statsig"', section)
+        self.assertIn('exporter."otlp-http".endpoint = "https://otel.example.com/v1/logs"', section)
+        self.assertIn('trace_exporter."otlp-http".endpoint = "https://otel.example.com/v1/logs"', section)
+        self.assertIn(
+            'exporter."otlp-http".headers = { "authorization" = "Bearer token", "x-otlp-meta" = "abc123" }',
+            section,
+        )
+        self.assertIn(
+            'trace_exporter."otlp-http".headers = { "authorization" = "Bearer token", "x-otlp-meta" = "abc123" }',
+            section,
+        )
+        self.assertIn('exporter."otlp-http".tls.ca-certificate = "/etc/scion/ca.pem"', section)
+        self.assertIn('trace_exporter."otlp-http".tls.ca-certificate = "/etc/scion/ca.pem"', section)
+
+    def test_build_otel_section_uses_env_overrides_and_production_default(self) -> None:
+        telemetry = {
+            "enabled": True,
+            "cloud": {
+                "endpoint": "localhost:4317",
+                "protocol": "grpc",
+            },
+            "resource": {"deployment.environment": "staging"},
+            "filter": {"events": {"include": ["agent.user.prompt"], "exclude": ["agent.user.prompt"]}},
+        }
+        env = {
+            "SCION_CODEX_OTEL_ENDPOINT": "collector.internal:4317",
+            "SCION_CODEX_OTEL_PROTOCOL": "grpc",
+            "SCION_CODEX_OTEL_ENVIRONMENT": "dev",
+        }
+
+        section = provision._build_otel_section(telemetry, env)
+
+        self.assertIn('environment = "dev"', section)
+        self.assertIn("log_user_prompt = false", section)
+        self.assertIn('exporter."otlp-grpc".endpoint = "collector.internal:4317"', section)
+        self.assertIn('trace_exporter."otlp-grpc".endpoint = "collector.internal:4317"', section)
+
+        defaulted = provision._build_otel_section({"enabled": True}, None)
+        self.assertIn('environment = "production"', defaulted)
+
 
 if __name__ == "__main__":
     unittest.main()

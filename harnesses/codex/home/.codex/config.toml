@@ -73,6 +73,10 @@ trust_level = "trusted"
 [otel]
 # Scion reconciles these values at agent start time when telemetry is enabled.
 enabled = false
+environment = "production"
 log_user_prompt = false   # redact user prompts unless explicitly enabled
+metrics_exporter = "statsig"
 exporter."otlp-grpc".endpoint = "localhost:4317"
 exporter."otlp-grpc".headers = { "x-otlp-meta" = "abc123" }
+trace_exporter."otlp-grpc".endpoint = "localhost:4317"
+trace_exporter."otlp-grpc".headers = { "x-otlp-meta" = "abc123" }

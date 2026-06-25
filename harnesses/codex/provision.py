@@ -412,6 +412,23 @@ def _resolve_protocol(telemetry: dict[str, Any] | None, env: dict[str, str] | No
     return "grpc"
 
 
+def _resolve_otel_environment(telemetry: dict[str, Any], env: dict[str, str] | None) -> str:
+    env = env or {}
+    for key in ("SCION_CODEX_OTEL_ENVIRONMENT", "SCION_OTEL_ENVIRONMENT", "SCION_SERVER_ENV"):
+        v = (env.get(key) or "").strip()
+        if v:
+            return v
+
+    resource = telemetry.get("resource") or {}
+    if isinstance(resource, dict):
+        for key in ("deployment.environment", "service.environment", "environment"):
+            v = str(resource.get(key) or "").strip()
+            if v:
+                return v
+
+    return "production"
+
+
 def _telemetry_enabled(telemetry: dict[str, Any] | None) -> bool:
     if not telemetry:
         return False
@@ -424,6 +441,7 @@ def _telemetry_enabled(telemetry: dict[str, Any] | None) -> bool:
 def _build_otel_section(telemetry: dict[str, Any], env: dict[str, str] | None) -> str:
     endpoint = _resolve_endpoint(telemetry, env)
     protocol = _resolve_protocol(telemetry, env)
+    environment = _resolve_otel_environment(telemetry, env)
 
     log_user_prompt = False
     flt = telemetry.get("filter") or {}
@@ -438,20 +456,54 @@ def _build_otel_section(telemetry: dict[str, Any], env: dict[str, str] | None) -
     if protocol in ("http", "http/protobuf"):
         exporter_key = "otlp-http"
 
-    headers_line = ""
     cloud = telemetry.get("cloud") or {}
-    headers = cloud.get("headers") if isinstance(cloud, dict) else None
-    if isinstance(headers, dict) and headers:
-        parts = [f'"{_toml_escape(k)}" = "{_toml_escape(v)}"' for k, v in headers.items()]
-        parts.sort()
-        headers_line = f"exporter.\"{exporter_key}\".headers = {{ " + ", ".join(parts) + " }\n"
 
-    log_user_prompt_str = "true" if log_user_prompt else "false"
-    return (
-        f"[otel]\nenabled = true\nlog_user_prompt = {log_user_prompt_str}\n"
-        f'exporter."{exporter_key}".endpoint = "{_toml_escape(endpoint)}"\n'
-        f"{headers_line}"
-    )
+    headers: dict[str, str] = {}
+    if isinstance(cloud, dict) and isinstance(cloud.get("headers"), dict):
+        headers = {str(k): str(v) for k, v in cloud["headers"].items()}
+
+    tls_ca_file = ""
+    if isinstance(cloud, dict) and isinstance(cloud.get("tls"), dict):
+        tls_ca_file = str(cloud["tls"].get("ca_file") or "").strip()
+
+    lines = [
+        "[otel]",
+        "enabled = true",
+        f'environment = "{_toml_escape(environment)}"',
+        f"log_user_prompt = {'true' if log_user_prompt else 'false'}",
+        'metrics_exporter = "statsig"',
+        f'exporter."{exporter_key}".endpoint = "{_toml_escape(endpoint)}"',
+        f'trace_exporter."{exporter_key}".endpoint = "{_toml_escape(endpoint)}"',
+    ]
+
+    if headers:
+        header_table = _toml_inline_table(headers)
+        lines.append(f'exporter."{exporter_key}".headers = {header_table}')
+        lines.append(f'trace_exporter."{exporter_key}".headers = {header_table}')
+
+    if tls_ca_file:
+        escaped_ca = _toml_escape(tls_ca_file)
+        lines.append(f'exporter."{exporter_key}".tls.ca-certificate = "{escaped_ca}"')
+        lines.append(f'trace_exporter."{exporter_key}".tls.ca-certificate = "{escaped_ca}"')
+
+    return "\n".join(lines) + "\n"
+
+
+def _toml_escape(value: str) -> str:
+    """Escape a string for a TOML basic string literal."""
+    out = value.replace("\\", "\\\\").replace("\"", "\\\"")
+    return out.replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
+
+
+def _toml_inline_table(items: dict[str, str]) -> str:
+    """Render dict as a TOML inline table with sorted, quoted keys/values."""
+    parts = [f'"{_toml_escape(str(k))}" = "{_toml_escape(str(v))}"' for k, v in sorted(items.items())]
+    return "{ " + ", ".join(parts) + " }"
+
+
+def _toml_string_array(items: list[str]) -> str:
+    parts = [f'"{_toml_escape(str(item))}"' for item in items]
+    return "[" + ", ".join(parts) + "]"
 
 
 def _reconcile_codex_toml(telemetry: dict[str, Any] | None, env: dict[str, str] | None) -> None:
@@ -483,23 +535,6 @@ def _reconcile_codex_toml(telemetry: dict[str, Any] | None, env: dict[str, str] 
 # Project-scope MCP (.codex/mcp_servers.json in the workspace) is not
 # implemented here yet; project-scoped entries are demoted to global with a
 # warning, matching the opencode harness's behavior.
-
-
-def _toml_escape(value: str) -> str:
-    """Escape a string for a TOML basic string literal."""
-    out = value.replace("\\", "\\\\").replace("\"", "\\\"")
-    return out.replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
-
-
-def _toml_inline_table(items: dict[str, str]) -> str:
-    """Render dict as a TOML inline table with sorted, quoted keys/values."""
-    parts = [f'"{_toml_escape(str(k))}" = "{_toml_escape(str(v))}"' for k, v in sorted(items.items())]
-    return "{ " + ", ".join(parts) + " }"
-
-
-def _toml_string_array(items: list[str]) -> str:
-    parts = [f'"{_toml_escape(str(item))}"' for item in items]
-    return "[" + ", ".join(parts) + "]"
 
 
 def _strip_mcp_sections(content: str) -> str:
