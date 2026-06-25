@@ -70,6 +70,8 @@ except ImportError:
 
 CODEX_AUTH_FILE = "~/.codex/auth.json"
 CODEX_CONFIG_FILE = "~/.codex/config.toml"
+SCION_MANAGED_BEGIN = "<!-- BEGIN SCION MANAGED CODEX INSTRUCTIONS -->"
+SCION_MANAGED_END = "<!-- END SCION MANAGED CODEX INSTRUCTIONS -->"
 
 VALID_AUTH_TYPES = ("api-key", "auth-file")
 
@@ -214,6 +216,120 @@ def _write_codex_auth_json(api_key: str) -> None:
         f.write("\n")
     os.chmod(tmp, 0o600)
     os.replace(tmp, target)
+
+
+# --- Instruction projection ------------------------------------------------
+
+
+def _read_text_if_exists(path: str) -> str:
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return f.read()
+    except FileNotFoundError:
+        return ""
+
+
+def _strip_scion_managed_block(content: str) -> str:
+    start = content.find(SCION_MANAGED_BEGIN)
+    if start == -1:
+        return content
+    end = content.find(SCION_MANAGED_END, start)
+    if end == -1:
+        return content[:start].rstrip() + "\n"
+    end += len(SCION_MANAGED_END)
+    return (content[:start] + content[end:]).strip() + "\n"
+
+
+def _markdown_section(title: str, content: str) -> str:
+    body = content.strip()
+    if not body:
+        return ""
+    return f"# {title}\n\n{body}\n"
+
+
+def _skill_sections(home: str, skills_dir: str) -> list[str]:
+    """Read installed Codex SKILL.md files for injection into AGENTS.md."""
+    if not skills_dir:
+        return []
+    root = os.path.join(home, skills_dir)
+    if not os.path.isdir(root):
+        return []
+
+    sections: list[str] = []
+    try:
+        entries = sorted(os.listdir(root))
+    except OSError as exc:
+        print(f"codex provision: could not list skills dir {root}: {exc}", file=sys.stderr)
+        return []
+
+    for entry in entries:
+        if entry.startswith("."):
+            continue
+        skill_md = os.path.join(root, entry, "SKILL.md")
+        if not os.path.isfile(skill_md):
+            continue
+        content = _read_text_if_exists(skill_md).strip()
+        if not content:
+            continue
+        sections.append(f"## {entry}\n\n{content}\n")
+    return sections
+
+
+def _apply_instruction_projection(bundle: str, manifest: dict[str, Any]) -> None:
+    """Compose staged Scion prompt inputs into Codex's AGENTS.md file.
+
+    ContainerScriptHarness stages agent_instructions and system_prompt as
+    inputs/*.md. Codex has no native system prompt flag in this harness, so the
+    system prompt is downgraded into AGENTS.md when config.yaml requests
+    prepend_to_instructions.
+    """
+    harness_cfg = manifest.get("harness_config") or {}
+    home = _expand(str(manifest.get("agent_home") or "~"))
+    instructions_file = str(harness_cfg.get("instructions_file") or ".codex/AGENTS.md")
+    system_prompt_mode = str(harness_cfg.get("system_prompt_mode") or "none")
+    skills_dir = str(harness_cfg.get("skills_dir") or ".codex/skills")
+
+    inputs_dir = os.path.join(bundle, "inputs")
+    instructions = _read_text_if_exists(os.path.join(inputs_dir, "instructions.md"))
+    system_prompt = _read_text_if_exists(os.path.join(inputs_dir, "system-prompt.md"))
+    skills = _skill_sections(home, skills_dir)
+
+    target = os.path.join(home, instructions_file)
+    existing = _strip_scion_managed_block(_read_text_if_exists(target))
+
+    sections: list[str] = []
+    if system_prompt.strip() and system_prompt_mode == "prepend_to_instructions":
+        sections.append(_markdown_section("System Instruction", system_prompt))
+    elif system_prompt.strip() and system_prompt_mode not in ("none", "prepend_to_instructions"):
+        # Native system prompt is not available for Codex in this harness.
+        sections.append(_markdown_section("System Instruction", system_prompt))
+
+    if instructions.strip():
+        sections.append(_markdown_section("Agent Instructions", instructions))
+
+    if skills:
+        sections.append("# Skills\n\n" + "\n".join(skills).strip() + "\n")
+
+    if not sections:
+        return
+
+    managed = (
+        f"{SCION_MANAGED_BEGIN}\n\n"
+        + "\n".join(section.strip() for section in sections if section.strip())
+        + f"\n\n{SCION_MANAGED_END}\n"
+    )
+
+    unmanaged = ""
+    if existing.strip():
+        unmanaged = "\n" + existing.strip() + "\n"
+    content = managed + unmanaged
+
+    os.makedirs(os.path.dirname(target), exist_ok=True)
+    tmp = target + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(content)
+    os.replace(tmp, target)
+    print(f"codex provision: wrote instructions to {target}", file=sys.stderr)
 
 
 # --- TOML reconciliation ---------------------------------------------------
@@ -591,6 +707,12 @@ def _provision(manifest: dict[str, Any]) -> int:
         except OSError as exc:
             print(f"codex provision: write auth.json failed: {exc}", file=sys.stderr)
             return EXIT_ERROR
+
+    try:
+        _apply_instruction_projection(bundle, manifest)
+    except OSError as exc:
+        print(f"codex provision: instruction projection failed: {exc}", file=sys.stderr)
+        return EXIT_ERROR
 
     # Telemetry — load by path; the manifest's Inputs.Telemetry may be stale on
     # first provision for the same reason as auth-candidates.json.

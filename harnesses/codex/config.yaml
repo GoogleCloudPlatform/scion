@@ -34,7 +34,8 @@ config_dir: .codex
 skills_dir: .codex/skills
 interrupt_key: C-c
 instructions_file: .codex/AGENTS.md
-system_prompt_mode: none
+system_prompt_file: .codex/AGENTS.md
+system_prompt_mode: prepend_to_instructions
 model_aliases:
   small: gpt-5.4-mini
   medium: gpt-5.4
@@ -58,7 +59,7 @@ capabilities:
     enabled: { support: "yes" }
     native_emitter: { support: "yes" }
   prompts:
-    system_prompt: { support: "no", reason: "System prompt injection is not implemented for this harness" }
+    system_prompt: { support: "partial", reason: "System prompt is downgraded into AGENTS.md" }
     agent_instructions: { support: "yes" }
   auth:
     api_key: { support: "yes" }
