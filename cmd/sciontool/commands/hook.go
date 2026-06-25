@@ -172,14 +172,11 @@ func processHookData(data []byte) error {
 	// Create processor with handlers
 	processor := hooks.NewHarnessProcessor()
 
-	// Register built-in dialects.
+	// Register built-in dialects first, then let a harness-bundled dialect.yaml
+	// override the requested dialect by name if one is present.
 	dialects.RegisterBuiltins(processor)
-
-	// Discover data-driven dialect from harness bundle if not built-in.
-	if _, ok := processor.Dialects[hookDialect]; !ok {
-		if md, err := dialects.DiscoverMappingDialect(hookDialect); err == nil {
-			processor.RegisterDialect(md)
-		}
+	if md, err := dialects.DiscoverMappingDialect(hookDialect); err == nil {
+		processor.RegisterDialect(md)
 	}
 
 	// Register handlers

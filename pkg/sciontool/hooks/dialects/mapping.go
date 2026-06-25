@@ -19,9 +19,10 @@ import (
 // It maps harness-specific event names to normalized Scion event names and
 // optionally extracts fields from the event payload using dotted paths.
 type MappingDialectSpec struct {
-	Dialect        string                      `yaml:"dialect"`
-	EventNameField string                      `yaml:"event_name_field"`
-	Mappings       map[string]MappingEntrySpec `yaml:"mappings"`
+	Dialect         string                      `yaml:"dialect"`
+	EventNameField  string                      `yaml:"event_name_field"`
+	EventNameFields []string                    `yaml:"event_name_fields"`
+	Mappings        map[string]MappingEntrySpec `yaml:"mappings"`
 }
 
 // MappingEntrySpec defines how a single harness event maps to a normalized event.
@@ -50,9 +51,9 @@ func (d *MappingDialect) Name() string {
 // extracted from top-level data. Custom field paths from the mapping entry
 // override those defaults.
 func (d *MappingDialect) Parse(data map[string]interface{}) (*hooks.Event, error) {
-	rawName := getString(data, d.spec.EventNameField)
+	rawName := d.eventName(data)
 	if rawName == "" {
-		return nil, fmt.Errorf("event name field %q missing or empty in input data", d.spec.EventNameField)
+		return nil, fmt.Errorf("event name field(s) %v missing or empty in input data", d.eventNameFields())
 	}
 
 	normalizedName := rawName
@@ -113,6 +114,26 @@ func (d *MappingDialect) Parse(data map[string]interface{}) (*hooks.Event, error
 	extractFilePath(data, &event.Data)
 
 	return event, nil
+}
+
+func (d *MappingDialect) eventName(data map[string]interface{}) string {
+	fields := d.eventNameFields()
+	for _, field := range fields {
+		if rawName := getString(data, field); rawName != "" {
+			return rawName
+		}
+	}
+	return ""
+}
+
+func (d *MappingDialect) eventNameFields() []string {
+	if len(d.spec.EventNameFields) > 0 {
+		return d.spec.EventNameFields
+	}
+	if d.spec.EventNameField != "" {
+		return []string{d.spec.EventNameField}
+	}
+	return nil
 }
 
 // applyFieldPath resolves a dotted path in the data and assigns the result
@@ -280,8 +301,8 @@ func LoadMappingDialect(path string) (*MappingDialect, error) {
 	if spec.Dialect == "" {
 		return nil, fmt.Errorf("dialect spec missing required 'dialect' field")
 	}
-	if spec.EventNameField == "" {
-		return nil, fmt.Errorf("dialect spec missing required 'event_name_field' field")
+	if spec.EventNameField == "" && len(spec.EventNameFields) == 0 {
+		return nil, fmt.Errorf("dialect spec missing required 'event_name_field' or 'event_name_fields' field")
 	}
 
 	return NewMappingDialect(spec), nil

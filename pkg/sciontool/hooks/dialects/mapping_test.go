@@ -87,6 +87,50 @@ func TestMappingDialect_Parse_UnknownEvent(t *testing.T) {
 	assert.Equal(t, "UnmappedEvent", event.RawName)
 }
 
+func TestMappingDialect_Parse_EventNameFields(t *testing.T) {
+	spec := MappingDialectSpec{
+		Dialect:         "test",
+		EventNameField:  "legacy_event",
+		EventNameFields: []string{"type", "event", "hook_event_name"},
+		Mappings: map[string]MappingEntrySpec{
+			"Primary":  {Event: hooks.EventSessionStart},
+			"Fallback": {Event: hooks.EventToolStart},
+		},
+	}
+	md := NewMappingDialect(spec)
+
+	t.Run("uses first non-empty field in order", func(t *testing.T) {
+		event, err := md.Parse(map[string]interface{}{
+			"type":            "",
+			"event":           "Fallback",
+			"hook_event_name": "Primary",
+		})
+		require.NoError(t, err)
+		assert.Equal(t, hooks.EventToolStart, event.Name)
+		assert.Equal(t, "Fallback", event.RawName)
+	})
+
+	t.Run("event_name_fields take precedence over legacy field", func(t *testing.T) {
+		event, err := md.Parse(map[string]interface{}{
+			"type":         "Primary",
+			"legacy_event": "Fallback",
+		})
+		require.NoError(t, err)
+		assert.Equal(t, hooks.EventSessionStart, event.Name)
+		assert.Equal(t, "Primary", event.RawName)
+	})
+
+	t.Run("does not fall back to legacy field when ordered fields are configured", func(t *testing.T) {
+		_, err := md.Parse(map[string]interface{}{
+			"legacy_event": "Fallback",
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "type")
+		assert.Contains(t, err.Error(), "event")
+		assert.Contains(t, err.Error(), "hook_event_name")
+	})
+}
+
 func TestMappingDialect_Parse_CommonFields(t *testing.T) {
 	md := NewMappingDialect(MappingDialectSpec{
 		Dialect:        "test",
@@ -297,6 +341,27 @@ func TestMappingDialect_Parse_TokenExtraction(t *testing.T) {
 }
 
 func TestLoadMappingDialect(t *testing.T) {
+	t.Run("valid spec with event_name_fields", func(t *testing.T) {
+		dir := t.TempDir()
+		specPath := filepath.Join(dir, "dialect.yaml")
+		err := os.WriteFile(specPath, []byte(`
+dialect: my-harness
+event_name_fields:
+  - type
+  - event
+mappings:
+  Start:
+    event: session-start
+`), 0644)
+		require.NoError(t, err)
+
+		md, err := LoadMappingDialect(specPath)
+		require.NoError(t, err)
+		assert.Equal(t, "my-harness", md.Name())
+		assert.Empty(t, md.spec.EventNameField)
+		assert.Equal(t, []string{"type", "event"}, md.spec.EventNameFields)
+	})
+
 	t.Run("valid spec", func(t *testing.T) {
 		dir := t.TempDir()
 		specPath := filepath.Join(dir, "dialect.yaml")
@@ -368,7 +433,7 @@ mappings:
 
 		_, err = LoadMappingDialect(specPath)
 		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "missing required 'event_name_field' field")
+		assert.Contains(t, err.Error(), "missing required 'event_name_field' or 'event_name_fields' field")
 	})
 }
 

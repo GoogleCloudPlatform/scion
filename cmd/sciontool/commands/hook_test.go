@@ -178,3 +178,50 @@ func TestProcessHookData_CodexCompletion(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "completed", status["activity"])
 }
+
+func TestProcessHookData_HarnessBundledDialectOverridesBuiltin(t *testing.T) {
+	tmpDir := t.TempDir()
+	oldHome := os.Getenv("HOME")
+	os.Setenv("HOME", tmpDir)
+	defer os.Setenv("HOME", oldHome)
+	scrubScionEnv(t)
+	log.SetLogPath(filepath.Join(tmpDir, "agent.log"))
+
+	oldDialect := hookDialect
+	hookDialect = "codex"
+	defer func() { hookDialect = oldDialect }()
+
+	bundleDir := filepath.Join(tmpDir, ".scion", "harness")
+	require.NoError(t, os.MkdirAll(bundleDir, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(bundleDir, "dialect.yaml"), []byte(`
+dialect: codex
+event_name_field: custom_event
+mappings:
+  OverrideTool:
+    event: tool-start
+`), 0644))
+
+	data := map[string]interface{}{
+		"type":         "agent-turn-complete",
+		"custom_event": "OverrideTool",
+		"tool_name":    "BundleTool",
+	}
+	jsonData, _ := json.Marshal(data)
+
+	err := processHookData(jsonData)
+	require.NoError(t, err)
+
+	statusPath := filepath.Join(tmpDir, "agent-info.json")
+	statusData, err := os.ReadFile(statusPath)
+	require.NoError(t, err)
+
+	var status map[string]interface{}
+	err = json.Unmarshal(statusData, &status)
+	require.NoError(t, err)
+	assert.Equal(t, "executing", status["activity"])
+	assert.Equal(t, "BundleTool", status["toolName"])
+
+	logData, err := os.ReadFile(filepath.Join(tmpDir, "agent.log"))
+	require.NoError(t, err)
+	assert.Contains(t, string(logData), "Running tool: BundleTool")
+}
