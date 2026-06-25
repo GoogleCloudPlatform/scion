@@ -29,7 +29,7 @@ try:
 except ImportError:
     scion_harness = None  # type: ignore[assignment]
 
-PROVISION_VERSION = "2026-06-25T00:00:00Z"
+PROVISION_VERSION = "2026-06-25T01:00:00Z"
 
 VALID_AUTH_TYPES = ("oauth-token", "vertex-ai", "none")
 

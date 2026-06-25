@@ -3,16 +3,22 @@ event_name_field: hook_event_name
 mappings:
   PreInvocation:
     event: model-start
+    fields:
+      session_id: .conversationId
   PostInvocation:
     event: model-end
+    fields:
+      session_id: .conversationId
   PreToolUse:
     event: tool-start
     fields:
       tool_name: .toolCall.name
+      tool_input: .toolCall.args
   PostToolUse:
     event: tool-end
     fields:
-      tool_name: .toolCall.name
+      # AGY PostToolUse payload only includes stepIdx and error.
+      # toolCall is NOT present — do not map tool_name here.
       error: .error
   Stop:
     event: agent-end

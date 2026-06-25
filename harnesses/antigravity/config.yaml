@@ -41,7 +41,7 @@ mcp:
 capabilities:
   limits:
     max_turns: { support: "yes" }
-    max_model_calls: { support: "no", reason: "AGY events do not distinguish model calls from invocations" }
+    max_model_calls: { support: "yes" }
     max_duration: { support: "yes" }
   telemetry:
     enabled: { support: "no", reason: "AGY has no native OTEL integration" }
