@@ -727,8 +727,6 @@ func (s *Server) handleResourcesDiscover(w http.ResponseWriter, r *http.Request)
 }
 
 // handleMessageChannels handles GET /api/v1/message-channels.
-//
-//nolint:unused // Kept for legacy message channel route compatibility.
 func (s *Server) handleMessageChannels(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed", nil)
