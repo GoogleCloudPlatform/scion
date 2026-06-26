@@ -344,6 +344,92 @@ func TestContainerScriptHarness_ApplyAuthSettings_StagesFileSecrets(t *testing.T
 	}
 }
 
+func TestContainerScriptHarness_ApplyAuthSettings_StagesFileSecrets_AbsolutePath(t *testing.T) {
+	// Identical harness setup to StagesFileSecrets, but the FileMapping uses an
+	// absolute container path (/home/scion/.codex/auth.json) instead of the
+	// tilde form (~/.codex/auth.json). HasSuffix matching must handle both.
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "config.yaml"), "harness: codex\nimage: scion-codex:latest\n")
+	writeFile(t, filepath.Join(dir, "provision.py"), "#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n")
+
+	entry := config.HarnessConfigEntry{
+		Harness: "codex",
+		Image:   "scion-codex:latest",
+		Provisioner: &config.HarnessProvisionerConfig{
+			Type:             "container-script",
+			InterfaceVersion: 1,
+			Command:          []string{"python3", "$HOME/.scion/harness/provision.py"},
+		},
+		Auth: &config.HarnessAuthMetadata{
+			Types: map[string]config.HarnessAuthTypeMetadata{
+				"auth-file": {
+					RequiredFiles: []config.HarnessAuthFileRequirement{
+						{
+							Name:         "CODEX_AUTH",
+							Type:         "file",
+							TargetSuffix: "/.codex/auth.json",
+							Field:        "CodexAuthFile",
+						},
+					},
+				},
+			},
+		},
+	}
+	h, err := NewContainerScriptHarness(dir, entry)
+	if err != nil {
+		t.Fatalf("NewContainerScriptHarness: %v", err)
+	}
+
+	agentHome := t.TempDir()
+	hostAuthFile := filepath.Join(t.TempDir(), "auth.json")
+	writeFile(t, hostAuthFile, `{"auth_mode":"oauth","token":"tok-abs"}`)
+
+	// Provide an absolute container path — the suffix matcher must still match.
+	resolved := &api.ResolvedAuth{
+		Method:  "container-script",
+		EnvVars: map[string]string{},
+		Files: []api.FileMapping{
+			{SourcePath: hostAuthFile, ContainerPath: "/home/scion/.codex/auth.json"},
+		},
+	}
+
+	if err := h.ApplyAuthSettings(agentHome, resolved); err != nil {
+		t.Fatalf("ApplyAuthSettings (absolute path): %v", err)
+	}
+
+	// The FileMapping must have been consumed (not left as a bind-mount).
+	if len(resolved.Files) != 0 {
+		t.Errorf("expected resolved.Files to be empty after staging; got %+v", resolved.Files)
+	}
+
+	// Secret file should be written.
+	secretPath := filepath.Join(agentHome, ".scion", "harness", "secrets", "CODEX_AUTH")
+	content, err := os.ReadFile(secretPath)
+	if err != nil {
+		t.Fatalf("staged secret not found at %s: %v", secretPath, err)
+	}
+	if string(content) != `{"auth_mode":"oauth","token":"tok-abs"}` {
+		t.Errorf("secret content=%q", content)
+	}
+
+	// auth-candidates.json must carry file_secret_files.CODEX_AUTH.
+	data, err := os.ReadFile(filepath.Join(agentHome, ".scion", "harness", "inputs", "auth-candidates.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]interface{}
+	if err := json.Unmarshal(data, &payload); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	fsf, ok := payload["file_secret_files"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("file_secret_files missing or wrong type: %T", payload["file_secret_files"])
+	}
+	if _, ok := fsf["CODEX_AUTH"]; !ok {
+		t.Errorf("file_secret_files.CODEX_AUTH missing; got %v", fsf)
+	}
+}
+
 func TestContainerScriptHarness_ApplyAuthSettings_NonFileCredentialKeptAsBindMount(t *testing.T) {
 	// FileMappings for credentials without a required_files declaration should
 	// remain as bind-mounts (not staged as secrets).

@@ -500,7 +500,9 @@ func (c *ContainerScriptHarness) stageFileSecretFiles(agentHome string, files []
 	}
 
 	// Normalize a container path by expanding ~ to $HOME and stripping trailing
-	// slashes so comparison is consistent.
+	// slashes so comparison is consistent. Absolute paths (e.g.
+	// /home/scion/.codex/auth.json) are returned unchanged; tilde paths are
+	// expanded to $HOME/... form.
 	normalize := func(p string) string {
 		p = strings.TrimRight(p, "/")
 		if strings.HasPrefix(p, "~/") {
@@ -517,14 +519,16 @@ func (c *ContainerScriptHarness) stageFileSecretFiles(agentHome string, files []
 		normCP := normalize(f.ContainerPath)
 
 		// Find a matching required_file entry by container path suffix.
+		// Use HasSuffix so that both tilde paths (~/.codex/auth.json →
+		// $HOME/.codex/auth.json) and absolute paths
+		// (/home/scion/.codex/auth.json) match the same suffix declaration.
 		var matchedName string
 		for _, req := range reqs {
-			suffix := req.targetSuffix
+			suffix := strings.TrimRight(req.targetSuffix, "/")
 			if !strings.HasPrefix(suffix, "/") {
 				suffix = "/" + suffix
 			}
-			normSuffix := normalize("~" + suffix)
-			if normCP == normSuffix {
+			if strings.HasSuffix(normCP, suffix) {
 				matchedName = req.name
 				break
 			}
