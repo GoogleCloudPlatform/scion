@@ -431,7 +431,7 @@ export class ScionPageMetrics extends LitElement {
 
       const existing = this.charts.get(canvasId);
       if (existing) {
-        if (existing.config.type === type) {
+        if ((existing.config as { type?: string }).type === type) {
           existing.data.labels = labels;
           existing.data.datasets = datasets;
           existing.update();
@@ -548,8 +548,6 @@ export class ScionPageMetrics extends LitElement {
     if (this.loading) return html`<sl-spinner></sl-spinner>`;
     if (!this.sessions) return this.renderEmptyState();
 
-    const s = this.sessions;
-
     return html`
       <div class="chart-row">
         <div class="section">
@@ -572,8 +570,6 @@ export class ScionPageMetrics extends LitElement {
     if (this.loading) return html`<sl-spinner></sl-spinner>`;
     if (!this.modelCalls) return this.renderEmptyState();
 
-    const mc = this.modelCalls;
-
     return html`
       <div class="chart-row">
         <div class="section">
@@ -595,8 +591,6 @@ export class ScionPageMetrics extends LitElement {
   private renderTokensTab() {
     if (this.loading) return html`<sl-spinner></sl-spinner>`;
     if (!this.tokens) return this.renderEmptyState();
-
-    const t = this.tokens;
 
     return html`
       <div class="chart-row">
