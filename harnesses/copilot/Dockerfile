@@ -22,6 +22,12 @@ RUN mkdir -p /home/scion/.copilot /home/scion/.copilot/skills \
              /home/scion/.github && \
     chown -R scion:scion /home/scion/.copilot /home/scion/.github
 
+# Pre-seed Copilot settings to prevent interactive prompts (folder trust,
+# auto-update banner) that block non-interactive operation. The provisioner
+# also writes these defaults, but baking them into the image guarantees
+# they exist even if the harness-config home-dir staging doesn't fire.
+COPY --chown=scion:scion home/.copilot/settings.json /home/scion/.copilot/settings.json
+
 # Install copilot binary (glibc variant — scion-base is Debian bookworm).
 # The binary is a self-contained Node.js SEA — no npm/node dependency needed.
 RUN ARCH=$(uname -m | sed 's/x86_64/x64/;s/aarch64/arm64/') && \
