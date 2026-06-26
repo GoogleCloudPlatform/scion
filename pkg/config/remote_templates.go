@@ -254,6 +254,7 @@ func resolveGitHubRef(ctx context.Context, parts *GitHubURLParts, token string) 
 	}
 
 	cmd := exec.CommandContext(ctx, "git", "ls-remote", "--heads", repoURL)
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "GIT_ASKPASS=echo")
 	output, err := cmd.Output()
 	if err != nil {
 		return
@@ -261,6 +262,7 @@ func resolveGitHubRef(ctx context.Context, parts *GitHubURLParts, token string) 
 
 	refs := make(map[string]bool)
 	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
+		line = strings.TrimRight(line, "\r")
 		if line == "" {
 			continue
 		}
