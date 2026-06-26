@@ -395,8 +395,11 @@ def _ensure_settings() -> None:
         except (OSError, json.JSONDecodeError):
             settings = {}
 
+    workspace = os.environ.get("SCION_AGENT_WORKSPACE") or "/workspace"
     defaults = {
         "autoUpdate": False,
+        "banner": "never",
+        "trustedFolders": [workspace],
     }
     changed = False
     for key, value in defaults.items():

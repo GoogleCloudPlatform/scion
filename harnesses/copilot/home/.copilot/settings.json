@@ -1,3 +1,5 @@
 {
-  "autoUpdate": false
+  "autoUpdate": false,
+  "banner": "never",
+  "trustedFolders": ["/workspace"]
 }
