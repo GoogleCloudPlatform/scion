@@ -31,7 +31,6 @@ ALL_STEP_IDS=(
   scion-gemini
   scion-opencode
   scion-codex
-  scion-copilot
   scion-hub
 )
 
@@ -59,16 +58,16 @@ resolve_targets() {
       echo scion-base
       ;;
     harnesses)
-      printf '%s\n' scion-claude scion-gemini scion-opencode scion-codex scion-copilot
+      printf '%s\n' scion-claude scion-gemini scion-opencode scion-codex
       ;;
     hub)
       echo scion-hub
       ;;
     common)
-      printf '%s\n' scion-base scion-claude scion-gemini scion-opencode scion-codex scion-copilot scion-hub
+      printf '%s\n' scion-base scion-claude scion-gemini scion-opencode scion-codex scion-hub
       ;;
     all)
-      printf '%s\n' core-base scion-base scion-claude scion-gemini scion-opencode scion-codex scion-copilot scion-hub
+      printf '%s\n' core-base scion-base scion-claude scion-gemini scion-opencode scion-codex scion-hub
       ;;
     *)
       return 1
@@ -93,7 +92,6 @@ step_dockerfile() {
     scion-gemini)  echo "${IMAGE_BUILD_DIR}/gemini/Dockerfile" ;;
     scion-opencode) echo "${REPO_ROOT}/harnesses/opencode/Dockerfile" ;;
     scion-codex)   echo "${REPO_ROOT}/harnesses/codex/Dockerfile" ;;
-    scion-copilot) echo "${REPO_ROOT}/harnesses/copilot/Dockerfile" ;;
     scion-hub)     echo "${IMAGE_BUILD_DIR}/hub/Dockerfile" ;;
     *) return 1 ;;
   esac
@@ -112,7 +110,6 @@ step_context_dir() {
     scion-gemini)  echo "${IMAGE_BUILD_DIR}/gemini" ;;
     scion-opencode) echo "${REPO_ROOT}/harnesses/opencode" ;;
     scion-codex)   echo "${REPO_ROOT}/harnesses/codex" ;;
-    scion-copilot) echo "${REPO_ROOT}/harnesses/copilot" ;;
     scion-hub)     echo "${IMAGE_BUILD_DIR}/hub" ;;
     *) return 1 ;;
   esac
@@ -141,7 +138,7 @@ step_build_args() {
         echo "GIT_COMMIT=${COMMIT_SHA}"
       fi
       ;;
-    scion-claude|scion-gemini|scion-opencode|scion-codex|scion-copilot|scion-hub)
+    scion-claude|scion-gemini|scion-opencode|scion-codex|scion-hub)
       echo "BASE_IMAGE=${prefix}scion-base:${BASE_TAG}"
       ;;
     *) return 1 ;;
@@ -157,7 +154,7 @@ step_parent() {
   case "$1" in
     core-base)     echo "" ;;
     scion-base)    echo "core-base" ;;
-    scion-claude|scion-gemini|scion-opencode|scion-codex|scion-copilot|scion-hub)
+    scion-claude|scion-gemini|scion-opencode|scion-codex|scion-hub)
       echo "scion-base"
       ;;
     *) return 1 ;;
