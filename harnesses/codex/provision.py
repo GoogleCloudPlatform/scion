@@ -751,6 +751,44 @@ def _provision(manifest: dict[str, Any]) -> int:
             print(f"codex provision: write auth.json failed: {exc}", file=sys.stderr)
             return EXIT_ERROR
 
+    # Apply auth-file auth: read the staged secret content and write a fresh
+    # writable ~/.codex/auth.json. The host staged the file content as a secret
+    # (rather than bind-mounting it read-only) so Codex can chown/write it on
+    # startup without hitting a read-only filesystem error.
+    if method == "auth-file":
+        auth_secret_path = file_secrets.get("CODEX_AUTH")
+        if auth_secret_path:
+            real_path = _expand(auth_secret_path)
+            try:
+                with open(real_path, "r", encoding="utf-8") as f:
+                    auth_content = f.read()
+            except OSError as exc:
+                print(f"codex provision: read CODEX_AUTH secret failed: {exc}", file=sys.stderr)
+                return EXIT_ERROR
+            if not auth_content.strip():
+                print("codex provision: CODEX_AUTH secret is empty", file=sys.stderr)
+                return EXIT_ERROR
+            try:
+                json.loads(auth_content)
+            except json.JSONDecodeError as exc:
+                print(f"codex provision: CODEX_AUTH secret is not valid JSON: {exc}", file=sys.stderr)
+                return EXIT_ERROR
+            auth_dir = _expand("~/.codex")
+            try:
+                os.makedirs(auth_dir, exist_ok=True)
+                target = os.path.join(auth_dir, "auth.json")
+                tmp = target + ".tmp"
+                with open(tmp, "w", encoding="utf-8") as f:
+                    f.write(auth_content)
+                os.chmod(tmp, 0o600)
+                os.replace(tmp, target)
+            except OSError as exc:
+                print(f"codex provision: write auth.json (auth-file mode) failed: {exc}", file=sys.stderr)
+                return EXIT_ERROR
+        # If no file_secret_files entry, the file may have arrived via bind-mount
+        # (legacy path) or already exists on disk — no action needed.
+
+
     try:
         _apply_instruction_projection(bundle, manifest)
     except OSError as exc:
