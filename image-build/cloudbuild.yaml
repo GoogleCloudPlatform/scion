@@ -197,7 +197,30 @@ steps:
     env:
       - 'DOCKER_CLI_EXPERIMENTAL=enabled'
 
-  # 7. Build Hub Image
+  # 7. Build Copilot Harness Image
+  - name: 'gcr.io/cloud-builders/docker'
+    id: 'build-scion-copilot'
+    dir: 'harnesses/copilot'
+    args:
+      - 'buildx'
+      - 'build'
+      - '--platform'
+      - 'linux/amd64,linux/arm64'
+      - '--build-arg'
+      - 'BASE_IMAGE=$_REGISTRY/scion-base:$_SHORT_SHA'
+      - '-t'
+      - '$_REGISTRY/scion-copilot:$_SHORT_SHA'
+      - '-t'
+      - '$_REGISTRY/scion-copilot:$_TAG'
+      - '-f'
+      - 'Dockerfile'
+      - '--pull'
+      - '--push'
+      - '.'
+    env:
+      - 'DOCKER_CLI_EXPERIMENTAL=enabled'
+
+  # 8. Build Hub Image
   - name: 'gcr.io/cloud-builders/docker'
     id: 'build-scion-hub'
     dir: 'image-build/hub'
