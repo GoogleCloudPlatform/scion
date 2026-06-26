@@ -396,13 +396,14 @@ def _ensure_settings() -> None:
             settings = {}
 
     workspace = os.environ.get("SCION_AGENT_WORKSPACE") or "/workspace"
-    defaults = {
+
+    # settings.json: user-facing settings (autoUpdate, banner).
+    settings_defaults = {
         "autoUpdate": False,
         "banner": "never",
-        "trustedFolders": [workspace],
     }
     changed = False
-    for key, value in defaults.items():
+    for key, value in settings_defaults.items():
         if key not in settings:
             settings[key] = value
             changed = True
@@ -413,6 +414,32 @@ def _ensure_settings() -> None:
             json.dump(settings, f, indent=2, sort_keys=True)
             f.write("\n")
         os.replace(tmp, settings_path)
+
+    # config.json: auto-managed config (trustedFolders).
+    # Copilot reads trustedFolders from config.json, NOT settings.json.
+    config_path = os.path.join(config_dir, "config.json")
+    config: dict[str, Any] = {}
+    if os.path.isfile(config_path):
+        try:
+            # config.json may have a leading comment line; strip it.
+            with open(config_path, "r", encoding="utf-8") as f:
+                raw = f.read()
+            # Remove lines starting with // (copilot writes a comment header).
+            lines = [
+                ln for ln in raw.splitlines()
+                if not ln.strip().startswith("//")
+            ]
+            config = json.loads("\n".join(lines)) or {}
+        except (OSError, json.JSONDecodeError):
+            config = {}
+
+    if "trustedFolders" not in config:
+        config["trustedFolders"] = [workspace]
+        tmp = config_path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(config, f, indent=2, sort_keys=True)
+            f.write("\n")
+        os.replace(tmp, config_path)
 
 
 # --- Entry point -------------------------------------------------------------

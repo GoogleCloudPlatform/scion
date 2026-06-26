@@ -27,6 +27,7 @@ RUN mkdir -p /home/scion/.copilot /home/scion/.copilot/skills \
 # also writes these defaults, but baking them into the image guarantees
 # they exist even if the harness-config home-dir staging doesn't fire.
 COPY --chown=scion:scion home/.copilot/settings.json /home/scion/.copilot/settings.json
+COPY --chown=scion:scion home/.copilot/config.json /home/scion/.copilot/config.json
 
 # Install copilot binary (glibc variant — scion-base is Debian bookworm).
 # The binary is a self-contained Node.js SEA — no npm/node dependency needed.
