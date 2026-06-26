@@ -74,7 +74,7 @@ no_auth:
   behavior: drop-to-shell
   message: |
     This agent started without credentials.
-    Run your Codex authentication setup.
+    Run: codex login --device-auth
     Then run: python3 /home/scion/.scion/harness/capture_auth.py
 auth:
   default_type: api-key
