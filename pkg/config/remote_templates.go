@@ -221,6 +221,9 @@ func fetchGitHubFolder(ctx context.Context, uri string, destPath string, token s
 		return err
 	}
 
+	// Resolve branch names that may contain slashes
+	resolveGitHubRef(ctx, parsed, token)
+
 	// Try GitHub tarball download first (works without git installed)
 	if err := fetchGitHubTarball(ctx, parsed, destPath, token); err == nil {
 		return nil
@@ -228,6 +231,70 @@ func fetchGitHubFolder(ctx context.Context, uri string, destPath string, token s
 
 	// Fall back to sparse git checkout
 	return sparseGitCheckout(ctx, parsed, destPath, token)
+}
+
+// resolveGitHubRef uses git ls-remote to disambiguate branch names that may
+// contain slashes. It updates parts.Branch and parts.Path in place.
+// Falls back silently to the naive parse if git is unavailable.
+func resolveGitHubRef(ctx context.Context, parts *GitHubURLParts, token string) {
+	afterTree := parts.Branch
+	if parts.Path != "" {
+		afterTree = parts.Branch + "/" + parts.Path
+	}
+
+	if !strings.Contains(afterTree, "/") {
+		return
+	}
+
+	var repoURL string
+	if token != "" {
+		repoURL = fmt.Sprintf("https://x-access-token:%s@github.com/%s/%s.git", token, parts.Owner, parts.Repo)
+	} else {
+		repoURL = fmt.Sprintf("https://github.com/%s/%s.git", parts.Owner, parts.Repo)
+	}
+
+	cmd := exec.CommandContext(ctx, "git", "ls-remote", "--heads", repoURL)
+	output, err := cmd.Output()
+	if err != nil {
+		return
+	}
+
+	refs := make(map[string]bool)
+	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
+		if line == "" {
+			continue
+		}
+		fields := strings.SplitN(line, "\t", 2)
+		if len(fields) == 2 {
+			ref := strings.TrimPrefix(fields[1], "refs/heads/")
+			refs[ref] = true
+		}
+	}
+
+	if branch, path, ok := matchBranchFromRefs(afterTree, refs); ok {
+		parts.Branch = branch
+		parts.Path = path
+	}
+}
+
+// matchBranchFromRefs finds the longest branch name from refs that is a prefix
+// of afterTree (the URL path segments after "tree/").
+func matchBranchFromRefs(afterTree string, refs map[string]bool) (branch, path string, found bool) {
+	bestMatch := ""
+	for ref := range refs {
+		if ref == afterTree || strings.HasPrefix(afterTree, ref+"/") {
+			if len(ref) > len(bestMatch) {
+				bestMatch = ref
+			}
+		}
+	}
+
+	if bestMatch == "" {
+		return "", "", false
+	}
+
+	rest := strings.TrimPrefix(afterTree, bestMatch)
+	return bestMatch, strings.TrimPrefix(rest, "/"), true
 }
 
 // fetchGitHubTarball downloads the repo tarball from GitHub and extracts the

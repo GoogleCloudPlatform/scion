@@ -152,6 +152,85 @@ func TestParseGitHubURL(t *testing.T) {
 	}
 }
 
+func TestMatchBranchFromRefs(t *testing.T) {
+	tests := []struct {
+		name       string
+		afterTree  string
+		refs       map[string]bool
+		wantBranch string
+		wantPath   string
+		wantFound  bool
+	}{
+		{
+			name:       "simple branch with path",
+			afterTree:  "main/pkg/config",
+			refs:       map[string]bool{"main": true, "develop": true},
+			wantBranch: "main",
+			wantPath:   "pkg/config",
+			wantFound:  true,
+		},
+		{
+			name:       "branch with slash and path",
+			afterTree:  "scion/gh-copilot-harness-lead/harnesses/copilot",
+			refs:       map[string]bool{"main": true, "scion/gh-copilot-harness-lead": true},
+			wantBranch: "scion/gh-copilot-harness-lead",
+			wantPath:   "harnesses/copilot",
+			wantFound:  true,
+		},
+		{
+			name:       "branch with slash no remaining path",
+			afterTree:  "feature/branch-name",
+			refs:       map[string]bool{"feature/branch-name": true},
+			wantBranch: "feature/branch-name",
+			wantPath:   "",
+			wantFound:  true,
+		},
+		{
+			name:       "prefers longest matching ref",
+			afterTree:  "scion/feature/test/path",
+			refs:       map[string]bool{"scion": true, "scion/feature": true, "scion/feature/test": true},
+			wantBranch: "scion/feature/test",
+			wantPath:   "path",
+			wantFound:  true,
+		},
+		{
+			name:       "no matching ref",
+			afterTree:  "nonexistent/path",
+			refs:       map[string]bool{"main": true, "develop": true},
+			wantBranch: "",
+			wantPath:   "",
+			wantFound:  false,
+		},
+		{
+			name:       "exact match no path",
+			afterTree:  "main",
+			refs:       map[string]bool{"main": true},
+			wantBranch: "main",
+			wantPath:   "",
+			wantFound:  true,
+		},
+		{
+			name:       "ambiguous prefix resolved by longest match",
+			afterTree:  "release/v1/hotfix/file.go",
+			refs:       map[string]bool{"release": true, "release/v1": true, "release/v1/hotfix": true},
+			wantBranch: "release/v1/hotfix",
+			wantPath:   "file.go",
+			wantFound:  true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			branch, path, found := matchBranchFromRefs(tt.afterTree, tt.refs)
+			assert.Equal(t, tt.wantFound, found)
+			if found {
+				assert.Equal(t, tt.wantBranch, branch)
+				assert.Equal(t, tt.wantPath, path)
+			}
+		})
+	}
+}
+
 func TestNormalizeTemplateSourceURL(t *testing.T) {
 	tests := []struct {
 		name     string
