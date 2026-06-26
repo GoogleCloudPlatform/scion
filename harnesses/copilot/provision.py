@@ -89,10 +89,23 @@ def _write_json(path: str, payload: Any) -> None:
     os.replace(tmp, path)
 
 
+_TOKEN_ENV_NAMES = ("COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN")
+
+
 def _present_env_keys(candidates: dict[str, Any]) -> set[str]:
-    """Names of auth env vars staged by the host as candidates."""
+    """Names of auth env vars staged by the host as candidates.
+
+    Falls back to scanning os.environ for known token env vars when the
+    candidates list is empty. This covers the case where the harness-config
+    was registered in the hub but the broker's env-gather couldn't resolve
+    auth requirements (hub-registered configs are hydrated after env-gather).
+    """
     raw = candidates.get("env_vars") or []
-    return {str(k) for k in raw if isinstance(k, str)}
+    keys = {str(k) for k in raw if isinstance(k, str)}
+    if not keys:
+        # Fallback: check container environment directly.
+        keys = {name for name in _TOKEN_ENV_NAMES if os.environ.get(name)}
+    return keys
 
 
 def _env_secret_files(candidates: dict[str, Any]) -> dict[str, str]:
@@ -108,16 +121,22 @@ def _env_secret_files(candidates: dict[str, Any]) -> dict[str, str]:
 
 
 def _read_secret(env_secret_files: dict[str, str], name: str) -> str:
-    """Read the 0600 secret value file for an env var. Returns "" on miss."""
+    """Read the secret value for an env var.
+
+    Tries the staged 0600 secret file first. Falls back to reading from
+    os.environ when no secret file was staged (hub-registered harness configs
+    may not have their auth requirements propagated through env-gather).
+    """
     path = env_secret_files.get(name)
-    if not path:
-        return ""
-    real = _expand(path)
-    try:
-        with open(real, "r", encoding="utf-8") as f:
-            return f.read().rstrip("\r\n")
-    except OSError:
-        return ""
+    if path:
+        real = _expand(path)
+        try:
+            with open(real, "r", encoding="utf-8") as f:
+                return f.read().rstrip("\r\n")
+        except OSError:
+            pass
+    # Fallback: read from container environment.
+    return os.environ.get(name, "")
 
 
 def _select_auth_method(
@@ -421,7 +440,13 @@ def _provision(manifest: dict[str, Any]) -> int:
     no_auth_cfg = harness_cfg.get("no_auth") or {}
     no_auth_behavior = str(no_auth_cfg.get("behavior") or "").strip()
 
-    if not candidates and no_auth_behavior:
+    # Determine auth method. When no candidates are present (empty env_vars)
+    # AND the harness config declares a no_auth behavior, skip auth gracefully
+    # instead of failing. This covers both explicit --no-auth and the case
+    # where the hub's env-gather couldn't resolve auth requirements for a
+    # new hub-registered harness type.
+    has_candidates = bool(env_keys)
+    if not has_candidates and no_auth_behavior:
         print(
             f"copilot provision: no-auth mode (behavior={no_auth_behavior}), "
             "skipping auth setup",
@@ -433,8 +458,17 @@ def _provision(manifest: dict[str, Any]) -> int:
         try:
             method, env_key = _select_auth_method(explicit, env_keys)
         except ValueError as exc:
-            print(str(exc), file=sys.stderr)
-            return EXIT_ERROR
+            if no_auth_behavior:
+                print(
+                    f"copilot provision: {exc} — falling back to "
+                    f"no-auth mode (behavior={no_auth_behavior})",
+                    file=sys.stderr,
+                )
+                method = "none"
+                env_key = ""
+            else:
+                print(str(exc), file=sys.stderr)
+                return EXIT_ERROR
 
     env_payload: dict[str, Any] = {}
     if method == "api-key":
