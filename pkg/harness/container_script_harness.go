@@ -422,6 +422,13 @@ func (c *ContainerScriptHarness) Provision(ctx context.Context, agentName, agent
 // value (e.g. Codex writes its API key into .codex/auth.json) read the file
 // because sciontool harness provision strips secret env vars from the script's
 // process environment for containment.
+//
+// For file-based credentials declared in required_files (e.g. auth-file mode),
+// the file content is read from the host SourcePath and staged as a secret file
+// under agent_home/.scion/harness/secrets/<NAME> (mode 0600). The path is
+// recorded in file_secret_files in auth-candidates.json so the container-side
+// script can write a fresh writable copy. The FileMapping is removed from
+// resolved.Files so the runtime does not bind-mount the file read-only.
 func (c *ContainerScriptHarness) ApplyAuthSettings(agentHome string, resolved *api.ResolvedAuth) error {
 	if resolved == nil {
 		return nil
@@ -432,19 +439,131 @@ func (c *ContainerScriptHarness) ApplyAuthSettings(agentHome string, resolved *a
 		return err
 	}
 
+	fileSecretFiles, remainingFiles, err := c.stageFileSecretFiles(agentHome, resolved.Files)
+	if err != nil {
+		return err
+	}
+	// Remove staged-as-secret FileMappings from resolved so the runtime does
+	// not also bind-mount them (which would create a read-only overlay that
+	// prevents the container-side script from writing the file).
+	resolved.Files = remainingFiles
+
 	payload := map[string]interface{}{
-		"schema_version":   1,
-		"explicit_type":    c.entry.AuthSelectedType,
-		"resolved_method":  resolved.Method,
-		"env_vars":         sortedKeys(resolved.EnvVars),
-		"env_secret_files": envSecretFiles,
-		"files":            fileMappingsToJSON(resolved.Files),
+		"schema_version":    1,
+		"explicit_type":     c.entry.AuthSelectedType,
+		"resolved_method":   resolved.Method,
+		"env_vars":          sortedKeys(resolved.EnvVars),
+		"env_secret_files":  envSecretFiles,
+		"file_secret_files": fileSecretFiles,
+		"files":             fileMappingsToJSON(resolved.Files),
 	}
 	data, err := json.MarshalIndent(payload, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal auth candidates: %w", err)
 	}
 	return c.stageInputFile(agentHome, "auth-candidates.json", data)
+}
+
+// stageFileSecretFiles reads the content of each FileMapping whose ContainerPath
+// matches a required_files declaration in the harness config, writes it to
+// agent_home/.scion/harness/secrets/<NAME> (mode 0600), and returns:
+//   - fileSecretFiles: map of name -> "$HOME/.scion/harness/secrets/<NAME>" for
+//     the staged secrets (to be written into file_secret_files in auth-candidates.json)
+//   - remainingFiles: the FileMappings that were NOT staged as secrets and should
+//     still be passed to the runtime for bind-mounting
+//
+// This prevents read-only bind-mounts for credential files that the container-side
+// provisioner script needs to write (e.g. Codex auth.json).
+func (c *ContainerScriptHarness) stageFileSecretFiles(agentHome string, files []api.FileMapping) (map[string]string, []api.FileMapping, error) {
+	fileSecretFiles := map[string]string{}
+	if len(files) == 0 || c.entry.Auth == nil {
+		return fileSecretFiles, files, nil
+	}
+
+	// Build a lookup from container path suffix → credential name using the
+	// harness config's required_files declarations.
+	type fileReq struct {
+		name         string
+		targetSuffix string
+	}
+	var reqs []fileReq
+	for _, authType := range c.entry.Auth.Types {
+		for _, rf := range authType.RequiredFiles {
+			if rf.Name == "" || rf.TargetSuffix == "" {
+				continue
+			}
+			reqs = append(reqs, fileReq{name: rf.Name, targetSuffix: rf.TargetSuffix})
+		}
+	}
+	if len(reqs) == 0 {
+		return fileSecretFiles, files, nil
+	}
+
+	// Normalize a container path by expanding ~ to $HOME and stripping trailing
+	// slashes so comparison is consistent.
+	normalize := func(p string) string {
+		p = strings.TrimRight(p, "/")
+		if strings.HasPrefix(p, "~/") {
+			p = "$HOME/" + p[2:]
+		}
+		return p
+	}
+
+	dir := filepath.Join(agentHome, ".scion", "harness", "secrets")
+	dirCreated := false
+
+	var remaining []api.FileMapping
+	for _, f := range files {
+		normCP := normalize(f.ContainerPath)
+
+		// Find a matching required_file entry by container path suffix.
+		var matchedName string
+		for _, req := range reqs {
+			suffix := req.targetSuffix
+			if !strings.HasPrefix(suffix, "/") {
+				suffix = "/" + suffix
+			}
+			normSuffix := normalize("~" + suffix)
+			if normCP == normSuffix {
+				matchedName = req.name
+				break
+			}
+		}
+
+		if matchedName == "" || !isSafeEnvName(matchedName) {
+			// Not a declared file credential or unsafe name — keep as bind-mount.
+			remaining = append(remaining, f)
+			continue
+		}
+
+		if f.SourcePath == "" {
+			// No host path to read; keep as bind-mount fallback.
+			remaining = append(remaining, f)
+			continue
+		}
+
+		content, err := os.ReadFile(f.SourcePath)
+		if err != nil {
+			return nil, nil, fmt.Errorf("read credential file %s (%s): %w", matchedName, f.SourcePath, err)
+		}
+
+		if !dirCreated {
+			if err := os.MkdirAll(dir, 0700); err != nil {
+				return nil, nil, fmt.Errorf("create secrets dir: %w", err)
+			}
+			dirCreated = true
+		}
+
+		target := filepath.Join(dir, matchedName)
+		if err := os.WriteFile(target, content, 0600); err != nil {
+			return nil, nil, fmt.Errorf("write file secret %s: %w", matchedName, err)
+		}
+		fileSecretFiles[matchedName] = "$HOME/.scion/harness/secrets/" + matchedName
+		// Do NOT add to remaining — this file is now staged as a secret and
+		// must not be bind-mounted.
+	}
+
+	return fileSecretFiles, remaining, nil
 }
 
 // stageEnvSecretFiles writes each non-empty env value to

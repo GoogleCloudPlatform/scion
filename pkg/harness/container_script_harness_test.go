@@ -245,6 +245,139 @@ func TestContainerScriptHarness_ApplyAuthSettings_WritesCandidates(t *testing.T)
 	}
 }
 
+func TestContainerScriptHarness_ApplyAuthSettings_StagesFileSecrets(t *testing.T) {
+	// Harness entry with a required_files declaration matching Codex auth-file.
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "config.yaml"), "harness: codex\nimage: scion-codex:latest\n")
+	writeFile(t, filepath.Join(dir, "provision.py"), "#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n")
+
+	entry := config.HarnessConfigEntry{
+		Harness: "codex",
+		Image:   "scion-codex:latest",
+		Provisioner: &config.HarnessProvisionerConfig{
+			Type:             "container-script",
+			InterfaceVersion: 1,
+			Command:          []string{"python3", "$HOME/.scion/harness/provision.py"},
+		},
+		Auth: &config.HarnessAuthMetadata{
+			Types: map[string]config.HarnessAuthTypeMetadata{
+				"auth-file": {
+					RequiredFiles: []config.HarnessAuthFileRequirement{
+						{
+							Name:         "CODEX_AUTH",
+							Type:         "file",
+							TargetSuffix: "/.codex/auth.json",
+							Field:        "CodexAuthFile",
+						},
+					},
+				},
+			},
+		},
+	}
+	h, err := NewContainerScriptHarness(dir, entry)
+	if err != nil {
+		t.Fatalf("NewContainerScriptHarness: %v", err)
+	}
+
+	agentHome := t.TempDir()
+
+	// Write a fake auth.json on the host.
+	hostAuthFile := filepath.Join(t.TempDir(), "auth.json")
+	writeFile(t, hostAuthFile, `{"auth_mode":"oauth","token":"tok-xxx"}`)
+
+	resolved := &api.ResolvedAuth{
+		Method:  "container-script",
+		EnvVars: map[string]string{},
+		Files: []api.FileMapping{
+			{SourcePath: hostAuthFile, ContainerPath: "~/.codex/auth.json"},
+		},
+	}
+
+	if err := h.ApplyAuthSettings(agentHome, resolved); err != nil {
+		t.Fatalf("ApplyAuthSettings: %v", err)
+	}
+
+	// The FileMapping should have been removed from resolved.Files.
+	if len(resolved.Files) != 0 {
+		t.Errorf("expected resolved.Files to be empty after staging; got %+v", resolved.Files)
+	}
+
+	// The secret file should be written at secrets/CODEX_AUTH with mode 0600.
+	secretPath := filepath.Join(agentHome, ".scion", "harness", "secrets", "CODEX_AUTH")
+	info, err := os.Stat(secretPath)
+	if err != nil {
+		t.Fatalf("staged secret not found at %s: %v", secretPath, err)
+	}
+	if info.Mode().Perm() != 0600 {
+		t.Errorf("secret mode=%o, want 0600", info.Mode().Perm())
+	}
+	content, _ := os.ReadFile(secretPath)
+	if string(content) != `{"auth_mode":"oauth","token":"tok-xxx"}` {
+		t.Errorf("secret content=%q", content)
+	}
+
+	// auth-candidates.json should have file_secret_files.CODEX_AUTH set.
+	data, err := os.ReadFile(filepath.Join(agentHome, ".scion", "harness", "inputs", "auth-candidates.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]interface{}
+	if err := json.Unmarshal(data, &payload); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	fsf, ok := payload["file_secret_files"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("file_secret_files missing or wrong type: %T", payload["file_secret_files"])
+	}
+	codexAuthPath, ok := fsf["CODEX_AUTH"].(string)
+	if !ok || codexAuthPath == "" {
+		t.Errorf("file_secret_files.CODEX_AUTH missing or empty: %v", fsf)
+	}
+	if !strings.HasPrefix(codexAuthPath, "$HOME/.scion/harness/secrets/") {
+		t.Errorf("file_secret_files.CODEX_AUTH=%q does not have expected prefix", codexAuthPath)
+	}
+
+	// The files array should be empty (bind-mount removed).
+	filesRaw, _ := payload["files"].([]interface{})
+	if len(filesRaw) != 0 {
+		t.Errorf("files array should be empty; got %v", filesRaw)
+	}
+}
+
+func TestContainerScriptHarness_ApplyAuthSettings_NonFileCredentialKeptAsBindMount(t *testing.T) {
+	// FileMappings for credentials without a required_files declaration should
+	// remain as bind-mounts (not staged as secrets).
+	h, _ := newTestContainerScriptHarness(t) // no Auth metadata
+	agentHome := t.TempDir()
+
+	hostFile := filepath.Join(t.TempDir(), "gcloud.json")
+	writeFile(t, hostFile, `{"type":"service_account"}`)
+
+	resolved := &api.ResolvedAuth{
+		Method:  "container-script",
+		EnvVars: map[string]string{},
+		Files: []api.FileMapping{
+			{SourcePath: hostFile, ContainerPath: "~/.config/gcloud/application_default_credentials.json"},
+		},
+	}
+
+	if err := h.ApplyAuthSettings(agentHome, resolved); err != nil {
+		t.Fatalf("ApplyAuthSettings: %v", err)
+	}
+
+	// No Auth metadata → no required_files → file should remain in resolved.Files.
+	if len(resolved.Files) != 1 {
+		t.Errorf("expected 1 file to remain as bind-mount; got %+v", resolved.Files)
+	}
+
+	// No secret should be staged.
+	secretDir := filepath.Join(agentHome, ".scion", "harness", "secrets")
+	entries, _ := os.ReadDir(secretDir)
+	for _, e := range entries {
+		t.Errorf("unexpected secret staged: %s", e.Name())
+	}
+}
+
 func TestContainerScriptHarness_ApplyMCPSettings_WritesInput(t *testing.T) {
 	h, _ := newTestContainerScriptHarness(t)
 	agentHome := t.TempDir()
