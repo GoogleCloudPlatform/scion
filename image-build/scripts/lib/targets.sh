@@ -134,6 +134,9 @@ step_build_args() {
       ;;
     scion-base)
       echo "BASE_IMAGE=${prefix}core-base:${BASE_TAG}"
+      if [[ "${EMBED_WEB:-false}" == "true" ]]; then
+        echo "EMBED_WEB=true"
+      fi
       if [[ -n "${COMMIT_SHA:-}" ]]; then
         echo "GIT_COMMIT=${COMMIT_SHA}"
       fi

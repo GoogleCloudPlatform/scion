@@ -39,6 +39,7 @@ TAG="latest"
 PLATFORM=""
 PUSH="false"
 DRY_RUN="false"
+EMBED_WEB="false"
 
 # shellcheck source=lib/targets.sh
 source "${SCRIPT_DIR}/lib/targets.sh"
@@ -74,6 +75,9 @@ Options:
   --push                Push images after building.
                         Auto-enabled for multi-arch builds (buildx limitation).
                         Ignored by --builder cloud-build (YAMLs always push).
+  --embed-web           Build scion-base with web client assets embedded in
+                        the scion binary. Supported for local Docker/Podman
+                        image builds; not supported with --builder cloud-build.
   --dry-run             Print the steps and the exact builder commands without executing.
   -h, --help            Show this help message.
 
@@ -91,6 +95,7 @@ while [[ $# -gt 0 ]]; do
     --tag)      TAG="$2"; shift 2 ;;
     --platform) PLATFORM="$2"; shift 2 ;;
     --push)     PUSH="true"; shift ;;
+    --embed-web) EMBED_WEB="true"; shift ;;
     --dry-run)  DRY_RUN="true"; shift ;;
     -h|--help)  usage 0 ;;
     *) echo "Unknown option: $1" >&2; usage 1 ;;
@@ -110,6 +115,12 @@ done
 if [[ "${builder_ok}" != "true" ]]; then
   echo "Error: unknown --builder '${BUILDER}'" >&2
   echo "Allowed: ${ALLOWED_BUILDERS[*]}" >&2
+  exit 1
+fi
+
+if [[ "${EMBED_WEB}" == "true" && "${BUILDER}" == "cloud-build" ]]; then
+  echo "Error: --embed-web is not supported with --builder cloud-build." >&2
+  echo "Cloud Build uses static YAML definitions; use local-docker or local-podman for embedded web image builds." >&2
   exit 1
 fi
 
@@ -192,6 +203,7 @@ echo "Tag:      ${TAG}${SHORT_SHA:+ (+ :${SHORT_SHA})}"
 if [[ "${BUILDER_MODE}" == "per-image" ]]; then
   echo "Platforms: ${PLATFORMS:-<native>}"
   echo "Push:     ${PUSH}"
+  echo "Embed web: ${EMBED_WEB}"
 fi
 echo "Steps:    ${STEPS[*]}"
 if [[ "${DRY_RUN}" == "true" ]]; then
@@ -260,7 +272,7 @@ else
     tags="$(compute_tags "${image_name}")"
 
     BASE_TAG="$(resolve_base_tag "${step}")"
-    export BASE_TAG REGISTRY TAG SHORT_SHA COMMIT_SHA
+    export BASE_TAG REGISTRY TAG SHORT_SHA COMMIT_SHA EMBED_WEB
 
     # Collect build-args for this step.
     build_arg_flags=()

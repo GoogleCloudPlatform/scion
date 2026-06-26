@@ -42,6 +42,10 @@ on:
           - linux/amd64
           - linux/arm64
         default: 'all'
+      embed_web:
+        description: 'Embed web client assets in the scion binary baked into scion-base'
+        type: boolean
+        default: false
 
   workflow_call:
     inputs:
@@ -61,6 +65,10 @@ on:
         description: 'Target platform(s) (all, linux/amd64, linux/arm64)'
         type: string
         default: 'all'
+      embed_web:
+        description: 'Embed web client assets in the scion binary baked into scion-base'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -87,9 +95,14 @@ jobs:
 
       - name: Build and push images
         run: |
-          image-build/scripts/build-images.sh \
-            --registry "${{ inputs.registry }}" \
-            --target "${{ inputs.target }}" \
-            --tag "${{ inputs.tag }}" \
-            --platform "${{ inputs.platform }}" \
+          args=(
+            --registry "${{ inputs.registry }}"
+            --target "${{ inputs.target }}"
+            --tag "${{ inputs.tag }}"
+            --platform "${{ inputs.platform }}"
             --push
+          )
+          if [[ "${{ inputs.embed_web }}" == "true" ]]; then
+            args+=(--embed-web)
+          fi
+          image-build/scripts/build-images.sh "${args[@]}"

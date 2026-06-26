@@ -27,6 +27,7 @@ ENV CGO_ENABLED=1
 # Build arguments for version info
 ARG GIT_COMMIT
 ARG BUILD_TIME
+ARG EMBED_WEB=false
 
 # Copy go.mod and go.sum first for better layer caching
 COPY go.mod go.sum ./
@@ -36,6 +37,14 @@ RUN go mod download
 COPY cmd/ ./cmd/
 COPY pkg/ ./pkg/
 COPY web/*.go ./web/
+COPY web/package.json web/package-lock.json web/vite.config.ts web/tsconfig.json web/tsconfig.client.json web/index.html ./web/
+COPY web/scripts/ ./web/scripts/
+COPY web/public/ ./web/public/
+COPY web/src/ ./web/src/
+
+RUN if [ "${EMBED_WEB}" = "true" ]; then \
+        cd web && npm ci && npm run build; \
+    fi
 
 # Build with version info injected via ldflags
 # VCS stamping is disabled since .git is not in the build context;
@@ -49,7 +58,11 @@ RUN BUILD_TIME="${BUILD_TIME:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}" && \
         SCION_LDFLAGS="${SCION_LDFLAGS} -X ${SCION_PKG}.Commit=${GIT_COMMIT}"; \
         SCIONTOOL_LDFLAGS="${SCIONTOOL_LDFLAGS} -X ${SCIONTOOL_PKG}.Commit=${GIT_COMMIT}"; \
     fi && \
-    go build -buildvcs=false -tags no_embed_web -ldflags="${SCION_LDFLAGS}" -o /usr/local/bin/scion ./cmd/scion/ && \
+    if [ "${EMBED_WEB}" = "true" ]; then \
+        go build -buildvcs=false -ldflags="${SCION_LDFLAGS}" -o /usr/local/bin/scion ./cmd/scion/; \
+    else \
+        go build -buildvcs=false -tags no_embed_web -ldflags="${SCION_LDFLAGS}" -o /usr/local/bin/scion ./cmd/scion/; \
+    fi && \
     go build -buildvcs=false -tags no_embed_web -ldflags="${SCIONTOOL_LDFLAGS}" -o /usr/local/bin/sciontool ./cmd/sciontool/
 
 # Final stage

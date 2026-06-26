@@ -47,6 +47,10 @@ All image-related scripts live under `scripts/`. GitHub Actions workflows remain
 
 The orchestrator owns target sequencing, tag computation, and BASE_IMAGE threading. Each builder only knows how to execute one image build (per-image mode) or one target submission (target mode).
 
+`--embed-web` is available for local Docker and Podman builds when you want
+the `scion` binary inside `scion-base` to include the built web client assets.
+Cloud Build does not support this flag because it submits static YAML configs.
+
 ### Targets
 
 | Target | What gets built | Notes |
@@ -76,6 +80,12 @@ image-build/scripts/build-images.sh --builder local-podman --target all
 
 # Build and push to your registry (default builder: local-docker)
 image-build/scripts/build-images.sh --registry ghcr.io/myorg --push
+
+# Build scion-base with embedded web assets in the scion binary
+image-build/scripts/build-images.sh --target scion-base --embed-web
+
+# Build the common image set with embedded web assets in scion-base
+image-build/scripts/build-images.sh --target common --embed-web
 
 # Submit to Cloud Build (--registry is required here)
 image-build/scripts/build-images.sh --builder cloud-build \
@@ -108,7 +118,9 @@ The legacy `trigger-cloudbuild.sh` script still works as a deprecation shim and 
 1. Fork the repo.
 2. Go to **Actions** > **Build Scion Images** > **Run workflow**.
 3. Enter `ghcr.io/<your-username>` as the registry.
-4. Run `scion config set image_registry ghcr.io/<your-username>`.
+4. Optionally enable **embed_web** to bake web client assets into the `scion`
+   binary in `scion-base`.
+5. Run `scion config set image_registry ghcr.io/<your-username>`.
 
 The workflow shells out to `build-images.sh --builder local-docker`. It is also available as a reusable workflow via `workflow_call` for use in downstream repos.
 
