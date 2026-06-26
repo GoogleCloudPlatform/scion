@@ -22,13 +22,13 @@ RUN mkdir -p /home/scion/.copilot /home/scion/.copilot/skills \
              /home/scion/.github && \
     chown -R scion:scion /home/scion/.copilot /home/scion/.github
 
-# Install copilot binary (Alpine/musl variant for scion-base).
+# Install copilot binary (glibc variant — scion-base is Debian bookworm).
 # The binary is a self-contained Node.js SEA — no npm/node dependency needed.
 RUN ARCH=$(uname -m | sed 's/x86_64/x64/;s/aarch64/arm64/') && \
     if [ "$COPILOT_CLI_VERSION" = "latest" ]; then \
-      URL="https://github.com/github/copilot-cli/releases/latest/download/copilot-linuxmusl-${ARCH}.tar.gz"; \
+      URL="https://github.com/github/copilot-cli/releases/latest/download/copilot-linux-${ARCH}.tar.gz"; \
     else \
-      URL="https://github.com/github/copilot-cli/releases/download/v${COPILOT_CLI_VERSION}/copilot-linuxmusl-${ARCH}.tar.gz"; \
+      URL="https://github.com/github/copilot-cli/releases/download/v${COPILOT_CLI_VERSION}/copilot-linux-${ARCH}.tar.gz"; \
     fi && \
     curl -fsSL "$URL" | tar xz -C /usr/local/bin && \
     chmod +x /usr/local/bin/copilot
