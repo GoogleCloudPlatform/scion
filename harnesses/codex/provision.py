@@ -133,6 +133,23 @@ def _env_secret_files(candidates: dict[str, Any]) -> dict[str, str]:
     return out
 
 
+def _file_secret_files(candidates: dict[str, Any]) -> dict[str, str]:
+    """Map of credential name -> container path of its 0600 staged secret file.
+
+    These are file-type credentials (e.g. CODEX_AUTH for auth.json) that the
+    host staged as secrets instead of bind-mounting, so the container-side
+    script can write a fresh writable copy.
+    """
+    raw = candidates.get("file_secret_files") or {}
+    out: dict[str, str] = {}
+    if not isinstance(raw, dict):
+        return out
+    for k, v in raw.items():
+        if isinstance(k, str) and isinstance(v, str) and v:
+            out[k] = v
+    return out
+
+
 def _read_secret(env_secret_files: dict[str, str], name: str) -> str:
     """Read the 0600 secret value file for an env var. Returns "" on miss."""
     path = env_secret_files.get(name)
@@ -146,8 +163,19 @@ def _read_secret(env_secret_files: dict[str, str], name: str) -> str:
         return ""
 
 
-def _codex_auth_file_present(file_paths: list[str]) -> bool:
-    """Return True if the Codex auth file is mounted or already on disk."""
+def _codex_auth_file_present(
+    file_paths: list[str],
+    file_secret_files: dict[str, str] | None = None,
+) -> bool:
+    """Return True if the Codex auth file is available.
+
+    Checks three sources in order:
+    1. A file_secret_files staged secret (host read the file and wrote a secret).
+    2. A bind-mounted container path matching the auth file location.
+    3. The auth file already present on disk (e.g. from a prior provision).
+    """
+    if file_secret_files and "CODEX_AUTH" in file_secret_files:
+        return True
     if any(_expand(p) == _expand(CODEX_AUTH_FILE) for p in file_paths):
         return True
     return os.path.isfile(_expand(CODEX_AUTH_FILE))
@@ -157,6 +185,7 @@ def _select_auth_method(
     explicit: str,
     env_keys: set[str],
     file_paths: list[str],
+    file_secret_files: dict[str, str] | None = None,
 ) -> tuple[str, str]:
     """Pick an auth method.
 
@@ -165,7 +194,7 @@ def _select_auth_method(
     """
     has_codex = "CODEX_API_KEY" in env_keys
     has_openai = "OPENAI_API_KEY" in env_keys
-    has_authfile = _codex_auth_file_present(file_paths)
+    has_authfile = _codex_auth_file_present(file_paths, file_secret_files)
 
     if explicit:
         if explicit not in VALID_AUTH_TYPES:
@@ -716,6 +745,7 @@ def _provision(manifest: dict[str, Any]) -> int:
     env_keys = _present_env_keys(candidates)
     file_paths = _present_file_paths(candidates)
     secret_files = _env_secret_files(candidates)
+    file_secrets = _file_secret_files(candidates)
 
     # No-auth mode: when no auth candidates were staged and the harness config
     # declares a no_auth behavior, skip auth setup entirely. The agent will
@@ -730,7 +760,7 @@ def _provision(manifest: dict[str, Any]) -> int:
         env_key = ""
     else:
         try:
-            method, env_key = _select_auth_method(explicit, env_keys, file_paths)
+            method, env_key = _select_auth_method(explicit, env_keys, file_paths, file_secrets)
         except ValueError as exc:
             print(str(exc), file=sys.stderr)
             return EXIT_ERROR
@@ -832,6 +862,8 @@ def _provision(manifest: dict[str, Any]) -> int:
         resolved_payload["auth_file_written"] = CODEX_AUTH_FILE
     elif method == "auth-file":
         resolved_payload["auth_file"] = CODEX_AUTH_FILE
+        if "CODEX_AUTH" in file_secrets:
+            resolved_payload["auth_file_written"] = CODEX_AUTH_FILE
 
     # Codex reads its credentials from .codex/auth.json, not from env, so the
     # env overlay is intentionally empty. We still emit a well-formed file so
