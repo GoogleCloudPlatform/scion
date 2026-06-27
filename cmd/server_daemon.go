@@ -17,6 +17,7 @@ package cmd
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -462,7 +463,11 @@ func runServerStatus(cmd *cobra.Command, args []string) error {
 }
 
 // waitForServerReady polls the server's /healthz endpoint until it returns 200
-// or the timeout expires. Returns true if the server became ready.
+// with a "healthy" composite status, or the timeout expires.
+// The web server's /healthz always returns HTTP 200 but reports a composite
+// status that reflects hub and broker readiness. On first start the hub
+// database may still be migrating when the HTTP listener begins accepting
+// connections, so we parse the JSON body to confirm all components are ready.
 func waitForServerReady(host string, port int, timeout time.Duration) bool {
 	client := &http.Client{Timeout: 2 * time.Second}
 	url := fmt.Sprintf("http://%s:%d/healthz", host, port)
@@ -470,9 +475,15 @@ func waitForServerReady(host string, port int, timeout time.Duration) bool {
 
 	for time.Now().Before(deadline) {
 		if resp, err := client.Get(url); err == nil {
+			body, readErr := io.ReadAll(resp.Body)
 			resp.Body.Close()
-			if resp.StatusCode == http.StatusOK {
-				return true
+			if resp.StatusCode == http.StatusOK && readErr == nil {
+				var health struct {
+					Status string `json:"status"`
+				}
+				if json.Unmarshal(body, &health) == nil && health.Status == "healthy" {
+					return true
+				}
 			}
 		}
 		time.Sleep(250 * time.Millisecond)
