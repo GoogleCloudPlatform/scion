@@ -1,3 +1,25 @@
+/*
+Package runtime implements the Cloud Run Instances runtime for Scion.
+
+Service Account and IAM Requirements:
+The Runtime Broker executing this code must have a Service Account with the following IAM roles:
+- roles/run.admin (to manage Cloud Run Instances)
+- roles/iam.serviceAccountUser (to attach the runtime service account to instances)
+- roles/logging.viewer (to stream and retrieve logs)
+- roles/iap.tunnelResourceAccessor (to exec into instances via IAP)
+
+Authentication Methods:
+1. GKE Workload Identity (Recommended for GKE-hosted brokers):
+   Bind a Kubernetes Service Account (KSA) to the Google Service Account (GSA) using:
+   `gcloud iam service-accounts add-iam-policy-binding <GSA_EMAIL> \
+       --role roles/iam.workloadIdentityUser \
+       --member "serviceAccount:<PROJECT_ID>.svc.id.goog[<NAMESPACE>/<KSA_NAME>]"`
+   Annotate the KSA: `kubectl annotate sa <KSA_NAME> iam.gke.io/gcp-service-account=<GSA_EMAIL>`
+
+2. Key File (For VM-hosted brokers or local testing):
+   Set the GOOGLE_APPLICATION_CREDENTIALS environment variable to point to a valid JSON key file
+   downloaded from the GCP console for the target Service Account.
+*/
 package runtime
 
 import (
@@ -12,19 +34,44 @@ import (
 	"cloud.google.com/go/run/apiv2/runpb"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/runtime/cloudrun"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/googleapis/gax-go/v2"
 	"google.golang.org/api/iterator"
+	"google.golang.org/grpc/codes"
 )
+
+var defaultCallOpts = []gax.CallOption{
+	gax.WithRetry(func() gax.Retryer {
+		return gax.OnCodes([]codes.Code{
+			codes.Unavailable,       // 503
+			codes.ResourceExhausted, // 429
+		}, gax.Backoff{
+			Initial:    100 * time.Millisecond,
+			Max:        10 * time.Second,
+			Multiplier: 1.3,
+		})
+	}),
+}
 
 type CloudRunRuntime struct {
 	config *config.CloudRunInstancesConfig
+	exec   cloudrun.ExecConnector
 }
 
 func NewCloudRunRuntime(cfg *config.CloudRunInstancesConfig) (*CloudRunRuntime, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("CloudRunInstancesConfig cannot be nil")
 	}
-	return &CloudRunRuntime{config: cfg}, nil
+	if cfg.ProjectID == "" {
+		return nil, fmt.Errorf("cloudrun: ProjectID must be non-empty")
+	}
+	if cfg.Location == "" || len(strings.Split(cfg.Location, "-")) < 2 {
+		return nil, fmt.Errorf("cloudrun: Location must be a valid GCP region format (e.g., 'us-central1'), got %q", cfg.Location)
+	}
+
+	execConn := cloudrun.NewIAPExecConnector("") // IapTunnelUrlOverride can be handled later if added to config
+	return &CloudRunRuntime{config: cfg, exec: execConn}, nil
 }
 
 // NewCloudRunRuntimeFromInstances returns a new CloudRunRuntime from the
@@ -51,6 +98,10 @@ func (r *CloudRunRuntime) client(ctx context.Context) (*runapi.InstancesClient, 
 }
 
 func (r *CloudRunRuntime) Run(ctx context.Context, cfg RunConfig) (string, error) {
+	if cfg.WorkspaceBackendName == "nfs" && r.config.NFSServer == "" {
+		return "", fmt.Errorf("cloudrun: NFSServer must be non-empty when workspace backend is NFS")
+	}
+
 	c, err := r.client(ctx)
 	if err != nil {
 		return "", fmt.Errorf("failed to create client: %w", err)
@@ -68,13 +119,13 @@ func (r *CloudRunRuntime) Run(ctx context.Context, cfg RunConfig) (string, error
 	getReq := &runpb.GetInstanceRequest{
 		Name: fmt.Sprintf("%s/instances/%s", parent, instanceID),
 	}
-	_, err = c.GetInstance(ctx, getReq)
+	_, err = c.GetInstance(ctx, getReq, defaultCallOpts...)
 	if err == nil {
 		// Instance exists. Try to start it if it's stopped.
 		startReq := &runpb.StartInstanceRequest{
 			Name: getReq.Name,
 		}
-		op, err := c.StartInstance(ctx, startReq)
+		op, err := c.StartInstance(ctx, startReq, defaultCallOpts...)
 		if err != nil {
 			return "", fmt.Errorf("failed to start existing instance: %w", err)
 		}
@@ -260,7 +311,7 @@ func (r *CloudRunRuntime) Run(ctx context.Context, cfg RunConfig) (string, error
 		Instance:   inst,
 	}
 
-	op, err := c.CreateInstance(ctx, req)
+	op, err := c.CreateInstance(ctx, req, defaultCallOpts...)
 	if err != nil {
 		return "", fmt.Errorf("failed to create instance: %w", err)
 	}
@@ -284,7 +335,7 @@ func (r *CloudRunRuntime) Stop(ctx context.Context, id string) error {
 		Name: name,
 	}
 
-	op, err := c.StopInstance(ctx, req)
+	op, err := c.StopInstance(ctx, req, defaultCallOpts...)
 	if err != nil {
 		return fmt.Errorf("failed to stop instance: %w", err)
 	}
@@ -308,7 +359,7 @@ func (r *CloudRunRuntime) Delete(ctx context.Context, id string) error {
 		Name: name,
 	}
 
-	op, err := c.DeleteInstance(ctx, req)
+	op, err := c.DeleteInstance(ctx, req, defaultCallOpts...)
 	if err != nil {
 		return fmt.Errorf("failed to delete instance: %w", err)
 	}
@@ -332,7 +383,7 @@ func (r *CloudRunRuntime) List(ctx context.Context, labelFilter map[string]strin
 		Parent: parent,
 	}
 
-	it := c.ListInstances(ctx, req)
+	it := c.ListInstances(ctx, req, defaultCallOpts...)
 	var agents []api.AgentInfo
 	for {
 		inst, err := it.Next()
@@ -373,11 +424,25 @@ func (r *CloudRunRuntime) List(ctx context.Context, labelFilter map[string]strin
 }
 
 func (r *CloudRunRuntime) GetLogs(ctx context.Context, id string) (string, error) {
-	return "", fmt.Errorf("cloudrun: GetLogs not yet implemented in Phase 1")
-}
+	logClient, err := cloudrun.NewLogClient(ctx, r.config.ProjectID)
+	if err != nil {
+		return "", fmt.Errorf("initializing log client: %w", err)
+	}
+	defer logClient.Close()
 
-func (r *CloudRunRuntime) Attach(ctx context.Context, id string) error {
-	return fmt.Errorf("cloudrun: Attach not yet implemented in Phase 1")
+	entries, err := logClient.GetLogs(ctx, id, cloudrun.LogOptions{Lines: 100}) // default lines
+	if err != nil {
+		return "", fmt.Errorf("fetching logs: %w", err)
+	}
+
+	var sb strings.Builder
+	for _, entry := range entries {
+		sb.WriteString(entry.Message)
+		if !strings.HasSuffix(entry.Message, "\n") {
+			sb.WriteString("\n")
+		}
+	}
+	return sb.String(), nil
 }
 
 func (r *CloudRunRuntime) ImageExists(ctx context.Context, image string) (bool, error) {
@@ -401,9 +466,45 @@ func (r *CloudRunRuntime) Sync(ctx context.Context, id string, direction SyncDir
 }
 
 func (r *CloudRunRuntime) Exec(ctx context.Context, id string, cmd []string) (string, error) {
-	return "", fmt.Errorf("cloudrun: Exec not yet implemented in Phase 1")
+	out, err := r.exec.Exec(ctx, r.config.ProjectID, r.config.Location, id, cmd)
+	return string(out), err
+}
+
+func (r *CloudRunRuntime) Attach(ctx context.Context, id string) error {
+	return r.exec.Connect(ctx, r.config.ProjectID, r.config.Location, id)
 }
 
 func (r *CloudRunRuntime) GetWorkspacePath(ctx context.Context, id string) (string, error) {
 	return "", fmt.Errorf("cloudrun: GetWorkspacePath not yet implemented in Phase 1")
+}
+
+// StreamLogs tails log output in real time (for scion look / scion logs -f).
+func (r *CloudRunRuntime) StreamLogs(ctx context.Context, instanceName string, opts cloudrun.LogOptions) (<-chan cloudrun.LogEntry, error) {
+	logClient, err := cloudrun.NewLogClient(ctx, r.config.ProjectID)
+	if err != nil {
+		return nil, fmt.Errorf("initializing log client: %w", err)
+	}
+	// Note: We don't defer logClient.Close() here because it's streaming.
+	// The client might need to be closed later, or we can rely on GC/context cancellation.
+	
+	ch, err := logClient.StreamLogs(ctx, instanceName, opts)
+	if err != nil {
+		logClient.Close()
+		return nil, fmt.Errorf("streaming logs: %w", err)
+	}
+	
+	// Create a wrapper channel to close the client when context is done or channel is closed
+	outCh := make(chan cloudrun.LogEntry)
+	go func() {
+		defer logClient.Close()
+		defer close(outCh)
+		for entry := range ch {
+			select {
+			case outCh <- entry:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	return outCh, nil
 }
