@@ -86,7 +86,9 @@ golangci-lint:
 ## web: Build the web frontend
 web:
 	@echo "Building web frontend..."
+	@rm -rf web/dist
 	@cd web && npm install && npm run build
+	@mkdir -p web/dist/client && touch web/dist/client/.gitkeep
 	@echo "Web frontend built."
 
 ## container-sciontool: Cross-compile sciontool for Linux containers
@@ -149,7 +151,8 @@ ci-full: fmt-check web web-typecheck lint compat-literals golangci-lint test-fas
 ## clean: Remove build artifacts
 clean:
 	@echo "Cleaning..."
-	@rm -rf $(BUILD_DIR) .build
+	@rm -rf $(BUILD_DIR) .build web/dist
+	@mkdir -p web/dist/client && touch web/dist/client/.gitkeep
 	@rm -f $(BINARY)
 	@echo "Done."
 
