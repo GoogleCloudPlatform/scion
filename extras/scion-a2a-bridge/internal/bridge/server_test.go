@@ -218,8 +218,8 @@ func TestWellKnownAgentCard(t *testing.T) {
 	if caps["streaming"] != true {
 		t.Errorf("capabilities.streaming = %v, want true", caps["streaming"])
 	}
-	if caps["pushNotifications"] != true {
-		t.Errorf("capabilities.pushNotifications = %v, want true", caps["pushNotifications"])
+	if caps["pushNotifications"] != false {
+		t.Errorf("capabilities.pushNotifications = %v, want false", caps["pushNotifications"])
 	}
 }
 
@@ -255,8 +255,8 @@ func TestPerAgentCard(t *testing.T) {
 	if caps["streaming"] != true {
 		t.Errorf("capabilities.streaming = %v, want true", caps["streaming"])
 	}
-	if caps["pushNotifications"] != true {
-		t.Errorf("capabilities.pushNotifications = %v, want true", caps["pushNotifications"])
+	if caps["pushNotifications"] != false {
+		t.Errorf("capabilities.pushNotifications = %v, want false", caps["pushNotifications"])
 	}
 }
 
@@ -302,7 +302,7 @@ func TestAuthMiddleware(t *testing.T) {
 	}
 
 	// JSON-RPC without auth should be rejected.
-	rpcReq, _ := json.Marshal(jsonRPCRequest{JSONRPC: "2.0", ID: 1, Method: "tasks/get", Params: json.RawMessage(`{"id":"x"}`)})
+	rpcReq, _ := json.Marshal(jsonRPCRequest{JSONRPC: "2.0", ID: 1, Method: "GetTask", Params: json.RawMessage(`{"id":"x"}`)})
 	httpReq, _ := http.NewRequest(http.MethodPost, ts.URL+"/projects/test-grove/agents/test-agent/jsonrpc", bytes.NewReader(rpcReq))
 	httpReq.Header.Set("Content-Type", "application/json")
 
@@ -335,7 +335,7 @@ func TestGetTaskNotFound(t *testing.T) {
 
 	// The SDK handler will return TaskNotFound via its own error handling.
 	rpcResp := doRPC(t, ts, "/projects/test-grove/agents/test-agent/jsonrpc",
-		"tasks/get", map[string]interface{}{"id": "nonexistent-task"}, "test-api-key")
+		"GetTask", map[string]interface{}{"id": "nonexistent-task"}, "test-api-key")
 
 	if rpcResp.Error == nil {
 		t.Fatal("expected error for nonexistent task")
@@ -350,7 +350,7 @@ func TestUnknownMethod(t *testing.T) {
 	_, ts, _ := newTestServer(t)
 
 	rpcResp := doRPC(t, ts, "/projects/test-grove/agents/test-agent/jsonrpc",
-		"unknown/method", map[string]string{}, "test-api-key")
+		"unknown.method", map[string]string{}, "test-api-key")
 
 	if rpcResp.Error == nil {
 		t.Fatal("expected error for unknown method")
@@ -365,7 +365,7 @@ func TestCancelTaskNotFound(t *testing.T) {
 	_, ts, _ := newTestServer(t)
 
 	rpcResp := doRPC(t, ts, "/projects/test-grove/agents/test-agent/jsonrpc",
-		"tasks/cancel", map[string]string{"id": "nonexistent-task"}, "test-api-key")
+		"CancelTask", map[string]string{"id": "nonexistent-task"}, "test-api-key")
 
 	if rpcResp.Error == nil {
 		t.Fatal("expected error for cancel of nonexistent task")
@@ -379,7 +379,7 @@ func TestInvalidJSONRPC(t *testing.T) {
 	rpcReq, _ := json.Marshal(map[string]interface{}{
 		"jsonrpc": "1.0",
 		"id":      1,
-		"method":  "tasks/get",
+		"method":  "GetTask",
 		"params":  map[string]string{"id": "x"},
 	})
 	httpReq, _ := http.NewRequest(http.MethodPost, ts.URL+"/projects/test-grove/agents/test-agent/jsonrpc", bytes.NewReader(rpcReq))
@@ -430,9 +430,9 @@ func TestJSONRPCDeniesNonExposedAgent(t *testing.T) {
 	_, ts, _ := newTestServer(t)
 
 	methods := []string{
-		"message/send",
-		"tasks/get",
-		"tasks/cancel",
+		"SendMessage",
+		"GetTask",
+		"CancelTask",
 	}
 
 	for _, method := range methods {
@@ -474,7 +474,7 @@ func TestLegacyGrovePath(t *testing.T) {
 	}
 
 	// Test legacy JSON-RPC path (requires auth)
-	rpcReq, _ := json.Marshal(jsonRPCRequest{JSONRPC: "2.0", ID: 1, Method: "tasks/get", Params: json.RawMessage(`{"id":"x"}`)})
+	rpcReq, _ := json.Marshal(jsonRPCRequest{JSONRPC: "2.0", ID: 1, Method: "GetTask", Params: json.RawMessage(`{"id":"x"}`)})
 	httpReq, _ := http.NewRequest(http.MethodPost, ts.URL+"/groves/test-grove/agents/test-agent/jsonrpc", bytes.NewReader(rpcReq))
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("X-API-Key", "test-api-key")

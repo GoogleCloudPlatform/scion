@@ -345,11 +345,14 @@ func (b *Bridge) SendMessage(ctx context.Context, projectSlug, agentSlug, contex
 	aKey := agentKey(agentCtx.ProjectID, agentCtx.AgentSlug)
 	b.registerActiveTask(taskID, aKey)
 	responseCh := make(chan *messages.StructuredMessage, 1)
-	b.addWaiter(taskID, &waiter{
+	if !b.addWaiter(taskID, &waiter{
 		ch:        responseCh,
 		agentSlug: agentCtx.AgentSlug,
 		projectID: agentCtx.ProjectID,
-	})
+	}) {
+		b.unregisterActiveTask(taskID, aKey)
+		return nil, fmt.Errorf("concurrent request for task %s", taskID)
+	}
 	defer b.removeWaiter(taskID)
 	// Keep task registered in activeTasks — the agent's eventual state-change
 	// to completed/failed will close it via dispatchToActiveTask.
@@ -468,7 +471,10 @@ func (b *Bridge) sendFollowUp(ctx context.Context, projectSlug, agentSlug, taskI
 		aKey := agentKey(task.ProjectID, task.AgentSlug)
 		b.registerActiveTask(taskID, aKey)
 		responseCh := make(chan *messages.StructuredMessage, 1)
-		b.addWaiter(taskID, &waiter{ch: responseCh, agentSlug: task.AgentSlug, projectID: task.ProjectID})
+		if !b.addWaiter(taskID, &waiter{ch: responseCh, agentSlug: task.AgentSlug, projectID: task.ProjectID}) {
+			b.unregisterActiveTask(taskID, aKey)
+			return nil, fmt.Errorf("concurrent follow-up for task %s: another blocking request is already waiting", taskID)
+		}
 		defer b.removeWaiter(taskID)
 		defer b.unregisterActiveTask(taskID, aKey)
 
@@ -743,10 +749,17 @@ func (b *Bridge) dispatchBrokerMessage(topic string, msg *messages.StructuredMes
 			// Also check if the task is registered as active (SDK executor
 			// registers in activeTasks even without a store entry).
 			b.tasksMu.RLock()
-			_, isActive := b.activeTasks[taskID]
+			entry, isActive := b.activeTasks[taskID]
 			b.tasksMu.RUnlock()
 			if !isActive {
 				b.log.Debug("ignoring message for unknown task", "task_id", taskID)
+				return
+			}
+			// Verify the message sender's agent slug matches the active
+			// task's registered agent key (format "projectID:agentSlug").
+			if parts := strings.SplitN(entry.aKey, ":", 2); len(parts) == 2 && parts[1] != agentSlug {
+				b.log.Warn("dropping cross-agent message for SDK-managed task",
+					"task_agent", parts[1], "msg_agent", agentSlug, "task_id", taskID)
 				return
 			}
 			// Active but not in store — SDK-managed task, dispatch via active path.
@@ -1242,10 +1255,17 @@ func (b *Bridge) unregisterActiveTask(taskID, aKey string) {
 	}
 }
 
-func (b *Bridge) addWaiter(taskID string, w *waiter) {
+// addWaiter registers a blocking waiter for a task. Returns false if a waiter
+// is already registered (concurrent follow-ups to the same task), in which case
+// the caller should reject the request to prevent response mis-delivery.
+func (b *Bridge) addWaiter(taskID string, w *waiter) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if _, exists := b.waiters[taskID]; exists {
+		return false
+	}
 	b.waiters[taskID] = w
+	return true
 }
 
 func (b *Bridge) removeWaiter(taskID string) {

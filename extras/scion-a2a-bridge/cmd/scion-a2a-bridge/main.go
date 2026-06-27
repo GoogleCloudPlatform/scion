@@ -39,6 +39,7 @@ import (
 	"github.com/a2aproject/a2a-go/v2/a2asrv/taskstore"
 	"github.com/prometheus/client_golang/prometheus"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/keepalive"
 	"gopkg.in/yaml.v3"
 
 	"github.com/GoogleCloudPlatform/scion/extras/scion-a2a-bridge/internal/bridge"
@@ -184,12 +185,12 @@ func main() {
 		Addr:           listenAddr,
 		Handler:        srv.Handler(),
 		ReadTimeout:    30 * time.Second,
-		WriteTimeout:   30 * time.Second,
+		WriteTimeout:   0, // Disabled: SSE streams and long executor timeouts exceed any fixed deadline; per-write deadlines are managed by SSEWriteDeadlineMiddleware.
 		IdleTimeout:    120 * time.Second,
 		MaxHeaderBytes: 1 << 20,
 	}
 
-	errCh := make(chan error, 1)
+	errCh := make(chan error, 3) // capacity matches the 3 server goroutines (HTTP, gRPC, REST)
 	go func() {
 		log.Warn("A2A server starting WITHOUT TLS — ensure TLS is terminated at a reverse proxy (e.g. Caddy, nginx, cloud LB)", "address", listenAddr)
 		log.Info("A2A protocol server starting", "address", listenAddr)
@@ -226,6 +227,12 @@ func main() {
 		}
 
 		grpcServer = grpc.NewServer(
+			grpc.MaxRecvMsgSize(1<<20), // 1 MB, matching REST/JSON-RPC body limit
+			grpc.MaxConcurrentStreams(100),
+			grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{
+				MinTime:             30 * time.Second,
+				PermitWithoutStream: true,
+			}),
 			grpc.ChainUnaryInterceptor(
 				bridge.AuthUnaryInterceptor(cfg),
 				bridge.RouteInfoUnaryInterceptor(defaultRoute),
@@ -273,11 +280,13 @@ func main() {
 				"address", cfg.Bridge.RESTListenAddress)
 		}
 
-		restHandler := bridge.AuthHTTPMiddleware(cfg, bridge.RouteInfoMiddleware(defaultRoute,
-			bridge.SSEWriteDeadlineMiddleware(
-				a2asrv.NewRESTHandler(
-					sdkRequestHandler,
-					a2asrv.WithTransportKeepAlive(cfg.Timeouts.SSEKeepalive),
+		restHandler := bridge.AuthHTTPMiddleware(cfg, bridge.MaxBytesReaderMiddleware(1<<20,
+			bridge.RouteInfoMiddleware(defaultRoute,
+				bridge.SSEWriteDeadlineMiddleware(
+					a2asrv.NewRESTHandler(
+						sdkRequestHandler,
+						a2asrv.WithTransportKeepAlive(cfg.Timeouts.SSEKeepalive),
+					),
 				),
 			),
 		))
@@ -286,7 +295,7 @@ func main() {
 			Addr:           cfg.Bridge.RESTListenAddress,
 			Handler:        restHandler,
 			ReadTimeout:    30 * time.Second,
-			WriteTimeout:   30 * time.Second,
+			WriteTimeout:   0, // Disabled: SSE streams and long executor timeouts exceed any fixed deadline; per-write deadlines are managed by SSEWriteDeadlineMiddleware.
 			IdleTimeout:    120 * time.Second,
 			MaxHeaderBytes: 1 << 20,
 		}

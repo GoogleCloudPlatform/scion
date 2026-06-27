@@ -74,6 +74,8 @@ func (s *ScopedTaskStore) Create(ctx context.Context, task *a2a.Task) (taskstore
 }
 
 // Update verifies ownership before delegating to the inner store.
+// When a task reaches a terminal state, its ownership entry is removed to
+// prevent unbounded growth of the ownership map.
 func (s *ScopedTaskStore) Update(ctx context.Context, update *taskstore.UpdateRequest) (taskstore.TaskVersion, error) {
 	owner, ok := ownerKey(ctx)
 	if !ok {
@@ -88,7 +90,19 @@ func (s *ScopedTaskStore) Update(ctx context.Context, update *taskstore.UpdateRe
 		return taskstore.TaskVersionMissing, a2a.ErrTaskNotFound
 	}
 
-	return s.inner.Update(ctx, update)
+	version, err := s.inner.Update(ctx, update)
+	if err != nil {
+		return version, err
+	}
+
+	// Clean up ownership entry when the task reaches a terminal state.
+	if isSDKTerminalState(update.Task.Status.State) {
+		s.mu.Lock()
+		delete(s.ownership, update.Task.ID)
+		s.mu.Unlock()
+	}
+
+	return version, nil
 }
 
 // Get retrieves a task and verifies that the caller owns it.
@@ -115,6 +129,17 @@ func (s *ScopedTaskStore) Get(ctx context.Context, taskID a2a.TaskID) (*taskstor
 // an additional ownership check.
 func (s *ScopedTaskStore) List(ctx context.Context, req *a2a.ListTasksRequest) (*a2a.ListTasksResponse, error) {
 	return s.inner.List(ctx, req)
+}
+
+// isSDKTerminalState returns true if the SDK task state is terminal (completed,
+// failed, canceled, rejected). Used to clean up ownership entries.
+func isSDKTerminalState(state a2a.TaskState) bool {
+	switch state {
+	case a2a.TaskStateCompleted, a2a.TaskStateFailed, a2a.TaskStateCanceled, a2a.TaskStateRejected:
+		return true
+	default:
+		return false
+	}
 }
 
 // RouteKeyAuthenticator returns a taskstore.Authenticator that derives the

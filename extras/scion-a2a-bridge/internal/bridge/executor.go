@@ -32,6 +32,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
 )
 
 // routeKey is a context key for passing project/agent routing info to the executor.
@@ -148,13 +149,17 @@ func (e *ScionExecutor) Execute(ctx context.Context, execCtx *a2asrv.ExecutorCon
 		e.bridge.registerActiveTask(string(taskID), aKey)
 		defer e.bridge.unregisterActiveTask(string(taskID), aKey)
 
-		// Set up response channel.
+		// Set up response channel. Reject if a waiter already exists (concurrent
+		// request to the same task).
 		responseCh := make(chan *messages.StructuredMessage, 1)
-		e.bridge.addWaiter(string(taskID), &waiter{
+		if !e.bridge.addWaiter(string(taskID), &waiter{
 			ch:        responseCh,
 			agentSlug: agentCtx.AgentSlug,
 			projectID: agentCtx.ProjectID,
-		})
+		}) {
+			yield(nil, fmt.Errorf("concurrent request for task %s: %w", taskID, a2a.ErrInternalError))
+			return
+		}
 		defer e.bridge.removeWaiter(string(taskID))
 
 		// Send to Hub using the per-user or admin client.
@@ -284,32 +289,45 @@ func SSEWriteDeadlineMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// sseDeadlineWriter intercepts WriteHeader to clear the write deadline when
-// the response is an SSE stream (Content-Type: text/event-stream).
+// sseWriteDeadline is the rolling per-write deadline for SSE connections.
+// Each write resets the deadline, so an active stream stays alive while
+// a stalled one is reaped after this duration.
+const sseWriteDeadline = 60 * time.Second
+
+// sseDeadlineWriter intercepts WriteHeader and Write to apply a rolling
+// per-write deadline for SSE streams (Content-Type: text/event-stream).
+// Non-SSE responses are passed through unchanged.
 type sseDeadlineWriter struct {
 	http.ResponseWriter
-	cleared bool
+	isSSE   bool
+	checked bool
+}
+
+// detectSSE checks the Content-Type header once and caches the result.
+func (s *sseDeadlineWriter) detectSSE() {
+	if !s.checked {
+		ct := s.ResponseWriter.Header().Get("Content-Type")
+		s.isSSE = strings.HasPrefix(ct, "text/event-stream")
+		s.checked = true
+	}
+}
+
+// extendDeadline sets a rolling write deadline for SSE connections.
+func (s *sseDeadlineWriter) extendDeadline() {
+	s.detectSSE()
+	if s.isSSE {
+		rc := http.NewResponseController(s.ResponseWriter)
+		_ = rc.SetWriteDeadline(time.Now().Add(sseWriteDeadline))
+	}
 }
 
 func (s *sseDeadlineWriter) WriteHeader(code int) {
-	if !s.cleared {
-		if ct := s.ResponseWriter.Header().Get("Content-Type"); ct == "text/event-stream" {
-			rc := http.NewResponseController(s.ResponseWriter)
-			_ = rc.SetWriteDeadline(time.Time{}) // clear deadline for SSE
-		}
-		s.cleared = true
-	}
+	s.extendDeadline()
 	s.ResponseWriter.WriteHeader(code)
 }
 
 func (s *sseDeadlineWriter) Write(b []byte) (int, error) {
-	if !s.cleared {
-		if ct := s.ResponseWriter.Header().Get("Content-Type"); ct == "text/event-stream" {
-			rc := http.NewResponseController(s.ResponseWriter)
-			_ = rc.SetWriteDeadline(time.Time{}) // clear deadline for SSE
-		}
-		s.cleared = true
-	}
+	s.extendDeadline()
 	return s.ResponseWriter.Write(b)
 }
 
@@ -321,6 +339,16 @@ func (s *sseDeadlineWriter) Flush() {
 
 func (s *sseDeadlineWriter) Unwrap() http.ResponseWriter {
 	return s.ResponseWriter
+}
+
+// MaxBytesReaderMiddleware wraps an http.Handler to limit the request body size,
+// preventing memory exhaustion from oversized payloads. This mirrors the
+// MaxBytesReader applied in the JSON-RPC path (server.go handleJSONRPC).
+func MaxBytesReaderMiddleware(maxBytes int64, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
+		next.ServeHTTP(w, r)
+	})
 }
 
 // RouteInfoMiddleware wraps an http.Handler to inject a fixed RouteInfo into the
