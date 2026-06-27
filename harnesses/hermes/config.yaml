@@ -1,0 +1,85 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+harness: hermes
+image: scion-hermes:latest
+user: scion
+
+provisioner:
+  type: container-script
+  interface_version: 1
+  command: ["python3", "/home/scion/.scion/harness/provision.py"]
+  timeout: 30s
+  lifecycle_events:
+    - pre-start
+  required_image_tools:
+    - python3
+
+config_dir: .hermes
+skills_dir: .hermes/skills
+interrupt_key: C-c
+instructions_file: AGENTS.md
+system_prompt_mode: prepend_to_instructions
+
+model_aliases:
+  small: google/gemini-3.5-flash
+  medium: anthropic/claude-sonnet-4
+  large: anthropic/claude-opus-4
+
+command:
+  base: ["hermes", "chat", "--yolo"]
+  task_flag: "-q"
+  resume_flag: "-c"
+  task_position: after_base_args
+
+capabilities:
+  limits:
+    max_turns: { support: "yes" }
+    max_model_calls: { support: "no", reason: "Hermes does not expose per-model-call hooks" }
+    max_duration: { support: "yes" }
+  telemetry:
+    enabled: { support: "no", reason: "Hermes has Langfuse integration but no native OTEL" }
+    native_emitter: { support: "no" }
+  prompts:
+    system_prompt: { support: "partial", reason: "System prompt is downgraded into AGENTS.md" }
+    agent_instructions: { support: "yes" }
+  auth:
+    api_key: { support: "yes" }
+    auth_file: { support: "no" }
+    oauth_token: { support: "no" }
+    vertex_ai: { support: "no", reason: "Hermes gemini provider uses Google AI Studio API keys, not Vertex AI ADC" }
+  mcp:
+    stdio: { support: "yes" }
+    sse: { support: "yes" }
+    streamable_http: { support: "yes" }
+    project_scope: { support: "no", reason: "Not yet implemented" }
+
+no_auth:
+  behavior: drop-to-shell
+  message: |
+    This agent started without credentials.
+    Run: hermes setup
+    Then run: python3 /home/scion/.scion/harness/capture_auth.py
+
+auth:
+  default_type: api-key
+  types:
+    api-key:
+      required_env:
+        - any_of: ["GOOGLE_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"]
+  autodetect:
+    env:
+      GOOGLE_API_KEY: api-key
+      OPENAI_API_KEY: api-key
+      ANTHROPIC_API_KEY: api-key
