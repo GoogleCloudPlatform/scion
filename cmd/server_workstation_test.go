@@ -46,6 +46,7 @@ func resetServerFlags() {
 	storageDir = ""
 	serverConfigPath = ""
 	dbURL = ""
+	webSessionSecret = ""
 }
 
 func TestWorkstationModeDefaults(t *testing.T) {

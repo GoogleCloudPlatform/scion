@@ -138,6 +138,10 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("no server components enabled; use --enable-hub, --enable-runtime-broker, or --enable-web")
 	}
 
+	if err := validateHostedHAPreflight(cfg); err != nil {
+		return err
+	}
+
 	// 6. Check ports
 	if err := checkServerPorts(cfg); err != nil {
 		return err
@@ -294,7 +298,10 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 
 		if !enableWeb {
 			// Hub runs its own HTTP server (standalone mode).
-			eventPub := newEventPublisher(ctx, cfg, hubDBRec)
+			eventPub, err := newEventPublisher(ctx, cfg, hubDBRec)
+			if err != nil {
+				return err
+			}
 			hubSrv.SetEventPublisher(eventPub)
 
 			log.Printf("Starting Hub API server on %s:%d", cfg.Hub.Host, cfg.Hub.Port)
@@ -322,7 +329,10 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	// 12. Start Web
 	var webSrv *hub.WebServer
 	if enableWeb {
-		webSrv = initWebServer(ctx, cfg, hubSrv, devAuthToken, adminEmailList, adminMode, maintenanceMessage, requestLogger, hubDBRec)
+		webSrv, err = initWebServer(ctx, cfg, hubSrv, devAuthToken, adminEmailList, adminMode, maintenanceMessage, requestLogger, hubDBRec)
+		if err != nil {
+			return err
+		}
 
 		// In combined mode, start Hub background services now that the
 		// ChannelEventPublisher has been wired by initWebServer.
@@ -684,6 +694,79 @@ func loadAndReconcileConfig(cmd *cobra.Command) (*config.GlobalConfig, error) {
 	}
 
 	return cfg, nil
+}
+
+func hostedHAGuardsRequired(cfg *config.GlobalConfig) bool {
+	return hostedMode && enableHub && cfg != nil
+}
+
+func validateHostedHAPreflight(cfg *config.GlobalConfig) error {
+	if !hostedHAGuardsRequired(cfg) {
+		return nil
+	}
+
+	if !strings.EqualFold(cfg.Database.Driver, "postgres") {
+		return fmt.Errorf("hosted production HA requires server.database.driver=postgres; got %q", cfg.Database.Driver)
+	}
+	if strings.TrimSpace(cfg.Database.URL) == "" {
+		return fmt.Errorf("hosted production HA requires server.database.url for Postgres")
+	}
+
+	if !strings.EqualFold(cfg.Storage.Provider, "gcs") || strings.TrimSpace(cfg.Storage.Bucket) == "" {
+		return fmt.Errorf("hosted production HA requires server.storage.provider=gcs and server.storage.bucket; local storage is not HA-safe")
+	}
+
+	if strings.TrimSpace(resolveSessionSecret()) == "" {
+		return fmt.Errorf("hosted production HA requires a durable session/signing secret; set --session-secret or SCION_SERVER_SESSION_SECRET")
+	}
+
+	if cfg.Auth.Mode != "proxy" {
+		return fmt.Errorf("hosted production HA requires server.auth.mode=proxy for Cloud Run IAP; got %q", cfg.Auth.Mode)
+	}
+	if cfg.Auth.Proxy == nil || cfg.Auth.Proxy.Provider != "iap" {
+		provider := ""
+		if cfg.Auth.Proxy != nil {
+			provider = cfg.Auth.Proxy.Provider
+		}
+		return fmt.Errorf("hosted production HA requires server.auth.proxy.provider=iap; got %q", provider)
+	}
+	if cfg.Auth.Proxy.IAP == nil || strings.TrimSpace(cfg.Auth.Proxy.IAP.Audience) == "" {
+		return fmt.Errorf("hosted production HA requires server.auth.proxy.iap.audience")
+	}
+	proxyAudience := strings.TrimSpace(cfg.Auth.Proxy.IAP.Audience)
+	if !isCloudRunIAPAudience(proxyAudience) {
+		return fmt.Errorf("hosted production HA requires a Cloud Run native IAP audience (/projects/<number>/locations/<region>/services/<service>); got %q", proxyAudience)
+	}
+
+	if cfg.Auth.Transport == nil {
+		return fmt.Errorf("hosted production HA requires server.auth.transport; do not use server.transport")
+	}
+	if cfg.Auth.Transport.Mode != "iap" {
+		return fmt.Errorf("hosted production HA requires server.auth.transport.mode=iap; got %q", cfg.Auth.Transport.Mode)
+	}
+	transportAudience := strings.TrimSpace(cfg.Auth.Transport.OIDCAudience)
+	if transportAudience == "" {
+		return fmt.Errorf("hosted production HA requires server.auth.transport.oidc_audience")
+	}
+	if transportAudience != proxyAudience {
+		return fmt.Errorf("hosted production HA requires server.auth.transport.oidc_audience to match server.auth.proxy.iap.audience")
+	}
+	if strings.TrimSpace(cfg.Auth.Transport.PlatformAuthSA) == "" {
+		return fmt.Errorf("hosted production HA requires server.auth.transport.platform_auth_sa")
+	}
+
+	return nil
+}
+
+func isCloudRunIAPAudience(audience string) bool {
+	parts := strings.Split(strings.TrimSpace(audience), "/")
+	if len(parts) != 7 {
+		return false
+	}
+	return parts[0] == "" &&
+		parts[1] == "projects" && parts[2] != "" &&
+		parts[3] == "locations" && parts[4] != "" &&
+		parts[5] == "services" && parts[6] != ""
 }
 
 // checkServerPorts checks that required server ports are available.
@@ -1124,7 +1207,9 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 	// can create its proxy with the ChannelEventPublisher.
 
 	// Initialize storage
-	initHubStorage(ctx, hubSrv, cfg, globalDir)
+	if err := initHubStorage(ctx, hubSrv, cfg, globalDir); err != nil {
+		return nil, err
+	}
 
 	// Hub ID was already resolved and set during initHubServer via ServerConfig.HubID
 	hubID := hubSrv.HubID()
@@ -1187,7 +1272,7 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 }
 
 // initHubStorage initializes the storage backend for the Hub server.
-func initHubStorage(ctx context.Context, hubSrv *hub.Server, cfg *config.GlobalConfig, globalDir string) {
+func initHubStorage(ctx context.Context, hubSrv *hub.Server, cfg *config.GlobalConfig, globalDir string) error {
 	if storageBucket != "" {
 		log.Printf("Initializing GCS storage with bucket: %s", storageBucket)
 		storageCfg := storage.Config{
@@ -1196,8 +1281,11 @@ func initHubStorage(ctx context.Context, hubSrv *hub.Server, cfg *config.GlobalC
 		}
 		stor, err := storage.New(ctx, storageCfg)
 		if err != nil {
+			if hostedHAGuardsRequired(cfg) {
+				return fmt.Errorf("failed to initialize required GCS storage: %w", err)
+			}
 			log.Printf("Warning: failed to initialize GCS storage: %v", err)
-			return
+			return nil
 		}
 		hubSrv.SetStorage(stor)
 		log.Printf("GCS storage configured: gs://%s", storageBucket)
@@ -1210,7 +1298,7 @@ func initHubStorage(ctx context.Context, hubSrv *hub.Server, cfg *config.GlobalC
 		stor, err := storage.New(ctx, storageCfg)
 		if err != nil {
 			log.Printf("Warning: failed to initialize local storage: %v", err)
-			return
+			return nil
 		}
 		hubSrv.SetStorage(stor)
 		log.Printf("Local storage configured: %s", storageDir)
@@ -1226,32 +1314,35 @@ func initHubStorage(ctx context.Context, hubSrv *hub.Server, cfg *config.GlobalC
 		stor, err := storage.New(ctx, storageCfg)
 		if err != nil {
 			log.Printf("Warning: failed to initialize local storage fallback: %v", err)
-			return
+			return nil
 		}
 		hubSrv.SetStorage(stor)
 	}
+	return nil
 }
 
 // newEventPublisher selects the event publisher backend based on the configured
 // database driver. With Postgres it returns a PostgresEventPublisher
 // (cross-replica LISTEN/NOTIFY); otherwise it returns the in-process
-// ChannelEventPublisher. If the Postgres publisher cannot be started it falls
-// back to the in-process publisher so a single instance still functions, logging
-// a prominent warning since cross-replica SSE delivery will be unavailable.
-func newEventPublisher(ctx context.Context, cfg *config.GlobalConfig, dbRec dbmetrics.Recorder) hub.EventPublisher {
+// ChannelEventPublisher. If the Postgres publisher cannot be started in hosted
+// HA mode startup fails closed because in-process events cannot cross replicas.
+func newEventPublisher(ctx context.Context, cfg *config.GlobalConfig, dbRec dbmetrics.Recorder) (hub.EventPublisher, error) {
 	if strings.EqualFold(cfg.Database.Driver, "postgres") {
 		if dbRec == nil {
 			dbRec = dbmetrics.NewDisabled()
 		}
 		pub, err := hub.NewPostgresEventPublisher(ctx, cfg.Database.URL, dbRec, logging.Subsystem("hub.events"))
 		if err != nil {
+			if hostedHAGuardsRequired(cfg) {
+				return nil, fmt.Errorf("failed to start required Postgres event publisher: %w", err)
+			}
 			log.Printf("WARNING: failed to start Postgres event publisher (%v); falling back to in-process events. Cross-replica SSE will not work.", err)
-			return hub.NewChannelEventPublisher()
+			return hub.NewChannelEventPublisher(), nil
 		}
 		log.Printf("Using Postgres LISTEN/NOTIFY event publisher")
-		return pub
+		return pub, nil
 	}
-	return hub.NewChannelEventPublisher()
+	return hub.NewChannelEventPublisher(), nil
 }
 
 // newCommandBus selects the command bus backend. With Postgres it returns a
@@ -1280,7 +1371,7 @@ func newCommandBus(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Se
 // initWebServer creates and configures the Web server. The provided context is
 // threaded to the event publisher so that the Postgres LISTEN/NOTIFY goroutine
 // is cancelled cleanly on shutdown, preventing connection leaks.
-func initWebServer(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Server, devAuthToken string, adminEmailList []string, adminMode bool, maintenanceMessage string, requestLogger *slog.Logger, dbRec dbmetrics.Recorder) *hub.WebServer {
+func initWebServer(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Server, devAuthToken string, adminEmailList []string, adminMode bool, maintenanceMessage string, requestLogger *slog.Logger, dbRec dbmetrics.Recorder) (*hub.WebServer, error) {
 	webHost := cfg.Hub.Host
 	if webHost == "" {
 		webHost = "0.0.0.0"
@@ -1336,7 +1427,10 @@ func initWebServer(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Se
 	webSrv.SetRequestLogger(requestLogger)
 
 	// Create shared event publisher for real-time SSE
-	eventPub := newEventPublisher(ctx, cfg, dbRec)
+	eventPub, err := newEventPublisher(ctx, cfg, dbRec)
+	if err != nil {
+		return nil, err
+	}
 	webSrv.SetEventPublisher(eventPub)
 
 	// Wire Hub services into WebServer if Hub is enabled
@@ -1354,7 +1448,7 @@ func initWebServer(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Se
 		})
 	}
 
-	return webSrv
+	return webSrv, nil
 }
 
 // startRuntimeBroker initializes and starts the runtime broker server.
