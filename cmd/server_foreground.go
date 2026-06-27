@@ -1361,6 +1361,7 @@ func initWebServer(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Se
 func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.GlobalConfig, hubSrv *hub.Server, webSrv *hub.WebServer, s store.Store, hubEndpoint, devAuthToken string, brokerSettings *config.Settings, globalDir string, requestLogger, messageLogger *slog.Logger, wg *sync.WaitGroup, errCh chan error) error {
 	rt := runtime.GetRuntime("", "")
 	log.Printf("Runtime broker using runtime: %s", rt.Name())
+	statelessCloudRunBroker := enableHub && !simulateRemoteBroker && rt != nil && rt.Name() == "cloudrun"
 
 	mgr := agent.NewManager(rt)
 	settings := brokerSettings
@@ -1373,7 +1374,11 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 	}
 
 	// Resolve broker ID
-	brokerID := resolveBrokerID(cfg, settings, vsBroker, globalDir)
+	defaultBrokerID := ""
+	if statelessCloudRunBroker {
+		defaultBrokerID = deriveCloudRunLogicalBrokerID(versionedSettings, rt)
+	}
+	brokerID := resolveBrokerID(cfg, settings, vsBroker, globalDir, defaultBrokerID)
 
 	// Resolve broker name
 	brokerName := resolveBrokerName(cfg, settings, vsBroker)
@@ -1415,7 +1420,11 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 				}
 			}
 			log.Printf("Registered global project with runtime broker %s (endpoint: %s, autoProvide: %v)", brokerName, rhEndpoint, serverAutoProvide)
-			hubSrv.SetEmbeddedBrokerID(brokerID)
+			if statelessCloudRunBroker {
+				hubSrv.SetStatelessEmbeddedBrokerID(brokerID)
+			} else {
+				hubSrv.SetEmbeddedBrokerID(brokerID)
+			}
 		}
 
 		// Generate credentials for co-located mode
@@ -1528,8 +1537,8 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 		TemplateCacheDir:     templateCacheDir,
 		TemplateCacheMaxSize: templateCacheMax,
 
-		ControlChannelEnabled: hubEndpointForRH != "",
-		HeartbeatEnabled:      hubEndpointForRH != "",
+		ControlChannelEnabled: hubEndpointForRH != "" && !statelessCloudRunBroker,
+		HeartbeatEnabled:      hubEndpointForRH != "" && !statelessCloudRunBroker,
 
 		InMemoryCredentials:  inMemoryCreds,
 		BrokerAuthEnabled:    true,
@@ -1679,16 +1688,22 @@ func initPluginManager() *scionplugin.Manager {
 	return mgr
 }
 
+var cloudRunLogicalBrokerNamespace = uuid.MustParse("c10f7a0a-6f03-5f9f-8d52-1d98b0fdb001")
+
 // resolveBrokerID determines the broker ID from various sources.
-func resolveBrokerID(cfg *config.GlobalConfig, settings *config.Settings, vsBroker *config.V1BrokerConfig, globalDir string) string {
+func resolveBrokerID(cfg *config.GlobalConfig, settings *config.Settings, vsBroker *config.V1BrokerConfig, globalDir, defaultBrokerID string) string {
 	var brokerID string
 	if vsBroker != nil && vsBroker.BrokerID != "" {
 		brokerID = vsBroker.BrokerID
-	} else {
+	} else if settings != nil && settings.Hub != nil {
 		brokerID = settings.Hub.BrokerID
 	}
 	if brokerID == "" {
 		brokerID = cfg.RuntimeBroker.BrokerID
+	}
+	if brokerID == "" && defaultBrokerID != "" {
+		log.Printf("Using deterministic logical broker ID: %s", defaultBrokerID)
+		return defaultBrokerID
 	}
 	if brokerID == "" {
 		brokerID = api.NewUUID()
@@ -1699,6 +1714,23 @@ func resolveBrokerID(cfg *config.GlobalConfig, settings *config.Settings, vsBrok
 		}
 	}
 	return brokerID
+}
+
+func deriveCloudRunLogicalBrokerID(settings *config.VersionedSettings, rt runtime.Runtime) string {
+	if settings == nil || rt == nil || rt.Name() != "cloudrun" {
+		return ""
+	}
+	rtConfig, runtimeType, err := settings.ResolveRuntime("")
+	if err != nil || runtimeType != "cloudrun" || rtConfig.CloudRun == nil {
+		return ""
+	}
+	projectID := strings.TrimSpace(rtConfig.CloudRun.Project)
+	location := strings.TrimSpace(rtConfig.CloudRun.Region)
+	if projectID == "" || location == "" {
+		return ""
+	}
+	seed := fmt.Sprintf("cloudrun:%s:%s", projectID, location)
+	return uuid.NewSHA1(cloudRunLogicalBrokerNamespace, []byte(seed)).String()
 }
 
 // resolveBrokerName determines the broker name from various sources.

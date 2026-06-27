@@ -478,6 +478,10 @@ type HybridBrokerClient struct {
 	controlChannel *ControlChannelBrokerClient
 	httpClient     RuntimeBrokerClient
 	debug          bool
+	// statelessLocalBrokers identifies co-located broker identities that are
+	// safe to serve from any replica through the local broker HTTP endpoint.
+	// Store affinity for these IDs is replica health, not lifecycle ownership.
+	statelessLocalBrokers map[string]struct{}
 	// affinity returns the believed owning hub instanceID for a broker and
 	// whether that owner is alive (last_heartbeat fresh). It is a routing HINT
 	// only (correctness comes from durable intent + drain); injected so route()
@@ -496,6 +500,9 @@ func NewHybridBrokerClient(manager *ControlChannelManager, httpClient RuntimeBro
 
 // useControlChannel returns true if we should use control channel for this broker.
 func (c *HybridBrokerClient) useControlChannel(brokerID string) bool {
+	if c.isStatelessLocalBroker(brokerID) {
+		return false
+	}
 	return c.controlChannel.manager.IsConnected(brokerID)
 }
 

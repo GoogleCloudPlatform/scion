@@ -582,15 +582,18 @@ type Server struct {
 	// Phase 3/4 supply the real local-tunnel ops; tests override for exactly-once.
 	execDispatch     func(ctx context.Context, d store.BrokerDispatch) (string, error)
 	deliverMsg       func(ctx context.Context, m *store.Message) error
-	maintenance      *MaintenanceState  // Runtime maintenance mode state
-	hubID            string             // Unique hub instance ID for secret namespacing
-	instanceID       string             // Unique per-process ID (uuid); affinity key for broker dispatch
-	embeddedBrokerID string             // Broker ID when running in hub+broker combo mode
-	workstation      bool               // True when running in workstation (non-production) mode
-	scheduler        *Scheduler         // Unified scheduler for recurring tasks
-	cleanupOnce      sync.Once          // Ensures CleanupResources runs only once
-	ctx              context.Context    // Server-lifetime context; cancelled on Shutdown
-	ctxCancel        context.CancelFunc // Cancels ctx
+	maintenance      *MaintenanceState // Runtime maintenance mode state
+	hubID            string            // Unique hub instance ID for secret namespacing
+	instanceID       string            // Unique per-process ID (uuid); affinity key for broker dispatch
+	embeddedBrokerID string            // Broker ID when running in hub+broker combo mode
+	// statelessEmbeddedBroker is true when the embedded broker identity is a
+	// replica-independent API adapter rather than a process-owned control channel.
+	statelessEmbeddedBroker bool
+	workstation             bool               // True when running in workstation (non-production) mode
+	scheduler               *Scheduler         // Unified scheduler for recurring tasks
+	cleanupOnce             sync.Once          // Ensures CleanupResources runs only once
+	ctx                     context.Context    // Server-lifetime context; cancelled on Shutdown
+	ctxCancel               context.CancelFunc // Cancels ctx
 
 	logQueryService  *LogQueryService         // Cloud Logging query service (nil = disabled)
 	metricsDashboard *MetricsDashboardService // Cloud Monitoring metrics dashboard (nil = disabled)
@@ -1340,10 +1343,29 @@ func (s *Server) SetEmbeddedBrokerID(id string) {
 	s.embeddedBrokerID = id
 }
 
+// SetStatelessEmbeddedBrokerID records a co-located broker whose runtime
+// lifecycle operations are safe from any hub replica.
+func (s *Server) SetStatelessEmbeddedBrokerID(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.embeddedBrokerID = id
+	s.statelessEmbeddedBroker = id != ""
+}
+
 // GetEmbeddedBrokerID returns the co-located broker ID, if any.
 func (s *Server) GetEmbeddedBrokerID() string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	return s.embeddedBrokerID
+}
+
+// GetStatelessEmbeddedBrokerID returns the embedded stateless broker ID, if any.
+func (s *Server) GetStatelessEmbeddedBrokerID() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if !s.statelessEmbeddedBroker {
+		return ""
+	}
 	return s.embeddedBrokerID
 }
 
@@ -1701,6 +1723,9 @@ func (s *Server) CreateAuthenticatedDispatcher() *HTTPAgentDispatcher {
 	if s.controlChannel != nil {
 		hbc := NewHybridBrokerClient(s.controlChannel, httpClient, &hmacBrokerSigner{store: s.store}, s.config.Debug)
 		hbc.SetAffinityLookup(StoreAffinityLookup(s.store, 0))
+		if statelessBrokerID := s.GetStatelessEmbeddedBrokerID(); statelessBrokerID != "" {
+			hbc.SetStatelessLocalBrokers([]string{statelessBrokerID})
+		}
 		client = hbc
 	} else {
 		client = httpClient

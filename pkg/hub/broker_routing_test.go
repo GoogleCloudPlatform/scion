@@ -34,6 +34,9 @@ import (
 // fallback path. Other methods are stubs.
 type fakeHTTPClient struct {
 	messageAgentCalled bool
+	startAgentCalled   bool
+	stopAgentCalled    bool
+	deleteAgentCalled  bool
 }
 
 func (f *fakeHTTPClient) MessageAgent(context.Context, string, string, string, string, string, bool, *messages.StructuredMessage) error {
@@ -46,9 +49,11 @@ func (f *fakeHTTPClient) CreateAgent(context.Context, string, string, *RemoteCre
 	return nil, nil
 }
 func (f *fakeHTTPClient) StartAgent(context.Context, string, string, string, string, string, string, string, string, map[string]string, []ResolvedSecret, *api.ScionConfig, []api.SharedDir, bool, bool) (*RemoteAgentResponse, error) {
+	f.startAgentCalled = true
 	return nil, nil
 }
 func (f *fakeHTTPClient) StopAgent(context.Context, string, string, string, string) error {
+	f.stopAgentCalled = true
 	return nil
 }
 func (f *fakeHTTPClient) RestartAgent(context.Context, string, string, string, string, map[string]string) error {
@@ -58,6 +63,7 @@ func (f *fakeHTTPClient) ResetAuthAgent(context.Context, string, string, string,
 	return nil
 }
 func (f *fakeHTTPClient) DeleteAgent(context.Context, string, string, string, string, bool, bool, bool, time.Time) error {
+	f.deleteAgentCalled = true
 	return nil
 }
 func (f *fakeHTTPClient) CheckAgentPrompt(context.Context, string, string, string, string) (bool, error) {
@@ -124,6 +130,46 @@ func TestHybridBrokerClient_Route_NilAffinityIsSafe(t *testing.T) {
 	// No affinity lookup set: a non-local broker with no endpoint is undeliverable.
 	assert.Equal(t, routeUndeliverable, c.route(context.Background(), "b-none", ""))
 	assert.Equal(t, routeHTTP, c.route(context.Background(), "b-ep", "http://x"))
+}
+
+func TestHybridBrokerClient_Route_StatelessBrokerIgnoresAffinity(t *testing.T) {
+	ctx := context.Background()
+	const brokerID = "cloudrun-logical-broker"
+
+	mgr := NewControlChannelManager(DefaultControlChannelConfig(), slog.Default())
+	mgr.mu.Lock()
+	mgr.connections[brokerID] = &BrokerConnection{brokerID: brokerID, sessionID: "s1"}
+	mgr.mu.Unlock()
+
+	c := NewHybridBrokerClient(mgr, nil, nil, false)
+	c.SetStatelessLocalBrokers([]string{brokerID})
+	c.SetAffinityLookup(func(context.Context, string) (string, bool) { return "other-replica", true })
+
+	assert.Equal(t, routeHTTP, c.route(ctx, brokerID, "http://localhost:9800"))
+	assert.Equal(t, routeUndeliverable, c.route(ctx, brokerID, ""))
+}
+
+func TestHybridBrokerClient_StatelessBrokerLifecycleUsesHTTP(t *testing.T) {
+	ctx := context.Background()
+	const brokerID = "cloudrun-logical-broker"
+
+	mgr := NewControlChannelManager(DefaultControlChannelConfig(), slog.Default())
+	httpClient := &fakeHTTPClient{}
+	c := NewHybridBrokerClient(mgr, httpClient, nil, false)
+	c.SetStatelessLocalBrokers([]string{brokerID})
+	c.SetAffinityLookup(func(context.Context, string) (string, bool) { return "other-replica", true })
+
+	_, err := c.StartAgent(ctx, brokerID, "http://localhost:9800", "agent-1", "project-1", "", "", "", "", nil, nil, nil, nil, false, false)
+	assert.NoError(t, err)
+	assert.True(t, httpClient.startAgentCalled)
+
+	err = c.StopAgent(ctx, brokerID, "http://localhost:9800", "agent-1", "project-1")
+	assert.NoError(t, err)
+	assert.True(t, httpClient.stopAgentCalled)
+
+	err = c.DeleteAgent(ctx, brokerID, "http://localhost:9800", "agent-1", "project-1", false, false, false, time.Time{})
+	assert.NoError(t, err)
+	assert.True(t, httpClient.deleteAgentCalled)
 }
 
 func TestHybridBrokerClient_MessageAgent_RouteGate(t *testing.T) {

@@ -76,12 +76,17 @@ func (d routeDecision) String() string {
 // reaper (B5-1) clears dead owners.
 const defaultAffinityFreshness = 90 * time.Second
 
-// route decides how to deliver a dispatch for brokerID. The local fast path is
-// checked first and unchanged; affinity is consulted only to choose between
-// forwarding (durable intent + signal) and fast-failing (design §5.3). The
-// affinity lookup is a hint — a wrong "alive" costs one timeout (intent stays
-// durable and reconciles later); a wrong "dead" is reaped by §7.1.
+// route decides how to deliver a dispatch for brokerID. Stateless local broker
+// identities represent a shared, replica-independent runtime capability and are
+// always routed through this replica's local broker HTTP endpoint when present.
+// Stateful brokers keep the existing control-channel and affinity behavior.
 func (c *HybridBrokerClient) route(ctx context.Context, brokerID, brokerEndpoint string) routeDecision {
+	if c.isStatelessLocalBroker(brokerID) {
+		if brokerEndpoint != "" {
+			return routeHTTP
+		}
+		return routeUndeliverable
+	}
 	if c.controlChannel.manager.IsConnected(brokerID) {
 		return routeLocal
 	}
@@ -104,6 +109,30 @@ func (c *HybridBrokerClient) route(ctx context.Context, brokerID, brokerEndpoint
 // server to a store-backed lookup (StoreAffinityLookup).
 func (c *HybridBrokerClient) SetAffinityLookup(fn func(ctx context.Context, brokerID string) (owner string, alive bool)) {
 	c.affinity = fn
+}
+
+// SetStatelessLocalBrokers marks co-located broker IDs whose runtime operations
+// are replica-independent. Remote/stateful brokers must not be listed here.
+func (c *HybridBrokerClient) SetStatelessLocalBrokers(ids []string) {
+	if len(ids) == 0 {
+		c.statelessLocalBrokers = nil
+		return
+	}
+	c.statelessLocalBrokers = make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		if id == "" {
+			continue
+		}
+		c.statelessLocalBrokers[id] = struct{}{}
+	}
+}
+
+func (c *HybridBrokerClient) isStatelessLocalBroker(brokerID string) bool {
+	if c == nil || brokerID == "" || len(c.statelessLocalBrokers) == 0 {
+		return false
+	}
+	_, ok := c.statelessLocalBrokers[brokerID]
+	return ok
 }
 
 const (
