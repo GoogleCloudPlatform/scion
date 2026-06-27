@@ -616,6 +616,17 @@ export class ScionPageProjectCreate extends LitElement {
 
         <div>
           <div class="form-field">
+            <label for="name">Name</label>
+            <sl-input
+              id="name"
+              placeholder="my-project"
+              .value=${this.name}
+              @sl-input=${(e: Event) => this.onNameInput(e)}
+              required
+            ></sl-input>
+          </div>
+
+          <div class="form-field">
             <label for="mode">Workspace Type</label>
             <sl-select
               id="mode"
@@ -794,17 +805,6 @@ export class ScionPageProjectCreate extends LitElement {
                     : nothing}
               `
             : nothing}
-
-          <div class="form-field">
-            <label for="name">Name</label>
-            <sl-input
-              id="name"
-              placeholder="my-project"
-              .value=${this.name}
-              @sl-input=${(e: Event) => this.onNameInput(e)}
-              required
-            ></sl-input>
-          </div>
 
           <div class="form-field">
             <label for="slug">Slug</label>
