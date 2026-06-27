@@ -1,114 +1,151 @@
-# Scion Hub — Cloud Run Deployment
+# Scion Hub Cloud Run HA Deployment
 
-Deploys the Scion hub as a single Cloud Run instance with IAP authentication
-and a co-located GKE broker targeting `scion-demo-cluster`.
+This directory deploys the production Cloud Run shape described in
+`.design/hub-cloudrun-deployment.md`: a horizontally scalable Hub/Web service
+with a co-located stateless Runtime Broker, protected by Cloud Run native IAP.
+
+The production path uses Cloud SQL Postgres and GCS from the start. SQLite,
+local filesystem storage, and GKE broker targeting are demo or alternate-runtime
+material and are not configured by `deploy.sh`.
 
 ## Architecture
 
-```
-User → Cloud Run (built-in IAP) → Hub container
-┌──────────────────────────┐
-│  scion server (combo)    │
-│  ├─ Hub API   :8080      │
-│  ├─ Web UI    :8080      │
-│  └─ Broker    :9810      │──▶ GKE Autopilot (scion-demo-cluster)
-│     SQLite: /tmp/scion.db│       namespace: scion-agents
-└──────────────────────────┘
+```text
+User / agent / CLI
+  -> Cloud Run native IAP
+  -> scion server --enable-hub --enable-web --enable-runtime-broker
+  -> Cloud SQL Postgres, GCS, Cloud Run Instances, Filestore
 ```
 
-- **IAP-protected** — Cloud Run's native IAP integration secures all ingress
-  paths (including the default `*.run.app` URL). No load balancer required.
-- **Authenticated HTTPS only** (`--no-allow-unauthenticated`)
-- **SQLite (ephemeral)** — lost on instance restart, acceptable for demo
-- **GKE auth via ADC** — Cloud Run service account → Workload Identity → GKE
+Key properties:
+
+- Cloud Run native IAP is enabled directly on the service.
+- The IAP audience is `/projects/<PROJECT_NUMBER>/locations/<REGION>/services/<SERVICE_NAME>`.
+- Hub state and realtime events use Postgres, not SQLite.
+- Template/workspace artifacts use GCS, not instance-local storage.
+- One logical broker identity (`server.broker.broker_id`) is shared by all Cloud Run replicas.
+- The default runtime is Cloud Run Instances (`runtimes.cloudrun.type: cloudrun`).
 
 ## Prerequisites
 
-- `gcloud` CLI, authenticated with project `deploy-demo-test`
-- `docker` CLI, authenticated to Artifact Registry
-- `kubectl` with access to `scion-demo-cluster` (for namespace creation only)
-- `openssl` (for session secret generation)
-- IAP API enabled (`gcloud services enable iap.googleapis.com`)
+- `gcloud`, `docker`, `python3`, and `openssl`.
+- Enabled APIs: Cloud Run, IAP, Artifact Registry, Secret Manager, IAM Credentials,
+  Cloud SQL Admin, Cloud Storage, and Cloud Logging.
+- A Cloud SQL Postgres instance in the target region.
+- A GCS bucket for Hub artifacts.
+- Filestore/NFS details for Cloud Run Instances workspaces.
+- A VPC network/subnetwork usable by Cloud Run Instances.
 
-## Quick Start
+## Required Configuration
+
+Set these environment variables before running `deploy.sh`:
+
+| Variable | Description |
+| --- | --- |
+| `SCION_PROJECT` | GCP project ID. Defaults to `deploy-demo-test`. |
+| `SCION_REGION` | GCP region. Defaults to `us-central1`. |
+| `SCION_SERVICE` | Cloud Run service name. Defaults to `scion-hub`. |
+| `SCION_CLOUDSQL_INSTANCE` | Cloud SQL instance name, not the full connection name. |
+| `SCION_DATABASE_NAME` | Postgres database name. Defaults to `scionhub`. |
+| `SCION_DATABASE_USER` | Postgres user. Defaults to `scion`. |
+| `SCION_DATABASE_PASSWORD` | Postgres password, used to render the DSN. |
+| `SCION_DATABASE_PASSWORD_SECRET` | Alternative to `SCION_DATABASE_PASSWORD`; reads the latest Secret Manager version. |
+| `SCION_DATABASE_URL` | Alternative full Postgres DSN. Use this to bypass DSN assembly. |
+| `SCION_GCS_BUCKET` | GCS bucket for Hub storage. |
+| `SCION_RUNTIME_NETWORK` | VPC network for Cloud Run Instances. |
+| `SCION_RUNTIME_SUBNETWORK` | VPC subnetwork for Cloud Run Instances. |
+| `SCION_FILESTORE_IP` | Filestore/NFS server IP. |
+| `SCION_FILESTORE_EXPORT` | Filestore/NFS export path, for example `/scion-workspaces`. |
+
+Useful optional variables:
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `SCION_MIN_INSTANCES` | `2` | Production HA minimum Cloud Run instances. |
+| `SCION_MAX_INSTANCES` | `10` | Cloud Run max instances; size this against the DB connection budget. |
+| `SCION_DB_MAX_OPEN_CONNS` | `10` | Per-replica Postgres max open connections. |
+| `SCION_DB_MAX_IDLE_CONNS` | `5` | Per-replica Postgres idle connections. |
+| `SCION_PUBLIC_URL` | discovered after first deploy | Public Hub URL injected into settings. |
+| `SCION_BROKER_ID` | `cloudrun-instances` | Stable logical broker ID shared by all replicas. |
+| `SCION_BROKER_NAME` | `Cloud Run Instances` | Display name for the logical broker. |
+| `SCION_SESSION_SECRET` | generated | Shared cookie/JWT signing secret stored in Secret Manager. |
+| `SCION_IAP_CLIENT_ID` / `SCION_IAP_CLIENT_SECRET` | unset | Optional custom OAuth client for IAP. |
+
+## Deploy
 
 ```bash
-# Full deploy (build + push + secrets + Cloud Run + IAP)
-./scripts/cloudrun/deploy.sh
+export SCION_PROJECT=deploy-demo-test
+export SCION_REGION=us-central1
+export SCION_CLOUDSQL_INSTANCE=scion-hub-postgres
+export SCION_DATABASE_NAME=scionhub
+export SCION_DATABASE_USER=scion
+export SCION_DATABASE_PASSWORD_SECRET=scion-hub-db-password
+export SCION_GCS_BUCKET=scion-hub-artifacts
+export SCION_RUNTIME_NETWORK=projects/deploy-demo-test/global/networks/scion
+export SCION_RUNTIME_SUBNETWORK=projects/deploy-demo-test/regions/us-central1/subnetworks/scion
+export SCION_FILESTORE_IP=10.0.0.2
+export SCION_FILESTORE_EXPORT=/scion-workspaces
 
-# Redeploy without rebuilding the image
+./scripts/cloudrun/deploy.sh
+```
+
+Redeploy an already-pushed image:
+
+```bash
 ./scripts/cloudrun/deploy.sh --skip-build
 ```
 
-## Configuration
+On a first deployment, the script may deploy twice. The first pass lets Cloud
+Run allocate the service URL; the second pass updates the settings secret with
+that URL unless `SCION_PUBLIC_URL` was provided.
 
-Environment variables override defaults:
+## What the Script Does
 
-| Variable               | Default              | Description                     |
-|------------------------|----------------------|---------------------------------|
-| `SCION_PROJECT`        | `deploy-demo-test`   | GCP project ID                  |
-| `SCION_REGION`         | `us-central1`        | GCP region                      |
-| `SCION_SERVICE`        | `scion-hub`          | Cloud Run service name          |
-| `SCION_GKE_CLUSTER`    | `scion-demo-cluster` | Target GKE cluster              |
-| `SCION_SA_NAME`        | `scion-hub-sa`       | Service account name            |
-| `SCION_REPO`           | `scion`              | Artifact Registry repo name     |
-| `SCION_SESSION_SECRET` | *(auto-generated)*   | JWT session secret (hex string) |
-
-## What the Deploy Script Does
-
-1. Creates a dedicated service account with `container.admin` and
-   `secretmanager.secretAccessor` roles (if it doesn't exist)
-2. Creates a transport service account for agent IAP traversal (Phase 2)
-3. Builds and pushes the container image to Artifact Registry
-4. Fetches GKE cluster endpoint + CA cert and generates a kubeconfig
-5. Computes the IAP audience (`/projects/NUM/locations/REGION/services/NAME`)
-6. Generates hub settings from the template (injects session secret, IAP audience)
-7. Stores kubeconfig and settings as Secret Manager secrets
-8. Ensures the `scion-agents` namespace exists in GKE
-9. Deploys the Cloud Run service with `--iap` flag and secrets mounted as files
-10. Grants the IAP service agent `roles/run.invoker` on the service
-11. Grants the transport SA `roles/iap.httpsResourceAccessor` for agent callbacks
+1. Creates or reuses the Hub, transport-auth, and agent runtime service accounts.
+2. Grants the Hub service account Cloud SQL, Secret Manager, GCS, Cloud Run
+   Instances, logging, IAP tunnel, and service-account attachment permissions.
+3. Grants the Hub service account token-creator access on the transport SA.
+4. Builds and pushes the Hub container image to Artifact Registry.
+5. Renders `hub-settings-template.yaml` with Postgres, GCS, IAP transport, and
+   Cloud Run runtime configuration.
+6. Stores settings and the shared session secret in Secret Manager.
+7. Deploys Cloud Run with `--iap`, `--no-allow-unauthenticated`,
+   `--no-cpu-throttling`, min instances `>= 2`, and Cloud SQL attachment.
+8. Grants the IAP service agent `roles/run.invoker`.
+9. Grants the transport SA `roles/iap.httpsResourceAccessor`.
 
 ## Verification
 
 ```bash
-# Get the service URL
 URL=$(gcloud run services describe scion-hub \
   --region us-central1 --project deploy-demo-test \
   --format="value(status.url)")
 
-# Verify IAP is enabled
 gcloud run services describe scion-hub \
   --region us-central1 --project deploy-demo-test \
-  | grep "Iap Enabled"
+  --format="value(metadata.annotations.run.googleapis.com/iap-enabled)"
 
-# Direct health check (bypasses IAP via identity token)
-curl -H "Authorization: Bearer $(gcloud auth print-identity-token)" "${URL}/health"
+curl -I "$URL"
+```
 
-# Visit the service URL in a browser — should redirect to Google sign-in
+The unauthenticated request should be blocked or redirected by IAP. Grant human
+access with:
+
+```bash
+gcloud iap web add-iam-policy-binding \
+  --project=deploy-demo-test \
+  --region=us-central1 \
+  --resource-type=cloud-run \
+  --service=scion-hub \
+  --member=user:EMAIL \
+  --role=roles/iap.httpsResourceAccessor
 ```
 
 ## Files
 
-| File                          | Purpose                                     |
-|-------------------------------|---------------------------------------------|
-| `Dockerfile`                  | Multi-stage build: web + Go → slim runtime  |
-| `deploy.sh`                   | End-to-end deploy script                    |
-| `hub-settings-template.yaml`  | Hub settings (IAP audience, transport SA)   |
-| `README.md`                   | This file                                   |
-
-## Notes
-
-- The Cloud Run instance uses `--timeout 3600` for long-lived WebSocket
-  connections from agent control channels.
-- `--min-instances 1` keeps the instance warm. SQLite state is lost on cold
-  starts, so a warm instance is critical.
-- The `gke-gcloud-auth-plugin` is installed in the image for robustness, but
-  `pkg/k8s/client.go` also has a `fallbackToGCEAuth()` path that uses ADC
-  directly if the plugin fails.
-- Session secret is stored in Secret Manager and injected into settings at
-  deploy time, so it survives instance restarts.
-- Cloud Run's native IAP protects all ingress paths without a load balancer,
-  managed cert, or static IP. The `*.run.app` URL is directly IAP-protected.
-- Agent IAP traversal (transport SA) requires Phase 2 transport token code
-  which is not yet merged. The infrastructure and IAM bindings are in place.
+| File | Purpose |
+| --- | --- |
+| `Dockerfile` | Multi-stage web plus Go build for Cloud Run. |
+| `entrypoint.sh` | Starts Hub, Web, and Runtime Broker in production mode. |
+| `deploy.sh` | End-to-end production Cloud Run deploy script. |
+| `hub-settings-template.yaml` | Versioned production settings template. |

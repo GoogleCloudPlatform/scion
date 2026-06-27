@@ -8,6 +8,6 @@ if [ -f /run/secrets/settings.yaml ]; then
   cat /run/secrets/settings.yaml > "$HOME/.scion/settings.yaml"
 fi
 exec scion server start \
-  --foreground --production --dev-auth \
+  --foreground --production \
   --enable-hub --enable-runtime-broker --enable-web --web-port 8080 \
   --auto-provide --global

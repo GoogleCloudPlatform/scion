@@ -1,30 +1,56 @@
 schema_version: "1"
-image_registry: "us-central1-docker.pkg.dev/deploy-demo-test/public-docker"
+image_registry: "__IMAGE_REGISTRY__"
 active_profile: default
+
 server:
+  mode: hosted
+  hub:
+    port: 8080
+    host: "0.0.0.0"
+    public_url: "__SERVICE_URL__"
+    gcp_project_id: "__PROJECT_ID__"
   database:
-    driver: sqlite
-    url: /tmp/scion.db
+    driver: postgres
+    url: "__POSTGRES_DSN__"
+    max_open_conns: __DB_MAX_OPEN_CONNS__
+    max_idle_conns: __DB_MAX_IDLE_CONNS__
+    conn_max_idle_time: "5m"
+  storage:
+    provider: gcs
+    bucket: "__GCS_BUCKET__"
+  secrets:
+    backend: gcpsm
+    gcp_project_id: "__PROJECT_ID__"
   auth:
-    session_secret: "__SESSION_SECRET__"
     mode: proxy
     proxy:
       provider: iap
       iap:
         audience: "__IAP_AUDIENCE__"
-  transport:
-    mode: iap
-    oidcAudience: "__IAP_AUDIENCE__"
-    platformAuthSA: "__TRANSPORT_SA_EMAIL__"
-  runtimeBroker:
-    port: 9810
+    transport:
+      mode: iap
+      oidc_audience: "__IAP_AUDIENCE__"
+      platform_auth_sa: "__TRANSPORT_SA_EMAIL__"
+  broker:
+    enabled: true
+    port: 9800
+    host: "127.0.0.1"
+    broker_id: "__BROKER_ID__"
+    broker_name: "__BROKER_NAME__"
+    auto_provide: true
+
 profiles:
   default:
-    runtime: kubernetes
+    runtime: cloudrun
+
 runtimes:
-  kubernetes:
-    type: kubernetes
-    gke: true
-    context: scion-demo-cluster
-    namespace: scion-agents
-    list_all_namespaces: false
+  cloudrun:
+    type: cloudrun
+    cloudrun:
+      project_id: "__PROJECT_ID__"
+      location: "__REGION__"
+      service_account: "__RUNTIME_SA_EMAIL__"
+      network: "__RUNTIME_NETWORK__"
+      subnetwork: "__RUNTIME_SUBNETWORK__"
+      nfs_server: "__FILESTORE_IP__"
+      nfs_export: "__FILESTORE_EXPORT__"
