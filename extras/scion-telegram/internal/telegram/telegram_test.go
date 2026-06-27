@@ -1100,8 +1100,8 @@ func TestHubError_UserFacingMessage(t *testing.T) {
 		{"agent_not_found", hubError{StatusCode: 404, Code: "agent_not_found"}, "Target agent not found"},
 		{"forbidden", hubError{StatusCode: 403, Code: "forbidden"}, "permission"},
 		{"unauthorized", hubError{StatusCode: 401, Code: "unauthorized"}, "Authentication error"},
-		{"server_error", hubError{StatusCode: 500, Code: "internal_error"}, "internal error"},
-		{"other", hubError{StatusCode: 400, Code: "invalid_request", Message: "bad topic"}, "bad topic"},
+		{"server_error", hubError{StatusCode: 500, Code: "internal_error"}, "try again or contact"},
+		{"other", hubError{StatusCode: 400, Code: "invalid_request", Message: "bad topic"}, "try again or contact"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -136,7 +136,10 @@ func HandleModalSubmit(
 			},
 		}
 
-		deliverInbound(topic, msg)
+		if he := deliverInbound(topic, msg); he != nil {
+			respondEphemeral(s, i, he.userFacingMessage())
+			return
+		}
 	}
 
 	// Mark as responded.

@@ -774,7 +774,10 @@ func (h *CommandHandler) HandleMessage(s *discordgo.Session, i *discordgo.Intera
 		},
 	}
 
-	h.deliverInbound(topic, msg)
+	if he := h.deliverInbound(topic, msg); he != nil {
+		h.followup(s, i, he.userFacingMessage())
+		return
+	}
 
 	h.log.Info("Slash command message delivered",
 		"agent", agentSlug, "sender", sender, "channel_id", i.ChannelID)

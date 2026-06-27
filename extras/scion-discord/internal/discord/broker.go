@@ -85,10 +85,7 @@ func (e *hubError) userFacingMessage() string {
 	case "broker_auth_failed", "unauthorized":
 		return "Authentication error — please contact an administrator."
 	default:
-		if e.StatusCode >= 500 {
-			return "Failed to deliver message — internal error. Please try again later."
-		}
-		return fmt.Sprintf("Failed to deliver message: %s", e.Message)
+		return "Failed to deliver message. Please try again or contact an administrator."
 	}
 }
 

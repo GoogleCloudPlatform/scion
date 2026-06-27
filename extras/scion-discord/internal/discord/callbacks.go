@@ -433,7 +433,10 @@ func (h *CallbackHandler) deliverAskUserResponse(ctx context.Context, i *discord
 		},
 	}
 
-	h.deliverInbound(topic, msg)
+	if he := h.deliverInbound(topic, msg); he != nil {
+		h.log.Error("Failed to deliver ask-user response",
+			"request_id", pending.RequestID, "error", he)
+	}
 }
 
 // --- Settings callback handlers ---

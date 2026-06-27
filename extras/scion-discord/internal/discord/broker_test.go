@@ -95,12 +95,12 @@ func TestHubError_UserFacingMessage(t *testing.T) {
 		{
 			name:     "server error",
 			err:      hubError{StatusCode: 502, Code: "runtime_error", Message: "agent unreachable"},
-			contains: "internal error",
+			contains: "try again or contact",
 		},
 		{
 			name:     "other client error",
 			err:      hubError{StatusCode: 400, Code: "invalid_request", Message: "bad topic format"},
-			contains: "bad topic format",
+			contains: "try again or contact",
 		},
 	}
 	for _, tt := range tests {
