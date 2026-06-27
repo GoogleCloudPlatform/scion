@@ -97,6 +97,7 @@ export class ScionPageOnboarding extends LitElement {
   @state() private importedHarnessConfigs: HarnessConfigInfo[] = [];
 
   // Step 4: Images
+  @state() private imageMode: 'choose' | 'pull' | 'build' = 'choose';
   @state() private imageStatuses = new Map<string, { status: string; error?: string; fullName?: string }>();
   @state() private imagePulling = false;
   @state() private imageBuilding = false;
@@ -974,14 +975,50 @@ export class ScionPageOnboarding extends LitElement {
       `;
     }
 
-    const importedImages = this.getImportedImages();
-    const hasImportedDockerfiles = importedImages.some(i => i.hasDockerfile);
+    if (this.imageMode === 'pull') return this.renderImagesPull();
+    if (this.imageMode === 'build') return this.renderImagesBuild();
+    return this.renderImagesChoose();
+  }
 
-    // No registry and no local build (neither system-level nor imported Dockerfiles) — show registry input
-    if (!this.imageRegistry && !this.buildAvailable && !hasImportedDockerfiles) {
+  private renderImagesChoose() {
+    return html`
+      <h2>Container Images</h2>
+      <p>How would you like to get container images for your selected harnesses?</p>
+
+      <div class="ws-cards">
+        <div class="ws-card" @click=${() => { this.imageMode = 'pull'; }}>
+          <sl-icon name="cloud-download"></sl-icon>
+          <div class="ws-card-text">
+            <div class="ws-card-title">Pull from remote registry</div>
+            <div class="ws-card-desc">Use pre-built images from a container registry.</div>
+          </div>
+        </div>
+        <div class="ws-card" @click=${() => { this.imageMode = 'build'; }}>
+          <sl-icon name="hammer"></sl-icon>
+          <div class="ws-card-text">
+            <div class="ws-card-title">Build locally</div>
+            <div class="ws-card-desc">Build images on this machine using Docker or Podman.</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="footer">
+        <sl-button variant="text" @click=${() => { this.currentStep = 3; }}>Back</sl-button>
+        <div class="footer-right">
+          <sl-button variant="default" @click=${() => { this.currentStep = 5; }}>Skip for now</sl-button>
+        </div>
+      </div>
+    `;
+  }
+
+  private renderImagesPull() {
+    const harnesses = [...this.selectedHarnesses];
+    const importedImages = this.getImportedImages();
+
+    if (!this.imageRegistry) {
       return html`
-        <h2>Container Images</h2>
-        <p>An image registry is required to pull container images. Enter one below.</p>
+        <h2>Pull Remote Images</h2>
+        <p>Enter the image registry to pull pre-built container images from.</p>
         <div class="form-group">
           <label>Image Registry</label>
           <sl-input
@@ -998,7 +1035,7 @@ export class ScionPageOnboarding extends LitElement {
           @click=${this.handleSaveRegistry}
         >Save</sl-button>
         <div class="footer">
-          <sl-button variant="text" @click=${() => { this.currentStep = 3; }}>Back</sl-button>
+          <sl-button variant="text" @click=${() => { this.imageMode = 'choose'; }}>Back</sl-button>
           <div class="footer-right">
             <sl-button variant="default" @click=${() => { this.currentStep = 5; }}>Skip for now</sl-button>
           </div>
@@ -1012,8 +1049,8 @@ export class ScionPageOnboarding extends LitElement {
     });
 
     return html`
-      <h2>Container Images</h2>
-      <p>Pull or build the container images for your selected harnesses.</p>
+      <h2>Pull Remote Images</h2>
+      <p>Pull container images from <strong>${this.imageRegistry}</strong>.</p>
 
       ${!this.runtimeAvailable ? html`
         <div class="alert alert-warning">
@@ -1030,8 +1067,76 @@ export class ScionPageOnboarding extends LitElement {
           const s = this.imageStatuses.get(h);
           const status = s?.status ?? 'pending';
           const imported = importedImages.find(i => i.slug === h);
-          const prefix = this.imageRegistry ? `${this.imageRegistry}/` : '';
-          const displayName = s?.fullName ?? (imported ? imported.image : `${prefix}scion-${h}:latest`);
+          const displayName = s?.fullName ?? (imported ? imported.image : `${this.imageRegistry}/scion-${h}:latest`);
+          return html`
+            <div class="image-item">
+              <span class="image-name">${displayName}</span>
+              ${status === 'pending' ? nothing : html`
+                <span class="image-status ${status}">
+                  ${status === 'pulling' ? html`<sl-spinner></sl-spinner>` : nothing}
+                  ${status === 'done' || status === 'exists' ? '✓' : nothing}
+                  ${status === 'error' ? '✗' : nothing}
+                  ${status}
+                </span>
+              `}
+            </div>
+          `;
+        })}
+      </div>
+
+      <div class="image-actions">
+        <sl-button
+          variant="primary"
+          size="small"
+          ?loading=${this.imagePulling}
+          ?disabled=${this.imagePulling}
+          @click=${this.handlePullImages}
+        >Pull images</sl-button>
+      </div>
+
+      <div class="footer">
+        <sl-button variant="text" @click=${() => { this.imageMode = 'choose'; }}>Back</sl-button>
+        <div class="footer-right">
+          <sl-button variant="default" @click=${() => { this.cleanupImageEvents(); this.currentStep = 5; }}>
+            Skip for now
+          </sl-button>
+          ${allDone ? html`
+            <sl-button variant="primary" @click=${() => { this.cleanupImageEvents(); this.currentStep = 5; }}>
+              Next
+            </sl-button>
+          ` : nothing}
+        </div>
+      </div>
+    `;
+  }
+
+  private renderImagesBuild() {
+    const harnesses = [...this.selectedHarnesses];
+    const importedImages = this.getImportedImages();
+    const hasImportedDockerfiles = importedImages.some(i => i.hasDockerfile);
+
+    const allDone = harnesses.length > 0 && harnesses.every(h => {
+      const s = this.imageStatuses.get(h);
+      return s && (s.status === 'done' || s.status === 'exists');
+    });
+
+    return html`
+      <h2>Build Images Locally</h2>
+      <p>Build container images on this machine.</p>
+
+      ${!this.runtimeAvailable ? html`
+        <div class="alert alert-warning">
+          <strong>No container runtime detected.</strong>
+          <p>Install Docker or Podman to build images. You can skip this step and configure a runtime later.</p>
+        </div>
+      ` : nothing}
+
+      <div class="image-list">
+        ${harnesses.map(h => {
+          const s = this.imageStatuses.get(h);
+          const status = s?.status ?? 'pending';
+          const imported = importedImages.find(i => i.slug === h);
+          const displayName = s?.fullName ?? (imported ? imported.image : `scion-${h}:latest`);
           return html`
             <div class="image-item">
               <span class="image-name">${displayName}</span>
@@ -1050,45 +1155,29 @@ export class ScionPageOnboarding extends LitElement {
       </div>
 
       <div class="image-actions">
-        ${this.imageRegistry ? html`
+        ${this.buildAvailable ? html`
           <sl-button
             variant="primary"
             size="small"
-            ?loading=${this.imagePulling}
-            ?disabled=${this.imagePulling || this.imageBuilding}
-            @click=${this.handlePullImages}
-          >Pull images</sl-button>
-        ` : nothing}
-
-        ${this.buildAvailable ? html`
-          <sl-button
-            variant=${this.imageRegistry ? 'default' : 'primary'}
-            size="small"
             ?loading=${this.imageBuilding}
-            ?disabled=${this.imagePulling || this.imageBuilding}
+            ?disabled=${this.imageBuilding}
             @click=${this.handleBuildImages}
           >Build locally</sl-button>
         ` : nothing}
 
         ${hasImportedDockerfiles ? html`
           <sl-button
-            variant=${this.imageRegistry || this.buildAvailable ? 'default' : 'primary'}
+            variant=${this.buildAvailable ? 'default' : 'primary'}
             size="small"
             ?loading=${this.imageBuilding}
-            ?disabled=${this.imagePulling || this.imageBuilding}
+            ?disabled=${this.imageBuilding}
             @click=${this.handleBuildFromDockerfile}
           >Build from Dockerfile</sl-button>
         ` : nothing}
 
-        ${!this.imageRegistry && !this.buildAvailable && !hasImportedDockerfiles ? html`
+        ${!this.buildAvailable && !hasImportedDockerfiles ? html`
           <p style="font-size:0.8125rem;color:var(--scion-text-muted,#64748b);margin:0;">
-            Pre-built images are available via pull. Local builds require a source checkout.
-          </p>
-        ` : nothing}
-
-        ${!this.imageRegistry && this.buildAvailable ? html`
-          <p style="font-size:0.8125rem;color:var(--scion-text-muted,#64748b);margin:0;">
-            To pull pre-built images instead, configure an image registry.
+            Local builds require a source checkout with build scripts or imported harness configs with Dockerfiles.
           </p>
         ` : nothing}
       </div>
@@ -1105,8 +1194,35 @@ export class ScionPageOnboarding extends LitElement {
         </div>
       ` : nothing}
 
+      ${allDone ? html`
+        <div class="build-section" style="margin-top:1rem;">
+          <p style="font-size:0.875rem;font-weight:600;margin:0 0 0.5rem;">Push to registry (optional)</p>
+          ${!this.imageRegistry ? html`
+            <div class="form-group">
+              <label>Image Registry</label>
+              <sl-input
+                placeholder="ghcr.io/your-org"
+                value=${this.registryInput}
+                @sl-input=${(e: Event) => { this.registryInput = (e.target as HTMLInputElement).value; }}
+              ></sl-input>
+            </div>
+            <sl-button
+              variant="default"
+              size="small"
+              ?loading=${this.registrySaving}
+              ?disabled=${!this.registryInput.trim()}
+              @click=${this.handleSaveRegistry}
+            >Save registry</sl-button>
+          ` : html`
+            <p style="font-size:0.8125rem;color:var(--scion-text-muted,#64748b);margin:0;">
+              Registry: <strong>${this.imageRegistry}</strong> — push support coming soon.
+            </p>
+          `}
+        </div>
+      ` : nothing}
+
       <div class="footer">
-        <sl-button variant="text" @click=${() => { this.currentStep = 3; }}>Back</sl-button>
+        <sl-button variant="text" @click=${() => { this.imageMode = 'choose'; }}>Back</sl-button>
         <div class="footer-right">
           <sl-button variant="default" @click=${() => { this.cleanupImageEvents(); this.currentStep = 5; }}>
             Skip for now
@@ -1461,7 +1577,7 @@ export class ScionPageOnboarding extends LitElement {
       </div>
 
       <div class="footer">
-        <sl-button variant="text" @click=${() => { this.currentStep = 4; }}>Back</sl-button>
+        <sl-button variant="text" @click=${() => { this.imageMode = 'choose'; this.currentStep = 4; }}>Back</sl-button>
         <div class="footer-right">
           <sl-button variant="default" @click=${() => { this.currentStep = 6; }}>Skip for now</sl-button>
         </div>
