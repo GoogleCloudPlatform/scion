@@ -396,33 +396,55 @@ func runServerStatus(cmd *cobra.Command, args []string) error {
 		status.PIDFile = daemon.GetPIDPathComponent(serverDaemonComponent, globalDir)
 	}
 
-	// Probe health endpoints to check component status
+	// Probe health endpoints to check component status.
+	// Parse JSON responses to verify composite health rather than relying
+	// solely on HTTP 200 (the web server returns 200 even when degraded).
 	client := &http.Client{Timeout: 2 * time.Second}
 
 	// Check web/hub on default web port (8080)
 	if resp, err := client.Get("http://127.0.0.1:8080/healthz"); err == nil {
+		body, readErr := io.ReadAll(resp.Body)
 		resp.Body.Close()
-		if resp.StatusCode == http.StatusOK {
-			status.WebRunning = true
-			status.HubRunning = true // Hub is mounted on web when both are enabled
+		if resp.StatusCode == http.StatusOK && readErr == nil {
+			var health struct {
+				Status string           `json:"status"`
+				Web    *json.RawMessage `json:"web,omitempty"`
+				Hub    *json.RawMessage `json:"hub,omitempty"`
+			}
+			if json.Unmarshal(body, &health) == nil {
+				status.WebRunning = health.Web != nil || health.Status == "healthy"
+				status.HubRunning = health.Hub != nil || health.Status == "healthy"
+			}
 		}
 	}
 
 	// Check standalone hub on default hub port (9810) if not found on web port
 	if !status.HubRunning {
 		if resp, err := client.Get("http://127.0.0.1:9810/healthz"); err == nil {
+			body, readErr := io.ReadAll(resp.Body)
 			resp.Body.Close()
-			if resp.StatusCode == http.StatusOK {
-				status.HubRunning = true
+			if resp.StatusCode == http.StatusOK && readErr == nil {
+				var health struct {
+					Status string `json:"status"`
+				}
+				if json.Unmarshal(body, &health) == nil && health.Status == "healthy" {
+					status.HubRunning = true
+				}
 			}
 		}
 	}
 
 	// Check broker on default broker port (9800)
 	if resp, err := client.Get("http://127.0.0.1:9800/healthz"); err == nil {
+		body, readErr := io.ReadAll(resp.Body)
 		resp.Body.Close()
-		if resp.StatusCode == http.StatusOK {
-			status.BrokerRunning = true
+		if resp.StatusCode == http.StatusOK && readErr == nil {
+			var health struct {
+				Status string `json:"status"`
+			}
+			if json.Unmarshal(body, &health) == nil && health.Status == "healthy" {
+				status.BrokerRunning = true
+			}
 		}
 	}
 
