@@ -53,7 +53,6 @@ try:
 except ImportError:
     scion_harness = None  # type: ignore[assignment]
 
-HERMES_ENV_FILE = "~/.hermes/.env"
 SCION_MANAGED_BEGIN = "<!-- BEGIN SCION MANAGED HERMES INSTRUCTIONS -->"
 SCION_MANAGED_END = "<!-- END SCION MANAGED HERMES INSTRUCTIONS -->"
 
@@ -356,6 +355,7 @@ def _apply_mcp_servers(bundle: str) -> int:
     payload = {"mcpServers": mcp_servers}
     try:
         _write_json(config_path, payload)
+        os.chmod(config_path, 0o600)
     except OSError as exc:
         print(f"hermes provision: failed to write mcp.json: {exc}", file=sys.stderr)
         return 0
@@ -447,6 +447,7 @@ def _provision(manifest: dict[str, Any]) -> int:
     # Build env overlay — these env vars are injected into the container
     # environment by sciontool before starting hermes.
     env_payload: dict[str, str] = {
+        "HERMES_HOME": "/home/scion/.hermes",
         "HERMES_YOLO_MODE": "1",
         "HERMES_QUIET": "1",
         "HERMES_ACCEPT_HOOKS": "auto",
