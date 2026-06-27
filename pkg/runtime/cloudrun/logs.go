@@ -43,7 +43,7 @@ func (c *LogClient) Close() error {
 // GetLogs retrieves recent log lines for a Cloud Run Instance.
 // Uses the Cloud Logging API filtering by resource labels.
 func (c *LogClient) GetLogs(ctx context.Context, instanceName string, opts LogOptions) ([]LogEntry, error) {
-	filter := fmt.Sprintf(`resource.type="cloud_run_instance" AND resource.labels.instance_id="%s" AND resource.labels.project_id="%s"`, instanceName, c.projectID)
+	filter := fmt.Sprintf(`resource.type="cloud_run_instance" AND resource.labels.instance_name="%s" AND resource.labels.project_id="%s"`, instanceName, c.projectID)
 	
 	req := &loggingpb.ListLogEntriesRequest{
 		ResourceNames: []string{"projects/" + c.projectID},
@@ -105,7 +105,7 @@ func (c *LogClient) StreamLogs(ctx context.Context, instanceName string, opts Lo
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				filter := fmt.Sprintf(`resource.type="cloud_run_instance" AND resource.labels.instance_id="%s" AND resource.labels.project_id="%s"`, instanceName, c.projectID)
+				filter := fmt.Sprintf(`resource.type="cloud_run_instance" AND resource.labels.instance_name="%s" AND resource.labels.project_id="%s"`, instanceName, c.projectID)
 				
 				if !lastSeen.IsZero() {
 					filter += fmt.Sprintf(` AND timestamp > "%s"`, lastSeen.Format(time.RFC3339Nano))
