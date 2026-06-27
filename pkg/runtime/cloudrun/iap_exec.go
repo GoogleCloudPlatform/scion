@@ -158,6 +158,10 @@ func (c *IAPExecConnector) runSSH(ctx context.Context, project, location, instan
 
 	iapConn := NewIapConn(wsConn)
 
+	if err := iapConn.Handshake(); err != nil {
+		return fmt.Errorf("IAP handshake failed: %w", err)
+	}
+
 	go func() {
 		localConn, err := listener.Accept()
 		if err != nil {
@@ -343,6 +347,7 @@ func (c *IapConn) Read(b []byte) (int, error) {
 
 		switch tag {
 		case 0x0001:
+		case 0x0002:
 		case 0x0004:
 			if len(payload) < 4 {
 				continue
@@ -390,4 +395,26 @@ func (c *IapConn) SetReadDeadline(t time.Time) error {
 
 func (c *IapConn) SetWriteDeadline(t time.Time) error {
 	return nil
+}
+
+func (c *IapConn) Handshake() error {
+	c.readMutex.Lock()
+	defer c.readMutex.Unlock()
+
+	for {
+		mt, msg, err := c.ws.ReadMessage()
+		if err != nil {
+			return fmt.Errorf("read message error: %w", err)
+		}
+		if mt != websocket.BinaryMessage {
+			continue
+		}
+		if len(msg) < 2 {
+			continue
+		}
+		tag := binary.BigEndian.Uint16(msg[0:2])
+		if tag == 0x0001 || tag == 0x0002 {
+			return nil
+		}
+	}
 }
