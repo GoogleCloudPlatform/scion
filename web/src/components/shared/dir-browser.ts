@@ -217,8 +217,7 @@ export class ScionDirBrowser extends LitElement {
 
   private onEntryClick(entry: DirEntry): void {
     if (!entry.isDir) return;
-    const newPath = this.currentPath + '/' + entry.name;
-    void this.navigate(newPath);
+    void this.navigate(this.joinPath(this.currentPath, entry.name));
   }
 
   private navigateUp(): void {
@@ -277,7 +276,7 @@ export class ScionDirBrowser extends LitElement {
       }
       this.newFolderMode = false;
       this.newFolderName = '';
-      void this.navigate(this.currentPath + '/' + name);
+      void this.navigate(this.joinPath(this.currentPath, name));
     } catch {
       this.newFolderError = 'Failed to connect to the server.';
     } finally {
@@ -305,7 +304,7 @@ export class ScionDirBrowser extends LitElement {
       const dirMatches = this.filteredEntries.filter(entry => entry.isDir);
       if (dirMatches.length === 1) {
         this.filterText = '';
-        void this.navigate(this.currentPath + '/' + dirMatches[0].name);
+        void this.navigate(this.joinPath(this.currentPath, dirMatches[0].name));
       } else if (dirMatches.length > 1) {
         const prefix = this.commonPrefix(dirMatches.map(d => d.name));
         if (prefix.length > this.filterText.length) {
@@ -318,10 +317,13 @@ export class ScionDirBrowser extends LitElement {
       const matches = this.filteredEntries.filter(entry => entry.isDir);
       if (matches.length === 1) {
         this.filterText = '';
-        const newPath = this.currentPath + '/' + matches[0].name;
-        void this.navigate(newPath);
+        void this.navigate(this.joinPath(this.currentPath, matches[0].name));
       }
     }
+  }
+
+  private joinPath(base: string, name: string): string {
+    return base.endsWith('/') ? base + name : base + '/' + name;
   }
 
   private commonPrefix(strings: string[]): string {

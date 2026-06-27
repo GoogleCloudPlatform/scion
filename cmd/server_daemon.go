@@ -409,13 +409,11 @@ func runServerStatus(cmd *cobra.Command, args []string) error {
 		_ = resp.Body.Close()
 		if resp.StatusCode == http.StatusOK && readErr == nil {
 			var health struct {
-				Status string           `json:"status"`
-				Web    *json.RawMessage `json:"web,omitempty"`
-				Hub    *json.RawMessage `json:"hub,omitempty"`
+				Status string `json:"status"`
 			}
-			if json.Unmarshal(body, &health) == nil {
+			if json.Unmarshal(body, &health) == nil && health.Status == "healthy" {
 				status.WebRunning = true
-				status.HubRunning = health.Hub != nil
+				status.HubRunning = true
 			}
 		}
 	}

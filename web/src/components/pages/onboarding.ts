@@ -1215,6 +1215,10 @@ export class ScionPageOnboarding extends LitElement {
       statuses.set(hc.slug, { status: 'building', fullName: `${hc.slug}:latest` });
       this.imageStatuses = statuses;
 
+      if (configs.length > 1) {
+        this.buildLogs = [...this.buildLogs, `=== Building ${hc.name} ===`];
+      }
+
       try {
         const res = await apiFetch(
           '/api/v1/admin/maintenance/operations/build-harness-config-image/run',
@@ -1250,6 +1254,7 @@ export class ScionPageOnboarding extends LitElement {
 
   private async pollHarnessConfigBuild(runId: string, slug: string): Promise<void> {
     let pollErrors = 0;
+    const logOffset = this.buildLogs.length;
     for (;;) {
       await new Promise(r => setTimeout(r, 3000));
       try {
@@ -1270,7 +1275,8 @@ export class ScionPageOnboarding extends LitElement {
         pollErrors = 0;
         const run = (await resp.json()) as { status?: string; log?: string };
         if (run.log) {
-          this.buildLogs = run.log.split('\n');
+          const newLines = run.log.split('\n');
+          this.buildLogs = [...this.buildLogs.slice(0, logOffset), ...newLines];
         }
 
         if (run.status === 'completed') {
