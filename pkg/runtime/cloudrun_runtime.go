@@ -9,16 +9,16 @@ The Runtime Broker executing this code must have a Service Account with the foll
 - roles/iap.tunnelResourceAccessor (to exec into instances via IAP)
 
 Authentication Methods:
-1. GKE Workload Identity (Recommended for GKE-hosted brokers):
-   Bind a Kubernetes Service Account (KSA) to the Google Service Account (GSA) using:
-   `gcloud iam service-accounts add-iam-policy-binding <GSA_EMAIL> \
-       --role roles/iam.workloadIdentityUser \
-       --member "serviceAccount:<PROJECT_ID>.svc.id.goog[<NAMESPACE>/<KSA_NAME>]"`
-   Annotate the KSA: `kubectl annotate sa <KSA_NAME> iam.gke.io/gcp-service-account=<GSA_EMAIL>`
+ 1. GKE Workload Identity (Recommended for GKE-hosted brokers):
+    Bind a Kubernetes Service Account (KSA) to the Google Service Account (GSA) using:
+    `gcloud iam service-accounts add-iam-policy-binding <GSA_EMAIL> \
+    --role roles/iam.workloadIdentityUser \
+    --member "serviceAccount:<PROJECT_ID>.svc.id.goog[<NAMESPACE>/<KSA_NAME>]"`
+    Annotate the KSA: `kubectl annotate sa <KSA_NAME> iam.gke.io/gcp-service-account=<GSA_EMAIL>`
 
-2. Key File (For VM-hosted brokers or local testing):
-   Set the GOOGLE_APPLICATION_CREDENTIALS environment variable to point to a valid JSON key file
-   downloaded from the GCP console for the target Service Account.
+ 2. Key File (For VM-hosted brokers or local testing):
+    Set the GOOGLE_APPLICATION_CREDENTIALS environment variable to point to a valid JSON key file
+    downloaded from the GCP console for the target Service Account.
 */
 package runtime
 
@@ -26,8 +26,10 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	runapi "cloud.google.com/go/run/apiv2"
@@ -40,6 +42,8 @@ import (
 	"google.golang.org/api/iterator"
 	"google.golang.org/grpc/codes"
 )
+
+const nfsSuperMagic = 0x6969
 
 var defaultCallOpts = []gax.CallOption{
 	gax.WithRetry(func() gax.Retryer {
@@ -98,8 +102,26 @@ func (r *CloudRunRuntime) client(ctx context.Context) (*runapi.InstancesClient, 
 }
 
 func (r *CloudRunRuntime) Run(ctx context.Context, cfg RunConfig) (string, error) {
-	if cfg.WorkspaceBackendName == "nfs" && r.config.NFSServer == "" {
-		return "", fmt.Errorf("cloudrun: NFSServer must be non-empty when workspace backend is NFS")
+	parent := fmt.Sprintf("projects/%s/locations/%s", r.config.ProjectID, r.config.Location)
+	agentID := cfg.Labels["agent_id"]
+	if agentID == "" {
+		return "", fmt.Errorf("agent_id label is required")
+	}
+	instanceID := "agent-" + agentID
+
+	uid := 1000
+	gid := 1000
+	if cfg.WorkspaceBackendName != "nfs" {
+		uid = os.Getuid()
+		gid = os.Getgid()
+	} else if cfg.NFSUID != 0 {
+		uid = cfg.NFSUID
+		gid = cfg.NFSGID
+	}
+
+	nfsPaths, err := r.provisionCloudRunNFS(ctx, cfg, agentID, uid, gid)
+	if err != nil {
+		return "", err
 	}
 
 	c, err := r.client(ctx)
@@ -107,13 +129,6 @@ func (r *CloudRunRuntime) Run(ctx context.Context, cfg RunConfig) (string, error
 		return "", fmt.Errorf("failed to create client: %w", err)
 	}
 	defer c.Close()
-
-	parent := fmt.Sprintf("projects/%s/locations/%s", r.config.ProjectID, r.config.Location)
-	agentID := cfg.Labels["agent_id"]
-	if agentID == "" {
-		return "", fmt.Errorf("agent_id label is required")
-	}
-	instanceID := "agent-" + agentID
 
 	// Check if the instance already exists
 	getReq := &runpb.GetInstanceRequest{
@@ -147,15 +162,6 @@ func (r *CloudRunRuntime) Run(ctx context.Context, cfg RunConfig) (string, error
 		}
 	}
 
-	uid := 1000
-	gid := 1000
-	if cfg.WorkspaceBackendName != "nfs" {
-		uid = os.Getuid()
-		gid = os.Getgid()
-	} else if cfg.NFSUID != 0 {
-		uid = cfg.NFSUID
-		gid = cfg.NFSGID
-	}
 	envVars = append(envVars, &runpb.EnvVar{
 		Name:   "SCION_HOST_UID",
 		Values: &runpb.EnvVar_Value{Value: fmt.Sprintf("%d", uid)},
@@ -168,17 +174,13 @@ func (r *CloudRunRuntime) Run(ctx context.Context, cfg RunConfig) (string, error
 	var volumes []*runpb.Volume
 	var volumeMounts []*runpb.VolumeMount
 
-	if cfg.WorkspaceBackendName == "nfs" && r.config.NFSServer != "" && r.config.NFSExport != "" {
-		workspaceNFSPath := fmt.Sprintf("%s/projects/%s/workspace", r.config.NFSExport, cfg.ProjectID)
-		homeNFSPath := fmt.Sprintf("%s/projects/%s/agents/%s/home", r.config.NFSExport, cfg.ProjectID, agentID)
-		secretsNFSPath := fmt.Sprintf("%s/projects/%s/agents/%s/secrets", r.config.NFSExport, cfg.ProjectID, agentID)
-
+	if nfsPaths != nil {
 		volumes = append(volumes, &runpb.Volume{
 			Name: "workspace",
 			VolumeType: &runpb.Volume_Nfs{
 				Nfs: &runpb.NFSVolumeSource{
 					Server:   r.config.NFSServer,
-					Path:     workspaceNFSPath,
+					Path:     nfsPaths.workspaceExportPath,
 					ReadOnly: false,
 				},
 			},
@@ -193,7 +195,7 @@ func (r *CloudRunRuntime) Run(ctx context.Context, cfg RunConfig) (string, error
 			VolumeType: &runpb.Volume_Nfs{
 				Nfs: &runpb.NFSVolumeSource{
 					Server:   r.config.NFSServer,
-					Path:     homeNFSPath,
+					Path:     nfsPaths.homeExportPath,
 					ReadOnly: false,
 				},
 			},
@@ -208,7 +210,7 @@ func (r *CloudRunRuntime) Run(ctx context.Context, cfg RunConfig) (string, error
 			VolumeType: &runpb.Volume_Nfs{
 				Nfs: &runpb.NFSVolumeSource{
 					Server:   r.config.NFSServer,
-					Path:     secretsNFSPath,
+					Path:     nfsPaths.secretsExportPath,
 					ReadOnly: true,
 				},
 			},
@@ -217,72 +219,6 @@ func (r *CloudRunRuntime) Run(ctx context.Context, cfg RunConfig) (string, error
 			Name:      "secrets",
 			MountPath: "/home/" + r.ExecUser() + "/.scion/secrets",
 		})
-
-		workspaceHostPath := cfg.Workspace
-		if workspaceHostPath != "" {
-			projectRoot := filepath.Dir(workspaceHostPath)
-			agentHomeHostPath := filepath.Join(projectRoot, "agents", agentID, "home")
-			agentSecretsHostPath := filepath.Join(projectRoot, "agents", agentID, "secrets")
-
-			if cfg.Locker != nil {
-				objID := store.StableProjectHash(cfg.ProjectID)
-				acquired, release, err := cfg.Locker.TryAdvisoryLockObject(
-					ctx, store.LockWorkspaceProvision, objID,
-				)
-				if err != nil {
-					return "", fmt.Errorf("NFS provision advisory lock: %w", err)
-				}
-				if acquired {
-					defer release()
-					if err := os.MkdirAll(workspaceHostPath, 0755); err != nil {
-						return "", fmt.Errorf("failed to create NFS workspace dir: %w", err)
-					}
-					os.Chown(workspaceHostPath, uid, gid)
-
-					sentinelPath := filepath.Join(workspaceHostPath, ".scion-provisioned")
-					os.WriteFile(sentinelPath, []byte("done"), 0644)
-					os.Chown(sentinelPath, uid, gid)
-				} else {
-					sentinelPath := filepath.Join(workspaceHostPath, ".scion-provisioned")
-					ctxTimeout, cancel := context.WithTimeout(ctx, 2*time.Minute)
-					defer cancel()
-					ticker := time.NewTicker(1 * time.Second)
-					defer ticker.Stop()
-
-					found := false
-					for !found {
-						select {
-						case <-ctxTimeout.Done():
-							return "", fmt.Errorf("timeout waiting for workspace provisioning sentinel: %s", sentinelPath)
-						case <-ticker.C:
-							if _, err := os.Stat(sentinelPath); err == nil {
-								found = true
-							}
-						}
-					}
-				}
-			} else {
-				sentinelPath := filepath.Join(workspaceHostPath, ".scion-provisioned")
-				if _, err := os.Stat(sentinelPath); err != nil {
-					if err := os.MkdirAll(workspaceHostPath, 0755); err != nil {
-						return "", fmt.Errorf("failed to create NFS workspace dir: %w", err)
-					}
-					os.Chown(workspaceHostPath, uid, gid)
-					os.WriteFile(sentinelPath, []byte("done"), 0644)
-					os.Chown(sentinelPath, uid, gid)
-				}
-			}
-
-			if err := os.MkdirAll(agentHomeHostPath, 0755); err != nil {
-				return "", fmt.Errorf("failed to create NFS home dir: %w", err)
-			}
-			os.Chown(agentHomeHostPath, uid, gid)
-
-			if err := os.MkdirAll(agentSecretsHostPath, 0755); err != nil {
-				return "", fmt.Errorf("failed to create NFS secrets dir: %w", err)
-			}
-			os.Chown(agentSecretsHostPath, uid, gid)
-		}
 	}
 
 	labels := make(map[string]string)
@@ -321,6 +257,215 @@ func (r *CloudRunRuntime) Run(ctx context.Context, cfg RunConfig) (string, error
 	}
 
 	return instanceID, nil
+}
+
+type cloudRunNFSProvisionPaths struct {
+	workspaceExportPath string
+	homeExportPath      string
+	secretsExportPath   string
+	hostBase            string
+	workspaceHostPath   string
+	homeHostPath        string
+	secretsHostPath     string
+}
+
+func (r *CloudRunRuntime) provisionCloudRunNFS(ctx context.Context, cfg RunConfig, agentID string, uid, gid int) (*cloudRunNFSProvisionPaths, error) {
+	if cfg.WorkspaceBackendName != "nfs" {
+		return nil, nil
+	}
+	if r.config.NFSServer == "" {
+		return nil, fmt.Errorf("cloudrun: nfs_server must be non-empty when workspace backend is NFS")
+	}
+	paths, err := cloudRunNFSExportPaths(r.config.NFSExport, cfg.ProjectID, agentID)
+	if err != nil {
+		return nil, err
+	}
+	if cfg.Workspace == "" {
+		return nil, fmt.Errorf("cloudrun: cannot provision NFS workspace because RunConfig.Workspace is empty; "+
+			"mount the Filestore export into the Hub/Broker and pass the resolved host path for %s, "+
+			"or run an external provisioner before creating Cloud Run instances", paths.workspaceExportPath)
+	}
+	hostPaths, err := cloudRunNFSHostPaths(cfg.Workspace, cfg.ProjectID, agentID)
+	if err != nil {
+		return nil, err
+	}
+	paths.hostBase = hostPaths.hostBase
+	paths.workspaceHostPath = hostPaths.workspaceHostPath
+	paths.homeHostPath = hostPaths.homeHostPath
+	paths.secretsHostPath = hostPaths.secretsHostPath
+
+	if err := requireNFSFilesystem(hostPaths.hostBase); err != nil {
+		return nil, err
+	}
+
+	if gid == 0 {
+		gid = 1000
+	}
+	if uid == 0 {
+		uid = 1000
+	}
+	resolved := ResolvedWorkspace{
+		HostPath:           hostPaths.workspaceHostPath,
+		ServerRelativePath: path.Join("projects", cfg.ProjectID, "workspace"),
+		HostBase:           hostPaths.hostBase,
+		Backend:            "nfs",
+		SharedDirs:         map[string]ResolvedSharedDir{},
+	}
+	if err := ProvisionShared(ProvisionInput{
+		Ctx:       ctx,
+		Resolved:  resolved,
+		ProjectID: cfg.ProjectID,
+		AgentID:   agentID,
+		Mode:      store.SharingModeSharedPlain,
+		GitClone:  cfg.GitClone,
+		Locker:    cfg.Locker,
+		NFSUID:    uid,
+		NFSGID:    gid,
+	}); err != nil {
+		return nil, fmt.Errorf("cloudrun: provision NFS workspace %s via Hub-mounted path %s: %w; "+
+			"verify the Hub Cloud Run service mounts the Filestore export read/write or run an external provisioner",
+			paths.workspaceExportPath, hostPaths.workspaceHostPath, err)
+	}
+	if err := mkdirNFSAgentDir(hostPaths.homeHostPath, uid, gid); err != nil {
+		return nil, fmt.Errorf("cloudrun: provision NFS agent home %s via Hub-mounted path %s: %w",
+			paths.homeExportPath, hostPaths.homeHostPath, err)
+	}
+	if err := mkdirNFSAgentDir(hostPaths.secretsHostPath, uid, gid); err != nil {
+		return nil, fmt.Errorf("cloudrun: provision NFS agent secrets %s via Hub-mounted path %s: %w",
+			paths.secretsExportPath, hostPaths.secretsHostPath, err)
+	}
+
+	return paths, nil
+}
+
+func cloudRunNFSExportPaths(nfsExport, projectID, agentID string) (*cloudRunNFSProvisionPaths, error) {
+	if nfsExport == "" {
+		return nil, fmt.Errorf("cloudrun: nfs_export must be non-empty when workspace backend is NFS")
+	}
+	exportRoot := path.Clean(nfsExport)
+	if !path.IsAbs(exportRoot) {
+		return nil, fmt.Errorf("cloudrun: nfs_export must be an absolute server path, got %q", nfsExport)
+	}
+	if err := validateCloudRunNFSElement("project_id", projectID); err != nil {
+		return nil, err
+	}
+	if err := validateCloudRunNFSElement("agent_id", agentID); err != nil {
+		return nil, err
+	}
+
+	paths := &cloudRunNFSProvisionPaths{
+		workspaceExportPath: path.Join(exportRoot, "projects", projectID, "workspace"),
+		homeExportPath:      path.Join(exportRoot, "projects", projectID, "agents", agentID, "home"),
+		secretsExportPath:   path.Join(exportRoot, "projects", projectID, "agents", agentID, "secrets"),
+	}
+	for name, p := range map[string]string{
+		"workspace": paths.workspaceExportPath,
+		"home":      paths.homeExportPath,
+		"secrets":   paths.secretsExportPath,
+	} {
+		if err := validateUnixPathBelowRoot(p, exportRoot); err != nil {
+			return nil, fmt.Errorf("cloudrun: invalid NFS %s path: %w", name, err)
+		}
+	}
+	return paths, nil
+}
+
+type cloudRunNFSHostProvisionPaths struct {
+	hostBase          string
+	workspaceHostPath string
+	homeHostPath      string
+	secretsHostPath   string
+}
+
+func cloudRunNFSHostPaths(workspaceHostPath, projectID, agentID string) (*cloudRunNFSHostProvisionPaths, error) {
+	if err := validateCloudRunNFSElement("project_id", projectID); err != nil {
+		return nil, err
+	}
+	if err := validateCloudRunNFSElement("agent_id", agentID); err != nil {
+		return nil, err
+	}
+
+	workspaceHostPath = filepath.Clean(workspaceHostPath)
+	if !filepath.IsAbs(workspaceHostPath) {
+		return nil, fmt.Errorf("cloudrun: NFS workspace host path must be absolute, got %q", workspaceHostPath)
+	}
+	expectedSuffix := filepath.Join("projects", projectID, "workspace")
+	hostSlash := filepath.ToSlash(workspaceHostPath)
+	suffixSlash := filepath.ToSlash(expectedSuffix)
+	if hostSlash != suffixSlash && !strings.HasSuffix(hostSlash, "/"+suffixSlash) {
+		return nil, fmt.Errorf("cloudrun: NFS workspace host path %q must end with %q so it maps to <export>/projects/<project-id>/workspace",
+			workspaceHostPath, expectedSuffix)
+	}
+
+	projectRoot := filepath.Dir(workspaceHostPath)
+	hostBase := filepath.Dir(filepath.Dir(projectRoot))
+	if err := ValidateNotExportRoot(workspaceHostPath, hostBase); err != nil {
+		return nil, fmt.Errorf("cloudrun: invalid NFS workspace host path: %w", err)
+	}
+	return &cloudRunNFSHostProvisionPaths{
+		hostBase:          hostBase,
+		workspaceHostPath: workspaceHostPath,
+		homeHostPath:      filepath.Join(projectRoot, "agents", agentID, "home"),
+		secretsHostPath:   filepath.Join(projectRoot, "agents", agentID, "secrets"),
+	}, nil
+}
+
+func validateCloudRunNFSElement(name, value string) error {
+	if value == "" || value == "." || value == ".." ||
+		strings.Contains(value, "/") || strings.Contains(value, "\\") {
+		return fmt.Errorf("cloudrun: %s %q is not a safe NFS path element", name, value)
+	}
+	return nil
+}
+
+func validateUnixPathBelowRoot(child, root string) error {
+	child = path.Clean(child)
+	root = path.Clean(root)
+	if child == root {
+		return fmt.Errorf("path %q equals export root %q; Cloud Run agents must mount project subtrees, never the export root", child, root)
+	}
+	if root == "/" {
+		if !path.IsAbs(child) || child == "/" {
+			return fmt.Errorf("path %q is not below export root %q", child, root)
+		}
+		return nil
+	}
+	if !strings.HasPrefix(child, root+"/") {
+		return fmt.Errorf("path %q is not below export root %q", child, root)
+	}
+	return nil
+}
+
+func requireNFSFilesystem(hostBase string) error {
+	info, err := os.Stat(hostBase)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("cloudrun: Hub cannot access NFS export at %s; "+
+				"mount the Filestore export into the Hub Cloud Run service at this path or run an external provisioner", hostBase)
+		}
+		return fmt.Errorf("cloudrun: cannot inspect Hub NFS mount %s: %w", hostBase, err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("cloudrun: Hub NFS mount path %s is not a directory", hostBase)
+	}
+	var stat syscall.Statfs_t
+	if err := syscall.Statfs(hostBase, &stat); err != nil {
+		return fmt.Errorf("cloudrun: cannot stat filesystem for Hub NFS mount %s: %w", hostBase, err)
+	}
+	if stat.Type != nfsSuperMagic {
+		return fmt.Errorf("cloudrun: Hub path %s exists but is not an NFS filesystem (statfs type %#x); "+
+			"mount the Filestore export into the Hub Cloud Run service or run an external provisioner",
+			hostBase, stat.Type)
+	}
+	return nil
+}
+
+func mkdirNFSAgentDir(dir string, uid, gid int) error {
+	if err := os.MkdirAll(dir, 0770); err != nil {
+		return err
+	}
+	_ = os.Chown(dir, uid, gid)
+	return nil
 }
 
 func (r *CloudRunRuntime) Stop(ctx context.Context, id string) error {
@@ -486,13 +631,13 @@ func (r *CloudRunRuntime) StreamLogs(ctx context.Context, instanceName string, o
 	}
 	// Note: We don't defer logClient.Close() here because it's streaming.
 	// The client might need to be closed later, or we can rely on GC/context cancellation.
-	
+
 	ch, err := logClient.StreamLogs(ctx, instanceName, opts)
 	if err != nil {
 		logClient.Close()
 		return nil, fmt.Errorf("streaming logs: %w", err)
 	}
-	
+
 	// Create a wrapper channel to close the client when context is done or channel is closed
 	outCh := make(chan cloudrun.LogEntry)
 	go func() {
