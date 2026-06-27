@@ -136,17 +136,15 @@ func (r *PodmanRuntime) Run(ctx context.Context, config RunConfig) (string, erro
 			"use rootful Docker or Podman for NFS-backed projects")
 	}
 
-	// Stage file and variable secrets before building args
-	var secretMountSpecs []string
-	if config.HomeDir != "" && len(config.ResolvedSecrets) > 0 {
-		mounts, err := writeFileSecrets(config.HomeDir, util.GetHomeDir(config.UnixUsername), config.ResolvedSecrets)
+	// Serialize file and variable secrets into an env-var blob for
+	// container-side staging by sciontool init (stateless broker support).
+	if len(config.ResolvedSecrets) > 0 {
+		encoded, err := serializeSecrets(util.GetHomeDir(config.UnixUsername), config.ResolvedSecrets)
 		if err != nil {
-			return "", fmt.Errorf("failed to stage file secrets: %w", err)
+			return "", fmt.Errorf("failed to serialize secrets: %w", err)
 		}
-		secretMountSpecs = mounts
-
-		if err := writeVariableSecrets(config.HomeDir, config.ResolvedSecrets); err != nil {
-			return "", fmt.Errorf("failed to write variable secrets: %w", err)
+		if encoded != "" {
+			config.Env = append(config.Env, StagedSecretEnvVar+"="+encoded)
 		}
 	}
 
@@ -211,10 +209,6 @@ func (r *PodmanRuntime) Run(ctx context.Context, config RunConfig) (string, erro
 	}
 
 	newArgs = append(newArgs, args[1:]...)
-
-	// Insert secret volume mounts before the image so they are treated as
-	// podman flags rather than arguments to the container command.
-	newArgs = insertVolumeFlags(newArgs, config.Image, secretMountSpecs)
 
 	WriteRuntimeDebugFile(config, r.Command, newArgs)
 

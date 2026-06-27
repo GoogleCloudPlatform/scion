@@ -25,6 +25,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks/handlers"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
@@ -166,6 +167,26 @@ func runInit(args []string) int {
 		} else {
 			log.Debug("Could not look up scion user in rootless mode: %v", err)
 		}
+	}
+
+	// Stage secrets from the SCION_STAGED_SECRETS env var. The broker
+	// serializes file and variable secrets into this single base64 blob
+	// instead of bind-mounting them from the host filesystem. We decode and
+	// write them before anything else so they are available to hooks and
+	// the harness.
+	if encoded := os.Getenv(runtime.StagedSecretEnvVar); encoded != "" {
+		staged, err := runtime.DecodeStagedSecrets(encoded)
+		if err != nil {
+			log.Error("Failed to decode staged secrets: %v", err)
+			return 1
+		}
+		if err := runtime.WriteStagedSecrets(agentHome, staged); err != nil {
+			log.Error("Failed to write staged secrets: %v", err)
+			return 1
+		}
+		os.Unsetenv(runtime.StagedSecretEnvVar)
+		log.Info("Staged %d file secret(s) and %d variable secret(s)",
+			len(staged.FileSecrets), len(staged.VariableSecrets))
 	}
 
 	// Initialize lifecycle hooks manager

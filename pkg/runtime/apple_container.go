@@ -19,9 +19,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -49,17 +47,15 @@ func (r *AppleContainerRuntime) ExecUser() string {
 }
 
 func (r *AppleContainerRuntime) Run(ctx context.Context, config RunConfig) (string, error) {
-	// Stage file, variable, and secret-map secrets before building args
-	if config.HomeDir != "" && len(config.ResolvedSecrets) > 0 {
-		containerHome := util.GetHomeDir(config.UnixUsername)
-		if _, err := writeFileSecrets(config.HomeDir, containerHome, config.ResolvedSecrets); err != nil {
-			return "", fmt.Errorf("failed to stage file secrets: %w", err)
+	// Serialize file and variable secrets into an env-var blob for
+	// container-side staging by sciontool init (stateless broker support).
+	if len(config.ResolvedSecrets) > 0 {
+		encoded, err := serializeSecrets(util.GetHomeDir(config.UnixUsername), config.ResolvedSecrets)
+		if err != nil {
+			return "", fmt.Errorf("failed to serialize secrets: %w", err)
 		}
-		if err := writeVariableSecrets(config.HomeDir, config.ResolvedSecrets); err != nil {
-			return "", fmt.Errorf("failed to write variable secrets: %w", err)
-		}
-		if err := writeSecretMap(config.HomeDir, containerHome, config.ResolvedSecrets); err != nil {
-			return "", fmt.Errorf("failed to write secret map: %w", err)
+		if encoded != "" {
+			config.Env = append(config.Env, StagedSecretEnvVar+"="+encoded)
 		}
 	}
 
@@ -111,15 +107,6 @@ func (r *AppleContainerRuntime) Run(ctx context.Context, config RunConfig) (stri
 	// Skip the original 'run', '-d', and '-i' from buildCommonRunArgs (indices 0, 1, 2)
 	// then strip flags that the Apple container CLI does not support.
 	newArgs = append(newArgs, stripUnsupportedAppleFlags(args[3:])...)
-
-	// Insert secrets staging directory volume before the image so it is treated
-	// as a container flag rather than an argument to the container command.
-	if config.HomeDir != "" && len(config.ResolvedSecrets) > 0 {
-		secretsDir := filepath.Join(filepath.Dir(config.HomeDir), "secrets")
-		if _, err := os.Stat(secretsDir); err == nil {
-			newArgs = insertVolumeFlags(newArgs, config.Image, []string{secretsDir + ":/run/scion-secrets:ro"})
-		}
-	}
 
 	WriteRuntimeDebugFile(config, r.Command, newArgs)
 

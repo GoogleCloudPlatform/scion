@@ -25,9 +25,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 )
 
-func TestWriteFileSecrets(t *testing.T) {
-	homeDir := t.TempDir()
-
+func TestSerializeSecrets(t *testing.T) {
 	secrets := []api.ResolvedSecret{
 		{
 			Name:   "TLS_CERT",
@@ -50,66 +48,94 @@ func TestWriteFileSecrets(t *testing.T) {
 			Value:  "raw-value-not-base64",
 			Source: "project",
 		},
+		{
+			Name:   "CONFIG",
+			Type:   "variable",
+			Target: "config",
+			Value:  `{"a":"b"}`,
+			Source: "user",
+		},
+		{
+			Name:   "TOKEN",
+			Type:   "variable",
+			Target: "token",
+			Value:  "abc123",
+			Source: "project",
+		},
 	}
 
-	mountSpecs, err := writeFileSecrets(homeDir, "/home/scion", secrets)
+	encoded, err := serializeSecrets("/home/scion", secrets)
 	if err != nil {
-		t.Fatalf("writeFileSecrets failed: %v", err)
+		t.Fatalf("serializeSecrets failed: %v", err)
+	}
+	if encoded == "" {
+		t.Fatal("expected non-empty encoded string")
 	}
 
-	// Should only produce mount specs for file-type secrets
-	if len(mountSpecs) != 2 {
-		t.Fatalf("expected 2 mount specs, got %d", len(mountSpecs))
-	}
-
-	// Verify the first file was written with decoded base64 content
-	secretsDir := filepath.Join(filepath.Dir(homeDir), "secrets")
-	content, err := os.ReadFile(filepath.Join(secretsDir, "TLS_CERT"))
+	// Decode and verify the structure
+	staged, err := DecodeStagedSecrets(encoded)
 	if err != nil {
-		t.Fatalf("failed to read TLS_CERT file: %v", err)
-	}
-	if string(content) != "cert-content" {
-		t.Errorf("expected decoded content %q, got %q", "cert-content", string(content))
+		t.Fatalf("DecodeStagedSecrets failed: %v", err)
 	}
 
-	// Verify the second file was written with raw content (fallback)
-	content, err = os.ReadFile(filepath.Join(secretsDir, "SSH_KEY"))
-	if err != nil {
-		t.Fatalf("failed to read SSH_KEY file: %v", err)
-	}
-	if string(content) != "raw-value-not-base64" {
-		t.Errorf("expected raw content %q, got %q", "raw-value-not-base64", string(content))
+	// Should have 2 file secrets (environment type is excluded)
+	if len(staged.FileSecrets) != 2 {
+		t.Fatalf("expected 2 file secrets, got %d", len(staged.FileSecrets))
 	}
 
-	// Verify file permissions
-	info, err := os.Stat(filepath.Join(secretsDir, "TLS_CERT"))
-	if err != nil {
-		t.Fatalf("failed to stat TLS_CERT: %v", err)
+	// Verify file secret targets
+	if staged.FileSecrets[0].Target != "/etc/ssl/cert.pem" {
+		t.Errorf("expected target /etc/ssl/cert.pem, got %s", staged.FileSecrets[0].Target)
 	}
-	if info.Mode().Perm() != 0600 {
-		t.Errorf("expected file mode 0600, got %o", info.Mode().Perm())
+	if staged.FileSecrets[1].Target != "/home/scion/.ssh/id_rsa" {
+		t.Errorf("expected target /home/scion/.ssh/id_rsa, got %s", staged.FileSecrets[1].Target)
+	}
+
+	// Verify base64-encoded values are decodable
+	data, err := base64.StdEncoding.DecodeString(staged.FileSecrets[0].Value)
+	if err != nil {
+		t.Fatalf("failed to decode file secret value: %v", err)
+	}
+	if string(data) != "cert-content" {
+		t.Errorf("expected cert-content, got %s", string(data))
+	}
+
+	// Raw values should have been re-encoded as base64
+	data, err = base64.StdEncoding.DecodeString(staged.FileSecrets[1].Value)
+	if err != nil {
+		t.Fatalf("raw value should be re-encoded as base64: %v", err)
+	}
+	if string(data) != "raw-value-not-base64" {
+		t.Errorf("expected raw-value-not-base64, got %s", string(data))
+	}
+
+	// Should have 2 variable secrets
+	if len(staged.VariableSecrets) != 2 {
+		t.Fatalf("expected 2 variable secrets, got %d", len(staged.VariableSecrets))
+	}
+	if staged.VariableSecrets["config"] != `{"a":"b"}` {
+		t.Errorf("config value mismatch: got %q", staged.VariableSecrets["config"])
+	}
+	if staged.VariableSecrets["token"] != "abc123" {
+		t.Errorf("token value mismatch: got %q", staged.VariableSecrets["token"])
 	}
 }
 
-func TestWriteFileSecrets_NoFileSecrets(t *testing.T) {
-	homeDir := t.TempDir()
-
+func TestSerializeSecrets_NoFileOrVariableSecrets(t *testing.T) {
 	secrets := []api.ResolvedSecret{
 		{Name: "KEY", Type: "environment", Target: "KEY", Value: "val"},
 	}
 
-	mountSpecs, err := writeFileSecrets(homeDir, "/home/scion", secrets)
+	encoded, err := serializeSecrets("/home/scion", secrets)
 	if err != nil {
-		t.Fatalf("writeFileSecrets failed: %v", err)
+		t.Fatalf("serializeSecrets failed: %v", err)
 	}
-	if len(mountSpecs) != 0 {
-		t.Errorf("expected 0 mount specs for non-file secrets, got %d", len(mountSpecs))
+	if encoded != "" {
+		t.Errorf("expected empty string for env-only secrets, got %q", encoded)
 	}
 }
 
-func TestWriteFileSecrets_TildeExpansion(t *testing.T) {
-	homeDir := t.TempDir()
-
+func TestSerializeSecrets_TildeExpansion(t *testing.T) {
 	secrets := []api.ResolvedSecret{
 		{
 			Name:   "SSH_KEY",
@@ -127,88 +153,236 @@ func TestWriteFileSecrets_TildeExpansion(t *testing.T) {
 		},
 	}
 
-	mountSpecs, err := writeFileSecrets(homeDir, "/home/gemini", secrets)
+	encoded, err := serializeSecrets("/home/gemini", secrets)
 	if err != nil {
-		t.Fatalf("writeFileSecrets failed: %v", err)
+		t.Fatalf("serializeSecrets failed: %v", err)
 	}
 
-	if len(mountSpecs) != 2 {
-		t.Fatalf("expected 2 mount specs, got %d", len(mountSpecs))
+	staged, err := DecodeStagedSecrets(encoded)
+	if err != nil {
+		t.Fatalf("DecodeStagedSecrets failed: %v", err)
 	}
 
-	// Verify ~/ was expanded to the container home directory
-	secretsDir := filepath.Join(filepath.Dir(homeDir), "secrets")
-	expectedMount0 := filepath.Join(secretsDir, "SSH_KEY") + ":/home/gemini/.ssh/id_rsa:ro"
-	if mountSpecs[0] != expectedMount0 {
-		t.Errorf("expected mount spec %q, got %q", expectedMount0, mountSpecs[0])
+	if staged.FileSecrets[0].Target != "/home/gemini/.ssh/id_rsa" {
+		t.Errorf("expected tilde-expanded target, got %s", staged.FileSecrets[0].Target)
 	}
-
-	// Verify absolute path is unchanged
-	expectedMount1 := filepath.Join(secretsDir, "ABS_CERT") + ":/etc/ssl/cert.pem:ro"
-	if mountSpecs[1] != expectedMount1 {
-		t.Errorf("expected mount spec %q, got %q", expectedMount1, mountSpecs[1])
+	if staged.FileSecrets[1].Target != "/etc/ssl/cert.pem" {
+		t.Errorf("expected absolute target unchanged, got %s", staged.FileSecrets[1].Target)
 	}
 }
 
-func TestWriteFileSecrets_PreCreatesParentDirs(t *testing.T) {
-	// writeFileSecrets should pre-create the parent directory of file secret
-	// mount targets inside the agent home so Docker does not create them as
-	// root (which makes the agent dir undeletable by non-root users).
+func TestSerializeSecrets_DuplicateTargetKeepsLater(t *testing.T) {
+	secrets := []api.ResolvedSecret{
+		{Name: "CERT_V1", Type: "file", Target: "/etc/cert.pem", Value: base64.StdEncoding.EncodeToString([]byte("v1")), Source: "user"},
+		{Name: "CERT_V2", Type: "file", Target: "/etc/cert.pem", Value: base64.StdEncoding.EncodeToString([]byte("v2")), Source: "project"},
+	}
+
+	encoded, err := serializeSecrets("/home/scion", secrets)
+	if err != nil {
+		t.Fatalf("serializeSecrets failed: %v", err)
+	}
+
+	staged, err := DecodeStagedSecrets(encoded)
+	if err != nil {
+		t.Fatalf("DecodeStagedSecrets failed: %v", err)
+	}
+
+	// Dedup keeps both entries (last one wins on write), but the slice should
+	// contain both — WriteStagedSecrets writes them sequentially so the last
+	// one's content prevails on disk.
+	if len(staged.FileSecrets) != 2 {
+		t.Fatalf("expected 2 file secrets (dedup keeps all, last wins on write), got %d", len(staged.FileSecrets))
+	}
+}
+
+func TestWriteStagedSecrets_FileSecrets(t *testing.T) {
 	homeDir := t.TempDir()
+	targetDir := t.TempDir()
+
+	staged := &StagedSecrets{
+		FileSecrets: []StagedFileSecret{
+			{
+				Name:   "TLS_CERT",
+				Target: filepath.Join(targetDir, "ssl", "cert.pem"),
+				Value:  base64.StdEncoding.EncodeToString([]byte("cert-content")),
+			},
+			{
+				Name:   "SSH_KEY",
+				Target: filepath.Join(targetDir, "ssh", "id_rsa"),
+				Value:  base64.StdEncoding.EncodeToString([]byte("ssh-key")),
+			},
+		},
+	}
+
+	if err := WriteStagedSecrets(homeDir, staged); err != nil {
+		t.Fatalf("WriteStagedSecrets failed: %v", err)
+	}
+
+	// Verify files were written with correct content
+	content, err := os.ReadFile(filepath.Join(targetDir, "ssl", "cert.pem"))
+	if err != nil {
+		t.Fatalf("failed to read cert.pem: %v", err)
+	}
+	if string(content) != "cert-content" {
+		t.Errorf("expected cert-content, got %q", string(content))
+	}
+
+	content, err = os.ReadFile(filepath.Join(targetDir, "ssh", "id_rsa"))
+	if err != nil {
+		t.Fatalf("failed to read id_rsa: %v", err)
+	}
+	if string(content) != "ssh-key" {
+		t.Errorf("expected ssh-key, got %q", string(content))
+	}
+
+	// Verify file permissions (0600)
+	info, err := os.Stat(filepath.Join(targetDir, "ssl", "cert.pem"))
+	if err != nil {
+		t.Fatalf("failed to stat cert.pem: %v", err)
+	}
+	if info.Mode().Perm() != 0600 {
+		t.Errorf("expected file mode 0600, got %o", info.Mode().Perm())
+	}
+}
+
+func TestWriteStagedSecrets_VariableSecrets(t *testing.T) {
+	homeDir := t.TempDir()
+
+	staged := &StagedSecrets{
+		VariableSecrets: map[string]string{
+			"config": `{"a":"b"}`,
+			"token":  "abc123",
+		},
+	}
+
+	if err := WriteStagedSecrets(homeDir, staged); err != nil {
+		t.Fatalf("WriteStagedSecrets failed: %v", err)
+	}
+
+	// Verify secrets.json was written
+	data, err := os.ReadFile(filepath.Join(homeDir, ".scion", "secrets.json"))
+	if err != nil {
+		t.Fatalf("failed to read secrets.json: %v", err)
+	}
+
+	var vars map[string]string
+	if err := json.Unmarshal(data, &vars); err != nil {
+		t.Fatalf("failed to unmarshal secrets.json: %v", err)
+	}
+
+	if len(vars) != 2 {
+		t.Fatalf("expected 2 variable entries, got %d", len(vars))
+	}
+	if vars["config"] != `{"a":"b"}` {
+		t.Errorf("config mismatch: got %q", vars["config"])
+	}
+	if vars["token"] != "abc123" {
+		t.Errorf("token mismatch: got %q", vars["token"])
+	}
+
+	// Verify file permissions
+	info, err := os.Stat(filepath.Join(homeDir, ".scion", "secrets.json"))
+	if err != nil {
+		t.Fatalf("failed to stat secrets.json: %v", err)
+	}
+	if info.Mode().Perm() != 0600 {
+		t.Errorf("expected file mode 0600, got %o", info.Mode().Perm())
+	}
+}
+
+func TestWriteStagedSecrets_NoVariables(t *testing.T) {
+	homeDir := t.TempDir()
+
+	staged := &StagedSecrets{}
+
+	if err := WriteStagedSecrets(homeDir, staged); err != nil {
+		t.Fatalf("WriteStagedSecrets failed: %v", err)
+	}
+
+	// secrets.json should NOT be created when there are no variable secrets
+	if _, err := os.Stat(filepath.Join(homeDir, ".scion", "secrets.json")); !os.IsNotExist(err) {
+		t.Error("expected secrets.json to not be created when no variable secrets exist")
+	}
+}
+
+func TestDecodeStagedSecrets_InvalidBase64(t *testing.T) {
+	_, err := DecodeStagedSecrets("not-valid-base64!!!")
+	if err == nil {
+		t.Error("expected error for invalid base64")
+	}
+}
+
+func TestDecodeStagedSecrets_InvalidJSON(t *testing.T) {
+	encoded := base64.StdEncoding.EncodeToString([]byte("not json"))
+	_, err := DecodeStagedSecrets(encoded)
+	if err == nil {
+		t.Error("expected error for invalid JSON")
+	}
+}
+
+func TestSerializeAndWriteRoundTrip(t *testing.T) {
+	homeDir := t.TempDir()
+	targetDir := t.TempDir()
 
 	secrets := []api.ResolvedSecret{
 		{
-			Name:   "telemetry-creds",
+			Name:   "CERT",
 			Type:   "file",
-			Target: "~/.scion/telemetry-gcp-credentials.json",
-			Value:  base64.StdEncoding.EncodeToString([]byte("cred-data")),
+			Target: filepath.Join(targetDir, "cert.pem"),
+			Value:  base64.StdEncoding.EncodeToString([]byte("my-cert")),
+			Source: "user",
+		},
+		{
+			Name:   "CONFIG",
+			Type:   "variable",
+			Target: "app_config",
+			Value:  `{"db":"postgres"}`,
 			Source: "project",
 		},
 		{
-			Name:   "nested-secret",
-			Type:   "file",
-			Target: "~/.config/deep/nested/secret.json",
-			Value:  base64.StdEncoding.EncodeToString([]byte("nested-data")),
-			Source: "user",
-		},
-		{
-			Name:   "abs-secret",
-			Type:   "file",
-			Target: "/etc/ssl/cert.pem",
-			Value:  base64.StdEncoding.EncodeToString([]byte("cert")),
+			Name:   "ENV_KEY",
+			Type:   "environment",
+			Target: "ENV_KEY",
+			Value:  "should-be-excluded",
 			Source: "user",
 		},
 	}
 
-	_, err := writeFileSecrets(homeDir, "/home/scion", secrets)
+	// Broker side: serialize
+	encoded, err := serializeSecrets("/unused", secrets)
 	if err != nil {
-		t.Fatalf("writeFileSecrets failed: %v", err)
+		t.Fatalf("serializeSecrets failed: %v", err)
 	}
 
-	// .scion dir should be pre-created inside the agent home
-	scionDir := filepath.Join(homeDir, ".scion")
-	info, err := os.Stat(scionDir)
+	// Container side: decode + write
+	staged, err := DecodeStagedSecrets(encoded)
 	if err != nil {
-		t.Fatalf("expected %s to exist, got: %v", scionDir, err)
+		t.Fatalf("DecodeStagedSecrets failed: %v", err)
 	}
-	if !info.IsDir() {
-		t.Fatalf("expected %s to be a directory", scionDir)
+	if err := WriteStagedSecrets(homeDir, staged); err != nil {
+		t.Fatalf("WriteStagedSecrets failed: %v", err)
 	}
 
-	// Nested parent dirs should also be pre-created
-	nestedDir := filepath.Join(homeDir, ".config", "deep", "nested")
-	info, err = os.Stat(nestedDir)
+	// Verify file secret
+	content, err := os.ReadFile(filepath.Join(targetDir, "cert.pem"))
 	if err != nil {
-		t.Fatalf("expected %s to exist, got: %v", nestedDir, err)
+		t.Fatalf("failed to read cert.pem: %v", err)
 	}
-	if !info.IsDir() {
-		t.Fatalf("expected %s to be a directory", nestedDir)
+	if string(content) != "my-cert" {
+		t.Errorf("expected my-cert, got %q", string(content))
 	}
 
-	// Absolute path outside container home should NOT create dirs inside agent home
-	etcDir := filepath.Join(homeDir, "etc", "ssl")
-	if _, err := os.Stat(etcDir); !os.IsNotExist(err) {
-		t.Errorf("expected %s to NOT exist for absolute target outside container home", etcDir)
+	// Verify variable secret
+	data, err := os.ReadFile(filepath.Join(homeDir, ".scion", "secrets.json"))
+	if err != nil {
+		t.Fatalf("failed to read secrets.json: %v", err)
+	}
+	var vars map[string]string
+	if err := json.Unmarshal(data, &vars); err != nil {
+		t.Fatalf("failed to unmarshal: %v", err)
+	}
+	if vars["app_config"] != `{"db":"postgres"}` {
+		t.Errorf("variable secret mismatch: got %q", vars["app_config"])
 	}
 }
 
@@ -228,120 +402,6 @@ func TestExpandTildeTarget(t *testing.T) {
 		if result != tc.expected {
 			t.Errorf("expandTildeTarget(%q, %q) = %q, want %q", tc.target, tc.containerHome, result, tc.expected)
 		}
-	}
-}
-
-func TestWriteVariableSecrets(t *testing.T) {
-	homeDir := t.TempDir()
-
-	secrets := []api.ResolvedSecret{
-		{Name: "CONFIG", Type: "variable", Target: "config", Value: `{"a":"b"}`, Source: "user"},
-		{Name: "TOKEN", Type: "variable", Target: "token", Value: "abc123", Source: "project"},
-		{Name: "ENV_KEY", Type: "environment", Target: "ENV_KEY", Value: "val", Source: "user"},
-	}
-
-	if err := writeVariableSecrets(homeDir, secrets); err != nil {
-		t.Fatalf("writeVariableSecrets failed: %v", err)
-	}
-
-	// Read and verify secrets.json
-	data, err := os.ReadFile(filepath.Join(homeDir, ".scion", "secrets.json"))
-	if err != nil {
-		t.Fatalf("failed to read secrets.json: %v", err)
-	}
-
-	var vars map[string]string
-	if err := json.Unmarshal(data, &vars); err != nil {
-		t.Fatalf("failed to unmarshal secrets.json: %v", err)
-	}
-
-	if len(vars) != 2 {
-		t.Fatalf("expected 2 variable entries, got %d", len(vars))
-	}
-	if vars["config"] != `{"a":"b"}` {
-		t.Errorf("config value mismatch: got %q", vars["config"])
-	}
-	if vars["token"] != "abc123" {
-		t.Errorf("token value mismatch: got %q", vars["token"])
-	}
-
-	// Verify file permissions
-	info, err := os.Stat(filepath.Join(homeDir, ".scion", "secrets.json"))
-	if err != nil {
-		t.Fatalf("failed to stat secrets.json: %v", err)
-	}
-	if info.Mode().Perm() != 0600 {
-		t.Errorf("expected file mode 0600, got %o", info.Mode().Perm())
-	}
-}
-
-func TestWriteVariableSecrets_NoVariables(t *testing.T) {
-	homeDir := t.TempDir()
-
-	secrets := []api.ResolvedSecret{
-		{Name: "KEY", Type: "environment", Target: "KEY", Value: "val"},
-	}
-
-	if err := writeVariableSecrets(homeDir, secrets); err != nil {
-		t.Fatalf("writeVariableSecrets failed: %v", err)
-	}
-
-	// secrets.json should NOT be created when there are no variable secrets
-	if _, err := os.Stat(filepath.Join(homeDir, ".scion", "secrets.json")); !os.IsNotExist(err) {
-		t.Error("expected secrets.json to not be created when no variable secrets exist")
-	}
-}
-
-func TestWriteSecretMap(t *testing.T) {
-	homeDir := t.TempDir()
-
-	secrets := []api.ResolvedSecret{
-		{Name: "CERT", Type: "file", Target: "/etc/ssl/cert.pem", Value: "data", Source: "user"},
-		{Name: "KEY", Type: "file", Target: "/etc/ssl/key.pem", Value: "data", Source: "project"},
-		{Name: "ENV", Type: "environment", Target: "ENV", Value: "val", Source: "user"},
-	}
-
-	if err := writeSecretMap(homeDir, "/home/scion", secrets); err != nil {
-		t.Fatalf("writeSecretMap failed: %v", err)
-	}
-
-	secretsDir := filepath.Join(filepath.Dir(homeDir), "secrets")
-	data, err := os.ReadFile(filepath.Join(secretsDir, "secret-map.json"))
-	if err != nil {
-		t.Fatalf("failed to read secret-map.json: %v", err)
-	}
-
-	var entries []secretMapEntry
-	if err := json.Unmarshal(data, &entries); err != nil {
-		t.Fatalf("failed to unmarshal secret-map.json: %v", err)
-	}
-
-	if len(entries) != 2 {
-		t.Fatalf("expected 2 entries in secret-map.json, got %d", len(entries))
-	}
-
-	if entries[0].Name != "CERT" || entries[0].Target != "/etc/ssl/cert.pem" || entries[0].Source != "CERT" {
-		t.Errorf("unexpected first entry: %+v", entries[0])
-	}
-	if entries[1].Name != "KEY" || entries[1].Target != "/etc/ssl/key.pem" || entries[1].Source != "KEY" {
-		t.Errorf("unexpected second entry: %+v", entries[1])
-	}
-}
-
-func TestWriteSecretMap_NoFileSecrets(t *testing.T) {
-	homeDir := t.TempDir()
-
-	secrets := []api.ResolvedSecret{
-		{Name: "KEY", Type: "environment", Target: "KEY", Value: "val"},
-	}
-
-	if err := writeSecretMap(homeDir, "/home/scion", secrets); err != nil {
-		t.Fatalf("writeSecretMap failed: %v", err)
-	}
-
-	secretsDir := filepath.Join(filepath.Dir(homeDir), "secrets")
-	if _, err := os.Stat(filepath.Join(secretsDir, "secret-map.json")); !os.IsNotExist(err) {
-		t.Error("expected secret-map.json to not be created when no file secrets exist")
 	}
 }
 
@@ -447,8 +507,6 @@ func TestInsertVolumeFlags(t *testing.T) {
 }
 
 func TestInsertVolumeFlags_SecretMountsBeforeImage(t *testing.T) {
-	// Simulate the full flow: buildCommonRunArgs produces args with image+command at the end,
-	// then insertVolumeFlags should place secret mounts before the image.
 	config := RunConfig{
 		Name:         "test-agent",
 		UnixUsername: "scion",
@@ -464,7 +522,6 @@ func TestInsertVolumeFlags_SecretMountsBeforeImage(t *testing.T) {
 	secretSpecs := []string{"/host/secrets/CERT:/etc/ssl/cert.pem:ro"}
 	result := insertVolumeFlags(args, config.Image, secretSpecs)
 
-	// Find the positions of the secret mount and image in the result
 	secretIdx := -1
 	imageIdx := -1
 	for i, a := range result {

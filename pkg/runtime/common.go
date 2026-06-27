@@ -788,156 +788,139 @@ func applyResolvedAuth(config RunConfig, addEnv func(string, string), addVolume 
 	return nil
 }
 
-// writeFileSecrets writes file-type secrets to a staging directory and returns
-// bind-mount specs that should be added to the container run command.
-// The staging directory is created as a sibling of homeDir: <parent>/secrets/<name>/
-// The containerHome parameter is the container user's home directory (e.g., /home/gemini)
-// and is used to expand ~/ prefixes in target paths.
-func writeFileSecrets(homeDir string, containerHome string, secrets []api.ResolvedSecret) ([]string, error) {
-	secretsDir := filepath.Join(filepath.Dir(homeDir), "secrets")
+// StagedSecretEnvVar is the environment variable used to pass serialized
+// file and variable secrets from the broker to the container. The value is
+// a base64-encoded JSON blob decoded by sciontool init.
+const StagedSecretEnvVar = "SCION_STAGED_SECRETS"
 
-	// Deduplicate by container target path (defense-in-depth — the secret
-	// backend should already have resolved target conflicts, but if multiple
-	// file secrets still share a target we keep only the last one, which
-	// corresponds to the highest-scope entry when the list is ordered).
-	type fileEntry struct {
-		secret api.ResolvedSecret
-		index  int
-	}
-	targetMap := make(map[string]fileEntry)
-	var targetOrder []string
-	idx := 0
-	for _, s := range secrets {
-		if s.Type != "file" {
-			continue
-		}
-		containerTarget := expandTildeTarget(s.Target, containerHome)
-		if _, exists := targetMap[containerTarget]; !exists {
-			targetOrder = append(targetOrder, containerTarget)
-		} else {
-			slog.Warn("writeFileSecrets: duplicate container target, keeping later entry",
-				"target", containerTarget,
-				"kept", s.Name,
-				"replaced", targetMap[containerTarget].secret.Name,
-			)
-		}
-		targetMap[containerTarget] = fileEntry{secret: s, index: idx}
-		idx++
-	}
+// stagedSecretWarnThreshold is the size (in bytes) above which a warning is
+// logged for the serialized secret blob. Container runtimes typically cap
+// the combined environment at ~128KB.
+const stagedSecretWarnThreshold = 100 * 1024
 
-	var mountSpecs []string
-	for _, containerTarget := range targetOrder {
-		entry := targetMap[containerTarget]
-		s := entry.secret
-
-		// Decode base64-encoded file content
-		data, err := base64.StdEncoding.DecodeString(s.Value)
-		if err != nil {
-			// Fall back to raw value if not base64-encoded
-			data = []byte(s.Value)
-		}
-
-		// Write to staging dir using the secret name as filename
-		hostPath := filepath.Join(secretsDir, s.Name)
-		if err := os.MkdirAll(filepath.Dir(hostPath), 0700); err != nil {
-			return nil, fmt.Errorf("failed to create secret directory: %w", err)
-		}
-		if err := os.WriteFile(hostPath, data, 0600); err != nil {
-			return nil, fmt.Errorf("failed to write secret file %s: %w", s.Name, err)
-		}
-
-		// Pre-create the parent directory of the mount target inside the
-		// agent home so that Docker/Podman does not create it as root
-		// (which would make the agent directory undeletable by a non-root
-		// broker process).
-		if homeDir != "" && strings.HasPrefix(containerTarget, containerHome+"/") {
-			rel := strings.TrimPrefix(containerTarget, containerHome+"/")
-			parentDir := filepath.Dir(rel)
-			if parentDir != "." {
-				_ = os.MkdirAll(filepath.Join(homeDir, parentDir), 0755)
-			}
-		}
-
-		// Bind-mount from host staging path to container target path (read-only)
-		mountSpecs = append(mountSpecs, fmt.Sprintf("%s:%s:ro", hostPath, containerTarget))
-	}
-
-	return mountSpecs, nil
-}
-
-// writeVariableSecrets writes variable-type secrets to ~/.scion/secrets.json
-// inside the agent's home directory for programmatic access.
-func writeVariableSecrets(homeDir string, secrets []api.ResolvedSecret) error {
-	vars := make(map[string]string)
-	for _, s := range secrets {
-		if s.Type != "variable" {
-			continue
-		}
-		vars[s.Target] = s.Value
-	}
-
-	if len(vars) == 0 {
-		return nil
-	}
-
-	scionDir := filepath.Join(homeDir, ".scion")
-	if err := os.MkdirAll(scionDir, 0700); err != nil {
-		return fmt.Errorf("failed to create .scion directory: %w", err)
-	}
-
-	data, err := json.Marshal(vars)
-	if err != nil {
-		return fmt.Errorf("failed to marshal secrets.json: %w", err)
-	}
-
-	return os.WriteFile(filepath.Join(scionDir, "secrets.json"), data, 0600)
-}
-
-// secretMapEntry describes a file secret for the Apple runtime's secret-map.json.
-type secretMapEntry struct {
+// StagedFileSecret describes a single file-type secret in the staged blob.
+type StagedFileSecret struct {
 	Name   string `json:"name"`
-	Target string `json:"target"`
-	Source string `json:"source"` // relative path within the secrets volume
+	Target string `json:"target"` // container-side path (tilde already expanded)
+	Value  string `json:"value"`  // base64-encoded file content
 }
 
-// writeSecretMap writes a secret-map.json manifest that the Apple container runtime
-// uses to copy file secrets from the shared volume to their target paths.
-// The containerHome parameter is used to expand ~/ prefixes in target paths.
-func writeSecretMap(homeDir string, containerHome string, secrets []api.ResolvedSecret) error {
-	// Deduplicate by container target (mirrors writeFileSecrets logic)
+// StagedSecrets is the top-level structure serialized into SCION_STAGED_SECRETS.
+type StagedSecrets struct {
+	FileSecrets     []StagedFileSecret `json:"file_secrets,omitempty"`
+	VariableSecrets map[string]string  `json:"variable_secrets,omitempty"`
+}
+
+// serializeSecrets collects file and variable secrets into a single JSON blob,
+// base64-encodes it, and returns the encoded string suitable for injection as
+// an environment variable. Returns "" when there are no file or variable secrets.
+// The containerHome parameter is used to expand ~/ prefixes in file target paths.
+func serializeSecrets(containerHome string, secrets []api.ResolvedSecret) (string, error) {
+	var staged StagedSecrets
+
+	// Collect file secrets, deduplicating by container target path.
 	seen := make(map[string]bool)
-	var entries []secretMapEntry
 	for _, s := range secrets {
 		if s.Type != "file" {
 			continue
 		}
 		target := expandTildeTarget(s.Target, containerHome)
 		if seen[target] {
-			continue
+			slog.Warn("serializeSecrets: duplicate container target, keeping later entry",
+				"target", target, "kept", s.Name)
 		}
 		seen[target] = true
-		entries = append(entries, secretMapEntry{
+
+		// Re-encode raw values as base64 for uniform handling on the container side.
+		val := s.Value
+		if _, err := base64.StdEncoding.DecodeString(val); err != nil {
+			val = base64.StdEncoding.EncodeToString([]byte(val))
+		}
+
+		staged.FileSecrets = append(staged.FileSecrets, StagedFileSecret{
 			Name:   s.Name,
 			Target: target,
-			Source: s.Name, // filename within secrets/ volume
+			Value:  val,
 		})
 	}
 
-	if len(entries) == 0 {
-		return nil
+	// Collect variable secrets.
+	for _, s := range secrets {
+		if s.Type != "variable" {
+			continue
+		}
+		if staged.VariableSecrets == nil {
+			staged.VariableSecrets = make(map[string]string)
+		}
+		staged.VariableSecrets[s.Target] = s.Value
 	}
 
-	secretsDir := filepath.Join(filepath.Dir(homeDir), "secrets")
-	if err := os.MkdirAll(secretsDir, 0700); err != nil {
-		return fmt.Errorf("failed to create secrets directory: %w", err)
+	if len(staged.FileSecrets) == 0 && len(staged.VariableSecrets) == 0 {
+		return "", nil
 	}
 
-	data, err := json.Marshal(entries)
+	jsonData, err := json.Marshal(staged)
 	if err != nil {
-		return fmt.Errorf("failed to marshal secret-map.json: %w", err)
+		return "", fmt.Errorf("failed to serialize staged secrets: %w", err)
 	}
 
-	return os.WriteFile(filepath.Join(secretsDir, "secret-map.json"), data, 0600)
+	encoded := base64.StdEncoding.EncodeToString(jsonData)
+	if len(encoded) > stagedSecretWarnThreshold {
+		slog.Warn("serialized secrets blob exceeds size warning threshold",
+			"size_bytes", len(encoded), "threshold_bytes", stagedSecretWarnThreshold)
+	}
+
+	return encoded, nil
+}
+
+// DecodeStagedSecrets decodes the SCION_STAGED_SECRETS env var value
+// (base64 → JSON) and returns the structured secrets. This is called
+// inside the container by sciontool init.
+func DecodeStagedSecrets(encoded string) (*StagedSecrets, error) {
+	jsonData, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		return nil, fmt.Errorf("failed to base64-decode staged secrets: %w", err)
+	}
+	var staged StagedSecrets
+	if err := json.Unmarshal(jsonData, &staged); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal staged secrets JSON: %w", err)
+	}
+	return &staged, nil
+}
+
+// WriteStagedSecrets writes decoded staged secrets to the filesystem inside
+// the container. File secrets are written to their target paths with 0600
+// permissions. Variable secrets are written to <homeDir>/.scion/secrets.json.
+func WriteStagedSecrets(homeDir string, staged *StagedSecrets) error {
+	for _, fs := range staged.FileSecrets {
+		data, err := base64.StdEncoding.DecodeString(fs.Value)
+		if err != nil {
+			data = []byte(fs.Value)
+		}
+
+		if err := os.MkdirAll(filepath.Dir(fs.Target), 0755); err != nil {
+			return fmt.Errorf("failed to create directory for secret %s: %w", fs.Name, err)
+		}
+		if err := os.WriteFile(fs.Target, data, 0600); err != nil {
+			return fmt.Errorf("failed to write secret file %s: %w", fs.Name, err)
+		}
+	}
+
+	if len(staged.VariableSecrets) > 0 {
+		scionDir := filepath.Join(homeDir, ".scion")
+		if err := os.MkdirAll(scionDir, 0700); err != nil {
+			return fmt.Errorf("failed to create .scion directory: %w", err)
+		}
+		data, err := json.Marshal(staged.VariableSecrets)
+		if err != nil {
+			return fmt.Errorf("failed to marshal secrets.json: %w", err)
+		}
+		if err := os.WriteFile(filepath.Join(scionDir, "secrets.json"), data, 0600); err != nil {
+			return fmt.Errorf("failed to write secrets.json: %w", err)
+		}
+	}
+
+	return nil
 }
 
 // phaseFromContainerStatus derives an agent phase from a container status string.
