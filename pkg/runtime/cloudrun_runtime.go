@@ -3,12 +3,16 @@ package runtime
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
+	"time"
 
-	run "cloud.google.com/go/run/apiv2"
+	runapi "cloud.google.com/go/run/apiv2"
 	"cloud.google.com/go/run/apiv2/runpb"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"google.golang.org/api/iterator"
 )
 
@@ -42,8 +46,8 @@ func (r *CloudRunRuntime) ExecUser() string {
 }
 
 // client creates a new Cloud Run Instances client. Caller is responsible for closing.
-func (r *CloudRunRuntime) client(ctx context.Context) (*run.InstancesClient, error) {
-	return run.NewInstancesClient(ctx)
+func (r *CloudRunRuntime) client(ctx context.Context) (*runapi.InstancesClient, error) {
+	return runapi.NewInstancesClient(ctx)
 }
 
 func (r *CloudRunRuntime) Run(ctx context.Context, cfg RunConfig) (string, error) {
@@ -86,9 +90,147 @@ func (r *CloudRunRuntime) Run(ctx context.Context, cfg RunConfig) (string, error
 		parts := strings.SplitN(e, "=", 2)
 		if len(parts) == 2 {
 			envVars = append(envVars, &runpb.EnvVar{
-				Name: parts[0],
+				Name:   parts[0],
 				Values: &runpb.EnvVar_Value{Value: parts[1]},
 			})
+		}
+	}
+
+	uid := 1000
+	gid := 1000
+	if cfg.WorkspaceBackendName != "nfs" {
+		uid = os.Getuid()
+		gid = os.Getgid()
+	} else if cfg.NFSUID != 0 {
+		uid = cfg.NFSUID
+		gid = cfg.NFSGID
+	}
+	envVars = append(envVars, &runpb.EnvVar{
+		Name:   "SCION_HOST_UID",
+		Values: &runpb.EnvVar_Value{Value: fmt.Sprintf("%d", uid)},
+	})
+	envVars = append(envVars, &runpb.EnvVar{
+		Name:   "SCION_HOST_GID",
+		Values: &runpb.EnvVar_Value{Value: fmt.Sprintf("%d", gid)},
+	})
+
+	var volumes []*runpb.Volume
+	var volumeMounts []*runpb.VolumeMount
+
+	if cfg.WorkspaceBackendName == "nfs" && r.config.NFSServer != "" && r.config.NFSExport != "" {
+		workspaceNFSPath := fmt.Sprintf("%s/projects/%s/workspace", r.config.NFSExport, cfg.ProjectID)
+		homeNFSPath := fmt.Sprintf("%s/projects/%s/agents/%s/home", r.config.NFSExport, cfg.ProjectID, agentID)
+		secretsNFSPath := fmt.Sprintf("%s/projects/%s/agents/%s/secrets", r.config.NFSExport, cfg.ProjectID, agentID)
+
+		volumes = append(volumes, &runpb.Volume{
+			Name: "workspace",
+			VolumeType: &runpb.Volume_Nfs{
+				Nfs: &runpb.NFSVolumeSource{
+					Server:   r.config.NFSServer,
+					Path:     workspaceNFSPath,
+					ReadOnly: false,
+				},
+			},
+		})
+		volumeMounts = append(volumeMounts, &runpb.VolumeMount{
+			Name:      "workspace",
+			MountPath: "/workspace",
+		})
+
+		volumes = append(volumes, &runpb.Volume{
+			Name: "home",
+			VolumeType: &runpb.Volume_Nfs{
+				Nfs: &runpb.NFSVolumeSource{
+					Server:   r.config.NFSServer,
+					Path:     homeNFSPath,
+					ReadOnly: false,
+				},
+			},
+		})
+		volumeMounts = append(volumeMounts, &runpb.VolumeMount{
+			Name:      "home",
+			MountPath: "/home/" + r.ExecUser(),
+		})
+
+		volumes = append(volumes, &runpb.Volume{
+			Name: "secrets",
+			VolumeType: &runpb.Volume_Nfs{
+				Nfs: &runpb.NFSVolumeSource{
+					Server:   r.config.NFSServer,
+					Path:     secretsNFSPath,
+					ReadOnly: true,
+				},
+			},
+		})
+		volumeMounts = append(volumeMounts, &runpb.VolumeMount{
+			Name:      "secrets",
+			MountPath: "/home/" + r.ExecUser() + "/.scion/secrets",
+		})
+
+		workspaceHostPath := cfg.Workspace
+		if workspaceHostPath != "" {
+			projectRoot := filepath.Dir(workspaceHostPath)
+			agentHomeHostPath := filepath.Join(projectRoot, "agents", agentID, "home")
+			agentSecretsHostPath := filepath.Join(projectRoot, "agents", agentID, "secrets")
+
+			if cfg.Locker != nil {
+				objID := store.StableProjectHash(cfg.ProjectID)
+				acquired, release, err := cfg.Locker.TryAdvisoryLockObject(
+					ctx, store.LockWorkspaceProvision, objID,
+				)
+				if err != nil {
+					return "", fmt.Errorf("NFS provision advisory lock: %w", err)
+				}
+				if acquired {
+					defer release()
+					if err := os.MkdirAll(workspaceHostPath, 0755); err != nil {
+						return "", fmt.Errorf("failed to create NFS workspace dir: %w", err)
+					}
+					os.Chown(workspaceHostPath, uid, gid)
+
+					sentinelPath := filepath.Join(workspaceHostPath, ".scion-provisioned")
+					os.WriteFile(sentinelPath, []byte("done"), 0644)
+					os.Chown(sentinelPath, uid, gid)
+				} else {
+					sentinelPath := filepath.Join(workspaceHostPath, ".scion-provisioned")
+					ctxTimeout, cancel := context.WithTimeout(ctx, 2*time.Minute)
+					defer cancel()
+					ticker := time.NewTicker(1 * time.Second)
+					defer ticker.Stop()
+
+					found := false
+					for !found {
+						select {
+						case <-ctxTimeout.Done():
+							return "", fmt.Errorf("timeout waiting for workspace provisioning sentinel: %s", sentinelPath)
+						case <-ticker.C:
+							if _, err := os.Stat(sentinelPath); err == nil {
+								found = true
+							}
+						}
+					}
+				}
+			} else {
+				sentinelPath := filepath.Join(workspaceHostPath, ".scion-provisioned")
+				if _, err := os.Stat(sentinelPath); err != nil {
+					if err := os.MkdirAll(workspaceHostPath, 0755); err != nil {
+						return "", fmt.Errorf("failed to create NFS workspace dir: %w", err)
+					}
+					os.Chown(workspaceHostPath, uid, gid)
+					os.WriteFile(sentinelPath, []byte("done"), 0644)
+					os.Chown(sentinelPath, uid, gid)
+				}
+			}
+
+			if err := os.MkdirAll(agentHomeHostPath, 0755); err != nil {
+				return "", fmt.Errorf("failed to create NFS home dir: %w", err)
+			}
+			os.Chown(agentHomeHostPath, uid, gid)
+
+			if err := os.MkdirAll(agentSecretsHostPath, 0755); err != nil {
+				return "", fmt.Errorf("failed to create NFS secrets dir: %w", err)
+			}
+			os.Chown(agentSecretsHostPath, uid, gid)
 		}
 	}
 
@@ -101,13 +243,15 @@ func (r *CloudRunRuntime) Run(ctx context.Context, cfg RunConfig) (string, error
 		LaunchStage: 1, // ALPHA
 		Containers: []*runpb.Container{
 			{
-				Name:    "scion-agent",
-				Image:   cfg.Image,
-				Command: cfg.CommandArgs,
-				Env:     envVars,
+				Name:         "scion-agent",
+				Image:        cfg.Image,
+				Command:      cfg.CommandArgs,
+				Env:          envVars,
+				VolumeMounts: volumeMounts,
 			},
 		},
-		Labels: labels,
+		Volumes: volumes,
+		Labels:  labels,
 	}
 
 	req := &runpb.CreateInstanceRequest{
