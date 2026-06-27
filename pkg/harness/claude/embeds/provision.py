@@ -157,7 +157,6 @@ def _select_auth_method(
     has_authfile = _auth_file_present(file_paths, CLAUDE_AUTH_FILE)
     has_gcp_project = "GOOGLE_CLOUD_PROJECT" in env_keys
     has_gcp_region = "GOOGLE_CLOUD_REGION" in env_keys
-    has_adc = _auth_file_present(file_paths, ADC_FILE)
 
     if explicit:
         if explicit not in VALID_AUTH_TYPES:
@@ -338,7 +337,9 @@ def _apply_mcp_servers(bundle: str, workspace: str) -> int:
             print(f"claude provision: applied {count} mcp server(s)", file=sys.stderr)
         return count
 
-    # Inline fallback when scion_harness is not available.
+    # Inline fallback when scion_harness is not available. Only writes to
+    # global mcpServers (not project-scoped) — intentional since scion_harness
+    # should always be available in production.
     claude_json_path = _expand(CLAUDE_JSON_FILE)
     cfg: dict[str, Any] = {}
     if os.path.isfile(claude_json_path):
@@ -434,11 +435,20 @@ def _provision(manifest: dict[str, Any]) -> int:
     file_paths = _present_file_paths(candidates)
     secret_files = _env_secret_files(candidates)
 
-    try:
-        method, env_key = _select_auth_method(explicit, env_keys, file_paths)
-    except ValueError as exc:
-        print(str(exc), file=sys.stderr)
-        return EXIT_ERROR
+    harness_cfg = manifest.get("harness_config") or {}
+    no_auth_cfg = harness_cfg.get("no_auth") or {}
+    no_auth_behavior = str(no_auth_cfg.get("behavior") or "").strip()
+
+    if not candidates and no_auth_behavior:
+        print(f"claude provision: no-auth mode (behavior={no_auth_behavior}), skipping auth setup", file=sys.stderr)
+        method = "none"
+        env_key = ""
+    else:
+        try:
+            method, env_key = _select_auth_method(explicit, env_keys, file_paths)
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            return EXIT_ERROR
 
     outputs = manifest.get("outputs") or {}
     env_out = _expand(outputs.get("env") or os.path.join(bundle, "outputs", "env.json"))
