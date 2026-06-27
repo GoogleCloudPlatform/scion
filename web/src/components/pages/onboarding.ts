@@ -739,7 +739,7 @@ export class ScionPageOnboarding extends LitElement {
           >
             <sl-option value="docker">Docker</sl-option>
             <sl-option value="podman">Podman</sl-option>
-            <sl-option value="container">Container (generic)</sl-option>
+            <sl-option value="container">Apple Container</sl-option>
           </sl-select>
         </div>
       `}
