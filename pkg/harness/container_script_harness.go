@@ -230,6 +230,16 @@ func (c *ContainerScriptHarness) ResolveAuth(auth api.AuthConfig) (*api.Resolved
 	addIfPresent("GOOGLE_CLOUD_REGION", auth.GoogleCloudRegion)
 	addIfPresent("CODEX_API_KEY", auth.CodexAPIKey)
 
+	// Forward config-driven auth env vars. These come from harness config
+	// metadata (auth.types[*].required_env) and are gathered by
+	// GatherAuthWithEnv. They are additive — hardcoded fields above take
+	// precedence if the same key appears in both.
+	for k, v := range auth.EnvVars {
+		if _, exists := resolved.EnvVars[k]; !exists {
+			resolved.EnvVars[k] = v
+		}
+	}
+
 	if auth.GoogleAppCredentials != "" {
 		resolved.Files = append(resolved.Files, api.FileMapping{
 			SourcePath:    auth.GoogleAppCredentials,

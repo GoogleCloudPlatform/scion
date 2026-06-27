@@ -1772,7 +1772,7 @@ func TestFilterResolvedSecretsForResolvedAuth(t *testing.T) {
 		},
 	}
 
-	filtered := filterResolvedSecretsForResolvedAuth(secrets, resolved)
+	filtered := filterResolvedSecretsForResolvedAuth(secrets, resolved, nil)
 	if len(filtered) != 2 {
 		t.Fatalf("expected 2 secrets after filtering, got %d", len(filtered))
 	}
@@ -1789,6 +1789,113 @@ func TestFilterResolvedSecretsForResolvedAuth(t *testing.T) {
 	}
 	if _, ok := got["gcloud-adc"]; ok {
 		t.Error("expected gcloud-adc to be dropped for api-key auth")
+	}
+}
+
+func TestIsAuthEnvKey_BuiltinKeys(t *testing.T) {
+	builtins := []string{
+		"GEMINI_API_KEY", "GOOGLE_API_KEY", "ANTHROPIC_API_KEY",
+		"CLAUDE_CODE_OAUTH_TOKEN", "OPENAI_API_KEY", "CODEX_API_KEY",
+		"GOOGLE_CLOUD_PROJECT", "GCP_PROJECT", "ANTHROPIC_VERTEX_PROJECT_ID",
+		"GOOGLE_CLOUD_REGION", "CLOUD_ML_REGION", "GOOGLE_CLOUD_LOCATION",
+	}
+	for _, key := range builtins {
+		if !isAuthEnvKey(key) {
+			t.Errorf("isAuthEnvKey(%q) = false, want true", key)
+		}
+	}
+	if isAuthEnvKey("RANDOM_ENV_VAR") {
+		t.Error("isAuthEnvKey(RANDOM_ENV_VAR) = true, want false")
+	}
+}
+
+func TestIsAuthEnvKey_ConfigDrivenKeys(t *testing.T) {
+	configKeys := map[string]struct{}{
+		"COPILOT_GITHUB_TOKEN": {},
+		"GH_TOKEN":             {},
+		"GITHUB_TOKEN":         {},
+	}
+
+	if !isAuthEnvKey("COPILOT_GITHUB_TOKEN", configKeys) {
+		t.Error("isAuthEnvKey(COPILOT_GITHUB_TOKEN, configKeys) = false, want true")
+	}
+	if !isAuthEnvKey("GH_TOKEN", configKeys) {
+		t.Error("isAuthEnvKey(GH_TOKEN, configKeys) = false, want true")
+	}
+	// Built-in keys still work with config keys present
+	if !isAuthEnvKey("GEMINI_API_KEY", configKeys) {
+		t.Error("isAuthEnvKey(GEMINI_API_KEY, configKeys) = false, want true")
+	}
+	// Unknown key is still not auth
+	if isAuthEnvKey("RANDOM_VAR", configKeys) {
+		t.Error("isAuthEnvKey(RANDOM_VAR, configKeys) = true, want false")
+	}
+}
+
+func TestConfigAuthEnvKeySet(t *testing.T) {
+	authMeta := &config.HarnessAuthMetadata{
+		Types: map[string]config.HarnessAuthTypeMetadata{
+			"api-key": {
+				RequiredEnv: []config.HarnessAuthEnvRequirement{
+					{AnyOf: []string{"COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"}},
+				},
+			},
+			"vertex-ai": {
+				RequiredEnv: []config.HarnessAuthEnvRequirement{
+					{AnyOf: []string{"GOOGLE_CLOUD_PROJECT"}},
+				},
+			},
+		},
+	}
+
+	keys := configAuthEnvKeySet(authMeta)
+	expected := []string{"COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN", "GOOGLE_CLOUD_PROJECT"}
+	for _, k := range expected {
+		if _, ok := keys[k]; !ok {
+			t.Errorf("expected key %q in configAuthEnvKeySet result", k)
+		}
+	}
+
+	nilKeys := configAuthEnvKeySet(nil)
+	if nilKeys != nil {
+		t.Errorf("expected nil for nil authMeta, got %v", nilKeys)
+	}
+}
+
+func TestFilterResolvedSecretsForResolvedAuth_ConfigDrivenKeys(t *testing.T) {
+	configKeys := map[string]struct{}{
+		"COPILOT_GITHUB_TOKEN": {},
+		"GH_TOKEN":             {},
+	}
+
+	secrets := []api.ResolvedSecret{
+		{Name: "COPILOT_GITHUB_TOKEN", Type: "environment", Target: "COPILOT_GITHUB_TOKEN", Value: "ghp_test"},
+		{Name: "GH_TOKEN", Type: "environment", Target: "GH_TOKEN", Value: "gh_test"},
+		{Name: "SOME_OTHER_SECRET", Type: "environment", Target: "SOME_OTHER_SECRET", Value: "other"},
+	}
+
+	resolved := &api.ResolvedAuth{
+		Method: "api-key",
+		EnvVars: map[string]string{
+			"COPILOT_GITHUB_TOKEN": "ghp_test",
+		},
+	}
+
+	filtered := filterResolvedSecretsForResolvedAuth(secrets, resolved, configKeys)
+
+	got := make(map[string]struct{}, len(filtered))
+	for _, s := range filtered {
+		got[s.Name] = struct{}{}
+	}
+
+	if _, ok := got["COPILOT_GITHUB_TOKEN"]; !ok {
+		t.Error("expected COPILOT_GITHUB_TOKEN to be kept (required by resolved auth)")
+	}
+	if _, ok := got["GH_TOKEN"]; ok {
+		t.Error("expected GH_TOKEN to be dropped (config-driven auth key not required by resolved auth)")
+	}
+	if _, ok := got["SOME_OTHER_SECRET"]; !ok {
+		t.Error("expected SOME_OTHER_SECRET to be kept (not an auth key)")
 	}
 }
 

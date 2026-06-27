@@ -356,7 +356,7 @@ func TestGatherAuthWithEnv_OverlayTakesPrecedence(t *testing.T) {
 		"GEMINI_API_KEY": "overlay-gemini",
 	}
 
-	auth := GatherAuthWithEnv(overlay, true)
+	auth := GatherAuthWithEnv(overlay, true, nil)
 
 	if auth.GeminiAPIKey != "overlay-gemini" {
 		t.Errorf("GeminiAPIKey = %q, want %q (overlay should take precedence)", auth.GeminiAPIKey, "overlay-gemini")
@@ -372,7 +372,7 @@ func TestGatherAuthWithEnv_NilOverlay(t *testing.T) {
 	t.Setenv("OPENAI_API_KEY", "process-openai")
 
 	// nil overlay should behave identically to GatherAuth
-	auth := GatherAuthWithEnv(nil, true)
+	auth := GatherAuthWithEnv(nil, true, nil)
 
 	if auth.GeminiAPIKey != "process-gemini" {
 		t.Errorf("GeminiAPIKey = %q, want %q", auth.GeminiAPIKey, "process-gemini")
@@ -673,7 +673,7 @@ func TestGatherAuthWithEnv_EmptyOverlayValueFallsThrough(t *testing.T) {
 		"GEMINI_API_KEY": "",
 	}
 
-	auth := GatherAuthWithEnv(overlay, true)
+	auth := GatherAuthWithEnv(overlay, true, nil)
 
 	if auth.GeminiAPIKey != "process-gemini" {
 		t.Errorf("GeminiAPIKey = %q, want %q (empty overlay should fall through)", auth.GeminiAPIKey, "process-gemini")
@@ -691,7 +691,7 @@ func TestGatherAuthWithEnv_OverlayProjectFallbacks(t *testing.T) {
 		"GCP_PROJECT": "overlay-project",
 	}
 
-	auth := GatherAuthWithEnv(overlay, true)
+	auth := GatherAuthWithEnv(overlay, true, nil)
 
 	if auth.GoogleCloudProject != "overlay-project" {
 		t.Errorf("GoogleCloudProject = %q, want %q (overlay fallback)", auth.GoogleCloudProject, "overlay-project")
@@ -724,7 +724,7 @@ func TestGatherAuthWithEnv_OverlayAllKeys(t *testing.T) {
 		"GOOGLE_APPLICATION_CREDENTIALS": "/ov/creds.json",
 	}
 
-	auth := GatherAuthWithEnv(overlay, true)
+	auth := GatherAuthWithEnv(overlay, true, nil)
 
 	if auth.GeminiAPIKey != "ov-gemini" {
 		t.Errorf("GeminiAPIKey = %q, want %q", auth.GeminiAPIKey, "ov-gemini")
@@ -759,14 +759,14 @@ func TestGatherAuthWithEnv_GCPMetadataMode(t *testing.T) {
 	overlay := map[string]string{
 		"SCION_METADATA_MODE": "assign",
 	}
-	auth := GatherAuthWithEnv(overlay, true)
+	auth := GatherAuthWithEnv(overlay, true, nil)
 	if auth.GCPMetadataMode != "assign" {
 		t.Errorf("GCPMetadataMode = %q, want %q", auth.GCPMetadataMode, "assign")
 	}
 
 	// From process env
 	t.Setenv("SCION_METADATA_MODE", "block")
-	auth2 := GatherAuthWithEnv(nil, true)
+	auth2 := GatherAuthWithEnv(nil, true, nil)
 	if auth2.GCPMetadataMode != "block" {
 		t.Errorf("GCPMetadataMode = %q, want %q", auth2.GCPMetadataMode, "block")
 	}
@@ -852,7 +852,7 @@ func TestGatherAuthWithEnv_BrokerMode(t *testing.T) {
 	overlay := map[string]string{
 		"ANTHROPIC_API_KEY": "hub-anthropic",
 	}
-	auth := GatherAuthWithEnv(overlay, false)
+	auth := GatherAuthWithEnv(overlay, false, nil)
 
 	// Overlay key should be present
 	if auth.AnthropicAPIKey != "hub-anthropic" {
@@ -1160,6 +1160,7 @@ func TestStageCaptureAuthAssets(t *testing.T) {
 		agentHome := t.TempDir()
 		configDir := t.TempDir()
 
+
 		if err := os.WriteFile(filepath.Join(configDir, "capture_auth.py"), []byte("#!/usr/bin/env python3\n"), 0644); err != nil {
 			t.Fatal(err)
 		}
@@ -1177,4 +1178,134 @@ func TestStageCaptureAuthAssets(t *testing.T) {
 			t.Error("capture_auth.py should be executable")
 		}
 	})
+}
+
+func TestGatherAuthWithEnv_ConfigDrivenEnvVars(t *testing.T) {
+	t.Setenv("COPILOT_GITHUB_TOKEN", "ghp_test123")
+	t.Setenv("GH_TOKEN", "gh_test456")
+	t.Setenv("SCION_TEST_UNSET_TOKEN", "")
+	os.Unsetenv("SCION_TEST_UNSET_TOKEN")
+
+	authMeta := &config.HarnessAuthMetadata{
+		DefaultType: "api-key",
+		Types: map[string]config.HarnessAuthTypeMetadata{
+			"api-key": {
+				RequiredEnv: []config.HarnessAuthEnvRequirement{
+					{AnyOf: []string{"COPILOT_GITHUB_TOKEN", "GH_TOKEN", "SCION_TEST_UNSET_TOKEN"}},
+				},
+			},
+		},
+	}
+
+	auth := GatherAuthWithEnv(nil, true, authMeta)
+
+	if auth.EnvVars == nil {
+		t.Fatal("EnvVars should not be nil when config metadata declares env vars")
+	}
+	if auth.EnvVars["COPILOT_GITHUB_TOKEN"] != "ghp_test123" {
+		t.Errorf("COPILOT_GITHUB_TOKEN = %q, want %q", auth.EnvVars["COPILOT_GITHUB_TOKEN"], "ghp_test123")
+	}
+	if auth.EnvVars["GH_TOKEN"] != "gh_test456" {
+		t.Errorf("GH_TOKEN = %q, want %q", auth.EnvVars["GH_TOKEN"], "gh_test456")
+	}
+	if _, ok := auth.EnvVars["SCION_TEST_UNSET_TOKEN"]; ok {
+		t.Error("SCION_TEST_UNSET_TOKEN should not be in EnvVars when not set in environment")
+	}
+}
+
+func TestGatherAuthWithEnv_ConfigDrivenEnvVarsFromOverlay(t *testing.T) {
+	overlay := map[string]string{
+		"COPILOT_GITHUB_TOKEN": "overlay-token",
+	}
+
+	authMeta := &config.HarnessAuthMetadata{
+		Types: map[string]config.HarnessAuthTypeMetadata{
+			"api-key": {
+				RequiredEnv: []config.HarnessAuthEnvRequirement{
+					{AnyOf: []string{"COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"}},
+				},
+			},
+		},
+	}
+
+	auth := GatherAuthWithEnv(overlay, true, authMeta)
+
+	if auth.EnvVars == nil {
+		t.Fatal("EnvVars should not be nil")
+	}
+	if auth.EnvVars["COPILOT_GITHUB_TOKEN"] != "overlay-token" {
+		t.Errorf("COPILOT_GITHUB_TOKEN = %q, want %q", auth.EnvVars["COPILOT_GITHUB_TOKEN"], "overlay-token")
+	}
+}
+
+func TestGatherAuthWithEnv_NilAuthMetaNoEnvVars(t *testing.T) {
+	auth := GatherAuthWithEnv(nil, true, nil)
+	if auth.EnvVars != nil {
+		t.Errorf("EnvVars should be nil when authMeta is nil, got %v", auth.EnvVars)
+	}
+}
+
+func TestGatherAuthWithEnv_EmptyAuthMetaNoEnvVars(t *testing.T) {
+	authMeta := &config.HarnessAuthMetadata{}
+	auth := GatherAuthWithEnv(nil, true, authMeta)
+	if auth.EnvVars != nil {
+		t.Errorf("EnvVars should be nil when authMeta has no types, got %v", auth.EnvVars)
+	}
+}
+
+func TestGatherAuthWithEnv_ConfigDrivenMultipleAuthTypes(t *testing.T) {
+	t.Setenv("COPILOT_GITHUB_TOKEN", "ghp_test")
+	t.Setenv("GOOGLE_CLOUD_PROJECT", "my-project")
+
+	authMeta := &config.HarnessAuthMetadata{
+		Types: map[string]config.HarnessAuthTypeMetadata{
+			"api-key": {
+				RequiredEnv: []config.HarnessAuthEnvRequirement{
+					{AnyOf: []string{"COPILOT_GITHUB_TOKEN", "GH_TOKEN"}},
+				},
+			},
+			"vertex-ai": {
+				RequiredEnv: []config.HarnessAuthEnvRequirement{
+					{AnyOf: []string{"GOOGLE_CLOUD_PROJECT"}},
+					{AnyOf: []string{"GOOGLE_CLOUD_REGION"}},
+				},
+			},
+		},
+	}
+
+	auth := GatherAuthWithEnv(nil, true, authMeta)
+
+	if auth.EnvVars["COPILOT_GITHUB_TOKEN"] != "ghp_test" {
+		t.Errorf("COPILOT_GITHUB_TOKEN = %q, want %q", auth.EnvVars["COPILOT_GITHUB_TOKEN"], "ghp_test")
+	}
+	if auth.EnvVars["GOOGLE_CLOUD_PROJECT"] != "my-project" {
+		t.Errorf("GOOGLE_CLOUD_PROJECT = %q, want %q", auth.EnvVars["GOOGLE_CLOUD_PROJECT"], "my-project")
+	}
+	if _, ok := auth.EnvVars["GOOGLE_CLOUD_REGION"]; ok {
+		t.Error("GOOGLE_CLOUD_REGION should not be in EnvVars when not set")
+	}
+}
+
+func TestGatherAuthWithEnv_BrokerModeConfigDriven(t *testing.T) {
+	overlay := map[string]string{
+		"COPILOT_GITHUB_TOKEN": "broker-token",
+	}
+
+	authMeta := &config.HarnessAuthMetadata{
+		Types: map[string]config.HarnessAuthTypeMetadata{
+			"api-key": {
+				RequiredEnv: []config.HarnessAuthEnvRequirement{
+					{AnyOf: []string{"COPILOT_GITHUB_TOKEN"}},
+				},
+			},
+		},
+	}
+
+	// In broker mode (localSources=false), env vars come only from overlay
+	t.Setenv("COPILOT_GITHUB_TOKEN", "should-not-see-this")
+	auth := GatherAuthWithEnv(overlay, false, authMeta)
+
+	if auth.EnvVars["COPILOT_GITHUB_TOKEN"] != "broker-token" {
+		t.Errorf("COPILOT_GITHUB_TOKEN = %q, want overlay value %q", auth.EnvVars["COPILOT_GITHUB_TOKEN"], "broker-token")
+	}
 }

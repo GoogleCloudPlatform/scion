@@ -135,6 +135,12 @@ func (g *Generic) ResolveAuth(auth api.AuthConfig) (*api.ResolvedAuth, error) {
 		result.EnvVars["GOOGLE_CLOUD_REGION"] = auth.GoogleCloudRegion
 	}
 
+	for k, v := range auth.EnvVars {
+		if _, exists := result.EnvVars[k]; !exists {
+			result.EnvVars[k] = v
+		}
+	}
+
 	if auth.GoogleAppCredentials != "" {
 		adcContainerPath := "~/.config/gcloud/application_default_credentials.json"
 		result.Files = append(result.Files, api.FileMapping{

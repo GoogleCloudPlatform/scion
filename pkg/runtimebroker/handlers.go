@@ -427,7 +427,29 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		required, secretInfo := s.extractRequiredEnvKeys(req)
+		// Hydrate hub-managed harness-config before extracting required keys
+		// so that config-driven auth metadata is available during env-gather.
+		// Graceful degradation: if hydration fails, fall back to on-disk only.
+		var hydratedHCPath string
+		if req.Config != nil && (req.Config.HarnessConfigID != "" || req.Config.HarnessConfigHash != "") {
+			hubConn := s.resolveHubConnection(r)
+			if hubConn != nil {
+				hydrateCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+				hcPath, err := s.hydrateHarnessConfig(hydrateCtx, req.Config, hubConn)
+				cancel()
+				if err != nil {
+					if s.config.Debug {
+						s.envSecretLog.Debug("Env-gather: harness-config hydration failed, falling back to on-disk",
+							"error", err.Error(),
+						)
+					}
+				} else {
+					hydratedHCPath = hcPath
+				}
+			}
+		}
+
+		required, secretInfo := s.extractRequiredEnvKeys(req, hydratedHCPath)
 		if s.config.Debug {
 			s.envSecretLog.Debug("Env-gather: evaluating env completeness",
 				"gatherEnv", req.GatherEnv,
@@ -1865,7 +1887,12 @@ func (s *Server) checkAgentPrompt(w http.ResponseWriter, r *http.Request, id, pr
 // env requirements.
 //
 // Phase 3 (secrets): Collects explicitly-declared secrets from settings and templates.
-func (s *Server) extractRequiredEnvKeys(req CreateAgentRequest) ([]string, map[string]api.SecretKeyInfo) {
+//
+// hydratedHarnessConfigPath, when non-empty, points to a hub-hydrated harness-
+// config directory that supplements the on-disk search. This allows env-gather
+// to see auth metadata from hub-managed harness-configs that haven't been
+// downloaded to the standard on-disk locations yet.
+func (s *Server) extractRequiredEnvKeys(req CreateAgentRequest, hydratedHarnessConfigPath ...string) ([]string, map[string]api.SecretKeyInfo) {
 	required := make(map[string]struct{})
 
 	var settings *config.VersionedSettings
@@ -1938,6 +1965,18 @@ func (s *Server) extractRequiredEnvKeys(req CreateAgentRequest) ([]string, map[s
 		}
 		if harnessConfigSearchPath != "" {
 			if hcDir, err := config.FindHarnessConfigDir(harnessConfigName, harnessConfigSearchPath); err == nil {
+				harnessType = hcDir.Config.Harness
+				authType = hcDir.Config.AuthSelectedType
+				if hcDir.Config.Auth != nil {
+					authMeta = hcDir.Config.Auth
+				}
+			}
+		}
+
+		// Fall back to hydrated hub-managed harness-config when on-disk
+		// search didn't find the config (or didn't populate auth metadata).
+		if harnessType == "" && len(hydratedHarnessConfigPath) > 0 && hydratedHarnessConfigPath[0] != "" {
+			if hcDir, err := config.LoadHarnessConfigDir(hydratedHarnessConfigPath[0]); err == nil {
 				harnessType = hcDir.Config.Harness
 				authType = hcDir.Config.AuthSelectedType
 				if hcDir.Config.Auth != nil {

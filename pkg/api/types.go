@@ -519,6 +519,12 @@ type AuthConfig struct {
 
 	// Auth mode selection
 	SelectedType string
+
+	// EnvVars holds config-driven auth env vars gathered from harness
+	// config metadata (auth.types[*].required_env). These flow through
+	// the auth pipeline alongside the hardcoded fields above, enabling
+	// new harnesses to declare auth requirements without Go code changes.
+	EnvVars map[string]string
 }
 
 // ResolvedAuth represents the single best auth method selected by a harness's

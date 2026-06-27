@@ -31,7 +31,7 @@ import (
 // It is source-agnostic: it checks env vars and well-known file paths
 // without knowing which harness will consume the result.
 func GatherAuth() api.AuthConfig {
-	return GatherAuthWithEnv(nil, true)
+	return GatherAuthWithEnv(nil, true, nil)
 }
 
 // GatherAuthWithEnv is like GatherAuth but checks the provided env overlay
@@ -43,7 +43,11 @@ func GatherAuth() api.AuthConfig {
 // the env map and never falls back to os.Getenv(), and filesystem scanning
 // for well-known credential files is skipped entirely. This prevents broker
 // operator credentials from leaking into hub-dispatched agents.
-func GatherAuthWithEnv(env map[string]string, localSources bool) api.AuthConfig {
+//
+// When authMeta is non-nil, env vars declared in the harness config's
+// auth.types[*].required_env groups are gathered into AuthConfig.EnvVars,
+// enabling config-driven auth passthrough without hardcoded Go fields.
+func GatherAuthWithEnv(env map[string]string, localSources bool, authMeta *config.HarnessAuthMetadata) api.AuthConfig {
 	lookup := func(key string) string {
 		if v, ok := env[key]; ok && v != "" {
 			return v
@@ -115,7 +119,43 @@ func GatherAuthWithEnv(env map[string]string, localSources bool) api.AuthConfig 
 		}
 	}
 
+	// Populate EnvVars from config-driven auth metadata. Every env key
+	// declared in any auth type's required_env groups is looked up; keys
+	// with non-empty values are included. This lets harness configs like
+	// copilot declare their own env requirements and have them flow through
+	// the auth pipeline without per-harness Go code.
+	if authMeta != nil {
+		auth.EnvVars = gatherConfigEnvVars(lookup, authMeta)
+	}
+
 	return auth
+}
+
+// gatherConfigEnvVars collects env var values for all keys declared in any
+// auth type's required_env groups. Returns nil when no values are found.
+func gatherConfigEnvVars(lookup func(string) string, authMeta *config.HarnessAuthMetadata) map[string]string {
+	if authMeta == nil || len(authMeta.Types) == 0 {
+		return nil
+	}
+	var result map[string]string
+	seen := make(map[string]struct{})
+	for _, authType := range authMeta.Types {
+		for _, req := range authType.RequiredEnv {
+			for _, key := range req.AnyOf {
+				if _, ok := seen[key]; ok {
+					continue
+				}
+				seen[key] = struct{}{}
+				if v := lookup(key); v != "" {
+					if result == nil {
+						result = make(map[string]string)
+					}
+					result[key] = v
+				}
+			}
+		}
+	}
+	return result
 }
 
 // OverlayFileSecrets bridges file-type ResolvedSecrets from the hub into
