@@ -60,6 +60,8 @@ def _load_config(bundle: str) -> list[dict[str, Any]]:
             data = json.load(f)
         except (json.JSONDecodeError, OSError):
             return []
+    if not isinstance(data, dict):
+        return []
     creds = data.get("credentials")
     if not isinstance(creds, list):
         return []

@@ -101,6 +101,8 @@ def _present_env_keys(candidates: dict[str, Any]) -> set[str]:
     auth requirements (hub-registered configs are hydrated after env-gather).
     """
     raw = candidates.get("env_vars") or []
+    if not isinstance(raw, (list, set, tuple)):
+        raw = []
     keys = {str(k) for k in raw if isinstance(k, str)}
     if not keys:
         # Fallback: check container environment directly.
@@ -391,7 +393,9 @@ def _ensure_settings() -> None:
     settings: dict[str, Any] = {}
     if os.path.isfile(settings_path):
         try:
-            settings = _load_json(settings_path) or {}
+            loaded = _load_json(settings_path)
+            if isinstance(loaded, dict):
+                settings = loaded
         except (OSError, json.JSONDecodeError):
             settings = {}
 
@@ -429,7 +433,9 @@ def _ensure_settings() -> None:
                 ln for ln in raw.splitlines()
                 if not ln.strip().startswith("//")
             ]
-            config = json.loads("\n".join(lines)) or {}
+            loaded = json.loads("\n".join(lines))
+            if isinstance(loaded, dict):
+                config = loaded
         except (OSError, json.JSONDecodeError):
             config = {}
 
