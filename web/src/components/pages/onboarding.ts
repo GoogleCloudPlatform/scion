@@ -914,7 +914,7 @@ export class ScionPageOnboarding extends LitElement {
         <div class="alert alert-warning">
           <strong>No container runtime detected.</strong>
           <p>
-            Install Docker or Podman to pull or build images. You can skip this
+            Install Docker, Podman, or Apple Container to pull or build images. You can skip this
             step and configure a runtime later.
           </p>
         </div>

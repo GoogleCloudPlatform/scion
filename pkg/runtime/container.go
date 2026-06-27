@@ -14,12 +14,19 @@
 
 package runtime
 
-import "os/exec"
+import (
+	"os/exec"
+	goruntime "runtime"
+)
 
-// DetectContainerRuntime finds an available container CLI (docker or podman).
-// Returns the binary name, or "" if neither is found.
+// DetectContainerRuntime finds an available container CLI (docker, podman,
+// or container on macOS). Returns the binary name, or "" if none is found.
 func DetectContainerRuntime() string {
-	for _, bin := range []string{"docker", "podman"} {
+	candidates := []string{"docker", "podman"}
+	if goruntime.GOOS == "darwin" {
+		candidates = append(candidates, "container")
+	}
+	for _, bin := range candidates {
 		if p, err := exec.LookPath(bin); err == nil && p != "" {
 			return bin
 		}

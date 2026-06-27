@@ -87,7 +87,7 @@ field is updated to reference the built image.`,
 
 		runtimeBin := runtime.DetectContainerRuntime()
 		if runtimeBin == "" {
-			return fmt.Errorf("no container runtime found (tried docker, podman)")
+			return fmt.Errorf("no container runtime found (tried docker, podman, container)")
 		}
 
 		imageBaseName := harnessConfigName
@@ -133,7 +133,7 @@ field is updated to reference the built image.`,
 		}
 
 		if buildPush {
-			pushExec := exec.CommandContext(cmd.Context(), runtimeBin, "push", outputImage)
+			pushExec := exec.CommandContext(cmd.Context(), runtimeBin, "image", "push", outputImage)
 			pushExec.Stdout = os.Stdout
 			pushExec.Stderr = os.Stderr
 			if err := pushExec.Run(); err != nil {

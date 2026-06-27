@@ -180,7 +180,7 @@ func (e *PullImagesExecutor) Run(ctx context.Context, logger io.Writer, params m
 		runtimeBin = scionruntime.DetectContainerRuntime()
 	}
 	if runtimeBin == "" {
-		return fmt.Errorf("no container runtime found (tried docker, podman)")
+		return fmt.Errorf("no container runtime found (tried docker, podman, container)")
 	}
 
 	harnesses := e.harnesses
@@ -540,7 +540,7 @@ func (e *BuildHarnessConfigImageExecutor) Run(ctx context.Context, logger io.Wri
 		runtimeBin = scionruntime.DetectContainerRuntime()
 	}
 	if runtimeBin == "" {
-		return fmt.Errorf("no container runtime found (tried docker, podman)")
+		return fmt.Errorf("no container runtime found (tried docker, podman, container)")
 	}
 
 	imageName := hc.Slug
@@ -566,7 +566,7 @@ func (e *BuildHarnessConfigImageExecutor) Run(ctx context.Context, logger io.Wri
 	if params["push"] == "true" && registry != "" {
 		pushImage := registry + "/" + outputImage
 		_, _ = fmt.Fprintf(logger, "Tagging %s as %s...\n", outputImage, pushImage)
-		tagCmd := exec.CommandContext(ctx, runtimeBin, "tag", outputImage, pushImage)
+		tagCmd := exec.CommandContext(ctx, runtimeBin, "image", "tag", outputImage, pushImage)
 		tagCmd.Stdout = logger
 		tagCmd.Stderr = logger
 		if err := tagCmd.Run(); err != nil {
@@ -574,7 +574,7 @@ func (e *BuildHarnessConfigImageExecutor) Run(ctx context.Context, logger io.Wri
 		}
 
 		_, _ = fmt.Fprintf(logger, "Pushing %s...\n", pushImage)
-		pushCmd := exec.CommandContext(ctx, runtimeBin, "push", pushImage)
+		pushCmd := exec.CommandContext(ctx, runtimeBin, "image", "push", pushImage)
 		pushCmd.Stdout = logger
 		pushCmd.Stderr = logger
 		if err := pushCmd.Run(); err != nil {
