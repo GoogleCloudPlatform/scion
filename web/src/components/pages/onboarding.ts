@@ -1216,18 +1216,28 @@ export class ScionPageOnboarding extends LitElement {
       this.imageStatuses = statuses;
 
       try {
-        const res = await apiFetch('/api/v1/system/images/build-harness-config', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ harnessConfigId: hc.id }),
-        });
+        const res = await apiFetch(
+          '/api/v1/admin/maintenance/operations/build-harness-config-image/run',
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              params: { harness_config_id: hc.id, tag: 'latest' },
+            }),
+          },
+        );
         if (!res.ok) {
           this.error = await extractApiError(res, `Failed to build image for ${hc.name}`);
           this.imageBuilding = false;
           return;
         }
-        const data = (await res.json()) as { jobId: string };
-        await this.awaitImageBuildJob(data.jobId, hc.slug);
+        const result = (await res.json()) as { runId?: string };
+        if (!result?.runId) {
+          this.error = 'Build started but no run ID was returned';
+          this.imageBuilding = false;
+          return;
+        }
+        await this.pollHarnessConfigBuild(result.runId, hc.slug);
       } catch {
         this.error = 'Failed to connect to the server.';
         this.imageBuilding = false;
@@ -1238,49 +1248,53 @@ export class ScionPageOnboarding extends LitElement {
     this.imageBuilding = false;
   }
 
-  private awaitImageBuildJob(jobId: string, slug: string): Promise<void> {
-    return new Promise<void>((resolve) => {
-      this.cleanupImageEvents();
-      const url = `/events?sub=${encodeURIComponent('system.images.' + jobId)}`;
-      const es = new EventSource(url);
-      this.imageEventSource = es;
-
-      es.addEventListener('update', (event: Event) => {
-        try {
-          const wrapper = JSON.parse((event as MessageEvent).data) as { subject: string; data?: Record<string, unknown> };
-          const d = wrapper.data;
-          if (!d) return;
-
-          if (d['image']) {
+  private async pollHarnessConfigBuild(runId: string, slug: string): Promise<void> {
+    let pollErrors = 0;
+    for (;;) {
+      await new Promise(r => setTimeout(r, 3000));
+      try {
+        const resp = await apiFetch(
+          `/api/v1/admin/maintenance/operations/build-harness-config-image/runs/${runId}`,
+        );
+        if (!resp.ok) {
+          pollErrors++;
+          if (pollErrors >= 5) {
             const next = new Map(this.imageStatuses);
-            next.set(slug, { status: d['status'] as string, fullName: d['image'] as string });
+            next.set(slug, { status: 'error', fullName: `${slug}:latest`, error: 'Lost connection to build' });
             this.imageStatuses = next;
+            return;
           }
-
-          if (d['type'] === 'log') {
-            const line = d['line'] as string;
-            this.buildLogs = [...this.buildLogs, line];
-
-            if (line === 'build complete' || line.startsWith('build failed:')) {
-              this.cleanupImageEvents();
-              if (line.startsWith('build failed:')) {
-                const next = new Map(this.imageStatuses);
-                next.set(slug, { status: 'error', fullName: `${slug}:latest`, error: line });
-                this.imageStatuses = next;
-              }
-              resolve();
-            }
-          }
-        } catch (err) {
-          console.error('[Onboarding] Failed to parse build event:', err);
+          continue;
         }
-      });
 
-      es.onerror = () => {
-        this.cleanupImageEvents();
-        resolve();
-      };
-    });
+        pollErrors = 0;
+        const run = (await resp.json()) as { status?: string; log?: string };
+        if (run.log) {
+          this.buildLogs = run.log.split('\n');
+        }
+
+        if (run.status === 'completed') {
+          const next = new Map(this.imageStatuses);
+          next.set(slug, { status: 'done', fullName: `${slug}:latest` });
+          this.imageStatuses = next;
+          return;
+        }
+        if (run.status === 'failed') {
+          const next = new Map(this.imageStatuses);
+          next.set(slug, { status: 'error', fullName: `${slug}:latest`, error: 'Build failed' });
+          this.imageStatuses = next;
+          return;
+        }
+      } catch {
+        pollErrors++;
+        if (pollErrors >= 5) {
+          const next = new Map(this.imageStatuses);
+          next.set(slug, { status: 'error', fullName: `${slug}:latest`, error: 'Lost connection to build' });
+          this.imageStatuses = next;
+          return;
+        }
+      }
+    }
   }
 
   private subscribeToImageJob(jobId: string, mode: 'pull' | 'build'): void {
