@@ -9,6 +9,7 @@ require (
 	cloud.google.com/go/logging v1.13.2
 	cloud.google.com/go/monitoring v1.24.3
 	cloud.google.com/go/policytroubleshooter v1.11.7
+	cloud.google.com/go/run v1.21.0
 	cloud.google.com/go/secretmanager v1.16.0
 	cloud.google.com/go/storage v1.59.1
 	entgo.io/ent v0.14.5
