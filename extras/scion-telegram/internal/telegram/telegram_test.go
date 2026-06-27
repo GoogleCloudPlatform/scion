@@ -21,6 +21,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -1053,4 +1054,157 @@ func TestSubjectMatchesPattern(t *testing.T) {
 			assert.Equal(t, tt.want, subjectMatchesPattern(tt.pattern, tt.subject))
 		})
 	}
+}
+
+func TestParseHubError(t *testing.T) {
+	t.Run("valid error response", func(t *testing.T) {
+		body := `{"error":{"code":"agent_not_found","message":"Agent not found"}}`
+		resp := &http.Response{
+			StatusCode: 404,
+			Body:       io.NopCloser(strings.NewReader(body)),
+		}
+		he := parseHubError(resp)
+		require.NotNil(t, he)
+		assert.Equal(t, 404, he.StatusCode)
+		assert.Equal(t, "agent_not_found", he.Code)
+		assert.Equal(t, "Agent not found", he.Message)
+	})
+
+	t.Run("empty body", func(t *testing.T) {
+		resp := &http.Response{
+			StatusCode: 500,
+			Body:       io.NopCloser(strings.NewReader("")),
+		}
+		he := parseHubError(resp)
+		assert.Equal(t, "unknown", he.Code)
+		assert.Equal(t, "Internal Server Error", he.Message)
+	})
+
+	t.Run("non-JSON body", func(t *testing.T) {
+		resp := &http.Response{
+			StatusCode: 403,
+			Body:       io.NopCloser(strings.NewReader("plain text")),
+		}
+		he := parseHubError(resp)
+		assert.Equal(t, "unknown", he.Code)
+		assert.Equal(t, "Forbidden", he.Message)
+	})
+}
+
+func TestHubError_UserFacingMessage(t *testing.T) {
+	tests := []struct {
+		name     string
+		err      hubError
+		contains string
+	}{
+		{"agent_not_found", hubError{StatusCode: 404, Code: "agent_not_found"}, "Target agent not found"},
+		{"forbidden", hubError{StatusCode: 403, Code: "forbidden"}, "permission"},
+		{"unauthorized", hubError{StatusCode: 401, Code: "unauthorized"}, "Authentication error"},
+		{"server_error", hubError{StatusCode: 500, Code: "internal_error"}, "internal error"},
+		{"other", hubError{StatusCode: 400, Code: "invalid_request", Message: "bad topic"}, "bad topic"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Contains(t, tt.err.userFacingMessage(), tt.contains)
+		})
+	}
+}
+
+func TestDeliverInbound_ReturnsHubError(t *testing.T) {
+	t.Run("returns error on 404", func(t *testing.T) {
+		hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error": map[string]interface{}{
+					"code":    "agent_not_found",
+					"message": "Agent not found",
+				},
+			})
+		}))
+		defer hub.Close()
+
+		b := &TelegramBroker{
+			log:        slog.New(slog.NewTextHandler(io.Discard, nil)),
+			hubURL:     hub.URL,
+			httpClient: http.DefaultClient,
+		}
+
+		msg := messages.NewInstruction("user:alice", "agent:coder", "hello")
+		he := b.deliverInbound("scion.project.p1.agent.coder.messages", msg)
+		require.NotNil(t, he)
+		assert.Equal(t, 404, he.StatusCode)
+		assert.Equal(t, "agent_not_found", he.Code)
+	})
+
+	t.Run("returns nil on success", func(t *testing.T) {
+		hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer hub.Close()
+
+		b := &TelegramBroker{
+			log:        slog.New(slog.NewTextHandler(io.Discard, nil)),
+			hubURL:     hub.URL,
+			httpClient: http.DefaultClient,
+		}
+
+		msg := messages.NewInstruction("user:alice", "agent:coder", "hello")
+		he := b.deliverInbound("scion.project.p1.agent.coder.messages", msg)
+		assert.Nil(t, he)
+	})
+}
+
+func TestInboundDelivery_ErrorFeedback(t *testing.T) {
+	tgSrv := newFakeTelegramServer(t)
+
+	// Hub that rejects with 404 (deleted agent)
+	hubSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error": map[string]interface{}{
+				"code":    "agent_not_found",
+				"message": "Agent not found",
+			},
+		})
+	}))
+	defer hubSrv.Close()
+
+	b := newTestBroker(t, tgSrv)
+
+	// Configure hub URL to point to the rejecting hub
+	b.mu.Lock()
+	b.hubURL = hubSrv.URL
+	b.chatRoutes[789] = "scion.project.p1.agent.deleted-agent.messages"
+	b.topicChats["scion.project.p1.agent.deleted-agent.messages"] = []int64{789}
+	b.InboundHandler = nil // Force HTTP delivery path
+	b.mu.Unlock()
+
+	// Queue a message from a user
+	tgSrv.setUpdates([]Update{
+		{
+			UpdateID: 1,
+			Message: &TGMessage{
+				MessageID: 42,
+				From:      &TGUser{ID: 456, Username: "alice"},
+				Chat:      TGChat{ID: 789, Type: "private"},
+				Date:      time.Now().Unix(),
+				Text:      "hello deleted agent",
+			},
+		},
+	})
+
+	require.NoError(t, b.Subscribe("scion.project.p1.>"))
+
+	// Wait for the error feedback message to be sent to the Telegram chat
+	require.Eventually(t, func() bool {
+		msgs := tgSrv.getSentMessages()
+		for _, m := range msgs {
+			if m.ChatID == 789 && strings.Contains(m.Text, "Target agent not found") {
+				return true
+			}
+		}
+		return false
+	}, 5*time.Second, 50*time.Millisecond, "expected error feedback message in Telegram chat")
 }
