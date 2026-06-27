@@ -19,6 +19,7 @@ import { customElement, property, state } from 'lit/decorators.js';
 import { Chart, registerables } from 'chart.js';
 
 import { apiFetch, extractApiError } from '../../client/api.js';
+import { LOCALE_CHANGE_EVENT, t } from '../../client/i18n.js';
 
 Chart.register(...registerables);
 
@@ -229,6 +230,7 @@ export class ScionPageMetrics extends LitElement {
 
   override connectedCallback(): void {
     super.connectedCallback();
+    window.addEventListener(LOCALE_CHANGE_EVENT, this.handleLocaleChange as EventListener);
     // Parse projectId from URL if not set as property (same pattern as project-detail.ts)
     if (!this.projectId && typeof window !== 'undefined') {
       const match = window.location.pathname.match(/\/projects\/([^/]+)\/metrics/);
@@ -239,8 +241,14 @@ export class ScionPageMetrics extends LitElement {
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
+    window.removeEventListener(LOCALE_CHANGE_EVENT, this.handleLocaleChange as EventListener);
     this.destroyAllCharts();
   }
+
+  private handleLocaleChange = (): void => {
+    this.requestUpdate();
+    this.updateComplete.then(() => this.updateCharts()).catch(() => undefined);
+  };
 
   private destroyAllCharts(): void {
     for (const chart of this.charts.values()) {
@@ -337,7 +345,7 @@ export class ScionPageMetrics extends LitElement {
             const sorted = this.sortPointsByDate(this.sessions.dailyCounts);
             this.renderChart('chart-sessions', 'bar', sorted.map(p => p.timestamp), [
               {
-                label: 'Sessions',
+                label: t('Sessions'),
                 data: sorted.map(p => p.value),
                 backgroundColor: CHART_COLORS[0],
               },
@@ -347,7 +355,7 @@ export class ScionPageMetrics extends LitElement {
             const sorted = this.sortPointsByDate(this.sessions.activeAgents);
             this.renderChart('chart-agents', 'line', sorted.map(p => p.timestamp), [
               {
-                label: 'Active Agents',
+                label: t('Active Agents'),
                 data: sorted.map(p => p.value),
                 borderColor: CHART_COLORS[1],
                 backgroundColor: CHART_COLORS[1] + '33',

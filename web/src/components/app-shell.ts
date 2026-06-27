@@ -32,6 +32,7 @@ import './shared/debug-panel.js';
 
 import type { User } from '../shared/types.js';
 import type { AccessDeniedDetail } from '../client/api.js';
+import { LocaleController, LOCALE_CHANGE_EVENT, t } from '../client/i18n.js';
 import { setDocumentTitle, PAGE_TITLE_EVENT } from '../client/page-title.js';
 import type { PageTitleDetail } from '../client/page-title.js';
 
@@ -81,6 +82,9 @@ export class ScionApp extends LitElement {
   /** Bound listener references for cleanup */
   private _accessDeniedHandler = this.handleAccessDenied.bind(this);
   private _pageTitleHandler = this.handlePageTitle.bind(this);
+  private _localeChangeHandler = this.handleLocaleChange.bind(this);
+
+  private locale = new LocaleController(this);
 
   static override styles = css`
     :host {
@@ -192,6 +196,7 @@ export class ScionApp extends LitElement {
   override connectedCallback(): void {
     super.connectedCallback();
     window.addEventListener('scion:access-denied', this._accessDeniedHandler as EventListener);
+    window.addEventListener(LOCALE_CHANGE_EVENT, this._localeChangeHandler as EventListener);
     this.addEventListener(PAGE_TITLE_EVENT, this._pageTitleHandler as EventListener);
     this.updateDocumentTitle();
     try {
@@ -204,6 +209,7 @@ export class ScionApp extends LitElement {
   override disconnectedCallback(): void {
     super.disconnectedCallback();
     window.removeEventListener('scion:access-denied', this._accessDeniedHandler as EventListener);
+    window.removeEventListener(LOCALE_CHANGE_EVENT, this._localeChangeHandler as EventListener);
     this.removeEventListener(PAGE_TITLE_EVENT, this._pageTitleHandler as EventListener);
   }
 
@@ -224,6 +230,10 @@ export class ScionApp extends LitElement {
     }
   }
 
+  private handleLocaleChange(): void {
+    this.updateDocumentTitle();
+  }
+
   /**
    * Set the document title from the current path-based page title.
    * Detail page components will refine this further via scion:page-title events.
@@ -236,7 +246,7 @@ export class ScionApp extends LitElement {
   private handleAccessDenied(event: CustomEvent<AccessDeniedDetail>): void {
     const detail = event.detail || {};
     const action = detail.action || 'perform this action on';
-    const message = `You don't have permission to ${action} this resource.`;
+    const message = t('You do not have permission to {action} this resource.', { action });
 
     const alert = Object.assign(document.createElement('sl-alert'), {
       variant: 'warning',
@@ -309,66 +319,66 @@ export class ScionApp extends LitElement {
   private getPageTitle(): string {
     // Check for exact match
     if (PAGE_TITLES[this.currentPath]) {
-      return PAGE_TITLES[this.currentPath];
+      return this.locale.t(PAGE_TITLES[this.currentPath]);
     }
 
     // Check for pattern matches
     if (this.currentPath === '/projects/new') {
-      return 'Create Project';
+      return this.locale.t('Create Project');
     }
     if (this.currentPath.match(/^\/projects\/[^/]+\/settings$/)) {
-      return 'Project Settings';
+      return this.locale.t('Project Settings');
     }
     if (this.currentPath.match(/^\/projects\/[^/]+\/schedules$/)) {
-      return 'Schedules';
+      return this.locale.t('Schedules');
     }
     if (this.currentPath.match(/^\/projects\/[^/]+\/metrics$/)) {
-      return 'Project Metrics';
+      return this.locale.t('Project Metrics');
     }
     if (this.currentPath.match(/^\/projects\/[^/]+\/templates\/[^/]+$/)) {
-      return 'Template';
+      return this.locale.t('Template');
     }
     if (this.currentPath.startsWith('/projects/')) {
-      return 'Project';
+      return this.locale.t('Project');
     }
     if (this.currentPath === '/agents/new') {
-      return 'Create Agent';
+      return this.locale.t('Create Agent');
     }
     if (this.currentPath.match(/^\/agents\/[^/]+\/terminal$/)) {
-      return 'Terminal';
+      return this.locale.t('Terminal');
     }
     if (this.currentPath.match(/^\/agents\/[^/]+\/configure$/)) {
-      return 'Configure Agent';
+      return this.locale.t('Configure Agent');
     }
     if (this.currentPath.startsWith('/agents/')) {
-      return 'Agent';
+      return this.locale.t('Agent');
     }
     if (this.currentPath.startsWith('/brokers/')) {
-      return 'Broker';
+      return this.locale.t('Broker');
     }
     if (this.currentPath.match(/^\/settings\/harness-configs\/[^/]+$/)) {
-      return 'Harness Config';
+      return this.locale.t('Harness Config');
     }
     if (this.currentPath.match(/^\/settings\/templates\/[^/]+$/)) {
-      return 'Template';
+      return this.locale.t('Template');
     }
     if (this.currentPath.match(/^\/admin\/groups\/[^/]+$/)) {
-      return 'Group';
+      return this.locale.t('Group');
     }
     if (this.currentPath === '/admin/maintenance') {
-      return 'Maintenance';
+      return this.locale.t('Maintenance');
     }
     if (this.currentPath === '/skills/new') {
-      return 'Create Skill';
+      return this.locale.t('Create Skill');
     }
     if (this.currentPath.startsWith('/skills/')) {
-      return 'Skill';
+      return this.locale.t('Skill');
     }
     if (this.currentPath.match(/^\/admin\/skill-registries\/[^/]+$/)) {
-      return 'Skill Registry';
+      return this.locale.t('Skill Registry');
     }
 
-    return 'Page Not Found';
+    return this.locale.t('Page Not Found');
   }
 
   private handleSidebarToggle(): void {

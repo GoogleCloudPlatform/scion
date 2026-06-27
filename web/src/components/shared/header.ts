@@ -24,6 +24,7 @@ import { LitElement, html, css } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
 import type { User } from '../../shared/types.js';
+import { getLocaleLabel, LocaleController, toggleLocale } from '../../client/i18n.js';
 import './notification-tray.js';
 import './inbox-tray.js';
 
@@ -55,6 +56,8 @@ export class ScionHeader extends LitElement {
 
   @state()
   private isDark = false;
+
+  private locale = new LocaleController(this);
 
   static override styles = css`
     :host {
@@ -206,6 +209,35 @@ export class ScionHeader extends LitElement {
       transition: color 0.2s ease;
     }
 
+    .language-button {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.375rem;
+      min-width: 4.25rem;
+      height: 2rem;
+      padding: 0 0.625rem;
+      border: 1px solid var(--scion-border, #e2e8f0);
+      border-radius: 0.5rem;
+      background: transparent;
+      color: var(--scion-text, #1e293b);
+      cursor: pointer;
+      font-size: 0.8125rem;
+      font-weight: 600;
+      transition:
+        background 0.15s ease,
+        border-color 0.15s ease;
+    }
+
+    .language-button:hover {
+      background: var(--scion-bg-subtle, #f1f5f9);
+      border-color: var(--scion-text-muted, #64748b);
+    }
+
+    .language-button sl-icon {
+      color: var(--scion-text-muted, #64748b);
+      font-size: 0.95rem;
+    }
+
     .theme-switch sl-icon.active-icon {
       color: var(--scion-primary, #3b82f6);
     }
@@ -255,7 +287,7 @@ export class ScionHeader extends LitElement {
               <button
                 class="mobile-menu-btn"
                 @click=${(): void => this.handleMobileMenuClick()}
-                aria-label="Open navigation menu"
+                aria-label=${this.locale.t('Open navigation menu')}
               >
                 <sl-icon name="list" style="font-size: 1.25rem;"></sl-icon>
               </button>
@@ -268,15 +300,29 @@ export class ScionHeader extends LitElement {
         <div class="header-actions">
           <scion-inbox-tray .user=${this.user}></scion-inbox-tray>
           <scion-notification-tray .user=${this.user}></scion-notification-tray>
-          <sl-tooltip content="Help">
-            <sl-icon-button name="question-circle" label="Help"></sl-icon-button>
+          <sl-tooltip content=${this.locale.t('Help')}>
+            <sl-icon-button name="question-circle" label=${this.locale.t('Help')}></sl-icon-button>
+          </sl-tooltip>
+          <sl-tooltip
+            content=${this.locale.t(
+              this.locale.locale === 'zh-CN' ? 'Switch to English' : 'Switch to Chinese'
+            )}
+          >
+            <button
+              class="language-button"
+              @click=${(): void => toggleLocale()}
+              aria-label=${this.locale.t('Switch language')}
+            >
+              <sl-icon name="translate"></sl-icon>
+              <span>${getLocaleLabel()}</span>
+            </button>
           </sl-tooltip>
           <div class="theme-switch">
             <sl-icon name="sun" class=${this.isDark ? '' : 'active-icon'}></sl-icon>
             <button
               class="toggle-track ${this.isDark ? 'dark' : ''}"
               @click=${(): void => this.toggleTheme()}
-              aria-label="Toggle dark mode"
+              aria-label=${this.locale.t('Toggle dark mode')}
             >
               <span class="toggle-knob"></span>
             </button>
@@ -294,20 +340,24 @@ export class ScionHeader extends LitElement {
       return html`
         <a href="/auth/login" class="sign-in-link">
           <sl-icon name="box-arrow-in-right"></sl-icon>
-          Sign in
+          ${this.locale.t('Sign in')}
         </a>
       `;
     }
 
     return html`
       <div class="user-buttons">
-        <a href="/profile" class="profile-link" @click=${(e: Event): void => this.handleProfileClick(e)}>
+        <a
+          href="/profile"
+          class="profile-link"
+          @click=${(e: Event): void => this.handleProfileClick(e)}
+        >
           <sl-icon name="person"></sl-icon>
-          Profile
+          ${this.locale.t('Profile')}
         </a>
         <button class="sign-out-button" @click=${(): void => this.handleLogout()}>
           <sl-icon name="box-arrow-right"></sl-icon>
-          Sign out
+          ${this.locale.t('Sign out')}
         </button>
       </div>
     `;

@@ -29,6 +29,7 @@ import '../shared/header.js';
 import '../shared/debug-panel.js';
 
 import type { User } from '../../shared/types.js';
+import { LocaleController, LOCALE_CHANGE_EVENT } from '../../client/i18n.js';
 import { setDocumentTitle } from '../../client/page-title.js';
 
 const PROFILE_TITLES: Record<string, string> = {
@@ -52,6 +53,10 @@ export class ScionProfileShell extends LitElement {
 
   @state()
   _sidebarCollapsed = false;
+
+  private _localeChangeHandler = this.handleLocaleChange.bind(this);
+
+  private locale = new LocaleController(this);
 
   static override styles = css`
     :host {
@@ -128,11 +133,17 @@ export class ScionProfileShell extends LitElement {
 
   override connectedCallback(): void {
     super.connectedCallback();
+    window.addEventListener(LOCALE_CHANGE_EVENT, this._localeChangeHandler as EventListener);
     try {
       this._sidebarCollapsed = localStorage.getItem('scion-sidebar-collapsed') === 'true';
     } catch {
       // localStorage may be unavailable (SecurityError in restricted contexts)
     }
+  }
+
+  override disconnectedCallback(): void {
+    super.disconnectedCallback();
+    window.removeEventListener(LOCALE_CHANGE_EVENT, this._localeChangeHandler as EventListener);
   }
 
   override updated(changedProperties: Map<string, unknown>): void {
@@ -144,6 +155,10 @@ export class ScionProfileShell extends LitElement {
   private updateDocumentTitle(): void {
     const title = this.getPageTitle();
     setDocumentTitle(title, 'Profile');
+  }
+
+  private handleLocaleChange(): void {
+    this.updateDocumentTitle();
   }
 
   override render() {
@@ -165,7 +180,11 @@ export class ScionProfileShell extends LitElement {
         placement="start"
         @sl-hide=${(): void => this.handleDrawerClose()}
       >
-        <scion-profile-nav .user=${this.user} .currentPath=${this.currentPath} .hideCollapse=${true}></scion-profile-nav>
+        <scion-profile-nav
+          .user=${this.user}
+          .currentPath=${this.currentPath}
+          .hideCollapse=${true}
+        ></scion-profile-nav>
       </sl-drawer>
 
       <main class="main">
@@ -190,7 +209,7 @@ export class ScionProfileShell extends LitElement {
   }
 
   private getPageTitle(): string {
-    return PROFILE_TITLES[this.currentPath] || 'Profile';
+    return this.locale.t(PROFILE_TITLES[this.currentPath] || 'Profile');
   }
 
   private handleSidebarToggle(): void {

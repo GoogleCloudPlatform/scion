@@ -24,6 +24,7 @@ import { LitElement, html, css } from 'lit';
 import { customElement, property } from 'lit/decorators.js';
 
 import type { User } from '../../shared/types.js';
+import { LocaleController } from '../../client/i18n.js';
 
 interface NavItem {
   path: string;
@@ -97,6 +98,8 @@ export class ScionNav extends LitElement {
    */
   @property({ type: Boolean })
   hideCollapse = false;
+
+  private locale = new LocaleController(this);
 
   static override styles = css`
     :host {
@@ -334,7 +337,7 @@ export class ScionNav extends LitElement {
         <div class="logo-icon">🌱</div>
         <div class="logo-text">
           <h1>Scion</h1>
-          <span>Agent Orchestration</span>
+          <span>${this.locale.t('Agent Orchestration')}</span>
         </div>
       </div>
 
@@ -342,7 +345,7 @@ export class ScionNav extends LitElement {
         ${NAV_SECTIONS.map(
           (section) => html`
             <div class="nav-section">
-              <div class="nav-section-title">${section.title}</div>
+              <div class="nav-section-title">${this.locale.t(section.title)}</div>
               <ul class="nav-list">
                 ${section.items.map(
                   (item) => html`
@@ -353,7 +356,7 @@ export class ScionNav extends LitElement {
                         @click=${(e: Event) => this.handleNavClick(e, item.path)}
                       >
                         <sl-icon name="${item.icon}"></sl-icon>
-                        <span class="nav-link-text">${item.label}</span>
+                        <span class="nav-link-text">${this.locale.t(item.label)}</span>
                       </a>
                     </li>
                   `
@@ -365,7 +368,7 @@ export class ScionNav extends LitElement {
         ${isAdmin
           ? html`
               <div class="nav-section admin-section">
-                <div class="nav-section-title">${ADMIN_SECTION.title}</div>
+                <div class="nav-section-title">${this.locale.t(ADMIN_SECTION.title)}</div>
                 <ul class="nav-list">
                   ${ADMIN_SECTION.items.map(
                     (item) => html`
@@ -376,7 +379,7 @@ export class ScionNav extends LitElement {
                           @click=${(e: Event) => this.handleNavClick(e, item.path)}
                         >
                           <sl-icon name="${item.icon}"></sl-icon>
-                          <span class="nav-link-text">${item.label}</span>
+                          <span class="nav-link-text">${this.locale.t(item.label)}</span>
                         </a>
                       </li>
                     `
@@ -393,11 +396,11 @@ export class ScionNav extends LitElement {
             <button
               class="collapse-toggle"
               @click=${(): void => this.handleCollapseToggle()}
-              aria-label=${this.collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
-              title=${this.collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+              aria-label=${this.locale.t(this.collapsed ? 'Expand sidebar' : 'Collapse sidebar')}
+              title=${this.locale.t(this.collapsed ? 'Expand sidebar' : 'Collapse sidebar')}
             >
               <sl-icon name="chevron-left"></sl-icon>
-              <span class="collapse-toggle-text">Collapse</span>
+              <span class="collapse-toggle-text">${this.locale.t('Collapse')}</span>
             </button>
           `}
     `;

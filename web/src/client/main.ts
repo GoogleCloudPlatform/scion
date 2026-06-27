@@ -27,6 +27,7 @@ import '@shoelace-style/shoelace/dist/themes/dark.css';
 import type { PageData, User } from '../shared/types.js';
 import { stateManager } from './state.js';
 import { debugLog } from './debug-log.js';
+import { installAutoTranslator } from './i18n.js';
 import { setDocumentTitle } from './page-title.js';
 
 // Inject theme CSS so it loads regardless of whether the page is served by
@@ -86,6 +87,8 @@ import '../components/shared/debug-panel.js';
 // import '../components/profile/profile-nav.js';
 
 // Page components are lazy-loaded per route — see ROUTES below.
+
+installAutoTranslator();
 
 /** Current authenticated user, fetched once on init */
 let currentUser: User | null = null;
@@ -381,7 +384,15 @@ async function renderRoute(path: string): Promise<void> {
     activeShell = null;
     const page = document.createElement(tag);
     appContainer.appendChild(page);
-    setDocumentTitle(tag === 'scion-login-page' ? 'Login' : tag === 'scion-page-invite' ? 'Invite' : 'Page Not Found');
+    setDocumentTitle(
+      tag === 'scion-login-page'
+        ? 'Login'
+        : tag === 'scion-page-invite'
+          ? 'Invite'
+          : tag === 'scion-page-onboarding'
+            ? 'Setup'
+            : 'Page Not Found'
+    );
   } else if (activeShell) {
     // Reuse existing shell — just update properties and swap page content
     const shell = activeShell.element as HTMLElement & {

@@ -24,6 +24,7 @@
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { apiFetch } from '../../client/api.js';
+import { LocaleController } from '../../client/i18n.js';
 
 import type { User, Project } from '../../shared/types.js';
 
@@ -73,6 +74,8 @@ export class ScionProfileNav extends LitElement {
 
   @state()
   private githubAppUrl: string | null = null;
+
+  private locale = new LocaleController(this);
 
   static override styles = css`
     :host {
@@ -452,7 +455,7 @@ export class ScionProfileNav extends LitElement {
 
   override connectedCallback(): void {
     super.connectedCallback();
-    this.checkGitHubApp();
+    void this.checkGitHubApp();
   }
 
   private async checkGitHubApp(): Promise<void> {
@@ -482,13 +485,18 @@ export class ScionProfileNav extends LitElement {
         <div class="logo-icon">🌱</div>
         <div class="logo-text">
           <h1>Scion</h1>
-          <span>Profile &amp; Settings</span>
+          <span>${this.locale.t('Profile & Settings')}</span>
         </div>
       </div>
 
-      <a href="/" class="return-link" aria-label="Return to Hub" title="Return to Hub">
+      <a
+        href="/"
+        class="return-link"
+        aria-label=${this.locale.t('Return to Hub')}
+        title=${this.locale.t('Return to Hub')}
+      >
         <sl-icon name="arrow-left-circle"></sl-icon>
-        <span>Return to Hub</span>
+        <span>${this.locale.t('Return to Hub')}</span>
       </a>
 
       ${this.user
@@ -498,7 +506,7 @@ export class ScionProfileNav extends LitElement {
                 <sl-icon name="person-circle"></sl-icon>
               </div>
               <div class="user-details">
-                <span class="user-name">${this.user.name || 'User'}</span>
+                <span class="user-name">${this.user.name || this.locale.t('User')}</span>
                 <span class="user-email">${this.user.email}</span>
               </div>
             </div>
@@ -509,7 +517,7 @@ export class ScionProfileNav extends LitElement {
         ${PROFILE_SECTIONS.map(
           (section) => html`
             <div class="nav-section">
-              <div class="nav-section-title">${section.title}</div>
+              <div class="nav-section-title">${this.locale.t(section.title)}</div>
               <ul class="nav-list">
                 ${section.items.map(
                   (item) => html`
@@ -519,7 +527,7 @@ export class ScionProfileNav extends LitElement {
                         class="nav-link ${this.isActive(item.path) ? 'active' : ''}"
                       >
                         <sl-icon name="${item.icon}"></sl-icon>
-                        <span class="nav-link-text">${item.label}</span>
+                        <span class="nav-link-text">${this.locale.t(item.label)}</span>
                       </a>
                     </li>
                     ${item.path === '/profile/tokens' && this.githubAppUrl
@@ -532,7 +540,9 @@ export class ScionProfileNav extends LitElement {
                               class="nav-link-external"
                             >
                               <sl-icon name="github"></sl-icon>
-                              <span class="nav-link-text">GitHub Application</span>
+                              <span class="nav-link-text"
+                                >${this.locale.t('GitHub Application')}</span
+                              >
                               <sl-icon name="box-arrow-up-right" class="external-icon"></sl-icon>
                             </a>
                           </li>
@@ -552,11 +562,11 @@ export class ScionProfileNav extends LitElement {
             <button
               class="collapse-toggle"
               @click=${(): void => this.handleCollapseToggle()}
-              aria-label=${this.collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
-              title=${this.collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+              aria-label=${this.locale.t(this.collapsed ? 'Expand sidebar' : 'Collapse sidebar')}
+              title=${this.locale.t(this.collapsed ? 'Expand sidebar' : 'Collapse sidebar')}
             >
               <sl-icon name="chevron-left"></sl-icon>
-              <span class="collapse-toggle-text">Collapse</span>
+              <span class="collapse-toggle-text">${this.locale.t('Collapse')}</span>
             </button>
           `}
     `;

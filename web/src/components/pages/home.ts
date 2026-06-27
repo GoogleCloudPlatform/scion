@@ -28,6 +28,7 @@ import { isAgentRunning } from '../../shared/types.js';
 import '../shared/status-badge.js';
 import { stateManager } from '../../client/state.js';
 import { apiFetch } from '../../client/api.js';
+import { LocaleController } from '../../client/i18n.js';
 
 interface InviteStats {
   pendingInvites: number;
@@ -63,6 +64,7 @@ export class ScionPageHome extends LitElement {
 
   private boundOnAgentsUpdated = this.onAgentsUpdated.bind(this);
   private boundOnProjectsUpdated = this.onProjectsUpdated.bind(this);
+  private locale = new LocaleController(this);
 
   override connectedCallback(): void {
     super.connectedCallback();
@@ -85,7 +87,10 @@ export class ScionPageHome extends LitElement {
   override disconnectedCallback(): void {
     super.disconnectedCallback();
     stateManager.removeEventListener('agents-updated', this.boundOnAgentsUpdated as EventListener);
-    stateManager.removeEventListener('projects-updated', this.boundOnProjectsUpdated as EventListener);
+    stateManager.removeEventListener(
+      'projects-updated',
+      this.boundOnProjectsUpdated as EventListener
+    );
   }
 
   private onAgentsUpdated(): void {
@@ -97,7 +102,7 @@ export class ScionPageHome extends LitElement {
   }
 
   private get activeAgentCount(): number {
-    return this.agents.filter(a => isAgentRunning(a)).length;
+    return this.agents.filter((a) => isAgentRunning(a)).length;
   }
 
   private async loadData(): Promise<void> {
@@ -112,7 +117,9 @@ export class ScionPageHome extends LitElement {
       if (!this.isConnected || stateManager.currentScope?.type !== 'dashboard') return;
 
       if (agentsResp.ok) {
-        const data = (await agentsResp.json()) as { agents?: Agent[]; _capabilities?: Capabilities } | Agent[];
+        const data = (await agentsResp.json()) as
+          | { agents?: Agent[]; _capabilities?: Capabilities }
+          | Agent[];
         if (!this.isConnected || stateManager.currentScope?.type !== 'dashboard') return;
         const agents = Array.isArray(data) ? data : data.agents || [];
         this.agents = agents;
@@ -120,7 +127,9 @@ export class ScionPageHome extends LitElement {
       }
 
       if (projectsResp.ok) {
-        const data = (await projectsResp.json()) as { projects?: Project[]; _capabilities?: Capabilities } | Project[];
+        const data = (await projectsResp.json()) as
+          | { projects?: Project[]; _capabilities?: Capabilities }
+          | Project[];
         if (!this.isConnected || stateManager.currentScope?.type !== 'dashboard') return;
         const projects = Array.isArray(data) ? data : data.projects || [];
         this.projects = projects;
@@ -333,50 +342,60 @@ export class ScionPageHome extends LitElement {
   `;
 
   override render() {
-    const userName = this.pageData?.user?.name?.split(' ')[0] || 'there';
+    const userName = this.pageData?.user?.name?.split(' ')[0] || this.locale.t('there');
 
     return html`
       <div class="hero">
-        <h1>Welcome back, ${userName}!</h1>
-        <p>Here's what's happening with your agents today.</p>
+        <h1>${this.locale.t('Welcome back, {name}!', { name: userName })}</h1>
+        <p>${this.locale.t("Here's what's happening with your agents today.")}</p>
       </div>
 
       <div class="stats">
         <div class="stat-card">
-          <h3>Active Agents</h3>
+          <h3>${this.locale.t('Active Agents')}</h3>
           <div class="stat-value">
             <span>${this.activeAgentCount}</span>
           </div>
           <div class="stat-change">
-            <scion-status-badge status="success" label="Ready" size="small"></scion-status-badge>
+            <scion-status-badge
+              status="success"
+              label=${this.locale.t('Ready')}
+              size="small"
+            ></scion-status-badge>
           </div>
         </div>
         <div class="stat-card">
-          <h3>Projects</h3>
+          <h3>${this.locale.t('Projects')}</h3>
           <div class="stat-value">${this.projects.length}</div>
-          <div class="stat-change">Project workspaces</div>
+          <div class="stat-change">${this.locale.t('Project workspaces')}</div>
         </div>
         <div class="stat-card">
-          <h3>Pending Invites</h3>
+          <h3>${this.locale.t('Pending Invites')}</h3>
           <div class="stat-value">${this.inviteStats?.pendingInvites ?? '--'}</div>
-          <div class="stat-change">${this.inviteStats ? `${this.inviteStats.totalRedemptions} total redemptions` : ''}</div>
+          <div class="stat-change">
+            ${this.inviteStats
+              ? this.locale.t('{count} total redemptions', {
+                  count: this.inviteStats.totalRedemptions,
+                })
+              : ''}
+          </div>
         </div>
         <div class="stat-card">
-          <h3>Allow List</h3>
+          <h3>${this.locale.t('Allow List')}</h3>
           <div class="stat-value">${this.inviteStats?.allowListCount ?? '--'}</div>
-          <div class="stat-change">Authorized users</div>
+          <div class="stat-change">${this.locale.t('Authorized users')}</div>
         </div>
       </div>
 
-      <h2 class="section-title">Quick Actions</h2>
+      <h2 class="section-title">${this.locale.t('Quick Actions')}</h2>
       <div class="quick-actions">
         <a href="/agents/new" class="action-card">
           <div class="action-icon">
             <sl-icon name="plus-lg"></sl-icon>
           </div>
           <div class="action-text">
-            <h4>Create Agent</h4>
-            <p>Spin up a new AI agent</p>
+            <h4>${this.locale.t('Create Agent')}</h4>
+            <p>${this.locale.t('Spin up a new AI agent')}</p>
           </div>
         </a>
         <a href="/projects/new" class="action-card">
@@ -384,8 +403,8 @@ export class ScionPageHome extends LitElement {
             <sl-icon name="folder-plus"></sl-icon>
           </div>
           <div class="action-text">
-            <h4>Create Project</h4>
-            <p>Add a project workspace</p>
+            <h4>${this.locale.t('Create Project')}</h4>
+            <p>${this.locale.t('Add a project workspace')}</p>
           </div>
         </a>
         <a href="/projects" class="action-card">
@@ -393,8 +412,8 @@ export class ScionPageHome extends LitElement {
             <sl-icon name="folder"></sl-icon>
           </div>
           <div class="action-text">
-            <h4>View Projects</h4>
-            <p>Browse project workspaces</p>
+            <h4>${this.locale.t('View Projects')}</h4>
+            <p>${this.locale.t('Browse project workspaces')}</p>
           </div>
         </a>
         <a href="/agents" class="action-card">
@@ -402,35 +421,54 @@ export class ScionPageHome extends LitElement {
             <sl-icon name="terminal"></sl-icon>
           </div>
           <div class="action-text">
-            <h4>Open Terminal</h4>
-            <p>Connect to running agent</p>
+            <h4>${this.locale.t('Open Terminal')}</h4>
+            <p>${this.locale.t('Connect to running agent')}</p>
           </div>
         </a>
       </div>
 
       <div class="activity-section">
-        <h2 class="section-title">Recent Activity</h2>
+        <h2 class="section-title">${this.locale.t('Recent Activity')}</h2>
         <div class="activity-list">
           ${this.inviteStats && this.inviteStats.recentRedemptions.length > 0
-            ? this.inviteStats.recentRedemptions.map(r => html`
-                <div class="activity-item">
-                  <div class="activity-icon">
-                    <sl-icon name="person-plus"></sl-icon>
+            ? this.inviteStats.recentRedemptions.map(
+                (r) => html`
+                  <div class="activity-item">
+                    <div class="activity-icon">
+                      <sl-icon name="person-plus"></sl-icon>
+                    </div>
+                    <div class="activity-content">
+                      <p class="activity-title">
+                        ${this.locale.t('Invite {prefix} redeemed ({uses})', {
+                          prefix: `${r.codePrefix}...`,
+                          uses: this.locale.t('{used}/{max} uses', {
+                            used: r.useCount,
+                            max: r.maxUses > 0 ? r.maxUses : '∞',
+                          }),
+                        })}
+                      </p>
+                      <p class="activity-time">
+                        ${r.note ? r.note + ' • ' : ''}${this.formatRelativeTime(r.created)}
+                      </p>
+                    </div>
                   </div>
-                  <div class="activity-content">
-                    <p class="activity-title">Invite <code>${r.codePrefix}...</code> redeemed (${r.useCount}/${r.maxUses > 0 ? r.maxUses : '∞'} uses)</p>
-                    <p class="activity-time">${r.note ? r.note + ' • ' : ''}${this.formatRelativeTime(r.created)}</p>
-                  </div>
-                </div>
-              `)
+                `
+              )
             : html`
                 <div class="empty-state">
                   <sl-icon name="clock-history"></sl-icon>
-                  <p>No recent activity to display.<br />Start by creating your first agent.</p>
-                  <a href="/agents/new" style="text-decoration: none; margin-top: 1rem; display: inline-block;">
+                  <p>
+                    ${this.locale.t('No recent activity to display.')}<br />${this.locale.t(
+                      'Start by creating your first agent.'
+                    )}
+                  </p>
+                  <a
+                    href="/agents/new"
+                    style="text-decoration: none; margin-top: 1rem; display: inline-block;"
+                  >
                     <sl-button variant="primary">
                       <sl-icon slot="prefix" name="plus-lg"></sl-icon>
-                      Create Agent
+                      ${this.locale.t('Create Agent')}
                     </sl-button>
                   </a>
                 </div>
@@ -446,14 +484,14 @@ export class ScionPageHome extends LitElement {
     const now = new Date();
     const diffMs = now.getTime() - date.getTime();
     const diffSecs = Math.floor(diffMs / 1000);
-    if (diffSecs < 60) return 'just now';
+    if (diffSecs < 60) return this.locale.t('just now');
     const diffMins = Math.floor(diffSecs / 60);
-    if (diffMins < 60) return `${diffMins}m ago`;
+    if (diffMins < 60) return this.locale.t('{count}m ago', { count: diffMins });
     const diffHours = Math.floor(diffMins / 60);
-    if (diffHours < 24) return `${diffHours}h ago`;
+    if (diffHours < 24) return this.locale.t('{count}h ago', { count: diffHours });
     const diffDays = Math.floor(diffHours / 24);
-    if (diffDays < 30) return `${diffDays}d ago`;
-    return date.toLocaleDateString();
+    if (diffDays < 30) return this.locale.t('{count}d ago', { count: diffDays });
+    return date.toLocaleDateString(this.locale.locale);
   }
 }
 

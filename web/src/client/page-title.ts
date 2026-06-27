@@ -23,6 +23,8 @@
  * names once data has loaded.
  */
 
+import { t } from './i18n.js';
+
 const APP_NAME = 'Scion';
 
 /**
@@ -52,7 +54,7 @@ export function setDocumentTitle(...segments: string[]): void {
     document.title = APP_NAME;
     return;
   }
-  document.title = [...segments, APP_NAME].join(' — ');
+  document.title = [...segments.map((segment) => t(segment)), APP_NAME].join(' — ');
 }
 
 /**
@@ -67,6 +69,6 @@ export function dispatchPageTitle(element: HTMLElement, ...segments: string[]): 
       detail: { segments },
       bubbles: true,
       composed: true,
-    }),
+    })
   );
 }
