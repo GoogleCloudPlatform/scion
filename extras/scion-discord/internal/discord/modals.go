@@ -60,7 +60,7 @@ func HandleModalSubmit(
 	s *discordgo.Session,
 	i *discordgo.InteractionCreate,
 	store Store,
-	deliverInbound func(topic string, msg *messages.StructuredMessage),
+	deliverInbound func(topic string, msg *messages.StructuredMessage) *hubError,
 	log *slog.Logger,
 ) {
 	if log == nil {

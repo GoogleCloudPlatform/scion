@@ -63,6 +63,59 @@ type inboundPayload struct {
 	Message *messages.StructuredMessage `json:"message"`
 }
 
+// hubError represents a structured error returned by the hub API.
+type hubError struct {
+	StatusCode int
+	Code       string `json:"code"`
+	Message    string `json:"message"`
+}
+
+func (e *hubError) Error() string {
+	return fmt.Sprintf("hub error %d (%s): %s", e.StatusCode, e.Code, e.Message)
+}
+
+// userFacingMessage returns a short message suitable for displaying to chat users.
+func (e *hubError) userFacingMessage() string {
+	switch e.Code {
+	case "agent_not_found":
+		return "Target agent not found. The agent may have been deleted."
+	case "forbidden":
+		return "You don't have permission to message this agent."
+	case "broker_auth_failed", "unauthorized":
+		return "Authentication error — please contact an administrator."
+	default:
+		if e.StatusCode >= 500 {
+			return "Failed to deliver message — internal error. Please try again later."
+		}
+		return fmt.Sprintf("Failed to deliver message: %s", e.Message)
+	}
+}
+
+// parseHubError reads and parses a hub API error response.
+func parseHubError(resp *http.Response) *hubError {
+	he := &hubError{StatusCode: resp.StatusCode}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	if err != nil || len(body) == 0 {
+		he.Code = "unknown"
+		he.Message = http.StatusText(resp.StatusCode)
+		return he
+	}
+	var envelope struct {
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil || envelope.Error.Code == "" {
+		he.Code = "unknown"
+		he.Message = http.StatusText(resp.StatusCode)
+		return he
+	}
+	he.Code = envelope.Error.Code
+	he.Message = envelope.Error.Message
+	return he
+}
+
 // TelegramBroker implements plugin.MessageBrokerPluginInterface as a Telegram
 // Bot API message broker. It supports:
 //   - Outbound message delivery to Telegram chats via the Bot API
@@ -659,7 +712,18 @@ func (b *TelegramBroker) handleIncomingMessage(tgMsg *TGMessage) {
 	b.log.Debug("Delivering inbound Telegram message",
 		"topic", topic, "sender", sender, "telegram_user_id", senderID)
 
-	b.deliverInbound(topic, msg)
+	if he := b.deliverInbound(topic, msg); he != nil {
+		b.mu.RLock()
+		api := b.api
+		b.mu.RUnlock()
+		if api != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			if _, err := api.SendMessage(ctx, tgMsg.Chat.ID, he.userFacingMessage(), ""); err != nil {
+				b.log.Error("Failed to send error feedback to Telegram chat", "chat_id", tgMsg.Chat.ID, "error", err)
+			}
+		}
+	}
 }
 
 // recipientFromTopic extracts a recipient identity from a topic string.
@@ -689,7 +753,9 @@ func isEcho(msg *messages.StructuredMessage) bool {
 // --- Hub delivery (same pattern as refbroker) ---
 
 // deliverInbound sends a message to the hub API or InboundHandler.
-func (b *TelegramBroker) deliverInbound(topic string, msg *messages.StructuredMessage) {
+// Returns a non-nil *hubError when the hub rejects the message with an HTTP
+// error status (4xx/5xx), allowing callers to surface feedback to the sender.
+func (b *TelegramBroker) deliverInbound(topic string, msg *messages.StructuredMessage) *hubError {
 	b.mu.RLock()
 	handler := b.InboundHandler
 	hubURL := b.hubURL
@@ -701,12 +767,12 @@ func (b *TelegramBroker) deliverInbound(topic string, msg *messages.StructuredMe
 	// Prefer the in-process handler if set (testing mode)
 	if handler != nil {
 		handler(topic, msg)
-		return
+		return nil
 	}
 
 	if hubURL == "" {
 		b.log.Debug("No hub URL configured, dropping inbound message", "topic", topic)
-		return
+		return nil
 	}
 
 	payload := inboundPayload{
@@ -716,14 +782,14 @@ func (b *TelegramBroker) deliverInbound(topic string, msg *messages.StructuredMe
 	body, err := json.Marshal(payload)
 	if err != nil {
 		b.log.Error("Failed to marshal inbound message", "error", err)
-		return
+		return nil
 	}
 
 	url := hubURL + "/api/v1/broker/inbound"
 	req, err := http.NewRequest("POST", url, bytes.NewReader(body))
 	if err != nil {
 		b.log.Error("Failed to create inbound request", "error", err)
-		return
+		return nil
 	}
 	req.ContentLength = int64(len(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -734,7 +800,7 @@ func (b *TelegramBroker) deliverInbound(topic string, msg *messages.StructuredMe
 		secretKey, decErr := decodeBase64(hmacKey)
 		if decErr != nil {
 			b.log.Error("Failed to decode HMAC key", "error", decErr)
-			return
+			return nil
 		}
 		auth := &apiclient.HMACAuth{
 			BrokerID:  brokerID,
@@ -742,22 +808,26 @@ func (b *TelegramBroker) deliverInbound(topic string, msg *messages.StructuredMe
 		}
 		if signErr := auth.ApplyAuth(req); signErr != nil {
 			b.log.Error("Failed to sign inbound request", "error", signErr)
-			return
+			return nil
 		}
 	}
 
 	resp, err := b.httpClient.Do(req)
 	if err != nil {
 		b.log.Error("Failed to deliver inbound message", "error", err, "topic", topic)
-		return
+		return nil
 	}
-	io.Copy(io.Discard, resp.Body)
-	resp.Body.Close()
+	defer resp.Body.Close()
 
 	if resp.StatusCode >= 400 {
+		he := parseHubError(resp)
 		b.log.Error("Hub rejected inbound message",
-			"status", resp.StatusCode, "topic", topic)
+			"status", resp.StatusCode, "code", he.Code, "message", he.Message, "topic", topic)
+		return he
 	}
+
+	io.Copy(io.Discard, resp.Body)
+	return nil
 }
 
 // decodeBase64 decodes a base64-encoded string, trying standard then URL-safe encoding.

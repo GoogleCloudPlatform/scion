@@ -53,12 +53,12 @@ type CommandHandler struct {
 	appID          string
 	guildID        string // empty = global commands
 	agentCacheTTL  time.Duration
-	deliverInbound func(topic string, msg *messages.StructuredMessage)
+	deliverInbound func(topic string, msg *messages.StructuredMessage) *hubError
 }
 
 // NewCommandHandler creates a new CommandHandler. agentCacheTTL controls how
 // long agent lists are cached before refreshing from the Hub API.
-func NewCommandHandler(store Store, session *discordgo.Session, hubClient HubClient, deliverInbound func(string, *messages.StructuredMessage), appID, guildID string, agentCacheTTL time.Duration, log *slog.Logger) *CommandHandler {
+func NewCommandHandler(store Store, session *discordgo.Session, hubClient HubClient, deliverInbound func(string, *messages.StructuredMessage) *hubError, appID, guildID string, agentCacheTTL time.Duration, log *slog.Logger) *CommandHandler {
 	if log == nil {
 		log = slog.Default()
 	}

@@ -64,6 +64,59 @@ type inboundPayload struct {
 	Message *messages.StructuredMessage `json:"message"`
 }
 
+// hubError represents a structured error returned by the hub API.
+type hubError struct {
+	StatusCode int
+	Code       string `json:"code"`
+	Message    string `json:"message"`
+}
+
+func (e *hubError) Error() string {
+	return fmt.Sprintf("hub error %d (%s): %s", e.StatusCode, e.Code, e.Message)
+}
+
+// userFacingMessage returns a short message suitable for displaying to chat users.
+func (e *hubError) userFacingMessage() string {
+	switch e.Code {
+	case "agent_not_found":
+		return "Target agent not found. Use `/scion agents` to see available agents."
+	case "forbidden":
+		return "You don't have permission to message this agent."
+	case "broker_auth_failed", "unauthorized":
+		return "Authentication error — please contact an administrator."
+	default:
+		if e.StatusCode >= 500 {
+			return "Failed to deliver message — internal error. Please try again later."
+		}
+		return fmt.Sprintf("Failed to deliver message: %s", e.Message)
+	}
+}
+
+// parseHubError reads and parses a hub API error response.
+func parseHubError(resp *http.Response) *hubError {
+	he := &hubError{StatusCode: resp.StatusCode}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	if err != nil || len(body) == 0 {
+		he.Code = "unknown"
+		he.Message = http.StatusText(resp.StatusCode)
+		return he
+	}
+	var envelope struct {
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil || envelope.Error.Code == "" {
+		he.Code = "unknown"
+		he.Message = http.StatusText(resp.StatusCode)
+		return he
+	}
+	he.Code = envelope.Error.Code
+	he.Message = envelope.Error.Message
+	return he
+}
+
 // DiscordBroker implements plugin.MessageBrokerPluginInterface with
 // Discord Gateway WebSocket, slash commands, message components, and
 // persistent SQLite state.
@@ -1001,6 +1054,15 @@ func (b *DiscordBroker) handleIncomingMessage(s *discordgo.Session, m *discordgo
 
 	// Deliver to each target agent.
 	for _, agentSlug := range targets {
+		// Pre-validate that the target agent exists in the cached agent list.
+		// This catches deleted-agent routing before hitting the hub, giving
+		// immediate feedback especially for default-agent mapped channels.
+		if len(agents) > 0 && !agentInList(agentSlug, agents) {
+			errMsg := fmt.Sprintf("Target agent %q not found. It may have been deleted. Use `/scion agents` to see available agents.", agentSlug)
+			s.ChannelMessageSend(channelID, errMsg)
+			continue
+		}
+
 		cc := &ConversationContext{
 			DiscordUserID: senderID,
 			ProjectID:     link.ProjectID,
@@ -1041,14 +1103,28 @@ func (b *DiscordBroker) handleIncomingMessage(s *discordgo.Session, m *discordgo
 		b.log.Debug("Delivering inbound message",
 			"topic", topic, "sender", sender, "agent", agentSlug)
 
-		b.deliverInbound(topic, msg)
+		if he := b.deliverInbound(topic, msg); he != nil {
+			s.ChannelMessageSend(channelID, he.userFacingMessage())
+		}
 	}
+}
+
+// agentInList checks whether slug appears in the agents list (case-insensitive).
+func agentInList(slug string, agents []string) bool {
+	for _, a := range agents {
+		if strings.EqualFold(a, slug) {
+			return true
+		}
+	}
+	return false
 }
 
 // --- Hub delivery ---
 
 // deliverInbound sends a message to the hub API or InboundHandler.
-func (b *DiscordBroker) deliverInbound(topic string, msg *messages.StructuredMessage) {
+// Returns a non-nil *hubError when the hub rejects the message with an HTTP
+// error status (4xx/5xx), allowing callers to surface feedback to the sender.
+func (b *DiscordBroker) deliverInbound(topic string, msg *messages.StructuredMessage) *hubError {
 	b.mu.RLock()
 	handler := b.InboundHandler
 	hubURL := b.hubURL
@@ -1059,12 +1135,12 @@ func (b *DiscordBroker) deliverInbound(topic string, msg *messages.StructuredMes
 
 	if handler != nil {
 		handler(topic, msg)
-		return
+		return nil
 	}
 
 	if hubURL == "" {
 		b.log.Debug("No hub URL configured, dropping inbound message", "topic", topic)
-		return
+		return nil
 	}
 
 	payload := inboundPayload{
@@ -1074,14 +1150,14 @@ func (b *DiscordBroker) deliverInbound(topic string, msg *messages.StructuredMes
 	body, err := json.Marshal(payload)
 	if err != nil {
 		b.log.Error("Failed to marshal inbound message", "error", err)
-		return
+		return nil
 	}
 
 	inboundURL := hubURL + "/api/v1/broker/inbound"
 	req, err := http.NewRequest("POST", inboundURL, bytes.NewReader(body))
 	if err != nil {
 		b.log.Error("Failed to create inbound request", "error", err)
-		return
+		return nil
 	}
 	req.ContentLength = int64(len(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -1090,22 +1166,26 @@ func (b *DiscordBroker) deliverInbound(topic string, msg *messages.StructuredMes
 	if brokerID != "" && hmacKey != "" {
 		if err := signInboundRequest(req, brokerID, hmacKey); err != nil {
 			b.log.Error("Failed to sign inbound request", "error", err)
-			return
+			return nil
 		}
 	}
 
 	resp, err := b.httpClient.Do(req)
 	if err != nil {
 		b.log.Error("Failed to deliver inbound message", "error", err, "topic", topic)
-		return
+		return nil
 	}
-	io.Copy(io.Discard, resp.Body)
-	resp.Body.Close()
+	defer resp.Body.Close()
 
 	if resp.StatusCode >= 400 {
+		he := parseHubError(resp)
 		b.log.Error("Hub rejected inbound message",
-			"status", resp.StatusCode, "topic", topic)
+			"status", resp.StatusCode, "code", he.Code, "message", he.Message, "topic", topic)
+		return he
 	}
+
+	io.Copy(io.Discard, resp.Body)
+	return nil
 }
 
 // --- Agent cache ---
