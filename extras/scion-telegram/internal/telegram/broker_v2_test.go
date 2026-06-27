@@ -2314,3 +2314,295 @@ func TestV2_DownloadTelegramFile_DownloadFailure(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "download file")
 }
+
+// --- Code span restoration tests ---
+
+func TestV2_HandleGroupMessage_CodeSpanPreserved(t *testing.T) {
+	tgSrv := newFakeTGServerV2(t)
+	hub := newFakeHubClient()
+	hub.agents["proj-1"] = []AgentInfo{{Slug: "coder"}}
+	b := newTestBrokerV2WithHub(t, tgSrv, hub)
+
+	ctx := context.Background()
+	require.NoError(t, b.store.SaveUserMapping(ctx, &TelegramUserMapping{
+		TelegramUserID: "456",
+		ScionEmail:     "alice@example.com",
+		LinkedAt:       time.Now().UTC(),
+	}))
+	require.NoError(t, b.store.SaveGroupLink(ctx, &GroupLink{
+		ChatID:       -200,
+		ProjectID:    "proj-1",
+		ProjectSlug:  "my-project",
+		DefaultAgent: "coder",
+		LinkedAt:     time.Now().UTC(),
+		Active:       true,
+	}))
+	require.NoError(t, b.store.SaveProjectAgents(ctx, &ProjectAgents{
+		ProjectID:   "proj-1",
+		Agents:      []AgentInfo{{Slug: "coder"}},
+		RefreshedAt: time.Now(),
+	}))
+
+	var deliveredMsg *messages.StructuredMessage
+	done := make(chan struct{}, 1)
+	b.InboundHandler = func(_ string, msg *messages.StructuredMessage) {
+		deliveredMsg = msg
+		select {
+		case done <- struct{}{}:
+		default:
+		}
+	}
+
+	// Simulate: user typed "check the `config` file" in Telegram.
+	// Telegram strips backticks and puts formatting in entities.
+	b.handleGroupMessage(&TGMessage{
+		MessageID: 42,
+		From:      &TGUser{ID: 456, Username: "alice"},
+		Chat:      TGChat{ID: -200, Type: "group"},
+		Date:      time.Now().Unix(),
+		Text:      "@coder check the config file",
+		Entities: []MessageEntity{
+			{Type: "mention", Offset: 0, Length: 6},
+			{Type: "code", Offset: 17, Length: 6},
+		},
+	})
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for delivery")
+	}
+
+	assert.Equal(t, "check the `config` file", deliveredMsg.Msg)
+}
+
+func TestV2_HandleGroupMessage_MultipleCodeSpans(t *testing.T) {
+	tgSrv := newFakeTGServerV2(t)
+	hub := newFakeHubClient()
+	hub.agents["proj-1"] = []AgentInfo{{Slug: "coder"}}
+	b := newTestBrokerV2WithHub(t, tgSrv, hub)
+
+	ctx := context.Background()
+	require.NoError(t, b.store.SaveUserMapping(ctx, &TelegramUserMapping{
+		TelegramUserID: "456",
+		ScionEmail:     "alice@example.com",
+		LinkedAt:       time.Now().UTC(),
+	}))
+	require.NoError(t, b.store.SaveGroupLink(ctx, &GroupLink{
+		ChatID:       -200,
+		ProjectID:    "proj-1",
+		ProjectSlug:  "my-project",
+		DefaultAgent: "coder",
+		LinkedAt:     time.Now().UTC(),
+		Active:       true,
+	}))
+	require.NoError(t, b.store.SaveProjectAgents(ctx, &ProjectAgents{
+		ProjectID:   "proj-1",
+		Agents:      []AgentInfo{{Slug: "coder"}},
+		RefreshedAt: time.Now(),
+	}))
+
+	var deliveredMsg *messages.StructuredMessage
+	done := make(chan struct{}, 1)
+	b.InboundHandler = func(_ string, msg *messages.StructuredMessage) {
+		deliveredMsg = msg
+		select {
+		case done <- struct{}{}:
+		default:
+		}
+	}
+
+	// Simulate: "run foo and bar" where foo and bar were in backticks.
+	b.handleGroupMessage(&TGMessage{
+		MessageID: 43,
+		From:      &TGUser{ID: 456, Username: "alice"},
+		Chat:      TGChat{ID: -200, Type: "group"},
+		Date:      time.Now().Unix(),
+		Text:      "@coder run foo and bar",
+		Entities: []MessageEntity{
+			{Type: "mention", Offset: 0, Length: 6},
+			{Type: "code", Offset: 11, Length: 3},
+			{Type: "code", Offset: 19, Length: 3},
+		},
+	})
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for delivery")
+	}
+
+	assert.Equal(t, "run `foo` and `bar`", deliveredMsg.Msg)
+}
+
+func TestV2_HandleGroupMessage_PreBlockPreserved(t *testing.T) {
+	tgSrv := newFakeTGServerV2(t)
+	hub := newFakeHubClient()
+	hub.agents["proj-1"] = []AgentInfo{{Slug: "coder"}}
+	b := newTestBrokerV2WithHub(t, tgSrv, hub)
+
+	ctx := context.Background()
+	require.NoError(t, b.store.SaveUserMapping(ctx, &TelegramUserMapping{
+		TelegramUserID: "456",
+		ScionEmail:     "alice@example.com",
+		LinkedAt:       time.Now().UTC(),
+	}))
+	require.NoError(t, b.store.SaveGroupLink(ctx, &GroupLink{
+		ChatID:       -200,
+		ProjectID:    "proj-1",
+		ProjectSlug:  "my-project",
+		DefaultAgent: "coder",
+		LinkedAt:     time.Now().UTC(),
+		Active:       true,
+	}))
+	require.NoError(t, b.store.SaveProjectAgents(ctx, &ProjectAgents{
+		ProjectID:   "proj-1",
+		Agents:      []AgentInfo{{Slug: "coder"}},
+		RefreshedAt: time.Now(),
+	}))
+
+	var deliveredMsg *messages.StructuredMessage
+	done := make(chan struct{}, 1)
+	b.InboundHandler = func(_ string, msg *messages.StructuredMessage) {
+		deliveredMsg = msg
+		select {
+		case done <- struct{}{}:
+		default:
+		}
+	}
+
+	// Simulate: user sent a code block (triple backticks) in Telegram.
+	b.handleGroupMessage(&TGMessage{
+		MessageID: 44,
+		From:      &TGUser{ID: 456, Username: "alice"},
+		Chat:      TGChat{ID: -200, Type: "group"},
+		Date:      time.Now().Unix(),
+		Text:      "@coder apply this:\nfmt.Println(\"hello\")",
+		Entities: []MessageEntity{
+			{Type: "mention", Offset: 0, Length: 6},
+			{Type: "pre", Offset: 19, Length: 20},
+		},
+	})
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for delivery")
+	}
+
+	assert.Equal(t, "apply this:\n```\nfmt.Println(\"hello\")\n```", deliveredMsg.Msg)
+}
+
+func TestV2_HandleGroupMessage_PreBlockWithLanguage(t *testing.T) {
+	tgSrv := newFakeTGServerV2(t)
+	hub := newFakeHubClient()
+	hub.agents["proj-1"] = []AgentInfo{{Slug: "coder"}}
+	b := newTestBrokerV2WithHub(t, tgSrv, hub)
+
+	ctx := context.Background()
+	require.NoError(t, b.store.SaveUserMapping(ctx, &TelegramUserMapping{
+		TelegramUserID: "456",
+		ScionEmail:     "alice@example.com",
+		LinkedAt:       time.Now().UTC(),
+	}))
+	require.NoError(t, b.store.SaveGroupLink(ctx, &GroupLink{
+		ChatID:       -200,
+		ProjectID:    "proj-1",
+		ProjectSlug:  "my-project",
+		DefaultAgent: "coder",
+		LinkedAt:     time.Now().UTC(),
+		Active:       true,
+	}))
+	require.NoError(t, b.store.SaveProjectAgents(ctx, &ProjectAgents{
+		ProjectID:   "proj-1",
+		Agents:      []AgentInfo{{Slug: "coder"}},
+		RefreshedAt: time.Now(),
+	}))
+
+	var deliveredMsg *messages.StructuredMessage
+	done := make(chan struct{}, 1)
+	b.InboundHandler = func(_ string, msg *messages.StructuredMessage) {
+		deliveredMsg = msg
+		select {
+		case done <- struct{}{}:
+		default:
+		}
+	}
+
+	// Simulate: user sent ```go\nfmt.Println("hello")\n``` in Telegram.
+	b.handleGroupMessage(&TGMessage{
+		MessageID: 45,
+		From:      &TGUser{ID: 456, Username: "alice"},
+		Chat:      TGChat{ID: -200, Type: "group"},
+		Date:      time.Now().Unix(),
+		Text:      "fmt.Println(\"hello\")",
+		Entities: []MessageEntity{
+			{Type: "pre", Offset: 0, Length: 20, Language: "go"},
+		},
+	})
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for delivery")
+	}
+
+	assert.Equal(t, "```go\nfmt.Println(\"hello\")\n```", deliveredMsg.Msg)
+}
+
+func TestV2_HandleGroupMessage_CodeSpanWithDefaultAgent(t *testing.T) {
+	tgSrv := newFakeTGServerV2(t)
+	hub := newFakeHubClient()
+	hub.agents["proj-1"] = []AgentInfo{{Slug: "coder"}}
+	b := newTestBrokerV2WithHub(t, tgSrv, hub)
+
+	ctx := context.Background()
+	require.NoError(t, b.store.SaveUserMapping(ctx, &TelegramUserMapping{
+		TelegramUserID: "456",
+		ScionEmail:     "alice@example.com",
+		LinkedAt:       time.Now().UTC(),
+	}))
+	require.NoError(t, b.store.SaveGroupLink(ctx, &GroupLink{
+		ChatID:       -200,
+		ProjectID:    "proj-1",
+		ProjectSlug:  "my-project",
+		DefaultAgent: "coder",
+		LinkedAt:     time.Now().UTC(),
+		Active:       true,
+	}))
+	require.NoError(t, b.store.SaveProjectAgents(ctx, &ProjectAgents{
+		ProjectID:   "proj-1",
+		Agents:      []AgentInfo{{Slug: "coder"}},
+		RefreshedAt: time.Now(),
+	}))
+
+	var deliveredMsg *messages.StructuredMessage
+	done := make(chan struct{}, 1)
+	b.InboundHandler = func(_ string, msg *messages.StructuredMessage) {
+		deliveredMsg = msg
+		select {
+		case done <- struct{}{}:
+		default:
+		}
+	}
+
+	// No mention — routes to default agent. Code span should be preserved.
+	b.handleGroupMessage(&TGMessage{
+		MessageID: 46,
+		From:      &TGUser{ID: 456, Username: "alice"},
+		Chat:      TGChat{ID: -200, Type: "group"},
+		Date:      time.Now().Unix(),
+		Text:      "check the config file",
+		Entities: []MessageEntity{
+			{Type: "code", Offset: 10, Length: 6},
+		},
+	})
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for delivery")
+	}
+
+	assert.Equal(t, "check the `config` file", deliveredMsg.Msg)
+}

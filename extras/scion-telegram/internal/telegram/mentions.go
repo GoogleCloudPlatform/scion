@@ -233,6 +233,7 @@ func extractAgentMentions(text string, knownAgents []string) (agents []string, h
 }
 
 // stripMentions removes @botUsername and @agentSlug mentions from text, returning clean content.
+// Newlines are preserved so that multi-line messages (including code blocks) retain their structure.
 func stripMentions(text string, botUsername string, agentSlugs []string) string {
 	remove := make(map[string]bool)
 	if botUsername != "" {
@@ -243,26 +244,30 @@ func stripMentions(text string, botUsername string, agentSlugs []string) string 
 	}
 	remove["all"] = true
 
-	var parts []string
-	for _, word := range strings.Fields(text) {
-		if !strings.HasPrefix(word, "@") {
-			parts = append(parts, word)
-			continue
-		}
-		name := strings.TrimPrefix(word, "@")
-		cleaned := strings.TrimRightFunc(name, func(r rune) bool {
-			return unicode.IsPunct(r) && r != '_' && r != '-'
-		})
-		if remove[strings.ToLower(cleaned)] {
-			trailing := name[len(cleaned):]
-			if trailing != "" {
-				parts = append(parts, trailing)
+	lines := strings.Split(text, "\n")
+	for i, line := range lines {
+		var parts []string
+		for _, word := range strings.Fields(line) {
+			if !strings.HasPrefix(word, "@") {
+				parts = append(parts, word)
+				continue
 			}
-			continue
+			name := strings.TrimPrefix(word, "@")
+			cleaned := strings.TrimRightFunc(name, func(r rune) bool {
+				return unicode.IsPunct(r) && r != '_' && r != '-'
+			})
+			if remove[strings.ToLower(cleaned)] {
+				trailing := name[len(cleaned):]
+				if trailing != "" {
+					parts = append(parts, trailing)
+				}
+				continue
+			}
+			parts = append(parts, word)
 		}
-		parts = append(parts, word)
+		lines[i] = strings.Join(parts, " ")
 	}
-	return strings.Join(parts, " ")
+	return strings.Join(lines, "\n")
 }
 
 // hasNonBotUserMention returns true if the message starts with (offset=0) a

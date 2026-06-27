@@ -1958,7 +1958,9 @@ func (b *TelegramBrokerV2) downloadTelegramFile(ctx context.Context, tgMsg *TGMe
 // resolveUserMentions extracts @username and text_mention entities from a
 // Telegram message, looks each up in the user_mappings store, and returns:
 //   - modifiedText: the message text with text_mention display names (offset>0)
-//     replaced by "user:email" for registered users
+//     replaced by "user:email" for registered users, and "code"/"pre" entity
+//     spans re-wrapped in backticks (Telegram strips backticks from the text
+//     field and stores the formatting as entities)
 //   - resolvedJSON: a JSON string mapping display names → "user:email" for all
 //     resolved mentions (empty string if none resolve)
 func (b *TelegramBrokerV2) resolveUserMentions(ctx context.Context, tgMsg *TGMessage) (string, string) {
@@ -2036,6 +2038,30 @@ func (b *TelegramBrokerV2) resolveUserMentions(ctx context.Context, tgMsg *TGMes
 					replacement: scionIdentity,
 				})
 			}
+		case "code":
+			span, ok := utf16Extract(tgMsg.Text, ent.Offset, ent.Length)
+			if !ok {
+				continue
+			}
+			replacements = append(replacements, textReplacement{
+				offset:      ent.Offset,
+				length:      ent.Length,
+				replacement: "`" + span + "`",
+			})
+		case "pre":
+			span, ok := utf16Extract(tgMsg.Text, ent.Offset, ent.Length)
+			if !ok {
+				continue
+			}
+			prefix := "```"
+			if ent.Language != "" {
+				prefix += ent.Language
+			}
+			replacements = append(replacements, textReplacement{
+				offset:      ent.Offset,
+				length:      ent.Length,
+				replacement: prefix + "\n" + span + "\n```",
+			})
 		}
 	}
 

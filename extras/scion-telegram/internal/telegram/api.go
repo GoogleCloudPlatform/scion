@@ -102,10 +102,11 @@ type TGMessage struct {
 
 // MessageEntity represents a special entity in a Telegram message (e.g. @mentions, commands).
 type MessageEntity struct {
-	Type   string  `json:"type"`
-	Offset int     `json:"offset"`
-	Length int     `json:"length"`
-	User   *TGUser `json:"user,omitempty"`
+	Type     string  `json:"type"`
+	Offset   int     `json:"offset"`
+	Length   int     `json:"length"`
+	User     *TGUser `json:"user,omitempty"`
+	Language string  `json:"language,omitempty"`
 }
 
 // TGUser represents a Telegram user.
