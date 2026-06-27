@@ -1070,7 +1070,17 @@ export class ScionPageOnboarding extends LitElement {
           >Build locally</sl-button>
         ` : nothing}
 
-        ${!this.imageRegistry && !this.buildAvailable ? html`
+        ${hasImportedDockerfiles ? html`
+          <sl-button
+            variant=${this.imageRegistry || this.buildAvailable ? 'default' : 'primary'}
+            size="small"
+            ?loading=${this.imageBuilding}
+            ?disabled=${this.imagePulling || this.imageBuilding}
+            @click=${this.handleBuildFromDockerfile}
+          >Build from Dockerfile</sl-button>
+        ` : nothing}
+
+        ${!this.imageRegistry && !this.buildAvailable && !hasImportedDockerfiles ? html`
           <p style="font-size:0.8125rem;color:var(--scion-text-muted,#64748b);margin:0;">
             Pre-built images are available via pull. Local builds require a source checkout.
           </p>
@@ -1190,6 +1200,89 @@ export class ScionPageOnboarding extends LitElement {
     }
   }
 
+  private async handleBuildFromDockerfile(): Promise<void> {
+    this.error = null;
+    this.imageBuilding = true;
+    this.buildLogs = [];
+    this.buildExpanded = true;
+
+    const configs = this.importedHarnessConfigs.filter(
+      hc => this.selectedHarnesses.has(hc.slug) && this.hasDockerfile(hc),
+    );
+
+    for (const hc of configs) {
+      const statuses = new Map(this.imageStatuses);
+      statuses.set(hc.slug, { status: 'building', fullName: `${hc.slug}:latest` });
+      this.imageStatuses = statuses;
+
+      try {
+        const res = await apiFetch('/api/v1/system/images/build-harness-config', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ harnessConfigId: hc.id }),
+        });
+        if (!res.ok) {
+          this.error = await extractApiError(res, `Failed to build image for ${hc.name}`);
+          this.imageBuilding = false;
+          return;
+        }
+        const data = (await res.json()) as { jobId: string };
+        await this.awaitImageBuildJob(data.jobId, hc.slug);
+      } catch {
+        this.error = 'Failed to connect to the server.';
+        this.imageBuilding = false;
+        return;
+      }
+    }
+
+    this.imageBuilding = false;
+  }
+
+  private awaitImageBuildJob(jobId: string, slug: string): Promise<void> {
+    return new Promise<void>((resolve) => {
+      this.cleanupImageEvents();
+      const url = `/events?sub=${encodeURIComponent('system.images.' + jobId)}`;
+      const es = new EventSource(url);
+      this.imageEventSource = es;
+
+      es.addEventListener('update', (event: Event) => {
+        try {
+          const wrapper = JSON.parse((event as MessageEvent).data) as { subject: string; data?: Record<string, unknown> };
+          const d = wrapper.data;
+          if (!d) return;
+
+          if (d['image']) {
+            const next = new Map(this.imageStatuses);
+            next.set(slug, { status: d['status'] as string, fullName: d['image'] as string });
+            this.imageStatuses = next;
+          }
+
+          if (d['type'] === 'log') {
+            const line = d['line'] as string;
+            this.buildLogs = [...this.buildLogs, line];
+
+            if (line === 'build complete' || line.startsWith('build failed:')) {
+              this.cleanupImageEvents();
+              if (line.startsWith('build failed:')) {
+                const next = new Map(this.imageStatuses);
+                next.set(slug, { status: 'error', fullName: `${slug}:latest`, error: line });
+                this.imageStatuses = next;
+              }
+              resolve();
+            }
+          }
+        } catch (err) {
+          console.error('[Onboarding] Failed to parse build event:', err);
+        }
+      });
+
+      es.onerror = () => {
+        this.cleanupImageEvents();
+        resolve();
+      };
+    });
+  }
+
   private subscribeToImageJob(jobId: string, mode: 'pull' | 'build'): void {
     this.cleanupImageEvents();
 
@@ -1261,6 +1354,7 @@ export class ScionPageOnboarding extends LitElement {
       if (image.includes(`scion-${h}`)) return h;
     }
     for (const hc of this.importedHarnessConfigs) {
+      if (image.startsWith(hc.slug + ':') || image === hc.slug) return hc.slug;
       if (hc.config?.image && image.includes(hc.config.image)) return hc.slug;
     }
     return null;
