@@ -1182,8 +1182,6 @@ func TestStageCaptureAuthAssets(t *testing.T) {
 func TestGatherAuthWithEnv_ConfigDrivenEnvVars(t *testing.T) {
 	t.Setenv("COPILOT_GITHUB_TOKEN", "ghp_test123")
 	t.Setenv("GH_TOKEN", "gh_test456")
-	t.Setenv("SCION_TEST_UNSET_TOKEN", "")
-	os.Unsetenv("SCION_TEST_UNSET_TOKEN")
 
 	authMeta := &config.HarnessAuthMetadata{
 		DefaultType: "api-key",
