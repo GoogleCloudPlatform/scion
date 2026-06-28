@@ -12,6 +12,7 @@ import (
 	"encoding/pem"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
@@ -22,15 +23,21 @@ import (
 	"sync"
 	"time"
 
+	"cloud.google.com/go/auth/credentials"
 	resourcemanager "cloud.google.com/go/resourcemanager/apiv3"
 	resourcemanagerpb "cloud.google.com/go/resourcemanager/apiv3/resourcemanagerpb"
-	"cloud.google.com/go/auth/credentials"
 	"github.com/gorilla/websocket"
 	"golang.org/x/crypto/ssh"
 )
 
 type IAPExecConnector struct {
-	IapTunnelUrlOverride string
+	IapTunnelUrlOverride  string
+	IapTunnelInsecureTLS  bool
+	SSHUser               string
+	SSHHost               string
+	StrictHostKeyChecking string
+	UserKnownHostsFile    string
+	SSHDebug              bool
 }
 
 func NewIAPExecConnector(iapTunnelUrlOverride string) *IAPExecConnector {
@@ -69,41 +76,33 @@ func (c *IAPExecConnector) runSSH(ctx context.Context, project, location, instan
 		shortID = instanceName[idx+1:]
 	}
 
-	var privKeyPath string
-	var tempDir string
+	privKeyPEM, pubKeyOpenSSH, err := generateSSHKeyPair()
+	if err != nil {
+		return fmt.Errorf("failed to generate SSH keys: %v", err)
+	}
 
-	staticKeyPath := "/tmp/id_test_rsa"
-	if _, err := os.Stat(staticKeyPath); err == nil {
-		privKeyPath = staticKeyPath
-	} else {
-		privKeyPEM, pubKeyOpenSSH, err := generateSSHKeyPair()
-		if err != nil {
-			return fmt.Errorf("failed to generate SSH keys: %v", err)
-		}
+	tempDir, err := os.MkdirTemp("", "run-ssh-*")
+	if err != nil {
+		return fmt.Errorf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
 
-		tempDir, err = os.MkdirTemp("", "run-ssh-*")
-		if err != nil {
-			return fmt.Errorf("failed to create temp dir: %v", err)
-		}
-		defer os.RemoveAll(tempDir)
+	privKeyPath := filepath.Join(tempDir, "id_rsa")
+	err = os.WriteFile(privKeyPath, privKeyPEM, 0600)
+	if err != nil {
+		return fmt.Errorf("failed to write private key: %v", err)
+	}
 
-		privKeyPath = filepath.Join(tempDir, "id_rsa")
-		err = os.WriteFile(privKeyPath, privKeyPEM, 0600)
-		if err != nil {
-			return fmt.Errorf("failed to write private key: %v", err)
-		}
+	serviceAccount := fmt.Sprintf("%s-compute@developer.gserviceaccount.com", projectNumber)
+	signedCert, err := requestSignedCertificate(ctx, project, location, shortID, serviceAccount, string(pubKeyOpenSSH), tok.Value)
+	if err != nil {
+		return fmt.Errorf("failed to sign SSH key: %v", err)
+	}
 
-		serviceAccount := fmt.Sprintf("%s-compute@developer.gserviceaccount.com", projectNumber)
-		signedCert, err := requestSignedCertificate(ctx, project, location, shortID, serviceAccount, string(pubKeyOpenSSH), tok.Value)
-		if err != nil {
-			return fmt.Errorf("failed to sign SSH key: %v", err)
-		}
-
-		certPath := filepath.Join(tempDir, "id_rsa-cert.pub")
-		err = os.WriteFile(certPath, []byte(signedCert), 0644)
-		if err != nil {
-			return fmt.Errorf("failed to write SSH certificate: %v", err)
-		}
+	certPath := filepath.Join(tempDir, "id_rsa-cert.pub")
+	err = os.WriteFile(certPath, []byte(signedCert), 0644)
+	if err != nil {
+		return fmt.Errorf("failed to write SSH certificate: %v", err)
 	}
 
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -126,16 +125,11 @@ func (c *IAPExecConnector) runSSH(ctx context.Context, project, location, instan
 
 	var tlsConfig *tls.Config
 	if c.IapTunnelUrlOverride != "" {
-		u, err := url.Parse(c.IapTunnelUrlOverride)
-		if err == nil {
-			tlsConfig = &tls.Config{
-				InsecureSkipVerify: true,
-				ServerName:         u.Hostname(),
-			}
-		} else {
-			tlsConfig = &tls.Config{
-				InsecureSkipVerify: true,
-			}
+		tlsConfig = &tls.Config{
+			InsecureSkipVerify: c.IapTunnelInsecureTLS,
+		}
+		if u, err := url.Parse(c.IapTunnelUrlOverride); err == nil {
+			tlsConfig.ServerName = u.Hostname()
 		}
 	}
 
@@ -154,7 +148,8 @@ func (c *IAPExecConnector) runSSH(ctx context.Context, project, location, instan
 		}
 		return fmt.Errorf("failed to connect to IAP WebSocket tunnel: %v", err)
 	}
-	defer wsConn.Close(); fmt.Printf("Negotiated Subprotocol: %s\n", resp.Header.Get("Sec-Websocket-Protocol"))
+	defer wsConn.Close()
+	slog.Debug("negotiated IAP tunnel websocket subprotocol", "subprotocol", resp.Header.Get("Sec-Websocket-Protocol"))
 
 	iapConn := NewIapConn(wsConn)
 
@@ -174,7 +169,8 @@ func (c *IAPExecConnector) runSSH(ctx context.Context, project, location, instan
 
 		go func() {
 			defer wg.Done()
-			written, err := io.Copy(iapConn, localConn); fmt.Printf("Copied %d bytes to iapConn, err=%v\n", written, err)
+			written, err := io.Copy(iapConn, localConn)
+			slog.Debug("copied local SSH bytes to IAP tunnel", "bytes", written, "error", err)
 		}()
 
 		go func() {
@@ -185,16 +181,35 @@ func (c *IAPExecConnector) runSSH(ctx context.Context, project, location, instan
 		wg.Wait()
 	}()
 
+	sshUser := c.SSHUser
+	if sshUser == "" {
+		sshUser = "root"
+	}
+	sshHost := c.SSHHost
+	if sshHost == "" {
+		sshHost = "127.0.0.1"
+	}
+	strictHostKeyChecking := c.StrictHostKeyChecking
+	if strictHostKeyChecking == "" {
+		strictHostKeyChecking = "accept-new"
+	}
+
 	sshArgs := []string{
 		"-p", localPort,
 		"-i", privKeyPath,
-		"-o", "StrictHostKeyChecking=no",
-		"-o", "UserKnownHostsFile=/dev/null", "-o", "BatchMode=yes", "-v",
-		"root@127.0.0.1",
+		"-o", "BatchMode=yes",
+		"-o", "StrictHostKeyChecking=" + strictHostKeyChecking,
 	}
+	if c.UserKnownHostsFile != "" {
+		sshArgs = append(sshArgs, "-o", "UserKnownHostsFile="+c.UserKnownHostsFile)
+	}
+	if c.SSHDebug {
+		sshArgs = append(sshArgs, "-v")
+	}
+	sshArgs = append(sshArgs, sshUser+"@"+sshHost)
 
 	if len(cmdArgs) > 0 {
-		sshArgs = append(sshArgs, cmdArgs...); fmt.Println("ssh args:", sshArgs)
+		sshArgs = append(sshArgs, cmdArgs...)
 	}
 
 	sshCmd := exec.CommandContext(ctx, "ssh", sshArgs...)
@@ -202,7 +217,9 @@ func (c *IAPExecConnector) runSSH(ctx context.Context, project, location, instan
 	sshCmd.Stdout = stdout
 	sshCmd.Stderr = stderr
 
-	fmt.Println("Running ssh..."); err = sshCmd.Run(); fmt.Println("ssh finished, err:", err)
+	slog.Debug("running SSH command", "user", sshUser, "host", sshHost, "port", localPort, "command_args", len(cmdArgs))
+	err = sshCmd.Run()
+	slog.Debug("SSH command finished", "error", err)
 	if err != nil {
 		return fmt.Errorf("SSH command failed: %w", err)
 	}
@@ -334,7 +351,8 @@ func (c *IapConn) Read(b []byte) (int, error) {
 		if err != nil {
 			return 0, err
 		}
-		fmt.Printf("Websocket msg type: %d, len: %d\n", mt, len(msg)); if mt != websocket.BinaryMessage {
+		slog.Debug("received IAP tunnel websocket message", "message_type", mt, "length", len(msg))
+		if mt != websocket.BinaryMessage {
 			continue
 		}
 
@@ -343,7 +361,8 @@ func (c *IapConn) Read(b []byte) (int, error) {
 		}
 
 		tag := binary.BigEndian.Uint16(msg[0:2])
-		payload := msg[2:]; fmt.Printf("IAP tag received: 0x%04x, payload len: %d\n", tag, len(payload))
+		payload := msg[2:]
+		slog.Debug("received IAP tunnel frame", "tag", tag, "payload_length", len(payload))
 
 		switch tag {
 		case 0x0001:
