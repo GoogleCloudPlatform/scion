@@ -15,7 +15,9 @@
 package hub
 
 import (
+	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -25,13 +27,20 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
+	cloudbuild "cloud.google.com/go/cloudbuild/apiv1"
+	cloudbuildpb "cloud.google.com/go/cloudbuild/apiv1/v2/cloudbuildpb"
+	"cloud.google.com/go/longrunning/autogen/longrunningpb"
+	gcstorage "cloud.google.com/go/storage"
 	scionruntime "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/durationpb"
 	"gopkg.in/yaml.v3"
 )
 
@@ -439,9 +448,21 @@ type BuildHarnessConfigImageExecutor struct {
 	runtimeBin string
 	registry   string
 	tag        string
+	gcpProject string
 }
 
 func (e *BuildHarnessConfigImageExecutor) Run(ctx context.Context, logger io.Writer, params map[string]string) error {
+	if params["builder"] == "cloud-build" {
+		cloudExecutor := &CloudBuildHarnessConfigExecutor{
+			store:      e.store,
+			storage:    e.storage,
+			gcpProject: e.gcpProject,
+			registry:   e.registry,
+			tag:        e.tag,
+		}
+		return cloudExecutor.Run(ctx, logger, params)
+	}
+
 	log := logging.Subsystem("hub.maintenance.build-harness-config-image")
 
 	harnessConfigID := params["harness_config_id"]
@@ -665,6 +686,424 @@ func (e *BuildHarnessConfigImageExecutor) syncBuiltImage(ctx context.Context, lo
 	_, _ = fmt.Fprintf(logger, "Updated harness-config record image to %s\n", outputImage)
 
 	return nil
+}
+
+// materializeHarnessConfigFiles downloads all files from a harness config's
+// storage path into the given directory. It is shared by both the local and
+// Cloud Build executors.
+func materializeHarnessConfigFiles(ctx context.Context, stor storage.Storage, hc *store.HarnessConfig, destDir string, logger io.Writer) error {
+	_, _ = fmt.Fprintf(logger, "Materializing %d file(s) from harness-config %q...\n", len(hc.Files), hc.Name)
+	for _, f := range hc.Files {
+		objectPath := hc.StoragePath + "/" + f.Path
+		reader, _, err := stor.Download(ctx, objectPath)
+		if err != nil {
+			return fmt.Errorf("failed to download %q from storage: %w", f.Path, err)
+		}
+
+		destPath := filepath.Join(destDir, f.Path)
+		if !strings.HasPrefix(destPath, destDir+string(os.PathSeparator)) {
+			_ = reader.Close()
+			return fmt.Errorf("invalid file path %q: escapes build directory", f.Path)
+		}
+		if dir := filepath.Dir(destPath); dir != destDir {
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				_ = reader.Close()
+				return fmt.Errorf("failed to create directory for %q: %w", f.Path, err)
+			}
+		}
+
+		outFile, err := os.Create(destPath)
+		if err != nil {
+			_ = reader.Close()
+			return fmt.Errorf("failed to create file %q: %w", f.Path, err)
+		}
+		_, err = io.Copy(outFile, reader)
+		_ = reader.Close()
+		_ = outFile.Close()
+		if err != nil {
+			return fmt.Errorf("failed to write file %q: %w", f.Path, err)
+		}
+
+		if f.Mode != "" {
+			mode := os.FileMode(0o644)
+			if _, err := fmt.Sscanf(f.Mode, "%o", &mode); err == nil {
+				_ = os.Chmod(destPath, mode)
+			}
+		}
+	}
+	return nil
+}
+
+// CloudBuildHarnessConfigExecutor builds a harness-config image using Google Cloud Build.
+type CloudBuildHarnessConfigExecutor struct {
+	store      store.Store
+	storage    storage.Storage
+	gcpProject string
+	registry   string
+	tag        string
+}
+
+func (e *CloudBuildHarnessConfigExecutor) Run(ctx context.Context, logger io.Writer, params map[string]string) error {
+	log := logging.Subsystem("hub.maintenance.cloud-build-harness-config-image")
+
+	harnessConfigID := params["harness_config_id"]
+	if harnessConfigID == "" {
+		return fmt.Errorf("missing required parameter: harness_config_id")
+	}
+
+	if e.gcpProject == "" {
+		return fmt.Errorf("Cloud Build requires a GCP project ID. Configure gcp_project_id in settings")
+	}
+
+	tag := e.tag
+	if tag == "" {
+		tag = "latest"
+	}
+	if v := params["tag"]; v != "" {
+		tag = v
+	}
+
+	registry := e.registry
+	if v := params["registry"]; v != "" {
+		registry = v
+	}
+	registry = strings.TrimSuffix(registry, "/")
+	if registry == "" {
+		return fmt.Errorf("Cloud Build requires a registry (images must be pushed). Configure image_registry first")
+	}
+
+	hc, err := e.store.GetHarnessConfig(ctx, harnessConfigID)
+	if err != nil {
+		return fmt.Errorf("failed to load harness-config %q: %w", harnessConfigID, err)
+	}
+
+	hasDockerfile := false
+	for _, f := range hc.Files {
+		if f.Path == "Dockerfile" {
+			hasDockerfile = true
+			break
+		}
+	}
+	if !hasDockerfile {
+		return fmt.Errorf("harness-config %q does not contain a Dockerfile", hc.Name)
+	}
+
+	if e.storage == nil {
+		return fmt.Errorf("storage not configured")
+	}
+
+	// Materialize harness-config files to a temp directory.
+	tmpDir, err := os.MkdirTemp("", "scion-cloudbuild-*")
+	if err != nil {
+		return fmt.Errorf("failed to create temp directory: %w", err)
+	}
+	defer func() { _ = os.RemoveAll(tmpDir) }()
+
+	if err := materializeHarnessConfigFiles(ctx, e.storage, hc, tmpDir, logger); err != nil {
+		return err
+	}
+
+	// Create a tar.gz of the build context.
+	_, _ = fmt.Fprintln(logger, "Creating build context archive...")
+	var buf bytes.Buffer
+	if err := createTarGz(tmpDir, &buf); err != nil {
+		return fmt.Errorf("failed to create build context archive: %w", err)
+	}
+
+	// Upload build context to the Cloud Build default staging bucket.
+	stagingBucket := e.gcpProject + "_cloudbuild"
+	objectName := fmt.Sprintf("source/scion-harness-%s-%d.tar.gz", hc.Name, time.Now().Unix())
+	_, _ = fmt.Fprintf(logger, "Uploading build context to gs://%s/%s...\n", stagingBucket, objectName)
+
+	gcsClient, err := gcstorage.NewClient(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to create GCS client: %w", err)
+	}
+	defer gcsClient.Close()
+
+	wc := gcsClient.Bucket(stagingBucket).Object(objectName).NewWriter(ctx)
+	wc.ContentType = "application/gzip"
+	if _, err := io.Copy(wc, &buf); err != nil {
+		_ = wc.Close()
+		return fmt.Errorf("failed to upload build context: %w", err)
+	}
+	if err := wc.Close(); err != nil {
+		return fmt.Errorf("failed to finalize build context upload: %w", err)
+	}
+	_, _ = fmt.Fprintln(logger, "Build context uploaded.")
+
+	// Build the output image reference.
+	imageName := hc.Slug
+	if imageName == "" {
+		imageName = hc.Name
+	}
+	baseImage := registry + "/scion-base:" + tag
+	outputImage := registry + "/" + imageName + ":" + tag
+
+	_, _ = fmt.Fprintf(logger, "Base image: %s\n", baseImage)
+	_, _ = fmt.Fprintf(logger, "Output image: %s\n", outputImage)
+	_, _ = fmt.Fprintf(logger, "Submitting Cloud Build job in project %q...\n", e.gcpProject)
+	log.Debug("Submitting Cloud Build",
+		"image", outputImage, "base_image", baseImage,
+		"project", e.gcpProject, "harness_config", hc.Name)
+
+	// Submit Cloud Build.
+	cbClient, err := cloudbuild.NewClient(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to create Cloud Build client: %w", err)
+	}
+	defer cbClient.Close()
+
+	build := &cloudbuildpb.Build{
+		Source: &cloudbuildpb.Source{
+			Source: &cloudbuildpb.Source_StorageSource{
+				StorageSource: &cloudbuildpb.StorageSource{
+					Bucket: stagingBucket,
+					Object: objectName,
+				},
+			},
+		},
+		Steps: []*cloudbuildpb.BuildStep{
+			{
+				Name: "gcr.io/cloud-builders/docker",
+				Args: []string{"buildx", "create", "--name", "builder", "--use"},
+				Id:   "setup-buildx",
+				Env:  []string{"DOCKER_CLI_EXPERIMENTAL=enabled"},
+			},
+			{
+				Name: "gcr.io/cloud-builders/docker",
+				Args: []string{"buildx", "inspect", "--bootstrap"},
+				Id:   "bootstrap-buildx",
+				Env:  []string{"DOCKER_CLI_EXPERIMENTAL=enabled"},
+			},
+			{
+				Name: "gcr.io/cloud-builders/docker",
+				Args: []string{
+					"buildx", "build",
+					"--platform", "linux/amd64,linux/arm64",
+					"--build-arg", "BASE_IMAGE=" + baseImage,
+					"-t", outputImage,
+					"-f", "Dockerfile",
+					"--push",
+					".",
+				},
+				Id:  "build-image",
+				Env: []string{"DOCKER_CLI_EXPERIMENTAL=enabled"},
+			},
+		},
+		Options: &cloudbuildpb.BuildOptions{
+			MachineType:          cloudbuildpb.BuildOptions_E2_HIGHCPU_8,
+			DynamicSubstitutions: true,
+		},
+		Timeout: durationpb.New(20 * time.Minute),
+	}
+
+	op, err := cbClient.CreateBuild(ctx, &cloudbuildpb.CreateBuildRequest{
+		ProjectId: e.gcpProject,
+		Build:     build,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to submit Cloud Build: %w", err)
+	}
+
+	buildID, err := extractBuildID(op)
+	if err != nil {
+		return fmt.Errorf("failed to get build ID from operation: %w", err)
+	}
+	_, _ = fmt.Fprintf(logger, "Cloud Build started: %s\n", buildID)
+	log.Info("Cloud Build started", "build_id", buildID, "project", e.gcpProject)
+
+	// Poll for build status and stream logs.
+	logBucket := e.gcpProject + "_cloudbuild"
+	logObjectPrefix := fmt.Sprintf("log-%s", buildID)
+	var lastLogOffset int64
+
+	for {
+		b, err := cbClient.GetBuild(ctx, &cloudbuildpb.GetBuildRequest{
+			ProjectId: e.gcpProject,
+			Id:        buildID,
+		})
+		if err != nil {
+			return fmt.Errorf("failed to poll build status: %w", err)
+		}
+
+		// Stream new log content from GCS.
+		lastLogOffset = streamCloudBuildLogs(ctx, gcsClient, logBucket, logObjectPrefix+".txt", lastLogOffset, logger)
+
+		switch b.Status {
+		case cloudbuildpb.Build_SUCCESS:
+			// Final log flush.
+			streamCloudBuildLogs(ctx, gcsClient, logBucket, logObjectPrefix+".txt", lastLogOffset, logger)
+			_, _ = fmt.Fprintf(logger, "\nCloud Build completed successfully: %s\n", outputImage)
+			log.Info("Cloud Build complete", "build_id", buildID, "image", outputImage)
+
+			if err := e.syncBuiltImage(ctx, logger, hc, tmpDir, outputImage); err != nil {
+				log.Error("Failed to sync built image back to store", "error", err)
+				_, _ = fmt.Fprintf(logger, "Warning: build succeeded but failed to update harness-config image: %v\n", err)
+			}
+			return nil
+
+		case cloudbuildpb.Build_FAILURE:
+			streamCloudBuildLogs(ctx, gcsClient, logBucket, logObjectPrefix+".txt", lastLogOffset, logger)
+			return fmt.Errorf("Cloud Build failed: %s", b.StatusDetail)
+
+		case cloudbuildpb.Build_TIMEOUT:
+			return fmt.Errorf("Cloud Build timed out")
+
+		case cloudbuildpb.Build_CANCELLED:
+			return fmt.Errorf("Cloud Build was cancelled")
+
+		case cloudbuildpb.Build_INTERNAL_ERROR:
+			return fmt.Errorf("Cloud Build internal error: %s", b.StatusDetail)
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(5 * time.Second):
+		}
+	}
+}
+
+// syncBuiltImage updates the harness config's config.yaml in storage and the
+// DB record to reference the newly-built image (Cloud Build variant).
+func (e *CloudBuildHarnessConfigExecutor) syncBuiltImage(ctx context.Context, logger io.Writer, hc *store.HarnessConfig, tmpDir, outputImage string) error {
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	configData, err := os.ReadFile(configPath)
+	if err != nil {
+		return fmt.Errorf("failed to read config.yaml: %w", err)
+	}
+
+	var doc yaml.Node
+	if err := yaml.Unmarshal(configData, &doc); err != nil {
+		return fmt.Errorf("failed to parse config.yaml: %w", err)
+	}
+	if len(doc.Content) == 0 || doc.Content[0].Kind != yaml.MappingNode {
+		return fmt.Errorf("config.yaml root is not a YAML mapping")
+	}
+	{
+		mapping := doc.Content[0]
+		found := false
+		for i := 0; i < len(mapping.Content)-1; i += 2 {
+			if mapping.Content[i].Value == "image" {
+				mapping.Content[i+1].Value = outputImage
+				found = true
+				break
+			}
+		}
+		if !found {
+			mapping.Content = append(mapping.Content,
+				&yaml.Node{Kind: yaml.ScalarNode, Value: "image"},
+				&yaml.Node{Kind: yaml.ScalarNode, Value: outputImage},
+			)
+		}
+	}
+
+	updatedData, err := yaml.Marshal(&doc)
+	if err != nil {
+		return fmt.Errorf("failed to marshal updated config.yaml: %w", err)
+	}
+
+	if e.storage != nil && hc.StoragePath != "" {
+		objectPath := hc.StoragePath + "/config.yaml"
+		if _, err := e.storage.Upload(ctx, objectPath, bytes.NewReader(updatedData), storage.UploadOptions{}); err != nil {
+			return fmt.Errorf("failed to upload updated config.yaml to storage: %w", err)
+		}
+		_, _ = fmt.Fprintf(logger, "Updated config.yaml in storage with image %s\n", outputImage)
+	}
+
+	configHash := transfer.HashBytes(updatedData)
+	for i, f := range hc.Files {
+		if f.Path == "config.yaml" {
+			hc.Files[i].Size = int64(len(updatedData))
+			hc.Files[i].Hash = configHash
+			break
+		}
+	}
+	hc.ContentHash = computeContentHash(hc.Files)
+
+	if hc.Config == nil {
+		hc.Config = &store.HarnessConfigData{}
+	}
+	hc.Config.Image = outputImage
+	if err := e.store.UpdateHarnessConfig(ctx, hc); err != nil {
+		return fmt.Errorf("failed to update harness-config record: %w", err)
+	}
+	_, _ = fmt.Fprintf(logger, "Updated harness-config record image to %s\n", outputImage)
+
+	return nil
+}
+
+// createTarGz creates a tar.gz archive from the contents of srcDir.
+func createTarGz(srcDir string, w io.Writer) error {
+	gzw := gzip.NewWriter(w)
+	defer gzw.Close()
+	tw := tar.NewWriter(gzw)
+	defer tw.Close()
+
+	return filepath.Walk(srcDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		relPath, err := filepath.Rel(srcDir, path)
+		if err != nil {
+			return err
+		}
+		if relPath == "." {
+			return nil
+		}
+
+		header, err := tar.FileInfoHeader(info, "")
+		if err != nil {
+			return err
+		}
+		header.Name = relPath
+
+		if err := tw.WriteHeader(header); err != nil {
+			return err
+		}
+
+		if info.IsDir() {
+			return nil
+		}
+
+		f, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		_, err = io.Copy(tw, f)
+		return err
+	})
+}
+
+// extractBuildID extracts the Cloud Build ID from a CreateBuild long-running
+// operation response.
+func extractBuildID(op *longrunningpb.Operation) (string, error) {
+	if op.Metadata == nil {
+		return "", fmt.Errorf("operation has no metadata")
+	}
+	var meta cloudbuildpb.BuildOperationMetadata
+	if err := proto.Unmarshal(op.Metadata.Value, &meta); err != nil {
+		return "", fmt.Errorf("failed to unmarshal build operation metadata: %w", err)
+	}
+	if meta.Build == nil || meta.Build.Id == "" {
+		return "", fmt.Errorf("build metadata does not contain a build ID")
+	}
+	return meta.Build.Id, nil
+}
+
+// streamCloudBuildLogs reads new log content from the Cloud Build log object
+// in GCS and writes it to the logger. It returns the new offset.
+func streamCloudBuildLogs(ctx context.Context, client *gcstorage.Client, bucket, object string, offset int64, logger io.Writer) int64 {
+	rc, err := client.Bucket(bucket).Object(object).NewRangeReader(ctx, offset, -1)
+	if err != nil {
+		return offset
+	}
+	defer rc.Close()
+
+	n, _ := io.Copy(logger, rc)
+	return offset + n
 }
 
 // UpdateCheckResult contains the result of a check-for-updates operation.

@@ -302,6 +302,7 @@ func (s *Server) resolveMaintenanceExecutor(key string) (MaintenanceExecutor, er
 			runtimeBin: mc.RuntimeBin,
 			registry:   mc.ImageRegistry,
 			tag:        mc.ImageTag,
+			gcpProject: s.config.GCPProjectID,
 		}, nil
 	default:
 		return nil, fmt.Errorf("no executor registered for operation %q", key)
