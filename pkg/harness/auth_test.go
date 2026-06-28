@@ -1160,7 +1160,6 @@ func TestStageCaptureAuthAssets(t *testing.T) {
 		agentHome := t.TempDir()
 		configDir := t.TempDir()
 
-
 		if err := os.WriteFile(filepath.Join(configDir, "capture_auth.py"), []byte("#!/usr/bin/env python3\n"), 0644); err != nil {
 			t.Fatal(err)
 		}

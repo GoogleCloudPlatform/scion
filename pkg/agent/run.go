@@ -214,6 +214,9 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	// config.yaml (seeded from harness embeds) always has the user field.
 	// Also check template directories since harness-configs may be bundled
 	// inside templates (§3.4 of agnostic-template-design).
+	// resolvedHarnessConfigAuth captures the auth metadata from the resolved
+	// on-disk harness config for use by the auth pipeline later.
+	var resolvedHarnessConfigAuth *config.HarnessAuthMetadata
 	if harnessConfigName != "" {
 		var templatePaths []string
 		// Prefer opts.Template when it is an absolute path (e.g. hydrated
@@ -247,6 +250,9 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 			}
 			if hcDir.Config.User != "" {
 				unixUsername = hcDir.Config.User
+			}
+			if hcDir.Config.Auth != nil {
+				resolvedHarnessConfigAuth = hcDir.Config.Auth
 			}
 		} else {
 			util.Debugf("image resolution: on-disk harness-config %q not found: %v", harnessConfigName, err)
@@ -389,17 +395,15 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		}
 	}
 
-	// Capture auth metadata from the resolved harness config so config-
-	// driven env vars can be gathered alongside the hardcoded fields.
+	// Resolve auth metadata for the config-driven env var pipeline.
+	// Prefer the on-disk harness config (already resolved above for image/
+	// user); fall back to the settings entry.
 	var authMeta *config.HarnessAuthMetadata
-	if harnessConfigName != "" {
-		if hcDir, err := resolveHarnessConfigDir(ctx, harnessConfigName, projectDir); err == nil && hcDir.Config.Auth != nil {
-			authMeta = hcDir.Config.Auth
-		}
-		if authMeta == nil && settings != nil {
-			if hcEntry, err := settings.ResolveHarnessConfig(profileName, harnessConfigName); err == nil && hcEntry.Auth != nil {
-				authMeta = hcEntry.Auth
-			}
+	if resolvedHarnessConfigAuth != nil {
+		authMeta = resolvedHarnessConfigAuth
+	} else if harnessConfigName != "" && settings != nil {
+		if hcEntry, err := settings.ResolveHarnessConfig(profileName, harnessConfigName); err == nil && hcEntry.Auth != nil {
+			authMeta = hcEntry.Auth
 		}
 	}
 
