@@ -40,13 +40,12 @@ const (
 
 var (
 	managedBackendMu   sync.Mutex
-	managedBackendOnce sync.Once
 	managedBackendInst managedagent.ManagedAgentBackend
-	managedBackendErr  error
 )
 
 // getManagedBackend returns the lazily-initialized managed agent backend.
 // It reads settings from the global settings file on first call.
+// Transient init failures are not cached so subsequent calls can retry.
 func getManagedBackend() (managedagent.ManagedAgentBackend, error) {
 	managedBackendMu.Lock()
 	defer managedBackendMu.Unlock()
@@ -54,25 +53,19 @@ func getManagedBackend() (managedagent.ManagedAgentBackend, error) {
 	if managedBackendInst != nil {
 		return managedBackendInst, nil
 	}
-	if managedBackendErr != nil {
-		return nil, managedBackendErr
-	}
 
 	globalDir, err := config.GetGlobalDir()
 	if err != nil {
-		managedBackendErr = fmt.Errorf("resolving global dir: %w", err)
-		return nil, managedBackendErr
+		return nil, fmt.Errorf("resolving global dir: %w", err)
 	}
 
 	vs, err := config.LoadSingleFileVersioned(globalDir)
 	if err != nil {
-		managedBackendErr = fmt.Errorf("loading settings: %w", err)
-		return nil, managedBackendErr
+		return nil, fmt.Errorf("loading settings: %w", err)
 	}
 
 	if vs.ManagedAgents == nil || vs.ManagedAgents.Google == nil {
-		managedBackendErr = fmt.Errorf("managed_agents.google configuration not found in settings")
-		return nil, managedBackendErr
+		return nil, fmt.Errorf("managed_agents.google configuration not found in settings")
 	}
 
 	cfg := vs.ManagedAgents.Google
@@ -81,8 +74,7 @@ func getManagedBackend() (managedagent.ManagedAgentBackend, error) {
 		BaseAgent: cfg.BaseAgent,
 	})
 	if err != nil {
-		managedBackendErr = fmt.Errorf("creating managed agent backend: %w", err)
-		return nil, managedBackendErr
+		return nil, fmt.Errorf("creating managed agent backend: %w", err)
 	}
 
 	managedBackendInst = backend
@@ -91,7 +83,7 @@ func getManagedBackend() (managedagent.ManagedAgentBackend, error) {
 
 // isManagedAgentRuntime returns true if the runtime string indicates a managed agent.
 func isManagedAgentRuntime(runtime string) bool {
-	return len(runtime) > len(ManagedRuntimePrefix) && runtime[:len(ManagedRuntimePrefix)] == ManagedRuntimePrefix
+	return strings.HasPrefix(runtime, ManagedRuntimePrefix)
 }
 
 // managedAgentCreate handles agent creation for the managed-agents profile.
@@ -278,6 +270,8 @@ func formatManagedAgentLook(ctx context.Context, agent *store.Agent) (string, er
 		return fmt.Sprintf("[status] %s (no active interaction)\n", agent.Phase), nil
 	}
 
+	// TODO: add per-step timestamps ([HH:MM:SS] prefix) once the backend
+	// API exposes them on managedagent.Step — see design doc section 4.5.
 	var b strings.Builder
 	for _, step := range state.Steps {
 		stepType := step.Type

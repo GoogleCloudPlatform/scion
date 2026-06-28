@@ -729,6 +729,7 @@ func (s *Server) createAgentInProject(
 			task = agent.AppliedConfig.Task
 		}
 		if err := s.managedAgentCreate(ctx, agent, task); err != nil {
+			_ = s.managedAgentDelete(ctx, agent)
 			_ = s.store.DeleteAgent(ctx, agent.ID)
 			RuntimeError(w, "Failed to create managed agent: "+err.Error())
 			return
