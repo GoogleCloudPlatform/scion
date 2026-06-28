@@ -74,6 +74,9 @@ export class ScionPageOnboarding extends LitElement {
   @state() private configuredRuntime = '';
   @state() private selectedRuntime = '';
 
+  // Step 2b: Apple DNS warning (non-blocking)
+  @state() private dnsWarning: string | null = null;
+
   // Step 3: Harnesses
   @state() private selectedHarnesses = new Set<string>();
 
@@ -183,6 +186,17 @@ export class ScionPageOnboarding extends LitElement {
       padding: 0.75rem 1rem;
       margin-bottom: 1rem;
       font-size: 0.875rem;
+    }
+
+    .warning-banner {
+      background: var(--sl-color-warning-50, #fefce8);
+      color: var(--sl-color-warning-700, #a16207);
+      border: 1px solid var(--sl-color-warning-200, #fef08a);
+      border-radius: var(--scion-radius, 0.5rem);
+      padding: 0.75rem 1rem;
+      margin-bottom: 1rem;
+      font-size: 0.875rem;
+      white-space: pre-line;
     }
 
     .check-results {
@@ -554,6 +568,7 @@ export class ScionPageOnboarding extends LitElement {
         ` : nothing}
 
         ${this.error ? html`<div class="error-banner">${this.error}</div>` : nothing}
+        ${this.dnsWarning ? html`<div class="warning-banner">${this.dnsWarning}</div>` : nothing}
 
         ${this.renderStep()}
       </div>
@@ -780,6 +795,7 @@ export class ScionPageOnboarding extends LitElement {
 
   private async handleRuntimeNext(): Promise<void> {
     this.error = null;
+    this.dnsWarning = null;
     this.stepLoading = true;
     try {
       const res = await apiFetch('/api/v1/system/runtime', {
@@ -791,6 +807,19 @@ export class ScionPageOnboarding extends LitElement {
         this.error = await extractApiError(res, 'Failed to save runtime');
         return;
       }
+
+      if (this.selectedRuntime === 'container') {
+        try {
+          const dnsRes = await apiFetch('/api/v1/system/apple-dns', { method: 'POST' });
+          const dnsData = await dnsRes.json() as { configured: boolean; hostname: string; ip: string; error?: string };
+          if (!dnsData.configured) {
+            this.dnsWarning = `Apple Container DNS setup requires sudo. If not prompted, run manually:\n  sudo container system dns create ${dnsData.hostname} --localhost ${dnsData.ip}`;
+          }
+        } catch {
+          // non-fatal — server startup will retry on next launch
+        }
+      }
+
       this.currentStep = 3;
     } finally {
       this.stepLoading = false;

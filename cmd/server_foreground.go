@@ -1484,6 +1484,19 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 		}
 	}
 
+	if rt != nil && rt.Name() == "container" && containerHubEndpoint != "" {
+		created, dnsErr := runtime.EnsureAppleDNS(cmd.Context(), runtime.AppleDNSHostname, runtime.AppleDNSIP)
+		if dnsErr != nil {
+			log.Printf("WARNING: Failed to configure Apple Container DNS (%s → %s): %v\n"+
+				"Agents may not reach the Hub. Run manually:\n"+
+				"  sudo container system dns create %s --localhost %s",
+				runtime.AppleDNSHostname, runtime.AppleDNSIP, dnsErr,
+				runtime.AppleDNSHostname, runtime.AppleDNSIP)
+		} else if created {
+			log.Printf("Configured Apple Container DNS: %s → %s", runtime.AppleDNSHostname, runtime.AppleDNSIP)
+		}
+	}
+
 	// Create Runtime Broker server configuration
 	rhCfg := runtimebroker.ServerConfig{
 		Port:                          cfg.RuntimeBroker.Port,

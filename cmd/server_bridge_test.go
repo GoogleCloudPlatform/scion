@@ -65,10 +65,10 @@ func TestContainerBridgeEndpoint(t *testing.T) {
 			want:        "",
 		},
 		{
-			name:        "apple runtime returns empty",
+			name:        "apple container with localhost",
 			hubEndpoint: "http://localhost:8080",
-			runtimeName: "apple-container",
-			want:        "",
+			runtimeName: "container",
+			want:        "http://host.containers.internal:8080",
 		},
 		{
 			name:        "empty runtime returns empty",

@@ -829,6 +829,57 @@ func (s *Server) handleFSValidatePath(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
+// --- Apple DNS ---
+
+type appleDNSResponse struct {
+	Configured bool   `json:"configured"`
+	Hostname   string `json:"hostname"`
+	IP         string `json:"ip"`
+	Error      string `json:"error,omitempty"`
+}
+
+func (s *Server) handleAppleDNS(w http.ResponseWriter, r *http.Request) {
+	if err := assertLoopback(r); err != nil {
+		writeError(w, http.StatusForbidden, ErrCodeForbidden, err.Error(), nil)
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		s.handleAppleDNSStatus(w, r)
+	case http.MethodPost:
+		s.handleAppleDNSSetup(w, r)
+	default:
+		MethodNotAllowed(w)
+	}
+}
+
+func (s *Server) handleAppleDNSStatus(w http.ResponseWriter, r *http.Request) {
+	exists, err := runtime.AppleDNSRuleExists(r.Context(), runtime.AppleDNSHostname)
+	resp := appleDNSResponse{
+		Configured: err == nil && exists,
+		Hostname:   runtime.AppleDNSHostname,
+		IP:         runtime.AppleDNSIP,
+	}
+	if err != nil {
+		resp.Error = err.Error()
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) handleAppleDNSSetup(w http.ResponseWriter, r *http.Request) {
+	_, err := runtime.EnsureAppleDNS(r.Context(), runtime.AppleDNSHostname, runtime.AppleDNSIP)
+	resp := appleDNSResponse{
+		Configured: err == nil,
+		Hostname:   runtime.AppleDNSHostname,
+		IP:         runtime.AppleDNSIP,
+	}
+	if err != nil {
+		resp.Error = err.Error()
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
 // trimOutput removes a trailing newline from command output.
 func trimOutput(s string) string {
 	if len(s) > 0 && s[len(s)-1] == '\n' {

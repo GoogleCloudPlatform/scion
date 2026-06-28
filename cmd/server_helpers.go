@@ -84,7 +84,7 @@ func isLocalhostURL(endpoint string) bool {
 func containerBridgeEndpoint(hubEndpoint, runtimeName string) string {
 	var bridgeHost string
 	switch runtimeName {
-	case "podman":
+	case "podman", "container":
 		bridgeHost = "host.containers.internal"
 	case "docker":
 		bridgeHost = "host.docker.internal"
