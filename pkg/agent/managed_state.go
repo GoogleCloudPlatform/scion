@@ -31,12 +31,15 @@ const managedAgentStateFile = "managed-agent-state.json"
 type ManagedAgentState struct {
 	CloudAgentID        string   `json:"cloud_agent_id"`
 	CloudProvider       string   `json:"cloud_provider"`
+	APIKeyRef           string   `json:"api_key_ref,omitempty"`
 	LatestInteractionID string   `json:"latest_interaction_id,omitempty"`
 	LatestEnvironmentID string   `json:"latest_environment_id,omitempty"`
-	InteractionChain    []string `json:"interaction_chain,omitempty"`
-	LastStatus          string   `json:"last_status,omitempty"`
-	CreatedAt           string   `json:"created_at"`
-	UpdatedAt           string   `json:"updated_at"`
+	// InteractionChain grows unbounded in v1; a future version should cap or
+	// rotate old entries for long-lived agents.
+	InteractionChain []string `json:"interaction_chain,omitempty"`
+	LastStatus       string   `json:"last_status,omitempty"`
+	CreatedAt        string   `json:"created_at"`
+	UpdatedAt        string   `json:"updated_at"`
 }
 
 // LoadManagedAgentState reads the managed agent state from the given agent directory.

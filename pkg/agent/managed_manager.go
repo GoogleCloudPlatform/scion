@@ -183,6 +183,11 @@ func (m *ManagedAgentManager) Start(ctx context.Context, opts api.StartOptions) 
 		return nil, fmt.Errorf("saving managed agent state: %w", err)
 	}
 
+	// Monitor interaction completion asynchronously.
+	if agentState.LatestInteractionID != "" {
+		go m.monitorInteraction(opts.Name, projectDir, agentDir, agentState.LatestInteractionID)
+	}
+
 	// Update agent-info.json with running phase.
 	info := &api.AgentInfo{
 		Name:        opts.Name,
@@ -204,8 +209,12 @@ func (m *ManagedAgentManager) Start(ctx context.Context, opts api.StartOptions) 
 		}
 	}
 
-	infoData, _ := json.MarshalIndent(info, "", "  ")
-	_ = os.WriteFile(infoPath, infoData, 0644)
+	infoData, err := json.MarshalIndent(info, "", "  ")
+	if err != nil {
+		slog.Warn("failed to marshal agent-info.json", "agent", opts.Name, "err", err)
+	} else if writeErr := os.WriteFile(infoPath, infoData, 0644); writeErr != nil {
+		slog.Warn("failed to write agent-info.json", "agent", opts.Name, "err", writeErr)
+	}
 
 	return info, nil
 }
@@ -396,6 +405,22 @@ func (m *ManagedAgentManager) Message(ctx context.Context, agentID, projectID st
 		return fmt.Errorf("saving managed agent state: %w", err)
 	}
 
+	// Update agent-info.json to reflect that the agent is working on the new message.
+	projectDir, _ := config.GetResolvedProjectDir(projectPath)
+	if projectDir != "" {
+		agentHome := config.GetAgentHomePath(projectDir, agentID)
+		infoPath := filepath.Join(agentHome, "agent-info.json")
+		if err := persistAgentInfoState(infoPath, "running", "working"); err != nil {
+			slog.Warn("failed to update agent-info after message", "agent", agentID, "err", err)
+		}
+	}
+
+	// Monitor interaction completion asynchronously and update agent-info.json
+	// when the interaction reaches a terminal state.
+	if projectDir != "" {
+		go m.monitorInteraction(agentID, projectDir, agentDir, handle.InteractionID)
+	}
+
 	return nil
 }
 
@@ -403,6 +428,8 @@ func (m *ManagedAgentManager) MessageRaw(_ context.Context, _, _ string, _ strin
 	return fmt.Errorf("MessageRaw is not supported for managed agents")
 }
 
+// Watch uses m.stateDir as the project path to resolve the agent directory.
+// Callers must ensure stateDir was set to the project path at construction time.
 func (m *ManagedAgentManager) Watch(ctx context.Context, agentID string) (<-chan api.StatusEvent, error) {
 	agentDir, err := managedAgentDir(agentID, m.stateDir)
 	if err != nil {
@@ -457,6 +484,48 @@ func (m *ManagedAgentManager) Watch(ctx context.Context, agentID string) (<-chan
 	return ch, nil
 }
 
+// monitorInteraction polls the backend for interaction status and updates
+// agent-info.json when the interaction reaches a terminal state. Runs as a
+// background goroutine launched by Start and Message.
+func (m *ManagedAgentManager) monitorInteraction(agentID, projectDir, agentDir, interactionID string) {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
+	ctx := context.Background()
+	for range ticker.C {
+		state, err := m.Backend.GetInteraction(ctx, interactionID)
+		if err != nil {
+			slog.Warn("interaction monitor: poll failed", "agent", agentID, "interaction", interactionID, "err", err)
+			continue
+		}
+
+		if !isTerminalStatus(state.Status) {
+			continue
+		}
+
+		activity := mapInteractionStatus(state.Status)
+		phase := "running"
+		if state.Status == managedagent.StatusCancelled || state.Status == managedagent.StatusFailed {
+			phase = "stopped"
+		}
+
+		agentHome := config.GetAgentHomePath(projectDir, agentID)
+		infoPath := filepath.Join(agentHome, "agent-info.json")
+		if err := persistAgentInfoState(infoPath, phase, activity); err != nil {
+			slog.Warn("interaction monitor: failed to update agent-info", "agent", agentID, "err", err)
+		}
+
+		// Update managed-agent-state with the final status.
+		if agentState, loadErr := LoadManagedAgentState(agentDir); loadErr == nil {
+			agentState.LastStatus = string(state.Status)
+			if saveErr := SaveManagedAgentState(agentDir, agentState); saveErr != nil {
+				slog.Warn("interaction monitor: failed to save state", "agent", agentID, "err", saveErr)
+			}
+		}
+		return
+	}
+}
+
 func (m *ManagedAgentManager) Close() {}
 
 func mapInteractionStatus(s managedagent.InteractionStatus) string {
@@ -464,7 +533,10 @@ func mapInteractionStatus(s managedagent.InteractionStatus) string {
 	case managedagent.StatusInProgress:
 		return "running"
 	case managedagent.StatusRequiresAction:
-		return "waiting_for_input"
+		// requires_action is unexpected for managed agents — the cloud service
+		// should handle tool calls internally. Log a warning so operators notice.
+		slog.Warn("unexpected requires_action status from managed agent backend", "status", s)
+		return "error"
 	case managedagent.StatusCompleted:
 		return "completed"
 	case managedagent.StatusFailed:
@@ -472,7 +544,7 @@ func mapInteractionStatus(s managedagent.InteractionStatus) string {
 	case managedagent.StatusCancelled:
 		return "stopped"
 	case managedagent.StatusIncomplete:
-		return "error"
+		return "limits_exceeded"
 	default:
 		return string(s)
 	}
