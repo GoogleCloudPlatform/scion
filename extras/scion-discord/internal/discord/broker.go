@@ -590,6 +590,17 @@ func (b *DiscordBroker) Publish(ctx context.Context, topic string, msg *messages
 	// Send to each target channel.
 	var errs []error
 	for _, channelID := range channelIDs {
+		// Forum and media channels (types 15, 16) are thread-only containers.
+		// Sending without a thread ID would broadcast to an invalid target;
+		// return an error so callers know a thread ID is required.
+		if msg.ThreadID == "" && b.isForumChannel(channelID) {
+			errs = append(errs, fmt.Errorf(
+				"discord channel %s is a forum/media channel — a thread ID is required to send messages; omit the channel or specify a thread ID",
+				channelID,
+			))
+			continue
+		}
+
 		if needsFilter && store != nil {
 			link, linkErr := store.GetChannelLink(ctx, channelID)
 			if linkErr == nil && link != nil {
@@ -1282,7 +1293,7 @@ func (b *DiscordBroker) resolveThreadParent(channelID string) (parentID string, 
 		}
 	}
 
-	// Thread types: GuildPublicThread (11), GuildPrivateThread (12), GuildNewsThread (15)
+	// Thread types: GuildPublicThread (11), GuildPrivateThread (12), GuildNewsThread (10)
 	if ch.Type == discordgo.ChannelTypeGuildPublicThread ||
 		ch.Type == discordgo.ChannelTypeGuildPrivateThread ||
 		ch.Type == discordgo.ChannelTypeGuildNewsThread {
@@ -1303,6 +1314,37 @@ func (b *DiscordBroker) resolveThreadParent(channelID string) (parentID string, 
 	b.threadParents[channelID] = ""
 	b.mu.Unlock()
 	return "", false
+}
+
+// isForumChannel checks whether a Discord channel ID refers to a forum or media
+// channel (types 15 and 16). These channel types are thread-only containers and
+// cannot receive messages directly — a thread ID is required.
+func (b *DiscordBroker) isForumChannel(channelID string) bool {
+	session := b.session
+	if session == nil {
+		return false
+	}
+
+	var ch *discordgo.Channel
+	var err error
+	if session.State != nil {
+		ch, err = session.State.Channel(channelID)
+	}
+	if ch == nil || err != nil {
+		// Fall back to REST API only if the session has a Ratelimiter
+		// (i.e. is fully initialized). Avoids panics in tests and during
+		// early startup.
+		if session.Ratelimiter == nil {
+			return false
+		}
+		ch, err = session.Channel(channelID)
+		if err != nil {
+			return false
+		}
+	}
+
+	return ch.Type == discordgo.ChannelTypeGuildForum ||
+		ch.Type == discordgo.ChannelTypeGuildMedia
 }
 
 // resolveRecipientChannels looks up target channels for a specific recipient.
