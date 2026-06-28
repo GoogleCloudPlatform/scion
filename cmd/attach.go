@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
@@ -132,6 +133,10 @@ func attachViaHub(hubCtx *HubContext, agentName string) error {
 	agent, err := hubCtx.Client.ProjectAgents(projectID).Get(ctx, agentName)
 	if err != nil {
 		return wrapHubError(fmt.Errorf("failed to get agent '%s': %w", agentName, err))
+	}
+
+	if strings.HasPrefix(agent.Runtime, "managed:") {
+		return fmt.Errorf("attach is not supported for managed agents — use scion message and scion look")
 	}
 
 	// Check agent lifecycle status - the agent must be running to attach.

@@ -254,6 +254,18 @@ func (m *AgentManager) List(ctx context.Context, filter map[string]string) ([]ap
 							Project: projectName,
 							Phase:   "unknown",
 						}
+					} else if ms, msErr := LoadManagedAgentState(agentDir); msErr == nil {
+						phase := "stopped"
+						if ms.LastStatus == "in_progress" {
+							phase = "running"
+						}
+						info = &api.AgentInfo{
+							Name:    e.Name(),
+							Project: projectName,
+							Runtime: "managed:" + ms.CloudProvider,
+							Profile: "managed-agents",
+							Phase:   phase,
+						}
 					} else {
 						continue
 					}

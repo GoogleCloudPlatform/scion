@@ -200,6 +200,12 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 		return
 	}
 
+	// Managed agent lifecycle: handle directly without broker dispatch.
+	if isManagedAgentRuntime(agent.Runtime) {
+		s.handleManagedAgentLifecycle(w, r, agent, action)
+		return
+	}
+
 	if !s.checkBrokerAvailability(w, r, agent) {
 		return
 	}

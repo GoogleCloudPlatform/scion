@@ -19,6 +19,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
@@ -103,6 +105,24 @@ func init() {
 // getHubLogs retrieves agent logs via the hub relay (hub -> broker -> agent.log).
 func getHubLogs(ctx context.Context, hubCtx *HubContext, agentName string) error {
 	PrintUsingHub(hubCtx.Endpoint)
+
+	tctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	agent, err := hubCtx.Client.ProjectAgents(hubCtx.ProjectID).Get(tctx, agentName)
+	if err != nil {
+		return wrapHubError(fmt.Errorf("failed to get agent '%s': %w", agentName, err))
+	}
+
+	if strings.HasPrefix(agent.Runtime, "managed:") {
+		fmt.Println("Managed agent logs are available in GCP Cloud Logging.")
+		fmt.Println()
+		fmt.Println("View logs in the Google Cloud Console:")
+		fmt.Println("  https://console.cloud.google.com/logs")
+		fmt.Println()
+		fmt.Println("Use scion look to view the agent's current interaction output.")
+		return nil
+	}
 
 	client := hubCtx.Client.ProjectAgents(hubCtx.ProjectID)
 

@@ -608,6 +608,37 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		s.events.PublishUserMessage(ctx, storeMsg)
 	}
 
+	// Managed agent path: deliver message directly via backend, bypass broker.
+	if isManagedAgentRuntime(agent.Runtime) {
+		if err := s.managedAgentMessage(ctx, agent, plainMessage, req.Interrupt); err != nil {
+			if persistedMsgID != "" {
+				if markErr := s.store.MarkMessageFailed(ctx, persistedMsgID, err.Error()); markErr != nil {
+					s.messageLog.Error("Failed to mark message as failed", "id", persistedMsgID, "error", markErr)
+				}
+			}
+			RuntimeError(w, "Failed to send message to managed agent: "+err.Error())
+			return
+		}
+
+		agent.Phase = string(state.PhaseRunning)
+		agent.Activity = "working"
+		_ = s.store.UpdateAgentStatus(ctx, agent.ID, store.AgentStatusUpdate{
+			Phase:    agent.Phase,
+			Activity: agent.Activity,
+		})
+		s.events.PublishAgentStatus(ctx, agent)
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(MessageDeliveryResponse{
+			MessageID:  persistedMsgID,
+			Status:     "delivered",
+			Agent:      agent.Slug,
+			AgentPhase: agent.Phase,
+		})
+		return
+	}
+
 	// If a dispatcher is available, dispatch the message to the runtime broker
 	dispatcher := s.GetDispatcher()
 	if dispatcher == nil {

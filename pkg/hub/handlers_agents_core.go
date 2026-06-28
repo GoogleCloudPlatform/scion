@@ -719,6 +719,40 @@ func (s *Server) createAgentInProject(
 		}
 	}
 
+	// Managed agent path: bypass broker dispatch entirely and handle directly.
+	if req.Profile == ManagedAgentsProfile {
+		s.agentLifecycleLog.Info("Hub: managed agent create (hub-direct)",
+			"agent_id", agent.ID, "agent", agent.Name, "elapsed", time.Since(hubCreateStart).String())
+
+		task := ""
+		if agent.AppliedConfig != nil {
+			task = agent.AppliedConfig.Task
+		}
+		if err := s.managedAgentCreate(ctx, agent, task); err != nil {
+			_ = s.store.DeleteAgent(ctx, agent.ID)
+			RuntimeError(w, "Failed to create managed agent: "+err.Error())
+			return
+		}
+
+		agent.Phase = string(state.PhaseRunning)
+		if task == "" {
+			agent.Activity = "waiting_for_input"
+		} else {
+			agent.Activity = "working"
+		}
+		if err := s.store.UpdateAgent(ctx, agent); err != nil {
+			s.agentLifecycleLog.Warn("Failed to update managed agent after create", "agent_id", agent.ID, "error", err)
+		}
+
+		s.events.PublishAgentCreated(ctx, agent)
+		s.enrichAgent(ctx, agent, project, nil)
+
+		writeJSON(w, http.StatusCreated, CreateAgentResponse{
+			Agent: agent,
+		})
+		return
+	}
+
 	// Dispatch to runtime broker if available.
 	// Unless provision-only is requested, do a full create+start via DispatchAgentCreate.
 	// Otherwise provision only — set up dirs, worktree, templates without launching the container.
@@ -1606,9 +1640,17 @@ func (s *Server) performAgentDelete(w http.ResponseWriter, r *http.Request, agen
 		deleteFiles = false
 	}
 
+	// Managed agent delete: clean up cloud resources directly, skip broker.
+	if isManagedAgentRuntime(agent.Runtime) {
+		if err := s.managedAgentDelete(ctx, agent); err != nil {
+			s.agentLifecycleLog.Warn("Failed to delete managed agent cloud resources",
+				"agent_id", agent.ID, "error", err)
+		}
+	}
+
 	// Verify broker is reachable before deleting to avoid orphaned containers.
 	// Force mode bypasses this check so stuck agents can always be cleaned up.
-	if !force && !s.checkBrokerAvailability(w, r, agent) {
+	if !isManagedAgentRuntime(agent.Runtime) && !force && !s.checkBrokerAvailability(w, r, agent) {
 		return
 	}
 
@@ -1817,17 +1859,35 @@ func (s *Server) handleAgentExec(w http.ResponseWriter, r *http.Request, id stri
 		return
 	}
 
+	agent, err := s.store.GetAgent(ctx, id)
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	// Managed agents: return formatted interaction state instead of exec.
+	if isManagedAgentRuntime(agent.Runtime) {
+		output, err := formatManagedAgentLook(ctx, agent)
+		if err != nil {
+			RuntimeError(w, "Failed to get managed agent state: "+err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, struct {
+			Output   string `json:"output"`
+			ExitCode int    `json:"exitCode"`
+		}{
+			Output:   output,
+			ExitCode: 0,
+		})
+		return
+	}
+
 	dispatcher := s.GetDispatcher()
 	if dispatcher == nil {
 		ServiceNotReady(w, "Exec dispatch is not available yet — the server may still be starting up")
 		return
 	}
 
-	agent, err := s.store.GetAgent(ctx, id)
-	if err != nil {
-		writeErrorFromErr(w, err, "")
-		return
-	}
 	if err := requireRuntimeBrokerAssigned(agent); err != nil {
 		ServiceNotReady(w, "Agent has no runtime broker assigned — the server may still be starting up")
 		return
