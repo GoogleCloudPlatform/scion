@@ -149,6 +149,24 @@ field is updated to reference the built image.`,
 	},
 }
 
+type cloudBuildConfig struct {
+	Steps   []cloudBuildStep  `yaml:"steps"`
+	Options cloudBuildOptions `yaml:"options"`
+	Timeout string            `yaml:"timeout"`
+}
+
+type cloudBuildStep struct {
+	Name string   `yaml:"name"`
+	ID   string   `yaml:"id"`
+	Args []string `yaml:"args"`
+	Env  []string `yaml:"env,omitempty"`
+}
+
+type cloudBuildOptions struct {
+	DynamicSubstitutions bool   `yaml:"dynamicSubstitutions"`
+	MachineType          string `yaml:"machineType"`
+}
+
 // runCloudBuild executes the build via gcloud builds submit.
 func runCloudBuild(cmd *cobra.Command, harnessConfigName string, hcDir *config.HarnessConfigDir, tag, baseImage, imageRegistry string, settings *config.VersionedSettings) error {
 	if _, err := exec.LookPath("gcloud"); err != nil {
@@ -178,37 +196,46 @@ func runCloudBuild(cmd *cobra.Command, harnessConfigName string, hcDir *config.H
 		platform = "linux/amd64,linux/arm64"
 	}
 
-	// Write a temporary cloudbuild.yaml.
-	cbConfig := fmt.Sprintf(`steps:
-  - name: 'gcr.io/cloud-builders/docker'
-    id: 'setup-buildx'
-    args: ['buildx', 'create', '--name', 'builder', '--use']
-    env: ['DOCKER_CLI_EXPERIMENTAL=enabled']
-  - name: 'gcr.io/cloud-builders/docker'
-    id: 'bootstrap-buildx'
-    args: ['buildx', 'inspect', '--bootstrap']
-    env: ['DOCKER_CLI_EXPERIMENTAL=enabled']
-  - name: 'gcr.io/cloud-builders/docker'
-    id: 'build-image'
-    args:
-      - 'buildx'
-      - 'build'
-      - '--platform'
-      - '%s'
-      - '--build-arg'
-      - 'BASE_IMAGE=%s'
-      - '-t'
-      - '%s'
-      - '-f'
-      - 'Dockerfile'
-      - '--push'
-      - '.'
-    env: ['DOCKER_CLI_EXPERIMENTAL=enabled']
-options:
-  dynamicSubstitutions: true
-  machineType: 'E2_HIGHCPU_8'
-timeout: 1200s
-`, platform, baseImage, outputImage)
+	// Build the cloudbuild.yaml via structured marshaling.
+	cbConfig := cloudBuildConfig{
+		Steps: []cloudBuildStep{
+			{
+				Name: "gcr.io/cloud-builders/docker",
+				ID:   "setup-buildx",
+				Args: []string{"buildx", "create", "--name", "builder", "--use"},
+				Env:  []string{"DOCKER_CLI_EXPERIMENTAL=enabled"},
+			},
+			{
+				Name: "gcr.io/cloud-builders/docker",
+				ID:   "bootstrap-buildx",
+				Args: []string{"buildx", "inspect", "--bootstrap"},
+				Env:  []string{"DOCKER_CLI_EXPERIMENTAL=enabled"},
+			},
+			{
+				Name: "gcr.io/cloud-builders/docker",
+				ID:   "build-image",
+				Args: []string{
+					"buildx", "build",
+					"--platform", platform,
+					"--build-arg", "BASE_IMAGE=" + baseImage,
+					"-t", outputImage,
+					"-f", "Dockerfile",
+					"--push", ".",
+				},
+				Env: []string{"DOCKER_CLI_EXPERIMENTAL=enabled"},
+			},
+		},
+		Options: cloudBuildOptions{
+			DynamicSubstitutions: true,
+			MachineType:          "E2_HIGHCPU_8",
+		},
+		Timeout: "1200s",
+	}
+
+	cbYAML, err := yaml.Marshal(&cbConfig)
+	if err != nil {
+		return fmt.Errorf("failed to marshal cloudbuild config: %w", err)
+	}
 
 	tmpFile, err := os.CreateTemp("", "scion-cloudbuild-*.yaml")
 	if err != nil {
@@ -216,7 +243,7 @@ timeout: 1200s
 	}
 	defer os.Remove(tmpFile.Name())
 
-	if _, err := tmpFile.WriteString(cbConfig); err != nil {
+	if _, err := tmpFile.Write(cbYAML); err != nil {
 		tmpFile.Close()
 		return fmt.Errorf("failed to write cloudbuild config: %w", err)
 	}
@@ -224,7 +251,7 @@ timeout: 1200s
 
 	if buildDryRun {
 		fmt.Printf("gcloud builds submit --project %s --config %s %s\n", gcpProject, tmpFile.Name(), hcDir.Path)
-		fmt.Printf("\n# cloudbuild.yaml contents:\n%s", cbConfig)
+		fmt.Printf("\n# cloudbuild.yaml contents:\n%s", cbYAML)
 		return nil
 	}
 

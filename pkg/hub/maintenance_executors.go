@@ -510,44 +510,8 @@ func (e *BuildHarnessConfigImageExecutor) Run(ctx context.Context, logger io.Wri
 	}
 	defer func() { _ = os.RemoveAll(tmpDir) }()
 
-	_, _ = fmt.Fprintf(logger, "Materializing %d file(s) from harness-config %q...\n", len(hc.Files), hc.Name)
-	for _, f := range hc.Files {
-		objectPath := hc.StoragePath + "/" + f.Path
-		reader, _, err := e.storage.Download(ctx, objectPath)
-		if err != nil {
-			return fmt.Errorf("failed to download %q from storage: %w", f.Path, err)
-		}
-
-		destPath := filepath.Join(tmpDir, f.Path)
-		if !strings.HasPrefix(destPath, tmpDir+string(os.PathSeparator)) {
-			_ = reader.Close()
-			return fmt.Errorf("invalid file path %q: escapes build directory", f.Path)
-		}
-		if dir := filepath.Dir(destPath); dir != tmpDir {
-			if err := os.MkdirAll(dir, 0o755); err != nil {
-				_ = reader.Close()
-				return fmt.Errorf("failed to create directory for %q: %w", f.Path, err)
-			}
-		}
-
-		outFile, err := os.Create(destPath)
-		if err != nil {
-			_ = reader.Close()
-			return fmt.Errorf("failed to create file %q: %w", f.Path, err)
-		}
-		_, err = io.Copy(outFile, reader)
-		_ = reader.Close()
-		_ = outFile.Close()
-		if err != nil {
-			return fmt.Errorf("failed to write file %q: %w", f.Path, err)
-		}
-
-		if f.Mode != "" {
-			mode := os.FileMode(0o644)
-			if _, err := fmt.Sscanf(f.Mode, "%o", &mode); err == nil {
-				_ = os.Chmod(destPath, mode)
-			}
-		}
+	if err := materializeHarnessConfigFiles(ctx, e.storage, hc, tmpDir, logger); err != nil {
+		return err
 	}
 
 	baseImage := "scion-base:" + tag
@@ -606,85 +570,13 @@ func (e *BuildHarnessConfigImageExecutor) Run(ctx context.Context, logger io.Wri
 
 	// Update the harness config's image in storage and the DB so agents
 	// pick up the newly-built image instead of the stale upstream reference.
-	if err := e.syncBuiltImage(ctx, logger, hc, tmpDir, outputImage); err != nil {
+	if err := syncBuiltImage(ctx, e.storage, e.store, logger, hc, tmpDir, outputImage); err != nil {
 		log.Error("Failed to sync built image back to store", "error", err)
 		_, _ = fmt.Fprintf(logger, "Warning: build succeeded but failed to update harness-config image: %v\n", err)
 	}
 
 	_, _ = fmt.Fprintf(logger, "\nBuild complete: %s\n", outputImage)
 	log.Info("Build complete", "image", outputImage, "harness_config", hc.Name)
-	return nil
-}
-
-// syncBuiltImage updates the harness config's config.yaml in storage and the
-// DB record to reference the newly-built image.
-func (e *BuildHarnessConfigImageExecutor) syncBuiltImage(ctx context.Context, logger io.Writer, hc *store.HarnessConfig, tmpDir, outputImage string) error {
-	configPath := filepath.Join(tmpDir, "config.yaml")
-	configData, err := os.ReadFile(configPath)
-	if err != nil {
-		return fmt.Errorf("failed to read config.yaml: %w", err)
-	}
-
-	var doc yaml.Node
-	if err := yaml.Unmarshal(configData, &doc); err != nil {
-		return fmt.Errorf("failed to parse config.yaml: %w", err)
-	}
-	if len(doc.Content) == 0 || doc.Content[0].Kind != yaml.MappingNode {
-		return fmt.Errorf("config.yaml root is not a YAML mapping")
-	}
-	{
-		mapping := doc.Content[0]
-		found := false
-		for i := 0; i < len(mapping.Content)-1; i += 2 {
-			if mapping.Content[i].Value == "image" {
-				mapping.Content[i+1].Value = outputImage
-				found = true
-				break
-			}
-		}
-		if !found {
-			mapping.Content = append(mapping.Content,
-				&yaml.Node{Kind: yaml.ScalarNode, Value: "image"},
-				&yaml.Node{Kind: yaml.ScalarNode, Value: outputImage},
-			)
-		}
-	}
-
-	updatedData, err := yaml.Marshal(&doc)
-	if err != nil {
-		return fmt.Errorf("failed to marshal updated config.yaml: %w", err)
-	}
-
-	// Upload updated config.yaml to storage.
-	if e.storage != nil && hc.StoragePath != "" {
-		objectPath := hc.StoragePath + "/config.yaml"
-		if _, err := e.storage.Upload(ctx, objectPath, bytes.NewReader(updatedData), storage.UploadOptions{}); err != nil {
-			return fmt.Errorf("failed to upload updated config.yaml to storage: %w", err)
-		}
-		_, _ = fmt.Fprintf(logger, "Updated config.yaml in storage with image %s\n", outputImage)
-	}
-
-	// Update config.yaml entry in hc.Files manifest with new size and hash.
-	configHash := transfer.HashBytes(updatedData)
-	for i, f := range hc.Files {
-		if f.Path == "config.yaml" {
-			hc.Files[i].Size = int64(len(updatedData))
-			hc.Files[i].Hash = configHash
-			break
-		}
-	}
-	hc.ContentHash = computeContentHash(hc.Files)
-
-	// Update the DB record.
-	if hc.Config == nil {
-		hc.Config = &store.HarnessConfigData{}
-	}
-	hc.Config.Image = outputImage
-	if err := e.store.UpdateHarnessConfig(ctx, hc); err != nil {
-		return fmt.Errorf("failed to update harness-config record: %w", err)
-	}
-	_, _ = fmt.Fprintf(logger, "Updated harness-config record image to %s\n", outputImage)
-
 	return nil
 }
 
@@ -821,6 +713,16 @@ func (e *CloudBuildHarnessConfigExecutor) Run(ctx context.Context, logger io.Wri
 	}
 	defer gcsClient.Close()
 
+	// Verify the staging bucket exists before attempting upload.
+	if _, err := gcsClient.Bucket(stagingBucket).Attrs(ctx); err != nil {
+		if err == gcstorage.ErrBucketNotExist {
+			return fmt.Errorf("Cloud Build staging bucket gs://%s does not exist. "+
+				"Run 'gcloud builds submit' once manually in project %s to create it, "+
+				"or create the bucket manually", stagingBucket, e.gcpProject)
+		}
+		return fmt.Errorf("failed to access staging bucket gs://%s: %w", stagingBucket, err)
+	}
+
 	wc := gcsClient.Bucket(stagingBucket).Object(objectName).NewWriter(ctx)
 	wc.ContentType = "application/gzip"
 	if _, err := io.Copy(wc, &buf); err != nil {
@@ -831,6 +733,15 @@ func (e *CloudBuildHarnessConfigExecutor) Run(ctx context.Context, logger io.Wri
 		return fmt.Errorf("failed to finalize build context upload: %w", err)
 	}
 	_, _ = fmt.Fprintln(logger, "Build context uploaded.")
+
+	// Clean up the source archive after the build completes (success or failure).
+	defer func() {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := gcsClient.Bucket(stagingBucket).Object(objectName).Delete(cleanupCtx); err != nil {
+			log.Warn("Failed to clean up Cloud Build source archive", "bucket", stagingBucket, "object", objectName, "error", err)
+		}
+	}()
 
 	// Build the output image reference.
 	imageName := hc.Slug
@@ -937,7 +848,7 @@ func (e *CloudBuildHarnessConfigExecutor) Run(ctx context.Context, logger io.Wri
 			_, _ = fmt.Fprintf(logger, "\nCloud Build completed successfully: %s\n", outputImage)
 			log.Info("Cloud Build complete", "build_id", buildID, "image", outputImage)
 
-			if err := e.syncBuiltImage(ctx, logger, hc, tmpDir, outputImage); err != nil {
+			if err := syncBuiltImage(ctx, e.storage, e.store, logger, hc, tmpDir, outputImage); err != nil {
 				log.Error("Failed to sync built image back to store", "error", err)
 				_, _ = fmt.Fprintf(logger, "Warning: build succeeded but failed to update harness-config image: %v\n", err)
 			}
@@ -966,8 +877,9 @@ func (e *CloudBuildHarnessConfigExecutor) Run(ctx context.Context, logger io.Wri
 }
 
 // syncBuiltImage updates the harness config's config.yaml in storage and the
-// DB record to reference the newly-built image (Cloud Build variant).
-func (e *CloudBuildHarnessConfigExecutor) syncBuiltImage(ctx context.Context, logger io.Writer, hc *store.HarnessConfig, tmpDir, outputImage string) error {
+// DB record to reference the newly-built image. Shared by both local and Cloud
+// Build executors.
+func syncBuiltImage(ctx context.Context, stor storage.Storage, storeDB store.Store, logger io.Writer, hc *store.HarnessConfig, tmpDir, outputImage string) error {
 	configPath := filepath.Join(tmpDir, "config.yaml")
 	configData, err := os.ReadFile(configPath)
 	if err != nil {
@@ -1004,9 +916,9 @@ func (e *CloudBuildHarnessConfigExecutor) syncBuiltImage(ctx context.Context, lo
 		return fmt.Errorf("failed to marshal updated config.yaml: %w", err)
 	}
 
-	if e.storage != nil && hc.StoragePath != "" {
+	if stor != nil && hc.StoragePath != "" {
 		objectPath := hc.StoragePath + "/config.yaml"
-		if _, err := e.storage.Upload(ctx, objectPath, bytes.NewReader(updatedData), storage.UploadOptions{}); err != nil {
+		if _, err := stor.Upload(ctx, objectPath, bytes.NewReader(updatedData), storage.UploadOptions{}); err != nil {
 			return fmt.Errorf("failed to upload updated config.yaml to storage: %w", err)
 		}
 		_, _ = fmt.Fprintf(logger, "Updated config.yaml in storage with image %s\n", outputImage)
@@ -1026,7 +938,7 @@ func (e *CloudBuildHarnessConfigExecutor) syncBuiltImage(ctx context.Context, lo
 		hc.Config = &store.HarnessConfigData{}
 	}
 	hc.Config.Image = outputImage
-	if err := e.store.UpdateHarnessConfig(ctx, hc); err != nil {
+	if err := storeDB.UpdateHarnessConfig(ctx, hc); err != nil {
 		return fmt.Errorf("failed to update harness-config record: %w", err)
 	}
 	_, _ = fmt.Fprintf(logger, "Updated harness-config record image to %s\n", outputImage)
