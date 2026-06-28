@@ -238,6 +238,7 @@ type VersionedSettings struct {
 	HarnessConfigs       map[string]HarnessConfigEntry `json:"harness_configs,omitempty" yaml:"harness_configs,omitempty" koanf:"harness_configs"`
 	Profiles             map[string]V1ProfileConfig    `json:"profiles,omitempty" yaml:"profiles,omitempty" koanf:"profiles"`
 	SharedDirs           []api.SharedDir               `json:"shared_dirs,omitempty" yaml:"shared_dirs,omitempty" koanf:"shared_dirs"`
+	ManagedAgents        *V1ManagedAgentsConfig        `json:"managed_agents,omitempty" yaml:"managed_agents,omitempty" koanf:"managed_agents"`
 
 	// Default agent limits (applied when no explicit value is set)
 	DefaultMaxTurns      int               `json:"default_max_turns,omitempty" yaml:"default_max_turns,omitempty" koanf:"default_max_turns"`
@@ -2349,6 +2350,17 @@ func loadServerConfigOnly(path string) (*GlobalConfig, error) {
 		return nil, fmt.Errorf("failed to unmarshal server config: %w", err)
 	}
 	return &gc, nil
+}
+
+// V1ManagedAgentsConfig holds configuration for cloud-managed agent backends.
+type V1ManagedAgentsConfig struct {
+	Google *V1GoogleManagedAgentConfig `json:"google,omitempty" yaml:"google,omitempty" koanf:"google"`
+}
+
+// V1GoogleManagedAgentConfig holds Google-specific managed agent settings.
+type V1GoogleManagedAgentConfig struct {
+	APIKey    string `json:"api_key,omitempty" yaml:"api_key,omitempty" koanf:"api_key"`
+	BaseAgent string `json:"base_agent,omitempty" yaml:"base_agent,omitempty" koanf:"base_agent"`
 }
 
 // getBackupPath returns a backup file path that does not already exist.
