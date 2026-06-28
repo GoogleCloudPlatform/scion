@@ -969,7 +969,7 @@ func createTarGz(srcDir string, w io.Writer) error {
 		if err != nil {
 			return err
 		}
-		header.Name = relPath
+		header.Name = filepath.ToSlash(relPath)
 
 		if err := tw.WriteHeader(header); err != nil {
 			return err
