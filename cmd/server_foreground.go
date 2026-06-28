@@ -1485,7 +1485,7 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 	}
 
 	if rt != nil && rt.Name() == "container" && containerHubEndpoint != "" {
-		created, dnsErr := runtime.EnsureAppleDNS(cmd.Context(), runtime.AppleDNSHostname, runtime.AppleDNSIP)
+		created, dnsErr := runtime.EnsureAppleDNS(ctx, runtime.AppleDNSHostname, runtime.AppleDNSIP)
 		if dnsErr != nil {
 			log.Printf("WARNING: Failed to configure Apple Container DNS (%s → %s): %v\n"+
 				"Agents may not reach the Hub. Run manually:\n"+

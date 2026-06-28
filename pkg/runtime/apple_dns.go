@@ -34,7 +34,8 @@ func AppleDNSRuleExists(ctx context.Context, hostname string) (bool, error) {
 		return false, err
 	}
 	for _, line := range strings.Split(string(out), "\n") {
-		if strings.Contains(line, hostname) {
+		fields := strings.Fields(line)
+		if len(fields) > 0 && fields[0] == hostname {
 			return true, nil
 		}
 	}
