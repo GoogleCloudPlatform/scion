@@ -20,14 +20,17 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
+	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
 
 const (
@@ -35,25 +38,38 @@ const (
 	githubRawBase     = "https://raw.githubusercontent.com"
 	githubAPITimeout  = 30 * time.Second
 	githubMaxFileSize = 10 * 1024 * 1024 // 10MB per file
+
+	githubMaxRetries    = 4
+	githubBaseBackoff   = 1 * time.Second
+	githubMaxBackoff    = 30 * time.Second
+	githubBackoffFactor = 2.0
 )
 
 // GitHubSkillResolver resolves skills from GitHub repositories
 // using the GitHub Contents API.
 type GitHubSkillResolver struct {
-	httpClient *http.Client
-	token      string // GITHUB_TOKEN for authenticated requests
-	apiBase    string // Default: githubAPIBase, override in tests
-	rawBase    string // Default: githubRawBase, override in tests
+	httpClient      *http.Client
+	token           string // GITHUB_TOKEN for authenticated requests
+	apiBase         string // Default: githubAPIBase, override in tests
+	rawBase         string // Default: githubRawBase, override in tests
+	resolutionCache *GitHubResolutionCache
 }
 
 // NewGitHubSkillResolver creates a resolver for gh:// and GitHub URL skills.
 // Reads GITHUB_TOKEN from environment for authenticated API access.
+// If a resolution cache directory is available, cached resolution results
+// are reused to avoid redundant GitHub API calls.
 func NewGitHubSkillResolver() *GitHubSkillResolver {
+	var cache *GitHubResolutionCache
+	if cacheDir, err := githubResolutionCacheDir(); err == nil {
+		cache, _ = NewGitHubResolutionCache(cacheDir, DefaultResolutionCacheTTL)
+	}
 	return &GitHubSkillResolver{
-		httpClient: &http.Client{Timeout: githubAPITimeout},
-		token:      os.Getenv("GITHUB_TOKEN"),
-		apiBase:    githubAPIBase,
-		rawBase:    githubRawBase,
+		httpClient:      &http.Client{Timeout: githubAPITimeout},
+		token:           os.Getenv("GITHUB_TOKEN"),
+		apiBase:         githubAPIBase,
+		rawBase:         githubRawBase,
+		resolutionCache: cache,
 	}
 }
 
@@ -85,6 +101,16 @@ func (r *GitHubSkillResolver) Resolve(ctx context.Context, refs []api.SkillRefer
 }
 
 func (r *GitHubSkillResolver) resolveOne(ctx context.Context, ghRef *GitHubSkillRef, ref api.SkillReference) (*ResolvedSkill, error) {
+	// Check resolution cache first
+	if r.resolutionCache != nil {
+		if cached, ok := r.resolutionCache.Get(ref.URI); ok {
+			util.Debugf("github: resolution cache hit for %s", ref.URI)
+			result := cached
+			result.As = ref.As
+			return &result, nil
+		}
+	}
+
 	commitSHA, err := r.resolveCommitSHA(ctx, ghRef)
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve ref for %s: %w", ghRef.Raw, err)
@@ -136,14 +162,21 @@ func (r *GitHubSkillResolver) resolveOne(ctx context.Context, ghRef *GitHubSkill
 
 	bundleHash := transfer.ComputeContentHash(fileInfos)
 
-	return &ResolvedSkill{
+	resolved := &ResolvedSkill{
 		Name:    ghRef.SkillName,
 		URI:     ghRef.Raw,
 		As:      ref.As,
 		Version: commitSHA[:12],
 		Hash:    bundleHash,
 		Files:   resolvedFiles,
-	}, nil
+	}
+
+	// Store in resolution cache
+	if r.resolutionCache != nil {
+		r.resolutionCache.Put(ref.URI, *resolved)
+	}
+
+	return resolved, nil
 }
 
 // githubContentEntry is the JSON structure returned by the GitHub Contents API.
@@ -170,7 +203,7 @@ func (r *GitHubSkillResolver) resolveCommitSHA(ctx context.Context, ghRef *GitHu
 	req.Header.Set("Accept", "application/vnd.github.v3.sha")
 	r.setAuthHeader(req)
 
-	resp, err := r.httpClient.Do(req)
+	resp, err := r.doWithRetry(ctx, req)
 	if err != nil {
 		return "", fmt.Errorf("GitHub API request failed: %w", err)
 	}
@@ -206,7 +239,7 @@ func (r *GitHubSkillResolver) listContents(ctx context.Context, ghRef *GitHubSki
 	req.Header.Set("Accept", "application/vnd.github.v3+json")
 	r.setAuthHeader(req)
 
-	resp, err := r.httpClient.Do(req)
+	resp, err := r.doWithRetry(ctx, req)
 	if err != nil {
 		return nil, fmt.Errorf("GitHub API request failed: %w", err)
 	}
@@ -237,7 +270,7 @@ func (r *GitHubSkillResolver) downloadRawFile(ctx context.Context, ghRef *GitHub
 	}
 	r.setAuthHeader(req)
 
-	resp, err := r.httpClient.Do(req)
+	resp, err := r.doWithRetry(ctx, req)
 	if err != nil {
 		return nil, fmt.Errorf("download failed: %w", err)
 	}
@@ -274,6 +307,102 @@ func (r *GitHubSkillResolver) setAuthHeader(req *http.Request) {
 	if r.token != "" {
 		req.Header.Set("Authorization", "Bearer "+r.token)
 	}
+}
+
+// doWithRetry executes an HTTP request with retry and exponential backoff
+// for rate-limited (403 with X-RateLimit-Remaining: 0, 429) and transient
+// server errors (5xx). On retryable responses it respects the Retry-After
+// header when present.
+func (r *GitHubSkillResolver) doWithRetry(ctx context.Context, req *http.Request) (*http.Response, error) {
+	var lastResp *http.Response
+	var lastErr error
+
+	for attempt := 0; attempt <= githubMaxRetries; attempt++ {
+		if attempt > 0 {
+			delay := retryDelay(lastResp, attempt)
+			util.Debugf("github: retrying request (attempt %d/%d) after %v: %s %s",
+				attempt, githubMaxRetries, delay, req.Method, req.URL.Path)
+
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(delay):
+			}
+		}
+
+		// Clone the request for retries (body is nil for GET requests)
+		cloned := req.Clone(ctx)
+		resp, err := r.httpClient.Do(cloned)
+		if err != nil {
+			lastErr = err
+			// Network errors are retryable
+			continue
+		}
+
+		if !isRetryableResponse(resp) {
+			return resp, nil
+		}
+
+		// Drain and close body so the connection can be reused
+		_, _ = io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+		lastResp = resp
+		lastErr = nil
+	}
+
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	// All retries exhausted — re-execute to return the final response for
+	// the caller to handle (e.g. apiError extraction).
+	return r.httpClient.Do(req.Clone(ctx))
+}
+
+// isRetryableResponse returns true for HTTP responses that should be retried:
+// 429 (Too Many Requests), 403 with rate-limit exhaustion, and 5xx server errors.
+func isRetryableResponse(resp *http.Response) bool {
+	if resp.StatusCode == http.StatusTooManyRequests {
+		return true
+	}
+	if resp.StatusCode == http.StatusForbidden && resp.Header.Get("X-RateLimit-Remaining") == "0" {
+		return true
+	}
+	if resp.StatusCode >= 500 {
+		return true
+	}
+	return false
+}
+
+// retryDelay calculates the backoff duration for a retry attempt.
+// Uses the Retry-After header when present, otherwise exponential backoff.
+func retryDelay(resp *http.Response, attempt int) time.Duration {
+	if resp != nil {
+		if ra := resp.Header.Get("Retry-After"); ra != "" {
+			if seconds, err := strconv.Atoi(ra); err == nil && seconds >= 0 {
+				d := time.Duration(seconds) * time.Second
+				if d > githubMaxBackoff {
+					d = githubMaxBackoff
+				}
+				return d
+			}
+		}
+		// For rate limits, check X-RateLimit-Reset (Unix timestamp)
+		if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusTooManyRequests {
+			if resetStr := resp.Header.Get("X-RateLimit-Reset"); resetStr != "" {
+				if resetUnix, err := strconv.ParseInt(resetStr, 10, 64); err == nil {
+					wait := time.Until(time.Unix(resetUnix, 0))
+					if wait > 0 && wait <= githubMaxBackoff {
+						return wait
+					}
+				}
+			}
+		}
+	}
+	backoff := time.Duration(float64(githubBaseBackoff) * math.Pow(githubBackoffFactor, float64(attempt-1)))
+	if backoff > githubMaxBackoff {
+		backoff = githubMaxBackoff
+	}
+	return backoff
 }
 
 func (r *GitHubSkillResolver) apiError(resp *http.Response, action string) error {

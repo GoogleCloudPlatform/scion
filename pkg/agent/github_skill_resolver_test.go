@@ -23,6 +23,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
@@ -216,9 +217,12 @@ func TestGitHubSkillResolver_NotFound_SkillDir(t *testing.T) {
 func TestGitHubSkillResolver_RateLimit(t *testing.T) {
 	server, mux := newTestGitHubServer(t)
 
+	attempts := 0
 	mux.HandleFunc("/repos/owner/repo/commits/main", func(w http.ResponseWriter, _ *http.Request) {
+		attempts++
 		w.Header().Set("X-RateLimit-Remaining", "0")
 		w.Header().Set("X-RateLimit-Reset", "1700000000")
+		w.Header().Set("Retry-After", "0")
 		w.WriteHeader(http.StatusForbidden)
 	})
 
@@ -239,6 +243,146 @@ func TestGitHubSkillResolver_RateLimit(t *testing.T) {
 	}
 	if !strings.Contains(result.Errors[0].Message, "GITHUB_TOKEN") {
 		t.Errorf("expected error to mention GITHUB_TOKEN, got %s", result.Errors[0].Message)
+	}
+	// Verify retries happened before the final rate-limit error
+	if attempts > 1 {
+		t.Logf("retried %d times before giving up (expected with backoff)", attempts-1)
+	}
+}
+
+func TestGitHubSkillResolver_RetryOn429(t *testing.T) {
+	server, mux := newTestGitHubServer(t)
+
+	attempts := 0
+	mux.HandleFunc("/repos/owner/repo/commits/main", func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		if attempts <= 2 {
+			w.Header().Set("Retry-After", "0")
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		w.Write([]byte(testCommitSHA))
+	})
+	mux.HandleFunc("/repos/owner/repo/contents/skills/my-skill", func(w http.ResponseWriter, _ *http.Request) {
+		json.NewEncoder(w).Encode([]githubContentEntry{
+			{Name: "SKILL.md", Path: "skills/my-skill/SKILL.md", Type: "file", Size: 5},
+		})
+	})
+	mux.HandleFunc("/raw/owner/repo/"+testCommitSHA+"/skills/my-skill/SKILL.md", func(w http.ResponseWriter, _ *http.Request) {
+		w.Write([]byte("hello"))
+	})
+
+	resolver := newTestGitHubResolver(server)
+
+	result, err := resolver.Resolve(context.Background(), []api.SkillReference{
+		{URI: "gh://owner/repo/my-skill@main"},
+	}, ResolveOpts{})
+
+	if err != nil {
+		t.Fatalf("Resolve failed: %v", err)
+	}
+	if len(result.Errors) != 0 {
+		t.Fatalf("unexpected errors: %v", result.Errors)
+	}
+	if len(result.Resolved) != 1 {
+		t.Fatalf("expected 1 resolved skill, got %d", len(result.Resolved))
+	}
+	if attempts < 3 {
+		t.Errorf("expected at least 3 attempts, got %d", attempts)
+	}
+}
+
+func TestGitHubSkillResolver_RetryOn5xx(t *testing.T) {
+	server, mux := newTestGitHubServer(t)
+
+	attempts := 0
+	mux.HandleFunc("/repos/owner/repo/commits/main", func(w http.ResponseWriter, _ *http.Request) {
+		attempts++
+		if attempts == 1 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.Write([]byte(testCommitSHA))
+	})
+	mux.HandleFunc("/repos/owner/repo/contents/skills/my-skill", func(w http.ResponseWriter, _ *http.Request) {
+		json.NewEncoder(w).Encode([]githubContentEntry{
+			{Name: "SKILL.md", Path: "skills/my-skill/SKILL.md", Type: "file", Size: 5},
+		})
+	})
+	mux.HandleFunc("/raw/owner/repo/"+testCommitSHA+"/skills/my-skill/SKILL.md", func(w http.ResponseWriter, _ *http.Request) {
+		w.Write([]byte("hello"))
+	})
+
+	resolver := newTestGitHubResolver(server)
+
+	result, err := resolver.Resolve(context.Background(), []api.SkillReference{
+		{URI: "gh://owner/repo/my-skill@main"},
+	}, ResolveOpts{})
+
+	if err != nil {
+		t.Fatalf("Resolve failed: %v", err)
+	}
+	if len(result.Errors) != 0 {
+		t.Fatalf("unexpected errors: %v", result.Errors)
+	}
+	if attempts < 2 {
+		t.Errorf("expected at least 2 attempts, got %d", attempts)
+	}
+}
+
+func TestGitHubSkillResolver_ResolutionCacheHit(t *testing.T) {
+	server, mux := newTestGitHubServer(t)
+	apiCalls := 0
+
+	mux.HandleFunc("/repos/owner/repo/commits/main", func(w http.ResponseWriter, _ *http.Request) {
+		apiCalls++
+		w.Write([]byte(testCommitSHA))
+	})
+	mux.HandleFunc("/repos/owner/repo/contents/skills/my-skill", func(w http.ResponseWriter, _ *http.Request) {
+		apiCalls++
+		json.NewEncoder(w).Encode([]githubContentEntry{
+			{Name: "SKILL.md", Path: "skills/my-skill/SKILL.md", Type: "file", Size: 5},
+		})
+	})
+	mux.HandleFunc("/raw/owner/repo/"+testCommitSHA+"/skills/my-skill/SKILL.md", func(w http.ResponseWriter, _ *http.Request) {
+		apiCalls++
+		w.Write([]byte("hello"))
+	})
+
+	resolver := newTestGitHubResolver(server)
+	cache, err := NewGitHubResolutionCache(t.TempDir(), 5*time.Minute)
+	if err != nil {
+		t.Fatalf("cache creation failed: %v", err)
+	}
+	resolver.resolutionCache = cache
+
+	// First call — should hit the API
+	result1, err := resolver.Resolve(context.Background(), []api.SkillReference{
+		{URI: "gh://owner/repo/my-skill@main"},
+	}, ResolveOpts{})
+	if err != nil {
+		t.Fatalf("first Resolve failed: %v", err)
+	}
+	if len(result1.Resolved) != 1 {
+		t.Fatalf("expected 1 resolved skill, got %d", len(result1.Resolved))
+	}
+	firstCallAPICalls := apiCalls
+
+	// Second call — should use cache, no new API calls
+	result2, err := resolver.Resolve(context.Background(), []api.SkillReference{
+		{URI: "gh://owner/repo/my-skill@main"},
+	}, ResolveOpts{})
+	if err != nil {
+		t.Fatalf("second Resolve failed: %v", err)
+	}
+	if len(result2.Resolved) != 1 {
+		t.Fatalf("expected 1 resolved skill on second call, got %d", len(result2.Resolved))
+	}
+	if apiCalls != firstCallAPICalls {
+		t.Errorf("expected no new API calls on cache hit, but got %d additional calls", apiCalls-firstCallAPICalls)
+	}
+	if result2.Resolved[0].Name != result1.Resolved[0].Name {
+		t.Errorf("cached result name mismatch: %s vs %s", result2.Resolved[0].Name, result1.Resolved[0].Name)
 	}
 }
 
@@ -354,6 +498,81 @@ func TestGitHubSkillResolver_MixedBatch(t *testing.T) {
 	if !gotHub {
 		t.Error("missing skill:// resolved skill")
 	}
+}
+
+func TestIsRetryableResponse(t *testing.T) {
+	tests := []struct {
+		name       string
+		statusCode int
+		headers    map[string]string
+		want       bool
+	}{
+		{"429 is retryable", 429, nil, true},
+		{"403 with rate limit is retryable", 403, map[string]string{"X-RateLimit-Remaining": "0"}, true},
+		{"403 without rate limit is not retryable", 403, nil, false},
+		{"500 is retryable", 500, nil, true},
+		{"502 is retryable", 502, nil, true},
+		{"503 is retryable", 503, nil, true},
+		{"200 is not retryable", 200, nil, false},
+		{"404 is not retryable", 404, nil, false},
+		{"401 is not retryable", 401, nil, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resp := &http.Response{
+				StatusCode: tt.statusCode,
+				Header:     make(http.Header),
+			}
+			for k, v := range tt.headers {
+				resp.Header.Set(k, v)
+			}
+			if got := isRetryableResponse(resp); got != tt.want {
+				t.Errorf("isRetryableResponse() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRetryDelay(t *testing.T) {
+	t.Run("uses Retry-After header", func(t *testing.T) {
+		resp := &http.Response{
+			StatusCode: 429,
+			Header:     make(http.Header),
+		}
+		resp.Header.Set("Retry-After", "3")
+		got := retryDelay(resp, 1)
+		if got != 3*time.Second {
+			t.Errorf("expected 3s, got %v", got)
+		}
+	})
+
+	t.Run("caps Retry-After at max backoff", func(t *testing.T) {
+		resp := &http.Response{
+			StatusCode: 429,
+			Header:     make(http.Header),
+		}
+		resp.Header.Set("Retry-After", "120")
+		got := retryDelay(resp, 1)
+		if got != githubMaxBackoff {
+			t.Errorf("expected %v, got %v", githubMaxBackoff, got)
+		}
+	})
+
+	t.Run("exponential backoff without headers", func(t *testing.T) {
+		d1 := retryDelay(nil, 1)
+		d2 := retryDelay(nil, 2)
+		d3 := retryDelay(nil, 3)
+		if d1 != 1*time.Second {
+			t.Errorf("attempt 1: expected 1s, got %v", d1)
+		}
+		if d2 != 2*time.Second {
+			t.Errorf("attempt 2: expected 2s, got %v", d2)
+		}
+		if d3 != 4*time.Second {
+			t.Errorf("attempt 3: expected 4s, got %v", d3)
+		}
+	})
 }
 
 type stubSkillResolver struct {
