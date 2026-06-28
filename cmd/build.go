@@ -33,6 +33,7 @@ var (
 	buildPush      bool
 	buildPlatform  string
 	buildDryRun    bool
+	buildBuilder   string
 )
 
 var buildCmd = &cobra.Command{
@@ -66,23 +67,28 @@ field is updated to reference the built image.`,
 		tag := buildTag
 
 		var settings *config.VersionedSettings
-		if buildBaseImage == "" || buildPush {
+		if buildBaseImage == "" || buildPush || buildBuilder == "cloud-build" {
 			settings, _, err = config.LoadEffectiveSettings(projectPath)
 			if err != nil {
 				return fmt.Errorf("failed to load settings: %w", err)
 			}
 		}
 
+		imageRegistry := ""
+		if settings != nil {
+			imageRegistry = settings.ResolveImageRegistry(profile)
+		}
+
 		baseImage := buildBaseImage
 		if baseImage == "" {
-			imageRegistry := ""
-			if settings != nil {
-				imageRegistry = settings.ResolveImageRegistry(profile)
-			}
 			baseImage = "scion-base:" + tag
 			if imageRegistry != "" {
 				baseImage = imageRegistry + "/scion-base:" + tag
 			}
+		}
+
+		if buildBuilder == "cloud-build" {
+			return runCloudBuild(cmd, harnessConfigName, hcDir, tag, baseImage, imageRegistry, settings)
 		}
 
 		runtimeBin := runtime.DetectContainerRuntime()
@@ -101,10 +107,6 @@ field is updated to reference the built image.`,
 
 		outputImage := imageBaseName + ":" + tag
 		if buildPush {
-			imageRegistry := ""
-			if settings != nil {
-				imageRegistry = settings.ResolveImageRegistry(profile)
-			}
 			if imageRegistry == "" {
 				return fmt.Errorf("--push requires image_registry to be configured")
 			}
@@ -141,63 +143,181 @@ field is updated to reference the built image.`,
 			}
 		}
 
-		configPath := filepath.Join(hcDir.Path, "config.yaml")
-		configData, err := os.ReadFile(configPath)
-		if err != nil {
-			return fmt.Errorf("failed to read config.yaml for update: %w", err)
-		}
-		var doc yaml.Node
-		if err := yaml.Unmarshal(configData, &doc); err != nil {
-			return fmt.Errorf("failed to parse config.yaml: %w", err)
-		}
-		if len(doc.Content) > 0 && doc.Content[0].Kind == yaml.MappingNode {
-			mapping := doc.Content[0]
-			found := false
-			for i := 0; i < len(mapping.Content)-1; i += 2 {
-				if mapping.Content[i].Value == "image" {
-					mapping.Content[i+1].Value = outputImage
-					found = true
-					break
-				}
-			}
-			if !found {
-				mapping.Content = append(mapping.Content,
-					&yaml.Node{Kind: yaml.ScalarNode, Value: "image"},
-					&yaml.Node{Kind: yaml.ScalarNode, Value: outputImage},
-				)
-			}
-		}
-		updatedData, err := yaml.Marshal(&doc)
-		if err != nil {
-			return fmt.Errorf("failed to marshal updated config.yaml: %w", err)
-		}
-		if err := os.WriteFile(configPath, updatedData, 0644); err != nil {
-			return fmt.Errorf("failed to write updated config.yaml: %w", err)
-		}
-		fmt.Printf("Updated %s image to %s\n", configPath, outputImage)
-
-		// Sync updated config to Hub so agents pick up the new image.
-		var gp string
-		if projectPath != "" {
-			if resolved, err := config.GetResolvedProjectDir(projectPath); err == nil {
-				gp = resolved
-			}
-		} else if resolved, err := config.GetResolvedProjectDir(""); err == nil {
-			gp = resolved
-		}
-		hubCtx, hubErr := CheckHubAvailabilityWithOptions(gp, true)
-		if hubErr != nil {
-			fmt.Printf("Warning: could not sync to Hub: %v\n", hubErr)
-			fmt.Println("Run 'scion harness-config push " + harnessConfigName + "' to sync manually.")
-		} else if hubCtx != nil {
-			if err := syncHarnessConfigToHub(hubCtx, harnessConfigName, hcDir.Path, "global", "", hcDir.Config.Harness); err != nil {
-				fmt.Printf("Warning: failed to sync to Hub: %v\n", err)
-				fmt.Println("Run 'scion harness-config push " + harnessConfigName + "' to sync manually.")
-			}
-		}
+		updateBuildConfigAndSync(harnessConfigName, hcDir, outputImage)
 
 		return nil
 	},
+}
+
+// runCloudBuild executes the build via gcloud builds submit.
+func runCloudBuild(cmd *cobra.Command, harnessConfigName string, hcDir *config.HarnessConfigDir, tag, baseImage, imageRegistry string, settings *config.VersionedSettings) error {
+	if _, err := exec.LookPath("gcloud"); err != nil {
+		return fmt.Errorf("--builder cloud-build requires gcloud CLI to be installed and in PATH")
+	}
+	if imageRegistry == "" {
+		return fmt.Errorf("--builder cloud-build requires image_registry to be configured")
+	}
+
+	gcpProject := resolveGCPProject(settings)
+	if gcpProject == "" {
+		return fmt.Errorf("no GCP project configured; set gcp_project_id in settings or run 'gcloud config set project <project>'")
+	}
+
+	imageBaseName := harnessConfigName
+	if hcDir.Config.Image != "" {
+		name := hcDir.Config.Image
+		if colonIdx := strings.LastIndex(name, ":"); colonIdx >= 0 {
+			name = name[:colonIdx]
+		}
+		imageBaseName = name
+	}
+	outputImage := imageRegistry + "/" + imageBaseName + ":" + tag
+
+	platform := buildPlatform
+	if platform == "" {
+		platform = "linux/amd64,linux/arm64"
+	}
+
+	// Write a temporary cloudbuild.yaml.
+	cbConfig := fmt.Sprintf(`steps:
+  - name: 'gcr.io/cloud-builders/docker'
+    id: 'setup-buildx'
+    args: ['buildx', 'create', '--name', 'builder', '--use']
+    env: ['DOCKER_CLI_EXPERIMENTAL=enabled']
+  - name: 'gcr.io/cloud-builders/docker'
+    id: 'bootstrap-buildx'
+    args: ['buildx', 'inspect', '--bootstrap']
+    env: ['DOCKER_CLI_EXPERIMENTAL=enabled']
+  - name: 'gcr.io/cloud-builders/docker'
+    id: 'build-image'
+    args:
+      - 'buildx'
+      - 'build'
+      - '--platform'
+      - '%s'
+      - '--build-arg'
+      - 'BASE_IMAGE=%s'
+      - '-t'
+      - '%s'
+      - '-f'
+      - 'Dockerfile'
+      - '--push'
+      - '.'
+    env: ['DOCKER_CLI_EXPERIMENTAL=enabled']
+options:
+  dynamicSubstitutions: true
+  machineType: 'E2_HIGHCPU_8'
+timeout: 1200s
+`, platform, baseImage, outputImage)
+
+	tmpFile, err := os.CreateTemp("", "scion-cloudbuild-*.yaml")
+	if err != nil {
+		return fmt.Errorf("failed to create temp cloudbuild config: %w", err)
+	}
+	defer os.Remove(tmpFile.Name())
+
+	if _, err := tmpFile.WriteString(cbConfig); err != nil {
+		tmpFile.Close()
+		return fmt.Errorf("failed to write cloudbuild config: %w", err)
+	}
+	tmpFile.Close()
+
+	if buildDryRun {
+		fmt.Printf("gcloud builds submit --project %s --config %s %s\n", gcpProject, tmpFile.Name(), hcDir.Path)
+		fmt.Printf("\n# cloudbuild.yaml contents:\n%s", cbConfig)
+		return nil
+	}
+
+	fmt.Printf("Submitting Cloud Build in project %s...\n", gcpProject)
+	fmt.Printf("Output image: %s\n", outputImage)
+
+	gcloudCmd := exec.CommandContext(cmd.Context(), "gcloud", "builds", "submit",
+		"--project", gcpProject,
+		"--config", tmpFile.Name(),
+		hcDir.Path)
+	gcloudCmd.Stdout = os.Stdout
+	gcloudCmd.Stderr = os.Stderr
+	if err := gcloudCmd.Run(); err != nil {
+		return fmt.Errorf("Cloud Build failed: %w", err)
+	}
+
+	updateBuildConfigAndSync(harnessConfigName, hcDir, outputImage)
+
+	return nil
+}
+
+// resolveGCPProject returns the GCP project from settings or gcloud config.
+func resolveGCPProject(settings *config.VersionedSettings) string {
+	if settings != nil && settings.Server != nil && settings.Server.Secrets != nil && settings.Server.Secrets.GCPProjectID != "" {
+		return settings.Server.Secrets.GCPProjectID
+	}
+	out, err := exec.Command("gcloud", "config", "get-value", "project").Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// updateBuildConfigAndSync updates the harness config's config.yaml with the
+// new image reference and syncs to Hub.
+func updateBuildConfigAndSync(harnessConfigName string, hcDir *config.HarnessConfigDir, outputImage string) {
+	configPath := filepath.Join(hcDir.Path, "config.yaml")
+	configData, err := os.ReadFile(configPath)
+	if err != nil {
+		fmt.Printf("Warning: failed to read config.yaml for update: %v\n", err)
+		return
+	}
+	var doc yaml.Node
+	if err := yaml.Unmarshal(configData, &doc); err != nil {
+		fmt.Printf("Warning: failed to parse config.yaml: %v\n", err)
+		return
+	}
+	if len(doc.Content) > 0 && doc.Content[0].Kind == yaml.MappingNode {
+		mapping := doc.Content[0]
+		found := false
+		for i := 0; i < len(mapping.Content)-1; i += 2 {
+			if mapping.Content[i].Value == "image" {
+				mapping.Content[i+1].Value = outputImage
+				found = true
+				break
+			}
+		}
+		if !found {
+			mapping.Content = append(mapping.Content,
+				&yaml.Node{Kind: yaml.ScalarNode, Value: "image"},
+				&yaml.Node{Kind: yaml.ScalarNode, Value: outputImage},
+			)
+		}
+	}
+	updatedData, err := yaml.Marshal(&doc)
+	if err != nil {
+		fmt.Printf("Warning: failed to marshal updated config.yaml: %v\n", err)
+		return
+	}
+	if err := os.WriteFile(configPath, updatedData, 0644); err != nil {
+		fmt.Printf("Warning: failed to write updated config.yaml: %v\n", err)
+		return
+	}
+	fmt.Printf("Updated %s image to %s\n", configPath, outputImage)
+
+	var gp string
+	if projectPath != "" {
+		if resolved, err := config.GetResolvedProjectDir(projectPath); err == nil {
+			gp = resolved
+		}
+	} else if resolved, err := config.GetResolvedProjectDir(""); err == nil {
+		gp = resolved
+	}
+	hubCtx, hubErr := CheckHubAvailabilityWithOptions(gp, true)
+	if hubErr != nil {
+		fmt.Printf("Warning: could not sync to Hub: %v\n", hubErr)
+		fmt.Println("Run 'scion harness-config push " + harnessConfigName + "' to sync manually.")
+	} else if hubCtx != nil {
+		if err := syncHarnessConfigToHub(hubCtx, harnessConfigName, hcDir.Path, "global", "", hcDir.Config.Harness); err != nil {
+			fmt.Printf("Warning: failed to sync to Hub: %v\n", err)
+			fmt.Println("Run 'scion harness-config push " + harnessConfigName + "' to sync manually.")
+		}
+	}
 }
 
 func init() {
@@ -207,4 +327,5 @@ func init() {
 	buildCmd.Flags().BoolVar(&buildPush, "push", false, "Push built image to image_registry after building")
 	buildCmd.Flags().StringVar(&buildPlatform, "platform", "", "Target platform (default: current architecture)")
 	buildCmd.Flags().BoolVar(&buildDryRun, "dry-run", false, "Show the docker build command without executing")
+	buildCmd.Flags().StringVar(&buildBuilder, "builder", "local", "Build backend: local or cloud-build")
 }
