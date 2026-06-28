@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"strings"
 )
 
@@ -91,6 +92,8 @@ func (r *SSEReader) Next() (*SSEEvent, error) {
 			dataLines = append(dataLines, value)
 		case "id":
 			event.ID = value
+		case "retry":
+			log.Printf("SSE: server sent retry: %s (ignored)", value)
 		}
 	}
 

@@ -15,13 +15,15 @@
 package google
 
 // CreateAgentRequest is the request body for POST /v1beta/agents.
+// BaseEnvironment is polymorphic: a string ("remote" or an environment ID)
+// or an *Environment config object.
 type CreateAgentRequest struct {
-	ID                string       `json:"id"`
-	BaseAgent         string       `json:"base_agent"`
-	SystemInstruction string       `json:"system_instruction,omitempty"`
-	Description       string       `json:"description,omitempty"`
-	Tools             []AgentTool  `json:"tools,omitempty"`
-	BaseEnvironment   *Environment `json:"base_environment,omitempty"`
+	ID                string      `json:"id"`
+	BaseAgent         string      `json:"base_agent"`
+	SystemInstruction string      `json:"system_instruction,omitempty"`
+	Description       string      `json:"description,omitempty"`
+	Tools             []AgentTool `json:"tools,omitempty"`
+	BaseEnvironment   interface{} `json:"base_environment,omitempty"`
 }
 
 // Agent is the response resource from the Agents API.
@@ -48,17 +50,19 @@ type ListAgentsResponse struct {
 }
 
 // CreateInteractionRequest is the request body for POST /v1beta/interactions.
+// Environment is polymorphic: a string ("remote" or an environment ID)
+// or an *Environment config object.
 type CreateInteractionRequest struct {
-	Agent                 string       `json:"agent,omitempty"`
-	Model                 string       `json:"model,omitempty"`
-	Input                 string       `json:"input"`
-	SystemInstruction     string       `json:"system_instruction,omitempty"`
-	Tools                 []AgentTool  `json:"tools,omitempty"`
-	Environment           *Environment `json:"environment,omitempty"`
-	PreviousInteractionID string       `json:"previous_interaction_id,omitempty"`
-	Stream                bool         `json:"stream,omitempty"`
-	Background            bool         `json:"background,omitempty"`
-	Store                 *bool        `json:"store,omitempty"`
+	Agent                 string      `json:"agent,omitempty"`
+	Model                 string      `json:"model,omitempty"`
+	Input                 string      `json:"input"`
+	SystemInstruction     string      `json:"system_instruction,omitempty"`
+	Tools                 []AgentTool `json:"tools,omitempty"`
+	Environment           interface{} `json:"environment,omitempty"`
+	PreviousInteractionID string      `json:"previous_interaction_id,omitempty"`
+	Stream                bool        `json:"stream,omitempty"`
+	Background            bool        `json:"background,omitempty"`
+	Store                 *bool       `json:"store,omitempty"`
 }
 
 // Interaction is the response resource from the Interactions API.
@@ -74,9 +78,11 @@ type Interaction struct {
 }
 
 // InteractionStep is a single step in an interaction's execution.
+// Arguments appears in polled responses; ArgumentsDelta in streaming deltas.
 type InteractionStep struct {
 	Type           string `json:"type"`
 	Text           string `json:"text,omitempty"`
+	Arguments      string `json:"arguments,omitempty"`
 	ArgumentsDelta string `json:"arguments_delta,omitempty"`
 	ToolName       string `json:"tool_name,omitempty"`
 }

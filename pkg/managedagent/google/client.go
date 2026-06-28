@@ -22,9 +22,12 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"time"
 )
 
 const defaultBaseURL = "https://generativelanguage.googleapis.com/v1beta"
+
+const maxErrorBodySize = 64 * 1024
 
 // Client is a thin HTTP client for the Google Managed Agents API.
 type Client struct {
@@ -36,10 +39,17 @@ type Client struct {
 // NewClient creates a new Google API client with the given API key.
 func NewClient(apiKey string) *Client {
 	return &Client{
-		baseURL:    defaultBaseURL,
-		apiKey:     apiKey,
-		httpClient: http.DefaultClient,
+		baseURL: defaultBaseURL,
+		apiKey:  apiKey,
+		httpClient: &http.Client{
+			Timeout: 30 * time.Second,
+		},
 	}
+}
+
+// SetBaseURL overrides the API base URL (useful for testing).
+func (c *Client) SetBaseURL(url string) {
+	c.baseURL = url
 }
 
 // CreateAgent creates a new managed agent configuration.
@@ -112,7 +122,7 @@ func (c *Client) CreateInteractionStream(ctx context.Context, req *CreateInterac
 	if err != nil {
 		return nil, fmt.Errorf("creating request: %w", err)
 	}
-	c.setHeaders(httpReq)
+	c.setHeaders(httpReq, true)
 	httpReq.Header.Set("Accept", "text/event-stream")
 
 	resp, err := c.httpClient.Do(httpReq)
@@ -150,7 +160,7 @@ func (c *Client) GetInteractionStream(ctx context.Context, interactionID string,
 	if err != nil {
 		return nil, fmt.Errorf("creating stream request: %w", err)
 	}
-	c.setHeaders(httpReq)
+	c.setHeaders(httpReq, false)
 	httpReq.Header.Set("Accept", "text/event-stream")
 
 	resp, err := c.httpClient.Do(httpReq)
@@ -185,7 +195,8 @@ func (c *Client) DeleteInteraction(ctx context.Context, interactionID string) er
 
 func (c *Client) do(ctx context.Context, method, path string, reqBody interface{}, respBody interface{}) error {
 	var bodyReader io.Reader
-	if reqBody != nil {
+	hasBody := reqBody != nil
+	if hasBody {
 		data, err := json.Marshal(reqBody)
 		if err != nil {
 			return fmt.Errorf("marshaling request: %w", err)
@@ -197,7 +208,7 @@ func (c *Client) do(ctx context.Context, method, path string, reqBody interface{
 	if err != nil {
 		return fmt.Errorf("creating request: %w", err)
 	}
-	c.setHeaders(httpReq)
+	c.setHeaders(httpReq, hasBody)
 
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
@@ -218,13 +229,15 @@ func (c *Client) do(ctx context.Context, method, path string, reqBody interface{
 	return nil
 }
 
-func (c *Client) setHeaders(req *http.Request) {
+func (c *Client) setHeaders(req *http.Request, hasBody bool) {
 	req.Header.Set("x-goog-api-key", c.apiKey)
-	req.Header.Set("Content-Type", "application/json")
+	if hasBody {
+		req.Header.Set("Content-Type", "application/json")
+	}
 }
 
 func (c *Client) parseError(resp *http.Response) error {
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodySize))
 	if err != nil {
 		return fmt.Errorf("API error (status %d, failed to read body: %w)", resp.StatusCode, err)
 	}

@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/managedagent"
 )
@@ -35,11 +36,15 @@ type Backend struct {
 }
 
 // NewBackend creates a new Google managed agent backend.
-func NewBackend(cfg BackendConfig) *Backend {
+// Returns an error if APIKey is empty.
+func NewBackend(cfg BackendConfig) (*Backend, error) {
+	if cfg.APIKey == "" {
+		return nil, fmt.Errorf("google backend: API key is required")
+	}
 	return &Backend{
 		client:    NewClient(cfg.APIKey),
 		baseAgent: cfg.BaseAgent,
-	}
+	}, nil
 }
 
 func (b *Backend) Name() string {
@@ -85,7 +90,7 @@ func (b *Backend) CreateInteraction(ctx context.Context, req managedagent.Intera
 	}
 
 	if req.EnvironmentID != "" {
-		apiReq.Environment = &Environment{Type: req.EnvironmentID}
+		apiReq.Environment = req.EnvironmentID
 	} else if req.Environment != nil {
 		apiReq.Environment = convertEnvironmentConfig(req.Environment)
 	}
@@ -95,10 +100,26 @@ func (b *Backend) CreateInteraction(ctx context.Context, req managedagent.Intera
 		if err != nil {
 			return nil, fmt.Errorf("google backend: %w", err)
 		}
-		return &managedagent.InteractionHandle{
+		handle := &managedagent.InteractionHandle{
 			Status:      managedagent.StatusInProgress,
 			EventStream: stream,
-		}, nil
+		}
+		// Parse the first event (interaction.created) to populate IDs.
+		reader := NewSSEReader(stream)
+		evt, err := reader.Next()
+		if err == nil && evt.Type == EventInteractionCreated {
+			if interaction, parseErr := ParseInteraction(evt.Data); parseErr == nil {
+				handle.InteractionID = interaction.ID
+				handle.EnvironmentID = interaction.EnvironmentID
+				handle.Status = managedagent.InteractionStatus(interaction.Status)
+			}
+		}
+		// Wrap the stream so subsequent reads continue from where we left off.
+		handle.EventStream = &prefixedSSEStream{
+			reader:     reader,
+			underlying: stream,
+		}
+		return handle, nil
 	}
 
 	interaction, err := b.client.CreateInteraction(ctx, apiReq)
@@ -117,7 +138,7 @@ func (b *Backend) GetInteraction(ctx context.Context, interactionID string) (*ma
 
 	return &managedagent.InteractionState{
 		InteractionID: interaction.ID,
-		Status:        managedagent.InteractionStatus(interaction.Status),
+		Status:        toInteractionStatus(interaction.Status),
 		Steps:         convertSteps(interaction.Steps),
 		OutputText:    interaction.OutputText,
 		EnvironmentID: interaction.EnvironmentID,
@@ -140,15 +161,48 @@ func (b *Backend) StreamInteraction(ctx context.Context, interactionID string, l
 	return stream, nil
 }
 
+// prefixedSSEStream wraps an SSEReader so that callers who want to continue
+// reading raw bytes from the underlying stream get the remaining data after
+// the first event was already consumed.
+type prefixedSSEStream struct {
+	reader     *SSEReader
+	underlying io.ReadCloser
+}
+
+func (s *prefixedSSEStream) Read(p []byte) (int, error) {
+	return s.underlying.Read(p)
+}
+
+func (s *prefixedSSEStream) Close() error {
+	return s.underlying.Close()
+}
+
 func convertInteractionToHandle(i *Interaction) *managedagent.InteractionHandle {
 	return &managedagent.InteractionHandle{
 		InteractionID: i.ID,
 		EnvironmentID: i.EnvironmentID,
-		Status:        managedagent.InteractionStatus(i.Status),
+		Status:        toInteractionStatus(i.Status),
 		Steps:         convertSteps(i.Steps),
 		OutputText:    i.OutputText,
 		Usage:         convertUsage(i.Usage),
 	}
+}
+
+var knownStatuses = map[managedagent.InteractionStatus]bool{
+	managedagent.StatusInProgress:     true,
+	managedagent.StatusRequiresAction: true,
+	managedagent.StatusCompleted:      true,
+	managedagent.StatusFailed:         true,
+	managedagent.StatusCancelled:      true,
+	managedagent.StatusIncomplete:     true,
+}
+
+func toInteractionStatus(s string) managedagent.InteractionStatus {
+	status := managedagent.InteractionStatus(s)
+	if !knownStatuses[status] {
+		log.Printf("google backend: unknown interaction status %q", s)
+	}
+	return status
 }
 
 func convertSteps(steps []InteractionStep) []managedagent.Step {
@@ -157,10 +211,14 @@ func convertSteps(steps []InteractionStep) []managedagent.Step {
 	}
 	result := make([]managedagent.Step, len(steps))
 	for i, s := range steps {
+		args := s.Arguments
+		if args == "" {
+			args = s.ArgumentsDelta
+		}
 		result[i] = managedagent.Step{
 			Type:      s.Type,
 			Text:      s.Text,
-			Arguments: s.ArgumentsDelta,
+			Arguments: args,
 			ToolName:  s.ToolName,
 		}
 	}
