@@ -565,7 +565,7 @@ func TestSecret_UserScope_WriteAuthWorks(t *testing.T) {
 	// Verify that an authenticated user passes auth checks for secret writes.
 	// The LocalBackend supports Set (stores plaintext in SQLite), so expect 200.
 	body := SetSecretRequest{
-		Value:       "super-secret",
+		Value:       "c3VwZXItc2VjcmV0",
 		Description: "A test secret",
 	}
 	rec := doRequest(t, srv, http.MethodPut, "/api/v1/secrets/MY_SECRET?scope=user", body)
@@ -1386,7 +1386,7 @@ func TestSecret_HubScope_AdminCanSetAndGet(t *testing.T) {
 	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id"))
 
 	// Admin should be able to set hub-scoped secrets
-	body := SetSecretRequest{Value: "hub-secret-val", Description: "Hub-wide secret", Scope: "hub"}
+	body := SetSecretRequest{Value: "aHViLXNlY3JldC12YWw=", Description: "Hub-wide secret", Scope: "hub"}
 	rec := doRequest(t, srv, http.MethodPut, "/api/v1/secrets/HUB_SECRET", body)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200 for admin hub scope secret write, got %d: %s", rec.Code, rec.Body.String())
@@ -1413,7 +1413,7 @@ func TestSecret_HubScope_MemberReadForbidden(t *testing.T) {
 	}
 
 	// Admin creates a hub secret
-	body := SetSecretRequest{Value: "hub-shared-secret", Scope: "hub"}
+	body := SetSecretRequest{Value: "aHViLXNoYXJlZC1zZWNyZXQ=", Scope: "hub"}
 	rec := doRequest(t, srv, http.MethodPut, "/api/v1/secrets/HUB_SHARED_SEC", body)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
@@ -1440,7 +1440,7 @@ func TestSecret_HubScope_MemberWriteForbidden(t *testing.T) {
 	}
 
 	// Non-admin member should be forbidden from writing hub-scoped secrets
-	body := SetSecretRequest{Value: "should-fail", Scope: "hub"}
+	body := SetSecretRequest{Value: "c2hvdWxkLWZhaWw=", Scope: "hub"}
 	rec := doRequestAsUser(t, srv, member, http.MethodPut, "/api/v1/secrets/HUB_FAIL_SEC", body)
 	if rec.Code != http.StatusForbidden {
 		t.Errorf("expected 403 for member hub scope secret write, got %d: %s", rec.Code, rec.Body.String())

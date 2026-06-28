@@ -31,7 +31,7 @@ import (
 // expectedTableCount is the number of domain tables in the hub schema
 // (excluding the schema_migrations bookkeeping table). The fixture must cover
 // every one of them.
-const expectedTableCount = 30
+const expectedTableCount = 37
 
 // TestFixtureCoverage is the CI coverage gate: it generates the fixture and
 // fails if any domain table has zero rows.

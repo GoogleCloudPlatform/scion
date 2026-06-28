@@ -127,12 +127,27 @@ func Spec() []TableFixture {
 				"created_at": baseTime, "updated_at": baseTime,
 				"group_type": "explicit",
 			},
+			{
+				"id": "98000000-0000-0000-0000-000000000001", "name": "Platform Child", "slug": "platform-child",
+				"group_type": "explicit",
+			},
 		}},
-		{Table: "group_members", Rows: []row{
-			{"group_id": groupID, "member_type": "user", "member_id": userID, "role": "owner", "added_at": baseTime},
-			{"group_id": groupID, "member_type": "agent", "member_id": agentID, "role": "member", "added_at": baseTime},
+		{Table: "group_child_groups", Rows: []row{
+			{
+				"group_id": groupID, "parent_group_id": "98000000-0000-0000-0000-000000000001",
+			},
 		}},
-		{Table: "policies", Rows: []row{
+		{Table: "group_memberships", Rows: []row{
+			{
+				"id":       "6f000000-0000-0000-0000-000000000001",
+				"group_id": groupID, "user_id": userID, "role": "owner", "added_at": baseTime,
+			},
+			{
+				"id":       "6f000000-0000-0000-0000-000000000002",
+				"group_id": groupID, "agent_id": agentID, "role": "member", "added_at": baseTime,
+			},
+		}},
+		{Table: "access_policies", Rows: []row{
 			{
 				"id": policyID, "name": "Allow Read", "description": "read agents",
 				"scope_type": "hub", "resource_type": "agent",
@@ -142,8 +157,14 @@ func Spec() []TableFixture {
 			},
 		}},
 		{Table: "policy_bindings", Rows: []row{
-			{"policy_id": policyID, "principal_type": "user", "principal_id": userID},
-			{"policy_id": policyID, "principal_type": "group", "principal_id": groupID},
+			{
+				"id":        "b1000000-0000-0000-0000-000000000001",
+				"policy_id": policyID, "principal_type": "user", "user_id": userID,
+			},
+			{
+				"id":        "b1000000-0000-0000-0000-000000000002",
+				"policy_id": policyID, "principal_type": "group", "group_id": groupID,
+			},
 		}},
 
 		// ---- Config / scoped values ----
@@ -187,6 +208,14 @@ func Spec() []TableFixture {
 			{
 				"project_id": projectID, "broker_id": brokerID, "last_sync_time": baseTime,
 				"last_commit_sha": "deadbeefcafe", "file_count": 42, "total_bytes": 123456,
+			},
+		}},
+		{Table: "broker_dispatch", Rows: []row{
+			{
+				"id": "bd000000-0000-0000-0000-000000000001", "broker_id": brokerID,
+				"agent_id": agentID, "agent_slug": agentID, "project_id": projectID,
+				"op": "message", "args": `{"message":"hello"}`, "state": "pending",
+				"created_at": baseTime, "updated_at": baseTime,
 			},
 		}},
 		{Table: "broker_secrets", Rows: []row{
@@ -251,6 +280,19 @@ func Spec() []TableFixture {
 				"payload": `{"task":"run"}`, "status": "pending", "created_at": baseTime,
 			},
 		}},
+		{Table: "lifecycle_hooks", Rows: []row{
+			{
+				"id": "1f000000-0000-0000-0000-000000000001", "name": "Notify Running",
+				"scope_type": "project", "scope_id": projectID, "selector": `{"template":"claude"}`,
+				"trigger": "running", "action": `{"type":"webhook","url":"https://example.com/hook"}`,
+				"enabled": true, "created_by": userID, "created_at": baseTime, "updated_at": baseTime,
+			},
+		}},
+		{Table: "lifecycle_hook_agent_phases", Rows: []row{
+			{
+				"agent_id": agentID, "last_phase": "running", "updated_at": baseTime,
+			},
+		}},
 
 		// ---- Access control: allow list / invites / tokens ----
 		{Table: "allow_list", Rows: []row{
@@ -277,6 +319,27 @@ func Spec() []TableFixture {
 			{ // NULL expires_at / last_used optionals
 				"id": "a9000000-0000-0000-0000-000000000001", "user_id": userID, "name": "legacy-key",
 				"prefix": "scion_ak", "key_hash": "apikeyhash", "scopes": `["read"]`, "created_at": baseTime,
+			},
+		}},
+		{Table: "skill_registries", Rows: []row{
+			{
+				"id": "53000000-0000-0000-0000-000000000001", "name": "builtin",
+				"endpoint": "https://skills.example.com", "description": "Built-in registry",
+				"type": "hub", "trust_level": "trusted", "status": "active",
+			},
+		}},
+		{Table: "skills", Rows: []row{
+			{
+				"id": "54000000-0000-0000-0000-000000000001", "name": "Reviewer",
+				"slug": "reviewer", "description": "Review code", "tags": `["code","review"]`,
+				"scope": "global", "status": "active", "visibility": "public",
+			},
+		}},
+		{Table: "skill_versions", Rows: []row{
+			{
+				"id":       "55000000-0000-0000-0000-000000000001",
+				"skill_id": "54000000-0000-0000-0000-000000000001", "version": "1.0.0",
+				"status": "published", "content_hash": "sha256:fixture",
 			},
 		}},
 

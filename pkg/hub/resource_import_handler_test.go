@@ -74,7 +74,7 @@ func TestHandleResourcesImport_GlobalAsAdmin(t *testing.T) {
 	srv, s, _ := testTemplateBootstrapServer(t)
 	ctx := context.Background()
 
-	admin := &store.User{ID: "user-admin", Email: "admin@test.com", DisplayName: "Admin", Role: store.UserRoleAdmin}
+	admin := &store.User{ID: tid("user-admin"), Email: "admin@test.com", DisplayName: "Admin", Role: store.UserRoleAdmin}
 	if err := s.CreateUser(ctx, admin); err != nil {
 		t.Fatal(err)
 	}
@@ -167,7 +167,7 @@ func TestHandleResourcesImport_StreamsProgress(t *testing.T) {
 	srv, s, _ := testTemplateBootstrapServer(t)
 	ctx := context.Background()
 
-	admin := &store.User{ID: "user-admin", Email: "admin@test.com", DisplayName: "Admin", Role: store.UserRoleAdmin}
+	admin := &store.User{ID: tid("user-admin"), Email: "admin@test.com", DisplayName: "Admin", Role: store.UserRoleAdmin}
 	if err := s.CreateUser(ctx, admin); err != nil {
 		t.Fatal(err)
 	}
@@ -240,7 +240,7 @@ func TestHandleResourcesImport_StreamErrorEvent(t *testing.T) {
 	srv, s, _ := testTemplateBootstrapServer(t)
 	ctx := context.Background()
 
-	admin := &store.User{ID: "user-admin", Email: "admin@test.com", DisplayName: "Admin", Role: store.UserRoleAdmin}
+	admin := &store.User{ID: tid("user-admin"), Email: "admin@test.com", DisplayName: "Admin", Role: store.UserRoleAdmin}
 	if err := s.CreateUser(ctx, admin); err != nil {
 		t.Fatal(err)
 	}
@@ -289,7 +289,7 @@ func TestHandleResourcesImport_GlobalForbiddenForMember(t *testing.T) {
 	srv, s, _ := testTemplateBootstrapServer(t)
 	ctx := context.Background()
 
-	member := &store.User{ID: "user-member", Email: "member@test.com", DisplayName: "Member", Role: store.UserRoleMember}
+	member := &store.User{ID: tid("user-member"), Email: "member@test.com", DisplayName: "Member", Role: store.UserRoleMember}
 	if err := s.CreateUser(ctx, member); err != nil {
 		t.Fatal(err)
 	}
@@ -318,7 +318,7 @@ func TestHandleResourcesImport_InvalidKind(t *testing.T) {
 	srv, s, _ := testTemplateBootstrapServer(t)
 	ctx := context.Background()
 
-	admin := &store.User{ID: "user-admin", Email: "admin@test.com", DisplayName: "Admin", Role: store.UserRoleAdmin}
+	admin := &store.User{ID: tid("user-admin"), Email: "admin@test.com", DisplayName: "Admin", Role: store.UserRoleAdmin}
 	if err := s.CreateUser(ctx, admin); err != nil {
 		t.Fatal(err)
 	}
@@ -534,7 +534,7 @@ func TestHandleResourcesImport_MissingSourceURL(t *testing.T) {
 	srv, s, _ := testTemplateBootstrapServer(t)
 	ctx := context.Background()
 
-	admin := &store.User{ID: "user-admin", Email: "admin@test.com", DisplayName: "Admin", Role: store.UserRoleAdmin}
+	admin := &store.User{ID: tid("user-admin"), Email: "admin@test.com", DisplayName: "Admin", Role: store.UserRoleAdmin}
 	if err := s.CreateUser(ctx, admin); err != nil {
 		t.Fatal(err)
 	}

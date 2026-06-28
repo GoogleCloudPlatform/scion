@@ -529,6 +529,8 @@ func (s *TemplateStore) ListHarnessConfigs(ctx context.Context, filter store.Har
 	switch {
 	case filter.ScopeID != "":
 		query.Where(entharnessconfig.ScopeIDEQ(filter.ScopeID))
+	case filter.ProjectID != "" && filter.Scope == store.HarnessConfigScopeProject:
+		query.Where(entharnessconfig.ScopeIDEQ(filter.ProjectID))
 	case filter.ProjectID != "" && filter.Scope == "":
 		// Project-without-scope: return global plus this project's configs.
 		query.Where(entharnessconfig.Or(

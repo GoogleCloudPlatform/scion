@@ -62,12 +62,12 @@ func TestGetAgent_ExposesHarnessCapabilities(t *testing.T) {
 	require.NotNil(t, got.HarnessCapabilities)
 	assert.Equal(t, "claude", got.ResolvedHarness)
 	assert.Equal(t, "claude", got.HarnessCapabilities.Harness)
-	assert.Equal(t, api.SupportNo, got.HarnessCapabilities.Limits.MaxModelCalls.Support)
+	assert.Equal(t, api.SupportYes, got.HarnessCapabilities.Limits.MaxModelCalls.Support)
 }
 
-func TestUpdateAgent_RejectsUnsupportedMaxModelCallsForClaude(t *testing.T) {
+func TestUpdateAgent_RejectsUnsupportedMaxModelCallsForGeneric(t *testing.T) {
 	srv, s := testServer(t)
-	agent := seedCreatedAgentForHarnessTest(t, s, "claude-update", "claude")
+	agent := seedCreatedAgentForHarnessTest(t, s, "generic-update", "generic")
 
 	rec := doRequest(t, srv, http.MethodPatch, "/api/v1/agents/"+agent.ID, map[string]interface{}{
 		"config": map[string]interface{}{

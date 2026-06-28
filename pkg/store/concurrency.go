@@ -57,6 +57,9 @@ const (
 	LockBrokerAffinityReap AdvisoryLockKey = 0x5C100006
 	// LockBrokerMessageSweep guards the periodic stuck-pending-message sweep (B5-2).
 	LockBrokerMessageSweep AdvisoryLockKey = 0x5C100007
+	// LockSchemaMigration guards startup schema migration and built-in seed data
+	// so concurrent Hub replicas do not race while applying Ent migrations.
+	LockSchemaMigration AdvisoryLockKey = 0x5C100008
 
 	// LockWorkspaceProvision is the CLASS ID for per-project workspace
 	// provisioning locks. It is used with the two-int advisory lock form

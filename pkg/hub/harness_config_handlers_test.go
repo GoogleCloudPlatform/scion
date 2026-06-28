@@ -151,11 +151,11 @@ func TestHarnessConfigListByScopeAndProject(t *testing.T) {
 	now := time.Now()
 
 	for _, hc := range []*store.HarnessConfig{
-		{ID: "hc_g", Slug: "g", Name: "G", Harness: "claude", Scope: "global",
+		{ID: tid("hc_g"), Slug: "g", Name: "G", Harness: "claude", Scope: "global",
 			Visibility: store.VisibilityPublic, Status: store.HarnessConfigStatusActive, Created: now, Updated: now},
-		{ID: "hc_a", Slug: "a", Name: "A", Harness: "claude", Scope: "project", ScopeID: "project_abc",
+		{ID: tid("hc_a"), Slug: "a", Name: "A", Harness: "claude", Scope: "project", ScopeID: "project_abc",
 			Visibility: store.VisibilityPublic, Status: store.HarnessConfigStatusActive, Created: now, Updated: now},
-		{ID: "hc_b", Slug: "b", Name: "B", Harness: "claude", Scope: "project", ScopeID: "project_xyz",
+		{ID: tid("hc_b"), Slug: "b", Name: "B", Harness: "claude", Scope: "project", ScopeID: "project_xyz",
 			Visibility: store.VisibilityPublic, Status: store.HarnessConfigStatusActive, Created: now, Updated: now},
 	} {
 		if err := s.CreateHarnessConfig(ctx, hc); err != nil {
@@ -172,7 +172,7 @@ func TestHarnessConfigListByScopeAndProject(t *testing.T) {
 	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
 		t.Fatalf("failed to decode response: %v", err)
 	}
-	if len(resp.HarnessConfigs) != 1 || resp.HarnessConfigs[0].ID != "hc_a" {
+	if len(resp.HarnessConfigs) != 1 || resp.HarnessConfigs[0].ID != tid("hc_a") {
 		ids := make([]string, len(resp.HarnessConfigs))
 		for i, hc := range resp.HarnessConfigs {
 			ids[i] = hc.ID
@@ -337,7 +337,7 @@ func TestHarnessConfigExposesCapabilities(t *testing.T) {
 	ctx := context.Background()
 
 	hc := &store.HarnessConfig{
-		ID:         "hc_caps1",
+		ID:         tid("hc_caps1"),
 		Slug:       "caps-hc",
 		Name:       "Caps HC",
 		Harness:    "claude",
@@ -352,7 +352,7 @@ func TestHarnessConfigExposesCapabilities(t *testing.T) {
 	}
 
 	// GET exposes per-item capabilities (dev token is admin → all actions).
-	rec := doRequest(t, srv, http.MethodGet, "/api/v1/harness-configs/hc_caps1", nil)
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/harness-configs/"+tid("hc_caps1"), nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
 	}

@@ -54,6 +54,11 @@ func testServer(t *testing.T) (*Server, store.Store) {
 
 	cfg := DefaultServerConfig()
 	cfg.DevAuthToken = testDevToken // Enable dev auth for testing
+	cfg.DevUserConfig = DevUserConfig{
+		Username:    "dev",
+		DisplayName: "Development User",
+		Email:       "dev@localhost",
+	}
 	srv, err := New(cfg, s)
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)

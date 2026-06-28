@@ -4831,11 +4831,11 @@ func TestAgentStatusUpdate_RejectsPhaseRegression(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
-	project := &store.Project{ID: "proj-regress", Name: "Regression Project", Slug: "regress-project"}
+	project := &store.Project{ID: tid("proj-regress"), Name: "Regression Project", Slug: "regress-project"}
 	require.NoError(t, s.CreateProject(ctx, project))
 
 	agent := &store.Agent{
-		ID: "agent-regress", Slug: "regress-slug", Name: "Regression Agent",
+		ID: tid("agent-regress"), Slug: "regress-slug", Name: "Regression Agent",
 		ProjectID: project.ID, Phase: string(state.PhaseRunning),
 		Activity: string(state.ActivityExecuting),
 	}
@@ -4870,11 +4870,11 @@ func TestAgentStatusUpdate_ActivityAutoCorrectsPhase(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
-	project := &store.Project{ID: "proj-autocorrect", Name: "AutoCorrect Project", Slug: "autocorrect-project"}
+	project := &store.Project{ID: tid("proj-autocorrect"), Name: "AutoCorrect Project", Slug: "autocorrect-project"}
 	require.NoError(t, s.CreateProject(ctx, project))
 
 	agent := &store.Agent{
-		ID: "agent-autocorrect", Slug: "autocorrect-slug", Name: "AutoCorrect Agent",
+		ID: tid("agent-autocorrect"), Slug: "autocorrect-slug", Name: "AutoCorrect Agent",
 		ProjectID: project.ID, Phase: string(state.PhaseStarting),
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
@@ -4908,17 +4908,17 @@ func TestBrokerHeartbeat_RejectsPhaseRegression(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
-	project := &store.Project{ID: "proj-hb-regress", Name: "HB Regression Project", Slug: "hb-regress-project"}
+	project := &store.Project{ID: tid("proj-hb-regress"), Name: "HB Regression Project", Slug: "hb-regress-project"}
 	require.NoError(t, s.CreateProject(ctx, project))
 
 	broker := &store.RuntimeBroker{
-		ID: "broker-hb-regress", Name: "HB Regression Broker", Slug: "hb-regress-broker",
+		ID: tid("broker-hb-regress"), Name: "HB Regression Broker", Slug: "hb-regress-broker",
 		Status: store.BrokerStatusOnline,
 	}
 	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
 
 	agent := &store.Agent{
-		ID: "agent-hb-regress", Slug: "hb-regress-slug", Name: "HB Regression Agent",
+		ID: tid("agent-hb-regress"), Slug: "hb-regress-slug", Name: "HB Regression Agent",
 		ProjectID: project.ID, RuntimeBrokerID: broker.ID,
 		Phase:    string(state.PhaseRunning),
 		Activity: string(state.ActivityWorking),

@@ -1147,7 +1147,7 @@ func TestImportTemplatesFromRemote_WithProjectGithubToken(t *testing.T) {
 	srv, s, stor := testTemplateBootstrapServer(t)
 	ctx := context.Background()
 
-	projectID := "test-project-id"
+	projectID := tid("test-project-id")
 	project := &store.Project{
 		ID:        projectID,
 		Name:      "test-project",
@@ -1274,7 +1274,7 @@ func TestImportHarnessConfigsFromRemote_WithProjectGithubToken(t *testing.T) {
 	srv, s, stor := testTemplateBootstrapServer(t)
 	ctx := context.Background()
 
-	projectID := "test-project-id"
+	projectID := tid("test-project-id")
 	project := &store.Project{
 		ID:        projectID,
 		Name:      "test-project",
