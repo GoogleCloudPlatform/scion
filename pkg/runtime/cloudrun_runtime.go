@@ -43,7 +43,9 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/googleapis/gax-go/v2"
 	"google.golang.org/api/iterator"
+	googleapi "google.golang.org/genproto/googleapis/api"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 const nfsSuperMagic = 0x6969
@@ -153,8 +155,32 @@ func (r *CloudRunRuntime) Run(ctx context.Context, cfg RunConfig) (string, error
 		}
 		return instanceID, nil
 	}
+	if status.Code(err) != codes.NotFound {
+		return "", fmt.Errorf("failed to get instance %s: %w", instanceID, err)
+	}
 
-	// Instance doesn't exist or other error, proceed to create
+	// Instance doesn't exist, proceed to create.
+	inst := r.buildCloudRunInstance(cfg, uid, gid, nfsPaths)
+
+	req := &runpb.CreateInstanceRequest{
+		Parent:     parent,
+		InstanceId: instanceID,
+		Instance:   inst,
+	}
+
+	op, err := c.CreateInstance(ctx, req, defaultCallOpts...)
+	if err != nil {
+		return "", fmt.Errorf("failed to create instance: %w", err)
+	}
+
+	if _, err := op.Wait(ctx); err != nil {
+		return "", fmt.Errorf("wait for create operation failed: %w", err)
+	}
+
+	return instanceID, nil
+}
+
+func (r *CloudRunRuntime) buildCloudRunInstance(cfg RunConfig, uid, gid int, nfsPaths *cloudRunNFSProvisionPaths) *runpb.Instance {
 	var envVars []*runpb.EnvVar
 	for _, e := range cfg.Env {
 		parts := strings.SplitN(e, "=", 2)
@@ -179,6 +205,11 @@ func (r *CloudRunRuntime) Run(ctx context.Context, cfg RunConfig) (string, error
 	var volumeMounts []*runpb.VolumeMount
 
 	if nfsPaths != nil {
+		workspaceMount := cfg.ContainerWorkspace
+		if workspaceMount == "" {
+			workspaceMount = "/workspace"
+		}
+
 		volumes = append(volumes, &runpb.Volume{
 			Name: "workspace",
 			VolumeType: &runpb.Volume_Nfs{
@@ -191,7 +222,7 @@ func (r *CloudRunRuntime) Run(ctx context.Context, cfg RunConfig) (string, error
 		})
 		volumeMounts = append(volumeMounts, &runpb.VolumeMount{
 			Name:      "workspace",
-			MountPath: "/workspace",
+			MountPath: workspaceMount,
 		})
 
 		volumes = append(volumes, &runpb.Volume{
@@ -231,7 +262,7 @@ func (r *CloudRunRuntime) Run(ctx context.Context, cfg RunConfig) (string, error
 	}
 
 	inst := &runpb.Instance{
-		LaunchStage: 1, // ALPHA
+		LaunchStage: googleapi.LaunchStage_ALPHA,
 		Containers: []*runpb.Container{
 			{
 				Name:         "scion-agent",
@@ -245,22 +276,20 @@ func (r *CloudRunRuntime) Run(ctx context.Context, cfg RunConfig) (string, error
 		Labels:  labels,
 	}
 
-	req := &runpb.CreateInstanceRequest{
-		Parent:     parent,
-		InstanceId: instanceID,
-		Instance:   inst,
+	if r.config != nil {
+		inst.ServiceAccount = r.config.ServiceAccount
+		if r.config.Network != "" || r.config.Subnetwork != "" {
+			inst.VpcAccess = &runpb.VpcAccess{
+				NetworkInterfaces: []*runpb.VpcAccess_NetworkInterface{
+					{
+						Network:    r.config.Network,
+						Subnetwork: r.config.Subnetwork,
+					},
+				},
+			}
+		}
 	}
-
-	op, err := c.CreateInstance(ctx, req, defaultCallOpts...)
-	if err != nil {
-		return "", fmt.Errorf("failed to create instance: %w", err)
-	}
-
-	if _, err := op.Wait(ctx); err != nil {
-		return "", fmt.Errorf("wait for create operation failed: %w", err)
-	}
-
-	return instanceID, nil
+	return inst
 }
 
 func cloudRunInstanceID(agentID string) string {

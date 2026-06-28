@@ -431,6 +431,81 @@ func TestCloudRunImageOperationsAreRemoteNoops(t *testing.T) {
 	}
 }
 
+func TestBuildCloudRunInstanceWiresRuntimeConfigAndNFSMounts(t *testing.T) {
+	rt := &CloudRunRuntime{config: &config.CloudRunInstancesConfig{
+		ServiceAccount: "agent-runtime@gcp-project.iam.gserviceaccount.com",
+		Network:        "projects/gcp-project/global/networks/scion",
+		Subnetwork:     "projects/gcp-project/regions/us-central1/subnetworks/agents",
+		NFSServer:      "10.0.0.2",
+		NFSExport:      "/scion-workspaces",
+	}}
+
+	inst := rt.buildCloudRunInstance(RunConfig{
+		Image:              "us-docker.pkg.dev/gcp-project/scion/agent:latest",
+		ContainerWorkspace: "/workspace",
+		Labels: map[string]string{
+			"agent_id": "agent-456",
+		},
+	}, 1000, 1000, &cloudRunNFSProvisionPaths{
+		workspaceExportPath: "/scion-workspaces/projects/proj-123/workspace",
+		homeExportPath:      "/scion-workspaces/projects/proj-123/agents/agent-456/home",
+		secretsExportPath:   "/scion-workspaces/projects/proj-123/agents/agent-456/secrets",
+	})
+
+	if inst.ServiceAccount != "agent-runtime@gcp-project.iam.gserviceaccount.com" {
+		t.Fatalf("ServiceAccount = %q", inst.ServiceAccount)
+	}
+	if inst.VpcAccess == nil || len(inst.VpcAccess.NetworkInterfaces) != 1 {
+		t.Fatalf("VpcAccess.NetworkInterfaces = %+v", inst.VpcAccess)
+	}
+	if got := inst.VpcAccess.NetworkInterfaces[0].Network; got != "projects/gcp-project/global/networks/scion" {
+		t.Fatalf("VpcAccess network = %q", got)
+	}
+	if got := inst.VpcAccess.NetworkInterfaces[0].Subnetwork; got != "projects/gcp-project/regions/us-central1/subnetworks/agents" {
+		t.Fatalf("VpcAccess subnetwork = %q", got)
+	}
+
+	if len(inst.Volumes) != 3 {
+		t.Fatalf("Volumes length = %d, want 3", len(inst.Volumes))
+	}
+	wantVolumes := map[string]struct {
+		path     string
+		readOnly bool
+	}{
+		"workspace": {path: "/scion-workspaces/projects/proj-123/workspace"},
+		"home":      {path: "/scion-workspaces/projects/proj-123/agents/agent-456/home"},
+		"secrets":   {path: "/scion-workspaces/projects/proj-123/agents/agent-456/secrets", readOnly: true},
+	}
+	for _, volume := range inst.Volumes {
+		want, ok := wantVolumes[volume.Name]
+		if !ok {
+			t.Fatalf("unexpected volume %q", volume.Name)
+		}
+		nfs := volume.GetNfs()
+		if nfs == nil {
+			t.Fatalf("volume %q has nil NFS source", volume.Name)
+		}
+		if nfs.Server != "10.0.0.2" || nfs.Path != want.path || nfs.ReadOnly != want.readOnly {
+			t.Fatalf("volume %q NFS = %+v", volume.Name, nfs)
+		}
+	}
+
+	mounts := inst.Containers[0].VolumeMounts
+	wantMounts := map[string]string{
+		"workspace": "/workspace",
+		"home":      "/home/scion",
+		"secrets":   "/home/scion/.scion/secrets",
+	}
+	if len(mounts) != len(wantMounts) {
+		t.Fatalf("VolumeMounts length = %d, want %d", len(mounts), len(wantMounts))
+	}
+	for _, mount := range mounts {
+		if got, want := mount.MountPath, wantMounts[mount.Name]; got != want {
+			t.Fatalf("mount %q path = %q, want %q", mount.Name, got, want)
+		}
+	}
+}
+
 func TestCloudRunDeferredRuntimeMethodsReturnExplicitErrors(t *testing.T) {
 	rt := &CloudRunRuntime{}
 
