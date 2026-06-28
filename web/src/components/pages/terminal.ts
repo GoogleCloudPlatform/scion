@@ -803,6 +803,7 @@ export class ScionPageTerminal extends LitElement {
 
       if (result.exitCode === 0) {
         alert(`Credentials captured successfully.\n\n${result.output}`);
+        await this.refreshAgentData();
       } else if (result.exitCode === 2) {
         alert(`No credentials found yet.\n\nAuthenticate first (e.g., run 'agy' inside the container), then try again.\n\n${result.output}`);
       } else {
@@ -813,6 +814,20 @@ export class ScionPageTerminal extends LitElement {
       alert(err instanceof Error ? err.message : 'Failed to capture auth');
     } finally {
       this.captureAuthLoading = false;
+    }
+  }
+
+  private async refreshAgentData(): Promise<void> {
+    try {
+      const response = await apiFetch(`/api/v1/agents/${this.agentId}`);
+      if (!response.ok) return;
+
+      const agent = (await response.json()) as Agent;
+      this.agent = agent;
+      this.agentPhase = agent.phase;
+      this.agentActivity = agent.activity ?? '';
+    } catch (err) {
+      console.warn('Failed to refresh agent data:', err);
     }
   }
 
