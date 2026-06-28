@@ -24,6 +24,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/fstest"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -39,7 +40,13 @@ type mockWebStore struct {
 
 func newTestWebServer(t *testing.T, cfg WebServerConfig) *WebServer {
 	t.Helper()
-	return NewWebServer(cfg)
+	ws := NewWebServer(cfg)
+	if ws.assets == nil && ws.assetsDisk == "" && cfg.AssetsDir == "" {
+		ws.assets = fstest.MapFS{
+			"assets/main.js": &fstest.MapFile{Data: []byte("// test stub")},
+		}
+	}
+	return ws
 }
 
 // newDevAuthWebServer creates a web server with dev-auth enabled for testing
@@ -52,7 +59,13 @@ func newDevAuthWebServer(t *testing.T, overrides ...func(*WebServerConfig)) *Web
 	for _, fn := range overrides {
 		fn(&cfg)
 	}
-	return NewWebServer(cfg)
+	ws := NewWebServer(cfg)
+	if ws.assets == nil && ws.assetsDisk == "" {
+		ws.assets = fstest.MapFS{
+			"assets/main.js": &fstest.MapFile{Data: []byte("// test stub")},
+		}
+	}
+	return ws
 }
 
 func TestSPAShellHandler(t *testing.T) {
@@ -231,7 +244,7 @@ func TestSPAHandler_NoAssets_ServesErrorPage(t *testing.T) {
 			assert.Equal(t, http.StatusOK, resp.StatusCode)
 			assert.Contains(t, resp.Header.Get("Content-Type"), "text/html")
 			assert.Contains(t, html, "Web UI Not Available")
-			assert.Contains(t, html, "not built from source")
+			assert.Contains(t, html, "built without embedded web assets")
 			assert.Contains(t, html, "Hub API")
 			assert.NotContains(t, html, "scion-app",
 				"should not render SPA shell when no assets are available")

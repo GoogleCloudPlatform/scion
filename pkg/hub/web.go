@@ -381,11 +381,11 @@ var noAssetsPage = `<!DOCTYPE html>
 <body>
     <div class="container">
         <h1>Web UI Not Available</h1>
-        <p>This Scion binary was not built from source with web assets included.
+        <p>This hub binary was built without embedded web assets.
            The Hub API is still fully operational.</p>
         <div class="hint">
             <p>To use the web UI, either:</p>
-            <p>1. Build from source: <code>make build</code></p>
+            <p>1. Rebuild with assets: <code>make all</code> (or <code>make web &amp;&amp; make build</code>)</p>
             <p>2. Point to pre-built assets: <code>--web-assets-dir /path/to/dist/client</code></p>
         </div>
     </div>
@@ -476,10 +476,14 @@ func NewWebServer(cfg WebServerConfig) *WebServer {
 		sub, err := fs.Sub(web.ClientAssets, "dist/client")
 		if err != nil {
 			slog.Error("Failed to create sub-filesystem from embedded assets", "error", err)
+		} else if _, err := fs.Stat(sub, "assets/main.js"); err != nil {
+			slog.Warn("Embedded web assets directory exists but main.js is missing. Run 'make all' (or 'make web && make build') to rebuild with web assets included, or use --web-assets-dir.")
 		} else {
 			ws.assets = sub
 		}
-		slog.Info("Web server using embedded assets")
+		if ws.assets != nil {
+			slog.Info("Web server using embedded assets")
+		}
 	} else {
 		slog.Warn("No web assets available: build with embedded assets or use --web-assets-dir")
 	}
