@@ -124,12 +124,6 @@ type AllowlistEntry struct {
 	Headers map[string]string `json:"headers,omitempty"`
 }
 
-// InteractionEvent is the envelope for an SSE event from the streaming API.
-type InteractionEvent struct {
-	Type string      `json:"type"`
-	Data interface{} `json:"data,omitempty"`
-}
-
 // StepDeltaEvent is the data payload for step.delta SSE events.
 type StepDeltaEvent struct {
 	Type           string `json:"type,omitempty"`

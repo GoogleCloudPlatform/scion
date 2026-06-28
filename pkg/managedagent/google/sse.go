@@ -43,15 +43,34 @@ type SSEEvent struct {
 }
 
 // SSEReader reads and parses Server-Sent Events from an io.Reader.
+// It uses bufio.Reader internally so that Buffered() can be called to
+// retrieve any data read-ahead from the underlying stream.
 type SSEReader struct {
-	scanner *bufio.Scanner
+	br *bufio.Reader
 }
 
 // NewSSEReader creates a new SSE parser that reads from r.
 func NewSSEReader(r io.Reader) *SSEReader {
 	return &SSEReader{
-		scanner: bufio.NewScanner(r),
+		br: bufio.NewReader(r),
 	}
+}
+
+// Buffered returns the number of bytes buffered but not yet consumed.
+func (r *SSEReader) Buffered() int {
+	return r.br.Buffered()
+}
+
+// BufferedReader returns the underlying bufio.Reader. Use this to
+// recover any read-ahead data after consuming specific events.
+func (r *SSEReader) BufferedReader() *bufio.Reader {
+	return r.br
+}
+
+func (r *SSEReader) readLine() (string, error) {
+	line, err := r.br.ReadString('\n')
+	line = strings.TrimRight(line, "\r\n")
+	return line, err
 }
 
 // Next reads the next SSE event from the stream. Returns io.EOF when
@@ -61,8 +80,21 @@ func (r *SSEReader) Next() (*SSEEvent, error) {
 	var dataLines []string
 	hasFields := false
 
-	for r.scanner.Scan() {
-		line := r.scanner.Text()
+	for {
+		line, err := r.readLine()
+
+		if line == "" && err != nil {
+			if hasFields {
+				if len(dataLines) > 0 {
+					event.Data = json.RawMessage(strings.Join(dataLines, "\n"))
+				}
+				return &event, nil
+			}
+			if err == io.EOF {
+				return nil, io.EOF
+			}
+			return nil, fmt.Errorf("reading SSE stream: %w", err)
+		}
 
 		if line == "" {
 			if !hasFields {
@@ -95,20 +127,14 @@ func (r *SSEReader) Next() (*SSEEvent, error) {
 		case "retry":
 			log.Printf("SSE: server sent retry: %s (ignored)", value)
 		}
-	}
 
-	if err := r.scanner.Err(); err != nil {
-		return nil, fmt.Errorf("reading SSE stream: %w", err)
-	}
-
-	if hasFields {
-		if len(dataLines) > 0 {
-			event.Data = json.RawMessage(strings.Join(dataLines, "\n"))
+		if err != nil {
+			if len(dataLines) > 0 {
+				event.Data = json.RawMessage(strings.Join(dataLines, "\n"))
+			}
+			return &event, nil
 		}
-		return &event, nil
 	}
-
-	return nil, io.EOF
 }
 
 // ParseStepStart parses the data payload of a step.start event.

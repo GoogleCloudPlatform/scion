@@ -58,7 +58,9 @@ func (b *Backend) CreateAgent(ctx context.Context, cfg managedagent.CreateAgentC
 		SystemInstruction: cfg.SystemInstruction,
 		Description:       cfg.Description,
 		Tools:             convertToolConfigs(cfg.Tools),
-		BaseEnvironment:   convertEnvironmentConfig(cfg.Environment),
+	}
+	if cfg.Environment != nil {
+		req.BaseEnvironment = convertEnvironmentConfig(cfg.Environment)
 	}
 	if req.BaseAgent == "" {
 		req.BaseAgent = b.baseAgent
@@ -114,10 +116,12 @@ func (b *Backend) CreateInteraction(ctx context.Context, req managedagent.Intera
 				handle.Status = managedagent.InteractionStatus(interaction.Status)
 			}
 		}
-		// Wrap the stream so subsequent reads continue from where we left off.
-		handle.EventStream = &prefixedSSEStream{
-			reader:     reader,
-			underlying: stream,
+		// The SSEReader's bufio.Reader may have read ahead beyond the first
+		// event. Compose the buffered remainder with the raw stream so
+		// callers reading from EventStream don't miss any data.
+		handle.EventStream = &sseStreamContinuation{
+			Reader: io.MultiReader(reader.BufferedReader(), stream),
+			closer: stream,
 		}
 		return handle, nil
 	}
@@ -161,20 +165,16 @@ func (b *Backend) StreamInteraction(ctx context.Context, interactionID string, l
 	return stream, nil
 }
 
-// prefixedSSEStream wraps an SSEReader so that callers who want to continue
-// reading raw bytes from the underlying stream get the remaining data after
-// the first event was already consumed.
-type prefixedSSEStream struct {
-	reader     *SSEReader
-	underlying io.ReadCloser
+// sseStreamContinuation combines the bufio.Reader's buffered remainder
+// with the raw HTTP body so that no data is lost after consuming the
+// first SSE event.
+type sseStreamContinuation struct {
+	io.Reader
+	closer io.Closer
 }
 
-func (s *prefixedSSEStream) Read(p []byte) (int, error) {
-	return s.underlying.Read(p)
-}
-
-func (s *prefixedSSEStream) Close() error {
-	return s.underlying.Close()
+func (s *sseStreamContinuation) Close() error {
+	return s.closer.Close()
 }
 
 func convertInteractionToHandle(i *Interaction) *managedagent.InteractionHandle {

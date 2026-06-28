@@ -31,9 +31,10 @@ const maxErrorBodySize = 64 * 1024
 
 // Client is a thin HTTP client for the Google Managed Agents API.
 type Client struct {
-	baseURL    string
-	apiKey     string
-	httpClient *http.Client
+	baseURL          string
+	apiKey           string
+	httpClient       *http.Client
+	streamHTTPClient *http.Client
 }
 
 // NewClient creates a new Google API client with the given API key.
@@ -44,6 +45,7 @@ func NewClient(apiKey string) *Client {
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
 		},
+		streamHTTPClient: &http.Client{},
 	}
 }
 
@@ -125,7 +127,7 @@ func (c *Client) CreateInteractionStream(ctx context.Context, req *CreateInterac
 	c.setHeaders(httpReq, true)
 	httpReq.Header.Set("Accept", "text/event-stream")
 
-	resp, err := c.httpClient.Do(httpReq)
+	resp, err := c.streamHTTPClient.Do(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("executing streaming request: %w", err)
 	}
@@ -163,7 +165,7 @@ func (c *Client) GetInteractionStream(ctx context.Context, interactionID string,
 	c.setHeaders(httpReq, false)
 	httpReq.Header.Set("Accept", "text/event-stream")
 
-	resp, err := c.httpClient.Do(httpReq)
+	resp, err := c.streamHTTPClient.Do(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("opening interaction stream: %w", err)
 	}
