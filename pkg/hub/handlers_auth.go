@@ -441,10 +441,30 @@ func (s *Server) handleAuthRefresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	accessToken, refreshToken, expiresIn, err := s.userTokenService.RefreshTokens(req.RefreshToken)
+	claims, err := s.userTokenService.ValidateRefreshToken(req.RefreshToken)
 	if err != nil {
 		writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
 			"invalid refresh token", nil)
+		return
+	}
+
+	// Re-evaluate admin status on token refresh
+	role := claims.Role
+	if newRole := s.getUserRole(claims.Email); role != newRole {
+		slog.Info("User role changed on token refresh", "email", claims.Email, "old_role", role, "new_role", newRole)
+		role = newRole
+		// Persist the role change
+		if user, err := s.store.GetUserByEmail(r.Context(), claims.Email); err == nil && user.Role != role {
+			user.Role = role
+			_ = s.store.UpdateUser(r.Context(), user)
+		}
+	}
+
+	accessToken, refreshToken, expiresIn, err := s.userTokenService.GenerateTokenPair(
+		claims.UserID, claims.Email, claims.DisplayName, role, claims.ClientType,
+	)
+	if err != nil {
+		InternalError(w)
 		return
 	}
 
@@ -1212,9 +1232,10 @@ func (s *Server) provisionUser(ctx context.Context, info *ExternalUserInfo) (*st
 		if info.DisplayName != "" && user.DisplayName == "" {
 			user.DisplayName = info.DisplayName
 		}
-		// Promote to admin if config changed
-		if user.Role != "admin" && s.getUserRole(info.Email) == "admin" {
-			user.Role = "admin"
+		// Re-evaluate admin status on every login
+		if newRole := s.getUserRole(info.Email); user.Role != newRole {
+			slog.Info("User role changed on login", "email", info.Email, "old_role", user.Role, "new_role", newRole)
+			user.Role = newRole
 		}
 		_ = s.store.UpdateUser(ctx, user)
 	}

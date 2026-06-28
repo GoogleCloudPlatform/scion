@@ -640,6 +640,44 @@ func TestProvisionUser(t *testing.T) {
 		}
 	})
 
+	t.Run("demotes admin to member when removed from admin emails", func(t *testing.T) {
+		srv, s := testServer(t)
+
+		// Pre-create user as admin
+		original := &store.User{
+			ID:      generateID(),
+			Email:   "former-admin@example.com",
+			Role:    "admin",
+			Status:  "active",
+			Created: time.Now(),
+		}
+		if err := s.CreateUser(ctx, original); err != nil {
+			t.Fatalf("failed to create user: %v", err)
+		}
+
+		// Admin emails list does NOT include this user
+		srv.config.AdminEmails = []string{"other-admin@example.com"}
+
+		info := &ExternalUserInfo{Email: "former-admin@example.com"}
+		user, err := srv.provisionUser(ctx, info)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		if user.Role != "member" {
+			t.Errorf("expected role 'member' after demotion, got %q", user.Role)
+		}
+
+		// Verify persisted in store
+		stored, err := s.GetUserByEmail(ctx, "former-admin@example.com")
+		if err != nil {
+			t.Fatalf("user not found in store: %v", err)
+		}
+		if stored.Role != "member" {
+			t.Errorf("expected stored role 'member', got %q", stored.Role)
+		}
+	})
+
 	t.Run("returns ErrAccessDenied for unauthorized domain", func(t *testing.T) {
 		srv, _ := testServer(t)
 

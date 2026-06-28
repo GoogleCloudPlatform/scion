@@ -1464,6 +1464,12 @@ func (ws *WebServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request)
 		if userInfo.DisplayName != "" && user.DisplayName == "" {
 			user.DisplayName = userInfo.DisplayName
 		}
+		// Re-evaluate admin status on every login
+		newRole := determineUserRole(userInfo.Email, ws.config.AdminEmails)
+		if user.Role != newRole {
+			slog.Info("User role changed on login", "email", userInfo.Email, "old_role", user.Role, "new_role", newRole)
+			user.Role = newRole
+		}
 		if err := ws.store.UpdateUser(ctx, user); err != nil {
 			slog.Warn("Failed to update user on login", "email", userInfo.Email, "error", err)
 		}
