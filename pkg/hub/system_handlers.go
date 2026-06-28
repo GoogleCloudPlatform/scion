@@ -218,18 +218,20 @@ func (s *Server) handlePutRuntime(w http.ResponseWriter, r *http.Request) {
 // --- 2.3: Onboarding Status ---
 
 type OnboardingStatus struct {
-	Initialized      bool   `json:"initialized"`
-	IdentitySet      bool   `json:"identitySet"`
-	RuntimeOK        bool   `json:"runtimeOK"`
-	HarnessesSeeded  bool   `json:"harnessesSeeded"`
-	ImagesPresent    bool   `json:"imagesPresent"`
-	HasWorkspace     bool   `json:"hasWorkspace"`
-	Complete         bool   `json:"complete"`
-	EmbeddedBrokerID string `json:"embeddedBrokerID,omitempty"`
-	ImageRegistry    string `json:"imageRegistry,omitempty"`
-	BuildAvailable   bool   `json:"buildAvailable"`
-	GitVersion       string `json:"gitVersion,omitempty"`
-	GitVersionOK     bool   `json:"gitVersionOK"`
+	Initialized         bool   `json:"initialized"`
+	IdentitySet         bool   `json:"identitySet"`
+	RuntimeOK           bool   `json:"runtimeOK"`
+	HarnessesSeeded     bool   `json:"harnessesSeeded"`
+	ImagesPresent       bool   `json:"imagesPresent"`
+	HasWorkspace        bool   `json:"hasWorkspace"`
+	Complete            bool   `json:"complete"`
+	EmbeddedBrokerID    string `json:"embeddedBrokerID,omitempty"`
+	ImageRegistry       string `json:"imageRegistry,omitempty"`
+	BuildAvailable      bool   `json:"buildAvailable"`
+	CloudBuildAvailable bool   `json:"cloudBuildAvailable"`
+	GCPProjectID        string `json:"gcpProjectId,omitempty"`
+	GitVersion          string `json:"gitVersion,omitempty"`
+	GitVersionOK        bool   `json:"gitVersionOK"`
 }
 
 func (s *Server) computeOnboardingStatus(ctx context.Context) OnboardingStatus {
@@ -292,6 +294,12 @@ func (s *Server) computeOnboardingStatus(ctx context.Context) OnboardingStatus {
 
 	// BuildAvailable: true only if the build script can be resolved
 	status.BuildAvailable = resolveBuildScript() != ""
+
+	// CloudBuildAvailable: true when a GCP project is configured
+	status.CloudBuildAvailable = s.config.GCPProjectID != ""
+	if s.config.GCPProjectID != "" {
+		status.GCPProjectID = s.config.GCPProjectID
+	}
 
 	// GitVersion: report installed git version and whether it meets the worktree requirement
 	if gitVersion, _, err := util.GetGitVersion(); err == nil {
