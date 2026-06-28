@@ -322,7 +322,16 @@ def _apply_mcp_servers(bundle: str) -> int:
             print(f"hermes provision: {exc}", file=sys.stderr)
             return 0
 
+    hermes_dir = _expand("~/.hermes")
+    config_path = os.path.join(hermes_dir, "mcp.json")
+
     if not servers:
+        if os.path.isfile(config_path):
+            try:
+                os.remove(config_path)
+                print("hermes provision: removed stale mcp.json (no servers configured)", file=sys.stderr)
+            except OSError as exc:
+                print(f"hermes provision: could not remove stale mcp.json: {exc}", file=sys.stderr)
         return 0
 
     mcp_servers: dict[str, Any] = {}
@@ -344,14 +353,11 @@ def _apply_mcp_servers(bundle: str) -> int:
     if not mcp_servers:
         return 0
 
-    hermes_dir = _expand("~/.hermes")
     try:
         os.makedirs(hermes_dir, exist_ok=True)
     except OSError as exc:
         print(f"hermes provision: could not create {hermes_dir}: {exc}", file=sys.stderr)
         return 0
-
-    config_path = os.path.join(hermes_dir, "mcp.json")
     payload = {"mcpServers": mcp_servers}
     try:
         _write_json(config_path, payload)
@@ -407,7 +413,7 @@ def _provision(manifest: dict[str, Any]) -> int:
     no_auth_cfg = harness_cfg.get("no_auth") or {}
     no_auth_behavior = str(no_auth_cfg.get("behavior") or "").strip()
 
-    if not candidates and no_auth_behavior:
+    if not env_keys and no_auth_behavior:
         print(f"hermes provision: no-auth mode (behavior={no_auth_behavior}), skipping auth setup", file=sys.stderr)
         method = "none"
         env_key = ""

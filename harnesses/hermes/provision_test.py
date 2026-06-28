@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import importlib.util
 import io
+import json
 import os
 import tempfile
 import unittest
@@ -77,6 +78,48 @@ class AuthResolutionTest(unittest.TestCase):
         with self.assertRaises(ValueError) as ctx:
             provision._select_auth_key("", set())
         self.assertIn("no valid API key found", str(ctx.exception))
+
+
+class NoAuthModeTest(unittest.TestCase):
+    def test_no_auth_activates_when_env_keys_empty_but_candidates_has_metadata(self) -> None:
+        """auth-candidates.json always has metadata (schema_version etc.) even
+        with zero credentials. The no-auth check must look at env_keys, not
+        at whether the candidates dict is truthy."""
+        with tempfile.TemporaryDirectory() as tmp:
+            home = os.path.join(tmp, "home")
+            bundle = os.path.join(tmp, "bundle")
+            os.makedirs(os.path.join(bundle, "inputs"))
+            os.makedirs(os.path.join(bundle, "outputs"))
+            os.makedirs(home)
+
+            candidates = {"schema_version": 1, "env_vars": [], "env_secret_files": {}}
+            with open(os.path.join(bundle, "inputs", "auth-candidates.json"), "w") as f:
+                json.dump(candidates, f)
+
+            manifest = {
+                "harness_bundle_dir": bundle,
+                "harness_config": {
+                    "instructions_file": "AGENTS.md",
+                    "skills_dir": ".hermes/skills",
+                    "system_prompt_mode": "none",
+                    "no_auth": {"behavior": "drop-to-shell"},
+                },
+                "outputs": {
+                    "env": os.path.join(bundle, "outputs", "env.json"),
+                    "resolved_auth": os.path.join(bundle, "outputs", "resolved-auth.json"),
+                },
+            }
+
+            stderr = io.StringIO()
+            with temporary_home(home), redirect_stderr(stderr):
+                rc = provision._provision(manifest)
+
+            self.assertEqual(rc, provision.EXIT_OK)
+            self.assertIn("no-auth mode", stderr.getvalue())
+
+            with open(os.path.join(bundle, "outputs", "resolved-auth.json"), "r") as f:
+                resolved = json.load(f)
+            self.assertEqual(resolved["method"], "none")
 
 
 class InstructionProjectionTest(unittest.TestCase):
@@ -250,6 +293,25 @@ class MCPEntryBuildingTest(unittest.TestCase):
             entry = provision._build_mcp_entry("no-cmd", spec)
         self.assertIsNone(entry)
         self.assertIn("missing command", stderr.getvalue())
+
+    def test_stale_mcp_json_removed_when_no_servers(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = os.path.join(tmp, "home")
+            bundle = os.path.join(tmp, "bundle")
+            hermes_dir = os.path.join(home, ".hermes")
+            os.makedirs(os.path.join(bundle, "inputs"))
+            os.makedirs(hermes_dir)
+
+            mcp_path = os.path.join(hermes_dir, "mcp.json")
+            with open(mcp_path, "w") as f:
+                json.dump({"mcpServers": {"old": {"command": "old-server"}}}, f)
+            self.assertTrue(os.path.isfile(mcp_path))
+
+            with temporary_home(home):
+                count = provision._apply_mcp_servers(bundle)
+
+            self.assertEqual(count, 0)
+            self.assertFalse(os.path.isfile(mcp_path))
 
     def test_sse_missing_url_returns_none(self) -> None:
         spec = {"transport": "sse"}
