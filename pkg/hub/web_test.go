@@ -2180,3 +2180,88 @@ func TestProxyAuthMiddleware_ExistingSession_SkipsVerification(t *testing.T) {
 	assert.Len(t, st.users, 1, "should not re-provision user")
 	_ = callCount
 }
+
+func TestProxyAuthMiddleware_DemotesAdminWhenRemovedFromList(t *testing.T) {
+	// An existing admin user whose email is no longer in AdminEmails
+	// should be demoted to "member" on next proxy-authenticated request.
+	mockAuth := &mockProxyAuthenticator{
+		user: &ProxyUserInfo{
+			Subject: "99",
+			Email:   "former-admin@example.com",
+			Domain:  "example.com",
+		},
+	}
+
+	st := newProxyAuthStore()
+	// Pre-create user as admin
+	adminUser := &store.User{
+		ID:      "u-admin-proxy",
+		Email:   "former-admin@example.com",
+		Role:    "admin",
+		Status:  "active",
+		Created: time.Now(),
+	}
+	_ = st.CreateUser(context.Background(), adminUser)
+
+	ws := newTestWebServer(t, WebServerConfig{
+		AuthMode:           "proxy",
+		ProxyAuthenticator: mockAuth,
+		// AdminEmails does NOT include former-admin@example.com
+		AdminEmails: []string{"other-admin@example.com"},
+	})
+	ws.SetStore(st)
+
+	req := httptest.NewRequest("GET", "/projects", nil)
+	req.Header.Set("Accept", "text/html")
+	rec := httptest.NewRecorder()
+
+	ws.Handler().ServeHTTP(rec, req)
+
+	// Verify user was demoted
+	updated, err := st.GetUserByEmail(context.Background(), "former-admin@example.com")
+	assert.NoError(t, err)
+	assert.Equal(t, "member", updated.Role,
+		"admin user should be demoted to member when removed from admin emails list")
+}
+
+func TestProxyAuthMiddleware_PromotesToAdminWhenAddedToList(t *testing.T) {
+	// An existing member user whose email is added to AdminEmails
+	// should be promoted to "admin" on next proxy-authenticated request.
+	mockAuth := &mockProxyAuthenticator{
+		user: &ProxyUserInfo{
+			Subject: "88",
+			Email:   "new-admin@example.com",
+			Domain:  "example.com",
+		},
+	}
+
+	st := newProxyAuthStore()
+	// Pre-create user as member
+	memberUser := &store.User{
+		ID:      "u-member-proxy",
+		Email:   "new-admin@example.com",
+		Role:    "member",
+		Status:  "active",
+		Created: time.Now(),
+	}
+	_ = st.CreateUser(context.Background(), memberUser)
+
+	ws := newTestWebServer(t, WebServerConfig{
+		AuthMode:           "proxy",
+		ProxyAuthenticator: mockAuth,
+		AdminEmails:        []string{"new-admin@example.com"},
+	})
+	ws.SetStore(st)
+
+	req := httptest.NewRequest("GET", "/projects", nil)
+	req.Header.Set("Accept", "text/html")
+	rec := httptest.NewRecorder()
+
+	ws.Handler().ServeHTTP(rec, req)
+
+	// Verify user was promoted
+	updated, err := st.GetUserByEmail(context.Background(), "new-admin@example.com")
+	assert.NoError(t, err)
+	assert.Equal(t, "admin", updated.Role,
+		"member user should be promoted to admin when added to admin emails list")
+}

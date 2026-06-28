@@ -1344,9 +1344,10 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 			if proxyUser.DisplayName != "" && user.DisplayName == "" {
 				user.DisplayName = proxyUser.DisplayName
 			}
-			// Promote to admin if config changed
-			if user.Role != "admin" && determineUserRole(proxyUser.Email, ws.config.AdminEmails) == "admin" {
-				user.Role = "admin"
+			// Re-evaluate admin status on every login (matches handleOAuthCallback / provisionUser)
+			if newRole := determineUserRole(proxyUser.Email, ws.config.AdminEmails); user.Role != newRole {
+				slog.Info("User role changed on proxy login", "email", proxyUser.Email, "old_role", user.Role, "new_role", newRole)
+				user.Role = newRole
 			}
 			_ = ws.store.UpdateUser(ctx, user)
 		}
