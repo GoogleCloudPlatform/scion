@@ -304,7 +304,10 @@ func (h *CallbackHandler) handleAskOption(s *discordgo.Session, i *discordgo.Int
 	choice := pending.Choices[index]
 
 	// Deliver the response to the hub.
-	h.deliverAskUserResponse(ctx, i, pending, choice)
+	if he := h.deliverAskUserResponse(ctx, i, pending, choice); he != nil {
+		h.respondUpdate(s, i, he.userFacingMessage(), nil)
+		return
+	}
 
 	// Mark as responded.
 	if err := h.store.MarkAskUserResponded(ctx, requestID); err != nil {
@@ -400,10 +403,10 @@ func (h *CallbackHandler) handleAskDismiss(s *discordgo.Session, i *discordgo.In
 
 // deliverAskUserResponse builds a StructuredMessage from the user's response
 // and delivers it to the hub, targeting the agent that asked.
-func (h *CallbackHandler) deliverAskUserResponse(ctx context.Context, i *discordgo.InteractionCreate, pending *PendingAskUser, responseText string) {
+func (h *CallbackHandler) deliverAskUserResponse(ctx context.Context, i *discordgo.InteractionCreate, pending *PendingAskUser, responseText string) *hubError {
 	if h.deliverInbound == nil {
 		h.log.Error("deliverInbound not configured, cannot deliver ask-user response")
-		return
+		return &hubError{StatusCode: 500, Message: "Internal error: delivery not configured"}
 	}
 
 	// Resolve the sender identity from Discord user → Scion identity.
@@ -436,7 +439,9 @@ func (h *CallbackHandler) deliverAskUserResponse(ctx context.Context, i *discord
 	if he := h.deliverInbound(topic, msg); he != nil {
 		h.log.Error("Failed to deliver ask-user response",
 			"request_id", pending.RequestID, "error", he)
+		return he
 	}
+	return nil
 }
 
 // --- Settings callback handlers ---

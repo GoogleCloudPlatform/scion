@@ -1051,15 +1051,6 @@ func (b *DiscordBroker) handleIncomingMessage(s *discordgo.Session, m *discordgo
 
 	// Deliver to each target agent.
 	for _, agentSlug := range targets {
-		// Pre-validate that the target agent exists in the cached agent list.
-		// This catches deleted-agent routing before hitting the hub, giving
-		// immediate feedback especially for default-agent mapped channels.
-		if len(agents) > 0 && !agentInList(agentSlug, agents) {
-			errMsg := fmt.Sprintf("Target agent %q not found. It may have been deleted. Use `/scion agents` to see available agents.", agentSlug)
-			s.ChannelMessageSend(channelID, errMsg)
-			continue
-		}
-
 		cc := &ConversationContext{
 			DiscordUserID: senderID,
 			ProjectID:     link.ProjectID,
@@ -1104,16 +1095,6 @@ func (b *DiscordBroker) handleIncomingMessage(s *discordgo.Session, m *discordgo
 			s.ChannelMessageSend(channelID, he.userFacingMessage())
 		}
 	}
-}
-
-// agentInList checks whether slug appears in the agents list (case-insensitive).
-func agentInList(slug string, agents []string) bool {
-	for _, a := range agents {
-		if strings.EqualFold(a, slug) {
-			return true
-		}
-	}
-	return false
 }
 
 // --- Hub delivery ---

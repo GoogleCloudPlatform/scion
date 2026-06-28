@@ -111,15 +111,6 @@ func TestHubError_UserFacingMessage(t *testing.T) {
 	}
 }
 
-func TestAgentInList(t *testing.T) {
-	agents := []string{"coder", "reviewer", "planner"}
-	assert.True(t, agentInList("coder", agents))
-	assert.True(t, agentInList("Coder", agents))
-	assert.False(t, agentInList("deleted-agent", agents))
-	assert.False(t, agentInList("coder", nil))
-	assert.False(t, agentInList("coder", []string{}))
-}
-
 func TestDeliverInbound_ReturnsHubError(t *testing.T) {
 	t.Run("404 agent not found", func(t *testing.T) {
 		hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
