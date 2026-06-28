@@ -1338,7 +1338,7 @@ func (b *DiscordBroker) isForumChannel(channelID string) bool {
 			return false
 		}
 		ch, err = session.Channel(channelID)
-		if err != nil {
+		if err != nil || ch == nil {
 			return false
 		}
 	}
