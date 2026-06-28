@@ -166,6 +166,8 @@ allowed_paths=(
   "^pkg/hub/handlers_auth.go$"
   "^pkg/hub/handlers_broker_inbound.go$"
   "^pkg/hub/handlers_notifications.go$"
+  "^pkg/hub/handlers_projects_core.go$"
+  "^pkg/hub/handlers_runtime_brokers.go$"
   "^pkg/hub/project_cache.go$"
   "^pkg/hub/project_compat.go$"
   "^pkg/hub/project_webdav.go$"
