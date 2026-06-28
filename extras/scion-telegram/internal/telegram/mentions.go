@@ -232,8 +232,11 @@ func extractAgentMentions(text string, knownAgents []string) (agents []string, h
 	return agents, false
 }
 
+// stripMentionRx matches @mention tokens for removal by stripMentions.
+var stripMentionRx = regexp.MustCompile(`@\S+`)
+
 // stripMentions removes @botUsername and @agentSlug mentions from text, returning clean content.
-// Newlines are preserved so that multi-line messages (including code blocks) retain their structure.
+// Uses regex-based matching to preserve all whitespace and indentation (important for code blocks).
 func stripMentions(text string, botUsername string, agentSlugs []string) string {
 	remove := make(map[string]bool)
 	if botUsername != "" {
@@ -244,30 +247,68 @@ func stripMentions(text string, botUsername string, agentSlugs []string) string 
 	}
 	remove["all"] = true
 
-	lines := strings.Split(text, "\n")
-	for i, line := range lines {
-		var parts []string
-		for _, word := range strings.Fields(line) {
-			if !strings.HasPrefix(word, "@") {
-				parts = append(parts, word)
-				continue
-			}
-			name := strings.TrimPrefix(word, "@")
-			cleaned := strings.TrimRightFunc(name, func(r rune) bool {
-				return unicode.IsPunct(r) && r != '_' && r != '-'
-			})
-			if remove[strings.ToLower(cleaned)] {
-				trailing := name[len(cleaned):]
-				if trailing != "" {
-					parts = append(parts, trailing)
-				}
-				continue
-			}
-			parts = append(parts, word)
-		}
-		lines[i] = strings.Join(parts, " ")
+	matches := stripMentionRx.FindAllStringIndex(text, -1)
+	if len(matches) == 0 {
+		return text
 	}
-	return strings.Join(lines, "\n")
+
+	type span struct{ start, end int }
+	var removals []span
+
+	for _, loc := range matches {
+		start, end := loc[0], loc[1]
+		if start > 0 {
+			r, _ := utf8.DecodeLastRuneInString(text[:start])
+			if !unicode.IsSpace(r) {
+				continue
+			}
+		}
+		word := text[start:end]
+		name := word[1:]
+		cleaned := strings.TrimRightFunc(name, func(r rune) bool {
+			return unicode.IsPunct(r) && r != '_' && r != '-'
+		})
+		if !remove[strings.ToLower(cleaned)] {
+			continue
+		}
+		trailing := name[len(cleaned):]
+		removeStart := start
+		removeEnd := end - len(trailing)
+
+		if removeEnd < len(text) {
+			r, size := utf8.DecodeRuneInString(text[removeEnd:])
+			if unicode.IsSpace(r) && r != '\n' && r != '\r' {
+				removeEnd += size
+			}
+		} else if removeStart > 0 {
+			r, size := utf8.DecodeLastRuneInString(text[:removeStart])
+			if unicode.IsSpace(r) && r != '\n' && r != '\r' {
+				removeStart -= size
+			}
+		}
+
+		removals = append(removals, span{removeStart, removeEnd})
+	}
+
+	if len(removals) == 0 {
+		return text
+	}
+
+	var b strings.Builder
+	pos := 0
+	for _, r := range removals {
+		if r.start < pos {
+			if r.end > pos {
+				pos = r.end
+			}
+			continue
+		}
+		b.WriteString(text[pos:r.start])
+		pos = r.end
+	}
+	b.WriteString(text[pos:])
+
+	return strings.TrimSpace(b.String())
 }
 
 // hasNonBotUserMention returns true if the message starts with (offset=0) a

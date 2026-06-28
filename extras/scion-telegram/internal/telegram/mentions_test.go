@@ -928,6 +928,33 @@ func TestExtractAgentMentions_WithDot(t *testing.T) {
 	assert.Equal(t, []string{"agent.dev"}, agents)
 }
 
+func TestStripMentions_PreservesCodeBlockIndentation(t *testing.T) {
+	result := stripMentions("@bot ```go\n    fmt.Println(\"hello\")\n```", "bot", nil)
+	assert.Equal(t, "```go\n    fmt.Println(\"hello\")\n```", result)
+}
+
+func TestStripMentions_PreservesTabIndentation(t *testing.T) {
+	result := stripMentions("@bot check this:\n\tline1\n\t\tline2", "bot", nil)
+	assert.Equal(t, "check this:\n\tline1\n\t\tline2", result)
+}
+
+func TestStripMentions_PreservesMultipleSpaces(t *testing.T) {
+	result := stripMentions("@bot ```\n  a  =  1\n```", "bot", nil)
+	assert.Equal(t, "```\n  a  =  1\n```", result)
+}
+
+func TestStripMentions_MentionBeforeMultilineCode(t *testing.T) {
+	input := "@ScionHubBot @coder ```\n    if x > 0 {\n        return x\n    }\n```"
+	expected := "```\n    if x > 0 {\n        return x\n    }\n```"
+	result := stripMentions(input, "ScionHubBot", []string{"coder"})
+	assert.Equal(t, expected, result)
+}
+
+func TestStripMentions_MidTextMentionPreservesNewlines(t *testing.T) {
+	result := stripMentions("line one\n@bot line two\nline three", "bot", nil)
+	assert.Equal(t, "line one\nline two\nline three", result)
+}
+
 func TestStripMentions_HyphenatedAgent(t *testing.T) {
 	result := stripMentions("@ScionHubBot @deploy-agent please review this", "ScionHubBot", []string{"deploy-agent"})
 	assert.Equal(t, "please review this", result)
