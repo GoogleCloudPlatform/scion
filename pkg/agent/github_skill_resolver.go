@@ -330,12 +330,11 @@ func (r *GitHubSkillResolver) doWithRetry(ctx context.Context, req *http.Request
 			}
 		}
 
-		// Clone the request for retries (body is nil for GET requests)
 		cloned := req.Clone(ctx)
 		resp, err := r.httpClient.Do(cloned)
 		if err != nil {
 			lastErr = err
-			// Network errors are retryable
+			lastResp = nil
 			continue
 		}
 
@@ -343,19 +342,17 @@ func (r *GitHubSkillResolver) doWithRetry(ctx context.Context, req *http.Request
 			return resp, nil
 		}
 
-		// Drain and close body so the connection can be reused
+		if attempt == githubMaxRetries {
+			return resp, nil
+		}
+
 		_, _ = io.Copy(io.Discard, resp.Body)
 		resp.Body.Close()
 		lastResp = resp
 		lastErr = nil
 	}
 
-	if lastErr != nil {
-		return nil, lastErr
-	}
-	// All retries exhausted — re-execute to return the final response for
-	// the caller to handle (e.g. apiError extraction).
-	return r.httpClient.Do(req.Clone(ctx))
+	return nil, lastErr
 }
 
 // isRetryableResponse returns true for HTTP responses that should be retried:
@@ -391,7 +388,10 @@ func retryDelay(resp *http.Response, attempt int) time.Duration {
 			if resetStr := resp.Header.Get("X-RateLimit-Reset"); resetStr != "" {
 				if resetUnix, err := strconv.ParseInt(resetStr, 10, 64); err == nil {
 					wait := time.Until(time.Unix(resetUnix, 0))
-					if wait > 0 && wait <= githubMaxBackoff {
+					if wait > 0 {
+						if wait > githubMaxBackoff {
+							return githubMaxBackoff
+						}
 						return wait
 					}
 				}

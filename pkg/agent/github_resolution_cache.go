@@ -72,7 +72,8 @@ func NewGitHubResolutionCache(dir string, ttl time.Duration) (*GitHubResolutionC
 }
 
 // Get returns a cached ResolvedSkill for the given URI if it exists
-// and has not expired.
+// and has not expired. The returned value is a deep copy safe for
+// concurrent use.
 func (c *GitHubResolutionCache) Get(uri string) (ResolvedSkill, bool) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -84,14 +85,17 @@ func (c *GitHubResolutionCache) Get(uri string) (ResolvedSkill, bool) {
 	if time.Now().After(entry.ExpiresAt) {
 		return ResolvedSkill{}, false
 	}
-	return entry.Skill, true
+	skill := entry.Skill
+	if len(entry.Skill.Files) > 0 {
+		skill.Files = make([]ResolvedFile, len(entry.Skill.Files))
+		copy(skill.Files, entry.Skill.Files)
+	}
+	return skill, true
 }
 
 // Put stores a resolved skill in the cache.
 func (c *GitHubResolutionCache) Put(uri string, skill ResolvedSkill) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-
 	now := time.Now()
 	c.entries[uri] = &resolutionCacheEntry{
 		Skill:     skill,
@@ -99,7 +103,13 @@ func (c *GitHubResolutionCache) Put(uri string, skill ResolvedSkill) {
 		ExpiresAt: now.Add(c.ttl),
 	}
 	c.evictExpired()
-	c.save()
+	snapshot := make(map[string]*resolutionCacheEntry, len(c.entries))
+	for k, v := range c.entries {
+		snapshot[k] = v
+	}
+	c.mu.Unlock()
+
+	c.save(snapshot)
 }
 
 // load reads the cache from disk. Best-effort: errors are silently ignored.
@@ -124,14 +134,18 @@ func (c *GitHubResolutionCache) load() {
 	util.Debugf("github: loaded %d resolution cache entries from disk", len(c.entries))
 }
 
-// save persists the cache to disk. Best-effort.
-func (c *GitHubResolutionCache) save() {
-	f := resolutionCacheFile{Entries: c.entries}
+// save persists the given entries snapshot to disk atomically. Best-effort.
+func (c *GitHubResolutionCache) save(entries map[string]*resolutionCacheEntry) {
+	f := resolutionCacheFile{Entries: entries}
 	data, err := json.MarshalIndent(f, "", "  ")
 	if err != nil {
 		return
 	}
-	_ = os.WriteFile(c.filePath, data, 0644)
+	tmpPath := c.filePath + ".tmp"
+	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
+		return
+	}
+	_ = os.Rename(tmpPath, c.filePath)
 }
 
 // evictExpired removes expired entries. Must be called with lock held.
