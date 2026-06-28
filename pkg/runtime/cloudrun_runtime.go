@@ -9,6 +9,7 @@ The Runtime Broker executing this code must have a Service Account with the foll
 - roles/iap.tunnelResourceAccessor (to exec into instances via IAP)
 
 Authentication Methods:
+
  1. GKE Workload Identity (Recommended for GKE-hosted brokers):
     Bind a Kubernetes Service Account (KSA) to the Google Service Account (GSA) using:
     `gcloud iam service-accounts add-iam-policy-binding <GSA_EMAIL> \
@@ -24,6 +25,8 @@ package runtime
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path"
@@ -44,6 +47,7 @@ import (
 )
 
 const nfsSuperMagic = 0x6969
+const cloudRunInstanceIDMaxLength = 63
 
 var defaultCallOpts = []gax.CallOption{
 	gax.WithRetry(func() gax.Retryer {
@@ -107,7 +111,7 @@ func (r *CloudRunRuntime) Run(ctx context.Context, cfg RunConfig) (string, error
 	if agentID == "" {
 		return "", fmt.Errorf("agent_id label is required")
 	}
-	instanceID := "agent-" + agentID
+	instanceID := cloudRunInstanceID(agentID)
 
 	uid := 1000
 	gid := 1000
@@ -257,6 +261,25 @@ func (r *CloudRunRuntime) Run(ctx context.Context, cfg RunConfig) (string, error
 	}
 
 	return instanceID, nil
+}
+
+func cloudRunInstanceID(agentID string) string {
+	slug := api.Slugify(agentID)
+	sum := sha256.Sum256([]byte(agentID))
+	suffix := hex.EncodeToString(sum[:])[:10]
+	if slug == "" {
+		slug = "agent"
+	}
+
+	prefix := "agent-"
+	maxSlugLen := cloudRunInstanceIDMaxLength - len(prefix) - 1 - len(suffix)
+	if len(slug) > maxSlugLen {
+		slug = strings.TrimRight(slug[:maxSlugLen], "-")
+	}
+	if slug == "" {
+		slug = "agent"
+	}
+	return fmt.Sprintf("%s%s-%s", prefix, slug, suffix)
 }
 
 type cloudRunNFSProvisionPaths struct {
@@ -591,7 +614,10 @@ func (r *CloudRunRuntime) GetLogs(ctx context.Context, id string) (string, error
 }
 
 func (r *CloudRunRuntime) ImageExists(ctx context.Context, image string) (bool, error) {
-	return false, fmt.Errorf("cloudrun: ImageExists not yet implemented in Phase 1")
+	if strings.TrimSpace(image) == "" {
+		return false, fmt.Errorf("cloudrun: image must be non-empty")
+	}
+	return true, nil
 }
 
 func (r *CloudRunRuntime) ImageID(ctx context.Context, image string) (string, error) {
@@ -603,11 +629,14 @@ func (r *CloudRunRuntime) RemoveImage(ctx context.Context, image string) error {
 }
 
 func (r *CloudRunRuntime) PullImage(ctx context.Context, image string) error {
-	return fmt.Errorf("cloudrun: PullImage not yet implemented in Phase 1")
+	if strings.TrimSpace(image) == "" {
+		return fmt.Errorf("cloudrun: image must be non-empty")
+	}
+	return nil
 }
 
 func (r *CloudRunRuntime) Sync(ctx context.Context, id string, direction SyncDirection) error {
-	return fmt.Errorf("cloudrun: Sync not yet implemented in Phase 1")
+	return fmt.Errorf("cloudrun: agent workspace sync is not supported by the Cloud Run runtime; use the Hub workspace API for hosted agents")
 }
 
 func (r *CloudRunRuntime) Exec(ctx context.Context, id string, cmd []string) (string, error) {
@@ -620,7 +649,7 @@ func (r *CloudRunRuntime) Attach(ctx context.Context, id string) error {
 }
 
 func (r *CloudRunRuntime) GetWorkspacePath(ctx context.Context, id string) (string, error) {
-	return "", fmt.Errorf("cloudrun: GetWorkspacePath not yet implemented in Phase 1")
+	return "", fmt.Errorf("cloudrun: host workspace paths are not available for Cloud Run instances; use the Hub workspace API")
 }
 
 // StreamLogs tails log output in real time (for scion look / scion logs -f).

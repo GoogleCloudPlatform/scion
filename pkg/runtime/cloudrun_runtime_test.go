@@ -24,12 +24,14 @@ import (
 =======
 >>>>>>> 696da747 (Harden Cloud Run NFS provisioning)
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 )
 
+<<<<<<< HEAD
 <<<<<<< HEAD
 func TestCloudRunRuntime_Name(t *testing.T) {
 	rt := NewCloudRunRuntime(nil)
@@ -326,6 +328,121 @@ func TestGetRuntime_CloudRun_DirectProfileName(t *testing.T) {
 	if _, ok := r.(*CloudRunRuntime); !ok {
 		t.Fatalf("expected *CloudRunRuntime from direct profile name, got %T", r)
 =======
+=======
+func TestNewCloudRunRuntimeValidatesConfig(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  *config.CloudRunInstancesConfig
+		want string
+	}{
+		{
+			name: "nil config",
+			cfg:  nil,
+			want: "cannot be nil",
+		},
+		{
+			name: "missing project id",
+			cfg: &config.CloudRunInstancesConfig{
+				Location: "us-central1",
+			},
+			want: "ProjectID must be non-empty",
+		},
+		{
+			name: "missing location",
+			cfg: &config.CloudRunInstancesConfig{
+				ProjectID: "gcp-project",
+			},
+			want: "Location must be a valid GCP region",
+		},
+		{
+			name: "invalid location",
+			cfg: &config.CloudRunInstancesConfig{
+				ProjectID: "gcp-project",
+				Location:  "moon",
+			},
+			want: "Location must be a valid GCP region",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := NewCloudRunRuntime(tt.cfg)
+			if err == nil {
+				t.Fatal("expected error")
+			}
+			if !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("error = %q, want substring %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestNewCloudRunRuntimeValidConfig(t *testing.T) {
+	rt, err := NewCloudRunRuntime(&config.CloudRunInstancesConfig{
+		ProjectID: "gcp-project",
+		Location:  "us-central1",
+	})
+	if err != nil {
+		t.Fatalf("NewCloudRunRuntime: %v", err)
+	}
+	if rt.Name() != "cloudrun" {
+		t.Fatalf("Name() = %q, want cloudrun", rt.Name())
+	}
+}
+
+func TestCloudRunInstanceIDStableFromAgentID(t *testing.T) {
+	got := cloudRunInstanceID("Agent 123")
+	if got != cloudRunInstanceID("Agent 123") {
+		t.Fatal("cloudRunInstanceID is not stable for the same agent ID")
+	}
+	if got == cloudRunInstanceID("agent-123") {
+		t.Fatal("distinct raw agent IDs should not collapse to the same instance ID")
+	}
+	if len(got) > cloudRunInstanceIDMaxLength {
+		t.Fatalf("instance ID length = %d, want <= %d", len(got), cloudRunInstanceIDMaxLength)
+	}
+	if !regexp.MustCompile(`^agent-[a-z0-9][a-z0-9-]*[a-z0-9]$`).MatchString(got) {
+		t.Fatalf("instance ID %q is not a valid lowercase hyphenated name", got)
+	}
+}
+
+func TestCloudRunInstanceIDHandlesLongAndUnsafeAgentID(t *testing.T) {
+	got := cloudRunInstanceID(strings.Repeat("Agent_With_Unsafe_Characters_", 8))
+	if len(got) > cloudRunInstanceIDMaxLength {
+		t.Fatalf("instance ID length = %d, want <= %d", len(got), cloudRunInstanceIDMaxLength)
+	}
+	if !strings.HasPrefix(got, "agent-agent-with-unsafe-characters") {
+		t.Fatalf("instance ID = %q, want readable slug prefix", got)
+	}
+}
+
+func TestCloudRunImageOperationsAreRemoteNoops(t *testing.T) {
+	rt := &CloudRunRuntime{}
+
+	exists, err := rt.ImageExists(context.Background(), "us-docker.pkg.dev/project/repo/image:tag")
+	if err != nil {
+		t.Fatalf("ImageExists returned error: %v", err)
+	}
+	if !exists {
+		t.Fatal("ImageExists = false, want true because Cloud Run resolves remote images")
+	}
+	if err := rt.PullImage(context.Background(), "us-docker.pkg.dev/project/repo/image:tag"); err != nil {
+		t.Fatalf("PullImage returned error: %v", err)
+	}
+}
+
+func TestCloudRunDeferredRuntimeMethodsReturnExplicitErrors(t *testing.T) {
+	rt := &CloudRunRuntime{}
+
+	if err := rt.Sync(context.Background(), "agent-1", SyncTo); err == nil || !strings.Contains(err.Error(), "Hub workspace API") {
+		t.Fatalf("Sync error = %v, want Hub workspace API guidance", err)
+	}
+	if _, err := rt.GetWorkspacePath(context.Background(), "agent-1"); err == nil || !strings.Contains(err.Error(), "host workspace paths are not available") {
+		t.Fatalf("GetWorkspacePath error = %v, want explicit unsupported error", err)
+	}
+}
+
+>>>>>>> c3337c25 (fix(runtime): ErrorRuntime on failure, implement stubs, align Dockerfile Go version)
 func TestCloudRunNFSExportPaths(t *testing.T) {
 	paths, err := cloudRunNFSExportPaths("/scion-workspaces/", "proj-123", "agent-456")
 	if err != nil {

@@ -271,6 +271,35 @@ active_profile: apple
 			t.Errorf("expected *DockerRuntime as fallback when no runtime found and not Cloud Run, got %T", r)
 		}
 	})
+
+	t.Run("Settings_Global_CloudRun_InvalidConfig_ReturnsErrorRuntime", func(t *testing.T) {
+		tmpHome := t.TempDir()
+		t.Setenv("HOME", tmpHome)
+
+		globalDir := filepath.Join(tmpHome, ".scion")
+		if err := os.MkdirAll(globalDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+
+		settings := `
+schema_version: "1"
+active_profile: hosted
+runtimes:
+  cloudrun:
+    type: cloudrun
+profiles:
+  hosted:
+    runtime: cloudrun
+`
+		if err := os.WriteFile(filepath.Join(globalDir, "settings.yaml"), []byte(settings), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		r := GetRuntime("", "")
+		if _, ok := r.(*ErrorRuntime); !ok {
+			t.Fatalf("expected *ErrorRuntime from invalid cloudrun config, got %T", r)
+		}
+	})
 }
 
 func TestGetRuntime_CloudRun_Precedence_Over_Docker(t *testing.T) {
