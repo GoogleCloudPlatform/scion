@@ -184,7 +184,7 @@ func runInit(args []string) int {
 			log.Error("Failed to write staged secrets: %v", err)
 			return 1
 		}
-		os.Unsetenv(runtime.StagedSecretEnvVar)
+		_ = os.Unsetenv(runtime.StagedSecretEnvVar)
 		log.Info("Staged %d file secret(s) and %d variable secret(s)",
 			len(staged.FileSecrets), len(staged.VariableSecrets))
 	}
