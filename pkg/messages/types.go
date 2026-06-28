@@ -24,6 +24,9 @@ import (
 // Schema version for the structured message format.
 const Version = 1
 
+// Maximum length of the Msg field in characters for outbound messages.
+const MaxMessageLength = 2000
+
 // Maximum size of the Msg field in bytes.
 const MaxMsgSize = 64 * 1024 // 64KB
 
@@ -126,6 +129,9 @@ func (m *StructuredMessage) Validate() error {
 	}
 	if m.Msg == "" {
 		return fmt.Errorf("msg field is required")
+	}
+	if len([]rune(m.Msg)) > MaxMessageLength {
+		return fmt.Errorf("message exceeds %d character limit (current: %d chars). Consider splitting into multiple messages using multiple scion message invocations", MaxMessageLength, len([]rune(m.Msg)))
 	}
 	if len(m.Msg) > MaxMsgSize {
 		return fmt.Errorf("msg exceeds maximum size of %d bytes", MaxMsgSize)

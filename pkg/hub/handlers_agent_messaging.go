@@ -68,6 +68,10 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		ValidationError(w, "msg is required", nil)
 		return
 	}
+	if msgLen := len([]rune(req.Msg)); msgLen > messages.MaxMessageLength {
+		ValidationError(w, fmt.Sprintf("message exceeds %d character limit (current: %d chars). Consider splitting into multiple messages using multiple scion message invocations", messages.MaxMessageLength, msgLen), nil)
+		return
+	}
 	if req.Type == "" {
 		req.Type = "input-needed"
 	}

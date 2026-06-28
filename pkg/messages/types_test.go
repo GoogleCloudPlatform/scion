@@ -76,6 +76,25 @@ func TestStructuredMessage_Validate(t *testing.T) {
 		}
 	})
 
+	t.Run("msg exceeds character limit", func(t *testing.T) {
+		m := validMsg()
+		m.Msg = strings.Repeat("x", MaxMessageLength+1)
+		err := m.Validate()
+		if err == nil {
+			t.Error("expected error for msg exceeding character limit")
+		} else if !strings.Contains(err.Error(), "character limit") {
+			t.Errorf("error should mention character limit, got: %v", err)
+		}
+	})
+
+	t.Run("msg at character limit", func(t *testing.T) {
+		m := validMsg()
+		m.Msg = strings.Repeat("x", MaxMessageLength)
+		if err := m.Validate(); err != nil {
+			t.Errorf("unexpected error for msg at character limit: %v", err)
+		}
+	})
+
 	t.Run("msg too large", func(t *testing.T) {
 		m := validMsg()
 		m.Msg = strings.Repeat("x", MaxMsgSize+1)
