@@ -828,16 +828,19 @@ func serializeSecrets(containerHome string, secrets []api.ResolvedSecret) (strin
 		}
 		target := expandTildeTarget(s.Target, containerHome)
 
-		// Re-encode raw values as base64 for uniform handling on the container side.
-		val := s.Value
-		if _, err := base64.StdEncoding.DecodeString(val); err != nil {
-			val = base64.StdEncoding.EncodeToString([]byte(val))
+		// Normalize to deterministic base64: decode first (to get raw bytes),
+		// then always re-encode. This guarantees uniform base64 on the container side.
+		var data []byte
+		if decoded, err := base64.StdEncoding.DecodeString(s.Value); err == nil {
+			data = decoded
+		} else {
+			data = []byte(s.Value)
 		}
 
 		entry := StagedFileSecret{
 			Name:   s.Name,
 			Target: target,
-			Value:  val,
+			Value:  base64.StdEncoding.EncodeToString(data),
 		}
 
 		if idx, exists := targetIndex[target]; exists {
@@ -899,17 +902,38 @@ func DecodeStagedSecrets(encoded string) (*StagedSecrets, error) {
 // the container. File secrets are written to their target paths with 0600
 // permissions. Variable secrets are written to <homeDir>/.scion/secrets.json.
 func WriteStagedSecrets(homeDir string, staged *StagedSecrets) error {
+	var uid, gid int
+	if os.Getuid() == 0 {
+		if uidStr := os.Getenv("SCION_HOST_UID"); uidStr != "" {
+			if id, err := strconv.Atoi(uidStr); err == nil {
+				uid = id
+			}
+		}
+		if gidStr := os.Getenv("SCION_HOST_GID"); gidStr != "" {
+			if id, err := strconv.Atoi(gidStr); err == nil {
+				gid = id
+			}
+		}
+	}
+
 	for _, fs := range staged.FileSecrets {
 		data, err := base64.StdEncoding.DecodeString(fs.Value)
 		if err != nil {
-			data = []byte(fs.Value)
+			return fmt.Errorf("failed to base64-decode secret %s: %w", fs.Name, err)
 		}
 
-		if err := os.MkdirAll(filepath.Dir(fs.Target), 0755); err != nil {
+		dir := filepath.Dir(fs.Target)
+		if err := os.MkdirAll(dir, 0755); err != nil {
 			return fmt.Errorf("failed to create directory for secret %s: %w", fs.Name, err)
+		}
+		if (uid > 0 || gid > 0) && strings.HasPrefix(dir, homeDir) {
+			_ = os.Chown(dir, uid, gid)
 		}
 		if err := os.WriteFile(fs.Target, data, 0600); err != nil {
 			return fmt.Errorf("failed to write secret file %s: %w", fs.Name, err)
+		}
+		if (uid > 0 || gid > 0) && strings.HasPrefix(fs.Target, homeDir) {
+			_ = os.Chown(fs.Target, uid, gid)
 		}
 	}
 
@@ -918,12 +942,19 @@ func WriteStagedSecrets(homeDir string, staged *StagedSecrets) error {
 		if err := os.MkdirAll(scionDir, 0700); err != nil {
 			return fmt.Errorf("failed to create .scion directory: %w", err)
 		}
+		if uid > 0 || gid > 0 {
+			_ = os.Chown(scionDir, uid, gid)
+		}
 		data, err := json.Marshal(staged.VariableSecrets)
 		if err != nil {
 			return fmt.Errorf("failed to marshal secrets.json: %w", err)
 		}
-		if err := os.WriteFile(filepath.Join(scionDir, "secrets.json"), data, 0600); err != nil {
+		secretsPath := filepath.Join(scionDir, "secrets.json")
+		if err := os.WriteFile(secretsPath, data, 0600); err != nil {
 			return fmt.Errorf("failed to write secrets.json: %w", err)
+		}
+		if uid > 0 || gid > 0 {
+			_ = os.Chown(secretsPath, uid, gid)
 		}
 	}
 
