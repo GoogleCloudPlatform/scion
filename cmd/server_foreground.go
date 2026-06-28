@@ -333,10 +333,11 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 		if !web.AssetsEmbedded && webAssetsDir == "" {
 			slog.Warn("This binary was built without web assets. The web UI will not be available. Run 'make all' (or 'make web && make build') to rebuild with web assets included, or use --web-assets-dir.")
 		} else if web.AssetsEmbedded && webAssetsDir == "" {
-			if sub, err := fs.Sub(web.ClientAssets, "dist/client"); err == nil {
-				if _, err := fs.Stat(sub, "assets/main.js"); err != nil {
-					slog.Warn("Embedded web assets are incomplete (main.js missing). The web UI will not be available. Run 'make all' (or 'make web && make build') to rebuild with web assets included, or use --web-assets-dir.")
-				}
+			sub, err := fs.Sub(web.ClientAssets, "dist/client")
+			if err != nil {
+				slog.Error("Failed to create sub-filesystem from embedded assets. The web UI will not be available. Run 'make web && make build' to rebuild with web assets included, or use --web-assets-dir.", "error", err)
+			} else if _, err := fs.Stat(sub, "assets/main.js"); err != nil {
+				slog.Warn("Embedded web assets are incomplete (main.js missing). The web UI will not be available. Run 'make all' (or 'make web && make build') to rebuild with web assets included, or use --web-assets-dir.")
 			}
 		}
 		log.Printf("Starting Web Frontend on %s:%d", cfg.Hub.Host, webPort)

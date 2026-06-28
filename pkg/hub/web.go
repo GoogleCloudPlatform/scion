@@ -475,7 +475,7 @@ func NewWebServer(cfg WebServerConfig) *WebServer {
 	} else if web.AssetsEmbedded {
 		sub, err := fs.Sub(web.ClientAssets, "dist/client")
 		if err != nil {
-			slog.Error("Failed to create sub-filesystem from embedded assets", "error", err)
+			slog.Error("Failed to create sub-filesystem from embedded assets. Run 'make web && make build' to rebuild with web assets included, or use --web-assets-dir.", "error", err)
 		} else if _, err := fs.Stat(sub, "assets/main.js"); err != nil {
 			slog.Warn("Embedded web assets directory exists but main.js is missing. Run 'make all' (or 'make web && make build') to rebuild with web assets included, or use --web-assets-dir.")
 		} else {
