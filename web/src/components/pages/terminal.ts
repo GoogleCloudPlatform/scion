@@ -26,7 +26,7 @@ import { customElement, property, state } from 'lit/decorators.js';
 
 import type { PageData, Agent, AgentPhase, AgentActivity } from '../../shared/types.js';
 import { isTerminalAvailable } from '../../shared/types.js';
-import { extractApiError } from '../../client/api.js';
+import { apiFetch, extractApiError } from '../../client/api.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
 import { SSEClient } from '../../client/sse-client.js';
 import type { SSEUpdateEvent } from '../../client/sse-client.js';
@@ -90,6 +90,12 @@ export class ScionPageTerminal extends LitElement {
 
   @state()
   private agentActivity: AgentActivity | '' = '';
+
+  @state()
+  private agent: Agent | null = null;
+
+  @state()
+  private captureAuthLoading = false;
 
   private terminal: Terminal | null = null;
   private fitAddon: FitAddon | null = null;
@@ -187,6 +193,29 @@ export class ScionPageTerminal extends LitElement {
     .reconnect-btn:hover {
       border-color: #60a5fa;
       color: #60a5fa;
+    }
+
+    .capture-auth-btn {
+      background: transparent;
+      border: 1px solid #2a2a2a;
+      color: #f59e0b;
+      padding: 0.25rem 0.75rem;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 0.75rem;
+      display: inline-flex;
+      align-items: center;
+      gap: 0.375rem;
+    }
+
+    .capture-auth-btn:hover {
+      border-color: #f59e0b;
+      background: rgba(245, 158, 11, 0.1);
+    }
+
+    .capture-auth-btn:disabled {
+      opacity: 0.5;
+      cursor: default;
     }
 
     /* Window switcher toggle group: two rectangular icon buttons */
@@ -357,6 +386,7 @@ export class ScionPageTerminal extends LitElement {
       }
 
       const agent = (await response.json()) as Agent;
+      this.agent = agent;
       this.agentName = agent.name;
       this.projectId = agent.projectId ?? '';
       this.agentPhase = agent.phase;
@@ -742,6 +772,50 @@ export class ScionPageTerminal extends LitElement {
     this.terminal?.focus();
   }
 
+  private get showCaptureAuth(): boolean {
+    const agent = this.agent;
+    if (!agent) return false;
+    if (agent.phase !== 'running') return false;
+    const isNoAuth = agent.appliedConfig?.noAuth === true || agent.harnessAuth === 'none';
+    return isNoAuth && !!agent.resolvedHarness;
+  }
+
+  private async handleCaptureAuth(): Promise<void> {
+    if (!this.agent) return;
+    this.captureAuthLoading = true;
+    try {
+      const response = await apiFetch(`/api/v1/agents/${this.agent.id}/exec`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          command: ['python3', '/home/scion/.scion/harness/capture_auth.py'],
+          timeout: 60,
+        }),
+      });
+
+      if (!response.ok) {
+        const msg = await extractApiError(response, 'Failed to run capture auth');
+        alert(msg);
+        return;
+      }
+
+      const result = await response.json() as { output: string; exitCode: number };
+
+      if (result.exitCode === 0) {
+        alert(`Credentials captured successfully.\n\n${result.output}`);
+      } else if (result.exitCode === 2) {
+        alert(`No credentials found yet.\n\nAuthenticate first (e.g., run 'agy' inside the container), then try again.\n\n${result.output}`);
+      } else {
+        alert(`Capture failed (exit ${result.exitCode}).\n\n${result.output}`);
+      }
+    } catch (err) {
+      console.error('Failed to capture auth:', err);
+      alert(err instanceof Error ? err.message : 'Failed to capture auth');
+    } finally {
+      this.captureAuthLoading = false;
+    }
+  }
+
   private handleReconnect(): void {
     this.cleanup();
     void this.loadAgentInfo();
@@ -820,6 +894,18 @@ export class ScionPageTerminal extends LitElement {
           >${this.renderTerminalIcon()}</button>
         </div>
         <div class="spacer"></div>
+        ${this.showCaptureAuth
+          ? html`
+              <button
+                class="capture-auth-btn"
+                ?disabled=${this.captureAuthLoading}
+                @click=${() => this.handleCaptureAuth()}
+                title="Capture credentials from inside the container"
+              >
+                ${this.captureAuthLoading ? 'Capturing...' : 'Capture Auth'}
+              </button>
+            `
+          : ''}
         <scion-status-badge
           status=${this.agentDisplayStatus as StatusType}
           size="small"

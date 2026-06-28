@@ -879,50 +879,6 @@ export class ScionPageAgentDetail extends LitElement {
     }
   }
 
-  private shouldShowCaptureAuth(agent: Agent | null): boolean {
-    if (!agent) return false;
-    if (agent.phase !== 'running') return false;
-    const isNoAuth = agent.appliedConfig?.noAuth === true || agent.harnessAuth === 'none';
-    return isNoAuth && !!agent.resolvedHarness;
-  }
-
-  private async handleCaptureAuth(): Promise<void> {
-    if (!this.agent) return;
-    this.actionLoading = { ...this.actionLoading, 'capture-auth': true };
-    try {
-      const response = await apiFetch(`/api/v1/agents/${this.agent.id}/exec`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          command: ['python3', '/home/scion/.scion/harness/capture_auth.py'],
-          timeout: 60,
-        }),
-      });
-
-      if (!response.ok) {
-        const msg = await extractApiError(response, 'Failed to run capture auth');
-        alert(msg);
-        return;
-      }
-
-      const result = await response.json() as { output: string; exitCode: number };
-
-      if (result.exitCode === 0) {
-        alert(`Credentials captured successfully.\n\n${result.output}`);
-        await this.fetchAndMergeAgent();
-      } else if (result.exitCode === 2) {
-        alert(`No credentials found yet.\n\nAuthenticate first (e.g., run 'agy' inside the container), then try again.\n\n${result.output}`);
-      } else {
-        alert(`Capture failed (exit ${result.exitCode}).\n\n${result.output}`);
-      }
-    } catch (err) {
-      console.error('Failed to capture auth:', err);
-      alert(err instanceof Error ? err.message : 'Failed to capture auth');
-    } finally {
-      this.actionLoading = { ...this.actionLoading, 'capture-auth': false };
-    }
-  }
-
   private backgroundRefresh(): void {
     this.fetchAndMergeAgent().catch((err) => {
       console.warn('Background refresh failed:', err);
@@ -1141,22 +1097,6 @@ export class ScionPageAgentDetail extends LitElement {
                     Configure
                   </sl-button>
                 </a>
-              `
-            : nothing}
-          ${this.shouldShowCaptureAuth(agent)
-            ? html`
-                <sl-tooltip content="Capture credentials from inside the container">
-                  <sl-button
-                    variant="neutral"
-                    size="small"
-                    ?loading=${this.actionLoading['capture-auth']}
-                    ?disabled=${this.actionLoading['capture-auth']}
-                    @click=${() => this.handleCaptureAuth()}
-                  >
-                    <sl-icon slot="prefix" name="key"></sl-icon>
-                    Capture Auth
-                  </sl-button>
-                </sl-tooltip>
               `
             : nothing}
           ${isAgentRunning(agent)
