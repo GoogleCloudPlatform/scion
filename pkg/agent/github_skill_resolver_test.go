@@ -261,15 +261,15 @@ func TestGitHubSkillResolver_RetryOn429(t *testing.T) {
 			w.WriteHeader(http.StatusTooManyRequests)
 			return
 		}
-		w.Write([]byte(testCommitSHA))
+		_, _ = w.Write([]byte(testCommitSHA))
 	})
 	mux.HandleFunc("/repos/owner/repo/contents/skills/my-skill", func(w http.ResponseWriter, _ *http.Request) {
-		json.NewEncoder(w).Encode([]githubContentEntry{
+		_ = json.NewEncoder(w).Encode([]githubContentEntry{
 			{Name: "SKILL.md", Path: "skills/my-skill/SKILL.md", Type: "file", Size: 5},
 		})
 	})
 	mux.HandleFunc("/raw/owner/repo/"+testCommitSHA+"/skills/my-skill/SKILL.md", func(w http.ResponseWriter, _ *http.Request) {
-		w.Write([]byte("hello"))
+		_, _ = w.Write([]byte("hello"))
 	})
 
 	resolver := newTestGitHubResolver(server)
@@ -302,15 +302,15 @@ func TestGitHubSkillResolver_RetryOn5xx(t *testing.T) {
 			w.WriteHeader(http.StatusServiceUnavailable)
 			return
 		}
-		w.Write([]byte(testCommitSHA))
+		_, _ = w.Write([]byte(testCommitSHA))
 	})
 	mux.HandleFunc("/repos/owner/repo/contents/skills/my-skill", func(w http.ResponseWriter, _ *http.Request) {
-		json.NewEncoder(w).Encode([]githubContentEntry{
+		_ = json.NewEncoder(w).Encode([]githubContentEntry{
 			{Name: "SKILL.md", Path: "skills/my-skill/SKILL.md", Type: "file", Size: 5},
 		})
 	})
 	mux.HandleFunc("/raw/owner/repo/"+testCommitSHA+"/skills/my-skill/SKILL.md", func(w http.ResponseWriter, _ *http.Request) {
-		w.Write([]byte("hello"))
+		_, _ = w.Write([]byte("hello"))
 	})
 
 	resolver := newTestGitHubResolver(server)
@@ -336,17 +336,17 @@ func TestGitHubSkillResolver_ResolutionCacheHit(t *testing.T) {
 
 	mux.HandleFunc("/repos/owner/repo/commits/main", func(w http.ResponseWriter, _ *http.Request) {
 		apiCalls++
-		w.Write([]byte(testCommitSHA))
+		_, _ = w.Write([]byte(testCommitSHA))
 	})
 	mux.HandleFunc("/repos/owner/repo/contents/skills/my-skill", func(w http.ResponseWriter, _ *http.Request) {
 		apiCalls++
-		json.NewEncoder(w).Encode([]githubContentEntry{
+		_ = json.NewEncoder(w).Encode([]githubContentEntry{
 			{Name: "SKILL.md", Path: "skills/my-skill/SKILL.md", Type: "file", Size: 5},
 		})
 	})
 	mux.HandleFunc("/raw/owner/repo/"+testCommitSHA+"/skills/my-skill/SKILL.md", func(w http.ResponseWriter, _ *http.Request) {
 		apiCalls++
-		w.Write([]byte("hello"))
+		_, _ = w.Write([]byte("hello"))
 	})
 
 	resolver := newTestGitHubResolver(server)
