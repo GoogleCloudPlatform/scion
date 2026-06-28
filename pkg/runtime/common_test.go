@@ -1337,11 +1337,16 @@ func TestSerializeSecrets_DeduplicatesByTarget(t *testing.T) {
 		t.Fatalf("DecodeStagedSecrets failed: %v", err)
 	}
 
-	// All three file entries are kept (the two with the same target plus the
-	// unique one). WriteStagedSecrets writes sequentially so the last entry
-	// for a given target path wins on disk.
-	if len(staged.FileSecrets) != 3 {
-		t.Fatalf("expected 3 file secrets, got %d", len(staged.FileSecrets))
+	// Duplicate targets are deduplicated (last entry wins), so we should have
+	// 2 entries: one for /tmp/my-secret.json (project-cert) and one for /tmp/other.json.
+	if len(staged.FileSecrets) != 2 {
+		t.Fatalf("expected 2 file secrets after dedup, got %d", len(staged.FileSecrets))
+	}
+	if staged.FileSecrets[0].Name != "project-cert" {
+		t.Errorf("expected project-cert to win for duplicate target, got %s", staged.FileSecrets[0].Name)
+	}
+	if staged.FileSecrets[1].Name != "other-file" {
+		t.Errorf("expected other-file as second entry, got %s", staged.FileSecrets[1].Name)
 	}
 }
 

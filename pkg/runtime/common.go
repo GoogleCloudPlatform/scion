@@ -529,6 +529,8 @@ func runInteractiveCommand(command string, args ...string) error {
 	return cmd.Run()
 }
 
+// TODO(#284): remove once Phase 2 eliminates remaining bind-mount usage
+//
 // insertVolumeFlags inserts -v flags for the given mount specs before the image
 // in an args slice. This ensures volume mounts appear as runtime flags rather
 // than being appended after the image and container command.
@@ -818,18 +820,13 @@ type StagedSecrets struct {
 func serializeSecrets(containerHome string, secrets []api.ResolvedSecret) (string, error) {
 	var staged StagedSecrets
 
-	// Collect file secrets, deduplicating by container target path.
-	seen := make(map[string]bool)
+	// Collect file secrets, deduplicating by container target path (last wins).
+	targetIndex := make(map[string]int) // target → index in FileSecrets
 	for _, s := range secrets {
 		if s.Type != "file" {
 			continue
 		}
 		target := expandTildeTarget(s.Target, containerHome)
-		if seen[target] {
-			slog.Warn("serializeSecrets: duplicate container target, keeping later entry",
-				"target", target, "kept", s.Name)
-		}
-		seen[target] = true
 
 		// Re-encode raw values as base64 for uniform handling on the container side.
 		val := s.Value
@@ -837,11 +834,21 @@ func serializeSecrets(containerHome string, secrets []api.ResolvedSecret) (strin
 			val = base64.StdEncoding.EncodeToString([]byte(val))
 		}
 
-		staged.FileSecrets = append(staged.FileSecrets, StagedFileSecret{
+		entry := StagedFileSecret{
 			Name:   s.Name,
 			Target: target,
 			Value:  val,
-		})
+		}
+
+		if idx, exists := targetIndex[target]; exists {
+			slog.Warn("serializeSecrets: duplicate container target, keeping later entry",
+				"target", target, "kept", s.Name,
+				"replaced", staged.FileSecrets[idx].Name)
+			staged.FileSecrets[idx] = entry
+		} else {
+			targetIndex[target] = len(staged.FileSecrets)
+			staged.FileSecrets = append(staged.FileSecrets, entry)
+		}
 	}
 
 	// Collect variable secrets.

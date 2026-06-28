@@ -187,11 +187,19 @@ func TestSerializeSecrets_DuplicateTargetKeepsLater(t *testing.T) {
 		t.Fatalf("DecodeStagedSecrets failed: %v", err)
 	}
 
-	// Dedup keeps both entries (last one wins on write), but the slice should
-	// contain both — WriteStagedSecrets writes them sequentially so the last
-	// one's content prevails on disk.
-	if len(staged.FileSecrets) != 2 {
-		t.Fatalf("expected 2 file secrets (dedup keeps all, last wins on write), got %d", len(staged.FileSecrets))
+	// Dedup should keep only one entry per target (last wins).
+	if len(staged.FileSecrets) != 1 {
+		t.Fatalf("expected 1 file secret after dedup, got %d", len(staged.FileSecrets))
+	}
+	if staged.FileSecrets[0].Name != "CERT_V2" {
+		t.Errorf("expected CERT_V2 to win, got %s", staged.FileSecrets[0].Name)
+	}
+	data, err := base64.StdEncoding.DecodeString(staged.FileSecrets[0].Value)
+	if err != nil {
+		t.Fatalf("failed to decode value: %v", err)
+	}
+	if string(data) != "v2" {
+		t.Errorf("expected v2 content, got %q", string(data))
 	}
 }
 
