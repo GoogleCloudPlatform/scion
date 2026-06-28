@@ -142,6 +142,9 @@ type WebServerConfig struct {
 	// for integration testing. Disabled by default; must never be enabled
 	// in production.
 	EnableTestLogin bool
+	// ProxyAuthenticator verifies proxy-supplied assertions (e.g., IAP JWT).
+	// Required when AuthMode == "proxy".
+	ProxyAuthenticator ProxyAuthenticator
 }
 
 // WebServer serves the web frontend SPA shell and static assets.
@@ -1240,6 +1243,159 @@ func (ws *WebServer) devAuthMiddleware(next http.Handler) http.Handler {
 	})
 }
 
+// proxyAuthMiddleware auto-creates a web session from a verified proxy assertion
+// (e.g. Google IAP signed JWT). It runs before sessionAuthMiddleware so that
+// IAP-authenticated users never see the login page.
+//
+// When AuthMode != "proxy" or no ProxyAuthenticator is configured, this is a no-op.
+// If the user already has a valid session cookie, the proxy assertion is not
+// re-verified — the session acts as a short-lived cache.
+func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
+	if ws.config.AuthMode != "proxy" || ws.config.ProxyAuthenticator == nil {
+		return next // no-op when not in proxy mode
+	}
+
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Skip public routes (login page, assets, API, etc.)
+		if isPublicRoute(r.URL.Path) {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		// If user already in context (e.g., set by devAuthMiddleware), proceed
+		if getWebSessionUser(r.Context()) != nil {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		// If user already has a valid session, skip proxy verification
+		session, err := ws.sessionStore.Get(r, webSessionName)
+		if err != nil {
+			session, _ = ws.sessionStore.New(r, webSessionName)
+		}
+		if uid, ok := session.Values[sessKeyUserID].(string); ok && uid != "" {
+			// Session exists — let sessionAuthMiddleware handle it
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		// No session — try proxy authentication
+		proxyUser, proxyErr := ws.config.ProxyAuthenticator.Authenticate(r)
+		if proxyErr != nil {
+			// Assertion present but invalid — reject
+			slog.Warn("Proxy auth rejected in web middleware",
+				"provider", ws.config.ProxyAuthenticator.Name(),
+				"error", proxyErr,
+				"path", r.URL.Path)
+			http.Error(w, "invalid proxy assertion: "+proxyErr.Error(), http.StatusUnauthorized)
+			return
+		}
+		if proxyUser == nil {
+			// No assertion present — fall through to sessionAuthMiddleware
+			// (which will redirect to login)
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		// Verified proxy identity — check authorization and provision/lookup user
+		ctx := r.Context()
+		if ws.store == nil {
+			slog.Error("Proxy auth: store not configured")
+			http.Error(w, "internal server error", http.StatusInternalServerError)
+			return
+		}
+
+		if !checkUserAuthorized(ctx, proxyUser.Email, ws.config.AuthorizedDomains, ws.config.AdminEmails, ws.config.UserAccessMode, ws.store) {
+			slog.Warn("Proxy auth: user not authorized", "email", proxyUser.Email)
+			http.Error(w, "access denied: email not authorized", http.StatusForbidden)
+			return
+		}
+
+		// Find or create user (same pattern as handleOAuthCallback)
+		user, err := ws.store.GetUserByEmail(ctx, proxyUser.Email)
+		if err != nil {
+			// Create new user
+			role := determineUserRole(proxyUser.Email, ws.config.AdminEmails)
+			user = &store.User{
+				ID:          generateID(),
+				Email:       proxyUser.Email,
+				DisplayName: proxyUser.DisplayName,
+				AvatarURL:   "",
+				Role:        role,
+				Status:      "active",
+				Created:     time.Now(),
+				LastLogin:   time.Now(),
+			}
+			if err := ws.store.CreateUser(ctx, user); err != nil {
+				slog.Error("Proxy auth: failed to create user", "email", proxyUser.Email, "error", err)
+				http.Error(w, "internal server error", http.StatusInternalServerError)
+				return
+			}
+			slog.Info("Proxy auth: created new user", "email", proxyUser.Email, "user_id", user.ID)
+		} else {
+			// Reject suspended users
+			if user.Status == "suspended" {
+				slog.Warn("Proxy auth: user is suspended", "email", proxyUser.Email, "user_id", user.ID)
+				http.Error(w, "access denied: user account is suspended", http.StatusForbidden)
+				return
+			}
+			// Update last login and backfill profile
+			user.LastLogin = time.Now()
+			if proxyUser.DisplayName != "" && user.DisplayName == "" {
+				user.DisplayName = proxyUser.DisplayName
+			}
+			// Promote to admin if config changed
+			if user.Role != "admin" && determineUserRole(proxyUser.Email, ws.config.AdminEmails) == "admin" {
+				user.Role = "admin"
+			}
+			_ = ws.store.UpdateUser(ctx, user)
+		}
+
+		// Ensure hub membership
+		ensureHubMembership(ctx, ws.store, user.ID)
+
+		// Generate Hub JWT tokens (mirrors devAuthMiddleware / handleOAuthCallback)
+		if ws.userTokenSvc != nil {
+			accessToken, refreshToken, expiresIn, err := ws.userTokenSvc.GenerateTokenPair(
+				user.ID, user.Email, user.DisplayName, user.Role, ClientTypeWeb,
+			)
+			if err == nil {
+				session.Values[sessKeyHubAccessToken] = accessToken
+				session.Values[sessKeyHubRefreshToken] = refreshToken
+				session.Values[sessKeyHubTokenExpiry] = time.Now().Add(time.Duration(expiresIn) * time.Second).UnixMilli()
+			} else {
+				slog.Warn("Proxy auth: failed to generate Hub tokens", "error", err)
+			}
+		}
+
+		// Populate session
+		session.Values[sessKeyUserID] = user.ID
+		session.Values[sessKeyUserEmail] = user.Email
+		session.Values[sessKeyUserName] = user.DisplayName
+		session.Values[sessKeyUserAvatar] = user.AvatarURL
+		session.Values[sessKeyUserRole] = user.Role
+
+		if err := session.Save(r, w); err != nil {
+			slog.Error("Proxy auth: failed to save session", "error", err)
+		}
+
+		slog.Info("Proxy auth: session created",
+			"provider", ws.config.ProxyAuthenticator.Name(),
+			"email", user.Email,
+			"user_id", user.ID)
+
+		webUser := &webSessionUser{
+			UserID:    user.ID,
+			Email:     user.Email,
+			Name:      user.DisplayName,
+			AvatarURL: user.AvatarURL,
+			Role:      user.Role,
+		}
+		ctx = context.WithValue(ctx, webUserContextKey{}, webUser)
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
 // sessionAuthMiddleware protects web routes by requiring an authenticated session.
 func (ws *WebServer) sessionAuthMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1715,6 +1871,9 @@ func (ws *WebServer) buildHandler() http.Handler {
 
 	// Session auth middleware (loads session user into context, redirects to login)
 	handler = ws.sessionAuthMiddleware(handler)
+
+	// Proxy auth middleware (auto-creates session from IAP assertions in proxy mode)
+	handler = ws.proxyAuthMiddleware(handler)
 
 	// Dev-auth middleware (auto-populates session when dev token configured)
 	handler = ws.devAuthMiddleware(handler)

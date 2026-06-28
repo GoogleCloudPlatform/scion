@@ -1313,6 +1313,22 @@ func initWebServer(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Se
 		webAdminEmails = cfg.Hub.AdminEmails
 	}
 
+	// Construct proxy authenticator for the web server when auth mode is "proxy".
+	// This mirrors the construction in initHubServer — both need the same authenticator.
+	var webProxyAuth hub.ProxyAuthenticator
+	if cfg.Auth.Mode == "proxy" && cfg.Auth.Proxy != nil {
+		switch cfg.Auth.Proxy.Provider {
+		case "iap":
+			if cfg.Auth.Proxy.IAP != nil && cfg.Auth.Proxy.IAP.Audience != "" {
+				webProxyAuth = &hub.IAPAuthenticator{
+					Audience: cfg.Auth.Proxy.IAP.Audience,
+					Issuer:   cfg.Auth.Proxy.IAP.Issuer,
+					JWKSURL:  cfg.Auth.Proxy.IAP.JWKSURL,
+				}
+			}
+		}
+	}
+
 	webCfg := hub.WebServerConfig{
 		Port:               webPort,
 		Host:               webHost,
@@ -1328,6 +1344,7 @@ func initWebServer(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Se
 		AdminMode:          adminMode,
 		MaintenanceMessage: maintenanceMessage,
 		EnableTestLogin:    enableTestLogin,
+		ProxyAuthenticator: webProxyAuth,
 	}
 	if enableTestLogin {
 		slog.Warn("Test login endpoint is enabled (--enable-test-login). This allows bypass of authentication and MUST NOT be used in production!")

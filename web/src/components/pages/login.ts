@@ -60,6 +60,12 @@ export class ScionLoginPage extends LitElement {
   private githubEnabled = false;
 
   /**
+   * Whether the server is in proxy auth mode (e.g., behind IAP)
+   */
+  @state()
+  private _proxyMode = false;
+
+  /**
    * Whether provider config is still loading
    */
   @state()
@@ -326,9 +332,10 @@ export class ScionLoginPage extends LitElement {
     try {
       const resp = await fetch('/auth/providers');
       if (resp.ok) {
-        const data = (await resp.json()) as Record<string, boolean>;
+        const data = (await resp.json()) as Record<string, unknown>;
         this.googleEnabled = !!data.google;
         this.githubEnabled = !!data.github;
+        this._proxyMode = data.authMode === 'proxy';
       }
     } catch {
       // If the fetch fails, leave providers disabled
@@ -376,14 +383,21 @@ export class ScionLoginPage extends LitElement {
           : ''}
 
         <div class="providers">
-          ${hasProviders
-            ? providers.map((provider) => this.renderProvider(provider))
-            : html`
+          ${this._proxyMode
+            ? html`
                 <div class="no-providers">
-                  <p>No authentication providers configured.</p>
-                  <p>Please configure OAuth credentials in the server settings.</p>
+                  <p>Authentication is handled by your organization's identity provider.</p>
+                  <p>If you continue to see this page, the authenticating proxy may not be configured correctly.</p>
                 </div>
-              `}
+              `
+            : hasProviders
+              ? providers.map((provider) => this.renderProvider(provider))
+              : html`
+                  <div class="no-providers">
+                    <p>No authentication providers configured.</p>
+                    <p>Please configure OAuth credentials in the server settings.</p>
+                  </div>
+                `}
         </div>
 
         <div class="footer">

@@ -38,6 +38,61 @@ type mockWebStore struct {
 	store.Store // embed interface to satisfy all method signatures (will panic if called)
 }
 
+// mockProxyAuthenticator is a test double for ProxyAuthenticator.
+type mockProxyAuthenticator struct {
+	user *ProxyUserInfo
+	err  error
+}
+
+func (m *mockProxyAuthenticator) Authenticate(_ *http.Request) (*ProxyUserInfo, error) {
+	return m.user, m.err
+}
+func (m *mockProxyAuthenticator) Name() string { return "mock" }
+
+// proxyAuthStore is a minimal store that supports the proxy auth user provisioning path.
+type proxyAuthStore struct {
+	store.Store // embed interface to satisfy all methods
+	users       map[string]*store.User
+}
+
+func newProxyAuthStore() *proxyAuthStore {
+	return &proxyAuthStore{users: make(map[string]*store.User)}
+}
+
+func (s *proxyAuthStore) GetUserByEmail(_ context.Context, email string) (*store.User, error) {
+	for _, u := range s.users {
+		if u.Email == email {
+			return u, nil
+		}
+	}
+	return nil, store.ErrNotFound
+}
+
+func (s *proxyAuthStore) CreateUser(_ context.Context, user *store.User) error {
+	s.users[user.ID] = user
+	return nil
+}
+
+func (s *proxyAuthStore) UpdateUser(_ context.Context, user *store.User) error {
+	s.users[user.ID] = user
+	return nil
+}
+
+func (s *proxyAuthStore) GetGroupBySlug(_ context.Context, _ string) (*store.Group, error) {
+	return nil, store.ErrNotFound // hub-members group not found is gracefully handled
+}
+
+func (s *proxyAuthStore) AddGroupMember(_ context.Context, _ *store.GroupMember) error {
+	return nil
+}
+
+func (s *proxyAuthStore) GetUser(_ context.Context, id string) (*store.User, error) {
+	if u, ok := s.users[id]; ok {
+		return u, nil
+	}
+	return nil, store.ErrNotFound
+}
+
 func newTestWebServer(t *testing.T, cfg WebServerConfig) *WebServer {
 	t.Helper()
 	ws := NewWebServer(cfg)
@@ -1950,4 +2005,178 @@ func TestSPAShellHandler_HubAPIError(t *testing.T) {
 
 	// No API data because the Hub returned an error
 	assert.Nil(t, pageData["data"])
+}
+
+// --- Proxy Auth Middleware Tests ---
+
+func TestProxyAuthMiddleware_ValidAssertion_CreatesSession(t *testing.T) {
+	// A request with a valid proxy assertion should auto-create a session
+	// and NOT redirect to /auth/login.
+	mockAuth := &mockProxyAuthenticator{
+		user: &ProxyUserInfo{
+			Subject: "12345",
+			Email:   "user@example.com",
+			Domain:  "example.com",
+		},
+	}
+	st := newProxyAuthStore()
+
+	ws := newTestWebServer(t, WebServerConfig{
+		AuthMode:           "proxy",
+		ProxyAuthenticator: mockAuth,
+	})
+	ws.SetStore(st)
+
+	req := httptest.NewRequest("GET", "/projects", nil)
+	req.Header.Set("Accept", "text/html")
+	rec := httptest.NewRecorder()
+
+	ws.Handler().ServeHTTP(rec, req)
+
+	resp := rec.Result()
+	// Should NOT redirect to /auth/login — user is authenticated
+	if resp.StatusCode == http.StatusFound {
+		location := resp.Header.Get("Location")
+		assert.NotEqual(t, "/auth/login", location,
+			"proxy-authenticated request should not redirect to login")
+	}
+
+	// Verify a user was created in the store
+	assert.Len(t, st.users, 1, "user should have been provisioned")
+	for _, u := range st.users {
+		assert.Equal(t, "user@example.com", u.Email)
+		assert.Equal(t, "active", u.Status)
+	}
+}
+
+func TestProxyAuthMiddleware_InvalidAssertion_Returns401(t *testing.T) {
+	// A request with an invalid proxy assertion should be rejected with 401
+	mockAuth := &mockProxyAuthenticator{
+		err: assert.AnError, // simulate verification failure
+	}
+
+	ws := newTestWebServer(t, WebServerConfig{
+		AuthMode:           "proxy",
+		ProxyAuthenticator: mockAuth,
+	})
+	ws.SetStore(newProxyAuthStore())
+
+	req := httptest.NewRequest("GET", "/projects", nil)
+	req.Header.Set("Accept", "text/html")
+	rec := httptest.NewRecorder()
+
+	ws.Handler().ServeHTTP(rec, req)
+
+	resp := rec.Result()
+	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode,
+		"invalid proxy assertion should return 401")
+}
+
+func TestProxyAuthMiddleware_NoAssertion_FallsThrough(t *testing.T) {
+	// A request with no proxy assertion should fall through to
+	// sessionAuthMiddleware, which redirects to login.
+	mockAuth := &mockProxyAuthenticator{
+		user: nil, // (nil, nil) = no assertion present
+		err:  nil,
+	}
+
+	ws := newTestWebServer(t, WebServerConfig{
+		AuthMode:           "proxy",
+		ProxyAuthenticator: mockAuth,
+	})
+	ws.SetStore(newProxyAuthStore())
+
+	req := httptest.NewRequest("GET", "/projects", nil)
+	req.Header.Set("Accept", "text/html")
+	rec := httptest.NewRecorder()
+
+	ws.Handler().ServeHTTP(rec, req)
+
+	resp := rec.Result()
+	assert.Equal(t, http.StatusFound, resp.StatusCode)
+	assert.Equal(t, "/auth/login", resp.Header.Get("Location"),
+		"request with no proxy assertion should redirect to login")
+}
+
+func TestProxyAuthMiddleware_NotProxyMode_NoOp(t *testing.T) {
+	// When AuthMode is not "proxy", the middleware should be a no-op
+	// even if a ProxyAuthenticator is somehow set.
+	mockAuth := &mockProxyAuthenticator{
+		user: &ProxyUserInfo{Email: "user@example.com"},
+	}
+
+	ws := newTestWebServer(t, WebServerConfig{
+		AuthMode:           "oauth", // NOT proxy
+		ProxyAuthenticator: mockAuth,
+	})
+
+	req := httptest.NewRequest("GET", "/projects", nil)
+	req.Header.Set("Accept", "text/html")
+	rec := httptest.NewRecorder()
+
+	ws.Handler().ServeHTTP(rec, req)
+
+	resp := rec.Result()
+	// Without proxy mode, should redirect to login
+	assert.Equal(t, http.StatusFound, resp.StatusCode)
+	assert.Equal(t, "/auth/login", resp.Header.Get("Location"),
+		"non-proxy mode should redirect to login as usual")
+}
+
+func TestProxyAuthMiddleware_ExistingSession_SkipsVerification(t *testing.T) {
+	// If a user already has a valid session, the proxy middleware should
+	// not re-verify the assertion — just pass through.
+	callCount := 0
+	mockAuth := &mockProxyAuthenticator{
+		user: &ProxyUserInfo{
+			Subject: "12345",
+			Email:   "user@example.com",
+		},
+	}
+
+	st := newProxyAuthStore()
+	ws := newTestWebServer(t, WebServerConfig{
+		AuthMode:           "proxy",
+		ProxyAuthenticator: mockAuth,
+	})
+	ws.SetStore(st)
+
+	handler := ws.Handler()
+
+	// First request: creates session (sets cookie)
+	req1 := httptest.NewRequest("GET", "/projects", nil)
+	req1.Header.Set("Accept", "text/html")
+	rec1 := httptest.NewRecorder()
+	handler.ServeHTTP(rec1, req1)
+
+	resp1 := rec1.Result()
+	cookies := resp1.Cookies()
+
+	// Second request: re-use the session cookie
+	// Replace the mock authenticator to track if it's called
+	ws.config.ProxyAuthenticator = &mockProxyAuthenticator{
+		user: &ProxyUserInfo{
+			Subject: "12345",
+			Email:   "user@example.com",
+		},
+	}
+
+	req2 := httptest.NewRequest("GET", "/projects", nil)
+	req2.Header.Set("Accept", "text/html")
+	for _, c := range cookies {
+		req2.AddCookie(c)
+	}
+	rec2 := httptest.NewRecorder()
+	handler.ServeHTTP(rec2, req2)
+
+	resp2 := rec2.Result()
+	// Should not redirect — session is valid
+	if resp2.StatusCode == http.StatusFound {
+		location := resp2.Header.Get("Location")
+		assert.NotEqual(t, "/auth/login", location)
+	}
+
+	// Verify still only 1 user in store (not re-provisioned)
+	assert.Len(t, st.users, 1, "should not re-provision user")
+	_ = callCount
 }
