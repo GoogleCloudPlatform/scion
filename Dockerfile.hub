@@ -1,10 +1,15 @@
-# Stage 1: Build the Scion Hub binary
-FROM golang:1.22-alpine AS builder
+# Stage 1: Build the web frontend assets
+FROM node:22-alpine AS frontend
+WORKDIR /web
+COPY web/package.json web/package-lock.json ./
+RUN npm ci
+COPY web/ .
+RUN npm run build
+
+# Stage 2: Build the Scion Hub binary (with embedded web assets)
+FROM golang:1.26.1-alpine AS builder
 WORKDIR /app
-# Disable workspace mode if needed, though usually just copying files works
 ENV GOWORK=off
-# Install build dependencies if needed
-# RUN apk add --no-cache gcc musl-dev
 
 # Copy go mod and sum files
 COPY go.mod go.sum ./
@@ -13,15 +18,18 @@ RUN go mod download
 # Copy the rest of the source code
 COPY . .
 
-# Build the application
+# Copy built frontend assets into the embed location
+COPY --from=frontend /web/dist/client web/dist/client
+
+# Build the application (without no_embed_web tag so assets are embedded)
 RUN go build -o /scion ./cmd/scion/
 
-# Stage 2: Create a minimal runtime image
+# Stage 3: Create a minimal runtime image
 FROM debian:bookworm-slim
 WORKDIR /app
 
-# Install necessary runtime dependencies, like ca-certificates
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
+# Install runtime dependencies used by the Hub broker and Cloud Run IAP exec path.
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates git openssh-client && rm -rf /var/lib/apt/lists/*
 
 # Copy the binary from the builder stage
 COPY --from=builder /scion /usr/local/bin/scion
