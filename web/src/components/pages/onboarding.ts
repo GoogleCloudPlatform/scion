@@ -933,7 +933,7 @@ export class ScionPageOnboarding extends LitElement {
       const res = await apiFetch('/api/v1/harness-configs?scope=global&status=active');
       if (!res.ok) return;
       const data = (await res.json()) as { harnessConfigs: Array<HarnessConfigInfo & { _capabilities?: unknown }> };
-      const builtinSlugs = new Set(['claude', 'gemini', 'codex', 'opencode']);
+      const builtinSlugs = new Set(['claude', 'gemini']);
       this.importedHarnessConfigs = data.harnessConfigs.filter(hc => !builtinSlugs.has(hc.slug));
     } catch { /* ignore */ }
   }
@@ -1412,8 +1412,8 @@ export class ScionPageOnboarding extends LitElement {
         if (data.builds.length > 1) {
           this.buildLogs = [...this.buildLogs, `=== Building ${build.harness} ===`];
         }
-        await this.pollHarnessConfigBuild(build.runId, build.harness);
       }
+      await Promise.all(data.builds.map(build => this.pollHarnessConfigBuild(build.runId, build.harness)));
     } catch {
       this.error = 'Failed to connect to the server.';
     } finally {
@@ -1584,7 +1584,7 @@ export class ScionPageOnboarding extends LitElement {
   }
 
   private hasDockerfile(hc: HarnessConfigInfo): boolean {
-    return hc.files?.some(f => f.path === 'Dockerfile' || f.path.endsWith('/Dockerfile')) ?? false;
+    return hc.files?.some(f => f.path === 'Dockerfile') ?? false;
   }
 
   private getImportedImages(): Array<{ slug: string; image: string; hasDockerfile: boolean }> {

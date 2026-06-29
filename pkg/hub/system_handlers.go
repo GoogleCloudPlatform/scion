@@ -793,9 +793,9 @@ func (s *Server) handleSystemImagesBuildFromConfigs(w http.ResponseWriter, r *ht
 
 		resp.Builds = append(resp.Builds, configBuildResult{Harness: name, RunID: runID})
 
-		go func(hcID, runID string, run *store.MaintenanceOperationRun) {
+		go func(hcID, runID string, run *store.MaintenanceOperationRun, exec *BuildHarnessConfigImageExecutor) {
 			var buf bytes.Buffer
-			execErr := executor.Run(context.Background(), &buf, map[string]string{
+			execErr := exec.Run(context.Background(), &buf, map[string]string{
 				"harness_config_id": hcID,
 				"tag":               "latest",
 			})
@@ -814,7 +814,7 @@ func (s *Server) handleSystemImagesBuildFromConfigs(w http.ResponseWriter, r *ht
 			if err := s.store.UpdateMaintenanceRun(context.Background(), run); err != nil {
 				slog.Error("failed to update maintenance run", "run_id", runID, "error", err)
 			}
-		}(hc.ID, runID, run)
+		}(hc.ID, runID, run, executor)
 	}
 
 	writeJSON(w, http.StatusOK, resp)
