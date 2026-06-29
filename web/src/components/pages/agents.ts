@@ -427,9 +427,15 @@ export class ScionPageAgents extends LitElement {
   }
 
   private async fetchAndMergeAgents(): Promise<void> {
-    const url = this.agentScope !== 'all'
-      ? `/api/v1/agents?scope=${this.agentScope}`
-      : '/api/v1/agents';
+    const params = new URLSearchParams();
+    if (this.agentScope !== 'all') {
+      params.set('scope', this.agentScope);
+    }
+    if (this.labelFilter.trim() && this.labelFilter.includes('=')) {
+      params.append('label', this.labelFilter.trim());
+    }
+    const qs = params.toString();
+    const url = qs ? `/api/v1/agents?${qs}` : '/api/v1/agents';
     const response = await apiFetch(url);
 
     if (!response.ok) {
@@ -777,6 +783,8 @@ export class ScionPageAgents extends LitElement {
           @sl-input=${(e: Event) => {
             this.labelFilter = (e.target as HTMLElement & { value: string }).value;
           }}
+          @sl-change=${() => void this.loadAgents()}
+          @sl-clear=${() => { this.labelFilter = ''; void this.loadAgents(); }}
           style="max-width: 220px;"
         >
           <sl-icon slot="prefix" name="tag"></sl-icon>

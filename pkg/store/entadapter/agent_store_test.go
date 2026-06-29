@@ -509,6 +509,10 @@ func TestAgentStore_LabelFiltering(t *testing.T) {
 	a4.Labels = nil
 	require.NoError(t, s.CreateAgent(ctx, a4))
 
+	a5 := makeAgent(projectID, "label-5")
+	a5.Labels = map[string]string{"scion.dev/role": "worker"}
+	require.NoError(t, s.CreateAgent(ctx, a5))
+
 	tests := []struct {
 		name     string
 		labels   map[string]string
@@ -532,7 +536,12 @@ func TestAgentStore_LabelFiltering(t *testing.T) {
 		{
 			name:    "empty filter returns all",
 			labels:  map[string]string{},
-			wantIDs: []string{a1.ID, a2.ID, a3.ID, a4.ID},
+			wantIDs: []string{a1.ID, a2.ID, a3.ID, a4.ID, a5.ID},
+		},
+		{
+			name:    "dotted key",
+			labels:  map[string]string{"scion.dev/role": "worker"},
+			wantIDs: []string{a5.ID},
 		},
 	}
 

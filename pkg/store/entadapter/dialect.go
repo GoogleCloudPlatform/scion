@@ -16,6 +16,7 @@ package entadapter
 
 import (
 	"fmt"
+	"strings"
 
 	"entgo.io/ent/dialect"
 	entsql "entgo.io/ent/dialect/sql"
@@ -27,12 +28,16 @@ import (
 // labelContains returns an Ent predicate restricting results to agents whose
 // `labels` JSON object contains the given key-value pair.
 //
-//	SQLite:   json_extract(labels, '$.key') = ?
+//	SQLite:   json_extract(labels, '$."key"') = ?
 //	Postgres: labels @> '{"key":"value"}'::jsonb
 //
 // The Postgres path embeds both key and value into the @> operand literal
 // (after quoting) to use the GIN-indexable containment operator. The SQLite
 // path uses json_extract with a parameterised value to avoid SQL injection.
+//
+// The SQLite json_path uses quoted-member syntax ($."key") so that keys
+// containing dots (e.g. "scion.dev/role") are treated as a single top-level
+// key rather than nested object traversal.
 func labelContains(key, value string) predicate.Agent {
 	return func(s *entsql.Selector) {
 		col := s.C(agent.FieldLabels)
@@ -46,10 +51,11 @@ func labelContains(key, value string) predicate.Agent {
 			}))
 		default: // SQLite
 			s.Where(entsql.P(func(b *entsql.Builder) {
+				escapedKey := strings.ReplaceAll(key, `"`, `\"`)
 				b.WriteString("json_extract(").
 					WriteString(col).
 					WriteString(", ").
-					Arg("$." + key).
+					Arg(fmt.Sprintf(`$."%s"`, escapedKey)).
 					WriteString(") = ").
 					Arg(value)
 			}))

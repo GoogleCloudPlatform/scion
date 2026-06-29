@@ -456,6 +456,16 @@ export class ScionPageAgentCreate extends LitElement {
     }
   }
 
+  private buildLabels(): Record<string, string> | undefined {
+    const valid = this.labelEntries.filter(l => l.key.trim());
+    if (valid.length === 0) return undefined;
+    const labels: Record<string, string> = {};
+    for (const l of valid) {
+      labels[l.key.trim()] = l.value.trim();
+    }
+    return labels;
+  }
+
   private async handleSubmit(_e: Event): Promise<void> {
     // Validate required fields
     if (!this.name.trim()) {
@@ -504,13 +514,9 @@ export class ScionPageAgentCreate extends LitElement {
         body.task = this.task.trim();
       }
 
-      const validLabels = this.labelEntries.filter(l => l.key.trim());
-      if (validLabels.length > 0) {
-        const labels: Record<string, string> = {};
-        for (const l of validLabels) {
-          labels[l.key.trim()] = l.value.trim();
-        }
-        body.labels = labels;
+      const builtLabels = this.buildLabels();
+      if (builtLabels) {
+        body.labels = builtLabels;
       }
 
       // GCP identity assignment
@@ -645,13 +651,9 @@ export class ScionPageAgentCreate extends LitElement {
         body.task = this.task.trim();
       }
 
-      const validLabels = this.labelEntries.filter(l => l.key.trim());
-      if (validLabels.length > 0) {
-        const labels: Record<string, string> = {};
-        for (const l of validLabels) {
-          labels[l.key.trim()] = l.value.trim();
-        }
-        body.labels = labels;
+      const builtLabels = this.buildLabels();
+      if (builtLabels) {
+        body.labels = builtLabels;
       }
 
       // GCP identity assignment

@@ -36,6 +36,26 @@ import (
 	gouuid "github.com/google/uuid"
 )
 
+// parseLabelFilters parses label=key=value query parameters into a map and
+// validates the resulting labels against constraint rules.
+func parseLabelFilters(params []string) (map[string]string, error) {
+	if len(params) == 0 {
+		return nil, nil
+	}
+	m := make(map[string]string, len(params))
+	for _, lp := range params {
+		k, v, ok := strings.Cut(lp, "=")
+		if !ok || k == "" {
+			return nil, fmt.Errorf("invalid label filter %q: must be key=value", lp)
+		}
+		m[k] = v
+	}
+	if err := labels.Validate(m); err != nil {
+		return nil, fmt.Errorf("invalid label filter: %w", err)
+	}
+	return m, nil
+}
+
 type ListAgentsResponse struct {
 	Agents       []AgentWithCapabilities `json:"agents"`
 	NextCursor   string                  `json:"nextCursor,omitempty"`
@@ -153,15 +173,12 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if labelParams := query["label"]; len(labelParams) > 0 {
-		filter.Labels = make(map[string]string, len(labelParams))
-		for _, lp := range labelParams {
-			k, v, ok := strings.Cut(lp, "=")
-			if !ok || k == "" {
-				BadRequest(w, fmt.Sprintf("Invalid label filter %q: must be key=value", lp))
-				return
-			}
-			filter.Labels[k] = v
+		parsed, err := parseLabelFilters(labelParams)
+		if err != nil {
+			BadRequest(w, err.Error())
+			return
 		}
+		filter.Labels = parsed
 	}
 
 	// scope=mine: agents the current user created

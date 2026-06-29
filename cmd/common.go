@@ -37,6 +37,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubsync"
+	"github.com/GoogleCloudPlatform/scion/pkg/labels"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
@@ -87,6 +88,9 @@ func parseLabels(raw []string) (map[string]string, error) {
 			return nil, fmt.Errorf("invalid label %q: must be key=value", s)
 		}
 		m[k] = v
+	}
+	if err := labels.Validate(m); err != nil {
+		return nil, fmt.Errorf("invalid label: %w", err)
 	}
 	return m, nil
 }

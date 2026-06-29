@@ -1610,15 +1610,12 @@ func (s *Server) listProjectAgents(w http.ResponseWriter, r *http.Request, proje
 	}
 
 	if labelParams := query["label"]; len(labelParams) > 0 {
-		filter.Labels = make(map[string]string, len(labelParams))
-		for _, lp := range labelParams {
-			k, v, ok := strings.Cut(lp, "=")
-			if !ok || k == "" {
-				BadRequest(w, fmt.Sprintf("Invalid label filter %q: must be key=value", lp))
-				return
-			}
-			filter.Labels[k] = v
+		parsed, err := parseLabelFilters(labelParams)
+		if err != nil {
+			BadRequest(w, err.Error())
+			return
 		}
+		filter.Labels = parsed
 	}
 
 	limit := 50
