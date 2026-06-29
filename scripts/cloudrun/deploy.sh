@@ -105,7 +105,9 @@ add_project_role() {
 }
 
 sed_escape() {
-  printf '%s' "$1" | sed -e 's/[\/&|\\]/\\&/g'
+  # Escape only \, &, and | (the delimiter used in render_settings).
+  # No need to escape / since we use | as the sed delimiter.
+  printf '%s' "$1" | sed -e 's/[\\&|]/\\&/g'
 }
 
 urlencode() {

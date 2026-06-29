@@ -733,7 +733,7 @@ func validateHostedHAPreflight(cfg *config.GlobalConfig) error {
 	if cfg.Auth.Proxy.IAP == nil || strings.TrimSpace(cfg.Auth.Proxy.IAP.Audience) == "" {
 		return fmt.Errorf("hosted production HA requires server.auth.proxy.iap.audience")
 	}
-	proxyAudience := strings.TrimSpace(cfg.Auth.Proxy.IAP.Audience)
+	proxyAudience := strings.TrimRight(strings.TrimSpace(cfg.Auth.Proxy.IAP.Audience), "/")
 	if !isCloudRunIAPAudience(proxyAudience) {
 		return fmt.Errorf("hosted production HA requires a Cloud Run native IAP audience (/projects/<number>/locations/<region>/services/<service>); got %q", proxyAudience)
 	}
@@ -744,7 +744,7 @@ func validateHostedHAPreflight(cfg *config.GlobalConfig) error {
 	if cfg.Auth.Transport.Mode != "iap" {
 		return fmt.Errorf("hosted production HA requires server.auth.transport.mode=iap; got %q", cfg.Auth.Transport.Mode)
 	}
-	transportAudience := strings.TrimSpace(cfg.Auth.Transport.OIDCAudience)
+	transportAudience := strings.TrimRight(strings.TrimSpace(cfg.Auth.Transport.OIDCAudience), "/")
 	if transportAudience == "" {
 		return fmt.Errorf("hosted production HA requires server.auth.transport.oidc_audience")
 	}
