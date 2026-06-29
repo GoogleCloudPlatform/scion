@@ -1249,6 +1249,7 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 		return nil, fmt.Errorf("hub server initialization failed: %w", err)
 	}
 	hubSrv.SetRequestLogger(requestLogger)
+	hubSrv.SetPluginManager(pluginMgr)
 	if messageLogger != nil {
 		hubSrv.SetMessageLogger(messageLogger)
 	}

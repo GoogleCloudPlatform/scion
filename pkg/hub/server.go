@@ -604,6 +604,9 @@ type Server struct {
 	// Discord link service for code-based account linking (nil = disabled)
 	discordLinkService *DiscordLinkService
 
+	// Plugin manager for broker integration admin API (nil = no integrations)
+	pluginManager IntegrationManager
+
 	// Channel registry for external notification delivery (nil = disabled)
 	channelRegistry *ChannelRegistry
 
@@ -1425,6 +1428,13 @@ func (s *Server) GetMessageBrokerProxy() *MessageBrokerProxy {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.messageBrokerProxy
+}
+
+// SetPluginManager sets the plugin manager for broker integration admin API.
+func (s *Server) SetPluginManager(m IntegrationManager) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.pluginManager = m
 }
 
 // logMessage logs a message dispatch event to the dedicated message logger
@@ -2623,6 +2633,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/admin/lifecycle-hooks", s.handleAdminLifecycleHooks)
 	s.mux.HandleFunc("/api/v1/admin/lifecycle-hooks/", s.handleAdminLifecycleHookByID)
 	s.mux.HandleFunc("/api/v1/admin/validate-resources", s.handleAdminValidateResources)
+	s.mux.HandleFunc("/api/v1/admin/integrations", s.handleAdminIntegrations)
+	s.mux.HandleFunc("/api/v1/admin/integrations/", s.handleAdminIntegrationByName)
 	s.mux.HandleFunc("/api/v1/metrics/", s.handleMetricsDashboard)
 	s.mux.HandleFunc("/api/v1/admin/metrics-dashboard", s.handleAdminMetricsDashboard) // legacy backward-compat
 
