@@ -217,6 +217,7 @@ func (s *Server) handleUpdateIntegrationConfig(w http.ResponseWriter, r *http.Re
 		return
 	}
 
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	var req IntegrationConfigUpdateRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		BadRequest(w, "invalid request body")
@@ -315,10 +316,7 @@ func (s *Server) handleRestartIntegration(w http.ResponseWriter, r *http.Request
 
 	if err := s.reconfigureIntegration(r.Context(), mgr, name); err != nil {
 		slog.Error("Failed to restart integration", "plugin", name, "error", err)
-		writeJSON(w, http.StatusInternalServerError, map[string]interface{}{
-			"status": "error",
-			"error":  err.Error(),
-		})
+		InternalError(w)
 		return
 	}
 
