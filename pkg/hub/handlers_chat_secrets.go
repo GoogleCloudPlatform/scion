@@ -74,6 +74,9 @@ func (s *Server) LoadChatIntegrationSecret(ctx context.Context, name string) (st
 		return sv.Value, nil
 	}
 
+	if s.store == nil {
+		return "", nil
+	}
 	return s.store.GetSecretValue(ctx, name, store.ScopeHub, s.hubID)
 }
 
@@ -85,6 +88,9 @@ func (s *Server) HasChatIntegrationSecret(ctx context.Context, name string) bool
 		return err == nil && meta != nil
 	}
 
+	if s.store == nil {
+		return false
+	}
 	val, err := s.store.GetSecretValue(ctx, name, store.ScopeHub, s.hubID)
 	return err == nil && val != ""
 }
