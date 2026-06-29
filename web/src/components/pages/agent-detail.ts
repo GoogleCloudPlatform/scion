@@ -1211,6 +1211,18 @@ export class ScionPageAgentDetail extends LitElement {
                 </div>
               `
             : ''}
+          ${agent.labels && Object.keys(agent.labels).length > 0
+            ? html`
+                <div class="info-item">
+                  <span class="info-label">Labels</span>
+                  <span class="info-value">
+                    ${Object.entries(agent.labels).map(
+                      ([k, v]) => html`<sl-tag size="small" variant="neutral" style="margin: 0.15em;">${k}: ${v}</sl-tag>`
+                    )}
+                  </span>
+                </div>
+              `
+            : ''}
         </div>
       </div>
     `;

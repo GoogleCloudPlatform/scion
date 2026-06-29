@@ -415,6 +415,10 @@ export interface Agent {
   runtimeBrokerName?: string;
   _capabilities?: Capabilities;
 
+  // Labels and annotations
+  labels?: Record<string, string>;
+  annotations?: Record<string, string>;
+
   // Configuration tab fields
   slug?: string;
   image?: string;

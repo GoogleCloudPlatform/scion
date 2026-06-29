@@ -104,6 +104,9 @@ export class ScionPageAgentCreate extends LitElement {
   private notify = true;
 
   @state()
+  private labelEntries: Array<{ key: string; value: string }> = [];
+
+  @state()
   private telemetryEnabled = false;
 
   @state()
@@ -501,6 +504,15 @@ export class ScionPageAgentCreate extends LitElement {
         body.task = this.task.trim();
       }
 
+      const validLabels = this.labelEntries.filter(l => l.key.trim());
+      if (validLabels.length > 0) {
+        const labels: Record<string, string> = {};
+        for (const l of validLabels) {
+          labels[l.key.trim()] = l.value.trim();
+        }
+        body.labels = labels;
+      }
+
       // GCP identity assignment
       if (this.gcpMetadataMode === 'assign' && this.gcpServiceAccountId) {
         body.gcp_identity = {
@@ -631,6 +643,15 @@ export class ScionPageAgentCreate extends LitElement {
       }
       if (this.task.trim()) {
         body.task = this.task.trim();
+      }
+
+      const validLabels = this.labelEntries.filter(l => l.key.trim());
+      if (validLabels.length > 0) {
+        const labels: Record<string, string> = {};
+        for (const l of validLabels) {
+          labels[l.key.trim()] = l.value.trim();
+        }
+        body.labels = labels;
       }
 
       // GCP identity assignment
@@ -1304,6 +1325,58 @@ private selectBrokerForProject(): void {
               resize="auto"
             ></sl-textarea>
             <div class="hint">The task or prompt to start the agent with.</div>
+          </div>
+
+          <div class="form-field">
+            <label>Labels</label>
+            ${this.labelEntries.map(
+              (entry, i) => html`
+                <div style="display: flex; gap: 0.5em; margin-bottom: 0.5em; align-items: center;">
+                  <sl-input
+                    size="small"
+                    placeholder="key"
+                    .value=${entry.key}
+                    @sl-input=${(e: Event) => {
+                      const updated = [...this.labelEntries];
+                      updated[i] = { ...updated[i], key: (e.target as HTMLElement & { value: string }).value };
+                      this.labelEntries = updated;
+                    }}
+                    style="flex: 1;"
+                  ></sl-input>
+                  <sl-input
+                    size="small"
+                    placeholder="value"
+                    .value=${entry.value}
+                    @sl-input=${(e: Event) => {
+                      const updated = [...this.labelEntries];
+                      updated[i] = { ...updated[i], value: (e.target as HTMLElement & { value: string }).value };
+                      this.labelEntries = updated;
+                    }}
+                    style="flex: 1;"
+                  ></sl-input>
+                  <sl-icon-button
+                    name="x-lg"
+                    label="Remove"
+                    @click=${() => {
+                      this.labelEntries = this.labelEntries.filter((_, idx) => idx !== i);
+                    }}
+                  ></sl-icon-button>
+                </div>
+              `
+            )}
+            ${this.labelEntries.length < 16
+              ? html`<sl-button
+                  size="small"
+                  variant="text"
+                  @click=${() => {
+                    this.labelEntries = [...this.labelEntries, { key: '', value: '' }];
+                  }}
+                >
+                  <sl-icon slot="prefix" name="plus-lg"></sl-icon>
+                  Add label
+                </sl-button>`
+              : ''}
+            <div class="hint">Optional key-value labels to organize agents (max 16).</div>
           </div>
 
           <div class="notify-field">
