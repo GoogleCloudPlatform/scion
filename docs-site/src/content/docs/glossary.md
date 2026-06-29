@@ -24,7 +24,22 @@ A set of configuration overrides that define how a runtime should execute an age
 The underlying technology used to execute agent containers (e.g., Docker, Podman, Apple Virtualization, Kubernetes).
 
 ### Runtime Broker
-A compute node that executes agents. It connects to a Hub to receive instructions and reports agent status.
+A service that manages the lifecycle of containerized agents on behalf of the Hub — provisioning workspaces, hydrating templates, and delegating container operations to a pluggable runtime. Brokers vary along two dimensions: whether they require host-level access to a container runtime (*node-bound* vs. *proxy*) and whether they run as a standalone process or are *embedded* in the Hub. See also *Managed Agent*, which bypasses the broker entirely via a direct cloud API integration.
+
+### Node-Bound Broker
+A Runtime Broker that runs on the same compute node as the containers it manages. Required for runtimes that need direct host access, such as Docker (via the daemon socket) or Apple Container (via the Virtualization framework). A node-bound broker is inherently stateful — its identity is tied to the machine it runs on, and it connects to the Hub via a persistent control channel and periodic heartbeats.
+
+### Proxy Broker
+A stateless Runtime Broker that delegates container operations to an API-mediated service such as Cloud Run or Kubernetes. Because it communicates over a network API rather than a local daemon, a proxy broker is not tied to any particular compute node and can be replicated for high availability.
+
+### Embedded Broker
+A Runtime Broker running inside the same process as the Hub server, eliminating control-channel overhead. Both node-bound and proxy brokers can be embedded. Contrast with a standalone broker, which runs as its own process and connects to the Hub remotely.
+
+### Hosted Broker
+An embedded proxy broker that serves as the platform's default compute backend. Because it is both stateless and co-located with the Hub, it can be replicated alongside Hub instances for high availability without broker-specific scheduling. Agents dispatched without an explicit broker target are routed to it automatically.
+
+### Managed Agent
+An agent whose lifecycle is managed directly by the Hub via a cloud provider API (e.g. Google Managed Agents), bypassing the Runtime Broker layer entirely. Managed agents share the same `Manager` interface and agent-label system as containerized agents, but have no container, no workspace mount, and no broker involvement. The choice between a managed agent and a brokered agent is a deployment-time decision controlled by a broker profile, not a property of the agent template.
 
 ### sciontool
 A helper utility bundled with Scion that is injected into agent containers to provide status reporting, metadata access, and task management.
