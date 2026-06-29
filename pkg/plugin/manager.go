@@ -449,6 +449,48 @@ func (m *Manager) ListPlugins() []string {
 	return keys
 }
 
+// BrokerHealthCheck returns the health status of a named broker plugin as
+// primitive types so callers need not import plugin-package structs.
+func (m *Manager) BrokerHealthCheck(name string) (status, message string, details map[string]string, err error) {
+	raw, err := m.Get(PluginTypeBroker, name)
+	if err != nil {
+		return "", "", nil, err
+	}
+	rpcClient, ok := raw.(*BrokerRPCClient)
+	if !ok {
+		return "", "", nil, fmt.Errorf("plugin %s is not a broker RPC client", name)
+	}
+	hs, err := rpcClient.HealthCheck()
+	if err != nil {
+		return "", "", nil, err
+	}
+	if hs == nil {
+		return "unknown", "", nil, nil
+	}
+	return hs.Status, hs.Message, hs.Details, nil
+}
+
+// BrokerInfo returns plugin metadata for a named broker plugin as primitive
+// types so callers need not import plugin-package structs.
+func (m *Manager) BrokerInfo(name string) (version, channelID string, capabilities []string, err error) {
+	raw, err := m.Get(PluginTypeBroker, name)
+	if err != nil {
+		return "", "", nil, err
+	}
+	rpcClient, ok := raw.(*BrokerRPCClient)
+	if !ok {
+		return "", "", nil, fmt.Errorf("plugin %s is not a broker RPC client", name)
+	}
+	info, err := rpcClient.GetInfo()
+	if err != nil {
+		return "", "", nil, err
+	}
+	if info == nil {
+		return "", "", nil, nil
+	}
+	return info.Version, info.ChannelID, info.Capabilities, nil
+}
+
 // Shutdown kills all plugin processes gracefully.
 // Self-managed plugins are disconnected but their processes are not terminated.
 func (m *Manager) Shutdown() {
