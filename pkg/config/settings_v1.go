@@ -328,6 +328,11 @@ type V1PluginEntry struct {
 	Path string `json:"path,omitempty" yaml:"path,omitempty" koanf:"path"`
 	// Config is an opaque key-value map passed to the plugin via Configure().
 	Config map[string]string `json:"config,omitempty" yaml:"config,omitempty" koanf:"config"`
+	// ConfigFile is the path to a standalone YAML config file for this plugin.
+	// When set, the hub reads non-sensitive settings from this file and merges
+	// them into the Config map. Secrets are loaded separately via SecretBackend.
+	// If empty, the inline Config map is used as-is (backward compatible).
+	ConfigFile string `json:"config_file,omitempty" yaml:"config_file,omitempty" koanf:"config_file"`
 	// SelfManaged indicates the plugin manages its own process lifecycle.
 	// The Hub connects to the plugin's RPC server rather than starting it.
 	SelfManaged bool `json:"self_managed,omitempty" yaml:"self_managed,omitempty" koanf:"self_managed"`

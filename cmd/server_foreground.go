@@ -1830,6 +1830,7 @@ func initPluginManager() *scionplugin.Manager {
 		pluginsCfg.Broker[name] = scionplugin.PluginEntry{
 			Path:        entry.Path,
 			Config:      entry.Config,
+			ConfigFile:  entry.ConfigFile,
 			SelfManaged: entry.SelfManaged,
 			Address:     entry.Address,
 		}

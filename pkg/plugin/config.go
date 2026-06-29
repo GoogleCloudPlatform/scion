@@ -52,6 +52,13 @@ type PluginEntry struct {
 	// The plugin validates its own config and returns clear errors for invalid values.
 	Config map[string]string `json:"config,omitempty" yaml:"config,omitempty" koanf:"config"`
 
+	// ConfigFile is the path to a standalone YAML config file for this plugin.
+	// When set, the hub reads non-sensitive settings from this file and merges
+	// them into the Config map before calling Configure(). Secrets are loaded
+	// separately via SecretBackend. If empty, the inline Config map is used
+	// as-is (backward compatible).
+	ConfigFile string `json:"config_file,omitempty" yaml:"config_file,omitempty" koanf:"config_file"`
+
 	// SelfManaged indicates the plugin manages its own process lifecycle.
 	// The Hub connects to the plugin's RPC server rather than starting it.
 	// The plugin is responsible for its own startup and shutdown.
