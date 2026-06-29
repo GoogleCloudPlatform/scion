@@ -1376,7 +1376,11 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 	// Resolve broker ID
 	defaultBrokerID := ""
 	if statelessCloudRunBroker {
-		defaultBrokerID = deriveCloudRunLogicalBrokerID(versionedSettings, rt)
+		var deriveErr error
+		defaultBrokerID, deriveErr = deriveCloudRunLogicalBrokerID(versionedSettings, rt)
+		if deriveErr != nil {
+			return fmt.Errorf("stateless Cloud Run broker requires a derivable broker ID: %w", deriveErr)
+		}
 	}
 	brokerID := resolveBrokerID(cfg, settings, vsBroker, globalDir, defaultBrokerID)
 
@@ -1716,21 +1720,24 @@ func resolveBrokerID(cfg *config.GlobalConfig, settings *config.Settings, vsBrok
 	return brokerID
 }
 
-func deriveCloudRunLogicalBrokerID(settings *config.VersionedSettings, rt runtime.Runtime) string {
+func deriveCloudRunLogicalBrokerID(settings *config.VersionedSettings, rt runtime.Runtime) (string, error) {
 	if settings == nil || rt == nil || rt.Name() != "cloudrun" {
-		return ""
+		return "", fmt.Errorf("deriveCloudRunLogicalBrokerID requires cloudrun runtime (got settings=%v, rt=%v)", settings != nil, rt)
 	}
 	rtConfig, runtimeType, err := settings.ResolveRuntime("")
-	if err != nil || runtimeType != "cloudrun" || rtConfig.CloudRun == nil {
-		return ""
+	if err != nil {
+		return "", fmt.Errorf("deriveCloudRunLogicalBrokerID: failed to resolve runtime: %w", err)
+	}
+	if runtimeType != "cloudrun" || rtConfig.CloudRun == nil {
+		return "", fmt.Errorf("deriveCloudRunLogicalBrokerID: expected cloudrun runtime, got %q", runtimeType)
 	}
 	projectID := strings.TrimSpace(rtConfig.CloudRun.Project)
 	location := strings.TrimSpace(rtConfig.CloudRun.Region)
 	if projectID == "" || location == "" {
-		return ""
+		return "", fmt.Errorf("deriveCloudRunLogicalBrokerID: project (%q) and region (%q) must both be set in cloudrun runtime config", projectID, location)
 	}
 	seed := fmt.Sprintf("cloudrun:%s:%s", projectID, location)
-	return uuid.NewSHA1(cloudRunLogicalBrokerNamespace, []byte(seed)).String()
+	return uuid.NewSHA1(cloudRunLogicalBrokerNamespace, []byte(seed)).String(), nil
 }
 
 // resolveBrokerName determines the broker name from various sources.
