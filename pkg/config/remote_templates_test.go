@@ -125,6 +125,22 @@ func TestParseGitHubURL(t *testing.T) {
 			wantPath:   ".claude/agents",
 		},
 		{
+			name:       "trailing slash on tree URL path is stripped",
+			uri:        "https://github.com/GoogleCloudPlatform/scion/tree/main/harnesses/",
+			wantOwner:  "GoogleCloudPlatform",
+			wantRepo:   "scion",
+			wantBranch: "main",
+			wantPath:   "harnesses",
+		},
+		{
+			name:       "trailing slash on direct path is stripped",
+			uri:        "https://github.com/org/repo/some/path/",
+			wantOwner:  "org",
+			wantRepo:   "repo",
+			wantBranch: "main",
+			wantPath:   "some/path",
+		},
+		{
 			name:        "non-github URL",
 			uri:         "https://gitlab.com/user/repo",
 			expectError: true,
@@ -359,6 +375,11 @@ func TestDetectCommonRoot(t *testing.T) {
 			name:     "single entry",
 			entries:  []string{"mytemplate/file.txt"},
 			expected: "mytemplate/",
+		},
+		{
+			name:     "pax_global_header must be filtered before calling detectCommonRoot",
+			entries:  []string{"pax_global_header", "scion-main/harnesses/copilot/config.yaml"},
+			expected: "",
 		},
 	}
 

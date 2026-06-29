@@ -421,6 +421,10 @@ func parseGitHubURL(uri string) (*GitHubURLParts, error) {
 		result.Path = strings.Join(pathParts[2:], "/")
 	}
 
+	// Trim trailing slashes from the path to normalise URLs like
+	// .../tree/main/harnesses/ that browsers copy with a trailing slash.
+	result.Path = strings.TrimRight(result.Path, "/")
+
 	return result, nil
 }
 
@@ -672,7 +676,11 @@ func extractTarGz(tarGzPath, destPath string) error {
 	}
 	defer gzr.Close()
 
-	// First pass: detect common root
+	// First pass: detect common root. Only consider regular files and
+	// directories — pax global headers (TypeXGlobalHeader) and other
+	// metadata entries must be skipped or they break common-root detection
+	// (GitHub tarballs start with a pax_global_header entry whose name
+	// does not share the repo-root prefix).
 	tarReader := tar.NewReader(gzr)
 	var entries []string
 	for {
@@ -683,7 +691,9 @@ func extractTarGz(tarGzPath, destPath string) error {
 		if err != nil {
 			return fmt.Errorf("failed to read tar header: %w", err)
 		}
-		entries = append(entries, header.Name)
+		if header.Typeflag == tar.TypeDir || header.Typeflag == tar.TypeReg || header.Typeflag == tar.TypeRegA || header.Typeflag == tar.TypeSymlink {
+			entries = append(entries, header.Name)
+		}
 	}
 
 	commonRoot := detectCommonRoot(func(yield func(string) bool) {
