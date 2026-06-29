@@ -822,7 +822,9 @@ func migrateStore(ctx context.Context, cfg *config.GlobalConfig, s *entadapter.C
 	locked := true
 	defer func() {
 		if locked {
-			_, _ = conn.ExecContext(context.Background(), "SELECT pg_advisory_unlock($1)", int64(store.LockSchemaMigration))
+			if _, err := conn.ExecContext(context.Background(), "SELECT pg_advisory_unlock($1)", int64(store.LockSchemaMigration)); err != nil {
+				slog.Error("Failed to release migration advisory lock", "error", err)
+			}
 		}
 	}()
 
