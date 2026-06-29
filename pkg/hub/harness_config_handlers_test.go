@@ -153,9 +153,9 @@ func TestHarnessConfigListByScopeAndProject(t *testing.T) {
 	for _, hc := range []*store.HarnessConfig{
 		{ID: tid("hc_g"), Slug: "g", Name: "G", Harness: "claude", Scope: "global",
 			Visibility: store.VisibilityPublic, Status: store.HarnessConfigStatusActive, Created: now, Updated: now},
-		{ID: tid("hc_a"), Slug: "a", Name: "A", Harness: "claude", Scope: "project", ScopeID: "project_abc",
+		{ID: tid("hc_a"), Slug: "a", Name: "A", Harness: "claude", Scope: "project", ScopeID: tid("project_abc"),
 			Visibility: store.VisibilityPublic, Status: store.HarnessConfigStatusActive, Created: now, Updated: now},
-		{ID: tid("hc_b"), Slug: "b", Name: "B", Harness: "claude", Scope: "project", ScopeID: "project_xyz",
+		{ID: tid("hc_b"), Slug: "b", Name: "B", Harness: "claude", Scope: "project", ScopeID: tid("project_xyz"),
 			Visibility: store.VisibilityPublic, Status: store.HarnessConfigStatusActive, Created: now, Updated: now},
 	} {
 		if err := s.CreateHarnessConfig(ctx, hc); err != nil {
@@ -164,7 +164,7 @@ func TestHarnessConfigListByScopeAndProject(t *testing.T) {
 	}
 
 	// scope=project + projectId should return only that project's configs.
-	rec := doRequest(t, srv, http.MethodGet, "/api/v1/harness-configs?scope=project&projectId=project_abc", nil)
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/harness-configs?scope=project&projectId="+tid("project_abc"), nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
 	}
@@ -177,7 +177,7 @@ func TestHarnessConfigListByScopeAndProject(t *testing.T) {
 		for i, hc := range resp.HarnessConfigs {
 			ids[i] = hc.ID
 		}
-		t.Errorf("expected only [hc_a], got %v", ids)
+		t.Errorf("expected only [%s], got %v", tid("hc_a"), ids)
 	}
 }
 

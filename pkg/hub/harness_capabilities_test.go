@@ -67,7 +67,7 @@ func TestGetAgent_ExposesHarnessCapabilities(t *testing.T) {
 
 func TestUpdateAgent_RejectsUnsupportedMaxModelCallsForGeneric(t *testing.T) {
 	srv, s := testServer(t)
-	agent := seedCreatedAgentForHarnessTest(t, s, "generic-update", "generic")
+	agent := seedCreatedAgentForHarnessTest(t, s, "claude-update", "generic")
 
 	rec := doRequest(t, srv, http.MethodPatch, "/api/v1/agents/"+agent.ID, map[string]interface{}{
 		"config": map[string]interface{}{
