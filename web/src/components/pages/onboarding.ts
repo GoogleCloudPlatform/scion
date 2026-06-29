@@ -922,6 +922,7 @@ export class ScionPageOnboarding extends LitElement {
         { slug: 'opencode', name: 'OpenCode' },
         { slug: 'copilot', name: 'GitHub Copilot' },
         { slug: 'antigravity', name: 'Antigravity' },
+        { slug: 'hermes', name: 'Hermes' },
       ];
     }
     this.stepLoading = false;
