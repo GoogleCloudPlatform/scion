@@ -514,9 +514,9 @@ func TestAgentStore_LabelFiltering(t *testing.T) {
 	require.NoError(t, s.CreateAgent(ctx, a5))
 
 	tests := []struct {
-		name     string
-		labels   map[string]string
-		wantIDs  []string
+		name    string
+		labels  map[string]string
+		wantIDs []string
 	}{
 		{
 			name:    "single label match",
