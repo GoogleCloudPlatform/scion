@@ -129,6 +129,29 @@ func (p *YAMLConfigProvider) Save(config map[string]string) error {
 	return os.WriteFile(p.path, data, 0600)
 }
 
+// IntegrationSecretMapping maps a secret backend key to the config key that a
+// plugin's Configure() method expects.
+type IntegrationSecretMapping struct {
+	SecretKey string
+	ConfigKey string
+}
+
+// PluginSecretKeyMap maps plugin names to their well-known secret keys and the
+// corresponding plugin config keys.
+var PluginSecretKeyMap = map[string][]IntegrationSecretMapping{
+	"telegram": {
+		{SecretTelegramBotToken, "bot_token"},
+		{SecretTelegramWebhookKey, "webhook_secret"},
+	},
+	"discord": {
+		{SecretDiscordBotToken, "bot_token"},
+		{SecretDiscordPublicKey, "public_key"},
+	},
+	"chat-app": {
+		{SecretGChatSigningKey, "signing_key"},
+	},
+}
+
 // LoadPluginConfigFile reads a standalone YAML config file for a plugin and
 // returns its contents merged with any existing inline config. The inline
 // config takes precedence (allows overrides). Secret keys are excluded from

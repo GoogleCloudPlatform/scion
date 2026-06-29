@@ -2039,26 +2039,6 @@ func resolveMaintenanceConfig(cfg *config.GlobalConfig) hub.MaintenanceConfig {
 	return mc
 }
 
-// pluginSecretKeyMap maps plugin names to their well-known secret keys and
-// the corresponding plugin config keys. Each entry maps a secret backend key
-// to the config key that the plugin's Configure() expects.
-var pluginSecretKeyMap = map[string][]struct {
-	secretKey string
-	configKey string
-}{
-	"telegram": {
-		{config.SecretTelegramBotToken, "bot_token"},
-		{config.SecretTelegramWebhookKey, "webhook_secret"},
-	},
-	"discord": {
-		{config.SecretDiscordBotToken, "bot_token"},
-		{config.SecretDiscordPublicKey, "public_key"},
-	},
-	"chat-app": {
-		{config.SecretGChatSigningKey, "signing_key"},
-	},
-}
-
 // injectPluginSecrets loads chat integration secrets from the secret backend
 // and injects them into the extra credentials map. Respects the fallback chain:
 // if the plugin's merged config (file + inline) already has a value for a key,
@@ -2068,21 +2048,21 @@ func injectPluginSecrets(ctx context.Context, sb secret.SecretBackend, pluginNam
 		return
 	}
 
-	mappings, ok := pluginSecretKeyMap[pluginName]
+	mappings, ok := config.PluginSecretKeyMap[pluginName]
 	if !ok {
 		return
 	}
 
 	hubID := sb.HubID()
 	for _, m := range mappings {
-		if existing, ok := pluginConfig[m.configKey]; ok && existing != "" {
+		if existing, ok := pluginConfig[m.ConfigKey]; ok && existing != "" {
 			continue
 		}
-		sv, err := sb.Get(ctx, m.secretKey, store.ScopeHub, hubID)
+		sv, err := sb.Get(ctx, m.SecretKey, store.ScopeHub, hubID)
 		if err != nil || sv == nil || sv.Value == "" {
 			continue
 		}
-		creds[m.configKey] = sv.Value
-		slog.Info("Injected secret into broker plugin", "secret", m.secretKey, "plugin", pluginName, "config_key", m.configKey)
+		creds[m.ConfigKey] = sv.Value
+		slog.Info("Injected secret into broker plugin", "secret", m.SecretKey, "plugin", pluginName, "config_key", m.ConfigKey)
 	}
 }
