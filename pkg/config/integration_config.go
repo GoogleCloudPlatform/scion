@@ -26,8 +26,8 @@ import (
 // Well-known secret keys for chat integration credentials stored via the secrets system.
 const (
 	// Telegram
-	SecretTelegramBotToken    = "TELEGRAM_BOT_TOKEN"
-	SecretTelegramWebhookKey  = "TELEGRAM_WEBHOOK_SECRET"
+	SecretTelegramBotToken   = "TELEGRAM_BOT_TOKEN"
+	SecretTelegramWebhookKey = "TELEGRAM_WEBHOOK_SECRET"
 
 	// Discord
 	SecretDiscordBotToken  = "DISCORD_BOT_TOKEN"
