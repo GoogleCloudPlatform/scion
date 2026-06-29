@@ -997,7 +997,7 @@ export class ScionPageOnboarding extends LitElement {
           <sl-icon name="hammer"></sl-icon>
           <div class="ws-card-text">
             <div class="ws-card-title">Build locally</div>
-            <div class="ws-card-desc">Build images on this machine using Docker or Podman.</div>
+            <div class="ws-card-desc">Build images on this machine using your local container runtime.</div>
           </div>
         </div>
       </div>
@@ -1127,7 +1127,7 @@ export class ScionPageOnboarding extends LitElement {
       ${!this.runtimeAvailable ? html`
         <div class="alert alert-warning">
           <strong>No container runtime detected.</strong>
-          <p>Install Docker or Podman to build images. You can skip this step and configure a runtime later.</p>
+          <p>Install Docker, Podman, or Apple Container to build images. You can skip this step and configure a runtime later.</p>
         </div>
       ` : nothing}
 
@@ -1176,9 +1176,20 @@ export class ScionPageOnboarding extends LitElement {
         ` : nothing}
 
         ${!this.buildAvailable && !hasImportedDockerfiles ? html`
-          <p style="font-size:0.8125rem;color:var(--scion-text-muted,#64748b);margin:0;">
-            Local builds require a source checkout with build scripts or imported harness configs with Dockerfiles.
-          </p>
+          <div class="alert alert-info" style="margin:1rem 0;">
+            <p>
+              To build standard harness images locally, a Scion source checkout with build scripts is required.
+              For pre-built images, use "Pull from registry" instead.
+            </p>
+            ${this.runtimeAvailable ? html`
+              <sl-button
+                variant="primary"
+                size="small"
+                style="margin-top:0.5rem;"
+                @click=${() => { this.imageMode = 'pull'; }}
+              >Switch to Pull from Registry</sl-button>
+            ` : nothing}
+          </div>
         ` : nothing}
       </div>
 
