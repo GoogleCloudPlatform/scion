@@ -42,10 +42,10 @@ type IntegrationManager interface {
 
 // IntegrationSummary is the response element for the list endpoint.
 type IntegrationSummary struct {
-	Name        string            `json:"name"`
-	Platform    string            `json:"platform"`
-	SelfManaged bool              `json:"self_managed"`
-	HasSecrets  map[string]bool   `json:"has_secrets"`
+	Name        string             `json:"name"`
+	Platform    string             `json:"platform"`
+	SelfManaged bool               `json:"self_managed"`
+	HasSecrets  map[string]bool    `json:"has_secrets"`
 	Status      *IntegrationStatus `json:"status,omitempty"`
 }
 
@@ -472,7 +472,7 @@ func (s *Server) reconfigureIntegration(ctx context.Context, mgr IntegrationMana
 		} else {
 			merged = fileMerged
 		}
-	} else if pluginCfg != nil {
+	} else {
 		for k, v := range pluginCfg {
 			merged[k] = v
 		}

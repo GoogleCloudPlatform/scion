@@ -25,12 +25,12 @@ import (
 // --- mock IntegrationManager ---
 
 type mockIntegrationManager struct {
-	plugins     map[string]map[string]string // name → config
-	selfManaged map[string]bool
-	healthErr   error
-	infoErr     error
-	configureErr error
-	reconnectErr error
+	plugins        map[string]map[string]string // name → config
+	selfManaged    map[string]bool
+	healthErr      error
+	infoErr        error
+	configureErr   error
+	reconnectErr   error
 	configureCalls []string
 	reconnectCalls []string
 }
