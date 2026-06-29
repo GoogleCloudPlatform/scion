@@ -19,10 +19,10 @@ import { customElement, state } from 'lit/decorators.js';
 
 import { apiFetch, extractApiError } from '../../client/api.js';
 import '../shared/dir-browser.js';
-import '../shared/resource-import.js';
+
 
 const ONBOARDING_STATUS_KEY = 'onboardingStatus';
-const TOTAL_STEPS = 6;
+const TOTAL_STEPS = 7;
 
 interface OnboardingStatus {
   initialized: boolean;
@@ -33,7 +33,6 @@ interface OnboardingStatus {
   hasWorkspace: boolean;
   complete: boolean;
   imageRegistry?: string;
-  buildAvailable?: boolean;
   gitVersion?: string;
   gitVersionOK?: boolean;
 }
@@ -54,18 +53,6 @@ interface RuntimeResponse {
   configured: string;
   available: boolean;
   availableRuntimes?: string[];
-}
-
-interface HarnessConfigInfo {
-  id: string;
-  name: string;
-  slug: string;
-  displayName?: string;
-  harness: string;
-  config?: {
-    image?: string;
-  };
-  files?: Array<{ path: string }>;
 }
 
 @customElement('scion-page-onboarding')
@@ -92,27 +79,24 @@ export class ScionPageOnboarding extends LitElement {
   // Step 2b: Apple DNS warning (non-blocking)
   @state() private dnsWarning: string | null = null;
 
-  // Step 3: Harnesses
-  @state() private selectedHarnesses = new Set<string>();
-  @state() private importedHarnessConfigs: HarnessConfigInfo[] = [];
+  // Step 3: Registry
+  @state() private imageRegistry = '';
+  @state() private registryInput = '';
+  @state() private registrySaving = false;
 
-  // Step 4: Images
-  @state() private imageMode: 'choose' | 'pull' | 'build' = 'choose';
+  // Step 4: Harnesses
+  @state() private selectedHarnesses = new Set<string>();
+  @state() private availableHarnesses: Array<{slug: string; name: string}> = [];
+
+  // Step 5: Images
   @state() private imageStatuses = new Map<string, { status: string; error?: string; fullName?: string }>();
   @state() private imagePulling = false;
-  @state() private imageBuilding = false;
-  @state() private buildLogs: string[] = [];
-  @state() private buildExpanded = false;
   @state() private runtimeAvailable = false;
-  @state() private canBuildFromConfigs = false;
-  @state() private imageRegistry = '';
-  @state() private registryInput = 'ghcr.io/homebrew-scion';
-  @state() private registrySaving = false;
   @state() private gitVersion = '';
   @state() private gitVersionOK = true;
   private imageEventSource: EventSource | null = null;
 
-  // Step 5: Workspace
+  // Step 6: Workspace
   @state() private workspaceMode: 'choose' | 'hub' | 'linked' = 'choose';
   @state() private wsProjectName = '';
   @state() private wsLocalPath = '';
@@ -403,37 +387,6 @@ export class ScionPageOnboarding extends LitElement {
       font-size: 0.75rem;
     }
 
-    .build-section {
-      margin-top: 1.25rem;
-      border-top: 1px solid var(--scion-border, #e2e8f0);
-      padding-top: 1rem;
-    }
-
-    .build-log-toggle {
-      display: flex;
-      align-items: center;
-      gap: 0.5rem;
-      cursor: pointer;
-      font-size: 0.8rem;
-      color: var(--scion-text-muted, #64748b);
-      margin-top: 0.75rem;
-    }
-
-    .build-log {
-      margin-top: 0.5rem;
-      max-height: 16rem;
-      overflow-y: auto;
-      background: var(--sl-color-neutral-50, #f8fafc);
-      border: 1px solid var(--scion-border, #e2e8f0);
-      border-radius: var(--scion-radius, 0.5rem);
-      padding: 0.75rem;
-      font-family: monospace;
-      font-size: 0.75rem;
-      line-height: 1.6;
-      white-space: pre-wrap;
-      word-break: break-all;
-    }
-
     .image-actions {
       display: flex;
       gap: 0.5rem;
@@ -548,7 +501,7 @@ export class ScionPageOnboarding extends LitElement {
       if (status && previouslyStarted) {
         if (status.identitySet && this.currentStep === 0) this.currentStep = 1;
         if (status.runtimeOK && this.currentStep <= 2) this.currentStep = Math.max(this.currentStep, 3);
-        if (status.harnessesSeeded && this.currentStep <= 3) this.currentStep = Math.max(this.currentStep, 4);
+        if (status.harnessesSeeded && this.currentStep <= 4) this.currentStep = Math.max(this.currentStep, 5);
       }
 
       // Prefill identity from current user
@@ -599,10 +552,11 @@ export class ScionPageOnboarding extends LitElement {
       case 0: return this.renderIdentity();
       case 1: return this.renderSystemCheck();
       case 2: return this.renderRuntime();
-      case 3: return this.renderHarnesses();
-      case 4: return this.renderImages();
-      case 5: return this.renderWorkspacePlaceholder();
-      case 6: return this.renderDone();
+      case 3: return this.renderRegistry();
+      case 4: return this.renderHarnesses();
+      case 5: return this.renderImages();
+      case 6: return this.renderWorkspacePlaceholder();
+      case 7: return this.renderDone();
       default: return nothing;
     }
   }
@@ -860,62 +814,82 @@ export class ScionPageOnboarding extends LitElement {
     }
   }
 
-  // ── Step 3: Harnesses ──
+  // ── Step 3: Registry ──
+
+  private renderRegistry() {
+    return html`
+      <h2>Image Registry</h2>
+      <p>Enter the container image registry where Scion images are hosted. This is required to pull harness images.</p>
+      <div class="form-group">
+        <label>Registry URL</label>
+        <sl-input
+          placeholder="e.g. us-central1-docker.pkg.dev/my-project/scion"
+          value=${this.registryInput}
+          @sl-input=${(e: Event) => { this.registryInput = (e.target as HTMLInputElement).value; }}
+        ></sl-input>
+      </div>
+      <p style="font-size:0.8125rem;color:var(--scion-text-muted,#64748b);">
+        Images like <code>${this.registryInput || 'your-registry'}/scion-claude:latest</code> will be pulled during setup.
+      </p>
+      <div class="footer">
+        <sl-button variant="text" @click=${() => { this.currentStep = 2; }}>Back</sl-button>
+        <div class="footer-right">
+          <sl-button variant="default" @click=${() => { this.currentStep = 4; }}>Skip for now</sl-button>
+          <sl-button
+            variant="primary"
+            ?loading=${this.registrySaving}
+            ?disabled=${!this.registryInput.trim()}
+            @click=${this.handleSaveRegistryAndNext}
+          >Next</sl-button>
+        </div>
+      </div>
+    `;
+  }
+
+  private async handleSaveRegistryAndNext(): Promise<void> {
+    await this.handleSaveRegistry();
+    if (!this.error) {
+      this.currentStep = 4;
+      void this.loadAvailableHarnesses();
+    }
+  }
+
+  // ── Step 4: Harnesses ──
 
   private renderHarnesses() {
-    const builtinHarnesses = [
-      { id: 'claude', label: 'Claude Code' },
-      { id: 'gemini', label: 'Gemini' },
-      { id: 'codex', label: 'Codex' },
-      { id: 'opencode', label: 'OpenCode' },
-    ];
-
     return html`
       <h2>AI Harnesses</h2>
       <p>Select which AI coding harnesses to configure.</p>
 
-      <div class="harness-list">
-        ${builtinHarnesses.map(h => html`
-          <div class="harness-item">
-            <sl-checkbox
-              ?checked=${this.selectedHarnesses.has(h.id)}
-              @sl-change=${(e: Event) => {
-                const checked = (e.target as HTMLInputElement).checked;
-                const next = new Set(this.selectedHarnesses);
-                if (checked) { next.add(h.id); } else { next.delete(h.id); }
-                this.selectedHarnesses = next;
-              }}
-            >${h.label}</sl-checkbox>
-          </div>
-        `)}
+      ${this.stepLoading ? html`
+        <div class="loading-state">
+          <sl-spinner></sl-spinner>
+          <p>Loading available harnesses...</p>
+        </div>
+      ` : html`
+        <div class="harness-list">
+          ${this.availableHarnesses.map(h => html`
+            <div class="harness-item">
+              <sl-checkbox
+                ?checked=${this.selectedHarnesses.has(h.slug)}
+                @sl-change=${(e: Event) => {
+                  const checked = (e.target as HTMLInputElement).checked;
+                  const next = new Set(this.selectedHarnesses);
+                  if (checked) { next.add(h.slug); } else { next.delete(h.slug); }
+                  this.selectedHarnesses = next;
+                }}
+              >${h.name}</sl-checkbox>
+            </div>
+          `)}
+        </div>
 
-        ${this.importedHarnessConfigs.map(hc => html`
-          <div class="harness-item">
-            <sl-checkbox
-              ?checked=${this.selectedHarnesses.has(hc.slug)}
-              @sl-change=${(e: Event) => {
-                const checked = (e.target as HTMLInputElement).checked;
-                const next = new Set(this.selectedHarnesses);
-                if (checked) { next.add(hc.slug); } else { next.delete(hc.slug); }
-                this.selectedHarnesses = next;
-              }}
-            >${hc.displayName || hc.name} <span style="font-size:0.75rem;color:var(--scion-text-muted,#64748b);">(imported)</span></sl-checkbox>
-          </div>
-        `)}
-      </div>
-
-      <div style="margin-top:1.5rem;">
-        <p style="font-size:0.875rem;margin-bottom:0.5rem;">Import additional harness configurations from URL</p>
-        <scion-resource-import
-          kind="harness-config"
-          scope="global"
-          .canImport=${true}
-          @resource-changed=${this.handleHarnessConfigImported}
-        ></scion-resource-import>
-      </div>
+        <p style="font-size:0.8125rem;color:var(--scion-text-muted,#64748b);margin-top:1rem;">
+          Additional harnesses can be imported and configured from Hub settings after onboarding.
+        </p>
+      `}
 
       <div class="footer">
-        <sl-button variant="text" @click=${() => { this.currentStep = 2; }}>Back</sl-button>
+        <sl-button variant="text" @click=${() => { this.currentStep = 3; }}>Back</sl-button>
         <div class="footer-right">
           <sl-button
             variant="primary"
@@ -928,14 +902,26 @@ export class ScionPageOnboarding extends LitElement {
     `;
   }
 
-  private async handleHarnessConfigImported(): Promise<void> {
+  private async loadAvailableHarnesses(): Promise<void> {
+    this.stepLoading = true;
     try {
-      const res = await apiFetch('/api/v1/harness-configs?scope=global&status=active');
-      if (!res.ok) return;
-      const data = (await res.json()) as { harnessConfigs: Array<HarnessConfigInfo & { _capabilities?: unknown }> };
-      const builtinSlugs = new Set(['claude', 'gemini']);
-      this.importedHarnessConfigs = data.harnessConfigs.filter(hc => !builtinSlugs.has(hc.slug));
-    } catch { /* ignore */ }
+      const res = await apiFetch('/api/v1/system/harnesses');
+      if (res.ok) {
+        const data = (await res.json()) as { harnesses: Array<{slug: string; name: string}> };
+        this.availableHarnesses = data.harnesses ?? [];
+      }
+    } catch { /* fallback to hardcoded list */ }
+    if (this.availableHarnesses.length === 0) {
+      this.availableHarnesses = [
+        { slug: 'claude', name: 'Claude' },
+        { slug: 'gemini', name: 'Gemini' },
+        { slug: 'codex', name: 'Codex' },
+        { slug: 'opencode', name: 'OpenCode' },
+        { slug: 'copilot', name: 'GitHub Copilot' },
+        { slug: 'antigravity', name: 'Antigravity' },
+      ];
+    }
+    this.stepLoading = false;
   }
 
   private async handleHarnessesNext(): Promise<void> {
@@ -951,23 +937,14 @@ export class ScionPageOnboarding extends LitElement {
         this.error = await extractApiError(res, 'Failed to initialize harnesses');
         return;
       }
-      const initData = (await res.json()) as {
-        importedHarnessConfigs?: string[];
-        importWarnings?: string[];
-      };
-      if (initData.importWarnings?.length) {
-        console.warn('[Onboarding] Harness import warnings:', initData.importWarnings);
-      }
-      // Refresh harness configs to pick up any auto-imported configs.
-      await this.handleHarnessConfigImported();
-      this.currentStep = 4;
+      this.currentStep = 5;
       void this.loadImagesStep();
     } finally {
       this.stepLoading = false;
     }
   }
 
-  // ── Step 4: Images ──
+  // ── Step 5: Images ──
 
   private renderImages() {
     const harnesses = [...this.selectedHarnesses];
@@ -976,81 +953,15 @@ export class ScionPageOnboarding extends LitElement {
         <h2>Container Images</h2>
         <p>No harnesses selected. You can go back to select harnesses or skip this step.</p>
         <div class="footer">
-          <sl-button variant="text" @click=${() => { this.currentStep = 3; }}>Back</sl-button>
+          <sl-button variant="text" @click=${() => { this.currentStep = 4; }}>Back</sl-button>
           <div class="footer-right">
-            <sl-button variant="default" @click=${() => { this.currentStep = 5; }}>Skip for now</sl-button>
+            <sl-button variant="default" @click=${() => { this.currentStep = 6; }}>Skip for now</sl-button>
           </div>
         </div>
       `;
     }
 
-    if (this.imageMode === 'pull') return this.renderImagesPull();
-    if (this.imageMode === 'build') return this.renderImagesBuild();
-    return this.renderImagesChoose();
-  }
-
-  private renderImagesChoose() {
-    return html`
-      <h2>Container Images</h2>
-      <p>How would you like to get container images for your selected harnesses?</p>
-
-      <div class="ws-cards">
-        <div class="ws-card" @click=${() => { this.imageMode = 'pull'; }}>
-          <sl-icon name="cloud-download"></sl-icon>
-          <div class="ws-card-text">
-            <div class="ws-card-title">Pull from remote registry</div>
-            <div class="ws-card-desc">Use pre-built images from a container registry.</div>
-          </div>
-        </div>
-        <div class="ws-card" @click=${() => { this.imageMode = 'build'; }}>
-          <sl-icon name="hammer"></sl-icon>
-          <div class="ws-card-text">
-            <div class="ws-card-title">Build locally</div>
-            <div class="ws-card-desc">Build images on this machine using your local container runtime.</div>
-          </div>
-        </div>
-      </div>
-
-      <div class="footer">
-        <sl-button variant="text" @click=${() => { this.currentStep = 3; }}>Back</sl-button>
-        <div class="footer-right">
-          <sl-button variant="default" @click=${() => { this.currentStep = 5; }}>Skip for now</sl-button>
-        </div>
-      </div>
-    `;
-  }
-
-  private renderImagesPull() {
-    const harnesses = [...this.selectedHarnesses];
-    const importedImages = this.getImportedImages();
-
-    if (!this.imageRegistry) {
-      return html`
-        <h2>Pull Remote Images</h2>
-        <p>Enter the image registry to pull pre-built container images from.</p>
-        <div class="form-group">
-          <label>Image Registry</label>
-          <sl-input
-            placeholder="ghcr.io/your-org"
-            value=${this.registryInput}
-            @sl-input=${(e: Event) => { this.registryInput = (e.target as HTMLInputElement).value; }}
-          ></sl-input>
-        </div>
-        <sl-button
-          variant="primary"
-          size="small"
-          ?loading=${this.registrySaving}
-          ?disabled=${!this.registryInput.trim()}
-          @click=${this.handleSaveRegistry}
-        >Save</sl-button>
-        <div class="footer">
-          <sl-button variant="text" @click=${() => { this.imageMode = 'choose'; }}>Back</sl-button>
-          <div class="footer-right">
-            <sl-button variant="default" @click=${() => { this.currentStep = 5; }}>Skip for now</sl-button>
-          </div>
-        </div>
-      `;
-    }
+    const registry = this.imageRegistry || this.registryInput;
 
     const allDone = harnesses.length > 0 && harnesses.every(h => {
       const s = this.imageStatuses.get(h);
@@ -1058,14 +969,16 @@ export class ScionPageOnboarding extends LitElement {
     });
 
     return html`
-      <h2>Pull Remote Images</h2>
-      <p>Pull container images from <strong>${this.imageRegistry}</strong>.</p>
+      <h2>Pull Container Images</h2>
+      ${registry
+        ? html`<p>Pull container images from <strong>${registry}</strong>.</p>`
+        : html`<p>No registry configured. Go back to the Registry step to set one, or skip this step.</p>`}
 
       ${!this.runtimeAvailable ? html`
         <div class="alert alert-warning">
           <strong>No container runtime detected.</strong>
           <p>
-            Install Docker, Podman, or Apple Container to pull or build images. You can skip this
+            Install Docker, Podman, or Apple Container to pull images. You can skip this
             step and configure a runtime later.
           </p>
         </div>
@@ -1075,8 +988,7 @@ export class ScionPageOnboarding extends LitElement {
         ${harnesses.map(h => {
           const s = this.imageStatuses.get(h);
           const status = s?.status ?? 'pending';
-          const imported = importedImages.find(i => i.slug === h);
-          const displayName = s?.fullName ?? (imported ? imported.image : `${this.imageRegistry}/scion-${h}:latest`);
+          const displayName = s?.fullName ?? (registry ? `${registry}/scion-${h}:latest` : `scion-${h}:latest`);
           return html`
             <div class="image-item">
               <span class="image-name">${displayName}</span>
@@ -1098,158 +1010,19 @@ export class ScionPageOnboarding extends LitElement {
           variant="primary"
           size="small"
           ?loading=${this.imagePulling}
-          ?disabled=${this.imagePulling}
+          ?disabled=${this.imagePulling || !registry}
           @click=${this.handlePullImages}
         >Pull images</sl-button>
       </div>
 
       <div class="footer">
-        <sl-button variant="text" @click=${() => { this.imageMode = 'choose'; }}>Back</sl-button>
+        <sl-button variant="text" @click=${() => { this.currentStep = 4; }}>Back</sl-button>
         <div class="footer-right">
-          <sl-button variant="default" @click=${() => { this.cleanupImageEvents(); this.currentStep = 5; }}>
+          <sl-button variant="default" @click=${() => { this.cleanupImageEvents(); this.currentStep = 6; }}>
             Skip for now
           </sl-button>
           ${allDone ? html`
-            <sl-button variant="primary" @click=${() => { this.cleanupImageEvents(); this.currentStep = 5; }}>
-              Next
-            </sl-button>
-          ` : nothing}
-        </div>
-      </div>
-    `;
-  }
-
-  private renderImagesBuild() {
-    const harnesses = [...this.selectedHarnesses];
-    const importedImages = this.getImportedImages();
-    const hasImportedDockerfiles = importedImages.some(i => i.hasDockerfile);
-
-    const allDone = harnesses.length > 0 && harnesses.every(h => {
-      const s = this.imageStatuses.get(h);
-      return s && (s.status === 'done' || s.status === 'exists');
-    });
-
-    return html`
-      <h2>Build Images Locally</h2>
-      <p>Build container images on this machine.</p>
-
-      ${!this.runtimeAvailable ? html`
-        <div class="alert alert-warning">
-          <strong>No container runtime detected.</strong>
-          <p>Install Docker, Podman, or Apple Container to build images. You can skip this step and configure a runtime later.</p>
-        </div>
-      ` : nothing}
-
-      <div class="image-list">
-        ${harnesses.map(h => {
-          const s = this.imageStatuses.get(h);
-          const status = s?.status ?? 'pending';
-          const imported = importedImages.find(i => i.slug === h);
-          const displayName = s?.fullName ?? (imported ? imported.image : `scion-${h}:latest`);
-          return html`
-            <div class="image-item">
-              <span class="image-name">${displayName}</span>
-              ${imported?.hasDockerfile ? html`<span style="font-size:0.75rem;color:var(--scion-text-muted,#64748b);">Dockerfile included</span>` : nothing}
-              ${status === 'pending' ? nothing : html`
-                <span class="image-status ${status}">
-                  ${status === 'pulling' ? html`<sl-spinner></sl-spinner>` : nothing}
-                  ${status === 'done' || status === 'exists' ? '✓' : nothing}
-                  ${status === 'error' ? '✗' : nothing}
-                  ${status}
-                </span>
-              `}
-            </div>
-          `;
-        })}
-      </div>
-
-      <div class="image-actions">
-        ${this.canBuildFromConfigs ? html`
-          <sl-button
-            variant="primary"
-            size="small"
-            ?loading=${this.imageBuilding}
-            ?disabled=${this.imageBuilding}
-            @click=${this.handleBuildFromConfigs}
-          >Build locally</sl-button>
-        ` : nothing}
-
-        ${hasImportedDockerfiles && !this.canBuildFromConfigs ? html`
-          <sl-button
-            variant="primary"
-            size="small"
-            ?loading=${this.imageBuilding}
-            ?disabled=${this.imageBuilding}
-            @click=${this.handleBuildFromDockerfile}
-          >Build from Dockerfile</sl-button>
-        ` : nothing}
-
-        ${!this.canBuildFromConfigs && !hasImportedDockerfiles ? html`
-          <div class="alert alert-info" style="margin:1rem 0;">
-            <p>
-              No harness configs with Dockerfiles were found. The import may have failed, or
-              these harnesses don't support local builds yet. You can try importing manually
-              from the harnesses step, or use "Pull from registry" instead.
-            </p>
-            ${this.runtimeAvailable ? html`
-              <sl-button
-                variant="primary"
-                size="small"
-                style="margin-top:0.5rem;"
-                @click=${() => { this.imageMode = 'pull'; }}
-              >Switch to Pull from Registry</sl-button>
-            ` : nothing}
-          </div>
-        ` : nothing}
-      </div>
-
-      ${this.buildLogs.length > 0 ? html`
-        <div class="build-section">
-          <div class="build-log-toggle" @click=${() => { this.buildExpanded = !this.buildExpanded; }}>
-            <sl-icon name=${this.buildExpanded ? 'chevron-down' : 'chevron-right'}></sl-icon>
-            Build output (${this.buildLogs.length} lines)
-          </div>
-          ${this.buildExpanded ? html`
-            <div class="build-log">${this.buildLogs.join('\n')}</div>
-          ` : nothing}
-        </div>
-      ` : nothing}
-
-      ${allDone ? html`
-        <div class="build-section" style="margin-top:1rem;">
-          <p style="font-size:0.875rem;font-weight:600;margin:0 0 0.5rem;">Push to registry (optional)</p>
-          ${!this.imageRegistry ? html`
-            <div class="form-group">
-              <label>Image Registry</label>
-              <sl-input
-                placeholder="ghcr.io/your-org"
-                value=${this.registryInput}
-                @sl-input=${(e: Event) => { this.registryInput = (e.target as HTMLInputElement).value; }}
-              ></sl-input>
-            </div>
-            <sl-button
-              variant="default"
-              size="small"
-              ?loading=${this.registrySaving}
-              ?disabled=${!this.registryInput.trim()}
-              @click=${this.handleSaveRegistry}
-            >Save registry</sl-button>
-          ` : html`
-            <p style="font-size:0.8125rem;color:var(--scion-text-muted,#64748b);margin:0;">
-              Registry: <strong>${this.imageRegistry}</strong> — push support coming soon.
-            </p>
-          `}
-        </div>
-      ` : nothing}
-
-      <div class="footer">
-        <sl-button variant="text" @click=${() => { this.imageMode = 'choose'; }}>Back</sl-button>
-        <div class="footer-right">
-          <sl-button variant="default" @click=${() => { this.cleanupImageEvents(); this.currentStep = 5; }}>
-            Skip for now
-          </sl-button>
-          ${allDone ? html`
-            <sl-button variant="primary" @click=${() => { this.cleanupImageEvents(); this.currentStep = 5; }}>
+            <sl-button variant="primary" @click=${() => { this.cleanupImageEvents(); this.currentStep = 6; }}>
               Next
             </sl-button>
           ` : nothing}
@@ -1305,174 +1078,14 @@ export class ScionPageOnboarding extends LitElement {
         return;
       }
       const data = (await res.json()) as { jobId: string };
-      this.subscribeToImageJob(data.jobId, 'pull');
+      this.subscribeToImageJob(data.jobId);
     } catch {
       this.error = 'Failed to connect to the server.';
       this.imagePulling = false;
     }
   }
 
-  private async handleBuildFromDockerfile(): Promise<void> {
-    this.error = null;
-    this.imageBuilding = true;
-    this.buildLogs = [];
-    this.buildExpanded = true;
-
-    const configs = this.importedHarnessConfigs.filter(
-      hc => this.selectedHarnesses.has(hc.slug) && this.hasDockerfile(hc),
-    );
-
-    for (const hc of configs) {
-      const statuses = new Map(this.imageStatuses);
-      statuses.set(hc.slug, { status: 'building', fullName: `${hc.slug}:latest` });
-      this.imageStatuses = statuses;
-
-      if (configs.length > 1) {
-        this.buildLogs = [...this.buildLogs, `=== Building ${hc.name} ===`];
-      }
-
-      try {
-        const res = await apiFetch(
-          '/api/v1/admin/maintenance/operations/build-harness-config-image/run',
-          {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              params: { harness_config_id: hc.id, tag: 'latest' },
-            }),
-          },
-        );
-        if (!res.ok) {
-          this.error = await extractApiError(res, `Failed to build image for ${hc.name}`);
-          this.imageBuilding = false;
-          return;
-        }
-        const result = (await res.json()) as { runId?: string };
-        if (!result?.runId) {
-          this.error = 'Build started but no run ID was returned';
-          this.imageBuilding = false;
-          return;
-        }
-        await this.pollHarnessConfigBuild(result.runId, hc.slug);
-      } catch {
-        this.error = 'Failed to connect to the server.';
-        this.imageBuilding = false;
-        return;
-      }
-    }
-
-    this.imageBuilding = false;
-  }
-
-  private async handleBuildFromConfigs(): Promise<void> {
-    this.error = null;
-    this.imageBuilding = true;
-    this.buildLogs = [];
-    this.buildExpanded = true;
-
-    const harnesses = [...this.selectedHarnesses].filter(slug =>
-      this.importedHarnessConfigs.some(hc => hc.slug === slug && this.hasDockerfile(hc)),
-    );
-
-    if (harnesses.length === 0) {
-      this.error = 'No selected harnesses have Dockerfiles for building.';
-      this.imageBuilding = false;
-      return;
-    }
-
-    const statuses = new Map(this.imageStatuses);
-    for (const h of harnesses) {
-      statuses.set(h, { status: 'building', fullName: `${h}:latest` });
-    }
-    this.imageStatuses = statuses;
-
-    try {
-      const res = await apiFetch('/api/v1/system/images/build-from-configs', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ harnesses, runtime: this.selectedRuntime }),
-      });
-      if (!res.ok) {
-        this.error = await extractApiError(res, 'Failed to start config-based build');
-        this.imageBuilding = false;
-        return;
-      }
-      const data = (await res.json()) as {
-        builds: Array<{ harness: string; runId: string }>;
-        errors?: string[];
-      };
-
-      if (data.errors?.length) {
-        for (const e of data.errors) {
-          this.buildLogs = [...this.buildLogs, `Warning: ${e}`];
-        }
-      }
-
-      for (const build of data.builds) {
-        if (data.builds.length > 1) {
-          this.buildLogs = [...this.buildLogs, `=== Building ${build.harness} ===`];
-        }
-      }
-      await Promise.all(data.builds.map(build => this.pollHarnessConfigBuild(build.runId, build.harness)));
-    } catch {
-      this.error = 'Failed to connect to the server.';
-    } finally {
-      this.imageBuilding = false;
-    }
-  }
-
-  private async pollHarnessConfigBuild(runId: string, slug: string): Promise<void> {
-    let pollErrors = 0;
-    const logOffset = this.buildLogs.length;
-    for (;;) {
-      await new Promise(r => setTimeout(r, 3000));
-      try {
-        const resp = await apiFetch(
-          `/api/v1/admin/maintenance/operations/build-harness-config-image/runs/${runId}`,
-        );
-        if (!resp.ok) {
-          pollErrors++;
-          if (pollErrors >= 5) {
-            const next = new Map(this.imageStatuses);
-            next.set(slug, { status: 'error', fullName: `${slug}:latest`, error: 'Lost connection to build' });
-            this.imageStatuses = next;
-            return;
-          }
-          continue;
-        }
-
-        pollErrors = 0;
-        const run = (await resp.json()) as { status?: string; log?: string };
-        if (run.log) {
-          const newLines = run.log.split('\n');
-          this.buildLogs = [...this.buildLogs.slice(0, logOffset), ...newLines];
-        }
-
-        if (run.status === 'completed') {
-          const next = new Map(this.imageStatuses);
-          next.set(slug, { status: 'done', fullName: `${slug}:latest` });
-          this.imageStatuses = next;
-          return;
-        }
-        if (run.status === 'failed') {
-          const next = new Map(this.imageStatuses);
-          next.set(slug, { status: 'error', fullName: `${slug}:latest`, error: 'Build failed' });
-          this.imageStatuses = next;
-          return;
-        }
-      } catch {
-        pollErrors++;
-        if (pollErrors >= 5) {
-          const next = new Map(this.imageStatuses);
-          next.set(slug, { status: 'error', fullName: `${slug}:latest`, error: 'Lost connection to build' });
-          this.imageStatuses = next;
-          return;
-        }
-      }
-    }
-  }
-
-  private subscribeToImageJob(jobId: string, mode: 'pull' | 'build'): void {
+  private subscribeToImageJob(jobId: string): void {
     this.cleanupImageEvents();
 
     const url = `/events?sub=${encodeURIComponent('system.images.' + jobId)}`;
@@ -1502,7 +1115,7 @@ export class ScionPageOnboarding extends LitElement {
             this.imageStatuses = next;
           }
 
-          if (mode === 'pull' && (status === 'done' || status === 'exists' || status === 'error')) {
+          if (status === 'done' || status === 'exists' || status === 'error') {
             completedImages.add(fullImageName);
             if (completedImages.size >= totalImages) {
               this.imagePulling = false;
@@ -1510,20 +1123,9 @@ export class ScionPageOnboarding extends LitElement {
             }
           }
         } else if (d['status'] === 'error') {
-          this.error = (d['error'] as string) || 'An error occurred during image operation.';
-          if (mode === 'pull') this.imagePulling = false;
-          if (mode === 'build') this.imageBuilding = false;
+          this.error = (d['error'] as string) || 'An error occurred during image pull.';
+          this.imagePulling = false;
           this.cleanupImageEvents();
-        }
-
-        if (mode === 'build' && d['type'] === 'log') {
-          const line = d['line'] as string;
-          this.buildLogs = [...this.buildLogs, line];
-
-          if (line === 'build complete' || line.startsWith('build failed:')) {
-            this.imageBuilding = false;
-            this.cleanupImageEvents();
-          }
         }
       } catch (err) {
         console.error('[Onboarding] Failed to parse image event:', err);
@@ -1531,20 +1133,17 @@ export class ScionPageOnboarding extends LitElement {
     });
 
     es.onerror = () => {
-      if (mode === 'pull') this.imagePulling = false;
-      if (mode === 'build') this.imageBuilding = false;
+      this.imagePulling = false;
       this.cleanupImageEvents();
     };
   }
 
   private imageNameToHarness(image: string): string | null {
-    const harnessNames = ['claude', 'gemini', 'codex', 'opencode'];
-    for (const h of harnessNames) {
-      if (image.includes(`scion-${h}`)) return h;
+    for (const h of this.availableHarnesses) {
+      if (image.includes(`scion-${h.slug}`)) return h.slug;
     }
-    for (const hc of this.importedHarnessConfigs) {
-      if (image.startsWith(hc.slug + ':') || image === hc.slug) return hc.slug;
-      if (hc.config?.image && image.includes(hc.config.image)) return hc.slug;
+    for (const slug of this.selectedHarnesses) {
+      if (image.includes(`scion-${slug}`)) return slug;
     }
     return null;
   }
@@ -1564,40 +1163,9 @@ export class ScionPageOnboarding extends LitElement {
         this.runtimeAvailable = data.available;
       }
     } catch { /* ignore */ }
-    try {
-      const res = await apiFetch('/api/v1/system/status');
-      if (res.ok) {
-        // Status fetched; buildAvailable is used outside onboarding only.
-        await res.json();
-      }
-    } catch { /* ignore */ }
-
-    // Refresh imported harness configs so we have file manifests for Dockerfile detection.
-    if (this.importedHarnessConfigs.length === 0) {
-      await this.handleHarnessConfigImported();
-    }
-
-    // Check if any selected harness has an imported config with a Dockerfile.
-    this.canBuildFromConfigs = this.importedHarnessConfigs.some(
-      hc => this.selectedHarnesses.has(hc.slug) && this.hasDockerfile(hc),
-    );
   }
 
-  private hasDockerfile(hc: HarnessConfigInfo): boolean {
-    return hc.files?.some(f => f.path === 'Dockerfile') ?? false;
-  }
-
-  private getImportedImages(): Array<{ slug: string; image: string; hasDockerfile: boolean }> {
-    return this.importedHarnessConfigs
-      .filter(hc => this.selectedHarnesses.has(hc.slug) && hc.config?.image)
-      .map(hc => ({
-        slug: hc.slug,
-        image: hc.config!.image!,
-        hasDockerfile: this.hasDockerfile(hc),
-      }));
-  }
-
-  // ── Step 5: First Workspace ──
+  // ── Step 6: First Workspace ──
 
   private renderWorkspacePlaceholder() {
     if (this.workspaceMode === 'hub') return this.renderWsHub();
@@ -1635,9 +1203,9 @@ export class ScionPageOnboarding extends LitElement {
       </div>
 
       <div class="footer">
-        <sl-button variant="text" @click=${() => { this.imageMode = 'choose'; this.currentStep = 4; }}>Back</sl-button>
+        <sl-button variant="text" @click=${() => { this.currentStep = 5; }}>Back</sl-button>
         <div class="footer-right">
-          <sl-button variant="default" @click=${() => { this.currentStep = 6; }}>Skip for now</sl-button>
+          <sl-button variant="default" @click=${() => { this.currentStep = 7; }}>Skip for now</sl-button>
         </div>
       </div>
     `;
@@ -1660,7 +1228,7 @@ export class ScionPageOnboarding extends LitElement {
       <div class="footer">
         <sl-button variant="text" @click=${() => { this.workspaceMode = 'choose'; }}>Back</sl-button>
         <div class="footer-right">
-          <sl-button variant="default" @click=${() => { this.currentStep = 6; }}>Skip for now</sl-button>
+          <sl-button variant="default" @click=${() => { this.currentStep = 7; }}>Skip for now</sl-button>
           <sl-button
             variant="primary"
             ?loading=${this.wsCreating}
@@ -1685,7 +1253,7 @@ export class ScionPageOnboarding extends LitElement {
         this.error = await extractApiError(res, 'Failed to create project');
         return;
       }
-      this.currentStep = 6;
+      this.currentStep = 7;
     } catch {
       this.error = 'Failed to connect to the server.';
     } finally {
@@ -1755,7 +1323,7 @@ export class ScionPageOnboarding extends LitElement {
       <div class="footer">
         <sl-button variant="text" @click=${() => { this.workspaceMode = 'choose'; }}>Back</sl-button>
         <div class="footer-right">
-          <sl-button variant="default" @click=${() => { this.currentStep = 6; }}>Skip for now</sl-button>
+          <sl-button variant="default" @click=${() => { this.currentStep = 7; }}>Skip for now</sl-button>
           <sl-button
             variant="primary"
             ?loading=${this.wsCreating}
@@ -1822,7 +1390,7 @@ export class ScionPageOnboarding extends LitElement {
         this.error = await extractApiError(provRes, 'Project created but failed to link directory. You can retry.');
         return;
       }
-      this.currentStep = 6;
+      this.currentStep = 7;
     } catch {
       this.error = 'Failed to connect to the server.';
     } finally {
@@ -1830,7 +1398,7 @@ export class ScionPageOnboarding extends LitElement {
     }
   }
 
-  // ── Step 6: Done ──
+  // ── Step 7: Done ──
 
   private renderDone() {
     sessionStorage.setItem('onboardingComplete', 'true');
