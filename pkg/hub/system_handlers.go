@@ -585,6 +585,7 @@ func (s *Server) handleSystemImagesPull(w http.ResponseWriter, r *http.Request) 
 
 type imageBuildRequest struct {
 	Harnesses []string `json:"harnesses"`
+	Runtime   string   `json:"runtime"`
 }
 
 type imageBuildLogEvent struct {
@@ -786,9 +787,10 @@ func (s *Server) handleSystemImagesBuildFromConfigs(w http.ResponseWriter, r *ht
 		}
 
 		executor := &BuildHarnessConfigImageExecutor{
-			store:   s.store,
-			storage: stor,
-			tag:     "latest",
+			store:      s.store,
+			storage:    stor,
+			runtimeBin: req.Runtime,
+			tag:        "latest",
 		}
 
 		resp.Builds = append(resp.Builds, configBuildResult{Harness: name, RunID: runID})

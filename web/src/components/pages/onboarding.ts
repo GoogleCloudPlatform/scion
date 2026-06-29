@@ -1390,7 +1390,7 @@ export class ScionPageOnboarding extends LitElement {
       const res = await apiFetch('/api/v1/system/images/build-from-configs', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ harnesses }),
+        body: JSON.stringify({ harnesses, runtime: this.selectedRuntime }),
       });
       if (!res.ok) {
         this.error = await extractApiError(res, 'Failed to start config-based build');
