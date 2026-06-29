@@ -17,6 +17,7 @@ package hub
 import (
 	"context"
 	"crypto/rand"
+	"errors"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -1281,31 +1282,43 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 			if email != "" {
 				currentRole, _ := session.Values[sessKeyUserRole].(string)
 				expectedRole := determineUserRole(email, ws.config.AdminEmails)
-				if currentRole != expectedRole {
-					slog.Info("Session role updated",
-						"email", email,
-						"old_role", currentRole,
-						"new_role", expectedRole,
-						"user_id", uid)
-					session.Values[sessKeyUserRole] = expectedRole
-					// Regenerate Hub JWT tokens with the new role so API
-					// calls within this session also reflect the change.
-					if ws.userTokenSvc != nil {
-						name, _ := session.Values[sessKeyUserName].(string)
-						accessToken, refreshToken, expiresIn, err := ws.userTokenSvc.GenerateTokenPair(
-							uid, email, name, expectedRole, ClientTypeWeb,
-						)
-						if err == nil {
-							session.Values[sessKeyHubAccessToken] = accessToken
-							session.Values[sessKeyHubRefreshToken] = refreshToken
-							session.Values[sessKeyHubTokenExpiry] = time.Now().Add(time.Duration(expiresIn) * time.Second).UnixMilli()
-						} else {
-							slog.Warn("Failed to regenerate Hub tokens for role change", "error", err)
-						}
+				if currentRole == expectedRole {
+					// Role unchanged — inject user into context and proceed
+					// without saving session (avoids redundant write).
+					user := &webSessionUser{
+						UserID:    uid,
+						Email:     email,
+						Name:      sessionString(session, sessKeyUserName),
+						AvatarURL: sessionString(session, sessKeyUserAvatar),
+						Role:      currentRole,
 					}
-					if err := session.Save(r, w); err != nil {
-						slog.Error("Failed to save session after role update", "error", err)
+					ctx := context.WithValue(r.Context(), webUserContextKey{}, user)
+					next.ServeHTTP(w, r.WithContext(ctx))
+					return
+				}
+				slog.Info("Session role updated",
+					"email", email,
+					"old_role", currentRole,
+					"new_role", expectedRole,
+					"user_id", uid)
+				session.Values[sessKeyUserRole] = expectedRole
+				// Regenerate Hub JWT tokens with the new role so API
+				// calls within this session also reflect the change.
+				if ws.userTokenSvc != nil {
+					name, _ := session.Values[sessKeyUserName].(string)
+					accessToken, refreshToken, expiresIn, err := ws.userTokenSvc.GenerateTokenPair(
+						uid, email, name, expectedRole, ClientTypeWeb,
+					)
+					if err == nil {
+						session.Values[sessKeyHubAccessToken] = accessToken
+						session.Values[sessKeyHubRefreshToken] = refreshToken
+						session.Values[sessKeyHubTokenExpiry] = time.Now().Add(time.Duration(expiresIn) * time.Second).UnixMilli()
+					} else {
+						slog.Warn("Failed to regenerate Hub tokens for role change", "error", err)
 					}
+				}
+				if err := session.Save(r, w); err != nil {
+					slog.Error("Failed to save session after role update", "error", err)
 				}
 			}
 			next.ServeHTTP(w, r)
@@ -1315,12 +1328,13 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 		// No session — try proxy authentication
 		proxyUser, proxyErr := ws.config.ProxyAuthenticator.Authenticate(r)
 		if proxyErr != nil {
-			// Assertion present but invalid — reject
+			// Assertion present but invalid — reject. Log the real error
+			// internally but return a generic message to avoid information disclosure.
 			slog.Warn("Proxy auth rejected in web middleware",
 				"provider", ws.config.ProxyAuthenticator.Name(),
 				"error", proxyErr,
 				"path", r.URL.Path)
-			http.Error(w, "invalid proxy assertion: "+proxyErr.Error(), http.StatusUnauthorized)
+			http.Error(w, "proxy authentication failed", http.StatusUnauthorized)
 			return
 		}
 		if proxyUser == nil {
@@ -1346,8 +1360,14 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 
 		// Find or create user (same pattern as handleOAuthCallback)
 		user, err := ws.store.GetUserByEmail(ctx, proxyUser.Email)
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			// Genuine DB error — don't treat as "create new user"
+			slog.Error("Proxy auth: failed to look up user", "email", proxyUser.Email, "error", err)
+			http.Error(w, "internal server error", http.StatusInternalServerError)
+			return
+		}
 		if err != nil {
-			// Create new user
+			// User not found — create new user
 			role := determineUserRole(proxyUser.Email, ws.config.AdminEmails)
 			user = &store.User{
 				ID:          generateID(),
@@ -1382,7 +1402,9 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 				slog.Info("User role changed on proxy login", "email", proxyUser.Email, "old_role", user.Role, "new_role", newRole)
 				user.Role = newRole
 			}
-			_ = ws.store.UpdateUser(ctx, user)
+			if err := ws.store.UpdateUser(ctx, user); err != nil {
+				slog.Warn("Failed to update user via proxy auth", "email", proxyUser.Email, "error", err)
+			}
 		}
 
 		// Ensure hub membership

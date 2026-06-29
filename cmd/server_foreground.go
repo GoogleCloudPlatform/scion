@@ -322,7 +322,10 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	// 12. Start Web
 	var webSrv *hub.WebServer
 	if enableWeb {
-		webSrv = initWebServer(ctx, cfg, hubSrv, devAuthToken, adminEmailList, adminMode, maintenanceMessage, requestLogger, hubDBRec)
+		webSrv, err = initWebServer(ctx, cfg, hubSrv, devAuthToken, adminEmailList, adminMode, maintenanceMessage, requestLogger, hubDBRec)
+		if err != nil {
+			return err
+		}
 
 		// In combined mode, start Hub background services now that the
 		// ChannelEventPublisher has been wired by initWebServer.
@@ -1280,7 +1283,7 @@ func newCommandBus(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Se
 // initWebServer creates and configures the Web server. The provided context is
 // threaded to the event publisher so that the Postgres LISTEN/NOTIFY goroutine
 // is cancelled cleanly on shutdown, preventing connection leaks.
-func initWebServer(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Server, devAuthToken string, adminEmailList []string, adminMode bool, maintenanceMessage string, requestLogger *slog.Logger, dbRec dbmetrics.Recorder) *hub.WebServer {
+func initWebServer(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Server, devAuthToken string, adminEmailList []string, adminMode bool, maintenanceMessage string, requestLogger *slog.Logger, dbRec dbmetrics.Recorder) (*hub.WebServer, error) {
 	webHost := cfg.Hub.Host
 	if webHost == "" {
 		webHost = "0.0.0.0"
@@ -1316,16 +1319,22 @@ func initWebServer(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Se
 	// Construct proxy authenticator for the web server when auth mode is "proxy".
 	// This mirrors the construction in initHubServer — both need the same authenticator.
 	var webProxyAuth hub.ProxyAuthenticator
-	if cfg.Auth.Mode == "proxy" && cfg.Auth.Proxy != nil {
+	if cfg.Auth.Mode == "proxy" {
+		if cfg.Auth.Proxy == nil {
+			return nil, fmt.Errorf("auth.mode=proxy requires auth.proxy configuration")
+		}
 		switch cfg.Auth.Proxy.Provider {
 		case "iap":
-			if cfg.Auth.Proxy.IAP != nil && cfg.Auth.Proxy.IAP.Audience != "" {
-				webProxyAuth = &hub.IAPAuthenticator{
-					Audience: cfg.Auth.Proxy.IAP.Audience,
-					Issuer:   cfg.Auth.Proxy.IAP.Issuer,
-					JWKSURL:  cfg.Auth.Proxy.IAP.JWKSURL,
-				}
+			if cfg.Auth.Proxy.IAP == nil || cfg.Auth.Proxy.IAP.Audience == "" {
+				return nil, fmt.Errorf("auth.proxy.iap.audience is required when auth.mode=proxy and provider=iap")
 			}
+			webProxyAuth = &hub.IAPAuthenticator{
+				Audience: cfg.Auth.Proxy.IAP.Audience,
+				Issuer:   cfg.Auth.Proxy.IAP.Issuer,
+				JWKSURL:  cfg.Auth.Proxy.IAP.JWKSURL,
+			}
+		default:
+			return nil, fmt.Errorf("unsupported auth.proxy.provider: %q", cfg.Auth.Proxy.Provider)
 		}
 	}
 
@@ -1371,7 +1380,7 @@ func initWebServer(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Se
 		})
 	}
 
-	return webSrv
+	return webSrv, nil
 }
 
 // startRuntimeBroker initializes and starts the runtime broker server.
