@@ -489,6 +489,66 @@ func TestAgentStore_PurgeDeletedAgents(t *testing.T) {
 	assert.NoError(t, err)
 }
 
+func TestAgentStore_LabelFiltering(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+
+	a1 := makeAgent(projectID, "label-1")
+	a1.Labels = map[string]string{"env": "prod", "team": "platform"}
+	require.NoError(t, s.CreateAgent(ctx, a1))
+
+	a2 := makeAgent(projectID, "label-2")
+	a2.Labels = map[string]string{"env": "staging", "team": "platform"}
+	require.NoError(t, s.CreateAgent(ctx, a2))
+
+	a3 := makeAgent(projectID, "label-3")
+	a3.Labels = map[string]string{"env": "prod", "team": "data"}
+	require.NoError(t, s.CreateAgent(ctx, a3))
+
+	a4 := makeAgent(projectID, "label-4")
+	a4.Labels = nil
+	require.NoError(t, s.CreateAgent(ctx, a4))
+
+	tests := []struct {
+		name     string
+		labels   map[string]string
+		wantIDs  []string
+	}{
+		{
+			name:    "single label match",
+			labels:  map[string]string{"env": "prod"},
+			wantIDs: []string{a1.ID, a3.ID},
+		},
+		{
+			name:    "multi-label AND",
+			labels:  map[string]string{"env": "prod", "team": "platform"},
+			wantIDs: []string{a1.ID},
+		},
+		{
+			name:    "no match",
+			labels:  map[string]string{"env": "dev"},
+			wantIDs: nil,
+		},
+		{
+			name:    "empty filter returns all",
+			labels:  map[string]string{},
+			wantIDs: []string{a1.ID, a2.ID, a3.ID, a4.ID},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := s.ListAgents(ctx, store.AgentFilter{
+				ProjectID: projectID,
+				Labels:    tt.labels,
+			}, store.ListOptions{})
+			require.NoError(t, err)
+			gotIDs := ids(result.Items)
+			assert.ElementsMatch(t, tt.wantIDs, gotIDs)
+		})
+	}
+}
+
 // ids extracts the agent IDs from a slice for order-independent comparison.
 func ids(agents []store.Agent) []string {
 	out := make([]string, len(agents))

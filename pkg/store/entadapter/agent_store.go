@@ -481,6 +481,9 @@ func agentFilterPredicates(filter store.AgentFilter) ([]predicate.Agent, error) 
 	if filter.AncestorID != "" {
 		preds = append(preds, ancestryContains(filter.AncestorID))
 	}
+	for k, v := range filter.Labels {
+		preds = append(preds, labelContains(k, v))
+	}
 
 	// Exclude soft-deleted agents unless explicitly requested.
 	if !filter.IncludeDeleted {

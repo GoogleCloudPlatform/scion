@@ -197,6 +197,10 @@ type AgentFilter struct {
 	// AncestorID, when non-empty, restricts results to agents whose ancestry
 	// chain contains the given principal ID (transitive access via creation lineage).
 	AncestorID string
+
+	// Labels, when non-empty, restricts results to agents whose labels
+	// contain all specified key-value pairs (AND semantics).
+	Labels map[string]string
 }
 
 // AgentStatusUpdate contains fields for status-only updates.

@@ -15,12 +15,47 @@
 package entadapter
 
 import (
+	"fmt"
+
 	"entgo.io/ent/dialect"
 	entsql "entgo.io/ent/dialect/sql"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/predicate"
 )
+
+// labelContains returns an Ent predicate restricting results to agents whose
+// `labels` JSON object contains the given key-value pair.
+//
+//	SQLite:   json_extract(labels, '$.key') = ?
+//	Postgres: labels @> '{"key":"value"}'::jsonb
+//
+// The Postgres path embeds both key and value into the @> operand literal
+// (after quoting) to use the GIN-indexable containment operator. The SQLite
+// path uses json_extract with a parameterised value to avoid SQL injection.
+func labelContains(key, value string) predicate.Agent {
+	return func(s *entsql.Selector) {
+		col := s.C(agent.FieldLabels)
+		switch s.Dialect() {
+		case dialect.Postgres:
+			s.Where(entsql.P(func(b *entsql.Builder) {
+				b.WriteString(col).
+					WriteString(" @> ").
+					Arg(fmt.Sprintf(`{%q:%q}`, key, value)).
+					WriteString("::jsonb")
+			}))
+		default: // SQLite
+			s.Where(entsql.P(func(b *entsql.Builder) {
+				b.WriteString("json_extract(").
+					WriteString(col).
+					WriteString(", ").
+					Arg("$." + key).
+					WriteString(") = ").
+					Arg(value)
+			}))
+		}
+	}
+}
 
 // ancestryContains returns an Ent predicate restricting results to agents whose
 // `ancestry` JSON array contains principalID.
