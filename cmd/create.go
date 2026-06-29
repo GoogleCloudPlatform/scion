@@ -216,6 +216,11 @@ func createAgentViaHub(hubCtx *HubContext, agentName string, task string) error 
 		}
 	}
 
+	parsedLabels, err := parseLabels(labelFlags)
+	if err != nil {
+		return err
+	}
+
 	// Build create request — always provision-only (create does not start the agent)
 	req := &hubclient.CreateAgentRequest{
 		Name:            agentName,
@@ -226,6 +231,7 @@ func createAgentViaHub(hubCtx *HubContext, agentName string, task string) error 
 		RuntimeBrokerID: runtimeBrokerID,
 		Task:            task,
 		Branch:          branch,
+		Labels:          parsedLabels,
 		ProvisionOnly:   true,
 	}
 
@@ -330,4 +336,7 @@ func init() {
 
 	// Inline config flag
 	createCmd.Flags().StringVar(&inlineConfigPath, "config", "", "Path to inline agent config file (YAML/JSON), or '-' for stdin")
+
+	// Label flags
+	createCmd.Flags().StringArrayVar(&labelFlags, "label", nil, "Label in key=value format (repeatable)")
 }

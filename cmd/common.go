@@ -73,7 +73,23 @@ var (
 	enableTelemetry       bool
 	disableTelemetry      bool
 	inlineConfigPath      string
+	labelFlags            []string
 )
+
+func parseLabels(raw []string) (map[string]string, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	m := make(map[string]string, len(raw))
+	for _, s := range raw {
+		k, v, ok := strings.Cut(s, "=")
+		if !ok || k == "" {
+			return nil, fmt.Errorf("invalid label %q: must be key=value", s)
+		}
+		m[k] = v
+	}
+	return m, nil
+}
 
 // loadInlineConfig loads a ScionConfig from the --config flag path.
 // If path is "-", reads from stdin. Supports YAML and JSON formats.
@@ -661,6 +677,11 @@ func startAgentViaHub(hubCtx *HubContext, agentName, task string, resume bool, i
 		}
 	}
 
+	parsedLabels, err := parseLabels(labelFlags)
+	if err != nil {
+		return err
+	}
+
 	// Build create request (Hub creates and starts in one operation)
 	req := &hubclient.CreateAgentRequest{
 		Name:            agentName,
@@ -673,6 +694,7 @@ func startAgentViaHub(hubCtx *HubContext, agentName, task string, resume bool, i
 		Task:            task,
 		Branch:          branch,
 		Workspace:       workspace,
+		Labels:          parsedLabels,
 		Resume:          resume,
 		Attach:          attach,
 		GatherEnv:       true, // Enable env-gather flow

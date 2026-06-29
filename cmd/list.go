@@ -45,6 +45,7 @@ var (
 	filterTemplate string
 	sortField      string
 	sortReverse    bool
+	filterLabels   []string
 )
 
 var validSortFields = map[string]bool{
@@ -120,9 +121,15 @@ func listAgentsViaHub(hubCtx *HubContext) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
+	parsedLabels, err := parseLabels(filterLabels)
+	if err != nil {
+		return err
+	}
+
 	opts := &hubclient.ListAgentsOptions{
 		IncludeDeleted: listDeleted,
 		Phase:          filterPhase,
+		Labels:         parsedLabels,
 	}
 	agentSvc := hubCtx.Client.Agents()
 
@@ -686,4 +693,5 @@ func init() {
 	listCmd.Flags().StringVar(&filterTemplate, "template", "", "Filter by template name")
 	listCmd.Flags().StringVar(&sortField, "sort", "", "Sort by field (name, phase, created, updated, last-seen)")
 	listCmd.Flags().BoolVar(&sortReverse, "reverse", false, "Reverse sort order")
+	listCmd.Flags().StringArrayVar(&filterLabels, "label", nil, "Filter by label in key=value format (repeatable)")
 }
