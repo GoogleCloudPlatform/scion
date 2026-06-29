@@ -4,7 +4,8 @@ WORKDIR /web
 COPY web/package.json web/package-lock.json ./
 RUN npm ci --ignore-scripts
 COPY web/ .
-RUN npm run copy:shoelace-icons && npm run build
+# npm run build already runs copy:shoelace-icons, vite build, and copy:client
+RUN npm run build
 
 # Stage 2: Build the Scion Hub binary (with embedded web assets)
 FROM golang:1.26.1-alpine AS builder
@@ -21,8 +22,9 @@ COPY . .
 # Copy built frontend assets into the embed location
 COPY --from=frontend /web/dist/client web/dist/client
 
-# Build the application (without no_embed_web tag so assets are embedded)
-RUN go build -o /scion ./cmd/scion/
+# Build a static binary (CGO_ENABLED=0) so it runs on the debian runtime image
+# without musl/glibc mismatch from the Alpine builder.
+RUN CGO_ENABLED=0 go build -o /scion ./cmd/scion/
 
 # Stage 3: Create a minimal runtime image
 FROM debian:bookworm-slim
