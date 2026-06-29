@@ -133,7 +133,7 @@ func (c *Client) CreateInteractionStream(ctx context.Context, req *CreateInterac
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		return nil, c.parseError(resp)
 	}
 
@@ -171,7 +171,7 @@ func (c *Client) GetInteractionStream(ctx context.Context, interactionID string,
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		return nil, c.parseError(resp)
 	}
 
@@ -216,7 +216,7 @@ func (c *Client) do(ctx context.Context, method, path string, reqBody interface{
 	if err != nil {
 		return fmt.Errorf("executing request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return c.parseError(resp)

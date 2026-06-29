@@ -29,11 +29,11 @@ const managedAgentStateFile = "managed-agent-state.json"
 // ManagedAgentState persists the cloud-side identifiers and interaction chain
 // for a managed agent so that the local CLI can reconnect across restarts.
 type ManagedAgentState struct {
-	CloudAgentID        string   `json:"cloud_agent_id"`
-	CloudProvider       string   `json:"cloud_provider"`
-	APIKeyRef           string   `json:"api_key_ref,omitempty"`
-	LatestInteractionID string   `json:"latest_interaction_id,omitempty"`
-	LatestEnvironmentID string   `json:"latest_environment_id,omitempty"`
+	CloudAgentID        string `json:"cloud_agent_id"`
+	CloudProvider       string `json:"cloud_provider"`
+	APIKeyRef           string `json:"api_key_ref,omitempty"`
+	LatestInteractionID string `json:"latest_interaction_id,omitempty"`
+	LatestEnvironmentID string `json:"latest_environment_id,omitempty"`
 	// InteractionChain grows unbounded in v1; a future version should cap or
 	// rotate old entries for long-lived agents.
 	InteractionChain []string `json:"interaction_chain,omitempty"`

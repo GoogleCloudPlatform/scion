@@ -32,10 +32,10 @@ const (
 	ManagedAgentsProfile = "managed-agents"
 	ManagedRuntimePrefix = "managed:"
 
-	annotationCloudAgentID       = "scion.dev/cloud-agent-id"
-	annotationCloudProvider      = "scion.dev/cloud-provider"
-	annotationInteractionID      = "scion.dev/interaction-id"
-	annotationEnvironmentID      = "scion.dev/environment-id"
+	annotationCloudAgentID  = "scion.dev/cloud-agent-id"
+	annotationCloudProvider = "scion.dev/cloud-provider"
+	annotationInteractionID = "scion.dev/interaction-id"
+	annotationEnvironmentID = "scion.dev/environment-id"
 )
 
 var (

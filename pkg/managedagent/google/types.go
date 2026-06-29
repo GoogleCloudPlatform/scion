@@ -89,19 +89,19 @@ type InteractionStep struct {
 
 // InteractionUsage contains token usage statistics.
 type InteractionUsage struct {
-	TotalInputTokens  int `json:"total_input_tokens"`
-	TotalOutputTokens int `json:"total_output_tokens"`
-	TotalCachedTokens int `json:"total_cached_tokens,omitempty"`
+	TotalInputTokens   int `json:"total_input_tokens"`
+	TotalOutputTokens  int `json:"total_output_tokens"`
+	TotalCachedTokens  int `json:"total_cached_tokens,omitempty"`
 	TotalThoughtTokens int `json:"total_thought_tokens,omitempty"`
 	TotalToolUseTokens int `json:"total_tool_use_tokens,omitempty"`
-	TotalTokens       int `json:"total_tokens"`
+	TotalTokens        int `json:"total_tokens"`
 }
 
 // Environment describes the execution environment configuration.
 type Environment struct {
-	Type    string          `json:"type,omitempty"`
-	Sources []SourceConfig  `json:"sources,omitempty"`
-	Network *NetworkConfig  `json:"network,omitempty"`
+	Type    string         `json:"type,omitempty"`
+	Sources []SourceConfig `json:"sources,omitempty"`
+	Network *NetworkConfig `json:"network,omitempty"`
 }
 
 // SourceConfig describes a source to mount into the environment.

@@ -25,14 +25,14 @@ import (
 
 // SSE event type constants from the Google Managed Agents API.
 const (
-	EventInteractionCreated    = "interaction.created"
-	EventInteractionCompleted  = "interaction.completed"
+	EventInteractionCreated      = "interaction.created"
+	EventInteractionCompleted    = "interaction.completed"
 	EventInteractionStatusUpdate = "interaction.status_update"
-	EventStepStart             = "step.start"
-	EventStepDelta             = "step.delta"
-	EventStepStop              = "step.stop"
-	EventError                 = "error"
-	EventDone                  = "done"
+	EventStepStart               = "step.start"
+	EventStepDelta               = "step.delta"
+	EventStepStop                = "step.stop"
+	EventError                   = "error"
+	EventDone                    = "done"
 )
 
 // SSEEvent represents a parsed Server-Sent Event.
