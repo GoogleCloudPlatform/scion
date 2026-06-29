@@ -437,12 +437,13 @@ func applyDatabasePoolDefaults(db *DatabaseConfig) {
 			// Conservative per-replica default so several replicas fit within a
 			// modest Postgres connection budget. The connection ceiling for N
 			// replicas is roughly N × (MaxOpenConns + event pool + 1 listener +
-			// brokers); see CONNECTION-BUDGET.md. Raise this only when the
-			// instance's max_connections (and any pooler) has headroom.
-			db.MaxOpenConns = 10
+			// brokers); see CONNECTION-BUDGET.md. With 2+ Cloud Run min-instances
+			// and a CloudSQL db-g1-small limit of ~25 connections, 5 per replica
+			// keeps the total (2×5 + overhead) safely under the limit.
+			db.MaxOpenConns = 5
 		}
 		if db.MaxIdleConns <= 1 {
-			db.MaxIdleConns = 5
+			db.MaxIdleConns = 2
 		}
 		if db.ConnMaxLifetime == "" {
 			db.ConnMaxLifetime = "30m"

@@ -1274,7 +1274,40 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 			session, _ = ws.sessionStore.New(r, webSessionName)
 		}
 		if uid, ok := session.Values[sessKeyUserID].(string); ok && uid != "" {
-			// Session exists — let sessionAuthMiddleware handle it
+			// Session exists — still re-evaluate admin role so config
+			// changes (admin grant/revoke) take effect on the next request
+			// without requiring a full session reset.
+			email, _ := session.Values[sessKeyUserEmail].(string)
+			if email != "" {
+				currentRole, _ := session.Values[sessKeyUserRole].(string)
+				expectedRole := determineUserRole(email, ws.config.AdminEmails)
+				if currentRole != expectedRole {
+					slog.Info("Session role updated",
+						"email", email,
+						"old_role", currentRole,
+						"new_role", expectedRole,
+						"user_id", uid)
+					session.Values[sessKeyUserRole] = expectedRole
+					// Regenerate Hub JWT tokens with the new role so API
+					// calls within this session also reflect the change.
+					if ws.userTokenSvc != nil {
+						name, _ := session.Values[sessKeyUserName].(string)
+						accessToken, refreshToken, expiresIn, err := ws.userTokenSvc.GenerateTokenPair(
+							uid, email, name, expectedRole, ClientTypeWeb,
+						)
+						if err == nil {
+							session.Values[sessKeyHubAccessToken] = accessToken
+							session.Values[sessKeyHubRefreshToken] = refreshToken
+							session.Values[sessKeyHubTokenExpiry] = time.Now().Add(time.Duration(expiresIn) * time.Second).UnixMilli()
+						} else {
+							slog.Warn("Failed to regenerate Hub tokens for role change", "error", err)
+						}
+					}
+					if err := session.Save(r, w); err != nil {
+						slog.Error("Failed to save session after role update", "error", err)
+					}
+				}
+			}
 			next.ServeHTTP(w, r)
 			return
 		}
