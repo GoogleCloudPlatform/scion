@@ -104,7 +104,7 @@ export class ScionPageOnboarding extends LitElement {
   @state() private buildLogs: string[] = [];
   @state() private buildExpanded = false;
   @state() private runtimeAvailable = false;
-  @state() private buildAvailable = false;
+  @state() private canBuildFromConfigs = false;
   @state() private imageRegistry = '';
   @state() private registryInput = 'ghcr.io/homebrew-scion';
   @state() private registrySaving = false;
@@ -951,6 +951,15 @@ export class ScionPageOnboarding extends LitElement {
         this.error = await extractApiError(res, 'Failed to initialize harnesses');
         return;
       }
+      const initData = (await res.json()) as {
+        importedHarnessConfigs?: string[];
+        importWarnings?: string[];
+      };
+      if (initData.importWarnings?.length) {
+        console.warn('[Onboarding] Harness import warnings:', initData.importWarnings);
+      }
+      // Refresh harness configs to pick up any auto-imported configs.
+      await this.handleHarnessConfigImported();
       this.currentStep = 4;
       void this.loadImagesStep();
     } finally {
@@ -1155,19 +1164,19 @@ export class ScionPageOnboarding extends LitElement {
       </div>
 
       <div class="image-actions">
-        ${this.buildAvailable ? html`
+        ${this.canBuildFromConfigs ? html`
           <sl-button
             variant="primary"
             size="small"
             ?loading=${this.imageBuilding}
             ?disabled=${this.imageBuilding}
-            @click=${this.handleBuildImages}
+            @click=${this.handleBuildFromConfigs}
           >Build locally</sl-button>
         ` : nothing}
 
-        ${hasImportedDockerfiles ? html`
+        ${hasImportedDockerfiles && !this.canBuildFromConfigs ? html`
           <sl-button
-            variant=${this.buildAvailable ? 'default' : 'primary'}
+            variant="primary"
             size="small"
             ?loading=${this.imageBuilding}
             ?disabled=${this.imageBuilding}
@@ -1175,11 +1184,12 @@ export class ScionPageOnboarding extends LitElement {
           >Build from Dockerfile</sl-button>
         ` : nothing}
 
-        ${!this.buildAvailable && !hasImportedDockerfiles ? html`
+        ${!this.canBuildFromConfigs && !hasImportedDockerfiles ? html`
           <div class="alert alert-info" style="margin:1rem 0;">
             <p>
-              To build standard harness images locally, a Scion source checkout with build scripts is required.
-              For pre-built images, use "Pull from registry" instead.
+              No harness configs with Dockerfiles were found. The import may have failed, or
+              these harnesses don't support local builds yet. You can try importing manually
+              from the harnesses step, or use "Pull from registry" instead.
             </p>
             ${this.runtimeAvailable ? html`
               <sl-button
@@ -1302,31 +1312,6 @@ export class ScionPageOnboarding extends LitElement {
     }
   }
 
-  private async handleBuildImages(): Promise<void> {
-    this.error = null;
-    this.imageBuilding = true;
-    this.buildLogs = [];
-    this.buildExpanded = true;
-
-    try {
-      const res = await apiFetch('/api/v1/system/images/build', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ harnesses: [...this.selectedHarnesses] }),
-      });
-      if (!res.ok) {
-        this.error = await extractApiError(res, 'Failed to start image build');
-        this.imageBuilding = false;
-        return;
-      }
-      const data = (await res.json()) as { jobId: string };
-      this.subscribeToImageJob(data.jobId, 'build');
-    } catch {
-      this.error = 'Failed to connect to the server.';
-      this.imageBuilding = false;
-    }
-  }
-
   private async handleBuildFromDockerfile(): Promise<void> {
     this.error = null;
     this.imageBuilding = true;
@@ -1377,6 +1362,63 @@ export class ScionPageOnboarding extends LitElement {
     }
 
     this.imageBuilding = false;
+  }
+
+  private async handleBuildFromConfigs(): Promise<void> {
+    this.error = null;
+    this.imageBuilding = true;
+    this.buildLogs = [];
+    this.buildExpanded = true;
+
+    const harnesses = [...this.selectedHarnesses].filter(slug =>
+      this.importedHarnessConfigs.some(hc => hc.slug === slug && this.hasDockerfile(hc)),
+    );
+
+    if (harnesses.length === 0) {
+      this.error = 'No selected harnesses have Dockerfiles for building.';
+      this.imageBuilding = false;
+      return;
+    }
+
+    const statuses = new Map(this.imageStatuses);
+    for (const h of harnesses) {
+      statuses.set(h, { status: 'building', fullName: `${h}:latest` });
+    }
+    this.imageStatuses = statuses;
+
+    try {
+      const res = await apiFetch('/api/v1/system/images/build-from-configs', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ harnesses }),
+      });
+      if (!res.ok) {
+        this.error = await extractApiError(res, 'Failed to start config-based build');
+        this.imageBuilding = false;
+        return;
+      }
+      const data = (await res.json()) as {
+        builds: Array<{ harness: string; runId: string }>;
+        errors?: string[];
+      };
+
+      if (data.errors?.length) {
+        for (const e of data.errors) {
+          this.buildLogs = [...this.buildLogs, `Warning: ${e}`];
+        }
+      }
+
+      for (const build of data.builds) {
+        if (data.builds.length > 1) {
+          this.buildLogs = [...this.buildLogs, `=== Building ${build.harness} ===`];
+        }
+        await this.pollHarnessConfigBuild(build.runId, build.harness);
+      }
+    } catch {
+      this.error = 'Failed to connect to the server.';
+    } finally {
+      this.imageBuilding = false;
+    }
   }
 
   private async pollHarnessConfigBuild(runId: string, slug: string): Promise<void> {
@@ -1525,8 +1567,8 @@ export class ScionPageOnboarding extends LitElement {
     try {
       const res = await apiFetch('/api/v1/system/status');
       if (res.ok) {
-        const data = (await res.json()) as OnboardingStatus;
-        this.buildAvailable = data.buildAvailable ?? false;
+        // Status fetched; buildAvailable is used outside onboarding only.
+        await res.json();
       }
     } catch { /* ignore */ }
 
@@ -1534,6 +1576,11 @@ export class ScionPageOnboarding extends LitElement {
     if (this.importedHarnessConfigs.length === 0) {
       await this.handleHarnessConfigImported();
     }
+
+    // Check if any selected harness has an imported config with a Dockerfile.
+    this.canBuildFromConfigs = this.importedHarnessConfigs.some(
+      hc => this.selectedHarnesses.has(hc.slug) && this.hasDockerfile(hc),
+    );
   }
 
   private hasDockerfile(hc: HarnessConfigInfo): boolean {

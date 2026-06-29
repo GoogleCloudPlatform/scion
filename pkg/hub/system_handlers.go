@@ -16,6 +16,7 @@ package hub
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"fmt"
 	"log/slog"
@@ -24,6 +25,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -705,6 +707,117 @@ func (s *Server) handleSystemImagesBuild(w http.ResponseWriter, r *http.Request)
 	}()
 
 	writeJSON(w, http.StatusOK, imagePullResponse{JobID: jobID})
+}
+
+// --- 4.3: Image Build from Harness Configs ---
+
+type configBuildResult struct {
+	Harness string `json:"harness"`
+	RunID   string `json:"runId"`
+}
+
+type configBuildResponse struct {
+	Builds []configBuildResult `json:"builds"`
+	Errors []string            `json:"errors,omitempty"`
+}
+
+func (s *Server) handleSystemImagesBuildFromConfigs(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		MethodNotAllowed(w)
+		return
+	}
+
+	if err := assertLoopback(r); err != nil {
+		writeError(w, http.StatusForbidden, ErrCodeForbidden, err.Error(), nil)
+		return
+	}
+
+	var req imageBuildRequest
+	if err := readJSON(r, &req); err != nil {
+		BadRequest(w, "invalid request body")
+		return
+	}
+
+	if len(req.Harnesses) == 0 {
+		ValidationError(w, "at least one harness must be specified", nil)
+		return
+	}
+
+	stor := s.GetStorage()
+	if stor == nil {
+		writeError(w, http.StatusServiceUnavailable, ErrCodeInternalError, "storage not configured", nil)
+		return
+	}
+
+	ctx := r.Context()
+	var resp configBuildResponse
+
+	for _, name := range req.Harnesses {
+		hc, err := s.store.GetHarnessConfigBySlug(ctx, name, store.HarnessConfigScopeGlobal, "")
+		if err != nil {
+			resp.Errors = append(resp.Errors, fmt.Sprintf("%s: no harness-config found", name))
+			continue
+		}
+
+		hasDockerfile := false
+		for _, f := range hc.Files {
+			if f.Path == "Dockerfile" {
+				hasDockerfile = true
+				break
+			}
+		}
+		if !hasDockerfile {
+			resp.Errors = append(resp.Errors, fmt.Sprintf("%s: no Dockerfile in harness-config", name))
+			continue
+		}
+
+		runID := api.NewUUID()
+		now := time.Now()
+		run := &store.MaintenanceOperationRun{
+			ID:           runID,
+			OperationKey: "build-harness-config-image",
+			Status:       store.MaintenanceStatusRunning,
+			StartedAt:    now,
+			StartedBy:    "onboarding",
+		}
+		if err := s.store.CreateMaintenanceRun(ctx, run); err != nil {
+			resp.Errors = append(resp.Errors, fmt.Sprintf("%s: failed to create run: %s", name, err))
+			continue
+		}
+
+		executor := &BuildHarnessConfigImageExecutor{
+			store:   s.store,
+			storage: stor,
+			tag:     "latest",
+		}
+
+		resp.Builds = append(resp.Builds, configBuildResult{Harness: name, RunID: runID})
+
+		go func(hcID, runID string, run *store.MaintenanceOperationRun) {
+			var buf bytes.Buffer
+			execErr := executor.Run(context.Background(), &buf, map[string]string{
+				"harness_config_id": hcID,
+				"tag":               "latest",
+			})
+
+			finishedAt := time.Now()
+			run.CompletedAt = &finishedAt
+			run.Log = buf.String()
+
+			if execErr != nil {
+				run.Status = store.MaintenanceStatusFailed
+				slog.Error("config-based build failed", "harness_config_id", hcID, "error", execErr)
+			} else {
+				run.Status = store.MaintenanceStatusCompleted
+			}
+
+			if err := s.store.UpdateMaintenanceRun(context.Background(), run); err != nil {
+				slog.Error("failed to update maintenance run", "run_id", runID, "error", err)
+			}
+		}(hc.ID, runID, run)
+	}
+
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // --- 5.2: Filesystem Endpoints ---
