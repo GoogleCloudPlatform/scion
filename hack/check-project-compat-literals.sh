@@ -147,6 +147,7 @@ allowed_paths=(
 
   # Core compatibility adapters and bounded legacy protocol/storage surfaces.
   "^pkg/agent/list.go$"
+  "^pkg/agent/managed_manager.go$"
   "^pkg/agent/msgbuffer.go$"
   "^pkg/api/types.go$"
   "^pkg/brokerclient/agents.go$"
