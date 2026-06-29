@@ -16,8 +16,8 @@ package hub
 
 import (
 	"bufio"
-	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -25,7 +25,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -393,19 +392,97 @@ func (s *Server) handleSystemStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, status)
 }
 
-// --- 2.4: System Init ---
+// --- 2.3b: Available Harnesses ---
 
-const canonicalHarnessesURL = "https://github.com/GoogleCloudPlatform/scion/tree/main/harnesses"
+type availableHarness struct {
+	Slug string `json:"slug"`
+	Name string `json:"name"`
+}
+
+func (s *Server) handleSystemHarnesses(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		MethodNotAllowed(w)
+		return
+	}
+
+	harnesses := fetchAvailableHarnesses(r.Context())
+	writeJSON(w, http.StatusOK, map[string]interface{}{"harnesses": harnesses})
+}
+
+func fetchAvailableHarnesses(ctx context.Context) []availableHarness {
+	type ghEntry struct {
+		Name string `json:"name"`
+		Type string `json:"type"`
+	}
+
+	req, err := http.NewRequestWithContext(ctx,
+		http.MethodGet,
+		"https://api.github.com/repos/GoogleCloudPlatform/scion/contents/harnesses",
+		nil)
+	if err == nil {
+		req.Header.Set("Accept", "application/vnd.github.v3+json")
+		resp, fetchErr := http.DefaultClient.Do(req)
+		if fetchErr == nil {
+			defer resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				var entries []ghEntry
+				if decErr := json.NewDecoder(resp.Body).Decode(&entries); decErr == nil {
+					var result []availableHarness
+					for _, e := range entries {
+						if e.Type == "dir" && e.Name != "." && e.Name != ".." {
+							result = append(result, availableHarness{
+								Slug: e.Name,
+								Name: harnessDisplayName(e.Name),
+							})
+						}
+					}
+					if len(result) > 0 {
+						return result
+					}
+				}
+			}
+		}
+	}
+
+	return defaultHarnesses()
+}
+
+func harnessDisplayName(slug string) string {
+	names := map[string]string{
+		"claude":       "Claude",
+		"gemini":       "Gemini",
+		"codex":        "Codex",
+		"opencode":     "OpenCode",
+		"copilot":      "GitHub Copilot",
+		"antigravity":  "Antigravity",
+		"hermes":       "Hermes",
+	}
+	if name, ok := names[slug]; ok {
+		return name
+	}
+	return strings.ToUpper(slug[:1]) + slug[1:]
+}
+
+func defaultHarnesses() []availableHarness {
+	return []availableHarness{
+		{Slug: "claude", Name: "Claude"},
+		{Slug: "gemini", Name: "Gemini"},
+		{Slug: "codex", Name: "Codex"},
+		{Slug: "opencode", Name: "OpenCode"},
+		{Slug: "copilot", Name: "GitHub Copilot"},
+		{Slug: "antigravity", Name: "Antigravity"},
+	}
+}
+
+// --- 2.4: System Init ---
 
 type systemInitRequest struct {
 	Harnesses []string `json:"harnesses"`
 }
 
 type systemInitResponse struct {
-	OK                     bool     `json:"ok"`
-	Initialized            bool     `json:"initialized"`
-	ImportedHarnessConfigs []string `json:"importedHarnessConfigs,omitempty"`
-	ImportWarnings         []string `json:"importWarnings,omitempty"`
+	OK          bool `json:"ok"`
+	Initialized bool `json:"initialized"`
 }
 
 func (s *Server) handleSystemInit(w http.ResponseWriter, r *http.Request) {
@@ -425,7 +502,14 @@ func (s *Server) handleSystemInit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if len(req.Harnesses) == 0 {
+	var selected []string
+	for _, name := range req.Harnesses {
+		if name = strings.TrimSpace(name); name != "" {
+			selected = append(selected, name)
+		}
+	}
+
+	if len(selected) == 0 {
 		ValidationError(w, "at least one harness must be specified", nil)
 		return
 	}
@@ -436,65 +520,46 @@ func (s *Server) handleSystemInit(w http.ResponseWriter, r *http.Request) {
 		allowed[n] = true
 	}
 
-	for _, name := range req.Harnesses {
+	for _, name := range selected {
 		if !allowed[name] {
 			ValidationError(w, fmt.Sprintf("unknown harness %q", name), nil)
 			return
 		}
 	}
 
-	opts := config.InitMachineOpts{
-		SelectedHarnessConfigs: req.Harnesses,
+	// Partition requested harnesses into catalog-based and embed-only.
+	// Embed-only harnesses (e.g. Gemini) are handled by the SeedHarnessConfig
+	// loop in InitMachine and must not appear in SelectedHarnessConfigs, which
+	// only searches the bundled catalog.
+	embedOnlyNames := make(map[string]bool)
+	var embedOnlyInstances []api.Harness
+	for _, h := range harness.EmbedOnlyHarnesses() {
+		embedOnlyNames[h.Name()] = true
+		for _, name := range selected {
+			if h.Name() == name {
+				embedOnlyInstances = append(embedOnlyInstances, h)
+				break
+			}
+		}
 	}
-	if err := config.InitMachine(nil, opts); err != nil {
+
+	catalogNames := []string{}
+	for _, name := range selected {
+		if !embedOnlyNames[name] {
+			catalogNames = append(catalogNames, name)
+		}
+	}
+
+	opts := config.InitMachineOpts{
+		SelectedHarnessConfigs: catalogNames,
+	}
+	if err := config.InitMachine(embedOnlyInstances, opts); err != nil {
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
 			fmt.Sprintf("initialization failed: %s", err.Error()), nil)
 		return
 	}
 
-	var resp systemInitResponse
-	resp.OK = true
-	resp.Initialized = true
-
-	// Step A: Re-bootstrap built-in configs into Hub storage so they are
-	// available immediately without a server restart.
-	globalDir, _ := config.GetGlobalDir()
-	if globalDir != "" {
-		hcDir := filepath.Join(globalDir, "harness-configs")
-		if err := s.BootstrapHarnessConfigsFromDir(r.Context(), hcDir); err != nil {
-			slog.Warn("harness config re-bootstrap failed", "error", err)
-		}
-	}
-
-	// Step B: Import external harness configs from the canonical GitHub repo.
-	// External harnesses use the Generic implementation (empty embed FS).
-	var externalNames []string
-	for _, name := range selected {
-		h := harness.New(name)
-		if _, basePath := h.GetHarnessEmbedsFS(); basePath == "" {
-			externalNames = append(externalNames, name)
-		}
-	}
-
-	if len(externalNames) > 0 && s.GetStorage() != nil {
-		imported, err := s.importFromRemote(
-			r.Context(), "", canonicalHarnessesURL,
-			store.HarnessConfigScopeGlobal,
-			s.harnessConfigImportKind(),
-			nil,
-			externalNames,
-		)
-		if err != nil {
-			slog.Warn("auto-import of external harness configs failed",
-				"harnesses", externalNames, "error", err)
-			resp.ImportWarnings = append(resp.ImportWarnings,
-				fmt.Sprintf("failed to import configs for %v: %s", externalNames, err))
-		} else {
-			resp.ImportedHarnessConfigs = imported
-		}
-	}
-
-	writeJSON(w, http.StatusOK, resp)
+	writeJSON(w, http.StatusOK, systemInitResponse{OK: true, Initialized: true})
 }
 
 // --- 4.1: Image Pull ---
@@ -708,118 +773,6 @@ func (s *Server) handleSystemImagesBuild(w http.ResponseWriter, r *http.Request)
 	}()
 
 	writeJSON(w, http.StatusOK, imagePullResponse{JobID: jobID})
-}
-
-// --- 4.3: Image Build from Harness Configs ---
-
-type configBuildResult struct {
-	Harness string `json:"harness"`
-	RunID   string `json:"runId"`
-}
-
-type configBuildResponse struct {
-	Builds []configBuildResult `json:"builds"`
-	Errors []string            `json:"errors,omitempty"`
-}
-
-func (s *Server) handleSystemImagesBuildFromConfigs(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
-		return
-	}
-
-	if err := assertLoopback(r); err != nil {
-		writeError(w, http.StatusForbidden, ErrCodeForbidden, err.Error(), nil)
-		return
-	}
-
-	var req imageBuildRequest
-	if err := readJSON(r, &req); err != nil {
-		BadRequest(w, "invalid request body")
-		return
-	}
-
-	if len(req.Harnesses) == 0 {
-		ValidationError(w, "at least one harness must be specified", nil)
-		return
-	}
-
-	stor := s.GetStorage()
-	if stor == nil {
-		writeError(w, http.StatusServiceUnavailable, ErrCodeInternalError, "storage not configured", nil)
-		return
-	}
-
-	ctx := r.Context()
-	var resp configBuildResponse
-
-	for _, name := range req.Harnesses {
-		hc, err := s.store.GetHarnessConfigBySlug(ctx, name, store.HarnessConfigScopeGlobal, "")
-		if err != nil {
-			resp.Errors = append(resp.Errors, fmt.Sprintf("%s: no harness-config found", name))
-			continue
-		}
-
-		hasDockerfile := false
-		for _, f := range hc.Files {
-			if f.Path == "Dockerfile" {
-				hasDockerfile = true
-				break
-			}
-		}
-		if !hasDockerfile {
-			resp.Errors = append(resp.Errors, fmt.Sprintf("%s: no Dockerfile in harness-config", name))
-			continue
-		}
-
-		runID := api.NewUUID()
-		now := time.Now()
-		run := &store.MaintenanceOperationRun{
-			ID:           runID,
-			OperationKey: "build-harness-config-image",
-			Status:       store.MaintenanceStatusRunning,
-			StartedAt:    now,
-			StartedBy:    "onboarding",
-		}
-		if err := s.store.CreateMaintenanceRun(ctx, run); err != nil {
-			resp.Errors = append(resp.Errors, fmt.Sprintf("%s: failed to create run: %s", name, err))
-			continue
-		}
-
-		executor := &BuildHarnessConfigImageExecutor{
-			store:      s.store,
-			storage:    stor,
-			runtimeBin: req.Runtime,
-			tag:        "latest",
-		}
-
-		resp.Builds = append(resp.Builds, configBuildResult{Harness: name, RunID: runID})
-
-		go func(hcID, runID string, run *store.MaintenanceOperationRun, exec *BuildHarnessConfigImageExecutor) {
-			var buf bytes.Buffer
-			execErr := exec.Run(context.Background(), &buf, map[string]string{
-				"harness_config_id": hcID,
-				"tag":               "latest",
-			})
-
-			finishedAt := time.Now()
-			run.CompletedAt = &finishedAt
-			run.Log = buf.String()
-
-			if execErr != nil {
-				run.Status = store.MaintenanceStatusFailed
-				slog.Error("config-based build failed", "harness_config_id", hcID, "error", execErr)
-			} else {
-				run.Status = store.MaintenanceStatusCompleted
-			}
-
-			if err := s.store.UpdateMaintenanceRun(context.Background(), run); err != nil {
-				slog.Error("failed to update maintenance run", "run_id", runID, "error", err)
-			}
-		}(hc.ID, runID, run, executor)
-	}
-
-	writeJSON(w, http.StatusOK, resp)
 }
 
 // --- 5.2: Filesystem Endpoints ---

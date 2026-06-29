@@ -2764,8 +2764,8 @@ func (s *Server) registerRoutes() {
 	s.mux.Handle("/api/v1/system/init", s.requireWorkstation(http.HandlerFunc(s.handleSystemInit)))
 	s.mux.Handle("/api/v1/system/images/pull", s.requireWorkstation(http.HandlerFunc(s.handleSystemImagesPull)))
 	s.mux.Handle("/api/v1/system/images/build", s.requireWorkstation(http.HandlerFunc(s.handleSystemImagesBuild)))
-	s.mux.Handle("/api/v1/system/images/build-from-configs", s.requireWorkstation(http.HandlerFunc(s.handleSystemImagesBuildFromConfigs)))
 	s.mux.Handle("/api/v1/system/apple-dns", s.requireWorkstation(http.HandlerFunc(s.handleAppleDNS)))
+	s.mux.Handle("/api/v1/system/harnesses", s.requireWorkstation(http.HandlerFunc(s.handleSystemHarnesses)))
 	s.mux.Handle("/api/v1/system/registry", s.requireWorkstation(http.HandlerFunc(s.handleSystemRegistry)))
 
 	// Workstation-only filesystem endpoints
