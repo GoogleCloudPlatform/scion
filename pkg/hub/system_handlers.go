@@ -393,13 +393,17 @@ func (s *Server) handleSystemStatus(w http.ResponseWriter, r *http.Request) {
 
 // --- 2.4: System Init ---
 
+const canonicalHarnessesURL = "https://github.com/GoogleCloudPlatform/scion/tree/main/harnesses"
+
 type systemInitRequest struct {
 	Harnesses []string `json:"harnesses"`
 }
 
 type systemInitResponse struct {
-	OK          bool `json:"ok"`
-	Initialized bool `json:"initialized"`
+	OK                     bool     `json:"ok"`
+	Initialized            bool     `json:"initialized"`
+	ImportedHarnessConfigs []string `json:"importedHarnessConfigs,omitempty"`
+	ImportWarnings         []string `json:"importWarnings,omitempty"`
 }
 
 func (s *Server) handleSystemInit(w http.ResponseWriter, r *http.Request) {
@@ -446,10 +450,49 @@ func (s *Server) handleSystemInit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, systemInitResponse{
-		OK:          true,
-		Initialized: true,
-	})
+	var resp systemInitResponse
+	resp.OK = true
+	resp.Initialized = true
+
+	// Step A: Re-bootstrap built-in configs into Hub storage so they are
+	// available immediately without a server restart.
+	globalDir, _ := config.GetGlobalDir()
+	if globalDir != "" {
+		hcDir := filepath.Join(globalDir, "harness-configs")
+		if err := s.BootstrapHarnessConfigsFromDir(r.Context(), hcDir); err != nil {
+			slog.Warn("harness config re-bootstrap failed", "error", err)
+		}
+	}
+
+	// Step B: Import external harness configs from the canonical GitHub repo.
+	// External harnesses use the Generic implementation (empty embed FS).
+	var externalNames []string
+	for _, name := range selected {
+		h := harness.New(name)
+		if _, basePath := h.GetHarnessEmbedsFS(); basePath == "" {
+			externalNames = append(externalNames, name)
+		}
+	}
+
+	if len(externalNames) > 0 && s.GetStorage() != nil {
+		imported, err := s.importFromRemote(
+			r.Context(), "", canonicalHarnessesURL,
+			store.HarnessConfigScopeGlobal,
+			s.harnessConfigImportKind(),
+			nil,
+			externalNames,
+		)
+		if err != nil {
+			slog.Warn("auto-import of external harness configs failed",
+				"harnesses", externalNames, "error", err)
+			resp.ImportWarnings = append(resp.ImportWarnings,
+				fmt.Sprintf("failed to import configs for %v: %s", externalNames, err))
+		} else {
+			resp.ImportedHarnessConfigs = imported
+		}
+	}
+
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // --- 4.1: Image Pull ---
