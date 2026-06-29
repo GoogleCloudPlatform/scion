@@ -25,6 +25,7 @@ package plugin
 type V1PluginEntryLike struct {
 	Path        string
 	Config      map[string]string
+	ConfigFile  string
 	SelfManaged bool
 	Address     string
 }
