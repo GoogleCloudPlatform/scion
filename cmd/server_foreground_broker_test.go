@@ -40,8 +40,10 @@ func TestCloudRunLogicalBrokerIDIsDeterministic(t *testing.T) {
 	}
 	rt := &scionruntime.MockRuntime{NameFunc: func() string { return "cloudrun" }}
 
-	id1 := deriveCloudRunLogicalBrokerID(settings, rt)
-	id2 := deriveCloudRunLogicalBrokerID(settings, rt)
+	id1, err1 := deriveCloudRunLogicalBrokerID(settings, rt)
+	assert.NoError(t, err1)
+	id2, err2 := deriveCloudRunLogicalBrokerID(settings, rt)
+	assert.NoError(t, err2)
 
 	assert.NotEmpty(t, id1)
 	assert.Equal(t, id1, id2)
