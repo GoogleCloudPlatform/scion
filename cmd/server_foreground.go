@@ -460,7 +460,10 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 								hubCreds["database_url"] = cfg.Database.URL
 							}
 							// Inject chat integration secrets from the secret backend.
-							injectPluginSecrets(ctx, secretBackend, bt, hubCreds)
+							// Pass the plugin's merged config so secrets are only injected
+							// when not already set by file or inline config.
+							brokerCfg := pluginMgr.GetPluginConfig(scionplugin.PluginTypeBroker, bt)
+							injectPluginSecrets(ctx, secretBackend, bt, brokerCfg, hubCreds)
 							if cfgErr := pluginMgr.ConfigureBroker(bt, hubCreds); cfgErr != nil {
 								log.Printf("Warning: failed to inject hub credentials into broker plugin %q: %v", bt, cfgErr)
 							} else {
@@ -2021,9 +2024,10 @@ var pluginSecretKeyMap = map[string][]struct {
 }
 
 // injectPluginSecrets loads chat integration secrets from the secret backend
-// and injects them into the plugin's credential map. Only injects if the key
-// is not already set (fallback chain: in-memory config → secret backend).
-func injectPluginSecrets(ctx context.Context, sb secret.SecretBackend, pluginName string, creds map[string]string) {
+// and injects them into the extra credentials map. Respects the fallback chain:
+// if the plugin's merged config (file + inline) already has a value for a key,
+// the secret backend is not consulted for that key.
+func injectPluginSecrets(ctx context.Context, sb secret.SecretBackend, pluginName string, pluginConfig, creds map[string]string) {
 	if sb == nil {
 		return
 	}
@@ -2035,7 +2039,7 @@ func injectPluginSecrets(ctx context.Context, sb secret.SecretBackend, pluginNam
 
 	hubID := sb.HubID()
 	for _, m := range mappings {
-		if existing, ok := creds[m.configKey]; ok && existing != "" {
+		if existing, ok := pluginConfig[m.configKey]; ok && existing != "" {
 			continue
 		}
 		sv, err := sb.Get(ctx, m.secretKey, store.ScopeHub, hubID)
@@ -2043,6 +2047,6 @@ func injectPluginSecrets(ctx context.Context, sb secret.SecretBackend, pluginNam
 			continue
 		}
 		creds[m.configKey] = sv.Value
-		log.Printf("Injected secret %q into broker plugin %q as %q", m.secretKey, pluginName, m.configKey)
+		slog.Info("Injected secret into broker plugin", "secret", m.secretKey, "plugin", pluginName, "config_key", m.configKey)
 	}
 }

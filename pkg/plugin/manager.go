@@ -402,6 +402,24 @@ func (m *Manager) ConfigureBroker(name string, extra map[string]string) error {
 	return rpcClient.Configure(merged)
 }
 
+// GetPluginConfig returns a copy of the stored config map for the named plugin,
+// or nil if the plugin is not loaded. The returned map is safe to read without
+// affecting the manager's internal state.
+func (m *Manager) GetPluginConfig(pluginType, name string) map[string]string {
+	key := pluginType + ":" + name
+	m.mu.RLock()
+	dp, ok := m.configs[key]
+	m.mu.RUnlock()
+	if !ok {
+		return nil
+	}
+	out := make(map[string]string, len(dp.Config))
+	for k, v := range dp.Config {
+		out[k] = v
+	}
+	return out
+}
+
 // HasPlugin returns true if a plugin with the given type and name is loaded.
 func (m *Manager) HasPlugin(pluginType, name string) bool {
 	key := pluginType + ":" + name

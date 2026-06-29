@@ -81,6 +81,23 @@ func TestYAMLConfigProvider_EmptyPath(t *testing.T) {
 	}
 }
 
+func TestYAMLConfigProvider_TildePath(t *testing.T) {
+	p, err := NewYAMLConfigProvider("~/configs/telegram.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	expected := filepath.Join(home, "configs", "telegram.yaml")
+	if p.Path() != expected {
+		t.Errorf("expected path %q, got %q", expected, p.Path())
+	}
+}
+
 func TestLoadPluginConfigFile_Empty(t *testing.T) {
 	inline := map[string]string{"key": "value"}
 	result, err := LoadPluginConfigFile("", inline)

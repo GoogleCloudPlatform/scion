@@ -40,6 +40,10 @@ const (
 // IntegrationConfigProvider defines the interface for reading and writing
 // per-integration configuration. Implementations handle only non-sensitive
 // settings; secrets are managed separately via SecretBackend.
+//
+// Phase 1 exposes file-based Load/Save only. Phase 2 will extend this to the
+// full admin API surface (context-aware, per-integration routing, list, status)
+// per design doc §3.3.
 type IntegrationConfigProvider interface {
 	// Load reads the integration config file and returns its contents as a
 	// flat key-value map suitable for merging into a plugin's Config map.
@@ -63,21 +67,19 @@ func NewYAMLConfigProvider(path string) (*YAMLConfigProvider, error) {
 	}
 
 	resolved := path
-	if !filepath.IsAbs(path) {
-		globalDir, err := GetGlobalDir()
-		if err != nil {
-			return nil, fmt.Errorf("resolve config dir: %w", err)
-		}
-		resolved = filepath.Join(globalDir, path)
-	}
-
-	// Expand ~ prefix
 	if strings.HasPrefix(resolved, "~/") {
 		home, err := os.UserHomeDir()
 		if err != nil {
 			return nil, fmt.Errorf("resolve home dir: %w", err)
 		}
 		resolved = filepath.Join(home, resolved[2:])
+	}
+	if !filepath.IsAbs(resolved) {
+		globalDir, err := GetGlobalDir()
+		if err != nil {
+			return nil, fmt.Errorf("resolve config dir: %w", err)
+		}
+		resolved = filepath.Join(globalDir, resolved)
 	}
 
 	return &YAMLConfigProvider{path: resolved}, nil

@@ -68,6 +68,9 @@ func (s *Server) LoadChatIntegrationSecret(ctx context.Context, name string) (st
 		if err != nil {
 			return "", err
 		}
+		if sv == nil {
+			return "", nil
+		}
 		return sv.Value, nil
 	}
 
