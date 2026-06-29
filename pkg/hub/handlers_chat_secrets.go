@@ -89,8 +89,8 @@ func (s *Server) HasChatIntegrationSecret(ctx context.Context, name string) bool
 	return err == nil && val != ""
 }
 
-// chatSecretDescription returns a human-readable description for a chat secret key.
-func chatSecretDescription(secretKey string) string {
+// ChatSecretDescription returns a human-readable description for a chat secret key.
+func ChatSecretDescription(secretKey string) string {
 	switch secretKey {
 	case config.SecretTelegramBotToken:
 		return "Telegram bot token"

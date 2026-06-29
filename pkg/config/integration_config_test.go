@@ -44,9 +44,9 @@ func TestYAMLConfigProvider_SaveAndLoad(t *testing.T) {
 	}
 
 	input := map[string]string{
-		"bot_token":     "secret-token",
-		"inbound_mode":  "webhook",
-		"webhook_url":   "https://example.com/webhook",
+		"bot_token":    "secret-token",
+		"inbound_mode": "webhook",
+		"webhook_url":  "https://example.com/webhook",
 	}
 
 	if err := p.Save(input); err != nil {
@@ -113,10 +113,12 @@ func TestLoadPluginConfigFile_MergeWithInlineOverride(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "plugin.yaml")
 	p, _ := NewYAMLConfigProvider(path)
-	p.Save(map[string]string{
+	if err := p.Save(map[string]string{
 		"inbound_mode": "poll",
 		"db_path":      "/tmp/test.db",
-	})
+	}); err != nil {
+		t.Fatal(err)
+	}
 
 	inline := map[string]string{
 		"inbound_mode": "webhook",
@@ -139,13 +141,15 @@ func TestLoadPluginConfigFile_FiltersSecretKeys(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "plugin.yaml")
 	p, _ := NewYAMLConfigProvider(path)
-	p.Save(map[string]string{
-		"bot_token":              "should-stay",
-		"TELEGRAM_BOT_TOKEN":    "should-be-filtered",
-		"telegram_bot_token":    "should-be-filtered",
-		"DISCORD_BOT_TOKEN":     "should-be-filtered",
-		"GCHAT_SIGNING_KEY":     "should-be-filtered",
-	})
+	if err := p.Save(map[string]string{
+		"bot_token":          "should-stay",
+		"TELEGRAM_BOT_TOKEN": "should-be-filtered",
+		"telegram_bot_token": "should-be-filtered",
+		"DISCORD_BOT_TOKEN":  "should-be-filtered",
+		"GCHAT_SIGNING_KEY":  "should-be-filtered",
+	}); err != nil {
+		t.Fatal(err)
+	}
 
 	result, err := LoadPluginConfigFile(path, nil)
 	if err != nil {
