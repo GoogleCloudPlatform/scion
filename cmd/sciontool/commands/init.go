@@ -25,7 +25,6 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
-	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks/handlers"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
@@ -34,6 +33,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/services"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/supervisor"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/telemetry"
+	"github.com/GoogleCloudPlatform/scion/pkg/stagedsecrets"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	otellog "go.opentelemetry.io/otel/log"
 	"go.opentelemetry.io/otel/metric"
@@ -174,17 +174,17 @@ func runInit(args []string) int {
 	// instead of bind-mounting them from the host filesystem. We decode and
 	// write them before anything else so they are available to hooks and
 	// the harness.
-	if encoded := os.Getenv(runtime.StagedSecretEnvVar); encoded != "" {
-		staged, err := runtime.DecodeStagedSecrets(encoded)
+	if encoded := os.Getenv(stagedsecrets.EnvVar); encoded != "" {
+		staged, err := stagedsecrets.Decode(encoded)
 		if err != nil {
 			log.Error("Failed to decode staged secrets: %v", err)
 			return 1
 		}
-		if err := runtime.WriteStagedSecrets(agentHome, staged); err != nil {
+		if err := stagedsecrets.Write(agentHome, staged); err != nil {
 			log.Error("Failed to write staged secrets: %v", err)
 			return 1
 		}
-		_ = os.Unsetenv(runtime.StagedSecretEnvVar)
+		_ = os.Unsetenv(stagedsecrets.EnvVar)
 		log.Info("Staged %d file secret(s) and %d variable secret(s)",
 			len(staged.FileSecrets), len(staged.VariableSecrets))
 	}
