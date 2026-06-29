@@ -492,7 +492,10 @@ export class ScionPageOnboarding extends LitElement {
         }
       }
 
-      if (status?.imageRegistry) this.imageRegistry = status.imageRegistry;
+      if (status?.imageRegistry) {
+        this.imageRegistry = status.imageRegistry;
+        this.registryInput = status.imageRegistry;
+      }
       if (status?.gitVersion !== undefined) this.gitVersion = status.gitVersion;
       if (status?.gitVersionOK !== undefined) this.gitVersionOK = status.gitVersionOK;
 
@@ -834,7 +837,7 @@ export class ScionPageOnboarding extends LitElement {
       <div class="footer">
         <sl-button variant="text" @click=${() => { this.currentStep = 2; }}>Back</sl-button>
         <div class="footer-right">
-          <sl-button variant="default" @click=${() => { this.currentStep = 4; }}>Skip for now</sl-button>
+          <sl-button variant="default" @click=${() => { this.currentStep = 4; void this.loadAvailableHarnesses(); }}>Skip for now</sl-button>
           <sl-button
             variant="primary"
             ?loading=${this.registrySaving}

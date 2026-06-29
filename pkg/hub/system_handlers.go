@@ -25,6 +25,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -405,6 +406,11 @@ func (s *Server) handleSystemHarnesses(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if err := assertLoopback(r); err != nil {
+		writeError(w, http.StatusForbidden, ErrCodeForbidden, err.Error(), nil)
+		return
+	}
+
 	harnesses := fetchAvailableHarnesses(r.Context())
 	writeJSON(w, http.StatusOK, map[string]interface{}{"harnesses": harnesses})
 }
@@ -421,7 +427,8 @@ func fetchAvailableHarnesses(ctx context.Context) []availableHarness {
 		nil)
 	if err == nil {
 		req.Header.Set("Accept", "application/vnd.github.v3+json")
-		resp, fetchErr := http.DefaultClient.Do(req)
+		client := &http.Client{Timeout: 5 * time.Second}
+		resp, fetchErr := client.Do(req)
 		if fetchErr == nil {
 			defer resp.Body.Close()
 			if resp.StatusCode == http.StatusOK {
@@ -448,6 +455,9 @@ func fetchAvailableHarnesses(ctx context.Context) []availableHarness {
 }
 
 func harnessDisplayName(slug string) string {
+	if slug == "" {
+		return ""
+	}
 	names := map[string]string{
 		"claude":       "Claude",
 		"gemini":       "Gemini",
@@ -471,6 +481,7 @@ func defaultHarnesses() []availableHarness {
 		{Slug: "opencode", Name: "OpenCode"},
 		{Slug: "copilot", Name: "GitHub Copilot"},
 		{Slug: "antigravity", Name: "Antigravity"},
+		{Slug: "hermes", Name: "Hermes"},
 	}
 }
 
@@ -601,15 +612,6 @@ func (s *Server) handleSystemImagesPull(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	allowed := map[string]bool{"claude": true, "gemini": true, "codex": true, "opencode": true}
-	for _, h := range req.Harnesses {
-		if !allowed[h] {
-			s.imagePullActive.Store(false)
-			ValidationError(w, fmt.Sprintf("unknown harness %q", h), nil)
-			return
-		}
-	}
-
 	var registry string
 	globalDir, err := config.GetGlobalDir()
 	if err == nil {
@@ -650,7 +652,6 @@ func (s *Server) handleSystemImagesPull(w http.ResponseWriter, r *http.Request) 
 
 type imageBuildRequest struct {
 	Harnesses []string `json:"harnesses"`
-	Runtime   string   `json:"runtime"`
 }
 
 type imageBuildLogEvent struct {
