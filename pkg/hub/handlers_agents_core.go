@@ -28,6 +28,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/gcp"
+	"github.com/GoogleCloudPlatform/scion/pkg/labels"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -149,6 +150,18 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 		RuntimeBrokerID: query.Get("runtimeBrokerId"),
 		Phase:           query.Get("phase"),
 		IncludeDeleted:  query.Get("includeDeleted") == "true",
+	}
+
+	if labelParams := query["label"]; len(labelParams) > 0 {
+		filter.Labels = make(map[string]string, len(labelParams))
+		for _, lp := range labelParams {
+			k, v, ok := strings.Cut(lp, "=")
+			if !ok || k == "" {
+				BadRequest(w, fmt.Sprintf("Invalid label filter %q: must be key=value", lp))
+				return
+			}
+			filter.Labels[k] = v
+		}
 	}
 
 	// scope=mine: agents the current user created
@@ -278,6 +291,11 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			ValidationError(w, "metadata_mode must be 'block', 'passthrough', or 'assign'", nil)
 			return
 		}
+	}
+
+	if err := labels.Validate(req.Labels); err != nil {
+		ValidationError(w, "Invalid labels: "+err.Error(), nil)
+		return
 	}
 
 	// Check if the caller is an agent (sub-agent creation)
@@ -1397,6 +1415,10 @@ func (s *Server) updateAgent(w http.ResponseWriter, r *http.Request, id string) 
 		agent.Name = updates.Name
 	}
 	if updates.Labels != nil {
+		if err := labels.Validate(updates.Labels); err != nil {
+			ValidationError(w, "Invalid labels: "+err.Error(), nil)
+			return
+		}
 		agent.Labels = updates.Labels
 	}
 	if updates.Annotations != nil {
