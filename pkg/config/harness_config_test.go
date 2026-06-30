@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"testing/fstest"
 )
 
 func TestLoadHarnessConfigDir(t *testing.T) {
@@ -552,6 +553,159 @@ func TestComputeHarnessConfigRevision_SkipsNonRuntimeFiles(t *testing.T) {
 	afterConfig := ComputeHarnessConfigRevision(dir)
 	if afterConfig == baseRev {
 		t.Error("changing config.yaml should change revision")
+	}
+}
+
+func TestSeedHarnessConfigFromDir(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	sourceFS := fstest.MapFS{
+		"myharness/config.yaml": &fstest.MapFile{
+			Data: []byte("harness: myharness\nimage: img:latest\nuser: scion\nconfig_dir: .myh\n"),
+		},
+		"myharness/provision.py": &fstest.MapFile{
+			Data: []byte("#!/usr/bin/env python3\nprint('provision')"),
+		},
+		"myharness/capture_auth.py": &fstest.MapFile{
+			Data: []byte("#!/usr/bin/env python3\nprint('capture')"),
+		},
+		"myharness/home/.bashrc": &fstest.MapFile{
+			Data: []byte("# bashrc"),
+		},
+		"myharness/home/.myh/settings.json": &fstest.MapFile{
+			Data: []byte("{}"),
+		},
+		"myharness/Dockerfile": &fstest.MapFile{
+			Data: []byte("FROM scratch"),
+		},
+		"myharness/cloudbuild.yaml": &fstest.MapFile{
+			Data: []byte("steps: []"),
+		},
+		"myharness/README.md": &fstest.MapFile{
+			Data: []byte("# readme"),
+		},
+		"myharness/.gitkeep": &fstest.MapFile{
+			Data: []byte(""),
+		},
+		"myharness/provision_test.py": &fstest.MapFile{
+			Data: []byte("# test"),
+		},
+		"myharness/init-firewall.sh": &fstest.MapFile{
+			Data: []byte("#!/bin/bash"),
+		},
+	}
+
+	targetDir := filepath.Join(tmpDir, "harness-configs", "myharness")
+	err := SeedHarnessConfigFromDir(targetDir, sourceFS, "myharness", false)
+	if err != nil {
+		t.Fatalf("SeedHarnessConfigFromDir failed: %v", err)
+	}
+
+	// Verify files that SHOULD be seeded
+	for _, want := range []string{
+		"config.yaml",
+		"provision.py",
+		"capture_auth.py",
+		"home/.bashrc",
+		"home/.myh/settings.json",
+	} {
+		path := filepath.Join(targetDir, want)
+		if _, err := os.Stat(path); err != nil {
+			t.Errorf("expected %s to be seeded, but not found", want)
+		}
+	}
+
+	// Verify files that SHOULD NOT be seeded (skip list)
+	for _, skip := range []string{
+		"Dockerfile",
+		"cloudbuild.yaml",
+		"README.md",
+		".gitkeep",
+		"provision_test.py",
+		"init-firewall.sh",
+	} {
+		path := filepath.Join(targetDir, skip)
+		if _, err := os.Stat(path); err == nil {
+			t.Errorf("expected %s to be skipped, but found at %s", skip, path)
+		}
+	}
+}
+
+func TestSeedHarnessConfigFromDir_NoOverwriteWithoutForce(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	sourceFS := fstest.MapFS{
+		"h/config.yaml": &fstest.MapFile{
+			Data: []byte("harness: h\nimage: img:latest\nuser: scion\n"),
+		},
+		"h/provision.py": &fstest.MapFile{
+			Data: []byte("# new provision"),
+		},
+	}
+
+	targetDir := filepath.Join(tmpDir, "h")
+	if err := os.MkdirAll(targetDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	existingContent := "# custom provision"
+	if err := os.WriteFile(filepath.Join(targetDir, "provision.py"), []byte(existingContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := SeedHarnessConfigFromDir(targetDir, sourceFS, "h", false); err != nil {
+		t.Fatalf("SeedHarnessConfigFromDir failed: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(targetDir, "provision.py"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != existingContent {
+		t.Errorf("provision.py was overwritten without force; got %q, want %q", string(data), existingContent)
+	}
+}
+
+func TestSeedAllHarnessConfigsFromEmbed(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	sourceFS := fstest.MapFS{
+		"alpha/config.yaml": &fstest.MapFile{
+			Data: []byte("harness: alpha\nimage: img:latest\nuser: scion\n"),
+		},
+		"alpha/provision.py": &fstest.MapFile{
+			Data: []byte("# alpha provision"),
+		},
+		"beta/config.yaml": &fstest.MapFile{
+			Data: []byte("harness: beta\nimage: img:latest\nuser: scion\nconfig_dir: .beta\n"),
+		},
+		"beta/home/.bashrc": &fstest.MapFile{
+			Data: []byte("# bashrc"),
+		},
+	}
+
+	hcDir := filepath.Join(tmpDir, "harness-configs")
+	if err := os.MkdirAll(hcDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := SeedAllHarnessConfigsFromEmbed(hcDir, sourceFS, false); err != nil {
+		t.Fatalf("SeedAllHarnessConfigsFromEmbed failed: %v", err)
+	}
+
+	// Verify alpha was seeded
+	if _, err := os.Stat(filepath.Join(hcDir, "alpha", "config.yaml")); err != nil {
+		t.Error("expected alpha/config.yaml to be seeded")
+	}
+	if _, err := os.Stat(filepath.Join(hcDir, "alpha", "provision.py")); err != nil {
+		t.Error("expected alpha/provision.py to be seeded")
+	}
+
+	// Verify beta was seeded
+	if _, err := os.Stat(filepath.Join(hcDir, "beta", "config.yaml")); err != nil {
+		t.Error("expected beta/config.yaml to be seeded")
+	}
+	if _, err := os.Stat(filepath.Join(hcDir, "beta", "home", ".bashrc")); err != nil {
+		t.Error("expected beta/home/.bashrc to be seeded")
 	}
 }
 

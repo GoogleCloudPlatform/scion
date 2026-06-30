@@ -401,6 +401,129 @@ func ComputeHarnessConfigRevision(dirPath string) string {
 	return "sha256:" + hex.EncodeToString(combined.Sum(nil))
 }
 
+var seedSkipFiles = map[string]bool{
+	"Dockerfile":       true,
+	"cloudbuild.yaml":  true,
+	"README.md":        true,
+	"provision_test.py": true,
+	".gitkeep":         true,
+	"init-firewall.sh": true,
+}
+
+// SeedHarnessConfigFromDir populates a harness-config directory from an
+// fs.FS-backed harness source directory (typically a sub-tree of the embedded
+// harnesses/ FS). Unlike SeedHarnessConfig, this does not require a
+// compiled-in api.Harness — it reads config.yaml from the source to discover
+// the harness name and config_dir.
+func SeedHarnessConfigFromDir(targetDir string, sourceFS fs.FS, sourcePath string, force bool) error {
+	configData, err := fs.ReadFile(sourceFS, filepath.Join(sourcePath, "config.yaml"))
+	if err != nil {
+		return fmt.Errorf("failed to read config.yaml from source: %w", err)
+	}
+
+	var entry HarnessConfigEntry
+	if err := yaml.Unmarshal(configData, &entry); err != nil {
+		return fmt.Errorf("failed to parse config.yaml: %w", err)
+	}
+
+	configDir := entry.ConfigDir
+	homeDir := filepath.Join(targetDir, "home")
+
+	if err := os.MkdirAll(targetDir, 0755); err != nil {
+		return fmt.Errorf("failed to create harness-config directory: %w", err)
+	}
+	if err := os.MkdirAll(homeDir, 0755); err != nil {
+		return fmt.Errorf("failed to create harness-config home directory: %w", err)
+	}
+	if configDir != "" {
+		if err := os.MkdirAll(filepath.Join(homeDir, configDir), 0755); err != nil {
+			return fmt.Errorf("failed to create config directory: %w", err)
+		}
+	}
+
+	// Seed config.yaml (always overwrite to keep in sync with embedded defaults)
+	if err := seedFileFromGenericFS(sourceFS, sourcePath, "config.yaml", filepath.Join(targetDir, "config.yaml"), force, true); err != nil {
+		return fmt.Errorf("failed to seed config.yaml: %w", err)
+	}
+
+	return fs.WalkDir(sourceFS, sourcePath, func(path string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if d.IsDir() {
+			return nil
+		}
+
+		relPath, err := filepath.Rel(sourcePath, path)
+		if err != nil {
+			return err
+		}
+
+		if relPath == "config.yaml" {
+			return nil
+		}
+
+		if seedSkipFiles[filepath.Base(relPath)] {
+			return nil
+		}
+
+		targetPath := mapEmbedFileToHarnessConfigPath(targetDir, homeDir, configDir, relPath)
+		if targetPath == "" {
+			return nil
+		}
+
+		if err := os.MkdirAll(filepath.Dir(targetPath), 0755); err != nil {
+			return err
+		}
+
+		return seedFileFromGenericFS(sourceFS, sourcePath, relPath, targetPath, force, false)
+	})
+}
+
+// SeedAllHarnessConfigsFromEmbed walks the top-level embed FS, discovers
+// harness subdirectories, and calls SeedHarnessConfigFromDir for each.
+func SeedAllHarnessConfigsFromEmbed(harnessConfigsDir string, rootFS fs.FS, force bool) error {
+	entries, err := fs.ReadDir(rootFS, ".")
+	if err != nil {
+		return fmt.Errorf("failed to read harness embed FS: %w", err)
+	}
+
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		targetDir := filepath.Join(harnessConfigsDir, name)
+		if err := SeedHarnessConfigFromDir(targetDir, rootFS, name, force); err != nil {
+			return fmt.Errorf("failed to seed harness-config %q: %w", name, err)
+		}
+	}
+	return nil
+}
+
+// seedFileFromGenericFS reads a file from an fs.FS and writes it to targetPath.
+// Like SeedFileFromFS but works with any fs.FS, not just embed.FS.
+func seedFileFromGenericFS(srcFS fs.FS, basePath, fileName, targetPath string, force, alwaysOverwrite bool) error {
+	data, err := fs.ReadFile(srcFS, filepath.Join(basePath, fileName))
+	if err != nil {
+		return nil
+	}
+
+	if force || alwaysOverwrite {
+		if err := os.WriteFile(targetPath, data, 0644); err != nil {
+			return fmt.Errorf("failed to write file %s: %w", targetPath, err)
+		}
+		return nil
+	}
+
+	if _, err := os.Stat(targetPath); os.IsNotExist(err) {
+		if err := os.WriteFile(targetPath, data, 0644); err != nil {
+			return fmt.Errorf("failed to write file %s: %w", targetPath, err)
+		}
+	}
+	return nil
+}
+
 // SeedHarnessConfigFromFS is a lower-level function that seeds from a provided embed.FS.
 // Used internally and for testing.
 func SeedHarnessConfigFromFS(targetDir string, embedsFS embed.FS, basePath, configDir string, force bool) error {
