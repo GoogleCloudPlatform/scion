@@ -27,8 +27,11 @@ type CreateAgentConfig struct {
 }
 
 // InteractionRequest contains the parameters for creating an interaction.
+// Either CloudAgentID or AgentName should be set; AgentName is the base
+// agent identifier used when no cloud-side agent config exists.
 type InteractionRequest struct {
 	CloudAgentID          string
+	AgentName             string
 	Input                 string
 	PreviousInteractionID string
 	EnvironmentID         string

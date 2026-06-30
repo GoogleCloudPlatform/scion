@@ -148,27 +148,22 @@ func (m *ManagedAgentManager) Start(ctx context.Context, opts api.StartOptions) 
 		}
 	}
 
-	// Create the cloud-side agent.
-	cloudAgentID, err := m.Backend.CreateAgent(ctx, managedagent.CreateAgentConfig{
-		SystemInstruction: systemInstruction,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("creating cloud agent: %w", err)
-	}
-
 	now := time.Now().UTC().Format(time.RFC3339)
 	agentState := &ManagedAgentState{
-		CloudAgentID:  cloudAgentID,
 		CloudProvider: m.Backend.Name(),
 		CreatedAt:     now,
 	}
 
-	// If a task was provided, create the first interaction.
+	// Create the first interaction directly using the interactions API.
+	// We skip the agents CRUD endpoint (/v1beta/agents) because it may
+	// not be generally available; the interactions endpoint works with
+	// both model names and built-in agent names.
 	if opts.Task != "" {
 		handle, err := m.Backend.CreateInteraction(ctx, managedagent.InteractionRequest{
-			CloudAgentID: cloudAgentID,
-			Input:        opts.Task,
-			Background:   true,
+			Input:             opts.Task,
+			SystemInstruction: systemInstruction,
+			Environment:       &managedagent.EnvironmentConfig{Type: "remote"},
+			Background:        true,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("creating initial interaction: %w", err)
@@ -264,13 +259,6 @@ func (m *ManagedAgentManager) Delete(ctx context.Context, agentID string, delete
 			return false, err
 		}
 		return false, nil
-	}
-
-	agentState, loadErr := LoadManagedAgentState(agentDir)
-	if loadErr == nil && agentState.CloudAgentID != "" {
-		if delErr := m.Backend.DeleteAgent(ctx, agentState.CloudAgentID); delErr != nil {
-			slog.Warn("failed to delete cloud agent", "cloud_agent_id", agentState.CloudAgentID, "err", delErr)
-		}
 	}
 
 	if deleteFiles {
@@ -382,7 +370,6 @@ func (m *ManagedAgentManager) Message(ctx context.Context, agentID, projectID st
 	}
 
 	req := managedagent.InteractionRequest{
-		CloudAgentID:          agentState.CloudAgentID,
 		Input:                 message,
 		PreviousInteractionID: agentState.LatestInteractionID,
 		EnvironmentID:         agentState.LatestEnvironmentID,

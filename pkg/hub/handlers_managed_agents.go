@@ -32,7 +32,6 @@ const (
 	ManagedAgentsProfile = "managed-agents"
 	ManagedRuntimePrefix = "managed:"
 
-	annotationCloudAgentID  = "scion.dev/cloud-agent-id"
 	annotationCloudProvider = "scion.dev/cloud-provider"
 	annotationInteractionID = "scion.dev/interaction-id"
 	annotationEnvironmentID = "scion.dev/environment-id"
@@ -97,22 +96,27 @@ func (s *Server) managedAgentCreate(ctx context.Context, agent *store.Agent, tas
 
 	agent.Runtime = ManagedRuntimePrefix + backend.Name()
 
-	cloudAgentID, err := backend.CreateAgent(ctx, managedagent.CreateAgentConfig{})
-	if err != nil {
-		return fmt.Errorf("creating cloud agent: %w", err)
-	}
-
 	if agent.Annotations == nil {
 		agent.Annotations = make(map[string]string)
 	}
-	agent.Annotations[annotationCloudAgentID] = cloudAgentID
 	agent.Annotations[annotationCloudProvider] = backend.Name()
 
+	// Skip the /v1beta/agents CRUD endpoint — it may not be generally
+	// available. Go directly to creating an interaction via
+	// /v1beta/interactions, which works with built-in agent names.
 	if task != "" {
+		var systemInstruction string
+		if agent.AppliedConfig != nil && agent.AppliedConfig.InlineConfig != nil {
+			systemInstruction = agent.AppliedConfig.InlineConfig.SystemPrompt
+			if systemInstruction == "" {
+				systemInstruction = agent.AppliedConfig.InlineConfig.AgentInstructions
+			}
+		}
 		handle, err := backend.CreateInteraction(ctx, managedagent.InteractionRequest{
-			CloudAgentID: cloudAgentID,
-			Input:        task,
-			Background:   true,
+			Input:             task,
+			SystemInstruction: systemInstruction,
+			Environment:       &managedagent.EnvironmentConfig{Type: "remote"},
+			Background:        true,
 		})
 		if err != nil {
 			return fmt.Errorf("creating initial interaction: %w", err)
@@ -133,11 +137,6 @@ func (s *Server) managedAgentMessage(ctx context.Context, agent *store.Agent, me
 		return fmt.Errorf("managed agent backend: %w", err)
 	}
 
-	cloudAgentID := agent.Annotations[annotationCloudAgentID]
-	if cloudAgentID == "" {
-		return fmt.Errorf("managed agent has no cloud agent ID")
-	}
-
 	if interrupt {
 		if interactionID := agent.Annotations[annotationInteractionID]; interactionID != "" {
 			if cancelErr := backend.CancelInteraction(ctx, interactionID); cancelErr != nil {
@@ -151,7 +150,6 @@ func (s *Server) managedAgentMessage(ctx context.Context, agent *store.Agent, me
 	}
 
 	req := managedagent.InteractionRequest{
-		CloudAgentID:          cloudAgentID,
 		Input:                 message,
 		PreviousInteractionID: agent.Annotations[annotationInteractionID],
 		EnvironmentID:         agent.Annotations[annotationEnvironmentID],
@@ -199,20 +197,8 @@ func (s *Server) managedAgentStop(ctx context.Context, agent *store.Agent) error
 
 // managedAgentDelete deletes a managed agent's cloud resources.
 func (s *Server) managedAgentDelete(ctx context.Context, agent *store.Agent) error {
-	backend, err := getManagedBackend()
-	if err != nil {
-		return fmt.Errorf("managed agent backend: %w", err)
-	}
-
-	// Stop first (best-effort).
+	// Stop first (best-effort) — cancels the active interaction.
 	_ = s.managedAgentStop(ctx, agent)
-
-	if cloudAgentID := agent.Annotations[annotationCloudAgentID]; cloudAgentID != "" {
-		if delErr := backend.DeleteAgent(ctx, cloudAgentID); delErr != nil {
-			slog.Warn("failed to delete cloud agent", "agent_id", agent.ID, "cloud_agent_id", cloudAgentID, "err", delErr)
-		}
-	}
-
 	return nil
 }
 

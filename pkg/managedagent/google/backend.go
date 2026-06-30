@@ -81,8 +81,16 @@ func (b *Backend) DeleteAgent(ctx context.Context, cloudAgentID string) error {
 }
 
 func (b *Backend) CreateInteraction(ctx context.Context, req managedagent.InteractionRequest) (*managedagent.InteractionHandle, error) {
+	agentName := req.CloudAgentID
+	if agentName == "" {
+		agentName = req.AgentName
+	}
+	if agentName == "" {
+		agentName = b.baseAgent
+	}
+
 	apiReq := &CreateInteractionRequest{
-		Agent:                 req.CloudAgentID,
+		Agent:                 agentName,
 		Input:                 req.Input,
 		PreviousInteractionID: req.PreviousInteractionID,
 		Stream:                req.Stream,
