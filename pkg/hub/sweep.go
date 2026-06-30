@@ -31,6 +31,11 @@ const stuckMessageExpireTTL = 24 * time.Hour
 // LockBrokerMessageSweep (B5-2).
 func (s *Server) brokerMessageSweepHandler() func(ctx context.Context) {
 	return func(ctx context.Context) {
+		// Tight timeout: fail fast if DB connections are saturated rather than
+		// holding a connection while waiting, which worsens the thundering herd.
+		ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		defer cancel()
+
 		cutoff := time.Now().Add(-stuckMessageThreshold)
 		count, err := s.store.CountStuckPendingMessages(ctx, cutoff)
 		if err != nil {

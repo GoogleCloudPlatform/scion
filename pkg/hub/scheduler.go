@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"math/rand"
 	"sync"
 	"time"
 
@@ -43,6 +44,12 @@ type Scheduler struct {
 
 	// Root ticker interval
 	tickInterval time.Duration
+
+	// MaxJitter is the upper bound on random delay added before each recurring
+	// handler invocation. Spreading handlers over this window prevents the
+	// "thundering herd" where all background tasks hit the DB simultaneously.
+	// Defaults to 30 s in production; tests can set it to 0 for determinism.
+	MaxJitter time.Duration
 
 	// Recurring handlers
 	recurring []RecurringHandler
@@ -82,11 +89,13 @@ type scheduledTimer struct {
 	Cancel context.CancelFunc
 }
 
-// NewScheduler creates a new Scheduler with a 1-minute root ticker interval.
+// NewScheduler creates a new Scheduler with a 1-minute root ticker interval
+// and a 30-second max jitter to desynchronize recurring handlers.
 func NewScheduler(st store.Store, log *slog.Logger) *Scheduler {
 	return &Scheduler{
 		store:         st,
 		tickInterval:  1 * time.Minute,
+		MaxJitter:     maxJitter,
 		timers:        make(map[string]*scheduledTimer),
 		eventHandlers: make(map[string]EventHandler),
 		log:           log,
@@ -238,13 +247,32 @@ func (s *Scheduler) Stop() {
 	s.wg.Wait()
 }
 
+// maxJitter is the upper bound on random delay added before each recurring
+// handler invocation. Spreading handlers over a 30-second window prevents the
+// "thundering herd" where all background tasks hit the DB simultaneously.
+const maxJitter = 30 * time.Second
+
 // runRecurringHandlers invokes all handlers whose interval divides the current
 // tick count. Each handler runs in its own goroutine with a timeout context.
+// A random jitter (0–30 s) is added before each invocation so background tasks
+// desynchronize and avoid saturating the DB connection pool.
 func (s *Scheduler) runRecurringHandlers(ctx context.Context) {
 	for _, h := range s.recurring {
 		if s.tickCount%uint64(h.Interval) == 0 {
 			handler := h // capture loop variable
 			go func() {
+				// Stagger start: sleep a random 0–MaxJitter so tasks that fire on
+				// the same tick don't all compete for DB connections at once.
+				jitter := time.Duration(0)
+				if s.MaxJitter > 0 {
+					jitter = time.Duration(rand.Int63n(int64(s.MaxJitter)))
+				}
+				select {
+				case <-time.After(jitter):
+				case <-ctx.Done():
+					return
+				}
+
 				handlerCtx, cancel := context.WithTimeout(ctx, 55*time.Second)
 				defer cancel()
 

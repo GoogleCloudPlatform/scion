@@ -573,6 +573,7 @@ func TestAgentStalledDetectionHandler_SchedulerIntegration(t *testing.T) {
 
 	scheduler := NewScheduler(s, slog.Default())
 	scheduler.tickInterval = 50 * time.Millisecond
+	scheduler.MaxJitter = 0
 
 	scheduler.RegisterRecurring("agent-stalled-detection", 1, srv.agentStalledDetectionHandler())
 

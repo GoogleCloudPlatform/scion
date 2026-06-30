@@ -29,16 +29,20 @@ import (
 )
 
 // newTestScheduler creates a scheduler with a fast tick interval for testing.
+// MaxJitter is set to 0 so handlers fire immediately and tests remain deterministic.
 func newTestScheduler(interval time.Duration) *Scheduler {
 	s := NewScheduler(nil, slog.Default())
 	s.tickInterval = interval
+	s.MaxJitter = 0
 	return s
 }
 
 // newTestSchedulerWithStore creates a scheduler with a mock store and fast tick interval.
+// MaxJitter is set to 0 so handlers fire immediately and tests remain deterministic.
 func newTestSchedulerWithStore(interval time.Duration, st store.Store) *Scheduler {
 	s := NewScheduler(st, slog.Default())
 	s.tickInterval = interval
+	s.MaxJitter = 0
 	return s
 }
 

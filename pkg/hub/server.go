@@ -1831,6 +1831,11 @@ func (s *Server) GenerateAgentToken(agentID, projectID string, ancestry []string
 // notification system are informed.
 func (s *Server) agentHeartbeatTimeoutHandler() func(ctx context.Context) {
 	return func(ctx context.Context) {
+		// Tight timeout: fail fast if DB connections are saturated rather than
+		// holding a connection while waiting, which worsens the thundering herd.
+		ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		defer cancel()
+
 		threshold := time.Now().Add(-2 * time.Minute)
 
 		agents, err := s.store.MarkStaleAgentsOffline(ctx, threshold)
@@ -1859,6 +1864,11 @@ func (s *Server) agentHeartbeatTimeoutHandler() func(ctx context.Context) {
 // (container stopped, phase set to "suspended").
 func (s *Server) agentStalledDetectionHandler() func(ctx context.Context) {
 	return func(ctx context.Context) {
+		// Tight timeout: fail fast if DB connections are saturated rather than
+		// holding a connection while waiting, which worsens the thundering herd.
+		ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		defer cancel()
+
 		activityThreshold := time.Now().Add(-s.config.StalledThreshold)
 		heartbeatRecency := time.Now().Add(-2 * time.Minute)
 
@@ -2308,16 +2318,20 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 	// otherwise every replica would publish duplicate offline/stalled events and
 	// race on the schedule claim. On SQLite the lock is a no-op. See
 	// CONCURRENCY-AUDIT.md §"Singleton / leader".
-	s.scheduler.RegisterRecurringSingleton("agent-heartbeat-timeout", 1, store.LockAgentHeartbeatTimeout, s.agentHeartbeatTimeoutHandler())
-	s.scheduler.RegisterRecurringSingleton("agent-stalled-detection", 1, store.LockAgentStalledDetection, s.agentStalledDetectionHandler())
+	// Non-critical maintenance tasks run every 5 minutes (not every 1 minute) to
+	// reduce DB connection pressure. Combined with per-handler jitter in the
+	// scheduler, this eliminates the thundering-herd pattern that was causing
+	// 9-54 s API latency spikes.
+	s.scheduler.RegisterRecurringSingleton("agent-heartbeat-timeout", 5, store.LockAgentHeartbeatTimeout, s.agentHeartbeatTimeoutHandler())
+	s.scheduler.RegisterRecurringSingleton("agent-stalled-detection", 5, store.LockAgentStalledDetection, s.agentStalledDetectionHandler())
 	if s.config.SoftDeleteRetention > 0 {
 		s.scheduler.RegisterRecurringSingleton("soft-delete-purge", 60, store.LockSoftDeletePurge, s.purgeHandler())
 	}
 	s.scheduler.RegisterEventHandler("message", s.messageEventHandler())
 	s.scheduler.RegisterEventHandler("dispatch_agent", s.dispatchAgentEventHandler())
 	s.scheduler.RegisterRecurringSingleton("schedule-evaluator", 1, store.LockScheduleEvaluator, s.evaluateSchedulesHandler())
-	s.scheduler.RegisterRecurringSingleton("broker-affinity-reap", 1, store.LockBrokerAffinityReap, s.brokerAffinityReapHandler())
-	s.scheduler.RegisterRecurringSingleton("broker-message-sweep", 1, store.LockBrokerMessageSweep, s.brokerMessageSweepHandler())
+	s.scheduler.RegisterRecurringSingleton("broker-affinity-reap", 5, store.LockBrokerAffinityReap, s.brokerAffinityReapHandler())
+	s.scheduler.RegisterRecurringSingleton("broker-message-sweep", 5, store.LockBrokerMessageSweep, s.brokerMessageSweepHandler())
 
 	// Register GitHub App health check if the app is configured
 	s.mu.RLock()

@@ -40,6 +40,11 @@ const (
 // so at most one replica runs it per tick.
 func (s *Server) brokerAffinityReapHandler() func(ctx context.Context) {
 	return func(ctx context.Context) {
+		// Tight timeout: fail fast if DB connections are saturated rather than
+		// holding a connection while waiting, which worsens the thundering herd.
+		ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		defer cancel()
+
 		now := time.Now()
 
 		cleared, err := s.store.ReapStaleBrokerAffinity(ctx, now.Add(-affinityStaleAge))
