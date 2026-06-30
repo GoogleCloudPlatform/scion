@@ -21,18 +21,13 @@ import (
 )
 
 func TestNew_BuiltinHarnesses(t *testing.T) {
-	tests := []struct {
-		name     string
-		expected string
-	}{
-		{"claude", "claude"},
-		{"gemini", "gemini"},
-	}
+	// Gemini is the only remaining builtin harness
+	h := New("gemini")
+	assert.Equal(t, "gemini", h.Name())
 
-	for _, tt := range tests {
-		h := New(tt.name)
-		assert.Equal(t, tt.expected, h.Name())
-	}
+	// Claude now returns Generic since it moved to directory-based seeding
+	h = New("claude")
+	assert.Equal(t, "generic", h.Name())
 }
 
 func TestNew_UnknownFallsToGeneric(t *testing.T) {

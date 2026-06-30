@@ -15,39 +15,48 @@
 package harness
 
 import (
+	"io/fs"
 	"reflect"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"gopkg.in/yaml.v3"
+
+	harnessesEmbed "github.com/GoogleCloudPlatform/scion/harnesses"
 )
 
-// loadAuthMetaFromHarness reads auth metadata from a built-in harness's
-// embedded config.yaml using its api.Harness embed accessor. Tests use this
-// so the config-driven preflight is validated against the same files that
-// ship in the binary.
+// loadAuthMetaFromHarness reads auth metadata from a harness's config.yaml.
+// First checks the compiled-in embeds, then falls through to the harnesses/
+// embed FS.
 func loadAuthMetaFromHarness(t *testing.T, harnessName string) *config.HarnessAuthMetadata {
 	t.Helper()
 
+	var data []byte
 	h := newBuiltin(harnessName)
-	if h == nil {
-		t.Fatalf("no built-in harness for %q", harnessName)
+	if h != nil {
+		embedsFS, basePath := h.GetHarnessEmbedsFS()
+		if basePath != "" {
+			var err error
+			data, err = embedsFS.ReadFile(basePath + "/config.yaml")
+			if err != nil {
+				t.Fatalf("read embedded config.yaml: %v", err)
+			}
+		}
 	}
-	embedsFS, basePath := h.GetHarnessEmbedsFS()
-	if basePath == "" {
-		t.Fatalf("harness %q has no embedded config", harnessName)
-	}
-	data, err := embedsFS.ReadFile(basePath + "/config.yaml")
-	if err != nil {
-		t.Fatalf("read embedded config.yaml: %v", err)
+	if data == nil {
+		var err error
+		data, err = fs.ReadFile(harnessesEmbed.FS, harnessName+"/config.yaml")
+		if err != nil {
+			t.Fatalf("read config.yaml from harnesses/ embed: %v", err)
+		}
 	}
 	var entry config.HarnessConfigEntry
 	if err := yaml.Unmarshal(data, &entry); err != nil {
-		t.Fatalf("parse embedded config.yaml: %v", err)
+		t.Fatalf("parse config.yaml: %v", err)
 	}
 	if entry.Auth == nil {
-		t.Fatalf("harness %q embedded config has no auth metadata", harnessName)
+		t.Fatalf("harness %q config has no auth metadata", harnessName)
 	}
 	return entry.Auth
 }

@@ -585,16 +585,17 @@ func TestResolve_BuiltinFallback(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
 
-	// No on-disk harness-config — Resolve should still return the built-in.
-	resolved, err := Resolve(context.Background(), ResolveOptions{Name: "claude"})
+	// No on-disk harness-config — Resolve returns builtin for gemini (still
+	// has a compiled-in implementation).
+	resolved, err := Resolve(context.Background(), ResolveOptions{Name: "gemini"})
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
 	if resolved.Implementation != "builtin" {
 		t.Errorf("Implementation=%q want builtin", resolved.Implementation)
 	}
-	if _, ok := resolved.Harness.(*ClaudeCode); !ok {
-		t.Errorf("expected *ClaudeCode, got %T", resolved.Harness)
+	if _, ok := resolved.Harness.(*GeminiCLI); !ok {
+		t.Errorf("expected *GeminiCLI, got %T", resolved.Harness)
 	}
 }
 

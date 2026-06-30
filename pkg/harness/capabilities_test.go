@@ -44,15 +44,18 @@ func TestAdvancedCapabilitiesDefaults(t *testing.T) {
 			expectResume:        api.SupportYes,
 		},
 		{
+			// Claude now returns Generic via New() since it moved to
+			// directory-based seeding. Capabilities come from config.yaml
+			// at runtime via ContainerScriptHarness.
 			name:                "claude",
 			harness:             "claude",
-			expectMaxTurns:      api.SupportYes,
-			expectMaxModelCalls: api.SupportYes,
+			expectMaxTurns:      api.SupportNo,
+			expectMaxModelCalls: api.SupportNo,
 			expectMaxDuration:   api.SupportYes,
 			expectAuthFile:      api.SupportYes,
 			expectVertexAI:      api.SupportYes,
-			expectSystemPrompt:  api.SupportYes,
-			expectResume:        api.SupportYes,
+			expectSystemPrompt:  api.SupportPartial,
+			expectResume:        api.SupportNo,
 		},
 		{
 			name:                "generic",

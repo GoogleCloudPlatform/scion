@@ -24,7 +24,6 @@ import (
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
-	claudeEmbeds "github.com/GoogleCloudPlatform/scion/pkg/harness/claude"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
 
@@ -293,7 +292,7 @@ func (c *ClaudeCode) GetInterruptKey() string {
 }
 
 func (c *ClaudeCode) GetHarnessEmbedsFS() (embed.FS, string) {
-	return claudeEmbeds.EmbedsFS, "embeds"
+	return embed.FS{}, ""
 }
 
 func (c *ClaudeCode) InjectAgentInstructions(agentHome string, content []byte) error {

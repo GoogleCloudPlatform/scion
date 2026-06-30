@@ -159,8 +159,6 @@ func Resolve(_ context.Context, opts ResolveOptions) (*ResolvedHarness, error) {
 // nil if none exists.
 func newBuiltin(harnessName string) api.Harness {
 	switch harnessName {
-	case "claude":
-		return &ClaudeCode{}
 	case "gemini":
 		return &GeminiCLI{}
 	}
