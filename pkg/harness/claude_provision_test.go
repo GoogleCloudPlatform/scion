@@ -22,20 +22,21 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+
+	harnessesEmbed "github.com/GoogleCloudPlatform/scion/harnesses"
 )
 
 // seedClaudeDir seeds the embedded Claude harness-config into a temp dir
-// using the same code path operators run during scion init / harness-config
-// upgrade. It returns the absolute target dir so tests can inspect it.
+// from the harnesses/ embed FS. It returns the absolute target dir so tests
+// can inspect it.
 func seedClaudeDir(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
-	if err := config.SeedHarnessConfig(dir, &ClaudeCode{}, false); err != nil {
-		t.Fatalf("SeedHarnessConfig: %v", err)
+	if err := config.SeedHarnessConfigFromDir(dir, harnessesEmbed.FS, "claude", false); err != nil {
+		t.Fatalf("SeedHarnessConfigFromDir: %v", err)
 	}
 	return dir
 }
@@ -72,111 +73,6 @@ func TestClaudeEmbedsSeedRootSupportFiles(t *testing.T) {
 	}
 	if len(hc.Config.Provisioner.Command) == 0 {
 		t.Error("expected provisioner.command in config.yaml")
-	}
-}
-
-// TestClaudeActivateScriptIsIdempotent verifies that --activate-script is a
-// no-op when the embedded default already declares container-script.
-func TestClaudeActivateScriptIsIdempotent(t *testing.T) {
-	dir := seedClaudeDir(t)
-
-	plan, err := config.UpgradeHarnessConfig(dir, &ClaudeCode{}, config.HarnessConfigUpgradeOptions{
-		ActivateScript: true,
-		Now:            func() time.Time { return time.Date(2026, 5, 31, 0, 0, 0, 0, time.UTC) },
-	})
-	if err != nil {
-		t.Fatalf("UpgradeHarnessConfig --activate-script: %v", err)
-	}
-	if plan.Changed {
-		t.Fatalf("expected no change (already container-script), got actions: %v", plan.Actions)
-	}
-
-	hc, err := config.LoadHarnessConfigDir(dir)
-	if err != nil {
-		t.Fatalf("LoadHarnessConfigDir after activate: %v", err)
-	}
-	if hc.Config.Provisioner == nil || hc.Config.Provisioner.Type != "container-script" {
-		t.Fatalf("provisioner.type=%q want container-script", hc.Config.Provisioner.Type)
-	}
-	if len(plan.Backups) != 0 {
-		t.Fatalf("expected no backups for idempotent activate, got %v", plan.Backups)
-	}
-}
-
-// TestClaudeContainerScriptHarnessParity asserts the ContainerScriptHarness
-// wrapper produces the same observable command/env/capability/getter values as
-// the compiled ClaudeCode harness for the embedded config.
-func TestClaudeContainerScriptHarnessParity(t *testing.T) {
-	dir := seedClaudeDir(t)
-
-	hc, err := config.LoadHarnessConfigDir(dir)
-	if err != nil {
-		t.Fatalf("LoadHarnessConfigDir: %v", err)
-	}
-	scripted, err := NewContainerScriptHarness(dir, hc.Config)
-	if err != nil {
-		t.Fatalf("NewContainerScriptHarness: %v", err)
-	}
-	builtin := &ClaudeCode{}
-
-	// 1. Name must match.
-	if scripted.Name() != builtin.Name() {
-		t.Errorf("Name parity: scripted=%q builtin=%q", scripted.Name(), builtin.Name())
-	}
-	if scripted.DefaultConfigDir() != builtin.DefaultConfigDir() {
-		t.Errorf("DefaultConfigDir: scripted=%q builtin=%q", scripted.DefaultConfigDir(), builtin.DefaultConfigDir())
-	}
-	if scripted.SkillsDir() != builtin.SkillsDir() {
-		t.Errorf("SkillsDir: scripted=%q builtin=%q", scripted.SkillsDir(), builtin.SkillsDir())
-	}
-	if scripted.GetInterruptKey() != builtin.GetInterruptKey() {
-		t.Errorf("GetInterruptKey: scripted=%q builtin=%q", scripted.GetInterruptKey(), builtin.GetInterruptKey())
-	}
-
-	// 2. GetCommand must match across the operative shapes.
-	cases := []struct {
-		name    string
-		task    string
-		resume  bool
-		baseArg []string
-	}{
-		{"resume_no_task", "", true, nil},
-		{"task_only", "fix the bug", false, nil},
-		{"task_with_base_args", "do it", false, []string{"--debug"}},
-	}
-	for _, tc := range cases {
-		t.Run("GetCommand_"+tc.name, func(t *testing.T) {
-			gotS := scripted.GetCommand(tc.task, tc.resume, tc.baseArg)
-			gotB := builtin.GetCommand(tc.task, tc.resume, tc.baseArg)
-			if strings.Join(gotS, " ") != strings.Join(gotB, " ") {
-				t.Errorf("scripted=%v builtin=%v", gotS, gotB)
-			}
-		})
-	}
-
-	// 3. AdvancedCapabilities must report the same shape.
-	gotCaps := scripted.AdvancedCapabilities()
-	wantCaps := builtin.AdvancedCapabilities()
-	if gotCaps.Harness != wantCaps.Harness {
-		t.Errorf("Capabilities.Harness: scripted=%q builtin=%q", gotCaps.Harness, wantCaps.Harness)
-	}
-	if gotCaps.Limits.MaxDuration.Support != wantCaps.Limits.MaxDuration.Support {
-		t.Errorf("Capabilities.Limits.MaxDuration: scripted=%v builtin=%v", gotCaps.Limits.MaxDuration, wantCaps.Limits.MaxDuration)
-	}
-	if gotCaps.Auth.APIKey.Support != wantCaps.Auth.APIKey.Support {
-		t.Errorf("Capabilities.Auth.APIKey: scripted=%v builtin=%v", gotCaps.Auth.APIKey, wantCaps.Auth.APIKey)
-	}
-	if gotCaps.Auth.AuthFile.Support != wantCaps.Auth.AuthFile.Support {
-		t.Errorf("Capabilities.Auth.AuthFile: scripted=%v builtin=%v", gotCaps.Auth.AuthFile, wantCaps.Auth.AuthFile)
-	}
-	if gotCaps.Auth.OAuthToken.Support != wantCaps.Auth.OAuthToken.Support {
-		t.Errorf("Capabilities.Auth.OAuthToken: scripted=%v builtin=%v", gotCaps.Auth.OAuthToken, wantCaps.Auth.OAuthToken)
-	}
-	if gotCaps.Auth.VertexAI.Support != wantCaps.Auth.VertexAI.Support {
-		t.Errorf("Capabilities.Auth.VertexAI: scripted=%v builtin=%v", gotCaps.Auth.VertexAI, wantCaps.Auth.VertexAI)
-	}
-	if gotCaps.Prompts.SystemPrompt.Support != wantCaps.Prompts.SystemPrompt.Support {
-		t.Errorf("Capabilities.Prompts.SystemPrompt: scripted=%v builtin=%v", gotCaps.Prompts.SystemPrompt, wantCaps.Prompts.SystemPrompt)
 	}
 }
 
