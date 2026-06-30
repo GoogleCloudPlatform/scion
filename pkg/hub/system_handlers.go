@@ -356,11 +356,10 @@ func (s *Server) handleSystemInit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	allowed := map[string]bool{
-		"claude":   true,
-		"gemini":   true,
-		"codex":    true,
-		"opencode": true,
+	allNames := harness.AllHarnessNames()
+	allowed := make(map[string]bool, len(allNames))
+	for _, n := range allNames {
+		allowed[n] = true
 	}
 
 	var selected []string
@@ -377,13 +376,19 @@ func (s *Server) handleSystemInit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Build harness instances for selected names
-	var harnessInstances []api.Harness
-	for _, name := range selected {
-		harnessInstances = append(harnessInstances, harness.New(name))
+	// Build embed-only harness instances for selected names
+	var embedOnlyInstances []api.Harness
+	for _, h := range harness.EmbedOnlyHarnesses() {
+		for _, name := range selected {
+			if h.Name() == name {
+				embedOnlyInstances = append(embedOnlyInstances, h)
+				break
+			}
+		}
 	}
 
-	if err := config.InitMachine(harnessInstances); err != nil {
+	opts := config.InitMachineOpts{HarnessesFS: harness.HarnessesFS()}
+	if err := config.InitMachine(embedOnlyInstances, opts); err != nil {
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
 			fmt.Sprintf("initialization failed: %s", err.Error()), nil)
 		return
