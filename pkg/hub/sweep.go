@@ -21,8 +21,11 @@ import (
 
 const stuckMessageThreshold = 5 * time.Minute
 
+const stuckMessageExpireTTL = 24 * time.Hour
+
 // brokerMessageSweepHandler returns a handler that counts messages still in
 // dispatch_state='pending' beyond the stuck threshold and logs/emits metrics.
+// Messages stuck beyond stuckMessageExpireTTL are transitioned to failed.
 // After Phase 4 (no-queuing delivery), no code path creates pending rows — any
 // count > 0 indicates a bug. Registered as a RecurringSingleton guarded by
 // LockBrokerMessageSweep (B5-2).
@@ -42,6 +45,17 @@ func (s *Server) brokerMessageSweepHandler() func(ctx context.Context) {
 
 		if rec := s.dispatchMetrics; rec != nil {
 			rec.ObserveMessageStuck(ctx, int64(count))
+		}
+
+		expireCutoff := time.Now().Add(-stuckMessageExpireTTL)
+		expired, err := s.store.ExpireStuckPendingMessages(ctx, expireCutoff, "expired: stuck in pending state beyond TTL")
+		if err != nil {
+			s.agentLifecycleLog.Error("sweep: expire stuck pending messages failed", "error", err)
+			return
+		}
+		if expired > 0 {
+			s.agentLifecycleLog.Info("sweep: expired stuck pending messages",
+				"expired", expired, "ttl", stuckMessageExpireTTL.String())
 		}
 	}
 }

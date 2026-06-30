@@ -239,6 +239,64 @@ func TestCountStuckPendingMessages(t *testing.T) {
 	assert.Equal(t, 0, count, "dispatched message is not stuck")
 }
 
+func TestExpireStuckPendingMessages(t *testing.T) {
+	client := enttest.NewClient(t)
+	cs := NewCompositeStore(client)
+	ctx := context.Background()
+
+	proj := &store.Project{
+		ID: uuid.NewString(), Name: "p", Slug: "p-" + uuid.NewString()[:8],
+		Visibility: store.VisibilityPrivate, OwnerID: uuid.NewString(),
+	}
+	require.NoError(t, cs.CreateProject(ctx, proj))
+
+	// A message created 25 hours ago (past TTL).
+	expiredMsg := &store.Message{
+		ID: uuid.NewString(), ProjectID: proj.ID,
+		Sender: "user:x", Recipient: "agent:a", Msg: "old",
+		CreatedAt: time.Now().Add(-25 * time.Hour),
+	}
+	require.NoError(t, cs.CreateMessage(ctx, expiredMsg))
+
+	// A message created 10 minutes ago (within TTL, but past stuck threshold).
+	recentMsg := &store.Message{
+		ID: uuid.NewString(), ProjectID: proj.ID,
+		Sender: "user:x", Recipient: "agent:b", Msg: "recent",
+		CreatedAt: time.Now().Add(-10 * time.Minute),
+	}
+	require.NoError(t, cs.CreateMessage(ctx, recentMsg))
+
+	// A message created just now (fresh).
+	freshMsg := &store.Message{
+		ID: uuid.NewString(), ProjectID: proj.ID,
+		Sender: "user:x", Recipient: "agent:c", Msg: "fresh",
+	}
+	require.NoError(t, cs.CreateMessage(ctx, freshMsg))
+
+	ttlCutoff := time.Now().Add(-24 * time.Hour)
+	reason := "expired: stuck in pending state beyond TTL"
+	expired, err := cs.ExpireStuckPendingMessages(ctx, ttlCutoff, reason)
+	require.NoError(t, err)
+	assert.Equal(t, 1, expired, "only the 25h-old message should be expired")
+
+	got, err := cs.GetMessage(ctx, expiredMsg.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.MessageDispatchFailed, got.DispatchState)
+
+	gotRecent, err := cs.GetMessage(ctx, recentMsg.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.MessageDispatchPending, gotRecent.DispatchState, "recent message still pending")
+
+	gotFresh, err := cs.GetMessage(ctx, freshMsg.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.MessageDispatchPending, gotFresh.DispatchState, "fresh message still pending")
+
+	// Running again should expire 0.
+	expired, err = cs.ExpireStuckPendingMessages(ctx, ttlCutoff, reason)
+	require.NoError(t, err)
+	assert.Equal(t, 0, expired, "already-expired message not counted again")
+}
+
 func mustCreateAgent(t *testing.T, client *ent.Client, projectID uuid.UUID, brokerID string) string {
 	t.Helper()
 	a, err := client.Agent.Create().

@@ -280,6 +280,20 @@ func (s *BrokerDispatchStore) CountStuckPendingMessages(ctx context.Context, bef
 	return n, nil
 }
 
+// ExpireStuckPendingMessages transitions messages stuck in pending state past
+// the given cutoff to failed, recording the reason. Returns the number expired.
+func (s *BrokerDispatchStore) ExpireStuckPendingMessages(ctx context.Context, before time.Time, reason string) (int, error) {
+	affected, err := s.client.Message.Update().
+		Where(message.DispatchStateEQ(store.MessageDispatchPending), message.CreatedLT(before)).
+		SetDispatchState(store.MessageDispatchFailed).
+		SetNillableDispatchFailureReason(&reason).
+		Save(ctx)
+	if err != nil {
+		return 0, mapError(err)
+	}
+	return affected, nil
+}
+
 // ListPendingMessages returns messages still pending delivery whose target agent
 // lives on the given broker (messages have no broker_id; the association is via
 // the recipient agent's runtime_broker_id).

@@ -402,6 +402,11 @@ type BrokerDispatchStore interface {
 	// cutoff. Used by the stuck-message sweep (B5-2) to surface messages that
 	// have not been dispatched within the expected window.
 	CountStuckPendingMessages(ctx context.Context, before time.Time) (int, error)
+
+	// ExpireStuckPendingMessages transitions messages stuck in pending state
+	// past the given cutoff to failed, recording the reason. Returns the
+	// number of messages expired.
+	ExpireStuckPendingMessages(ctx context.Context, before time.Time, reason string) (int, error)
 }
 
 // TemplateStore defines template persistence operations.
