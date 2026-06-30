@@ -2741,16 +2741,19 @@ func TestAgentCreate_StoresTemplateSlug(t *testing.T) {
 		t.Fatalf("failed to add project provider: %v", err)
 	}
 
-	// Create a template with a known slug
+	// Create a template with a known slug and files (active template)
 	tmpl := &store.Template{
-		ID:         tid("tmpl_uuid_123"),
-		Slug:       "my-claude-template",
-		Name:       "My Claude Template",
-		Harness:    "claude",
-		Scope:      "global",
-		Visibility: store.VisibilityPublic,
-		Created:    time.Now(),
-		Updated:    time.Now(),
+		ID:          tid("tmpl_uuid_123"),
+		Slug:        "my-claude-template",
+		Name:        "My Claude Template",
+		Harness:     "claude",
+		Scope:       "global",
+		Visibility:  store.VisibilityPublic,
+		Status:      store.TemplateStatusActive,
+		ContentHash: "abc123",
+		Files:       []store.TemplateFile{{Path: "CLAUDE.md", Size: 100, Hash: "deadbeef"}},
+		Created:     time.Now(),
+		Updated:     time.Now(),
 	}
 	if err := s.CreateTemplate(ctx, tmpl); err != nil {
 		t.Fatalf("failed to create template: %v", err)

@@ -511,6 +511,18 @@ func (s *Server) createAgentInProject(
 			}
 			// Template will be resolved locally by the broker
 		}
+
+		// Guard: reject dispatch when the resolved template has no files and
+		// no content hash. This catches templates stuck in 'pending' state
+		// before they reach broker hydration (where the failure is opaque).
+		if resolvedTemplate != nil && len(resolvedTemplate.Files) == 0 && resolvedTemplate.ContentHash == "" {
+			name := resolvedTemplate.Slug
+			if name == "" {
+				name = resolvedTemplate.Name
+			}
+			ValidationError(w, "template "+name+" has no files — sync template files first with: scion template sync "+name, nil)
+			return
+		}
 	}
 
 	// Resolve harness config: prefer the user's explicit choice, then template default.

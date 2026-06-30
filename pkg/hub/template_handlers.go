@@ -281,10 +281,12 @@ func (s *Server) createTemplateV2(w http.ResponseWriter, r *http.Request) {
 		template.Visibility = store.VisibilityPrivate
 	}
 
-	// If no files provided, mark as active immediately
-	if len(req.Files) == 0 {
-		template.Status = store.TemplateStatusActive
-	}
+	// If no files provided, keep the template in 'pending' status so it
+	// cannot be used for agent dispatch until files are uploaded via
+	// "scion template sync". This prevents template_error failures when
+	// agents are dispatched to file-less templates.
+	// Templates with files are also created as 'pending' and promoted to
+	// 'active' during finalize (handleTemplateFinalize).
 
 	// Generate storage path and URI
 	storagePath := storage.TemplateStoragePath(template.Scope, template.ScopeID, template.Slug)
@@ -687,7 +689,11 @@ func (s *Server) handleTemplateDownload(w http.ResponseWriter, r *http.Request, 
 	}
 
 	if len(template.Files) == 0 {
-		ValidationError(w, "template has no files", nil)
+		name := template.Slug
+		if name == "" {
+			name = template.Name
+		}
+		ValidationError(w, "template "+name+" ("+template.ID+") has no files — sync template files first with: scion template sync "+name, nil)
 		return
 	}
 
