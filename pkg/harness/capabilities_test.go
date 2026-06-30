@@ -44,18 +44,17 @@ func TestAdvancedCapabilitiesDefaults(t *testing.T) {
 			expectResume:        api.SupportYes,
 		},
 		{
-			// Claude now returns Generic via New() since it moved to
-			// directory-based seeding. Capabilities come from config.yaml
-			// at runtime via ContainerScriptHarness.
+			// Claude capabilities come from harnesses/claude/config.yaml
+			// via DeclarativeGenericHarness loaded from the embed FS.
 			name:                "claude",
 			harness:             "claude",
-			expectMaxTurns:      api.SupportNo,
+			expectMaxTurns:      api.SupportYes,
 			expectMaxModelCalls: api.SupportNo,
 			expectMaxDuration:   api.SupportYes,
 			expectAuthFile:      api.SupportYes,
 			expectVertexAI:      api.SupportYes,
-			expectSystemPrompt:  api.SupportPartial,
-			expectResume:        api.SupportNo,
+			expectSystemPrompt:  api.SupportYes,
+			expectResume:        "",
 		},
 		{
 			name:                "generic",

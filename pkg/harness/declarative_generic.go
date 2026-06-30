@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -138,8 +139,18 @@ func (d *DeclarativeGenericHarness) InjectAgentInstructions(agentHome string, co
 		target = "agents.md"
 	}
 	full := filepath.Join(agentHome, target)
-	if err := os.MkdirAll(filepath.Dir(full), 0755); err != nil {
+	dir := filepath.Dir(full)
+	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("create instructions dir: %w", err)
+	}
+	base := filepath.Base(target)
+	entries, err := os.ReadDir(dir)
+	if err == nil {
+		for _, e := range entries {
+			if !e.IsDir() && strings.EqualFold(e.Name(), base) && e.Name() != base {
+				_ = os.Remove(filepath.Join(dir, e.Name()))
+			}
+		}
 	}
 	return os.WriteFile(full, content, 0644)
 }

@@ -407,7 +407,7 @@ func setupInlineHarnessTemplate(t *testing.T, scionDir, tplName, agentInstructio
 	hcDir := filepath.Join(tplDir, "harness-configs", "claude-web")
 	hcHome := filepath.Join(hcDir, "home")
 	os.MkdirAll(filepath.Join(hcHome, ".claude", "skills", "chrome-devtools"), 0755)
-	os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte("harness: claude\nimage: test-claude:latest\n"), 0644)
+	os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte("harness: claude\nimage: test-claude:latest\nskills_dir: .claude/skills\ninstructions_file: .claude/CLAUDE.md\n"), 0644)
 
 	// Harness config provides claude.md (lowercase) — this should be REPLACED
 	os.WriteFile(filepath.Join(hcHome, ".claude", "claude.md"), []byte("# Harness Config Instructions\nThese are from the harness config."), 0644)

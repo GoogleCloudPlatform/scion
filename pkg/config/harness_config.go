@@ -87,6 +87,16 @@ func LoadHarnessConfigDir(dirPath string) (*HarnessConfigDir, error) {
 	}, nil
 }
 
+// ParseHarnessConfigYAML unmarshals raw config.yaml bytes into a
+// HarnessConfigEntry without validation or path resolution.
+func ParseHarnessConfigYAML(data []byte) (HarnessConfigEntry, error) {
+	var entry HarnessConfigEntry
+	if err := yaml.Unmarshal(data, &entry); err != nil {
+		return HarnessConfigEntry{}, err
+	}
+	return entry, nil
+}
+
 // FindHarnessConfigDir resolves a harness-config by name, checking template-level,
 // project-level, then global directories.
 // Optional templatePaths specify template directories whose harness-configs/

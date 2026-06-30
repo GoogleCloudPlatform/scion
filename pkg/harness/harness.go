@@ -19,6 +19,7 @@ import (
 	"sort"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 
 	harnessesEmbed "github.com/GoogleCloudPlatform/scion/harnesses"
 )
@@ -28,8 +29,24 @@ func New(harnessName string) api.Harness {
 	case "gemini":
 		return &GeminiCLI{}
 	default:
+		if h := newFromEmbedFS(harnessName); h != nil {
+			return h
+		}
 		return &Generic{}
 	}
+}
+
+func newFromEmbedFS(name string) api.Harness {
+	data, err := fs.ReadFile(harnessesEmbed.FS, name+"/config.yaml")
+	if err != nil {
+		return nil
+	}
+	entry, err := config.ParseHarnessConfigYAML(data)
+	if err != nil {
+		return nil
+	}
+	entry.Harness = name
+	return NewDeclarativeGenericHarness(entry)
 }
 
 // EmbedOnlyHarnesses returns harnesses that still use compiled-in Go embeds

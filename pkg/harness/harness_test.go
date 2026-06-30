@@ -25,9 +25,9 @@ func TestNew_BuiltinHarnesses(t *testing.T) {
 	h := New("gemini")
 	assert.Equal(t, "gemini", h.Name())
 
-	// Claude now returns Generic since it moved to directory-based seeding
+	// Claude loads from the harnesses/ embed FS as a DeclarativeGenericHarness
 	h = New("claude")
-	assert.Equal(t, "generic", h.Name())
+	assert.Equal(t, "claude", h.Name())
 }
 
 func TestNew_UnknownFallsToGeneric(t *testing.T) {
