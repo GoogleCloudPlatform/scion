@@ -501,7 +501,8 @@
             "project_scope": { "$ref": "#/$defs/capabilityField" }
           },
           "additionalProperties": false
-        }
+        },
+        "resume": { "$ref": "#/$defs/capabilityField" }
       },
       "additionalProperties": false
     },

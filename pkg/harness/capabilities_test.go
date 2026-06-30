@@ -54,7 +54,7 @@ func TestAdvancedCapabilitiesDefaults(t *testing.T) {
 			expectAuthFile:      api.SupportYes,
 			expectVertexAI:      api.SupportYes,
 			expectSystemPrompt:  api.SupportYes,
-			expectResume:        "",
+			expectResume:        api.SupportYes,
 		},
 		{
 			name:                "generic",

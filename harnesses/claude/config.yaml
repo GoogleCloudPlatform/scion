@@ -67,6 +67,7 @@ capabilities:
     stdio: { support: "yes" }
     sse: { support: "yes" }
     streamable_http: { support: "yes" }
+  resume: { support: "yes" }
 no_auth:
   behavior: drop-to-shell
   message: |
