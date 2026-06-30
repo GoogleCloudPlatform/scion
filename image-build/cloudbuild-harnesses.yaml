@@ -61,7 +61,7 @@ steps:
   # Build Claude Harness Image
   - name: 'gcr.io/cloud-builders/docker'
     id: 'build-scion-claude'
-    dir: 'image-build/claude'
+    dir: 'harnesses/claude'
     args:
       - 'buildx'
       - 'build'
