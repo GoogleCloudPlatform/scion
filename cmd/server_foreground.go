@@ -138,6 +138,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("no server components enabled; use --enable-hub, --enable-runtime-broker, or --enable-web")
 	}
 
+	validateHostedBasic(cfg)
 	if err := validateHostedHAPreflight(cfg); err != nil {
 		return err
 	}
@@ -702,7 +703,33 @@ func loadAndReconcileConfig(cmd *cobra.Command) (*config.GlobalConfig, error) {
 }
 
 func hostedHAGuardsRequired(cfg *config.GlobalConfig) bool {
-	return hostedMode && enableHub && cfg != nil
+	return hostedMode && enableHub && cfg != nil && isHADeployment(cfg)
+}
+
+// isHADeployment returns true when the configuration indicates a multi-instance
+// (Cloud Run / HA) deployment rather than a single-instance GCE VM.
+func isHADeployment(cfg *config.GlobalConfig) bool {
+	if os.Getenv("K_SERVICE") != "" {
+		return true
+	}
+	if strings.EqualFold(cfg.Database.Driver, "postgres") {
+		return true
+	}
+	if strings.EqualFold(cfg.Storage.Provider, "gcs") && cfg.Auth.Mode == "proxy" {
+		return true
+	}
+	return false
+}
+
+// validateHostedBasic runs lightweight checks that apply to all --hosted
+// deployments (both single-instance VMs and Cloud Run HA).
+func validateHostedBasic(cfg *config.GlobalConfig) {
+	if !hostedMode || cfg == nil {
+		return
+	}
+	if strings.TrimSpace(resolveSessionSecret()) == "" {
+		log.Println("Warning: no session secret set; sessions will not survive restarts. Set --session-secret or SCION_SERVER_SESSION_SECRET for durable sessions.")
+	}
 }
 
 func validateHostedHAPreflight(cfg *config.GlobalConfig) error {
@@ -711,53 +738,53 @@ func validateHostedHAPreflight(cfg *config.GlobalConfig) error {
 	}
 
 	if !strings.EqualFold(cfg.Database.Driver, "postgres") {
-		return fmt.Errorf("hosted production HA requires server.database.driver=postgres; got %q", cfg.Database.Driver)
+		return fmt.Errorf("hosted HA deployment requires server.database.driver=postgres; got %q (single-instance VM deployments do not require Postgres)", cfg.Database.Driver)
 	}
 	if strings.TrimSpace(cfg.Database.URL) == "" {
-		return fmt.Errorf("hosted production HA requires server.database.url for Postgres")
+		return fmt.Errorf("hosted HA deployment requires server.database.url for Postgres")
 	}
 
 	if !strings.EqualFold(cfg.Storage.Provider, "gcs") || strings.TrimSpace(cfg.Storage.Bucket) == "" {
-		return fmt.Errorf("hosted production HA requires server.storage.provider=gcs and server.storage.bucket; local storage is not HA-safe")
+		return fmt.Errorf("hosted HA deployment requires server.storage.provider=gcs and server.storage.bucket; local storage is not HA-safe")
 	}
 
 	if strings.TrimSpace(resolveSessionSecret()) == "" {
-		return fmt.Errorf("hosted production HA requires a durable session/signing secret; set --session-secret or SCION_SERVER_SESSION_SECRET")
+		return fmt.Errorf("hosted HA deployment requires a durable session/signing secret; set --session-secret or SCION_SERVER_SESSION_SECRET")
 	}
 
 	if cfg.Auth.Mode != "proxy" {
-		return fmt.Errorf("hosted production HA requires server.auth.mode=proxy for Cloud Run IAP; got %q", cfg.Auth.Mode)
+		return fmt.Errorf("hosted HA deployment requires server.auth.mode=proxy for Cloud Run IAP; got %q", cfg.Auth.Mode)
 	}
 	if cfg.Auth.Proxy == nil || cfg.Auth.Proxy.Provider != "iap" {
 		provider := ""
 		if cfg.Auth.Proxy != nil {
 			provider = cfg.Auth.Proxy.Provider
 		}
-		return fmt.Errorf("hosted production HA requires server.auth.proxy.provider=iap; got %q", provider)
+		return fmt.Errorf("hosted HA deployment requires server.auth.proxy.provider=iap; got %q", provider)
 	}
 	if cfg.Auth.Proxy.IAP == nil || strings.TrimSpace(cfg.Auth.Proxy.IAP.Audience) == "" {
-		return fmt.Errorf("hosted production HA requires server.auth.proxy.iap.audience")
+		return fmt.Errorf("hosted HA deployment requires server.auth.proxy.iap.audience")
 	}
 	proxyAudience := strings.TrimRight(strings.TrimSpace(cfg.Auth.Proxy.IAP.Audience), "/")
 	if !isCloudRunIAPAudience(proxyAudience) {
-		return fmt.Errorf("hosted production HA requires a Cloud Run native IAP audience (/projects/<number>/locations/<region>/services/<service>); got %q", proxyAudience)
+		return fmt.Errorf("hosted HA deployment requires a Cloud Run native IAP audience (/projects/<number>/locations/<region>/services/<service>); got %q", proxyAudience)
 	}
 
 	if cfg.Auth.Transport == nil {
-		return fmt.Errorf("hosted production HA requires server.auth.transport; do not use server.transport")
+		return fmt.Errorf("hosted HA deployment requires server.auth.transport; do not use server.transport")
 	}
 	if cfg.Auth.Transport.Mode != "iap" {
-		return fmt.Errorf("hosted production HA requires server.auth.transport.mode=iap; got %q", cfg.Auth.Transport.Mode)
+		return fmt.Errorf("hosted HA deployment requires server.auth.transport.mode=iap; got %q", cfg.Auth.Transport.Mode)
 	}
 	transportAudience := strings.TrimRight(strings.TrimSpace(cfg.Auth.Transport.OIDCAudience), "/")
 	if transportAudience == "" {
-		return fmt.Errorf("hosted production HA requires server.auth.transport.oidc_audience")
+		return fmt.Errorf("hosted HA deployment requires server.auth.transport.oidc_audience")
 	}
 	if transportAudience != proxyAudience {
-		return fmt.Errorf("hosted production HA requires server.auth.transport.oidc_audience to match server.auth.proxy.iap.audience")
+		return fmt.Errorf("hosted HA deployment requires server.auth.transport.oidc_audience to match server.auth.proxy.iap.audience")
 	}
 	if strings.TrimSpace(cfg.Auth.Transport.PlatformAuthSA) == "" {
-		return fmt.Errorf("hosted production HA requires server.auth.transport.platform_auth_sa")
+		return fmt.Errorf("hosted HA deployment requires server.auth.transport.platform_auth_sa")
 	}
 
 	return nil

@@ -145,6 +145,88 @@ func TestValidateHostedHAPreflightSkippedOutsideHostedHub(t *testing.T) {
 	require.NoError(t, validateHostedHAPreflight(cfg))
 }
 
+func TestValidateHostedHAPreflightSkippedForNonHA(t *testing.T) {
+	resetServerFlags()
+	hostedMode = true
+	enableHub = true
+	t.Setenv("SCION_SERVER_SESSION_SECRET", "test-secret")
+	t.Setenv("K_SERVICE", "")
+	t.Cleanup(resetServerFlags)
+
+	cfg := config.DefaultGlobalConfig()
+	cfg.Mode = "hosted"
+	cfg.Database.Driver = "sqlite"
+	cfg.Database.URL = ""
+	cfg.Storage.Provider = "local"
+	cfg.Auth.Mode = "oauth"
+
+	require.NoError(t, validateHostedHAPreflight(&cfg))
+}
+
+func TestIsHADeployment(t *testing.T) {
+	tests := []struct {
+		name     string
+		setup    func(t *testing.T, cfg *config.GlobalConfig)
+		expected bool
+	}{
+		{
+			name: "sqlite + local + oauth is not HA",
+			setup: func(t *testing.T, cfg *config.GlobalConfig) {
+				cfg.Database.Driver = "sqlite"
+				cfg.Storage.Provider = "local"
+				cfg.Auth.Mode = "oauth"
+			},
+			expected: false,
+		},
+		{
+			name: "postgres triggers HA",
+			setup: func(t *testing.T, cfg *config.GlobalConfig) {
+				cfg.Database.Driver = "postgres"
+				cfg.Storage.Provider = "local"
+				cfg.Auth.Mode = "oauth"
+			},
+			expected: true,
+		},
+		{
+			name: "K_SERVICE triggers HA",
+			setup: func(t *testing.T, cfg *config.GlobalConfig) {
+				cfg.Database.Driver = "sqlite"
+				cfg.Storage.Provider = "local"
+				cfg.Auth.Mode = "oauth"
+				t.Setenv("K_SERVICE", "scion-hub")
+			},
+			expected: true,
+		},
+		{
+			name: "gcs + proxy triggers HA",
+			setup: func(t *testing.T, cfg *config.GlobalConfig) {
+				cfg.Database.Driver = "sqlite"
+				cfg.Storage.Provider = "gcs"
+				cfg.Auth.Mode = "proxy"
+			},
+			expected: true,
+		},
+		{
+			name: "gcs without proxy is not HA",
+			setup: func(t *testing.T, cfg *config.GlobalConfig) {
+				cfg.Database.Driver = "sqlite"
+				cfg.Storage.Provider = "gcs"
+				cfg.Auth.Mode = "oauth"
+			},
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("K_SERVICE", "")
+			cfg := config.DefaultGlobalConfig()
+			tt.setup(t, &cfg)
+			require.Equal(t, tt.expected, isHADeployment(&cfg))
+		})
+	}
+}
+
 func TestNewEventPublisherFailsClosedForHostedHA(t *testing.T) {
 	withHostedHAGuards(t)
 	cfg := validHostedHAConfig()
