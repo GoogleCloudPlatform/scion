@@ -27,12 +27,14 @@ import (
 type BackendConfig struct {
 	APIKey    string
 	BaseAgent string
+	Model     string
 }
 
 // Backend implements managedagent.ManagedAgentBackend using the Google API.
 type Backend struct {
 	client    *Client
 	baseAgent string
+	model     string
 }
 
 // NewBackend creates a new Google managed agent backend.
@@ -44,6 +46,7 @@ func NewBackend(cfg BackendConfig) (*Backend, error) {
 	return &Backend{
 		client:    NewClient(cfg.APIKey),
 		baseAgent: cfg.BaseAgent,
+		model:     cfg.Model,
 	}, nil
 }
 
@@ -90,13 +93,22 @@ func (b *Backend) CreateInteraction(ctx context.Context, req managedagent.Intera
 	}
 
 	apiReq := &CreateInteractionRequest{
-		Agent:                 agentName,
 		Input:                 req.Input,
 		PreviousInteractionID: req.PreviousInteractionID,
 		Stream:                req.Stream,
 		Background:            req.Background,
 		SystemInstruction:     req.SystemInstruction,
 		Tools:                 convertToolConfigs(req.Tools),
+	}
+
+	if agentName != "" {
+		apiReq.Agent = agentName
+	} else {
+		model := req.Model
+		if model == "" {
+			model = b.model
+		}
+		apiReq.Model = model
 	}
 
 	if req.EnvironmentID != "" {

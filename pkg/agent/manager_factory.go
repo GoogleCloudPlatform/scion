@@ -39,6 +39,7 @@ func NewManagerForProfile(rt runtime.Runtime, profile string, settings *config.V
 	backend, err := google.NewBackend(google.BackendConfig{
 		APIKey:    cfg.APIKey,
 		BaseAgent: cfg.BaseAgent,
+		Model:     cfg.Model,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("creating managed agent backend: %w", err)

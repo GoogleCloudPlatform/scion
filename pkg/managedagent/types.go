@@ -32,6 +32,7 @@ type CreateAgentConfig struct {
 type InteractionRequest struct {
 	CloudAgentID          string
 	AgentName             string
+	Model                 string
 	Input                 string
 	PreviousInteractionID string
 	EnvironmentID         string

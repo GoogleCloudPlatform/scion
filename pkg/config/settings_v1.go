@@ -2361,6 +2361,7 @@ type V1ManagedAgentsConfig struct {
 type V1GoogleManagedAgentConfig struct {
 	APIKey    string `json:"api_key,omitempty" yaml:"api_key,omitempty" koanf:"api_key"`
 	BaseAgent string `json:"base_agent,omitempty" yaml:"base_agent,omitempty" koanf:"base_agent"`
+	Model     string `json:"model,omitempty" yaml:"model,omitempty" koanf:"model"`
 }
 
 // getBackupPath returns a backup file path that does not already exist.
