@@ -16,8 +16,6 @@ package cmd
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -1627,33 +1625,24 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 			}
 		}
 
-		// Generate credentials for co-located mode
-		secretKeyBytes := make([]byte, 32)
-		if _, err := rand.Read(secretKeyBytes); err != nil {
-			log.Printf("Warning: failed to generate secret key for co-located mode: %v", err)
-		} else {
-			brokerSecret := &store.BrokerSecret{
-				BrokerID:  brokerID,
-				SecretKey: secretKeyBytes,
-				Algorithm: store.BrokerSecretAlgorithmHMACSHA256,
-				CreatedAt: time.Now(),
-				Status:    store.BrokerSecretStatusActive,
-			}
-			if err := s.DeleteBrokerSecret(ctx, brokerID); err != nil && err != store.ErrNotFound {
-				log.Printf("Warning: failed to delete old broker secret: %v", err)
-			}
-			if err := s.CreateBrokerSecret(ctx, brokerSecret); err != nil {
-				log.Printf("Warning: failed to create broker secret for co-located mode: %v", err)
+		// Generate or retrieve credentials for co-located mode (idempotent).
+		// Uses GenerateAndStoreSecret which returns the existing secret if one
+		// is already stored, so multiple Cloud Run instances share the same key.
+		if authSvc := hubSrv.GetBrokerAuthService(); authSvc != nil {
+			secretKeyB64, secretErr := authSvc.GenerateAndStoreSecret(ctx, brokerID)
+			if secretErr != nil {
+				log.Printf("Warning: failed to generate/retrieve secret for co-located broker: %v", secretErr)
 			} else {
-				log.Printf("Created broker secret for co-located control channel")
+				log.Printf("Broker secret ready for co-located control channel (idempotent)")
+				inMemoryCreds = &brokercredentials.BrokerCredentials{
+					BrokerID:     brokerID,
+					SecretKey:    secretKeyB64,
+					HubEndpoint:  hubEndpointForRH,
+					RegisteredAt: time.Now(),
+				}
 			}
-
-			inMemoryCreds = &brokercredentials.BrokerCredentials{
-				BrokerID:     brokerID,
-				SecretKey:    base64.StdEncoding.EncodeToString(secretKeyBytes),
-				HubEndpoint:  hubEndpointForRH,
-				RegisteredAt: time.Now(),
-			}
+		} else {
+			log.Printf("Warning: BrokerAuthService not available, skipping co-located broker credentials")
 		}
 	}
 
