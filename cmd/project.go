@@ -57,7 +57,7 @@ By default, it initializes in:
 
 With --global, it initializes in the user's home folder.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		harnesses := harness.All()
+		embedOnlyHarnesses := harness.EmbedOnlyHarnesses()
 
 		if globalInit || machineInit {
 			if !isJSONOutput() {
@@ -78,8 +78,12 @@ With --global, it initializes in the user's home folder.`,
 				registryValue = promptImageRegistry()
 			}
 
-			opts := config.InitMachineOpts{ImageRegistry: registryValue, Force: machineInitForce}
-			if err := config.InitMachine(harnesses, opts); err != nil {
+			opts := config.InitMachineOpts{
+				ImageRegistry: registryValue,
+				Force:         machineInitForce,
+				HarnessesFS:   harness.HarnessesFS(),
+			}
+			if err := config.InitMachine(embedOnlyHarnesses, opts); err != nil {
 				return fmt.Errorf("failed to initialize global config: %w", err)
 			}
 
@@ -159,7 +163,7 @@ With --global, it initializes in the user's home folder.`,
 		if !isJSONOutput() {
 			fmt.Println("Initializing scion project...")
 		}
-		if err := config.InitProject("", harnesses); err != nil {
+		if err := config.InitProject("", embedOnlyHarnesses); err != nil {
 			return fmt.Errorf("failed to initialize project: %w", err)
 		}
 

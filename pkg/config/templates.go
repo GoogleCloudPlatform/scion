@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -464,7 +465,7 @@ func CloneTemplate(srcName, destName string, global bool) error {
 	return nil
 }
 
-func UpdateDefaultTemplates(force bool, harnesses []api.Harness) error {
+func UpdateDefaultTemplates(force bool, harnesses []api.Harness, harnessesFS ...fs.FS) error {
 	globalDir, err := GetGlobalDir()
 	if err != nil {
 		return err
@@ -490,7 +491,14 @@ func UpdateDefaultTemplates(force bool, harnesses []api.Harness) error {
 		return err
 	}
 
-	// Update harness-configs
+	// Seed directory-based harnesses from the embedded harnesses/ FS.
+	if len(harnessesFS) > 0 && harnessesFS[0] != nil {
+		if err := SeedAllHarnessConfigsFromEmbed(harnessConfigsDir, harnessesFS[0], true); err != nil {
+			return err
+		}
+	}
+
+	// Update embed-only harness-configs
 	for _, h := range harnesses {
 		if err := SeedHarnessConfig(filepath.Join(harnessConfigsDir, h.Name()), h, true); err != nil {
 			return err

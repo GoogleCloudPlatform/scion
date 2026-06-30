@@ -541,6 +541,11 @@ type InitMachineOpts struct {
 	// Force overwrites existing template and harness-config files with the
 	// versions embedded in the binary. Use this to refresh after a binary upgrade.
 	Force bool
+
+	// HarnessesFS is the embedded harnesses/ filesystem used to seed
+	// directory-based harness-configs. When non-nil, SeedAllHarnessConfigsFromEmbed
+	// is called to seed all harnesses found in the FS.
+	HarnessesFS fs.FS
 }
 
 // InitMachine performs full global/machine-level setup: creates ~/.scion/,
@@ -597,8 +602,15 @@ func InitMachine(harnesses []api.Harness, opts ...InitMachineOpts) error {
 		return fmt.Errorf("failed to seed global default agnostic template: %w", err)
 	}
 
+	// Seed directory-based harnesses from the embedded harnesses/ FS.
+	if opt.HarnessesFS != nil {
+		if err := SeedAllHarnessConfigsFromEmbed(harnessConfigsDir, opt.HarnessesFS, opt.Force); err != nil {
+			return fmt.Errorf("failed to seed harness-configs from embed: %w", err)
+		}
+	}
+
+	// Seed embed-only harnesses (those still using compiled-in embeds, e.g. Gemini).
 	for _, h := range harnesses {
-		// Seed harness-config directory
 		if err := SeedHarnessConfig(filepath.Join(harnessConfigsDir, h.Name()), h, opt.Force); err != nil {
 			return fmt.Errorf("failed to seed global %s harness-config: %w", h.Name(), err)
 		}

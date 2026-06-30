@@ -92,7 +92,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	}
 	if _, err := os.Stat(globalDir); os.IsNotExist(err) {
 		log.Println("Initializing global scion directory...")
-		if err := config.InitGlobal(harness.All()); err != nil {
+		if err := config.InitGlobal(harness.EmbedOnlyHarnesses(), config.InitMachineOpts{HarnessesFS: harness.HarnessesFS()}); err != nil {
 			return fmt.Errorf("failed to initialize global config: %w", err)
 		}
 	} else if hostedMode {
@@ -102,7 +102,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 		// Only done in hosted mode to avoid overwriting local customizations
 		// during development; admins should use non-default names for custom
 		// templates.
-		if err := config.UpdateDefaultTemplates(true, harness.All()); err != nil {
+		if err := config.UpdateDefaultTemplates(true, harness.EmbedOnlyHarnesses(), harness.HarnessesFS()); err != nil {
 			log.Printf("Warning: failed to refresh default templates: %v", err)
 		}
 	}
