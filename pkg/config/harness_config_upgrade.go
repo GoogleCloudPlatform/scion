@@ -33,6 +33,7 @@ type HarnessConfigUpgradeOptions struct {
 	ActivateScript bool
 	Force          bool
 	Now            func() time.Time
+	HarnessesFS    fs.FS
 }
 
 type HarnessConfigUpgradePlan struct {
@@ -76,8 +77,15 @@ func UpgradeHarnessConfig(targetDir string, h api.Harness, opts HarnessConfigUpg
 		})
 		plan.Changed = true
 		if !opts.DryRun {
-			if err := SeedHarnessConfig(absTarget, h, true); err != nil {
-				return plan, err
+			// Try compiled-in embeds first, then fall through to harnesses/ FS.
+			if _, basePath := h.GetHarnessEmbedsFS(); basePath != "" {
+				if err := SeedHarnessConfig(absTarget, h, true); err != nil {
+					return plan, err
+				}
+			} else if opts.HarnessesFS != nil {
+				if err := SeedHarnessConfigFromDir(absTarget, opts.HarnessesFS, h.Name(), true); err != nil {
+					return plan, err
+				}
 			}
 		}
 		return plan, nil
@@ -85,9 +93,11 @@ func UpgradeHarnessConfig(targetDir string, h api.Harness, opts HarnessConfigUpg
 
 	embedsFS, basePath := h.GetHarnessEmbedsFS()
 	if basePath == "" {
-		// No embeds — this harness has no compiled-in defaults (e.g. opencode/codex
-		// after Phase D removal). Check for legacy-builtin configs that need
-		// auto-activation of container-script provisioning.
+		// No compiled-in embeds — try seeding from the harnesses/ embed FS.
+		if opts.HarnessesFS != nil {
+			return upgradeFromHarnessesFS(absTarget, plan, h.Name(), opts)
+		}
+		// Fall back to legacy-builtin upgrade path.
 		return upgradeLegacyBuiltinConfig(absTarget, plan, opts)
 	}
 
@@ -236,6 +246,101 @@ func upgradeLegacyBuiltinConfig(absTarget string, plan *HarnessConfigUpgradePlan
 			}
 		}
 	}
+	return plan, nil
+}
+
+// upgradeFromHarnessesFS handles upgrade using the embedded harnesses/ FS as
+// the source of truth. Reads config.yaml from the harnesses/ FS to get the
+// default configuration, merges missing fields, and adds missing support files.
+func upgradeFromHarnessesFS(absTarget string, plan *HarnessConfigUpgradePlan, harnessName string, opts HarnessConfigUpgradeOptions) (*HarnessConfigUpgradePlan, error) {
+	sourcePath := harnessName
+	configPath := filepath.Join(absTarget, "config.yaml")
+
+	defaultConfigData, err := fs.ReadFile(opts.HarnessesFS, filepath.Join(sourcePath, "config.yaml"))
+	if err != nil {
+		return upgradeLegacyBuiltinConfig(absTarget, plan, opts)
+	}
+
+	currentConfigData, err := os.ReadFile(configPath)
+	if err != nil {
+		return plan, nil
+	}
+
+	var defaultEntry HarnessConfigEntry
+	if err := yaml.Unmarshal(defaultConfigData, &defaultEntry); err != nil {
+		return plan, fmt.Errorf("parse embedded config.yaml: %w", err)
+	}
+	configDir := defaultEntry.ConfigDir
+
+	mergedConfigData, changedConfig, fields, err := mergeHarnessConfigYAML(currentConfigData, defaultConfigData)
+	if err != nil {
+		return plan, err
+	}
+	for _, field := range fields {
+		plan.Actions = append(plan.Actions, HarnessConfigUpgradeAction{
+			Type:   "merge_config_field",
+			Path:   "config.yaml",
+			Detail: field,
+		})
+	}
+
+	if opts.ActivateScript {
+		hasScript := fileExists(filepath.Join(absTarget, "provision.py")) || embeddedFileExists(opts.HarnessesFS, sourcePath, "provision.py")
+		if !hasScript {
+			return plan, fmt.Errorf("cannot activate script for %q: no provision.py found", plan.Name)
+		}
+		var activated bool
+		mergedConfigData, activated, err = activateContainerScriptProvisioner(mergedConfigData)
+		if err != nil {
+			return plan, err
+		}
+		if activated {
+			changedConfig = true
+			plan.Actions = append(plan.Actions, HarnessConfigUpgradeAction{
+				Type:   "activate_script",
+				Path:   "config.yaml",
+				Detail: "set provisioner.type to container-script",
+			})
+		}
+	}
+
+	if changedConfig {
+		plan.Changed = true
+		if !opts.DryRun {
+			backupPath, err := backupFile(configPath, opts.Now())
+			if err != nil {
+				return plan, err
+			}
+			plan.Backups = append(plan.Backups, backupPath)
+			if err := os.WriteFile(configPath, mergedConfigData, 0644); err != nil {
+				return plan, fmt.Errorf("write merged config.yaml: %w", err)
+			}
+		}
+	}
+
+	subFS, err := fs.Sub(opts.HarnessesFS, sourcePath)
+	if err != nil {
+		return plan, err
+	}
+	addedFiles, err := addMissingHarnessConfigFiles(absTarget, subFS, ".", configDir, opts.DryRun)
+	if err != nil {
+		return plan, err
+	}
+	for _, relPath := range addedFiles {
+		plan.Changed = true
+		plan.Actions = append(plan.Actions, HarnessConfigUpgradeAction{
+			Type: "add_file",
+			Path: relPath,
+		})
+	}
+
+	sort.SliceStable(plan.Actions, func(i, j int) bool {
+		if plan.Actions[i].Type == plan.Actions[j].Type {
+			return plan.Actions[i].Path < plan.Actions[j].Path
+		}
+		return plan.Actions[i].Type < plan.Actions[j].Type
+	})
+
 	return plan, nil
 }
 

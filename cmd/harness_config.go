@@ -166,11 +166,15 @@ This overwrites config.yaml and home directory files with the built-in versions.
 		h := harness.New(hcDir.Config.Harness)
 
 		if _, basePath := h.GetHarnessEmbedsFS(); basePath == "" {
-			return fmt.Errorf("cannot reset %q: it is installed from a bundle and has no built-in defaults; reinstall with: scion harness-config install harnesses/%s", name, hcDir.Config.Harness)
-		}
-
-		if err := config.SeedHarnessConfig(targetDir, h, true); err != nil {
-			return fmt.Errorf("failed to reset harness-config %q: %w", name, err)
+			// No compiled-in embeds — try seeding from the harnesses/ embed FS.
+			harnessesFS := harness.HarnessesFS()
+			if err := config.SeedHarnessConfigFromDir(targetDir, harnessesFS, hcDir.Config.Harness, true); err != nil {
+				return fmt.Errorf("failed to reset harness-config %q from embedded directory: %w", name, err)
+			}
+		} else {
+			if err := config.SeedHarnessConfig(targetDir, h, true); err != nil {
+				return fmt.Errorf("failed to reset harness-config %q: %w", name, err)
+			}
 		}
 
 		if isJSONOutput() {
@@ -241,6 +245,7 @@ By default this does not activate container-script provisioning. Use
 				DryRun:         dryRun,
 				ActivateScript: activateScript,
 				Force:          force,
+				HarnessesFS:    harness.HarnessesFS(),
 			})
 			if err != nil {
 				return err
