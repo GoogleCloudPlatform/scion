@@ -495,6 +495,8 @@ export class ScionPageOnboarding extends LitElement {
       if (status?.imageRegistry) {
         this.imageRegistry = status.imageRegistry;
         this.registryInput = status.imageRegistry;
+      } else {
+        this.registryInput = 'ghcr.io/homebrew-scion';
       }
       if (status?.gitVersion !== undefined) this.gitVersion = status.gitVersion;
       if (status?.gitVersionOK !== undefined) this.gitVersionOK = status.gitVersionOK;
@@ -1004,6 +1006,11 @@ export class ScionPageOnboarding extends LitElement {
                   ${status}
                 </span>
               `}
+              ${status === 'error' && s?.error ? html`
+                <div style="font-size:0.75rem;color:var(--sl-color-danger-600,#dc2626);margin-top:0.25rem;word-break:break-word;">
+                  ${s.error}
+                </div>
+              ` : nothing}
             </div>
           `;
         })}
