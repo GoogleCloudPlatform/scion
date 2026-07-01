@@ -29,6 +29,19 @@ type MaterializeOptions struct {
 	Force bool
 }
 
+// MaterializeBundledTemplates writes only the bundled Templates to the local
+// filesystem. Use this when harness-config materialization is handled
+// separately (e.g. selective materialization in handleSystemInit).
+func MaterializeBundledTemplates(globalDir string, opts MaterializeOptions) error {
+	for _, res := range resources.BuiltinTemplates() {
+		targetDir := filepath.Join(globalDir, "templates", res.Name)
+		if err := materializeTemplateFromFS(targetDir, res.FS, res.Root, opts.Force); err != nil {
+			return fmt.Errorf("failed to materialize template %q: %w", res.Name, err)
+		}
+	}
+	return nil
+}
+
 // MaterializeBundledResources writes bundled Templates and Harness-configs to
 // the local filesystem for workstation compatibility. It uses the same
 // resources.BuiltinResources() catalog as the hosted bootstrap path.

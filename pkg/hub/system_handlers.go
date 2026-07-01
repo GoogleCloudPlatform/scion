@@ -356,30 +356,28 @@ func (s *Server) handleSystemInit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if len(req.Harnesses) == 0 {
+		ValidationError(w, "at least one harness must be specified", nil)
+		return
+	}
+
 	allNames := harness.AllHarnessNames()
 	allowed := make(map[string]bool, len(allNames))
 	for _, n := range allNames {
 		allowed[n] = true
 	}
 
-	var selected []string
 	for _, name := range req.Harnesses {
 		if !allowed[name] {
 			ValidationError(w, fmt.Sprintf("unknown harness %q", name), nil)
 			return
 		}
-		selected = append(selected, name)
 	}
 
-	if len(selected) == 0 {
-		ValidationError(w, "at least one harness must be specified", nil)
-		return
-	}
-
-	// Build embed-only harness instances for selected names
+	// Build embed-only harness instances for selected names only.
 	var embedOnlyInstances []api.Harness
 	for _, h := range harness.EmbedOnlyHarnesses() {
-		for _, name := range selected {
+		for _, name := range req.Harnesses {
 			if h.Name() == name {
 				embedOnlyInstances = append(embedOnlyInstances, h)
 				break
@@ -387,10 +385,9 @@ func (s *Server) handleSystemInit(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Directory-based harnesses are seeded unconditionally via HarnessesFS;
-	// the directories are inert until activated. Selective materialization
-	// based on the user's selection will be addressed in PR 5.
-	opts := config.InitMachineOpts{HarnessesFS: harness.HarnessesFS()}
+	opts := config.InitMachineOpts{
+		SelectedHarnessConfigs: req.Harnesses,
+	}
 	if err := config.InitMachine(embedOnlyInstances, opts); err != nil {
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
 			fmt.Sprintf("initialization failed: %s", err.Error()), nil)
