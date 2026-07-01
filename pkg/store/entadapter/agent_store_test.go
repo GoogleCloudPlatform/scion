@@ -211,6 +211,24 @@ func TestAgentStore_SoftDeleteExclusion(t *testing.T) {
 	assert.ElementsMatch(t, []string{live.ID, gone.ID}, ids(incl.Items))
 }
 
+// TestAgentStore_GetAgentBySlugExcludesSoftDeleted verifies that GetAgentBySlug
+// does not return a soft-deleted agent, returning ErrNotFound instead.
+func TestAgentStore_GetAgentBySlugExcludesSoftDeleted(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+
+	a := makeAgent(projectID, "reusable-slug")
+	require.NoError(t, s.CreateAgent(ctx, a))
+
+	// Soft-delete the agent.
+	a.DeletedAt = time.Now()
+	require.NoError(t, s.UpdateAgent(ctx, a))
+
+	// Slug lookup must not return the soft-deleted record.
+	_, err := s.GetAgentBySlug(ctx, projectID, "reusable-slug")
+	assert.ErrorIs(t, err, store.ErrNotFound)
+}
+
 // TestAgentStore_OptimisticLockConflict verifies the state_version CAS guard:
 // a second update issued against a stale version is rejected with
 // ErrVersionConflict rather than silently overwriting the first.

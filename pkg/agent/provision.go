@@ -1369,7 +1369,8 @@ func GetAgent(ctx context.Context, agentName string, templateName string, agentI
 				if err != nil {
 					return nil
 				}
-				return os.Chmod(path, 0755)
+				_ = os.Chmod(path, 0755)
+				return nil
 			})
 			os.RemoveAll(agentDir)
 			// Prune worktrees so git forgets any worktree that pointed into the
