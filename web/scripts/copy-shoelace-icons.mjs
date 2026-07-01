@@ -112,6 +112,7 @@ const USED_ICONS = [
   'person-plus',
   'play-circle',
   'plus-circle',
+  'plug',
   'plus-lg',
   'question-circle',
   'robot',

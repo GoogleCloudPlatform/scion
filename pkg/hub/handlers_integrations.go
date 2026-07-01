@@ -391,6 +391,7 @@ func filterSensitiveConfig(name string, cfg map[string]string) map[string]string
 		"hub_url":     true,
 		"hmac_key":    true,
 		"broker_id":   true,
+		"bot_id":      true,
 		"config_file": true,
 	}
 
