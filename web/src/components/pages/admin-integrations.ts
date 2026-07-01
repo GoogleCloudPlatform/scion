@@ -1,0 +1,719 @@
+/**
+ * Copyright 2026 Google LLC
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+import { LitElement, html, css, nothing } from 'lit';
+import { customElement, state } from 'lit/decorators.js';
+
+import { apiFetch, extractApiError } from '../../client/api.js';
+
+// ── Type definitions matching the Go API response ──
+
+interface IntegrationStatus {
+  connected: boolean;
+  version?: string;
+  channel_id?: string;
+  capabilities?: string[];
+  health?: string;
+  message?: string;
+  details?: Record<string, string>;
+}
+
+interface IntegrationSummary {
+  name: string;
+  platform: string;
+  self_managed: boolean;
+  has_secrets: Record<string, boolean>;
+  status?: IntegrationStatus;
+}
+
+interface IntegrationDetail {
+  name: string;
+  platform: string;
+  self_managed: boolean;
+  settings: Record<string, string>;
+  has_secrets: Record<string, boolean>;
+  status?: IntegrationStatus;
+}
+
+@customElement('scion-page-admin-integrations')
+export class ScionPageAdminIntegrations extends LitElement {
+  @state() private loading = true;
+  @state() private error: string | null = null;
+  @state() private successMessage: string | null = null;
+
+  // List view
+  @state() private integrations: IntegrationSummary[] = [];
+
+  // Detail view
+  @state() private detail: IntegrationDetail | null = null;
+  @state() private editedSettings: Record<string, string> = {};
+  @state() private editedSecrets: Record<string, string> = {};
+  @state() private saving = false;
+  @state() private restarting = false;
+
+  static override styles = css`
+    :host {
+      display: block;
+    }
+
+    .header {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      margin-bottom: 1.5rem;
+    }
+
+    .header sl-icon {
+      color: var(--scion-primary, #3b82f6);
+      font-size: 1.5rem;
+    }
+
+    .header h1 {
+      font-size: 1.5rem;
+      font-weight: 700;
+      color: var(--scion-text, #1e293b);
+      margin: 0;
+    }
+
+    .header-description {
+      color: var(--scion-text-muted, #64748b);
+      font-size: 0.875rem;
+      margin: 0 0 1.5rem 0;
+    }
+
+    .section {
+      background: var(--scion-surface, #ffffff);
+      border: 1px solid var(--scion-border, #e2e8f0);
+      border-radius: var(--scion-radius-lg, 0.75rem);
+      padding: 1.5rem;
+      margin-bottom: 1.5rem;
+    }
+
+    .section-title {
+      font-size: 1rem;
+      font-weight: 600;
+      color: var(--scion-text, #1e293b);
+      margin: 0 0 1rem 0;
+      padding-bottom: 0.75rem;
+      border-bottom: 1px solid var(--scion-border, #e2e8f0);
+    }
+
+    .form-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 1rem;
+    }
+
+    @media (max-width: 768px) {
+      .form-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    .form-field {
+      display: flex;
+      flex-direction: column;
+      gap: 0.25rem;
+    }
+
+    .form-field.full-width {
+      grid-column: 1 / -1;
+    }
+
+    .form-field label {
+      font-size: 0.8125rem;
+      font-weight: 500;
+      color: var(--scion-text, #1e293b);
+    }
+
+    .form-field .hint {
+      font-size: 0.75rem;
+      color: var(--scion-text-muted, #64748b);
+    }
+
+    .loading-container {
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      padding: 4rem;
+    }
+
+    .status-message {
+      font-size: 0.875rem;
+      padding: 0.75rem 1rem;
+      border-radius: var(--scion-radius, 0.5rem);
+      margin-bottom: 1rem;
+    }
+
+    .status-message.success {
+      background: var(--scion-success-bg, #dcfce7);
+      color: var(--scion-success-text, #166534);
+      border: 1px solid var(--scion-success-border, #86efac);
+    }
+
+    .status-message.error {
+      background: var(--scion-error-bg, #fef2f2);
+      color: var(--scion-error-text, #991b1b);
+      border: 1px solid var(--scion-error-border, #fca5a5);
+    }
+
+    sl-input::part(base),
+    sl-select::part(combobox) {
+      font-size: 0.875rem;
+      border-color: var(--scion-border, #e2e8f0);
+      background: var(--scion-surface, #ffffff);
+    }
+
+    sl-input::part(input) {
+      color: var(--scion-text, #1e293b);
+    }
+
+    .actions {
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+      padding: 1rem 0;
+      border-top: 1px solid var(--scion-border, #e2e8f0);
+      margin-top: 1rem;
+    }
+
+    .actions sl-button::part(base) {
+      font-size: 0.875rem;
+    }
+
+    /* List view table */
+    .integration-table {
+      width: 100%;
+      border-collapse: collapse;
+    }
+
+    .integration-table th {
+      text-align: left;
+      font-size: 0.75rem;
+      font-weight: 600;
+      color: var(--scion-text-muted, #64748b);
+      text-transform: uppercase;
+      letter-spacing: 0.025em;
+      padding: 0.75rem 1rem;
+      border-bottom: 1px solid var(--scion-border, #e2e8f0);
+    }
+
+    .integration-table td {
+      padding: 0.75rem 1rem;
+      font-size: 0.875rem;
+      color: var(--scion-text, #1e293b);
+      border-bottom: 1px solid var(--scion-border, #e2e8f0);
+    }
+
+    .integration-table tr.clickable {
+      cursor: pointer;
+    }
+
+    .integration-table tr.clickable:hover td {
+      background: var(--scion-bg-subtle, #f8fafc);
+    }
+
+    .platform-name {
+      text-transform: capitalize;
+    }
+
+    .empty-state {
+      text-align: center;
+      padding: 3rem;
+      color: var(--scion-text-muted, #64748b);
+    }
+
+    .empty-state sl-icon {
+      font-size: 2.5rem;
+      margin-bottom: 1rem;
+      display: block;
+    }
+
+    /* Detail view */
+    .back-link {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.25rem;
+      font-size: 0.875rem;
+      color: var(--scion-primary, #3b82f6);
+      text-decoration: none;
+      cursor: pointer;
+      margin-bottom: 1rem;
+    }
+
+    .back-link:hover {
+      text-decoration: underline;
+    }
+
+    .detail-name {
+      font-size: 1.25rem;
+      font-weight: 700;
+      color: var(--scion-text, #1e293b);
+      margin: 0 0 0.25rem 0;
+    }
+
+    .detail-platform {
+      font-size: 0.875rem;
+      color: var(--scion-text-muted, #64748b);
+      text-transform: capitalize;
+      margin: 0 0 1.5rem 0;
+    }
+
+    .status-row {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      margin-bottom: 0.5rem;
+      font-size: 0.875rem;
+    }
+
+    .status-label {
+      font-weight: 500;
+      color: var(--scion-text-muted, #64748b);
+      min-width: 6rem;
+    }
+
+    .capabilities-list {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.375rem;
+    }
+
+    .secret-row {
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+      padding: 0.75rem 0;
+      border-bottom: 1px solid var(--scion-border, #e2e8f0);
+    }
+
+    .secret-row:last-child {
+      border-bottom: none;
+    }
+
+    .secret-key {
+      font-size: 0.875rem;
+      font-weight: 500;
+      color: var(--scion-text, #1e293b);
+      min-width: 10rem;
+    }
+
+    .secret-status {
+      font-size: 0.8125rem;
+    }
+
+    .secret-input {
+      flex: 1;
+    }
+  `;
+
+  private get currentName(): string | null {
+    const path = window.location.pathname;
+    const match = path.match(/^\/admin\/integrations\/([^/]+)$/);
+    return match ? decodeURIComponent(match[1]) : null;
+  }
+
+  override connectedCallback(): void {
+    super.connectedCallback();
+    void this.loadData();
+  }
+
+  private async loadData(): Promise<void> {
+    const name = this.currentName;
+    if (name) {
+      await this.loadDetail(name);
+    } else {
+      await this.loadList();
+    }
+  }
+
+  private async loadList(): Promise<void> {
+    this.loading = true;
+    this.error = null;
+    try {
+      const res = await apiFetch('/api/v1/admin/integrations');
+      if (!res.ok) {
+        this.error = await extractApiError(res, 'Failed to load integrations');
+        return;
+      }
+      this.integrations = (await res.json()) as IntegrationSummary[];
+    } catch {
+      this.error = 'Failed to connect to server';
+    } finally {
+      this.loading = false;
+    }
+  }
+
+  private async loadDetail(name: string): Promise<void> {
+    this.loading = true;
+    this.error = null;
+    try {
+      const res = await apiFetch(`/api/v1/admin/integrations/${encodeURIComponent(name)}`);
+      if (!res.ok) {
+        this.error = await extractApiError(res, 'Failed to load integration');
+        return;
+      }
+      this.detail = (await res.json()) as IntegrationDetail;
+      this.editedSettings = { ...this.detail.settings };
+      this.editedSecrets = {};
+    } catch {
+      this.error = 'Failed to connect to server';
+    } finally {
+      this.loading = false;
+    }
+  }
+
+  private async handleSaveConfig(): Promise<void> {
+    if (!this.detail) return;
+    this.saving = true;
+    this.error = null;
+    this.successMessage = null;
+    try {
+      const body: { settings: Record<string, string>; secrets?: Record<string, string> } = {
+        settings: this.editedSettings,
+      };
+      const changedSecrets = Object.entries(this.editedSecrets).filter(([, v]) => v !== '');
+      if (changedSecrets.length > 0) {
+        body.secrets = Object.fromEntries(changedSecrets);
+      }
+      const res = await apiFetch(
+        `/api/v1/admin/integrations/${encodeURIComponent(this.detail.name)}/config`,
+        {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        }
+      );
+      if (!res.ok) {
+        this.error = await extractApiError(res, 'Failed to save configuration');
+        return;
+      }
+      this.successMessage = 'Configuration saved successfully';
+      await this.loadDetail(this.detail.name);
+    } catch {
+      this.error = 'Failed to save configuration';
+    } finally {
+      this.saving = false;
+    }
+  }
+
+  private async handleRestart(): Promise<void> {
+    if (!this.detail) return;
+    this.restarting = true;
+    this.error = null;
+    this.successMessage = null;
+    try {
+      const res = await apiFetch(
+        `/api/v1/admin/integrations/${encodeURIComponent(this.detail.name)}/restart`,
+        { method: 'POST' }
+      );
+      if (!res.ok) {
+        this.error = await extractApiError(res, 'Failed to restart integration');
+        return;
+      }
+      this.successMessage = 'Integration restarted successfully';
+      await this.loadDetail(this.detail.name);
+    } catch {
+      this.error = 'Failed to restart integration';
+    } finally {
+      this.restarting = false;
+    }
+  }
+
+  private navigateTo(path: string): void {
+    window.history.pushState({}, '', path);
+    window.dispatchEvent(new PopStateEvent('popstate'));
+  }
+
+  override render() {
+    const isDetail = this.currentName !== null;
+
+    return html`
+      ${this.error ? html`<div class="status-message error">${this.error}</div>` : nothing}
+      ${this.successMessage
+        ? html`<div class="status-message success">${this.successMessage}</div>`
+        : nothing}
+      ${this.loading
+        ? html`<div class="loading-container"><sl-spinner></sl-spinner></div>`
+        : isDetail
+          ? this.renderDetail()
+          : this.renderList()}
+    `;
+  }
+
+  // ── List View ──
+
+  private renderList() {
+    return html`
+      <div class="header">
+        <sl-icon name="plug"></sl-icon>
+        <h1>Integrations</h1>
+      </div>
+      <p class="header-description">
+        Manage chat integrations — Telegram, Discord, and Google Chat plugins connected to this
+        hub.
+      </p>
+
+      ${this.integrations.length === 0
+        ? html`
+            <div class="section">
+              <div class="empty-state">
+                <sl-icon name="plug"></sl-icon>
+                <p>No integrations configured.</p>
+                <p style="font-size: 0.8125rem">
+                  Chat integrations will appear here once a broker plugin is registered.
+                </p>
+              </div>
+            </div>
+          `
+        : html`
+            <div class="section" style="padding: 0;">
+              <table class="integration-table">
+                <thead>
+                  <tr>
+                    <th>Name</th>
+                    <th>Platform</th>
+                    <th>Status</th>
+                    <th>Self-Managed</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${this.integrations.map(
+                    (i) => html`
+                      <tr
+                        class="clickable"
+                        @click=${() => this.navigateTo(`/admin/integrations/${encodeURIComponent(i.name)}`)}
+                      >
+                        <td><strong>${i.name}</strong></td>
+                        <td><span class="platform-name">${this.platformLabel(i.platform)}</span></td>
+                        <td>${this.renderStatusBadge(i.status)}</td>
+                        <td>${i.self_managed ? 'Yes' : 'No'}</td>
+                      </tr>
+                    `
+                  )}
+                </tbody>
+              </table>
+            </div>
+          `}
+    `;
+  }
+
+  // ── Detail View ──
+
+  private renderDetail() {
+    if (!this.detail) {
+      return html`<div class="status-message error">Integration not found.</div>`;
+    }
+    const d = this.detail;
+    return html`
+      <a class="back-link" @click=${(e: Event) => { e.preventDefault(); this.navigateTo('/admin/integrations'); }}>
+        <sl-icon name="arrow-left"></sl-icon> Back to Integrations
+      </a>
+
+      <h2 class="detail-name">${d.name}</h2>
+      <p class="detail-platform">${this.platformLabel(d.platform)}${d.self_managed ? ' · Self-managed' : ''}</p>
+
+      ${this.renderStatusSection(d.status)}
+      ${this.renderConfigSection(d)}
+      ${this.renderSecretsSection(d)}
+      ${this.renderActionsSection()}
+    `;
+  }
+
+  private renderStatusSection(status?: IntegrationStatus) {
+    if (!status) {
+      return html`
+        <div class="section">
+          <h3 class="section-title">Status</h3>
+          <p style="color: var(--scion-text-muted); font-size: 0.875rem;">No status information available.</p>
+        </div>
+      `;
+    }
+
+    return html`
+      <div class="section">
+        <h3 class="section-title">Status</h3>
+        <div class="status-row">
+          <span class="status-label">Connection</span>
+          ${this.renderStatusBadge(status)}
+        </div>
+        ${status.health
+          ? html`
+              <div class="status-row">
+                <span class="status-label">Health</span>
+                <sl-badge variant=${status.health === 'healthy' ? 'success' : status.health === 'unhealthy' ? 'danger' : 'neutral'}>
+                  ${status.health}
+                </sl-badge>
+              </div>
+            `
+          : nothing}
+        ${status.message && status.health === 'unhealthy'
+          ? html`
+              <sl-alert variant="danger" open style="margin-top: 0.75rem;">
+                <sl-icon slot="icon" name="exclamation-triangle"></sl-icon>
+                ${status.message}
+              </sl-alert>
+            `
+          : nothing}
+        ${status.version
+          ? html`
+              <div class="status-row">
+                <span class="status-label">Version</span>
+                <span>${status.version}</span>
+              </div>
+            `
+          : nothing}
+        ${status.channel_id
+          ? html`
+              <div class="status-row">
+                <span class="status-label">Channel ID</span>
+                <span style="font-family: var(--sl-font-mono, monospace); font-size: 0.8125rem;">${status.channel_id}</span>
+              </div>
+            `
+          : nothing}
+        ${status.capabilities && status.capabilities.length > 0
+          ? html`
+              <div class="status-row">
+                <span class="status-label">Capabilities</span>
+                <div class="capabilities-list">
+                  ${status.capabilities.map(
+                    (c) => html`<sl-badge variant="neutral">${c}</sl-badge>`
+                  )}
+                </div>
+              </div>
+            `
+          : nothing}
+      </div>
+    `;
+  }
+
+  private renderConfigSection(d: IntegrationDetail) {
+    const keys = Object.keys(d.settings);
+    if (keys.length === 0) {
+      return html`
+        <div class="section">
+          <h3 class="section-title">Configuration</h3>
+          <p style="color: var(--scion-text-muted); font-size: 0.875rem;">No configurable settings for this integration.</p>
+        </div>
+      `;
+    }
+
+    return html`
+      <div class="section">
+        <h3 class="section-title">Configuration</h3>
+        <div class="form-grid">
+          ${keys.map(
+            (key) => html`
+              <div class="form-field">
+                <label>${key}</label>
+                <sl-input
+                  value=${this.editedSettings[key] ?? ''}
+                  @sl-input=${(e: Event) => {
+                    this.editedSettings = {
+                      ...this.editedSettings,
+                      [key]: (e.target as HTMLInputElement).value,
+                    };
+                  }}
+                ></sl-input>
+              </div>
+            `
+          )}
+        </div>
+      </div>
+    `;
+  }
+
+  private renderSecretsSection(d: IntegrationDetail) {
+    const secretKeys = Object.keys(d.has_secrets);
+    if (secretKeys.length === 0) return nothing;
+
+    return html`
+      <div class="section">
+        <h3 class="section-title">Secrets</h3>
+        ${secretKeys.map(
+          (key) => html`
+            <div class="secret-row">
+              <span class="secret-key">${key}</span>
+              <span class="secret-status">
+                ${d.has_secrets[key]
+                  ? html`<sl-badge variant="success">Set</sl-badge>`
+                  : html`<sl-badge variant="warning">Not set</sl-badge>`}
+              </span>
+              <sl-input
+                class="secret-input"
+                type="password"
+                placeholder=${d.has_secrets[key] ? 'Enter new value to update' : 'Enter value'}
+                value=${this.editedSecrets[key] ?? ''}
+                @sl-input=${(e: Event) => {
+                  this.editedSecrets = {
+                    ...this.editedSecrets,
+                    [key]: (e.target as HTMLInputElement).value,
+                  };
+                }}
+              ></sl-input>
+            </div>
+          `
+        )}
+      </div>
+    `;
+  }
+
+  private renderActionsSection() {
+    return html`
+      <div class="actions">
+        <sl-button
+          variant="primary"
+          ?loading=${this.saving}
+          @click=${() => { void this.handleSaveConfig(); }}
+        >
+          Save Configuration
+        </sl-button>
+        <sl-button
+          variant="default"
+          ?loading=${this.restarting}
+          @click=${() => { void this.handleRestart(); }}
+        >
+          <sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>
+          Restart
+        </sl-button>
+      </div>
+    `;
+  }
+
+  // ── Helpers ──
+
+  private renderStatusBadge(status?: IntegrationStatus) {
+    if (!status) {
+      return html`<sl-badge variant="neutral">Unknown</sl-badge>`;
+    }
+    return status.connected
+      ? html`<sl-badge variant="success">Connected</sl-badge>`
+      : html`<sl-badge variant="danger">Disconnected</sl-badge>`;
+  }
+
+  private platformLabel(platform: string): string {
+    switch (platform) {
+      case 'telegram':
+        return 'Telegram';
+      case 'discord':
+        return 'Discord';
+      case 'gchat':
+        return 'Google Chat';
+      default:
+        return platform;
+    }
+  }
+}

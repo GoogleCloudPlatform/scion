@@ -64,6 +64,7 @@ const ADMIN_SECTION: NavSection = {
   items: [
     { path: '/settings', label: 'Hub Resources', icon: 'gear' },
     { path: '/admin/server-config', label: 'Server Config', icon: 'sliders' },
+    { path: '/admin/integrations', label: 'Integrations', icon: 'plug' },
     { path: '/admin/scheduler', label: 'Scheduler', icon: 'clock' },
     { path: '/admin/users', label: 'Users', icon: 'people' },
     { path: '/admin/groups', label: 'Groups', icon: 'diagram-3' },
