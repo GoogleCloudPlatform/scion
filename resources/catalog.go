@@ -66,8 +66,6 @@ func BuiltinTemplates() []BundledResource {
 }
 
 // BuiltinHarnessConfigs returns the bundled harness-config resources.
-// Gemini is excluded — it remains supplied through existing embed-only harness code
-// and has no directory in harnesses/.
 func BuiltinHarnessConfigs() []BundledResource {
 	var configs []BundledResource
 	entries, err := fs.ReadDir(harnesses.FS, ".")

@@ -16,5 +16,5 @@ package harnesses
 
 import "embed"
 
-//go:embed all:antigravity/* all:claude/* all:codex/* all:copilot/* all:hermes/* all:opencode/*
+//go:embed all:antigravity/* all:claude/* all:codex/* all:copilot/* all:gemini-cli/* all:hermes/* all:opencode/*
 var FS embed.FS
