@@ -253,7 +253,7 @@ func (s *AgentStore) GetAgentBySlug(ctx context.Context, projectID, slug string)
 		return nil, err
 	}
 	a, err := s.client.Agent.Query().
-		Where(agent.ProjectIDEQ(projectUID), agent.SlugEQ(slug)).
+		Where(agent.ProjectIDEQ(projectUID), agent.SlugEQ(slug), agent.DeletedAtIsNil()).
 		Only(ctx)
 	if err != nil {
 		return nil, mapError(err)

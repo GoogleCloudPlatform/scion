@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1362,7 +1363,14 @@ func GetAgent(ctx context.Context, agentName string, templateName string, agentI
 	// but failed before writing scion-agent.json. Remove it so we re-provision.
 	if _, err := os.Stat(agentDir); err == nil {
 		if configPath := config.GetScionAgentConfigPath(agentDir); configPath == "" {
-			util.Debugf("GetAgent: agent dir exists but no config file found, removing stale directory")
+			util.Debugf("GetAgent: stale agent directory detected (no config file), removing: %s", agentDir)
+			// chmod to ensure we can remove root-owned files left by containers.
+			_ = filepath.WalkDir(agentDir, func(path string, d fs.DirEntry, err error) error {
+				if err != nil {
+					return nil
+				}
+				return os.Chmod(path, 0755)
+			})
 			os.RemoveAll(agentDir)
 			// Prune worktrees so git forgets any worktree that pointed into the
 			// now-deleted directory, allowing ProvisionAgent to recreate it cleanly.
