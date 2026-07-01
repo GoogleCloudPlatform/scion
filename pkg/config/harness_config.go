@@ -412,12 +412,12 @@ func ComputeHarnessConfigRevision(dirPath string) string {
 }
 
 var seedSkipFiles = map[string]bool{
-	"Dockerfile":       true,
-	"cloudbuild.yaml":  true,
-	"README.md":        true,
+	"Dockerfile":        true,
+	"cloudbuild.yaml":   true,
+	"README.md":         true,
 	"provision_test.py": true,
-	".gitkeep":         true,
-	"init-firewall.sh": true,
+	".gitkeep":          true,
+	"init-firewall.sh":  true,
 }
 
 // SeedHarnessConfigFromDir populates a harness-config directory from an
