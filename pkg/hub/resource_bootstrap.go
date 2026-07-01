@@ -67,7 +67,8 @@ func (s *Server) BootstrapBundledResources(ctx context.Context, opts BootstrapOp
 		s.templateLog.Info("bootstrapped bundled resource",
 			"kind", r.Kind, "name", r.Name,
 			"created", result.Created, "updated", result.Updated,
-			"skipped", result.Skipped, "failed", result.Failed)
+			"repaired", result.Repaired, "skipped", result.Skipped,
+			"failed", result.Failed)
 	}
 	return errors.Join(errs...)
 }
