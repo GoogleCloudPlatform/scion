@@ -406,7 +406,7 @@ func runServerStatus(cmd *cobra.Command, args []string) error {
 	// Check web/hub on default web port (8080)
 	if resp, err := client.Get("http://127.0.0.1:8080/healthz"); err == nil {
 		body, readErr := io.ReadAll(resp.Body)
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		if resp.StatusCode == http.StatusOK && readErr == nil {
 			var health struct {
 				Status string           `json:"status"`
@@ -424,7 +424,7 @@ func runServerStatus(cmd *cobra.Command, args []string) error {
 	if !status.HubRunning {
 		if resp, err := client.Get("http://127.0.0.1:9810/healthz"); err == nil {
 			body, readErr := io.ReadAll(resp.Body)
-			resp.Body.Close()
+			_ = resp.Body.Close()
 			if resp.StatusCode == http.StatusOK && readErr == nil {
 				var health struct {
 					Status string `json:"status"`
@@ -439,7 +439,7 @@ func runServerStatus(cmd *cobra.Command, args []string) error {
 	// Check broker on default broker port (9800)
 	if resp, err := client.Get("http://127.0.0.1:9800/healthz"); err == nil {
 		body, readErr := io.ReadAll(resp.Body)
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		if resp.StatusCode == http.StatusOK && readErr == nil {
 			var health struct {
 				Status string `json:"status"`
@@ -500,7 +500,7 @@ func waitForServerReady(host string, port int, timeout time.Duration) bool {
 	for time.Now().Before(deadline) {
 		if resp, err := client.Get(url); err == nil {
 			body, readErr := io.ReadAll(resp.Body)
-			resp.Body.Close()
+			_ = resp.Body.Close()
 			if resp.StatusCode == http.StatusOK && readErr == nil {
 				var health struct {
 					Status string `json:"status"`
