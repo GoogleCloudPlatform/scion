@@ -1206,7 +1206,11 @@ func (s *Server) handleSkillDownload(w http.ResponseWriter, r *http.Request, ski
 	}
 
 	versionPath := skill.StoragePath + "/" + sv.Version
-	downloadURLs, manifestURL, expires, _ := generateDownloadURLs(ctx, stor, versionPath, sv.Files)
+	downloadURLs, manifestURL, expires, err := generateDownloadURLs(ctx, stor, versionPath, sv.Files)
+	if err != nil {
+		RuntimeError(w, fmt.Sprintf("skill %q version %q: %s", skill.Name, sv.Version, err))
+		return
+	}
 
 	if stor.Provider() == storage.ProviderLocal {
 		hubURL := requestBaseURL(r)

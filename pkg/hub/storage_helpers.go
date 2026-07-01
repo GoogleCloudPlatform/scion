@@ -223,6 +223,8 @@ func reconcileResourceStorage(ctx context.Context, stor storage.Storage, storage
 
 // generateDownloadURLs generates signed GET URLs for files under basePath.
 // Returns the download URL infos, a manifest URL (if possible), the expiry time, and any error.
+// Returns a hard error if signing fails for any listed file — callers must not
+// serve a partial URL list, as that produces opaque hydration failures (issue #373).
 func generateDownloadURLs(ctx context.Context, stor storage.Storage, basePath string, files []store.TemplateFile) ([]DownloadURLInfo, string, time.Time, error) {
 	downloadURLs := make([]DownloadURLInfo, 0, len(files))
 	expires := time.Now().Add(SignedURLExpiry)
@@ -234,7 +236,7 @@ func generateDownloadURLs(ctx context.Context, stor storage.Storage, basePath st
 			Expires: SignedURLExpiry,
 		})
 		if err != nil {
-			continue
+			return nil, "", expires, fmt.Errorf("storage object missing: %s (run validate to check storage consistency): %w", file.Path, err)
 		}
 		downloadURLs = append(downloadURLs, DownloadURLInfo{
 			Path: file.Path,
@@ -247,13 +249,14 @@ func generateDownloadURLs(ctx context.Context, stor storage.Storage, basePath st
 	// Generate manifest URL
 	var manifestURL string
 	manifestPath := basePath + "/manifest.json"
-	signedURL, _ := stor.GenerateSignedURL(ctx, manifestPath, storage.SignedURLOptions{
+	signedURL, err := stor.GenerateSignedURL(ctx, manifestPath, storage.SignedURLOptions{
 		Method:  "GET",
 		Expires: SignedURLExpiry,
 	})
-	if signedURL != nil {
-		manifestURL = signedURL.URL
+	if err != nil {
+		return nil, "", expires, fmt.Errorf("storage object missing: manifest.json (run validate to check storage consistency): %w", err)
 	}
+	manifestURL = signedURL.URL
 
 	return downloadURLs, manifestURL, expires, nil
 }

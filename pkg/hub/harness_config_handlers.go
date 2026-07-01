@@ -15,6 +15,7 @@
 package hub
 
 import (
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -574,7 +575,11 @@ func (s *Server) handleHarnessConfigDownload(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	downloadURLs, manifestURL, expires, _ := generateDownloadURLs(ctx, stor, hc.StoragePath, hc.Files)
+	downloadURLs, manifestURL, expires, err := generateDownloadURLs(ctx, stor, hc.StoragePath, hc.Files)
+	if err != nil {
+		RuntimeError(w, fmt.Sprintf("harness-config %q: %s — run 'scion harness-config validate %s' to diagnose", hc.Name, err, hc.Name))
+		return
+	}
 
 	writeJSON(w, http.StatusOK, DownloadResponse{
 		Files:       downloadURLs,
