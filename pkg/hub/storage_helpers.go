@@ -256,7 +256,9 @@ func generateDownloadURLs(ctx context.Context, stor storage.Storage, basePath st
 	if err != nil {
 		return nil, "", expires, fmt.Errorf("storage object missing: manifest.json (run validate to check storage consistency): %w", err)
 	}
-	manifestURL = signedURL.URL
+	if signedURL != nil {
+		manifestURL = signedURL.URL
+	}
 
 	return downloadURLs, manifestURL, expires, nil
 }
