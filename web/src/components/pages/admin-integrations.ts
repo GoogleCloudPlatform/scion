@@ -367,7 +367,7 @@ export class ScionPageAdminIntegrations extends LitElement {
         return;
       }
       this.detail = (await res.json()) as IntegrationDetail;
-      this.editedSettings = { ...this.detail.settings };
+      this.editedSettings = { ...(this.detail.settings || {}) };
       this.editedSecrets = {};
     } catch {
       this.error = 'Failed to connect to server';
@@ -434,8 +434,7 @@ export class ScionPageAdminIntegrations extends LitElement {
   }
 
   private navigateTo(path: string): void {
-    window.history.pushState({}, '', path);
-    window.dispatchEvent(new PopStateEvent('popstate'));
+    this.dispatchEvent(new CustomEvent('nav-click', { detail: { path }, bubbles: true, composed: true }));
   }
 
   override render() {
@@ -519,7 +518,7 @@ export class ScionPageAdminIntegrations extends LitElement {
     }
     const d = this.detail;
     return html`
-      <a class="back-link" @click=${(e: Event) => { e.preventDefault(); this.navigateTo('/admin/integrations'); }}>
+      <a class="back-link" href="/admin/integrations">
         <sl-icon name="arrow-left"></sl-icon> Back to Integrations
       </a>
 
@@ -615,7 +614,7 @@ export class ScionPageAdminIntegrations extends LitElement {
   }
 
   private renderConfigSection(d: IntegrationDetail) {
-    const keys = Object.keys(d.settings);
+    const keys = Object.keys(d.settings || {});
     if (keys.length === 0) {
       return html`
         <div class="section">
@@ -635,7 +634,7 @@ export class ScionPageAdminIntegrations extends LitElement {
                 <label>${key}</label>
                 <sl-input
                   value=${this.editedSettings[key] ?? ''}
-                  @sl-input=${(e: Event) => {
+                  @sl-change=${(e: Event) => {
                     this.editedSettings = {
                       ...this.editedSettings,
                       [key]: (e.target as HTMLInputElement).value,
@@ -651,7 +650,7 @@ export class ScionPageAdminIntegrations extends LitElement {
   }
 
   private renderSecretsSection(d: IntegrationDetail) {
-    const secretKeys = Object.keys(d.has_secrets);
+    const secretKeys = Object.keys(d.has_secrets || {});
     if (secretKeys.length === 0) return nothing;
 
     return html`
@@ -671,7 +670,7 @@ export class ScionPageAdminIntegrations extends LitElement {
                 type="password"
                 placeholder=${d.has_secrets[key] ? 'Enter new value to update' : 'Enter value'}
                 value=${this.editedSecrets[key] ?? ''}
-                @sl-input=${(e: Event) => {
+                @sl-change=${(e: Event) => {
                   this.editedSecrets = {
                     ...this.editedSecrets,
                     [key]: (e.target as HTMLInputElement).value,
