@@ -17,13 +17,16 @@ package hub
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 	"github.com/GoogleCloudPlatform/scion/resources"
 )
@@ -206,4 +209,181 @@ func stageResourceSource(src ResourceSource) (dir string, cleanup func(), err er
 
 	cleanup = func() { os.RemoveAll(dir) }
 	return dir, cleanup, nil
+}
+
+// BootstrapSource imports a resource from a ResourceSource into the Hub's
+// storage backend and database. It applies the OverwritePolicy to decide
+// whether to create, update, or skip existing resources.
+func (rs *ResourceStore) BootstrapSource(ctx context.Context, src ResourceSource, opts BootstrapOptions) (BootstrapResult, error) {
+	result := BootstrapResult{}
+	srv := rs.srv
+	p := rs.pers
+	stor := srv.GetStorage()
+	if stor == nil {
+		result.Failed++
+		return result, fmt.Errorf("storage backend is not configured")
+	}
+
+	meta, err := src.Metadata(ctx)
+	if err != nil {
+		result.Failed++
+		return result, err
+	}
+
+	slug := api.Slugify(meta.Name)
+	existing, err := p.GetBySlug(ctx, slug, meta.Scope, meta.ScopeID)
+	if err != nil {
+		result.Failed++
+		return result, err
+	}
+
+	if existing != nil {
+		switch opts.OverwritePolicy {
+		case OverwriteNever:
+			result.Skipped++
+			return result, nil
+		case OverwriteBuiltinManaged:
+			if !IsBuiltinManaged(existing.SourceURL) && !opts.Force {
+				srv.templateLog.Warn(p.Label()+": skipping non-built-in conflict",
+					"name", meta.Name, "existingSource", existing.SourceURL)
+				result.Skipped++
+				return result, nil
+			}
+		case OverwriteAlways:
+			// proceed
+		}
+	}
+
+	dir, cleanup, err := stageResourceSource(src)
+	if err != nil {
+		result.Failed++
+		return result, fmt.Errorf("%s: stage source: %w", p.Label(), err)
+	}
+	defer cleanup()
+
+	files, err := transfer.CollectFiles(dir, nil)
+	if err != nil {
+		result.Failed++
+		return result, err
+	}
+
+	if existing == nil {
+		return rs.bootstrapSourceCreate(ctx, meta, slug, dir, files, &result)
+	}
+	return rs.bootstrapSourceUpdate(ctx, meta, existing, dir, files, opts, &result)
+}
+
+// bootstrapSourceCreate handles the create path for a new resource.
+func (rs *ResourceStore) bootstrapSourceCreate(
+	ctx context.Context,
+	meta ResourceMetadata,
+	slug, dir string,
+	files []transfer.FileInfo,
+	result *BootstrapResult,
+) (BootstrapResult, error) {
+	srv := rs.srv
+	p := rs.pers
+	kind := p.Kind()
+	stor := srv.GetStorage()
+
+	storagePath := storage.ResourceStoragePath(kind, meta.Scope, meta.ScopeID, slug)
+	rec := &ResourceRecord{
+		Kind:          kind,
+		ID:            api.NewUUID(),
+		Name:          meta.Name,
+		Slug:          slug,
+		Scope:         meta.Scope,
+		ScopeID:       meta.ScopeID,
+		Status:        resourceStatusPending,
+		StoragePath:   storagePath,
+		StorageBucket: stor.Bucket(),
+		StorageURI:    storage.ResourceStorageURI(stor.Bucket(), kind, meta.Scope, meta.ScopeID, slug),
+		SourceURL:     meta.SourceURL,
+		Visibility:    p.DefaultVisibility(),
+	}
+	if err := p.Create(ctx, rec, dir); err != nil {
+		if errors.Is(err, store.ErrAlreadyExists) {
+			srv.templateLog.Info(p.Label()+": duplicate create race, re-reading",
+				"name", meta.Name)
+			existing, rerr := p.GetBySlug(ctx, slug, meta.Scope, meta.ScopeID)
+			if rerr != nil || existing == nil {
+				result.Failed++
+				return *result, fmt.Errorf("%s: create race recovery failed: %w", p.Label(), err)
+			}
+			return rs.bootstrapSourceUpdate(ctx, meta, existing, dir, files, BootstrapOptions{Force: true}, result)
+		}
+		result.Failed++
+		return *result, fmt.Errorf("%s: create failed: %w", p.Label(), err)
+	}
+
+	uploaded, _, err := uploadResourceFiles(ctx, stor, storagePath, files, p.Label())
+	if err != nil {
+		result.Failed++
+		return *result, err
+	}
+	rec.Files = uploaded
+	rec.ContentHash = computeContentHash(uploaded)
+	rec.Status = resourceStatusActive
+	if err := p.Update(ctx, rec, dir); err != nil {
+		result.Failed++
+		return *result, err
+	}
+
+	srv.templateLog.Info(p.Label()+": created resource from source",
+		"name", meta.Name, "files", len(uploaded))
+	p.PostFinalize(ctx, rec, dir)
+	result.Created++
+	return *result, nil
+}
+
+// bootstrapSourceUpdate handles the update path for an existing resource.
+func (rs *ResourceStore) bootstrapSourceUpdate(
+	ctx context.Context,
+	meta ResourceMetadata,
+	existing *ResourceRecord,
+	dir string,
+	files []transfer.FileInfo,
+	opts BootstrapOptions,
+	result *BootstrapResult,
+) (BootstrapResult, error) {
+	srv := rs.srv
+	p := rs.pers
+	kind := p.Kind()
+	stor := srv.GetStorage()
+
+	if !opts.Force {
+		newHash := computeContentHash(toResourceFiles(files))
+		if newHash == existing.ContentHash {
+			result.Skipped++
+			return *result, nil
+		}
+	}
+
+	storagePath := existing.StoragePath
+	if storagePath == "" {
+		storagePath = storage.ResourceStoragePath(kind, existing.Scope, existing.ScopeID, existing.Slug)
+	}
+
+	uploaded, written, err := uploadResourceFiles(ctx, stor, storagePath, files, p.Label())
+	if err != nil {
+		result.Failed++
+		return *result, err
+	}
+
+	reconcileResourceStorage(ctx, stor, storagePath, existing.Name, written, srv.templateLog, p.Label())
+
+	existing.Files = uploaded
+	existing.ContentHash = computeContentHash(uploaded)
+	existing.SourceURL = meta.SourceURL
+	existing.Status = resourceStatusActive
+	if err := p.Update(ctx, existing, dir); err != nil {
+		result.Failed++
+		return *result, err
+	}
+
+	srv.templateLog.Info(p.Label()+": updated resource from source",
+		"name", meta.Name)
+	p.PostFinalize(ctx, existing, dir)
+	result.Updated++
+	return *result, nil
 }
