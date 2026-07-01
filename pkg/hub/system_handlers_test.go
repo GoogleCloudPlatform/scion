@@ -193,6 +193,43 @@ func TestSystemInit_EmptyHarnesses(t *testing.T) {
 	}
 }
 
+func TestSystemInit_SelectiveHarnessConfig(t *testing.T) {
+	srv, _ := testWorkstationServer(t)
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	restore := config.OverrideRuntimeDetection(
+		func(string) (string, error) { return "/usr/bin/docker", nil },
+		func(string, []string) error { return nil },
+	)
+	defer restore()
+
+	rec := doWorkstationRequest(t, srv, http.MethodPost, "/api/v1/system/init", map[string]interface{}{
+		"harnesses": []string{"codex"},
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Codex harness-config should be seeded.
+	codexConfig := filepath.Join(tmpHome, ".scion", "harness-configs", "codex", "config.yaml")
+	if _, err := os.Stat(codexConfig); err != nil {
+		t.Errorf("expected codex config.yaml to be created: %v", err)
+	}
+
+	// Claude should NOT be seeded (selective materialization).
+	claudeConfig := filepath.Join(tmpHome, ".scion", "harness-configs", "claude", "config.yaml")
+	if _, err := os.Stat(claudeConfig); err == nil {
+		t.Error("expected claude config.yaml to NOT be created in selective mode")
+	}
+
+	// Default template should always be seeded.
+	templateFile := filepath.Join(tmpHome, ".scion", "templates", "default", "scion-agent.yaml")
+	if _, err := os.Stat(templateFile); err != nil {
+		t.Errorf("expected default template scion-agent.yaml to be created: %v", err)
+	}
+}
+
 // ============================================================================
 // PUT /system/identity
 // ============================================================================
