@@ -76,9 +76,9 @@ type harnessPolicyDecision struct {
 
 // evaluateHarnessConfigPolicy enforces broker-level dispatch policy on the
 // resolved harness-config. Today it gates container-script provisioners
-// behind ServerConfig.AllowContainerScriptHarnesses so brokers must opt in
-// before staging Hub-distributed scripts that execute inside agent
-// containers with access to projected secrets.
+// behind ServerConfig.AllowContainerScriptHarnesses (defaults to true).
+// Set AllowContainerScriptHarnesses=false to block container-script
+// dispatches on this broker.
 //
 // Caller passes the resolved harness-config name (for logs/error text) and
 // the parsed config entry. Returns a non-OK decision when the dispatch

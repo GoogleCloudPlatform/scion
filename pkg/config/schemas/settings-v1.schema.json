@@ -769,8 +769,8 @@
         },
         "allow_container_script_harnesses": {
           "type": "boolean",
-          "default": false,
-          "description": "Allow agents whose harness-config declares provisioner.type: container-script. Container-script provisioners execute scripts inside the agent container with access to projected secrets, so brokers must opt in explicitly.",
+          "default": true,
+          "description": "Allow agents whose harness-config declares provisioner.type: container-script. Container-script provisioners execute scripts inside the agent container with access to projected secrets. Defaults to true; set false to block container-script dispatches on this broker.",
           "x-env-var": "SCION_SERVER_BROKER_ALLOWCONTAINERSCRIPTHARNESSES"
         },
         "cors": { "$ref": "#/$defs/corsConfig" }
