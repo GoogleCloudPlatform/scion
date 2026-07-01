@@ -66,8 +66,6 @@ func (d *DeclarativeGenericHarness) GetInterruptKey() string {
 	return "C-c"
 }
 
-func (d *DeclarativeGenericHarness) GetEmbedDir() string { return "" }
-
 func (d *DeclarativeGenericHarness) GetHarnessEmbedsFS() (embed.FS, string) {
 	return embed.FS{}, ""
 }

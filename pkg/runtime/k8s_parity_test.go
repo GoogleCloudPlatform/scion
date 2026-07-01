@@ -53,7 +53,6 @@ func (h *EnvHarness) HasSystemPrompt(agentHome string) bool { return false }
 func (h *EnvHarness) Provision(ctx context.Context, agentName, agentDir, agentHome, agentWorkspace string) error {
 	return nil
 }
-func (h *EnvHarness) GetEmbedDir() string                                            { return "test" }
 func (h *EnvHarness) GetInterruptKey() string                                        { return "C-c" }
 func (h *EnvHarness) GetHarnessEmbedsFS() (embed.FS, string)                         { return embed.FS{}, "" }
 func (h *EnvHarness) InjectAgentInstructions(agentHome string, content []byte) error { return nil }

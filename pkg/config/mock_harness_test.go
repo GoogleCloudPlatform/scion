@@ -25,7 +25,6 @@ import (
 
 type MockHarness struct {
 	NameVal      string
-	EmbedDirVal  string
 	ConfigDirVal string
 }
 
@@ -48,7 +47,6 @@ func (m *MockHarness) HasSystemPrompt(agentHome string) bool { return false }
 func (m *MockHarness) Provision(ctx context.Context, agentName, agentDir, agentHome, agentWorkspace string) error {
 	return nil
 }
-func (m *MockHarness) GetEmbedDir() string                    { return m.EmbedDirVal }
 func (m *MockHarness) GetInterruptKey() string                { return "C-c" }
 func (m *MockHarness) GetHarnessEmbedsFS() (embed.FS, string) { return embed.FS{}, "" }
 func (m *MockHarness) InjectAgentInstructions(agentHome string, content []byte) error {
@@ -69,7 +67,7 @@ func (m *MockHarness) ResolveAuth(auth api.AuthConfig) (*api.ResolvedAuth, error
 
 func GetMockHarnesses() []api.Harness {
 	return []api.Harness{
-		&MockHarness{NameVal: "gemini", EmbedDirVal: "gemini", ConfigDirVal: ".gemini"},
-		&MockHarness{NameVal: "claude", EmbedDirVal: "claude", ConfigDirVal: ".claude"},
+		&MockHarness{NameVal: "gemini", ConfigDirVal: ".gemini"},
+		&MockHarness{NameVal: "claude", ConfigDirVal: ".claude"},
 	}
 }

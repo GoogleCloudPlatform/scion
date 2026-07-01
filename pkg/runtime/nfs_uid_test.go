@@ -207,7 +207,6 @@ func (h *nfsTestHarness) HasSystemPrompt(agentHome string) bool { return false }
 func (h *nfsTestHarness) Provision(ctx context.Context, agentName, agentDir, agentHome, agentWorkspace string) error {
 	return nil
 }
-func (h *nfsTestHarness) GetEmbedDir() string                    { return "test" }
 func (h *nfsTestHarness) GetInterruptKey() string                { return "C-c" }
 func (h *nfsTestHarness) GetHarnessEmbedsFS() (embed.FS, string) { return embed.FS{}, "" }
 func (h *nfsTestHarness) InjectAgentInstructions(agentHome string, content []byte) error {

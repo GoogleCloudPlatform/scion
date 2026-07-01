@@ -263,10 +263,6 @@ func (g *GeminiCLI) ApplyAuthSettings(agentHome string, resolved *api.ResolvedAu
 	return g.updateSelectedAuthType(settingsPath, geminiAuthType)
 }
 
-func (g *GeminiCLI) GetEmbedDir() string {
-	return "gemini"
-}
-
 func (g *GeminiCLI) GetInterruptKey() string {
 	return "C-c"
 }

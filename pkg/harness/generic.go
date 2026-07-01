@@ -85,10 +85,6 @@ func (g *Generic) Provision(ctx context.Context, agentName, agentDir, agentHome,
 	return nil
 }
 
-func (g *Generic) GetEmbedDir() string {
-	return ""
-}
-
 func (g *Generic) GetInterruptKey() string {
 	return "C-c"
 }

@@ -84,10 +84,6 @@ func (c *ContainerScriptHarness) GetInterruptKey() string {
 	return c.entry.InterruptKey
 }
 
-// GetEmbedDir is unused for container-script harnesses; resolution flows
-// through the on-disk harness-config dir, not embedded fallback.
-func (c *ContainerScriptHarness) GetEmbedDir() string { return "" }
-
 // GetHarnessEmbedsFS returns an empty FS — container-script harnesses do not
 // own embedded files; their files live on disk in the harness-config dir.
 func (c *ContainerScriptHarness) GetHarnessEmbedsFS() (embed.FS, string) {

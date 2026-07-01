@@ -283,10 +283,6 @@ func (c *ClaudeCode) ApplyAuthSettings(agentHome string, resolved *api.ResolvedA
 	return os.WriteFile(claudeJSONPath, newData, 0644)
 }
 
-func (c *ClaudeCode) GetEmbedDir() string {
-	return "claude"
-}
-
 func (c *ClaudeCode) GetInterruptKey() string {
 	return "Escape"
 }
