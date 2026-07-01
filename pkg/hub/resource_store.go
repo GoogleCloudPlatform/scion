@@ -171,7 +171,7 @@ func (rs *ResourceStore) Bootstrap(ctx context.Context, name, dir, scope, scopeI
 			return false, err
 		}
 
-		srv.templateLog.Info(p.Label()+": imported resource",
+		srv.resourceLog.Info(p.Label()+": imported resource",
 			"name", name, "files", len(uploaded), "harness", rec.Harness)
 		p.PostFinalize(ctx, rec, dir)
 		return true, nil
@@ -197,12 +197,12 @@ func (rs *ResourceStore) Bootstrap(ctx context.Context, name, dir, scope, scopeI
 	// Reconcile storage: drop objects no longer in the manifest so removed files
 	// don't linger. (Templates already did this on sync; harness-configs gain it
 	// by routing through the shared path — a removed-file cleanup fix.)
-	reconcileResourceStorage(ctx, stor, storagePath, existing.Name, written, srv.templateLog, p.Label())
+	reconcileResourceStorage(ctx, stor, storagePath, existing.Name, written, srv.resourceLog, p.Label())
 
 	newHash := computeContentHash(uploaded)
 	changed := newHash != existing.ContentHash
 	if changed {
-		srv.templateLog.Info(p.Label()+": resource re-synced",
+		srv.resourceLog.Info(p.Label()+": resource re-synced",
 			"name", existing.Name, "oldHash", existing.ContentHash, "newHash", newHash)
 	}
 

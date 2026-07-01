@@ -653,6 +653,7 @@ type Server struct {
 	authLog           *slog.Logger
 	envSecretLog      *slog.Logger
 	templateLog       *slog.Logger
+	resourceLog       *slog.Logger
 	workspaceLog      *slog.Logger
 	maintenanceLog    *slog.Logger
 
@@ -705,6 +706,7 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 		authLog:           logging.Subsystem("hub.auth"),
 		envSecretLog:      logging.Subsystem("hub.env-secrets"),
 		templateLog:       logging.Subsystem("hub.templates"),
+		resourceLog:       logging.Subsystem("hub.resources"),
 		workspaceLog:      logging.Subsystem("hub.workspace"),
 		maintenanceLog:    logging.Subsystem("hub.maintenance"),
 	}

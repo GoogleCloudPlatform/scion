@@ -34,7 +34,7 @@ import (
 func (s *Server) BootstrapBundledResources(ctx context.Context, opts BootstrapOptions) error {
 	stor := s.GetStorage()
 	if stor == nil {
-		s.templateLog.Warn("bundled resource bootstrap: no storage backend configured, skipping")
+		s.resourceLog.Warn("bundled resource bootstrap: no storage backend configured, skipping")
 		return nil
 	}
 
@@ -64,7 +64,7 @@ func (s *Server) BootstrapBundledResources(ctx context.Context, opts BootstrapOp
 			continue
 		}
 
-		s.templateLog.Info("bootstrapped bundled resource",
+		s.resourceLog.Info("bootstrapped bundled resource",
 			"kind", r.Kind, "name", r.Name,
 			"created", result.Created, "updated", result.Updated,
 			"repaired", result.Repaired, "skipped", result.Skipped,

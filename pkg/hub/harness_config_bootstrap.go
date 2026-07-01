@@ -32,13 +32,13 @@ import (
 func (s *Server) BootstrapHarnessConfigsFromDir(ctx context.Context, harnessConfigsDir string) error {
 	info, err := os.Stat(harnessConfigsDir)
 	if err != nil || !info.IsDir() {
-		s.templateLog.Debug("harness config bootstrap: directory not found, skipping", "dir", harnessConfigsDir)
+		s.resourceLog.Debug("harness config bootstrap: directory not found, skipping", "dir", harnessConfigsDir)
 		return nil
 	}
 
 	stor := s.GetStorage()
 	if stor == nil {
-		s.templateLog.Warn("harness config bootstrap: no storage backend configured, skipping")
+		s.resourceLog.Warn("harness config bootstrap: no storage backend configured, skipping")
 		return nil
 	}
 
@@ -60,21 +60,21 @@ func (s *Server) BootstrapHarnessConfigsFromDir(ctx context.Context, harnessConf
 		// Load config.yaml to get harness type
 		hcDir, err := config.LoadHarnessConfigDir(dirPath)
 		if err != nil {
-			s.templateLog.Warn("harness config bootstrap: failed to load config, skipping",
+			s.resourceLog.Warn("harness config bootstrap: failed to load config, skipping",
 				"config", name, "error", err)
 			continue
 		}
 
 		existing, err := s.store.GetHarnessConfigBySlug(ctx, slug, store.HarnessConfigScopeGlobal, "")
 		if err != nil && err != store.ErrNotFound {
-			s.templateLog.Warn("harness config bootstrap: failed to look up config, skipping",
+			s.resourceLog.Warn("harness config bootstrap: failed to look up config, skipping",
 				"config", name, "error", err)
 			continue
 		}
 
 		if existing == nil {
 			if err := s.bootstrapSingleHarnessConfig(ctx, name, dirPath, hcDir, stor); err != nil {
-				s.templateLog.Warn("harness config bootstrap: failed to import config, skipping",
+				s.resourceLog.Warn("harness config bootstrap: failed to import config, skipping",
 					"config", name, "error", err)
 				continue
 			}
@@ -82,7 +82,7 @@ func (s *Server) BootstrapHarnessConfigsFromDir(ctx context.Context, harnessConf
 		} else {
 			changed, err := s.syncExistingHarnessConfig(ctx, existing, dirPath, hcDir, stor, false)
 			if err != nil {
-				s.templateLog.Warn("harness config bootstrap: failed to sync config, skipping",
+				s.resourceLog.Warn("harness config bootstrap: failed to sync config, skipping",
 					"config", name, "error", err)
 				continue
 			}
@@ -93,7 +93,7 @@ func (s *Server) BootstrapHarnessConfigsFromDir(ctx context.Context, harnessConf
 	}
 
 	if imported > 0 || updated > 0 {
-		s.templateLog.Info("harness config bootstrap: sync complete",
+		s.resourceLog.Info("harness config bootstrap: sync complete",
 			"imported", imported, "updated", updated)
 	}
 

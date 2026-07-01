@@ -246,7 +246,7 @@ func (rs *ResourceStore) BootstrapSource(ctx context.Context, src ResourceSource
 			return result, nil
 		case OverwriteBuiltinManaged:
 			if !IsBuiltinManaged(existing.SourceURL) && !opts.Force {
-				srv.templateLog.Warn(p.Label()+": skipping non-built-in conflict",
+				srv.resourceLog.Warn(p.Label()+": skipping non-built-in conflict",
 					"name", meta.Name, "existingSource", existing.SourceURL)
 				result.Skipped++
 				return result, nil
@@ -305,7 +305,7 @@ func (rs *ResourceStore) bootstrapSourceCreate(
 	}
 	if err := p.Create(ctx, rec, dir); err != nil {
 		if errors.Is(err, store.ErrAlreadyExists) {
-			srv.templateLog.Info(p.Label()+": duplicate create race, re-reading",
+			srv.resourceLog.Info(p.Label()+": duplicate create race, re-reading",
 				"name", meta.Name)
 			existing, rerr := p.GetBySlug(ctx, slug, meta.Scope, meta.ScopeID)
 			if rerr != nil || existing == nil {
@@ -331,7 +331,7 @@ func (rs *ResourceStore) bootstrapSourceCreate(
 		return *result, err
 	}
 
-	srv.templateLog.Info(p.Label()+": created resource from source",
+	srv.resourceLog.Info(p.Label()+": created resource from source",
 		"name", meta.Name, "files", len(uploaded))
 	p.PostFinalize(ctx, rec, dir)
 	result.Created++
@@ -383,7 +383,7 @@ func (rs *ResourceStore) bootstrapSourceUpdate(
 		return *result, err
 	}
 
-	reconcileResourceStorage(ctx, stor, storagePath, existing.Name, written, srv.templateLog, p.Label())
+	reconcileResourceStorage(ctx, stor, storagePath, existing.Name, written, srv.resourceLog, p.Label())
 
 	existing.Files = uploaded
 	existing.ContentHash = computeContentHash(uploaded)
@@ -394,7 +394,7 @@ func (rs *ResourceStore) bootstrapSourceUpdate(
 		return *result, err
 	}
 
-	srv.templateLog.Info(p.Label()+": updated resource from source",
+	srv.resourceLog.Info(p.Label()+": updated resource from source",
 		"name", meta.Name)
 	p.PostFinalize(ctx, existing, dir)
 	result.Updated++
@@ -427,7 +427,7 @@ func (rs *ResourceStore) repairStorageIfNeeded(
 		storagePath = storage.ResourceStoragePath(kind, rec.Scope, rec.ScopeID, rec.Slug)
 	}
 
-	srv.templateLog.Info(p.Label()+": repairing storage",
+	srv.resourceLog.Info(p.Label()+": repairing storage",
 		"name", rec.Name, "issues", len(report.Issues))
 
 	uploaded, written, err := uploadResourceFiles(ctx, stor, storagePath, files, p.Label())
@@ -435,7 +435,7 @@ func (rs *ResourceStore) repairStorageIfNeeded(
 		return false, fmt.Errorf("repair upload: %w", err)
 	}
 
-	reconcileResourceStorage(ctx, stor, storagePath, rec.Name, written, srv.templateLog, p.Label())
+	reconcileResourceStorage(ctx, stor, storagePath, rec.Name, written, srv.resourceLog, p.Label())
 
 	rec.Files = uploaded
 	rec.ContentHash = computeContentHash(uploaded)
@@ -444,7 +444,7 @@ func (rs *ResourceStore) repairStorageIfNeeded(
 		return false, fmt.Errorf("repair update: %w", err)
 	}
 
-	srv.templateLog.Info(p.Label()+": repaired storage",
+	srv.resourceLog.Info(p.Label()+": repaired storage",
 		"name", rec.Name, "files", len(uploaded))
 	return true, nil
 }

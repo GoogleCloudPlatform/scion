@@ -57,7 +57,7 @@ func (s *Server) handleAdminValidateResources(w http.ResponseWriter, r *http.Req
 		rs := s.templateStore()
 		report, err := rs.ValidateStorage(ctx, rec)
 		if err != nil {
-			s.templateLog.Warn("admin validate: template validation error",
+			s.resourceLog.Warn("admin validate: template validation error",
 				"name", t.Name, "error", err)
 			continue
 		}
@@ -78,7 +78,7 @@ func (s *Server) handleAdminValidateResources(w http.ResponseWriter, r *http.Req
 		rs := s.harnessConfigStore(hc.Harness)
 		report, err := rs.ValidateStorage(ctx, rec)
 		if err != nil {
-			s.templateLog.Warn("admin validate: harness-config validation error",
+			s.resourceLog.Warn("admin validate: harness-config validation error",
 				"name", hc.Name, "error", err)
 			continue
 		}

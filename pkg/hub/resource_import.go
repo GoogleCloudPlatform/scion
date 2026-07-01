@@ -285,9 +285,9 @@ func (s *Server) fetchRemoteForImport(ctx context.Context, projectID, sourceURL 
 			sec, secErr := sb.Get(ctx, "GITHUB_TOKEN", secret.ScopeProject, projectID)
 			if secErr == nil && sec != nil && sec.Value != "" {
 				authToken = sec.Value
-				s.templateLog.Info("using project GITHUB_TOKEN for resource import", "projectID", projectID)
+				s.resourceLog.Info("using project GITHUB_TOKEN for resource import", "projectID", projectID)
 			} else if secErr != nil && !errors.Is(secErr, store.ErrNotFound) {
-				s.templateLog.Warn("Failed to retrieve GITHUB_TOKEN from secret backend", "projectID", projectID, "error", secErr)
+				s.resourceLog.Warn("Failed to retrieve GITHUB_TOKEN from secret backend", "projectID", projectID, "error", secErr)
 			}
 		}
 	}
@@ -420,7 +420,7 @@ func (s *Server) importResourceDirs(ctx context.Context, dirs []resourceDir, ski
 			}
 			done := int(completed.Add(1))
 			if err != nil {
-				s.templateLog.Warn(kind.noun+" import: failed to import resource, skipping",
+				s.resourceLog.Warn(kind.noun+" import: failed to import resource, skipping",
 					"name", rd.name, "error", err)
 				failedSlots[i] = rd.name
 				emit(progress, ResourceImportEvent{
