@@ -65,8 +65,8 @@ type OverwritePolicy int
 
 const (
 	OverwriteBuiltinManaged OverwritePolicy = iota // only overwrite built-in-managed resources
-	OverwriteAlways                                 // admin force
-	OverwriteNever                                  // read-only
+	OverwriteAlways                                // admin force
+	OverwriteNever                                 // read-only
 )
 
 // BootstrapResult reports what BootstrapSource did for a single resource.
@@ -205,11 +205,11 @@ func stageResourceSource(src ResourceSource) (dir string, cleanup func(), err er
 	})
 
 	if walkErr != nil {
-		os.RemoveAll(dir)
+		_ = os.RemoveAll(dir)
 		return "", nil, walkErr
 	}
 
-	cleanup = func() { os.RemoveAll(dir) }
+	cleanup = func() { _ = os.RemoveAll(dir) }
 	return dir, cleanup, nil
 }
 
