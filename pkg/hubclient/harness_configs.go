@@ -70,6 +70,9 @@ type HarnessConfigService interface {
 
 	// Reimport re-imports a harness config from its stored source URL or an override.
 	Reimport(ctx context.Context, id string, sourceURL string) (*ReimportHarnessConfigResponse, error)
+
+	// Validate checks storage consistency for a harness config.
+	Validate(ctx context.Context, id string) (*ValidationReport, error)
 }
 
 // harnessConfigService is the implementation of HarnessConfigService.
@@ -337,6 +340,15 @@ func (s *harnessConfigService) Reimport(ctx context.Context, id string, sourceUR
 		return nil, err
 	}
 	return apiclient.DecodeResponse[ReimportHarnessConfigResponse](resp)
+}
+
+// Validate checks storage consistency for a harness config.
+func (s *harnessConfigService) Validate(ctx context.Context, id string) (*ValidationReport, error) {
+	resp, err := s.c.get(ctx, "/api/v1/harness-configs/"+id+"/validate", nil)
+	if err != nil {
+		return nil, err
+	}
+	return apiclient.DecodeResponse[ValidationReport](resp)
 }
 
 func (s *harnessConfigService) getTransferClient() *transfer.Client {

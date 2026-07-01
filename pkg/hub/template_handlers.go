@@ -352,6 +352,8 @@ func (s *Server) handleTemplateByIDV2(w http.ResponseWriter, r *http.Request) {
 		s.handleTemplateDownload(w, r, templateID)
 	case "clone":
 		s.handleTemplateClone(w, r, templateID)
+	case "validate":
+		s.handleTemplateValidate(w, r, templateID)
 	case "files":
 		s.handleTemplateFiles(w, r, templateID, "")
 	default:
@@ -709,6 +711,31 @@ func (s *Server) handleTemplateDownload(w http.ResponseWriter, r *http.Request, 
 	}
 
 	writeJSON(w, http.StatusOK, response)
+}
+
+// handleTemplateValidate validates a template's storage consistency.
+func (s *Server) handleTemplateValidate(w http.ResponseWriter, r *http.Request, id string) {
+	if r.Method != http.MethodGet {
+		MethodNotAllowed(w)
+		return
+	}
+
+	ctx := r.Context()
+	template, err := s.store.GetTemplate(ctx, id)
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	rec := templateToRecord(template)
+	rs := s.templateStore()
+	report, err := rs.ValidateStorage(ctx, rec)
+	if err != nil {
+		RuntimeError(w, fmt.Sprintf("validation failed: %v", err))
+		return
+	}
+
+	writeJSON(w, http.StatusOK, report)
 }
 
 // handleTemplateClone creates a copy of a template.

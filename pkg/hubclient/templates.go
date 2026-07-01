@@ -59,6 +59,9 @@ type TemplateService interface {
 
 	// DownloadFile downloads a file from the given signed URL.
 	DownloadFile(ctx context.Context, url string) ([]byte, error)
+
+	// Validate checks storage consistency for a template.
+	Validate(ctx context.Context, templateID string) (*ValidationReport, error)
 }
 
 // templateService is the implementation of TemplateService.
@@ -223,6 +226,22 @@ type DownloadURLInfo struct {
 	Hash string `json:"hash,omitempty"`
 }
 
+// ValidationReport is the result of validating a resource's storage consistency.
+type ValidationReport struct {
+	ResourceKind string            `json:"resourceKind"`
+	Name         string            `json:"name"`
+	Scope        string            `json:"scope"`
+	Status       string            `json:"status"`
+	Issues       []ValidationIssue `json:"issues"`
+}
+
+// ValidationIssue describes a single storage consistency problem.
+type ValidationIssue struct {
+	Kind    string `json:"kind"`
+	File    string `json:"file,omitempty"`
+	Message string `json:"message"`
+}
+
 // List returns templates matching the filter criteria.
 func (s *templateService) List(ctx context.Context, opts *ListTemplatesOptions) (*ListTemplatesResponse, error) {
 	query := url.Values{}
@@ -352,6 +371,15 @@ func (s *templateService) RequestDownloadURLs(ctx context.Context, templateID st
 		return nil, err
 	}
 	return apiclient.DecodeResponse[DownloadResponse](resp)
+}
+
+// Validate checks storage consistency for a template.
+func (s *templateService) Validate(ctx context.Context, templateID string) (*ValidationReport, error) {
+	resp, err := s.c.get(ctx, "/api/v1/templates/"+templateID+"/validate", nil)
+	if err != nil {
+		return nil, err
+	}
+	return apiclient.DecodeResponse[ValidationReport](resp)
 }
 
 // UploadFile uploads a file to the given signed URL.
