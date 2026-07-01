@@ -40,9 +40,12 @@ const fileUploadConcurrency = 8
 
 // generateUploadURLs generates signed PUT URLs for a list of files under basePath.
 // Returns the upload URL infos, a manifest URL (if possible), and any error.
+//
+// Any failure to generate a signed URL for a listed file is treated as a hard
+// error — a partial URL set would cause the client to silently skip files,
+// producing an incomplete upload that passes verification only by accident.
 func generateUploadURLs(ctx context.Context, stor storage.Storage, basePath string, files []FileUploadRequest) ([]UploadURLInfo, string, error) {
 	uploadURLs := make([]UploadURLInfo, 0, len(files))
-	var lastErr error
 	for _, file := range files {
 		objectPath := basePath + "/" + file.Path
 		signedURL, err := stor.GenerateSignedURL(ctx, objectPath, storage.SignedURLOptions{
@@ -50,8 +53,7 @@ func generateUploadURLs(ctx context.Context, stor storage.Storage, basePath stri
 			Expires: SignedURLExpiry,
 		})
 		if err != nil {
-			lastErr = err
-			continue
+			return nil, "", fmt.Errorf("failed to generate signed URL for file %q: %w", file.Path, err)
 		}
 		uploadURLs = append(uploadURLs, UploadURLInfo{
 			Path:    file.Path,
@@ -62,11 +64,7 @@ func generateUploadURLs(ctx context.Context, stor storage.Storage, basePath stri
 		})
 	}
 
-	if len(uploadURLs) == 0 && len(files) > 0 && lastErr != nil {
-		return nil, "", lastErr
-	}
-
-	// Generate manifest URL
+	// Generate manifest URL — best-effort; callers handle a missing manifest.
 	var manifestURL string
 	manifestPath := basePath + "/manifest.json"
 	signedURL, err := stor.GenerateSignedURL(ctx, manifestPath, storage.SignedURLOptions{
@@ -246,7 +244,8 @@ func generateDownloadURLs(ctx context.Context, stor storage.Storage, basePath st
 		})
 	}
 
-	// Generate manifest URL
+	// Generate manifest URL — best-effort; a missing manifest is not fatal
+	// because callers fall back to per-file downloads.
 	var manifestURL string
 	manifestPath := basePath + "/manifest.json"
 	signedURL, err := stor.GenerateSignedURL(ctx, manifestPath, storage.SignedURLOptions{

@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -1353,13 +1354,20 @@ func (s *Server) handleSkillsResolve(w http.ResponseWriter, r *http.Request) {
 		if stor != nil && len(sv.Files) > 0 {
 			versionPath := skill.StoragePath + "/" + sv.Version
 			downloadURLs, _, _, dlErr := generateDownloadURLs(ctx, stor, versionPath, sv.Files)
-			if dlErr == nil {
-				if stor.Provider() == storage.ProviderLocal {
-					hubURL := requestBaseURL(r)
-					downloadURLs = rewriteLocalDownloadURLs(downloadURLs, hubURL, "skills", skill.ID)
-				}
-				entry.Files = downloadURLs
+			if dlErr != nil {
+				slog.ErrorContext(ctx, "failed to generate download URLs for skill version",
+					"skill", skill.Name, "version", sv.Version, "error", dlErr)
+				resolveErrors = append(resolveErrors, ResolveSkillError{
+					URI: skillRef.URI, Code: "storage_error",
+					Message: fmt.Sprintf("skill %s version %s has storage files missing — re-sync the skill", skill.Name, sv.Version),
+				})
+				continue
 			}
+			if stor.Provider() == storage.ProviderLocal {
+				hubURL := requestBaseURL(r)
+				downloadURLs = rewriteLocalDownloadURLs(downloadURLs, hubURL, "skills", skill.ID)
+			}
+			entry.Files = downloadURLs
 		}
 
 		go func(versionID string) {
