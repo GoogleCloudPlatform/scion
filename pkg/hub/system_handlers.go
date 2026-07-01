@@ -387,6 +387,9 @@ func (s *Server) handleSystemInit(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Directory-based harnesses are seeded unconditionally via HarnessesFS;
+	// the directories are inert until activated. Selective materialization
+	// based on the user's selection will be addressed in PR 5.
 	opts := config.InitMachineOpts{HarnessesFS: harness.HarnessesFS()}
 	if err := config.InitMachine(embedOnlyInstances, opts); err != nil {
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,

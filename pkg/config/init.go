@@ -602,7 +602,9 @@ func InitMachine(harnesses []api.Harness, opts ...InitMachineOpts) error {
 		return fmt.Errorf("failed to seed global default agnostic template: %w", err)
 	}
 
-	// Seed directory-based harnesses from the embedded harnesses/ FS.
+	// Seed all directory-based harnesses unconditionally from the embedded
+	// harnesses/ FS. The directories are inert until activated, so seeding
+	// them all is safe. Selective materialization will be addressed in PR 5.
 	if opt.HarnessesFS != nil {
 		if err := SeedAllHarnessConfigsFromEmbed(harnessConfigsDir, opt.HarnessesFS, opt.Force); err != nil {
 			return fmt.Errorf("failed to seed harness-configs from embed: %w", err)
