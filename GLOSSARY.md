@@ -93,9 +93,34 @@ The control plane of Scion — it owns identity, auth, project registration, and
 _Avoid_: server, master, coordinator
 
 **Runtime Broker**:
-A compute node (laptop, VM, or cluster) that registers with a Hub to offer execution capacity and runs the agents dispatched to it. Always write in full; "broker" alone is forbidden because it collides with Message Broker.
+A service that manages the lifecycle of containerized agents on behalf of the Hub — provisioning workspaces, hydrating templates, and delegating container operations to a pluggable runtime. Brokers vary along two dimensions: whether they require host-level access to a container runtime (*node-bound* vs. *proxy*) and whether they run as a standalone process or are *embedded* in the Hub. Always write in full; "broker" alone is forbidden because it collides with Message Broker. See also *Managed Agent*, which bypasses the broker entirely via a direct cloud API integration.
 _Avoid_: broker, node, runner, worker
-_See also_: Runtime, Profile, Message Broker (distinct concept, same word)
+_See also_: Node-Bound Broker, Proxy Broker, Embedded Broker, Hosted Broker, Managed Agent, Runtime, Profile, Message Broker (distinct concept, same word)
+
+**Node-Bound Broker**:
+A Runtime Broker that runs on the same compute node as the containers it manages. Required for runtimes that need direct host access, such as Docker (via the daemon socket) or Apple Container (via the Virtualization framework). A node-bound broker is inherently stateful — its identity is tied to the machine it runs on, and it connects to the Hub via a persistent control channel and periodic heartbeats.
+_Avoid_: local broker, host broker
+_See also_: Runtime Broker, Proxy Broker, Embedded Broker
+
+**Proxy Broker**:
+A stateless Runtime Broker that delegates container operations to an API-mediated service such as Cloud Run or Kubernetes. Because it communicates over a network API rather than a local daemon, a proxy broker is not tied to any particular compute node and can be replicated for high availability.
+_Avoid_: remote broker, API broker, cloud broker
+_See also_: Runtime Broker, Node-Bound Broker, Hosted Broker
+
+**Embedded Broker**:
+A Runtime Broker running inside the same process as the Hub server, eliminating control-channel overhead. Both node-bound and proxy brokers can be embedded. Contrast with a standalone broker, which runs as its own process and connects to the Hub remotely.
+_Avoid_: inline broker, in-process broker
+_See also_: Runtime Broker, Combo server, Hosted Broker
+
+**Hosted Broker**:
+An embedded proxy broker that serves as the platform's default compute backend. Because it is both stateless and co-located with the Hub, it can be replicated alongside Hub instances for high availability without broker-specific scheduling. Agents dispatched without an explicit broker target are routed to it automatically.
+_Avoid_: default broker, platform broker, cloud broker
+_See also_: Runtime Broker, Proxy Broker, Embedded Broker
+
+**Managed Agent**:
+An agent whose lifecycle is managed directly by the Hub via a cloud provider API (e.g. Google Managed Agents), bypassing the Runtime Broker layer entirely. Managed agents share the same `Manager` interface and agent-label system as containerized agents, but have no container, no workspace mount, and no broker involvement. The choice between a managed agent and a brokered agent is a deployment-time decision controlled by a broker profile, not a property of the agent template.
+_Avoid_: cloud agent, API agent, serverless agent
+_See also_: Runtime Broker, Profile
 
 **Profile**:
 A named bundle of runtime broker settings selected as a unit — a runtime plus its execution settings (env, volumes, resources), default harness-config and template, image registry, secrets, and harness overrides. A runtime-broker-scoped concept; long form **Runtime Broker Profile**.
