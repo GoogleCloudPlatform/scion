@@ -356,6 +356,17 @@ func (rs *ResourceStore) bootstrapSourceUpdate(
 	if !opts.Force {
 		newHash := computeContentHash(toResourceFiles(files))
 		if newHash == existing.ContentHash {
+			if opts.RepairStorage && IsBuiltinManaged(existing.SourceURL) {
+				repaired, err := rs.repairStorageIfNeeded(ctx, existing, dir, files)
+				if err != nil {
+					result.Failed++
+					return *result, err
+				}
+				if repaired {
+					result.Repaired++
+					return *result, nil
+				}
+			}
 			result.Skipped++
 			return *result, nil
 		}
@@ -388,4 +399,52 @@ func (rs *ResourceStore) bootstrapSourceUpdate(
 	p.PostFinalize(ctx, existing, dir)
 	result.Updated++
 	return *result, nil
+}
+
+// repairStorageIfNeeded validates storage for a built-in-managed resource and
+// re-uploads any missing objects from the staged source directory.
+func (rs *ResourceStore) repairStorageIfNeeded(
+	ctx context.Context,
+	rec *ResourceRecord,
+	dir string,
+	files []transfer.FileInfo,
+) (bool, error) {
+	report, err := rs.ValidateStorage(ctx, rec)
+	if err != nil {
+		return false, fmt.Errorf("repair validate: %w", err)
+	}
+	if len(report.Issues) == 0 {
+		return false, nil
+	}
+
+	srv := rs.srv
+	p := rs.pers
+	stor := srv.GetStorage()
+	kind := p.Kind()
+
+	storagePath := rec.StoragePath
+	if storagePath == "" {
+		storagePath = storage.ResourceStoragePath(kind, rec.Scope, rec.ScopeID, rec.Slug)
+	}
+
+	srv.templateLog.Info(p.Label()+": repairing storage",
+		"name", rec.Name, "issues", len(report.Issues))
+
+	uploaded, written, err := uploadResourceFiles(ctx, stor, storagePath, files, p.Label())
+	if err != nil {
+		return false, fmt.Errorf("repair upload: %w", err)
+	}
+
+	reconcileResourceStorage(ctx, stor, storagePath, rec.Name, written, srv.templateLog, p.Label())
+
+	rec.Files = uploaded
+	rec.ContentHash = computeContentHash(uploaded)
+	rec.Status = resourceStatusActive
+	if err := p.Update(ctx, rec, dir); err != nil {
+		return false, fmt.Errorf("repair update: %w", err)
+	}
+
+	srv.templateLog.Info(p.Label()+": repaired storage",
+		"name", rec.Name, "files", len(uploaded))
+	return true, nil
 }
