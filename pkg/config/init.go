@@ -589,7 +589,6 @@ func InitMachine(harnesses []api.Harness, opts ...InitMachineOpts) error {
 		opt = opts[0]
 	}
 
-	templatesDir := filepath.Join(globalDir, "templates")
 	agentsDir := filepath.Join(globalDir, "agents")
 	harnessConfigsDir := filepath.Join(globalDir, harnessConfigsDirName)
 
@@ -597,18 +596,9 @@ func InitMachine(harnesses []api.Harness, opts ...InitMachineOpts) error {
 		return fmt.Errorf("failed to create global agents directory: %w", err)
 	}
 
-	// Seed default agnostic template
-	if err := SeedAgnosticTemplate(filepath.Join(templatesDir, "default"), opt.Force); err != nil {
-		return fmt.Errorf("failed to seed global default agnostic template: %w", err)
-	}
-
-	// Seed all directory-based harnesses unconditionally from the embedded
-	// harnesses/ FS. The directories are inert until activated, so seeding
-	// them all is safe. Selective materialization will be addressed in PR 5.
-	if opt.HarnessesFS != nil {
-		if err := SeedAllHarnessConfigsFromEmbed(harnessConfigsDir, opt.HarnessesFS, opt.Force); err != nil {
-			return fmt.Errorf("failed to seed harness-configs from embed: %w", err)
-		}
+	// Materialize all bundled Templates and Harness-configs from the catalog.
+	if err := MaterializeBundledResources(globalDir, MaterializeOptions{Force: opt.Force}); err != nil {
+		return fmt.Errorf("failed to materialize bundled resources: %w", err)
 	}
 
 	// Seed embed-only harnesses (those still using compiled-in embeds, e.g. Gemini).

@@ -471,34 +471,24 @@ func UpdateDefaultTemplates(force bool, harnesses []api.Harness, harnessesFS ...
 		return err
 	}
 
-	templatesDir, err := GetGlobalTemplatesDir()
-	if err != nil {
-		return err
-	}
 	harnessConfigsDir := filepath.Join(globalDir, harnessConfigsDirName)
 
-	defaultDir := filepath.Join(templatesDir, "default")
-
-	// Check if the default template already exists
 	if !force {
+		templatesDir, err := GetGlobalTemplatesDir()
+		if err != nil {
+			return err
+		}
+		defaultDir := filepath.Join(templatesDir, "default")
 		if _, err := os.Stat(defaultDir); err == nil {
 			return fmt.Errorf("default template already exists at %s; use --force to overwrite", defaultDir)
 		}
 	}
 
-	// Update default agnostic template
-	if err := SeedAgnosticTemplate(defaultDir, true); err != nil {
+	if err := MaterializeBundledResources(globalDir, MaterializeOptions{Force: true}); err != nil {
 		return err
 	}
 
-	// Seed directory-based harnesses from the embedded harnesses/ FS.
-	if len(harnessesFS) > 0 && harnessesFS[0] != nil {
-		if err := SeedAllHarnessConfigsFromEmbed(harnessConfigsDir, harnessesFS[0], true); err != nil {
-			return err
-		}
-	}
-
-	// Update embed-only harness-configs
+	// Seed embed-only harness-configs (e.g. Gemini).
 	for _, h := range harnesses {
 		if err := SeedHarnessConfig(filepath.Join(harnessConfigsDir, h.Name()), h, true); err != nil {
 			return err
