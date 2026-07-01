@@ -369,6 +369,10 @@ func TestBootstrapSource_SkipNonBuiltinConflict(t *testing.T) {
 	}
 }
 
+// TODO: This test exercises the normal update path (GetBySlug finds pre-existing record).
+// A proper race test requires a mock persistence where GetBySlug returns nil on first call
+// but Create returns ErrAlreadyExists, simulating the HA window between read and write.
+// Add this test before or alongside the HA integration tests.
 func TestBootstrapSource_DuplicateCreateRace(t *testing.T) {
 	srv, s, _ := testTemplateBootstrapServer(t)
 	ctx := context.Background()
