@@ -230,6 +230,32 @@ func TestSystemInit_SelectiveHarnessConfig(t *testing.T) {
 	}
 }
 
+func TestSystemInit_EmbedOnlyHarness(t *testing.T) {
+	srv, _ := testWorkstationServer(t)
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	restore := config.OverrideRuntimeDetection(
+		func(string) (string, error) { return "/usr/bin/docker", nil },
+		func(string, []string) error { return nil },
+	)
+	defer restore()
+
+	// Gemini is embed-only (not in the bundled catalog). This must not 500.
+	rec := doWorkstationRequest(t, srv, http.MethodPost, "/api/v1/system/init", map[string]interface{}{
+		"harnesses": []string{"gemini"},
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Gemini harness-config should be seeded via the embed-only path.
+	geminiConfig := filepath.Join(tmpHome, ".scion", "harness-configs", "gemini", "config.yaml")
+	if _, err := os.Stat(geminiConfig); err != nil {
+		t.Errorf("expected gemini config.yaml to be created: %v", err)
+	}
+}
+
 // ============================================================================
 // PUT /system/identity
 // ============================================================================
