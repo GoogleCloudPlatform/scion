@@ -94,6 +94,10 @@ func (m *mockHarnessConfigService) ReadFile(ctx context.Context, id, filePath st
 	return nil, nil
 }
 
+func (m *mockHarnessConfigService) Validate(ctx context.Context, id string) (*hubclient.ValidationReport, error) {
+	return nil, nil
+}
+
 var _ hubclient.HarnessConfigService = (*mockHarnessConfigService)(nil)
 
 // TestHarnessConfigResolveSuccess exercises the end-to-end download path for a

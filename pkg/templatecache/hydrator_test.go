@@ -88,6 +88,10 @@ func (m *mockTemplateService) DownloadFile(ctx context.Context, url string) ([]b
 	return nil, nil
 }
 
+func (m *mockTemplateService) Validate(ctx context.Context, templateID string) (*hubclient.ValidationReport, error) {
+	return nil, nil
+}
+
 // mockHubClient is a mock implementation of hubclient.Client.
 type mockHubClient struct {
 	templates      hubclient.TemplateService
