@@ -768,10 +768,18 @@ func extractTarGz(tarGzPath, destPath string) error {
 			}
 			outFile.Close()
 		case tar.TypeSymlink:
+			linkTarget := header.Linkname
+			if !filepath.IsAbs(linkTarget) {
+				linkTarget = filepath.Join(filepath.Dir(fpath), linkTarget)
+			}
+			linkTarget = filepath.Clean(linkTarget)
+			if !strings.HasPrefix(linkTarget, filepath.Clean(destPath)+string(os.PathSeparator)) {
+				continue
+			}
 			if err := os.MkdirAll(filepath.Dir(fpath), 0755); err != nil {
 				return err
 			}
-			if err := os.Symlink(header.Linkname, fpath); err != nil {
+			if err := os.Symlink(header.Linkname, fpath); err != nil && !os.IsExist(err) {
 				return err
 			}
 		}
