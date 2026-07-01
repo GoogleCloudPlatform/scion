@@ -95,13 +95,10 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 		if err := config.InitGlobal(harness.EmbedOnlyHarnesses(), config.InitMachineOpts{HarnessesFS: harness.HarnessesFS()}); err != nil {
 			return fmt.Errorf("failed to initialize global config: %w", err)
 		}
-	} else if hostedMode {
-		// In hosted mode, refresh the default template and harness-configs
-		// from the binary's embeds on every start. This ensures a binary upgrade
-		// automatically propagates new defaults without manual re-init.
-		// Only done in hosted mode to avoid overwriting local customizations
-		// during development; admins should use non-default names for custom
-		// templates.
+	} else if !hostedMode {
+		// In workstation mode, refresh the default template and harness-configs
+		// from the binary's embeds. Hosted mode bootstraps directly into the Hub
+		// via BootstrapBundledResources, bypassing local ~/.scion materialization.
 		if err := config.UpdateDefaultTemplates(true, harness.EmbedOnlyHarnesses(), harness.HarnessesFS()); err != nil {
 			log.Printf("Warning: failed to refresh default templates: %v", err)
 		}
@@ -1324,16 +1321,28 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 		}
 	}
 
-	// Bootstrap local templates into Hub if database is empty
-	globalTemplatesDir := filepath.Join(globalDir, "templates")
-	if err := hubSrv.BootstrapTemplatesFromDir(ctx, globalTemplatesDir); err != nil {
-		log.Printf("Warning: template bootstrap failed: %v", err)
-	}
-
-	// Bootstrap local harness configs into Hub
-	globalHarnessConfigsDir := filepath.Join(globalDir, "harness-configs")
-	if err := hubSrv.BootstrapHarnessConfigsFromDir(ctx, globalHarnessConfigsDir); err != nil {
-		log.Printf("Warning: harness config bootstrap failed: %v", err)
+	if hostedMode {
+		// Hosted mode: bootstrap bundled resources directly into the Hub from
+		// the binary's embedded catalog. This removes the dependency on local
+		// ~/.scion directories and ensures every replica converges on the same
+		// DB + storage state.
+		if err := hubSrv.BootstrapBundledResources(ctx, hub.BootstrapOptions{
+			RepairStorage:   true,
+			OverwritePolicy: hub.OverwriteBuiltinManaged,
+		}); err != nil {
+			log.Printf("Warning: bundled resource bootstrap failed: %v", err)
+		}
+	} else {
+		// Workstation mode: import from local ~/.scion directories. These were
+		// refreshed from embeds earlier in the startup sequence.
+		globalTemplatesDir := filepath.Join(globalDir, "templates")
+		if err := hubSrv.BootstrapTemplatesFromDir(ctx, globalTemplatesDir); err != nil {
+			log.Printf("Warning: template bootstrap failed: %v", err)
+		}
+		globalHarnessConfigsDir := filepath.Join(globalDir, "harness-configs")
+		if err := hubSrv.BootstrapHarnessConfigsFromDir(ctx, globalHarnessConfigsDir); err != nil {
+			log.Printf("Warning: harness config bootstrap failed: %v", err)
+		}
 	}
 
 	log.Printf("Database: %s (%s)", cfg.Database.Driver, cfg.Database.URL)
