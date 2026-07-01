@@ -752,7 +752,7 @@ func extractTarGz(tarGzPath, destPath string) error {
 			if err := os.MkdirAll(fpath, os.FileMode(header.Mode)); err != nil {
 				return err
 			}
-		case tar.TypeReg:
+		case tar.TypeReg, tar.TypeRegA:
 			if err := os.MkdirAll(filepath.Dir(fpath), 0755); err != nil {
 				return err
 			}
@@ -767,6 +767,13 @@ func extractTarGz(tarGzPath, destPath string) error {
 				return err
 			}
 			outFile.Close()
+		case tar.TypeSymlink:
+			if err := os.MkdirAll(filepath.Dir(fpath), 0755); err != nil {
+				return err
+			}
+			if err := os.Symlink(header.Linkname, fpath); err != nil {
+				return err
+			}
 		}
 	}
 
