@@ -105,6 +105,7 @@ func (s *Server) handleAdminIntegrationByName(w http.ResponseWriter, r *http.Req
 
 	// Parse: /api/v1/admin/integrations/{name}[/{action}]
 	path := strings.TrimPrefix(r.URL.Path, "/api/v1/admin/integrations/")
+	path = strings.TrimSuffix(path, "/")
 	parts := strings.SplitN(path, "/", 2)
 	name := parts[0]
 	if name == "" {
@@ -299,6 +300,8 @@ func (s *Server) handleUpdateIntegrationConfig(w http.ResponseWriter, r *http.Re
 	// Reconfigure the running integration with updated config.
 	if err := s.reconfigureIntegration(r.Context(), mgr, name); err != nil {
 		slog.Error("Failed to reconfigure integration after config update", "plugin", name, "error", err)
+		InternalError(w)
+		return
 	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
@@ -456,19 +459,21 @@ func (s *Server) reconfigureIntegration(ctx context.Context, mgr IntegrationMana
 
 	merged := make(map[string]string)
 	if configFile != "" {
-		var inlineCfg map[string]string
-		if pluginCfg != nil {
-			inlineCfg = pluginCfg
-		}
-		fileMerged, err := config.LoadPluginConfigFile(configFile, inlineCfg)
+		fileMerged, err := config.LoadPluginConfigFile(configFile, nil)
 		if err != nil {
 			slog.Error("Failed to reload config file for reconfigure", "plugin", name, "error", err)
-			// Fall through with what we have.
 			for k, v := range pluginCfg {
 				merged[k] = v
 			}
 		} else {
 			merged = fileMerged
+			// Carry over runtime/internal keys from the old config that
+			// are not present in the file (e.g. hub_url, hmac_key).
+			for k, v := range pluginCfg {
+				if _, ok := merged[k]; !ok {
+					merged[k] = v
+				}
+			}
 		}
 	} else {
 		for k, v := range pluginCfg {
