@@ -426,7 +426,7 @@ var seedSkipFiles = map[string]bool{
 // compiled-in api.Harness — it reads config.yaml from the source to discover
 // the harness name and config_dir.
 func SeedHarnessConfigFromDir(targetDir string, sourceFS fs.FS, sourcePath string, force bool) error {
-	configData, err := fs.ReadFile(sourceFS, filepath.Join(sourcePath, "config.yaml"))
+	configData, err := fs.ReadFile(sourceFS, filepath.ToSlash(filepath.Join(sourcePath, "config.yaml")))
 	if err != nil {
 		return fmt.Errorf("failed to read config.yaml from source: %w", err)
 	}
@@ -468,6 +468,7 @@ func SeedHarnessConfigFromDir(targetDir string, sourceFS fs.FS, sourcePath strin
 		if err != nil {
 			return err
 		}
+		relPath = filepath.ToSlash(relPath)
 
 		if relPath == "config.yaml" {
 			return nil
@@ -514,7 +515,7 @@ func SeedAllHarnessConfigsFromEmbed(harnessConfigsDir string, rootFS fs.FS, forc
 // seedFileFromGenericFS reads a file from an fs.FS and writes it to targetPath.
 // Like SeedFileFromFS but works with any fs.FS, not just embed.FS.
 func seedFileFromGenericFS(srcFS fs.FS, basePath, fileName, targetPath string, force, alwaysOverwrite bool) error {
-	data, err := fs.ReadFile(srcFS, filepath.Join(basePath, fileName))
+	data, err := fs.ReadFile(srcFS, filepath.ToSlash(filepath.Join(basePath, fileName)))
 	if err != nil {
 		return nil
 	}

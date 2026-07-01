@@ -256,7 +256,7 @@ func upgradeFromHarnessesFS(absTarget string, plan *HarnessConfigUpgradePlan, ha
 	sourcePath := harnessName
 	configPath := filepath.Join(absTarget, "config.yaml")
 
-	defaultConfigData, err := fs.ReadFile(opts.HarnessesFS, filepath.Join(sourcePath, "config.yaml"))
+	defaultConfigData, err := fs.ReadFile(opts.HarnessesFS, filepath.ToSlash(filepath.Join(sourcePath, "config.yaml")))
 	if err != nil {
 		return upgradeLegacyBuiltinConfig(absTarget, plan, opts)
 	}

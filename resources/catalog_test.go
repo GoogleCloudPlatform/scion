@@ -53,15 +53,11 @@ func TestBuiltinTemplates(t *testing.T) {
 func TestBuiltinHarnessConfigs(t *testing.T) {
 	configs := BuiltinHarnessConfigs()
 
-	expected := map[string]bool{
-		"antigravity": false,
-		"claude":      false,
-		"codex":       false,
-		"copilot":     false,
-		"hermes":      false,
-		"opencode":    false,
+	if len(configs) == 0 {
+		t.Fatal("expected at least 1 harness-config, got 0")
 	}
 
+	seen := make(map[string]bool)
 	for _, cfg := range configs {
 		if cfg.Kind != storage.ResourceKindHarnessConfig {
 			t.Errorf("harness-config %q kind = %q, want %q", cfg.Name, cfg.Kind, storage.ResourceKindHarnessConfig)
@@ -73,21 +69,14 @@ func TestBuiltinHarnessConfigs(t *testing.T) {
 			t.Errorf("harness-config %q scopeID = %q, want empty", cfg.Name, cfg.ScopeID)
 		}
 		assertSourceURL(t, cfg)
-		if _, ok := expected[cfg.Name]; ok {
-			expected[cfg.Name] = true
-		} else {
-			t.Errorf("unexpected harness-config %q", cfg.Name)
+		if seen[cfg.Name] {
+			t.Errorf("duplicate harness-config %q", cfg.Name)
 		}
+		seen[cfg.Name] = true
 	}
 
-	for name, found := range expected {
-		if !found {
-			t.Errorf("expected harness-config %q not found", name)
-		}
-	}
-
-	if len(configs) != 6 {
-		t.Errorf("expected 6 harness-configs, got %d", len(configs))
+	if !seen["claude"] {
+		t.Error("expected harness-config \"claude\" not found")
 	}
 }
 

@@ -34,15 +34,6 @@ type BundledResource struct {
 	Root      string
 }
 
-var harnessConfigNames = []string{
-	"antigravity",
-	"claude",
-	"codex",
-	"copilot",
-	"hermes",
-	"opencode",
-}
-
 func bundledVersion() string {
 	v := version.Version
 	if v == "" {
@@ -75,10 +66,19 @@ func BuiltinTemplates() []BundledResource {
 }
 
 // BuiltinHarnessConfigs returns the bundled harness-config resources.
-// Gemini is excluded — it remains supplied through existing embed-only harness code.
+// Gemini is excluded — it remains supplied through existing embed-only harness code
+// and has no directory in harnesses/.
 func BuiltinHarnessConfigs() []BundledResource {
 	var configs []BundledResource
-	for _, name := range harnessConfigNames {
+	entries, err := fs.ReadDir(harnesses.FS, ".")
+	if err != nil {
+		panic(fmt.Sprintf("resources: read harnesses FS: %v", err))
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		name := e.Name()
 		sub, err := fs.Sub(harnesses.FS, name)
 		if err != nil {
 			panic(fmt.Sprintf("resources: sub harness FS %q: %v", name, err))
