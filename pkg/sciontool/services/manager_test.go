@@ -101,16 +101,17 @@ func TestManager_RestartOnFailure(t *testing.T) {
 		t.Fatalf("Start() error: %v", err)
 	}
 
-	// Wait for the service to fail and be restarted at least once
-	time.Sleep(3 * time.Second)
-
 	mgr.mu.Lock()
 	svc := mgr.services[0]
 	mgr.mu.Unlock()
-	failures := svc.currentFailures()
 
-	if failures == 0 {
-		t.Error("expected at least one restart attempt for on-failure policy")
+	deadline := time.After(10 * time.Second)
+	for svc.currentFailures() == 0 {
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for at least one restart attempt for on-failure policy")
+		case <-time.After(100 * time.Millisecond):
+		}
 	}
 
 	cancel()
@@ -209,14 +210,17 @@ func TestManager_MaxRestarts(t *testing.T) {
 		t.Fatalf("Start() error: %v", err)
 	}
 
-	// Wait for all restart attempts to exhaust (1s + 2s + 4s backoff + some process time)
-	time.Sleep(10 * time.Second)
-
 	mgr.mu.Lock()
 	svc := mgr.services[0]
 	mgr.mu.Unlock()
-	if !svc.isAbandoned() {
-		t.Error("expected service to be abandoned after max restarts")
+
+	deadline := time.After(30 * time.Second)
+	for !svc.isAbandoned() {
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for service to be abandoned after max restarts")
+		case <-time.After(100 * time.Millisecond):
+		}
 	}
 	if f := svc.currentFailures(); f < maxConsecutiveFailures {
 		t.Errorf("expected at least %d failures, got %d", maxConsecutiveFailures, f)
