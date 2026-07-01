@@ -81,7 +81,6 @@ With --global, it initializes in the user's home folder.`,
 			opts := config.InitMachineOpts{
 				ImageRegistry: registryValue,
 				Force:         machineInitForce,
-				HarnessesFS:   harness.HarnessesFS(),
 			}
 			if err := config.InitMachine(embedOnlyHarnesses, opts); err != nil {
 				return fmt.Errorf("failed to initialize global config: %w", err)

@@ -38,7 +38,7 @@ func TestHarnessConfigList(t *testing.T) {
 	t.Setenv("HOME", tmpDir)
 
 	// Seed harness-configs via InitMachine
-	require.NoError(t, config.InitMachine(harness.EmbedOnlyHarnesses(), config.InitMachineOpts{HarnessesFS: harness.HarnessesFS()}))
+	require.NoError(t, config.InitMachine(harness.EmbedOnlyHarnesses()))
 
 	// List harness-configs
 	globalDir, err := config.GetGlobalDir()
@@ -72,7 +72,7 @@ func TestHarnessConfigReset(t *testing.T) {
 	t.Setenv("HOME", tmpDir)
 
 	// Seed harness-configs via InitMachine
-	require.NoError(t, config.InitMachine(harness.EmbedOnlyHarnesses(), config.InitMachineOpts{HarnessesFS: harness.HarnessesFS()}))
+	require.NoError(t, config.InitMachine(harness.EmbedOnlyHarnesses()))
 
 	globalDir, err := config.GetGlobalDir()
 	require.NoError(t, err)

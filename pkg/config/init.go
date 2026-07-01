@@ -542,11 +542,6 @@ type InitMachineOpts struct {
 	// versions embedded in the binary. Use this to refresh after a binary upgrade.
 	Force bool
 
-	// HarnessesFS is the embedded harnesses/ filesystem used to seed
-	// directory-based harness-configs. Kept for backward compatibility with
-	// upgrade code; the primary seeding path now uses MaterializeBundledResources.
-	HarnessesFS fs.FS
-
 	// SelectedHarnessConfigs, when non-nil, restricts harness-config
 	// materialization to only the named configs. Templates are still
 	// materialized unconditionally. An empty non-nil slice skips all
