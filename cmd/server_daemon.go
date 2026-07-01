@@ -186,15 +186,17 @@ func runServerStop(cmd *cobra.Command, args []string) error {
 
 	running, pid, _ := daemon.StatusComponent(serverDaemonComponent, globalDir)
 
+	serverPorts := collectServerPorts(cmd)
+
 	if stopForce {
-		return runServerStopForce(globalDir, running, pid)
+		return runServerStopForce(globalDir, running, pid, serverPorts)
 	}
 
 	if !running {
 		// PID file is missing or stale — probe ports to see if a server is
 		// still listening. This handles the case where the PID file was
 		// deleted while the server was still running.
-		ports := []int{8080, 9800, 9810}
+		ports := serverPorts
 		occupied := daemon.DetectOccupiedPorts(ports)
 		if len(occupied) == 0 {
 			return fmt.Errorf("server daemon is not running")
@@ -250,7 +252,7 @@ func runServerStop(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func runServerStopForce(globalDir string, pidRunning bool, pid int) error {
+func runServerStopForce(globalDir string, pidRunning bool, pid int, serverPorts []int) error {
 	killed := false
 
 	// If PID file exists and process is running, stop it normally first.
@@ -262,8 +264,8 @@ func runServerStopForce(globalDir string, pidRunning bool, pid int) error {
 		}
 	}
 
-	// Probe default server ports and kill any process holding them.
-	ports := []int{8080, 9800, 9810}
+	// Probe server ports and kill any process holding them.
+	ports := serverPorts
 	occupied := daemon.DetectOccupiedPorts(ports)
 	if len(occupied) == 0 && !killed {
 		fmt.Println("No running server found.")
@@ -412,8 +414,8 @@ func runServerStatus(cmd *cobra.Command, args []string) error {
 				Hub    *json.RawMessage `json:"hub,omitempty"`
 			}
 			if json.Unmarshal(body, &health) == nil {
-				status.WebRunning = health.Web != nil || health.Status == "healthy"
-				status.HubRunning = health.Hub != nil || health.Status == "healthy"
+				status.WebRunning = true
+				status.HubRunning = health.Hub != nil
 			}
 		}
 	}
@@ -427,7 +429,7 @@ func runServerStatus(cmd *cobra.Command, args []string) error {
 				var health struct {
 					Status string `json:"status"`
 				}
-				if json.Unmarshal(body, &health) == nil && health.Status == "healthy" {
+				if json.Unmarshal(body, &health) == nil {
 					status.HubRunning = true
 				}
 			}
@@ -442,7 +444,7 @@ func runServerStatus(cmd *cobra.Command, args []string) error {
 			var health struct {
 				Status string `json:"status"`
 			}
-			if json.Unmarshal(body, &health) == nil && health.Status == "healthy" {
+			if json.Unmarshal(body, &health) == nil {
 				status.BrokerRunning = true
 			}
 		}
