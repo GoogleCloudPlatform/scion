@@ -367,7 +367,7 @@ export class ScionPageAdminIntegrations extends LitElement {
         return;
       }
       this.detail = (await res.json()) as IntegrationDetail;
-      this.editedSettings = { ...(this.detail.settings || {}) };
+      this.editedSettings = { ...this.detail.settings };
       this.editedSecrets = {};
     } catch {
       this.error = 'Failed to connect to server';
@@ -434,7 +434,8 @@ export class ScionPageAdminIntegrations extends LitElement {
   }
 
   private navigateTo(path: string): void {
-    this.dispatchEvent(new CustomEvent('nav-click', { detail: { path }, bubbles: true, composed: true }));
+    window.history.pushState({}, '', path);
+    window.dispatchEvent(new PopStateEvent('popstate'));
   }
 
   override render() {
@@ -518,7 +519,7 @@ export class ScionPageAdminIntegrations extends LitElement {
     }
     const d = this.detail;
     return html`
-      <a class="back-link" href="/admin/integrations">
+      <a class="back-link" @click=${(e: Event) => { e.preventDefault(); this.navigateTo('/admin/integrations'); }}>
         <sl-icon name="arrow-left"></sl-icon> Back to Integrations
       </a>
 
@@ -595,26 +596,12 @@ export class ScionPageAdminIntegrations extends LitElement {
               </div>
             `
           : nothing}
-        ${status.details && Object.keys(status.details).length > 0
-          ? html`
-              <div style="margin-top: 0.75rem; padding-top: 0.75rem; border-top: 1px solid var(--scion-border, #e2e8f0);">
-                ${Object.entries(status.details).map(
-                  ([k, v]) => html`
-                    <div class="status-row">
-                      <span class="status-label">${k}</span>
-                      <span style="font-size: 0.8125rem;">${v}</span>
-                    </div>
-                  `
-                )}
-              </div>
-            `
-          : nothing}
       </div>
     `;
   }
 
   private renderConfigSection(d: IntegrationDetail) {
-    const keys = Object.keys(d.settings || {});
+    const keys = Object.keys(d.settings);
     if (keys.length === 0) {
       return html`
         <div class="section">
@@ -634,7 +621,7 @@ export class ScionPageAdminIntegrations extends LitElement {
                 <label>${key}</label>
                 <sl-input
                   value=${this.editedSettings[key] ?? ''}
-                  @sl-change=${(e: Event) => {
+                  @sl-input=${(e: Event) => {
                     this.editedSettings = {
                       ...this.editedSettings,
                       [key]: (e.target as HTMLInputElement).value,
@@ -650,7 +637,7 @@ export class ScionPageAdminIntegrations extends LitElement {
   }
 
   private renderSecretsSection(d: IntegrationDetail) {
-    const secretKeys = Object.keys(d.has_secrets || {});
+    const secretKeys = Object.keys(d.has_secrets);
     if (secretKeys.length === 0) return nothing;
 
     return html`
@@ -670,7 +657,7 @@ export class ScionPageAdminIntegrations extends LitElement {
                 type="password"
                 placeholder=${d.has_secrets[key] ? 'Enter new value to update' : 'Enter value'}
                 value=${this.editedSecrets[key] ?? ''}
-                @sl-change=${(e: Event) => {
+                @sl-input=${(e: Event) => {
                   this.editedSecrets = {
                     ...this.editedSecrets,
                     [key]: (e.target as HTMLInputElement).value,
@@ -728,11 +715,5 @@ export class ScionPageAdminIntegrations extends LitElement {
       default:
         return platform;
     }
-  }
-}
-
-declare global {
-  interface HTMLElementTagNameMap {
-    'scion-page-admin-integrations': ScionPageAdminIntegrations;
   }
 }
