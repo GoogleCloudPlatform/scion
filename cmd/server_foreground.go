@@ -99,7 +99,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 		// In workstation mode, refresh the default template and harness-configs
 		// from the binary's embeds. Hosted mode bootstraps directly into the Hub
 		// via BootstrapBundledResources, bypassing local ~/.scion materialization.
-		if err := config.UpdateDefaultTemplates(true, harness.EmbedOnlyHarnesses(), harness.HarnessesFS()); err != nil {
+		if err := config.UpdateDefaultTemplates(true, harness.EmbedOnlyHarnesses()); err != nil {
 			log.Printf("Warning: failed to refresh default templates: %v", err)
 		}
 	}

@@ -626,7 +626,7 @@ If the default template already exists, a warning is printed and no changes
 are made. Use --force to overwrite the existing default template.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		force, _ := cmd.Flags().GetBool("force")
-		err := config.UpdateDefaultTemplates(force, harness.EmbedOnlyHarnesses(), harness.HarnessesFS())
+		err := config.UpdateDefaultTemplates(force, harness.EmbedOnlyHarnesses())
 		if err != nil {
 			return err
 		}

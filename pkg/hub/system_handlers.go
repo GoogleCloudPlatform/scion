@@ -390,7 +390,7 @@ func (s *Server) handleSystemInit(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	var catalogNames []string
+	catalogNames := []string{}
 	for _, name := range req.Harnesses {
 		if !embedOnlyNames[name] {
 			catalogNames = append(catalogNames, name)

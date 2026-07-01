@@ -18,7 +18,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -465,7 +464,7 @@ func CloneTemplate(srcName, destName string, global bool) error {
 	return nil
 }
 
-func UpdateDefaultTemplates(force bool, harnesses []api.Harness, harnessesFS ...fs.FS) error {
+func UpdateDefaultTemplates(force bool, harnesses []api.Harness) error {
 	globalDir, err := GetGlobalDir()
 	if err != nil {
 		return err
