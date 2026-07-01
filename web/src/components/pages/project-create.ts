@@ -174,7 +174,7 @@ export class ScionPageProjectCreate extends LitElement {
     if (!this.name) {
       const segments = e.detail.path.replace(/\/+$/, '').split('/');
       const derived = segments[segments.length - 1] || '';
-      if (derived) {
+      if (derived && !/^[a-zA-Z]:$/.test(derived)) {
         this.name = derived;
         if (!this.slugManuallyEdited) {
           this.slug = this.slugify(derived);

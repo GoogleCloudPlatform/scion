@@ -1307,7 +1307,10 @@ export class ScionPageOnboarding extends LitElement {
             this.wsLocalPath = e.detail.path;
             if (!this.wsProjectName.trim()) {
               const segments = e.detail.path.replace(/\/+$/, '').split('/');
-              this.wsProjectName = segments[segments.length - 1] || '';
+              const derived = segments[segments.length - 1] || '';
+              if (derived && !/^[a-zA-Z]:$/.test(derived)) {
+                this.wsProjectName = derived;
+              }
             }
             void this.wsValidatePath(e.detail.path);
           }}
