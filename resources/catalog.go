@@ -1,0 +1,102 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package resources
+
+import (
+	"fmt"
+	"io/fs"
+
+	harnesses "github.com/GoogleCloudPlatform/scion/harnesses"
+	"github.com/GoogleCloudPlatform/scion/pkg/storage"
+	"github.com/GoogleCloudPlatform/scion/pkg/version"
+)
+
+// BundledResource describes a built-in resource shipped with the binary.
+type BundledResource struct {
+	Kind      storage.ResourceKind
+	Name      string
+	Scope     string
+	ScopeID   string
+	SourceURL string
+	FS        fs.FS
+	Root      string
+}
+
+var harnessConfigNames = []string{
+	"antigravity",
+	"claude",
+	"codex",
+	"copilot",
+	"hermes",
+	"opencode",
+}
+
+func bundledVersion() string {
+	v := version.Version
+	if v == "" {
+		return "dev"
+	}
+	return v
+}
+
+func sourceURL(kind storage.ResourceKind, name string) string {
+	return fmt.Sprintf("builtin://scion/%s/%s/%s", bundledVersion(), kind, name)
+}
+
+// BuiltinTemplates returns the bundled template resources.
+func BuiltinTemplates() []BundledResource {
+	templateFS, err := fs.Sub(templatesFS, "templates")
+	if err != nil {
+		panic(fmt.Sprintf("resources: sub templates FS: %v", err))
+	}
+	return []BundledResource{
+		{
+			Kind:      storage.ResourceKindTemplate,
+			Name:      "default",
+			Scope:     "global",
+			ScopeID:   "",
+			SourceURL: sourceURL(storage.ResourceKindTemplate, "default"),
+			FS:        templateFS,
+			Root:      "default",
+		},
+	}
+}
+
+// BuiltinHarnessConfigs returns the bundled harness-config resources.
+// Gemini is excluded — it remains supplied through existing embed-only harness code.
+func BuiltinHarnessConfigs() []BundledResource {
+	var configs []BundledResource
+	for _, name := range harnessConfigNames {
+		sub, err := fs.Sub(harnesses.FS, name)
+		if err != nil {
+			panic(fmt.Sprintf("resources: sub harness FS %q: %v", name, err))
+		}
+		configs = append(configs, BundledResource{
+			Kind:      storage.ResourceKindHarnessConfig,
+			Name:      name,
+			Scope:     "global",
+			ScopeID:   "",
+			SourceURL: sourceURL(storage.ResourceKindHarnessConfig, name),
+			FS:        sub,
+			Root:      ".",
+		})
+	}
+	return configs
+}
+
+// BuiltinResources returns all bundled resources (templates + harness-configs).
+func BuiltinResources() []BundledResource {
+	return append(BuiltinTemplates(), BuiltinHarnessConfigs()...)
+}
