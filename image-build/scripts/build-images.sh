@@ -61,7 +61,8 @@ Options:
   --target <target>     Build target (default: common)
                           core-base   - just the core-base layer
                           scion-base  - just scion-base (uses existing core-base:<tag>)
-                          harnesses   - all harness images (uses existing scion-base:<tag>)
+                          harnesses   - all catalog harness images with Dockerfiles
+                                        (uses existing scion-base:<tag>)
                           hub         - just scion-hub (uses existing scion-base:<tag>)
                           common      - scion-base + harnesses + hub (skip core-base)
                           all         - full rebuild including core-base

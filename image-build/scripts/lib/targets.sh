@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Target DAG and step descriptors for the scion image build orchestrator.
+# Target DAG and step descriptors for the Scion image build orchestrator.
 #
 # This file is sourced by build-images.sh. It is the single source of truth
 # for which images exist, which target names expand to which ordered step
@@ -22,15 +22,42 @@
 # Builders never read this file. The orchestrator translates step descriptors
 # into the uniform builder_build call.
 
+discover_harness_names() {
+  local harness_root="${REPO_ROOT}/harnesses"
+  if [[ ! -d "${harness_root}" ]]; then
+    return 0
+  fi
+  find "${harness_root}" -mindepth 2 -maxdepth 2 -name Dockerfile -print \
+    | while IFS= read -r dockerfile; do
+        basename "$(dirname "${dockerfile}")"
+      done \
+    | sort
+}
+
+is_harness_step() {
+  local step="$1"
+  local name="${step#scion-}"
+  [[ "${step}" == scion-* && -f "${REPO_ROOT}/harnesses/${name}/Dockerfile" ]]
+}
+
+emit_harness_steps() {
+  local name
+  discover_harness_names | while IFS= read -r name; do
+    [[ -n "${name}" ]] && echo "scion-${name}"
+  done
+}
+
 # All known step IDs. The step ID is also the published image name
-# (without registry prefix).
+# (without registry prefix). Harness steps are discovered from the root
+# harnesses catalog.
 ALL_STEP_IDS=(
   core-base
   scion-base
-  scion-claude
-  scion-gemini
-  scion-opencode
-  scion-codex
+)
+while IFS= read -r harness_step; do
+  [[ -n "${harness_step}" ]] && ALL_STEP_IDS+=("${harness_step}")
+done < <(emit_harness_steps)
+ALL_STEP_IDS+=(
   scion-hub
 )
 
@@ -58,16 +85,20 @@ resolve_targets() {
       echo scion-base
       ;;
     harnesses)
-      printf '%s\n' scion-claude scion-gemini scion-opencode scion-codex
+      emit_harness_steps
       ;;
     hub)
       echo scion-hub
       ;;
     common)
-      printf '%s\n' scion-base scion-claude scion-gemini scion-opencode scion-codex scion-hub
+      printf '%s\n' scion-base
+      emit_harness_steps
+      printf '%s\n' scion-hub
       ;;
     all)
-      printf '%s\n' core-base scion-base scion-claude scion-gemini scion-opencode scion-codex scion-hub
+      printf '%s\n' core-base scion-base
+      emit_harness_steps
+      printf '%s\n' scion-hub
       ;;
     *)
       return 1
@@ -88,12 +119,14 @@ step_dockerfile() {
   case "$1" in
     core-base)     echo "${IMAGE_BUILD_DIR}/core-base/Dockerfile" ;;
     scion-base)    echo "${IMAGE_BUILD_DIR}/scion-base/Dockerfile" ;;
-    scion-claude)  echo "${IMAGE_BUILD_DIR}/claude/Dockerfile" ;;
-    scion-gemini)  echo "${IMAGE_BUILD_DIR}/gemini/Dockerfile" ;;
-    scion-opencode) echo "${REPO_ROOT}/harnesses/opencode/Dockerfile" ;;
-    scion-codex)   echo "${REPO_ROOT}/harnesses/codex/Dockerfile" ;;
     scion-hub)     echo "${IMAGE_BUILD_DIR}/hub/Dockerfile" ;;
-    *) return 1 ;;
+    *)
+      if is_harness_step "$1"; then
+        echo "${REPO_ROOT}/harnesses/${1#scion-}/Dockerfile"
+      else
+        return 1
+      fi
+      ;;
   esac
 }
 
@@ -106,12 +139,14 @@ step_context_dir() {
   case "$1" in
     core-base)     echo "${IMAGE_BUILD_DIR}/core-base" ;;
     scion-base)    echo "${REPO_ROOT}" ;;
-    scion-claude)  echo "${IMAGE_BUILD_DIR}/claude" ;;
-    scion-gemini)  echo "${IMAGE_BUILD_DIR}/gemini" ;;
-    scion-opencode) echo "${REPO_ROOT}/harnesses/opencode" ;;
-    scion-codex)   echo "${REPO_ROOT}/harnesses/codex" ;;
     scion-hub)     echo "${IMAGE_BUILD_DIR}/hub" ;;
-    *) return 1 ;;
+    *)
+      if is_harness_step "$1"; then
+        echo "${REPO_ROOT}/harnesses/${1#scion-}"
+      else
+        return 1
+      fi
+      ;;
   esac
 }
 
@@ -138,10 +173,16 @@ step_build_args() {
         echo "GIT_COMMIT=${COMMIT_SHA}"
       fi
       ;;
-    scion-claude|scion-gemini|scion-opencode|scion-codex|scion-hub)
+    scion-hub)
       echo "BASE_IMAGE=${prefix}scion-base:${BASE_TAG}"
       ;;
-    *) return 1 ;;
+    *)
+      if is_harness_step "$1"; then
+        echo "BASE_IMAGE=${prefix}scion-base:${BASE_TAG}"
+      else
+        return 1
+      fi
+      ;;
   esac
 }
 
@@ -154,9 +195,13 @@ step_parent() {
   case "$1" in
     core-base)     echo "" ;;
     scion-base)    echo "core-base" ;;
-    scion-claude|scion-gemini|scion-opencode|scion-codex|scion-hub)
-      echo "scion-base"
+    scion-hub)     echo "scion-base" ;;
+    *)
+      if is_harness_step "$1"; then
+        echo "scion-base"
+      else
+        return 1
+      fi
       ;;
-    *) return 1 ;;
   esac
 }

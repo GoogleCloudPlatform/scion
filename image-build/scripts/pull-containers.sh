@@ -27,6 +27,8 @@ set -euo pipefail
 REGISTRY=""
 TAG="latest"
 RUNTIME_ARG=""
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -56,11 +58,13 @@ fi
 REGISTRY="${REGISTRY%/}"
 
 IMAGES=(
-  "${REGISTRY}/scion-claude:${TAG}"
-  "${REGISTRY}/scion-gemini:${TAG}"
-  "${REGISTRY}/scion-opencode:${TAG}"
-  "${REGISTRY}/scion-codex:${TAG}"
+  "${REGISTRY}/scion-base:${TAG}"
+  "${REGISTRY}/scion-hub:${TAG}"
 )
+while IFS= read -r dockerfile; do
+  harness="$(basename "$(dirname "${dockerfile}")")"
+  IMAGES+=("${REGISTRY}/scion-${harness}:${TAG}")
+done < <(find "${REPO_ROOT}/harnesses" -mindepth 2 -maxdepth 2 -name Dockerfile -print | sort)
 
 detect_runtime() {
   if command -v container &>/dev/null && [[ "$(uname)" == "Darwin" ]]; then

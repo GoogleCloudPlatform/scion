@@ -2,24 +2,24 @@
 
 Dockerfiles and build configurations for Scion container images.
 
+`image-build/` is focused on Scion-owned base and server images. Harness-specific
+images are recipes attached to Harness-config bundles under `harnesses/<name>/`.
+The build scripts can still build those harness images for a workstation or a
+private registry, but the catalog is the source of truth for their Dockerfiles.
+
 ## Image Hierarchy
 
 ```
 core-base          System dependencies (Go, Node, Python)
   └── scion-base   Adds sciontool binary and scion user
-        ├── claude         Claude Code harness
-        ├── gemini         Gemini CLI harness
-        ├── opencode       OpenCode harness (bundle-local build)
-        ├── codex          Codex harness (bundle-local build)
-        ├── antigravity    Antigravity harness (bundle-local build)
-        └── hub            Scion hub server
+        ├── harness images  Optional recipes from harnesses/<name>/
+        └── hub             Scion hub server
 ```
 
-The `claude/`, `gemini/`, and `hub/` directories live under `image-build/` and
-each contains a `Dockerfile` that extends `scion-base`. The `opencode`, `codex`,
-and `antigravity` images build from their self-contained bundles under
-`harnesses/<name>/` (each bundle carries its own `Dockerfile` and
-`cloudbuild.yaml`). See [`harnesses/README.md`](../harnesses/README.md).
+`core-base/`, `scion-base/`, and `hub/` live under `image-build/`. Harness images
+build from self-contained bundles under `harnesses/<name>/` when that bundle has
+a `Dockerfile` and `cloudbuild.yaml`. See
+[`harnesses/README.md`](../harnesses/README.md).
 
 ## Scripts
 
@@ -53,9 +53,9 @@ The orchestrator owns target sequencing, tag computation, and BASE_IMAGE threadi
 |---|---|---|
 | `core-base` | `core-base` | Foundation tools layer. |
 | `scion-base` | `scion-base` | Adds sciontool. Uses existing `core-base:<tag>`. |
-| `harnesses` | `scion-claude`, `scion-gemini` (+ opt-in bundle images) | Uses existing `scion-base:<tag>`. Opt-in harness images (opencode, codex, antigravity) build from `harnesses/<name>/`. |
+| `harnesses` | All catalog harness images with `harnesses/<name>/Dockerfile` | Uses existing `scion-base:<tag>`. Builds recipes from the root Harness-config catalog. |
 | `hub` | `scion-hub` | Hub server image. Uses existing `scion-base:<tag>`. |
-| `common` (default) | `scion-base` + harnesses + hub | Skips `core-base`. Most common rebuild. |
+| `common` (default) | `scion-base` + catalog harnesses + hub | Skips `core-base`. Most common rebuild. |
 | `all` | Full DAG | Rebuilds everything from `core-base`. |
 
 ### Tagging
@@ -67,7 +67,8 @@ When two steps in the same run depend on each other, the orchestrator threads `B
 ### Quick Start: Build Your Own Images
 
 ```bash
-# Build locally without ever pushing — bare tags (scion-claude:latest, etc.)
+# Build locally without ever pushing — bare tags (scion-base:latest,
+# scion-claude:latest, etc.)
 # land in your local engine's image store. Default builder: local-docker.
 image-build/scripts/build-images.sh --target all
 
@@ -126,6 +127,12 @@ The `cloud-build` builder maps each `--target` to a static YAML file:
 | `hub` | `cloudbuild-hub.yaml` |
 
 These YAMLs reference `$_TAG`, `$_SHORT_SHA`, `$_COMMIT_SHA`, and `$_REGISTRY` substitutions, all forwarded by the orchestrator.
+
+The aggregate `cloudbuild-harnesses.yaml`, `cloudbuild-common.yaml`, and
+`cloudbuild.yaml` files are static snapshots of the current catalog. When adding
+or removing a harness Dockerfile under `harnesses/<name>/`, update those
+aggregate YAMLs too. Individual harness bundles can also carry their own
+`harnesses/<name>/cloudbuild.yaml` for one-off builds.
 
 ## Authentication
 

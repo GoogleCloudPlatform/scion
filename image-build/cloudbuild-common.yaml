@@ -12,18 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Cloud Build configuration for rebuilding scion-base + all harnesses
-# This is the most common rebuild: updates sciontool/config then rebuilds harnesses
-# Skips core-base (uses existing core-base:<_TAG>)
-# Pipeline: scion-base -> all harnesses (using freshly built scion-base)
+# Common rebuild: scion-base, catalog harness images, and scion-hub.
+# Skips core-base and uses existing core-base:<_TAG>.
 steps:
-  # Pre-flight: verify push access to catch permission errors early
   - name: 'gcr.io/cloud-builders/gcloud'
     id: 'verify-registry'
     entrypoint: 'bash'
     args: ['image-build/scripts/verify-registry.sh', '$_REGISTRY']
 
-  # Enable multi-arch builds
   - name: 'gcr.io/cloud-builders/docker'
     id: 'setup-buildx'
     args: ['buildx', 'create', '--name', 'mybuilder', '--use']
@@ -36,142 +32,58 @@ steps:
     env:
       - 'DOCKER_CLI_EXPERIMENTAL=enabled'
 
-  # 1. Build and push scion-base image (uses existing core-base:<_TAG>)
   - name: 'gcr.io/cloud-builders/docker'
     id: 'build-scion-base'
-    args:
-      - 'buildx'
-      - 'build'
-      - '--platform'
-      - 'linux/amd64,linux/arm64'
-      - '--build-arg'
-      - 'BASE_IMAGE=$_REGISTRY/core-base:$_TAG'
-      - '--build-arg'
-      - 'GIT_COMMIT=$_COMMIT_SHA'
-      - '-t'
-      - '$_REGISTRY/scion-base:$_SHORT_SHA'
-      - '-t'
-      - '$_REGISTRY/scion-base:$_TAG'
-      - '-f'
-      - 'image-build/scion-base/Dockerfile'
-      - '--pull'
-      - '--push'
-      - '.'
+    args: ['buildx', 'build', '--platform', 'linux/amd64,linux/arm64', '--build-arg', 'BASE_IMAGE=$_REGISTRY/core-base:$_TAG', '--build-arg', 'GIT_COMMIT=$_COMMIT_SHA', '-t', '$_REGISTRY/scion-base:$_SHORT_SHA', '-t', '$_REGISTRY/scion-base:$_TAG', '-f', 'image-build/scion-base/Dockerfile', '--pull', '--push', '.']
     env:
       - 'DOCKER_CLI_EXPERIMENTAL=enabled'
 
-  # 2. Build Gemini Harness Image
   - name: 'gcr.io/cloud-builders/docker'
-    id: 'build-scion-gemini'
-    dir: 'image-build/gemini'
-    args:
-      - 'buildx'
-      - 'build'
-      - '--platform'
-      - 'linux/amd64,linux/arm64'
-      - '--build-arg'
-      - 'BASE_IMAGE=$_REGISTRY/scion-base:$_SHORT_SHA'
-      - '-t'
-      - '$_REGISTRY/scion-gemini:$_SHORT_SHA'
-      - '-t'
-      - '$_REGISTRY/scion-gemini:$_TAG'
-      - '-f'
-      - 'Dockerfile'
-      - '--pull'
-      - '--push'
-      - '.'
+    id: 'build-scion-antigravity'
+    dir: 'harnesses/antigravity'
+    args: ['buildx', 'build', '--platform', 'linux/amd64,linux/arm64', '--build-arg', 'BASE_IMAGE=$_REGISTRY/scion-base:$_SHORT_SHA', '-t', '$_REGISTRY/scion-antigravity:$_SHORT_SHA', '-t', '$_REGISTRY/scion-antigravity:$_TAG', '-f', 'Dockerfile', '--pull', '--push', '.']
     env:
       - 'DOCKER_CLI_EXPERIMENTAL=enabled'
 
-  # 3. Build Claude Harness Image
   - name: 'gcr.io/cloud-builders/docker'
     id: 'build-scion-claude'
-    dir: 'image-build/claude'
-    args:
-      - 'buildx'
-      - 'build'
-      - '--platform'
-      - 'linux/amd64,linux/arm64'
-      - '--build-arg'
-      - 'BASE_IMAGE=$_REGISTRY/scion-base:$_SHORT_SHA'
-      - '-t'
-      - '$_REGISTRY/scion-claude:$_SHORT_SHA'
-      - '-t'
-      - '$_REGISTRY/scion-claude:$_TAG'
-      - '-f'
-      - 'Dockerfile'
-      - '--pull'
-      - '--push'
-      - '.'
+    dir: 'harnesses/claude'
+    args: ['buildx', 'build', '--platform', 'linux/amd64,linux/arm64', '--build-arg', 'BASE_IMAGE=$_REGISTRY/scion-base:$_SHORT_SHA', '-t', '$_REGISTRY/scion-claude:$_SHORT_SHA', '-t', '$_REGISTRY/scion-claude:$_TAG', '-f', 'Dockerfile', '--pull', '--push', '.']
     env:
       - 'DOCKER_CLI_EXPERIMENTAL=enabled'
 
-  # 4. Build OpenCode Harness Image
-  - name: 'gcr.io/cloud-builders/docker'
-    id: 'build-scion-opencode'
-    dir: 'image-build/opencode'
-    args:
-      - 'buildx'
-      - 'build'
-      - '--platform'
-      - 'linux/amd64,linux/arm64'
-      - '--build-arg'
-      - 'BASE_IMAGE=$_REGISTRY/scion-base:$_SHORT_SHA'
-      - '-t'
-      - '$_REGISTRY/scion-opencode:$_SHORT_SHA'
-      - '-t'
-      - '$_REGISTRY/scion-opencode:$_TAG'
-      - '-f'
-      - 'Dockerfile'
-      - '--pull'
-      - '--push'
-      - '.'
-    env:
-      - 'DOCKER_CLI_EXPERIMENTAL=enabled'
-
-  # 5. Build Codex Harness Image
   - name: 'gcr.io/cloud-builders/docker'
     id: 'build-scion-codex'
-    dir: 'image-build/codex'
-    args:
-      - 'buildx'
-      - 'build'
-      - '--platform'
-      - 'linux/amd64,linux/arm64'
-      - '--build-arg'
-      - 'BASE_IMAGE=$_REGISTRY/scion-base:$_SHORT_SHA'
-      - '-t'
-      - '$_REGISTRY/scion-codex:$_SHORT_SHA'
-      - '-t'
-      - '$_REGISTRY/scion-codex:$_TAG'
-      - '-f'
-      - 'Dockerfile'
-      - '--pull'
-      - '--push'
-      - '.'
+    dir: 'harnesses/codex'
+    args: ['buildx', 'build', '--platform', 'linux/amd64,linux/arm64', '--build-arg', 'BASE_IMAGE=$_REGISTRY/scion-base:$_SHORT_SHA', '-t', '$_REGISTRY/scion-codex:$_SHORT_SHA', '-t', '$_REGISTRY/scion-codex:$_TAG', '-f', 'Dockerfile', '--pull', '--push', '.']
     env:
       - 'DOCKER_CLI_EXPERIMENTAL=enabled'
 
-  # 6. Build Hub Image
+  - name: 'gcr.io/cloud-builders/docker'
+    id: 'build-scion-copilot'
+    dir: 'harnesses/copilot'
+    args: ['buildx', 'build', '--platform', 'linux/amd64,linux/arm64', '--build-arg', 'BASE_IMAGE=$_REGISTRY/scion-base:$_SHORT_SHA', '-t', '$_REGISTRY/scion-copilot:$_SHORT_SHA', '-t', '$_REGISTRY/scion-copilot:$_TAG', '-f', 'Dockerfile', '--pull', '--push', '.']
+    env:
+      - 'DOCKER_CLI_EXPERIMENTAL=enabled'
+
+  - name: 'gcr.io/cloud-builders/docker'
+    id: 'build-scion-hermes'
+    dir: 'harnesses/hermes'
+    args: ['buildx', 'build', '--platform', 'linux/amd64,linux/arm64', '--build-arg', 'BASE_IMAGE=$_REGISTRY/scion-base:$_SHORT_SHA', '-t', '$_REGISTRY/scion-hermes:$_SHORT_SHA', '-t', '$_REGISTRY/scion-hermes:$_TAG', '-f', 'Dockerfile', '--pull', '--push', '.']
+    env:
+      - 'DOCKER_CLI_EXPERIMENTAL=enabled'
+
+  - name: 'gcr.io/cloud-builders/docker'
+    id: 'build-scion-opencode'
+    dir: 'harnesses/opencode'
+    args: ['buildx', 'build', '--platform', 'linux/amd64,linux/arm64', '--build-arg', 'BASE_IMAGE=$_REGISTRY/scion-base:$_SHORT_SHA', '-t', '$_REGISTRY/scion-opencode:$_SHORT_SHA', '-t', '$_REGISTRY/scion-opencode:$_TAG', '-f', 'Dockerfile', '--pull', '--push', '.']
+    env:
+      - 'DOCKER_CLI_EXPERIMENTAL=enabled'
+
   - name: 'gcr.io/cloud-builders/docker'
     id: 'build-scion-hub'
     dir: 'image-build/hub'
-    args:
-      - 'buildx'
-      - 'build'
-      - '--platform'
-      - 'linux/amd64,linux/arm64'
-      - '--build-arg'
-      - 'BASE_IMAGE=$_REGISTRY/scion-base:$_SHORT_SHA'
-      - '-t'
-      - '$_REGISTRY/scion-hub:$_SHORT_SHA'
-      - '-t'
-      - '$_REGISTRY/scion-hub:$_TAG'
-      - '-f'
-      - 'Dockerfile'
-      - '--pull'
-      - '--push'
-      - '.'
+    args: ['buildx', 'build', '--platform', 'linux/amd64,linux/arm64', '--build-arg', 'BASE_IMAGE=$_REGISTRY/scion-base:$_SHORT_SHA', '-t', '$_REGISTRY/scion-hub:$_SHORT_SHA', '-t', '$_REGISTRY/scion-hub:$_TAG', '-f', 'Dockerfile', '--pull', '--push', '.']
     env:
       - 'DOCKER_CLI_EXPERIMENTAL=enabled'
 
@@ -181,4 +93,4 @@ substitutions:
 options:
   dynamicSubstitutions: true
   machineType: 'E2_HIGHCPU_8'
-timeout: 3600s # 1 hour - scion-base + all harnesses
+timeout: 3600s
