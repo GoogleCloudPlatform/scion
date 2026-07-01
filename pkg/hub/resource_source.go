@@ -125,8 +125,9 @@ func (s *FSResourceSource) Files(ctx context.Context) ([]transfer.FileInfo, erro
 		if root != "." && root != "" {
 			relPath = strings.TrimPrefix(path, root+"/")
 		}
+		relPath = filepath.ToSlash(relPath)
 
-		data, readErr := fs.ReadFile(fsys, path)
+		data, readErr := fs.ReadFile(fsys, filepath.ToSlash(path))
 		if readErr != nil {
 			return readErr
 		}
@@ -182,6 +183,7 @@ func stageResourceSource(src ResourceSource) (dir string, cleanup func(), err er
 		if root != "." && root != "" {
 			relPath = strings.TrimPrefix(path, root+"/")
 		}
+		relPath = filepath.ToSlash(relPath)
 		if relPath == "" || relPath == root {
 			return nil
 		}
@@ -191,7 +193,7 @@ func stageResourceSource(src ResourceSource) (dir string, cleanup func(), err er
 			return os.MkdirAll(target, 0755)
 		}
 
-		data, readErr := fs.ReadFile(fsys, path)
+		data, readErr := fs.ReadFile(fsys, filepath.ToSlash(path))
 		if readErr != nil {
 			return readErr
 		}
