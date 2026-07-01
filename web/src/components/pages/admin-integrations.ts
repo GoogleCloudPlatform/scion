@@ -596,6 +596,20 @@ export class ScionPageAdminIntegrations extends LitElement {
               </div>
             `
           : nothing}
+        ${status.details && Object.keys(status.details).length > 0
+          ? html`
+              <div style="margin-top: 0.75rem; padding-top: 0.75rem; border-top: 1px solid var(--scion-border, #e2e8f0);">
+                ${Object.entries(status.details).map(
+                  ([k, v]) => html`
+                    <div class="status-row">
+                      <span class="status-label">${k}</span>
+                      <span style="font-size: 0.8125rem;">${v}</span>
+                    </div>
+                  `
+                )}
+              </div>
+            `
+          : nothing}
       </div>
     `;
   }
@@ -715,5 +729,11 @@ export class ScionPageAdminIntegrations extends LitElement {
       default:
         return platform;
     }
+  }
+}
+
+declare global {
+  interface HTMLElementTagNameMap {
+    'scion-page-admin-integrations': ScionPageAdminIntegrations;
   }
 }
