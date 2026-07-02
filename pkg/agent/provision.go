@@ -924,9 +924,6 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 				}
 			}
 			if content != nil {
-				// Conditionally append extra instruction fragments before injection
-				content = appendExtraInstructions(ctx, content, isGit, settings)
-
 				// Append workspace skill content for harnesses without native skill support
 				if len(wsInjectedContent) > 0 {
 					content = append(content, wsInjectedContent...)
@@ -978,7 +975,9 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 		// No template chain, but inline config may have content fields
 		if finalScionCfg.AgentInstructions != "" {
 			content := []byte(finalScionCfg.AgentInstructions)
-			content = appendExtraInstructions(ctx, content, isGit, settings)
+			if len(wsInjectedContent) > 0 {
+				content = append(content, wsInjectedContent...)
+			}
 			util.Debugf("ProvisionAgent: injecting inline agent_instructions (%d bytes, no template)", len(content))
 			if err := h.InjectAgentInstructions(agentHome, content); err != nil {
 				return "", "", nil, fmt.Errorf("failed to inject agent instructions: %w", err)
@@ -1183,28 +1182,6 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 
 	util.Debugf("provision: total ProvisionAgent completed in %s", time.Since(provisionStart))
 	return agentHome, agentWorkspace, finalScionCfg, nil
-}
-
-// appendExtraInstructions conditionally appends agents-git.md and/or
-// agents-hub.md content from the embedded default template to the base
-// agent instructions. This runs before harness-specific injection.
-func appendExtraInstructions(ctx context.Context, content []byte, isGit bool, settings *config.VersionedSettings) []byte {
-	if isGit {
-		if extra, err := config.EmbedsFS.ReadFile("embeds/templates/default/agents-git.md"); err == nil && len(extra) > 0 {
-			util.Debugf("ProvisionAgent: appending agents-git.md (%d bytes)", len(extra))
-			content = append(content, '\n')
-			content = append(content, extra...)
-		}
-	}
-	hubEnabled := (settings != nil && settings.IsHubEnabled()) || api.IsBrokerModeFromContext(ctx)
-	if hubEnabled {
-		if extra, err := config.EmbedsFS.ReadFile("embeds/templates/default/agents-hub.md"); err == nil && len(extra) > 0 {
-			util.Debugf("ProvisionAgent: appending agents-hub.md (%d bytes)", len(extra))
-			content = append(content, '\n')
-			content = append(content, extra...)
-		}
-	}
-	return content
 }
 
 // skillFrontmatter holds parsed YAML frontmatter from SKILL.md files.
