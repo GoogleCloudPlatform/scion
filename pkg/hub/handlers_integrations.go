@@ -99,6 +99,9 @@ var knownPluginSet = func() map[string]bool {
 	return s
 }()
 
+// settingsWriteMu guards concurrent writes to settings.yaml.
+var settingsWriteMu sync.Mutex
+
 // pluginBuildMu guards concurrent build operations per plugin name.
 var pluginBuildMu sync.Map
 
@@ -491,10 +494,17 @@ func (s *Server) handleInstallIntegration(w http.ResponseWriter, r *http.Request
 	configFilePath := "~/.scion/scion-" + name + ".yaml"
 	if err := config.CreatePluginConfigFile(name, configFilePath); err != nil {
 		slog.Error("Failed to create plugin config file", "plugin", name, "error", err)
+		InternalError(w)
+		return
 	}
 
-	if err := config.AddPluginToSettings(name, configFilePath); err != nil {
+	settingsWriteMu.Lock()
+	err = config.AddPluginToSettings(name, configFilePath)
+	settingsWriteMu.Unlock()
+	if err != nil {
 		slog.Error("Failed to add plugin to settings.yaml", "plugin", name, "error", err)
+		InternalError(w)
+		return
 	}
 
 	if err := s.reconfigureIntegration(r.Context(), mgr, name); err != nil {
@@ -643,6 +653,7 @@ func getIntegrationStatus(mgr IntegrationManager, name string) *IntegrationStatu
 // non-nil *sync.Mutex if acquired, nil if another build is already in progress.
 func acquirePluginBuildLock(name string) *sync.Mutex {
 	mu := &sync.Mutex{}
+	mu.Lock()
 	actual, loaded := pluginBuildMu.LoadOrStore(name, mu)
 	if loaded {
 		existing := actual.(*sync.Mutex)
@@ -651,7 +662,6 @@ func acquirePluginBuildLock(name string) *sync.Mutex {
 		}
 		return existing
 	}
-	mu.Lock()
 	return mu
 }
 

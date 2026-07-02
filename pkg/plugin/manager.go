@@ -515,24 +515,30 @@ func (m *Manager) UpdatePlugin(name string, repoPath string) error {
 	}
 
 	binaryPath := dp.Path
+	tmpBinaryPath := binaryPath + ".tmp"
 
 	m.logger.Info("Building plugin from source",
 		"name", name, "source", sourceDir, "binary", binaryPath)
 
-	buildCmd := exec.Command("go", "build", "-o", binaryPath, "./cmd/scion-plugin-"+name)
+	buildCmd := exec.Command("go", "build", "-o", tmpBinaryPath, "./cmd/scion-plugin-"+name)
 	buildCmd.Dir = sourceDir
 	if output, err := buildCmd.CombinedOutput(); err != nil {
+		os.Remove(tmpBinaryPath)
 		return fmt.Errorf("go build failed for plugin %q: %w\n%s", name, err, string(output))
 	}
+	defer os.Remove(tmpBinaryPath)
 
-	// Hold the write lock across kill+reload so Get() callers cannot see
-	// a dead client reference between the two operations.
 	m.mu.Lock()
 	if client, hasClient := m.clients[key]; hasClient {
 		delete(m.dispensed, key)
+		delete(m.clients, key)
 		client.Kill()
 	}
 	m.mu.Unlock()
+
+	if err := os.Rename(tmpBinaryPath, binaryPath); err != nil {
+		return fmt.Errorf("failed to move new binary into place for plugin %q: %w", name, err)
+	}
 
 	return m.loadPlugin(dp)
 }

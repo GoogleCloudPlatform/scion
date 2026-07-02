@@ -220,19 +220,24 @@ func (f *FanOutEventBus) ReplaceSpoke(name string, newBus NamedEventBus) error {
 		return fmt.Errorf("cannot replace the %q spoke", InProcessBusName)
 	}
 
+	var oldBus EventBus
 	f.mu.Lock()
-	defer f.mu.Unlock()
-
 	for i, nb := range f.buses {
 		if nb.Name == name {
-			if err := nb.Bus.Close(); err != nil {
-				f.log.Error("failed to close old spoke during replace", "bus", name, "error", err)
-			}
+			oldBus = nb.Bus
 			f.buses[i] = newBus
-			return nil
+			break
 		}
 	}
-	return fmt.Errorf("spoke %q not found", name)
+	f.mu.Unlock()
+
+	if oldBus == nil {
+		return fmt.Errorf("spoke %q not found", name)
+	}
+	if err := oldBus.Close(); err != nil {
+		f.log.Error("failed to close old spoke during replace", "bus", name, "error", err)
+	}
+	return nil
 }
 
 // RemoveSpoke removes a spoke by name and closes it.
@@ -241,19 +246,24 @@ func (f *FanOutEventBus) RemoveSpoke(name string) error {
 		return fmt.Errorf("cannot remove the %q spoke", InProcessBusName)
 	}
 
+	var oldBus EventBus
 	f.mu.Lock()
-	defer f.mu.Unlock()
-
 	for i, nb := range f.buses {
 		if nb.Name == name {
-			if err := nb.Bus.Close(); err != nil {
-				f.log.Error("failed to close spoke during remove", "bus", name, "error", err)
-			}
+			oldBus = nb.Bus
 			f.buses = append(f.buses[:i], f.buses[i+1:]...)
-			return nil
+			break
 		}
 	}
-	return fmt.Errorf("spoke %q not found", name)
+	f.mu.Unlock()
+
+	if oldBus == nil {
+		return fmt.Errorf("spoke %q not found", name)
+	}
+	if err := oldBus.Close(); err != nil {
+		f.log.Error("failed to close spoke during remove", "bus", name, "error", err)
+	}
+	return nil
 }
 
 // fanOutSubscription aggregates subscriptions from all child event buses.
