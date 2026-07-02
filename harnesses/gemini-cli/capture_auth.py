@@ -55,11 +55,11 @@ def _load_config(bundle: str) -> list[dict[str, Any]]:
     config_path = os.path.join(bundle, "inputs", "capture-auth-config.json")
     if not os.path.isfile(config_path):
         return []
-    with open(config_path, "r", encoding="utf-8") as f:
-        try:
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
             data = json.load(f)
-        except (json.JSONDecodeError, OSError):
-            return []
+    except (json.JSONDecodeError, OSError):
+        return []
     creds = data.get("credentials")
     if not isinstance(creds, list):
         return []

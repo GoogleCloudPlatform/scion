@@ -51,14 +51,8 @@ from typing import Any
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-try:
-    import scion_harness  # type: ignore[import-not-found]
-except ImportError:
-    scion_harness = None  # type: ignore[assignment]
-
 GEMINI_SETTINGS_FILE = "~/.gemini/settings.json"
 GEMINI_OAUTH_CREDS_FILE = "~/.gemini/oauth_creds.json"
-ADC_FILE = "~/.config/gcloud/application_default_credentials.json"
 
 VALID_AUTH_TYPES = ("api-key", "auth-file", "vertex-ai")
 
@@ -121,19 +115,6 @@ def _env_secret_files(candidates: dict[str, Any]) -> dict[str, str]:
     return {str(k): str(v) for k, v in raw.items() if isinstance(k, str) and isinstance(v, str)}
 
 
-def _read_secret(secret_files: dict[str, str], env_name: str) -> str:
-    """Read the secret value from a staged secret file."""
-    path = secret_files.get(env_name, "")
-    if not path:
-        return ""
-    expanded = _expand(path)
-    try:
-        with open(expanded, "r", encoding="utf-8") as f:
-            return f.read().strip()
-    except OSError:
-        return ""
-
-
 def _auth_file_present(file_paths: list[str], target: str) -> bool:
     """Return True if the auth file is mounted or already on disk."""
     if any(_expand(p) == _expand(target) for p in file_paths):
@@ -155,8 +136,6 @@ def _select_auth_method(
     has_google_key = "GOOGLE_API_KEY" in env_keys
     has_authfile = _auth_file_present(file_paths, GEMINI_OAUTH_CREDS_FILE)
     has_gcp_project = "GOOGLE_CLOUD_PROJECT" in env_keys
-    has_gcp_region = "GOOGLE_CLOUD_REGION" in env_keys
-
     if explicit:
         if explicit not in VALID_AUTH_TYPES:
             raise ValueError(
