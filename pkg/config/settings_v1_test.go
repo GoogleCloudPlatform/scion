@@ -3239,16 +3239,16 @@ func TestRewriteImageRegistry(t *testing.T) {
 		want        string
 	}{
 		{
-			name:        "rewrite scion image",
+			name:        "fully qualified scion image preserved",
 			fullImage:   "us-central1-docker.pkg.dev/example-project/scion-images/scion-claude:latest",
 			newRegistry: "ghcr.io/myorg",
-			want:        "ghcr.io/myorg/scion-claude:latest",
+			want:        "us-central1-docker.pkg.dev/example-project/scion-images/scion-claude:latest",
 		},
 		{
-			name:        "rewrite with trailing slash",
+			name:        "fully qualified scion image preserved with trailing slash",
 			fullImage:   "us-central1-docker.pkg.dev/example-project/scion-images/scion-gemini:latest",
 			newRegistry: "ghcr.io/myorg/",
-			want:        "ghcr.io/myorg/scion-gemini:latest",
+			want:        "us-central1-docker.pkg.dev/example-project/scion-images/scion-gemini:latest",
 		},
 		{
 			name:        "do not rewrite non-scion image",
@@ -3275,16 +3275,16 @@ func TestRewriteImageRegistry(t *testing.T) {
 			want:        "",
 		},
 		{
-			name:        "scion-base image is rewritten",
+			name:        "fully qualified scion-base image preserved",
 			fullImage:   "us-central1-docker.pkg.dev/example-project/scion-images/scion-base:v2",
 			newRegistry: "docker.io/myuser",
-			want:        "docker.io/myuser/scion-base:v2",
+			want:        "us-central1-docker.pkg.dev/example-project/scion-images/scion-base:v2",
 		},
 		{
-			name:        "preserves tag",
+			name:        "fully qualified preserves tag",
 			fullImage:   "us-central1-docker.pkg.dev/example-project/scion-images/scion-opencode:sha-abc123",
 			newRegistry: "ghcr.io/myorg",
-			want:        "ghcr.io/myorg/scion-opencode:sha-abc123",
+			want:        "us-central1-docker.pkg.dev/example-project/scion-images/scion-opencode:sha-abc123",
 		},
 		{
 			name:        "bare image name (no registry prefix)",
@@ -3297,6 +3297,24 @@ func TestRewriteImageRegistry(t *testing.T) {
 			fullImage:   "scion-gemini:latest",
 			newRegistry: "",
 			want:        "scion-gemini:latest",
+		},
+		{
+			name:        "explicit registry preserved",
+			fullImage:   "ghcr.io/myorg/scion-elixir:latest",
+			newRegistry: "docker.io/other",
+			want:        "ghcr.io/myorg/scion-elixir:latest",
+		},
+		{
+			name:        "port-based registry preserved",
+			fullImage:   "localhost:5000/scion-test:latest",
+			newRegistry: "ghcr.io/myorg",
+			want:        "localhost:5000/scion-test:latest",
+		},
+		{
+			name:        "docker hub path rewritten",
+			fullImage:   "myuser/scion-custom:latest",
+			newRegistry: "ghcr.io/myorg",
+			want:        "ghcr.io/myorg/scion-custom:latest",
 		},
 	}
 

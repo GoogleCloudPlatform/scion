@@ -210,6 +210,17 @@ func RewriteImageRegistry(fullImage, newRegistry string) string {
 		return fullImage
 	}
 
+	// If the image already has an explicit registry hostname
+	// (first path component contains "." or ":"), don't rewrite it.
+	// A fully qualified reference like ghcr.io/org/scion-foo:v1
+	// means the author chose that registry deliberately.
+	if firstSlash := strings.Index(fullImage, "/"); firstSlash >= 0 {
+		firstComponent := fullImage[:firstSlash]
+		if strings.ContainsAny(firstComponent, ".:") {
+			return fullImage
+		}
+	}
+
 	// Strip trailing slash from registry
 	registry := strings.TrimRight(newRegistry, "/")
 	return registry + "/" + basename
