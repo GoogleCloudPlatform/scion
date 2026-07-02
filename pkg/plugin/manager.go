@@ -500,7 +500,6 @@ func (m *Manager) UpdatePlugin(name string, repoPath string) error {
 	m.mu.RLock()
 	dp, ok := m.configs[key]
 	isSelf := m.selfManaged[key]
-	client, hasClient := m.clients[key]
 	m.mu.RUnlock()
 
 	if !ok {
@@ -526,9 +525,14 @@ func (m *Manager) UpdatePlugin(name string, repoPath string) error {
 		return fmt.Errorf("go build failed for plugin %q: %w\n%s", name, err, string(output))
 	}
 
-	if hasClient {
+	// Hold the write lock across kill+reload so Get() callers cannot see
+	// a dead client reference between the two operations.
+	m.mu.Lock()
+	if client, hasClient := m.clients[key]; hasClient {
+		delete(m.dispensed, key)
 		client.Kill()
 	}
+	m.mu.Unlock()
 
 	return m.loadPlugin(dp)
 }

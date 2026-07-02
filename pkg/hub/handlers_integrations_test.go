@@ -16,8 +16,11 @@ package hub
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -31,8 +34,12 @@ type mockIntegrationManager struct {
 	infoErr        error
 	configureErr   error
 	reconnectErr   error
+	updateErr      error
+	installErr     error
 	configureCalls []string
 	reconnectCalls []string
+	updateCalls    []string
+	installCalls   []string
 }
 
 func newMockIntegrationManager() *mockIntegrationManager {
@@ -105,10 +112,16 @@ func (m *mockIntegrationManager) BrokerInfo(name string) (string, string, []stri
 }
 
 func (m *mockIntegrationManager) UpdatePlugin(name string, repoPath string) error {
-	return nil
+	m.updateCalls = append(m.updateCalls, name)
+	return m.updateErr
 }
 
 func (m *mockIntegrationManager) InstallPlugin(name, repoPath, pluginsDir string) error {
+	m.installCalls = append(m.installCalls, name)
+	if m.installErr != nil {
+		return m.installErr
+	}
+	m.plugins[name] = map[string]string{}
 	return nil
 }
 
@@ -633,5 +646,228 @@ func TestIntegrationByName_UnknownAction(t *testing.T) {
 
 	if rr.Code != http.StatusNotFound {
 		t.Fatalf("expected 404, got %d", rr.Code)
+	}
+}
+
+// --- Update endpoint ---
+
+func TestUpdateIntegration_SelfManaged(t *testing.T) {
+	mgr := newMockIntegrationManager()
+	mgr.plugins["telegram"] = map[string]string{}
+	mgr.selfManaged["telegram"] = true
+
+	srv := &Server{}
+	srv.pluginManager = mgr
+
+	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/integrations/telegram/update", nil)
+	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	rr := httptest.NewRecorder()
+	srv.handleAdminIntegrationByName(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for self-managed, got %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestUpdateIntegration_NotFound(t *testing.T) {
+	mgr := newMockIntegrationManager()
+	srv := &Server{}
+	srv.pluginManager = mgr
+
+	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/integrations/nonexistent/update", nil)
+	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	rr := httptest.NewRecorder()
+	srv.handleAdminIntegrationByName(rr, req)
+
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", rr.Code)
+	}
+}
+
+func TestUpdateIntegration_NoRepoPath(t *testing.T) {
+	mgr := newMockIntegrationManager()
+	mgr.plugins["telegram"] = map[string]string{}
+
+	srv := &Server{}
+	srv.pluginManager = mgr
+
+	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/integrations/telegram/update", nil)
+	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	rr := httptest.NewRecorder()
+	srv.handleAdminIntegrationByName(rr, req)
+
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500 (no repo path), got %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestUpdateIntegration_BuildError(t *testing.T) {
+	mgr := newMockIntegrationManager()
+	mgr.plugins["telegram"] = map[string]string{}
+	mgr.updateErr = fmt.Errorf("go build failed: exit status 1")
+
+	srv := &Server{}
+	srv.config.MaintenanceConfig.RepoPath = "/some/repo"
+	srv.pluginManager = mgr
+
+	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/integrations/telegram/update", nil)
+	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	rr := httptest.NewRecorder()
+	srv.handleAdminIntegrationByName(rr, req)
+
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d: %s", rr.Code, rr.Body.String())
+	}
+	// Error body should NOT contain raw error details
+	if strings.Contains(rr.Body.String(), "go build failed") {
+		t.Error("response should not leak internal error details")
+	}
+}
+
+// --- Install endpoint ---
+
+func TestInstallIntegration_NilPluginManager(t *testing.T) {
+	srv := &Server{}
+
+	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/integrations/telegram/install", nil)
+	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	rr := httptest.NewRecorder()
+	srv.handleAdminIntegrationByName(rr, req)
+
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500 for nil plugin manager, got %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestInstallIntegration_AlreadyInstalled(t *testing.T) {
+	mgr := newMockIntegrationManager()
+	mgr.plugins["telegram"] = map[string]string{}
+
+	srv := &Server{}
+	srv.pluginManager = mgr
+
+	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/integrations/telegram/install", nil)
+	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	rr := httptest.NewRecorder()
+	srv.handleAdminIntegrationByName(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for already-installed, got %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestInstallIntegration_UnknownPlugin(t *testing.T) {
+	mgr := newMockIntegrationManager()
+
+	srv := &Server{}
+	srv.pluginManager = mgr
+
+	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/integrations/evil-plugin/install", nil)
+	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	rr := httptest.NewRecorder()
+	srv.handleAdminIntegrationByName(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for unknown plugin, got %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
+// --- Available integrations endpoint ---
+
+func TestListAvailableIntegrations_NoRepoPath(t *testing.T) {
+	srv := &Server{}
+
+	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/integrations/available", nil)
+	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	rr := httptest.NewRecorder()
+	srv.handleAdminIntegrationByName(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var result []AvailableIntegration
+	if err := json.NewDecoder(rr.Body).Decode(&result); err != nil {
+		t.Fatalf("decode error: %v", err)
+	}
+	if len(result) != 0 {
+		t.Fatalf("expected empty list, got %d", len(result))
+	}
+}
+
+func TestListAvailableIntegrations_WithSource(t *testing.T) {
+	repoDir := t.TempDir()
+	// Create source directories for telegram (available) but not discord
+	if err := os.MkdirAll(filepath.Join(repoDir, "extras", "scion-telegram"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	mgr := newMockIntegrationManager()
+	// telegram is NOT installed, discord is NOT installed either
+	// but only telegram has a source dir
+
+	srv := &Server{}
+	srv.config.MaintenanceConfig.RepoPath = repoDir
+	srv.pluginManager = mgr
+
+	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/integrations/available", nil)
+	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	rr := httptest.NewRecorder()
+	srv.handleAdminIntegrationByName(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var result []AvailableIntegration
+	if err := json.NewDecoder(rr.Body).Decode(&result); err != nil {
+		t.Fatalf("decode error: %v", err)
+	}
+	if len(result) != 1 {
+		t.Fatalf("expected 1 available, got %d", len(result))
+	}
+	if result[0].Name != "telegram" {
+		t.Errorf("expected telegram, got %s", result[0].Name)
+	}
+}
+
+func TestListAvailableIntegrations_ExcludesInstalled(t *testing.T) {
+	repoDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repoDir, "extras", "scion-telegram"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	mgr := newMockIntegrationManager()
+	mgr.plugins["telegram"] = map[string]string{} // already installed
+
+	srv := &Server{}
+	srv.config.MaintenanceConfig.RepoPath = repoDir
+	srv.pluginManager = mgr
+
+	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/integrations/available", nil)
+	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	rr := httptest.NewRecorder()
+	srv.handleAdminIntegrationByName(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var result []AvailableIntegration
+	if err := json.NewDecoder(rr.Body).Decode(&result); err != nil {
+		t.Fatalf("decode error: %v", err)
+	}
+	if len(result) != 0 {
+		t.Fatalf("expected 0 available (already installed), got %d", len(result))
 	}
 }

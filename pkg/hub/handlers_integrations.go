@@ -22,6 +22,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/plugin"
@@ -89,6 +90,17 @@ type AvailableIntegration struct {
 
 // knownPlugins is the list of plugins that can be discovered for installation.
 var knownPlugins = []string{"telegram", "discord"}
+
+var knownPluginSet = func() map[string]bool {
+	s := make(map[string]bool, len(knownPlugins))
+	for _, n := range knownPlugins {
+		s[n] = true
+	}
+	return s
+}()
+
+// pluginBuildMu guards concurrent build operations per plugin name.
+var pluginBuildMu sync.Map
 
 // --- Route dispatchers ---
 
@@ -393,16 +405,23 @@ func (s *Server) handleUpdateIntegration(w http.ResponseWriter, r *http.Request,
 
 	repoPath := s.config.MaintenanceConfig.RepoPath
 	if repoPath == "" {
-		InternalError(w)
 		slog.Error("No repository path configured for plugin update")
+		InternalError(w)
 		return
 	}
 
+	mu := acquirePluginBuildLock(name)
+	if mu == nil {
+		writeJSON(w, http.StatusConflict, map[string]string{
+			"error": "a build is already in progress for this integration",
+		})
+		return
+	}
+	defer releasePluginBuildLock(name)
+
 	if err := mgr.UpdatePlugin(name, repoPath); err != nil {
 		slog.Error("Failed to update integration", "plugin", name, "error", err)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{
-			"error": "update failed: " + err.Error(),
-		})
+		InternalError(w)
 		return
 	}
 
@@ -414,19 +433,30 @@ func (s *Server) handleUpdateIntegration(w http.ResponseWriter, r *http.Request,
 }
 
 func (s *Server) handleInstallIntegration(w http.ResponseWriter, r *http.Request, name string) {
+	if !knownPluginSet[name] {
+		BadRequest(w, "unknown integration: "+name)
+		return
+	}
+
 	s.mu.RLock()
 	mgr := s.pluginManager
 	s.mu.RUnlock()
 
-	if mgr != nil && mgr.HasPlugin("broker", name) {
+	if mgr == nil {
+		slog.Error("Plugin manager not initialized")
+		InternalError(w)
+		return
+	}
+
+	if mgr.HasPlugin("broker", name) {
 		BadRequest(w, "integration is already installed")
 		return
 	}
 
 	repoPath := s.config.MaintenanceConfig.RepoPath
 	if repoPath == "" {
-		InternalError(w)
 		slog.Error("No repository path configured for plugin install")
+		InternalError(w)
 		return
 	}
 
@@ -435,6 +465,15 @@ func (s *Server) handleInstallIntegration(w http.ResponseWriter, r *http.Request
 		NotFound(w, "plugin source")
 		return
 	}
+
+	mu := acquirePluginBuildLock(name)
+	if mu == nil {
+		writeJSON(w, http.StatusConflict, map[string]string{
+			"error": "a build is already in progress for this integration",
+		})
+		return
+	}
+	defer releasePluginBuildLock(name)
 
 	pluginsDir, err := plugin.DefaultPluginsDir()
 	if err != nil {
@@ -445,9 +484,7 @@ func (s *Server) handleInstallIntegration(w http.ResponseWriter, r *http.Request
 
 	if err := mgr.InstallPlugin(name, repoPath, pluginsDir); err != nil {
 		slog.Error("Failed to install integration", "plugin", name, "error", err)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{
-			"error": "install failed: " + err.Error(),
-		})
+		InternalError(w)
 		return
 	}
 
@@ -600,6 +637,28 @@ func getIntegrationStatus(mgr IntegrationManager, name string) *IntegrationStatu
 	}
 
 	return status
+}
+
+// acquirePluginBuildLock tries to acquire a per-plugin build lock. Returns a
+// non-nil *sync.Mutex if acquired, nil if another build is already in progress.
+func acquirePluginBuildLock(name string) *sync.Mutex {
+	mu := &sync.Mutex{}
+	actual, loaded := pluginBuildMu.LoadOrStore(name, mu)
+	if loaded {
+		existing := actual.(*sync.Mutex)
+		if !existing.TryLock() {
+			return nil
+		}
+		return existing
+	}
+	mu.Lock()
+	return mu
+}
+
+func releasePluginBuildLock(name string) {
+	if actual, ok := pluginBuildMu.Load(name); ok {
+		actual.(*sync.Mutex).Unlock()
+	}
 }
 
 // reconfigureIntegration reloads config for a plugin and calls ConfigureBroker.

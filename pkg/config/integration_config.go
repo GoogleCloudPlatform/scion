@@ -223,22 +223,16 @@ func CreatePluginConfigFile(pluginName, configFilePath string) error {
 		return fmt.Errorf("create config dir: %w", err)
 	}
 
-	defaults := map[string]string{}
+	// Write a minimal config file with only non-secret settings.
+	// Secret keys (bot_token, public_key, etc.) are managed via the
+	// secrets backend and should not appear in the config file.
+	content := "# Scion plugin configuration for " + pluginName + "\n"
 	switch pluginName {
-	case "telegram":
-		defaults["bot_token"] = ""
 	case "discord":
-		defaults["bot_token"] = ""
-		defaults["application_id"] = ""
-		defaults["public_key"] = ""
+		content += "application_id: \"\"\n"
 	}
 
-	data, err := yamlv3.Marshal(defaults)
-	if err != nil {
-		return fmt.Errorf("marshal config: %w", err)
-	}
-
-	return os.WriteFile(resolved, data, 0600)
+	return os.WriteFile(resolved, []byte(content), 0600)
 }
 
 // LoadPluginConfigFile reads a standalone YAML config file for a plugin and
