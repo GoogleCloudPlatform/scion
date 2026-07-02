@@ -1,7 +1,9 @@
 # Scion Hub Cloud Run — Required IAM Grants
 
 **Project:** ptone-experiments  
-**Hub SA:** scion-hub-runner@ptone-experiments.iam.gserviceaccount.com  
+**Hub SA:** scion-hub-runner@ptone-experiments.iam.gserviceaccount.com
+
+> ⚠️ Important: Always pass --service-account=scion-hub-runner@ptone-experiments.iam.gserviceaccount.com when deploying. If omitted, Cloud Run defaults to the Compute SA and all custom IAM grants fail.  
 **Agent SA (sandbox):** scion-instance-gym@serverless-team-scion.iam.gserviceaccount.com
 
 ---
