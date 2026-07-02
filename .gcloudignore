@@ -26,9 +26,9 @@ hack/
 internal/
 reviews/
 scratch/
-scripts/
+/scripts/
 shared-dirs/
-skills/
+/skills/
 
 # ---------------------------------------------------------------------------
 # Web frontend — only web/embed.go and web/embed_stub.go are needed
