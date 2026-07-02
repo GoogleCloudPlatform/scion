@@ -45,10 +45,10 @@ type jsonRPCRequest struct {
 
 // jsonRPCResponse is a test helper for parsing JSON-RPC responses.
 type jsonRPCResponse struct {
-	JSONRPC string       `json:"jsonrpc"`
-	ID      interface{}  `json:"id"`
-	Result  interface{}  `json:"result,omitempty"`
-	Error   *jsonRPCErr  `json:"error,omitempty"`
+	JSONRPC string      `json:"jsonrpc"`
+	ID      interface{} `json:"id"`
+	Result  interface{} `json:"result,omitempty"`
+	Error   *jsonRPCErr `json:"error,omitempty"`
 }
 
 type jsonRPCErr struct {

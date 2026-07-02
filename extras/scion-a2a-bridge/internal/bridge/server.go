@@ -272,8 +272,8 @@ func writeJSONRPCError(w http.ResponseWriter, id interface{}, code int, message 
 		Message string `json:"message"`
 	}
 	type jsonrpcResponse struct {
-		JSONRPC string       `json:"jsonrpc"`
-		ID      interface{}  `json:"id"`
+		JSONRPC string        `json:"jsonrpc"`
+		ID      interface{}   `json:"id"`
 		Error   *jsonrpcError `json:"error,omitempty"`
 	}
 	resp := jsonrpcResponse{

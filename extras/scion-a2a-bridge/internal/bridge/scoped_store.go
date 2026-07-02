@@ -31,7 +31,7 @@ import (
 type ScopedTaskStore struct {
 	inner taskstore.Store
 
-	mu       sync.RWMutex
+	mu        sync.RWMutex
 	ownership map[a2a.TaskID]string // taskID → "projectSlug:agentSlug"
 }
 
