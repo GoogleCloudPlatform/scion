@@ -28,6 +28,7 @@ Exit codes:
   0 = credential captured
   1 = error
   2 = no credentials found (not an error, but nothing was stored)
+  3 = secret already exists (conflict — use --force to overwrite)
 """
 
 from __future__ import annotations
@@ -43,6 +44,7 @@ from typing import Any
 EXIT_OK = 0
 EXIT_ERROR = 1
 EXIT_NO_CREDS = 2
+EXIT_CONFLICT = 3
 
 HARNESS_BUNDLE = os.path.join(
     os.environ.get("HOME") or os.path.expanduser("~"),
@@ -115,8 +117,8 @@ def _capture_one(entry: dict[str, Any], force: bool) -> tuple[bool, str | None]:
 
     if result.returncode != 0:
         stderr = result.stderr.strip()
-        if "already exists" in stderr:
-            return True, None
+        if "already exists" in stderr.lower():
+            return False, "CONFLICT"
         return False, f"sciontool failed for {key}: {stderr}"
 
     return True, None
@@ -189,6 +191,7 @@ def main() -> int:
     entries = unique_entries
 
     captured = 0
+    conflicts = 0
     errors = 0
 
     for entry in entries:
@@ -205,7 +208,10 @@ def main() -> int:
             continue
 
         ok, err = _capture_one(entry, args.force)
-        if err:
+        if err == "CONFLICT":
+            print(f'CONFLICT: secret "{key}" already exists (use --force to overwrite)')
+            conflicts += 1
+        elif err:
             print(f"capture-auth: {key}: {err}", file=sys.stderr)
             errors += 1
         elif ok:
@@ -213,7 +219,7 @@ def main() -> int:
             captured += 1
 
     # Keyring fallback: AGY may store tokens only in gnome-keyring, not to file
-    if captured == 0 and errors == 0:
+    if captured == 0 and conflicts == 0 and errors == 0:
         print("capture-auth: file not found, trying gnome-keyring fallback...")
         token = _extract_from_keyring()
         if token:
@@ -230,6 +236,9 @@ def main() -> int:
                 if result.returncode == 0:
                     print(f"capture-auth: AGY_TOKEN: captured from gnome-keyring")
                     captured += 1
+                elif "already exists" in result.stderr.lower():
+                    print('CONFLICT: secret "AGY_TOKEN" already exists (use --force to overwrite)')
+                    conflicts += 1
                 else:
                     print(f"capture-auth: keyring fallback failed: {result.stderr.strip()}", file=sys.stderr)
                     errors += 1
@@ -238,6 +247,9 @@ def main() -> int:
                     os.unlink(tmp_path)
                 except OSError:
                     pass
+
+    if conflicts > 0:
+        return EXIT_CONFLICT
 
     if errors > 0 and captured == 0:
         return EXIT_ERROR
