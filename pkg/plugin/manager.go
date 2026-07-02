@@ -520,6 +520,12 @@ func (m *Manager) UpdatePlugin(name string, repoPath string) error {
 	m.logger.Info("Building plugin from source",
 		"name", name, "source", sourceDir, "binary", binaryPath)
 
+	tidyCmd := exec.Command("go", "mod", "tidy")
+	tidyCmd.Dir = sourceDir
+	if output, err := tidyCmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("go mod tidy failed for plugin %q: %w\n%s", name, err, string(output))
+	}
+
 	buildCmd := exec.Command("go", "build", "-o", tmpBinaryPath, "./cmd/scion-plugin-"+name)
 	buildCmd.Dir = sourceDir
 	if output, err := buildCmd.CombinedOutput(); err != nil {
@@ -569,6 +575,12 @@ func (m *Manager) InstallPlugin(name, repoPath, pluginsDir string) error {
 
 	m.logger.Info("Building plugin from source (first-time install)",
 		"name", name, "source", sourceDir, "binary", targetPath)
+
+	tidyCmd := exec.Command("go", "mod", "tidy")
+	tidyCmd.Dir = sourceDir
+	if output, err := tidyCmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("go mod tidy failed for plugin %q: %w\n%s", name, err, string(output))
+	}
 
 	buildCmd := exec.Command("go", "build", "-o", targetPath, "./cmd/scion-plugin-"+name)
 	buildCmd.Dir = sourceDir
