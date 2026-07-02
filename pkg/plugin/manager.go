@@ -19,7 +19,9 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"sync"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
@@ -489,6 +491,82 @@ func (m *Manager) BrokerInfo(name string) (version, channelID string, capabiliti
 		return "", "", nil, nil
 	}
 	return info.Version, info.ChannelID, info.Capabilities, nil
+}
+
+// UpdatePlugin rebuilds a hub-managed (non-self-managed) plugin binary from
+// source and restarts it. Self-managed plugins cannot be updated this way.
+func (m *Manager) UpdatePlugin(name string, repoPath string) error {
+	key := PluginTypeBroker + ":" + name
+	m.mu.RLock()
+	dp, ok := m.configs[key]
+	isSelf := m.selfManaged[key]
+	client, hasClient := m.clients[key]
+	m.mu.RUnlock()
+
+	if !ok {
+		return fmt.Errorf("plugin %q is not loaded", name)
+	}
+	if isSelf {
+		return fmt.Errorf("plugin %q is self-managed and cannot be updated this way", name)
+	}
+
+	sourceDir := filepath.Join(repoPath, "extras", "scion-"+name)
+	if _, err := os.Stat(sourceDir); err != nil {
+		return fmt.Errorf("plugin source directory not found: %s", sourceDir)
+	}
+
+	binaryPath := dp.Path
+
+	m.logger.Info("Building plugin from source",
+		"name", name, "source", sourceDir, "binary", binaryPath)
+
+	buildCmd := exec.Command("go", "build", "-o", binaryPath, "./cmd/scion-plugin-"+name)
+	buildCmd.Dir = sourceDir
+	if output, err := buildCmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("go build failed for plugin %q: %w\n%s", name, err, string(output))
+	}
+
+	if hasClient {
+		client.Kill()
+	}
+
+	return m.loadPlugin(dp)
+}
+
+// InstallPlugin builds a plugin binary from source and loads it into the manager.
+// Used for first-time installation of plugins not yet present on the system.
+func (m *Manager) InstallPlugin(name, repoPath, pluginsDir string) error {
+	key := PluginTypeBroker + ":" + name
+	m.mu.RLock()
+	_, alreadyLoaded := m.clients[key]
+	m.mu.RUnlock()
+
+	if alreadyLoaded {
+		return fmt.Errorf("plugin %q is already installed", name)
+	}
+
+	sourceDir := filepath.Join(repoPath, "extras", "scion-"+name)
+	if _, err := os.Stat(sourceDir); err != nil {
+		return fmt.Errorf("plugin source directory not found: %s", sourceDir)
+	}
+
+	targetDir := filepath.Join(pluginsDir, PluginTypeBroker)
+	if err := os.MkdirAll(targetDir, 0755); err != nil {
+		return fmt.Errorf("failed to create plugins directory %s: %w", targetDir, err)
+	}
+
+	targetPath := filepath.Join(targetDir, PluginBinaryPrefix+name)
+
+	m.logger.Info("Building plugin from source (first-time install)",
+		"name", name, "source", sourceDir, "binary", targetPath)
+
+	buildCmd := exec.Command("go", "build", "-o", targetPath, "./cmd/scion-plugin-"+name)
+	buildCmd.Dir = sourceDir
+	if output, err := buildCmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("go build failed for plugin %q: %w\n%s", name, err, string(output))
+	}
+
+	return m.LoadOne(PluginTypeBroker, name, PluginEntry{Path: targetPath}, pluginsDir)
 }
 
 // Shutdown kills all plugin processes gracefully.
