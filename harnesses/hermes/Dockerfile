@@ -27,7 +27,11 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
 RUN apt-get update && apt-get install -y --no-install-recommends ripgrep \
   && apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# Install Hermes Agent via pip (available in scion-base)
+# Install pip (not included in scion-base)
+RUN apt-get update && apt-get install -y --no-install-recommends python3-pip \
+  && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# Install Hermes Agent via pip
 RUN if [ -n "${HERMES_VERSION}" ]; then \
       pip install --no-cache-dir "hermes-agent==${HERMES_VERSION}"; \
     else \
