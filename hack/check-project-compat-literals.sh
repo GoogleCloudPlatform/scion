@@ -136,6 +136,7 @@ allowed_paths=(
   "^extras/scion-a2a-bridge/cmd/scion-a2a-bridge/main.go$"
   "^extras/scion-a2a-bridge/internal/bridge/bridge.go$"
   "^extras/scion-a2a-bridge/internal/bridge/config.go$"
+  "^extras/scion-a2a-bridge/internal/bridge/executor.go$"
   "^extras/scion-a2a-bridge/internal/bridge/server.go$"
   "^extras/scion-chat-app/cmd/scion-chat-app/main.go$"
   "^extras/scion-chat-app/internal/chatapp/commands.go$"
