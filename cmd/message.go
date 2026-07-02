@@ -184,6 +184,9 @@ Examples:
 		if len(msgAttach) > messages.MaxAttachments {
 			return fmt.Errorf("too many attachments: %d (max %d)", len(msgAttach), messages.MaxAttachments)
 		}
+		if len(msgAttach) > 0 && (msgIn != "" || msgAt != "") {
+			return fmt.Errorf("--attach cannot be combined with --in or --at")
+		}
 
 		// Check if Hub should be used
 		var hubCtx *HubContext
@@ -248,6 +251,13 @@ Examples:
 		// --wake requires Hub mode
 		if msgWake {
 			return fmt.Errorf("--wake requires Hub mode (use 'scion hub enable' first)")
+		}
+
+		// --attach requires Hub mode: attachments are delivered through Hub
+		// storage, while local mode writes plain text to the agent terminal
+		// and cannot transfer files.
+		if len(msgAttach) > 0 {
+			return fmt.Errorf("--attach requires Hub mode (use 'scion hub enable' first); in local mode, include the file contents in the message text")
 		}
 
 		// Local mode — structured messages are only available in Hub mode,

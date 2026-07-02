@@ -860,6 +860,39 @@ func TestWakeFlagValidation(t *testing.T) {
 	}
 }
 
+func TestAttachFlagValidation(t *testing.T) {
+	tests := []struct {
+		name     string
+		setup    func()
+		teardown func()
+		errMsg   string
+	}{
+		{
+			name:     "attach with in",
+			setup:    func() { msgAttach = []string{"notes.md"}; msgIn = "5m" },
+			teardown: func() { msgAttach = nil; msgIn = "" },
+			errMsg:   "--attach cannot be combined with --in or --at",
+		},
+		{
+			name:     "attach with at",
+			setup:    func() { msgAttach = []string{"notes.md"}; msgAt = "2026-01-01T00:00:00Z" },
+			teardown: func() { msgAttach = nil; msgAt = "" },
+			errMsg:   "--attach cannot be combined with --in or --at",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.setup()
+			defer tc.teardown()
+
+			err := messageCmd.RunE(messageCmd, []string{"agent1", "hello"})
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.errMsg)
+		})
+	}
+}
+
 func TestSendGroupMessageViaHub(t *testing.T) {
 	orig := saveMessageTestState()
 	defer orig.restore()
