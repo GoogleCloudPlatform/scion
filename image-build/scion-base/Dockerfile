@@ -34,7 +34,9 @@ RUN go mod download
 
 # Copy source and build scion and sciontool
 COPY cmd/ ./cmd/
+COPY harnesses/ ./harnesses/
 COPY pkg/ ./pkg/
+COPY resources/ ./resources/
 COPY web/*.go ./web/
 
 # Build with version info injected via ldflags
