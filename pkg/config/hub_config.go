@@ -568,7 +568,8 @@ func loadGlobalConfigLegacy(configPath string) (*GlobalConfig, error) {
 		"runtimeBroker.corsAllowedOrigins": defaults.RuntimeBroker.CORSAllowedOrigins,
 		"runtimeBroker.corsAllowedMethods": defaults.RuntimeBroker.CORSAllowedMethods,
 		"runtimeBroker.corsAllowedHeaders": defaults.RuntimeBroker.CORSAllowedHeaders,
-		"runtimeBroker.corsMaxAge":         defaults.RuntimeBroker.CORSMaxAge,
+		"runtimeBroker.corsMaxAge":                    defaults.RuntimeBroker.CORSMaxAge,
+		"runtimeBroker.allowContainerScriptHarnesses": defaults.RuntimeBroker.AllowContainerScriptHarnesses,
 		// Database defaults
 		"database.driver": defaults.Database.Driver,
 		"database.url":    defaults.Database.URL,

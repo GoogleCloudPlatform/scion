@@ -163,6 +163,29 @@ hub:
 	}
 }
 
+func TestLegacyConfigAllowContainerScriptHarnesses(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	configPath := filepath.Join(tmpDir, "server.yaml")
+
+	configContent := `
+runtimeBroker:
+  enabled: true
+`
+	if err := os.WriteFile(configPath, []byte(configContent), 0644); err != nil {
+		t.Fatalf("failed to write config file: %v", err)
+	}
+
+	cfg, err := LoadGlobalConfig(configPath)
+	if err != nil {
+		t.Fatalf("failed to load config: %v", err)
+	}
+
+	if !cfg.RuntimeBroker.AllowContainerScriptHarnesses {
+		t.Error("expected AllowContainerScriptHarnesses to be true when loading legacy config with empty broker section")
+	}
+}
+
 func TestLoadGlobalConfigEnvOverride(t *testing.T) {
 	// Set environment variables
 	// Note: Env vars use underscores which map to dots for nesting
