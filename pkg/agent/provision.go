@@ -765,6 +765,17 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	}
 	util.Debugf("provision: home/skills copy completed in %s", time.Since(homeCopyStart))
 
+	// Step 3b: Auto-inject workspace skills from /workspace/skills/
+	hubEnabled := (settings != nil && settings.IsHubEnabled()) || api.IsBrokerModeFromContext(ctx)
+	injCtx := workspaceSkillsInjectionContext{
+		IsGit:      isGit,
+		HubEnabled: hubEnabled,
+	}
+	wsInjectedContent, err := injectWorkspaceSkills(projectDir, agentHome, skillsDir, injCtx, nil)
+	if err != nil {
+		return "", "", nil, fmt.Errorf("failed to inject workspace skills: %w", err)
+	}
+
 	// Step 3d: Resolve and install referenced skills from skill bank
 	var resolvedSkillsRecord *SkillResolutionRecord
 	if len(finalScionCfg.Skills) > 0 {
@@ -915,6 +926,11 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 			if content != nil {
 				// Conditionally append extra instruction fragments before injection
 				content = appendExtraInstructions(ctx, content, isGit, settings)
+
+				// Append workspace skill content for harnesses without native skill support
+				if len(wsInjectedContent) > 0 {
+					content = append(content, wsInjectedContent...)
+				}
 
 				util.Debugf("ProvisionAgent: injecting agent instructions (%d bytes) into %s", len(content), agentHome)
 				if err := h.InjectAgentInstructions(agentHome, content); err != nil {
@@ -1189,6 +1205,137 @@ func appendExtraInstructions(ctx context.Context, content []byte, isGit bool, se
 		}
 	}
 	return content
+}
+
+// skillFrontmatter holds parsed YAML frontmatter from SKILL.md files.
+type skillFrontmatter struct {
+	Name        string `yaml:"name"`
+	Description string `yaml:"description"`
+	InjectWhen  string `yaml:"inject_when"`
+}
+
+// parseSkillFrontmatter extracts YAML frontmatter from a SKILL.md file.
+// Returns zero-value skillFrontmatter if no frontmatter is found.
+func parseSkillFrontmatter(data []byte) skillFrontmatter {
+	content := string(data)
+	if !strings.HasPrefix(content, "---\n") {
+		return skillFrontmatter{}
+	}
+	end := strings.Index(content[4:], "\n---")
+	if end < 0 {
+		return skillFrontmatter{}
+	}
+	var fm skillFrontmatter
+	_ = yaml.Unmarshal([]byte(content[4:4+end]), &fm)
+	return fm
+}
+
+// workspaceSkillsInjectionContext holds the context needed to evaluate
+// conditional injection of workspace skills.
+type workspaceSkillsInjectionContext struct {
+	IsGit      bool
+	HubEnabled bool
+}
+
+// shouldInjectSkill checks whether a skill should be injected based on its
+// inject_when frontmatter condition and the current provisioning context.
+func shouldInjectSkill(fm skillFrontmatter, injCtx workspaceSkillsInjectionContext) bool {
+	switch fm.InjectWhen {
+	case "":
+		return true
+	case "git_workspace":
+		return injCtx.IsGit
+	case "hub_enabled":
+		return injCtx.HubEnabled
+	default:
+		util.Debugf("provision: unknown inject_when=%q for skill %q, skipping", fm.InjectWhen, fm.Name)
+		return false
+	}
+}
+
+// injectWorkspaceSkills discovers skills in the workspace-level skills/
+// directory and injects them into the agent. For harnesses that support
+// skills (skillsDir != ""), skill directories are copied into the agent
+// home. For harnesses without skill support, SKILL.md content is appended
+// to the provided agent instructions content.
+//
+// Template skills take precedence: if a template already installed a skill
+// with the same directory name, the workspace skill is skipped.
+//
+// Returns updated content (only modified when skillsDir == "").
+func injectWorkspaceSkills(
+	projectDir string,
+	agentHome string,
+	skillsDir string,
+	injCtx workspaceSkillsInjectionContext,
+	content []byte,
+) ([]byte, error) {
+	// Workspace skills live at the workspace root, sibling to .scion/
+	workspaceRoot := projectDir
+	if filepath.Base(projectDir) == config.DotScion {
+		workspaceRoot = filepath.Dir(projectDir)
+	}
+	wsSkillsDir := filepath.Join(workspaceRoot, "skills")
+
+	entries, err := os.ReadDir(wsSkillsDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			util.Debugf("provision: no workspace skills directory at %s", wsSkillsDir)
+			return content, nil
+		}
+		return content, fmt.Errorf("failed to read workspace skills directory: %w", err)
+	}
+
+	for _, entry := range entries {
+		if !entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
+			continue
+		}
+		skillName := entry.Name()
+		skillSrc := filepath.Join(wsSkillsDir, skillName)
+
+		// Parse SKILL.md frontmatter for injection conditions
+		skillMD := filepath.Join(skillSrc, "SKILL.md")
+		var fm skillFrontmatter
+		if data, err := os.ReadFile(skillMD); err == nil {
+			fm = parseSkillFrontmatter(data)
+		}
+
+		if !shouldInjectSkill(fm, injCtx) {
+			util.Debugf("provision: skipping workspace skill %q (inject_when=%q not satisfied)", skillName, fm.InjectWhen)
+			continue
+		}
+
+		if skillsDir != "" {
+			// Harness supports skills — copy the skill directory
+			skillDest := filepath.Join(agentHome, skillsDir, skillName)
+
+			// Template skills take precedence: skip if already present
+			if _, err := os.Stat(skillDest); err == nil {
+				util.Debugf("provision: workspace skill %q skipped (template skill takes precedence)", skillName)
+				continue
+			}
+
+			if err := os.MkdirAll(skillDest, 0755); err != nil {
+				return content, fmt.Errorf("failed to create workspace skill dir %s: %w", skillName, err)
+			}
+			if err := util.CopyDir(skillSrc, skillDest); err != nil {
+				return content, fmt.Errorf("failed to copy workspace skill %s: %w", skillName, err)
+			}
+			util.Debugf("provision: injected workspace skill %q into %s", skillName, skillDest)
+		} else {
+			// Harness lacks skill support — composite SKILL.md content into agent instructions
+			data, err := os.ReadFile(skillMD)
+			if err != nil {
+				util.Debugf("provision: workspace skill %q has no SKILL.md, skipping fallback injection", skillName)
+				continue
+			}
+			util.Debugf("provision: compositing workspace skill %q SKILL.md (%d bytes) into agent instructions", skillName, len(data))
+			content = append(content, '\n')
+			content = append(content, data...)
+		}
+	}
+
+	return content, nil
 }
 
 func GetSavedProfile(agentName string, projectPath string) string {
