@@ -109,9 +109,9 @@ gcloud projects add-iam-policy-binding ptone-experiments \
 |---|---|---|
 | cloudsql.client | scion-hub-runner | ✅ granted |
 | storage.objectAdmin | scion-hub-runner | ✅ granted |
-| iam.serviceAccountTokenCreator (self) | scion-hub-runner | ⏳ OUTSTANDING |
+| iam.serviceAccountTokenCreator (self) | scion-hub-runner | ✅ granted |
 | secretmanager.secretAccessor | scion-hub-runner | ✅ granted |
-| secretmanager.viewer | scion-hub-runner | ⏳ OUTSTANDING (signing keys) |
+| secretmanager.viewer | scion-hub-runner | ✅ granted |
 | run.admin | scion-hub-runner | ✅ granted |
 | iam.serviceAccountUser | scion-hub-runner | ✅ granted |
 | logging.viewer | scion-hub-runner | ✅ granted |
