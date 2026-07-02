@@ -104,6 +104,14 @@ func (m *mockIntegrationManager) BrokerInfo(name string) (string, string, []stri
 	return "v0.8.2", "telegram", []string{"send", "receive"}, nil
 }
 
+func (m *mockIntegrationManager) UpdatePlugin(name string, repoPath string) error {
+	return nil
+}
+
+func (m *mockIntegrationManager) InstallPlugin(name, repoPath, pluginsDir string) error {
+	return nil
+}
+
 // --- Auth tests ---
 
 func TestIntegrations_Unauthenticated(t *testing.T) {
