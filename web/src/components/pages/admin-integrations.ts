@@ -48,6 +48,11 @@ interface IntegrationDetail {
   status?: IntegrationStatus;
 }
 
+interface AvailableIntegration {
+  name: string;
+  platform: string;
+}
+
 @customElement('scion-page-admin-integrations')
 export class ScionPageAdminIntegrations extends LitElement {
   @state() private loading = true;
@@ -63,6 +68,11 @@ export class ScionPageAdminIntegrations extends LitElement {
   @state() private editedSecrets: Record<string, string> = {};
   @state() private saving = false;
   @state() private restarting = false;
+  @state() private updating = false;
+
+  // Available integrations for install
+  @state() private availableIntegrations: AvailableIntegration[] = [];
+  @state() private installingName: string | null = null;
 
   static override styles = css`
     :host {
@@ -344,12 +354,18 @@ export class ScionPageAdminIntegrations extends LitElement {
     this.loading = true;
     this.error = null;
     try {
-      const res = await apiFetch('/api/v1/admin/integrations');
-      if (!res.ok) {
-        this.error = await extractApiError(res, 'Failed to load integrations');
+      const [listRes, availRes] = await Promise.all([
+        apiFetch('/api/v1/admin/integrations'),
+        apiFetch('/api/v1/admin/integrations/available'),
+      ]);
+      if (!listRes.ok) {
+        this.error = await extractApiError(listRes, 'Failed to load integrations');
         return;
       }
-      this.integrations = (await res.json()) as IntegrationSummary[];
+      this.integrations = (await listRes.json()) as IntegrationSummary[];
+      if (availRes.ok) {
+        this.availableIntegrations = (await availRes.json()) as AvailableIntegration[];
+      }
     } catch {
       this.error = 'Failed to connect to server';
     } finally {
@@ -407,6 +423,51 @@ export class ScionPageAdminIntegrations extends LitElement {
       this.error = 'Failed to save configuration';
     } finally {
       this.saving = false;
+    }
+  }
+
+  private async handleUpdate(): Promise<void> {
+    if (!this.detail) return;
+    this.updating = true;
+    this.error = null;
+    this.successMessage = null;
+    try {
+      const res = await apiFetch(
+        `/api/v1/admin/integrations/${encodeURIComponent(this.detail.name)}/update`,
+        { method: 'POST' }
+      );
+      if (!res.ok) {
+        this.error = await extractApiError(res, 'Failed to update integration');
+        return;
+      }
+      this.successMessage = 'Integration updated successfully';
+      await this.loadDetail(this.detail.name);
+    } catch {
+      this.error = 'Failed to update integration';
+    } finally {
+      this.updating = false;
+    }
+  }
+
+  private async handleInstall(name: string): Promise<void> {
+    this.installingName = name;
+    this.error = null;
+    this.successMessage = null;
+    try {
+      const res = await apiFetch(
+        `/api/v1/admin/integrations/${encodeURIComponent(name)}/install`,
+        { method: 'POST' }
+      );
+      if (!res.ok) {
+        this.error = await extractApiError(res, 'Failed to install integration');
+        return;
+      }
+      this.successMessage = `Integration "${name}" installed successfully`;
+      await this.loadList();
+    } catch {
+      this.error = 'Failed to install integration';
+    } finally {
+      this.installingName = null;
     }
   }
 
@@ -507,6 +568,51 @@ export class ScionPageAdminIntegrations extends LitElement {
               </table>
             </div>
           `}
+
+      ${this.availableIntegrations.length > 0
+        ? html`
+            <div class="header" style="margin-top: 2rem;">
+              <sl-icon name="download"></sl-icon>
+              <h1 style="font-size: 1.25rem;">Available Integrations</h1>
+            </div>
+            <p class="header-description">
+              These integrations can be installed from source. After installing, configure
+              secrets and restart to activate.
+            </p>
+            <div class="section" style="padding: 0;">
+              <table class="integration-table">
+                <thead>
+                  <tr>
+                    <th>Name</th>
+                    <th>Platform</th>
+                    <th>Action</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${this.availableIntegrations.map(
+                    (a) => html`
+                      <tr>
+                        <td><strong>${a.name}</strong></td>
+                        <td><span class="platform-name">${this.platformLabel(a.platform)}</span></td>
+                        <td>
+                          <sl-button
+                            size="small"
+                            variant="primary"
+                            ?loading=${this.installingName === a.name}
+                            ?disabled=${this.installingName !== null}
+                            @click=${() => { void this.handleInstall(a.name); }}
+                          >
+                            Install
+                          </sl-button>
+                        </td>
+                      </tr>
+                    `
+                  )}
+                </tbody>
+              </table>
+            </div>
+          `
+        : nothing}
     `;
   }
 
@@ -685,6 +791,7 @@ export class ScionPageAdminIntegrations extends LitElement {
   }
 
   private renderActionsSection() {
+    const showUpdate = this.detail && !this.detail.self_managed;
     return html`
       <div class="actions">
         <sl-button
@@ -702,6 +809,18 @@ export class ScionPageAdminIntegrations extends LitElement {
           <sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>
           Restart
         </sl-button>
+        ${showUpdate
+          ? html`
+              <sl-button
+                variant="default"
+                ?loading=${this.updating}
+                @click=${() => { void this.handleUpdate(); }}
+              >
+                <sl-icon slot="prefix" name="arrow-repeat"></sl-icon>
+                Update
+              </sl-button>
+            `
+          : nothing}
       </div>
     `;
   }
