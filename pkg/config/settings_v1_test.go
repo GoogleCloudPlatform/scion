@@ -1480,6 +1480,49 @@ func TestConvertV1ServerToGlobalConfig_Nil(t *testing.T) {
 	assert.Equal(t, "info", gc.LogLevel)
 }
 
+func TestConvertV1ServerToGlobalConfig_AllowContainerScriptHarnesses(t *testing.T) {
+	boolPtr := func(b bool) *bool { return &b }
+
+	t.Run("no broker section defaults to true", func(t *testing.T) {
+		v1 := &V1ServerConfig{}
+		gc := ConvertV1ServerToGlobalConfig(v1)
+		assert.True(t, gc.RuntimeBroker.AllowContainerScriptHarnesses)
+	})
+
+	t.Run("broker section without field defaults to true", func(t *testing.T) {
+		v1 := &V1ServerConfig{
+			Broker: &V1BrokerConfig{Enabled: true},
+		}
+		gc := ConvertV1ServerToGlobalConfig(v1)
+		assert.True(t, gc.RuntimeBroker.AllowContainerScriptHarnesses)
+	})
+
+	t.Run("broker section with explicit false", func(t *testing.T) {
+		v1 := &V1ServerConfig{
+			Broker: &V1BrokerConfig{
+				AllowContainerScriptHarnesses: boolPtr(false),
+			},
+		}
+		gc := ConvertV1ServerToGlobalConfig(v1)
+		assert.False(t, gc.RuntimeBroker.AllowContainerScriptHarnesses)
+	})
+
+	t.Run("broker section with explicit true", func(t *testing.T) {
+		v1 := &V1ServerConfig{
+			Broker: &V1BrokerConfig{
+				AllowContainerScriptHarnesses: boolPtr(true),
+			},
+		}
+		gc := ConvertV1ServerToGlobalConfig(v1)
+		assert.True(t, gc.RuntimeBroker.AllowContainerScriptHarnesses)
+	})
+
+	t.Run("nil config defaults to true", func(t *testing.T) {
+		gc := ConvertV1ServerToGlobalConfig(nil)
+		assert.True(t, gc.RuntimeBroker.AllowContainerScriptHarnesses)
+	})
+}
+
 func TestConvertGlobalToV1ServerConfig_RoundTrip(t *testing.T) {
 	gc := DefaultGlobalConfig()
 	gc.LogLevel = "debug"

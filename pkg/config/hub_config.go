@@ -371,16 +371,17 @@ func DefaultGlobalConfig() GlobalConfig {
 			AdminEmails:        []string{},
 		},
 		RuntimeBroker: RuntimeBrokerConfig{
-			Enabled:            false,
-			Port:               9800,
-			Host:               "0.0.0.0",
-			ReadTimeout:        30 * time.Second,
-			WriteTimeout:       120 * time.Second, // Longer for agent operations
-			CORSEnabled:        true,
-			CORSAllowedOrigins: []string{"*"},
-			CORSAllowedMethods: []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
-			CORSAllowedHeaders: []string{"Authorization", "Content-Type", "X-Scion-Broker-Token", "X-API-Key"},
-			CORSMaxAge:         3600,
+			Enabled:                       false,
+			Port:                          9800,
+			Host:                          "0.0.0.0",
+			ReadTimeout:                   30 * time.Second,
+			WriteTimeout:                  120 * time.Second, // Longer for agent operations
+			CORSEnabled:                   true,
+			CORSAllowedOrigins:            []string{"*"},
+			CORSAllowedMethods:            []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
+			CORSAllowedHeaders:            []string{"Authorization", "Content-Type", "X-Scion-Broker-Token", "X-API-Key"},
+			CORSMaxAge:                    3600,
+			AllowContainerScriptHarnesses: true,
 		},
 		Database: DatabaseConfig{
 			Driver: "sqlite",

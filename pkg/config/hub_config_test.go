@@ -51,6 +51,10 @@ func TestDefaultGlobalConfig(t *testing.T) {
 	if cfg.LogLevel != "info" {
 		t.Errorf("expected log level 'info', got %q", cfg.LogLevel)
 	}
+
+	if !cfg.RuntimeBroker.AllowContainerScriptHarnesses {
+		t.Error("expected AllowContainerScriptHarnesses to be true by default")
+	}
 }
 
 func TestLoadGlobalConfigDefaults(t *testing.T) {
