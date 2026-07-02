@@ -226,7 +226,7 @@ The run modes form a spine of increasing infrastructure — **Local → Workstat
 |------|---------------|--------------------|---------|----------------|
 | **Local mode** | None (CLI only) | Local machine; git-worktree isolation | Single-user | Agents launched directly via the `scion` CLI, no server |
 | **Workstation mode** | Combo server (Hub + Runtime Broker + Web) on loopback | Embedded SQLite on that machine | Single-user | The hosted experience locally, on your own machine |
-| **Single-node hosted** | One networked Hub instance on a single node | Embedded SQLite, local/single-volume; non-HA | Single- or multi-user | A cheap, simple networked Hub — starter-hub VM today; single Cloud Run + SQLite planned |
+| **Single-node hosted** | One networked Hub instance on a single node | Embedded SQLite, local/single-volume; non-HA | Single- or multi-user | A cheap, simple networked Hub — a single VM, or a single Cloud Run instance + SQLite |
 | **HA hosted** | Hub replicated behind a load balancer | External managed DB (Postgres) + object storage; highly available | Single- or multi-user | A durable, always-on shared deployment — Cloud Run + Cloud SQL |
 
 **Local mode**:
@@ -243,7 +243,7 @@ _Avoid_: hub mode, cloud mode, distributed mode, production mode
 _See also_: Single-node hosted, HA hosted, Tenancy, Workstation mode
 
 **Single-node hosted**:
-A hosted deployment whose control plane — the Hub — runs as a single instance on one compute node, keeping state in an embedded SQLite database on local or single-volume storage, with no external database. Non-HA: it accepts restart/redeploy downtime and single-volume durability in exchange for low cost and operational simplicity — there is no separate database to provision, secure, back up, or pay for. Realized today by the starter-hub single VM (`scripts/starter-hub/`); a single Cloud Run instance backed by SQLite is a planned realization. "Single-node" scopes the control plane only — agents may run on other nodes. The `sqlite` driver pins the Hub to one instance (a single DB connection and in-memory lifecycle-hook deduplication).
+A hosted deployment whose control plane — the Hub — runs as a single instance on one compute node, keeping state in an embedded SQLite database on local or single-volume storage, with no external database. Non-HA: it accepts restart/redeploy downtime and single-volume durability in exchange for low cost and operational simplicity — there is no separate database to provision, secure, back up, or pay for. Realized as a single VM (e.g. the starter-hub scripts, `scripts/starter-hub/`) or a single Cloud Run instance backed by SQLite. "Single-node" scopes the control plane only — agents may run on other nodes. The `sqlite` driver pins the Hub to one instance (a single DB connection and in-memory lifecycle-hook deduplication).
 _Avoid_: single-instance hosted, standalone hosted, lite hub, sqlite mode
 _See also_: HA hosted, Hosted mode, Tenancy, Node-Bound Broker (broker-to-node binding — a different subject, same word "node")
 
