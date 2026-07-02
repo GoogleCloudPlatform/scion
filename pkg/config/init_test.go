@@ -647,22 +647,23 @@ func TestInitMachine_RestoresDeletedFiles(t *testing.T) {
 	globalDir := filepath.Join(tmpDir, GlobalDir)
 	defaultTplDir := filepath.Join(globalDir, "templates", "default")
 
-	// Read the original agents.md content
-	agentsMdPath := filepath.Join(defaultTplDir, "agents.md")
-	originalContent, err := os.ReadFile(agentsMdPath)
+	// Use scion-agent.yaml to test restore — it's guaranteed to have content.
+	// (agents.md is intentionally empty since its content moved to workspace skills.)
+	targetPath := filepath.Join(defaultTplDir, "scion-agent.yaml")
+	originalContent, err := os.ReadFile(targetPath)
 	if err != nil {
-		t.Fatalf("failed to read agents.md: %v", err)
+		t.Fatalf("failed to read scion-agent.yaml: %v", err)
 	}
 	if len(originalContent) == 0 {
-		t.Fatal("expected agents.md to have content")
+		t.Fatal("expected scion-agent.yaml to have content")
 	}
 
-	// Delete agents.md
-	if err := os.Remove(agentsMdPath); err != nil {
-		t.Fatalf("failed to delete agents.md: %v", err)
+	// Delete the file
+	if err := os.Remove(targetPath); err != nil {
+		t.Fatalf("failed to delete scion-agent.yaml: %v", err)
 	}
-	if _, err := os.Stat(agentsMdPath); !os.IsNotExist(err) {
-		t.Fatal("expected agents.md to be deleted")
+	if _, err := os.Stat(targetPath); !os.IsNotExist(err) {
+		t.Fatal("expected scion-agent.yaml to be deleted")
 	}
 
 	// Re-run init — should restore the deleted file
@@ -670,12 +671,12 @@ func TestInitMachine_RestoresDeletedFiles(t *testing.T) {
 		t.Fatalf("second InitMachine failed: %v", err)
 	}
 
-	restoredContent, err := os.ReadFile(agentsMdPath)
+	restoredContent, err := os.ReadFile(targetPath)
 	if err != nil {
-		t.Fatalf("agents.md was not restored after re-init: %v", err)
+		t.Fatalf("scion-agent.yaml was not restored after re-init: %v", err)
 	}
 	if string(restoredContent) != string(originalContent) {
-		t.Error("restored agents.md content does not match original embedded content")
+		t.Error("restored scion-agent.yaml content does not match original embedded content")
 	}
 }
 

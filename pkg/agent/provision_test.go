@@ -2130,7 +2130,9 @@ func TestShouldInjectSkill(t *testing.T) {
 func createTestSkill(t *testing.T, baseDir, name, content string) {
 	t.Helper()
 	skillDir := filepath.Join(baseDir, name)
-	os.MkdirAll(skillDir, 0755)
+	if err := os.MkdirAll(skillDir, 0755); err != nil {
+		t.Fatalf("failed to create skill dir %s: %v", name, err)
+	}
 	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(content), 0644); err != nil {
 		t.Fatalf("failed to create test skill %s: %v", name, err)
 	}
@@ -2142,12 +2144,18 @@ func setupWorkspaceSkillsTest(t *testing.T) (string, string, string, string) {
 	t.Helper()
 	tmpDir := t.TempDir()
 	projectDir := filepath.Join(tmpDir, ".scion")
-	os.MkdirAll(projectDir, 0755)
+	if err := os.MkdirAll(projectDir, 0755); err != nil {
+		t.Fatalf("failed to create project dir: %v", err)
+	}
 	wsSkillsDir := filepath.Join(tmpDir, "skills")
-	os.MkdirAll(wsSkillsDir, 0755)
+	if err := os.MkdirAll(wsSkillsDir, 0755); err != nil {
+		t.Fatalf("failed to create skills dir: %v", err)
+	}
 	agentHome := filepath.Join(tmpDir, "agent-home")
 	skillsDir := ".claude/skills"
-	os.MkdirAll(filepath.Join(agentHome, skillsDir), 0755)
+	if err := os.MkdirAll(filepath.Join(agentHome, skillsDir), 0755); err != nil {
+		t.Fatalf("failed to create agent home skills dir: %v", err)
+	}
 	return projectDir, wsSkillsDir, agentHome, skillsDir
 }
 
@@ -2205,8 +2213,12 @@ func TestInjectWorkspaceSkills_HarnessWithSkillsDir(t *testing.T) {
 
 		templateContent := "template version"
 		tplSkillDir := filepath.Join(agentHome, skillsDir, "conflict-skill")
-		os.MkdirAll(tplSkillDir, 0755)
-		os.WriteFile(filepath.Join(tplSkillDir, "SKILL.md"), []byte(templateContent), 0644)
+		if err := os.MkdirAll(tplSkillDir, 0755); err != nil {
+			t.Fatalf("failed to create template skill dir: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(tplSkillDir, "SKILL.md"), []byte(templateContent), 0644); err != nil {
+			t.Fatalf("failed to write template skill: %v", err)
+		}
 
 		createTestSkill(t, wsSkillsDir, "conflict-skill", "---\nname: conflict-skill\n---\n\nworkspace version")
 
@@ -2227,9 +2239,13 @@ func TestInjectWorkspaceSkills_HarnessWithSkillsDir(t *testing.T) {
 
 	t.Run("no workspace skills dir is graceful", func(t *testing.T) {
 		noSkillsProject := filepath.Join(t.TempDir(), ".scion")
-		os.MkdirAll(noSkillsProject, 0755)
+		if err := os.MkdirAll(noSkillsProject, 0755); err != nil {
+			t.Fatalf("failed to create dir: %v", err)
+		}
 		agentHome := filepath.Join(t.TempDir(), "agent-home")
-		os.MkdirAll(agentHome, 0755)
+		if err := os.MkdirAll(agentHome, 0755); err != nil {
+			t.Fatalf("failed to create dir: %v", err)
+		}
 
 		injCtx := workspaceSkillsInjectionContext{}
 		_, err := injectWorkspaceSkills(noSkillsProject, agentHome, ".claude/skills", injCtx, nil)
@@ -2242,8 +2258,12 @@ func TestInjectWorkspaceSkills_HarnessWithSkillsDir(t *testing.T) {
 		projectDir, wsSkillsDir, agentHome, skillsDir := setupWorkspaceSkillsTest(t)
 
 		hiddenDir := filepath.Join(wsSkillsDir, ".hidden-skill")
-		os.MkdirAll(hiddenDir, 0755)
-		os.WriteFile(filepath.Join(hiddenDir, "SKILL.md"), []byte("---\nname: hidden\n---\n"), 0644)
+		if err := os.MkdirAll(hiddenDir, 0755); err != nil {
+			t.Fatalf("failed to create hidden dir: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(hiddenDir, "SKILL.md"), []byte("---\nname: hidden\n---\n"), 0644); err != nil {
+			t.Fatalf("failed to write file: %v", err)
+		}
 
 		injCtx := workspaceSkillsInjectionContext{}
 		_, err := injectWorkspaceSkills(projectDir, agentHome, skillsDir, injCtx, nil)
@@ -2261,7 +2281,9 @@ func TestInjectWorkspaceSkills_HarnessWithSkillsDir(t *testing.T) {
 		projectDir, wsSkillsDir, agentHome, skillsDir := setupWorkspaceSkillsTest(t)
 
 		readmePath := filepath.Join(wsSkillsDir, "README.md")
-		os.WriteFile(readmePath, []byte("# Skills readme"), 0644)
+		if err := os.WriteFile(readmePath, []byte("# Skills readme"), 0644); err != nil {
+			t.Fatalf("failed to write readme: %v", err)
+		}
 
 		injCtx := workspaceSkillsInjectionContext{}
 		_, err := injectWorkspaceSkills(projectDir, agentHome, skillsDir, injCtx, nil)
@@ -2280,12 +2302,18 @@ func TestInjectWorkspaceSkills_FallbackComposition(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	projectDir := filepath.Join(tmpDir, ".scion")
-	os.MkdirAll(projectDir, 0755)
+	if err := os.MkdirAll(projectDir, 0755); err != nil {
+		t.Fatalf("failed to create project dir: %v", err)
+	}
 	wsSkillsDir := filepath.Join(tmpDir, "skills")
-	os.MkdirAll(wsSkillsDir, 0755)
+	if err := os.MkdirAll(wsSkillsDir, 0755); err != nil {
+		t.Fatalf("failed to create skills dir: %v", err)
+	}
 
 	agentHome := filepath.Join(tmpDir, "agent-home")
-	os.MkdirAll(agentHome, 0755)
+	if err := os.MkdirAll(agentHome, 0755); err != nil {
+		t.Fatalf("failed to create agent home: %v", err)
+	}
 
 	t.Run("SKILL.md content appended when no skills dir", func(t *testing.T) {
 		createTestSkill(t, wsSkillsDir, "fallback-skill", "---\nname: fallback-skill\n---\n\n# Fallback content\n")
@@ -2321,12 +2349,18 @@ func TestInjectWorkspaceSkills_FallbackComposition(t *testing.T) {
 	t.Run("skill without SKILL.md is skipped in fallback", func(t *testing.T) {
 		isolatedDir := t.TempDir()
 		isolatedProject := filepath.Join(isolatedDir, ".scion")
-		os.MkdirAll(isolatedProject, 0755)
+		if err := os.MkdirAll(isolatedProject, 0755); err != nil {
+			t.Fatalf("failed to create dir: %v", err)
+		}
 		isolatedSkills := filepath.Join(isolatedDir, "skills")
-		os.MkdirAll(isolatedSkills, 0755)
+		if err := os.MkdirAll(isolatedSkills, 0755); err != nil {
+			t.Fatalf("failed to create dir: %v", err)
+		}
 
 		noMDSkill := filepath.Join(isolatedSkills, "no-skillmd")
-		os.MkdirAll(noMDSkill, 0755)
+		if err := os.MkdirAll(noMDSkill, 0755); err != nil {
+			t.Fatalf("failed to create dir: %v", err)
+		}
 
 		injCtx := workspaceSkillsInjectionContext{}
 		result, err := injectWorkspaceSkills(isolatedProject, agentHome, "", injCtx, []byte("base"))

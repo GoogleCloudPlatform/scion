@@ -936,6 +936,12 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 			} else {
 				util.Debugf("ProvisionAgent: agent_instructions resolved to nil, skipping injection")
 			}
+		} else if len(wsInjectedContent) > 0 {
+			// No agent_instructions configured, but workspace skills need fallback injection
+			util.Debugf("ProvisionAgent: injecting workspace skill fallback content (%d bytes) into %s", len(wsInjectedContent), agentHome)
+			if err := h.InjectAgentInstructions(agentHome, wsInjectedContent); err != nil {
+				return "", "", nil, fmt.Errorf("failed to inject workspace skill fallback instructions: %w", err)
+			}
 		} else {
 			util.Debugf("ProvisionAgent: no agent_instructions configured and no agents.md found in template")
 		}
@@ -981,6 +987,11 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 			util.Debugf("ProvisionAgent: injecting inline agent_instructions (%d bytes, no template)", len(content))
 			if err := h.InjectAgentInstructions(agentHome, content); err != nil {
 				return "", "", nil, fmt.Errorf("failed to inject agent instructions: %w", err)
+			}
+		} else if len(wsInjectedContent) > 0 {
+			util.Debugf("ProvisionAgent: injecting workspace skill fallback content (%d bytes, no template)", len(wsInjectedContent))
+			if err := h.InjectAgentInstructions(agentHome, wsInjectedContent); err != nil {
+				return "", "", nil, fmt.Errorf("failed to inject workspace skill fallback instructions: %w", err)
 			}
 		}
 		if finalScionCfg.SystemPrompt != "" {
@@ -1194,7 +1205,7 @@ type skillFrontmatter struct {
 // parseSkillFrontmatter extracts YAML frontmatter from a SKILL.md file.
 // Returns zero-value skillFrontmatter if no frontmatter is found.
 func parseSkillFrontmatter(data []byte) skillFrontmatter {
-	content := string(data)
+	content := strings.ReplaceAll(string(data), "\r\n", "\n")
 	if !strings.HasPrefix(content, "---\n") {
 		return skillFrontmatter{}
 	}
@@ -1278,11 +1289,13 @@ func injectWorkspaceSkills(
 		skillName := entry.Name()
 		skillSrc := filepath.Join(wsSkillsDir, skillName)
 
-		// Parse SKILL.md frontmatter for injection conditions
+		// Read SKILL.md once for both frontmatter parsing and fallback injection
 		skillMD := filepath.Join(skillSrc, "SKILL.md")
+		skillMDData, skillMDErr := os.ReadFile(skillMD)
+
 		var fm skillFrontmatter
-		if data, err := os.ReadFile(skillMD); err == nil {
-			fm = parseSkillFrontmatter(data)
+		if skillMDErr == nil {
+			fm = parseSkillFrontmatter(skillMDData)
 		}
 
 		if !shouldInjectSkill(fm, injCtx) {
@@ -1309,14 +1322,13 @@ func injectWorkspaceSkills(
 			util.Debugf("provision: injected workspace skill %q into %s", skillName, skillDest)
 		} else {
 			// Harness lacks skill support — composite SKILL.md content into agent instructions
-			data, err := os.ReadFile(skillMD)
-			if err != nil {
+			if skillMDErr != nil {
 				util.Debugf("provision: workspace skill %q has no SKILL.md, skipping fallback injection", skillName)
 				continue
 			}
-			util.Debugf("provision: compositing workspace skill %q SKILL.md (%d bytes) into agent instructions", skillName, len(data))
+			util.Debugf("provision: compositing workspace skill %q SKILL.md (%d bytes) into agent instructions", skillName, len(skillMDData))
 			content = append(content, '\n')
-			content = append(content, data...)
+			content = append(content, skillMDData...)
 		}
 	}
 
