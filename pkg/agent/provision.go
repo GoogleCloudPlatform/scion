@@ -1203,7 +1203,9 @@ func parseSkillFrontmatter(data []byte) skillFrontmatter {
 		return skillFrontmatter{}
 	}
 	var fm skillFrontmatter
-	_ = yaml.Unmarshal([]byte(content[4:4+end]), &fm)
+	if err := yaml.Unmarshal([]byte(content[4:4+end]), &fm); err != nil {
+		util.Debugf("provision: failed to parse SKILL.md frontmatter: %v", err)
+	}
 	return fm
 }
 
@@ -1264,7 +1266,13 @@ func injectWorkspaceSkills(
 	}
 
 	for _, entry := range entries {
-		if !entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
+		if !entry.IsDir() {
+			if entry.Type()&os.ModeSymlink != 0 {
+				util.Debugf("provision: skipping symlinked skill %q (symlinks not supported)", entry.Name())
+			}
+			continue
+		}
+		if strings.HasPrefix(entry.Name(), ".") {
 			continue
 		}
 		skillName := entry.Name()

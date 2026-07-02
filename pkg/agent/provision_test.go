@@ -2089,6 +2089,15 @@ func TestParseSkillFrontmatter(t *testing.T) {
 			t.Errorf("expected zero-value for unclosed frontmatter, got %+v", fm)
 		}
 	})
+
+	t.Run("malformed YAML in frontmatter", func(t *testing.T) {
+		data := []byte("---\nname: bad-skill\ninject_when:\t\tbadly indented\n  - not: valid\n---\n\n# Content\n")
+		fm := parseSkillFrontmatter(data)
+		// Malformed YAML returns zero-value (skill treated as unconditional)
+		if fm.InjectWhen != "" {
+			t.Errorf("expected empty InjectWhen for malformed YAML, got %q", fm.InjectWhen)
+		}
+	})
 }
 
 func TestShouldInjectSkill(t *testing.T) {
@@ -2127,21 +2136,24 @@ func createTestSkill(t *testing.T, baseDir, name, content string) {
 	}
 }
 
-func TestInjectWorkspaceSkills_HarnessWithSkillsDir(t *testing.T) {
+// setupWorkspaceSkillsTest creates an isolated project layout for workspace
+// skills injection testing. Returns projectDir, wsSkillsDir, agentHome, skillsDir.
+func setupWorkspaceSkillsTest(t *testing.T) (string, string, string, string) {
+	t.Helper()
 	tmpDir := t.TempDir()
-
-	// Simulate project layout: tmpDir/.scion/ is projectDir, tmpDir/skills/ is workspace skills
 	projectDir := filepath.Join(tmpDir, ".scion")
 	os.MkdirAll(projectDir, 0755)
 	wsSkillsDir := filepath.Join(tmpDir, "skills")
 	os.MkdirAll(wsSkillsDir, 0755)
-
-	// Agent home with harness skills dir
 	agentHome := filepath.Join(tmpDir, "agent-home")
 	skillsDir := ".claude/skills"
 	os.MkdirAll(filepath.Join(agentHome, skillsDir), 0755)
+	return projectDir, wsSkillsDir, agentHome, skillsDir
+}
 
+func TestInjectWorkspaceSkills_HarnessWithSkillsDir(t *testing.T) {
 	t.Run("unconditional skills are copied", func(t *testing.T) {
+		projectDir, wsSkillsDir, agentHome, skillsDir := setupWorkspaceSkillsTest(t)
 		createTestSkill(t, wsSkillsDir, "always-skill", "---\nname: always-skill\ndescription: Always inject\n---\n\n# Always\n")
 
 		injCtx := workspaceSkillsInjectionContext{IsGit: false, HubEnabled: false}
@@ -2157,6 +2169,7 @@ func TestInjectWorkspaceSkills_HarnessWithSkillsDir(t *testing.T) {
 	})
 
 	t.Run("git_workspace skill injected when isGit=true", func(t *testing.T) {
+		projectDir, wsSkillsDir, agentHome, skillsDir := setupWorkspaceSkillsTest(t)
 		createTestSkill(t, wsSkillsDir, "git-skill", "---\nname: git-skill\ninject_when: git_workspace\n---\n\n# Git\n")
 
 		injCtx := workspaceSkillsInjectionContext{IsGit: true}
@@ -2172,10 +2185,8 @@ func TestInjectWorkspaceSkills_HarnessWithSkillsDir(t *testing.T) {
 	})
 
 	t.Run("git_workspace skill skipped when isGit=false", func(t *testing.T) {
-		// Clean up from previous run
-		os.RemoveAll(filepath.Join(agentHome, skillsDir, "git-cond-skill"))
-
-		createTestSkill(t, wsSkillsDir, "git-cond-skill", "---\nname: git-cond-skill\ninject_when: git_workspace\n---\n\n# Git\n")
+		projectDir, wsSkillsDir, agentHome, skillsDir := setupWorkspaceSkillsTest(t)
+		createTestSkill(t, wsSkillsDir, "git-skill", "---\nname: git-skill\ninject_when: git_workspace\n---\n\n# Git\n")
 
 		injCtx := workspaceSkillsInjectionContext{IsGit: false}
 		_, err := injectWorkspaceSkills(projectDir, agentHome, skillsDir, injCtx, nil)
@@ -2183,13 +2194,15 @@ func TestInjectWorkspaceSkills_HarnessWithSkillsDir(t *testing.T) {
 			t.Fatalf("injectWorkspaceSkills failed: %v", err)
 		}
 
-		dest := filepath.Join(agentHome, skillsDir, "git-cond-skill")
+		dest := filepath.Join(agentHome, skillsDir, "git-skill")
 		if _, err := os.Stat(dest); !os.IsNotExist(err) {
-			t.Errorf("expected git-cond-skill to NOT be copied when isGit=false")
+			t.Errorf("expected git-skill to NOT be copied when isGit=false")
 		}
 	})
 
 	t.Run("template skill takes precedence", func(t *testing.T) {
+		projectDir, wsSkillsDir, agentHome, skillsDir := setupWorkspaceSkillsTest(t)
+
 		templateContent := "template version"
 		tplSkillDir := filepath.Join(agentHome, skillsDir, "conflict-skill")
 		os.MkdirAll(tplSkillDir, 0755)
@@ -2213,17 +2226,21 @@ func TestInjectWorkspaceSkills_HarnessWithSkillsDir(t *testing.T) {
 	})
 
 	t.Run("no workspace skills dir is graceful", func(t *testing.T) {
-		noSkillsDir := filepath.Join(t.TempDir(), ".scion")
-		os.MkdirAll(noSkillsDir, 0755)
+		noSkillsProject := filepath.Join(t.TempDir(), ".scion")
+		os.MkdirAll(noSkillsProject, 0755)
+		agentHome := filepath.Join(t.TempDir(), "agent-home")
+		os.MkdirAll(agentHome, 0755)
 
 		injCtx := workspaceSkillsInjectionContext{}
-		_, err := injectWorkspaceSkills(noSkillsDir, agentHome, skillsDir, injCtx, nil)
+		_, err := injectWorkspaceSkills(noSkillsProject, agentHome, ".claude/skills", injCtx, nil)
 		if err != nil {
 			t.Errorf("expected graceful handling of missing skills dir, got: %v", err)
 		}
 	})
 
 	t.Run("hidden directories are skipped", func(t *testing.T) {
+		projectDir, wsSkillsDir, agentHome, skillsDir := setupWorkspaceSkillsTest(t)
+
 		hiddenDir := filepath.Join(wsSkillsDir, ".hidden-skill")
 		os.MkdirAll(hiddenDir, 0755)
 		os.WriteFile(filepath.Join(hiddenDir, "SKILL.md"), []byte("---\nname: hidden\n---\n"), 0644)
@@ -2241,6 +2258,8 @@ func TestInjectWorkspaceSkills_HarnessWithSkillsDir(t *testing.T) {
 	})
 
 	t.Run("non-directory files in skills dir are skipped", func(t *testing.T) {
+		projectDir, wsSkillsDir, agentHome, skillsDir := setupWorkspaceSkillsTest(t)
+
 		readmePath := filepath.Join(wsSkillsDir, "README.md")
 		os.WriteFile(readmePath, []byte("# Skills readme"), 0644)
 
