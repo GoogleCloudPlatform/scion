@@ -58,17 +58,23 @@ You can install Scion directly using `go install`:
 go install github.com/GoogleCloudPlatform/scion/cmd/scion@latest
 ```
 
+:::caution[Web UI assets are not included]
+`go install` builds only the Go binary. It does not build or embed the web frontend, so `scion server start` will serve a blank web UI with missing frontend assets. Use Homebrew for a ready-to-run install, or build from a clone with `make all`.
+:::
+
 Ensure your `$GOPATH/bin` (typically `~/go/bin`) is in your system `$PATH`.
 
 ### From Clone
 If you have the repository cloned, you can use the provided `Makefile`:
 
 ```bash
-make build
+make all
 # This creates a 'scion' binary in the build directory.
 # You can move it to a directory in your PATH:
 sudo mv ./build/scion /usr/local/bin/
 ```
+
+The `all` target builds the web frontend before compiling the Go binary, so the embedded web UI assets are present. If you prefer separate steps, run `make web` before `make build`.
 
 To verify your installation, run:
 

@@ -39,6 +39,8 @@ See the full [Installation Guide](https://googlecloudplatform.github.io/scion/ge
 go install github.com/GoogleCloudPlatform/scion/cmd/scion@latest
 ```
 
+> **Warning:** `go install` builds only the Go binary. It does not build or embed the web frontend, so `scion server start` will serve a blank web UI with missing frontend assets. Use Homebrew for a ready-to-run install, or build from a clone with `make all` before installing the binary.
+
 ### Initialize your machine and a Project (project)
 
 > **Tip:** If you used `scion server start` above, the onboarding wizard handles machine initialization automatically — you can skip this section.
