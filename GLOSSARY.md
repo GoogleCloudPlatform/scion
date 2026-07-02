@@ -220,13 +220,14 @@ _See also_: Activity (Blocked is one of its values)
 
 ## Modes
 
-The three run modes at a glance — distinguish them by whether a server runs and who it serves:
+The run modes form a spine of increasing infrastructure — **Local → Workstation → Single-node hosted → HA hosted**. Two independent dimensions separate them: the **availability tier** of the control plane (whether the Hub runs as a single instance on an embedded database, or is replicated across an external one), and **Tenancy** (whether it serves one user or many). Tenancy is orthogonal and only opens up once hosted; the availability tier is fixed by the Hub's database driver (`SCION_SERVER_DATABASE_DRIVER`: `sqlite` vs. `postgres`).
 
-| Mode | Server | Tenancy | State & isolation | Canonical use |
-|------|--------|---------|-------------------|----------------|
-| **Local mode** | None | Single user | Local machine; isolation via git worktrees | Agents launched directly via the `scion` CLI, no server |
-| **Workstation mode** | Combo server (Hub + Runtime Broker + Web) on loopback | Single-tenant | That machine | The hosted experience locally, on your own machine |
-| **Hosted mode** | Multi-user server deployment | Multi-user | Hub-coordinated across brokers | Coordinating state across users, projects, and runtime brokers |
+| Mode | Control plane | State & durability | Tenancy | Canonical use |
+|------|---------------|--------------------|---------|----------------|
+| **Local mode** | None (CLI only) | Local machine; git-worktree isolation | Single-user | Agents launched directly via the `scion` CLI, no server |
+| **Workstation mode** | Combo server (Hub + Runtime Broker + Web) on loopback | Embedded SQLite on that machine | Single-user | The hosted experience locally, on your own machine |
+| **Single-node hosted** | One networked Hub instance on a single node | Embedded SQLite, local/single-volume; non-HA | Single- or multi-user | A cheap, simple networked Hub — starter-hub VM today; single Cloud Run + SQLite planned |
+| **HA hosted** | Hub replicated behind a load balancer | External managed DB (Postgres) + object storage; highly available | Single- or multi-user | A durable, always-on shared deployment — Cloud Run + Cloud SQL |
 
 **Local mode**:
 Running Scion with no server at all — agents launched directly via the `scion` CLI, with state on the local machine and isolation via git worktrees.
@@ -237,8 +238,24 @@ Running a single-tenant Scion server (Hub + Runtime Broker + Web combined) on yo
 _Avoid_: local mode, local server, dev mode, single-user mode
 
 **Hosted mode**:
-The umbrella term for running against a Hub that coordinates state across users, projects, and runtime brokers; a multi-user server deployment is the canonical example.
+The umbrella term for running against a networked Hub — reachable beyond a single machine — that coordinates state across users, projects, and runtime brokers. Spans two **availability tiers**, **Single-node hosted** and **HA hosted**, distinguished by control-plane durability and cost; the tier is fixed by the Hub's database driver (embedded `sqlite` vs. external `postgres`). Orthogonal to the tier is **Tenancy** (single- vs. multi-user).
 _Avoid_: hub mode, cloud mode, distributed mode, production mode
+_See also_: Single-node hosted, HA hosted, Tenancy, Workstation mode
+
+**Single-node hosted**:
+A hosted deployment whose control plane — the Hub — runs as a single instance on one compute node, keeping state in an embedded SQLite database on local or single-volume storage, with no external database. Non-HA: it accepts restart/redeploy downtime and single-volume durability in exchange for low cost and operational simplicity — there is no separate database to provision, secure, back up, or pay for. Realized today by the starter-hub single VM (`scripts/starter-hub/`); a single Cloud Run instance backed by SQLite is a planned realization. "Single-node" scopes the control plane only — agents may run on other nodes. The `sqlite` driver pins the Hub to one instance (a single DB connection and in-memory lifecycle-hook deduplication).
+_Avoid_: single-instance hosted, standalone hosted, lite hub, sqlite mode
+_See also_: HA hosted, Hosted mode, Tenancy, Node-Bound Broker (broker-to-node binding — a different subject, same word "node")
+
+**HA hosted**:
+A hosted deployment whose control plane is replicated across multiple Hub instances behind a load balancer, backed by an external managed database (Cloud SQL Postgres) and object storage (GCS), with stateless proxy/hosted brokers. Highly available and durable — it survives node loss and redeploys without downtime — at the cost of running and paying for that external infrastructure. Realized by the Cloud Run deployment (`scripts/cloudrun/`: Cloud Run with min-instances ≥ 2 plus Cloud SQL). The `postgres` driver is what enables replication — durable cross-instance compare-and-set for lifecycle-hook deduplication, versus SQLite's single-instance in-memory approach.
+_Avoid_: clustered hosted, distributed hosted, ha mode, production mode
+_See also_: Single-node hosted, Hosted mode, Tenancy, Proxy Broker, Hosted Broker
+
+**Tenancy**:
+Whether a deployment serves a single identity or many — orthogonal to the availability tier. **Single-user**: one principal, with simple auth (a workstation dev token, or one OAuth identity). **Multi-user**: many principals authenticated through an OAuth identity provider (Google or GitHub), with Hub **Groups** and access policies governing who can see and act on what. Local and Workstation modes are single-user by construction; either hosted tier can be single- or multi-user.
+_Avoid_: multi-tenancy (for org isolation), single-tenant / multi-tenant (prefer single-/multi-user)
+_See also_: Group, Hosted mode, Single-node hosted, HA hosted
 
 ## Operations
 
