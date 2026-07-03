@@ -144,6 +144,79 @@ func TestChecker_NoLocalFallsToRemote(t *testing.T) {
 	}
 }
 
+func TestChecker_BareImageNoLocal(t *testing.T) {
+	remoteChecked := false
+	client := &http.Client{
+		Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			remoteChecked = true
+			return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody}, nil
+		}),
+	}
+	c := NewChecker(WithHTTPClient(client))
+	result := c.Check(context.Background(), "cogo:latest")
+	if result.Status != "unknown" {
+		t.Errorf("expected status unknown for bare image without local checker, got %s", result.Status)
+	}
+	if remoteChecked {
+		t.Error("remote check should not be called for bare image names")
+	}
+}
+
+func TestChecker_BareImageLocalNotFound(t *testing.T) {
+	remoteChecked := false
+	client := &http.Client{
+		Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			remoteChecked = true
+			return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody}, nil
+		}),
+	}
+	c := NewChecker(
+		WithLocalChecker(&mockLocalChecker{exists: false}),
+		WithHTTPClient(client),
+	)
+	result := c.Check(context.Background(), "cogo:latest")
+	if result.Status != "unknown" {
+		t.Errorf("expected status unknown for bare image not found locally, got %s", result.Status)
+	}
+	if remoteChecked {
+		t.Error("remote check should not be called for bare image names")
+	}
+}
+
+func TestChecker_BareImageLocalFound(t *testing.T) {
+	c := NewChecker(
+		WithLocalChecker(&mockLocalChecker{exists: true}),
+	)
+	result := c.Check(context.Background(), "cogo:latest")
+	if result.Status != "valid" {
+		t.Errorf("expected status valid, got %s", result.Status)
+	}
+	if result.Source != "local" {
+		t.Errorf("expected source local, got %s", result.Source)
+	}
+}
+
+func TestIsBareImageName(t *testing.T) {
+	tests := []struct {
+		image string
+		bare  bool
+	}{
+		{"cogo:latest", true},
+		{"cogo", true},
+		{"myorg/myimage:v2", true},
+		{"ghcr.io/myorg/scion-claude:latest", false},
+		{"us-docker.pkg.dev/proj/repo/img:v1", false},
+		{"localhost:5000/myimage:latest", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.image, func(t *testing.T) {
+			if got := isBareImageName(tt.image); got != tt.bare {
+				t.Errorf("isBareImageName(%q) = %v, want %v", tt.image, got, tt.bare)
+			}
+		})
+	}
+}
+
 func TestParseImageRef(t *testing.T) {
 	tests := []struct {
 		input    string

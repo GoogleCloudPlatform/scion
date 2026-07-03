@@ -363,6 +363,12 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// 13b. Re-check image status for all active harness configs now that
+	// the local image checker has been registered by startRuntimeBroker.
+	if enableHub && hubSrv != nil {
+		go hubSrv.RecheckAllImageStatuses(ctx)
+	}
+
 	// 14. Set up dispatcher, message broker, and notification dispatcher.
 	// This must happen after the ChannelEventPublisher is set (step 11/12)
 	// so that StartMessageBroker and StartNotificationDispatcher can
@@ -1344,9 +1350,6 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 			log.Printf("Warning: harness config bootstrap failed: %v", err)
 		}
 	}
-
-	// Re-check image status for all active harness configs after bootstrap
-	go hubSrv.RecheckAllImageStatuses(ctx)
 
 	log.Printf("Database: %s (%s)", cfg.Database.Driver, cfg.Database.URL)
 
