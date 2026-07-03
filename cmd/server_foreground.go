@@ -1344,6 +1344,9 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 		}
 	}
 
+	// Re-check image status for all active harness configs after bootstrap
+	go hubSrv.RecheckAllImageStatuses(ctx)
+
 	log.Printf("Database: %s (%s)", cfg.Database.Driver, cfg.Database.URL)
 
 	return hubSrv, nil

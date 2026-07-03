@@ -477,6 +477,10 @@ type HarnessConfigStore interface {
 
 	// ListHarnessConfigs returns harness configs matching the filter criteria.
 	ListHarnessConfigs(ctx context.Context, filter HarnessConfigFilter, opts ListOptions) (*ListResult[HarnessConfig], error)
+
+	// UpdateHarnessConfigImageStatus updates only the image_status and
+	// image_status_checked_at columns for a harness config.
+	UpdateHarnessConfigImageStatus(ctx context.Context, id, status string, checkedAt time.Time) error
 }
 
 // HarnessConfigFilter defines criteria for filtering harness configs.

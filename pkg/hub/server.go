@@ -39,6 +39,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/githubapp"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/imagecheck"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/dbmetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/dispatchmetrics"
@@ -668,6 +669,8 @@ type Server struct {
 
 	imageBuildActive atomic.Bool
 	imagePullActive  atomic.Bool
+
+	imageChecker *imagecheck.Checker
 }
 
 func newInstanceID() string {
@@ -970,6 +973,9 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 
 	// Initialize GCP token rate limiter (1 req/sec average, burst of 10)
 	srv.gcpTokenRateLimiter = NewGCPTokenRateLimiter(1, 10)
+
+	// Initialize image checker for harness config image status verification
+	srv.imageChecker = imagecheck.NewChecker()
 
 	srv.registerRoutes()
 

@@ -15,10 +15,12 @@
 package hub
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -242,6 +244,8 @@ func (s *Server) handleHarnessConfigByID(w http.ResponseWriter, r *http.Request)
 		s.handleHarnessConfigClone(w, r, hcID)
 	case "validate":
 		s.handleHarnessConfigValidate(w, r, hcID)
+	case "check-image":
+		s.handleHarnessConfigCheckImage(w, r, hcID)
 	case "reimport":
 		s.handleHarnessConfigReimport(w, r, hcID)
 	case "files":
@@ -280,12 +284,37 @@ func (s *Server) getHarnessConfig(w http.ResponseWriter, r *http.Request, id str
 		return
 	}
 
+	if s.imageStatusStale(hc) {
+		if image := s.harnessConfigImage(hc); image != "" {
+			registry := s.resolveImageRegistry()
+			resolvedImage := config.RewriteImageRegistry(image, registry)
+			result := s.imageChecker.Check(ctx, resolvedImage)
+			hc.ImageStatus = result.Status
+			now := time.Now()
+			hc.ImageStatusCheckedAt = &now
+			go s.store.UpdateHarnessConfigImageStatus(context.Background(), hc.ID, result.Status, result.CheckedAt)
+		}
+	}
+
 	resp := HarnessConfigWithCapabilities{HarnessConfig: *hc}
 	if identity := GetIdentityFromContext(ctx); identity != nil {
 		resp.Cap = s.authzService.ComputeCapabilities(ctx, identity, harnessConfigResource(hc))
 	}
 
 	writeJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) imageStatusStale(hc *store.HarnessConfig) bool {
+	return hc.ImageStatus == store.HarnessConfigImageStatusUnknown ||
+		hc.ImageStatusCheckedAt == nil ||
+		time.Since(*hc.ImageStatusCheckedAt) > 5*time.Minute
+}
+
+func (s *Server) harnessConfigImage(hc *store.HarnessConfig) string {
+	if hc.Config != nil {
+		return hc.Config.Image
+	}
+	return ""
 }
 
 func (s *Server) updateHarnessConfig(w http.ResponseWriter, r *http.Request, id string) {
@@ -549,6 +578,40 @@ func (s *Server) handleHarnessConfigFinalize(w http.ResponseWriter, r *http.Requ
 	}
 
 	writeJSON(w, http.StatusOK, hc)
+}
+
+// handleHarnessConfigCheckImage triggers an immediate image status re-check.
+// POST /api/v1/harness-configs/{id}/check-image
+func (s *Server) handleHarnessConfigCheckImage(w http.ResponseWriter, r *http.Request, id string) {
+	if r.Method != http.MethodPost {
+		MethodNotAllowed(w)
+		return
+	}
+
+	ctx := r.Context()
+	hc, err := s.store.GetHarnessConfig(ctx, id)
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	image := s.harnessConfigImage(hc)
+	if image == "" {
+		writeError(w, http.StatusBadRequest, "no_image", "Harness config has no image configured", nil)
+		return
+	}
+
+	registry := s.resolveImageRegistry()
+	resolvedImage := config.RewriteImageRegistry(image, registry)
+	result := s.imageChecker.Check(ctx, resolvedImage)
+
+	_ = s.store.UpdateHarnessConfigImageStatus(ctx, hc.ID, result.Status, result.CheckedAt)
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"image_status":            result.Status,
+		"image_status_checked_at": result.CheckedAt,
+		"source":                  result.Source,
+	})
 }
 
 // handleHarnessConfigDownload returns signed URLs for downloading harness config files.

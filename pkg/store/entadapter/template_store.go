@@ -348,26 +348,28 @@ func (s *TemplateStore) ListTemplates(ctx context.Context, filter store.Template
 // store.HarnessConfig model.
 func entHarnessConfigToStore(e *ent.HarnessConfig) *store.HarnessConfig {
 	hc := &store.HarnessConfig{
-		ID:            e.ID.String(),
-		Name:          e.Name,
-		Slug:          e.Slug,
-		DisplayName:   e.DisplayName,
-		Description:   e.Description,
-		Harness:       e.Harness,
-		ContentHash:   e.ContentHash,
-		Scope:         e.Scope,
-		ScopeID:       e.ScopeID,
-		StorageURI:    e.StorageURI,
-		StorageBucket: e.StorageBucket,
-		StoragePath:   e.StoragePath,
-		SourceURL:     e.SourceURL,
-		Status:        string(e.Status),
-		OwnerID:       e.OwnerID,
-		CreatedBy:     e.CreatedBy,
-		UpdatedBy:     e.UpdatedBy,
-		Visibility:    e.Visibility,
-		Created:       e.Created,
-		Updated:       e.Updated,
+		ID:                   e.ID.String(),
+		Name:                 e.Name,
+		Slug:                 e.Slug,
+		DisplayName:          e.DisplayName,
+		Description:          e.Description,
+		Harness:              e.Harness,
+		ContentHash:          e.ContentHash,
+		Scope:                e.Scope,
+		ScopeID:              e.ScopeID,
+		StorageURI:           e.StorageURI,
+		StorageBucket:        e.StorageBucket,
+		StoragePath:          e.StoragePath,
+		SourceURL:            e.SourceURL,
+		Status:               string(e.Status),
+		ImageStatus:          string(e.ImageStatus),
+		ImageStatusCheckedAt: e.ImageStatusCheckedAt,
+		OwnerID:              e.OwnerID,
+		CreatedBy:            e.CreatedBy,
+		UpdatedBy:            e.UpdatedBy,
+		Visibility:           e.Visibility,
+		Created:              e.Created,
+		Updated:              e.Updated,
 	}
 	unmarshalJSONString(e.Config, &hc.Config)
 	unmarshalJSONString(e.Files, &hc.Files)
@@ -459,7 +461,7 @@ func (s *TemplateStore) UpdateHarnessConfig(ctx context.Context, hc *store.Harne
 
 	hc.Updated = time.Now()
 
-	_, err = s.client.HarnessConfig.UpdateOneID(uid).
+	update := s.client.HarnessConfig.UpdateOneID(uid).
 		SetName(hc.Name).
 		SetSlug(hc.Slug).
 		SetDisplayName(hc.DisplayName).
@@ -475,10 +477,31 @@ func (s *TemplateStore) UpdateHarnessConfig(ctx context.Context, hc *store.Harne
 		SetFiles(marshalJSONString(hc.Files)).
 		SetSourceURL(hc.SourceURL).
 		SetStatus(entharnessconfig.Status(hc.Status)).
+		SetImageStatus(entharnessconfig.ImageStatus(hc.ImageStatus)).
 		SetOwnerID(hc.OwnerID).
 		SetUpdatedBy(hc.UpdatedBy).
 		SetVisibility(hc.Visibility).
-		SetUpdated(hc.Updated).
+		SetUpdated(hc.Updated)
+	if hc.ImageStatusCheckedAt != nil {
+		update.SetImageStatusCheckedAt(*hc.ImageStatusCheckedAt)
+	}
+	_, err = update.Save(ctx)
+	if err != nil {
+		return mapError(err)
+	}
+	return nil
+}
+
+// UpdateHarnessConfigImageStatus updates only the image_status and
+// image_status_checked_at columns for a harness config.
+func (s *TemplateStore) UpdateHarnessConfigImageStatus(ctx context.Context, id, status string, checkedAt time.Time) error {
+	uid, err := parseUUID(id)
+	if err != nil {
+		return err
+	}
+	_, err = s.client.HarnessConfig.UpdateOneID(uid).
+		SetImageStatus(entharnessconfig.ImageStatus(status)).
+		SetImageStatusCheckedAt(checkedAt).
 		Save(ctx)
 	if err != nil {
 		return mapError(err)

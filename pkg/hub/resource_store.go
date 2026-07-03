@@ -17,8 +17,11 @@ package hub
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
@@ -400,6 +403,27 @@ func (p *harnessConfigPersistence) OnHashMatch(ctx context.Context, rec *Resourc
 }
 
 func (p *harnessConfigPersistence) PostFinalize(ctx context.Context, rec *ResourceRecord, dir string) {
+	image := p.extractImage(dir)
+	if image == "" {
+		return
+	}
+	go p.s.checkAndUpdateImageStatus(context.WithoutCancel(ctx), rec.ID, image)
+}
+
+func (p *harnessConfigPersistence) extractImage(dir string) string {
+	if p.model != nil && p.model.Config != nil && p.model.Config.Image != "" {
+		return p.model.Config.Image
+	}
+	configPath := filepath.Join(dir, "config.yaml")
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return ""
+	}
+	entry, err := config.ParseHarnessConfigYAML(data)
+	if err != nil {
+		return ""
+	}
+	return entry.Image
 }
 
 func harnessConfigToRecord(hc *store.HarnessConfig) *ResourceRecord {

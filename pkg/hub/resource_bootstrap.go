@@ -19,10 +19,12 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"path/filepath"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/resources"
 )
 
@@ -95,4 +97,49 @@ func resolveHarnessType(r resources.BundledResource) (string, error) {
 		return "", fmt.Errorf("config.yaml missing harness field")
 	}
 	return entry.Harness, nil
+}
+
+// checkAndUpdateImageStatus resolves the image registry, checks image
+// availability, and persists the result.
+func (s *Server) checkAndUpdateImageStatus(ctx context.Context, hcID, image string) {
+	registry := s.resolveImageRegistry()
+	resolvedImage := config.RewriteImageRegistry(image, registry)
+
+	result := s.imageChecker.Check(ctx, resolvedImage)
+
+	if err := s.store.UpdateHarnessConfigImageStatus(ctx, hcID, result.Status, result.CheckedAt); err != nil {
+		slog.Error("failed to update image status", "id", hcID, "error", err)
+	}
+}
+
+// resolveImageRegistry returns the configured image registry, falling back
+// to an empty string (no rewrite) if unavailable.
+func (s *Server) resolveImageRegistry() string {
+	globalDir, err := config.GetGlobalDir()
+	if err != nil {
+		return ""
+	}
+	vs, err := config.LoadSingleFileVersioned(globalDir)
+	if err != nil || vs == nil {
+		return ""
+	}
+	return vs.ResolveImageRegistry("")
+}
+
+// RecheckAllImageStatuses re-checks image availability for all active
+// harness configs. Called at server startup after bootstrap completes.
+func (s *Server) RecheckAllImageStatuses(ctx context.Context) {
+	result, err := s.store.ListHarnessConfigs(ctx, store.HarnessConfigFilter{
+		Status: store.HarnessConfigStatusActive,
+	}, store.ListOptions{Limit: 1000})
+	if err != nil {
+		slog.Error("failed to list harness configs for image recheck", "error", err)
+		return
+	}
+	for _, hc := range result.Items {
+		if hc.Config == nil || hc.Config.Image == "" {
+			continue
+		}
+		s.checkAndUpdateImageStatus(ctx, hc.ID, hc.Config.Image)
+	}
 }
