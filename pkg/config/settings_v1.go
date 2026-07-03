@@ -747,8 +747,6 @@ type HarnessConfigEntry struct {
 }
 
 // HarnessProvisionerConfig declares how a harness-config is provisioned.
-// "builtin" keeps the current compiled Go harness behavior; "container-script"
-// is the explicit opt-in for the decoupled container-side script path.
 type HarnessProvisionerConfig struct {
 	Type               string   `json:"type,omitempty" yaml:"type,omitempty" koanf:"type"`
 	InterfaceVersion   int      `json:"interface_version,omitempty" yaml:"interface_version,omitempty" koanf:"interface_version"`

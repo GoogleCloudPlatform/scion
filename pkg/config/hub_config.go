@@ -129,11 +129,8 @@ type RuntimeBrokerConfig struct {
 	CORSMaxAge         int      `json:"corsMaxAge" yaml:"corsMaxAge" koanf:"corsMaxAge"`
 
 	// AllowContainerScriptHarnesses controls whether the broker accepts
-	// dispatches whose harness-config declares
-	// `provisioner.type: container-script`. Defaults to true; set false to
-	// block container-script dispatches on this broker. See
-	// .design/decoupled-harness-implementation.md (Phase 3) for the policy
-	// rationale.
+	// dispatches whose harness-config declares a provisioner block. Defaults
+	// to true; set false to block provisioner-based dispatches on this broker.
 	AllowContainerScriptHarnesses bool `json:"allowContainerScriptHarnesses" yaml:"allowContainerScriptHarnesses" koanf:"allowContainerScriptHarnesses"`
 }
 

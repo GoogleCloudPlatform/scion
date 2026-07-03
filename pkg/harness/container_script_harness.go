@@ -773,9 +773,7 @@ func expandEnvTemplate(value, agentName, agentHome, unixUsername string) string 
 }
 
 // StageCaptureAuthAssets stages capture_auth.py and its config file into the
-// harness bundle directory at agentHome/.scion/harness/. This is a shared
-// helper called by both container-script and builtin harness Provision methods
-// so the capture script is available at a known path in the container.
+// harness bundle directory at agentHome/.scion/harness/.
 //
 // configDirPath is the harness-config directory containing capture_auth.py.
 // authMeta provides the required_files declarations used to generate the

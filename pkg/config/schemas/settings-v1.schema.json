@@ -289,7 +289,7 @@
         },
         "provisioner": {
           "$ref": "#/$defs/harnessProvisioner",
-          "description": "Provisioning implementation metadata. Presence of a script file alone does not activate container-script behavior."
+          "description": "Provisioning implementation metadata."
         },
         "config_dir": {
           "type": "string",
@@ -403,8 +403,7 @@
       "type": "object",
       "properties": {
         "type": {
-          "type": "string",
-          "enum": ["builtin", "container-script", "plugin", "generic"]
+          "type": "string"
         },
         "interface_version": {
           "type": "integer",
@@ -774,7 +773,7 @@
         "allow_container_script_harnesses": {
           "type": "boolean",
           "default": true,
-          "description": "Allow agents whose harness-config declares provisioner.type: container-script. Container-script provisioners execute scripts inside the agent container with access to projected secrets. Defaults to true; set false to block container-script dispatches on this broker.",
+          "description": "Allow agents whose harness-config declares a provisioner block. Provisioners execute scripts inside the agent container with access to projected secrets. Defaults to true; set false to block provisioner-based dispatches on this broker.",
           "x-env-var": "SCION_SERVER_BROKER_ALLOWCONTAINERSCRIPTHARNESSES"
         },
         "cors": { "$ref": "#/$defs/corsConfig" }

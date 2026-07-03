@@ -182,21 +182,6 @@ runtimes:
 	assert.NotEmpty(t, errors, "invalid runtime type should produce validation error")
 }
 
-func TestValidateSettings_InvalidHarnessConfigProvisionerType(t *testing.T) {
-	data := []byte(`
-schema_version: "1"
-harness_configs:
-  test:
-    harness: custom
-    image: test:latest
-    provisioner:
-      type: unknown
-`)
-	errors, err := ValidateSettings(data, "1")
-	require.NoError(t, err)
-	assert.NotEmpty(t, errors, "invalid provisioner type should produce validation error")
-}
-
 func TestValidateSettings_MissingRequiredHarnessField(t *testing.T) {
 	data := []byte(`
 schema_version: "1"

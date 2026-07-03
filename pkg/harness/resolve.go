@@ -53,7 +53,7 @@ type ResolvedHarness struct {
 
 // Resolve constructs an api.Harness using the priority order from the design:
 //
-//  1. Container-script harness (provisioner.type: container-script)
+//  1. Container-script harness (provisioner block present)
 //  2. Declarative generic harness (config.yaml only)
 //
 // For (1) the resolved harness-config dir must exist and contain provision.py.

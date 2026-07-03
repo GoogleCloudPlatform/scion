@@ -139,11 +139,9 @@ type ServerConfig struct {
 	StateDir string
 
 	// AllowContainerScriptHarnesses controls whether the broker will dispatch
-	// agents whose resolved harness-config declares
-	// `provisioner.type: container-script`. Container-script provisioners
-	// execute Python (or any declared interpreter) inside the agent container
-	// with access to projected secrets. Defaults to true; set false to block
-	// container-script dispatches on this broker.
+	// agents whose resolved harness-config declares a provisioner block.
+	// Provisioners execute scripts inside the agent container with access to
+	// projected secrets. Defaults to true; set false to block such dispatches.
 	AllowContainerScriptHarnesses bool
 
 	// NFSConfig holds NFS workspace storage settings for this broker.
