@@ -144,6 +144,8 @@ allowed_paths=(
   "^extras/scion-chat-app/internal/chatapp/notifications.go$"
   "^extras/scion-chat-app/internal/state/state.go$"
   "^extras/scion-discord/internal/discord/broker.go$"
+  "^extras/scion-slack/internal/slack/broker.go$"
+  "^extras/scion-slack/internal/slack/broker_test.go$"
   "^extras/scion-telegram/internal/telegram/broker_v2.go$"
 
   # Core compatibility adapters and bounded legacy protocol/storage surfaces.
