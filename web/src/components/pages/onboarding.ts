@@ -18,11 +18,12 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
 import { apiFetch, extractApiError } from '../../client/api.js';
+import type { HarnessConfig } from '../../shared/types.js';
 import '../shared/dir-browser.js';
 
 
 const ONBOARDING_STATUS_KEY = 'onboardingStatus';
-const TOTAL_STEPS = 7;
+const TOTAL_STEPS = 6;
 
 interface OnboardingStatus {
   initialized: boolean;
@@ -84,14 +85,11 @@ export class ScionPageOnboarding extends LitElement {
   @state() private registryInput = '';
   @state() private registrySaving = false;
 
-  // Step 4: Harnesses
+  // Step 4: Harnesses + Images (merged)
+  @state() private harnessConfigs: HarnessConfig[] = [];
   @state() private selectedHarnesses = new Set<string>();
-  @state() private availableHarnesses: Array<{slug: string; name: string}> = [];
-
-  // Step 5: Images
-  @state() private imageStatuses = new Map<string, { status: string; error?: string; fullName?: string }>();
+  @state() private imageCheckStatuses = new Map<string, { imageStatus: string; source?: string | undefined; checking?: boolean | undefined }>();
   @state() private imagePulling = false;
-  @state() private runtimeAvailable = false;
   @state() private gitVersion = '';
   @state() private gitVersionOK = true;
   private imageEventSource: EventSource | null = null;
@@ -506,7 +504,7 @@ export class ScionPageOnboarding extends LitElement {
       if (status && previouslyStarted) {
         if (status.identitySet && this.currentStep === 0) this.currentStep = 1;
         if (status.runtimeOK && this.currentStep <= 2) this.currentStep = Math.max(this.currentStep, 3);
-        if (status.harnessesSeeded && this.currentStep <= 4) this.currentStep = Math.max(this.currentStep, 5);
+        if (status.harnessesSeeded && this.currentStep <= 3) this.currentStep = Math.max(this.currentStep, 4);
       }
 
       // Prefill identity from current user
@@ -558,10 +556,9 @@ export class ScionPageOnboarding extends LitElement {
       case 1: return this.renderSystemCheck();
       case 2: return this.renderRuntime();
       case 3: return this.renderRegistry();
-      case 4: return this.renderHarnesses();
-      case 5: return this.renderImages();
-      case 6: return this.renderWorkspacePlaceholder();
-      case 7: return this.renderDone();
+      case 4: return this.renderHarnessesAndImages();
+      case 5: return this.renderWorkspacePlaceholder();
+      case 6: return this.renderDone();
       default: return nothing;
     }
   }
@@ -839,7 +836,7 @@ export class ScionPageOnboarding extends LitElement {
       <div class="footer">
         <sl-button variant="text" @click=${() => { this.currentStep = 2; }}>Back</sl-button>
         <div class="footer-right">
-          <sl-button variant="default" @click=${() => { this.currentStep = 4; void this.loadAvailableHarnesses(); }}>Skip for now</sl-button>
+          <sl-button variant="default" @click=${() => { this.currentStep = 4; void this.loadHarnessConfigs(); }}>Skip for now</sl-button>
           <sl-button
             variant="primary"
             ?loading=${this.registrySaving}
@@ -855,38 +852,86 @@ export class ScionPageOnboarding extends LitElement {
     await this.handleSaveRegistry();
     if (!this.error) {
       this.currentStep = 4;
-      void this.loadAvailableHarnesses();
+      void this.loadHarnessConfigs();
     }
   }
 
-  // ── Step 4: Harnesses ──
+  // ── Step 4: Harnesses + Images (merged) ──
 
-  private renderHarnesses() {
+  private renderHarnessesAndImages() {
+    const registry = this.imageRegistry || this.registryInput;
+    const selectedList = this.harnessConfigs.filter(hc => this.selectedHarnesses.has(hc.slug));
+    const needsPull = selectedList.filter(hc => {
+      const cs = this.imageCheckStatuses.get(hc.id);
+      const status = cs?.imageStatus ?? hc.imageStatus ?? 'unknown';
+      const source = cs?.source;
+      return !(status === 'valid' && source === 'local');
+    });
+    const allReady = selectedList.length > 0 && needsPull.length === 0;
+
     return html`
       <h2>AI Harnesses</h2>
-      <p>Select which AI coding harnesses to configure.</p>
+      <p>Select harnesses and ensure container images are ready.</p>
 
       ${this.stepLoading ? html`
         <div class="loading-state">
           <sl-spinner></sl-spinner>
-          <p>Loading available harnesses...</p>
+          <p>Loading harness configurations...</p>
         </div>
       ` : html`
         <div class="harness-list">
-          ${this.availableHarnesses.map(h => html`
-            <div class="harness-item">
-              <sl-checkbox
-                ?checked=${this.selectedHarnesses.has(h.slug)}
-                @sl-change=${(e: Event) => {
-                  const checked = (e.target as HTMLInputElement).checked;
-                  const next = new Set(this.selectedHarnesses);
-                  if (checked) { next.add(h.slug); } else { next.delete(h.slug); }
-                  this.selectedHarnesses = next;
-                }}
-              >${h.name}</sl-checkbox>
-            </div>
-          `)}
+          ${this.harnessConfigs.map(hc => {
+            const cs = this.imageCheckStatuses.get(hc.id);
+            const imageStatus = cs?.imageStatus ?? hc.imageStatus ?? 'unknown';
+            const source = cs?.source;
+            const checking = cs?.checking ?? false;
+            const imageName = hc.config?.image ?? '';
+            const displayName = hc.displayName || hc.name;
+
+            return html`
+              <div class="harness-item" style="flex-wrap:wrap;">
+                <sl-checkbox
+                  ?checked=${this.selectedHarnesses.has(hc.slug)}
+                  @sl-change=${(e: Event) => {
+                    const checked = (e.target as HTMLInputElement).checked;
+                    const next = new Set(this.selectedHarnesses);
+                    if (checked) { next.add(hc.slug); } else { next.delete(hc.slug); }
+                    this.selectedHarnesses = next;
+                  }}
+                >
+                  <span class="harness-name">${displayName}</span>
+                </sl-checkbox>
+                <span style="flex:1;font-family:monospace;font-size:0.8125rem;color:var(--scion-text-muted,#64748b);text-align:right;">
+                  ${imageName}
+                </span>
+                ${checking
+                  ? html`<span class="image-status pulling"><sl-spinner></sl-spinner> checking</span>`
+                  : imageStatus === 'valid' && source === 'local'
+                    ? html`<span class="image-status done">✓ ready</span>`
+                    : imageStatus === 'valid' && source === 'registry'
+                      ? html`<span class="image-status pulling">↓ available</span>`
+                      : imageStatus === 'invalid'
+                        ? html`<span class="image-status error">✗ not found</span>`
+                        : imageStatus === 'error'
+                          ? html`<span class="image-status error">⚠ error</span>`
+                          : html`<span class="image-status queued">? unknown</span>`
+                }
+              </div>
+            `;
+          })}
         </div>
+
+        ${needsPull.length > 0 && this.selectedHarnesses.size > 0 ? html`
+          <div class="image-actions" style="margin-top:1rem;">
+            <sl-button
+              variant="primary"
+              size="small"
+              ?loading=${this.imagePulling}
+              ?disabled=${this.imagePulling || !registry}
+              @click=${this.handlePullSelected}
+            >Pull selected</sl-button>
+          </div>
+        ` : nothing}
 
         <p style="font-size:0.8125rem;color:var(--scion-text-muted,#64748b);margin-top:1rem;">
           Additional harnesses can be imported and configured from Hub settings after onboarding.
@@ -896,38 +941,86 @@ export class ScionPageOnboarding extends LitElement {
       <div class="footer">
         <sl-button variant="text" @click=${() => { this.currentStep = 3; }}>Back</sl-button>
         <div class="footer-right">
+          <sl-button variant="default" @click=${() => { this.cleanupImageEvents(); this.currentStep = 5; }}>
+            Skip for now
+          </sl-button>
           <sl-button
             variant="primary"
             ?loading=${this.stepLoading}
             ?disabled=${this.selectedHarnesses.size === 0}
             @click=${this.handleHarnessesNext}
-          >Next</sl-button>
+          >${allReady ? 'Next' : 'Next'}</sl-button>
         </div>
       </div>
     `;
   }
 
-  private async loadAvailableHarnesses(): Promise<void> {
+  private async loadHarnessConfigs(): Promise<void> {
     this.stepLoading = true;
+    this.error = null;
     try {
-      const res = await apiFetch('/api/v1/system/harnesses');
+      const res = await apiFetch('/api/v1/harness-configs?scope=global&status=active');
       if (res.ok) {
-        const data = (await res.json()) as { harnesses: Array<{slug: string; name: string}> };
-        this.availableHarnesses = data.harnesses ?? [];
+        const data = (await res.json()) as { items: HarnessConfig[] };
+        this.harnessConfigs = data.items ?? [];
+        const preselected = new Set<string>();
+        for (const hc of this.harnessConfigs) {
+          if (hc.imageStatus === 'valid') {
+            preselected.add(hc.slug);
+          }
+        }
+        if (this.selectedHarnesses.size === 0) {
+          this.selectedHarnesses = preselected;
+        }
+        void this.checkStaleImageStatuses();
       }
-    } catch { /* fallback to hardcoded list */ }
-    if (this.availableHarnesses.length === 0) {
-      this.availableHarnesses = [
-        { slug: 'claude', name: 'Claude' },
-        { slug: 'gemini', name: 'Gemini' },
-        { slug: 'codex', name: 'Codex' },
-        { slug: 'opencode', name: 'OpenCode' },
-        { slug: 'copilot', name: 'GitHub Copilot' },
-        { slug: 'antigravity', name: 'Antigravity' },
-        { slug: 'hermes', name: 'Hermes' },
-      ];
+    } catch {
+      this.error = 'Failed to load harness configurations.';
+    } finally {
+      this.stepLoading = false;
     }
-    this.stepLoading = false;
+  }
+
+  private async checkStaleImageStatuses(): Promise<void> {
+    const staleConfigs = this.harnessConfigs.filter(hc => {
+      if (!hc.config?.image) return false;
+      if (hc.imageStatus === 'unknown' || !hc.imageStatus) return true;
+      if (hc.imageStatusCheckedAt) {
+        const checkedAt = new Date(hc.imageStatusCheckedAt).getTime();
+        return Date.now() - checkedAt > 5 * 60 * 1000;
+      }
+      return true;
+    });
+
+    const batchSize = 4;
+    for (let i = 0; i < staleConfigs.length; i += batchSize) {
+      const batch = staleConfigs.slice(i, i + batchSize);
+      await Promise.all(batch.map(hc => this.checkImageStatus(hc)));
+    }
+  }
+
+  private async checkImageStatus(hc: HarnessConfig): Promise<void> {
+    const next = new Map(this.imageCheckStatuses);
+    next.set(hc.id, { imageStatus: hc.imageStatus ?? 'unknown', checking: true });
+    this.imageCheckStatuses = next;
+
+    try {
+      const res = await apiFetch(`/api/v1/harness-configs/${hc.id}/check-image`, { method: 'POST' });
+      if (res.ok) {
+        const data = (await res.json()) as { image_status: string; source?: string };
+        const updated = new Map(this.imageCheckStatuses);
+        updated.set(hc.id, { imageStatus: data.image_status, source: data.source, checking: false });
+        this.imageCheckStatuses = updated;
+      } else {
+        const updated = new Map(this.imageCheckStatuses);
+        updated.set(hc.id, { imageStatus: 'error', checking: false });
+        this.imageCheckStatuses = updated;
+      }
+    } catch {
+      const updated = new Map(this.imageCheckStatuses);
+      updated.set(hc.id, { imageStatus: 'error', checking: false });
+      this.imageCheckStatuses = updated;
+    }
   }
 
   private async handleHarnessesNext(): Promise<void> {
@@ -943,139 +1036,17 @@ export class ScionPageOnboarding extends LitElement {
         this.error = await extractApiError(res, 'Failed to initialize harnesses');
         return;
       }
+      this.cleanupImageEvents();
       this.currentStep = 5;
-      void this.loadImagesStep();
     } finally {
       this.stepLoading = false;
     }
   }
 
-  // ── Step 5: Images ──
-
-  private renderImages() {
-    const harnesses = [...this.selectedHarnesses];
-    if (harnesses.length === 0) {
-      return html`
-        <h2>Container Images</h2>
-        <p>No harnesses selected. You can go back to select harnesses or skip this step.</p>
-        <div class="footer">
-          <sl-button variant="text" @click=${() => { this.currentStep = 4; }}>Back</sl-button>
-          <div class="footer-right">
-            <sl-button variant="default" @click=${() => { this.currentStep = 6; }}>Skip for now</sl-button>
-          </div>
-        </div>
-      `;
-    }
-
-    const registry = this.imageRegistry || this.registryInput;
-
-    const allDone = harnesses.length > 0 && harnesses.every(h => {
-      const s = this.imageStatuses.get(h);
-      return s && (s.status === 'done' || s.status === 'exists');
-    });
-
-    return html`
-      <h2>Pull Container Images</h2>
-      ${registry
-        ? html`<p>Pull container images from <strong>${registry}</strong>.</p>`
-        : html`<p>No registry configured. Go back to the Registry step to set one, or skip this step.</p>`}
-
-      ${!this.runtimeAvailable ? html`
-        <div class="alert alert-warning">
-          <strong>No container runtime detected.</strong>
-          <p>
-            Install Docker, Podman, or Apple Container to pull images. You can skip this
-            step and configure a runtime later.
-          </p>
-        </div>
-      ` : nothing}
-
-      <div class="image-list">
-        ${harnesses.map(h => {
-          const s = this.imageStatuses.get(h);
-          const status = s?.status ?? 'pending';
-          const displayName = s?.fullName ?? (registry ? `${registry}/scion-${h}:latest` : `scion-${h}:latest`);
-          return html`
-            <div class="image-item">
-              <span class="image-name">${displayName}</span>
-              ${status === 'pending' ? nothing : html`
-                <span class="image-status ${status}">
-                  ${status === 'pulling' ? html`<sl-spinner></sl-spinner>` : nothing}
-                  ${status === 'done' || status === 'exists' ? '✓' : nothing}
-                  ${status === 'error' ? '✗' : nothing}
-                  ${status}
-                </span>
-              `}
-              ${status === 'error' && s?.error ? html`
-                <div style="font-size:0.75rem;color:var(--sl-color-danger-600,#dc2626);margin-top:0.25rem;word-break:break-word;">
-                  ${s.error}
-                </div>
-              ` : nothing}
-            </div>
-          `;
-        })}
-      </div>
-
-      <div class="image-actions">
-        <sl-button
-          variant="primary"
-          size="small"
-          ?loading=${this.imagePulling}
-          ?disabled=${this.imagePulling || !registry}
-          @click=${this.handlePullImages}
-        >Pull images</sl-button>
-      </div>
-
-      <div class="footer">
-        <sl-button variant="text" @click=${() => { this.currentStep = 4; }}>Back</sl-button>
-        <div class="footer-right">
-          <sl-button variant="default" @click=${() => { this.cleanupImageEvents(); this.currentStep = 6; }}>
-            Skip for now
-          </sl-button>
-          ${allDone ? html`
-            <sl-button variant="primary" @click=${() => { this.cleanupImageEvents(); this.currentStep = 6; }}>
-              Next
-            </sl-button>
-          ` : nothing}
-        </div>
-      </div>
-    `;
-  }
-
-  private async handleSaveRegistry(): Promise<void> {
-    this.error = null;
-    this.registrySaving = true;
-    try {
-      const res = await apiFetch('/api/v1/system/registry', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ image_registry: this.registryInput.trim() }),
-      });
-      if (!res.ok) {
-        this.error = await extractApiError(res, 'Failed to save registry');
-        return;
-      }
-      this.imageRegistry = this.registryInput.trim();
-      // Reload the images step to reflect the new registry
-      void this.loadImagesStep();
-    } catch {
-      this.error = 'Failed to connect to the server.';
-    } finally {
-      this.registrySaving = false;
-    }
-  }
-
-  private async handlePullImages(): Promise<void> {
+  private async handlePullSelected(): Promise<void> {
     this.error = null;
     this.imagePulling = true;
     const harnesses = [...this.selectedHarnesses];
-
-    const statuses = new Map(this.imageStatuses);
-    for (const h of harnesses) {
-      const prefix = this.imageRegistry ? `${this.imageRegistry}/` : '';
-      statuses.set(h, { status: 'queued', fullName: `${prefix}scion-${h}:latest` });
-    }
-    this.imageStatuses = statuses;
 
     try {
       const res = await apiFetch('/api/v1/system/images/pull', {
@@ -1115,22 +1086,13 @@ export class ScionPageOnboarding extends LitElement {
         if (d['image']) {
           const fullImageName = d['image'] as string;
           const status = d['status'] as string;
-          const error = d['error'] as string | undefined;
-
-          const harness = this.imageNameToHarness(fullImageName);
-          if (harness) {
-            const next = new Map(this.imageStatuses);
-            const entry: { status: string; error?: string; fullName?: string } = { status, fullName: fullImageName };
-            if (error) entry.error = error;
-            next.set(harness, entry);
-            this.imageStatuses = next;
-          }
 
           if (status === 'done' || status === 'exists' || status === 'error') {
             completedImages.add(fullImageName);
             if (completedImages.size >= totalImages) {
               this.imagePulling = false;
               this.cleanupImageEvents();
+              void this.recheckAllImageStatuses();
             }
           }
         } else if (d['status'] === 'error') {
@@ -1149,14 +1111,12 @@ export class ScionPageOnboarding extends LitElement {
     };
   }
 
-  private imageNameToHarness(image: string): string | null {
-    for (const h of this.availableHarnesses) {
-      if (image.includes(`scion-${h.slug}`)) return h.slug;
+  private async recheckAllImageStatuses(): Promise<void> {
+    const batchSize = 4;
+    for (let i = 0; i < this.harnessConfigs.length; i += batchSize) {
+      const batch = this.harnessConfigs.slice(i, i + batchSize);
+      await Promise.all(batch.map(hc => this.checkImageStatus(hc)));
     }
-    for (const slug of this.selectedHarnesses) {
-      if (image.includes(`scion-${slug}`)) return slug;
-    }
-    return null;
   }
 
   private cleanupImageEvents(): void {
@@ -1166,17 +1126,28 @@ export class ScionPageOnboarding extends LitElement {
     }
   }
 
-  private async loadImagesStep(): Promise<void> {
+  private async handleSaveRegistry(): Promise<void> {
+    this.error = null;
+    this.registrySaving = true;
     try {
-      const res = await apiFetch('/api/v1/system/runtime');
-      if (res.ok) {
-        const data = (await res.json()) as RuntimeResponse;
-        this.runtimeAvailable = data.available;
+      const res = await apiFetch('/api/v1/system/registry', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ image_registry: this.registryInput.trim() }),
+      });
+      if (!res.ok) {
+        this.error = await extractApiError(res, 'Failed to save registry');
+        return;
       }
-    } catch { /* ignore */ }
+      this.imageRegistry = this.registryInput.trim();
+    } catch {
+      this.error = 'Failed to connect to the server.';
+    } finally {
+      this.registrySaving = false;
+    }
   }
 
-  // ── Step 6: First Workspace ──
+  // ── Step 5: First Workspace ──
 
   private renderWorkspacePlaceholder() {
     if (this.workspaceMode === 'hub') return this.renderWsHub();
@@ -1214,9 +1185,9 @@ export class ScionPageOnboarding extends LitElement {
       </div>
 
       <div class="footer">
-        <sl-button variant="text" @click=${() => { this.currentStep = 5; }}>Back</sl-button>
+        <sl-button variant="text" @click=${() => { this.currentStep = 4; }}>Back</sl-button>
         <div class="footer-right">
-          <sl-button variant="default" @click=${() => { this.currentStep = 7; }}>Skip for now</sl-button>
+          <sl-button variant="default" @click=${() => { this.currentStep = 6; }}>Skip for now</sl-button>
         </div>
       </div>
     `;
@@ -1239,7 +1210,7 @@ export class ScionPageOnboarding extends LitElement {
       <div class="footer">
         <sl-button variant="text" @click=${() => { this.workspaceMode = 'choose'; }}>Back</sl-button>
         <div class="footer-right">
-          <sl-button variant="default" @click=${() => { this.currentStep = 7; }}>Skip for now</sl-button>
+          <sl-button variant="default" @click=${() => { this.currentStep = 6; }}>Skip for now</sl-button>
           <sl-button
             variant="primary"
             ?loading=${this.wsCreating}
@@ -1264,7 +1235,7 @@ export class ScionPageOnboarding extends LitElement {
         this.error = await extractApiError(res, 'Failed to create project');
         return;
       }
-      this.currentStep = 7;
+      this.currentStep = 6;
     } catch {
       this.error = 'Failed to connect to the server.';
     } finally {
@@ -1334,7 +1305,7 @@ export class ScionPageOnboarding extends LitElement {
       <div class="footer">
         <sl-button variant="text" @click=${() => { this.workspaceMode = 'choose'; }}>Back</sl-button>
         <div class="footer-right">
-          <sl-button variant="default" @click=${() => { this.currentStep = 7; }}>Skip for now</sl-button>
+          <sl-button variant="default" @click=${() => { this.currentStep = 6; }}>Skip for now</sl-button>
           <sl-button
             variant="primary"
             ?loading=${this.wsCreating}
@@ -1401,7 +1372,7 @@ export class ScionPageOnboarding extends LitElement {
         this.error = await extractApiError(provRes, 'Project created but failed to link directory. You can retry.');
         return;
       }
-      this.currentStep = 7;
+      this.currentStep = 6;
     } catch {
       this.error = 'Failed to connect to the server.';
     } finally {
