@@ -1418,7 +1418,7 @@ func TestSharedWorkspace_NoAgentStateInMounts(t *testing.T) {
 
 func TestBuildCommonRunArgs_FuseMountArgOrdering(t *testing.T) {
 	config := RunConfig{
-		Harness:      &harness.ClaudeCode{},
+		Harness:      &harness.Generic{},
 		Name:         "test-agent",
 		UnixUsername: "scion",
 		Image:        "scion-agent:latest",
@@ -1499,7 +1499,7 @@ func TestBuildCommonRunArgs_ShellMetacharsInPrompt(t *testing.T) {
 	for _, tt := range prompts {
 		t.Run(tt.name, func(t *testing.T) {
 			config := RunConfig{
-				Harness:      &harness.ClaudeCode{},
+				Harness:      &harness.Generic{},
 				Name:         "test-agent",
 				UnixUsername: "scion",
 				Image:        "scion-agent:latest",

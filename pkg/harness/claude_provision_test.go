@@ -142,7 +142,7 @@ func TestClaudeContainerScriptReconcilesMissingBundle(t *testing.T) {
 
 	agentHome := t.TempDir()
 
-	// Simulate an agent home created by the builtin ClaudeCode{} harness:
+	// Simulate an agent home created by the old builtin harness path:
 	// the config dir exists but there is no .scion/harness/ bundle.
 	configDir := filepath.Join(agentHome, ".claude")
 	if err := os.MkdirAll(configDir, 0755); err != nil {
