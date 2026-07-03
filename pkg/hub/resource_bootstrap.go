@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"os"
 	"path/filepath"
 
 	"golang.org/x/sync/errgroup"
@@ -132,18 +133,19 @@ func (s *Server) checkAndUpdateImageStatus(ctx context.Context, hcID, image stri
 	}
 }
 
-// resolveImageRegistry returns the configured image registry, falling back
-// to an empty string (no rewrite) if unavailable.
+// resolveImageRegistry returns the configured image registry from the
+// server's in-memory config, which includes environment variable overrides
+// applied at startup. Falls back to SCION_IMAGE_REGISTRY env var if the
+// maintenance config value is empty.
+//
+// TODO: use an internal settings API that returns fully-resolved settings
+// (env var overrides + DB values) once available — needed for HA mode where
+// settings will live in the database.
 func (s *Server) resolveImageRegistry() string {
-	globalDir, err := config.GetGlobalDir()
-	if err != nil {
-		return ""
+	if r := s.config.MaintenanceConfig.ImageRegistry; r != "" {
+		return r
 	}
-	vs, err := config.LoadSingleFileVersioned(globalDir)
-	if err != nil || vs == nil {
-		return ""
-	}
-	return vs.ResolveImageRegistry("")
+	return os.Getenv("SCION_IMAGE_REGISTRY")
 }
 
 // RecheckAllImageStatuses re-checks image availability for all active

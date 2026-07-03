@@ -644,6 +644,7 @@ func (s *Server) handleHarnessConfigCheckImage(w http.ResponseWriter, r *http.Re
 		"image_status":            result.Status,
 		"image_status_checked_at": result.CheckedAt,
 		"source":                  result.Source,
+		"resolved_image":          resolvedImage,
 	}
 	if result.Error != "" {
 		resp["error"] = result.Error
