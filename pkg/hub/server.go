@@ -1584,6 +1584,12 @@ func (s *Server) SetGCPTokenMetrics(m GCPTokenMetricsRecorder) {
 	s.gcpTokenMetrics = m
 }
 
+// SetLocalImageChecker wires a local container runtime into the image
+// checker so it can verify images via the local Docker/Podman daemon.
+func (s *Server) SetLocalImageChecker(l imagecheck.LocalImageExister) {
+	s.imageChecker.SetLocal(l)
+}
+
 // GetMaintenanceState returns the runtime maintenance state.
 func (s *Server) GetMaintenanceState() *MaintenanceState {
 	return s.maintenance

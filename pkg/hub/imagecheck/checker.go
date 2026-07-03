@@ -41,6 +41,10 @@ func NewChecker(opts ...Option) *Checker {
 	return c
 }
 
+func (c *Checker) SetLocal(l LocalImageExister) {
+	c.local = l
+}
+
 func (c *Checker) Check(ctx context.Context, image string) CheckResult {
 	now := time.Now()
 
