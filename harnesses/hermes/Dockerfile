@@ -33,9 +33,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends python3-pip \
 
 # Install Hermes Agent via pip
 RUN if [ -n "${HERMES_VERSION}" ]; then \
-      pip install --no-cache-dir "hermes-agent==${HERMES_VERSION}"; \
+      pip install --no-cache-dir --break-system-packages "hermes-agent==${HERMES_VERSION}"; \
     else \
-      pip install --no-cache-dir hermes-agent; \
+      pip install --no-cache-dir --break-system-packages hermes-agent; \
     fi
 
 RUN mkdir -p /home/scion/.hermes /home/scion/.hermes/skills \
