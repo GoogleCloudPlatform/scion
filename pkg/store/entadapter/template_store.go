@@ -390,6 +390,9 @@ func (s *TemplateStore) CreateHarnessConfig(ctx context.Context, hc *store.Harne
 	if hc.Status == "" {
 		hc.Status = store.HarnessConfigStatusActive
 	}
+	if hc.ImageStatus == "" {
+		hc.ImageStatus = store.HarnessConfigImageStatusUnknown
+	}
 
 	create := s.client.HarnessConfig.Create().
 		SetID(uid).
@@ -408,6 +411,7 @@ func (s *TemplateStore) CreateHarnessConfig(ctx context.Context, hc *store.Harne
 		SetFiles(marshalJSONString(hc.Files)).
 		SetSourceURL(hc.SourceURL).
 		SetStatus(entharnessconfig.Status(hc.Status)).
+		SetImageStatus(entharnessconfig.ImageStatus(hc.ImageStatus)).
 		SetOwnerID(hc.OwnerID).
 		SetCreatedBy(hc.CreatedBy).
 		SetUpdatedBy(hc.UpdatedBy).
@@ -460,6 +464,9 @@ func (s *TemplateStore) UpdateHarnessConfig(ctx context.Context, hc *store.Harne
 	}
 
 	hc.Updated = time.Now()
+	if hc.ImageStatus == "" {
+		hc.ImageStatus = store.HarnessConfigImageStatusUnknown
+	}
 
 	update := s.client.HarnessConfig.UpdateOneID(uid).
 		SetName(hc.Name).
