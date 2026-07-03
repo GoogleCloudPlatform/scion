@@ -633,9 +633,11 @@ func (s *Server) handleSystemImagesPull(w http.ResponseWriter, r *http.Request) 
 
 	rt := runtime.GetRuntime("", "")
 
+	requestedHarnesses := req.Harnesses
+
 	go func() {
 		defer s.imagePullActive.Store(false)
-		if err := runtime.PullImages(s.ctx, rt, req.Harnesses, registry, func(pr runtime.PullResult) {
+		if err := runtime.PullImages(s.ctx, rt, requestedHarnesses, registry, func(pr runtime.PullResult) {
 			s.events.PublishRaw("system.images."+jobID, pr)
 		}); err != nil {
 			s.events.PublishRaw("system.images."+jobID, map[string]string{
@@ -643,9 +645,31 @@ func (s *Server) handleSystemImagesPull(w http.ResponseWriter, r *http.Request) 
 				"error":  err.Error(),
 			})
 		}
+		s.syncImageStatusAfterPull(s.ctx, requestedHarnesses)
 	}()
 
 	writeJSON(w, http.StatusOK, imagePullResponse{JobID: jobID})
+}
+
+// syncImageStatusAfterPull updates the image_status of harness-configs
+// matching the pulled harnesses so the DB reflects newly-pulled images.
+func (s *Server) syncImageStatusAfterPull(ctx context.Context, harnesses []string) {
+	for _, h := range harnesses {
+		configs, err := s.store.ListHarnessConfigs(ctx, store.HarnessConfigFilter{
+			Harness: h,
+			Status:  store.HarnessConfigStatusActive,
+		}, store.ListOptions{Limit: 100})
+		if err != nil {
+			slog.Error("syncImageStatusAfterPull: list failed", "harness", h, "error", err)
+			continue
+		}
+		for _, hc := range configs.Items {
+			if hc.Config == nil || hc.Config.Image == "" {
+				continue
+			}
+			s.checkAndUpdateImageStatus(ctx, hc.ID, hc.Config.Image)
+		}
+	}
 }
 
 // --- 4.2: Image Build ---
