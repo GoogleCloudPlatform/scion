@@ -132,6 +132,9 @@ func (rs *ResourceStore) Bootstrap(ctx context.Context, name, dir, scope, scopeI
 		return false, fmt.Errorf("storage backend is not configured")
 	}
 
+	if err := transfer.NormalizeDir(dir); err != nil {
+		return false, fmt.Errorf("normalize dir: %w", err)
+	}
 	files, err := transfer.CollectFiles(dir, nil)
 	if err != nil {
 		return false, err

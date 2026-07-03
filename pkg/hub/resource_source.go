@@ -133,6 +133,7 @@ func (s *FSResourceSource) Files(ctx context.Context) ([]transfer.FileInfo, erro
 		if readErr != nil {
 			return readErr
 		}
+		data = transfer.NormalizeFileContent(data)
 
 		hash := sha256.Sum256(data)
 		files = append(files, transfer.FileInfo{
@@ -264,6 +265,11 @@ func (rs *ResourceStore) BootstrapSource(ctx context.Context, src ResourceSource
 		return result, fmt.Errorf("%s: stage source: %w", p.Label(), err)
 	}
 	defer cleanup()
+
+	if err := transfer.NormalizeDir(dir); err != nil {
+		result.Failed++
+		return result, fmt.Errorf("%s: normalize staged dir: %w", p.Label(), err)
+	}
 
 	files, err := transfer.CollectFiles(dir, nil)
 	if err != nil {
