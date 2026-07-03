@@ -489,7 +489,7 @@ type HarnessConfigFilter struct {
 	Scope     string
 	ScopeID   string
 	ProjectID string // When set without Scope, returns global + project-scoped configs for this project
-	Harness   string
+	Harness     string
 	OwnerID     string
 	Status      string
 	ImageStatus string

@@ -17,6 +17,7 @@ package hub
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -287,7 +288,10 @@ func (s *Server) getHarnessConfig(w http.ResponseWriter, r *http.Request, id str
 
 	if s.imageStatusStale(hc) {
 		if image := s.harnessConfigImage(hc); image != "" {
-			go s.checkAndUpdateImageStatus(context.Background(), hc.ID, image)
+			go s.imageStatusFlight.Do(hc.ID, func() (any, error) {
+				s.checkAndUpdateImageStatus(context.Background(), hc.ID, image)
+				return nil, nil
+			})
 		}
 	}
 
@@ -600,7 +604,9 @@ func (s *Server) handleHarnessConfigCheckImage(w http.ResponseWriter, r *http.Re
 	resolvedImage := config.RewriteImageRegistry(image, registry)
 	result := s.imageChecker.Check(ctx, resolvedImage)
 
-	_ = s.store.UpdateHarnessConfigImageStatus(ctx, hc.ID, result.Status, result.CheckedAt)
+	if err := s.store.UpdateHarnessConfigImageStatus(ctx, hc.ID, result.Status, result.CheckedAt); err != nil {
+		slog.Warn("failed to persist image status", "id", hc.ID, "error", err)
+	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"image_status":            result.Status,

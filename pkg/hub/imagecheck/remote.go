@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -157,7 +158,7 @@ func fetchAnonymousToken(ctx context.Context, client HTTPClient, wwwAuth string)
 	tokenURL := realm
 	sep := "?"
 	for k, v := range params {
-		tokenURL += sep + k + "=" + v
+		tokenURL += sep + url.QueryEscape(k) + "=" + url.QueryEscape(v)
 		sep = "&"
 	}
 

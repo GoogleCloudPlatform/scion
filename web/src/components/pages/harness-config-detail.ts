@@ -655,6 +655,9 @@ export class ScionPageHarnessConfigDetail extends LitElement {
     );
     if (resp.ok) {
       await this.loadHarnessConfig();
+    } else {
+      const msg = await extractApiError(resp, `HTTP ${resp.status}`);
+      alert(msg);
     }
   }
 

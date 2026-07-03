@@ -49,6 +49,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 	"github.com/google/uuid"
 	"github.com/robfig/cron/v3"
+	"golang.org/x/sync/singleflight"
 )
 
 const (
@@ -670,7 +671,8 @@ type Server struct {
 	imageBuildActive atomic.Bool
 	imagePullActive  atomic.Bool
 
-	imageChecker *imagecheck.Checker
+	imageChecker      *imagecheck.Checker
+	imageStatusFlight singleflight.Group
 }
 
 func newInstanceID() string {
