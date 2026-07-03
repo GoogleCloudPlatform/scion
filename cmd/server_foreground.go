@@ -1328,6 +1328,7 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 		if err := hubSrv.BootstrapBundledResources(ctx, hub.BootstrapOptions{
 			RepairStorage:   true,
 			OverwritePolicy: hub.OverwriteBuiltinManaged,
+			SkipIfAnyExist:  true,
 		}); err != nil {
 			log.Printf("Warning: bundled resource bootstrap failed: %v", err)
 		}

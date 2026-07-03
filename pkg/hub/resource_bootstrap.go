@@ -42,8 +42,23 @@ func (s *Server) BootstrapBundledResources(ctx context.Context, opts BootstrapOp
 		return nil
 	}
 
+	skipHarnessConfigs := false
+	if opts.SkipIfAnyExist {
+		existing, err := s.store.ListHarnessConfigs(ctx, store.HarnessConfigFilter{
+			Status: store.HarnessConfigStatusActive,
+		}, store.ListOptions{Limit: 1})
+		if err == nil && len(existing.Items) > 0 {
+			s.resourceLog.Info("bundled resource bootstrap: active harness configs exist, skipping harness-config seeding")
+			skipHarnessConfigs = true
+		}
+	}
+
 	var errs []error
 	for _, r := range resources.BuiltinResources() {
+		if skipHarnessConfigs && r.Kind == storage.ResourceKindHarnessConfig {
+			continue
+		}
+
 		src := NewFSResourceSource(r)
 
 		var rs *ResourceStore

@@ -58,6 +58,7 @@ type BootstrapOptions struct {
 	RepairStorage   bool
 	AdoptExisting   bool
 	OverwritePolicy OverwritePolicy
+	SkipIfAnyExist  bool // skip seeding if any active resources of the same kind already exist
 }
 
 // OverwritePolicy determines which existing resources BootstrapSource may overwrite.
@@ -81,7 +82,8 @@ type BootstrapResult struct {
 // IsBuiltinManaged returns true if sourceURL identifies a resource managed by
 // the built-in bundled catalog.
 func IsBuiltinManaged(sourceURL string) bool {
-	return strings.HasPrefix(sourceURL, "builtin://scion/")
+	return strings.HasPrefix(sourceURL, "builtin://scion/") ||
+		strings.HasPrefix(sourceURL, "git+https://github.com/GoogleCloudPlatform/scion/harnesses/")
 }
 
 // FSResourceSource implements ResourceSource for a bundled BundledResource.
