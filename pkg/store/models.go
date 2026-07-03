@@ -585,15 +585,18 @@ type HarnessConfig struct {
 
 // HarnessConfigData holds the harness-specific configuration details.
 type HarnessConfigData struct {
-	Harness          string               `json:"harness,omitempty"`
-	Image            string               `json:"image,omitempty"`
-	User             string               `json:"user,omitempty"`
-	Model            string               `json:"model,omitempty"`
-	Args             []string             `json:"args,omitempty"`
-	Env              map[string]string    `json:"env,omitempty"`
-	AuthSelectedType string               `json:"authSelectedType,omitempty"`
-	Secrets          []api.RequiredSecret `json:"secrets,omitempty"`
-	ModelAliases     map[string]string    `json:"modelAliases,omitempty"`
+	Harness                 string               `json:"harness,omitempty"`
+	Image                   string               `json:"image,omitempty"`
+	User                    string               `json:"user,omitempty"`
+	Model                   string               `json:"model,omitempty"`
+	Args                    []string             `json:"args,omitempty"`
+	Env                     map[string]string    `json:"env,omitempty"`
+	AuthSelectedType        string               `json:"authSelectedType,omitempty"`
+	Secrets                 []api.RequiredSecret `json:"secrets,omitempty"`
+	ModelAliases            map[string]string    `json:"modelAliases,omitempty"`
+	ThinkingBudgetMap       map[string]int       `json:"thinkingBudgetMap,omitempty"`
+	ThinkingBudgetFlag      string               `json:"thinkingBudgetFlag,omitempty"`
+	ThinkingBudgetConfigKey string               `json:"thinkingBudgetConfigKey,omitempty"`
 }
 
 // HarnessConfigStatus constants

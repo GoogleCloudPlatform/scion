@@ -238,5 +238,39 @@ class CodexProvisionTest(unittest.TestCase):
         self.assertIn('environment = "production"', defaulted)
 
 
+    def test_apply_thinking_budget_inserts_key(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with temporary_home(tmp):
+                codex_dir = os.path.join(tmp, ".codex")
+                os.makedirs(codex_dir)
+                config_path = os.path.join(codex_dir, "config.toml")
+                with open(config_path, "w") as f:
+                    f.write('[otel]\nenabled = true\n')
+
+                provision._apply_thinking_budget("model_reasoning_effort", "medium")
+
+                with open(config_path) as f:
+                    content = f.read()
+                self.assertIn('model_reasoning_effort = "medium"', content)
+                self.assertIn("[otel]", content)
+
+    def test_apply_thinking_budget_replaces_existing_key(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with temporary_home(tmp):
+                codex_dir = os.path.join(tmp, ".codex")
+                os.makedirs(codex_dir)
+                config_path = os.path.join(codex_dir, "config.toml")
+                with open(config_path, "w") as f:
+                    f.write('model_reasoning_effort = "low"\n\n[otel]\nenabled = true\n')
+
+                provision._apply_thinking_budget("model_reasoning_effort", "high")
+
+                with open(config_path) as f:
+                    content = f.read()
+                self.assertIn('model_reasoning_effort = "high"', content)
+                self.assertNotIn('"low"', content)
+                self.assertEqual(content.count("model_reasoning_effort"), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

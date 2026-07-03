@@ -554,6 +554,54 @@ def _reconcile_codex_toml(telemetry: dict[str, Any] | None, env: dict[str, str] 
     os.replace(tmp, config_path)
 
 
+# --- Thinking budget --------------------------------------------------------
+
+
+def _apply_thinking_budget(config_key: str, level: str) -> None:
+    """Write the resolved thinking budget level into ~/.codex/config.toml.
+
+    Replaces an existing top-level `config_key = ...` line or appends one
+    before any bracketed section. This mirrors the line-based TOML editing
+    used by _reconcile_codex_toml / _strip_otel_section.
+    """
+    codex_dir = _expand("~/.codex")
+    os.makedirs(codex_dir, exist_ok=True)
+    config_path = os.path.join(codex_dir, "config.toml")
+
+    content = ""
+    if os.path.isfile(config_path):
+        with open(config_path, "r", encoding="utf-8") as f:
+            content = f.read()
+
+    key_re = re.compile(r"^\s*" + re.escape(config_key) + r"\s*=")
+    lines = content.split("\n")
+    new_line = f'{config_key} = "{_toml_escape(level)}"'
+
+    replaced = False
+    for i, line in enumerate(lines):
+        if key_re.match(line):
+            lines[i] = new_line
+            replaced = True
+            break
+
+    if not replaced:
+        insert_at = 0
+        for i, line in enumerate(lines):
+            if line.strip().startswith("["):
+                break
+            insert_at = i + 1
+        lines.insert(insert_at, new_line)
+
+    content = "\n".join(lines)
+    content = content.strip() + "\n"
+
+    tmp = config_path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(content)
+    os.replace(tmp, config_path)
+    print(f"codex provision: set {config_key}={level} in config.toml", file=sys.stderr)
+
+
 # --- MCP server reconciliation ---------------------------------------------
 #
 # Codex consumes MCP servers from `[mcp_servers.<name>]` tables in
@@ -845,6 +893,18 @@ def _provision(manifest: dict[str, Any]) -> int:
     except OSError as exc:
         print(f"codex provision: reconcile config.toml failed: {exc}", file=sys.stderr)
         return EXIT_ERROR
+
+    # Thinking budget — the host-side provision.go injects the resolved effort
+    # level as SCION_THINKING_BUDGET_LEVEL when the harness config declares a
+    # thinking_budget_config_key. Write it into config.toml so Codex picks it up.
+    thinking_level = os.environ.get("SCION_THINKING_BUDGET_LEVEL", "").strip()
+    thinking_key = str(harness_cfg.get("thinking_budget_config_key") or "").strip()
+    if thinking_level and thinking_key:
+        try:
+            _apply_thinking_budget(thinking_key, thinking_level)
+        except OSError as exc:
+            print(f"codex provision: apply thinking budget failed: {exc}", file=sys.stderr)
+            return EXIT_ERROR
 
     # Outputs.
     outputs = manifest.get("outputs") or {}

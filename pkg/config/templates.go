@@ -662,6 +662,38 @@ func ResolveModelAlias(model string, aliases map[string]string) string {
 	return model // alias not mapped, pass through
 }
 
+// ResolveThinkingBudget maps a 0-100 thinking budget value to a harness-
+// specific effort level string using the harness's threshold map. The map
+// keys are effort level names (e.g. "low", "medium", "high") and values
+// are the upper-bound budget thresholds for that level. The function
+// selects the level with the smallest threshold that is >= the budget.
+// If the budget exceeds all thresholds, the highest level is returned.
+// Returns "" if the budget is 0 or the map is nil/empty.
+func ResolveThinkingBudget(budget int, thresholds map[string]int) string {
+	if budget <= 0 || len(thresholds) == 0 {
+		return ""
+	}
+
+	type entry struct {
+		level     string
+		threshold int
+	}
+	entries := make([]entry, 0, len(thresholds))
+	for level, threshold := range thresholds {
+		entries = append(entries, entry{level, threshold})
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].threshold < entries[j].threshold
+	})
+
+	for _, e := range entries {
+		if e.threshold >= budget {
+			return e.level
+		}
+	}
+	return entries[len(entries)-1].level
+}
+
 func MergeScionConfig(base, override *api.ScionConfig) *api.ScionConfig {
 	if base == nil {
 		base = &api.ScionConfig{}
@@ -708,6 +740,9 @@ func MergeScionConfig(base, override *api.ScionConfig) *api.ScionConfig {
 	}
 	if override.Model != "" {
 		result.Model = override.Model
+	}
+	if override.ThinkingBudget > 0 {
+		result.ThinkingBudget = override.ThinkingBudget
 	}
 	if override.Kubernetes != nil {
 		result.Kubernetes = mergeKubernetesConfig(result.Kubernetes, override.Kubernetes)

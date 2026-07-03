@@ -39,6 +39,13 @@ model_aliases:
   small: haiku
   medium: sonnet
   large: opus
+  x-large: fable
+thinking_budget_map:
+  low: 30
+  medium: 60
+  high: 90
+  xhigh: 100
+thinking_budget_flag: "--effort"
 env:
   ANTHROPIC_MODEL: "opus"
   ANTHROPIC_SMALL_FAST_MODEL: "haiku"

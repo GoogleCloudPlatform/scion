@@ -1717,6 +1717,44 @@ func TestResolveModelAlias(t *testing.T) {
 	}
 }
 
+func TestResolveThinkingBudget(t *testing.T) {
+	thresholds := map[string]int{
+		"low":    10,
+		"medium": 50,
+		"high":   80,
+	}
+
+	tests := []struct {
+		name       string
+		budget     int
+		thresholds map[string]int
+		expected   string
+	}{
+		{"zero budget returns empty", 0, thresholds, ""},
+		{"negative budget returns empty", -5, thresholds, ""},
+		{"nil thresholds returns empty", 50, nil, ""},
+		{"empty thresholds returns empty", 50, map[string]int{}, ""},
+		{"budget below all thresholds selects lowest", 5, thresholds, "low"},
+		{"budget matches low threshold", 10, thresholds, "low"},
+		{"budget between low and medium", 30, thresholds, "medium"},
+		{"budget matches medium threshold", 50, thresholds, "medium"},
+		{"budget between medium and high", 70, thresholds, "high"},
+		{"budget matches high threshold", 80, thresholds, "high"},
+		{"budget above all thresholds selects highest", 100, thresholds, "high"},
+		{"single threshold at zero selects on any positive budget", 1, map[string]int{"low": 0}, "low"},
+		{"single threshold exact match", 50, map[string]int{"medium": 50}, "medium"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ResolveThinkingBudget(tt.budget, tt.thresholds)
+			if got != tt.expected {
+				t.Errorf("ResolveThinkingBudget(%d, ...) = %q, want %q", tt.budget, got, tt.expected)
+			}
+		})
+	}
+}
+
 func TestWarnDeprecatedTemplateFields(t *testing.T) {
 	t.Run("nil config returns nil", func(t *testing.T) {
 		warnings := WarnDeprecatedTemplateFields(nil)

@@ -711,6 +711,27 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 		}
 	}
 
+	// Resolve thinking budget (0-100 → harness effort level)
+	if finalScionCfg.ThinkingBudget > 0 && hcDir.Config.ThinkingBudgetMap != nil {
+		effortLevel := config.ResolveThinkingBudget(finalScionCfg.ThinkingBudget, hcDir.Config.ThinkingBudgetMap)
+		if effortLevel != "" {
+			if hcDir.Config.ThinkingBudgetFlag != "" {
+				util.Debugf("ProvisionAgent: resolved thinking_budget %d → effort %q (flag %s)",
+					finalScionCfg.ThinkingBudget, effortLevel, hcDir.Config.ThinkingBudgetFlag)
+				finalScionCfg.CommandArgs = append(finalScionCfg.CommandArgs,
+					hcDir.Config.ThinkingBudgetFlag, effortLevel)
+			}
+			if hcDir.Config.ThinkingBudgetConfigKey != "" {
+				util.Debugf("ProvisionAgent: resolved thinking_budget %d → effort %q (config key %s)",
+					finalScionCfg.ThinkingBudget, effortLevel, hcDir.Config.ThinkingBudgetConfigKey)
+				if finalScionCfg.Env == nil {
+					finalScionCfg.Env = make(map[string]string)
+				}
+				finalScionCfg.Env["SCION_THINKING_BUDGET_LEVEL"] = effortLevel
+			}
+		}
+	}
+
 	// 2d. Compose agent home directory
 	homeCopyStart := time.Now()
 

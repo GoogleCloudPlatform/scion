@@ -730,6 +730,24 @@ type HarnessConfigEntry struct {
 	// model field; the alias is resolved to the concrete name at provision time.
 	ModelAliases map[string]string `json:"model_aliases,omitempty" yaml:"model_aliases,omitempty" koanf:"model_aliases"`
 
+	// ThinkingBudgetMap maps effort-level names (e.g. "low", "medium", "high")
+	// to integer thresholds on the 0-100 scale. A template's thinking_budget
+	// value is compared against these thresholds to select the effort level,
+	// which is then passed to the harness CLI via its native flag.
+	ThinkingBudgetMap map[string]int `json:"thinking_budget_map,omitempty" yaml:"thinking_budget_map,omitempty" koanf:"thinking_budget_map"`
+
+	// ThinkingBudgetFlag is the CLI flag the harness uses to accept an effort
+	// level (e.g. "--effort" for Claude Code). If empty, thinking budget is
+	// not supported by this harness.
+	ThinkingBudgetFlag string `json:"thinking_budget_flag,omitempty" yaml:"thinking_budget_flag,omitempty" koanf:"thinking_budget_flag"`
+
+	// ThinkingBudgetConfigKey is the config file key the harness uses to accept
+	// an effort level (e.g. "model_reasoning_effort" for Codex). Used when the
+	// harness reads effort from a config file instead of a CLI flag. The resolved
+	// level is injected as SCION_THINKING_BUDGET_LEVEL env var for the
+	// provisioning script to write into the config file.
+	ThinkingBudgetConfigKey string `json:"thinking_budget_config_key,omitempty" yaml:"thinking_budget_config_key,omitempty" koanf:"thinking_budget_config_key"`
+
 	Provisioner      *HarnessProvisionerConfig        `json:"provisioner,omitempty" yaml:"provisioner,omitempty" koanf:"provisioner"`
 	ConfigDir        string                           `json:"config_dir,omitempty" yaml:"config_dir,omitempty" koanf:"config_dir"`
 	SkillsDir        string                           `json:"skills_dir,omitempty" yaml:"skills_dir,omitempty" koanf:"skills_dir"`

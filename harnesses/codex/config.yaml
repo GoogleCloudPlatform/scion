@@ -39,6 +39,11 @@ model_aliases:
   small: gpt-5.4-mini
   medium: gpt-5.4
   large: gpt-5.5
+thinking_budget_map:
+  low: 30
+  medium: 60
+  high: 100
+thinking_budget_config_key: model_reasoning_effort
 command:
   base: ["codex", "--sandbox", "danger-full-access", "--dangerously-bypass-approvals-and-sandbox", "--dangerously-bypass-hook-trust"]
   # resume_flag is split on whitespace, so "resume --last" emits two argv tokens

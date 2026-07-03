@@ -287,6 +287,19 @@
           "additionalProperties": { "type": "string" },
           "description": "Maps abstract model size aliases (e.g. small, medium, large) to concrete harness-specific model names. Templates use the alias; it is resolved at provision time."
         },
+        "thinking_budget_map": {
+          "type": "object",
+          "description": "Maps thinking effort level names to minimum budget thresholds (0-100). The smallest threshold greater than or equal to the requested budget is selected.",
+          "additionalProperties": { "type": "integer", "minimum": 0, "maximum": 100 }
+        },
+        "thinking_budget_flag": {
+          "type": "string",
+          "description": "CLI flag name used to pass the resolved thinking effort level to the harness (e.g. --effort)."
+        },
+        "thinking_budget_config_key": {
+          "type": "string",
+          "description": "Config file key used to pass the resolved thinking effort level to the harness (e.g. model_reasoning_effort). The level is injected as SCION_THINKING_BUDGET_LEVEL env var for the provisioning script."
+        },
         "provisioner": {
           "$ref": "#/$defs/harnessProvisioner",
           "description": "Provisioning implementation metadata. Presence of a script file alone does not activate container-script behavior."
