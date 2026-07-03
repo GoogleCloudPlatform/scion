@@ -206,6 +206,7 @@ func (c *ContainerScriptHarness) ResolveAuth(auth api.AuthConfig) (*api.Resolved
 	// use them. SCION_HARNESS_AUTH_CANDIDATES is a manifest-style hint.
 	if auth.SelectedType != "" {
 		resolved.EnvVars["SCION_HARNESS_SELECTED_AUTH"] = auth.SelectedType
+		resolved.Method = auth.SelectedType
 	}
 
 	// Forward any explicit auth env vars to the container. The script may
@@ -267,10 +268,51 @@ func (c *ContainerScriptHarness) ResolveAuth(auth api.AuthConfig) (*api.Resolved
 		})
 	}
 
+	// When no explicit auth type was selected, detect from the staged
+	// credentials using harness-config auth metadata. This sets a
+	// user-facing Method (e.g. "api-key") instead of the provisioner type.
+	if auth.SelectedType == "" && c.entry.Auth != nil {
+		envKeys := make(map[string]struct{}, len(resolved.EnvVars))
+		for k := range resolved.EnvVars {
+			envKeys[k] = struct{}{}
+		}
+		if detected := DetectAuthTypeFromEnvVarsFromConfig(c.entry.Auth, envKeys); detected != "" {
+			resolved.Method = detected
+		} else if c.entry.Auth.DefaultType != "" {
+			// Check if the default auth type's required env keys are satisfied.
+			if meta, ok := c.entry.Auth.Types[c.entry.Auth.DefaultType]; ok {
+				if authTypeEnvSatisfied(meta, envKeys) {
+					resolved.Method = c.entry.Auth.DefaultType
+				}
+			}
+		}
+	}
+
 	// The auth_candidates manifest written during Provision() captures the full
 	// candidate set for the script. ResolveAuth provides the env/file material
 	// the runtime needs to project secrets into the container.
 	return resolved, nil
+}
+
+// authTypeEnvSatisfied checks if at least one required_env group for an auth
+// type has all its any_of keys satisfied by the presentKeys set.
+func authTypeEnvSatisfied(meta config.HarnessAuthTypeMetadata, presentKeys map[string]struct{}) bool {
+	if len(meta.RequiredEnv) == 0 {
+		return false
+	}
+	for _, req := range meta.RequiredEnv {
+		satisfied := false
+		for _, key := range req.AnyOf {
+			if _, ok := presentKeys[key]; ok {
+				satisfied = true
+				break
+			}
+		}
+		if !satisfied {
+			return false
+		}
+	}
+	return true
 }
 
 // ProvisionManifest is the JSON payload written to
