@@ -48,7 +48,7 @@ type mockStorage struct {
 	// race-clean under `go test -race`).
 	mu      sync.Mutex
 	objects map[string]*storage.Object // objectPath -> Object
-	content map[string][]byte         // objectPath -> file data
+	content map[string][]byte          // objectPath -> file data
 }
 
 func newMockStorage(bucket string) *mockStorage {

@@ -327,7 +327,7 @@ func extractImageFromStorage(ctx context.Context, stor storage.Storage, storageP
 	if err != nil {
 		return ""
 	}
-	defer reader.Close()
+	defer func() { _ = reader.Close() }()
 	data, err := io.ReadAll(reader)
 	if err != nil {
 		return ""

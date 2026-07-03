@@ -141,7 +141,7 @@ func computeStoredHash(ctx context.Context, stor storage.Storage, objectPath str
 	if err != nil {
 		return ""
 	}
-	defer reader.Close()
+	defer func() { _ = reader.Close() }()
 
 	hasher := sha256.New()
 	if _, err := io.Copy(hasher, reader); err != nil {
