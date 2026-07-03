@@ -23,6 +23,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/resources"
 )
 
@@ -38,8 +39,24 @@ func (s *Server) BootstrapBundledResources(ctx context.Context, opts BootstrapOp
 		return nil
 	}
 
+	skipHarnessCreate := false
+	if opts.SkipIfAnyExist {
+		existing, err := s.store.ListHarnessConfigs(ctx, store.HarnessConfigFilter{
+			Status: store.HarnessConfigStatusActive,
+		}, store.ListOptions{Limit: 1})
+		if err == nil && len(existing.Items) > 0 {
+			s.resourceLog.Info("bundled resource bootstrap: active harness configs exist, skipping new harness-config creation but updating existing")
+			skipHarnessCreate = true
+		}
+	}
+
 	var errs []error
 	for _, r := range resources.BuiltinResources() {
+		callOpts := opts
+		if skipHarnessCreate && r.Kind == storage.ResourceKindHarnessConfig {
+			callOpts.SkipCreate = true
+		}
+
 		src := NewFSResourceSource(r)
 
 		var rs *ResourceStore
@@ -58,7 +75,7 @@ func (s *Server) BootstrapBundledResources(ctx context.Context, opts BootstrapOp
 			continue
 		}
 
-		result, err := rs.BootstrapSource(ctx, src, opts)
+		result, err := rs.BootstrapSource(ctx, src, callOpts)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("bootstrap %s %q: %w", r.Kind, r.Name, err))
 			continue

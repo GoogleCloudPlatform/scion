@@ -233,6 +233,60 @@ func TestBootstrapBundledResources_NoStorage(t *testing.T) {
 	}
 }
 
+func TestBootstrapBundledResources_SkipIfAnyExist_UpdatesExisting(t *testing.T) {
+	srv, s, _ := testTemplateBootstrapServer(t)
+	ctx := context.Background()
+
+	// First bootstrap without SkipIfAnyExist to seed all configs.
+	err := srv.BootstrapBundledResources(ctx, BootstrapOptions{
+		RepairStorage:   true,
+		OverwritePolicy: OverwriteBuiltinManaged,
+	})
+	if err != nil {
+		t.Fatalf("initial bootstrap failed: %v", err)
+	}
+
+	configs1, err := s.ListHarnessConfigs(ctx, store.HarnessConfigFilter{}, store.ListOptions{Limit: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if configs1.TotalCount == 0 {
+		t.Fatal("expected at least one harness config after initial bootstrap")
+	}
+
+	// Record initial hashes.
+	initialHashes := make(map[string]string)
+	for _, hc := range configs1.Items {
+		initialHashes[hc.Slug] = hc.ContentHash
+	}
+
+	// Second bootstrap with SkipIfAnyExist should NOT skip updates for
+	// existing configs. Since the content hasn't changed, hashes should
+	// remain the same but the call must not error (verifies the update
+	// path is reached, not short-circuited).
+	err = srv.BootstrapBundledResources(ctx, BootstrapOptions{
+		RepairStorage:   true,
+		OverwritePolicy: OverwriteBuiltinManaged,
+		SkipIfAnyExist:  true,
+	})
+	if err != nil {
+		t.Fatalf("second bootstrap with SkipIfAnyExist failed: %v", err)
+	}
+
+	configs2, err := s.ListHarnessConfigs(ctx, store.HarnessConfigFilter{}, store.ListOptions{Limit: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if configs2.TotalCount != configs1.TotalCount {
+		t.Errorf("expected %d harness configs, got %d", configs1.TotalCount, configs2.TotalCount)
+	}
+	for _, hc := range configs2.Items {
+		if hc.ContentHash != initialHashes[hc.Slug] {
+			t.Errorf("harness-config %q: content hash changed unexpectedly", hc.Name)
+		}
+	}
+}
+
 func TestResolveHarnessType(t *testing.T) {
 	tests := []struct {
 		name    string

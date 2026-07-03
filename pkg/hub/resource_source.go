@@ -58,6 +58,8 @@ type BootstrapOptions struct {
 	RepairStorage   bool
 	AdoptExisting   bool
 	OverwritePolicy OverwritePolicy
+	SkipIfAnyExist  bool
+	SkipCreate      bool
 }
 
 // OverwritePolicy determines which existing resources BootstrapSource may overwrite.
@@ -270,6 +272,10 @@ func (rs *ResourceStore) BootstrapSource(ctx context.Context, src ResourceSource
 	}
 
 	if existing == nil {
+		if opts.SkipCreate {
+			result.Skipped++
+			return result, nil
+		}
 		return rs.bootstrapSourceCreate(ctx, meta, slug, dir, files, &result)
 	}
 	return rs.bootstrapSourceUpdate(ctx, meta, existing, dir, files, opts, &result)
