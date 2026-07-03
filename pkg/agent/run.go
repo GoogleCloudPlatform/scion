@@ -932,6 +932,12 @@ authDone:
 			}
 			return ""
 		}(),
+		NoAuthCommand: func() string {
+			if opts.NoAuth && noAuthConfig != nil && noAuthConfig.Behavior == "drop-to-shell" {
+				return noAuthConfig.Command
+			}
+			return ""
+		}(),
 		Debug:                util.DebugEnabled(),
 		Resume:               opts.Resume,
 		MetadataInterception: hasMetadataInterception(agentEnv),

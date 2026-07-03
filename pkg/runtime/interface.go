@@ -48,6 +48,7 @@ type RunConfig struct {
 	BrokerMode           bool
 	NoAuth               bool
 	NoAuthMessage        string
+	NoAuthCommand        string
 	Debug                bool
 	MetadataInterception bool     // Add NET_ADMIN cap for iptables-based metadata server interception
 	ExtraHosts           []string // Extra /etc/hosts entries (e.g. "host.docker.internal:host-gateway")

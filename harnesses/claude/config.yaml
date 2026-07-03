@@ -70,6 +70,7 @@ capabilities:
   resume: { support: "yes" }
 no_auth:
   behavior: drop-to-shell
+  command: claude login
   message: |
     This agent started without credentials.
     Run: claude login
