@@ -17,6 +17,7 @@ package hub
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -320,6 +321,24 @@ func (s *Server) harnessConfigImage(hc *store.HarnessConfig) string {
 	return ""
 }
 
+func extractImageFromStorage(ctx context.Context, stor storage.Storage, storagePath string) string {
+	objectPath := storagePath + "/config.yaml"
+	reader, _, err := stor.Download(ctx, objectPath)
+	if err != nil {
+		return ""
+	}
+	defer reader.Close()
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		return ""
+	}
+	entry, err := config.ParseHarnessConfigYAML(data)
+	if err != nil {
+		return ""
+	}
+	return entry.Image
+}
+
 func (s *Server) updateHarnessConfig(w http.ResponseWriter, r *http.Request, id string) {
 	ctx := r.Context()
 
@@ -574,6 +593,13 @@ func (s *Server) handleHarnessConfigFinalize(w http.ResponseWriter, r *http.Requ
 	hc.Files = req.Manifest.Files
 	hc.ContentHash = contentHash
 	hc.Status = store.HarnessConfigStatusActive
+
+	if image := extractImageFromStorage(ctx, stor, hc.StoragePath); image != "" {
+		if hc.Config == nil {
+			hc.Config = &store.HarnessConfigData{}
+		}
+		hc.Config.Image = image
+	}
 
 	if err := s.store.UpdateHarnessConfig(ctx, hc); err != nil {
 		writeErrorFromErr(w, err, "")

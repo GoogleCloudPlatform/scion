@@ -17,6 +17,7 @@ package hub
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 
@@ -407,23 +408,33 @@ func (p *harnessConfigPersistence) PostFinalize(ctx context.Context, rec *Resour
 	if image == "" {
 		return
 	}
+
+	if p.model != nil && (p.model.Config == nil || p.model.Config.Image != image) {
+		if p.model.Config == nil {
+			p.model.Config = &store.HarnessConfigData{}
+		}
+		p.model.Config.Image = image
+		if err := p.s.store.UpdateHarnessConfig(ctx, p.model); err != nil {
+			slog.Error("failed to persist image in harness config", "id", rec.ID, "error", err)
+		}
+	}
+
 	go p.s.checkAndUpdateImageStatus(context.WithoutCancel(ctx), rec.ID, image)
 }
 
 func (p *harnessConfigPersistence) extractImage(dir string) string {
-	if p.model != nil && p.model.Config != nil && p.model.Config.Image != "" {
-		return p.model.Config.Image
-	}
 	configPath := filepath.Join(dir, "config.yaml")
 	data, err := os.ReadFile(configPath)
-	if err != nil {
-		return ""
+	if err == nil {
+		entry, err := config.ParseHarnessConfigYAML(data)
+		if err == nil && entry.Image != "" {
+			return entry.Image
+		}
 	}
-	entry, err := config.ParseHarnessConfigYAML(data)
-	if err != nil {
-		return ""
+	if p.model != nil && p.model.Config != nil {
+		return p.model.Config.Image
 	}
-	return entry.Image
+	return ""
 }
 
 func harnessConfigToRecord(hc *store.HarnessConfig) *ResourceRecord {
