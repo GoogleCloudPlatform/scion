@@ -490,9 +490,10 @@ type HarnessConfigFilter struct {
 	ScopeID   string
 	ProjectID string // When set without Scope, returns global + project-scoped configs for this project
 	Harness   string
-	OwnerID   string
-	Status    string
-	Search    string // Full-text search on name/description
+	OwnerID     string
+	Status      string
+	ImageStatus string
+	Search      string // Full-text search on name/description
 }
 
 // UserStore defines user persistence operations.

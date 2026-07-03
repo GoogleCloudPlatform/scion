@@ -573,6 +573,9 @@ func (s *TemplateStore) ListHarnessConfigs(ctx context.Context, filter store.Har
 	if filter.Status != "" {
 		query.Where(entharnessconfig.StatusEQ(entharnessconfig.Status(filter.Status)))
 	}
+	if filter.ImageStatus != "" {
+		query.Where(entharnessconfig.ImageStatusEQ(entharnessconfig.ImageStatus(filter.ImageStatus)))
+	}
 	if filter.Search != "" {
 		query.Where(entharnessconfig.Or(
 			entharnessconfig.NameContainsFold(filter.Search),
