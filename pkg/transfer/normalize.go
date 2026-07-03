@@ -89,6 +89,10 @@ func NormalizeDir(dir string) error {
 		if err != nil {
 			return err
 		}
-		return os.WriteFile(path, normalized, info.Mode())
+		tmpPath := path + ".tmp"
+		if err := os.WriteFile(tmpPath, normalized, info.Mode()); err != nil {
+			return err
+		}
+		return os.Rename(tmpPath, path)
 	})
 }

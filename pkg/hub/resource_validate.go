@@ -102,12 +102,7 @@ func (rs *ResourceStore) ValidateStorage(ctx context.Context, rec *ResourceRecor
 			var hashErr error
 			storedHash, hashErr = computeStoredHash(ctx, stor, objectPath)
 			if hashErr != nil {
-				report.Issues = append(report.Issues, ValidationIssue{
-					Kind:    ValidationIssueContentHashMismatch,
-					File:    file.Path,
-					Message: fmt.Sprintf("failed to compute hash: %v", hashErr),
-				})
-				continue
+				return report, fmt.Errorf("computing hash for %q: %w", objectPath, hashErr)
 			}
 		}
 		if storedHash != "" && storedHash != file.Hash {
