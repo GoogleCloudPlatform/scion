@@ -53,6 +53,40 @@ interface AvailableIntegration {
   platform: string;
 }
 
+interface PlatformFieldDef {
+  key: string;
+  label: string;
+  description: string;
+  defaultValue: string;
+}
+
+function resolvePlatform(name: string): string {
+  switch (name) {
+    case 'telegram': return 'telegram';
+    case 'discord': return 'discord';
+    case 'slack': return 'slack';
+    case 'chat-app': return 'gchat';
+    default: return name;
+  }
+}
+
+const PLATFORM_FIELDS: Record<string, PlatformFieldDef[]> = {
+  telegram: [
+    { key: 'inbound_mode', label: 'Inbound Mode', description: 'How Telegram delivers updates (poll or webhook)', defaultValue: 'poll' },
+    { key: 'webhook_listen', label: 'Webhook Listen', description: 'HTTP listen address for webhook mode', defaultValue: ':9094' },
+    { key: 'db_path', label: 'Database Path', description: 'Path to SQLite database', defaultValue: '~/.scion/scion-telegram.db' },
+  ],
+  discord: [
+    { key: 'application_id', label: 'Application ID', description: 'Discord application ID for slash commands', defaultValue: '' },
+  ],
+  slack: [
+    { key: 'socket_mode', label: 'Socket Mode', description: 'Use Slack Socket Mode instead of HTTP webhooks (no public URL needed)', defaultValue: 'false' },
+    { key: 'listen_address', label: 'Listen Address', description: 'HTTP listen address (HTTP mode only)', defaultValue: ':3000' },
+    { key: 'db_path', label: 'Database Path', description: 'Path to SQLite database', defaultValue: '~/.scion/scion-slack.db' },
+    { key: 'agent_cache_ttl', label: 'Agent Cache TTL', description: 'How long to cache agent info', defaultValue: '5m' },
+  ],
+};
+
 @customElement('scion-page-admin-integrations')
 export class ScionPageAdminIntegrations extends LitElement {
   @state() private loading = true;
@@ -720,8 +754,13 @@ export class ScionPageAdminIntegrations extends LitElement {
   }
 
   private renderConfigSection(d: IntegrationDetail) {
-    const keys = Object.keys(d.settings || {});
-    if (keys.length === 0) {
+    const platform = resolvePlatform(d.name);
+    const fieldDefs = PLATFORM_FIELDS[platform] || [];
+    const definedKeys = new Set(fieldDefs.map((f) => f.key));
+    const extraKeys = Object.keys(d.settings || {}).filter((k) => !definedKeys.has(k));
+    const hasFields = fieldDefs.length > 0 || extraKeys.length > 0;
+
+    if (!hasFields && Object.keys(d.settings || {}).length === 0) {
       return html`
         <div class="section">
           <h3 class="section-title">Configuration</h3>
@@ -734,7 +773,25 @@ export class ScionPageAdminIntegrations extends LitElement {
       <div class="section">
         <h3 class="section-title">Configuration</h3>
         <div class="form-grid">
-          ${keys.map(
+          ${fieldDefs.map(
+            (field) => html`
+              <div class="form-field">
+                <label>${field.label}</label>
+                <sl-input
+                  value=${this.editedSettings[field.key] ?? field.defaultValue}
+                  placeholder=${field.defaultValue}
+                  @sl-change=${(e: Event) => {
+                    this.editedSettings = {
+                      ...this.editedSettings,
+                      [field.key]: (e.target as HTMLInputElement).value,
+                    };
+                  }}
+                ></sl-input>
+                <span class="hint">${field.description}</span>
+              </div>
+            `
+          )}
+          ${extraKeys.map(
             (key) => html`
               <div class="form-field">
                 <label>${key}</label>
@@ -842,6 +899,8 @@ export class ScionPageAdminIntegrations extends LitElement {
         return 'Telegram';
       case 'discord':
         return 'Discord';
+      case 'slack':
+        return 'Slack';
       case 'gchat':
         return 'Google Chat';
       default:

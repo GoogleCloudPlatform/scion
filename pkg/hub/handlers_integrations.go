@@ -89,7 +89,7 @@ type AvailableIntegration struct {
 }
 
 // knownPlugins is the list of plugins that can be discovered for installation.
-var knownPlugins = []string{"telegram", "discord"}
+var knownPlugins = []string{"telegram", "discord", "slack"}
 
 var knownPluginSet = func() map[string]bool {
 	s := make(map[string]bool, len(knownPlugins))
@@ -565,6 +565,8 @@ func resolvePlatform(name string) string {
 		return "telegram"
 	case "discord":
 		return "discord"
+	case "slack":
+		return "slack"
 	case "chat-app":
 		return "gchat"
 	default:

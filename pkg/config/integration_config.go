@@ -33,6 +33,11 @@ const (
 	SecretDiscordBotToken  = "DISCORD_BOT_TOKEN"
 	SecretDiscordPublicKey = "DISCORD_PUBLIC_KEY"
 
+	// Slack
+	SecretSlackBotToken      = "SLACK_BOT_TOKEN"
+	SecretSlackAppToken      = "SLACK_APP_TOKEN"
+	SecretSlackSigningSecret = "SLACK_SIGNING_SECRET"
+
 	// Google Chat
 	SecretGChatSigningKey = "GCHAT_SIGNING_KEY"
 )
@@ -147,6 +152,11 @@ var PluginSecretKeyMap = map[string][]IntegrationSecretMapping{
 		{SecretDiscordBotToken, "bot_token"},
 		{SecretDiscordPublicKey, "public_key"},
 	},
+	"slack": {
+		{SecretSlackBotToken, "bot_token"},
+		{SecretSlackAppToken, "app_token"},
+		{SecretSlackSigningSecret, "signing_secret"},
+	},
 	"chat-app": {
 		{SecretGChatSigningKey, "signing_key"},
 	},
@@ -230,6 +240,11 @@ func CreatePluginConfigFile(pluginName, configFilePath string) error {
 	switch pluginName {
 	case "discord":
 		content += "application_id: \"\"\n"
+	case "slack":
+		content += "socket_mode: \"false\"\n"
+		content += "listen_address: \":3000\"\n"
+		content += "db_path: \"~/.scion/scion-slack.db\"\n"
+		content += "agent_cache_ttl: \"5m\"\n"
 	}
 
 	return os.WriteFile(resolved, []byte(content), 0600)
@@ -258,6 +273,7 @@ func LoadPluginConfigFile(configFile string, inlineConfig map[string]string) (ma
 	for _, secretKey := range []string{
 		SecretTelegramBotToken, SecretTelegramWebhookKey,
 		SecretDiscordBotToken, SecretDiscordPublicKey,
+		SecretSlackBotToken, SecretSlackAppToken, SecretSlackSigningSecret,
 		SecretGChatSigningKey,
 	} {
 		delete(fileConfig, strings.ToLower(secretKey))

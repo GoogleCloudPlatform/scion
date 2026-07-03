@@ -567,6 +567,7 @@ func TestResolvePlatform(t *testing.T) {
 	}{
 		{"telegram", "telegram"},
 		{"discord", "discord"},
+		{"slack", "slack"},
 		{"chat-app", "gchat"},
 		{"custom", "custom"},
 	}
@@ -610,6 +611,50 @@ func TestFilterSensitiveConfig(t *testing.T) {
 	}
 	if filtered["db_path"] != "/var/lib/tg.db" {
 		t.Errorf("expected db_path preserved, got %s", filtered["db_path"])
+	}
+}
+
+func TestFilterSensitiveConfig_Slack(t *testing.T) {
+	cfg := map[string]string{
+		"socket_mode":     "true",
+		"listen_address":  ":3000",
+		"db_path":         "~/.scion/scion-slack.db",
+		"agent_cache_ttl": "5m",
+		"bot_token":       "xoxb-secret",
+		"app_token":       "xapp-secret",
+		"signing_secret":  "secret-signing",
+		"hub_url":         "https://hub.example.com",
+		"config_file":     "/etc/slack.yaml",
+	}
+
+	filtered := filterSensitiveConfig("slack", cfg)
+
+	if _, ok := filtered["bot_token"]; ok {
+		t.Error("bot_token should be filtered")
+	}
+	if _, ok := filtered["app_token"]; ok {
+		t.Error("app_token should be filtered")
+	}
+	if _, ok := filtered["signing_secret"]; ok {
+		t.Error("signing_secret should be filtered")
+	}
+	if _, ok := filtered["hub_url"]; ok {
+		t.Error("hub_url should be filtered")
+	}
+	if _, ok := filtered["config_file"]; ok {
+		t.Error("config_file should be filtered")
+	}
+	if filtered["socket_mode"] != "true" {
+		t.Errorf("expected socket_mode true, got %s", filtered["socket_mode"])
+	}
+	if filtered["listen_address"] != ":3000" {
+		t.Errorf("expected listen_address :3000, got %s", filtered["listen_address"])
+	}
+	if filtered["db_path"] != "~/.scion/scion-slack.db" {
+		t.Errorf("expected db_path preserved, got %s", filtered["db_path"])
+	}
+	if filtered["agent_cache_ttl"] != "5m" {
+		t.Errorf("expected agent_cache_ttl 5m, got %s", filtered["agent_cache_ttl"])
 	}
 }
 
@@ -837,6 +882,45 @@ func TestListAvailableIntegrations_WithSource(t *testing.T) {
 	}
 	if result[0].Name != "telegram" {
 		t.Errorf("expected telegram, got %s", result[0].Name)
+	}
+}
+
+func TestListAvailableIntegrations_IncludesSlack(t *testing.T) {
+	repoDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repoDir, "extras", "scion-slack"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	mgr := newMockIntegrationManager()
+
+	srv := &Server{}
+	srv.config.MaintenanceConfig.RepoPath = repoDir
+	srv.pluginManager = mgr
+
+	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/integrations/available", nil)
+	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	rr := httptest.NewRecorder()
+	srv.handleAdminIntegrationByName(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var result []AvailableIntegration
+	if err := json.NewDecoder(rr.Body).Decode(&result); err != nil {
+		t.Fatalf("decode error: %v", err)
+	}
+
+	found := false
+	for _, a := range result {
+		if a.Name == "slack" && a.Platform == "slack" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected slack in available integrations, got %v", result)
 	}
 }
 
