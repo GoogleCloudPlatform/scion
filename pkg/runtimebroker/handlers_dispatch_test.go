@@ -123,24 +123,6 @@ func dispatchAgent(t *testing.T, srv *Server, harnessConfig string) (int, string
 	return w.Code, w.Body.String()
 }
 
-func TestDispatchLegacyBuiltinConfigAllowed(t *testing.T) {
-	srv, mgr, dotScion := dispatchTestEnv(t, false)
-	writeHarnessConfig(t, dotScion, "claude-builtin", `harness: claude
-image: scion-claude:test
-provisioner:
-  type: builtin
-  interface_version: 1
-`)
-
-	code, body := dispatchAgent(t, srv, "claude-builtin")
-	if code != http.StatusCreated {
-		t.Fatalf("legacy built-in dispatch expected 201, got %d: %s", code, body)
-	}
-	if !mgr.provisionCalled {
-		t.Error("expected Provision to be called for built-in dispatch")
-	}
-}
-
 func TestDispatchContainerScriptConfigBlockedByDefault(t *testing.T) {
 	srv, mgr, dotScion := dispatchTestEnv(t, false)
 	writeHarnessConfig(t, dotScion, "scripted", `harness: claude

@@ -37,15 +37,6 @@ func TestEvaluateHarnessConfigPolicy(t *testing.T) {
 			wantOK: true,
 		},
 		{
-			name:  "builtin provisioner is allowed",
-			allow: false,
-			entry: config.HarnessConfigEntry{
-				Harness:     "claude",
-				Provisioner: &config.HarnessProvisionerConfig{Type: "builtin"},
-			},
-			wantOK: true,
-		},
-		{
 			name:  "container-script blocked when allow=false",
 			allow: false,
 			entry: config.HarnessConfigEntry{

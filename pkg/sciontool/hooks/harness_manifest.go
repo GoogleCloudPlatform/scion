@@ -69,7 +69,7 @@ func LoadHarnessManifestRequirement(agentHome string) (HarnessManifestRequiremen
 	}
 
 	prov := manifest.HarnessConfig.Provisioner
-	if prov == nil || prov.Type != "container-script" {
+	if prov == nil {
 		return HarnessManifestRequirement{}, nil
 	}
 

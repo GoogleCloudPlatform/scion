@@ -84,14 +84,11 @@ type harnessPolicyDecision struct {
 // the parsed config entry. Returns a non-OK decision when the dispatch
 // should be refused.
 //
-// The policy is intentionally minimal in v1 — only container-script type is
-// gated. Future additions (e.g., trusted_harness_config_publishers) can
-// extend this function without touching the dispatch path.
+// The policy is intentionally minimal in v1 — scripted provisioning is gated.
+// Future additions (e.g., trusted_harness_config_publishers) can extend this
+// function without touching the dispatch path.
 func (s *Server) evaluateHarnessConfigPolicy(harnessConfigName string, entry config.HarnessConfigEntry) harnessPolicyDecision {
 	if entry.Provisioner == nil {
-		return harnessPolicyDecision{OK: true}
-	}
-	if entry.Provisioner.Type != "container-script" {
 		return harnessPolicyDecision{OK: true}
 	}
 	if s.config.AllowContainerScriptHarnesses {
@@ -102,7 +99,7 @@ func (s *Server) evaluateHarnessConfigPolicy(harnessConfigName string, entry con
 		Code:       ErrCodeForbidden,
 		HTTPStatus: 403,
 		Message: fmt.Sprintf(
-			"harness-config %q uses provisioner.type: container-script but this broker has allow_container_script_harnesses=false. Set broker.allow_container_script_harnesses=true (SCION_SERVER_BROKER_ALLOWCONTAINERSCRIPTHARNESSES=true) to enable.",
+			"harness-config %q uses scripted provisioning but this broker has allow_container_script_harnesses=false. Set broker.allow_container_script_harnesses=true (SCION_SERVER_BROKER_ALLOWCONTAINERSCRIPTHARNESSES=true) to enable.",
 			harnessConfigName,
 		),
 	}

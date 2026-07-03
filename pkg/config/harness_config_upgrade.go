@@ -93,12 +93,10 @@ func UpgradeHarnessConfig(targetDir string, h api.Harness, opts HarnessConfigUpg
 
 	embedsFS, basePath := h.GetHarnessEmbedsFS()
 	if basePath == "" {
-		// No compiled-in embeds — try seeding from the harnesses/ embed FS.
 		if opts.HarnessesFS != nil {
 			return upgradeFromHarnessesFS(absTarget, plan, h.Name(), opts)
 		}
-		// Fall back to legacy-builtin upgrade path.
-		return upgradeLegacyBuiltinConfig(absTarget, plan, opts)
+		return plan, nil
 	}
 
 	configDir := h.DefaultConfigDir()
@@ -180,75 +178,6 @@ func UpgradeHarnessConfig(targetDir string, h api.Harness, opts HarnessConfigUpg
 	return plan, nil
 }
 
-// upgradeLegacyBuiltinConfig handles upgrade for harness configs whose compiled-in
-// Go implementation has been removed (opencode, codex). If the on-disk config has
-// provisioner.type "builtin" or missing and a provision.py exists, auto-activate
-// container-script provisioning. If no provision.py exists, record a warning step
-// telling the user to reinstall from the bundle.
-func upgradeLegacyBuiltinConfig(absTarget string, plan *HarnessConfigUpgradePlan, opts HarnessConfigUpgradeOptions) (*HarnessConfigUpgradePlan, error) {
-	configPath := filepath.Join(absTarget, "config.yaml")
-	configData, err := os.ReadFile(configPath)
-	if err != nil {
-		return plan, nil
-	}
-
-	var cfg map[string]interface{}
-	if err := yaml.Unmarshal(configData, &cfg); err != nil {
-		return plan, nil
-	}
-	if cfg == nil {
-		// Empty or comment-only config.yaml: nothing to upgrade.
-		return plan, nil
-	}
-
-	harnessName, _ := cfg["harness"].(string)
-	if harnessName != "opencode" && harnessName != "codex" {
-		return plan, nil
-	}
-
-	provisioner, _ := cfg["provisioner"].(map[string]interface{})
-	provType := ""
-	if provisioner != nil {
-		provType, _ = provisioner["type"].(string)
-	}
-	if provType == "container-script" {
-		return plan, nil
-	}
-
-	hasProvisionPy := fileExists(filepath.Join(absTarget, "provision.py"))
-	if !hasProvisionPy {
-		plan.Actions = append(plan.Actions, HarnessConfigUpgradeAction{
-			Type:   "warning",
-			Detail: "legacy built-in config has no provision.py; reinstall with: scion harness-config install harnesses/" + harnessName,
-		})
-		return plan, nil
-	}
-
-	updatedData, activated, err := activateContainerScriptProvisioner(configData)
-	if err != nil {
-		return plan, err
-	}
-	if activated {
-		plan.Changed = true
-		plan.Actions = append(plan.Actions, HarnessConfigUpgradeAction{
-			Type:   "activate_script",
-			Path:   "config.yaml",
-			Detail: "auto-activated container-script (built-in removed)",
-		})
-		if !opts.DryRun {
-			backupPath, err := backupFile(configPath, opts.Now())
-			if err != nil {
-				return plan, err
-			}
-			plan.Backups = append(plan.Backups, backupPath)
-			if err := os.WriteFile(configPath, updatedData, 0644); err != nil {
-				return plan, fmt.Errorf("write upgraded config.yaml: %w", err)
-			}
-		}
-	}
-	return plan, nil
-}
-
 // upgradeFromHarnessesFS handles upgrade using the embedded harnesses/ FS as
 // the source of truth. Reads config.yaml from the harnesses/ FS to get the
 // default configuration, merges missing fields, and adds missing support files.
@@ -258,7 +187,7 @@ func upgradeFromHarnessesFS(absTarget string, plan *HarnessConfigUpgradePlan, ha
 
 	defaultConfigData, err := fs.ReadFile(opts.HarnessesFS, filepath.ToSlash(filepath.Join(sourcePath, "config.yaml")))
 	if err != nil {
-		return upgradeLegacyBuiltinConfig(absTarget, plan, opts)
+		return plan, nil
 	}
 
 	currentConfigData, err := os.ReadFile(configPath)
