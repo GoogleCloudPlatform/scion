@@ -949,7 +949,7 @@ export class ScionPageOnboarding extends LitElement {
             ?loading=${this.stepLoading}
             ?disabled=${this.selectedHarnesses.size === 0}
             @click=${this.handleHarnessesNext}
-          >${allReady ? 'Next' : 'Next'}</sl-button>
+          >Next</sl-button>
         </div>
       </div>
     `;
@@ -1046,7 +1046,20 @@ export class ScionPageOnboarding extends LitElement {
   private async handlePullSelected(): Promise<void> {
     this.error = null;
     this.imagePulling = true;
-    const harnesses = [...this.selectedHarnesses];
+    const selectedList = this.harnessConfigs.filter(hc => this.selectedHarnesses.has(hc.slug));
+    const harnesses = selectedList
+      .filter(hc => {
+        const cs = this.imageCheckStatuses.get(hc.id);
+        const status = cs?.imageStatus ?? hc.imageStatus ?? 'unknown';
+        const source = cs?.source;
+        return !(status === 'valid' && source === 'local');
+      })
+      .map(hc => hc.slug);
+
+    if (harnesses.length === 0) {
+      this.imagePulling = false;
+      return;
+    }
 
     try {
       const res = await apiFetch('/api/v1/system/images/pull', {

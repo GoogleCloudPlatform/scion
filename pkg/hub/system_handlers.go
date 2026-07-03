@@ -17,7 +17,6 @@ package hub
 import (
 	"bufio"
 	"context"
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -25,7 +24,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -391,98 +389,6 @@ func (s *Server) handleSystemStatus(w http.ResponseWriter, r *http.Request) {
 
 	status := s.computeOnboardingStatus(r.Context())
 	writeJSON(w, http.StatusOK, status)
-}
-
-// --- 2.3b: Available Harnesses ---
-
-type availableHarness struct {
-	Slug string `json:"slug"`
-	Name string `json:"name"`
-}
-
-func (s *Server) handleSystemHarnesses(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
-		return
-	}
-
-	if err := assertLoopback(r); err != nil {
-		writeError(w, http.StatusForbidden, ErrCodeForbidden, err.Error(), nil)
-		return
-	}
-
-	harnesses := fetchAvailableHarnesses(r.Context())
-	writeJSON(w, http.StatusOK, map[string]interface{}{"harnesses": harnesses})
-}
-
-func fetchAvailableHarnesses(ctx context.Context) []availableHarness {
-	type ghEntry struct {
-		Name string `json:"name"`
-		Type string `json:"type"`
-	}
-
-	req, err := http.NewRequestWithContext(ctx,
-		http.MethodGet,
-		"https://api.github.com/repos/GoogleCloudPlatform/scion/contents/harnesses",
-		nil)
-	if err == nil {
-		req.Header.Set("Accept", "application/vnd.github.v3+json")
-		client := &http.Client{Timeout: 5 * time.Second}
-		resp, fetchErr := client.Do(req)
-		if fetchErr == nil {
-			defer resp.Body.Close()
-			if resp.StatusCode == http.StatusOK {
-				var entries []ghEntry
-				if decErr := json.NewDecoder(resp.Body).Decode(&entries); decErr == nil {
-					var result []availableHarness
-					for _, e := range entries {
-						if e.Type == "dir" && e.Name != "." && e.Name != ".." {
-							result = append(result, availableHarness{
-								Slug: e.Name,
-								Name: harnessDisplayName(e.Name),
-							})
-						}
-					}
-					if len(result) > 0 {
-						return result
-					}
-				}
-			}
-		}
-	}
-
-	return defaultHarnesses()
-}
-
-func harnessDisplayName(slug string) string {
-	if slug == "" {
-		return ""
-	}
-	names := map[string]string{
-		"claude":       "Claude",
-		"gemini":       "Gemini",
-		"codex":        "Codex",
-		"opencode":     "OpenCode",
-		"copilot":      "GitHub Copilot",
-		"antigravity":  "Antigravity",
-		"hermes":       "Hermes",
-	}
-	if name, ok := names[slug]; ok {
-		return name
-	}
-	return strings.ToUpper(slug[:1]) + slug[1:]
-}
-
-func defaultHarnesses() []availableHarness {
-	return []availableHarness{
-		{Slug: "claude", Name: "Claude"},
-		{Slug: "gemini", Name: "Gemini"},
-		{Slug: "codex", Name: "Codex"},
-		{Slug: "opencode", Name: "OpenCode"},
-		{Slug: "copilot", Name: "GitHub Copilot"},
-		{Slug: "antigravity", Name: "Antigravity"},
-		{Slug: "hermes", Name: "Hermes"},
-	}
 }
 
 // --- 2.4: System Init ---
