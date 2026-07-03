@@ -99,7 +99,16 @@ func (rs *ResourceStore) ValidateStorage(ctx context.Context, rec *ResourceRecor
 
 		storedHash := objectMetadataHash(obj)
 		if storedHash == "" {
-			storedHash = computeStoredHash(ctx, stor, objectPath)
+			var hashErr error
+			storedHash, hashErr = computeStoredHash(ctx, stor, objectPath)
+			if hashErr != nil {
+				report.Issues = append(report.Issues, ValidationIssue{
+					Kind:    ValidationIssueContentHashMismatch,
+					File:    file.Path,
+					Message: fmt.Sprintf("failed to compute hash: %v", hashErr),
+				})
+				continue
+			}
 		}
 		if storedHash != "" && storedHash != file.Hash {
 			report.Issues = append(report.Issues, ValidationIssue{
@@ -134,18 +143,19 @@ func objectMetadataHash(obj *storage.Object) string {
 	return obj.Metadata["sha256"]
 }
 
-// computeStoredHash downloads an object's content and computes its SHA256 hash.
-// Returns "" if the download fails or the hash cannot be computed.
-func computeStoredHash(ctx context.Context, stor storage.Storage, objectPath string) string {
+func computeStoredHash(ctx context.Context, stor storage.Storage, objectPath string) (string, error) {
 	reader, _, err := stor.Download(ctx, objectPath)
 	if err != nil {
-		return ""
+		return "", err
+	}
+	if reader == nil {
+		return "", fmt.Errorf("storage returned nil reader for %s", objectPath)
 	}
 	defer func() { _ = reader.Close() }()
 
 	hasher := sha256.New()
 	if _, err := io.Copy(hasher, reader); err != nil {
-		return ""
+		return "", err
 	}
-	return "sha256:" + hex.EncodeToString(hasher.Sum(nil))
+	return "sha256:" + hex.EncodeToString(hasher.Sum(nil)), nil
 }

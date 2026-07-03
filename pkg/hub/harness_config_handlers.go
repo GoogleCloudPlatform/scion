@@ -324,7 +324,7 @@ func (s *Server) harnessConfigImage(hc *store.HarnessConfig) string {
 func extractImageFromStorage(ctx context.Context, stor storage.Storage, storagePath string) string {
 	objectPath := storagePath + "/config.yaml"
 	reader, _, err := stor.Download(ctx, objectPath)
-	if err != nil {
+	if err != nil || reader == nil {
 		return ""
 	}
 	defer func() { _ = reader.Close() }()

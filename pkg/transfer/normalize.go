@@ -85,6 +85,10 @@ func NormalizeDir(dir string) error {
 		if len(normalized) == len(data) && bytes.Equal(normalized, data) {
 			return nil
 		}
-		return os.WriteFile(path, normalized, 0644)
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(path, normalized, info.Mode())
 	})
 }
