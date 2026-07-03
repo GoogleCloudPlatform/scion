@@ -288,7 +288,10 @@ func (s *Server) getHarnessConfig(w http.ResponseWriter, r *http.Request, id str
 
 	if s.imageStatusStale(hc) {
 		if image := s.harnessConfigImage(hc); image != "" {
-			go s.checkAndUpdateImageStatus(context.Background(), hc.ID, image)
+			go s.imageStatusFlight.Do(hc.ID, func() (any, error) {
+				s.checkAndUpdateImageStatus(context.Background(), hc.ID, image)
+				return nil, nil
+			})
 		}
 	}
 

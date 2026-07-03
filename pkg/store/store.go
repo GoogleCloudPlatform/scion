@@ -485,10 +485,10 @@ type HarnessConfigStore interface {
 
 // HarnessConfigFilter defines criteria for filtering harness configs.
 type HarnessConfigFilter struct {
-	Name        string // Exact match on name
-	Scope       string
-	ScopeID     string
-	ProjectID   string // When set without Scope, returns global + project-scoped configs for this project
+	Name      string // Exact match on name
+	Scope     string
+	ScopeID   string
+	ProjectID string // When set without Scope, returns global + project-scoped configs for this project
 	Harness     string
 	OwnerID     string
 	Status      string
