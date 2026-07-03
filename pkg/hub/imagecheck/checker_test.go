@@ -102,8 +102,8 @@ func TestChecker_ErrorUnauthorized(t *testing.T) {
 	if result.Status != "error" {
 		t.Errorf("expected status error, got %s", result.Status)
 	}
-	if result.Error != "registry requires authentication" {
-		t.Errorf("expected auth error message, got %s", result.Error)
+	if !strings.Contains(result.Error, "auth") {
+		t.Errorf("expected auth-related error message, got %s", result.Error)
 	}
 }
 

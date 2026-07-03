@@ -603,7 +603,8 @@ export class ScionPageHarnessConfigDetail extends LitElement {
   private renderImageSection() {
     const hc = this.harnessConfig!;
     const image = hc.config?.image;
-    const showSection = image || this.hasDockerfile;
+    const hasImageStatus = !!hc.imageStatus && hc.imageStatus !== 'unknown';
+    const showSection = image || this.hasDockerfile || hasImageStatus;
     if (!showSection) return nothing;
 
     const isRemote = image ? this.isRemoteImage(image) : false;

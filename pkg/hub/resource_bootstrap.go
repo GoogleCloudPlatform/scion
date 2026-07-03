@@ -123,6 +123,9 @@ func (s *Server) checkAndUpdateImageStatus(ctx context.Context, hcID, image stri
 	resolvedImage := config.RewriteImageRegistry(image, registry)
 
 	result := s.imageChecker.Check(ctx, resolvedImage)
+	if result.Error != "" {
+		slog.Warn("image status check returned error", "id", hcID, "image", image, "resolved", resolvedImage, "status", result.Status, "error", result.Error)
+	}
 
 	if err := s.store.UpdateHarnessConfigImageStatus(ctx, hcID, result.Status, result.CheckedAt); err != nil {
 		slog.Error("failed to update image status", "id", hcID, "error", err)

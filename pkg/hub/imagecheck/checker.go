@@ -2,6 +2,7 @@ package imagecheck
 
 import (
 	"context"
+	"log/slog"
 	"net/http"
 	"time"
 )
@@ -56,11 +57,17 @@ func (c *Checker) Check(ctx context.Context, image string) CheckResult {
 
 	ref, err := parseImageRef(image)
 	if err != nil {
+		slog.Warn("image check: invalid image reference", "image", image, "error", err)
 		return CheckResult{
 			Status:    "invalid",
+			Error:     err.Error(),
 			CheckedAt: now,
 		}
 	}
 
-	return checkRemoteImage(ctx, c.client, ref, now)
+	result := checkRemoteImage(ctx, c.client, ref, now)
+	if result.Error != "" {
+		slog.Warn("image check: remote check failed", "image", image, "registry", ref.Registry, "repo", ref.Repository, "tag", ref.Tag, "status", result.Status, "error", result.Error)
+	}
+	return result
 }

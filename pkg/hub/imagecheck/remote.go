@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
@@ -65,9 +66,11 @@ func registryHost(registry string) string {
 
 func checkRemoteImage(ctx context.Context, client HTTPClient, ref imageRef, now time.Time) CheckResult {
 	host := registryHost(ref.Registry)
-	url := fmt.Sprintf("https://%s/v2/%s/manifests/%s", host, ref.Repository, ref.Tag)
+	manifestURL := fmt.Sprintf("https://%s/v2/%s/manifests/%s", host, ref.Repository, ref.Tag)
 
-	result := doRegistryHead(ctx, client, url, "", now)
+	slog.Debug("image check: probing remote registry", "url", manifestURL, "registry", ref.Registry, "repo", ref.Repository, "tag", ref.Tag)
+
+	result := doRegistryHead(ctx, client, manifestURL, "", now)
 	if result.Status != "" {
 		return result
 	}
@@ -121,17 +124,19 @@ func doRegistryHead(ctx context.Context, client HTTPClient, url, token string, n
 		}
 	case http.StatusUnauthorized:
 		if token != "" {
+			slog.Warn("image check: registry auth failed after token exchange", "url", url)
 			return CheckResult{
 				Status:    "error",
-				Error:     "registry requires authentication",
+				Error:     "registry requires authentication (token rejected)",
 				CheckedAt: now,
 			}
 		}
 		anonToken, err := fetchAnonymousToken(ctx, client, resp.Header.Get("Www-Authenticate"))
 		if err != nil {
+			slog.Warn("image check: anonymous token fetch failed", "url", url, "error", err)
 			return CheckResult{
 				Status:    "error",
-				Error:     "registry requires authentication",
+				Error:     fmt.Sprintf("registry auth: %v", err),
 				CheckedAt: now,
 			}
 		}

@@ -2,6 +2,7 @@ package imagecheck
 
 import (
 	"context"
+	"log/slog"
 	"time"
 )
 
@@ -19,12 +20,17 @@ func WithLocalChecker(l LocalImageExister) Option {
 
 func checkLocalImage(ctx context.Context, local LocalImageExister, image string, now time.Time) (CheckResult, bool) {
 	found, err := local.ImageExists(ctx, image)
-	if err == nil && found {
+	if err != nil {
+		slog.Warn("local image check failed", "image", image, "error", err)
+		return CheckResult{}, false
+	}
+	if found {
 		return CheckResult{
 			Status:    "valid",
 			Source:    "local",
 			CheckedAt: now,
 		}, true
 	}
+	slog.Debug("local image not found", "image", image)
 	return CheckResult{}, false
 }

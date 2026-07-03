@@ -606,17 +606,23 @@ func (s *Server) handleHarnessConfigCheckImage(w http.ResponseWriter, r *http.Re
 
 	registry := s.resolveImageRegistry()
 	resolvedImage := config.RewriteImageRegistry(image, registry)
+	slog.Info("checking image status", "id", hc.ID, "image", image, "resolved", resolvedImage, "registry", registry)
 	result := s.imageChecker.Check(ctx, resolvedImage)
+	slog.Info("image check result", "id", hc.ID, "status", result.Status, "source", result.Source, "error", result.Error)
 
 	if err := s.store.UpdateHarnessConfigImageStatus(ctx, hc.ID, result.Status, result.CheckedAt); err != nil {
 		slog.Warn("failed to persist image status", "id", hc.ID, "error", err)
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{
+	resp := map[string]any{
 		"image_status":            result.Status,
 		"image_status_checked_at": result.CheckedAt,
 		"source":                  result.Source,
-	})
+	}
+	if result.Error != "" {
+		resp["error"] = result.Error
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // handleHarnessConfigDownload returns signed URLs for downloading harness config files.

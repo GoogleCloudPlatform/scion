@@ -1628,6 +1628,7 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 			} else {
 				hubSrv.SetEmbeddedBrokerID(brokerID)
 			}
+			hubSrv.SetLocalImageChecker(rt)
 		}
 
 		// Generate or retrieve credentials for co-located mode (idempotent).
