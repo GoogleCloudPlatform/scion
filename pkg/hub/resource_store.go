@@ -458,6 +458,8 @@ func extractNoAuthBehavior(hc *store.HarnessConfig, dir string) {
 			hc.Config = &store.HarnessConfigData{}
 		}
 		hc.Config.NoAuthBehavior = hcDir.Config.NoAuthConfig.Behavior
+	} else if hc.Config != nil {
+		hc.Config.NoAuthBehavior = ""
 	}
 }
 

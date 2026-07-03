@@ -240,7 +240,10 @@ func (s *Server) populateAgentConfig(ctx context.Context, agent *store.Agent, pr
 				agent.AppliedConfig.HarnessAuth == "" &&
 				hc.Config != nil &&
 				hc.Config.NoAuthBehavior == "drop-to-shell" {
-				if !s.hasRequiredAuthCredentials(ctx, agent, hc.Harness) {
+				hasCreds, err := s.hasRequiredAuthCredentials(ctx, agent, hc.Harness)
+				if err != nil {
+					s.agentLifecycleLog.Error("Failed to check auth credentials for fallback", "agent_id", agent.ID, "error", err)
+				} else if !hasCreds {
 					agent.AppliedConfig.NoAuth = true
 					agent.AppliedConfig.HarnessAuth = "none"
 					s.agentLifecycleLog.Info("Auto no-auth fallback: harness supports drop-to-shell and no credentials found",
@@ -762,46 +765,64 @@ func (s *Server) findBrokerByIDOrSlug(ctx context.Context, identifier string) (*
 // hasRequiredAuthCredentials checks whether the required auth environment
 // variables for the given harness type are available in the agent's env,
 // or in the hub's env/secret stores (user and project scopes).
-func (s *Server) hasRequiredAuthCredentials(ctx context.Context, agent *store.Agent, harnessType string) bool {
+func (s *Server) hasRequiredAuthCredentials(ctx context.Context, agent *store.Agent, harnessType string) (bool, error) {
 	keyGroups := harness.RequiredAuthEnvKeys(harnessType, agent.AppliedConfig.HarnessAuth)
 	if len(keyGroups) == 0 {
-		return true
+		return true, nil
 	}
-	// Every key group is a set of alternatives (any one satisfies the group).
-	// All groups must be satisfied for credentials to be considered present.
 	for _, group := range keyGroups {
-		if !s.hasAnyKey(ctx, agent, group) {
-			return false
+		found, err := s.hasAnyKey(ctx, agent, group)
+		if err != nil {
+			return false, err
+		}
+		if !found {
+			return false, nil
 		}
 	}
-	return true
+	return true, nil
 }
 
 // hasAnyKey returns true if at least one of the keys is present in the
 // agent's env, or in the hub's env/secret stores at user or project scope.
-func (s *Server) hasAnyKey(ctx context.Context, agent *store.Agent, keys []string) bool {
+func (s *Server) hasAnyKey(ctx context.Context, agent *store.Agent, keys []string) (bool, error) {
 	for _, key := range keys {
 		if agent.AppliedConfig != nil && agent.AppliedConfig.Env != nil {
 			if _, ok := agent.AppliedConfig.Env[key]; ok {
-				return true
+				return true, nil
 			}
 		}
 		if agent.OwnerID != "" {
-			if ev, err := s.store.GetEnvVar(ctx, key, "user", agent.OwnerID); err == nil && ev != nil {
-				return true
+			ev, err := s.store.GetEnvVar(ctx, key, "user", agent.OwnerID)
+			if err != nil && !errors.Is(err, store.ErrNotFound) {
+				return false, err
 			}
-			if sec, err := s.store.GetSecret(ctx, key, "user", agent.OwnerID); err == nil && sec != nil {
-				return true
+			if ev != nil {
+				return true, nil
+			}
+			sec, err := s.store.GetSecret(ctx, key, "user", agent.OwnerID)
+			if err != nil && !errors.Is(err, store.ErrNotFound) {
+				return false, err
+			}
+			if sec != nil {
+				return true, nil
 			}
 		}
 		if agent.ProjectID != "" {
-			if ev, err := s.store.GetEnvVar(ctx, key, "project", agent.ProjectID); err == nil && ev != nil {
-				return true
+			ev, err := s.store.GetEnvVar(ctx, key, "project", agent.ProjectID)
+			if err != nil && !errors.Is(err, store.ErrNotFound) {
+				return false, err
 			}
-			if sec, err := s.store.GetSecret(ctx, key, "project", agent.ProjectID); err == nil && sec != nil {
-				return true
+			if ev != nil {
+				return true, nil
+			}
+			sec, err := s.store.GetSecret(ctx, key, "project", agent.ProjectID)
+			if err != nil && !errors.Is(err, store.ErrNotFound) {
+				return false, err
+			}
+			if sec != nil {
+				return true, nil
 			}
 		}
 	}
-	return false
+	return false, nil
 }
