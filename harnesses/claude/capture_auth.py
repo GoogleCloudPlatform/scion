@@ -129,9 +129,9 @@ def _extract_oauth_from_scrollback() -> str | None:
         return None
     if result.returncode != 0:
         return None
-    for line in result.stdout.splitlines():
+    for line in reversed(result.stdout.splitlines()):
         stripped = line.strip()
-        if re.match(r"^sk-ant-[A-Za-z0-9._-]+$", stripped):
+        if re.match(r"^sk-ant-oat[A-Za-z0-9._-]+$", stripped):
             return stripped
     return None
 
