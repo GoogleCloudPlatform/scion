@@ -158,7 +158,7 @@ func fetchAnonymousToken(ctx context.Context, client HTTPClient, wwwAuth string)
 	tokenURL := realm
 	sep := "?"
 	for k, v := range params {
-		tokenURL += sep + url.QueryEscape(k) + "=" + url.QueryEscape(v)
+		tokenURL += sep + k + "=" + v
 		sep = "&"
 	}
 
