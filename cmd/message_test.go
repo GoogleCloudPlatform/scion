@@ -929,6 +929,58 @@ func TestAttachFlagValidation(t *testing.T) {
 	}
 }
 
+func TestHubOnlyFlagLocalModeValidation(t *testing.T) {
+	// noHub forces EnsureHubReady to return a nil Hub context, so the
+	// local-mode guards are exercised regardless of the environment's
+	// hub configuration.
+	origNoHub := noHub
+	noHub = true
+	defer func() { noHub = origNoHub }()
+
+	tests := []struct {
+		name     string
+		setup    func()
+		teardown func()
+		errMsg   string
+	}{
+		{
+			name:     "channel requires hub mode",
+			setup:    func() { msgChannel = "telegram" },
+			teardown: func() { msgChannel = "" },
+			errMsg:   "--channel requires Hub mode",
+		},
+		{
+			name:     "attach requires hub mode",
+			setup:    func() { msgAttach = []string{"notes.md"} },
+			teardown: func() { msgAttach = nil },
+			errMsg:   "--attach requires Hub mode",
+		},
+		{
+			name:     "wake requires hub mode",
+			setup:    func() { msgWake = true },
+			teardown: func() { msgWake = false },
+			errMsg:   "--wake requires Hub mode",
+		},
+		{
+			name:     "notify requires hub mode",
+			setup:    func() { msgNotify = true },
+			teardown: func() { msgNotify = false },
+			errMsg:   "--notify requires Hub mode",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.setup()
+			defer tc.teardown()
+
+			err := messageCmd.RunE(messageCmd, []string{"agent1", "hello"})
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.errMsg)
+		})
+	}
+}
+
 func TestSendGroupMessageViaHub(t *testing.T) {
 	orig := saveMessageTestState()
 	defer orig.restore()
