@@ -287,13 +287,7 @@ func (s *Server) getHarnessConfig(w http.ResponseWriter, r *http.Request, id str
 
 	if s.imageStatusStale(hc) {
 		if image := s.harnessConfigImage(hc); image != "" {
-			registry := s.resolveImageRegistry()
-			resolvedImage := config.RewriteImageRegistry(image, registry)
-			result := s.imageChecker.Check(ctx, resolvedImage)
-			hc.ImageStatus = result.Status
-			now := time.Now()
-			hc.ImageStatusCheckedAt = &now
-			go s.store.UpdateHarnessConfigImageStatus(context.Background(), hc.ID, result.Status, result.CheckedAt)
+			go s.checkAndUpdateImageStatus(context.Background(), hc.ID, image)
 		}
 	}
 

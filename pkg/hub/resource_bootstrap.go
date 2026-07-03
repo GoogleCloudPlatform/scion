@@ -22,6 +22,8 @@ import (
 	"log/slog"
 	"path/filepath"
 
+	"golang.org/x/sync/errgroup"
+
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -127,7 +129,7 @@ func (s *Server) resolveImageRegistry() string {
 }
 
 // RecheckAllImageStatuses re-checks image availability for all active
-// harness configs. Called at server startup after bootstrap completes.
+// harness configs concurrently. Called at server startup after bootstrap completes.
 func (s *Server) RecheckAllImageStatuses(ctx context.Context) {
 	result, err := s.store.ListHarnessConfigs(ctx, store.HarnessConfigFilter{
 		Status: store.HarnessConfigStatusActive,
@@ -136,10 +138,18 @@ func (s *Server) RecheckAllImageStatuses(ctx context.Context) {
 		slog.Error("failed to list harness configs for image recheck", "error", err)
 		return
 	}
+
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(5)
 	for _, hc := range result.Items {
 		if hc.Config == nil || hc.Config.Image == "" {
 			continue
 		}
-		s.checkAndUpdateImageStatus(ctx, hc.ID, hc.Config.Image)
+		id, image := hc.ID, hc.Config.Image
+		g.Go(func() error {
+			s.checkAndUpdateImageStatus(gctx, id, image)
+			return nil
+		})
 	}
+	_ = g.Wait()
 }
