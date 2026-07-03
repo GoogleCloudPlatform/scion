@@ -16,11 +16,7 @@ package hub
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
-	"errors"
 	"fmt"
-	"io"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 )
@@ -43,10 +39,9 @@ type ValidationIssue struct {
 
 // Validation issue kinds.
 const (
-	ValidationIssueMissingObject       = "missing_object"
-	ValidationIssueMissingManifest     = "missing_manifest"
-	ValidationIssueZeroFilesActive     = "zero_files_active"
-	ValidationIssueContentHashMismatch = "content_hash_mismatch"
+	ValidationIssueMissingObject   = "missing_object"
+	ValidationIssueMissingManifest = "missing_manifest"
+	ValidationIssueZeroFilesActive = "zero_files_active"
 )
 
 // ValidateStorage checks a resource record's storage consistency. It verifies:
@@ -80,41 +75,15 @@ func (rs *ResourceStore) ValidateStorage(ctx context.Context, rec *ResourceRecor
 
 	for _, file := range rec.Files {
 		objectPath := storagePath + "/" + file.Path
-		obj, err := stor.GetObject(ctx, objectPath)
+		exists, err := stor.Exists(ctx, objectPath)
 		if err != nil {
-			if errors.Is(err, storage.ErrNotFound) {
-				report.Issues = append(report.Issues, ValidationIssue{
-					Kind:    ValidationIssueMissingObject,
-					File:    file.Path,
-					Message: fmt.Sprintf("storage object missing for file %q", file.Path),
-				})
-				continue
-			}
 			return report, fmt.Errorf("checking object %q: %w", objectPath, err)
 		}
-
-		if file.Hash == "" {
-			continue
-		}
-
-		storedHash := objectMetadataHash(obj)
-		if storedHash == "" {
-			var hashErr error
-			storedHash, hashErr = computeStoredHash(ctx, stor, objectPath)
-			if hashErr != nil {
-				report.Issues = append(report.Issues, ValidationIssue{
-					Kind:    ValidationIssueContentHashMismatch,
-					File:    file.Path,
-					Message: fmt.Sprintf("failed to compute hash: %v", hashErr),
-				})
-				continue
-			}
-		}
-		if storedHash != "" && storedHash != file.Hash {
+		if !exists {
 			report.Issues = append(report.Issues, ValidationIssue{
-				Kind:    ValidationIssueContentHashMismatch,
+				Kind:    ValidationIssueMissingObject,
 				File:    file.Path,
-				Message: fmt.Sprintf("expected %s, got %s", file.Hash, storedHash),
+				Message: fmt.Sprintf("storage object missing for file %q", file.Path),
 			})
 		}
 	}
@@ -132,30 +101,4 @@ func (rs *ResourceStore) ValidateStorage(ctx context.Context, rec *ResourceRecor
 	}
 
 	return report, nil
-}
-
-// objectMetadataHash extracts the SHA256 hash stored in object metadata during
-// upload. Returns "" if the metadata doesn't contain a hash.
-func objectMetadataHash(obj *storage.Object) string {
-	if obj == nil || obj.Metadata == nil {
-		return ""
-	}
-	return obj.Metadata["sha256"]
-}
-
-func computeStoredHash(ctx context.Context, stor storage.Storage, objectPath string) (string, error) {
-	reader, _, err := stor.Download(ctx, objectPath)
-	if err != nil {
-		return "", err
-	}
-	if reader == nil {
-		return "", fmt.Errorf("storage returned nil reader for %s", objectPath)
-	}
-	defer func() { _ = reader.Close() }()
-
-	hasher := sha256.New()
-	if _, err := io.Copy(hasher, reader); err != nil {
-		return "", err
-	}
-	return "sha256:" + hex.EncodeToString(hasher.Sum(nil)), nil
 }

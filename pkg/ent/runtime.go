@@ -392,15 +392,15 @@ func init() {
 	// harnessconfig.DefaultScope holds the default value on creation for the scope field.
 	harnessconfig.DefaultScope = harnessconfigDescScope.Default.(string)
 	// harnessconfigDescVisibility is the schema descriptor for visibility field.
-	harnessconfigDescVisibility := harnessconfigFields[21].Descriptor()
+	harnessconfigDescVisibility := harnessconfigFields[19].Descriptor()
 	// harnessconfig.DefaultVisibility holds the default value on creation for the visibility field.
 	harnessconfig.DefaultVisibility = harnessconfigDescVisibility.Default.(string)
 	// harnessconfigDescCreated is the schema descriptor for created field.
-	harnessconfigDescCreated := harnessconfigFields[22].Descriptor()
+	harnessconfigDescCreated := harnessconfigFields[20].Descriptor()
 	// harnessconfig.DefaultCreated holds the default value on creation for the created field.
 	harnessconfig.DefaultCreated = harnessconfigDescCreated.Default.(func() time.Time)
 	// harnessconfigDescUpdated is the schema descriptor for updated field.
-	harnessconfigDescUpdated := harnessconfigFields[23].Descriptor()
+	harnessconfigDescUpdated := harnessconfigFields[21].Descriptor()
 	// harnessconfig.DefaultUpdated holds the default value on creation for the updated field.
 	harnessconfig.DefaultUpdated = harnessconfigDescUpdated.Default.(func() time.Time)
 	// harnessconfig.UpdateDefaultUpdated holds the default value on update for the updated field.

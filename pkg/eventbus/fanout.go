@@ -41,12 +41,18 @@ type NamedEventBus struct {
 	ChannelID string
 }
 
+type recordedSubscription struct {
+	pattern string
+	handler EventHandler
+}
+
 // FanOutEventBus implements EventBus by delegating to N child event buses.
 // Publish fans out concurrently. Subscribe and Close delegate to all children.
 type FanOutEventBus struct {
-	mu    sync.RWMutex
-	buses []NamedEventBus
-	log   *slog.Logger
+	mu            sync.RWMutex
+	buses         []NamedEventBus
+	subscriptions []recordedSubscription
+	log           *slog.Logger
 }
 
 // NewFanOutEventBus creates a FanOutEventBus that delegates to the given children.
@@ -134,10 +140,11 @@ func (f *FanOutEventBus) Publish(ctx context.Context, topic string, msg *message
 
 // Subscribe delegates to all child event buses.
 func (f *FanOutEventBus) Subscribe(pattern string, handler EventHandler) (Subscription, error) {
-	f.mu.RLock()
+	f.mu.Lock()
+	f.subscriptions = append(f.subscriptions, recordedSubscription{pattern: pattern, handler: handler})
 	buses := make([]NamedEventBus, len(f.buses))
 	copy(buses, f.buses)
-	f.mu.RUnlock()
+	f.mu.Unlock()
 
 	subs := make([]Subscription, 0, len(buses))
 	for _, nb := range buses {
@@ -199,22 +206,33 @@ func (f *FanOutEventBus) BusChannels() []BusChannel {
 }
 
 // AddSpoke adds a new spoke to the fan-out bus. Returns an error if a spoke
-// with the same name already exists.
+// with the same name already exists. Existing subscriptions are replayed to
+// the new spoke so late-joining plugins receive all active topic handlers.
 func (f *FanOutEventBus) AddSpoke(bus NamedEventBus) error {
 	f.mu.Lock()
-	defer f.mu.Unlock()
-
 	for _, nb := range f.buses {
 		if nb.Name == bus.Name {
+			f.mu.Unlock()
 			return fmt.Errorf("spoke %q already exists", bus.Name)
 		}
 	}
 	f.buses = append(f.buses, bus)
+	subs := make([]recordedSubscription, len(f.subscriptions))
+	copy(subs, f.subscriptions)
+	f.mu.Unlock()
+
+	for _, sub := range subs {
+		if _, err := bus.Bus.Subscribe(sub.pattern, sub.handler); err != nil {
+			f.log.Error("failed to replay subscription to new spoke",
+				"spoke", bus.Name, "pattern", sub.pattern, "error", err.Error())
+		}
+	}
 	return nil
 }
 
 // ReplaceSpoke replaces an existing spoke by name. It tears down the old
-// spoke's subscriptions (via Close) and inserts the new one at the same position.
+// spoke's subscriptions (via Close), inserts the new one at the same position,
+// and replays existing subscriptions to the replacement.
 func (f *FanOutEventBus) ReplaceSpoke(name string, newBus NamedEventBus) error {
 	if name == InProcessBusName {
 		return fmt.Errorf("cannot replace the %q spoke", InProcessBusName)
@@ -222,12 +240,17 @@ func (f *FanOutEventBus) ReplaceSpoke(name string, newBus NamedEventBus) error {
 
 	var oldBus EventBus
 	f.mu.Lock()
+	var subs []recordedSubscription
 	for i, nb := range f.buses {
 		if nb.Name == name {
 			oldBus = nb.Bus
 			f.buses[i] = newBus
 			break
 		}
+	}
+	if oldBus != nil {
+		subs = make([]recordedSubscription, len(f.subscriptions))
+		copy(subs, f.subscriptions)
 	}
 	f.mu.Unlock()
 
@@ -236,6 +259,13 @@ func (f *FanOutEventBus) ReplaceSpoke(name string, newBus NamedEventBus) error {
 	}
 	if err := oldBus.Close(); err != nil {
 		f.log.Error("failed to close old spoke during replace", "bus", name, "error", err)
+	}
+
+	for _, sub := range subs {
+		if _, err := newBus.Bus.Subscribe(sub.pattern, sub.handler); err != nil {
+			f.log.Error("failed to replay subscription to replaced spoke",
+				"spoke", newBus.Name, "pattern", sub.pattern, "error", err.Error())
+		}
 	}
 	return nil
 }

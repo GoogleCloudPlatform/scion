@@ -58,7 +58,6 @@ type BootstrapOptions struct {
 	RepairStorage   bool
 	AdoptExisting   bool
 	OverwritePolicy OverwritePolicy
-	SkipIfAnyExist  bool // skip seeding if any active resources of the same kind already exist
 }
 
 // OverwritePolicy determines which existing resources BootstrapSource may overwrite.
@@ -82,8 +81,7 @@ type BootstrapResult struct {
 // IsBuiltinManaged returns true if sourceURL identifies a resource managed by
 // the built-in bundled catalog.
 func IsBuiltinManaged(sourceURL string) bool {
-	return strings.HasPrefix(sourceURL, "builtin://scion/") ||
-		strings.HasPrefix(sourceURL, "git+https://github.com/GoogleCloudPlatform/scion/harnesses/")
+	return strings.HasPrefix(sourceURL, "builtin://scion/")
 }
 
 // FSResourceSource implements ResourceSource for a bundled BundledResource.
@@ -133,7 +131,6 @@ func (s *FSResourceSource) Files(ctx context.Context) ([]transfer.FileInfo, erro
 		if readErr != nil {
 			return readErr
 		}
-		data = transfer.NormalizeFileContent(data)
 
 		hash := sha256.Sum256(data)
 		files = append(files, transfer.FileInfo{
@@ -265,11 +262,6 @@ func (rs *ResourceStore) BootstrapSource(ctx context.Context, src ResourceSource
 		return result, fmt.Errorf("%s: stage source: %w", p.Label(), err)
 	}
 	defer cleanup()
-
-	if err := transfer.NormalizeDir(dir); err != nil {
-		result.Failed++
-		return result, fmt.Errorf("%s: normalize staged dir: %w", p.Label(), err)
-	}
 
 	files, err := transfer.CollectFiles(dir, nil)
 	if err != nil {

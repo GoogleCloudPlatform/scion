@@ -571,10 +571,6 @@ type HarnessConfig struct {
 
 	Status string `json:"status"` // pending, active, archived
 
-	// Image status
-	ImageStatus          string     `json:"imageStatus"`                    // unknown, valid, invalid, error
-	ImageStatusCheckedAt *time.Time `json:"imageStatusCheckedAt,omitempty"` // last image check timestamp
-
 	// Ownership
 	OwnerID    string `json:"ownerId,omitempty"`
 	CreatedBy  string `json:"createdBy,omitempty"`
@@ -605,14 +601,6 @@ const (
 	HarnessConfigStatusPending  = "pending"
 	HarnessConfigStatusActive   = "active"
 	HarnessConfigStatusArchived = "archived"
-)
-
-// HarnessConfigImageStatus constants
-const (
-	HarnessConfigImageStatusUnknown = "unknown"
-	HarnessConfigImageStatusValid   = "valid"
-	HarnessConfigImageStatusInvalid = "invalid"
-	HarnessConfigImageStatusError   = "error"
 )
 
 // HarnessConfigScope constants

@@ -196,34 +196,6 @@ func (_c *HarnessConfigCreate) SetNillableStatus(v *harnessconfig.Status) *Harne
 	return _c
 }
 
-// SetImageStatus sets the "image_status" field.
-func (_c *HarnessConfigCreate) SetImageStatus(v harnessconfig.ImageStatus) *HarnessConfigCreate {
-	_c.mutation.SetImageStatus(v)
-	return _c
-}
-
-// SetNillableImageStatus sets the "image_status" field if the given value is not nil.
-func (_c *HarnessConfigCreate) SetNillableImageStatus(v *harnessconfig.ImageStatus) *HarnessConfigCreate {
-	if v != nil {
-		_c.SetImageStatus(*v)
-	}
-	return _c
-}
-
-// SetImageStatusCheckedAt sets the "image_status_checked_at" field.
-func (_c *HarnessConfigCreate) SetImageStatusCheckedAt(v time.Time) *HarnessConfigCreate {
-	_c.mutation.SetImageStatusCheckedAt(v)
-	return _c
-}
-
-// SetNillableImageStatusCheckedAt sets the "image_status_checked_at" field if the given value is not nil.
-func (_c *HarnessConfigCreate) SetNillableImageStatusCheckedAt(v *time.Time) *HarnessConfigCreate {
-	if v != nil {
-		_c.SetImageStatusCheckedAt(*v)
-	}
-	return _c
-}
-
 // SetOwnerID sets the "owner_id" field.
 func (_c *HarnessConfigCreate) SetOwnerID(v string) *HarnessConfigCreate {
 	_c.mutation.SetOwnerID(v)
@@ -379,10 +351,6 @@ func (_c *HarnessConfigCreate) defaults() {
 		v := harnessconfig.DefaultStatus
 		_c.mutation.SetStatus(v)
 	}
-	if _, ok := _c.mutation.ImageStatus(); !ok {
-		v := harnessconfig.DefaultImageStatus
-		_c.mutation.SetImageStatus(v)
-	}
 	if _, ok := _c.mutation.Visibility(); !ok {
 		v := harnessconfig.DefaultVisibility
 		_c.mutation.SetVisibility(v)
@@ -436,14 +404,6 @@ func (_c *HarnessConfigCreate) check() error {
 	if v, ok := _c.mutation.Status(); ok {
 		if err := harnessconfig.StatusValidator(v); err != nil {
 			return &ValidationError{Name: "status", err: fmt.Errorf(`ent: validator failed for field "HarnessConfig.status": %w`, err)}
-		}
-	}
-	if _, ok := _c.mutation.ImageStatus(); !ok {
-		return &ValidationError{Name: "image_status", err: errors.New(`ent: missing required field "HarnessConfig.image_status"`)}
-	}
-	if v, ok := _c.mutation.ImageStatus(); ok {
-		if err := harnessconfig.ImageStatusValidator(v); err != nil {
-			return &ValidationError{Name: "image_status", err: fmt.Errorf(`ent: validator failed for field "HarnessConfig.image_status": %w`, err)}
 		}
 	}
 	if _, ok := _c.mutation.Visibility(); !ok {
@@ -546,14 +506,6 @@ func (_c *HarnessConfigCreate) createSpec() (*HarnessConfig, *sqlgraph.CreateSpe
 	if value, ok := _c.mutation.Status(); ok {
 		_spec.SetField(harnessconfig.FieldStatus, field.TypeEnum, value)
 		_node.Status = value
-	}
-	if value, ok := _c.mutation.ImageStatus(); ok {
-		_spec.SetField(harnessconfig.FieldImageStatus, field.TypeEnum, value)
-		_node.ImageStatus = value
-	}
-	if value, ok := _c.mutation.ImageStatusCheckedAt(); ok {
-		_spec.SetField(harnessconfig.FieldImageStatusCheckedAt, field.TypeTime, value)
-		_node.ImageStatusCheckedAt = &value
 	}
 	if value, ok := _c.mutation.OwnerID(); ok {
 		_spec.SetField(harnessconfig.FieldOwnerID, field.TypeString, value)
@@ -854,36 +806,6 @@ func (u *HarnessConfigUpsert) SetStatus(v harnessconfig.Status) *HarnessConfigUp
 // UpdateStatus sets the "status" field to the value that was provided on create.
 func (u *HarnessConfigUpsert) UpdateStatus() *HarnessConfigUpsert {
 	u.SetExcluded(harnessconfig.FieldStatus)
-	return u
-}
-
-// SetImageStatus sets the "image_status" field.
-func (u *HarnessConfigUpsert) SetImageStatus(v harnessconfig.ImageStatus) *HarnessConfigUpsert {
-	u.Set(harnessconfig.FieldImageStatus, v)
-	return u
-}
-
-// UpdateImageStatus sets the "image_status" field to the value that was provided on create.
-func (u *HarnessConfigUpsert) UpdateImageStatus() *HarnessConfigUpsert {
-	u.SetExcluded(harnessconfig.FieldImageStatus)
-	return u
-}
-
-// SetImageStatusCheckedAt sets the "image_status_checked_at" field.
-func (u *HarnessConfigUpsert) SetImageStatusCheckedAt(v time.Time) *HarnessConfigUpsert {
-	u.Set(harnessconfig.FieldImageStatusCheckedAt, v)
-	return u
-}
-
-// UpdateImageStatusCheckedAt sets the "image_status_checked_at" field to the value that was provided on create.
-func (u *HarnessConfigUpsert) UpdateImageStatusCheckedAt() *HarnessConfigUpsert {
-	u.SetExcluded(harnessconfig.FieldImageStatusCheckedAt)
-	return u
-}
-
-// ClearImageStatusCheckedAt clears the value of the "image_status_checked_at" field.
-func (u *HarnessConfigUpsert) ClearImageStatusCheckedAt() *HarnessConfigUpsert {
-	u.SetNull(harnessconfig.FieldImageStatusCheckedAt)
 	return u
 }
 
@@ -1290,41 +1212,6 @@ func (u *HarnessConfigUpsertOne) SetStatus(v harnessconfig.Status) *HarnessConfi
 func (u *HarnessConfigUpsertOne) UpdateStatus() *HarnessConfigUpsertOne {
 	return u.Update(func(s *HarnessConfigUpsert) {
 		s.UpdateStatus()
-	})
-}
-
-// SetImageStatus sets the "image_status" field.
-func (u *HarnessConfigUpsertOne) SetImageStatus(v harnessconfig.ImageStatus) *HarnessConfigUpsertOne {
-	return u.Update(func(s *HarnessConfigUpsert) {
-		s.SetImageStatus(v)
-	})
-}
-
-// UpdateImageStatus sets the "image_status" field to the value that was provided on create.
-func (u *HarnessConfigUpsertOne) UpdateImageStatus() *HarnessConfigUpsertOne {
-	return u.Update(func(s *HarnessConfigUpsert) {
-		s.UpdateImageStatus()
-	})
-}
-
-// SetImageStatusCheckedAt sets the "image_status_checked_at" field.
-func (u *HarnessConfigUpsertOne) SetImageStatusCheckedAt(v time.Time) *HarnessConfigUpsertOne {
-	return u.Update(func(s *HarnessConfigUpsert) {
-		s.SetImageStatusCheckedAt(v)
-	})
-}
-
-// UpdateImageStatusCheckedAt sets the "image_status_checked_at" field to the value that was provided on create.
-func (u *HarnessConfigUpsertOne) UpdateImageStatusCheckedAt() *HarnessConfigUpsertOne {
-	return u.Update(func(s *HarnessConfigUpsert) {
-		s.UpdateImageStatusCheckedAt()
-	})
-}
-
-// ClearImageStatusCheckedAt clears the value of the "image_status_checked_at" field.
-func (u *HarnessConfigUpsertOne) ClearImageStatusCheckedAt() *HarnessConfigUpsertOne {
-	return u.Update(func(s *HarnessConfigUpsert) {
-		s.ClearImageStatusCheckedAt()
 	})
 }
 
@@ -1914,41 +1801,6 @@ func (u *HarnessConfigUpsertBulk) SetStatus(v harnessconfig.Status) *HarnessConf
 func (u *HarnessConfigUpsertBulk) UpdateStatus() *HarnessConfigUpsertBulk {
 	return u.Update(func(s *HarnessConfigUpsert) {
 		s.UpdateStatus()
-	})
-}
-
-// SetImageStatus sets the "image_status" field.
-func (u *HarnessConfigUpsertBulk) SetImageStatus(v harnessconfig.ImageStatus) *HarnessConfigUpsertBulk {
-	return u.Update(func(s *HarnessConfigUpsert) {
-		s.SetImageStatus(v)
-	})
-}
-
-// UpdateImageStatus sets the "image_status" field to the value that was provided on create.
-func (u *HarnessConfigUpsertBulk) UpdateImageStatus() *HarnessConfigUpsertBulk {
-	return u.Update(func(s *HarnessConfigUpsert) {
-		s.UpdateImageStatus()
-	})
-}
-
-// SetImageStatusCheckedAt sets the "image_status_checked_at" field.
-func (u *HarnessConfigUpsertBulk) SetImageStatusCheckedAt(v time.Time) *HarnessConfigUpsertBulk {
-	return u.Update(func(s *HarnessConfigUpsert) {
-		s.SetImageStatusCheckedAt(v)
-	})
-}
-
-// UpdateImageStatusCheckedAt sets the "image_status_checked_at" field to the value that was provided on create.
-func (u *HarnessConfigUpsertBulk) UpdateImageStatusCheckedAt() *HarnessConfigUpsertBulk {
-	return u.Update(func(s *HarnessConfigUpsert) {
-		s.UpdateImageStatusCheckedAt()
-	})
-}
-
-// ClearImageStatusCheckedAt clears the value of the "image_status_checked_at" field.
-func (u *HarnessConfigUpsertBulk) ClearImageStatusCheckedAt() *HarnessConfigUpsertBulk {
-	return u.Update(func(s *HarnessConfigUpsert) {
-		s.ClearImageStatusCheckedAt()
 	})
 }
 

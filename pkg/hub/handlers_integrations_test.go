@@ -23,6 +23,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
 )
 
 // --- mock IntegrationManager ---
@@ -30,13 +32,16 @@ import (
 type mockIntegrationManager struct {
 	plugins        map[string]map[string]string // name → config
 	selfManaged    map[string]bool
+	inactive       map[string]bool // registered but not active
 	healthErr      error
 	infoErr        error
 	configureErr   error
+	startErr       error
 	reconnectErr   error
 	updateErr      error
 	installErr     error
 	configureCalls []string
+	startCalls     []string
 	reconnectCalls []string
 	updateCalls    []string
 	installCalls   []string
@@ -46,6 +51,7 @@ func newMockIntegrationManager() *mockIntegrationManager {
 	return &mockIntegrationManager{
 		plugins:     make(map[string]map[string]string),
 		selfManaged: make(map[string]bool),
+		inactive:    make(map[string]bool),
 	}
 }
 
@@ -63,6 +69,16 @@ func (m *mockIntegrationManager) HasPlugin(pluginType, name string) bool {
 	}
 	_, ok := m.plugins[name]
 	return ok
+}
+
+func (m *mockIntegrationManager) IsPluginActive(pluginType, name string) bool {
+	if pluginType != "broker" {
+		return false
+	}
+	if _, ok := m.plugins[name]; !ok {
+		return false
+	}
+	return !m.inactive[name]
 }
 
 func (m *mockIntegrationManager) GetPluginConfig(pluginType, name string) map[string]string {
@@ -87,9 +103,30 @@ func (m *mockIntegrationManager) IsSelfManaged(pluginType, name string) bool {
 	return m.selfManaged[name]
 }
 
+func (m *mockIntegrationManager) UpdatePluginConfig(pluginType, name string, config map[string]string) {
+	if pluginType != "broker" {
+		return
+	}
+	if m.plugins[name] == nil {
+		m.plugins[name] = make(map[string]string)
+	}
+	for k, v := range config {
+		m.plugins[name][k] = v
+	}
+}
+
 func (m *mockIntegrationManager) ConfigureBroker(name string, extra map[string]string) error {
 	m.configureCalls = append(m.configureCalls, name)
 	return m.configureErr
+}
+
+func (m *mockIntegrationManager) StartPlugin(pluginType, name string, cfg map[string]string) error {
+	m.startCalls = append(m.startCalls, name)
+	if m.startErr != nil {
+		return m.startErr
+	}
+	delete(m.inactive, name)
+	return nil
 }
 
 func (m *mockIntegrationManager) Reconnect(pluginType, name string) error {
@@ -122,6 +159,42 @@ func (m *mockIntegrationManager) InstallPlugin(name, repoPath, pluginsDir string
 		return m.installErr
 	}
 	m.plugins[name] = map[string]string{}
+	return nil
+}
+
+func (m *mockIntegrationManager) GetBrokerEventBus(name string) (eventbus.EventBus, error) {
+	return nil, fmt.Errorf("not implemented in mock")
+}
+
+func (m *mockIntegrationManager) GetPluginConfigFile(pluginType, name string) string {
+	if pluginType != "broker" {
+		return ""
+	}
+	cfg := m.plugins[name]
+	if cfg == nil {
+		return ""
+	}
+	return cfg["config_file"]
+}
+
+func (m *mockIntegrationManager) RegisterPlugin(pluginType, name, path string, cfg map[string]string, configFile string) {
+	if m.plugins[name] == nil {
+		m.plugins[name] = make(map[string]string)
+	}
+	for k, v := range cfg {
+		m.plugins[name][k] = v
+	}
+	if configFile != "" {
+		m.plugins[name]["config_file"] = configFile
+	}
+}
+
+func (m *mockIntegrationManager) StopPlugin(pluginType, name string) error {
+	return nil
+}
+
+func (m *mockIntegrationManager) UnregisterPlugin(pluginType, name string) error {
+	delete(m.plugins, name)
 	return nil
 }
 
@@ -421,6 +494,57 @@ func TestRestartIntegration_OK(t *testing.T) {
 	}
 }
 
+func TestRestartIntegration_InactivePlugin(t *testing.T) {
+	mgr := newMockIntegrationManager()
+	mgr.plugins["telegram"] = map[string]string{}
+	mgr.inactive["telegram"] = true
+
+	srv := &Server{}
+	srv.pluginManager = mgr
+
+	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/integrations/telegram/restart", nil)
+	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	rr := httptest.NewRecorder()
+	srv.handleAdminIntegrationByName(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	if len(mgr.startCalls) != 1 || mgr.startCalls[0] != "telegram" {
+		t.Errorf("expected StartPlugin call for telegram, got %v", mgr.startCalls)
+	}
+
+	if len(mgr.configureCalls) != 0 {
+		t.Errorf("expected no ConfigureBroker calls (StartPlugin handles inactive), got %d", len(mgr.configureCalls))
+	}
+}
+
+func TestRestartIntegration_InactivePlugin_StartError(t *testing.T) {
+	mgr := newMockIntegrationManager()
+	mgr.plugins["telegram"] = map[string]string{}
+	mgr.inactive["telegram"] = true
+	mgr.startErr = fmt.Errorf("binary not found")
+
+	srv := &Server{}
+	srv.pluginManager = mgr
+
+	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/integrations/telegram/restart", nil)
+	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	rr := httptest.NewRecorder()
+	srv.handleAdminIntegrationByName(rr, req)
+
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	if !strings.Contains(rr.Body.String(), "binary not found") {
+		t.Error("response should contain the actual error message")
+	}
+}
+
 func TestRestartIntegration_NotFound(t *testing.T) {
 	mgr := newMockIntegrationManager()
 	srv := &Server{}
@@ -501,6 +625,88 @@ func TestUpdateConfig_WithConfigFile(t *testing.T) {
 
 	if len(mgr.configureCalls) != 1 {
 		t.Errorf("expected 1 ConfigureBroker call, got %d", len(mgr.configureCalls))
+	}
+}
+
+func TestUpdateConfig_ReturnsUpdatedSettings(t *testing.T) {
+	dir := t.TempDir()
+	configFile := dir + "/telegram.yaml"
+
+	mgr := newMockIntegrationManager()
+	mgr.plugins["telegram"] = map[string]string{
+		"config_file":    configFile,
+		"webhook_listen": ":9094",
+	}
+
+	srv := &Server{}
+	srv.pluginManager = mgr
+
+	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
+	body := `{"settings":{"webhook_listen":":9095","db_path":"/tmp/tg.db"}}`
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/admin/integrations/telegram/config", strings.NewReader(body))
+	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	rr := httptest.NewRecorder()
+	srv.handleAdminIntegrationByName(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var result map[string]interface{}
+	if err := json.NewDecoder(rr.Body).Decode(&result); err != nil {
+		t.Fatalf("decode error: %v", err)
+	}
+
+	if result["status"] != "ok" {
+		t.Errorf("expected status ok, got %v", result["status"])
+	}
+
+	settings, ok := result["settings"].(map[string]interface{})
+	if !ok {
+		t.Fatal("expected settings in response")
+	}
+
+	if settings["webhook_listen"] != ":9095" {
+		t.Errorf("expected updated webhook_listen :9095, got %v", settings["webhook_listen"])
+	}
+	if settings["db_path"] != "/tmp/tg.db" {
+		t.Errorf("expected db_path /tmp/tg.db, got %v", settings["db_path"])
+	}
+
+	// Verify internal keys are filtered from settings.
+	if _, hasConfigFile := settings["config_file"]; hasConfigFile {
+		t.Error("config_file should be filtered from settings response")
+	}
+}
+
+func TestUpdateConfig_SyncsInMemoryConfig(t *testing.T) {
+	dir := t.TempDir()
+	configFile := dir + "/telegram.yaml"
+
+	mgr := newMockIntegrationManager()
+	mgr.plugins["telegram"] = map[string]string{
+		"config_file":    configFile,
+		"webhook_listen": ":9094",
+	}
+
+	srv := &Server{}
+	srv.pluginManager = mgr
+
+	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
+	body := `{"settings":{"webhook_listen":":9095"}}`
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/admin/integrations/telegram/config", strings.NewReader(body))
+	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	rr := httptest.NewRecorder()
+	srv.handleAdminIntegrationByName(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	// Subsequent GetPluginConfig should reflect the updated value.
+	cfg := mgr.GetPluginConfig("broker", "telegram")
+	if cfg["webhook_listen"] != ":9095" {
+		t.Errorf("in-memory config not updated: expected :9095, got %s", cfg["webhook_listen"])
 	}
 }
 
@@ -722,9 +928,8 @@ func TestUpdateIntegration_BuildError(t *testing.T) {
 	if rr.Code != http.StatusInternalServerError {
 		t.Fatalf("expected 500, got %d: %s", rr.Code, rr.Body.String())
 	}
-	// Error body should NOT contain raw error details
-	if strings.Contains(rr.Body.String(), "go build failed") {
-		t.Error("response should not leak internal error details")
+	if !strings.Contains(rr.Body.String(), "go build failed") {
+		t.Error("response should contain the build error message")
 	}
 }
 

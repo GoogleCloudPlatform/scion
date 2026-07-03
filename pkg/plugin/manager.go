@@ -118,6 +118,23 @@ func (m *Manager) LoadAll(cfg PluginsConfig, pluginsDir string) error {
 		)
 	}
 
+	// Register plugins from config that failed to start or whose binary was
+	// not found, so they remain visible in the integrations list. Only applies
+	// to entries with a config_file (i.e. installed via the admin API).
+	for name, entry := range cfg.Broker {
+		if entry.ConfigFile == "" || m.HasPlugin(PluginTypeBroker, name) {
+			continue
+		}
+		regCfg := make(map[string]string, len(entry.Config))
+		for k, v := range entry.Config {
+			regCfg[k] = v
+		}
+		path := resolvePluginPath(name, PluginTypeBroker, entry.Path, pluginsDir, m.logger)
+		m.RegisterPlugin(PluginTypeBroker, name, path, regCfg, entry.ConfigFile)
+		m.logger.Info("Registered plugin from config (not yet active)",
+			"type", PluginTypeBroker, "name", name)
+	}
+
 	return nil
 }
 
@@ -128,6 +145,7 @@ func (m *Manager) LoadOne(pluginType, name string, entry PluginEntry, pluginsDir
 			Name:        name,
 			Type:        pluginType,
 			Config:      entry.Config,
+			ConfigFile:  entry.ConfigFile,
 			FromConfig:  true,
 			SelfManaged: true,
 			Address:     entry.Address,
@@ -142,6 +160,7 @@ func (m *Manager) LoadOne(pluginType, name string, entry PluginEntry, pluginsDir
 		Type:       pluginType,
 		Path:       path,
 		Config:     entry.Config,
+		ConfigFile: entry.ConfigFile,
 		FromConfig: true,
 	})
 }
@@ -388,20 +407,44 @@ func (m *Manager) ConfigureBroker(name string, extra map[string]string) error {
 	}
 
 	// Start from the original plugin config and layer the extra values on top.
+	// Do NOT re-send _host_callbacks — the reverse RPC channel was established
+	// during the initial loadPlugin→Dispense→Configure cycle. Re-sending it
+	// causes the plugin to re-dial a consumed MuxBroker stream, resulting in EOF.
 	merged := make(map[string]string)
 	if hasDP {
 		for k, v := range dp.Config {
 			merged[k] = v
 		}
 	}
-	if rpcClient.hostCallbacksAvailable {
-		merged[hostCallbacksConfigKey] = "true"
-	}
+	delete(merged, hostCallbacksConfigKey)
 	for k, v := range extra {
 		merged[k] = v
 	}
+	delete(merged, hostCallbacksConfigKey)
 
 	return rpcClient.Configure(merged)
+}
+
+// UpdatePluginConfig merges the given config values into the manager's
+// in-memory config for the named plugin. This keeps GetPluginConfig in sync
+// after a successful ConfigureBroker or StartPlugin call.
+func (m *Manager) UpdatePluginConfig(pluginType, name string, config map[string]string) {
+	key := pluginType + ":" + name
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	dp, ok := m.configs[key]
+	if !ok {
+		return
+	}
+	merged := make(map[string]string, len(dp.Config)+len(config))
+	for k, v := range dp.Config {
+		merged[k] = v
+	}
+	for k, v := range config {
+		merged[k] = v
+	}
+	dp.Config = merged
+	m.configs[key] = dp
 }
 
 // GetPluginConfig returns a copy of the stored config map for the named plugin,
@@ -415,15 +458,28 @@ func (m *Manager) GetPluginConfig(pluginType, name string) map[string]string {
 	if !ok {
 		return nil
 	}
-	out := make(map[string]string, len(dp.Config))
+	out := make(map[string]string, len(dp.Config)+1)
 	for k, v := range dp.Config {
 		out[k] = v
+	}
+	if dp.Path != "" {
+		out["path"] = dp.Path
 	}
 	return out
 }
 
 // HasPlugin returns true if a plugin with the given type and name is loaded.
 func (m *Manager) HasPlugin(pluginType, name string) bool {
+	key := pluginType + ":" + name
+	m.mu.RLock()
+	_, ok := m.configs[key]
+	m.mu.RUnlock()
+	return ok
+}
+
+// IsPluginActive returns true if the plugin has a running process connection.
+// A plugin that is registered but not yet started returns false.
+func (m *Manager) IsPluginActive(pluginType, name string) bool {
 	key := pluginType + ":" + name
 	m.mu.RLock()
 	_, ok := m.clients[key]
@@ -439,16 +495,102 @@ func (m *Manager) IsSelfManaged(pluginType, name string) bool {
 	return m.selfManaged[key]
 }
 
-// ListPlugins returns a list of all loaded plugin keys ("type:name").
+// ListPlugins returns a list of all known plugin keys ("type:name"),
+// including plugins that are registered but not yet active.
 func (m *Manager) ListPlugins() []string {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	keys := make([]string, 0, len(m.clients))
-	for k := range m.clients {
+	keys := make([]string, 0, len(m.configs))
+	for k := range m.configs {
 		keys = append(keys, k)
 	}
 	return keys
+}
+
+// GetPluginConfigFile returns the config file path for the named plugin,
+// or an empty string if the plugin is not loaded or has no config file.
+func (m *Manager) GetPluginConfigFile(pluginType, name string) string {
+	key := pluginType + ":" + name
+	m.mu.RLock()
+	dp, ok := m.configs[key]
+	m.mu.RUnlock()
+	if !ok {
+		return ""
+	}
+	return dp.ConfigFile
+}
+
+// RegisterPlugin records a plugin in the manager's registry without starting
+// its process. The plugin will appear in ListPlugins and HasPlugin but will
+// not be active until loaded via LoadOne or a server restart.
+func (m *Manager) RegisterPlugin(pluginType, name, path string, cfg map[string]string, configFile string) {
+	key := pluginType + ":" + name
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.configs[key] = DiscoveredPlugin{
+		Name:       name,
+		Type:       pluginType,
+		Path:       path,
+		Config:     cfg,
+		ConfigFile: configFile,
+		FromConfig: true,
+	}
+}
+
+// StopPlugin kills a running plugin subprocess and removes it from the active
+// client maps. The plugin remains registered in m.configs so HasPlugin still
+// returns true; call UnregisterPlugin to fully remove it.
+func (m *Manager) StopPlugin(pluginType, name string) error {
+	key := pluginType + ":" + name
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	client, ok := m.clients[key]
+	if !ok {
+		return nil
+	}
+
+	if !m.selfManaged[key] {
+		client.Kill()
+	}
+	delete(m.clients, key)
+	delete(m.dispensed, key)
+	delete(m.selfManaged, key)
+	return nil
+}
+
+// UnregisterPlugin removes a plugin from the manager's registry entirely.
+// After this call HasPlugin returns false and the plugin will appear in the
+// available-integrations list.
+func (m *Manager) UnregisterPlugin(pluginType, name string) error {
+	key := pluginType + ":" + name
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.configs, key)
+	return nil
+}
+
+// StartPlugin starts a registered-but-not-active plugin by calling loadPlugin
+// with its stored config. If cfg is non-nil, it overrides the plugin's config
+// for initial configuration (e.g. to include injected secrets).
+func (m *Manager) StartPlugin(pluginType, name string, cfg map[string]string) error {
+	key := pluginType + ":" + name
+	m.mu.RLock()
+	dp, ok := m.configs[key]
+	m.mu.RUnlock()
+	if !ok {
+		return fmt.Errorf("plugin not registered: %s/%s", pluginType, name)
+	}
+	if cfg != nil {
+		dp.Config = cfg
+	}
+	return m.loadPlugin(dp)
+}
+
+// GetBrokerEventBus returns an EventBus backed by the named broker plugin.
+func (m *Manager) GetBrokerEventBus(name string) (eventbus.EventBus, error) {
+	return m.GetBroker(name)
 }
 
 // BrokerHealthCheck returns the health status of a named broker plugin as
@@ -554,10 +696,10 @@ func (m *Manager) UpdatePlugin(name string, repoPath string) error {
 func (m *Manager) InstallPlugin(name, repoPath, pluginsDir string) error {
 	key := PluginTypeBroker + ":" + name
 	m.mu.RLock()
-	_, alreadyLoaded := m.clients[key]
+	_, alreadyRegistered := m.configs[key]
 	m.mu.RUnlock()
 
-	if alreadyLoaded {
+	if alreadyRegistered {
 		return fmt.Errorf("plugin %q is already installed", name)
 	}
 
@@ -588,7 +730,7 @@ func (m *Manager) InstallPlugin(name, repoPath, pluginsDir string) error {
 		return fmt.Errorf("go build failed for plugin %q: %w\n%s", name, err, string(output))
 	}
 
-	return m.LoadOne(PluginTypeBroker, name, PluginEntry{Path: targetPath}, pluginsDir)
+	return nil
 }
 
 // Shutdown kills all plugin processes gracefully.

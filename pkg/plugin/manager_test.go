@@ -186,6 +186,30 @@ func (m *mockHostCallbacks) CancelSubscription(pattern string) error {
 	return nil
 }
 
+func TestManagerUpdatePluginConfig(t *testing.T) {
+	mgr := NewManager(nil)
+	mgr.RegisterPlugin(PluginTypeBroker, "telegram", "/usr/bin/telegram", map[string]string{
+		"webhook_listen": ":9094",
+	}, "/etc/telegram.yaml")
+
+	mgr.UpdatePluginConfig(PluginTypeBroker, "telegram", map[string]string{
+		"webhook_listen": ":9095",
+		"db_path":        "/tmp/tg.db",
+	})
+
+	cfg := mgr.GetPluginConfig(PluginTypeBroker, "telegram")
+	assert.Equal(t, ":9095", cfg["webhook_listen"])
+	assert.Equal(t, "/tmp/tg.db", cfg["db_path"])
+	assert.Equal(t, "/etc/telegram.yaml", mgr.GetPluginConfigFile(PluginTypeBroker, "telegram"))
+}
+
+func TestManagerUpdatePluginConfig_NotRegistered(t *testing.T) {
+	mgr := NewManager(nil)
+	// Should not panic on unknown plugin.
+	mgr.UpdatePluginConfig(PluginTypeBroker, "nonexistent", map[string]string{"key": "val"})
+	assert.Nil(t, mgr.GetPluginConfig(PluginTypeBroker, "nonexistent"))
+}
+
 func TestManagerShutdown_SelfManagedTracking(t *testing.T) {
 	mgr := NewManager(nil)
 

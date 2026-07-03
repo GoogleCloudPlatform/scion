@@ -488,8 +488,6 @@ export interface HarnessConfig {
   contentHash?: string;
   sourceUrl?: string;
   files?: TemplateFileInfo[];
-  imageStatus?: string;
-  imageStatusCheckedAt?: string;
   created?: string;
   updated?: string;
   _capabilities?: Capabilities;

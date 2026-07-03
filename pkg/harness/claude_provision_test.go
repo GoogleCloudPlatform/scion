@@ -858,8 +858,8 @@ func TestClaudeContainerScriptResolveAuthShape(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ResolveAuth: %v", err)
 	}
-	if resolved.Method != "api-key" {
-		t.Errorf("Method=%q want api-key (detected from ANTHROPIC_API_KEY via auth metadata)", resolved.Method)
+	if resolved.Method != "container-script" {
+		t.Errorf("Method=%q want container-script (final selection deferred to script)", resolved.Method)
 	}
 	if resolved.EnvVars["ANTHROPIC_API_KEY"] != "sk-ant-xx" {
 		t.Errorf("expected ANTHROPIC_API_KEY to flow through, got %v", resolved.EnvVars)

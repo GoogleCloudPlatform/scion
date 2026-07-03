@@ -22,15 +22,10 @@ Reads credential mappings from inputs/capture-auth-config.json (derived from
 the harness config.yaml's auth.types.*.required_files declarations). This
 avoids hardcoding paths or key names in the script.
 
-Additionally captures OAuth tokens produced by `claude setup-token` by reading
-the terminal scrollback (via tmux capture-pane, the same mechanism behind
-`scion look`) and searching for lines beginning with ``sk-ant``.
-
 Exit codes:
   0 = at least one credential captured
   1 = error
   2 = no credentials found (not an error, but nothing was stored)
-  3 = secret already exists (conflict — use --force to overwrite)
 """
 
 from __future__ import annotations
@@ -38,7 +33,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
 import subprocess
 import sys
 from typing import Any
@@ -46,7 +40,6 @@ from typing import Any
 EXIT_OK = 0
 EXIT_ERROR = 1
 EXIT_NO_CREDS = 2
-EXIT_CONFLICT = 3
 
 HARNESS_BUNDLE = os.path.join(
     os.environ.get("HOME") or os.path.expanduser("~"),
@@ -110,48 +103,8 @@ def _capture_one(
 
     if result.returncode != 0:
         stderr = result.stderr.strip()
-        if "already exists" in stderr.lower():
-            return False, "CONFLICT"
         return False, f"sciontool failed for {key}: {stderr}"
 
-    return True, None
-
-
-def _extract_oauth_from_scrollback() -> str | None:
-    """Read terminal scrollback and return an sk-ant OAuth token if present."""
-    try:
-        result = subprocess.run(
-            ["tmux", "capture-pane", "-pS", "-200", "-t", "scion"],
-            capture_output=True, text=True, timeout=10,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
-        print(f"capture-auth: scrollback read failed: {exc}", file=sys.stderr)
-        return None
-    if result.returncode != 0:
-        return None
-    for line in reversed(result.stdout.splitlines()):
-        stripped = line.strip()
-        if re.match(r"^sk-ant-oat[A-Za-z0-9._-]+$", stripped):
-            return stripped
-    return None
-
-
-def _store_oauth_token(token: str, force: bool) -> tuple[bool, str | None]:
-    """Store an OAuth token as CLAUDE_CODE_OAUTH_TOKEN via sciontool."""
-    cmd = ["sciontool", "secret", "set", "CLAUDE_CODE_OAUTH_TOKEN", token]
-    if force:
-        cmd.append("--force")
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-    except FileNotFoundError:
-        return False, "sciontool not found in PATH"
-    except subprocess.TimeoutExpired:
-        return False, "sciontool timed out storing OAuth token"
-    if result.returncode != 0:
-        stderr = result.stderr.strip()
-        if "already exists" in stderr.lower():
-            return False, "CONFLICT"
-        return False, f"sciontool failed: {stderr}"
     return True, None
 
 
@@ -172,9 +125,15 @@ def main() -> int:
     args = parser.parse_args()
 
     entries = _load_config(args.bundle)
+    if not entries:
+        print(
+            "capture-auth: no credential mappings found in "
+            "inputs/capture-auth-config.json",
+            file=sys.stderr,
+        )
+        return EXIT_NO_CREDS
 
     captured = 0
-    conflicts = 0
     errors = 0
 
     for entry in entries:
@@ -187,37 +146,12 @@ def main() -> int:
             continue
 
         ok, err = _capture_one(entry, args.force)
-        if err == "CONFLICT":
-            print(f'CONFLICT: secret "{key}" already exists (use --force to overwrite)')
-            conflicts += 1
-        elif err:
+        if err:
             print(f"capture-auth: {key}: {err}", file=sys.stderr)
             errors += 1
         elif ok:
             print(f"capture-auth: {key}: captured from {source}")
             captured += 1
-
-    # Scrollback fallback: capture OAuth token from `claude setup-token` output.
-    if captured == 0 and conflicts == 0 and errors == 0:
-        print("capture-auth: no credential files found, scanning terminal scrollback...")
-        token = _extract_oauth_from_scrollback()
-        if token:
-            ok, err = _store_oauth_token(token, args.force)
-            if err == "CONFLICT":
-                print(
-                    'CONFLICT: secret "CLAUDE_CODE_OAUTH_TOKEN" already exists '
-                    "(use --force to overwrite)"
-                )
-                conflicts += 1
-            elif err:
-                print(f"capture-auth: CLAUDE_CODE_OAUTH_TOKEN: {err}", file=sys.stderr)
-                errors += 1
-            elif ok:
-                print("capture-auth: CLAUDE_CODE_OAUTH_TOKEN: captured from terminal scrollback")
-                captured += 1
-
-    if conflicts > 0:
-        return EXIT_CONFLICT
 
     if errors > 0 and captured == 0:
         return EXIT_ERROR

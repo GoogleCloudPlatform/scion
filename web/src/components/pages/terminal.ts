@@ -21,7 +21,7 @@
  * via WebSocket proxy through Koa to the Hub PTY endpoint.
  */
 
-import { LitElement, html, css, nothing } from 'lit';
+import { LitElement, html, css } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
 import type { PageData, Agent, AgentPhase, AgentActivity } from '../../shared/types.js';
@@ -96,9 +96,6 @@ export class ScionPageTerminal extends LitElement {
 
   @state()
   private captureAuthLoading = false;
-
-  @state()
-  private captureAuthConflicts: string[] | null = null;
 
   private terminal: Terminal | null = null;
   private fitAddon: FitAddon | null = null;
@@ -783,20 +780,17 @@ export class ScionPageTerminal extends LitElement {
     return isNoAuth && !!agent.resolvedHarness;
   }
 
-  private static readonly SECRET_CONFLICT_RE = /secret "([^"]+)" already exists/g;
-
-  private async handleCaptureAuth(force = false): Promise<void> {
+  private async handleCaptureAuth(): Promise<void> {
     if (!this.agent) return;
     this.captureAuthLoading = true;
-    this.captureAuthConflicts = null;
     try {
-      const command = ['python3', '/home/scion/.scion/harness/capture_auth.py'];
-      if (force) command.push('--force');
-
       const response = await apiFetch(`/api/v1/agents/${this.agent.id}/exec`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ command, timeout: 60 }),
+        body: JSON.stringify({
+          command: ['python3', '/home/scion/.scion/harness/capture_auth.py'],
+          timeout: 60,
+        }),
       });
 
       if (!response.ok) {
@@ -813,15 +807,7 @@ export class ScionPageTerminal extends LitElement {
       } else if (result.exitCode === 2) {
         alert(`No credentials found yet.\n\nAuthenticate first (e.g., run 'agy' inside the container), then try again.\n\n${result.output}`);
       } else {
-        const conflicts: string[] = [];
-        for (const m of result.output.matchAll(ScionPageTerminal.SECRET_CONFLICT_RE)) {
-          conflicts.push(m[1]);
-        }
-        if (conflicts.length > 0) {
-          this.captureAuthConflicts = conflicts;
-        } else {
-          alert(`Capture failed (exit ${result.exitCode}).\n\n${result.output}`);
-        }
+        alert(`Capture failed (exit ${result.exitCode}).\n\n${result.output}`);
       }
     } catch (err) {
       console.error('Failed to capture auth:', err);
@@ -829,37 +815,6 @@ export class ScionPageTerminal extends LitElement {
     } finally {
       this.captureAuthLoading = false;
     }
-  }
-
-  private renderCaptureAuthConflictDialog() {
-    if (!this.captureAuthConflicts) return nothing;
-    const secrets = this.captureAuthConflicts;
-    const label = secrets.length === 1
-      ? `Secret "${secrets[0]}" already exists`
-      : `${secrets.length} secrets already exist`;
-    return html`
-      <sl-dialog
-        label=${label}
-        open
-        @sl-request-close=${() => { if (!this.captureAuthLoading) this.captureAuthConflicts = null; }}
-      >
-        <p>The following secret${secrets.length > 1 ? 's' : ''} already exist${secrets.length === 1 ? 's' : ''}:</p>
-        <ul>${secrets.map(s => html`<li><code>${s}</code></li>`)}</ul>
-        <p>Do you want to force-update ${secrets.length > 1 ? 'them' : 'it'}?</p>
-        <sl-button
-          slot="footer"
-          variant="default"
-          ?disabled=${this.captureAuthLoading}
-          @click=${() => { this.captureAuthConflicts = null; }}
-        >Cancel</sl-button>
-        <sl-button
-          slot="footer"
-          variant="warning"
-          ?loading=${this.captureAuthLoading}
-          @click=${() => void this.handleCaptureAuth(true)}
-        >Force Update</sl-button>
-      </sl-dialog>
-    `;
   }
 
   private async refreshAgentData(): Promise<void> {
@@ -999,7 +954,6 @@ export class ScionPageTerminal extends LitElement {
             </div>`
           : ''}
       </div>
-      ${this.renderCaptureAuthConflictDialog()}
     `;
   }
 }

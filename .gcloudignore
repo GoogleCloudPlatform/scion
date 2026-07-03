@@ -92,4 +92,6 @@ GLOSSARY.md
 LICENSE
 Makefile
 README.md
+Dockerfile
+Dockerfile.hub
 pr-*-review*.md

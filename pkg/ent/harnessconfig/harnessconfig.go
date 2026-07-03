@@ -43,10 +43,6 @@ const (
 	FieldFiles = "files"
 	// FieldStatus holds the string denoting the status field in the database.
 	FieldStatus = "status"
-	// FieldImageStatus holds the string denoting the image_status field in the database.
-	FieldImageStatus = "image_status"
-	// FieldImageStatusCheckedAt holds the string denoting the image_status_checked_at field in the database.
-	FieldImageStatusCheckedAt = "image_status_checked_at"
 	// FieldOwnerID holds the string denoting the owner_id field in the database.
 	FieldOwnerID = "owner_id"
 	// FieldCreatedBy holds the string denoting the created_by field in the database.
@@ -82,8 +78,6 @@ var Columns = []string{
 	FieldStoragePath,
 	FieldFiles,
 	FieldStatus,
-	FieldImageStatus,
-	FieldImageStatusCheckedAt,
 	FieldOwnerID,
 	FieldCreatedBy,
 	FieldUpdatedBy,
@@ -148,34 +142,6 @@ func StatusValidator(s Status) error {
 		return nil
 	default:
 		return fmt.Errorf("harnessconfig: invalid enum value for status field: %q", s)
-	}
-}
-
-// ImageStatus defines the type for the "image_status" enum field.
-type ImageStatus string
-
-// ImageStatusUnknown is the default value of the ImageStatus enum.
-const DefaultImageStatus = ImageStatusUnknown
-
-// ImageStatus values.
-const (
-	ImageStatusUnknown ImageStatus = "unknown"
-	ImageStatusValid   ImageStatus = "valid"
-	ImageStatusInvalid ImageStatus = "invalid"
-	ImageStatusError   ImageStatus = "error"
-)
-
-func (is ImageStatus) String() string {
-	return string(is)
-}
-
-// ImageStatusValidator is a validator for the "image_status" field enum values. It is called by the builders before save.
-func ImageStatusValidator(is ImageStatus) error {
-	switch is {
-	case ImageStatusUnknown, ImageStatusValid, ImageStatusInvalid, ImageStatusError:
-		return nil
-	default:
-		return fmt.Errorf("harnessconfig: invalid enum value for image_status field: %q", is)
 	}
 }
 
@@ -255,16 +221,6 @@ func ByFiles(opts ...sql.OrderTermOption) OrderOption {
 // ByStatus orders the results by the status field.
 func ByStatus(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldStatus, opts...).ToFunc()
-}
-
-// ByImageStatus orders the results by the image_status field.
-func ByImageStatus(opts ...sql.OrderTermOption) OrderOption {
-	return sql.OrderByField(FieldImageStatus, opts...).ToFunc()
-}
-
-// ByImageStatusCheckedAt orders the results by the image_status_checked_at field.
-func ByImageStatusCheckedAt(opts ...sql.OrderTermOption) OrderOption {
-	return sql.OrderByField(FieldImageStatusCheckedAt, opts...).ToFunc()
 }
 
 // ByOwnerID orders the results by the owner_id field.

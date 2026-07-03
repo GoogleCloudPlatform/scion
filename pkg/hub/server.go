@@ -39,7 +39,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/githubapp"
-	"github.com/GoogleCloudPlatform/scion/pkg/hub/imagecheck"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/dbmetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/dispatchmetrics"
@@ -49,7 +48,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 	"github.com/google/uuid"
 	"github.com/robfig/cron/v3"
-	"golang.org/x/sync/singleflight"
 )
 
 const (
@@ -643,6 +641,9 @@ type Server struct {
 	// Message broker proxy for pub/sub message routing (nil = disabled)
 	messageBrokerProxy *MessageBrokerProxy
 
+	// Fan-out event bus for adding/removing spokes at runtime (nil = disabled)
+	fanOutBus *eventbus.FanOutEventBus
+
 	// User last-seen activity tracker (nil = disabled)
 	userActivity *UserActivityTracker
 
@@ -670,9 +671,6 @@ type Server struct {
 
 	imageBuildActive atomic.Bool
 	imagePullActive  atomic.Bool
-
-	imageChecker      *imagecheck.Checker
-	imageStatusFlight singleflight.Group
 }
 
 func newInstanceID() string {
@@ -975,9 +973,6 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 
 	// Initialize GCP token rate limiter (1 req/sec average, burst of 10)
 	srv.gcpTokenRateLimiter = NewGCPTokenRateLimiter(1, 10)
-
-	// Initialize image checker for harness config image status verification
-	srv.imageChecker = imagecheck.NewChecker()
 
 	srv.registerRoutes()
 
@@ -1584,12 +1579,6 @@ func (s *Server) SetGCPTokenMetrics(m GCPTokenMetricsRecorder) {
 	s.gcpTokenMetrics = m
 }
 
-// SetLocalImageChecker wires a local container runtime into the image
-// checker so it can verify images via the local Docker/Podman daemon.
-func (s *Server) SetLocalImageChecker(l imagecheck.LocalImageExister) {
-	s.imageChecker.SetLocal(l)
-}
-
 // GetMaintenanceState returns the runtime maintenance state.
 func (s *Server) GetMaintenanceState() *MaintenanceState {
 	return s.maintenance
@@ -1715,6 +1704,10 @@ func (s *Server) StartMessageBroker(b eventbus.EventBus) {
 	if _, isNoop := s.events.(noopEventPublisher); isNoop || s.events == nil {
 		slog.Warn("Event publisher does not support subscriptions, message broker proxy not started")
 		return
+	}
+
+	if fanout, ok := b.(*eventbus.FanOutEventBus); ok {
+		s.fanOutBus = fanout
 	}
 
 	proxy := NewMessageBrokerProxy(b, s.store, s.events, s.GetDispatcher, logging.Subsystem("hub.broker"))

@@ -67,7 +67,6 @@ capabilities:
 
 no_auth:
   behavior: drop-to-shell
-  command: hermes setup
   message: |
     This agent started without credentials.
     Run: hermes setup

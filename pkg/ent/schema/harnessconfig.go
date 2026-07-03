@@ -68,12 +68,6 @@ func (HarnessConfig) Fields() []ent.Field {
 		field.Enum("status").
 			Values("pending", "active", "archived").
 			Default("active"),
-		field.Enum("image_status").
-			Values("unknown", "valid", "invalid", "error").
-			Default("unknown"),
-		field.Time("image_status_checked_at").
-			Optional().
-			Nillable(),
 		field.String("owner_id").
 			Optional(),
 		field.String("created_by").

@@ -441,10 +441,6 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	// later projected into the container environment).
 	authEnvOverlay := buildAuthEnvOverlay(opts.Env, opts.ResolvedSecrets)
 
-	canFallbackToNoAuth := func() bool {
-		return opts.HarnessAuth == "" && noAuthConfig != nil && noAuthConfig.Behavior == "drop-to-shell"
-	}
-
 	var auth api.AuthConfig
 	var resolvedAuth *api.ResolvedAuth
 	if !opts.NoAuth {
@@ -474,13 +470,6 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		util.Debugf("auth: after overlay — selectedType=%q", auth.SelectedType)
 		resolved, err := h.ResolveAuth(auth)
 		if err != nil {
-			if canFallbackToNoAuth() {
-				util.Debugf("auth: resolution failed, falling back to no-auth mode: %v", err)
-				opts.NoAuth = true
-				opts.HarnessAuth = "none"
-				warnings = append(warnings, "Auth: no credentials found, starting in no-auth mode")
-				goto authDone
-			}
 			return nil, fmt.Errorf("auth resolution failed: %w", err)
 		}
 		// Keep a copy of the full resolved auth material for secret filtering.
@@ -492,13 +481,6 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		}
 		util.Debugf("auth: resolved — method=%q, envVars=%v, files=%d", resolved.Method, resolved.EnvVars, len(resolved.Files))
 		if err := harness.ValidateAuth(resolved); err != nil {
-			if canFallbackToNoAuth() {
-				util.Debugf("auth: validation failed, falling back to no-auth mode: %v", err)
-				opts.NoAuth = true
-				opts.HarnessAuth = "none"
-				warnings = append(warnings, "Auth: credential validation failed, starting in no-auth mode")
-				goto authDone
-			}
 			return nil, fmt.Errorf("auth validation failed: %w", err)
 		}
 		// Allow harnesses to update their native settings files (e.g. Gemini settings.json)
@@ -546,7 +528,6 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		}
 		warnings = append(warnings, fmt.Sprintf("Auth: resolved as %s", authDetail))
 	}
-authDone:
 
 	// 4. Launch container
 	detached := true
@@ -931,12 +912,6 @@ authDone:
 		NoAuthMessage: func() string {
 			if opts.NoAuth && noAuthConfig != nil && noAuthConfig.Behavior == "drop-to-shell" {
 				return noAuthConfig.Message
-			}
-			return ""
-		}(),
-		NoAuthCommand: func() string {
-			if opts.NoAuth && noAuthConfig != nil && noAuthConfig.Behavior == "drop-to-shell" {
-				return noAuthConfig.Command
 			}
 			return ""
 		}(),

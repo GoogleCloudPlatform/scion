@@ -83,7 +83,6 @@ capabilities:
 
 no_auth:
   behavior: drop-to-shell
-  command: copilot login
   message: |
     This agent started without credentials.
     Run: copilot login

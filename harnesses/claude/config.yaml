@@ -39,7 +39,6 @@ model_aliases:
   small: haiku
   medium: sonnet
   large: opus
-  x-large: fable
 env:
   ANTHROPIC_MODEL: "opus"
   ANTHROPIC_SMALL_FAST_MODEL: "haiku"
@@ -71,10 +70,9 @@ capabilities:
   resume: { support: "yes" }
 no_auth:
   behavior: drop-to-shell
-  command: claude setup-token
   message: |
     This agent started without credentials.
-    Run: claude setup-token
+    Run: claude login
     Then run: python3 /home/scion/.scion/harness/capture_auth.py
 auth:
   default_type: api-key

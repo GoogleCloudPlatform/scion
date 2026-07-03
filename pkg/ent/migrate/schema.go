@@ -389,8 +389,6 @@ var (
 		{Name: "storage_path", Type: field.TypeString, Nullable: true},
 		{Name: "files", Type: field.TypeString, Nullable: true},
 		{Name: "status", Type: field.TypeEnum, Enums: []string{"pending", "active", "archived"}, Default: "active"},
-		{Name: "image_status", Type: field.TypeEnum, Enums: []string{"unknown", "valid", "invalid", "error"}, Default: "unknown"},
-		{Name: "image_status_checked_at", Type: field.TypeTime, Nullable: true},
 		{Name: "owner_id", Type: field.TypeString, Nullable: true},
 		{Name: "created_by", Type: field.TypeString, Nullable: true},
 		{Name: "updated_by", Type: field.TypeString, Nullable: true},

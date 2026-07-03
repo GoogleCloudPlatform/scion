@@ -363,12 +363,6 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// 13b. Re-check image status for all active harness configs now that
-	// the local image checker has been registered by startRuntimeBroker.
-	if enableHub && hubSrv != nil {
-		go hubSrv.RecheckAllImageStatuses(ctx)
-	}
-
 	// 14. Set up dispatcher, message broker, and notification dispatcher.
 	// This must happen after the ChannelEventPublisher is set (step 11/12)
 	// so that StartMessageBroker and StartNotificationDispatcher can
@@ -1334,7 +1328,6 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 		if err := hubSrv.BootstrapBundledResources(ctx, hub.BootstrapOptions{
 			RepairStorage:   true,
 			OverwritePolicy: hub.OverwriteBuiltinManaged,
-			SkipIfAnyExist:  true,
 		}); err != nil {
 			log.Printf("Warning: bundled resource bootstrap failed: %v", err)
 		}
@@ -1631,7 +1624,6 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 			} else {
 				hubSrv.SetEmbeddedBrokerID(brokerID)
 			}
-			hubSrv.SetLocalImageChecker(rt)
 		}
 
 		// Generate or retrieve credentials for co-located mode (idempotent).

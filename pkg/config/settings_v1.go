@@ -823,7 +823,6 @@ type HarnessAuthAutodetect struct {
 type HarnessNoAuthConfig struct {
 	Behavior string `json:"behavior,omitempty" yaml:"behavior,omitempty" koanf:"behavior"`
 	Message  string `json:"message,omitempty" yaml:"message,omitempty" koanf:"message"`
-	Command  string `json:"command,omitempty" yaml:"command,omitempty" koanf:"command"`
 }
 
 // HarnessMCPConfig is the declarative mapping that lets a harness's

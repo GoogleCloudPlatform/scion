@@ -72,7 +72,6 @@ capabilities:
     project_scope: { support: "no", reason: "Project-scoped MCP (.codex/mcp_servers.json) is not implemented yet; project entries are demoted to global" }
 no_auth:
   behavior: drop-to-shell
-  command: codex login --device-auth
   message: |
     This agent started without credentials.
     Run: codex login --device-auth

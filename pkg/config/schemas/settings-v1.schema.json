@@ -360,10 +360,6 @@
         "message": {
           "type": "string",
           "description": "Message to display to the user in no-auth mode."
-        },
-        "command": {
-          "type": "string",
-          "description": "Command to auto-run in no-auth drop-to-shell mode."
         }
       },
       "additionalProperties": false

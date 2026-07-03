@@ -42,13 +42,12 @@ const testBootstrapDevToken = "scion_dev_bootstrap_test_token_1234567890"
 // mockStorage implements storage.Storage for testing.
 type mockStorage struct {
 	bucket string
-	// mu guards objects and content: the Phase-4 import path uploads files and
-	// resources concurrently, so real backends (GCS / local FS) are exercised
-	// concurrently and the mock must be safe for concurrent access too (and
-	// race-clean under `go test -race`).
+	// mu guards objects: the Phase-4 import path uploads files and resources
+	// concurrently, so real backends (GCS / local FS) are exercised concurrently
+	// and the mock must be safe for concurrent access too (and race-clean under
+	// `go test -race`).
 	mu      sync.Mutex
 	objects map[string]*storage.Object // objectPath -> Object
-	content map[string][]byte          // objectPath -> file data
 }
 
 func newMockStorage(bucket string) *mockStorage {
@@ -75,7 +74,7 @@ func (m *mockStorage) GetObject(_ context.Context, objectPath string) (*storage.
 	defer m.mu.Unlock()
 	obj, ok := m.objects[objectPath]
 	if !ok {
-		return nil, storage.ErrNotFound
+		return nil, fmt.Errorf("object not found: %s", objectPath)
 	}
 	return obj, nil
 }
@@ -87,41 +86,19 @@ func (m *mockStorage) Exists(_ context.Context, objectPath string) (bool, error)
 	return ok, nil
 }
 
-func (m *mockStorage) Upload(_ context.Context, objectPath string, r io.Reader, opts storage.UploadOptions) (*storage.Object, error) {
-	var data []byte
-	if r != nil {
-		var err error
-		data, err = io.ReadAll(r)
-		if err != nil {
-			return nil, err
-		}
-	}
+func (m *mockStorage) Upload(_ context.Context, objectPath string, _ io.Reader, opts storage.UploadOptions) (*storage.Object, error) {
 	obj := &storage.Object{
 		Name:     objectPath,
-		Size:     int64(len(data)),
 		Metadata: opts.Metadata,
 	}
 	m.mu.Lock()
 	m.objects[objectPath] = obj
-	if data != nil {
-		if m.content == nil {
-			m.content = make(map[string][]byte)
-		}
-		m.content[objectPath] = data
-	}
 	m.mu.Unlock()
 	return obj, nil
 }
 
-func (m *mockStorage) Download(_ context.Context, objectPath string) (io.ReadCloser, *storage.Object, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	obj, ok := m.objects[objectPath]
-	if !ok {
-		return nil, nil, storage.ErrNotFound
-	}
-	data := m.content[objectPath]
-	return io.NopCloser(bytes.NewReader(data)), obj, nil
+func (m *mockStorage) Download(_ context.Context, _ string) (io.ReadCloser, *storage.Object, error) {
+	return nil, nil, fmt.Errorf("not implemented")
 }
 
 func (m *mockStorage) Delete(_ context.Context, objectPath string) error {

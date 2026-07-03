@@ -26,7 +26,6 @@ Exit codes:
   0 = at least one credential captured
   1 = error
   2 = no credentials found (not an error, but nothing was stored)
-  3 = secret already exists (conflict — use --force to overwrite)
 """
 
 from __future__ import annotations
@@ -41,7 +40,6 @@ from typing import Any
 EXIT_OK = 0
 EXIT_ERROR = 1
 EXIT_NO_CREDS = 2
-EXIT_CONFLICT = 3
 
 HARNESS_BUNDLE = os.path.join(
     os.environ.get("HOME") or os.path.expanduser("~"),
@@ -108,7 +106,7 @@ def _capture_one(
     if result.returncode != 0:
         stderr = result.stderr.strip()
         if "already exists" in stderr.lower():
-            return False, "CONFLICT"
+            return True, None
         return False, f"sciontool failed for {key}: {stderr}"
 
     return True, None
@@ -140,7 +138,6 @@ def main() -> int:
         return EXIT_NO_CREDS
 
     captured = 0
-    conflicts = 0
     errors = 0
 
     for entry in entries:
@@ -153,18 +150,12 @@ def main() -> int:
             continue
 
         ok, err = _capture_one(entry, args.force)
-        if err == "CONFLICT":
-            print(f'CONFLICT: secret "{key}" already exists (use --force to overwrite)')
-            conflicts += 1
-        elif err:
+        if err:
             print(f"capture-auth: {key}: {err}", file=sys.stderr)
             errors += 1
         elif ok:
             print(f"capture-auth: {key}: captured from {source}")
             captured += 1
-
-    if conflicts > 0:
-        return EXIT_CONFLICT
 
     if errors > 0 and captured == 0:
         return EXIT_ERROR
