@@ -292,8 +292,8 @@ func (s *Server) computeOnboardingStatus(ctx context.Context) OnboardingStatus {
 		status.ImageRegistry = vs.ResolveImageRegistry("")
 	}
 	// TODO: use an internal settings API when available (needed for HA/DB-backed settings)
-	if status.ImageRegistry == "" {
-		status.ImageRegistry = os.Getenv("SCION_IMAGE_REGISTRY")
+	if envRegistry := os.Getenv("SCION_IMAGE_REGISTRY"); envRegistry != "" {
+		status.ImageRegistry = envRegistry
 	}
 
 	// BuildAvailable: true only if the build script can be resolved
@@ -472,8 +472,8 @@ func (s *Server) handleSystemImagesPull(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 	// TODO: use an internal settings API when available (needed for HA/DB-backed settings)
-	if registry == "" {
-		registry = os.Getenv("SCION_IMAGE_REGISTRY")
+	if envRegistry := os.Getenv("SCION_IMAGE_REGISTRY"); envRegistry != "" {
+		registry = envRegistry
 	}
 	if registry == "" {
 		s.imagePullActive.Store(false)
