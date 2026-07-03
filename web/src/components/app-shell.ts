@@ -367,12 +367,6 @@ export class ScionApp extends LitElement {
     if (this.currentPath.match(/^\/admin\/skill-registries\/[^/]+$/)) {
       return 'Skill Registry';
     }
-    if (this.currentPath.match(/^\/admin\/integrations\/[^/]+$/)) {
-      return 'Integration';
-    }
-    if (this.currentPath === '/admin/integrations') {
-      return 'Integrations';
-    }
 
     return 'Page Not Found';
   }

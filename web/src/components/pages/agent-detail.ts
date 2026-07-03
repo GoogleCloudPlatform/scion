@@ -1353,10 +1353,10 @@ export class ScionPageAgentDetail extends LitElement {
     const inline = cfg?.inlineConfig;
 
     return html`
-      ${this.renderIdentityCard(agent, cfg?.gcpIdentity)} ${this.renderHarnessModelCard(agent, cfg, inline)}
-      ${this.renderRuntimeCard(agent, inline)} ${this.renderGCPIdentityCard(cfg?.gcpIdentity)}
-      ${this.renderConfigLimitsCard(inline)} ${this.renderTelemetryCard(inline?.telemetry)}
-      ${this.renderInitialTaskCard(cfg)}
+      ${this.renderIdentityCard(agent, cfg?.gcpIdentity)} ${this.renderLabelsCard(agent)}
+      ${this.renderHarnessModelCard(agent, cfg, inline)} ${this.renderRuntimeCard(agent, inline)}
+      ${this.renderGCPIdentityCard(cfg?.gcpIdentity)} ${this.renderConfigLimitsCard(inline)}
+      ${this.renderTelemetryCard(inline?.telemetry)} ${this.renderInitialTaskCard(cfg)}
     `;
   }
 
@@ -1425,6 +1425,20 @@ export class ScionPageAgentDetail extends LitElement {
                 </div>
               `
             : ''}
+        </div>
+      </div>
+    `;
+  }
+
+  private renderLabelsCard(agent: Agent) {
+    if (!agent.labels || Object.keys(agent.labels).length === 0) return nothing;
+    return html`
+      <div class="card">
+        <h3 class="card-title">Labels</h3>
+        <div style="display: flex; flex-wrap: wrap; gap: 0.35em; padding: 0.25em 0;">
+          ${Object.entries(agent.labels).map(
+            ([k, v]) => html`<sl-tag size="small" variant="neutral">${k}: ${v}</sl-tag>`
+          )}
         </div>
       </div>
     `;

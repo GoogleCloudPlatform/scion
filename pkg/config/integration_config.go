@@ -30,9 +30,8 @@ const (
 	SecretTelegramWebhookKey = "TELEGRAM_WEBHOOK_SECRET"
 
 	// Discord
-	SecretDiscordBotToken = "DISCORD_BOT_TOKEN"
-	// NOTE: Discord public_key is a non-secret config field (used for Ed25519
-	// webhook signature verification), stored in the config YAML, not secrets.
+	SecretDiscordBotToken  = "DISCORD_BOT_TOKEN"
+	SecretDiscordPublicKey = "DISCORD_PUBLIC_KEY"
 
 	// Google Chat
 	SecretGChatSigningKey = "GCHAT_SIGNING_KEY"
@@ -146,6 +145,7 @@ var PluginSecretKeyMap = map[string][]IntegrationSecretMapping{
 	},
 	"discord": {
 		{SecretDiscordBotToken, "bot_token"},
+		{SecretDiscordPublicKey, "public_key"},
 	},
 	"chat-app": {
 		{SecretGChatSigningKey, "signing_key"},
@@ -207,51 +207,6 @@ func AddPluginToSettings(pluginName, configFilePath string) error {
 	return os.WriteFile(settingsPath, out, 0644)
 }
 
-// RemovePluginFromSettings removes a broker plugin entry from the global settings.yaml.
-func RemovePluginFromSettings(pluginName string) error {
-	globalDir, err := GetGlobalDir()
-	if err != nil {
-		return fmt.Errorf("resolve global dir: %w", err)
-	}
-
-	settingsPath := filepath.Join(globalDir, "settings.yaml")
-
-	data, err := os.ReadFile(settingsPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return fmt.Errorf("read settings file: %w", err)
-	}
-
-	var raw map[string]interface{}
-	if err := yamlv3.Unmarshal(data, &raw); err != nil {
-		return fmt.Errorf("parse settings file: %w", err)
-	}
-
-	server, _ := raw["server"].(map[string]interface{})
-	if server == nil {
-		return nil
-	}
-	plugins, _ := server["plugins"].(map[string]interface{})
-	if plugins == nil {
-		return nil
-	}
-	broker, _ := plugins["broker"].(map[string]interface{})
-	if broker == nil {
-		return nil
-	}
-
-	delete(broker, pluginName)
-
-	out, err := yamlv3.Marshal(raw)
-	if err != nil {
-		return fmt.Errorf("marshal settings: %w", err)
-	}
-
-	return os.WriteFile(settingsPath, out, 0644)
-}
-
 // CreatePluginConfigFile creates a default config file for a newly installed plugin.
 func CreatePluginConfigFile(pluginName, configFilePath string) error {
 	resolved := configFilePath
@@ -273,12 +228,8 @@ func CreatePluginConfigFile(pluginName, configFilePath string) error {
 	// secrets backend and should not appear in the config file.
 	content := "# Scion plugin configuration for " + pluginName + "\n"
 	switch pluginName {
-	case "telegram":
-		content += "inbound_mode: poll\n"
 	case "discord":
 		content += "application_id: \"\"\n"
-	case "chat-app":
-		content += "listen_address: \":9090\"\n"
 	}
 
 	return os.WriteFile(resolved, []byte(content), 0600)
@@ -306,7 +257,7 @@ func LoadPluginConfigFile(configFile string, inlineConfig map[string]string) (ma
 	// Filter out secret keys from file-based config
 	for _, secretKey := range []string{
 		SecretTelegramBotToken, SecretTelegramWebhookKey,
-		SecretDiscordBotToken,
+		SecretDiscordBotToken, SecretDiscordPublicKey,
 		SecretGChatSigningKey,
 	} {
 		delete(fileConfig, strings.ToLower(secretKey))

@@ -346,7 +346,11 @@ func discoverResourceDirs(root, sourceURL string, kind resourceImportKind) ([]re
 					childName = hcDir.Config.Name
 				}
 			}
-			dirs = append(dirs, resourceDir{childName, dir, sourceURL})
+			childSourceURL := sourceURL
+			if sourceURL != "" {
+				childSourceURL = strings.TrimRight(sourceURL, "/") + "/" + entry.Name()
+			}
+			dirs = append(dirs, resourceDir{childName, dir, childSourceURL})
 		} else {
 			skipped = append(skipped, skippedDir{entry.Name(), "no " + kind.marker})
 		}

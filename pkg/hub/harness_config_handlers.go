@@ -15,10 +15,14 @@
 package hub
 
 import (
+	"context"
 	"fmt"
+	"io"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -72,13 +76,14 @@ func (s *Server) listHarnessConfigs(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query()
 
 	filter := store.HarnessConfigFilter{
-		Name:      query.Get("name"),
-		Scope:     query.Get("scope"),
-		ScopeID:   query.Get("scopeId"),
-		ProjectID: query.Get("projectId"),
-		Harness:   query.Get("harness"),
-		Status:    query.Get("status"),
-		Search:    query.Get("search"),
+		Name:        query.Get("name"),
+		Scope:       query.Get("scope"),
+		ScopeID:     query.Get("scopeId"),
+		ProjectID:   query.Get("projectId"),
+		Harness:     query.Get("harness"),
+		Status:      query.Get("status"),
+		ImageStatus: query.Get("image_status"),
+		Search:      query.Get("search"),
 	}
 
 	// Default to active harness configs only
@@ -242,6 +247,8 @@ func (s *Server) handleHarnessConfigByID(w http.ResponseWriter, r *http.Request)
 		s.handleHarnessConfigClone(w, r, hcID)
 	case "validate":
 		s.handleHarnessConfigValidate(w, r, hcID)
+	case "check-image":
+		s.handleHarnessConfigCheckImage(w, r, hcID)
 	case "reimport":
 		s.handleHarnessConfigReimport(w, r, hcID)
 	case "files":
@@ -280,12 +287,56 @@ func (s *Server) getHarnessConfig(w http.ResponseWriter, r *http.Request, id str
 		return
 	}
 
+	if s.imageStatusStale(hc) {
+		if image := s.harnessConfigImage(hc); image != "" {
+			go func() {
+				if _, err, _ := s.imageStatusFlight.Do(hc.ID, func() (any, error) {
+					s.checkAndUpdateImageStatus(context.Background(), hc.ID, image)
+					return nil, nil
+				}); err != nil {
+					slog.Error("image status check failed", "harness_config_id", hc.ID, "error", err)
+				}
+			}()
+		}
+	}
+
 	resp := HarnessConfigWithCapabilities{HarnessConfig: *hc}
 	if identity := GetIdentityFromContext(ctx); identity != nil {
 		resp.Cap = s.authzService.ComputeCapabilities(ctx, identity, harnessConfigResource(hc))
 	}
 
 	writeJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) imageStatusStale(hc *store.HarnessConfig) bool {
+	return hc.ImageStatus == store.HarnessConfigImageStatusUnknown ||
+		hc.ImageStatusCheckedAt == nil ||
+		time.Since(*hc.ImageStatusCheckedAt) > 5*time.Minute
+}
+
+func (s *Server) harnessConfigImage(hc *store.HarnessConfig) string {
+	if hc.Config != nil {
+		return hc.Config.Image
+	}
+	return ""
+}
+
+func extractImageFromStorage(ctx context.Context, stor storage.Storage, storagePath string) string {
+	objectPath := storagePath + "/config.yaml"
+	reader, _, err := stor.Download(ctx, objectPath)
+	if err != nil || reader == nil {
+		return ""
+	}
+	defer func() { _ = reader.Close() }()
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		return ""
+	}
+	entry, err := config.ParseHarnessConfigYAML(data)
+	if err != nil {
+		return ""
+	}
+	return entry.Image
 }
 
 func (s *Server) updateHarnessConfig(w http.ResponseWriter, r *http.Request, id string) {
@@ -543,12 +594,62 @@ func (s *Server) handleHarnessConfigFinalize(w http.ResponseWriter, r *http.Requ
 	hc.ContentHash = contentHash
 	hc.Status = store.HarnessConfigStatusActive
 
+	if image := extractImageFromStorage(ctx, stor, hc.StoragePath); image != "" {
+		if hc.Config == nil {
+			hc.Config = &store.HarnessConfigData{}
+		}
+		hc.Config.Image = image
+	}
+
 	if err := s.store.UpdateHarnessConfig(ctx, hc); err != nil {
 		writeErrorFromErr(w, err, "")
 		return
 	}
 
 	writeJSON(w, http.StatusOK, hc)
+}
+
+// handleHarnessConfigCheckImage triggers an immediate image status re-check.
+// POST /api/v1/harness-configs/{id}/check-image
+func (s *Server) handleHarnessConfigCheckImage(w http.ResponseWriter, r *http.Request, id string) {
+	if r.Method != http.MethodPost {
+		MethodNotAllowed(w)
+		return
+	}
+
+	ctx := r.Context()
+	hc, err := s.store.GetHarnessConfig(ctx, id)
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	image := s.harnessConfigImage(hc)
+	if image == "" {
+		writeError(w, http.StatusBadRequest, "no_image", "Harness config has no image configured", nil)
+		return
+	}
+
+	registry := s.resolveImageRegistry()
+	resolvedImage := config.RewriteImageRegistry(image, registry)
+	slog.Info("checking image status", "id", hc.ID, "image", image, "resolved", resolvedImage, "registry", registry)
+	result := s.imageChecker.Check(ctx, resolvedImage)
+	slog.Info("image check result", "id", hc.ID, "status", result.Status, "source", result.Source, "error", result.Error)
+
+	if err := s.store.UpdateHarnessConfigImageStatus(ctx, hc.ID, result.Status, result.CheckedAt); err != nil {
+		slog.Warn("failed to persist image status", "id", hc.ID, "error", err)
+	}
+
+	resp := map[string]any{
+		"image_status":            result.Status,
+		"image_status_checked_at": result.CheckedAt,
+		"source":                  result.Source,
+		"resolved_image":          resolvedImage,
+	}
+	if result.Error != "" {
+		resp["error"] = result.Error
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // handleHarnessConfigDownload returns signed URLs for downloading harness config files.

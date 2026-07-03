@@ -107,30 +107,49 @@ func TestBuiltinResources(t *testing.T) {
 }
 
 func TestSourceURLFormat(t *testing.T) {
+	const harnessPrefix = "git+https://github.com/GoogleCloudPlatform/scion/harnesses/"
+	const builtinPrefix = "builtin://scion/"
+
 	for _, r := range BuiltinResources() {
-		if !strings.HasPrefix(r.SourceURL, "builtin://scion/") {
-			t.Errorf("%s %q SourceURL = %q, want prefix %q", r.Kind, r.Name, r.SourceURL, "builtin://scion/")
-		}
-		parts := strings.Split(strings.TrimPrefix(r.SourceURL, "builtin://scion/"), "/")
-		if len(parts) != 3 {
-			t.Errorf("%s %q SourceURL = %q, want 3 path segments after prefix (version/kind/name)", r.Kind, r.Name, r.SourceURL)
-			continue
-		}
-		if parts[0] == "" {
-			t.Errorf("%s %q SourceURL has empty version segment", r.Kind, r.Name)
-		}
-		if parts[1] != string(r.Kind) {
-			t.Errorf("%s %q SourceURL kind segment = %q, want %q", r.Kind, r.Name, parts[1], r.Kind)
-		}
-		if parts[2] != r.Name {
-			t.Errorf("%s %q SourceURL name segment = %q, want %q", r.Kind, r.Name, parts[2], r.Name)
+		if r.Kind == storage.ResourceKindHarnessConfig {
+			if !strings.HasPrefix(r.SourceURL, harnessPrefix) {
+				t.Errorf("%s %q SourceURL = %q, want prefix %q", r.Kind, r.Name, r.SourceURL, harnessPrefix)
+				continue
+			}
+			name := strings.TrimPrefix(r.SourceURL, harnessPrefix)
+			if name != r.Name {
+				t.Errorf("%s %q SourceURL name = %q, want %q", r.Kind, r.Name, name, r.Name)
+			}
+		} else {
+			if !strings.HasPrefix(r.SourceURL, builtinPrefix) {
+				t.Errorf("%s %q SourceURL = %q, want prefix %q", r.Kind, r.Name, r.SourceURL, builtinPrefix)
+				continue
+			}
+			parts := strings.Split(strings.TrimPrefix(r.SourceURL, builtinPrefix), "/")
+			if len(parts) != 3 {
+				t.Errorf("%s %q SourceURL = %q, want 3 path segments after prefix (version/kind/name)", r.Kind, r.Name, r.SourceURL)
+				continue
+			}
+			if parts[0] == "" {
+				t.Errorf("%s %q SourceURL has empty version segment", r.Kind, r.Name)
+			}
+			if parts[1] != string(r.Kind) {
+				t.Errorf("%s %q SourceURL kind segment = %q, want %q", r.Kind, r.Name, parts[1], r.Kind)
+			}
+			if parts[2] != r.Name {
+				t.Errorf("%s %q SourceURL name segment = %q, want %q", r.Kind, r.Name, parts[2], r.Name)
+			}
 		}
 	}
 }
 
 func assertSourceURL(t *testing.T, r BundledResource) {
 	t.Helper()
-	if !strings.HasPrefix(r.SourceURL, "builtin://scion/") {
+	if r.Kind == storage.ResourceKindHarnessConfig {
+		if !strings.HasPrefix(r.SourceURL, "git+https://github.com/GoogleCloudPlatform/scion/harnesses/") {
+			t.Errorf("%s %q SourceURL = %q, want git+https://... prefix", r.Kind, r.Name, r.SourceURL)
+		}
+	} else if !strings.HasPrefix(r.SourceURL, "builtin://scion/") {
 		t.Errorf("%s %q SourceURL = %q, want builtin://scion/... prefix", r.Kind, r.Name, r.SourceURL)
 	}
 }

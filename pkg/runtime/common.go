@@ -80,6 +80,20 @@ func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }
 
+func buildNoAuthArgs(noAuthMsg, noAuthCmd string) []string {
+	if noAuthCmd != "" {
+		msgPart := ""
+		if noAuthMsg != "" {
+			msgPart = fmt.Sprintf("printf '%%s\\n' %s; ", shellQuote(noAuthMsg))
+		}
+		return []string{"sh", "-c", fmt.Sprintf("%s%s; exec bash", msgPart, noAuthCmd)}
+	}
+	if noAuthMsg != "" {
+		return []string{"sh", "-c", fmt.Sprintf("printf '%%s\\n' %s; exec bash", shellQuote(noAuthMsg))}
+	}
+	return []string{"bash"}
+}
+
 // buildCommonRunArgs constructs the common arguments for 'run' command across different runtimes.
 func buildCommonRunArgs(config RunConfig) ([]string, error) {
 	args := []string{"run", "-d", "-i"}
@@ -430,11 +444,7 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 	// Get command from harness
 	var harnessArgs []string
 	if config.NoAuth {
-		if config.NoAuthMessage != "" {
-			harnessArgs = []string{"sh", "-c", fmt.Sprintf("printf '%%s\\n' %s; exec bash", shellQuote(config.NoAuthMessage))}
-		} else {
-			harnessArgs = []string{"bash"}
-		}
+		harnessArgs = buildNoAuthArgs(config.NoAuthMessage, config.NoAuthCommand)
 	} else if config.Harness != nil {
 		harnessArgs = config.Harness.GetCommand(config.Task, config.Resume, config.CommandArgs)
 	} else {

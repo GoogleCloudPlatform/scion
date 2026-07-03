@@ -115,6 +115,7 @@ func TestIsBuiltinManaged(t *testing.T) {
 	}{
 		{"builtin://scion/dev/template/default", true},
 		{"builtin://scion/v1.0.0/harness-config/claude", true},
+		{"git+https://github.com/GoogleCloudPlatform/scion/harnesses/claude", true},
 		{"https://github.com/example/templates", false},
 		{"", false},
 	}

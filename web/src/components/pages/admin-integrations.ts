@@ -18,7 +18,6 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
 import { apiFetch, extractApiError } from '../../client/api.js';
-import { dispatchPageTitle } from '../../client/page-title.js';
 
 // ── Type definitions matching the Go API response ──
 
@@ -54,28 +53,6 @@ interface AvailableIntegration {
   platform: string;
 }
 
-const PLATFORM_FIELDS: Record<string, Array<{key: string, label: string, description: string, defaultValue: string}>> = {
-  telegram: [
-    { key: 'inbound_mode', label: 'Inbound Mode', description: 'poll or webhook', defaultValue: 'poll' },
-    { key: 'webhook_listen', label: 'Webhook Listen Address', description: 'e.g. :9094 (webhook mode only)', defaultValue: '' },
-    { key: 'db_path', label: 'Database Path', description: 'Path to SQLite database', defaultValue: '~/.scion/scion-telegram.db' },
-    { key: 'send_queue_size', label: 'Send Queue Size', description: 'Messages to buffer (default: 100)', defaultValue: '100' },
-    { key: 'send_min_delay', label: 'Send Min Delay', description: 'Min delay between sends', defaultValue: '50ms' },
-    { key: 'agent_cache_ttl', label: 'Agent Cache TTL', description: 'How long to cache agent info', defaultValue: '5m' },
-    { key: 'webhook_url', label: 'Webhook URL', description: 'Public HTTPS URL for Telegram to send updates (webhook mode only)', defaultValue: 'https://<your-domain>/telegram/webhook' },
-  ],
-  discord: [
-    { key: 'application_id', label: 'Application ID', description: 'Discord application/client ID (for bot invite URL)', defaultValue: '' },
-    { key: 'guild_id', label: 'Guild ID', description: 'Discord server ID', defaultValue: '' },
-    { key: 'public_key', label: 'Public Key', description: 'Discord application public key for webhook verification', defaultValue: '' },
-    { key: 'db_path', label: 'Database Path', description: 'Path to SQLite database', defaultValue: '~/.scion/discord.db' },
-    { key: 'mention_routing', label: 'Mention Routing', description: 'Route messages by bot mention (true/false)', defaultValue: 'false' },
-  ],
-  gchat: [
-    { key: 'listen_address', label: 'Listen Address', description: 'HTTP listen address (e.g. :9090)', defaultValue: '' },
-  ],
-};
-
 @customElement('scion-page-admin-integrations')
 export class ScionPageAdminIntegrations extends LitElement {
   @state() private loading = true;
@@ -92,13 +69,6 @@ export class ScionPageAdminIntegrations extends LitElement {
   @state() private saving = false;
   @state() private restarting = false;
   @state() private updating = false;
-
-  // Uninstall
-  @state() private uninstalling = false;
-  @state() private confirmUninstall = false;
-
-  // Copy invite URL
-  @state() private inviteCopied = false;
 
   // Available integrations for install
   @state() private availableIntegrations: AvailableIntegration[] = [];
@@ -219,10 +189,6 @@ export class ScionPageAdminIntegrations extends LitElement {
 
     sl-input::part(input) {
       color: var(--scion-text, #1e293b);
-    }
-
-    .implicit-default::part(input) {
-      color: var(--sl-color-neutral-400);
     }
 
     .actions {
@@ -400,7 +366,6 @@ export class ScionPageAdminIntegrations extends LitElement {
       if (availRes.ok) {
         this.availableIntegrations = (await availRes.json()) as AvailableIntegration[];
       }
-      dispatchPageTitle(this, 'Integrations', 'Admin');
     } catch {
       this.error = 'Failed to connect to server';
     } finally {
@@ -420,21 +385,11 @@ export class ScionPageAdminIntegrations extends LitElement {
       this.detail = (await res.json()) as IntegrationDetail;
       this.editedSettings = { ...(this.detail.settings || {}) };
       this.editedSecrets = {};
-      dispatchPageTitle(this, this.detail.name, 'Integrations', 'Admin');
     } catch {
       this.error = 'Failed to connect to server';
     } finally {
       this.loading = false;
     }
-  }
-
-  private async handleCopyInviteUrl(): Promise<void> {
-    const appId = this.detail?.settings?.['application_id'];
-    if (!appId) return;
-    const url = `https://discord.com/api/oauth2/authorize?client_id=${encodeURIComponent(appId)}&permissions=2147485696&scope=bot%20applications.commands`;
-    await navigator.clipboard.writeText(url);
-    this.inviteCopied = true;
-    setTimeout(() => { this.inviteCopied = false; }, 2000);
   }
 
   private async handleSaveConfig(): Promise<void> {
@@ -443,12 +398,8 @@ export class ScionPageAdminIntegrations extends LitElement {
     this.error = null;
     this.successMessage = null;
     try {
-      const explicitSettings: Record<string, string> = {};
-      for (const [k, v] of Object.entries(this.editedSettings)) {
-        if (v !== '') explicitSettings[k] = v;
-      }
       const body: { settings: Record<string, string>; secrets?: Record<string, string> } = {
-        settings: explicitSettings,
+        settings: this.editedSettings,
       };
       const changedSecrets = Object.entries(this.editedSecrets).filter(([, v]) => v !== '');
       if (changedSecrets.length > 0) {
@@ -463,29 +414,13 @@ export class ScionPageAdminIntegrations extends LitElement {
         }
       );
       if (!res.ok) {
-        await this.showError(await extractApiError(res, 'Failed to save configuration'));
+        this.error = await extractApiError(res, 'Failed to save configuration');
         return;
       }
-
-      // Auto-restart after successful save.
-      try {
-        const restartRes = await apiFetch(
-          `/api/v1/admin/integrations/${encodeURIComponent(this.detail.name)}/restart`,
-          { method: 'POST' }
-        );
-        if (!restartRes.ok) {
-          const restartErr = await extractApiError(restartRes, 'restart failed');
-          this.successMessage = `Configuration saved but restart failed: ${restartErr}`;
-        } else {
-          this.successMessage = 'Configuration saved and integration restarted.';
-        }
-      } catch {
-        this.successMessage = 'Configuration saved but restart failed: unable to connect';
-      }
-
+      this.successMessage = 'Configuration saved successfully';
       await this.loadDetail(this.detail.name);
     } catch {
-      await this.showError('Failed to save configuration');
+      this.error = 'Failed to save configuration';
     } finally {
       this.saving = false;
     }
@@ -502,13 +437,13 @@ export class ScionPageAdminIntegrations extends LitElement {
         { method: 'POST' }
       );
       if (!res.ok) {
-        await this.showError(await extractApiError(res, 'Failed to update integration'));
+        this.error = await extractApiError(res, 'Failed to update integration');
         return;
       }
       this.successMessage = 'Integration updated successfully';
       await this.loadDetail(this.detail.name);
     } catch {
-      await this.showError('Failed to update integration');
+      this.error = 'Failed to update integration';
     } finally {
       this.updating = false;
     }
@@ -547,39 +482,15 @@ export class ScionPageAdminIntegrations extends LitElement {
         { method: 'POST' }
       );
       if (!res.ok) {
-        await this.showError(await extractApiError(res, 'Failed to restart integration'));
+        this.error = await extractApiError(res, 'Failed to restart integration');
         return;
       }
       this.successMessage = 'Integration restarted successfully';
       await this.loadDetail(this.detail.name);
     } catch {
-      await this.showError('Failed to restart integration');
+      this.error = 'Failed to restart integration';
     } finally {
       this.restarting = false;
-    }
-  }
-
-  private async handleUninstall(): Promise<void> {
-    if (!this.detail) return;
-    this.uninstalling = true;
-    this.error = null;
-    this.successMessage = null;
-    try {
-      const res = await apiFetch(
-        `/api/v1/admin/integrations/${encodeURIComponent(this.detail.name)}/uninstall`,
-        { method: 'DELETE' }
-      );
-      if (!res.ok) {
-        await this.showError(await extractApiError(res, 'Failed to uninstall integration'));
-        return;
-      }
-      this.confirmUninstall = false;
-      this.detail = null;
-      this.navigateTo('/admin/integrations');
-    } catch {
-      await this.showError('Failed to uninstall integration');
-    } finally {
-      this.uninstalling = false;
     }
   }
 
@@ -591,10 +502,10 @@ export class ScionPageAdminIntegrations extends LitElement {
     const isDetail = this.currentName !== null;
 
     return html`
+      ${this.error ? html`<div class="status-message error">${this.error}</div>` : nothing}
       ${this.successMessage
         ? html`<div class="status-message success">${this.successMessage}</div>`
         : nothing}
-      ${!isDetail && this.error ? html`<div class="status-message error">${this.error}</div>` : nothing}
       ${this.loading
         ? html`<div class="loading-container"><sl-spinner></sl-spinner></div>`
         : isDetail
@@ -723,7 +634,6 @@ export class ScionPageAdminIntegrations extends LitElement {
       ${this.renderStatusSection(d.status)}
       ${this.renderConfigSection(d)}
       ${this.renderSecretsSection(d)}
-      ${this.error ? html`<div class="status-message error">${this.error}</div>` : nothing}
       ${this.renderActionsSection()}
     `;
   }
@@ -810,15 +720,8 @@ export class ScionPageAdminIntegrations extends LitElement {
   }
 
   private renderConfigSection(d: IntegrationDetail) {
-    const knownFields = PLATFORM_FIELDS[d.platform] ?? [];
-    const fields = knownFields.map(f => ({ key: f.key, label: f.label, description: f.description, defaultValue: f.defaultValue }));
-    const knownKeys = new Set(knownFields.map(f => f.key));
-    for (const key of Object.keys(d.settings || {})) {
-      if (!knownKeys.has(key)) {
-        fields.push({ key, label: key, description: '', defaultValue: '' });
-      }
-    }
-    if (fields.length === 0) {
+    const keys = Object.keys(d.settings || {});
+    if (keys.length === 0) {
       return html`
         <div class="section">
           <h3 class="section-title">Configuration</h3>
@@ -831,35 +734,21 @@ export class ScionPageAdminIntegrations extends LitElement {
       <div class="section">
         <h3 class="section-title">Configuration</h3>
         <div class="form-grid">
-          ${fields.map(
-            (field) => {
-              const isExplicit = (this.editedSettings[field.key] ?? '') !== '';
-              const displayValue = this.editedSettings[field.key] ?? field.defaultValue;
-              return html`
+          ${keys.map(
+            (key) => html`
               <div class="form-field">
-                <label>${field.label}</label>
-                ${field.description
-                  ? html`<span class="hint">${field.description}</span>`
-                  : nothing}
+                <label>${key}</label>
                 <sl-input
-                  class=${isExplicit ? '' : 'implicit-default'}
-                  value=${displayValue}
-                  placeholder=${field.description || ''}
+                  value=${this.editedSettings[key] ?? ''}
                   @sl-change=${(e: Event) => {
-                    const val = (e.target as HTMLInputElement).value;
-                    if (val === '') {
-                      const { [field.key]: _, ...rest } = this.editedSettings;
-                      this.editedSettings = rest;
-                    } else {
-                      this.editedSettings = {
-                        ...this.editedSettings,
-                        [field.key]: val,
-                      };
-                    }
+                    this.editedSettings = {
+                      ...this.editedSettings,
+                      [key]: (e.target as HTMLInputElement).value,
+                    };
                   }}
                 ></sl-input>
               </div>
-            `;}
+            `
           )}
         </div>
       </div>
@@ -920,17 +809,6 @@ export class ScionPageAdminIntegrations extends LitElement {
           <sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>
           Restart
         </sl-button>
-        ${this.detail?.platform === 'discord' && this.detail?.settings?.['application_id']
-          ? html`
-              <sl-button
-                variant="default"
-                @click=${() => { void this.handleCopyInviteUrl(); }}
-              >
-                <sl-icon slot="prefix" name=${this.inviteCopied ? 'check-lg' : 'link-45deg'}></sl-icon>
-                ${this.inviteCopied ? 'Copied!' : 'Copy Invite URL'}
-              </sl-button>
-            `
-          : nothing}
         ${showUpdate
           ? html`
               <sl-button
@@ -943,46 +821,8 @@ export class ScionPageAdminIntegrations extends LitElement {
               </sl-button>
             `
           : nothing}
-        <sl-button
-          variant="danger"
-          outline
-          @click=${() => { this.confirmUninstall = true; }}
-        >
-          <sl-icon slot="prefix" name="trash"></sl-icon>
-          Uninstall
-        </sl-button>
       </div>
-
-      <sl-dialog
-        label="Uninstall Integration"
-        ?open=${this.confirmUninstall}
-        @sl-request-close=${() => { if (!this.uninstalling) this.confirmUninstall = false; }}
-      >
-        <p>This will delete all configuration, secrets, and the plugin binary. Are you sure?</p>
-        <sl-button
-          slot="footer"
-          variant="default"
-          @click=${() => { this.confirmUninstall = false; }}
-          ?disabled=${this.uninstalling}
-        >
-          Cancel
-        </sl-button>
-        <sl-button
-          slot="footer"
-          variant="danger"
-          ?loading=${this.uninstalling}
-          @click=${() => { void this.handleUninstall(); }}
-        >
-          Uninstall
-        </sl-button>
-      </sl-dialog>
     `;
-  }
-
-  private async showError(message: string): Promise<void> {
-    this.error = message;
-    await this.updateComplete;
-    this.shadowRoot?.querySelector('.status-message')?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   }
 
   // ── Helpers ──

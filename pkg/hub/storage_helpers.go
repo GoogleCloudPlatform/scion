@@ -165,7 +165,11 @@ func uploadResourceFiles(ctx context.Context, stor storage.Storage, storagePath 
 				return fmt.Errorf("%s: failed to open file %s: %w", label, fi.Path, err)
 			}
 
-			_, err = stor.Upload(ctx, objectPath, f, storage.UploadOptions{})
+			uploadOpts := storage.UploadOptions{}
+			if fi.Hash != "" {
+				uploadOpts.Metadata = map[string]string{"sha256": fi.Hash}
+			}
+			_, err = stor.Upload(ctx, objectPath, f, uploadOpts)
 			_ = f.Close()
 			if err != nil {
 				return fmt.Errorf("%s: failed to upload file %s: %w", label, fi.Path, err)

@@ -17,6 +17,7 @@
 package hub
 
 import (
+	"bytes"
 	"context"
 	"testing"
 
@@ -196,6 +197,118 @@ func TestValidateStorage_ZeroFilesActive(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("expected zero_files_active issue, got: %v", report.Issues)
+	}
+}
+
+func TestValidateStorage_ContentHashMismatch(t *testing.T) {
+	srv, s, stor := testTemplateBootstrapServer(t)
+	ctx := context.Background()
+
+	br := testBundledResource(storage.ResourceKindTemplate, "hash-mismatch", map[string]string{
+		"scion-agent.yaml": "harness: claude\n",
+		"home/.bashrc":     "# original content",
+	})
+	src := NewFSResourceSource(br)
+	rs := srv.templateStore()
+
+	_, err := rs.BootstrapSource(ctx, src, BootstrapOptions{
+		OverwritePolicy: OverwriteBuiltinManaged,
+	})
+	if err != nil {
+		t.Fatalf("bootstrap failed: %v", err)
+	}
+
+	tmpl, err := s.GetTemplateBySlug(ctx, "hash-mismatch", "global", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Overwrite one file with different content while keeping the DB manifest
+	// unchanged, simulating GCS/DB divergence.
+	objectPath := tmpl.StoragePath + "/home/.bashrc"
+	stor.Upload(ctx, objectPath, //nolint:errcheck
+		bytes.NewReader([]byte("# WRONG content")),
+		storage.UploadOptions{Metadata: map[string]string{"sha256": "sha256:0000000000000000000000000000000000000000000000000000000000000000"}},
+	)
+
+	// Add manifest so we don't get a missing_manifest issue
+	manifestPath := tmpl.StoragePath + "/manifest.json"
+	stor.Upload(ctx, manifestPath, nil, storage.UploadOptions{}) //nolint:errcheck
+
+	rec := templateToRecord(tmpl)
+	report, err := rs.ValidateStorage(ctx, rec)
+	if err != nil {
+		t.Fatalf("ValidateStorage failed: %v", err)
+	}
+
+	found := false
+	for _, issue := range report.Issues {
+		if issue.Kind == ValidationIssueContentHashMismatch && issue.File == "home/.bashrc" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected content_hash_mismatch issue for home/.bashrc, got: %v", report.Issues)
+	}
+}
+
+func TestRepairStorage_FixesHashMismatch(t *testing.T) {
+	srv, s, stor := testTemplateBootstrapServer(t)
+	ctx := context.Background()
+
+	br := testBundledResource(storage.ResourceKindTemplate, "repair-hash", map[string]string{
+		"scion-agent.yaml": "harness: claude\n",
+		"home/.bashrc":     "# correct content",
+	})
+	src := NewFSResourceSource(br)
+	rs := srv.templateStore()
+
+	_, err := rs.BootstrapSource(ctx, src, BootstrapOptions{
+		OverwritePolicy: OverwriteBuiltinManaged,
+	})
+	if err != nil {
+		t.Fatalf("bootstrap failed: %v", err)
+	}
+
+	tmpl, err := s.GetTemplateBySlug(ctx, "repair-hash", "global", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Corrupt one file in storage
+	objectPath := tmpl.StoragePath + "/home/.bashrc"
+	stor.Upload(ctx, objectPath, //nolint:errcheck
+		bytes.NewReader([]byte("# CORRUPTED")),
+		storage.UploadOptions{Metadata: map[string]string{"sha256": "sha256:badhash"}},
+	)
+
+	// Verify it's detected as broken
+	rec := templateToRecord(tmpl)
+	report, err := rs.ValidateStorage(ctx, rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hashMismatchFound := false
+	for _, issue := range report.Issues {
+		if issue.Kind == ValidationIssueContentHashMismatch {
+			hashMismatchFound = true
+		}
+	}
+	if !hashMismatchFound {
+		t.Fatal("expected content_hash_mismatch before repair")
+	}
+
+	// Run repair
+	result, err := rs.BootstrapSource(ctx, src, BootstrapOptions{
+		RepairStorage:   true,
+		OverwritePolicy: OverwriteBuiltinManaged,
+	})
+	if err != nil {
+		t.Fatalf("repair bootstrap failed: %v", err)
+	}
+	if result.Repaired != 1 {
+		t.Errorf("expected Repaired=1, got %d", result.Repaired)
 	}
 }
 

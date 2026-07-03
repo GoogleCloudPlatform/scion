@@ -19,7 +19,11 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
+	"os"
 	"path/filepath"
+
+	"golang.org/x/sync/errgroup"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
@@ -39,22 +43,21 @@ func (s *Server) BootstrapBundledResources(ctx context.Context, opts BootstrapOp
 		return nil
 	}
 
-	skipHarnessCreate := false
+	skipHarnessConfigs := false
 	if opts.SkipIfAnyExist {
 		existing, err := s.store.ListHarnessConfigs(ctx, store.HarnessConfigFilter{
 			Status: store.HarnessConfigStatusActive,
 		}, store.ListOptions{Limit: 1})
 		if err == nil && len(existing.Items) > 0 {
-			s.resourceLog.Info("bundled resource bootstrap: active harness configs exist, skipping new harness-config creation but updating existing")
-			skipHarnessCreate = true
+			s.resourceLog.Info("bundled resource bootstrap: active harness configs exist, skipping harness-config seeding")
+			skipHarnessConfigs = true
 		}
 	}
 
 	var errs []error
 	for _, r := range resources.BuiltinResources() {
-		callOpts := opts
-		if skipHarnessCreate && r.Kind == storage.ResourceKindHarnessConfig {
-			callOpts.SkipCreate = true
+		if skipHarnessConfigs && r.Kind == storage.ResourceKindHarnessConfig {
+			continue
 		}
 
 		src := NewFSResourceSource(r)
@@ -75,7 +78,7 @@ func (s *Server) BootstrapBundledResources(ctx context.Context, opts BootstrapOp
 			continue
 		}
 
-		result, err := rs.BootstrapSource(ctx, src, callOpts)
+		result, err := rs.BootstrapSource(ctx, src, opts)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("bootstrap %s %q: %w", r.Kind, r.Name, err))
 			continue
@@ -112,4 +115,61 @@ func resolveHarnessType(r resources.BundledResource) (string, error) {
 		return "", fmt.Errorf("config.yaml missing harness field")
 	}
 	return entry.Harness, nil
+}
+
+// checkAndUpdateImageStatus resolves the image registry, checks image
+// availability, and persists the result.
+func (s *Server) checkAndUpdateImageStatus(ctx context.Context, hcID, image string) {
+	registry := s.resolveImageRegistry()
+	resolvedImage := config.RewriteImageRegistry(image, registry)
+
+	result := s.imageChecker.Check(ctx, resolvedImage)
+	if result.Error != "" {
+		slog.Warn("image status check returned error", "id", hcID, "image", image, "resolved", resolvedImage, "status", result.Status, "error", result.Error)
+	}
+
+	if err := s.store.UpdateHarnessConfigImageStatus(ctx, hcID, result.Status, result.CheckedAt); err != nil {
+		slog.Error("failed to update image status", "id", hcID, "error", err)
+	}
+}
+
+// resolveImageRegistry returns the configured image registry from the
+// server's in-memory config, which includes environment variable overrides
+// applied at startup. Falls back to SCION_IMAGE_REGISTRY env var if the
+// maintenance config value is empty.
+//
+// TODO: use an internal settings API that returns fully-resolved settings
+// (env var overrides + DB values) once available — needed for HA mode where
+// settings will live in the database.
+func (s *Server) resolveImageRegistry() string {
+	if r := s.config.MaintenanceConfig.ImageRegistry; r != "" {
+		return r
+	}
+	return os.Getenv("SCION_IMAGE_REGISTRY")
+}
+
+// RecheckAllImageStatuses re-checks image availability for all active
+// harness configs concurrently. Called at server startup after bootstrap completes.
+func (s *Server) RecheckAllImageStatuses(ctx context.Context) {
+	result, err := s.store.ListHarnessConfigs(ctx, store.HarnessConfigFilter{
+		Status: store.HarnessConfigStatusActive,
+	}, store.ListOptions{Limit: 1000})
+	if err != nil {
+		slog.Error("failed to list harness configs for image recheck", "error", err)
+		return
+	}
+
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(5)
+	for _, hc := range result.Items {
+		if hc.Config == nil || hc.Config.Image == "" {
+			continue
+		}
+		id, image := hc.ID, hc.Config.Image
+		g.Go(func() error {
+			s.checkAndUpdateImageStatus(gctx, id, image)
+			return nil
+		})
+	}
+	_ = g.Wait()
 }

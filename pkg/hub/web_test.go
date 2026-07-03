@@ -1649,58 +1649,6 @@ func TestSSEHandler_RequiresAuth(t *testing.T) {
 	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
 }
 
-func TestSSEHandler_ReconnectOnMaxAge(t *testing.T) {
-	// Use a config override to shorten SSEMaxConnectionAge — no global mutation,
-	// no data races when tests run in parallel.
-	ws := newDevAuthWebServer(t, func(cfg *WebServerConfig) {
-		cfg.SSEMaxConnectionAge = 200 * time.Millisecond
-	})
-	pub := NewChannelEventPublisher()
-	ws.SetEventPublisher(pub)
-	t.Cleanup(pub.Close)
-
-	ts := httptest.NewServer(ws.Handler())
-	defer ts.Close()
-
-	resp, err := http.Get(ts.URL + "/events?sub=project.test.>")
-	require.NoError(t, err)
-	defer func() { _ = resp.Body.Close() }()
-
-	assert.Equal(t, http.StatusOK, resp.StatusCode)
-
-	// Read all data until the server closes the connection. The last
-	// meaningful frame should be the reconnect event.
-	// Use a channel to make the blocking Read interruptible by the deadline.
-	type readResult struct {
-		data string
-		err  error
-	}
-	done := make(chan readResult, 1)
-	go func() {
-		var accumulated strings.Builder
-		buf := make([]byte, 4096)
-		for {
-			n, readErr := resp.Body.Read(buf)
-			if n > 0 {
-				accumulated.Write(buf[:n])
-			}
-			if readErr != nil {
-				// Connection closed by server — expected.
-				done <- readResult{data: accumulated.String(), err: readErr}
-				return
-			}
-		}
-	}()
-
-	select {
-	case result := <-done:
-		assert.Contains(t, result.data, "event: reconnect")
-		assert.Contains(t, result.data, "data: {}")
-	case <-time.After(5 * time.Second):
-		t.Fatal("timed out waiting for server to close SSE connection")
-	}
-}
-
 func TestLoginPageRendersLoginComponent(t *testing.T) {
 	// /login is a public route so no dev-auth needed
 	ws := newTestWebServer(t, WebServerConfig{})

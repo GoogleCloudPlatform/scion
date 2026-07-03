@@ -477,18 +477,23 @@ type HarnessConfigStore interface {
 
 	// ListHarnessConfigs returns harness configs matching the filter criteria.
 	ListHarnessConfigs(ctx context.Context, filter HarnessConfigFilter, opts ListOptions) (*ListResult[HarnessConfig], error)
+
+	// UpdateHarnessConfigImageStatus updates only the image_status and
+	// image_status_checked_at columns for a harness config.
+	UpdateHarnessConfigImageStatus(ctx context.Context, id, status string, checkedAt time.Time) error
 }
 
 // HarnessConfigFilter defines criteria for filtering harness configs.
 type HarnessConfigFilter struct {
-	Name      string // Exact match on name
-	Scope     string
-	ScopeID   string
-	ProjectID string // When set without Scope, returns global + project-scoped configs for this project
-	Harness   string
-	OwnerID   string
-	Status    string
-	Search    string // Full-text search on name/description
+	Name        string // Exact match on name
+	Scope       string
+	ScopeID     string
+	ProjectID   string // When set without Scope, returns global + project-scoped configs for this project
+	Harness     string
+	OwnerID     string
+	Status      string
+	ImageStatus string
+	Search      string // Full-text search on name/description
 }
 
 // UserStore defines user persistence operations.

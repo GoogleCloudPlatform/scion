@@ -91,6 +91,47 @@ func TestBootstrapHarnessConfigsFromDir_ImportsConfigs(t *testing.T) {
 	}
 }
 
+func TestBootstrapHarnessConfigsFromDir_PersistsConfigImage(t *testing.T) {
+	srv, s, _ := testTemplateBootstrapServer(t)
+	ctx := context.Background()
+
+	dir := makeHarnessConfigDir(t, "claude", map[string]string{
+		"config.yaml": "harness: claude\nimage: scion-claude:latest\nuser: scion\n",
+	})
+
+	if err := srv.BootstrapHarnessConfigsFromDir(ctx, dir); err != nil {
+		t.Fatalf("bootstrap failed: %v", err)
+	}
+
+	hc, err := s.GetHarnessConfigBySlug(ctx, "claude", store.HarnessConfigScopeGlobal, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hc.Config == nil {
+		t.Fatal("expected Config to be populated after bootstrap, got nil")
+	}
+	if hc.Config.Image != "scion-claude:latest" {
+		t.Errorf("expected Config.Image = %q, got %q", "scion-claude:latest", hc.Config.Image)
+	}
+
+	// Re-bootstrap with a different image and verify it updates.
+	if err := os.WriteFile(filepath.Join(dir, "claude", "config.yaml"),
+		[]byte("harness: claude\nimage: scion-claude:v2\nuser: scion\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.BootstrapHarnessConfigsFromDir(ctx, dir); err != nil {
+		t.Fatalf("second bootstrap failed: %v", err)
+	}
+
+	hc, err = s.GetHarnessConfigBySlug(ctx, "claude", store.HarnessConfigScopeGlobal, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hc.Config == nil || hc.Config.Image != "scion-claude:v2" {
+		t.Errorf("expected Config.Image = %q after re-sync, got %+v", "scion-claude:v2", hc.Config)
+	}
+}
+
 func TestBootstrapHarnessConfigsFromDir_MultipleConfigs(t *testing.T) {
 	srv, s, _ := testTemplateBootstrapServer(t)
 	ctx := context.Background()

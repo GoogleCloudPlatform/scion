@@ -17,10 +17,12 @@ package runtimebroker
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -1672,13 +1674,21 @@ func (s *Server) execCommand(w http.ResponseWriter, r *http.Request, id, project
 			NotFound(w, "Agent")
 			return
 		}
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			writeJSON(w, http.StatusOK, ExecResponse{
+				Output:   output,
+				ExitCode: exitErr.ExitCode(),
+			})
+			return
+		}
 		RuntimeError(w, "Failed to execute command: "+err.Error())
 		return
 	}
 
 	writeJSON(w, http.StatusOK, ExecResponse{
 		Output:   output,
-		ExitCode: 0, // TODO: Get actual exit code from runtime
+		ExitCode: 0,
 	})
 }
 

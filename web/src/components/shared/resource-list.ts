@@ -39,6 +39,7 @@ interface ResourceItem {
   displayName?: string;
   description?: string;
   harness?: string;
+  imageStatus?: string;
 }
 
 @customElement('scion-resource-list')
@@ -158,6 +159,34 @@ export class ScionResourceList extends LitElement {
       color: var(--scion-text-muted, #64748b);
       border: 1px solid var(--scion-border, #e2e8f0);
       white-space: nowrap;
+    }
+
+    .image-status-badge {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 1.25rem;
+      height: 1.25rem;
+      border-radius: 9999px;
+      font-size: 0.6875rem;
+      font-weight: 700;
+      flex-shrink: 0;
+    }
+    .image-status-badge.valid {
+      background: var(--sl-color-success-100, #dcfce7);
+      color: var(--sl-color-success-700, #15803d);
+    }
+    .image-status-badge.invalid {
+      background: var(--sl-color-danger-100, #fee2e2);
+      color: var(--sl-color-danger-700, #b91c1c);
+    }
+    .image-status-badge.unknown {
+      background: var(--sl-color-neutral-100, #f1f5f9);
+      color: var(--sl-color-neutral-500, #64748b);
+    }
+    .image-status-badge.error {
+      background: var(--sl-color-warning-100, #fef3c7);
+      color: var(--sl-color-warning-700, #a16207);
     }
 
     .row-actions {
@@ -496,6 +525,11 @@ export class ScionResourceList extends LitElement {
             ${item.description ? html`<div class="resource-meta">${item.description}</div>` : ''}
           </div>
           ${item.harness ? html`<span class="resource-badge">${item.harness}</span>` : ''}
+          ${item.imageStatus ? html`
+            <span class="image-status-badge ${item.imageStatus}">
+              ${item.imageStatus === 'valid' ? '✓' : item.imageStatus === 'invalid' ? '✗' : item.imageStatus === 'error' ? '⚠' : '?'}
+            </span>
+          ` : ''}
           <sl-icon
             name="chevron-right"
             style="color: var(--sl-color-neutral-400); font-size: 0.875rem;"
@@ -513,6 +547,11 @@ export class ScionResourceList extends LitElement {
             ${item.description ? html`<div class="resource-meta">${item.description}</div>` : ''}
           </div>
           ${item.harness ? html`<span class="resource-badge">${item.harness}</span>` : ''}
+          ${item.imageStatus ? html`
+            <span class="image-status-badge ${item.imageStatus}">
+              ${item.imageStatus === 'valid' ? '✓' : item.imageStatus === 'invalid' ? '✗' : item.imageStatus === 'error' ? '⚠' : '?'}
+            </span>
+          ` : ''}
           <sl-icon
             name="chevron-right"
             style="color: var(--sl-color-neutral-400); font-size: 0.875rem;"

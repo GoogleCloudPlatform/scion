@@ -80,18 +80,6 @@ func (s *Server) LoadChatIntegrationSecret(ctx context.Context, name string) (st
 	return s.store.GetSecretValue(ctx, name, store.ScopeHub, s.hubID)
 }
 
-// DeleteChatIntegrationSecret removes a chat integration secret from the
-// secrets backend, with fallback to the database.
-func (s *Server) DeleteChatIntegrationSecret(ctx context.Context, name string) error {
-	if s.secretBackend != nil {
-		return s.secretBackend.Delete(ctx, name, store.ScopeHub, s.hubID)
-	}
-	if s.store != nil {
-		return s.store.DeleteSecret(ctx, name, store.ScopeHub, s.hubID)
-	}
-	return nil
-}
-
 // HasChatIntegrationSecret checks whether a chat integration secret exists
 // in either the secrets backend or the database.
 func (s *Server) HasChatIntegrationSecret(ctx context.Context, name string) bool {
@@ -116,6 +104,8 @@ func ChatSecretDescription(secretKey string) string {
 		return "Telegram webhook secret"
 	case config.SecretDiscordBotToken:
 		return "Discord bot token"
+	case config.SecretDiscordPublicKey:
+		return "Discord application public key"
 	case config.SecretGChatSigningKey:
 		return "Google Chat signing key"
 	default:

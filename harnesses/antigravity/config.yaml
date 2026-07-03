@@ -57,6 +57,7 @@ capabilities:
 
 no_auth:
   behavior: drop-to-shell
+  command: agy
   message: |
     This agent started without credentials.
     Run: agy

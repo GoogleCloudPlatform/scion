@@ -120,6 +120,11 @@ func Files(v string) predicate.HarnessConfig {
 	return predicate.HarnessConfig(sql.FieldEQ(FieldFiles, v))
 }
 
+// ImageStatusCheckedAt applies equality check predicate on the "image_status_checked_at" field. It's identical to ImageStatusCheckedAtEQ.
+func ImageStatusCheckedAt(v time.Time) predicate.HarnessConfig {
+	return predicate.HarnessConfig(sql.FieldEQ(FieldImageStatusCheckedAt, v))
+}
+
 // OwnerID applies equality check predicate on the "owner_id" field. It's identical to OwnerIDEQ.
 func OwnerID(v string) predicate.HarnessConfig {
 	return predicate.HarnessConfig(sql.FieldEQ(FieldOwnerID, v))
@@ -1108,6 +1113,76 @@ func StatusIn(vs ...Status) predicate.HarnessConfig {
 // StatusNotIn applies the NotIn predicate on the "status" field.
 func StatusNotIn(vs ...Status) predicate.HarnessConfig {
 	return predicate.HarnessConfig(sql.FieldNotIn(FieldStatus, vs...))
+}
+
+// ImageStatusEQ applies the EQ predicate on the "image_status" field.
+func ImageStatusEQ(v ImageStatus) predicate.HarnessConfig {
+	return predicate.HarnessConfig(sql.FieldEQ(FieldImageStatus, v))
+}
+
+// ImageStatusNEQ applies the NEQ predicate on the "image_status" field.
+func ImageStatusNEQ(v ImageStatus) predicate.HarnessConfig {
+	return predicate.HarnessConfig(sql.FieldNEQ(FieldImageStatus, v))
+}
+
+// ImageStatusIn applies the In predicate on the "image_status" field.
+func ImageStatusIn(vs ...ImageStatus) predicate.HarnessConfig {
+	return predicate.HarnessConfig(sql.FieldIn(FieldImageStatus, vs...))
+}
+
+// ImageStatusNotIn applies the NotIn predicate on the "image_status" field.
+func ImageStatusNotIn(vs ...ImageStatus) predicate.HarnessConfig {
+	return predicate.HarnessConfig(sql.FieldNotIn(FieldImageStatus, vs...))
+}
+
+// ImageStatusCheckedAtEQ applies the EQ predicate on the "image_status_checked_at" field.
+func ImageStatusCheckedAtEQ(v time.Time) predicate.HarnessConfig {
+	return predicate.HarnessConfig(sql.FieldEQ(FieldImageStatusCheckedAt, v))
+}
+
+// ImageStatusCheckedAtNEQ applies the NEQ predicate on the "image_status_checked_at" field.
+func ImageStatusCheckedAtNEQ(v time.Time) predicate.HarnessConfig {
+	return predicate.HarnessConfig(sql.FieldNEQ(FieldImageStatusCheckedAt, v))
+}
+
+// ImageStatusCheckedAtIn applies the In predicate on the "image_status_checked_at" field.
+func ImageStatusCheckedAtIn(vs ...time.Time) predicate.HarnessConfig {
+	return predicate.HarnessConfig(sql.FieldIn(FieldImageStatusCheckedAt, vs...))
+}
+
+// ImageStatusCheckedAtNotIn applies the NotIn predicate on the "image_status_checked_at" field.
+func ImageStatusCheckedAtNotIn(vs ...time.Time) predicate.HarnessConfig {
+	return predicate.HarnessConfig(sql.FieldNotIn(FieldImageStatusCheckedAt, vs...))
+}
+
+// ImageStatusCheckedAtGT applies the GT predicate on the "image_status_checked_at" field.
+func ImageStatusCheckedAtGT(v time.Time) predicate.HarnessConfig {
+	return predicate.HarnessConfig(sql.FieldGT(FieldImageStatusCheckedAt, v))
+}
+
+// ImageStatusCheckedAtGTE applies the GTE predicate on the "image_status_checked_at" field.
+func ImageStatusCheckedAtGTE(v time.Time) predicate.HarnessConfig {
+	return predicate.HarnessConfig(sql.FieldGTE(FieldImageStatusCheckedAt, v))
+}
+
+// ImageStatusCheckedAtLT applies the LT predicate on the "image_status_checked_at" field.
+func ImageStatusCheckedAtLT(v time.Time) predicate.HarnessConfig {
+	return predicate.HarnessConfig(sql.FieldLT(FieldImageStatusCheckedAt, v))
+}
+
+// ImageStatusCheckedAtLTE applies the LTE predicate on the "image_status_checked_at" field.
+func ImageStatusCheckedAtLTE(v time.Time) predicate.HarnessConfig {
+	return predicate.HarnessConfig(sql.FieldLTE(FieldImageStatusCheckedAt, v))
+}
+
+// ImageStatusCheckedAtIsNil applies the IsNil predicate on the "image_status_checked_at" field.
+func ImageStatusCheckedAtIsNil() predicate.HarnessConfig {
+	return predicate.HarnessConfig(sql.FieldIsNull(FieldImageStatusCheckedAt))
+}
+
+// ImageStatusCheckedAtNotNil applies the NotNil predicate on the "image_status_checked_at" field.
+func ImageStatusCheckedAtNotNil() predicate.HarnessConfig {
+	return predicate.HarnessConfig(sql.FieldNotNull(FieldImageStatusCheckedAt))
 }
 
 // OwnerIDEQ applies the EQ predicate on the "owner_id" field.
