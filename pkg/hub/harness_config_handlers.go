@@ -288,10 +288,14 @@ func (s *Server) getHarnessConfig(w http.ResponseWriter, r *http.Request, id str
 
 	if s.imageStatusStale(hc) {
 		if image := s.harnessConfigImage(hc); image != "" {
-			go s.imageStatusFlight.Do(hc.ID, func() (any, error) {
-				s.checkAndUpdateImageStatus(context.Background(), hc.ID, image)
-				return nil, nil
-			})
+			go func() {
+				if _, err, _ := s.imageStatusFlight.Do(hc.ID, func() (any, error) {
+					s.checkAndUpdateImageStatus(context.Background(), hc.ID, image)
+					return nil, nil
+				}); err != nil {
+					slog.Error("image status check failed", "harness_config_id", hc.ID, "error", err)
+				}
+			}()
 		}
 	}
 
