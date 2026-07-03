@@ -8,6 +8,8 @@ import (
 	"time"
 )
 
+const defaultHTTPTimeout = 10 * time.Second
+
 type HTTPClient interface {
 	Do(req *http.Request) (*http.Response, error)
 }
@@ -52,10 +54,6 @@ func parseImageRef(image string) (imageRef, error) {
 }
 
 func checkRemoteImage(ctx context.Context, client HTTPClient, ref imageRef, now time.Time) CheckResult {
-	if client == nil {
-		client = &http.Client{Timeout: 10 * time.Second}
-	}
-
 	url := fmt.Sprintf("https://%s/v2/%s/manifests/%s", ref.Registry, ref.Repository, ref.Tag)
 
 	req, err := http.NewRequestWithContext(ctx, "HEAD", url, nil)

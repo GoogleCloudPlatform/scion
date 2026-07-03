@@ -2,6 +2,7 @@ package imagecheck
 
 import (
 	"context"
+	"net/http"
 	"time"
 )
 
@@ -16,24 +17,12 @@ type ImageChecker interface {
 	Check(ctx context.Context, image string) CheckResult
 }
 
-// LocalImageExister checks whether a container image exists on the local daemon.
-// Satisfied by runtime.Runtime.
-type LocalImageExister interface {
-	ImageExists(ctx context.Context, image string) (bool, error)
-}
-
 type Checker struct {
 	local  LocalImageExister
 	client HTTPClient
 }
 
 type Option func(*Checker)
-
-func WithLocalChecker(l LocalImageExister) Option {
-	return func(c *Checker) {
-		c.local = l
-	}
-}
 
 func WithHTTPClient(client HTTPClient) Option {
 	return func(c *Checker) {
@@ -46,6 +35,9 @@ func NewChecker(opts ...Option) *Checker {
 	for _, opt := range opts {
 		opt(c)
 	}
+	if c.client == nil {
+		c.client = &http.Client{Timeout: defaultHTTPTimeout}
+	}
 	return c
 }
 
@@ -53,13 +45,8 @@ func (c *Checker) Check(ctx context.Context, image string) CheckResult {
 	now := time.Now()
 
 	if c.local != nil {
-		found, err := c.local.ImageExists(ctx, image)
-		if err == nil && found {
-			return CheckResult{
-				Status:    "valid",
-				Source:    "local",
-				CheckedAt: now,
-			}
+		if result, found := checkLocalImage(ctx, c.local, image, now); found {
+			return result
 		}
 	}
 
