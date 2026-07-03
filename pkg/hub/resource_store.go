@@ -384,6 +384,7 @@ func (p *harnessConfigPersistence) Create(ctx context.Context, rec *ResourceReco
 		SourceURL:     rec.SourceURL,
 		Visibility:    rec.Visibility,
 	}
+	extractNoAuthBehavior(hc, dir)
 	rec.Harness = p.harness
 	p.model = hc
 	return p.s.store.CreateHarnessConfig(ctx, hc)
@@ -399,6 +400,7 @@ func (p *harnessConfigPersistence) Update(ctx context.Context, rec *ResourceReco
 	if rec.SourceURL != "" {
 		hc.SourceURL = rec.SourceURL
 	}
+	extractNoAuthBehavior(hc, dir)
 	return p.s.store.UpdateHarnessConfig(ctx, hc)
 }
 
@@ -438,6 +440,25 @@ func (p *harnessConfigPersistence) extractImage(dir string) string {
 		return p.model.Config.Image
 	}
 	return ""
+}
+
+// extractNoAuthBehavior loads config.yaml from dir and stamps the
+// no_auth.behavior value onto the HarnessConfig's Config data so the
+// hub can use it for auto no-auth fallback decisions.
+func extractNoAuthBehavior(hc *store.HarnessConfig, dir string) {
+	if dir == "" {
+		return
+	}
+	hcDir, err := config.LoadHarnessConfigDir(dir)
+	if err != nil {
+		return
+	}
+	if hcDir.Config.NoAuthConfig != nil && hcDir.Config.NoAuthConfig.Behavior != "" {
+		if hc.Config == nil {
+			hc.Config = &store.HarnessConfigData{}
+		}
+		hc.Config.NoAuthBehavior = hcDir.Config.NoAuthConfig.Behavior
+	}
 }
 
 func harnessConfigToRecord(hc *store.HarnessConfig) *ResourceRecord {

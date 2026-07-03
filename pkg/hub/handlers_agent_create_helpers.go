@@ -24,6 +24,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -230,6 +231,22 @@ func (s *Server) populateAgentConfig(ctx context.Context, agent *store.Agent, pr
 		if hc != nil {
 			agent.AppliedConfig.HarnessConfigID = hc.ID
 			agent.AppliedConfig.HarnessConfigHash = hc.ContentHash
+
+			// Auto no-auth fallback: when auth is "auto" (empty) and the harness
+			// config declares no_auth.behavior=drop-to-shell, check whether the
+			// required auth credentials are available. If not, enable NoAuth so
+			// the broker doesn't reject the agent for missing env vars.
+			if !agent.AppliedConfig.NoAuth &&
+				agent.AppliedConfig.HarnessAuth == "" &&
+				hc.Config != nil &&
+				hc.Config.NoAuthBehavior == "drop-to-shell" {
+				if !s.hasRequiredAuthCredentials(ctx, agent, hc.Harness) {
+					agent.AppliedConfig.NoAuth = true
+					agent.AppliedConfig.HarnessAuth = "none"
+					s.agentLifecycleLog.Info("Auto no-auth fallback: harness supports drop-to-shell and no credentials found",
+						"agent_id", agent.ID, "harness", hc.Harness)
+				}
+			}
 		}
 	}
 
@@ -740,4 +757,51 @@ func (s *Server) findBrokerByIDOrSlug(ctx context.Context, identifier string) (*
 	}
 
 	return nil, store.ErrNotFound
+}
+
+// hasRequiredAuthCredentials checks whether the required auth environment
+// variables for the given harness type are available in the agent's env,
+// or in the hub's env/secret stores (user and project scopes).
+func (s *Server) hasRequiredAuthCredentials(ctx context.Context, agent *store.Agent, harnessType string) bool {
+	keyGroups := harness.RequiredAuthEnvKeys(harnessType, agent.AppliedConfig.HarnessAuth)
+	if len(keyGroups) == 0 {
+		return true
+	}
+	// Every key group is a set of alternatives (any one satisfies the group).
+	// All groups must be satisfied for credentials to be considered present.
+	for _, group := range keyGroups {
+		if !s.hasAnyKey(ctx, agent, group) {
+			return false
+		}
+	}
+	return true
+}
+
+// hasAnyKey returns true if at least one of the keys is present in the
+// agent's env, or in the hub's env/secret stores at user or project scope.
+func (s *Server) hasAnyKey(ctx context.Context, agent *store.Agent, keys []string) bool {
+	for _, key := range keys {
+		if agent.AppliedConfig != nil && agent.AppliedConfig.Env != nil {
+			if _, ok := agent.AppliedConfig.Env[key]; ok {
+				return true
+			}
+		}
+		if agent.OwnerID != "" {
+			if ev, err := s.store.GetEnvVar(ctx, key, "user", agent.OwnerID); err == nil && ev != nil {
+				return true
+			}
+			if sec, err := s.store.GetSecret(ctx, key, "user", agent.OwnerID); err == nil && sec != nil {
+				return true
+			}
+		}
+		if agent.ProjectID != "" {
+			if ev, err := s.store.GetEnvVar(ctx, key, "project", agent.ProjectID); err == nil && ev != nil {
+				return true
+			}
+			if sec, err := s.store.GetSecret(ctx, key, "project", agent.ProjectID); err == nil && sec != nil {
+				return true
+			}
+		}
+	}
+	return false
 }
