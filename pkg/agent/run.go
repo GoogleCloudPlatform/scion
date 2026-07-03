@@ -477,6 +477,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 			if canFallbackToNoAuth() {
 				util.Debugf("auth: resolution failed, falling back to no-auth mode: %v", err)
 				opts.NoAuth = true
+				opts.HarnessAuth = "none"
 				warnings = append(warnings, "Auth: no credentials found, starting in no-auth mode")
 				goto authDone
 			}
@@ -494,6 +495,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 			if canFallbackToNoAuth() {
 				util.Debugf("auth: validation failed, falling back to no-auth mode: %v", err)
 				opts.NoAuth = true
+				opts.HarnessAuth = "none"
 				warnings = append(warnings, "Auth: credential validation failed, starting in no-auth mode")
 				goto authDone
 			}

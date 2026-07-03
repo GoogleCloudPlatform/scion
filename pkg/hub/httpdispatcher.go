@@ -653,6 +653,9 @@ func (d *HTTPAgentDispatcher) applyBrokerResponse(agent *store.Agent, resp *Remo
 			}
 			if resp.Agent.HarnessAuth != "" {
 				agent.AppliedConfig.HarnessAuth = resp.Agent.HarnessAuth
+				if resp.Agent.HarnessAuth == "none" {
+					agent.AppliedConfig.NoAuth = true
+				}
 			}
 			if resp.Agent.Image != "" {
 				agent.AppliedConfig.Image = resp.Agent.Image
