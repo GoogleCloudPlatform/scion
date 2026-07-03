@@ -316,6 +316,32 @@ export class ScionPageHarnessConfigDetail extends LitElement {
       font-size: 0.75rem;
       color: var(--sl-color-neutral-500);
     }
+    .image-status-indicator {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.25rem;
+      font-size: 0.75rem;
+      font-weight: 600;
+      padding: 0.125rem 0.5rem;
+      border-radius: var(--sl-border-radius-pill);
+      white-space: nowrap;
+    }
+    .image-status-indicator.valid {
+      background: var(--sl-color-success-100, #dcfce7);
+      color: var(--sl-color-success-700, #15803d);
+    }
+    .image-status-indicator.invalid {
+      background: var(--sl-color-danger-100, #fee2e2);
+      color: var(--sl-color-danger-700, #b91c1c);
+    }
+    .image-status-indicator.error {
+      background: var(--sl-color-warning-100, #fef3c7);
+      color: var(--sl-color-warning-700, #a16207);
+    }
+    .image-status-indicator.unknown {
+      background: var(--sl-color-neutral-100, #f1f5f9);
+      color: var(--sl-color-neutral-500, #64748b);
+    }
 
     .dialog-warning {
       display: flex;
@@ -591,6 +617,15 @@ export class ScionPageHarnessConfigDetail extends LitElement {
               ${isRemote ? 'Remote' : 'Local'}
             </span>
             <span class="image-path">${image}</span>
+            <span class="image-status-indicator ${hc.imageStatus || 'unknown'}">
+              ${hc.imageStatus === 'valid' ? 'Image Available' :
+                hc.imageStatus === 'invalid' ? 'Image Not Found' :
+                hc.imageStatus === 'error' ? 'Check Failed' : 'Not Checked'}
+            </span>
+            <sl-button size="small" variant="text" @click=${this.recheckImage}>
+              <sl-icon slot="prefix" name="arrow-repeat"></sl-icon>
+              Re-check
+            </sl-button>
           ` : html`
             <span class="image-meta">No image configured</span>
           `}
@@ -611,6 +646,16 @@ export class ScionPageHarnessConfigDetail extends LitElement {
         </div>
       </div>
     `;
+  }
+
+  private async recheckImage(): Promise<void> {
+    const resp = await apiFetch(
+      `/api/v1/harness-configs/${this.harnessConfigId}/check-image`,
+      { method: 'POST' }
+    );
+    if (resp.ok) {
+      await this.loadHarnessConfig();
+    }
   }
 
   // ── Refresh from Source ──

@@ -388,7 +388,7 @@ export class ScionPageAgentCreate extends LitElement {
           fetch('/api/v1/runtime-brokers?limit=200', { credentials: 'include' }),
           fetch('/api/v1/templates?status=active&limit=200', { credentials: 'include' }),
           fetch('/api/v1/settings/public', { credentials: 'include' }),
-          fetch('/api/v1/harness-configs?status=active&limit=100', { credentials: 'include' }),
+          fetch('/api/v1/harness-configs?status=active&image_status=valid&limit=100', { credentials: 'include' }),
         ]);
 
       if (projectsRes.ok) {
@@ -859,8 +859,8 @@ private selectBrokerForProject(): void {
   private async loadHarnessConfigs(): Promise<void> {
     try {
       const url = this.projectId
-        ? `/api/v1/harness-configs?status=active&projectId=${encodeURIComponent(this.projectId)}&limit=100`
-        : '/api/v1/harness-configs?status=active&limit=100';
+        ? `/api/v1/harness-configs?status=active&image_status=valid&projectId=${encodeURIComponent(this.projectId)}&limit=100`
+        : '/api/v1/harness-configs?status=active&image_status=valid&limit=100';
       const res = await apiFetch(url);
       if (res.ok) {
         const data = (await res.json()) as { harnessConfigs?: HarnessConfigEntry[] };
