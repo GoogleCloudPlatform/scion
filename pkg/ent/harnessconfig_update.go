@@ -278,6 +278,40 @@ func (_u *HarnessConfigUpdate) SetNillableStatus(v *harnessconfig.Status) *Harne
 	return _u
 }
 
+// SetImageStatus sets the "image_status" field.
+func (_u *HarnessConfigUpdate) SetImageStatus(v harnessconfig.ImageStatus) *HarnessConfigUpdate {
+	_u.mutation.SetImageStatus(v)
+	return _u
+}
+
+// SetNillableImageStatus sets the "image_status" field if the given value is not nil.
+func (_u *HarnessConfigUpdate) SetNillableImageStatus(v *harnessconfig.ImageStatus) *HarnessConfigUpdate {
+	if v != nil {
+		_u.SetImageStatus(*v)
+	}
+	return _u
+}
+
+// SetImageStatusCheckedAt sets the "image_status_checked_at" field.
+func (_u *HarnessConfigUpdate) SetImageStatusCheckedAt(v time.Time) *HarnessConfigUpdate {
+	_u.mutation.SetImageStatusCheckedAt(v)
+	return _u
+}
+
+// SetNillableImageStatusCheckedAt sets the "image_status_checked_at" field if the given value is not nil.
+func (_u *HarnessConfigUpdate) SetNillableImageStatusCheckedAt(v *time.Time) *HarnessConfigUpdate {
+	if v != nil {
+		_u.SetImageStatusCheckedAt(*v)
+	}
+	return _u
+}
+
+// ClearImageStatusCheckedAt clears the value of the "image_status_checked_at" field.
+func (_u *HarnessConfigUpdate) ClearImageStatusCheckedAt() *HarnessConfigUpdate {
+	_u.mutation.ClearImageStatusCheckedAt()
+	return _u
+}
+
 // SetOwnerID sets the "owner_id" field.
 func (_u *HarnessConfigUpdate) SetOwnerID(v string) *HarnessConfigUpdate {
 	_u.mutation.SetOwnerID(v)
@@ -441,6 +475,11 @@ func (_u *HarnessConfigUpdate) check() error {
 			return &ValidationError{Name: "status", err: fmt.Errorf(`ent: validator failed for field "HarnessConfig.status": %w`, err)}
 		}
 	}
+	if v, ok := _u.mutation.ImageStatus(); ok {
+		if err := harnessconfig.ImageStatusValidator(v); err != nil {
+			return &ValidationError{Name: "image_status", err: fmt.Errorf(`ent: validator failed for field "HarnessConfig.image_status": %w`, err)}
+		}
+	}
 	return nil
 }
 
@@ -524,6 +563,15 @@ func (_u *HarnessConfigUpdate) sqlSave(ctx context.Context) (_node int, err erro
 	}
 	if value, ok := _u.mutation.Status(); ok {
 		_spec.SetField(harnessconfig.FieldStatus, field.TypeEnum, value)
+	}
+	if value, ok := _u.mutation.ImageStatus(); ok {
+		_spec.SetField(harnessconfig.FieldImageStatus, field.TypeEnum, value)
+	}
+	if value, ok := _u.mutation.ImageStatusCheckedAt(); ok {
+		_spec.SetField(harnessconfig.FieldImageStatusCheckedAt, field.TypeTime, value)
+	}
+	if _u.mutation.ImageStatusCheckedAtCleared() {
+		_spec.ClearField(harnessconfig.FieldImageStatusCheckedAt, field.TypeTime)
 	}
 	if value, ok := _u.mutation.OwnerID(); ok {
 		_spec.SetField(harnessconfig.FieldOwnerID, field.TypeString, value)
@@ -825,6 +873,40 @@ func (_u *HarnessConfigUpdateOne) SetNillableStatus(v *harnessconfig.Status) *Ha
 	return _u
 }
 
+// SetImageStatus sets the "image_status" field.
+func (_u *HarnessConfigUpdateOne) SetImageStatus(v harnessconfig.ImageStatus) *HarnessConfigUpdateOne {
+	_u.mutation.SetImageStatus(v)
+	return _u
+}
+
+// SetNillableImageStatus sets the "image_status" field if the given value is not nil.
+func (_u *HarnessConfigUpdateOne) SetNillableImageStatus(v *harnessconfig.ImageStatus) *HarnessConfigUpdateOne {
+	if v != nil {
+		_u.SetImageStatus(*v)
+	}
+	return _u
+}
+
+// SetImageStatusCheckedAt sets the "image_status_checked_at" field.
+func (_u *HarnessConfigUpdateOne) SetImageStatusCheckedAt(v time.Time) *HarnessConfigUpdateOne {
+	_u.mutation.SetImageStatusCheckedAt(v)
+	return _u
+}
+
+// SetNillableImageStatusCheckedAt sets the "image_status_checked_at" field if the given value is not nil.
+func (_u *HarnessConfigUpdateOne) SetNillableImageStatusCheckedAt(v *time.Time) *HarnessConfigUpdateOne {
+	if v != nil {
+		_u.SetImageStatusCheckedAt(*v)
+	}
+	return _u
+}
+
+// ClearImageStatusCheckedAt clears the value of the "image_status_checked_at" field.
+func (_u *HarnessConfigUpdateOne) ClearImageStatusCheckedAt() *HarnessConfigUpdateOne {
+	_u.mutation.ClearImageStatusCheckedAt()
+	return _u
+}
+
 // SetOwnerID sets the "owner_id" field.
 func (_u *HarnessConfigUpdateOne) SetOwnerID(v string) *HarnessConfigUpdateOne {
 	_u.mutation.SetOwnerID(v)
@@ -1001,6 +1083,11 @@ func (_u *HarnessConfigUpdateOne) check() error {
 			return &ValidationError{Name: "status", err: fmt.Errorf(`ent: validator failed for field "HarnessConfig.status": %w`, err)}
 		}
 	}
+	if v, ok := _u.mutation.ImageStatus(); ok {
+		if err := harnessconfig.ImageStatusValidator(v); err != nil {
+			return &ValidationError{Name: "image_status", err: fmt.Errorf(`ent: validator failed for field "HarnessConfig.image_status": %w`, err)}
+		}
+	}
 	return nil
 }
 
@@ -1101,6 +1188,15 @@ func (_u *HarnessConfigUpdateOne) sqlSave(ctx context.Context) (_node *HarnessCo
 	}
 	if value, ok := _u.mutation.Status(); ok {
 		_spec.SetField(harnessconfig.FieldStatus, field.TypeEnum, value)
+	}
+	if value, ok := _u.mutation.ImageStatus(); ok {
+		_spec.SetField(harnessconfig.FieldImageStatus, field.TypeEnum, value)
+	}
+	if value, ok := _u.mutation.ImageStatusCheckedAt(); ok {
+		_spec.SetField(harnessconfig.FieldImageStatusCheckedAt, field.TypeTime, value)
+	}
+	if _u.mutation.ImageStatusCheckedAtCleared() {
+		_spec.ClearField(harnessconfig.FieldImageStatusCheckedAt, field.TypeTime)
 	}
 	if value, ok := _u.mutation.OwnerID(); ok {
 		_spec.SetField(harnessconfig.FieldOwnerID, field.TypeString, value)
