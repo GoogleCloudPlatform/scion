@@ -557,7 +557,7 @@ export class ScionPageAdminIntegrations extends LitElement {
         <h1>Integrations</h1>
       </div>
       <p class="header-description">
-        Manage chat integrations — Telegram, Discord, and Google Chat plugins connected to this
+        Manage chat integrations — Telegram, Discord, Google Chat, and Slack plugins connected to this
         hub.
       </p>
 
