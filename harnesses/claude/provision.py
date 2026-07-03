@@ -150,13 +150,18 @@ def _select_auth_method(
     """Pick an auth method.
 
     Returns (method, env_key_or_empty). env_key is the chosen API key env var
-    name when method == 'api-key', else "". Raises ValueError on no-creds.
+    name when method == 'api-key', or the chosen GCP region env var name when
+    method == 'vertex-ai', else "". Raises ValueError on no-creds.
     """
     has_anthropic = "ANTHROPIC_API_KEY" in env_keys
     has_oauth = "CLAUDE_CODE_OAUTH_TOKEN" in env_keys
     has_authfile = _auth_file_present(file_paths, CLAUDE_AUTH_FILE)
     has_gcp_project = "GOOGLE_CLOUD_PROJECT" in env_keys
-    has_gcp_region = "GOOGLE_CLOUD_REGION" in env_keys
+    has_gcp_region = any(k in env_keys for k in ('GOOGLE_CLOUD_LOCATION', 'GOOGLE_CLOUD_REGION'))
+    _gcp_region_key = next(
+        (k for k in ('GOOGLE_CLOUD_LOCATION', 'GOOGLE_CLOUD_REGION') if k in env_keys),
+        "",
+    )
 
     if explicit:
         if explicit not in VALID_AUTH_TYPES:
@@ -189,9 +194,9 @@ def _select_auth_method(
             if not has_gcp_project or not has_gcp_region:
                 raise ValueError(
                     "claude: auth type 'vertex-ai' selected but GOOGLE_CLOUD_PROJECT "
-                    "and/or GOOGLE_CLOUD_REGION not set"
+                    "and/or GOOGLE_CLOUD_LOCATION / GOOGLE_CLOUD_REGION not set"
                 )
-            return "vertex-ai", ""
+            return "vertex-ai", _gcp_region_key
 
     # Auto-detect precedence matches the compiled ClaudeCode harness:
     # API key -> OAuth token -> credentials file -> Vertex AI
@@ -202,18 +207,14 @@ def _select_auth_method(
     if has_authfile:
         return "auth-file", ""
     if has_gcp_project and has_gcp_region:
-        # Accept vertex-ai when project + region are set, even without a local
-        # ADC file — in GCP environments (GKE, Cloud Run, Compute Engine) the
-        # metadata server provides credentials via the attached service account.
-        # The GCP SDK / Vertex AI client handles this fallback natively.
-        return "vertex-ai", ""
+        return "vertex-ai", _gcp_region_key
 
     raise ValueError(
         "claude: no valid auth method found; set ANTHROPIC_API_KEY for direct API "
         "access, CLAUDE_CODE_OAUTH_TOKEN (from `claude setup-token`) or "
         f"{CLAUDE_AUTH_FILE} for subscription auth, or provide "
-        "GOOGLE_CLOUD_PROJECT + GOOGLE_CLOUD_REGION (with ADC or GCP service "
-        "account) for Vertex AI"
+        "GOOGLE_CLOUD_PROJECT + GOOGLE_CLOUD_LOCATION/GOOGLE_CLOUD_REGION "
+        "(with ADC or GCP service account) for Vertex AI"
     )
 
 
@@ -405,10 +406,11 @@ def _build_env_overlay(method: str, env_key: str) -> dict[str, str]:
     if method == "oauth-token":
         return {"CLAUDE_CODE_OAUTH_TOKEN": "${CLAUDE_CODE_OAUTH_TOKEN}"}
     if method == "vertex-ai":
+        region_ref = env_key or "GOOGLE_CLOUD_REGION"
         return {
             "CLAUDE_CODE_USE_VERTEX": "1",
             "ANTHROPIC_VERTEX_PROJECT_ID": "${GOOGLE_CLOUD_PROJECT}",
-            "CLOUD_ML_REGION": "${GOOGLE_CLOUD_REGION}",
+            "CLOUD_ML_REGION": f"${{{region_ref}}}",
         }
     # auth-file: no env updates needed.
     return {}
