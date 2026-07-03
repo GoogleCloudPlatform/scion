@@ -25,15 +25,10 @@ import (
 )
 
 func New(harnessName string) api.Harness {
-	switch harnessName {
-	case "gemini":
-		return &GeminiCLI{}
-	default:
-		if h := newFromEmbedFS(harnessName); h != nil {
-			return h
-		}
-		return &Generic{}
+	if h := newFromEmbedFS(harnessName); h != nil {
+		return h
 	}
+	return &Generic{}
 }
 
 func newFromEmbedFS(name string) api.Harness {
@@ -49,12 +44,11 @@ func newFromEmbedFS(name string) api.Harness {
 	return NewDeclarativeGenericHarness(entry)
 }
 
-// EmbedOnlyHarnesses returns harnesses that still use compiled-in Go embeds
-// for seeding (i.e., those not yet migrated to the harnesses/ directory).
+// EmbedOnlyHarnesses returns harnesses that use compiled-in Go embeds for
+// seeding. All harnesses have migrated to the harnesses/ directory, so this
+// returns an empty slice.
 func EmbedOnlyHarnesses() []api.Harness {
-	return []api.Harness{
-		&GeminiCLI{},
-	}
+	return nil
 }
 
 // HarnessesFS returns the embedded harnesses/ filesystem.
@@ -62,26 +56,15 @@ func HarnessesFS() fs.FS {
 	return harnessesEmbed.FS
 }
 
-// AllHarnessNames returns the complete list of harness names by combining
-// directory-based harnesses (from the embedded harnesses/ FS) with
-// embed-only harnesses.
+// AllHarnessNames returns the list of harness names from the embedded
+// harnesses/ filesystem.
 func AllHarnessNames() []string {
-	seen := make(map[string]bool)
-
 	entries, _ := fs.ReadDir(harnessesEmbed.FS, ".")
+	names := make([]string, 0, len(entries))
 	for _, e := range entries {
 		if e.IsDir() {
-			seen[e.Name()] = true
+			names = append(names, e.Name())
 		}
-	}
-
-	for _, h := range EmbedOnlyHarnesses() {
-		seen[h.Name()] = true
-	}
-
-	names := make([]string, 0, len(seen))
-	for n := range seen {
-		names = append(names, n)
 	}
 	sort.Strings(names)
 	return names

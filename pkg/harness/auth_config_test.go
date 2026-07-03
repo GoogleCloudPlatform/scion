@@ -26,30 +26,12 @@ import (
 	harnessesEmbed "github.com/GoogleCloudPlatform/scion/harnesses"
 )
 
-// loadAuthMetaFromHarness reads auth metadata from a harness's config.yaml.
-// First checks the compiled-in embeds, then falls through to the harnesses/
-// embed FS.
 func loadAuthMetaFromHarness(t *testing.T, harnessName string) *config.HarnessAuthMetadata {
 	t.Helper()
 
-	var data []byte
-	h := newBuiltin(harnessName)
-	if h != nil {
-		embedsFS, basePath := h.GetHarnessEmbedsFS()
-		if basePath != "" {
-			var err error
-			data, err = embedsFS.ReadFile(basePath + "/config.yaml")
-			if err != nil {
-				t.Fatalf("read embedded config.yaml: %v", err)
-			}
-		}
-	}
-	if data == nil {
-		var err error
-		data, err = fs.ReadFile(harnessesEmbed.FS, harnessName+"/config.yaml")
-		if err != nil {
-			t.Fatalf("read config.yaml from harnesses/ embed: %v", err)
-		}
+	data, err := fs.ReadFile(harnessesEmbed.FS, harnessName+"/config.yaml")
+	if err != nil {
+		t.Fatalf("read config.yaml from harnesses/ embed: %v", err)
 	}
 	var entry config.HarnessConfigEntry
 	if err := yaml.Unmarshal(data, &entry); err != nil {
@@ -91,21 +73,20 @@ func TestAuthMetadataAvailable(t *testing.T) {
 
 // TestRequiredAuthEnvKeysFromConfig_ParityWithCompiled verifies that the
 // config-driven preflight returns identical results to the compiled tables
-// for every built-in harness's embedded auth metadata. This is the key
-// guardrail that lets Phase 3 ship without behavior changes for built-ins.
+// for claude (the only harness still in the compiled table).
 func TestRequiredAuthEnvKeysFromConfig_ParityWithCompiled(t *testing.T) {
 	cases := []struct {
-		harness string
-		types   []string
+		harness     string
+		compiledKey string
+		types       []string
 	}{
-		{"claude", []string{"", "api-key", "oauth-token", "auth-file", "vertex-ai", "unknown"}},
-		{"gemini", []string{"", "api-key", "auth-file", "vertex-ai", "unknown"}},
+		{"claude", "claude", []string{"", "api-key", "oauth-token", "auth-file", "vertex-ai", "unknown"}},
 	}
 	for _, tc := range cases {
 		authMeta := loadAuthMetaFromHarness(t, tc.harness)
 		for _, at := range tc.types {
 			t.Run(tc.harness+"/"+at, func(t *testing.T) {
-				wantGroups := RequiredAuthEnvKeys(tc.harness, at)
+				wantGroups := RequiredAuthEnvKeys(tc.compiledKey, at)
 				gotGroups := RequiredAuthEnvKeysFromConfig(authMeta, at)
 				if !equalGroups(gotGroups, wantGroups) {
 					t.Errorf("config-driven=%v compiled=%v", gotGroups, wantGroups)
@@ -116,18 +97,14 @@ func TestRequiredAuthEnvKeysFromConfig_ParityWithCompiled(t *testing.T) {
 }
 
 // TestRequiredAuthSecretsFromConfig_ParityWithCompiled verifies parity for
-// the harnesses that actually declare a vertex-ai type. Codex and OpenCode
-// intentionally diverge: the compiled table groups them with claude/gemini
-// for vertex-ai (incorrectly suggesting a gcloud-adc secret), but neither
-// harness declares a vertex-ai auth type so the config path returns nil —
-// this is a deliberate behavior tightening documented in the design doc.
+// claude (the only harness still in the compiled table).
 func TestRequiredAuthSecretsFromConfig_ParityWithCompiled(t *testing.T) {
 	cases := []struct {
-		harness string
-		types   []string
+		harness     string
+		compiledKey string
+		types       []string
 	}{
-		{"claude", []string{"", "api-key", "auth-file", "vertex-ai"}},
-		{"gemini", []string{"", "api-key", "auth-file", "vertex-ai"}},
+		{"claude", "claude", []string{"", "api-key", "auth-file", "vertex-ai"}},
 	}
 	for _, tc := range cases {
 		authMeta := loadAuthMetaFromHarness(t, tc.harness)
@@ -138,7 +115,7 @@ func TestRequiredAuthSecretsFromConfig_ParityWithCompiled(t *testing.T) {
 					name += "/sa-assigned"
 				}
 				t.Run(name, func(t *testing.T) {
-					want := RequiredAuthSecrets(tc.harness, at, sa)
+					want := RequiredAuthSecrets(tc.compiledKey, at, sa)
 					got := RequiredAuthSecretsFromConfig(authMeta, at, sa)
 					if !equalRequiredSecrets(got, want) {
 						t.Errorf("config-driven=%+v compiled=%+v", got, want)
@@ -178,7 +155,7 @@ func TestDetectAuthTypeFromEnvVarsFromConfig_Claude(t *testing.T) {
 }
 
 func TestDetectAuthTypeFromEnvVarsFromConfig_Gemini(t *testing.T) {
-	authMeta := loadAuthMetaFromHarness(t, "gemini")
+	authMeta := loadAuthMetaFromHarness(t, "gemini-cli")
 	cases := []struct {
 		name string
 		keys []string
@@ -212,8 +189,8 @@ func TestDetectAuthTypeFromFileSecretsFromConfig(t *testing.T) {
 		{"claude", "CLAUDE_AUTH only", []string{"CLAUDE_AUTH"}, "auth-file"},
 		{"claude", "gcloud-adc only", []string{"gcloud-adc"}, "vertex-ai"},
 		{"claude", "auth-file wins over vertex-ai", []string{"CLAUDE_AUTH", "gcloud-adc"}, "auth-file"},
-		{"gemini", "OAUTH wins", []string{"GEMINI_OAUTH_CREDS", "gcloud-adc"}, "auth-file"},
-		{"gemini", "gcloud-adc only", []string{"gcloud-adc"}, "vertex-ai"},
+		{"gemini-cli", "OAUTH wins", []string{"GEMINI_OAUTH_CREDS", "gcloud-adc"}, "auth-file"},
+		{"gemini-cli", "gcloud-adc only", []string{"gcloud-adc"}, "vertex-ai"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.harness+"/"+tc.name, func(t *testing.T) {
@@ -234,8 +211,8 @@ func TestDetectAuthTypeFromGCPIdentityFromConfig(t *testing.T) {
 	}{
 		{"claude", true, "vertex-ai"},
 		{"claude", false, ""},
-		{"gemini", true, "vertex-ai"},
-		{"gemini", false, ""},
+		{"gemini-cli", true, "vertex-ai"},
+		{"gemini-cli", false, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.harness, func(t *testing.T) {

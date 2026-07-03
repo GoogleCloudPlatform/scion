@@ -61,7 +61,7 @@ func TestComposition_HarnessConfigBaseLayer(t *testing.T) {
 	hcDir := filepath.Join(globalScionDir, "harness-configs", "test-hc")
 	hcHome := filepath.Join(hcDir, "home")
 	os.MkdirAll(filepath.Join(hcHome, ".config"), 0755)
-	os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte("harness: gemini\n"), 0644)
+	os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte("harness: claude\n"), 0644)
 	os.WriteFile(filepath.Join(hcHome, "base-file.txt"), []byte("from-harness-config"), 0644)
 	os.WriteFile(filepath.Join(hcHome, ".config", "base-config.json"), []byte(`{"source": "harness-config"}`), 0644)
 
@@ -100,7 +100,7 @@ func TestComposition_TemplateOverlay(t *testing.T) {
 	hcDir := filepath.Join(globalScionDir, "harness-configs", "overlay-hc")
 	hcHome := filepath.Join(hcDir, "home")
 	os.MkdirAll(hcHome, 0755)
-	os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte("harness: gemini\n"), 0644)
+	os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte("harness: claude\n"), 0644)
 	os.WriteFile(filepath.Join(hcHome, "shared-file.txt"), []byte("from-harness-config"), 0644)
 	os.WriteFile(filepath.Join(hcHome, "base-only.txt"), []byte("base-only-content"), 0644)
 
@@ -148,12 +148,12 @@ func TestComposition_TemplateOverlay(t *testing.T) {
 func TestComposition_AgentInstructionsInjection(t *testing.T) {
 	_, globalScionDir, projectScionDir := setupCompositionTest(t)
 
-	seedTestHarnessConfig(t, globalScionDir, "gemini-hc", "gemini")
+	seedTestHarnessConfig(t, globalScionDir, "claude-hc", "claude")
 
 	t.Run("inline content", func(t *testing.T) {
 		tplDir := filepath.Join(globalScionDir, "templates", "inline-instructions")
 		os.MkdirAll(tplDir, 0755)
-		tplConfig := `default_harness_config: gemini-hc
+		tplConfig := `default_harness_config: claude-hc
 agent_instructions: "You are a helpful coding assistant."
 `
 		os.WriteFile(filepath.Join(tplDir, "scion-agent.yaml"), []byte(tplConfig), 0644)
@@ -163,10 +163,9 @@ agent_instructions: "You are a helpful coding assistant."
 			t.Fatalf("ProvisionAgent failed: %v", err)
 		}
 
-		// Gemini harness writes agent instructions to .gemini/GEMINI.md
-		data, err := os.ReadFile(filepath.Join(agentHome, ".gemini", "GEMINI.md"))
+		data, err := os.ReadFile(filepath.Join(agentHome, ".claude", "CLAUDE.md"))
 		if err != nil {
-			t.Fatalf("expected GEMINI.md to exist: %v", err)
+			t.Fatalf("expected CLAUDE.md to exist: %v", err)
 		}
 		if !strings.Contains(string(data), "helpful coding assistant") {
 			t.Errorf("expected agent instructions content, got %q", string(data))
@@ -176,9 +175,8 @@ agent_instructions: "You are a helpful coding assistant."
 	t.Run("file reference", func(t *testing.T) {
 		tplDir := filepath.Join(globalScionDir, "templates", "file-instructions")
 		os.MkdirAll(tplDir, 0755)
-		// Write the instructions file
 		os.WriteFile(filepath.Join(tplDir, "my-instructions.md"), []byte("Instructions from file."), 0644)
-		tplConfig := `default_harness_config: gemini-hc
+		tplConfig := `default_harness_config: claude-hc
 agent_instructions: my-instructions.md
 `
 		os.WriteFile(filepath.Join(tplDir, "scion-agent.yaml"), []byte(tplConfig), 0644)
@@ -188,9 +186,9 @@ agent_instructions: my-instructions.md
 			t.Fatalf("ProvisionAgent failed: %v", err)
 		}
 
-		data, err := os.ReadFile(filepath.Join(agentHome, ".gemini", "GEMINI.md"))
+		data, err := os.ReadFile(filepath.Join(agentHome, ".claude", "CLAUDE.md"))
 		if err != nil {
-			t.Fatalf("expected GEMINI.md to exist: %v", err)
+			t.Fatalf("expected CLAUDE.md to exist: %v", err)
 		}
 		if string(data) != "Instructions from file." {
 			t.Errorf("expected content from file, got %q", string(data))
@@ -201,11 +199,11 @@ agent_instructions: my-instructions.md
 func TestComposition_SystemPromptInjection(t *testing.T) {
 	_, globalScionDir, projectScionDir := setupCompositionTest(t)
 
-	seedTestHarnessConfig(t, globalScionDir, "gemini-hc", "gemini")
+	seedTestHarnessConfig(t, globalScionDir, "claude-hc", "claude")
 
 	tplDir := filepath.Join(globalScionDir, "templates", "sysprompt-test")
 	os.MkdirAll(tplDir, 0755)
-	tplConfig := `default_harness_config: gemini-hc
+	tplConfig := `default_harness_config: claude-hc
 system_prompt: "Be concise and precise."
 `
 	os.WriteFile(filepath.Join(tplDir, "scion-agent.yaml"), []byte(tplConfig), 0644)
@@ -215,10 +213,10 @@ system_prompt: "Be concise and precise."
 		t.Fatalf("ProvisionAgent failed: %v", err)
 	}
 
-	// Gemini harness writes system prompt to .gemini/system_prompt.md
-	data, err := os.ReadFile(filepath.Join(agentHome, ".gemini", "system_prompt.md"))
+	// Claude harness writes system prompt to .claude/system-prompt.md
+	data, err := os.ReadFile(filepath.Join(agentHome, ".claude", "system-prompt.md"))
 	if err != nil {
-		t.Fatalf("expected system_prompt.md to exist: %v", err)
+		t.Fatalf("expected system-prompt.md to exist: %v", err)
 	}
 	if !strings.Contains(string(data), "concise and precise") {
 		t.Errorf("expected system prompt content, got %q", string(data))
@@ -228,7 +226,7 @@ system_prompt: "Be concise and precise."
 func TestComposition_CommonFiles(t *testing.T) {
 	_, globalScionDir, projectScionDir := setupCompositionTest(t)
 
-	seedTestHarnessConfig(t, globalScionDir, "common-hc", "gemini")
+	seedTestHarnessConfig(t, globalScionDir, "common-hc", "claude")
 
 	tplDir := filepath.Join(globalScionDir, "templates", "common-test")
 	os.MkdirAll(tplDir, 0755)
@@ -252,10 +250,10 @@ func TestComposition_HarnessConfigResolution(t *testing.T) {
 	_, globalScionDir, projectScionDir := setupCompositionTest(t)
 
 	// Create harness-configs
-	seedTestHarnessConfig(t, globalScionDir, "cli-hc", "gemini")
-	seedTestHarnessConfig(t, globalScionDir, "tpl-hc", "gemini")
-	seedTestHarnessConfig(t, globalScionDir, "profile-hc", "gemini")
-	seedTestHarnessConfig(t, globalScionDir, "settings-hc", "gemini")
+	seedTestHarnessConfig(t, globalScionDir, "cli-hc", "claude")
+	seedTestHarnessConfig(t, globalScionDir, "tpl-hc", "claude")
+	seedTestHarnessConfig(t, globalScionDir, "profile-hc", "claude")
+	seedTestHarnessConfig(t, globalScionDir, "settings-hc", "claude")
 
 	// Create template with default_harness_config
 	tplDir := filepath.Join(globalScionDir, "templates", "resolve-test")
@@ -341,7 +339,7 @@ func TestComposition_LegacyTemplateRejected(t *testing.T) {
 	// Create a legacy template with harness field
 	tplDir := filepath.Join(globalScionDir, "templates", "legacy-tpl")
 	os.MkdirAll(tplDir, 0755)
-	os.WriteFile(filepath.Join(tplDir, "scion-agent.yaml"), []byte("harness: gemini\n"), 0644)
+	os.WriteFile(filepath.Join(tplDir, "scion-agent.yaml"), []byte("harness: claude\n"), 0644)
 
 	_, _, _, err := ProvisionAgent(context.Background(), "legacy-agent", "legacy-tpl", "", "", projectScionDir, "", "", "", "")
 	if err == nil {
@@ -355,7 +353,7 @@ func TestComposition_LegacyTemplateRejected(t *testing.T) {
 func TestComposition_HarnessConfigPersistedInAgentInfo(t *testing.T) {
 	tmpDir, globalScionDir, projectScionDir := setupCompositionTest(t)
 
-	seedTestHarnessConfig(t, globalScionDir, "persist-hc", "gemini")
+	seedTestHarnessConfig(t, globalScionDir, "persist-hc", "claude")
 
 	tplDir := filepath.Join(globalScionDir, "templates", "persist-test")
 	os.MkdirAll(tplDir, 0755)
@@ -513,20 +511,20 @@ func TestComposition_FullInitProjectFlow(t *testing.T) {
 
 	os.Chdir(projectDir)
 
-	// Use the "default" template (agnostic); default_harness_config: gemini comes from settings
+	// Use the "default" template (agnostic); default_harness_config: claude comes from settings
 	agentHome, _, cfg, err := ProvisionAgent(context.Background(), "full-flow-agent", "default", "", "", projectScionDir, "", "", "", "")
 	if err != nil {
 		t.Fatalf("ProvisionAgent failed: %v", err)
 	}
 
-	// Verify harness was resolved from gemini harness-config
-	if cfg.Harness != "gemini" {
-		t.Errorf("expected harness 'gemini', got %q", cfg.Harness)
+	// Verify harness was resolved from claude harness-config
+	if cfg.Harness != "claude" {
+		t.Errorf("expected harness 'claude', got %q", cfg.Harness)
 	}
 
 	// Verify harness-config name is set
-	if cfg.HarnessConfig != "gemini" {
-		t.Errorf("expected HarnessConfig 'gemini', got %q", cfg.HarnessConfig)
+	if cfg.HarnessConfig != "claude" {
+		t.Errorf("expected HarnessConfig 'claude', got %q", cfg.HarnessConfig)
 	}
 
 	// Verify agent home exists

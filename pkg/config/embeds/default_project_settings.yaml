@@ -33,7 +33,7 @@ default_template: default
 
 # Default harness-config for new agents
 # Env: SCION_DEFAULT_HARNESS_CONFIG
-default_harness_config: gemini
+default_harness_config: claude
 
 # CLI behavior settings
 cli:

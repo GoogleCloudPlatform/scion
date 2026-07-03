@@ -37,7 +37,7 @@ func seedTestHarnessConfig(t *testing.T, scionDir, name, harnessType string) {
 	os.MkdirAll(hcDir, 0755)
 	configYAML := "harness: " + harnessType + "\nimage: test-image:latest\n"
 	if harnessType == "claude" {
-		configYAML += "skills_dir: .claude/skills\ninstructions_file: .claude/CLAUDE.md\n"
+		configYAML += "skills_dir: .claude/skills\ninstructions_file: .claude/CLAUDE.md\nsystem_prompt_file: .claude/system-prompt.md\n"
 	}
 	if err := os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte(configYAML), 0644); err != nil {
 		t.Fatalf("failed to write harness-config: %v", err)
@@ -175,15 +175,15 @@ func TestProvisionGeminiAgentSettings(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Provision a gemini agent using the "default" agnostic template
+	// Provision a claude agent using the "default" agnostic template
 	agentName := "gemini-agent"
-	agentHome, _, _, err := ProvisionAgent(context.Background(), agentName, "default", "", "gemini", projectScionDir, "", "", "", "")
+	agentHome, _, _, err := ProvisionAgent(context.Background(), agentName, "default", "", "claude", projectScionDir, "", "", "", "")
 	if err != nil {
 		t.Fatalf("ProvisionAgent failed: %v", err)
 	}
 
-	// Verify agent's settings.json (copied from gemini harness-config's home)
-	agentSettingsPath := filepath.Join(agentHome, ".gemini", "settings.json")
+	// Verify agent's settings.json (copied from claude harness-config's home)
+	agentSettingsPath := filepath.Join(agentHome, ".claude", "settings.json")
 	data, err := os.ReadFile(agentSettingsPath)
 	if err != nil {
 		t.Fatalf("failed to read agent settings.json: %v", err)
@@ -194,7 +194,7 @@ func TestProvisionGeminiAgentSettings(t *testing.T) {
 		t.Fatalf("failed to unmarshal agent settings.json: %v", err)
 	}
 
-	// With no auth_selected_type in the gemini harness config, Provision()
+	// With no auth_selected_type in the claude harness config, Provision()
 	// should NOT inject a selectedType into settings.json — auth is determined
 	// at runtime.
 	if security, ok := settings["security"].(map[string]interface{}); ok {
@@ -399,11 +399,11 @@ func TestProvisionAgentWorkspaceFlag(t *testing.T) {
 	os.MkdirAll(globalTemplatesDir, 0755)
 
 	// Create a harness-config and agnostic template
-	seedTestHarnessConfig(t, globalScionDir, "gemini", "gemini")
+	seedTestHarnessConfig(t, globalScionDir, "claude", "claude")
 
-	tplDir := filepath.Join(globalTemplatesDir, "gemini")
+	tplDir := filepath.Join(globalTemplatesDir, "claude")
 	os.MkdirAll(tplDir, 0755)
-	tplConfig := `{"default_harness_config": "gemini"}`
+	tplConfig := `{"default_harness_config": "claude"}`
 	os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(tplConfig), 0644)
 
 	projectDir := filepath.Join(tmpDir, "project")
@@ -420,7 +420,7 @@ func TestProvisionAgentWorkspaceFlag(t *testing.T) {
 
 	// 1. Test valid --workspace in non-git
 	agentName := "workspace-agent"
-	_, _, cfg, err := ProvisionAgent(context.Background(), agentName, "gemini", "", "", projectScionDir, "", "", "", customWorkspace)
+	_, _, cfg, err := ProvisionAgent(context.Background(), agentName, "claude", "", "", projectScionDir, "", "", "", customWorkspace)
 	if err != nil {
 		t.Fatalf("ProvisionAgent failed: %v", err)
 	}
@@ -448,7 +448,7 @@ func TestProvisionAgentWorkspaceFlag(t *testing.T) {
 	absRelativeWorkspace, _ := filepath.Abs(filepath.Join(tmpDir, relativeWorkspace))
 	evalAbsRelativeWorkspace, _ := filepath.EvalSymlinks(absRelativeWorkspace)
 
-	_, _, cfg, err = ProvisionAgent(context.Background(), "rel-agent", "gemini", "", "", projectScionDir, "", "", "", relativeWorkspace)
+	_, _, cfg, err = ProvisionAgent(context.Background(), "rel-agent", "claude", "", "", projectScionDir, "", "", "", relativeWorkspace)
 	if err != nil {
 		t.Fatalf("ProvisionAgent failed: %v", err)
 	}
@@ -475,7 +475,7 @@ func TestProvisionAgentWorkspaceFlag(t *testing.T) {
 	os.WriteFile(filepath.Join(gitDir, ".gitignore"), []byte("agents/"), 0644)
 
 	var ws string
-	_, ws, cfg, err = ProvisionAgent(context.Background(), "git-agent", "gemini", "", "", gitScionDir, "", "", "", customWorkspace)
+	_, ws, cfg, err = ProvisionAgent(context.Background(), "git-agent", "claude", "", "", gitScionDir, "", "", "", customWorkspace)
 	if err != nil {
 		t.Fatalf("expected no error when using --workspace in a git repository, got: %v", err)
 	}
@@ -515,13 +515,13 @@ func TestProvisionAgentYAMLTemplate(t *testing.T) {
 	globalTemplatesDir := filepath.Join(globalScionDir, "templates")
 	os.MkdirAll(globalTemplatesDir, 0755)
 
-	// Create a harness-config for gemini
-	seedTestHarnessConfig(t, globalScionDir, "gemini", "gemini")
+	// Create a harness-config for claude
+	seedTestHarnessConfig(t, globalScionDir, "claude", "claude")
 
 	// Create an agnostic template with YAML config
 	tplDir := filepath.Join(globalTemplatesDir, "yaml-test-tpl")
 	os.MkdirAll(tplDir, 0755)
-	tplConfigYAML := `default_harness_config: gemini
+	tplConfigYAML := `default_harness_config: claude
 env:
   TPL_VAR: tpl-val
   GOOGLE_CLOUD_PROJECT: my-project
@@ -543,8 +543,8 @@ auth_selectedType: vertex-ai
 	}
 
 	// Verify harness resolved from harness-config
-	if cfg.Harness != "gemini" {
-		t.Errorf("expected harness 'gemini', got %q", cfg.Harness)
+	if cfg.Harness != "claude" {
+		t.Errorf("expected harness 'claude', got %q", cfg.Harness)
 	}
 	if cfg.Env["TPL_VAR"] != "tpl-val" {
 		t.Errorf("expected env[TPL_VAR] = 'tpl-val', got %q", cfg.Env["TPL_VAR"])
@@ -569,8 +569,8 @@ auth_selectedType: vertex-ai
 	if err := json.Unmarshal(data, &persistedCfg); err != nil {
 		t.Fatal(err)
 	}
-	if persistedCfg.Harness != "gemini" {
-		t.Errorf("persisted: expected harness 'gemini', got %q", persistedCfg.Harness)
+	if persistedCfg.Harness != "claude" {
+		t.Errorf("persisted: expected harness 'claude', got %q", persistedCfg.Harness)
 	}
 	if persistedCfg.Env["TPL_VAR"] != "tpl-val" {
 		t.Errorf("persisted: expected env[TPL_VAR] = 'tpl-val', got %q", persistedCfg.Env["TPL_VAR"])
@@ -649,7 +649,7 @@ func TestProvisionAgentInvalidYAMLTemplate(t *testing.T) {
 	// Create a template with invalid YAML config (commas in map entries)
 	tplDir := filepath.Join(globalTemplatesDir, "invalid-yaml-tpl")
 	os.MkdirAll(tplDir, 0755)
-	invalidYAML := `default_harness_config: gemini
+	invalidYAML := `default_harness_config: claude
 env:
   "KEY1": "value1",
   "KEY2": "value2"
@@ -690,14 +690,14 @@ func TestProvisionAgent_WritesServicesFile(t *testing.T) {
 	globalTemplatesDir := filepath.Join(globalScionDir, "templates")
 	os.MkdirAll(globalTemplatesDir, 0755)
 
-	// Create a harness-config for gemini
-	seedTestHarnessConfig(t, globalScionDir, "gemini", "gemini")
+	// Create a harness-config for claude
+	seedTestHarnessConfig(t, globalScionDir, "claude", "claude")
 
 	t.Run("services written when defined", func(t *testing.T) {
 		// Create an agnostic template with services defined in YAML
 		tplDir := filepath.Join(globalTemplatesDir, "svc-tpl")
 		os.MkdirAll(tplDir, 0755)
-		tplConfigYAML := `default_harness_config: gemini
+		tplConfigYAML := `default_harness_config: claude
 services:
   - name: xvfb
     command: ["Xvfb", ":99"]
@@ -738,7 +738,7 @@ services:
 	t.Run("no services file when none defined", func(t *testing.T) {
 		tplDir := filepath.Join(globalTemplatesDir, "no-svc-tpl")
 		os.MkdirAll(tplDir, 0755)
-		tplConfig := `{"default_harness_config": "gemini"}`
+		tplConfig := `{"default_harness_config": "claude"}`
 		os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(tplConfig), 0644)
 
 		projectDir := filepath.Join(tmpDir, "project-nosvc")
@@ -824,10 +824,10 @@ func TestProvisionAgent_SkillsAreTemplateOnly(t *testing.T) {
 	globalTemplatesDir := filepath.Join(globalScionDir, "templates")
 	os.MkdirAll(globalTemplatesDir, 0755)
 
-	// Create a harness-config for gemini with its own skills (should be ignored)
-	hcDir := filepath.Join(globalScionDir, "harness-configs", "gemini")
+	// Create a harness-config for claude with its own skills (should be ignored)
+	hcDir := filepath.Join(globalScionDir, "harness-configs", "claude")
 	os.MkdirAll(hcDir, 0755)
-	configYAML := "harness: gemini\nimage: test-image:latest\n"
+	configYAML := "harness: claude\nimage: test-image:latest\nskills_dir: .claude/skills\ninstructions_file: .claude/CLAUDE.md\n"
 	os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte(configYAML), 0644)
 
 	hcSkillDir := filepath.Join(hcDir, "skills", "base-skill")
@@ -837,7 +837,7 @@ func TestProvisionAgent_SkillsAreTemplateOnly(t *testing.T) {
 	// Create a template with a different skill
 	tplDir := filepath.Join(globalTemplatesDir, "overlay-tpl")
 	os.MkdirAll(tplDir, 0755)
-	tplConfig := `{"default_harness_config": "gemini"}`
+	tplConfig := `{"default_harness_config": "claude"}`
 	os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(tplConfig), 0644)
 
 	tplSkillDir := filepath.Join(tplDir, "skills", "tpl-skill")
@@ -855,13 +855,13 @@ func TestProvisionAgent_SkillsAreTemplateOnly(t *testing.T) {
 	}
 
 	// Harness-config skills should NOT be copied (skills are template-only)
-	baseSkillPath := filepath.Join(agentHome, ".gemini", "skills", "base-skill", "SKILL.md")
+	baseSkillPath := filepath.Join(agentHome, ".claude", "skills", "base-skill", "SKILL.md")
 	if _, err := os.Stat(baseSkillPath); err == nil {
 		t.Errorf("harness-config skill should not be copied, but found at %s", baseSkillPath)
 	}
 
 	// Template skills should still be copied
-	tplSkillPath := filepath.Join(agentHome, ".gemini", "skills", "tpl-skill", "SKILL.md")
+	tplSkillPath := filepath.Join(agentHome, ".claude", "skills", "tpl-skill", "SKILL.md")
 	if _, err := os.Stat(tplSkillPath); err != nil {
 		t.Errorf("expected template skill at %s, got error: %v", tplSkillPath, err)
 	}
@@ -884,10 +884,10 @@ func TestProvisionAgentGitClone_ClearsStaleWorktreeWorkspace(t *testing.T) {
 
 	globalScionDir := filepath.Join(tmpDir, ".scion")
 	os.MkdirAll(filepath.Join(globalScionDir, "templates"), 0755)
-	seedTestHarnessConfig(t, globalScionDir, "gemini", "gemini")
-	tplDir := filepath.Join(globalScionDir, "templates", "gemini")
+	seedTestHarnessConfig(t, globalScionDir, "claude", "claude")
+	tplDir := filepath.Join(globalScionDir, "templates", "claude")
 	os.MkdirAll(tplDir, 0755)
-	os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config":"gemini"}`), 0644)
+	os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config":"claude"}`), 0644)
 
 	projectDir := filepath.Join(tmpDir, "project")
 	projectScionDir := filepath.Join(projectDir, ".scion")
@@ -909,7 +909,7 @@ func TestProvisionAgentGitClone_ClearsStaleWorktreeWorkspace(t *testing.T) {
 	}
 	ctx := api.ContextWithGitClone(context.Background(), gitClone)
 
-	_, wsPath, _, err := ProvisionAgent(ctx, "clone-agent", "gemini", "", "", projectScionDir, "", "", "", "")
+	_, wsPath, _, err := ProvisionAgent(ctx, "clone-agent", "claude", "", "", projectScionDir, "", "", "", "")
 	if err != nil {
 		t.Fatalf("ProvisionAgent failed: %v", err)
 	}
@@ -947,10 +947,10 @@ func TestProvisionAgentGitClone_PreservesExistingClone(t *testing.T) {
 
 	globalScionDir := filepath.Join(tmpDir, ".scion")
 	os.MkdirAll(filepath.Join(globalScionDir, "templates"), 0755)
-	seedTestHarnessConfig(t, globalScionDir, "gemini", "gemini")
-	tplDir := filepath.Join(globalScionDir, "templates", "gemini")
+	seedTestHarnessConfig(t, globalScionDir, "claude", "claude")
+	tplDir := filepath.Join(globalScionDir, "templates", "claude")
 	os.MkdirAll(tplDir, 0755)
-	os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config":"gemini"}`), 0644)
+	os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config":"claude"}`), 0644)
 
 	projectDir := filepath.Join(tmpDir, "project")
 	projectScionDir := filepath.Join(projectDir, ".scion")
@@ -970,7 +970,7 @@ func TestProvisionAgentGitClone_PreservesExistingClone(t *testing.T) {
 	}
 	ctx := api.ContextWithGitClone(context.Background(), gitClone)
 
-	_, wsPath, _, err := ProvisionAgent(ctx, "restart-agent", "gemini", "", "", projectScionDir, "", "", "", "")
+	_, wsPath, _, err := ProvisionAgent(ctx, "restart-agent", "claude", "", "", projectScionDir, "", "", "", "")
 	if err != nil {
 		t.Fatalf("ProvisionAgent failed: %v", err)
 	}
@@ -1002,10 +1002,10 @@ func TestGetAgentGitClone_ClearsExistingWorkspace(t *testing.T) {
 
 	globalScionDir := filepath.Join(tmpDir, ".scion")
 	os.MkdirAll(filepath.Join(globalScionDir, "templates"), 0755)
-	seedTestHarnessConfig(t, globalScionDir, "gemini", "gemini")
-	tplDir := filepath.Join(globalScionDir, "templates", "gemini")
+	seedTestHarnessConfig(t, globalScionDir, "claude", "claude")
+	tplDir := filepath.Join(globalScionDir, "templates", "claude")
 	os.MkdirAll(tplDir, 0755)
-	os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config":"gemini"}`), 0644)
+	os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config":"claude"}`), 0644)
 
 	projectDir := filepath.Join(tmpDir, "project")
 	projectScionDir := filepath.Join(projectDir, ".scion")
@@ -1020,7 +1020,7 @@ func TestGetAgentGitClone_ClearsExistingWorkspace(t *testing.T) {
 	os.MkdirAll(agentHome, 0755)
 	// Write a config file so GetAgent treats this as an existing agent.
 	os.WriteFile(filepath.Join(agentDir, "scion-agent.json"),
-		[]byte(`{"harness":"gemini","default_harness_config":"gemini"}`), 0644)
+		[]byte(`{"harness":"claude","default_harness_config":"claude"}`), 0644)
 	// Populate workspace with stale clone content.
 	os.WriteFile(filepath.Join(agentWorkspace, ".git"),
 		[]byte("gitdir: ../../../.git/worktrees/reused-agent\n"), 0644)
@@ -1034,7 +1034,7 @@ func TestGetAgentGitClone_ClearsExistingWorkspace(t *testing.T) {
 	}
 	ctx := api.ContextWithGitClone(context.Background(), gitClone)
 
-	_, _, wsPath, _, err := GetAgent(ctx, "reused-agent", "gemini", "", "", projectScionDir, "", "", "", "")
+	_, _, wsPath, _, err := GetAgent(ctx, "reused-agent", "claude", "", "", projectScionDir, "", "", "", "")
 	if err != nil {
 		t.Fatalf("GetAgent failed: %v", err)
 	}
@@ -1071,10 +1071,10 @@ func TestProvisionAgent_SharedWorkspaceRelocatesAgentState(t *testing.T) {
 
 	globalScionDir := filepath.Join(tmpDir, ".scion")
 	os.MkdirAll(filepath.Join(globalScionDir, "templates"), 0755)
-	seedTestHarnessConfig(t, globalScionDir, "gemini", "gemini")
-	tplDir := filepath.Join(globalScionDir, "templates", "gemini")
+	seedTestHarnessConfig(t, globalScionDir, "claude", "claude")
+	tplDir := filepath.Join(globalScionDir, "templates", "claude")
 	os.MkdirAll(tplDir, 0755)
-	os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config":"gemini"}`), 0644)
+	os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config":"claude"}`), 0644)
 
 	// Project dir with .scion as a directory plus project-id (split storage).
 	projectDir := filepath.Join(tmpDir, "project")
@@ -1094,7 +1094,7 @@ func TestProvisionAgent_SharedWorkspaceRelocatesAgentState(t *testing.T) {
 	opts := api.StartOptions{
 		Name:            "shared-agent",
 		Task:            "do the thing",
-		Template:        "gemini",
+		Template:        "claude",
 		ProjectPath:     projectScionDir,
 		Workspace:       sharedWorkspace,
 		SharedWorkspace: true,
@@ -1141,10 +1141,10 @@ func TestProvisionAgent_SharedWorkspaceMigratesLegacyState(t *testing.T) {
 
 	globalScionDir := filepath.Join(tmpDir, ".scion")
 	os.MkdirAll(filepath.Join(globalScionDir, "templates"), 0755)
-	seedTestHarnessConfig(t, globalScionDir, "gemini", "gemini")
-	tplDir := filepath.Join(globalScionDir, "templates", "gemini")
+	seedTestHarnessConfig(t, globalScionDir, "claude", "claude")
+	tplDir := filepath.Join(globalScionDir, "templates", "claude")
 	os.MkdirAll(tplDir, 0755)
-	os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config":"gemini"}`), 0644)
+	os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config":"claude"}`), 0644)
 
 	projectDir := filepath.Join(tmpDir, "project")
 	projectScionDir := filepath.Join(projectDir, ".scion")
@@ -1161,7 +1161,7 @@ func TestProvisionAgent_SharedWorkspaceMigratesLegacyState(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(legacyDir, "prompt.md"), []byte("old task"), 0644); err != nil {
 		t.Fatalf("write legacy prompt.md: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(legacyDir, "scion-agent.json"), []byte(`{"harness":"gemini"}`), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(legacyDir, "scion-agent.json"), []byte(`{"harness":"claude"}`), 0644); err != nil {
 		t.Fatalf("write legacy scion-agent.json: %v", err)
 	}
 
@@ -1173,7 +1173,7 @@ func TestProvisionAgent_SharedWorkspaceMigratesLegacyState(t *testing.T) {
 	mgr := NewManager(rt)
 	opts := api.StartOptions{
 		Name:            "legacy-agent",
-		Template:        "gemini",
+		Template:        "claude",
 		ProjectPath:     projectScionDir,
 		Workspace:       sharedWorkspace,
 		SharedWorkspace: true,
@@ -1217,10 +1217,10 @@ func TestProvisionAgent_SharedWorkspaceCredentialHelper(t *testing.T) {
 
 	globalScionDir := filepath.Join(tmpDir, ".scion")
 	os.MkdirAll(filepath.Join(globalScionDir, "templates"), 0755)
-	seedTestHarnessConfig(t, globalScionDir, "gemini", "gemini")
-	tplDir := filepath.Join(globalScionDir, "templates", "gemini")
+	seedTestHarnessConfig(t, globalScionDir, "claude", "claude")
+	tplDir := filepath.Join(globalScionDir, "templates", "claude")
 	os.MkdirAll(tplDir, 0755)
-	os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config":"gemini"}`), 0644)
+	os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config":"claude"}`), 0644)
 
 	projectDir := filepath.Join(tmpDir, "project")
 	projectScionDir := filepath.Join(projectDir, ".scion")
@@ -1233,7 +1233,7 @@ func TestProvisionAgent_SharedWorkspaceCredentialHelper(t *testing.T) {
 	// Set SharedWorkspace context
 	ctx := api.ContextWithSharedWorkspace(context.Background())
 
-	home, _, _, err := ProvisionAgent(ctx, "shared-agent", "gemini", "", "", projectScionDir, "", "", "", sharedWorkspace)
+	home, _, _, err := ProvisionAgent(ctx, "shared-agent", "claude", "", "", projectScionDir, "", "", "", sharedWorkspace)
 	if err != nil {
 		t.Fatalf("ProvisionAgent failed: %v", err)
 	}
@@ -1273,10 +1273,10 @@ func TestProvisionAgent_SharedWorkspaceNoCredentialWithoutFlag(t *testing.T) {
 
 	globalScionDir := filepath.Join(tmpDir, ".scion")
 	os.MkdirAll(filepath.Join(globalScionDir, "templates"), 0755)
-	seedTestHarnessConfig(t, globalScionDir, "gemini", "gemini")
-	tplDir := filepath.Join(globalScionDir, "templates", "gemini")
+	seedTestHarnessConfig(t, globalScionDir, "claude", "claude")
+	tplDir := filepath.Join(globalScionDir, "templates", "claude")
 	os.MkdirAll(tplDir, 0755)
-	os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config":"gemini"}`), 0644)
+	os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config":"claude"}`), 0644)
 
 	projectDir := filepath.Join(tmpDir, "project")
 	projectScionDir := filepath.Join(projectDir, ".scion")
@@ -1286,7 +1286,7 @@ func TestProvisionAgent_SharedWorkspaceNoCredentialWithoutFlag(t *testing.T) {
 	os.MkdirAll(customWorkspace, 0755)
 
 	// No SharedWorkspace context — plain workspace mount
-	home, _, _, err := ProvisionAgent(context.Background(), "plain-agent", "gemini", "", "", projectScionDir, "", "", "", customWorkspace)
+	home, _, _, err := ProvisionAgent(context.Background(), "plain-agent", "claude", "", "", projectScionDir, "", "", "", customWorkspace)
 	if err != nil {
 		t.Fatalf("ProvisionAgent failed: %v", err)
 	}

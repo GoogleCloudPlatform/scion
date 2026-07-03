@@ -110,7 +110,7 @@ func TestLoadVersionedSettings_DefaultsOnly(t *testing.T) {
 	assert.Equal(t, "1", vs.SchemaVersion)
 	assert.Equal(t, "local", vs.ActiveProfile)
 	assert.Equal(t, "default", vs.DefaultTemplate)
-	assert.Equal(t, "gemini", vs.DefaultHarnessConfig)
+	assert.Equal(t, "claude", vs.DefaultHarnessConfig)
 	// harness_configs block is no longer in default settings (lives on disk as harness-config dirs)
 	assert.Contains(t, vs.Runtimes, "docker")
 	assert.Equal(t, "docker", vs.Runtimes["docker"].Type)

@@ -51,18 +51,16 @@ type ResolvedHarness struct {
 	ConfigName     string
 	ConfigDir      *config.HarnessConfigDir
 	Config         config.HarnessConfigEntry
-	Implementation string // builtin | container-script | generic
+	Implementation string // container-script | generic
 }
 
 // Resolve constructs an api.Harness using the priority order from the design:
 //
-//  1. Explicit container-script harness (provisioner.type: container-script)
-//  2. Built-in Go harness for known harness types
-//  3. Declarative generic harness (config.yaml only)
+//  1. Container-script harness (provisioner.type: container-script)
+//  2. Declarative generic harness (config.yaml only)
 //
-// For (1) the resolved harness-config dir must exist and contain provision.py
-// (the activation step in Phase 1 enforces this). For (2)-(3) the harness-
-// config dir is optional.
+// For (1) the resolved harness-config dir must exist and contain provision.py.
+// For (2) the harness-config dir is optional.
 func Resolve(_ context.Context, opts ResolveOptions) (*ResolvedHarness, error) {
 	if opts.Name == "" {
 		return nil, fmt.Errorf("harness.Resolve requires a name")
@@ -109,17 +107,6 @@ func Resolve(_ context.Context, opts ResolveOptions) (*ResolvedHarness, error) {
 		}, nil
 	}
 
-	// 2. Built-in
-	if builtin := newBuiltin(entry.Harness); builtin != nil {
-		return &ResolvedHarness{
-			Harness:        builtin,
-			ConfigName:     opts.Name,
-			ConfigDir:      hcDir,
-			Config:         entry,
-			Implementation: "builtin",
-		}, nil
-	}
-
 	if entry.Harness == "opencode" || entry.Harness == "codex" {
 		if hcDir == nil {
 			slog.Warn("harness is not installed; run: scion harness-config install harnesses/"+entry.Harness, "harness", entry.Harness)
@@ -153,16 +140,6 @@ func Resolve(_ context.Context, opts ResolveOptions) (*ResolvedHarness, error) {
 		Config:         entry,
 		Implementation: "generic",
 	}, nil
-}
-
-// newBuiltin returns the compiled-in harness for the given harness type, or
-// nil if none exists.
-func newBuiltin(harnessName string) api.Harness {
-	switch harnessName {
-	case "gemini":
-		return &GeminiCLI{}
-	}
-	return nil
 }
 
 // mergeHarnessConfigEntries overlays settings overrides on top of the

@@ -581,21 +581,19 @@ provisioner:
 	}
 }
 
-func TestResolve_BuiltinFallback(t *testing.T) {
+func TestResolve_UnknownHarnessFallsToGeneric(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
 
-	// No on-disk harness-config — Resolve returns builtin for gemini (still
-	// has a compiled-in implementation).
-	resolved, err := Resolve(context.Background(), ResolveOptions{Name: "gemini"})
+	resolved, err := Resolve(context.Background(), ResolveOptions{Name: "nonexistent"})
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
-	if resolved.Implementation != "builtin" {
-		t.Errorf("Implementation=%q want builtin", resolved.Implementation)
+	if resolved.Implementation != "generic" {
+		t.Errorf("Implementation=%q want generic", resolved.Implementation)
 	}
-	if _, ok := resolved.Harness.(*GeminiCLI); !ok {
-		t.Errorf("expected *GeminiCLI, got %T", resolved.Harness)
+	if _, ok := resolved.Harness.(*Generic); !ok {
+		t.Errorf("expected *Generic, got %T", resolved.Harness)
 	}
 }
 

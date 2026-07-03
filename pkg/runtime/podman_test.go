@@ -41,7 +41,7 @@ echo "$@"
 	}
 
 	config := RunConfig{
-		Harness:      &harness.GeminiCLI{},
+		Harness:      &harness.Generic{},
 		Name:         "test-agent",
 		UnixUsername: "scion",
 		Image:        "scion-agent:latest",
@@ -138,7 +138,7 @@ echo "$@"
 	t.Run("rootless adds --userns=keep-id with uid/gid mapping and env var", func(t *testing.T) {
 		rt := &PodmanRuntime{Command: mockPodman, Rootless: true}
 		config := RunConfig{
-			Harness:      &harness.GeminiCLI{},
+			Harness:      &harness.Generic{},
 			Name:         "test-agent",
 			UnixUsername: "scion",
 			Image:        "scion-agent:latest",
@@ -159,7 +159,7 @@ echo "$@"
 	t.Run("rootful omits --userns=keep-id", func(t *testing.T) {
 		rt := &PodmanRuntime{Command: mockPodman, Rootless: false}
 		config := RunConfig{
-			Harness:      &harness.GeminiCLI{},
+			Harness:      &harness.Generic{},
 			Name:         "test-agent",
 			UnixUsername: "scion",
 			Image:        "scion-agent:latest",

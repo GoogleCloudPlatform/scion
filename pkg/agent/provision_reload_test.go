@@ -27,7 +27,7 @@ import (
 func TestProvisionAgentReloadsConfig(t *testing.T) {
 	mockRuntimeForTest(t)
 	// This test verifies that ProvisionAgent reloads the config after harness.Provision
-	// which allows harness-injected changes (like GEMINI_API_KEY) to be returned.
+	// which allows harness-injected changes to be returned.
 
 	tmpDir := t.TempDir()
 
@@ -58,26 +58,26 @@ func TestProvisionAgentReloadsConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Provision a gemini agent using the "default" agnostic template with --harness-config=gemini
+	// Provision a claude agent using the "default" agnostic template with --harness-config=claude
 	agentName := "reload-test-agent"
-	_, _, cfg, err := ProvisionAgent(context.Background(), agentName, "default", "", "gemini", projectScionDir, "", "", "", "")
+	_, _, cfg, err := ProvisionAgent(context.Background(), agentName, "default", "", "claude", projectScionDir, "", "", "", "")
 	if err != nil {
 		t.Fatalf("ProvisionAgent failed: %v", err)
 	}
 
-	// With no auth_selected_type in the gemini harness config, no env vars
+	// With no auth_selected_type in the claude harness config, no env vars
 	// should be injected by Provision (auth is determined at runtime).
 	if cfg.Env != nil {
-		if _, ok := cfg.Env["GEMINI_API_KEY"]; ok {
-			t.Error("GEMINI_API_KEY should not be in env when no auth_selected_type is set")
+		if _, ok := cfg.Env["ANTHROPIC_API_KEY"]; ok {
+			t.Error("ANTHROPIC_API_KEY should not be in env when no auth_selected_type is set")
 		}
 	}
 }
 
 func TestProvisionAgentWithHarnessAuthOverride(t *testing.T) {
 	mockRuntimeForTest(t)
-	// Verify that when --harness-auth vertex-ai is used with the gemini harness,
-	// GEMINI_API_KEY is NOT injected into the env map by harness Provision().
+	// Verify that when --harness-auth vertex-ai is used with the claude harness,
+	// ANTHROPIC_API_KEY is NOT injected into the env map by harness Provision().
 
 	tmpDir := t.TempDir()
 
@@ -106,22 +106,20 @@ func TestProvisionAgentWithHarnessAuthOverride(t *testing.T) {
 	// Provision with vertex-ai override via inline config (simulates --harness-auth vertex-ai)
 	agentName := "vertex-ai-override"
 	inlineCfg := &api.ScionConfig{AuthSelectedType: "vertex-ai"}
-	_, _, cfg, err := ProvisionAgent(context.Background(), agentName, "default", "", "gemini", projectScionDir, "", "", "", "", inlineCfg)
+	_, _, cfg, err := ProvisionAgent(context.Background(), agentName, "default", "", "claude", projectScionDir, "", "", "", "", inlineCfg)
 	if err != nil {
 		t.Fatalf("ProvisionAgent failed: %v", err)
 	}
 
-	if cfg.Env == nil {
-		t.Fatal("expected cfg.Env to be non-nil")
+	// ANTHROPIC_API_KEY should NOT be present — vertex-ai doesn't use it
+	if cfg.Env != nil {
+		if _, ok := cfg.Env["ANTHROPIC_API_KEY"]; ok {
+			t.Error("ANTHROPIC_API_KEY should not be in env when auth is vertex-ai")
+		}
 	}
 
-	// GEMINI_API_KEY should NOT be present — vertex-ai doesn't use it
-	if _, ok := cfg.Env["GEMINI_API_KEY"]; ok {
-		t.Error("GEMINI_API_KEY should not be in env when auth is vertex-ai")
-	}
-
-	// GOOGLE_CLOUD_PROJECT should be present for vertex-ai
-	if _, ok := cfg.Env["GOOGLE_CLOUD_PROJECT"]; !ok {
-		t.Error("expected GOOGLE_CLOUD_PROJECT to be in env for vertex-ai auth")
+	// Verify the auth_selected_type was persisted
+	if cfg.AuthSelectedType != "vertex-ai" {
+		t.Errorf("expected AuthSelectedType = 'vertex-ai', got %q", cfg.AuthSelectedType)
 	}
 }

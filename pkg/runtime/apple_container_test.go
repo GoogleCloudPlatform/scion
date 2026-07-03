@@ -89,7 +89,7 @@ echo "$@"
 	}
 
 	config := RunConfig{
-		Harness:      &harness.GeminiCLI{},
+		Harness:      &harness.Generic{},
 		Name:         "test-agent",
 		UnixUsername: "scion",
 		Image:        "scion-agent:latest",
@@ -120,7 +120,7 @@ echo "$@"
 	runtime := &AppleContainerRuntime{Command: mockContainer}
 
 	config := RunConfig{
-		Harness:              &harness.GeminiCLI{},
+		Harness:              &harness.Generic{},
 		Name:                 "test-agent",
 		UnixUsername:         "scion",
 		Image:                "scion-agent:latest",

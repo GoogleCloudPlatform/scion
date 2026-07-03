@@ -134,7 +134,7 @@ func TestBuildCommonRunArgs(t *testing.T) {
 		{
 			name: "basic config",
 			config: RunConfig{
-				Harness:      &harness.GeminiCLI{},
+				Harness:      &harness.Generic{},
 				Name:         "test-agent",
 				UnixUsername: "scion",
 				Image:        "scion-agent:latest",
@@ -145,7 +145,7 @@ func TestBuildCommonRunArgs(t *testing.T) {
 		{
 			name: "workspace and home",
 			config: RunConfig{
-				Harness:      &harness.GeminiCLI{},
+				Harness:      &harness.Generic{},
 				Name:         "test-agent",
 				UnixUsername: "scion",
 				Image:        "scion-agent:latest",
@@ -162,7 +162,7 @@ func TestBuildCommonRunArgs(t *testing.T) {
 		{
 			name: "gemini api key",
 			config: RunConfig{
-				Harness: &harness.GeminiCLI{},
+				Harness: &harness.Generic{},
 				Name:    "test-agent",
 				ResolvedAuth: &api.ResolvedAuth{
 					Method: "api-key",
@@ -179,7 +179,7 @@ func TestBuildCommonRunArgs(t *testing.T) {
 		{
 			name: "labels",
 			config: RunConfig{
-				Harness: &harness.GeminiCLI{},
+				Harness: &harness.Generic{},
 				Name:    "test-agent",
 				Labels: map[string]string{
 					"foo": "bar",
@@ -195,7 +195,7 @@ func TestBuildCommonRunArgs(t *testing.T) {
 		{
 			name: "oauth propagation with home",
 			config: RunConfig{
-				Harness:      &harness.GeminiCLI{},
+				Harness:      &harness.Generic{},
 				Name:         "test-agent",
 				UnixUsername: "scion",
 				HomeDir:      tmpHome,
@@ -215,7 +215,7 @@ func TestBuildCommonRunArgs(t *testing.T) {
 		{
 			name: "adc propagation without home",
 			config: RunConfig{
-				Harness:      &harness.GeminiCLI{},
+				Harness:      &harness.Generic{},
 				Name:         "test-agent",
 				UnixUsername: "scion",
 				ResolvedAuth: &api.ResolvedAuth{
@@ -237,7 +237,7 @@ func TestBuildCommonRunArgs(t *testing.T) {
 		{
 			name: "other auth and model",
 			config: RunConfig{
-				Harness: &harness.GeminiCLI{},
+				Harness: &harness.Generic{},
 				Name:    "test-agent",
 				ResolvedAuth: &api.ResolvedAuth{
 					Method: "api-key",
@@ -259,7 +259,7 @@ func TestBuildCommonRunArgs(t *testing.T) {
 		{
 			name: "resume and env",
 			config: RunConfig{
-				Harness: &harness.GeminiCLI{},
+				Harness: &harness.Generic{},
 				Name:    "test-agent",
 				Image:   "scion-agent:latest",
 				Env:     []string{"FOO=BAR"},
@@ -268,17 +268,15 @@ func TestBuildCommonRunArgs(t *testing.T) {
 			},
 			wantIn: []string{
 				"-e FOO=BAR",
-				// The harness now runs inside an `sh -c` wrapper that captures
-				// its exit code to a fixed file (see state.HarnessExitCodeFile).
 				"tmux new-session -d -s scion -n agent sh -c ",
-				`'\''gemini'\'' '\''--yolo'\'' '\''--resume'\'' '\''--prompt-interactive'\'' '\''hello'\''`,
+				`'\''hello'\''`,
 				"; echo $? > /tmp/scion-harness-exit-code",
 			},
 		},
 		{
 			name: "resume with tmux",
 			config: RunConfig{
-				Harness: &harness.GeminiCLI{},
+				Harness: &harness.Generic{},
 				Name:    "test-agent",
 				Image:   "scion-agent:latest",
 				Task:    "hello",
@@ -286,14 +284,14 @@ func TestBuildCommonRunArgs(t *testing.T) {
 			},
 			wantIn: []string{
 				"tmux new-session -d -s scion -n agent sh -c ",
-				`'\''gemini'\'' '\''--yolo'\'' '\''--resume'\'' '\''--prompt-interactive'\'' '\''hello'\''`,
+				`'\''hello'\''`,
 				"; echo $? > /tmp/scion-harness-exit-code",
 			},
 		},
 		{
 			name: "template label",
 			config: RunConfig{
-				Harness:  &harness.GeminiCLI{},
+				Harness:  &harness.Generic{},
 				Name:     "test-agent",
 				Image:    "scion-agent:latest",
 				Template: "my-template",
@@ -305,7 +303,7 @@ func TestBuildCommonRunArgs(t *testing.T) {
 		{
 			name: "oauth without home",
 			config: RunConfig{
-				Harness:      &harness.GeminiCLI{},
+				Harness:      &harness.Generic{},
 				Name:         "test-agent",
 				UnixUsername: "scion",
 				ResolvedAuth: &api.ResolvedAuth{
@@ -327,7 +325,7 @@ func TestBuildCommonRunArgs(t *testing.T) {
 		{
 			name: "git relative workspace",
 			config: RunConfig{
-				Harness:      &harness.GeminiCLI{},
+				Harness:      &harness.Generic{},
 				Name:         "test-agent",
 				UnixUsername: "scion",
 				RepoRoot:     "/home/user/repo",
@@ -343,7 +341,7 @@ func TestBuildCommonRunArgs(t *testing.T) {
 		{
 			name: "shared workspace (workspace equals repo root)",
 			config: RunConfig{
-				Harness:      &harness.GeminiCLI{},
+				Harness:      &harness.Generic{},
 				Name:         "test-agent",
 				UnixUsername: "scion",
 				RepoRoot:     "/home/user/repo",
@@ -361,7 +359,7 @@ func TestBuildCommonRunArgs(t *testing.T) {
 		{
 			name: "generic volumes",
 			config: RunConfig{
-				Harness: &harness.GeminiCLI{},
+				Harness: &harness.Generic{},
 				Volumes: []api.VolumeMount{
 					{Source: "/host/path", Target: "/container/path", ReadOnly: true},
 					{Source: "/host/data", Target: "/container/data", ReadOnly: false},
@@ -376,7 +374,7 @@ func TestBuildCommonRunArgs(t *testing.T) {
 		{
 			name: "volume expansion",
 			config: RunConfig{
-				Harness:      &harness.GeminiCLI{},
+				Harness:      &harness.Generic{},
 				UnixUsername: "scion",
 				Volumes: []api.VolumeMount{
 					{Source: "~/.config/gcloud", Target: "~/.config/gcloud", ReadOnly: true},
@@ -393,7 +391,7 @@ func TestBuildCommonRunArgs(t *testing.T) {
 		{
 			name: "volume env var expansion",
 			config: RunConfig{
-				Harness:      &harness.GeminiCLI{},
+				Harness:      &harness.Generic{},
 				UnixUsername: "scion",
 				Volumes: []api.VolumeMount{
 					{Source: "${TEST_SCION_VOL_PATH}/pkg", Target: "/container/go/pkg", ReadOnly: false},
@@ -407,19 +405,19 @@ func TestBuildCommonRunArgs(t *testing.T) {
 		{
 			name: "attach without task",
 			config: RunConfig{
-				Harness:      &harness.GeminiCLI{},
+				Harness:      &harness.Generic{},
 				Name:         "test-agent",
 				UnixUsername: "scion",
 				Image:        "scion-agent:latest",
 				Task:         "",
 			},
-			wantIn:  []string{"gemini", "--yolo"},
+			wantIn:  []string{"tmux new-session -d -s scion -n agent"},
 			wantOut: []string{"--prompt-interactive"},
 		},
 		{
 			name: "workspace from volumes",
 			config: RunConfig{
-				Harness:      &harness.GeminiCLI{},
+				Harness:      &harness.Generic{},
 				Name:         "test-agent",
 				UnixUsername: "scion",
 				Image:        "scion-agent:latest",
@@ -435,7 +433,7 @@ func TestBuildCommonRunArgs(t *testing.T) {
 		{
 			name: "workspace precedence over volumes",
 			config: RunConfig{
-				Harness:      &harness.GeminiCLI{},
+				Harness:      &harness.Generic{},
 				Name:         "test-agent",
 				UnixUsername: "scion",
 				Image:        "scion-agent:latest",
@@ -455,7 +453,7 @@ func TestBuildCommonRunArgs(t *testing.T) {
 		{
 			name: "host uid and gid",
 			config: RunConfig{
-				Harness: &harness.GeminiCLI{},
+				Harness: &harness.Generic{},
 				Image:   "scion-agent:latest",
 			},
 			wantIn: []string{
@@ -466,7 +464,7 @@ func TestBuildCommonRunArgs(t *testing.T) {
 		{
 			name: "git clone mode skips workspace mount",
 			config: RunConfig{
-				Harness:      &harness.GeminiCLI{},
+				Harness:      &harness.Generic{},
 				Name:         "test-agent",
 				UnixUsername: "scion",
 				Image:        "scion-agent:latest",
@@ -484,27 +482,24 @@ func TestBuildCommonRunArgs(t *testing.T) {
 			},
 		},
 		{
-			name: "telemetry enabled injects harness telemetry env",
+			name: "telemetry enabled with generic harness has no telemetry env",
 			config: RunConfig{
-				Harness:          &harness.GeminiCLI{},
+				Harness:          &harness.Generic{},
 				Name:             "test-agent",
 				UnixUsername:     "scion",
 				Image:            "scion-agent:latest",
 				TelemetryEnabled: true,
 			},
-			wantIn: []string{
-				"-e GEMINI_TELEMETRY_ENABLED=true",
-				"-e GEMINI_TELEMETRY_TARGET=local",
-				"-e GEMINI_TELEMETRY_USE_COLLECTOR=true",
-				"-e GEMINI_TELEMETRY_OTLP_ENDPOINT=http://localhost:4317",
-				"-e GEMINI_TELEMETRY_OTLP_PROTOCOL=grpc",
-				"-e GEMINI_TELEMETRY_LOG_PROMPTS=false",
+			wantOut: []string{
+				"GEMINI_TELEMETRY_ENABLED",
+				"GEMINI_TELEMETRY_TARGET",
+				"GEMINI_TELEMETRY_OTLP_ENDPOINT",
 			},
 		},
 		{
 			name: "telemetry disabled omits harness telemetry env",
 			config: RunConfig{
-				Harness:          &harness.GeminiCLI{},
+				Harness:          &harness.Generic{},
 				Name:             "test-agent",
 				UnixUsername:     "scion",
 				Image:            "scion-agent:latest",
@@ -519,7 +514,7 @@ func TestBuildCommonRunArgs(t *testing.T) {
 		{
 			name: "git clone mode with home dir still mounts home",
 			config: RunConfig{
-				Harness:      &harness.GeminiCLI{},
+				Harness:      &harness.Generic{},
 				Name:         "test-agent",
 				UnixUsername: "scion",
 				Image:        "scion-agent:latest",
@@ -540,7 +535,7 @@ func TestBuildCommonRunArgs(t *testing.T) {
 		{
 			name: "gcs volume triggers fuse mount path",
 			config: RunConfig{
-				Harness:      &harness.GeminiCLI{},
+				Harness:      &harness.Generic{},
 				Name:         "test-agent",
 				UnixUsername: "scion",
 				Image:        "scion-agent:latest",
@@ -560,7 +555,7 @@ func TestBuildCommonRunArgs(t *testing.T) {
 		{
 			name: "gcs volume with prefix and mode",
 			config: RunConfig{
-				Harness:      &harness.GeminiCLI{},
+				Harness:      &harness.Generic{},
 				Name:         "test-agent",
 				UnixUsername: "scion",
 				Image:        "scion-agent:latest",
@@ -650,7 +645,7 @@ func TestVolumeDeduplication(t *testing.T) {
 
 	config := RunConfig{
 
-		Harness: &harness.GeminiCLI{},
+		Harness: &harness.Generic{},
 
 		Name: "test-agent",
 
@@ -715,7 +710,7 @@ func TestDevBinariesMount(t *testing.T) {
 	t.Setenv("SCION_DEV_BINARIES", tmpDir)
 
 	args, err := buildCommonRunArgs(RunConfig{
-		Harness:      &harness.GeminiCLI{},
+		Harness:      &harness.Generic{},
 		Name:         "test-agent",
 		UnixUsername: "scion",
 		Image:        "scion-agent:latest",
@@ -736,7 +731,7 @@ func TestDevBinariesMountNotSetOrInvalid(t *testing.T) {
 	t.Setenv("SCION_DEV_BINARIES", "")
 
 	args, err := buildCommonRunArgs(RunConfig{
-		Harness:      &harness.GeminiCLI{},
+		Harness:      &harness.Generic{},
 		Name:         "test-agent",
 		UnixUsername: "scion",
 		Image:        "scion-agent:latest",
@@ -754,7 +749,7 @@ func TestDevBinariesMountNotSetOrInvalid(t *testing.T) {
 	t.Setenv("SCION_DEV_BINARIES", "/nonexistent/path")
 
 	args, err = buildCommonRunArgs(RunConfig{
-		Harness:      &harness.GeminiCLI{},
+		Harness:      &harness.Generic{},
 		Name:         "test-agent",
 		UnixUsername: "scion",
 		Image:        "scion-agent:latest",
@@ -774,7 +769,7 @@ func TestDevBinariesMountNotSetOrInvalid(t *testing.T) {
 	t.Setenv("SCION_DEV_BINARIES", tmpFile)
 
 	args, err = buildCommonRunArgs(RunConfig{
-		Harness:      &harness.GeminiCLI{},
+		Harness:      &harness.Generic{},
 		Name:         "test-agent",
 		UnixUsername: "scion",
 		Image:        "scion-agent:latest",
@@ -802,7 +797,7 @@ func TestGcloudMountPreCreatesDirectory(t *testing.T) {
 	agentHome := t.TempDir()
 
 	args, err := buildCommonRunArgs(RunConfig{
-		Harness:      &harness.GeminiCLI{},
+		Harness:      &harness.Generic{},
 		Name:         "test-agent",
 		UnixUsername: "scion",
 		Image:        "scion-agent:latest",
@@ -915,7 +910,7 @@ func TestScionDirShadowedWhenFullRepoMounted(t *testing.T) {
 	// a tmpfs shadow mount should be added over /repo-root/.scion to
 	// prevent agents from accessing other agents' secrets.
 	args, err := buildCommonRunArgs(RunConfig{
-		Harness:      &harness.GeminiCLI{},
+		Harness:      &harness.Generic{},
 		Name:         "test-agent",
 		UnixUsername: "scion",
 		Image:        "scion-agent:latest",
@@ -943,7 +938,7 @@ func TestScionDirNotShadowedWhenWorkspaceInsideRepo(t *testing.T) {
 	// When the workspace is inside the repo root, .git and workspace are
 	// mounted separately (no full repo mount), so no tmpfs shadow is needed.
 	args, err := buildCommonRunArgs(RunConfig{
-		Harness:      &harness.GeminiCLI{},
+		Harness:      &harness.Generic{},
 		Name:         "test-agent",
 		UnixUsername: "scion",
 		Image:        "scion-agent:latest",
@@ -979,7 +974,7 @@ func TestGcloudMountSkippedInBrokerMode(t *testing.T) {
 	agentHome := t.TempDir()
 
 	args, err := buildCommonRunArgs(RunConfig{
-		Harness:      &harness.GeminiCLI{},
+		Harness:      &harness.Generic{},
 		Name:         "test-agent",
 		UnixUsername: "scion",
 		Image:        "scion-agent:latest",
@@ -1285,7 +1280,7 @@ func TestResolveHostNetworking(t *testing.T) {
 
 func TestBuildCommonRunArgs_NetworkMode(t *testing.T) {
 	config := RunConfig{
-		Harness:      &harness.GeminiCLI{},
+		Harness:      &harness.Generic{},
 		Name:         "test-agent",
 		UnixUsername: "scion",
 		Image:        "scion-agent:latest",
@@ -1311,7 +1306,7 @@ func TestBuildCommonRunArgs_NetworkMode(t *testing.T) {
 
 func TestBuildCommonRunArgs_ExtraHosts(t *testing.T) {
 	config := RunConfig{
-		Harness:      &harness.GeminiCLI{},
+		Harness:      &harness.Generic{},
 		Name:         "test-agent",
 		UnixUsername: "scion",
 		Image:        "scion-agent:latest",
@@ -1389,7 +1384,7 @@ func TestSharedWorkspace_NoAgentStateInMounts(t *testing.T) {
 	}
 
 	args, err := buildCommonRunArgs(RunConfig{
-		Harness:      &harness.GeminiCLI{},
+		Harness:      &harness.Generic{},
 		Name:         "agent-a",
 		UnixUsername: "scion",
 		Image:        "scion-agent:latest",

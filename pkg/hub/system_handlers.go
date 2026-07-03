@@ -378,33 +378,10 @@ func (s *Server) handleSystemInit(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Partition requested harnesses into catalog-based and embed-only.
-	// Embed-only harnesses (e.g. Gemini) are handled by the SeedHarnessConfig
-	// loop in InitMachine and must not appear in SelectedHarnessConfigs, which
-	// only searches the bundled catalog.
-	embedOnlyNames := make(map[string]bool)
-	var embedOnlyInstances []api.Harness
-	for _, h := range harness.EmbedOnlyHarnesses() {
-		embedOnlyNames[h.Name()] = true
-		for _, name := range req.Harnesses {
-			if h.Name() == name {
-				embedOnlyInstances = append(embedOnlyInstances, h)
-				break
-			}
-		}
-	}
-
-	catalogNames := []string{}
-	for _, name := range req.Harnesses {
-		if !embedOnlyNames[name] {
-			catalogNames = append(catalogNames, name)
-		}
-	}
-
 	opts := config.InitMachineOpts{
-		SelectedHarnessConfigs: catalogNames,
+		SelectedHarnessConfigs: req.Harnesses,
 	}
-	if err := config.InitMachine(embedOnlyInstances, opts); err != nil {
+	if err := config.InitMachine(nil, opts); err != nil {
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
 			fmt.Sprintf("initialization failed: %s", err.Error()), nil)
 		return

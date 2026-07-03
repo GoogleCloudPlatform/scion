@@ -20,14 +20,12 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func TestNew_BuiltinHarnesses(t *testing.T) {
-	// Gemini is the only remaining builtin harness
-	h := New("gemini")
-	assert.Equal(t, "gemini", h.Name())
-
-	// Claude loads from the harnesses/ embed FS as a DeclarativeGenericHarness
-	h = New("claude")
+func TestNew_EmbedFSHarnesses(t *testing.T) {
+	h := New("claude")
 	assert.Equal(t, "claude", h.Name())
+
+	h = New("gemini-cli")
+	assert.Equal(t, "gemini-cli", h.Name())
 }
 
 func TestNew_UnknownFallsToGeneric(t *testing.T) {
@@ -35,16 +33,15 @@ func TestNew_UnknownFallsToGeneric(t *testing.T) {
 	assert.Equal(t, "generic", h.Name())
 }
 
-func TestEmbedOnlyHarnesses_ReturnsGemini(t *testing.T) {
+func TestEmbedOnlyHarnesses_ReturnsEmpty(t *testing.T) {
 	all := EmbedOnlyHarnesses()
-	assert.Len(t, all, 1)
-	assert.Equal(t, "gemini", all[0].Name())
+	assert.Empty(t, all)
 }
 
 func TestAllHarnessNames_IncludesAll(t *testing.T) {
 	names := AllHarnessNames()
 	assert.Contains(t, names, "claude")
-	assert.Contains(t, names, "gemini")
+	assert.Contains(t, names, "gemini-cli")
 	assert.Contains(t, names, "codex")
 	assert.Contains(t, names, "opencode")
 	assert.Contains(t, names, "antigravity")

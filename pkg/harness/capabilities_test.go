@@ -33,8 +33,8 @@ func TestAdvancedCapabilitiesDefaults(t *testing.T) {
 		expectResume        api.SupportLevel
 	}{
 		{
-			name:                "gemini",
-			harness:             "gemini",
+			name:                "gemini-cli",
+			harness:             "gemini-cli",
 			expectMaxTurns:      api.SupportYes,
 			expectMaxModelCalls: api.SupportYes,
 			expectMaxDuration:   api.SupportYes,

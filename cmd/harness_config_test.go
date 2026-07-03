@@ -47,16 +47,16 @@ func TestHarnessConfigList(t *testing.T) {
 	configs, err := config.ListHarnessConfigDirs("")
 	require.NoError(t, err)
 
-	// Should have at least gemini and claude configs
+	// Should have at least gemini-cli and claude configs
 	names := make(map[string]bool)
 	for _, hc := range configs {
 		names[hc.Name] = true
 	}
-	assert.True(t, names["gemini"], "expected gemini harness-config")
+	assert.True(t, names["gemini-cli"], "expected gemini-cli harness-config")
 	assert.True(t, names["claude"], "expected claude harness-config")
 
 	// Verify they're in the global directory
-	geminiDir := filepath.Join(globalDir, "harness-configs", "gemini")
+	geminiDir := filepath.Join(globalDir, "harness-configs", "gemini-cli")
 	assert.DirExists(t, geminiDir)
 }
 
@@ -78,32 +78,27 @@ func TestHarnessConfigReset(t *testing.T) {
 	require.NoError(t, err)
 
 	// Corrupt a harness-config file
-	geminiConfigPath := filepath.Join(globalDir, "harness-configs", "gemini", "config.yaml")
-	require.FileExists(t, geminiConfigPath)
+	claudeConfigPath := filepath.Join(globalDir, "harness-configs", "claude", "config.yaml")
+	require.FileExists(t, claudeConfigPath)
 
-	originalData, err := os.ReadFile(geminiConfigPath)
+	originalData, err := os.ReadFile(claudeConfigPath)
 	require.NoError(t, err)
 
-	require.NoError(t, os.WriteFile(geminiConfigPath, []byte("CORRUPTED"), 0644))
+	require.NoError(t, os.WriteFile(claudeConfigPath, []byte("CORRUPTED"), 0644))
 
-	// Load the corrupted config to get the harness type — this should fail
-	// because YAML is corrupted, so we'll need to reset using the pre-corruption data
-	// Instead, let's read it back, verify it's corrupted, then reset
-	corruptedData, err := os.ReadFile(geminiConfigPath)
+	corruptedData, err := os.ReadFile(claudeConfigPath)
 	require.NoError(t, err)
 	assert.Equal(t, "CORRUPTED", string(corruptedData))
 
-	// Reset: first restore enough to make LoadHarnessConfigDir work
-	// (In practice, the reset command reads the existing config to find the harness type)
-	require.NoError(t, os.WriteFile(geminiConfigPath, originalData, 0644))
+	require.NoError(t, os.WriteFile(claudeConfigPath, originalData, 0644))
 
 	// Now reset using SeedHarnessConfig with force
-	h := harness.New("gemini")
-	targetDir := filepath.Join(globalDir, "harness-configs", "gemini")
+	h := harness.New("claude")
+	targetDir := filepath.Join(globalDir, "harness-configs", "claude")
 	require.NoError(t, config.SeedHarnessConfig(targetDir, h, true))
 
 	// Verify it was restored (not corrupted)
-	restoredData, err := os.ReadFile(geminiConfigPath)
+	restoredData, err := os.ReadFile(claudeConfigPath)
 	require.NoError(t, err)
 	assert.NotEqual(t, "CORRUPTED", string(restoredData))
 	assert.Equal(t, string(originalData), string(restoredData))
