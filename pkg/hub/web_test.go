@@ -1650,12 +1650,11 @@ func TestSSEHandler_RequiresAuth(t *testing.T) {
 }
 
 func TestSSEHandler_ReconnectOnMaxAge(t *testing.T) {
-	// Temporarily shorten the max connection age so the test finishes fast.
-	origAge := sseMaxConnectionAge
-	sseMaxConnectionAge = 200 * time.Millisecond
-	t.Cleanup(func() { sseMaxConnectionAge = origAge })
-
-	ws := newDevAuthWebServer(t)
+	// Use a config override to shorten SSEMaxConnectionAge — no global mutation,
+	// no data races when tests run in parallel.
+	ws := newDevAuthWebServer(t, func(cfg *WebServerConfig) {
+		cfg.SSEMaxConnectionAge = 200 * time.Millisecond
+	})
 	pub := NewChannelEventPublisher()
 	ws.SetEventPublisher(pub)
 	t.Cleanup(pub.Close)
@@ -1671,28 +1670,35 @@ func TestSSEHandler_ReconnectOnMaxAge(t *testing.T) {
 
 	// Read all data until the server closes the connection. The last
 	// meaningful frame should be the reconnect event.
-	var accumulated strings.Builder
-	buf := make([]byte, 4096)
-	deadline := time.After(5 * time.Second)
-	for {
-		select {
-		case <-deadline:
-			t.Fatal("timed out waiting for server to close SSE connection")
-		default:
-		}
-		n, readErr := resp.Body.Read(buf)
-		if n > 0 {
-			accumulated.Write(buf[:n])
-		}
-		if readErr != nil {
-			// Connection closed by server — expected.
-			break
-		}
+	// Use a channel to make the blocking Read interruptible by the deadline.
+	type readResult struct {
+		data string
+		err  error
 	}
+	done := make(chan readResult, 1)
+	go func() {
+		var accumulated strings.Builder
+		buf := make([]byte, 4096)
+		for {
+			n, readErr := resp.Body.Read(buf)
+			if n > 0 {
+				accumulated.Write(buf[:n])
+			}
+			if readErr != nil {
+				// Connection closed by server — expected.
+				done <- readResult{data: accumulated.String(), err: readErr}
+				return
+			}
+		}
+	}()
 
-	body := accumulated.String()
-	assert.Contains(t, body, "event: reconnect")
-	assert.Contains(t, body, "data: {}")
+	select {
+	case result := <-done:
+		assert.Contains(t, result.data, "event: reconnect")
+		assert.Contains(t, result.data, "data: {}")
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for server to close SSE connection")
+	}
 }
 
 func TestLoginPageRendersLoginComponent(t *testing.T) {
