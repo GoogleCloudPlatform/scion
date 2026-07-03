@@ -108,6 +108,14 @@ Examples:
 		if (msgIn != "" || msgAt != "") && (msgBroadcast || msgAll) {
 			return fmt.Errorf("--in/--at cannot be combined with --broadcast or --all")
 		}
+		// Scheduled events only carry interrupt/plain; reject flags that
+		// would otherwise be silently dropped when the event fires.
+		if msgNotify && (msgIn != "" || msgAt != "") {
+			return fmt.Errorf("--notify cannot be combined with --in or --at")
+		}
+		if msgChannel != "" && (msgIn != "" || msgAt != "") {
+			return fmt.Errorf("--channel cannot be combined with --in or --at")
+		}
 
 		// Validate --thread-id requires --channel
 		if msgThreadID != "" && msgChannel == "" {
@@ -187,6 +195,11 @@ Examples:
 		if len(msgAttach) > 0 && (msgIn != "" || msgAt != "") {
 			return fmt.Errorf("--attach cannot be combined with --in or --at")
 		}
+		// Plain delivery strips the structured envelope that carries
+		// attachment references, so the combination would silently drop them.
+		if len(msgAttach) > 0 && msgPlain {
+			return fmt.Errorf("--attach cannot be combined with --plain (attachments are delivered in the structured message envelope)")
+		}
 
 		// Check if Hub should be used
 		var hubCtx *HubContext
@@ -258,6 +271,12 @@ Examples:
 		// and cannot transfer files.
 		if len(msgAttach) > 0 {
 			return fmt.Errorf("--attach requires Hub mode (use 'scion hub enable' first); in local mode, include the file contents in the message text")
+		}
+
+		// --channel/--thread-id require Hub mode: channel routing is resolved
+		// by the Hub's channel registry and never reaches local delivery.
+		if msgChannel != "" {
+			return fmt.Errorf("--channel requires Hub mode (use 'scion hub enable' first)")
 		}
 
 		// Local mode — structured messages are only available in Hub mode,

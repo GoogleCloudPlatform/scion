@@ -356,6 +356,8 @@ func TestScheduleMessageFlagValidation(t *testing.T) {
 		at        string
 		broadcast bool
 		all       bool
+		notify    bool
+		channel   string
 		wantErr   string
 	}{
 		{
@@ -376,6 +378,30 @@ func TestScheduleMessageFlagValidation(t *testing.T) {
 			all:     true,
 			wantErr: "--in/--at cannot be combined with --broadcast or --all",
 		},
+		{
+			name:    "notify with in not allowed",
+			in:      "30m",
+			notify:  true,
+			wantErr: "--notify cannot be combined with --in or --at",
+		},
+		{
+			name:    "notify with at not allowed",
+			at:      "2030-01-01T00:00:00Z",
+			notify:  true,
+			wantErr: "--notify cannot be combined with --in or --at",
+		},
+		{
+			name:    "channel with in not allowed",
+			in:      "30m",
+			channel: "telegram",
+			wantErr: "--channel cannot be combined with --in or --at",
+		},
+		{
+			name:    "channel with at not allowed",
+			at:      "2030-01-01T00:00:00Z",
+			channel: "telegram",
+			wantErr: "--channel cannot be combined with --in or --at",
+		},
 	}
 
 	for _, tc := range tests {
@@ -383,15 +409,19 @@ func TestScheduleMessageFlagValidation(t *testing.T) {
 			// Save and restore global state
 			origIn, origAt := msgIn, msgAt
 			origBroadcast, origAll := msgBroadcast, msgAll
+			origNotify, origChannel := msgNotify, msgChannel
 			defer func() {
 				msgIn, msgAt = origIn, origAt
 				msgBroadcast, msgAll = origBroadcast, origAll
+				msgNotify, msgChannel = origNotify, origChannel
 			}()
 
 			msgIn = tc.in
 			msgAt = tc.at
 			msgBroadcast = tc.broadcast
 			msgAll = tc.all
+			msgNotify = tc.notify
+			msgChannel = tc.channel
 
 			// Build args appropriate for the flag combination
 			var args []string
@@ -878,6 +908,12 @@ func TestAttachFlagValidation(t *testing.T) {
 			setup:    func() { msgAttach = []string{"notes.md"}; msgAt = "2026-01-01T00:00:00Z" },
 			teardown: func() { msgAttach = nil; msgAt = "" },
 			errMsg:   "--attach cannot be combined with --in or --at",
+		},
+		{
+			name:     "attach with plain",
+			setup:    func() { msgAttach = []string{"notes.md"}; msgPlain = true },
+			teardown: func() { msgAttach = nil; msgPlain = false },
+			errMsg:   "--attach cannot be combined with --plain",
 		},
 	}
 
