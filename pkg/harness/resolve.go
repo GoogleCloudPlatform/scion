@@ -86,8 +86,8 @@ func Resolve(_ context.Context, opts ResolveOptions) (*ResolvedHarness, error) {
 		entry.Harness = opts.Name
 	}
 
-	// 1. Container-script harness
-	if entry.Provisioner != nil && entry.Provisioner.Type == "container-script" {
+	// 1. Container-script harness (provisioner block present)
+	if entry.Provisioner != nil {
 		if hcDir == nil || hcDir.Path == "" {
 			return nil, fmt.Errorf("container-script harness %q requires an on-disk harness-config directory: %w", opts.Name, hcErr)
 		}

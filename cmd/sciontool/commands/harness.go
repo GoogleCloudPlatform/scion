@@ -127,8 +127,8 @@ func runHarnessProvision(ctx context.Context, manifestPath string) error {
 	}
 
 	prov := manifest.HarnessConfig.Provisioner
-	if prov == nil || prov.Type != "container-script" {
-		return fmt.Errorf("manifest does not declare provisioner.type: container-script")
+	if prov == nil {
+		return fmt.Errorf("manifest does not declare a provisioner block")
 	}
 	if len(prov.Command) == 0 {
 		return fmt.Errorf("manifest provisioner.command is empty")

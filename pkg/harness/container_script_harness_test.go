@@ -74,17 +74,6 @@ func newTestContainerScriptHarness(t *testing.T) (*ContainerScriptHarness, strin
 	return h, dir
 }
 
-func TestContainerScriptHarness_RejectsNonContainerScriptType(t *testing.T) {
-	dir := t.TempDir()
-	entry := config.HarnessConfigEntry{
-		Harness:     "claude",
-		Provisioner: &config.HarnessProvisionerConfig{Type: "builtin"},
-	}
-	if _, err := NewContainerScriptHarness(dir, entry); err == nil {
-		t.Fatal("expected error for non container-script provisioner")
-	}
-}
-
 func TestContainerScriptHarness_BasicGetters(t *testing.T) {
 	h, _ := newTestContainerScriptHarness(t)
 	if h.Name() != "testharness" {
@@ -631,7 +620,8 @@ func TestResolve_LegacyBuiltinOpencode(t *testing.T) {
 	configsDir := filepath.Join(home, ".scion", "harness-configs")
 	hcDir := filepath.Join(configsDir, "opencode")
 
-	// Legacy opencode config with provisioner.type: builtin (no container-script).
+	// Legacy opencode config with provisioner.type: builtin — now treated as
+	// container-script since provisioner.type is implicit.
 	writeFile(t, filepath.Join(hcDir, "config.yaml"), `harness: opencode
 image: scion-opencode:latest
 user: scion
@@ -649,12 +639,11 @@ command:
 	if err != nil {
 		t.Fatalf("Resolve should not error for legacy-builtin config: %v", err)
 	}
-	// Should fall through to declarative-generic (has command metadata).
-	if resolved.Implementation != "generic" {
-		t.Errorf("Implementation=%q want generic", resolved.Implementation)
+	if resolved.Implementation != "container-script" {
+		t.Errorf("Implementation=%q want container-script", resolved.Implementation)
 	}
-	if _, ok := resolved.Harness.(*DeclarativeGenericHarness); !ok {
-		t.Errorf("expected DeclarativeGenericHarness, got %T", resolved.Harness)
+	if _, ok := resolved.Harness.(*ContainerScriptHarness); !ok {
+		t.Errorf("expected ContainerScriptHarness, got %T", resolved.Harness)
 	}
 }
 

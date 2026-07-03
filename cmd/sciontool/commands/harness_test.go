@@ -184,8 +184,8 @@ func TestRunHarnessProvision_RejectsMissingProvisioner(t *testing.T) {
 	manifestPath := writeManifest(t, bundle, manifest)
 
 	err := runHarnessProvision(context.Background(), manifestPath)
-	if err == nil || !strings.Contains(err.Error(), "container-script") {
-		t.Fatalf("expected provisioner type error, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "provisioner block") {
+		t.Fatalf("expected missing provisioner error, got %v", err)
 	}
 }
 

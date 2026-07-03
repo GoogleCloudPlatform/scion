@@ -52,8 +52,8 @@ type ContainerScriptHarness struct {
 // harness-config directory; entry is the parsed config.yaml after settings
 // overlay.
 func NewContainerScriptHarness(configDirPath string, entry config.HarnessConfigEntry) (*ContainerScriptHarness, error) {
-	if entry.Provisioner == nil || entry.Provisioner.Type != "container-script" {
-		return nil, fmt.Errorf("container-script harness requires provisioner.type: container-script")
+	if entry.Provisioner == nil {
+		return nil, fmt.Errorf("container-script harness requires a provisioner block")
 	}
 	if entry.Harness == "" {
 		return nil, fmt.Errorf("container-script harness requires harness name in config.yaml")
