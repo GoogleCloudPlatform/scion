@@ -477,7 +477,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 			if canFallbackToNoAuth() {
 				util.Debugf("auth: resolution failed, falling back to no-auth mode: %v", err)
 				opts.NoAuth = true
-				warnings = append(warnings, fmt.Sprintf("Auth: no credentials found, starting in no-auth mode"))
+				warnings = append(warnings, "Auth: no credentials found, starting in no-auth mode")
 				goto authDone
 			}
 			return nil, fmt.Errorf("auth resolution failed: %w", err)
@@ -494,7 +494,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 			if canFallbackToNoAuth() {
 				util.Debugf("auth: validation failed, falling back to no-auth mode: %v", err)
 				opts.NoAuth = true
-				warnings = append(warnings, fmt.Sprintf("Auth: credential validation failed, starting in no-auth mode"))
+				warnings = append(warnings, "Auth: credential validation failed, starting in no-auth mode")
 				goto authDone
 			}
 			return nil, fmt.Errorf("auth validation failed: %w", err)
