@@ -146,6 +146,10 @@ type WebServerConfig struct {
 	// ProxyAuthenticator verifies proxy-supplied assertions (e.g., IAP JWT).
 	// Required when AuthMode == "proxy".
 	ProxyAuthenticator ProxyAuthenticator
+	// SSEMaxConnectionAge is the maximum lifetime of an SSE connection before
+	// the server proactively closes it so the client can reconnect cleanly.
+	// Defaults to defaultSSEMaxConnectionAge (3500s) when zero.
+	SSEMaxConnectionAge time.Duration
 }
 
 // WebServer serves the web frontend SPA shell and static assets.
@@ -1007,13 +1011,11 @@ func (ws *WebServer) tryServeStaticFile(w http.ResponseWriter, r *http.Request) 
 
 // handleSSE serves the Server-Sent Events endpoint. It subscribes to the
 // configured EventPublisher and streams matching events to the browser.
-// sseMaxConnectionAge is the maximum lifetime of an SSE connection before the
-// server proactively closes it. Cloud Run hard-kills connections at 3600s
-// (producing FAILED_PRECONDITION / error code 9); closing at 3500s gives the
-// client a clean EOF so it auto-reconnects per the SSE spec.
-//
-// Declared as a variable so tests can temporarily shorten it.
-var sseMaxConnectionAge = 3500 * time.Second
+// defaultSSEMaxConnectionAge is the default maximum lifetime of an SSE
+// connection. Cloud Run hard-kills connections at 3600s (producing
+// FAILED_PRECONDITION / error code 9); closing at 3500s gives the client a
+// clean EOF so it auto-reconnects per the SSE spec.
+const defaultSSEMaxConnectionAge = 3500 * time.Second
 
 // Route: GET /events?sub=<pattern>&sub=<pattern>...
 func (ws *WebServer) handleSSE(w http.ResponseWriter, r *http.Request) {
@@ -1062,7 +1064,11 @@ func (ws *WebServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 
 	// Proactively close before Cloud Run's 3600s hard kill so the client
 	// gets a clean EOF and auto-reconnects per the SSE spec.
-	reconnectTimer := time.NewTimer(sseMaxConnectionAge)
+	maxAge := ws.config.SSEMaxConnectionAge
+	if maxAge == 0 {
+		maxAge = defaultSSEMaxConnectionAge
+	}
+	reconnectTimer := time.NewTimer(maxAge)
 	defer reconnectTimer.Stop()
 
 	for {
