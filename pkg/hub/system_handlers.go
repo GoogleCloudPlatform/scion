@@ -218,6 +218,11 @@ func (s *Server) handlePutRuntime(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Update the image checker so it uses the newly selected runtime for
+	// local image existence checks instead of the previously configured one.
+	rt := runtime.GetRuntime("", "")
+	s.SetLocalImageChecker(rt)
+
 	writeJSON(w, http.StatusOK, systemRuntimeResponse{
 		Detected:   req.Runtime,
 		Configured: req.Runtime,
@@ -487,7 +492,58 @@ func (s *Server) handleSystemInit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Clean up harness configs that were NOT selected: remove from disk and
+	// from the Hub DB so a previous init's choices don't linger.
+	s.cleanupUnselectedHarnessConfigs(r.Context(), selected)
+
 	writeJSON(w, http.StatusOK, systemInitResponse{OK: true, Initialized: true})
+}
+
+// cleanupUnselectedHarnessConfigs removes harness configs that are not in
+// the selected list from both disk and the Hub database.
+func (s *Server) cleanupUnselectedHarnessConfigs(ctx context.Context, selected []string) {
+	selectedSet := make(map[string]bool, len(selected))
+	for _, name := range selected {
+		selectedSet[name] = true
+	}
+
+	// Remove unselected harness-config directories from disk.
+	globalDir, err := config.GetGlobalDir()
+	if err == nil {
+		harnessConfigsDir := filepath.Join(globalDir, "harness-configs")
+		entries, err := os.ReadDir(harnessConfigsDir)
+		if err == nil {
+			for _, e := range entries {
+				if !e.IsDir() {
+					continue
+				}
+				if !selectedSet[e.Name()] {
+					path := filepath.Join(harnessConfigsDir, e.Name())
+					if err := os.RemoveAll(path); err != nil {
+						slog.Warn("cleanupUnselectedHarnessConfigs: failed to remove dir", "path", path, "error", err)
+					}
+				}
+			}
+		}
+	}
+
+	// Remove unselected global harness-config records from the Hub DB.
+	if s.store != nil {
+		configs, err := s.store.ListHarnessConfigs(ctx, store.HarnessConfigFilter{
+			Scope: store.HarnessConfigScopeGlobal,
+		}, store.ListOptions{Limit: 200})
+		if err != nil {
+			slog.Warn("cleanupUnselectedHarnessConfigs: failed to list configs", "error", err)
+			return
+		}
+		for _, hc := range configs.Items {
+			if !selectedSet[hc.Name] {
+				if err := s.store.DeleteHarnessConfig(ctx, hc.ID); err != nil {
+					slog.Warn("cleanupUnselectedHarnessConfigs: failed to delete config", "name", hc.Name, "id", hc.ID, "error", err)
+				}
+			}
+		}
+	}
 }
 
 // --- 4.1: Image Pull ---
