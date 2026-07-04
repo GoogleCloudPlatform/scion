@@ -24,6 +24,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -240,7 +241,7 @@ func (s *Server) populateAgentConfig(ctx context.Context, agent *store.Agent, pr
 				agent.AppliedConfig.HarnessAuth == "" &&
 				hc.Config != nil &&
 				hc.Config.NoAuthBehavior == "drop-to-shell" {
-				hasCreds, err := s.hasRequiredAuthCredentials(ctx, agent, hc.Harness)
+				hasCreds, err := s.hasRequiredAuthCredentials(ctx, agent, hc.Harness, hc.Config.AuthMeta)
 				if err != nil {
 					s.agentLifecycleLog.Error("Failed to check auth credentials for fallback", "agent_id", agent.ID, "error", err)
 				} else if !hasCreds {
@@ -763,11 +764,16 @@ func (s *Server) findBrokerByIDOrSlug(ctx context.Context, identifier string) (*
 }
 
 // hasRequiredAuthCredentials checks whether the required auth environment
-// variables for the given harness type are available in the agent's env,
-// or in the hub's env/secret stores (user and project scopes).
-func (s *Server) hasRequiredAuthCredentials(ctx context.Context, agent *store.Agent, harnessType string) (bool, error) {
+// variables and file secrets for the given harness type are available in the
+// agent's env, or in the hub's env/secret stores (user and project scopes).
+//
+// When authMeta is non-nil (config-driven harness), file requirements from
+// required_files are also evaluated. Files marked with
+// SkippedWhenGCPServiceAccountAssigned are treated as satisfied when the
+// agent's project has at least one verified GCP service account.
+func (s *Server) hasRequiredAuthCredentials(ctx context.Context, agent *store.Agent, harnessType string, authMeta *config.HarnessAuthMetadata) (bool, error) {
 	keyGroups := harness.RequiredAuthEnvKeys(harnessType, agent.AppliedConfig.HarnessAuth)
-	if len(keyGroups) == 0 {
+	if len(keyGroups) == 0 && authMeta == nil {
 		return true, nil
 	}
 	for _, group := range keyGroups {
@@ -779,7 +785,49 @@ func (s *Server) hasRequiredAuthCredentials(ctx context.Context, agent *store.Ag
 			return false, nil
 		}
 	}
+
+	// Check config-driven file requirements (e.g. gcloud-adc for vertex-ai).
+	if authMeta != nil {
+		gcpSAAssigned, err := s.projectHasVerifiedGCPSA(ctx, agent.ProjectID)
+		if err != nil {
+			return false, err
+		}
+		fileSecrets := harness.RequiredAuthSecretsFromConfig(authMeta, agent.AppliedConfig.HarnessAuth, gcpSAAssigned)
+		for _, fs := range fileSecrets {
+			keys := append([]string{fs.Key}, fs.AlternativeEnvKeys...)
+			found, err := s.hasAnyKey(ctx, agent, keys)
+			if err != nil {
+				return false, err
+			}
+			if !found {
+				return false, nil
+			}
+		}
+	}
+
 	return true, nil
+}
+
+// projectHasVerifiedGCPSA returns true if the project has at least one
+// verified GCP service account, meaning the GCE metadata server can provide
+// application default credentials at runtime.
+func (s *Server) projectHasVerifiedGCPSA(ctx context.Context, projectID string) (bool, error) {
+	if projectID == "" {
+		return false, nil
+	}
+	sas, err := s.store.ListGCPServiceAccounts(ctx, store.GCPServiceAccountFilter{
+		Scope:   "project",
+		ScopeID: projectID,
+	})
+	if err != nil {
+		return false, err
+	}
+	for _, sa := range sas {
+		if sa.Verified {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // hasAnyKey returns true if at least one of the keys is present in the

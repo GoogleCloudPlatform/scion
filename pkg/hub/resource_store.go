@@ -385,6 +385,7 @@ func (p *harnessConfigPersistence) Create(ctx context.Context, rec *ResourceReco
 		Visibility:    rec.Visibility,
 	}
 	extractNoAuthBehavior(hc, dir)
+	extractAuthMeta(hc, dir)
 	rec.Harness = p.harness
 	p.model = hc
 	return p.s.store.CreateHarnessConfig(ctx, hc)
@@ -401,6 +402,7 @@ func (p *harnessConfigPersistence) Update(ctx context.Context, rec *ResourceReco
 		hc.SourceURL = rec.SourceURL
 	}
 	extractNoAuthBehavior(hc, dir)
+	extractAuthMeta(hc, dir)
 	return p.s.store.UpdateHarnessConfig(ctx, hc)
 }
 
@@ -460,6 +462,28 @@ func extractNoAuthBehavior(hc *store.HarnessConfig, dir string) {
 		hc.Config.NoAuthBehavior = hcDir.Config.NoAuthConfig.Behavior
 	} else if hc.Config != nil {
 		hc.Config.NoAuthBehavior = ""
+	}
+}
+
+// extractAuthMeta loads config.yaml from dir and stamps the declarative
+// auth metadata onto the HarnessConfig's Config data so the hub can
+// evaluate required_files (including SkippedWhenGCPServiceAccountAssigned)
+// at pre-dispatch time.
+func extractAuthMeta(hc *store.HarnessConfig, dir string) {
+	if dir == "" {
+		return
+	}
+	hcDir, err := config.LoadHarnessConfigDir(dir)
+	if err != nil {
+		return
+	}
+	if hcDir.Config.Auth != nil && len(hcDir.Config.Auth.Types) > 0 {
+		if hc.Config == nil {
+			hc.Config = &store.HarnessConfigData{}
+		}
+		hc.Config.AuthMeta = hcDir.Config.Auth
+	} else if hc.Config != nil {
+		hc.Config.AuthMeta = nil
 	}
 }
 

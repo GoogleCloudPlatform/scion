@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 )
 
 // Agent represents an agent record in the Hub database.
@@ -602,6 +603,7 @@ type HarnessConfigData struct {
 	ThinkingBudgetFlag      string               `json:"thinkingBudgetFlag,omitempty"`
 	ThinkingBudgetConfigKey string               `json:"thinkingBudgetConfigKey,omitempty"`
 	NoAuthBehavior          string               `json:"noAuthBehavior,omitempty"`
+	AuthMeta                *config.HarnessAuthMetadata `json:"authMeta,omitempty"`
 }
 
 // HarnessConfigStatus constants
