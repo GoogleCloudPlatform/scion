@@ -15,6 +15,7 @@
 package config
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -26,7 +27,7 @@ func TestYAMLConfigProvider_LoadNonExistent(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	config, err := p.Load()
+	config, err := p.Load(context.Background())
 	if err != nil {
 		t.Fatalf("Load() should not error for missing file: %v", err)
 	}
@@ -49,7 +50,7 @@ func TestYAMLConfigProvider_SaveAndLoad(t *testing.T) {
 		"webhook_url":  "https://example.com/webhook",
 	}
 
-	if err := p.Save(input); err != nil {
+	if err := p.Save(context.Background(), input); err != nil {
 		t.Fatalf("Save() failed: %v", err)
 	}
 
@@ -62,7 +63,7 @@ func TestYAMLConfigProvider_SaveAndLoad(t *testing.T) {
 		t.Errorf("expected 0600 permissions, got %o", info.Mode().Perm())
 	}
 
-	loaded, err := p.Load()
+	loaded, err := p.Load(context.Background())
 	if err != nil {
 		t.Fatalf("Load() failed: %v", err)
 	}
@@ -113,7 +114,7 @@ func TestLoadPluginConfigFile_MergeWithInlineOverride(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "plugin.yaml")
 	p, _ := NewYAMLConfigProvider(path)
-	if err := p.Save(map[string]string{
+	if err := p.Save(context.Background(), map[string]string{
 		"inbound_mode": "poll",
 		"db_path":      "/tmp/test.db",
 	}); err != nil {
@@ -141,7 +142,7 @@ func TestLoadPluginConfigFile_FiltersSecretKeys(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "plugin.yaml")
 	p, _ := NewYAMLConfigProvider(path)
-	if err := p.Save(map[string]string{
+	if err := p.Save(context.Background(), map[string]string{
 		"bot_token":          "should-stay",
 		"TELEGRAM_BOT_TOKEN": "should-be-filtered",
 		"telegram_bot_token": "should-be-filtered",

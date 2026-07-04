@@ -1,0 +1,97 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+syntax = "proto3";
+
+package scion.broker.v1;
+
+option go_package = "github.com/GoogleCloudPlatform/scion/proto/broker/v1;brokerv1";
+
+// BrokerService mirrors MessageBrokerPluginInterface (pkg/plugin/broker_plugin.go)
+// over gRPC for standalone integration services.
+service BrokerService {
+  rpc Configure(ConfigureRequest) returns (ConfigureResponse);
+  rpc Publish(PublishRequest) returns (PublishResponse);
+  rpc Subscribe(SubscribeRequest) returns (SubscribeResponse);
+  rpc Unsubscribe(UnsubscribeRequest) returns (UnsubscribeResponse);
+  rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+  rpc GetInfo(GetInfoRequest) returns (GetInfoResponse);
+}
+
+// StructuredMessage mirrors pkg/messages.StructuredMessage.
+message StructuredMessage {
+  int32 version = 1;
+  string timestamp = 2;
+  string sender = 3;
+  string sender_id = 4;
+  string recipient = 5;
+  string recipient_id = 6;
+  string recipients = 7;
+  string msg = 8;
+  string type = 9;
+  bool plain = 10;
+  bool raw = 11;
+  bool urgent = 12;
+  bool broadcasted = 13;
+  bool observer_only = 14;
+  string status = 15;
+  repeated string attachments = 16;
+  map<string, string> metadata = 17;
+  string channel = 18;
+  string thread_id = 19;
+  string visibility = 20;
+}
+
+message ConfigureRequest {
+  map<string, string> config = 1;
+}
+
+message ConfigureResponse {}
+
+message PublishRequest {
+  string topic = 1;
+  StructuredMessage message = 2;
+}
+
+message PublishResponse {}
+
+message SubscribeRequest {
+  string pattern = 1;
+}
+
+message SubscribeResponse {}
+
+message UnsubscribeRequest {
+  string pattern = 1;
+}
+
+message UnsubscribeResponse {}
+
+message HealthCheckRequest {}
+
+message HealthCheckResponse {
+  string status = 1;
+  string message = 2;
+  map<string, string> details = 3;
+}
+
+message GetInfoRequest {}
+
+message GetInfoResponse {
+  string name = 1;
+  string version = 2;
+  string min_scion_version = 3;
+  string channel_id = 4;
+  repeated string capabilities = 5;
+}

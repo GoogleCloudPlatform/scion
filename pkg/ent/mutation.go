@@ -24,6 +24,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/group"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/groupmembership"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/harnessconfig"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/integrationconfig"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/integrationupdate"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/invitecode"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/lifecyclehook"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/lifecyclehookagentphase"
@@ -74,6 +76,8 @@ const (
 	TypeGroup                    = "Group"
 	TypeGroupMembership          = "GroupMembership"
 	TypeHarnessConfig            = "HarnessConfig"
+	TypeIntegrationConfig        = "IntegrationConfig"
+	TypeIntegrationUpdate        = "IntegrationUpdate"
 	TypeInviteCode               = "InviteCode"
 	TypeLifecycleHook            = "LifecycleHook"
 	TypeLifecycleHookAgentPhase  = "LifecycleHookAgentPhase"
@@ -14810,6 +14814,1346 @@ func (m *HarnessConfigMutation) ClearEdge(name string) error {
 // It returns an error if the edge is not defined in the schema.
 func (m *HarnessConfigMutation) ResetEdge(name string) error {
 	return fmt.Errorf("unknown HarnessConfig edge %s", name)
+}
+
+// IntegrationConfigMutation represents an operation that mutates the IntegrationConfig nodes in the graph.
+type IntegrationConfigMutation struct {
+	config
+	op            Op
+	typ           string
+	id            *uuid.UUID
+	integration   *string
+	_config       *string
+	enabled       *bool
+	updated_by    *string
+	create_time   *time.Time
+	update_time   *time.Time
+	clearedFields map[string]struct{}
+	done          bool
+	oldValue      func(context.Context) (*IntegrationConfig, error)
+	predicates    []predicate.IntegrationConfig
+}
+
+var _ ent.Mutation = (*IntegrationConfigMutation)(nil)
+
+// integrationconfigOption allows management of the mutation configuration using functional options.
+type integrationconfigOption func(*IntegrationConfigMutation)
+
+// newIntegrationConfigMutation creates new mutation for the IntegrationConfig entity.
+func newIntegrationConfigMutation(c config, op Op, opts ...integrationconfigOption) *IntegrationConfigMutation {
+	m := &IntegrationConfigMutation{
+		config:        c,
+		op:            op,
+		typ:           TypeIntegrationConfig,
+		clearedFields: make(map[string]struct{}),
+	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
+}
+
+// withIntegrationConfigID sets the ID field of the mutation.
+func withIntegrationConfigID(id uuid.UUID) integrationconfigOption {
+	return func(m *IntegrationConfigMutation) {
+		var (
+			err   error
+			once  sync.Once
+			value *IntegrationConfig
+		)
+		m.oldValue = func(ctx context.Context) (*IntegrationConfig, error) {
+			once.Do(func() {
+				if m.done {
+					err = errors.New("querying old values post mutation is not allowed")
+				} else {
+					value, err = m.Client().IntegrationConfig.Get(ctx, id)
+				}
+			})
+			return value, err
+		}
+		m.id = &id
+	}
+}
+
+// withIntegrationConfig sets the old IntegrationConfig of the mutation.
+func withIntegrationConfig(node *IntegrationConfig) integrationconfigOption {
+	return func(m *IntegrationConfigMutation) {
+		m.oldValue = func(context.Context) (*IntegrationConfig, error) {
+			return node, nil
+		}
+		m.id = &node.ID
+	}
+}
+
+// Client returns a new `ent.Client` from the mutation. If the mutation was
+// executed in a transaction (ent.Tx), a transactional client is returned.
+func (m IntegrationConfigMutation) Client() *Client {
+	client := &Client{config: m.config}
+	client.init()
+	return client
+}
+
+// Tx returns an `ent.Tx` for mutations that were executed in transactions;
+// it returns an error otherwise.
+func (m IntegrationConfigMutation) Tx() (*Tx, error) {
+	if _, ok := m.driver.(*txDriver); !ok {
+		return nil, errors.New("ent: mutation is not running in a transaction")
+	}
+	tx := &Tx{config: m.config}
+	tx.init()
+	return tx, nil
+}
+
+// SetID sets the value of the id field. Note that this
+// operation is only accepted on creation of IntegrationConfig entities.
+func (m *IntegrationConfigMutation) SetID(id uuid.UUID) {
+	m.id = &id
+}
+
+// ID returns the ID value in the mutation. Note that the ID is only available
+// if it was provided to the builder or after it was returned from the database.
+func (m *IntegrationConfigMutation) ID() (id uuid.UUID, exists bool) {
+	if m.id == nil {
+		return
+	}
+	return *m.id, true
+}
+
+// IDs queries the database and returns the entity ids that match the mutation's predicate.
+// That means, if the mutation is applied within a transaction with an isolation level such
+// as sql.LevelSerializable, the returned ids match the ids of the rows that will be updated
+// or updated by the mutation.
+func (m *IntegrationConfigMutation) IDs(ctx context.Context) ([]uuid.UUID, error) {
+	switch {
+	case m.op.Is(OpUpdateOne | OpDeleteOne):
+		id, exists := m.ID()
+		if exists {
+			return []uuid.UUID{id}, nil
+		}
+		fallthrough
+	case m.op.Is(OpUpdate | OpDelete):
+		return m.Client().IntegrationConfig.Query().Where(m.predicates...).IDs(ctx)
+	default:
+		return nil, fmt.Errorf("IDs is not allowed on %s operations", m.op)
+	}
+}
+
+// SetIntegration sets the "integration" field.
+func (m *IntegrationConfigMutation) SetIntegration(s string) {
+	m.integration = &s
+}
+
+// Integration returns the value of the "integration" field in the mutation.
+func (m *IntegrationConfigMutation) Integration() (r string, exists bool) {
+	v := m.integration
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldIntegration returns the old "integration" field's value of the IntegrationConfig entity.
+// If the IntegrationConfig object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *IntegrationConfigMutation) OldIntegration(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldIntegration is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldIntegration requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldIntegration: %w", err)
+	}
+	return oldValue.Integration, nil
+}
+
+// ResetIntegration resets all changes to the "integration" field.
+func (m *IntegrationConfigMutation) ResetIntegration() {
+	m.integration = nil
+}
+
+// SetConfig sets the "config" field.
+func (m *IntegrationConfigMutation) SetConfig(s string) {
+	m._config = &s
+}
+
+// Config returns the value of the "config" field in the mutation.
+func (m *IntegrationConfigMutation) Config() (r string, exists bool) {
+	v := m._config
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldConfig returns the old "config" field's value of the IntegrationConfig entity.
+// If the IntegrationConfig object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *IntegrationConfigMutation) OldConfig(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldConfig is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldConfig requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldConfig: %w", err)
+	}
+	return oldValue.Config, nil
+}
+
+// ResetConfig resets all changes to the "config" field.
+func (m *IntegrationConfigMutation) ResetConfig() {
+	m._config = nil
+}
+
+// SetEnabled sets the "enabled" field.
+func (m *IntegrationConfigMutation) SetEnabled(b bool) {
+	m.enabled = &b
+}
+
+// Enabled returns the value of the "enabled" field in the mutation.
+func (m *IntegrationConfigMutation) Enabled() (r bool, exists bool) {
+	v := m.enabled
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldEnabled returns the old "enabled" field's value of the IntegrationConfig entity.
+// If the IntegrationConfig object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *IntegrationConfigMutation) OldEnabled(ctx context.Context) (v bool, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldEnabled is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldEnabled requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldEnabled: %w", err)
+	}
+	return oldValue.Enabled, nil
+}
+
+// ResetEnabled resets all changes to the "enabled" field.
+func (m *IntegrationConfigMutation) ResetEnabled() {
+	m.enabled = nil
+}
+
+// SetUpdatedBy sets the "updated_by" field.
+func (m *IntegrationConfigMutation) SetUpdatedBy(s string) {
+	m.updated_by = &s
+}
+
+// UpdatedBy returns the value of the "updated_by" field in the mutation.
+func (m *IntegrationConfigMutation) UpdatedBy() (r string, exists bool) {
+	v := m.updated_by
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldUpdatedBy returns the old "updated_by" field's value of the IntegrationConfig entity.
+// If the IntegrationConfig object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *IntegrationConfigMutation) OldUpdatedBy(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldUpdatedBy is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldUpdatedBy requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldUpdatedBy: %w", err)
+	}
+	return oldValue.UpdatedBy, nil
+}
+
+// ClearUpdatedBy clears the value of the "updated_by" field.
+func (m *IntegrationConfigMutation) ClearUpdatedBy() {
+	m.updated_by = nil
+	m.clearedFields[integrationconfig.FieldUpdatedBy] = struct{}{}
+}
+
+// UpdatedByCleared returns if the "updated_by" field was cleared in this mutation.
+func (m *IntegrationConfigMutation) UpdatedByCleared() bool {
+	_, ok := m.clearedFields[integrationconfig.FieldUpdatedBy]
+	return ok
+}
+
+// ResetUpdatedBy resets all changes to the "updated_by" field.
+func (m *IntegrationConfigMutation) ResetUpdatedBy() {
+	m.updated_by = nil
+	delete(m.clearedFields, integrationconfig.FieldUpdatedBy)
+}
+
+// SetCreateTime sets the "create_time" field.
+func (m *IntegrationConfigMutation) SetCreateTime(t time.Time) {
+	m.create_time = &t
+}
+
+// CreateTime returns the value of the "create_time" field in the mutation.
+func (m *IntegrationConfigMutation) CreateTime() (r time.Time, exists bool) {
+	v := m.create_time
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCreateTime returns the old "create_time" field's value of the IntegrationConfig entity.
+// If the IntegrationConfig object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *IntegrationConfigMutation) OldCreateTime(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCreateTime is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCreateTime requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCreateTime: %w", err)
+	}
+	return oldValue.CreateTime, nil
+}
+
+// ResetCreateTime resets all changes to the "create_time" field.
+func (m *IntegrationConfigMutation) ResetCreateTime() {
+	m.create_time = nil
+}
+
+// SetUpdateTime sets the "update_time" field.
+func (m *IntegrationConfigMutation) SetUpdateTime(t time.Time) {
+	m.update_time = &t
+}
+
+// UpdateTime returns the value of the "update_time" field in the mutation.
+func (m *IntegrationConfigMutation) UpdateTime() (r time.Time, exists bool) {
+	v := m.update_time
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldUpdateTime returns the old "update_time" field's value of the IntegrationConfig entity.
+// If the IntegrationConfig object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *IntegrationConfigMutation) OldUpdateTime(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldUpdateTime is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldUpdateTime requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldUpdateTime: %w", err)
+	}
+	return oldValue.UpdateTime, nil
+}
+
+// ResetUpdateTime resets all changes to the "update_time" field.
+func (m *IntegrationConfigMutation) ResetUpdateTime() {
+	m.update_time = nil
+}
+
+// Where appends a list predicates to the IntegrationConfigMutation builder.
+func (m *IntegrationConfigMutation) Where(ps ...predicate.IntegrationConfig) {
+	m.predicates = append(m.predicates, ps...)
+}
+
+// WhereP appends storage-level predicates to the IntegrationConfigMutation builder. Using this method,
+// users can use type-assertion to append predicates that do not depend on any generated package.
+func (m *IntegrationConfigMutation) WhereP(ps ...func(*sql.Selector)) {
+	p := make([]predicate.IntegrationConfig, len(ps))
+	for i := range ps {
+		p[i] = ps[i]
+	}
+	m.Where(p...)
+}
+
+// Op returns the operation name.
+func (m *IntegrationConfigMutation) Op() Op {
+	return m.op
+}
+
+// SetOp allows setting the mutation operation.
+func (m *IntegrationConfigMutation) SetOp(op Op) {
+	m.op = op
+}
+
+// Type returns the node type of this mutation (IntegrationConfig).
+func (m *IntegrationConfigMutation) Type() string {
+	return m.typ
+}
+
+// Fields returns all fields that were changed during this mutation. Note that in
+// order to get all numeric fields that were incremented/decremented, call
+// AddedFields().
+func (m *IntegrationConfigMutation) Fields() []string {
+	fields := make([]string, 0, 6)
+	if m.integration != nil {
+		fields = append(fields, integrationconfig.FieldIntegration)
+	}
+	if m._config != nil {
+		fields = append(fields, integrationconfig.FieldConfig)
+	}
+	if m.enabled != nil {
+		fields = append(fields, integrationconfig.FieldEnabled)
+	}
+	if m.updated_by != nil {
+		fields = append(fields, integrationconfig.FieldUpdatedBy)
+	}
+	if m.create_time != nil {
+		fields = append(fields, integrationconfig.FieldCreateTime)
+	}
+	if m.update_time != nil {
+		fields = append(fields, integrationconfig.FieldUpdateTime)
+	}
+	return fields
+}
+
+// Field returns the value of a field with the given name. The second boolean
+// return value indicates that this field was not set, or was not defined in the
+// schema.
+func (m *IntegrationConfigMutation) Field(name string) (ent.Value, bool) {
+	switch name {
+	case integrationconfig.FieldIntegration:
+		return m.Integration()
+	case integrationconfig.FieldConfig:
+		return m.Config()
+	case integrationconfig.FieldEnabled:
+		return m.Enabled()
+	case integrationconfig.FieldUpdatedBy:
+		return m.UpdatedBy()
+	case integrationconfig.FieldCreateTime:
+		return m.CreateTime()
+	case integrationconfig.FieldUpdateTime:
+		return m.UpdateTime()
+	}
+	return nil, false
+}
+
+// OldField returns the old value of the field from the database. An error is
+// returned if the mutation operation is not UpdateOne, or the query to the
+// database failed.
+func (m *IntegrationConfigMutation) OldField(ctx context.Context, name string) (ent.Value, error) {
+	switch name {
+	case integrationconfig.FieldIntegration:
+		return m.OldIntegration(ctx)
+	case integrationconfig.FieldConfig:
+		return m.OldConfig(ctx)
+	case integrationconfig.FieldEnabled:
+		return m.OldEnabled(ctx)
+	case integrationconfig.FieldUpdatedBy:
+		return m.OldUpdatedBy(ctx)
+	case integrationconfig.FieldCreateTime:
+		return m.OldCreateTime(ctx)
+	case integrationconfig.FieldUpdateTime:
+		return m.OldUpdateTime(ctx)
+	}
+	return nil, fmt.Errorf("unknown IntegrationConfig field %s", name)
+}
+
+// SetField sets the value of a field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *IntegrationConfigMutation) SetField(name string, value ent.Value) error {
+	switch name {
+	case integrationconfig.FieldIntegration:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetIntegration(v)
+		return nil
+	case integrationconfig.FieldConfig:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetConfig(v)
+		return nil
+	case integrationconfig.FieldEnabled:
+		v, ok := value.(bool)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetEnabled(v)
+		return nil
+	case integrationconfig.FieldUpdatedBy:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetUpdatedBy(v)
+		return nil
+	case integrationconfig.FieldCreateTime:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCreateTime(v)
+		return nil
+	case integrationconfig.FieldUpdateTime:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetUpdateTime(v)
+		return nil
+	}
+	return fmt.Errorf("unknown IntegrationConfig field %s", name)
+}
+
+// AddedFields returns all numeric fields that were incremented/decremented during
+// this mutation.
+func (m *IntegrationConfigMutation) AddedFields() []string {
+	return nil
+}
+
+// AddedField returns the numeric value that was incremented/decremented on a field
+// with the given name. The second boolean return value indicates that this field
+// was not set, or was not defined in the schema.
+func (m *IntegrationConfigMutation) AddedField(name string) (ent.Value, bool) {
+	return nil, false
+}
+
+// AddField adds the value to the field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *IntegrationConfigMutation) AddField(name string, value ent.Value) error {
+	switch name {
+	}
+	return fmt.Errorf("unknown IntegrationConfig numeric field %s", name)
+}
+
+// ClearedFields returns all nullable fields that were cleared during this
+// mutation.
+func (m *IntegrationConfigMutation) ClearedFields() []string {
+	var fields []string
+	if m.FieldCleared(integrationconfig.FieldUpdatedBy) {
+		fields = append(fields, integrationconfig.FieldUpdatedBy)
+	}
+	return fields
+}
+
+// FieldCleared returns a boolean indicating if a field with the given name was
+// cleared in this mutation.
+func (m *IntegrationConfigMutation) FieldCleared(name string) bool {
+	_, ok := m.clearedFields[name]
+	return ok
+}
+
+// ClearField clears the value of the field with the given name. It returns an
+// error if the field is not defined in the schema.
+func (m *IntegrationConfigMutation) ClearField(name string) error {
+	switch name {
+	case integrationconfig.FieldUpdatedBy:
+		m.ClearUpdatedBy()
+		return nil
+	}
+	return fmt.Errorf("unknown IntegrationConfig nullable field %s", name)
+}
+
+// ResetField resets all changes in the mutation for the field with the given name.
+// It returns an error if the field is not defined in the schema.
+func (m *IntegrationConfigMutation) ResetField(name string) error {
+	switch name {
+	case integrationconfig.FieldIntegration:
+		m.ResetIntegration()
+		return nil
+	case integrationconfig.FieldConfig:
+		m.ResetConfig()
+		return nil
+	case integrationconfig.FieldEnabled:
+		m.ResetEnabled()
+		return nil
+	case integrationconfig.FieldUpdatedBy:
+		m.ResetUpdatedBy()
+		return nil
+	case integrationconfig.FieldCreateTime:
+		m.ResetCreateTime()
+		return nil
+	case integrationconfig.FieldUpdateTime:
+		m.ResetUpdateTime()
+		return nil
+	}
+	return fmt.Errorf("unknown IntegrationConfig field %s", name)
+}
+
+// AddedEdges returns all edge names that were set/added in this mutation.
+func (m *IntegrationConfigMutation) AddedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// AddedIDs returns all IDs (to other nodes) that were added for the given edge
+// name in this mutation.
+func (m *IntegrationConfigMutation) AddedIDs(name string) []ent.Value {
+	return nil
+}
+
+// RemovedEdges returns all edge names that were removed in this mutation.
+func (m *IntegrationConfigMutation) RemovedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// RemovedIDs returns all IDs (to other nodes) that were removed for the edge with
+// the given name in this mutation.
+func (m *IntegrationConfigMutation) RemovedIDs(name string) []ent.Value {
+	return nil
+}
+
+// ClearedEdges returns all edge names that were cleared in this mutation.
+func (m *IntegrationConfigMutation) ClearedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// EdgeCleared returns a boolean which indicates if the edge with the given name
+// was cleared in this mutation.
+func (m *IntegrationConfigMutation) EdgeCleared(name string) bool {
+	return false
+}
+
+// ClearEdge clears the value of the edge with the given name. It returns an error
+// if that edge is not defined in the schema.
+func (m *IntegrationConfigMutation) ClearEdge(name string) error {
+	return fmt.Errorf("unknown IntegrationConfig unique edge %s", name)
+}
+
+// ResetEdge resets all changes to the edge with the given name in this mutation.
+// It returns an error if the edge is not defined in the schema.
+func (m *IntegrationConfigMutation) ResetEdge(name string) error {
+	return fmt.Errorf("unknown IntegrationConfig edge %s", name)
+}
+
+// IntegrationUpdateMutation represents an operation that mutates the IntegrationUpdate nodes in the graph.
+type IntegrationUpdateMutation struct {
+	config
+	op            Op
+	typ           string
+	id            *uuid.UUID
+	integration   *string
+	state         *integrationupdate.State
+	detail        *string
+	new_version   *string
+	requested_by  *string
+	create_time   *time.Time
+	update_time   *time.Time
+	clearedFields map[string]struct{}
+	done          bool
+	oldValue      func(context.Context) (*IntegrationUpdate, error)
+	predicates    []predicate.IntegrationUpdate
+}
+
+var _ ent.Mutation = (*IntegrationUpdateMutation)(nil)
+
+// integrationupdateOption allows management of the mutation configuration using functional options.
+type integrationupdateOption func(*IntegrationUpdateMutation)
+
+// newIntegrationUpdateMutation creates new mutation for the IntegrationUpdate entity.
+func newIntegrationUpdateMutation(c config, op Op, opts ...integrationupdateOption) *IntegrationUpdateMutation {
+	m := &IntegrationUpdateMutation{
+		config:        c,
+		op:            op,
+		typ:           TypeIntegrationUpdate,
+		clearedFields: make(map[string]struct{}),
+	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
+}
+
+// withIntegrationUpdateID sets the ID field of the mutation.
+func withIntegrationUpdateID(id uuid.UUID) integrationupdateOption {
+	return func(m *IntegrationUpdateMutation) {
+		var (
+			err   error
+			once  sync.Once
+			value *IntegrationUpdate
+		)
+		m.oldValue = func(ctx context.Context) (*IntegrationUpdate, error) {
+			once.Do(func() {
+				if m.done {
+					err = errors.New("querying old values post mutation is not allowed")
+				} else {
+					value, err = m.Client().IntegrationUpdate.Get(ctx, id)
+				}
+			})
+			return value, err
+		}
+		m.id = &id
+	}
+}
+
+// withIntegrationUpdate sets the old IntegrationUpdate of the mutation.
+func withIntegrationUpdate(node *IntegrationUpdate) integrationupdateOption {
+	return func(m *IntegrationUpdateMutation) {
+		m.oldValue = func(context.Context) (*IntegrationUpdate, error) {
+			return node, nil
+		}
+		m.id = &node.ID
+	}
+}
+
+// Client returns a new `ent.Client` from the mutation. If the mutation was
+// executed in a transaction (ent.Tx), a transactional client is returned.
+func (m IntegrationUpdateMutation) Client() *Client {
+	client := &Client{config: m.config}
+	client.init()
+	return client
+}
+
+// Tx returns an `ent.Tx` for mutations that were executed in transactions;
+// it returns an error otherwise.
+func (m IntegrationUpdateMutation) Tx() (*Tx, error) {
+	if _, ok := m.driver.(*txDriver); !ok {
+		return nil, errors.New("ent: mutation is not running in a transaction")
+	}
+	tx := &Tx{config: m.config}
+	tx.init()
+	return tx, nil
+}
+
+// SetID sets the value of the id field. Note that this
+// operation is only accepted on creation of IntegrationUpdate entities.
+func (m *IntegrationUpdateMutation) SetID(id uuid.UUID) {
+	m.id = &id
+}
+
+// ID returns the ID value in the mutation. Note that the ID is only available
+// if it was provided to the builder or after it was returned from the database.
+func (m *IntegrationUpdateMutation) ID() (id uuid.UUID, exists bool) {
+	if m.id == nil {
+		return
+	}
+	return *m.id, true
+}
+
+// IDs queries the database and returns the entity ids that match the mutation's predicate.
+// That means, if the mutation is applied within a transaction with an isolation level such
+// as sql.LevelSerializable, the returned ids match the ids of the rows that will be updated
+// or updated by the mutation.
+func (m *IntegrationUpdateMutation) IDs(ctx context.Context) ([]uuid.UUID, error) {
+	switch {
+	case m.op.Is(OpUpdateOne | OpDeleteOne):
+		id, exists := m.ID()
+		if exists {
+			return []uuid.UUID{id}, nil
+		}
+		fallthrough
+	case m.op.Is(OpUpdate | OpDelete):
+		return m.Client().IntegrationUpdate.Query().Where(m.predicates...).IDs(ctx)
+	default:
+		return nil, fmt.Errorf("IDs is not allowed on %s operations", m.op)
+	}
+}
+
+// SetIntegration sets the "integration" field.
+func (m *IntegrationUpdateMutation) SetIntegration(s string) {
+	m.integration = &s
+}
+
+// Integration returns the value of the "integration" field in the mutation.
+func (m *IntegrationUpdateMutation) Integration() (r string, exists bool) {
+	v := m.integration
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldIntegration returns the old "integration" field's value of the IntegrationUpdate entity.
+// If the IntegrationUpdate object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *IntegrationUpdateMutation) OldIntegration(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldIntegration is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldIntegration requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldIntegration: %w", err)
+	}
+	return oldValue.Integration, nil
+}
+
+// ResetIntegration resets all changes to the "integration" field.
+func (m *IntegrationUpdateMutation) ResetIntegration() {
+	m.integration = nil
+}
+
+// SetState sets the "state" field.
+func (m *IntegrationUpdateMutation) SetState(i integrationupdate.State) {
+	m.state = &i
+}
+
+// State returns the value of the "state" field in the mutation.
+func (m *IntegrationUpdateMutation) State() (r integrationupdate.State, exists bool) {
+	v := m.state
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldState returns the old "state" field's value of the IntegrationUpdate entity.
+// If the IntegrationUpdate object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *IntegrationUpdateMutation) OldState(ctx context.Context) (v integrationupdate.State, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldState is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldState requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldState: %w", err)
+	}
+	return oldValue.State, nil
+}
+
+// ResetState resets all changes to the "state" field.
+func (m *IntegrationUpdateMutation) ResetState() {
+	m.state = nil
+}
+
+// SetDetail sets the "detail" field.
+func (m *IntegrationUpdateMutation) SetDetail(s string) {
+	m.detail = &s
+}
+
+// Detail returns the value of the "detail" field in the mutation.
+func (m *IntegrationUpdateMutation) Detail() (r string, exists bool) {
+	v := m.detail
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldDetail returns the old "detail" field's value of the IntegrationUpdate entity.
+// If the IntegrationUpdate object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *IntegrationUpdateMutation) OldDetail(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldDetail is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldDetail requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldDetail: %w", err)
+	}
+	return oldValue.Detail, nil
+}
+
+// ClearDetail clears the value of the "detail" field.
+func (m *IntegrationUpdateMutation) ClearDetail() {
+	m.detail = nil
+	m.clearedFields[integrationupdate.FieldDetail] = struct{}{}
+}
+
+// DetailCleared returns if the "detail" field was cleared in this mutation.
+func (m *IntegrationUpdateMutation) DetailCleared() bool {
+	_, ok := m.clearedFields[integrationupdate.FieldDetail]
+	return ok
+}
+
+// ResetDetail resets all changes to the "detail" field.
+func (m *IntegrationUpdateMutation) ResetDetail() {
+	m.detail = nil
+	delete(m.clearedFields, integrationupdate.FieldDetail)
+}
+
+// SetNewVersion sets the "new_version" field.
+func (m *IntegrationUpdateMutation) SetNewVersion(s string) {
+	m.new_version = &s
+}
+
+// NewVersion returns the value of the "new_version" field in the mutation.
+func (m *IntegrationUpdateMutation) NewVersion() (r string, exists bool) {
+	v := m.new_version
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldNewVersion returns the old "new_version" field's value of the IntegrationUpdate entity.
+// If the IntegrationUpdate object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *IntegrationUpdateMutation) OldNewVersion(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldNewVersion is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldNewVersion requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldNewVersion: %w", err)
+	}
+	return oldValue.NewVersion, nil
+}
+
+// ClearNewVersion clears the value of the "new_version" field.
+func (m *IntegrationUpdateMutation) ClearNewVersion() {
+	m.new_version = nil
+	m.clearedFields[integrationupdate.FieldNewVersion] = struct{}{}
+}
+
+// NewVersionCleared returns if the "new_version" field was cleared in this mutation.
+func (m *IntegrationUpdateMutation) NewVersionCleared() bool {
+	_, ok := m.clearedFields[integrationupdate.FieldNewVersion]
+	return ok
+}
+
+// ResetNewVersion resets all changes to the "new_version" field.
+func (m *IntegrationUpdateMutation) ResetNewVersion() {
+	m.new_version = nil
+	delete(m.clearedFields, integrationupdate.FieldNewVersion)
+}
+
+// SetRequestedBy sets the "requested_by" field.
+func (m *IntegrationUpdateMutation) SetRequestedBy(s string) {
+	m.requested_by = &s
+}
+
+// RequestedBy returns the value of the "requested_by" field in the mutation.
+func (m *IntegrationUpdateMutation) RequestedBy() (r string, exists bool) {
+	v := m.requested_by
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldRequestedBy returns the old "requested_by" field's value of the IntegrationUpdate entity.
+// If the IntegrationUpdate object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *IntegrationUpdateMutation) OldRequestedBy(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldRequestedBy is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldRequestedBy requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldRequestedBy: %w", err)
+	}
+	return oldValue.RequestedBy, nil
+}
+
+// ClearRequestedBy clears the value of the "requested_by" field.
+func (m *IntegrationUpdateMutation) ClearRequestedBy() {
+	m.requested_by = nil
+	m.clearedFields[integrationupdate.FieldRequestedBy] = struct{}{}
+}
+
+// RequestedByCleared returns if the "requested_by" field was cleared in this mutation.
+func (m *IntegrationUpdateMutation) RequestedByCleared() bool {
+	_, ok := m.clearedFields[integrationupdate.FieldRequestedBy]
+	return ok
+}
+
+// ResetRequestedBy resets all changes to the "requested_by" field.
+func (m *IntegrationUpdateMutation) ResetRequestedBy() {
+	m.requested_by = nil
+	delete(m.clearedFields, integrationupdate.FieldRequestedBy)
+}
+
+// SetCreateTime sets the "create_time" field.
+func (m *IntegrationUpdateMutation) SetCreateTime(t time.Time) {
+	m.create_time = &t
+}
+
+// CreateTime returns the value of the "create_time" field in the mutation.
+func (m *IntegrationUpdateMutation) CreateTime() (r time.Time, exists bool) {
+	v := m.create_time
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCreateTime returns the old "create_time" field's value of the IntegrationUpdate entity.
+// If the IntegrationUpdate object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *IntegrationUpdateMutation) OldCreateTime(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCreateTime is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCreateTime requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCreateTime: %w", err)
+	}
+	return oldValue.CreateTime, nil
+}
+
+// ResetCreateTime resets all changes to the "create_time" field.
+func (m *IntegrationUpdateMutation) ResetCreateTime() {
+	m.create_time = nil
+}
+
+// SetUpdateTime sets the "update_time" field.
+func (m *IntegrationUpdateMutation) SetUpdateTime(t time.Time) {
+	m.update_time = &t
+}
+
+// UpdateTime returns the value of the "update_time" field in the mutation.
+func (m *IntegrationUpdateMutation) UpdateTime() (r time.Time, exists bool) {
+	v := m.update_time
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldUpdateTime returns the old "update_time" field's value of the IntegrationUpdate entity.
+// If the IntegrationUpdate object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *IntegrationUpdateMutation) OldUpdateTime(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldUpdateTime is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldUpdateTime requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldUpdateTime: %w", err)
+	}
+	return oldValue.UpdateTime, nil
+}
+
+// ResetUpdateTime resets all changes to the "update_time" field.
+func (m *IntegrationUpdateMutation) ResetUpdateTime() {
+	m.update_time = nil
+}
+
+// Where appends a list predicates to the IntegrationUpdateMutation builder.
+func (m *IntegrationUpdateMutation) Where(ps ...predicate.IntegrationUpdate) {
+	m.predicates = append(m.predicates, ps...)
+}
+
+// WhereP appends storage-level predicates to the IntegrationUpdateMutation builder. Using this method,
+// users can use type-assertion to append predicates that do not depend on any generated package.
+func (m *IntegrationUpdateMutation) WhereP(ps ...func(*sql.Selector)) {
+	p := make([]predicate.IntegrationUpdate, len(ps))
+	for i := range ps {
+		p[i] = ps[i]
+	}
+	m.Where(p...)
+}
+
+// Op returns the operation name.
+func (m *IntegrationUpdateMutation) Op() Op {
+	return m.op
+}
+
+// SetOp allows setting the mutation operation.
+func (m *IntegrationUpdateMutation) SetOp(op Op) {
+	m.op = op
+}
+
+// Type returns the node type of this mutation (IntegrationUpdate).
+func (m *IntegrationUpdateMutation) Type() string {
+	return m.typ
+}
+
+// Fields returns all fields that were changed during this mutation. Note that in
+// order to get all numeric fields that were incremented/decremented, call
+// AddedFields().
+func (m *IntegrationUpdateMutation) Fields() []string {
+	fields := make([]string, 0, 7)
+	if m.integration != nil {
+		fields = append(fields, integrationupdate.FieldIntegration)
+	}
+	if m.state != nil {
+		fields = append(fields, integrationupdate.FieldState)
+	}
+	if m.detail != nil {
+		fields = append(fields, integrationupdate.FieldDetail)
+	}
+	if m.new_version != nil {
+		fields = append(fields, integrationupdate.FieldNewVersion)
+	}
+	if m.requested_by != nil {
+		fields = append(fields, integrationupdate.FieldRequestedBy)
+	}
+	if m.create_time != nil {
+		fields = append(fields, integrationupdate.FieldCreateTime)
+	}
+	if m.update_time != nil {
+		fields = append(fields, integrationupdate.FieldUpdateTime)
+	}
+	return fields
+}
+
+// Field returns the value of a field with the given name. The second boolean
+// return value indicates that this field was not set, or was not defined in the
+// schema.
+func (m *IntegrationUpdateMutation) Field(name string) (ent.Value, bool) {
+	switch name {
+	case integrationupdate.FieldIntegration:
+		return m.Integration()
+	case integrationupdate.FieldState:
+		return m.State()
+	case integrationupdate.FieldDetail:
+		return m.Detail()
+	case integrationupdate.FieldNewVersion:
+		return m.NewVersion()
+	case integrationupdate.FieldRequestedBy:
+		return m.RequestedBy()
+	case integrationupdate.FieldCreateTime:
+		return m.CreateTime()
+	case integrationupdate.FieldUpdateTime:
+		return m.UpdateTime()
+	}
+	return nil, false
+}
+
+// OldField returns the old value of the field from the database. An error is
+// returned if the mutation operation is not UpdateOne, or the query to the
+// database failed.
+func (m *IntegrationUpdateMutation) OldField(ctx context.Context, name string) (ent.Value, error) {
+	switch name {
+	case integrationupdate.FieldIntegration:
+		return m.OldIntegration(ctx)
+	case integrationupdate.FieldState:
+		return m.OldState(ctx)
+	case integrationupdate.FieldDetail:
+		return m.OldDetail(ctx)
+	case integrationupdate.FieldNewVersion:
+		return m.OldNewVersion(ctx)
+	case integrationupdate.FieldRequestedBy:
+		return m.OldRequestedBy(ctx)
+	case integrationupdate.FieldCreateTime:
+		return m.OldCreateTime(ctx)
+	case integrationupdate.FieldUpdateTime:
+		return m.OldUpdateTime(ctx)
+	}
+	return nil, fmt.Errorf("unknown IntegrationUpdate field %s", name)
+}
+
+// SetField sets the value of a field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *IntegrationUpdateMutation) SetField(name string, value ent.Value) error {
+	switch name {
+	case integrationupdate.FieldIntegration:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetIntegration(v)
+		return nil
+	case integrationupdate.FieldState:
+		v, ok := value.(integrationupdate.State)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetState(v)
+		return nil
+	case integrationupdate.FieldDetail:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetDetail(v)
+		return nil
+	case integrationupdate.FieldNewVersion:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetNewVersion(v)
+		return nil
+	case integrationupdate.FieldRequestedBy:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetRequestedBy(v)
+		return nil
+	case integrationupdate.FieldCreateTime:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCreateTime(v)
+		return nil
+	case integrationupdate.FieldUpdateTime:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetUpdateTime(v)
+		return nil
+	}
+	return fmt.Errorf("unknown IntegrationUpdate field %s", name)
+}
+
+// AddedFields returns all numeric fields that were incremented/decremented during
+// this mutation.
+func (m *IntegrationUpdateMutation) AddedFields() []string {
+	return nil
+}
+
+// AddedField returns the numeric value that was incremented/decremented on a field
+// with the given name. The second boolean return value indicates that this field
+// was not set, or was not defined in the schema.
+func (m *IntegrationUpdateMutation) AddedField(name string) (ent.Value, bool) {
+	return nil, false
+}
+
+// AddField adds the value to the field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *IntegrationUpdateMutation) AddField(name string, value ent.Value) error {
+	switch name {
+	}
+	return fmt.Errorf("unknown IntegrationUpdate numeric field %s", name)
+}
+
+// ClearedFields returns all nullable fields that were cleared during this
+// mutation.
+func (m *IntegrationUpdateMutation) ClearedFields() []string {
+	var fields []string
+	if m.FieldCleared(integrationupdate.FieldDetail) {
+		fields = append(fields, integrationupdate.FieldDetail)
+	}
+	if m.FieldCleared(integrationupdate.FieldNewVersion) {
+		fields = append(fields, integrationupdate.FieldNewVersion)
+	}
+	if m.FieldCleared(integrationupdate.FieldRequestedBy) {
+		fields = append(fields, integrationupdate.FieldRequestedBy)
+	}
+	return fields
+}
+
+// FieldCleared returns a boolean indicating if a field with the given name was
+// cleared in this mutation.
+func (m *IntegrationUpdateMutation) FieldCleared(name string) bool {
+	_, ok := m.clearedFields[name]
+	return ok
+}
+
+// ClearField clears the value of the field with the given name. It returns an
+// error if the field is not defined in the schema.
+func (m *IntegrationUpdateMutation) ClearField(name string) error {
+	switch name {
+	case integrationupdate.FieldDetail:
+		m.ClearDetail()
+		return nil
+	case integrationupdate.FieldNewVersion:
+		m.ClearNewVersion()
+		return nil
+	case integrationupdate.FieldRequestedBy:
+		m.ClearRequestedBy()
+		return nil
+	}
+	return fmt.Errorf("unknown IntegrationUpdate nullable field %s", name)
+}
+
+// ResetField resets all changes in the mutation for the field with the given name.
+// It returns an error if the field is not defined in the schema.
+func (m *IntegrationUpdateMutation) ResetField(name string) error {
+	switch name {
+	case integrationupdate.FieldIntegration:
+		m.ResetIntegration()
+		return nil
+	case integrationupdate.FieldState:
+		m.ResetState()
+		return nil
+	case integrationupdate.FieldDetail:
+		m.ResetDetail()
+		return nil
+	case integrationupdate.FieldNewVersion:
+		m.ResetNewVersion()
+		return nil
+	case integrationupdate.FieldRequestedBy:
+		m.ResetRequestedBy()
+		return nil
+	case integrationupdate.FieldCreateTime:
+		m.ResetCreateTime()
+		return nil
+	case integrationupdate.FieldUpdateTime:
+		m.ResetUpdateTime()
+		return nil
+	}
+	return fmt.Errorf("unknown IntegrationUpdate field %s", name)
+}
+
+// AddedEdges returns all edge names that were set/added in this mutation.
+func (m *IntegrationUpdateMutation) AddedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// AddedIDs returns all IDs (to other nodes) that were added for the given edge
+// name in this mutation.
+func (m *IntegrationUpdateMutation) AddedIDs(name string) []ent.Value {
+	return nil
+}
+
+// RemovedEdges returns all edge names that were removed in this mutation.
+func (m *IntegrationUpdateMutation) RemovedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// RemovedIDs returns all IDs (to other nodes) that were removed for the edge with
+// the given name in this mutation.
+func (m *IntegrationUpdateMutation) RemovedIDs(name string) []ent.Value {
+	return nil
+}
+
+// ClearedEdges returns all edge names that were cleared in this mutation.
+func (m *IntegrationUpdateMutation) ClearedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// EdgeCleared returns a boolean which indicates if the edge with the given name
+// was cleared in this mutation.
+func (m *IntegrationUpdateMutation) EdgeCleared(name string) bool {
+	return false
+}
+
+// ClearEdge clears the value of the edge with the given name. It returns an error
+// if that edge is not defined in the schema.
+func (m *IntegrationUpdateMutation) ClearEdge(name string) error {
+	return fmt.Errorf("unknown IntegrationUpdate unique edge %s", name)
+}
+
+// ResetEdge resets all changes to the edge with the given name in this mutation.
+// It returns an error if the edge is not defined in the schema.
+func (m *IntegrationUpdateMutation) ResetEdge(name string) error {
+	return fmt.Errorf("unknown IntegrationUpdate edge %s", name)
 }
 
 // InviteCodeMutation represents an operation that mutates the InviteCode nodes in the graph.

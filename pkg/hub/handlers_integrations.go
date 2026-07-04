@@ -24,7 +24,14 @@ import (
 	"strings"
 	"sync"
 
+	"database/sql"
+
+	entsql "entgo.io/ent/dialect/sql"
+	"github.com/google/uuid"
+
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/integrationupdate"
 	"github.com/GoogleCloudPlatform/scion/pkg/plugin"
 )
 
@@ -36,6 +43,7 @@ type IntegrationManager interface {
 	HasPlugin(pluginType, name string) bool
 	GetPluginConfig(pluginType, name string) map[string]string
 	IsSelfManaged(pluginType, name string) bool
+	GetDeploymentMode(pluginType, name string) plugin.DeploymentMode
 	ConfigureBroker(name string, extra map[string]string) error
 	Reconnect(pluginType, name string) error
 	BrokerHealthCheck(name string) (status, message string, details map[string]string, err error)
@@ -48,21 +56,23 @@ type IntegrationManager interface {
 
 // IntegrationSummary is the response element for the list endpoint.
 type IntegrationSummary struct {
-	Name        string             `json:"name"`
-	Platform    string             `json:"platform"`
-	SelfManaged bool               `json:"self_managed"`
-	HasSecrets  map[string]bool    `json:"has_secrets"`
-	Status      *IntegrationStatus `json:"status,omitempty"`
+	Name           string             `json:"name"`
+	Platform       string             `json:"platform"`
+	SelfManaged    bool               `json:"self_managed"`
+	DeploymentMode string             `json:"deployment_mode"`
+	HasSecrets     map[string]bool    `json:"has_secrets"`
+	Status         *IntegrationStatus `json:"status,omitempty"`
 }
 
 // IntegrationDetail is the response for the single-integration GET endpoint.
 type IntegrationDetail struct {
-	Name        string             `json:"name"`
-	Platform    string             `json:"platform"`
-	SelfManaged bool               `json:"self_managed"`
-	Settings    map[string]string  `json:"settings"`
-	HasSecrets  map[string]bool    `json:"has_secrets"`
-	Status      *IntegrationStatus `json:"status,omitempty"`
+	Name           string             `json:"name"`
+	Platform       string             `json:"platform"`
+	SelfManaged    bool               `json:"self_managed"`
+	DeploymentMode string             `json:"deployment_mode"`
+	Settings       map[string]string  `json:"settings"`
+	HasSecrets     map[string]bool    `json:"has_secrets"`
+	Status         *IntegrationStatus `json:"status,omitempty"`
 }
 
 // IntegrationStatus holds runtime status information from a broker plugin.
@@ -86,6 +96,19 @@ type IntegrationConfigUpdateRequest struct {
 type AvailableIntegration struct {
 	Name     string `json:"name"`
 	Platform string `json:"platform"`
+}
+
+// IntegrationUpdateResponse is returned by POST update for HA integrations (202)
+// and by GET update/{id}.
+type IntegrationUpdateResponse struct {
+	ID          string `json:"id"`
+	Integration string `json:"integration"`
+	State       string `json:"state"`
+	Detail      string `json:"detail,omitempty"`
+	NewVersion  string `json:"new_version,omitempty"`
+	RequestedBy string `json:"requested_by,omitempty"`
+	CreatedAt   string `json:"created_at,omitempty"`
+	UpdatedAt   string `json:"updated_at,omitempty"`
 }
 
 // knownPlugins is the list of plugins that can be discovered for installation.
@@ -132,10 +155,10 @@ func (s *Server) handleAdminIntegrationByName(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	// Parse: /api/v1/admin/integrations/{name}[/{action}]
+	// Parse: /api/v1/admin/integrations/{name}[/{action}[/{sub}]]
 	path := strings.TrimPrefix(r.URL.Path, "/api/v1/admin/integrations/")
 	path = strings.TrimSuffix(path, "/")
-	parts := strings.SplitN(path, "/", 2)
+	parts := strings.SplitN(path, "/", 3)
 	name := parts[0]
 	if name == "" {
 		NotFound(w, "integration")
@@ -143,8 +166,12 @@ func (s *Server) handleAdminIntegrationByName(w http.ResponseWriter, r *http.Req
 	}
 
 	action := ""
-	if len(parts) == 2 {
+	if len(parts) >= 2 {
 		action = parts[1]
+	}
+	actionSub := ""
+	if len(parts) >= 3 {
+		actionSub = parts[2]
 	}
 
 	// Special-case: "available" as a name with no action is the available-integrations list.
@@ -179,6 +206,10 @@ func (s *Server) handleAdminIntegrationByName(w http.ResponseWriter, r *http.Req
 		}
 		s.handleIntegrationHealth(w, r, name)
 	case "update":
+		if actionSub != "" && r.Method == http.MethodGet {
+			s.handleGetUpdateStatus(w, r, name, actionSub)
+			return
+		}
 		if r.Method != http.MethodPost {
 			MethodNotAllowed(w)
 			return
@@ -216,11 +247,12 @@ func (s *Server) handleListIntegrations(w http.ResponseWriter, r *http.Request) 
 		}
 
 		summary := IntegrationSummary{
-			Name:        name,
-			Platform:    resolvePlatform(name),
-			SelfManaged: mgr.IsSelfManaged("broker", name),
-			HasSecrets:  s.checkIntegrationSecrets(r.Context(), name),
-			Status:      getIntegrationStatus(mgr, name),
+			Name:           name,
+			Platform:       resolvePlatform(name),
+			SelfManaged:    mgr.IsSelfManaged("broker", name),
+			DeploymentMode: string(mgr.GetDeploymentMode("broker", name)),
+			HasSecrets:     s.checkIntegrationSecrets(r.Context(), name),
+			Status:         getIntegrationStatus(mgr, name),
 		}
 		summaries = append(summaries, summary)
 	}
@@ -244,12 +276,13 @@ func (s *Server) handleGetIntegration(w http.ResponseWriter, r *http.Request, na
 	}
 
 	detail := IntegrationDetail{
-		Name:        name,
-		Platform:    resolvePlatform(name),
-		SelfManaged: mgr.IsSelfManaged("broker", name),
-		Settings:    filterSensitiveConfig(name, cfg),
-		HasSecrets:  s.checkIntegrationSecrets(r.Context(), name),
-		Status:      getIntegrationStatus(mgr, name),
+		Name:           name,
+		Platform:       resolvePlatform(name),
+		SelfManaged:    mgr.IsSelfManaged("broker", name),
+		DeploymentMode: string(mgr.GetDeploymentMode("broker", name)),
+		Settings:       filterSensitiveConfig(name, cfg),
+		HasSecrets:     s.checkIntegrationSecrets(r.Context(), name),
+		Status:         getIntegrationStatus(mgr, name),
 	}
 
 	writeJSON(w, http.StatusOK, detail)
@@ -301,27 +334,53 @@ func (s *Server) handleUpdateIntegrationConfig(w http.ResponseWriter, r *http.Re
 		}
 	}
 
-	// Write non-sensitive settings to YAML config file.
+	// Write non-sensitive settings: HA mode uses PostgresConfigProvider,
+	// non-HA mode uses YAML config file.
 	if len(req.Settings) > 0 {
-		pluginCfg := mgr.GetPluginConfig("broker", name)
-		configFile := ""
-		if pluginCfg != nil {
-			configFile = pluginCfg["config_file"]
+		var provider config.IntegrationConfigProvider
+		var haConfigTx *ent.Tx
+
+		if s.isHAIntegration(mgr, name) {
+			if !s.requirePostgres(w) {
+				return
+			}
+			if s.entClient == nil {
+				InternalError(w)
+				return
+			}
+			haTx, txErr := s.entClient.Tx(ctx)
+			if txErr != nil {
+				slog.Error("Failed to begin transaction for config update", "plugin", name, "error", txErr)
+				InternalError(w)
+				return
+			}
+			defer haTx.Rollback()
+			pgProvider := config.NewPostgresConfigProvider(haTx.Client(), name)
+			pgProvider.SetUpdatedBy(userID)
+			provider = pgProvider
+			haConfigTx = haTx
+		} else {
+			pluginCfg := mgr.GetPluginConfig("broker", name)
+			configFile := ""
+			if pluginCfg != nil {
+				configFile = pluginCfg["config_file"]
+			}
+
+			if configFile == "" {
+				BadRequest(w, "integration has no config file configured")
+				return
+			}
+
+			yamlProvider, err := config.NewYAMLConfigProvider(configFile)
+			if err != nil {
+				slog.Error("Failed to create config provider", "plugin", name, "error", err)
+				InternalError(w)
+				return
+			}
+			provider = yamlProvider
 		}
 
-		if configFile == "" {
-			BadRequest(w, "integration has no config file configured")
-			return
-		}
-
-		provider, err := config.NewYAMLConfigProvider(configFile)
-		if err != nil {
-			slog.Error("Failed to create config provider", "plugin", name, "error", err)
-			InternalError(w)
-			return
-		}
-
-		existing, err := provider.Load()
+		existing, err := provider.Load(ctx)
 		if err != nil {
 			slog.Error("Failed to load existing config", "plugin", name, "error", err)
 			InternalError(w)
@@ -337,10 +396,26 @@ func (s *Server) handleUpdateIntegrationConfig(w http.ResponseWriter, r *http.Re
 			existing[k] = v
 		}
 
-		if err := provider.Save(existing); err != nil {
+		if err := provider.Save(ctx, existing); err != nil {
 			slog.Error("Failed to save config", "plugin", name, "error", err)
 			InternalError(w)
 			return
+		}
+
+		// For HA mode, NOTIFY within the same transaction as the config write.
+		if haConfigTx != nil {
+			signal := AdminSignal{
+				Integration: name,
+				Kind:        "config",
+			}
+			if err := publishAdminSignalTx(ctx, haConfigTx, signal); err != nil {
+				slog.Warn("Failed to NOTIFY config change", "integration", name, "error", err)
+			}
+			if err := haConfigTx.Commit(); err != nil {
+				slog.Error("Failed to commit config update transaction", "plugin", name, "error", err)
+				InternalError(w)
+				return
+			}
 		}
 	}
 
@@ -401,8 +476,9 @@ func (s *Server) handleUpdateIntegration(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
-	if mgr.IsSelfManaged("broker", name) {
-		BadRequest(w, "cannot update a self-managed integration")
+	// HA (Mode 3) integrations: insert an update request row + NOTIFY.
+	if s.isHAIntegration(mgr, name) {
+		s.handleUpdateIntegrationHA(w, r, name)
 		return
 	}
 
@@ -731,4 +807,160 @@ func (s *Server) reconfigureIntegration(ctx context.Context, mgr IntegrationMana
 	}
 
 	return nil
+}
+
+// requirePostgres is a feature gate for Mode 3 (HA) endpoints that require
+// Postgres. Returns true if the check passed and the handler can proceed.
+// Returns false if the response has been written (409).
+func (s *Server) requirePostgres(w http.ResponseWriter) bool {
+	if s.IsPostgres() {
+		return true
+	}
+	writeJSON(w, http.StatusConflict, map[string]string{
+		"error": "Mode 3 (HA) features require PostgreSQL. Configure database.driver: postgres in settings.",
+	})
+	return false
+}
+
+// isHAIntegration reports whether the named integration is running in HA
+// (Mode 3) deployment mode. Currently this checks if the integration is
+// self-managed (the precursor to full gRPC mode support in Phase 5A).
+func (s *Server) isHAIntegration(mgr IntegrationManager, name string) bool {
+	return mgr.IsSelfManaged("broker", name)
+}
+
+// handleGetUpdateStatus handles GET .../update/{id} and GET .../update/latest.
+func (s *Server) handleGetUpdateStatus(w http.ResponseWriter, r *http.Request, name, updateRef string) {
+	if !s.requirePostgres(w) {
+		return
+	}
+
+	client := s.entClient
+	if client == nil {
+		InternalError(w)
+		return
+	}
+
+	ctx := r.Context()
+	var row *ent.IntegrationUpdate
+	var err error
+
+	if updateRef == "latest" {
+		row, err = client.IntegrationUpdate.
+			Query().
+			Where(integrationupdate.IntegrationEQ(name)).
+			Order(integrationupdate.ByCreateTime(entsql.OrderDesc())).
+			First(ctx)
+	} else {
+		uid, parseErr := uuid.Parse(updateRef)
+		if parseErr != nil {
+			BadRequest(w, "invalid update id")
+			return
+		}
+		row, err = client.IntegrationUpdate.
+			Query().
+			Where(
+				integrationupdate.IDEQ(uid),
+				integrationupdate.IntegrationEQ(name),
+			).
+			Only(ctx)
+	}
+
+	if err != nil {
+		if ent.IsNotFound(err) {
+			NotFound(w, "update")
+			return
+		}
+		slog.Error("Failed to query integration update", "integration", name, "ref", updateRef, "error", err)
+		InternalError(w)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, integrationUpdateToResponse(row))
+}
+
+func integrationUpdateToResponse(row *ent.IntegrationUpdate) IntegrationUpdateResponse {
+	return IntegrationUpdateResponse{
+		ID:          row.ID.String(),
+		Integration: row.Integration,
+		State:       string(row.State),
+		Detail:      row.Detail,
+		NewVersion:  row.NewVersion,
+		RequestedBy: row.RequestedBy,
+		CreatedAt:   row.CreateTime.UTC().Format("2006-01-02T15:04:05Z"),
+		UpdatedAt:   row.UpdateTime.UTC().Format("2006-01-02T15:04:05Z"),
+	}
+}
+
+// entDB returns the underlying *sql.DB from the server's Ent client, or nil.
+func (s *Server) entDB() *sql.DB {
+	if s.entClient == nil {
+		return nil
+	}
+	drv, ok := s.entClient.Driver().(*entsql.Driver)
+	if !ok {
+		return nil
+	}
+	return drv.DB()
+}
+
+// handleUpdateIntegrationHA handles POST .../update for HA integrations.
+// It inserts an integration_updates row in "requested" state, fires a NOTIFY,
+// and returns 202 with the update_id for polling.
+func (s *Server) handleUpdateIntegrationHA(w http.ResponseWriter, r *http.Request, name string) {
+	if !s.requirePostgres(w) {
+		return
+	}
+
+	client := s.entClient
+	if client == nil {
+		InternalError(w)
+		return
+	}
+
+	ctx := r.Context()
+	user := GetUserIdentityFromContext(ctx)
+	requestedBy := ""
+	if user != nil {
+		requestedBy = user.ID()
+	}
+
+	tx, err := client.Tx(ctx)
+	if err != nil {
+		slog.Error("Failed to begin transaction for integration update", "integration", name, "error", err)
+		InternalError(w)
+		return
+	}
+	defer tx.Rollback()
+
+	row, err := tx.IntegrationUpdate.
+		Create().
+		SetIntegration(name).
+		SetState(integrationupdate.StateRequested).
+		SetRequestedBy(requestedBy).
+		Save(ctx)
+	if err != nil {
+		slog.Error("Failed to create integration update request", "integration", name, "error", err)
+		InternalError(w)
+		return
+	}
+
+	signal := AdminSignal{
+		Integration: name,
+		Kind:        "update",
+		ID:          row.ID.String(),
+	}
+	if err := publishAdminSignalTx(ctx, tx, signal); err != nil {
+		slog.Warn("Failed to NOTIFY integration update", "integration", name, "error", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		slog.Error("Failed to commit integration update transaction", "integration", name, "error", err)
+		InternalError(w)
+		return
+	}
+
+	writeJSON(w, http.StatusAccepted, map[string]string{
+		"update_id": row.ID.String(),
+	})
 }

@@ -32,13 +32,19 @@ import (
 // Manager owns the lifecycle of all loaded plugins.
 // It handles discovery, loading, dispensing, and shutdown of plugin processes.
 type Manager struct {
-	clients         map[string]*goplugin.Client // "type:name" -> client
-	dispensed       map[string]interface{}      // "type:name" -> dispensed interface (cached)
-	selfManaged     map[string]bool             // "type:name" -> true if self-managed
-	configs         map[string]DiscoveredPlugin // "type:name" -> original config (for reconnection)
+	clients         map[string]*goplugin.Client    // "type:name" -> client
+	dispensed       map[string]interface{}         // "type:name" -> dispensed interface (cached)
+	selfManaged     map[string]bool                // "type:name" -> true if self-managed
+	grpcAdapters    map[string]GRPCBrokerClient    // "type:name" -> gRPC adapter
+	configs         map[string]DiscoveredPlugin    // "type:name" -> original config (for reconnection)
+	pluginEntries   map[string]PluginEntry         // "type:name" -> original PluginEntry (for mode resolution)
 	mu              sync.RWMutex
 	logger          *slog.Logger
 	brokerCallbacks *HostCallbacksForwarder // lazily-wired host callbacks for broker plugins
+
+	// NewGRPCBrokerAdapter creates a GRPCBrokerClient for a given plugin entry.
+	// Injected at startup to avoid an import cycle with pkg/plugin/grpcbroker.
+	NewGRPCBrokerAdapter func(entry PluginEntry, logger *slog.Logger) (GRPCBrokerClient, error)
 }
 
 // NewManager creates a new plugin manager.
@@ -50,7 +56,9 @@ func NewManager(logger *slog.Logger) *Manager {
 		clients:         make(map[string]*goplugin.Client),
 		dispensed:       make(map[string]interface{}),
 		selfManaged:     make(map[string]bool),
+		grpcAdapters:    make(map[string]GRPCBrokerClient),
 		configs:         make(map[string]DiscoveredPlugin),
+		pluginEntries:   make(map[string]PluginEntry),
 		logger:          logger,
 		brokerCallbacks: &HostCallbacksForwarder{},
 	}
@@ -99,9 +107,31 @@ func (f *HostCallbacksForwarder) CancelSubscription(pattern string) error {
 
 // LoadAll discovers and loads all plugins from the given configuration and plugins directory.
 func (m *Manager) LoadAll(cfg PluginsConfig, pluginsDir string) error {
+	// Handle gRPC mode entries before standard discovery.
+	for name, entry := range cfg.Broker {
+		if entry.ResolvedDeploymentMode() == DeploymentModeHA {
+			if err := m.loadGRPCPlugin(PluginTypeBroker, name, entry); err != nil {
+				m.logger.Error("Failed to load gRPC plugin",
+					"name", name,
+					"address", entry.Address,
+					"error", err,
+				)
+			}
+		}
+	}
+
 	discovered := DiscoverPlugins(cfg, pluginsDir, m.logger)
 
 	for _, dp := range discovered {
+		// Skip entries already loaded as gRPC plugins.
+		key := dp.Type + ":" + dp.Name
+		m.mu.RLock()
+		_, isGRPC := m.grpcAdapters[key]
+		m.mu.RUnlock()
+		if isGRPC {
+			continue
+		}
+
 		if err := m.loadPlugin(dp); err != nil {
 			m.logger.Error("Failed to load plugin",
 				"type", dp.Type,
@@ -123,7 +153,10 @@ func (m *Manager) LoadAll(cfg PluginsConfig, pluginsDir string) error {
 
 // LoadOne loads a single plugin by type and name from the given configuration.
 func (m *Manager) LoadOne(pluginType, name string, entry PluginEntry, pluginsDir string) error {
-	if entry.SelfManaged {
+	if entry.ResolvedDeploymentMode() == DeploymentModeHA {
+		return m.loadGRPCPlugin(pluginType, name, entry)
+	}
+	if entry.SelfManaged || entry.ResolvedDeploymentMode() == DeploymentModeExternal {
 		return m.loadPlugin(DiscoveredPlugin{
 			Name:        name,
 			Type:        pluginType,
@@ -144,6 +177,34 @@ func (m *Manager) LoadOne(pluginType, name string, entry PluginEntry, pluginsDir
 		Config:     entry.Config,
 		FromConfig: true,
 	})
+}
+
+// loadGRPCPlugin creates a GRPCBrokerClient for a plugin configured with mode: grpc.
+func (m *Manager) loadGRPCPlugin(pluginType, name string, entry PluginEntry) error {
+	if entry.Address == "" {
+		return fmt.Errorf("address is required for gRPC mode plugin %s/%s", pluginType, name)
+	}
+	if m.NewGRPCBrokerAdapter == nil {
+		return fmt.Errorf("gRPC broker adapter factory not configured")
+	}
+
+	adapter, err := m.NewGRPCBrokerAdapter(entry, m.logger)
+	if err != nil {
+		return fmt.Errorf("create gRPC adapter for %s/%s: %w", pluginType, name, err)
+	}
+
+	key := pluginType + ":" + name
+	m.mu.Lock()
+	if old, ok := m.grpcAdapters[key]; ok {
+		old.Close()
+	}
+	m.grpcAdapters[key] = adapter
+	m.pluginEntries[key] = entry
+	m.mu.Unlock()
+
+	m.logger.Info("Loaded gRPC plugin",
+		"type", pluginType, "name", name, "address", entry.Address)
+	return nil
 }
 
 // loadPlugin starts a plugin process (or connects to a self-managed one) and stores its client.
@@ -350,7 +411,18 @@ func (m *Manager) Reconnect(pluginType, name string) error {
 // GetBroker returns an eventbus.EventBus backed by the named broker plugin.
 // For self-managed plugins, it returns a reconnecting adapter that automatically
 // re-establishes the connection if the plugin process restarts.
+// For gRPC mode plugins, it returns the GRPCBrokerAdapter directly (which has
+// its own reconnection logic).
 func (m *Manager) GetBroker(name string) (eventbus.EventBus, error) {
+	key := PluginTypeBroker + ":" + name
+	m.mu.RLock()
+	adapter, isGRPC := m.grpcAdapters[key]
+	m.mu.RUnlock()
+
+	if isGRPC {
+		return adapter, nil
+	}
+
 	raw, err := m.Get(PluginTypeBroker, name)
 	if err != nil {
 		return nil, err
@@ -361,11 +433,11 @@ func (m *Manager) GetBroker(name string) (eventbus.EventBus, error) {
 		return nil, fmt.Errorf("plugin %s is not a broker plugin", name)
 	}
 
-	adapter := NewBrokerPluginAdapter(rpcClient)
+	rpcAdapter := NewBrokerPluginAdapter(rpcClient)
 	if m.IsSelfManaged(PluginTypeBroker, name) {
-		return newReconnectingBrokerAdapter(m, name, adapter, m.logger), nil
+		return newReconnectingBrokerAdapter(m, name, rpcAdapter, m.logger), nil
 	}
-	return adapter, nil
+	return rpcAdapter, nil
 }
 
 // ConfigureBroker re-configures a loaded broker plugin by merging extra
@@ -374,6 +446,16 @@ func (m *Manager) GetBroker(name string) (eventbus.EventBus, error) {
 // that are not available at initial plugin load time.
 func (m *Manager) ConfigureBroker(name string, extra map[string]string) error {
 	key := PluginTypeBroker + ":" + name
+
+	// Check for gRPC adapter first.
+	m.mu.RLock()
+	adapter, isGRPC := m.grpcAdapters[key]
+	m.mu.RUnlock()
+
+	if isGRPC {
+		return adapter.Configure(extra)
+	}
+
 	m.mu.RLock()
 	raw, ok := m.dispensed[key]
 	dp, hasDP := m.configs[key]
@@ -411,15 +493,24 @@ func (m *Manager) GetPluginConfig(pluginType, name string) map[string]string {
 	key := pluginType + ":" + name
 	m.mu.RLock()
 	dp, ok := m.configs[key]
+	entry, hasEntry := m.pluginEntries[key]
 	m.mu.RUnlock()
-	if !ok {
-		return nil
+
+	if ok {
+		out := make(map[string]string, len(dp.Config))
+		for k, v := range dp.Config {
+			out[k] = v
+		}
+		return out
 	}
-	out := make(map[string]string, len(dp.Config))
-	for k, v := range dp.Config {
-		out[k] = v
+	if hasEntry {
+		out := make(map[string]string, len(entry.Config))
+		for k, v := range entry.Config {
+			out[k] = v
+		}
+		return out
 	}
-	return out
+	return nil
 }
 
 // HasPlugin returns true if a plugin with the given type and name is loaded.
@@ -427,6 +518,9 @@ func (m *Manager) HasPlugin(pluginType, name string) bool {
 	key := pluginType + ":" + name
 	m.mu.RLock()
 	_, ok := m.clients[key]
+	if !ok {
+		_, ok = m.grpcAdapters[key]
+	}
 	m.mu.RUnlock()
 	return ok
 }
@@ -444,16 +538,60 @@ func (m *Manager) ListPlugins() []string {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	keys := make([]string, 0, len(m.clients))
+	seen := make(map[string]bool, len(m.clients)+len(m.grpcAdapters))
+	keys := make([]string, 0, len(m.clients)+len(m.grpcAdapters))
 	for k := range m.clients {
-		keys = append(keys, k)
+		if !seen[k] {
+			keys = append(keys, k)
+			seen[k] = true
+		}
+	}
+	for k := range m.grpcAdapters {
+		if !seen[k] {
+			keys = append(keys, k)
+			seen[k] = true
+		}
 	}
 	return keys
+}
+
+// GetDeploymentMode returns the deployment mode for a loaded plugin.
+func (m *Manager) GetDeploymentMode(pluginType, name string) DeploymentMode {
+	key := pluginType + ":" + name
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	if _, ok := m.grpcAdapters[key]; ok {
+		return DeploymentModeHA
+	}
+	if m.selfManaged[key] {
+		return DeploymentModeExternal
+	}
+	if _, ok := m.clients[key]; ok {
+		return DeploymentModePlugin
+	}
+	return DeploymentModePlugin
 }
 
 // BrokerHealthCheck returns the health status of a named broker plugin as
 // primitive types so callers need not import plugin-package structs.
 func (m *Manager) BrokerHealthCheck(name string) (status, message string, details map[string]string, err error) {
+	key := PluginTypeBroker + ":" + name
+	m.mu.RLock()
+	adapter, isGRPC := m.grpcAdapters[key]
+	m.mu.RUnlock()
+
+	if isGRPC {
+		hs, hErr := adapter.HealthCheck()
+		if hErr != nil {
+			return "", "", nil, hErr
+		}
+		if hs == nil {
+			return "unknown", "", nil, nil
+		}
+		return hs.Status, hs.Message, hs.Details, nil
+	}
+
 	raw, err := m.Get(PluginTypeBroker, name)
 	if err != nil {
 		return "", "", nil, err
@@ -475,6 +613,22 @@ func (m *Manager) BrokerHealthCheck(name string) (status, message string, detail
 // BrokerInfo returns plugin metadata for a named broker plugin as primitive
 // types so callers need not import plugin-package structs.
 func (m *Manager) BrokerInfo(name string) (version, channelID string, capabilities []string, err error) {
+	key := PluginTypeBroker + ":" + name
+	m.mu.RLock()
+	adapter, isGRPC := m.grpcAdapters[key]
+	m.mu.RUnlock()
+
+	if isGRPC {
+		info, iErr := adapter.GetInfo()
+		if iErr != nil {
+			return "", "", nil, iErr
+		}
+		if info == nil {
+			return "", "", nil, nil
+		}
+		return info.Version, info.ChannelID, info.Capabilities, nil
+	}
+
 	raw, err := m.Get(PluginTypeBroker, name)
 	if err != nil {
 		return "", "", nil, err
@@ -593,6 +747,7 @@ func (m *Manager) InstallPlugin(name, repoPath, pluginsDir string) error {
 
 // Shutdown kills all plugin processes gracefully.
 // Self-managed plugins are disconnected but their processes are not terminated.
+// gRPC adapters are closed (connection terminated, remote process unaffected).
 func (m *Manager) Shutdown() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -600,18 +755,25 @@ func (m *Manager) Shutdown() {
 	for key, client := range m.clients {
 		if m.selfManaged[key] {
 			m.logger.Info("Disconnecting self-managed plugin", "plugin", key)
-			// For self-managed plugins, Kill() with Test=true in the
-			// ReattachConfig will close the RPC connection without
-			// terminating the external process.
 		} else {
 			m.logger.Info("Shutting down plugin", "plugin", key)
 		}
 		client.Kill()
 	}
+
+	for key, adapter := range m.grpcAdapters {
+		m.logger.Info("Closing gRPC broker adapter", "plugin", key)
+		if err := adapter.Close(); err != nil {
+			m.logger.Error("Failed to close gRPC adapter", "plugin", key, "error", err)
+		}
+	}
+
 	m.clients = make(map[string]*goplugin.Client)
 	m.dispensed = make(map[string]interface{})
 	m.selfManaged = make(map[string]bool)
+	m.grpcAdapters = make(map[string]GRPCBrokerClient)
 	m.configs = make(map[string]DiscoveredPlugin)
+	m.pluginEntries = make(map[string]PluginEntry)
 
 	goplugin.CleanupClients()
 }

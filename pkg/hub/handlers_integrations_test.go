@@ -23,6 +23,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/plugin"
+	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
+	"github.com/google/uuid"
 )
 
 // --- mock IntegrationManager ---
@@ -85,6 +89,16 @@ func (m *mockIntegrationManager) IsSelfManaged(pluginType, name string) bool {
 		return false
 	}
 	return m.selfManaged[name]
+}
+
+func (m *mockIntegrationManager) GetDeploymentMode(pluginType, name string) plugin.DeploymentMode {
+	if pluginType != "broker" {
+		return plugin.DeploymentModePlugin
+	}
+	if m.selfManaged[name] {
+		return plugin.DeploymentModeExternal
+	}
+	return plugin.DeploymentModePlugin
 }
 
 func (m *mockIntegrationManager) ConfigureBroker(name string, extra map[string]string) error {
@@ -696,13 +710,14 @@ func TestIntegrationByName_UnknownAction(t *testing.T) {
 
 // --- Update endpoint ---
 
-func TestUpdateIntegration_SelfManaged(t *testing.T) {
+func TestUpdateIntegration_SelfManaged_SQLite(t *testing.T) {
 	mgr := newMockIntegrationManager()
 	mgr.plugins["telegram"] = map[string]string{}
 	mgr.selfManaged["telegram"] = true
 
 	srv := &Server{}
 	srv.pluginManager = mgr
+	// dbDriver is empty → requirePostgres returns 409
 
 	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/integrations/telegram/update", nil)
@@ -710,8 +725,8 @@ func TestUpdateIntegration_SelfManaged(t *testing.T) {
 	rr := httptest.NewRecorder()
 	srv.handleAdminIntegrationByName(rr, req)
 
-	if rr.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400 for self-managed, got %d: %s", rr.Code, rr.Body.String())
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("expected 409 for self-managed on SQLite, got %d: %s", rr.Code, rr.Body.String())
 	}
 }
 
@@ -953,5 +968,387 @@ func TestListAvailableIntegrations_ExcludesInstalled(t *testing.T) {
 	}
 	if len(result) != 0 {
 		t.Fatalf("expected 0 available (already installed), got %d", len(result))
+	}
+}
+
+// --- Mode 3 (HA) integration tests ---
+
+func TestRequirePostgres_SQLite(t *testing.T) {
+	srv := &Server{}
+	// dbDriver is empty — SQLite or unconfigured
+	rr := httptest.NewRecorder()
+	ok := srv.requirePostgres(rr)
+
+	if ok {
+		t.Fatal("requirePostgres should return false for non-postgres driver")
+	}
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d", rr.Code)
+	}
+}
+
+func TestRequirePostgres_Postgres(t *testing.T) {
+	srv := &Server{dbDriver: "postgres"}
+	rr := httptest.NewRecorder()
+	ok := srv.requirePostgres(rr)
+
+	if !ok {
+		t.Fatal("requirePostgres should return true for postgres driver")
+	}
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 (default), got %d", rr.Code)
+	}
+}
+
+func TestUpdateIntegration_HA_Accepted(t *testing.T) {
+	client := enttest.NewClient(t)
+
+	mgr := newMockIntegrationManager()
+	mgr.plugins["discord"] = map[string]string{}
+	mgr.selfManaged["discord"] = true
+
+	srv := &Server{dbDriver: "postgres"}
+	srv.pluginManager = mgr
+	srv.entClient = client
+
+	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/integrations/discord/update", nil)
+	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	rr := httptest.NewRecorder()
+	srv.handleAdminIntegrationByName(rr, req)
+
+	if rr.Code != http.StatusAccepted {
+		t.Fatalf("expected 202, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var resp map[string]string
+	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	updateID := resp["update_id"]
+	if updateID == "" {
+		t.Fatal("expected update_id in response")
+	}
+
+	uid, err := uuid.Parse(updateID)
+	if err != nil {
+		t.Fatalf("update_id is not a valid UUID: %v", err)
+	}
+
+	row, err := client.IntegrationUpdate.Get(req.Context(), uid)
+	if err != nil {
+		t.Fatalf("failed to query created update row: %v", err)
+	}
+	if row.Integration != "discord" {
+		t.Errorf("expected integration discord, got %s", row.Integration)
+	}
+	if string(row.State) != "requested" {
+		t.Errorf("expected state requested, got %s", row.State)
+	}
+	if row.RequestedBy != "u1" {
+		t.Errorf("expected requested_by u1, got %s", row.RequestedBy)
+	}
+}
+
+func TestGetUpdateStatus_ByID(t *testing.T) {
+	client := enttest.NewClient(t)
+
+	mgr := newMockIntegrationManager()
+	mgr.plugins["discord"] = map[string]string{}
+	mgr.selfManaged["discord"] = true
+
+	srv := &Server{dbDriver: "postgres"}
+	srv.pluginManager = mgr
+	srv.entClient = client
+
+	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
+
+	// First create an update via the HA flow
+	createReq := httptest.NewRequest(http.MethodPost, "/api/v1/admin/integrations/discord/update", nil)
+	createReq = createReq.WithContext(contextWithIdentity(createReq.Context(), admin))
+	createRR := httptest.NewRecorder()
+	srv.handleAdminIntegrationByName(createRR, createReq)
+
+	if createRR.Code != http.StatusAccepted {
+		t.Fatalf("create: expected 202, got %d: %s", createRR.Code, createRR.Body.String())
+	}
+
+	var createResp map[string]string
+	if err := json.NewDecoder(createRR.Body).Decode(&createResp); err != nil {
+		t.Fatalf("decode create response: %v", err)
+	}
+	updateID := createResp["update_id"]
+
+	// Now GET the update status by ID
+	getReq := httptest.NewRequest(http.MethodGet, "/api/v1/admin/integrations/discord/update/"+updateID, nil)
+	getReq = getReq.WithContext(contextWithIdentity(getReq.Context(), admin))
+	getRR := httptest.NewRecorder()
+	srv.handleAdminIntegrationByName(getRR, getReq)
+
+	if getRR.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", getRR.Code, getRR.Body.String())
+	}
+
+	var resp IntegrationUpdateResponse
+	if err := json.NewDecoder(getRR.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.ID != updateID {
+		t.Errorf("expected id %s, got %s", updateID, resp.ID)
+	}
+	if resp.Integration != "discord" {
+		t.Errorf("expected integration discord, got %s", resp.Integration)
+	}
+	if resp.State != "requested" {
+		t.Errorf("expected state requested, got %s", resp.State)
+	}
+}
+
+func TestGetUpdateStatus_Latest(t *testing.T) {
+	client := enttest.NewClient(t)
+
+	mgr := newMockIntegrationManager()
+	mgr.plugins["discord"] = map[string]string{}
+	mgr.selfManaged["discord"] = true
+
+	srv := &Server{dbDriver: "postgres"}
+	srv.pluginManager = mgr
+	srv.entClient = client
+
+	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
+
+	// Create two updates so "latest" returns the second
+	for i := 0; i < 2; i++ {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/integrations/discord/update", nil)
+		req = req.WithContext(contextWithIdentity(req.Context(), admin))
+		rr := httptest.NewRecorder()
+		srv.handleAdminIntegrationByName(rr, req)
+		if rr.Code != http.StatusAccepted {
+			t.Fatalf("create %d: expected 202, got %d", i, rr.Code)
+		}
+	}
+
+	getReq := httptest.NewRequest(http.MethodGet, "/api/v1/admin/integrations/discord/update/latest", nil)
+	getReq = getReq.WithContext(contextWithIdentity(getReq.Context(), admin))
+	getRR := httptest.NewRecorder()
+	srv.handleAdminIntegrationByName(getRR, getReq)
+
+	if getRR.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", getRR.Code, getRR.Body.String())
+	}
+
+	var resp IntegrationUpdateResponse
+	if err := json.NewDecoder(getRR.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Integration != "discord" {
+		t.Errorf("expected integration discord, got %s", resp.Integration)
+	}
+	if resp.ID == "" {
+		t.Error("expected a non-empty update ID")
+	}
+}
+
+func TestGetUpdateStatus_NotFound(t *testing.T) {
+	client := enttest.NewClient(t)
+
+	srv := &Server{dbDriver: "postgres"}
+	srv.entClient = client
+
+	mgr := newMockIntegrationManager()
+	mgr.plugins["discord"] = map[string]string{}
+	srv.pluginManager = mgr
+
+	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/integrations/discord/update/"+uuid.New().String(), nil)
+	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	rr := httptest.NewRecorder()
+	srv.handleAdminIntegrationByName(rr, req)
+
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestGetUpdateStatus_InvalidID(t *testing.T) {
+	client := enttest.NewClient(t)
+
+	srv := &Server{dbDriver: "postgres"}
+	srv.entClient = client
+
+	mgr := newMockIntegrationManager()
+	mgr.plugins["discord"] = map[string]string{}
+	srv.pluginManager = mgr
+
+	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/integrations/discord/update/not-a-uuid", nil)
+	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	rr := httptest.NewRecorder()
+	srv.handleAdminIntegrationByName(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestGetUpdateStatus_SQLiteReturns409(t *testing.T) {
+	srv := &Server{}
+	mgr := newMockIntegrationManager()
+	mgr.plugins["discord"] = map[string]string{}
+	srv.pluginManager = mgr
+
+	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/integrations/discord/update/latest", nil)
+	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	rr := httptest.NewRecorder()
+	srv.handleAdminIntegrationByName(rr, req)
+
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("expected 409 for update status on SQLite, got %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestUpdateConfig_HA_Integration(t *testing.T) {
+	client := enttest.NewClient(t)
+
+	mgr := newMockIntegrationManager()
+	mgr.plugins["discord"] = map[string]string{}
+	mgr.selfManaged["discord"] = true
+
+	srv := &Server{dbDriver: "postgres"}
+	srv.pluginManager = mgr
+	srv.entClient = client
+
+	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
+	body := `{"settings":{"guild_id":"12345","application_id":"67890"}}`
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/admin/integrations/discord/config", strings.NewReader(body))
+	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	rr := httptest.NewRecorder()
+	srv.handleAdminIntegrationByName(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	// Verify config was persisted to integration_configs table
+	rows, err := client.IntegrationConfig.Query().All(req.Context())
+	if err != nil {
+		t.Fatalf("query integration configs: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 config row, got %d", len(rows))
+	}
+	if rows[0].Integration != "discord" {
+		t.Errorf("expected integration discord, got %s", rows[0].Integration)
+	}
+}
+
+func TestUpdateConfig_NonHA_NeedsConfigFile(t *testing.T) {
+	mgr := newMockIntegrationManager()
+	mgr.plugins["telegram"] = map[string]string{}
+	// selfManaged is false → non-HA path
+
+	srv := &Server{dbDriver: "postgres"}
+	srv.pluginManager = mgr
+
+	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
+	body := `{"settings":{"webhook_listen":":9095"}}`
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/admin/integrations/telegram/config", strings.NewReader(body))
+	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	rr := httptest.NewRecorder()
+	srv.handleAdminIntegrationByName(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 (no config file for non-HA), got %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestIsHAIntegration(t *testing.T) {
+	mgr := newMockIntegrationManager()
+	mgr.selfManaged["discord"] = true
+
+	srv := &Server{}
+
+	if !srv.isHAIntegration(mgr, "discord") {
+		t.Error("expected discord (self-managed) to be HA")
+	}
+	if srv.isHAIntegration(mgr, "telegram") {
+		t.Error("expected telegram (not self-managed) to not be HA")
+	}
+}
+
+func TestGetUpdateStatus_CrossIntegrationRejected(t *testing.T) {
+	client := enttest.NewClient(t)
+
+	mgr := newMockIntegrationManager()
+	mgr.plugins["discord"] = map[string]string{}
+	mgr.plugins["telegram"] = map[string]string{}
+	mgr.selfManaged["discord"] = true
+	mgr.selfManaged["telegram"] = true
+
+	srv := &Server{dbDriver: "postgres"}
+	srv.pluginManager = mgr
+	srv.entClient = client
+
+	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
+
+	// Create an update for discord
+	createReq := httptest.NewRequest(http.MethodPost, "/api/v1/admin/integrations/discord/update", nil)
+	createReq = createReq.WithContext(contextWithIdentity(createReq.Context(), admin))
+	createRR := httptest.NewRecorder()
+	srv.handleAdminIntegrationByName(createRR, createReq)
+
+	if createRR.Code != http.StatusAccepted {
+		t.Fatalf("create: expected 202, got %d: %s", createRR.Code, createRR.Body.String())
+	}
+
+	var createResp map[string]string
+	if err := json.NewDecoder(createRR.Body).Decode(&createResp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	discordUpdateID := createResp["update_id"]
+
+	// Try to GET that discord update via the telegram endpoint — should 404
+	getReq := httptest.NewRequest(http.MethodGet, "/api/v1/admin/integrations/telegram/update/"+discordUpdateID, nil)
+	getReq = getReq.WithContext(contextWithIdentity(getReq.Context(), admin))
+	getRR := httptest.NewRecorder()
+	srv.handleAdminIntegrationByName(getRR, getReq)
+
+	if getRR.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for cross-integration ID, got %d: %s", getRR.Code, getRR.Body.String())
+	}
+}
+
+func TestUpdateConfig_HA_SetsUpdatedBy(t *testing.T) {
+	client := enttest.NewClient(t)
+
+	mgr := newMockIntegrationManager()
+	mgr.plugins["discord"] = map[string]string{}
+	mgr.selfManaged["discord"] = true
+
+	srv := &Server{dbDriver: "postgres"}
+	srv.pluginManager = mgr
+	srv.entClient = client
+
+	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
+	body := `{"settings":{"guild_id":"99999"}}`
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/admin/integrations/discord/config", strings.NewReader(body))
+	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	rr := httptest.NewRecorder()
+	srv.handleAdminIntegrationByName(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	rows, err := client.IntegrationConfig.Query().All(req.Context())
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 row, got %d", len(rows))
+	}
+	if rows[0].UpdatedBy != "u1" {
+		t.Errorf("expected updated_by u1, got %q", rows[0].UpdatedBy)
 	}
 }

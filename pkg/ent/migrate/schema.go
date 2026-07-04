@@ -427,6 +427,58 @@ var (
 			},
 		},
 	}
+	// IntegrationConfigsColumns holds the columns for the "integration_configs" table.
+	IntegrationConfigsColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "integration", Type: field.TypeString, Unique: true},
+		{Name: "config", Type: field.TypeString, Default: "{}"},
+		{Name: "enabled", Type: field.TypeBool, Default: true},
+		{Name: "updated_by", Type: field.TypeString, Nullable: true},
+		{Name: "create_time", Type: field.TypeTime},
+		{Name: "update_time", Type: field.TypeTime},
+	}
+	// IntegrationConfigsTable holds the schema information for the "integration_configs" table.
+	IntegrationConfigsTable = &schema.Table{
+		Name:       "integration_configs",
+		Columns:    IntegrationConfigsColumns,
+		PrimaryKey: []*schema.Column{IntegrationConfigsColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "integrationconfig_integration",
+				Unique:  true,
+				Columns: []*schema.Column{IntegrationConfigsColumns[1]},
+			},
+		},
+	}
+	// IntegrationUpdatesColumns holds the columns for the "integration_updates" table.
+	IntegrationUpdatesColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "integration", Type: field.TypeString},
+		{Name: "state", Type: field.TypeEnum, Enums: []string{"requested", "acknowledged", "updating", "completed", "failed"}, Default: "requested"},
+		{Name: "detail", Type: field.TypeString, Nullable: true},
+		{Name: "new_version", Type: field.TypeString, Nullable: true},
+		{Name: "requested_by", Type: field.TypeString, Nullable: true},
+		{Name: "create_time", Type: field.TypeTime},
+		{Name: "update_time", Type: field.TypeTime},
+	}
+	// IntegrationUpdatesTable holds the schema information for the "integration_updates" table.
+	IntegrationUpdatesTable = &schema.Table{
+		Name:       "integration_updates",
+		Columns:    IntegrationUpdatesColumns,
+		PrimaryKey: []*schema.Column{IntegrationUpdatesColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "integrationupdate_integration",
+				Unique:  false,
+				Columns: []*schema.Column{IntegrationUpdatesColumns[1]},
+			},
+			{
+				Name:    "integrationupdate_integration_create_time",
+				Unique:  false,
+				Columns: []*schema.Column{IntegrationUpdatesColumns[1], IntegrationUpdatesColumns[6]},
+			},
+		},
+	}
 	// InviteCodesColumns holds the columns for the "invite_codes" table.
 	InviteCodesColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeUUID},
@@ -1221,6 +1273,8 @@ var (
 		GroupsTable,
 		GroupMembershipsTable,
 		HarnessConfigsTable,
+		IntegrationConfigsTable,
+		IntegrationUpdatesTable,
 		InviteCodesTable,
 		LifecycleHooksTable,
 		LifecycleHookAgentPhasesTable,
@@ -1280,6 +1334,12 @@ func init() {
 	GroupMembershipsTable.ForeignKeys[2].RefTable = AgentsTable
 	HarnessConfigsTable.Annotation = &entsql.Annotation{
 		Table: "harness_configs",
+	}
+	IntegrationConfigsTable.Annotation = &entsql.Annotation{
+		Table: "integration_configs",
+	}
+	IntegrationUpdatesTable.Annotation = &entsql.Annotation{
+		Table: "integration_updates",
 	}
 	InviteCodesTable.Annotation = &entsql.Annotation{
 		Table: "invite_codes",

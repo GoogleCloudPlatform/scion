@@ -36,7 +36,13 @@ func PluginsConfigFromEntries(brokerEntries map[string]V1PluginEntryLike) Plugin
 		Broker: make(map[string]PluginEntry),
 	}
 	for name, entry := range brokerEntries {
-		cfg.Broker[name] = PluginEntry(entry)
+		cfg.Broker[name] = PluginEntry{
+			Path:        entry.Path,
+			Config:      entry.Config,
+			ConfigFile:  entry.ConfigFile,
+			SelfManaged: entry.SelfManaged,
+			Address:     entry.Address,
+		}
 	}
 	return cfg
 }

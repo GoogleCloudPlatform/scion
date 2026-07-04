@@ -87,3 +87,48 @@ func TestPluginsConfigFromEntries_SelfManaged(t *testing.T) {
 	assert.Equal(t, "my-gcp-project", cfg.Broker["googlechat"].Config["project_id"])
 	assert.Empty(t, cfg.Broker["googlechat"].Path)
 }
+
+func TestResolvedDeploymentMode(t *testing.T) {
+	tests := []struct {
+		name     string
+		entry    PluginEntry
+		expected DeploymentMode
+	}{
+		{
+			name:     "default empty entry",
+			entry:    PluginEntry{},
+			expected: DeploymentModePlugin,
+		},
+		{
+			name:     "explicit plugin mode",
+			entry:    PluginEntry{Mode: "plugin"},
+			expected: DeploymentModePlugin,
+		},
+		{
+			name:     "grpc mode",
+			entry:    PluginEntry{Mode: "grpc", Address: "localhost:9090"},
+			expected: DeploymentModeHA,
+		},
+		{
+			name:     "self-managed mode string",
+			entry:    PluginEntry{Mode: "self-managed"},
+			expected: DeploymentModeExternal,
+		},
+		{
+			name:     "legacy self_managed flag",
+			entry:    PluginEntry{SelfManaged: true, Address: "localhost:9090"},
+			expected: DeploymentModeExternal,
+		},
+		{
+			name:     "mode takes precedence over self_managed flag",
+			entry:    PluginEntry{Mode: "grpc", SelfManaged: true, Address: "localhost:9090"},
+			expected: DeploymentModeHA,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expected, tt.entry.ResolvedDeploymentMode())
+		})
+	}
+}

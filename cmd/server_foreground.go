@@ -45,6 +45,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/dispatchmetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/hubmetrics"
 	scionplugin "github.com/GoogleCloudPlatform/scion/pkg/plugin"
+	"github.com/GoogleCloudPlatform/scion/pkg/plugin/grpcbroker"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtimebroker"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
@@ -172,8 +173,9 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 
 	// 8. Initialize store
 	var s store.Store
+	var entClient *ent.Client
 	if enableHub {
-		s, err = initStore(ctx, cfg)
+		s, entClient, err = initStore(ctx, cfg)
 		if err != nil {
 			return err
 		}
@@ -234,7 +236,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 		}
 
 		var hubInitErr error
-		hubSrv, hubInitErr = initHubServer(ctx, cfg, s, hubEndpoint, devAuthToken, adminEmailList, adminMode, maintenanceMessage, requestLogger, messageLogger, globalDir, pluginMgr, secretBackend)
+		hubSrv, hubInitErr = initHubServer(ctx, cfg, s, entClient, hubEndpoint, devAuthToken, adminEmailList, adminMode, maintenanceMessage, requestLogger, messageLogger, globalDir, pluginMgr, secretBackend)
 		if hubInitErr != nil {
 			log.Fatalf("Hub server failed to start: %v", hubInitErr)
 		}
@@ -841,14 +843,14 @@ func checkServerPorts(cfg *config.GlobalConfig) error {
 // initStore initializes the database store. The provided context is used for
 // schema migration and the initial health-check ping so that a Ctrl+C during
 // startup cancels those operations gracefully.
-func initStore(ctx context.Context, cfg *config.GlobalConfig) (store.Store, error) {
+func initStore(ctx context.Context, cfg *config.GlobalConfig) (store.Store, *ent.Client, error) {
 	connMaxLifetime, err := cfg.Database.ConnMaxLifetimeDuration()
 	if err != nil {
-		return nil, fmt.Errorf("invalid database pool config: %w", err)
+		return nil, nil, fmt.Errorf("invalid database pool config: %w", err)
 	}
 	connMaxIdleTime, err := cfg.Database.ConnMaxIdleTimeDuration()
 	if err != nil {
-		return nil, fmt.Errorf("invalid database pool config: %w", err)
+		return nil, nil, fmt.Errorf("invalid database pool config: %w", err)
 	}
 
 	// The connection pool config is shared across backends. For SQLite,
@@ -870,7 +872,7 @@ func initStore(ctx context.Context, cfg *config.GlobalConfig) (store.Store, erro
 		// it. Detection is conservative and the whole step is a no-op for an
 		// already-Ent file, so it is safe to run on every boot.
 		if err := maybeMigrateLegacySQLite(ctx, cfg.Database.URL); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 
 		// All Hub state lives in a single Ent-backed SQLite database.
@@ -887,17 +889,17 @@ func initStore(ctx context.Context, cfg *config.GlobalConfig) (store.Store, erro
 		}
 		entClient, err = entc.OpenSQLite(sqliteDSN, pool)
 		if err != nil {
-			return nil, fmt.Errorf("failed to open database: %w", err)
+			return nil, nil, fmt.Errorf("failed to open database: %w", err)
 		}
 	case "postgres":
 		// Postgres uses the pgx stdlib driver. The URL is a standard
 		// connection string (e.g. "postgres://user:pass@host:5432/db?sslmode=require").
 		entClient, err = entc.OpenPostgres(cfg.Database.URL, pool)
 		if err != nil {
-			return nil, fmt.Errorf("failed to open database: %w", err)
+			return nil, nil, fmt.Errorf("failed to open database: %w", err)
 		}
 	default:
-		return nil, fmt.Errorf("unsupported database driver: %s", cfg.Database.Driver)
+		return nil, nil, fmt.Errorf("unsupported database driver: %s", cfg.Database.Driver)
 	}
 
 	s := entadapter.NewCompositeStore(entClient)
@@ -906,15 +908,15 @@ func initStore(ctx context.Context, cfg *config.GlobalConfig) (store.Store, erro
 	// operations (parity with the former raw-SQL store).
 	if err := migrateStore(ctx, cfg, s); err != nil {
 		s.Close()
-		return nil, fmt.Errorf("failed to run migrations: %w", err)
+		return nil, nil, fmt.Errorf("failed to run migrations: %w", err)
 	}
 
 	if err := s.Ping(ctx); err != nil {
 		s.Close()
-		return nil, fmt.Errorf("database ping failed: %w", err)
+		return nil, nil, fmt.Errorf("database ping failed: %w", err)
 	}
 
-	return s, nil
+	return s, entClient, nil
 }
 
 func migrateStore(ctx context.Context, cfg *config.GlobalConfig, s *entadapter.CompositeStore) error {
@@ -1108,7 +1110,7 @@ func resolveSessionSecret() string {
 }
 
 // initHubServer creates and configures the Hub server.
-func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store, hubEndpoint, devAuthToken string, adminEmailList []string, adminMode bool, maintenanceMessage string, requestLogger, messageLogger *slog.Logger, globalDir string, pluginMgr *scionplugin.Manager, secretBackend secret.SecretBackend) (*hub.Server, error) {
+func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store, entClient *ent.Client, hubEndpoint, devAuthToken string, adminEmailList []string, adminMode bool, maintenanceMessage string, requestLogger, messageLogger *slog.Logger, globalDir string, pluginMgr *scionplugin.Manager, secretBackend secret.SecretBackend) (*hub.Server, error) {
 	hubCfg := hub.ServerConfig{
 		HubID:                 cfg.Hub.ResolveHubID(),
 		Port:                  cfg.Hub.Port,
@@ -1254,6 +1256,7 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 	}
 	hubSrv.SetRequestLogger(requestLogger)
 	hubSrv.SetPluginManager(pluginMgr)
+	hubSrv.SetIntegrationHA(cfg.Database.Driver, entClient, cfg.Database.URL)
 	if messageLogger != nil {
 		hubSrv.SetMessageLogger(messageLogger)
 	}
@@ -1849,6 +1852,7 @@ func isObserverBroker(pluginMgr *scionplugin.Manager, name string) bool {
 func initPluginManager() *scionplugin.Manager {
 	logger := logging.Subsystem("plugin")
 	mgr := scionplugin.NewManager(logger)
+	mgr.NewGRPCBrokerAdapter = grpcbroker.NewAdapterFromEntry
 
 	vs, err := config.LoadVersionedSettings("")
 	if err != nil || vs == nil || vs.Server == nil || vs.Server.Plugins == nil {
@@ -1873,11 +1877,16 @@ func initPluginManager() *scionplugin.Manager {
 			mergedConfig = entry.Config
 		}
 		pluginsCfg.Broker[name] = scionplugin.PluginEntry{
-			Path:        entry.Path,
-			Config:      mergedConfig,
-			ConfigFile:  entry.ConfigFile,
-			SelfManaged: entry.SelfManaged,
-			Address:     entry.Address,
+			Path:          entry.Path,
+			Config:        mergedConfig,
+			ConfigFile:    entry.ConfigFile,
+			SelfManaged:   entry.SelfManaged,
+			Mode:          entry.Mode,
+			Address:       entry.Address,
+			TLSCertFile:   entry.TLSCertFile,
+			TLSKeyFile:    entry.TLSKeyFile,
+			TLSCAFile:     entry.TLSCAFile,
+			TLSSkipVerify: entry.TLSSkipVerify,
 		}
 	}
 

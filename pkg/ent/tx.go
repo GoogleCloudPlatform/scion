@@ -38,6 +38,10 @@ type Tx struct {
 	GroupMembership *GroupMembershipClient
 	// HarnessConfig is the client for interacting with the HarnessConfig builders.
 	HarnessConfig *HarnessConfigClient
+	// IntegrationConfig is the client for interacting with the IntegrationConfig builders.
+	IntegrationConfig *IntegrationConfigClient
+	// IntegrationUpdate is the client for interacting with the IntegrationUpdate builders.
+	IntegrationUpdate *IntegrationUpdateClient
 	// InviteCode is the client for interacting with the InviteCode builders.
 	InviteCode *InviteCodeClient
 	// LifecycleHook is the client for interacting with the LifecycleHook builders.
@@ -228,6 +232,8 @@ func (tx *Tx) init() {
 	tx.Group = NewGroupClient(tx.config)
 	tx.GroupMembership = NewGroupMembershipClient(tx.config)
 	tx.HarnessConfig = NewHarnessConfigClient(tx.config)
+	tx.IntegrationConfig = NewIntegrationConfigClient(tx.config)
+	tx.IntegrationUpdate = NewIntegrationUpdateClient(tx.config)
 	tx.InviteCode = NewInviteCodeClient(tx.config)
 	tx.LifecycleHook = NewLifecycleHookClient(tx.config)
 	tx.LifecycleHookAgentPhase = NewLifecycleHookAgentPhaseClient(tx.config)

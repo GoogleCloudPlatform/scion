@@ -15,6 +15,7 @@
 package config
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -45,17 +46,13 @@ const (
 // IntegrationConfigProvider defines the interface for reading and writing
 // per-integration configuration. Implementations handle only non-sensitive
 // settings; secrets are managed separately via SecretBackend.
-//
-// Phase 1 exposes file-based Load/Save only. Phase 2 will extend this to the
-// full admin API surface (context-aware, per-integration routing, list, status)
-// per design doc §3.3.
 type IntegrationConfigProvider interface {
-	// Load reads the integration config file and returns its contents as a
+	// Load reads the integration configuration and returns its contents as a
 	// flat key-value map suitable for merging into a plugin's Config map.
-	Load() (map[string]string, error)
+	Load(ctx context.Context) (map[string]string, error)
 
-	// Save writes the given key-value map to the integration config file.
-	Save(config map[string]string) error
+	// Save writes the given key-value map to the integration configuration store.
+	Save(ctx context.Context, config map[string]string) error
 }
 
 // YAMLConfigProvider reads and writes per-integration YAML config files.
@@ -97,7 +94,9 @@ func (p *YAMLConfigProvider) Path() string {
 
 // Load reads the YAML config file and returns its contents as a flat key-value map.
 // Returns an empty map (not an error) if the file does not exist.
-func (p *YAMLConfigProvider) Load() (map[string]string, error) {
+// The context parameter is accepted for interface compliance but unused by
+// the file-based provider.
+func (p *YAMLConfigProvider) Load(_ context.Context) (map[string]string, error) {
 	data, err := os.ReadFile(p.path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -120,7 +119,9 @@ func (p *YAMLConfigProvider) Load() (map[string]string, error) {
 
 // Save writes the given key-value map to the YAML config file.
 // The parent directory is created if it does not exist.
-func (p *YAMLConfigProvider) Save(config map[string]string) error {
+// The context parameter is accepted for interface compliance but unused by
+// the file-based provider.
+func (p *YAMLConfigProvider) Save(_ context.Context, config map[string]string) error {
 	dir := filepath.Dir(p.path)
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return fmt.Errorf("create config dir %s: %w", dir, err)
@@ -264,7 +265,7 @@ func LoadPluginConfigFile(configFile string, inlineConfig map[string]string) (ma
 		return nil, err
 	}
 
-	fileConfig, err := provider.Load()
+	fileConfig, err := provider.Load(context.Background())
 	if err != nil {
 		return nil, err
 	}

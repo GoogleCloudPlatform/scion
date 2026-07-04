@@ -165,6 +165,29 @@ func (f HarnessConfigFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Valu
 	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.HarnessConfigMutation", m)
 }
 
+// The IntegrationConfigFunc type is an adapter to allow the use of ordinary
+// function as IntegrationConfig mutator.
+type IntegrationConfigFunc func(context.Context, *ent.IntegrationConfigMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f IntegrationConfigFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.IntegrationConfigMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.IntegrationConfigMutation", m)
+}
+
+// The IntegrationUpdateFunc type is an adapter to allow the use of ordinary
+// function as IntegrationUpdate mutator.
+type IntegrationUpdateFunc func(context.Context, *ent.IntegrationUpdateMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f IntegrationUpdateFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.IntegrationUpdateMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.IntegrationUpdateMutation", m)
+}
 // The InviteCodeFunc type is an adapter to allow the use of ordinary
 // function as InviteCode mutator.
 type InviteCodeFunc func(context.Context, *ent.InviteCodeMutation) (ent.Value, error)

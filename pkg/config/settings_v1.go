@@ -356,6 +356,14 @@ type V1PluginEntry struct {
 	// an externally-managed process). When empty, falls back to SelfManaged for
 	// backward compatibility.
 	Mode string `json:"mode,omitempty" yaml:"mode,omitempty" koanf:"mode"`
+	// TLSCertFile is the path to the client TLS certificate for mTLS.
+	TLSCertFile string `json:"tls_cert_file,omitempty" yaml:"tls_cert_file,omitempty" koanf:"tls_cert_file"`
+	// TLSKeyFile is the path to the client TLS private key for mTLS.
+	TLSKeyFile string `json:"tls_key_file,omitempty" yaml:"tls_key_file,omitempty" koanf:"tls_key_file"`
+	// TLSCAFile is the path to the CA certificate for verifying the server.
+	TLSCAFile string `json:"tls_ca_file,omitempty" yaml:"tls_ca_file,omitempty" koanf:"tls_ca_file"`
+	// TLSSkipVerify disables TLS certificate verification (for development).
+	TLSSkipVerify bool `json:"tls_skip_verify,omitempty" yaml:"tls_skip_verify,omitempty" koanf:"tls_skip_verify"`
 }
 
 // V1ServerHubConfig holds the Hub API server settings (when running scion-server).

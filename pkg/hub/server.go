@@ -36,6 +36,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/githubapp"
@@ -673,6 +674,22 @@ type Server struct {
 
 	imageChecker      *imagecheck.Checker
 	imageStatusFlight singleflight.Group
+
+	// Mode 3 (HA) integration support fields.
+	// dbDriver records the database backend ("sqlite" or "postgres") for
+	// feature-gating Mode 3 endpoints that require Postgres.
+	dbDriver string
+	// entClient is the Ent ORM client for direct queries on
+	// integration_configs and integration_updates tables (nil when HA
+	// integration features are not configured).
+	entClient *ent.Client
+	// adminSignalListener listens for NOTIFY on scion_integration_admin
+	// (nil when database is not Postgres).
+	adminSignalListener *AdminSignalListener
+	// databaseDSN is the Postgres connection string, needed to open the
+	// admin signal listener connection and for PublishAdminSignal calls
+	// outside a transaction (nil/empty when database is not Postgres).
+	databaseDSN string
 }
 
 func newInstanceID() string {
@@ -1443,6 +1460,22 @@ func (s *Server) SetPluginManager(m IntegrationManager) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.pluginManager = m
+}
+
+// SetIntegrationHA configures Mode 3 (HA) integration support on the server.
+// It sets the database driver, Ent client, and DSN needed for Postgres-backed
+// integration config/update endpoints and the admin signal listener.
+func (s *Server) SetIntegrationHA(dbDriver string, client *ent.Client, dsn string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.dbDriver = dbDriver
+	s.entClient = client
+	s.databaseDSN = dsn
+}
+
+// IsPostgres reports whether the hub is running on a Postgres backend.
+func (s *Server) IsPostgres() bool {
+	return strings.EqualFold(s.dbDriver, "postgres")
 }
 
 // logMessage logs a message dispatch event to the dedicated message logger
