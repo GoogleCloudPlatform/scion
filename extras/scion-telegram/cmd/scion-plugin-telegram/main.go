@@ -208,14 +208,14 @@ func serveStandalone() {
 	// Only the lock holder calls RegisterWebhook().
 	cfg := rt.Config()
 	cfg["database_url"] = databaseURL
-	cfg["inbound_mode"] = "webhook"
 	cfg["skip_set_webhook"] = "true"
 
-	// F8: Validate merged config rejects poll mode.
+	// F8: Validate merged config rejects poll mode before forcing webhook.
 	if v, ok := cfg["inbound_mode"]; ok && strings.EqualFold(v, "poll") {
 		log.Error("HA/standalone Telegram requires webhook mode; inbound_mode=poll is not supported")
 		os.Exit(1)
 	}
+	cfg["inbound_mode"] = "webhook"
 
 	if err := broker.Configure(cfg); err != nil {
 		log.Error("Failed to configure Telegram broker", "error", err)
@@ -224,11 +224,11 @@ func serveStandalone() {
 
 	rt.SetReconfigure(func(newCfg map[string]string) error {
 		newCfg["database_url"] = databaseURL
-		newCfg["inbound_mode"] = "webhook"
 		newCfg["skip_set_webhook"] = "true"
 		if v, ok := newCfg["inbound_mode"]; ok && strings.EqualFold(v, "poll") {
 			return fmt.Errorf("HA/standalone Telegram requires webhook mode; inbound_mode=poll rejected")
 		}
+		newCfg["inbound_mode"] = "webhook"
 		return broker.Configure(newCfg)
 	})
 

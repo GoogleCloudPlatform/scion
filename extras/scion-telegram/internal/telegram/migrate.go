@@ -24,7 +24,7 @@ import (
 // idempotent: rows are inserted with ON CONFLICT DO NOTHING semantics.
 // Returns a map of table name → row count migrated.
 func MigrateSQLiteToPostgres(ctx context.Context, sqlitePath, postgresURL string) (map[string]int, error) {
-	src, err := NewSQLiteStore(sqlitePath)
+	src, err := NewSQLiteStoreReadOnly(sqlitePath)
 	if err != nil {
 		return nil, fmt.Errorf("open source sqlite: %w", err)
 	}

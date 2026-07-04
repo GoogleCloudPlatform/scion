@@ -175,6 +175,16 @@ func NewSQLiteStore(dbPath string) (Store, error) {
 	return s, nil
 }
 
+// NewSQLiteStoreReadOnly opens a SQLite database in read-only mode.
+// No schema changes or WAL pragma are applied.
+func NewSQLiteStoreReadOnly(dbPath string) (Store, error) {
+	db, err := sql.Open("sqlite", dbPath+"?mode=ro")
+	if err != nil {
+		return nil, fmt.Errorf("open sqlite database (read-only): %w", err)
+	}
+	return &sqliteStore{db: db}, nil
+}
+
 func (s *sqliteStore) createTables() error {
 	const ddl = `
 CREATE TABLE IF NOT EXISTS group_links (

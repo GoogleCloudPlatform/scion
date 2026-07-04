@@ -338,18 +338,19 @@ Standalone mode runs the Telegram broker as an independent service with Postgres
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `DATABASE_URL` | **Yes** | — | Postgres connection URL |
-| `BOT_TOKEN` | **Yes** | — | Telegram bot token |
-| `WEBHOOK_URL` | **Yes** | — | Public HTTPS URL for webhook delivery |
-| `WEBHOOK_SECRET` | No | — | Secret token for webhook validation |
-| `WEBHOOK_LISTEN` | No | `:9094` | Listen address for webhook HTTP server |
-| `HUB_URL` | No | — | Hub API URL for inbound message delivery |
-| `HMAC_KEY` | No | — | HMAC key for hub authentication |
-| `BROKER_ID` | No | — | Broker identifier for HMAC signing |
+| `TELEGRAM_BOT_TOKEN` | **Yes** | — | Telegram bot token |
+| `TELEGRAM_WEBHOOK_URL` | **Yes** | — | Public HTTPS URL for webhook delivery |
+| `TELEGRAM_WEBHOOK_SECRET` | No | — | Secret token for webhook validation |
+| `TELEGRAM_WEBHOOK_LISTEN` | No | `:9094` | Listen address for webhook HTTP server |
+| `TELEGRAM_HUB_URL` | No | — | Hub API URL for inbound message delivery |
+| `TELEGRAM_HMAC_KEY` | No | — | HMAC key for hub authentication |
+| `TELEGRAM_BROKER_ID` | No | — | Broker identifier for HMAC signing |
+| `GRPC_PORT` | No | `50051` | gRPC server listen port |
 
 ### Running Standalone
 
 ```bash
-DATABASE_URL="postgres://..." BOT_TOKEN="..." WEBHOOK_URL="https://..." \
+DATABASE_URL="postgres://..." TELEGRAM_BOT_TOKEN="..." TELEGRAM_WEBHOOK_URL="https://..." \
   ./scion-plugin-telegram --standalone
 ```
 
@@ -359,9 +360,9 @@ DATABASE_URL="postgres://..." BOT_TOKEN="..." WEBHOOK_URL="https://..." \
 docker build -t scion-telegram -f extras/scion-telegram/Dockerfile .
 
 docker run -e DATABASE_URL="postgres://..." \
-           -e BOT_TOKEN="..." \
-           -e WEBHOOK_URL="https://..." \
-           -p 9094:9094 scion-telegram
+           -e TELEGRAM_BOT_TOKEN="..." \
+           -e TELEGRAM_WEBHOOK_URL="https://..." \
+           -p 9094:9094 -p 50051:50051 scion-telegram
 ```
 
 ### Webhook Registration Lock
