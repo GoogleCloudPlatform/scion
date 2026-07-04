@@ -417,7 +417,11 @@ export class ScionPageAdminIntegrations extends LitElement {
         return;
       }
       this.detail = (await res.json()) as IntegrationDetail;
-      this.editedSettings = { ...(this.detail.settings || {}) };
+      const knownFields = PLATFORM_FIELDS[this.detail.platform] ?? [];
+      this.editedSettings = {
+        ...Object.fromEntries(knownFields.map((f) => [f.key, f.defaultValue])),
+        ...(this.detail.settings || {}),
+      };
       this.editedSecrets = {};
     } catch {
       this.error = 'Failed to connect to server';
@@ -778,7 +782,7 @@ export class ScionPageAdminIntegrations extends LitElement {
               <div class="form-field">
                 <label>${field.label}</label>
                 <sl-input
-                  value=${this.editedSettings[field.key] ?? field.defaultValue}
+                  .value=${this.editedSettings[field.key] ?? field.defaultValue}
                   placeholder=${field.defaultValue}
                   @sl-change=${(e: Event) => {
                     this.editedSettings = {
@@ -796,7 +800,7 @@ export class ScionPageAdminIntegrations extends LitElement {
               <div class="form-field">
                 <label>${key}</label>
                 <sl-input
-                  value=${this.editedSettings[key] ?? ''}
+                  .value=${this.editedSettings[key] ?? ''}
                   @sl-change=${(e: Event) => {
                     this.editedSettings = {
                       ...this.editedSettings,
@@ -832,7 +836,7 @@ export class ScionPageAdminIntegrations extends LitElement {
                 class="secret-input"
                 type="password"
                 placeholder=${d.has_secrets[key] ? 'Enter new value to update' : 'Enter value'}
-                value=${this.editedSecrets[key] ?? ''}
+                .value=${this.editedSecrets[key] ?? ''}
                 @sl-change=${(e: Event) => {
                   this.editedSecrets = {
                     ...this.editedSecrets,
