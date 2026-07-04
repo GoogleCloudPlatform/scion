@@ -85,7 +85,8 @@ type Runtime struct {
 	config    map[string]string
 	cancelCtx context.CancelFunc
 
-	ready chan struct{} // closed when initial config load succeeds
+	ready      chan struct{} // closed when initial config load succeeds
+	shutdownCh chan string   // update-triggered graceful shutdown signal
 }
 
 // New creates a Runtime but does not start it. Call Start to begin.
@@ -95,9 +96,10 @@ func New(opts Options) *Runtime {
 		log = slog.Default()
 	}
 	return &Runtime{
-		opts:  opts,
-		log:   log,
-		ready: make(chan struct{}),
+		opts:       opts,
+		log:        log,
+		ready:      make(chan struct{}),
+		shutdownCh: make(chan string, 1),
 	}
 }
 
@@ -115,7 +117,7 @@ func (rt *Runtime) Start(ctx context.Context) (context.Context, error) {
 		return nil, fmt.Errorf("connect to database: %w", err)
 	}
 
-	if err := rt.loadConfig(rctx); err != nil {
+	if err := rt.loadConfig(rctx, true); err != nil {
 		cancel()
 		return nil, fmt.Errorf("load initial config: %w", err)
 	}
@@ -134,10 +136,26 @@ func (rt *Runtime) Start(ctx context.Context) (context.Context, error) {
 		}
 	})
 
+	// F7: Re-scan tables on (re)connect — NOTIFYs missed during LISTEN
+	// gaps are recovered from the source-of-truth rows.
+	rt.listener.SetOnConnect(func() {
+		rt.scanPendingUpdates(rctx)
+		rt.handleConfigSignal(rctx)
+	})
+
+	go rt.pollLoop(rctx)
+
 	rt.log.Info("Integration runtime started",
 		"integration", rt.opts.Integration,
 	)
 	return rctx, nil
+}
+
+// ShutdownRequested returns a channel that receives the update ID when an
+// update signal requests graceful shutdown. The caller should cancel the
+// runtime's context to trigger orderly shutdown.
+func (rt *Runtime) ShutdownRequested() <-chan string {
+	return rt.shutdownCh
 }
 
 // SetReconfigure sets the callback invoked when a config change signal arrives.
@@ -183,10 +201,15 @@ func (rt *Runtime) Stop() {
 }
 
 func (rt *Runtime) connectWithRetry(ctx context.Context) error {
-	const maxAttempts = 10
 	backoff := 500 * time.Millisecond
+	attempt := 0
 
-	for attempt := 1; attempt <= maxAttempts; attempt++ {
+	for {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		attempt++
+
 		db, err := sql.Open("pgx", rt.opts.DatabaseURL)
 		if err != nil {
 			rt.log.Warn("Failed to open database", "attempt", attempt, "error", err)
@@ -210,7 +233,6 @@ func (rt *Runtime) connectWithRetry(ctx context.Context) error {
 			continue
 		}
 
-		// Verify hub-owned tables exist.
 		err = rt.checkHubTables(ctx, db)
 		if err != nil {
 			db.Close()
@@ -225,20 +247,23 @@ func (rt *Runtime) connectWithRetry(ctx context.Context) error {
 		rt.db = db
 		return nil
 	}
-	return fmt.Errorf("failed to connect to database after %d attempts", maxAttempts)
 }
 
 func (rt *Runtime) checkHubTables(ctx context.Context, db *sql.DB) error {
 	checkCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	_, err := db.ExecContext(checkCtx,
-		"SELECT 1 FROM integration_configs LIMIT 0")
+	if _, err := db.ExecContext(checkCtx, "SELECT 1 FROM integration_configs LIMIT 0"); err != nil {
+		return err
+	}
+	_, err := db.ExecContext(checkCtx, "SELECT 1 FROM integration_updates LIMIT 0")
 	return err
 }
 
 // loadConfig implements the layering: local YAML → env vars → DB config.
-// DB config has highest priority.
-func (rt *Runtime) loadConfig(ctx context.Context) error {
+// DB config has highest priority. When initial is true, a DB config load
+// failure is fatal (returning an error); on subsequent reloads it is
+// warn-and-keep (preserving last-known-good config).
+func (rt *Runtime) loadConfig(ctx context.Context, initial bool) error {
 	merged := make(map[string]string)
 
 	// Layer 1: local YAML file (lowest priority).
@@ -271,7 +296,10 @@ func (rt *Runtime) loadConfig(ctx context.Context) error {
 	// Layer 3: DB config (highest priority).
 	dbConfig, err := rt.loadDBConfig(ctx)
 	if err != nil {
-		rt.log.Warn("Failed to load DB config, using file/env only", "error", err)
+		if initial {
+			return fmt.Errorf("load DB config: %w", err)
+		}
+		rt.log.Warn("Failed to load DB config, keeping last-known-good", "error", err)
 	} else {
 		for k, v := range dbConfig {
 			merged[k] = v
@@ -304,9 +332,18 @@ func (rt *Runtime) loadDBConfig(ctx context.Context) (map[string]string, error) 
 		return nil, fmt.Errorf("query integration_configs: %w", err)
 	}
 
-	var result map[string]string
-	if err := json.Unmarshal([]byte(configJSON), &result); err != nil {
+	var raw map[string]any
+	if err := json.Unmarshal([]byte(configJSON), &raw); err != nil {
 		return nil, fmt.Errorf("unmarshal integration config: %w", err)
+	}
+	result := make(map[string]string, len(raw))
+	for k, v := range raw {
+		switch val := v.(type) {
+		case string:
+			result[k] = val
+		default:
+			result[k] = fmt.Sprintf("%v", val)
+		}
 	}
 	return result, nil
 }
@@ -314,7 +351,7 @@ func (rt *Runtime) loadDBConfig(ctx context.Context) (map[string]string, error) 
 func (rt *Runtime) handleConfigSignal(ctx context.Context) {
 	rt.log.Info("Config change signal received", "integration", rt.opts.Integration)
 
-	if err := rt.loadConfig(ctx); err != nil {
+	if err := rt.loadConfig(ctx, false); err != nil {
 		rt.log.Error("Failed to reload config on signal", "error", err)
 		return
 	}
@@ -337,19 +374,27 @@ func (rt *Runtime) handleUpdateSignal(ctx context.Context, updateID string) {
 		"update_id", updateID,
 	)
 
-	// Acknowledge the update.
-	if err := rt.writeUpdateState(ctx, updateID, "acknowledged", ""); err != nil {
+	// F9: Guarded transition requested→acknowledged. If 0 rows affected,
+	// this is a stale/duplicate signal — do not proceed.
+	applied, err := rt.transitionUpdateState(ctx, updateID, "requested", "acknowledged", "")
+	if err != nil {
 		rt.log.Error("Failed to acknowledge update", "error", err, "update_id", updateID)
 		return
 	}
-
-	// Transition to updating.
-	if err := rt.writeUpdateState(ctx, updateID, "updating", ""); err != nil {
-		rt.log.Error("Failed to mark update as updating", "error", err, "update_id", updateID)
+	if !applied {
+		rt.log.Info("Update signal stale or already processed", "update_id", updateID)
 		return
 	}
 
-	// Execute update hook if configured.
+	applied, err = rt.transitionUpdateState(ctx, updateID, "acknowledged", "updating", "")
+	if err != nil {
+		rt.log.Error("Failed to mark update as updating", "error", err, "update_id", updateID)
+		return
+	}
+	if !applied {
+		return
+	}
+
 	if rt.opts.UpdateHook != "" {
 		rt.log.Info("Executing update hook", "hook", rt.opts.UpdateHook)
 		cmd := exec.CommandContext(ctx, "sh", "-c", rt.opts.UpdateHook)
@@ -357,27 +402,34 @@ func (rt *Runtime) handleUpdateSignal(ctx context.Context, updateID string) {
 		cmd.Stderr = os.Stderr
 		if err := cmd.Run(); err != nil {
 			detail := fmt.Sprintf("update hook failed: %v", err)
-			_ = rt.writeUpdateState(ctx, updateID, "failed", detail)
+			rt.transitionUpdateState(ctx, updateID, "updating", "failed", detail)
 			rt.log.Error("Update hook failed", "error", err)
 			return
 		}
 	}
 
-	// Default: graceful exit relying on platform restart policy.
-	rt.log.Info("Update complete, exiting for platform restart")
-	os.Exit(0)
+	// F8: Signal main to shut down gracefully instead of os.Exit(0).
+	rt.log.Info("Update processed, requesting graceful shutdown")
+	select {
+	case rt.shutdownCh <- updateID:
+	default:
+	}
 }
 
-func (rt *Runtime) writeUpdateState(ctx context.Context, updateID, state, detail string) error {
+// transitionUpdateState performs a guarded state transition: the UPDATE only
+// fires if the row is currently in fromState. Returns (true, nil) if the row
+// was transitioned, (false, nil) if it was stale/already-advanced, or
+// (false, err) on database error.
+func (rt *Runtime) transitionUpdateState(ctx context.Context, updateID, fromState, toState, detail string) (bool, error) {
 	if rt.db == nil || updateID == "" {
-		return nil
+		return true, nil
 	}
 
 	writeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
 	query := "UPDATE integration_updates SET state = $1, update_time = NOW()"
-	args := []any{state}
+	args := []any{toState}
 	argIdx := 2
 
 	if detail != "" {
@@ -386,11 +438,69 @@ func (rt *Runtime) writeUpdateState(ctx context.Context, updateID, state, detail
 		argIdx++
 	}
 
-	query += fmt.Sprintf(" WHERE id = $%d::uuid", argIdx)
-	args = append(args, updateID)
+	query += fmt.Sprintf(" WHERE id = $%d::uuid AND state = $%d", argIdx, argIdx+1)
+	args = append(args, updateID, fromState)
 
-	_, err := rt.db.ExecContext(writeCtx, query, args...)
-	return err
+	result, err := rt.db.ExecContext(writeCtx, query, args...)
+	if err != nil {
+		return false, err
+	}
+
+	n, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
+// pollLoop periodically re-scans the source-of-truth tables for rows
+// that were missed during LISTEN gaps (F7). NOTIFYs are not queued for
+// disconnected listeners, so this catches updates requested while the
+// integration was down or reconnecting.
+func (rt *Runtime) pollLoop(ctx context.Context) {
+	rt.scanPendingUpdates(ctx)
+
+	ticker := time.NewTicker(60 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			rt.scanPendingUpdates(ctx)
+			rt.handleConfigSignal(ctx)
+		}
+	}
+}
+
+func (rt *Runtime) scanPendingUpdates(ctx context.Context) {
+	if rt.db == nil {
+		return
+	}
+
+	queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	rows, err := rt.db.QueryContext(queryCtx,
+		"SELECT id FROM integration_updates WHERE integration = $1 AND state = 'requested'",
+		rt.opts.Integration)
+	if err != nil {
+		if ctx.Err() == nil {
+			rt.log.Warn("Failed to scan pending updates", "error", err)
+		}
+		return
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rt.log.Warn("Failed to scan update row", "error", err)
+			continue
+		}
+		rt.handleUpdateSignal(ctx, id)
+	}
 }
 
 func (rt *Runtime) sleep(ctx context.Context, d time.Duration) bool {

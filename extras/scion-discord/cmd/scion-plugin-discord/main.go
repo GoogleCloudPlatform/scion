@@ -213,7 +213,13 @@ func serveStandalone() {
 		close(lockLoopDone)
 	}()
 
-	<-rctx.Done()
+	// Block until signal or update-triggered shutdown (F8).
+	select {
+	case <-rctx.Done():
+	case updateID := <-rt.ShutdownRequested():
+		log.Info("Update-triggered shutdown", "update_id", updateID)
+		stop()
+	}
 	<-lockLoopDone
 	log.Info("Shutting down standalone Discord bot")
 

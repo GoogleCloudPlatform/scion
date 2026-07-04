@@ -110,6 +110,7 @@ type AdminSignalListener struct {
 
 	mu        sync.RWMutex
 	callbacks []AdminSignalCallback
+	onConnect func()
 }
 
 // NewAdminSignalListener creates and starts a new listener on the admin signal
@@ -134,6 +135,15 @@ func NewAdminSignalListener(ctx context.Context, dsn string, log *slog.Logger) *
 func (l *AdminSignalListener) OnSignal(cb AdminSignalCallback) {
 	l.mu.Lock()
 	l.callbacks = append(l.callbacks, cb)
+	l.mu.Unlock()
+}
+
+// SetOnConnect registers a callback invoked on initial connect and every
+// reconnect. Use this to re-scan tables for rows missed during LISTEN gaps,
+// since Postgres does not queue NOTIFYs for disconnected listeners.
+func (l *AdminSignalListener) SetOnConnect(fn func()) {
+	l.mu.Lock()
+	l.onConnect = fn
 	l.mu.Unlock()
 }
 
@@ -181,6 +191,13 @@ func (l *AdminSignalListener) run() {
 			l.log.Warn("Admin signal LISTEN failed", "error", err)
 			_ = conn.Close(context.Background())
 			continue
+		}
+
+		l.mu.RLock()
+		oc := l.onConnect
+		l.mu.RUnlock()
+		if oc != nil {
+			oc()
 		}
 
 		loopErr := l.listenLoop(conn, pollInterval)

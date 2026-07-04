@@ -308,10 +308,11 @@ Standalone mode runs the Discord bot as an independent service, communicating wi
 ### How It Works
 
 - The binary detects standalone mode via `--standalone` flag or `DISCORD_STANDALONE=true` env var
-- A Postgres advisory lock ensures only one instance opens the Discord Gateway at a time (Discord enforces one WebSocket session per bot token)
+- A Postgres advisory lock held on a dedicated database connection ensures only one instance opens the Discord Gateway at a time (Discord enforces one WebSocket session per bot token)
+- The lock holder periodically verifies the connection is alive; on loss, it closes the Gateway and re-enters standby
 - All instances serve gRPC and respond to health checks regardless of lock state
 - The lock holder runs the Gateway; standby instances retry every ~30s
-- On primary failure, Postgres releases the session-level lock and a standby promotes within 30–60s
+- On primary failure, Postgres releases the session-level lock and a standby promotes after a takeover delay (~60–90s) to prevent dual-Gateway storms
 - Outbound messages (hub → Discord) are delivered via REST API, which works from any instance — only the Gateway connection is serialized
 
 ### Quick Start (Standalone)
@@ -423,11 +424,12 @@ message_broker:
 
 ### HA Failover Behavior
 
-1. Instance A acquires the advisory lock → opens the Discord Gateway
+1. Instance A acquires the advisory lock on a dedicated DB connection → opens the Discord Gateway
 2. Instance B fails to acquire → enters standby, retries every 30s
-3. Instance A crashes → Postgres releases the session-level lock
-4. Instance B acquires lock on next tick → opens Gateway within 30–60s
+3. Instance A crashes → Postgres releases the session-level lock (dedicated connection dies)
+4. Instance B observes the lock acquirable on two consecutive ticks (takeover delay) → opens Gateway within ~60–90s
 5. Messages queued during the gap are delivered on reconnect (deferred message reconciliation)
+6. If Instance A's lock connection dies without a crash, Instance A detects it on the next verify tick, closes the Gateway, and re-enters standby
 
 ### Config Layering
 
