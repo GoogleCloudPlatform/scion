@@ -19,20 +19,20 @@ by `sciontool harness provision --manifest ...`. The host-side
 ContainerScriptHarness has already:
 
   * Staged this script and config.yaml under $HOME/.scion/harness/.
-  * Projected available auth env vars into the container's launch environment
-    (so the OpenCode child process will see ANTHROPIC_API_KEY, OPENAI_API_KEY,
-    etc. — but `sciontool harness provision` strips them from THIS script's env
-    for containment, so we read the *names* of available creds from
-    inputs/auth-candidates.json instead of os.environ).
+   * Projected available auth env vars into the container's launch environment
+     (so the OpenCode child process will see ANTHROPIC_API_KEY, OPENAI_API_KEY,
+     OPENCODE_API_KEY, etc. — but `sciontool harness provision` strips them from
+     THIS script's env for containment, so we read the *names* of available
+     creds from inputs/auth-candidates.json instead of os.environ).
   * Mounted any auth file (e.g. ~/.local/share/opencode/auth.json) at the
     declared container_path.
 
 This script's job is therefore minimal:
 
-  1. Determine which auth method OpenCode will use, honoring an explicit
-     selection if present and otherwise applying the same precedence as the
-     compiled OpenCode harness:
-         AnthropicAPIKey > OpenAIAPIKey > OpenCodeAuthFile.
+   1. Determine which auth method OpenCode will use, honoring an explicit
+      selection if present and otherwise applying the same precedence as the
+      compiled OpenCode harness:
+          AnthropicAPIKey > OpenAIAPIKey > OpenCodeAPIKey > OpenCodeAuthFile.
   2. Fail (exit 1) with an actionable message if no method is available.
   3. Write outputs/resolved-auth.json describing the choice (for diagnostics
      and resume-time consistency).
@@ -165,6 +165,7 @@ def _select_auth_method(
     """
     has_anthropic = "ANTHROPIC_API_KEY" in env_keys
     has_openai = "OPENAI_API_KEY" in env_keys
+    has_opencode = "OPENCODE_API_KEY" in env_keys
     has_authfile = _opencode_auth_file_present(file_paths)
 
     has_vertex_project = bool(env_keys & {"GOOGLE_CLOUD_PROJECT", "VERTEXAI_PROJECT"})
@@ -188,9 +189,11 @@ def _select_auth_method(
                 return "api-key", "ANTHROPIC_API_KEY"
             if has_openai:
                 return "api-key", "OPENAI_API_KEY"
+            if has_opencode:
+                return "api-key", "OPENCODE_API_KEY"
             raise ValueError(
                 "opencode: auth type 'api-key' selected but no API key found; "
-                "set ANTHROPIC_API_KEY or OPENAI_API_KEY"
+                "set ANTHROPIC_API_KEY, OPENAI_API_KEY, or OPENCODE_API_KEY"
             )
         if explicit == "auth-file":
             if not has_authfile:
@@ -220,15 +223,18 @@ def _select_auth_method(
         return "api-key", "ANTHROPIC_API_KEY"
     if has_openai:
         return "api-key", "OPENAI_API_KEY"
+    if has_opencode:
+        return "api-key", "OPENCODE_API_KEY"
     if has_authfile:
         return "auth-file", ""
     if has_vertex:
         return "vertex-ai", ""
 
     raise ValueError(
-        "opencode: no valid auth method found; set ANTHROPIC_API_KEY or "
-        f"OPENAI_API_KEY, provide auth credentials at {OPENCODE_AUTH_FILE}, "
-        "or configure GOOGLE_CLOUD_PROJECT + GOOGLE_CLOUD_REGION for Vertex AI"
+        "opencode: no valid auth method found; set ANTHROPIC_API_KEY, "
+        "OPENAI_API_KEY, or OPENCODE_API_KEY, provide auth credentials at "
+        f"{OPENCODE_AUTH_FILE}, or configure GOOGLE_CLOUD_PROJECT + "
+        "GOOGLE_CLOUD_REGION for Vertex AI"
     )
 
 

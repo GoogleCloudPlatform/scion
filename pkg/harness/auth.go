@@ -66,6 +66,7 @@ func GatherAuthWithEnv(env map[string]string, localSources bool, authMeta *confi
 		ClaudeOAuthToken: lookup("CLAUDE_CODE_OAUTH_TOKEN"),
 		OpenAIAPIKey:     lookup("OPENAI_API_KEY"),
 		CodexAPIKey:      lookup("CODEX_API_KEY"),
+		OpenCodeAPIKey:   lookup("OPENCODE_API_KEY"),
 		GoogleCloudProject: util.FirstNonEmpty(
 			lookup("GOOGLE_CLOUD_PROJECT"),
 			lookup("GCP_PROJECT"),
@@ -490,7 +491,7 @@ func RequiredAuthEnvKeys(harnessName, authSelectedType string) [][]string {
 		case "none":
 			return nil
 		case "api-key":
-			return [][]string{{"ANTHROPIC_API_KEY", "OPENAI_API_KEY"}}
+			return [][]string{{"ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENCODE_API_KEY"}}
 		}
 	case "codex":
 		switch effectiveType {

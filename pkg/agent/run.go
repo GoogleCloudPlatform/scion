@@ -1231,6 +1231,7 @@ func isAuthEnvKey(key string, extraAuthKeys ...map[string]struct{}) bool {
 		"CLAUDE_CODE_OAUTH_TOKEN",
 		"OPENAI_API_KEY",
 		"CODEX_API_KEY",
+		"OPENCODE_API_KEY",
 		"GOOGLE_CLOUD_PROJECT",
 		"GCP_PROJECT",
 		"ANTHROPIC_VERTEX_PROJECT_ID",

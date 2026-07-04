@@ -80,7 +80,7 @@ auth:
   types:
     api-key:
       required_env:
-        - any_of: ["ANTHROPIC_API_KEY", "OPENAI_API_KEY"]
+        - any_of: ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENCODE_API_KEY"]
     auth-file:
       required_files:
         - name: OPENCODE_AUTH
@@ -97,6 +97,7 @@ auth:
     env:
       ANTHROPIC_API_KEY: api-key
       OPENAI_API_KEY: api-key
+      OPENCODE_API_KEY: api-key
       GOOGLE_CLOUD_PROJECT: vertex-ai
       VERTEXAI_PROJECT: vertex-ai
       GOOGLE_CLOUD_REGION: vertex-ai

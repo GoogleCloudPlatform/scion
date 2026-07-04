@@ -507,10 +507,11 @@ type AuthConfig struct {
 	ClaudeOAuthToken string // CLAUDE_CODE_OAUTH_TOKEN (long-lived, from `claude setup-token`)
 	ClaudeAuthFile   string // ~/.claude/.credentials.json path (rotating refresh-token store)
 
-	// OpenAI/Codex auth
+	// OpenAI/Codex/OpenCode auth
 	OpenAIAPIKey     string
 	CodexAPIKey      string
 	CodexAuthFile    string
+	OpenCodeAPIKey   string
 	OpenCodeAuthFile string
 
 	// GCP metadata server mode ("block", "passthrough", "assign").

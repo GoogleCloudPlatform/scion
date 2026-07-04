@@ -225,6 +225,7 @@ func (c *ContainerScriptHarness) ResolveAuth(auth api.AuthConfig) (*api.Resolved
 	addIfPresent("GOOGLE_CLOUD_PROJECT", auth.GoogleCloudProject)
 	addIfPresent("GOOGLE_CLOUD_REGION", auth.GoogleCloudRegion)
 	addIfPresent("CODEX_API_KEY", auth.CodexAPIKey)
+	addIfPresent("OPENCODE_API_KEY", auth.OpenCodeAPIKey)
 
 	// Forward config-driven auth env vars. These come from harness config
 	// metadata (auth.types[*].required_env) and are gathered by

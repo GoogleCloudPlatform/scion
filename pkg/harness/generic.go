@@ -124,6 +124,9 @@ func (g *Generic) ResolveAuth(auth api.AuthConfig) (*api.ResolvedAuth, error) {
 	if auth.CodexAPIKey != "" {
 		result.EnvVars["CODEX_API_KEY"] = auth.CodexAPIKey
 	}
+	if auth.OpenCodeAPIKey != "" {
+		result.EnvVars["OPENCODE_API_KEY"] = auth.OpenCodeAPIKey
+	}
 	if auth.GoogleCloudProject != "" {
 		result.EnvVars["GOOGLE_CLOUD_PROJECT"] = auth.GoogleCloudProject
 	}
