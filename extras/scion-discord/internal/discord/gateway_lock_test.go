@@ -82,13 +82,13 @@ func TestGatewayLockLoop_TakeoverDelay(t *testing.T) {
 	ctx := context.Background()
 
 	// Tick 1: acquires lock but releases (takeover delay, need 2 consecutive).
-	loop.tick(ctx)
+	loop.Tick(ctx)
 	assert.False(t, loop.Active(), "should not be active after first tick")
 	assert.Equal(t, int32(1), atomic.LoadInt32(&locker.releases), "should release after first tick")
 	assert.Equal(t, 0, acquiredCount, "OnAcquired should not fire yet")
 
 	// Tick 2: acquires again, takeover delay satisfied → OnAcquired fires.
-	loop.tick(ctx)
+	loop.Tick(ctx)
 	assert.True(t, loop.Active(), "should be active after second tick")
 	assert.Equal(t, 1, acquiredCount, "OnAcquired should fire exactly once")
 }
@@ -101,25 +101,25 @@ func TestGatewayLockLoop_TakeoverDelayResetOnFailure(t *testing.T) {
 	ctx := context.Background()
 
 	// Tick 1: lock acquirable → counter=1, released.
-	loop.tick(ctx)
+	loop.Tick(ctx)
 	assert.False(t, loop.Active())
 
 	// Lock becomes unavailable.
 	locker.setAcquirable(false)
 
 	// Tick 2: not acquirable → counter resets.
-	loop.tick(ctx)
+	loop.Tick(ctx)
 	assert.False(t, loop.Active())
 
 	// Lock available again.
 	locker.setAcquirable(true)
 
 	// Tick 3: acquirable → counter=1 (reset), released.
-	loop.tick(ctx)
+	loop.Tick(ctx)
 	assert.False(t, loop.Active(), "counter should have reset, need 2 consecutive")
 
 	// Tick 4: acquirable → counter=2, promoted.
-	loop.tick(ctx)
+	loop.Tick(ctx)
 	assert.True(t, loop.Active())
 }
 
@@ -133,8 +133,8 @@ func TestGatewayLockLoop_SubscribeFailureReleasesLock(t *testing.T) {
 	ctx := context.Background()
 
 	// Two ticks to satisfy takeover delay.
-	loop.tick(ctx)
-	loop.tick(ctx)
+	loop.Tick(ctx)
+	loop.Tick(ctx)
 
 	assert.False(t, loop.Active(), "should not be active when OnAcquired fails")
 	// 1 release from takeover delay tick + 1 from failed acquire
@@ -153,15 +153,15 @@ func TestGatewayLockLoop_LockLossClosesGateway(t *testing.T) {
 	ctx := context.Background()
 
 	// Acquire lock (2 ticks for takeover delay).
-	loop.tick(ctx)
-	loop.tick(ctx)
+	loop.Tick(ctx)
+	loop.Tick(ctx)
 	require.True(t, loop.Active())
 
 	// Simulate lock connection death.
 	locker.setVerifyErr(errors.New("connection dead"))
 
 	// Next tick verifies → detects loss.
-	loop.tick(ctx)
+	loop.Tick(ctx)
 
 	assert.False(t, loop.Active(), "should be inactive after lock loss")
 	assert.True(t, lostCalled, "OnLost should fire")
@@ -179,8 +179,8 @@ func TestGatewayLockLoop_LockLossContextCancelled(t *testing.T) {
 	ctx := context.Background()
 
 	// Acquire.
-	loop.tick(ctx)
-	loop.tick(ctx)
+	loop.Tick(ctx)
+	loop.Tick(ctx)
 	require.True(t, loop.Active())
 
 	locker.setVerifyErr(errors.New("connection dead"))
@@ -188,7 +188,7 @@ func TestGatewayLockLoop_LockLossContextCancelled(t *testing.T) {
 	// Verify with a cancelled context — should NOT treat as lock loss.
 	cancelledCtx, cancel := context.WithCancel(ctx)
 	cancel()
-	loop.tick(cancelledCtx)
+	loop.Tick(cancelledCtx)
 
 	assert.True(t, loop.Active(), "should stay active when ctx is cancelled")
 	assert.False(t, lostCalled, "OnLost should not fire during shutdown")
@@ -207,7 +207,7 @@ func TestGatewayLockLoop_StandbyNotAcquirable(t *testing.T) {
 	ctx := context.Background()
 
 	for i := 0; i < 5; i++ {
-		loop.tick(ctx)
+		loop.Tick(ctx)
 	}
 
 	assert.False(t, loop.Active())
@@ -221,7 +221,7 @@ func TestGatewayLockLoop_AcquireError(t *testing.T) {
 	loop.OnAcquired = func() error { return nil }
 
 	ctx := context.Background()
-	loop.tick(ctx)
+	loop.Tick(ctx)
 
 	assert.False(t, loop.Active())
 }
@@ -235,13 +235,13 @@ func TestGatewayLockLoop_VerifyWhileActiveKeepsLock(t *testing.T) {
 	ctx := context.Background()
 
 	// Acquire.
-	loop.tick(ctx)
-	loop.tick(ctx)
+	loop.Tick(ctx)
+	loop.Tick(ctx)
 	require.True(t, loop.Active())
 
 	// Multiple verify ticks with healthy conn — should stay active.
 	for i := 0; i < 5; i++ {
-		loop.tick(ctx)
+		loop.Tick(ctx)
 		assert.True(t, loop.Active())
 	}
 }
@@ -256,8 +256,8 @@ func TestGatewayLockLoop_ReleaseHandleWithoutOnLost(t *testing.T) {
 
 	ctx := context.Background()
 
-	loop.tick(ctx)
-	loop.tick(ctx)
+	loop.Tick(ctx)
+	loop.Tick(ctx)
 	require.True(t, loop.Active())
 
 	// Orderly shutdown: ReleaseHandle should NOT call OnLost.

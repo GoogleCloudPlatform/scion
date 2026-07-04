@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/integration/lockloop"
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
@@ -123,6 +124,11 @@ CREATE TABLE IF NOT EXISTS telegram_topic_defaults (
 	thread_id  BIGINT NOT NULL,
 	agent_slug TEXT NOT NULL,
 	PRIMARY KEY (chat_id, thread_id)
+);
+
+CREATE TABLE IF NOT EXISTS telegram_processed_updates (
+	update_id  BIGINT PRIMARY KEY,
+	processed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 `
 	_, err := s.db.Exec(ddl)
@@ -527,38 +533,41 @@ func (s *postgresStore) DeleteTopicDefault(ctx context.Context, chatID int64, th
 	return err
 }
 
+// --- Update dedup (F7) ---
+
+// TryMarkUpdateProcessed attempts to insert an update_id into the dedup table.
+// Returns true if the insert succeeded (first time seeing this update_id),
+// false if a row already exists (duplicate delivery).
+func (s *postgresStore) TryMarkUpdateProcessed(ctx context.Context, updateID int64) (bool, error) {
+	result, err := s.db.ExecContext(ctx,
+		`INSERT INTO telegram_processed_updates (update_id) VALUES ($1) ON CONFLICT DO NOTHING`,
+		updateID)
+	if err != nil {
+		return false, fmt.Errorf("insert update_id: %w", err)
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
+// PruneProcessedUpdates removes entries older than the given duration.
+func (s *postgresStore) PruneProcessedUpdates(ctx context.Context, olderThan int) error {
+	_, err := s.db.ExecContext(ctx,
+		`DELETE FROM telegram_processed_updates WHERE processed_at < NOW() - ($1 || ' hours')::INTERVAL`,
+		olderThan)
+	return err
+}
+
 // --- Advisory lock support ---
 
-// AdvisoryLocker is implemented by store backends that support Postgres advisory locks.
-type AdvisoryLocker interface {
-	TryAdvisoryLock(ctx context.Context, key int64) (acquired bool, handle *AdvisoryLockHandle, err error)
-}
-
-// AdvisoryLockHandle holds a Postgres advisory lock on a dedicated connection.
-// Call Release exactly once when the lock is no longer needed.
-type AdvisoryLockHandle struct {
-	conn *sql.Conn
-	key  int64
-}
-
-// Release unlocks the advisory lock and returns the dedicated connection to the pool.
-func (h *AdvisoryLockHandle) Release(ctx context.Context) error {
-	if h.conn == nil {
-		return nil
-	}
-	_, err := h.conn.ExecContext(ctx, "SELECT pg_advisory_unlock($1)", h.key)
-	closeErr := h.conn.Close()
-	h.conn = nil
-	if err != nil {
-		return fmt.Errorf("advisory unlock: %w", err)
-	}
-	return closeErr
-}
+// AdvisoryLocker is the shared lockloop interface for advisory locks.
+type AdvisoryLocker = lockloop.AdvisoryLocker
 
 // TryAdvisoryLock attempts to acquire a Postgres session-level advisory lock
-// on a dedicated connection. If acquired, the caller MUST call
-// handle.Release() to free the lock and return the connection.
-func (s *postgresStore) TryAdvisoryLock(ctx context.Context, key int64) (acquired bool, handle *AdvisoryLockHandle, err error) {
+// on a dedicated connection. Returns a shared lockloop.AdvisoryLockHandle.
+func (s *postgresStore) TryAdvisoryLock(ctx context.Context, key int64) (acquired bool, handle *lockloop.AdvisoryLockHandle, err error) {
 	conn, err := s.db.Conn(ctx)
 	if err != nil {
 		return false, nil, fmt.Errorf("acquire connection: %w", err)
@@ -575,7 +584,19 @@ func (s *postgresStore) TryAdvisoryLock(ctx context.Context, key int64) (acquire
 		return false, nil, nil
 	}
 
-	return true, &AdvisoryLockHandle{conn: conn, key: key}, nil
+	return true, lockloop.NewAdvisoryLockHandle(
+		func() error {
+			_, unlockErr := conn.ExecContext(context.Background(), "SELECT pg_advisory_unlock($1)", key)
+			closeErr := conn.Close()
+			if unlockErr != nil {
+				return fmt.Errorf("advisory unlock: %w", unlockErr)
+			}
+			return closeErr
+		},
+		func(verifyCtx context.Context) error {
+			return conn.PingContext(verifyCtx)
+		},
+	), nil
 }
 
 // --- scan helpers ---

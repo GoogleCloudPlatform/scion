@@ -653,7 +653,7 @@ func TestPostgres_AdvisoryLock_AcquireAndRelease(t *testing.T) {
 	assert.True(t, acquired)
 	require.NotNil(t, handle)
 
-	require.NoError(t, handle.Release(ctx))
+	require.NoError(t, handle.Release())
 }
 
 func TestPostgres_AdvisoryLock_SecondInstanceBlocked(t *testing.T) {
@@ -676,7 +676,7 @@ func TestPostgres_AdvisoryLock_SecondInstanceBlocked(t *testing.T) {
 	acquired1, handle1, err := locker1.TryAdvisoryLock(ctx, 0x5C10000A)
 	require.NoError(t, err)
 	assert.True(t, acquired1)
-	defer handle1.Release(ctx)
+	defer handle1.Release()
 
 	locker2 := store2.(AdvisoryLocker)
 	acquired2, handle2, err := locker2.TryAdvisoryLock(ctx, 0x5C10000A)
@@ -685,11 +685,11 @@ func TestPostgres_AdvisoryLock_SecondInstanceBlocked(t *testing.T) {
 	assert.Nil(t, handle2)
 
 	// Release first lock, second should now acquire.
-	require.NoError(t, handle1.Release(ctx))
+	require.NoError(t, handle1.Release())
 
 	acquired2, handle2, err = locker2.TryAdvisoryLock(ctx, 0x5C10000A)
 	require.NoError(t, err)
 	assert.True(t, acquired2, "second instance should acquire after first releases")
 	require.NotNil(t, handle2)
-	require.NoError(t, handle2.Release(ctx))
+	require.NoError(t, handle2.Release())
 }

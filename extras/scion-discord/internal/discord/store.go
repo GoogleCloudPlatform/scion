@@ -9,36 +9,16 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/integration/lockloop"
+
 	_ "modernc.org/sqlite"
 )
 
-// AdvisoryLockHandle represents a held advisory lock on a dedicated database
-// connection. The lock stays alive as long as the underlying connection lives.
-type AdvisoryLockHandle struct {
-	release func() error
-	verify  func(ctx context.Context) error
-}
+// AdvisoryLockHandle is an alias for the shared lockloop type.
+type AdvisoryLockHandle = lockloop.AdvisoryLockHandle
 
-// Release unlocks the advisory lock and returns the dedicated connection to the pool.
-func (h *AdvisoryLockHandle) Release() error {
-	if h == nil {
-		return nil
-	}
-	return h.release()
-}
-
-// Verify checks that the dedicated lock connection is still alive (cheap ping).
-func (h *AdvisoryLockHandle) Verify(ctx context.Context) error {
-	if h == nil {
-		return nil
-	}
-	return h.verify(ctx)
-}
-
-// NewAdvisoryLockHandle constructs an AdvisoryLockHandle.
-func NewAdvisoryLockHandle(release func() error, verify func(ctx context.Context) error) *AdvisoryLockHandle {
-	return &AdvisoryLockHandle{release: release, verify: verify}
-}
+// NewAdvisoryLockHandle constructs an AdvisoryLockHandle (delegates to lockloop).
+var NewAdvisoryLockHandle = lockloop.NewAdvisoryLockHandle
 
 // Store defines the persistence interface for the Discord broker plugin.
 type Store interface {

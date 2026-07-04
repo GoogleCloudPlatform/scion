@@ -238,10 +238,15 @@ func (b *TelegramBrokerV2) Configure(config map[string]string) error {
 
 		webhookSecret := config["webhook_secret"]
 
-		// Register the webhook with Telegram.
-		if err := b.api.SetWebhook(ctx, webhookURL, webhookSecret); err != nil {
-			b.store.Close()
-			return fmt.Errorf("failed to set webhook: %w", err)
+		// In standalone HA mode, skip_set_webhook=true means this instance
+		// should start the HTTP listener but NOT call setWebhook. Only the
+		// lock holder calls RegisterWebhook() separately.
+		skipSetWebhook := config["skip_set_webhook"] == "true"
+		if !skipSetWebhook {
+			if err := b.api.SetWebhook(ctx, webhookURL, webhookSecret); err != nil {
+				b.store.Close()
+				return fmt.Errorf("failed to set webhook: %w", err)
+			}
 		}
 
 		// Stop any existing webhook server before starting a new one.
@@ -329,6 +334,38 @@ func (b *TelegramBrokerV2) Configure(config map[string]string) error {
 		"inbound_mode", b.inboundMode,
 	)
 	return nil
+}
+
+// RegisterWebhook calls the Telegram setWebhook API to register this instance's
+// webhook URL. In standalone HA mode, only the lock holder should call this.
+func (b *TelegramBrokerV2) RegisterWebhook(webhookURL, webhookSecret string) error {
+	b.mu.RLock()
+	api := b.api
+	b.mu.RUnlock()
+
+	if api == nil {
+		return fmt.Errorf("broker not configured")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return api.SetWebhook(ctx, webhookURL, webhookSecret)
+}
+
+// DeregisterWebhook calls the Telegram deleteWebhook API to remove the
+// webhook registration. Called when the lock holder loses the lock.
+func (b *TelegramBrokerV2) DeregisterWebhook() error {
+	b.mu.RLock()
+	api := b.api
+	b.mu.RUnlock()
+
+	if api == nil {
+		return nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return api.DeleteWebhook(ctx)
 }
 
 // registerBotCommands sets the bot's command menu in Telegram for autocomplete.

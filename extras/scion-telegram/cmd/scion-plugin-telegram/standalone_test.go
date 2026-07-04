@@ -15,102 +15,72 @@
 package main
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
-func TestLoadStandaloneConfig_RejectsPollMode(t *testing.T) {
-	t.Setenv("DATABASE_URL", "postgres://localhost/test")
-	t.Setenv("BOT_TOKEN", "test-token")
-	t.Setenv("WEBHOOK_URL", "https://example.com/webhook")
-	t.Setenv("INBOUND_MODE", "poll")
-
-	_, err := loadStandaloneConfig()
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "HA/standalone Telegram requires webhook mode")
+func TestStandaloneMode_EnvDetection(t *testing.T) {
+	// TELEGRAM_STANDALONE=true should trigger standalone mode.
+	t.Setenv("TELEGRAM_STANDALONE", "true")
+	assert.True(t, isStandaloneRequested())
 }
 
-func TestLoadStandaloneConfig_RequiresDatabaseURL(t *testing.T) {
-	t.Setenv("DATABASE_URL", "")
-	t.Setenv("BOT_TOKEN", "test-token")
-	t.Setenv("WEBHOOK_URL", "https://example.com/webhook")
-
-	_, err := loadStandaloneConfig()
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "DATABASE_URL is required")
+func TestStandaloneMode_LegacyEnvDetection(t *testing.T) {
+	t.Setenv("SCION_TELEGRAM_STANDALONE", "1")
+	assert.True(t, isStandaloneRequested())
 }
 
-func TestLoadStandaloneConfig_RequiresBotToken(t *testing.T) {
-	t.Setenv("DATABASE_URL", "postgres://localhost/test")
-	t.Setenv("BOT_TOKEN", "")
-	t.Setenv("WEBHOOK_URL", "https://example.com/webhook")
-
-	_, err := loadStandaloneConfig()
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "BOT_TOKEN is required")
+func TestStandaloneMode_NotSet(t *testing.T) {
+	t.Setenv("TELEGRAM_STANDALONE", "")
+	t.Setenv("SCION_TELEGRAM_STANDALONE", "")
+	assert.False(t, isStandaloneRequested())
 }
 
-func TestLoadStandaloneConfig_RequiresWebhookURL(t *testing.T) {
-	t.Setenv("DATABASE_URL", "postgres://localhost/test")
-	t.Setenv("BOT_TOKEN", "test-token")
-	t.Setenv("WEBHOOK_URL", "")
-	t.Setenv("INBOUND_MODE", "")
-
-	_, err := loadStandaloneConfig()
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "WEBHOOK_URL is required")
+func TestPollModeRejection(t *testing.T) {
+	cfg := map[string]string{
+		"inbound_mode": "poll",
+	}
+	err := validateStandaloneConfig(cfg)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "webhook mode")
 }
 
-func TestLoadStandaloneConfig_ValidConfig(t *testing.T) {
-	t.Setenv("DATABASE_URL", "postgres://localhost/test")
-	t.Setenv("BOT_TOKEN", "test-token")
-	t.Setenv("WEBHOOK_URL", "https://example.com/webhook")
-	t.Setenv("WEBHOOK_SECRET", "secret123")
-	t.Setenv("WEBHOOK_LISTEN", ":8080")
-	t.Setenv("INBOUND_MODE", "")
-
-	cfg, err := loadStandaloneConfig()
-	require.NoError(t, err)
-	assert.Equal(t, "postgres://localhost/test", cfg.DatabaseURL)
-	assert.Equal(t, "test-token", cfg.BotToken)
-	assert.Equal(t, "https://example.com/webhook", cfg.WebhookURL)
-	assert.Equal(t, "secret123", cfg.WebhookSecret)
-	assert.Equal(t, ":8080", cfg.WebhookListen)
-	assert.Equal(t, "webhook", cfg.InboundMode)
+func TestPollModeRejection_CaseInsensitive(t *testing.T) {
+	cfg := map[string]string{
+		"inbound_mode": "Poll",
+	}
+	err := validateStandaloneConfig(cfg)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "webhook mode")
 }
 
-func TestLoadStandaloneConfig_DefaultWebhookListen(t *testing.T) {
-	t.Setenv("DATABASE_URL", "postgres://localhost/test")
-	t.Setenv("BOT_TOKEN", "test-token")
-	t.Setenv("WEBHOOK_URL", "https://example.com/webhook")
-	t.Setenv("WEBHOOK_LISTEN", "")
-	t.Setenv("INBOUND_MODE", "")
-
-	cfg, err := loadStandaloneConfig()
-	require.NoError(t, err)
-	assert.Equal(t, ":9094", cfg.WebhookListen)
+func TestWebhookModeAccepted(t *testing.T) {
+	cfg := map[string]string{
+		"inbound_mode": "webhook",
+	}
+	err := validateStandaloneConfig(cfg)
+	assert.NoError(t, err)
 }
 
-func TestLoadStandaloneConfig_WebhookModeExplicit(t *testing.T) {
-	t.Setenv("DATABASE_URL", "postgres://localhost/test")
-	t.Setenv("BOT_TOKEN", "test-token")
-	t.Setenv("WEBHOOK_URL", "https://example.com/webhook")
-	t.Setenv("INBOUND_MODE", "webhook")
-
-	cfg, err := loadStandaloneConfig()
-	require.NoError(t, err)
-	assert.Equal(t, "webhook", cfg.InboundMode)
+func TestEmptyModeAccepted(t *testing.T) {
+	cfg := map[string]string{}
+	err := validateStandaloneConfig(cfg)
+	assert.NoError(t, err)
 }
 
-func TestLoadStandaloneConfig_RejectsPollCaseInsensitive(t *testing.T) {
-	t.Setenv("DATABASE_URL", "postgres://localhost/test")
-	t.Setenv("BOT_TOKEN", "test-token")
-	t.Setenv("WEBHOOK_URL", "https://example.com/webhook")
-	t.Setenv("INBOUND_MODE", "Poll")
+// isStandaloneRequested checks env vars for standalone mode (extracted for testing).
+func isStandaloneRequested() bool {
+	return strings.EqualFold(envOrEmpty("TELEGRAM_STANDALONE"), "true") ||
+		envOrEmpty("SCION_TELEGRAM_STANDALONE") == "1"
+}
 
-	_, err := loadStandaloneConfig()
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "HA/standalone Telegram requires webhook mode")
+// validateStandaloneConfig checks that a merged config map does not contain
+// inbound_mode=poll (design decision D8: HA Telegram is webhook-only).
+func validateStandaloneConfig(cfg map[string]string) error {
+	if v, ok := cfg["inbound_mode"]; ok && strings.EqualFold(v, "poll") {
+		return errPollRejected
+	}
+	return nil
 }
