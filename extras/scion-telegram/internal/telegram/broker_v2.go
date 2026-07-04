@@ -172,16 +172,24 @@ func (b *TelegramBrokerV2) Configure(config map[string]string) error {
 		b.agentCacheTTL = d
 	}
 
-	// Initialize SQLite store.
-	dbPath := config["db_path"]
-	if dbPath == "" {
-		dbPath = defaultDBPath
+	// Initialize store: Postgres if database_url is set, otherwise SQLite.
+	if databaseURL, ok := config["database_url"]; ok && databaseURL != "" {
+		store, err := NewPostgresStore(databaseURL)
+		if err != nil {
+			return fmt.Errorf("init postgres store: %w", err)
+		}
+		b.store = store
+	} else {
+		dbPath := config["db_path"]
+		if dbPath == "" {
+			dbPath = defaultDBPath
+		}
+		store, err := NewSQLiteStore(dbPath)
+		if err != nil {
+			return fmt.Errorf("init store: %w", err)
+		}
+		b.store = store
 	}
-	store, err := NewSQLiteStore(dbPath)
-	if err != nil {
-		return fmt.Errorf("init store: %w", err)
-	}
-	b.store = store
 
 	// Validate bot token.
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -308,12 +316,16 @@ func (b *TelegramBrokerV2) Configure(config map[string]string) error {
 		slugCancel()
 	}
 
+	storeBackend := "sqlite"
+	if _, ok := config["database_url"]; ok && config["database_url"] != "" {
+		storeBackend = "postgres"
+	}
 	b.log.Info("Telegram v2 broker configured",
 		"bot_username", bot.Username,
 		"bot_id", bot.ID,
 		"hub_url", b.hubURL,
 		"broker_id", b.brokerID,
-		"db_path", dbPath,
+		"store_backend", storeBackend,
 		"inbound_mode", b.inboundMode,
 	)
 	return nil

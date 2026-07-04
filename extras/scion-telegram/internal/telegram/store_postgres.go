@@ -529,6 +529,11 @@ func (s *postgresStore) DeleteTopicDefault(ctx context.Context, chatID int64, th
 
 // --- Advisory lock support ---
 
+// AdvisoryLocker is implemented by store backends that support Postgres advisory locks.
+type AdvisoryLocker interface {
+	TryAdvisoryLock(ctx context.Context, key int64) (acquired bool, handle *AdvisoryLockHandle, err error)
+}
+
 // AdvisoryLockHandle holds a Postgres advisory lock on a dedicated connection.
 // Call Release exactly once when the lock is no longer needed.
 type AdvisoryLockHandle struct {
