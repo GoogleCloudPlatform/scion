@@ -15,6 +15,7 @@
 package hub
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -24,6 +25,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/integrationupdate"
 	"github.com/GoogleCloudPlatform/scion/pkg/plugin"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
 	"github.com/google/uuid"
@@ -32,24 +34,26 @@ import (
 // --- mock IntegrationManager ---
 
 type mockIntegrationManager struct {
-	plugins        map[string]map[string]string // name → config
-	selfManaged    map[string]bool
-	healthErr      error
-	infoErr        error
-	configureErr   error
-	reconnectErr   error
-	updateErr      error
-	installErr     error
-	configureCalls []string
-	reconnectCalls []string
-	updateCalls    []string
-	installCalls   []string
+	plugins         map[string]map[string]string // name → config
+	selfManaged     map[string]bool
+	deploymentModes map[string]plugin.DeploymentMode
+	healthErr       error
+	infoErr         error
+	configureErr    error
+	reconnectErr    error
+	updateErr       error
+	installErr      error
+	configureCalls  []string
+	reconnectCalls  []string
+	updateCalls     []string
+	installCalls    []string
 }
 
 func newMockIntegrationManager() *mockIntegrationManager {
 	return &mockIntegrationManager{
-		plugins:     make(map[string]map[string]string),
-		selfManaged: make(map[string]bool),
+		plugins:         make(map[string]map[string]string),
+		selfManaged:     make(map[string]bool),
+		deploymentModes: make(map[string]plugin.DeploymentMode),
 	}
 }
 
@@ -94,6 +98,9 @@ func (m *mockIntegrationManager) IsSelfManaged(pluginType, name string) bool {
 func (m *mockIntegrationManager) GetDeploymentMode(pluginType, name string) plugin.DeploymentMode {
 	if pluginType != "broker" {
 		return plugin.DeploymentModePlugin
+	}
+	if mode, ok := m.deploymentModes[name]; ok {
+		return mode
 	}
 	if m.selfManaged[name] {
 		return plugin.DeploymentModeExternal
@@ -1009,7 +1016,7 @@ func TestUpdateIntegration_HA_Accepted(t *testing.T) {
 
 	mgr := newMockIntegrationManager()
 	mgr.plugins["discord"] = map[string]string{}
-	mgr.selfManaged["discord"] = true
+	mgr.deploymentModes["discord"] = plugin.DeploymentModeHA
 
 	srv := &Server{dbDriver: "postgres"}
 	srv.pluginManager = mgr
@@ -1059,7 +1066,7 @@ func TestGetUpdateStatus_ByID(t *testing.T) {
 
 	mgr := newMockIntegrationManager()
 	mgr.plugins["discord"] = map[string]string{}
-	mgr.selfManaged["discord"] = true
+	mgr.deploymentModes["discord"] = plugin.DeploymentModeHA
 
 	srv := &Server{dbDriver: "postgres"}
 	srv.pluginManager = mgr
@@ -1113,7 +1120,7 @@ func TestGetUpdateStatus_Latest(t *testing.T) {
 
 	mgr := newMockIntegrationManager()
 	mgr.plugins["discord"] = map[string]string{}
-	mgr.selfManaged["discord"] = true
+	mgr.deploymentModes["discord"] = plugin.DeploymentModeHA
 
 	srv := &Server{dbDriver: "postgres"}
 	srv.pluginManager = mgr
@@ -1121,15 +1128,30 @@ func TestGetUpdateStatus_Latest(t *testing.T) {
 
 	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
 
-	// Create two updates so "latest" returns the second
-	for i := 0; i < 2; i++ {
-		req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/integrations/discord/update", nil)
-		req = req.WithContext(contextWithIdentity(req.Context(), admin))
-		rr := httptest.NewRecorder()
-		srv.handleAdminIntegrationByName(rr, req)
-		if rr.Code != http.StatusAccepted {
-			t.Fatalf("create %d: expected 202, got %d", i, rr.Code)
-		}
+	// Create first update, then mark it completed so the 409 guard allows a second.
+	req1 := httptest.NewRequest(http.MethodPost, "/api/v1/admin/integrations/discord/update", nil)
+	req1 = req1.WithContext(contextWithIdentity(req1.Context(), admin))
+	rr1 := httptest.NewRecorder()
+	srv.handleAdminIntegrationByName(rr1, req1)
+	if rr1.Code != http.StatusAccepted {
+		t.Fatalf("create 0: expected 202, got %d: %s", rr1.Code, rr1.Body.String())
+	}
+	var resp1 map[string]string
+	if err := json.NewDecoder(rr1.Body).Decode(&resp1); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	firstID, _ := uuid.Parse(resp1["update_id"])
+	client.IntegrationUpdate.UpdateOneID(firstID).
+		SetState(integrationupdate.StateCompleted).
+		SaveX(context.Background())
+
+	// Create second update.
+	req2 := httptest.NewRequest(http.MethodPost, "/api/v1/admin/integrations/discord/update", nil)
+	req2 = req2.WithContext(contextWithIdentity(req2.Context(), admin))
+	rr2 := httptest.NewRecorder()
+	srv.handleAdminIntegrationByName(rr2, req2)
+	if rr2.Code != http.StatusAccepted {
+		t.Fatalf("create 1: expected 202, got %d: %s", rr2.Code, rr2.Body.String())
 	}
 
 	getReq := httptest.NewRequest(http.MethodGet, "/api/v1/admin/integrations/discord/update/latest", nil)
@@ -1217,7 +1239,7 @@ func TestUpdateConfig_HA_Integration(t *testing.T) {
 
 	mgr := newMockIntegrationManager()
 	mgr.plugins["discord"] = map[string]string{}
-	mgr.selfManaged["discord"] = true
+	mgr.deploymentModes["discord"] = plugin.DeploymentModeHA
 
 	srv := &Server{dbDriver: "postgres"}
 	srv.pluginManager = mgr
@@ -1269,15 +1291,15 @@ func TestUpdateConfig_NonHA_NeedsConfigFile(t *testing.T) {
 
 func TestIsHAIntegration(t *testing.T) {
 	mgr := newMockIntegrationManager()
-	mgr.selfManaged["discord"] = true
+	mgr.deploymentModes["discord"] = plugin.DeploymentModeHA
 
 	srv := &Server{}
 
 	if !srv.isHAIntegration(mgr, "discord") {
-		t.Error("expected discord (self-managed) to be HA")
+		t.Error("expected discord (HA mode) to be HA")
 	}
 	if srv.isHAIntegration(mgr, "telegram") {
-		t.Error("expected telegram (not self-managed) to not be HA")
+		t.Error("expected telegram (no mode set) to not be HA")
 	}
 }
 
@@ -1287,8 +1309,8 @@ func TestGetUpdateStatus_CrossIntegrationRejected(t *testing.T) {
 	mgr := newMockIntegrationManager()
 	mgr.plugins["discord"] = map[string]string{}
 	mgr.plugins["telegram"] = map[string]string{}
-	mgr.selfManaged["discord"] = true
-	mgr.selfManaged["telegram"] = true
+	mgr.deploymentModes["discord"] = plugin.DeploymentModeHA
+	mgr.deploymentModes["telegram"] = plugin.DeploymentModeHA
 
 	srv := &Server{dbDriver: "postgres"}
 	srv.pluginManager = mgr
@@ -1328,7 +1350,7 @@ func TestUpdateConfig_HA_SetsUpdatedBy(t *testing.T) {
 
 	mgr := newMockIntegrationManager()
 	mgr.plugins["discord"] = map[string]string{}
-	mgr.selfManaged["discord"] = true
+	mgr.deploymentModes["discord"] = plugin.DeploymentModeHA
 
 	srv := &Server{dbDriver: "postgres"}
 	srv.pluginManager = mgr
@@ -1432,7 +1454,7 @@ func TestIsHAIntegration_Modes(t *testing.T) {
 	mgr := newMockIntegrationManager()
 	mgr.plugins["telegram"] = map[string]string{}
 	mgr.plugins["discord"] = map[string]string{}
-	mgr.selfManaged["discord"] = true
+	mgr.deploymentModes["discord"] = plugin.DeploymentModeHA
 
 	srv := &Server{}
 	srv.pluginManager = mgr
@@ -1442,6 +1464,13 @@ func TestIsHAIntegration_Modes(t *testing.T) {
 	}
 
 	if !srv.isHAIntegration(mgr, "discord") {
-		t.Error("self-managed discord should be HA (mapped from legacy)")
+		t.Error("HA-mode discord should be HA")
+	}
+
+	// selfManaged without deploymentModes should NOT be HA.
+	mgr2 := newMockIntegrationManager()
+	mgr2.selfManaged["slack"] = true
+	if srv.isHAIntegration(mgr2, "slack") {
+		t.Error("self-managed without HA mode should not be HA")
 	}
 }

@@ -824,10 +824,9 @@ func (s *Server) requirePostgres(w http.ResponseWriter) bool {
 }
 
 // isHAIntegration reports whether the named integration is running in HA
-// (Mode 3) deployment mode. Currently this checks if the integration is
-// self-managed (the precursor to full gRPC mode support in Phase 5A).
+// (Mode 3) deployment mode.
 func (s *Server) isHAIntegration(mgr IntegrationManager, name string) bool {
-	return mgr.IsSelfManaged("broker", name)
+	return mgr.GetDeploymentMode("broker", name) == plugin.DeploymentModeHA
 }
 
 // handleGetUpdateStatus handles GET .../update/{id} and GET .../update/latest.
