@@ -50,6 +50,7 @@ type IntegrationManager interface {
 	BrokerInfo(name string) (version, channelID string, capabilities []string, err error)
 	UpdatePlugin(name string, repoPath string) error
 	InstallPlugin(name, repoPath, pluginsDir string) error
+	GetGRPCBrokerAdapter(name string) plugin.GRPCBrokerClient
 }
 
 // --- Response types ---
@@ -918,6 +919,18 @@ func (s *Server) handleUpdateIntegrationHA(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	s.mu.RLock()
+	mgr := s.pluginManager
+	s.mu.RUnlock()
+
+	// Capture pre-update version so completion detection can compare.
+	preUpdateVersion := ""
+	if mgr != nil {
+		if version, _, _, err := mgr.BrokerInfo(name); err == nil {
+			preUpdateVersion = version
+		}
+	}
+
 	ctx := r.Context()
 	user := GetUserIdentityFromContext(ctx)
 	requestedBy := ""
@@ -933,12 +946,16 @@ func (s *Server) handleUpdateIntegrationHA(w http.ResponseWriter, r *http.Reques
 	}
 	defer tx.Rollback()
 
-	row, err := tx.IntegrationUpdate.
+	create := tx.IntegrationUpdate.
 		Create().
 		SetIntegration(name).
 		SetState(integrationupdate.StateRequested).
-		SetRequestedBy(requestedBy).
-		Save(ctx)
+		SetRequestedBy(requestedBy)
+	if preUpdateVersion != "" {
+		create = create.SetDetail("pre_update_version=" + preUpdateVersion)
+	}
+
+	row, err := create.Save(ctx)
 	if err != nil {
 		slog.Error("Failed to create integration update request", "integration", name, "error", err)
 		InternalError(w)
@@ -959,6 +976,9 @@ func (s *Server) handleUpdateIntegrationHA(w http.ResponseWriter, r *http.Reques
 		InternalError(w)
 		return
 	}
+
+	// Start a timeout timer for completion detection.
+	s.startUpdateTimeout(name, row.ID.String())
 
 	writeJSON(w, http.StatusAccepted, map[string]string{
 		"update_id": row.ID.String(),

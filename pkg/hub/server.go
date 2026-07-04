@@ -690,6 +690,9 @@ type Server struct {
 	// admin signal listener connection and for PublishAdminSignal calls
 	// outside a transaction (nil/empty when database is not Postgres).
 	databaseDSN string
+	// updateTracker manages pending HA update timeouts and reconnect-based
+	// completion detection.
+	updateTracker *pendingUpdateTracker
 }
 
 func newInstanceID() string {
@@ -750,6 +753,9 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 	if cfg.SecretBackend != nil {
 		srv.secretBackend = cfg.SecretBackend
 	}
+
+	// Initialize update tracker for HA integration completion detection.
+	srv.updateTracker = newPendingUpdateTracker()
 
 	// Initialize user activity tracker (throttled to once per hour per user)
 	srv.userActivity = NewUserActivityTracker(s, time.Hour)
@@ -1458,8 +1464,10 @@ func (s *Server) GetMessageBrokerProxy() *MessageBrokerProxy {
 // SetPluginManager sets the plugin manager for broker integration admin API.
 func (s *Server) SetPluginManager(m IntegrationManager) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.pluginManager = m
+	s.mu.Unlock()
+
+	s.registerReconnectCallbacks(m)
 }
 
 // SetIntegrationHA configures Mode 3 (HA) integration support on the server.

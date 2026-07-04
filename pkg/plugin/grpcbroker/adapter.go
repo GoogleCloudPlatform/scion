@@ -78,6 +78,8 @@ type GRPCBrokerAdapter struct {
 
 	info   *plugin.PluginInfo
 	health *plugin.HealthStatus
+
+	reconnectCallbacks []func()
 }
 
 // NewGRPCBrokerAdapter creates a new adapter that connects to the remote
@@ -94,6 +96,15 @@ func NewGRPCBrokerAdapter(cfg AdapterConfig) *GRPCBrokerAdapter {
 		auth:       cfg.Authenticator,
 		activeSubs: make(map[string]eventbus.EventHandler),
 	}
+}
+
+// OnReconnect registers a callback that is invoked after a successful
+// reconnect to the remote broker (not on initial connect). Callbacks are
+// called with the adapter lock released so they may call GetInfo/HealthCheck.
+func (a *GRPCBrokerAdapter) OnReconnect(fn func()) {
+	a.mu.Lock()
+	a.reconnectCallbacks = append(a.reconnectCallbacks, fn)
+	a.mu.Unlock()
 }
 
 // dialOpts returns gRPC dial options based on the adapter's TLS configuration.
@@ -172,9 +183,10 @@ func (a *GRPCBrokerAdapter) ensureConnected() error {
 	if err := a.connect(); err != nil {
 		return err
 	}
-	// Re-subscribe if we have active subscriptions (reconnect scenario).
-	if len(a.activeSubs) > 0 {
+	isReconnect := len(a.activeSubs) > 0
+	if isReconnect {
 		a.resubscribeAll()
+		a.fireReconnectCallbacks()
 	}
 	return nil
 }
@@ -215,7 +227,26 @@ func (a *GRPCBrokerAdapter) tryReconnect() error {
 
 	a.logger.Info("successfully reconnected to gRPC broker",
 		"resubscribed", len(a.activeSubs))
+
+	a.fireReconnectCallbacks()
+
 	return nil
+}
+
+// fireReconnectCallbacks invokes all registered reconnect callbacks.
+// Caller must hold a.mu; the lock is released during callback execution
+// so callbacks may call GetInfo/HealthCheck.
+func (a *GRPCBrokerAdapter) fireReconnectCallbacks() {
+	if len(a.reconnectCallbacks) == 0 {
+		return
+	}
+	cbs := make([]func(), len(a.reconnectCallbacks))
+	copy(cbs, a.reconnectCallbacks)
+	a.mu.Unlock()
+	for _, cb := range cbs {
+		cb()
+	}
+	a.mu.Lock()
 }
 
 // Publish sends a message to the remote broker.

@@ -35,6 +35,7 @@ interface IntegrationSummary {
   name: string;
   platform: string;
   self_managed: boolean;
+  deployment_mode?: string;
   has_secrets: Record<string, boolean>;
   status?: IntegrationStatus;
 }
@@ -43,6 +44,7 @@ interface IntegrationDetail {
   name: string;
   platform: string;
   self_managed: boolean;
+  deployment_mode?: string;
   settings: Record<string, string>;
   has_secrets: Record<string, boolean>;
   status?: IntegrationStatus;
@@ -103,6 +105,12 @@ export class ScionPageAdminIntegrations extends LitElement {
   @state() private saving = false;
   @state() private restarting = false;
   @state() private updating = false;
+
+  // HA async update state
+  @state() private updateState: string | null = null;
+  @state() private updateDetail: string | null = null;
+  @state() private updateNewVersion: string | null = null;
+  private updatePollTimer: ReturnType<typeof setInterval> | null = null;
 
   // Available integrations for install
   @state() private availableIntegrations: AvailableIntegration[] = [];
@@ -466,6 +474,12 @@ export class ScionPageAdminIntegrations extends LitElement {
 
   private async handleUpdate(): Promise<void> {
     if (!this.detail) return;
+
+    if (this.detail.deployment_mode === 'ha') {
+      await this.handleUpdateHA();
+      return;
+    }
+
     this.updating = true;
     this.error = null;
     this.successMessage = null;
@@ -485,6 +499,88 @@ export class ScionPageAdminIntegrations extends LitElement {
     } finally {
       this.updating = false;
     }
+  }
+
+  private async handleUpdateHA(): Promise<void> {
+    if (!this.detail) return;
+    this.updating = true;
+    this.error = null;
+    this.successMessage = null;
+    this.updateState = null;
+    this.updateDetail = null;
+    this.updateNewVersion = null;
+    this.stopUpdatePolling();
+
+    try {
+      const res = await apiFetch(
+        `/api/v1/admin/integrations/${encodeURIComponent(this.detail.name)}/update`,
+        { method: 'POST' }
+      );
+      if (!res.ok) {
+        this.error = await extractApiError(res, 'Failed to request update');
+        this.updating = false;
+        return;
+      }
+      const data = (await res.json()) as { update_id: string };
+      this.updateState = 'requested';
+      this.startUpdatePolling(this.detail.name, data.update_id);
+    } catch {
+      this.error = 'Failed to request update';
+      this.updating = false;
+    }
+  }
+
+  private startUpdatePolling(integrationName: string, updateId: string): void {
+    this.updatePollTimer = setInterval(() => {
+      void this.pollUpdateStatus(integrationName, updateId);
+    }, 3000);
+  }
+
+  private stopUpdatePolling(): void {
+    if (this.updatePollTimer !== null) {
+      clearInterval(this.updatePollTimer);
+      this.updatePollTimer = null;
+    }
+  }
+
+  private async pollUpdateStatus(integrationName: string, updateId: string): Promise<void> {
+    try {
+      const res = await apiFetch(
+        `/api/v1/admin/integrations/${encodeURIComponent(integrationName)}/update/${encodeURIComponent(updateId)}`
+      );
+      if (!res.ok) return;
+
+      const data = (await res.json()) as {
+        state: string;
+        detail?: string;
+        new_version?: string;
+      };
+      this.updateState = data.state;
+      this.updateDetail = data.detail ?? null;
+      this.updateNewVersion = data.new_version ?? null;
+
+      if (data.state === 'completed' || data.state === 'failed') {
+        this.stopUpdatePolling();
+        this.updating = false;
+        if (data.state === 'completed') {
+          this.successMessage = data.new_version
+            ? `Update complete — version: ${data.new_version}`
+            : 'Update complete';
+          await this.loadDetail(integrationName);
+        } else {
+          this.error = data.detail
+            ? `Update failed: ${data.detail}`
+            : 'Update failed';
+        }
+      }
+    } catch {
+      // Polling errors are transient; keep polling.
+    }
+  }
+
+  override disconnectedCallback(): void {
+    super.disconnectedCallback();
+    this.stopUpdatePolling();
   }
 
   private async handleInstall(name: string): Promise<void> {
@@ -585,7 +681,7 @@ export class ScionPageAdminIntegrations extends LitElement {
                     <th>Name</th>
                     <th>Platform</th>
                     <th>Status</th>
-                    <th>Self-Managed</th>
+                    <th>Mode</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -598,7 +694,7 @@ export class ScionPageAdminIntegrations extends LitElement {
                         <td><strong>${i.name}</strong></td>
                         <td><span class="platform-name">${this.platformLabel(i.platform)}</span></td>
                         <td>${this.renderStatusBadge(i.status)}</td>
-                        <td>${i.self_managed ? 'Yes' : 'No'}</td>
+                        <td>${this.renderDeploymentModeBadge(i.deployment_mode)}</td>
                       </tr>
                     `
                   )}
@@ -667,7 +763,7 @@ export class ScionPageAdminIntegrations extends LitElement {
       </a>
 
       <h2 class="detail-name">${d.name}</h2>
-      <p class="detail-platform">${this.platformLabel(d.platform)}${d.self_managed ? ' · Self-managed' : ''}</p>
+      <p class="detail-platform">${this.platformLabel(d.platform)} · ${this.deploymentModeLabel(d.deployment_mode)}</p>
 
       ${this.renderStatusSection(d.status)}
       ${this.renderConfigSection(d)}
@@ -852,7 +948,8 @@ export class ScionPageAdminIntegrations extends LitElement {
   }
 
   private renderActionsSection() {
-    const showUpdate = this.detail && !this.detail.self_managed;
+    const mode = this.detail?.deployment_mode ?? 'plugin';
+    const showUpdate = this.detail && mode !== 'external';
     return html`
       <div class="actions">
         <sl-button
@@ -883,6 +980,47 @@ export class ScionPageAdminIntegrations extends LitElement {
             `
           : nothing}
       </div>
+      ${this.updateState ? this.renderUpdateProgress() : nothing}
+    `;
+  }
+
+  private renderUpdateProgress() {
+    let message = '';
+    let variant: 'primary' | 'success' | 'danger' = 'primary';
+
+    switch (this.updateState) {
+      case 'requested':
+        message = 'Update requested...';
+        break;
+      case 'acknowledged':
+        message = 'Integration acknowledged, preparing update...';
+        break;
+      case 'updating':
+        message = 'Updating...';
+        break;
+      case 'completed':
+        message = this.updateNewVersion
+          ? `Update complete — version: ${this.updateNewVersion}`
+          : 'Update complete';
+        variant = 'success';
+        break;
+      case 'failed':
+        message = this.updateDetail
+          ? `Update failed: ${this.updateDetail}`
+          : 'Update failed';
+        variant = 'danger';
+        break;
+    }
+
+    const showSpinner = this.updateState !== 'completed' && this.updateState !== 'failed';
+
+    return html`
+      <sl-alert variant=${variant} open style="margin-top: 0.75rem;">
+        ${showSpinner
+          ? html`<sl-spinner slot="icon" style="font-size: 1rem;"></sl-spinner>`
+          : html`<sl-icon slot="icon" name=${variant === 'success' ? 'check-circle' : 'exclamation-triangle'}></sl-icon>`}
+        ${message}
+      </sl-alert>
     `;
   }
 
@@ -895,6 +1033,28 @@ export class ScionPageAdminIntegrations extends LitElement {
     return status.connected
       ? html`<sl-badge variant="success">Connected</sl-badge>`
       : html`<sl-badge variant="danger">Disconnected</sl-badge>`;
+  }
+
+  private renderDeploymentModeBadge(mode?: string) {
+    switch (mode) {
+      case 'ha':
+        return html`<sl-badge variant="primary">HA</sl-badge>`;
+      case 'external':
+        return html`<sl-badge variant="neutral">External</sl-badge>`;
+      default:
+        return html`<sl-badge variant="success">Plugin</sl-badge>`;
+    }
+  }
+
+  private deploymentModeLabel(mode?: string): string {
+    switch (mode) {
+      case 'ha':
+        return 'HA';
+      case 'external':
+        return 'External';
+      default:
+        return 'Plugin';
+    }
   }
 
   private platformLabel(platform: string): string {

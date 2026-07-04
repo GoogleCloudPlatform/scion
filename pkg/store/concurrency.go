@@ -65,10 +65,6 @@ const (
 	// Gateway; standby instances retry periodically and promote on acquisition.
 	LockDiscordGateway AdvisoryLockKey = 0x5C100009
 
-	// LockDiscordGateway serializes the Discord Gateway WebSocket connection
-	// so only one standalone instance opens a session per bot token.
-	LockDiscordGateway AdvisoryLockKey = 0x5C100009
-
 	// LockTelegramWebhook serializes the Telegram setWebhook registration
 	// call so only one standalone instance registers the webhook URL at a time.
 	LockTelegramWebhook AdvisoryLockKey = 0x5C10000A

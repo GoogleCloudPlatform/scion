@@ -573,6 +573,15 @@ func (m *Manager) GetDeploymentMode(pluginType, name string) DeploymentMode {
 	return DeploymentModePlugin
 }
 
+// GetGRPCBrokerAdapter returns the GRPCBrokerClient for the named broker if it
+// is running in gRPC/HA mode, or nil otherwise.
+func (m *Manager) GetGRPCBrokerAdapter(name string) GRPCBrokerClient {
+	key := PluginTypeBroker + ":" + name
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.grpcAdapters[key]
+}
+
 // BrokerHealthCheck returns the health status of a named broker plugin as
 // primitive types so callers need not import plugin-package structs.
 func (m *Manager) BrokerHealthCheck(name string) (status, message string, details map[string]string, err error) {

@@ -142,6 +142,8 @@ type GRPCBrokerClient interface {
 	GetInfo() (*PluginInfo, error)
 	// HealthCheck retrieves health status.
 	HealthCheck() (*HealthStatus, error)
+	// OnReconnect registers a callback invoked after a successful reconnect.
+	OnReconnect(fn func())
 }
 
 // PluginInfo contains metadata reported by a plugin via the GetInfo() RPC call.

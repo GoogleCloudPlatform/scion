@@ -356,3 +356,64 @@ func TestAdapterImplementsEventBus(t *testing.T) {
 	// Compile-time check that GRPCBrokerAdapter implements eventbus.EventBus.
 	var _ eventbus.EventBus = (*GRPCBrokerAdapter)(nil)
 }
+
+func TestAdapterReconnectCallback(t *testing.T) {
+	broker := refbroker.New(slog.Default())
+	defer broker.Close()
+
+	addr, stop := startTestServer(t, broker)
+
+	adapter := NewGRPCBrokerAdapter(AdapterConfig{
+		Address: addr,
+		Logger:  slog.Default(),
+	})
+	defer adapter.Close()
+
+	var callbackCount int
+	var cbMu sync.Mutex
+	adapter.OnReconnect(func() {
+		cbMu.Lock()
+		callbackCount++
+		cbMu.Unlock()
+	})
+
+	// Initial subscribe to establish connection.
+	_, err := adapter.Subscribe("test.>", func(_ context.Context, _ string, _ *messages.StructuredMessage) {})
+	require.NoError(t, err)
+
+	// Stop server and restart to trigger reconnect.
+	stop()
+
+	broker2 := refbroker.New(slog.Default())
+	defer broker2.Close()
+
+	addr2, stop2 := startTestServer(t, broker2)
+	defer stop2()
+
+	// Close the adapter connection to simulate disconnect,
+	// then point to the new server address.
+	_ = addr2
+	adapter.mu.Lock()
+	if adapter.conn != nil {
+		adapter.conn.Close()
+		adapter.conn = nil
+		adapter.client = nil
+	}
+	adapter.address = addr2
+	adapter.mu.Unlock()
+
+	// Next publish triggers reconnect.
+	ctx := context.Background()
+	_ = adapter.Publish(ctx, "test.topic", &messages.StructuredMessage{
+		Version: 1,
+		Msg:     "after-reconnect",
+	})
+
+	time.Sleep(50 * time.Millisecond)
+
+	cbMu.Lock()
+	count := callbackCount
+	cbMu.Unlock()
+
+	assert.GreaterOrEqual(t, count, 1, "reconnect callback should have been called")
+}

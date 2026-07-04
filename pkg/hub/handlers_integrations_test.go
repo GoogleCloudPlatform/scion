@@ -139,6 +139,10 @@ func (m *mockIntegrationManager) InstallPlugin(name, repoPath, pluginsDir string
 	return nil
 }
 
+func (m *mockIntegrationManager) GetGRPCBrokerAdapter(name string) plugin.GRPCBrokerClient {
+	return nil
+}
+
 // --- Auth tests ---
 
 func TestIntegrations_Unauthenticated(t *testing.T) {
@@ -1350,5 +1354,94 @@ func TestUpdateConfig_HA_SetsUpdatedBy(t *testing.T) {
 	}
 	if rows[0].UpdatedBy != "u1" {
 		t.Errorf("expected updated_by u1, got %q", rows[0].UpdatedBy)
+	}
+}
+
+// --- Deployment mode tests ---
+
+func TestListIntegrations_DeploymentMode(t *testing.T) {
+	mgr := newMockIntegrationManager()
+	mgr.plugins["telegram"] = map[string]string{}
+	mgr.plugins["discord"] = map[string]string{}
+	mgr.selfManaged["discord"] = true
+
+	srv := &Server{}
+	srv.pluginManager = mgr
+
+	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/integrations", nil)
+	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	rr := httptest.NewRecorder()
+	srv.handleAdminIntegrations(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var result []IntegrationSummary
+	if err := json.NewDecoder(rr.Body).Decode(&result); err != nil {
+		t.Fatalf("decode error: %v", err)
+	}
+
+	byName := make(map[string]IntegrationSummary)
+	for _, s := range result {
+		byName[s.Name] = s
+	}
+
+	if tg, ok := byName["telegram"]; ok {
+		if tg.DeploymentMode != "plugin" {
+			t.Errorf("telegram: expected deployment_mode=plugin, got %q", tg.DeploymentMode)
+		}
+	}
+
+	if dc, ok := byName["discord"]; ok {
+		if dc.DeploymentMode != "external" {
+			t.Errorf("discord: expected deployment_mode=external, got %q", dc.DeploymentMode)
+		}
+	}
+}
+
+func TestGetIntegration_DeploymentMode(t *testing.T) {
+	mgr := newMockIntegrationManager()
+	mgr.plugins["telegram"] = map[string]string{}
+
+	srv := &Server{}
+	srv.pluginManager = mgr
+
+	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/integrations/telegram", nil)
+	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	rr := httptest.NewRecorder()
+	srv.handleAdminIntegrationByName(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var detail IntegrationDetail
+	if err := json.NewDecoder(rr.Body).Decode(&detail); err != nil {
+		t.Fatalf("decode error: %v", err)
+	}
+
+	if detail.DeploymentMode != "plugin" {
+		t.Errorf("expected deployment_mode=plugin, got %q", detail.DeploymentMode)
+	}
+}
+
+func TestIsHAIntegration_Modes(t *testing.T) {
+	mgr := newMockIntegrationManager()
+	mgr.plugins["telegram"] = map[string]string{}
+	mgr.plugins["discord"] = map[string]string{}
+	mgr.selfManaged["discord"] = true
+
+	srv := &Server{}
+	srv.pluginManager = mgr
+
+	if srv.isHAIntegration(mgr, "telegram") {
+		t.Error("plugin-mode telegram should not be HA")
+	}
+
+	if !srv.isHAIntegration(mgr, "discord") {
+		t.Error("self-managed discord should be HA (mapped from legacy)")
 	}
 }
