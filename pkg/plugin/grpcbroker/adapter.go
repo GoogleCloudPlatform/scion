@@ -233,20 +233,20 @@ func (a *GRPCBrokerAdapter) tryReconnect() error {
 	return nil
 }
 
-// fireReconnectCallbacks invokes all registered reconnect callbacks.
-// Caller must hold a.mu; the lock is released during callback execution
-// so callbacks may call GetInfo/HealthCheck.
+// fireReconnectCallbacks dispatches all registered reconnect callbacks
+// on a separate goroutine so the caller's lock is never released.
+// Caller must hold a.mu.
 func (a *GRPCBrokerAdapter) fireReconnectCallbacks() {
 	if len(a.reconnectCallbacks) == 0 {
 		return
 	}
 	cbs := make([]func(), len(a.reconnectCallbacks))
 	copy(cbs, a.reconnectCallbacks)
-	a.mu.Unlock()
-	for _, cb := range cbs {
-		cb()
-	}
-	a.mu.Lock()
+	go func() {
+		for _, cb := range cbs {
+			cb()
+		}
+	}()
 }
 
 // Publish sends a message to the remote broker.
@@ -275,6 +275,9 @@ func (a *GRPCBrokerAdapter) Publish(ctx context.Context, topic string, msg *mess
 	a.logger.Warn("publish failed, attempting reconnect", "topic", topic, "error", err)
 	if reconnErr := a.tryReconnect(); reconnErr != nil {
 		return fmt.Errorf("publish failed: %w (reconnect also failed: %v)", err, reconnErr)
+	}
+	if a.client == nil {
+		return fmt.Errorf("publish failed: client nil after reconnect")
 	}
 	_, err = a.client.Publish(ctx, req)
 	return err
@@ -307,6 +310,9 @@ func (a *GRPCBrokerAdapter) Subscribe(pattern string, handler eventbus.EventHand
 	a.logger.Warn("subscribe failed, attempting reconnect", "pattern", pattern, "error", err)
 	if reconnErr := a.tryReconnect(); reconnErr != nil {
 		return nil, fmt.Errorf("subscribe failed: %w (reconnect also failed: %v)", err, reconnErr)
+	}
+	if a.client == nil {
+		return nil, fmt.Errorf("subscribe failed: client nil after reconnect")
 	}
 
 	_, err = a.client.Subscribe(ctx, &brokerv1.SubscribeRequest{Pattern: pattern})

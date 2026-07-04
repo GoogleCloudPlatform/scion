@@ -28,12 +28,12 @@ func TestNewPendingUpdateTracker(t *testing.T) {
 	}
 }
 
-func TestStartUpdateTimeout_StoresEntry(t *testing.T) {
+func TestStartUpdateTracking_StoresEntry(t *testing.T) {
 	srv := &Server{
 		updateTracker: newPendingUpdateTracker(),
 	}
 
-	srv.startUpdateTimeout("discord", "test-update-id")
+	srv.startUpdateTracking("discord", "test-update-id", "1.0.0")
 
 	srv.updateTracker.mu.Lock()
 	defer srv.updateTracker.mu.Unlock()
@@ -45,16 +45,20 @@ func TestStartUpdateTimeout_StoresEntry(t *testing.T) {
 	if entry.updateID != "test-update-id" {
 		t.Errorf("expected update ID test-update-id, got %q", entry.updateID)
 	}
+	if entry.preUpdateVersion != "1.0.0" {
+		t.Errorf("expected preUpdateVersion 1.0.0, got %q", entry.preUpdateVersion)
+	}
+	entry.cancel()
 	entry.timer.Stop()
 }
 
-func TestStartUpdateTimeout_ReplacesExisting(t *testing.T) {
+func TestStartUpdateTracking_ReplacesExisting(t *testing.T) {
 	srv := &Server{
 		updateTracker: newPendingUpdateTracker(),
 	}
 
-	srv.startUpdateTimeout("discord", "first-id")
-	srv.startUpdateTimeout("discord", "second-id")
+	srv.startUpdateTracking("discord", "first-id", "1.0.0")
+	srv.startUpdateTracking("discord", "second-id", "1.1.0")
 
 	srv.updateTracker.mu.Lock()
 	defer srv.updateTracker.mu.Unlock()
@@ -66,13 +70,76 @@ func TestStartUpdateTimeout_ReplacesExisting(t *testing.T) {
 	if entry.updateID != "second-id" {
 		t.Errorf("expected second-id, got %q", entry.updateID)
 	}
+	entry.cancel()
 	entry.timer.Stop()
 }
 
-func TestStartUpdateTimeout_NilTracker(t *testing.T) {
+func TestStartUpdateTracking_NilTracker(t *testing.T) {
 	srv := &Server{}
 	// Should not panic.
-	srv.startUpdateTimeout("discord", "test-id")
+	srv.startUpdateTracking("discord", "test-id", "1.0.0")
+}
+
+func TestHasPendingUpdate(t *testing.T) {
+	tracker := newPendingUpdateTracker()
+
+	if tracker.hasPendingUpdate("discord") {
+		t.Error("expected no pending update initially")
+	}
+
+	srv := &Server{updateTracker: tracker}
+	srv.startUpdateTracking("discord", "test-id", "1.0.0")
+
+	if !tracker.hasPendingUpdate("discord") {
+		t.Error("expected pending update after tracking started")
+	}
+
+	// Clean up.
+	tracker.mu.Lock()
+	e := tracker.pending["discord"]
+	e.cancel()
+	e.timer.Stop()
+	tracker.mu.Unlock()
+}
+
+func TestTriggerImmediatePoll_NoPending(t *testing.T) {
+	srv := &Server{
+		updateTracker: newPendingUpdateTracker(),
+	}
+	// Should not panic when no pending update exists.
+	srv.triggerImmediatePoll("discord")
+}
+
+func TestTriggerImmediatePoll_NilTracker(t *testing.T) {
+	srv := &Server{}
+	// Should not panic with nil tracker.
+	srv.triggerImmediatePoll("discord")
+}
+
+func TestHandleUpdateTimeout_UpdateIDMismatch(t *testing.T) {
+	tracker := newPendingUpdateTracker()
+	srv := &Server{updateTracker: tracker}
+
+	srv.startUpdateTracking("discord", "current-id", "1.0.0")
+
+	// Simulate a stale timeout for a different updateID.
+	// Should not delete the current entry.
+	srv.handleUpdateTimeout("discord", "stale-id")
+
+	tracker.mu.Lock()
+	_, ok := tracker.pending["discord"]
+	tracker.mu.Unlock()
+
+	if !ok {
+		t.Error("expected current entry to survive stale timeout")
+	}
+
+	// Clean up.
+	tracker.mu.Lock()
+	e := tracker.pending["discord"]
+	e.cancel()
+	e.timer.Stop()
+	tracker.mu.Unlock()
 }
 
 func TestRegisterReconnectCallbacks_SkipsNonHA(t *testing.T) {

@@ -919,6 +919,29 @@ func (s *Server) handleUpdateIntegrationHA(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	// Reject if a non-terminal update already exists for this integration.
+	ctx := r.Context()
+	existingCount, err := client.IntegrationUpdate.Query().
+		Where(
+			integrationupdate.IntegrationEQ(name),
+			integrationupdate.StateNotIn(
+				integrationupdate.StateCompleted,
+				integrationupdate.StateFailed,
+			),
+		).
+		Count(ctx)
+	if err != nil {
+		slog.Error("Failed to check for pending updates", "integration", name, "error", err)
+		InternalError(w)
+		return
+	}
+	if existingCount > 0 {
+		writeJSON(w, http.StatusConflict, map[string]string{
+			"error": "An update is already in progress for this integration",
+		})
+		return
+	}
+
 	s.mu.RLock()
 	mgr := s.pluginManager
 	s.mu.RUnlock()
@@ -931,7 +954,6 @@ func (s *Server) handleUpdateIntegrationHA(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
-	ctx := r.Context()
 	user := GetUserIdentityFromContext(ctx)
 	requestedBy := ""
 	if user != nil {
@@ -977,8 +999,8 @@ func (s *Server) handleUpdateIntegrationHA(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// Start a timeout timer for completion detection.
-	s.startUpdateTimeout(name, row.ID.String())
+	// Start poll-based completion detection.
+	s.startUpdateTracking(name, row.ID.String(), preUpdateVersion)
 
 	writeJSON(w, http.StatusAccepted, map[string]string{
 		"update_id": row.ID.String(),

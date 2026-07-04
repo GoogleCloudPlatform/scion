@@ -1475,13 +1475,17 @@ func (s *Server) SetPluginManager(m IntegrationManager) {
 // integration config/update endpoints and the admin signal listener.
 func (s *Server) SetIntegrationHA(dbDriver string, client *ent.Client, dsn string) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.dbDriver = dbDriver
 	s.entClient = client
 	s.databaseDSN = dsn
 
 	if client != nil && s.discordLinkService != nil {
 		s.discordLinkService.SetEntClient(client)
+	}
+	s.mu.Unlock()
+
+	if client != nil {
+		s.sweepOrphanedUpdates()
 	}
 }
 
