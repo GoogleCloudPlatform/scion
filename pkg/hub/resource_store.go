@@ -477,7 +477,7 @@ func extractAuthMeta(hc *store.HarnessConfig, dir string) {
 	if err != nil {
 		return
 	}
-	if hcDir.Config.Auth != nil && len(hcDir.Config.Auth.Types) > 0 {
+	if hcDir != nil && hcDir.Config.Auth != nil && len(hcDir.Config.Auth.Types) > 0 {
 		if hc.Config == nil {
 			hc.Config = &store.HarnessConfigData{}
 		}

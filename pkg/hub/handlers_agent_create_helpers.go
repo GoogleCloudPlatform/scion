@@ -793,8 +793,13 @@ func (s *Server) hasRequiredAuthCredentials(ctx context.Context, agent *store.Ag
 		return false, nil
 	}
 
-	// Explicit auth type selected or no authMeta — use the compiled check.
-	keyGroups := harness.RequiredAuthEnvKeys(harnessType, agent.AppliedConfig.HarnessAuth)
+	// Explicit auth type selected or no authMeta — use config-driven check when available.
+	var keyGroups [][]string
+	if authMeta != nil {
+		keyGroups = harness.RequiredAuthEnvKeysFromConfig(authMeta, agent.AppliedConfig.HarnessAuth)
+	} else {
+		keyGroups = harness.RequiredAuthEnvKeys(harnessType, agent.AppliedConfig.HarnessAuth)
+	}
 	if len(keyGroups) == 0 && authMeta == nil {
 		return true, nil
 	}
