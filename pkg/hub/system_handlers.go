@@ -196,7 +196,14 @@ func (s *Server) handlePutRuntime(w http.ResponseWriter, r *http.Request) {
 
 	activeProfile := vs.ActiveProfile
 	if activeProfile == "" {
-		activeProfile = "default"
+		// The single-file load doesn't merge embedded defaults, so ActiveProfile
+		// may be empty. Resolve the effective active profile so we update the same
+		// profile the server will read at startup (e.g. "local" from defaults).
+		if effective, _, eErr := config.LoadEffectiveSettings(""); eErr == nil && effective != nil && effective.ActiveProfile != "" {
+			activeProfile = effective.ActiveProfile
+		} else {
+			activeProfile = "default"
+		}
 	}
 
 	if vs.Profiles == nil {
