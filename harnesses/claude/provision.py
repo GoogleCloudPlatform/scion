@@ -157,11 +157,11 @@ def _select_auth_method(
     has_oauth = "CLAUDE_CODE_OAUTH_TOKEN" in env_keys
     has_authfile = _auth_file_present(file_paths, CLAUDE_AUTH_FILE)
     has_gcp_project = "GOOGLE_CLOUD_PROJECT" in env_keys
-    has_gcp_region = any(k in env_keys for k in ('GOOGLE_CLOUD_LOCATION', 'GOOGLE_CLOUD_REGION'))
     _gcp_region_key = next(
         (k for k in ('GOOGLE_CLOUD_LOCATION', 'GOOGLE_CLOUD_REGION') if k in env_keys),
         "",
     )
+    has_gcp_region = bool(_gcp_region_key)
 
     if explicit:
         if explicit not in VALID_AUTH_TYPES:
