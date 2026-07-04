@@ -70,7 +70,7 @@ func TestComposition_HarnessConfigBaseLayer(t *testing.T) {
 	os.MkdirAll(tplDir, 0755)
 	os.WriteFile(filepath.Join(tplDir, "scion-agent.yaml"), []byte("default_harness_config: test-hc\n"), 0644)
 
-	agentHome, _, _, err := ProvisionAgent(context.Background(), "base-agent", "base-test", "", "", projectScionDir, "", "", "", "")
+	agentHome, _, _, err := ProvisionAgent(context.Background(), "base-agent", "base-test", "", "", projectScionDir, "", "", "", "", "")
 	if err != nil {
 		t.Fatalf("ProvisionAgent failed: %v", err)
 	}
@@ -112,7 +112,7 @@ func TestComposition_TemplateOverlay(t *testing.T) {
 	os.WriteFile(filepath.Join(tplHome, "shared-file.txt"), []byte("from-template"), 0644) // overlay
 	os.WriteFile(filepath.Join(tplHome, "template-only.txt"), []byte("template-only-content"), 0644)
 
-	agentHome, _, _, err := ProvisionAgent(context.Background(), "overlay-agent", "overlay-test", "", "", projectScionDir, "", "", "", "")
+	agentHome, _, _, err := ProvisionAgent(context.Background(), "overlay-agent", "overlay-test", "", "", projectScionDir, "", "", "", "", "")
 	if err != nil {
 		t.Fatalf("ProvisionAgent failed: %v", err)
 	}
@@ -158,7 +158,7 @@ agent_instructions: "You are a helpful coding assistant."
 `
 		os.WriteFile(filepath.Join(tplDir, "scion-agent.yaml"), []byte(tplConfig), 0644)
 
-		agentHome, _, _, err := ProvisionAgent(context.Background(), "inline-agent", "inline-instructions", "", "", projectScionDir, "", "", "", "")
+		agentHome, _, _, err := ProvisionAgent(context.Background(), "inline-agent", "inline-instructions", "", "", projectScionDir, "", "", "", "", "")
 		if err != nil {
 			t.Fatalf("ProvisionAgent failed: %v", err)
 		}
@@ -181,7 +181,7 @@ agent_instructions: my-instructions.md
 `
 		os.WriteFile(filepath.Join(tplDir, "scion-agent.yaml"), []byte(tplConfig), 0644)
 
-		agentHome, _, _, err := ProvisionAgent(context.Background(), "file-instr-agent", "file-instructions", "", "", projectScionDir, "", "", "", "")
+		agentHome, _, _, err := ProvisionAgent(context.Background(), "file-instr-agent", "file-instructions", "", "", projectScionDir, "", "", "", "", "")
 		if err != nil {
 			t.Fatalf("ProvisionAgent failed: %v", err)
 		}
@@ -208,7 +208,7 @@ system_prompt: "Be concise and precise."
 `
 	os.WriteFile(filepath.Join(tplDir, "scion-agent.yaml"), []byte(tplConfig), 0644)
 
-	agentHome, _, _, err := ProvisionAgent(context.Background(), "sysprompt-agent", "sysprompt-test", "", "", projectScionDir, "", "", "", "")
+	agentHome, _, _, err := ProvisionAgent(context.Background(), "sysprompt-agent", "sysprompt-test", "", "", projectScionDir, "", "", "", "", "")
 	if err != nil {
 		t.Fatalf("ProvisionAgent failed: %v", err)
 	}
@@ -232,7 +232,7 @@ func TestComposition_CommonFiles(t *testing.T) {
 	os.MkdirAll(tplDir, 0755)
 	os.WriteFile(filepath.Join(tplDir, "scion-agent.yaml"), []byte("default_harness_config: common-hc\n"), 0644)
 
-	agentHome, _, _, err := ProvisionAgent(context.Background(), "common-agent", "common-test", "", "", projectScionDir, "", "", "", "")
+	agentHome, _, _, err := ProvisionAgent(context.Background(), "common-agent", "common-test", "", "", projectScionDir, "", "", "", "", "")
 	if err != nil {
 		t.Fatalf("ProvisionAgent failed: %v", err)
 	}
@@ -266,7 +266,7 @@ func TestComposition_HarnessConfigResolution(t *testing.T) {
 	os.WriteFile(filepath.Join(tplDirNoDefault, "scion-agent.yaml"), []byte("env:\n  FOO: bar\n"), 0644)
 
 	t.Run("CLI flag wins over template", func(t *testing.T) {
-		_, _, cfg, err := ProvisionAgent(context.Background(), "cli-wins", "resolve-test", "", "cli-hc", projectScionDir, "", "", "", "")
+		_, _, cfg, err := ProvisionAgent(context.Background(), "cli-wins", "resolve-test", "", "cli-hc", projectScionDir, "", "", "", "", "")
 		if err != nil {
 			t.Fatalf("ProvisionAgent failed: %v", err)
 		}
@@ -276,7 +276,7 @@ func TestComposition_HarnessConfigResolution(t *testing.T) {
 	})
 
 	t.Run("template default used when no CLI flag", func(t *testing.T) {
-		_, _, cfg, err := ProvisionAgent(context.Background(), "tpl-default", "resolve-test", "", "", projectScionDir, "", "", "", "")
+		_, _, cfg, err := ProvisionAgent(context.Background(), "tpl-default", "resolve-test", "", "", projectScionDir, "", "", "", "", "")
 		if err != nil {
 			t.Fatalf("ProvisionAgent failed: %v", err)
 		}
@@ -295,7 +295,7 @@ profiles:
 `
 		os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(settingsYAML), 0644)
 
-		_, _, cfg, err := ProvisionAgent(context.Background(), "profile-default", "no-default-test", "", "", projectScionDir, "test-profile", "", "", "")
+		_, _, cfg, err := ProvisionAgent(context.Background(), "profile-default", "no-default-test", "", "", projectScionDir, "test-profile", "", "", "", "")
 		if err != nil {
 			t.Fatalf("ProvisionAgent failed: %v", err)
 		}
@@ -312,7 +312,7 @@ default_harness_config: settings-hc
 `
 		os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(settingsYAML), 0644)
 
-		_, _, cfg, err := ProvisionAgent(context.Background(), "settings-default", "no-default-test", "", "", projectScionDir, "", "", "", "")
+		_, _, cfg, err := ProvisionAgent(context.Background(), "settings-default", "no-default-test", "", "", projectScionDir, "", "", "", "", "")
 		if err != nil {
 			t.Fatalf("ProvisionAgent failed: %v", err)
 		}
@@ -323,7 +323,7 @@ default_harness_config: settings-hc
 	})
 
 	t.Run("error when no harness-config resolved", func(t *testing.T) {
-		_, _, _, err := ProvisionAgent(context.Background(), "no-hc", "no-default-test", "", "", projectScionDir, "", "", "", "")
+		_, _, _, err := ProvisionAgent(context.Background(), "no-hc", "no-default-test", "", "", projectScionDir, "", "", "", "", "")
 		if err == nil {
 			t.Fatal("expected error when no harness-config can be resolved")
 		}
@@ -341,7 +341,7 @@ func TestComposition_LegacyTemplateRejected(t *testing.T) {
 	os.MkdirAll(tplDir, 0755)
 	os.WriteFile(filepath.Join(tplDir, "scion-agent.yaml"), []byte("harness: claude\n"), 0644)
 
-	_, _, _, err := ProvisionAgent(context.Background(), "legacy-agent", "legacy-tpl", "", "", projectScionDir, "", "", "", "")
+	_, _, _, err := ProvisionAgent(context.Background(), "legacy-agent", "legacy-tpl", "", "", projectScionDir, "", "", "", "", "")
 	if err == nil {
 		t.Fatal("expected error for legacy template with 'harness' field")
 	}
@@ -359,7 +359,7 @@ func TestComposition_HarnessConfigPersistedInAgentInfo(t *testing.T) {
 	os.MkdirAll(tplDir, 0755)
 	os.WriteFile(filepath.Join(tplDir, "scion-agent.yaml"), []byte("default_harness_config: persist-hc\n"), 0644)
 
-	agentHome, _, cfg, err := ProvisionAgent(context.Background(), "persist-agent", "persist-test", "", "", projectScionDir, "", "", "", "")
+	agentHome, _, cfg, err := ProvisionAgent(context.Background(), "persist-agent", "persist-test", "", "", projectScionDir, "", "", "", "", "")
 	if err != nil {
 		t.Fatalf("ProvisionAgent failed: %v", err)
 	}
@@ -461,7 +461,7 @@ func TestComposition_InlineHarnessConfigWithAgentInstructions(t *testing.T) {
 	_, globalScionDir, projectScionDir := setupCompositionTest(t)
 	setupInlineHarnessTemplate(t, globalScionDir, "web-dev-explicit", "agents.md")
 
-	agentHome, _, _, err := ProvisionAgent(context.Background(), "explicit-instruct", "web-dev-explicit", "", "", projectScionDir, "", "", "", "")
+	agentHome, _, _, err := ProvisionAgent(context.Background(), "explicit-instruct", "web-dev-explicit", "", "", projectScionDir, "", "", "", "", "")
 	if err != nil {
 		t.Fatalf("ProvisionAgent failed: %v", err)
 	}
@@ -477,7 +477,7 @@ func TestComposition_InlineHarnessConfigAutoDetectsAgentsMd(t *testing.T) {
 	_, globalScionDir, projectScionDir := setupCompositionTest(t)
 	setupInlineHarnessTemplate(t, globalScionDir, "web-dev-auto", "") // no agent_instructions
 
-	agentHome, _, _, err := ProvisionAgent(context.Background(), "auto-instruct", "web-dev-auto", "", "", projectScionDir, "", "", "", "")
+	agentHome, _, _, err := ProvisionAgent(context.Background(), "auto-instruct", "web-dev-auto", "", "", projectScionDir, "", "", "", "", "")
 	if err != nil {
 		t.Fatalf("ProvisionAgent failed: %v", err)
 	}
@@ -512,7 +512,7 @@ func TestComposition_FullInitProjectFlow(t *testing.T) {
 	os.Chdir(projectDir)
 
 	// Use the "default" template (agnostic); default_harness_config: claude comes from settings
-	agentHome, _, cfg, err := ProvisionAgent(context.Background(), "full-flow-agent", "default", "", "", projectScionDir, "", "", "", "")
+	agentHome, _, cfg, err := ProvisionAgent(context.Background(), "full-flow-agent", "default", "", "", projectScionDir, "", "", "", "", "")
 	if err != nil {
 		t.Fatalf("ProvisionAgent failed: %v", err)
 	}

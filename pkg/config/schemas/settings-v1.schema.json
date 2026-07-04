@@ -225,6 +225,17 @@
           "type": "boolean",
           "default": false,
           "description": "Enable GKE-specific features (e.g., Workload Identity)."
+        },
+        "docker": {
+          "type": "object",
+          "description": "Docker/Podman-specific runtime settings.",
+          "properties": {
+            "network": {
+              "type": "string",
+              "description": "Container network mode passed to Docker/Podman --network flag (e.g. 'host', 'bridge', 'none', or a custom network name)."
+            }
+          },
+          "additionalProperties": false
         }
       },
       "additionalProperties": false
@@ -491,7 +502,8 @@
             "api_key": { "$ref": "#/$defs/capabilityField" },
             "auth_file": { "$ref": "#/$defs/capabilityField" },
             "oauth_token": { "$ref": "#/$defs/capabilityField" },
-            "vertex_ai": { "$ref": "#/$defs/capabilityField" }
+            "vertex_ai": { "$ref": "#/$defs/capabilityField" },
+            "none": { "$ref": "#/$defs/capabilityField" }
           },
           "additionalProperties": false
         },
@@ -514,7 +526,7 @@
       "properties": {
         "default_type": {
           "type": "string",
-          "enum": ["api-key", "oauth-token", "auth-file", "vertex-ai"]
+          "enum": ["api-key", "oauth-token", "auth-file", "vertex-ai", "none"]
         },
         "types": {
           "type": "object",
@@ -573,14 +585,14 @@
           "type": "object",
           "additionalProperties": {
             "type": "string",
-            "enum": ["api-key", "oauth-token", "auth-file", "vertex-ai"]
+            "enum": ["api-key", "oauth-token", "auth-file", "vertex-ai", "none"]
           }
         },
         "files": {
           "type": "object",
           "additionalProperties": {
             "type": "string",
-            "enum": ["api-key", "oauth-token", "auth-file", "vertex-ai"]
+            "enum": ["api-key", "oauth-token", "auth-file", "vertex-ai", "none"]
           }
         }
       },
@@ -644,7 +656,7 @@
         "resources": { "$ref": "#/$defs/resourceSpec" },
         "auth_selected_type": {
           "type": "string",
-          "enum": ["api-key", "oauth-token", "auth-file", "vertex-ai"]
+          "enum": ["api-key", "oauth-token", "auth-file", "vertex-ai", "none"]
         }
       },
       "additionalProperties": false

@@ -63,6 +63,93 @@ echo "$@"
 	}
 }
 
+func TestDockerRuntime_NetworkConfig(t *testing.T) {
+	tmpDir := t.TempDir()
+	mockDocker := filepath.Join(tmpDir, "mock-docker")
+
+	script := `#!/bin/sh
+echo "$@"
+`
+	if err := os.WriteFile(mockDocker, []byte(script), 0755); err != nil {
+		t.Fatalf("failed to write mock docker: %v", err)
+	}
+
+	t.Run("runtime network applied when config NetworkMode is empty", func(t *testing.T) {
+		rt := &DockerRuntime{
+			Command: mockDocker,
+			Network: "bridge",
+		}
+
+		config := RunConfig{
+			Harness:      &harness.Generic{},
+			Name:         "test-agent",
+			UnixUsername: "scion",
+			Image:        "scion-agent:latest",
+			Task:         "hello",
+		}
+
+		out, err := rt.Run(context.Background(), config)
+		if err != nil {
+			t.Fatalf("runtime.Run failed: %v", err)
+		}
+
+		if !strings.Contains(out, "--network bridge") {
+			t.Errorf("expected '--network bridge' in output, got %q", out)
+		}
+	})
+
+	t.Run("config NetworkMode takes precedence over runtime network", func(t *testing.T) {
+		rt := &DockerRuntime{
+			Command: mockDocker,
+			Network: "bridge",
+		}
+
+		config := RunConfig{
+			Harness:      &harness.Generic{},
+			Name:         "test-agent",
+			UnixUsername: "scion",
+			Image:        "scion-agent:latest",
+			Task:         "hello",
+			NetworkMode:  "host",
+		}
+
+		out, err := rt.Run(context.Background(), config)
+		if err != nil {
+			t.Fatalf("runtime.Run failed: %v", err)
+		}
+
+		if !strings.Contains(out, "--network host") {
+			t.Errorf("expected '--network host' in output, got %q", out)
+		}
+		if strings.Contains(out, "--network bridge") {
+			t.Errorf("expected '--network bridge' to be absent, got %q", out)
+		}
+	})
+
+	t.Run("no network flag when both are empty", func(t *testing.T) {
+		rt := &DockerRuntime{
+			Command: mockDocker,
+		}
+
+		config := RunConfig{
+			Harness:      &harness.Generic{},
+			Name:         "test-agent",
+			UnixUsername: "scion",
+			Image:        "scion-agent:latest",
+			Task:         "hello",
+		}
+
+		out, err := rt.Run(context.Background(), config)
+		if err != nil {
+			t.Fatalf("runtime.Run failed: %v", err)
+		}
+
+		if strings.Contains(out, "--network") {
+			t.Errorf("expected no '--network' flag, got %q", out)
+		}
+	})
+}
+
 func TestDockerRuntime_Exec_UserFlag(t *testing.T) {
 	// Create a temporary script to act as a mock docker
 	tmpDir := t.TempDir()

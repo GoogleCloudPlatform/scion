@@ -208,7 +208,24 @@ func (h *HubHandler) Handle(event *hooks.Event) error {
 		})
 
 	case hooks.EventSessionEnd:
-		// Session ended
+		if event.Data.AssistantText != "" {
+			text := event.Data.AssistantText
+			const maxAssistantTextBytes = 64 * 1024
+			if len(text) > maxAssistantTextBytes {
+				text = text[:maxAssistantTextBytes] + "\n[truncated]"
+			}
+			metadata := map[string]string{"source": "hook"}
+			msgCtx, msgCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer msgCancel()
+			if msgErr := h.client.SendOutboundMessage(msgCtx, hub.OutboundMessage{
+				Msg:        text,
+				Type:       "assistant-reply",
+				Visibility: "verbose",
+				Metadata:   metadata,
+			}); msgErr != nil {
+				log.Error("Hub: outbound assistant reply failed (session-end): %v", msgErr)
+			}
+		}
 		log.Debug("Hub: Reporting stopped (session end)")
 		as := state.AgentState{Phase: state.PhaseStopped}
 		err = h.client.UpdateStatus(ctx, hub.StatusUpdate{

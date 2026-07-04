@@ -89,6 +89,10 @@ func (h *LimitsHandler) Handle(event *hooks.Event) error {
 		return nil
 	}
 
+	if isHeartbeatEvent(event) {
+		return nil
+	}
+
 	switch event.Name {
 	case hooks.EventAgentEnd:
 		if h.maxTurns <= 0 {
@@ -275,4 +279,12 @@ func ParseEnvInt(key string) int {
 		return 0
 	}
 	return n
+}
+
+func isHeartbeatEvent(event *hooks.Event) bool {
+	if event.Data.Raw == nil {
+		return false
+	}
+	isHB, _ := event.Data.Raw["_scion_heartbeat"].(bool)
+	return isHB
 }

@@ -67,6 +67,17 @@ func TestAdvancedCapabilitiesDefaults(t *testing.T) {
 			expectSystemPrompt:  api.SupportPartial,
 			expectResume:        api.SupportNo,
 		},
+		{
+			name:                "opencode",
+			harness:             "opencode",
+			expectMaxTurns:      api.SupportYes,
+			expectMaxModelCalls: api.SupportYes,
+			expectMaxDuration:   api.SupportYes,
+			expectAuthFile:      api.SupportYes,
+			expectVertexAI:      api.SupportYes,
+			expectSystemPrompt:  api.SupportPartial,
+			expectResume:        api.SupportYes,
+		},
 	}
 
 	for _, tc := range tests {

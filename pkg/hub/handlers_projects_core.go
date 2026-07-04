@@ -741,10 +741,7 @@ func (s *Server) cloneSharedWorkspaceProject(ctx context.Context, project *store
 	// Only convert to HTTPS if the URL looks like a remote git URL.
 	cloneURL := resolveCloneURL(project.Labels["scion.dev/clone-url"], project.GitRemote)
 
-	defaultBranch := project.Labels["scion.dev/default-branch"]
-	if defaultBranch == "" {
-		defaultBranch = "main"
-	}
+	defaultBranch := s.resolveDefaultBranch(cloneURL, project.Labels["scion.dev/default-branch"])
 
 	// Resolve a token for authentication.
 	token := s.resolveCloneToken(ctx, project)

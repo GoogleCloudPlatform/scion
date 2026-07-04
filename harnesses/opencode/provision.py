@@ -64,7 +64,7 @@ except ImportError:
 OPENCODE_AUTH_FILE = "~/.local/share/opencode/auth.json"
 OPENCODE_CONFIG_FILE = "~/.config/opencode/opencode.json"
 
-VALID_AUTH_TYPES = ("api-key", "auth-file", "vertex-ai")
+VALID_AUTH_TYPES = ("api-key", "auth-file", "vertex-ai", "none")
 
 # Exit codes mirror the contract documented in the design doc:
 #   0 = success
@@ -168,7 +168,9 @@ def _select_auth_method(
     has_authfile = _opencode_auth_file_present(file_paths)
 
     has_vertex_project = bool(env_keys & {"GOOGLE_CLOUD_PROJECT", "VERTEXAI_PROJECT"})
-    has_vertex_location = bool(env_keys & {"GOOGLE_CLOUD_REGION", "GOOGLE_CLOUD_LOCATION", "VERTEX_LOCATION"})
+    has_vertex_location = bool(
+        env_keys & {"GOOGLE_CLOUD_REGION", "GOOGLE_CLOUD_LOCATION", "VERTEX_LOCATION"}
+    )
     # gcp_metadata_mode is not currently populated in auth-candidates.json by
     # the Go staging layer; this guard is reserved for future use.
     gcp_meta_mode = str(candidates.get("gcp_metadata_mode") or "").strip()
@@ -197,6 +199,8 @@ def _select_auth_method(
                     f"found; expected {OPENCODE_AUTH_FILE}"
                 )
             return "auth-file", ""
+        if explicit == "none":
+            return "none", ""
         if explicit == "vertex-ai":
             if not has_vertex_project or not has_vertex_location:
                 raise ValueError(
@@ -253,7 +257,10 @@ def _translate_mcp_server(name: str, spec: dict[str, Any]) -> dict[str, Any] | N
     if transport == "stdio":
         cmd = spec.get("command")
         if not isinstance(cmd, str) or not cmd:
-            print(f"opencode provision: mcp server {name!r}: stdio transport missing command", file=sys.stderr)
+            print(
+                f"opencode provision: mcp server {name!r}: stdio transport missing command",
+                file=sys.stderr,
+            )
             return None
         args = spec.get("args") or []
         if not isinstance(args, list):
@@ -271,7 +278,10 @@ def _translate_mcp_server(name: str, spec: dict[str, Any]) -> dict[str, Any] | N
     if transport in ("sse", "streamable-http"):
         url = spec.get("url")
         if not isinstance(url, str) or not url:
-            print(f"opencode provision: mcp server {name!r}: {transport} transport missing url", file=sys.stderr)
+            print(
+                f"opencode provision: mcp server {name!r}: {transport} transport missing url",
+                file=sys.stderr,
+            )
             return None
         out = {
             "type": "remote",
@@ -282,7 +292,10 @@ def _translate_mcp_server(name: str, spec: dict[str, Any]) -> dict[str, Any] | N
             out["headers"] = {str(k): str(v) for k, v in headers.items()}
         return out
 
-    print(f"opencode provision: mcp server {name!r}: unsupported transport {transport!r}", file=sys.stderr)
+    print(
+        f"opencode provision: mcp server {name!r}: unsupported transport {transport!r}",
+        file=sys.stderr,
+    )
     return None
 
 
@@ -323,7 +336,10 @@ def _apply_mcp_servers(bundle: str) -> int:
         try:
             existing = _load_json(config_path)
         except (OSError, json.JSONDecodeError) as exc:
-            print(f"opencode provision: existing opencode.json not readable, recreating: {exc}", file=sys.stderr)
+            print(
+                f"opencode provision: existing opencode.json not readable, recreating: {exc}",
+                file=sys.stderr,
+            )
             existing = {}
         if isinstance(existing, dict):
             config_data = existing
@@ -338,10 +354,14 @@ def _apply_mcp_servers(bundle: str) -> int:
     try:
         _write_json(config_path, config_data)
     except OSError as exc:
-        print(f"opencode provision: failed to write opencode.json: {exc}", file=sys.stderr)
+        print(
+            f"opencode provision: failed to write opencode.json: {exc}", file=sys.stderr
+        )
         return 0
 
-    print(f"opencode provision: applied {len(translated)} mcp server(s)", file=sys.stderr)
+    print(
+        f"opencode provision: applied {len(translated)} mcp server(s)", file=sys.stderr
+    )
     return len(translated)
 
 
@@ -363,6 +383,25 @@ def _read_mcp_servers_inline(bundle: str) -> dict[str, dict[str, Any]]:
     return {str(k): v for k, v in servers.items() if isinstance(v, dict)}
 
 
+def _inject_scion_plugin(bundle: str) -> None:
+    """Copy scion-plugin.js from harness bundle to OpenCode's plugin directory."""
+    plugin_src = os.path.join(bundle, "scion-plugin.js")
+    if not os.path.isfile(plugin_src):
+        print(
+            "opencode provision: scion-plugin.js not found in harness bundle",
+            file=sys.stderr,
+        )
+        return
+    plugin_dir = os.path.expanduser("~/.config/opencode/plugins")
+    os.makedirs(plugin_dir, exist_ok=True)
+    plugin_dst = os.path.join(plugin_dir, "scion-plugin.js")
+    with open(plugin_src, "r") as f:
+        content = f.read()
+    with open(plugin_dst, "w") as f:
+        f.write(content)
+    os.chmod(plugin_dst, 0o644)
+
+
 def _provision(manifest: dict[str, Any]) -> int:
     bundle = manifest.get("harness_bundle_dir") or "$HOME/.scion/harness"
     bundle = _expand(bundle)
@@ -378,7 +417,10 @@ def _provision(manifest: dict[str, Any]) -> int:
         try:
             candidates = _load_json(auth_candidates_path) or {}
         except (OSError, json.JSONDecodeError) as exc:
-            print(f"opencode provision: invalid auth-candidates.json: {exc}", file=sys.stderr)
+            print(
+                f"opencode provision: invalid auth-candidates.json: {exc}",
+                file=sys.stderr,
+            )
             return EXIT_ERROR
 
     explicit = str(candidates.get("explicit_type") or "").strip()
@@ -394,19 +436,27 @@ def _provision(manifest: dict[str, Any]) -> int:
     secret_files = _env_secret_files(candidates)
 
     if not candidates and no_auth_behavior:
-        print(f"opencode provision: no-auth mode (behavior={no_auth_behavior}), skipping auth setup", file=sys.stderr)
+        print(
+            f"opencode provision: no-auth mode (behavior={no_auth_behavior}), skipping auth setup",
+            file=sys.stderr,
+        )
         method = "none"
         env_key = ""
     else:
         try:
-            method, env_key = _select_auth_method(explicit, env_keys, file_paths, candidates)
+            method, env_key = _select_auth_method(
+                explicit, env_keys, file_paths, candidates
+            )
         except ValueError as exc:
             print(str(exc), file=sys.stderr)
             return EXIT_ERROR
 
     outputs = manifest.get("outputs") or {}
     env_out = _expand(outputs.get("env") or os.path.join(bundle, "outputs", "env.json"))
-    auth_out = _expand(outputs.get("resolved_auth") or os.path.join(bundle, "outputs", "resolved-auth.json"))
+    auth_out = _expand(
+        outputs.get("resolved_auth")
+        or os.path.join(bundle, "outputs", "resolved-auth.json")
+    )
 
     resolved_payload: dict[str, Any] = {
         "schema_version": 1,
@@ -427,9 +477,14 @@ def _provision(manifest: dict[str, Any]) -> int:
     env_payload: dict[str, Any] = {}
 
     if method == "vertex-ai":
-        project = _resolve_secret(secret_files, "GOOGLE_CLOUD_PROJECT", "VERTEXAI_PROJECT")
+        project = _resolve_secret(
+            secret_files, "GOOGLE_CLOUD_PROJECT", "VERTEXAI_PROJECT"
+        )
         location = _resolve_secret(
-            secret_files, "GOOGLE_CLOUD_REGION", "GOOGLE_CLOUD_LOCATION", "VERTEX_LOCATION"
+            secret_files,
+            "GOOGLE_CLOUD_REGION",
+            "GOOGLE_CLOUD_LOCATION",
+            "VERTEX_LOCATION",
         )
         if project:
             env_payload["VERTEXAI_PROJECT"] = project
@@ -449,6 +504,8 @@ def _provision(manifest: dict[str, Any]) -> int:
     # provisioning errors — auth is the hard gate (per design Q4: unsupported
     # transports are best-effort warn-and-skip).
     _apply_mcp_servers(bundle)
+
+    _inject_scion_plugin(bundle)
 
     print(f"opencode provision: method={method}", file=sys.stderr)
     return EXIT_OK
@@ -479,10 +536,16 @@ def main() -> int:
     try:
         manifest = _load_json(manifest_path)
     except FileNotFoundError:
-        print(f"opencode provision: manifest not found at {manifest_path}", file=sys.stderr)
+        print(
+            f"opencode provision: manifest not found at {manifest_path}",
+            file=sys.stderr,
+        )
         return EXIT_ERROR
     except (OSError, json.JSONDecodeError) as exc:
-        print(f"opencode provision: failed to load manifest {manifest_path}: {exc}", file=sys.stderr)
+        print(
+            f"opencode provision: failed to load manifest {manifest_path}: {exc}",
+            file=sys.stderr,
+        )
         return EXIT_ERROR
 
     if not isinstance(manifest, dict):

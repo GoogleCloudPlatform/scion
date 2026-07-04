@@ -1,0 +1,8 @@
+[registry."host.bridge.internal:5000"]
+http = true
+
+[registry."localhost:5000"]
+http = true
+
+[registry."host.docker.internal:5000"]
+http = true

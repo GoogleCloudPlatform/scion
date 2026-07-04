@@ -69,6 +69,9 @@ func (s *Server) updateAgentStatus(w http.ResponseWriter, r *http.Request, id st
 		return
 	}
 
+	s.agentLifecycleLog.Debug("agent status updated",
+		"agent_id", id, "phase", status.Phase, "activity", status.Activity)
+
 	// Publish status event (best-effort: fetch agent for ProjectID)
 	if agent, err := s.store.GetAgent(ctx, id); err == nil {
 		s.events.PublishAgentStatus(ctx, agent)

@@ -115,6 +115,10 @@ func (nd *NotificationDispatcher) handleEvent(evt Event) {
 		return
 	}
 
+	nd.log.Debug("notification dispatcher received agent status event",
+		"agent_id", statusEvt.AgentID, "project_id", statusEvt.ProjectID,
+		"phase", statusEvt.Phase, "activity", statusEvt.Activity)
+
 	ctx := context.Background()
 
 	// Collect subscriptions from both scopes: agent-scoped first (more specific),

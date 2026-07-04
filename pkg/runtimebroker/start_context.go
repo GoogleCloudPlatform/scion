@@ -386,6 +386,7 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		opts.Workspace = in.Config.Workspace
 		opts.Profile = in.Config.Profile
 		opts.Branch = in.Config.Branch
+		opts.Source = in.Config.Source
 		opts.SharedWorkspace = in.Config.SharedWorkspace
 	}
 

@@ -50,13 +50,15 @@ func init() {
 
 	startCmd.Flags().StringVarP(&branch, "branch", "b", "", "Git branch to use for the agent workspace")
 
+	startCmd.Flags().StringVar(&source, "source", "", "Source branch/tag/commit for the agent workspace (defaults to repo default branch)")
+
 	startCmd.Flags().StringVarP(&workspace, "workspace", "w", "", "Host path to mount as /workspace")
 
 	startCmd.Flags().StringVar(&runtimeBrokerID, "broker", "", "Preferred runtime broker ID or name")
 	startCmd.Flags().StringVar(&harnessConfigFlag, "harness-config", "", "Named harness configuration to use")
 	startCmd.Flags().StringVar(&harnessConfigFlag, "harness", "", "Named harness configuration to use (alias for --harness-config)")
 
-	startCmd.Flags().StringVar(&harnessAuthFlag, "harness-auth", "", "Override auth method for the harness (api-key, oauth-token, auth-file, vertex-ai)")
+	startCmd.Flags().StringVar(&harnessAuthFlag, "harness-auth", "", "Override auth method for the harness (api-key, oauth-token, auth-file, vertex-ai, none)")
 
 	// Notification flag — on by default for Hub mode; use --no-notify to opt out
 	startCmd.Flags().BoolVar(&startNoNotify, "no-notify", false, "Do not subscribe to notifications for the spawned agent")

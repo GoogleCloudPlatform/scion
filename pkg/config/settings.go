@@ -131,17 +131,18 @@ type HubConnectionConfig struct {
 }
 
 type Settings struct {
-	ProjectID       string                         `json:"project_id,omitempty" yaml:"project_id,omitempty" koanf:"project_id"`
-	ActiveProfile   string                         `json:"active_profile" yaml:"active_profile" koanf:"active_profile"`
-	DefaultTemplate string                         `json:"default_template,omitempty" yaml:"default_template,omitempty" koanf:"default_template"`
-	WorkspacePath   string                         `json:"workspace_path,omitempty" yaml:"workspace_path,omitempty" koanf:"workspace_path"`
-	Bucket          *BucketConfig                  `json:"bucket,omitempty" yaml:"bucket,omitempty" koanf:"bucket"`
-	Hub             *HubClientConfig               `json:"hub,omitempty" yaml:"hub,omitempty" koanf:"hub"`
-	CLI             *CLIConfig                     `json:"cli,omitempty" yaml:"cli,omitempty" koanf:"cli"`
-	HubConnections  map[string]HubConnectionConfig `json:"hub_connections,omitempty" yaml:"hub_connections,omitempty" koanf:"hub_connections"`
-	Runtimes        map[string]RuntimeConfig       `json:"runtimes" yaml:"runtimes" koanf:"runtimes"`
-	Harnesses       map[string]HarnessConfig       `json:"harnesses" yaml:"harnesses" koanf:"harnesses"`
-	Profiles        map[string]ProfileConfig       `json:"profiles" yaml:"profiles" koanf:"profiles"`
+	ProjectID        string                         `json:"project_id,omitempty" yaml:"project_id,omitempty" koanf:"project_id"`
+	ActiveProfile    string                         `json:"active_profile" yaml:"active_profile" koanf:"active_profile"`
+	DefaultTemplate  string                         `json:"default_template,omitempty" yaml:"default_template,omitempty" koanf:"default_template"`
+	WorkspacePath    string                         `json:"workspace_path,omitempty" yaml:"workspace_path,omitempty" koanf:"workspace_path"`
+	DisableLocalAuth *bool                          `json:"disable_local_auth,omitempty" yaml:"disable_local_auth,omitempty" koanf:"disable_local_auth"`
+	Bucket           *BucketConfig                  `json:"bucket,omitempty" yaml:"bucket,omitempty" koanf:"bucket"`
+	Hub              *HubClientConfig               `json:"hub,omitempty" yaml:"hub,omitempty" koanf:"hub"`
+	CLI              *CLIConfig                     `json:"cli,omitempty" yaml:"cli,omitempty" koanf:"cli"`
+	HubConnections   map[string]HubConnectionConfig `json:"hub_connections,omitempty" yaml:"hub_connections,omitempty" koanf:"hub_connections"`
+	Runtimes         map[string]RuntimeConfig       `json:"runtimes" yaml:"runtimes" koanf:"runtimes"`
+	Harnesses        map[string]HarnessConfig       `json:"harnesses" yaml:"harnesses" koanf:"harnesses"`
+	Profiles         map[string]ProfileConfig       `json:"profiles" yaml:"profiles" koanf:"profiles"`
 }
 
 func (s *Settings) ResolveRuntime(profileName string) (RuntimeConfig, string, error) {

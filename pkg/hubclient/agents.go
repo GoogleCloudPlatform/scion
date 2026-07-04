@@ -167,6 +167,7 @@ type CreateAgentRequest struct {
 	Profile         string            `json:"profile,omitempty"`
 	Task            string            `json:"task,omitempty"`
 	Branch          string            `json:"branch,omitempty"`
+	Source          string            `json:"source,omitempty"`
 	Workspace       string            `json:"workspace,omitempty"`
 	Labels          map[string]string `json:"labels,omitempty"`
 	Annotations     map[string]string `json:"annotations,omitempty"`

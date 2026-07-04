@@ -1153,6 +1153,45 @@ func TestResolveRuntime_ProfileEnvMerge(t *testing.T) {
 	assert.Equal(t, "profile_value", rtConfig.Env["PROFILE_KEY"], "profile env should be merged")
 }
 
+func TestResolveRuntime_DockerNetwork(t *testing.T) {
+	vs := &VersionedSettings{
+		ActiveProfile: "local",
+		Runtimes: map[string]V1RuntimeConfig{
+			"docker": {
+				Type: "docker",
+				Docker: &V1DockerConfig{
+					Network: "host",
+				},
+			},
+		},
+		Profiles: map[string]V1ProfileConfig{
+			"local": {Runtime: "docker"},
+		},
+	}
+
+	rtConfig, runtimeType, err := vs.ResolveRuntime("")
+	require.NoError(t, err)
+	assert.Equal(t, "docker", runtimeType)
+	require.NotNil(t, rtConfig.Docker)
+	assert.Equal(t, "host", rtConfig.Docker.Network)
+}
+
+func TestResolveRuntime_DockerNetworkEmpty(t *testing.T) {
+	vs := &VersionedSettings{
+		ActiveProfile: "local",
+		Runtimes: map[string]V1RuntimeConfig{
+			"docker": {Type: "docker"},
+		},
+		Profiles: map[string]V1ProfileConfig{
+			"local": {Runtime: "docker"},
+		},
+	}
+
+	rtConfig, _, err := vs.ResolveRuntime("")
+	require.NoError(t, err)
+	assert.Nil(t, rtConfig.Docker)
+}
+
 func TestResolveRuntime_ProfileNotFound(t *testing.T) {
 	vs := &VersionedSettings{
 		ActiveProfile: "nonexistent",

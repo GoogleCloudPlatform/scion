@@ -359,6 +359,14 @@ func (c *ContainerScriptHarness) Provision(ctx context.Context, agentName, agent
 		}
 	}
 
+	// Copy scion-plugin.js if present (used by opencode harness).
+	pluginSrc := filepath.Join(c.configDirPath, "scion-plugin.js")
+	if fileExistsHelper(pluginSrc) {
+		if err := copyHarnessConfigFile(pluginSrc, filepath.Join(bundleHostPath, "scion-plugin.js")); err != nil {
+			return fmt.Errorf("stage scion-plugin.js: %w", err)
+		}
+	}
+
 	// Stage the shared scion_harness.py helper next to provision.py so the
 	// in-container script can import it (provision.py adds the bundle dir to
 	// sys.path).

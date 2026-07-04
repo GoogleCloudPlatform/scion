@@ -50,10 +50,10 @@ arguments are provided, an empty prompt.md is created for later editing.`,
 		// Validate --harness-auth value
 		if harnessAuthFlag != "" {
 			switch harnessAuthFlag {
-			case "api-key", "oauth-token", "auth-file", "vertex-ai":
+			case "api-key", "oauth-token", "auth-file", "vertex-ai", "none":
 				// valid
 			default:
-				return fmt.Errorf("invalid --harness-auth value %q: must be one of api-key, oauth-token, auth-file, vertex-ai", harnessAuthFlag)
+				return fmt.Errorf("invalid --harness-auth value %q: must be one of api-key, oauth-token, auth-file, vertex-ai, none", harnessAuthFlag)
 			}
 		}
 
@@ -89,6 +89,7 @@ arguments are provided, an empty prompt.md is created for later editing.`,
 
 		// Apply inline config overrides to CLI options
 		effectiveBranch := branch
+		effectiveSource := source
 		effectiveTask := task
 		effectiveHarnessConfig := harnessConfigFlag
 		effectiveImage := agentImage
@@ -96,6 +97,9 @@ arguments are provided, an empty prompt.md is created for later editing.`,
 		if inlineCfg != nil {
 			if effectiveBranch == "" && inlineCfg.Branch != "" {
 				effectiveBranch = inlineCfg.Branch
+			}
+			if effectiveSource == "" && inlineCfg.Source != "" {
+				effectiveSource = inlineCfg.Source
 			}
 			if effectiveTask == "" && inlineCfg.Task != "" {
 				effectiveTask = inlineCfg.Task
@@ -117,6 +121,7 @@ arguments are provided, an empty prompt.md is created for later editing.`,
 			Image:         effectiveImage,
 			ProjectPath:   projectPath,
 			Branch:        effectiveBranch,
+			Source:        effectiveSource,
 			Workspace:     workspace,
 			InlineConfig:  inlineCfg,
 		}
@@ -322,12 +327,13 @@ func init() {
 	createCmd.Flags().StringVarP(&templateName, "type", "t", "", "Template to use")
 	createCmd.Flags().StringVarP(&agentImage, "image", "i", "", "Container image to use (overrides template)")
 	createCmd.Flags().StringVarP(&branch, "branch", "b", "", "Git branch to use for the agent workspace")
+	createCmd.Flags().StringVar(&source, "source", "", "Source branch/tag/commit for the agent workspace (defaults to repo default branch)")
 	createCmd.Flags().StringVarP(&workspace, "workspace", "w", "", "Host path to mount as /workspace")
 	createCmd.Flags().StringVar(&runtimeBrokerID, "broker", "", "Preferred runtime broker ID or name")
 	createCmd.Flags().StringVar(&harnessConfigFlag, "harness-config", "", "Named harness configuration to use")
 	createCmd.Flags().StringVar(&harnessConfigFlag, "harness", "h", "Named harness configuration to use (alias for --harness-config)")
 
-	createCmd.Flags().StringVar(&harnessAuthFlag, "harness-auth", "", "Override auth method for the harness (api-key, oauth-token, auth-file, vertex-ai)")
+	createCmd.Flags().StringVar(&harnessAuthFlag, "harness-auth", "", "Override auth method for the harness (api-key, oauth-token, auth-file, vertex-ai, none)")
 
 	// Template resolution flags for Hub mode (Section 9.4)
 	createCmd.Flags().BoolVar(&uploadTemplate, "upload-template", false, "Automatically upload local template to Hub if not found")

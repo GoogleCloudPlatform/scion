@@ -102,6 +102,9 @@ func GetRuntime(projectPath string, profileName string) Runtime {
 		if rtConfig.Host != "" {
 			dr.Host = rtConfig.Host
 		}
+		if rtConfig.Docker != nil && rtConfig.Docker.Network != "" {
+			dr.Network = rtConfig.Docker.Network
+		}
 		return dr
 	case "podman":
 		pr := NewPodmanRuntime()

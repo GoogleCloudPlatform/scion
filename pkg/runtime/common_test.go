@@ -1117,12 +1117,13 @@ func TestResolveHostNetworking(t *testing.T) {
 		name        string
 		runtimeName string
 		env         map[string]string
-		forceHost   bool // set SCION_FORCE_HOST_NETWORK for this case
 		wantMode    string
 		wantEP      string // expected SCION_HUB_ENDPOINT after call (empty = unchanged/absent)
+		wantURL     string // expected SCION_HUB_URL after call (empty = unchanged/absent)
+		forceHost   bool   // set SCION_FORCE_HOST_NETWORK for this case
 	}{
 		{
-			name:        "docker with bridge hostname rewrites to localhost",
+			name:        "docker with bridge hostname uses host networking",
 			runtimeName: "docker",
 			env: map[string]string{
 				"SCION_HUB_ENDPOINT": "http://host.docker.internal:8080",
@@ -1130,6 +1131,7 @@ func TestResolveHostNetworking(t *testing.T) {
 			},
 			wantMode: "host",
 			wantEP:   "http://localhost:8080",
+			wantURL:  "http://localhost:8080",
 		},
 		{
 			name:        "docker with localhost endpoint",
@@ -1183,13 +1185,14 @@ func TestResolveHostNetworking(t *testing.T) {
 			wantEP:   "http://localhost:8080",
 		},
 		{
-			name:        "docker with bridge hostname in HUB_URL only",
+			name:        "docker with bridge hostname in HUB_URL uses host networking",
 			runtimeName: "docker",
 			env: map[string]string{
 				"SCION_HUB_URL": "http://host.docker.internal:9090",
 			},
 			wantMode: "host",
-			wantEP:   "", // SCION_HUB_ENDPOINT not set
+			wantEP:   "",
+			wantURL:  "http://localhost:9090",
 		},
 		{
 			name:        "force-host overrides domain endpoint",
@@ -1266,6 +1269,11 @@ func TestResolveHostNetworking(t *testing.T) {
 			if tt.wantEP != "" {
 				if ep := env["SCION_HUB_ENDPOINT"]; ep != tt.wantEP {
 					t.Errorf("SCION_HUB_ENDPOINT = %q, want %q", ep, tt.wantEP)
+				}
+			}
+			if tt.wantURL != "" {
+				if u := env["SCION_HUB_URL"]; u != tt.wantURL {
+					t.Errorf("SCION_HUB_URL = %q, want %q", u, tt.wantURL)
 				}
 			}
 			// Verify HUB_URL is also rewritten when bridge hostname was present

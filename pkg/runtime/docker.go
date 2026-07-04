@@ -31,6 +31,7 @@ import (
 type DockerRuntime struct {
 	Command string
 	Host    string
+	Network string
 }
 
 func NewDockerRuntime() *DockerRuntime {
@@ -48,6 +49,10 @@ func (r *DockerRuntime) ExecUser() string {
 }
 
 func (r *DockerRuntime) Run(ctx context.Context, config RunConfig) (string, error) {
+	if config.NetworkMode == "" && r.Network != "" {
+		config.NetworkMode = r.Network
+	}
+
 	// Serialize file and variable secrets into an env-var blob for
 	// container-side staging by sciontool init (stateless broker support).
 	if len(config.ResolvedSecrets) > 0 {
