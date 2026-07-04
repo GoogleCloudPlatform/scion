@@ -464,6 +464,19 @@ func pgScanChannelLinks(rows *sql.Rows) ([]*ChannelLink, error) {
 	return links, rows.Err()
 }
 
+// --- Advisory locks ---
+
+func (s *postgresStore) TryAdvisoryLock(ctx context.Context, key int64) (bool, error) {
+	var acquired bool
+	err := s.db.QueryRowContext(ctx, "SELECT pg_try_advisory_lock($1)", key).Scan(&acquired)
+	return acquired, err
+}
+
+func (s *postgresStore) ReleaseAdvisoryLock(ctx context.Context, key int64) error {
+	_, err := s.db.ExecContext(ctx, "SELECT pg_advisory_unlock($1)", key)
+	return err
+}
+
 func pgScanUserMapping(row *sql.Row) (*DiscordUserMapping, error) {
 	var m DiscordUserMapping
 	err := row.Scan(&m.DiscordUserID, &m.DiscordUsername, &m.ScionUserID, &m.ScionEmail, &m.LinkedAt)

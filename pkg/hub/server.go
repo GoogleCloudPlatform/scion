@@ -1471,6 +1471,10 @@ func (s *Server) SetIntegrationHA(dbDriver string, client *ent.Client, dsn strin
 	s.dbDriver = dbDriver
 	s.entClient = client
 	s.databaseDSN = dsn
+
+	if client != nil && s.discordLinkService != nil {
+		s.discordLinkService.SetEntClient(client)
+	}
 }
 
 // IsPostgres reports whether the hub is running on a Postgres backend.
