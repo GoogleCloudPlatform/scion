@@ -108,7 +108,6 @@ func serveStandalone() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 
-	// Read essential config from environment.
 	databaseURL := os.Getenv("DATABASE_URL")
 	if databaseURL == "" {
 		log.Error("DATABASE_URL is required in standalone mode")
@@ -121,6 +120,30 @@ func serveStandalone() {
 			grpcPort = parsed
 		}
 	}
+
+	// Create broker and gRPC server early so health probes work during
+	// the runtime's DB-connect retry window (F10).
+	broker := discord.NewBroker(log)
+	brokerServer := grpcbroker.NewServer(broker)
+
+	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", grpcPort))
+	if err != nil {
+		log.Error("Failed to listen for gRPC", "error", err, "port", grpcPort)
+		os.Exit(1)
+	}
+
+	grpcServer := grpc.NewServer()
+	brokerv1.RegisterBrokerServiceServer(grpcServer, brokerServer)
+	healthServer := health.NewServer()
+	healthpb.RegisterHealthServer(grpcServer, healthServer)
+	healthServer.SetServingStatus("", healthpb.HealthCheckResponse_NOT_SERVING)
+
+	go func() {
+		log.Info("gRPC server listening", "port", grpcPort)
+		if err := grpcServer.Serve(lis); err != nil {
+			log.Error("gRPC server error", "error", err)
+		}
+	}()
 
 	// Start the integration runtime (config layering + signal listener).
 	rt := runtime.New(runtime.Options{
@@ -145,7 +168,6 @@ func serveStandalone() {
 	}
 	defer rt.Stop()
 
-	// Open the Postgres store for Discord-specific data.
 	discordStore, err := discord.NewPostgresStore(databaseURL)
 	if err != nil {
 		log.Error("Failed to open Discord Postgres store", "error", err)
@@ -153,10 +175,6 @@ func serveStandalone() {
 	}
 	defer discordStore.Close()
 
-	// Create the Discord broker.
-	broker := discord.NewBroker(log)
-
-	// Build the config map from runtime + env direct overrides.
 	cfg := rt.Config()
 	cfg["database_driver"] = "postgres"
 	cfg["database_url"] = databaseURL
@@ -166,96 +184,60 @@ func serveStandalone() {
 		os.Exit(1)
 	}
 
-	// Wire runtime reconfigure callback to re-configure the broker.
 	rt.SetReconfigure(func(newCfg map[string]string) error {
 		newCfg["database_driver"] = "postgres"
 		newCfg["database_url"] = databaseURL
 		return broker.Configure(newCfg)
 	})
 
-	// Start gRPC server with the 5A scaffolding.
-	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", grpcPort))
-	if err != nil {
-		log.Error("Failed to listen for gRPC", "error", err, "port", grpcPort)
-		os.Exit(1)
+	// Gateway lock loop: acquire advisory lock on a dedicated conn,
+	// verify periodically, takeover delay prevents dual-Gateway storms.
+	lockLoop := discord.NewGatewayLockLoop(discordStore, int64(store.LockDiscordGateway), log)
+	lockLoop.OnAcquired = func() error {
+		if err := broker.Subscribe(">"); err != nil {
+			return err
+		}
+		healthServer.SetServingStatus("", healthpb.HealthCheckResponse_SERVING)
+		return nil
+	}
+	lockLoop.OnLost = func() {
+		healthServer.SetServingStatus("", healthpb.HealthCheckResponse_NOT_SERVING)
+		if err := broker.Close(); err != nil {
+			log.Warn("Error closing broker on lock loss", "error", err)
+		}
 	}
 
-	grpcServer := grpc.NewServer()
-	brokerServer := grpcbroker.NewServer(broker)
-	brokerv1.RegisterBrokerServiceServer(grpcServer, brokerServer)
-
-	healthServer := health.NewServer()
-	healthpb.RegisterHealthServer(grpcServer, healthServer)
-	healthServer.SetServingStatus("", healthpb.HealthCheckResponse_NOT_SERVING)
-
+	lockLoopDone := make(chan struct{})
 	go func() {
-		log.Info("gRPC server listening", "port", grpcPort)
-		if err := grpcServer.Serve(lis); err != nil {
-			log.Error("gRPC server error", "error", err)
-		}
+		lockLoop.Run(rctx)
+		close(lockLoopDone)
 	}()
 
-	// Lock loop: acquire advisory lock → open Gateway; not acquired → standby.
-	lockKey := int64(store.LockDiscordGateway)
-	gatewayActive := false
-
-	go func() {
-		const lockInterval = 30 * time.Second
-		ticker := time.NewTicker(lockInterval)
-		defer ticker.Stop()
-
-		tryLock := func() {
-			acquired, lockErr := discordStore.TryAdvisoryLock(rctx, lockKey)
-			if lockErr != nil {
-				log.Error("Advisory lock error", "error", lockErr)
-				return
-			}
-
-			if acquired && !gatewayActive {
-				log.Info("Advisory lock acquired, opening Discord Gateway")
-				if subErr := broker.Subscribe(">"); subErr != nil {
-					log.Error("Failed to subscribe/open Gateway", "error", subErr)
-					_ = discordStore.ReleaseAdvisoryLock(rctx, lockKey)
-					return
-				}
-				gatewayActive = true
-				healthServer.SetServingStatus("", healthpb.HealthCheckResponse_SERVING)
-			} else if !acquired && !gatewayActive {
-				log.Debug("Standby — another instance holds the Gateway lock")
-			}
-		}
-
-		// Try immediately on startup.
-		tryLock()
-
-		for {
-			select {
-			case <-rctx.Done():
-				return
-			case <-ticker.C:
-				if !gatewayActive {
-					tryLock()
-				}
-			}
-		}
-	}()
-
-	// Block until signal.
 	<-rctx.Done()
+	<-lockLoopDone
 	log.Info("Shutting down standalone Discord bot")
 
-	// Graceful shutdown sequence.
+	// F5: Correct shutdown ordering:
+	// NOT_SERVING → GracefulStop (bounded) → broker.Close → release lock (last).
 	healthServer.SetServingStatus("", healthpb.HealthCheckResponse_NOT_SERVING)
 
-	if gatewayActive {
-		if closeErr := broker.Close(); closeErr != nil {
-			log.Warn("Failed to close Discord broker", "error", closeErr)
-		}
-		if releaseErr := discordStore.ReleaseAdvisoryLock(context.Background(), lockKey); releaseErr != nil {
-			log.Warn("Failed to release advisory lock", "error", releaseErr)
-		}
+	grpcDone := make(chan struct{})
+	go func() {
+		grpcServer.GracefulStop()
+		close(grpcDone)
+	}()
+	select {
+	case <-grpcDone:
+	case <-time.After(5 * time.Second):
+		grpcServer.Stop()
 	}
 
-	grpcServer.GracefulStop()
+	if lockLoop.Active() {
+		if err := broker.Close(); err != nil {
+			log.Warn("Failed to close Discord broker", "error", err)
+		}
+	}
+	lockLoop.ReleaseHandle()
+
 	log.Info("Standalone Discord bot stopped")
 }

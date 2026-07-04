@@ -12,6 +12,34 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+// AdvisoryLockHandle represents a held advisory lock on a dedicated database
+// connection. The lock stays alive as long as the underlying connection lives.
+type AdvisoryLockHandle struct {
+	release func() error
+	verify  func(ctx context.Context) error
+}
+
+// Release unlocks the advisory lock and returns the dedicated connection to the pool.
+func (h *AdvisoryLockHandle) Release() error {
+	if h == nil {
+		return nil
+	}
+	return h.release()
+}
+
+// Verify checks that the dedicated lock connection is still alive (cheap ping).
+func (h *AdvisoryLockHandle) Verify(ctx context.Context) error {
+	if h == nil {
+		return nil
+	}
+	return h.verify(ctx)
+}
+
+// NewAdvisoryLockHandle constructs an AdvisoryLockHandle.
+func NewAdvisoryLockHandle(release func() error, verify func(ctx context.Context) error) *AdvisoryLockHandle {
+	return &AdvisoryLockHandle{release: release, verify: verify}
+}
+
 // Store defines the persistence interface for the Discord broker plugin.
 type Store interface {
 	// Channel links (Discord channel <-> Scion project)
@@ -54,9 +82,10 @@ type Store interface {
 	SetNotificationPref(ctx context.Context, pref *NotificationPref) error
 	GetNotificationPrefs(ctx context.Context, discordUserID, projectID string) ([]*NotificationPref, error)
 
-	// Advisory locks (HA singleton coordination)
-	TryAdvisoryLock(ctx context.Context, key int64) (bool, error)
-	ReleaseAdvisoryLock(ctx context.Context, key int64) error
+	// Advisory locks (HA singleton coordination).
+	// On Postgres, acquires a session-scoped lock on a dedicated connection.
+	// The returned handle MUST be Released when the lock is no longer needed.
+	TryAdvisoryLock(ctx context.Context, key int64) (acquired bool, handle *AdvisoryLockHandle, err error)
 
 	// Lifecycle
 	Close() error
@@ -689,14 +718,13 @@ func scanUserMapping(row *sql.Row) (*DiscordUserMapping, error) {
 	return &m, nil
 }
 
-// --- Advisory locks (SQLite stub) ---
+// --- Advisory locks (SQLite stub — single-node, no contention) ---
 
-func (s *sqliteStore) TryAdvisoryLock(_ context.Context, _ int64) (bool, error) {
-	return true, nil
-}
-
-func (s *sqliteStore) ReleaseAdvisoryLock(_ context.Context, _ int64) error {
-	return nil
+func (s *sqliteStore) TryAdvisoryLock(_ context.Context, _ int64) (bool, *AdvisoryLockHandle, error) {
+	return true, NewAdvisoryLockHandle(
+		func() error { return nil },
+		func(_ context.Context) error { return nil },
+	), nil
 }
 
 func boolToInt(b bool) int {

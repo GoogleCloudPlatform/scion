@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
@@ -466,15 +467,42 @@ func pgScanChannelLinks(rows *sql.Rows) ([]*ChannelLink, error) {
 
 // --- Advisory locks ---
 
-func (s *postgresStore) TryAdvisoryLock(ctx context.Context, key int64) (bool, error) {
-	var acquired bool
-	err := s.db.QueryRowContext(ctx, "SELECT pg_try_advisory_lock($1)", key).Scan(&acquired)
-	return acquired, err
-}
+// TryAdvisoryLock acquires a session-scoped advisory lock on a dedicated
+// connection pinned from the pool. The lock stays alive as long as the
+// connection lives. Mirrors the hub pattern in pkg/store/entadapter/locking.go.
+func (s *postgresStore) TryAdvisoryLock(ctx context.Context, key int64) (bool, *AdvisoryLockHandle, error) {
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return false, nil, fmt.Errorf("advisory lock: acquiring connection: %w", err)
+	}
 
-func (s *postgresStore) ReleaseAdvisoryLock(ctx context.Context, key int64) error {
-	_, err := s.db.ExecContext(ctx, "SELECT pg_advisory_unlock($1)", key)
-	return err
+	var acquired bool
+	if err := conn.QueryRowContext(ctx, "SELECT pg_try_advisory_lock($1)", key).Scan(&acquired); err != nil {
+		conn.Close()
+		return false, nil, fmt.Errorf("advisory lock: pg_try_advisory_lock(%d): %w", key, err)
+	}
+
+	if !acquired {
+		conn.Close()
+		return false, nil, nil
+	}
+
+	handle := NewAdvisoryLockHandle(
+		func() error {
+			unlockCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_, unlockErr := conn.ExecContext(unlockCtx, "SELECT pg_advisory_unlock($1)", key)
+			closeErr := conn.Close()
+			if unlockErr != nil {
+				return fmt.Errorf("advisory lock: pg_advisory_unlock(%d): %w", key, unlockErr)
+			}
+			return closeErr
+		},
+		func(ctx context.Context) error {
+			return conn.PingContext(ctx)
+		},
+	)
+	return true, handle, nil
 }
 
 func pgScanUserMapping(row *sql.Row) (*DiscordUserMapping, error) {
