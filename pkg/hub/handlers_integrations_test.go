@@ -724,7 +724,7 @@ func TestIntegrationByName_UnknownAction(t *testing.T) {
 func TestUpdateIntegration_SelfManaged_SQLite(t *testing.T) {
 	mgr := newMockIntegrationManager()
 	mgr.plugins["telegram"] = map[string]string{}
-	mgr.selfManaged["telegram"] = true
+	mgr.deploymentModes["telegram"] = plugin.DeploymentModeHA
 
 	srv := &Server{}
 	srv.pluginManager = mgr
