@@ -1,6 +1,10 @@
 # scion-plugin-discord
 
-Discord message broker plugin for the Scion hub. Runs as a [go-plugin](https://github.com/hashicorp/go-plugin) broker spoke in the hub's FanOutBroker, providing bidirectional messaging between Discord channels and Scion agents.
+Discord message broker plugin for the Scion hub. Provides bidirectional messaging between Discord channels and Scion agents.
+
+**Two operating modes:**
+- **Plugin mode** (default) — runs as a [go-plugin](https://github.com/hashicorp/go-plugin) subprocess managed by the hub
+- **Standalone mode** — runs as an independent gRPC service with HA support via Postgres advisory locks
 
 **Outbound:** Hub publishes `StructuredMessage`s → plugin formats and sends them to linked Discord channels via the Bot API, using per-agent webhooks for distinct agent identities (custom name + avatar).
 **Inbound:** Discord messages (via Gateway) → plugin converts to `StructuredMessage`s → delivered to agents via the hub's inbound endpoint.
@@ -9,7 +13,8 @@ Discord message broker plugin for the Scion hub. Runs as a [go-plugin](https://g
 
 - Scion hub running with FanOutBroker support (`server.message_broker.types`)
 - A Discord account with permission to create applications at [discord.com/developers](https://discord.com/developers/applications)
-- Go 1.25+ (for building from source)
+- Go 1.26+ (for building from source)
+- **Standalone mode only:** PostgreSQL database shared with the hub
 
 ## Setup Guide
 
@@ -295,6 +300,144 @@ Discord Gateway API
 - **SQLite state** persists channel links, user mappings, conversation contexts, notification preferences, and pending ask-user callbacks across restarts.
 - **Send queue** uses per-channel worker goroutines with configurable rate limiting to avoid Discord 429 errors.
 - **Webhook identity** gives each agent a unique name and RoboHash avatar in Discord, managed per-channel with automatic recreation if deleted.
+
+## Standalone Mode (HA Deployment)
+
+Standalone mode runs the Discord bot as an independent service, communicating with the hub via gRPC. This enables high-availability deployments with automatic failover.
+
+### How It Works
+
+- The binary detects standalone mode via `--standalone` flag or `DISCORD_STANDALONE=true` env var
+- A Postgres advisory lock ensures only one instance opens the Discord Gateway at a time (Discord enforces one WebSocket session per bot token)
+- All instances serve gRPC and respond to health checks regardless of lock state
+- The lock holder runs the Gateway; standby instances retry every ~30s
+- On primary failure, Postgres releases the session-level lock and a standby promotes within 30–60s
+- Outbound messages (hub → Discord) are delivered via REST API, which works from any instance — only the Gateway connection is serialized
+
+### Quick Start (Standalone)
+
+```bash
+# Build
+cd extras/scion-discord
+go build -o scion-plugin-discord ./cmd/scion-plugin-discord
+
+# Run
+export DATABASE_URL="postgres://user:pass@localhost:5432/scion?sslmode=disable"
+export DISCORD_BOT_TOKEN="your-bot-token"
+export DISCORD_APPLICATION_ID="your-app-id"
+export DISCORD_HUB_URL="https://your-hub.example.com"
+export DISCORD_BROKER_ID="your-broker-uuid"
+export DISCORD_HMAC_KEY="your-base64-hmac-key"
+./scion-plugin-discord --standalone
+```
+
+### Docker
+
+```bash
+# Build from repository root
+docker build -f extras/scion-discord/Dockerfile -t scion-discord .
+
+# Run
+docker run -e DATABASE_URL=... -e DISCORD_BOT_TOKEN=... scion-discord
+```
+
+### Required Environment Variables
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `DATABASE_URL` | **Yes** | — | Postgres connection string (shared with hub) |
+| `DISCORD_BOT_TOKEN` | **Yes** | — | Discord bot token from Developer Portal |
+| `DISCORD_APPLICATION_ID` | Recommended | — | For slash command registration |
+| `DISCORD_PUBLIC_KEY` | No | — | For interaction verification |
+| `DISCORD_HUB_URL` | **Yes** | — | Hub base URL for registration API / inbound delivery |
+| `DISCORD_BROKER_ID` | **Yes** | — | Registered broker ID (UUID) |
+| `DISCORD_HMAC_KEY` | **Yes** | — | Base64-encoded HMAC secret for hub authentication |
+| `DISCORD_GUILD_ID` | No | — | Guild ID for guild-scoped commands |
+| `GRPC_PORT` | No | `50051` | gRPC listen port |
+| `CONFIG_FILE` | No | — | Path to local YAML config file |
+| `UPDATE_HOOK` | No | — | Command to run on update signal (default: exit for platform restart) |
+
+### Hub Configuration for gRPC Mode
+
+In the hub's `settings.yaml`, configure the Discord integration with `mode: grpc`:
+
+```yaml
+server:
+  message_broker:
+    enabled: true
+    types:
+      - discord
+
+  plugins:
+    broker:
+      discord:
+        mode: grpc
+        address: "discord-bot:50051"  # hostname:port of the standalone service
+```
+
+Without `mode: grpc`, the hub launches Discord as a go-plugin subprocess (plugin mode).
+
+### Broker Auth Credentials
+
+The `/scion register` command makes direct HTTP calls to the hub API, authenticated via HMAC-SHA256. The standalone bot needs `DISCORD_HUB_URL`, `DISCORD_BROKER_ID`, and `DISCORD_HMAC_KEY` to authenticate.
+
+To register a broker:
+```bash
+# Register via hub API
+curl -X POST https://your-hub/api/v1/brokers -d '{"name":"plugin-discord"}'
+
+# Complete join to get HMAC secret
+curl -X POST https://your-hub/api/v1/brokers/join -d '{"broker_id":"<id-from-step-1>"}'
+```
+
+### Privileged Gateway Intents
+
+The bot requires privileged Gateway intents enabled in the [Discord Developer Portal](https://discord.com/developers/applications) → Bot → Privileged Gateway Intents:
+
+- **MESSAGE CONTENT INTENT** — required for reading message text
+- **SERVER MEMBERS INTENT** — required for resolving user info
+- **PRESENCE INTENT** — required by the bot's intent flags
+
+Without Message Content Intent, the bot connects but messages arrive with empty content. Without any required intent, the Gateway rejects the connection entirely (error 4014).
+
+### Bot Invite Permissions
+
+Minimum required permissions (integer: 84992): Send Messages, Read Message History, View Channels, Embed Links.
+
+For per-agent webhook identity, add **Manage Webhooks** permission. Without it, all messages appear as the bot user instead of distinct per-agent personas.
+
+### One Bot Token = One Hub
+
+Discord enforces exactly ONE Gateway WebSocket session per bot token. If the same token is used by two independent deployments, they fight over the session (opcode 9 INVALID SESSION reconnect storm).
+
+Within a single deployment, the advisory lock handles this — only one replica connects at a time. Across different hub deployments, use different bot tokens (create separate Discord Applications).
+
+### message_broker.types Requirement
+
+The hub's outbound message dispatch only routes to integrations listed in `message_broker.types`. Loading the Discord plugin is not enough — `discord` must also appear in this list:
+
+```yaml
+message_broker:
+  types: [discord]
+```
+
+### HA Failover Behavior
+
+1. Instance A acquires the advisory lock → opens the Discord Gateway
+2. Instance B fails to acquire → enters standby, retries every 30s
+3. Instance A crashes → Postgres releases the session-level lock
+4. Instance B acquires lock on next tick → opens Gateway within 30–60s
+5. Messages queued during the gap are delivered on reconnect (deferred message reconciliation)
+
+### Config Layering
+
+In standalone mode, configuration is resolved with the following priority (highest wins):
+
+1. **DB config** (`integration_configs` table) — managed by admin UI
+2. **Environment variables** (`DISCORD_*` prefix)
+3. **Local YAML file** (`CONFIG_FILE` env var)
+
+Config changes made via the admin UI are delivered to the running service via Postgres LISTEN/NOTIFY without restart.
 
 ## Troubleshooting
 
