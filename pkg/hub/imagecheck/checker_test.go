@@ -196,6 +196,19 @@ func TestChecker_BareImageLocalFound(t *testing.T) {
 	}
 }
 
+func TestChecker_BareImageLocalError(t *testing.T) {
+	c := NewChecker(
+		WithLocalChecker(&mockLocalChecker{exists: false, err: fmt.Errorf("podman machine not running")}),
+	)
+	result := c.Check(context.Background(), "cogo:latest")
+	if result.Status != "error" {
+		t.Errorf("expected status error for bare image with local checker error, got %s", result.Status)
+	}
+	if !strings.Contains(result.Error, "podman machine not running") {
+		t.Errorf("expected error to contain runtime failure details, got %s", result.Error)
+	}
+}
+
 func TestIsBareImageName(t *testing.T) {
 	tests := []struct {
 		image string

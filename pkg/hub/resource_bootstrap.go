@@ -142,7 +142,10 @@ func (s *Server) checkAndUpdateImageStatus(ctx context.Context, hcID, image stri
 // (env var overrides + DB values) once available — needed for HA mode where
 // settings will live in the database.
 func (s *Server) resolveImageRegistry() string {
-	if r := s.config.MaintenanceConfig.ImageRegistry; r != "" {
+	s.mu.RLock()
+	r := s.config.MaintenanceConfig.ImageRegistry
+	s.mu.RUnlock()
+	if r != "" {
 		return r
 	}
 	return os.Getenv("SCION_IMAGE_REGISTRY")

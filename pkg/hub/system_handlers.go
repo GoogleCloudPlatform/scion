@@ -269,6 +269,10 @@ func (s *Server) handleSystemRegistry(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.mu.Lock()
+	s.config.MaintenanceConfig.ImageRegistry = req.ImageRegistry
+	s.mu.Unlock()
+
 	writeJSON(w, http.StatusOK, putRegistryResponse{
 		ImageRegistry: req.ImageRegistry,
 	})

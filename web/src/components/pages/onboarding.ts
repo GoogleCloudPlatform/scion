@@ -90,6 +90,7 @@ export class ScionPageOnboarding extends LitElement {
   @state() private selectedHarnesses = new Set<string>();
   @state() private imageCheckStatuses = new Map<string, { imageStatus: string; source?: string | undefined; checking?: boolean | undefined }>();
   @state() private imagePulling = false;
+  @state() private imageRechecking = false;
   @state() private gitVersion = '';
   @state() private gitVersionOK = true;
   private imageEventSource: EventSource | null = null;
@@ -921,15 +922,24 @@ export class ScionPageOnboarding extends LitElement {
           })}
         </div>
 
-        ${needsPull.length > 0 && this.selectedHarnesses.size > 0 ? html`
-          <div class="image-actions" style="margin-top:1rem;">
+        ${this.selectedHarnesses.size > 0 ? html`
+          <div class="image-actions" style="margin-top:1rem;display:flex;gap:0.5rem;">
+            ${needsPull.length > 0 ? html`
+              <sl-button
+                variant="primary"
+                size="small"
+                ?loading=${this.imagePulling}
+                ?disabled=${this.imagePulling || !registry}
+                @click=${this.handlePullSelected}
+              >Pull selected</sl-button>
+            ` : nothing}
             <sl-button
-              variant="primary"
+              variant="default"
               size="small"
-              ?loading=${this.imagePulling}
-              ?disabled=${this.imagePulling || !registry}
-              @click=${this.handlePullSelected}
-            >Pull selected</sl-button>
+              ?loading=${this.imageRechecking}
+              ?disabled=${this.imagePulling || this.imageRechecking}
+              @click=${this.handleRecheckImages}
+            >Re-check</sl-button>
           </div>
         ` : nothing}
 
@@ -1122,6 +1132,15 @@ export class ScionPageOnboarding extends LitElement {
       this.imagePulling = false;
       this.cleanupImageEvents();
     };
+  }
+
+  private async handleRecheckImages(): Promise<void> {
+    this.imageRechecking = true;
+    try {
+      await this.recheckAllImageStatuses();
+    } finally {
+      this.imageRechecking = false;
+    }
   }
 
   private async recheckAllImageStatuses(): Promise<void> {

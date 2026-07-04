@@ -2,6 +2,7 @@ package imagecheck
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -50,9 +51,12 @@ func (c *Checker) SetLocal(l LocalImageExister) {
 func (c *Checker) Check(ctx context.Context, image string) CheckResult {
 	now := time.Now()
 
+	var localErr error
 	if c.local != nil {
-		if result, found := checkLocalImage(ctx, c.local, image, now); found {
+		if result, found, err := checkLocalImage(ctx, c.local, image, now); found {
 			return result
+		} else if err != nil {
+			localErr = err
 		}
 	}
 
@@ -60,10 +64,15 @@ func (c *Checker) Check(ctx context.Context, image string) CheckResult {
 	// Without a local checker we cannot determine availability, so return
 	// "unknown" rather than probing a remote registry that will 401.
 	if isBareImageName(image) {
-		return CheckResult{
+		result := CheckResult{
 			Status:    "unknown",
 			CheckedAt: now,
 		}
+		if localErr != nil {
+			result.Status = "error"
+			result.Error = fmt.Sprintf("container runtime error: %v", localErr)
+		}
+		return result
 	}
 
 	ref, err := parseImageRef(image)
