@@ -323,6 +323,59 @@ plugins:
         db_path: /var/lib/scion/telegram_v2.db
 ```
 
+## Standalone / HA Mode (Mode 3)
+
+Standalone mode runs the Telegram broker as an independent service with Postgres-backed state. Multiple replicas can process webhook updates concurrently; only the lock holder registers the webhook with Telegram.
+
+### Requirements
+
+- Postgres database (shared with the Scion hub or dedicated)
+- Public HTTPS endpoint for Telegram webhook delivery (Cloud Run, k8s ingress, etc.)
+- **Webhook mode only** — long-poll is not supported in standalone mode
+
+### Standalone Environment Variables
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `DATABASE_URL` | **Yes** | — | Postgres connection URL |
+| `BOT_TOKEN` | **Yes** | — | Telegram bot token |
+| `WEBHOOK_URL` | **Yes** | — | Public HTTPS URL for webhook delivery |
+| `WEBHOOK_SECRET` | No | — | Secret token for webhook validation |
+| `WEBHOOK_LISTEN` | No | `:9094` | Listen address for webhook HTTP server |
+| `HUB_URL` | No | — | Hub API URL for inbound message delivery |
+| `HMAC_KEY` | No | — | HMAC key for hub authentication |
+| `BROKER_ID` | No | — | Broker identifier for HMAC signing |
+
+### Running Standalone
+
+```bash
+DATABASE_URL="postgres://..." BOT_TOKEN="..." WEBHOOK_URL="https://..." \
+  ./scion-plugin-telegram --standalone
+```
+
+### Docker
+
+```bash
+docker build -t scion-telegram -f extras/scion-telegram/Dockerfile .
+
+docker run -e DATABASE_URL="postgres://..." \
+           -e BOT_TOKEN="..." \
+           -e WEBHOOK_URL="https://..." \
+           -p 9094:9094 scion-telegram
+```
+
+### Webhook Registration Lock
+
+In multi-replica deployments, a Postgres advisory lock serializes webhook registration. Only the lock holder calls Telegram's `setWebhook` API. All instances process incoming webhook updates concurrently.
+
+### SQLite to Postgres Migration
+
+```bash
+./scion-plugin-telegram migrate --from /var/lib/scion/telegram_v2.db --to "postgres://..."
+```
+
+The migration is **read-only** on the source and **idempotent** on the target.
+
 ## Architecture
 
 ```
@@ -338,7 +391,7 @@ Telegram Bot API
                                           │  ├─ RegistrationHndlr│
                                           │  └─ SendQueue        │
                                           │        │             │
-                                          │  SQLite (state)      │
+                                          │  SQLite / Postgres   │
                                           └──────────┬───────────┘
                                                      │ go-plugin RPC
                                                      ▼
@@ -355,5 +408,5 @@ Telegram Bot API
 - **FanOutBroker spoke:** The plugin runs as one of potentially several broker spokes (alongside `broker-log`, `chat-app`, etc.). The hub publishes messages to all configured spokes concurrently.
 - **Webhook mode is strongly recommended** over polling — it eliminates 409 conflict errors when multiple instances run and provides real-time delivery.
 - **Registration** uses a hub-issued 6-character code. The user generates a code via `/register` in Telegram DM, then enters it on the hub's `/profile/telegram` page. This works with any hub auth mode.
-- **SQLite state** persists group links, user mappings, conversation contexts, notification preferences, and pending ask-user callbacks across restarts.
+- **SQLite / Postgres state** persists group links, user mappings, conversation contexts, notification preferences, and pending ask-user callbacks across restarts.
 - **Send queue** uses per-chat worker goroutines with configurable rate limiting to avoid Telegram 429 errors.
