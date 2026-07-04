@@ -961,8 +961,8 @@ export class ScionPageOnboarding extends LitElement {
     try {
       const res = await apiFetch('/api/v1/harness-configs?scope=global&status=active');
       if (res.ok) {
-        const data = (await res.json()) as { items: HarnessConfig[] };
-        this.harnessConfigs = data.items ?? [];
+        const data = (await res.json()) as { harnessConfigs: HarnessConfig[] };
+        this.harnessConfigs = data.harnessConfigs ?? [];
         const preselected = new Set<string>();
         for (const hc of this.harnessConfigs) {
           if (hc.imageStatus === 'valid') {
