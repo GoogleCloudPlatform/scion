@@ -2719,44 +2719,125 @@ func TestStartAgentBrokerIDEnv(t *testing.T) {
 }
 
 func TestStartAgentProjectSlugResolvesProjectPath(t *testing.T) {
-	// When the startAgent handler receives projectSlug with no projectPath
-	// (hub-managed project), it should resolve ProjectPath from the slug.
-	srv, mgr := newTestServerWithProvisionCapture()
-
-	// Start uses the agent name from the URL path
-	body := `{"groveSlug": "my-hub-grove"}`
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/hub-managed-agent/start", strings.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-
-	srv.Handler().ServeHTTP(w, req)
-
-	if w.Code != http.StatusAccepted {
-		t.Fatalf("expected status %d, got %d: %s", http.StatusAccepted, w.Code, w.Body.String())
+	tests := []struct {
+		name string
+		body string
+	}{
+		{
+			name: "projectSlug",
+			body: `{"projectSlug": "my-hub-project"}`,
+		},
+		{
+			name: "legacy groveSlug",
+			body: `{"groveSlug": "my-hub-project"}`,
+		},
 	}
 
-	if !mgr.startCalled {
-		t.Fatal("expected Start to be called")
-	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// When the startAgent handler receives projectSlug with no projectPath
+			// (hub-managed project), it should resolve ProjectPath from the slug.
+			srv, mgr := newTestServerWithProvisionCapture()
 
-	globalDir, err := config.GetGlobalDir()
-	if err != nil {
-		t.Fatalf("failed to get global dir: %v", err)
-	}
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/hub-managed-agent/start", strings.NewReader(tt.body))
+			req.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
 
-	expectedPath := filepath.Join(globalDir, "projects", "my-hub-grove")
-	if mgr.lastOpts.ProjectPath != expectedPath {
-		t.Errorf("expected ProjectPath %q, got %q", expectedPath, mgr.lastOpts.ProjectPath)
+			srv.Handler().ServeHTTP(w, req)
+
+			if w.Code != http.StatusAccepted {
+				t.Fatalf("expected status %d, got %d: %s", http.StatusAccepted, w.Code, w.Body.String())
+			}
+
+			if !mgr.startCalled {
+				t.Fatal("expected Start to be called")
+			}
+
+			globalDir, err := config.GetGlobalDir()
+			if err != nil {
+				t.Fatalf("failed to get global dir: %v", err)
+			}
+
+			expectedPath := filepath.Join(globalDir, "projects", "my-hub-project")
+			if mgr.lastOpts.ProjectPath != expectedPath {
+				t.Errorf("expected ProjectPath %q, got %q", expectedPath, mgr.lastOpts.ProjectPath)
+			}
+		})
 	}
 }
 
 func TestStartAgentProjectSlugNotUsedWhenProjectPathSet(t *testing.T) {
-	// When startAgent receives both projectPath and projectSlug,
-	// projectPath takes precedence.
+	tests := []struct {
+		name         string
+		body         string
+		expectedPath string
+	}{
+		{
+			name:         "legacy grovePath wins over legacy groveSlug",
+			body:         `{"grovePath": "/projects/my-local-project/.scion", "groveSlug": "my-hub-project"}`,
+			expectedPath: "/projects/my-local-project/.scion",
+		},
+		{
+			name: "projectPath wins over projectSlug and legacy keys",
+			body: `{
+				"projectPath": "/projects/my-local-project/.scion",
+				"projectSlug": "my-hub-project",
+				"grovePath": "/projects/legacy-project/.scion",
+				"groveSlug": "legacy-hub-project"
+			}`,
+			expectedPath: "/projects/my-local-project/.scion",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// When startAgent receives both projectPath and projectSlug,
+			// projectPath takes precedence.
+			srv, mgr := newTestServerWithProvisionCapture()
+
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/local-project-agent/start", strings.NewReader(tt.body))
+			req.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+
+			srv.Handler().ServeHTTP(w, req)
+
+			if w.Code != http.StatusAccepted {
+				t.Fatalf("expected status %d, got %d: %s", http.StatusAccepted, w.Code, w.Body.String())
+			}
+
+			if !mgr.startCalled {
+				t.Fatal("expected Start to be called")
+			}
+
+			if mgr.lastOpts.ProjectPath != tt.expectedPath {
+				t.Errorf("expected ProjectPath %q, got %q", tt.expectedPath, mgr.lastOpts.ProjectPath)
+			}
+		})
+	}
+}
+
+func TestStartAgentInlineConfigModelUpdatesExistingAgentConfig(t *testing.T) {
 	srv, mgr := newTestServerWithProvisionCapture()
 
-	body := `{"grovePath": "/projects/my-local-grove/.scion", "groveSlug": "my-hub-grove"}`
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/local-grove-agent/start", strings.NewReader(body))
+	projectDir := filepath.Join(t.TempDir(), ".scion")
+	agentName := "configured-agent"
+	agentDir := config.GetAgentDir(projectDir, agentName, false)
+	if err := os.MkdirAll(agentDir, 0755); err != nil {
+		t.Fatalf("failed to create agent dir: %v", err)
+	}
+	cfgPath := filepath.Join(agentDir, "scion-agent.json")
+	if err := os.WriteFile(cfgPath, []byte(`{"harness":"gemini","max_turns":3}`), 0644); err != nil {
+		t.Fatalf("failed to write scion-agent.json: %v", err)
+	}
+
+	body := fmt.Sprintf(`{
+		"projectPath": %q,
+		"inlineConfig": {
+			"model": "gemini-2.5-pro",
+			"max_turns": 7
+		}
+	}`, projectDir)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+agentName+"/start", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 
@@ -2765,14 +2846,61 @@ func TestStartAgentProjectSlugNotUsedWhenProjectPathSet(t *testing.T) {
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("expected status %d, got %d: %s", http.StatusAccepted, w.Code, w.Body.String())
 	}
-
 	if !mgr.startCalled {
 		t.Fatal("expected Start to be called")
 	}
 
-	// ProjectPath should remain as explicitly provided, not overridden by ProjectSlug
-	if mgr.lastOpts.ProjectPath != "/projects/my-local-grove/.scion" {
-		t.Errorf("expected ProjectPath %q, got %q", "/projects/my-local-grove/.scion", mgr.lastOpts.ProjectPath)
+	data, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("failed to read updated scion-agent.json: %v", err)
+	}
+	var updated api.ScionConfig
+	if err := json.Unmarshal(data, &updated); err != nil {
+		t.Fatalf("failed to parse updated scion-agent.json: %v", err)
+	}
+
+	if updated.Harness != "gemini" {
+		t.Errorf("expected existing harness to be preserved, got %q", updated.Harness)
+	}
+	if updated.Model != "gemini-2.5-pro" {
+		t.Errorf("expected model %q, got %q", "gemini-2.5-pro", updated.Model)
+	}
+	if updated.MaxTurns != 7 {
+		t.Errorf("expected max_turns 7, got %d", updated.MaxTurns)
+	}
+}
+
+func TestStartAgentInlineConfigPassedForProvisionOnStart(t *testing.T) {
+	srv, mgr := newTestServerWithProvisionCapture()
+
+	projectDir := filepath.Join(t.TempDir(), ".scion")
+	if err := os.MkdirAll(projectDir, 0755); err != nil {
+		t.Fatalf("failed to create project dir: %v", err)
+	}
+
+	body := fmt.Sprintf(`{
+		"projectPath": %q,
+		"inlineConfig": {
+			"model": "gemini-2.5-pro"
+		}
+	}`, projectDir)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/provision-on-start-agent/start", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusAccepted, w.Code, w.Body.String())
+	}
+	if !mgr.startCalled {
+		t.Fatal("expected Start to be called")
+	}
+	if mgr.lastOpts.InlineConfig == nil {
+		t.Fatal("expected InlineConfig to be passed to Start")
+	}
+	if mgr.lastOpts.InlineConfig.Model != "gemini-2.5-pro" {
+		t.Errorf("expected inline model %q, got %q", "gemini-2.5-pro", mgr.lastOpts.InlineConfig.Model)
 	}
 }
 

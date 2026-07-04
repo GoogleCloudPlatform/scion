@@ -1195,8 +1195,10 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 	// Read optional task, projectPath, projectSlug, harnessConfig, and resolvedEnv from request body
 	var startReq struct {
 		Task            string               `json:"task"`
-		ProjectPath     string               `json:"grovePath"`
-		ProjectSlug     string               `json:"groveSlug"`
+		ProjectPath     string               `json:"projectPath"`
+		ProjectSlug     string               `json:"projectSlug"`
+		GrovePath       string               `json:"grovePath"`
+		GroveSlug       string               `json:"groveSlug"`
 		HarnessConfig   string               `json:"harnessConfig"`
 		ResolvedEnv     map[string]string    `json:"resolvedEnv"`
 		ResolvedSecrets []api.ResolvedSecret `json:"resolvedSecrets,omitempty"`
@@ -1215,6 +1217,12 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		if err := json.NewDecoder(r.Body).Decode(&startReq); err != nil {
 			s.agentLifecycleLog.Debug("No task in start request body (ignoring decode error)", "agent_id", id, "error", err)
 		}
+	}
+	if startReq.ProjectPath == "" && startReq.GrovePath != "" {
+		startReq.ProjectPath = startReq.GrovePath
+	}
+	if startReq.ProjectSlug == "" && startReq.GroveSlug != "" {
+		startReq.ProjectSlug = startReq.GroveSlug
 	}
 
 	s.agentLifecycleLog.Debug("startAgent called", "agent_id", id, "task", startReq.Task, "projectPath", startReq.ProjectPath, "projectSlug", startReq.ProjectSlug, "harnessConfig", startReq.HarnessConfig, "resolvedEnvCount", len(startReq.ResolvedEnv))
@@ -1242,6 +1250,7 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		ProjectPath:     startReq.ProjectPath,
 		ProjectSlug:     startReq.ProjectSlug,
 		Config:          cfg,
+		InlineConfig:    startReq.InlineConfig,
 		ResolvedEnv:     startReq.ResolvedEnv,
 		ResolvedSecrets: startReq.ResolvedSecrets,
 		SharedDirs:      startReq.SharedDirs,
