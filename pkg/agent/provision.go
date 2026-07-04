@@ -1176,8 +1176,7 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	// into the harness bundle so they are available at a known path in the
 	// container. Container-script harnesses stage these during their own
 	// Provision(); this path handles non-container-script fallbacks.
-	if _, isContainerScript := h.(*harness.ContainerScriptHarness); !isContainerScript {
-		if err := harness.StageCaptureAuthAssets(agentHome, hcDir.Path, hcDir.Config.Auth); err != nil {
+if _, isContainerScript := h.(*harness.ContainerScriptHarness); !isContainerScript && hcDir != nil {
 			fmt.Fprintf(os.Stderr, "Warning: capture-auth asset staging failed: %v\n", err)
 		}
 	}
