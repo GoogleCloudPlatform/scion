@@ -772,6 +772,28 @@ func (s *Server) findBrokerByIDOrSlug(ctx context.Context, identifier string) (*
 // SkippedWhenGCPServiceAccountAssigned are treated as satisfied when the
 // agent's project has at least one verified GCP service account.
 func (s *Server) hasRequiredAuthCredentials(ctx context.Context, agent *store.Agent, harnessType string, authMeta *config.HarnessAuthMetadata) (bool, error) {
+	// When authMeta defines auth types and no explicit type was selected,
+	// check ALL config-defined auth types and return true if ANY is fully
+	// satisfiable. This prevents the compiled default (api-key) from
+	// short-circuiting before config-driven types like vertex-ai are checked.
+	if authMeta != nil && agent.AppliedConfig.HarnessAuth == "" && len(authMeta.Types) > 0 {
+		gcpSAAssigned, err := s.projectHasVerifiedGCPSA(ctx, agent.ProjectID)
+		if err != nil {
+			return false, err
+		}
+		for authType := range authMeta.Types {
+			satisfied, err := s.isAuthTypeSatisfied(ctx, agent, authMeta, authType, gcpSAAssigned)
+			if err != nil {
+				return false, err
+			}
+			if satisfied {
+				return true, nil
+			}
+		}
+		return false, nil
+	}
+
+	// Explicit auth type selected or no authMeta — use the compiled check.
 	keyGroups := harness.RequiredAuthEnvKeys(harnessType, agent.AppliedConfig.HarnessAuth)
 	if len(keyGroups) == 0 && authMeta == nil {
 		return true, nil
@@ -795,6 +817,43 @@ func (s *Server) hasRequiredAuthCredentials(ctx context.Context, agent *store.Ag
 		fileSecrets := harness.RequiredAuthSecretsFromConfig(authMeta, agent.AppliedConfig.HarnessAuth, gcpSAAssigned)
 		for _, fs := range fileSecrets {
 			keys := append([]string{fs.Key}, fs.AlternativeEnvKeys...)
+			found, err := s.hasAnyKey(ctx, agent, keys)
+			if err != nil {
+				return false, err
+			}
+			if !found {
+				return false, nil
+			}
+		}
+	}
+
+	return true, nil
+}
+
+// isAuthTypeSatisfied checks whether all env-var and file-secret requirements
+// for a single auth type (as declared in authMeta) are met. Unlike the broker
+// preflight (which only enforces required: true files), this checks ALL listed
+// files so the hub can determine whether the auth type is viable.
+func (s *Server) isAuthTypeSatisfied(ctx context.Context, agent *store.Agent, authMeta *config.HarnessAuthMetadata, authType string, gcpSAAssigned bool) (bool, error) {
+	keyGroups := harness.RequiredAuthEnvKeysFromConfig(authMeta, authType)
+	for _, group := range keyGroups {
+		found, err := s.hasAnyKey(ctx, agent, group)
+		if err != nil {
+			return false, err
+		}
+		if !found {
+			return false, nil
+		}
+	}
+
+	t, ok := authMeta.Types[authType]
+	if ok {
+		for _, f := range t.RequiredFiles {
+			if f.SkippedWhenGCPServiceAccountAssigned && gcpSAAssigned {
+				continue
+			}
+			keys := []string{f.Name}
+			keys = append(keys, f.AlternativeEnvKeys...)
 			found, err := s.hasAnyKey(ctx, agent, keys)
 			if err != nil {
 				return false, err
