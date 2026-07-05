@@ -89,8 +89,8 @@ func TestBundleInstall_OpenCode(t *testing.T) {
 		}
 	}
 
-	// 4. Assert bundle root files.
-	for _, name := range []string{"config.yaml", "provision.py"} {
+	// 4. Assert bundle root files (including vendored scion_harness.py).
+	for _, name := range []string{"config.yaml", "provision.py", "scion_harness.py"} {
 		if _, err := os.Stat(filepath.Join(installDir, name)); err != nil {
 			t.Errorf("expected %s at bundle root: %v", name, err)
 		}
@@ -165,8 +165,8 @@ func TestBundleInstall_Codex(t *testing.T) {
 		}
 	}
 
-	// 4. Assert bundle root files.
-	for _, name := range []string{"config.yaml", "provision.py"} {
+	// 4. Assert bundle root files (including vendored scion_harness.py).
+	for _, name := range []string{"config.yaml", "provision.py", "scion_harness.py"} {
 		if _, err := os.Stat(filepath.Join(installDir, name)); err != nil {
 			t.Errorf("expected %s at bundle root: %v", name, err)
 		}
@@ -246,8 +246,8 @@ func TestBundleInstall_Antigravity(t *testing.T) {
 		t.Errorf("installed harness=%q want antigravity", installedHC.Config.Harness)
 	}
 
-	// 3. Assert bundle root files.
-	for _, name := range []string{"config.yaml", "provision.py", "dialect.yaml"} {
+	// 3. Assert bundle root files (including vendored scion_harness.py).
+	for _, name := range []string{"config.yaml", "provision.py", "dialect.yaml", "scion_harness.py"} {
 		if _, err := os.Stat(filepath.Join(installDir, name)); err != nil {
 			t.Errorf("expected %s at bundle root: %v", name, err)
 		}

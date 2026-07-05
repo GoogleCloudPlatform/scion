@@ -518,6 +518,75 @@ func TestContainerScriptHarness_StagesScionHarnessHelper(t *testing.T) {
 	}
 }
 
+func TestContainerScriptHarness_VendoredLibStagesFromConfigDir(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "config.yaml"), "harness: testharness\nimage: scion-test:latest\n")
+	writeFile(t, filepath.Join(dir, "provision.py"), "#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n")
+	libContent := "# vendored lib\nLIB_VERSION = \"2026-07-05\"\n"
+	writeFile(t, filepath.Join(dir, "scion_harness.py"), libContent)
+	entry := config.HarnessConfigEntry{
+		Harness:   "testharness",
+		Image:     "scion-test:latest",
+		ConfigDir: ".test",
+		Provisioner: &config.HarnessProvisionerConfig{
+			Type:             "container-script",
+			InterfaceVersion: 1,
+			Lib:              "vendored",
+			Command:          []string{"python3", "$HOME/.scion/harness/provision.py"},
+			Timeout:          "10s",
+			LifecycleEvents:  []string{"pre-start"},
+		},
+	}
+	h, err := NewContainerScriptHarness(dir, entry)
+	if err != nil {
+		t.Fatalf("NewContainerScriptHarness: %v", err)
+	}
+	agentHome := t.TempDir()
+	if err := h.Provision(context.Background(), "agent1", agentHome, agentHome, "/workspace"); err != nil {
+		t.Fatal(err)
+	}
+	helper := filepath.Join(agentHome, ".scion", "harness", "scion_harness.py")
+	staged, err := os.ReadFile(helper)
+	if err != nil {
+		t.Fatalf("scion_harness.py not staged: %v", err)
+	}
+	if string(staged) != libContent {
+		t.Errorf("vendored lib: got %q, want %q", string(staged), libContent)
+	}
+}
+
+func TestContainerScriptHarness_VendoredLibMissingIsHardError(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "config.yaml"), "harness: testharness\nimage: scion-test:latest\n")
+	writeFile(t, filepath.Join(dir, "provision.py"), "#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n")
+	// No scion_harness.py in the config dir.
+	entry := config.HarnessConfigEntry{
+		Harness:   "testharness",
+		Image:     "scion-test:latest",
+		ConfigDir: ".test",
+		Provisioner: &config.HarnessProvisionerConfig{
+			Type:             "container-script",
+			InterfaceVersion: 1,
+			Lib:              "vendored",
+			Command:          []string{"python3", "$HOME/.scion/harness/provision.py"},
+			Timeout:          "10s",
+			LifecycleEvents:  []string{"pre-start"},
+		},
+	}
+	h, err := NewContainerScriptHarness(dir, entry)
+	if err != nil {
+		t.Fatalf("NewContainerScriptHarness: %v", err)
+	}
+	agentHome := t.TempDir()
+	err = h.Provision(context.Background(), "agent1", agentHome, agentHome, "/workspace")
+	if err == nil {
+		t.Fatal("expected error when vendored lib is missing, got nil")
+	}
+	if !strings.Contains(err.Error(), "provisioner.lib") {
+		t.Errorf("error should mention provisioner.lib, got: %v", err)
+	}
+}
+
 func TestContainerScriptHarness_ProvisionReferencesMCPInputInManifest(t *testing.T) {
 	h, _ := newTestContainerScriptHarness(t)
 	agentHome := t.TempDir()

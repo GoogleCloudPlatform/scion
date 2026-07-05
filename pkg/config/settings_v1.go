@@ -758,6 +758,7 @@ type HarnessConfigEntry struct {
 type HarnessProvisionerConfig struct {
 	Type               string   `json:"type,omitempty" yaml:"type,omitempty" koanf:"type"`
 	InterfaceVersion   int      `json:"interface_version,omitempty" yaml:"interface_version,omitempty" koanf:"interface_version"`
+	Lib                string   `json:"lib,omitempty" yaml:"lib,omitempty" koanf:"lib"`
 	Command            []string `json:"command,omitempty" yaml:"command,omitempty" koanf:"command"`
 	Timeout            string   `json:"timeout,omitempty" yaml:"timeout,omitempty" koanf:"timeout"`
 	LifecycleEvents    []string `json:"lifecycle_events,omitempty" yaml:"lifecycle_events,omitempty" koanf:"lifecycle_events"`

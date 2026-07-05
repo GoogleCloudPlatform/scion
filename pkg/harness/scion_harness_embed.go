@@ -15,19 +15,17 @@
 package harness
 
 import (
-	_ "embed"
 	"fmt"
 	"os"
 	"path/filepath"
-)
 
-//go:embed embeds/scion_harness.py
-var sharedHarnessHelperSource []byte
+	"github.com/GoogleCloudPlatform/scion/harnesses"
+)
 
 // SharedHarnessHelperSource returns the embedded scion_harness.py contents.
 // Tests use this to assert the staged file matches the embedded source.
 func SharedHarnessHelperSource() []byte {
-	return sharedHarnessHelperSource
+	return harnesses.CanonicalHarnessLib
 }
 
 // writeSharedHarnessHelper writes the embedded scion_harness.py to dst, creating
@@ -37,5 +35,5 @@ func writeSharedHarnessHelper(dst string) error {
 	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
 		return fmt.Errorf("create dir for shared helper: %w", err)
 	}
-	return os.WriteFile(dst, sharedHarnessHelperSource, 0644)
+	return os.WriteFile(dst, harnesses.CanonicalHarnessLib, 0644)
 }

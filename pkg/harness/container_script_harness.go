@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -359,11 +360,10 @@ func (c *ContainerScriptHarness) Provision(ctx context.Context, agentName, agent
 		}
 	}
 
-	// Stage the shared scion_harness.py helper next to provision.py so the
-	// in-container script can import it (provision.py adds the bundle dir to
-	// sys.path).
-	if err := writeSharedHarnessHelper(filepath.Join(bundleHostPath, "scion_harness.py")); err != nil {
-		return fmt.Errorf("stage scion_harness.py: %w", err)
+	// Stage scion_harness.py next to provision.py so the in-container script
+	// can import it. The lib mode (vendored | injected) determines the source.
+	if err := c.stageHarnessLib(bundleHostPath); err != nil {
+		return err
 	}
 
 	manifest := ProvisionManifest{
@@ -690,6 +690,68 @@ func containerBundlePath(_ string) string {
 	// we encode that path verbatim. The wrapper is responsible for setting
 	// $HOME correctly.
 	return "$HOME/.scion/harness"
+}
+
+// stageHarnessLib stages scion_harness.py into the bundle directory according
+// to the provisioner.lib mode declared in config.yaml.
+//
+//   - vendored: copy from the installed harness-config directory; hard error if
+//     the file is missing (packaging bug — the author declared vendored but
+//     forgot to include the file).
+//   - injected (or absent): write the binary-embedded copy (legacy behavior).
+//
+// Both modes log the staged source and LIB_VERSION for diagnostics.
+func (c *ContainerScriptHarness) stageHarnessLib(bundleHostPath string) error {
+	dst := filepath.Join(bundleHostPath, "scion_harness.py")
+	libMode := "injected"
+	if c.entry.Provisioner != nil && c.entry.Provisioner.Lib != "" {
+		libMode = c.entry.Provisioner.Lib
+	}
+
+	var stagedSource string
+	switch libMode {
+	case "vendored":
+		src := filepath.Join(c.configDirPath, "scion_harness.py")
+		if !fileExistsHelper(src) {
+			return fmt.Errorf("stage scion_harness.py: provisioner.lib is %q but %s does not exist — "+
+				"run 'go generate ./harnesses/' or include scion_harness.py in the harness bundle", libMode, src)
+		}
+		if err := copyHarnessConfigFile(src, dst); err != nil {
+			return fmt.Errorf("stage scion_harness.py (vendored): %w", err)
+		}
+		stagedSource = "vendored"
+	default:
+		if err := writeSharedHarnessHelper(dst); err != nil {
+			return fmt.Errorf("stage scion_harness.py (injected): %w", err)
+		}
+		stagedSource = "injected"
+	}
+
+	staged, err := os.ReadFile(dst)
+	if err == nil {
+		version := parseLibVersion(string(staged))
+		slog.Info("staged scion_harness.py", "source", stagedSource, "lib_version", version)
+	}
+	return nil
+}
+
+// parseLibVersion extracts the LIB_VERSION value from scion_harness.py source.
+// Returns "unknown" if the marker is not found.
+func parseLibVersion(src string) string {
+	for _, line := range strings.Split(src, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "LIB_VERSION") && strings.Contains(line, "=") {
+			parts := strings.SplitN(line, "=", 2)
+			if len(parts) == 2 {
+				v := strings.TrimSpace(parts[1])
+				v = strings.Trim(v, "\"'")
+				if v != "" {
+					return v
+				}
+			}
+		}
+	}
+	return "unknown"
 }
 
 func writeHookWrapper(agentHome, bundleContainerPath string) error {

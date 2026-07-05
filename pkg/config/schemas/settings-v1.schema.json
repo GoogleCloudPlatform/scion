@@ -409,6 +409,10 @@
           "type": "integer",
           "minimum": 1
         },
+        "lib": {
+          "type": "string",
+          "enum": ["vendored", "injected"]
+        },
         "command": {
           "type": "array",
           "items": { "type": "string" }
