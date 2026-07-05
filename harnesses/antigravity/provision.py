@@ -9,148 +9,143 @@ by `sciontool harness provision --manifest ...`. Responsibilities:
   3. Generate .agents/hooks.json wiring AGY hook events to sciontool.
   4. Write outputs/env.json and outputs/resolved-auth.json.
 
-Stdlib-only — no external dependencies.
+Stdlib-only — no external dependencies (beyond the staged scion_harness lib).
 """
 
 from __future__ import annotations
 
-import argparse
 import json
 import os
 import shutil
-import subprocess
 import sys
 from typing import Any
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-try:
-    import scion_harness  # type: ignore[import-not-found]
-except ImportError:
-    scion_harness = None  # type: ignore[assignment]
+import scion_harness
+
+assert scion_harness.INTERFACE_VERSION >= 2, (
+    f"scion_harness INTERFACE_VERSION {scion_harness.INTERFACE_VERSION} < 2"
+)
 
 PROVISION_VERSION = "2026-06-25T01:00:00Z"
 
-VALID_AUTH_TYPES = ("oauth-token", "vertex-ai", "none")
+AGY_MCP_MAPPING: dict[str, Any] = {
+    "global_config_file": ".gemini/config/mcp_config.json",
+    "global_config_path": "mcpServers",
+    "transport_field": "type",
+    "transport_map": {
+        "stdio": "stdio",
+        "sse": "sse",
+        "streamable-http": "streamable-http",
+    },
+}
 
-EXIT_OK = 0
-EXIT_ERROR = 1
-EXIT_UNSUPPORTED = 2
-
-
-def _expand(path: str) -> str:
-    return os.path.expanduser(os.path.expandvars(path))
-
-
-def _load_json(path: str) -> Any:
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
-
-
-def _write_json(path: str, payload: Any) -> None:
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(payload, f, indent=2, sort_keys=True)
-        f.write("\n")
-    os.replace(tmp, path)
-
-
-def _present_env_keys(candidates: dict[str, Any]) -> set[str]:
-    raw = candidates.get("env_vars") or []
-    keys = {str(k) for k in raw if isinstance(k, str)}
-    if os.environ.get("AGY_TOKEN"):
-        keys.add("AGY_TOKEN")
-    return keys
-
-
-def _env_secret_files(candidates: dict[str, Any]) -> dict[str, str]:
-    """Map of env-var name -> container path of its 0600 secret value file."""
-    raw = candidates.get("env_secret_files") or {}
-    out: dict[str, str] = {}
-    if not isinstance(raw, dict):
-        return out
-    for k, v in raw.items():
-        if isinstance(k, str) and isinstance(v, str) and v:
-            out[k] = v
-    return out
+ANTIGRAVITY_AUTH = scion_harness.AuthSpec(
+    "antigravity",
+    [
+        scion_harness.env_method(
+            "vertex-ai",
+            all_of=["AGY_TOKEN", "GOOGLE_CLOUD_PROJECT"],
+            any_of=["GOOGLE_CLOUD_LOCATION", "GOOGLE_CLOUD_REGION"],
+            env_fallback=True,
+            hint="set AGY_TOKEN, GOOGLE_CLOUD_PROJECT, and GOOGLE_CLOUD_LOCATION",
+        ),
+        scion_harness.env_method(
+            "oauth-token",
+            any_of=["AGY_TOKEN"],
+            env_fallback=True,
+            hint="set AGY_TOKEN",
+        ),
+    ],
+    fallback_to_none_on_error=True,
+)
 
 
-def _read_secret(env_secret_files: dict[str, str], name: str) -> str:
-    """Read secret from staged file, falling back to env var. Returns '' on miss."""
-    path = env_secret_files.get(name)
-    if path:
-        real = _expand(path)
+def provision(ctx: scion_harness.ProvisionContext) -> None:
+    ctx.info(
+        f"version={PROVISION_VERSION} "
+        f"home={ctx.home} uid={os.getuid()} gid={os.getgid()}"
+    )
+
+    # DIVERGENCE(no-auth-gate): antigravity treats "none" as a valid auth
+    # method even when no_auth behavior is not configured. The library's
+    # select_auth raises ProvisionError when no method matches; we catch
+    # it and fall back to "none" unless an explicit type was requested.
+    try:
+        resolved = ctx.select_auth(ANTIGRAVITY_AUTH)
+    except scion_harness.ProvisionError:
+        if ctx.explicit_type:
+            raise
+        resolved = scion_harness.ResolvedAuth(method="none")
+
+    method = resolved.method
+
+    has_token = False
+    if method in ("oauth-token", "vertex-ai"):
+        token_raw = _read_agy_token(ctx)
+        if not token_raw:
+            oauth_token_path = os.path.join(
+                ctx.home, ".gemini", "antigravity-cli", "antigravity-oauth-token"
+            )
+            try:
+                with open(oauth_token_path, "r", encoding="utf-8") as f:
+                    token_raw = f.read().rstrip("\r\n")
+                if token_raw:
+                    ctx.info(
+                        f"read AGY_TOKEN from bind-mounted path {oauth_token_path}"
+                    )
+            except OSError:
+                pass
+        if not token_raw:
+            raise scion_harness.ProvisionError("AGY_TOKEN secret is empty")
         try:
-            with open(real, "r", encoding="utf-8") as f:
+            token_obj = json.loads(token_raw)
+        except json.JSONDecodeError as exc:
+            raise scion_harness.ProvisionError(
+                f"AGY_TOKEN is not valid JSON: {exc}"
+            )
+        has_refresh = (
+            "refresh_token" in token_obj
+            or (
+                isinstance(token_obj.get("token"), dict)
+                and "refresh_token" in token_obj["token"]
+            )
+        )
+        if not isinstance(token_obj, dict) or not has_refresh:
+            raise scion_harness.ProvisionError(
+                "AGY_TOKEN must contain refresh_token"
+            )
+        has_token = True
+
+    is_enterprise = method == "vertex-ai"
+
+    _generate_wrapper_script(ctx.home, has_token, is_enterprise)
+    ctx.write_outputs(resolved, env={})
+
+    instructions_file = ctx.harness_config.get("instructions_file") or "GEMINI.md"
+    model = os.environ.get("AGY_MODEL", "") or "Gemini 3.5 Flash"
+    _copy_instructions(ctx.bundle_dir, ctx.home, instructions_file)
+    _generate_hooks_json(ctx.home)
+    _prestage_onboarding(ctx.home, enterprise=is_enterprise, model=model)
+    _apply_mcp(ctx)
+
+    ctx.info(f"method={method}")
+
+
+def _read_agy_token(ctx: scion_harness.ProvisionContext) -> str:
+    """Read AGY_TOKEN from staged secret file (with path expansion) or env."""
+    secret_path = ctx.env_secret_files.get("AGY_TOKEN")
+    if secret_path:
+        try:
+            with open(scion_harness.expand_path(secret_path), "r", encoding="utf-8") as f:
                 return f.read().rstrip("\r\n")
         except OSError:
             pass
-    return os.environ.get(name, "")
+    return os.environ.get("AGY_TOKEN", "")
 
 
-def _parse_env_output(output: str, env: dict[str, str]) -> None:
-    """Parse KEY=VALUE lines from daemon output into env dict."""
-    for line in output.splitlines():
-        for var in (
-            "DBUS_SESSION_BUS_ADDRESS", "DBUS_SESSION_BUS_PID",
-            "GNOME_KEYRING_CONTROL", "SSH_AUTH_SOCK",
-            "GNOME_KEYRING_PID",
-        ):
-            if line.startswith(var + "="):
-                val = line.split("=", 1)[1].rstrip(";").strip("'\"")
-                env[var] = val
-
-
-def _select_auth_method(
-    explicit: str, env_keys: set[str], secret_files: dict[str, str],
-    home: str,
-) -> tuple[str, str]:
-    has_token = "AGY_TOKEN" in secret_files or bool(_read_secret(secret_files, "AGY_TOKEN"))
-    if not has_token:
-        # AGY_TOKEN may be a file-type secret bind-mounted directly to its
-        # target path rather than staged to the env secret directory.
-        has_token = os.path.isfile(os.path.join(
-            home, ".gemini", "antigravity-cli", "antigravity-oauth-token"
-        ))
-    has_gcp_project = any(k in env_keys for k in ("GOOGLE_CLOUD_PROJECT",))
-    has_gcp_location = any(k in env_keys for k in ("GOOGLE_CLOUD_LOCATION", "GOOGLE_CLOUD_REGION"))
-
-    # The host-side forwarder may not pass GOOGLE_CLOUD_LOCATION through
-    # auth-candidates (only GOOGLE_CLOUD_REGION is forwarded). Fall back
-    # to checking os.environ so the provisioner still detects GCP config.
-    gcp_project = has_gcp_project or bool(os.environ.get("GOOGLE_CLOUD_PROJECT"))
-    gcp_location = has_gcp_location or bool(
-        os.environ.get("GOOGLE_CLOUD_LOCATION") or os.environ.get("GOOGLE_CLOUD_REGION")
-    )
-
-    if explicit:
-        if explicit not in VALID_AUTH_TYPES:
-            raise ValueError(
-                f"antigravity: unknown auth type {explicit!r}; "
-                f"valid types are: {', '.join(VALID_AUTH_TYPES)}"
-            )
-        if explicit == "vertex-ai":
-            if not has_token:
-                raise ValueError("antigravity: auth type 'vertex-ai' selected but AGY_TOKEN secret not found")
-            if not gcp_project:
-                raise ValueError("antigravity: auth type 'vertex-ai' selected but GOOGLE_CLOUD_PROJECT not found")
-            if not gcp_location:
-                raise ValueError("antigravity: auth type 'vertex-ai' selected but GOOGLE_CLOUD_LOCATION/REGION not found")
-            return "vertex-ai", "AGY_TOKEN"
-        if explicit == "oauth-token":
-            if not has_token:
-                raise ValueError("antigravity: auth type 'oauth-token' selected but AGY_TOKEN secret not found")
-            return "oauth-token", "AGY_TOKEN"
-        if explicit == "none":
-            return "none", ""
-
-    if has_token:
-        if gcp_project and gcp_location:
-            return "vertex-ai", "AGY_TOKEN"
-        return "oauth-token", "AGY_TOKEN"
-
-    return "none", ""
+# ---- Native functions below: keyring, hooks, onboarding, MCP ----
 
 
 def _generate_hooks_json(home: str) -> None:
@@ -198,7 +193,7 @@ def _generate_hooks_json(home: str) -> None:
     agents_dir = os.path.join("/workspace", ".agents")
     os.makedirs(agents_dir, exist_ok=True)
     hooks_path = os.path.join(agents_dir, "hooks.json")
-    _write_json(hooks_path, hooks_data)
+    scion_harness.atomic_write_json(hooks_path, hooks_data)
     print(
         f"antigravity provision: generated hooks.json at {hooks_path}",
         file=sys.stderr,
@@ -345,35 +340,15 @@ exec agy --dangerously-skip-permissions "$@"
     )
 
 
-AGY_MCP_MAPPING: dict[str, Any] = {
-    "global_config_file": ".gemini/config/mcp_config.json",
-    "global_config_path": "mcpServers",
-    "transport_field": "type",
-    "transport_map": {
-        "stdio": "stdio",
-        "sse": "sse",
-        "streamable-http": "streamable-http",
-    },
-}
-
-
-def _apply_mcp(bundle: str) -> None:
+def _apply_mcp(ctx: scion_harness.ProvisionContext) -> None:
     """Apply staged MCP server configuration into AGY's mcp_config.json."""
-    if scion_harness is None:
-        return
     try:
-        count = scion_harness.apply_mcp_servers_simple(bundle, AGY_MCP_MAPPING)
+        count = scion_harness.apply_mcp_servers_simple(ctx.bundle_dir, AGY_MCP_MAPPING)
     except (ValueError, OSError) as exc:
-        print(
-            f"antigravity provision: MCP config error: {exc}",
-            file=sys.stderr,
-        )
+        ctx.info(f"MCP config error: {exc}")
         return
     if count > 0:
-        print(
-            f"antigravity provision: applied {count} MCP server(s)",
-            file=sys.stderr,
-        )
+        ctx.info(f"applied {count} MCP server(s)")
 
 
 def _copy_instructions(bundle: str, home: str, instructions_file: str) -> None:
@@ -434,7 +409,7 @@ def _prestage_onboarding(
         }
         if model:
             settings["model"] = model
-        _write_json(settings_path, settings)
+        scion_harness.atomic_write_json(settings_path, settings)
 
     # cache/onboarding.json — marks onboarding complete.
     # Always set enterpriseOnboardingComplete=true regardless of auth mode:
@@ -442,7 +417,7 @@ def _prestage_onboarding(
     # enterprise onboarding flow (theme selector, etc.).
     onboarding_path = os.path.join(cache_dir, "onboarding.json")
     if not os.path.isfile(onboarding_path):
-        _write_json(onboarding_path, {
+        scion_harness.atomic_write_json(onboarding_path, {
             "consumerOnboardingComplete": True,
             "enterpriseOnboardingComplete": True,
             "onboardingComplete": True,
@@ -458,7 +433,7 @@ def _prestage_onboarding(
     project_id = str(uuid.uuid4())
     project_path = os.path.join(projects_dir, project_id + ".json")
     if not any(f.endswith(".json") for f in os.listdir(projects_dir)):
-        _write_json(project_path, {
+        scion_harness.atomic_write_json(project_path, {
             "id": project_id,
             "name": workspace,
             "projectResources": {
@@ -546,186 +521,5 @@ def _prestage_onboarding(
     )
 
 
-def _provision(manifest: dict[str, Any]) -> int:
-    home = os.environ.get("HOME") or os.path.expanduser("~")
-    print(
-        f"antigravity provision: version={PROVISION_VERSION} "
-        f"home={home} uid={os.getuid()} gid={os.getgid()}",
-        file=sys.stderr,
-    )
-    bundle = manifest.get("harness_bundle_dir") or "$HOME/.scion/harness"
-    bundle = _expand(bundle)
-
-    inputs_dir = os.path.join(bundle, "inputs")
-    auth_candidates_path = os.path.join(inputs_dir, "auth-candidates.json")
-
-    candidates: dict[str, Any] = {}
-    if os.path.isfile(auth_candidates_path):
-        try:
-            candidates = _load_json(auth_candidates_path) or {}
-        except (OSError, json.JSONDecodeError) as exc:
-            print(
-                f"antigravity provision: invalid auth-candidates.json: {exc}",
-                file=sys.stderr,
-            )
-            return EXIT_ERROR
-
-    explicit = str(candidates.get("explicit_type") or "").strip()
-    env_keys = _present_env_keys(candidates)
-    secret_files = _env_secret_files(candidates)
-
-    # No-auth mode: when no auth candidates were staged and the harness config
-    # declares a no_auth behavior, skip auth setup entirely.
-    harness_cfg = manifest.get("harness_config") or {}
-    no_auth_cfg = harness_cfg.get("no_auth") or {}
-    no_auth_behavior = str(no_auth_cfg.get("behavior") or "").strip()
-
-    if not candidates and no_auth_behavior:
-        print(f"antigravity provision: no-auth mode (behavior={no_auth_behavior}), skipping auth setup", file=sys.stderr)
-        method = "none"
-        env_key = ""
-    else:
-        try:
-            method, env_key = _select_auth_method(explicit, env_keys, secret_files, home)
-        except ValueError as exc:
-            print(str(exc), file=sys.stderr)
-            return EXIT_ERROR
-
-    outputs = manifest.get("outputs") or {}
-    env_out = _expand(
-        outputs.get("env") or os.path.join(bundle, "outputs", "env.json")
-    )
-    auth_out = _expand(
-        outputs.get("resolved_auth")
-        or os.path.join(bundle, "outputs", "resolved-auth.json")
-    )
-
-    resolved_payload: dict[str, Any] = {
-        "schema_version": 1,
-        "harness": "antigravity",
-        "method": method,
-        "explicit_type": explicit or None,
-    }
-
-    env_payload: dict[str, Any] = {}
-
-    # Validate token if an auth method requiring it was selected
-    has_token = False
-    if method in ("oauth-token", "vertex-ai"):
-        token_raw = _read_secret(secret_files, "AGY_TOKEN")
-        if not token_raw:
-            # AGY_TOKEN may be a file-type secret bind-mounted directly to its
-            # target path rather than staged to the env secret directory.
-            oauth_token_path = os.path.join(
-                home, ".gemini", "antigravity-cli", "antigravity-oauth-token"
-            )
-            try:
-                with open(oauth_token_path, "r", encoding="utf-8") as f:
-                    token_raw = f.read().rstrip("\r\n")
-                if token_raw:
-                    print(
-                        f"antigravity provision: read AGY_TOKEN from "
-                        f"bind-mounted path {oauth_token_path}",
-                        file=sys.stderr,
-                    )
-            except OSError:
-                pass
-        if not token_raw:
-            print("antigravity provision: AGY_TOKEN secret is empty", file=sys.stderr)
-            return EXIT_ERROR
-        try:
-            token_obj = json.loads(token_raw)
-        except json.JSONDecodeError as exc:
-            print(f"antigravity provision: AGY_TOKEN is not valid JSON: {exc}", file=sys.stderr)
-            return EXIT_ERROR
-        has_refresh = (
-            "refresh_token" in token_obj
-            or (isinstance(token_obj.get("token"), dict) and "refresh_token" in token_obj["token"])
-        )
-        if not isinstance(token_obj, dict) or not has_refresh:
-            print("antigravity provision: AGY_TOKEN must contain refresh_token", file=sys.stderr)
-            return EXIT_ERROR
-        has_token = True
-
-    is_enterprise = method == "vertex-ai"
-
-    # Generate wrapper script that inits keyring and execs AGY.
-    # Keyring daemons must run in AGY's process tree (not the
-    # provisioner's) so they stay alive for the session.
-    _generate_wrapper_script(home, has_token, is_enterprise)
-
-    try:
-        _write_json(auth_out, resolved_payload)
-        _write_json(env_out, env_payload)
-    except OSError as exc:
-        print(
-            f"antigravity provision: failed to write outputs: {exc}",
-            file=sys.stderr,
-        )
-        return EXIT_ERROR
-
-    harness_cfg = manifest.get("harness_config") or {}
-    instructions_file = harness_cfg.get("instructions_file") or "GEMINI.md"
-    # AGY doesn't support --model flag so we write the model into settings.json.
-    # AGY_MODEL env var overrides; otherwise use the default.
-    model = os.environ.get("AGY_MODEL", "") or "Gemini 3.5 Flash"
-    _copy_instructions(bundle, home, instructions_file)
-    _generate_hooks_json(home)
-    _prestage_onboarding(home, enterprise=is_enterprise, model=model)
-    _apply_mcp(bundle)
-
-    print(f"antigravity provision: method={method}", file=sys.stderr)
-    return EXIT_OK
-
-
-def _dispatch(manifest: dict[str, Any]) -> int:
-    command = str(manifest.get("command") or "provision")
-    if command == "provision":
-        return _provision(manifest)
-    print(
-        f"antigravity provision: unsupported command {command!r}",
-        file=sys.stderr,
-    )
-    return EXIT_UNSUPPORTED
-
-
-def main() -> int:
-    parser = argparse.ArgumentParser(
-        description="Antigravity container-side provisioner"
-    )
-    parser.add_argument(
-        "--manifest",
-        help="Path to the staged manifest.json",
-        default=None,
-    )
-    args = parser.parse_args()
-
-    manifest_path = args.manifest
-    if not manifest_path:
-        home = os.environ.get("HOME") or os.path.expanduser("~")
-        manifest_path = os.path.join(home, ".scion", "harness", "manifest.json")
-
-    try:
-        manifest = _load_json(manifest_path)
-    except FileNotFoundError:
-        print(
-            f"antigravity provision: manifest not found at {manifest_path}",
-            file=sys.stderr,
-        )
-        return EXIT_ERROR
-    except (OSError, json.JSONDecodeError) as exc:
-        print(
-            f"antigravity provision: failed to load manifest: {exc}",
-            file=sys.stderr,
-        )
-        return EXIT_ERROR
-
-    if not isinstance(manifest, dict):
-        print("antigravity provision: manifest is not an object", file=sys.stderr)
-        return EXIT_ERROR
-
-    return _dispatch(manifest)
-
-
 if __name__ == "__main__":
-    sys.exit(main())
+    scion_harness.run("antigravity", provision)
