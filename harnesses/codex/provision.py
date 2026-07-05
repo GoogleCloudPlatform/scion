@@ -26,216 +26,64 @@ ContainerScriptHarness has already:
   * Mounted any auth file (e.g. ~/.codex/auth.json) at the declared
     container_path, when auth-file mode is in use.
 
-This script's job mirrors the compiled Codex harness:
+This script's job:
 
   1. Determine which auth method Codex will use, honoring an explicit
-     selection if present and otherwise applying the same precedence as the
-     compiled harness:
+     selection if present and otherwise applying the same precedence:
          CodexAPIKey > OpenAIAPIKey > CodexAuthFile.
-  2. For api-key methods, read the secret value from the staged
-     secrets/<NAME> file and write `~/.codex/auth.json` with
-     `{"auth_mode": "apikey", "OPENAI_API_KEY": "<value>"}`. The compiled
-     harness always writes the OPENAI_API_KEY field regardless of which
-     env-var name was the source — Codex itself only reads OPENAI_API_KEY
-     from auth.json.
+  2. For api-key methods, read the secret value and write
+     `~/.codex/auth.json` with `{"auth_mode": "apikey", "OPENAI_API_KEY": "<value>"}`.
   3. Reconcile the [otel] section in `~/.codex/config.toml` from
-     inputs/telemetry.json. If telemetry is enabled, rebuild [otel]; if not,
-     strip any pre-existing [otel] block.
+     inputs/telemetry.json.
   4. Write outputs/resolved-auth.json describing the chosen method.
-  5. Write outputs/env.json (intentionally empty — Codex reads creds from
-     auth.json, not from env, so no overlay is needed).
+  5. Write outputs/env.json (intentionally empty).
 
 The script is stdlib-only; it does manual TOML editing because tomllib (3.11+)
-is read-only and we must avoid third-party dependencies (the script ships in
-the harness-config artifact and runs inside any image that declares python3).
+is read-only and we must avoid third-party dependencies.
 """
 
 from __future__ import annotations
 
-import argparse
 import json
 import os
-import re
 import sys
 from typing import Any
 
-# Add the bundle dir to sys.path so we can import the staged scion_harness
-# helper module (sibling file of this script). Mirrors the OpenCode harness.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-try:
-    import scion_harness  # type: ignore[import-not-found]
-except ImportError:
-    scion_harness = None  # type: ignore[assignment]
+import scion_harness  # type: ignore[import-not-found]
+
+assert scion_harness.INTERFACE_VERSION >= 2, (
+    "codex provision.py requires scion_harness INTERFACE_VERSION >= 2; "
+    f"got {scion_harness.INTERFACE_VERSION}"
+)
 
 CODEX_AUTH_FILE = "~/.codex/auth.json"
 CODEX_CONFIG_FILE = "~/.codex/config.toml"
-SCION_MANAGED_BEGIN = "<!-- BEGIN SCION MANAGED CODEX INSTRUCTIONS -->"
-SCION_MANAGED_END = "<!-- END SCION MANAGED CODEX INSTRUCTIONS -->"
 
-VALID_AUTH_TYPES = ("api-key", "auth-file")
-
-# Exit codes mirror the contract documented in the design doc:
-#   0 = success
-#   1 = error (stderr is captured and surfaced)
-#   2 = unsupported command (treated as no-op for optional operations)
-EXIT_OK = 0
-EXIT_ERROR = 1
-EXIT_UNSUPPORTED = 2
-
-
-def _expand(path: str) -> str:
-    """Expand ~ and $HOME in a container path."""
-    return os.path.expanduser(os.path.expandvars(path))
-
-
-def _load_json(path: str) -> Any:
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
+AUTH = scion_harness.AuthSpec(
+    "codex",
+    [
+        scion_harness.env_method(
+            "api-key",
+            any_of=["CODEX_API_KEY", "OPENAI_API_KEY"],
+            hint="set CODEX_API_KEY or OPENAI_API_KEY",
+        ),
+        scion_harness.file_method(
+            "auth-file",
+            path=CODEX_AUTH_FILE,
+            hint=f"provide auth credentials at {CODEX_AUTH_FILE}",
+        ),
+    ],
+)
 
 
-def _write_json(path: str, payload: Any) -> None:
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(payload, f, indent=2, sort_keys=True)
-        f.write("\n")
-    os.replace(tmp, path)
-
-
-def _present_env_keys(candidates: dict[str, Any]) -> set[str]:
-    """Names of auth env vars staged by the host as candidates."""
-    raw = candidates.get("env_vars") or []
-    return {str(k) for k in raw if isinstance(k, str)}
-
-
-def _present_file_paths(candidates: dict[str, Any]) -> list[str]:
-    """Container paths of auth files mounted by the host as candidates."""
-    raw = candidates.get("files") or []
-    out: list[str] = []
-    for entry in raw:
-        if isinstance(entry, dict):
-            cp = entry.get("container_path")
-            if isinstance(cp, str) and cp:
-                out.append(cp)
-    return out
-
-
-def _env_secret_files(candidates: dict[str, Any]) -> dict[str, str]:
-    """Map of env-var name -> container path of its 0600 secret value file."""
-    raw = candidates.get("env_secret_files") or {}
-    out: dict[str, str] = {}
-    if not isinstance(raw, dict):
-        return out
-    for k, v in raw.items():
-        if isinstance(k, str) and isinstance(v, str) and v:
-            out[k] = v
-    return out
-
-
-def _file_secret_files(candidates: dict[str, Any]) -> dict[str, str]:
-    """Map of credential name -> container path of its 0600 staged secret file.
-
-    These are file-type credentials (e.g. CODEX_AUTH for auth.json) that the
-    host staged as secrets instead of bind-mounting, so the container-side
-    script can write a fresh writable copy.
-    """
-    raw = candidates.get("file_secret_files") or {}
-    out: dict[str, str] = {}
-    if not isinstance(raw, dict):
-        return out
-    for k, v in raw.items():
-        if isinstance(k, str) and isinstance(v, str) and v:
-            out[k] = v
-    return out
-
-
-def _read_secret(env_secret_files: dict[str, str], name: str) -> str:
-    """Read the 0600 secret value file for an env var. Returns "" on miss."""
-    path = env_secret_files.get(name)
-    if not path:
-        return ""
-    real = _expand(path)
-    try:
-        with open(real, "r", encoding="utf-8") as f:
-            return f.read().rstrip("\r\n")
-    except OSError:
-        return ""
-
-
-def _codex_auth_file_present(
-    file_paths: list[str],
-    file_secret_files: dict[str, str] | None = None,
-) -> bool:
-    """Return True if the Codex auth file is available.
-
-    Checks three sources in order:
-    1. A file_secret_files staged secret (host read the file and wrote a secret).
-    2. A bind-mounted container path matching the auth file location.
-    3. The auth file already present on disk (e.g. from a prior provision).
-    """
-    if file_secret_files and "CODEX_AUTH" in file_secret_files:
-        return True
-    if any(_expand(p) == _expand(CODEX_AUTH_FILE) for p in file_paths):
-        return True
-    return os.path.isfile(_expand(CODEX_AUTH_FILE))
-
-
-def _select_auth_method(
-    explicit: str,
-    env_keys: set[str],
-    file_paths: list[str],
-    file_secret_files: dict[str, str] | None = None,
-) -> tuple[str, str]:
-    """Pick an auth method.
-
-    Returns (method, env_key_or_empty). env_key is the chosen API key env var
-    name when method == 'api-key', else "". Raises ValueError on no-creds.
-    """
-    has_codex = "CODEX_API_KEY" in env_keys
-    has_openai = "OPENAI_API_KEY" in env_keys
-    has_authfile = _codex_auth_file_present(file_paths, file_secret_files)
-
-    if explicit:
-        if explicit not in VALID_AUTH_TYPES:
-            raise ValueError(
-                f"codex: unknown auth type {explicit!r}; valid types are: "
-                f"{', '.join(VALID_AUTH_TYPES)}"
-            )
-        if explicit == "api-key":
-            if has_codex:
-                return "api-key", "CODEX_API_KEY"
-            if has_openai:
-                return "api-key", "OPENAI_API_KEY"
-            raise ValueError(
-                "codex: auth type 'api-key' selected but no API key found; "
-                "set CODEX_API_KEY or OPENAI_API_KEY"
-            )
-        if explicit == "auth-file":
-            if not has_authfile:
-                raise ValueError(
-                    "codex: auth type 'auth-file' selected but no auth file "
-                    f"found; expected {CODEX_AUTH_FILE}"
-                )
-            return "auth-file", ""
-
-    # Auto-detect precedence matches the compiled Codex harness.
-    if has_codex:
-        return "api-key", "CODEX_API_KEY"
-    if has_openai:
-        return "api-key", "OPENAI_API_KEY"
-    if has_authfile:
-        return "auth-file", ""
-
-    raise ValueError(
-        "codex: no valid auth method found; set CODEX_API_KEY or OPENAI_API_KEY,"
-        f" or provide auth credentials at {CODEX_AUTH_FILE}"
-    )
+# --- Native auth writers ---------------------------------------------------
 
 
 def _write_codex_auth_json(api_key: str) -> None:
     """Mirror the compiled ApplyAuthSettings: {"auth_mode": "apikey", ...}."""
-    auth_dir = _expand("~/.codex")
+    auth_dir = scion_harness.expand_path("~/.codex")
     os.makedirs(auth_dir, exist_ok=True)
     target = os.path.join(auth_dir, "auth.json")
     payload = {"auth_mode": "apikey", "OPENAI_API_KEY": api_key}
@@ -247,165 +95,30 @@ def _write_codex_auth_json(api_key: str) -> None:
     os.replace(tmp, target)
 
 
-# --- Instruction projection ------------------------------------------------
-
-
-def _read_text_if_exists(path: str) -> str:
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return f.read()
-    except OSError:
-        return ""
-
-
-def _strip_scion_managed_block(content: str) -> str:
-    start = content.find(SCION_MANAGED_BEGIN)
-    if start == -1:
-        return content
-    end = content.find(SCION_MANAGED_END, start)
-    if end == -1:
-        print(
-            f"codex provision: warning: found {SCION_MANAGED_BEGIN} but no matching {SCION_MANAGED_END}. "
-            "Aborting strip to prevent data loss.",
-            file=sys.stderr,
-        )
-        return content
-    end += len(SCION_MANAGED_END)
-    return (content[:start] + content[end:]).strip() + "\n"
-
-
-def _markdown_section(title: str, content: str) -> str:
-    body = content.strip()
-    if not body:
-        return ""
-    return f"# {title}\n\n{body}\n"
-
-
-def _skill_sections(home: str, skills_dir: str) -> list[str]:
-    """Read installed Codex SKILL.md files for injection into AGENTS.md."""
-    if not skills_dir:
-        return []
-    root = os.path.join(home, skills_dir)
-    if not os.path.isdir(root):
-        return []
-
-    sections: list[str] = []
-    try:
-        entries = sorted(os.listdir(root))
-    except OSError as exc:
-        print(f"codex provision: could not list skills dir {root}: {exc}", file=sys.stderr)
-        return []
-
-    for entry in entries:
-        if entry.startswith("."):
-            continue
-        skill_md = os.path.join(root, entry, "SKILL.md")
-        if not os.path.isfile(skill_md):
-            continue
-        content = _read_text_if_exists(skill_md).strip()
-        if not content:
-            continue
-        sections.append(f"## {entry}\n\n{content}\n")
-    return sections
-
-
-def _apply_instruction_projection(bundle: str, manifest: dict[str, Any]) -> None:
-    """Compose staged Scion prompt inputs into Codex's AGENTS.md file.
-
-    ContainerScriptHarness stages agent_instructions and system_prompt as
-    inputs/*.md. Codex has no native system prompt flag in this harness, so the
-    system prompt is downgraded into AGENTS.md when config.yaml requests
-    prepend_to_instructions.
-    """
-    harness_cfg = manifest.get("harness_config") or {}
-    home = os.environ.get("HOME") or _expand("~")
-    instructions_file = str(harness_cfg.get("instructions_file") or ".codex/AGENTS.md")
-    system_prompt_mode = str(harness_cfg.get("system_prompt_mode") or "none")
-    skills_dir = str(harness_cfg.get("skills_dir") or ".codex/skills")
-
-    inputs_dir = os.path.join(bundle, "inputs")
-    instructions = _read_text_if_exists(os.path.join(inputs_dir, "instructions.md"))
-    system_prompt = _read_text_if_exists(os.path.join(inputs_dir, "system-prompt.md"))
-    skills = _skill_sections(home, skills_dir)
-
-    target = os.path.join(home, instructions_file)
-    existing = _strip_scion_managed_block(_read_text_if_exists(target))
-
-    sections: list[str] = []
-    if system_prompt.strip() and system_prompt_mode != "none":
-        sections.append(_markdown_section("System Instruction", system_prompt))
-
-    if instructions.strip():
-        sections.append(_markdown_section("Agent Instructions", instructions))
-
-    if skills:
-        sections.append("# Skills\n\n" + "\n\n".join(skill.strip() for skill in skills) + "\n")
-
-    if not sections and not existing.strip():
-        if os.path.isfile(target):
-            os.remove(target)
+def _write_codex_auth_file(ctx: scion_harness.ProvisionContext) -> None:
+    """Write ~/.codex/auth.json from a staged CODEX_AUTH file secret."""
+    auth_content = _read_file_secret(ctx, "CODEX_AUTH")
+    if not auth_content:
         return
-
-    managed = ""
-    if sections:
-        managed = (
-            f"{SCION_MANAGED_BEGIN}\n\n"
-            + "\n\n".join(section.strip() for section in sections if section.strip())
-            + f"\n\n{SCION_MANAGED_END}\n"
-        )
-
-    unmanaged = ""
-    if existing.strip():
-        unmanaged = existing.strip() + "\n"
-        if managed:
-            unmanaged = "\n" + unmanaged
-    content = managed + unmanaged
-
-    os.makedirs(os.path.dirname(target), exist_ok=True)
+    if not auth_content.strip():
+        raise scion_harness.ProvisionError("CODEX_AUTH secret is empty")
+    try:
+        json.loads(auth_content)
+    except json.JSONDecodeError as exc:
+        raise scion_harness.ProvisionError(
+            f"CODEX_AUTH secret is not valid JSON: {exc}"
+        ) from exc
+    auth_dir = scion_harness.expand_path("~/.codex")
+    os.makedirs(auth_dir, exist_ok=True)
+    target = os.path.join(auth_dir, "auth.json")
     tmp = target + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
-        f.write(content)
+        f.write(auth_content)
+    os.chmod(tmp, 0o600)
     os.replace(tmp, target)
-    print(f"codex provision: wrote instructions to {target}", file=sys.stderr)
 
 
-# --- TOML reconciliation ---------------------------------------------------
-#
-# We do NOT use tomllib because (a) it is read-only, (b) we must preserve
-# user-edited keys outside [otel], (c) the file is small enough for line-based
-# rewriting, and (d) the compiled harness does the same thing in Go.
-# Keep behavior byte-equivalent to pkg/harness/codex_config.go.
-
-
-_SECTION_RE = re.compile(r"^\s*\[([^\]\s]+)(?:\.[^\]]*)?\]\s*$")
-
-
-def _strip_otel_section(content: str) -> str:
-    """Remove the [otel] section (and any blank lines immediately before it).
-
-    Sub-tables under [otel] (e.g. an inline [otel.foo]) are NOT in use today,
-    but matching the Go behavior: we stop at the next bracketed top-level
-    section header. The Go implementation uses simple bracket matching, so we
-    do the same for parity.
-    """
-    lines = content.split("\n")
-    target = "[otel]"
-    section_start = -1
-    section_end = len(lines)
-    for i, line in enumerate(lines):
-        if line.strip() == target:
-            section_start = i
-            for j in range(i + 1, len(lines)):
-                t = lines[j].strip()
-                if t.startswith("[") and t.endswith("]"):
-                    section_end = j
-                    break
-            break
-    if section_start == -1:
-        return content
-    while section_start > 0 and lines[section_start - 1].strip() == "":
-        section_start -= 1
-    return "\n".join(lines[:section_start] + lines[section_end:])
+# --- TOML reconciliation (otel) --------------------------------------------
 
 
 def _list_contains(items: list[Any], target: str) -> bool:
@@ -498,104 +211,43 @@ def _build_otel_section(telemetry: dict[str, Any], env: dict[str, str] | None) -
     lines = [
         "[otel]",
         "enabled = true",
-        f'environment = "{_toml_escape(environment)}"',
+        f'environment = "{scion_harness.toml_escape(environment)}"',
         f"log_user_prompt = {'true' if log_user_prompt else 'false'}",
         'metrics_exporter = "statsig"',
-        f'exporter."{exporter_key}".endpoint = "{_toml_escape(endpoint)}"',
-        f'trace_exporter."{exporter_key}".endpoint = "{_toml_escape(endpoint)}"',
+        f'exporter."{exporter_key}".endpoint = "{scion_harness.toml_escape(endpoint)}"',
+        f'trace_exporter."{exporter_key}".endpoint = "{scion_harness.toml_escape(endpoint)}"',
     ]
 
     if headers:
-        header_table = _toml_inline_table(headers)
+        header_table = scion_harness.toml_inline_table(headers)
         lines.append(f'exporter."{exporter_key}".headers = {header_table}')
         lines.append(f'trace_exporter."{exporter_key}".headers = {header_table}')
 
     if tls_ca_file:
-        escaped_ca = _toml_escape(tls_ca_file)
+        escaped_ca = scion_harness.toml_escape(tls_ca_file)
         lines.append(f'exporter."{exporter_key}".tls.ca-certificate = "{escaped_ca}"')
         lines.append(f'trace_exporter."{exporter_key}".tls.ca-certificate = "{escaped_ca}"')
 
     return "\n".join(lines) + "\n"
 
 
-def _toml_escape(value: str) -> str:
-    """Escape a string for a TOML basic string literal."""
-    out = value.replace("\\", "\\\\").replace("\"", "\\\"")
-    return out.replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
-
-
-def _toml_inline_table(items: dict[str, str]) -> str:
-    """Render dict as a TOML inline table with sorted, quoted keys/values."""
-    parts = [f'"{_toml_escape(str(k))}" = "{_toml_escape(str(v))}"' for k, v in sorted(items.items())]
-    return "{ " + ", ".join(parts) + " }"
-
-
-def _toml_string_array(items: list[str]) -> str:
-    parts = [f'"{_toml_escape(str(item))}"' for item in items]
-    return "[" + ", ".join(parts) + "]"
-
-
 def _reconcile_codex_toml(telemetry: dict[str, Any] | None, env: dict[str, str] | None) -> None:
-    codex_dir = _expand("~/.codex")
+    codex_dir = scion_harness.expand_path("~/.codex")
     os.makedirs(codex_dir, exist_ok=True)
     config_path = os.path.join(codex_dir, "config.toml")
     content = ""
     if os.path.isfile(config_path):
         with open(config_path, "r", encoding="utf-8") as f:
             content = f.read()
-    content = _strip_otel_section(content)
+    content = scion_harness.strip_toml_sections(content, lambda h: h == "[otel]")
     if _telemetry_enabled(telemetry):
         section = _build_otel_section(telemetry or {}, env)
         content = content.rstrip("\n\t ") + "\n\n" + section
     content = content.strip() + "\n"
-    tmp = config_path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        f.write(content)
-    os.replace(tmp, config_path)
+    scion_harness.atomic_write_text(config_path, content)
 
 
-# --- MCP server reconciliation ---------------------------------------------
-#
-# Codex consumes MCP servers from `[mcp_servers.<name>]` tables in
-# ~/.codex/config.toml. Stdio servers use command/args/env; HTTP servers use
-# url/http_headers (codex does not have a separate SSE transport — both `sse`
-# and `streamable-http` from the universal schema map to codex's HTTP server).
-#
-# Project-scope MCP (.codex/mcp_servers.json in the workspace) is not
-# implemented here yet; project-scoped entries are demoted to global with a
-# warning, matching the opencode harness's behavior.
-
-
-def _strip_mcp_sections(content: str) -> str:
-    """Remove every [mcp_servers.*] section so we can re-emit the merged set.
-
-    A section runs from its header line to the next bracketed top-level
-    section header (matching the existing `_strip_otel_section` shape). Any
-    blank lines immediately preceding the header are also consumed so the
-    file does not accumulate orphaned whitespace across reprovisions.
-    """
-    lines = content.split("\n")
-    keep = [True] * len(lines)
-    i = 0
-    while i < len(lines):
-        stripped = lines[i].strip()
-        if stripped.startswith("[mcp_servers.") and stripped.endswith("]"):
-            section_start = i
-            section_end = len(lines)
-            for j in range(i + 1, len(lines)):
-                t = lines[j].strip()
-                if t.startswith("[") and t.endswith("]"):
-                    section_end = j
-                    break
-            trim_start = section_start
-            while trim_start > 0 and lines[trim_start - 1].strip() == "" and keep[trim_start - 1]:
-                trim_start -= 1
-            for k in range(trim_start, section_end):
-                keep[k] = False
-            i = section_end
-        else:
-            i += 1
-    return "\n".join(line for line, k in zip(lines, keep) if k)
+# --- MCP server emission ---------------------------------------------------
 
 
 def _build_mcp_section(name: str, spec: dict[str, Any]) -> str | None:
@@ -608,22 +260,22 @@ def _build_mcp_section(name: str, spec: dict[str, Any]) -> str | None:
         if not isinstance(cmd, str) or not cmd:
             print(f"codex provision: mcp server {name!r}: stdio transport missing command", file=sys.stderr)
             return None
-        body.append(f'command = "{_toml_escape(cmd)}"')
+        body.append(f'command = "{scion_harness.toml_escape(cmd)}"')
         args = spec.get("args") or []
         if isinstance(args, list) and args:
-            body.append(f"args = {_toml_string_array([str(a) for a in args])}")
+            body.append(f"args = {scion_harness.toml_string_array([str(a) for a in args])}")
         env = spec.get("env")
         if isinstance(env, dict) and env:
-            body.append(f"env = {_toml_inline_table({str(k): str(v) for k, v in env.items()})}")
+            body.append(f"env = {scion_harness.toml_inline_table({str(k): str(v) for k, v in env.items()})}")
     elif transport in ("sse", "streamable-http"):
         url = spec.get("url")
         if not isinstance(url, str) or not url:
             print(f"codex provision: mcp server {name!r}: {transport} transport missing url", file=sys.stderr)
             return None
-        body.append(f'url = "{_toml_escape(url)}"')
+        body.append(f'url = "{scion_harness.toml_escape(url)}"')
         headers = spec.get("headers")
         if isinstance(headers, dict) and headers:
-            body.append(f"http_headers = {_toml_inline_table({str(k): str(v) for k, v in headers.items()})}")
+            body.append(f"http_headers = {scion_harness.toml_inline_table({str(k): str(v) for k, v in headers.items()})}")
     else:
         print(f"codex provision: mcp server {name!r}: unsupported transport {transport!r}", file=sys.stderr)
         return None
@@ -631,298 +283,89 @@ def _build_mcp_section(name: str, spec: dict[str, Any]) -> str | None:
     return "\n".join(body) + "\n"
 
 
-def _apply_mcp_servers(bundle: str) -> int:
-    """Reconcile [mcp_servers.*] sections in ~/.codex/config.toml from inputs/mcp-servers.json.
-
-    Returns the number of servers written. Any error is logged and treated
-    as a warning (per design Q4: provisioning should not fail on MCP issues).
-    """
-    if scion_harness is None:
-        servers = _read_mcp_servers_inline(bundle)
-    else:
-        try:
-            servers = scion_harness.read_mcp_servers(bundle)
-        except ValueError as exc:
-            print(f"codex provision: {exc}", file=sys.stderr)
-            return 0
-
-    if not servers:
-        return 0
-
-    sections: list[str] = []
-    for name in sorted(servers.keys()):
-        spec = servers[name]
-        if not isinstance(spec, dict):
-            continue
-        scope = (spec.get("scope") or "global").strip().lower()
-        if scope == "project":
-            print(
-                f"codex provision: mcp server {name!r} requested project scope; "
-                "registering globally (project-scoped MCP not implemented)",
-                file=sys.stderr,
-            )
-        section = _build_mcp_section(name, spec)
-        if section is not None:
-            sections.append(section)
-
-    if not sections:
-        return 0
-
-    codex_dir = _expand("~/.codex")
-    try:
-        os.makedirs(codex_dir, exist_ok=True)
-    except OSError as exc:
-        print(f"codex provision: could not create {codex_dir}: {exc}", file=sys.stderr)
-        return 0
-
+def _write_mcp_to_config(servers: dict[str, str]) -> None:
+    """Write translated MCP server sections into ~/.codex/config.toml."""
+    codex_dir = scion_harness.expand_path("~/.codex")
+    os.makedirs(codex_dir, exist_ok=True)
     config_path = os.path.join(codex_dir, "config.toml")
     content = ""
     if os.path.isfile(config_path):
-        try:
-            with open(config_path, "r", encoding="utf-8") as f:
-                content = f.read()
-        except OSError as exc:
-            print(f"codex provision: existing config.toml not readable: {exc}", file=sys.stderr)
-            return 0
-
-    content = _strip_mcp_sections(content)
+        with open(config_path, "r", encoding="utf-8") as f:
+            content = f.read()
+    content = scion_harness.strip_toml_sections(
+        content, lambda h: h.startswith("[mcp_servers.")
+    )
+    sections = list(servers.values())
     appended = "\n".join(sections)
     content = content.rstrip("\n\t ") + "\n\n" + appended
     content = content.strip() + "\n"
-
-    tmp = config_path + ".tmp"
-    try:
-        with open(tmp, "w", encoding="utf-8") as f:
-            f.write(content)
-        os.replace(tmp, config_path)
-    except OSError as exc:
-        print(f"codex provision: failed to write config.toml: {exc}", file=sys.stderr)
-        return 0
-
-    print(f"codex provision: applied {len(sections)} mcp server(s)", file=sys.stderr)
-    return len(sections)
-
-
-def _read_mcp_servers_inline(bundle: str) -> dict[str, dict[str, Any]]:
-    """Fallback when scion_harness import fails."""
-    path = os.path.join(bundle, "inputs", "mcp-servers.json")
-    if not os.path.isfile(path):
-        return {}
-    try:
-        payload = _load_json(path) or {}
-    except (OSError, json.JSONDecodeError) as exc:
-        print(f"codex provision: invalid mcp-servers.json: {exc}", file=sys.stderr)
-        return {}
-    if not isinstance(payload, dict):
-        return {}
-    servers = payload.get("mcp_servers") or {}
-    if not isinstance(servers, dict):
-        return {}
-    return {str(k): v for k, v in servers.items() if isinstance(v, dict)}
+    scion_harness.atomic_write_text(config_path, content)
 
 
 # --- Entry point -----------------------------------------------------------
 
 
-def _provision(manifest: dict[str, Any]) -> int:
-    bundle = manifest.get("harness_bundle_dir") or "$HOME/.scion/harness"
-    bundle = _expand(bundle)
-    inputs_dir = os.path.join(bundle, "inputs")
-
-    # Auth candidates — load by path because ApplyAuthSettings may write
-    # auth-candidates.json AFTER Provision generated the manifest, so the
-    # manifest's Inputs.AuthCandidates may be empty on first provision.
-    auth_candidates_path = os.path.join(inputs_dir, "auth-candidates.json")
-    candidates: dict[str, Any] = {}
-    if os.path.isfile(auth_candidates_path):
-        try:
-            candidates = _load_json(auth_candidates_path) or {}
-        except (OSError, json.JSONDecodeError) as exc:
-            print(f"codex provision: invalid auth-candidates.json: {exc}", file=sys.stderr)
-            return EXIT_ERROR
-
-    explicit = str(candidates.get("explicit_type") or "").strip()
-    env_keys = _present_env_keys(candidates)
-    file_paths = _present_file_paths(candidates)
-    secret_files = _env_secret_files(candidates)
-    file_secrets = _file_secret_files(candidates)
-
-    # No-auth mode: when no auth candidates were staged and the harness config
-    # declares a no_auth behavior, skip auth setup entirely. The agent will
-    # drop to shell so the user can authenticate interactively.
-    harness_cfg = manifest.get("harness_config") or {}
-    no_auth_cfg = harness_cfg.get("no_auth") or {}
-    no_auth_behavior = str(no_auth_cfg.get("behavior") or "").strip()
-
-    if not candidates and no_auth_behavior:
-        print(f"codex provision: no-auth mode (behavior={no_auth_behavior}), skipping auth setup", file=sys.stderr)
-        method = "none"
-        env_key = ""
-    else:
-        try:
-            method, env_key = _select_auth_method(explicit, env_keys, file_paths, file_secrets)
-        except ValueError as exc:
-            print(str(exc), file=sys.stderr)
-            return EXIT_ERROR
-
-    # Apply api-key auth: read the staged secret value and write .codex/auth.json.
-    if method == "api-key":
-        api_key = _read_secret(secret_files, env_key)
-        if not api_key:
-            print(
-                f"codex provision: chose api-key ({env_key}) but no secret value "
-                f"was staged at the recorded path; check ApplyAuthSettings",
-                file=sys.stderr,
-            )
-            return EXIT_ERROR
-        try:
-            _write_codex_auth_json(api_key)
-        except OSError as exc:
-            print(f"codex provision: write auth.json failed: {exc}", file=sys.stderr)
-            return EXIT_ERROR
-
-    # Apply auth-file auth: read the staged secret content and write a fresh
-    # writable ~/.codex/auth.json. The host staged the file content as a secret
-    # (rather than bind-mounting it read-only) so Codex can chown/write it on
-    # startup without hitting a read-only filesystem error.
-    if method == "auth-file":
-        auth_secret_path = file_secrets.get("CODEX_AUTH")
-        if auth_secret_path:
-            real_path = _expand(auth_secret_path)
-            try:
-                with open(real_path, "r", encoding="utf-8") as f:
-                    auth_content = f.read()
-            except OSError as exc:
-                print(f"codex provision: read CODEX_AUTH secret failed: {exc}", file=sys.stderr)
-                return EXIT_ERROR
-            if not auth_content.strip():
-                print("codex provision: CODEX_AUTH secret is empty", file=sys.stderr)
-                return EXIT_ERROR
-            try:
-                json.loads(auth_content)
-            except json.JSONDecodeError as exc:
-                print(f"codex provision: CODEX_AUTH secret is not valid JSON: {exc}", file=sys.stderr)
-                return EXIT_ERROR
-            auth_dir = _expand("~/.codex")
-            try:
-                os.makedirs(auth_dir, exist_ok=True)
-                target = os.path.join(auth_dir, "auth.json")
-                tmp = target + ".tmp"
-                with open(tmp, "w", encoding="utf-8") as f:
-                    f.write(auth_content)
-                os.chmod(tmp, 0o600)
-                os.replace(tmp, target)
-            except OSError as exc:
-                print(f"codex provision: write auth.json (auth-file mode) failed: {exc}", file=sys.stderr)
-                return EXIT_ERROR
-        # If no file_secret_files entry, the file may have arrived via bind-mount
-        # (legacy path) or already exists on disk — no action needed.
-
-
+def _read_env_secret(ctx: scion_harness.ProvisionContext, name: str) -> str:
+    """Read an env secret, expanding $HOME in the staged path."""
+    path = ctx.env_secret_files.get(name, "")
+    if not path:
+        return ""
+    path = scion_harness.expand_path(path)
     try:
-        _apply_instruction_projection(bundle, manifest)
-    except OSError as exc:
-        print(f"codex provision: instruction projection failed: {exc}", file=sys.stderr)
-        return EXIT_ERROR
+        with open(path, "r", encoding="utf-8") as f:
+            return f.read().rstrip("\r\n")
+    except OSError:
+        return ""
 
-    # Telemetry — load by path; the manifest's Inputs.Telemetry may be stale on
-    # first provision for the same reason as auth-candidates.json.
-    telemetry_path = os.path.join(inputs_dir, "telemetry.json")
-    telemetry_payload: dict[str, Any] = {}
-    if os.path.isfile(telemetry_path):
-        try:
-            telemetry_payload = _load_json(telemetry_path) or {}
-        except (OSError, json.JSONDecodeError) as exc:
-            print(f"codex provision: invalid telemetry.json: {exc}", file=sys.stderr)
-            return EXIT_ERROR
 
+def _read_file_secret(ctx: scion_harness.ProvisionContext, name: str) -> str:
+    """Read a file-type secret, expanding $HOME in the staged path."""
+    path = ctx.file_secret_files.get(name, "")
+    if not path:
+        return ""
+    path = scion_harness.expand_path(path)
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return f.read().rstrip("\r\n")
+    except OSError:
+        return ""
+
+
+def provision(ctx: scion_harness.ProvisionContext) -> None:
+    resolved = ctx.select_auth(AUTH)
+
+    if resolved.method == "api-key":
+        api_key = _read_env_secret(ctx, resolved.env_key)
+        if not api_key:
+            raise scion_harness.ProvisionError(
+                f"chose api-key ({resolved.env_key}) but no secret value "
+                "was staged at the recorded path; check ApplyAuthSettings"
+            )
+        _write_codex_auth_json(api_key)
+
+    if resolved.method == "auth-file":
+        _write_codex_auth_file(ctx)
+
+    harness_cfg = ctx.harness_config
+    instructions_file = str(harness_cfg.get("instructions_file") or ".codex/AGENTS.md")
+    scion_harness.project_instructions(ctx, instructions_file)
+
+    telemetry_payload = ctx.telemetry
     telemetry = telemetry_payload.get("telemetry") if isinstance(telemetry_payload, dict) else None
     env_overlay = telemetry_payload.get("env") if isinstance(telemetry_payload, dict) else None
     if not isinstance(env_overlay, dict):
         env_overlay = None
-    try:
-        _reconcile_codex_toml(telemetry if isinstance(telemetry, dict) else None, env_overlay)
-    except OSError as exc:
-        print(f"codex provision: reconcile config.toml failed: {exc}", file=sys.stderr)
-        return EXIT_ERROR
-
-    # Outputs.
-    outputs = manifest.get("outputs") or {}
-    env_out = _expand(outputs.get("env") or os.path.join(bundle, "outputs", "env.json"))
-    auth_out = _expand(outputs.get("resolved_auth") or os.path.join(bundle, "outputs", "resolved-auth.json"))
-
-    resolved_payload: dict[str, Any] = {
-        "schema_version": 1,
-        "harness": "codex",
-        "method": method,
-        "explicit_type": explicit or None,
-    }
-    if method == "api-key":
-        resolved_payload["env_var"] = env_key
-        resolved_payload["auth_file_written"] = CODEX_AUTH_FILE
-    elif method == "auth-file":
-        resolved_payload["auth_file"] = CODEX_AUTH_FILE
-        if "CODEX_AUTH" in file_secrets:
-            resolved_payload["auth_file_written"] = CODEX_AUTH_FILE
-
-    # Codex reads its credentials from .codex/auth.json, not from env, so the
-    # env overlay is intentionally empty. We still emit a well-formed file so
-    # sciontool init's overlay loader has a target to consume.
-    env_payload: dict[str, Any] = {}
-
-    try:
-        _write_json(auth_out, resolved_payload)
-        _write_json(env_out, env_payload)
-    except OSError as exc:
-        print(f"codex provision: failed to write outputs: {exc}", file=sys.stderr)
-        return EXIT_ERROR
-
-    # Apply universal MCP servers, if any. Failures here are warnings, not
-    # provisioning errors — auth is the hard gate (per design Q4: unsupported
-    # transports are best-effort warn-and-skip).
-    _apply_mcp_servers(bundle)
-
-    print(f"codex provision: method={method}", file=sys.stderr)
-    return EXIT_OK
-
-
-def _dispatch(manifest: dict[str, Any]) -> int:
-    command = str(manifest.get("command") or "provision")
-    if command == "provision":
-        return _provision(manifest)
-    print(f"codex provision: unsupported command {command!r}", file=sys.stderr)
-    return EXIT_UNSUPPORTED
-
-
-def main() -> int:
-    parser = argparse.ArgumentParser(description="Codex container-side provisioner")
-    parser.add_argument(
-        "--manifest",
-        help="Path to the staged manifest.json (defaults to $HOME/.scion/harness/manifest.json)",
-        default=None,
+    _reconcile_codex_toml(
+        telemetry if isinstance(telemetry, dict) else None,
+        env_overlay,
     )
-    args = parser.parse_args()
 
-    manifest_path = args.manifest
-    if not manifest_path:
-        home = os.environ.get("HOME") or os.path.expanduser("~")
-        manifest_path = os.path.join(home, ".scion", "harness", "manifest.json")
+    ctx.write_outputs(resolved, env={})
 
-    try:
-        manifest = _load_json(manifest_path)
-    except FileNotFoundError:
-        print(f"codex provision: manifest not found at {manifest_path}", file=sys.stderr)
-        return EXIT_ERROR
-    except (OSError, json.JSONDecodeError) as exc:
-        print(f"codex provision: failed to load manifest {manifest_path}: {exc}", file=sys.stderr)
-        return EXIT_ERROR
+    scion_harness.apply_mcp_translated(ctx, _build_mcp_section, _write_mcp_to_config)
 
-    if not isinstance(manifest, dict):
-        print("codex provision: manifest is not an object", file=sys.stderr)
-        return EXIT_ERROR
-
-    return _dispatch(manifest)
+    ctx.info(f"method={resolved.method}")
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    scion_harness.run("codex", provision)
