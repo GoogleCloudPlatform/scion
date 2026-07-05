@@ -102,3 +102,14 @@ func BuiltinHarnessConfigs() []BundledResource {
 func BuiltinResources() []BundledResource {
 	return append(BuiltinTemplates(), BuiltinHarnessConfigs()...)
 }
+
+// PlatformSkillsFS returns the embedded filesystem containing platform skills.
+// Each top-level directory under platform_skills/ is a skill directory
+// containing at minimum a SKILL.md file.
+func PlatformSkillsFS() fs.FS {
+	sub, err := fs.Sub(platformSkillsFS, "platform_skills")
+	if err != nil {
+		panic(fmt.Sprintf("resources: sub platform_skills FS: %v", err))
+	}
+	return sub
+}

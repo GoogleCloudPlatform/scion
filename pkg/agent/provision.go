@@ -33,6 +33,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
 	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
+	"github.com/GoogleCloudPlatform/scion/resources"
 )
 
 func DeleteAgentFiles(agentName string, projectPath string, removeBranch bool) (bool, error) {
@@ -765,12 +766,19 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	}
 	util.Debugf("provision: home/skills copy completed in %s", time.Since(homeCopyStart))
 
-	// Step 3b: Auto-inject workspace skills from /workspace/skills/
+	// Step 3a2: Inject platform skills from embedded resources
 	hubEnabled := (settings != nil && settings.IsHubEnabled()) || api.IsBrokerModeFromContext(ctx)
 	injCtx := workspaceSkillsInjectionContext{
 		IsGit:      isGit,
 		HubEnabled: hubEnabled,
 	}
+	if skillsDir != "" {
+		if err := injectPlatformSkills(resources.PlatformSkillsFS(), agentHome, skillsDir, injCtx); err != nil {
+			return "", "", nil, fmt.Errorf("failed to inject platform skills: %w", err)
+		}
+	}
+
+	// Step 3b: Auto-inject workspace skills from /workspace/skills/
 	wsInjectedContent, err := injectWorkspaceSkills(projectDir, agentHome, skillsDir, injCtx, nil)
 	if err != nil {
 		return "", "", nil, fmt.Errorf("failed to inject workspace skills: %w", err)
@@ -1241,6 +1249,78 @@ func shouldInjectSkill(fm skillFrontmatter, injCtx workspaceSkillsInjectionConte
 		util.Debugf("provision: unknown inject_when=%q for skill %q, skipping", fm.InjectWhen, fm.Name)
 		return false
 	}
+}
+
+// injectPlatformSkills copies platform skills from the embedded filesystem
+// into the agent's skills directory. Skills with inject_when conditions are
+// evaluated against the injection context (e.g. git_workspace skills are
+// only injected when isGit is true). Template skills take precedence: if a
+// template already installed a skill with the same directory name, the
+// platform skill is skipped.
+func injectPlatformSkills(
+	skillsFS fs.FS,
+	agentHome string,
+	skillsDir string,
+	injCtx workspaceSkillsInjectionContext,
+) error {
+	entries, err := fs.ReadDir(skillsFS, ".")
+	if err != nil {
+		return fmt.Errorf("failed to read platform skills FS: %w", err)
+	}
+
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		skillName := entry.Name()
+
+		skillMDData, err := fs.ReadFile(skillsFS, skillName+"/SKILL.md")
+		if err != nil {
+			util.Debugf("provision: platform skill %q has no SKILL.md, skipping", skillName)
+			continue
+		}
+
+		fm := parseSkillFrontmatter(skillMDData)
+		if !shouldInjectSkill(fm, injCtx) {
+			util.Debugf("provision: skipping platform skill %q (inject_when=%q not satisfied)", skillName, fm.InjectWhen)
+			continue
+		}
+
+		skillDest := filepath.Join(agentHome, skillsDir, skillName)
+
+		// Template skills take precedence
+		if _, err := os.Stat(skillDest); err == nil {
+			util.Debugf("provision: platform skill %q skipped (template skill takes precedence)", skillName)
+			continue
+		}
+
+		// Walk the embedded skill directory and copy all files
+		skillRoot := skillName
+		if err := fs.WalkDir(skillsFS, skillRoot, func(path string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			rel, err := filepath.Rel(skillRoot, path)
+			if err != nil {
+				return err
+			}
+			target := filepath.Join(skillDest, rel)
+
+			if d.IsDir() {
+				return os.MkdirAll(target, 0755)
+			}
+			data, err := fs.ReadFile(skillsFS, path)
+			if err != nil {
+				return err
+			}
+			return os.WriteFile(target, data, 0644)
+		}); err != nil {
+			return fmt.Errorf("failed to copy platform skill %s: %w", skillName, err)
+		}
+		util.Debugf("provision: injected platform skill %q into %s", skillName, skillDest)
+	}
+
+	return nil
 }
 
 // injectWorkspaceSkills discovers skills in the workspace-level skills/

@@ -18,3 +18,6 @@ import "embed"
 
 //go:embed all:templates/*
 var templatesFS embed.FS
+
+//go:embed all:platform_skills/*
+var platformSkillsFS embed.FS

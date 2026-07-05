@@ -22,6 +22,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/fstest"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -2384,6 +2385,158 @@ func TestInjectWorkspaceSkills_FallbackComposition(t *testing.T) {
 
 		if !strings.Contains(string(result), "# Hub content") {
 			t.Errorf("expected hub skill content when hubEnabled=true")
+		}
+	})
+}
+
+func TestInjectPlatformSkills(t *testing.T) {
+	t.Run("unconditional skills are injected", func(t *testing.T) {
+		agentHome := t.TempDir()
+		skillsDir := ".claude/commands"
+
+		skillsFS := fstest.MapFS{
+			"my-skill/SKILL.md": &fstest.MapFile{
+				Data: []byte("---\nname: my-skill\ndescription: A test skill\n---\n\n# My Skill\n"),
+			},
+		}
+
+		injCtx := workspaceSkillsInjectionContext{IsGit: false, HubEnabled: false}
+		if err := injectPlatformSkills(skillsFS, agentHome, skillsDir, injCtx); err != nil {
+			t.Fatalf("injectPlatformSkills failed: %v", err)
+		}
+
+		dest := filepath.Join(agentHome, skillsDir, "my-skill", "SKILL.md")
+		if _, err := os.Stat(dest); os.IsNotExist(err) {
+			t.Errorf("expected platform skill to be copied to %s", dest)
+		}
+	})
+
+	t.Run("git_workspace skill injected when isGit=true", func(t *testing.T) {
+		agentHome := t.TempDir()
+		skillsDir := ".claude/commands"
+
+		skillsFS := fstest.MapFS{
+			"git-skill/SKILL.md": &fstest.MapFile{
+				Data: []byte("---\nname: git-skill\ninject_when: git_workspace\n---\n\n# Git\n"),
+			},
+		}
+
+		injCtx := workspaceSkillsInjectionContext{IsGit: true}
+		if err := injectPlatformSkills(skillsFS, agentHome, skillsDir, injCtx); err != nil {
+			t.Fatalf("injectPlatformSkills failed: %v", err)
+		}
+
+		dest := filepath.Join(agentHome, skillsDir, "git-skill", "SKILL.md")
+		if _, err := os.Stat(dest); os.IsNotExist(err) {
+			t.Errorf("expected git-skill to be injected when isGit=true")
+		}
+	})
+
+	t.Run("git_workspace skill skipped when isGit=false", func(t *testing.T) {
+		agentHome := t.TempDir()
+		skillsDir := ".claude/commands"
+
+		skillsFS := fstest.MapFS{
+			"git-skill/SKILL.md": &fstest.MapFile{
+				Data: []byte("---\nname: git-skill\ninject_when: git_workspace\n---\n\n# Git\n"),
+			},
+		}
+
+		injCtx := workspaceSkillsInjectionContext{IsGit: false}
+		if err := injectPlatformSkills(skillsFS, agentHome, skillsDir, injCtx); err != nil {
+			t.Fatalf("injectPlatformSkills failed: %v", err)
+		}
+
+		dest := filepath.Join(agentHome, skillsDir, "git-skill")
+		if _, err := os.Stat(dest); !os.IsNotExist(err) {
+			t.Errorf("expected git-skill to NOT be injected when isGit=false")
+		}
+	})
+
+	t.Run("template skill takes precedence over platform skill", func(t *testing.T) {
+		agentHome := t.TempDir()
+		skillsDir := ".claude/commands"
+
+		tplContent := "template version"
+		tplSkillDir := filepath.Join(agentHome, skillsDir, "conflict-skill")
+		if err := os.MkdirAll(tplSkillDir, 0755); err != nil {
+			t.Fatalf("failed to create template skill dir: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(tplSkillDir, "SKILL.md"), []byte(tplContent), 0644); err != nil {
+			t.Fatalf("failed to write template skill: %v", err)
+		}
+
+		skillsFS := fstest.MapFS{
+			"conflict-skill/SKILL.md": &fstest.MapFile{
+				Data: []byte("---\nname: conflict-skill\n---\n\nplatform version"),
+			},
+		}
+
+		injCtx := workspaceSkillsInjectionContext{}
+		if err := injectPlatformSkills(skillsFS, agentHome, skillsDir, injCtx); err != nil {
+			t.Fatalf("injectPlatformSkills failed: %v", err)
+		}
+
+		data, err := os.ReadFile(filepath.Join(tplSkillDir, "SKILL.md"))
+		if err != nil {
+			t.Fatalf("failed to read skill: %v", err)
+		}
+		if string(data) != tplContent {
+			t.Errorf("template skill was overwritten: got %q, want %q", string(data), tplContent)
+		}
+	})
+
+	t.Run("skill with scripts subdirectory is fully copied", func(t *testing.T) {
+		agentHome := t.TempDir()
+		skillsDir := ".claude/commands"
+
+		skillsFS := fstest.MapFS{
+			"scion/SKILL.md": &fstest.MapFile{
+				Data: []byte("---\nname: scion\n---\n\n# Scion\n"),
+			},
+			"scion/scripts/start-agent.sh": &fstest.MapFile{
+				Data: []byte("#!/bin/bash\necho start"),
+			},
+		}
+
+		injCtx := workspaceSkillsInjectionContext{}
+		if err := injectPlatformSkills(skillsFS, agentHome, skillsDir, injCtx); err != nil {
+			t.Fatalf("injectPlatformSkills failed: %v", err)
+		}
+
+		dest := filepath.Join(agentHome, skillsDir, "scion", "scripts", "start-agent.sh")
+		data, err := os.ReadFile(dest)
+		if err != nil {
+			t.Fatalf("expected script to be copied, got error: %v", err)
+		}
+		if !strings.Contains(string(data), "echo start") {
+			t.Errorf("script content mismatch: %q", string(data))
+		}
+	})
+
+	t.Run("multiple skills with mixed conditions", func(t *testing.T) {
+		agentHome := t.TempDir()
+		skillsDir := ".claude/commands"
+
+		skillsFS := fstest.MapFS{
+			"always-skill/SKILL.md": &fstest.MapFile{
+				Data: []byte("---\nname: always-skill\n---\n\n# Always\n"),
+			},
+			"git-only/SKILL.md": &fstest.MapFile{
+				Data: []byte("---\nname: git-only\ninject_when: git_workspace\n---\n\n# Git Only\n"),
+			},
+		}
+
+		injCtx := workspaceSkillsInjectionContext{IsGit: false}
+		if err := injectPlatformSkills(skillsFS, agentHome, skillsDir, injCtx); err != nil {
+			t.Fatalf("injectPlatformSkills failed: %v", err)
+		}
+
+		if _, err := os.Stat(filepath.Join(agentHome, skillsDir, "always-skill", "SKILL.md")); os.IsNotExist(err) {
+			t.Errorf("expected unconditional skill to be injected")
+		}
+		if _, err := os.Stat(filepath.Join(agentHome, skillsDir, "git-only")); !os.IsNotExist(err) {
+			t.Errorf("expected git-only skill to be skipped when isGit=false")
 		}
 	})
 }
