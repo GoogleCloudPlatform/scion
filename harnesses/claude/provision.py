@@ -94,22 +94,9 @@ CLAUDE_MCP_MAPPING = {
 }
 
 
-def _read_secret(ctx: scion_harness.ProvisionContext, name: str) -> str:
-    """Read a staged secret file, expanding $HOME in the path."""
-    path = ctx.env_secret_files.get(name, "")
-    if not path:
-        return ""
-    expanded = scion_harness.expand_path(path)
-    try:
-        with open(expanded, "r", encoding="utf-8") as f:
-            return f.read().rstrip("\r\n")
-    except OSError:
-        return ""
-
-
 def _resolve(ctx: scion_harness.ProvisionContext, name: str) -> str:
     """Read a secret value, falling back to a ${VAR} placeholder."""
-    val = _read_secret(ctx, name)
+    val = ctx.read_secret(name)
     return val if val else "${" + name + "}"
 
 
@@ -213,7 +200,7 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
         raise scion_harness.ProvisionError(f"failed to update project paths: {exc}") from exc
 
     if auth.method == "api-key" and auth.env_key:
-        api_key_value = _read_secret(ctx, auth.env_key)
+        api_key_value = ctx.read_secret(auth.env_key)
         if api_key_value:
             try:
                 _apply_api_key_approval(ctx, api_key_value)
