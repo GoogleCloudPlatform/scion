@@ -394,7 +394,9 @@ def _read_mcp_servers_inline(bundle: str) -> dict[str, dict[str, Any]]:
     return {str(k): v for k, v in servers.items() if isinstance(v, dict)}
 
 
-def _build_env_overlay(method: str, env_key: str) -> dict[str, str]:
+def _build_env_overlay(
+    method: str, env_key: str, secret_files: dict[str, str]
+) -> dict[str, str]:
     """Build the env vars overlay for outputs/env.json.
 
     These mirror the env updates the compiled ClaudeCode.Provision() writes
@@ -402,15 +404,15 @@ def _build_env_overlay(method: str, env_key: str) -> dict[str, str]:
     the vars into the harness process environment.
     """
     if method == "api-key" and env_key:
-        return {env_key: os.environ.get(env_key, "")}
+        return {env_key: _read_secret(secret_files, env_key)}
     if method == "oauth-token":
-        return {"CLAUDE_CODE_OAUTH_TOKEN": os.environ.get("CLAUDE_CODE_OAUTH_TOKEN", "")}
+        return {"CLAUDE_CODE_OAUTH_TOKEN": _read_secret(secret_files, "CLAUDE_CODE_OAUTH_TOKEN")}
     if method == "vertex-ai":
         region_key = env_key or "GOOGLE_CLOUD_REGION"
         return {
             "CLAUDE_CODE_USE_VERTEX": "1",
-            "ANTHROPIC_VERTEX_PROJECT_ID": os.environ.get("GOOGLE_CLOUD_PROJECT", ""),
-            "CLOUD_ML_REGION": os.environ.get(region_key, ""),
+            "ANTHROPIC_VERTEX_PROJECT_ID": _read_secret(secret_files, "GOOGLE_CLOUD_PROJECT"),
+            "CLOUD_ML_REGION": _read_secret(secret_files, region_key),
         }
     # auth-file: no env updates needed.
     return {}
@@ -490,7 +492,7 @@ def _provision(manifest: dict[str, Any]) -> int:
         resolved_payload["vertex_ai"] = True
 
     # 4. Build env overlay — mirrors ClaudeCode.Provision() env updates.
-    env_payload = _build_env_overlay(method, env_key)
+    env_payload = _build_env_overlay(method, env_key, secret_files)
 
     try:
         _write_json(auth_out, resolved_payload)
