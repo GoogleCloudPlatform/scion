@@ -1,7 +1,7 @@
 # Harness Provisioner Consolidation: `scion_harness.py` as a Real Library
 
-Status: APPROVED FOR IMPLEMENTATION — work packages in §5 are written for
-independent implementing agents; decisions in §6 are final.
+Status: IMPLEMENTED — all work packages (WP-0 through WP-5) landed on
+branch `scion/harnesslib-refactor`. See commit log for per-WP details.
 Author: fable-arch agent
 Date: 2026-07-05
 Baseline: main @ 83128b8

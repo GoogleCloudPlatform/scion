@@ -329,9 +329,36 @@ func debugJSON(v interface{}) string {
 	return string(data)
 }
 
-// TestBundleContractNoDeletedHelpers is a forward-looking check (WP-5 will
-// enforce this more comprehensively). For now it just documents the intent.
+// TestBundleContractNoDeletedHelpers fails if any provision.py contains
+// helper definitions or patterns that should live in scion_harness.py.
+// This prevents re-introduction of duplicated code after consolidation.
 func TestBundleContractNoDeletedHelpers(t *testing.T) {
-	t.Skip("WP-5 will implement the anti-fragmentation lint")
-	_ = strings.Contains // suppress unused import
+	forbidden := []string{
+		"def _expand(",
+		"def _load_json(",
+		"def _write_json(",
+		"def _read_secret(",
+		"def _present_env_keys(",
+		"def _present_file_paths(",
+		"def _env_secret_files(",
+		"def _file_secret_files(",
+		"_read_mcp_servers_inline",
+	}
+
+	harnessNames := discoverHarnesses(t)
+	for _, hname := range harnessNames {
+		data, err := fs.ReadFile(harnessFS.FS, hname+"/provision.py")
+		if err != nil {
+			continue
+		}
+		content := string(data)
+		for _, pat := range forbidden {
+			if strings.Contains(content, pat) {
+				t.Errorf("harness %s/provision.py contains %q — this helper should be in scion_harness.py", hname, pat)
+			}
+		}
+		if strings.Contains(content, "except ImportError") && strings.Contains(content, "scion_harness") {
+			t.Errorf("harness %s/provision.py uses except ImportError around scion_harness — import must be mandatory", hname)
+		}
+	}
 }
