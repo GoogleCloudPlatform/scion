@@ -402,15 +402,15 @@ def _build_env_overlay(method: str, env_key: str) -> dict[str, str]:
     the vars into the harness process environment.
     """
     if method == "api-key" and env_key:
-        return {env_key: f"${{{env_key}}}"}
+        return {env_key: os.environ.get(env_key, "")}
     if method == "oauth-token":
-        return {"CLAUDE_CODE_OAUTH_TOKEN": "${CLAUDE_CODE_OAUTH_TOKEN}"}
+        return {"CLAUDE_CODE_OAUTH_TOKEN": os.environ.get("CLAUDE_CODE_OAUTH_TOKEN", "")}
     if method == "vertex-ai":
-        region_ref = env_key or "GOOGLE_CLOUD_REGION"
+        region_key = env_key or "GOOGLE_CLOUD_REGION"
         return {
             "CLAUDE_CODE_USE_VERTEX": "1",
-            "ANTHROPIC_VERTEX_PROJECT_ID": "${GOOGLE_CLOUD_PROJECT}",
-            "CLOUD_ML_REGION": f"${{{region_ref}}}",
+            "ANTHROPIC_VERTEX_PROJECT_ID": os.environ.get("GOOGLE_CLOUD_PROJECT", ""),
+            "CLOUD_ML_REGION": os.environ.get(region_key, ""),
         }
     # auth-file: no env updates needed.
     return {}
