@@ -140,10 +140,13 @@ func runBundleContractCase(t *testing.T, python, hname, caseDir string) {
 	for _, fname := range []string{"provision.py", "config.yaml", "scion_harness.py"} {
 		data, err := fs.ReadFile(harnessFS.FS, hname+"/"+fname)
 		if err != nil {
-			if fname == "config.yaml" || fname == "scion_harness.py" {
+			if fname == "scion_harness.py" {
+				data = harnessFS.CanonicalHarnessLib
+			} else if fname == "config.yaml" {
 				continue // optional
+			} else {
+				t.Fatalf("read %s/%s from embed: %v", hname, fname, err)
 			}
-			t.Fatalf("read %s/%s from embed: %v", hname, fname, err)
 		}
 		dst := filepath.Join(bundleDir, fname)
 		if err := os.WriteFile(dst, data, 0755); err != nil {

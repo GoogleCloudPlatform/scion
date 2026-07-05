@@ -428,7 +428,7 @@ class ProvisionContext:
         path = secret_files.get(name)
         if path:
             try:
-                with open(path, "r", encoding="utf-8") as f:
+                with open(expand_path(path), "r", encoding="utf-8") as f:
                     return f.read().rstrip("\r\n")
             except OSError:
                 pass
@@ -442,7 +442,7 @@ class ProvisionContext:
         path = secret_files.get(name)
         if path:
             try:
-                with open(path, "r", encoding="utf-8") as f:
+                with open(expand_path(path), "r", encoding="utf-8") as f:
                     return f.read().rstrip("\r\n")
             except OSError:
                 pass

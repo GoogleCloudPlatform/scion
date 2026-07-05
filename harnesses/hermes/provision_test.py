@@ -19,9 +19,14 @@ import importlib.util
 import io
 import json
 import os
+import sys
 import tempfile
 import unittest
 from contextlib import contextmanager, redirect_stderr
+
+# Import scion_harness from the harnesses root (sibling of hermes/).
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+import scion_harness  # type: ignore[import-not-found]
 
 PROVISION_PATH = os.path.join(os.path.dirname(__file__), "provision.py")
 SPEC = importlib.util.spec_from_file_location("hermes_provision", PROVISION_PATH)
@@ -29,6 +34,11 @@ assert SPEC is not None
 provision = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
 SPEC.loader.exec_module(provision)
+
+MANAGED_BEGIN = scion_harness._MANAGED_BEGIN_STANDARD
+MANAGED_END = scion_harness._MANAGED_END_STANDARD
+LEGACY_BEGIN = "<!-- BEGIN SCION MANAGED HERMES INSTRUCTIONS -->"
+LEGACY_END = "<!-- END SCION MANAGED HERMES INSTRUCTIONS -->"
 
 
 @contextmanager
@@ -44,40 +54,70 @@ def temporary_home(path: str):
             os.environ["HOME"] = old_home
 
 
+def _make_ctx(
+    bundle_dir: str,
+    env_vars: list[str] | None = None,
+    explicit_type: str = "",
+    env_secret_files: dict[str, str] | None = None,
+    harness_config: dict | None = None,
+) -> scion_harness.ProvisionContext:
+    """Build a ProvisionContext with auth-candidates staged in bundle_dir."""
+    os.makedirs(os.path.join(bundle_dir, "inputs"), exist_ok=True)
+    os.makedirs(os.path.join(bundle_dir, "outputs"), exist_ok=True)
+
+    candidates: dict = {}
+    if env_vars is not None or explicit_type or env_secret_files is not None:
+        candidates["env_vars"] = env_vars or []
+        candidates["env_secret_files"] = env_secret_files or {}
+        if explicit_type:
+            candidates["explicit_type"] = explicit_type
+
+    cand_path = os.path.join(bundle_dir, "inputs", "auth-candidates.json")
+    with open(cand_path, "w") as f:
+        json.dump(candidates, f)
+
+    manifest = {
+        "harness_bundle_dir": bundle_dir,
+        "harness_config": harness_config or {},
+    }
+    return scion_harness.ProvisionContext("hermes", manifest)
+
+
 class AuthResolutionTest(unittest.TestCase):
+    def _select(self, env_vars: list[str], explicit: str = "") -> scion_harness.ResolvedAuth:
+        with tempfile.TemporaryDirectory() as tmp:
+            ctx = _make_ctx(os.path.join(tmp, "bundle"), env_vars=env_vars, explicit_type=explicit)
+            return ctx.select_auth(provision.AUTH)
+
     def test_anthropic_takes_precedence_over_openai_and_google(self) -> None:
-        env_keys = {"ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GOOGLE_API_KEY"}
-        method, key = provision._select_auth_key("", env_keys)
-        self.assertEqual(method, "api-key")
-        self.assertEqual(key, "ANTHROPIC_API_KEY")
+        result = self._select(["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GOOGLE_API_KEY"])
+        self.assertEqual(result.method, "api-key")
+        self.assertEqual(result.env_key, "ANTHROPIC_API_KEY")
 
     def test_openai_takes_precedence_over_google(self) -> None:
-        env_keys = {"OPENAI_API_KEY", "GOOGLE_API_KEY"}
-        method, key = provision._select_auth_key("", env_keys)
-        self.assertEqual(method, "api-key")
-        self.assertEqual(key, "OPENAI_API_KEY")
+        result = self._select(["OPENAI_API_KEY", "GOOGLE_API_KEY"])
+        self.assertEqual(result.method, "api-key")
+        self.assertEqual(result.env_key, "OPENAI_API_KEY")
 
     def test_google_key_used_when_alone(self) -> None:
-        env_keys = {"GOOGLE_API_KEY"}
-        method, key = provision._select_auth_key("", env_keys)
-        self.assertEqual(method, "api-key")
-        self.assertEqual(key, "GOOGLE_API_KEY")
+        result = self._select(["GOOGLE_API_KEY"])
+        self.assertEqual(result.method, "api-key")
+        self.assertEqual(result.env_key, "GOOGLE_API_KEY")
 
     def test_explicit_api_key_type_accepted(self) -> None:
-        env_keys = {"GOOGLE_API_KEY"}
-        method, key = provision._select_auth_key("api-key", env_keys)
-        self.assertEqual(method, "api-key")
-        self.assertEqual(key, "GOOGLE_API_KEY")
+        result = self._select(["GOOGLE_API_KEY"], explicit="api-key")
+        self.assertEqual(result.method, "api-key")
+        self.assertEqual(result.env_key, "GOOGLE_API_KEY")
 
     def test_unknown_auth_type_raises(self) -> None:
-        with self.assertRaises(ValueError) as ctx:
-            provision._select_auth_key("auth-file", {"ANTHROPIC_API_KEY"})
-        self.assertIn("only 'api-key' is supported", str(ctx.exception))
+        with self.assertRaises(scion_harness.ProvisionError) as ctx:
+            self._select(["ANTHROPIC_API_KEY"], explicit="auth-file")
+        self.assertIn("valid types are", str(ctx.exception))
 
     def test_no_keys_raises(self) -> None:
-        with self.assertRaises(ValueError) as ctx:
-            provision._select_auth_key("", set())
-        self.assertIn("no valid API key found", str(ctx.exception))
+        with self.assertRaises(scion_harness.ProvisionError) as ctx:
+            self._select([])
+        self.assertIn("no valid auth method found", str(ctx.exception))
 
 
 class NoAuthModeTest(unittest.TestCase):
@@ -88,34 +128,26 @@ class NoAuthModeTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             home = os.path.join(tmp, "home")
             bundle = os.path.join(tmp, "bundle")
-            os.makedirs(os.path.join(bundle, "inputs"))
             os.makedirs(os.path.join(bundle, "outputs"))
             os.makedirs(home)
 
-            candidates = {"schema_version": 1, "env_vars": [], "env_secret_files": {}}
-            with open(os.path.join(bundle, "inputs", "auth-candidates.json"), "w") as f:
-                json.dump(candidates, f)
-
-            manifest = {
-                "harness_bundle_dir": bundle,
-                "harness_config": {
+            ctx = _make_ctx(
+                bundle,
+                env_vars=[],
+                env_secret_files={},
+                harness_config={
                     "instructions_file": "AGENTS.md",
                     "skills_dir": ".hermes/skills",
                     "system_prompt_mode": "none",
                     "no_auth": {"behavior": "drop-to-shell"},
                 },
-                "outputs": {
-                    "env": os.path.join(bundle, "outputs", "env.json"),
-                    "resolved_auth": os.path.join(bundle, "outputs", "resolved-auth.json"),
-                },
-            }
+            )
 
             stderr = io.StringIO()
             with temporary_home(home), redirect_stderr(stderr):
-                rc = provision._provision(manifest)
+                provision.provision(ctx)
 
-            self.assertEqual(rc, provision.EXIT_OK)
-            self.assertIn("no-auth mode", stderr.getvalue())
+            self.assertIn("no-auth", stderr.getvalue())
 
             with open(os.path.join(bundle, "outputs", "resolved-auth.json"), "r") as f:
                 resolved = json.load(f)
@@ -145,21 +177,27 @@ class InstructionProjectionTest(unittest.TestCase):
                 f.write("# Second Skill\n\nUse this other skill.")
 
             manifest = {
+                "harness_bundle_dir": bundle,
                 "harness_config": {
                     "instructions_file": "AGENTS.md",
                     "skills_dir": ".hermes/skills",
                     "system_prompt_mode": "prepend_to_instructions",
                 },
             }
+            ctx = scion_harness.ProvisionContext("hermes", manifest)
 
             with temporary_home(home):
-                provision._apply_instruction_projection(bundle, manifest)
-                provision._apply_instruction_projection(bundle, manifest)
+                scion_harness.project_instructions(
+                    ctx, "AGENTS.md", skills_dir=".hermes/skills",
+                )
+                scion_harness.project_instructions(
+                    ctx, "AGENTS.md", skills_dir=".hermes/skills",
+                )
 
             with open(os.path.join(home, "AGENTS.md"), "r") as f:
                 content = f.read()
 
-            self.assertEqual(content.count(provision.SCION_MANAGED_BEGIN), 1)
+            self.assertEqual(content.count(MANAGED_BEGIN), 1)
             self.assertIn("# System Instruction\n\nSystem rules", content)
             self.assertIn("# Agent Instructions\n\nAgent rules", content)
             self.assertIn("## example\n\n# Example Skill\n\nUse this skill.", content)
@@ -175,27 +213,31 @@ class InstructionProjectionTest(unittest.TestCase):
             agents_path = os.path.join(home, "AGENTS.md")
             with open(agents_path, "w") as f:
                 f.write(
-                    f"{provision.SCION_MANAGED_BEGIN}\n\n"
+                    f"{LEGACY_BEGIN}\n\n"
                     "# Agent Instructions\n\nOld managed content\n\n"
-                    f"{provision.SCION_MANAGED_END}\n\n"
+                    f"{LEGACY_END}\n\n"
                     "# User Notes\n\nKeep this.\n"
                 )
 
             manifest = {
+                "harness_bundle_dir": bundle,
                 "harness_config": {
                     "instructions_file": "AGENTS.md",
                     "skills_dir": ".hermes/skills",
                     "system_prompt_mode": "prepend_to_instructions",
                 },
             }
+            ctx = scion_harness.ProvisionContext("hermes", manifest)
 
             with temporary_home(home):
-                provision._apply_instruction_projection(bundle, manifest)
+                scion_harness.project_instructions(
+                    ctx, "AGENTS.md", skills_dir=".hermes/skills",
+                )
 
             with open(agents_path, "r") as f:
                 content = f.read()
 
-            self.assertNotIn(provision.SCION_MANAGED_BEGIN, content)
+            self.assertNotIn(LEGACY_BEGIN, content)
             self.assertNotIn("Old managed content", content)
             self.assertEqual(content, "# User Notes\n\nKeep this.\n")
 
@@ -209,35 +251,39 @@ class InstructionProjectionTest(unittest.TestCase):
             agents_path = os.path.join(home, "AGENTS.md")
             with open(agents_path, "w") as f:
                 f.write(
-                    f"{provision.SCION_MANAGED_BEGIN}\n\n"
+                    f"{LEGACY_BEGIN}\n\n"
                     "# Agent Instructions\n\nOld managed content\n\n"
-                    f"{provision.SCION_MANAGED_END}\n"
+                    f"{LEGACY_END}\n"
                 )
 
             manifest = {
+                "harness_bundle_dir": bundle,
                 "harness_config": {
                     "instructions_file": "AGENTS.md",
                     "skills_dir": ".hermes/skills",
                     "system_prompt_mode": "prepend_to_instructions",
                 },
             }
+            ctx = scion_harness.ProvisionContext("hermes", manifest)
 
             with temporary_home(home):
-                provision._apply_instruction_projection(bundle, manifest)
+                scion_harness.project_instructions(
+                    ctx, "AGENTS.md", skills_dir=".hermes/skills",
+                )
 
             self.assertFalse(os.path.exists(agents_path))
 
     def test_preserves_content_when_end_marker_missing(self) -> None:
         content = (
             "# Before\n\n"
-            f"{provision.SCION_MANAGED_BEGIN}\n\n"
+            f"{LEGACY_BEGIN}\n\n"
             "# Agent Instructions\n\nManaged without an end marker\n\n"
             "# After\n"
         )
         stderr = io.StringIO()
 
         with redirect_stderr(stderr):
-            got = provision._strip_scion_managed_block(content)
+            got = scion_harness._strip_managed_block(content)
 
         self.assertEqual(got, content)
         self.assertIn("Aborting strip to prevent data loss", stderr.getvalue())
@@ -307,8 +353,10 @@ class MCPEntryBuildingTest(unittest.TestCase):
                 json.dump({"mcpServers": {"old": {"command": "old-server"}}}, f)
             self.assertTrue(os.path.isfile(mcp_path))
 
+            manifest = {"harness_bundle_dir": bundle}
+            ctx = scion_harness.ProvisionContext("hermes", manifest)
             with temporary_home(home):
-                count = provision._apply_mcp_servers(bundle)
+                count = provision._apply_mcp_servers(ctx)
 
             self.assertEqual(count, 0)
             self.assertFalse(os.path.isfile(mcp_path))
