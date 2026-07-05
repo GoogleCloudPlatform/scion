@@ -727,3 +727,17 @@ func TestMapEmbedFileToHarnessConfigPath_RootSupportFiles(t *testing.T) {
 		}
 	}
 }
+
+func TestMapEmbedFileToHomePath_OpenCodeConfigs(t *testing.T) {
+	homeDir := "/tmp/home"
+	configDir := ".config/opencode"
+	tests := map[string]string{
+		"opencode.json":  filepath.Join(homeDir, configDir, "opencode.json"),
+		"opencode.jsonc": filepath.Join(homeDir, configDir, "opencode.jsonc"),
+	}
+	for input, want := range tests {
+		if got := mapEmbedFileToHomePath(homeDir, configDir, input); got != want {
+			t.Errorf("mapEmbedFileToHomePath(%q) = %q, want %q", input, got, want)
+		}
+	}
+}

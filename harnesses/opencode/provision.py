@@ -62,7 +62,8 @@ except ImportError:
     scion_harness = None  # type: ignore[assignment]
 
 OPENCODE_AUTH_FILE = "~/.local/share/opencode/auth.json"
-OPENCODE_CONFIG_FILE = "~/.config/opencode/opencode.json"
+OPENCODE_CONFIG_DIR = "~/.config/opencode"
+OPENCODE_CONFIG_CANDIDATES = ("opencode.jsonc", "opencode.json")
 
 VALID_AUTH_TYPES = ("api-key", "auth-file", "vertex-ai", "none")
 
@@ -80,9 +81,42 @@ def _expand(path: str) -> str:
     return os.path.expanduser(os.path.expandvars(path))
 
 
+def _resolve_opencode_config_path() -> str:
+    """Resolve the OpenCode config file path.
+
+    Prefers opencode.jsonc over opencode.json if present. Defaults to
+    opencode.json if neither exists.
+    """
+    base = _expand(OPENCODE_CONFIG_DIR)
+    for name in OPENCODE_CONFIG_CANDIDATES:
+        candidate = os.path.join(base, name)
+        if os.path.isfile(candidate):
+            return candidate
+    return os.path.join(base, "opencode.json")
+
+
+def _strip_jsonc_comments(text: str) -> str:
+    """Strip // and /* */ comments from JSONC text for json.loads parsing."""
+    import re
+
+    text = re.sub(r"//.*$", "", text, flags=re.MULTILINE)
+    text = re.sub(r"/\*.*?\*/", "", text, flags=re.DOTALL)
+    return text
+
+
 def _load_json(path: str) -> Any:
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
+
+
+def _load_json_or_jsonc(path: str) -> Any:
+    """Load a JSON or JSONC file, stripping comments if needed."""
+    with open(path, "r", encoding="utf-8") as f:
+        text = f.read()
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return json.loads(_strip_jsonc_comments(text))
 
 
 def _write_json(path: str, payload: Any) -> None:
@@ -336,14 +370,14 @@ def _apply_mcp_servers(bundle: str) -> int:
     if not translated:
         return 0
 
-    config_path = _expand(OPENCODE_CONFIG_FILE)
+    config_path = _resolve_opencode_config_path()
     config_data: dict[str, Any] = {}
     if os.path.isfile(config_path):
         try:
-            existing = _load_json(config_path)
-        except (OSError, json.JSONDecodeError) as exc:
+            existing = _load_json_or_jsonc(config_path)
+        except (OSError, json.JSONDecodeError, ValueError) as exc:
             print(
-                f"opencode provision: existing opencode.json not readable, recreating: {exc}",
+                f"opencode provision: existing {os.path.basename(config_path)} not readable, recreating: {exc}",
                 file=sys.stderr,
             )
             existing = {}
@@ -361,7 +395,8 @@ def _apply_mcp_servers(bundle: str) -> int:
         _write_json(config_path, config_data)
     except OSError as exc:
         print(
-            f"opencode provision: failed to write opencode.json: {exc}", file=sys.stderr
+            f"opencode provision: failed to write {os.path.basename(config_path)}: {exc}",
+            file=sys.stderr,
         )
         return 0
 

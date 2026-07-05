@@ -15,7 +15,9 @@
 package hub
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -198,6 +200,38 @@ func uploadResourceFiles(ctx context.Context, stor storage.Storage, storagePath 
 		written[r.objectPath] = struct{}{}
 	}
 	return uploaded, written, nil
+}
+
+// toTransferFileInfos converts store.TemplateFile slice to transfer.FileInfo slice.
+func toTransferFileInfos(files []store.TemplateFile) []transfer.FileInfo {
+	result := make([]transfer.FileInfo, len(files))
+	for i, f := range files {
+		result[i] = transfer.FileInfo{
+			Path: f.Path,
+			Size: f.Size,
+			Hash: f.Hash,
+			Mode: f.Mode,
+		}
+	}
+	return result
+}
+
+// writeManifestToStorage writes a manifest.json file to storage at the given path.
+func writeManifestToStorage(ctx context.Context, stor storage.Storage, storagePath string, manifest *transfer.Manifest) error {
+	manifestBytes, err := json.Marshal(manifest)
+	if err != nil {
+		return fmt.Errorf("failed to marshal manifest: %w", err)
+	}
+
+	manifestPath := storagePath + "/manifest.json"
+	_, err = stor.Upload(ctx, manifestPath, bytes.NewReader(manifestBytes), storage.UploadOptions{
+		ContentType: "application/json",
+	})
+	if err != nil {
+		return fmt.Errorf("failed to upload manifest.json: %w", err)
+	}
+
+	return nil
 }
 
 // reconcileResourceStorage deletes objects under storagePath that are not in the

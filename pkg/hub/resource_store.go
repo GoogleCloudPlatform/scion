@@ -171,8 +171,19 @@ func (rs *ResourceStore) Bootstrap(ctx context.Context, name, dir, scope, scopeI
 		if err != nil {
 			return false, err
 		}
+
+		// Write manifest.json to storage
+		manifest := &transfer.Manifest{
+			Version:     "1.0",
+			ContentHash: computeContentHash(uploaded),
+			Files:       toTransferFileInfos(uploaded),
+		}
+		if err := writeManifestToStorage(ctx, stor, storagePath, manifest); err != nil {
+			return false, fmt.Errorf("failed to write manifest.json: %w", err)
+		}
+
 		rec.Files = uploaded
-		rec.ContentHash = computeContentHash(uploaded)
+		rec.ContentHash = manifest.ContentHash
 		rec.Status = resourceStatusActive
 		if err := p.Update(ctx, rec, dir); err != nil {
 			return false, err
@@ -187,6 +198,28 @@ func (rs *ResourceStore) Bootstrap(ctx context.Context, name, dir, scope, scopeI
 	// Existing resource — short-circuit on unchanged content unless forced.
 	if !force {
 		if computeContentHash(toResourceFiles(files)) == existing.ContentHash {
+			// Check if manifest.json is missing and write it if needed
+			storagePath := existing.StoragePath
+			if storagePath == "" {
+				storagePath = storage.ResourceStoragePath(kind, existing.Scope, existing.ScopeID, existing.Slug)
+			}
+			manifestPath := storagePath + "/manifest.json"
+			exists, err := stor.Exists(ctx, manifestPath)
+			if err == nil && !exists {
+				// Write missing manifest.json
+				manifest := &transfer.Manifest{
+					Version:     "1.0",
+					ContentHash: existing.ContentHash,
+					Files:       toTransferFileInfos(existing.Files),
+				}
+				if err := writeManifestToStorage(ctx, stor, storagePath, manifest); err != nil {
+					srv.resourceLog.Warn(p.Label()+": failed to write missing manifest.json",
+						"name", existing.Name, "error", err)
+				} else {
+					srv.resourceLog.Info(p.Label()+": wrote missing manifest.json",
+						"name", existing.Name)
+				}
+			}
 			return p.OnHashMatch(ctx, existing, dir)
 		}
 	}
@@ -200,6 +233,19 @@ func (rs *ResourceStore) Bootstrap(ctx context.Context, name, dir, scope, scopeI
 	if err != nil {
 		return false, err
 	}
+
+	// Write manifest.json to storage
+	manifest := &transfer.Manifest{
+		Version:     "1.0",
+		ContentHash: computeContentHash(uploaded),
+		Files:       toTransferFileInfos(uploaded),
+	}
+	if err := writeManifestToStorage(ctx, stor, storagePath, manifest); err != nil {
+		return false, fmt.Errorf("failed to write manifest.json: %w", err)
+	}
+
+	// Add manifest.json to the written set so reconcile doesn't delete it
+	written[storagePath+"/manifest.json"] = struct{}{}
 
 	// Reconcile storage: drop objects no longer in the manifest so removed files
 	// don't linger. (Templates already did this on sync; harness-configs gain it

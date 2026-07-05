@@ -121,8 +121,8 @@ func TestBootstrapTemplatesFromDir_ImportsTemplates(t *testing.T) {
 	}
 
 	// Verify files were uploaded to storage
-	if len(stor.objects) != 2 {
-		t.Errorf("expected 2 objects in storage, got %d", len(stor.objects))
+	if len(stor.objects) != 3 {
+		t.Errorf("expected 3 objects in storage (2 files + manifest.json), got %d", len(stor.objects))
 	}
 }
 
@@ -160,8 +160,8 @@ func TestBootstrapTemplatesFromDir_ImportsNewAlongsideExisting(t *testing.T) {
 	}
 
 	// Verify the new template files were uploaded
-	if len(stor.objects) != 1 {
-		t.Errorf("expected 1 object in storage (new template file), got %d", len(stor.objects))
+	if len(stor.objects) != 2 {
+		t.Errorf("expected 2 objects in storage (1 file + manifest.json), got %d", len(stor.objects))
 	}
 }
 
@@ -400,8 +400,8 @@ func TestSyncExistingTemplate_ForceReconcilesStorage(t *testing.T) {
 		t.Fatalf("get template: %v", err)
 	}
 	originalHash := existing.ContentHash
-	if len(stor.objects) != 3 {
-		t.Fatalf("expected 3 storage objects after bootstrap, got %d", len(stor.objects))
+	if len(stor.objects) != 4 {
+		t.Fatalf("expected 4 storage objects after bootstrap (3 files + manifest.json), got %d", len(stor.objects))
 	}
 
 	// Modify the source: update one file, delete one, add a new one.
@@ -452,8 +452,8 @@ func TestSyncExistingTemplate_ForceReconcilesStorage(t *testing.T) {
 	if _, exists := stor.objects[storagePath+"/file-update.txt"]; !exists {
 		t.Error("expected file-update.txt to remain in storage after re-upload")
 	}
-	if len(stor.objects) != 3 {
-		t.Errorf("expected 3 storage objects after reconcile, got %d", len(stor.objects))
+	if len(stor.objects) != 4 {
+		t.Errorf("expected 4 storage objects after reconcile (3 files + manifest.json), got %d", len(stor.objects))
 	}
 }
 
@@ -1260,8 +1260,8 @@ system_prompt: system-prompt.md
 	}
 
 	// Verify files uploaded to storage
-	if len(stor.objects) != 3 {
-		t.Errorf("expected 3 files uploaded to storage, got %d", len(stor.objects))
+	if len(stor.objects) != 4 {
+		t.Errorf("expected 4 files uploaded to storage (3 files + manifest.json), got %d", len(stor.objects))
 	}
 }
 
@@ -1354,8 +1354,8 @@ func TestImportHarnessConfigsFromRemote_WithProjectGithubToken(t *testing.T) {
 	if existing.Harness != "claude" {
 		t.Errorf("expected harness 'claude', got %q", existing.Harness)
 	}
-	if len(stor.objects) != 2 {
-		t.Errorf("expected 2 files uploaded to storage, got %d", len(stor.objects))
+	if len(stor.objects) != 3 {
+		t.Errorf("expected 3 files uploaded to storage (2 files + manifest.json), got %d", len(stor.objects))
 	}
 }
 

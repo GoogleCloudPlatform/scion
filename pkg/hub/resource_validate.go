@@ -47,6 +47,7 @@ const (
 	ValidationIssueMissingManifest     = "missing_manifest"
 	ValidationIssueZeroFilesActive     = "zero_files_active"
 	ValidationIssueContentHashMismatch = "content_hash_mismatch"
+	ValidationIssueStorageEmpty        = "storage_empty"
 )
 
 // ValidateStorage checks a resource record's storage consistency. It verifies:
@@ -78,16 +79,15 @@ func (rs *ResourceStore) ValidateStorage(ctx context.Context, rec *ResourceRecor
 		storagePath = storage.ResourceStoragePath(rec.Kind, rec.Scope, rec.ScopeID, rec.Slug)
 	}
 
+	missingCount := 0
+	mismatchCount := 0
+
 	for _, file := range rec.Files {
 		objectPath := storagePath + "/" + file.Path
 		obj, err := stor.GetObject(ctx, objectPath)
 		if err != nil {
 			if errors.Is(err, storage.ErrNotFound) {
-				report.Issues = append(report.Issues, ValidationIssue{
-					Kind:    ValidationIssueMissingObject,
-					File:    file.Path,
-					Message: fmt.Sprintf("storage object missing for file %q", file.Path),
-				})
+				missingCount++
 				continue
 			}
 			return report, fmt.Errorf("checking object %q: %w", objectPath, err)
@@ -106,23 +106,27 @@ func (rs *ResourceStore) ValidateStorage(ctx context.Context, rec *ResourceRecor
 			}
 		}
 		if storedHash != "" && storedHash != file.Hash {
-			report.Issues = append(report.Issues, ValidationIssue{
-				Kind:    ValidationIssueContentHashMismatch,
-				File:    file.Path,
-				Message: fmt.Sprintf("expected %s, got %s", file.Hash, storedHash),
-			})
+			mismatchCount++
 		}
 	}
 
-	manifestPath := storagePath + "/manifest.json"
-	exists, err := stor.Exists(ctx, manifestPath)
-	if err != nil {
-		return report, fmt.Errorf("checking manifest: %w", err)
-	}
-	if !exists {
+	// Report high-level issues first
+	if missingCount == len(rec.Files) && len(rec.Files) > 0 {
 		report.Issues = append(report.Issues, ValidationIssue{
-			Kind:    ValidationIssueMissingManifest,
-			Message: "manifest.json missing from storage",
+			Kind:    ValidationIssueStorageEmpty,
+			Message: fmt.Sprintf("storage is empty (%d files missing), run 'scion %s sync' to populate", len(rec.Files), rec.Kind),
+		})
+	} else if missingCount > 0 {
+		report.Issues = append(report.Issues, ValidationIssue{
+			Kind:    ValidationIssueMissingObject,
+			Message: fmt.Sprintf("%d of %d files missing from storage", missingCount, len(rec.Files)),
+		})
+	}
+
+	if mismatchCount > 0 {
+		report.Issues = append(report.Issues, ValidationIssue{
+			Kind:    ValidationIssueContentHashMismatch,
+			Message: fmt.Sprintf("%d files have outdated content in storage, run 'scion %s sync' to update", mismatchCount, rec.Kind),
 		})
 	}
 

@@ -489,7 +489,33 @@ func UpdateDefaultTemplates(force bool, harnesses []api.Harness) error {
 
 	// Seed embed-only harness-configs (e.g. Gemini).
 	for _, h := range harnesses {
-		if err := SeedHarnessConfig(filepath.Join(harnessConfigsDir, h.Name()), h, true); err != nil {
+		if err := SeedHarnessConfig(filepath.Join(harnessConfigsDir, h.Name()), h, force); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// RefreshDefaultTemplates updates templates and harness-configs from embedded
+// defaults without failing if they already exist. Used by server startup to
+// ensure defaults are present. The force parameter controls whether to overwrite
+// existing harness-config files (true) or preserve user customizations (false).
+func RefreshDefaultTemplates(harnesses []api.Harness, force bool) error {
+	globalDir, err := GetGlobalDir()
+	if err != nil {
+		return err
+	}
+
+	harnessConfigsDir := filepath.Join(globalDir, harnessConfigsDirName)
+
+	// Materialize templates with force parameter
+	if err := MaterializeBundledResources(globalDir, MaterializeOptions{Force: force}); err != nil {
+		return err
+	}
+
+	// Seed harness-configs with force parameter
+	for _, h := range harnesses {
+		if err := SeedHarnessConfig(filepath.Join(harnessConfigsDir, h.Name()), h, force); err != nil {
 			return err
 		}
 	}
