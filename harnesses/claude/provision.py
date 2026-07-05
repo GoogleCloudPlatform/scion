@@ -135,6 +135,11 @@ def _read_secret(secret_files: dict[str, str], env_name: str) -> str:
         return ""
 
 
+def _resolve(secret_files: dict[str, str], name: str) -> str:
+    val = _read_secret(secret_files, name)
+    return val if val else '${' + name + '}'
+
+
 def _auth_file_present(file_paths: list[str], target: str) -> bool:
     """Return True if the auth file is mounted or already on disk."""
     if any(_expand(p) == _expand(target) for p in file_paths):
@@ -404,15 +409,15 @@ def _build_env_overlay(
     the vars into the harness process environment.
     """
     if method == "api-key" and env_key:
-        return {env_key: _read_secret(secret_files, env_key)}
+        return {env_key: _resolve(secret_files, env_key)}
     if method == "oauth-token":
-        return {"CLAUDE_CODE_OAUTH_TOKEN": _read_secret(secret_files, "CLAUDE_CODE_OAUTH_TOKEN")}
+        return {"CLAUDE_CODE_OAUTH_TOKEN": _resolve(secret_files, "CLAUDE_CODE_OAUTH_TOKEN")}
     if method == "vertex-ai":
         region_key = env_key or "GOOGLE_CLOUD_REGION"
         return {
             "CLAUDE_CODE_USE_VERTEX": "1",
-            "ANTHROPIC_VERTEX_PROJECT_ID": _read_secret(secret_files, "GOOGLE_CLOUD_PROJECT"),
-            "CLOUD_ML_REGION": _read_secret(secret_files, region_key),
+            "ANTHROPIC_VERTEX_PROJECT_ID": _resolve(secret_files, "GOOGLE_CLOUD_PROJECT"),
+            "CLOUD_ML_REGION": _resolve(secret_files, region_key),
         }
     # auth-file: no env updates needed.
     return {}
