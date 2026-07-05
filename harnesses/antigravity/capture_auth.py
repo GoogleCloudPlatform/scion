@@ -14,26 +14,12 @@
 # limitations under the License.
 """Antigravity capture-auth script.
 
-Captures the Antigravity OAuth token file and stores it as a project-scoped
-secret via `sciontool secret set`. Designed to run after the user authenticates
-interactively inside a no-auth agent container.
-
-AGY stores its OAuth token as a JSON file at:
-  ~/.gemini/antigravity-cli/antigravity-oauth-token
-
-This script reads the file, validates it contains a refresh_token, and stores
-it as the AGY_TOKEN secret.
-
-Exit codes:
-  0 = credential captured
-  1 = error
-  2 = no credentials found (not an error, but nothing was stored)
-  3 = secret already exists (conflict — use --force to overwrite)
+Extends the standard capture-auth flow with keyring support: when no token
+file is found on disk, falls back to extracting AGY_TOKEN from gnome-keyring.
 """
 
 from __future__ import annotations
 
-import argparse
 import json
 import os
 import subprocess
@@ -41,87 +27,13 @@ import sys
 import tempfile
 from typing import Any
 
-EXIT_OK = 0
-EXIT_ERROR = 1
-EXIT_NO_CREDS = 2
-EXIT_CONFLICT = 3
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import scion_harness
 
-HARNESS_BUNDLE = os.path.join(
-    os.environ.get("HOME") or os.path.expanduser("~"),
-    ".scion", "harness",
-)
-
-
-def _expand(path: str) -> str:
-    return os.path.expanduser(os.path.expandvars(path))
-
-
-def _load_config(bundle: str) -> list[dict[str, Any]]:
-    config_path = os.path.join(bundle, "inputs", "capture-auth-config.json")
-    if not os.path.isfile(config_path):
-        return []
-    with open(config_path, "r", encoding="utf-8") as f:
-        try:
-            data = json.load(f)
-        except (json.JSONDecodeError, OSError):
-            return []
-    creds = data.get("credentials")
-    if not isinstance(creds, list):
-        return []
-    return creds
-
-
-def _validate_token_file(path: str) -> bool:
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            obj = json.load(f)
-    except (json.JSONDecodeError, OSError) as exc:
-        print(f"capture-auth: token file is not valid JSON: {exc}", file=sys.stderr)
-        return False
-    has_refresh = (
-        "refresh_token" in obj
-        or (isinstance(obj.get("token"), dict) and "refresh_token" in obj["token"])
-    )
-    if not isinstance(obj, dict) or not has_refresh:
-        print("capture-auth: token file missing refresh_token field", file=sys.stderr)
-        return False
-    return True
-
-
-def _capture_one(entry: dict[str, Any], force: bool) -> tuple[bool, str | None]:
-    key = entry.get("key", "") or entry.get("name", "")
-    source = _expand(entry.get("source", ""))
-    secret_type = entry.get("type", "file")
-    target = entry.get("target", "")
-
-    if not key or not source:
-        return False, "invalid entry: missing key or source"
-
-    if not os.path.isfile(source):
-        return False, None
-
-    cmd = [
-        "sciontool", "secret", "set", key, f"@{source}",
-        "--type", secret_type,
-        "--target", target,
-    ]
-    if force:
-        cmd.append("--force")
-
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-    except FileNotFoundError:
-        return False, "sciontool not found in PATH"
-    except subprocess.TimeoutExpired:
-        return False, f"sciontool timed out for key {key}"
-
-    if result.returncode != 0:
-        stderr = result.stderr.strip()
-        if "already exists" in stderr.lower():
-            return False, "CONFLICT"
-        return False, f"sciontool failed for {key}: {stderr}"
-
-    return True, None
+_CA_EXIT_OK = 0
+_CA_EXIT_ERROR = 1
+_CA_EXIT_NO_CREDS = 2
+_CA_EXIT_CONFLICT = 3
 
 
 def _setup_dbus() -> bool:
@@ -162,105 +74,42 @@ def _extract_from_keyring() -> str | None:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(
-        description="Capture Antigravity auth token and store as project secret"
-    )
-    parser.add_argument("--force", action="store_true", help="Overwrite existing secrets")
-    parser.add_argument("--bundle", default=HARNESS_BUNDLE)
-    args = parser.parse_args()
+    rc = scion_harness.capture_auth_main()
+    if rc == _CA_EXIT_OK:
+        return rc
 
-    entries = _load_config(args.bundle)
+    print("capture-auth: file not found, trying gnome-keyring fallback...")
+    token = _extract_from_keyring()
+    if not token:
+        if rc == _CA_EXIT_NO_CREDS:
+            print("capture-auth: no credentials found to capture")
+            print("  Make sure you have authenticated with: agy")
+        return rc
 
-    if not entries:
-        home = os.environ.get("HOME") or os.path.expanduser("~")
-        token_path = os.path.join(home, ".gemini", "antigravity-cli", "antigravity-oauth-token")
-        entries = [{
-            "key": "AGY_TOKEN",
-            "source": token_path,
-            "type": "file",
-            "target": "~/.gemini/antigravity-cli/antigravity-oauth-token",
-        }]
-
-    seen_keys: set[str] = set()
-    unique_entries = []
-    for e in entries:
-        k = e.get("key", "") or e.get("name", "")
-        if k not in seen_keys:
-            seen_keys.add(k)
-            unique_entries.append(e)
-    entries = unique_entries
-
-    captured = 0
-    conflicts = 0
-    errors = 0
-
-    for entry in entries:
-        key = entry.get("key", "") or entry.get("name", "<unknown>")
-        source = entry.get("source", "")
-        expanded = _expand(source) if source else ""
-
-        if not expanded or not os.path.isfile(expanded):
-            print(f"capture-auth: {key}: source not found ({source})")
-            continue
-
-        if not _validate_token_file(expanded):
-            errors += 1
-            continue
-
-        ok, err = _capture_one(entry, args.force)
-        if err == "CONFLICT":
-            print(f'CONFLICT: secret "{key}" already exists (use --force to overwrite)')
-            conflicts += 1
-        elif err:
-            print(f"capture-auth: {key}: {err}", file=sys.stderr)
-            errors += 1
-        elif ok:
-            print(f"capture-auth: {key}: captured from {source}")
-            captured += 1
-
-    # Keyring fallback: AGY may store tokens only in gnome-keyring, not to file
-    if captured == 0 and conflicts == 0 and errors == 0:
-        print("capture-auth: file not found, trying gnome-keyring fallback...")
-        token = _extract_from_keyring()
-        if token:
-            target = "~/.gemini/antigravity-cli/antigravity-oauth-token"
-            fd, tmp_path = tempfile.mkstemp(prefix="agy_token_", suffix=".json")
-            try:
-                with os.fdopen(fd, "w") as f:
-                    f.write(token)
-                cmd = ["sciontool", "secret", "set", "AGY_TOKEN", f"@{tmp_path}",
-                       "--type", "file", "--target", target]
-                if args.force:
-                    cmd.append("--force")
-                result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-                if result.returncode == 0:
-                    print(f"capture-auth: AGY_TOKEN: captured from gnome-keyring")
-                    captured += 1
-                elif "already exists" in result.stderr.lower():
-                    print('CONFLICT: secret "AGY_TOKEN" already exists (use --force to overwrite)')
-                    conflicts += 1
-                else:
-                    print(f"capture-auth: keyring fallback failed: {result.stderr.strip()}", file=sys.stderr)
-                    errors += 1
-            finally:
-                try:
-                    os.unlink(tmp_path)
-                except OSError:
-                    pass
-
-    if conflicts > 0:
-        return EXIT_CONFLICT
-
-    if errors > 0 and captured == 0:
-        return EXIT_ERROR
-
-    if captured == 0:
-        print("capture-auth: no credentials found to capture")
-        print("  Make sure you have authenticated with: agy")
-        return EXIT_NO_CREDS
-
-    print(f"capture-auth: {captured} credential(s) captured successfully")
-    return EXIT_OK
+    target = "~/.gemini/antigravity-cli/antigravity-oauth-token"
+    fd, tmp_path = tempfile.mkstemp(prefix="agy_token_", suffix=".json")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(token)
+        force = "--force" in sys.argv
+        cmd = ["sciontool", "secret", "set", "AGY_TOKEN", f"@{tmp_path}",
+               "--type", "file", "--target", target]
+        if force:
+            cmd.append("--force")
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        if result.returncode == 0:
+            print("capture-auth: AGY_TOKEN: captured from gnome-keyring")
+            return _CA_EXIT_OK
+        if "already exists" in result.stderr.lower():
+            print('CONFLICT: secret "AGY_TOKEN" already exists (use --force to overwrite)')
+            return _CA_EXIT_CONFLICT
+        print(f"capture-auth: keyring fallback failed: {result.stderr.strip()}", file=sys.stderr)
+        return _CA_EXIT_ERROR
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
 
 
 if __name__ == "__main__":
