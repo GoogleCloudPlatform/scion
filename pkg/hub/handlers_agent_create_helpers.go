@@ -935,6 +935,22 @@ func (s *Server) hasAnyKey(ctx context.Context, agent *store.Agent, keys []strin
 				return true, nil
 			}
 		}
+		if s.hubID != "" {
+			ev, err := s.store.GetEnvVar(ctx, key, store.ScopeHub, s.hubID)
+			if err != nil && !errors.Is(err, store.ErrNotFound) {
+				return false, err
+			}
+			if ev != nil {
+				return true, nil
+			}
+			sec, err := s.store.GetSecret(ctx, key, store.ScopeHub, s.hubID)
+			if err != nil && !errors.Is(err, store.ErrNotFound) {
+				return false, err
+			}
+			if sec != nil {
+				return true, nil
+			}
+		}
 	}
 	return false, nil
 }
