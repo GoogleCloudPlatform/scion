@@ -48,12 +48,12 @@ command:
   task_position: before_base_args
 capabilities:
   limits:
-    max_turns: { support: "no", reason: "This harness has no hook dialect for turn events" }
-    max_model_calls: { support: "no", reason: "This harness has no hook dialect for model events" }
+    max_turns: { support: "yes", reason: "Supported via scion-plugin.js event bridge" }
+    max_model_calls: { support: "yes", reason: "Supported via scion-plugin.js event bridge" }
     max_duration: { support: "yes" }
   telemetry:
     enabled: { support: "yes" }
-    native_emitter: { support: "no", reason: "Native telemetry forwarding is not wired for this harness" }
+    native_emitter: { support: "yes", reason: "Forwarded via scion-plugin.js event bridge" }
   prompts:
     system_prompt: { support: "partial", reason: "System prompt is downgraded into AGENTS.md" }
     agent_instructions: { support: "yes" }
@@ -62,11 +62,13 @@ capabilities:
     auth_file: { support: "yes" }
     oauth_token: { support: "no" }
     vertex_ai: { support: "yes" }
+    none: { support: "yes", reason: "No authentication required (e.g. local llama.cpp)" }
   mcp:
     stdio: { support: "yes" }
     sse: { support: "yes" }
     streamable_http: { support: "yes" }
     project_scope: { support: "no", reason: "OpenCode does not distinguish project-scoped MCP" }
+  resume: { support: "yes" }
 no_auth:
   behavior: drop-to-shell
   message: |
@@ -78,7 +80,7 @@ auth:
   types:
     api-key:
       required_env:
-        - any_of: ["ANTHROPIC_API_KEY", "OPENAI_API_KEY"]
+        - any_of: ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENCODE_API_KEY"]
     auth-file:
       required_files:
         - name: OPENCODE_AUTH
@@ -89,10 +91,13 @@ auth:
       required_env:
         - any_of: ["GOOGLE_CLOUD_PROJECT", "VERTEXAI_PROJECT"]
         - any_of: ["GOOGLE_CLOUD_REGION", "GOOGLE_CLOUD_LOCATION", "VERTEX_LOCATION"]
+    none:
+      required_env: []
   autodetect:
     env:
       ANTHROPIC_API_KEY: api-key
       OPENAI_API_KEY: api-key
+      OPENCODE_API_KEY: api-key
       GOOGLE_CLOUD_PROJECT: vertex-ai
       VERTEXAI_PROJECT: vertex-ai
       GOOGLE_CLOUD_REGION: vertex-ai

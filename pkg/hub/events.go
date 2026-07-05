@@ -345,6 +345,10 @@ func (p *ChannelEventPublisher) Close() {
 // PublishAgentStatus publishes an agent status event to both agent-specific
 // and project-scoped subjects (dual-publish pattern).
 func (p *eventBuilder) PublishAgentStatus(_ context.Context, agent *store.Agent) {
+	slog.Debug("PublishAgentStatus",
+		"agent_id", agent.ID, "project_id", agent.ProjectID,
+		"phase", agent.Phase, "activity", agent.Activity)
+
 	evt := AgentStatusEvent{
 		AgentID:         agent.ID,
 		ProjectID:       agent.ProjectID,

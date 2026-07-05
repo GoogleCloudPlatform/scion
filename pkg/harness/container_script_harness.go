@@ -225,6 +225,7 @@ func (c *ContainerScriptHarness) ResolveAuth(auth api.AuthConfig) (*api.Resolved
 	addIfPresent("GOOGLE_CLOUD_PROJECT", auth.GoogleCloudProject)
 	addIfPresent("GOOGLE_CLOUD_REGION", auth.GoogleCloudRegion)
 	addIfPresent("CODEX_API_KEY", auth.CodexAPIKey)
+	addIfPresent("OPENCODE_API_KEY", auth.OpenCodeAPIKey)
 
 	// Forward config-driven auth env vars. These come from harness config
 	// metadata (auth.types[*].required_env) and are gathered by
@@ -356,6 +357,14 @@ func (c *ContainerScriptHarness) Provision(ctx context.Context, agentName, agent
 	if fileExistsHelper(dialectSrc) {
 		if err := copyHarnessConfigFile(dialectSrc, filepath.Join(bundleHostPath, "dialect.yaml")); err != nil {
 			return fmt.Errorf("stage dialect.yaml: %w", err)
+		}
+	}
+
+	// Copy scion-plugin.js if present (used by opencode harness).
+	pluginSrc := filepath.Join(c.configDirPath, "scion-plugin.js")
+	if fileExistsHelper(pluginSrc) {
+		if err := copyHarnessConfigFile(pluginSrc, filepath.Join(bundleHostPath, "scion-plugin.js")); err != nil {
+			return fmt.Errorf("stage scion-plugin.js: %w", err)
 		}
 	}
 

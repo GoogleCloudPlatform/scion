@@ -104,7 +104,7 @@ profiles:
 
 	// Provision agent
 	agentName := "test-agent"
-	_, _, cfg, err := ProvisionAgent(context.Background(), agentName, "test-tpl", "", "", projectScionDir, "test-profile", "", "", "")
+	_, _, cfg, err := ProvisionAgent(context.Background(), agentName, "test-tpl", "", "", projectScionDir, "test-profile", "", "", "", "")
 	if err != nil {
 		t.Fatalf("ProvisionAgent failed: %v", err)
 	}
@@ -178,7 +178,7 @@ func TestProvisionGeminiAgentSettings(t *testing.T) {
 
 	// Provision a claude agent using the "default" agnostic template
 	agentName := "gemini-agent"
-	agentHome, _, _, err := ProvisionAgent(context.Background(), agentName, "default", "", "claude", projectScionDir, "", "", "", "")
+	agentHome, _, _, err := ProvisionAgent(context.Background(), agentName, "default", "", "claude", projectScionDir, "", "", "", "", "")
 	if err != nil {
 		t.Fatalf("ProvisionAgent failed: %v", err)
 	}
@@ -316,7 +316,7 @@ func TestProvisionAgentNonGitWorkspace(t *testing.T) {
 	evalProjectDir, _ := filepath.EvalSymlinks(projectDir)
 
 	agentName := "test-agent"
-	home, ws, cfg, err := ProvisionAgent(context.Background(), agentName, "default", "", "", projectScionDir, "", "", "", "")
+	home, ws, cfg, err := ProvisionAgent(context.Background(), agentName, "default", "", "", projectScionDir, "", "", "", "", "")
 	if err != nil {
 		t.Fatalf("ProvisionAgent failed: %v", err)
 	}
@@ -358,7 +358,7 @@ func TestProvisionAgentNonGitWorkspace(t *testing.T) {
 	}
 	evalCWD, _ := filepath.EvalSymlinks(cwd)
 
-	_, ws, cfg, err = ProvisionAgent(context.Background(), "global-agent", "default", "", "", globalScionDir, "", "", "", "")
+	_, ws, cfg, err = ProvisionAgent(context.Background(), "global-agent", "default", "", "", globalScionDir, "", "", "", "", "")
 	if err != nil {
 		t.Fatalf("ProvisionAgent failed for global project: %v", err)
 	}
@@ -421,7 +421,7 @@ func TestProvisionAgentWorkspaceFlag(t *testing.T) {
 
 	// 1. Test valid --workspace in non-git
 	agentName := "workspace-agent"
-	_, _, cfg, err := ProvisionAgent(context.Background(), agentName, "claude", "", "", projectScionDir, "", "", "", customWorkspace)
+	_, _, cfg, err := ProvisionAgent(context.Background(), agentName, "claude", "", "", projectScionDir, "", "", "", "", customWorkspace)
 	if err != nil {
 		t.Fatalf("ProvisionAgent failed: %v", err)
 	}
@@ -449,7 +449,7 @@ func TestProvisionAgentWorkspaceFlag(t *testing.T) {
 	absRelativeWorkspace, _ := filepath.Abs(filepath.Join(tmpDir, relativeWorkspace))
 	evalAbsRelativeWorkspace, _ := filepath.EvalSymlinks(absRelativeWorkspace)
 
-	_, _, cfg, err = ProvisionAgent(context.Background(), "rel-agent", "claude", "", "", projectScionDir, "", "", "", relativeWorkspace)
+	_, _, cfg, err = ProvisionAgent(context.Background(), "rel-agent", "claude", "", "", projectScionDir, "", "", "", "", relativeWorkspace)
 	if err != nil {
 		t.Fatalf("ProvisionAgent failed: %v", err)
 	}
@@ -476,7 +476,7 @@ func TestProvisionAgentWorkspaceFlag(t *testing.T) {
 	os.WriteFile(filepath.Join(gitDir, ".gitignore"), []byte("agents/"), 0644)
 
 	var ws string
-	_, ws, cfg, err = ProvisionAgent(context.Background(), "git-agent", "claude", "", "", gitScionDir, "", "", "", customWorkspace)
+	_, ws, cfg, err = ProvisionAgent(context.Background(), "git-agent", "claude", "", "", gitScionDir, "", "", "", "", customWorkspace)
 	if err != nil {
 		t.Fatalf("expected no error when using --workspace in a git repository, got: %v", err)
 	}
@@ -538,7 +538,7 @@ auth_selectedType: vertex-ai
 
 	// Provision agent
 	agentName := "yaml-agent"
-	_, _, cfg, err := ProvisionAgent(context.Background(), agentName, "yaml-test-tpl", "", "", projectScionDir, "", "", "", "")
+	_, _, cfg, err := ProvisionAgent(context.Background(), agentName, "yaml-test-tpl", "", "", projectScionDir, "", "", "", "", "")
 	if err != nil {
 		t.Fatalf("ProvisionAgent failed: %v", err)
 	}
@@ -617,7 +617,7 @@ func TestProvisionAgentUsesProjectTemplate(t *testing.T) {
 	// Provision agent using projectPath — the project template should be used
 	// even though CWD has no .scion directory.
 	agentName := "project-tpl-agent"
-	_, _, cfg, err := ProvisionAgent(context.Background(), agentName, "my-tpl", "", "", projectPath, "", "", "", "")
+	_, _, cfg, err := ProvisionAgent(context.Background(), agentName, "my-tpl", "", "", projectPath, "", "", "", "", "")
 	if err != nil {
 		t.Fatalf("ProvisionAgent failed: %v", err)
 	}
@@ -665,7 +665,7 @@ env:
 
 	// Provision agent - should fail with an error
 	agentName := "invalid-yaml-agent"
-	_, _, _, err := ProvisionAgent(context.Background(), agentName, "invalid-yaml-tpl", "", "", projectScionDir, "", "", "", "")
+	_, _, _, err := ProvisionAgent(context.Background(), agentName, "invalid-yaml-tpl", "", "", projectScionDir, "", "", "", "", "")
 	if err == nil {
 		t.Fatal("expected error for invalid YAML template, got nil")
 	}
@@ -716,7 +716,7 @@ services:
 		os.MkdirAll(projectScionDir, 0755)
 
 		agentName := "svc-agent"
-		agentHome, _, _, err := ProvisionAgent(context.Background(), agentName, "svc-tpl", "", "", projectScionDir, "", "", "", "")
+		agentHome, _, _, err := ProvisionAgent(context.Background(), agentName, "svc-tpl", "", "", projectScionDir, "", "", "", "", "")
 		if err != nil {
 			t.Fatalf("ProvisionAgent failed: %v", err)
 		}
@@ -747,7 +747,7 @@ services:
 		os.MkdirAll(projectScionDir, 0755)
 
 		agentName := "no-svc-agent"
-		agentHome, _, _, err := ProvisionAgent(context.Background(), agentName, "no-svc-tpl", "", "", projectScionDir, "", "", "", "")
+		agentHome, _, _, err := ProvisionAgent(context.Background(), agentName, "no-svc-tpl", "", "", projectScionDir, "", "", "", "", "")
 		if err != nil {
 			t.Fatalf("ProvisionAgent failed: %v", err)
 		}
@@ -794,7 +794,7 @@ func TestProvisionAgent_CopiesSkillsDir(t *testing.T) {
 	os.MkdirAll(projectScionDir, 0755)
 
 	agentName := "skills-agent"
-	agentHome, _, _, err := ProvisionAgent(context.Background(), agentName, "skills-tpl", "", "", projectScionDir, "", "", "", "")
+	agentHome, _, _, err := ProvisionAgent(context.Background(), agentName, "skills-tpl", "", "", projectScionDir, "", "", "", "", "")
 	if err != nil {
 		t.Fatalf("ProvisionAgent failed: %v", err)
 	}
@@ -850,7 +850,7 @@ func TestProvisionAgent_SkillsAreTemplateOnly(t *testing.T) {
 	os.MkdirAll(projectScionDir, 0755)
 
 	agentName := "overlay-agent"
-	agentHome, _, _, err := ProvisionAgent(context.Background(), agentName, "overlay-tpl", "", "", projectScionDir, "", "", "", "")
+	agentHome, _, _, err := ProvisionAgent(context.Background(), agentName, "overlay-tpl", "", "", projectScionDir, "", "", "", "", "")
 	if err != nil {
 		t.Fatalf("ProvisionAgent failed: %v", err)
 	}
@@ -910,7 +910,7 @@ func TestProvisionAgentGitClone_ClearsStaleWorktreeWorkspace(t *testing.T) {
 	}
 	ctx := api.ContextWithGitClone(context.Background(), gitClone)
 
-	_, wsPath, _, err := ProvisionAgent(ctx, "clone-agent", "claude", "", "", projectScionDir, "", "", "", "")
+	_, wsPath, _, err := ProvisionAgent(ctx, "clone-agent", "claude", "", "", projectScionDir, "", "", "", "", "")
 	if err != nil {
 		t.Fatalf("ProvisionAgent failed: %v", err)
 	}
@@ -971,7 +971,7 @@ func TestProvisionAgentGitClone_PreservesExistingClone(t *testing.T) {
 	}
 	ctx := api.ContextWithGitClone(context.Background(), gitClone)
 
-	_, wsPath, _, err := ProvisionAgent(ctx, "restart-agent", "claude", "", "", projectScionDir, "", "", "", "")
+	_, wsPath, _, err := ProvisionAgent(ctx, "restart-agent", "claude", "", "", projectScionDir, "", "", "", "", "")
 	if err != nil {
 		t.Fatalf("ProvisionAgent failed: %v", err)
 	}
@@ -1035,7 +1035,7 @@ func TestGetAgentGitClone_ClearsExistingWorkspace(t *testing.T) {
 	}
 	ctx := api.ContextWithGitClone(context.Background(), gitClone)
 
-	_, _, wsPath, _, err := GetAgent(ctx, "reused-agent", "claude", "", "", projectScionDir, "", "", "", "")
+	_, _, wsPath, _, err := GetAgent(ctx, "reused-agent", "claude", "", "", projectScionDir, "", "", "", "", "")
 	if err != nil {
 		t.Fatalf("GetAgent failed: %v", err)
 	}
@@ -1234,7 +1234,7 @@ func TestProvisionAgent_SharedWorkspaceCredentialHelper(t *testing.T) {
 	// Set SharedWorkspace context
 	ctx := api.ContextWithSharedWorkspace(context.Background())
 
-	home, _, _, err := ProvisionAgent(ctx, "shared-agent", "claude", "", "", projectScionDir, "", "", "", sharedWorkspace)
+	home, _, _, err := ProvisionAgent(ctx, "shared-agent", "claude", "", "", projectScionDir, "", "", "", "", sharedWorkspace)
 	if err != nil {
 		t.Fatalf("ProvisionAgent failed: %v", err)
 	}
@@ -1287,7 +1287,7 @@ func TestProvisionAgent_SharedWorkspaceNoCredentialWithoutFlag(t *testing.T) {
 	os.MkdirAll(customWorkspace, 0755)
 
 	// No SharedWorkspace context — plain workspace mount
-	home, _, _, err := ProvisionAgent(context.Background(), "plain-agent", "claude", "", "", projectScionDir, "", "", "", customWorkspace)
+	home, _, _, err := ProvisionAgent(context.Background(), "plain-agent", "claude", "", "", projectScionDir, "", "", "", "", customWorkspace)
 	if err != nil {
 		t.Fatalf("ProvisionAgent failed: %v", err)
 	}
@@ -1357,7 +1357,7 @@ func TestGetAgent_RecreatesMissingWorktree(t *testing.T) {
 	os.MkdirAll(agentHome, 0755)
 
 	// Create a worktree (simulating a successful first provision)
-	if err := util.CreateWorktree(agentWorkspace, agentName); err != nil {
+	if err := util.CreateWorktree(agentWorkspace, agentName, ""); err != nil {
 		t.Fatalf("CreateWorktree failed: %v", err)
 	}
 
@@ -1387,7 +1387,7 @@ func TestGetAgent_RecreatesMissingWorktree(t *testing.T) {
 	}
 
 	// Call GetAgent — it should recreate the worktree
-	_, _, wsPath, _, err := GetAgent(context.Background(), agentName, "", "", "", scionDir, "", "", "", "")
+	_, _, wsPath, _, err := GetAgent(context.Background(), agentName, "", "", "", scionDir, "", "", "", "", "")
 	if err != nil {
 		t.Fatalf("GetAgent failed: %v", err)
 	}
@@ -1466,7 +1466,7 @@ func TestGetAgent_StaleDirectoryCreatesWorkspace(t *testing.T) {
 
 	// Call GetAgent — it should detect the stale directory, remove it,
 	// and re-provision successfully with a workspace worktree.
-	_, _, wsPath, cfg, err := GetAgent(context.Background(), agentName, "", "", "", scionDir, "", "", "", "")
+	_, _, wsPath, cfg, err := GetAgent(context.Background(), agentName, "", "", "", scionDir, "", "", "", "", "")
 	if err != nil {
 		t.Fatalf("GetAgent failed: %v", err)
 	}
@@ -1545,7 +1545,7 @@ func TestGetAgent_BrandNewAgentCreatesWorkspace(t *testing.T) {
 	}
 
 	// Call GetAgent — it should provision from scratch with a workspace worktree.
-	_, _, wsPath, cfg, err := GetAgent(context.Background(), agentName, "", "", "", scionDir, "", "", "", "")
+	_, _, wsPath, cfg, err := GetAgent(context.Background(), agentName, "", "", "", scionDir, "", "", "", "", "")
 	if err != nil {
 		t.Fatalf("GetAgent failed: %v", err)
 	}
@@ -1604,7 +1604,7 @@ func TestGetAgent_MissingWorkspaceNonGit(t *testing.T) {
 	os.WriteFile(filepath.Join(agentHome, "agent-info.json"),
 		[]byte(`{"name":"nongit-agent","template":"default"}`), 0644)
 
-	_, _, wsPath, _, err := GetAgent(context.Background(), agentName, "", "", "", scionDir, "", "", "", "")
+	_, _, wsPath, _, err := GetAgent(context.Background(), agentName, "", "", "", scionDir, "", "", "", "", "")
 	if err != nil {
 		t.Fatalf("GetAgent failed: %v", err)
 	}
@@ -1667,7 +1667,7 @@ func TestProvisionAgent_SkillsWithMockResolver(t *testing.T) {
 	_ = contentHash
 
 	ctx := ContextWithSkillResolver(context.Background(), resolver)
-	agentHome, _, _, err := ProvisionAgent(ctx, "skill-ref-agent", "skill-ref-tpl", "", "", projectScionDir, "", "", "", "")
+	agentHome, _, _, err := ProvisionAgent(ctx, "skill-ref-agent", "skill-ref-tpl", "", "", projectScionDir, "", "", "", "", "")
 	if err != nil {
 		t.Fatalf("ProvisionAgent failed: %v", err)
 	}
@@ -1718,7 +1718,7 @@ func TestProvisionAgent_RequiredSkillsNoResolver(t *testing.T) {
 	os.MkdirAll(projectScionDir, 0755)
 
 	// No resolver on context → should fail for required skills
-	_, _, _, err := ProvisionAgent(context.Background(), "no-resolver-agent", "required-skill-tpl", "", "", projectScionDir, "", "", "", "")
+	_, _, _, err := ProvisionAgent(context.Background(), "no-resolver-agent", "required-skill-tpl", "", "", projectScionDir, "", "", "", "", "")
 	if err == nil {
 		t.Fatal("expected provisioning to fail with required skills and no resolver")
 	}
@@ -1761,7 +1761,7 @@ func TestProvisionAgent_OptionalSkillsNoResolver(t *testing.T) {
 	os.MkdirAll(projectScionDir, 0755)
 
 	// No resolver on context → should succeed for optional-only skills
-	_, _, _, err := ProvisionAgent(context.Background(), "optional-agent", "optional-skill-tpl", "", "", projectScionDir, "", "", "", "")
+	_, _, _, err := ProvisionAgent(context.Background(), "optional-agent", "optional-skill-tpl", "", "", projectScionDir, "", "", "", "", "")
 	if err != nil {
 		t.Fatalf("expected provisioning to succeed with optional-only skills and no resolver, got: %v", err)
 	}
@@ -1800,7 +1800,7 @@ skills:
 	os.MkdirAll(projectScionDir, 0755)
 
 	// This should fail because there's no resolver for the required skill
-	_, _, _, err := ProvisionAgent(context.Background(), "yaml-skills-agent", "yaml-skills-tpl", "", "", projectScionDir, "", "", "", "")
+	_, _, _, err := ProvisionAgent(context.Background(), "yaml-skills-agent", "yaml-skills-tpl", "", "", projectScionDir, "", "", "", "", "")
 	if err == nil {
 		t.Fatal("expected error for required skill with no resolver")
 	}
@@ -1849,7 +1849,7 @@ func TestProvisionAgent_SkillsResolverError(t *testing.T) {
 		},
 	}
 	ctx := ContextWithSkillResolver(context.Background(), resolver)
-	_, _, _, err := ProvisionAgent(ctx, "resolver-err-agent", "resolver-err-tpl", "", "", projectScionDir, "", "", "", "")
+	_, _, _, err := ProvisionAgent(ctx, "resolver-err-agent", "resolver-err-tpl", "", "", projectScionDir, "", "", "", "", "")
 	if err == nil {
 		t.Fatal("expected error for required skill resolution failure")
 	}
@@ -1896,7 +1896,7 @@ func TestProvisionAgent_RequiredSkillOmittedFromResolverResponse(t *testing.T) {
 		},
 	}
 	ctx := ContextWithSkillResolver(context.Background(), resolver)
-	_, _, _, err := ProvisionAgent(ctx, "omitted-agent", "omitted-required-tpl", "", "", projectScionDir, "", "", "", "")
+	_, _, _, err := ProvisionAgent(ctx, "omitted-agent", "omitted-required-tpl", "", "", projectScionDir, "", "", "", "", "")
 	if err == nil {
 		t.Fatal("expected error when required skill is missing from resolver response")
 	}
@@ -1946,7 +1946,7 @@ func TestProvisionAgent_OptionalSkillOmittedFromResolverResponse(t *testing.T) {
 		},
 	}
 	ctx := ContextWithSkillResolver(context.Background(), resolver)
-	_, _, _, err := ProvisionAgent(ctx, "omitted-opt-agent", "omitted-optional-tpl", "", "", projectScionDir, "", "", "", "")
+	_, _, _, err := ProvisionAgent(ctx, "omitted-opt-agent", "omitted-optional-tpl", "", "", projectScionDir, "", "", "", "", "")
 	if err != nil {
 		t.Fatalf("expected provisioning to succeed when only optional skill is omitted, got: %v", err)
 	}
@@ -1990,7 +1990,7 @@ func TestProvisionAgent_UnrequestedSkillFromResolver(t *testing.T) {
 		},
 	}
 	ctx := ContextWithSkillResolver(context.Background(), resolver)
-	_, _, _, err := ProvisionAgent(ctx, "extra-skill-agent", "extra-skill-tpl", "", "", projectScionDir, "", "", "", "")
+	_, _, _, err := ProvisionAgent(ctx, "extra-skill-agent", "extra-skill-tpl", "", "", projectScionDir, "", "", "", "", "")
 	if err == nil {
 		t.Fatal("expected error when resolver returns unrequested skill")
 	}
@@ -2040,7 +2040,7 @@ func TestProvisionAgent_DuplicateResolvedSkill(t *testing.T) {
 		},
 	}
 	ctx := ContextWithSkillResolver(context.Background(), resolver)
-	_, _, _, err := ProvisionAgent(ctx, "dup-skill-agent", "dup-skill-tpl", "", "", projectScionDir, "", "", "", "")
+	_, _, _, err := ProvisionAgent(ctx, "dup-skill-agent", "dup-skill-tpl", "", "", projectScionDir, "", "", "", "", "")
 	if err == nil {
 		t.Fatal("expected error when resolver returns duplicate skill")
 	}

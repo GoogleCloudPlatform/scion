@@ -15,7 +15,9 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -26,6 +28,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 	"github.com/spf13/cobra"
 )
 
@@ -87,21 +90,50 @@ var harnessConfigListCmd = &cobra.Command{
 					Status: "active",
 				})
 				if err == nil {
-					// Merge Hub results (avoid duplicates by name)
-					localNames := make(map[string]bool)
-					for _, e := range entries {
-						localNames[e.Name] = true
+					// Build hub map for comparison
+					hubMap := make(map[string]*hubclient.HarnessConfig)
+					for i := range hubResp.HarnessConfigs {
+						hubMap[hubResp.HarnessConfigs[i].Name] = &hubResp.HarnessConfigs[i]
 					}
-					for _, hc := range hubResp.HarnessConfigs {
-						if !localNames[hc.Name] {
-							entries = append(entries, hcEntry{
-								Name:    hc.Name,
-								Harness: hc.Harness,
-								Source:  "hub",
-								ID:      hc.ID,
-								Status:  hc.Status,
-							})
+
+					// Update local entries with hub status and validate storage
+					for i := range entries {
+						if hubHC, exists := hubMap[entries[i].Name]; exists {
+							entries[i].ID = hubHC.ID
+							entries[i].Status = hubHC.Status
+
+							// Validate storage to check for stale content
+							report, err := hubCtx.Client.HarnessConfigs().Validate(context.Background(), hubHC.ID)
+							if err == nil && len(report.Issues) > 0 {
+								// Storage has issues
+								entries[i].Source = "local+hub (storage-stale)"
+							} else {
+								// Storage is valid, compare local vs DB
+								files, err := transfer.CollectFiles(entries[i].Path, nil)
+								if err == nil {
+									localHash := transfer.ComputeContentHash(files)
+									if localHash == hubHC.ContentHash {
+										entries[i].Source = "local+hub (in-sync)"
+									} else {
+										entries[i].Source = "local+hub (local-outdated)"
+									}
+								} else {
+									entries[i].Source = "local+hub (error)"
+								}
+							}
+							delete(hubMap, entries[i].Name)
 						}
+					}
+
+					// Add hub-only entries
+					for name, hc := range hubMap {
+						entries = append(entries, hcEntry{
+							Name:    name,
+							Harness: hc.Harness,
+							Source:  "hub-only",
+							ID:      hc.ID,
+							Status:  hc.Status,
+						})
 					}
 				}
 			}
@@ -669,6 +701,18 @@ func syncHarnessConfigToHub(hubCtx *HubContext, name, localPath, scope, scopeID,
 			Size: f.Size,
 			Hash: f.Hash,
 			Mode: f.Mode,
+		}
+	}
+
+	// Upload manifest.json to storage if ManifestURL is provided
+	if uploadResp.ManifestURL != "" {
+		fmt.Println("Uploading manifest.json...")
+		manifestBytes, err := json.Marshal(manifest)
+		if err != nil {
+			return fmt.Errorf("failed to marshal manifest: %w", err)
+		}
+		if err := transfer.NewClient(nil).UploadFileWithMethod(ctx, uploadResp.ManifestURL, "PUT", nil, bytes.NewReader(manifestBytes)); err != nil {
+			return fmt.Errorf("failed to upload manifest.json: %w", err)
 		}
 	}
 

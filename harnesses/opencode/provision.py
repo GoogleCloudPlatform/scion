@@ -19,20 +19,20 @@ by `sciontool harness provision --manifest ...`. The host-side
 ContainerScriptHarness has already:
 
   * Staged this script and config.yaml under $HOME/.scion/harness/.
-  * Projected available auth env vars into the container's launch environment
-    (so the OpenCode child process will see ANTHROPIC_API_KEY, OPENAI_API_KEY,
-    etc. — but `sciontool harness provision` strips them from THIS script's env
-    for containment, so we read the *names* of available creds from
-    inputs/auth-candidates.json instead of os.environ).
+   * Projected available auth env vars into the container's launch environment
+     (so the OpenCode child process will see ANTHROPIC_API_KEY, OPENAI_API_KEY,
+     OPENCODE_API_KEY, etc. — but `sciontool harness provision` strips them from
+     THIS script's env for containment, so we read the *names* of available
+     creds from inputs/auth-candidates.json instead of os.environ).
   * Mounted any auth file (e.g. ~/.local/share/opencode/auth.json) at the
     declared container_path.
 
 This script's job is therefore minimal:
 
-  1. Determine which auth method OpenCode will use, honoring an explicit
-     selection if present and otherwise applying the same precedence as the
-     compiled OpenCode harness:
-         AnthropicAPIKey > OpenAIAPIKey > OpenCodeAuthFile.
+   1. Determine which auth method OpenCode will use, honoring an explicit
+      selection if present and otherwise applying the same precedence as the
+      compiled OpenCode harness:
+          AnthropicAPIKey > OpenAIAPIKey > OpenCodeAPIKey > OpenCodeAuthFile.
   2. Fail (exit 1) with an actionable message if no method is available.
   3. Write outputs/resolved-auth.json describing the choice (for diagnostics
      and resume-time consistency).
@@ -62,9 +62,10 @@ except ImportError:
     scion_harness = None  # type: ignore[assignment]
 
 OPENCODE_AUTH_FILE = "~/.local/share/opencode/auth.json"
-OPENCODE_CONFIG_FILE = "~/.config/opencode/opencode.json"
+OPENCODE_CONFIG_DIR = "~/.config/opencode"
+OPENCODE_CONFIG_CANDIDATES = ("opencode.jsonc", "opencode.json")
 
-VALID_AUTH_TYPES = ("api-key", "auth-file", "vertex-ai")
+VALID_AUTH_TYPES = ("api-key", "auth-file", "vertex-ai", "none")
 
 # Exit codes mirror the contract documented in the design doc:
 #   0 = success
@@ -80,9 +81,42 @@ def _expand(path: str) -> str:
     return os.path.expanduser(os.path.expandvars(path))
 
 
+def _resolve_opencode_config_path() -> str:
+    """Resolve the OpenCode config file path.
+
+    Prefers opencode.jsonc over opencode.json if present. Defaults to
+    opencode.json if neither exists.
+    """
+    base = _expand(OPENCODE_CONFIG_DIR)
+    for name in OPENCODE_CONFIG_CANDIDATES:
+        candidate = os.path.join(base, name)
+        if os.path.isfile(candidate):
+            return candidate
+    return os.path.join(base, "opencode.json")
+
+
+def _strip_jsonc_comments(text: str) -> str:
+    """Strip // and /* */ comments from JSONC text for json.loads parsing."""
+    import re
+
+    text = re.sub(r"//.*$", "", text, flags=re.MULTILINE)
+    text = re.sub(r"/\*.*?\*/", "", text, flags=re.DOTALL)
+    return text
+
+
 def _load_json(path: str) -> Any:
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
+
+
+def _load_json_or_jsonc(path: str) -> Any:
+    """Load a JSON or JSONC file, stripping comments if needed."""
+    with open(path, "r", encoding="utf-8") as f:
+        text = f.read()
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return json.loads(_strip_jsonc_comments(text))
 
 
 def _write_json(path: str, payload: Any) -> None:
@@ -165,10 +199,13 @@ def _select_auth_method(
     """
     has_anthropic = "ANTHROPIC_API_KEY" in env_keys
     has_openai = "OPENAI_API_KEY" in env_keys
+    has_opencode = "OPENCODE_API_KEY" in env_keys
     has_authfile = _opencode_auth_file_present(file_paths)
 
     has_vertex_project = bool(env_keys & {"GOOGLE_CLOUD_PROJECT", "VERTEXAI_PROJECT"})
-    has_vertex_location = bool(env_keys & {"GOOGLE_CLOUD_REGION", "GOOGLE_CLOUD_LOCATION", "VERTEX_LOCATION"})
+    has_vertex_location = bool(
+        env_keys & {"GOOGLE_CLOUD_REGION", "GOOGLE_CLOUD_LOCATION", "VERTEX_LOCATION"}
+    )
     # gcp_metadata_mode is not currently populated in auth-candidates.json by
     # the Go staging layer; this guard is reserved for future use.
     gcp_meta_mode = str(candidates.get("gcp_metadata_mode") or "").strip()
@@ -186,9 +223,11 @@ def _select_auth_method(
                 return "api-key", "ANTHROPIC_API_KEY"
             if has_openai:
                 return "api-key", "OPENAI_API_KEY"
+            if has_opencode:
+                return "api-key", "OPENCODE_API_KEY"
             raise ValueError(
                 "opencode: auth type 'api-key' selected but no API key found; "
-                "set ANTHROPIC_API_KEY or OPENAI_API_KEY"
+                "set ANTHROPIC_API_KEY, OPENAI_API_KEY, or OPENCODE_API_KEY"
             )
         if explicit == "auth-file":
             if not has_authfile:
@@ -197,6 +236,8 @@ def _select_auth_method(
                     f"found; expected {OPENCODE_AUTH_FILE}"
                 )
             return "auth-file", ""
+        if explicit == "none":
+            return "none", ""
         if explicit == "vertex-ai":
             if not has_vertex_project or not has_vertex_location:
                 raise ValueError(
@@ -216,15 +257,18 @@ def _select_auth_method(
         return "api-key", "ANTHROPIC_API_KEY"
     if has_openai:
         return "api-key", "OPENAI_API_KEY"
+    if has_opencode:
+        return "api-key", "OPENCODE_API_KEY"
     if has_authfile:
         return "auth-file", ""
     if has_vertex:
         return "vertex-ai", ""
 
     raise ValueError(
-        "opencode: no valid auth method found; set ANTHROPIC_API_KEY or "
-        f"OPENAI_API_KEY, provide auth credentials at {OPENCODE_AUTH_FILE}, "
-        "or configure GOOGLE_CLOUD_PROJECT + GOOGLE_CLOUD_REGION for Vertex AI"
+        "opencode: no valid auth method found; set ANTHROPIC_API_KEY, "
+        "OPENAI_API_KEY, or OPENCODE_API_KEY, provide auth credentials at "
+        f"{OPENCODE_AUTH_FILE}, or configure GOOGLE_CLOUD_PROJECT + "
+        "GOOGLE_CLOUD_REGION for Vertex AI"
     )
 
 
@@ -253,7 +297,10 @@ def _translate_mcp_server(name: str, spec: dict[str, Any]) -> dict[str, Any] | N
     if transport == "stdio":
         cmd = spec.get("command")
         if not isinstance(cmd, str) or not cmd:
-            print(f"opencode provision: mcp server {name!r}: stdio transport missing command", file=sys.stderr)
+            print(
+                f"opencode provision: mcp server {name!r}: stdio transport missing command",
+                file=sys.stderr,
+            )
             return None
         args = spec.get("args") or []
         if not isinstance(args, list):
@@ -271,7 +318,10 @@ def _translate_mcp_server(name: str, spec: dict[str, Any]) -> dict[str, Any] | N
     if transport in ("sse", "streamable-http"):
         url = spec.get("url")
         if not isinstance(url, str) or not url:
-            print(f"opencode provision: mcp server {name!r}: {transport} transport missing url", file=sys.stderr)
+            print(
+                f"opencode provision: mcp server {name!r}: {transport} transport missing url",
+                file=sys.stderr,
+            )
             return None
         out = {
             "type": "remote",
@@ -282,7 +332,10 @@ def _translate_mcp_server(name: str, spec: dict[str, Any]) -> dict[str, Any] | N
             out["headers"] = {str(k): str(v) for k, v in headers.items()}
         return out
 
-    print(f"opencode provision: mcp server {name!r}: unsupported transport {transport!r}", file=sys.stderr)
+    print(
+        f"opencode provision: mcp server {name!r}: unsupported transport {transport!r}",
+        file=sys.stderr,
+    )
     return None
 
 
@@ -317,13 +370,16 @@ def _apply_mcp_servers(bundle: str) -> int:
     if not translated:
         return 0
 
-    config_path = _expand(OPENCODE_CONFIG_FILE)
+    config_path = _resolve_opencode_config_path()
     config_data: dict[str, Any] = {}
     if os.path.isfile(config_path):
         try:
-            existing = _load_json(config_path)
-        except (OSError, json.JSONDecodeError) as exc:
-            print(f"opencode provision: existing opencode.json not readable, recreating: {exc}", file=sys.stderr)
+            existing = _load_json_or_jsonc(config_path)
+        except (OSError, json.JSONDecodeError, ValueError) as exc:
+            print(
+                f"opencode provision: existing {os.path.basename(config_path)} not readable, recreating: {exc}",
+                file=sys.stderr,
+            )
             existing = {}
         if isinstance(existing, dict):
             config_data = existing
@@ -338,10 +394,15 @@ def _apply_mcp_servers(bundle: str) -> int:
     try:
         _write_json(config_path, config_data)
     except OSError as exc:
-        print(f"opencode provision: failed to write opencode.json: {exc}", file=sys.stderr)
+        print(
+            f"opencode provision: failed to write {os.path.basename(config_path)}: {exc}",
+            file=sys.stderr,
+        )
         return 0
 
-    print(f"opencode provision: applied {len(translated)} mcp server(s)", file=sys.stderr)
+    print(
+        f"opencode provision: applied {len(translated)} mcp server(s)", file=sys.stderr
+    )
     return len(translated)
 
 
@@ -363,6 +424,25 @@ def _read_mcp_servers_inline(bundle: str) -> dict[str, dict[str, Any]]:
     return {str(k): v for k, v in servers.items() if isinstance(v, dict)}
 
 
+def _inject_scion_plugin(bundle: str) -> None:
+    """Copy scion-plugin.js from harness bundle to OpenCode's plugin directory."""
+    plugin_src = os.path.join(bundle, "scion-plugin.js")
+    if not os.path.isfile(plugin_src):
+        print(
+            "opencode provision: scion-plugin.js not found in harness bundle",
+            file=sys.stderr,
+        )
+        return
+    plugin_dir = os.path.expanduser("~/.config/opencode/plugins")
+    os.makedirs(plugin_dir, exist_ok=True)
+    plugin_dst = os.path.join(plugin_dir, "scion-plugin.js")
+    with open(plugin_src, "r") as f:
+        content = f.read()
+    with open(plugin_dst, "w") as f:
+        f.write(content)
+    os.chmod(plugin_dst, 0o644)
+
+
 def _provision(manifest: dict[str, Any]) -> int:
     bundle = manifest.get("harness_bundle_dir") or "$HOME/.scion/harness"
     bundle = _expand(bundle)
@@ -378,7 +458,10 @@ def _provision(manifest: dict[str, Any]) -> int:
         try:
             candidates = _load_json(auth_candidates_path) or {}
         except (OSError, json.JSONDecodeError) as exc:
-            print(f"opencode provision: invalid auth-candidates.json: {exc}", file=sys.stderr)
+            print(
+                f"opencode provision: invalid auth-candidates.json: {exc}",
+                file=sys.stderr,
+            )
             return EXIT_ERROR
 
     explicit = str(candidates.get("explicit_type") or "").strip()
@@ -394,19 +477,27 @@ def _provision(manifest: dict[str, Any]) -> int:
     secret_files = _env_secret_files(candidates)
 
     if not candidates and no_auth_behavior:
-        print(f"opencode provision: no-auth mode (behavior={no_auth_behavior}), skipping auth setup", file=sys.stderr)
+        print(
+            f"opencode provision: no-auth mode (behavior={no_auth_behavior}), skipping auth setup",
+            file=sys.stderr,
+        )
         method = "none"
         env_key = ""
     else:
         try:
-            method, env_key = _select_auth_method(explicit, env_keys, file_paths, candidates)
+            method, env_key = _select_auth_method(
+                explicit, env_keys, file_paths, candidates
+            )
         except ValueError as exc:
             print(str(exc), file=sys.stderr)
             return EXIT_ERROR
 
     outputs = manifest.get("outputs") or {}
     env_out = _expand(outputs.get("env") or os.path.join(bundle, "outputs", "env.json"))
-    auth_out = _expand(outputs.get("resolved_auth") or os.path.join(bundle, "outputs", "resolved-auth.json"))
+    auth_out = _expand(
+        outputs.get("resolved_auth")
+        or os.path.join(bundle, "outputs", "resolved-auth.json")
+    )
 
     resolved_payload: dict[str, Any] = {
         "schema_version": 1,
@@ -427,9 +518,14 @@ def _provision(manifest: dict[str, Any]) -> int:
     env_payload: dict[str, Any] = {}
 
     if method == "vertex-ai":
-        project = _resolve_secret(secret_files, "GOOGLE_CLOUD_PROJECT", "VERTEXAI_PROJECT")
+        project = _resolve_secret(
+            secret_files, "GOOGLE_CLOUD_PROJECT", "VERTEXAI_PROJECT"
+        )
         location = _resolve_secret(
-            secret_files, "GOOGLE_CLOUD_REGION", "GOOGLE_CLOUD_LOCATION", "VERTEX_LOCATION"
+            secret_files,
+            "GOOGLE_CLOUD_REGION",
+            "GOOGLE_CLOUD_LOCATION",
+            "VERTEX_LOCATION",
         )
         if project:
             env_payload["VERTEXAI_PROJECT"] = project
@@ -449,6 +545,8 @@ def _provision(manifest: dict[str, Any]) -> int:
     # provisioning errors — auth is the hard gate (per design Q4: unsupported
     # transports are best-effort warn-and-skip).
     _apply_mcp_servers(bundle)
+
+    _inject_scion_plugin(bundle)
 
     print(f"opencode provision: method={method}", file=sys.stderr)
     return EXIT_OK
@@ -479,10 +577,16 @@ def main() -> int:
     try:
         manifest = _load_json(manifest_path)
     except FileNotFoundError:
-        print(f"opencode provision: manifest not found at {manifest_path}", file=sys.stderr)
+        print(
+            f"opencode provision: manifest not found at {manifest_path}",
+            file=sys.stderr,
+        )
         return EXIT_ERROR
     except (OSError, json.JSONDecodeError) as exc:
-        print(f"opencode provision: failed to load manifest {manifest_path}: {exc}", file=sys.stderr)
+        print(
+            f"opencode provision: failed to load manifest {manifest_path}: {exc}",
+            file=sys.stderr,
+        )
         return EXIT_ERROR
 
     if not isinstance(manifest, dict):

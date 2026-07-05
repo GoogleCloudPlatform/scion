@@ -86,8 +86,8 @@ func TestBootstrapHarnessConfigsFromDir_ImportsConfigs(t *testing.T) {
 	if hc.ContentHash == "" {
 		t.Error("expected non-empty content hash")
 	}
-	if len(stor.objects) != 3 {
-		t.Errorf("expected 3 objects in storage, got %d", len(stor.objects))
+	if len(stor.objects) != 4 {
+		t.Errorf("expected 4 objects in storage (3 files + manifest.json), got %d", len(stor.objects))
 	}
 }
 

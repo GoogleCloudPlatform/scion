@@ -92,7 +92,7 @@ func init() {
 	rootCmd.AddCommand(hookCmd)
 
 	hookCmd.Flags().StringVar(&hookDialect, "dialect", "claude",
-		"Harness dialect for event parsing (claude, gemini, codex)")
+		"Harness dialect for event parsing (claude, gemini, codex, opencode)")
 	hookCmd.Flags().StringVar(&hookData, "data", "",
 		"Additional data for subcommands")
 

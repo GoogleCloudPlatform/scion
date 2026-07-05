@@ -246,6 +246,7 @@ type VersionedSettings struct {
 	Runtimes             map[string]V1RuntimeConfig    `json:"runtimes,omitempty" yaml:"runtimes,omitempty" koanf:"runtimes"`
 	ImageRegistry        string                        `json:"image_registry,omitempty" yaml:"image_registry,omitempty" koanf:"image_registry"`
 	WorkspacePath        string                        `json:"workspace_path,omitempty" yaml:"workspace_path,omitempty" koanf:"workspace_path"`
+	DisableLocalAuth     *bool                         `json:"disable_local_auth,omitempty" yaml:"disable_local_auth,omitempty" koanf:"disable_local_auth"`
 	HarnessConfigs       map[string]HarnessConfigEntry `json:"harness_configs,omitempty" yaml:"harness_configs,omitempty" koanf:"harness_configs"`
 	Profiles             map[string]V1ProfileConfig    `json:"profiles,omitempty" yaml:"profiles,omitempty" koanf:"profiles"`
 	SharedDirs           []api.SharedDir               `json:"shared_dirs,omitempty" yaml:"shared_dirs,omitempty" koanf:"shared_dirs"`
@@ -704,6 +705,11 @@ type V1CloudRunConfig struct {
 	Region string `json:"region,omitempty" yaml:"region,omitempty" koanf:"region"`
 }
 
+// V1DockerConfig holds Docker-specific runtime settings.
+type V1DockerConfig struct {
+	Network string `json:"network,omitempty" yaml:"network,omitempty" koanf:"network"`
+}
+
 // V1RuntimeConfig extends RuntimeConfig with a Type field.
 type V1RuntimeConfig struct {
 	Type              string            `json:"type,omitempty" yaml:"type,omitempty" koanf:"type"`
@@ -716,6 +722,8 @@ type V1RuntimeConfig struct {
 	ListAllNamespaces bool              `json:"list_all_namespaces,omitempty" yaml:"list_all_namespaces,omitempty" koanf:"list_all_namespaces"`
 	// CloudRun holds Cloud Run-specific settings when Type is "cloudrun".
 	CloudRun *V1CloudRunConfig `json:"cloudrun,omitempty" yaml:"cloudrun,omitempty" koanf:"cloudrun"`
+	// Docker holds Docker-specific settings when Type is "docker" or "podman".
+	Docker *V1DockerConfig `json:"docker,omitempty" yaml:"docker,omitempty" koanf:"docker"`
 }
 
 // HarnessConfigEntry defines a harness configuration entry in versioned settings.
@@ -1774,9 +1782,10 @@ func convertVersionedToLegacy(vs *VersionedSettings) *Settings {
 	}
 
 	s := &Settings{
-		ActiveProfile:   vs.ActiveProfile,
-		DefaultTemplate: vs.DefaultTemplate,
-		WorkspacePath:   vs.WorkspacePath,
+		ActiveProfile:    vs.ActiveProfile,
+		DefaultTemplate:  vs.DefaultTemplate,
+		WorkspacePath:    vs.WorkspacePath,
+		DisableLocalAuth: vs.DisableLocalAuth,
 	}
 
 	// Convert Hub

@@ -59,9 +59,13 @@ var (
 	// Server daemon flags
 	serverStartForeground bool
 	stopForce             bool
+	serverNoBrowser       bool
 
 	// Hosted mode flag (replaces former "production" mode)
 	hostedMode bool
+
+	// Force overwrite harness-configs on startup
+	forceHarnessConfigs bool
 )
 
 const (
@@ -267,6 +271,9 @@ func init() {
 
 	// Runtime Broker auto-provide flag
 	serverStartCmd.Flags().BoolVar(&serverAutoProvide, "auto-provide", false, "Automatically add runtime broker as provider for new projects")
+
+	// Harness-config force flag
+	serverStartCmd.Flags().BoolVar(&forceHarnessConfigs, "force-harness-configs", false, "Force overwrite of harness-config files on startup (discards user customizations)")
 
 	// Web Frontend flags
 	serverStartCmd.Flags().BoolVar(&enableWeb, "enable-web", false, "Enable the web frontend")

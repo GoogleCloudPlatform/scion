@@ -66,6 +66,7 @@ func GatherAuthWithEnv(env map[string]string, localSources bool, authMeta *confi
 		ClaudeOAuthToken: lookup("CLAUDE_CODE_OAUTH_TOKEN"),
 		OpenAIAPIKey:     lookup("OPENAI_API_KEY"),
 		CodexAPIKey:      lookup("CODEX_API_KEY"),
+		OpenCodeAPIKey:   lookup("OPENCODE_API_KEY"),
 		GoogleCloudProject: util.FirstNonEmpty(
 			lookup("GOOGLE_CLOUD_PROJECT"),
 			lookup("GCP_PROJECT"),
@@ -339,6 +340,10 @@ func RequiredAuthSecrets(harnessName, authSelectedType string, gcpSAAssigned boo
 		effectiveType = "api-key"
 	}
 
+	if effectiveType == "none" {
+		return nil
+	}
+
 	switch harnessName {
 	case "claude", "gemini", "opencode", "codex":
 		if effectiveType == "vertex-ai" && !gcpSAAssigned {
@@ -461,6 +466,8 @@ func RequiredAuthEnvKeys(harnessName, authSelectedType string) [][]string {
 	switch harnessName {
 	case "claude":
 		switch effectiveType {
+		case "none":
+			return nil
 		case "api-key":
 			return [][]string{{"ANTHROPIC_API_KEY"}}
 		case "oauth-token":
@@ -472,6 +479,8 @@ func RequiredAuthEnvKeys(harnessName, authSelectedType string) [][]string {
 		}
 	case "gemini":
 		switch effectiveType {
+		case "none":
+			return nil
 		case "api-key":
 			return [][]string{{"GEMINI_API_KEY", "GOOGLE_API_KEY"}}
 		case "vertex-ai":
@@ -479,11 +488,15 @@ func RequiredAuthEnvKeys(harnessName, authSelectedType string) [][]string {
 		}
 	case "opencode":
 		switch effectiveType {
+		case "none":
+			return nil
 		case "api-key":
-			return [][]string{{"ANTHROPIC_API_KEY", "OPENAI_API_KEY"}}
+			return [][]string{{"ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENCODE_API_KEY"}}
 		}
 	case "codex":
 		switch effectiveType {
+		case "none":
+			return nil
 		case "api-key":
 			return [][]string{{"CODEX_API_KEY", "OPENAI_API_KEY"}}
 		}

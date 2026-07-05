@@ -409,6 +409,62 @@ func TestSignalLimitsExceeded_CreatesTriggerFile(t *testing.T) {
 	assert.NoError(t, err, "trigger file should exist after signalLimitsExceeded")
 }
 
+func TestLimitsHandler_SkipsHeartbeatEvents(t *testing.T) {
+	scrubHubEnv(t)
+	tmpDir := t.TempDir()
+	limitsPath := filepath.Join(tmpDir, "agent-limits.json")
+
+	err := InitLimitsFile(limitsPath, 0, 10)
+	require.NoError(t, err)
+
+	h := &LimitsHandler{
+		maxTurns:      0,
+		maxModelCalls: 10,
+		limitsPath:    limitsPath,
+		statusHandler: &StatusHandler{StatusPath: filepath.Join(tmpDir, "agent-info.json")},
+	}
+
+	for i := 0; i < 50; i++ {
+		err := h.Handle(&hooks.Event{
+			Name: hooks.EventModelEnd,
+			Data: hooks.EventData{
+				Raw: map[string]interface{}{"_scion_heartbeat": true},
+			},
+		})
+		require.NoError(t, err)
+	}
+
+	ls := readLimitsFile(t, limitsPath)
+	assert.Equal(t, 0, ls.ModelCallCount)
+}
+
+func TestLimitsHandler_CountsNonHeartbeatModelEnd(t *testing.T) {
+	scrubHubEnv(t)
+	tmpDir := t.TempDir()
+	limitsPath := filepath.Join(tmpDir, "agent-limits.json")
+
+	err := InitLimitsFile(limitsPath, 0, 10)
+	require.NoError(t, err)
+
+	h := &LimitsHandler{
+		maxTurns:      0,
+		maxModelCalls: 10,
+		limitsPath:    limitsPath,
+		statusHandler: &StatusHandler{StatusPath: filepath.Join(tmpDir, "agent-info.json")},
+	}
+
+	err = h.Handle(&hooks.Event{
+		Name: hooks.EventModelEnd,
+		Data: hooks.EventData{
+			Raw: map[string]interface{}{},
+		},
+	})
+	require.NoError(t, err)
+
+	ls := readLimitsFile(t, limitsPath)
+	assert.Equal(t, 1, ls.ModelCallCount)
+}
+
 // readLimitsFile reads and parses an agent-limits.json file for test assertions.
 func readLimitsFile(t *testing.T, path string) LimitsState {
 	t.Helper()

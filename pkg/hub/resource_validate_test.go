@@ -19,6 +19,7 @@ package hub
 import (
 	"bytes"
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
@@ -104,13 +105,13 @@ func TestValidateStorage_MissingObject(t *testing.T) {
 
 	found := false
 	for _, issue := range report.Issues {
-		if issue.Kind == ValidationIssueMissingObject && issue.File == "home/.bashrc" {
+		if issue.Kind == ValidationIssueMissingObject && strings.Contains(issue.Message, "1 of 2 files missing") {
 			found = true
 			break
 		}
 	}
 	if !found {
-		t.Errorf("expected missing_object issue for home/.bashrc, got: %v", report.Issues)
+		t.Errorf("expected missing_object issue with summary message, got: %v", report.Issues)
 	}
 }
 
@@ -146,15 +147,9 @@ func TestValidateStorage_MissingManifest(t *testing.T) {
 		t.Fatalf("ValidateStorage failed: %v", err)
 	}
 
-	found := false
-	for _, issue := range report.Issues {
-		if issue.Kind == ValidationIssueMissingManifest {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Errorf("expected missing_manifest issue, got: %v", report.Issues)
+	// After removing manifest check, this should pass if files are valid
+	if len(report.Issues) > 0 {
+		t.Errorf("expected no issues, got: %v", report.Issues)
 	}
 }
 
@@ -243,13 +238,13 @@ func TestValidateStorage_ContentHashMismatch(t *testing.T) {
 
 	found := false
 	for _, issue := range report.Issues {
-		if issue.Kind == ValidationIssueContentHashMismatch && issue.File == "home/.bashrc" {
+		if issue.Kind == ValidationIssueContentHashMismatch && strings.Contains(issue.Message, "1 files have outdated content") {
 			found = true
 			break
 		}
 	}
 	if !found {
-		t.Errorf("expected content_hash_mismatch issue for home/.bashrc, got: %v", report.Issues)
+		t.Errorf("expected content_hash_mismatch issue with summary message, got: %v", report.Issues)
 	}
 }
 

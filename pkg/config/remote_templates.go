@@ -254,7 +254,7 @@ func resolveGitHubRef(ctx context.Context, parts *GitHubURLParts, token string) 
 	}
 
 	cmd := exec.CommandContext(ctx, "git", "ls-remote", "--heads", repoURL)
-	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "GIT_ASKPASS=echo")
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
 	output, err := cmd.Output()
 	if err != nil {
 		return

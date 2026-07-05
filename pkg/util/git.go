@@ -163,7 +163,8 @@ func IsIgnored(dir, path string) bool {
 }
 
 // CreateWorktree creates a new git worktree at the specified path with a new branch.
-func CreateWorktree(path, branch string) error {
+// When source is non-empty, the worktree is based on that commit-ish instead of HEAD.
+func CreateWorktree(path, branch, source string) error {
 	// Guard: refuse to create worktrees inside an agent container.
 	// SCION_HOST_UID is set by the runtime when launching containers.
 	// Creating worktrees inside containers produces path-identity mismatches
@@ -183,15 +184,22 @@ func CreateWorktree(path, branch string) error {
 	}
 	root := filepath.Dir(commonDir)
 
-	// git worktree add --relative-paths -b <branch> <path>
+	// git worktree add --relative-paths -b <branch> <path> [<source>]
 	// We run from root to ensure --relative-paths are calculated from root
-	cmd := exec.Command("git", "worktree", "add", "--relative-paths", "-b", branch, path)
+	args := []string{"worktree", "add", "--relative-paths", "-b", branch}
+	if source != "" {
+		args = append(args, path, source)
+	} else {
+		args = append(args, path)
+	}
+	cmd := exec.Command("git", args...)
 	cmd.Dir = root
 	if output, err := cmd.CombinedOutput(); err != nil {
 		outputStr := string(output)
 		// If branch already exists, try to just add it
 		if strings.Contains(outputStr, "already exists") {
-			cmd = exec.Command("git", "worktree", "add", "--relative-paths", path, branch)
+			fallbackArgs := []string{"worktree", "add", "--relative-paths", path, branch}
+			cmd = exec.Command("git", fallbackArgs...)
 			cmd.Dir = root
 			if output, err := cmd.CombinedOutput(); err != nil {
 				outputStr = string(output)
@@ -205,6 +213,32 @@ func CreateWorktree(path, branch string) error {
 		return fmt.Errorf("failed to create worktree: %s", strings.TrimSpace(outputStr))
 	}
 	return nil
+}
+
+// DefaultBranch returns the default branch name for the repository at projectDir.
+// It first tries to read refs/remotes/origin/HEAD, then falls back to the current
+// HEAD branch, and finally returns "main" if both fail.
+func DefaultBranch(projectDir string) string {
+	cmd := exec.Command("git", "symbolic-ref", "refs/remotes/origin/HEAD")
+	if projectDir != "" {
+		cmd.Dir = projectDir
+	}
+	output, err := cmd.Output()
+	if err == nil {
+		ref := strings.TrimSpace(string(output))
+		if parts := strings.Split(ref, "/"); len(parts) > 0 {
+			return parts[len(parts)-1]
+		}
+	}
+	// Fallback: current HEAD branch
+	cmd = exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD")
+	if projectDir != "" {
+		cmd.Dir = projectDir
+	}
+	if output, err := cmd.Output(); err == nil {
+		return strings.TrimSpace(string(output))
+	}
+	return "main"
 }
 
 // RemoveWorktree removes a git worktree at the specified path.
@@ -573,8 +607,10 @@ func CloneSharedWorkspace(workspacePath, cloneURL, branch, token string) error {
 	}
 	args = append(args, authURL, workspacePath)
 
+	gitEnv := append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+
 	cmd := exec.Command("git", args...)
-	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	cmd.Env = gitEnv
 	output, err := cmd.CombinedOutput()
 
 	if err != nil && branch != "" && isRemoteBranchNotFound(string(output)) {
@@ -584,7 +620,7 @@ func CloneSharedWorkspace(workspacePath, cloneURL, branch, token string) error {
 
 		fallbackArgs := []string{"clone", authURL, workspacePath}
 		fallbackCmd := exec.Command("git", fallbackArgs...)
-		fallbackCmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+		fallbackCmd.Env = gitEnv
 		output, err = fallbackCmd.CombinedOutput()
 		if err != nil {
 			sanitized := strings.TrimSpace(sanitizeGitOutput(string(output), token))

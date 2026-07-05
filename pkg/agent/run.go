@@ -142,7 +142,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 
 	util.Debugf("Start: calling GetAgent name=%s template=%q image=%q harnessConfig=%q projectPath=%q profile=%q",
 		opts.Name, opts.Template, opts.Image, opts.HarnessConfig, opts.ProjectPath, opts.Profile)
-	agentDir, agentHome, agentWorkspace, finalScionCfg, err := GetAgent(ctx, opts.Name, opts.Template, opts.Image, opts.HarnessConfig, opts.ProjectPath, opts.Profile, "", opts.Branch, opts.Workspace, startInlineConfig)
+	agentDir, agentHome, agentWorkspace, finalScionCfg, err := GetAgent(ctx, opts.Name, opts.Template, opts.Image, opts.HarnessConfig, opts.ProjectPath, opts.Profile, "", opts.Branch, opts.Source, opts.Workspace, startInlineConfig)
 	if err != nil {
 		return nil, err
 	}
@@ -178,6 +178,10 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		util.Debugf("Start: LoadEffectiveSettings(%s) error: %v", projectDir, err)
 	}
 	config.PrintDeprecationWarnings(settingsWarnings)
+
+	if settings != nil && settings.DisableLocalAuth != nil && *settings.DisableLocalAuth {
+		opts.DisableLocalAuth = true
+	}
 
 	// Phase 5: Resolve project ID from settings if not already provided via env
 	if projectID == "" && settings != nil && settings.Hub != nil {
@@ -367,6 +371,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 			ProfileName:   profileName,
 			Settings:      settings,
 			ConfigDirPath: opts.HarnessConfigPath,
+			HarnessAuth:   opts.HarnessAuth,
 		})
 		if err != nil {
 			util.Debugf("harness.Resolve fell back to New(%q): %v", harnessName, err)
@@ -407,7 +412,8 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	// auth overlay so that GatherAuthWithEnv can see credentials like
 	// GOOGLE_CLOUD_PROJECT and GOOGLE_CLOUD_REGION declared in the active
 	// settings profile.
-	if settings != nil && !opts.BrokerMode {
+	localSources := !opts.BrokerMode && !opts.DisableLocalAuth
+	if settings != nil && localSources {
 		var settingsEnv map[string]string
 		if harnessConfigName != "" {
 			if hcEntry, err := settings.ResolveHarnessConfig(profileName, harnessConfigName); err == nil {
@@ -442,7 +448,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	var auth api.AuthConfig
 	var resolvedAuth *api.ResolvedAuth
 	if !opts.NoAuth {
-		auth = harness.GatherAuthWithEnv(authEnvOverlay, !opts.BrokerMode, authMeta)
+		auth = harness.GatherAuthWithEnv(authEnvOverlay, localSources, authMeta)
 		if opts.BrokerMode {
 			harness.OverlayFileSecrets(&auth, opts.ResolvedSecrets)
 		}
@@ -1225,6 +1231,7 @@ func isAuthEnvKey(key string, extraAuthKeys ...map[string]struct{}) bool {
 		"CLAUDE_CODE_OAUTH_TOKEN",
 		"OPENAI_API_KEY",
 		"CODEX_API_KEY",
+		"OPENCODE_API_KEY",
 		"GOOGLE_CLOUD_PROJECT",
 		"GCP_PROJECT",
 		"ANTHROPIC_VERTEX_PROJECT_ID",

@@ -475,6 +475,7 @@ type ScionConfig struct {
 	// Agent operational parameters (creation-time record)
 	Task   string `json:"task,omitempty" yaml:"task,omitempty"`
 	Branch string `json:"branch,omitempty" yaml:"branch,omitempty"`
+	Source string `json:"source,omitempty" yaml:"source,omitempty"`
 
 	// Info contains persisted metadata about the agent
 	Info *AgentInfo `json:"-" yaml:"-"`
@@ -506,10 +507,11 @@ type AuthConfig struct {
 	ClaudeOAuthToken string // CLAUDE_CODE_OAUTH_TOKEN (long-lived, from `claude setup-token`)
 	ClaudeAuthFile   string // ~/.claude/.credentials.json path (rotating refresh-token store)
 
-	// OpenAI/Codex auth
+	// OpenAI/Codex/OpenCode auth
 	OpenAIAPIKey     string
 	CodexAPIKey      string
 	CodexAuthFile    string
+	OpenCodeAPIKey   string
 	OpenCodeAuthFile string
 
 	// GCP metadata server mode ("block", "passthrough", "assign").
@@ -819,10 +821,12 @@ type StartOptions struct {
 	Env               map[string]string
 	ResolvedSecrets   []ResolvedSecret
 	BrokerMode        bool // When true, auth gathering skips local sources (broker env + filesystem)
+	DisableLocalAuth  bool // When true, auth gathering skips local sources (same as BrokerMode for auth)
 	Detached          *bool
 	Resume            bool
 	NoAuth            bool
 	Branch            string
+	Source            string
 	Workspace         string
 	GitClone          *GitCloneConfig // When set, skip workspace creation; sciontool clones inside container
 	SharedWorkspace   bool            // When true, workspace is a shared git clone (git-workspace hybrid); skip worktree, configure credential helper

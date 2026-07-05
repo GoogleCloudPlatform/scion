@@ -61,4 +61,3 @@ provisioner:
 		t.Errorf("expected no actions, got %d", len(plan.Actions))
 	}
 }
-

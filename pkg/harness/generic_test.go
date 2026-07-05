@@ -111,6 +111,7 @@ func TestGenericResolveAuth_AllCreds(t *testing.T) {
 		GoogleAPIKey:         "google",
 		OpenAIAPIKey:         "openai",
 		CodexAPIKey:          "codex",
+		OpenCodeAPIKey:       "opencode",
 		GoogleCloudProject:   "proj",
 		GoogleCloudRegion:    "region",
 		GoogleAppCredentials: "/adc.json",
@@ -129,6 +130,7 @@ func TestGenericResolveAuth_AllCreds(t *testing.T) {
 		"GOOGLE_API_KEY":       "google",
 		"OPENAI_API_KEY":       "openai",
 		"CODEX_API_KEY":        "codex",
+		"OPENCODE_API_KEY":     "opencode",
 		"GOOGLE_CLOUD_PROJECT": "proj",
 		"GOOGLE_CLOUD_REGION":  "region",
 	}

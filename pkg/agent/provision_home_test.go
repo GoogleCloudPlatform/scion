@@ -79,7 +79,7 @@ func TestProvisionAgentHomeCopy(t *testing.T) {
 
 	// Provision agent
 	agentName := "test-agent"
-	agentHome, _, _, err := ProvisionAgent(context.Background(), agentName, "test-tpl", "", "", projectScionDir, "", "", "", "")
+	agentHome, _, _, err := ProvisionAgent(context.Background(), agentName, "test-tpl", "", "", projectScionDir, "", "", "", "", "")
 	if err != nil {
 		t.Fatalf("ProvisionAgent failed: %v", err)
 	}
@@ -135,7 +135,7 @@ func TestProvisionAgentLegacyTemplateRejected(t *testing.T) {
 
 	// Provision agent - should fail with validation error
 	agentName := "legacy-agent"
-	_, _, _, err := ProvisionAgent(context.Background(), agentName, "legacy-tpl", "", "", projectScionDir, "", "", "", "")
+	_, _, _, err := ProvisionAgent(context.Background(), agentName, "legacy-tpl", "", "", projectScionDir, "", "", "", "", "")
 	if err == nil {
 		t.Fatal("expected error for legacy template with harness field, got nil")
 	}

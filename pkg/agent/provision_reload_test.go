@@ -60,7 +60,7 @@ func TestProvisionAgentReloadsConfig(t *testing.T) {
 
 	// Provision a claude agent using the "default" agnostic template with --harness-config=claude
 	agentName := "reload-test-agent"
-	_, _, cfg, err := ProvisionAgent(context.Background(), agentName, "default", "", "claude", projectScionDir, "", "", "", "")
+	_, _, cfg, err := ProvisionAgent(context.Background(), agentName, "default", "", "claude", projectScionDir, "", "", "", "", "")
 	if err != nil {
 		t.Fatalf("ProvisionAgent failed: %v", err)
 	}
@@ -106,7 +106,7 @@ func TestProvisionAgentWithHarnessAuthOverride(t *testing.T) {
 	// Provision with vertex-ai override via inline config (simulates --harness-auth vertex-ai)
 	agentName := "vertex-ai-override"
 	inlineCfg := &api.ScionConfig{AuthSelectedType: "vertex-ai"}
-	_, _, cfg, err := ProvisionAgent(context.Background(), agentName, "default", "", "claude", projectScionDir, "", "", "", "", inlineCfg)
+	_, _, cfg, err := ProvisionAgent(context.Background(), agentName, "default", "", "claude", projectScionDir, "", "", "", "", "", inlineCfg)
 	if err != nil {
 		t.Fatalf("ProvisionAgent failed: %v", err)
 	}

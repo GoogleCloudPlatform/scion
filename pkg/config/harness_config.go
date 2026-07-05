@@ -72,6 +72,10 @@ func LoadHarnessConfigDir(dirPath string) (*HarnessConfigDir, error) {
 		return nil, fmt.Errorf("failed to parse config.yaml: %w", err)
 	}
 
+	if entry.AuthSelectedType == "" && entry.Auth != nil && entry.Auth.DefaultType != "" {
+		entry.AuthSelectedType = entry.Auth.DefaultType
+	}
+
 	name := filepath.Base(absPath)
 	if entry.Name != "" {
 		if entry.Name == "." || entry.Name == ".." || strings.ContainsAny(entry.Name, "/\\") {
@@ -322,9 +326,9 @@ func mapEmbedFileToHomePath(homeDir, configDir, fileName string) string {
 		return filepath.Join(homeDir, ".codex", "config.toml")
 	case "scion_notify.sh":
 		return filepath.Join(homeDir, ".codex", "scion_notify.sh")
-	case "opencode.json":
+	case "opencode.json", "opencode.jsonc":
 		if configDir != "" {
-			return filepath.Join(homeDir, configDir, "opencode.json")
+			return filepath.Join(homeDir, configDir, fileName)
 		}
 		return ""
 	default:

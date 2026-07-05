@@ -112,7 +112,7 @@ func TestGitUtils(t *testing.T) {
 		branchName := "test-branch"
 
 		// Create
-		if err := CreateWorktree(worktreePath, branchName); err != nil {
+		if err := CreateWorktree(worktreePath, branchName, ""); err != nil {
 			t.Fatalf("CreateWorktree failed: %v", err)
 		}
 
@@ -132,7 +132,7 @@ func TestGitUtils(t *testing.T) {
 		// Test PruneWorktrees
 		prunePath := filepath.Join(repoDir, "prune-test")
 		pruneBranch := "prune-branch"
-		if err := CreateWorktree(prunePath, pruneBranch); err != nil {
+		if err := CreateWorktree(prunePath, pruneBranch, ""); err != nil {
 			t.Fatalf("CreateWorktree for prune failed: %v", err)
 		}
 		// Manually remove directory to simulate stale worktree
@@ -144,7 +144,7 @@ func TestGitUtils(t *testing.T) {
 			t.Fatalf("PruneWorktrees failed: %v", err)
 		}
 		// Verify we can create it again (if prune failed, this might fail with 'already exists')
-		if err := CreateWorktree(prunePath, pruneBranch); err != nil {
+		if err := CreateWorktree(prunePath, pruneBranch, ""); err != nil {
 			t.Errorf("Failed to recreate worktree after prune: %v", err)
 		}
 		// Clean up
@@ -154,7 +154,7 @@ func TestGitUtils(t *testing.T) {
 	t.Run("PruneWorktreesIn", func(t *testing.T) {
 		prunePath := filepath.Join(repoDir, "prune-in-test")
 		pruneBranch := "prune-in-branch"
-		if err := CreateWorktree(prunePath, pruneBranch); err != nil {
+		if err := CreateWorktree(prunePath, pruneBranch, ""); err != nil {
 			t.Fatalf("CreateWorktree failed: %v", err)
 		}
 		// Manually remove directory to simulate stale worktree
@@ -174,7 +174,7 @@ func TestGitUtils(t *testing.T) {
 
 		// Verify we can create the worktree again (prune cleared the stale record)
 		os.Chdir(prevWd)
-		if err := CreateWorktree(prunePath, pruneBranch); err != nil {
+		if err := CreateWorktree(prunePath, pruneBranch, ""); err != nil {
 			t.Errorf("Failed to recreate worktree after PruneWorktreesIn: %v", err)
 		}
 		// Clean up
@@ -185,7 +185,7 @@ func TestGitUtils(t *testing.T) {
 		// Create a branch via worktree, then remove the worktree without deleting the branch
 		wtPath := filepath.Join(repoDir, "branch-del-test")
 		branch := "delete-me-branch"
-		if err := CreateWorktree(wtPath, branch); err != nil {
+		if err := CreateWorktree(wtPath, branch, ""); err != nil {
 			t.Fatalf("CreateWorktree failed: %v", err)
 		}
 		if _, err := RemoveWorktree(wtPath, false); err != nil {
@@ -217,7 +217,7 @@ func TestGitUtils(t *testing.T) {
 		wtPath := filepath.Join(repoDir, "wt-find")
 		branch := "find-branch"
 
-		if err := CreateWorktree(wtPath, branch); err != nil {
+		if err := CreateWorktree(wtPath, branch, ""); err != nil {
 			t.Fatalf("setup failed: %v", err)
 		}
 
@@ -242,7 +242,7 @@ func TestGitUtils(t *testing.T) {
 		wtPath := filepath.Join(repoDir, "wt-rm-branch")
 		branch := "rm-branch-test"
 
-		if err := CreateWorktree(wtPath, branch); err != nil {
+		if err := CreateWorktree(wtPath, branch, ""); err != nil {
 			t.Fatalf("CreateWorktree failed: %v", err)
 		}
 
@@ -326,7 +326,7 @@ func TestCreateWorktree_FromWorktreeSucceeds(t *testing.T) {
 
 	// Create a worktree from the main repo
 	wtPath := filepath.Join(mainRepo, "child-wt")
-	if err := CreateWorktree(wtPath, "child-branch"); err != nil {
+	if err := CreateWorktree(wtPath, "child-branch", ""); err != nil {
 		t.Fatalf("failed to create initial worktree: %v", err)
 	}
 
@@ -336,7 +336,7 @@ func TestCreateWorktree_FromWorktreeSucceeds(t *testing.T) {
 		t.Fatal(err)
 	}
 	siblingPath := filepath.Join(mainRepo, "sibling-wt")
-	if err := CreateWorktree(siblingPath, "sibling-branch"); err != nil {
+	if err := CreateWorktree(siblingPath, "sibling-branch", ""); err != nil {
 		t.Fatalf("expected worktree creation from within a worktree to succeed, got: %v", err)
 	}
 
@@ -353,7 +353,7 @@ func TestCreateWorktree_RejectsInsideContainer(t *testing.T) {
 	mainRepo := setupGitRepo(t)
 
 	wtPath := filepath.Join(mainRepo, "container-wt")
-	err := CreateWorktree(wtPath, "container-branch")
+	err := CreateWorktree(wtPath, "container-branch", "")
 	if err == nil {
 		t.Fatal("expected error creating worktree inside container context")
 	}

@@ -401,7 +401,7 @@ func TestRequiredAuthEnvKeys(t *testing.T) {
 		{"gemini vertex-ai", "gemini", "vertex-ai", [][]string{{"GOOGLE_CLOUD_PROJECT"}, {"GOOGLE_CLOUD_REGION", "CLOUD_ML_REGION", "GOOGLE_CLOUD_LOCATION"}}},
 
 		// OpenCode
-		{"opencode api-key", "opencode", "api-key", [][]string{{"ANTHROPIC_API_KEY", "OPENAI_API_KEY"}}},
+		{"opencode api-key", "opencode", "api-key", [][]string{{"ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENCODE_API_KEY"}}},
 		{"opencode auth-file", "opencode", "auth-file", nil},
 
 		// Codex
@@ -415,7 +415,7 @@ func TestRequiredAuthEnvKeys(t *testing.T) {
 		// Empty authType defaults to api-key
 		{"claude empty auth type", "claude", "", [][]string{{"ANTHROPIC_API_KEY"}}},
 		{"gemini empty auth type", "gemini", "", [][]string{{"GEMINI_API_KEY", "GOOGLE_API_KEY"}}},
-		{"opencode empty auth type", "opencode", "", [][]string{{"ANTHROPIC_API_KEY", "OPENAI_API_KEY"}}},
+		{"opencode empty auth type", "opencode", "", [][]string{{"ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENCODE_API_KEY"}}},
 		{"codex empty auth type", "codex", "", [][]string{{"CODEX_API_KEY", "OPENAI_API_KEY"}}},
 
 		// Unknown/empty

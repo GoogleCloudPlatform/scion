@@ -12,4 +12,5 @@ func RegisterBuiltins(processor *hooks.HarnessProcessor) {
 	processor.RegisterDialect(NewClaudeDialect())
 	processor.RegisterDialect(NewGeminiDialect())
 	processor.RegisterDialect(NewCodexDialect())
+	processor.RegisterDialect(NewOpenCodeDialect())
 }

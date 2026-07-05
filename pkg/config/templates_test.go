@@ -220,6 +220,114 @@ func TestUpdateDefaultTemplates(t *testing.T) {
 	}
 }
 
+func TestRefreshDefaultTemplates_PreservesHarnessConfigCustomizations(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "scion-test-refresh-hc-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	origHome := os.Getenv("HOME")
+	os.Setenv("HOME", tmpDir)
+	defer os.Setenv("HOME", origHome)
+
+	// First call to seed initial harness-configs (force=false)
+	if err := RefreshDefaultTemplates(GetMockHarnesses(), false); err != nil {
+		t.Fatalf("expected first refresh to succeed, got: %v", err)
+	}
+
+	// Find a seeded harness-config and customize it
+	harnessConfigsDir := filepath.Join(tmpDir, DotScion, harnessConfigsDirName)
+	entries, err := os.ReadDir(harnessConfigsDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) == 0 {
+		t.Fatal("expected at least one harness-config to be seeded")
+	}
+
+	hcDir := filepath.Join(harnessConfigsDir, entries[0].Name())
+	customFile := filepath.Join(hcDir, "home", "custom-user-file.txt")
+	customContent := "user-customized-content"
+	if err := os.WriteFile(customFile, []byte(customContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Call RefreshDefaultTemplates with force=false (simulating server startup)
+	if err := RefreshDefaultTemplates(GetMockHarnesses(), false); err != nil {
+		t.Fatalf("expected refresh to succeed, got: %v", err)
+	}
+
+	// Verify the user's custom file is preserved
+	data, err := os.ReadFile(customFile)
+	if err != nil {
+		t.Fatalf("expected custom file to still exist: %v", err)
+	}
+	if string(data) != customContent {
+		t.Errorf("expected custom file content to be preserved, got: %s", string(data))
+	}
+}
+
+func TestRefreshDefaultTemplates_ForceOverwritesCustomizations(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "scion-test-refresh-hc-force-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	origHome := os.Getenv("HOME")
+	os.Setenv("HOME", tmpDir)
+	defer os.Setenv("HOME", origHome)
+
+	// First call to seed initial harness-configs (force=false)
+	if err := RefreshDefaultTemplates(GetMockHarnesses(), false); err != nil {
+		t.Fatalf("expected first refresh to succeed, got: %v", err)
+	}
+
+	// Find a seeded harness-config and customize an embedded file
+	harnessConfigsDir := filepath.Join(tmpDir, DotScion, harnessConfigsDirName)
+	entries, err := os.ReadDir(harnessConfigsDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) == 0 {
+		t.Fatal("expected at least one harness-config to be seeded")
+	}
+
+	hcDir := filepath.Join(harnessConfigsDir, entries[0].Name())
+	configFile := filepath.Join(hcDir, "config.yaml")
+
+	// Read original content
+	originalData, err := os.ReadFile(configFile)
+	if err != nil {
+		t.Fatalf("expected config.yaml to exist: %v", err)
+	}
+	originalContent := string(originalData)
+
+	// Modify the embedded file
+	customContent := "# CUSTOMIZED BY USER\n" + originalContent
+	if err := os.WriteFile(configFile, []byte(customContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Call RefreshDefaultTemplates with force=true
+	if err := RefreshDefaultTemplates(GetMockHarnesses(), true); err != nil {
+		t.Fatalf("expected refresh with force=true to succeed, got: %v", err)
+	}
+
+	// Verify the embedded file is restored to original
+	data, err := os.ReadFile(configFile)
+	if err != nil {
+		t.Fatalf("expected config.yaml to still exist: %v", err)
+	}
+	if string(data) == customContent {
+		t.Error("expected config.yaml to be overwritten with force=true, but it still contains custom content")
+	}
+	if string(data) != originalContent {
+		t.Error("expected config.yaml to be restored to original content")
+	}
+}
+
 func TestMergeScionConfig(t *testing.T) {
 	trueVal := true
 	falseVal := false

@@ -74,6 +74,7 @@ type CreateAgentRequest struct {
 	Profile         string            `json:"profile,omitempty"`       // Settings profile for the runtime broker to use
 	Task            string            `json:"task,omitempty"`
 	Branch          string            `json:"branch,omitempty"`
+	Source          string            `json:"source,omitempty"`
 	Workspace       string            `json:"workspace,omitempty"`
 	Labels          map[string]string `json:"labels,omitempty"`
 	Config          *api.ScionConfig  `json:"config,omitempty"`
