@@ -19,7 +19,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
@@ -712,7 +711,7 @@ func syncHarnessConfigToHub(hubCtx *HubContext, name, localPath, scope, scopeID,
 		if err != nil {
 			return fmt.Errorf("failed to marshal manifest: %w", err)
 		}
-		if err := uploadManifestToSignedURL(ctx, uploadResp.ManifestURL, manifestBytes); err != nil {
+		if err := transfer.NewClient(nil).UploadFileWithMethod(ctx, uploadResp.ManifestURL, "PUT", nil, bytes.NewReader(manifestBytes)); err != nil {
 			return fmt.Errorf("failed to upload manifest.json: %w", err)
 		}
 	}
@@ -872,27 +871,6 @@ func pullHarnessConfigFromHub(hubCtx *HubContext, hc *hubclient.HarnessConfig, t
 	}
 
 	fmt.Printf("Harness-config '%s' pulled successfully to %s\n", name, destPath)
-
-	return nil
-}
-
-// uploadManifestToSignedURL uploads manifest content to a signed URL.
-func uploadManifestToSignedURL(ctx context.Context, signedURL string, content []byte) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPut, signedURL, bytes.NewReader(content))
-	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("failed to upload: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("upload failed with status: %s", resp.Status)
-	}
 
 	return nil
 }
