@@ -1,0 +1,9 @@
+{
+  "exit_code": 0,
+  "resolved_auth": {
+    "method": "api-key",
+    "harness": "codex",
+    "env_var": "CODEX_API_KEY"
+  },
+  "env": {}
+}

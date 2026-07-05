@@ -1,0 +1,13 @@
+{
+  "auth_candidates": {
+    "schema_version": 1,
+    "env_vars": [
+      "AGY_TOKEN"
+    ],
+    "env_secret_files": {
+      "AGY_TOKEN": "$HOME/.scion/harness/secrets/AGY_TOKEN"
+    },
+    "files": []
+  },
+  "harness_config": {}
+}

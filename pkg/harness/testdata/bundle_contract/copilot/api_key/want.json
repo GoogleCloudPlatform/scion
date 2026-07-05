@@ -1,0 +1,11 @@
+{
+  "exit_code": 0,
+  "resolved_auth": {
+    "method": "api-key",
+    "harness": "copilot",
+    "env_var": "COPILOT_GITHUB_TOKEN"
+  },
+  "env": {
+    "COPILOT_GITHUB_TOKEN": "test-api-key-value"
+  }
+}

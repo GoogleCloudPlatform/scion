@@ -1,0 +1,13 @@
+{
+  "auth_candidates": {
+    "schema_version": 1,
+    "env_vars": [
+      "GEMINI_API_KEY"
+    ],
+    "env_secret_files": {
+      "GEMINI_API_KEY": "$HOME/.scion/harness/secrets/GEMINI_API_KEY"
+    },
+    "files": []
+  },
+  "harness_config": {}
+}

@@ -1,0 +1,11 @@
+{
+  "exit_code": 0,
+  "resolved_auth": {
+    "method": "api-key",
+    "harness": "claude",
+    "env_var": "ANTHROPIC_API_KEY"
+  },
+  "env": {
+    "ANTHROPIC_API_KEY": "test-api-key-value"
+  }
+}

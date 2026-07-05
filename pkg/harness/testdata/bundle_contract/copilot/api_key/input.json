@@ -1,0 +1,13 @@
+{
+  "auth_candidates": {
+    "schema_version": 1,
+    "env_vars": [
+      "COPILOT_GITHUB_TOKEN"
+    ],
+    "env_secret_files": {
+      "COPILOT_GITHUB_TOKEN": "$HOME/.scion/harness/secrets/COPILOT_GITHUB_TOKEN"
+    },
+    "files": []
+  },
+  "harness_config": {}
+}

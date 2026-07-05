@@ -1,0 +1,4 @@
+{
+  "exit_code": 0,
+  "_divergence": "DIVERGENCE(no-auth-gate): antigravity treats none as a valid auth method. Preserved in WP-3g per \u00a74.3"
+}

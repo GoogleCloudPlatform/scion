@@ -1,0 +1,11 @@
+{
+  "exit_code": 0,
+  "resolved_auth": {
+    "method": "api-key",
+    "harness": "gemini-cli",
+    "env_var": "GEMINI_API_KEY"
+  },
+  "env": {
+    "GEMINI_API_KEY": "${GEMINI_API_KEY}"
+  }
+}

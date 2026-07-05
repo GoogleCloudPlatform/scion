@@ -1,0 +1,12 @@
+{
+  "exit_code": 0,
+  "resolved_auth": {
+    "method": "none"
+  },
+  "env": {
+    "HERMES_ACCEPT_HOOKS": "auto",
+    "HERMES_HOME": "/home/scion/.hermes",
+    "HERMES_QUIET": "1",
+    "HERMES_YOLO_MODE": "1"
+  }
+}

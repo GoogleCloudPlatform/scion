@@ -1,0 +1,4 @@
+{
+  "exit_code": 0,
+  "_divergence": "DIVERGENCE(no-auth-gate): copilot falls back to no-auth on error instead of exit 1. Scheduled to become fallback_to_none_on_error=True in WP-3e per \u00a74.3"
+}
