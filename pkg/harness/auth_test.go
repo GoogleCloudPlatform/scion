@@ -400,6 +400,11 @@ func TestRequiredAuthEnvKeys(t *testing.T) {
 		{"gemini auth-file", "gemini", "auth-file", nil},
 		{"gemini vertex-ai", "gemini", "vertex-ai", [][]string{{"GOOGLE_CLOUD_PROJECT"}, {"GOOGLE_CLOUD_REGION", "CLOUD_ML_REGION", "GOOGLE_CLOUD_LOCATION"}}},
 
+		// Gemini-CLI (mirrors gemini)
+		{"gemini-cli api-key", "gemini-cli", "api-key", [][]string{{"GEMINI_API_KEY", "GOOGLE_API_KEY"}}},
+		{"gemini-cli auth-file", "gemini-cli", "auth-file", nil},
+		{"gemini-cli vertex-ai", "gemini-cli", "vertex-ai", [][]string{{"GOOGLE_CLOUD_PROJECT"}, {"GOOGLE_CLOUD_REGION", "CLOUD_ML_REGION", "GOOGLE_CLOUD_LOCATION"}}},
+
 		// OpenCode
 		{"opencode api-key", "opencode", "api-key", [][]string{{"ANTHROPIC_API_KEY", "OPENAI_API_KEY"}}},
 		{"opencode auth-file", "opencode", "auth-file", nil},
@@ -415,6 +420,7 @@ func TestRequiredAuthEnvKeys(t *testing.T) {
 		// Empty authType defaults to api-key
 		{"claude empty auth type", "claude", "", [][]string{{"ANTHROPIC_API_KEY"}}},
 		{"gemini empty auth type", "gemini", "", [][]string{{"GEMINI_API_KEY", "GOOGLE_API_KEY"}}},
+		{"gemini-cli empty auth type", "gemini-cli", "", [][]string{{"GEMINI_API_KEY", "GOOGLE_API_KEY"}}},
 		{"opencode empty auth type", "opencode", "", [][]string{{"ANTHROPIC_API_KEY", "OPENAI_API_KEY"}}},
 		{"codex empty auth type", "codex", "", [][]string{{"CODEX_API_KEY", "OPENAI_API_KEY"}}},
 
@@ -464,12 +470,15 @@ func TestRequiredAuthSecrets(t *testing.T) {
 	}{
 		{"claude vertex-ai", "claude", "vertex-ai", false, false, "gcloud-adc", "file"},
 		{"gemini vertex-ai", "gemini", "vertex-ai", false, false, "gcloud-adc", "file"},
+		{"gemini-cli vertex-ai", "gemini-cli", "vertex-ai", false, false, "gcloud-adc", "file"},
 		{"opencode vertex-ai", "opencode", "vertex-ai", false, false, "gcloud-adc", "file"},
 		{"codex vertex-ai", "codex", "vertex-ai", false, false, "gcloud-adc", "file"},
 		{"claude api-key", "claude", "api-key", false, true, "", ""},
 		{"gemini api-key", "gemini", "api-key", false, true, "", ""},
+		{"gemini-cli api-key", "gemini-cli", "api-key", false, true, "", ""},
 		{"claude empty auth type", "claude", "", false, true, "", ""},
 		{"gemini empty auth type", "gemini", "", false, true, "", ""},
+		{"gemini-cli empty auth type", "gemini-cli", "", false, true, "", ""},
 		{"generic vertex-ai", "generic", "vertex-ai", false, true, "", ""},
 		{"unknown harness", "unknown", "vertex-ai", false, true, "", ""},
 		{"empty harness", "", "vertex-ai", false, true, "", ""},
@@ -477,6 +486,7 @@ func TestRequiredAuthSecrets(t *testing.T) {
 		// GCP SA assigned — ADC not required
 		{"claude vertex-ai with GCP SA", "claude", "vertex-ai", true, true, "", ""},
 		{"gemini vertex-ai with GCP SA", "gemini", "vertex-ai", true, true, "", ""},
+		{"gemini-cli vertex-ai with GCP SA", "gemini-cli", "vertex-ai", true, true, "", ""},
 		{"opencode vertex-ai with GCP SA", "opencode", "vertex-ai", true, true, "", ""},
 		{"codex vertex-ai with GCP SA", "codex", "vertex-ai", true, true, "", ""},
 	}
@@ -521,8 +531,10 @@ func TestDetectAuthTypeFromGCPIdentity(t *testing.T) {
 	}{
 		{"claude with GCP SA", "claude", true, "vertex-ai"},
 		{"gemini with GCP SA", "gemini", true, "vertex-ai"},
+		{"gemini-cli with GCP SA", "gemini-cli", true, "vertex-ai"},
 		{"claude without GCP SA", "claude", false, ""},
 		{"gemini without GCP SA", "gemini", false, ""},
+		{"gemini-cli without GCP SA", "gemini-cli", false, ""},
 		{"opencode with GCP SA", "opencode", true, ""},
 		{"codex with GCP SA", "codex", true, ""},
 		{"generic with GCP SA", "generic", true, ""},
@@ -554,8 +566,11 @@ func TestDetectAuthTypeFromEnvVars(t *testing.T) {
 		{"gemini with GAC", "gemini", map[string]struct{}{"GOOGLE_APPLICATION_CREDENTIALS": {}}, "vertex-ai"},
 		{"gemini with GOOGLE_CLOUD_PROJECT", "gemini", map[string]struct{}{"GOOGLE_CLOUD_PROJECT": {}}, "vertex-ai"},
 		{"gemini with CLAUDE_CODE_OAUTH_TOKEN", "gemini", map[string]struct{}{"CLAUDE_CODE_OAUTH_TOKEN": {}}, ""},
+		{"gemini-cli with GAC", "gemini-cli", map[string]struct{}{"GOOGLE_APPLICATION_CREDENTIALS": {}}, "vertex-ai"},
+		{"gemini-cli with GOOGLE_CLOUD_PROJECT", "gemini-cli", map[string]struct{}{"GOOGLE_CLOUD_PROJECT": {}}, "vertex-ai"},
 		{"claude without GAC", "claude", map[string]struct{}{}, ""},
 		{"gemini without GAC", "gemini", map[string]struct{}{}, ""},
+		{"gemini-cli without GAC", "gemini-cli", map[string]struct{}{}, ""},
 		{"opencode with GAC", "opencode", map[string]struct{}{"GOOGLE_APPLICATION_CREDENTIALS": {}}, ""},
 		{"opencode with GOOGLE_CLOUD_PROJECT", "opencode", map[string]struct{}{"GOOGLE_CLOUD_PROJECT": {}}, ""},
 		{"codex with GAC", "codex", map[string]struct{}{"GOOGLE_APPLICATION_CREDENTIALS": {}}, ""},
@@ -568,6 +583,8 @@ func TestDetectAuthTypeFromEnvVars(t *testing.T) {
 		{"gemini API key wins over GCP project", "gemini", map[string]struct{}{"GEMINI_API_KEY": {}, "GOOGLE_CLOUD_PROJECT": {}}, ""},
 		{"gemini GOOGLE_API_KEY wins over GAC", "gemini", map[string]struct{}{"GOOGLE_API_KEY": {}, "GOOGLE_APPLICATION_CREDENTIALS": {}}, ""},
 		{"gemini API key alone", "gemini", map[string]struct{}{"GEMINI_API_KEY": {}}, ""},
+		{"gemini-cli API key wins over GAC", "gemini-cli", map[string]struct{}{"GEMINI_API_KEY": {}, "GOOGLE_APPLICATION_CREDENTIALS": {}}, ""},
+		{"gemini-cli API key wins over GCP project", "gemini-cli", map[string]struct{}{"GEMINI_API_KEY": {}, "GOOGLE_CLOUD_PROJECT": {}}, ""},
 	}
 
 	for _, tt := range tests {
@@ -610,6 +627,18 @@ func TestDetectAuthTypeFromFileSecrets(t *testing.T) {
 			"gemini",
 			map[string]struct{}{},
 			"",
+		},
+		{
+			"gemini-cli with gcloud-adc",
+			"gemini-cli",
+			map[string]struct{}{"gcloud-adc": {}},
+			"vertex-ai",
+		},
+		{
+			"gemini-cli with GEMINI_OAUTH_CREDS",
+			"gemini-cli",
+			map[string]struct{}{"GEMINI_OAUTH_CREDS": {}},
+			"auth-file",
 		},
 		{
 			"codex with CODEX_AUTH",

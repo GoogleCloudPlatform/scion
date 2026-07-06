@@ -81,6 +81,7 @@ func TestRequiredAuthEnvKeysFromConfig_ParityWithCompiled(t *testing.T) {
 		types       []string
 	}{
 		{"claude", "claude", []string{"", "api-key", "oauth-token", "auth-file", "vertex-ai", "unknown"}},
+		{"gemini-cli", "gemini-cli", []string{"", "api-key", "auth-file", "vertex-ai", "unknown"}},
 	}
 	for _, tc := range cases {
 		authMeta := loadAuthMetaFromHarness(t, tc.harness)
@@ -105,6 +106,7 @@ func TestRequiredAuthSecretsFromConfig_ParityWithCompiled(t *testing.T) {
 		types       []string
 	}{
 		{"claude", "claude", []string{"", "api-key", "auth-file", "vertex-ai"}},
+		{"gemini-cli", "gemini-cli", []string{"", "api-key", "auth-file", "vertex-ai"}},
 	}
 	for _, tc := range cases {
 		authMeta := loadAuthMetaFromHarness(t, tc.harness)

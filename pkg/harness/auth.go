@@ -340,7 +340,7 @@ func RequiredAuthSecrets(harnessName, authSelectedType string, gcpSAAssigned boo
 	}
 
 	switch harnessName {
-	case "claude", "gemini", "opencode", "codex":
+	case "claude", "gemini", "gemini-cli", "opencode", "codex":
 		if effectiveType == "vertex-ai" && !gcpSAAssigned {
 			return []api.RequiredSecret{
 				{
@@ -368,7 +368,7 @@ func RequiredAuthSecrets(harnessName, authSelectedType string, gcpSAAssigned boo
 // assumption during env-gather, preventing false requirements.
 func DetectAuthTypeFromFileSecrets(harnessName string, fileSecretNames map[string]struct{}) string {
 	switch harnessName {
-	case "gemini":
+	case "gemini", "gemini-cli":
 		// Auto-detect priority: api-key → OAuth (auth-file) → ADC (vertex-ai)
 		if _, ok := fileSecretNames["GEMINI_OAUTH_CREDS"]; ok {
 			return "auth-file"
@@ -415,7 +415,7 @@ func DetectAuthTypeFromEnvVars(harnessName string, envKeys map[string]struct{}) 
 		if hasGAC || hasGCP {
 			return "vertex-ai"
 		}
-	case "gemini":
+	case "gemini", "gemini-cli":
 		_, hasGeminiKey := envKeys["GEMINI_API_KEY"]
 		_, hasGoogleKey := envKeys["GOOGLE_API_KEY"]
 		if hasGeminiKey || hasGoogleKey {
@@ -436,7 +436,7 @@ func DetectAuthTypeFromGCPIdentity(harnessName string, gcpSAAssigned bool) strin
 		return ""
 	}
 	switch harnessName {
-	case "claude", "gemini":
+	case "claude", "gemini", "gemini-cli":
 		return "vertex-ai"
 	}
 	return ""
@@ -470,7 +470,7 @@ func RequiredAuthEnvKeys(harnessName, authSelectedType string) [][]string {
 		case "vertex-ai":
 			return [][]string{{"GOOGLE_CLOUD_PROJECT"}, {"GOOGLE_CLOUD_REGION", "CLOUD_ML_REGION", "GOOGLE_CLOUD_LOCATION"}}
 		}
-	case "gemini":
+	case "gemini", "gemini-cli":
 		switch effectiveType {
 		case "api-key":
 			return [][]string{{"GEMINI_API_KEY", "GOOGLE_API_KEY"}}
