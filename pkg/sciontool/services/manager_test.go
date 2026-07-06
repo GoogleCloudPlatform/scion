@@ -136,21 +136,17 @@ func TestManager_RestartAlways(t *testing.T) {
 		t.Fatalf("Start() error: %v", err)
 	}
 
-	// Wait for it to restart a few times
-	time.Sleep(3 * time.Second)
-
 	mgr.mu.Lock()
 	svc := mgr.services[0]
 	mgr.mu.Unlock()
-	// With "always" and exit code 0, failures still increment (consecutive exits)
-	// but it should still be restarting
-	abandoned := svc.isAbandoned()
 
-	// The process exits immediately with 0, so failures increment each time
-	// After 3, it should be abandoned
-	if !abandoned {
-		// It may not yet be abandoned if timing is tight; just check it attempted restarts
-		t.Log("service not yet abandoned, checking it was restarted")
+	deadline := time.After(10 * time.Second)
+	for !svc.isAbandoned() && svc.currentFailures() == 0 {
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for restart attempts under always policy")
+		case <-time.After(100 * time.Millisecond):
+		}
 	}
 
 	cancel()

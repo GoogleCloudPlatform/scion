@@ -73,6 +73,11 @@ func LoadHarnessManifestRequirement(agentHome string) (HarnessManifestRequiremen
 		return HarnessManifestRequirement{}, nil
 	}
 
+	// Builtin provisioners do not require pre-start provisioning.
+	if prov.Type == "builtin" {
+		return HarnessManifestRequirement{BundleDir: bundleDir}, nil
+	}
+
 	// pre-start participation is the default for container-script. If the
 	// harness explicitly declares lifecycle_events, honor it; otherwise we
 	// assume pre-start is required (matches the documented default).
