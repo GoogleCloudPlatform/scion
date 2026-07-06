@@ -80,18 +80,23 @@ func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }
 
-func buildNoAuthArgs(noAuthMsg, noAuthCmd string) []string {
+// buildNoAuthCmdLine returns a shell command string for no-auth mode.
+// The result is embedded directly into the sh -c command line used by the
+// tmux agent window, avoiding a redundant nested sh -c that previously
+// caused the no-auth command to be fed as terminal input instead of
+// running as a standalone command.
+func buildNoAuthCmdLine(noAuthMsg, noAuthCmd string) string {
 	if noAuthCmd != "" {
 		msgPart := ""
 		if noAuthMsg != "" {
 			msgPart = fmt.Sprintf("printf '%%s\\n' %s; ", shellQuote(noAuthMsg))
 		}
-		return []string{"sh", "-c", fmt.Sprintf("%s%s; exec bash", msgPart, noAuthCmd)}
+		return fmt.Sprintf("%s%s; exec bash", msgPart, noAuthCmd)
 	}
 	if noAuthMsg != "" {
-		return []string{"sh", "-c", fmt.Sprintf("printf '%%s\\n' %s; exec bash", shellQuote(noAuthMsg))}
+		return fmt.Sprintf("printf '%%s\\n' %s; exec bash", shellQuote(noAuthMsg))
 	}
-	return []string{"bash"}
+	return "exec bash"
 }
 
 // buildCommonRunArgs constructs the common arguments for 'run' command across different runtimes.
@@ -441,24 +446,24 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 		addArg("--label", fmt.Sprintf("scion.template=%s", config.Template))
 	}
 
-	// Get command from harness
-	var harnessArgs []string
+	// Get command from harness.
+	// No-auth mode builds a raw shell command string that is embedded
+	// directly into the sh -c used by the tmux agent window. This avoids
+	// the double-sh-c wrapping that previously caused the no-auth command
+	// to be injected as terminal input instead of running standalone.
+	var cmdLine string
 	if config.NoAuth {
-		harnessArgs = buildNoAuthArgs(config.NoAuthMessage, config.NoAuthCommand)
+		cmdLine = buildNoAuthCmdLine(config.NoAuthMessage, config.NoAuthCommand)
 	} else if config.Harness != nil {
-		harnessArgs = config.Harness.GetCommand(config.Task, config.Resume, config.CommandArgs)
+		harnessArgs := config.Harness.GetCommand(config.Task, config.Resume, config.CommandArgs)
+		var quotedArgs []string
+		for _, a := range harnessArgs {
+			quotedArgs = append(quotedArgs, shellQuote(a))
+		}
+		cmdLine = strings.Join(quotedArgs, " ")
 	} else {
 		return nil, fmt.Errorf("no harness provided")
 	}
-
-	// Build tmux-wrapped command — use POSIX single-quote escaping so that
-	// shell metacharacters (backticks, $, etc.) in the task prompt are not
-	// interpreted by sh -c.
-	var quotedArgs []string
-	for _, a := range harnessArgs {
-		quotedArgs = append(quotedArgs, shellQuote(a))
-	}
-	cmdLine := strings.Join(quotedArgs, " ")
 
 	// Wrap the harness in a shell that records its real exit code to a fixed
 	// file. The harness runs as a tmux grandchild, so its exit code is

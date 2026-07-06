@@ -878,23 +878,24 @@ func (r *KubernetesRuntime) cleanupProjectRWXClaims(ctx context.Context, namespa
 }
 
 func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev1.Pod, error) {
-	// Command Resolution
+	// Command Resolution — see buildCommonRunArgs for the Docker/Podman
+	// equivalent. No-auth mode builds a raw shell command string to avoid
+	// the double-sh-c wrapping that previously caused the no-auth command
+	// to be injected as terminal input instead of running standalone.
 	var cmd []string
-	var harnessArgs []string
+	var cmdLine string
 	if config.NoAuth {
-		harnessArgs = buildNoAuthArgs(config.NoAuthMessage, config.NoAuthCommand)
+		cmdLine = buildNoAuthCmdLine(config.NoAuthMessage, config.NoAuthCommand)
 	} else if config.Harness != nil {
-		harnessArgs = config.Harness.GetCommand(config.Task, config.Resume, config.CommandArgs)
+		harnessArgs := config.Harness.GetCommand(config.Task, config.Resume, config.CommandArgs)
+		var quotedArgs []string
+		for _, a := range harnessArgs {
+			quotedArgs = append(quotedArgs, shellQuote(a))
+		}
+		cmdLine = strings.Join(quotedArgs, " ")
 	} else {
-		// Fallback if no harness (though RunConfig implies there should be one or defaults)
-		harnessArgs = []string{"/bin/sh", "-c", "sleep infinity"}
+		cmdLine = "sleep infinity"
 	}
-
-	var quotedArgs []string
-	for _, a := range harnessArgs {
-		quotedArgs = append(quotedArgs, shellQuote(a))
-	}
-	cmdLine := strings.Join(quotedArgs, " ")
 	// Wrap the harness so it records its real exit code to a fixed file (see
 	// state.HarnessExitCodeFile / buildCommonRunArgs for rationale). `sciontool init`
 	// reads this to report crashes accurately.
