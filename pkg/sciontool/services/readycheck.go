@@ -49,7 +49,7 @@ func waitForTCP(target string, timeout time.Duration) error {
 	for time.Now().Before(deadline) {
 		conn, err := net.DialTimeout("tcp", target, readyPollInterval)
 		if err == nil {
-			conn.Close()
+			_ = conn.Close()
 			return nil
 		}
 		time.Sleep(readyPollInterval)
@@ -63,7 +63,7 @@ func waitForHTTP(target string, timeout time.Duration) error {
 	for time.Now().Before(deadline) {
 		resp, err := client.Get(target)
 		if err == nil {
-			resp.Body.Close()
+			_ = resp.Body.Close()
 			if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 				return nil
 			}

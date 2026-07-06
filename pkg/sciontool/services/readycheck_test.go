@@ -30,7 +30,7 @@ func TestReadyCheck_TCP(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to start listener: %v", err)
 	}
-	defer listener.Close()
+	defer func() { _ = listener.Close() }()
 
 	addr := listener.Addr().String()
 
@@ -50,7 +50,7 @@ func TestReadyCheck_HTTP(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		fmt.Fprint(w, "ok")
+		_, _ = fmt.Fprint(w, "ok")
 	})
 
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -59,8 +59,8 @@ func TestReadyCheck_HTTP(t *testing.T) {
 	}
 
 	server := &http.Server{Handler: mux}
-	go server.Serve(listener)
-	defer server.Close()
+	go func() { _ = server.Serve(listener) }()
+	defer func() { _ = server.Close() }()
 
 	addr := listener.Addr().String()
 	check := &api.ReadyCheck{

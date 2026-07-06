@@ -324,13 +324,13 @@ func TestReadProjectIDFromCredentials(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer os.Remove(tmpFile.Name())
+	defer func() { _ = os.Remove(tmpFile.Name()) }()
 
 	credJSON := `{"type":"service_account","project_id":"test-project-123","private_key_id":"key"}`
 	if _, err := tmpFile.WriteString(credJSON); err != nil {
 		t.Fatal(err)
 	}
-	tmpFile.Close()
+	_ = tmpFile.Close()
 
 	got := readProjectIDFromCredentials(tmpFile.Name())
 	if got != "test-project-123" {
@@ -345,9 +345,9 @@ func TestReadProjectIDFromCredentials(t *testing.T) {
 
 	// Invalid JSON
 	badFile, _ := os.CreateTemp("", "bad-creds-*.json")
-	defer os.Remove(badFile.Name())
-	badFile.WriteString("not json")
-	badFile.Close()
+	defer func() { _ = os.Remove(badFile.Name()) }()
+	_, _ = badFile.WriteString("not json")
+	_ = badFile.Close()
 	got = readProjectIDFromCredentials(badFile.Name())
 	if got != "" {
 		t.Errorf("readProjectIDFromCredentials(invalid) = %q, want empty", got)
@@ -362,11 +362,11 @@ func TestLoadConfig_ProjectIDFromCredentials(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer os.Remove(tmpFile.Name())
+	defer func() { _ = os.Remove(tmpFile.Name()) }()
 
 	credJSON := `{"type":"service_account","project_id":"creds-project"}`
-	tmpFile.WriteString(credJSON)
-	tmpFile.Close()
+	_, _ = tmpFile.WriteString(credJSON)
+	_ = tmpFile.Close()
 
 	// Set credentials file but NOT project ID or provider
 	os.Setenv(EnvGCPCredentials, tmpFile.Name())
@@ -392,11 +392,11 @@ func TestLoadConfig_GCPAutoDetect(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer os.Remove(tmpFile.Name())
+	defer func() { _ = os.Remove(tmpFile.Name()) }()
 
 	credJSON := `{"type":"service_account","project_id":"auto-project"}`
-	tmpFile.WriteString(credJSON)
-	tmpFile.Close()
+	_, _ = tmpFile.WriteString(credJSON)
+	_ = tmpFile.Close()
 
 	// Only set credentials file - no provider, no project ID, no endpoint
 	os.Setenv(EnvGCPCredentials, tmpFile.Name())
@@ -424,11 +424,11 @@ func TestLoadConfig_ProjectIDEnvTakesPriority(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer os.Remove(tmpFile.Name())
+	defer func() { _ = os.Remove(tmpFile.Name()) }()
 
 	credJSON := `{"type":"service_account","project_id":"creds-project"}`
-	tmpFile.WriteString(credJSON)
-	tmpFile.Close()
+	_, _ = tmpFile.WriteString(credJSON)
+	_ = tmpFile.Close()
 
 	// Set both env var and credentials file
 	os.Setenv(EnvProjectID, "env-project")

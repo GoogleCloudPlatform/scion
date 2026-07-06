@@ -30,10 +30,10 @@ func setupTestEnv(t *testing.T) (cleanup func()) {
 	t.Helper()
 	tmpDir := t.TempDir()
 	origHome := os.Getenv("HOME")
-	os.Setenv("HOME", tmpDir)
+	_ = os.Setenv("HOME", tmpDir)
 	log.SetLogPath(filepath.Join(tmpDir, "agent.log"))
 	return func() {
-		os.Setenv("HOME", origHome)
+		_ = os.Setenv("HOME", origHome)
 	}
 }
 
@@ -117,7 +117,7 @@ func TestManager_RestartOnFailure(t *testing.T) {
 	cancel()
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer shutdownCancel()
-	mgr.Shutdown(shutdownCtx)
+	_ = mgr.Shutdown(shutdownCtx)
 }
 
 func TestManager_RestartAlways(t *testing.T) {
@@ -156,7 +156,7 @@ func TestManager_RestartAlways(t *testing.T) {
 	cancel()
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer shutdownCancel()
-	mgr.Shutdown(shutdownCtx)
+	_ = mgr.Shutdown(shutdownCtx)
 }
 
 func TestManager_RestartNo(t *testing.T) {
@@ -191,7 +191,7 @@ func TestManager_RestartNo(t *testing.T) {
 	cancel()
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer shutdownCancel()
-	mgr.Shutdown(shutdownCtx)
+	_ = mgr.Shutdown(shutdownCtx)
 }
 
 func TestManager_MaxRestarts(t *testing.T) {

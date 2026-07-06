@@ -301,7 +301,7 @@ func (c *Client) UpdateStatus(ctx context.Context, status StatusUpdate) error {
 
 		// Read response body
 		respBody, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
+		_ = resp.Body.Close()
 
 		// Success
 		if resp.StatusCode < 400 {
@@ -475,7 +475,7 @@ func (c *Client) RefreshToken(ctx context.Context) (string, time.Time, error) {
 	if err != nil {
 		return "", time.Time{}, fmt.Errorf("token refresh request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	respBody, _ := io.ReadAll(resp.Body)
 
@@ -822,7 +822,7 @@ func (c *Client) RefreshGitHubToken(ctx context.Context) (string, time.Time, err
 	if err != nil {
 		return "", time.Time{}, fmt.Errorf("GitHub token refresh request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	respBody, _ := io.ReadAll(resp.Body)
 
@@ -947,7 +947,7 @@ func (c *Client) StartGitHubTokenRefresh(ctx context.Context, config *GitHubToke
 			}
 
 			// Update GITHUB_TOKEN env var in-process
-			os.Setenv("GITHUB_TOKEN", newToken)
+			_ = os.Setenv("GITHUB_TOKEN", newToken)
 
 			if config != nil && config.OnRefreshed != nil {
 				config.OnRefreshed(newToken, newExpiry)
@@ -978,7 +978,7 @@ func WriteGitHubTokenFile(path, token string) error {
 		return fmt.Errorf("failed to write GitHub token file: %w", err)
 	}
 	if err := os.Rename(tmp, path); err != nil {
-		os.Remove(tmp)
+		_ = os.Remove(tmp)
 		return fmt.Errorf("failed to rename GitHub token file: %w", err)
 	}
 	return nil
@@ -1209,7 +1209,7 @@ func WriteTokenFile(token string) error {
 		return fmt.Errorf("failed to write token file: %w", err)
 	}
 	if err := os.Rename(tmp, path); err != nil {
-		os.Remove(tmp)
+		_ = os.Remove(tmp)
 		return fmt.Errorf("failed to rename token file: %w", err)
 	}
 	return nil

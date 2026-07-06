@@ -143,7 +143,7 @@ func extractFinalAssistantText(path string) string {
 	if err != nil {
 		return ""
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	// Collect text from contiguous assistant entries at the tail of the
 	// transcript. Iterate forward once (Claude transcripts are small
@@ -392,7 +392,7 @@ func extractFinalAssistantContentFromTranscript(path string) (string, *hooks.Ass
 	if err != nil {
 		return "", nil
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	var turnBlocks []hooks.ContentBlock
 	scanner := bufio.NewScanner(f)
