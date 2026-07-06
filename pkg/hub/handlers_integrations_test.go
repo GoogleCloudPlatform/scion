@@ -1012,6 +1012,9 @@ func TestRequirePostgres_Postgres(t *testing.T) {
 }
 
 func TestUpdateIntegration_HA_Accepted(t *testing.T) {
+	if !enttest.Active() {
+		t.Skip("requires Postgres backend; set SCION_TEST_POSTGRES_URL and build with -tags integration")
+	}
 	client := enttest.NewClient(t)
 
 	mgr := newMockIntegrationManager()
@@ -1062,6 +1065,9 @@ func TestUpdateIntegration_HA_Accepted(t *testing.T) {
 }
 
 func TestGetUpdateStatus_ByID(t *testing.T) {
+	if !enttest.Active() {
+		t.Skip("requires Postgres backend; set SCION_TEST_POSTGRES_URL and build with -tags integration")
+	}
 	client := enttest.NewClient(t)
 
 	mgr := newMockIntegrationManager()
@@ -1116,6 +1122,9 @@ func TestGetUpdateStatus_ByID(t *testing.T) {
 }
 
 func TestGetUpdateStatus_Latest(t *testing.T) {
+	if !enttest.Active() {
+		t.Skip("requires Postgres backend; set SCION_TEST_POSTGRES_URL and build with -tags integration")
+	}
 	client := enttest.NewClient(t)
 
 	mgr := newMockIntegrationManager()
@@ -1176,6 +1185,9 @@ func TestGetUpdateStatus_Latest(t *testing.T) {
 }
 
 func TestGetUpdateStatus_NotFound(t *testing.T) {
+	if !enttest.Active() {
+		t.Skip("requires Postgres backend; set SCION_TEST_POSTGRES_URL and build with -tags integration")
+	}
 	client := enttest.NewClient(t)
 
 	srv := &Server{dbDriver: "postgres"}
@@ -1197,6 +1209,9 @@ func TestGetUpdateStatus_NotFound(t *testing.T) {
 }
 
 func TestGetUpdateStatus_InvalidID(t *testing.T) {
+	if !enttest.Active() {
+		t.Skip("requires Postgres backend; set SCION_TEST_POSTGRES_URL and build with -tags integration")
+	}
 	client := enttest.NewClient(t)
 
 	srv := &Server{dbDriver: "postgres"}
@@ -1235,6 +1250,9 @@ func TestGetUpdateStatus_SQLiteReturns409(t *testing.T) {
 }
 
 func TestUpdateConfig_HA_Integration(t *testing.T) {
+	if !enttest.Active() {
+		t.Skip("requires Postgres backend; set SCION_TEST_POSTGRES_URL and build with -tags integration")
+	}
 	client := enttest.NewClient(t)
 
 	mgr := newMockIntegrationManager()
@@ -1304,6 +1322,9 @@ func TestIsHAIntegration(t *testing.T) {
 }
 
 func TestGetUpdateStatus_CrossIntegrationRejected(t *testing.T) {
+	if !enttest.Active() {
+		t.Skip("requires Postgres backend; set SCION_TEST_POSTGRES_URL and build with -tags integration")
+	}
 	client := enttest.NewClient(t)
 
 	mgr := newMockIntegrationManager()
@@ -1346,6 +1367,9 @@ func TestGetUpdateStatus_CrossIntegrationRejected(t *testing.T) {
 }
 
 func TestUpdateConfig_HA_SetsUpdatedBy(t *testing.T) {
+	if !enttest.Active() {
+		t.Skip("requires Postgres backend; set SCION_TEST_POSTGRES_URL and build with -tags integration")
+	}
 	client := enttest.NewClient(t)
 
 	mgr := newMockIntegrationManager()

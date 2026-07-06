@@ -23,6 +23,9 @@ import (
 )
 
 func TestPostgresConfigProvider_LoadEmpty(t *testing.T) {
+	if !enttest.Active() {
+		t.Skip("requires Postgres backend; set SCION_TEST_POSTGRES_URL and build with -tags integration")
+	}
 	client := enttest.NewClient(t)
 	p := config.NewPostgresConfigProvider(client, "discord")
 
@@ -36,6 +39,9 @@ func TestPostgresConfigProvider_LoadEmpty(t *testing.T) {
 }
 
 func TestPostgresConfigProvider_SaveAndLoad(t *testing.T) {
+	if !enttest.Active() {
+		t.Skip("requires Postgres backend; set SCION_TEST_POSTGRES_URL and build with -tags integration")
+	}
 	client := enttest.NewClient(t)
 	p := config.NewPostgresConfigProvider(client, "discord")
 	ctx := context.Background()
@@ -62,6 +68,9 @@ func TestPostgresConfigProvider_SaveAndLoad(t *testing.T) {
 }
 
 func TestPostgresConfigProvider_SaveUpsert(t *testing.T) {
+	if !enttest.Active() {
+		t.Skip("requires Postgres backend; set SCION_TEST_POSTGRES_URL and build with -tags integration")
+	}
 	client := enttest.NewClient(t)
 	p := config.NewPostgresConfigProvider(client, "telegram")
 	ctx := context.Background()
@@ -90,6 +99,9 @@ func TestPostgresConfigProvider_SaveUpsert(t *testing.T) {
 }
 
 func TestPostgresConfigProvider_IsolatedByIntegration(t *testing.T) {
+	if !enttest.Active() {
+		t.Skip("requires Postgres backend; set SCION_TEST_POSTGRES_URL and build with -tags integration")
+	}
 	client := enttest.NewClient(t)
 	discordP := config.NewPostgresConfigProvider(client, "discord")
 	telegramP := config.NewPostgresConfigProvider(client, "telegram")
@@ -127,6 +139,9 @@ func TestPostgresConfigProvider_IsolatedByIntegration(t *testing.T) {
 }
 
 func TestPostgresConfigProvider_ImplementsInterface(t *testing.T) {
+	if !enttest.Active() {
+		t.Skip("requires Postgres backend; set SCION_TEST_POSTGRES_URL and build with -tags integration")
+	}
 	client := enttest.NewClient(t)
 	var _ config.IntegrationConfigProvider = config.NewPostgresConfigProvider(client, "test")
 }
