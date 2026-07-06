@@ -812,7 +812,7 @@ func checkServerPorts(cfg *config.GlobalConfig) error {
 			if status.isScionServer {
 				return fmt.Errorf("a scion server is already running on port %d\nUse 'scion server status' to check or 'scion server stop' to stop it", cfg.Hub.Port)
 			}
-			return fmt.Errorf("Hub port %d is already in use by another process", cfg.Hub.Port)
+			return fmt.Errorf("hub port %d is already in use by another process", cfg.Hub.Port)
 		}
 	}
 	if cfg.RuntimeBroker.Enabled {
@@ -821,7 +821,7 @@ func checkServerPorts(cfg *config.GlobalConfig) error {
 			if status.isScionServer {
 				return fmt.Errorf("a scion server is already running on port %d\nUse 'scion server status' to check or 'scion server stop' to stop it", cfg.RuntimeBroker.Port)
 			}
-			return fmt.Errorf("Runtime Broker port %d is already in use by another process", cfg.RuntimeBroker.Port)
+			return fmt.Errorf("runtime broker port %d is already in use by another process", cfg.RuntimeBroker.Port)
 		}
 	}
 	if enableWeb {
@@ -834,7 +834,7 @@ func checkServerPorts(cfg *config.GlobalConfig) error {
 			if status.isScionServer {
 				return fmt.Errorf("a scion server is already running on port %d\nUse 'scion server status' to check or 'scion server stop' to stop it", webPort)
 			}
-			return fmt.Errorf("Web Frontend port %d is already in use by another process", webPort)
+			return fmt.Errorf("web frontend port %d is already in use by another process", webPort)
 		}
 	}
 	return nil

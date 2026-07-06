@@ -202,7 +202,7 @@ users:
 }
 
 func TestClient_Verify_Success(t *testing.T) {
-	clientset := k8sfake.NewSimpleClientset()
+	clientset := k8sfake.NewClientset()
 	scheme := k8sruntime.NewScheme()
 	dynClient := fake.NewSimpleDynamicClient(scheme)
 	client := NewTestClient(dynClient, clientset)

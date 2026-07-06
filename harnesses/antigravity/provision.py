@@ -208,13 +208,20 @@ def _generate_hooks_json(home: str) -> None:
     # AGY only fires project-local hooks. The global path
     # (~/.gemini/antigravity-cli/hooks.json) loads but never executes.
     agents_dir = os.path.join("/workspace", ".agents")
-    os.makedirs(agents_dir, exist_ok=True)
-    hooks_path = os.path.join(agents_dir, "hooks.json")
-    scion_harness.atomic_write_json(hooks_path, hooks_data)
-    print(
-        f"antigravity provision: generated hooks.json at {hooks_path}",
-        file=sys.stderr,
-    )
+    try:
+        os.makedirs(agents_dir, exist_ok=True)
+        hooks_path = os.path.join(agents_dir, "hooks.json")
+        scion_harness.atomic_write_json(hooks_path, hooks_data)
+        print(
+            f"antigravity provision: generated hooks.json at {hooks_path}",
+            file=sys.stderr,
+        )
+    except (OSError, PermissionError) as exc:
+        print(
+            f"antigravity provision: warning: could not write hooks.json "
+            f"to {agents_dir}: {exc}",
+            file=sys.stderr,
+        )
 
 
 def _generate_wrapper_script(home: str, has_token: bool, is_enterprise: bool) -> None:

@@ -1373,9 +1373,10 @@ func runTemplateStatus(cmd *cobra.Command, args []string) error {
 			hubStr = "yes"
 		}
 		status := e.Status
-		if e.Status == "synced" {
+		switch e.Status {
+		case "synced":
 			status = "synced (hash match)"
-		} else if e.Status == "out of date" {
+		case "out of date":
 			status = "out of date (local differs)"
 		}
 		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", e.Name, localStr, hubStr, status)

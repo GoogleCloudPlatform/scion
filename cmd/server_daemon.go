@@ -303,7 +303,7 @@ func runServerRestart(cmd *cobra.Command, args []string) error {
 
 	running, pid, _ := daemon.StatusComponent(serverDaemonComponent, globalDir)
 	if !running {
-		return fmt.Errorf("server daemon is not running.\n\nUse 'scion server start' to start it.")
+		return fmt.Errorf("server daemon is not running\n\nUse 'scion server start' to start it")
 	}
 
 	// Stop the daemon

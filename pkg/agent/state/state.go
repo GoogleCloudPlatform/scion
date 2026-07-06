@@ -259,7 +259,7 @@ func (s AgentState) Validate() error {
 		return err
 	}
 	if s.Activity != "" && s.Phase != PhaseRunning {
-		if !(s.Phase == PhaseStopped && s.Activity.IsTerminal()) {
+		if s.Phase != PhaseStopped || !s.Activity.IsTerminal() {
 			return fmt.Errorf("activity %q is not valid when phase is %q (must be %q)", s.Activity, s.Phase, PhaseRunning)
 		}
 	}

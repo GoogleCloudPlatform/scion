@@ -850,11 +850,12 @@ type V1ProfileConfig struct {
 // so that settings are loaded from ~/.scion/project-configs/<slug>__<uuid>/.scion/.
 func resolveEffectiveProjectPath(projectPath string) string {
 	effectiveProjectPath := projectPath
-	if effectiveProjectPath == "" {
+	switch effectiveProjectPath {
+	case "":
 		if projectPath, ok := FindProjectRoot(); ok {
 			effectiveProjectPath = projectPath
 		}
-	} else if effectiveProjectPath == "global" || effectiveProjectPath == "home" {
+	case "global", "home":
 		effectiveProjectPath = ""
 	}
 	if effectiveProjectPath != "" {

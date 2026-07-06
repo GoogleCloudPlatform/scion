@@ -181,10 +181,10 @@ func main() {
 				defer w2.Done()
 				h := hubs[k%2]
 				st, _, _ := req(h, "POST", "/api/v1/projects", map[string]any{"id": id, "name": name})
-				switch {
-				case st == 201 || st == 200:
+				switch st {
+				case 200, 201:
 					atomic.AddInt64(&c201, 1)
-				case st == 409:
+				case 409:
 					atomic.AddInt64(&c409, 1)
 				default:
 					atomic.AddInt64(&cother, 1)

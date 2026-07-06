@@ -241,8 +241,8 @@ func TestEnsureHubReady_HubContextEnvVars(t *testing.T) {
 	// Set up a mock hub server
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		switch {
-		case r.URL.Path == "/healthz":
+		switch r.URL.Path {
+		case "/healthz":
 			_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 		default:
 			http.NotFound(w, r)
@@ -383,8 +383,8 @@ func TestEnsureHubReady_HubContextProjectIDEnvPriority(t *testing.T) {
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		switch {
-		case r.URL.Path == "/healthz":
+		switch r.URL.Path {
+		case "/healthz":
 			_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 		default:
 			http.NotFound(w, r)

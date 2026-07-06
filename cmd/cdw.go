@@ -73,7 +73,7 @@ Then checks for any git worktree checked out to the specified branch.`,
 
 		// Not found
 		if targetPath == "" {
-			return fmt.Errorf("no agent worktree found for '%s'. 'cdw' is only valid for git-based agents that use worktrees for workspace isolation.", name)
+			return fmt.Errorf("no agent worktree found for '%s', 'cdw' is only valid for git-based agents that use worktrees for workspace isolation", name)
 		}
 
 		// Change directory

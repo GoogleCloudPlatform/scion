@@ -228,7 +228,7 @@ func resolveProjectWorkspacePath() (string, error) {
 // runAgentSync handles agent-level sync (to/from a specific agent).
 func runAgentSync(args []string) error {
 	var agentName string
-	var direction runtime.SyncDirection = runtime.SyncUnspecified
+	var direction = runtime.SyncUnspecified
 
 	if len(args) == 2 {
 		dirStr := args[0]

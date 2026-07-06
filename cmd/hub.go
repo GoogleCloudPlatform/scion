@@ -2052,7 +2052,7 @@ func runHubEnable(cmd *cobra.Command, args []string) error {
 
 	health, err := client.Health(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to connect to Hub at %s: %w\n\nVerify the Hub endpoint is correct and the Hub is running.", endpoint, err)
+		return fmt.Errorf("failed to connect to Hub at %s: %w\n\nVerify the Hub endpoint is correct and the Hub is running", endpoint, err)
 	}
 
 	// Save the enabled setting

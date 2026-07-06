@@ -268,9 +268,10 @@ func printValidationReport(name string, report *hubclient.ValidationReport) erro
 		}
 	}
 
-	if report.ResourceKind == "template" {
+	switch report.ResourceKind {
+	case "template":
 		fmt.Printf("\nRun 'scion template sync %s' to repair.\n", name)
-	} else if report.ResourceKind == "harness-config" {
+	case "harness-config":
 		fmt.Printf("\nRun 'scion harness-config sync %s' to repair.\n", name)
 	}
 
