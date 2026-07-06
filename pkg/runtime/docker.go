@@ -233,13 +233,13 @@ func (r *DockerRuntime) Attach(ctx context.Context, id string) error {
 	}
 
 	if agent == nil {
-		return fmt.Errorf("agent '%s' container not found. It may have exited and been removed.", id)
+		return fmt.Errorf("agent '%s' container not found, it may have exited and been removed", id)
 	}
 
 	// Check if running
 	status := strings.ToLower(agent.ContainerStatus)
 	if !strings.HasPrefix(status, "up") && status != "running" {
-		return fmt.Errorf("agent '%s' is not running (status: %s). Use 'scion start %s' to resume it.", id, agent.ContainerStatus, id)
+		return fmt.Errorf("agent '%s' is not running (status: %s), use 'scion start %s' to resume it", id, agent.ContainerStatus, id)
 	}
 
 	// Ensure tmux uses the latest client's terminal size so the session
@@ -302,15 +302,16 @@ func (r *DockerRuntime) Sync(ctx context.Context, id string, direction SyncDirec
 			if v.Source == "" {
 				continue
 			}
-			if direction == SyncTo {
+			switch direction {
+			case SyncTo:
 				if err := gcp.SyncToGCS(ctx, v.Source, v.Bucket, v.Prefix); err != nil {
 					return fmt.Errorf("failed to sync to GCS: %w", err)
 				}
-			} else if direction == SyncFrom {
+			case SyncFrom:
 				if err := gcp.SyncFromGCS(ctx, v.Bucket, v.Prefix, v.Source); err != nil {
 					return fmt.Errorf("failed to sync from GCS: %w", err)
 				}
-			} else {
+			default:
 				return fmt.Errorf("sync direction must be specified for GCS volumes")
 			}
 		}

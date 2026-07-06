@@ -31,7 +31,7 @@ import (
 )
 
 func newTestK8sRuntime() (*KubernetesRuntime, *k8sfake.Clientset, *fake.FakeDynamicClient) {
-	clientset := k8sfake.NewSimpleClientset()
+	clientset := k8sfake.NewClientset()
 	scheme := k8sruntime.NewScheme()
 	dynClient := fake.NewSimpleDynamicClient(scheme)
 	client := k8s.NewTestClient(dynClient, clientset)
@@ -462,7 +462,7 @@ func TestDeleteCleansUpSecrets(t *testing.T) {
 }
 
 func TestCreateSecretProviderClass(t *testing.T) {
-	clientset := k8sfake.NewSimpleClientset()
+	clientset := k8sfake.NewClientset()
 	scheme := k8sruntime.NewScheme()
 	// Register the SPC GVR so the fake dynamic client can handle it
 	scheme.AddKnownTypeWithName(

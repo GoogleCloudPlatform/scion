@@ -644,7 +644,7 @@ func (e *CloudBuildHarnessConfigExecutor) Run(ctx context.Context, logger io.Wri
 	}
 
 	if e.gcpProject == "" {
-		return fmt.Errorf("Cloud Build requires a GCP project ID. Configure gcp_project_id in settings")
+		return fmt.Errorf("cloud Build requires a GCP project ID, configure gcp_project_id in settings")
 	}
 
 	tag := e.tag
@@ -661,7 +661,7 @@ func (e *CloudBuildHarnessConfigExecutor) Run(ctx context.Context, logger io.Wri
 	}
 	registry = strings.TrimSuffix(registry, "/")
 	if registry == "" {
-		return fmt.Errorf("Cloud Build requires a registry (images must be pushed). Configure image_registry first")
+		return fmt.Errorf("cloud Build requires a registry (images must be pushed), configure image_registry first")
 	}
 
 	hc, err := e.store.GetHarnessConfig(ctx, harnessConfigID)
@@ -716,8 +716,8 @@ func (e *CloudBuildHarnessConfigExecutor) Run(ctx context.Context, logger io.Wri
 	// Verify the staging bucket exists before attempting upload.
 	if _, err := gcsClient.Bucket(stagingBucket).Attrs(ctx); err != nil {
 		if err == gcstorage.ErrBucketNotExist {
-			return fmt.Errorf("Cloud Build staging bucket gs://%s does not exist. "+
-				"Run 'gcloud builds submit' once manually in project %s to create it, "+
+			return fmt.Errorf("cloud Build staging bucket gs://%s does not exist; "+
+				"run 'gcloud builds submit' once manually in project %s to create it, "+
 				"or create the bucket manually", stagingBucket, e.gcpProject)
 		}
 		return fmt.Errorf("failed to access staging bucket gs://%s: %w", stagingBucket, err)
@@ -856,16 +856,16 @@ func (e *CloudBuildHarnessConfigExecutor) Run(ctx context.Context, logger io.Wri
 
 		case cloudbuildpb.Build_FAILURE:
 			streamCloudBuildLogs(ctx, gcsClient, logBucket, logObjectPrefix+".txt", lastLogOffset, logger)
-			return fmt.Errorf("Cloud Build failed: %s", b.StatusDetail)
+			return fmt.Errorf("cloud Build failed: %s", b.StatusDetail)
 
 		case cloudbuildpb.Build_TIMEOUT:
-			return fmt.Errorf("Cloud Build timed out")
+			return fmt.Errorf("cloud Build timed out")
 
 		case cloudbuildpb.Build_CANCELLED:
-			return fmt.Errorf("Cloud Build was cancelled")
+			return fmt.Errorf("cloud Build was cancelled")
 
 		case cloudbuildpb.Build_INTERNAL_ERROR:
-			return fmt.Errorf("Cloud Build internal error: %s", b.StatusDetail)
+			return fmt.Errorf("cloud Build internal error: %s", b.StatusDetail)
 		}
 
 		select {

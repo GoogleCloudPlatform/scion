@@ -462,7 +462,7 @@ func TestImageExists_Validation(t *testing.T) {
 // --- Stage 2.4: Multi-namespace operations ---
 
 func TestList_AllNamespaces(t *testing.T) {
-	clientset := k8sfake.NewSimpleClientset()
+	clientset := k8sfake.NewClientset()
 
 	// Create pods in different namespaces
 	for _, ns := range []string{"default", "production", "staging"} {
@@ -513,7 +513,7 @@ func TestList_AllNamespaces(t *testing.T) {
 }
 
 func TestList_SingleNamespace(t *testing.T) {
-	clientset := k8sfake.NewSimpleClientset()
+	clientset := k8sfake.NewClientset()
 
 	// Create pods in different namespaces
 	for _, ns := range []string{"default", "other"} {
@@ -548,7 +548,7 @@ func TestList_SingleNamespace(t *testing.T) {
 }
 
 func TestResolveNamespace_FromAnnotation(t *testing.T) {
-	clientset := k8sfake.NewSimpleClientset()
+	clientset := k8sfake.NewClientset()
 
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
@@ -577,7 +577,7 @@ func TestResolveNamespace_FromAnnotation(t *testing.T) {
 }
 
 func TestResolveNamespace_Default(t *testing.T) {
-	clientset := k8sfake.NewSimpleClientset()
+	clientset := k8sfake.NewClientset()
 
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
@@ -603,7 +603,7 @@ func TestResolveNamespace_Default(t *testing.T) {
 }
 
 func TestDelete_NamespaceSlashFormat(t *testing.T) {
-	clientset := k8sfake.NewSimpleClientset()
+	clientset := k8sfake.NewClientset()
 
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{

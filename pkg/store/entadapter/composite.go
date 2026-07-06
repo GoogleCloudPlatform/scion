@@ -171,7 +171,7 @@ func (c *CompositeStore) Migrate(ctx context.Context) error {
 	if err := entc.AutoMigrate(ctx, c.client); err != nil {
 		return err
 	}
-	return c.MaintenanceStore.SeedMaintenanceOperations(ctx)
+	return c.SeedMaintenanceOperations(ctx)
 }
 
 // DB returns the underlying *sql.DB, or nil if the client is not backed by a

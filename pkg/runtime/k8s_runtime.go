@@ -1990,7 +1990,7 @@ func (r *KubernetesRuntime) Attach(ctx context.Context, id string) error {
 	}
 
 	if agent == nil {
-		return fmt.Errorf("agent '%s' pod not found. It may have been deleted.", id)
+		return fmt.Errorf("agent '%s' pod not found, it may have been deleted", id)
 	}
 
 	// Use the actual pod name (ContainerID) which may include a project prefix
@@ -1999,7 +1999,7 @@ func (r *KubernetesRuntime) Attach(ctx context.Context, id string) error {
 
 	// For Kubernetes, we want to ensure it is in Running phase
 	if !strings.EqualFold(agent.ContainerStatus, string(corev1.PodRunning)) {
-		return fmt.Errorf("agent '%s' is not running (status: %s). Use 'scion start %s' to resume it.", id, agent.ContainerStatus, id)
+		return fmt.Errorf("agent '%s' is not running (status: %s), use 'scion start %s' to resume it", id, agent.ContainerStatus, id)
 	}
 
 	fmt.Printf("Attaching to pod '%s' (use Ctrl-b d to detach)...\n", podName)
@@ -2193,15 +2193,16 @@ func (r *KubernetesRuntime) Sync(ctx context.Context, id string, direction SyncD
 			if v.Source == "" {
 				continue
 			}
-			if direction == SyncTo {
+			switch direction {
+			case SyncTo:
 				if err := gcp.SyncToGCS(ctx, v.Source, v.Bucket, v.Prefix); err != nil {
 					return fmt.Errorf("failed to sync to GCS: %w", err)
 				}
-			} else if direction == SyncFrom {
+			case SyncFrom:
 				if err := gcp.SyncFromGCS(ctx, v.Bucket, v.Prefix, v.Source); err != nil {
 					return fmt.Errorf("failed to sync from GCS: %w", err)
 				}
-			} else {
+			default:
 				return fmt.Errorf("sync direction must be specified for GCS volumes")
 			}
 		}

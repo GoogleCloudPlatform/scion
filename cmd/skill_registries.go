@@ -41,7 +41,7 @@ var registriesListCmd = &cobra.Command{
 func runRegistriesList(cmd *cobra.Command, args []string) error {
 	hubCtx, err := CheckHubAvailability(projectPath)
 	if err != nil {
-		return fmt.Errorf("Hub connection required: %w", err)
+		return fmt.Errorf("hub connection required: %w", err)
 	}
 
 	ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
@@ -80,7 +80,7 @@ var registriesAddCmd = &cobra.Command{
 func runRegistriesAdd(cmd *cobra.Command, args []string) error {
 	hubCtx, err := CheckHubAvailability(projectPath)
 	if err != nil {
-		return fmt.Errorf("Hub connection required: %w", err)
+		return fmt.Errorf("hub connection required: %w", err)
 	}
 
 	ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
@@ -130,7 +130,7 @@ var registriesShowCmd = &cobra.Command{
 func runRegistriesShow(cmd *cobra.Command, args []string) error {
 	hubCtx, err := CheckHubAvailability(projectPath)
 	if err != nil {
-		return fmt.Errorf("Hub connection required: %w", err)
+		return fmt.Errorf("hub connection required: %w", err)
 	}
 
 	ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
@@ -172,7 +172,7 @@ var registriesUpdateCmd = &cobra.Command{
 func runRegistriesUpdate(cmd *cobra.Command, args []string) error {
 	hubCtx, err := CheckHubAvailability(projectPath)
 	if err != nil {
-		return fmt.Errorf("Hub connection required: %w", err)
+		return fmt.Errorf("hub connection required: %w", err)
 	}
 
 	ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
@@ -228,7 +228,7 @@ var registriesRemoveCmd = &cobra.Command{
 func runRegistriesRemove(cmd *cobra.Command, args []string) error {
 	hubCtx, err := CheckHubAvailability(projectPath)
 	if err != nil {
-		return fmt.Errorf("Hub connection required: %w", err)
+		return fmt.Errorf("hub connection required: %w", err)
 	}
 
 	ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
@@ -256,7 +256,7 @@ var registriesPinCmd = &cobra.Command{
 func runRegistriesPin(cmd *cobra.Command, args []string) error {
 	hubCtx, err := CheckHubAvailability(projectPath)
 	if err != nil {
-		return fmt.Errorf("Hub connection required: %w", err)
+		return fmt.Errorf("hub connection required: %w", err)
 	}
 
 	ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)

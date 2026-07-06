@@ -46,7 +46,7 @@ var skillsListCmd = &cobra.Command{
 func runSkillsList(cmd *cobra.Command, args []string) error {
 	hubCtx, err := CheckHubAvailability(projectPath)
 	if err != nil {
-		return fmt.Errorf("Hub connection required: %w", err)
+		return fmt.Errorf("hub connection required: %w", err)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -105,7 +105,7 @@ var skillsShowCmd = &cobra.Command{
 func runSkillsShow(cmd *cobra.Command, args []string) error {
 	hubCtx, err := CheckHubAvailability(projectPath)
 	if err != nil {
-		return fmt.Errorf("Hub connection required: %w", err)
+		return fmt.Errorf("hub connection required: %w", err)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -276,7 +276,7 @@ func runSkillsPublish(cmd *cobra.Command, args []string) error {
 
 	hubCtx, err := CheckHubAvailability(projectPath)
 	if err != nil {
-		return fmt.Errorf("Hub connection required: %w", err)
+		return fmt.Errorf("hub connection required: %w", err)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
@@ -421,7 +421,7 @@ var skillsDeleteCmd = &cobra.Command{
 func runSkillsDelete(cmd *cobra.Command, args []string) error {
 	hubCtx, err := CheckHubAvailability(projectPath)
 	if err != nil {
-		return fmt.Errorf("Hub connection required: %w", err)
+		return fmt.Errorf("hub connection required: %w", err)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -464,7 +464,7 @@ var skillsDeprecateCmd = &cobra.Command{
 func runSkillsDeprecate(cmd *cobra.Command, args []string) error {
 	hubCtx, err := CheckHubAvailability(projectPath)
 	if err != nil {
-		return fmt.Errorf("Hub connection required: %w", err)
+		return fmt.Errorf("hub connection required: %w", err)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -540,7 +540,7 @@ var skillsVersionsCmd = &cobra.Command{
 func runSkillsVersions(cmd *cobra.Command, args []string) error {
 	hubCtx, err := CheckHubAvailability(projectPath)
 	if err != nil {
-		return fmt.Errorf("Hub connection required: %w", err)
+		return fmt.Errorf("hub connection required: %w", err)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -596,7 +596,7 @@ var skillsResolveCmd = &cobra.Command{
 func runSkillsResolve(cmd *cobra.Command, args []string) error {
 	hubCtx, err := CheckHubAvailability(projectPath)
 	if err != nil {
-		return fmt.Errorf("Hub connection required: %w", err)
+		return fmt.Errorf("hub connection required: %w", err)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)

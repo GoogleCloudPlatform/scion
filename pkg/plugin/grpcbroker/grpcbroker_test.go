@@ -308,7 +308,7 @@ func TestServerWrapsPluginInterface(t *testing.T) {
 	defer s.GracefulStop()
 
 	// Connect directly with a raw gRPC client
-	conn, err := grpc.Dial(lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := grpc.NewClient(lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
 	require.NoError(t, err)
 	defer func() { _ = conn.Close() }()
 

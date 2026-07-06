@@ -267,13 +267,13 @@ func (r *AppleContainerRuntime) Attach(ctx context.Context, id string) error {
 	}
 
 	if a == nil {
-		return fmt.Errorf("agent '%s' container not found. It may have exited and been removed.", id)
+		return fmt.Errorf("agent '%s' container not found, it may have exited and been removed", id)
 	}
 
 	// Check if running
 	status := strings.ToLower(a.ContainerStatus)
 	if !strings.HasPrefix(status, "up") && status != "running" {
-		return fmt.Errorf("agent '%s' is not running (status: %s). Use 'scion start %s' to resume it.", id, a.ContainerStatus, id)
+		return fmt.Errorf("agent '%s' is not running (status: %s), use 'scion start %s' to resume it", id, a.ContainerStatus, id)
 	}
 
 	// Ensure tmux uses the latest client's terminal size so the session

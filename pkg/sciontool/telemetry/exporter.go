@@ -59,7 +59,7 @@ func loadGCPDialOptions(ctx context.Context, credFile string) ([]grpc.DialOption
 	if err != nil {
 		return nil, fmt.Errorf("reading GCP credentials file: %w", err)
 	}
-	creds, err := google.CredentialsFromJSON(ctx, keyBytes,
+	creds, err := google.CredentialsFromJSONWithType(ctx, keyBytes, google.ServiceAccount,
 		"https://www.googleapis.com/auth/trace.append",
 		"https://www.googleapis.com/auth/logging.write",
 		"https://www.googleapis.com/auth/monitoring.write",

@@ -31,7 +31,7 @@ func TestRunDiagnostics_BasicChecks(t *testing.T) {
 	ns := &corev1.Namespace{
 		ObjectMeta: metav1.ObjectMeta{Name: "default"},
 	}
-	clientset := k8sfake.NewSimpleClientset(ns)
+	clientset := k8sfake.NewClientset(ns)
 
 	scheme := k8sruntime.NewScheme()
 	dynClient := fake.NewSimpleDynamicClient(scheme)
@@ -67,7 +67,7 @@ func TestRunDiagnostics_GKEChecks(t *testing.T) {
 	ns := &corev1.Namespace{
 		ObjectMeta: metav1.ObjectMeta{Name: "default"},
 	}
-	clientset := k8sfake.NewSimpleClientset(ns)
+	clientset := k8sfake.NewClientset(ns)
 
 	scheme := k8sruntime.NewScheme()
 	dynClient := fake.NewSimpleDynamicClient(scheme)
@@ -95,7 +95,7 @@ func TestRunDiagnostics_NonGKE_NoCSIChecks(t *testing.T) {
 	ns := &corev1.Namespace{
 		ObjectMeta: metav1.ObjectMeta{Name: "default"},
 	}
-	clientset := k8sfake.NewSimpleClientset(ns)
+	clientset := k8sfake.NewClientset(ns)
 
 	scheme := k8sruntime.NewScheme()
 	dynClient := fake.NewSimpleDynamicClient(scheme)
@@ -116,7 +116,7 @@ func TestRunDiagnostics_NonGKE_NoCSIChecks(t *testing.T) {
 
 func TestRunDiagnostics_NamespaceNotFound(t *testing.T) {
 	// Create clientset WITHOUT the target namespace
-	clientset := k8sfake.NewSimpleClientset()
+	clientset := k8sfake.NewClientset()
 
 	scheme := k8sruntime.NewScheme()
 	dynClient := fake.NewSimpleDynamicClient(scheme)
@@ -142,7 +142,7 @@ func TestRunDiagnostics_CustomNamespace(t *testing.T) {
 	ns := &corev1.Namespace{
 		ObjectMeta: metav1.ObjectMeta{Name: "custom-ns"},
 	}
-	clientset := k8sfake.NewSimpleClientset(ns)
+	clientset := k8sfake.NewClientset(ns)
 
 	scheme := k8sruntime.NewScheme()
 	dynClient := fake.NewSimpleDynamicClient(scheme)

@@ -65,10 +65,10 @@ func TestBuildPod_WorkspaceVolume_LocalBackend_EmptyDir(t *testing.T) {
 	for _, v := range pod.Spec.Volumes {
 		if v.Name == "workspace" {
 			found = true
-			if v.VolumeSource.EmptyDir == nil {
+			if v.EmptyDir == nil {
 				t.Errorf("local backend: workspace volume should be EmptyDir, got %+v", v.VolumeSource)
 			}
-			if v.VolumeSource.PersistentVolumeClaim != nil {
+			if v.PersistentVolumeClaim != nil {
 				t.Errorf("local backend: workspace volume should NOT be PVC")
 			}
 		}
@@ -111,13 +111,13 @@ func TestBuildPod_WorkspaceVolume_NFSBackend_PVCWithSubPath(t *testing.T) {
 	for _, v := range pod.Spec.Volumes {
 		if v.Name == "workspace" {
 			found = true
-			if v.VolumeSource.PersistentVolumeClaim == nil {
+			if v.PersistentVolumeClaim == nil {
 				t.Fatalf("NFS backend: workspace volume should be PVC, got %+v", v.VolumeSource)
 			}
-			if v.VolumeSource.PersistentVolumeClaim.ClaimName != "scion-workspaces" {
-				t.Errorf("PVC claimName = %q, want %q", v.VolumeSource.PersistentVolumeClaim.ClaimName, "scion-workspaces")
+			if v.PersistentVolumeClaim.ClaimName != "scion-workspaces" {
+				t.Errorf("PVC claimName = %q, want %q", v.PersistentVolumeClaim.ClaimName, "scion-workspaces")
 			}
-			if v.VolumeSource.EmptyDir != nil {
+			if v.EmptyDir != nil {
 				t.Errorf("NFS backend: workspace volume should NOT be EmptyDir")
 			}
 		}
@@ -157,7 +157,7 @@ func TestBuildPod_WorkspaceVolume_NFSWithoutPVCName_FallsBackToEmptyDir(t *testi
 
 	for _, v := range pod.Spec.Volumes {
 		if v.Name == "workspace" {
-			if v.VolumeSource.EmptyDir == nil {
+			if v.EmptyDir == nil {
 				t.Errorf("NFS without PVC name: should fall back to EmptyDir, got %+v", v.VolumeSource)
 			}
 		}
@@ -1186,9 +1186,9 @@ func TestBuildPod_NFSBackend_WorktreeSubPath_StillRouted(t *testing.T) {
 
 	wsVol := findVolume(pod, "workspace")
 	require.NotNil(t, wsVol, "workspace volume must exist")
-	require.NotNil(t, wsVol.VolumeSource.PersistentVolumeClaim,
+	require.NotNil(t, wsVol.PersistentVolumeClaim,
 		"NFS worktree backend must use PVC, not EmptyDir")
-	assert.Equal(t, "scion-workspaces", wsVol.VolumeSource.PersistentVolumeClaim.ClaimName)
+	assert.Equal(t, "scion-workspaces", wsVol.PersistentVolumeClaim.ClaimName)
 
 	wsMount := findVolumeMount(&pod.Spec.Containers[0], "workspace")
 	require.NotNil(t, wsMount, "workspace mount must exist")

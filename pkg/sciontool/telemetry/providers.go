@@ -114,7 +114,7 @@ func buildResource(ctx context.Context) (*resource.Resource, error) {
 func newGCPProviders(ctx context.Context, config *Config, res *resource.Resource, batch bool) (*Providers, error) {
 	clientOpts := []option.ClientOption{}
 	if config.GCPCredentialsFile != "" {
-		clientOpts = append(clientOpts, option.WithCredentialsFile(config.GCPCredentialsFile))
+		clientOpts = append(clientOpts, option.WithAuthCredentialsFile(option.ServiceAccount, config.GCPCredentialsFile))
 	}
 
 	// GCP Cloud Trace exporter

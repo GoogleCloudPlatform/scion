@@ -41,7 +41,7 @@ type gcpSMClient struct {
 func newGCPSMClient(ctx context.Context, credentialsJSON string) (SMClient, error) {
 	var opts []option.ClientOption
 	if credentialsJSON != "" {
-		opts = append(opts, option.WithCredentialsJSON([]byte(credentialsJSON)))
+		opts = append(opts, option.WithAuthCredentialsJSON(option.ServiceAccount, []byte(credentialsJSON)))
 	}
 	client, err := secretmanager.NewClient(ctx, opts...)
 	if err != nil {

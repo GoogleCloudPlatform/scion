@@ -27,7 +27,7 @@ import (
 )
 
 func TestKubernetesRuntime_Run_Annotations(t *testing.T) {
-	clientset := k8sfake.NewSimpleClientset()
+	clientset := k8sfake.NewClientset()
 	scheme := k8sruntime.NewScheme()
 	fc := fake.NewSimpleDynamicClient(scheme)
 	client := k8s.NewTestClient(fc, clientset)
@@ -73,7 +73,7 @@ func TestKubernetesRuntime_Run_Annotations(t *testing.T) {
 }
 
 func TestKubernetesRuntime_List_Annotations(t *testing.T) {
-	clientset := k8sfake.NewSimpleClientset()
+	clientset := k8sfake.NewClientset()
 	scheme := k8sruntime.NewScheme()
 	fc := fake.NewSimpleDynamicClient(scheme)
 	client := k8s.NewTestClient(fc, clientset)

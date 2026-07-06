@@ -332,7 +332,7 @@ func TestBuildPod_GitClone_Annotations(t *testing.T) {
 // --- Stage 1.1 continued: createAuthFileSecret ---
 
 func TestCreateAuthFileSecret(t *testing.T) {
-	clientset := k8sfake.NewSimpleClientset()
+	clientset := k8sfake.NewClientset()
 	scheme := k8sruntime.NewScheme()
 	dynClient := fake.NewSimpleDynamicClient(scheme)
 	client := k8s.NewTestClient(dynClient, clientset)

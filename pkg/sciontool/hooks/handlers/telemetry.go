@@ -20,6 +20,7 @@ import (
 	otellog "go.opentelemetry.io/otel/log"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
+	"go.opentelemetry.io/otel/trace/noop"
 )
 
 // SpanMapping defines how hook events map to span names.
@@ -77,7 +78,7 @@ func NewTelemetryHandler(tp trace.TracerProvider, lp otellog.LoggerProvider, red
 	if tp != nil {
 		tracer = tp.Tracer("github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks/handlers")
 	} else {
-		tracer = trace.NewNoopTracerProvider().Tracer("noop")
+		tracer = noop.NewTracerProvider().Tracer("noop")
 	}
 
 	h := &TelemetryHandler{

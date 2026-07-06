@@ -45,7 +45,7 @@ func NewGCPExporter(config *Config) (*GCPExporter, error) {
 
 	opts := []option.ClientOption{}
 	if config.GCPCredentialsFile != "" {
-		opts = append(opts, option.WithCredentialsFile(config.GCPCredentialsFile))
+		opts = append(opts, option.WithAuthCredentialsFile(option.ServiceAccount, config.GCPCredentialsFile))
 	}
 
 	// Create GCP Cloud Trace exporter
@@ -79,7 +79,7 @@ func NewGCPExporter(config *Config) (*GCPExporter, error) {
 		_ = logClient.Close()
 		return nil, fmt.Errorf("creating Cloud Monitoring metric exporter: %w", err)
 	}
-	var metricExporter sdkmetric.Exporter = metricExp
+	var metricExporter = metricExp
 	if config.MetricsDebug {
 		metricExporter = newDebugMetricExporter(metricExporter)
 	}

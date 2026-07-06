@@ -157,10 +157,7 @@ func (a *GRPCBrokerAdapter) connect() error {
 		return fmt.Errorf("dial options: %w", err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	conn, err := grpc.DialContext(ctx, a.address, opts...)
+	conn, err := grpc.NewClient(a.address, opts...)
 	if err != nil {
 		return fmt.Errorf("dial %s: %w", a.address, err)
 	}

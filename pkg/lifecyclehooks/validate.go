@@ -419,7 +419,8 @@ func validateExecutionIdentity(ctx context.Context, hook *store.LifecycleHook, r
 
 	// Must be in scope. For hub-scoped hooks, any hub-scoped SA is valid.
 	// For project-scoped hooks, the SA must be in the same project scope.
-	if hook.ScopeType == store.LifecycleHookScopeHub {
+	switch hook.ScopeType {
+	case store.LifecycleHookScopeHub:
 		// Hub-scoped hooks can use hub-scoped SAs.
 		if sa.Scope != "hub" {
 			errs = append(errs, FieldError{
@@ -427,7 +428,7 @@ func validateExecutionIdentity(ctx context.Context, hook *store.LifecycleHook, r
 				Message: fmt.Sprintf("hub-scoped hook requires a hub-scoped service account; SA %q has scope %q", sa.Email, sa.Scope),
 			})
 		}
-	} else if hook.ScopeType == store.LifecycleHookScopeProject {
+	case store.LifecycleHookScopeProject:
 		// Project-scoped hooks require the SA to be in the same project.
 		if sa.Scope != "project" || sa.ScopeID != hook.ScopeID {
 			errs = append(errs, FieldError{

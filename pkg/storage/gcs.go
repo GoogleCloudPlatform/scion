@@ -44,7 +44,7 @@ func NewGCS(ctx context.Context, cfg Config) (*GCSStorage, error) {
 
 	// Use service account credentials if provided
 	if cfg.Credentials != nil && cfg.Credentials.ServiceAccountJSON != "" {
-		opts = append(opts, option.WithCredentialsJSON([]byte(cfg.Credentials.ServiceAccountJSON)))
+		opts = append(opts, option.WithAuthCredentialsJSON(option.ServiceAccount, []byte(cfg.Credentials.ServiceAccountJSON)))
 	}
 
 	// Create the client

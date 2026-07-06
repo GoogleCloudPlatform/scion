@@ -174,12 +174,12 @@ func MergeEnvOverlay(env []string, overlay map[string]string) []string {
 func validEnvKey(k string) bool {
 	for i, r := range k {
 		if i == 0 {
-			if !(r == '_' || (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z')) {
+			if r != '_' && (r < 'A' || r > 'Z') && (r < 'a' || r > 'z') {
 				return false
 			}
 			continue
 		}
-		if !(r == '_' || (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9')) {
+		if r != '_' && (r < 'A' || r > 'Z') && (r < 'a' || r > 'z') && (r < '0' || r > '9') {
 			return false
 		}
 	}

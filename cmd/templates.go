@@ -472,7 +472,7 @@ func deleteTemplateMatch(ctx context.Context, match *TemplateMatch, hubCtx *HubC
 	} else {
 		// Delete hub template
 		if hubCtx == nil {
-			return fmt.Errorf("Hub context not available for deleting Hub template")
+			return fmt.Errorf("hub context not available for deleting hub template")
 		}
 		deleteCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		defer cancel()
@@ -590,7 +590,7 @@ func cloneLocalTemplate(srcPath, destName string, destGlobal bool) error {
 // cloneFromHubTemplate pulls a Hub template and clones it locally.
 func cloneFromHubTemplate(hubCtx *HubContext, match *TemplateMatch, destName string, destGlobal bool) error {
 	if hubCtx == nil {
-		return fmt.Errorf("Hub context not available for cloning Hub template")
+		return fmt.Errorf("hub context not available for cloning hub template")
 	}
 
 	// Determine destination path
@@ -716,7 +716,7 @@ func runTemplateSync(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	if hubCtx == nil {
-		return fmt.Errorf("Hub integration is not enabled. Use 'scion hub enable' first")
+		return fmt.Errorf("hub integration is not enabled, use 'scion hub enable' first")
 	}
 
 	PrintUsingHub(hubCtx.Endpoint)
@@ -846,7 +846,7 @@ func runTemplatePull(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	if hubCtx == nil {
-		return fmt.Errorf("Hub integration is not enabled. Use 'scion hub enable' first")
+		return fmt.Errorf("hub integration is not enabled, use 'scion hub enable' first")
 	}
 
 	PrintUsingHub(hubCtx.Endpoint)
@@ -1229,7 +1229,7 @@ func runTemplateStatus(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	if hubCtx == nil {
-		return fmt.Errorf("Hub integration is not enabled. Use 'scion hub enable' first")
+		return fmt.Errorf("hub integration is not enabled, use 'scion hub enable' first")
 	}
 
 	PrintUsingHub(hubCtx.Endpoint)

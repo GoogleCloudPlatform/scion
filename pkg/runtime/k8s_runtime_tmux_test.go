@@ -60,7 +60,7 @@ func (m *MockHarness) ResolveAuth(auth api.AuthConfig) (*api.ResolvedAuth, error
 
 func TestKubernetesRuntime_Run_Tmux(t *testing.T) {
 	// Setup
-	clientset := k8sfake.NewSimpleClientset()
+	clientset := k8sfake.NewClientset()
 	scheme := k8sruntime.NewScheme()
 	fc := fake.NewSimpleDynamicClient(scheme)
 	client := k8s.NewTestClient(fc, clientset)
