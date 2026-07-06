@@ -90,6 +90,13 @@ func (s *Server) BootstrapBundledResources(ctx context.Context, opts BootstrapOp
 			"repaired", result.Repaired, "skipped", result.Skipped,
 			"failed", result.Failed)
 	}
+
+	if !skipHarnessConfigs {
+		if err := s.ArchiveObsoleteBundledHarnessConfigs(ctx); err != nil {
+			errs = append(errs, fmt.Errorf("archive obsolete bundled harness-configs: %w", err))
+		}
+	}
+
 	return errors.Join(errs...)
 }
 
@@ -115,6 +122,51 @@ func resolveHarnessType(r resources.BundledResource) (string, error) {
 		return "", fmt.Errorf("config.yaml missing harness field")
 	}
 	return entry.Harness, nil
+}
+
+// ArchiveObsoleteBundledHarnessConfigs archives global harness-configs that
+// were originally bootstrapped from bundled resources but whose bundled source
+// no longer exists in the current binary. This prevents stale configs (e.g. a
+// removed harness like "gemini") from persisting indefinitely via local disk
+// copies at ~/.scion/harness-configs/.
+func (s *Server) ArchiveObsoleteBundledHarnessConfigs(ctx context.Context) error {
+	bundledNames := make(map[string]struct{})
+	for _, name := range resources.BuiltinHarnessConfigNames() {
+		bundledNames[name] = struct{}{}
+	}
+
+	existing, err := s.store.ListHarnessConfigs(ctx, store.HarnessConfigFilter{
+		Scope:  store.HarnessConfigScopeGlobal,
+		Status: store.HarnessConfigStatusActive,
+	}, store.ListOptions{Limit: 1000})
+	if err != nil {
+		return fmt.Errorf("list global harness configs: %w", err)
+	}
+
+	archived := 0
+	for _, hc := range existing.Items {
+		if !IsBuiltinManaged(hc.SourceURL) && hc.SourceURL != "" {
+			continue
+		}
+		if _, ok := bundledNames[hc.Name]; ok {
+			continue
+		}
+
+		hc.Status = store.HarnessConfigStatusArchived
+		if err := s.store.UpdateHarnessConfig(ctx, &hc); err != nil {
+			s.resourceLog.Warn("failed to archive obsolete bundled harness-config",
+				"name", hc.Name, "id", hc.ID, "error", err)
+			continue
+		}
+		s.resourceLog.Info("archived obsolete bundled harness-config",
+			"name", hc.Name, "id", hc.ID, "sourceUrl", hc.SourceURL)
+		archived++
+	}
+
+	if archived > 0 {
+		s.resourceLog.Info("archived obsolete bundled harness-configs", "count", archived)
+	}
+	return nil
 }
 
 // checkAndUpdateImageStatus resolves the image registry, checks image

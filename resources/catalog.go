@@ -98,6 +98,22 @@ func BuiltinHarnessConfigs() []BundledResource {
 	return configs
 }
 
+// BuiltinHarnessConfigNames returns the names of all bundled harness-config
+// resources without constructing full BundledResource values.
+func BuiltinHarnessConfigNames() []string {
+	entries, err := fs.ReadDir(harnesses.FS, ".")
+	if err != nil {
+		panic(fmt.Sprintf("resources: read harnesses FS: %v", err))
+	}
+	var names []string
+	for _, e := range entries {
+		if e.IsDir() {
+			names = append(names, e.Name())
+		}
+	}
+	return names
+}
+
 // BuiltinResources returns all bundled resources (templates + harness-configs).
 func BuiltinResources() []BundledResource {
 	return append(BuiltinTemplates(), BuiltinHarnessConfigs()...)

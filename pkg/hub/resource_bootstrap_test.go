@@ -20,6 +20,7 @@ import (
 	"context"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -230,6 +231,150 @@ func TestBootstrapBundledResources_NoStorage(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("expected nil error without storage, got: %v", err)
+	}
+}
+
+func TestArchiveObsoleteBundledHarnessConfigs(t *testing.T) {
+	srv, s, _ := testTemplateBootstrapServer(t)
+	ctx := context.Background()
+	now := time.Now()
+
+	// Bootstrap real bundled resources first so the DB has current configs.
+	if err := srv.BootstrapBundledResources(ctx, BootstrapOptions{
+		RepairStorage:   true,
+		OverwritePolicy: OverwriteBuiltinManaged,
+	}); err != nil {
+		t.Fatalf("BootstrapBundledResources failed: %v", err)
+	}
+
+	// Insert a stale bundled harness-config that no longer exists in the embed.
+	staleBuiltin := &store.HarnessConfig{
+		ID:         tid("hc_stale_builtin"),
+		Slug:       "old-removed-harness",
+		Name:       "old-removed-harness",
+		Harness:    "generic",
+		Scope:      store.HarnessConfigScopeGlobal,
+		SourceURL:  "git+https://github.com/GoogleCloudPlatform/scion/harnesses/old-removed-harness",
+		Visibility: "public",
+		Status:     store.HarnessConfigStatusActive,
+		Created:    now,
+		Updated:    now,
+	}
+	if err := s.CreateHarnessConfig(ctx, staleBuiltin); err != nil {
+		t.Fatalf("failed to create stale builtin config: %v", err)
+	}
+
+	// Insert a stale config with empty source_url (old format).
+	staleEmpty := &store.HarnessConfig{
+		ID:         tid("hc_stale_empty"),
+		Slug:       "old-empty-source",
+		Name:       "old-empty-source",
+		Harness:    "generic",
+		Scope:      store.HarnessConfigScopeGlobal,
+		SourceURL:  "",
+		Visibility: "public",
+		Status:     store.HarnessConfigStatusActive,
+		Created:    now,
+		Updated:    now,
+	}
+	if err := s.CreateHarnessConfig(ctx, staleEmpty); err != nil {
+		t.Fatalf("failed to create stale empty-source config: %v", err)
+	}
+
+	// Insert a user-imported config from an external source — must NOT be archived.
+	userImported := &store.HarnessConfig{
+		ID:         tid("hc_user_imported"),
+		Slug:       "user-custom-harness",
+		Name:       "user-custom-harness",
+		Harness:    "generic",
+		Scope:      store.HarnessConfigScopeGlobal,
+		SourceURL:  "git+https://github.com/example/custom-harness",
+		Visibility: "public",
+		Status:     store.HarnessConfigStatusActive,
+		Created:    now,
+		Updated:    now,
+	}
+	if err := s.CreateHarnessConfig(ctx, userImported); err != nil {
+		t.Fatalf("failed to create user-imported config: %v", err)
+	}
+
+	// Insert a project-scoped config — must NOT be archived.
+	projectScoped := &store.HarnessConfig{
+		ID:         tid("hc_project_scoped"),
+		Slug:       "project-harness",
+		Name:       "project-harness",
+		Harness:    "generic",
+		Scope:      store.HarnessConfigScopeProject,
+		ScopeID:    tid("project_1"),
+		SourceURL:  "",
+		Visibility: "public",
+		Status:     store.HarnessConfigStatusActive,
+		Created:    now,
+		Updated:    now,
+	}
+	if err := s.CreateHarnessConfig(ctx, projectScoped); err != nil {
+		t.Fatalf("failed to create project-scoped config: %v", err)
+	}
+
+	// Run the archive function.
+	if err := srv.ArchiveObsoleteBundledHarnessConfigs(ctx); err != nil {
+		t.Fatalf("ArchiveObsoleteBundledHarnessConfigs failed: %v", err)
+	}
+
+	// Verify stale builtin config was archived.
+	got, err := s.GetHarnessConfig(ctx, staleBuiltin.ID)
+	if err != nil {
+		t.Fatalf("failed to get stale builtin config: %v", err)
+	}
+	if got.Status != store.HarnessConfigStatusArchived {
+		t.Errorf("stale builtin config: expected status %q, got %q",
+			store.HarnessConfigStatusArchived, got.Status)
+	}
+
+	// Verify stale empty-source config was archived.
+	got, err = s.GetHarnessConfig(ctx, staleEmpty.ID)
+	if err != nil {
+		t.Fatalf("failed to get stale empty-source config: %v", err)
+	}
+	if got.Status != store.HarnessConfigStatusArchived {
+		t.Errorf("stale empty-source config: expected status %q, got %q",
+			store.HarnessConfigStatusArchived, got.Status)
+	}
+
+	// Verify user-imported config was NOT archived.
+	got, err = s.GetHarnessConfig(ctx, userImported.ID)
+	if err != nil {
+		t.Fatalf("failed to get user-imported config: %v", err)
+	}
+	if got.Status != store.HarnessConfigStatusActive {
+		t.Errorf("user-imported config: expected status %q, got %q",
+			store.HarnessConfigStatusActive, got.Status)
+	}
+
+	// Verify project-scoped config was NOT archived.
+	got, err = s.GetHarnessConfig(ctx, projectScoped.ID)
+	if err != nil {
+		t.Fatalf("failed to get project-scoped config: %v", err)
+	}
+	if got.Status != store.HarnessConfigStatusActive {
+		t.Errorf("project-scoped config: expected status %q, got %q",
+			store.HarnessConfigStatusActive, got.Status)
+	}
+
+	// Verify all real bundled configs are still active.
+	bundledNames := resources.BuiltinHarnessConfigNames()
+	for _, name := range bundledNames {
+		configs, err := s.ListHarnessConfigs(ctx, store.HarnessConfigFilter{
+			Name:   name,
+			Scope:  store.HarnessConfigScopeGlobal,
+			Status: store.HarnessConfigStatusActive,
+		}, store.ListOptions{Limit: 1})
+		if err != nil {
+			t.Fatalf("failed to list config %q: %v", name, err)
+		}
+		if len(configs.Items) == 0 {
+			t.Errorf("bundled config %q: expected to remain active, but not found", name)
+		}
 	}
 }
 
