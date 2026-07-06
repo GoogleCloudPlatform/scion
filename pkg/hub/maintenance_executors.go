@@ -291,9 +291,17 @@ func (e *RebuildServerExecutor) Run(ctx context.Context, logger io.Writer, param
 	steps = append(steps, step{"Fetching latest code", "git", []string{"fetch", "origin"}, repoPath})
 	if branch != "" {
 		steps = append(steps, step{"Checking out branch " + branch, "git", []string{"checkout", branch}, repoPath})
-		steps = append(steps, step{"Pulling latest code", "git", []string{"pull", "origin", branch}, repoPath})
+		steps = append(steps, step{"Resetting to origin/" + branch, "git", []string{"reset", "--hard", "origin/" + branch}, repoPath})
 	} else {
-		steps = append(steps, step{"Pulling latest code", "git", []string{"pull"}, repoPath})
+		// Determine the current branch to reset against its remote tracking ref.
+		branchCmd := exec.CommandContext(ctx, "git", "rev-parse", "--abbrev-ref", "HEAD")
+		branchCmd.Dir = repoPath
+		branchOut, err := branchCmd.CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("failed to determine current branch: %s", strings.TrimSpace(string(branchOut)))
+		}
+		currentBranch := strings.TrimSpace(string(branchOut))
+		steps = append(steps, step{"Resetting to origin/" + currentBranch, "git", []string{"reset", "--hard", "origin/" + currentBranch}, repoPath})
 	}
 	steps = append(steps,
 		step{"Building web assets", "make", []string{"web"}, repoPath},
@@ -310,12 +318,18 @@ func (e *RebuildServerExecutor) Run(ctx context.Context, logger io.Writer, param
 		if step.dir != "" {
 			cmd.Dir = step.dir
 		}
+		var stderr bytes.Buffer
 		cmd.Stdout = logger
-		cmd.Stderr = logger
+		cmd.Stderr = io.MultiWriter(logger, &stderr)
 		if err := cmd.Run(); err != nil {
+			errDetail := strings.TrimSpace(stderr.String())
 			log.Error("Step failed",
 				"step", i+1, "name", step.name,
-				"cmd", step.cmd, "args", fmt.Sprint(step.args), "error", err)
+				"cmd", step.cmd, "args", fmt.Sprint(step.args),
+				"error", err, "stderr", errDetail)
+			if errDetail != "" {
+				return fmt.Errorf("%s failed: %s", step.name, errDetail)
+			}
 			return fmt.Errorf("%s failed: %w", step.name, err)
 		}
 		log.Debug("Step completed", "step", i+1, "name", step.name)
@@ -374,9 +388,16 @@ func (e *RebuildWebExecutor) Run(ctx context.Context, logger io.Writer, params m
 	steps = append(steps, step{"Fetching latest code", "git", []string{"fetch", "origin"}})
 	if branch != "" {
 		steps = append(steps, step{"Checking out branch " + branch, "git", []string{"checkout", branch}})
-		steps = append(steps, step{"Pulling latest code", "git", []string{"pull", "origin", branch}})
+		steps = append(steps, step{"Resetting to origin/" + branch, "git", []string{"reset", "--hard", "origin/" + branch}})
 	} else {
-		steps = append(steps, step{"Pulling latest code", "git", []string{"pull"}})
+		branchCmd := exec.CommandContext(ctx, "git", "rev-parse", "--abbrev-ref", "HEAD")
+		branchCmd.Dir = repoPath
+		branchOut, err := branchCmd.CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("failed to determine current branch: %s", strings.TrimSpace(string(branchOut)))
+		}
+		currentBranch := strings.TrimSpace(string(branchOut))
+		steps = append(steps, step{"Resetting to origin/" + currentBranch, "git", []string{"reset", "--hard", "origin/" + currentBranch}})
 	}
 	steps = append(steps, step{"Building web assets", "make", []string{"web"}})
 
@@ -387,11 +408,17 @@ func (e *RebuildWebExecutor) Run(ctx context.Context, logger io.Writer, params m
 			"cmd", step.cmd, "args", fmt.Sprint(step.args))
 		cmd := exec.CommandContext(ctx, step.cmd, step.args...)
 		cmd.Dir = repoPath
+		var stderr bytes.Buffer
 		cmd.Stdout = logger
-		cmd.Stderr = logger
+		cmd.Stderr = io.MultiWriter(logger, &stderr)
 		if err := cmd.Run(); err != nil {
+			errDetail := strings.TrimSpace(stderr.String())
 			log.Error("Step failed",
-				"step", i+1, "name", step.name, "error", err)
+				"step", i+1, "name", step.name,
+				"error", err, "stderr", errDetail)
+			if errDetail != "" {
+				return fmt.Errorf("%s failed: %s", step.name, errDetail)
+			}
 			return fmt.Errorf("%s failed: %w", step.name, err)
 		}
 		log.Debug("Step completed", "step", i+1, "name", step.name)
