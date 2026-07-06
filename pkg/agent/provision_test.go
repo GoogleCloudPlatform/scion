@@ -35,7 +35,7 @@ import (
 func seedTestHarnessConfig(t *testing.T, scionDir, name, harnessType string) {
 	t.Helper()
 	hcDir := filepath.Join(scionDir, "harness-configs", name)
-	os.MkdirAll(hcDir, 0755)
+	_ = os.MkdirAll(hcDir, 0755)
 	configYAML := "harness: " + harnessType + "\nimage: test-image:latest\n"
 	if harnessType == "claude" {
 		configYAML += "skills_dir: .claude/skills\ninstructions_file: .claude/CLAUDE.md\nsystem_prompt_file: .claude/system-prompt.md\n"
@@ -50,24 +50,24 @@ func TestProvisionAgentEnvMerging(t *testing.T) {
 
 	// Move to tmpDir to avoid being inside the project's git repo
 	oldWd, _ := os.Getwd()
-	os.Chdir(tmpDir)
-	defer os.Chdir(oldWd)
+	_ = os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
 
 	// Mock HOME for global settings and templates
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	globalScionDir := filepath.Join(tmpDir, ".scion")
 	globalTemplatesDir := filepath.Join(globalScionDir, "templates")
-	os.MkdirAll(globalTemplatesDir, 0755)
+	_ = os.MkdirAll(globalTemplatesDir, 0755)
 
 	// Create a harness-config for test-harness
 	seedTestHarnessConfig(t, globalScionDir, "test-harness", "test-harness")
 
 	// Create an agnostic template (no harness field, uses default_harness_config)
 	tplDir := filepath.Join(globalTemplatesDir, "test-tpl")
-	os.MkdirAll(tplDir, 0755)
+	_ = os.MkdirAll(tplDir, 0755)
 	tplConfig := `{
 		"default_harness_config": "test-harness",
 		"env": {
@@ -75,7 +75,7 @@ func TestProvisionAgentEnvMerging(t *testing.T) {
 			"OVERRIDE_VAR": "tpl-override"
 		}
 	}`
-	os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(tplConfig), 0644)
+	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(tplConfig), 0644)
 
 	// Global settings with harness_configs
 	globalSettings := `schema_version: "1"
@@ -86,12 +86,12 @@ harness_configs:
       GLOBAL_VAR: global-val
       OVERRIDE_VAR: global-override
 `
-	os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(globalSettings), 0644)
+	_ = os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(globalSettings), 0644)
 
 	// Project settings
 	projectDir := filepath.Join(tmpDir, "project")
 	projectScionDir := filepath.Join(projectDir, ".scion")
-	os.MkdirAll(projectScionDir, 0755)
+	_ = os.MkdirAll(projectScionDir, 0755)
 	projectSettings := `schema_version: "1"
 profiles:
   test-profile:
@@ -100,7 +100,7 @@ profiles:
       PROJECT_VAR: project-val
       OVERRIDE_VAR: project-override
 `
-	os.WriteFile(filepath.Join(projectScionDir, "settings.yaml"), []byte(projectSettings), 0644)
+	_ = os.WriteFile(filepath.Join(projectScionDir, "settings.yaml"), []byte(projectSettings), 0644)
 
 	// Provision agent
 	agentName := "test-agent"
@@ -151,13 +151,13 @@ func TestProvisionGeminiAgentSettings(t *testing.T) {
 
 	// Move to tmpDir
 	oldWd, _ := os.Getwd()
-	os.Chdir(tmpDir)
-	defer os.Chdir(oldWd)
+	_ = os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
 
 	// Mock HOME
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	// Seed global harness-configs (required for agent creation)
 	if err := config.InitMachine(getTestHarnesses()); err != nil {
@@ -212,12 +212,12 @@ func TestProvisionWritesTaskToPromptMd(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	oldWd, _ := os.Getwd()
-	os.Chdir(tmpDir)
-	defer os.Chdir(oldWd)
+	_ = os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
 
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	if err := config.InitMachine(getTestHarnesses()); err != nil {
 		t.Fatalf("InitMachine failed: %v", err)
@@ -229,7 +229,7 @@ func TestProvisionWritesTaskToPromptMd(t *testing.T) {
 		t.Fatalf("InitProject failed: %v", err)
 	}
 
-	os.Chdir(projectDir)
+	_ = os.Chdir(projectDir)
 
 	rt := &runtime.MockRuntime{}
 	mgr := NewManager(rt)
@@ -289,13 +289,13 @@ func TestProvisionAgentNonGitWorkspace(t *testing.T) {
 
 	// Move to tmpDir to avoid being inside the project's git repo
 	oldWd, _ := os.Getwd()
-	os.Chdir(tmpDir)
-	defer os.Chdir(oldWd)
+	_ = os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
 
 	// Mock HOME
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	if err := config.InitMachine(getTestHarnesses()); err != nil {
 		t.Fatalf("InitMachine failed: %v", err)
@@ -352,7 +352,7 @@ func TestProvisionAgentNonGitWorkspace(t *testing.T) {
 
 	// Change into a subdirectory to act as CWD
 	cwd := filepath.Join(tmpDir, "some-dir")
-	os.MkdirAll(cwd, 0755)
+	_ = os.MkdirAll(cwd, 0755)
 	if err := os.Chdir(cwd); err != nil {
 		t.Fatal(err)
 	}
@@ -387,36 +387,36 @@ func TestProvisionAgentWorkspaceFlag(t *testing.T) {
 
 	// Move to tmpDir to avoid being inside the project's git repo
 	oldWd, _ := os.Getwd()
-	os.Chdir(tmpDir)
-	defer os.Chdir(oldWd)
+	_ = os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
 
 	// Mock HOME
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	globalScionDir := filepath.Join(tmpDir, ".scion")
 	globalTemplatesDir := filepath.Join(globalScionDir, "templates")
-	os.MkdirAll(globalTemplatesDir, 0755)
+	_ = os.MkdirAll(globalTemplatesDir, 0755)
 
 	// Create a harness-config and agnostic template
 	seedTestHarnessConfig(t, globalScionDir, "claude", "claude")
 
 	tplDir := filepath.Join(globalTemplatesDir, "claude")
-	os.MkdirAll(tplDir, 0755)
+	_ = os.MkdirAll(tplDir, 0755)
 	tplConfig := `{"default_harness_config": "claude"}`
-	os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(tplConfig), 0644)
+	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(tplConfig), 0644)
 
 	projectDir := filepath.Join(tmpDir, "project")
-	os.MkdirAll(projectDir, 0755)
+	_ = os.MkdirAll(projectDir, 0755)
 
 	// Mock .scion
 	projectScionDir := filepath.Join(projectDir, ".scion")
-	os.MkdirAll(projectScionDir, 0755)
-	os.WriteFile(filepath.Join(projectDir, ".gitignore"), []byte("agents/"), 0644)
+	_ = os.MkdirAll(projectScionDir, 0755)
+	_ = os.WriteFile(filepath.Join(projectDir, ".gitignore"), []byte("agents/"), 0644)
 
 	customWorkspace := filepath.Join(tmpDir, "custom-workspace")
-	os.MkdirAll(customWorkspace, 0755)
+	_ = os.MkdirAll(customWorkspace, 0755)
 	evalCustomWorkspace, _ := filepath.EvalSymlinks(customWorkspace)
 
 	// 1. Test valid --workspace in non-git
@@ -445,7 +445,7 @@ func TestProvisionAgentWorkspaceFlag(t *testing.T) {
 	// 2. Test relative path for --workspace
 	relativeWorkspace := "some-subdir"
 
-	os.MkdirAll(filepath.Join(tmpDir, relativeWorkspace), 0755)
+	_ = os.MkdirAll(filepath.Join(tmpDir, relativeWorkspace), 0755)
 	absRelativeWorkspace, _ := filepath.Abs(filepath.Join(tmpDir, relativeWorkspace))
 	evalAbsRelativeWorkspace, _ := filepath.EvalSymlinks(absRelativeWorkspace)
 
@@ -470,10 +470,10 @@ func TestProvisionAgentWorkspaceFlag(t *testing.T) {
 
 	// 3. Test --workspace succeeds in git repo
 	gitDir := filepath.Join(tmpDir, "git-project")
-	os.MkdirAll(filepath.Join(gitDir, ".git"), 0755)
+	_ = os.MkdirAll(filepath.Join(gitDir, ".git"), 0755)
 	gitScionDir := filepath.Join(gitDir, ".scion")
-	os.MkdirAll(gitScionDir, 0755)
-	os.WriteFile(filepath.Join(gitDir, ".gitignore"), []byte("agents/"), 0644)
+	_ = os.MkdirAll(gitScionDir, 0755)
+	_ = os.WriteFile(filepath.Join(gitDir, ".gitignore"), []byte("agents/"), 0644)
 
 	var ws string
 	_, ws, cfg, err = ProvisionAgent(context.Background(), "git-agent", "claude", "", "", gitScionDir, "", "", "", customWorkspace)
@@ -504,37 +504,37 @@ func TestProvisionAgentYAMLTemplate(t *testing.T) {
 
 	// Move to tmpDir to avoid being inside the project's git repo
 	oldWd, _ := os.Getwd()
-	os.Chdir(tmpDir)
-	defer os.Chdir(oldWd)
+	_ = os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
 
 	// Mock HOME for global settings and templates
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	globalScionDir := filepath.Join(tmpDir, ".scion")
 	globalTemplatesDir := filepath.Join(globalScionDir, "templates")
-	os.MkdirAll(globalTemplatesDir, 0755)
+	_ = os.MkdirAll(globalTemplatesDir, 0755)
 
 	// Create a harness-config for claude
 	seedTestHarnessConfig(t, globalScionDir, "claude", "claude")
 
 	// Create an agnostic template with YAML config
 	tplDir := filepath.Join(globalTemplatesDir, "yaml-test-tpl")
-	os.MkdirAll(tplDir, 0755)
+	_ = os.MkdirAll(tplDir, 0755)
 	tplConfigYAML := `default_harness_config: claude
 env:
   TPL_VAR: tpl-val
   GOOGLE_CLOUD_PROJECT: my-project
 auth_selectedType: vertex-ai
 `
-	os.WriteFile(filepath.Join(tplDir, "scion-agent.yaml"), []byte(tplConfigYAML), 0644)
+	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.yaml"), []byte(tplConfigYAML), 0644)
 
 	// Project settings (minimal)
 	projectDir := filepath.Join(tmpDir, "project")
 	projectScionDir := filepath.Join(projectDir, ".scion")
-	os.MkdirAll(projectScionDir, 0755)
-	os.WriteFile(filepath.Join(projectDir, ".gitignore"), []byte("agents/"), 0644)
+	_ = os.MkdirAll(projectScionDir, 0755)
+	_ = os.WriteFile(filepath.Join(projectDir, ".gitignore"), []byte("agents/"), 0644)
 
 	// Provision agent
 	agentName := "yaml-agent"
@@ -584,13 +584,13 @@ func TestProvisionAgentUsesProjectTemplate(t *testing.T) {
 	// Move to tmpDir — this is NOT the project's directory,
 	// simulating a broker process whose CWD doesn't contain .scion.
 	oldWd, _ := os.Getwd()
-	os.Chdir(tmpDir)
-	defer os.Chdir(oldWd)
+	_ = os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
 
 	// Mock HOME
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	// Create global harness-configs
 	globalScionDir := filepath.Join(tmpDir, ".scion")
@@ -598,8 +598,8 @@ func TestProvisionAgentUsesProjectTemplate(t *testing.T) {
 
 	// Create a global agnostic template
 	globalTplDir := filepath.Join(globalScionDir, "templates", "my-tpl")
-	os.MkdirAll(globalTplDir, 0755)
-	os.WriteFile(filepath.Join(globalTplDir, "scion-agent.json"), []byte(`{
+	_ = os.MkdirAll(globalTplDir, 0755)
+	_ = os.WriteFile(filepath.Join(globalTplDir, "scion-agent.json"), []byte(`{
 		"default_harness_config": "grove-harness",
 		"env": {"SOURCE": "global"}
 	}`), 0644)
@@ -608,8 +608,8 @@ func TestProvisionAgentUsesProjectTemplate(t *testing.T) {
 	projectDir := filepath.Join(tmpDir, "project")
 	projectPath := filepath.Join(projectDir, ".scion")
 	projectTplDir := filepath.Join(projectPath, "templates", "my-tpl")
-	os.MkdirAll(projectTplDir, 0755)
-	os.WriteFile(filepath.Join(projectTplDir, "scion-agent.json"), []byte(`{
+	_ = os.MkdirAll(projectTplDir, 0755)
+	_ = os.WriteFile(filepath.Join(projectTplDir, "scion-agent.json"), []byte(`{
 		"default_harness_config": "grove-harness",
 		"env": {"SOURCE": "project"}
 	}`), 0644)
@@ -635,33 +635,33 @@ func TestProvisionAgentInvalidYAMLTemplate(t *testing.T) {
 
 	// Move to tmpDir to avoid being inside the project's git repo
 	oldWd, _ := os.Getwd()
-	os.Chdir(tmpDir)
-	defer os.Chdir(oldWd)
+	_ = os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
 
 	// Mock HOME for global settings and templates
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	globalScionDir := filepath.Join(tmpDir, ".scion")
 	globalTemplatesDir := filepath.Join(globalScionDir, "templates")
-	os.MkdirAll(globalTemplatesDir, 0755)
+	_ = os.MkdirAll(globalTemplatesDir, 0755)
 
 	// Create a template with invalid YAML config (commas in map entries)
 	tplDir := filepath.Join(globalTemplatesDir, "invalid-yaml-tpl")
-	os.MkdirAll(tplDir, 0755)
+	_ = os.MkdirAll(tplDir, 0755)
 	invalidYAML := `default_harness_config: claude
 env:
   "KEY1": "value1",
   "KEY2": "value2"
 `
-	os.WriteFile(filepath.Join(tplDir, "scion-agent.yaml"), []byte(invalidYAML), 0644)
+	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.yaml"), []byte(invalidYAML), 0644)
 
 	// Project settings
 	projectDir := filepath.Join(tmpDir, "project")
 	projectScionDir := filepath.Join(projectDir, ".scion")
-	os.MkdirAll(projectScionDir, 0755)
-	os.WriteFile(filepath.Join(projectDir, ".gitignore"), []byte("agents/"), 0644)
+	_ = os.MkdirAll(projectScionDir, 0755)
+	_ = os.WriteFile(filepath.Join(projectDir, ".gitignore"), []byte("agents/"), 0644)
 
 	// Provision agent - should fail with an error
 	agentName := "invalid-yaml-agent"
@@ -680,16 +680,16 @@ func TestProvisionAgent_WritesServicesFile(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	oldWd, _ := os.Getwd()
-	os.Chdir(tmpDir)
-	defer os.Chdir(oldWd)
+	_ = os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
 
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	globalScionDir := filepath.Join(tmpDir, ".scion")
 	globalTemplatesDir := filepath.Join(globalScionDir, "templates")
-	os.MkdirAll(globalTemplatesDir, 0755)
+	_ = os.MkdirAll(globalTemplatesDir, 0755)
 
 	// Create a harness-config for claude
 	seedTestHarnessConfig(t, globalScionDir, "claude", "claude")
@@ -697,7 +697,7 @@ func TestProvisionAgent_WritesServicesFile(t *testing.T) {
 	t.Run("services written when defined", func(t *testing.T) {
 		// Create an agnostic template with services defined in YAML
 		tplDir := filepath.Join(globalTemplatesDir, "svc-tpl")
-		os.MkdirAll(tplDir, 0755)
+		_ = os.MkdirAll(tplDir, 0755)
 		tplConfigYAML := `default_harness_config: claude
 services:
   - name: xvfb
@@ -709,11 +709,11 @@ services:
     command: ["npx", "chrome-mcp"]
     restart: on-failure
 `
-		os.WriteFile(filepath.Join(tplDir, "scion-agent.yaml"), []byte(tplConfigYAML), 0644)
+		_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.yaml"), []byte(tplConfigYAML), 0644)
 
 		projectDir := filepath.Join(tmpDir, "project-svc")
 		projectScionDir := filepath.Join(projectDir, ".scion")
-		os.MkdirAll(projectScionDir, 0755)
+		_ = os.MkdirAll(projectScionDir, 0755)
 
 		agentName := "svc-agent"
 		agentHome, _, _, err := ProvisionAgent(context.Background(), agentName, "svc-tpl", "", "", projectScionDir, "", "", "", "")
@@ -738,13 +738,13 @@ services:
 
 	t.Run("no services file when none defined", func(t *testing.T) {
 		tplDir := filepath.Join(globalTemplatesDir, "no-svc-tpl")
-		os.MkdirAll(tplDir, 0755)
+		_ = os.MkdirAll(tplDir, 0755)
 		tplConfig := `{"default_harness_config": "claude"}`
-		os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(tplConfig), 0644)
+		_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(tplConfig), 0644)
 
 		projectDir := filepath.Join(tmpDir, "project-nosvc")
 		projectScionDir := filepath.Join(projectDir, ".scion")
-		os.MkdirAll(projectScionDir, 0755)
+		_ = os.MkdirAll(projectScionDir, 0755)
 
 		agentName := "no-svc-agent"
 		agentHome, _, _, err := ProvisionAgent(context.Background(), agentName, "no-svc-tpl", "", "", projectScionDir, "", "", "", "")
@@ -763,35 +763,35 @@ func TestProvisionAgent_CopiesSkillsDir(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	oldWd, _ := os.Getwd()
-	os.Chdir(tmpDir)
-	defer os.Chdir(oldWd)
+	_ = os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
 
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	globalScionDir := filepath.Join(tmpDir, ".scion")
 	globalTemplatesDir := filepath.Join(globalScionDir, "templates")
-	os.MkdirAll(globalTemplatesDir, 0755)
+	_ = os.MkdirAll(globalTemplatesDir, 0755)
 
 	// Create a harness-config for claude
 	seedTestHarnessConfig(t, globalScionDir, "claude", "claude")
 
 	// Create a template with a skills/ directory containing a skill
 	tplDir := filepath.Join(globalTemplatesDir, "skills-tpl")
-	os.MkdirAll(tplDir, 0755)
+	_ = os.MkdirAll(tplDir, 0755)
 	tplConfig := `{"default_harness_config": "claude"}`
-	os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(tplConfig), 0644)
+	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(tplConfig), 0644)
 
 	// Create skills in the template
 	skillDir := filepath.Join(tplDir, "skills", "my-skill")
-	os.MkdirAll(skillDir, 0755)
-	os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("# My Skill\nDoes things."), 0644)
+	_ = os.MkdirAll(skillDir, 0755)
+	_ = os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("# My Skill\nDoes things."), 0644)
 
 	// Project settings
 	projectDir := filepath.Join(tmpDir, "project")
 	projectScionDir := filepath.Join(projectDir, ".scion")
-	os.MkdirAll(projectScionDir, 0755)
+	_ = os.MkdirAll(projectScionDir, 0755)
 
 	agentName := "skills-agent"
 	agentHome, _, _, err := ProvisionAgent(context.Background(), agentName, "skills-tpl", "", "", projectScionDir, "", "", "", "")
@@ -814,40 +814,40 @@ func TestProvisionAgent_SkillsAreTemplateOnly(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	oldWd, _ := os.Getwd()
-	os.Chdir(tmpDir)
-	defer os.Chdir(oldWd)
+	_ = os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
 
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	globalScionDir := filepath.Join(tmpDir, ".scion")
 	globalTemplatesDir := filepath.Join(globalScionDir, "templates")
-	os.MkdirAll(globalTemplatesDir, 0755)
+	_ = os.MkdirAll(globalTemplatesDir, 0755)
 
 	// Create a harness-config for claude with its own skills (should be ignored)
 	hcDir := filepath.Join(globalScionDir, "harness-configs", "claude")
-	os.MkdirAll(hcDir, 0755)
+	_ = os.MkdirAll(hcDir, 0755)
 	configYAML := "harness: claude\nimage: test-image:latest\nskills_dir: .claude/skills\ninstructions_file: .claude/CLAUDE.md\n"
-	os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte(configYAML), 0644)
+	_ = os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte(configYAML), 0644)
 
 	hcSkillDir := filepath.Join(hcDir, "skills", "base-skill")
-	os.MkdirAll(hcSkillDir, 0755)
-	os.WriteFile(filepath.Join(hcSkillDir, "SKILL.md"), []byte("# Base Skill"), 0644)
+	_ = os.MkdirAll(hcSkillDir, 0755)
+	_ = os.WriteFile(filepath.Join(hcSkillDir, "SKILL.md"), []byte("# Base Skill"), 0644)
 
 	// Create a template with a different skill
 	tplDir := filepath.Join(globalTemplatesDir, "overlay-tpl")
-	os.MkdirAll(tplDir, 0755)
+	_ = os.MkdirAll(tplDir, 0755)
 	tplConfig := `{"default_harness_config": "claude"}`
-	os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(tplConfig), 0644)
+	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(tplConfig), 0644)
 
 	tplSkillDir := filepath.Join(tplDir, "skills", "tpl-skill")
-	os.MkdirAll(tplSkillDir, 0755)
-	os.WriteFile(filepath.Join(tplSkillDir, "SKILL.md"), []byte("# Template Skill"), 0644)
+	_ = os.MkdirAll(tplSkillDir, 0755)
+	_ = os.WriteFile(filepath.Join(tplSkillDir, "SKILL.md"), []byte("# Template Skill"), 0644)
 
 	projectDir := filepath.Join(tmpDir, "project")
 	projectScionDir := filepath.Join(projectDir, ".scion")
-	os.MkdirAll(projectScionDir, 0755)
+	_ = os.MkdirAll(projectScionDir, 0755)
 
 	agentName := "overlay-agent"
 	agentHome, _, _, err := ProvisionAgent(context.Background(), agentName, "overlay-tpl", "", "", projectScionDir, "", "", "", "")
@@ -876,31 +876,31 @@ func TestProvisionAgentGitClone_ClearsStaleWorktreeWorkspace(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	oldWd, _ := os.Getwd()
-	os.Chdir(tmpDir)
-	defer os.Chdir(oldWd)
+	_ = os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
 
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	globalScionDir := filepath.Join(tmpDir, ".scion")
-	os.MkdirAll(filepath.Join(globalScionDir, "templates"), 0755)
+	_ = os.MkdirAll(filepath.Join(globalScionDir, "templates"), 0755)
 	seedTestHarnessConfig(t, globalScionDir, "claude", "claude")
 	tplDir := filepath.Join(globalScionDir, "templates", "claude")
-	os.MkdirAll(tplDir, 0755)
-	os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config":"claude"}`), 0644)
+	_ = os.MkdirAll(tplDir, 0755)
+	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config":"claude"}`), 0644)
 
 	projectDir := filepath.Join(tmpDir, "project")
 	projectScionDir := filepath.Join(projectDir, ".scion")
-	os.MkdirAll(projectScionDir, 0755)
+	_ = os.MkdirAll(projectScionDir, 0755)
 
 	// Pre-populate the workspace with stale worktree content: a .git FILE
 	// (not directory) plus some code files — simulating a previous local run.
 	agentsDir := filepath.Join(projectDir, ".scion", "agents")
 	staleWorkspace := filepath.Join(agentsDir, "clone-agent", "workspace")
-	os.MkdirAll(staleWorkspace, 0755)
-	os.WriteFile(filepath.Join(staleWorkspace, ".git"), []byte("gitdir: ../../../.git/worktrees/clone-agent\n"), 0644)
-	os.WriteFile(filepath.Join(staleWorkspace, "main.go"), []byte("package main\n"), 0644)
+	_ = os.MkdirAll(staleWorkspace, 0755)
+	_ = os.WriteFile(filepath.Join(staleWorkspace, ".git"), []byte("gitdir: ../../../.git/worktrees/clone-agent\n"), 0644)
+	_ = os.WriteFile(filepath.Join(staleWorkspace, "main.go"), []byte("package main\n"), 0644)
 
 	// Provision in git clone mode.
 	gitClone := &api.GitCloneConfig{
@@ -939,30 +939,30 @@ func TestProvisionAgentGitClone_PreservesExistingClone(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	oldWd, _ := os.Getwd()
-	os.Chdir(tmpDir)
-	defer os.Chdir(oldWd)
+	_ = os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
 
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	globalScionDir := filepath.Join(tmpDir, ".scion")
-	os.MkdirAll(filepath.Join(globalScionDir, "templates"), 0755)
+	_ = os.MkdirAll(filepath.Join(globalScionDir, "templates"), 0755)
 	seedTestHarnessConfig(t, globalScionDir, "claude", "claude")
 	tplDir := filepath.Join(globalScionDir, "templates", "claude")
-	os.MkdirAll(tplDir, 0755)
-	os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config":"claude"}`), 0644)
+	_ = os.MkdirAll(tplDir, 0755)
+	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config":"claude"}`), 0644)
 
 	projectDir := filepath.Join(tmpDir, "project")
 	projectScionDir := filepath.Join(projectDir, ".scion")
-	os.MkdirAll(projectScionDir, 0755)
+	_ = os.MkdirAll(projectScionDir, 0755)
 
 	// Pre-populate the workspace with a real git clone: .git as a DIRECTORY.
 	agentsDir := filepath.Join(projectDir, ".scion", "agents")
 	existingClone := filepath.Join(agentsDir, "restart-agent", "workspace")
-	os.MkdirAll(existingClone, 0755)
-	os.MkdirAll(filepath.Join(existingClone, ".git"), 0755) // real clone marker
-	os.WriteFile(filepath.Join(existingClone, "main.go"), []byte("package main\n"), 0644)
+	_ = os.MkdirAll(existingClone, 0755)
+	_ = os.MkdirAll(filepath.Join(existingClone, ".git"), 0755) // real clone marker
+	_ = os.WriteFile(filepath.Join(existingClone, "main.go"), []byte("package main\n"), 0644)
 
 	gitClone := &api.GitCloneConfig{
 		URL:    "https://github.com/example/repo.git",
@@ -994,38 +994,38 @@ func TestGetAgentGitClone_ClearsExistingWorkspace(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	oldWd, _ := os.Getwd()
-	os.Chdir(tmpDir)
-	defer os.Chdir(oldWd)
+	_ = os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
 
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	globalScionDir := filepath.Join(tmpDir, ".scion")
-	os.MkdirAll(filepath.Join(globalScionDir, "templates"), 0755)
+	_ = os.MkdirAll(filepath.Join(globalScionDir, "templates"), 0755)
 	seedTestHarnessConfig(t, globalScionDir, "claude", "claude")
 	tplDir := filepath.Join(globalScionDir, "templates", "claude")
-	os.MkdirAll(tplDir, 0755)
-	os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config":"claude"}`), 0644)
+	_ = os.MkdirAll(tplDir, 0755)
+	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config":"claude"}`), 0644)
 
 	projectDir := filepath.Join(tmpDir, "project")
 	projectScionDir := filepath.Join(projectDir, ".scion")
-	os.MkdirAll(projectScionDir, 0755)
+	_ = os.MkdirAll(projectScionDir, 0755)
 
 	// Create a fully provisioned agent directory with config file and
 	// a populated workspace — simulating a leftover from a previous agent.
 	agentDir := filepath.Join(projectScionDir, "agents", "reused-agent")
 	agentWorkspace := filepath.Join(agentDir, "workspace")
 	agentHome := filepath.Join(agentDir, "home")
-	os.MkdirAll(agentWorkspace, 0755)
-	os.MkdirAll(agentHome, 0755)
+	_ = os.MkdirAll(agentWorkspace, 0755)
+	_ = os.MkdirAll(agentHome, 0755)
 	// Write a config file so GetAgent treats this as an existing agent.
-	os.WriteFile(filepath.Join(agentDir, "scion-agent.json"),
+	_ = os.WriteFile(filepath.Join(agentDir, "scion-agent.json"),
 		[]byte(`{"harness":"claude","default_harness_config":"claude"}`), 0644)
 	// Populate workspace with stale clone content.
-	os.WriteFile(filepath.Join(agentWorkspace, ".git"),
+	_ = os.WriteFile(filepath.Join(agentWorkspace, ".git"),
 		[]byte("gitdir: ../../../.git/worktrees/reused-agent\n"), 0644)
-	os.WriteFile(filepath.Join(agentWorkspace, "main.go"),
+	_ = os.WriteFile(filepath.Join(agentWorkspace, "main.go"),
 		[]byte("package main\n"), 0644)
 
 	gitClone := &api.GitCloneConfig{
@@ -1063,30 +1063,30 @@ func TestProvisionAgent_SharedWorkspaceRelocatesAgentState(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	oldWd, _ := os.Getwd()
-	os.Chdir(tmpDir)
-	defer os.Chdir(oldWd)
+	_ = os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
 
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	globalScionDir := filepath.Join(tmpDir, ".scion")
-	os.MkdirAll(filepath.Join(globalScionDir, "templates"), 0755)
+	_ = os.MkdirAll(filepath.Join(globalScionDir, "templates"), 0755)
 	seedTestHarnessConfig(t, globalScionDir, "claude", "claude")
 	tplDir := filepath.Join(globalScionDir, "templates", "claude")
-	os.MkdirAll(tplDir, 0755)
-	os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config":"claude"}`), 0644)
+	_ = os.MkdirAll(tplDir, 0755)
+	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config":"claude"}`), 0644)
 
 	// Project dir with .scion as a directory plus project-id (split storage).
 	projectDir := filepath.Join(tmpDir, "project")
 	projectScionDir := filepath.Join(projectDir, ".scion")
-	os.MkdirAll(projectScionDir, 0755)
+	_ = os.MkdirAll(projectScionDir, 0755)
 	if err := config.WriteProjectID(projectScionDir, "550e8400-e29b-41d4-a716-446655440000"); err != nil {
 		t.Fatalf("WriteProjectID failed: %v", err)
 	}
 
 	sharedWorkspace := filepath.Join(tmpDir, "shared-ws")
-	os.MkdirAll(sharedWorkspace, 0755)
+	_ = os.MkdirAll(sharedWorkspace, 0755)
 
 	ctx := api.ContextWithSharedWorkspace(context.Background())
 
@@ -1133,23 +1133,23 @@ func TestProvisionAgent_SharedWorkspaceMigratesLegacyState(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	oldWd, _ := os.Getwd()
-	os.Chdir(tmpDir)
-	defer os.Chdir(oldWd)
+	_ = os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
 
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	globalScionDir := filepath.Join(tmpDir, ".scion")
-	os.MkdirAll(filepath.Join(globalScionDir, "templates"), 0755)
+	_ = os.MkdirAll(filepath.Join(globalScionDir, "templates"), 0755)
 	seedTestHarnessConfig(t, globalScionDir, "claude", "claude")
 	tplDir := filepath.Join(globalScionDir, "templates", "claude")
-	os.MkdirAll(tplDir, 0755)
-	os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config":"claude"}`), 0644)
+	_ = os.MkdirAll(tplDir, 0755)
+	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config":"claude"}`), 0644)
 
 	projectDir := filepath.Join(tmpDir, "project")
 	projectScionDir := filepath.Join(projectDir, ".scion")
-	os.MkdirAll(projectScionDir, 0755)
+	_ = os.MkdirAll(projectScionDir, 0755)
 	if err := config.WriteProjectID(projectScionDir, "550e8400-e29b-41d4-a716-446655440000"); err != nil {
 		t.Fatalf("WriteProjectID failed: %v", err)
 	}
@@ -1167,7 +1167,7 @@ func TestProvisionAgent_SharedWorkspaceMigratesLegacyState(t *testing.T) {
 	}
 
 	sharedWorkspace := filepath.Join(tmpDir, "shared-ws")
-	os.MkdirAll(sharedWorkspace, 0755)
+	_ = os.MkdirAll(sharedWorkspace, 0755)
 
 	ctx := api.ContextWithSharedWorkspace(context.Background())
 	rt := &runtime.MockRuntime{}
@@ -1209,27 +1209,27 @@ func TestProvisionAgent_SharedWorkspaceCredentialHelper(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	oldWd, _ := os.Getwd()
-	os.Chdir(tmpDir)
-	defer os.Chdir(oldWd)
+	_ = os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
 
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	globalScionDir := filepath.Join(tmpDir, ".scion")
-	os.MkdirAll(filepath.Join(globalScionDir, "templates"), 0755)
+	_ = os.MkdirAll(filepath.Join(globalScionDir, "templates"), 0755)
 	seedTestHarnessConfig(t, globalScionDir, "claude", "claude")
 	tplDir := filepath.Join(globalScionDir, "templates", "claude")
-	os.MkdirAll(tplDir, 0755)
-	os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config":"claude"}`), 0644)
+	_ = os.MkdirAll(tplDir, 0755)
+	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config":"claude"}`), 0644)
 
 	projectDir := filepath.Join(tmpDir, "project")
 	projectScionDir := filepath.Join(projectDir, ".scion")
-	os.MkdirAll(projectScionDir, 0755)
+	_ = os.MkdirAll(projectScionDir, 0755)
 
 	// Create a shared workspace directory (simulates a pre-cloned git repo)
 	sharedWorkspace := filepath.Join(tmpDir, "shared-ws")
-	os.MkdirAll(sharedWorkspace, 0755)
+	_ = os.MkdirAll(sharedWorkspace, 0755)
 
 	// Set SharedWorkspace context
 	ctx := api.ContextWithSharedWorkspace(context.Background())
@@ -1265,26 +1265,26 @@ func TestProvisionAgent_SharedWorkspaceNoCredentialWithoutFlag(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	oldWd, _ := os.Getwd()
-	os.Chdir(tmpDir)
-	defer os.Chdir(oldWd)
+	_ = os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
 
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	globalScionDir := filepath.Join(tmpDir, ".scion")
-	os.MkdirAll(filepath.Join(globalScionDir, "templates"), 0755)
+	_ = os.MkdirAll(filepath.Join(globalScionDir, "templates"), 0755)
 	seedTestHarnessConfig(t, globalScionDir, "claude", "claude")
 	tplDir := filepath.Join(globalScionDir, "templates", "claude")
-	os.MkdirAll(tplDir, 0755)
-	os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config":"claude"}`), 0644)
+	_ = os.MkdirAll(tplDir, 0755)
+	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config":"claude"}`), 0644)
 
 	projectDir := filepath.Join(tmpDir, "project")
 	projectScionDir := filepath.Join(projectDir, ".scion")
-	os.MkdirAll(projectScionDir, 0755)
+	_ = os.MkdirAll(projectScionDir, 0755)
 
 	customWorkspace := filepath.Join(tmpDir, "custom-ws")
-	os.MkdirAll(customWorkspace, 0755)
+	_ = os.MkdirAll(customWorkspace, 0755)
 
 	// No SharedWorkspace context — plain workspace mount
 	home, _, _, err := ProvisionAgent(context.Background(), "plain-agent", "claude", "", "", projectScionDir, "", "", "", customWorkspace)
@@ -1314,16 +1314,16 @@ func TestGetAgent_RecreatesMissingWorktree(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	oldWd, _ := os.Getwd()
-	os.Chdir(tmpDir)
-	defer os.Chdir(oldWd)
+	_ = os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
 
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	// Create a git repo to act as the project root
 	projectDir := filepath.Join(tmpDir, "project")
-	os.MkdirAll(projectDir, 0755)
+	_ = os.MkdirAll(projectDir, 0755)
 	for _, args := range [][]string{
 		{"init"},
 		{"config", "user.email", "test@example.com"},
@@ -1339,22 +1339,22 @@ func TestGetAgent_RecreatesMissingWorktree(t *testing.T) {
 
 	// Set up .scion directory structure with templates
 	scionDir := filepath.Join(projectDir, ".scion")
-	os.MkdirAll(filepath.Join(scionDir, "templates"), 0755)
+	_ = os.MkdirAll(filepath.Join(scionDir, "templates"), 0755)
 
 	// Set up global scion with a harness config
 	globalScionDir := filepath.Join(tmpDir, ".scion")
-	os.MkdirAll(filepath.Join(globalScionDir, "templates"), 0755)
+	_ = os.MkdirAll(filepath.Join(globalScionDir, "templates"), 0755)
 	seedTestHarnessConfig(t, globalScionDir, "generic", "generic")
 	tplDir := filepath.Join(globalScionDir, "templates", "default")
-	os.MkdirAll(tplDir, 0755)
-	os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config":"generic"}`), 0644)
+	_ = os.MkdirAll(tplDir, 0755)
+	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config":"generic"}`), 0644)
 
 	agentName := "ws-agent"
 	agentDir := filepath.Join(scionDir, "agents", agentName)
 	agentWorkspace := filepath.Join(agentDir, "workspace")
 	agentHome := config.GetAgentHomePath(scionDir, agentName)
-	os.MkdirAll(agentDir, 0755)
-	os.MkdirAll(agentHome, 0755)
+	_ = os.MkdirAll(agentDir, 0755)
+	_ = os.MkdirAll(agentHome, 0755)
 
 	// Create a worktree (simulating a successful first provision)
 	if err := util.CreateWorktree(agentWorkspace, agentName); err != nil {
@@ -1362,11 +1362,11 @@ func TestGetAgent_RecreatesMissingWorktree(t *testing.T) {
 	}
 
 	// Write agent config (so GetAgent treats this as an existing agent)
-	os.WriteFile(filepath.Join(agentDir, "scion-agent.json"),
+	_ = os.WriteFile(filepath.Join(agentDir, "scion-agent.json"),
 		[]byte(`{"harness":"generic","default_harness_config":"generic"}`), 0644)
 
 	// Write agent-info.json to home
-	os.WriteFile(filepath.Join(agentHome, "agent-info.json"),
+	_ = os.WriteFile(filepath.Join(agentHome, "agent-info.json"),
 		[]byte(`{"name":"ws-agent","template":"default"}`), 0644)
 
 	// Verify the worktree exists
@@ -1417,16 +1417,16 @@ func TestGetAgent_StaleDirectoryCreatesWorkspace(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	oldWd, _ := os.Getwd()
-	os.Chdir(tmpDir)
-	defer os.Chdir(oldWd)
+	_ = os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
 
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	// Create a git repo to act as the project root
 	projectDir := filepath.Join(tmpDir, "project")
-	os.MkdirAll(projectDir, 0755)
+	_ = os.MkdirAll(projectDir, 0755)
 	for _, args := range [][]string{
 		{"init"},
 		{"config", "user.email", "test@example.com"},
@@ -1442,27 +1442,27 @@ func TestGetAgent_StaleDirectoryCreatesWorkspace(t *testing.T) {
 
 	// Set up .scion directory structure with templates
 	scionDir := filepath.Join(projectDir, ".scion")
-	os.MkdirAll(filepath.Join(scionDir, "templates"), 0755)
+	_ = os.MkdirAll(filepath.Join(scionDir, "templates"), 0755)
 
 	// Set up global scion with a harness config
 	globalScionDir := filepath.Join(tmpDir, ".scion")
-	os.MkdirAll(filepath.Join(globalScionDir, "templates"), 0755)
+	_ = os.MkdirAll(filepath.Join(globalScionDir, "templates"), 0755)
 	seedTestHarnessConfig(t, globalScionDir, "generic", "generic")
 	tplDir := filepath.Join(globalScionDir, "templates", "default")
-	os.MkdirAll(tplDir, 0755)
-	os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config":"generic"}`), 0644)
+	_ = os.MkdirAll(tplDir, 0755)
+	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config":"generic"}`), 0644)
 
 	// .scion/agents/ must be gitignored for provisioning to succeed
-	os.WriteFile(filepath.Join(projectDir, ".gitignore"), []byte(".scion/agents/\n"), 0644)
+	_ = os.WriteFile(filepath.Join(projectDir, ".gitignore"), []byte(".scion/agents/\n"), 0644)
 
 	agentName := "stale-agent"
 	agentDir := filepath.Join(scionDir, "agents", agentName)
 
 	// Create the agent directory WITHOUT a config file (simulates a failed
 	// previous provisioning that wrote the directory but not scion-agent.json).
-	os.MkdirAll(agentDir, 0755)
+	_ = os.MkdirAll(agentDir, 0755)
 	// Also create a workspace subdirectory to simulate partial state
-	os.MkdirAll(filepath.Join(agentDir, "workspace"), 0755)
+	_ = os.MkdirAll(filepath.Join(agentDir, "workspace"), 0755)
 
 	// Call GetAgent — it should detect the stale directory, remove it,
 	// and re-provision successfully with a workspace worktree.
@@ -1498,16 +1498,16 @@ func TestGetAgent_BrandNewAgentCreatesWorkspace(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	oldWd, _ := os.Getwd()
-	os.Chdir(tmpDir)
-	defer os.Chdir(oldWd)
+	_ = os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
 
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	// Create a git repo to act as the project root
 	projectDir := filepath.Join(tmpDir, "project")
-	os.MkdirAll(projectDir, 0755)
+	_ = os.MkdirAll(projectDir, 0755)
 	for _, args := range [][]string{
 		{"init"},
 		{"config", "user.email", "test@example.com"},
@@ -1523,18 +1523,18 @@ func TestGetAgent_BrandNewAgentCreatesWorkspace(t *testing.T) {
 
 	// Set up .scion directory structure with templates
 	scionDir := filepath.Join(projectDir, ".scion")
-	os.MkdirAll(filepath.Join(scionDir, "templates"), 0755)
+	_ = os.MkdirAll(filepath.Join(scionDir, "templates"), 0755)
 
 	// Set up global scion with a harness config
 	globalScionDir := filepath.Join(tmpDir, ".scion")
-	os.MkdirAll(filepath.Join(globalScionDir, "templates"), 0755)
+	_ = os.MkdirAll(filepath.Join(globalScionDir, "templates"), 0755)
 	seedTestHarnessConfig(t, globalScionDir, "generic", "generic")
 	tplDir := filepath.Join(globalScionDir, "templates", "default")
-	os.MkdirAll(tplDir, 0755)
-	os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config":"generic"}`), 0644)
+	_ = os.MkdirAll(tplDir, 0755)
+	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config":"generic"}`), 0644)
 
 	// .scion/agents/ must be gitignored for provisioning to succeed
-	os.WriteFile(filepath.Join(projectDir, ".gitignore"), []byte(".scion/agents/\n"), 0644)
+	_ = os.WriteFile(filepath.Join(projectDir, ".gitignore"), []byte(".scion/agents/\n"), 0644)
 
 	agentName := "brand-new-agent"
 
@@ -1572,36 +1572,36 @@ func TestGetAgent_MissingWorkspaceNonGit(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	oldWd, _ := os.Getwd()
-	os.Chdir(tmpDir)
-	defer os.Chdir(oldWd)
+	_ = os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
 
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	// Set up global scion
 	globalScionDir := filepath.Join(tmpDir, ".scion")
-	os.MkdirAll(filepath.Join(globalScionDir, "templates"), 0755)
+	_ = os.MkdirAll(filepath.Join(globalScionDir, "templates"), 0755)
 	seedTestHarnessConfig(t, globalScionDir, "generic", "generic")
 	tplDir := filepath.Join(globalScionDir, "templates", "default")
-	os.MkdirAll(tplDir, 0755)
-	os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config":"generic"}`), 0644)
+	_ = os.MkdirAll(tplDir, 0755)
+	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config":"generic"}`), 0644)
 
 	// Non-git project directory
 	projectDir := filepath.Join(tmpDir, "project")
 	scionDir := filepath.Join(projectDir, ".scion")
-	os.MkdirAll(scionDir, 0755)
+	_ = os.MkdirAll(scionDir, 0755)
 
 	agentName := "nongit-agent"
 	agentDir := filepath.Join(scionDir, "agents", agentName)
 	agentHome := config.GetAgentHomePath(scionDir, agentName)
-	os.MkdirAll(agentDir, 0755)
-	os.MkdirAll(agentHome, 0755)
+	_ = os.MkdirAll(agentDir, 0755)
+	_ = os.MkdirAll(agentHome, 0755)
 
 	// Write agent config (existing agent, no workspace dir)
-	os.WriteFile(filepath.Join(agentDir, "scion-agent.json"),
+	_ = os.WriteFile(filepath.Join(agentDir, "scion-agent.json"),
 		[]byte(`{"harness":"generic","default_harness_config":"generic"}`), 0644)
-	os.WriteFile(filepath.Join(agentHome, "agent-info.json"),
+	_ = os.WriteFile(filepath.Join(agentHome, "agent-info.json"),
 		[]byte(`{"name":"nongit-agent","template":"default"}`), 0644)
 
 	_, _, wsPath, _, err := GetAgent(context.Background(), agentName, "", "", "", scionDir, "", "", "", "")
@@ -1619,32 +1619,32 @@ func TestProvisionAgent_SkillsWithMockResolver(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	oldWd, _ := os.Getwd()
-	os.Chdir(tmpDir)
-	defer os.Chdir(oldWd)
+	_ = os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
 
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	globalScionDir := filepath.Join(tmpDir, ".scion")
 	globalTemplatesDir := filepath.Join(globalScionDir, "templates")
-	os.MkdirAll(globalTemplatesDir, 0755)
+	_ = os.MkdirAll(globalTemplatesDir, 0755)
 	seedTestHarnessConfig(t, globalScionDir, "claude", "claude")
 
 	// Create template with skills references
 	tplDir := filepath.Join(globalTemplatesDir, "skill-ref-tpl")
-	os.MkdirAll(tplDir, 0755)
+	_ = os.MkdirAll(tplDir, 0755)
 	tplConfig := `{
 		"default_harness_config": "claude",
 		"skills": [
 			{"uri": "skill://scion/core/test-skill@1.0"}
 		]
 	}`
-	os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(tplConfig), 0644)
+	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(tplConfig), 0644)
 
 	projectDir := filepath.Join(tmpDir, "project")
 	projectScionDir := filepath.Join(projectDir, ".scion")
-	os.MkdirAll(projectScionDir, 0755)
+	_ = os.MkdirAll(projectScionDir, 0755)
 
 	// Set up mock resolver via context
 	skillContent := []byte("# Test Skill\nDescription here.")
@@ -1690,20 +1690,20 @@ func TestProvisionAgent_RequiredSkillsNoResolver(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	oldWd, _ := os.Getwd()
-	os.Chdir(tmpDir)
-	defer os.Chdir(oldWd)
+	_ = os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
 
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	globalScionDir := filepath.Join(tmpDir, ".scion")
 	globalTemplatesDir := filepath.Join(globalScionDir, "templates")
-	os.MkdirAll(globalTemplatesDir, 0755)
+	_ = os.MkdirAll(globalTemplatesDir, 0755)
 	seedTestHarnessConfig(t, globalScionDir, "claude", "claude")
 
 	tplDir := filepath.Join(globalTemplatesDir, "required-skill-tpl")
-	os.MkdirAll(tplDir, 0755)
+	_ = os.MkdirAll(tplDir, 0755)
 	tplConfig := `{
 		"default_harness_config": "claude",
 		"skills": [
@@ -1711,11 +1711,11 @@ func TestProvisionAgent_RequiredSkillsNoResolver(t *testing.T) {
 			{"uri": "skill://scion/core/team-creation@^1.0"}
 		]
 	}`
-	os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(tplConfig), 0644)
+	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(tplConfig), 0644)
 
 	projectDir := filepath.Join(tmpDir, "project")
 	projectScionDir := filepath.Join(projectDir, ".scion")
-	os.MkdirAll(projectScionDir, 0755)
+	_ = os.MkdirAll(projectScionDir, 0755)
 
 	// No resolver on context → should fail for required skills
 	_, _, _, err := ProvisionAgent(context.Background(), "no-resolver-agent", "required-skill-tpl", "", "", projectScionDir, "", "", "", "")
@@ -1734,31 +1734,31 @@ func TestProvisionAgent_OptionalSkillsNoResolver(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	oldWd, _ := os.Getwd()
-	os.Chdir(tmpDir)
-	defer os.Chdir(oldWd)
+	_ = os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
 
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	globalScionDir := filepath.Join(tmpDir, ".scion")
 	globalTemplatesDir := filepath.Join(globalScionDir, "templates")
-	os.MkdirAll(globalTemplatesDir, 0755)
+	_ = os.MkdirAll(globalTemplatesDir, 0755)
 	seedTestHarnessConfig(t, globalScionDir, "claude", "claude")
 
 	tplDir := filepath.Join(globalTemplatesDir, "optional-skill-tpl")
-	os.MkdirAll(tplDir, 0755)
+	_ = os.MkdirAll(tplDir, 0755)
 	tplConfig := `{
 		"default_harness_config": "claude",
 		"skills": [
 			{"uri": "skill://scion/core/optional-skill@latest", "optional": true}
 		]
 	}`
-	os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(tplConfig), 0644)
+	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(tplConfig), 0644)
 
 	projectDir := filepath.Join(tmpDir, "project")
 	projectScionDir := filepath.Join(projectDir, ".scion")
-	os.MkdirAll(projectScionDir, 0755)
+	_ = os.MkdirAll(projectScionDir, 0755)
 
 	// No resolver on context → should succeed for optional-only skills
 	_, _, _, err := ProvisionAgent(context.Background(), "optional-agent", "optional-skill-tpl", "", "", projectScionDir, "", "", "", "")
@@ -1771,21 +1771,21 @@ func TestProvisionAgent_SkillsYAMLParsing(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	oldWd, _ := os.Getwd()
-	os.Chdir(tmpDir)
-	defer os.Chdir(oldWd)
+	_ = os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
 
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	globalScionDir := filepath.Join(tmpDir, ".scion")
 	globalTemplatesDir := filepath.Join(globalScionDir, "templates")
-	os.MkdirAll(globalTemplatesDir, 0755)
+	_ = os.MkdirAll(globalTemplatesDir, 0755)
 	seedTestHarnessConfig(t, globalScionDir, "claude", "claude")
 
 	// Test YAML skills parsing with hyphenated keys
 	tplDir := filepath.Join(globalTemplatesDir, "yaml-skills-tpl")
-	os.MkdirAll(tplDir, 0755)
+	_ = os.MkdirAll(tplDir, 0755)
 	tplConfig := `default_harness_config: claude
 skills:
   - uri: "skill://scion/core/scion@^1.0"
@@ -1793,11 +1793,11 @@ skills:
     as: my-custom
     optional: true
 `
-	os.WriteFile(filepath.Join(tplDir, "scion-agent.yaml"), []byte(tplConfig), 0644)
+	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.yaml"), []byte(tplConfig), 0644)
 
 	projectDir := filepath.Join(tmpDir, "project")
 	projectScionDir := filepath.Join(projectDir, ".scion")
-	os.MkdirAll(projectScionDir, 0755)
+	_ = os.MkdirAll(projectScionDir, 0755)
 
 	// This should fail because there's no resolver for the required skill
 	_, _, _, err := ProvisionAgent(context.Background(), "yaml-skills-agent", "yaml-skills-tpl", "", "", projectScionDir, "", "", "", "")
@@ -1818,29 +1818,29 @@ func TestProvisionAgent_SkillsResolverError(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	oldWd, _ := os.Getwd()
-	os.Chdir(tmpDir)
-	defer os.Chdir(oldWd)
+	_ = os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
 
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	globalScionDir := filepath.Join(tmpDir, ".scion")
 	globalTemplatesDir := filepath.Join(globalScionDir, "templates")
-	os.MkdirAll(globalTemplatesDir, 0755)
+	_ = os.MkdirAll(globalTemplatesDir, 0755)
 	seedTestHarnessConfig(t, globalScionDir, "claude", "claude")
 
 	tplDir := filepath.Join(globalTemplatesDir, "resolver-err-tpl")
-	os.MkdirAll(tplDir, 0755)
+	_ = os.MkdirAll(tplDir, 0755)
 	tplConfig := `{
 		"default_harness_config": "claude",
 		"skills": [{"uri": "skill://scion/core/scion@^1.0"}]
 	}`
-	os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(tplConfig), 0644)
+	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(tplConfig), 0644)
 
 	projectDir := filepath.Join(tmpDir, "project")
 	projectScionDir := filepath.Join(projectDir, ".scion")
-	os.MkdirAll(projectScionDir, 0755)
+	_ = os.MkdirAll(projectScionDir, 0755)
 
 	// Resolver that returns a per-skill error for a required skill
 	resolver := &mockResolver{
@@ -1862,20 +1862,20 @@ func TestProvisionAgent_RequiredSkillOmittedFromResolverResponse(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	oldWd, _ := os.Getwd()
-	os.Chdir(tmpDir)
-	defer os.Chdir(oldWd)
+	_ = os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
 
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	globalScionDir := filepath.Join(tmpDir, ".scion")
 	globalTemplatesDir := filepath.Join(globalScionDir, "templates")
-	os.MkdirAll(globalTemplatesDir, 0755)
+	_ = os.MkdirAll(globalTemplatesDir, 0755)
 	seedTestHarnessConfig(t, globalScionDir, "claude", "claude")
 
 	tplDir := filepath.Join(globalTemplatesDir, "omitted-required-tpl")
-	os.MkdirAll(tplDir, 0755)
+	_ = os.MkdirAll(tplDir, 0755)
 	tplConfig := `{
 		"default_harness_config": "claude",
 		"skills": [
@@ -1883,11 +1883,11 @@ func TestProvisionAgent_RequiredSkillOmittedFromResolverResponse(t *testing.T) {
 			{"uri": "skill://scion/core/skill-b@1.0"}
 		]
 	}`
-	os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(tplConfig), 0644)
+	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(tplConfig), 0644)
 
 	projectDir := filepath.Join(tmpDir, "project")
 	projectScionDir := filepath.Join(projectDir, ".scion")
-	os.MkdirAll(projectScionDir, 0755)
+	_ = os.MkdirAll(projectScionDir, 0755)
 
 	// Resolver returns only skill-a, silently omitting skill-b
 	resolver := &mockResolver{
@@ -1912,20 +1912,20 @@ func TestProvisionAgent_OptionalSkillOmittedFromResolverResponse(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	oldWd, _ := os.Getwd()
-	os.Chdir(tmpDir)
-	defer os.Chdir(oldWd)
+	_ = os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
 
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	globalScionDir := filepath.Join(tmpDir, ".scion")
 	globalTemplatesDir := filepath.Join(globalScionDir, "templates")
-	os.MkdirAll(globalTemplatesDir, 0755)
+	_ = os.MkdirAll(globalTemplatesDir, 0755)
 	seedTestHarnessConfig(t, globalScionDir, "claude", "claude")
 
 	tplDir := filepath.Join(globalTemplatesDir, "omitted-optional-tpl")
-	os.MkdirAll(tplDir, 0755)
+	_ = os.MkdirAll(tplDir, 0755)
 	tplConfig := `{
 		"default_harness_config": "claude",
 		"skills": [
@@ -1933,11 +1933,11 @@ func TestProvisionAgent_OptionalSkillOmittedFromResolverResponse(t *testing.T) {
 			{"uri": "skill://scion/core/skill-b@1.0", "optional": true}
 		]
 	}`
-	os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(tplConfig), 0644)
+	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(tplConfig), 0644)
 
 	projectDir := filepath.Join(tmpDir, "project")
 	projectScionDir := filepath.Join(projectDir, ".scion")
-	os.MkdirAll(projectScionDir, 0755)
+	_ = os.MkdirAll(projectScionDir, 0755)
 
 	// Resolver returns only skill-a; optional skill-b is omitted entirely
 	resolver := &mockResolver{
@@ -1956,31 +1956,31 @@ func TestProvisionAgent_UnrequestedSkillFromResolver(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	oldWd, _ := os.Getwd()
-	os.Chdir(tmpDir)
-	defer os.Chdir(oldWd)
+	_ = os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
 
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	globalScionDir := filepath.Join(tmpDir, ".scion")
 	globalTemplatesDir := filepath.Join(globalScionDir, "templates")
-	os.MkdirAll(globalTemplatesDir, 0755)
+	_ = os.MkdirAll(globalTemplatesDir, 0755)
 	seedTestHarnessConfig(t, globalScionDir, "claude", "claude")
 
 	tplDir := filepath.Join(globalTemplatesDir, "extra-skill-tpl")
-	os.MkdirAll(tplDir, 0755)
+	_ = os.MkdirAll(tplDir, 0755)
 	tplConfig := `{
 		"default_harness_config": "claude",
 		"skills": [
 			{"uri": "skill://scion/core/skill-a@1.0"}
 		]
 	}`
-	os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(tplConfig), 0644)
+	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(tplConfig), 0644)
 
 	projectDir := filepath.Join(tmpDir, "project")
 	projectScionDir := filepath.Join(projectDir, ".scion")
-	os.MkdirAll(projectScionDir, 0755)
+	_ = os.MkdirAll(projectScionDir, 0755)
 
 	// Resolver returns the requested skill plus an unrequested extra one
 	resolver := &mockResolver{
@@ -2006,31 +2006,31 @@ func TestProvisionAgent_DuplicateResolvedSkill(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	oldWd, _ := os.Getwd()
-	os.Chdir(tmpDir)
-	defer os.Chdir(oldWd)
+	_ = os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
 
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	globalScionDir := filepath.Join(tmpDir, ".scion")
 	globalTemplatesDir := filepath.Join(globalScionDir, "templates")
-	os.MkdirAll(globalTemplatesDir, 0755)
+	_ = os.MkdirAll(globalTemplatesDir, 0755)
 	seedTestHarnessConfig(t, globalScionDir, "claude", "claude")
 
 	tplDir := filepath.Join(globalTemplatesDir, "dup-skill-tpl")
-	os.MkdirAll(tplDir, 0755)
+	_ = os.MkdirAll(tplDir, 0755)
 	tplConfig := `{
 		"default_harness_config": "claude",
 		"skills": [
 			{"uri": "skill://scion/core/skill-a@1.0"}
 		]
 	}`
-	os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(tplConfig), 0644)
+	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(tplConfig), 0644)
 
 	projectDir := filepath.Join(tmpDir, "project")
 	projectScionDir := filepath.Join(projectDir, ".scion")
-	os.MkdirAll(projectScionDir, 0755)
+	_ = os.MkdirAll(projectScionDir, 0755)
 
 	// Resolver returns the same skill twice
 	resolver := &mockResolver{

@@ -235,7 +235,7 @@ func TestHubAPIDelivery(t *testing.T) {
 	defer srv.Close()
 
 	b := New(slog.Default())
-	defer b.Close()
+	defer func() { _ = b.Close() }()
 
 	require.NoError(t, b.Configure(map[string]string{
 		"hub_url":     srv.URL,

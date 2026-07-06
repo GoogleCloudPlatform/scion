@@ -1410,7 +1410,7 @@ func (c *Client) FetchGCPIdentityToken(ctx context.Context, audience string) (st
 	if err != nil {
 		return "", fmt.Errorf("hub request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	respBody, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {

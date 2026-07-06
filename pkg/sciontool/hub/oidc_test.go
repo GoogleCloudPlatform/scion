@@ -231,7 +231,7 @@ func TestOIDCTransport_InjectsHeader(t *testing.T) {
 	req, _ := http.NewRequest("GET", hubSrv.URL+"/test", nil)
 	resp, err := client.Do(req)
 	require.NoError(t, err)
-	resp.Body.Close()
+	_ = resp.Body.Close()
 
 	assert.Equal(t, "Bearer "+token, receivedAuth)
 }
@@ -254,7 +254,7 @@ func TestOIDCTransport_DoesNotOverrideExistingAuth(t *testing.T) {
 	req.Header.Set("Authorization", "Bearer existing-token")
 	resp, err := client.Do(req)
 	require.NoError(t, err)
-	resp.Body.Close()
+	_ = resp.Body.Close()
 
 	assert.Equal(t, "Bearer existing-token", receivedAuth)
 }
@@ -276,7 +276,7 @@ func TestOIDCTransport_GracefulDegradation(t *testing.T) {
 	req, _ := http.NewRequest("GET", hubSrv.URL+"/test", nil)
 	resp, err := client.Do(req)
 	require.NoError(t, err)
-	resp.Body.Close()
+	_ = resp.Body.Close()
 
 	assert.True(t, requestReceived, "request should proceed even when token unavailable")
 }
@@ -306,7 +306,7 @@ func TestOIDCTransport_WithMetadataSource(t *testing.T) {
 	req, _ := http.NewRequest("GET", hubSrv.URL+"/test", nil)
 	resp, err := client.Do(req)
 	require.NoError(t, err)
-	resp.Body.Close()
+	_ = resp.Body.Close()
 
 	assert.Equal(t, "Bearer "+token, receivedAuth)
 }
@@ -315,7 +315,7 @@ func TestOIDCTransport_WithMetadataSource(t *testing.T) {
 
 func TestConfigureOIDCTransport_InjectedMode(t *testing.T) {
 	token := makeTestJWT(time.Now().Add(1 * time.Hour))
-	os.Setenv(EnvTransportToken, token)
+	_ = os.Setenv(EnvTransportToken, token)
 	defer func() { _ = os.Unsetenv(EnvTransportToken) }()
 
 	c := &Client{
@@ -360,7 +360,7 @@ func TestConfigureOIDCTransport_MetadataMode_AudienceOverride(t *testing.T) {
 
 	_ = os.Unsetenv(EnvTransportToken)
 	_ = os.Unsetenv("SCION_METADATA_MODE")
-	os.Setenv(EnvHubOIDCAudience, "https://custom-audience.example.com")
+	_ = os.Setenv(EnvHubOIDCAudience, "https://custom-audience.example.com")
 	defer func() { _ = os.Unsetenv(EnvHubOIDCAudience) }()
 
 	c := &Client{
@@ -396,9 +396,8 @@ func TestConfigureOIDCTransport_SkipsMetadataWhenScionMetadataActive(t *testing.
 	cleanup := overrideGCPDetection(true)
 	defer cleanup()
 
-	os.Unsetenv(EnvTransportToken)
-	os.Setenv("SCION_METADATA_MODE", "assign")
-	defer os.Unsetenv("SCION_METADATA_MODE")
+	t.Setenv(EnvTransportToken, "")
+	t.Setenv("SCION_METADATA_MODE", "assign")
 
 	c := &Client{
 		hubURL: "https://hub.example.com",
@@ -416,7 +415,7 @@ func TestConfigureOIDCTransport_InjectedPriority(t *testing.T) {
 	defer cleanup()
 
 	token := makeTestJWT(time.Now().Add(1 * time.Hour))
-	os.Setenv(EnvTransportToken, token)
+	_ = os.Setenv(EnvTransportToken, token)
 	defer func() { _ = os.Unsetenv(EnvTransportToken) }()
 
 	c := &Client{
@@ -438,8 +437,7 @@ func TestOIDC_EndToEnd_BothHeaders(t *testing.T) {
 	defer cleanup()
 
 	token := makeTestJWT(time.Now().Add(1 * time.Hour))
-	os.Setenv(EnvTransportToken, token)
-	defer os.Unsetenv(EnvTransportToken)
+	t.Setenv(EnvTransportToken, token)
 
 	var gotAuth, gotAgentToken string
 	hubSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

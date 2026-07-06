@@ -128,7 +128,7 @@ func TestDisplayAgentsLocalMode(t *testing.T) {
 	os.Stdout = w
 
 	err := displayAgents(agents, false, false)
-	w.Close()
+	_ = w.Close()
 	os.Stdout = old
 
 	if err != nil {
@@ -136,7 +136,7 @@ func TestDisplayAgentsLocalMode(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	buf.ReadFrom(r)
+	_, _ = buf.ReadFrom(r)
 	output := buf.String()
 
 	// Verify header contains all expected columns
@@ -189,7 +189,7 @@ func TestDisplayAgentsHubMode(t *testing.T) {
 	os.Stdout = w
 
 	err := displayAgents(agents, false, true)
-	w.Close()
+	_ = w.Close()
 	os.Stdout = old
 
 	if err != nil {
@@ -197,7 +197,7 @@ func TestDisplayAgentsHubMode(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	buf.ReadFrom(r)
+	_, _ = buf.ReadFrom(r)
 	output := buf.String()
 
 	lines := strings.Split(strings.TrimSpace(output), "\n")
@@ -264,7 +264,7 @@ func TestDisplayAgentsSortByTime(t *testing.T) {
 	os.Stdout = w
 
 	err := displayAgents(agents, false, false)
-	w.Close()
+	_ = w.Close()
 	os.Stdout = old
 
 	if err != nil {
@@ -272,7 +272,7 @@ func TestDisplayAgentsSortByTime(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	buf.ReadFrom(r)
+	_, _ = buf.ReadFrom(r)
 	output := buf.String()
 
 	lines := strings.Split(strings.TrimSpace(output), "\n")
@@ -298,7 +298,7 @@ func TestDisplayAgentsEmpty(t *testing.T) {
 	os.Stdout = w
 
 	err := displayAgents(nil, false, false)
-	w.Close()
+	_ = w.Close()
 	os.Stdout = old
 
 	if err != nil {
@@ -306,7 +306,7 @@ func TestDisplayAgentsEmpty(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	buf.ReadFrom(r)
+	_, _ = buf.ReadFrom(r)
 	output := buf.String()
 
 	if !strings.Contains(output, "No active agents found in the current project.") {
@@ -320,7 +320,7 @@ func TestDisplayAgentsEmptyAll(t *testing.T) {
 	os.Stdout = w
 
 	err := displayAgents(nil, true, false)
-	w.Close()
+	_ = w.Close()
 	os.Stdout = old
 
 	if err != nil {
@@ -328,7 +328,7 @@ func TestDisplayAgentsEmptyAll(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	buf.ReadFrom(r)
+	_, _ = buf.ReadFrom(r)
 	output := buf.String()
 
 	if !strings.Contains(output, "No active agents found across any projects.") {
@@ -361,7 +361,7 @@ func TestDisplayAgentsFriendlyTemplateName(t *testing.T) {
 	os.Stdout = w
 
 	err := displayAgents(agents, false, false)
-	w.Close()
+	_ = w.Close()
 	os.Stdout = old
 
 	if err != nil {
@@ -369,7 +369,7 @@ func TestDisplayAgentsFriendlyTemplateName(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	buf.ReadFrom(r)
+	_, _ = buf.ReadFrom(r)
 	output := buf.String()
 
 	lines := strings.Split(strings.TrimSpace(output), "\n")
@@ -546,7 +546,7 @@ func TestDisplayAgentsRunningFlag(t *testing.T) {
 	os.Stdout = w
 
 	err := displayAgents(agents, false, false)
-	w.Close()
+	_ = w.Close()
 	os.Stdout = old
 
 	if err != nil {
@@ -554,7 +554,7 @@ func TestDisplayAgentsRunningFlag(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	buf.ReadFrom(r)
+	_, _ = buf.ReadFrom(r)
 	output := buf.String()
 
 	if !strings.Contains(output, "active-agent") {
@@ -597,7 +597,7 @@ func TestFilterAgentsByPhase(t *testing.T) {
 	os.Stdout = w
 
 	err := displayAgents(agents, false, false)
-	w.Close()
+	_ = w.Close()
 	os.Stdout = old
 
 	if err != nil {
@@ -605,7 +605,7 @@ func TestFilterAgentsByPhase(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	buf.ReadFrom(r)
+	_, _ = buf.ReadFrom(r)
 	output := buf.String()
 
 	if !strings.Contains(output, "running-1") {
@@ -637,7 +637,7 @@ func TestFilterAgentsByActivity(t *testing.T) {
 	os.Stdout = w
 
 	err := displayAgents(agents, false, false)
-	w.Close()
+	_ = w.Close()
 	os.Stdout = old
 
 	if err != nil {
@@ -645,7 +645,7 @@ func TestFilterAgentsByActivity(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	buf.ReadFrom(r)
+	_, _ = buf.ReadFrom(r)
 	output := buf.String()
 
 	if !strings.Contains(output, "thinking-agent") {
@@ -673,7 +673,7 @@ func TestFilterAgentsByTemplate(t *testing.T) {
 	os.Stdout = w
 
 	err := displayAgents(agents, false, false)
-	w.Close()
+	_ = w.Close()
 	os.Stdout = old
 
 	if err != nil {
@@ -681,7 +681,7 @@ func TestFilterAgentsByTemplate(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	buf.ReadFrom(r)
+	_, _ = buf.ReadFrom(r)
 	output := buf.String()
 
 	if !strings.Contains(output, "claude-agent") {
@@ -710,7 +710,7 @@ func TestFilterAgentsCombined(t *testing.T) {
 	os.Stdout = w
 
 	err := displayAgents(agents, false, false)
-	w.Close()
+	_ = w.Close()
 	os.Stdout = old
 
 	if err != nil {
@@ -718,7 +718,7 @@ func TestFilterAgentsCombined(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	buf.ReadFrom(r)
+	_, _ = buf.ReadFrom(r)
 	output := buf.String()
 
 	lines := strings.Split(strings.TrimSpace(output), "\n")
@@ -745,7 +745,7 @@ func TestSortAgentsByName(t *testing.T) {
 	os.Stdout = w
 
 	err := displayAgents(agents, false, false)
-	w.Close()
+	_ = w.Close()
 	os.Stdout = old
 
 	if err != nil {
@@ -753,7 +753,7 @@ func TestSortAgentsByName(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	buf.ReadFrom(r)
+	_, _ = buf.ReadFrom(r)
 	output := buf.String()
 
 	lines := strings.Split(strings.TrimSpace(output), "\n")
@@ -787,7 +787,7 @@ func TestSortAgentsByCreated(t *testing.T) {
 	os.Stdout = w
 
 	err := displayAgents(agents, false, false)
-	w.Close()
+	_ = w.Close()
 	os.Stdout = old
 
 	if err != nil {
@@ -795,7 +795,7 @@ func TestSortAgentsByCreated(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	buf.ReadFrom(r)
+	_, _ = buf.ReadFrom(r)
 	output := buf.String()
 
 	lines := strings.Split(strings.TrimSpace(output), "\n")
@@ -831,7 +831,7 @@ func TestSortAgentsReverse(t *testing.T) {
 	os.Stdout = w
 
 	err := displayAgents(agents, false, false)
-	w.Close()
+	_ = w.Close()
 	os.Stdout = old
 
 	if err != nil {
@@ -839,7 +839,7 @@ func TestSortAgentsReverse(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	buf.ReadFrom(r)
+	_, _ = buf.ReadFrom(r)
 	output := buf.String()
 
 	lines := strings.Split(strings.TrimSpace(output), "\n")
@@ -871,7 +871,7 @@ func TestDisplayAgentsFilteredEmpty(t *testing.T) {
 	os.Stdout = w
 
 	err := displayAgents(agents, false, false)
-	w.Close()
+	_ = w.Close()
 	os.Stdout = old
 
 	if err != nil {
@@ -879,7 +879,7 @@ func TestDisplayAgentsFilteredEmpty(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	buf.ReadFrom(r)
+	_, _ = buf.ReadFrom(r)
 	output := buf.String()
 
 	if !strings.Contains(output, "No active agents") {

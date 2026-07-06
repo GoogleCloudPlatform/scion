@@ -37,7 +37,7 @@ func checkPort(host string, port int) portStatus {
 	addr := fmt.Sprintf("%s:%d", host, port)
 	ln, err := net.Listen("tcp", addr)
 	if err == nil {
-		ln.Close()
+		_ = ln.Close()
 		return portStatus{inUse: false}
 	}
 
@@ -47,7 +47,7 @@ func checkPort(host string, port int) portStatus {
 	if err != nil {
 		return portStatus{inUse: true, isScionServer: false}
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	// Check if the response looks like a scion health response
 	var health struct {

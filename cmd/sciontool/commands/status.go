@@ -71,10 +71,10 @@ Examples:
 			}
 			runStatusLimitsExceeded(message)
 		default:
-			fmt.Fprintf(cmd.ErrOrStderr(), "Error: unknown status type %q\n", statusType)
-			fmt.Fprintf(cmd.ErrOrStderr(), "Valid types: ask_user, blocked, task_completed, limits_exceeded\n")
+			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Error: unknown status type %q\n", statusType)
+			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Valid types: ask_user, blocked, task_completed, limits_exceeded\n")
 			cmd.Root().SetArgs([]string{"status", "--help"})
-			cmd.Root().Execute()
+			_ = cmd.Root().Execute()
 		}
 	},
 }

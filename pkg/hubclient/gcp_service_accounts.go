@@ -94,7 +94,7 @@ func (s *gcpServiceAccountService) List(ctx context.Context) ([]GCPServiceAccoun
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= http.StatusBadRequest {
 		return nil, apiclient.ParseErrorResponse(resp)
 	}

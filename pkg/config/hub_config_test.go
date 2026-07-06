@@ -162,11 +162,11 @@ hub:
 func TestLoadGlobalConfigEnvOverride(t *testing.T) {
 	// Set environment variables
 	// Note: Env vars use underscores which map to dots for nesting
-	os.Setenv("SCION_SERVER_HUB_PORT", "7777")
-	os.Setenv("SCION_SERVER_DATABASE_DRIVER", "postgres")
+	_ = os.Setenv("SCION_SERVER_HUB_PORT", "7777")
+	_ = os.Setenv("SCION_SERVER_DATABASE_DRIVER", "postgres")
 	defer func() {
-		os.Unsetenv("SCION_SERVER_HUB_PORT")
-		os.Unsetenv("SCION_SERVER_DATABASE_DRIVER")
+		_ = os.Unsetenv("SCION_SERVER_HUB_PORT")
+		_ = os.Unsetenv("SCION_SERVER_DATABASE_DRIVER")
 	}()
 
 	cfg, err := LoadGlobalConfig("")
@@ -185,8 +185,8 @@ func TestLoadGlobalConfigEnvOverride(t *testing.T) {
 
 func TestLoadGlobalConfigAdminEmailsEnvOverride(t *testing.T) {
 	// Test standard SCION_SERVER_HUB_ADMINEMAILS
-	os.Setenv("SCION_SERVER_HUB_ADMINEMAILS", "admin1@example.com,admin2@example.com")
-	defer os.Unsetenv("SCION_SERVER_HUB_ADMINEMAILS")
+	_ = os.Setenv("SCION_SERVER_HUB_ADMINEMAILS", "admin1@example.com,admin2@example.com")
+	defer func() { _ = os.Unsetenv("SCION_SERVER_HUB_ADMINEMAILS") }()
 
 	cfg, err := LoadGlobalConfig("")
 	if err != nil {
@@ -205,11 +205,11 @@ func TestLoadGlobalConfigAdminEmailsEnvOverride(t *testing.T) {
 	}
 
 	// Unset to test shorthand removal
-	os.Unsetenv("SCION_SERVER_HUB_ADMINEMAILS")
+	_ = os.Unsetenv("SCION_SERVER_HUB_ADMINEMAILS")
 
 	// Verify that the old SCION_ADMIN_EMAILS no longer works
-	os.Setenv("SCION_ADMIN_EMAILS", "old@example.com")
-	defer os.Unsetenv("SCION_ADMIN_EMAILS")
+	_ = os.Setenv("SCION_ADMIN_EMAILS", "old@example.com")
+	defer func() { _ = os.Unsetenv("SCION_ADMIN_EMAILS") }()
 
 	cfg, err = LoadGlobalConfig("")
 	if err != nil {
@@ -225,8 +225,8 @@ func TestLoadGlobalConfigAdminEmailsEnvOverride(t *testing.T) {
 
 func TestLoadGlobalConfigAuthorizedDomainsEnvOverride(t *testing.T) {
 	// Test standard SCION_SERVER_AUTH_AUTHORIZEDDOMAINS
-	os.Setenv("SCION_SERVER_AUTH_AUTHORIZEDDOMAINS", "example.com,test.org")
-	defer os.Unsetenv("SCION_SERVER_AUTH_AUTHORIZEDDOMAINS")
+	_ = os.Setenv("SCION_SERVER_AUTH_AUTHORIZEDDOMAINS", "example.com,test.org")
+	defer func() { _ = os.Unsetenv("SCION_SERVER_AUTH_AUTHORIZEDDOMAINS") }()
 
 	cfg, err := LoadGlobalConfig("")
 	if err != nil {
@@ -245,11 +245,11 @@ func TestLoadGlobalConfigAuthorizedDomainsEnvOverride(t *testing.T) {
 	}
 
 	// Unset to test shorthand removal
-	os.Unsetenv("SCION_SERVER_AUTH_AUTHORIZEDDOMAINS")
+	_ = os.Unsetenv("SCION_SERVER_AUTH_AUTHORIZEDDOMAINS")
 
 	// Verify that the old SCION_AUTHORIZED_DOMAINS no longer works
-	os.Setenv("SCION_AUTHORIZED_DOMAINS", "old.com")
-	defer os.Unsetenv("SCION_AUTHORIZED_DOMAINS")
+	_ = os.Setenv("SCION_AUTHORIZED_DOMAINS", "old.com")
+	defer func() { _ = os.Unsetenv("SCION_AUTHORIZED_DOMAINS") }()
 
 	cfg, err = LoadGlobalConfig("")
 	if err != nil {
@@ -303,23 +303,23 @@ func TestEnvKeyToConfigKey(t *testing.T) {
 
 func TestLoadGlobalConfigOAuthEnvOverride(t *testing.T) {
 	// Set OAuth environment variables
-	os.Setenv("SCION_SERVER_OAUTH_CLI_GOOGLE_CLIENTID", "test-cli-client-id")
-	os.Setenv("SCION_SERVER_OAUTH_CLI_GOOGLE_CLIENTSECRET", "test-cli-secret")
-	os.Setenv("SCION_SERVER_OAUTH_WEB_GITHUB_CLIENTID", "test-web-gh-id")
-	os.Setenv("SCION_SERVER_OAUTH_WEB_GITHUB_CLIENTSECRET", "test-web-gh-secret")
-	os.Setenv("SCION_SERVER_OAUTH_DEVICE_GOOGLE_CLIENTID", "test-device-google-id")
-	os.Setenv("SCION_SERVER_OAUTH_DEVICE_GOOGLE_CLIENTSECRET", "test-device-google-secret")
-	os.Setenv("SCION_SERVER_OAUTH_DEVICE_GITHUB_CLIENTID", "test-device-gh-id")
-	os.Setenv("SCION_SERVER_OAUTH_DEVICE_GITHUB_CLIENTSECRET", "test-device-gh-secret")
+	_ = os.Setenv("SCION_SERVER_OAUTH_CLI_GOOGLE_CLIENTID", "test-cli-client-id")
+	_ = os.Setenv("SCION_SERVER_OAUTH_CLI_GOOGLE_CLIENTSECRET", "test-cli-secret")
+	_ = os.Setenv("SCION_SERVER_OAUTH_WEB_GITHUB_CLIENTID", "test-web-gh-id")
+	_ = os.Setenv("SCION_SERVER_OAUTH_WEB_GITHUB_CLIENTSECRET", "test-web-gh-secret")
+	_ = os.Setenv("SCION_SERVER_OAUTH_DEVICE_GOOGLE_CLIENTID", "test-device-google-id")
+	_ = os.Setenv("SCION_SERVER_OAUTH_DEVICE_GOOGLE_CLIENTSECRET", "test-device-google-secret")
+	_ = os.Setenv("SCION_SERVER_OAUTH_DEVICE_GITHUB_CLIENTID", "test-device-gh-id")
+	_ = os.Setenv("SCION_SERVER_OAUTH_DEVICE_GITHUB_CLIENTSECRET", "test-device-gh-secret")
 	defer func() {
-		os.Unsetenv("SCION_SERVER_OAUTH_CLI_GOOGLE_CLIENTID")
-		os.Unsetenv("SCION_SERVER_OAUTH_CLI_GOOGLE_CLIENTSECRET")
-		os.Unsetenv("SCION_SERVER_OAUTH_WEB_GITHUB_CLIENTID")
-		os.Unsetenv("SCION_SERVER_OAUTH_WEB_GITHUB_CLIENTSECRET")
-		os.Unsetenv("SCION_SERVER_OAUTH_DEVICE_GOOGLE_CLIENTID")
-		os.Unsetenv("SCION_SERVER_OAUTH_DEVICE_GOOGLE_CLIENTSECRET")
-		os.Unsetenv("SCION_SERVER_OAUTH_DEVICE_GITHUB_CLIENTID")
-		os.Unsetenv("SCION_SERVER_OAUTH_DEVICE_GITHUB_CLIENTSECRET")
+		_ = os.Unsetenv("SCION_SERVER_OAUTH_CLI_GOOGLE_CLIENTID")
+		_ = os.Unsetenv("SCION_SERVER_OAUTH_CLI_GOOGLE_CLIENTSECRET")
+		_ = os.Unsetenv("SCION_SERVER_OAUTH_WEB_GITHUB_CLIENTID")
+		_ = os.Unsetenv("SCION_SERVER_OAUTH_WEB_GITHUB_CLIENTSECRET")
+		_ = os.Unsetenv("SCION_SERVER_OAUTH_DEVICE_GOOGLE_CLIENTID")
+		_ = os.Unsetenv("SCION_SERVER_OAUTH_DEVICE_GOOGLE_CLIENTSECRET")
+		_ = os.Unsetenv("SCION_SERVER_OAUTH_DEVICE_GITHUB_CLIENTID")
+		_ = os.Unsetenv("SCION_SERVER_OAUTH_DEVICE_GITHUB_CLIENTSECRET")
 	}()
 
 	cfg, err := LoadGlobalConfig("")
@@ -395,8 +395,8 @@ hub:
 	})
 
 	t.Run("from environment variable", func(t *testing.T) {
-		os.Setenv("SCION_SERVER_HUB_ENDPOINT", "https://env-hub.example.com")
-		defer os.Unsetenv("SCION_SERVER_HUB_ENDPOINT")
+		_ = os.Setenv("SCION_SERVER_HUB_ENDPOINT", "https://env-hub.example.com")
+		defer func() { _ = os.Unsetenv("SCION_SERVER_HUB_ENDPOINT") }()
 
 		cfg, err := LoadGlobalConfig("")
 		if err != nil {
@@ -421,8 +421,8 @@ hub:
 			t.Fatalf("failed to write config file: %v", err)
 		}
 
-		os.Setenv("SCION_SERVER_HUB_ENDPOINT", "https://env-hub.example.com")
-		defer os.Unsetenv("SCION_SERVER_HUB_ENDPOINT")
+		_ = os.Setenv("SCION_SERVER_HUB_ENDPOINT", "https://env-hub.example.com")
+		defer func() { _ = os.Unsetenv("SCION_SERVER_HUB_ENDPOINT") }()
 
 		cfg, err := LoadGlobalConfig(configPath)
 		if err != nil {
@@ -530,15 +530,15 @@ server:
 	}
 
 	// Set OAuth env vars (these should override settings.yaml values)
-	os.Setenv("SCION_SERVER_OAUTH_WEB_GOOGLE_CLIENTID", "env-web-google-id")
-	os.Setenv("SCION_SERVER_OAUTH_WEB_GOOGLE_CLIENTSECRET", "env-web-google-secret")
-	os.Setenv("SCION_SERVER_OAUTH_CLI_GOOGLE_CLIENTID", "env-cli-google-id")
-	os.Setenv("SCION_SERVER_HUB_PORT", "7777")
+	_ = os.Setenv("SCION_SERVER_OAUTH_WEB_GOOGLE_CLIENTID", "env-web-google-id")
+	_ = os.Setenv("SCION_SERVER_OAUTH_WEB_GOOGLE_CLIENTSECRET", "env-web-google-secret")
+	_ = os.Setenv("SCION_SERVER_OAUTH_CLI_GOOGLE_CLIENTID", "env-cli-google-id")
+	_ = os.Setenv("SCION_SERVER_HUB_PORT", "7777")
 	defer func() {
-		os.Unsetenv("SCION_SERVER_OAUTH_WEB_GOOGLE_CLIENTID")
-		os.Unsetenv("SCION_SERVER_OAUTH_WEB_GOOGLE_CLIENTSECRET")
-		os.Unsetenv("SCION_SERVER_OAUTH_CLI_GOOGLE_CLIENTID")
-		os.Unsetenv("SCION_SERVER_HUB_PORT")
+		_ = os.Unsetenv("SCION_SERVER_OAUTH_WEB_GOOGLE_CLIENTID")
+		_ = os.Unsetenv("SCION_SERVER_OAUTH_WEB_GOOGLE_CLIENTSECRET")
+		_ = os.Unsetenv("SCION_SERVER_OAUTH_CLI_GOOGLE_CLIENTID")
+		_ = os.Unsetenv("SCION_SERVER_HUB_PORT")
 	}()
 
 	// loadGlobalConfigFromSettings checks GetGlobalDir() first, then
@@ -569,11 +569,11 @@ server:
 }
 
 func TestApplyEnvOverridesCommaSeparatedLists(t *testing.T) {
-	os.Setenv("SCION_SERVER_HUB_ADMINEMAILS", "a@x.com,b@x.com")
-	os.Setenv("SCION_SERVER_AUTH_AUTHORIZEDDOMAINS", "x.com,y.com")
+	_ = os.Setenv("SCION_SERVER_HUB_ADMINEMAILS", "a@x.com,b@x.com")
+	_ = os.Setenv("SCION_SERVER_AUTH_AUTHORIZEDDOMAINS", "x.com,y.com")
 	defer func() {
-		os.Unsetenv("SCION_SERVER_HUB_ADMINEMAILS")
-		os.Unsetenv("SCION_SERVER_AUTH_AUTHORIZEDDOMAINS")
+		_ = os.Unsetenv("SCION_SERVER_HUB_ADMINEMAILS")
+		_ = os.Unsetenv("SCION_SERVER_AUTH_AUTHORIZEDDOMAINS")
 	}()
 
 	gc := DefaultGlobalConfig()
@@ -643,8 +643,8 @@ func TestLoadServerMode_Normalization(t *testing.T) {
 	// to "hosted" at the public API level.
 	tmpDir := t.TempDir()
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	globalScionDir := filepath.Join(tmpDir, ".scion")
 	if err := os.MkdirAll(globalScionDir, 0755); err != nil {

@@ -126,7 +126,7 @@ func TestInstallResolvedSkills_Success(t *testing.T) {
 	contentHash := transfer.HashBytes(content)
 
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write(content)
+		_, _ = w.Write(content)
 	}))
 	defer srv.Close()
 
@@ -192,7 +192,7 @@ func TestInstallResolvedSkills_HashMismatch(t *testing.T) {
 	wrongHash := "sha256:0000000000000000000000000000000000000000000000000000000000000000"
 
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write(content)
+		_, _ = w.Write(content)
 	}))
 	defer srv.Close()
 
@@ -238,7 +238,7 @@ func TestInstallResolvedSkills_HashMismatch(t *testing.T) {
 
 func TestInstallResolvedSkills_PathTraversal(t *testing.T) {
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("malicious content"))
+		_, _ = w.Write([]byte("malicious content"))
 	}))
 	defer srv.Close()
 
@@ -296,7 +296,7 @@ func TestInstallResolvedSkills_DuplicateDestination(t *testing.T) {
 
 func TestDownloadSkillFile_HTTPSOnly(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("content"))
+		_, _ = w.Write([]byte("content"))
 	}))
 	defer srv.Close()
 
@@ -323,7 +323,7 @@ func TestDownloadSkillFile_SizeLimit(t *testing.T) {
 	// Serve content larger than the limit
 	bigContent := strings.Repeat("x", 100)
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(bigContent))
+		_, _ = w.Write([]byte(bigContent))
 	}))
 	defer srv.Close()
 
@@ -344,7 +344,7 @@ func TestDownloadSkillFile_SizeLimit(t *testing.T) {
 func TestDownloadSkillFile_CrossHostRedirect(t *testing.T) {
 	// Set up two servers, first redirects to second
 	other := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("content"))
+		_, _ = w.Write([]byte("content"))
 	}))
 	defer other.Close()
 
@@ -467,7 +467,7 @@ func TestInstallResolvedSkills_WithAsRename(t *testing.T) {
 	contentHash := transfer.HashBytes(content)
 
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write(content)
+		_, _ = w.Write(content)
 	}))
 	defer srv.Close()
 
@@ -524,9 +524,9 @@ func TestInstallResolvedSkills_NestedFiles(t *testing.T) {
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		callCount++
 		if strings.Contains(r.URL.Path, "SKILL") {
-			w.Write(content1)
+			_, _ = w.Write(content1)
 		} else {
-			w.Write(content2)
+			_, _ = w.Write(content2)
 		}
 	}))
 	defer srv.Close()
@@ -577,7 +577,7 @@ func TestInstallResolvedSkills_BundleHashMismatch(t *testing.T) {
 	wrongBundleHash := "sha256:0000000000000000000000000000000000000000000000000000000000000000"
 
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write(content)
+		_, _ = w.Write(content)
 	}))
 	defer srv.Close()
 
@@ -615,12 +615,12 @@ func TestEnumerateLocalSkills(t *testing.T) {
 	skillsPath := filepath.Join(agentHome, skillsDir)
 
 	// Create some local skill directories
-	os.MkdirAll(filepath.Join(skillsPath, "local-skill-1"), 0755)
-	os.MkdirAll(filepath.Join(skillsPath, "local-skill-2"), 0755)
+	_ = os.MkdirAll(filepath.Join(skillsPath, "local-skill-1"), 0755)
+	_ = os.MkdirAll(filepath.Join(skillsPath, "local-skill-2"), 0755)
 	// Hidden dirs should be excluded
-	os.MkdirAll(filepath.Join(skillsPath, ".staging-temp"), 0755)
+	_ = os.MkdirAll(filepath.Join(skillsPath, ".staging-temp"), 0755)
 	// Files should be excluded
-	os.WriteFile(filepath.Join(skillsPath, "README.md"), []byte("test"), 0644)
+	_ = os.WriteFile(filepath.Join(skillsPath, "README.md"), []byte("test"), 0644)
 
 	entries := enumerateLocalSkills(agentHome, skillsDir)
 	if len(entries) != 2 {
@@ -654,7 +654,7 @@ func TestInstallResolvedSkills_OverridesExistingLocalSkill(t *testing.T) {
 	})
 
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write(content)
+		_, _ = w.Write(content)
 	}))
 	defer srv.Close()
 
@@ -662,8 +662,8 @@ func TestInstallResolvedSkills_OverridesExistingLocalSkill(t *testing.T) {
 	skillsDest := filepath.Join(agentHome, ".claude", "skills")
 
 	// Pre-create a local skill that will be overridden
-	os.MkdirAll(filepath.Join(skillsDest, "my-skill"), 0755)
-	os.WriteFile(filepath.Join(skillsDest, "my-skill", "SKILL.md"), []byte("# Old"), 0644)
+	_ = os.MkdirAll(filepath.Join(skillsDest, "my-skill"), 0755)
+	_ = os.WriteFile(filepath.Join(skillsDest, "my-skill", "SKILL.md"), []byte("# Old"), 0644)
 
 	skills := []ResolvedSkill{
 		{

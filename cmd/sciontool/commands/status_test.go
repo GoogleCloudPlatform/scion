@@ -19,8 +19,8 @@ func TestStatusCommand(t *testing.T) {
 	// Create a temp directory for test files
 	tempDir := t.TempDir()
 	originalHome := os.Getenv("HOME")
-	os.Setenv("HOME", tempDir)
-	defer os.Setenv("HOME", originalHome)
+	_ = os.Setenv("HOME", tempDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
 	scrubScionEnv(t)
 
 	tests := []struct {
@@ -79,8 +79,8 @@ func TestStatusCommand(t *testing.T) {
 			// Clean up files before each test
 			statusFile := filepath.Join(tempDir, "agent-info.json")
 			logFile := filepath.Join(tempDir, "agent.log")
-			os.Remove(statusFile)
-			os.Remove(logFile)
+			_ = os.Remove(statusFile)
+			_ = os.Remove(logFile)
 			log.SetLogPath(logFile)
 
 			rootCmd.SetArgs(tt.args)
@@ -126,8 +126,8 @@ func TestStatusCommand(t *testing.T) {
 func TestStatusCommandUnknownType(t *testing.T) {
 	tempDir := t.TempDir()
 	originalHome := os.Getenv("HOME")
-	os.Setenv("HOME", tempDir)
-	defer os.Setenv("HOME", originalHome)
+	_ = os.Setenv("HOME", tempDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
 	scrubScionEnv(t)
 
 	buf := new(bytes.Buffer)

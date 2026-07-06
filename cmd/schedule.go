@@ -189,7 +189,7 @@ func runScheduleList(cmd *cobra.Command, args []string) error {
 		if len(events) > 0 {
 			fmt.Printf("SCHEDULED EVENTS (one-shot)\n")
 			w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-			fmt.Fprintln(w, "ID\tTYPE\tSTATUS\tFIRE AT\tCREATED")
+			_, _ = fmt.Fprintln(w, "ID\tTYPE\tSTATUS\tFIRE AT\tCREATED")
 			for _, evt := range events {
 				id := evt.ID
 				if len(id) > 8 {
@@ -197,9 +197,9 @@ func runScheduleList(cmd *cobra.Command, args []string) error {
 				}
 				fireAt := formatScheduleTime(evt.FireAt, evt.Status)
 				created := formatRelativeTime(evt.CreatedAt)
-				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", id, evt.EventType, evt.Status, fireAt, created)
+				_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", id, evt.EventType, evt.Status, fireAt, created)
 			}
-			w.Flush()
+			_ = w.Flush()
 			printed = true
 		}
 	}
@@ -213,7 +213,7 @@ func runScheduleList(cmd *cobra.Command, args []string) error {
 			}
 			fmt.Printf("RECURRING SCHEDULES\n")
 			w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-			fmt.Fprintln(w, "ID\tNAME\tCRON\tNEXT RUN\tSTATUS")
+			_, _ = fmt.Fprintln(w, "ID\tNAME\tCRON\tNEXT RUN\tSTATUS")
 			for _, sched := range schedules {
 				id := sched.ID
 				if len(id) > 8 {
@@ -223,9 +223,9 @@ func runScheduleList(cmd *cobra.Command, args []string) error {
 				if sched.NextRunAt != nil {
 					nextRun = formatScheduleTime(*sched.NextRunAt, sched.Status)
 				}
-				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", id, sched.Name, sched.CronExpr, nextRun, sched.Status)
+				_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", id, sched.Name, sched.CronExpr, nextRun, sched.Status)
 			}
-			w.Flush()
+			_ = w.Flush()
 			printed = true
 		}
 	}
@@ -693,7 +693,7 @@ func runScheduleHistory(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("EXECUTION HISTORY (%d events)\n", len(events))
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "ID\tSTATUS\tFIRED AT\tERROR")
+	_, _ = fmt.Fprintln(w, "ID\tSTATUS\tFIRED AT\tERROR")
 	for _, evt := range events {
 		id := evt.ID
 		if len(id) > 8 {
@@ -710,9 +710,9 @@ func runScheduleHistory(cmd *cobra.Command, args []string) error {
 				errStr = errStr[:60] + "..."
 			}
 		}
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", id, evt.Status, firedAt, errStr)
+		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", id, evt.Status, firedAt, errStr)
 	}
-	w.Flush()
+	_ = w.Flush()
 
 	return nil
 }

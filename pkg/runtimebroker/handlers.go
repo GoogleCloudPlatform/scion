@@ -1804,7 +1804,7 @@ func (s *Server) getLogs(w http.ResponseWriter, r *http.Request, id, projectID s
 		if data, err := os.ReadFile(agentLogPath); err == nil {
 			w.Header().Set("Content-Type", "text/plain")
 			w.WriteHeader(http.StatusOK)
-			w.Write(data)
+			_, _ = w.Write(data)
 			return
 		}
 		// Fall through to container logs if agent.log not found
@@ -1824,7 +1824,7 @@ func (s *Server) getLogs(w http.ResponseWriter, r *http.Request, id, projectID s
 
 	w.Header().Set("Content-Type", "text/plain")
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte(logs))
+	_, _ = w.Write([]byte(logs))
 }
 
 func (s *Server) getStats(w http.ResponseWriter, r *http.Request, id, projectID string) {

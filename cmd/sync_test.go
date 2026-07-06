@@ -32,7 +32,7 @@ func TestResolveAgentID_AgentFound(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/v1/projects/grove-1/agents" && r.Method == http.MethodGet {
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]interface{}{
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"agents": []map[string]interface{}{
 					{"slug": "agent-id-1", "name": "my-agent", "status": "running"},
 					{"slug": "agent-id-2", "name": "other-agent", "status": "stopped"},
@@ -62,7 +62,7 @@ func TestResolveAgentID_AgentNotFound(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/v1/projects/grove-1/agents" && r.Method == http.MethodGet {
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]interface{}{
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"agents": []map[string]interface{}{
 					{"slug": "agent-id-1", "name": "other-agent", "status": "running"},
 				},
@@ -91,7 +91,7 @@ func TestResolveAgentID_AgentNotRunning(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/v1/projects/grove-1/agents" && r.Method == http.MethodGet {
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]interface{}{
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"agents": []map[string]interface{}{
 					{"slug": "agent-id-1", "name": "my-agent", "status": "stopped"},
 				},
@@ -122,7 +122,7 @@ func TestResolveLocalWorkspacePath_WorktreeExists(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create temp dir: %v", err)
 	}
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	// Create project directory structure
 	projectName := "my-project"
@@ -158,7 +158,7 @@ func TestResolveLocalWorkspacePath_FallbackToCurrent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create temp dir: %v", err)
 	}
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	// Set projectPath to the temp directory (no worktrees exist)
 	oldProjectPath := projectPath

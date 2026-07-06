@@ -144,11 +144,11 @@ func TestTelemetryHandler_Flush(t *testing.T) {
 	h := NewTelemetryHandler(nil, nil, nil)
 
 	// Start some events without ending them
-	h.Handle(&hooks.Event{
+	_ = h.Handle(&hooks.Event{
 		Name: hooks.EventToolStart,
 		Data: hooks.EventData{ToolName: "Bash"},
 	})
-	h.Handle(&hooks.Event{
+	_ = h.Handle(&hooks.Event{
 		Name: hooks.EventModelStart,
 		Data: hooks.EventData{},
 	})
@@ -248,7 +248,7 @@ func TestTelemetryHandler_NilLoggerProvider(t *testing.T) {
 func TestTelemetryHandler_WithLoggerProvider(t *testing.T) {
 	proc := &recordingProcessor{}
 	lp := sdklog.NewLoggerProvider(sdklog.WithProcessor(proc))
-	defer lp.Shutdown(context.Background())
+	defer func() { _ = lp.Shutdown(context.Background()) }()
 
 	h := NewTelemetryHandler(nil, lp, nil)
 	if h.logger == nil {
@@ -300,7 +300,7 @@ func TestTelemetryHandler_WithLoggerProvider(t *testing.T) {
 func TestTelemetryHandler_LogRedaction(t *testing.T) {
 	proc := &recordingProcessor{}
 	lp := sdklog.NewLoggerProvider(sdklog.WithProcessor(proc))
-	defer lp.Shutdown(context.Background())
+	defer func() { _ = lp.Shutdown(context.Background()) }()
 
 	redactor := telemetry.NewRedactor(telemetry.RedactionConfig{
 		Redact: []string{"prompt", "tool_input", "tool_output"},
@@ -349,7 +349,7 @@ func TestTelemetryHandler_LogRedaction(t *testing.T) {
 func TestTelemetryHandler_LogRecordIncludesFilePath(t *testing.T) {
 	proc := &recordingProcessor{}
 	lp := sdklog.NewLoggerProvider(sdklog.WithProcessor(proc))
-	defer lp.Shutdown(context.Background())
+	defer func() { _ = lp.Shutdown(context.Background()) }()
 
 	h := NewTelemetryHandler(nil, lp, nil)
 
@@ -392,7 +392,7 @@ func TestTelemetryHandler_LogRecordIncludesFilePath(t *testing.T) {
 func TestTelemetryHandler_LogRecordIncludesTokens(t *testing.T) {
 	proc := &recordingProcessor{}
 	lp := sdklog.NewLoggerProvider(sdklog.WithProcessor(proc))
-	defer lp.Shutdown(context.Background())
+	defer func() { _ = lp.Shutdown(context.Background()) }()
 
 	h := NewTelemetryHandler(nil, lp, nil)
 
@@ -438,7 +438,7 @@ func TestTelemetryHandler_LogRecordIncludesTokens(t *testing.T) {
 func TestNewTelemetryHandler_WithMeterProvider(t *testing.T) {
 	reader := sdkmetric.NewManualReader()
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
-	defer mp.Shutdown(context.Background())
+	defer func() { _ = mp.Shutdown(context.Background()) }()
 
 	h := NewTelemetryHandler(nil, nil, nil, mp)
 	if h == nil {
@@ -483,7 +483,7 @@ func TestTelemetryHandler_NilMeterProviderNoInstruments(t *testing.T) {
 func TestTelemetryHandler_ToolMetrics(t *testing.T) {
 	reader := sdkmetric.NewManualReader()
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
-	defer mp.Shutdown(context.Background())
+	defer func() { _ = mp.Shutdown(context.Background()) }()
 
 	h := NewTelemetryHandler(nil, nil, nil, mp)
 
@@ -533,7 +533,7 @@ func TestTelemetryHandler_ToolMetrics(t *testing.T) {
 func TestTelemetryHandler_ModelMetrics(t *testing.T) {
 	reader := sdkmetric.NewManualReader()
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
-	defer mp.Shutdown(context.Background())
+	defer func() { _ = mp.Shutdown(context.Background()) }()
 
 	h := NewTelemetryHandler(nil, nil, nil, mp)
 
@@ -582,7 +582,7 @@ func TestTelemetryHandler_ModelMetrics(t *testing.T) {
 func TestTelemetryHandler_SessionMetrics(t *testing.T) {
 	reader := sdkmetric.NewManualReader()
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
-	defer mp.Shutdown(context.Background())
+	defer func() { _ = mp.Shutdown(context.Background()) }()
 
 	h := NewTelemetryHandler(nil, nil, nil, mp)
 
@@ -616,7 +616,7 @@ func TestTelemetryHandler_SessionMetrics(t *testing.T) {
 func TestTelemetryHandler_TokenMetricsOnModelEnd(t *testing.T) {
 	reader := sdkmetric.NewManualReader()
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
-	defer mp.Shutdown(context.Background())
+	defer func() { _ = mp.Shutdown(context.Background()) }()
 
 	h := NewTelemetryHandler(nil, nil, nil, mp)
 
@@ -670,7 +670,7 @@ func TestTelemetryHandler_TokenMetricsOnModelEnd(t *testing.T) {
 func TestTelemetryHandler_TokenMetricsOnSessionEnd(t *testing.T) {
 	reader := sdkmetric.NewManualReader()
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
-	defer mp.Shutdown(context.Background())
+	defer func() { _ = mp.Shutdown(context.Background()) }()
 
 	h := NewTelemetryHandler(nil, nil, nil, mp)
 
@@ -712,7 +712,7 @@ func TestTelemetryHandler_TokenMetricsOnSessionEnd(t *testing.T) {
 func TestTelemetryHandler_UnpairedToolEnd(t *testing.T) {
 	reader := sdkmetric.NewManualReader()
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
-	defer mp.Shutdown(context.Background())
+	defer func() { _ = mp.Shutdown(context.Background()) }()
 
 	h := NewTelemetryHandler(nil, nil, nil, mp)
 
@@ -746,7 +746,7 @@ func TestTelemetryHandler_UnpairedToolEnd(t *testing.T) {
 func TestTelemetryHandler_UnpairedModelEnd(t *testing.T) {
 	reader := sdkmetric.NewManualReader()
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
-	defer mp.Shutdown(context.Background())
+	defer func() { _ = mp.Shutdown(context.Background()) }()
 
 	h := NewTelemetryHandler(nil, nil, nil, mp)
 
@@ -788,7 +788,7 @@ func TestTelemetryHandler_UnpairedModelEnd(t *testing.T) {
 func TestTelemetryHandler_NoTokenMetricsWhenZero(t *testing.T) {
 	reader := sdkmetric.NewManualReader()
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
-	defer mp.Shutdown(context.Background())
+	defer func() { _ = mp.Shutdown(context.Background()) }()
 
 	h := NewTelemetryHandler(nil, nil, nil, mp)
 

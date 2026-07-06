@@ -30,7 +30,7 @@ var versionCmd = &cobra.Command{
 	Short: "Print sciontool version information",
 	Long:  `Print version, commit, and build time information for sciontool.`,
 	Run: func(cmd *cobra.Command, args []string) {
-		fmt.Fprintln(cmd.OutOrStdout(), getVersionString())
+		_, _ = fmt.Fprintln(cmd.OutOrStdout(), getVersionString())
 	},
 }
 

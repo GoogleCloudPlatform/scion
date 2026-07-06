@@ -61,7 +61,7 @@ func writeError(w http.ResponseWriter, statusCode int, code, message string, det
 		},
 	}
 
-	json.NewEncoder(w).Encode(resp)
+	_ = json.NewEncoder(w).Encode(resp)
 }
 
 // NotFound writes a 404 Not Found response.

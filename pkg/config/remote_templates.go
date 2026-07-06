@@ -323,7 +323,7 @@ func fetchGitHubTarball(ctx context.Context, parts *GitHubURLParts, destPath str
 	if err != nil {
 		return fmt.Errorf("failed to download tarball: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("tarball download failed: HTTP %d", resp.StatusCode)
@@ -335,13 +335,13 @@ func fetchGitHubTarball(ctx context.Context, parts *GitHubURLParts, destPath str
 		return fmt.Errorf("failed to create temp file: %w", err)
 	}
 	tmpPath := tmpFile.Name()
-	defer os.Remove(tmpPath)
+	defer func() { _ = os.Remove(tmpPath) }()
 
 	if _, err := io.Copy(tmpFile, resp.Body); err != nil {
-		tmpFile.Close()
+		_ = tmpFile.Close()
 		return fmt.Errorf("failed to save tarball: %w", err)
 	}
-	tmpFile.Close()
+	_ = tmpFile.Close()
 
 	// If no sub-path, extract directly to destPath
 	subPath := strings.TrimRight(parts.Path, "/")
@@ -354,7 +354,7 @@ func fetchGitHubTarball(ctx context.Context, parts *GitHubURLParts, destPath str
 	if err != nil {
 		return fmt.Errorf("failed to create temp directory: %w", err)
 	}
-	defer os.RemoveAll(tmpExtract)
+	defer func() { _ = os.RemoveAll(tmpExtract) }()
 
 	if err := extractTarGz(tmpPath, tmpExtract); err != nil {
 		return err
@@ -436,7 +436,7 @@ func sparseGitCheckout(ctx context.Context, parts *GitHubURLParts, destPath stri
 	if err != nil {
 		return fmt.Errorf("failed to create temp directory: %w", err)
 	}
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	var repoURL string
 	if token != "" {
@@ -557,8 +557,8 @@ func fetchArchive(ctx context.Context, uri string, destPath string) error {
 		return fmt.Errorf("failed to create temp file: %w", err)
 	}
 	tmpPath := tmpFile.Name()
-	defer os.Remove(tmpPath)
-	defer tmpFile.Close()
+	defer func() { _ = os.Remove(tmpPath) }()
+	defer func() { _ = tmpFile.Close() }()
 
 	// Download
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, uri, nil)
@@ -570,7 +570,7 @@ func fetchArchive(ctx context.Context, uri string, destPath string) error {
 	if err != nil {
 		return fmt.Errorf("failed to download archive: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("failed to download archive: HTTP %d", resp.StatusCode)
@@ -579,7 +579,7 @@ func fetchArchive(ctx context.Context, uri string, destPath string) error {
 	if _, err := io.Copy(tmpFile, resp.Body); err != nil {
 		return fmt.Errorf("failed to save archive: %w", err)
 	}
-	tmpFile.Close()
+	_ = tmpFile.Close()
 
 	// Extract based on file type
 	lower := strings.ToLower(uri)
@@ -598,7 +598,7 @@ func extractZip(zipPath, destPath string) error {
 	if err != nil {
 		return fmt.Errorf("failed to open zip: %w", err)
 	}
-	defer r.Close()
+	defer func() { _ = r.Close() }()
 
 	// Detect if there's a common root directory
 	commonRoot := detectCommonRoot(func(yield func(string) bool) {
@@ -646,13 +646,13 @@ func extractZip(zipPath, destPath string) error {
 
 		rc, err := f.Open()
 		if err != nil {
-			outFile.Close()
+			_ = outFile.Close()
 			return err
 		}
 
 		_, err = io.Copy(outFile, rc)
-		rc.Close()
-		outFile.Close()
+		_ = rc.Close()
+		_ = outFile.Close()
 
 		if err != nil {
 			return err
@@ -668,13 +668,13 @@ func extractTarGz(tarGzPath, destPath string) error {
 	if err != nil {
 		return fmt.Errorf("failed to open archive: %w", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	gzr, err := gzip.NewReader(f)
 	if err != nil {
 		return fmt.Errorf("failed to create gzip reader: %w", err)
 	}
-	defer gzr.Close()
+	defer func() { _ = gzr.Close() }()
 
 	// First pass: detect common root. Only consider regular files and
 	// directories — pax global headers (TypeXGlobalHeader) and other
@@ -705,18 +705,18 @@ func extractTarGz(tarGzPath, destPath string) error {
 	})
 
 	// Reopen for extraction
-	f.Close()
+	_ = f.Close()
 	f, err = os.Open(tarGzPath)
 	if err != nil {
 		return fmt.Errorf("failed to reopen archive: %w", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	gzr, err = gzip.NewReader(f)
 	if err != nil {
 		return fmt.Errorf("failed to create gzip reader: %w", err)
 	}
-	defer gzr.Close()
+	defer func() { _ = gzr.Close() }()
 
 	tarReader = tar.NewReader(gzr)
 
@@ -763,10 +763,10 @@ func extractTarGz(tarGzPath, destPath string) error {
 			}
 
 			if _, err := io.Copy(outFile, tarReader); err != nil {
-				outFile.Close()
+				_ = outFile.Close()
 				return err
 			}
-			outFile.Close()
+			_ = outFile.Close()
 		case tar.TypeSymlink:
 			linkTarget := header.Linkname
 			if !filepath.IsAbs(linkTarget) {

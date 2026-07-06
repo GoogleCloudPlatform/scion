@@ -147,7 +147,7 @@ func (p *Pipeline) Start(ctx context.Context) error {
 	// Start receiver
 	if err := p.receiver.Start(ctx); err != nil {
 		if p.exporter != nil {
-			p.exporter.Shutdown(ctx)
+			_ = p.exporter.Shutdown(ctx)
 		}
 		return fmt.Errorf("failed to start receiver: %w", err)
 	}

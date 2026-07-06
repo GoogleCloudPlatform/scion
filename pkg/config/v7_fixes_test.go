@@ -13,15 +13,15 @@ func TestLoadVersionedSettings_ProjectIDRemapping(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	projectDir := filepath.Join(tmpDir, "my-project", ".scion")
 	require.NoError(t, os.MkdirAll(projectDir, 0755))
 
 	// Test SCION_HUB_PROJECT_ID maps correctly and remaps to grove_id
-	os.Setenv("SCION_HUB_PROJECT_ID", "env-project-id")
-	defer os.Unsetenv("SCION_HUB_PROJECT_ID")
+	_ = os.Setenv("SCION_HUB_PROJECT_ID", "env-project-id")
+	defer func() { _ = os.Unsetenv("SCION_HUB_PROJECT_ID") }()
 
 	vs, err := LoadVersionedSettings(projectDir)
 	require.NoError(t, err)

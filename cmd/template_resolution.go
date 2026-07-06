@@ -436,7 +436,7 @@ func updateHubTemplate(ctx context.Context, hubCtx *HubContext, hubTemplate *hub
 		}
 
 		err = hubCtx.Client.Templates().UploadFile(uploadCtx, urlInfo.URL, urlInfo.Method, urlInfo.Headers, f)
-		f.Close()
+		_ = f.Close()
 		if err != nil {
 			return nil, fmt.Errorf("failed to upload %s: %w", fileInfo.Path, err)
 		}

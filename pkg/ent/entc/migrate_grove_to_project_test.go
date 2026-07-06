@@ -51,7 +51,7 @@ func setupEntDB(t *testing.T) string {
 	dsn := "file:" + dbName + "?mode=memory&cache=shared"
 	client, err := OpenSQLite(dsn, PoolConfig{})
 	require.NoError(t, err)
-	t.Cleanup(func() { client.Close() })
+	t.Cleanup(func() { _ = client.Close() })
 	require.NoError(t, AutoMigrate(context.Background(), client))
 	return dsn
 }
@@ -62,7 +62,7 @@ func rawDB(t *testing.T, dsn string) *sql.DB {
 	t.Helper()
 	db, err := sql.Open("sqlite", dsn)
 	require.NoError(t, err)
-	t.Cleanup(func() { db.Close() })
+	t.Cleanup(func() { _ = db.Close() })
 	return db
 }
 

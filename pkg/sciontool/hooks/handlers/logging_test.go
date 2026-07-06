@@ -92,7 +92,7 @@ func TestLoggingHandler_Handle(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			// Clear log file
-			os.WriteFile(logPath, []byte{}, 0644)
+			_ = os.WriteFile(logPath, []byte{}, 0644)
 
 			err := h.Handle(tt.event)
 			require.NoError(t, err)

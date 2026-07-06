@@ -711,7 +711,7 @@ func (e *CloudBuildHarnessConfigExecutor) Run(ctx context.Context, logger io.Wri
 	if err != nil {
 		return fmt.Errorf("failed to create GCS client: %w", err)
 	}
-	defer gcsClient.Close()
+	defer func() { _ = gcsClient.Close() }()
 
 	// Verify the staging bucket exists before attempting upload.
 	if _, err := gcsClient.Bucket(stagingBucket).Attrs(ctx); err != nil {
@@ -763,7 +763,7 @@ func (e *CloudBuildHarnessConfigExecutor) Run(ctx context.Context, logger io.Wri
 	if err != nil {
 		return fmt.Errorf("failed to create Cloud Build client: %w", err)
 	}
-	defer cbClient.Close()
+	defer func() { _ = cbClient.Close() }()
 
 	build := &cloudbuildpb.Build{
 		Source: &cloudbuildpb.Source{
@@ -949,9 +949,9 @@ func syncBuiltImage(ctx context.Context, stor storage.Storage, storeDB store.Sto
 // createTarGz creates a tar.gz archive from the contents of srcDir.
 func createTarGz(srcDir string, w io.Writer) error {
 	gzw := gzip.NewWriter(w)
-	defer gzw.Close()
+	defer func() { _ = gzw.Close() }()
 	tw := tar.NewWriter(gzw)
-	defer tw.Close()
+	defer func() { _ = tw.Close() }()
 
 	return filepath.Walk(srcDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
@@ -983,7 +983,7 @@ func createTarGz(srcDir string, w io.Writer) error {
 		if err != nil {
 			return err
 		}
-		defer f.Close()
+		defer func() { _ = f.Close() }()
 		_, err = io.Copy(tw, f)
 		return err
 	})
@@ -1012,7 +1012,7 @@ func streamCloudBuildLogs(ctx context.Context, client *gcstorage.Client, bucket,
 	if err != nil {
 		return offset
 	}
-	defer rc.Close()
+	defer func() { _ = rc.Close() }()
 
 	n, _ := io.Copy(logger, rc)
 	return offset + n

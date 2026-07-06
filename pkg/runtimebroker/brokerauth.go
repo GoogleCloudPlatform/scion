@@ -143,7 +143,7 @@ func (m *BrokerAuthMiddleware) Middleware(next http.Handler) http.Handler {
 func (m *BrokerAuthMiddleware) writeError(w http.ResponseWriter, message string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusUnauthorized)
-	fmt.Fprintf(w, `{"error":{"code":"broker_auth_failed","message":%q}}`, message)
+	_, _ = fmt.Fprintf(w, `{"error":{"code":"broker_auth_failed","message":%q}}`, message)
 }
 
 // UpdateSecretKey updates the secret key used for verification.
@@ -285,5 +285,5 @@ func (m *MultiKeyBrokerAuthMiddleware) Middleware(next http.Handler) http.Handle
 func (m *MultiKeyBrokerAuthMiddleware) writeError(w http.ResponseWriter, message string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusUnauthorized)
-	fmt.Fprintf(w, `{"error":{"code":"broker_auth_failed","message":%q}}`, message)
+	_, _ = fmt.Fprintf(w, `{"error":{"code":"broker_auth_failed","message":%q}}`, message)
 }

@@ -97,8 +97,8 @@ func TestIsInsideProject(t *testing.T) {
 	// Unset Hub context to avoid synthetic project root detection
 	for _, e := range []string{"SCION_HUB_ENDPOINT", "SCION_HUB_URL", "SCION_GROVE_ID", "SCION_PROJECT_ID"} {
 		if val, ok := os.LookupEnv(e); ok {
-			os.Unsetenv(e)
-			defer os.Setenv(e, val)
+			_ = os.Unsetenv(e)
+			defer func() { _ = os.Setenv(e, val) }()
 		}
 	}
 
@@ -110,13 +110,13 @@ func TestIsInsideProject(t *testing.T) {
 	}
 
 	origWd, _ := os.Getwd()
-	defer os.Chdir(origWd)
+	defer func() { _ = os.Chdir(origWd) }()
 
 	// Set HOME to a clean temp dir
 	tmpHome := t.TempDir()
 	origHome := os.Getenv("HOME")
-	os.Setenv("HOME", tmpHome)
-	defer os.Setenv("HOME", origHome)
+	_ = os.Setenv("HOME", tmpHome)
+	defer func() { _ = os.Setenv("HOME", origHome) }()
 
 	// When in the project directory
 	if err := os.Chdir(tmpProject); err != nil {
@@ -157,13 +157,13 @@ func TestGetEnclosingProjectPath(t *testing.T) {
 	}
 
 	origWd, _ := os.Getwd()
-	defer os.Chdir(origWd)
+	defer func() { _ = os.Chdir(origWd) }()
 
 	// Set HOME to a clean temp dir
 	tmpHome := t.TempDir()
 	origHome := os.Getenv("HOME")
-	os.Setenv("HOME", tmpHome)
-	defer os.Setenv("HOME", origHome)
+	_ = os.Setenv("HOME", tmpHome)
+	defer func() { _ = os.Setenv("HOME", origHome) }()
 
 	// Create a subdirectory
 	subDir := filepath.Join(tmpProject, "subdir", "deep")
@@ -199,13 +199,13 @@ func TestGetEnclosingProjectPath_NotFound(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	origWd, _ := os.Getwd()
-	defer os.Chdir(origWd)
+	defer func() { _ = os.Chdir(origWd) }()
 
 	// Set HOME to a clean temp dir
 	tmpHome := t.TempDir()
 	origHome := os.Getenv("HOME")
-	os.Setenv("HOME", tmpHome)
-	defer os.Setenv("HOME", origHome)
+	_ = os.Setenv("HOME", tmpHome)
+	defer func() { _ = os.Setenv("HOME", origHome) }()
 
 	if err := os.Chdir(tmpDir); err != nil {
 		t.Fatal(err)
@@ -250,16 +250,16 @@ func TestSeedAgnosticTemplate(t *testing.T) {
 
 func TestSeedAgnosticTemplate_NoOverwrite(t *testing.T) {
 	targetDir := filepath.Join(t.TempDir(), "default")
-	os.MkdirAll(targetDir, 0755)
+	_ = os.MkdirAll(targetDir, 0755)
 
 	// Write a custom file first
 	customContent := "custom content"
-	os.WriteFile(filepath.Join(targetDir, "agents.md"), []byte(customContent), 0644)
+	_ = os.WriteFile(filepath.Join(targetDir, "agents.md"), []byte(customContent), 0644)
 
 	// Write a custom home/.tmux.conf
 	homeDir := filepath.Join(targetDir, "home")
-	os.MkdirAll(homeDir, 0755)
-	os.WriteFile(filepath.Join(homeDir, ".tmux.conf"), []byte(customContent), 0644)
+	_ = os.MkdirAll(homeDir, 0755)
+	_ = os.WriteFile(filepath.Join(homeDir, ".tmux.conf"), []byte(customContent), 0644)
 
 	// Seed without force — should not overwrite
 	if err := SeedAgnosticTemplate(targetDir, false); err != nil {
@@ -286,13 +286,13 @@ func TestSeedAgnosticTemplate_NoOverwrite(t *testing.T) {
 
 func TestSeedAgnosticTemplate_ForceOverwrite(t *testing.T) {
 	targetDir := filepath.Join(t.TempDir(), "default")
-	os.MkdirAll(targetDir, 0755)
+	_ = os.MkdirAll(targetDir, 0755)
 
 	// Write custom files first
-	os.WriteFile(filepath.Join(targetDir, "agents.md"), []byte("custom"), 0644)
+	_ = os.WriteFile(filepath.Join(targetDir, "agents.md"), []byte("custom"), 0644)
 	homeDir := filepath.Join(targetDir, "home")
-	os.MkdirAll(homeDir, 0755)
-	os.WriteFile(filepath.Join(homeDir, ".tmux.conf"), []byte("custom"), 0644)
+	_ = os.MkdirAll(homeDir, 0755)
+	_ = os.WriteFile(filepath.Join(homeDir, ".tmux.conf"), []byte("custom"), 0644)
 
 	// Seed with force — should overwrite
 	if err := SeedAgnosticTemplate(targetDir, true); err != nil {
@@ -324,8 +324,8 @@ func TestInitProject_EmptyTemplatesDir(t *testing.T) {
 
 	// Override HOME for global templates and external project-config dirs
 	origHome := os.Getenv("HOME")
-	os.Setenv("HOME", tmpDir)
-	defer os.Setenv("HOME", origHome)
+	_ = os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", origHome) }()
 
 	// Use explicit targetDir to avoid CWD-based resolution issues
 	projectDir := filepath.Join(tmpDir, "project", DotScion)
@@ -355,8 +355,8 @@ func TestInitProject_NoHarnessConfigs(t *testing.T) {
 	mockIsGitRepo(t, true)
 
 	origHome := os.Getenv("HOME")
-	os.Setenv("HOME", tmpDir)
-	defer os.Setenv("HOME", origHome)
+	_ = os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", origHome) }()
 
 	projectDir := filepath.Join(tmpDir, "project", DotScion)
 
@@ -384,8 +384,8 @@ func TestInitMachine_SeedsAll(t *testing.T) {
 	mockRuntimeDetection(t, "docker")
 
 	origHome := os.Getenv("HOME")
-	os.Setenv("HOME", tmpDir)
-	defer os.Setenv("HOME", origHome)
+	_ = os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", origHome) }()
 
 	if err := InitMachine(GetMockHarnesses()); err != nil {
 		t.Fatalf("InitMachine failed: %v", err)
@@ -444,8 +444,8 @@ func TestInitMachine_DoesNotOverwriteExistingBrokerID(t *testing.T) {
 	mockRuntimeDetection(t, "docker")
 
 	origHome := os.Getenv("HOME")
-	os.Setenv("HOME", tmpDir)
-	defer os.Setenv("HOME", origHome)
+	_ = os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", origHome) }()
 
 	// First init to seed settings and broker ID
 	if err := InitMachine(GetMockHarnesses()); err != nil {
@@ -479,8 +479,8 @@ func TestInitGlobal_IsAliasForInitMachine(t *testing.T) {
 	mockRuntimeDetection(t, "docker")
 
 	origHome := os.Getenv("HOME")
-	os.Setenv("HOME", tmpDir)
-	defer os.Setenv("HOME", origHome)
+	_ = os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", origHome) }()
 
 	// InitGlobal should work the same as InitMachine
 	if err := InitGlobal(GetMockHarnesses()); err != nil {
@@ -506,8 +506,8 @@ func TestInitMachine_WithImageRegistry(t *testing.T) {
 	mockRuntimeDetection(t, "docker")
 
 	origHome := os.Getenv("HOME")
-	os.Setenv("HOME", tmpDir)
-	defer os.Setenv("HOME", origHome)
+	_ = os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", origHome) }()
 
 	opts := InitMachineOpts{ImageRegistry: "ghcr.io/testorg"}
 	if err := InitMachine(GetMockHarnesses(), opts); err != nil {
@@ -529,8 +529,8 @@ func TestInitMachine_FailsWithNoRuntime(t *testing.T) {
 	mockRuntimeDetectionNone(t)
 
 	origHome := os.Getenv("HOME")
-	os.Setenv("HOME", tmpDir)
-	defer os.Setenv("HOME", origHome)
+	_ = os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", origHome) }()
 
 	err := InitMachine(GetMockHarnesses())
 	if err == nil {
@@ -546,8 +546,8 @@ func TestInitProject_FailsWithNoRuntime(t *testing.T) {
 	mockRuntimeDetectionNone(t)
 
 	origHome := os.Getenv("HOME")
-	os.Setenv("HOME", tmpDir)
-	defer os.Setenv("HOME", origHome)
+	_ = os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", origHome) }()
 
 	projectDir := filepath.Join(tmpDir, "project", DotScion)
 	err := InitProject(projectDir, GetMockHarnesses())
@@ -564,8 +564,8 @@ func TestInitMachine_UsesDetectedRuntime(t *testing.T) {
 	mockRuntimeDetection(t, "podman")
 
 	origHome := os.Getenv("HOME")
-	os.Setenv("HOME", tmpDir)
-	defer os.Setenv("HOME", origHome)
+	_ = os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", origHome) }()
 
 	if err := InitMachine(GetMockHarnesses()); err != nil {
 		t.Fatalf("InitMachine failed: %v", err)
@@ -598,8 +598,8 @@ func TestInitProject_UsesDetectedRuntime(t *testing.T) {
 	mockIsGitRepo(t, true)
 
 	origHome := os.Getenv("HOME")
-	os.Setenv("HOME", tmpDir)
-	defer os.Setenv("HOME", origHome)
+	_ = os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", origHome) }()
 
 	projectDir := filepath.Join(tmpDir, "project", DotScion)
 	if err := InitProject(projectDir, GetMockHarnesses()); err != nil {
@@ -636,8 +636,8 @@ func TestInitMachine_RestoresDeletedFiles(t *testing.T) {
 	mockRuntimeDetection(t, "docker")
 
 	origHome := os.Getenv("HOME")
-	os.Setenv("HOME", tmpDir)
-	defer os.Setenv("HOME", origHome)
+	_ = os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", origHome) }()
 
 	// First init seeds everything
 	if err := InitMachine(GetMockHarnesses()); err != nil {
@@ -685,8 +685,8 @@ func TestInitMachine_RestoresDeletedCommonFiles(t *testing.T) {
 	mockRuntimeDetection(t, "docker")
 
 	origHome := os.Getenv("HOME")
-	os.Setenv("HOME", tmpDir)
-	defer os.Setenv("HOME", origHome)
+	_ = os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", origHome) }()
 
 	if err := InitMachine(GetMockHarnesses()); err != nil {
 		t.Fatalf("first InitMachine failed: %v", err)
@@ -725,8 +725,8 @@ func TestInitMachine_PreservesCustomizedFiles(t *testing.T) {
 	mockRuntimeDetection(t, "docker")
 
 	origHome := os.Getenv("HOME")
-	os.Setenv("HOME", tmpDir)
-	defer os.Setenv("HOME", origHome)
+	_ = os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", origHome) }()
 
 	if err := InitMachine(GetMockHarnesses()); err != nil {
 		t.Fatalf("first InitMachine failed: %v", err)
@@ -774,8 +774,8 @@ func TestInitMachine_PreservesSettings(t *testing.T) {
 	mockRuntimeDetection(t, "docker")
 
 	origHome := os.Getenv("HOME")
-	os.Setenv("HOME", tmpDir)
-	defer os.Setenv("HOME", origHome)
+	_ = os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", origHome) }()
 
 	if err := InitMachine(GetMockHarnesses()); err != nil {
 		t.Fatalf("first InitMachine failed: %v", err)

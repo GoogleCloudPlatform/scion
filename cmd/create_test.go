@@ -39,7 +39,7 @@ func saveCreateTestState() createTestState {
 }
 
 func (s createTestState) restore() {
-	os.Setenv("HOME", s.home)
+	_ = os.Setenv("HOME", s.home)
 	projectPath = s.projectPath
 	noHub = s.noHub
 }
@@ -49,7 +49,7 @@ func TestCreateAgent_DuplicateReturnsError(t *testing.T) {
 	defer orig.restore()
 
 	tmpHome := t.TempDir()
-	os.Setenv("HOME", tmpHome)
+	_ = os.Setenv("HOME", tmpHome)
 	noHub = true
 
 	// Set up project directory with an existing agent

@@ -47,7 +47,7 @@ func TestAdminSignalIntegration_PublishReceiveRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	sent := AdminSignal{
 		Integration: "discord",

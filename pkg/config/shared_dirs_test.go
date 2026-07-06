@@ -164,8 +164,8 @@ func TestGetSharedDirsBasePath_GitProject(t *testing.T) {
 
 	// Simulate a git project with split storage
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	// Create the external agents dir structure
 	projectConfigDir := filepath.Join(tmpDir, ".scion", "project-configs", "myproject__abc12345")

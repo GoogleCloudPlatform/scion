@@ -580,7 +580,7 @@ func CloneSharedWorkspace(workspacePath, cloneURL, branch, token string) error {
 	if err != nil && branch != "" && isRemoteBranchNotFound(string(output)) {
 		// The branch doesn't exist on the remote yet. Clone the default branch
 		// instead and create the requested branch locally.
-		os.RemoveAll(workspacePath)
+		_ = os.RemoveAll(workspacePath)
 
 		fallbackArgs := []string{"clone", authURL, workspacePath}
 		fallbackCmd := exec.Command("git", fallbackArgs...)

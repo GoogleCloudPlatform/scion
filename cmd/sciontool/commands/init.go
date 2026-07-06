@@ -269,8 +269,8 @@ func runInit(args []string) int {
 		log.Error("Pre-start hooks failed: %v", err)
 		if harnessReq.Required {
 			log.Error("Container-script harness pre-start provisioning is required; aborting startup")
-			statusHandler.UpdatePhase(state.PhaseError, "", "")
-			statusHandler.SetMessage(fmt.Sprintf("pre-start provisioning failed: %v", err))
+			_ = statusHandler.UpdatePhase(state.PhaseError, "", "")
+			_ = statusHandler.SetMessage(fmt.Sprintf("pre-start provisioning failed: %v", err))
 			return 1
 		}
 		// Continue anyway - hooks failing shouldn't prevent startup
@@ -290,8 +290,8 @@ func runInit(args []string) int {
 		if err != nil {
 			log.Error("Failed to load harness env overlay %s: %v", overlayPath, err)
 			if harnessReq.Required {
-				statusHandler.UpdatePhase(state.PhaseError, "", "")
-				statusHandler.SetMessage(fmt.Sprintf("invalid harness env overlay: %v", err))
+				_ = statusHandler.UpdatePhase(state.PhaseError, "", "")
+				_ = statusHandler.SetMessage(fmt.Sprintf("invalid harness env overlay: %v", err))
 				return 1
 			}
 		} else if len(overlay) > 0 {
@@ -307,8 +307,8 @@ func runInit(args []string) int {
 		// Update local agent-info.json to error state so local status readers
 		// and the broker heartbeat see the failure and error message.
 		errMsg := fmt.Sprintf("git clone failed: %v", err)
-		statusHandler.UpdatePhase(state.PhaseError, "", "")
-		statusHandler.SetMessage(errMsg)
+		_ = statusHandler.UpdatePhase(state.PhaseError, "", "")
+		_ = statusHandler.SetMessage(errMsg)
 
 		// Report error to Hub directly so the agent doesn't stay stuck in "cloning" state.
 		// This is best-effort; the broker heartbeat will also pick up the error from
@@ -435,8 +435,8 @@ func runInit(args []string) int {
 		} else if f, err := os.CreateTemp(agentHome, ".scion-preflight-*"); err != nil {
 			log.Error("Pre-flight: cannot write to agent home %s: %v (uid=%d)", agentHome, err, os.Geteuid())
 		} else {
-			os.Remove(f.Name())
-			f.Close()
+			_ = os.Remove(f.Name())
+			_ = f.Close()
 			log.Debug("Pre-flight: agent home %s is writable (uid=%d)", agentHome, os.Geteuid())
 		}
 		if _, err := exec.LookPath("tmux"); err != nil {
@@ -740,7 +740,7 @@ func runInit(args []string) int {
 			}
 		}
 		// Remove stale trigger file from a previous run
-		os.Remove(handlers.LimitsTriggerFile)
+		_ = os.Remove(handlers.LimitsTriggerFile)
 	}
 
 	// Watch for limits-exceeded trigger file (works across UID boundaries).
@@ -882,11 +882,11 @@ waitLoop:
 		// HYBRID mapping: an unexpected non-zero exit becomes PhaseError with
 		// the activity cleared (crash detail lives in the message + exitCode).
 		// `crashed` activity is only valid on PhaseStopped per state validation.
-		statusHandler.UpdatePhase(state.PhaseError, "", "")
-		statusHandler.SetMessage(outcome.message)
+		_ = statusHandler.UpdatePhase(state.PhaseError, "", "")
+		_ = statusHandler.SetMessage(outcome.message)
 	} else if limitsExceeded {
-		statusHandler.UpdatePhase(state.PhaseStopped, state.ActivityLimitsExceeded, "")
-		statusHandler.SetMessage("limits exceeded")
+		_ = statusHandler.UpdatePhase(state.PhaseStopped, state.ActivityLimitsExceeded, "")
+		_ = statusHandler.SetMessage("limits exceeded")
 	}
 
 	// Report final status to Hub, distinguishing clean stop from crash.
@@ -1087,7 +1087,7 @@ func handleAuthReset(hubClient *hub.Client, tokenRefreshCancel *context.CancelFu
 	}
 
 	// Clear any AUTH_LOST message from agent-info.json.
-	statusHandler.SetMessage("")
+	_ = statusHandler.SetMessage("")
 
 	// Schedule refresh 2 hours before the new token's expiry.
 	refreshAt := tokenExpiry.Add(-2 * time.Hour)
@@ -1118,7 +1118,7 @@ func handleAuthReset(hubClient *hub.Client, tokenRefreshCancel *context.CancelFu
 		OnAuthLost: func() {
 			log.Error("AUTH_LOST: Agent token has expired and could not be refreshed - hub communication is no longer possible")
 			log.Error("AUTH_LOST: Agent limits (max-duration, max-turns, max-model-calls) are enforced locally and remain active")
-			statusHandler.SetMessage("AUTH_LOST: Hub token expired and could not be refreshed")
+			_ = statusHandler.SetMessage("AUTH_LOST: Hub token expired and could not be refreshed")
 		},
 	})
 
@@ -1471,7 +1471,7 @@ func gitCloneWorkspace(uid, gid int, agentHome string) error {
 	normalizedURL := util.NormalizeGitRemote(cloneURL)
 	if hubClient := hub.NewClient(); hubClient != nil && hubClient.IsConfigured() {
 		hubCtx, hubCancel := context.WithTimeout(context.Background(), 10*time.Second)
-		hubClient.UpdateStatus(hubCtx, hub.StatusUpdate{
+		_ = hubClient.UpdateStatus(hubCtx, hub.StatusUpdate{
 			Phase:   state.PhaseCloning,
 			Status:  string(state.PhaseCloning),
 			Message: "Cloning repository",
@@ -1879,7 +1879,7 @@ func writeEnvFile(agentHome string, uid, gid int) {
 	}
 	if err := os.Rename(tmpPath, envPath); err != nil {
 		log.Error("Failed to atomically rename scion-env file: %v", err)
-		os.Remove(tmpPath)
+		_ = os.Remove(tmpPath)
 		return
 	}
 

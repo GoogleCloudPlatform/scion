@@ -102,7 +102,7 @@ func (s *metadataTokenSource) getToken() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("oidc: metadata fetch: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("oidc: metadata server returned %d", resp.StatusCode)

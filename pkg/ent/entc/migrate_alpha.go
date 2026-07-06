@@ -165,7 +165,7 @@ func IsLegacyRawSQLSchema(path string) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("opening %s: %w", path, err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	hasMigrations, err := tableExists(db, "schema_migrations")
 	if err != nil {
@@ -254,7 +254,7 @@ func backupLegacy(path string, opts AlphaOptions) (string, error) {
 		// Non-fatal: a DB in rollback-journal mode has no WAL to checkpoint.
 		opts.logf("migration α: wal_checkpoint skipped: %v", err)
 	}
-	db.Close()
+	_ = db.Close()
 
 	suffix := opts.BackupSuffix
 	if suffix == "" {
@@ -273,7 +273,7 @@ func buildEntSchema(ctx context.Context, tmpPath string) error {
 	if err != nil {
 		return err
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 	return AutoMigrate(ctx, client)
 }
 
@@ -329,7 +329,7 @@ func copyLegacyData(ctx context.Context, dstPath, legacyPath string, report *Alp
 	if err != nil {
 		return err
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	// Pin to one connection so PRAGMAs and the ATTACH apply to every statement.
 	db.SetMaxOpenConns(1)
 
@@ -531,10 +531,10 @@ func buildIDRemap(ctx context.Context, db *sql.DB, opts AlphaOptions) error {
 			legacyIDs = append(legacyIDs, id.String)
 		}
 		if err := rows.Err(); err != nil {
-			rows.Close()
+			_ = rows.Close()
 			return err
 		}
-		rows.Close()
+		_ = rows.Close()
 		for _, old := range legacyIDs {
 			newID := uuid.NewSHA1(migrationNamespace, []byte(old)).String()
 			if _, err := db.ExecContext(ctx, `INSERT OR IGNORE INTO _id_remap (old, new) VALUES (?, ?)`, old, newID); err != nil {
@@ -657,7 +657,7 @@ func tableColumns(db *sql.DB, table string) (map[string]bool, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	cols := map[string]bool{}
 	for rows.Next() {
 		var cid, notnull, pk int
@@ -684,7 +684,7 @@ func attachedTableColumns(ctx context.Context, db *sql.DB, table string) (map[st
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	cols := map[string]bool{}
 	for rows.Next() {
 		var cid, notnull, pk int

@@ -44,7 +44,7 @@ func TestEnsureScionGitignore_Idempotent(t *testing.T) {
 	setupGitRepoDir(t, tmpDir)
 
 	// Write .gitignore with .scion/ already present (covers agents/ too)
-	os.WriteFile(filepath.Join(tmpDir, ".gitignore"), []byte("node_modules/\n.scion/\n"), 0644)
+	_ = os.WriteFile(filepath.Join(tmpDir, ".gitignore"), []byte("node_modules/\n.scion/\n"), 0644)
 
 	if err := EnsureScionGitignore(tmpDir); err != nil {
 		t.Fatalf("EnsureScionGitignore failed: %v", err)
@@ -64,7 +64,7 @@ func TestEnsureScionGitignore_AppendsToExisting(t *testing.T) {
 	setupGitRepoDir(t, tmpDir)
 
 	// Write .gitignore without trailing newline and without .scion coverage
-	os.WriteFile(filepath.Join(tmpDir, ".gitignore"), []byte("node_modules/"), 0644)
+	_ = os.WriteFile(filepath.Join(tmpDir, ".gitignore"), []byte("node_modules/"), 0644)
 
 	if err := EnsureScionGitignore(tmpDir); err != nil {
 		t.Fatalf("EnsureScionGitignore failed: %v", err)
@@ -85,7 +85,7 @@ func TestEnsureScionGitignore_RecognizesVariants(t *testing.T) {
 		t.Run(pattern, func(t *testing.T) {
 			tmpDir := t.TempDir()
 			setupGitRepoDir(t, tmpDir)
-			os.WriteFile(filepath.Join(tmpDir, ".gitignore"), []byte(pattern+"\n"), 0644)
+			_ = os.WriteFile(filepath.Join(tmpDir, ".gitignore"), []byte(pattern+"\n"), 0644)
 
 			if err := EnsureScionGitignore(tmpDir); err != nil {
 				t.Fatalf("EnsureScionGitignore failed for pattern %q: %v", pattern, err)
@@ -115,8 +115,8 @@ func TestInitProject_NonGitCreatesMarkerAndExternalDir(t *testing.T) {
 
 	// Change to the project directory (non-git)
 	origWd, _ := os.Getwd()
-	defer os.Chdir(origWd)
-	os.Chdir(projectDir)
+	defer func() { _ = os.Chdir(origWd) }()
+	_ = os.Chdir(projectDir)
 
 	// InitProject with the .scion path as target
 	if err := InitProject(scionDir, GetMockHarnesses()); err != nil {
@@ -182,11 +182,11 @@ func TestInitProject_NonGitRejectsOldStyleDir(t *testing.T) {
 	// Create a non-git project with old-style .scion directory
 	projectDir := t.TempDir()
 	scionDir := filepath.Join(projectDir, ".scion")
-	os.MkdirAll(scionDir, 0755)
+	_ = os.MkdirAll(scionDir, 0755)
 
 	origWd, _ := os.Getwd()
-	defer os.Chdir(origWd)
-	os.Chdir(projectDir)
+	defer func() { _ = os.Chdir(origWd) }()
+	_ = os.Chdir(projectDir)
 
 	err := InitProject(scionDir, GetMockHarnesses())
 	if err == nil {
@@ -207,8 +207,8 @@ func TestInitProject_NonGitIdempotent(t *testing.T) {
 	scionDir := filepath.Join(projectDir, ".scion")
 
 	origWd, _ := os.Getwd()
-	defer os.Chdir(origWd)
-	os.Chdir(projectDir)
+	defer func() { _ = os.Chdir(origWd) }()
+	_ = os.Chdir(projectDir)
 
 	// First init
 	if err := InitProject(scionDir, GetMockHarnesses()); err != nil {
@@ -237,15 +237,15 @@ func TestInitProject_GitCreatesProjectIDAndExternalDir(t *testing.T) {
 
 	// Create a git repo
 	projectDir := filepath.Join(t.TempDir(), "my-git-project")
-	os.MkdirAll(projectDir, 0755)
+	_ = os.MkdirAll(projectDir, 0755)
 	setupGitRepoDir(t, projectDir)
 
 	scionDir := filepath.Join(projectDir, ".scion")
 
 	// Change to the project directory
 	origWd, _ := os.Getwd()
-	defer os.Chdir(origWd)
-	os.Chdir(projectDir)
+	defer func() { _ = os.Chdir(origWd) }()
+	_ = os.Chdir(projectDir)
 
 	if err := InitProject(scionDir, GetMockHarnesses()); err != nil {
 		t.Fatalf("InitProject failed: %v", err)
@@ -317,14 +317,14 @@ func TestInitProject_GitIdempotentProjectID(t *testing.T) {
 	mockRuntimeDetection(t, "docker")
 
 	projectDir := filepath.Join(t.TempDir(), "idempotent-project")
-	os.MkdirAll(projectDir, 0755)
+	_ = os.MkdirAll(projectDir, 0755)
 	setupGitRepoDir(t, projectDir)
 
 	scionDir := filepath.Join(projectDir, ".scion")
 
 	origWd, _ := os.Getwd()
-	defer os.Chdir(origWd)
-	os.Chdir(projectDir)
+	defer func() { _ = os.Chdir(origWd) }()
+	_ = os.Chdir(projectDir)
 
 	// First init
 	if err := InitProject(scionDir, GetMockHarnesses()); err != nil {

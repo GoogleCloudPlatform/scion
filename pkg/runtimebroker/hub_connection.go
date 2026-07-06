@@ -185,7 +185,7 @@ func (hc *HubConnection) Stop() {
 
 	if cc != nil {
 		slog.Info("Stopping control channel for connection", "name", hc.Name)
-		cc.Close()
+		_ = cc.Close()
 	}
 	// Wait for the Connect goroutine launched in Start to observe the close
 	// and exit. Safe to call even when no goroutine is outstanding.

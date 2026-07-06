@@ -33,7 +33,7 @@ func TestAgentService_List_QueryParameters(t *testing.T) {
 			t.Errorf("expected groveId %q, got %q", projectID, query.Get("groveId"))
 		}
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"agents": []}`))
+		_, _ = w.Write([]byte(`{"agents": []}`))
 	}))
 	defer server.Close()
 
@@ -61,7 +61,7 @@ func TestSubscriptionService_List_QueryParameters(t *testing.T) {
 			t.Errorf("expected groveId %q, got %q", projectID, query.Get("groveId"))
 		}
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`[]`))
+		_, _ = w.Write([]byte(`[]`))
 	}))
 	defer server.Close()
 
@@ -89,7 +89,7 @@ func TestSubscriptionTemplateService_List_QueryParameters(t *testing.T) {
 			t.Errorf("expected groveId %q, got %q", projectID, query.Get("groveId"))
 		}
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`[]`))
+		_, _ = w.Write([]byte(`[]`))
 	}))
 	defer server.Close()
 

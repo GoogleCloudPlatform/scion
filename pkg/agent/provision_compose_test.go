@@ -489,12 +489,12 @@ func TestComposition_FullInitProjectFlow(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	oldWd, _ := os.Getwd()
-	os.Chdir(tmpDir)
-	defer os.Chdir(oldWd)
+	_ = os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
 
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	// InitMachine seeds global harness-configs (required for agent creation)
 	if err := config.InitMachine(getTestHarnesses()); err != nil {
@@ -507,7 +507,7 @@ func TestComposition_FullInitProjectFlow(t *testing.T) {
 		t.Fatalf("InitProject failed: %v", err)
 	}
 
-	os.Chdir(projectDir)
+	_ = os.Chdir(projectDir)
 
 	// Use the "default" template (agnostic); default_harness_config: claude comes from settings
 	agentHome, _, cfg, err := ProvisionAgent(context.Background(), "full-flow-agent", "default", "", "", projectScionDir, "", "", "", "")

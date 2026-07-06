@@ -29,12 +29,12 @@ func TestCreateTemplate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	// Override home dir for global templates
 	origHome := os.Getenv("HOME")
-	os.Setenv("HOME", tmpDir)
-	defer os.Setenv("HOME", origHome)
+	_ = os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", origHome) }()
 
 	// Create a mock project structure
 	projectDir := filepath.Join(tmpDir, "project", DotScion)
@@ -44,7 +44,7 @@ func TestCreateTemplate(t *testing.T) {
 
 	// Helper to change current working directory
 	origWd, _ := os.Getwd()
-	defer os.Chdir(origWd)
+	defer func() { _ = os.Chdir(origWd) }()
 	if err := os.Chdir(filepath.Dir(projectDir)); err != nil {
 		t.Fatal(err)
 	}
@@ -99,12 +99,12 @@ func TestDeleteTemplate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	// Override home dir for global templates
 	origHome := os.Getenv("HOME")
-	os.Setenv("HOME", tmpDir)
-	defer os.Setenv("HOME", origHome)
+	_ = os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", origHome) }()
 
 	// Create a mock project structure
 	projectDir := filepath.Join(tmpDir, "project", DotScion)
@@ -114,7 +114,7 @@ func TestDeleteTemplate(t *testing.T) {
 
 	// Helper to change current working directory
 	origWd, _ := os.Getwd()
-	defer os.Chdir(origWd)
+	defer func() { _ = os.Chdir(origWd) }()
 	if err := os.Chdir(filepath.Dir(projectDir)); err != nil {
 		t.Fatal(err)
 	}
@@ -165,12 +165,12 @@ func TestUpdateDefaultTemplates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	// Override home dir so global dir resolves to tmpDir
 	origHome := os.Getenv("HOME")
-	os.Setenv("HOME", tmpDir)
-	defer os.Setenv("HOME", origHome)
+	_ = os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", origHome) }()
 
 	globalDefaultDir := filepath.Join(tmpDir, DotScion, "templates", "default")
 	defaultScionYAML := filepath.Join(globalDefaultDir, "scion-agent.yaml")
@@ -308,12 +308,12 @@ func TestCloneTemplate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	// Override home dir for global templates
 	origHome := os.Getenv("HOME")
-	os.Setenv("HOME", tmpDir)
-	defer os.Setenv("HOME", origHome)
+	_ = os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", origHome) }()
 
 	// Create a mock project structure
 	projectDir := filepath.Join(tmpDir, "project", DotScion)
@@ -323,7 +323,7 @@ func TestCloneTemplate(t *testing.T) {
 
 	// Helper to change current working directory
 	origWd, _ := os.Getwd()
-	defer os.Chdir(origWd)
+	defer func() { _ = os.Chdir(origWd) }()
 	if err := os.Chdir(filepath.Dir(projectDir)); err != nil {
 		t.Fatal(err)
 	}
@@ -386,7 +386,7 @@ func TestLoadConfigInvalidVolumes(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer os.RemoveAll(tmpDir)
+		defer func() { _ = os.RemoveAll(tmpDir) }()
 
 		// Write a config where volumes is an object instead of an array
 		configContent := `{
@@ -411,7 +411,7 @@ func TestLoadConfigInvalidVolumes(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer os.RemoveAll(tmpDir)
+		defer func() { _ = os.RemoveAll(tmpDir) }()
 
 		configContent := `{
 			"harness": "gemini",
@@ -436,7 +436,7 @@ func TestLoadConfigInvalidVolumes(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer os.RemoveAll(tmpDir)
+		defer func() { _ = os.RemoveAll(tmpDir) }()
 
 		configContent := `{
 			"harness": "gemini",
@@ -467,7 +467,7 @@ func TestLoadConfigInvalidVolumes(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer os.RemoveAll(tmpDir)
+		defer func() { _ = os.RemoveAll(tmpDir) }()
 
 		configContent := `{
 			"harness": "gemini",
@@ -493,17 +493,17 @@ func TestFindTemplateInProjectPath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	// Override HOME for global templates
 	origHome := os.Getenv("HOME")
-	os.Setenv("HOME", tmpDir)
-	defer os.Setenv("HOME", origHome)
+	_ = os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", origHome) }()
 
 	// Set CWD to tmpDir so CWD-based resolution won't find any .scion
 	origWd, _ := os.Getwd()
-	defer os.Chdir(origWd)
-	os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(origWd) }()
+	_ = os.Chdir(tmpDir)
 
 	// Create a global template
 	globalTemplatesDir := filepath.Join(tmpDir, GlobalDir, "templates")
@@ -585,7 +585,7 @@ func TestFindTemplateInProjectPath_GitGroveInRepoTemplates(t *testing.T) {
 	// Simulate a git project: in-repo .scion/ with grove-id and templates/ in-repo.
 	// Templates live in-repo so they can be committed to the repository.
 	projectDir := filepath.Join(t.TempDir(), "my-git-project", ".scion")
-	os.MkdirAll(projectDir, 0755)
+	_ = os.MkdirAll(projectDir, 0755)
 	if err := WriteProjectID(projectDir, "550e8400-e29b-41d4-a716-446655440000"); err != nil {
 		t.Fatal(err)
 	}
@@ -613,15 +613,15 @@ func TestGetTemplateChainInProject(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	origHome := os.Getenv("HOME")
-	os.Setenv("HOME", tmpDir)
-	defer os.Setenv("HOME", origHome)
+	_ = os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", origHome) }()
 
 	origWd, _ := os.Getwd()
-	defer os.Chdir(origWd)
-	os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(origWd) }()
+	_ = os.Chdir(tmpDir)
 
 	// Create project template
 	projectPath := filepath.Join(tmpDir, "project", DotScion)
@@ -647,15 +647,15 @@ func TestGetTemplateChainInProjectWithDefault(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	origHome := os.Getenv("HOME")
-	os.Setenv("HOME", tmpDir)
-	defer os.Setenv("HOME", origHome)
+	_ = os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", origHome) }()
 
 	origWd, _ := os.Getwd()
-	defer os.Chdir(origWd)
-	os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(origWd) }()
+	_ = os.Chdir(tmpDir)
 
 	projectPath := filepath.Join(tmpDir, "project", DotScion)
 
@@ -702,7 +702,7 @@ func TestImageFieldLoadingAndMerging(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create temp dir: %v", err)
 	}
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	// 1. Test LoadConfig
 	configContent := `{
@@ -1450,7 +1450,7 @@ func TestLoadConfigYAMLKeyNormalization(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer os.RemoveAll(tmpDir)
+		defer func() { _ = os.RemoveAll(tmpDir) }()
 
 		configContent := `harness-config: claude-web
 `
@@ -1474,7 +1474,7 @@ func TestLoadConfigYAMLKeyNormalization(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer os.RemoveAll(tmpDir)
+		defer func() { _ = os.RemoveAll(tmpDir) }()
 
 		configContent := `default-harness-config: gemini-experimental
 `
@@ -1498,7 +1498,7 @@ func TestLoadConfigYAMLKeyNormalization(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer os.RemoveAll(tmpDir)
+		defer func() { _ = os.RemoveAll(tmpDir) }()
 
 		configContent := `harness_config: claude-web
 default_harness_config: gemini
@@ -1531,7 +1531,7 @@ command_args:
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer os.RemoveAll(tmpDir)
+		defer func() { _ = os.RemoveAll(tmpDir) }()
 
 		configContent := `env:
   MY-CUSTOM-VAR: hello
@@ -1563,7 +1563,7 @@ command_args:
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer os.RemoveAll(tmpDir)
+		defer func() { _ = os.RemoveAll(tmpDir) }()
 
 		configContent := `harness-config: claude-web
 image: us-central1-docker.pkg.dev/my-project/repo/image:latest
@@ -1813,7 +1813,7 @@ func TestResolveContentInChain(t *testing.T) {
 		childDir := t.TempDir()
 
 		expectedContent := "# Base agent instructions\nBe helpful."
-		os.WriteFile(filepath.Join(parentDir, "agents.md"), []byte(expectedContent), 0644)
+		_ = os.WriteFile(filepath.Join(parentDir, "agents.md"), []byte(expectedContent), 0644)
 
 		chain := []*Template{
 			{Name: "default", Path: parentDir},
@@ -1833,8 +1833,8 @@ func TestResolveContentInChain(t *testing.T) {
 		parentDir := t.TempDir()
 		childDir := t.TempDir()
 
-		os.WriteFile(filepath.Join(parentDir, "agents.md"), []byte("parent content"), 0644)
-		os.WriteFile(filepath.Join(childDir, "agents.md"), []byte("child content"), 0644)
+		_ = os.WriteFile(filepath.Join(parentDir, "agents.md"), []byte("parent content"), 0644)
+		_ = os.WriteFile(filepath.Join(childDir, "agents.md"), []byte("child content"), 0644)
 
 		chain := []*Template{
 			{Name: "default", Path: parentDir},

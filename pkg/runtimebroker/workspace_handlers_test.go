@@ -285,7 +285,7 @@ func TestBuildWorkspaceManifest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create temp dir: %v", err)
 	}
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	// Create test files
 	testFiles := map[string]string{
@@ -342,7 +342,7 @@ func TestBuildWorkspaceManifestWithExcludes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create temp dir: %v", err)
 	}
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	// Create test files including some that should be excluded
 	testFiles := map[string]string{
@@ -388,7 +388,7 @@ func TestCountWorkspaceFiles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create temp dir: %v", err)
 	}
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	// Create test files
 	testFiles := map[string]string{
@@ -462,7 +462,7 @@ func TestApplyFilePermissions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create temp dir: %v", err)
 	}
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	// Create test files
 	testFile := filepath.Join(tmpDir, "test.sh")
@@ -502,7 +502,7 @@ func TestApplyFilePermissions_InvalidMode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create temp dir: %v", err)
 	}
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	// Create test file
 	testFile := filepath.Join(tmpDir, "test.txt")
@@ -532,7 +532,7 @@ func TestApplyFilePermissions_EmptyMode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create temp dir: %v", err)
 	}
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	// Create test file
 	testFile := filepath.Join(tmpDir, "test.txt")
@@ -572,7 +572,7 @@ func TestApplyFilePermissions_MissingFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create temp dir: %v", err)
 	}
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	// Try to apply permissions to non-existent file
 	files := []transfer.FileInfo{
@@ -829,7 +829,7 @@ func TestCountWorkspaceFiles_EmptyDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create temp dir: %v", err)
 	}
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	count, size := srv.countWorkspaceFiles(tmpDir)
 
@@ -852,7 +852,7 @@ func TestCountWorkspaceFiles_NestedDirectories(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create temp dir: %v", err)
 	}
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	// Create nested files
 	testFiles := map[string]string{

@@ -295,7 +295,7 @@ func (s *authService) PollDeviceToken(ctx context.Context, deviceCode, provider 
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	switch resp.StatusCode {
 	case 200:

@@ -146,7 +146,7 @@ func TestLoadHarnessConfigDir_NotFound(t *testing.T) {
 func TestLoadHarnessConfigDir_MissingConfigYAML(t *testing.T) {
 	tmpDir := t.TempDir()
 	configDir := filepath.Join(tmpDir, "empty")
-	os.MkdirAll(configDir, 0755)
+	_ = os.MkdirAll(configDir, 0755)
 
 	_, err := LoadHarnessConfigDir(configDir)
 	if err == nil {
@@ -173,8 +173,8 @@ user: scion
 
 	// Override HOME so GetGlobalDir resolves to our temp dir
 	origHome := os.Getenv("HOME")
-	os.Setenv("HOME", tmpDir)
-	defer os.Setenv("HOME", origHome)
+	_ = os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", origHome) }()
 
 	// Test: project-level takes precedence
 	hc, err := FindHarnessConfigDir("claude", projectPath)
@@ -231,8 +231,8 @@ func TestFindHarnessConfigDir_TemplatePaths(t *testing.T) {
 
 	// Override HOME so global dir resolves to our temp dir
 	origHome := os.Getenv("HOME")
-	os.Setenv("HOME", tmpDir)
-	defer os.Setenv("HOME", origHome)
+	_ = os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", origHome) }()
 
 	// Setup a template with a custom harness-config
 	templateDir := filepath.Join(tmpDir, "templates", "web-dev")
@@ -317,8 +317,8 @@ func TestFindHarnessConfigDir_FallsThrough_BrokenDirectory(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	origHome := os.Getenv("HOME")
-	os.Setenv("HOME", tmpDir)
-	defer os.Setenv("HOME", origHome)
+	_ = os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", origHome) }()
 
 	// Setup valid global harness-config
 	globalHCDir := filepath.Join(tmpDir, DotScion, harnessConfigsDirName, "opencode")
@@ -368,15 +368,15 @@ func TestListHarnessConfigDirs(t *testing.T) {
 
 	// Override HOME
 	origHome := os.Getenv("HOME")
-	os.Setenv("HOME", tmpDir)
-	defer os.Setenv("HOME", origHome)
+	_ = os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", origHome) }()
 
 	// Setup global harness-configs
 	globalBase := filepath.Join(tmpDir, DotScion, harnessConfigsDirName)
 	for _, name := range []string{"claude", "gemini"} {
 		dir := filepath.Join(globalBase, name)
-		os.MkdirAll(dir, 0755)
-		os.WriteFile(filepath.Join(dir, "config.yaml"), []byte("harness: "+name+"\n"), 0644)
+		_ = os.MkdirAll(dir, 0755)
+		_ = os.WriteFile(filepath.Join(dir, "config.yaml"), []byte("harness: "+name+"\n"), 0644)
 	}
 
 	// Setup project-level harness-config (overrides global claude, adds codex)
@@ -384,8 +384,8 @@ func TestListHarnessConfigDirs(t *testing.T) {
 	projectBase := filepath.Join(projectPath, harnessConfigsDirName)
 	for _, name := range []string{"claude", "codex"} {
 		dir := filepath.Join(projectBase, name)
-		os.MkdirAll(dir, 0755)
-		os.WriteFile(filepath.Join(dir, "config.yaml"), []byte("harness: "+name+"\nimage: project-"+name+"\n"), 0644)
+		_ = os.MkdirAll(dir, 0755)
+		_ = os.WriteFile(filepath.Join(dir, "config.yaml"), []byte("harness: "+name+"\nimage: project-"+name+"\n"), 0644)
 	}
 
 	configs, err := ListHarnessConfigDirs(projectPath)

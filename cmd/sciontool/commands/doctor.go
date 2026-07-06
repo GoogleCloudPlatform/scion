@@ -208,7 +208,7 @@ func checkHubConnectivity(hubURL string) bool {
 		fmt.Printf("[FAIL] Hub unreachable at %s: %v\n", hubURL, err)
 		return false
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 
 	if resp.StatusCode < 400 {
 		fmt.Printf("[ OK ] Hub reachable at %s\n", hubURL)
@@ -251,7 +251,7 @@ func checkAuthentication(hubURL string, failures *int) bool {
 		return false
 	}
 	respBody, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
+	_ = resp.Body.Close()
 
 	if resp.StatusCode < 400 {
 		fmt.Println("[ OK ] Authenticated successfully (heartbeat accepted)")
@@ -276,7 +276,7 @@ func checkAuthentication(hubURL string, failures *int) bool {
 		return false
 	}
 	respBody, _ = io.ReadAll(resp.Body)
-	resp.Body.Close()
+	_ = resp.Body.Close()
 
 	if resp.StatusCode == 200 {
 		fmt.Println("[ OK ] Token refresh works")
@@ -300,7 +300,7 @@ func checkGCPMetadata(failures *int) {
 
 	port := 18380
 	if p := os.Getenv("SCION_METADATA_PORT"); p != "" {
-		fmt.Sscanf(p, "%d", &port)
+		_, _ = fmt.Sscanf(p, "%d", &port)
 	}
 
 	client := &http.Client{Timeout: 2 * time.Second}
@@ -312,7 +312,7 @@ func checkGCPMetadata(failures *int) {
 		*failures++
 		return
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 
 	if resp.StatusCode == http.StatusOK {
 		fmt.Printf("[ OK ] Metadata server healthy at %s (mode=%s)\n", addr, mode)
@@ -349,7 +349,7 @@ func checkGCPTokenAcquisition(port int, failures *int) {
 		*failures++
 		return
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, _ := io.ReadAll(resp.Body)
 

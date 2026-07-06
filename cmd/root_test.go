@@ -223,11 +223,11 @@ func TestDevAuthWarning(t *testing.T) {
 
 	// Save and restore HOME
 	origHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", origHome)
+	defer func() { _ = os.Setenv("HOME", origHome) }()
 
 	// Create a temp directory for test settings
 	tmpDir := t.TempDir()
-	os.Setenv("HOME", tmpDir)
+	_ = os.Setenv("HOME", tmpDir)
 	scionDir := filepath.Join(tmpDir, ".scion")
 	if err := os.MkdirAll(scionDir, 0755); err != nil {
 		t.Fatalf("failed to create test .scion dir: %v", err)
@@ -302,24 +302,24 @@ hub:
 
 			// Set environment
 			if tt.devTokenEnv != "" {
-				os.Setenv("SCION_DEV_TOKEN", tt.devTokenEnv)
-				defer os.Unsetenv("SCION_DEV_TOKEN")
+				_ = os.Setenv("SCION_DEV_TOKEN", tt.devTokenEnv)
+				defer func() { _ = os.Unsetenv("SCION_DEV_TOKEN") }()
 			} else {
-				os.Unsetenv("SCION_DEV_TOKEN")
+				_ = os.Unsetenv("SCION_DEV_TOKEN")
 			}
-			os.Unsetenv("SCION_DEV_TOKEN_FILE")
+			_ = os.Unsetenv("SCION_DEV_TOKEN_FILE")
 			// Clear v1 settings env var to prevent it from leaking dev auth
 			origServerAuthToken := os.Getenv("SCION_AUTH_TOKEN")
-			os.Unsetenv("SCION_AUTH_TOKEN")
-			defer os.Setenv("SCION_AUTH_TOKEN", origServerAuthToken)
+			_ = os.Unsetenv("SCION_AUTH_TOKEN")
+			defer func() { _ = os.Setenv("SCION_AUTH_TOKEN", origServerAuthToken) }()
 
 			// Write dev token file if specified
 			devTokenPath := filepath.Join(scionDir, "dev-token")
 			if tt.devTokenFile != "" {
-				os.WriteFile(devTokenPath, []byte(tt.devTokenFile+"\n"), 0600)
-				defer os.Remove(devTokenPath)
+				_ = os.WriteFile(devTokenPath, []byte(tt.devTokenFile+"\n"), 0600)
+				defer func() { _ = os.Remove(devTokenPath) }()
 			} else {
-				os.Remove(devTokenPath)
+				_ = os.Remove(devTokenPath)
 			}
 
 			// Capture stderr
@@ -331,11 +331,11 @@ hub:
 			printDevAuthWarningIfNeeded("")
 
 			// Restore stderr and read output
-			w.Close()
+			_ = w.Close()
 			os.Stderr = oldStderr
 
 			var buf bytes.Buffer
-			buf.ReadFrom(r)
+			_, _ = buf.ReadFrom(r)
 			output := buf.String()
 
 			if tt.expectWarning {
@@ -612,21 +612,21 @@ func TestCheckAgentContainerContext(t *testing.T) {
 				t.Setenv("SCION_HOST_UID", tt.hostUID)
 			} else {
 				t.Setenv("SCION_HOST_UID", "")
-				os.Unsetenv("SCION_HOST_UID")
+				_ = os.Unsetenv("SCION_HOST_UID")
 			}
 			if tt.hubEnv != "" {
 				t.Setenv("SCION_HUB_ENDPOINT", tt.hubEnv)
 			} else {
 				t.Setenv("SCION_HUB_ENDPOINT", "")
-				os.Unsetenv("SCION_HUB_ENDPOINT")
+				_ = os.Unsetenv("SCION_HUB_ENDPOINT")
 			}
 			t.Setenv("SCION_HUB_URL", "")
-			os.Unsetenv("SCION_HUB_URL")
+			_ = os.Unsetenv("SCION_HUB_URL")
 			if tt.networkMode != "" {
 				t.Setenv("SCION_NETWORK_MODE", tt.networkMode)
 			} else {
 				t.Setenv("SCION_NETWORK_MODE", "")
-				os.Unsetenv("SCION_NETWORK_MODE")
+				_ = os.Unsetenv("SCION_NETWORK_MODE")
 			}
 
 			// Set flag
@@ -650,9 +650,9 @@ func TestCheckAgentContainerContext(t *testing.T) {
 func TestCheckAgentContainerContextConfigSubcommand(t *testing.T) {
 	t.Setenv("SCION_HOST_UID", "1000")
 	t.Setenv("SCION_HUB_ENDPOINT", "")
-	os.Unsetenv("SCION_HUB_ENDPOINT")
+	_ = os.Unsetenv("SCION_HUB_ENDPOINT")
 	t.Setenv("SCION_HUB_URL", "")
-	os.Unsetenv("SCION_HUB_URL")
+	_ = os.Unsetenv("SCION_HUB_URL")
 
 	origHubEndpoint := hubEndpoint
 	hubEndpoint = ""

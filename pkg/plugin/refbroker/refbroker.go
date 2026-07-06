@@ -272,7 +272,7 @@ func (b *RefBroker) deliverInbound(topic string, msg *messages.StructuredMessage
 		b.log.Error("Failed to deliver inbound message", "error", err, "topic", topic)
 		return
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 
 	if resp.StatusCode >= 400 {
 		b.log.Error("Hub rejected inbound message",

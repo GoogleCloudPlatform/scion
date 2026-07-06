@@ -23,8 +23,8 @@ import (
 func TestGetGlobalDir(t *testing.T) {
 	tmpHome := t.TempDir()
 	origHome := os.Getenv("HOME")
-	os.Setenv("HOME", tmpHome)
-	defer os.Setenv("HOME", origHome)
+	_ = os.Setenv("HOME", tmpHome)
+	defer func() { _ = os.Setenv("HOME", origHome) }()
 
 	dir, err := GetGlobalDir()
 	if err != nil {
@@ -61,8 +61,8 @@ func TestGetProjectName(t *testing.T) {
 func TestGetResolvedProjectDir(t *testing.T) {
 	tmpHome := t.TempDir()
 	origHome := os.Getenv("HOME")
-	os.Setenv("HOME", tmpHome)
-	defer os.Setenv("HOME", origHome)
+	_ = os.Setenv("HOME", tmpHome)
+	defer func() { _ = os.Setenv("HOME", origHome) }()
 
 	globalDir := filepath.Join(tmpHome, GlobalDir)
 	if err := os.MkdirAll(globalDir, 0755); err != nil {
@@ -112,13 +112,13 @@ func TestGetResolvedProjectDir_WalkUp(t *testing.T) {
 	}
 
 	origWd, _ := os.Getwd()
-	defer os.Chdir(origWd)
+	defer func() { _ = os.Chdir(origWd) }()
 
 	// Set HOME to a clean temp dir so we don't fall back to real global .scion
 	tmpHome := t.TempDir()
 	origHome := os.Getenv("HOME")
-	os.Setenv("HOME", tmpHome)
-	defer os.Setenv("HOME", origHome)
+	_ = os.Setenv("HOME", tmpHome)
+	defer func() { _ = os.Setenv("HOME", origHome) }()
 
 	if err := os.Chdir(subDir); err != nil {
 		t.Fatal(err)
@@ -141,8 +141,8 @@ func TestGetResolvedProjectDir_WalkUp(t *testing.T) {
 func TestRequireProjectPath_ExplicitGlobal(t *testing.T) {
 	tmpHome := t.TempDir()
 	origHome := os.Getenv("HOME")
-	os.Setenv("HOME", tmpHome)
-	defer os.Setenv("HOME", origHome)
+	_ = os.Setenv("HOME", tmpHome)
+	defer func() { _ = os.Setenv("HOME", origHome) }()
 
 	globalDir := filepath.Join(tmpHome, GlobalDir)
 
@@ -176,13 +176,13 @@ func TestRequireProjectPath_NoProjectError(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	origWd, _ := os.Getwd()
-	defer os.Chdir(origWd)
+	defer func() { _ = os.Chdir(origWd) }()
 
 	// Set HOME to a clean temp dir
 	tmpHome := t.TempDir()
 	origHome := os.Getenv("HOME")
-	os.Setenv("HOME", tmpHome)
-	defer os.Setenv("HOME", origHome)
+	_ = os.Setenv("HOME", tmpHome)
+	defer func() { _ = os.Setenv("HOME", origHome) }()
 
 	// Ensure no hub context
 	t.Setenv("SCION_HUB_ENDPOINT", "")
@@ -212,7 +212,7 @@ func TestRequireProjectPath_HubContextFallback(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	origWd, _ := os.Getwd()
-	defer os.Chdir(origWd)
+	defer func() { _ = os.Chdir(origWd) }()
 
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
@@ -240,7 +240,7 @@ func TestFindProjectRoot_HubContextNoScion(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	origWd, _ := os.Getwd()
-	defer os.Chdir(origWd)
+	defer func() { _ = os.Chdir(origWd) }()
 
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
@@ -267,7 +267,7 @@ func TestFindProjectRoot_HubContextNoScion_Disabled(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	origWd, _ := os.Getwd()
-	defer os.Chdir(origWd)
+	defer func() { _ = os.Chdir(origWd) }()
 
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
@@ -292,7 +292,7 @@ func TestFindProjectRoot_MarkerWithHubFallback(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	origWd, _ := os.Getwd()
-	defer os.Chdir(origWd)
+	defer func() { _ = os.Chdir(origWd) }()
 
 	// Set HOME to a dir where project-configs won't exist
 	tmpHome := t.TempDir()
@@ -305,7 +305,7 @@ func TestFindProjectRoot_MarkerWithHubFallback(t *testing.T) {
 		ProjectName: "test-project",
 		ProjectSlug: "test-project",
 	}
-	WriteProjectMarker(filepath.Join(tmpDir, ".scion"), marker)
+	_ = WriteProjectMarker(filepath.Join(tmpDir, ".scion"), marker)
 
 	if err := os.Chdir(tmpDir); err != nil {
 		t.Fatal(err)
@@ -333,13 +333,13 @@ func TestRequireProjectPath_ProjectExists(t *testing.T) {
 	}
 
 	origWd, _ := os.Getwd()
-	defer os.Chdir(origWd)
+	defer func() { _ = os.Chdir(origWd) }()
 
 	// Set HOME to a clean temp dir
 	tmpHome := t.TempDir()
 	origHome := os.Getenv("HOME")
-	os.Setenv("HOME", tmpHome)
-	defer os.Setenv("HOME", origHome)
+	_ = os.Setenv("HOME", tmpHome)
+	defer func() { _ = os.Setenv("HOME", origHome) }()
 
 	if err := os.Chdir(tmpProject); err != nil {
 		t.Fatal(err)
@@ -368,8 +368,8 @@ func TestResolveProjectPath_ExplicitProjectRoot(t *testing.T) {
 
 	tmpHome := t.TempDir()
 	origHome := os.Getenv("HOME")
-	os.Setenv("HOME", tmpHome)
-	defer os.Setenv("HOME", origHome)
+	_ = os.Setenv("HOME", tmpHome)
+	defer func() { _ = os.Setenv("HOME", origHome) }()
 
 	// Create a project with .scion
 	tmpProject := t.TempDir()
@@ -400,8 +400,8 @@ func TestResolveProjectPath_ExplicitDotScionPath(t *testing.T) {
 
 	tmpHome := t.TempDir()
 	origHome := os.Getenv("HOME")
-	os.Setenv("HOME", tmpHome)
-	defer os.Setenv("HOME", origHome)
+	_ = os.Setenv("HOME", tmpHome)
+	defer func() { _ = os.Setenv("HOME", origHome) }()
 
 	tmpProject := t.TempDir()
 	projectScion := filepath.Join(tmpProject, ".scion")
@@ -427,8 +427,8 @@ func TestResolveProjectPath_ExplicitPathNoDotScion(t *testing.T) {
 
 	tmpHome := t.TempDir()
 	origHome := os.Getenv("HOME")
-	os.Setenv("HOME", tmpHome)
-	defer os.Setenv("HOME", origHome)
+	_ = os.Setenv("HOME", tmpHome)
+	defer func() { _ = os.Setenv("HOME", origHome) }()
 
 	tmpDir := t.TempDir()
 
@@ -450,8 +450,8 @@ func TestRequireProjectPath_ExplicitProjectRoot(t *testing.T) {
 
 	tmpHome := t.TempDir()
 	origHome := os.Getenv("HOME")
-	os.Setenv("HOME", tmpHome)
-	defer os.Setenv("HOME", origHome)
+	_ = os.Setenv("HOME", tmpHome)
+	defer func() { _ = os.Setenv("HOME", origHome) }()
 
 	tmpProject := t.TempDir()
 	projectScion := filepath.Join(tmpProject, ".scion")
@@ -482,8 +482,8 @@ func TestResolveProjectPath_GlobalViaWalkUp(t *testing.T) {
 	// Create a temp home with .scion
 	tmpHome := t.TempDir()
 	origHome := os.Getenv("HOME")
-	os.Setenv("HOME", tmpHome)
-	defer os.Setenv("HOME", origHome)
+	_ = os.Setenv("HOME", tmpHome)
+	defer func() { _ = os.Setenv("HOME", origHome) }()
 
 	globalDir := filepath.Join(tmpHome, GlobalDir)
 	if err := os.Mkdir(globalDir, 0755); err != nil {
@@ -497,7 +497,7 @@ func TestResolveProjectPath_GlobalViaWalkUp(t *testing.T) {
 	}
 
 	origWd, _ := os.Getwd()
-	defer os.Chdir(origWd)
+	defer func() { _ = os.Chdir(origWd) }()
 
 	if err := os.Chdir(subDir); err != nil {
 		t.Fatal(err)
@@ -526,8 +526,8 @@ func TestResolveProjectPath_ProjectNotGlobal(t *testing.T) {
 
 	tmpHome := t.TempDir()
 	origHome := os.Getenv("HOME")
-	os.Setenv("HOME", tmpHome)
-	defer os.Setenv("HOME", origHome)
+	_ = os.Setenv("HOME", tmpHome)
+	defer func() { _ = os.Setenv("HOME", origHome) }()
 
 	// Create a project with .scion outside of home
 	tmpProject := t.TempDir()
@@ -537,7 +537,7 @@ func TestResolveProjectPath_ProjectNotGlobal(t *testing.T) {
 	}
 
 	origWd, _ := os.Getwd()
-	defer os.Chdir(origWd)
+	defer func() { _ = os.Chdir(origWd) }()
 
 	if err := os.Chdir(tmpProject); err != nil {
 		t.Fatal(err)

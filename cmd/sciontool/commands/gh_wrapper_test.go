@@ -54,13 +54,13 @@ func TestRunGhWrapper_SkipsInjectionForUserToken(t *testing.T) {
 	// Save and restore env vars
 	for _, key := range []string{"SCION_GITHUB_APP_ENABLED", "SCION_USER_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"} {
 		orig := os.Getenv(key)
-		t.Cleanup(func() { os.Setenv(key, orig) })
+		t.Cleanup(func() { _ = os.Setenv(key, orig) })
 	}
 
-	os.Setenv("SCION_GITHUB_APP_ENABLED", "true")
-	os.Setenv("SCION_USER_GITHUB_TOKEN", "true")
-	os.Setenv("GITHUB_TOKEN", "ghp_user_pat")
-	os.Unsetenv("GH_TOKEN")
+	_ = os.Setenv("SCION_GITHUB_APP_ENABLED", "true")
+	_ = os.Setenv("SCION_USER_GITHUB_TOKEN", "true")
+	_ = os.Setenv("GITHUB_TOKEN", "ghp_user_pat")
+	_ = os.Unsetenv("GH_TOKEN")
 
 	// runGhWrapper would try to exec the real gh binary, so we can't call it
 	// directly. Instead, test the logic inline: when both flags are true,

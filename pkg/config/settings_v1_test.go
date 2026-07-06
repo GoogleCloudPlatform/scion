@@ -98,8 +98,8 @@ func TestLoadVersionedSettings_DefaultsOnly(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	projectDir := filepath.Join(tmpDir, "my-project", ".scion")
 	require.NoError(t, os.MkdirAll(projectDir, 0755))
@@ -120,8 +120,8 @@ func TestLoadVersionedSettings_GlobalOverride(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	projectDir := filepath.Join(tmpDir, "my-project", ".scion")
 	require.NoError(t, os.MkdirAll(projectDir, 0755))
@@ -147,8 +147,8 @@ func TestLoadVersionedSettings_GroveOverride(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	projectDir := filepath.Join(tmpDir, "my-project", ".scion")
 	require.NoError(t, os.MkdirAll(projectDir, 0755))
@@ -181,18 +181,18 @@ func TestLoadVersionedSettings_EnvOverrides(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	projectDir := filepath.Join(tmpDir, "my-project", ".scion")
 	require.NoError(t, os.MkdirAll(projectDir, 0755))
 
 	// Set environment variable overrides
-	os.Setenv("SCION_ACTIVE_PROFILE", "remote")
-	defer os.Unsetenv("SCION_ACTIVE_PROFILE")
+	_ = os.Setenv("SCION_ACTIVE_PROFILE", "remote")
+	defer func() { _ = os.Unsetenv("SCION_ACTIVE_PROFILE") }()
 
-	os.Setenv("SCION_DEFAULT_TEMPLATE", "opencode")
-	defer os.Unsetenv("SCION_DEFAULT_TEMPLATE")
+	_ = os.Setenv("SCION_DEFAULT_TEMPLATE", "opencode")
+	defer func() { _ = os.Unsetenv("SCION_DEFAULT_TEMPLATE") }()
 
 	vs, err := LoadVersionedSettings(projectDir)
 	require.NoError(t, err)
@@ -205,18 +205,18 @@ func TestLoadVersionedSettings_HubEnvVars(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	projectDir := filepath.Join(tmpDir, "my-project", ".scion")
 	require.NoError(t, os.MkdirAll(projectDir, 0755))
 
 	// Test SCION_HUB_GROVE_ID maps correctly (regression test)
-	os.Setenv("SCION_HUB_GROVE_ID", "my-grove-id")
-	defer os.Unsetenv("SCION_HUB_GROVE_ID")
+	_ = os.Setenv("SCION_HUB_GROVE_ID", "my-grove-id")
+	defer func() { _ = os.Unsetenv("SCION_HUB_GROVE_ID") }()
 
-	os.Setenv("SCION_HUB_LOCAL_ONLY", "true")
-	defer os.Unsetenv("SCION_HUB_LOCAL_ONLY")
+	_ = os.Setenv("SCION_HUB_LOCAL_ONLY", "true")
+	defer func() { _ = os.Unsetenv("SCION_HUB_LOCAL_ONLY") }()
 
 	vs, err := LoadVersionedSettings(projectDir)
 	require.NoError(t, err)
@@ -229,17 +229,17 @@ func TestLoadVersionedSettings_CLIEnvVars(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	projectDir := filepath.Join(tmpDir, "my-project", ".scion")
 	require.NoError(t, os.MkdirAll(projectDir, 0755))
 
-	os.Setenv("SCION_CLI_AUTOHELP", "false")
-	defer os.Unsetenv("SCION_CLI_AUTOHELP")
+	_ = os.Setenv("SCION_CLI_AUTOHELP", "false")
+	defer func() { _ = os.Unsetenv("SCION_CLI_AUTOHELP") }()
 
-	os.Setenv("SCION_CLI_INTERACTIVE_DISABLED", "true")
-	defer os.Unsetenv("SCION_CLI_INTERACTIVE_DISABLED")
+	_ = os.Setenv("SCION_CLI_INTERACTIVE_DISABLED", "true")
+	defer func() { _ = os.Unsetenv("SCION_CLI_INTERACTIVE_DISABLED") }()
 
 	vs, err := LoadVersionedSettings(projectDir)
 	require.NoError(t, err)
@@ -251,8 +251,8 @@ func TestLoadVersionedSettings_JSONFallback(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	projectDir := filepath.Join(tmpDir, "my-project", ".scion")
 	require.NoError(t, os.MkdirAll(projectDir, 0755))
@@ -279,8 +279,8 @@ func TestLoadVersionedSettings_NewFields(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	projectDir := filepath.Join(tmpDir, "my-project", ".scion")
 	require.NoError(t, os.MkdirAll(projectDir, 0755))
@@ -589,8 +589,8 @@ func TestLoadEffectiveSettings_VersionedFileRouting(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	projectDir := filepath.Join(tmpDir, "my-project", ".scion")
 	require.NoError(t, os.MkdirAll(projectDir, 0755))
@@ -618,8 +618,8 @@ func TestLoadEffectiveSettings_LegacyFileRouting(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	projectDir := filepath.Join(tmpDir, "my-project", ".scion")
 	require.NoError(t, os.MkdirAll(projectDir, 0755))
@@ -649,8 +649,8 @@ func TestLoadEffectiveSettings_NoUserFiles(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	projectDir := filepath.Join(tmpDir, "my-project", ".scion")
 	require.NoError(t, os.MkdirAll(projectDir, 0755))
@@ -734,8 +734,8 @@ func TestAdapterRoundTripConsistency(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	projectDir := filepath.Join(tmpDir, "my-project", ".scion")
 	require.NoError(t, os.MkdirAll(projectDir, 0755))
@@ -793,8 +793,8 @@ func TestResolveEffectiveProjectPath_GitProject(t *testing.T) {
 
 	// Simulate a git grove with grove-id → should redirect to external config dir
 	projectDir := filepath.Join(t.TempDir(), "my-repo", ".scion")
-	os.MkdirAll(projectDir, 0755)
-	WriteProjectID(projectDir, "550e8400-e29b-41d4-a716-446655440000")
+	_ = os.MkdirAll(projectDir, 0755)
+	_ = WriteProjectID(projectDir, "550e8400-e29b-41d4-a716-446655440000")
 
 	result := resolveEffectiveProjectPath(projectDir)
 
@@ -835,12 +835,12 @@ func TestDetectHierarchyFormat_Versioned(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	originalWd, _ := os.Getwd()
-	defer os.Chdir(originalWd)
-	os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(originalWd) }()
+	_ = os.Chdir(tmpDir)
 
 	globalScionDir := filepath.Join(tmpDir, ".scion")
 	require.NoError(t, os.MkdirAll(globalScionDir, 0755))
@@ -857,12 +857,12 @@ func TestDetectHierarchyFormat_Legacy(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	originalWd, _ := os.Getwd()
-	defer os.Chdir(originalWd)
-	os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(originalWd) }()
+	_ = os.Chdir(tmpDir)
 
 	globalScionDir := filepath.Join(tmpDir, ".scion")
 	require.NoError(t, os.MkdirAll(globalScionDir, 0755))
@@ -881,12 +881,12 @@ func TestDetectHierarchyFormat_NoFiles(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	originalWd, _ := os.Getwd()
-	defer os.Chdir(originalWd)
-	os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(originalWd) }()
+	_ = os.Chdir(tmpDir)
 
 	assert.False(t, detectHierarchyFormat(""))
 }
@@ -895,12 +895,12 @@ func TestDetectHierarchyFormat_GroveVersioned(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	originalWd, _ := os.Getwd()
-	defer os.Chdir(originalWd)
-	os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(originalWd) }()
+	_ = os.Chdir(tmpDir)
 
 	projectDir := filepath.Join(tmpDir, "my-project", ".scion")
 	require.NoError(t, os.MkdirAll(projectDir, 0755))
@@ -1523,8 +1523,8 @@ func TestLoadGlobalConfig_FromSettingsYAML(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	globalDir := filepath.Join(tmpDir, ".scion")
 	require.NoError(t, os.MkdirAll(globalDir, 0755))
@@ -1571,8 +1571,8 @@ func TestLoadGlobalConfig_TelemetryEnabledFromSettingsYAML(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	globalDir := filepath.Join(tmpDir, ".scion")
 	require.NoError(t, os.MkdirAll(globalDir, 0755))
@@ -1603,8 +1603,8 @@ func TestLoadGlobalConfig_TelemetryDisabledFromSettingsYAML(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	globalDir := filepath.Join(tmpDir, ".scion")
 	require.NoError(t, os.MkdirAll(globalDir, 0755))
@@ -1629,8 +1629,8 @@ func TestLoadGlobalConfig_NoTelemetrySectionLeavesNil(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	globalDir := filepath.Join(tmpDir, ".scion")
 	require.NoError(t, os.MkdirAll(globalDir, 0755))
@@ -1652,8 +1652,8 @@ func TestLoadGlobalConfig_SettingsYAMLPreferredOverServerYAML(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	globalDir := filepath.Join(tmpDir, ".scion")
 	require.NoError(t, os.MkdirAll(globalDir, 0755))
@@ -1688,8 +1688,8 @@ func TestLoadGlobalConfig_FallsBackToServerYAML(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	globalDir := filepath.Join(tmpDir, ".scion")
 	require.NoError(t, os.MkdirAll(globalDir, 0755))
@@ -2590,8 +2590,8 @@ func TestUpdateSetting_PreservesV1Format(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	projectDir := filepath.Join(tmpDir, "my-project", ".scion")
 	require.NoError(t, os.MkdirAll(projectDir, 0755))
@@ -2634,8 +2634,8 @@ func TestUpdateSetting_V1HubEnabled(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	projectDir := filepath.Join(tmpDir, "my-project", ".scion")
 	require.NoError(t, os.MkdirAll(projectDir, 0755))
@@ -2665,8 +2665,8 @@ func TestUpdateSetting_V1BrokerIdMapsToServerBroker(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	projectDir := filepath.Join(tmpDir, "my-project", ".scion")
 	require.NoError(t, os.MkdirAll(projectDir, 0755))
@@ -2705,8 +2705,8 @@ func TestUpdateSetting_V1BrokerTokenMapsToServerBroker(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	projectDir := filepath.Join(tmpDir, "my-project", ".scion")
 	require.NoError(t, os.MkdirAll(projectDir, 0755))
@@ -2734,8 +2734,8 @@ func TestUpdateSetting_V1DeprecatedKeysSkipSilently(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	projectDir := filepath.Join(tmpDir, "my-project", ".scion")
 	require.NoError(t, os.MkdirAll(projectDir, 0755))
@@ -2763,8 +2763,8 @@ func TestUpdateSetting_V1MultipleUpdatesPreserveFormat(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	projectDir := filepath.Join(tmpDir, "my-project", ".scion")
 	require.NoError(t, os.MkdirAll(projectDir, 0755))
@@ -2815,8 +2815,8 @@ func TestUpdateSetting_LegacyFormatAutoMigrates(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	projectDir := filepath.Join(tmpDir, "my-project", ".scion")
 	require.NoError(t, os.MkdirAll(projectDir, 0755))
@@ -2882,8 +2882,8 @@ func TestUpdateSetting_V1GlobalScope(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	globalDir := filepath.Join(tmpDir, ".scion")
 	require.NoError(t, os.MkdirAll(globalDir, 0755))
@@ -3069,8 +3069,8 @@ func TestLoadVersionedSettings_TelemetryHierarchyMerge(t *testing.T) {
 		if strings.HasPrefix(e, "SCION_") {
 			key := strings.SplitN(e, "=", 2)[0]
 			val := os.Getenv(key)
-			os.Unsetenv(key)
-			defer os.Setenv(key, val)
+			_ = os.Unsetenv(key)
+			defer func() { _ = os.Setenv(key, val) }()
 		}
 	}
 
@@ -3078,11 +3078,11 @@ func TestLoadVersionedSettings_TelemetryHierarchyMerge(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	originalWd, _ := os.Getwd()
-	defer os.Chdir(originalWd)
+	defer func() { _ = os.Chdir(originalWd) }()
 
 	// Create global settings with telemetry defaults
 	globalScionDir := filepath.Join(tmpDir, ".scion")
@@ -3109,7 +3109,7 @@ telemetry:
 	projectDir := filepath.Join(tmpDir, "myproject")
 	projectScionDir := filepath.Join(projectDir, ".scion")
 	require.NoError(t, os.MkdirAll(projectScionDir, 0755))
-	os.Chdir(projectDir)
+	_ = os.Chdir(projectDir)
 
 	projectSettings := `schema_version: "1"
 telemetry:
@@ -3186,20 +3186,20 @@ func TestLoadVersionedSettings_TelemetryEnvOverride(t *testing.T) {
 		if strings.HasPrefix(e, "SCION_") {
 			key := strings.SplitN(e, "=", 2)[0]
 			val := os.Getenv(key)
-			os.Unsetenv(key)
-			defer os.Setenv(key, val)
+			_ = os.Unsetenv(key)
+			defer func() { _ = os.Setenv(key, val) }()
 		}
 	}
 
 	tmpDir := t.TempDir()
 
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	originalWd, _ := os.Getwd()
-	defer os.Chdir(originalWd)
-	os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(originalWd) }()
+	_ = os.Chdir(tmpDir)
 
 	// Create global settings with telemetry
 	globalScionDir := filepath.Join(tmpDir, ".scion")
@@ -3668,8 +3668,8 @@ server:
 `
 	tmpDir := t.TempDir()
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	globalDir := filepath.Join(tmpDir, ".scion")
 	require.NoError(t, os.MkdirAll(globalDir, 0755))

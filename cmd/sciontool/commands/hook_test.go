@@ -41,8 +41,8 @@ func TestProcessHookData_Claude(t *testing.T) {
 	// Set up temp home directory for status/log files
 	tmpDir := t.TempDir()
 	oldHome := os.Getenv("HOME")
-	os.Setenv("HOME", tmpDir)
-	defer os.Setenv("HOME", oldHome)
+	_ = os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", oldHome) }()
 	scrubScionEnv(t)
 	log.SetLogPath(filepath.Join(tmpDir, "agent.log"))
 
@@ -79,8 +79,8 @@ func TestProcessHookData_Claude(t *testing.T) {
 func TestProcessHookData_Gemini(t *testing.T) {
 	tmpDir := t.TempDir()
 	oldHome := os.Getenv("HOME")
-	os.Setenv("HOME", tmpDir)
-	defer os.Setenv("HOME", oldHome)
+	_ = os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", oldHome) }()
 	scrubScionEnv(t)
 	log.SetLogPath(filepath.Join(tmpDir, "agent.log"))
 
@@ -110,8 +110,8 @@ func TestProcessHookData_Gemini(t *testing.T) {
 func TestProcessHookData_SessionEvents(t *testing.T) {
 	tmpDir := t.TempDir()
 	oldHome := os.Getenv("HOME")
-	os.Setenv("HOME", tmpDir)
-	defer os.Setenv("HOME", oldHome)
+	_ = os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", oldHome) }()
 	scrubScionEnv(t)
 	log.SetLogPath(filepath.Join(tmpDir, "agent.log"))
 
@@ -130,7 +130,7 @@ func TestProcessHookData_SessionEvents(t *testing.T) {
 	statusPath := filepath.Join(tmpDir, "agent-info.json")
 	statusData, _ := os.ReadFile(statusPath)
 	var status map[string]interface{}
-	json.Unmarshal(statusData, &status)
+	_ = json.Unmarshal(statusData, &status)
 	assert.Equal(t, "working", status["activity"]) // session-start sets working activity
 	assert.Nil(t, status["status"])                // legacy field removed
 
@@ -145,7 +145,7 @@ func TestProcessHookData_SessionEvents(t *testing.T) {
 	require.NoError(t, err)
 
 	statusData, _ = os.ReadFile(statusPath)
-	json.Unmarshal(statusData, &status)
+	_ = json.Unmarshal(statusData, &status)
 	assert.Equal(t, "stopped", status["phase"]) // session-end sets stopped phase
 	assert.Nil(t, status["status"])             // legacy field removed
 }
@@ -153,8 +153,8 @@ func TestProcessHookData_SessionEvents(t *testing.T) {
 func TestProcessHookData_CodexCompletion(t *testing.T) {
 	tmpDir := t.TempDir()
 	oldHome := os.Getenv("HOME")
-	os.Setenv("HOME", tmpDir)
-	defer os.Setenv("HOME", oldHome)
+	_ = os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", oldHome) }()
 	scrubScionEnv(t)
 	log.SetLogPath(filepath.Join(tmpDir, "agent.log"))
 
@@ -182,8 +182,8 @@ func TestProcessHookData_CodexCompletion(t *testing.T) {
 func TestProcessHookData_HarnessBundledDialectOverridesBuiltin(t *testing.T) {
 	tmpDir := t.TempDir()
 	oldHome := os.Getenv("HOME")
-	os.Setenv("HOME", tmpDir)
-	defer os.Setenv("HOME", oldHome)
+	_ = os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", oldHome) }()
 	scrubScionEnv(t)
 	log.SetLogPath(filepath.Join(tmpDir, "agent.log"))
 

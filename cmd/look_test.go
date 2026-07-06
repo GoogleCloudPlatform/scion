@@ -89,7 +89,7 @@ func TestPrintLookOutput_NonInteractive(t *testing.T) {
 
 	printLookOutput("hello world\n")
 
-	w.Close()
+	_ = w.Close()
 	os.Stdout = oldStdout
 
 	buf := make([]byte, 4096)
@@ -115,7 +115,7 @@ func TestPrintLookOutput_FallbackWhenNotTerminal(t *testing.T) {
 
 	printLookOutput("some output\n")
 
-	w.Close()
+	_ = w.Close()
 	os.Stdout = oldStdout
 
 	buf := make([]byte, 4096)

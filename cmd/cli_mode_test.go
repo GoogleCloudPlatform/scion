@@ -49,7 +49,7 @@ func TestResolveMode(t *testing.T) {
 				t.Setenv("SCION_CLI_MODE", tt.envValue)
 			} else {
 				t.Setenv("SCION_CLI_MODE", "")
-				os.Unsetenv("SCION_CLI_MODE")
+				_ = os.Unsetenv("SCION_CLI_MODE")
 			}
 			mode := resolveMode()
 			assert.Equal(t, tt.expected, mode)

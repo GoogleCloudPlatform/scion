@@ -53,7 +53,7 @@ func saveDeleteTestState() deleteTestState {
 }
 
 func (s deleteTestState) restore() {
-	os.Setenv("HOME", s.home)
+	_ = os.Setenv("HOME", s.home)
 	projectPath = s.projectPath
 	preserveBranch = s.preserveBranch
 	noHub = s.noHub
@@ -88,7 +88,7 @@ func newDeleteMockHubServer(t *testing.T, projectID string) (*httptest.Server, *
 
 		switch {
 		case r.URL.Path == "/healthz" && r.Method == http.MethodGet:
-			json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
 
 		case r.Method == http.MethodDelete:
 			// Extract agent name from path: /api/v1/projects/<projectID>/agents/<agentName>
@@ -110,7 +110,7 @@ func TestDeleteAgentLocal_NonExistentAgentReturnsError(t *testing.T) {
 	defer orig.restore()
 
 	tmpHome := t.TempDir()
-	os.Setenv("HOME", tmpHome)
+	_ = os.Setenv("HOME", tmpHome)
 	noHub = true
 
 	// Set up project directory without any agent
@@ -128,7 +128,7 @@ func TestDeleteAgentLocal_ExistingAgentSucceeds(t *testing.T) {
 	defer orig.restore()
 
 	tmpHome := t.TempDir()
-	os.Setenv("HOME", tmpHome)
+	_ = os.Setenv("HOME", tmpHome)
 	noHub = true
 	preserveBranch = true
 
@@ -156,7 +156,7 @@ func TestDeleteAgentsViaHub_CleansUpLocalFiles(t *testing.T) {
 	defer orig.restore()
 
 	tmpHome := t.TempDir()
-	os.Setenv("HOME", tmpHome)
+	_ = os.Setenv("HOME", tmpHome)
 	preserveBranch = true // skip branch operations since there's no real git repo
 
 	projectID := "grove-del-123"
@@ -202,7 +202,7 @@ func TestDeleteAgentsViaHub_MultipleAgents(t *testing.T) {
 	defer orig.restore()
 
 	tmpHome := t.TempDir()
-	os.Setenv("HOME", tmpHome)
+	_ = os.Setenv("HOME", tmpHome)
 	preserveBranch = true
 
 	projectID := "grove-multi-456"
@@ -243,7 +243,7 @@ func TestDeleteAgentsViaHub_HubFailsSkipsLocalCleanup(t *testing.T) {
 	defer orig.restore()
 
 	tmpHome := t.TempDir()
-	os.Setenv("HOME", tmpHome)
+	_ = os.Setenv("HOME", tmpHome)
 	preserveBranch = true
 
 	projectID := "grove-fail-789"
@@ -252,11 +252,11 @@ func TestDeleteAgentsViaHub_HubFailsSkipsLocalCleanup(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if r.URL.Path == "/healthz" {
-			json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
 			return
 		}
 		w.WriteHeader(http.StatusNotFound)
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"error": map[string]interface{}{
 				"code":    "not_found",
 				"message": "Resource not found",
@@ -293,7 +293,7 @@ func TestDeleteAgentsViaHub_NoLocalFiles(t *testing.T) {
 	defer orig.restore()
 
 	tmpHome := t.TempDir()
-	os.Setenv("HOME", tmpHome)
+	_ = os.Setenv("HOME", tmpHome)
 	preserveBranch = true
 
 	projectID := "grove-nolocal-101"
@@ -328,7 +328,7 @@ func TestDeleteAgentsViaHub_LocalCleanupFailureCreatesStaleLocalNotToRegister(t 
 	defer orig.restore()
 
 	tmpHome := t.TempDir()
-	os.Setenv("HOME", tmpHome)
+	_ = os.Setenv("HOME", tmpHome)
 	preserveBranch = true
 
 	projectID := "grove-stale-202"
@@ -336,11 +336,11 @@ func TestDeleteAgentsViaHub_LocalCleanupFailureCreatesStaleLocalNotToRegister(t 
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case r.URL.Path == "/healthz" && r.Method == http.MethodGet:
-			json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
 		case r.Method == http.MethodDelete && r.URL.Path == "/api/v1/projects/"+projectID+"/agents/stale-agent":
 			w.WriteHeader(http.StatusNoContent)
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects/"+projectID+"/agents":
-			json.NewEncoder(w).Encode(map[string]interface{}{
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"agents":     []interface{}{},
 				"serverTime": time.Now().UTC().Format(time.RFC3339Nano),
 				"totalCount": 0,
@@ -396,8 +396,8 @@ func TestDeleteStopped_RequiresGroveContext(t *testing.T) {
 	// Unset Hub context to avoid synthetic project root detection
 	for _, e := range []string{"SCION_HUB_ENDPOINT", "SCION_HUB_URL", "SCION_GROVE_ID", "SCION_PROJECT_ID"} {
 		if val, ok := os.LookupEnv(e); ok {
-			os.Unsetenv(e)
-			defer os.Setenv(e, val)
+			_ = os.Unsetenv(e)
+			defer func() { _ = os.Setenv(e, val) }()
 		}
 	}
 
@@ -405,13 +405,13 @@ func TestDeleteStopped_RequiresGroveContext(t *testing.T) {
 	defer orig.restore()
 
 	tmpHome := t.TempDir()
-	os.Setenv("HOME", tmpHome)
+	_ = os.Setenv("HOME", tmpHome)
 
 	// Set CWD to a directory without .scion so project resolution fails
 	tmpDir := t.TempDir()
 	oldWd, _ := os.Getwd()
-	defer os.Chdir(oldWd)
-	os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
+	_ = os.Chdir(tmpDir)
 
 	noHub = true
 	projectPath = ""
@@ -428,7 +428,7 @@ func TestDeleteStopped_AcceptsGlobalFlag(t *testing.T) {
 	defer orig.restore()
 
 	tmpHome := t.TempDir()
-	os.Setenv("HOME", tmpHome)
+	_ = os.Setenv("HOME", tmpHome)
 
 	// Create global .scion directory
 	globalDir := filepath.Join(tmpHome, ".scion")
@@ -437,8 +437,8 @@ func TestDeleteStopped_AcceptsGlobalFlag(t *testing.T) {
 	// Set CWD to a directory without .scion
 	tmpDir := t.TempDir()
 	oldWd, _ := os.Getwd()
-	defer os.Chdir(oldWd)
-	os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
+	_ = os.Chdir(tmpDir)
 
 	// Verify that RequireProjectPath("global") resolves correctly even outside a project.
 	// The full command flow requires Docker for runtime.List, so we test the project

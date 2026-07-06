@@ -197,10 +197,10 @@ func TestInitCommand_Integration(t *testing.T) {
 func TestGitCloneWorkspace_NoCloneURL(t *testing.T) {
 	// Ensure SCION_GIT_CLONE_URL is not set
 	orig := os.Getenv("SCION_GIT_CLONE_URL")
-	os.Unsetenv("SCION_GIT_CLONE_URL")
+	_ = os.Unsetenv("SCION_GIT_CLONE_URL")
 	defer func() {
 		if orig != "" {
-			os.Setenv("SCION_GIT_CLONE_URL", orig)
+			_ = os.Setenv("SCION_GIT_CLONE_URL", orig)
 		}
 	}()
 
@@ -240,7 +240,7 @@ func TestIsWorkspaceEmpty(t *testing.T) {
 
 	t.Run("directory with files", func(t *testing.T) {
 		tmpDir := t.TempDir()
-		os.WriteFile(filepath.Join(tmpDir, "file.txt"), []byte("content"), 0644)
+		_ = os.WriteFile(filepath.Join(tmpDir, "file.txt"), []byte("content"), 0644)
 		if isWorkspaceEmpty(tmpDir) {
 			t.Error("expected false for directory with files")
 		}
@@ -248,7 +248,7 @@ func TestIsWorkspaceEmpty(t *testing.T) {
 
 	t.Run("directory with only .scion marker", func(t *testing.T) {
 		tmpDir := t.TempDir()
-		os.MkdirAll(filepath.Join(tmpDir, ".scion"), 0755)
+		_ = os.MkdirAll(filepath.Join(tmpDir, ".scion"), 0755)
 		if !isWorkspaceEmpty(tmpDir) {
 			t.Error("expected true when workspace contains only .scion marker")
 		}
@@ -256,7 +256,7 @@ func TestIsWorkspaceEmpty(t *testing.T) {
 
 	t.Run("directory with only .scion-volumes", func(t *testing.T) {
 		tmpDir := t.TempDir()
-		os.MkdirAll(filepath.Join(tmpDir, ".scion-volumes"), 0755)
+		_ = os.MkdirAll(filepath.Join(tmpDir, ".scion-volumes"), 0755)
 		if !isWorkspaceEmpty(tmpDir) {
 			t.Error("expected true when workspace contains only .scion-volumes")
 		}
@@ -264,8 +264,8 @@ func TestIsWorkspaceEmpty(t *testing.T) {
 
 	t.Run("directory with .scion and .scion-volumes", func(t *testing.T) {
 		tmpDir := t.TempDir()
-		os.MkdirAll(filepath.Join(tmpDir, ".scion"), 0755)
-		os.MkdirAll(filepath.Join(tmpDir, ".scion-volumes"), 0755)
+		_ = os.MkdirAll(filepath.Join(tmpDir, ".scion"), 0755)
+		_ = os.MkdirAll(filepath.Join(tmpDir, ".scion-volumes"), 0755)
 		if !isWorkspaceEmpty(tmpDir) {
 			t.Error("expected true when workspace contains only .scion and .scion-volumes")
 		}
@@ -273,8 +273,8 @@ func TestIsWorkspaceEmpty(t *testing.T) {
 
 	t.Run("directory with .scion marker and real content", func(t *testing.T) {
 		tmpDir := t.TempDir()
-		os.MkdirAll(filepath.Join(tmpDir, ".scion"), 0755)
-		os.WriteFile(filepath.Join(tmpDir, "README.md"), []byte("content"), 0644)
+		_ = os.MkdirAll(filepath.Join(tmpDir, ".scion"), 0755)
+		_ = os.WriteFile(filepath.Join(tmpDir, "README.md"), []byte("content"), 0644)
 		if isWorkspaceEmpty(tmpDir) {
 			t.Error("expected false when workspace has .scion and real files")
 		}
@@ -532,8 +532,8 @@ func TestUseDirectPasswdEdit(t *testing.T) {
 			// Clear both env vars, then set what the test needs
 			t.Setenv("container", "")
 			t.Setenv("SCION_ALT_USERMOD", "")
-			os.Unsetenv("container")
-			os.Unsetenv("SCION_ALT_USERMOD")
+			_ = os.Unsetenv("container")
+			_ = os.Unsetenv("SCION_ALT_USERMOD")
 			for k, v := range tt.envVars {
 				t.Setenv(k, v)
 			}

@@ -40,7 +40,7 @@ func writeLegacyDB(t *testing.T, path string) legacyFixture {
 	t.Helper()
 	db, err := sql.Open("sqlite", "file:"+path)
 	require.NoError(t, err)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	ddl := []string{
 		`CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TIMESTAMP)`,
@@ -125,7 +125,7 @@ func openMigrated(t *testing.T, path string) *ent.Client {
 	t.Helper()
 	client, err := OpenSQLite("file:"+path+"?cache=shared", PoolConfig{MaxOpenConns: 1})
 	require.NoError(t, err)
-	t.Cleanup(func() { client.Close() })
+	t.Cleanup(func() { _ = client.Close() })
 	return client
 }
 

@@ -248,7 +248,7 @@ func outputDoctorJSON(report *scionruntime.DiagnosticReport) error {
 	if err != nil {
 		return err
 	}
-	fmt.Fprintln(os.Stdout, string(data))
+	_, _ = fmt.Fprintln(os.Stdout, string(data))
 	return nil
 }
 

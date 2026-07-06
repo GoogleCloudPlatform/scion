@@ -1548,7 +1548,7 @@ func TestCreateAgentHubManagedProjectSettingsEndpoint(t *testing.T) {
 	if err := os.MkdirAll(scionDir, 0755); err != nil {
 		t.Fatalf("failed to create .scion dir: %v", err)
 	}
-	t.Cleanup(func() { os.RemoveAll(projectPath) })
+	t.Cleanup(func() { _ = os.RemoveAll(projectPath) })
 
 	// Place settings.yaml in the .scion subdirectory (hub-managed project layout)
 	settingsContent := "hub:\n  endpoint: https://hub.external.example.com\n"
@@ -1792,7 +1792,7 @@ hub:
 		// Create a project dir with kubernetes settings so resolveManagerForOpts
 		// matches the "kubernetes" runtime without trying to create a real manager.
 		projectDir := filepath.Join(t.TempDir(), ".scion")
-		os.MkdirAll(projectDir, 0755)
+		_ = os.MkdirAll(projectDir, 0755)
 		k8sSettings := `schema_version: "1"
 profiles:
   local:
@@ -1801,7 +1801,7 @@ runtimes:
   kubernetes:
     type: kubernetes
 `
-		os.WriteFile(filepath.Join(projectDir, "settings.yaml"), []byte(k8sSettings), 0644)
+		_ = os.WriteFile(filepath.Join(projectDir, "settings.yaml"), []byte(k8sSettings), 0644)
 
 		body := fmt.Sprintf(`{
 			"name": "test-agent",

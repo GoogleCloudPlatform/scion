@@ -232,11 +232,11 @@ func TestPrintWorkstationQuickstart(t *testing.T) {
 
 	printWorkstationQuickstart(false, dir, "127.0.0.1", 8080, true, true)
 
-	w.Close()
+	_ = w.Close()
 	os.Stdout = old
 
 	var buf bytes.Buffer
-	io.Copy(&buf, r)
+	_, _ = io.Copy(&buf, r)
 	output := buf.String()
 
 	assert.Contains(t, output, "http://127.0.0.1:8080", "should show web UI URL")
@@ -252,11 +252,11 @@ func TestPrintWorkstationQuickstart_NoWeb(t *testing.T) {
 
 	printWorkstationQuickstart(false, dir, "127.0.0.1", 8080, false, false)
 
-	w.Close()
+	_ = w.Close()
 	os.Stdout = old
 
 	var buf bytes.Buffer
-	io.Copy(&buf, r)
+	_, _ = io.Copy(&buf, r)
 	output := buf.String()
 
 	assert.NotContains(t, output, "Web UI", "should not show web UI when disabled")
@@ -272,11 +272,11 @@ func TestPrintWorkstationQuickstart_WildcardHost(t *testing.T) {
 
 	printWorkstationQuickstart(false, dir, "0.0.0.0", 9090, true, false)
 
-	w.Close()
+	_ = w.Close()
 	os.Stdout = old
 
 	var buf bytes.Buffer
-	io.Copy(&buf, r)
+	_, _ = io.Copy(&buf, r)
 	output := buf.String()
 
 	assert.Contains(t, output, "http://127.0.0.1:9090", "should replace 0.0.0.0 with 127.0.0.1")
@@ -295,11 +295,11 @@ func TestGenerateSystemdUnit(t *testing.T) {
 	err := generateSystemdUnit("/usr/local/bin/scion", false)
 	require.NoError(t, err)
 
-	w.Close()
+	_ = w.Close()
 	os.Stdout = old
 
 	var buf bytes.Buffer
-	io.Copy(&buf, r)
+	_, _ = io.Copy(&buf, r)
 	output := buf.String()
 
 	assert.Contains(t, output, "[Unit]")
@@ -321,11 +321,11 @@ func TestGenerateSystemdUnit_Hosted(t *testing.T) {
 	err := generateSystemdUnit("/usr/local/bin/scion", true)
 	require.NoError(t, err)
 
-	w.Close()
+	_ = w.Close()
 	os.Stdout = old
 
 	var buf bytes.Buffer
-	io.Copy(&buf, r)
+	_, _ = io.Copy(&buf, r)
 	output := buf.String()
 
 	assert.Contains(t, output, "Scion Server (Hosted)")
@@ -344,11 +344,11 @@ func TestGenerateLaunchdPlist(t *testing.T) {
 	err := generateLaunchdPlist("/usr/local/bin/scion", false)
 	require.NoError(t, err)
 
-	w.Close()
+	_ = w.Close()
 	os.Stdout = old
 
 	var buf bytes.Buffer
-	io.Copy(&buf, r)
+	_, _ = io.Copy(&buf, r)
 	output := buf.String()
 
 	assert.Contains(t, output, "io.scion.server")
@@ -370,17 +370,17 @@ func TestRunServerInstall(t *testing.T) {
 
 	err := runServerInstall(nil, nil)
 
-	w.Close()
-	wErr.Close()
+	_ = w.Close()
+	_ = wErr.Close()
 	os.Stdout = old
 	os.Stderr = oldErr
 
 	var buf bytes.Buffer
-	io.Copy(&buf, r)
+	_, _ = io.Copy(&buf, r)
 	output := buf.String()
 
 	var errBuf bytes.Buffer
-	io.Copy(&errBuf, rErr)
+	_, _ = io.Copy(&errBuf, rErr)
 	stderrOutput := errBuf.String()
 
 	switch goruntime.GOOS {

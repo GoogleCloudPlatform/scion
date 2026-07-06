@@ -238,11 +238,11 @@ func (h *StatusHandler) writeAgentInfoLocked(info map[string]interface{}) error 
 	tmpPath := tmpFile.Name()
 
 	if _, err := tmpFile.Write(data); err != nil {
-		tmpFile.Close()
-		os.Remove(tmpPath)
+		_ = tmpFile.Close()
+		_ = os.Remove(tmpPath)
 		return fmt.Errorf("writing temp file: %w", err)
 	}
-	tmpFile.Close()
+	_ = tmpFile.Close()
 
 	// CreateTemp uses mode 0600. Widen to 0644 so the broker process
 	// (which may run as a different uid than the container init) can
@@ -250,7 +250,7 @@ func (h *StatusHandler) writeAgentInfoLocked(info map[string]interface{}) error 
 	os.Chmod(tmpPath, 0644) //nolint:errcheck
 
 	if err := os.Rename(tmpPath, h.StatusPath); err != nil {
-		os.Remove(tmpPath)
+		_ = os.Remove(tmpPath)
 		return fmt.Errorf("atomic rename: %w", err)
 	}
 

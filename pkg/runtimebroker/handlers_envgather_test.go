@@ -1680,7 +1680,7 @@ profiles:
 	// Should NOT return 202 — all requirements are satisfied
 	if w.Code == http.StatusAccepted {
 		var envReqs EnvRequirementsResponse
-		json.Unmarshal(w.Body.Bytes(), &envReqs)
+		_ = json.Unmarshal(w.Body.Bytes(), &envReqs)
 		// Check that gcloud-adc is not in needs
 		for _, k := range envReqs.Needs {
 			if k == "gcloud-adc" {
@@ -1790,7 +1790,7 @@ profiles:
 	// Should NOT return 202 — GOOGLE_APPLICATION_CREDENTIALS satisfies the ADC requirement
 	if w.Code == http.StatusAccepted {
 		var envReqs EnvRequirementsResponse
-		json.Unmarshal(w.Body.Bytes(), &envReqs)
+		_ = json.Unmarshal(w.Body.Bytes(), &envReqs)
 		for _, k := range envReqs.Needs {
 			if k == "gcloud-adc" {
 				t.Fatalf("gcloud-adc should not be in needs when GOOGLE_APPLICATION_CREDENTIALS is provided, got needs=%v", envReqs.Needs)
@@ -2047,7 +2047,7 @@ profiles:
 	// Override HOME so GetGlobalDir() finds our fake home
 	origHome := os.Getenv("HOME")
 	t.Setenv("HOME", fakeHome)
-	defer os.Setenv("HOME", origHome)
+	defer func() { _ = os.Setenv("HOME", origHome) }()
 
 	cfg := DefaultServerConfig()
 	cfg.BrokerID = "test-broker-id"

@@ -235,7 +235,7 @@ func runAllowListImport(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("failed to open file: %w", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	emails, err := parseImportCSV(f)
 	if err != nil {

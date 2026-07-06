@@ -26,24 +26,24 @@ func TestIsHeadlessEnvironment(t *testing.T) {
 	origDisplay := os.Getenv("DISPLAY")
 	origWayland := os.Getenv("WAYLAND_DISPLAY")
 	t.Cleanup(func() {
-		os.Setenv("SCION_HEADLESS", origHeadless)
-		os.Setenv("DISPLAY", origDisplay)
-		os.Setenv("WAYLAND_DISPLAY", origWayland)
+		_ = os.Setenv("SCION_HEADLESS", origHeadless)
+		_ = os.Setenv("DISPLAY", origDisplay)
+		_ = os.Setenv("WAYLAND_DISPLAY", origWayland)
 	})
 
 	t.Run("SCION_HEADLESS=1 forces headless", func(t *testing.T) {
-		os.Setenv("SCION_HEADLESS", "1")
-		os.Setenv("DISPLAY", ":0")
-		os.Setenv("WAYLAND_DISPLAY", "wayland-0")
+		t.Setenv("SCION_HEADLESS", "1")
+		t.Setenv("DISPLAY", ":0")
+		t.Setenv("WAYLAND_DISPLAY", "wayland-0")
 		if !IsHeadlessEnvironment() {
 			t.Error("expected headless when SCION_HEADLESS=1")
 		}
 	})
 
 	t.Run("SCION_HEADLESS=0 does not force headless", func(t *testing.T) {
-		os.Setenv("SCION_HEADLESS", "0")
-		os.Setenv("DISPLAY", ":0")
-		os.Setenv("WAYLAND_DISPLAY", "")
+		t.Setenv("SCION_HEADLESS", "0")
+		t.Setenv("DISPLAY", ":0")
+		t.Setenv("WAYLAND_DISPLAY", "")
 		if runtime.GOOS == "darwin" {
 			if IsHeadlessEnvironment() {
 				t.Error("expected non-headless on macOS")
@@ -57,9 +57,9 @@ func TestIsHeadlessEnvironment(t *testing.T) {
 	})
 
 	t.Run("no display vars on linux means headless", func(t *testing.T) {
-		os.Setenv("SCION_HEADLESS", "")
-		os.Setenv("DISPLAY", "")
-		os.Setenv("WAYLAND_DISPLAY", "")
+		t.Setenv("SCION_HEADLESS", "")
+		t.Setenv("DISPLAY", "")
+		t.Setenv("WAYLAND_DISPLAY", "")
 		if runtime.GOOS == "darwin" {
 			if IsHeadlessEnvironment() {
 				t.Error("macOS should never return headless (unless forced)")
@@ -72,18 +72,18 @@ func TestIsHeadlessEnvironment(t *testing.T) {
 	})
 
 	t.Run("DISPLAY set means not headless", func(t *testing.T) {
-		os.Setenv("SCION_HEADLESS", "")
-		os.Setenv("DISPLAY", ":0")
-		os.Setenv("WAYLAND_DISPLAY", "")
+		_ = os.Setenv("SCION_HEADLESS", "")
+		_ = os.Setenv("DISPLAY", ":0")
+		_ = os.Setenv("WAYLAND_DISPLAY", "")
 		if IsHeadlessEnvironment() {
 			t.Error("expected non-headless when DISPLAY is set")
 		}
 	})
 
 	t.Run("WAYLAND_DISPLAY set means not headless", func(t *testing.T) {
-		os.Setenv("SCION_HEADLESS", "")
-		os.Setenv("DISPLAY", "")
-		os.Setenv("WAYLAND_DISPLAY", "wayland-0")
+		_ = os.Setenv("SCION_HEADLESS", "")
+		_ = os.Setenv("DISPLAY", "")
+		_ = os.Setenv("WAYLAND_DISPLAY", "wayland-0")
 		if IsHeadlessEnvironment() {
 			t.Error("expected non-headless when WAYLAND_DISPLAY is set")
 		}

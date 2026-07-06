@@ -47,7 +47,7 @@ func TestGCPSkillResolver_HappyPath(t *testing.T) {
 		})
 	})
 	mux.HandleFunc("/files/SKILL.md", func(w http.ResponseWriter, _ *http.Request) {
-		w.Write([]byte(skillContent))
+		_, _ = w.Write([]byte(skillContent))
 	})
 
 	server := httptest.NewServer(mux)
@@ -70,7 +70,7 @@ func TestGCPSkillResolver_HappyPath(t *testing.T) {
 		})
 	})
 	fixupMux.HandleFunc("/files/SKILL.md", func(w http.ResponseWriter, _ *http.Request) {
-		w.Write([]byte(skillContent))
+		_, _ = w.Write([]byte(skillContent))
 	})
 	_ = origHandler
 	server.Config.Handler = fixupMux
@@ -146,10 +146,10 @@ func TestGCPSkillResolver_MultipleFiles(t *testing.T) {
 		})
 	})
 	mux.HandleFunc("/files/SKILL.md", func(w http.ResponseWriter, _ *http.Request) {
-		w.Write([]byte(skillContent))
+		_, _ = w.Write([]byte(skillContent))
 	})
 	mux.HandleFunc("/files/config.json", func(w http.ResponseWriter, _ *http.Request) {
-		w.Write([]byte(configContent))
+		_, _ = w.Write([]byte(configContent))
 	})
 
 	server = httptest.NewServer(mux)
@@ -404,7 +404,7 @@ func TestGCPSkillResolver_AsAlias(t *testing.T) {
 		})
 	})
 	mux.HandleFunc("/files/SKILL.md", func(w http.ResponseWriter, _ *http.Request) {
-		w.Write([]byte("# content"))
+		_, _ = w.Write([]byte("# content"))
 	})
 
 	server = httptest.NewServer(mux)

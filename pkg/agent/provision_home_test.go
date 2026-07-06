@@ -37,26 +37,26 @@ func TestProvisionAgentHomeCopy(t *testing.T) {
 
 	// Move to tmpDir to avoid being inside the project's git repo
 	oldWd, _ := os.Getwd()
-	os.Chdir(tmpDir)
-	defer os.Chdir(oldWd)
+	_ = os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
 
 	// Initialize dummy git repo
 	runCmd(t, tmpDir, "git", "init")
 	runCmd(t, tmpDir, "git", "config", "user.email", "test@example.com")
 	runCmd(t, tmpDir, "git", "config", "user.name", "Test User")
-	os.WriteFile(filepath.Join(tmpDir, "initial"), []byte("initial"), 0644)
+	_ = os.WriteFile(filepath.Join(tmpDir, "initial"), []byte("initial"), 0644)
 	runCmd(t, tmpDir, "git", "add", "initial")
 	runCmd(t, tmpDir, "git", "commit", "-m", "initial commit")
 
 	// Mock HOME for global settings and templates
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	projectScionDir := filepath.Join(tmpDir, ".scion")
 
 	// Add .scion/agents/ to gitignore to satisfy ProvisionAgent's security check
-	os.WriteFile(filepath.Join(tmpDir, ".gitignore"), []byte(".scion/agents/\n"), 0644)
+	_ = os.WriteFile(filepath.Join(tmpDir, ".gitignore"), []byte(".scion/agents/\n"), 0644)
 	runCmd(t, tmpDir, "git", "add", ".gitignore")
 	runCmd(t, tmpDir, "git", "commit", "-m", "add gitignore")
 
@@ -64,18 +64,18 @@ func TestProvisionAgentHomeCopy(t *testing.T) {
 	seedTestHarnessConfig(t, projectScionDir, "test", "test")
 
 	// Create agnostic template with home directory
-	os.MkdirAll(filepath.Join(projectScionDir, "templates", "test-tpl", "home"), 0755)
+	_ = os.MkdirAll(filepath.Join(projectScionDir, "templates", "test-tpl", "home"), 0755)
 
 	tplDir := filepath.Join(projectScionDir, "templates", "test-tpl")
 
 	// Create file in template root (should NOT be copied)
-	os.WriteFile(filepath.Join(tplDir, "root-file.txt"), []byte("root"), 0644)
+	_ = os.WriteFile(filepath.Join(tplDir, "root-file.txt"), []byte("root"), 0644)
 
 	// Create file in template home (SHOULD be copied as overlay)
-	os.WriteFile(filepath.Join(tplDir, "home", "home-file.txt"), []byte("home"), 0644)
+	_ = os.WriteFile(filepath.Join(tplDir, "home", "home-file.txt"), []byte("home"), 0644)
 
 	// Create agnostic scion-agent.json in template root
-	os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config": "test"}`), 0644)
+	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config": "test"}`), 0644)
 
 	// Provision agent
 	agentName := "test-agent"
@@ -105,33 +105,33 @@ func TestProvisionAgentLegacyTemplateRejected(t *testing.T) {
 
 	// Move to tmpDir to avoid being inside the project's git repo
 	oldWd, _ := os.Getwd()
-	os.Chdir(tmpDir)
-	defer os.Chdir(oldWd)
+	_ = os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
 
 	// Initialize dummy git repo
 	runCmd(t, tmpDir, "git", "init")
 	runCmd(t, tmpDir, "git", "config", "user.email", "test@example.com")
 	runCmd(t, tmpDir, "git", "config", "user.name", "Test User")
-	os.WriteFile(filepath.Join(tmpDir, "initial"), []byte("initial"), 0644)
+	_ = os.WriteFile(filepath.Join(tmpDir, "initial"), []byte("initial"), 0644)
 	runCmd(t, tmpDir, "git", "add", "initial")
 	runCmd(t, tmpDir, "git", "commit", "-m", "initial commit")
 
 	// Mock HOME
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	projectScionDir := filepath.Join(tmpDir, ".scion")
 
 	// Add .scion/agents/ to gitignore
-	os.WriteFile(filepath.Join(tmpDir, ".gitignore"), []byte(".scion/agents/\n"), 0644)
+	_ = os.WriteFile(filepath.Join(tmpDir, ".gitignore"), []byte(".scion/agents/\n"), 0644)
 	runCmd(t, tmpDir, "git", "add", ".gitignore")
 	runCmd(t, tmpDir, "git", "commit", "-m", "add gitignore")
 
 	// Create a legacy template WITH a harness field (should be rejected)
 	tplDir := filepath.Join(projectScionDir, "templates", "legacy-tpl")
-	os.MkdirAll(tplDir, 0755)
-	os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"harness": "test"}`), 0644)
+	_ = os.MkdirAll(tplDir, 0755)
+	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"harness": "test"}`), 0644)
 
 	// Provision agent - should fail with validation error
 	agentName := "legacy-agent"

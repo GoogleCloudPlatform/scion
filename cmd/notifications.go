@@ -176,7 +176,7 @@ func init() {
 
 	// Update flags
 	notificationsUpdateCmd.Flags().StringVar(&updateTriggers, "triggers", "", "Comma-separated trigger activities (required)")
-	notificationsUpdateCmd.MarkFlagRequired("triggers")
+	_ = notificationsUpdateCmd.MarkFlagRequired("triggers")
 
 	// Subscriptions list flags
 	notificationsSubscriptionsCmd.Flags().StringVar(&subscriptionsProject, "project", "", "Filter by project")

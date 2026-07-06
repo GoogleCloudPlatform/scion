@@ -78,7 +78,7 @@ func newMockHubServerForLocalStorageHarnessConfig(t *testing.T, uploadedPaths *[
 					require.NoError(t, file.Close())
 				}
 			}
-			json.NewEncoder(w).Encode(map[string]interface{}{
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"files": []map[string]interface{}{
 					{
 						"path":    "config.yaml",
@@ -91,7 +91,7 @@ func newMockHubServerForLocalStorageHarnessConfig(t *testing.T, uploadedPaths *[
 			})
 
 		case r.URL.Path == "/api/v1/harness-configs/local-storage-hc-id/finalize" && r.Method == http.MethodPost:
-			json.NewEncoder(w).Encode(map[string]interface{}{
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"id":          "local-storage-hc-id",
 				"name":        "codex",
 				"harness":     "codex",
@@ -103,7 +103,7 @@ func newMockHubServerForLocalStorageHarnessConfig(t *testing.T, uploadedPaths *[
 			// Use the real SHA-256 of "harness: codex\n" so Phase 3 hash
 			// validation passes. Hard-coded value computed via:
 			//   echo -n "harness: codex\n" | sha256sum
-			json.NewEncoder(w).Encode(map[string]interface{}{
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"files": []map[string]interface{}{
 					{
 						"path": "config.yaml",
@@ -114,7 +114,7 @@ func newMockHubServerForLocalStorageHarnessConfig(t *testing.T, uploadedPaths *[
 			})
 
 		case r.URL.Path == "/api/v1/harness-configs/local-storage-hc-id/files/config.yaml" && r.Method == http.MethodGet:
-			json.NewEncoder(w).Encode(map[string]interface{}{
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"path":     "config.yaml",
 				"content":  "harness: codex\n",
 				"size":     16,

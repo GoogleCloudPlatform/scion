@@ -229,7 +229,7 @@ func TestManager_MaxRestarts(t *testing.T) {
 	cancel()
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer shutdownCancel()
-	mgr.Shutdown(shutdownCtx)
+	_ = mgr.Shutdown(shutdownCtx)
 }
 
 func TestManager_LogFiles(t *testing.T) {
@@ -251,7 +251,7 @@ func TestManager_LogFiles(t *testing.T) {
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	mgr.Shutdown(shutdownCtx)
+	_ = mgr.Shutdown(shutdownCtx)
 
 	home := os.Getenv("HOME")
 	logDir := filepath.Join(home, ".scion", "services", "logs")
@@ -309,7 +309,7 @@ func TestManager_ServiceEnv(t *testing.T) {
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	mgr.Shutdown(shutdownCtx)
+	_ = mgr.Shutdown(shutdownCtx)
 
 	home := os.Getenv("HOME")
 	logDir := filepath.Join(home, ".scion", "services", "logs")
@@ -371,7 +371,7 @@ func TestManager_StartOrder(t *testing.T) {
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	mgr.Shutdown(shutdownCtx)
+	_ = mgr.Shutdown(shutdownCtx)
 }
 
 func TestMergeEnv(t *testing.T) {

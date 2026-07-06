@@ -184,7 +184,7 @@ func runBrowserAuthFlow(cmd *cobra.Command, client hubclient.Client, requestedPr
 	if err != nil {
 		return nil, fmt.Errorf("failed to start auth server: %w", err)
 	}
-	defer authServer.Shutdown()
+	defer func() { _ = authServer.Shutdown() }()
 
 	// Get OAuth URL from Hub
 	authResp, err := client.Auth().GetAuthURL(cmd.Context(), callbackURL, state, provider)

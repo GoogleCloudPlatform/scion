@@ -48,11 +48,11 @@ func TestOutputJSON(t *testing.T) {
 	err := outputJSON(data)
 	require.NoError(t, err)
 
-	w.Close()
+	_ = w.Close()
 	os.Stdout = oldStdout
 
 	var buf bytes.Buffer
-	buf.ReadFrom(r)
+	_, _ = buf.ReadFrom(r)
 	output := buf.String()
 
 	// Verify it's valid JSON
@@ -83,11 +83,11 @@ func TestOutputActionResult(t *testing.T) {
 		err := outputActionResult(result)
 		require.NoError(t, err)
 
-		w.Close()
+		_ = w.Close()
 		os.Stdout = oldStdout
 
 		var buf bytes.Buffer
-		buf.ReadFrom(r)
+		_, _ = buf.ReadFrom(r)
 		output := buf.String()
 
 		var parsed ActionResult
@@ -121,14 +121,14 @@ func TestOutputActionResult(t *testing.T) {
 		err := outputActionResult(result)
 		require.NoError(t, err)
 
-		stdoutW.Close()
-		stderrW.Close()
+		_ = stdoutW.Close()
+		_ = stderrW.Close()
 		os.Stdout = oldStdout
 		os.Stderr = oldStderr
 
 		var stdoutBuf, stderrBuf bytes.Buffer
-		stdoutBuf.ReadFrom(stdoutR)
-		stderrBuf.ReadFrom(stderrR)
+		_, _ = stdoutBuf.ReadFrom(stdoutR)
+		_, _ = stderrBuf.ReadFrom(stderrR)
 
 		assert.Contains(t, stdoutBuf.String(), "test message")
 		assert.NotContains(t, stdoutBuf.String(), "Warning:")
@@ -154,14 +154,14 @@ func TestStatusfWritesToStderr(t *testing.T) {
 		statusf("hello %s\n", "world")
 		statusln("goodbye")
 
-		stdoutW.Close()
-		stderrW.Close()
+		_ = stdoutW.Close()
+		_ = stderrW.Close()
 		os.Stdout = oldStdout
 		os.Stderr = oldStderr
 
 		var stdoutBuf, stderrBuf bytes.Buffer
-		stdoutBuf.ReadFrom(stdoutR)
-		stderrBuf.ReadFrom(stderrR)
+		_, _ = stdoutBuf.ReadFrom(stdoutR)
+		_, _ = stderrBuf.ReadFrom(stderrR)
 
 		assert.Empty(t, stdoutBuf.String(), "statusf/statusln should not write to stdout")
 		assert.Contains(t, stderrBuf.String(), "hello world")
@@ -182,14 +182,14 @@ func TestStatusfWritesToStderr(t *testing.T) {
 		statusf("should not appear\n")
 		statusln("also hidden")
 
-		stdoutW.Close()
-		stderrW.Close()
+		_ = stdoutW.Close()
+		_ = stderrW.Close()
 		os.Stdout = oldStdout
 		os.Stderr = oldStderr
 
 		var stdoutBuf, stderrBuf bytes.Buffer
-		stdoutBuf.ReadFrom(stdoutR)
-		stderrBuf.ReadFrom(stderrR)
+		_, _ = stdoutBuf.ReadFrom(stdoutR)
+		_, _ = stderrBuf.ReadFrom(stderrR)
 
 		assert.Empty(t, stdoutBuf.String(), "statusf/statusln should not write to stdout in JSON mode")
 		assert.Empty(t, stderrBuf.String(), "statusf/statusln should not write to stderr in JSON mode")
@@ -213,14 +213,14 @@ func TestPrintUsingHubWritesToStderr(t *testing.T) {
 
 		PrintUsingHub("http://localhost:8080")
 
-		stdoutW.Close()
-		stderrW.Close()
+		_ = stdoutW.Close()
+		_ = stderrW.Close()
 		os.Stdout = oldStdout
 		os.Stderr = oldStderr
 
 		var stdoutBuf, stderrBuf bytes.Buffer
-		stdoutBuf.ReadFrom(stdoutR)
-		stderrBuf.ReadFrom(stderrR)
+		_, _ = stdoutBuf.ReadFrom(stdoutR)
+		_, _ = stderrBuf.ReadFrom(stderrR)
 
 		assert.Empty(t, stdoutBuf.String(), "PrintUsingHub should not write to stdout")
 		assert.Contains(t, stderrBuf.String(), "Using hub: http://localhost:8080")
@@ -239,14 +239,14 @@ func TestPrintUsingHubWritesToStderr(t *testing.T) {
 
 		PrintUsingHub("http://localhost:8080")
 
-		stdoutW.Close()
-		stderrW.Close()
+		_ = stdoutW.Close()
+		_ = stderrW.Close()
 		os.Stdout = oldStdout
 		os.Stderr = oldStderr
 
 		var stdoutBuf, stderrBuf bytes.Buffer
-		stdoutBuf.ReadFrom(stdoutR)
-		stderrBuf.ReadFrom(stderrR)
+		_, _ = stdoutBuf.ReadFrom(stdoutR)
+		_, _ = stderrBuf.ReadFrom(stderrR)
 
 		assert.Empty(t, stdoutBuf.String(), "PrintUsingHub should not write to stdout in JSON mode")
 		assert.Empty(t, stderrBuf.String(), "PrintUsingHub should not write to stderr in JSON mode")

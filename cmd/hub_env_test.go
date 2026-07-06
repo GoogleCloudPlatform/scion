@@ -50,7 +50,7 @@ func saveEnvTestState() envTestState {
 }
 
 func (s envTestState) restore() {
-	os.Setenv("HOME", s.home)
+	_ = os.Setenv("HOME", s.home)
 	projectPath = s.projectPath
 	envProjectScope = s.envProjectScope
 	envBrokerScope = s.envBrokerScope
@@ -87,14 +87,14 @@ func newEnvListMockServer(t *testing.T, envVars []map[string]interface{}) *httpt
 
 		switch {
 		case r.URL.Path == "/healthz" && r.Method == http.MethodGet:
-			json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
 
 		case r.URL.Path == "/api/v1/env" && r.Method == http.MethodGet:
 			scope := r.URL.Query().Get("scope")
 			if scope == "" {
 				scope = "user"
 			}
-			json.NewEncoder(w).Encode(map[string]interface{}{
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"envVars": envVars,
 				"scope":   scope,
 			})
@@ -144,7 +144,7 @@ func TestRunEnvList_WithResults(t *testing.T) {
 	defer server.Close()
 
 	tmpHome := t.TempDir()
-	os.Setenv("HOME", tmpHome)
+	_ = os.Setenv("HOME", tmpHome)
 	t.Setenv("SCION_HUB_ENDPOINT", server.URL)
 
 	projectDir := setupEnvProject(t, tmpHome, server.URL)
@@ -166,7 +166,7 @@ func TestRunEnvList_Empty(t *testing.T) {
 	defer server.Close()
 
 	tmpHome := t.TempDir()
-	os.Setenv("HOME", tmpHome)
+	_ = os.Setenv("HOME", tmpHome)
 	t.Setenv("SCION_HUB_ENDPOINT", server.URL)
 
 	projectDir := setupEnvProject(t, tmpHome, server.URL)
@@ -192,7 +192,7 @@ func TestRunEnvList_JSON(t *testing.T) {
 	defer server.Close()
 
 	tmpHome := t.TempDir()
-	os.Setenv("HOME", tmpHome)
+	_ = os.Setenv("HOME", tmpHome)
 	t.Setenv("SCION_HUB_ENDPOINT", server.URL)
 
 	projectDir := setupEnvProject(t, tmpHome, server.URL)
@@ -245,10 +245,10 @@ func newEnvProjectResolveMockServer(t *testing.T, projectID, projectName, projec
 
 		switch {
 		case r.URL.Path == "/healthz" && r.Method == http.MethodGet:
-			json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
 
 		case r.URL.Path == "/api/v1/projects/"+projectID && r.Method == http.MethodGet:
-			json.NewEncoder(w).Encode(map[string]interface{}{
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"id":   projectID,
 				"name": projectName,
 				"slug": projectSlug,
@@ -263,7 +263,7 @@ func newEnvProjectResolveMockServer(t *testing.T, projectID, projectName, projec
 					{"id": projectID, "name": projectName, "slug": projectSlug},
 				}
 			}
-			json.NewEncoder(w).Encode(map[string]interface{}{
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"projects": projects,
 			})
 
@@ -272,7 +272,7 @@ func newEnvProjectResolveMockServer(t *testing.T, projectID, projectName, projec
 			if scope == "" {
 				scope = "user"
 			}
-			json.NewEncoder(w).Encode(map[string]interface{}{
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"envVars": envVars,
 				"scope":   scope,
 				"scopeId": r.URL.Query().Get("scopeId"),
@@ -280,7 +280,7 @@ func newEnvProjectResolveMockServer(t *testing.T, projectID, projectName, projec
 
 		default:
 			w.WriteHeader(http.StatusNotFound)
-			json.NewEncoder(w).Encode(map[string]interface{}{
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"code":    "not_found",
 				"message": "Not found",
 			})
@@ -304,7 +304,7 @@ func TestRunEnvList_BareGroveFlag(t *testing.T) {
 	defer server.Close()
 
 	tmpHome := t.TempDir()
-	os.Setenv("HOME", tmpHome)
+	_ = os.Setenv("HOME", tmpHome)
 	t.Setenv("SCION_HUB_ENDPOINT", server.URL)
 
 	projectDir := setupEnvProjectWithHubProjectID(t, tmpHome, server.URL, groveUUID)
@@ -314,8 +314,8 @@ func TestRunEnvList_BareGroveFlag(t *testing.T) {
 	envBrokerScope = ""
 	// Simulate bare --grove: set sentinel value and mark flag as changed
 	envProjectScope = scopeInferSentinel
-	hubEnvListCmd.Flags().Set("grove", scopeInferSentinel)
-	defer hubEnvListCmd.Flags().Set("grove", "")
+	_ = hubEnvListCmd.Flags().Set("grove", scopeInferSentinel)
+	defer func() { _ = hubEnvListCmd.Flags().Set("grove", "") }()
 
 	err := runEnvList(hubEnvListCmd, nil)
 	assert.NoError(t, err)
@@ -335,7 +335,7 @@ func TestRunEnvList_GroveByName(t *testing.T) {
 	defer server.Close()
 
 	tmpHome := t.TempDir()
-	os.Setenv("HOME", tmpHome)
+	_ = os.Setenv("HOME", tmpHome)
 	t.Setenv("SCION_HUB_ENDPOINT", server.URL)
 
 	projectDir := setupEnvProject(t, tmpHome, server.URL)
@@ -345,8 +345,8 @@ func TestRunEnvList_GroveByName(t *testing.T) {
 	envBrokerScope = ""
 	// Simulate --grove=hub-local
 	envProjectScope = "hub-local"
-	hubEnvListCmd.Flags().Set("grove", "hub-local")
-	defer hubEnvListCmd.Flags().Set("grove", "")
+	_ = hubEnvListCmd.Flags().Set("grove", "hub-local")
+	defer func() { _ = hubEnvListCmd.Flags().Set("grove", "") }()
 
 	err := runEnvList(hubEnvListCmd, nil)
 	assert.NoError(t, err)
@@ -367,10 +367,10 @@ func TestResolveEnvScope_SentinelInfersFromSettings(t *testing.T) {
 	testCmd.Flags().Lookup("broker").NoOptDefVal = scopeInferSentinel
 
 	// Set bare --grove (sentinel)
-	testCmd.Flags().Set("grove", scopeInferSentinel)
+	_ = testCmd.Flags().Set("grove", scopeInferSentinel)
 
 	tmpHome := t.TempDir()
-	os.Setenv("HOME", tmpHome)
+	_ = os.Setenv("HOME", tmpHome)
 	projectDir := setupEnvProjectWithHubProjectID(t, tmpHome, "http://localhost:9999", groveUUID)
 	projectPath = projectDir
 
@@ -395,10 +395,10 @@ func TestResolveEnvScope_ExplicitGroveValue(t *testing.T) {
 	testCmd.Flags().Lookup("broker").NoOptDefVal = scopeInferSentinel
 
 	// Set --grove=hub-local
-	testCmd.Flags().Set("grove", "hub-local")
+	_ = testCmd.Flags().Set("grove", "hub-local")
 
 	tmpHome := t.TempDir()
-	os.Setenv("HOME", tmpHome)
+	_ = os.Setenv("HOME", tmpHome)
 	projectDir := setupEnvProject(t, tmpHome, "http://localhost:9999")
 	projectPath = projectDir
 
@@ -423,10 +423,10 @@ func TestResolveEnvScope_ScopeHub(t *testing.T) {
 	testCmd.Flags().Lookup("broker").NoOptDefVal = scopeInferSentinel
 
 	// Set --scope hub
-	testCmd.Flags().Set("scope", "hub")
+	_ = testCmd.Flags().Set("scope", "hub")
 
 	tmpHome := t.TempDir()
-	os.Setenv("HOME", tmpHome)
+	_ = os.Setenv("HOME", tmpHome)
 	projectDir := setupEnvProject(t, tmpHome, "http://localhost:9999")
 	projectPath = projectDir
 
@@ -451,11 +451,11 @@ func TestResolveEnvScope_ScopeConflictsWithProject(t *testing.T) {
 	testCmd.Flags().Lookup("broker").NoOptDefVal = scopeInferSentinel
 
 	// Set both --scope and --grove
-	testCmd.Flags().Set("scope", "hub")
-	testCmd.Flags().Set("grove", "some-grove")
+	_ = testCmd.Flags().Set("scope", "hub")
+	_ = testCmd.Flags().Set("grove", "some-grove")
 
 	tmpHome := t.TempDir()
-	os.Setenv("HOME", tmpHome)
+	_ = os.Setenv("HOME", tmpHome)
 	projectDir := setupEnvProject(t, tmpHome, "http://localhost:9999")
 	projectPath = projectDir
 
@@ -479,11 +479,11 @@ func TestResolveEnvScope_ScopeConflictsWithBroker(t *testing.T) {
 	testCmd.Flags().Lookup("broker").NoOptDefVal = scopeInferSentinel
 
 	// Set both --scope and --broker
-	testCmd.Flags().Set("scope", "hub")
-	testCmd.Flags().Set("broker", "some-broker")
+	_ = testCmd.Flags().Set("scope", "hub")
+	_ = testCmd.Flags().Set("broker", "some-broker")
 
 	tmpHome := t.TempDir()
-	os.Setenv("HOME", tmpHome)
+	_ = os.Setenv("HOME", tmpHome)
 	projectDir := setupEnvProject(t, tmpHome, "http://localhost:9999")
 	projectPath = projectDir
 

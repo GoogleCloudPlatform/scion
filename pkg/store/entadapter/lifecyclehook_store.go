@@ -347,7 +347,7 @@ func (s *LifecycleHookStore) CompareAndSetHookPhase(ctx context.Context, agentID
 		return false, fmt.Errorf("compare-and-set hook phase: begin tx: %w", err)
 	}
 	// Rollback is a no-op after Commit succeeds.
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	// Query for existing row. ForUpdate serialises concurrent CAS
 	// attempts in Postgres; in SQLite the single-writer lock suffices

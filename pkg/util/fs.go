@@ -140,7 +140,7 @@ func RemoveAllSafe(root string) error {
 						return nil
 					}
 					if info.IsDir() {
-						os.Chmod(path, 0700)
+						_ = os.Chmod(path, 0700)
 						dirs = append(dirs, path)
 						return nil
 					}
@@ -163,7 +163,7 @@ func RemoveAllSafe(root string) error {
 			// Ensure the directory is writable so we can list/delete contents.
 			info, infoErr := d.Info()
 			if infoErr == nil && info.Mode().Perm()&0700 != 0700 {
-				os.Chmod(path, 0700)
+				_ = os.Chmod(path, 0700)
 			}
 			dirs = append(dirs, path)
 			return nil
@@ -181,7 +181,7 @@ func RemoveAllSafe(root string) error {
 	for _, f := range files {
 		if err := os.Remove(f); err != nil && !os.IsNotExist(err) {
 			if os.IsPermission(err) {
-				os.Chmod(filepath.Dir(f), 0700)
+				_ = os.Chmod(filepath.Dir(f), 0700)
 				err = os.Remove(f)
 			}
 			if err != nil && !os.IsNotExist(err) && firstErr == nil {
@@ -196,7 +196,7 @@ func RemoveAllSafe(root string) error {
 	for i := len(dirs) - 1; i >= 0; i-- {
 		if err := os.Remove(dirs[i]); err != nil && !os.IsNotExist(err) {
 			if os.IsPermission(err) {
-				os.Chmod(dirs[i], 0700)
+				_ = os.Chmod(dirs[i], 0700)
 				err = os.Remove(dirs[i])
 			}
 			if err != nil && !os.IsNotExist(err) && firstErr == nil {
@@ -230,7 +230,7 @@ func removeSymlinkSafe(path string) {
 	dirFD, err := syscall.Open(dir, syscall.O_RDONLY, 0)
 	if err == nil {
 		err = unix.Unlinkat(dirFD, name, 0)
-		syscall.Close(dirFD)
+		_ = syscall.Close(dirFD)
 		if err == nil {
 			elapsed := time.Since(start)
 			if elapsed > 100*time.Millisecond {
@@ -247,23 +247,23 @@ func removeSymlinkSafe(path string) {
 	f, tmpErr := os.CreateTemp(dir, ".symrm.*")
 	if tmpErr == nil {
 		tmp := f.Name()
-		f.Close()
+		_ = f.Close()
 		if os.Rename(tmp, path) == nil {
-			os.Remove(path)
+			_ = os.Remove(path)
 			elapsed := time.Since(start)
 			if elapsed > 100*time.Millisecond {
 				Debugf("removeSymlinkSafe: rename-over took %v for %s", elapsed, name)
 			}
 			return
 		}
-		os.Remove(tmp)
+		_ = os.Remove(tmp)
 	}
 
 	// Strategy 3: direct os.Remove (may trigger autofs on macOS).
 	Debugf("removeSymlinkSafe: falling back to os.Remove for %s", name)
 	if rmErr := os.Remove(path); rmErr != nil && os.IsPermission(rmErr) {
-		os.Chmod(dir, 0700)
-		os.Remove(path)
+		_ = os.Chmod(dir, 0700)
+		_ = os.Remove(path)
 	}
 	elapsed := time.Since(start)
 	if elapsed > 100*time.Millisecond {

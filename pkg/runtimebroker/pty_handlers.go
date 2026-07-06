@@ -249,16 +249,16 @@ func (s *Server) handleAgentAttach(w http.ResponseWriter, r *http.Request) {
 		slog.Error("WebSocket upgrade failed for agent", "agent_id", agentID, "error", err)
 		return
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	// Get terminal size from query params
 	cols := 80
 	rows := 24
 	if c := r.URL.Query().Get("cols"); c != "" {
-		fmt.Sscanf(c, "%d", &cols)
+		_, _ = fmt.Sscanf(c, "%d", &cols)
 	}
 	if rowStr := r.URL.Query().Get("rows"); rowStr != "" {
-		fmt.Sscanf(rowStr, "%d", &rows)
+		_, _ = fmt.Sscanf(rowStr, "%d", &rows)
 	}
 
 	runtimeCmd := result.RuntimeName
@@ -364,11 +364,11 @@ func (s *LocalPTYSession) Run() error {
 
 	defer func() {
 		if s.ptyMaster != nil {
-			s.ptyMaster.Close()
+			_ = s.ptyMaster.Close()
 		}
 		if s.cmd != nil && s.cmd.Process != nil {
-			s.cmd.Process.Kill()
-			s.cmd.Wait()
+			_ = s.cmd.Process.Kill()
+			_ = s.cmd.Wait()
 		}
 	}()
 
@@ -455,8 +455,8 @@ func (s *LocalPTYSession) runK8sExec() error {
 			Tty:               true,
 			TerminalSizeQueue: sizeQueue,
 		})
-		stdoutWriter.Close()
-		stdinReader.Close()
+		_ = stdoutWriter.Close()
+		_ = stdinReader.Close()
 		errCh <- execErr
 	}()
 
@@ -525,8 +525,8 @@ func (s *LocalPTYSession) runK8sExec() error {
 
 	err = <-errCh
 	s.cancel()
-	stdinWriter.Close()
-	stdoutReader.Close()
+	_ = stdinWriter.Close()
+	_ = stdoutReader.Close()
 	return err
 }
 
@@ -708,12 +708,12 @@ func (h *StreamPTYHandler) Run() error {
 	defer func() {
 		// With real PTY, ptyMaster and ptySlave are the same fd, so only close once
 		if h.ptyMaster != nil {
-			h.ptyMaster.Close()
+			_ = h.ptyMaster.Close()
 		}
 		if h.cmd != nil && h.cmd.Process != nil {
 			// Kill only if still running
 			if h.cmd.ProcessState == nil {
-				h.cmd.Process.Kill()
+				_ = h.cmd.Process.Kill()
 			}
 			if err := h.cmd.Wait(); err != nil {
 				slog.Debug("PTY command exited with error", "slug", h.slug, "error", err)
@@ -809,8 +809,8 @@ func (h *StreamPTYHandler) runK8sExec() error {
 			Tty:               true,
 			TerminalSizeQueue: sizeQueue,
 		})
-		stdoutWriter.Close()
-		stdinReader.Close()
+		_ = stdoutWriter.Close()
+		_ = stdinReader.Close()
 		errCh <- err
 	}()
 
@@ -840,7 +840,7 @@ func (h *StreamPTYHandler) runK8sExec() error {
 				errCh <- h.ctx.Err()
 				return
 			case <-h.handler.closeCh:
-				stdinWriter.Close()
+				_ = stdinWriter.Close()
 				errCh <- io.EOF
 				return
 			case data := <-h.handler.dataCh:
@@ -854,8 +854,8 @@ func (h *StreamPTYHandler) runK8sExec() error {
 
 	err = <-errCh
 	h.cancel()
-	stdinWriter.Close()
-	stdoutReader.Close()
+	_ = stdinWriter.Close()
+	_ = stdoutReader.Close()
 	return err
 }
 
@@ -992,10 +992,10 @@ func (h *StreamPTYHandler) Close() {
 	h.cancel()
 	// With real PTY, ptyMaster and ptySlave are the same fd, so only close once
 	if h.ptyMaster != nil {
-		h.ptyMaster.Close()
+		_ = h.ptyMaster.Close()
 	}
 	if h.cmd != nil && h.cmd.Process != nil {
-		h.cmd.Process.Kill()
+		_ = h.cmd.Process.Kill()
 	}
 }
 

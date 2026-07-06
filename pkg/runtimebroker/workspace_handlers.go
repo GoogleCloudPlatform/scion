@@ -366,7 +366,7 @@ func (s *Server) uploadManifest(ctx context.Context, bucket, storagePath string,
 	if err != nil {
 		return fmt.Errorf("failed to create storage client: %w", err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	// Serialize manifest to JSON
 	manifestJSON, err := json.Marshal(manifest)
@@ -422,7 +422,7 @@ func (s *Server) countWorkspaceFiles(workspacePath string) (int, int64) {
 	var count int
 	var totalSize int64
 
-	filepath.WalkDir(workspacePath, func(path string, d fs.DirEntry, err error) error {
+	_ = filepath.WalkDir(workspacePath, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil
 		}

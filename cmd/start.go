@@ -63,7 +63,7 @@ func init() {
 
 	// Back-compat: accept --notify without error (it's now the default)
 	startCmd.Flags().BoolVar(&startNotifyDeprecated, "notify", false, "")
-	startCmd.Flags().MarkDeprecated("notify", "notifications are now enabled by default; remove --notify from your instructions")
+	_ = startCmd.Flags().MarkDeprecated("notify", "notifications are now enabled by default; remove --notify from your instructions")
 
 	// Template resolution flags for Hub mode (Section 9.4)
 	startCmd.Flags().BoolVar(&uploadTemplate, "upload-template", false, "Automatically upload local template to Hub if not found")

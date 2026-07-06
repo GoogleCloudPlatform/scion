@@ -98,7 +98,7 @@ func runMetadataStatus() int {
 		fmt.Printf("[FAIL] Cannot connect to %s: %v\n", addr, err)
 		failed = true
 	} else {
-		conn.Close()
+		_ = conn.Close()
 		fmt.Printf("[ OK ] Port %d is open\n", cfg.Port)
 	}
 
@@ -109,7 +109,7 @@ func runMetadataStatus() int {
 		fmt.Printf("[FAIL] Health endpoint unreachable: %v\n", err)
 		failed = true
 	} else {
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		if resp.StatusCode == http.StatusOK {
 			fmt.Println("[ OK ] Health endpoint returned 200")
 		} else {
@@ -137,7 +137,7 @@ func runMetadataStatus() int {
 			fmt.Printf("[FAIL] Token endpoint unreachable: %v\n", err)
 			failed = true
 		} else {
-			tokenResp.Body.Close()
+			_ = tokenResp.Body.Close()
 			if tokenResp.StatusCode == http.StatusOK {
 				fmt.Println("[ OK ] Token endpoint returned 200")
 			} else {

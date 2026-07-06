@@ -96,7 +96,7 @@ func runSecretMigrate(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to open database: %w", err)
 	}
 	db := entadapter.NewCompositeStore(entClient)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	if err := db.Migrate(ctx); err != nil {
 		return fmt.Errorf("failed to migrate database: %w", err)
 	}

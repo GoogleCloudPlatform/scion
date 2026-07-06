@@ -132,7 +132,7 @@ func resolveInstallSource(source string) (localPath string, cleanup func(), err 
 		if fetchErr != nil {
 			return "", nil, fmt.Errorf("failed to fetch remote source: %w", fetchErr)
 		}
-		return cachePath, func() { os.RemoveAll(cachePath) }, nil
+		return cachePath, func() { _ = os.RemoveAll(cachePath) }, nil
 	}
 
 	localPath, err = filepath.Abs(source)

@@ -603,7 +603,7 @@ func (r *KubernetesRuntime) createSecretProviderClass(ctx context.Context, names
 	if len(secretObjects) > 0 {
 		soJSON, _ := json.Marshal(secretObjects)
 		var soSlice []interface{}
-		json.Unmarshal(soJSON, &soSlice)
+		_ = json.Unmarshal(soJSON, &soSlice)
 		spec["secretObjects"] = soSlice
 	}
 
@@ -1766,7 +1766,7 @@ func (r *KubernetesRuntime) syncFromPod(ctx context.Context, namespace, podName,
 	})
 
 	// Close stdin to tell local tar that stream is finished
-	stdin.Close()
+	_ = stdin.Close()
 	waitErr := tarCmd.Wait()
 
 	if err != nil {
@@ -1954,7 +1954,7 @@ func (r *KubernetesRuntime) GetLogs(ctx context.Context, id string) (string, err
 	if err != nil {
 		return "", err
 	}
-	defer podLogs.Close()
+	defer func() { _ = podLogs.Close() }()
 
 	data, err := io.ReadAll(podLogs)
 	if err != nil {
@@ -2051,7 +2051,7 @@ func (r *KubernetesRuntime) Attach(ctx context.Context, id string) error {
 		if err != nil {
 			return fmt.Errorf("failed to set raw mode: %w", err)
 		}
-		defer term.Restore(fd, oldState)
+		defer func() { _ = term.Restore(fd, oldState) }()
 	}
 
 	// Create a context that can be canceled by our detach sequence

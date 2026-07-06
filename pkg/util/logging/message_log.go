@@ -63,7 +63,7 @@ func NewMessageLogger(cfg MessageLoggerConfig) (*slog.Logger, func(), error) {
 		}
 		handlers = append(handlers, cloudHandler)
 		cleanups = append(cleanups, func() {
-			ch.logger.Flush()
+			_ = ch.logger.Flush()
 		})
 	}
 

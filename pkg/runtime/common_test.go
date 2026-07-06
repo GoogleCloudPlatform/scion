@@ -121,9 +121,9 @@ func TestBuildCommonRunArgs(t *testing.T) {
 	// Setup some dummy auth files
 	tmpDir := t.TempDir()
 	oauthFile := filepath.Join(tmpDir, "oauth.json")
-	os.WriteFile(oauthFile, []byte("{}"), 0644)
+	_ = os.WriteFile(oauthFile, []byte("{}"), 0644)
 	adcFile := filepath.Join(tmpDir, "adc.json")
-	os.WriteFile(adcFile, []byte("{}"), 0644)
+	_ = os.WriteFile(adcFile, []byte("{}"), 0644)
 
 	tests := []struct {
 		name    string
@@ -705,7 +705,7 @@ func TestDevBinariesMount(t *testing.T) {
 	// When SCION_DEV_BINARIES is set to a valid directory, it should
 	// be bind-mounted to /opt/scion/bin in the container.
 	tmpDir := t.TempDir()
-	os.WriteFile(filepath.Join(tmpDir, "sciontool"), []byte("fake"), 0755)
+	_ = os.WriteFile(filepath.Join(tmpDir, "sciontool"), []byte("fake"), 0755)
 
 	t.Setenv("SCION_DEV_BINARIES", tmpDir)
 
@@ -765,7 +765,7 @@ func TestDevBinariesMountNotSetOrInvalid(t *testing.T) {
 
 	// When set to a file (not a directory), no mount should appear.
 	tmpFile := filepath.Join(t.TempDir(), "not-a-dir")
-	os.WriteFile(tmpFile, []byte("x"), 0644)
+	_ = os.WriteFile(tmpFile, []byte("x"), 0644)
 	t.Setenv("SCION_DEV_BINARIES", tmpFile)
 
 	args, err = buildCommonRunArgs(RunConfig{
@@ -827,7 +827,7 @@ func TestWriteRuntimeDebugFile(t *testing.T) {
 	t.Run("writes file when debug is true", func(t *testing.T) {
 		agentDir := t.TempDir()
 		homeDir := filepath.Join(agentDir, "home")
-		os.MkdirAll(homeDir, 0755)
+		_ = os.MkdirAll(homeDir, 0755)
 
 		config := RunConfig{
 			Debug:   true,
@@ -879,7 +879,7 @@ func TestWriteRuntimeDebugFile(t *testing.T) {
 	t.Run("no-op when debug is false", func(t *testing.T) {
 		agentDir := t.TempDir()
 		homeDir := filepath.Join(agentDir, "home")
-		os.MkdirAll(homeDir, 0755)
+		_ = os.MkdirAll(homeDir, 0755)
 
 		config := RunConfig{
 			Debug:   false,

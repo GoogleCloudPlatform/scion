@@ -48,7 +48,7 @@ func TestWorkspaceSyncFrom(t *testing.T) {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(SyncFromResponse{
+		_ = json.NewEncoder(w).Encode(SyncFromResponse{
 			Manifest: &transfer.Manifest{
 				Version:     "1.0",
 				ContentHash: "sha256:abc123",
@@ -107,7 +107,7 @@ func TestWorkspaceSyncTo(t *testing.T) {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(SyncToResponse{
+		_ = json.NewEncoder(w).Encode(SyncToResponse{
 			UploadURLs: []transfer.UploadURLInfo{
 				{Path: "src/main.go", URL: "https://storage.example.com/upload/main.go", Method: "PUT"},
 				{Path: "src/lib.go", URL: "https://storage.example.com/upload/lib.go", Method: "PUT"},
@@ -163,7 +163,7 @@ func TestWorkspaceSyncToFinalize(t *testing.T) {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(SyncToFinalizeResponse{
+		_ = json.NewEncoder(w).Encode(SyncToFinalizeResponse{
 			Applied:          true,
 			ContentHash:      "sha256:finalhash",
 			FilesApplied:     2,
@@ -209,7 +209,7 @@ func TestWorkspaceGetStatus(t *testing.T) {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(WorkspaceStatusResponse{
+		_ = json.NewEncoder(w).Encode(WorkspaceStatusResponse{
 			Slug:       "agent-status",
 			ProjectID:  "grove-xyz",
 			StorageURI: "gs://bucket/workspaces/grove-xyz/agent-status/",
@@ -253,7 +253,7 @@ func TestWorkspaceSyncFromNilOptions(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// With nil options, request body should be nil or empty
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(SyncFromResponse{
+		_ = json.NewEncoder(w).Encode(SyncFromResponse{
 			Manifest: &transfer.Manifest{
 				Version: "1.0",
 				Files:   []transfer.FileInfo{},
@@ -293,7 +293,7 @@ func TestWorkspaceSyncFrom_NotFound(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusNotFound)
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"error": map[string]string{
 				"code":    "not_found",
 				"message": "Agent not found",
@@ -313,7 +313,7 @@ func TestWorkspaceSyncFrom_Conflict(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusConflict)
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"error": map[string]string{
 				"code":    "conflict",
 				"message": "Agent is not running",
@@ -333,7 +333,7 @@ func TestWorkspaceSyncTo_BadRequest(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"error": map[string]string{
 				"code":    "validation_error",
 				"message": "files list is required",
@@ -353,7 +353,7 @@ func TestWorkspaceSyncToFinalize_Unauthorized(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"error": map[string]string{
 				"code":    "unauthorized",
 				"message": "Invalid or missing authorization token",
@@ -374,7 +374,7 @@ func TestWorkspaceGetStatus_InternalServerError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"error": map[string]string{
 				"code":    "internal_error",
 				"message": "Database error",
@@ -394,7 +394,7 @@ func TestWorkspaceSyncFrom_InvalidJSON(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{invalid json`))
+		_, _ = w.Write([]byte(`{invalid json`))
 	}))
 	defer server.Close()
 
@@ -409,7 +409,7 @@ func TestWorkspaceSyncTo_InvalidJSON(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`not json at all`))
+		_, _ = w.Write([]byte(`not json at all`))
 	}))
 	defer server.Close()
 
@@ -425,7 +425,7 @@ func TestWorkspaceGetStatus_GatewayTimeout(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusGatewayTimeout)
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"error": map[string]string{
 				"code":    "gateway_timeout",
 				"message": "Runtime Broker unreachable",
@@ -463,7 +463,7 @@ func TestWorkspaceSyncTo_Forbidden(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusForbidden)
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"error": map[string]string{
 				"code":    "forbidden",
 				"message": "Access denied to agent",
@@ -484,7 +484,7 @@ func TestWorkspaceSyncToFinalize_BadGateway(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadGateway)
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"error": map[string]string{
 				"code":    "runtime_error",
 				"message": "Failed to apply workspace",
@@ -507,7 +507,7 @@ func TestWorkspaceSyncToFinalize_BadGateway(t *testing.T) {
 func TestWorkspaceGetStatus_NoLastSync(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(WorkspaceStatusResponse{
+		_ = json.NewEncoder(w).Encode(WorkspaceStatusResponse{
 			Slug:       "agent-new",
 			ProjectID:  "project-1",
 			StorageURI: "gs://bucket/workspaces/project-1/agent-new/",
@@ -532,7 +532,7 @@ func TestWorkspaceGetStatus_NoLastSync(t *testing.T) {
 func TestWorkspaceSyncFrom_EmptyManifest(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(SyncFromResponse{
+		_ = json.NewEncoder(w).Encode(SyncFromResponse{
 			Manifest: &transfer.Manifest{
 				Version:     "1.0",
 				ContentHash: "",

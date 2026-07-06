@@ -48,7 +48,7 @@ func saveTemplateTestState() templateTestState {
 }
 
 func (s templateTestState) restore() {
-	os.Setenv("HOME", s.home)
+	_ = os.Setenv("HOME", s.home)
 	globalMode = s.globalMode
 	noHub = s.noHub
 	autoConfirm = s.autoConfirm
@@ -73,7 +73,7 @@ func TestRunTemplateDelete_NotFound(t *testing.T) {
 	defer orig.restore()
 
 	tmpHome := t.TempDir()
-	os.Setenv("HOME", tmpHome)
+	_ = os.Setenv("HOME", tmpHome)
 	globalMode = true
 	noHub = true
 	autoConfirm = true
@@ -91,7 +91,7 @@ func TestRunTemplateDelete_LocalOnly_AutoConfirm(t *testing.T) {
 	defer orig.restore()
 
 	tmpHome := t.TempDir()
-	os.Setenv("HOME", tmpHome)
+	_ = os.Setenv("HOME", tmpHome)
 	globalMode = true
 	noHub = true
 	autoConfirm = true
@@ -115,7 +115,7 @@ func TestRunTemplateDelete_ProtectedTemplate(t *testing.T) {
 	defer orig.restore()
 
 	tmpHome := t.TempDir()
-	os.Setenv("HOME", tmpHome)
+	_ = os.Setenv("HOME", tmpHome)
 	globalMode = true
 	noHub = true
 	autoConfirm = true
@@ -141,18 +141,18 @@ func newMockHubServer(t *testing.T, projectID string, templates []map[string]int
 		switch {
 		// Health check
 		case r.URL.Path == "/healthz" && r.Method == http.MethodGet:
-			json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
 
 		// Project lookup.
 		case strings.HasPrefix(r.URL.Path, "/api/v1/projects/") && r.Method == http.MethodGet:
-			json.NewEncoder(w).Encode(map[string]interface{}{
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"id":   projectID,
 				"name": "test-project",
 			})
 
 		// Template list
 		case r.URL.Path == "/api/v1/templates" && r.Method == http.MethodGet:
-			json.NewEncoder(w).Encode(map[string]interface{}{
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"templates": templates,
 			})
 
@@ -160,7 +160,7 @@ func newMockHubServer(t *testing.T, projectID string, templates []map[string]int
 		case strings.HasPrefix(r.URL.Path, "/api/v1/templates/") && r.Method == http.MethodDelete:
 			deleteCalled = true
 			w.WriteHeader(http.StatusOK)
-			json.NewEncoder(w).Encode(map[string]interface{}{"ok": true})
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"ok": true})
 
 		default:
 			w.WriteHeader(http.StatusNotFound)
@@ -195,12 +195,12 @@ func TestRunTemplateDelete_HubOnly_AutoConfirm(t *testing.T) {
 	defer orig.restore()
 
 	tmpHome := t.TempDir()
-	os.Setenv("HOME", tmpHome)
+	_ = os.Setenv("HOME", tmpHome)
 	// Clear SCION_HUB_ENDPOINT to prevent it overriding the mock server URL
 	// in settings loaded via koanf env provider
 	origHubEndpoint := os.Getenv("SCION_HUB_ENDPOINT")
-	os.Unsetenv("SCION_HUB_ENDPOINT")
-	defer os.Setenv("SCION_HUB_ENDPOINT", origHubEndpoint)
+	_ = os.Unsetenv("SCION_HUB_ENDPOINT")
+	defer func() { _ = os.Setenv("SCION_HUB_ENDPOINT", origHubEndpoint) }()
 	globalMode = true
 	autoConfirm = true
 	noHub = false
@@ -234,11 +234,11 @@ func TestRunTemplateDelete_Both_AutoConfirm(t *testing.T) {
 	defer orig.restore()
 
 	tmpHome := t.TempDir()
-	os.Setenv("HOME", tmpHome)
+	_ = os.Setenv("HOME", tmpHome)
 	// Clear SCION_HUB_ENDPOINT to prevent it overriding the mock server URL
 	origHubEndpoint2 := os.Getenv("SCION_HUB_ENDPOINT")
-	os.Unsetenv("SCION_HUB_ENDPOINT")
-	defer os.Setenv("SCION_HUB_ENDPOINT", origHubEndpoint2)
+	_ = os.Unsetenv("SCION_HUB_ENDPOINT")
+	defer func() { _ = os.Setenv("SCION_HUB_ENDPOINT", origHubEndpoint2) }()
 	globalMode = true
 	autoConfirm = true
 	noHub = false
@@ -277,7 +277,7 @@ func TestRunTemplateDelete_NoHub_Flag(t *testing.T) {
 	defer orig.restore()
 
 	tmpHome := t.TempDir()
-	os.Setenv("HOME", tmpHome)
+	_ = os.Setenv("HOME", tmpHome)
 	globalMode = true
 	noHub = true // --no-hub set
 	autoConfirm = true
@@ -331,21 +331,21 @@ func newMockHubServerForSync(t *testing.T, projectID string, existingTemplates [
 
 		switch {
 		case r.URL.Path == "/healthz" && r.Method == http.MethodGet:
-			json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
 
 		case strings.HasPrefix(r.URL.Path, "/api/v1/projects/") && r.Method == http.MethodGet:
-			json.NewEncoder(w).Encode(map[string]interface{}{
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"id":   projectID,
 				"name": "test-project",
 			})
 
 		case r.URL.Path == "/api/v1/templates" && r.Method == http.MethodGet:
-			json.NewEncoder(w).Encode(map[string]interface{}{
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"templates": existingTemplates,
 			})
 
 		case r.URL.Path == "/api/v1/templates" && r.Method == http.MethodPost:
-			json.NewEncoder(w).Encode(map[string]interface{}{
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"template": map[string]interface{}{
 					"id":   "new-tpl-id",
 					"name": "test-tpl",
@@ -353,7 +353,7 @@ func newMockHubServerForSync(t *testing.T, projectID string, existingTemplates [
 			})
 
 		case strings.HasSuffix(r.URL.Path, "/download") && r.Method == http.MethodGet:
-			json.NewEncoder(w).Encode(map[string]interface{}{
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"files": []map[string]interface{}{
 					{
 						"path": "scion-agent.json",
@@ -364,12 +364,12 @@ func newMockHubServerForSync(t *testing.T, projectID string, existingTemplates [
 			})
 
 		case strings.HasSuffix(r.URL.Path, "/upload") && r.Method == http.MethodPost:
-			json.NewEncoder(w).Encode(map[string]interface{}{
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"uploadUrls": []interface{}{},
 			})
 
 		case strings.HasSuffix(r.URL.Path, "/finalize") && r.Method == http.MethodPost:
-			json.NewEncoder(w).Encode(map[string]interface{}{
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"id":          "new-tpl-id",
 				"name":        "test-tpl",
 				"status":      "active",
@@ -387,10 +387,10 @@ func TestRunTemplateSync_UpdatesExistingTemplate(t *testing.T) {
 	defer orig.restore()
 
 	tmpHome := t.TempDir()
-	os.Setenv("HOME", tmpHome)
+	_ = os.Setenv("HOME", tmpHome)
 	origHubEndpoint := os.Getenv("SCION_HUB_ENDPOINT")
-	os.Unsetenv("SCION_HUB_ENDPOINT")
-	defer os.Setenv("SCION_HUB_ENDPOINT", origHubEndpoint)
+	_ = os.Unsetenv("SCION_HUB_ENDPOINT")
+	defer func() { _ = os.Setenv("SCION_HUB_ENDPOINT", origHubEndpoint) }()
 	globalMode = true
 	autoConfirm = true
 	noHub = false
@@ -429,7 +429,7 @@ func TestRunTemplateStatus_NoHub(t *testing.T) {
 	defer orig.restore()
 
 	tmpHome := t.TempDir()
-	os.Setenv("HOME", tmpHome)
+	_ = os.Setenv("HOME", tmpHome)
 	globalMode = true
 	noHub = true
 	autoConfirm = true

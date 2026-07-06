@@ -116,7 +116,7 @@ func TestReadProjectMarker_InvalidContent(t *testing.T) {
 	markerPath := filepath.Join(tmpDir, ".scion")
 
 	// Write invalid marker (missing required fields)
-	os.WriteFile(markerPath, []byte("grove-name: test\n"), 0644)
+	_ = os.WriteFile(markerPath, []byte("grove-name: test\n"), 0644)
 
 	_, err := ReadProjectMarker(markerPath)
 	if err == nil {
@@ -136,7 +136,7 @@ func TestResolveProjectMarker(t *testing.T) {
 		ProjectName: "My App",
 		ProjectSlug: "my-app",
 	}
-	WriteProjectMarker(markerPath, marker)
+	_ = WriteProjectMarker(markerPath, marker)
 
 	resolved, err := ResolveProjectMarker(markerPath)
 	if err != nil {
@@ -154,14 +154,14 @@ func TestIsProjectMarkerFile(t *testing.T) {
 
 	// File case
 	filePath := filepath.Join(tmpDir, "marker")
-	os.WriteFile(filePath, []byte("test"), 0644)
+	_ = os.WriteFile(filePath, []byte("test"), 0644)
 	if !IsProjectMarkerFile(filePath) {
 		t.Error("expected file to be recognized as marker")
 	}
 
 	// Directory case
 	dirPath := filepath.Join(tmpDir, "dir")
-	os.MkdirAll(dirPath, 0755)
+	_ = os.MkdirAll(dirPath, 0755)
 	if IsProjectMarkerFile(dirPath) {
 		t.Error("expected directory to NOT be recognized as marker")
 	}
@@ -175,12 +175,12 @@ func TestIsProjectMarkerFile(t *testing.T) {
 func TestIsOldStyleNonGitProject(t *testing.T) {
 	tmpHome := t.TempDir()
 	origHome := os.Getenv("HOME")
-	os.Setenv("HOME", tmpHome)
-	defer os.Setenv("HOME", origHome)
+	_ = os.Setenv("HOME", tmpHome)
+	defer func() { _ = os.Setenv("HOME", origHome) }()
 
 	// Create global .scion — should NOT be flagged
 	globalDir := filepath.Join(tmpHome, ".scion")
-	os.MkdirAll(globalDir, 0755)
+	_ = os.MkdirAll(globalDir, 0755)
 	if IsOldStyleNonGitProject(globalDir) {
 		t.Error("global ~/.scion should NOT be flagged as old-style")
 	}
@@ -188,16 +188,16 @@ func TestIsOldStyleNonGitProject(t *testing.T) {
 	// Create a non-git project .scion dir — SHOULD be flagged
 	nonGitDir := t.TempDir()
 	scionDir := filepath.Join(nonGitDir, ".scion")
-	os.MkdirAll(scionDir, 0755)
+	_ = os.MkdirAll(scionDir, 0755)
 	if !IsOldStyleNonGitProject(scionDir) {
 		t.Error("non-git .scion directory should be flagged as old-style")
 	}
 
 	// Create a git project .scion dir — should NOT be flagged
 	gitDir := t.TempDir()
-	os.MkdirAll(filepath.Join(gitDir, ".git"), 0755)
+	_ = os.MkdirAll(filepath.Join(gitDir, ".git"), 0755)
 	gitScionDir := filepath.Join(gitDir, ".scion")
-	os.MkdirAll(gitScionDir, 0755)
+	_ = os.MkdirAll(gitScionDir, 0755)
 	if IsOldStyleNonGitProject(gitScionDir) {
 		t.Error("git .scion directory should NOT be flagged as old-style")
 	}
@@ -205,7 +205,7 @@ func TestIsOldStyleNonGitProject(t *testing.T) {
 	// .scion as a file — should NOT be flagged
 	fileDir := t.TempDir()
 	markerFile := filepath.Join(fileDir, ".scion")
-	os.WriteFile(markerFile, []byte("grove-id: test"), 0644)
+	_ = os.WriteFile(markerFile, []byte("grove-id: test"), 0644)
 	if IsOldStyleNonGitProject(markerFile) {
 		t.Error(".scion file should NOT be flagged as old-style")
 	}
@@ -241,15 +241,15 @@ func TestFindProjectRoot_MarkerFile(t *testing.T) {
 		ProjectName: "test-project",
 		ProjectSlug: "test-project",
 	}
-	WriteProjectMarker(filepath.Join(projectDir, ".scion"), marker)
+	_ = WriteProjectMarker(filepath.Join(projectDir, ".scion"), marker)
 
 	// Create the external directory so resolution works
 	externalPath, _ := marker.ExternalProjectPath()
-	os.MkdirAll(externalPath, 0755)
+	_ = os.MkdirAll(externalPath, 0755)
 
 	origWd, _ := os.Getwd()
-	defer os.Chdir(origWd)
-	os.Chdir(projectDir)
+	defer func() { _ = os.Chdir(origWd) }()
+	_ = os.Chdir(projectDir)
 
 	got, found := FindProjectRoot()
 	if !found {
@@ -264,7 +264,7 @@ func TestFindProjectRoot_MarkerFile(t *testing.T) {
 func TestWriteAndReadProjectID(t *testing.T) {
 	tmpDir := t.TempDir()
 	scionDir := filepath.Join(tmpDir, ".scion")
-	os.MkdirAll(scionDir, 0755)
+	_ = os.MkdirAll(scionDir, 0755)
 
 	projectID := "550e8400-e29b-41d4-a716-446655440000"
 	if err := WriteProjectID(scionDir, projectID); err != nil {
@@ -296,8 +296,8 @@ func TestGetGitProjectExternalConfigDir(t *testing.T) {
 	t.Setenv("HOME", tmpHome)
 
 	projectDir := filepath.Join(t.TempDir(), "my-repo", ".scion")
-	os.MkdirAll(projectDir, 0755)
-	WriteProjectID(projectDir, "550e8400-e29b-41d4-a716-446655440000")
+	_ = os.MkdirAll(projectDir, 0755)
+	_ = WriteProjectID(projectDir, "550e8400-e29b-41d4-a716-446655440000")
 
 	got, err := GetGitProjectExternalConfigDir(projectDir)
 	if err != nil {
@@ -315,7 +315,7 @@ func TestGetGitProjectExternalConfigDir_NoProjectID(t *testing.T) {
 	t.Setenv("HOME", tmpHome)
 
 	projectDir := filepath.Join(t.TempDir(), "my-repo", ".scion")
-	os.MkdirAll(projectDir, 0755)
+	_ = os.MkdirAll(projectDir, 0755)
 
 	got, err := GetGitProjectExternalConfigDir(projectDir)
 	if err != nil {
@@ -332,8 +332,8 @@ func TestGetGitProjectExternalAgentsDir(t *testing.T) {
 
 	// Create a simulated git project .scion dir with grove-id
 	projectDir := filepath.Join(t.TempDir(), "my-repo", ".scion")
-	os.MkdirAll(projectDir, 0755)
-	WriteProjectID(projectDir, "550e8400-e29b-41d4-a716-446655440000")
+	_ = os.MkdirAll(projectDir, 0755)
+	_ = WriteProjectID(projectDir, "550e8400-e29b-41d4-a716-446655440000")
 
 	got, err := GetGitProjectExternalAgentsDir(projectDir)
 	if err != nil {
@@ -352,7 +352,7 @@ func TestGetGitProjectExternalAgentsDir_NoProjectID(t *testing.T) {
 
 	// Create a .scion dir without grove-id
 	projectDir := filepath.Join(t.TempDir(), "my-repo", ".scion")
-	os.MkdirAll(projectDir, 0755)
+	_ = os.MkdirAll(projectDir, 0755)
 
 	got, err := GetGitProjectExternalAgentsDir(projectDir)
 	if err != nil {
@@ -369,8 +369,8 @@ func TestGetAgentHomePath_GitProjectSplitStorage(t *testing.T) {
 
 	// Create a git project with grove-id (split storage)
 	projectDir := filepath.Join(t.TempDir(), "my-repo", ".scion")
-	os.MkdirAll(projectDir, 0755)
-	WriteProjectID(projectDir, "550e8400-e29b-41d4-a716-446655440000")
+	_ = os.MkdirAll(projectDir, 0755)
+	_ = WriteProjectID(projectDir, "550e8400-e29b-41d4-a716-446655440000")
 
 	got := GetAgentHomePath(projectDir, "test-agent")
 	want := filepath.Join(tmpHome, ".scion", "project-configs", "my-repo__550e8400", ".scion", "agents", "test-agent", "home")
@@ -385,7 +385,7 @@ func TestGetAgentHomePath_NoProjectID(t *testing.T) {
 
 	// Create a .scion dir without grove-id (fallback to in-repo)
 	projectDir := filepath.Join(t.TempDir(), "my-repo", ".scion")
-	os.MkdirAll(projectDir, 0755)
+	_ = os.MkdirAll(projectDir, 0755)
 
 	got := GetAgentHomePath(projectDir, "test-agent")
 	want := filepath.Join(projectDir, "agents", "test-agent", "home")
@@ -400,8 +400,8 @@ func TestGetAgentDir_SharedWorkspaceUsesExternal(t *testing.T) {
 
 	// Git project with grove-id (split storage)
 	projectDir := filepath.Join(t.TempDir(), "my-repo", ".scion")
-	os.MkdirAll(projectDir, 0755)
-	WriteProjectID(projectDir, "550e8400-e29b-41d4-a716-446655440000")
+	_ = os.MkdirAll(projectDir, 0755)
+	_ = WriteProjectID(projectDir, "550e8400-e29b-41d4-a716-446655440000")
 
 	got := GetAgentDir(projectDir, "test-agent", true)
 	want := filepath.Join(tmpHome, ".scion", "project-configs", "my-repo__550e8400", ".scion", "agents", "test-agent")
@@ -416,8 +416,8 @@ func TestGetAgentDir_WorktreeModeStaysInProject(t *testing.T) {
 
 	// Git project with grove-id (split storage), but caller is NOT shared-workspace
 	projectDir := filepath.Join(t.TempDir(), "my-repo", ".scion")
-	os.MkdirAll(projectDir, 0755)
-	WriteProjectID(projectDir, "550e8400-e29b-41d4-a716-446655440000")
+	_ = os.MkdirAll(projectDir, 0755)
+	_ = WriteProjectID(projectDir, "550e8400-e29b-41d4-a716-446655440000")
 
 	got := GetAgentDir(projectDir, "test-agent", false)
 	want := filepath.Join(projectDir, "agents", "test-agent")
@@ -432,7 +432,7 @@ func TestGetAgentDir_SharedWorkspaceWithoutProjectIDFallsBack(t *testing.T) {
 
 	// .scion dir without grove-id — split storage not initialized
 	projectDir := filepath.Join(t.TempDir(), "my-repo", ".scion")
-	os.MkdirAll(projectDir, 0755)
+	_ = os.MkdirAll(projectDir, 0755)
 
 	got := GetAgentDir(projectDir, "test-agent", true)
 	want := filepath.Join(projectDir, "agents", "test-agent")
@@ -446,8 +446,8 @@ func TestResolveAgentDir_PrefersExternalWhenScionAgentJSONExists(t *testing.T) {
 	t.Setenv("HOME", tmpHome)
 
 	projectDir := filepath.Join(t.TempDir(), "my-repo", ".scion")
-	os.MkdirAll(projectDir, 0755)
-	WriteProjectID(projectDir, "550e8400-e29b-41d4-a716-446655440000")
+	_ = os.MkdirAll(projectDir, 0755)
+	_ = WriteProjectID(projectDir, "550e8400-e29b-41d4-a716-446655440000")
 
 	// Populate the external dir with a scion-agent.json (shared-workspace layout)
 	extAgentDir := filepath.Join(tmpHome, ".scion", "project-configs", "my-repo__550e8400", ".scion", "agents", "test-agent")
@@ -469,8 +469,8 @@ func TestResolveAgentDir_FallsBackToInProjectWhenExternalAbsent(t *testing.T) {
 	t.Setenv("HOME", tmpHome)
 
 	projectDir := filepath.Join(t.TempDir(), "my-repo", ".scion")
-	os.MkdirAll(projectDir, 0755)
-	WriteProjectID(projectDir, "550e8400-e29b-41d4-a716-446655440000")
+	_ = os.MkdirAll(projectDir, 0755)
+	_ = WriteProjectID(projectDir, "550e8400-e29b-41d4-a716-446655440000")
 
 	// Worktree-mode layout: scion-agent.json lives in-project, only home/ is external.
 	// (We do not create the external scion-agent.json.)
@@ -516,7 +516,7 @@ func TestIsHubContext(t *testing.T) {
 func TestWriteWorkspaceMarker(t *testing.T) {
 	tmpDir := t.TempDir()
 	workspaceDir := filepath.Join(tmpDir, "workspace")
-	os.MkdirAll(workspaceDir, 0755)
+	_ = os.MkdirAll(workspaceDir, 0755)
 
 	err := WriteWorkspaceMarker(workspaceDir, "grove-id-123", "my-project", "my-project")
 	if err != nil {

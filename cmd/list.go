@@ -421,9 +421,9 @@ func displayAgents(agents []api.AgentInfo, all bool, hubMode bool) error {
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 	if hubMode {
-		fmt.Fprintln(w, "NAME\tTEMPLATE\tHARNESS-CFG\tRUNTIME\tPROJECT\tBROKER\tPHASE\tCONTAINER\tLAST ACTIVITY")
+		_, _ = fmt.Fprintln(w, "NAME\tTEMPLATE\tHARNESS-CFG\tRUNTIME\tPROJECT\tBROKER\tPHASE\tCONTAINER\tLAST ACTIVITY")
 	} else {
-		fmt.Fprintln(w, "NAME\tTEMPLATE\tHARNESS-CFG\tRUNTIME\tPROJECT\tPHASE\tCONTAINER\tLAST ACTIVITY")
+		_, _ = fmt.Fprintln(w, "NAME\tTEMPLATE\tHARNESS-CFG\tRUNTIME\tPROJECT\tPHASE\tCONTAINER\tLAST ACTIVITY")
 	}
 	for _, a := range agents {
 		phase := a.Phase
@@ -448,12 +448,12 @@ func displayAgents(agents []api.AgentInfo, all bool, hubMode bool) error {
 			broker = a.RuntimeBrokerID
 		}
 		if hubMode {
-			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", a.Name, a.Template, harnessConfig, a.Runtime, a.Project, broker, phase, containerStatus, lastActivity)
+			_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", a.Name, a.Template, harnessConfig, a.Runtime, a.Project, broker, phase, containerStatus, lastActivity)
 		} else {
-			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", a.Name, a.Template, harnessConfig, a.Runtime, a.Project, phase, containerStatus, lastActivity)
+			_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", a.Name, a.Template, harnessConfig, a.Runtime, a.Project, phase, containerStatus, lastActivity)
 		}
 	}
-	w.Flush()
+	_ = w.Flush()
 	return nil
 }
 

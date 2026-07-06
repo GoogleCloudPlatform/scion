@@ -196,7 +196,7 @@ func (rt *Runtime) Stop() {
 		rt.listener.Close()
 	}
 	if rt.db != nil {
-		rt.db.Close()
+		_ = rt.db.Close()
 	}
 }
 
@@ -224,7 +224,7 @@ func (rt *Runtime) connectWithRetry(ctx context.Context) error {
 		err = db.PingContext(pingCtx)
 		cancel()
 		if err != nil {
-			db.Close()
+			_ = db.Close()
 			rt.log.Warn("Database ping failed", "attempt", attempt, "error", err)
 			if !rt.sleep(ctx, backoff) {
 				return ctx.Err()
@@ -235,7 +235,7 @@ func (rt *Runtime) connectWithRetry(ctx context.Context) error {
 
 		err = rt.checkHubTables(ctx, db)
 		if err != nil {
-			db.Close()
+			_ = db.Close()
 			rt.log.Warn("Hub tables not ready, retrying", "attempt", attempt, "error", err)
 			if !rt.sleep(ctx, backoff) {
 				return ctx.Err()
@@ -402,7 +402,7 @@ func (rt *Runtime) handleUpdateSignal(ctx context.Context, updateID string) {
 		cmd.Stderr = os.Stderr
 		if err := cmd.Run(); err != nil {
 			detail := fmt.Sprintf("update hook failed: %v", err)
-			rt.transitionUpdateState(ctx, updateID, "updating", "failed", detail)
+			_, _ = rt.transitionUpdateState(ctx, updateID, "updating", "failed", detail)
 			rt.log.Error("Update hook failed", "error", err)
 			return
 		}
@@ -491,7 +491,7 @@ func (rt *Runtime) scanPendingUpdates(ctx context.Context) {
 		}
 		return
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	for rows.Next() {
 		var id string

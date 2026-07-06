@@ -573,7 +573,7 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 		worktreeStart := time.Now()
 		// Remove existing workspace dir if it exists to allow worktree add
 		_ = util.MakeWritableRecursive(agentWorkspace)
-		os.RemoveAll(agentWorkspace)
+		_ = os.RemoveAll(agentWorkspace)
 		// Prune worktrees to clean up any stale entries.
 		// Use repo-root-aware prune so it works when the process CWD is
 		// outside the repository (e.g. runtime broker).
@@ -1596,7 +1596,7 @@ func GetAgent(ctx context.Context, agentName string, templateName string, agentI
 				_ = os.Chmod(path, 0755)
 				return nil
 			})
-			os.RemoveAll(agentDir)
+			_ = os.RemoveAll(agentDir)
 			// Prune worktrees so git forgets any worktree that pointed into the
 			// now-deleted directory, allowing ProvisionAgent to recreate it cleanly.
 			if root, rootErr := util.RepoRootDir(filepath.Dir(agentWorkspace)); rootErr == nil {

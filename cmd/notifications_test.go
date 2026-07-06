@@ -30,7 +30,7 @@ func TestResolveAgentIDForSubscription_Found(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/v1/projects/grove-1/agents" && r.Method == http.MethodGet {
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]interface{}{
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"agents": []map[string]interface{}{
 					{"id": "uuid-1", "slug": "my-agent", "name": "my-agent", "status": "running"},
 					{"id": "uuid-2", "slug": "other-agent", "name": "other-agent", "status": "running"},
@@ -60,7 +60,7 @@ func TestResolveAgentIDForSubscription_NotFound(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/v1/projects/grove-1/agents" && r.Method == http.MethodGet {
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]interface{}{
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"agents": []map[string]interface{}{
 					{"id": "uuid-1", "slug": "other-agent", "name": "other-agent", "status": "running"},
 				},
@@ -86,7 +86,7 @@ func TestResolveAgentIDForSubscription_BySlugified(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/v1/projects/grove-1/agents" && r.Method == http.MethodGet {
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]interface{}{
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"agents": []map[string]interface{}{
 					{"id": "uuid-1", "slug": "my-agent", "name": "My Agent", "status": "running"},
 				},
@@ -140,7 +140,7 @@ func TestSubscriptionsListEndToEnd(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/v1/notifications/subscriptions" && r.Method == http.MethodGet {
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(subs)
+			_ = json.NewEncoder(w).Encode(subs)
 			return
 		}
 		w.WriteHeader(http.StatusNotFound)
@@ -192,7 +192,7 @@ func TestSubscriptionCreateEndToEnd(t *testing.T) {
 
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusCreated)
-			json.NewEncoder(w).Encode(hubclient.Subscription{
+			_ = json.NewEncoder(w).Encode(hubclient.Subscription{
 				ID:                "new-sub-id",
 				Scope:             req.Scope,
 				ProjectID:         req.ProjectID,

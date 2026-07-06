@@ -28,8 +28,8 @@ func TestLoadSettings(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	projectDir := filepath.Join(tmpDir, "my-project")
 	projectScionDir := filepath.Join(projectDir, ".scion")
@@ -109,8 +109,8 @@ func TestLoadSettings(t *testing.T) {
 func TestUpdateSetting(t *testing.T) {
 	tmpDir := t.TempDir()
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	projectDir := filepath.Join(tmpDir, "my-project")
 	projectScionDir := filepath.Join(projectDir, ".scion")
@@ -477,10 +477,10 @@ func TestHubMethods(t *testing.T) {
 }
 
 func TestExpansion(t *testing.T) {
-	os.Setenv("TEST_EXP_VAR", "expanded_value")
-	os.Setenv("TEST_EXP_KEY", "EXP_KEY")
-	defer os.Unsetenv("TEST_EXP_VAR")
-	defer os.Unsetenv("TEST_EXP_KEY")
+	_ = os.Setenv("TEST_EXP_VAR", "expanded_value")
+	_ = os.Setenv("TEST_EXP_KEY", "EXP_KEY")
+	defer func() { _ = os.Unsetenv("TEST_EXP_VAR") }()
+	defer func() { _ = os.Unsetenv("TEST_EXP_KEY") }()
 
 	base := &Settings{}
 	overrideJSON := `{
@@ -562,13 +562,13 @@ func TestExpandVolumeMountsPreservesAllFields(t *testing.T) {
 func TestUpdateHubSettingsGlobal(t *testing.T) {
 	tmpDir := t.TempDir()
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	// Unset SCION_HUB_ENDPOINT so it doesn't override file-loaded values
 	if orig, ok := os.LookupEnv("SCION_HUB_ENDPOINT"); ok {
-		os.Unsetenv("SCION_HUB_ENDPOINT")
-		t.Cleanup(func() { os.Setenv("SCION_HUB_ENDPOINT", orig) })
+		_ = os.Unsetenv("SCION_HUB_ENDPOINT")
+		t.Cleanup(func() { _ = os.Setenv("SCION_HUB_ENDPOINT", orig) })
 	}
 
 	// Create global .scion directory
@@ -629,13 +629,13 @@ func TestUpdateHubSettingsGlobal(t *testing.T) {
 func TestHubSettingsLoadFromGlobal(t *testing.T) {
 	tmpDir := t.TempDir()
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	// Unset SCION_HUB_ENDPOINT so it doesn't override file-loaded values
 	if orig, ok := os.LookupEnv("SCION_HUB_ENDPOINT"); ok {
-		os.Unsetenv("SCION_HUB_ENDPOINT")
-		t.Cleanup(func() { os.Setenv("SCION_HUB_ENDPOINT", orig) })
+		_ = os.Unsetenv("SCION_HUB_ENDPOINT")
+		t.Cleanup(func() { _ = os.Setenv("SCION_HUB_ENDPOINT", orig) })
 	}
 
 	// Create global settings with hub config
@@ -736,8 +736,8 @@ func TestMergeSettingsHubConnectionsNilBase(t *testing.T) {
 func TestUpdateSettingHubConnections(t *testing.T) {
 	tmpDir := t.TempDir()
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	projectDir := filepath.Join(tmpDir, "my-project")
 	projectScionDir := filepath.Join(projectDir, ".scion")
@@ -755,8 +755,8 @@ func TestUpdateSettingHubConnections(t *testing.T) {
 func TestUpdateSettingHubConnectionsInvalidKey(t *testing.T) {
 	tmpDir := t.TempDir()
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	projectScionDir := filepath.Join(tmpDir, ".scion")
 	if err := os.MkdirAll(projectScionDir, 0755); err != nil {
@@ -820,8 +820,8 @@ func TestGetSettingsMapHubConnections(t *testing.T) {
 func TestDeleteHubConnection(t *testing.T) {
 	tmpDir := t.TempDir()
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	projectScionDir := filepath.Join(tmpDir, ".scion")
 	if err := os.MkdirAll(projectScionDir, 0755); err != nil {
@@ -874,8 +874,8 @@ func TestUpdateSetting_SplitStorageWritesToExternalDir(t *testing.T) {
 	// local .scion/ directory, so that LoadSettingsKoanf reads the same values.
 	tmpHome := t.TempDir()
 	origHome := os.Getenv("HOME")
-	os.Setenv("HOME", tmpHome)
-	defer os.Setenv("HOME", origHome)
+	_ = os.Setenv("HOME", tmpHome)
+	defer func() { _ = os.Setenv("HOME", origHome) }()
 
 	// Create a project with .scion and a grove-id file (split storage marker)
 	projectDir := filepath.Join(tmpHome, "my-project")

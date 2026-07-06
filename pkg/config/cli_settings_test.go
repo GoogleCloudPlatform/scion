@@ -24,8 +24,8 @@ func TestCLISettings(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	projectDir := filepath.Join(tmpDir, "my-project")
 	projectScionDir := filepath.Join(projectDir, ".scion")

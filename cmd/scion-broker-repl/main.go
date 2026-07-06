@@ -73,7 +73,7 @@ func servePlugin() {
 func runREPL() {
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	b := refbroker.New(log)
-	defer b.Close()
+	defer func() { _ = b.Close() }()
 
 	// Parse flags from args
 	hubURL := ""

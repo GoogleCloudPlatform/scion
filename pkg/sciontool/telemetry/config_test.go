@@ -49,20 +49,20 @@ func TestLoadConfig_Defaults(t *testing.T) {
 func TestLoadConfig_EnvOverrides(t *testing.T) {
 	clearTelemetryEnv()
 
-	os.Setenv(EnvEnabled, "false")
-	os.Setenv(EnvCloudEnabled, "false")
-	os.Setenv(EnvEndpoint, "otel.example.com:443")
-	os.Setenv(EnvProtocol, "http")
-	os.Setenv(EnvInsecure, "true")
+	_ = os.Setenv(EnvEnabled, "false")
+	_ = os.Setenv(EnvCloudEnabled, "false")
+	_ = os.Setenv(EnvEndpoint, "otel.example.com:443")
+	_ = os.Setenv(EnvProtocol, "http")
+	_ = os.Setenv(EnvInsecure, "true")
 	if err := os.Setenv(EnvCAFile, "/etc/ssl/certs/custom-root.pem"); err != nil {
 		t.Fatalf("failed to set %s: %v", EnvCAFile, err)
 	}
-	os.Setenv(EnvGRPCPort, "14317")
-	os.Setenv(EnvHTTPPort, "14318")
-	os.Setenv(EnvProjectID, "my-project")
-	os.Setenv(EnvFilterExclude, "event.type.a,event.type.b")
-	os.Setenv(EnvFilterInclude, "event.type.c")
-	os.Setenv(EnvMetricsDebug, "true")
+	_ = os.Setenv(EnvGRPCPort, "14317")
+	_ = os.Setenv(EnvHTTPPort, "14318")
+	_ = os.Setenv(EnvProjectID, "my-project")
+	_ = os.Setenv(EnvFilterExclude, "event.type.a,event.type.b")
+	_ = os.Setenv(EnvFilterInclude, "event.type.c")
+	_ = os.Setenv(EnvMetricsDebug, "true")
 	defer clearTelemetryEnv()
 
 	cfg := LoadConfig()
@@ -175,13 +175,13 @@ func TestParseBoolEnv(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		os.Setenv("TEST_BOOL", tt.value)
+		_ = os.Setenv("TEST_BOOL", tt.value)
 		got := parseBoolEnv("TEST_BOOL", tt.defaultVal)
 		if got != tt.expected {
 			t.Errorf("parseBoolEnv(%q, %v) = %v, want %v", tt.value, tt.defaultVal, got, tt.expected)
 		}
 	}
-	os.Unsetenv("TEST_BOOL")
+	_ = os.Unsetenv("TEST_BOOL")
 }
 
 func TestParseCSVEnv(t *testing.T) {
@@ -198,7 +198,7 @@ func TestParseCSVEnv(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		os.Setenv("TEST_CSV", tt.value)
+		_ = os.Setenv("TEST_CSV", tt.value)
 		got := parseCSVEnv("TEST_CSV")
 		if len(got) != len(tt.expected) {
 			t.Errorf("parseCSVEnv(%q) = %v, want %v", tt.value, got, tt.expected)
@@ -210,7 +210,7 @@ func TestParseCSVEnv(t *testing.T) {
 			}
 		}
 	}
-	os.Unsetenv("TEST_CSV")
+	_ = os.Unsetenv("TEST_CSV")
 }
 
 func TestIsCloudConfigured_GCP(t *testing.T) {
@@ -369,7 +369,7 @@ func TestLoadConfig_ProjectIDFromCredentials(t *testing.T) {
 	_ = tmpFile.Close()
 
 	// Set credentials file but NOT project ID or provider
-	os.Setenv(EnvGCPCredentials, tmpFile.Name())
+	_ = os.Setenv(EnvGCPCredentials, tmpFile.Name())
 	defer clearTelemetryEnv()
 
 	cfg := LoadConfig()
@@ -399,7 +399,7 @@ func TestLoadConfig_GCPAutoDetect(t *testing.T) {
 	_ = tmpFile.Close()
 
 	// Only set credentials file - no provider, no project ID, no endpoint
-	os.Setenv(EnvGCPCredentials, tmpFile.Name())
+	_ = os.Setenv(EnvGCPCredentials, tmpFile.Name())
 	defer clearTelemetryEnv()
 
 	cfg := LoadConfig()
@@ -431,8 +431,8 @@ func TestLoadConfig_ProjectIDEnvTakesPriority(t *testing.T) {
 	_ = tmpFile.Close()
 
 	// Set both env var and credentials file
-	os.Setenv(EnvProjectID, "env-project")
-	os.Setenv(EnvGCPCredentials, tmpFile.Name())
+	_ = os.Setenv(EnvProjectID, "env-project")
+	_ = os.Setenv(EnvGCPCredentials, tmpFile.Name())
 	defer clearTelemetryEnv()
 
 	cfg := LoadConfig()
@@ -472,8 +472,8 @@ func TestLoadConfig_WellKnownPathFallback(t *testing.T) {
 
 	// Override HOME so LoadConfig finds the well-known path
 	origHome := os.Getenv("HOME")
-	os.Setenv("HOME", tmpHome)
-	defer os.Setenv("HOME", origHome)
+	_ = os.Setenv("HOME", tmpHome)
+	defer func() { _ = os.Setenv("HOME", origHome) }()
 
 	cfg := LoadConfig()
 
@@ -494,21 +494,30 @@ func TestLoadConfig_EnvTakesPriorityOverWellKnown(t *testing.T) {
 	// Create well-known path
 	tmpHome := t.TempDir()
 	scionDir := filepath.Join(tmpHome, ".scion")
-	os.MkdirAll(scionDir, 0755)
+	if err := os.MkdirAll(scionDir, 0755); err != nil {
+		t.Fatal(err)
+	}
 	wellKnownPath := filepath.Join(scionDir, "telemetry-gcp-credentials.json")
-	os.WriteFile(wellKnownPath, []byte(`{"type":"service_account","project_id":"wk-project"}`), 0600)
+	if err := os.WriteFile(wellKnownPath, []byte(`{"type":"service_account","project_id":"wk-project"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
 
 	// Also create a separate file for the env var
-	envFile, _ := os.CreateTemp("", "gcp-creds-*.json")
-	defer os.Remove(envFile.Name())
-	envFile.WriteString(`{"type":"service_account","project_id":"env-project"}`)
-	envFile.Close()
+	envFile, err := os.CreateTemp("", "gcp-creds-*.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Remove(envFile.Name()) }()
+	if _, err := envFile.WriteString(`{"type":"service_account","project_id":"env-project"}`); err != nil {
+		t.Fatal(err)
+	}
+	_ = envFile.Close()
 
 	origHome := os.Getenv("HOME")
-	os.Setenv("HOME", tmpHome)
-	os.Setenv(EnvGCPCredentials, envFile.Name())
+	_ = os.Setenv("HOME", tmpHome)
+	_ = os.Setenv(EnvGCPCredentials, envFile.Name())
 	defer func() {
-		os.Setenv("HOME", origHome)
+		_ = os.Setenv("HOME", origHome)
 		clearTelemetryEnv()
 	}()
 
@@ -544,8 +553,8 @@ func TestIsGCP_WithEndpointNoCreds(t *testing.T) {
 func TestLoadConfig_GCPEnvOverrides(t *testing.T) {
 	clearTelemetryEnv()
 
-	os.Setenv(EnvGCPCredentials, "/etc/gcp/sa.json")
-	os.Setenv(EnvCloudProvider, "gcp")
+	_ = os.Setenv(EnvGCPCredentials, "/etc/gcp/sa.json")
+	_ = os.Setenv(EnvCloudProvider, "gcp")
 	defer clearTelemetryEnv()
 
 	cfg := LoadConfig()
@@ -559,22 +568,22 @@ func TestLoadConfig_GCPEnvOverrides(t *testing.T) {
 }
 
 func clearTelemetryEnv() {
-	os.Unsetenv(EnvEnabled)
-	os.Unsetenv(EnvCloudEnabled)
-	os.Unsetenv(EnvEndpoint)
-	os.Unsetenv(EnvProtocol)
-	os.Unsetenv(EnvInsecure)
+	_ = os.Unsetenv(EnvEnabled)
+	_ = os.Unsetenv(EnvCloudEnabled)
+	_ = os.Unsetenv(EnvEndpoint)
+	_ = os.Unsetenv(EnvProtocol)
+	_ = os.Unsetenv(EnvInsecure)
 	if err := os.Unsetenv(EnvCAFile); err != nil {
 		panic(err)
 	}
-	os.Unsetenv(EnvGRPCPort)
-	os.Unsetenv(EnvHTTPPort)
-	os.Unsetenv(EnvFilterExclude)
-	os.Unsetenv(EnvFilterInclude)
-	os.Unsetenv(EnvProjectID)
-	os.Unsetenv(EnvGCPCredentials)
-	os.Unsetenv(EnvCloudProvider)
-	os.Unsetenv(EnvMetricsDebug)
+	_ = os.Unsetenv(EnvGRPCPort)
+	_ = os.Unsetenv(EnvHTTPPort)
+	_ = os.Unsetenv(EnvFilterExclude)
+	_ = os.Unsetenv(EnvFilterInclude)
+	_ = os.Unsetenv(EnvProjectID)
+	_ = os.Unsetenv(EnvGCPCredentials)
+	_ = os.Unsetenv(EnvCloudProvider)
+	_ = os.Unsetenv(EnvMetricsDebug)
 	// Mark as sandboxed so LoadConfig's test guard doesn't force-disable cloud.
 	telemetryTestSandboxed = true
 }

@@ -63,7 +63,7 @@ var sharedDirListCmd = &cobra.Command{
 		}
 
 		tw := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-		fmt.Fprintln(tw, "NAME\tMODE\tMOUNT\tPROVISIONED")
+		_, _ = fmt.Fprintln(tw, "NAME\tMODE\tMOUNT\tPROVISIONED")
 		for _, info := range infos {
 			mode := "read-write"
 			if info.ReadOnly {
@@ -77,7 +77,7 @@ var sharedDirListCmd = &cobra.Command{
 			if info.Exists {
 				provisioned = "yes"
 			}
-			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", info.Name, mode, mount, provisioned)
+			_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", info.Name, mode, mount, provisioned)
 		}
 		return tw.Flush()
 	},
@@ -183,7 +183,7 @@ var sharedDirRemoveCmd = &cobra.Command{
 		if !autoConfirm {
 			fmt.Printf("Remove shared directory '%s' and all its contents? [y/N] ", name)
 			var response string
-			fmt.Scanln(&response)
+			_, _ = fmt.Scanln(&response)
 			if response != "y" && response != "Y" {
 				fmt.Println("Cancelled.")
 				return nil

@@ -50,7 +50,7 @@ func req(h hub, method, path string, body any) (int, []byte, time.Duration) {
 	if err != nil {
 		return 0, []byte(err.Error()), d
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	rb, _ := io.ReadAll(resp.Body)
 	return resp.StatusCode, rb, d
 }

@@ -50,7 +50,7 @@ func saveSecretTestState() secretTestState {
 }
 
 func (s secretTestState) restore() {
-	os.Setenv("HOME", s.home)
+	_ = os.Setenv("HOME", s.home)
 	projectPath = s.projectPath
 	secretProjectScope = s.secretProjectScope
 	secretBrokerScope = s.secretBrokerScope
@@ -87,14 +87,14 @@ func newSecretListMockServer(t *testing.T, secrets []map[string]interface{}) *ht
 
 		switch {
 		case r.URL.Path == "/healthz" && r.Method == http.MethodGet:
-			json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
 
 		case r.URL.Path == "/api/v1/secrets" && r.Method == http.MethodGet:
 			scope := r.URL.Query().Get("scope")
 			if scope == "" {
 				scope = "user"
 			}
-			json.NewEncoder(w).Encode(map[string]interface{}{
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"secrets": secrets,
 				"scope":   scope,
 			})
@@ -144,7 +144,7 @@ func TestRunSecretList_WithResults(t *testing.T) {
 	defer server.Close()
 
 	tmpHome := t.TempDir()
-	os.Setenv("HOME", tmpHome)
+	_ = os.Setenv("HOME", tmpHome)
 	t.Setenv("SCION_HUB_ENDPOINT", server.URL)
 
 	projectDir := setupSecretProject(t, tmpHome, server.URL)
@@ -166,7 +166,7 @@ func TestRunSecretList_Empty(t *testing.T) {
 	defer server.Close()
 
 	tmpHome := t.TempDir()
-	os.Setenv("HOME", tmpHome)
+	_ = os.Setenv("HOME", tmpHome)
 	t.Setenv("SCION_HUB_ENDPOINT", server.URL)
 
 	projectDir := setupSecretProject(t, tmpHome, server.URL)
@@ -192,7 +192,7 @@ func TestRunSecretList_JSON(t *testing.T) {
 	defer server.Close()
 
 	tmpHome := t.TempDir()
-	os.Setenv("HOME", tmpHome)
+	_ = os.Setenv("HOME", tmpHome)
 	t.Setenv("SCION_HUB_ENDPOINT", server.URL)
 
 	projectDir := setupSecretProject(t, tmpHome, server.URL)
@@ -218,10 +218,10 @@ func TestResolveSecretScope_ScopeHub(t *testing.T) {
 	testCmd.Flags().Lookup("broker").NoOptDefVal = scopeInferSentinel
 
 	// Set --scope hub
-	testCmd.Flags().Set("scope", "hub")
+	_ = testCmd.Flags().Set("scope", "hub")
 
 	tmpHome := t.TempDir()
-	os.Setenv("HOME", tmpHome)
+	_ = os.Setenv("HOME", tmpHome)
 	projectDir := setupSecretProject(t, tmpHome, "http://localhost:9999")
 	projectPath = projectDir
 
@@ -248,10 +248,10 @@ func TestResolveSecretScope_ProjectFallbackToProjectID(t *testing.T) {
 	testCmd.Flags().Lookup("broker").NoOptDefVal = scopeInferSentinel
 
 	// Set --grove without a value (triggers inference)
-	testCmd.Flags().Set("grove", scopeInferSentinel)
+	_ = testCmd.Flags().Set("grove", scopeInferSentinel)
 
 	tmpHome := t.TempDir()
-	os.Setenv("HOME", tmpHome)
+	_ = os.Setenv("HOME", tmpHome)
 	// setupSecretProject sets project_id but NOT hub.projectId
 	projectDir := setupSecretProject(t, tmpHome, "http://localhost:9999")
 	projectPath = projectDir
@@ -280,11 +280,11 @@ func TestResolveSecretScope_ScopeConflictsWithProject(t *testing.T) {
 	testCmd.Flags().Lookup("broker").NoOptDefVal = scopeInferSentinel
 
 	// Set both --scope and --grove
-	testCmd.Flags().Set("scope", "hub")
-	testCmd.Flags().Set("grove", "some-project")
+	_ = testCmd.Flags().Set("scope", "hub")
+	_ = testCmd.Flags().Set("grove", "some-project")
 
 	tmpHome := t.TempDir()
-	os.Setenv("HOME", tmpHome)
+	_ = os.Setenv("HOME", tmpHome)
 	projectDir := setupSecretProject(t, tmpHome, "http://localhost:9999")
 	projectPath = projectDir
 
@@ -308,11 +308,11 @@ func TestResolveSecretScope_ScopeConflictsWithBroker(t *testing.T) {
 	testCmd.Flags().Lookup("broker").NoOptDefVal = scopeInferSentinel
 
 	// Set both --scope and --broker
-	testCmd.Flags().Set("scope", "hub")
-	testCmd.Flags().Set("broker", "some-broker")
+	_ = testCmd.Flags().Set("scope", "hub")
+	_ = testCmd.Flags().Set("broker", "some-broker")
 
 	tmpHome := t.TempDir()
-	os.Setenv("HOME", tmpHome)
+	_ = os.Setenv("HOME", tmpHome)
 	projectDir := setupSecretProject(t, tmpHome, "http://localhost:9999")
 	projectPath = projectDir
 

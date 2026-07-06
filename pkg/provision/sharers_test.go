@@ -63,8 +63,12 @@ func TestUnregisterSharer_OneRemaining(t *testing.T) {
 	branch := "feature/bar"
 	wt := "/workspace/wt-bar"
 
-	RegisterSharer(base, branch, wt, "agent-1")
-	RegisterSharer(base, branch, wt, "agent-2")
+	if err := RegisterSharer(base, branch, wt, "agent-1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := RegisterSharer(base, branch, wt, "agent-2"); err != nil {
+		t.Fatal(err)
+	}
 
 	remaining, path, err := UnregisterSharer(base, branch, "agent-1")
 	if err != nil {
@@ -89,7 +93,9 @@ func TestUnregisterSharer_LastRemoves(t *testing.T) {
 	branch := "feature/baz"
 	wt := "/workspace/wt-baz"
 
-	RegisterSharer(base, branch, wt, "agent-1")
+	if err := RegisterSharer(base, branch, wt, "agent-1"); err != nil {
+		t.Fatal(err)
+	}
 
 	remaining, path, err := UnregisterSharer(base, branch, "agent-1")
 	if err != nil {
@@ -112,8 +118,12 @@ func TestUnregisterSharer_LastRemoves(t *testing.T) {
 func TestFindBranchForAgent(t *testing.T) {
 	base := setupBase(t)
 
-	RegisterSharer(base, "feature/alpha", "/wt/alpha", "agent-A")
-	RegisterSharer(base, "feature/beta", "/wt/beta", "agent-B")
+	if err := RegisterSharer(base, "feature/alpha", "/wt/alpha", "agent-A"); err != nil {
+		t.Fatal(err)
+	}
+	if err := RegisterSharer(base, "feature/beta", "/wt/beta", "agent-B"); err != nil {
+		t.Fatal(err)
+	}
 
 	branch, wt, found, err := FindBranchForAgent(base, "agent-A")
 	if err != nil {
@@ -143,9 +153,15 @@ func TestIdempotentRegister(t *testing.T) {
 	branch := "feature/idem"
 	wt := "/wt/idem"
 
-	RegisterSharer(base, branch, wt, "agent-1")
-	RegisterSharer(base, branch, wt, "agent-1")
-	RegisterSharer(base, branch, wt, "agent-1")
+	if err := RegisterSharer(base, branch, wt, "agent-1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := RegisterSharer(base, branch, wt, "agent-1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := RegisterSharer(base, branch, wt, "agent-1"); err != nil {
+		t.Fatal(err)
+	}
 
 	sharers, _, err := ListSharers(base, branch)
 	if err != nil {
@@ -191,7 +207,7 @@ func TestUnregisterSharer_AgentNotInList(t *testing.T) {
 	branch := "feature/noop"
 	wt := "/wt/noop"
 
-	RegisterSharer(base, branch, wt, "agent-1")
+	_ = RegisterSharer(base, branch, wt, "agent-1")
 
 	remaining, path, err := UnregisterSharer(base, branch, "agent-unknown")
 	if err != nil {

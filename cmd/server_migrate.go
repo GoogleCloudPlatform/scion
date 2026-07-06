@@ -99,7 +99,7 @@ func runServerMigrate(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 
-	fmt.Fprintf(out, "Opening source (read-only): %s\n", srcPath)
+	_, _ = fmt.Fprintf(out, "Opening source (read-only): %s\n", srcPath)
 	src, err := entc.OpenSQLiteReadOnly(srcDSN)
 	if err != nil {
 		return fmt.Errorf("opening source sqlite: %w", err)
@@ -110,23 +110,23 @@ func runServerMigrate(cmd *cobra.Command, _ []string) error {
 		}
 	}()
 
-	fmt.Fprintln(out, "Opening destination PostgreSQL")
+	_, _ = fmt.Fprintln(out, "Opening destination PostgreSQL")
 	dst, err := entc.OpenPostgres(dstDSN, entc.PoolConfig{MaxOpenConns: 10, MaxIdleConns: 5})
 	if err != nil {
 		return fmt.Errorf("opening destination postgres: %w", err)
 	}
-	defer dst.Close()
+	defer func() { _ = dst.Close() }()
 
-	fmt.Fprintln(out, "Ensuring destination schema (auto-migrate)")
+	_, _ = fmt.Fprintln(out, "Ensuring destination schema (auto-migrate)")
 	if err := entc.AutoMigrate(ctx, dst); err != nil {
 		return fmt.Errorf("destination auto-migrate: %w", err)
 	}
 
-	fmt.Fprintln(out, "Migrating entities...")
+	_, _ = fmt.Fprintln(out, "Migrating entities...")
 	report, err := entc.MigrateData(ctx, src, dst, entc.MigrateOptions{
 		BatchSize: migrateBatchSize,
 		Logf: func(format string, args ...any) {
-			fmt.Fprintf(out, "  "+format+"\n", args...)
+			_, _ = fmt.Fprintf(out, "  "+format+"\n", args...)
 		},
 	})
 	if err != nil {
@@ -137,19 +137,19 @@ func runServerMigrate(cmd *cobra.Command, _ []string) error {
 	for _, e := range report.Entities {
 		total += e.Dest
 	}
-	fmt.Fprintf(out, "Migration complete: %d entities, %d rows total, %d child-group edges\n",
+	_, _ = fmt.Fprintf(out, "Migration complete: %d entities, %d rows total, %d child-group edges\n",
 		len(report.Entities), total, report.ChildGroupEdgs)
 
 	if migrateDropSource {
 		_ = src.Close()
 		src = nil
-		fmt.Fprintf(out, "Dropping source SQLite file: %s\n", srcPath)
+		_, _ = fmt.Fprintf(out, "Dropping source SQLite file: %s\n", srcPath)
 		if err := dropSQLiteFile(srcPath); err != nil {
 			return fmt.Errorf("dropping source: %w", err)
 		}
-		fmt.Fprintln(out, "Source dropped.")
+		_, _ = fmt.Fprintln(out, "Source dropped.")
 	} else {
-		fmt.Fprintf(out, "Source left in place: %s\n", srcPath)
+		_, _ = fmt.Fprintf(out, "Source left in place: %s\n", srcPath)
 	}
 
 	return nil

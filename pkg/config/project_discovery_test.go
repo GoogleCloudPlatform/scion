@@ -23,8 +23,8 @@ import (
 func TestDiscoverProjects_EmptyHome(t *testing.T) {
 	tmpHome := t.TempDir()
 	origHome := os.Getenv("HOME")
-	os.Setenv("HOME", tmpHome)
-	defer os.Setenv("HOME", origHome)
+	_ = os.Setenv("HOME", tmpHome)
+	defer func() { _ = os.Setenv("HOME", origHome) }()
 
 	projects, err := DiscoverProjects()
 	if err != nil {
@@ -38,11 +38,11 @@ func TestDiscoverProjects_EmptyHome(t *testing.T) {
 func TestDiscoverProjects_GlobalOnly(t *testing.T) {
 	tmpHome := t.TempDir()
 	origHome := os.Getenv("HOME")
-	os.Setenv("HOME", tmpHome)
-	defer os.Setenv("HOME", origHome)
+	_ = os.Setenv("HOME", tmpHome)
+	defer func() { _ = os.Setenv("HOME", origHome) }()
 
 	globalDir := filepath.Join(tmpHome, ".scion")
-	os.MkdirAll(filepath.Join(globalDir, "agents"), 0755)
+	_ = os.MkdirAll(filepath.Join(globalDir, "agents"), 0755)
 
 	projects, err := DiscoverProjects()
 	if err != nil {
@@ -66,26 +66,26 @@ func TestDiscoverProjects_ExternalProject(t *testing.T) {
 	// Unset Hub environment variables to avoid pollution
 	for _, e := range []string{"SCION_HUB_ENDPOINT", "SCION_HUB_URL", "SCION_HUB_TOKEN", "SCION_GROVE_ID", "SCION_HUB_GROVE_ID", "SCION_OTEL_ENDPOINT", "SCION_OTEL_PROTOCOL", "SCION_PROJECT_ID"} {
 		if val, ok := os.LookupEnv(e); ok {
-			os.Unsetenv(e)
-			defer os.Setenv(e, val)
+			_ = os.Unsetenv(e)
+			defer func() { _ = os.Setenv(e, val) }()
 		}
 	}
 
 	tmpHome := t.TempDir()
 	origHome := os.Getenv("HOME")
-	os.Setenv("HOME", tmpHome)
-	defer os.Setenv("HOME", origHome)
+	_ = os.Setenv("HOME", tmpHome)
+	defer func() { _ = os.Setenv("HOME", origHome) }()
 
 	// Create global dir
-	os.MkdirAll(filepath.Join(tmpHome, ".scion"), 0755)
+	_ = os.MkdirAll(filepath.Join(tmpHome, ".scion"), 0755)
 
 	// Create an external project config
 	projectConfigDir := filepath.Join(tmpHome, ".scion", "project-configs", "myproject__abcd1234", ".scion")
-	os.MkdirAll(filepath.Join(projectConfigDir, "agents", "agent1"), 0755)
+	_ = os.MkdirAll(filepath.Join(projectConfigDir, "agents", "agent1"), 0755)
 
 	// Create a workspace directory with a marker file
 	workspace := filepath.Join(tmpHome, "projects", "myproject")
-	os.MkdirAll(workspace, 0755)
+	_ = os.MkdirAll(workspace, 0755)
 
 	// Write marker file
 	marker := &ProjectMarker{
@@ -93,11 +93,11 @@ func TestDiscoverProjects_ExternalProject(t *testing.T) {
 		ProjectName: "myproject",
 		ProjectSlug: "myproject",
 	}
-	WriteProjectMarker(filepath.Join(workspace, DotScion), marker)
+	_ = WriteProjectMarker(filepath.Join(workspace, DotScion), marker)
 
 	// Write settings with workspace_path
 	settingsContent := "workspace_path: " + workspace + "\ngrove_id: abcd1234-0000-0000-0000-000000000000\n"
-	os.WriteFile(filepath.Join(projectConfigDir, "settings.yaml"), []byte(settingsContent), 0644)
+	_ = os.WriteFile(filepath.Join(projectConfigDir, "settings.yaml"), []byte(settingsContent), 0644)
 
 	projects, err := DiscoverProjects()
 	if err != nil {
@@ -131,24 +131,24 @@ func TestDiscoverProjects_OrphanedExternal(t *testing.T) {
 	// Unset Hub environment variables to avoid pollution
 	for _, e := range []string{"SCION_HUB_ENDPOINT", "SCION_HUB_URL", "SCION_HUB_TOKEN", "SCION_GROVE_ID", "SCION_HUB_GROVE_ID", "SCION_OTEL_ENDPOINT", "SCION_OTEL_PROTOCOL", "SCION_PROJECT_ID"} {
 		if val, ok := os.LookupEnv(e); ok {
-			os.Unsetenv(e)
-			defer os.Setenv(e, val)
+			_ = os.Unsetenv(e)
+			defer func() { _ = os.Setenv(e, val) }()
 		}
 	}
 
 	tmpHome := t.TempDir()
 	origHome := os.Getenv("HOME")
-	os.Setenv("HOME", tmpHome)
-	defer os.Setenv("HOME", origHome)
+	_ = os.Setenv("HOME", tmpHome)
+	defer func() { _ = os.Setenv("HOME", origHome) }()
 
-	os.MkdirAll(filepath.Join(tmpHome, ".scion"), 0755)
+	_ = os.MkdirAll(filepath.Join(tmpHome, ".scion"), 0755)
 
 	// Create external project config pointing to a non-existent workspace
 	projectConfigDir := filepath.Join(tmpHome, ".scion", "project-configs", "gone-project__deadbeef", ".scion")
-	os.MkdirAll(filepath.Join(projectConfigDir, "agents"), 0755)
+	_ = os.MkdirAll(filepath.Join(projectConfigDir, "agents"), 0755)
 
 	settingsContent := "workspace_path: /nonexistent/workspace\n"
-	os.WriteFile(filepath.Join(projectConfigDir, "settings.yaml"), []byte(settingsContent), 0644)
+	_ = os.WriteFile(filepath.Join(projectConfigDir, "settings.yaml"), []byte(settingsContent), 0644)
 
 	projects, err := DiscoverProjects()
 	if err != nil {
@@ -174,15 +174,15 @@ func TestDiscoverProjects_OrphanedExternal(t *testing.T) {
 func TestFindOrphanedProjectConfigs(t *testing.T) {
 	tmpHome := t.TempDir()
 	origHome := os.Getenv("HOME")
-	os.Setenv("HOME", tmpHome)
-	defer os.Setenv("HOME", origHome)
+	_ = os.Setenv("HOME", tmpHome)
+	defer func() { _ = os.Setenv("HOME", origHome) }()
 
-	os.MkdirAll(filepath.Join(tmpHome, ".scion"), 0755)
+	_ = os.MkdirAll(filepath.Join(tmpHome, ".scion"), 0755)
 
 	// Create one orphaned project
 	orphanedDir := filepath.Join(tmpHome, ".scion", "project-configs", "orphan__12345678", ".scion")
-	os.MkdirAll(filepath.Join(orphanedDir, "agents"), 0755)
-	os.WriteFile(filepath.Join(orphanedDir, "settings.yaml"), []byte("workspace_path: /does/not/exist\n"), 0644)
+	_ = os.MkdirAll(filepath.Join(orphanedDir, "agents"), 0755)
+	_ = os.WriteFile(filepath.Join(orphanedDir, "settings.yaml"), []byte("workspace_path: /does/not/exist\n"), 0644)
 
 	orphaned, err := FindOrphanedProjectConfigs()
 	if err != nil {
@@ -199,12 +199,12 @@ func TestFindOrphanedProjectConfigs(t *testing.T) {
 func TestRemoveProjectConfig(t *testing.T) {
 	tmpHome := t.TempDir()
 	origHome := os.Getenv("HOME")
-	os.Setenv("HOME", tmpHome)
-	defer os.Setenv("HOME", origHome)
+	_ = os.Setenv("HOME", tmpHome)
+	defer func() { _ = os.Setenv("HOME", origHome) }()
 
 	configDir := filepath.Join(tmpHome, ".scion", "project-configs", "test__aabbccdd", ".scion")
-	os.MkdirAll(configDir, 0755)
-	os.WriteFile(filepath.Join(configDir, "settings.yaml"), []byte(""), 0644)
+	_ = os.MkdirAll(configDir, 0755)
+	_ = os.WriteFile(filepath.Join(configDir, "settings.yaml"), []byte(""), 0644)
 
 	if err := RemoveProjectConfig(configDir); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -219,12 +219,12 @@ func TestRemoveProjectConfig(t *testing.T) {
 func TestRemoveProjectConfig_SafetyCheck(t *testing.T) {
 	tmpHome := t.TempDir()
 	origHome := os.Getenv("HOME")
-	os.Setenv("HOME", tmpHome)
-	defer os.Setenv("HOME", origHome)
+	_ = os.Setenv("HOME", tmpHome)
+	defer func() { _ = os.Setenv("HOME", origHome) }()
 
 	// Try to remove something outside project-configs — should fail
 	outsideDir := filepath.Join(tmpHome, "projects", "important")
-	os.MkdirAll(outsideDir, 0755)
+	_ = os.MkdirAll(outsideDir, 0755)
 
 	err := RemoveProjectConfig(outsideDir)
 	if err == nil {
@@ -235,16 +235,16 @@ func TestRemoveProjectConfig_SafetyCheck(t *testing.T) {
 func TestReconnectProject(t *testing.T) {
 	tmpHome := t.TempDir()
 	origHome := os.Getenv("HOME")
-	os.Setenv("HOME", tmpHome)
-	defer os.Setenv("HOME", origHome)
+	_ = os.Setenv("HOME", tmpHome)
+	defer func() { _ = os.Setenv("HOME", origHome) }()
 
 	// Create external project config
 	configDir := filepath.Join(tmpHome, ".scion", "project-configs", "proj__11223344", ".scion")
-	os.MkdirAll(configDir, 0755)
-	os.WriteFile(filepath.Join(configDir, "settings.yaml"), []byte("workspace_path: /old/path\n"), 0644)
+	_ = os.MkdirAll(configDir, 0755)
+	_ = os.WriteFile(filepath.Join(configDir, "settings.yaml"), []byte("workspace_path: /old/path\n"), 0644)
 
 	newPath := filepath.Join(tmpHome, "new-workspace")
-	os.MkdirAll(newPath, 0755)
+	_ = os.MkdirAll(newPath, 0755)
 
 	if err := ReconnectProject(configDir, newPath); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -263,9 +263,9 @@ func TestReconnectProject(t *testing.T) {
 func TestCountAgents(t *testing.T) {
 	tmpDir := t.TempDir()
 	agentsDir := filepath.Join(tmpDir, "agents")
-	os.MkdirAll(filepath.Join(agentsDir, "agent-a"), 0755)
-	os.MkdirAll(filepath.Join(agentsDir, "agent-b"), 0755)
-	os.MkdirAll(filepath.Join(agentsDir, ".hidden"), 0755)
+	_ = os.MkdirAll(filepath.Join(agentsDir, "agent-a"), 0755)
+	_ = os.MkdirAll(filepath.Join(agentsDir, "agent-b"), 0755)
+	_ = os.MkdirAll(filepath.Join(agentsDir, ".hidden"), 0755)
 
 	count := countAgents(agentsDir)
 	if count != 2 {
@@ -283,9 +283,9 @@ func TestCountAgents_NonExistentDir(t *testing.T) {
 func TestListAgentNames(t *testing.T) {
 	tmpDir := t.TempDir()
 	agentsDir := filepath.Join(tmpDir, "agents")
-	os.MkdirAll(filepath.Join(agentsDir, "agent-a"), 0755)
-	os.MkdirAll(filepath.Join(agentsDir, "agent-b"), 0755)
-	os.MkdirAll(filepath.Join(agentsDir, ".hidden"), 0755)
+	_ = os.MkdirAll(filepath.Join(agentsDir, "agent-a"), 0755)
+	_ = os.MkdirAll(filepath.Join(agentsDir, "agent-b"), 0755)
+	_ = os.MkdirAll(filepath.Join(agentsDir, ".hidden"), 0755)
 
 	names := ListAgentNames(agentsDir)
 	if len(names) != 2 {
@@ -352,31 +352,31 @@ func TestDiscoverProjects_StaleExternalAfterMarkerRecreate(t *testing.T) {
 	// Unset Hub environment variables to avoid pollution
 	for _, e := range []string{"SCION_HUB_ENDPOINT", "SCION_HUB_URL", "SCION_HUB_TOKEN", "SCION_GROVE_ID", "SCION_HUB_GROVE_ID", "SCION_OTEL_ENDPOINT", "SCION_OTEL_PROTOCOL", "SCION_PROJECT_ID"} {
 		if val, ok := os.LookupEnv(e); ok {
-			os.Unsetenv(e)
-			defer os.Setenv(e, val)
+			_ = os.Unsetenv(e)
+			defer func() { _ = os.Setenv(e, val) }()
 		}
 	}
 
 	tmpHome := t.TempDir()
 	origHome := os.Getenv("HOME")
-	os.Setenv("HOME", tmpHome)
-	defer os.Setenv("HOME", origHome)
+	_ = os.Setenv("HOME", tmpHome)
+	defer func() { _ = os.Setenv("HOME", origHome) }()
 
-	os.MkdirAll(filepath.Join(tmpHome, ".scion"), 0755)
+	_ = os.MkdirAll(filepath.Join(tmpHome, ".scion"), 0755)
 
 	workspace := filepath.Join(tmpHome, "projects", "myproject")
-	os.MkdirAll(workspace, 0755)
+	_ = os.MkdirAll(workspace, 0755)
 
 	// Simulate the old project-config (from a previous init)
 	oldConfigDir := filepath.Join(tmpHome, ".scion", "project-configs", "myproject__aaaaaaaa", ".scion")
-	os.MkdirAll(filepath.Join(oldConfigDir, "agents"), 0755)
-	os.WriteFile(filepath.Join(oldConfigDir, "settings.yaml"),
+	_ = os.MkdirAll(filepath.Join(oldConfigDir, "agents"), 0755)
+	_ = os.WriteFile(filepath.Join(oldConfigDir, "settings.yaml"),
 		[]byte("workspace_path: "+workspace+"\ngrove_id: aaaaaaaa-0000-0000-0000-000000000000\n"), 0644)
 
 	// Simulate new project-config (from re-init after marker was deleted)
 	newConfigDir := filepath.Join(tmpHome, ".scion", "project-configs", "myproject__bbbbbbbb", ".scion")
-	os.MkdirAll(filepath.Join(newConfigDir, "agents"), 0755)
-	os.WriteFile(filepath.Join(newConfigDir, "settings.yaml"),
+	_ = os.MkdirAll(filepath.Join(newConfigDir, "agents"), 0755)
+	_ = os.WriteFile(filepath.Join(newConfigDir, "settings.yaml"),
 		[]byte("workspace_path: "+workspace+"\ngrove_id: bbbbbbbb-0000-0000-0000-000000000000\n"), 0644)
 
 	// Workspace marker now points to the new project-config
@@ -385,7 +385,7 @@ func TestDiscoverProjects_StaleExternalAfterMarkerRecreate(t *testing.T) {
 		ProjectName: "myproject",
 		ProjectSlug: "myproject",
 	}
-	WriteProjectMarker(filepath.Join(workspace, DotScion), marker)
+	_ = WriteProjectMarker(filepath.Join(workspace, DotScion), marker)
 
 	// The old config should be orphaned because the marker resolves to the new config
 	orphaned, err := FindOrphanedProjectConfigs()
@@ -407,15 +407,15 @@ func TestDiscoverProjects_StaleExternalAfterMarkerRecreate(t *testing.T) {
 func TestDiscoverProjects_GitProjectExternal(t *testing.T) {
 	tmpHome := t.TempDir()
 	origHome := os.Getenv("HOME")
-	os.Setenv("HOME", tmpHome)
-	defer os.Setenv("HOME", origHome)
+	_ = os.Setenv("HOME", tmpHome)
+	defer func() { _ = os.Setenv("HOME", origHome) }()
 
-	os.MkdirAll(filepath.Join(tmpHome, ".scion"), 0755)
+	_ = os.MkdirAll(filepath.Join(tmpHome, ".scion"), 0755)
 
 	// Create a git project external directory (agents only, no .scion subdir)
 	projectDir := filepath.Join(tmpHome, ".scion", "project-configs", "myrepo__aabb1122")
 	agentsDir := filepath.Join(projectDir, "agents", "worker1", "home")
-	os.MkdirAll(agentsDir, 0755)
+	_ = os.MkdirAll(agentsDir, 0755)
 
 	projects, err := DiscoverProjects()
 	if err != nil {
@@ -446,14 +446,14 @@ func TestDiscoverProjects_GitProjectExternal(t *testing.T) {
 func TestDiscoverProjects_GitProjectExternalEmptyAgents(t *testing.T) {
 	tmpHome := t.TempDir()
 	origHome := os.Getenv("HOME")
-	os.Setenv("HOME", tmpHome)
-	defer os.Setenv("HOME", origHome)
+	_ = os.Setenv("HOME", tmpHome)
+	defer func() { _ = os.Setenv("HOME", origHome) }()
 
-	os.MkdirAll(filepath.Join(tmpHome, ".scion"), 0755)
+	_ = os.MkdirAll(filepath.Join(tmpHome, ".scion"), 0755)
 
 	// Create a git project external directory with an empty agents dir (no .scion subdir)
 	projectDir := filepath.Join(tmpHome, ".scion", "project-configs", "leftover__deadbeef")
-	os.MkdirAll(filepath.Join(projectDir, "agents"), 0755)
+	_ = os.MkdirAll(filepath.Join(projectDir, "agents"), 0755)
 
 	projects, err := DiscoverProjects()
 	if err != nil {
@@ -478,17 +478,17 @@ func TestDiscoverProjects_GitProjectExternalEmptyAgents(t *testing.T) {
 func TestDiscoverProjects_GitProjectWithExternalConfig(t *testing.T) {
 	tmpHome := t.TempDir()
 	origHome := os.Getenv("HOME")
-	os.Setenv("HOME", tmpHome)
-	defer os.Setenv("HOME", origHome)
+	_ = os.Setenv("HOME", tmpHome)
+	defer func() { _ = os.Setenv("HOME", origHome) }()
 
-	os.MkdirAll(filepath.Join(tmpHome, ".scion"), 0755)
+	_ = os.MkdirAll(filepath.Join(tmpHome, ".scion"), 0755)
 
 	// Create a git project in the new layout: .scion/ (config + agents)
 	projectDir := filepath.Join(tmpHome, ".scion", "project-configs", "newrepo__ccdd1122")
 	scionDir := filepath.Join(projectDir, ".scion")
 	agentsDir := filepath.Join(scionDir, "agents", "worker1", "home")
-	os.MkdirAll(scionDir, 0755)
-	os.MkdirAll(agentsDir, 0755)
+	_ = os.MkdirAll(scionDir, 0755)
+	_ = os.MkdirAll(agentsDir, 0755)
 
 	projects, err := DiscoverProjects()
 	if err != nil {
@@ -594,14 +594,14 @@ func TestDiscoverProjects_GitProjectWithExternalConfigUsesWorkspaceMarkerProject
 func TestDiscoverProjects_ProjectConfigNoScionNoAgents(t *testing.T) {
 	tmpHome := t.TempDir()
 	origHome := os.Getenv("HOME")
-	os.Setenv("HOME", tmpHome)
-	defer os.Setenv("HOME", origHome)
+	_ = os.Setenv("HOME", tmpHome)
+	defer func() { _ = os.Setenv("HOME", origHome) }()
 
-	os.MkdirAll(filepath.Join(tmpHome, ".scion"), 0755)
+	_ = os.MkdirAll(filepath.Join(tmpHome, ".scion"), 0755)
 
 	// Create a project-config directory with no .scion and no agents subdir
 	projectDir := filepath.Join(tmpHome, ".scion", "project-configs", "empty-leftover__aabb1122")
-	os.MkdirAll(projectDir, 0755)
+	_ = os.MkdirAll(projectDir, 0755)
 
 	projects, err := DiscoverProjects()
 	if err != nil {
@@ -626,14 +626,14 @@ func TestDiscoverProjects_ProjectConfigNoScionNoAgents(t *testing.T) {
 func TestFindOrphanedProjectConfigs_IncludesEmptyGitProjects(t *testing.T) {
 	tmpHome := t.TempDir()
 	origHome := os.Getenv("HOME")
-	os.Setenv("HOME", tmpHome)
-	defer os.Setenv("HOME", origHome)
+	_ = os.Setenv("HOME", tmpHome)
+	defer func() { _ = os.Setenv("HOME", origHome) }()
 
-	os.MkdirAll(filepath.Join(tmpHome, ".scion"), 0755)
+	_ = os.MkdirAll(filepath.Join(tmpHome, ".scion"), 0755)
 
 	// Create leftover project-config with empty agents dir (typical test residue)
 	projectDir := filepath.Join(tmpHome, ".scion", "project-configs", "ws-test__abcd1234")
-	os.MkdirAll(filepath.Join(projectDir, "agents"), 0755)
+	_ = os.MkdirAll(filepath.Join(projectDir, "agents"), 0755)
 
 	orphaned, err := FindOrphanedProjectConfigs()
 	if err != nil {

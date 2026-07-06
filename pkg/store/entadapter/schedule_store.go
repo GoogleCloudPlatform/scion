@@ -644,7 +644,7 @@ func (s *ScheduleStore) queryIDs(ctx context.Context, drv interface {
 	if err := drv.Query(ctx, query, args, rows); err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	return scanUUIDRows(rows)
 }
 

@@ -590,7 +590,7 @@ func appendGitExclude(hostPath, pattern string) error {
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	if len(data) > 0 && data[len(data)-1] != '\n' {
 		if _, err := f.WriteString("\n"); err != nil {
 			return err

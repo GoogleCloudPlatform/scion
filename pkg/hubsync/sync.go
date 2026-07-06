@@ -1102,7 +1102,7 @@ func saveProjectStateAtomic(projectPath string, state *config.ProjectState) erro
 		return err
 	}
 	tmpPath := tmpFile.Name()
-	defer os.Remove(tmpPath)
+	defer func() { _ = os.Remove(tmpPath) }()
 
 	if _, err := tmpFile.Write(data); err != nil {
 		_ = tmpFile.Close()

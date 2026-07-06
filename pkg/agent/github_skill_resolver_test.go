@@ -59,7 +59,7 @@ func TestGitHubSkillResolver_HappyPath(t *testing.T) {
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
-		w.Write([]byte(testCommitSHA))
+		_, _ = w.Write([]byte(testCommitSHA))
 	})
 
 	mux.HandleFunc("/repos/owner/repo/contents/skills/my-skill", func(w http.ResponseWriter, r *http.Request) {
@@ -67,17 +67,17 @@ func TestGitHubSkillResolver_HappyPath(t *testing.T) {
 		if ref != testCommitSHA {
 			t.Errorf("expected ref=%s, got %s", testCommitSHA, ref)
 		}
-		json.NewEncoder(w).Encode([]githubContentEntry{
+		_ = json.NewEncoder(w).Encode([]githubContentEntry{
 			{Name: "SKILL.md", Path: "skills/my-skill/SKILL.md", Type: "file", Size: len(skillContent)},
 			{Name: "README.md", Path: "skills/my-skill/README.md", Type: "file", Size: len(readmeContent)},
 		})
 	})
 
 	mux.HandleFunc("/raw/owner/repo/"+testCommitSHA+"/skills/my-skill/SKILL.md", func(w http.ResponseWriter, _ *http.Request) {
-		w.Write([]byte(skillContent))
+		_, _ = w.Write([]byte(skillContent))
 	})
 	mux.HandleFunc("/raw/owner/repo/"+testCommitSHA+"/skills/my-skill/README.md", func(w http.ResponseWriter, _ *http.Request) {
-		w.Write([]byte(readmeContent))
+		_, _ = w.Write([]byte(readmeContent))
 	})
 
 	resolver := newTestGitHubResolver(server)
@@ -134,15 +134,15 @@ func TestGitHubSkillResolver_AuthHeader(t *testing.T) {
 	var gotAuth string
 	mux.HandleFunc("/repos/owner/repo/commits/main", func(w http.ResponseWriter, r *http.Request) {
 		gotAuth = r.Header.Get("Authorization")
-		w.Write([]byte(testCommitSHA))
+		_, _ = w.Write([]byte(testCommitSHA))
 	})
 	mux.HandleFunc("/repos/owner/repo/contents/skills/my-skill", func(w http.ResponseWriter, _ *http.Request) {
-		json.NewEncoder(w).Encode([]githubContentEntry{
+		_ = json.NewEncoder(w).Encode([]githubContentEntry{
 			{Name: "SKILL.md", Path: "skills/my-skill/SKILL.md", Type: "file", Size: 5},
 		})
 	})
 	mux.HandleFunc("/raw/owner/repo/"+testCommitSHA+"/skills/my-skill/SKILL.md", func(w http.ResponseWriter, _ *http.Request) {
-		w.Write([]byte("hello"))
+		_, _ = w.Write([]byte("hello"))
 	})
 
 	resolver := newTestGitHubResolver(server)
@@ -191,7 +191,7 @@ func TestGitHubSkillResolver_NotFound_SkillDir(t *testing.T) {
 	server, mux := newTestGitHubServer(t)
 
 	mux.HandleFunc("/repos/owner/repo/commits/main", func(w http.ResponseWriter, _ *http.Request) {
-		w.Write([]byte(testCommitSHA))
+		_, _ = w.Write([]byte(testCommitSHA))
 	})
 	mux.HandleFunc("/repos/owner/repo/contents/skills/missing-skill", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
@@ -414,15 +414,15 @@ func TestGitHubSkillResolver_DefaultBranch(t *testing.T) {
 	var requestedPath string
 	mux.HandleFunc("/repos/owner/repo/commits/HEAD", func(w http.ResponseWriter, r *http.Request) {
 		requestedPath = r.URL.Path
-		w.Write([]byte(testCommitSHA))
+		_, _ = w.Write([]byte(testCommitSHA))
 	})
 	mux.HandleFunc("/repos/owner/repo/contents/skills/my-skill", func(w http.ResponseWriter, _ *http.Request) {
-		json.NewEncoder(w).Encode([]githubContentEntry{
+		_ = json.NewEncoder(w).Encode([]githubContentEntry{
 			{Name: "SKILL.md", Path: "skills/my-skill/SKILL.md", Type: "file", Size: 5},
 		})
 	})
 	mux.HandleFunc("/raw/owner/repo/"+testCommitSHA+"/skills/my-skill/SKILL.md", func(w http.ResponseWriter, _ *http.Request) {
-		w.Write([]byte("hello"))
+		_, _ = w.Write([]byte("hello"))
 	})
 
 	resolver := newTestGitHubResolver(server)
@@ -443,15 +443,15 @@ func TestGitHubSkillResolver_MixedBatch(t *testing.T) {
 	server, mux := newTestGitHubServer(t)
 
 	mux.HandleFunc("/repos/owner/repo/commits/main", func(w http.ResponseWriter, _ *http.Request) {
-		w.Write([]byte(testCommitSHA))
+		_, _ = w.Write([]byte(testCommitSHA))
 	})
 	mux.HandleFunc("/repos/owner/repo/contents/skills/my-skill", func(w http.ResponseWriter, _ *http.Request) {
-		json.NewEncoder(w).Encode([]githubContentEntry{
+		_ = json.NewEncoder(w).Encode([]githubContentEntry{
 			{Name: "SKILL.md", Path: "skills/my-skill/SKILL.md", Type: "file", Size: 5},
 		})
 	})
 	mux.HandleFunc("/raw/owner/repo/"+testCommitSHA+"/skills/my-skill/SKILL.md", func(w http.ResponseWriter, _ *http.Request) {
-		w.Write([]byte("hello"))
+		_, _ = w.Write([]byte("hello"))
 	})
 
 	ghResolver := newTestGitHubResolver(server)

@@ -197,7 +197,7 @@ func (r *Receiver) handleHTTPTraces(w http.ResponseWriter, req *http.Request) {
 	respBytes, _ := proto.Marshal(resp)
 	w.Header().Set("Content-Type", "application/x-protobuf")
 	w.WriteHeader(http.StatusOK)
-	w.Write(respBytes)
+	_, _ = w.Write(respBytes)
 }
 
 // traceServiceServer implements the OTLP gRPC trace service.
@@ -246,7 +246,7 @@ func (r *Receiver) handleHTTPMetrics(w http.ResponseWriter, req *http.Request) {
 	respBytes, _ := proto.Marshal(resp)
 	w.Header().Set("Content-Type", "application/x-protobuf")
 	w.WriteHeader(http.StatusOK)
-	w.Write(respBytes)
+	_, _ = w.Write(respBytes)
 }
 
 // metricsServiceServer implements the OTLP gRPC metrics service.
@@ -295,7 +295,7 @@ func (r *Receiver) handleHTTPLogs(w http.ResponseWriter, req *http.Request) {
 	respBytes, _ := proto.Marshal(resp)
 	w.Header().Set("Content-Type", "application/x-protobuf")
 	w.WriteHeader(http.StatusOK)
-	w.Write(respBytes)
+	_, _ = w.Write(respBytes)
 }
 
 // logsServiceServer implements the OTLP gRPC logs service.

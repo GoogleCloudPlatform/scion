@@ -185,8 +185,8 @@ func NewRequestLogger(cfg RequestLoggerConfig) (*slog.Logger, func(), error) {
 		}
 		handlers = append(handlers, slog.NewJSONHandler(f, opts))
 		cleanups = append(cleanups, func() {
-			f.Sync()
-			f.Close()
+			_ = f.Sync()
+			_ = f.Close()
 		})
 	}
 
@@ -199,7 +199,7 @@ func NewRequestLogger(cfg RequestLoggerConfig) (*slog.Logger, func(), error) {
 		}
 		handlers = append(handlers, cloudHandler)
 		cleanups = append(cleanups, func() {
-			ch.logger.Flush()
+			_ = ch.logger.Flush()
 		})
 	}
 

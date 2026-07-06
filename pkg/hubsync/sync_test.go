@@ -34,8 +34,8 @@ func TestEnsureHubReady_GlobalFallbackWithHubEnabled(t *testing.T) {
 	// Unset Hub context to avoid synthetic project root detection
 	for _, e := range []string{"SCION_HUB_ENDPOINT", "SCION_HUB_URL", "SCION_GROVE_ID", "SCION_HUB_GROVE_ID", "SCION_PROJECT_ID"} {
 		if val, ok := os.LookupEnv(e); ok {
-			os.Unsetenv(e)
-			defer os.Setenv(e, val)
+			_ = os.Unsetenv(e)
+			defer func() { _ = os.Setenv(e, val) }()
 		}
 	}
 	// When projectPath="" and the resolution falls back to global, EnsureHubReady
@@ -50,15 +50,15 @@ func TestEnsureHubReady_GlobalFallbackWithHubEnabled(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case r.URL.Path == "/healthz":
-			json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+			_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 		case r.URL.Path == "/api/v1/projects/"+projectID:
 			// Project is already registered
-			json.NewEncoder(w).Encode(map[string]interface{}{
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"id":   projectID,
 				"name": "Global",
 			})
 		case strings.Contains(r.URL.Path, "/agents"):
-			json.NewEncoder(w).Encode(map[string]interface{}{
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"agents":     []interface{}{},
 				"serverTime": time.Now().UTC().Format(time.RFC3339Nano),
 			})
@@ -99,7 +99,7 @@ hub:
 	if err := os.Chdir(tmpHome); err != nil {
 		t.Fatalf("Failed to chdir: %v", err)
 	}
-	defer os.Chdir(origDir)
+	defer func() { _ = os.Chdir(origDir) }()
 
 	hubCtx, err := EnsureHubReady("", EnsureHubReadyOptions{
 		SkipSync:    true,
@@ -126,14 +126,14 @@ func TestEnsureHubReady_EndpointOverrideBeatsSettings(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case r.URL.Path == "/healthz":
-			json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+			_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 		case r.URL.Path == "/api/v1/projects/"+projectID:
-			json.NewEncoder(w).Encode(map[string]interface{}{
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"id":   projectID,
 				"name": "Override",
 			})
 		case strings.Contains(r.URL.Path, "/agents"):
-			json.NewEncoder(w).Encode(map[string]interface{}{
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"agents":     []interface{}{},
 				"serverTime": time.Now().UTC().Format(time.RFC3339Nano),
 			})
@@ -167,7 +167,7 @@ hub:
 	if err := os.Chdir(tmpHome); err != nil {
 		t.Fatalf("Failed to chdir: %v", err)
 	}
-	defer os.Chdir(origDir)
+	defer func() { _ = os.Chdir(origDir) }()
 
 	hubCtx, err := EnsureHubReady("", EnsureHubReadyOptions{
 		AutoConfirm:      true,
@@ -189,8 +189,8 @@ func TestEnsureHubReady_GlobalFallbackWithHubDisabled(t *testing.T) {
 	// Unset Hub context to avoid synthetic project root detection
 	for _, e := range []string{"SCION_HUB_ENDPOINT", "SCION_HUB_URL", "SCION_GROVE_ID", "SCION_HUB_GROVE_ID", "SCION_PROJECT_ID"} {
 		if val, ok := os.LookupEnv(e); ok {
-			os.Unsetenv(e)
-			defer os.Setenv(e, val)
+			_ = os.Unsetenv(e)
+			defer func() { _ = os.Setenv(e, val) }()
 		}
 	}
 	// When projectPath="" and the resolution falls back to global with hub NOT
@@ -217,7 +217,7 @@ func TestEnsureHubReady_GlobalFallbackWithHubDisabled(t *testing.T) {
 	if err := os.Chdir(tmpHome); err != nil {
 		t.Fatalf("Failed to chdir: %v", err)
 	}
-	defer os.Chdir(origDir)
+	defer func() { _ = os.Chdir(origDir) }()
 
 	hubCtx, err := EnsureHubReady("", EnsureHubReadyOptions{
 		SkipSync:    true,
@@ -243,7 +243,7 @@ func TestEnsureHubReady_HubContextEnvVars(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case r.URL.Path == "/healthz":
-			json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+			_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 		default:
 			http.NotFound(w, r)
 		}
@@ -277,7 +277,7 @@ func TestEnsureHubReady_HubContextEnvVars(t *testing.T) {
 	if err := os.Chdir(tmpHome); err != nil {
 		t.Fatalf("Failed to chdir: %v", err)
 	}
-	defer os.Chdir(origDir)
+	defer func() { _ = os.Chdir(origDir) }()
 
 	hubCtx, err := EnsureHubReady("", EnsureHubReadyOptions{
 		AutoConfirm: true,
@@ -309,17 +309,17 @@ func TestEnsureHubReady_HubContextSkipsSyncAndRegistration(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case r.URL.Path == "/healthz":
-			json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+			_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 		case r.URL.Path == "/api/v1/projects/"+projectID:
 			// Project lookup — should not reach here in container context
 			registrationCalled = true
-			json.NewEncoder(w).Encode(map[string]interface{}{
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"id":   projectID,
 				"name": "test-project",
 			})
 		case strings.Contains(r.URL.Path, "/agents"):
 			syncCalled = true
-			json.NewEncoder(w).Encode(map[string]interface{}{
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"agents":     []interface{}{},
 				"serverTime": time.Now().UTC().Format(time.RFC3339Nano),
 			})
@@ -351,7 +351,7 @@ func TestEnsureHubReady_HubContextSkipsSyncAndRegistration(t *testing.T) {
 	if err := os.Chdir(tmpHome); err != nil {
 		t.Fatalf("Failed to chdir: %v", err)
 	}
-	defer os.Chdir(origDir)
+	defer func() { _ = os.Chdir(origDir) }()
 
 	hubCtx, err := EnsureHubReady("", EnsureHubReadyOptions{
 		AutoConfirm: true,
@@ -385,7 +385,7 @@ func TestEnsureHubReady_HubContextProjectIDEnvPriority(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case r.URL.Path == "/healthz":
-			json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+			_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 		default:
 			http.NotFound(w, r)
 		}
@@ -416,7 +416,7 @@ func TestEnsureHubReady_HubContextProjectIDEnvPriority(t *testing.T) {
 	if err := os.Chdir(projectDir); err != nil {
 		t.Fatalf("Failed to chdir: %v", err)
 	}
-	defer os.Chdir(origDir)
+	defer func() { _ = os.Chdir(origDir) }()
 
 	hubCtx, err := EnsureHubReady("", EnsureHubReadyOptions{
 		AutoConfirm: true,
@@ -500,7 +500,7 @@ func TestGetLocalAgents(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	// Create agents directory structure
 	agentsDir := filepath.Join(tmpDir, "agents")
@@ -565,7 +565,7 @@ func TestGetLocalAgents_EmptyDir(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	agents, err := GetLocalAgents(tmpDir)
 	if err != nil {
@@ -1010,7 +1010,7 @@ func TestUpdateLastSyncedAt_UsesHubTime(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	// Use a specific hub time that's clearly different from time.Now()
 	hubTime := time.Date(2025, 6, 15, 10, 30, 45, 123456789, time.UTC)
@@ -1043,7 +1043,7 @@ func TestUpdateLastSyncedAt_FallbackToLocalTime(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	before := time.Now().UTC()
 	UpdateLastSyncedAt(tmpDir, time.Time{}, false) // zero time = fallback
@@ -1073,7 +1073,7 @@ func TestUpdateLastSyncedAt_NanoPrecision(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	// Use a time with sub-second precision
 	hubTime := time.Date(2025, 6, 15, 10, 30, 45, 123456789, time.UTC)
@@ -1313,7 +1313,7 @@ func TestCreateHubClient_UsesAgentTokenFromEnv(t *testing.T) {
 			t.Errorf("expected no Authorization header when using agent token, got %q", auth)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 	}))
 	defer server.Close()
 
@@ -1347,7 +1347,7 @@ func TestCreateHubClient_PrefersTokenFileOverEnv(t *testing.T) {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 	}))
 	defer server.Close()
 
@@ -1355,8 +1355,8 @@ func TestCreateHubClient_PrefersTokenFileOverEnv(t *testing.T) {
 	t.Setenv("HOME", tmpHome)
 	// Write a token file
 	scionDir := filepath.Join(tmpHome, ".scion")
-	os.MkdirAll(scionDir, 0700)
-	os.WriteFile(filepath.Join(scionDir, "scion-token"), []byte("file-token-value"), 0600)
+	_ = os.MkdirAll(scionDir, 0700)
+	_ = os.WriteFile(filepath.Join(scionDir, "scion-token"), []byte("file-token-value"), 0600)
 	// Set a different value in env
 	t.Setenv("SCION_AUTH_TOKEN", "env-token-value")
 	t.Setenv("SCION_DEV_TOKEN", "")
@@ -1380,7 +1380,7 @@ func TestCreateHubClient_PrefersOAuthOverAgentToken(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Just verify the request arrives
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 	}))
 	defer server.Close()
 
@@ -1401,7 +1401,7 @@ func TestCreateHubClient_FallsBackToDevAuth(t *testing.T) {
 	// When neither OAuth nor SCION_AUTH_TOKEN is set, should fall back to dev auth
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 	}))
 	defer server.Close()
 
@@ -1428,7 +1428,7 @@ func TestIsProjectRegistered_Found(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/v1/projects/"+projectID {
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]string{"id": projectID, "name": "my-project"})
+			_ = json.NewEncoder(w).Encode(map[string]string{"id": projectID, "name": "my-project"})
 			return
 		}
 		http.NotFound(w, r)
@@ -1454,7 +1454,7 @@ func TestIsProjectRegistered_NotFound(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusNotFound)
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"error": map[string]string{
 				"code":    "not_found",
 				"message": "Project not found",
@@ -1485,7 +1485,7 @@ func TestIsProjectRegistered_NonNotFoundError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"error": map[string]string{
 				"code":    "internal_error",
 				"message": "database connection not found",
@@ -1511,14 +1511,14 @@ func TestFindProjectByID_Found(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/v1/projects/"+projectID {
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]string{
+			_ = json.NewEncoder(w).Encode(map[string]string{
 				"id":   projectID,
 				"name": "original-project-name",
 			})
 			return
 		}
 		w.WriteHeader(http.StatusNotFound)
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"error": map[string]string{"code": "not_found", "message": "not found"},
 		})
 	}))
@@ -1546,7 +1546,7 @@ func TestFindProjectByID_NotFound(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusNotFound)
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"error": map[string]string{"code": "not_found", "message": "not found"},
 		})
 	}))
@@ -1594,7 +1594,7 @@ func TestGetLocalAgentInfo_FromAgentInfoJSON(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	// Create agent directory with agent-info.json
 	homeDir := filepath.Join(tmpDir, "agents", "myagent", "home")
@@ -1623,7 +1623,7 @@ func TestGetLocalAgentInfo_FallbackToScionJSON(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	// Create agent directory with only scion-agent.json (no agent-info.json)
 	agentDir := filepath.Join(tmpDir, "agents", "myagent")
@@ -1649,7 +1649,7 @@ func TestGetLocalAgentInfo_FallbackToScionYAML(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	// Create agent directory with only scion-agent.yaml
 	agentDir := filepath.Join(tmpDir, "agents", "myagent")
@@ -1675,7 +1675,7 @@ func TestGetLocalAgentInfo_NonexistentAgent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	result := getLocalAgentInfo(tmpDir, "nonexistent")
 	if result != nil {
@@ -1767,7 +1767,7 @@ func TestCompareAgents_WatermarkBoundary(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if strings.Contains(r.URL.Path, "/agents") {
 					w.Header().Set("Content-Type", "application/json")
-					json.NewEncoder(w).Encode(map[string]interface{}{
+					_ = json.NewEncoder(w).Encode(map[string]interface{}{
 						"agents": []map[string]interface{}{
 							{
 								"id":              "agent-uuid-1",
@@ -1845,7 +1845,7 @@ func TestCompareAgents_LocalOnlyStaleAfterWatermark(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.Contains(r.URL.Path, "/agents") {
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]interface{}{
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"agents":     []map[string]interface{}{},
 				"serverTime": time.Now().UTC().Format(time.RFC3339Nano),
 				"totalCount": 0,
@@ -1923,7 +1923,7 @@ func TestCompareAgents_PreviouslySyncedDeletedFromHub(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.Contains(r.URL.Path, "/agents") {
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]interface{}{
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"agents":     []map[string]interface{}{},
 				"serverTime": time.Now().UTC().Format(time.RFC3339Nano),
 				"totalCount": 0,
@@ -1993,7 +1993,7 @@ func TestCompareAgents_NewLocalAgentNotInSyncedList(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.Contains(r.URL.Path, "/agents") {
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]interface{}{
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"agents":     []map[string]interface{}{},
 				"serverTime": time.Now().UTC().Format(time.RFC3339Nano),
 				"totalCount": 0,
@@ -2119,7 +2119,7 @@ func TestStaleLocalAgentSurvivesSyncCycle(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.Contains(r.URL.Path, "/agents") {
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]interface{}{
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"agents": []map[string]interface{}{
 					{"name": "in-sync-agent", "id": "uuid-1", "status": "running",
 						"runtimeBrokerId": brokerID, "created": watermark.Add(-time.Hour).Format(time.RFC3339Nano)},
@@ -2201,7 +2201,7 @@ func TestCompareAgents_HubAgentDifferentBrokerMatchesLocal(t *testing.T) {
 			// Capture the query string to verify no runtimeBrokerId filter
 			capturedQuery = r.URL.RawQuery
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]interface{}{
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"agents": []map[string]interface{}{
 					{
 						"id":              "agent-uuid-laptop",
@@ -2278,7 +2278,7 @@ func TestCompareAgents_HubOnlyAgentDifferentBrokerIsRemoteOnly(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.Contains(r.URL.Path, "/agents") {
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]interface{}{
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"agents": []map[string]interface{}{
 					{
 						"id":              "agent-uuid-remote",

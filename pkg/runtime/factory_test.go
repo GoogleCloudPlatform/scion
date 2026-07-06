@@ -31,7 +31,7 @@ func TestGetRuntime(t *testing.T) {
 	if err := os.Chdir(tmpWd); err != nil {
 		t.Fatal(err)
 	}
-	defer os.Chdir(oldWd)
+	defer func() { _ = os.Chdir(oldWd) }()
 
 	// Test default behavior (LoadSettings defaults to "container" via local profile)
 	t.Run("Default", func(t *testing.T) {
@@ -208,7 +208,7 @@ active_profile: apple
 		if err := os.MkdirAll(globalDir, 0755); err != nil {
 			t.Fatal(err)
 		}
-		os.WriteFile(filepath.Join(globalDir, "settings.json"), []byte(`{"default_runtime": "docker"}`), 0644)
+		_ = os.WriteFile(filepath.Join(globalDir, "settings.json"), []byte(`{"default_runtime": "docker"}`), 0644)
 
 		// Parameter override to container
 		r := GetRuntime("", "container")

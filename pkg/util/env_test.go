@@ -23,8 +23,7 @@ import (
 )
 
 func TestExpandEnv(t *testing.T) {
-	os.Setenv("TEST_VAR", "test_value")
-	defer os.Unsetenv("TEST_VAR")
+	t.Setenv("TEST_VAR", "test_value")
 
 	tests := []struct {
 		input    string
@@ -45,10 +44,10 @@ func TestExpandEnv(t *testing.T) {
 
 		result, warned := ExpandEnv(tt.input)
 
-		w.Close()
+		_ = w.Close()
 		os.Stderr = oldStderr
 		var buf bytes.Buffer
-		io.Copy(&buf, r)
+		_, _ = io.Copy(&buf, r)
 		stderrOutput := buf.String()
 
 		if result != tt.expected {

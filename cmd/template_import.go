@@ -95,7 +95,7 @@ func runTemplateImport(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("failed to fetch remote source: %w", err)
 		}
 		remoteCachePath = cachePath
-		defer os.RemoveAll(remoteCachePath)
+		defer func() { _ = os.RemoveAll(remoteCachePath) }()
 		source = cachePath
 	}
 

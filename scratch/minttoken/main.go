@@ -34,7 +34,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, "db connect:", err)
 		os.Exit(1)
 	}
-	defer conn.Close(ctx)
+	defer func() { _ = conn.Close(ctx) }()
 
 	var id, email, displayName, role string
 	// Prefer an admin; fall back to any user.

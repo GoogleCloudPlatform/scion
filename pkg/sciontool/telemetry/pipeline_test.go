@@ -94,7 +94,7 @@ func TestPipeline_DoubleStart(t *testing.T) {
 	ctx := context.Background()
 	defer func() {
 		stopCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		pipeline.Stop(stopCtx)
+		_ = pipeline.Stop(stopCtx)
 		cancel()
 	}()
 
@@ -207,7 +207,7 @@ func TestPipeline_MetricHandlerRegistered(t *testing.T) {
 	}
 	defer func() {
 		stopCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		pipeline.Stop(stopCtx)
+		_ = pipeline.Stop(stopCtx)
 		cancel()
 	}()
 
@@ -276,7 +276,7 @@ func TestPipeline_LogHandlerRegistered(t *testing.T) {
 	}
 	defer func() {
 		stopCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		pipeline.Stop(stopCtx)
+		_ = pipeline.Stop(stopCtx)
 		cancel()
 	}()
 

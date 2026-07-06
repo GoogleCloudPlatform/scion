@@ -140,8 +140,8 @@ func TestInstallLocally(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	origHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", origHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", origHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	srcDir := filepath.Join(tmpDir, "source", "test-hc")
 	createTestHarnessConfig(t, srcDir)
@@ -165,8 +165,8 @@ func TestInstallLocally_Force(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	origHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", origHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", origHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	srcDir := filepath.Join(tmpDir, "source", "test-hc")
 	createTestHarnessConfig(t, srcDir)
@@ -186,8 +186,8 @@ func TestInstallLocally_GroveScope(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	origHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", origHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", origHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	srcDir := filepath.Join(tmpDir, "source", "test-hc")
 	createTestHarnessConfig(t, srcDir)

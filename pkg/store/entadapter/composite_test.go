@@ -37,7 +37,7 @@ func newTestCompositeStore(t *testing.T) *CompositeStore {
 	entClient := enttest.NewClient(t)
 
 	cs := NewCompositeStore(entClient)
-	t.Cleanup(func() { cs.Close() })
+	t.Cleanup(func() { _ = cs.Close() })
 
 	return cs
 }

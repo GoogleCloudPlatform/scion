@@ -209,7 +209,7 @@ func Execute() {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "\n%s%s%sError: %v%s\n\n", util.BgRed, util.White, util.Bold, err, util.Reset)
 		if cmd != nil && autoHelp {
-			cmd.Usage()
+			_ = cmd.Usage()
 		}
 		os.Exit(1)
 	}

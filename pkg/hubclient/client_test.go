@@ -69,7 +69,7 @@ func TestHealth(t *testing.T) {
 			t.Errorf("expected path /healthz, got %s", r.URL.Path)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(HealthResponse{
+		_ = json.NewEncoder(w).Encode(HealthResponse{
 			Status:  "ok",
 			Version: "1.0.0",
 			Uptime:  "1h30m",
@@ -105,7 +105,7 @@ func TestAgentsList(t *testing.T) {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"agents": []Agent{
 				{
 					ID:     "uuid-1",
@@ -147,7 +147,7 @@ func TestAgentsGet(t *testing.T) {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(Agent{
+		_ = json.NewEncoder(w).Encode(Agent{
 			ID:      "uuid-123",
 			Slug:    "test-agent",
 			Name:    "Test Agent",
@@ -189,7 +189,7 @@ func TestAgentsCreate(t *testing.T) {
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
-		json.NewEncoder(w).Encode(CreateAgentResponse{
+		_ = json.NewEncoder(w).Encode(CreateAgentResponse{
 			Agent: &Agent{
 				ID:        "uuid-new",
 				Slug:      "new-agent",
@@ -288,7 +288,7 @@ func TestProjectsRegister(t *testing.T) {
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(RegisterProjectResponse{
+		_ = json.NewEncoder(w).Encode(RegisterProjectResponse{
 			Project: &Project{
 				ID:        "project-uuid",
 				Name:      req.Name,
@@ -335,7 +335,7 @@ func TestFallback(t *testing.T) {
 		}
 		if r.URL.Path == "/api/v1/groves/my-project" {
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(Project{ID: "my-project", Name: "My Project"})
+			_ = json.NewEncoder(w).Encode(Project{ID: "my-project", Name: "My Project"})
 			return
 		}
 		w.WriteHeader(http.StatusInternalServerError)
@@ -372,7 +372,7 @@ func TestWithBearerToken(t *testing.T) {
 			return
 		}
 		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(HealthResponse{Status: "ok"})
+		_ = json.NewEncoder(w).Encode(HealthResponse{Status: "ok"})
 	}))
 	defer server.Close()
 
@@ -398,7 +398,7 @@ func TestWithAgentToken(t *testing.T) {
 			t.Errorf("expected empty Authorization header, got %q", authHeader)
 		}
 		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(HealthResponse{Status: "ok"})
+		_ = json.NewEncoder(w).Encode(HealthResponse{Status: "ok"})
 	}))
 	defer server.Close()
 
@@ -425,7 +425,7 @@ func TestEnvList(t *testing.T) {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(ListEnvResponse{
+		_ = json.NewEncoder(w).Encode(ListEnvResponse{
 			EnvVars: []EnvVar{
 				{ID: "1", Key: "API_URL", Value: "https://api.example.com", Scope: "project", ScopeID: "grove-123"},
 				{ID: "2", Key: "LOG_LEVEL", Value: "debug", Scope: "project", ScopeID: "grove-123"},
@@ -459,7 +459,7 @@ func TestEnvGet(t *testing.T) {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(EnvVar{
+		_ = json.NewEncoder(w).Encode(EnvVar{
 			ID:      "uuid-123",
 			Key:     "API_URL",
 			Value:   "https://api.example.com",
@@ -503,7 +503,7 @@ func TestEnvSet(t *testing.T) {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(SetEnvResponse{
+		_ = json.NewEncoder(w).Encode(SetEnvResponse{
 			EnvVar: &EnvVar{
 				ID:      "uuid-new",
 				Key:     "LOG_LEVEL",
@@ -547,7 +547,7 @@ func TestEnvSetWithInjectionModeAndSecret(t *testing.T) {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(SetEnvResponse{
+		_ = json.NewEncoder(w).Encode(SetEnvResponse{
 			EnvVar: &EnvVar{
 				ID:            "uuid-secret",
 				Key:           "SECRET_KEY",
@@ -621,7 +621,7 @@ func TestSecretList(t *testing.T) {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(ListSecretResponse{
+		_ = json.NewEncoder(w).Encode(ListSecretResponse{
 			Secrets: []Secret{
 				{ID: "1", Key: "API_KEY", Scope: "user", Version: 1},
 				{ID: "2", Key: "DATABASE_PASSWORD", Scope: "user", Version: 3},
@@ -652,7 +652,7 @@ func TestSecretGet(t *testing.T) {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(Secret{
+		_ = json.NewEncoder(w).Encode(Secret{
 			ID:      "uuid-123",
 			Key:     "API_KEY",
 			Scope:   "user",
@@ -694,7 +694,7 @@ func TestSecretSet(t *testing.T) {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(SetSecretResponse{
+		_ = json.NewEncoder(w).Encode(SetSecretResponse{
 			Secret: &Secret{
 				ID:      "uuid-new",
 				Key:     "NEW_SECRET",
@@ -767,7 +767,7 @@ func TestTokenCreate(t *testing.T) {
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
-		json.NewEncoder(w).Encode(CreateTokenResponse{
+		_ = json.NewEncoder(w).Encode(CreateTokenResponse{
 			Token: "scion_pat_abc123",
 			AccessToken: &TokenInfo{
 				ID:        "token-uuid",
@@ -813,7 +813,7 @@ func TestTokenList(t *testing.T) {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(ListTokensResponse{
+		_ = json.NewEncoder(w).Encode(ListTokensResponse{
 			Items: []TokenInfo{
 				{ID: "t1", Name: "ci-token", Prefix: "scion_pat_abc1", ProjectID: "grove-1", Scopes: []string{"agent:dispatch"}},
 				{ID: "t2", Name: "deploy", Prefix: "scion_pat_def2", ProjectID: "grove-2", Scopes: []string{"agent:manage"}},
@@ -842,7 +842,7 @@ func TestTokenGet(t *testing.T) {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(TokenInfo{
+		_ = json.NewEncoder(w).Encode(TokenInfo{
 			ID:        "token-123",
 			Name:      "ci-token",
 			Prefix:    "scion_pat_abc1",

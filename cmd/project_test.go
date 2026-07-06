@@ -28,16 +28,16 @@ func TestProjectInitNestedDetection(t *testing.T) {
 	// Save and restore working directory
 	origWd, err := os.Getwd()
 	require.NoError(t, err)
-	defer os.Chdir(origWd)
+	defer func() { _ = os.Chdir(origWd) }()
 
 	// Save and restore HOME
 	origHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", origHome)
+	defer func() { _ = os.Setenv("HOME", origHome) }()
 
 	t.Run("allows nested project inside project", func(t *testing.T) {
 		// Create temp project with .scion
 		tmpHome := t.TempDir()
-		os.Setenv("HOME", tmpHome)
+		_ = os.Setenv("HOME", tmpHome)
 
 		projectDir := t.TempDir()
 		scionDir := filepath.Join(projectDir, ".scion")
@@ -62,7 +62,7 @@ func TestProjectInitNestedDetection(t *testing.T) {
 	t.Run("allows project when only global exists", func(t *testing.T) {
 		// Create a temp HOME with .scion (global project)
 		tmpHome := t.TempDir()
-		os.Setenv("HOME", tmpHome)
+		_ = os.Setenv("HOME", tmpHome)
 
 		globalScionDir := filepath.Join(tmpHome, ".scion")
 		require.NoError(t, os.Mkdir(globalScionDir, 0755))
@@ -93,7 +93,7 @@ func TestProjectInitNestedDetection(t *testing.T) {
 	t.Run("allows nested project inside non-global project", func(t *testing.T) {
 		// Create temp HOME without global project
 		tmpHome := t.TempDir()
-		os.Setenv("HOME", tmpHome)
+		_ = os.Setenv("HOME", tmpHome)
 
 		// Create a project with .scion that is NOT the global project
 		projectDir := filepath.Join(tmpHome, "projects", "existing-project")

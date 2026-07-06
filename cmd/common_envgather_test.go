@@ -45,8 +45,8 @@ func TestGatherAndSubmitEnv_NonInteractiveGathersFromLocalEnv(t *testing.T) {
 
 	// When the key is available in the local env, non-interactive mode
 	// should gather and submit it automatically (same as --yes).
-	os.Setenv("TEST_SECRET_KEY", "secret-value")
-	defer os.Unsetenv("TEST_SECRET_KEY")
+	_ = os.Setenv("TEST_SECRET_KEY", "secret-value")
+	defer func() { _ = os.Unsetenv("TEST_SECRET_KEY") }()
 
 	// Set up mock Hub server
 	projectID := tid("grove-1")
@@ -125,8 +125,8 @@ func TestGatherAndSubmitEnv_NonInteractiveMultipleKeysMissing(t *testing.T) {
 	outputFormat = "json" // Suppress stderr output for cleaner test
 
 	// Keys are not in the local environment, so they can't be satisfied
-	os.Unsetenv("KEY_A")
-	os.Unsetenv("KEY_B")
+	_ = os.Unsetenv("KEY_A")
+	_ = os.Unsetenv("KEY_B")
 
 	resp := &hubclient.CreateAgentResponse{
 		Agent: &hubclient.Agent{ID: "agent-3"},
@@ -161,7 +161,7 @@ func TestStartAgentViaHub_EnvGatherFailureCleansUp(t *testing.T) {
 	outputFormat = "json"
 
 	// Keys not in local env so env-gather must fail
-	os.Unsetenv("MISSING_KEY")
+	_ = os.Unsetenv("MISSING_KEY")
 
 	agentID := "agent-cleanup-1"
 	projectID := "grove-cleanup"
@@ -171,12 +171,12 @@ func TestStartAgentViaHub_EnvGatherFailureCleansUp(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case r.URL.Path == "/healthz" && r.Method == http.MethodGet:
-			json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
 
 		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/projects/"+projectID+"/agents":
 			// CreateAgent — return 202 with env-gather requirements
 			w.WriteHeader(http.StatusAccepted)
-			json.NewEncoder(w).Encode(map[string]interface{}{
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"agent": map[string]interface{}{"id": agentID, "name": "test-agent", "status": "provisioning"},
 				"envGather": map[string]interface{}{
 					"agentId":  agentID,
@@ -191,7 +191,7 @@ func TestStartAgentViaHub_EnvGatherFailureCleansUp(t *testing.T) {
 			w.WriteHeader(http.StatusNoContent)
 
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects":
-			json.NewEncoder(w).Encode(map[string]interface{}{
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"projects": []map[string]interface{}{{"id": projectID, "name": "test"}},
 			})
 
@@ -246,7 +246,7 @@ func TestStartAgentViaHub_GlobalGroveSkipsWorkspaceBootstrap(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects/"+projectID:
-			json.NewEncoder(w).Encode(map[string]interface{}{
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"id":   projectID,
 				"name": "global",
 			})
@@ -254,7 +254,7 @@ func TestStartAgentViaHub_GlobalGroveSkipsWorkspaceBootstrap(t *testing.T) {
 			var req hubclient.CreateAgentRequest
 			require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
 			captured = &req
-			json.NewEncoder(w).Encode(&hubclient.CreateAgentResponse{
+			_ = json.NewEncoder(w).Encode(&hubclient.CreateAgentResponse{
 				Agent: &hubclient.Agent{
 					ID:                tid("agent-1"),
 					Slug:              tid("agent-1"),
@@ -300,18 +300,18 @@ func newEnvGatherMockHubServer(t *testing.T, projectID string) (*httptest.Server
 
 		switch {
 		case r.URL.Path == "/healthz" && r.Method == http.MethodGet:
-			json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
 
 		case r.Method == http.MethodPost && r.URL.Path != "":
 			// SubmitEnv endpoint
 			var body struct {
 				Env map[string]string `json:"env"`
 			}
-			json.NewDecoder(r.Body).Decode(&body)
+			_ = json.NewDecoder(r.Body).Decode(&body)
 			for k, v := range body.Env {
 				captured[k] = v
 			}
-			json.NewEncoder(w).Encode(map[string]interface{}{
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"agent": map[string]interface{}{"id": tid("agent-1"), "status": "running"},
 			})
 
@@ -477,8 +477,8 @@ func TestGatherAndSubmitEnv_NonInteractiveSecretsMissing(t *testing.T) {
 
 	// Neither key is in local env; SECRET_A is secret-eligible but can't be
 	// prompted in non-interactive mode, ENV_B is env-only.
-	os.Unsetenv("SECRET_A")
-	os.Unsetenv("ENV_B")
+	_ = os.Unsetenv("SECRET_A")
+	_ = os.Unsetenv("ENV_B")
 
 	resp := &hubclient.CreateAgentResponse{
 		Agent: &hubclient.Agent{ID: tid("agent-1")},

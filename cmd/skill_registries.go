@@ -62,9 +62,9 @@ func runRegistriesList(cmd *cobra.Command, args []string) error {
 	}
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "NAME\tTYPE\tTRUST\tSTATUS\tENDPOINT")
+	_, _ = fmt.Fprintln(w, "NAME\tTYPE\tTRUST\tSTATUS\tENDPOINT")
 	for _, r := range resp.Items {
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n",
+		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n",
 			r.Name, r.Type, r.TrustLevel, r.Status, r.Endpoint)
 	}
 	return w.Flush()

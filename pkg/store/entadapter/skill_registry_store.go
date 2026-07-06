@@ -201,7 +201,7 @@ func (s *SkillRegistryStore) PinSkillHash(ctx context.Context, registryID string
 	if err != nil {
 		return mapError(err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	query := tx.SkillRegistry.Query().
 		Where(entskillregistry.ID(uid))
@@ -243,7 +243,7 @@ func (s *SkillRegistryStore) UnpinSkillHash(ctx context.Context, registryID stri
 	if err != nil {
 		return mapError(err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	query := tx.SkillRegistry.Query().
 		Where(entskillregistry.ID(uid))

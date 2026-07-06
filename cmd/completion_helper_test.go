@@ -27,15 +27,15 @@ func TestGetAgentNames(t *testing.T) {
 	// Isolate from user environment
 	originalHome := os.Getenv("HOME")
 	tmpHome := t.TempDir()
-	os.Setenv("HOME", tmpHome)
-	defer os.Setenv("HOME", originalHome)
+	_ = os.Setenv("HOME", tmpHome)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
 
 	// Setup temp directory for project
 	tmpDir, err := os.MkdirTemp("", "scion-completion-test")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	projectDir := filepath.Join(tmpDir, ".scion")
 	agentsDir := filepath.Join(projectDir, "agents")
@@ -55,7 +55,7 @@ func TestGetAgentNames(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		f.Close()
+		_ = f.Close()
 	}
 
 	createAgent("agent1")

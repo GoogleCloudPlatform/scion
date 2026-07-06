@@ -64,7 +64,7 @@ func TestGitUtils(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer os.Chdir(originalWd)
+	defer func() { _ = os.Chdir(originalWd) }()
 
 	if err := os.Chdir(repoDir); err != nil {
 		t.Fatal(err)
@@ -165,15 +165,19 @@ func TestGitUtils(t *testing.T) {
 		// PruneWorktreesIn should work even when CWD is outside the repo
 		outsideDir := t.TempDir()
 		prevWd, _ := os.Getwd()
-		os.Chdir(outsideDir)
-		defer os.Chdir(prevWd)
+		if err := os.Chdir(outsideDir); err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = os.Chdir(prevWd) }()
 
 		if err := PruneWorktreesIn(repoDir); err != nil {
 			t.Fatalf("PruneWorktreesIn failed: %v", err)
 		}
 
 		// Verify we can create the worktree again (prune cleared the stale record)
-		os.Chdir(prevWd)
+		if err := os.Chdir(prevWd); err != nil {
+			t.Fatal(err)
+		}
 		if err := CreateWorktree(prunePath, pruneBranch); err != nil {
 			t.Errorf("Failed to recreate worktree after PruneWorktreesIn: %v", err)
 		}
@@ -319,7 +323,7 @@ func TestCreateWorktree_FromWorktreeSucceeds(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer os.Chdir(originalWd)
+	defer func() { _ = os.Chdir(originalWd) }()
 	if err := os.Chdir(mainRepo); err != nil {
 		t.Fatal(err)
 	}

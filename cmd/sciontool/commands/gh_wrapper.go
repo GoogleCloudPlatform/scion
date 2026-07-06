@@ -57,7 +57,7 @@ func runGhWrapper(args []string) int {
 			tokenPath := hub.GitHubTokenPath()
 			token := hub.ReadGitHubTokenFile(tokenPath)
 			if token != "" {
-				os.Setenv("GH_TOKEN", token)
+				_ = os.Setenv("GH_TOKEN", token)
 			}
 		}
 	}

@@ -70,7 +70,7 @@ func TestIsHubProjectRef_LocalDirExists(t *testing.T) {
 	// Change to the parent directory so the relative path resolves
 	origDir, err := os.Getwd()
 	require.NoError(t, err)
-	t.Cleanup(func() { os.Chdir(origDir) })
+	t.Cleanup(func() { _ = os.Chdir(origDir) })
 	require.NoError(t, os.Chdir(tmpDir))
 
 	// The slug-like name should resolve as a local path since the dir exists
@@ -85,7 +85,7 @@ func TestIsHubProjectRef_LocalScionDirExists(t *testing.T) {
 
 	origDir, err := os.Getwd()
 	require.NoError(t, err)
-	t.Cleanup(func() { os.Chdir(origDir) })
+	t.Cleanup(func() { _ = os.Chdir(origDir) })
 	require.NoError(t, os.Chdir(tmpDir))
 
 	assert.False(t, IsHubProjectRef(dirName), "should be false when .scion subdirectory exists")
@@ -100,7 +100,7 @@ func TestResolveProjectOnHub_ByUUID(t *testing.T) {
 	projectID := "550e8400-e29b-41d4-a716-446655440000"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/v1/projects/"+projectID {
-			json.NewEncoder(w).Encode(hubclient.Project{
+			_ = json.NewEncoder(w).Encode(hubclient.Project{
 				ID:   projectID,
 				Name: "Test Project",
 				Slug: "test-project",
@@ -125,7 +125,7 @@ func TestResolveProjectOnHub_BySlug(t *testing.T) {
 		if r.URL.Path == "/api/v1/projects" {
 			slug := r.URL.Query().Get("slug")
 			if slug == "my-project" {
-				json.NewEncoder(w).Encode(map[string]interface{}{
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
 					"projects": []hubclient.Project{
 						{ID: "abc-123", Name: "My Project", Slug: "my-project"},
 					},
@@ -134,7 +134,7 @@ func TestResolveProjectOnHub_BySlug(t *testing.T) {
 				return
 			}
 			// Empty for name fallback
-			json.NewEncoder(w).Encode(map[string]interface{}{
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"projects":   []hubclient.Project{},
 				"totalCount": 0,
 			})
@@ -160,14 +160,14 @@ func TestResolveProjectOnHub_ByName(t *testing.T) {
 			slug := r.URL.Query().Get("slug")
 			if slug != "" {
 				// Slug query returns nothing
-				json.NewEncoder(w).Encode(map[string]interface{}{
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
 					"projects":   []hubclient.Project{},
 					"totalCount": 0,
 				})
 				return
 			}
 			if name == "My Project" {
-				json.NewEncoder(w).Encode(map[string]interface{}{
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
 					"projects": []hubclient.Project{
 						{ID: "abc-456", Name: "My Project", Slug: "my-project"},
 					},
@@ -175,7 +175,7 @@ func TestResolveProjectOnHub_ByName(t *testing.T) {
 				})
 				return
 			}
-			json.NewEncoder(w).Encode(map[string]interface{}{
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"projects":   []hubclient.Project{},
 				"totalCount": 0,
 			})
@@ -198,7 +198,7 @@ func TestResolveProjectOnHub_ByGitURL(t *testing.T) {
 		if r.URL.Path == "/api/v1/projects" {
 			gitRemote := r.URL.Query().Get("gitRemote")
 			if gitRemote != "" {
-				json.NewEncoder(w).Encode(map[string]interface{}{
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
 					"projects": []hubclient.Project{
 						{ID: "git-grove-1", Name: "Git Project", Slug: "git-project"},
 					},
@@ -206,7 +206,7 @@ func TestResolveProjectOnHub_ByGitURL(t *testing.T) {
 				})
 				return
 			}
-			json.NewEncoder(w).Encode(map[string]interface{}{
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"projects":   []hubclient.Project{},
 				"totalCount": 0,
 			})
@@ -227,7 +227,7 @@ func TestResolveProjectOnHub_ByGitURL(t *testing.T) {
 func TestResolveProjectOnHub_NotFound(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/v1/projects" {
-			json.NewEncoder(w).Encode(map[string]interface{}{
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"projects":   []hubclient.Project{},
 				"totalCount": 0,
 			})
@@ -251,14 +251,14 @@ func TestResolveProjectOnHub_MultipleByName(t *testing.T) {
 			slug := r.URL.Query().Get("slug")
 			if slug != "" {
 				// No slug match
-				json.NewEncoder(w).Encode(map[string]interface{}{
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
 					"projects":   []hubclient.Project{},
 					"totalCount": 0,
 				})
 				return
 			}
 			// Name returns multiple
-			json.NewEncoder(w).Encode(map[string]interface{}{
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"projects": []hubclient.Project{
 					{ID: "id-1", Name: "dupe", Slug: "dupe-1"},
 					{ID: "id-2", Name: "dupe", Slug: "dupe-2"},

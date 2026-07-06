@@ -230,24 +230,24 @@ func TestStartBrokerMode_EmptyEnvNotFatal(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	oldWd, _ := os.Getwd()
-	os.Chdir(tmpDir)
-	defer os.Chdir(oldWd)
+	_ = os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
 
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	globalScionDir := filepath.Join(tmpDir, ".scion")
 
 	hcDir := filepath.Join(globalScionDir, "harness-configs", "test-harness")
-	os.MkdirAll(hcDir, 0755)
-	os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte("harness: gemini\nuser: scion\nimage: test-image:latest\n"), 0644)
+	_ = os.MkdirAll(hcDir, 0755)
+	_ = os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte("harness: gemini\nuser: scion\nimage: test-image:latest\n"), 0644)
 
 	tplDir := filepath.Join(globalScionDir, "templates", "default")
-	os.MkdirAll(tplDir, 0755)
-	os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config": "test-harness"}`), 0644)
+	_ = os.MkdirAll(tplDir, 0755)
+	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config": "test-harness"}`), 0644)
 
-	os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(`schema_version: "1"
+	_ = os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(`schema_version: "1"
 active_profile: local
 profiles:
   local:
@@ -256,7 +256,7 @@ profiles:
 
 	projectDir := filepath.Join(tmpDir, "project")
 	projectScionDir := filepath.Join(projectDir, ".scion")
-	os.MkdirAll(projectScionDir, 0755)
+	_ = os.MkdirAll(projectScionDir, 0755)
 
 	var capturedEnv []string
 	mockRT := &runtime.MockRuntime{
@@ -272,8 +272,8 @@ profiles:
 	// Write scion-agent.json with empty env vars (simulating profile-level
 	// passthrough markers that are irrelevant to the selected harness)
 	agentDir := filepath.Join(projectScionDir, "agents", "broker-test")
-	os.MkdirAll(filepath.Join(agentDir, "home"), 0755)
-	os.WriteFile(filepath.Join(agentDir, "scion-agent.json"), []byte(`{
+	_ = os.MkdirAll(filepath.Join(agentDir, "home"), 0755)
+	_ = os.WriteFile(filepath.Join(agentDir, "scion-agent.json"), []byte(`{
 		"harness": "generic",
 		"env": {
 			"GEMINI_API_KEY": "",
@@ -324,24 +324,24 @@ func TestStartLocalMode_EmptyEnvIsFatal(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	oldWd, _ := os.Getwd()
-	os.Chdir(tmpDir)
-	defer os.Chdir(oldWd)
+	_ = os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
 
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	globalScionDir := filepath.Join(tmpDir, ".scion")
 
 	hcDir := filepath.Join(globalScionDir, "harness-configs", "test-harness")
-	os.MkdirAll(hcDir, 0755)
-	os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte("harness: gemini\nuser: scion\nimage: test-image:latest\n"), 0644)
+	_ = os.MkdirAll(hcDir, 0755)
+	_ = os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte("harness: gemini\nuser: scion\nimage: test-image:latest\n"), 0644)
 
 	tplDir := filepath.Join(globalScionDir, "templates", "default")
-	os.MkdirAll(tplDir, 0755)
-	os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config": "test-harness"}`), 0644)
+	_ = os.MkdirAll(tplDir, 0755)
+	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config": "test-harness"}`), 0644)
 
-	os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(`schema_version: "1"
+	_ = os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(`schema_version: "1"
 active_profile: local
 profiles:
   local:
@@ -350,7 +350,7 @@ profiles:
 
 	projectDir := filepath.Join(tmpDir, "project")
 	projectScionDir := filepath.Join(projectDir, ".scion")
-	os.MkdirAll(projectScionDir, 0755)
+	_ = os.MkdirAll(projectScionDir, 0755)
 
 	mockRT := &runtime.MockRuntime{
 		ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
@@ -362,8 +362,8 @@ profiles:
 	}
 
 	agentDir := filepath.Join(projectScionDir, "agents", "local-test")
-	os.MkdirAll(filepath.Join(agentDir, "home"), 0755)
-	os.WriteFile(filepath.Join(agentDir, "scion-agent.json"), []byte(`{
+	_ = os.MkdirAll(filepath.Join(agentDir, "home"), 0755)
+	_ = os.WriteFile(filepath.Join(agentDir, "scion-agent.json"), []byte(`{
 		"harness": "generic",
 		"env": {
 			"MISSING_KEY": ""
@@ -567,13 +567,13 @@ func TestStartResumeNonExistentAgent(t *testing.T) {
 
 	// Move to tmpDir to avoid being inside the project's git repo
 	oldWd, _ := os.Getwd()
-	os.Chdir(tmpDir)
-	defer os.Chdir(oldWd)
+	_ = os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
 
 	// Mock HOME for global settings
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	// Create .scion directory structure (minimum required)
 	scionDir := filepath.Join(tmpDir, ".scion")
@@ -619,27 +619,27 @@ func TestStartResolvesHarnessConfigUser(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	oldWd, _ := os.Getwd()
-	os.Chdir(tmpDir)
-	defer os.Chdir(oldWd)
+	_ = os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
 
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	globalScionDir := filepath.Join(tmpDir, ".scion")
 
 	// Create harness-config with user field
 	hcDir := filepath.Join(globalScionDir, "harness-configs", "test-harness")
-	os.MkdirAll(hcDir, 0755)
-	os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte("harness: gemini\nuser: scion\nimage: test-image:latest\n"), 0644)
+	_ = os.MkdirAll(hcDir, 0755)
+	_ = os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte("harness: gemini\nuser: scion\nimage: test-image:latest\n"), 0644)
 
 	// Create a minimal template
 	tplDir := filepath.Join(globalScionDir, "templates", "default")
-	os.MkdirAll(tplDir, 0755)
-	os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config": "test-harness"}`), 0644)
+	_ = os.MkdirAll(tplDir, 0755)
+	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config": "test-harness"}`), 0644)
 
 	// Settings without harness_configs entries (simulating default_settings.yaml)
-	os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(`schema_version: "1"
+	_ = os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(`schema_version: "1"
 active_profile: local
 profiles:
   local:
@@ -649,7 +649,7 @@ profiles:
 	// Create project directory
 	projectDir := filepath.Join(tmpDir, "project")
 	projectScionDir := filepath.Join(projectDir, ".scion")
-	os.MkdirAll(projectScionDir, 0755)
+	_ = os.MkdirAll(projectScionDir, 0755)
 
 	// Capture the RunConfig
 	var capturedConfig runtime.RunConfig
@@ -685,27 +685,27 @@ func TestStartResolvesHarnessConfigUserSettingsOverride(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	oldWd, _ := os.Getwd()
-	os.Chdir(tmpDir)
-	defer os.Chdir(oldWd)
+	_ = os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
 
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	globalScionDir := filepath.Join(tmpDir, ".scion")
 
 	// Create harness-config with user field
 	hcDir := filepath.Join(globalScionDir, "harness-configs", "test-harness")
-	os.MkdirAll(hcDir, 0755)
-	os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte("harness: gemini\nuser: scion\nimage: test-image:latest\n"), 0644)
+	_ = os.MkdirAll(hcDir, 0755)
+	_ = os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte("harness: gemini\nuser: scion\nimage: test-image:latest\n"), 0644)
 
 	// Create a minimal template
 	tplDir := filepath.Join(globalScionDir, "templates", "default")
-	os.MkdirAll(tplDir, 0755)
-	os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config": "test-harness"}`), 0644)
+	_ = os.MkdirAll(tplDir, 0755)
+	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config": "test-harness"}`), 0644)
 
 	// Settings WITH harness_configs that override the user
-	os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(`schema_version: "1"
+	_ = os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(`schema_version: "1"
 active_profile: local
 harness_configs:
   test-harness:
@@ -720,7 +720,7 @@ profiles:
 	// Create project directory
 	projectDir := filepath.Join(tmpDir, "project")
 	projectScionDir := filepath.Join(projectDir, ".scion")
-	os.MkdirAll(projectScionDir, 0755)
+	_ = os.MkdirAll(projectScionDir, 0755)
 
 	// Capture the RunConfig
 	var capturedConfig runtime.RunConfig
@@ -760,12 +760,12 @@ func TestStartResolvesHarnessConfigUserFromAbsTemplateDir(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	oldWd, _ := os.Getwd()
-	os.Chdir(tmpDir)
-	defer os.Chdir(oldWd)
+	_ = os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
 
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	globalScionDir := filepath.Join(tmpDir, ".scion")
 
@@ -773,14 +773,14 @@ func TestStartResolvesHarnessConfigUserFromAbsTemplateDir(t *testing.T) {
 	// with a bundled harness-config that has user: scion
 	hydratedTplDir := filepath.Join(tmpDir, "template-cache", "web-dev")
 	hcDir := filepath.Join(hydratedTplDir, "harness-configs", "claude-web")
-	os.MkdirAll(hcDir, 0755)
-	os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte("harness: claude\nuser: scion\nimage: scion-claude:latest\n"), 0644)
-	os.MkdirAll(filepath.Join(hcDir, "home"), 0755)
-	os.WriteFile(filepath.Join(hydratedTplDir, "scion-agent.json"), []byte(`{"default_harness_config": "claude-web"}`), 0644)
+	_ = os.MkdirAll(hcDir, 0755)
+	_ = os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte("harness: claude\nuser: scion\nimage: scion-claude:latest\n"), 0644)
+	_ = os.MkdirAll(filepath.Join(hcDir, "home"), 0755)
+	_ = os.WriteFile(filepath.Join(hydratedTplDir, "scion-agent.json"), []byte(`{"default_harness_config": "claude-web"}`), 0644)
 
 	// Minimal global settings (no harness_configs defined)
-	os.MkdirAll(globalScionDir, 0755)
-	os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(`schema_version: "1"
+	_ = os.MkdirAll(globalScionDir, 0755)
+	_ = os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(`schema_version: "1"
 active_profile: local
 profiles:
   local:
@@ -790,7 +790,7 @@ profiles:
 	// Create project directory
 	projectDir := filepath.Join(tmpDir, "project")
 	projectScionDir := filepath.Join(projectDir, ".scion")
-	os.MkdirAll(projectScionDir, 0755)
+	_ = os.MkdirAll(projectScionDir, 0755)
 
 	// Capture the RunConfig
 	var capturedConfig runtime.RunConfig
@@ -832,36 +832,36 @@ func TestStartResolvesHarnessConfigFromNamedTemplate(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	oldWd, _ := os.Getwd()
-	os.Chdir(tmpDir)
-	defer os.Chdir(oldWd)
+	_ = os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
 
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	globalScionDir := filepath.Join(tmpDir, ".scion")
 
 	// Create a "default" template (required as base layer)
 	defaultTplDir := filepath.Join(globalScionDir, "templates", "default")
-	os.MkdirAll(defaultTplDir, 0755)
-	os.WriteFile(filepath.Join(defaultTplDir, "scion-agent.yaml"), []byte("default_harness_config: claude\n"), 0644)
+	_ = os.MkdirAll(defaultTplDir, 0755)
+	_ = os.WriteFile(filepath.Join(defaultTplDir, "scion-agent.yaml"), []byte("default_harness_config: claude\n"), 0644)
 
 	// Seed the default "claude" harness-config at global level
 	claudeHcDir := filepath.Join(globalScionDir, "harness-configs", "claude")
-	os.MkdirAll(filepath.Join(claudeHcDir, "home"), 0755)
-	os.WriteFile(filepath.Join(claudeHcDir, "config.yaml"), []byte("harness: claude\nuser: scion\nimage: scion-claude:latest\n"), 0644)
+	_ = os.MkdirAll(filepath.Join(claudeHcDir, "home"), 0755)
+	_ = os.WriteFile(filepath.Join(claudeHcDir, "config.yaml"), []byte("harness: claude\nuser: scion\nimage: scion-claude:latest\n"), 0644)
 
 	// Create a non-default template "test4" with a bundled harness-config "claude2"
 	test4TplDir := filepath.Join(globalScionDir, "templates", "test4")
-	os.MkdirAll(test4TplDir, 0755)
-	os.WriteFile(filepath.Join(test4TplDir, "scion-agent.yaml"), []byte("default_harness_config: claude2\n"), 0644)
+	_ = os.MkdirAll(test4TplDir, 0755)
+	_ = os.WriteFile(filepath.Join(test4TplDir, "scion-agent.yaml"), []byte("default_harness_config: claude2\n"), 0644)
 
 	claude2HcDir := filepath.Join(test4TplDir, "harness-configs", "claude2")
-	os.MkdirAll(filepath.Join(claude2HcDir, "home"), 0755)
-	os.WriteFile(filepath.Join(claude2HcDir, "config.yaml"), []byte("harness: claude\nuser: scion\nimage: custom-claude:latest\n"), 0644)
+	_ = os.MkdirAll(filepath.Join(claude2HcDir, "home"), 0755)
+	_ = os.WriteFile(filepath.Join(claude2HcDir, "config.yaml"), []byte("harness: claude\nuser: scion\nimage: custom-claude:latest\n"), 0644)
 
 	// Minimal global settings
-	os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(`schema_version: "1"
+	_ = os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(`schema_version: "1"
 active_profile: local
 profiles:
   local:
@@ -871,7 +871,7 @@ profiles:
 	// Create project directory
 	projectDir := filepath.Join(tmpDir, "project")
 	projectScionDir := filepath.Join(projectDir, ".scion")
-	os.MkdirAll(projectScionDir, 0755)
+	_ = os.MkdirAll(projectScionDir, 0755)
 
 	// Capture the RunConfig
 	var capturedConfig runtime.RunConfig
@@ -1057,26 +1057,26 @@ func TestTaskFlagRunConfig(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	oldWd, _ := os.Getwd()
-	os.Chdir(tmpDir)
-	defer os.Chdir(oldWd)
+	_ = os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
 
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	globalScionDir := filepath.Join(tmpDir, ".scion")
 
 	// Create harness-config
 	hcDir := filepath.Join(globalScionDir, "harness-configs", "test-harness")
-	os.MkdirAll(hcDir, 0755)
-	os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte("harness: generic\nuser: scion\nimage: test-image:latest\n"), 0644)
+	_ = os.MkdirAll(hcDir, 0755)
+	_ = os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte("harness: generic\nuser: scion\nimage: test-image:latest\n"), 0644)
 
 	// Create template
 	tplDir := filepath.Join(globalScionDir, "templates", "default")
-	os.MkdirAll(tplDir, 0755)
-	os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config": "test-harness"}`), 0644)
+	_ = os.MkdirAll(tplDir, 0755)
+	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config": "test-harness"}`), 0644)
 
-	os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(`schema_version: "1"
+	_ = os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(`schema_version: "1"
 active_profile: local
 profiles:
   local:
@@ -1085,7 +1085,7 @@ profiles:
 
 	projectDir := filepath.Join(tmpDir, "project")
 	projectScionDir := filepath.Join(projectDir, ".scion")
-	os.MkdirAll(projectScionDir, 0755)
+	_ = os.MkdirAll(projectScionDir, 0755)
 
 	t.Run("task_flag moves task into CommandArgs", func(t *testing.T) {
 		var capturedConfig runtime.RunConfig
@@ -1100,8 +1100,8 @@ profiles:
 		}
 
 		agentDir := filepath.Join(projectScionDir, "agents", "flag-test")
-		os.MkdirAll(filepath.Join(agentDir, "home"), 0755)
-		os.WriteFile(filepath.Join(agentDir, "scion-agent.json"), []byte(`{
+		_ = os.MkdirAll(filepath.Join(agentDir, "home"), 0755)
+		_ = os.WriteFile(filepath.Join(agentDir, "scion-agent.json"), []byte(`{
 			"harness": "generic",
 			"task_flag": "--input",
 			"command_args": ["adk", "run", "/opt/agent"]
@@ -1150,8 +1150,8 @@ profiles:
 		}
 
 		agentDir := filepath.Join(projectScionDir, "agents", "noflag-test")
-		os.MkdirAll(filepath.Join(agentDir, "home"), 0755)
-		os.WriteFile(filepath.Join(agentDir, "scion-agent.json"), []byte(`{
+		_ = os.MkdirAll(filepath.Join(agentDir, "home"), 0755)
+		_ = os.WriteFile(filepath.Join(agentDir, "scion-agent.json"), []byte(`{
 			"harness": "generic",
 			"command_args": ["adk", "run", "/opt/agent"]
 		}`), 0644)
@@ -1187,26 +1187,26 @@ func TestTelemetryEnabledRunConfig(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	oldWd, _ := os.Getwd()
-	os.Chdir(tmpDir)
-	defer os.Chdir(oldWd)
+	_ = os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
 
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	globalScionDir := filepath.Join(tmpDir, ".scion")
 
 	// Create harness-config
 	hcDir := filepath.Join(globalScionDir, "harness-configs", "test-harness")
-	os.MkdirAll(hcDir, 0755)
-	os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte("harness: gemini\nuser: scion\nimage: test-image:latest\n"), 0644)
+	_ = os.MkdirAll(hcDir, 0755)
+	_ = os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte("harness: gemini\nuser: scion\nimage: test-image:latest\n"), 0644)
 
 	// Create template
 	tplDir := filepath.Join(globalScionDir, "templates", "default")
-	os.MkdirAll(tplDir, 0755)
-	os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config": "test-harness"}`), 0644)
+	_ = os.MkdirAll(tplDir, 0755)
+	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config": "test-harness"}`), 0644)
 
-	os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(`schema_version: "1"
+	_ = os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(`schema_version: "1"
 active_profile: local
 profiles:
   local:
@@ -1215,7 +1215,7 @@ profiles:
 
 	projectDir := filepath.Join(tmpDir, "project")
 	projectScionDir := filepath.Join(projectDir, ".scion")
-	os.MkdirAll(projectScionDir, 0755)
+	_ = os.MkdirAll(projectScionDir, 0755)
 
 	t.Run("telemetry enabled passes TelemetryEnabled to RunConfig", func(t *testing.T) {
 		var capturedConfig runtime.RunConfig
@@ -1231,8 +1231,8 @@ profiles:
 
 		// Create agent with telemetry enabled in scion-agent.json
 		agentDir := filepath.Join(projectScionDir, "agents", "telem-on")
-		os.MkdirAll(filepath.Join(agentDir, "home"), 0755)
-		os.WriteFile(filepath.Join(agentDir, "scion-agent.json"), []byte(`{
+		_ = os.MkdirAll(filepath.Join(agentDir, "home"), 0755)
+		_ = os.WriteFile(filepath.Join(agentDir, "scion-agent.json"), []byte(`{
 			"harness": "gemini",
 			"telemetry": {"enabled": true}
 		}`), 0644)
@@ -1265,8 +1265,8 @@ profiles:
 		}
 
 		agentDir := filepath.Join(projectScionDir, "agents", "telem-off")
-		os.MkdirAll(filepath.Join(agentDir, "home"), 0755)
-		os.WriteFile(filepath.Join(agentDir, "scion-agent.json"), []byte(`{
+		_ = os.MkdirAll(filepath.Join(agentDir, "home"), 0755)
+		_ = os.WriteFile(filepath.Join(agentDir, "scion-agent.json"), []byte(`{
 			"harness": "gemini",
 			"telemetry": {"enabled": false}
 		}`), 0644)
@@ -1293,24 +1293,24 @@ func TestTelemetryOverrideFlag(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	oldWd, _ := os.Getwd()
-	os.Chdir(tmpDir)
-	defer os.Chdir(oldWd)
+	_ = os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
 
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	globalScionDir := filepath.Join(tmpDir, ".scion")
 
 	hcDir := filepath.Join(globalScionDir, "harness-configs", "test-harness")
-	os.MkdirAll(hcDir, 0755)
-	os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte("harness: gemini\nuser: scion\nimage: test-image:latest\n"), 0644)
+	_ = os.MkdirAll(hcDir, 0755)
+	_ = os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte("harness: gemini\nuser: scion\nimage: test-image:latest\n"), 0644)
 
 	tplDir := filepath.Join(globalScionDir, "templates", "default")
-	os.MkdirAll(tplDir, 0755)
-	os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config": "test-harness"}`), 0644)
+	_ = os.MkdirAll(tplDir, 0755)
+	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config": "test-harness"}`), 0644)
 
-	os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(`schema_version: "1"
+	_ = os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(`schema_version: "1"
 active_profile: local
 profiles:
   local:
@@ -1319,7 +1319,7 @@ profiles:
 
 	projectDir := filepath.Join(tmpDir, "project")
 	projectScionDir := filepath.Join(projectDir, ".scion")
-	os.MkdirAll(projectScionDir, 0755)
+	_ = os.MkdirAll(projectScionDir, 0755)
 
 	boolPtr := func(b bool) *bool { return &b }
 
@@ -1336,8 +1336,8 @@ profiles:
 		}
 
 		agentDir := filepath.Join(projectScionDir, "agents", "override-enable")
-		os.MkdirAll(filepath.Join(agentDir, "home"), 0755)
-		os.WriteFile(filepath.Join(agentDir, "scion-agent.json"), []byte(`{
+		_ = os.MkdirAll(filepath.Join(agentDir, "home"), 0755)
+		_ = os.WriteFile(filepath.Join(agentDir, "scion-agent.json"), []byte(`{
 			"harness": "gemini",
 			"telemetry": {"enabled": false}
 		}`), 0644)
@@ -1371,8 +1371,8 @@ profiles:
 		}
 
 		agentDir := filepath.Join(projectScionDir, "agents", "override-disable")
-		os.MkdirAll(filepath.Join(agentDir, "home"), 0755)
-		os.WriteFile(filepath.Join(agentDir, "scion-agent.json"), []byte(`{
+		_ = os.MkdirAll(filepath.Join(agentDir, "home"), 0755)
+		_ = os.WriteFile(filepath.Join(agentDir, "scion-agent.json"), []byte(`{
 			"harness": "gemini",
 			"telemetry": {"enabled": true}
 		}`), 0644)
@@ -1406,8 +1406,8 @@ profiles:
 		}
 
 		agentDir := filepath.Join(projectScionDir, "agents", "override-no-config")
-		os.MkdirAll(filepath.Join(agentDir, "home"), 0755)
-		os.WriteFile(filepath.Join(agentDir, "scion-agent.json"), []byte(`{
+		_ = os.MkdirAll(filepath.Join(agentDir, "home"), 0755)
+		_ = os.WriteFile(filepath.Join(agentDir, "scion-agent.json"), []byte(`{
 			"harness": "gemini"
 		}`), 0644)
 
@@ -1441,26 +1441,26 @@ func TestSettingsTelemetryMergedIntoStart(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	oldWd, _ := os.Getwd()
-	os.Chdir(tmpDir)
-	defer os.Chdir(oldWd)
+	_ = os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
 
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	globalScionDir := filepath.Join(tmpDir, ".scion")
 
 	hcDir := filepath.Join(globalScionDir, "harness-configs", "test-harness")
-	os.MkdirAll(hcDir, 0755)
-	os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte("harness: gemini\nuser: scion\nimage: test-image:latest\n"), 0644)
+	_ = os.MkdirAll(hcDir, 0755)
+	_ = os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte("harness: gemini\nuser: scion\nimage: test-image:latest\n"), 0644)
 
 	tplDir := filepath.Join(globalScionDir, "templates", "default")
-	os.MkdirAll(tplDir, 0755)
-	os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config": "test-harness"}`), 0644)
+	_ = os.MkdirAll(tplDir, 0755)
+	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config": "test-harness"}`), 0644)
 
 	// Settings with telemetry cloud config but telemetry.enabled: false
 	// (the override should enable it)
-	os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(`schema_version: "1"
+	_ = os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(`schema_version: "1"
 active_profile: local
 profiles:
   local:
@@ -1475,7 +1475,7 @@ telemetry:
 
 	projectDir := filepath.Join(tmpDir, "project")
 	projectScionDir := filepath.Join(projectDir, ".scion")
-	os.MkdirAll(projectScionDir, 0755)
+	_ = os.MkdirAll(projectScionDir, 0755)
 
 	boolPtr := func(b bool) *bool { return &b }
 
@@ -1491,8 +1491,8 @@ telemetry:
 	}
 
 	agentDir := filepath.Join(projectScionDir, "agents", "settings-telem")
-	os.MkdirAll(filepath.Join(agentDir, "home"), 0755)
-	os.WriteFile(filepath.Join(agentDir, "scion-agent.json"), []byte(`{
+	_ = os.MkdirAll(filepath.Join(agentDir, "home"), 0755)
+	_ = os.WriteFile(filepath.Join(agentDir, "scion-agent.json"), []byte(`{
 		"harness": "gemini"
 	}`), 0644)
 
@@ -1531,24 +1531,24 @@ func TestHarnessAuthOverrideFlag(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	oldWd, _ := os.Getwd()
-	os.Chdir(tmpDir)
-	defer os.Chdir(oldWd)
+	_ = os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
 
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	globalScionDir := filepath.Join(tmpDir, ".scion")
 
 	hcDir := filepath.Join(globalScionDir, "harness-configs", "test-harness")
-	os.MkdirAll(hcDir, 0755)
-	os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte("harness: gemini\nuser: scion\nimage: test-image:latest\n"), 0644)
+	_ = os.MkdirAll(hcDir, 0755)
+	_ = os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte("harness: gemini\nuser: scion\nimage: test-image:latest\n"), 0644)
 
 	tplDir := filepath.Join(globalScionDir, "templates", "default")
-	os.MkdirAll(tplDir, 0755)
-	os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config": "test-harness"}`), 0644)
+	_ = os.MkdirAll(tplDir, 0755)
+	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config": "test-harness"}`), 0644)
 
-	os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(`schema_version: "1"
+	_ = os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(`schema_version: "1"
 active_profile: local
 profiles:
   local:
@@ -1557,7 +1557,7 @@ profiles:
 
 	projectDir := filepath.Join(tmpDir, "project")
 	projectScionDir := filepath.Join(projectDir, ".scion")
-	os.MkdirAll(projectScionDir, 0755)
+	_ = os.MkdirAll(projectScionDir, 0755)
 
 	t.Run("override changes auth_selected_type from api-key to vertex-ai", func(t *testing.T) {
 		mockRT := &runtime.MockRuntime{
@@ -1570,8 +1570,8 @@ profiles:
 		}
 
 		agentDir := filepath.Join(projectScionDir, "agents", "auth-override")
-		os.MkdirAll(filepath.Join(agentDir, "home"), 0755)
-		os.WriteFile(filepath.Join(agentDir, "scion-agent.json"), []byte(`{
+		_ = os.MkdirAll(filepath.Join(agentDir, "home"), 0755)
+		_ = os.WriteFile(filepath.Join(agentDir, "scion-agent.json"), []byte(`{
 			"harness": "gemini",
 			"auth_selectedType": "api-key"
 		}`), 0644)
@@ -2005,27 +2005,27 @@ func TestStartPreservesExplicitHubEndpoint(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	oldWd, _ := os.Getwd()
-	os.Chdir(tmpDir)
-	defer os.Chdir(oldWd)
+	_ = os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
 
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	globalScionDir := filepath.Join(tmpDir, ".scion")
 
 	// Create harness-config
 	hcDir := filepath.Join(globalScionDir, "harness-configs", "test-harness")
-	os.MkdirAll(hcDir, 0755)
-	os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte("harness: gemini\nuser: scion\nimage: test-image:latest\n"), 0644)
+	_ = os.MkdirAll(hcDir, 0755)
+	_ = os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte("harness: gemini\nuser: scion\nimage: test-image:latest\n"), 0644)
 
 	// Create a minimal template
 	tplDir := filepath.Join(globalScionDir, "templates", "default")
-	os.MkdirAll(tplDir, 0755)
-	os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config": "test-harness"}`), 0644)
+	_ = os.MkdirAll(tplDir, 0755)
+	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config": "test-harness"}`), 0644)
 
 	// Global settings
-	os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(`schema_version: "1"
+	_ = os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(`schema_version: "1"
 active_profile: local
 profiles:
   local:
@@ -2035,8 +2035,8 @@ profiles:
 	// Create project directory with hub-enabled settings (different endpoint)
 	projectDir := filepath.Join(tmpDir, "project")
 	projectScionDir := filepath.Join(projectDir, ".scion")
-	os.MkdirAll(projectScionDir, 0755)
-	os.WriteFile(filepath.Join(projectScionDir, "settings.yaml"), []byte(`hub:
+	_ = os.MkdirAll(projectScionDir, 0755)
+	_ = os.WriteFile(filepath.Join(projectScionDir, "settings.yaml"), []byte(`hub:
   enabled: true
   endpoint: "http://project-setting:9810"
 `), 0644)
@@ -2187,18 +2187,18 @@ func TestStartSuppressesHubEnvWhenHubDisabled(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	oldWd, _ := os.Getwd()
-	os.Chdir(tmpDir)
-	defer os.Chdir(oldWd)
+	_ = os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
 
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	// Clear dev token env vars so we control the test
 	for _, k := range []string{"SCION_DEV_TOKEN", "SCION_AUTH_TOKEN", "SCION_DEV_TOKEN_FILE"} {
 		if old, ok := os.LookupEnv(k); ok {
-			defer os.Setenv(k, old)
-			os.Unsetenv(k)
+			defer func() { _ = os.Setenv(k, old) }()
+			_ = os.Unsetenv(k)
 		}
 	}
 
@@ -2206,16 +2206,16 @@ func TestStartSuppressesHubEnvWhenHubDisabled(t *testing.T) {
 
 	// Create harness-config
 	hcDir := filepath.Join(globalScionDir, "harness-configs", "test-harness")
-	os.MkdirAll(hcDir, 0755)
-	os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte("harness: gemini\nuser: scion\nimage: test-image:latest\n"), 0644)
+	_ = os.MkdirAll(hcDir, 0755)
+	_ = os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte("harness: gemini\nuser: scion\nimage: test-image:latest\n"), 0644)
 
 	// Create a minimal template
 	tplDir := filepath.Join(globalScionDir, "templates", "default")
-	os.MkdirAll(tplDir, 0755)
-	os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config": "test-harness"}`), 0644)
+	_ = os.MkdirAll(tplDir, 0755)
+	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config": "test-harness"}`), 0644)
 
 	// Global settings
-	os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(`schema_version: "1"
+	_ = os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(`schema_version: "1"
 active_profile: local
 profiles:
   local:
@@ -2225,14 +2225,14 @@ profiles:
 	// Create project directory with hub explicitly DISABLED but endpoint configured
 	projectDir := filepath.Join(tmpDir, "project")
 	projectScionDir := filepath.Join(projectDir, ".scion")
-	os.MkdirAll(projectScionDir, 0755)
-	os.WriteFile(filepath.Join(projectScionDir, "settings.yaml"), []byte(`hub:
+	_ = os.MkdirAll(projectScionDir, 0755)
+	_ = os.WriteFile(filepath.Join(projectScionDir, "settings.yaml"), []byte(`hub:
   enabled: false
   endpoint: "http://localhost:9810"
 `), 0644)
 
 	// Write a dev-token file (should NOT be used since hub is disabled)
-	os.WriteFile(filepath.Join(globalScionDir, "dev-token"), []byte("scion-dev-test-token-abc"), 0644)
+	_ = os.WriteFile(filepath.Join(globalScionDir, "dev-token"), []byte("scion-dev-test-token-abc"), 0644)
 
 	t.Run("project settings hub disabled suppresses hub env", func(t *testing.T) {
 		var capturedConfig runtime.RunConfig
@@ -2279,8 +2279,8 @@ profiles:
 	t.Run("agent-level hub endpoint suppressed when hub disabled", func(t *testing.T) {
 		// Agent scion-agent.json has hub.endpoint but project says hub.enabled=false
 		agentDir := filepath.Join(projectScionDir, "agents", "hub-disabled-agent")
-		os.MkdirAll(filepath.Join(agentDir, "home"), 0755)
-		os.WriteFile(filepath.Join(agentDir, "scion-agent.json"), []byte(`{
+		_ = os.MkdirAll(filepath.Join(agentDir, "home"), 0755)
+		_ = os.WriteFile(filepath.Join(agentDir, "scion-agent.json"), []byte(`{
 			"harness": "gemini",
 			"hub": {
 				"endpoint": "http://agent-hub:9810"
@@ -2325,8 +2325,8 @@ profiles:
 	t.Run("template env section hub endpoint suppressed when hub disabled", func(t *testing.T) {
 		// Agent scion-agent.json has env.SCION_HUB_ENDPOINT but project says hub.enabled=false
 		agentDir := filepath.Join(projectScionDir, "agents", "hub-disabled-env")
-		os.MkdirAll(filepath.Join(agentDir, "home"), 0755)
-		os.WriteFile(filepath.Join(agentDir, "scion-agent.json"), []byte(`{
+		_ = os.MkdirAll(filepath.Join(agentDir, "home"), 0755)
+		_ = os.WriteFile(filepath.Join(agentDir, "scion-agent.json"), []byte(`{
 			"harness": "gemini",
 			"env": {
 				"SCION_HUB_ENDPOINT": "http://host.docker.internal:8080"
@@ -2376,18 +2376,18 @@ func TestStartScionConfigEnvHubEndpointOverridesAll(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	oldWd, _ := os.Getwd()
-	os.Chdir(tmpDir)
-	defer os.Chdir(oldWd)
+	_ = os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
 
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	// Clear dev token env vars so we control the test
 	for _, k := range []string{"SCION_DEV_TOKEN", "SCION_AUTH_TOKEN", "SCION_DEV_TOKEN_FILE"} {
 		if old, ok := os.LookupEnv(k); ok {
-			defer os.Setenv(k, old)
-			os.Unsetenv(k)
+			defer func() { _ = os.Setenv(k, old) }()
+			_ = os.Unsetenv(k)
 		}
 	}
 
@@ -2395,16 +2395,16 @@ func TestStartScionConfigEnvHubEndpointOverridesAll(t *testing.T) {
 
 	// Create harness-config
 	hcDir := filepath.Join(globalScionDir, "harness-configs", "test-harness")
-	os.MkdirAll(hcDir, 0755)
-	os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte("harness: gemini\nuser: scion\nimage: test-image:latest\n"), 0644)
+	_ = os.MkdirAll(hcDir, 0755)
+	_ = os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte("harness: gemini\nuser: scion\nimage: test-image:latest\n"), 0644)
 
 	// Create a minimal template
 	tplDir := filepath.Join(globalScionDir, "templates", "default")
-	os.MkdirAll(tplDir, 0755)
-	os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config": "test-harness"}`), 0644)
+	_ = os.MkdirAll(tplDir, 0755)
+	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config": "test-harness"}`), 0644)
 
 	// Global settings
-	os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(`schema_version: "1"
+	_ = os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(`schema_version: "1"
 active_profile: local
 profiles:
   local:
@@ -2414,8 +2414,8 @@ profiles:
 	// Create project directory with hub-enabled settings (priority 1)
 	projectDir := filepath.Join(tmpDir, "project")
 	projectScionDir := filepath.Join(projectDir, ".scion")
-	os.MkdirAll(projectScionDir, 0755)
-	os.WriteFile(filepath.Join(projectScionDir, "settings.yaml"), []byte(`hub:
+	_ = os.MkdirAll(projectScionDir, 0755)
+	_ = os.WriteFile(filepath.Join(projectScionDir, "settings.yaml"), []byte(`hub:
   enabled: true
   endpoint: "http://project-settings:9810"
 `), 0644)
@@ -2423,8 +2423,8 @@ profiles:
 	// Create agent with both hub.endpoint (priority 2) and
 	// env.SCION_HUB_ENDPOINT (priority 3 — should win)
 	agentDir := filepath.Join(projectScionDir, "agents", "hub-env-test")
-	os.MkdirAll(filepath.Join(agentDir, "home"), 0755)
-	os.WriteFile(filepath.Join(agentDir, "scion-agent.json"), []byte(`{
+	_ = os.MkdirAll(filepath.Join(agentDir, "home"), 0755)
+	_ = os.WriteFile(filepath.Join(agentDir, "scion-agent.json"), []byte(`{
 		"harness": "gemini",
 		"hub": {
 			"endpoint": "http://hub-endpoint-field:9810"
@@ -2511,18 +2511,18 @@ func TestStartInjectsProfileEnvForAuth(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	oldWd, _ := os.Getwd()
-	os.Chdir(tmpDir)
-	defer os.Chdir(oldWd)
+	_ = os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
 
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	// Clear env vars that would interfere
 	for _, k := range []string{"GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_REGION"} {
 		if old, ok := os.LookupEnv(k); ok {
-			defer os.Setenv(k, old)
-			os.Unsetenv(k)
+			defer func() { _ = os.Setenv(k, old) }()
+			_ = os.Unsetenv(k)
 		}
 	}
 
@@ -2530,16 +2530,16 @@ func TestStartInjectsProfileEnvForAuth(t *testing.T) {
 
 	// Create harness-config on disk (claude type)
 	hcDir := filepath.Join(globalScionDir, "harness-configs", "claude-cfg")
-	os.MkdirAll(hcDir, 0755)
-	os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte("harness: claude\nuser: scion\nimage: test-image:latest\n"), 0644)
+	_ = os.MkdirAll(hcDir, 0755)
+	_ = os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte("harness: claude\nuser: scion\nimage: test-image:latest\n"), 0644)
 
 	// Create a minimal template
 	tplDir := filepath.Join(globalScionDir, "templates", "default")
-	os.MkdirAll(tplDir, 0755)
-	os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config": "claude-cfg"}`), 0644)
+	_ = os.MkdirAll(tplDir, 0755)
+	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config": "claude-cfg"}`), 0644)
 
 	// Global versioned settings with a profile that has env vars
-	os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(`schema_version: "1"
+	_ = os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(`schema_version: "1"
 active_profile: vertex
 profiles:
   vertex:
@@ -2555,7 +2555,7 @@ runtimes:
 	// Create project directory
 	projectDir := filepath.Join(tmpDir, "project")
 	projectScionDir := filepath.Join(projectDir, ".scion")
-	os.MkdirAll(projectScionDir, 0755)
+	_ = os.MkdirAll(projectScionDir, 0755)
 
 	// Capture the RunConfig
 	var capturedConfig runtime.RunConfig

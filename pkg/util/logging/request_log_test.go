@@ -53,7 +53,7 @@ func TestInstrumentedResponseWriter_DefaultStatus(t *testing.T) {
 	w := &InstrumentedResponseWriter{ResponseWriter: rec, statusCode: http.StatusOK}
 
 	// Write without explicit WriteHeader → should default to 200
-	w.Write([]byte("ok"))
+	_, _ = w.Write([]byte("ok"))
 
 	if w.statusCode != http.StatusOK {
 		t.Errorf("expected status 200, got %d", w.statusCode)
@@ -212,7 +212,7 @@ func TestRequestLogMiddleware_ProducesCorrectJSON(t *testing.T) {
 	handler := RequestLogMiddleware(logger, "hub", HubPathPatterns())(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
-			w.Write([]byte(`{"status":"ok"}`))
+			_, _ = w.Write([]byte(`{"status":"ok"}`))
 		}),
 	)
 
@@ -286,7 +286,7 @@ func TestRequestLogMiddleware_TraceIDGeneration(t *testing.T) {
 	handler.ServeHTTP(httptest.NewRecorder(), req)
 
 	var entry map[string]any
-	json.Unmarshal(buf.Bytes(), &entry)
+	_ = json.Unmarshal(buf.Bytes(), &entry)
 
 	if _, ok := entry["trace_id"]; ok {
 		t.Error("expected no trace_id when no trace header present")
@@ -323,7 +323,7 @@ func TestRequestLogMiddleware_TraceIDFromHeader(t *testing.T) {
 			handler.ServeHTTP(httptest.NewRecorder(), req)
 
 			var entry map[string]any
-			json.Unmarshal(buf.Bytes(), &entry)
+			_ = json.Unmarshal(buf.Bytes(), &entry)
 
 			if entry["trace_id"] != tt.want {
 				t.Errorf("expected trace_id=%s, got %v", tt.want, entry["trace_id"])
@@ -349,7 +349,7 @@ func TestRequestLogMiddleware_HandlerEnrichment(t *testing.T) {
 	handler.ServeHTTP(httptest.NewRecorder(), req)
 
 	var entry map[string]any
-	json.Unmarshal(buf.Bytes(), &entry)
+	_ = json.Unmarshal(buf.Bytes(), &entry)
 
 	if entry["project_id"] != "enriched-project" {
 		t.Errorf("expected project_id=enriched-project, got %v", entry["project_id"])
@@ -376,7 +376,7 @@ func TestRequestLogMiddleware_FileOutput(t *testing.T) {
 	handler := RequestLogMiddleware(logger, "test", nil)(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
-			w.Write([]byte("ok"))
+			_, _ = w.Write([]byte("ok"))
 		}),
 	)
 
@@ -522,7 +522,7 @@ func TestRequestLogMiddleware_StatusLevels(t *testing.T) {
 			handler.ServeHTTP(httptest.NewRecorder(), req)
 
 			var entry map[string]any
-			json.Unmarshal(buf.Bytes(), &entry)
+			_ = json.Unmarshal(buf.Bytes(), &entry)
 
 			level, _ := entry["level"].(string)
 			if level != tt.level {

@@ -36,7 +36,7 @@ func newTestStore(t *testing.T) store.Store {
 	require.NoError(t, err)
 	require.NoError(t, entc.AutoMigrate(context.Background(), client))
 	s := entadapter.NewCompositeStore(client)
-	t.Cleanup(func() { s.Close() })
+	t.Cleanup(func() { _ = s.Close() })
 	return s
 }
 

@@ -692,10 +692,10 @@ func (m *Manager) UpdatePlugin(name string, repoPath string) error {
 	buildCmd := exec.Command("go", "build", "-o", tmpBinaryPath, "./cmd/scion-plugin-"+name)
 	buildCmd.Dir = sourceDir
 	if output, err := buildCmd.CombinedOutput(); err != nil {
-		os.Remove(tmpBinaryPath)
+		_ = os.Remove(tmpBinaryPath)
 		return fmt.Errorf("go build failed for plugin %q: %w\n%s", name, err, string(output))
 	}
-	defer os.Remove(tmpBinaryPath)
+	defer func() { _ = os.Remove(tmpBinaryPath) }()
 
 	m.mu.Lock()
 	if client, hasClient := m.clients[key]; hasClient {

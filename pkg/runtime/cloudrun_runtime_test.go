@@ -251,7 +251,7 @@ func TestGetRuntime_CloudRun(t *testing.T) {
 	if err := os.Chdir(tmpWd); err != nil {
 		t.Fatal(err)
 	}
-	defer os.Chdir(oldWd)
+	defer func() { _ = os.Chdir(oldWd) }()
 
 	r := GetRuntime("", "")
 	cr, ok := r.(*CloudRunRuntime)
@@ -283,7 +283,7 @@ func TestGetRuntime_CloudRun_DirectProfileName(t *testing.T) {
 	if err := os.Chdir(tmpWd); err != nil {
 		t.Fatal(err)
 	}
-	defer os.Chdir(oldWd)
+	defer func() { _ = os.Chdir(oldWd) }()
 
 	r := GetRuntime("", "cloudrun")
 	if _, ok := r.(*CloudRunRuntime); !ok {

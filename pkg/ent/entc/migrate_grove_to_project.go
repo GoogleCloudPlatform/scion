@@ -51,7 +51,7 @@ func migrateGroveToProjectDataWithDSN(ctx context.Context, sqliteDSN string, pro
 	if err != nil {
 		return fmt.Errorf("opening ent database for data migration: %w", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	// Enable foreign keys to match Ent's connection settings.
 	if _, err := db.Exec("PRAGMA foreign_keys = ON"); err != nil {
@@ -114,7 +114,7 @@ func mergeDuplicateGroups(ctx context.Context, tx *sql.Tx) (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("querying duplicate groups: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	type duplicate struct {
 		oldID   string
@@ -210,7 +210,7 @@ func backfillProjectIDs(ctx context.Context, tx *sql.Tx, projectStore ProjectSlu
 	if err != nil {
 		return 0, fmt.Errorf("querying groups for project_id backfill: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	type groupRecord struct {
 		id   string

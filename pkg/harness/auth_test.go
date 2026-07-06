@@ -130,24 +130,24 @@ func TestGatherAuth_FileDiscovery(t *testing.T) {
 
 	// Create well-known credential files
 	adcPath := filepath.Join(tmpHome, ".config", "gcloud", "application_default_credentials.json")
-	os.MkdirAll(filepath.Dir(adcPath), 0755)
-	os.WriteFile(adcPath, []byte(`{"type":"authorized_user"}`), 0644)
+	_ = os.MkdirAll(filepath.Dir(adcPath), 0755)
+	_ = os.WriteFile(adcPath, []byte(`{"type":"authorized_user"}`), 0644)
 
 	oauthPath := filepath.Join(tmpHome, ".gemini", "oauth_creds.json")
-	os.MkdirAll(filepath.Dir(oauthPath), 0755)
-	os.WriteFile(oauthPath, []byte(`{"dummy":"oauth"}`), 0644)
+	_ = os.MkdirAll(filepath.Dir(oauthPath), 0755)
+	_ = os.WriteFile(oauthPath, []byte(`{"dummy":"oauth"}`), 0644)
 
 	codexPath := filepath.Join(tmpHome, ".codex", "auth.json")
-	os.MkdirAll(filepath.Dir(codexPath), 0755)
-	os.WriteFile(codexPath, []byte(`{"dummy":"codex"}`), 0644)
+	_ = os.MkdirAll(filepath.Dir(codexPath), 0755)
+	_ = os.WriteFile(codexPath, []byte(`{"dummy":"codex"}`), 0644)
 
 	opencodePath := filepath.Join(tmpHome, ".local", "share", "opencode", "auth.json")
-	os.MkdirAll(filepath.Dir(opencodePath), 0755)
-	os.WriteFile(opencodePath, []byte(`{"dummy":"opencode"}`), 0644)
+	_ = os.MkdirAll(filepath.Dir(opencodePath), 0755)
+	_ = os.WriteFile(opencodePath, []byte(`{"dummy":"opencode"}`), 0644)
 
 	claudeCredsPath := filepath.Join(tmpHome, ".claude", ".credentials.json")
-	os.MkdirAll(filepath.Dir(claudeCredsPath), 0755)
-	os.WriteFile(claudeCredsPath, []byte(`{"claudeAiOauth":{"accessToken":"rotating"}}`), 0644)
+	_ = os.MkdirAll(filepath.Dir(claudeCredsPath), 0755)
+	_ = os.WriteFile(claudeCredsPath, []byte(`{"claudeAiOauth":{"accessToken":"rotating"}}`), 0644)
 
 	auth := GatherAuth()
 
@@ -180,8 +180,8 @@ func TestGatherAuth_EnvCredsTakePrecedenceOverFiles(t *testing.T) {
 
 	// Create the ADC file
 	adcPath := filepath.Join(tmpHome, ".config", "gcloud", "application_default_credentials.json")
-	os.MkdirAll(filepath.Dir(adcPath), 0755)
-	os.WriteFile(adcPath, []byte(`{"type":"authorized_user"}`), 0644)
+	_ = os.MkdirAll(filepath.Dir(adcPath), 0755)
+	_ = os.WriteFile(adcPath, []byte(`{"type":"authorized_user"}`), 0644)
 
 	// Set env var — should take precedence over file discovery
 	t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", "/explicit/path/creds.json")
@@ -244,7 +244,7 @@ func TestValidateAuth_Valid(t *testing.T) {
 func TestValidateAuth_ValidWithFiles(t *testing.T) {
 	// Create a temp file to serve as source
 	tmpFile := filepath.Join(t.TempDir(), "creds.json")
-	os.WriteFile(tmpFile, []byte(`{"type":"test"}`), 0644)
+	_ = os.WriteFile(tmpFile, []byte(`{"type":"test"}`), 0644)
 
 	resolved := &api.ResolvedAuth{
 		Method: "vertex-ai",
@@ -319,7 +319,7 @@ func TestValidateAuth_MissingSourceFile(t *testing.T) {
 
 func TestValidateAuth_EmptyContainerPath(t *testing.T) {
 	tmpFile := filepath.Join(t.TempDir(), "creds.json")
-	os.WriteFile(tmpFile, []byte(`{"type":"test"}`), 0644)
+	_ = os.WriteFile(tmpFile, []byte(`{"type":"test"}`), 0644)
 
 	resolved := &api.ResolvedAuth{
 		Method: "test-method",
@@ -775,11 +775,11 @@ func TestGatherAuthWithEnv_GCPMetadataMode(t *testing.T) {
 func TestOverlaySettings_ReadsScionAgentJSON(t *testing.T) {
 	tmpDir := t.TempDir()
 	agentHome := filepath.Join(tmpDir, "home")
-	os.MkdirAll(agentHome, 0755)
+	_ = os.MkdirAll(agentHome, 0755)
 
 	// Write scion-agent.json with a universal auth type
 	scionAgentPath := filepath.Join(tmpDir, "scion-agent.json")
-	os.WriteFile(scionAgentPath, []byte(`{"auth_selectedType": "auth-file"}`), 0644)
+	_ = os.WriteFile(scionAgentPath, []byte(`{"auth_selectedType": "auth-file"}`), 0644)
 
 	auth := api.AuthConfig{}
 	h := New("gemini")
@@ -796,14 +796,14 @@ func TestOverlaySettings_IgnoresHostGeminiSettings(t *testing.T) {
 
 	// Write a host ~/.gemini/settings.json with a Gemini-internal auth type
 	geminiDir := filepath.Join(tmpHome, ".gemini")
-	os.MkdirAll(geminiDir, 0755)
-	os.WriteFile(filepath.Join(geminiDir, "settings.json"),
+	_ = os.MkdirAll(geminiDir, 0755)
+	_ = os.WriteFile(filepath.Join(geminiDir, "settings.json"),
 		[]byte(`{"security":{"auth":{"selectedType":"oauth-personal"}}}`), 0644)
 
 	// Agent dir with no scion-agent.json (or one without auth_selectedType)
 	tmpDir := t.TempDir()
 	agentHome := filepath.Join(tmpDir, "home")
-	os.MkdirAll(agentHome, 0755)
+	_ = os.MkdirAll(agentHome, 0755)
 
 	auth := api.AuthConfig{}
 	h := New("gemini")
@@ -818,7 +818,7 @@ func TestOverlaySettings_IgnoresHostGeminiSettings(t *testing.T) {
 func TestOverlaySettings_NoScionAgentJSON(t *testing.T) {
 	tmpDir := t.TempDir()
 	agentHome := filepath.Join(tmpDir, "home")
-	os.MkdirAll(agentHome, 0755)
+	_ = os.MkdirAll(agentHome, 0755)
 
 	// No scion-agent.json exists
 	auth := api.AuthConfig{}
@@ -841,12 +841,12 @@ func TestGatherAuthWithEnv_BrokerMode(t *testing.T) {
 
 	// Create credential files on the broker filesystem
 	adcPath := filepath.Join(tmpHome, ".config", "gcloud", "application_default_credentials.json")
-	os.MkdirAll(filepath.Dir(adcPath), 0755)
-	os.WriteFile(adcPath, []byte(`{"type":"authorized_user"}`), 0644)
+	_ = os.MkdirAll(filepath.Dir(adcPath), 0755)
+	_ = os.WriteFile(adcPath, []byte(`{"type":"authorized_user"}`), 0644)
 
 	oauthPath := filepath.Join(tmpHome, ".gemini", "oauth_creds.json")
-	os.MkdirAll(filepath.Dir(oauthPath), 0755)
-	os.WriteFile(oauthPath, []byte(`{"dummy":"oauth"}`), 0644)
+	_ = os.MkdirAll(filepath.Dir(oauthPath), 0755)
+	_ = os.WriteFile(oauthPath, []byte(`{"dummy":"oauth"}`), 0644)
 
 	// Call with localSources=false and an overlay that provides one key
 	overlay := map[string]string{

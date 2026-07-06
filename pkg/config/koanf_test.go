@@ -28,8 +28,8 @@ func TestLoadSettingsKoanf(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	projectDir := filepath.Join(tmpDir, "my-project")
 	projectScionDir := filepath.Join(projectDir, ".scion")
@@ -54,8 +54,8 @@ func TestLoadSettingsKoanfWithYAML(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	projectDir := filepath.Join(tmpDir, "my-project")
 	projectScionDir := filepath.Join(projectDir, ".scion")
@@ -103,8 +103,8 @@ func TestLoadSettingsKoanfWithProjectOverride(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	projectDir := filepath.Join(tmpDir, "my-project")
 	projectScionDir := filepath.Join(projectDir, ".scion")
@@ -155,8 +155,8 @@ func TestLoadSettingsKoanfWithEnvOverride(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	projectDir := filepath.Join(tmpDir, "my-project")
 	projectScionDir := filepath.Join(projectDir, ".scion")
@@ -165,11 +165,11 @@ func TestLoadSettingsKoanfWithEnvOverride(t *testing.T) {
 	}
 
 	// Set environment variable override
-	os.Setenv("SCION_ACTIVE_PROFILE", "remote")
-	defer os.Unsetenv("SCION_ACTIVE_PROFILE")
+	_ = os.Setenv("SCION_ACTIVE_PROFILE", "remote")
+	defer func() { _ = os.Unsetenv("SCION_ACTIVE_PROFILE") }()
 
-	os.Setenv("SCION_DEFAULT_TEMPLATE", "opencode")
-	defer os.Unsetenv("SCION_DEFAULT_TEMPLATE")
+	_ = os.Setenv("SCION_DEFAULT_TEMPLATE", "opencode")
+	defer func() { _ = os.Unsetenv("SCION_DEFAULT_TEMPLATE") }()
 
 	s, err := LoadSettingsKoanf(projectScionDir)
 	if err != nil {
@@ -187,8 +187,8 @@ func TestLoadSettingsKoanfWithBucketEnvOverride(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	projectDir := filepath.Join(tmpDir, "my-project")
 	projectScionDir := filepath.Join(projectDir, ".scion")
@@ -197,14 +197,14 @@ func TestLoadSettingsKoanfWithBucketEnvOverride(t *testing.T) {
 	}
 
 	// Set bucket environment variable overrides
-	os.Setenv("SCION_BUCKET_PROVIDER", "GCS")
-	defer os.Unsetenv("SCION_BUCKET_PROVIDER")
+	_ = os.Setenv("SCION_BUCKET_PROVIDER", "GCS")
+	defer func() { _ = os.Unsetenv("SCION_BUCKET_PROVIDER") }()
 
-	os.Setenv("SCION_BUCKET_NAME", "my-bucket")
-	defer os.Unsetenv("SCION_BUCKET_NAME")
+	_ = os.Setenv("SCION_BUCKET_NAME", "my-bucket")
+	defer func() { _ = os.Unsetenv("SCION_BUCKET_NAME") }()
 
-	os.Setenv("SCION_BUCKET_PREFIX", "agents")
-	defer os.Unsetenv("SCION_BUCKET_PREFIX")
+	_ = os.Setenv("SCION_BUCKET_PREFIX", "agents")
+	defer func() { _ = os.Unsetenv("SCION_BUCKET_PREFIX") }()
 
 	s, err := LoadSettingsKoanf(projectScionDir)
 	if err != nil {
@@ -251,7 +251,7 @@ func TestGetSettingsPath(t *testing.T) {
 	}
 
 	// Remove YAML, should fall back to JSON
-	os.Remove(yamlPath)
+	_ = os.Remove(yamlPath)
 	if path := GetSettingsPath(tmpDir); path != jsonPath {
 		t.Errorf("expected JSON fallback '%s', got '%s'", jsonPath, path)
 	}
@@ -288,13 +288,13 @@ func TestLoadSettingsKoanfV1ProjectID(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	// Unset SCION_HUB_ENDPOINT so it doesn't override the file-loaded value
 	if orig, ok := os.LookupEnv("SCION_HUB_ENDPOINT"); ok {
-		os.Unsetenv("SCION_HUB_ENDPOINT")
-		t.Cleanup(func() { os.Setenv("SCION_HUB_ENDPOINT", orig) })
+		_ = os.Unsetenv("SCION_HUB_ENDPOINT")
+		t.Cleanup(func() { _ = os.Setenv("SCION_HUB_ENDPOINT", orig) })
 	}
 
 	projectDir := filepath.Join(tmpDir, "my-project")
@@ -340,8 +340,8 @@ func TestLoadSettingsKoanfV1ProjectIDHubWinsOverTopLevel(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	projectDir := filepath.Join(tmpDir, "my-project")
 	projectScionDir := filepath.Join(projectDir, ".scion")
@@ -377,8 +377,8 @@ func TestLoadSettingsKoanfV1ProjectIDFromEnv(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	projectDir := filepath.Join(tmpDir, "my-project")
 	projectScionDir := filepath.Join(projectDir, ".scion")
@@ -387,8 +387,8 @@ func TestLoadSettingsKoanfV1ProjectIDFromEnv(t *testing.T) {
 	}
 
 	// Set SCION_HUB_GROVE_ID env var — should map to top-level grove_id
-	os.Setenv("SCION_HUB_GROVE_ID", "env-grove-uuid")
-	defer os.Unsetenv("SCION_HUB_GROVE_ID")
+	_ = os.Setenv("SCION_HUB_GROVE_ID", "env-grove-uuid")
+	defer func() { _ = os.Unsetenv("SCION_HUB_GROVE_ID") }()
 
 	s, err := LoadSettingsKoanf(projectScionDir)
 	if err != nil {
@@ -404,8 +404,8 @@ func TestLoadSettingsKoanfV1BrokerFields(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	projectDir := filepath.Join(tmpDir, "my-project")
 	projectScionDir := filepath.Join(projectDir, ".scion")
@@ -452,8 +452,8 @@ func TestLoadSettingsKoanfV1BrokerFieldsNoOverrideExisting(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	projectDir := filepath.Join(tmpDir, "my-project")
 	projectScionDir := filepath.Join(projectDir, ".scion")
@@ -493,8 +493,8 @@ func TestLoadSettingsKoanfWithJSONFallback(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	projectDir := filepath.Join(tmpDir, "my-project")
 	projectScionDir := filepath.Join(projectDir, ".scion")
@@ -538,14 +538,14 @@ func TestV1ProjectIDSurvivesUpdateSetting(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	// Unset env vars that could interfere
 	for _, env := range []string{"SCION_HUB_ENDPOINT", "SCION_HUB_GROVE_ID"} {
 		if orig, ok := os.LookupEnv(env); ok {
-			os.Unsetenv(env)
-			t.Cleanup(func() { os.Setenv(env, orig) })
+			_ = os.Unsetenv(env)
+			t.Cleanup(func() { _ = os.Setenv(env, orig) })
 		}
 	}
 
@@ -597,13 +597,13 @@ func TestLoadSettingsKoanf_ProjectIDFileOverridesGlobal(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	for _, env := range []string{"SCION_HUB_ENDPOINT", "SCION_HUB_GROVE_ID"} {
 		if orig, ok := os.LookupEnv(env); ok {
-			os.Unsetenv(env)
-			t.Cleanup(func() { os.Setenv(env, orig) })
+			_ = os.Unsetenv(env)
+			t.Cleanup(func() { _ = os.Setenv(env, orig) })
 		}
 	}
 
@@ -652,13 +652,13 @@ func TestLoadSettingsKoanf_GlobalProjectIDDoesNotBleedIntoProject(t *testing.T) 
 	tmpDir := t.TempDir()
 
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	for _, env := range []string{"SCION_HUB_ENDPOINT", "SCION_HUB_GROVE_ID"} {
 		if orig, ok := os.LookupEnv(env); ok {
-			os.Unsetenv(env)
-			t.Cleanup(func() { os.Setenv(env, orig) })
+			_ = os.Unsetenv(env)
+			t.Cleanup(func() { _ = os.Setenv(env, orig) })
 		}
 	}
 
@@ -697,13 +697,13 @@ func TestLoadSettingsKoanf_V1HubProjectIDPopulatesGetHubProjectID(t *testing.T) 
 	tmpDir := t.TempDir()
 
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	for _, env := range []string{"SCION_HUB_ENDPOINT", "SCION_HUB_GROVE_ID"} {
 		if orig, ok := os.LookupEnv(env); ok {
-			os.Unsetenv(env)
-			t.Cleanup(func() { os.Setenv(env, orig) })
+			_ = os.Unsetenv(env)
+			t.Cleanup(func() { _ = os.Setenv(env, orig) })
 		}
 	}
 
@@ -739,13 +739,13 @@ func TestLoadSettingsKoanf_V1HubProjectIDWithMarkerFile(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	for _, env := range []string{"SCION_HUB_ENDPOINT", "SCION_HUB_GROVE_ID"} {
 		if orig, ok := os.LookupEnv(env); ok {
-			os.Unsetenv(env)
-			t.Cleanup(func() { os.Setenv(env, orig) })
+			_ = os.Unsetenv(env)
+			t.Cleanup(func() { _ = os.Setenv(env, orig) })
 		}
 	}
 
@@ -791,13 +791,13 @@ func TestLoadSettingsKoanf_InRepoSettingsLayered(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	for _, env := range []string{"SCION_HUB_ENDPOINT", "SCION_HUB_GROVE_ID", "SCION_ACTIVE_PROFILE"} {
 		if orig, ok := os.LookupEnv(env); ok {
-			os.Unsetenv(env)
-			t.Cleanup(func() { os.Setenv(env, orig) })
+			_ = os.Unsetenv(env)
+			t.Cleanup(func() { _ = os.Setenv(env, orig) })
 		}
 	}
 
@@ -852,13 +852,13 @@ func TestLoadSettingsKoanf_ExternalOverridesInRepo(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	for _, env := range []string{"SCION_HUB_ENDPOINT", "SCION_HUB_GROVE_ID", "SCION_ACTIVE_PROFILE"} {
 		if orig, ok := os.LookupEnv(env); ok {
-			os.Unsetenv(env)
-			t.Cleanup(func() { os.Setenv(env, orig) })
+			_ = os.Unsetenv(env)
+			t.Cleanup(func() { _ = os.Setenv(env, orig) })
 		}
 	}
 

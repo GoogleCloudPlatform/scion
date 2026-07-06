@@ -27,7 +27,7 @@ func TestStoreAndLoad(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create temp dir: %v", err)
 	}
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	// Override the credentials path for testing
 	origPath := credentialsPath
@@ -88,7 +88,7 @@ func TestLoadNotAuthenticated(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create temp dir: %v", err)
 	}
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	// Override the credentials path for testing
 	origPath := credentialsPath
@@ -110,7 +110,7 @@ func TestRemove(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create temp dir: %v", err)
 	}
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	// Override the credentials path for testing
 	origPath := credentialsPath
@@ -148,7 +148,7 @@ func TestMultipleHubs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create temp dir: %v", err)
 	}
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	// Override the credentials path for testing
 	origPath := credentialsPath
@@ -215,7 +215,7 @@ func TestIsAuthenticated(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create temp dir: %v", err)
 	}
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	// Override the credentials path for testing
 	origPath := credentialsPath
@@ -252,7 +252,7 @@ func TestGetAccessToken(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create temp dir: %v", err)
 	}
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	// Override the credentials path for testing
 	origPath := credentialsPath

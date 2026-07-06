@@ -383,7 +383,7 @@ func ComputeHarnessConfigRevision(dirPath string) string {
 		if openErr != nil {
 			return nil
 		}
-		defer f.Close()
+		defer func() { _ = f.Close() }()
 		h := sha256.New()
 		if _, copyErr := io.Copy(h, f); copyErr != nil {
 			return nil

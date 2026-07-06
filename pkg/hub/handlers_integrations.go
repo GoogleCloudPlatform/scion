@@ -353,7 +353,7 @@ func (s *Server) handleUpdateIntegrationConfig(w http.ResponseWriter, r *http.Re
 				InternalError(w)
 				return
 			}
-			defer haTx.Rollback()
+			defer func() { _ = haTx.Rollback() }()
 			pgProvider := config.NewPostgresConfigProvider(haTx.Client(), name)
 			pgProvider.SetUpdatedBy(userID)
 			provider = pgProvider
@@ -951,7 +951,7 @@ func (s *Server) handleUpdateIntegrationHA(w http.ResponseWriter, r *http.Reques
 		InternalError(w)
 		return
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	create := tx.IntegrationUpdate.
 		Create().

@@ -50,16 +50,16 @@ Use 'scion project prune' to clean them up.`,
 		}
 
 		w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-		fmt.Fprintln(w, "NAME\tTYPE\tAGENTS\tSTATUS\tWORKSPACE")
+		_, _ = fmt.Fprintln(w, "NAME\tTYPE\tAGENTS\tSTATUS\tWORKSPACE")
 		for _, g := range projects {
 			workspace := g.WorkspacePath
 			if workspace == "" {
 				workspace = "-"
 			}
-			fmt.Fprintf(w, "%s\t%s\t%d\t%s\t%s\n",
+			_, _ = fmt.Fprintf(w, "%s\t%s\t%d\t%s\t%s\n",
 				g.Name, g.Type, g.AgentCount, g.Status, workspace)
 		}
-		w.Flush()
+		_ = w.Flush()
 
 		return nil
 	},

@@ -1638,7 +1638,7 @@ func runBrokerHubs(cmd *cobra.Command, args []string) error {
 	fmt.Println()
 
 	w := tabwriter.NewWriter(os.Stdout, 2, 4, 2, ' ', 0)
-	fmt.Fprintf(w, "  NAME\tHUB ENDPOINT\tAUTH\tSTATUS\tREGISTERED\n")
+	_, _ = fmt.Fprintf(w, "  NAME\tHUB ENDPOINT\tAUTH\tSTATUS\tREGISTERED\n")
 	for _, c := range allCreds {
 		regDate := ""
 		if !c.RegisteredAt.IsZero() {
@@ -1652,9 +1652,9 @@ func runBrokerHubs(cmd *cobra.Command, args []string) error {
 		if s, ok := liveStatusMap[c.Name]; ok {
 			status = s
 		}
-		fmt.Fprintf(w, "  %s\t%s\t%s\t%s\t%s\n", c.Name, c.HubEndpoint, authMode, status, regDate)
+		_, _ = fmt.Fprintf(w, "  %s\t%s\t%s\t%s\t%s\n", c.Name, c.HubEndpoint, authMode, status, regDate)
 	}
-	w.Flush()
+	_ = w.Flush()
 
 	fmt.Printf("\nCredentials directory: %s\n", multiStore.Dir())
 
@@ -2023,7 +2023,7 @@ func queryBrokerHubConnections(port int) *BrokerHubConnectionsResponse {
 	if err != nil {
 		return nil
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return nil

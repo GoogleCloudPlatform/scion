@@ -67,11 +67,11 @@ func newMessageMockHubServer(t *testing.T, projectID string, runningAgents []hub
 
 		switch {
 		case r.URL.Path == "/healthz" && r.Method == http.MethodGet:
-			json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
 
 		case r.Method == http.MethodGet && (r.URL.Path == "/api/v1/groves/"+projectID+"/agents" || r.URL.Path == "/api/v1/projects/"+projectID+"/agents" || r.URL.Path == "/api/v1/agents"):
 			// List agents endpoint
-			json.NewEncoder(w).Encode(map[string]interface{}{
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"agents": runningAgents,
 			})
 
@@ -126,7 +126,7 @@ func newMessageMockHubServer(t *testing.T, projectID string, runningAgents []hub
 				StructuredMessage *messages.StructuredMessage `json:"structured_message"`
 				Interrupt         bool                        `json:"interrupt"`
 			}
-			json.NewDecoder(r.Body).Decode(&body)
+			_ = json.NewDecoder(r.Body).Decode(&body)
 
 			sm := sentMessage{
 				AgentName:     agentName,
@@ -144,7 +144,7 @@ func newMessageMockHubServer(t *testing.T, projectID string, runningAgents []hub
 			sent = append(sent, sm)
 			mu.Unlock()
 			w.WriteHeader(http.StatusOK)
-			json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
 
 		default:
 			w.WriteHeader(http.StatusNotFound)
@@ -323,11 +323,11 @@ func TestSendMessageViaHub_SingleAgentError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if r.URL.Path == "/healthz" {
-			json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
 			return
 		}
 		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"error": map[string]interface{}{
 				"code":    "internal",
 				"message": "internal error",
@@ -419,7 +419,7 @@ func TestSendMessageViaHub_BroadcastPartialFailure(t *testing.T) {
 
 		switch {
 		case r.URL.Path == "/healthz":
-			json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
 		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/projects/"+projectID+"/broadcast":
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"status":   "accepted",
@@ -517,19 +517,19 @@ func TestSendMessageViaHub_NotifyFlag(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case r.URL.Path == "/healthz" && r.Method == http.MethodGet:
-			json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
 		case r.Method == http.MethodPost:
 			var body struct {
 				StructuredMessage *messages.StructuredMessage `json:"structured_message"`
 				Interrupt         bool                        `json:"interrupt"`
 				Notify            bool                        `json:"notify"`
 			}
-			json.NewDecoder(r.Body).Decode(&body)
+			_ = json.NewDecoder(r.Body).Decode(&body)
 			mu.Lock()
 			notifyReceived = body.Notify
 			mu.Unlock()
 			w.WriteHeader(http.StatusOK)
-			json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -565,19 +565,19 @@ func TestSendMessageViaHub_NoNotifyFlag(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case r.URL.Path == "/healthz" && r.Method == http.MethodGet:
-			json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
 		case r.Method == http.MethodPost:
 			var body struct {
 				StructuredMessage *messages.StructuredMessage `json:"structured_message"`
 				Interrupt         bool                        `json:"interrupt"`
 				Notify            bool                        `json:"notify"`
 			}
-			json.NewDecoder(r.Body).Decode(&body)
+			_ = json.NewDecoder(r.Body).Decode(&body)
 			mu.Lock()
 			notifyReceived = body.Notify
 			mu.Unlock()
 			w.WriteHeader(http.StatusOK)
-			json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -614,10 +614,10 @@ func TestSendOutboundMessageViaHub(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case r.URL.Path == "/healthz" && r.Method == http.MethodGet:
-			json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
 		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/groves/"+projectID+"/agents/my-agent/outbound-message":
 			var msg hubclient.OutboundMessageRequest
-			json.NewDecoder(r.Body).Decode(&msg)
+			_ = json.NewDecoder(r.Body).Decode(&msg)
 			receivedMsg = &msg
 			w.WriteHeader(http.StatusOK)
 		default:
@@ -653,7 +653,7 @@ func TestSendOutboundMessageViaHub_RequiresAgentContext(t *testing.T) {
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
 	}))
 	defer server.Close()
 
@@ -962,7 +962,7 @@ func TestSendMessageViaHub_WakePassedThrough(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case r.URL.Path == "/healthz" && r.Method == http.MethodGet:
-			json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
 		case r.Method == http.MethodPost:
 			var body struct {
 				StructuredMessage *messages.StructuredMessage `json:"structured_message"`
@@ -970,12 +970,12 @@ func TestSendMessageViaHub_WakePassedThrough(t *testing.T) {
 				Notify            bool                        `json:"notify"`
 				Wake              bool                        `json:"wake"`
 			}
-			json.NewDecoder(r.Body).Decode(&body)
+			_ = json.NewDecoder(r.Body).Decode(&body)
 			mu.Lock()
 			wakeReceived = body.Wake
 			mu.Unlock()
 			w.WriteHeader(http.StatusOK)
-			json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}

@@ -216,14 +216,14 @@ func writeLimitsState(path string, ls *LimitsState) error {
 	tmpPath := tmpFile.Name()
 
 	if _, err := tmpFile.Write(data); err != nil {
-		tmpFile.Close()
-		os.Remove(tmpPath)
+		_ = tmpFile.Close()
+		_ = os.Remove(tmpPath)
 		return fmt.Errorf("writing temp file: %w", err)
 	}
-	tmpFile.Close()
+	_ = tmpFile.Close()
 
 	if err := os.Rename(tmpPath, path); err != nil {
-		os.Remove(tmpPath)
+		_ = os.Remove(tmpPath)
 		return fmt.Errorf("atomic rename: %w", err)
 	}
 

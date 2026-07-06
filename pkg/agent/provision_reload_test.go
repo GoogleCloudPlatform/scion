@@ -33,13 +33,13 @@ func TestProvisionAgentReloadsConfig(t *testing.T) {
 
 	// Move to tmpDir
 	oldWd, _ := os.Getwd()
-	os.Chdir(tmpDir)
-	defer os.Chdir(oldWd)
+	_ = os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
 
 	// Mock HOME
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	// Seed global harness-configs (required for agent creation)
 	if err := config.InitMachine(getTestHarnesses()); err != nil {
@@ -82,12 +82,12 @@ func TestProvisionAgentWithHarnessAuthOverride(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	oldWd, _ := os.Getwd()
-	os.Chdir(tmpDir)
-	defer os.Chdir(oldWd)
+	_ = os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
 
 	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
 
 	if err := config.InitMachine(getTestHarnesses()); err != nil {
 		t.Fatalf("InitMachine failed: %v", err)

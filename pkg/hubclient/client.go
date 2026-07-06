@@ -287,7 +287,7 @@ func (c *client) getWithQuery(ctx context.Context, path string, query url.Values
 	resp, err := c.transport.GetWithQuery(ctx, path, query, headers)
 	if err == nil && resp.StatusCode == http.StatusNotFound && strings.Contains(path, "/projects") {
 		legacyPath := strings.Replace(path, "/projects", "/groves", 1)
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		resp, err = c.transport.GetWithQuery(ctx, legacyPath, query, headers)
 		c.checkForDeprecation(resp)
 		return resp, err
@@ -300,7 +300,7 @@ func (c *client) post(ctx context.Context, path string, body interface{}, header
 	resp, err := c.transport.Post(ctx, path, body, headers)
 	if err == nil && resp.StatusCode == http.StatusNotFound && strings.Contains(path, "/projects") {
 		legacyPath := strings.Replace(path, "/projects", "/groves", 1)
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		resp, err = c.transport.Post(ctx, legacyPath, body, headers)
 		c.checkForDeprecation(resp)
 		return resp, err
@@ -313,7 +313,7 @@ func (c *client) put(ctx context.Context, path string, body interface{}, headers
 	resp, err := c.transport.Put(ctx, path, body, headers)
 	if err == nil && resp.StatusCode == http.StatusNotFound && strings.Contains(path, "/projects") {
 		legacyPath := strings.Replace(path, "/projects", "/groves", 1)
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		resp, err = c.transport.Put(ctx, legacyPath, body, headers)
 		c.checkForDeprecation(resp)
 		return resp, err
@@ -326,7 +326,7 @@ func (c *client) patch(ctx context.Context, path string, body interface{}, heade
 	resp, err := c.transport.Patch(ctx, path, body, headers)
 	if err == nil && resp.StatusCode == http.StatusNotFound && strings.Contains(path, "/projects") {
 		legacyPath := strings.Replace(path, "/projects", "/groves", 1)
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		resp, err = c.transport.Patch(ctx, legacyPath, body, headers)
 		c.checkForDeprecation(resp)
 		return resp, err
@@ -339,7 +339,7 @@ func (c *client) delete(ctx context.Context, path string, headers http.Header) (
 	resp, err := c.transport.Delete(ctx, path, headers)
 	if err == nil && resp.StatusCode == http.StatusNotFound && strings.Contains(path, "/projects") {
 		legacyPath := strings.Replace(path, "/projects", "/groves", 1)
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		resp, err = c.transport.Delete(ctx, legacyPath, headers)
 		c.checkForDeprecation(resp)
 		return resp, err
@@ -365,7 +365,7 @@ func (c *client) Health(ctx context.Context) (*HealthResponse, error) {
 		return nil, err
 	}
 	if resp.StatusCode == 404 {
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		resp, err = c.get(ctx, "/health", nil)
 		if err != nil {
 			return nil, err
