@@ -198,13 +198,19 @@ def apply_mcp_servers_simple(bundle_path: str, mcp_mapping: dict[str, Any], agen
 
     if global_entries and global_file and global_path:
         target = global_file if os.path.isabs(global_file) else os.path.join(home, global_file)
-        written += _merge_into_file(target, global_path, global_entries)
+        try:
+            written += _merge_into_file(target, global_path, global_entries)
+        except OSError as exc:
+            warn(f"failed to write MCP global config {target}: {exc}")
 
     if project_entries and project_file and project_path:
         target = project_file if os.path.isabs(project_file) else os.path.join(home, project_file)
         # {workspace} substitution in the path component.
         resolved_path = project_path.replace("{workspace}", agent_workspace)
-        written += _merge_into_file(target, resolved_path, project_entries)
+        try:
+            written += _merge_into_file(target, resolved_path, project_entries)
+        except OSError as exc:
+            warn(f"failed to write MCP project config {target}: {exc}")
 
     return written
 
@@ -412,7 +418,9 @@ class ProvisionContext:
             if os.path.isfile(path):
                 try:
                     self._telemetry = load_json(path) or {}
-                except (OSError, json.JSONDecodeError):
+                except json.JSONDecodeError as exc:
+                    raise ProvisionError(f"malformed telemetry.json: {exc}") from exc
+                except OSError:
                     self._telemetry = {}
             else:
                 self._telemetry = {}
@@ -854,7 +862,11 @@ def apply_mcp_translated(
     if not translated:
         return 0
 
-    write_fn(translated)
+    try:
+        write_fn(translated)
+    except OSError as exc:
+        ctx.warn(f"failed to write MCP config: {exc}")
+        return 0
     ctx.info(f"applied {len(translated)} mcp server(s)")
     return len(translated)
 
@@ -990,6 +1002,9 @@ def run(harness_name: str, provision_fn: Any) -> None:
     except ProvisionError as exc:
         print(f"{harness_name} provision: {exc}", file=sys.stderr)
         sys.exit(EXIT_ERROR)
+    except OSError as exc:
+        print(f"{harness_name} provision: {exc}", file=sys.stderr)
+        sys.exit(EXIT_ERROR)
 
     sys.exit(EXIT_OK)
 
@@ -1039,6 +1054,20 @@ def capture_auth_main(argv: list[str] | None = None) -> int:
         print("capture-auth: no credential mappings found in inputs/capture-auth-config.json",
               file=sys.stderr)
         return _CA_EXIT_NO_CREDS
+
+    # Deduplicate by key — a credential may appear under multiple auth methods
+    # (e.g. AGY_TOKEN under both oauth-token and vertex-ai) but should only be
+    # captured once.  First entry wins.
+    seen_keys: set[str] = set()
+    unique_entries: list[dict[str, Any]] = []
+    for entry in entries:
+        key = entry.get("key", "")
+        if key and key not in seen_keys:
+            seen_keys.add(key)
+            unique_entries.append(entry)
+        elif not key:
+            unique_entries.append(entry)
+    entries = unique_entries
 
     captured = 0
     conflicts = 0

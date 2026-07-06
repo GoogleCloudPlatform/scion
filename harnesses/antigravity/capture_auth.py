@@ -73,18 +73,89 @@ def _extract_from_keyring() -> str | None:
     return result.stdout.strip()
 
 
+def _validate_refresh_token(token_raw: str) -> bool:
+    """Validate that a token JSON blob contains a refresh_token."""
+    try:
+        obj = json.loads(token_raw)
+    except json.JSONDecodeError:
+        return False
+    if not isinstance(obj, dict):
+        return False
+    if "refresh_token" in obj:
+        return True
+    inner = obj.get("token")
+    if isinstance(inner, dict) and "refresh_token" in inner:
+        return True
+    return False
+
+
+_AGY_TOKEN_PATH = "~/.gemini/antigravity-cli/antigravity-oauth-token"
+
+
+def _try_capture_token_file(force: bool) -> int | None:
+    """Attempt to capture AGY_TOKEN directly from the known disk path.
+
+    Returns an exit code on definitive result, or None to continue to keyring.
+    """
+    expanded = scion_harness.expand_path(_AGY_TOKEN_PATH)
+    if not os.path.isfile(expanded):
+        return None
+    try:
+        with open(expanded, "r", encoding="utf-8") as f:
+            raw = f.read().rstrip("\r\n")
+    except OSError:
+        return None
+    if not raw:
+        return None
+    if not _validate_refresh_token(raw):
+        print("capture-auth: AGY_TOKEN file does not contain refresh_token", file=sys.stderr)
+        return _CA_EXIT_ERROR
+    cmd = ["sciontool", "secret", "set", "AGY_TOKEN", f"@{expanded}",
+           "--type", "file", "--target", _AGY_TOKEN_PATH]
+    if force:
+        cmd.append("--force")
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        print(f"capture-auth: sciontool error: {exc}", file=sys.stderr)
+        return _CA_EXIT_ERROR
+    if result.returncode == 0:
+        print(f"capture-auth: AGY_TOKEN: captured from {_AGY_TOKEN_PATH}")
+        return _CA_EXIT_OK
+    if "already exists" in result.stderr.lower():
+        print('CONFLICT: secret "AGY_TOKEN" already exists (use --force to overwrite)')
+        return _CA_EXIT_CONFLICT
+    print(f"capture-auth: sciontool failed: {result.stderr.strip()}", file=sys.stderr)
+    return _CA_EXIT_ERROR
+
+
 def main() -> int:
     rc = scion_harness.capture_auth_main()
     if rc == _CA_EXIT_OK:
         return rc
 
+    # Only fall back to keyring when no credential files were found on disk.
+    # CONFLICT (secret already exists) and ERROR should propagate as-is.
+    if rc != _CA_EXIT_NO_CREDS:
+        return rc
+
+    # Synthesized default: try the well-known AGY_TOKEN path on disk even if
+    # capture-auth-config.json didn't list it (e.g. missing config, staging bug).
+    force = "--force" in sys.argv
+    disk_rc = _try_capture_token_file(force)
+    if disk_rc is not None:
+        return disk_rc
+
     print("capture-auth: file not found, trying gnome-keyring fallback...")
     token = _extract_from_keyring()
     if not token:
-        if rc == _CA_EXIT_NO_CREDS:
-            print("capture-auth: no credentials found to capture")
-            print("  Make sure you have authenticated with: agy")
-        return rc
+        print("capture-auth: no credentials found to capture")
+        print("  Make sure you have authenticated with: agy")
+        return _CA_EXIT_NO_CREDS
+
+    if not _validate_refresh_token(token):
+        print("capture-auth: keyring token does not contain refresh_token", file=sys.stderr)
+        return _CA_EXIT_ERROR
 
     target = "~/.gemini/antigravity-cli/antigravity-oauth-token"
     fd, tmp_path = tempfile.mkstemp(prefix="agy_token_", suffix=".json")
