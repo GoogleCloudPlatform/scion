@@ -56,7 +56,7 @@ func (h *SignalHandler) Start() {
 				return
 			case syscall.SIGHUP:
 				// Forward SIGHUP to child (can be used for reload in future)
-				h.supervisor.Signal(sig)
+				_ = h.supervisor.Signal(sig)
 			}
 		}
 	}()

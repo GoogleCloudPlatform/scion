@@ -226,7 +226,7 @@ func (r *GCPSkillResolver) fetchSkillMetadata(ctx context.Context, resourceURL, 
 	if err != nil {
 		return nil, fmt.Errorf("GCP API request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode == http.StatusNotFound {
 		return nil, fmt.Errorf("skill not found in GCP registry")
@@ -261,7 +261,7 @@ func (r *GCPSkillResolver) downloadFile(ctx context.Context, fileURL, token stri
 	if err != nil {
 		return nil, fmt.Errorf("download failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("download failed with status %d", resp.StatusCode)

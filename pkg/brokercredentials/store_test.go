@@ -394,7 +394,7 @@ func TestStore_LoadIfChanged(t *testing.T) {
 	store := NewStore(credPath)
 
 	// LoadIfChanged on non-existent file should return nil
-	creds, modTime, err := store.LoadIfChanged(time.Time{})
+	creds, _, err := store.LoadIfChanged(time.Time{})
 	if err != nil {
 		t.Fatalf("LoadIfChanged failed for non-existent file: %v", err)
 	}
@@ -412,7 +412,7 @@ func TestStore_LoadIfChanged(t *testing.T) {
 	}
 
 	// First load with zero time should return credentials
-	creds, modTime, err = store.LoadIfChanged(time.Time{})
+	creds, modTime, err := store.LoadIfChanged(time.Time{})
 	if err != nil {
 		t.Fatalf("LoadIfChanged failed: %v", err)
 	}

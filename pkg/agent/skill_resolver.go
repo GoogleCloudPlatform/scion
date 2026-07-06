@@ -526,7 +526,7 @@ func downloadSkillFile(ctx context.Context, fileURL, destPath string, maxSize in
 	if err != nil {
 		return fmt.Errorf("failed to create file: %w", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	n, err := io.Copy(f, limitedReader)
 	if err != nil {

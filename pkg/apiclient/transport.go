@@ -135,7 +135,7 @@ func (t *Transport) Do(ctx context.Context, req *http.Request) (*http.Response, 
 
 		// Retry on 5xx errors
 		if resp.StatusCode >= 500 && i < t.MaxRetries {
-			resp.Body.Close()
+			_ = resp.Body.Close()
 			time.Sleep(t.RetryWait)
 			continue
 		}
@@ -277,7 +277,7 @@ func (t *Transport) doJSON(ctx context.Context, method, path string, body interf
 // DecodeResponse reads and decodes a JSON response body.
 // If the response indicates an error (status >= 400), it returns an APIError.
 func DecodeResponse[T any](resp *http.Response) (*T, error) {
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode >= 400 {
 		return nil, ParseErrorResponse(resp)
@@ -299,7 +299,7 @@ func DecodeResponse[T any](resp *http.Response) (*T, error) {
 // CheckResponse checks if a response indicates an error.
 // Returns nil on success (2xx status codes), otherwise returns an APIError.
 func CheckResponse(resp *http.Response) error {
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode >= 400 {
 		return ParseErrorResponse(resp)

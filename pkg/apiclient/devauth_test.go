@@ -104,7 +104,7 @@ func TestInitDevAuth(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	t.Run("disabled", func(t *testing.T) {
 		cfg := DevAuthConfig{Enabled: false}
@@ -207,49 +207,37 @@ func TestResolveDevToken(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer os.RemoveAll(tmpDir)
-
-	// Clear any existing env vars
-	originalToken := os.Getenv("SCION_DEV_TOKEN")
-	originalFile := os.Getenv("SCION_DEV_TOKEN_FILE")
-	defer func() {
-		os.Setenv("SCION_DEV_TOKEN", originalToken)
-		os.Setenv("SCION_DEV_TOKEN_FILE", originalFile)
-	}()
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	t.Run("from env var", func(t *testing.T) {
-		os.Setenv("SCION_DEV_TOKEN", "scion_dev_from_env")
-		os.Setenv("SCION_DEV_TOKEN_FILE", "")
+		t.Setenv("SCION_DEV_TOKEN", "scion_dev_from_env")
+		t.Setenv("SCION_DEV_TOKEN_FILE", "")
 
 		token := ResolveDevToken()
 		if token != "scion_dev_from_env" {
 			t.Errorf("ResolveDevToken() = %v, want scion_dev_from_env", token)
 		}
-
-		os.Unsetenv("SCION_DEV_TOKEN")
 	})
 
 	t.Run("from custom file via env", func(t *testing.T) {
-		os.Unsetenv("SCION_DEV_TOKEN")
+		t.Setenv("SCION_DEV_TOKEN", "")
 
 		customFile := filepath.Join(tmpDir, "custom-resolve")
 		if err := os.WriteFile(customFile, []byte("scion_dev_from_file\n"), 0600); err != nil {
 			t.Fatal(err)
 		}
 
-		os.Setenv("SCION_DEV_TOKEN_FILE", customFile)
+		t.Setenv("SCION_DEV_TOKEN_FILE", customFile)
 
 		token := ResolveDevToken()
 		if token != "scion_dev_from_file" {
 			t.Errorf("ResolveDevToken() = %v, want scion_dev_from_file", token)
 		}
-
-		os.Unsetenv("SCION_DEV_TOKEN_FILE")
 	})
 
 	t.Run("no token found", func(t *testing.T) {
-		os.Unsetenv("SCION_DEV_TOKEN")
-		os.Unsetenv("SCION_DEV_TOKEN_FILE")
+		t.Setenv("SCION_DEV_TOKEN", "")
+		t.Setenv("SCION_DEV_TOKEN_FILE", "")
 
 		// Note: This test might find a token if ~/.scion/dev-token exists
 		// For a pure test, we'd need to mock the home directory
@@ -265,19 +253,11 @@ func TestResolveDevTokenWithSource(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer os.RemoveAll(tmpDir)
-
-	// Clear any existing env vars
-	originalToken := os.Getenv("SCION_DEV_TOKEN")
-	originalFile := os.Getenv("SCION_DEV_TOKEN_FILE")
-	defer func() {
-		os.Setenv("SCION_DEV_TOKEN", originalToken)
-		os.Setenv("SCION_DEV_TOKEN_FILE", originalFile)
-	}()
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	t.Run("from env var with source", func(t *testing.T) {
-		os.Setenv("SCION_DEV_TOKEN", "scion_dev_from_env")
-		os.Setenv("SCION_DEV_TOKEN_FILE", "")
+		t.Setenv("SCION_DEV_TOKEN", "scion_dev_from_env")
+		t.Setenv("SCION_DEV_TOKEN_FILE", "")
 
 		token, source := ResolveDevTokenWithSource()
 		if token != "scion_dev_from_env" {
@@ -286,19 +266,17 @@ func TestResolveDevTokenWithSource(t *testing.T) {
 		if source != "SCION_DEV_TOKEN env var" {
 			t.Errorf("ResolveDevTokenWithSource() source = %v, want 'SCION_DEV_TOKEN env var'", source)
 		}
-
-		os.Unsetenv("SCION_DEV_TOKEN")
 	})
 
 	t.Run("from custom file via env with source", func(t *testing.T) {
-		os.Unsetenv("SCION_DEV_TOKEN")
+		t.Setenv("SCION_DEV_TOKEN", "")
 
 		customFile := filepath.Join(tmpDir, "custom-resolve-source")
 		if err := os.WriteFile(customFile, []byte("scion_dev_from_file\n"), 0600); err != nil {
 			t.Fatal(err)
 		}
 
-		os.Setenv("SCION_DEV_TOKEN_FILE", customFile)
+		t.Setenv("SCION_DEV_TOKEN_FILE", customFile)
 
 		token, source := ResolveDevTokenWithSource()
 		if token != "scion_dev_from_file" {
@@ -308,7 +286,5 @@ func TestResolveDevTokenWithSource(t *testing.T) {
 		if source != expectedSource {
 			t.Errorf("ResolveDevTokenWithSource() source = %v, want %v", source, expectedSource)
 		}
-
-		os.Unsetenv("SCION_DEV_TOKEN_FILE")
 	})
 }

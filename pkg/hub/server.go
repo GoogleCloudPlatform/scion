@@ -683,9 +683,6 @@ type Server struct {
 	// integration_configs and integration_updates tables (nil when HA
 	// integration features are not configured).
 	entClient *ent.Client
-	// adminSignalListener listens for NOTIFY on scion_integration_admin
-	// (nil when database is not Postgres).
-	adminSignalListener *AdminSignalListener
 	// databaseDSN is the Postgres connection string, needed to open the
 	// admin signal listener connection and for PublishAdminSignal calls
 	// outside a transaction (nil/empty when database is not Postgres).

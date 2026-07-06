@@ -28,17 +28,17 @@ import (
 )
 
 const (
-	defaultUpdateTimeout  = 10 * time.Minute
-	defaultPollInterval   = 20 * time.Second
+	defaultUpdateTimeout = 10 * time.Minute
+	defaultPollInterval  = 20 * time.Second
 )
 
 // pendingUpdateEntry tracks a single pending update with its poll goroutine
 // and timeout timer.
 type pendingUpdateEntry struct {
-	updateID          string
-	preUpdateVersion  string
-	cancel            context.CancelFunc
-	timer             *time.Timer
+	updateID         string
+	preUpdateVersion string
+	cancel           context.CancelFunc
+	timer            *time.Timer
 }
 
 // pendingUpdateTracker manages poll-based completion detection for HA updates.

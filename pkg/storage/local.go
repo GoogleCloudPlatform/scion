@@ -123,7 +123,7 @@ func (s *LocalStorage) Upload(ctx context.Context, objectPath string, reader io.
 	if err != nil {
 		return nil, fmt.Errorf("failed to create file: %w", err)
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 
 	// Copy data and compute hash
 	hash := sha256.New()
@@ -171,7 +171,7 @@ func (s *LocalStorage) Download(ctx context.Context, objectPath string) (io.Read
 
 	info, err := file.Stat()
 	if err != nil {
-		file.Close()
+		_ = file.Close()
 		return nil, nil, fmt.Errorf("failed to stat file: %w", err)
 	}
 
@@ -339,7 +339,7 @@ func (s *LocalStorage) Copy(ctx context.Context, srcPath, dstPath string) (*Obje
 		}
 		return nil, fmt.Errorf("failed to open source file: %w", err)
 	}
-	defer src.Close()
+	defer func() { _ = src.Close() }()
 
 	// Ensure destination directory exists
 	if err := os.MkdirAll(filepath.Dir(dstFullPath), 0755); err != nil {
@@ -351,7 +351,7 @@ func (s *LocalStorage) Copy(ctx context.Context, srcPath, dstPath string) (*Obje
 	if err != nil {
 		return nil, fmt.Errorf("failed to create destination file: %w", err)
 	}
-	defer dst.Close()
+	defer func() { _ = dst.Close() }()
 
 	// Copy content
 	size, err := io.Copy(dst, src)

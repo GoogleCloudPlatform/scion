@@ -16,6 +16,7 @@ package logging
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"log/slog"
 	"os"
@@ -58,7 +59,7 @@ func TestGCPHandler_EmptyMessageSuppressed(t *testing.T) {
 	logger := slog.New(handler)
 
 	// Log with empty message (as HTTP request logs do)
-	logger.LogAttrs(nil, slog.LevelInfo, "",
+	logger.LogAttrs(context.Background(), slog.LevelInfo, "",
 		slog.Group("httpRequest",
 			slog.String("requestMethod", "GET"),
 			slog.Int("status", 200),

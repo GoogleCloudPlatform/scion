@@ -160,15 +160,15 @@ func write(level, tag, format string, args ...interface{}) {
 				return
 			}
 			// Write the fallback message to the new log file too
-			f.WriteString(timestamp + " " + fallbackMsg)
+			_, _ = f.WriteString(timestamp + " " + fallbackMsg)
 		} else {
 			// Already at /tmp/agent.log and it failed
 			mu.Unlock()
 			return
 		}
 	}
-	f.WriteString(fileEntry)
-	f.Close()
+	_, _ = f.WriteString(fileEntry)
+	_ = f.Close()
 	mu.Unlock()
 }
 

@@ -23,6 +23,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 )
+
 const (
 	// PluginTypeBroker is the plugin type for message broker implementations.
 	PluginTypeBroker = "broker"
@@ -61,6 +62,7 @@ const (
 	// DeploymentModeHA is the gRPC standalone mode for HA deployments.
 	DeploymentModeHA DeploymentMode = "ha"
 )
+
 // PluginEntry holds configuration for a single plugin.
 type PluginEntry struct {
 	// Path is the explicit filesystem path to the plugin binary.

@@ -307,7 +307,6 @@ func promptHubRegistration(isGlobal bool) error {
 		if err := config.UpdateSetting(resolvedPath, "hub.projectId", resp.Project.ID, isGlobal); err != nil {
 			fmt.Printf("Warning: failed to save hub project ID: %v\n", err)
 		}
-		projectID = resp.Project.ID
 	}
 
 	// Show any auto-provided brokers

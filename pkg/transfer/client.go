@@ -85,7 +85,7 @@ func (c *Client) UploadFileWithMethod(ctx context.Context, signedURL, method str
 	if err != nil {
 		return fmt.Errorf("upload failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode >= 400 {
 		bodyBytes, _ := io.ReadAll(resp.Body)
@@ -111,7 +111,7 @@ func (c *Client) uploadToFile(fileURL string, content io.Reader) error {
 	if err != nil {
 		return fmt.Errorf("failed to create file %s: %w", path, err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	if _, err := io.Copy(f, content); err != nil {
 		return fmt.Errorf("failed to write file %s: %w", path, err)
@@ -143,7 +143,7 @@ func (c *Client) DownloadFile(ctx context.Context, signedURL string) ([]byte, er
 	if err != nil {
 		return nil, fmt.Errorf("download failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode >= 400 {
 		bodyBytes, _ := io.ReadAll(resp.Body)
@@ -191,7 +191,7 @@ func (c *Client) UploadFiles(ctx context.Context, files []FileInfo, urls []Uploa
 		}
 
 		err = c.UploadFile(ctx, url, f)
-		f.Close()
+		_ = f.Close()
 		if err != nil {
 			return fmt.Errorf("failed to upload file %s: %w", file.Path, err)
 		}

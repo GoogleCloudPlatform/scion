@@ -32,12 +32,12 @@ import (
 // Manager owns the lifecycle of all loaded plugins.
 // It handles discovery, loading, dispensing, and shutdown of plugin processes.
 type Manager struct {
-	clients         map[string]*goplugin.Client    // "type:name" -> client
-	dispensed       map[string]interface{}         // "type:name" -> dispensed interface (cached)
-	selfManaged     map[string]bool                // "type:name" -> true if self-managed
-	grpcAdapters    map[string]GRPCBrokerClient    // "type:name" -> gRPC adapter
-	configs         map[string]DiscoveredPlugin    // "type:name" -> original config (for reconnection)
-	pluginEntries   map[string]PluginEntry         // "type:name" -> original PluginEntry (for mode resolution)
+	clients         map[string]*goplugin.Client // "type:name" -> client
+	dispensed       map[string]interface{}      // "type:name" -> dispensed interface (cached)
+	selfManaged     map[string]bool             // "type:name" -> true if self-managed
+	grpcAdapters    map[string]GRPCBrokerClient // "type:name" -> gRPC adapter
+	configs         map[string]DiscoveredPlugin // "type:name" -> original config (for reconnection)
+	pluginEntries   map[string]PluginEntry      // "type:name" -> original PluginEntry (for mode resolution)
 	mu              sync.RWMutex
 	logger          *slog.Logger
 	brokerCallbacks *HostCallbacksForwarder // lazily-wired host callbacks for broker plugins

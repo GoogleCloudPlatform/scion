@@ -117,7 +117,7 @@ func TestInstallOneSkill_CacheHit(t *testing.T) {
 	})
 
 	// Pre-populate cache
-	cache.Put(bundleHash, map[string][]byte{"SKILL.md": content})
+	_, _ = cache.Put(bundleHash, map[string][]byte{"SKILL.md": content})
 
 	ctx := ContextWithSkillCache(context.Background(), cache)
 
@@ -166,7 +166,7 @@ func TestInstallOneSkill_CacheMissPopulatesCache(t *testing.T) {
 	})
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write(content)
+		_, _ = w.Write(content)
 	}))
 	defer srv.Close()
 
@@ -211,7 +211,7 @@ func TestInstallOneSkill_NoCacheStillWorks(t *testing.T) {
 	})
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write(content)
+		_, _ = w.Write(content)
 	}))
 	defer srv.Close()
 
@@ -259,7 +259,7 @@ func TestInstallOneSkill_SecondInstallUsesCacheFromFirstInstall(t *testing.T) {
 	downloadCount := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		downloadCount++
-		w.Write(content)
+		_, _ = w.Write(content)
 	}))
 	defer srv.Close()
 

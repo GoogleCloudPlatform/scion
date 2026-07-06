@@ -36,12 +36,10 @@ func TestStart_ErrorPropagation_Tmux(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create temp dir: %v", err)
 	}
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	// Mock HOME for global settings and templates
-	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	t.Setenv("HOME", tmpDir)
 
 	// Setup global templates (needed by GetAgent)
 	globalScionDir := filepath.Join(tmpDir, ".scion")
@@ -147,12 +145,10 @@ func TestStart_ErrorPropagation_Tmux_Missing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create temp dir: %v", err)
 	}
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	// Mock HOME for global settings and templates
-	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	t.Setenv("HOME", tmpDir)
 
 	// Setup global templates (needed by GetAgent)
 	globalScionDir := filepath.Join(tmpDir, ".scion")
@@ -248,11 +244,9 @@ func TestStart_RunFailureMarksAgentInfoError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create temp dir: %v", err)
 	}
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
-	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	t.Setenv("HOME", tmpDir)
 
 	globalScionDir := filepath.Join(tmpDir, ".scion")
 	globalTemplatesDir := filepath.Join(globalScionDir, "templates")
@@ -343,12 +337,10 @@ func TestStart_ErrorPropagation_FalsePositive_Tmux(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create temp dir: %v", err)
 	}
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	// Mock HOME
-	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	t.Setenv("HOME", tmpDir)
 
 	// Setup global templates
 	globalScionDir := filepath.Join(tmpDir, ".scion")
@@ -444,12 +436,10 @@ func TestStart_ErrorPropagation_Tmux_CommandNotFound(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create temp dir: %v", err)
 	}
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	// Mock HOME
-	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	t.Setenv("HOME", tmpDir)
 
 	// Setup global templates
 	globalScionDir := filepath.Join(tmpDir, ".scion")

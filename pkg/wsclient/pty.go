@@ -175,7 +175,7 @@ func (c *PTYClient) Run() error {
 	if term.IsTerminal(c.oldFd) {
 		if cols, rows, err := term.GetSize(c.oldFd); err == nil {
 			msg := wsprotocol.NewPTYResizeMessage(cols, rows)
-			c.writeToWebSocket(msg)
+			_ = c.writeToWebSocket(msg)
 		}
 	}
 
@@ -222,7 +222,7 @@ func (c *PTYClient) Run() error {
 	// Close connection
 	slog.Debug("PTY client sending close message")
 	c.writeMu.Lock()
-	c.conn.WriteMessage(
+	_ = c.conn.WriteMessage(
 		websocket.CloseMessage,
 		websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""),
 	)
@@ -275,9 +275,9 @@ func (c *PTYClient) restoreTerminal(writeResetSeqs bool) {
 			// Write reset sequences before restoring termios, while stdout is
 			// still connected. These are idempotent — sending them when the
 			// modes are already off is harmless.
-			os.Stdout.Write([]byte(terminalResetSequences))
+			_, _ = os.Stdout.Write([]byte(terminalResetSequences))
 		}
-		term.Restore(c.oldFd, c.termState)
+		_ = term.Restore(c.oldFd, c.termState)
 		c.termState = nil
 	}
 }
@@ -297,7 +297,7 @@ func (c *PTYClient) handleResize() {
 				continue
 			}
 			msg := wsprotocol.NewPTYResizeMessage(cols, rows)
-			c.writeToWebSocket(msg)
+			_ = c.writeToWebSocket(msg)
 		}
 	}
 }
@@ -410,7 +410,7 @@ func (c *PTYClient) readFromWebSocket() error {
 			if err := json.Unmarshal(data, &msg); err != nil {
 				continue
 			}
-			os.Stdout.Write(msg.Data)
+			_, _ = os.Stdout.Write(msg.Data)
 
 		case wsprotocol.TypeError:
 			var errMsg wsprotocol.ErrorMessage
@@ -471,7 +471,7 @@ func AttachToAgent(ctx context.Context, endpoint, token, slug string) error {
 	if err := client.Connect(ctx); err != nil {
 		return err
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	return client.Run()
 }

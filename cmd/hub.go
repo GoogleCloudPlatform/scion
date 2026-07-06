@@ -514,7 +514,7 @@ func getAuthInfo(settings *config.Settings, endpoint string) authInfo {
 func getHubClient(settings *config.Settings) (hubclient.Client, error) {
 	endpoint := GetHubEndpoint(settings)
 	if endpoint == "" {
-		return nil, fmt.Errorf("Hub endpoint not configured. Set SCION_HUB_ENDPOINT or use --hub flag")
+		return nil, fmt.Errorf("hub endpoint not configured; set SCION_HUB_ENDPOINT or use --hub flag")
 	}
 
 	var opts []hubclient.Option
@@ -2038,7 +2038,7 @@ func runHubEnable(cmd *cobra.Command, args []string) error {
 
 	endpoint := GetHubEndpoint(settings)
 	if endpoint == "" {
-		return fmt.Errorf("Hub endpoint not configured.\n\nConfigure the Hub endpoint via:\n  - SCION_HUB_ENDPOINT environment variable\n  - hub.endpoint in settings.yaml\n  - --hub flag on any command\n\nExample: scion config set hub.endpoint https://hub.scion.dev --global")
+		return fmt.Errorf("hub endpoint not configured: set SCION_HUB_ENDPOINT, hub.endpoint in settings.yaml, or use --hub flag")
 	}
 
 	// Try to connect and verify Hub is healthy before enabling
@@ -2188,7 +2188,7 @@ func runHubLink(cmd *cobra.Command, args []string) error {
 
 	endpoint := GetHubEndpoint(settings)
 	if endpoint == "" {
-		return fmt.Errorf("Hub endpoint not configured.\n\nConfigure the Hub endpoint via:\n  - SCION_HUB_ENDPOINT environment variable\n  - hub.endpoint in settings.yaml\n  - --hub flag on any command\n\nExample: scion config set hub.endpoint https://hub.scion.dev --global")
+		return fmt.Errorf("hub endpoint not configured: set SCION_HUB_ENDPOINT, hub.endpoint in settings.yaml, or use --hub flag")
 	}
 
 	// Get project name for display
@@ -2226,7 +2226,7 @@ func runHubLink(cmd *cobra.Command, args []string) error {
 	defer cancel()
 
 	if _, err := client.Health(ctx); err != nil {
-		return fmt.Errorf("Hub at %s is not responding: %w", endpoint, err)
+		return fmt.Errorf("hub at %s is not responding: %w", endpoint, err)
 	}
 
 	// Ensure project_id exists

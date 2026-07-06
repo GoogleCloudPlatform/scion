@@ -468,7 +468,7 @@ func (a *reconnectingBrokerAdapter) Subscribe(pattern string, handler eventbus.E
 		return nil, fmt.Errorf("adapter is closed")
 	}
 
-	sub, err := a.current.Subscribe(pattern, handler)
+	_, err := a.current.Subscribe(pattern, handler)
 	if err == nil {
 		a.activeSubs[pattern] = handler
 		return &reconnectingSub{adapter: a, pattern: pattern}, nil
@@ -478,7 +478,7 @@ func (a *reconnectingBrokerAdapter) Subscribe(pattern string, handler eventbus.E
 	if reconnErr := a.tryReconnect(); reconnErr != nil {
 		return nil, fmt.Errorf("subscribe failed: %w (reconnect also failed: %v)", err, reconnErr)
 	}
-	sub, err = a.current.Subscribe(pattern, handler)
+	sub, err := a.current.Subscribe(pattern, handler)
 	if err != nil {
 		return nil, err
 	}

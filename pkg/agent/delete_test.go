@@ -60,26 +60,32 @@ func TestDeleteAgentFiles_CleansStaleWorktree(t *testing.T) {
 
 	// Set CWD and HOME to tmpDir so config resolution works
 	oldWd, _ := os.Getwd()
-	defer os.Chdir(oldWd)
-	os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
 
-	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	t.Setenv("HOME", tmpDir)
 
 	// Create a git repo to act as the project root
 	projectDir := filepath.Join(tmpDir, "project")
-	os.MkdirAll(projectDir, 0755)
+	if err := os.MkdirAll(projectDir, 0755); err != nil {
+		t.Fatalf("mkdir project: %v", err)
+	}
 	setupGitRepo(t, projectDir)
 
 	// Create .scion directory structure
 	scionDir := filepath.Join(projectDir, ".scion")
-	os.MkdirAll(filepath.Join(scionDir, "agents"), 0755)
+	if err := os.MkdirAll(filepath.Join(scionDir, "agents"), 0755); err != nil {
+		t.Fatalf("mkdir scion agents: %v", err)
+	}
 
 	agentName := "stale-agent"
 	agentDir := filepath.Join(scionDir, "agents", agentName)
 	agentWorkspace := filepath.Join(agentDir, "workspace")
-	os.MkdirAll(agentDir, 0755)
+	if err := os.MkdirAll(agentDir, 0755); err != nil {
+		t.Fatalf("mkdir agent: %v", err)
+	}
 
 	// Create a worktree at the workspace path (simulates a successful start)
 	if err := util.CreateWorktree(agentWorkspace, agentName); err != nil {
@@ -94,11 +100,13 @@ func TestDeleteAgentFiles_CleansStaleWorktree(t *testing.T) {
 
 	// Manually remove the workspace directory (simulating incomplete cleanup).
 	// This leaves the worktree registered but the directory gone ("prunable").
-	os.RemoveAll(agentWorkspace)
+	_ = os.RemoveAll(agentWorkspace)
 
 	// Re-create the agent directory without .git (simulates a failed re-start
 	// that created the dir structure but couldn't add the worktree)
-	os.MkdirAll(agentDir, 0755)
+	if err := os.MkdirAll(agentDir, 0755); err != nil {
+		t.Fatalf("mkdir agent: %v", err)
+	}
 
 	// Call DeleteAgentFiles — it should clean up the stale worktree record
 	branchDeleted, err := DeleteAgentFiles(agentName, scionDir, true)
@@ -136,20 +144,24 @@ func TestDeleteAgentFiles_CleansSharedWorkspaceExternalState(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	oldWd, _ := os.Getwd()
-	defer os.Chdir(oldWd)
-	os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
 
-	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	t.Setenv("HOME", tmpDir)
 
 	// Set up a project with .scion + project-id (split-storage marker).
 	projectDir := filepath.Join(tmpDir, "project")
-	os.MkdirAll(projectDir, 0755)
+	if err := os.MkdirAll(projectDir, 0755); err != nil {
+		t.Fatalf("mkdir project: %v", err)
+	}
 	setupGitRepo(t, projectDir)
 
 	scionDir := filepath.Join(projectDir, ".scion")
-	os.MkdirAll(scionDir, 0755)
+	if err := os.MkdirAll(scionDir, 0755); err != nil {
+		t.Fatalf("mkdir scion: %v", err)
+	}
 	if err := config.WriteProjectID(scionDir, "550e8400-e29b-41d4-a716-446655440000"); err != nil {
 		t.Fatalf("WriteProjectID failed: %v", err)
 	}
@@ -191,24 +203,30 @@ func TestDeleteAgentFiles_CleansWorktreeWithGitFile(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	oldWd, _ := os.Getwd()
-	defer os.Chdir(oldWd)
-	os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
 
-	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	t.Setenv("HOME", tmpDir)
 
 	projectDir := filepath.Join(tmpDir, "project")
-	os.MkdirAll(projectDir, 0755)
+	if err := os.MkdirAll(projectDir, 0755); err != nil {
+		t.Fatalf("mkdir project: %v", err)
+	}
 	setupGitRepo(t, projectDir)
 
 	scionDir := filepath.Join(projectDir, ".scion")
-	os.MkdirAll(filepath.Join(scionDir, "agents"), 0755)
+	if err := os.MkdirAll(filepath.Join(scionDir, "agents"), 0755); err != nil {
+		t.Fatalf("mkdir scion agents: %v", err)
+	}
 
 	agentName := "normal-agent"
 	agentDir := filepath.Join(scionDir, "agents", agentName)
 	agentWorkspace := filepath.Join(agentDir, "workspace")
-	os.MkdirAll(agentDir, 0755)
+	if err := os.MkdirAll(agentDir, 0755); err != nil {
+		t.Fatalf("mkdir agent: %v", err)
+	}
 
 	// Create a proper worktree (has .git file)
 	if err := util.CreateWorktree(agentWorkspace, agentName); err != nil {
@@ -279,8 +297,8 @@ func TestDeleteAgentFiles_WorktreePerAgent_DeletesOnlyTargetWorktree(t *testing.
 
 	tmpDir := t.TempDir()
 	oldWd, _ := os.Getwd()
-	defer os.Chdir(oldWd)
-	os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
+	_ = os.Chdir(tmpDir)
 	t.Setenv("HOME", tmpDir)
 
 	bare := initBareRepo(t)
@@ -404,8 +422,8 @@ func TestDeleteAgentFiles_SharedWorktree_DeleteCreatorWhileJoinerRemains(t *test
 
 	tmpDir := t.TempDir()
 	oldWd, _ := os.Getwd()
-	defer os.Chdir(oldWd)
-	os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
+	_ = os.Chdir(tmpDir)
 	t.Setenv("HOME", tmpDir)
 
 	bare := initBareRepo(t)
@@ -509,8 +527,8 @@ func TestDeleteAgentFiles_SharedWorktree_DeleteLastSharer_RemovesWorktree(t *tes
 
 	tmpDir := t.TempDir()
 	oldWd, _ := os.Getwd()
-	defer os.Chdir(oldWd)
-	os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
+	_ = os.Chdir(tmpDir)
 	t.Setenv("HOME", tmpDir)
 
 	bare := initBareRepo(t)
@@ -594,8 +612,8 @@ func TestDeleteAgentFiles_SharedWorktree_SoleSharer_DeleteRemoves(t *testing.T) 
 
 	tmpDir := t.TempDir()
 	oldWd, _ := os.Getwd()
-	defer os.Chdir(oldWd)
-	os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
+	_ = os.Chdir(tmpDir)
 	t.Setenv("HOME", tmpDir)
 
 	bare := initBareRepo(t)

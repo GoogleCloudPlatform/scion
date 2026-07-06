@@ -177,8 +177,8 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 	// Check if --no-hub flag is set
 	if opts.NoHub {
 		if projectPath != "" && IsHubProjectRef(projectPath) {
-			return nil, fmt.Errorf("cannot use --no-hub with a hub project reference (%s)\n\n"+
-				"Hub project references (slugs, names, git URLs) require hub connectivity.", projectPath)
+			return nil, fmt.Errorf("cannot use --no-hub with a hub project reference (%s): "+
+				"hub project references (slugs, names, git URLs) require hub connectivity", projectPath)
 		}
 		debugf("NoHub flag set, returning nil")
 		return nil, nil
@@ -245,7 +245,7 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 		}
 	}
 	if endpoint == "" {
-		return nil, wrapHubError(fmt.Errorf("Hub is enabled but no endpoint configured.\n\nConfigure via: scion config set hub.endpoint <url>"))
+		return nil, wrapHubError(fmt.Errorf("hub is enabled but no endpoint configured; configure via: scion config set hub.endpoint <url>"))
 	}
 
 	// Ensure project_id exists.
@@ -294,7 +294,7 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 	defer cancel()
 
 	if _, err := client.Health(ctx); err != nil {
-		return nil, wrapHubError(fmt.Errorf("Hub at %s is not responding: %w", endpoint, err))
+		return nil, wrapHubError(fmt.Errorf("hub at %s is not responding: %w", endpoint, err))
 	}
 
 	// Get broker ID
@@ -1105,7 +1105,7 @@ func saveProjectStateAtomic(projectPath string, state *config.ProjectState) erro
 	defer os.Remove(tmpPath)
 
 	if _, err := tmpFile.Write(data); err != nil {
-		tmpFile.Close()
+		_ = tmpFile.Close()
 		return err
 	}
 	if err := tmpFile.Close(); err != nil {

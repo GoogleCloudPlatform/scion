@@ -17,8 +17,8 @@ package harnesses
 //go:generate go run ./gen
 
 import (
-	_ "embed"
 	"embed"
+	_ "embed"
 )
 
 //go:embed all:antigravity/* all:claude/* all:codex/* all:copilot/* all:gemini-cli/* all:hermes/* all:opencode/*

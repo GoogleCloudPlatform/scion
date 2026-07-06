@@ -118,7 +118,7 @@ func TestClient_UploadFile_HTTP(t *testing.T) {
 func TestClient_UploadFile_HTTPError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusForbidden)
-		w.Write([]byte("access denied"))
+		_, _ = w.Write([]byte("access denied"))
 	}))
 	defer server.Close()
 
@@ -158,7 +158,7 @@ func TestClient_DownloadFile_FileURL(t *testing.T) {
 
 func TestClient_DownloadFile_HTTP(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("server content"))
+		_, _ = w.Write([]byte("server content"))
 	}))
 	defer server.Close()
 
@@ -176,7 +176,7 @@ func TestClient_DownloadFile_HTTP(t *testing.T) {
 func TestClient_DownloadFile_HTTPError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
-		w.Write([]byte("not found"))
+		_, _ = w.Write([]byte("not found"))
 	}))
 	defer server.Close()
 
@@ -191,7 +191,7 @@ func TestClient_DownloadToFile(t *testing.T) {
 	dir := t.TempDir()
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("file content"))
+		_, _ = w.Write([]byte("file content"))
 	}))
 	defer server.Close()
 
@@ -271,9 +271,9 @@ func TestClient_DownloadFiles(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/file1.txt":
-			w.Write([]byte("content1"))
+			_, _ = w.Write([]byte("content1"))
 		case "/file2.txt":
-			w.Write([]byte("content2"))
+			_, _ = w.Write([]byte("content2"))
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}

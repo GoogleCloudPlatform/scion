@@ -1786,7 +1786,7 @@ func (r *KubernetesRuntime) Stop(ctx context.Context, id string) error {
 }
 
 func (r *KubernetesRuntime) Delete(ctx context.Context, id string) error {
-	namespace := r.DefaultNamespace
+	var namespace string
 
 	// Support namespace/pod format
 	if strings.Contains(id, "/") {
@@ -1938,7 +1938,7 @@ func (r *KubernetesRuntime) List(ctx context.Context, labelFilter map[string]str
 }
 
 func (r *KubernetesRuntime) GetLogs(ctx context.Context, id string) (string, error) {
-	namespace := r.DefaultNamespace
+	var namespace string
 	podName := id
 
 	if strings.Contains(id, "/") {
@@ -1965,13 +1965,12 @@ func (r *KubernetesRuntime) GetLogs(ctx context.Context, id string) (string, err
 }
 
 func (r *KubernetesRuntime) Attach(ctx context.Context, id string) error {
+	var namespace string
 	podName := id
-	namespace := r.DefaultNamespace
 
 	if strings.Contains(id, "/") {
 		parts := strings.SplitN(id, "/", 2)
 		namespace = parts[0]
-		podName = parts[1]
 	} else {
 		namespace = r.resolveNamespace(ctx, podName)
 	}
@@ -2268,7 +2267,7 @@ func (r *KubernetesRuntime) Sync(ctx context.Context, id string, direction SyncD
 }
 
 func (r *KubernetesRuntime) Exec(ctx context.Context, id string, cmd []string) (string, error) {
-	namespace := r.DefaultNamespace
+	var namespace string
 	podName := id
 
 	if strings.Contains(id, "/") {
@@ -2370,7 +2369,7 @@ func (r *KubernetesRuntime) execInPod(ctx context.Context, namespace, podName st
 // GetWorkspacePath returns the local workspace path for a Kubernetes pod.
 // For K8s, this returns the workspace path stored in annotations when the pod was created.
 func (r *KubernetesRuntime) GetWorkspacePath(ctx context.Context, id string) (string, error) {
-	namespace := r.DefaultNamespace
+	var namespace string
 
 	// Parse namespace from id if present (format: namespace/podname)
 	if strings.Contains(id, "/") {

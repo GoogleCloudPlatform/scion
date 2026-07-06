@@ -151,7 +151,7 @@ func (s *GCSStorage) Upload(ctx context.Context, objectPath string, reader io.Re
 	// Copy data
 	size, err := io.Copy(writer, reader)
 	if err != nil {
-		writer.Close()
+		_ = writer.Close()
 		return nil, fmt.Errorf("failed to upload data: %w", err)
 	}
 

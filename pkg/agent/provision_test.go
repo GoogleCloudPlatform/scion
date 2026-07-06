@@ -1375,11 +1375,11 @@ func TestGetAgent_RecreatesMissingWorktree(t *testing.T) {
 	}
 
 	// Remove the workspace directory (simulating worktree prune or manual cleanup)
-	os.RemoveAll(agentWorkspace)
+	_ = os.RemoveAll(agentWorkspace)
 	// Also prune the worktree records so git doesn't think it still exists
 	cmd := exec.Command("git", "worktree", "prune")
 	cmd.Dir = projectDir
-	cmd.Run()
+	_ = cmd.Run()
 
 	// Verify workspace is gone
 	if _, err := os.Stat(agentWorkspace); !os.IsNotExist(err) {

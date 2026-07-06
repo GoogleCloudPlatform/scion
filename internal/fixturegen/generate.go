@@ -69,7 +69,7 @@ func Generate(ctx context.Context, path string) (*Report, error) {
 	if err != nil {
 		return nil, fmt.Errorf("opening fixture db: %w", err)
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	if err := entc.AutoMigrate(ctx, client); err != nil {
 		return nil, fmt.Errorf("migrating fixture db: %w", err)
@@ -135,7 +135,7 @@ func listTables(ctx context.Context, db *sql.DB) ([]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("listing tables: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var tables []string
 	for rows.Next() {
@@ -160,7 +160,7 @@ func columnsForTable(ctx context.Context, db *sql.DB, table string) (tableColumn
 	if err != nil {
 		return nil, fmt.Errorf("listing columns for %s: %w", table, err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	cols := tableColumns{}
 	for rows.Next() {

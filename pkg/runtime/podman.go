@@ -19,9 +19,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"os"
 	"os/exec"
-	goruntime "runtime"
 	"strconv"
 	"strings"
 
@@ -474,30 +472,4 @@ func (r *PodmanRuntime) GetWorkspacePath(ctx context.Context, id string) (string
 	}
 
 	return "", fmt.Errorf("no /workspace mount found for container %s", id)
-}
-
-// validatePodmanMachineMounts checks that the workspace path is within the user's
-// home directory when running on macOS with Podman Machine. Podman Machine exposes
-// $HOME via virtiofs by default; paths outside $HOME won't be accessible in the VM.
-func validatePodmanMachineMounts(workspace string) error {
-	if goruntime.GOOS != "darwin" {
-		return nil
-	}
-
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return nil // Can't determine home dir, skip validation
-	}
-
-	if !strings.HasPrefix(workspace, home) {
-		return fmt.Errorf(
-			"workspace path %q is outside your home directory (%s). "+
-				"Podman Machine on macOS exposes $HOME via virtiofs by default. "+
-				"Either move your workspace under $HOME or configure additional "+
-				"Podman Machine mounts with: podman machine init --volume <path>:<path>",
-			workspace, home,
-		)
-	}
-
-	return nil
 }

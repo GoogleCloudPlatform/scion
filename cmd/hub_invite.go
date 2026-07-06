@@ -211,7 +211,7 @@ func runInviteList(cmd *cobra.Command, args []string) error {
 	fmt.Printf("%-38s %-14s %-10s %-8s %-22s %s\n", "ID", "PREFIX", "STATUS", "USES", "EXPIRES", "NOTE")
 	for _, inv := range resp.Items {
 		status := inviteStatus(inv)
-		uses := fmt.Sprintf("%d", inv.UseCount)
+		var uses string
 		if inv.MaxUses > 0 {
 			uses = fmt.Sprintf("%d/%d", inv.UseCount, inv.MaxUses)
 		} else {

@@ -96,19 +96,6 @@ func nfsTestBackend(t *testing.T) (*nfsBackend, *config.V1NFSConfig, string) {
 	return b, cfg, mountRoot
 }
 
-// resolveForTest resolves workspace paths for a test project.
-func resolveForTest(t *testing.T, b WorkspaceBackend, projectID string) ResolvedWorkspace {
-	t.Helper()
-	res, err := b.Resolve(ResolveInput{
-		ProjectID: projectID,
-		Mode:      store.SharingModeSharedPlain,
-	})
-	if err != nil {
-		t.Fatalf("Resolve: %v", err)
-	}
-	return res
-}
-
 // initBareGitRepo creates a bare git repo at the given path for cloning from.
 func initBareGitRepo(t *testing.T) string {
 	t.Helper()

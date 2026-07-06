@@ -86,13 +86,13 @@ func StartComponent(component, executable string, args []string, globalDir strin
 	}
 
 	if err := cmd.Start(); err != nil {
-		logFile.Close()
+		_ = logFile.Close()
 		return fmt.Errorf("failed to start daemon: %w", err)
 	}
 
 	if err := WritePIDComponent(component, globalDir, cmd.Process.Pid); err != nil {
 		_ = cmd.Process.Kill()
-		logFile.Close()
+		_ = logFile.Close()
 		return fmt.Errorf("failed to write PID file: %w", err)
 	}
 
@@ -102,7 +102,7 @@ func StartComponent(component, executable string, args []string, globalDir strin
 	// error (which may carry OS-level exit status) so operators can tell a
 	// clean exit from an unexpected one.
 	go func() {
-		defer logFile.Close()
+		defer func() { _ = logFile.Close() }()
 		if err := cmd.Wait(); err != nil {
 			slog.Warn("Daemon component exited with error",
 				"component", component,

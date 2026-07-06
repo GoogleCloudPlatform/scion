@@ -134,7 +134,7 @@ func TestSupervisor_Signal(t *testing.T) {
 	// Start a long-running command
 	done := make(chan struct{})
 	go func() {
-		sup.Run(ctx, []string{"sleep", "60"})
+		_, _ = sup.Run(ctx, []string{"sleep", "60"})
 		close(done)
 	}()
 

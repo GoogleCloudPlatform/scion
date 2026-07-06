@@ -137,8 +137,7 @@ func TestFilterWorkspaceVolume(t *testing.T) {
 
 func TestBuildAgentEnv(t *testing.T) {
 	// Setup host env for inheritance test
-	os.Setenv("INHERITED_KEY", "inherited-value")
-	defer os.Unsetenv("INHERITED_KEY")
+	t.Setenv("INHERITED_KEY", "inherited-value")
 
 	scionCfg := &api.ScionConfig{
 		Env: map[string]string{
@@ -390,8 +389,7 @@ profiles:
 func TestBuildAgentEnv_EmptyValuePassthrough(t *testing.T) {
 	// When a config env entry has an empty value (no ${VAR} reference),
 	// buildAgentEnv should implicitly look up the host env var of the same name.
-	os.Setenv("HOST_AVAILABLE_KEY", "host-value")
-	defer os.Unsetenv("HOST_AVAILABLE_KEY")
+	t.Setenv("HOST_AVAILABLE_KEY", "host-value")
 
 	scionCfg := &api.ScionConfig{
 		Env: map[string]string{
@@ -1905,35 +1903,31 @@ func TestStartInjectsHubEnvFromProjectSettings(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	oldWd, _ := os.Getwd()
-	os.Chdir(tmpDir)
-	defer os.Chdir(oldWd)
+	_ = os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
 
-	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", tmpDir)
+	t.Setenv("HOME", tmpDir)
 
 	// Clear env vars that would interfere with settings loading
 	for _, k := range []string{"SCION_DEV_TOKEN", "SCION_AUTH_TOKEN", "SCION_DEV_TOKEN_FILE", "SCION_HUB_ENDPOINT", "SCION_HUB_URL"} {
-		if old, ok := os.LookupEnv(k); ok {
-			defer os.Setenv(k, old)
-			os.Unsetenv(k)
-		}
+		t.Setenv(k, "")
+		_ = os.Unsetenv(k)
 	}
 
 	globalScionDir := filepath.Join(tmpDir, ".scion")
 
 	// Create harness-config
 	hcDir := filepath.Join(globalScionDir, "harness-configs", "test-harness")
-	os.MkdirAll(hcDir, 0755)
-	os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte("harness: gemini\nuser: scion\nimage: test-image:latest\n"), 0644)
+	_ = os.MkdirAll(hcDir, 0755)
+	_ = os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte("harness: gemini\nuser: scion\nimage: test-image:latest\n"), 0644)
 
 	// Create a minimal template
 	tplDir := filepath.Join(globalScionDir, "templates", "default")
-	os.MkdirAll(tplDir, 0755)
-	os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config": "test-harness"}`), 0644)
+	_ = os.MkdirAll(tplDir, 0755)
+	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config": "test-harness"}`), 0644)
 
 	// Global settings
-	os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(`schema_version: "1"
+	_ = os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(`schema_version: "1"
 active_profile: local
 profiles:
   local:
@@ -1943,14 +1937,14 @@ profiles:
 	// Create project directory with hub-enabled settings
 	projectDir := filepath.Join(tmpDir, "project")
 	projectScionDir := filepath.Join(projectDir, ".scion")
-	os.MkdirAll(projectScionDir, 0755)
-	os.WriteFile(filepath.Join(projectScionDir, "settings.yaml"), []byte(`hub:
+	_ = os.MkdirAll(projectScionDir, 0755)
+	_ = os.WriteFile(filepath.Join(projectScionDir, "settings.yaml"), []byte(`hub:
   enabled: true
   endpoint: "http://localhost:9810"
 `), 0644)
 
 	// Write a dev-token file so the token resolution finds it
-	os.WriteFile(filepath.Join(globalScionDir, "dev-token"), []byte("scion-dev-test-token-abc"), 0644)
+	_ = os.WriteFile(filepath.Join(globalScionDir, "dev-token"), []byte("scion-dev-test-token-abc"), 0644)
 
 	// Capture the RunConfig
 	var capturedConfig runtime.RunConfig

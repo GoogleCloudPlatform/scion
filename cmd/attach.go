@@ -74,8 +74,6 @@ If the agent was started with tmux support, this will attach to the tmux session
 					if _, err := os.Stat(filepath.Join(globalAgentDir, "scion-agent.json")); err == nil {
 						found = true
 						targetProjectPath = globalDir
-						// Update display info
-						projectDir = globalDir
 						projectName = "global"
 						fmt.Printf("Agent '%s' not found in local project, using global agent.\n", agentName)
 					}

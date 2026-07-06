@@ -54,9 +54,9 @@ type TLSConfig struct {
 
 // AdapterConfig holds configuration for creating a GRPCBrokerAdapter.
 type AdapterConfig struct {
-	Address   string
-	TLS       *TLSConfig
-	Logger    *slog.Logger
+	Address       string
+	TLS           *TLSConfig
+	Logger        *slog.Logger
 	Authenticator PerCallAuthenticator
 }
 
@@ -75,9 +75,6 @@ type GRPCBrokerAdapter struct {
 	client     brokerv1.BrokerServiceClient
 	activeSubs map[string]eventbus.EventHandler
 	closed     bool
-
-	info   *plugin.PluginInfo
-	health *plugin.HealthStatus
 
 	reconnectCallbacks []func()
 }
@@ -152,7 +149,7 @@ func (a *GRPCBrokerAdapter) dialOpts() ([]grpc.DialOption, error) {
 // connect establishes the gRPC connection. Caller must hold a.mu.
 func (a *GRPCBrokerAdapter) connect() error {
 	if a.conn != nil {
-		a.conn.Close()
+		_ = a.conn.Close()
 	}
 
 	opts, err := a.dialOpts()

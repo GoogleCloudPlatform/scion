@@ -31,15 +31,13 @@ func setupCompositionTest(t *testing.T) (tmpDir, globalScionDir, projectScionDir
 	tmpDir = t.TempDir()
 
 	oldWd, _ := os.Getwd()
-	os.Chdir(tmpDir)
-	t.Cleanup(func() { os.Chdir(oldWd) })
+	_ = os.Chdir(tmpDir)
+	t.Cleanup(func() { _ = os.Chdir(oldWd) })
 
-	originalHome := os.Getenv("HOME")
-	t.Cleanup(func() { os.Setenv("HOME", originalHome) })
-	os.Setenv("HOME", tmpDir)
+	t.Setenv("HOME", tmpDir)
 
 	globalScionDir = filepath.Join(tmpDir, ".scion")
-	os.MkdirAll(filepath.Join(globalScionDir, "templates"), 0755)
+	_ = os.MkdirAll(filepath.Join(globalScionDir, "templates"), 0755)
 
 	// Seed the default template so template chain inheritance works
 	defaultTplDir := filepath.Join(globalScionDir, "templates", "default")
@@ -49,7 +47,7 @@ func setupCompositionTest(t *testing.T) (tmpDir, globalScionDir, projectScionDir
 
 	projectDir := filepath.Join(tmpDir, "project")
 	projectScionDir = filepath.Join(projectDir, ".scion")
-	os.MkdirAll(projectScionDir, 0755)
+	_ = os.MkdirAll(projectScionDir, 0755)
 
 	return tmpDir, globalScionDir, projectScionDir
 }
@@ -60,15 +58,15 @@ func TestComposition_HarnessConfigBaseLayer(t *testing.T) {
 	// Create harness-config with home files
 	hcDir := filepath.Join(globalScionDir, "harness-configs", "test-hc")
 	hcHome := filepath.Join(hcDir, "home")
-	os.MkdirAll(filepath.Join(hcHome, ".config"), 0755)
-	os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte("harness: claude\n"), 0644)
-	os.WriteFile(filepath.Join(hcHome, "base-file.txt"), []byte("from-harness-config"), 0644)
-	os.WriteFile(filepath.Join(hcHome, ".config", "base-config.json"), []byte(`{"source": "harness-config"}`), 0644)
+	_ = os.MkdirAll(filepath.Join(hcHome, ".config"), 0755)
+	_ = os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte("harness: claude\n"), 0644)
+	_ = os.WriteFile(filepath.Join(hcHome, "base-file.txt"), []byte("from-harness-config"), 0644)
+	_ = os.WriteFile(filepath.Join(hcHome, ".config", "base-config.json"), []byte(`{"source": "harness-config"}`), 0644)
 
 	// Create agnostic template (no home, just points to harness-config)
 	tplDir := filepath.Join(globalScionDir, "templates", "base-test")
-	os.MkdirAll(tplDir, 0755)
-	os.WriteFile(filepath.Join(tplDir, "scion-agent.yaml"), []byte("default_harness_config: test-hc\n"), 0644)
+	_ = os.MkdirAll(tplDir, 0755)
+	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.yaml"), []byte("default_harness_config: test-hc\n"), 0644)
 
 	agentHome, _, _, err := ProvisionAgent(context.Background(), "base-agent", "base-test", "", "", projectScionDir, "", "", "", "")
 	if err != nil {
@@ -99,18 +97,18 @@ func TestComposition_TemplateOverlay(t *testing.T) {
 	// Create harness-config with home files
 	hcDir := filepath.Join(globalScionDir, "harness-configs", "overlay-hc")
 	hcHome := filepath.Join(hcDir, "home")
-	os.MkdirAll(hcHome, 0755)
-	os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte("harness: claude\n"), 0644)
-	os.WriteFile(filepath.Join(hcHome, "shared-file.txt"), []byte("from-harness-config"), 0644)
-	os.WriteFile(filepath.Join(hcHome, "base-only.txt"), []byte("base-only-content"), 0644)
+	_ = os.MkdirAll(hcHome, 0755)
+	_ = os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte("harness: claude\n"), 0644)
+	_ = os.WriteFile(filepath.Join(hcHome, "shared-file.txt"), []byte("from-harness-config"), 0644)
+	_ = os.WriteFile(filepath.Join(hcHome, "base-only.txt"), []byte("base-only-content"), 0644)
 
 	// Create template with home directory that overlays
 	tplDir := filepath.Join(globalScionDir, "templates", "overlay-test")
 	tplHome := filepath.Join(tplDir, "home")
-	os.MkdirAll(tplHome, 0755)
-	os.WriteFile(filepath.Join(tplDir, "scion-agent.yaml"), []byte("default_harness_config: overlay-hc\n"), 0644)
-	os.WriteFile(filepath.Join(tplHome, "shared-file.txt"), []byte("from-template"), 0644) // overlay
-	os.WriteFile(filepath.Join(tplHome, "template-only.txt"), []byte("template-only-content"), 0644)
+	_ = os.MkdirAll(tplHome, 0755)
+	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.yaml"), []byte("default_harness_config: overlay-hc\n"), 0644)
+	_ = os.WriteFile(filepath.Join(tplHome, "shared-file.txt"), []byte("from-template"), 0644) // overlay
+	_ = os.WriteFile(filepath.Join(tplHome, "template-only.txt"), []byte("template-only-content"), 0644)
 
 	agentHome, _, _, err := ProvisionAgent(context.Background(), "overlay-agent", "overlay-test", "", "", projectScionDir, "", "", "", "")
 	if err != nil {
@@ -152,11 +150,11 @@ func TestComposition_AgentInstructionsInjection(t *testing.T) {
 
 	t.Run("inline content", func(t *testing.T) {
 		tplDir := filepath.Join(globalScionDir, "templates", "inline-instructions")
-		os.MkdirAll(tplDir, 0755)
+		_ = os.MkdirAll(tplDir, 0755)
 		tplConfig := `default_harness_config: claude-hc
 agent_instructions: "You are a helpful coding assistant."
 `
-		os.WriteFile(filepath.Join(tplDir, "scion-agent.yaml"), []byte(tplConfig), 0644)
+		_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.yaml"), []byte(tplConfig), 0644)
 
 		agentHome, _, _, err := ProvisionAgent(context.Background(), "inline-agent", "inline-instructions", "", "", projectScionDir, "", "", "", "")
 		if err != nil {
@@ -174,12 +172,12 @@ agent_instructions: "You are a helpful coding assistant."
 
 	t.Run("file reference", func(t *testing.T) {
 		tplDir := filepath.Join(globalScionDir, "templates", "file-instructions")
-		os.MkdirAll(tplDir, 0755)
-		os.WriteFile(filepath.Join(tplDir, "my-instructions.md"), []byte("Instructions from file."), 0644)
+		_ = os.MkdirAll(tplDir, 0755)
+		_ = os.WriteFile(filepath.Join(tplDir, "my-instructions.md"), []byte("Instructions from file."), 0644)
 		tplConfig := `default_harness_config: claude-hc
 agent_instructions: my-instructions.md
 `
-		os.WriteFile(filepath.Join(tplDir, "scion-agent.yaml"), []byte(tplConfig), 0644)
+		_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.yaml"), []byte(tplConfig), 0644)
 
 		agentHome, _, _, err := ProvisionAgent(context.Background(), "file-instr-agent", "file-instructions", "", "", projectScionDir, "", "", "", "")
 		if err != nil {
@@ -202,11 +200,11 @@ func TestComposition_SystemPromptInjection(t *testing.T) {
 	seedTestHarnessConfig(t, globalScionDir, "claude-hc", "claude")
 
 	tplDir := filepath.Join(globalScionDir, "templates", "sysprompt-test")
-	os.MkdirAll(tplDir, 0755)
+	_ = os.MkdirAll(tplDir, 0755)
 	tplConfig := `default_harness_config: claude-hc
 system_prompt: "Be concise and precise."
 `
-	os.WriteFile(filepath.Join(tplDir, "scion-agent.yaml"), []byte(tplConfig), 0644)
+	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.yaml"), []byte(tplConfig), 0644)
 
 	agentHome, _, _, err := ProvisionAgent(context.Background(), "sysprompt-agent", "sysprompt-test", "", "", projectScionDir, "", "", "", "")
 	if err != nil {
@@ -229,8 +227,8 @@ func TestComposition_CommonFiles(t *testing.T) {
 	seedTestHarnessConfig(t, globalScionDir, "common-hc", "claude")
 
 	tplDir := filepath.Join(globalScionDir, "templates", "common-test")
-	os.MkdirAll(tplDir, 0755)
-	os.WriteFile(filepath.Join(tplDir, "scion-agent.yaml"), []byte("default_harness_config: common-hc\n"), 0644)
+	_ = os.MkdirAll(tplDir, 0755)
+	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.yaml"), []byte("default_harness_config: common-hc\n"), 0644)
 
 	agentHome, _, _, err := ProvisionAgent(context.Background(), "common-agent", "common-test", "", "", projectScionDir, "", "", "", "")
 	if err != nil {
@@ -257,13 +255,13 @@ func TestComposition_HarnessConfigResolution(t *testing.T) {
 
 	// Create template with default_harness_config
 	tplDir := filepath.Join(globalScionDir, "templates", "resolve-test")
-	os.MkdirAll(tplDir, 0755)
-	os.WriteFile(filepath.Join(tplDir, "scion-agent.yaml"), []byte("default_harness_config: tpl-hc\n"), 0644)
+	_ = os.MkdirAll(tplDir, 0755)
+	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.yaml"), []byte("default_harness_config: tpl-hc\n"), 0644)
 
 	// Create template without default_harness_config (for fallback tests)
 	tplDirNoDefault := filepath.Join(globalScionDir, "templates", "no-default-test")
-	os.MkdirAll(tplDirNoDefault, 0755)
-	os.WriteFile(filepath.Join(tplDirNoDefault, "scion-agent.yaml"), []byte("env:\n  FOO: bar\n"), 0644)
+	_ = os.MkdirAll(tplDirNoDefault, 0755)
+	_ = os.WriteFile(filepath.Join(tplDirNoDefault, "scion-agent.yaml"), []byte("env:\n  FOO: bar\n"), 0644)
 
 	t.Run("CLI flag wins over template", func(t *testing.T) {
 		_, _, cfg, err := ProvisionAgent(context.Background(), "cli-wins", "resolve-test", "", "cli-hc", projectScionDir, "", "", "", "")
@@ -293,7 +291,7 @@ profiles:
     runtime: docker
     default_harness_config: profile-hc
 `
-		os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(settingsYAML), 0644)
+		_ = os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(settingsYAML), 0644)
 
 		_, _, cfg, err := ProvisionAgent(context.Background(), "profile-default", "no-default-test", "", "", projectScionDir, "test-profile", "", "", "")
 		if err != nil {
@@ -303,14 +301,14 @@ profiles:
 			t.Errorf("expected HarnessConfig = 'profile-hc', got %q", cfg.HarnessConfig)
 		}
 		// Clean up settings
-		os.Remove(filepath.Join(globalScionDir, "settings.yaml"))
+		_ = os.Remove(filepath.Join(globalScionDir, "settings.yaml"))
 	})
 
 	t.Run("top-level settings default used as last resort", func(t *testing.T) {
 		settingsYAML := `schema_version: "1"
 default_harness_config: settings-hc
 `
-		os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(settingsYAML), 0644)
+		_ = os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(settingsYAML), 0644)
 
 		_, _, cfg, err := ProvisionAgent(context.Background(), "settings-default", "no-default-test", "", "", projectScionDir, "", "", "", "")
 		if err != nil {
@@ -319,7 +317,7 @@ default_harness_config: settings-hc
 		if cfg.HarnessConfig != "settings-hc" {
 			t.Errorf("expected HarnessConfig = 'settings-hc', got %q", cfg.HarnessConfig)
 		}
-		os.Remove(filepath.Join(globalScionDir, "settings.yaml"))
+		_ = os.Remove(filepath.Join(globalScionDir, "settings.yaml"))
 	})
 
 	t.Run("error when no harness-config resolved", func(t *testing.T) {
@@ -338,8 +336,8 @@ func TestComposition_LegacyTemplateRejected(t *testing.T) {
 
 	// Create a legacy template with harness field
 	tplDir := filepath.Join(globalScionDir, "templates", "legacy-tpl")
-	os.MkdirAll(tplDir, 0755)
-	os.WriteFile(filepath.Join(tplDir, "scion-agent.yaml"), []byte("harness: claude\n"), 0644)
+	_ = os.MkdirAll(tplDir, 0755)
+	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.yaml"), []byte("harness: claude\n"), 0644)
 
 	_, _, _, err := ProvisionAgent(context.Background(), "legacy-agent", "legacy-tpl", "", "", projectScionDir, "", "", "", "")
 	if err == nil {
@@ -356,8 +354,8 @@ func TestComposition_HarnessConfigPersistedInAgentInfo(t *testing.T) {
 	seedTestHarnessConfig(t, globalScionDir, "persist-hc", "claude")
 
 	tplDir := filepath.Join(globalScionDir, "templates", "persist-test")
-	os.MkdirAll(tplDir, 0755)
-	os.WriteFile(filepath.Join(tplDir, "scion-agent.yaml"), []byte("default_harness_config: persist-hc\n"), 0644)
+	_ = os.MkdirAll(tplDir, 0755)
+	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.yaml"), []byte("default_harness_config: persist-hc\n"), 0644)
 
 	agentHome, _, cfg, err := ProvisionAgent(context.Background(), "persist-agent", "persist-test", "", "", projectScionDir, "", "", "", "")
 	if err != nil {
@@ -387,11 +385,11 @@ func TestComposition_HarnessConfigPersistedInAgentInfo(t *testing.T) {
 func setupInlineHarnessTemplate(t *testing.T, scionDir, tplName, agentInstructions string) string {
 	t.Helper()
 	tplDir := filepath.Join(scionDir, "templates", tplName)
-	os.MkdirAll(tplDir, 0755)
+	_ = os.MkdirAll(tplDir, 0755)
 
 	// Template-level agents.md (the instruction file that should win)
-	os.WriteFile(filepath.Join(tplDir, "agents.md"), []byte("# Template Agent Instructions\nThese are from the template."), 0644)
-	os.WriteFile(filepath.Join(tplDir, "system-prompt.md"), []byte("Be helpful."), 0644)
+	_ = os.WriteFile(filepath.Join(tplDir, "agents.md"), []byte("# Template Agent Instructions\nThese are from the template."), 0644)
+	_ = os.WriteFile(filepath.Join(tplDir, "system-prompt.md"), []byte("Be helpful."), 0644)
 
 	// Template scion-agent.yaml
 	tplConfig := "default_harness_config: claude-web\n"
@@ -399,21 +397,21 @@ func setupInlineHarnessTemplate(t *testing.T, scionDir, tplName, agentInstructio
 		tplConfig += "agent_instructions: " + agentInstructions + "\n"
 	}
 	tplConfig += "system_prompt: system-prompt.md\n"
-	os.WriteFile(filepath.Join(tplDir, "scion-agent.yaml"), []byte(tplConfig), 0644)
+	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.yaml"), []byte(tplConfig), 0644)
 
 	// Inline harness-config: harness-configs/claude-web/
 	hcDir := filepath.Join(tplDir, "harness-configs", "claude-web")
 	hcHome := filepath.Join(hcDir, "home")
-	os.MkdirAll(filepath.Join(hcHome, ".claude", "skills", "chrome-devtools"), 0755)
-	os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte("harness: claude\nimage: test-claude:latest\nskills_dir: .claude/skills\ninstructions_file: .claude/CLAUDE.md\n"), 0644)
+	_ = os.MkdirAll(filepath.Join(hcHome, ".claude", "skills", "chrome-devtools"), 0755)
+	_ = os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte("harness: claude\nimage: test-claude:latest\nskills_dir: .claude/skills\ninstructions_file: .claude/CLAUDE.md\n"), 0644)
 
 	// Harness config provides claude.md (lowercase) — this should be REPLACED
-	os.WriteFile(filepath.Join(hcHome, ".claude", "claude.md"), []byte("# Harness Config Instructions\nThese are from the harness config."), 0644)
-	os.WriteFile(filepath.Join(hcHome, ".claude", "settings.json"), []byte(`{"theme": "dark"}`), 0644)
-	os.WriteFile(filepath.Join(hcHome, ".claude", "skills", "chrome-devtools", "SKILL.md"), []byte("# Chrome DevTools"), 0644)
-	os.WriteFile(filepath.Join(hcHome, ".claude.json"), []byte(`{"projects": {}}`), 0644)
-	os.WriteFile(filepath.Join(hcHome, ".bashrc"), []byte("# bashrc"), 0644)
-	os.WriteFile(filepath.Join(hcHome, ".tmux.conf"), []byte("# tmux"), 0644)
+	_ = os.WriteFile(filepath.Join(hcHome, ".claude", "claude.md"), []byte("# Harness Config Instructions\nThese are from the harness config."), 0644)
+	_ = os.WriteFile(filepath.Join(hcHome, ".claude", "settings.json"), []byte(`{"theme": "dark"}`), 0644)
+	_ = os.WriteFile(filepath.Join(hcHome, ".claude", "skills", "chrome-devtools", "SKILL.md"), []byte("# Chrome DevTools"), 0644)
+	_ = os.WriteFile(filepath.Join(hcHome, ".claude.json"), []byte(`{"projects": {}}`), 0644)
+	_ = os.WriteFile(filepath.Join(hcHome, ".bashrc"), []byte("# bashrc"), 0644)
+	_ = os.WriteFile(filepath.Join(hcHome, ".tmux.conf"), []byte("# tmux"), 0644)
 
 	return tplDir
 }

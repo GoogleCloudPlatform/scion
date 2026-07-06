@@ -691,7 +691,7 @@ authDone:
 				util.Debugf("Start: failed to write token file: %v", err)
 			} else if err := os.Rename(tmp, tokenPath); err != nil {
 				util.Debugf("Start: failed to rename token file: %v", err)
-				os.Remove(tmp)
+				_ = os.Remove(tmp)
 			} else {
 				util.Debugf("Start: wrote agent token to %s", tokenPath)
 			}

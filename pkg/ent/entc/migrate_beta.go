@@ -252,7 +252,7 @@ func applyFields(builder, rowElem reflect.Value) error {
 		fv := rowElem.Field(i)
 
 		var candidates []string
-		if f.Type.Kind() == reflect.Ptr {
+		if f.Type.Kind() == reflect.Pointer {
 			candidates = []string{"SetNillable" + f.Name, "Set" + f.Name}
 		} else {
 			candidates = []string{"Set" + f.Name}

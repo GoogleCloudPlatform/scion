@@ -32,11 +32,11 @@ func TestSignalHandler_WithPreStopHook(t *testing.T) {
 	defer handler.Stop()
 
 	// Start a long-running command in the background
-	go sup.Run(ctx, []string{"sleep", "60"})
+	go func() { _, _ = sup.Run(ctx, []string{"sleep", "60"}) }()
 	time.Sleep(50 * time.Millisecond) // Let process start
 
 	// Send SIGTERM
-	syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
+	_ = syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
 
 	// Wait for hook to be called
 	time.Sleep(100 * time.Millisecond)
@@ -57,11 +57,11 @@ func TestSignalHandler_WithoutPreStopHook(t *testing.T) {
 	defer handler.Stop()
 
 	// Start a long-running command
-	go sup.Run(ctx, []string{"sleep", "60"})
+	go func() { _, _ = sup.Run(ctx, []string{"sleep", "60"}) }()
 	time.Sleep(50 * time.Millisecond)
 
 	// This should not panic
-	syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
+	_ = syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
 	time.Sleep(100 * time.Millisecond)
 }
 

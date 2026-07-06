@@ -108,14 +108,3 @@ func Logger(ctx context.Context) *slog.Logger {
 func Subsystem(name string) *slog.Logger {
 	return slog.Default().With(slog.String(AttrSubsystem, name))
 }
-
-// Handler with component name
-type componentHandler struct {
-	slog.Handler
-	component string
-}
-
-func (h *componentHandler) Handle(ctx context.Context, r slog.Record) error {
-	r.AddAttrs(slog.String(AttrComponent, h.component))
-	return h.Handler.Handle(ctx, r)
-}

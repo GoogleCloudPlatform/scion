@@ -24,8 +24,6 @@ import (
 	"strings"
 	"sync"
 
-	"database/sql"
-
 	entsql "entgo.io/ent/dialect/sql"
 	"github.com/google/uuid"
 
@@ -890,18 +888,6 @@ func integrationUpdateToResponse(row *ent.IntegrationUpdate) IntegrationUpdateRe
 		CreatedAt:   row.CreateTime.UTC().Format("2006-01-02T15:04:05Z"),
 		UpdatedAt:   row.UpdateTime.UTC().Format("2006-01-02T15:04:05Z"),
 	}
-}
-
-// entDB returns the underlying *sql.DB from the server's Ent client, or nil.
-func (s *Server) entDB() *sql.DB {
-	if s.entClient == nil {
-		return nil
-	}
-	drv, ok := s.entClient.Driver().(*entsql.Driver)
-	if !ok {
-		return nil
-	}
-	return drv.DB()
 }
 
 // handleUpdateIntegrationHA handles POST .../update for HA integrations.

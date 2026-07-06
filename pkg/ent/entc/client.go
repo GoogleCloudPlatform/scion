@@ -77,11 +77,11 @@ func OpenSQLite(dsn string, pool PoolConfig, opts ...ent.Option) (*ent.Client, e
 	}
 	// Enable foreign keys and WAL mode, matching existing store pattern.
 	if _, err := db.Exec("PRAGMA foreign_keys = ON"); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, fmt.Errorf("enabling foreign keys: %w", err)
 	}
 	if _, err := db.Exec("PRAGMA journal_mode = WAL"); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, fmt.Errorf("enabling WAL mode: %w", err)
 	}
 	pool.apply(db)
@@ -110,11 +110,11 @@ func OpenSQLiteReadOnly(dsn string, opts ...ent.Option) (*ent.Client, error) {
 	// Foreign keys on for read consistency; query_only to guarantee the source
 	// is never modified during migration.
 	if _, err := db.Exec("PRAGMA foreign_keys = ON"); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, fmt.Errorf("enabling foreign keys: %w", err)
 	}
 	if _, err := db.Exec("PRAGMA query_only = ON"); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, fmt.Errorf("enabling query_only mode: %w", err)
 	}
 	drv := entsql.OpenDB(dialect.SQLite, db)

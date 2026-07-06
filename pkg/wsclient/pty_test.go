@@ -68,12 +68,12 @@ func TestRestoreTerminalWritesResetSequences(t *testing.T) {
 	client.restoreTerminal(true)
 
 	// Close the write end so the read end sees EOF.
-	w.Close()
+	_ = w.Close()
 	os.Stdout = origStdout
 
 	buf := make([]byte, 4096)
 	n, _ := r.Read(buf)
-	r.Close()
+	_ = r.Close()
 
 	output := string(buf[:n])
 	if output != terminalResetSequences {
@@ -98,12 +98,12 @@ func TestRestoreTerminalSkipsResetOnError(t *testing.T) {
 
 	client.restoreTerminal(false)
 
-	w.Close()
+	_ = w.Close()
 	os.Stdout = origStdout
 
 	buf := make([]byte, 4096)
 	n, _ := r.Read(buf)
-	r.Close()
+	_ = r.Close()
 
 	if n != 0 {
 		t.Errorf("restoreTerminal on error wrote %d bytes: %q, want no output", n, string(buf[:n]))
@@ -126,12 +126,12 @@ func TestRestoreTerminalNoOpWhenNoState(t *testing.T) {
 
 	client.restoreTerminal(true)
 
-	w.Close()
+	_ = w.Close()
 	os.Stdout = origStdout
 
 	buf := make([]byte, 4096)
 	n, _ := r.Read(buf)
-	r.Close()
+	_ = r.Close()
 
 	if n != 0 {
 		t.Errorf("restoreTerminal with nil termState wrote %d bytes: %q", n, string(buf[:n]))

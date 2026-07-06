@@ -16,7 +16,6 @@ package harness
 
 import (
 	"encoding/json"
-	"fmt"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -197,14 +196,14 @@ func runBundleContractCase(t *testing.T, python, hname, caseDir string) {
 
 	// Build the manifest.
 	manifest := map[string]interface{}{
-		"schema_version":    1,
-		"command":           "provision",
-		"agent_name":        "test-agent",
-		"agent_home":        tmpHome,
-		"agent_workspace":   "/workspace",
+		"schema_version":     1,
+		"command":            "provision",
+		"agent_name":         "test-agent",
+		"agent_home":         tmpHome,
+		"agent_workspace":    "/workspace",
 		"harness_bundle_dir": bundleDir,
-		"harness_config":    input.HarnessConfig,
-		"inputs":            map[string]interface{}{},
+		"harness_config":     input.HarnessConfig,
+		"inputs":             map[string]interface{}{},
 		"outputs": map[string]interface{}{
 			"env":           filepath.Join(bundleDir, "outputs", "env.json"),
 			"resolved_auth": filepath.Join(bundleDir, "outputs", "resolved-auth.json"),
@@ -318,15 +317,6 @@ func TestBundleContractCoverage(t *testing.T) {
 			t.Logf("harness %s: %d fixture cases", hname, count)
 		}
 	}
-}
-
-// debugJSON returns a pretty-printed JSON string for debugging.
-func debugJSON(v interface{}) string {
-	data, err := json.MarshalIndent(v, "", "  ")
-	if err != nil {
-		return fmt.Sprintf("%v", v)
-	}
-	return string(data)
 }
 
 // TestBundleContractNoDeletedHelpers fails if any provision.py contains

@@ -11,14 +11,14 @@ import (
 func main() {
 	ctx := context.Background()
 	c, _ := pgx.Connect(ctx, os.Getenv("PG_DSN"))
-	defer c.Close(ctx)
+	defer func() { _ = c.Close(ctx) }()
 	for i := 0; i < 14; i++ {
 		rows, _ := c.Query(ctx, `SELECT client_addr::text, state, count(*) FROM pg_stat_activity WHERE datname='scion_test' AND client_addr IS NOT NULL GROUP BY 1,2 ORDER BY 1,2`)
 		m := map[string]int{}
 		for rows.Next() {
 			var a, s string
 			var n int
-			rows.Scan(&a, &s, &n)
+			_ = rows.Scan(&a, &s, &n)
 			m[a+"/"+s] = n
 		}
 		rows.Close()

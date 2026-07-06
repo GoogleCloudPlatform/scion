@@ -89,7 +89,7 @@ func TestLocalBackend_Set(t *testing.T) {
 
 	// Update the same secret
 	input.Value = "sk-updated-456"
-	created, meta, err = backend.Set(ctx, input)
+	created, _, err = backend.Set(ctx, input)
 	if err != nil {
 		t.Fatalf("Set (update) failed: %v", err)
 	}

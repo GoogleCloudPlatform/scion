@@ -30,7 +30,7 @@ func TestDebugEnabled(t *testing.T) {
 	debugMu.Unlock()
 
 	// Clean environment
-	os.Unsetenv("SCION_DEBUG")
+	_ = os.Unsetenv("SCION_DEBUG")
 
 	// Test 1: No debug when not set
 	if DebugEnabled() {
@@ -38,11 +38,11 @@ func TestDebugEnabled(t *testing.T) {
 	}
 
 	// Test 2: Debug via environment variable
-	os.Setenv("SCION_DEBUG", "1")
+	_ = os.Setenv("SCION_DEBUG", "1")
 	if !DebugEnabled() {
 		t.Error("DebugEnabled should return true when SCION_DEBUG is set")
 	}
-	os.Unsetenv("SCION_DEBUG")
+	_ = os.Unsetenv("SCION_DEBUG")
 
 	// Test 3: Debug via EnableDebug()
 	debugMu.Lock()
@@ -56,7 +56,7 @@ func TestDebugEnabled(t *testing.T) {
 	}
 
 	// Test 4: EnableDebug() overrides environment
-	os.Unsetenv("SCION_DEBUG")
+	_ = os.Unsetenv("SCION_DEBUG")
 	if !DebugEnabled() {
 		t.Error("DebugEnabled should remain true after EnableDebug() even without env var")
 	}
@@ -81,12 +81,12 @@ func TestDebugf(t *testing.T) {
 	os.Stderr = w
 
 	// Test: No output when debug disabled
-	os.Unsetenv("SCION_DEBUG")
+	_ = os.Unsetenv("SCION_DEBUG")
 	Debugf("test message %d", 42)
 
-	w.Close()
+	_ = w.Close()
 	var buf bytes.Buffer
-	io.Copy(&buf, r)
+	_, _ = io.Copy(&buf, r)
 	os.Stderr = oldStderr
 
 	if buf.String() != "" {
@@ -100,9 +100,9 @@ func TestDebugf(t *testing.T) {
 	EnableDebug()
 	Debugf("test message %d", 42)
 
-	w.Close()
+	_ = w.Close()
 	buf.Reset()
-	io.Copy(&buf, r)
+	_, _ = io.Copy(&buf, r)
 	os.Stderr = oldStderr
 
 	output := buf.String()
@@ -136,9 +136,9 @@ func TestDebugfTagged(t *testing.T) {
 	EnableDebug()
 	DebugfTagged("mytag", "test %s", "value")
 
-	w.Close()
+	_ = w.Close()
 	var buf bytes.Buffer
-	io.Copy(&buf, r)
+	_, _ = io.Copy(&buf, r)
 	os.Stderr = oldStderr
 
 	expected := "[mytag] test value\n"

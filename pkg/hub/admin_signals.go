@@ -157,8 +157,8 @@ func (l *AdminSignalListener) run() {
 	defer l.wg.Done()
 
 	const (
-		minBackoff = 250 * time.Millisecond
-		maxBackoff = 10 * time.Second
+		minBackoff   = 250 * time.Millisecond
+		maxBackoff   = 10 * time.Second
 		pollInterval = time.Second
 	)
 	backoff := minBackoff

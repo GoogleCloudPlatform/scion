@@ -15,9 +15,6 @@
 package hubclient
 
 import (
-	"path/filepath"
-	"strings"
-
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 )
 
@@ -76,57 +73,6 @@ func (b *ManifestBuilder) ensureBuilder() {
 		b.builder = transfer.NewManifestBuilder(b.BasePath)
 		b.builder.ExcludePatterns = b.IgnorePatterns
 	}
-}
-
-// shouldIgnore checks if a path should be ignored.
-// Delegates to the underlying transfer.ManifestBuilder.
-func (b *ManifestBuilder) shouldIgnore(relPath string, isDir bool) bool {
-	b.ensureBuilder()
-	// For backward compatibility, we expose this method but it's now internal
-	// to the transfer package. We recreate the logic here.
-	return shouldIgnorePattern(relPath, isDir, b.IgnorePatterns)
-}
-
-// shouldIgnorePattern checks if a path matches any ignore pattern.
-// This function is used for backward compatibility.
-func shouldIgnorePattern(relPath string, isDir bool, patterns []string) bool {
-	for _, pattern := range patterns {
-		if matchPattern(pattern, relPath) {
-			return true
-		}
-	}
-	return false
-}
-
-// matchPattern checks if a path matches a pattern.
-func matchPattern(pattern, relPath string) bool {
-	// Handle ** patterns
-	if strings.Contains(pattern, "**") {
-		prefix := strings.TrimSuffix(pattern, "/**")
-		if strings.HasPrefix(relPath, prefix+"/") || relPath == prefix {
-			return true
-		}
-		suffix := strings.TrimPrefix(pattern, "**/")
-		if suffix != pattern && strings.HasSuffix(relPath, suffix) {
-			return true
-		}
-		return false
-	}
-
-	// Simple match
-	if matched, _ := filepath.Match(pattern, filepath.Base(relPath)); matched {
-		return true
-	}
-	if matched, _ := filepath.Match(pattern, relPath); matched {
-		return true
-	}
-	return false
-}
-
-// hashFile computes the SHA-256 hash of a file.
-// Delegates to transfer.HashFile.
-func (b *ManifestBuilder) hashFile(path string) (string, error) {
-	return transfer.HashFile(path)
 }
 
 // ComputeContentHash computes the overall content hash from file hashes.

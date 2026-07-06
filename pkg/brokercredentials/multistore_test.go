@@ -299,7 +299,7 @@ func TestMultiStore_LoadAllIfChanged(t *testing.T) {
 	store := NewMultiStore(dir)
 
 	// No directory: should return no change
-	_, _, changed, err := store.LoadAllIfChanged(time.Time{})
+	_, _, _, err := store.LoadAllIfChanged(time.Time{})
 	if err != nil {
 		t.Fatalf("LoadAllIfChanged failed: %v", err)
 	}

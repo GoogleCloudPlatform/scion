@@ -56,7 +56,6 @@ type managedService struct {
 	// start(), the reset-failures goroutine, and the Manager.Shutdown path.
 	mu        sync.Mutex
 	cmd       *exec.Cmd
-	cancel    context.CancelFunc
 	done      chan struct{}
 	exited    bool
 	exitCode  int

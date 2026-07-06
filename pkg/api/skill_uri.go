@@ -142,7 +142,6 @@ func parseFullURI(raw string, uri *SkillURI) (*SkillURI, error) {
 	if alias, ok := registryAliases[registry]; ok {
 		uri.Scope = alias
 		uri.Registry = defaultRegistry
-		registry = defaultRegistry
 
 		// For alias forms like skill://project/my-skill, pathSegments are the rest
 		return parseAliasPath(raw, uri, pathSegments, version)

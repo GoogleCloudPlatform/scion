@@ -33,7 +33,7 @@ func newTestClient(t *testing.T) *ent.Client {
 	t.Helper()
 	client, err := OpenSQLite("file:"+t.Name()+"?mode=memory&cache=shared", PoolConfig{})
 	require.NoError(t, err)
-	t.Cleanup(func() { client.Close() })
+	t.Cleanup(func() { _ = client.Close() })
 	require.NoError(t, AutoMigrate(context.Background(), client))
 	return client
 }
@@ -41,7 +41,7 @@ func newTestClient(t *testing.T) *ent.Client {
 func TestOpenSQLite(t *testing.T) {
 	client, err := OpenSQLite("file:TestOpenSQLite?mode=memory&cache=shared", PoolConfig{})
 	require.NoError(t, err)
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 	require.NoError(t, AutoMigrate(context.Background(), client))
 }
 

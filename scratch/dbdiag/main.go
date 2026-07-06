@@ -17,11 +17,11 @@ func main() {
 		fmt.Fprintln(os.Stderr, "connect:", err)
 		os.Exit(1)
 	}
-	defer conn.Close(ctx)
+	defer func() { _ = conn.Close(ctx) }()
 
 	var maxc, used int
-	conn.QueryRow(ctx, "SHOW max_connections").Scan(&maxc)
-	conn.QueryRow(ctx, "SELECT count(*) FROM pg_stat_activity WHERE datname='scion_test'").Scan(&used)
+	_ = conn.QueryRow(ctx, "SHOW max_connections").Scan(&maxc)
+	_ = conn.QueryRow(ctx, "SELECT count(*) FROM pg_stat_activity WHERE datname='scion_test'").Scan(&used)
 	fmt.Printf("max_connections=%d  total_on_scion_test=%d\n", maxc, used)
 
 	rows, _ := conn.Query(ctx, `SELECT COALESCE(application_name,'(none)'), state, count(*)
@@ -32,11 +32,11 @@ func main() {
 	for rows.Next() {
 		var app, state string
 		var n int
-		rows.Scan(&app, &state, &n)
+		_ = rows.Scan(&app, &state, &n)
 		fmt.Printf("%-32s %-20s %d\n", app, state, n)
 	}
 	// Advisory locks currently held.
 	var locks int
-	conn.QueryRow(ctx, "SELECT count(*) FROM pg_locks WHERE locktype='advisory'").Scan(&locks)
+	_ = conn.QueryRow(ctx, "SELECT count(*) FROM pg_locks WHERE locktype='advisory'").Scan(&locks)
 	fmt.Printf("advisory_locks_held=%d\n", locks)
 }

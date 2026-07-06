@@ -16,26 +16,6 @@ func getString(data map[string]interface{}, key string) string {
 	return ""
 }
 
-// getBool safely extracts a bool value from a map.
-func getBool(data map[string]interface{}, key string) bool {
-	if val, ok := data[key]; ok {
-		if b, ok := val.(bool); ok {
-			return b
-		}
-	}
-	return false
-}
-
-// getFloat safely extracts a float64 value from a map.
-func getFloat(data map[string]interface{}, key string) float64 {
-	if val, ok := data[key]; ok {
-		if f, ok := val.(float64); ok {
-			return f
-		}
-	}
-	return 0
-}
-
 // extractTokens populates token usage fields on EventData from raw event data.
 // It checks top-level fields first, then falls back to a nested "usage" object.
 // Supports field names: input_tokens, output_tokens, cached_tokens,

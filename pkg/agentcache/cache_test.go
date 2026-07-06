@@ -68,9 +68,7 @@ func TestGenerateCacheKey_Uniqueness(t *testing.T) {
 func TestReadWriteCache(t *testing.T) {
 	// Use a temporary directory for testing
 	tmpDir := t.TempDir()
-	oldHome := os.Getenv("HOME")
-	os.Setenv("HOME", tmpDir)
-	defer os.Setenv("HOME", oldHome)
+	t.Setenv("HOME", tmpDir)
 
 	cacheKey := "test-key-123456"
 	agents := []string{"agent-1", "agent-2", "agent-3"}
@@ -107,9 +105,7 @@ func TestReadWriteCache(t *testing.T) {
 
 func TestReadCache_NotExists(t *testing.T) {
 	tmpDir := t.TempDir()
-	oldHome := os.Getenv("HOME")
-	os.Setenv("HOME", tmpDir)
-	defer os.Setenv("HOME", oldHome)
+	t.Setenv("HOME", tmpDir)
 
 	// Reading non-existent cache should return nil, nil
 	result, err := ReadCache("nonexistent-key")
@@ -123,9 +119,7 @@ func TestReadCache_NotExists(t *testing.T) {
 
 func TestReadCache_CorruptedFile(t *testing.T) {
 	tmpDir := t.TempDir()
-	oldHome := os.Getenv("HOME")
-	os.Setenv("HOME", tmpDir)
-	defer os.Setenv("HOME", oldHome)
+	t.Setenv("HOME", tmpDir)
 
 	cacheKey := "corrupt-test"
 	cacheDir := filepath.Join(tmpDir, ".scion", "cache", "agent-names")
@@ -151,9 +145,7 @@ func TestReadCache_CorruptedFile(t *testing.T) {
 
 func TestWriteCache_EmptyList(t *testing.T) {
 	tmpDir := t.TempDir()
-	oldHome := os.Getenv("HOME")
-	os.Setenv("HOME", tmpDir)
-	defer os.Setenv("HOME", oldHome)
+	t.Setenv("HOME", tmpDir)
 
 	cacheKey := "empty-test"
 
@@ -176,9 +168,7 @@ func TestWriteCache_EmptyList(t *testing.T) {
 
 func TestClearCache(t *testing.T) {
 	tmpDir := t.TempDir()
-	oldHome := os.Getenv("HOME")
-	os.Setenv("HOME", tmpDir)
-	defer os.Setenv("HOME", oldHome)
+	t.Setenv("HOME", tmpDir)
 
 	// Write some cache entries
 	_ = WriteCache("key1", []string{"agent1"})

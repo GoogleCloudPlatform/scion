@@ -31,7 +31,7 @@ func newTestEventBus() *InProcessEventBus {
 
 func TestInProcessEventBus_PublishSubscribe(t *testing.T) {
 	b := newTestEventBus()
-	defer b.Close()
+	defer func() { _ = b.Close() }()
 
 	var received *messages.StructuredMessage
 	var receivedTopic string
@@ -68,7 +68,7 @@ func TestInProcessEventBus_PublishSubscribe(t *testing.T) {
 
 func TestInProcessEventBus_WildcardSubscribe(t *testing.T) {
 	b := newTestEventBus()
-	defer b.Close()
+	defer func() { _ = b.Close() }()
 
 	var mu sync.Mutex
 	var received []string
@@ -87,12 +87,12 @@ func TestInProcessEventBus_WildcardSubscribe(t *testing.T) {
 	msg1 := messages.NewInstruction("user:alice", "agent:a1", "msg1")
 	msg2 := messages.NewInstruction("user:alice", "agent:a2", "msg2")
 
-	b.Publish(ctx, "scion.project.g1.agent.a1.messages", msg1)
-	b.Publish(ctx, "scion.project.g1.agent.a2.messages", msg2)
+	_ = b.Publish(ctx, "scion.project.g1.agent.a1.messages", msg1)
+	_ = b.Publish(ctx, "scion.project.g1.agent.a2.messages", msg2)
 
 	// Should NOT match a different project
 	msg3 := messages.NewInstruction("user:alice", "agent:a3", "msg3")
-	b.Publish(ctx, "scion.project.g2.agent.a3.messages", msg3)
+	_ = b.Publish(ctx, "scion.project.g2.agent.a3.messages", msg3)
 
 	// Wait for delivery
 	time.Sleep(50 * time.Millisecond)
@@ -106,7 +106,7 @@ func TestInProcessEventBus_WildcardSubscribe(t *testing.T) {
 
 func TestInProcessEventBus_GreaterThanWildcard(t *testing.T) {
 	b := newTestEventBus()
-	defer b.Close()
+	defer func() { _ = b.Close() }()
 
 	var mu sync.Mutex
 	var received []string
@@ -122,9 +122,9 @@ func TestInProcessEventBus_GreaterThanWildcard(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	b.Publish(ctx, "scion.project.g1.agent.a1.messages", messages.NewInstruction("u:a", "a:b", "m1"))
-	b.Publish(ctx, "scion.project.g1.broadcast", messages.NewInstruction("u:a", "project:g1", "m2"))
-	b.Publish(ctx, "scion.project.g2.broadcast", messages.NewInstruction("u:a", "project:g2", "m3")) // should NOT match
+	_ = b.Publish(ctx, "scion.project.g1.agent.a1.messages", messages.NewInstruction("u:a", "a:b", "m1"))
+	_ = b.Publish(ctx, "scion.project.g1.broadcast", messages.NewInstruction("u:a", "project:g1", "m2"))
+	_ = b.Publish(ctx, "scion.project.g2.broadcast", messages.NewInstruction("u:a", "project:g2", "m3")) // should NOT match
 
 	time.Sleep(50 * time.Millisecond)
 
@@ -137,7 +137,7 @@ func TestInProcessEventBus_GreaterThanWildcard(t *testing.T) {
 
 func TestInProcessEventBus_BroadcastTopic(t *testing.T) {
 	b := newTestEventBus()
-	defer b.Close()
+	defer func() { _ = b.Close() }()
 
 	var wg sync.WaitGroup
 	wg.Add(2)
@@ -154,7 +154,7 @@ func TestInProcessEventBus_BroadcastTopic(t *testing.T) {
 
 	msg := messages.NewInstruction("agent:lead", "project:g1", "hello all")
 	msg.Broadcasted = true
-	b.Publish(context.Background(), "scion.project.g1.broadcast", msg)
+	_ = b.Publish(context.Background(), "scion.project.g1.broadcast", msg)
 
 	wg.Wait()
 }
@@ -165,7 +165,7 @@ func TestInProcessEventBus_BroadcastTopic(t *testing.T) {
 // preventing handlers from honoring cancellation or carrying publisher values.
 func TestInProcessEventBus_PropagatesPublisherContext(t *testing.T) {
 	b := newTestEventBus()
-	defer b.Close()
+	defer func() { _ = b.Close() }()
 
 	type ctxKey string
 	const key ctxKey = "trace"
@@ -197,7 +197,7 @@ func TestInProcessEventBus_PropagatesPublisherContext(t *testing.T) {
 
 func TestInProcessEventBus_Unsubscribe(t *testing.T) {
 	b := newTestEventBus()
-	defer b.Close()
+	defer func() { _ = b.Close() }()
 
 	var callCount atomic.Int32
 	sub, err := b.Subscribe("scion.project.g1.broadcast", func(ctx context.Context, topic string, msg *messages.StructuredMessage) {
@@ -208,16 +208,16 @@ func TestInProcessEventBus_Unsubscribe(t *testing.T) {
 	}
 
 	msg := messages.NewInstruction("u:a", "g:g1", "m1")
-	b.Publish(context.Background(), "scion.project.g1.broadcast", msg)
+	_ = b.Publish(context.Background(), "scion.project.g1.broadcast", msg)
 	time.Sleep(50 * time.Millisecond)
 
 	if callCount.Load() != 1 {
 		t.Fatalf("expected 1 call before unsubscribe, got %d", callCount.Load())
 	}
 
-	sub.Unsubscribe()
+	_ = sub.Unsubscribe()
 
-	b.Publish(context.Background(), "scion.project.g1.broadcast", msg)
+	_ = b.Publish(context.Background(), "scion.project.g1.broadcast", msg)
 	time.Sleep(50 * time.Millisecond)
 
 	if callCount.Load() != 1 {
@@ -236,7 +236,7 @@ func TestInProcessEventBus_CloseStopsDelivery(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	b.Close()
+	_ = b.Close()
 
 	err = b.Publish(context.Background(), "scion.project.g1.broadcast",
 		messages.NewInstruction("u:a", "g:g1", "after close"))
@@ -252,7 +252,7 @@ func TestInProcessEventBus_CloseStopsDelivery(t *testing.T) {
 
 func TestInProcessEventBus_NoMatchNoDelivery(t *testing.T) {
 	b := newTestEventBus()
-	defer b.Close()
+	defer func() { _ = b.Close() }()
 
 	callCount := 0
 	_, err := b.Subscribe("scion.project.g1.agent.specific.messages", func(ctx context.Context, topic string, msg *messages.StructuredMessage) {
@@ -262,7 +262,7 @@ func TestInProcessEventBus_NoMatchNoDelivery(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	b.Publish(context.Background(), "scion.project.g1.agent.other.messages",
+	_ = b.Publish(context.Background(), "scion.project.g1.agent.other.messages",
 		messages.NewInstruction("u:a", "a:other", "should not match"))
 	time.Sleep(50 * time.Millisecond)
 

@@ -265,7 +265,7 @@ func runCloudBuild(cmd *cobra.Command, harnessConfigName string, hcDir *config.H
 	gcloudCmd.Stdout = os.Stdout
 	gcloudCmd.Stderr = os.Stderr
 	if err := gcloudCmd.Run(); err != nil {
-		return fmt.Errorf("Cloud Build failed: %w", err)
+		return fmt.Errorf("cloud Build failed: %w", err)
 	}
 
 	updateBuildConfigAndSync(harnessConfigName, hcDir, outputImage)

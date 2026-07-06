@@ -2220,7 +2220,7 @@ func MigrateSettingsFile(dir string, dryRun bool) (*MigrationResult, error) {
 		return nil, fmt.Errorf("failed to read %s: %w", settingsPath, err)
 	}
 
-	version, isLegacy := DetectSettingsFormat(data)
+	version, _ := DetectSettingsFormat(data)
 	if version != "" {
 		result.Skipped = true
 		result.SkipReason = fmt.Sprintf("already versioned (schema_version: %s)", version)
@@ -2244,10 +2244,8 @@ func MigrateSettingsFile(dir string, dryRun bool) (*MigrationResult, error) {
 	}
 
 	// If file has no legacy indicators and is effectively empty, still migrate it
-	// (add schema_version to make it versioned)
-	if !isLegacy && version == "" {
-		// Minimal or empty file — still convert
-	}
+	// (add schema_version to make it versioned).
+	// Both legacy and minimal/empty files fall through to conversion below.
 
 	// 4. Convert via AdaptLegacySettings
 	vs, warnings := AdaptLegacySettings(&legacy)

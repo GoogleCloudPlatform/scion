@@ -166,7 +166,7 @@ func (g *LockLoop) tryAcquire(ctx context.Context) {
 	g.consecutiveAcquirable++
 
 	if g.consecutiveAcquirable < g.TakeoverTicks {
-		handle.Release()
+		_ = handle.Release()
 		g.log.Info("Lock acquirable, waiting for takeover delay",
 			"ticks", g.consecutiveAcquirable, "required", g.TakeoverTicks)
 		return
@@ -175,7 +175,7 @@ func (g *LockLoop) tryAcquire(ctx context.Context) {
 	if g.OnAcquired != nil {
 		if err := g.OnAcquired(); err != nil {
 			g.log.Error("Failed to activate after lock acquisition", "error", err)
-			handle.Release()
+			_ = handle.Release()
 			g.consecutiveAcquirable = 0
 			return
 		}
