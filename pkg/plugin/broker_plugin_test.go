@@ -84,13 +84,13 @@ func startTestBrokerRPCServer(t *testing.T, impl MessageBrokerPluginInterface) *
 
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
-	t.Cleanup(func() { listener.Close() })
+	t.Cleanup(func() { _ = listener.Close() })
 
 	go server.Accept(listener)
 
 	client, err := rpc.Dial("tcp", listener.Addr().String())
 	require.NoError(t, err)
-	t.Cleanup(func() { client.Close() })
+	t.Cleanup(func() { _ = client.Close() })
 
 	return &BrokerRPCClient{client: client}
 }

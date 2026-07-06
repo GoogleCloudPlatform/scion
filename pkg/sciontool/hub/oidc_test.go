@@ -361,7 +361,7 @@ func TestConfigureOIDCTransport_MetadataMode_AudienceOverride(t *testing.T) {
 	_ = os.Unsetenv(EnvTransportToken)
 	_ = os.Unsetenv("SCION_METADATA_MODE")
 	os.Setenv(EnvHubOIDCAudience, "https://custom-audience.example.com")
-	defer os.Unsetenv(EnvHubOIDCAudience)
+	defer func() { _ = os.Unsetenv(EnvHubOIDCAudience) }()
 
 	c := &Client{
 		hubURL: "https://hub.example.com",
@@ -379,7 +379,7 @@ func TestConfigureOIDCTransport_NotOnGCP(t *testing.T) {
 	cleanup := overrideGCPDetection(false)
 	defer cleanup()
 
-	os.Unsetenv(EnvTransportToken)
+	_ = os.Unsetenv(EnvTransportToken)
 
 	c := &Client{
 		hubURL: "https://hub.example.com",

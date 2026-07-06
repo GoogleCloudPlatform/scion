@@ -33,13 +33,13 @@ import (
 func newTestBroker(t *testing.T) *RefBroker {
 	t.Helper()
 	b := New(slog.Default())
-	t.Cleanup(func() { b.Close() })
+	t.Cleanup(func() { _ = b.Close() })
 	return b
 }
 
 func TestConfigure(t *testing.T) {
 	b := New(slog.Default())
-	defer b.Close()
+	defer func() { _ = b.Close() }()
 
 	err := b.Configure(map[string]string{
 		"hub_url":     "http://localhost:8080",
@@ -203,7 +203,7 @@ func TestClose(t *testing.T) {
 
 func TestGetInfo(t *testing.T) {
 	b := New(slog.Default())
-	defer b.Close()
+	defer func() { _ = b.Close() }()
 
 	info, err := b.GetInfo()
 	require.NoError(t, err)

@@ -21,7 +21,6 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
-	"github.com/GoogleCloudPlatform/scion/pkg/config"
 )
 
 // Agent represents an agent record in the Hub database.
@@ -590,20 +589,20 @@ type HarnessConfig struct {
 
 // HarnessConfigData holds the harness-specific configuration details.
 type HarnessConfigData struct {
-	Harness                 string                      `json:"harness,omitempty"`
-	Image                   string                      `json:"image,omitempty"`
-	User                    string                      `json:"user,omitempty"`
-	Model                   string                      `json:"model,omitempty"`
-	Args                    []string                    `json:"args,omitempty"`
-	Env                     map[string]string           `json:"env,omitempty"`
-	AuthSelectedType        string                      `json:"authSelectedType,omitempty"`
-	Secrets                 []api.RequiredSecret        `json:"secrets,omitempty"`
-	ModelAliases            map[string]string           `json:"modelAliases,omitempty"`
-	ThinkingBudgetMap       map[string]int              `json:"thinkingBudgetMap,omitempty"`
-	ThinkingBudgetFlag      string                      `json:"thinkingBudgetFlag,omitempty"`
-	ThinkingBudgetConfigKey string                      `json:"thinkingBudgetConfigKey,omitempty"`
-	NoAuthBehavior          string                      `json:"noAuthBehavior,omitempty"`
-	AuthMeta                *config.HarnessAuthMetadata `json:"authMeta,omitempty"`
+	Harness                 string                   `json:"harness,omitempty"`
+	Image                   string                   `json:"image,omitempty"`
+	User                    string                   `json:"user,omitempty"`
+	Model                   string                   `json:"model,omitempty"`
+	Args                    []string                 `json:"args,omitempty"`
+	Env                     map[string]string        `json:"env,omitempty"`
+	AuthSelectedType        string                   `json:"authSelectedType,omitempty"`
+	Secrets                 []api.RequiredSecret     `json:"secrets,omitempty"`
+	ModelAliases            map[string]string        `json:"modelAliases,omitempty"`
+	ThinkingBudgetMap       map[string]int           `json:"thinkingBudgetMap,omitempty"`
+	ThinkingBudgetFlag      string                   `json:"thinkingBudgetFlag,omitempty"`
+	ThinkingBudgetConfigKey string                   `json:"thinkingBudgetConfigKey,omitempty"`
+	NoAuthBehavior          string                   `json:"noAuthBehavior,omitempty"`
+	AuthMeta                *api.HarnessAuthMetadata `json:"authMeta,omitempty"`
 }
 
 // HarnessConfigStatus constants

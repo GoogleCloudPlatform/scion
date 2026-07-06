@@ -648,7 +648,7 @@ func TestClient_StartTokenRefresh(t *testing.T) {
 			futureExpiry := time.Now().Add(10 * time.Hour).UTC().Format(time.RFC3339)
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
-			w.Write([]byte(`{"token":"refreshed-token","expires_at":"` + futureExpiry + `"}`))
+			_, _ = w.Write([]byte(`{"token":"refreshed-token","expires_at":"` + futureExpiry + `"}`))
 		}))
 		defer server.Close()
 
@@ -673,7 +673,7 @@ func TestClient_StartTokenRefresh(t *testing.T) {
 	t.Run("stops when context is cancelled", func(t *testing.T) {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
-			w.Write([]byte(`{"token":"new","expires_at":"2030-01-01T00:00:00Z"}`))
+			_, _ = w.Write([]byte(`{"token":"new","expires_at":"2030-01-01T00:00:00Z"}`))
 		}))
 		defer server.Close()
 
@@ -703,13 +703,13 @@ func TestClient_StartTokenRefresh(t *testing.T) {
 			// First attempt fails transiently (503); the second succeeds.
 			if atomic.AddInt32(&calls, 1) == 1 {
 				w.WriteHeader(http.StatusServiceUnavailable)
-				w.Write([]byte("temporarily down"))
+				_, _ = w.Write([]byte("temporarily down"))
 				return
 			}
 			futureExpiry := time.Now().Add(10 * time.Hour).UTC().Format(time.RFC3339)
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
-			w.Write([]byte(`{"token":"recovered-token","expires_at":"` + futureExpiry + `"}`))
+			_, _ = w.Write([]byte(`{"token":"recovered-token","expires_at":"` + futureExpiry + `"}`))
 		}))
 		defer server.Close()
 

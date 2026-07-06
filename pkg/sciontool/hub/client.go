@@ -1272,7 +1272,7 @@ func (c *Client) SendOutboundMessage(ctx context.Context, msg OutboundMessage) e
 		return fmt.Errorf("failed to send outbound message: %w", err)
 	}
 	respBody, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
+	_ = resp.Body.Close()
 
 	if resp.StatusCode >= 400 {
 		return fmt.Errorf("hub returned error %d: %s", resp.StatusCode, string(respBody))
@@ -1366,7 +1366,7 @@ func (c *Client) FetchGCPToken(ctx context.Context, scopes []string) (*GCPAccess
 	if err != nil {
 		return nil, fmt.Errorf("hub request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	respBody, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {

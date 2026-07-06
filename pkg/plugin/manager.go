@@ -196,7 +196,7 @@ func (m *Manager) loadGRPCPlugin(pluginType, name string, entry PluginEntry) err
 	key := pluginType + ":" + name
 	m.mu.Lock()
 	if old, ok := m.grpcAdapters[key]; ok {
-		old.Close()
+		_ = old.Close()
 	}
 	m.grpcAdapters[key] = adapter
 	m.pluginEntries[key] = entry

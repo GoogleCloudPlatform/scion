@@ -33,7 +33,7 @@ func startRefBrokerRPCServer(t *testing.T) (*plugin.BrokerRPCClient, *RefBroker)
 	t.Helper()
 
 	impl := New(slog.Default())
-	t.Cleanup(func() { impl.Close() })
+	t.Cleanup(func() { _ = impl.Close() })
 
 	server := rpc.NewServer()
 	rpcServer := &plugin.BrokerRPCServer{Impl: impl}
@@ -41,13 +41,13 @@ func startRefBrokerRPCServer(t *testing.T) (*plugin.BrokerRPCClient, *RefBroker)
 
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
-	t.Cleanup(func() { listener.Close() })
+	t.Cleanup(func() { _ = listener.Close() })
 
 	go server.Accept(listener)
 
 	client, err := rpc.Dial("tcp", listener.Addr().String())
 	require.NoError(t, err)
-	t.Cleanup(func() { client.Close() })
+	t.Cleanup(func() { _ = client.Close() })
 
 	return plugin.NewBrokerRPCClient(client), impl
 }
