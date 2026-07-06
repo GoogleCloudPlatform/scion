@@ -302,7 +302,7 @@ var harnessConfigSyncCmd = &cobra.Command{
 			return err
 		}
 		if hubCtx == nil {
-			return fmt.Errorf("Hub integration is not enabled. Configure via 'scion config set hub.enabled true' and 'scion config set hub.endpoint <url>'")
+			return fmt.Errorf("hub integration is not enabled, configure via 'scion config set hub.enabled true' and 'scion config set hub.endpoint <url>'")
 		}
 
 		PrintUsingHub(hubCtx.Endpoint)
@@ -347,7 +347,7 @@ var harnessConfigPullCmd = &cobra.Command{
 			return err
 		}
 		if hubCtx == nil {
-			return fmt.Errorf("Hub integration is not enabled. Configure via 'scion config set hub.enabled true' and 'scion config set hub.endpoint <url>'")
+			return fmt.Errorf("hub integration is not enabled, configure via 'scion config set hub.enabled true' and 'scion config set hub.endpoint <url>'")
 		}
 
 		PrintUsingHub(hubCtx.Endpoint)
@@ -481,7 +481,7 @@ var harnessConfigDeleteCmd = &cobra.Command{
 			return err
 		}
 		if hubCtx == nil {
-			return fmt.Errorf("Hub integration is not enabled. Configure via 'scion config set hub.enabled true' and 'scion config set hub.endpoint <url>'")
+			return fmt.Errorf("hub integration is not enabled, configure via 'scion config set hub.enabled true' and 'scion config set hub.endpoint <url>'")
 		}
 
 		PrintUsingHub(hubCtx.Endpoint)
