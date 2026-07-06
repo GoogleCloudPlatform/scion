@@ -71,7 +71,7 @@ AUTH = scion_harness.AuthSpec(
         scion_harness.env_method("api-key", any_of=["ANTHROPIC_API_KEY"]),
         scion_harness.env_method("oauth-token", any_of=["CLAUDE_CODE_OAUTH_TOKEN"],
                                  hint="set CLAUDE_CODE_OAUTH_TOKEN (generate with `claude setup-token`)"),
-        scion_harness.file_method("auth-file", path=CLAUDE_AUTH_FILE),
+        scion_harness.file_method("auth-file", path=CLAUDE_AUTH_FILE, secret_key="CLAUDE_AUTH"),
         scion_harness.env_method("vertex-ai",
                                  all_of=["GOOGLE_CLOUD_PROJECT"],
                                  any_of=["GOOGLE_CLOUD_LOCATION", "GOOGLE_CLOUD_REGION"],

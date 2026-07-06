@@ -1,0 +1,13 @@
+{
+  "auth_candidates": {
+    "schema_version": 1,
+    "env_vars": [
+      "GOOGLE_CLOUD_PROJECT"
+    ],
+    "env_secret_files": {
+      "GOOGLE_CLOUD_PROJECT": "$HOME/.scion/harness/secrets/GOOGLE_CLOUD_PROJECT"
+    },
+    "files": []
+  },
+  "harness_config": {}
+}

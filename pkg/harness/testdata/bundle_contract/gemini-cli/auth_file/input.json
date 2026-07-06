@@ -1,0 +1,12 @@
+{
+  "auth_candidates": {
+    "schema_version": 1,
+    "env_vars": [],
+    "env_secret_files": {},
+    "files": [],
+    "file_secret_files": {
+      "GEMINI_OAUTH_CREDS": "$HOME/.scion/harness/secrets/GEMINI_OAUTH_CREDS"
+    }
+  },
+  "harness_config": {}
+}

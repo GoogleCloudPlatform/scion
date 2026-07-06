@@ -72,7 +72,7 @@ AUTH = sh.AuthSpec(
             any_of=["ANTHROPIC_API_KEY", "OPENAI_API_KEY"],
             hint="set ANTHROPIC_API_KEY or OPENAI_API_KEY",
         ),
-        sh.file_method("auth-file", path=OPENCODE_AUTH_FILE),
+        sh.file_method("auth-file", path=OPENCODE_AUTH_FILE, secret_key="OPENCODE_AUTH"),
     ],
 )
 

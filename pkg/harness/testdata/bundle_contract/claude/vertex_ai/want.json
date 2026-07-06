@@ -1,0 +1,13 @@
+{
+  "exit_code": 0,
+  "resolved_auth": {
+    "method": "vertex-ai",
+    "harness": "claude",
+    "env_var": "GOOGLE_CLOUD_REGION"
+  },
+  "env": {
+    "CLAUDE_CODE_USE_VERTEX": "1",
+    "ANTHROPIC_VERTEX_PROJECT_ID": "test-project",
+    "CLOUD_ML_REGION": "us-central1"
+  }
+}

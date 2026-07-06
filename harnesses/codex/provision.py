@@ -73,6 +73,7 @@ AUTH = scion_harness.AuthSpec(
             "auth-file",
             path=CODEX_AUTH_FILE,
             hint=f"provide auth credentials at {CODEX_AUTH_FILE}",
+            secret_key="CODEX_AUTH",
         ),
     ],
 )

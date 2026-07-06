@@ -260,6 +260,7 @@ class AuthMethod:
         path: str | None = None,
         hint: str = "",
         env_fallback: bool = False,
+        secret_key: str = "",
     ):
         self.name = name
         self.kind = kind  # "env" or "file"
@@ -268,6 +269,7 @@ class AuthMethod:
         self.path = path
         self.hint = hint
         self.env_fallback = env_fallback
+        self.secret_key = secret_key
 
 
 def env_method(
@@ -287,9 +289,10 @@ def file_method(
     *,
     path: str,
     hint: str = "",
+    secret_key: str = "",
 ) -> AuthMethod:
     """Declare a file-based auth method."""
-    return AuthMethod(name, "file", path=path, hint=hint)
+    return AuthMethod(name, "file", path=path, hint=hint, secret_key=secret_key)
 
 
 class AuthSpec:
@@ -612,7 +615,7 @@ class ProvisionContext:
             return True
         if os.path.isfile(target):
             return True
-        if method.name in file_secrets:
+        if method.secret_key and method.secret_key in file_secrets:
             return True
         return False
 

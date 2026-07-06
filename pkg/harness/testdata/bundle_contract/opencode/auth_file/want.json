@@ -1,0 +1,8 @@
+{
+  "exit_code": 0,
+  "resolved_auth": {
+    "method": "auth-file",
+    "harness": "opencode"
+  },
+  "env": {}
+}

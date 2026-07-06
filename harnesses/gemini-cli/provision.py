@@ -75,6 +75,7 @@ AUTH = scion_harness.AuthSpec(
             "auth-file",
             path=GEMINI_OAUTH_CREDS_FILE,
             hint=f"provide OAuth credentials at {GEMINI_OAUTH_CREDS_FILE}",
+            secret_key="GEMINI_OAUTH_CREDS",
         ),
         scion_harness.env_method(
             "vertex-ai",
