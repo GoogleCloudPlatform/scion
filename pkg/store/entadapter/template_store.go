@@ -506,9 +506,14 @@ func (s *TemplateStore) UpdateHarnessConfigImageStatus(ctx context.Context, id, 
 	if err != nil {
 		return err
 	}
+	existing, err := s.client.HarnessConfig.Get(ctx, uid)
+	if err != nil {
+		return mapError(err)
+	}
 	_, err = s.client.HarnessConfig.UpdateOneID(uid).
 		SetImageStatus(entharnessconfig.ImageStatus(status)).
 		SetImageStatusCheckedAt(checkedAt).
+		SetUpdated(existing.Updated).
 		Save(ctx)
 	if err != nil {
 		return mapError(err)
