@@ -93,7 +93,7 @@ func ConfigFromEnv() *Config {
 
 	port := 18380
 	if p := os.Getenv("SCION_METADATA_PORT"); p != "" {
-		fmt.Sscanf(p, "%d", &port)
+		_, _ = fmt.Sscanf(p, "%d", &port)
 	}
 
 	hubURL := os.Getenv("SCION_HUB_ENDPOINT")
@@ -219,7 +219,7 @@ func (s *Server) Start(ctx context.Context) error {
 		activeServerMu.Unlock()
 		if prev != nil && prev.srv != nil {
 			log.Info("Forcefully closing previous metadata server instance")
-			prev.srv.Close()
+			_ = prev.srv.Close()
 		} else {
 			// Fallback: try the HTTP shutdown endpoint (cross-process or
 			// the package-level reference was lost).
@@ -245,7 +245,7 @@ func (s *Server) Start(ctx context.Context) error {
 
 	if err := s.ensureShutdownToken(); err != nil {
 		cancel()
-		ln.Close()
+		_ = ln.Close()
 		return fmt.Errorf("metadata server shutdown token: %w", err)
 	}
 	s.srv = &http.Server{
@@ -296,7 +296,7 @@ func (s *Server) Start(ctx context.Context) error {
 		}
 		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer shutdownCancel()
-		s.srv.Shutdown(shutdownCtx)
+		_ = s.srv.Shutdown(shutdownCtx)
 	}()
 
 	return nil
@@ -361,7 +361,7 @@ func (s *Server) Stop() {
 	// more than once.
 	if s.srv != nil {
 		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 2*time.Second)
-		s.srv.Shutdown(shutdownCtx)
+		_ = s.srv.Shutdown(shutdownCtx)
 		shutdownCancel()
 	}
 	if s.shutdownTokenPath != "" {
@@ -397,7 +397,7 @@ func (s *Server) shutdownExisting() {
 		log.Debug("Could not reach existing metadata server for shutdown: %v", err)
 		return
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	log.Info("Sent shutdown request to existing metadata server on port %d (status=%d)", s.config.Port, resp.StatusCode)
 }
 
@@ -414,7 +414,7 @@ func (s *Server) handleShutdown(w http.ResponseWriter, r *http.Request) {
 	}
 	log.Info("Shutdown requested via /_scion/shutdown, stopping metadata server")
 	w.WriteHeader(http.StatusOK)
-	fmt.Fprint(w, "shutting down")
+	_, _ = fmt.Fprint(w, "shutting down")
 	go func() {
 		time.Sleep(50 * time.Millisecond)
 		s.Stop()
@@ -446,7 +446,7 @@ func writeShutdownToken(path, token string) error {
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	if _, err := f.WriteString(token + "\n"); err != nil {
 		_ = os.Remove(path)
 		return err
@@ -460,7 +460,7 @@ func (s *Server) probeHealth() bool {
 	if err != nil {
 		return false
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	return resp.StatusCode == http.StatusOK
 }
 
@@ -528,7 +528,7 @@ func (s *Server) restartHTTP(ctx context.Context) error {
 	}
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 2*time.Second)
-	s.srv.Shutdown(shutdownCtx)
+	_ = s.srv.Shutdown(shutdownCtx)
 	shutdownCancel()
 
 	addr := fmt.Sprintf("127.0.0.1:%d", s.config.Port)
@@ -592,7 +592,7 @@ func (s *Server) requireMetadataFlavor(next http.Handler) http.Handler {
 func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == "/" {
 		w.Header().Set("Metadata-Flavor", "Google")
-		fmt.Fprint(w, "OK")
+		_, _ = fmt.Fprint(w, "OK")
 		return
 	}
 	http.NotFound(w, r)
@@ -603,13 +603,13 @@ func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
 
 	switch {
 	case path == "" || path == "/":
-		fmt.Fprint(w, "project/\ninstance/\n")
+		_, _ = fmt.Fprint(w, "project/\ninstance/\n")
 
 	case path == "project/project-id":
-		fmt.Fprint(w, s.config.ProjectID)
+		_, _ = fmt.Fprint(w, s.config.ProjectID)
 
 	case path == "project/numeric-project-id":
-		fmt.Fprint(w, "0")
+		_, _ = fmt.Fprint(w, "0")
 
 	case path == "instance/service-accounts/" || path == "instance/service-accounts":
 		s.handleServiceAccountList(w, r)
@@ -641,11 +641,11 @@ func (s *Server) handleServiceAccountList(w http.ResponseWriter, r *http.Request
 		if s.config.SAEmail != "" {
 			result[s.config.SAEmail] = s.serviceAccountInfo(s.config.SAEmail)
 		}
-		json.NewEncoder(w).Encode(result)
+		_ = json.NewEncoder(w).Encode(result)
 		return
 	}
 
-	fmt.Fprintf(w, "default/\n%s/\n", s.config.SAEmail)
+	_, _ = fmt.Fprintf(w, "default/\n%s/\n", s.config.SAEmail)
 }
 
 // serviceAccountInfo returns the recursive JSON representation of a service account.
@@ -683,11 +683,11 @@ func (s *Server) handleServiceAccount(w http.ResponseWriter, r *http.Request, pa
 
 	switch action {
 	case "email":
-		fmt.Fprint(w, s.config.SAEmail)
+		_, _ = fmt.Fprint(w, s.config.SAEmail)
 
 	case "scopes":
 		scopes := "https://www.googleapis.com/auth/cloud-platform"
-		fmt.Fprint(w, scopes)
+		_, _ = fmt.Fprint(w, scopes)
 
 	case "token":
 		s.handleToken(w, r)
@@ -698,11 +698,11 @@ func (s *Server) handleServiceAccount(w http.ResponseWriter, r *http.Request, pa
 	case "":
 		if isRecursive(r) {
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(s.serviceAccountInfo(account))
+			_ = json.NewEncoder(w).Encode(s.serviceAccountInfo(account))
 			return
 		}
 		// List endpoints for this account
-		fmt.Fprint(w, "email\nscopes\ntoken\nidentity\n")
+		_, _ = fmt.Fprint(w, "email\nscopes\ntoken\nidentity\n")
 
 	default:
 		http.NotFound(w, r)
@@ -723,7 +723,7 @@ func (s *Server) serveCachedToken(w http.ResponseWriter) bool {
 		return false
 	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
 		"access_token": cached.AccessToken,
 		"expires_in":   int(remaining.Seconds()),
 		"token_type":   cached.TokenType,
@@ -767,7 +767,7 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(token)
+	_ = json.NewEncoder(w).Encode(token)
 }
 
 func (s *Server) serveCachedIDToken(w http.ResponseWriter, audience string) bool {
@@ -779,7 +779,7 @@ func (s *Server) serveCachedIDToken(w http.ResponseWriter, audience string) bool
 		return false
 	}
 	w.Header().Set("Content-Type", "text/plain")
-	fmt.Fprint(w, cached.Token)
+	_, _ = fmt.Fprint(w, cached.Token)
 	return true
 }
 
@@ -826,7 +826,7 @@ func (s *Server) handleIdentityToken(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "text/plain")
-	fmt.Fprint(w, token.Token)
+	_, _ = fmt.Fprint(w, token.Token)
 }
 
 func (s *Server) fetchAccessToken(ctx context.Context) (*GCPAccessTokenResponse, error) {
@@ -871,7 +871,7 @@ func (s *Server) fetchAccessTokenDirect(ctx context.Context) (*GCPAccessTokenRes
 	if err != nil {
 		return nil, fmt.Errorf("hub request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	respBody, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
@@ -934,7 +934,7 @@ func (s *Server) fetchIdentityTokenDirect(ctx context.Context, audience string) 
 	if err != nil {
 		return "", fmt.Errorf("hub request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	respBody, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {

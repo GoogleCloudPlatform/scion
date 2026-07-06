@@ -111,7 +111,7 @@ func TestTransportPost(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusCreated {
 		t.Errorf("expected status 201, got %d", resp.StatusCode)
@@ -133,7 +133,7 @@ func TestTransportWithAuth(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 }
 
 func TestDecodeResponse(t *testing.T) {

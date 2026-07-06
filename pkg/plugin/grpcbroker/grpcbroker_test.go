@@ -43,7 +43,7 @@ func startTestServer(t *testing.T, impl *refbroker.RefBroker) (string, func()) {
 	s := grpc.NewServer()
 	brokerv1.RegisterBrokerServiceServer(s, NewServer(impl))
 
-	go s.Serve(lis)
+	go func() { _ = s.Serve(lis) }()
 
 	return lis.Addr().String(), func() {
 		s.GracefulStop()
@@ -52,7 +52,7 @@ func startTestServer(t *testing.T, impl *refbroker.RefBroker) (string, func()) {
 
 func TestAdapterPublishSubscribe(t *testing.T) {
 	broker := refbroker.New(slog.Default())
-	defer broker.Close()
+	defer func() { _ = broker.Close() }()
 
 	var received []string
 	var mu sync.Mutex
@@ -69,17 +69,17 @@ func TestAdapterPublishSubscribe(t *testing.T) {
 		Address: addr,
 		Logger:  slog.Default(),
 	})
-	defer adapter.Close()
+	defer func() { _ = adapter.Close() }()
 
 	// Subscribe
 	handler := func(_ context.Context, _ string, _ *messages.StructuredMessage) {}
-	sub, err := adapter.Subscribe("scion.grove.g1.agent.*.messages", handler)
+	sub, err := adapter.Subscribe("scion.project.g1.agent.*.messages", handler)
 	require.NoError(t, err)
 	require.NotNil(t, sub)
 
 	// Publish
 	msg := messages.NewInstruction("user:alice", "agent:coder", "hello via grpc")
-	err = adapter.Publish(context.Background(), "scion.grove.g1.agent.coder.messages", msg)
+	err = adapter.Publish(context.Background(), "scion.project.g1.agent.coder.messages", msg)
 	require.NoError(t, err)
 
 	// Wait for async delivery in refbroker
@@ -99,7 +99,7 @@ func TestAdapterPublishSubscribe(t *testing.T) {
 
 func TestAdapterGetInfo(t *testing.T) {
 	broker := refbroker.New(slog.Default())
-	defer broker.Close()
+	defer func() { _ = broker.Close() }()
 
 	addr, stop := startTestServer(t, broker)
 	defer stop()
@@ -108,7 +108,7 @@ func TestAdapterGetInfo(t *testing.T) {
 		Address: addr,
 		Logger:  slog.Default(),
 	})
-	defer adapter.Close()
+	defer func() { _ = adapter.Close() }()
 
 	info, err := adapter.GetInfo()
 	require.NoError(t, err)
@@ -121,7 +121,7 @@ func TestAdapterGetInfo(t *testing.T) {
 
 func TestAdapterHealthCheck(t *testing.T) {
 	broker := refbroker.New(slog.Default())
-	defer broker.Close()
+	defer func() { _ = broker.Close() }()
 
 	addr, stop := startTestServer(t, broker)
 	defer stop()
@@ -130,7 +130,7 @@ func TestAdapterHealthCheck(t *testing.T) {
 		Address: addr,
 		Logger:  slog.Default(),
 	})
-	defer adapter.Close()
+	defer func() { _ = adapter.Close() }()
 
 	health, err := adapter.HealthCheck()
 	require.NoError(t, err)
@@ -142,7 +142,7 @@ func TestAdapterHealthCheck(t *testing.T) {
 
 func TestAdapterConfigure(t *testing.T) {
 	broker := refbroker.New(slog.Default())
-	defer broker.Close()
+	defer func() { _ = broker.Close() }()
 
 	addr, stop := startTestServer(t, broker)
 	defer stop()
@@ -151,7 +151,7 @@ func TestAdapterConfigure(t *testing.T) {
 		Address: addr,
 		Logger:  slog.Default(),
 	})
-	defer adapter.Close()
+	defer func() { _ = adapter.Close() }()
 
 	err := adapter.Configure(map[string]string{
 		"hub_url":     "http://localhost:8080",
@@ -178,23 +178,23 @@ func TestAdapterReconnectAfterServerRestart(t *testing.T) {
 
 	s1 := grpc.NewServer()
 	brokerv1.RegisterBrokerServiceServer(s1, NewServer(broker))
-	go s1.Serve(lis)
+	go func() { _ = s1.Serve(lis) }()
 
 	adapter := NewGRPCBrokerAdapter(AdapterConfig{
 		Address: fixedAddr,
 		Logger:  slog.Default(),
 	})
-	defer adapter.Close()
+	defer func() { _ = adapter.Close() }()
 
 	// Subscribe with handler.
 	handler := func(_ context.Context, _ string, _ *messages.StructuredMessage) {}
-	sub, err := adapter.Subscribe("scion.grove.g1.>", handler)
+	sub, err := adapter.Subscribe("scion.project.g1.>", handler)
 	require.NoError(t, err)
 	require.NotNil(t, sub)
 
 	// Publish successfully.
 	msg1 := messages.NewInstruction("user:alice", "agent:coder", "before restart")
-	require.NoError(t, adapter.Publish(context.Background(), "scion.grove.g1.agent.coder.messages", msg1))
+	require.NoError(t, adapter.Publish(context.Background(), "scion.project.g1.agent.coder.messages", msg1))
 
 	require.Eventually(t, func() bool {
 		mu.Lock()
@@ -205,11 +205,11 @@ func TestAdapterReconnectAfterServerRestart(t *testing.T) {
 	// Kill the server and force-close the adapter's connection so the next
 	// RPC call sees a transport error and triggers reconnect logic.
 	s1.Stop()
-	broker.Close()
+	_ = broker.Close()
 
 	adapter.mu.Lock()
 	if adapter.conn != nil {
-		adapter.conn.Close()
+		_ = adapter.conn.Close()
 		adapter.conn = nil
 		adapter.client = nil
 	}
@@ -217,7 +217,7 @@ func TestAdapterReconnectAfterServerRestart(t *testing.T) {
 
 	// Start a new server on the same port.
 	broker2 := refbroker.New(slog.Default())
-	defer broker2.Close()
+	defer func() { _ = broker2.Close() }()
 
 	var received2 []string
 	broker2.InboundHandler = func(topic string, msg *messages.StructuredMessage) {
@@ -231,13 +231,13 @@ func TestAdapterReconnectAfterServerRestart(t *testing.T) {
 
 	s2 := grpc.NewServer()
 	brokerv1.RegisterBrokerServiceServer(s2, NewServer(broker2))
-	go s2.Serve(lis2)
+	go func() { _ = s2.Serve(lis2) }()
 	defer s2.GracefulStop()
 
 	// ensureConnected will re-dial; tryReconnect will re-subscribe.
 	// Publish to trigger connect → subscribe → publish.
 	msg2 := messages.NewInstruction("user:bob", "agent:coder", "after restart")
-	err = adapter.Publish(context.Background(), "scion.grove.g1.agent.coder.messages", msg2)
+	err = adapter.Publish(context.Background(), "scion.project.g1.agent.coder.messages", msg2)
 	require.NoError(t, err)
 
 	// The adapter should have re-subscribed after reconnect, so the message
@@ -255,7 +255,7 @@ func TestAdapterReconnectAfterServerRestart(t *testing.T) {
 
 func TestAdapterClosedReturnsError(t *testing.T) {
 	broker := refbroker.New(slog.Default())
-	defer broker.Close()
+	defer func() { _ = broker.Close() }()
 
 	addr, stop := startTestServer(t, broker)
 	defer stop()
@@ -297,20 +297,20 @@ func TestIsLocalAddress(t *testing.T) {
 
 func TestServerWrapsPluginInterface(t *testing.T) {
 	broker := refbroker.New(slog.Default())
-	defer broker.Close()
+	defer func() { _ = broker.Close() }()
 
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 
 	s := grpc.NewServer()
 	brokerv1.RegisterBrokerServiceServer(s, NewServer(broker))
-	go s.Serve(lis)
+	go func() { _ = s.Serve(lis) }()
 	defer s.GracefulStop()
 
 	// Connect directly with a raw gRPC client
 	conn, err := grpc.Dial(lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
 	require.NoError(t, err)
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	client := brokerv1.NewBrokerServiceClient(conn)
 
@@ -359,7 +359,7 @@ func TestAdapterImplementsEventBus(t *testing.T) {
 
 func TestAdapterReconnectCallback(t *testing.T) {
 	broker := refbroker.New(slog.Default())
-	defer broker.Close()
+	defer func() { _ = broker.Close() }()
 
 	addr, stop := startTestServer(t, broker)
 
@@ -367,7 +367,7 @@ func TestAdapterReconnectCallback(t *testing.T) {
 		Address: addr,
 		Logger:  slog.Default(),
 	})
-	defer adapter.Close()
+	defer func() { _ = adapter.Close() }()
 
 	var callbackCount int
 	var cbMu sync.Mutex
@@ -385,7 +385,7 @@ func TestAdapterReconnectCallback(t *testing.T) {
 	stop()
 
 	broker2 := refbroker.New(slog.Default())
-	defer broker2.Close()
+	defer func() { _ = broker2.Close() }()
 
 	addr2, stop2 := startTestServer(t, broker2)
 	defer stop2()
@@ -395,7 +395,7 @@ func TestAdapterReconnectCallback(t *testing.T) {
 	_ = addr2
 	adapter.mu.Lock()
 	if adapter.conn != nil {
-		adapter.conn.Close()
+		_ = adapter.conn.Close()
 		adapter.conn = nil
 		adapter.client = nil
 	}

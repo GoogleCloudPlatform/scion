@@ -37,7 +37,7 @@ func freePort(t *testing.T) int {
 		t.Fatal(err)
 	}
 	port := l.Addr().(*net.TCPAddr).Port
-	l.Close()
+	_ = l.Close()
 	return port
 }
 
@@ -84,7 +84,7 @@ func TestMetadataServer_HealthCheck(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
@@ -122,7 +122,7 @@ func TestMetadataServer_RequiresMetadataFlavorHeader(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("expected 403 without Metadata-Flavor header, got %d", resp.StatusCode)
@@ -141,7 +141,7 @@ func metadataGet(t *testing.T, port int, path string) (*http.Response, string) {
 		t.Fatal(err)
 	}
 	body, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	return resp, string(body)
 }
 
@@ -247,13 +247,13 @@ func TestMetadataServer_AssignMode_SAEndpoints(t *testing.T) {
 	hubServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/v1/agent/gcp-token":
-			json.NewEncoder(w).Encode(map[string]interface{}{
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"access_token": "ya29.test-token",
 				"expires_in":   3599,
 				"token_type":   "Bearer",
 			})
 		case "/api/v1/agent/gcp-identity-token":
-			json.NewEncoder(w).Encode(map[string]string{
+			_ = json.NewEncoder(w).Encode(map[string]string{
 				"token": "eyJhbGciOiJSUzI1NiIs.test-id-token",
 			})
 		default:
@@ -351,7 +351,7 @@ func TestMetadataServer_AssignMode_TokenCaching(t *testing.T) {
 	requestCount := 0
 	hubServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requestCount++
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"access_token": fmt.Sprintf("ya29.token-%d", requestCount),
 			"expires_in":   3599,
 			"token_type":   "Bearer",
@@ -384,8 +384,8 @@ func TestMetadataServer_AssignMode_TokenCaching(t *testing.T) {
 	_, body2 := metadataGet(t, port, "/computeMetadata/v1/instance/service-accounts/default/token")
 
 	var resp1, resp2 map[string]interface{}
-	json.Unmarshal([]byte(body1), &resp1)
-	json.Unmarshal([]byte(body2), &resp2)
+	_ = json.Unmarshal([]byte(body1), &resp1)
+	_ = json.Unmarshal([]byte(body2), &resp2)
 
 	// Both should have the same token (cached)
 	if resp1["access_token"] != resp2["access_token"] {
@@ -400,7 +400,7 @@ func TestMetadataServer_AssignMode_TokenCaching(t *testing.T) {
 
 func TestMetadataServer_AssignMode_RecursiveServiceAccount(t *testing.T) {
 	hubServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"access_token": "ya29.test-token",
 			"expires_in":   3599,
 			"token_type":   "Bearer",
@@ -549,7 +549,7 @@ func TestMetadataServer_AssignMode_SingleflightToken(t *testing.T) {
 	hubServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt64(&requestCount, 1)
 		time.Sleep(200 * time.Millisecond) // simulate slow Hub
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"access_token": "ya29.singleflight-token",
 			"expires_in":   3599,
 			"token_type":   "Bearer",
@@ -653,7 +653,7 @@ func TestMetadataServer_RestartHTTP(t *testing.T) {
 	}
 
 	// Forcibly close the HTTP server to simulate a crash
-	srv.srv.Close()
+	_ = srv.srv.Close()
 	time.Sleep(50 * time.Millisecond)
 
 	if srv.probeHealth() {
@@ -674,7 +674,7 @@ func TestMetadataServer_RestartHTTP(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET after restart: %v", err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200 after restart, got %d", resp.StatusCode)
 	}
@@ -699,7 +699,7 @@ func TestMetadataServer_RestartLimit(t *testing.T) {
 
 	// Exhaust restart attempts
 	for i := 0; i < maxRestarts; i++ {
-		srv.srv.Close()
+		_ = srv.srv.Close()
 		time.Sleep(50 * time.Millisecond)
 		if err := srv.restartHTTP(ctx); err != nil {
 			t.Fatalf("restart %d should succeed: %v", i+1, err)
@@ -707,7 +707,7 @@ func TestMetadataServer_RestartLimit(t *testing.T) {
 	}
 
 	// Next restart should fail (limit reached)
-	srv.srv.Close()
+	_ = srv.srv.Close()
 	time.Sleep(50 * time.Millisecond)
 	err := srv.restartHTTP(ctx)
 	if err == nil {
@@ -748,7 +748,7 @@ func TestMetadataServer_ShutdownEndpoint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusMethodNotAllowed {
 		t.Fatalf("expected 405 for GET, got %d", resp.StatusCode)
 	}
@@ -759,7 +759,7 @@ func TestMetadataServer_ShutdownEndpoint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("expected 403 without Metadata-Flavor, got %d", resp.StatusCode)
 	}
@@ -771,7 +771,7 @@ func TestMetadataServer_ShutdownEndpoint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("expected 403 without shutdown token, got %d", resp.StatusCode)
 	}
@@ -790,7 +790,7 @@ func TestMetadataServer_ShutdownEndpoint(t *testing.T) {
 		t.Fatal(err)
 	}
 	body, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
