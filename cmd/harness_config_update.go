@@ -68,7 +68,7 @@ func runHarnessConfigUpdate(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	if hubCtx == nil {
-		return fmt.Errorf("Hub is not available. The update command requires a Hub connection.")
+		return fmt.Errorf("hub is not available, the update command requires a hub connection")
 	}
 
 	PrintUsingHub(hubCtx.Endpoint)
@@ -112,7 +112,7 @@ func updateSingleHarnessConfig(ctx context.Context, hubCtx *HubContext, name, ur
 		sourceURL = match.SourceURL
 	}
 	if sourceURL == "" {
-		return fmt.Errorf("harness-config %q has no stored source URL. Use --url to specify one.", name)
+		return fmt.Errorf("harness-config %q has no stored source URL, use --url to specify one", name)
 	}
 
 	if !isJSONOutput() {

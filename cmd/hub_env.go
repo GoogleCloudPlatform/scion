@@ -556,9 +556,10 @@ func runEnvList(cmd *cobra.Command, _ []string) error {
 // formatEnvAnnotations builds an annotation string for injection mode and secret status.
 func formatEnvAnnotations(v *hubclient.EnvVar) string {
 	var parts []string
-	if v.InjectionMode == "always" {
+	switch v.InjectionMode {
+	case "always":
 		parts = append(parts, "always")
-	} else if v.InjectionMode == "as_needed" {
+	case "as_needed":
 		parts = append(parts, "as-needed")
 	}
 	if v.Secret {

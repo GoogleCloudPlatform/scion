@@ -161,9 +161,10 @@ func runInviteCreate(cmd *cobra.Command, args []string) error {
 	}
 
 	maxUsesLabel := fmt.Sprintf("%d", resp.Invite.MaxUses)
-	if resp.Invite.MaxUses == 0 {
+	switch resp.Invite.MaxUses {
+	case 0:
 		maxUsesLabel = "unlimited"
-	} else if resp.Invite.MaxUses == 1 {
+	case 1:
 		maxUsesLabel = "1 (single-use)"
 	}
 

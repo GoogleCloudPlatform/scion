@@ -278,16 +278,18 @@ func checkAuthentication(hubURL string, failures *int) bool {
 	respBody, _ = io.ReadAll(resp.Body)
 	_ = resp.Body.Close()
 
-	if resp.StatusCode == 200 {
+	switch resp.StatusCode {
+	case 200:
 		fmt.Println("[ OK ] Token refresh works")
 		return true
-	} else if resp.StatusCode == 401 || resp.StatusCode == 403 {
+	case 401, 403:
 		fmt.Printf("[FAIL] Token refresh rejected (%d): %s\n", resp.StatusCode, doctorTruncate(string(respBody), 120))
 		*failures++
 		return false
+	default:
+		fmt.Printf("[WARN] Token refresh returned %d: %s\n", resp.StatusCode, doctorTruncate(string(respBody), 120))
+		return false
 	}
-	fmt.Printf("[WARN] Token refresh returned %d: %s\n", resp.StatusCode, doctorTruncate(string(respBody), 120))
-	return false
 }
 
 func checkGCPMetadata(failures *int) {

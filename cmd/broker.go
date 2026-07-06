@@ -1156,10 +1156,11 @@ func runBrokerProvide(cmd *cobra.Command, args []string) error {
 	if brokerMakeDefault {
 		currentDefault := resp.Project.DefaultRuntimeBrokerID
 
-		if currentDefault == brokerID {
+		switch currentDefault {
+		case brokerID:
 			// Already the default, nothing to do
 			fmt.Printf("Broker '%s' is already the default for project '%s'\n", brokerName, resp.Project.Name)
-		} else if currentDefault == "" {
+		case "":
 			// No default set - the server should have auto-set it during provide,
 			// but set it explicitly to be sure
 			_, err := client.Projects().Update(ctx, resp.Project.ID, &hubclient.UpdateProjectRequest{
@@ -1169,7 +1170,7 @@ func runBrokerProvide(cmd *cobra.Command, args []string) error {
 				return fmt.Errorf("failed to set default broker: %w", err)
 			}
 			fmt.Printf("Broker '%s' set as default for project '%s'\n", brokerName, resp.Project.Name)
-		} else {
+		default:
 			// Different default already set - resolve its name and confirm
 			currentDefaultName := currentDefault[:8] // fallback to truncated ID
 			currentBroker, err := client.RuntimeBrokers().Get(ctx, currentDefault)
@@ -1959,7 +1960,7 @@ func getHubClientForConnection(name string) (hubclient.Client, error) {
 	multiStore := brokercredentials.NewMultiStore("")
 	creds, err := multiStore.Load(name)
 	if err != nil {
-		return nil, fmt.Errorf("hub connection '%s' not found.\n\nUse 'scion runtime-broker hubs' to list available connections.", name)
+		return nil, fmt.Errorf("hub connection '%s' not found\n\nUse 'scion runtime-broker hubs' to list available connections", name)
 	}
 
 	if creds.HubEndpoint == "" {

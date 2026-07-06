@@ -118,7 +118,7 @@ func runHubAuthLogin(cmd *cobra.Command, args []string) error {
 		hubURL = getDefaultHubURL()
 	}
 	if hubURL == "" {
-		return fmt.Errorf("Hub URL not specified. Use --hub-url or configure hub.endpoint in settings")
+		return fmt.Errorf("hub URL not specified, use --hub-url or configure hub.endpoint in settings")
 	}
 
 	fmt.Printf("Authenticating with Hub at %s\n", hubURL)
