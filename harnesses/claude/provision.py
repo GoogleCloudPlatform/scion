@@ -208,7 +208,10 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
                 ctx.warn(f"failed to write API key approval: {exc}")
 
     env = _build_env_overlay(ctx, auth)
-    ctx.write_outputs(auth, env=env)
+    extra: dict[str, Any] | None = None
+    if auth.method == "vertex-ai":
+        extra = {"vertex_ai": True}
+    ctx.write_outputs(auth, env=env, extra=extra)
 
     mcp_mapping = dict(CLAUDE_MCP_MAPPING)
     mcp_mapping["project_config_path"] = f"projects.{ctx.workspace}.mcpServers"

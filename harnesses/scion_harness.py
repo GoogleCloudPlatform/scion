@@ -550,7 +550,7 @@ class ProvisionContext:
             elif method.kind == "file":
                 if self._match_file_method(method, file_paths, file_secrets):
                     return ResolvedAuth(method=method.name,
-                                       auth_file=expand_path(method.path or ""),
+                                       auth_file=method.path or "",
                                        spec_entry=method)
                 if explicit:
                     raise ProvisionError(
@@ -578,22 +578,33 @@ class ProvisionContext:
         env_keys: set[str],
         secret_files: dict[str, str],
     ) -> str | None:
-        """Check if an env method's requirements are met. Returns the matched key or None."""
+        """Check if an env method's requirements are met. Returns the matched key or None.
+
+        Two-pass matching: candidates/secret-files are checked across all keys
+        first; environ fallback only fires if nothing matched in the first pass.
+        This prevents a stale container env var for a lower-priority key from
+        shadowing a user-staged secret for a higher-priority key.
+        """
         if method.all_of:
-            all_present = all(
-                k in env_keys or k in secret_files or
-                (method.env_fallback and os.environ.get(k))
-                for k in method.all_of
-            )
-            if not all_present:
+            # Pass 1: check candidates/secret-files only
+            missing = [k for k in method.all_of
+                       if k not in env_keys and k not in secret_files]
+            if missing and method.env_fallback:
+                # Pass 2: allow env fallback for keys not in candidates
+                missing = [k for k in missing if not os.environ.get(k)]
+            if missing:
                 return None
 
         if method.any_of:
+            # Pass 1: check candidates/secret-files across ALL keys first
             for key in method.any_of:
                 if key in env_keys or key in secret_files:
                     return key
-                if method.env_fallback and os.environ.get(key):
-                    return key
+            # Pass 2: only if no key matched above, try env fallback
+            if method.env_fallback:
+                for key in method.any_of:
+                    if os.environ.get(key):
+                        return key
             return None
 
         if method.all_of and not method.any_of:
@@ -636,8 +647,12 @@ class ProvisionContext:
             "method": resolved.method,
             "explicit_type": self.explicit_type or None,
         }
+        # env_var only for api-key-style methods (single-key auth), not for
+        # multi-key methods like vertex-ai where env_key is a location, not a credential.
         if resolved.env_key:
-            auth_payload["env_var"] = resolved.env_key
+            is_multi_key = resolved.spec_entry and resolved.spec_entry.all_of
+            if not is_multi_key:
+                auth_payload["env_var"] = resolved.env_key
         if resolved.auth_file:
             auth_payload["auth_file"] = resolved.auth_file
         if extra:

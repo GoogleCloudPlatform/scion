@@ -62,22 +62,39 @@ ANTIGRAVITY_AUTH = scion_harness.AuthSpec(
 )
 
 
+def _has_disk_oauth_token(ctx: scion_harness.ProvisionContext) -> bool:
+    """Check if a bind-mounted antigravity-oauth-token exists on disk."""
+    path = os.path.join(
+        ctx.home, ".gemini", "antigravity-cli", "antigravity-oauth-token"
+    )
+    return os.path.isfile(path)
+
+
 def provision(ctx: scion_harness.ProvisionContext) -> None:
     ctx.info(
         f"version={PROVISION_VERSION} "
         f"home={ctx.home} uid={os.getuid()} gid={os.getgid()}"
     )
 
-    # DIVERGENCE(no-auth-gate): antigravity treats "none" as a valid auth
-    # method even when no_auth behavior is not configured. The library's
-    # select_auth raises ProvisionError when no method matches; we catch
-    # it and fall back to "none" unless an explicit type was requested.
-    try:
-        resolved = ctx.select_auth(ANTIGRAVITY_AUTH)
-    except scion_harness.ProvisionError:
-        if ctx.explicit_type:
-            raise
+    # Explicit "none" is valid for antigravity (file-only or no-auth setups).
+    if ctx.explicit_type == "none":
         resolved = scion_harness.ResolvedAuth(method="none")
+    else:
+        # Disk-path probe: bind-mounted antigravity-oauth-token must count
+        # toward token detection even when AGY_TOKEN is not staged as a
+        # candidate. Check before select_auth so we can override "none".
+        has_disk_token = _has_disk_oauth_token(ctx)
+
+        try:
+            resolved = ctx.select_auth(ANTIGRAVITY_AUTH)
+        except scion_harness.ProvisionError:
+            if ctx.explicit_type:
+                raise
+            resolved = scion_harness.ResolvedAuth(method="none")
+
+        if resolved.method == "none" and has_disk_token:
+            ctx.info("detected bind-mounted antigravity-oauth-token; using oauth-token auth")
+            resolved = scion_harness.ResolvedAuth(method="oauth-token")
 
     method = resolved.method
 

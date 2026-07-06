@@ -3,11 +3,11 @@
     "schema_version": 1,
     "env_vars": [
       "GOOGLE_CLOUD_PROJECT",
-      "GOOGLE_CLOUD_REGION"
+      "GOOGLE_CLOUD_LOCATION"
     ],
     "env_secret_files": {
       "GOOGLE_CLOUD_PROJECT": "$HOME/.scion/harness/secrets/GOOGLE_CLOUD_PROJECT",
-      "GOOGLE_CLOUD_REGION": "$HOME/.scion/harness/secrets/GOOGLE_CLOUD_REGION"
+      "GOOGLE_CLOUD_LOCATION": "$HOME/.scion/harness/secrets/GOOGLE_CLOUD_LOCATION"
     },
     "files": []
   },

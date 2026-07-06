@@ -3,6 +3,7 @@
   "resolved_auth": {
     "method": "vertex-ai",
     "harness": "gemini-cli",
+    "vertex_ai": true,
     "env_var": "GOOGLE_CLOUD_PROJECT"
   },
   "env": {

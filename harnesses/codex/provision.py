@@ -361,7 +361,10 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
         env_overlay,
     )
 
-    ctx.write_outputs(resolved, env={})
+    extra: dict[str, Any] | None = None
+    if resolved.method == "auth-file":
+        extra = {"auth_file_written": True}
+    ctx.write_outputs(resolved, env={}, extra=extra)
 
     scion_harness.apply_mcp_translated(ctx, _build_mcp_section, _write_mcp_to_config)
 

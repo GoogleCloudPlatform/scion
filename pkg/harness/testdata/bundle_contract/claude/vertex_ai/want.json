@@ -3,7 +3,7 @@
   "resolved_auth": {
     "method": "vertex-ai",
     "harness": "claude",
-    "env_var": "GOOGLE_CLOUD_REGION"
+    "vertex_ai": true
   },
   "env": {
     "CLAUDE_CODE_USE_VERTEX": "1",
