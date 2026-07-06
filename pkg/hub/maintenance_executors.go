@@ -29,9 +29,8 @@ import (
 	"strings"
 	"time"
 
-	cloudbuild "cloud.google.com/go/cloudbuild/apiv1"
+	cloudbuild "cloud.google.com/go/cloudbuild/apiv1/v2"
 	cloudbuildpb "cloud.google.com/go/cloudbuild/apiv1/v2/cloudbuildpb"
-	"cloud.google.com/go/longrunning/autogen/longrunningpb"
 	gcstorage "cloud.google.com/go/storage"
 	scionruntime "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
@@ -39,7 +38,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
-	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/durationpb"
 	"gopkg.in/yaml.v3"
 )
@@ -991,13 +989,10 @@ func createTarGz(srcDir string, w io.Writer) error {
 
 // extractBuildID extracts the Cloud Build ID from a CreateBuild long-running
 // operation response.
-func extractBuildID(op *longrunningpb.Operation) (string, error) {
-	if op.Metadata == nil {
-		return "", fmt.Errorf("operation has no metadata")
-	}
-	var meta cloudbuildpb.BuildOperationMetadata
-	if err := proto.Unmarshal(op.Metadata.Value, &meta); err != nil {
-		return "", fmt.Errorf("failed to unmarshal build operation metadata: %w", err)
+func extractBuildID(op *cloudbuild.CreateBuildOperation) (string, error) {
+	meta, err := op.Metadata()
+	if err != nil {
+		return "", fmt.Errorf("failed to get build operation metadata: %w", err)
 	}
 	if meta.Build == nil || meta.Build.Id == "" {
 		return "", fmt.Errorf("build metadata does not contain a build ID")
