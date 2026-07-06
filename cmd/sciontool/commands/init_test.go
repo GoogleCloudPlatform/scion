@@ -169,6 +169,9 @@ func TestInitCommand_Integration(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test in short mode")
 	}
+	if os.Getenv("SCION_INTEGRATION_TEST") == "" {
+		t.Skip("skipping integration test: SCION_INTEGRATION_TEST not set")
+	}
 
 	// Clear Hub env vars so the subprocess cannot talk to the real Hub
 	// and corrupt agent state. See issue #123.
