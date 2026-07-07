@@ -220,10 +220,18 @@ func AutoMigrate(ctx context.Context, client *ent.Client) error {
 		return fmt.Errorf("iterating tables: %w", err)
 	}
 
-	// Drop all existing tables (CASCADE handles FK dependencies).
+	// Create a map of Ent-managed tables for selective dropping.
+	entTables := make(map[string]bool)
+	for _, t := range migrate.Tables {
+		entTables[t.Name] = true
+	}
+
+	// Drop only existing tables that are managed by Ent (CASCADE handles FK dependencies).
 	for _, t := range tables {
-		if _, err := db.ExecContext(ctx, `DROP TABLE IF EXISTS "`+t+`" CASCADE`); err != nil {
-			return fmt.Errorf("dropping table %q: %w", t, err)
+		if entTables[t] {
+			if _, err := db.ExecContext(ctx, `DROP TABLE IF EXISTS "`+t+`" CASCADE`); err != nil {
+				return fmt.Errorf("dropping table %q: %w", t, err)
+			}
 		}
 	}
 
