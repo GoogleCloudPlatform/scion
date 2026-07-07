@@ -12,13 +12,14 @@ import (
 	"os/user"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
 var (
 	logPath     string
 	debug       bool
-	quiet       bool
+	quiet       atomic.Bool
 	mu          sync.Mutex
 	initialized bool
 )
@@ -26,9 +27,7 @@ var (
 // SetQuiet suppresses stderr log output (but preserves file logging).
 // Used when running as a hook/status subprocess where stderr is captured by the host.
 func SetQuiet(enabled bool) {
-	mu.Lock()
-	defer mu.Unlock()
-	quiet = enabled
+	quiet.Store(enabled)
 }
 
 // Init initializes the logging system.
@@ -134,7 +133,7 @@ func write(level, tag, format string, args ...interface{}) {
 	stderrEntry := fmt.Sprintf("[sciontool] %s:%s %s\n", level, tagStr, message)
 
 	// Write to stderr (suppressed in quiet mode for hook/status subcommands)
-	if !quiet {
+	if !quiet.Load() {
 		fmt.Fprint(os.Stderr, stderrEntry)
 	}
 

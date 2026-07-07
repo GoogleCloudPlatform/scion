@@ -263,7 +263,7 @@ func runAskUser(message string) {
 		}
 	}
 
-	log.Info("Agent asked: %s", message)
+	fmt.Fprintf(os.Stderr, "[sciontool] Agent asked: %s\n", message)
 }
 
 // runTaskCompleted updates status to completed.
@@ -290,5 +290,5 @@ func runTaskCompleted(message string) {
 		}
 	}
 
-	log.Info("Agent completed: %s", message)
+	fmt.Fprintf(os.Stderr, "[sciontool] Agent completed: %s\n", message)
 }
