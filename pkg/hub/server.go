@@ -648,8 +648,10 @@ type Server struct {
 	userActivity *UserActivityTracker
 
 	// operationalSettings manages Layer-1 settings from the DB in postgres mode.
-	// Nil in file/SQLite mode (settings-db §3.7).
-	operationalSettings *OperationalSettings
+	// Nil (zero value) in file/SQLite mode (settings-db §3.7).
+	// Uses atomic.Pointer for safe concurrent access — Phase 4/5 will add
+	// request-path readers while Set is called during startup.
+	operationalSettings atomic.Pointer[OperationalSettings]
 
 	// Dedicated request logger (nil = disabled)
 	requestLogger *slog.Logger
@@ -1497,15 +1499,15 @@ func (s *Server) IsPostgres() bool {
 
 // SetOperationalSettings attaches the OperationalSettings service to the
 // server. This is called during postgres-mode startup after seeding and
-// initial refresh (settings-db §3.5/§3.9).
+// initial refresh (settings-db §3.5/§3.9). Safe for concurrent use.
 func (s *Server) SetOperationalSettings(ops *OperationalSettings) {
-	s.operationalSettings = ops
+	s.operationalSettings.Store(ops)
 }
 
 // GetOperationalSettings returns the OperationalSettings service, or nil
-// in file/SQLite mode.
+// in file/SQLite mode. Safe for concurrent use.
 func (s *Server) GetOperationalSettings() *OperationalSettings {
-	return s.operationalSettings
+	return s.operationalSettings.Load()
 }
 
 // logMessage logs a message dispatch event to the dedicated message logger

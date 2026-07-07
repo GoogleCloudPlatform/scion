@@ -18,6 +18,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -749,9 +750,14 @@ func LoadFileOnlyKoanf() *koanf.Koanf {
 	k := koanf.New(".")
 
 	// 1. Load global settings.yaml (includes embedded defaults via koanf merge).
-	globalDir, _ := GetGlobalDir()
+	globalDir, err := GetGlobalDir()
+	if err != nil {
+		slog.Warn("LoadFileOnlyKoanf: failed to resolve global settings directory", "error", err)
+	}
 	if globalDir != "" {
-		_ = loadSettingsFile(k, globalDir)
+		if err := loadSettingsFile(k, globalDir); err != nil {
+			slog.Warn("LoadFileOnlyKoanf: failed to load settings file", "dir", globalDir, "error", err)
+		}
 	}
 
 	// 2. Load legacy server.yaml into the same keyspace (for sites that

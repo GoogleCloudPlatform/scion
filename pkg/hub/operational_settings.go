@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"os"
 	"sync"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -36,8 +37,21 @@ type sectionState struct {
 
 // Layer1Snapshot is an immutable merged view of all Layer-1 operational settings.
 // It carries everything that reloadSettings() currently derives from the config
-// file, so that applySnapshot can populate ServerConfig + MaintenanceState
-// without re-reading any external source.
+// file, so that ApplySnapshot can populate ServerConfig without re-reading any
+// external source.
+//
+// Field population depends on the source:
+//   - Postgres mode (OperationalSettings.Snapshot): ALL fields are populated via
+//     the full koanf merge (env > DB > file > defaults). This includes
+//     SoftDeleteRetention, SoftDeleteRetainFiles, PublicURL, ImageRegistry,
+//     DefaultTemplate, DefaultHarnessConfig, DefaultMaxTurns, DefaultMaxModelCalls,
+//     DefaultMaxDuration, DefaultResources, and NotificationChannels.
+//   - File mode (BuildLayer1SnapshotFromFile): only the fields that the old
+//     reloadSettings() consumed are populated. Fields like SoftDeleteRetention,
+//     DefaultTemplate, etc. remain at zero values because the old reloadSettings
+//     never applied them on reload — they are consumed only at startup. This
+//     maintains file-mode parity (the pre-refactor code never touched them on
+//     config reload either).
 type Layer1Snapshot struct {
 	// Access
 	AdminEmails       []string
@@ -46,12 +60,18 @@ type Layer1Snapshot struct {
 
 	// Lifecycle
 	AutoSuspendStalled    bool
-	SoftDeleteRetention   string
-	SoftDeleteRetainFiles bool
+	SoftDeleteRetention   string // postgres-mode only (see type comment)
+	SoftDeleteRetainFiles bool   // postgres-mode only (see type comment)
 
 	// Maintenance
 	AdminMode          bool
 	MaintenanceMessage string
+	// HasMaintenanceRow indicates whether a maintenance section row exists in
+	// the DB. When false (row absent), ApplyMaintenanceFromSnapshot leaves
+	// MaintenanceState as initialized at startup rather than resetting to
+	// defaults. This field is only meaningful in postgres mode — file-mode
+	// snapshots should never apply maintenance state.
+	HasMaintenanceRow bool
 
 	// Telemetry
 	TelemetryEnabled *bool
@@ -228,6 +248,9 @@ func (o *OperationalSettings) Snapshot() Layer1Snapshot {
 	// For maintenance, pull from DB section directly (not koanf — it has no
 	// koanf paths). If no DB row exists, compiled defaults apply.
 	snap.AdminMode, snap.MaintenanceMessage = o.maintenanceFromCache(dbSections)
+	if _, ok := dbSections["maintenance"]; ok {
+		snap.HasMaintenanceRow = true
+	}
 
 	return snap
 }
@@ -373,6 +396,13 @@ func buildSnapshotFromKoanf(k *koanf.Koanf) Layer1Snapshot {
 // BuildLayer1SnapshotFromFile constructs a Layer1Snapshot from the current
 // GlobalConfig, i.e. from settings.yaml + env. This is used in file/SQLite
 // mode where there is no DB tier for operational settings.
+//
+// NOTE: Only fields that the old reloadSettings() consumed are populated here.
+// Fields like SoftDeleteRetention, DefaultTemplate, DefaultMaxTurns, PublicURL,
+// ImageRegistry, DefaultResources, and NotificationChannels remain at zero
+// values — the old reloadSettings never applied those on config reload (they
+// are consumed at startup, not on reload). In postgres mode, the full koanf-based
+// Snapshot() populates all fields. See the Layer1Snapshot type comment for details.
 func BuildLayer1SnapshotFromFile(gc *config.GlobalConfig) Layer1Snapshot {
 	snap := Layer1Snapshot{
 		AdminEmails:        gc.Hub.AdminEmails,
@@ -460,8 +490,11 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 
 	s.mu.Unlock()
 
-	// Maintenance state (uses its own mutex)
-	s.maintenance.Set(snap.AdminMode, snap.MaintenanceMessage)
+	// NOTE: Maintenance state is deliberately NOT applied here.
+	// Maintenance is runtime/API-owned state. In file mode, reloadSettings
+	// must never touch MaintenanceState (restoring pre-refactor behavior).
+	// In postgres mode, the caller uses ApplyMaintenanceFromSnapshot
+	// separately, which respects env > DB precedence (§3.4/§3.8).
 
 	// Settings that require restart
 	needsRestart := []string{
@@ -477,6 +510,43 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 		"applied":          applied,
 		"requires_restart": needsRestart,
 	}
+}
+
+// ApplyMaintenanceFromSnapshot applies maintenance state from a postgres-mode
+// snapshot, respecting the env > DB precedence rule (design §3.4/§3.8).
+//
+// This function must be called ONLY in postgres-mode paths — file-mode
+// reloadSettings must never touch MaintenanceState (it is runtime/API-owned).
+//
+// Behavior:
+//   - If snap.HasMaintenanceRow is false (no DB row): no-op — MaintenanceState
+//     keeps its current value (which honors the env var set at startup).
+//   - If snap.HasMaintenanceRow is true: apply DB values, UNLESS the
+//     SCION_SERVER_ADMIN_MODE env var is set (per-node break-glass override).
+//
+// Phase 4 will call this on propagation events — a changed maintenance row
+// propagated from another node MUST apply, but env force-enable still wins
+// on this node.
+func ApplyMaintenanceFromSnapshot(s *Server, snap Layer1Snapshot) {
+	if !snap.HasMaintenanceRow {
+		// No maintenance row in DB — leave MaintenanceState as initialized
+		// at startup (which already honors the env var).
+		return
+	}
+
+	adminMode := snap.AdminMode
+	message := snap.MaintenanceMessage
+
+	// Env force-enable wins over DB value on this node (per-node break-glass,
+	// §3.8). Match the exact env var names from cmd/server_foreground.go:80-82.
+	if v := os.Getenv("SCION_SERVER_ADMIN_MODE"); v != "" {
+		adminMode = v == "true" || v == "1" || v == "yes"
+	}
+	if v := os.Getenv("SCION_SERVER_MAINTENANCE_MESSAGE"); v != "" {
+		message = v
+	}
+
+	s.maintenance.Set(adminMode, message)
 }
 
 // applySnapshotLogLevel applies the log-level portion of the snapshot.

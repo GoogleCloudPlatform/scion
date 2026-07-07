@@ -1432,6 +1432,7 @@ func initOperationalSettings(ctx context.Context, cfg *config.GlobalConfig, hubS
 
 	snap := ops.Snapshot()
 	hub.ApplySnapshot(hubSrv, snap)
+	hub.ApplyMaintenanceFromSnapshot(hubSrv, snap)
 
 	hubSrv.SetOperationalSettings(ops)
 

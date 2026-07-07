@@ -26,6 +26,12 @@ import (
 	"github.com/knadh/koanf/v2"
 )
 
+// setEnvForTest sets an env var and returns a cleanup function.
+func setEnvForTest(t *testing.T, key, value string) {
+	t.Helper()
+	t.Setenv(key, value)
+}
+
 // --- fake HubSettingStore ---
 
 type fakeHubSettingStore struct {
@@ -441,12 +447,10 @@ func TestApplySnapshot_RegressionParity(t *testing.T) {
 		t.Errorf("GitHubApp.PrivateKeyPath: want /path/to/key.pem, got %s", srv.config.GitHubAppConfig.PrivateKeyPath)
 	}
 
-	// Check maintenance state
-	if !srv.maintenance.IsEnabled() {
-		t.Error("MaintenanceState.IsEnabled: want true")
-	}
-	if srv.maintenance.Message() != "Maintenance in progress" {
-		t.Errorf("MaintenanceState.Message: want 'Maintenance in progress', got %q", srv.maintenance.Message())
+	// ApplySnapshot must NOT touch MaintenanceState — maintenance is runtime/
+	// API-owned state handled separately by ApplyMaintenanceFromSnapshot.
+	if srv.maintenance.IsEnabled() {
+		t.Error("MaintenanceState.IsEnabled: want false (ApplySnapshot must not touch maintenance)")
 	}
 
 	// Check results structure
@@ -632,4 +636,169 @@ func TestSnapshot_GitHubAppExcludesSecrets(t *testing.T) {
 	}
 	// The Layer1Snapshot struct does not have fields for private_key or
 	// webhook_secret, so they are structurally excluded.
+}
+
+// --- NB5 regression tests ---
+
+func TestApplyMaintenanceFromSnapshot_EnvWinsOverAbsentDBRow(t *testing.T) {
+	// Scenario: no maintenance row in DB, but SCION_SERVER_ADMIN_MODE=true env set.
+	// Expected: MaintenanceState retains whatever it was initialized with (env at startup).
+	// ApplyMaintenanceFromSnapshot should be a no-op when HasMaintenanceRow is false.
+	setEnvForTest(t, "SCION_SERVER_ADMIN_MODE", "true")
+
+	srv := &Server{
+		maintenance: NewMaintenanceState(true, "env-set"), // initialized from env at startup
+	}
+
+	snap := Layer1Snapshot{
+		AdminMode:         false,
+		HasMaintenanceRow: false, // no DB row
+	}
+
+	ApplyMaintenanceFromSnapshot(srv, snap)
+
+	// Should remain as initialized — no-op because no DB row.
+	if !srv.maintenance.IsEnabled() {
+		t.Error("want maintenance enabled (no-op when HasMaintenanceRow=false)")
+	}
+	if srv.maintenance.Message() != "env-set" {
+		t.Errorf("want message 'env-set', got %q", srv.maintenance.Message())
+	}
+}
+
+func TestApplyMaintenanceFromSnapshot_EnvWinsOverFalseDBRow(t *testing.T) {
+	// Scenario: maintenance row exists in DB with admin_mode=false,
+	// but SCION_SERVER_ADMIN_MODE=true env var is set (break-glass).
+	// Expected: env wins — maintenance enabled.
+	setEnvForTest(t, "SCION_SERVER_ADMIN_MODE", "true")
+	setEnvForTest(t, "SCION_SERVER_MAINTENANCE_MESSAGE", "env-break-glass")
+
+	srv := &Server{
+		maintenance: NewMaintenanceState(false, ""),
+	}
+
+	snap := Layer1Snapshot{
+		AdminMode:          false,
+		MaintenanceMessage: "from-db",
+		HasMaintenanceRow:  true, // DB row exists
+	}
+
+	ApplyMaintenanceFromSnapshot(srv, snap)
+
+	if !srv.maintenance.IsEnabled() {
+		t.Error("want maintenance enabled (env override wins)")
+	}
+	if srv.maintenance.Message() != "env-break-glass" {
+		t.Errorf("want message 'env-break-glass', got %q", srv.maintenance.Message())
+	}
+}
+
+func TestApplyMaintenanceFromSnapshot_DBRowAppliedWhenNoEnv(t *testing.T) {
+	// Scenario: maintenance row exists in DB with admin_mode=true,
+	// no env override set. Expected: DB values applied.
+	// Ensure env vars are unset by t.Setenv (overrides then restores).
+	setEnvForTest(t, "SCION_SERVER_ADMIN_MODE", "")
+	setEnvForTest(t, "SCION_SERVER_MAINTENANCE_MESSAGE", "")
+
+	srv := &Server{
+		maintenance: NewMaintenanceState(false, ""),
+	}
+
+	snap := Layer1Snapshot{
+		AdminMode:          true,
+		MaintenanceMessage: "DB maintenance",
+		HasMaintenanceRow:  true,
+	}
+
+	ApplyMaintenanceFromSnapshot(srv, snap)
+
+	if !srv.maintenance.IsEnabled() {
+		t.Error("want maintenance enabled from DB row")
+	}
+	if srv.maintenance.Message() != "DB maintenance" {
+		t.Errorf("want message 'DB maintenance', got %q", srv.maintenance.Message())
+	}
+}
+
+func TestApplySnapshot_FileMode_DoesNotModifyMaintenance(t *testing.T) {
+	// B2 regression test: simulate the file-mode scenario where maintenance
+	// is enabled via API, then a config reload (PUT /admin/server-config)
+	// triggers reloadSettings → BuildLayer1SnapshotFromFile → ApplySnapshot.
+	// Maintenance must NOT be reset.
+
+	// 1. Initialize server with maintenance enabled (as if set via PUT /admin/maintenance).
+	srv := &Server{
+		maintenance: NewMaintenanceState(true, "Enabled via API"),
+	}
+
+	// 2. Build a file-mode snapshot with AdminMode=false (typical settings.yaml).
+	gc := &config.GlobalConfig{
+		Hub: config.HubServerConfig{
+			AdminEmails: []string{"admin@file.com"},
+		},
+		Auth: config.DevAuthConfig{
+			UserAccessMode: "open",
+		},
+		AdminMode: false, // file says not in maintenance
+	}
+	snap := BuildLayer1SnapshotFromFile(gc)
+
+	// 3. Apply snapshot (file-mode path — reloadSettings calls this).
+	ApplySnapshot(srv, snap)
+
+	// 4. Assert: maintenance state is unchanged (still enabled from API).
+	if !srv.maintenance.IsEnabled() {
+		t.Error("maintenance should remain enabled after file-mode ApplySnapshot (B2 regression)")
+	}
+	if srv.maintenance.Message() != "Enabled via API" {
+		t.Errorf("maintenance message should remain 'Enabled via API', got %q", srv.maintenance.Message())
+	}
+}
+
+func TestConcurrentRefreshAndSnapshot(t *testing.T) {
+	// NB5(c): concurrent Refresh+Snapshot race test.
+	// Run with -race to detect data races.
+	fakeStore := newFakeHubSettingStore()
+	fakeStore.seed("access", json.RawMessage(`{"admin_emails":["a@b.com"]}`))
+	fakeStore.seed("lifecycle", json.RawMessage(`{"auto_suspend_stalled":true}`))
+	fakeStore.seed("maintenance", json.RawMessage(`{"admin_mode":true,"maintenance_message":"test"}`))
+
+	fileK := newFileKoanf(t, map[string]interface{}{
+		"server.hub.admin_emails": []interface{}{"file@example.com"},
+	})
+	ops := NewOperationalSettings(fakeStore, fileK, emptyKoanf())
+	_, _ = ops.Refresh(context.Background())
+
+	// Run concurrent Refresh and Snapshot calls.
+	var wg sync.WaitGroup
+	const goroutines = 10
+	const iterations = 100
+
+	for i := 0; i < goroutines; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < iterations; j++ {
+				_, _ = ops.Refresh(context.Background())
+			}
+		}()
+
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < iterations; j++ {
+				snap := ops.Snapshot()
+				// Access fields to ensure no race on reads.
+				_ = snap.AdminEmails
+				_ = snap.AdminMode
+				_ = snap.HasMaintenanceRow
+				_ = snap.MaintenanceMessage
+				_ = snap.AutoSuspendStalled
+				_ = snap.EnvOverrides
+			}
+		}()
+	}
+
+	wg.Wait()
+	// If we reach here without the race detector firing, the test passes.
 }
