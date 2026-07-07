@@ -17,7 +17,6 @@ package opsettings
 import (
 	"encoding/json"
 	"fmt"
-	"strings"
 
 	"github.com/knadh/koanf/providers/confmap"
 	"github.com/knadh/koanf/v2"
@@ -38,13 +37,16 @@ var koanfPathToJSONField = map[string]map[string]string{
 		"server.hub.soft_delete_retention":    "soft_delete_retention",
 		"server.hub.soft_delete_retain_files": "soft_delete_retain_files",
 	},
-	"maintenance": {
-		"server.hub.admin_mode":          "admin_mode",
-		"server.hub.maintenance_message": "maintenance_message",
-	},
 	"endpoints": {
 		"server.hub.public_url": "public_url",
 		"image_registry":        "image_registry",
+	},
+	"github_app": {
+		"server.github_app.app_id":           "app_id",
+		"server.github_app.api_base_url":     "api_base_url",
+		"server.github_app.webhooks_enabled": "webhooks_enabled",
+		"server.github_app.installation_url": "installation_url",
+		"server.github_app.private_key_path": "private_key_path",
 	},
 }
 
@@ -61,13 +63,16 @@ var jsonFieldToKoanfPaths = map[string]map[string]string{
 		"soft_delete_retention":    "server.hub.soft_delete_retention",
 		"soft_delete_retain_files": "server.hub.soft_delete_retain_files",
 	},
-	"maintenance": {
-		"admin_mode":          "server.hub.admin_mode",
-		"maintenance_message": "server.hub.maintenance_message",
-	},
 	"endpoints": {
 		"public_url":     "server.hub.public_url",
 		"image_registry": "image_registry",
+	},
+	"github_app": {
+		"app_id":           "server.github_app.app_id",
+		"api_base_url":     "server.github_app.api_base_url",
+		"webhooks_enabled": "server.github_app.webhooks_enabled",
+		"installation_url": "server.github_app.installation_url",
+		"private_key_path": "server.github_app.private_key_path",
 	},
 }
 
@@ -80,13 +85,17 @@ func ExtractSectionFromKoanf(k *koanf.Koanf, sectionName string) (json.RawMessag
 		return nil, fmt.Errorf("unknown section %q", sectionName)
 	}
 
+	if len(sec.KoanfPaths) == 0 {
+		return json.Marshal(map[string]interface{}{})
+	}
+
 	switch sectionName {
 	case "telemetry":
 		return extractSubtree(k, "telemetry")
 	case "agent_defaults":
 		return extractAgentDefaults(k)
 	case "github_app":
-		return extractSubtree(k, "server.github_app")
+		return extractGitHubApp(k)
 	case "notifications":
 		return extractNotifications(k)
 	default:
@@ -116,6 +125,10 @@ func extractAgentDefaults(k *koanf.Koanf) (json.RawMessage, error) {
 		}
 	}
 	return json.Marshal(doc)
+}
+
+func extractGitHubApp(k *koanf.Koanf) (json.RawMessage, error) {
+	return extractMappedSection(k, "github_app")
 }
 
 func extractNotifications(k *koanf.Koanf) (json.RawMessage, error) {
@@ -157,6 +170,11 @@ func LoadSectionsIntoKoanf(sections map[string]json.RawMessage) (*koanf.Koanf, e
 }
 
 func loadSectionIntoKoanf(k *koanf.Koanf, sectionName string, doc json.RawMessage) error {
+	sec := SectionByName(sectionName)
+	if sec != nil && len(sec.KoanfPaths) == 0 {
+		return nil
+	}
+
 	var raw map[string]interface{}
 	if err := json.Unmarshal(doc, &raw); err != nil {
 		return err
@@ -168,7 +186,7 @@ func loadSectionIntoKoanf(k *koanf.Koanf, sectionName string, doc json.RawMessag
 	case "agent_defaults":
 		return k.Load(confmap.Provider(raw, "."), nil)
 	case "github_app":
-		return loadPrefixed(k, "server.github_app", raw)
+		return loadMappedSection(k, "github_app", raw)
 	case "notifications":
 		flat := make(map[string]interface{})
 		for key, val := range raw {
@@ -285,28 +303,4 @@ func ClassifyKeys(keys []string) (layer1 map[string][]string, layer0 []string) {
 		}
 	}
 	return layer1, layer0
-}
-
-// OwningSection for the telemetry subtree needs to handle the parent prefix.
-// The init-time OwningSection already handles this via prefix-walk — keys like
-// "telemetry.cloud.tls.enabled" match because "telemetry.cloud.tls" then
-// "telemetry.cloud" then "telemetry" are checked.
-// Similarly "server.github_app.webhooks_enabled" matches via "server.github_app".
-
-// sectionKeyRoot returns the koanf key prefix that covers all of a section's
-// fields (used for subtree operations like Cut).
-func sectionKeyRoot(sectionName string) string {
-	roots := map[string]string{
-		"telemetry":  "telemetry",
-		"github_app": "server.github_app",
-	}
-	if r, ok := roots[sectionName]; ok {
-		return r
-	}
-	return ""
-}
-
-// isParentKey checks if key is a prefix-based ancestor of target.
-func isParentKey(key, target string) bool {
-	return strings.HasPrefix(target, key+".")
 }

@@ -17,11 +17,9 @@ package opsettings
 import (
 	"encoding/json"
 	"fmt"
-	"strings"
-	"sync"
-
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/santhosh-tekuri/jsonschema/v6"
+	"strings"
 )
 
 // Section describes a single Layer-1 operational settings section.
@@ -43,8 +41,6 @@ var sectionIndex map[string]*Section
 // keyIndex maps koanf path → section name for ownership lookup.
 var keyIndex map[string]string
 
-var initOnce sync.Once
-
 func init() {
 	Registry = []Section{
 		{
@@ -58,8 +54,12 @@ func init() {
 			New:        func() any { return &LifecycleSettings{} },
 		},
 		{
+			// maintenance is durable via DB but has no settings.yaml representation.
+			// It is runtime/API-owned state: absent DB row = compiled defaults
+			// (admin_mode=false). Seeding skips this section. The env var
+			// SCION_SERVER_ADMINMODE remains a per-node force-enable (design §3.4/§3.8).
 			Name:       "maintenance",
-			KoanfPaths: []string{"server.hub.admin_mode", "server.hub.maintenance_message"},
+			KoanfPaths: nil,
 			New:        func() any { return &MaintenanceSettings{} },
 		},
 		{
@@ -115,17 +115,15 @@ func init() {
 }
 
 func ensureIndexes() {
-	initOnce.Do(func() {
-		sectionIndex = make(map[string]*Section, len(Registry))
-		keyIndex = make(map[string]string)
-		for i := range Registry {
-			s := &Registry[i]
-			sectionIndex[s.Name] = s
-			for _, kp := range s.KoanfPaths {
-				keyIndex[kp] = s.Name
-			}
+	sectionIndex = make(map[string]*Section, len(Registry))
+	keyIndex = make(map[string]string)
+	for i := range Registry {
+		s := &Registry[i]
+		sectionIndex[s.Name] = s
+		for _, kp := range s.KoanfPaths {
+			keyIndex[kp] = s.Name
 		}
-	})
+	}
 }
 
 // SectionByName returns the Section with the given name, or nil if not found.
@@ -190,7 +188,7 @@ func compileSchemas() {
 			"type": "object",
 			"properties": map[string]interface{}{
 				"admin_emails":       getSchemaProperty(root, "server", "hub", "admin_emails"),
-				"user_access_mode":   schemaPropertyOrFallback(root, map[string]interface{}{"type": "string"}, "server", "auth", "user_access_mode"),
+				"user_access_mode":   getSchemaProperty(root, "server", "auth", "user_access_mode"),
 				"authorized_domains": getSchemaProperty(root, "server", "auth", "authorized_domains"),
 			},
 			"additionalProperties": false,
@@ -198,12 +196,16 @@ func compileSchemas() {
 		"lifecycle": {
 			"type": "object",
 			"properties": map[string]interface{}{
-				"auto_suspend_stalled":     schemaPropertyOrFallback(root, map[string]interface{}{"type": "boolean"}, "server", "hub", "auto_suspend_stalled"),
+				"auto_suspend_stalled":     getSchemaProperty(root, "server", "hub", "auto_suspend_stalled"),
 				"soft_delete_retention":    getSchemaProperty(root, "server", "hub", "soft_delete_retention"),
 				"soft_delete_retain_files": getSchemaProperty(root, "server", "hub", "soft_delete_retain_files"),
 			},
 			"additionalProperties": false,
 		},
+		// Tech debt: maintenance schema is hand-written — admin_mode and
+		// maintenance_message have no $defs in settings-v1.schema.json because
+		// they are runtime state, not file config. If they are ever added to
+		// the canonical schema, unify here.
 		"maintenance": {
 			"type": "object",
 			"properties": map[string]interface{}{
@@ -233,6 +235,9 @@ func compileSchemas() {
 			},
 			"additionalProperties": false,
 		},
+		// Tech debt: github_app schema is hand-written — the canonical
+		// settings-v1.schema.json has no $defs for GitHub App fields. If a
+		// gitHubApp $def is added later, unify here.
 		"github_app": {
 			"type": "object",
 			"properties": map[string]interface{}{

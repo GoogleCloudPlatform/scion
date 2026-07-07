@@ -16,9 +16,13 @@ package opsettings
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 
+	"github.com/knadh/koanf/parsers/yaml"
 	"github.com/knadh/koanf/providers/confmap"
+	"github.com/knadh/koanf/providers/file"
 	"github.com/knadh/koanf/v2"
 )
 
@@ -60,6 +64,12 @@ func TestSectionMarshalUnmarshal(t *testing.T) {
 
 func TestSectionHasKoanfPaths(t *testing.T) {
 	for _, sec := range Registry {
+		if sec.Name == "maintenance" {
+			if len(sec.KoanfPaths) != 0 {
+				t.Errorf("maintenance section should have empty KoanfPaths, got %v", sec.KoanfPaths)
+			}
+			continue
+		}
 		if len(sec.KoanfPaths) == 0 {
 			t.Errorf("section %q has no koanf paths", sec.Name)
 		}
@@ -85,8 +95,6 @@ func TestOwningSection(t *testing.T) {
 		{"server.hub.auto_suspend_stalled", "lifecycle"},
 		{"server.hub.soft_delete_retention", "lifecycle"},
 		{"server.hub.soft_delete_retain_files", "lifecycle"},
-		{"server.hub.admin_mode", "maintenance"},
-		{"server.hub.maintenance_message", "maintenance"},
 		{"telemetry.enabled", "telemetry"},
 		{"telemetry.cloud.endpoint", "telemetry"},
 		{"telemetry.hub.enabled", "telemetry"},
@@ -104,6 +112,18 @@ func TestOwningSection(t *testing.T) {
 		got := OwningSection(tt.key)
 		if got != tt.want {
 			t.Errorf("OwningSection(%q) = %q, want %q", tt.key, got, tt.want)
+		}
+	}
+}
+
+func TestMaintenanceHasNoOwnedKeys(t *testing.T) {
+	keys := []string{
+		"server.hub.admin_mode",
+		"server.hub.maintenance_message",
+	}
+	for _, key := range keys {
+		if sec := OwningSection(key); sec != "" {
+			t.Errorf("maintenance has no KoanfPaths, but OwningSection(%q) returned %q", key, sec)
 		}
 	}
 }
@@ -216,8 +236,6 @@ func TestExtractSectionFromKoanf(t *testing.T) {
 		"server.hub.auto_suspend_stalled":     true,
 		"server.hub.soft_delete_retention":    "72h",
 		"server.hub.soft_delete_retain_files": true,
-		"server.hub.admin_mode":               true,
-		"server.hub.maintenance_message":      "updating",
 		"server.hub.public_url":               "https://hub.test.com",
 		"image_registry":                      "gcr.io/test",
 		"default_template":                    "default",
@@ -258,8 +276,8 @@ func TestExtractSectionFromKoanf(t *testing.T) {
 			}
 		}},
 		{"maintenance", func(t *testing.T, doc map[string]interface{}) {
-			if doc["admin_mode"] != true {
-				t.Errorf("expected admin_mode=true, got %v", doc["admin_mode"])
+			if len(doc) != 0 {
+				t.Errorf("maintenance section should produce empty doc (no koanf paths), got %v", doc)
 			}
 		}},
 		{"endpoints", func(t *testing.T, doc map[string]interface{}) {
@@ -315,7 +333,45 @@ func TestExtractUnknownSection(t *testing.T) {
 	}
 }
 
-// --- Round-trip test ---
+// B2: github_app must not leak secret material
+func TestGitHubAppExtractExcludesSecrets(t *testing.T) {
+	k := koanf.New(".")
+	_ = k.Load(confmap.Provider(map[string]interface{}{
+		"server.github_app.app_id":           42,
+		"server.github_app.api_base_url":     "https://api.github.com",
+		"server.github_app.webhooks_enabled": true,
+		"server.github_app.installation_url": "https://github.com/apps/test",
+		"server.github_app.private_key_path": "/etc/keys/gh.pem",
+		"server.github_app.private_key":      "-----BEGIN RSA PRIVATE KEY-----\nSECRET",
+		"server.github_app.webhook_secret":   "whsec_supersecret",
+	}, "."), nil)
+
+	raw, err := ExtractSectionFromKoanf(k, "github_app")
+	if err != nil {
+		t.Fatalf("extract: %v", err)
+	}
+
+	var doc map[string]interface{}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if _, ok := doc["private_key"]; ok {
+		t.Error("section doc must NOT contain private_key (secret material)")
+	}
+	if _, ok := doc["webhook_secret"]; ok {
+		t.Error("section doc must NOT contain webhook_secret (secret material)")
+	}
+
+	if doc["app_id"] == nil {
+		t.Error("expected app_id in section doc")
+	}
+	if doc["private_key_path"] == nil {
+		t.Error("expected private_key_path in section doc (path only, not secret)")
+	}
+}
+
+// --- Round-trip tests ---
 
 func TestRoundTrip(t *testing.T) {
 	k := koanf.New(".")
@@ -326,8 +382,6 @@ func TestRoundTrip(t *testing.T) {
 		"server.hub.auto_suspend_stalled":     true,
 		"server.hub.soft_delete_retention":    "48h",
 		"server.hub.soft_delete_retain_files": false,
-		"server.hub.admin_mode":               false,
-		"server.hub.maintenance_message":      "",
 		"server.hub.public_url":               "https://hub.example.com",
 		"image_registry":                      "gcr.io/project",
 		"default_template":                    "tmpl",
@@ -335,13 +389,18 @@ func TestRoundTrip(t *testing.T) {
 		"default_max_turns":                   50,
 		"default_max_model_calls":             100,
 		"default_max_duration":                "30m",
-		"telemetry.enabled":                   true,
-		"telemetry.cloud.endpoint":            "https://otel.example.com",
-		"server.github_app.app_id":            99,
-		"server.github_app.webhooks_enabled":  true,
-		"server.github_app.api_base_url":      "https://api.github.com",
-		"server.github_app.installation_url":  "https://github.com/apps/test",
-		"server.github_app.private_key_path":  "/etc/keys/gh.pem",
+		"default_resources": map[string]interface{}{
+			"requests": map[string]interface{}{"cpu": "100m", "memory": "256Mi"},
+			"limits":   map[string]interface{}{"cpu": "1", "memory": "1Gi"},
+			"disk":     "10Gi",
+		},
+		"telemetry.enabled":                  true,
+		"telemetry.cloud.endpoint":           "https://otel.example.com",
+		"server.github_app.app_id":           99,
+		"server.github_app.webhooks_enabled": true,
+		"server.github_app.api_base_url":     "https://api.github.com",
+		"server.github_app.installation_url": "https://github.com/apps/test",
+		"server.github_app.private_key_path": "/etc/keys/gh.pem",
 		"server.notification_channels": []interface{}{
 			map[string]interface{}{"type": "slack"},
 		},
@@ -398,6 +457,173 @@ func TestRoundTrip(t *testing.T) {
 	}
 	if merged.Exists("server.hub.port") {
 		t.Error("Layer-0 key server.hub.port should not appear in merged sections")
+	}
+}
+
+// N7: Verify default_resources (nested ResourceSpec) round-trips through JSON correctly.
+func TestRoundTripDefaultResources(t *testing.T) {
+	k := koanf.New(".")
+	_ = k.Load(confmap.Provider(map[string]interface{}{
+		"default_resources": map[string]interface{}{
+			"requests": map[string]interface{}{"cpu": "250m", "memory": "512Mi"},
+			"limits":   map[string]interface{}{"cpu": "2", "memory": "4Gi"},
+			"disk":     "20Gi",
+		},
+	}, "."), nil)
+
+	raw, err := ExtractSectionFromKoanf(k, "agent_defaults")
+	if err != nil {
+		t.Fatalf("extract: %v", err)
+	}
+
+	var settings AgentDefaultsSettings
+	if err := json.Unmarshal(raw, &settings); err != nil {
+		t.Fatalf("unmarshal into AgentDefaultsSettings: %v", err)
+	}
+
+	if settings.DefaultResources == nil {
+		t.Fatal("expected DefaultResources to be non-nil")
+	}
+	if settings.DefaultResources.Requests.CPU != "250m" {
+		t.Errorf("expected CPU=250m, got %q", settings.DefaultResources.Requests.CPU)
+	}
+	if settings.DefaultResources.Limits.Memory != "4Gi" {
+		t.Errorf("expected Memory=4Gi, got %q", settings.DefaultResources.Limits.Memory)
+	}
+	if settings.DefaultResources.Disk != "20Gi" {
+		t.Errorf("expected Disk=20Gi, got %q", settings.DefaultResources.Disk)
+	}
+}
+
+// N1: Stronger round-trip using a real settings.yaml through the koanf YAML
+// parser, matching the actual config loader chain.
+func TestRoundTripFromYAMLFile(t *testing.T) {
+	const sampleYAML = `schema_version: "1"
+server:
+  hub:
+    port: 9810
+    public_url: "https://hub.example.com"
+    admin_emails:
+      - "admin@example.com"
+    soft_delete_retention: "72h"
+    soft_delete_retain_files: true
+    auto_suspend_stalled: true
+  auth:
+    mode: oauth
+    user_access_mode: invite
+    authorized_domains:
+      - "example.com"
+  database:
+    driver: postgres
+    url: "postgres://localhost/scion"
+  github_app:
+    app_id: 42
+    api_base_url: "https://api.github.com"
+    webhooks_enabled: true
+    installation_url: "https://github.com/apps/myapp"
+    private_key_path: "/etc/keys/gh.pem"
+    private_key: "SECRET_KEY_MATERIAL"
+    webhook_secret: "SECRET_WEBHOOK"
+  notification_channels:
+    - type: slack
+      params:
+        url: "https://hooks.slack.com/services/xxx"
+telemetry:
+  enabled: true
+  cloud:
+    endpoint: "https://otel.example.com"
+    protocol: grpc
+default_template: "standard"
+default_harness_config: "base"
+default_max_turns: 50
+default_max_model_calls: 200
+default_max_duration: "1h"
+default_resources:
+  requests:
+    cpu: "100m"
+    memory: "256Mi"
+  limits:
+    cpu: "1"
+    memory: "1Gi"
+  disk: "5Gi"
+image_registry: "gcr.io/my-project"
+`
+
+	dir := t.TempDir()
+	settingsPath := filepath.Join(dir, "settings.yaml")
+	if err := os.WriteFile(settingsPath, []byte(sampleYAML), 0644); err != nil {
+		t.Fatalf("write settings.yaml: %v", err)
+	}
+
+	// Load through the real koanf YAML parser (same as pkg/config loader).
+	original := koanf.New(".")
+	if err := original.Load(file.Provider(settingsPath), yaml.Parser()); err != nil {
+		t.Fatalf("load YAML via koanf: %v", err)
+	}
+
+	// Extract all sections.
+	sections, err := ExtractAllSections(original)
+	if err != nil {
+		t.Fatalf("extract: %v", err)
+	}
+
+	// Reload sections into a fresh koanf.
+	reloaded, err := LoadSectionsIntoKoanf(sections)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+
+	// Verify all Layer-1 leaf keys match between original and reloaded.
+	// Skip parent/container keys (e.g. "server.github_app") — extraction
+	// may intentionally filter child keys (like secrets), so comparing the
+	// entire subtree would fail. Only compare leaf koanf paths that map
+	// directly to section document fields.
+	parentKeys := map[string]bool{
+		"server.github_app": true,
+		"telemetry.cloud":   true, "telemetry.cloud.tls": true, "telemetry.cloud.batch": true,
+		"telemetry.hub": true, "telemetry.local": true,
+		"telemetry.filter": true, "telemetry.filter.events": true,
+		"telemetry.filter.attributes": true, "telemetry.filter.sampling": true,
+	}
+	for _, sec := range Registry {
+		for _, kp := range sec.KoanfPaths {
+			if parentKeys[kp] {
+				continue
+			}
+			origVal := original.Get(kp)
+			reloadVal := reloaded.Get(kp)
+			if origVal == nil && reloadVal == nil {
+				continue
+			}
+			if origVal == nil || reloadVal == nil {
+				t.Errorf("[%s] key %q: original=%v, reloaded=%v", sec.Name, kp, origVal, reloadVal)
+				continue
+			}
+			origJSON, _ := json.Marshal(origVal)
+			reloadJSON, _ := json.Marshal(reloadVal)
+			if string(origJSON) != string(reloadJSON) {
+				t.Errorf("[%s] key %q mismatch:\n  original: %s\n  reloaded: %s", sec.Name, kp, origJSON, reloadJSON)
+			}
+		}
+	}
+
+	// Verify Layer-0 keys are NOT in the reloaded koanf.
+	layer0Keys := []string{"server.database.driver", "server.hub.port", "server.auth.mode", "schema_version"}
+	for _, key := range layer0Keys {
+		if reloaded.Exists(key) {
+			t.Errorf("Layer-0 key %q should not appear in reloaded sections", key)
+		}
+	}
+
+	// Verify github_app secrets were excluded.
+	ghDoc := sections["github_app"]
+	var ghMap map[string]interface{}
+	json.Unmarshal(ghDoc, &ghMap)
+	if _, ok := ghMap["private_key"]; ok {
+		t.Error("github_app section must not contain private_key")
+	}
+	if _, ok := ghMap["webhook_secret"]; ok {
+		t.Error("github_app section must not contain webhook_secret")
 	}
 }
 
