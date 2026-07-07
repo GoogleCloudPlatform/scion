@@ -34,6 +34,9 @@ Commands:
 		if logLevel == "debug" {
 			log.SetDebug(true)
 		}
+		if isHookSubcommand(cmd) {
+			log.SetQuiet(true)
+		}
 	},
 }
 
@@ -45,6 +48,16 @@ func Execute() {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+func isHookSubcommand(cmd *cobra.Command) bool {
+	for c := cmd; c != nil; c = c.Parent() {
+		switch c.Name() {
+		case "hook", "status":
+			return true
+		}
+	}
+	return false
 }
 
 func init() {

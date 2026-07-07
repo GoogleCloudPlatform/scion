@@ -18,9 +18,18 @@ import (
 var (
 	logPath     string
 	debug       bool
+	quiet       bool
 	mu          sync.Mutex
 	initialized bool
 )
+
+// SetQuiet suppresses stderr log output (but preserves file logging).
+// Used when running as a hook/status subprocess where stderr is captured by the host.
+func SetQuiet(enabled bool) {
+	mu.Lock()
+	defer mu.Unlock()
+	quiet = enabled
+}
 
 // Init initializes the logging system.
 func Init() {
@@ -124,8 +133,10 @@ func write(level, tag, format string, args ...interface{}) {
 	// Format for stderr: [sciontool] LEVEL: [TAG] message
 	stderrEntry := fmt.Sprintf("[sciontool] %s:%s %s\n", level, tagStr, message)
 
-	// Write to stderr
-	fmt.Fprint(os.Stderr, stderrEntry)
+	// Write to stderr (suppressed in quiet mode for hook/status subcommands)
+	if !quiet {
+		fmt.Fprint(os.Stderr, stderrEntry)
+	}
 
 	// Write to agent.log
 	mu.Lock()
