@@ -80,6 +80,8 @@ export class ScionPageAgentConfigure extends LitElement {
 
   // Form fields — General
   @state() private model = '';
+  @state() private modelSelection: '' | 'small' | 'medium' | 'large' | 'extra-large' | 'other' = '';
+  @state() private customModelId = '';
   @state() private image = '';
   @state() private branch = '';
   @state() private containerUser = '';
@@ -416,6 +418,14 @@ export class ScionPageAgentConfigure extends LitElement {
     }
   }
 
+  private deriveModelSelection(model: string): { selection: '' | 'small' | 'medium' | 'large' | 'extra-large' | 'other'; customId: string } {
+    if (!model) return { selection: '', customId: '' };
+    if (['small', 'medium', 'large', 'extra-large'].includes(model)) {
+      return { selection: model as 'small' | 'medium' | 'large' | 'extra-large', customId: '' };
+    }
+    return { selection: 'other', customId: model };
+  }
+
   private populateForm(): void {
     if (!this.agent) return;
     const ac = this.agent.appliedConfig;
@@ -423,6 +433,9 @@ export class ScionPageAgentConfigure extends LitElement {
 
     // General
     this.model = ac?.model || ic?.model || '';
+    const derived = this.deriveModelSelection(this.model);
+    this.modelSelection = derived.selection;
+    this.customModelId = derived.customId;
     this.image = ac?.image || ic?.image || '';
     this.branch = ic?.branch || '';
     this.containerUser = ic?.user || '';
@@ -464,7 +477,10 @@ export class ScionPageAgentConfigure extends LitElement {
     const config: ScionConfigPayload = {};
     const caps = this.harnessCapabilities;
 
-    if (this.model) config.model = this.model;
+    const model = this.modelSelection === 'other'
+      ? this.customModelId
+      : this.modelSelection;
+    if (model) config.model = model;
     if (this.image) config.image = this.image;
     if (this.branch) config.branch = this.branch;
     if (this.containerUser) config.user = this.containerUser;
@@ -789,12 +805,22 @@ export class ScionPageAgentConfigure extends LitElement {
 
     return html`
       <div class="form-field">
-        <label>Model</label>
-        <sl-input
-          placeholder="e.g. claude-opus-4-6, gemini-2.5-pro"
-          .value=${this.model}
-          @sl-input=${(e: Event) => { this.model = (e.target as HTMLElement & { value: string }).value; }}
-        ></sl-input>
+        <sl-select label="Model" value=${this.modelSelection} clearable
+            @sl-change=${(e: any) => { this.modelSelection = e.target.value; if (e.target.value !== 'other') this.customModelId = ''; }}>
+          <sl-option value="small">Small</sl-option>
+          <sl-option value="medium">Medium</sl-option>
+          <sl-option value="large">Large</sl-option>
+          <sl-option value="extra-large">Extra Large</sl-option>
+          <sl-option value="other">Other (specify)</sl-option>
+        </sl-select>
+
+        ${this.modelSelection === 'other' ? html`
+          <sl-input label="Model ID" placeholder="e.g. claude-opus-4-8"
+            .value=${this.customModelId}
+            @sl-input=${(e: any) => { this.customModelId = e.target.value; }}
+            style="margin-top: 0.75rem">
+          </sl-input>
+        ` : ''}
       </div>
 
       <div class="form-field">
