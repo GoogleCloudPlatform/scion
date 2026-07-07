@@ -42,7 +42,9 @@ func Get() string {
 	}
 
 	commit := GetCommit()
-	if len(commit) > 8 {
+	if commit == "" {
+		commit = "unknown"
+	} else if len(commit) > 8 {
 		commit = commit[:8]
 	}
 
