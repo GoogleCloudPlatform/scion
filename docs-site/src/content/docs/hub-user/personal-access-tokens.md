@@ -22,8 +22,13 @@ Personal Access Tokens support granular scoping. When creating a token, you can:
 You can generate a new PAT using the Scion CLI:
 
 ```bash
-scion auth tokens create "My CI/CD Token"
+scion hub token create --project my-project --name "My CI/CD Token" --scopes agent:dispatch,agent:read
 ```
+
+Tokens are scoped to a single project. Pass `--scopes` to restrict the token's
+actions (for example `agent:dispatch,agent:read`, or `agent:manage` for all
+agent actions), and `--expires` to set a lifetime (e.g. `30d`, `90d`, `1y`;
+default 90 days, maximum 1 year).
 
 This will output the token value. **Store this token securely.** It is only displayed once and cannot be retrieved later.
 
@@ -69,11 +74,13 @@ The easiest way to administer your tokens is through the **Web UI management int
 If a token is compromised or no longer needed, you can revoke it:
 
 ```bash
-scion auth tokens revoke <token-id>
+scion hub token revoke <token-id>
 ```
 
 You can list all your active tokens using:
 
 ```bash
-scion auth tokens list
+scion hub token list
 ```
+
+To remove a token entirely (rather than leaving it in listings as revoked), use `scion hub token delete <token-id>`.

@@ -180,7 +180,7 @@ Projects can be linked to specific GitHub App installations. The system automati
 
 Users can authenticate the CLI against a Scion Hub using the following flow:
 
-1.  **Login**: `scion auth login` opens a browser to the dashboard login page.
+1.  **Login**: `scion hub auth login` opens a browser to the dashboard login page.
 2.  **Exchange**: After successful login, the dashboard provides a token (or the CLI exchanges a code).
 3.  **Storage**: The token is stored in `~/.scion/config.json`.
 

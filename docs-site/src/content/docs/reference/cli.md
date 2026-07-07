@@ -247,23 +247,18 @@ Manages agent templates.
 
 ## Hub Integration
 
-### `scion auth`
-
-Manages authentication with a Scion Hub, including User Access Tokens.
-
-- `login`: Authenticate against the Hub (opens a browser).
-- `tokens`: Manage Personal Access Tokens (PATs).
-    - `list`: List all active tokens.
-    - `create <name>`: Create a new token with optional scopes.
-    - `revoke <token-id>`: Revoke a specific token.
-
 ### `scion hub`
 
-Manages connection to and interaction with a Scion Hub.
+Manages connection to and interaction with a Scion Hub. Authentication lives under `scion hub auth` (there is no top-level `scion auth` command).
 
 - `scion hub auth`: Manage Hub authentication.
-    - `login`: Authenticate with Hub server (supports `--provider github`).
+    - `login`: Authenticate with Hub server (opens a browser; supports `--no-browser` for device flow and `--provider github`).
     - `logout`: Clear stored credentials.
+- `scion hub token`: Manage user access tokens (scoped, revocable bearer tokens for CI/CD and automation).
+    - `create`: Create a new token. Flags: `--project`, `--name`, `--scopes`, `--expires`.
+    - `list`: List your access tokens.
+    - `revoke <token-id>`: Revoke a token (remains visible in listings as revoked).
+    - `delete <token-id>`: Permanently delete a token.
 - `scion hub status`: Show the current Hub connection status.
 - `scion hub notifications`: Retrieve a list of recent system notifications and agent alerts.
 - `scion hub link`: Link the current local project to the Hub.
