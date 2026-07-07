@@ -19,13 +19,14 @@ package entc
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	"entgo.io/ent/dialect"
 	entsql "entgo.io/ent/dialect/sql"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/stdlib"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
@@ -193,13 +194,17 @@ func AutoMigrate(ctx context.Context, client *ent.Client) error {
 
 	// If we got "already exists" (42P07), the DB has a prior schema.
 	// Drop all Ent-managed tables so Schema.Create can run cleanly.
-	errStr := err.Error()
-	if !strings.Contains(errStr, "42P07") && !strings.Contains(errStr, "already exists") {
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) || pgErr.Code != "42P07" {
 		return fmt.Errorf("running auto-migration: %w", err)
 	}
 
 	// Use the raw DB connection to drop all tables in the Ent schema.
-	db := client.Driver().(*entsql.Driver).DB()
+	drv, ok := client.Driver().(*entsql.Driver)
+	if !ok {
+		return fmt.Errorf("migration reset requires an entsql.Driver, got %T", client.Driver())
+	}
+	db := drv.DB()
 	// Get all table names from the Ent schema via information_schema.
 	rows, err := db.QueryContext(ctx,
 		"SELECT tablename FROM pg_tables WHERE schemaname='public' ORDER BY tablename")
