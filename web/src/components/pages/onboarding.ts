@@ -94,6 +94,7 @@ export class ScionPageOnboarding extends LitElement {
   @state() private gitVersion = '';
   @state() private gitVersionOK = true;
   private imageEventSource: EventSource | null = null;
+  private imageJobTimeoutId: number | null = null;
 
   // Step 6: Workspace
   @state() private workspaceMode: 'choose' | 'hub' | 'linked' = 'choose';
@@ -1083,14 +1084,14 @@ export class ScionPageOnboarding extends LitElement {
         return;
       }
       const data = (await res.json()) as { jobId: string };
-      this.subscribeToImageJob(data.jobId);
+      this.subscribeToImageJob(data.jobId, harnesses.length);
     } catch {
       this.error = 'Failed to connect to the server.';
       this.imagePulling = false;
     }
   }
 
-  private subscribeToImageJob(jobId: string): void {
+  private subscribeToImageJob(jobId: string, totalImages: number): void {
     this.cleanupImageEvents();
 
     const url = `/events?sub=${encodeURIComponent('system.images.' + jobId)}`;
@@ -1098,9 +1099,23 @@ export class ScionPageOnboarding extends LitElement {
     this.imageEventSource = es;
 
     const completedImages = new Set<string>();
-    const totalImages = this.selectedHarnesses.size;
+
+    const finishPull = () => {
+      this.imagePulling = false;
+      this.cleanupImageEvents();
+      void this.recheckAllImageStatuses();
+    };
+
+    let lastEventTime = Date.now();
+    const timeoutId = window.setInterval(() => {
+      if (Date.now() - lastEventTime >= 60_000) {
+        finishPull();
+      }
+    }, 10_000);
+    this.imageJobTimeoutId = timeoutId;
 
     es.addEventListener('update', (event: Event) => {
+      lastEventTime = Date.now();
       try {
         const wrapper = JSON.parse((event as MessageEvent).data) as { subject: string; data?: Record<string, unknown> };
         const d = wrapper.data;
@@ -1113,9 +1128,7 @@ export class ScionPageOnboarding extends LitElement {
           if (status === 'done' || status === 'exists' || status === 'error') {
             completedImages.add(fullImageName);
             if (completedImages.size >= totalImages) {
-              this.imagePulling = false;
-              this.cleanupImageEvents();
-              void this.recheckAllImageStatuses();
+              finishPull();
             }
           }
         } else if (d['status'] === 'error') {
@@ -1152,6 +1165,10 @@ export class ScionPageOnboarding extends LitElement {
   }
 
   private cleanupImageEvents(): void {
+    if (this.imageJobTimeoutId != null) {
+      window.clearInterval(this.imageJobTimeoutId);
+      this.imageJobTimeoutId = null;
+    }
     if (this.imageEventSource) {
       this.imageEventSource.close();
       this.imageEventSource = null;
