@@ -66,6 +66,13 @@ func (d *DeclarativeGenericHarness) GetInterruptKey() string {
 	return "C-c"
 }
 
+func (d *DeclarativeGenericHarness) GetInterruptSequence() []string {
+	if d.entry.InterruptSignal == "sequence" || len(d.entry.InterruptSequence) > 0 {
+		return d.entry.InterruptSequence
+	}
+	return nil
+}
+
 func (d *DeclarativeGenericHarness) GetHarnessEmbedsFS() (embed.FS, string) {
 	return embed.FS{}, ""
 }

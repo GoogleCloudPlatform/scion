@@ -286,8 +286,14 @@ func (m *AgentManager) deliverImmediate(ctx context.Context, agentID, projectID 
 	var cmds [][]string
 
 	if interrupt {
-		key := h.GetInterruptKey()
-		cmds = append(cmds, []string{"tmux", "send-keys", "-t", "scion:0", key})
+		if seq := h.GetInterruptSequence(); len(seq) > 0 {
+			for _, key := range seq {
+				cmds = append(cmds, []string{"tmux", "send-keys", "-t", "scion:0", key})
+			}
+		} else {
+			key := h.GetInterruptKey()
+			cmds = append(cmds, []string{"tmux", "send-keys", "-t", "scion:0", key})
+		}
 	}
 
 	if message == "" {

@@ -145,6 +145,18 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// A leading "!" in the message body acts as an inline interrupt signal:
+	// strip the prefix and promote to urgent so the harness is interrupted
+	// before delivery — equivalent to --interrupt on the CLI.
+	if trimmed := strings.TrimSpace(req.Message.Msg); strings.HasPrefix(trimmed, "!") {
+		content := strings.TrimSpace(trimmed[1:])
+		if content == "" {
+			content = "interrupt"
+		}
+		req.Message.Msg = content
+		req.Message.Urgent = true
+	}
+
 	// Dispatch directly to the agent, bypassing the broker to avoid circular delivery
 	dispatcher := s.GetDispatcher()
 	if dispatcher == nil {

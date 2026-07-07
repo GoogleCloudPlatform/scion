@@ -100,6 +100,58 @@ func TestContainerScriptHarness_BasicGetters(t *testing.T) {
 	}
 }
 
+func TestContainerScriptHarness_GetInterruptSequence(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "config.yaml"), "harness: seqtest\nimage: scion-test:latest\n")
+	writeFile(t, filepath.Join(dir, "provision.py"), "#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n")
+
+	// No sequence configured — should return nil.
+	entry := config.HarnessConfigEntry{
+		Harness:      "seqtest",
+		Image:        "scion-test:latest",
+		InterruptKey: "C-c",
+		Provisioner: &config.HarnessProvisionerConfig{
+			Type:             "container-script",
+			InterfaceVersion: 1,
+			Command:          []string{"python3", "$HOME/.scion/harness/provision.py"},
+		},
+	}
+	h, err := NewContainerScriptHarness(dir, entry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if seq := h.GetInterruptSequence(); seq != nil {
+		t.Errorf("expected nil sequence, got %v", seq)
+	}
+
+	// With interrupt_sequence and interrupt_signal=sequence.
+	entry.InterruptSequence = []string{"Escape", "Escape", "Escape"}
+	entry.InterruptSignal = "sequence"
+	h2, err := NewContainerScriptHarness(dir, entry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seq := h2.GetInterruptSequence()
+	if len(seq) != 3 {
+		t.Fatalf("expected 3-key sequence, got %v", seq)
+	}
+	for i, want := range []string{"Escape", "Escape", "Escape"} {
+		if seq[i] != want {
+			t.Errorf("seq[%d]=%q, want %q", i, seq[i], want)
+		}
+	}
+
+	// With interrupt_sequence populated but no explicit interrupt_signal — still returns sequence.
+	entry.InterruptSignal = ""
+	h3, err := NewContainerScriptHarness(dir, entry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if seq := h3.GetInterruptSequence(); len(seq) != 3 {
+		t.Errorf("expected sequence even without signal field, got %v", seq)
+	}
+}
+
 func TestContainerScriptHarness_GetEnvTemplating(t *testing.T) {
 	h, _ := newTestContainerScriptHarness(t)
 	env := h.GetEnv("agent42", "/home/scion", "scion")

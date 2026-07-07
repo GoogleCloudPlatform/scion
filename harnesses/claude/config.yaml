@@ -33,6 +33,11 @@ provisioner:
 config_dir: .claude
 skills_dir: .claude/skills
 interrupt_key: Escape
+interrupt_sequence:
+  - Escape
+  - Escape
+  - Escape
+interrupt_signal: sequence
 instructions_file: .claude/CLAUDE.md
 system_prompt_file: .claude/system-prompt.md
 system_prompt_mode: native

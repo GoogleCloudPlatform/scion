@@ -35,8 +35,14 @@ type Harness interface {
 	// from filepath.Dir(agentHome) when split storage is active).
 	Provision(ctx context.Context, agentName, agentDir, agentHome, agentWorkspace string) error
 
-	// GetInterruptKey returns the key sequence used to interrupt the harness process (e.g., "C-c" or "Escape").
+	// GetInterruptKey returns the single key used to interrupt the harness process (e.g., "C-c" or "Escape").
 	GetInterruptKey() string
+
+	// GetInterruptSequence returns the sequence of keys to send to interrupt the
+	// harness, each as a separate tmux send-keys call. When interrupt_signal is
+	// "sequence" (or interrupt_sequence is populated), this takes priority over
+	// GetInterruptKey. Returns nil to fall back to GetInterruptKey.
+	GetInterruptSequence() []string
 
 	// GetHarnessEmbedsFS returns the embedded filesystem containing default harness-config files
 	// and the base path within it (e.g., "embeds").

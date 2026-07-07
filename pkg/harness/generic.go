@@ -89,6 +89,10 @@ func (g *Generic) GetInterruptKey() string {
 	return "C-c"
 }
 
+func (g *Generic) GetInterruptSequence() []string {
+	return nil
+}
+
 func (g *Generic) GetHarnessEmbedsFS() (embed.FS, string) {
 	return embed.FS{}, ""
 }

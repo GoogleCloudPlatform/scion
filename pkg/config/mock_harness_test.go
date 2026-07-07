@@ -48,6 +48,7 @@ func (m *MockHarness) Provision(ctx context.Context, agentName, agentDir, agentH
 	return nil
 }
 func (m *MockHarness) GetInterruptKey() string                { return "C-c" }
+func (m *MockHarness) GetInterruptSequence() []string         { return nil }
 func (m *MockHarness) GetHarnessEmbedsFS() (embed.FS, string) { return embed.FS{}, "" }
 func (m *MockHarness) InjectAgentInstructions(agentHome string, content []byte) error {
 	target := filepath.Join(agentHome, "agents.md")

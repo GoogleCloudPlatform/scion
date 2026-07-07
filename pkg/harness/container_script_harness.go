@@ -85,6 +85,16 @@ func (c *ContainerScriptHarness) GetInterruptKey() string {
 	return c.entry.InterruptKey
 }
 
+// GetInterruptSequence returns the configured interrupt key sequence.
+// When interrupt_signal is "sequence" or interrupt_sequence is populated,
+// each entry is sent as a separate tmux send-keys call.
+func (c *ContainerScriptHarness) GetInterruptSequence() []string {
+	if c.entry.InterruptSignal == "sequence" || len(c.entry.InterruptSequence) > 0 {
+		return c.entry.InterruptSequence
+	}
+	return nil
+}
+
 // GetHarnessEmbedsFS returns an empty FS — container-script harnesses do not
 // own embedded files; their files live on disk in the harness-config dir.
 func (c *ContainerScriptHarness) GetHarnessEmbedsFS() (embed.FS, string) {

@@ -741,7 +741,9 @@ type HarnessConfigEntry struct {
 	Provisioner      *HarnessProvisionerConfig        `json:"provisioner,omitempty" yaml:"provisioner,omitempty" koanf:"provisioner"`
 	ConfigDir        string                           `json:"config_dir,omitempty" yaml:"config_dir,omitempty" koanf:"config_dir"`
 	SkillsDir        string                           `json:"skills_dir,omitempty" yaml:"skills_dir,omitempty" koanf:"skills_dir"`
-	InterruptKey     string                           `json:"interrupt_key,omitempty" yaml:"interrupt_key,omitempty" koanf:"interrupt_key"`
+	InterruptKey      string                           `json:"interrupt_key,omitempty" yaml:"interrupt_key,omitempty" koanf:"interrupt_key"`
+	InterruptSequence []string                         `json:"interrupt_sequence,omitempty" yaml:"interrupt_sequence,omitempty" koanf:"interrupt_sequence"`
+	InterruptSignal   string                           `json:"interrupt_signal,omitempty" yaml:"interrupt_signal,omitempty" koanf:"interrupt_signal"`
 	InstructionsFile string                           `json:"instructions_file,omitempty" yaml:"instructions_file,omitempty" koanf:"instructions_file"`
 	SystemPromptFile string                           `json:"system_prompt_file,omitempty" yaml:"system_prompt_file,omitempty" koanf:"system_prompt_file"`
 	SystemPromptMode string                           `json:"system_prompt_mode,omitempty" yaml:"system_prompt_mode,omitempty" koanf:"system_prompt_mode"`

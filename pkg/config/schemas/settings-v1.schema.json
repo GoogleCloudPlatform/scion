@@ -301,7 +301,17 @@
         },
         "interrupt_key": {
           "type": "string",
-          "description": "Key sequence used to interrupt the harness process."
+          "description": "Single key used to interrupt the harness process (e.g. C-c or Escape)."
+        },
+        "interrupt_sequence": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Ordered list of keys to send as separate tmux send-keys calls to interrupt the harness. Used when a single key is insufficient."
+        },
+        "interrupt_signal": {
+          "type": "string",
+          "enum": ["key", "sequence"],
+          "description": "Which interrupt method to use: key (single interrupt_key) or sequence (interrupt_sequence array)."
         },
         "instructions_file": {
           "type": "string",

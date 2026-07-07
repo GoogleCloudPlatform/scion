@@ -54,6 +54,7 @@ func (h *EnvHarness) Provision(ctx context.Context, agentName, agentDir, agentHo
 	return nil
 }
 func (h *EnvHarness) GetInterruptKey() string                                        { return "C-c" }
+func (h *EnvHarness) GetInterruptSequence() []string                                 { return nil }
 func (h *EnvHarness) GetHarnessEmbedsFS() (embed.FS, string)                         { return embed.FS{}, "" }
 func (h *EnvHarness) InjectAgentInstructions(agentHome string, content []byte) error { return nil }
 func (h *EnvHarness) InjectSystemPrompt(agentHome string, content []byte) error      { return nil }
