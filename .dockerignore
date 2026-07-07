@@ -5,9 +5,6 @@
 *.key
 *.pem
 *.secret
-!web/**/*.js
-!web/**/*.ts
-!web/**/*.json
 *.env
 
 # Ignore version control (can be large)
@@ -25,8 +22,12 @@
 *.out
 coverage.txt
 
-# Ignore node_modules if present
+# node_modules/ must precede the !web/ re-includes so that
+# web/node_modules/ stays excluded even after the negation patterns.
 node_modules/
+!web/**/*.js
+!web/**/*.ts
+!web/**/*.json
 
 # Ignore documentation not needed for build
 *.md

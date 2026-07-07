@@ -110,6 +110,13 @@ export class SSEClient extends EventTarget {
       }
     });
 
+    // Handle server-initiated reconnect (e.g. before a clean shutdown).
+    this.eventSource.addEventListener('reconnect', () => {
+      this.reconnectAttempts = 0;
+      this.eventSource?.close();
+      this.openConnection();
+    });
+
     // Handle initial connection acknowledgement
     this.eventSource.addEventListener('connected', (event) => {
       try {

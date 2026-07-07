@@ -21,6 +21,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"entgo.io/ent/dialect"
@@ -171,6 +172,8 @@ func applyKeepalives(params map[string]string) {
 	}
 }
 
+// TODO: integration test for Postgres reset path (requires postgres container)
+
 // AutoMigrate runs automatic schema migration on the given client.
 // For Postgres, it uses a two-pass strategy:
 //  1. First pass: DROP all tables in the public schema that were created by
@@ -211,16 +214,15 @@ func AutoMigrate(ctx context.Context, client *ent.Client) error {
 	if err != nil {
 		return fmt.Errorf("listing tables for migration reset: %w", err)
 	}
+	defer rows.Close()
 	var tables []string
 	for rows.Next() {
 		var name string
 		if err := rows.Scan(&name); err != nil {
-			rows.Close()
 			return fmt.Errorf("scanning table name: %w", err)
 		}
 		tables = append(tables, name)
 	}
-	rows.Close()
 	if err := rows.Err(); err != nil {
 		return fmt.Errorf("iterating tables: %w", err)
 	}
@@ -231,10 +233,13 @@ func AutoMigrate(ctx context.Context, client *ent.Client) error {
 		entTables[t.Name] = true
 	}
 
+	slog.Warn("AutoMigrate: dropping all Ent-managed tables for schema reset (hosted mode only)")
+
 	// Drop only existing tables that are managed by Ent (CASCADE handles FK dependencies).
 	for _, t := range tables {
 		if entTables[t] {
-			if _, err := db.ExecContext(ctx, `DROP TABLE IF EXISTS "`+t+`" CASCADE`); err != nil {
+			quotedName := pgx.Identifier{t}.Sanitize()
+			if _, err := db.ExecContext(ctx, `DROP TABLE IF EXISTS `+quotedName+` CASCADE`); err != nil {
 				return fmt.Errorf("dropping table %q: %w", t, err)
 			}
 		}
