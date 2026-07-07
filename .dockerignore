@@ -4,6 +4,9 @@
 .gemini/
 *key*
 *secret*
+!web/**/*.js
+!web/**/*.ts
+!web/**/*.json
 *.env
 
 # Ignore version control (can be large)
