@@ -202,7 +202,7 @@ export GOOGLE_APPLICATION_CREDENTIALS="/path/to/service-account.json"
 scion server start --enable-hub
 ```
 
-See the [Observability guide](/scion/hub-admin/observability/) for full OTel configuration.
+See the [Observability guide](/scion/hosted/single-node/observability/) for full OTel configuration.
 
 ## Log Levels
 
@@ -245,7 +245,7 @@ SCION_LOG_GCP=true scion server start --enable-hub --enable-runtime-broker 2>&1 
   jq -r '.subsystem // empty' | sort -u
 ```
 
-See the [Observability guide](/scion/hub-admin/observability/#querying-logs-by-subsystem) for the full list of subsystems and Cloud Logging query examples.
+See the [Observability guide](/scion/hosted/single-node/observability/#querying-logs-by-subsystem) for the full list of subsystems and Cloud Logging query examples.
 
 ## HTTP Request Logging
 
@@ -400,7 +400,7 @@ In debug mode, the broker logs detailed hexadecimal representations of all input
 
 ## Related Guides
 
-- [Observability](/scion/hub-admin/observability/) - Full telemetry pipeline setup
-- [Metrics](/scion/hub-admin/metrics/) - OpenTelemetry metrics configuration
-- [Hub Server](/scion/hub-admin/hub-server/) - Hub deployment and configuration
-- [Runtime Broker](/scion/hub-user/runtime-broker/) - Broker setup
+- [Observability](/scion/hosted/single-node/observability/) - Full telemetry pipeline setup
+- [Metrics](/scion/hosted/single-node/metrics/) - OpenTelemetry metrics configuration
+- [Hub Server](/scion/hosted/single-node/hub-server/) - Hub deployment and configuration
+- [Runtime Broker](/scion/hosted/ha/runtime-broker/) - Broker setup

@@ -72,6 +72,6 @@ Both are independent of which sharing mode a project uses.
 
 ## See also
 
-- [About Workspaces](/scion/advanced-local/workspace/) — the operational guide to worktrees, mounts, and host-side backing.
+- [About Workspaces](/scion/local/workspace/) — the operational guide to worktrees, mounts, and host-side backing.
 - [Core Concepts](/scion/concepts/) — how workspaces fit alongside agents, projects, and the Hub.
 - [Glossary](/scion/glossary/) — canonical definitions for every term used here.

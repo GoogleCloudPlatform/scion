@@ -24,7 +24,7 @@ View and manage your registered projects.
 - **Project Settings**: Centralized configuration interface for managing project-scoped environment variables and secrets, including "Injection Mode" controls (Always vs. As-Needed). The settings page features a streamlined flow with a "Done" button and hides unnecessary registration options for git-backed projects.
 - **Workspace & File Management**: Access the comprehensive **inline file editor** to view and modify files directly in the browser, featuring integrated Markdown preview capabilities. The file browser supports **fuzzy and regex-based filtering** for fast navigation. You can also download individual workspace files or generate ZIP archives of entire projects directly from the UI.
 - **Template Management**: Direct server-side importing of templates with immediate UI feedback. Includes full template file browsing, editing, and upload capabilities directly within the dashboard.
-- **Shared Directory Management**: View and manage project shared directories directly from the Web UI (see [Project Shared Directories](/scion/advanced-local/workspace/#5-project-shared-directories)).
+- **Shared Directory Management**: View and manage project shared directories directly from the Web UI (see [Project Shared Directories](/scion/local/workspace/#5-project-shared-directories)).
 - **Agent List**: See all agents belonging to the project, with card/list view toggle for flexible display.
 
 ### Agents
@@ -35,9 +35,9 @@ Detailed view for individual agents, featuring a high-density tabbed layout and 
 - **Messages Tab**: A dedicated tab for viewing structured messages sent to and from the agent.
 - **Configuration Tab**: Dedicated tab for viewing the applied configuration of the agent, featuring a new telemetry configuration card.
 - **Debug Panel**: A full-height panel providing a real-time stream of SSE events and internal state transitions for advanced troubleshooting and observability.
-- **Terminal**: Interactive terminal access to the agent's workspace, featuring full Tmux support. Includes a dedicated terminal toolbar, seamless window switching (agent/shell), automatic window size adjustment, extended key sequence support (like `Shift+Enter`), and modifier-based text selection (`Shift`-drag or `Option`-drag on macOS). For detailed configuration, see [Interactive Sessions with Tmux](/scion/advanced-local/tmux/).
+- **Terminal**: Interactive terminal access to the agent's workspace, featuring full Tmux support. Includes a dedicated terminal toolbar, seamless window switching (agent/shell), automatic window size adjustment, extended key sequence support (like `Shift+Enter`), and modifier-based text selection (`Shift`-drag or `Option`-drag on macOS). For detailed configuration, see [Interactive Sessions with Tmux](/scion/local/tmux/).
 - **Workspace Content Previews**: Content preview capabilities for workspace files directly within the UI, allowing you to quickly inspect agent output and project data.
-- **Lifecycle Control**: Start, stop, **suspend**, restart, or delete agents from the UI. Suspending an agent preserves its harness session so a later start *continues* the conversation rather than starting fresh, while restarting a crashed (`error`) agent runs a clean session. Includes bulk operations like the "Stop All" button for efficient bulk shutdown of all agents within a project. To reclaim resources, the Hub also **auto-suspends** agents that stay stalled past a grace period; they resume automatically on the next message. See [Agent Lifecycle](/scion/advanced-local/agent-lifecycle/).
+- **Lifecycle Control**: Start, stop, **suspend**, restart, or delete agents from the UI. Suspending an agent preserves its harness session so a later start *continues* the conversation rather than starting fresh, while restarting a crashed (`error`) agent runs a clean session. Includes bulk operations like the "Stop All" button for efficient bulk shutdown of all agents within a project. To reclaim resources, the Hub also **auto-suspends** agents that stay stalled past a grace period; they resume automatically on the next message. See [Agent Lifecycle](/scion/local/agent-lifecycle/).
 
 ### Runtime Brokers
 Monitor the infrastructure nodes where your agents are executing.
@@ -58,7 +58,7 @@ The dashboard supports several authentication methods:
 - **OAuth (Google/GitHub)**: For standard user access.
 - **Development Auto-login**: For local development.
 
-See the [Authentication Guide](/scion/hub-admin/auth/) for setup instructions.
+See the [Authentication Guide](/scion/hosted/single-node/auth/) for setup instructions.
 
 ## API Proxying
 The Go server handles API proxying, token injection, and session management so the browser never handles raw API keys or long-lived tokens directly.

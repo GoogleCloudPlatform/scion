@@ -34,7 +34,7 @@ For teams or individuals who prefer external notifications, Scion supports nativ
 - **Severity-Based Color Coding:** Messages are color-coded in Discord based on their severity (e.g., info, warning, error, urgent).
 - **Mentions:** Urgent messages or explicit `ask_user` requests can trigger `@user` or `@role` mentions in Discord, ensuring that critical requests don't go unnoticed.
 
-To configure Discord notifications, see the [Hub Administration Guide](/scion/hub-admin/hub-server/#discord-integration).
+To configure Discord notifications, see the [Hub Administration Guide](/scion/hosted/single-node/hub-server/#discord-integration).
 
 ## Agent `ask_user` Integration
 

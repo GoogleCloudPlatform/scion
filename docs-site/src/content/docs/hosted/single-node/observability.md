@@ -105,7 +105,7 @@ telemetry:
         - "agent.user.prompt"
 ```
 
-See the [Orchestrator Settings Reference](/scion/reference/orchestrator-settings/#telemetry-configuration-telemetry) for the full field reference, and [Metrics & OpenTelemetry](/scion/hub-admin/metrics/#configuration-hierarchy) for how settings merge across scopes.
+See the [Orchestrator Settings Reference](/scion/reference/orchestrator-settings/#telemetry-configuration-telemetry) for the full field reference, and [Metrics & OpenTelemetry](/scion/hosted/single-node/metrics/#configuration-hierarchy) for how settings merge across scopes.
 
 #### Via Hub Environment Variables
 
@@ -146,7 +146,7 @@ The `sciontool` utility ensures that `agent.log` is owned by the `scion` user du
 
 ## Telemetry Collection
 
-The telemetry pipeline in sciontool collects and forwards OpenTelemetry (OTLP) data from agents. See the [Metrics & OpenTelemetry guide](/scion/hub-admin/metrics/) for deep configuration details.
+The telemetry pipeline in sciontool collects and forwards OpenTelemetry (OTLP) data from agents. See the [Metrics & OpenTelemetry guide](/scion/hosted/single-node/metrics/) for deep configuration details.
 
 ### What's Collected
 
@@ -203,7 +203,7 @@ logName="projects/YOUR_PROJECT/logs/scion" OR logName="projects/YOUR_PROJECT/log
 jsonPayload.request_id = "YOUR_REQUEST_ID"
 ```
 
-See the [Local Development Logging guide](/scion/development/logging/#http-request-logging) for the full field reference and file output format.
+See the [Local Development Logging guide](/scion/contributing/logging/#http-request-logging) for the full field reference and file output format.
 
 ## Querying Logs by Subsystem
 
@@ -386,7 +386,7 @@ Server maintenance operations (like `rebuild-server`, `rebuild-web`, and `pull-i
 ### Logs Not Appearing in GCP
 
 1.  **Verify Endpoints**: Ensure `SCION_OTEL_ENDPOINT` is set to `monitoring.googleapis.com:443`.
-2.  **Check Credentials**: Outside of GKE/Cloud Run (where ADC is automatic), agents need a GCP service account key file. Verify the `scion-telemetry-gcp-credentials` secret is registered with target `~/.scion/telemetry-gcp-credentials.json`. Inside the agent, check `echo $SCION_OTEL_GCP_CREDENTIALS` — it should point to the file. See [GCP Credentials for Agent Containers](/scion/hub-admin/metrics/#4-gcp-credentials-for-agent-containers-non-adc-environments) for setup.
+2.  **Check Credentials**: Outside of GKE/Cloud Run (where ADC is automatic), agents need a GCP service account key file. Verify the `scion-telemetry-gcp-credentials` secret is registered with target `~/.scion/telemetry-gcp-credentials.json`. Inside the agent, check `echo $SCION_OTEL_GCP_CREDENTIALS` — it should point to the file. See [GCP Credentials for Agent Containers](/scion/hosted/single-node/metrics/#4-gcp-credentials-for-agent-containers-non-adc-environments) for setup.
 3.  **Check Permissions**: Verify the Workload Identity or Service Account has `roles/logging.logWriter`.
 4.  **Inspect Agent Init**: View the agent container logs (stderr) to see if `sciontool` reported a telemetry startup failure:
     ```
@@ -402,6 +402,6 @@ If you see logs but they aren't linked to traces in the Cloud Trace waterfall:
 
 ## Related Guides
 
-- [Metrics & OpenTelemetry](/scion/hub-admin/metrics/) - Detailed telemetry configuration
-- [Hub Server](/scion/hub-admin/hub-server/) - Hub integration for hosted mode
-- [Runtime Broker](/scion/hub-user/runtime-broker/) - Broker setup and configuration
+- [Metrics & OpenTelemetry](/scion/hosted/single-node/metrics/) - Detailed telemetry configuration
+- [Hub Server](/scion/hosted/single-node/hub-server/) - Hub integration for hosted mode
+- [Runtime Broker](/scion/hosted/ha/runtime-broker/) - Broker setup and configuration

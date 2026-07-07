@@ -20,10 +20,56 @@ import starlight from '@astrojs/starlight';
 import d2 from 'astro-d2';
 import starlightLinksValidator from 'starlight-links-validator';
 
+// The Hosted user journey is shared by both hosted tiers (Single-node and HA).
+// The pages live once under `hosted/user/`; both tiers reference the same slugs
+// so we link rather than duplicate.
+const hostedUserGuide = {
+	label: 'User Guide',
+	items: [
+		{ label: 'Connecting to a Hub', slug: 'hosted/user/hosted-user' },
+		{ label: 'Personal Access Tokens', slug: 'hosted/user/personal-access-tokens' },
+		{ label: 'Secrets & Environment', slug: 'hosted/user/secrets' },
+		{ label: 'Messaging & Notifications', slug: 'hosted/user/messaging' },
+		{ label: 'External Channels', slug: 'hosted/user/external-channels' },
+	],
+};
+
 // https://astro.build/config
 export default defineConfig({
 	site: 'https://googlecloudplatform.github.io',
 	base: '/scion',
+	// Preserve old URLs after the mode-axis restructure so inbound links do not 404.
+	redirects: {
+		'/advanced-local/local-governance': '/scion/local/local-governance',
+		'/advanced-local/agent-lifecycle': '/scion/local/agent-lifecycle',
+		'/advanced-local/workspace': '/scion/local/workspace',
+		'/advanced-local/templates': '/scion/local/templates',
+		'/advanced-local/agent-credentials': '/scion/local/agent-credentials',
+		'/advanced-local/custom-images': '/scion/local/custom-images',
+		'/advanced-local/tmux': '/scion/local/tmux',
+		'/advanced-local/completions': '/scion/local/completions',
+		'/advanced-local/workstation-server': '/scion/workstation/workstation-server',
+		'/workspaces-and-sharing': '/scion/local/workspaces-and-sharing',
+		'/hub-user/dashboard': '/scion/workstation/dashboard',
+		'/hub-user/git-projects': '/scion/workstation/git-projects',
+		'/hub-user/hosted-user': '/scion/hosted/user/hosted-user',
+		'/hub-user/personal-access-tokens': '/scion/hosted/user/personal-access-tokens',
+		'/hub-user/secrets': '/scion/hosted/user/secrets',
+		'/hub-user/messaging': '/scion/hosted/user/messaging',
+		'/hub-user/external-channels': '/scion/hosted/user/external-channels',
+		'/hub-user/runtime-broker': '/scion/hosted/ha/runtime-broker',
+		'/hub-user/multi-broker': '/scion/hosted/ha/multi-broker',
+		'/hub-admin/hub-server': '/scion/hosted/single-node/hub-server',
+		'/hub-admin/hub-setup-gce': '/scion/hosted/single-node/hub-setup-gce',
+		'/hub-admin/auth': '/scion/hosted/single-node/auth',
+		'/hub-admin/observability': '/scion/hosted/single-node/observability',
+		'/hub-admin/metrics': '/scion/hosted/single-node/metrics',
+		'/hub-admin/kubernetes': '/scion/hosted/ha/kubernetes',
+		'/hub-admin/auth-proxy-iap': '/scion/hosted/ha/auth-proxy-iap',
+		'/hub-admin/permissions': '/scion/hosted/ha/permissions',
+		'/hub-admin/lifecycle-hooks': '/scion/hosted/ha/lifecycle-hooks',
+		'/development/logging': '/scion/contributing/logging',
+	},
 	integrations: [
 		d2(),
 		starlight({
@@ -37,9 +83,8 @@ export default defineConfig({
 					label: 'Introduction & Foundations',
 					items: [
 						{ label: 'Overview', slug: 'overview' },
-						{ label: 'Core Concepts', slug: 'concepts' },
 						{ label: 'Choosing a Mode', slug: 'choosing-a-mode' },
-						{ label: 'Workspaces & Sharing Modes', slug: 'workspaces-and-sharing' },
+						{ label: 'Core Concepts', slug: 'concepts' },
 						{ label: 'Philosophy', slug: 'philosophy' },
 						{ label: 'Supported Harnesses', slug: 'supported-harnesses' },
 						{ label: 'Glossary', slug: 'glossary' },
@@ -47,7 +92,7 @@ export default defineConfig({
 					],
 				},
 				{
-					label: 'Getting Started',
+					label: 'Getting Started (Workstation)',
 					items: [
 						{ label: 'Installation', slug: 'getting-started/install' },
 						{ label: 'Onboarding Wizard', slug: 'getting-started/onboarding' },
@@ -55,55 +100,65 @@ export default defineConfig({
 					],
 				},
 				{
-					label: 'Advanced Local Usage',
+					label: 'Local Mode',
 					items: [
-						{ label: 'Local Configuration', slug: 'advanced-local/local-governance' },
-						{ label: 'Agent Lifecycle', slug: 'advanced-local/agent-lifecycle' },
-						{ label: 'Templates & Roles', slug: 'advanced-local/templates' },
-						{ label: 'Custom Images', slug: 'advanced-local/custom-images' },
-						{ label: 'Agent Credentials', slug: 'advanced-local/agent-credentials' },
-						{ label: 'About Workspaces', slug: 'advanced-local/workspace' },
-						{ label: 'Tmux Sessions', slug: 'advanced-local/tmux' },
-						{ label: 'Shell Completions', slug: 'advanced-local/completions' },
-						{ label: 'Workstation Server', slug: 'advanced-local/workstation-server' },
+						{ label: 'Local Configuration', slug: 'local/local-governance' },
+						{ label: 'Working with Agents', slug: 'local/agent-lifecycle' },
+						{ label: 'About Workspaces', slug: 'local/workspace' },
+						{ label: 'Workspaces & Sharing Modes', slug: 'local/workspaces-and-sharing' },
+						{ label: 'Templates & Roles', slug: 'local/templates' },
+						{ label: 'Agent Credentials', slug: 'local/agent-credentials' },
+						{ label: 'Custom Images', slug: 'local/custom-images' },
+						{ label: 'Tmux Sessions', slug: 'local/tmux' },
+						{ label: 'Shell Completions', slug: 'local/completions' },
 					],
 				},
 				{
-				        label: 'Hub User Guide',
-				        items: [
-				                { label: 'Connecting to Hub', slug: 'hub-user/hosted-user' },
-				                { label: 'Personal Access Tokens', slug: 'hub-user/personal-access-tokens' },
-				                { label: 'Git-Based Projects', slug: 'hub-user/git-projects' },
-				                { label: 'Web Dashboard', slug: 'hub-user/dashboard' },
-				                { label: 'Secret Management', slug: 'hub-user/secrets' },
-				                { label: 'Runtime Broker', slug: 'hub-user/runtime-broker' },
-				                { label: 'Messaging & Notifications', slug: 'hub-user/messaging' },
-				                { label: 'External Channels', slug: 'hub-user/external-channels' },
-				                { label: 'Multi-Broker Setup', slug: 'hub-user/multi-broker' },
-				        ],
+					label: 'Workstation Mode',
+					items: [
+						{ label: 'The Combo Server', slug: 'workstation/workstation-server' },
+						{ label: 'The Web Dashboard', slug: 'workstation/dashboard' },
+						{ label: 'Projects (Hub-managed vs Linked)', slug: 'workstation/git-projects' },
+					],
 				},
 				{
-				        label: 'Hub Administration',					items: [
-						{ label: 'Hub Setup', slug: 'hub-admin/hub-server' },
-						{ label: 'Hub Setup (GCE)', slug: 'hub-admin/hub-setup-gce' },
-						{ label: 'Kubernetes', slug: 'hub-admin/kubernetes' },
-						{ label: 'Security', slug: 'hub-admin/auth' },
-						{ label: 'Proxy Auth (IAP)', slug: 'hub-admin/auth-proxy-iap' },
-						{ label: 'Permissions', slug: 'hub-admin/permissions' },
-						{ label: 'Lifecycle Hooks', slug: 'hub-admin/lifecycle-hooks' },
-						{ label: 'Observability', slug: 'hub-admin/observability' },
-						{ label: 'Metrics', slug: 'hub-admin/metrics' },
+					label: 'Hosted — Single-node',
+					items: [
+						hostedUserGuide,
+						{
+							label: 'Admin Guide',
+							items: [
+								{ label: 'Hub Setup', slug: 'hosted/single-node/hub-server' },
+								{ label: 'Deploy on a VM (GCE)', slug: 'hosted/single-node/hub-setup-gce' },
+								{ label: 'Auth & Tenancy', slug: 'hosted/single-node/auth' },
+								{ label: 'Observability', slug: 'hosted/single-node/observability' },
+								{ label: 'Metrics', slug: 'hosted/single-node/metrics' },
+							],
+						},
+					],
+				},
+				{
+					label: 'Hosted — HA',
+					items: [
+						hostedUserGuide,
+						{
+							label: 'Admin Guide',
+							items: [
+								{ label: 'Kubernetes Runtime', slug: 'hosted/ha/kubernetes' },
+								{ label: 'Runtime Brokers & Profiles', slug: 'hosted/ha/runtime-broker' },
+								{ label: 'Multi-Broker Setup', slug: 'hosted/ha/multi-broker' },
+								{ label: 'Identity & Access (RBAC)', slug: 'hosted/ha/permissions' },
+								{ label: 'Proxy Auth (IAP)', slug: 'hosted/ha/auth-proxy-iap' },
+								{ label: 'Lifecycle Hooks', slug: 'hosted/ha/lifecycle-hooks' },
+								{ label: 'Observability', slug: 'hosted/single-node/observability' },
+								{ label: 'Metrics', slug: 'hosted/single-node/metrics' },
+							],
+						},
 					],
 				},
 				{
 					label: 'Technical Reference',
 					autogenerate: { directory: 'reference' },
-				},
-				{
-					label: 'Development',
-					items: [
-						{ label: 'Local Logging', slug: 'development/logging' },
-					],
 				},
 				{
 					label: 'Contributing',

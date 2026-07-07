@@ -172,4 +172,4 @@ If GitHub App integration is not available, you can use a Personal Access Token.
 2. You provide the PAT to the Hub as a secret named `GITHUB_TOKEN`.
 3. Scion injects this token into the agent container as an environment variable (`GITHUB_TOKEN`), which Git uses for HTTPS authentication.
 
-For detailed instructions on setting this up, see [Git-Based Projects](/scion/hub-user/git-projects/).
+For detailed instructions on setting this up, see [Git-Based Projects](/scion/workstation/git-projects/).

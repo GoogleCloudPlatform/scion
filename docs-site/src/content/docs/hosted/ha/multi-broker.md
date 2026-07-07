@@ -36,7 +36,7 @@ On each machine you want to register:
    scion broker provide <project>
    ```
 
-Repeat for each machine. See [Runtime Broker](/scion/hub-user/runtime-broker/) for detailed setup.
+Repeat for each machine. See [Runtime Broker](/scion/hosted/ha/runtime-broker/) for detailed setup.
 
 ## Broker Selection
 

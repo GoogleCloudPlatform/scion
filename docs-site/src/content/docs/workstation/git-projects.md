@@ -21,13 +21,13 @@ Before diving in, it's important to understand the two workspace models Scion of
 
 **Key takeaway**: When a project is managed by the Hub — whether created from a URL or linked from a local directory — agents always use **HTTPS clone-based provisioning**. Local worktrees are a local-mode feature only. This is intentional: the Hub enforces a consistent workspace strategy across all brokers and users.
 
-For the full technical details on workspace strategies, see [About Workspaces](/scion/advanced-local/workspace/).
+For the full technical details on workspace strategies, see [About Workspaces](/scion/local/workspace/).
 
 ---
 
 ## Prerequisites
 
-- A running Scion Hub that you are connected to (see [Connecting to Hub](/scion/hub-user/hosted-user/))
+- A running Scion Hub that you are connected to (see [Connecting to Hub](/scion/hosted/user/hosted-user/))
 - A GitHub repository (public or private) you want agents to work on
 - A GitHub account with permission to create fine-grained Personal Access Tokens
 
@@ -141,7 +141,7 @@ You can also set `GITHUB_TOKEN` at the **user scope** if your token covers multi
 scion hub secret set GITHUB_TOKEN github_pat_xxxxxxxx
 ```
 
-Project-scoped secrets take priority over user-scoped ones (see [Secret Management](/scion/hub-user/secrets/) for the full resolution hierarchy).
+Project-scoped secrets take priority over user-scoped ones (see [Secret Management](/scion/hosted/user/secrets/) for the full resolution hierarchy).
 
 ### Web Dashboard Alternative
 

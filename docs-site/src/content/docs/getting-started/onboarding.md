@@ -91,16 +91,16 @@ This step is optional — choose **Skip for now** to create projects later from 
 
 ### You're all set
 
-The final screen confirms your workstation is configured. Click **Go to Dashboard** to open the [Web Dashboard](/scion/hub-user/dashboard/) at `http://127.0.0.1:8080` and start running agents.
+The final screen confirms your workstation is configured. Click **Go to Dashboard** to open the [Web Dashboard](/scion/workstation/dashboard/) at `http://127.0.0.1:8080` and start running agents.
 
 ## After onboarding
 
-- Manage the running server with `scion server status`, `scion server restart`, and `scion server stop`. See [Workstation Server Mode](/scion/advanced-local/workstation-server/) for the combo server, network bridges, and lifecycle details.
-- Learn your way around the [Web Dashboard](/scion/hub-user/dashboard/).
+- Manage the running server with `scion server status`, `scion server restart`, and `scion server stop`. See [Workstation Server Mode](/scion/workstation/workstation-server/) for the combo server, network bridges, and lifecycle details.
+- Learn your way around the [Web Dashboard](/scion/workstation/dashboard/).
 - Understand the pieces you just configured in [Core Concepts](/scion/concepts/).
 
 ## See also
 
 - [Choosing a Mode](/scion/choosing-a-mode/) — where Workstation mode fits among Local and the hosted tiers.
 - [Installation](/scion/getting-started/install/) — prerequisites and install methods.
-- [Workstation Server Mode](/scion/advanced-local/workstation-server/) — the server the wizard starts.
+- [Workstation Server Mode](/scion/workstation/workstation-server/) — the server the wizard starts.

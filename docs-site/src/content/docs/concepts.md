@@ -58,7 +58,7 @@ Brokers vary along two dimensions:
 
 Note that a **Managed Agent** bypasses the Runtime Broker layer entirely, with its lifecycle driven directly by a cloud provider API.
 
-For more details, see the [Runtime Broker Guide](/scion/hub-user/runtime-broker/).
+For more details, see the [Runtime Broker Guide](/scion/hosted/ha/runtime-broker/).
 
 ### Agent State Model
 
@@ -78,7 +78,7 @@ This separation allows the UI and API consumers to distinguish between infrastru
 
 #### Suspended phase
 
-`suspended` is distinct from `stopped`. Both tear down the container, but `suspended` records the **intent to resume**: when the agent is started again, its harness conversation is continued (Claude Code receives `--continue`, Gemini CLI receives `--resume`, and so on) rather than starting fresh. This is true session continuation, not a restart from a blank slate. Suspension is only available for harnesses that support session resume — see [Agent Lifecycle: Suspend & Resume](/scion/advanced-local/agent-lifecycle/).
+`suspended` is distinct from `stopped`. Both tear down the container, but `suspended` records the **intent to resume**: when the agent is started again, its harness conversation is continued (Claude Code receives `--continue`, Gemini CLI receives `--resume`, and so on) rather than starting fresh. This is true session continuation, not a restart from a blank slate. Suspension is only available for harnesses that support session resume — see [Agent Lifecycle: Suspend & Resume](/scion/local/agent-lifecycle/).
 
 #### Error phase (crashes and setup failures)
 
@@ -92,11 +92,11 @@ A crash can be set from two places: `sciontool` reports it from the recovered ex
 
 The `error` phase is not limited to runtime crashes — it also covers **setup failures** that happen before an agent ever reaches `running`, such as a failed git clone or a provisioning error. In all cases the phase is restartable.
 
-The `error` phase is **restartable**: running `scion start` clears the error and launches a fresh session. See [Crash Recovery](/scion/advanced-local/agent-lifecycle/#crash-recovery-the-error-phase).
+The `error` phase is **restartable**: running `scion start` clears the error and launches a fresh session. See [Crash Recovery](/scion/local/agent-lifecycle/#crash-recovery-the-error-phase).
 
 #### Stalled, offline, and auto-suspend
 
-The `stalled` activity is set by the platform when an agent's heartbeat is still arriving (the process is alive) but no activity events have been seen for a while (default: 5 minutes). It flags an agent that appears hung. Agents that have declared themselves `blocked` are excluded from stalled detection. An agent that stays stalled long enough may be **auto-suspended** to reclaim its container — see [Auto-Suspend of Stalled Agents](/scion/advanced-local/agent-lifecycle/#auto-suspend-of-stalled-agents).
+The `stalled` activity is set by the platform when an agent's heartbeat is still arriving (the process is alive) but no activity events have been seen for a while (default: 5 minutes). It flags an agent that appears hung. Agents that have declared themselves `blocked` are excluded from stalled detection. An agent that stays stalled long enough may be **auto-suspended** to reclaim its container — see [Auto-Suspend of Stalled Agents](/scion/local/agent-lifecycle/#auto-suspend-of-stalled-agents).
 
 The `offline` activity status occurs when an agent heartbeat has not been heard from for some time. Currently, this may be due to an agent being unable to refresh its auth token, which disconnects it from sending its heartbeat and other updates. These agents can be stopped and restarted to be provisioned with a new auth token. They should be able to refresh this token as long as they can maintain a connection to the Hub.
 
@@ -133,7 +133,7 @@ When a Hub manages a git-based project, agents are provisioned with an independe
 - SSH credentials on the host are not used; a `GITHUB_TOKEN` is required.
 - This strategy is consistent across all broker machines, whether or not the repo exists locally.
 
-This means a git project used locally with worktrees may switch to clone-based provisioning once it is managed by a Hub. See the [About Workspaces](/scion/advanced-local/workspace/) guide for details.
+This means a git project used locally with worktrees may switch to clone-based provisioning once it is managed by a Hub. See the [About Workspaces](/scion/local/workspace/) guide for details.
 
 ### Resource Isolation
 Scion enforces strict isolation between agents to prevent interference and cross-contamination of credentials or data.

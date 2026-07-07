@@ -48,7 +48,7 @@ Set the webhook URL in one of two ways:
 - **settings.yaml:** Set `server.discord_webhook_url` in the Hub configuration.
 - **Environment variable:** Set `SCION_DISCORD_WEBHOOK_URL`.
 
-For more details, see [Hub Setup — Discord Integration](/scion/hub-admin/hub-server/#discord-integration).
+For more details, see [Hub Setup — Discord Integration](/scion/hosted/single-node/hub-server/#discord-integration).
 
 ## A2A Protocol Bridge
 

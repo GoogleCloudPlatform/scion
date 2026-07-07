@@ -92,7 +92,7 @@ The easiest way to get these images is to fork this repo, and then go to the "Ac
 
 You will then use your `ghcr.io/myorg` registry for the `image_registry` setting. These images must be available in the registry before running the initialization command.
 
-See [Building Containers](/scion/advanced-local/custom-images/) for more details
+See [Building Containers](/scion/local/custom-images/) for more details
 
 ## Configuration
 
@@ -131,7 +131,7 @@ export ANTHROPIC_API_KEY="your-api-key"
 export GEMINI_API_KEY="your-api-key"
 ```
 
-Scion also supports Vertex AI (via Application Default Credentials) and OAuth token files. For advanced credential configurations, including Hub-based secret injection, see [Agent Credentials](/scion/advanced-local/agent-credentials/).
+Scion also supports Vertex AI (via Application Default Credentials) and OAuth token files. For advanced credential configurations, including Hub-based secret injection, see [Agent Credentials](/scion/local/agent-credentials/).
 
 ### 4. Select Runtime
 Scion automatically selects the appropriate runtime based on your operating system:
@@ -166,7 +166,7 @@ Both files validate against the [settings JSON schema](https://github.com/Google
 
 Scion provides shell completions. These are highly recommended as they are very useful when providing proper descriptive agent names.
 
-For setup instructions, see [Shell Completions](/scion/advanced-local/completions/).
+For setup instructions, see [Shell Completions](/scion/local/completions/).
 
 ---
 

@@ -114,7 +114,7 @@ scion hub secret set \
   scion-telemetry-gcp-credentials @/path/to/sa-key.json
 ```
 
-Once set, every agent that starts will have the credential file mounted at `~/.scion/telemetry-gcp-credentials.json` and GCP-native telemetry will be enabled automatically — no additional environment variable configuration required. See [Metrics & OpenTelemetry](/scion/hub-admin/metrics/#4-gcp-credentials-for-agent-containers-non-adc-environments) for the full setup guide.
+Once set, every agent that starts will have the credential file mounted at `~/.scion/telemetry-gcp-credentials.json` and GCP-native telemetry will be enabled automatically — no additional environment variable configuration required. See [Metrics & OpenTelemetry](/scion/hosted/single-node/metrics/#4-gcp-credentials-for-agent-containers-non-adc-environments) for the full setup guide.
 
 ---
 

@@ -169,7 +169,7 @@ These environment variables control server-side logging behavior. They are not p
 | `GOOGLE_CLOUD_PROJECT` | GCP project ID for Cloud Logging (priority 2) | - |
 | `SCION_SERVER_REQUEST_LOG_PATH` | Write HTTP request logs to a file at this path. Each line is a JSON object in `HttpRequest` format. When not set, request logs follow the default routing (stdout in background mode, suppressed in foreground mode, Cloud Logging when enabled). | (disabled) |
 
-See the [Local Development Logging guide](/scion/development/logging/) for details on log formats, request log fields, and Cloud Logging integration.
+See the [Local Development Logging guide](/scion/contributing/logging/) for details on log formats, request log fields, and Cloud Logging integration.
 
 ### Hub Endpoint Resolution
 

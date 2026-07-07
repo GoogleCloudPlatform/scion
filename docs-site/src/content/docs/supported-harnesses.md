@@ -14,7 +14,7 @@ The Gemini harness supports three authentication methods (auto-detected in this 
 - **OAuth** (`auth-file`): Uses `~/.gemini/oauth_creds.json` if available.
 - **Vertex AI** (`vertex-ai`): Uses Application Default Credentials (ADC) with `GOOGLE_CLOUD_PROJECT`.
 
-Auth type can be explicitly set via `auth_selectedType` in your Scion settings profile. See [Agent Credentials](/scion/advanced-local/agent-credentials/) for details.
+Auth type can be explicitly set via `auth_selectedType` in your Scion settings profile. See [Agent Credentials](/scion/local/agent-credentials/) for details.
 
 ### Configuration
 - **scion-agent.yaml**: Can be configured via `agent_instructions` and `system_prompt` fields in the template.
@@ -35,7 +35,7 @@ Claude supports two authentication methods (auto-detected in this order):
 - **API Key** (`api-key`): Set `ANTHROPIC_API_KEY` in your host environment. Scion propagates this to the agent and pre-approves it in `.claude.json` so Claude Code does not prompt for confirmation.
 - **Vertex AI** (`vertex-ai`): Uses Google Cloud's Vertex AI endpoint with ADC, `GOOGLE_CLOUD_PROJECT`, and `GOOGLE_CLOUD_REGION`.
 
-Auth type can be explicitly set via `auth_selectedType` in your Scion settings profile. See [Agent Credentials](/scion/advanced-local/agent-credentials/) for details.
+Auth type can be explicitly set via `auth_selectedType` in your Scion settings profile. See [Agent Credentials](/scion/local/agent-credentials/) for details.
 
 ### Configuration
 - **scion-agent.yaml**: Can be configured via `agent_instructions` and `system_prompt` fields in the template.

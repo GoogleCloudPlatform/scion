@@ -81,7 +81,7 @@ A comprehensive, hierarchical RBAC (Role-Based Access Control) system is current
 
 ## 4. Secret Management
 
-Scion provides a typed, scope-aware secret management system. Secret values are never stored in plaintext in the Hub database. For a user-facing guide, see [Secret Management](/scion/hub-user/secrets/).
+Scion provides a typed, scope-aware secret management system. Secret values are never stored in plaintext in the Hub database. For a user-facing guide, see [Secret Management](/scion/hosted/user/secrets/).
 
 ### 4.1 Secrets Backend Architecture
 

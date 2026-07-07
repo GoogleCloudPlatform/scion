@@ -183,4 +183,4 @@ capability, with this caveat for other runtimes:
 
 - [Core Concepts: Agent State Model](/scion/concepts/#agent-state-model)
 - [CLI Reference: Agent Lifecycle](/scion/reference/cli/#agent-lifecycle)
-- [Web Dashboard](/scion/hub-user/dashboard/)
+- [Web Dashboard](/scion/workstation/dashboard/)

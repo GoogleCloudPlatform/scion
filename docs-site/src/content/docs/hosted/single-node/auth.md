@@ -129,7 +129,7 @@ Brokers never store agent secrets (like API keys) on disk.
 3. The Broker projects secrets into the agent container based on their type (environment variable, JSON file, or filesystem path).
 4. When the agent is deleted, the secrets are purged from the host.
 
-For details on configuring and managing secrets, see [Secret Management](/scion/hub-user/secrets/).
+For details on configuring and managing secrets, see [Secret Management](/scion/hosted/user/secrets/).
 
 ## GCP Identity & Metadata Emulation
 

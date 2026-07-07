@@ -61,7 +61,7 @@ fresh.
 
 Only running agents can be suspended, and the agent's harness must support
 session resume (Claude Code and Gemini CLI do; the generic harness does not —
-use `stop` instead). See [Agent Lifecycle](/scion/advanced-local/agent-lifecycle/).
+use `stop` instead). See [Agent Lifecycle](/scion/local/agent-lifecycle/).
 
 **Usage:** `scion suspend <agent-name> [flags]`
 

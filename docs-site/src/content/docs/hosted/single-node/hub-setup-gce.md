@@ -71,6 +71,6 @@ Once the Hub is running:
 
 1. **Access the Web Dashboard** — Navigate to your domain (or the VM's external IP) in a browser.
 2. **Create your first project** — Use the dashboard or `scion project create` from the CLI.
-3. **Register a Runtime Broker** — Connect a machine to execute agents. See [Runtime Broker](/scion/hub-user/runtime-broker/) for details on registering your local machine or a remote VM.
+3. **Register a Runtime Broker** — Connect a machine to execute agents. See [Runtime Broker](/scion/hosted/ha/runtime-broker/) for details on registering your local machine or a remote VM.
 
 For ongoing Hub administration (auth, permissions, observability), see the other guides in the Hub Administration section.

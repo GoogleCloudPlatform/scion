@@ -63,4 +63,4 @@ scion start my-agent --env SCION_HUB_API_URL=http://host.bridge.internal:8080
 
 While the Workstation Server is a powerful local tool, the concepts it uses—such as API tokens, Hub connections, and the Web Dashboard—are identical to those used in a full team deployment.
 
-To learn more about how to navigate the UI, manage secrets via the Hub, or dispatch remote agents, refer to the [Hub User Guide](/scion/hub-user/hosted-user/).
+To learn more about how to navigate the UI, manage secrets via the Hub, or dispatch remote agents, refer to the [Hub User Guide](/scion/hosted/user/hosted-user/).

@@ -58,7 +58,7 @@ Run a single-tenant Scion server — the **combo server**, which bundles the Hub
 
 Choose Workstation when: *"Give me the hosted experience locally."*
 
-The fastest way in is the [Onboarding Wizard](/scion/getting-started/onboarding/), which `scion server start` opens automatically on first run. For the mechanics of the combo server, network bridges, and lifecycle, see [Workstation Server Mode](/scion/advanced-local/workstation-server/).
+The fastest way in is the [Onboarding Wizard](/scion/getting-started/onboarding/), which `scion server start` opens automatically on first run. For the mechanics of the combo server, network bridges, and lifecycle, see [Workstation Server Mode](/scion/workstation/workstation-server/).
 
 ### Single-node hosted
 
@@ -66,7 +66,7 @@ A **hosted** deployment whose control plane runs as a single Hub instance on one
 
 Choose Single-node hosted when: *"A cheap, shared Hub for me or a small team."*
 
-Because it is networked, this tier forks into a **user** journey (connect, dispatch, collaborate) and a moderate **admin** journey (provision the node, configure auth and secrets). See [Hub Setup](/scion/hub-admin/hub-server/).
+Because it is networked, this tier forks into a **user** journey (connect, dispatch, collaborate) and a moderate **admin** journey (provision the node, configure auth and secrets). See [Hub Setup](/scion/hosted/single-node/hub-server/).
 
 ### HA hosted
 
@@ -74,7 +74,7 @@ A **hosted** deployment whose control plane is replicated across multiple Hub in
 
 Choose HA hosted when: *"A durable, always-on, multi-user platform."*
 
-This tier requires the fullest **user/admin** split: admins provision Postgres, object storage, load-balanced Hub replicas, proxy/hosted brokers, identity providers, and observability; users largely reuse the hosted-user journey. See [Hub Setup](/scion/hub-admin/hub-server/) for the deployment tracks.
+This tier requires the fullest **user/admin** split: admins provision Postgres, object storage, load-balanced Hub replicas, proxy/hosted brokers, identity providers, and observability; users largely reuse the hosted-user journey. See [Hub Setup](/scion/hosted/single-node/hub-server/) for the deployment tracks.
 
 ## How to choose
 
@@ -90,4 +90,4 @@ The two questions that resolve almost every case: *Do I need a networked control
 - [Core Concepts](/scion/concepts/) — Agent, Project, Hub, Runtime Broker, and the state model.
 - [Glossary](/scion/glossary/) — canonical definitions for every term used here.
 - [Onboarding Wizard](/scion/getting-started/onboarding/) — the guided setup for Workstation mode.
-- [Workstation Server Mode](/scion/advanced-local/workstation-server/) — running the combo server locally.
+- [Workstation Server Mode](/scion/workstation/workstation-server/) — running the combo server locally.
