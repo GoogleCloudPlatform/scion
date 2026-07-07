@@ -34,52 +34,19 @@ var (
 	BuildTime string
 )
 
-// Get returns the version string based on the current build information.
+// Get returns the version string showing both version tag and commit hash.
 func Get() string {
-	// If Version is set, we assume it's a semantic version tag injected at build time.
-	if Version != "" {
-		return Version
+	ver := Version
+	if ver == "" {
+		ver = "dev"
 	}
 
-	// Fallback to commit and build time.
-	commit := Commit
-	buildTime := BuildTime
-
-	// If variables are empty (e.g. go run or simple go build), try to read from debug info.
-	if commit == "" {
-		if info, ok := debug.ReadBuildInfo(); ok {
-			for _, setting := range info.Settings {
-				if setting.Key == "vcs.revision" {
-					commit = setting.Value
-				}
-				// Note: vcs.time is commit time, not build time.
-			}
-		}
-	}
-
-	// Shorten commit hash if it's long
+	commit := GetCommit()
 	if len(commit) > 8 {
 		commit = commit[:8]
 	}
 
-	if commit == "" {
-		commit = "unknown"
-	}
-
-	// If buildTime is not set via ldflags, try to get the binary's modification time.
-	if buildTime == "" {
-		if exe, err := os.Executable(); err == nil {
-			if info, err := os.Stat(exe); err == nil {
-				buildTime = info.ModTime().Format("2006-01-02 15:04:05")
-			}
-		}
-	}
-
-	if buildTime == "" {
-		buildTime = "unknown"
-	}
-
-	return fmt.Sprintf("Commit: %s\nBuild Time: %s", commit, buildTime)
+	return fmt.Sprintf("scion %s (commit %s)", ver, commit)
 }
 
 // GetBuildTime returns the build time, applying fallbacks if the ldflags
