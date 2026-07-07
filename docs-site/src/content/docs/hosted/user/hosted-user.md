@@ -1,11 +1,11 @@
 ---
-title: Team Workflow
-description: Connecting to a Scion Hub for team collaboration.
+title: Connecting to a Hub
+description: Connecting your CLI to a Scion Hub to dispatch agents, share projects, and collaborate.
 ---
 
-**What you will learn**: How to connect your local CLI to your organization's Scion Hub, dispatch agents remotely, use the Web Dashboard, and collaborate with your team.
+**What you will learn**: How to connect your local CLI to a Scion Hub, dispatch agents remotely, use the Web Dashboard, and collaborate with others.
 
-Scion's "Hosted" mode allows teams to share state, infrastructure, and agent configurations by connecting to a central Scion Hub.
+[Hosted mode](/scion/choosing-a-mode/) lets you — or a team — share state, infrastructure, and agent configurations by connecting to a networked Scion Hub. This guide is the **shared user journey** for both hosted tiers ([Single-node](/scion/hosted/single-node/overview/) and [HA](/scion/hosted/ha/overview/)): the connection and dispatch workflow is identical on either.
 
 ## Connecting to a Hub
 
@@ -72,7 +72,7 @@ This means:
   ```
 - To use local worktrees instead, run with `--no-hub` or disable hub integration temporarily.
 
-For full details on workspace strategies, see [About Workspaces](/scion/local/workspace/).
+Clone-per-agent is one of Scion's three **workspace sharing modes** (Shared-plain, Worktree-per-agent, Clone-per-agent). For how each mode provisions the workspace and which apply to Hub-managed projects, see [Workspaces & Sharing Modes](/scion/local/workspaces-and-sharing/) and [About Workspaces](/scion/local/workspace/).
 
 ## Using Remote Infrastructure
 
@@ -82,7 +82,7 @@ With the Hub connected, you can dispatch agents to **Runtime Brokers** managed b
 The Hub automatically routes tasks to available brokers. You can tag agents to request specific capabilities (e.g., `gpu-capable`).
 
 ### Local Fallback
-If you want to temporarily run agents locally even while connected to the Hub, you can use the `--local` flag or set `hub.local_only: true` in your settings.
+If you want to temporarily run agents locally even while connected to the Hub, add `--no-hub` to a single command, or set `hub.local_only: true` in your settings to keep the Hub configured but operate locally.
 
 ## Shared Secrets & Environment
 

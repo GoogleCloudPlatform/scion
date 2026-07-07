@@ -22,6 +22,30 @@ Scion supports multiple authentication methods for different use cases:
 - **Development Auth**: For local development and testing.
 - **User Access Tokens (UATs)**: For programmatic access and CI/CD pipelines.
 
+## Tenancy: single- vs multi-user
+
+**Tenancy** is whether a deployment serves one identity or many. It is **orthogonal** to the
+availability tier — either hosted tier ([Single-node](/scion/hosted/single-node/overview/) or
+[HA](/scion/hosted/ha/overview/)) can be single- or multi-user. [Local](/scion/choosing-a-mode/)
+and [Workstation](/scion/workstation/workstation-server/) modes are single-user by construction.
+
+- **Single-user** — one principal, with simple auth: a workstation developer token, or a single
+  OAuth identity. There are no other users to isolate, so Groups and access policies are not
+  needed.
+- **Multi-user** — many principals authenticated through an OAuth identity provider (Google or
+  GitHub). Access is governed by Hub **Groups** (named collections of users) and access policies
+  that decide who can see and act on what.
+
+Deciding to run multi-user is what turns on the rest of this page's OAuth setup, domain
+authorization, and the RBAC model. For the authorization model itself — Groups, roles, and
+policy bindings — see [Identity & Access (RBAC)](/scion/hosted/ha/permissions/).
+
+:::note[Terminology]
+Prefer **single-user / multi-user** over "single-tenant / multi-tenant"; in Scion, "multi-tenancy"
+is reserved for organizational isolation, a different concern. See the
+[Glossary](/scion/glossary/).
+:::
+
 ## OAuth Authentication
 
 Scion supports OAuth authentication via Google and GitHub. OAuth credentials are configured separately for web and CLI clients due to different redirect URI requirements.

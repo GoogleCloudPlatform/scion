@@ -4,12 +4,22 @@ title: Installation
 
 **What you will learn**: How to get Scion running on your machine from scratch with zero configuration, allowing you to start your first agent immediately.
 
-This guide covers the steps to install and configure Scion on your local machine.
+This guide covers the steps to install and configure Scion on your local machine. It applies to
+both [Local mode](/scion/choosing-a-mode/) (CLI only, no server) and
+[Workstation mode](/scion/choosing-a-mode/) (the combo server run locally). If you are not sure
+which you want, read [Choosing a Mode](/scion/choosing-a-mode/) first.
+
+:::tip[Prefer a guided setup?]
+For Workstation mode, the [Onboarding Wizard](/scion/getting-started/onboarding/) walks you
+through the whole setup in your browser — no config files to edit. Install Scion (with its web
+assets), then run `scion server start`.
+:::
 
 ## Prerequisites
 
 ### 1. Go
-Scion is written in Go. You need Go 1.22 or later installed.
+Scion is written in Go. You need Go 1.26 or later installed (see the `go` directive in the
+repository's `go.mod`).
 - [Download and install Go](https://golang.org/doc/install)
 
 While a binary may be available from the github releases page, this is an active project and it is currently best to regularly build from source.
@@ -159,6 +169,15 @@ Scion accepts settings in either YAML or JSON. `scion init` writes `settings.yam
 ```
 
 Both files validate against the [settings JSON schema](https://github.com/GoogleCloudPlatform/scion/blob/main/pkg/config/schemas/settings-v1.schema.json). See the [Configuration Overview](/scion/reference/scion-config-reference/) for the full settings ecosystem.
+
+---
+
+## Next steps
+
+- **Run your first agent** — follow the [Tutorial](/scion/getting-started/tutorial/).
+- **Set up Workstation mode** — use the [Onboarding Wizard](/scion/getting-started/onboarding/)
+  (`scion server start`).
+- **Understand the pieces** — read [Core Concepts](/scion/concepts/).
 
 ---
 
