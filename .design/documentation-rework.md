@@ -2,86 +2,124 @@
 
 ## Overview
 
-The current documentation structure divides content strictly by "Developer" vs "Administrator" and then tries to weave the "Solo" vs "Hosted" operational modes within those sections. As the capabilities of Scion have expanded, this structure risks overwhelming users who only care about a specific operational mode or level of complexity.
+The docs-site was originally organized on a **persona axis** — *Getting Started →
+Advanced Local → Hub User → Hub Admin → Reference → Contributing*. That axis forced
+readers to already know whether they were on Local, Workstation, or a hosted tier
+before they could find the right page. Meanwhile the root `GLOSSARY.md` matured into
+the project's source of truth and introduced a clean **operational-mode spine** that
+the site did not reflect anywhere in prose.
 
-This rework proposes a persona-driven documentation architecture that clearly segregates content based on the user's specific goals and environment:
+This rework **re-anchors the docs on the mode spine as the primary navigation axis**,
+with a **user/admin fork inside each mode** whose depth scales with the mode's
+complexity.
 
-1.  **Casual Local User**: "I just want an AI agent to help me code right now."
-2.  **Advanced User**: "I want to customize my local agents, create templates, and tweak harnesses."
-3.  **Hub User (Team Developer)**: "I am connecting to my company's Scion Hub to run agents remotely."
-4.  **Hub Admin (Platform Ops)**: "I need to deploy, secure, and manage the Scion Hub and Broker infrastructure."
+## The Mode Spine
+
+The operational modes form a ladder of increasing infrastructure:
+
+> **Local → Workstation → Single-node hosted → HA hosted**
+
+They are separated by two orthogonal dimensions:
+
+- **Availability tier** — whether the Hub is a single instance on an embedded
+  database or replicated on an external one. Fixed by `SCION_SERVER_DATABASE_DRIVER`
+  (`sqlite` vs `postgres`).
+- **Tenancy** — single-user vs multi-user. Orthogonal; only opens up once hosted.
+
+| Mode | Control plane | State & durability | Tenancy | Canonical use |
+| :--- | :--- | :--- | :--- | :--- |
+| **Local** | None (CLI only) | Local machine; git-worktree isolation | Single-user | Agents via the `scion` CLI, no server |
+| **Workstation** | Combo server (Hub + Runtime Broker + Web) on loopback | Embedded SQLite | Single-user | The hosted experience locally |
+| **Single-node hosted** | One networked Hub on a single node | Embedded SQLite; non-HA | Single- or multi-user | Cheap networked Hub (1 VM / 1 Cloud Run + SQLite) |
+| **HA hosted** | Hub replicated behind a load balancer | External Postgres + object storage; HA | Single- or multi-user | Durable always-on deployment (Cloud Run + Cloud SQL) |
 
 ## Rationale for Change
 
-- **Reduced Cognitive Load**: A casual local user shouldn't have to wade through Kubernetes deployment concepts or Hub authentication flows to figure out how to start a local Gemini agent.
-- **Clearer Progression**: Users can naturally "level up" from a Casual Local User to an Advanced User, and eventually to a Hub User.
-- **Better Feature Discovery**: Advanced features (like custom templates, runtime configurations) are currently mixed with basic concepts. Grouping them by persona clarifies what is "standard" vs "advanced."
-- **Targeted Entry Points**: Different users enter the documentation with different intentions. Explicitly naming the personas in the navigation helps users self-select the right path immediately.
+- **Readers self-select by deployment target.** The mode spine is the most important
+  taxonomy in the glossary; making it the navigation axis lets a reader jump straight
+  to the mode they run.
+- **Workstation is a first-class mode**, not an afterthought buried under "Advanced
+  Local Usage."
+- **The two hosted tiers are differentiated.** Single-node (SQLite, one instance,
+  cheap) and HA (Postgres + LB + object storage, durable) are distinct deployment
+  targets with different setup paths.
+- **The user/admin fork scales with complexity** — none for Local, light for
+  Workstation, moderate for Single-node, full for HA — instead of a single global
+  Hub-User/Hub-Admin split.
 
-## Proposed New Architecture
+## New Architecture
 
-### 1. Introduction & Foundations
-*A quick landing zone for everyone to understand what Scion is.*
-*   **What is Scion?**: Core value proposition.
-*   **Architecture 101**: Brief overview of Solo vs. Hosted modes.
-*   **Glossary**: Quick definitions (Grove, Agent, Harness, Hub, Broker).
+### 1. Introduction & Foundations *(everyone, mode-agnostic)*
+Overview, **Choosing a Mode** (the spine + the two dimensions), Core Concepts,
+Philosophy, Supported Harnesses, Glossary (a faithful projection of root
+`GLOSSARY.md`), Release Notes.
 
-### 2. Getting Started (The Casual Local User)
-*Targeted at the single developer wanting immediate value on their local machine. Zero-config focus.*
-*   **Quickstart**: Installation (macOS, Linux), configuring an API key, and starting the first agent.
-*   **Basic Workflows**:
-    *   Starting and stopping agents.
-    *   Viewing agent output and logs.
-    *   Interacting with an agent (`scion attach`).
-*   **Workspace Basics**: How Scion manages Git worktrees automatically.
+### 2. Getting Started (Workstation)
+Installation, the **Onboarding Wizard** (`scion server start` → `/onboarding`),
+first-agent Tutorial.
 
-### 3. Advanced Local Usage (The Power User)
-*Targeted at developers who want to push the boundaries of local agents.*
-*   **Agent Configuration**: Deep dive into `.scion/settings.json` and CLI flags.
-*   **Templates & Roles**: Creating and managing custom agent templates (e.g., Code Reviewer vs. Test Writer).
-*   **Harness Deep Dive**: Configuring specific harnesses (Gemini, Claude) and tweaking system prompts.
-*   **Runtimes**: Switching between Docker, Apple Virtualization, and podman.
-*   **Resource Management**: Setting limits on local agent containers.
+### 3. Local Mode *(single audience)*
+CLI-only usage: working with agents (start/stop/attach/resume/logs), **Workspaces &
+Sharing Modes** (Shared-plain / Worktree-per-agent / Clone-per-agent), templates &
+roles, agent credentials, custom images, tmux, shell completions, local
+configuration.
 
-<!-- feedback - this section should include details on starting and using the "workstation server mode" - noting how to configure network bridge (currently automatic for podman) this can be a 'bonus' content, with a pointer to the hub user guide as being mostly relevant to this workstation server mode -->
+### 4. Workstation Mode *(single audience; hosted-experience-locally)*
+The combo server, the Web Dashboard, Hub-managed vs Linked projects.
 
-### 4. Hub User Guide (The Team Developer)
-*Targeted at developers using a centrally managed Scion Hub. Assumes someone else set it up.*
-*   **Connecting to a Hub**: Login flows (OAuth), selecting a Hub context.
-*   **The Web Dashboard**: Navigating the UI, viewing team Groves and Agents.
-*   **Remote Workflows**: Dispatching agents to remote brokers from the CLI or Web.
-*   **Secret Management**: Using Hub-managed secrets instead of local environment variables.
-*   **Collaboration**: Viewing other team members' agents and sharing context.
+### 5. Hosted — Single-node *(cheap networked Hub)*
+- **User Guide**: connecting to a Hub, personal access tokens, secrets &
+  environment, messaging & notifications, external channels.
+- **Admin Guide**: Hub setup (SQLite, one instance), deploy on a VM / Cloud Run,
+  auth & tenancy, observability & metrics.
 
-### 5. Hub Administration (Platform Ops)
-*Targeted at DevOps, Platform Engineers, and System Administrators.*
-*   **Architecture Deep Dive**: Hub, Brokers, Database, and Web Server interactions.
-*   **Deploying the Hub**:
-    *   Local/VM deployment.
-    *   Kubernetes deployment.
-    *   Configuring persistence (SQLite vs. external databases).
-*   **Provisioning Brokers**: Setting up runtime brokers to execute workloads.
-*   **Identity & Security**:
-    *   Configuring OAuth providers.
-    *   Role-Based Access Control (RBAC) and permissions.
-    *   Managing credentials securely.
-*   **Observability & Operations**: Exporting metrics, centralized logging, and monitoring agent health.
+### 6. Hosted — HA *(durable, always-on)*
+- **User Guide**: shares the hosted-user journey (link, don't duplicate).
+- **Admin Guide**: Postgres + object storage + LB replicas, runtime brokers (Proxy /
+  Hosted / Embedded) & profiles, Kubernetes runtime, identity & access (OAuth,
+  Groups, RBAC, IAP), lifecycle hooks, multi-broker setup, observability & metrics.
 
-### 6. Contributor's Guide
-*Targeted at people contributing to Scion itself.*
-*   **Local Development Setup**: Compiling Scion, running the Vite dev server.
-*   **Architecture & Codebase Tour**: Overview of `pkg/`, `cmd/`, and `web/`.
-*   **Design Catalog**: Index of architectural decision records (ADRs) and design specs.
+### 7. Technical Reference *(mode-agnostic; autogenerated)*
+CLI, API, agent-config, harness-settings, orchestrator-settings, permissions-policy,
+scion-config-reference, security, server/web config.
 
-### 7. Technical Reference
-*Exhaustive, machine-generated or highly structured documentation.*
-*   **CLI Command Reference**: Auto-generated from Cobra.
-*   **API Reference**: REST and WebSocket endpoints for Hub/Broker.
-*   **Configuration Schema**: Complete reference for `settings.json` and Hub config files.
+### 8. Contributing *(autogenerated; folds the former "Development" section in)*
+Architecture, ADK, harness-dev, runtime-dev, design catalog, logging.
+
+## Vocabulary
+
+Follow the root `GLOSSARY.md`. Retired terms and their replacements:
+
+| Deprecated | Use instead |
+| :--- | :--- |
+| Grove | Project |
+| Solo mode | Local mode |
+| "Mode 3" (numeric) | HA hosted |
+| bare "Broker" | Runtime Broker (a service) / a specific broker type |
+| "two workspace strategies" | Shared-plain, Worktree-per-agent, Clone-per-agent |
+
+Preserve: Runtime Broker is a *service* (not a node); Project ≠ Group; harnesses are
+**not** plugins; Message Broker ≠ Event Bus. Both `settings.yaml` and `settings.json`
+are valid on disk (YAML preferred; `scion init` writes YAML).
 
 ## Implementation Strategy
 
-1.  **Restructure the Astro/Starlight Sidebar**: Update `docs-site/astro.config.mjs` to reflect the new top-level categories.
-2.  **Migrate Existing Content**: Move existing Markdown files into the new directory structure, updating internal links.
-3.  **Content Gap Analysis**: Identify areas where recent code changes (e.g., new Broker auth flows, web dashboard features) lack coverage in the new structure and create placeholder pages.
-4.  **Rewrite Introductions**: Ensure the landing page of each section clearly states *who* the section is for and *what* they will learn.
+1. **Restructure the Starlight sidebar** (`docs-site/astro.config.mjs`) to the mode
+   axis, with a user/admin sub-fork inside the hosted tiers.
+2. **Migrate content by `git mv`** into mode directories (`local/`, `workstation/`,
+   `hosted/user/`, `hosted/single-node/`, `hosted/ha/`); fix internal links; add
+   redirects for old URLs.
+3. **Move internal design docs** (e.g. HA deployment, chat-app HA assessment,
+   lifecycle hooks) into `.design/`; extract any user-facing content into the hosted
+   admin tracks.
+4. **Content revision** against current code and `GLOSSARY.md` proceeds as a separate
+   phase, page by page.
+
+## Status
+
+- **P0 (correctness)** and **P1 (Choosing a Mode, Workspaces & Sharing Modes,
+  Onboarding Wizard)** — complete.
+- **P2 (structural rework)** — this document; sidebar restructured, pages migrated,
+  design docs relocated, meta-guides updated, links fixed.
+- **P3 (remaining content gaps)** — Managed Agents guide, Single-node vs HA admin
+  overviews, tenancy framing, residual "grove" cleanup — follow-on work.
