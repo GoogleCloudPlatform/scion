@@ -738,22 +738,22 @@ type HarnessConfigEntry struct {
 	// model field; the alias is resolved to the concrete name at provision time.
 	ModelAliases map[string]string `json:"model_aliases,omitempty" yaml:"model_aliases,omitempty" koanf:"model_aliases"`
 
-	Provisioner      *HarnessProvisionerConfig        `json:"provisioner,omitempty" yaml:"provisioner,omitempty" koanf:"provisioner"`
-	ConfigDir        string                           `json:"config_dir,omitempty" yaml:"config_dir,omitempty" koanf:"config_dir"`
-	SkillsDir        string                           `json:"skills_dir,omitempty" yaml:"skills_dir,omitempty" koanf:"skills_dir"`
+	Provisioner       *HarnessProvisionerConfig        `json:"provisioner,omitempty" yaml:"provisioner,omitempty" koanf:"provisioner"`
+	ConfigDir         string                           `json:"config_dir,omitempty" yaml:"config_dir,omitempty" koanf:"config_dir"`
+	SkillsDir         string                           `json:"skills_dir,omitempty" yaml:"skills_dir,omitempty" koanf:"skills_dir"`
 	InterruptKey      string                           `json:"interrupt_key,omitempty" yaml:"interrupt_key,omitempty" koanf:"interrupt_key"`
 	InterruptSequence []string                         `json:"interrupt_sequence,omitempty" yaml:"interrupt_sequence,omitempty" koanf:"interrupt_sequence"`
 	InterruptSignal   string                           `json:"interrupt_signal,omitempty" yaml:"interrupt_signal,omitempty" koanf:"interrupt_signal"`
-	InstructionsFile string                           `json:"instructions_file,omitempty" yaml:"instructions_file,omitempty" koanf:"instructions_file"`
-	SystemPromptFile string                           `json:"system_prompt_file,omitempty" yaml:"system_prompt_file,omitempty" koanf:"system_prompt_file"`
-	SystemPromptMode string                           `json:"system_prompt_mode,omitempty" yaml:"system_prompt_mode,omitempty" koanf:"system_prompt_mode"`
-	Command          *HarnessCommandConfig            `json:"command,omitempty" yaml:"command,omitempty" koanf:"command"`
-	EnvTemplate      map[string]string                `json:"env_template,omitempty" yaml:"env_template,omitempty" koanf:"env_template"`
-	Capabilities     *api.HarnessAdvancedCapabilities `json:"capabilities,omitempty" yaml:"capabilities,omitempty" koanf:"capabilities"`
-	Auth             *HarnessAuthMetadata             `json:"auth,omitempty" yaml:"auth,omitempty" koanf:"auth"`
-	NoAuthConfig     *HarnessNoAuthConfig             `json:"no_auth,omitempty" yaml:"no_auth,omitempty" koanf:"no_auth"`
-	MCP              *HarnessMCPConfig                `json:"mcp,omitempty" yaml:"mcp,omitempty" koanf:"mcp"`
-	Dialect          map[string]interface{}           `json:"dialect,omitempty" yaml:"dialect,omitempty" koanf:"dialect"`
+	InstructionsFile  string                           `json:"instructions_file,omitempty" yaml:"instructions_file,omitempty" koanf:"instructions_file"`
+	SystemPromptFile  string                           `json:"system_prompt_file,omitempty" yaml:"system_prompt_file,omitempty" koanf:"system_prompt_file"`
+	SystemPromptMode  string                           `json:"system_prompt_mode,omitempty" yaml:"system_prompt_mode,omitempty" koanf:"system_prompt_mode"`
+	Command           *HarnessCommandConfig            `json:"command,omitempty" yaml:"command,omitempty" koanf:"command"`
+	EnvTemplate       map[string]string                `json:"env_template,omitempty" yaml:"env_template,omitempty" koanf:"env_template"`
+	Capabilities      *api.HarnessAdvancedCapabilities `json:"capabilities,omitempty" yaml:"capabilities,omitempty" koanf:"capabilities"`
+	Auth              *HarnessAuthMetadata             `json:"auth,omitempty" yaml:"auth,omitempty" koanf:"auth"`
+	NoAuthConfig      *HarnessNoAuthConfig             `json:"no_auth,omitempty" yaml:"no_auth,omitempty" koanf:"no_auth"`
+	MCP               *HarnessMCPConfig                `json:"mcp,omitempty" yaml:"mcp,omitempty" koanf:"mcp"`
+	Dialect           map[string]interface{}           `json:"dialect,omitempty" yaml:"dialect,omitempty" koanf:"dialect"`
 }
 
 // HarnessProvisionerConfig declares how a harness-config is provisioned.
