@@ -331,14 +331,15 @@ func TestArchiveObsoleteBundledHarnessConfigs(t *testing.T) {
 			store.HarnessConfigStatusArchived, got.Status)
 	}
 
-	// Verify stale empty-source config was archived.
+	// Verify stale empty-source config was NOT archived (empty SourceURL
+	// could be user-created; only builtin-managed configs are archived).
 	got, err = s.GetHarnessConfig(ctx, staleEmpty.ID)
 	if err != nil {
 		t.Fatalf("failed to get stale empty-source config: %v", err)
 	}
-	if got.Status != store.HarnessConfigStatusArchived {
+	if got.Status != store.HarnessConfigStatusActive {
 		t.Errorf("stale empty-source config: expected status %q, got %q",
-			store.HarnessConfigStatusArchived, got.Status)
+			store.HarnessConfigStatusActive, got.Status)
 	}
 
 	// Verify user-imported config was NOT archived.

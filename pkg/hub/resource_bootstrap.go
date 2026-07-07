@@ -91,10 +91,8 @@ func (s *Server) BootstrapBundledResources(ctx context.Context, opts BootstrapOp
 			"failed", result.Failed)
 	}
 
-	if !skipHarnessConfigs {
-		if err := s.ArchiveObsoleteBundledHarnessConfigs(ctx); err != nil {
-			errs = append(errs, fmt.Errorf("archive obsolete bundled harness-configs: %w", err))
-		}
+	if err := s.ArchiveObsoleteBundledHarnessConfigs(ctx); err != nil {
+		errs = append(errs, fmt.Errorf("archive obsolete bundled harness-configs: %w", err))
 	}
 
 	return errors.Join(errs...)
@@ -145,7 +143,7 @@ func (s *Server) ArchiveObsoleteBundledHarnessConfigs(ctx context.Context) error
 
 	archived := 0
 	for _, hc := range existing.Items {
-		if !IsBuiltinManaged(hc.SourceURL) && hc.SourceURL != "" {
+		if !IsBuiltinManaged(hc.SourceURL) {
 			continue
 		}
 		if _, ok := bundledNames[hc.Name]; ok {
