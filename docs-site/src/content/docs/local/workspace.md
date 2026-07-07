@@ -106,7 +106,7 @@ scion hub project create https://github.com/org/repo.git
 
 #### Project ID Format
 
-Git-backed projects use **deterministic UUID v5** identifiers derived from the namespace and the normalized git URL. This ensures the same repository always produces the same project ID regardless of the access protocol (e.g., `https://` vs `git@`). Hub-managed projects use random UUID v4 identifiers.
+Project IDs are always randomly generated UUIDs (v4). A git remote is associated metadata, not identity, so the same repository can back multiple projects, and re-creating a project from the same URL produces a new ID.
 
 #### Agent Branch Strategy
 

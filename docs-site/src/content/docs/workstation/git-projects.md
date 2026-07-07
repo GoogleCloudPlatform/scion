@@ -87,7 +87,7 @@ Project created:
 ```
 
 :::note[Project ID Format]
-Git-backed projects use **deterministic UUID v5** identifiers, derived from the namespace and normalized git URL. This ensures the same repository always produces the same project ID regardless of protocol (`https://` vs `git@`). Hub-managed projects (without a git repository) use random UUID v4 identifiers.
+Project IDs are always randomly generated UUIDs (v4). A git remote is associated metadata, not identity, so the same repository can back multiple projects, and re-creating a project from the same URL produces a new ID.
 :::
 
 ### Optional Flags
@@ -100,8 +100,8 @@ scion hub project create https://github.com/acme/backend.git --branch develop
 scion hub project create https://github.com/acme/backend.git --slug my-backend
 ```
 
-:::tip[Idempotent creation]
-Creating a project from the same git URL twice won't create a duplicate — the project ID is a deterministic UUID v5 derived from the normalized URL, so the command is idempotent. Git URL user info (e.g., `git@` vs `https://`) is normalized before ID generation, ensuring consistent results across protocols. Additionally, stale project links are automatically detected and synchronized during hub-link sync operations.
+:::note[Multiple projects per remote]
+Project IDs are always randomly generated UUIDs, so a git remote is associated metadata rather than identity: creating a project from the same git URL twice yields two distinct projects, each with its own ID. Stale project links are still automatically detected and synchronized during hub-link sync operations.
 :::
 
 ---
