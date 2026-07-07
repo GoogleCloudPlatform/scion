@@ -69,6 +69,11 @@ const (
 	// call so only one standalone instance registers the webhook URL at a time.
 	LockTelegramWebhook AdvisoryLockKey = 0x5C10000A
 
+	// LockHubSettingsSeed guards first-boot seeding of operational settings
+	// from settings.yaml into the hub_settings table (settings-db §3.9).
+	// Only the replica that acquires this lock performs the seed; others skip.
+	LockHubSettingsSeed AdvisoryLockKey = 0x5C10000B
+
 	// LockWorkspaceProvision is the CLASS ID for per-project workspace
 	// provisioning locks. It is used with the two-int advisory lock form
 	// pg_try_advisory_lock(classid, objid), where classid is this constant

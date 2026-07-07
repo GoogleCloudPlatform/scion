@@ -559,15 +559,15 @@ func loadGlobalConfigLegacy(configPath string) (*GlobalConfig, error) {
 		"hub.corsAllowedHeaders": defaults.Hub.CORSAllowedHeaders,
 		"hub.corsMaxAge":         defaults.Hub.CORSMaxAge,
 		// RuntimeBroker defaults
-		"runtimeBroker.enabled":            defaults.RuntimeBroker.Enabled,
-		"runtimeBroker.port":               defaults.RuntimeBroker.Port,
-		"runtimeBroker.host":               defaults.RuntimeBroker.Host,
-		"runtimeBroker.readTimeout":        defaults.RuntimeBroker.ReadTimeout,
-		"runtimeBroker.writeTimeout":       defaults.RuntimeBroker.WriteTimeout,
-		"runtimeBroker.corsEnabled":        defaults.RuntimeBroker.CORSEnabled,
-		"runtimeBroker.corsAllowedOrigins": defaults.RuntimeBroker.CORSAllowedOrigins,
-		"runtimeBroker.corsAllowedMethods": defaults.RuntimeBroker.CORSAllowedMethods,
-		"runtimeBroker.corsAllowedHeaders": defaults.RuntimeBroker.CORSAllowedHeaders,
+		"runtimeBroker.enabled":                       defaults.RuntimeBroker.Enabled,
+		"runtimeBroker.port":                          defaults.RuntimeBroker.Port,
+		"runtimeBroker.host":                          defaults.RuntimeBroker.Host,
+		"runtimeBroker.readTimeout":                   defaults.RuntimeBroker.ReadTimeout,
+		"runtimeBroker.writeTimeout":                  defaults.RuntimeBroker.WriteTimeout,
+		"runtimeBroker.corsEnabled":                   defaults.RuntimeBroker.CORSEnabled,
+		"runtimeBroker.corsAllowedOrigins":            defaults.RuntimeBroker.CORSAllowedOrigins,
+		"runtimeBroker.corsAllowedMethods":            defaults.RuntimeBroker.CORSAllowedMethods,
+		"runtimeBroker.corsAllowedHeaders":            defaults.RuntimeBroker.CORSAllowedHeaders,
 		"runtimeBroker.corsMaxAge":                    defaults.RuntimeBroker.CORSMaxAge,
 		"runtimeBroker.allowContainerScriptHarnesses": defaults.RuntimeBroker.AllowContainerScriptHarnesses,
 		// Database defaults
@@ -738,6 +738,42 @@ func envKeyToConfigKey(envKey string) string {
 	}
 
 	return strings.Join(parts, ".")
+}
+
+// LoadFileOnlyKoanf returns a koanf instance loaded from settings.yaml +
+// embedded defaults, without any environment variable overlay. This produces
+// the "file fallback" Layer for OperationalSettings (settings-db §3.4/§3.9):
+// seeding reads file values only (not env), so env stays a runtime override
+// rather than being baked into shared state from whichever node seeded first.
+func LoadFileOnlyKoanf() *koanf.Koanf {
+	k := koanf.New(".")
+
+	// 1. Load global settings.yaml (includes embedded defaults via koanf merge).
+	globalDir, _ := GetGlobalDir()
+	if globalDir != "" {
+		_ = loadSettingsFile(k, globalDir)
+	}
+
+	// 2. Load legacy server.yaml into the same keyspace (for sites that
+	//    have not yet migrated). loadServerConfigFile prefixes "server." keys.
+	if globalDir != "" {
+		loadServerConfigFile(k, globalDir)
+	}
+
+	return k
+}
+
+// LoadEnvKoanf returns a koanf instance loaded with only the SCION_SERVER_*
+// environment variables (no file, no defaults). This is used by the
+// OperationalSettings service to detect which Layer-1 keys are overridden by
+// env vars on this node (settings-db §3.4).
+func LoadEnvKoanf() *koanf.Koanf {
+	k := koanf.New(".")
+	_ = k.Load(env.Provider("SCION_SERVER_", ".", func(s string) string {
+		key := strings.TrimPrefix(s, "SCION_SERVER_")
+		return envKeyToConfigKey(key)
+	}), nil)
+	return k
 }
 
 // applyEnvOverrides loads SCION_SERVER_ environment variables and merges them

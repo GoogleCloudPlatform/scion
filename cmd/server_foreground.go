@@ -36,6 +36,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/brokercredentials"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
 	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
@@ -55,6 +56,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 	"github.com/GoogleCloudPlatform/scion/web"
+	"github.com/knadh/koanf/v2"
 	"github.com/spf13/cobra"
 )
 
@@ -1356,7 +1358,143 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 
 	log.Printf("Database: %s (%s)", cfg.Database.Driver, cfg.Database.URL)
 
+	// --- Settings-DB Phase 3: OperationalSettings wiring (§3.9) ---
+	// Gated on postgres: in SQLite/workstation mode the legacy file path is
+	// used unchanged.
+	if strings.EqualFold(cfg.Database.Driver, "postgres") {
+		if err := initOperationalSettings(ctx, cfg, hubSrv, s, globalDir); err != nil {
+			return nil, fmt.Errorf("operational settings init: %w", err)
+		}
+	}
+
 	return hubSrv, nil
+}
+
+// initOperationalSettings sets up the OperationalSettings service for postgres
+// mode (settings-db §3.9). It:
+//  1. Acquires advisory lock "hub_settings_seed"
+//  2. If no _meta row exists, seeds sections from settings.yaml (file values only)
+//  3. Releases the lock
+//  4. Calls Refresh to load sections, then applySnapshot
+//  5. Logs any env-overridden Layer-1 keys as a WARN
+func initOperationalSettings(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Server, s store.Store, globalDir string) error {
+	settingStore, ok := s.(store.HubSettingStore)
+	if !ok {
+		// Store does not implement HubSettingStore — skip (should not happen
+		// with postgres, but guard defensively).
+		log.Println("WARNING: store does not implement HubSettingStore; skipping operational settings init")
+		return nil
+	}
+
+	// Build the file-only and env-only koanf instances.
+	fileKoanf := config.LoadFileOnlyKoanf()
+	envKoanf := config.LoadEnvKoanf()
+
+	// --- Seeding under advisory lock ---
+	locker, hasLocker := s.(store.AdvisoryLocker)
+	if hasLocker {
+		acquired, release, err := locker.TryAdvisoryLock(ctx, store.LockHubSettingsSeed)
+		if err != nil {
+			return fmt.Errorf("acquiring hub_settings_seed advisory lock: %w", err)
+		}
+		if acquired {
+			defer func() {
+				if rerr := release(); rerr != nil {
+					slog.Error("Failed to release hub_settings_seed advisory lock", "error", rerr)
+				}
+			}()
+
+			if err := seedHubSettingsIfNeeded(ctx, settingStore, fileKoanf, globalDir); err != nil {
+				return fmt.Errorf("seeding hub settings: %w", err)
+			}
+		} else {
+			// Another replica is seeding — that's fine, we'll pick up the
+			// results via Refresh below.
+			log.Println("Hub settings seed lock held by another replica; skipping seed")
+		}
+	} else {
+		// No advisory locking (shouldn't happen on postgres, but handle).
+		if err := seedHubSettingsIfNeeded(ctx, settingStore, fileKoanf, globalDir); err != nil {
+			return fmt.Errorf("seeding hub settings: %w", err)
+		}
+	}
+
+	// --- Create OperationalSettings, Refresh, and apply ---
+	ops := hub.NewOperationalSettings(settingStore, fileKoanf, envKoanf)
+
+	changed, err := ops.Refresh(ctx)
+	if err != nil {
+		return fmt.Errorf("initial operational settings refresh: %w", err)
+	}
+	if len(changed) > 0 {
+		log.Printf("Operational settings loaded from DB: %v", changed)
+	}
+
+	snap := ops.Snapshot()
+	hub.ApplySnapshot(hubSrv, snap)
+
+	hubSrv.SetOperationalSettings(ops)
+
+	// --- WARN log for env-overridden Layer-1 keys (§3.4) ---
+	if envKeys := ops.EnvOverriddenKeys(); len(envKeys) > 0 {
+		slog.Warn("Layer-1 settings overridden by SCION_SERVER_* env vars on this node — these values diverge from the shared DB",
+			"keys", envKeys)
+	}
+
+	return nil
+}
+
+// seedHubSettingsIfNeeded checks for the _meta sentinel row; if absent, seeds
+// each registry section from the file's Layer-1 keys. Sections with no koanf
+// paths (e.g. maintenance) are skipped — they start with compiled defaults.
+func seedHubSettingsIfNeeded(ctx context.Context, s store.HubSettingStore, fileKoanf *koanf.Koanf, globalDir string) error {
+	// Check for _meta sentinel.
+	_, err := s.GetHubSetting(ctx, "_meta")
+	if err == nil {
+		// _meta exists — seeding already done.
+		log.Println("Hub settings already seeded (_meta row present); skipping seed")
+		return nil
+	}
+	if err != store.ErrNotFound {
+		return fmt.Errorf("checking _meta row: %w", err)
+	}
+
+	// No _meta — seed.
+	log.Println("Seeding hub_settings from settings.yaml...")
+
+	settingsPath := filepath.Join(globalDir, "settings.yaml")
+
+	for _, sec := range opsettings.Registry {
+		// Skip sections with no koanf paths (e.g. maintenance — runtime-only).
+		if len(sec.KoanfPaths) == 0 {
+			continue
+		}
+
+		doc, err := opsettings.ExtractSectionFromKoanf(fileKoanf, sec.Name)
+		if err != nil {
+			slog.Warn("Failed to extract section for seeding; skipping", "section", sec.Name, "error", err)
+			continue
+		}
+
+		_, err = s.UpsertHubSetting(ctx, sec.Name, doc, "seed", -1) // unconditional upsert
+		if err != nil {
+			return fmt.Errorf("seeding section %q: %w", sec.Name, err)
+		}
+		log.Printf("  Seeded section: %s", sec.Name)
+	}
+
+	// Write _meta sentinel.
+	metaDoc, _ := json.Marshal(map[string]interface{}{
+		"seeded_from":  settingsPath,
+		"seeded_at":    time.Now().UTC().Format(time.RFC3339),
+		"seed_version": "1",
+	})
+	if _, err := s.UpsertHubSetting(ctx, "_meta", metaDoc, "seed", -1); err != nil {
+		return fmt.Errorf("writing _meta sentinel: %w", err)
+	}
+
+	log.Println("Hub settings seeding complete")
+	return nil
 }
 
 // initHubStorage initializes the storage backend for the Hub server.

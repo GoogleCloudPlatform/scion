@@ -647,6 +647,10 @@ type Server struct {
 	// User last-seen activity tracker (nil = disabled)
 	userActivity *UserActivityTracker
 
+	// operationalSettings manages Layer-1 settings from the DB in postgres mode.
+	// Nil in file/SQLite mode (settings-db §3.7).
+	operationalSettings *OperationalSettings
+
 	// Dedicated request logger (nil = disabled)
 	requestLogger *slog.Logger
 
@@ -1489,6 +1493,19 @@ func (s *Server) SetIntegrationHA(dbDriver string, client *ent.Client, dsn strin
 // IsPostgres reports whether the hub is running on a Postgres backend.
 func (s *Server) IsPostgres() bool {
 	return strings.EqualFold(s.dbDriver, "postgres")
+}
+
+// SetOperationalSettings attaches the OperationalSettings service to the
+// server. This is called during postgres-mode startup after seeding and
+// initial refresh (settings-db §3.5/§3.9).
+func (s *Server) SetOperationalSettings(ops *OperationalSettings) {
+	s.operationalSettings = ops
+}
+
+// GetOperationalSettings returns the OperationalSettings service, or nil
+// in file/SQLite mode.
+func (s *Server) GetOperationalSettings() *OperationalSettings {
+	return s.operationalSettings
 }
 
 // logMessage logs a message dispatch event to the dedicated message logger
