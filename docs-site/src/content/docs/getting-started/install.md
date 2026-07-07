@@ -141,6 +141,14 @@ Scion automatically selects the appropriate runtime based on your operating syst
 If you wish to change this (e.g., to use Podman on macOS), you can manually edit `.scion/settings.yaml`:
 
 ```yaml
+profiles:
+  local:
+    runtime: podman
+```
+
+Scion accepts settings in either YAML or JSON. `scion init` writes `settings.yaml`, and YAML is preferred when multiple files are present (the loader looks for `settings.yaml`, then `settings.yml`, then `settings.json`). If you prefer JSON, name the file `.scion/settings.json` and use valid JSON syntax:
+
+```json
 {
   "profiles": {
     "local": {
@@ -149,6 +157,8 @@ If you wish to change this (e.g., to use Podman on macOS), you can manually edit
   }
 }
 ```
+
+Both files validate against the [settings JSON schema](https://github.com/GoogleCloudPlatform/scion/blob/main/pkg/config/schemas/settings-v1.schema.json). See the [Configuration Overview](/scion/reference/scion-config-reference/) for the full settings ecosystem.
 
 ---
 
