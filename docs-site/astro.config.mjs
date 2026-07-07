@@ -27,7 +27,7 @@ const hostedUserGuide = {
 	label: 'User Guide',
 	items: [
 		{ label: 'Connecting to a Hub', slug: 'hosted/user/hosted-user' },
-		{ label: 'Personal Access Tokens', slug: 'hosted/user/personal-access-tokens' },
+		{ label: 'User Access Tokens', slug: 'hosted/user/personal-access-tokens' },
 		{ label: 'Secrets & Environment', slug: 'hosted/user/secrets' },
 		{ label: 'Messaging & Notifications', slug: 'hosted/user/messaging' },
 		{ label: 'External Channels', slug: 'hosted/user/external-channels' },
@@ -128,9 +128,11 @@ export default defineConfig({
 						{
 							label: 'Admin Guide',
 							items: [
+								{ label: 'Single-node Overview', slug: 'hosted/single-node/overview' },
 								{ label: 'Hub Setup', slug: 'hosted/single-node/hub-server' },
 								{ label: 'Deploy on a VM (GCE)', slug: 'hosted/single-node/hub-setup-gce' },
 								{ label: 'Auth & Tenancy', slug: 'hosted/single-node/auth' },
+								{ label: 'Managed Agents', slug: 'hosted/single-node/managed-agents' },
 								{ label: 'Observability', slug: 'hosted/single-node/observability' },
 								{ label: 'Metrics', slug: 'hosted/single-node/metrics' },
 							],
@@ -144,8 +146,10 @@ export default defineConfig({
 						{
 							label: 'Admin Guide',
 							items: [
+								{ label: 'HA Overview', slug: 'hosted/ha/overview' },
 								{ label: 'Kubernetes Runtime', slug: 'hosted/ha/kubernetes' },
 								{ label: 'Runtime Brokers & Profiles', slug: 'hosted/ha/runtime-broker' },
+								{ label: 'Managed Agents', slug: 'hosted/single-node/managed-agents' },
 								{ label: 'Multi-Broker Setup', slug: 'hosted/ha/multi-broker' },
 								{ label: 'Identity & Access (RBAC)', slug: 'hosted/ha/permissions' },
 								{ label: 'Proxy Auth (IAP)', slug: 'hosted/ha/auth-proxy-iap' },

@@ -36,7 +36,7 @@ The proxy authenticator runs **after** higher-priority app-layer credentials:
 
 1. Agent token (`X-Scion-Agent-Token` / agent JWT)
 2. Broker HMAC (`X-Scion-Broker-ID`)
-3. Bearer token (dev token / PAT / user JWT)
+3. Bearer token (dev token / UAT / user JWT)
 4. **Proxy authenticator** (IAP assertion) — runs only when no app-layer credential matched
 
 This means agents and brokers traversing IAP are identified by their own credentials, not by the IAP service-account assertion.

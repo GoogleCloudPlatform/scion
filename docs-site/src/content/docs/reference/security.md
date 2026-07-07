@@ -118,10 +118,10 @@ Secrets are typed to control how they reach the agent container:
 - **`variable`**: Written to `~/.scion/secrets.json` inside the container.
 - **`file`**: Written to a specified filesystem path (max 64 KiB).
 
-### 4.4 Personal Access Tokens (PATs)
+### 4.4 User Access Tokens (UATs)
 
-For headless environments (CI/CD, automation), Scion supports **Personal Access Tokens**.
-- Tokens are prefixed with `scion_pat_`.
+For headless environments (CI/CD, automation), Scion supports **user access tokens (UATs)**.
+- Tokens are prefixed with `scion_pat_` (a legacy artifact of the older "personal access token" name).
 - Only the SHA-256 hash of the token is stored in the database; the original value is never persisted.
 - Tokens can be scoped to specific permissions and projects, and revoked instantly via the dashboard or CLI.
 

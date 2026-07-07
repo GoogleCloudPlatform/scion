@@ -20,7 +20,7 @@ Scion supports multiple authentication methods for different use cases:
 
 - **OAuth (Google/GitHub)**: For production web and CLI authentication.
 - **Development Auth**: For local development and testing.
-- **Personal Access Tokens (PATs)**: For programmatic access and CI/CD pipelines.
+- **User Access Tokens (UATs)**: For programmatic access and CI/CD pipelines.
 
 ## OAuth Authentication
 
@@ -191,9 +191,11 @@ Agents are automatically authenticated. When the Hub dispatches an agent to a Ru
 - Tokens are scoped to the specific agent and its project.
 - Tokens have a default expiration (typically 24 hours), but Scion implements an automated token refresh mechanism to ensure long-running agents maintain valid authorization throughout extended tasks.
 
-## Personal Access Tokens
+## User Access Tokens
 
-For programmatic access (e.g., CI/CD pipelines), the Hub supports Personal Access Tokens (PATs).
-- Tokens can be generated via the Web Dashboard or CLI.
-- Tokens are prefixed with `scion_pat_`.
+For programmatic access (e.g., CI/CD pipelines), the Hub supports **user access tokens (UATs)**.
+- Tokens can be generated via the Web Dashboard or CLI (`scion hub token create`).
+- Tokens are prefixed with `scion_pat_` (a legacy artifact of the older "personal access token" name).
 - Use the `Authorization: Bearer <token>` header in your requests.
+
+See [User Access Tokens](/scion/hosted/user/personal-access-tokens/) for the full user-facing guide.

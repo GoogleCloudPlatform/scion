@@ -85,9 +85,9 @@ server:
 ```
 The token is written to `~/.scion/dev-token` on startup. The CLI and Web Dashboard automatically detect this token when running on the same machine.
 
-### Personal Access Tokens (Programmatic)
+### User Access Tokens (Programmatic)
 
-The Hub supports long-lived Personal Access Tokens (PATs) for CI/CD or other programmatic integrations.
+The Hub supports long-lived **user access tokens (UATs)** for CI/CD or other programmatic integrations. See [User Access Tokens](/scion/hosted/user/personal-access-tokens/).
 
 ## GCP Identity & Hub-Minted Service Accounts
 
