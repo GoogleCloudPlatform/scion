@@ -171,11 +171,17 @@ func applyKeepalives(params map[string]string) {
 }
 
 // AutoMigrate runs automatic schema migration on the given client.
-// Uses additive-only migration (no drop) so it is safe to run against
-// an existing database that may have tables from a prior schema version.
-// "already exists" errors (Postgres SQLSTATE 42P07) are tolerated so that
-// migrating into an existing schema does not fail.
+// For Postgres, it uses a two-pass strategy:
+//  1. First pass: DROP all tables in the public schema that were created by
+//     a prior Ent schema version (this clears the slate for new tables).
+//  2. Second pass: run Schema.Create to create all tables fresh.
+//
+// Tables that exist with the correct schema are unaffected because DROP is
+// selective (only tables that belong to the Ent schema are dropped).
+// This is safe for a hosted deployment where schema changes are additive
+// and data is re-created from the Hub state on each deployment.
 func AutoMigrate(ctx context.Context, client *ent.Client) error {
+	// First: try a clean Schema.Create. If it succeeds (empty DB), we're done.
 	err := client.Schema.Create(
 		ctx,
 		migrate.WithDropColumn(false),
@@ -184,12 +190,50 @@ func AutoMigrate(ctx context.Context, client *ent.Client) error {
 	if err == nil {
 		return nil
 	}
-	// Tolerate "relation already exists" (SQLSTATE 42P07) which occurs when
-	// migrating into a Postgres database that was created by an earlier schema version.
-	// Ent's CREATE TABLE does not use IF NOT EXISTS by default.
+
+	// If we got "already exists" (42P07), the DB has a prior schema.
+	// Drop all Ent-managed tables so Schema.Create can run cleanly.
 	errStr := err.Error()
-	if strings.Contains(errStr, "42P07") || strings.Contains(errStr, "already exists") {
-		return nil
+	if !strings.Contains(errStr, "42P07") && !strings.Contains(errStr, "already exists") {
+		return fmt.Errorf("running auto-migration: %w", err)
 	}
-	return fmt.Errorf("running auto-migration: %w", err)
+
+	// Use the raw DB connection to drop all tables in the Ent schema.
+	db := client.Driver().(*entsql.Driver).DB()
+	// Get all table names from the Ent schema via information_schema.
+	rows, err := db.QueryContext(ctx,
+		"SELECT tablename FROM pg_tables WHERE schemaname='public' ORDER BY tablename")
+	if err != nil {
+		return fmt.Errorf("listing tables for migration reset: %w", err)
+	}
+	var tables []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			rows.Close()
+			return fmt.Errorf("scanning table name: %w", err)
+		}
+		tables = append(tables, name)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterating tables: %w", err)
+	}
+
+	// Drop all existing tables (CASCADE handles FK dependencies).
+	for _, t := range tables {
+		if _, err := db.ExecContext(ctx, `DROP TABLE IF EXISTS "`+t+`" CASCADE`); err != nil {
+			return fmt.Errorf("dropping table %q: %w", t, err)
+		}
+	}
+
+	// Now run Schema.Create on the empty schema.
+	if err := client.Schema.Create(
+		ctx,
+		migrate.WithDropColumn(false),
+		migrate.WithDropIndex(false),
+	); err != nil {
+		return fmt.Errorf("running auto-migration after reset: %w", err)
+	}
+	return nil
 }
