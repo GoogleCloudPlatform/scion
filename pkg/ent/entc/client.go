@@ -20,6 +20,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 
 	"entgo.io/ent/dialect"
@@ -28,6 +29,7 @@ import (
 	"github.com/jackc/pgx/v5/stdlib"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/migrate"
 )
 
 // PoolConfig holds connection pool settings applied to the underlying
@@ -169,9 +171,25 @@ func applyKeepalives(params map[string]string) {
 }
 
 // AutoMigrate runs automatic schema migration on the given client.
+// Uses additive-only migration (no drop) so it is safe to run against
+// an existing database that may have tables from a prior schema version.
+// "already exists" errors (Postgres SQLSTATE 42P07) are tolerated so that
+// migrating into an existing schema does not fail.
 func AutoMigrate(ctx context.Context, client *ent.Client) error {
-	if err := client.Schema.Create(ctx); err != nil {
-		return fmt.Errorf("running auto-migration: %w", err)
+	err := client.Schema.Create(
+		ctx,
+		migrate.WithDropColumn(false),
+		migrate.WithDropIndex(false),
+	)
+	if err == nil {
+		return nil
 	}
-	return nil
+	// Tolerate "relation already exists" (SQLSTATE 42P07) which occurs when
+	// migrating into a Postgres database that was created by an earlier schema version.
+	// Ent's CREATE TABLE does not use IF NOT EXISTS by default.
+	errStr := err.Error()
+	if strings.Contains(errStr, "42P07") || strings.Contains(errStr, "already exists") {
+		return nil
+	}
+	return fmt.Errorf("running auto-migration: %w", err)
 }
