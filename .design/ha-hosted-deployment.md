@@ -1,6 +1,6 @@
-# Mode 3 (HA) Deployment Guide
+# HA Hosted Deployment Guide
 
-Mode 3 runs chat integrations as standalone services on separate compute, with
+HA hosted mode runs chat integrations as standalone services on separate compute, with
 Postgres-backed state and advisory-lock failover. The hub manages them via gRPC
 and a shared Postgres signal plane.
 

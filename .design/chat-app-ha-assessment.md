@@ -6,8 +6,8 @@
 
 The chat-app integration (`extras/scion-chat-app/`) already runs as a standalone
 process using self-managed net/rpc on `localhost:9090`. It has a Dockerfile and
-can be deployed independently. However, it has three gaps that prevent Mode 3
-(HA) adoption.
+can be deployed independently. However, it has three gaps that prevent HA
+hosted adoption.
 
 ## Gap Analysis
 
