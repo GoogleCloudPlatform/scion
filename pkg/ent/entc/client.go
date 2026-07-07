@@ -235,7 +235,9 @@ func AutoMigrate(ctx context.Context, client *ent.Client) error {
 
 	slog.Warn("AutoMigrate: dropping all Ent-managed tables for schema reset (hosted mode only)")
 
-	// Drop only existing tables that are managed by Ent (CASCADE handles FK dependencies).
+	// Tables are dropped individually without a transaction. A crash mid-drop
+	// leaves the DB in a partially-dropped state; this is acceptable for hosted
+	// deployments where data is reconstructed from Hub state on startup.
 	for _, t := range tables {
 		if entTables[t] {
 			quotedName := pgx.Identifier{t}.Sanitize()

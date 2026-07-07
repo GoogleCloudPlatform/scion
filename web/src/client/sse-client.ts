@@ -114,6 +114,7 @@ export class SSEClient extends EventTarget {
     this.eventSource.addEventListener('reconnect', () => {
       this.reconnectAttempts = 0;
       this.eventSource?.close();
+      this.eventSource = null;
       this.openConnection();
     });
 

@@ -22,12 +22,8 @@
 *.out
 coverage.txt
 
-# node_modules/ must precede the !web/ re-includes so that
-# web/node_modules/ stays excluded even after the negation patterns.
+# Ignore node_modules if present
 node_modules/
-!web/**/*.js
-!web/**/*.ts
-!web/**/*.json
 
 # Ignore documentation not needed for build
 *.md
