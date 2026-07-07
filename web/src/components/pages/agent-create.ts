@@ -1180,6 +1180,7 @@ private selectBrokerForProject(): void {
               @sl-change=${(e: Event) => {
                 this.modelSelection = (e.target as HTMLElement & { value: string }).value as
                   | '' | 'small' | 'medium' | 'large' | 'extra-large' | 'other';
+                if (this.modelSelection !== 'other') this.customModelId = '';
               }}
             >
               <sl-option value="small">Small</sl-option>
