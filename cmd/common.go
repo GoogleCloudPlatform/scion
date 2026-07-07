@@ -75,6 +75,7 @@ var (
 	disableTelemetry      bool
 	inlineConfigPath      string
 	labelFlags            []string
+	modelFlag             string
 )
 
 func parseLabels(raw []string) (map[string]string, error) {
@@ -405,6 +406,14 @@ func RunAgent(cmd *cobra.Command, args []string, resume bool) error {
 		if err := resolveInlineConfigContent(inlineCfg, inlineConfigDir); err != nil {
 			return err
 		}
+	}
+
+	if modelFlag != "" {
+		normalizedModel := config.NormalizeModelAlias(modelFlag)
+		if inlineCfg == nil {
+			inlineCfg = &api.ScionConfig{}
+		}
+		inlineCfg.Model = normalizedModel
 	}
 
 	// This allows starting/resuming an agent even if it exists on Hub but not locally

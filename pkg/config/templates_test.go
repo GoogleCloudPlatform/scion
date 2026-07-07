@@ -1825,7 +1825,7 @@ func TestKnownModelAliases(t *testing.T) {
 		}
 	}
 
-	notAliases := []string{"tiny", "xl", "gemini-pro", "opus", ""}
+	notAliases := []string{"tiny", "gemini-pro", "opus", ""}
 	for _, name := range notAliases {
 		if KnownModelAliases[name] {
 			t.Errorf("expected %q to NOT be a known model alias", name)

@@ -34,3 +34,9 @@ func TestNoNotifyFlagRegistered(t *testing.T) {
 	assert.Empty(t, f.Deprecated, "--no-notify should not be deprecated")
 	assert.Equal(t, "false", f.DefValue)
 }
+
+func TestModelFlagRegistered(t *testing.T) {
+	f := startCmd.Flags().Lookup("model")
+	require.NotNil(t, f, "--model flag should be registered on start command")
+	assert.Equal(t, "", f.DefValue, "--model default should be empty")
+}
