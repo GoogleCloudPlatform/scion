@@ -19,6 +19,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/group"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/groupmembership"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/harnessconfig"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/hubsetting"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/integrationconfig"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/integrationupdate"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/invitecode"
@@ -438,6 +439,30 @@ func init() {
 	harnessconfigDescID := harnessconfigFields[0].Descriptor()
 	// harnessconfig.DefaultID holds the default value on creation for the id field.
 	harnessconfig.DefaultID = harnessconfigDescID.Default.(func() uuid.UUID)
+	hubsettingFields := schema.HubSetting{}.Fields()
+	_ = hubsettingFields
+	// hubsettingDescSection is the schema descriptor for section field.
+	hubsettingDescSection := hubsettingFields[1].Descriptor()
+	// hubsetting.SectionValidator is a validator for the "section" field. It is called by the builders before save.
+	hubsetting.SectionValidator = hubsettingDescSection.Validators[0].(func(string) error)
+	// hubsettingDescRevision is the schema descriptor for revision field.
+	hubsettingDescRevision := hubsettingFields[3].Descriptor()
+	// hubsetting.DefaultRevision holds the default value on creation for the revision field.
+	hubsetting.DefaultRevision = hubsettingDescRevision.Default.(int64)
+	// hubsettingDescCreateTime is the schema descriptor for create_time field.
+	hubsettingDescCreateTime := hubsettingFields[5].Descriptor()
+	// hubsetting.DefaultCreateTime holds the default value on creation for the create_time field.
+	hubsetting.DefaultCreateTime = hubsettingDescCreateTime.Default.(func() time.Time)
+	// hubsettingDescUpdateTime is the schema descriptor for update_time field.
+	hubsettingDescUpdateTime := hubsettingFields[6].Descriptor()
+	// hubsetting.DefaultUpdateTime holds the default value on creation for the update_time field.
+	hubsetting.DefaultUpdateTime = hubsettingDescUpdateTime.Default.(func() time.Time)
+	// hubsetting.UpdateDefaultUpdateTime holds the default value on update for the update_time field.
+	hubsetting.UpdateDefaultUpdateTime = hubsettingDescUpdateTime.UpdateDefault.(func() time.Time)
+	// hubsettingDescID is the schema descriptor for id field.
+	hubsettingDescID := hubsettingFields[0].Descriptor()
+	// hubsetting.DefaultID holds the default value on creation for the id field.
+	hubsetting.DefaultID = hubsettingDescID.Default.(func() uuid.UUID)
 	integrationconfigFields := schema.IntegrationConfig{}.Fields()
 	_ = integrationconfigFields
 	// integrationconfigDescIntegration is the schema descriptor for integration field.

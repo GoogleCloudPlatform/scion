@@ -30,6 +30,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/group"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/groupmembership"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/harnessconfig"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/hubsetting"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/integrationconfig"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/integrationupdate"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/invitecode"
@@ -90,6 +91,8 @@ type Client struct {
 	GroupMembership *GroupMembershipClient
 	// HarnessConfig is the client for interacting with the HarnessConfig builders.
 	HarnessConfig *HarnessConfigClient
+	// HubSetting is the client for interacting with the HubSetting builders.
+	HubSetting *HubSettingClient
 	// IntegrationConfig is the client for interacting with the IntegrationConfig builders.
 	IntegrationConfig *IntegrationConfigClient
 	// IntegrationUpdate is the client for interacting with the IntegrationUpdate builders.
@@ -165,6 +168,7 @@ func (c *Client) init() {
 	c.Group = NewGroupClient(c.config)
 	c.GroupMembership = NewGroupMembershipClient(c.config)
 	c.HarnessConfig = NewHarnessConfigClient(c.config)
+	c.HubSetting = NewHubSettingClient(c.config)
 	c.IntegrationConfig = NewIntegrationConfigClient(c.config)
 	c.IntegrationUpdate = NewIntegrationUpdateClient(c.config)
 	c.InviteCode = NewInviteCodeClient(c.config)
@@ -296,6 +300,7 @@ func (c *Client) Tx(ctx context.Context) (*Tx, error) {
 		Group:                    NewGroupClient(cfg),
 		GroupMembership:          NewGroupMembershipClient(cfg),
 		HarnessConfig:            NewHarnessConfigClient(cfg),
+		HubSetting:               NewHubSettingClient(cfg),
 		IntegrationConfig:        NewIntegrationConfigClient(cfg),
 		IntegrationUpdate:        NewIntegrationUpdateClient(cfg),
 		InviteCode:               NewInviteCodeClient(cfg),
@@ -354,6 +359,7 @@ func (c *Client) BeginTx(ctx context.Context, opts *sql.TxOptions) (*Tx, error) 
 		Group:                    NewGroupClient(cfg),
 		GroupMembership:          NewGroupMembershipClient(cfg),
 		HarnessConfig:            NewHarnessConfigClient(cfg),
+		HubSetting:               NewHubSettingClient(cfg),
 		IntegrationConfig:        NewIntegrationConfigClient(cfg),
 		IntegrationUpdate:        NewIntegrationUpdateClient(cfg),
 		InviteCode:               NewInviteCodeClient(cfg),
@@ -411,9 +417,9 @@ func (c *Client) Use(hooks ...Hook) {
 		c.AccessPolicy, c.Agent, c.AllowListEntry, c.ApiKey, c.BrokerDispatch,
 		c.BrokerJoinToken, c.BrokerSecret, c.DiscordPendingLink, c.EnvVar,
 		c.GCPServiceAccount, c.GithubInstallation, c.Group, c.GroupMembership,
-		c.HarnessConfig, c.IntegrationConfig, c.IntegrationUpdate, c.InviteCode,
-		c.LifecycleHook, c.LifecycleHookAgentPhase, c.MaintenanceOperation,
-		c.MaintenanceOperationRun, c.Message, c.Notification,
+		c.HarnessConfig, c.HubSetting, c.IntegrationConfig, c.IntegrationUpdate,
+		c.InviteCode, c.LifecycleHook, c.LifecycleHookAgentPhase,
+		c.MaintenanceOperation, c.MaintenanceOperationRun, c.Message, c.Notification,
 		c.NotificationSubscription, c.PolicyBinding, c.Project, c.ProjectContributor,
 		c.ProjectSyncState, c.RuntimeBroker, c.Schedule, c.ScheduledEvent, c.Secret,
 		c.Skill, c.SkillRegistry, c.SkillVersion, c.SubscriptionTemplate, c.Template,
@@ -430,9 +436,9 @@ func (c *Client) Intercept(interceptors ...Interceptor) {
 		c.AccessPolicy, c.Agent, c.AllowListEntry, c.ApiKey, c.BrokerDispatch,
 		c.BrokerJoinToken, c.BrokerSecret, c.DiscordPendingLink, c.EnvVar,
 		c.GCPServiceAccount, c.GithubInstallation, c.Group, c.GroupMembership,
-		c.HarnessConfig, c.IntegrationConfig, c.IntegrationUpdate, c.InviteCode,
-		c.LifecycleHook, c.LifecycleHookAgentPhase, c.MaintenanceOperation,
-		c.MaintenanceOperationRun, c.Message, c.Notification,
+		c.HarnessConfig, c.HubSetting, c.IntegrationConfig, c.IntegrationUpdate,
+		c.InviteCode, c.LifecycleHook, c.LifecycleHookAgentPhase,
+		c.MaintenanceOperation, c.MaintenanceOperationRun, c.Message, c.Notification,
 		c.NotificationSubscription, c.PolicyBinding, c.Project, c.ProjectContributor,
 		c.ProjectSyncState, c.RuntimeBroker, c.Schedule, c.ScheduledEvent, c.Secret,
 		c.Skill, c.SkillRegistry, c.SkillVersion, c.SubscriptionTemplate, c.Template,
@@ -473,6 +479,8 @@ func (c *Client) Mutate(ctx context.Context, m Mutation) (Value, error) {
 		return c.GroupMembership.mutate(ctx, m)
 	case *HarnessConfigMutation:
 		return c.HarnessConfig.mutate(ctx, m)
+	case *HubSettingMutation:
+		return c.HubSetting.mutate(ctx, m)
 	case *IntegrationConfigMutation:
 		return c.IntegrationConfig.mutate(ctx, m)
 	case *IntegrationUpdateMutation:
@@ -2579,6 +2587,139 @@ func (c *HarnessConfigClient) mutate(ctx context.Context, m *HarnessConfigMutati
 		return (&HarnessConfigDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
 	default:
 		return nil, fmt.Errorf("ent: unknown HarnessConfig mutation op: %q", m.Op())
+	}
+}
+
+// HubSettingClient is a client for the HubSetting schema.
+type HubSettingClient struct {
+	config
+}
+
+// NewHubSettingClient returns a client for the HubSetting from the given config.
+func NewHubSettingClient(c config) *HubSettingClient {
+	return &HubSettingClient{config: c}
+}
+
+// Use adds a list of mutation hooks to the hooks stack.
+// A call to `Use(f, g, h)` equals to `hubsetting.Hooks(f(g(h())))`.
+func (c *HubSettingClient) Use(hooks ...Hook) {
+	c.hooks.HubSetting = append(c.hooks.HubSetting, hooks...)
+}
+
+// Intercept adds a list of query interceptors to the interceptors stack.
+// A call to `Intercept(f, g, h)` equals to `hubsetting.Intercept(f(g(h())))`.
+func (c *HubSettingClient) Intercept(interceptors ...Interceptor) {
+	c.inters.HubSetting = append(c.inters.HubSetting, interceptors...)
+}
+
+// Create returns a builder for creating a HubSetting entity.
+func (c *HubSettingClient) Create() *HubSettingCreate {
+	mutation := newHubSettingMutation(c.config, OpCreate)
+	return &HubSettingCreate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// CreateBulk returns a builder for creating a bulk of HubSetting entities.
+func (c *HubSettingClient) CreateBulk(builders ...*HubSettingCreate) *HubSettingCreateBulk {
+	return &HubSettingCreateBulk{config: c.config, builders: builders}
+}
+
+// MapCreateBulk creates a bulk creation builder from the given slice. For each item in the slice, the function creates
+// a builder and applies setFunc on it.
+func (c *HubSettingClient) MapCreateBulk(slice any, setFunc func(*HubSettingCreate, int)) *HubSettingCreateBulk {
+	rv := reflect.ValueOf(slice)
+	if rv.Kind() != reflect.Slice {
+		return &HubSettingCreateBulk{err: fmt.Errorf("calling to HubSettingClient.MapCreateBulk with wrong type %T, need slice", slice)}
+	}
+	builders := make([]*HubSettingCreate, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		builders[i] = c.Create()
+		setFunc(builders[i], i)
+	}
+	return &HubSettingCreateBulk{config: c.config, builders: builders}
+}
+
+// Update returns an update builder for HubSetting.
+func (c *HubSettingClient) Update() *HubSettingUpdate {
+	mutation := newHubSettingMutation(c.config, OpUpdate)
+	return &HubSettingUpdate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOne returns an update builder for the given entity.
+func (c *HubSettingClient) UpdateOne(_m *HubSetting) *HubSettingUpdateOne {
+	mutation := newHubSettingMutation(c.config, OpUpdateOne, withHubSetting(_m))
+	return &HubSettingUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOneID returns an update builder for the given id.
+func (c *HubSettingClient) UpdateOneID(id uuid.UUID) *HubSettingUpdateOne {
+	mutation := newHubSettingMutation(c.config, OpUpdateOne, withHubSettingID(id))
+	return &HubSettingUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// Delete returns a delete builder for HubSetting.
+func (c *HubSettingClient) Delete() *HubSettingDelete {
+	mutation := newHubSettingMutation(c.config, OpDelete)
+	return &HubSettingDelete{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// DeleteOne returns a builder for deleting the given entity.
+func (c *HubSettingClient) DeleteOne(_m *HubSetting) *HubSettingDeleteOne {
+	return c.DeleteOneID(_m.ID)
+}
+
+// DeleteOneID returns a builder for deleting the given entity by its id.
+func (c *HubSettingClient) DeleteOneID(id uuid.UUID) *HubSettingDeleteOne {
+	builder := c.Delete().Where(hubsetting.ID(id))
+	builder.mutation.id = &id
+	builder.mutation.op = OpDeleteOne
+	return &HubSettingDeleteOne{builder}
+}
+
+// Query returns a query builder for HubSetting.
+func (c *HubSettingClient) Query() *HubSettingQuery {
+	return &HubSettingQuery{
+		config: c.config,
+		ctx:    &QueryContext{Type: TypeHubSetting},
+		inters: c.Interceptors(),
+	}
+}
+
+// Get returns a HubSetting entity by its id.
+func (c *HubSettingClient) Get(ctx context.Context, id uuid.UUID) (*HubSetting, error) {
+	return c.Query().Where(hubsetting.ID(id)).Only(ctx)
+}
+
+// GetX is like Get, but panics if an error occurs.
+func (c *HubSettingClient) GetX(ctx context.Context, id uuid.UUID) *HubSetting {
+	obj, err := c.Get(ctx, id)
+	if err != nil {
+		panic(err)
+	}
+	return obj
+}
+
+// Hooks returns the client hooks.
+func (c *HubSettingClient) Hooks() []Hook {
+	return c.hooks.HubSetting
+}
+
+// Interceptors returns the client interceptors.
+func (c *HubSettingClient) Interceptors() []Interceptor {
+	return c.inters.HubSetting
+}
+
+func (c *HubSettingClient) mutate(ctx context.Context, m *HubSettingMutation) (Value, error) {
+	switch m.Op() {
+	case OpCreate:
+		return (&HubSettingCreate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdate:
+		return (&HubSettingUpdate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdateOne:
+		return (&HubSettingUpdateOne{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpDelete, OpDeleteOne:
+		return (&HubSettingDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
+	default:
+		return nil, fmt.Errorf("ent: unknown HubSetting mutation op: %q", m.Op())
 	}
 }
 
@@ -6040,23 +6181,23 @@ type (
 	hooks struct {
 		AccessPolicy, Agent, AllowListEntry, ApiKey, BrokerDispatch, BrokerJoinToken,
 		BrokerSecret, DiscordPendingLink, EnvVar, GCPServiceAccount,
-		GithubInstallation, Group, GroupMembership, HarnessConfig, IntegrationConfig,
-		IntegrationUpdate, InviteCode, LifecycleHook, LifecycleHookAgentPhase,
-		MaintenanceOperation, MaintenanceOperationRun, Message, Notification,
-		NotificationSubscription, PolicyBinding, Project, ProjectContributor,
-		ProjectSyncState, RuntimeBroker, Schedule, ScheduledEvent, Secret, Skill,
-		SkillRegistry, SkillVersion, SubscriptionTemplate, Template, User,
-		UserAccessToken []ent.Hook
+		GithubInstallation, Group, GroupMembership, HarnessConfig, HubSetting,
+		IntegrationConfig, IntegrationUpdate, InviteCode, LifecycleHook,
+		LifecycleHookAgentPhase, MaintenanceOperation, MaintenanceOperationRun,
+		Message, Notification, NotificationSubscription, PolicyBinding, Project,
+		ProjectContributor, ProjectSyncState, RuntimeBroker, Schedule, ScheduledEvent,
+		Secret, Skill, SkillRegistry, SkillVersion, SubscriptionTemplate, Template,
+		User, UserAccessToken []ent.Hook
 	}
 	inters struct {
 		AccessPolicy, Agent, AllowListEntry, ApiKey, BrokerDispatch, BrokerJoinToken,
 		BrokerSecret, DiscordPendingLink, EnvVar, GCPServiceAccount,
-		GithubInstallation, Group, GroupMembership, HarnessConfig, IntegrationConfig,
-		IntegrationUpdate, InviteCode, LifecycleHook, LifecycleHookAgentPhase,
-		MaintenanceOperation, MaintenanceOperationRun, Message, Notification,
-		NotificationSubscription, PolicyBinding, Project, ProjectContributor,
-		ProjectSyncState, RuntimeBroker, Schedule, ScheduledEvent, Secret, Skill,
-		SkillRegistry, SkillVersion, SubscriptionTemplate, Template, User,
-		UserAccessToken []ent.Interceptor
+		GithubInstallation, Group, GroupMembership, HarnessConfig, HubSetting,
+		IntegrationConfig, IntegrationUpdate, InviteCode, LifecycleHook,
+		LifecycleHookAgentPhase, MaintenanceOperation, MaintenanceOperationRun,
+		Message, Notification, NotificationSubscription, PolicyBinding, Project,
+		ProjectContributor, ProjectSyncState, RuntimeBroker, Schedule, ScheduledEvent,
+		Secret, Skill, SkillRegistry, SkillVersion, SubscriptionTemplate, Template,
+		User, UserAccessToken []ent.Interceptor
 	}
 )

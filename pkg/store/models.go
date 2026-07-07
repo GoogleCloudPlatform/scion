@@ -2068,6 +2068,23 @@ const (
 	SkillRegistryTrustPinned  = "pinned"
 )
 
+// =============================================================================
+// Hub Settings (Two-Tier Settings Architecture)
+// =============================================================================
+
+// HubSetting represents an operational hub setting stored in the database.
+// Each row corresponds to a section (e.g. "access", "telemetry") with a JSON
+// value containing the section's configuration.
+type HubSetting struct {
+	ID        string          `json:"id"`
+	Section   string          `json:"section"`
+	Value     json.RawMessage `json:"value"`
+	Revision  int64           `json:"revision"`
+	UpdatedBy string          `json:"updatedBy,omitempty"`
+	CreatedAt time.Time       `json:"createdAt"`
+	UpdatedAt time.Time       `json:"updatedAt"`
+}
+
 // SkillRegistryType constants
 const (
 	SkillRegistryTypeHub = "hub"

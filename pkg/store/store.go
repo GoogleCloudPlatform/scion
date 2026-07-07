@@ -16,6 +16,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"time"
 )
@@ -25,7 +26,8 @@ var (
 	ErrNotFound        = errors.New("not found")
 	ErrAlreadyExists   = errors.New("already exists")
 	ErrVersionConflict = errors.New("version conflict")
-	ErrInvalidInput    = errors.New("invalid input")
+	ErrInvalidInput      = errors.New("invalid input")
+	ErrRevisionConflict  = errors.New("revision conflict")
 )
 
 // Store defines the interface for Hub data persistence.
@@ -120,6 +122,9 @@ type Store interface {
 
 	// Skill Registry operations (Hub-to-Hub Federation)
 	SkillRegistryStore
+
+	// HubSetting operations (Two-Tier Settings Architecture)
+	HubSettingStore
 }
 
 // AgentStore defines agent-related persistence operations.
@@ -1305,4 +1310,30 @@ type SkillRegistryStore interface {
 	UnpinSkillHash(ctx context.Context, registryID string, uri string) error
 	GetPinnedHash(ctx context.Context, registryID string, uri string) (string, error)
 	ListPinnedHashes(ctx context.Context, registryID string) (map[string]string, error)
+}
+
+// =============================================================================
+// Hub Settings (Two-Tier Settings Architecture)
+// =============================================================================
+
+// HubSettingStore defines persistence operations for operational hub settings.
+// Each setting is a section (e.g. "access", "telemetry") with a JSON value.
+type HubSettingStore interface {
+	// GetHubSetting retrieves a hub setting by section name.
+	// Returns ErrNotFound if the section doesn't exist.
+	GetHubSetting(ctx context.Context, section string) (*HubSetting, error)
+
+	// ListHubSettings returns all hub settings.
+	ListHubSettings(ctx context.Context) ([]HubSetting, error)
+
+	// UpsertHubSetting creates or updates a hub setting with CAS semantics.
+	//   expectedRevision == 0:  create-only; returns ErrRevisionConflict if the section already exists.
+	//   expectedRevision == -1: unconditional upsert (used for seeding); always succeeds.
+	//   expectedRevision > 0:   CAS update; returns ErrRevisionConflict if current revision != expectedRevision.
+	UpsertHubSetting(ctx context.Context, section string, value json.RawMessage,
+		updatedBy string, expectedRevision int64) (*HubSetting, error)
+
+	// DeleteHubSetting removes a hub setting by section name.
+	// Returns ErrNotFound if the section doesn't exist.
+	DeleteHubSetting(ctx context.Context, section string) error
 }

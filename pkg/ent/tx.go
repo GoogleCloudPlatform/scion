@@ -40,6 +40,8 @@ type Tx struct {
 	GroupMembership *GroupMembershipClient
 	// HarnessConfig is the client for interacting with the HarnessConfig builders.
 	HarnessConfig *HarnessConfigClient
+	// HubSetting is the client for interacting with the HubSetting builders.
+	HubSetting *HubSettingClient
 	// IntegrationConfig is the client for interacting with the IntegrationConfig builders.
 	IntegrationConfig *IntegrationConfigClient
 	// IntegrationUpdate is the client for interacting with the IntegrationUpdate builders.
@@ -235,6 +237,7 @@ func (tx *Tx) init() {
 	tx.Group = NewGroupClient(tx.config)
 	tx.GroupMembership = NewGroupMembershipClient(tx.config)
 	tx.HarnessConfig = NewHarnessConfigClient(tx.config)
+	tx.HubSetting = NewHubSettingClient(tx.config)
 	tx.IntegrationConfig = NewIntegrationConfigClient(tx.config)
 	tx.IntegrationUpdate = NewIntegrationUpdateClient(tx.config)
 	tx.InviteCode = NewInviteCodeClient(tx.config)

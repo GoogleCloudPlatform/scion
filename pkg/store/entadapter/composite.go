@@ -55,6 +55,7 @@ type CompositeStore struct {
 	*LifecycleHookStore
 	*SkillStore
 	*SkillRegistryStore
+	*HubSettingStore
 
 	client *ent.Client
 }
@@ -87,6 +88,7 @@ func NewCompositeStore(client *ent.Client) *CompositeStore {
 		LifecycleHookStore:  NewLifecycleHookStore(client),
 		SkillStore:          NewSkillStore(client),
 		SkillRegistryStore:  NewSkillRegistryStore(client),
+		HubSettingStore:     NewHubSettingStore(client),
 		client:              client,
 	}
 }
