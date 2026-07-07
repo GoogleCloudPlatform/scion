@@ -27,6 +27,7 @@ import (
 const (
 	projectSettingDefaultTemplate      = "scion.io/default-template"
 	projectSettingDefaultHarnessConfig = "scion.io/default-harness-config"
+	projectSettingDefaultModel         = "scion.io/default-model"
 	projectSettingTelemetryEnabled     = "scion.io/telemetry-enabled"
 	projectSettingActiveProfile        = "scion.io/active-profile"
 
@@ -129,6 +130,7 @@ func projectSettingsFromAnnotations(project *store.Project) *hubclient.ProjectSe
 
 	settings.DefaultTemplate = project.Annotations[projectSettingDefaultTemplate]
 	settings.DefaultHarnessConfig = project.Annotations[projectSettingDefaultHarnessConfig]
+	settings.DefaultModel = project.Annotations[projectSettingDefaultModel]
 	settings.ActiveProfile = project.Annotations[projectSettingActiveProfile]
 
 	if val, ok := project.Annotations[projectSettingTelemetryEnabled]; ok {
@@ -194,6 +196,7 @@ func applyProjectSettingsToAnnotations(project *store.Project, settings *hubclie
 
 	setOrDelete(project.Annotations, projectSettingDefaultTemplate, settings.DefaultTemplate)
 	setOrDelete(project.Annotations, projectSettingDefaultHarnessConfig, settings.DefaultHarnessConfig)
+	setOrDelete(project.Annotations, projectSettingDefaultModel, settings.DefaultModel)
 	setOrDelete(project.Annotations, projectSettingActiveProfile, settings.ActiveProfile)
 
 	if settings.TelemetryEnabled != nil {
@@ -269,6 +272,11 @@ func applyProjectDefaults(ac *store.AgentAppliedConfig, project *store.Project) 
 	// Apply default harness config (only if not already set)
 	if ac.HarnessConfig == "" && settings.DefaultHarnessConfig != "" {
 		ac.HarnessConfig = settings.DefaultHarnessConfig
+	}
+
+	// Apply default model (only if not already set by agent/template/CLI)
+	if ac.Model == "" && settings.DefaultModel != "" {
+		ac.Model = settings.DefaultModel
 	}
 
 	// Check if there are any project limit/resource defaults to apply

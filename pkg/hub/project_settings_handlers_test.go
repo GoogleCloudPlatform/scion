@@ -208,6 +208,63 @@ func TestApplyProjectDefaults_HarnessConfig(t *testing.T) {
 	})
 }
 
+func TestProjectSettings_DefaultModel(t *testing.T) {
+	srv, s := testServer(t)
+	project := createTestProjectForSettings(t, s)
+
+	putBody := hubclient.ProjectSettings{
+		DefaultModel: "claude-sonnet-5",
+	}
+
+	rec := doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+project.ID+"/settings", putBody)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	var putResp hubclient.ProjectSettings
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&putResp))
+	assert.Equal(t, "claude-sonnet-5", putResp.DefaultModel)
+
+	// GET should return persisted value
+	rec = doRequest(t, srv, http.MethodGet, "/api/v1/projects/"+project.ID+"/settings", nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var getResp hubclient.ProjectSettings
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&getResp))
+	assert.Equal(t, "claude-sonnet-5", getResp.DefaultModel)
+
+	// Clear by sending empty value
+	clearBody := hubclient.ProjectSettings{}
+	rec = doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+project.ID+"/settings", clearBody)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var clearResp hubclient.ProjectSettings
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&clearResp))
+	assert.Empty(t, clearResp.DefaultModel)
+}
+
+func TestApplyProjectDefaults_Model(t *testing.T) {
+	t.Run("applies default model when empty", func(t *testing.T) {
+		project := &store.Project{
+			Annotations: map[string]string{
+				"scion.io/default-model": "claude-sonnet-5",
+			},
+		}
+		ac := &store.AgentAppliedConfig{}
+		applyProjectDefaults(ac, project)
+		assert.Equal(t, "claude-sonnet-5", ac.Model)
+	})
+
+	t.Run("does not override explicit model", func(t *testing.T) {
+		project := &store.Project{
+			Annotations: map[string]string{
+				"scion.io/default-model": "claude-sonnet-5",
+			},
+		}
+		ac := &store.AgentAppliedConfig{Model: "claude-opus-4"}
+		applyProjectDefaults(ac, project)
+		assert.Equal(t, "claude-opus-4", ac.Model)
+	})
+}
+
 func TestProjectSettings_DefaultGCPIdentity(t *testing.T) {
 	srv, s := testServer(t)
 	project := createTestProjectForSettings(t, s)
