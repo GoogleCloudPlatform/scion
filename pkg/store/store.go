@@ -23,11 +23,11 @@ import (
 
 // Common errors returned by store implementations.
 var (
-	ErrNotFound        = errors.New("not found")
-	ErrAlreadyExists   = errors.New("already exists")
-	ErrVersionConflict = errors.New("version conflict")
-	ErrInvalidInput      = errors.New("invalid input")
-	ErrRevisionConflict  = errors.New("revision conflict")
+	ErrNotFound         = errors.New("not found")
+	ErrAlreadyExists    = errors.New("already exists")
+	ErrVersionConflict  = errors.New("version conflict")
+	ErrInvalidInput     = errors.New("invalid input")
+	ErrRevisionConflict = errors.New("revision conflict")
 )
 
 // Store defines the interface for Hub data persistence.

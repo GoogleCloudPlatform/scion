@@ -261,8 +261,8 @@ func TestUpsertHubSetting_ConcurrentCASRace(t *testing.T) {
 
 	const goroutines = 10
 	var (
-		wg       sync.WaitGroup
-		wins     atomic.Int32
+		wg        sync.WaitGroup
+		wins      atomic.Int32
 		conflicts atomic.Int32
 	)
 
