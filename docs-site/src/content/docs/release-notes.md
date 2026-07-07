@@ -2,6 +2,455 @@
 title: Release Notes
 ---
 
+## Jul 5, 2026
+
+The largest single commit in recent history landed: Phase 5 HA (Mode 3) support — a complete high-availability architecture for chat integrations with gRPC broker protocol, advisory lock failover, standalone Discord deployment, and an integration runtime library. Platform skills also became embedded in the binary.
+
+### 🚀 Features
+* **[HA]:** Phase 5 HA (Mode 3) support — a sweeping ~26,600-line change across 92 files delivering:
+  - **gRPC broker protocol** (`proto/broker/v1/`) for cross-process integration communication with adapter, factory, and server
+  - **Integration runtime library** (`pkg/integration/runtime/`) with config resolution (DB > env > YAML layering), admin signal listener, update signal handling with status write-back, and schema retry with backoff
+  - **Standalone Discord entry point** with `--standalone` flag, Postgres-backed `discord_pending_links`, advisory lock loop with takeover delay and lock-loss detection, gRPC health service, and graceful shutdown ordering
+  - **Transactional NOTIFY** for admin signals, cross-integration ID leakage guards, `updated_by` tracking
+  - **PostgresConfigProvider** for HA config persistence replacing YAML-only storage
+  - Multi-stage Dockerfile and comprehensive standalone deployment documentation (#608)
+* **[Agent]:** Platform skills embedded in binary via `go:embed` and injected into all agents at provisioning time — `scion`, `scion-cli-operations`, `scion-messaging`, `agent-status-signals`, `team-creation`, and `git-sandbox` (conditional on `isGit=true`). Runs after template skills but before workspace skills (#610).
+
+### 🐛 Fixes
+* **[Hub]:** Check hub-scoped env vars in `hasAnyKey` credential check — child agents whose owner is a parent agent (not a human user) can now find credentials at hub scope (#611).
+* **[Claude]:** Fixed env overlay variable resolution in `provision.py` — values now read from `auth_candidates.json` or staged secrets instead of `os.environ`, with `_resolve()` fallback to shell references (#607).
+* **[Claude]:** Expanded env var references in Vertex AI env overlay — replaced literal `'${VAR_NAME}'` strings with actual `os.environ.get()` calls across all auth branches (#606).
+
+## Jul 4, 2026
+
+A quieter holiday day focused on auth correctness: the hub's credential detection was fixed to evaluate all config-driven auth types, GCP service account assignments are now honored for file-based credential skipping, and several regressions from the builtin harness removal were patched.
+
+### 🐛 Fixes
+* **[Hub]:** Fixed `hasRequiredAuthCredentials` to auto-detect auth type before checking requirements — when `HarnessAuth` is empty (auto mode), the hub now iterates all auth types from `authMeta.Types` instead of short-circuiting on the compiled api-key default. Correctly detects file-based credentials like `CODEX_AUTH` and `gcloud-adc` (#605).
+* **[Hub]:** Honor `skipped_when_gcp_service_account_assigned` — when a project has a verified GCP service account, file requirements marked with this flag are treated as satisfied, preventing false no-auth fallback (#604).
+* **[Hub]:** Accept `projectPath`/`projectSlug` keys in broker `startAgent` handler for backwards compatibility.
+* **[Harness]:** Restored missing `StageCaptureAuthAssets` call in `provision.go` — the builtin harness removal (#600) accidentally deleted this line, causing a build error.
+* **[Shell]:** Improved bash shebang lines to use `#!/usr/bin/env bash` consistently, avoiding stale bash versions.
+
+## Jul 3, 2026
+
+A milestone cleanup and expansion day: the entire builtin harness system was deleted (-3486 lines), Slack landed as a full chat integration, the hub gained graceful SSE reconnect for Cloud Run, and Claude's provisioner received OAuth capture and Vertex AI fixes.
+
+### 🚀 Features
+* **[Slack]:** Full Slack chat integration as a standalone plugin module — Events API and Socket Mode support, Block Kit formatting, slash command tree (`/scion setup, register, msg, agents, status`), ask-user modal flow, SQLite state store with WAL, hub API client with HMAC signing, per-user registration with code flow (#591).
+* **[Slack]:** Slack integration management added to the chat admin UI (#599).
+* **[Hub]:** Auto no-auth fallback in pre-dispatch validation — when auth is `auto` and the harness supports `drop-to-shell`, the hub now accepts the agent without credentials instead of rejecting it for missing env vars (#595).
+* **[Hub]:** `SCION_IMAGE_REGISTRY` env var takes precedence over `settings.yaml` for image registry resolution (#594).
+
+### 🐛 Fixes
+* **[Hub]:** Graceful SSE reconnect before Cloud Run's 3600s hard timeout — server sends a `reconnect` event at 3500s and closes cleanly so the client auto-reconnects per the SSE spec (#590).
+* **[Hub]:** Fixed `BootstrapBundledResources` to update existing configs when content changes — split skip logic into `SkipCreate` (respects user deletions) and an always-run update path with content hash comparison (#592, #596).
+* **[Claude]:** Fixed Vertex AI auth detection in `provision.py` (#598).
+* **[Claude]:** Capture OAuth token (`sk-ant`) from `setup-token` as `CLAUDE_CODE_OAUTH_TOKEN`, restricted to `oat` prefix and most-recent token (#587).
+* **[Claude]:** Added `fable` as XL model alias and updated no-auth login command.
+* **[Agent]:** Fixed no-auth auto-resolve UI — `HarnessAuth="none"` now propagated back through broker response so the web UI shows the Capture Auth button correctly. Auth method display shows resolved method instead of "container-script" (#586).
+* **[Message]:** Closed remaining silent-drop gaps for `--plain`/`--notify`/`--channel` flag combinations with `--in`/`--at` and local mode (#584).
+* **[Harness]:** Image status follow-up fixes — error propagation, nil checks, file permissions, atomic write, and `ValidateStorage` hash error handling (#585, #593).
+* **[Gemini]:** Set Gemini CLI default model to 3.5 Flash.
+* **[Hub]:** Address review comments on `handlers_integrations.go` (#588).
+* **[CI]:** Fixed `gofmt` struct field alignment in `types.go` and `models.go` (#589).
+
+### 🗑️ Removals
+* **[Harness]:** Removed the entire dead builtin harness system — **-3486 lines**. All harnesses now use container-script provisioning (#600).
+
+### 🔧 Chores
+* **[Deps]:** Bumped `golang.org/x/net` in scion-broker-log (#597).
+
+## Jul 2, 2026
+
+A day of polish and depth: harness-config images gained build status tracking with registry probing, the plugin system got hub-mediated install/update flows, skills and templates were factored across repos, and no-auth provisioning learned to auto-fallback gracefully.
+
+### 🚀 Features
+* **[Harness]:** Track and display container image status per harness-config — new `image_status` column with local and remote registry checks (including anonymous Docker Hub auth), async refresh on detail page, startup recheck with errgroup concurrency, and list/filter/badge UI (#583).
+* **[Harness]:** No-auth auto-fallback and auto-run suggested command — when no credentials are available, provisioning falls back to no-auth mode automatically and surfaces the suggested auth command (#582).
+* **[Harness]:** Auto-inject workspace skills during provisioning — skills in the workspace `skills/` directory are automatically made available to agents at provision time (#573).
+* **[Chat Admin]:** Hub-mediated plugin updates and first-time install (Phase 4) — `UpdatePlugin` rebuilds from source and restarts, `InstallPlugin` handles first-time build+load, `GET /integrations/available` lists installable plugins, and `FanOutEventBus` gains mutex-protected spoke management for thread-safe dynamic plugin lifecycle (#570).
+* **[Web]:** Labels card on agent detail Configuration tab — displays agent labels as `sl-tag` pills, hidden when no labels are set (#581).
+
+### 🐛 Fixes
+* **[Capture Auth]:** Propagate exec exit codes and standardize conflict handling — broker now unwraps `exec.ExitError` for real exit codes instead of hardcoding 0. All `capture_auth.py` scripts detect "already exists" and exit with code 3 (`EXIT_CONFLICT`), parsed by a frontend dialog offering Force Update or Cancel (#577).
+* **[Build]:** Slimmed Cloud Build source upload from ~2365 files / 38.5 MiB to ~942 files / 12.5 MiB via `.gcloudignore`, with anchored patterns to preserve `image-build/scripts/` and template embeds (#579).
+* **[Build]:** Included Dockerfiles in cloud-build context and refocused build pipeline on harness catalog with gemini-cli build step (#576).
+* **[Build]:** Run `go mod tidy` before `go build` in plugin install/update to prevent stale module errors (#574).
+* **[Hermes]:** Added `--break-system-packages` to pip install for PEP 668 compatibility (#580).
+* **[Hermes]:** Installed `python3-pip` in Hermes harness Dockerfile (#578).
+* **[Antigravity]:** Bumped AGY_VERSION to 1.0.16 in Dockerfile.
+* **[Base]:** Added Playwright CLI to base image.
+
+### 🔄 Refactor
+* **[Skills/Templates]:** Factored skills and templates across scion, teamv1, and contrib repos — created `scion-cli-operations` and `git-sandbox` workspace skills, promoted `scion-messaging` and `agent-status-signals` from teamv1, moved fork templates to correct destinations, retired status boilerplate from default `agents.md` (#575).
+
+### 📖 Docs
+* **[Glossary]:** Reworked Modes section with availability tiers (single-node hosted vs HA hosted) and tenancy as an orthogonal dimension (#571, #572).
+
+## Jul 1, 2026
+
+A massive infrastructure day: the harness system was refactored from compiled builtins to a bundled resource catalog with directory-based provisioning, a Gemini CLI harness shipped, chat integration admin landed across API and UI phases, the A2A bridge adopted the official SDK, and HA reliability received targeted fixes.
+
+### 🚀 Features
+* **[Harness]:** Normalized Claude to directory-based provisioning — moves Claude's harness config from compiled Go code to a standalone `harnesses/claude/` directory, completing the pattern established by PR #279's `provision.py` migration (#548).
+* **[Resources]:** Introduced bundled resource catalog for Templates and Harness-configs — embedded resources are now declared in a catalog and promoted through a `ResourceSource` interface with `BootstrapSource` for the hosted startup path and `MaterializeBundledResources` for workstation local seeding (#549, #550, #551, #552).
+* **[Harness]:** Gemini CLI container-script harness bundle — full provisioning model with API key/OAuth/Vertex AI auth detection, model aliases, `capture_auth.py`, Dockerfile, and Cloud Build config. Migrates Gemini from the builtin harness to the same pattern as Claude (#563).
+* **[Build]:** Refocused image builds on base image and harness catalog — build pipeline now produces a single `scion-base` image plus per-harness images from the catalog (#561).
+* **[Chat Admin]:** Chat integration admin API endpoints (Phase 2) — CRUD operations for managing integration plugins via the Hub API (#543).
+* **[Chat Admin]:** Chat integration admin UI (Phase 3) — new `/admin/integrations` page with list/detail views, config forms, secrets management, and restart controls (#556).
+* **[A2A Bridge]:** Adopted the official `a2a-go` SDK for protocol handling — replaces hand-rolled JSON-RPC with spec-compliant server, `ScionExecutor` bridges SDK events to Scion Hub routing. Preserves auth, metrics, and multi-project routing (#362).
+* **[Hub]:** HA robustness improvements — added scheduler jitter (0-30s) and increased non-critical task intervals from 1 to 5 minutes to prevent DB connection thundering herd. Idempotent broker secret for co-located mode survives Cloud Run restarts (#555).
+* **[Hub]:** Storage validation, repair, and CLI `validate` commands for diagnosing and fixing storage inconsistencies (#553).
+
+### 🐛 Fixes
+* **[Agent]:** Exclude soft-deleted agents from slug lookup and clean stale directories (#547).
+* **[Message]:** Reject `--attach` in local (no-Hub) mode instead of silently dropping attachments — also rejects `--attach` combined with `--in`/`--at` since scheduled sends don't carry attachments.
+* **[Build]:** Skip image registry rewrite for fully qualified references — prevents double-prefixing when images already include a registry hostname (#566).
+* **[Web]:** Dir-browser UX improvements and safety fixes (#559).
+* **[Server]:** Improved server lifecycle reliability (#558).
+* **[Config]:** Updated `allow_container_script_harnesses` default to `true` in schema (#557).
+* **[Config]:** Misc correctness fixes — Makefile, `InitProject`, GitHub URL import (#560).
+* **[Web]:** Added plug icon to bundle and hidden `bot_id` from config UI (#562).
+* **[Harness]:** Removed legacy seeding dead code and fixed logger subsystem (#554).
+
+### 📖 Docs
+* **[Build]:** Warned that `go install` produces a blank web UI and fixed build-from-clone steps (#565).
+
+### 🔧 Chores
+* **[Deps]:** Bumped `golang.org/x/net` in A2A bridge (#569).
+
+## Jun 30, 2026
+
+A landmark feature landed: the managed agent backend, enabling Scion to orchestrate cloud-hosted agents (starting with Google's Gemini API) alongside its existing container-based runtime. The glossary was also ported to the repo root.
+
+### 🚀 Features
+* **[Managed Agent]:** Added the `ManagedAgentBackend` interface and Google API client — introduces a new execution path where `ManagedAgentManager` implements the existing `Manager` interface but delegates to a cloud API instead of a local Runtime+Harness pair. The first backend targets `generativelanguage.googleapis.com` (Gemini API). Includes SSE stream parser, hub handlers for managed agent CRUD, design document, and ~2800 lines of new code across 21 files (#541).
+
+### 📖 Docs
+* **[Glossary]:** Ported runtime broker taxonomy to root `GLOSSARY.md` — updated Runtime Broker definition and added Node-Bound Broker, Proxy Broker, Embedded Broker, Hosted Broker, and Managed Agent entries from the docs-site glossary (#546).
+
+## Jun 29, 2026
+
+The biggest day in weeks: the Claude harness was migrated from builtin to container-script provisioning, a full Cloud Run HA deployment stack landed (Dockerfile, IAP auth, stateless broker routing, Postgres locking), agent labels shipped as a core feature, and chat integrations began a config refactor with secrets migration.
+
+### 🚀 Features
+* **[Harness]:** Migrated Claude harness from builtin to container-script provisioning — `provision.py` handles Claude's 4-way auth precedence (API key → OAuth → auth-file → Vertex AI), API key pre-approval, MCP server translation, and env var overlay. Includes parity tests verifying identical output to the compiled harness. Compiled fallback preserved for existing installations (#279).
+* **[Hub]:** Chat integration config refactor + secrets migration (Phase 1) — added `IntegrationConfigProvider` with YAML-based per-integration config files, well-known secret key constants for Telegram/Discord/Google Chat, and a `LoadPluginConfigFile` helper that merges file-based config with inline config while filtering secrets (#537).
+* **[Agent]:** Agent-specific key-value labels added to the core data model — labels can be set at creation time, displayed on agent detail pages, and filtered/sorted in the agent list view (#531).
+* **[Hub]:** Multi-stage `Dockerfile.hub` for Scion Hub — builds frontend assets, embeds them in the Go binary, uses `CGO_ENABLED=0` for a static binary compatible with Debian runtime. Iteratively refined through several commits to fix npm scripts, web asset embedding, and root Dockerfile sync.
+* **[Hub]:** IAP proxy auth middleware for Cloud Run — creates hub sessions from IAP identity headers, re-evaluates admin role on every request (not just login), and reduces DB connection pool size for hosted deployments (#530 follow-up).
+* **[Deployment]:** Reworked Cloud Run HA deployment config — overhauled `deploy.sh` and `hub-settings-template.yaml` with fail-closed HA preflight checks, stateless broker lifecycle routing, IAP audience normalization, and Postgres advisory locking for safe concurrent migrations.
+
+### 🐛 Fixes
+* **[Hub]:** Expire stuck pending messages in broker-message-sweep — messages that remain in `pending` status beyond a threshold are now cleaned up automatically (#545).
+* **[Hub]:** Narrowed hosted HA preflight to actual HA deployments — previously the preflight blocked single-instance startups that happened to have Postgres configured (#544).
+* **[Runtime]:** Made `SCION_FORCE_HOST_NETWORK` escape hatch runtime-agnostic — works correctly with Docker, Podman, and Apple Container instead of assuming Docker-only semantics.
+* **[Hub]:** Stateless Cloud Run broker routing — `deriveCloudRunLogicalBrokerID` now returns errors when project/region is unavailable instead of proceeding with empty values.
+* **[Hub]:** IAP audience trailing-slash trimming and `render_settings` escaping fix for deploy scripts.
+* **[Hub]:** Postgres migration advisory lock with proper error handling on deferred unlock, preventing concurrent migration races.
+* **[CI]:** Resolved `gofmt` and `golangci-lint` failures on main (#538).
+
+### 📖 Docs
+* **[Glossary]:** Revised runtime broker glossary with broker taxonomy — node-bound vs proxy, standalone vs embedded — with entries for Hosted Broker, Managed Agent, and cross-references (#539, #540).
+
+### 🔧 Chores
+* **[Changelog]:** Merged June 28 entry (#529 follow-up).
+
+## Jun 28, 2026
+
+A large batch of platform improvements landed: Apple Container gained build support and DNS connectivity, a new Hermes Agent harness shipped, Cloud Build became an alternative image builder, and the auth pipeline was decoupled from harness-specific Go code. Chat integrations received several reliability fixes.
+
+### 🚀 Features
+* **[Runtime]:** Apple Container added as a build-capable runtime on macOS — `DetectContainerRuntime()` now discovers the `container` binary (Apple Virtualization framework), and tag/push commands use the cross-runtime `image` subcommand form (#509).
+* **[Runtime]:** Apple Container DNS support for Hub connectivity — when using the `container` runtime, `EnsureAppleDNS` creates a DNS rule so agent containers can resolve the Hub API endpoint. Onboarding UI triggers setup automatically when Apple Container is selected (#528).
+* **[Harness]:** Hermes Agent harness bundle — complete scaffold with API key auth (Anthropic > OpenAI > Google AI Studio precedence), instruction projection into `AGENTS.md`, MCP server config, model alias resolution, capture-auth for no-auth flow, and 16 provision tests (#519).
+* **[Build]:** Google Cloud Build support for harness-config image builds — new `CloudBuildHarnessConfigExecutor` uploads build context to GCS, submits multi-arch builds (`linux/amd64,linux/arm64`), and streams logs. CLI gains `--builder cloud-build` flag. System status API exposes Cloud Build availability for the frontend (#521).
+* **[Auth]:** Decoupled auth pipeline from harness-specific Go code (Phases 1-2) — harness-config hydration now runs during the env-gather pre-check so config-driven auth metadata is available before the broker requests env vars. Generic `EnvVars` map on `AuthConfig` replaces hardcoded paths; the Copilot harness's GitHub tokens now flow through config alone (#516).
+* **[Agent]:** Retry with exponential backoff and two-layer TTL cache for the GitHub skill resolver (#525).
+* **[Web]:** Moved Capture Auth button to the terminal page for easier access (#520).
+
+### 🐛 Fixes
+* **[Hub]:** Admin role re-evaluated on every login and token refresh — previously only set at user creation, so config changes to admin emails had no effect on existing users (#530).
+* **[Discord]:** Require thread ID for forum channels to prevent broadcast — messages to forum-type channels without a thread ID are now rejected with an actionable error instead of broadcasting to all threads (#522).
+* **[Telegram]:** Restore backtick code spans stripped by Telegram's entity parser — the broker now reconstructs inline code and code blocks from `code`/`pre` entities, and `stripMentions` preserves whitespace and indentation (#518).
+* **[Chat]:** Propagate hub errors (403, 404, 500) back to chat channels with user-facing messages instead of swallowing them silently. Discord broker pre-validates target agents against the cached agent list to catch deleted-agent routing immediately (#517).
+* **[Runtime]:** Replace bind-mount secret staging with env-var pipeline for stateless brokers, fixing credential delivery when the filesystem is read-only (#523).
+* **[Message]:** Enforce 2000-character limit on messages with an actionable error for oversized payloads (#524).
+* **[Web]:** Detect incomplete embedded assets and serve a helpful error page instead of a blank screen (#526).
+
+### 🔧 Chores
+* **[CI]:** Added `handlers_projects_core.go` and `handlers_runtime_brokers.go` to the compat-literals allowlist for legitimate legacy grove literals (#527).
+
+## Jun 27, 2026
+
+A single targeted fix: GitHub URL parsing now correctly handles branch names containing slashes when resolving remote template references.
+
+### 🐛 Fixes
+* **[Config]:** Handle branch names with slashes in GitHub URL parsing — `resolveGitHubRef` now uses `git ls-remote --heads` to disambiguate branch vs path segments, picking the longest matching ref. Previously, branches like `feature/foo` were incorrectly split at the first slash, misidentifying part of the branch name as a file path (#503).
+
+## Jun 26, 2026
+
+A harness-heavy day: the Codex harness received critical auth fixes for file-based credentials, a new GitHub Copilot CLI harness shipped end-to-end tested, OpenCode gained Vertex AI auth support, and several provisioning issues were resolved.
+
+### 🚀 Features
+* **[Harness]:** GitHub Copilot CLI harness bundle — complete harness with build integration, provisioner with resilient auth fallback to no-auth mode when hub-registered configs haven't staged auth keys yet, and env var fallback for tokens in container environment (#506).
+* **[OpenCode]:** Vertex AI auth support — autodetects GCP project + location env vars and writes `VERTEXAI_PROJECT`/`VERTEX_LOCATION` to `outputs/env.json`. Lowest priority fallback after api-key and auth-file.
+* **[Harness]:** Stage `required_files` as secrets instead of bind-mounting — reads file content on host and stages as 0600 secret files under `agent_home/.scion/harness/secrets/`, fixing read-only filesystem crashes when harnesses try to write to credential files (#498).
+
+### 🐛 Fixes
+* **[Codex]:** Write fresh writable `auth.json` from staged secret in auth-file mode, fixing `lchown: read-only file system` crash at Codex startup (#501).
+* **[Codex]:** Validate `CODEX_AUTH` secret is valid JSON before writing to `~/.codex/auth.json`, surfacing clear errors at provisioning time instead of opaque startup failures (#499).
+* **[Codex]:** Updated no-auth hint to suggest `codex login --device-auth` instead of generic message (#504).
+* **[Hub]:** Registered missing `/api/v1/message-channels` route that was causing 404s for `--channel` flag in the CLI (#502).
+* **[Sciontool]:** Prevent `__pycache__` creation during harness provision by setting `PYTHONDONTWRITEBYTECODE=1`, fixing `scion delete` permission errors from root-owned bytecache on bind-mounted agent home (#505).
+* **[Web]:** Move Name field above Workspace Type in new project form (#507).
+* **[Web]:** Clean `dist` directory before build to prevent stale chunk accumulation (#508).
+
+### 🔧 Chores
+* **[CI]:** Fixed TypeScript errors in metrics-dashboard causing CI failure (#500).
+
+## Jun 25, 2026
+
+A major push on harness development — the Codex harness gained notification hooks, dialect YAML configuration, OTEL telemetry support, and template instructions. Antigravity was pinned to a specific release, briefly switched to ADC auth, then reverted. The Hub handlers were split by resource for maintainability.
+
+### 🚀 Features
+* **[Codex Harness]:** Notification hooks enabled — harness now fires lifecycle events and OTEL-escaped telemetry configuration for agent observability (#482, #488).
+* **[Codex Harness]:** Dialect YAML configuration — maps model aliases and API conventions for the Codex harness (#484, #486).
+* **[Codex Harness]:** Project template instructions — added instruction projection with hardened output and dropped unused system prompt file (#483).
+* **[Codex Harness]:** Extended OTEL config support for richer telemetry integration (#494).
+* **[Codex Harness]:** Updated model aliases (#481).
+* **[Antigravity]:** Pinned CLI binary to v1.0.11 from GitHub Releases for build reproducibility, with `TARGETARCH` mapping for multi-platform support (#487).
+* **[Sciontool]:** Hook support for bundled dialect overrides, allowing harness-specific model mapping to be shipped with the harness config (#485, #489).
+
+### 🐛 Fixes
+* **[Antigravity]:** Added missing field extractions (`session_id` from `.conversationId`, `tool_input` from `.toolCall.args`) and removed false `tool_name` extraction from `PostToolUse`. Declared `max_model_calls` as supported capability (#490).
+* **[Antigravity]:** Disabled ADC auth for vertex-ai (USE_ADC not yet functional in AGY CLI) and reverted to requiring `AGY_TOKEN` with keyring injection. GCP location fallback and v1.0.11 pin preserved (#497).
+* **[Codex Harness]:** Write instructions under container home directory (#491).
+* **[Codex Harness]:** Make notify hook executable (#492).
+
+### 🔧 Chores
+* **[Hub]:** Split monolithic handlers.go by resource type for maintainability (#480).
+* **[Docs]:** Changelog updates merged (#changelog).
+
+## Jun 23, 2026
+
+A light day with fixes to metrics reporting and capture-auth error handling.
+
+### 🐛 Fixes
+* **[Metrics]:** Fixed 7 review findings — handle all `KeyValue` types in `attrSetKey` (bool, double, zero int, empty string), simplify duration alignment to use `Truncate`, remove raw error messages from `X-Metrics-Warning` HTTP headers, and move chart rendering side-effects from `render()` to `updated()` lifecycle.
+* **[Capture Auth]:** Treat "already exists" as successful capture — previously returned `(False, None)` causing the main loop to trigger a keyring fallback that also failed on the same condition (#479).
+
+## Jun 22, 2026
+
+Skill publishing was simplified with a new multipart upload path replacing the 3-step signed-URL flow, and Antigravity auth received several fixes for token format handling and keyring capture.
+
+### 🚀 Features
+* **[Skill Bank]:** Replaced signed-URL upload with multipart POST for skill version publishing — server now handles hash computation, storage upload, and publishing atomically in a single request. Added `DeleteSkillVersion` store method for cleaning up failed draft uploads. Web UI simplified by removing client-side SHA-256, concurrent upload semaphore, per-file retry logic, and finalize step. Skill create page gained a "Publish first version" toggle for combined create+publish flow (#474).
+
+### 🐛 Fixes
+* **[Antigravity]:** Accept nested AGY token format with `auth_method` envelope — validation now handles both flat and nested `{"token": {...}, "auth_method": "..."}` layouts (#471).
+* **[Antigravity]:** Capture token from gnome-keyring when AGY doesn't persist the file — `capture_auth.py` falls back to `secret-tool lookup` via saved DBUS session address (#477).
+* **[Antigravity]:** Deduplicate capture-auth entries when the same secret key appears in multiple auth types, and treat "already exists" errors as silent skips (#478).
+* **[Skill Bank — M5]:** Code review fixes — `cmd.Context()` for Ctrl+C support, case-insensitive URI scheme detection (RFC 3986), pointer fields for partial updates, store constants instead of hardcoded strings, fix for clearing pinned hashes (#470).
+
+## Jun 21, 2026
+
+Antigravity auth was iterated on significantly — gnome-keyring was restored after the previous removal broke flows, token paths were fixed for bind-mounted secrets, and GCP settings detection was patched. A lifecycle hooks integration with Google Cloud Agent Registry was demonstrated, and the build system learned to use config.yaml image names.
+
+### 🚀 Features
+* **[Antigravity]:** Restored gnome-keyring to the provision flow — AGY requires keyring initialization before writing the OAuth token file, so keyring packages, DBUS initialization, and `secret-tool` injection were added back while keeping the `AGY_TOKEN` rename (#461).
+* **[Lifecycle Hooks]:** Added `PROJECT_SLUG` as a trusted lifecycle hook variable and demonstrated Google Cloud Agent Registry integration — hooks POST an A2A agent card on agent start and DELETE the registration on stop. Includes integration test and docs example. Also fixed `VerificationStatus` derivation in the ent adapter (#demo).
+* **[Skills]:** Hand-tuned team-builder skill content.
+
+### 🐛 Fixes
+* **[Antigravity]:** Read `AGY_TOKEN` from bind-mounted target path (`~/.gemini/antigravity-cli/antigravity-oauth-token`) instead of the env secret staging directory, fixing token detection in `_select_auth_method`, `_provision`, and `agy-wrapper.sh` (#465, #469).
+* **[Antigravity]:** Patch GCP settings block for oauth-token agents when `GOOGLE_CLOUD_PROJECT` is present in the container environment, fixing the gate that only triggered on the enterprise marker file or `AGY_USE_GCP` env var (#462).
+* **[Build]:** Use `config.yaml` image field to determine output image name instead of always using the harness-config CLI argument, ensuring the built image matches the intended name from the config (#463, #464, #468).
+
+## Jun 20, 2026
+
+The Antigravity harness was simplified by dropping gnome-keyring in favor of file-based OAuth, the skill creation UX was overhauled with a combined create+publish flow, and the metrics pipeline gained critical fixes for GCP project resolution and hook metric routing.
+
+### 🚀 Features
+* **[Antigravity]:** Removed gnome-keyring dependency and switched to file-based OAuth token placement — the token is written directly to `~/.gemini/antigravity-cli/antigravity-oauth-token`, eliminating DBUS/keyring daemon complexity. Dockerfile drops 4 packages (#460).
+* **[Antigravity]:** Use official install script for CLI installation (#453).
+* **[Skills — Create UX P1]:** Combined create+publish flow on the skill creation page — SKILL.md textarea with auto-populated fields from YAML frontmatter (debounced parsing, manual edit tracking), drag-and-drop file upload with signed-URL pattern and SHA-256 hashing, inline multi-step progress view, per-file status indicators with retry support, and file validation (50 files max, 10MB/file, 50MB total) (#455).
+* **[Config]:** Added `name` field to harness-config `config.yaml` so config authors can declare the intended name independently of the directory name. Resolution priority: CLI flag > config.yaml > harness field > URL-derived. Includes path traversal validation and JSON schema pattern constraint (#456).
+* **[Web]:** "Capture Auth" button on agent detail page for no-auth running agents — calls `capture_auth.py` inside the container with exit code handling (#459).
+* **[Metrics]:** Diagnostic logging when the telemetry pipeline receives data without a cloud exporter (sync.Once warning on first invocation). GCP project ID resolution from metadata server as fallback, fixing the pipeline on instances with working metadata but no explicit credentials. Hook metrics now route through the pipeline OTLP receiver instead of creating per-invocation exporters, preventing Cloud Monitoring sampling rate violations (#458).
+* **[Metrics]:** Registered `ModelResponse` hook to enable token metrics from Claude Code (#458).
+
+### 🐛 Fixes
+* **[Antigravity]:** Use `TARGETARCH` Docker build arg instead of `uname -m` for correct multi-platform support under cross-compilation (#457).
+
+## Jun 19, 2026
+
+Harness config management gained delete and image status UI, agent logs got a broker-based fallback, and skill version publishing became idempotent for interrupted drafts.
+
+### 🚀 Features
+* **[Web]:** Harness-config detail page improvements — delete button with confirmation dialog, image status section showing image path (local vs remote) and last update time, and `HarnessConfigData` type to surface `config.image` from the API. Agent detail logs tab now always visible, falling back to broker-based `/api/v1/agents/{id}/logs` when Cloud Logging is not configured (#452).
+
+### 🐛 Fixes
+* **[Hub]:** Made skill version publish idempotent for draft versions — retrying after an interrupted upload/finalize now returns the existing draft with fresh upload URLs instead of a 409 Conflict. Published/deprecated/archived versions still reject duplicates (#451).
+* **[Hub]:** Added missing user-scope authorization check in `deleteHarnessConfig` and defaulted `deleteFiles` checkbox to unchecked so users must opt in to file deletion (#452).
+
+## Jun 18, 2026
+
+A productive day spanning the harness config lifecycle, template import UX, agent visualization, and build infrastructure. The harness journey P1 landed with source URL tracking and reimport flows, while template imports gained a discovery/selection dialog.
+
+### 🚀 Features
+* **[Harness Config — Journey P1]:** Added `source_url` field to track import origin for harness configs and templates. New reimport endpoint (`POST /reimport`) re-imports from stored or overridden source URL. CLI `scion harness-config update` command with `--url` and `--all` flags. Web UI shows source URL as clickable link with a "Refresh from Source" button (#447).
+* **[Templates]:** Template discovery and selection dialog for bulk imports — discover endpoints scan for available resources without importing, and when multiple templates are found, a checkbox dialog lets users choose which to import. Single-template sources import directly (#437).
+* **[Agent Viz]:** Customizable agent colors via color picker (persisted in localStorage), replay button for seek-to-start, sender-colored comms cards with smarter collapsed summaries that understand structured JSON payloads (#436).
+* **[Build]:** Sync built image reference back to Hub after `scion build` — auto-syncs the updated `config.yaml` to Hub with recalculated file manifest and content hash, so the locally-built image is actually used at agent start (#444).
+* **[Server]:** Startup warning when the server binary is built without embedded web assets, with a self-contained HTML page served from the static asset handler (#445).
+
+### 🐛 Fixes
+* **[Harness]:** Pass Hub-hydrated harness-config path to `harness.Resolve` in both run and provisioning paths — previously Hub-managed configs hydrated into temp directories were invisible, causing fallback to `Generic{}` harness with an empty shell command (#450).
+* **[Templates]:** Import progress streaming now works on per-project endpoints (NDJSON support), and single-template imports are correctly scoped to the discovered resource (#443).
+* **[Messaging]:** Tightened web channel default to actual web clients only (not CLI or API callers) (#448).
+* **[Build]:** Use default Docker builder for local builds instead of custom container builder, fixing intermediate image resolution; use `BUILDX_BUILDER` env var to avoid mutating global Docker config (#442).
+
+### 🔧 Chores
+* **[Deps]:** Bumped dompurify (→3.4.9, →3.4.11), js-yaml (→4.2.0), vite (→6.4.3), rclone (→1.74.3), astro (→6.4.8) (#430, #431, #432, #438, #439, #440, #441).
+
+## Jun 17, 2026
+
+A targeted fix for message display in the agent detail view, improving both data completeness and access control.
+
+### 🐛 Fixes
+* **[Messaging]:** Fixed message display in agent detail view — web UI messages now default to `channel: "web"` and persist `channel`/`threadID` fields on message records. Agent managers (owners, project admins, global admins) can now see all messages including those from chat integrations, while other users only see messages where they are a participant (#435).
+
+## Jun 15, 2026
+
+A settings loading fix resolved a split-brain bug for git projects, the Skill Bank web UI received QA polish, and agent-viz gained Markdown rendering for inter-agent messages.
+
+### 🚀 Features
+* **[Agent Viz]:** Render inter-agent comms transcript as Markdown with per-message collapse — messages expand from a one-line plain-text summary to full formatted Markdown on click. Includes security hardening (HTML escaping before `marked.parse()`), lazy parsing for performance, and 1,000-char summary truncation (#427).
+
+### 🐛 Fixes
+* **[Config]:** Fixed split-brain settings loading for git projects with `project-id` — in-repo `.scion/settings.yaml` was silently skipped when split storage was configured, causing global settings to override project-level settings. The merge chain is now: defaults → global → in-repo → external → env. Also fixed `scion config dir` to show the effective config directory and added warnings for profiles/runtimes in in-repo settings.
+* **[Web — Skill Bank]:** QA fixes — added `storage.googleapis.com` to CSP `connect-src` for GCS uploads, fixed upload retry to use `/upload` endpoint, changed registry create default trust level from `trusted` to `pinned`, fixed case-sensitive `SKILL.md` validation, hid `scopeId` for user-scoped skills, and defaulted version to `1.0.0` (#429).
+* **[Runtime]:** Fixed Apple container list JSON parsing for new status format.
+* **[Build]:** Split `make all` and `make install` targets so `sudo` doesn't need `go`/`npm` in PATH — workflow is now `make all && sudo make install`.
+
+### 🔧 Chores
+* **[Docs]:** Changelog entries for June 10-14 merged to main (#433).
+
+## Jun 14, 2026
+
+The Skill Bank gained a full web UI, the Discord bot received significant fixes, and harness provisioning was hardened for no-auth mode.
+
+### 🚀 Features
+* **[Web — Skill Bank UI]:** Complete web interface for skill management — list page with search/scope filtering, detail page with version history and metadata, create page with scaffolding, and a publish dialog for uploading skills to the Hub. Admin pages for skill registry management (list, detail, CRUD). Added 4,200+ lines of Lit components across 7 new pages (#423).
+* **[Web]:** Auto-link chat accounts when registration link includes `?code=` parameter — shows a clean "Linking... → Success!" flow instead of the manual code-entry form (#426).
+
+### 🐛 Fixes
+* **[Discord]:** Multiple fixes to the Discord bot — improved broker message handling, command routing, send queue reliability, and webhook delivery (422 lines changed across broker, commands, sendqueue, and webhooks) (#428).
+* **[Harness]:** Handle no-auth mode in container-script provisioners, preventing auth-related failures when agents are configured without authentication (#424).
+* **[Build]:** Added missing `!no_sqlite` build tags to test files depending on `messagebroker_test.go`, fixing `go vet -tags no_sqlite` failures (#264).
+
+### 🔧 Chores
+* **[Style]:** Minor `gofmt` formatting fixes (#264).
+
+## Jun 13, 2026
+
+A2A multi-turn conversations shipped as a series of commits, transforming the bridge from single-turn MVP to full multi-turn lifecycle support. Alongside that, secrets handling was fixed for double-encoding, the project detail agent list gained filtering, and several CI/build issues were resolved.
+
+### 🚀 Features
+* **[A2A Bridge — Multi-Turn Lifecycle]:** Tasks no longer auto-close on the first content message. Content messages are now broadcast with `state=working` and `Final=false`, keeping the task alive. Task lifecycle is driven solely by agent state-change messages: `working/thinking/executing` → working, `waiting_for_input` → input-required, `completed/error/stalled` → terminal states. This enables agents to ask clarifying questions, send progress updates, and emit interim artifacts before completing.
+* **[A2A Bridge — Follow-Up Messages]:** `message/send` with a `taskID` routes to the existing agent, continuing the conversation. Verifies task ownership, rejects terminal-state tasks, and works with both blocking and non-blocking modes.
+* **[A2A Bridge — Capability Advertisement]:** Agent cards now advertise `streaming=true` and `pushNotifications=true`, reflecting the implemented multi-turn support.
+* **[Hub]:** Restored harness-config build UI and executor that was accidentally removed by PR #412 — includes the build image button, dialog, log streaming, and seeded operation (#420).
+* **[UI]:** Added filter and sort controls to the project detail agent list (#414).
+
+### 🐛 Fixes
+* **[Secrets]:** Fixed secret API base64 handling — store decoded plaintext instead of base64-encoded values, preventing double-encoding when secrets are injected as environment variables. Added 128KB `MaxBytesReader` limits and frontend-side base64 encoding via `TextEncoder` (#418).
+* **[A2A Bridge]:** Preserve `input-required` state on content messages instead of unconditionally resetting to `working`. Use `projectcompat` topic helpers instead of hardcoded patterns. Added `TouchTask` store method for timestamp refresh (#421).
+* **[Ent]:** Regenerated ent client to remove stale `discordpendinglink` import (#419).
+* **[Auth]:** Stricter email validation using `net/mail.ParseAddress` (#411).
+* **[Hub]:** Fixed duplicate `no_auth` keys and missing field schema attribute (#412).
+* **[Skill Bank]:** Fixed SQLite pin compatibility and skill name validation (#415).
+
+### 🔒 Security
+* **[Runtime]:** Protected metadata server shutdown endpoint from unauthorized access (#422).
+
+### 🔧 Chores
+* **[CI]:** Added esbuild as explicit dev dependency for Vite 7 compatibility (#416).
+* **[Build]:** Bumped esbuild and vite (→ v8.0.16) in web frontend (#413).
+* **[Style]:** Applied `gofmt` to all unformatted Go source files (#417).
+
+## Jun 12, 2026
+
+Two major feature PRs landed: Skill Bank M5 adds federated skill resolution across GitHub, GCP Vertex AI, and external registries, while the messaging overhaul hardens error contracts, delivery feedback, and agent wake semantics across all channels.
+
+### 🚀 Features
+* **[Skill Bank — M5a: Routing Resolver]:** `RoutingSkillResolver` dispatches skill references by URI scheme to registered resolvers (`skill://`, `gh://`, `gcp-skill://`, full GitHub URLs), with the hub resolver as fallback. Wired at CLI and broker call sites, wrapped by the caching resolver (#408).
+* **[Skill Bank — M5b: GitHub Resolver]:** `GitHubSkillResolver` resolves `gh://` URIs and full GitHub URLs via the GitHub Contents API, with input sanitization and response size limits (#408).
+* **[Skill Bank — M5c: Federation & Registries]:** External skill registry management with CRUD admin API, federation proxy for cross-registry resolution, and trust enforcement (trusted pass-through or pinned hash verification). CLI commands under `scion skills registries`. Security hardening: 10MB body size limit, redirect-following disabled to prevent credential leakage, reusable HTTP client (#408).
+* **[Skill Bank — M5d: GCP Vertex AI Resolver]:** `gcp-skill://` URI resolution via Vertex AI Skills API using Application Default Credentials. Version validation, SSRF defense (HTTPS-only, same-host download URLs, no link-local/RFC1918 targets), and 1MB metadata response limit (#408).
+* **[Messaging — Error Contracts]:** Non-existent agent targets now return proper errors instead of creating orphan message rows. Scheduled events targeting deleted agents are marked as failed. Hub API 404 responses include agent slug and project context (#409).
+* **[Messaging — Delivery Feedback]:** Persistence failures return 500 (was silent 200), missing recipients return 400 (removed silent creator fallback), broker dispatch failures return 502. Successful sends include `message_id`, `status`, `recipient`, and `recipient_id` in the response (#409).
+* **[Messaging — Agent Phase Pre-Check]:** `handleAgentMessage` now returns 409 Conflict for non-running agents with actionable guidance (suspended: use `--wake`, stopped/error: use `scion start`) (#409).
+* **[Messaging — Wake Improvements]:** Wake timeout bumped from 15s to 30s matching broker retry deadline. Distinct error for wake-success-delivery-failure. Messages to suspended agents without `--wake` now rejected with clear error (#409).
+* **[Messaging — Integration Feedback]:** Telegram plugin validates default agents before routing, reports Hub delivery errors back to originating chat with error cooldown (max 1 per 5min per chat+thread+error-type) and remediation suggestions (#409).
+
+### 🐛 Fixes
+* **[Build]:** Corrected `runId` JSON key mismatch in build polling that caused polling to silently fail (#410).
+
+### 🔧 Chores
+* **[Docs]:** Added Observability section to glossary clarifying infrastructure metrics (`scion.hub.*`, `scion.db.*`) vs agent metrics (`gen_ai.*`, `agent.*`) and the telemetry pipeline (#407).
+
+## Jun 11, 2026
+
+The skill bank feature landed in a single massive PR — a complete registry, provisioning, and caching system for reusable agent skills. This is the largest single change in the project's history at 18,000+ lines spanning milestones M1 through M6.
+
+### 🚀 Features
+* **[Skill Bank — M1: Agent-Side Provisioning]:** Added `SkillReference` type with URI parser supporting full, shorthand, alias, and bare name forms. Integrated skill resolution into the agent provisioning pipeline with fail-closed safety (S1): required skills without a resolver cause provisioning failure. Skills are installed via staging with per-file SHA-256 hash verification (S2), path safety validation (S3), and atomic rename (#399).
+* **[Skill Bank — M2: Hub API & Storage]:** Full CRUD API for skills and versions — create, list, get, update, delete, publish with signed URL upload workflow. Batch resolve endpoint with scope search order (user > project > global > core) and semver constraint matching (exact, `^`, `~`, `>=`, `latest`, `sha256:` content-addressed). Ent schemas for `Skill` and `SkillVersion` entities with comprehensive store tests (#399).
+* **[Skill Bank — M2: CLI]:** `scion skills` command group with `list`, `show`, `create` (scaffold), `publish` (upload + finalize), `delete`, `versions`, and `resolve` subcommands. Includes `scion skill` singular alias and `--format json` support (#399).
+* **[Skill Bank — M3: Hub Resolver Wiring]:** `HubSkillResolver` adapter bridging `hubclient.SkillService` to the agent `SkillResolver` interface, injected at both CLI and broker call sites with identity propagation (#399).
+* **[Skill Bank — M4: Broker-Side Caching]:** Content-hash-keyed caching for resolved skills using the existing `templatecache.Cache` infrastructure (500MB default, `~/.scion/cache/skills/`). Cache hits verified with SHA-256 on read; mismatches evict and re-download. Latest/range constraints always re-resolve against Hub but skip download on cache hit (#399).
+* **[Skill Bank — M6: Discovery & Lifecycle]:** Tag filtering with AND semantics and case-insensitive matching. Deprecation workflow with version-level deprecation messages, optional replacement URIs, and warnings surfaced during resolution. Download counter with atomic per-version increment. Published versions preferred over deprecated in latest/constraint resolution (#399).
+
+### 🔒 Security
+* **[Skill Bank]:** ActionRead authorization checks added to all read/download/resolve endpoints. User scope authorization gap fixed in `createSkill`. Batch resolve item cap (max 50) to prevent abuse. Cache hit hash verification to detect corruption. HTTPS-only downloads (S5) with cross-host redirect rejection (#399).
+
+## Jun 10, 2026
+
+A sweeping day of project compatibility refactoring, security hardening, and a major new Discord integration. The codebase-wide rename from "grove" to "project" landed across endpoints, config, runtime labels, and CI guardrails. The test-login endpoint was secured with challenge tokens, harness config hydration was fixed end-to-end, and a standalone Discord bot with gRPC support shipped.
+
+### 🚀 Features
+* **[Discord]:** Standalone Discord bot with gRPC for HA deployment — the Discord plugin can now run as an independent process communicating with the hub via gRPC, enabling horizontal scaling and high-availability setups. Includes a new `DiscordPendingLink` entity, gRPC broker adapter, and a dedicated Dockerfile (#395).
+* **[Scheduler]:** Enabled scheduler write commands (`create-recurring`, `pause`, `resume`, `delete`) in agent mode, removing the `dispatch_` prefix gate that previously blocked agents from managing schedules (#378).
+* **[Auth]:** Added challenge token authentication to the test-login endpoint — callers must present a short-lived JWT (5min TTL) signed with the hub's user signing key and scoped to the `scion-test-login` audience. Includes case-insensitive Bearer parsing and explicit `exp` claim enforcement (#382, #392).
+* **[Compatibility]:** Project/grove compatibility boundary — added a comprehensive migration layer with legacy `/groves` route wrappers, request body field adapters, and centralized compatibility key mapping to support clients using the old naming while the codebase transitions (#380, #387, #388).
+
+### 🐛 Fixes
+* **[Hub]:** Fixed harness config hydration pipeline — `populateAgentConfig()` now stamps `HarnessConfigID`/`Hash` on agent records, `RemoteAgentConfig` threads these fields to the broker, and database errors during slug lookup are now logged instead of silently discarded (#389).
+* **[UI]:** Fixed file badge size inconsistency (computed from filtered list instead of unfiltered total) and added missing settings page titles for harness-configs and templates detail routes (#390).
+* **[UI]:** Applied agent list UI improvements to the project detail view (#383).
+* **[Runtime]:** Fixed recursive glob in sparse checkout to include `home/` subdirectory by switching from `/*` to `/**` pattern (#381).
+* **[Compatibility]:** Used canonical project endpoints across integrations, test fixtures, and mocks — replacing remaining `/groves` references (#384, #385).
+* **[Compatibility]:** Centralized runtime project label compatibility, replacing scattered literal strings (#386).
+* **[CI]:** Fixed compat-literals CI step failing due to missing ripgrep — installs `rg` in the runner and degrades gracefully when unavailable (#397).
+
+### 🔧 Chores
+* **[CI]:** Enforced project compatibility literal guardrail in GitHub Actions with a documented contributor rule (#391, #393).
+* **[Docs]:** Changelog backfill for June 8-9 entries merged to main (#396).
+
+## Jun 9, 2026
+
+A lighter day focused on messaging improvements and fixing a hub import routing gap. Broker messages now support an interrupt prefix, Telegram formatting was fixed, and missing harness-config import routes were wired up.
+
+### 🚀 Features
+* **[Messaging]:** Support `!` prefix in broker messages as inline interrupt — messages from Telegram, webhooks, or direct channels that start with `!` are now delivered with urgent/interrupt semantics, equivalent to `--interrupt` on the CLI. Handles whitespace edge cases and defaults to "interrupt" for bare `!` messages (#375).
+
+### 🐛 Fixes
+* **[Messaging]:** Fixed literal `\n` sequences appearing in Telegram message formatting instead of actual newlines (#377).
+* **[Hub]:** Registered missing harness-config import routes — the unified `/api/v1/resources/import` endpoint and the per-project `/api/v1/projects/{id}/import-harness-configs` endpoint were never wired up, causing 404 errors on the hub import screen. Added handlers, URL normalization, and proper error code constants (#376).
+
 ## Jun 8, 2026
 
 This release strengthens the agent state and container lifecycle: agents can now be suspended and resumed with their harness session intact, crashes are surfaced as a restartable `error` state, and stalled agents are auto-suspended to reclaim resources.
