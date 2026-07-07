@@ -17,6 +17,7 @@ package cmd
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -303,6 +304,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 				return err
 			}
 			hubSrv.SetEventPublisher(eventPub)
+			startSettingsPropagation(ctx, hubSrv, eventPub)
 
 			log.Printf("Starting Hub API server on %s:%d", cfg.Hub.Host, cfg.Hub.Port)
 			wg.Add(1)
@@ -1398,14 +1400,14 @@ func initOperationalSettings(ctx context.Context, cfg *config.GlobalConfig, hubS
 			return fmt.Errorf("acquiring hub_settings_seed advisory lock: %w", err)
 		}
 		if acquired {
-			defer func() {
-				if rerr := release(); rerr != nil {
-					slog.Error("Failed to release hub_settings_seed advisory lock", "error", rerr)
-				}
-			}()
-
-			if err := seedHubSettingsIfNeeded(ctx, settingStore, fileKoanf, globalDir); err != nil {
-				return fmt.Errorf("seeding hub settings: %w", err)
+			seedErr := seedHubSettingsIfNeeded(ctx, settingStore, fileKoanf, globalDir)
+			// Release the advisory lock immediately after seeding (scoped
+			// release per design §3.9) — Refresh below does not need the lock.
+			if rerr := release(); rerr != nil {
+				slog.Error("Failed to release hub_settings_seed advisory lock", "error", rerr)
+			}
+			if seedErr != nil {
+				return fmt.Errorf("seeding hub settings: %w", seedErr)
 			}
 		} else {
 			// Another replica is seeding — that's fine, we'll pick up the
@@ -1445,6 +1447,19 @@ func initOperationalSettings(ctx context.Context, cfg *config.GlobalConfig, hubS
 	return nil
 }
 
+// startSettingsPropagation wires the event publisher into the OperationalSettings
+// service and starts the cross-replica propagation loop (design §3.6, Phase 4).
+// In file/SQLite mode (no OperationalSettings), this is a no-op.
+func startSettingsPropagation(ctx context.Context, hubSrv *hub.Server, eventPub hub.EventPublisher) {
+	ops := hubSrv.GetOperationalSettings()
+	if ops == nil {
+		return // file/SQLite mode — no propagation needed
+	}
+	ops.SetEventPublisher(eventPub)
+	ops.StartPropagation(ctx, hubSrv)
+	slog.Info("Settings change propagation started (subscribe + poll backstop)")
+}
+
 // seedHubSettingsIfNeeded checks for the _meta sentinel row; if absent, seeds
 // each registry section from the file's Layer-1 keys. Sections with no koanf
 // paths (e.g. maintenance) are skipped — they start with compiled defaults.
@@ -1456,7 +1471,7 @@ func seedHubSettingsIfNeeded(ctx context.Context, s store.HubSettingStore, fileK
 		log.Println("Hub settings already seeded (_meta row present); skipping seed")
 		return nil
 	}
-	if err != store.ErrNotFound {
+	if !errors.Is(err, store.ErrNotFound) {
 		return fmt.Errorf("checking _meta row: %w", err)
 	}
 
@@ -1697,6 +1712,7 @@ func initWebServer(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Se
 	// Wire Hub services into WebServer if Hub is enabled
 	if hubSrv != nil {
 		hubSrv.SetEventPublisher(eventPub)
+		startSettingsPropagation(ctx, hubSrv, eventPub)
 		webSrv.SetOAuthService(hubSrv.GetOAuthService())
 		webSrv.SetStore(hubSrv.GetStore())
 		webSrv.SetUserTokenService(hubSrv.GetUserTokenService())

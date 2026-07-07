@@ -87,6 +87,11 @@ type PostgresEventPublisher struct {
 	// desired counts how many subscriptions need each channel LISTENed.
 	desired map[string]int
 	closed  bool
+
+	// onReconnect is called each time the listener reconnects after a
+	// connection loss. Used by settings propagation (Phase 4) to trigger
+	// an unconditional Refresh that covers notifications missed during the gap.
+	onReconnect func()
 }
 
 // pgSubscription is a single Subscribe registration.
@@ -372,6 +377,15 @@ func (p *PostgresEventPublisher) Close() {
 	p.desired = make(map[string]int)
 }
 
+// SetOnReconnect sets a callback invoked each time the listener reconnects
+// after a connection loss. Used by settings propagation (Phase 4) to trigger
+// an unconditional Refresh that covers notifications missed during the gap.
+func (p *PostgresEventPublisher) SetOnReconnect(fn func()) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.onReconnect = fn
+}
+
 // runListener maintains a dedicated connection that LISTENs on the desired
 // channels and dispatches received notifications. It reconnects with backoff and
 // re-LISTENs (resubscribes) after any connection loss.
@@ -383,6 +397,7 @@ func (p *PostgresEventPublisher) runListener() {
 		maxBackoff = 10 * time.Second
 	)
 	backoff := minBackoff
+	firstConnect := true
 
 	for {
 		if p.ctx.Err() != nil {
@@ -401,6 +416,19 @@ func (p *PostgresEventPublisher) runListener() {
 			backoff = nextBackoff(backoff, maxBackoff)
 			continue
 		}
+
+		if !firstConnect {
+			// Reconnect after connection loss — invoke the callback so
+			// subscribers can refresh state missed during the gap (Phase 4
+			// settings propagation uses this).
+			p.mu.RLock()
+			fn := p.onReconnect
+			p.mu.RUnlock()
+			if fn != nil {
+				fn()
+			}
+		}
+		firstConnect = false
 
 		p.log.Info("Event listener connected")
 		backoff = minBackoff

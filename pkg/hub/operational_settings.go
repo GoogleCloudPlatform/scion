@@ -19,8 +19,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"math/rand"
 	"os"
 	"sync"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -104,6 +106,16 @@ type Layer1Snapshot struct {
 	EnvOverrides []string
 }
 
+// settingsUpdatedSubject is the LISTEN/NOTIFY subject used to propagate
+// settings changes across hub replicas (design §3.6).
+const settingsUpdatedSubject = "admin.settings.updated"
+
+// SettingsUpdatedEvent is the payload published on admin.settings.updated.
+type SettingsUpdatedEvent struct {
+	Section  string `json:"section"`
+	Revision int64  `json:"revision"`
+}
+
 // OperationalSettings is the runtime component that merges file, DB, and env
 // sources into a single Layer-1 view per §3.5 of the settings-db design.
 //
@@ -116,6 +128,17 @@ type OperationalSettings struct {
 	envKoanf     *koanf.Koanf    // env-only koanf for merge
 	mu           sync.RWMutex
 	cache        map[string]sectionState // section name → cached value + revision
+
+	// Event publisher for cross-replica propagation (nil in SQLite/file mode).
+	events EventPublisher
+
+	// server is set by StartPropagation — used for self-apply in Update
+	// and for apply in the propagation loop. Nil until propagation starts.
+	server *Server
+
+	// stopPropagation cancels the propagation goroutines (subscriber + poll ticker).
+	stopPropagation context.CancelFunc
+	propagationWg   sync.WaitGroup
 }
 
 // NewOperationalSettings creates a new OperationalSettings service.
@@ -296,8 +319,25 @@ func (o *OperationalSettings) Update(
 	}
 	o.mu.Unlock()
 
-	// TODO(phase4): publish admin.settings.updated event with {section, revision}
-	// to propagate the change to other replicas via PostgresEventPublisher.
+	// Publish admin.settings.updated event to propagate the change to other
+	// replicas via PostgresEventPublisher (design §3.6). The event publisher
+	// is nil in file/SQLite mode — no-op there.
+	if o.events != nil {
+		o.events.PublishRaw(settingsUpdatedSubject, SettingsUpdatedEvent{
+			Section:  section,
+			Revision: result.Revision,
+		})
+	}
+
+	// Self-apply: the writing node applies its own change synchronously
+	// rather than waiting for its own event (design §3.6). Double-apply
+	// (sync here + own event received via subscription) is harmless because
+	// ApplySnapshot and ApplyMaintenanceFromSnapshot are idempotent.
+	if o.server != nil {
+		snap := o.Snapshot()
+		ApplySnapshot(o.server, snap)
+		ApplyMaintenanceFromSnapshot(o.server, snap)
+	}
 
 	return result.Revision, nil
 }
@@ -310,6 +350,131 @@ func (o *OperationalSettings) EnvOverriddenKeys() []string {
 		keys = append(keys, key)
 	}
 	return keys
+}
+
+// SetEventPublisher wires the event publisher for cross-replica propagation.
+// Must be called before StartPropagation. Nil is safe (disables publishing
+// in Update). In file/SQLite mode this is never called.
+func (o *OperationalSettings) SetEventPublisher(ep EventPublisher) {
+	o.events = ep
+}
+
+// StartPropagation begins the cross-replica change propagation loop (design
+// §3.6). It subscribes to admin.settings.updated events, starts a 60s jittered
+// poll backstop, and wires the reconnect callback for unconditional refresh.
+//
+// Must be called after SetEventPublisher. Postgres mode only; in file/SQLite
+// mode this is never called (the writing handler applies synchronously).
+//
+// The ctx should be the server's lifetime context; cancellation stops the
+// propagation goroutines.
+func (o *OperationalSettings) StartPropagation(ctx context.Context, server *Server) {
+	if o.events == nil {
+		return
+	}
+
+	o.server = server
+
+	propCtx, cancel := context.WithCancel(ctx)
+	o.stopPropagation = cancel
+
+	// --- Subscribe to admin.settings.updated events (§3.6 primary) ---
+	ch, unsub := o.events.Subscribe(settingsUpdatedSubject)
+
+	o.propagationWg.Add(1)
+	go func() {
+		defer o.propagationWg.Done()
+		defer unsub()
+		o.runSubscriptionLoop(propCtx, ch, server)
+	}()
+
+	// --- Poll backstop at 60s with jitter (§3.6 backstop) ---
+	o.propagationWg.Add(1)
+	go func() {
+		defer o.propagationWg.Done()
+		o.runPollBackstop(propCtx, server)
+	}()
+
+	// --- Reconnect refresh callback (§3.6 reconnect) ---
+	if pgPub, ok := o.events.(*PostgresEventPublisher); ok {
+		pgPub.SetOnReconnect(func() {
+			slog.Info("Event listener reconnected — refreshing operational settings unconditionally")
+			o.refreshAndApply(ctx, server)
+		})
+	}
+}
+
+// StopPropagation stops the propagation goroutines and waits for them to exit.
+func (o *OperationalSettings) StopPropagation() {
+	if o.stopPropagation != nil {
+		o.stopPropagation()
+	}
+	o.propagationWg.Wait()
+}
+
+// runSubscriptionLoop listens for admin.settings.updated events and triggers
+// Refresh + apply on receipt.
+func (o *OperationalSettings) runSubscriptionLoop(ctx context.Context, ch <-chan Event, server *Server) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case evt, ok := <-ch:
+			if !ok {
+				return
+			}
+			// Decode the event to log which section changed; the actual
+			// application always does a full Refresh (cheap revision-only diff).
+			var payload SettingsUpdatedEvent
+			if err := json.Unmarshal(evt.Data, &payload); err == nil {
+				slog.Info("Received settings update event", "section", payload.Section, "revision", payload.Revision)
+			}
+			o.refreshAndApply(ctx, server)
+		}
+	}
+}
+
+// runPollBackstop runs a ticker at ~60s (with ±10s jitter) that calls Refresh
+// and applies any changes. This is the backstop for missed NOTIFY events
+// (design §3.6). Postgres mode only.
+func (o *OperationalSettings) runPollBackstop(ctx context.Context, server *Server) {
+	// Initial jitter: 0-10s offset so replicas don't all poll at the same instant.
+	jitter := time.Duration(rand.Int63n(int64(10 * time.Second)))
+	select {
+	case <-ctx.Done():
+		return
+	case <-time.After(jitter):
+	}
+
+	ticker := time.NewTicker(60 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			o.refreshAndApply(ctx, server)
+		}
+	}
+}
+
+// refreshAndApply performs a Refresh and applies any changed sections to the
+// server. Idempotent: applying the same snapshot twice is harmless because
+// ApplySnapshot writes the same values and ApplyMaintenanceFromSnapshot
+// is idempotent by design.
+func (o *OperationalSettings) refreshAndApply(ctx context.Context, server *Server) {
+	changed, err := o.Refresh(ctx)
+	if err != nil {
+		slog.Error("Settings propagation refresh failed", "error", err)
+		return
+	}
+	if len(changed) > 0 {
+		slog.Info("Settings propagation detected changes", "sections", changed)
+		snap := o.Snapshot()
+		ApplySnapshot(server, snap)
+		ApplyMaintenanceFromSnapshot(server, snap)
+	}
 }
 
 // loadSectionDocIntoKoanf loads a single section's JSON document into the
@@ -537,8 +702,12 @@ func ApplyMaintenanceFromSnapshot(s *Server, snap Layer1Snapshot) {
 	adminMode := snap.AdminMode
 	message := snap.MaintenanceMessage
 
-	// Env force-enable wins over DB value on this node (per-node break-glass,
-	// §3.8). Match the exact env var names from cmd/server_foreground.go:80-82.
+	// SCION_SERVER_ADMIN_MODE env var overrides bidirectionally: it can
+	// force-enable OR force-disable admin mode on this node, matching the
+	// pre-existing startup semantics in cmd/server_foreground.go:80-82.
+	// The design doc says "force-enables" but we keep parity with existing
+	// behavior (which parses the value as a boolean). The docs phase will
+	// document the bidirectional override.
 	if v := os.Getenv("SCION_SERVER_ADMIN_MODE"); v != "" {
 		adminMode = v == "true" || v == "1" || v == "yes"
 	}

@@ -802,3 +802,45 @@ func TestConcurrentRefreshAndSnapshot(t *testing.T) {
 	wg.Wait()
 	// If we reach here without the race detector firing, the test passes.
 }
+
+func TestSnapshot_MixedSource_DBAndFile(t *testing.T) {
+	// Part A item 6: section A present in DB, section B file-only.
+	// Assert A = DB values, B = file values in one snapshot.
+
+	// File has both access and lifecycle values.
+	fileK := newFileKoanf(t, map[string]interface{}{
+		"server.hub.admin_emails":          []interface{}{"file@example.com"},
+		"server.auth.user_access_mode":     "open",
+		"server.hub.auto_suspend_stalled":  false,
+		"server.hub.soft_delete_retention": "30d",
+	})
+
+	// DB has access section only (DB-provided values).
+	fakeStore := newFakeHubSettingStore()
+	fakeStore.seed("access", json.RawMessage(`{"admin_emails":["db@example.com"],"user_access_mode":"domain_restricted"}`))
+	// lifecycle is NOT in DB — should fall back to file.
+
+	ops := NewOperationalSettings(fakeStore, fileK, emptyKoanf())
+	_, err := ops.Refresh(context.Background())
+	if err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+
+	snap := ops.Snapshot()
+
+	// Section A (access): values must come from DB.
+	if len(snap.AdminEmails) != 1 || snap.AdminEmails[0] != "db@example.com" {
+		t.Errorf("AdminEmails: want [db@example.com] (from DB), got %v", snap.AdminEmails)
+	}
+	if snap.UserAccessMode != "domain_restricted" {
+		t.Errorf("UserAccessMode: want domain_restricted (from DB), got %s", snap.UserAccessMode)
+	}
+
+	// Section B (lifecycle): values must come from file.
+	if snap.AutoSuspendStalled != false {
+		t.Error("AutoSuspendStalled: want false (from file)")
+	}
+	if snap.SoftDeleteRetention != "30d" {
+		t.Errorf("SoftDeleteRetention: want '30d' (from file), got %q", snap.SoftDeleteRetention)
+	}
+}
