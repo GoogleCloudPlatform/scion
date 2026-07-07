@@ -10,9 +10,11 @@ This document defines the core concepts and terminology used in Scion.
 An **Agent** is an isolated process running an LLM + Harness loop (aka Agent) against a task. It acts as an independent worker with its own identity, credentials, and workspace. An agent is the fundamental unit of execution in Scion.
 
 ### Project
-A **Project** (or **Group**) is a project workspace where agents live. It corresponds to a `.scion` directory on the filesystem. It can exist at the project level (generally located at the root of a git repository), or globally in the users home folder.
+A **Project** is a namespace and collection of agents and configuration where agents live. It corresponds to a `.scion` directory on the filesystem, usually one-to-one with a git repository. It can exist at the project level (generally located at the root of a git repository), or globally in the user's home folder.
 
-Every project has a unique **Project ID**. Git-backed projects use deterministic **UUID v5** identifiers (derived from the namespace and normalized git URL), ensuring the same repository always maps to the same ID regardless of protocol. Hub-managed projects use random **UUID v4** identifiers.
+A Project is **not** the same thing as a **Group**. A Group is a named collection of Hub users used by the permissions system to assign access (see the [Glossary](/scion/glossary/)); it governs *who* can act, not *where* agents live.
+
+Every project has a unique **Project ID** — a randomly generated UUID. A git remote is associated metadata, not identity, so multiple projects may share the same remote by design.
 
 ### Hub
 The **Hub** is the central control plane of a hosted Scion architecture. It acts as the "brain" of the system, coordinating state across multiple users, projects, and runtime brokers.
@@ -48,10 +50,15 @@ The **Runtime** is the infrastructure layer responsible for executing the agent 
 - **Kubernetes**: Allows running agents as Pods in a Kubernetes cluster, enabling remote execution and scaling at production scale.
 
 ### Runtime Broker
-A **Runtime Broker** is a compute node (e.g., a server, laptop, or K8s cluster) that registers with a **Scion Hub** to provide execution capacity.
-- It manages the local lifecycle of agents dispatched from the Hub.
-- It handles workspace synchronization, template hydration, and log streaming.
-- For more details, see the [Runtime Broker Guide](/scion/hub-user/runtime-broker/).
+A **Runtime Broker** is a *service* that manages the lifecycle of containerized agents on behalf of the **Hub** — it is not itself a compute node. It provisions workspaces, hydrates templates, streams logs, and delegates container operations to a pluggable **Runtime**.
+
+Brokers vary along two dimensions:
+- **Host access** — a **Node-Bound Broker** runs on the same machine as the containers it manages (required for runtimes that need direct host access, like Docker or Apple Container); a **Proxy Broker** is stateless and delegates to an API-mediated service such as Cloud Run or Kubernetes.
+- **Process model** — a broker may run as its own standalone process, or be an **Embedded Broker** running inside the Hub process. The default platform backend is the **Hosted Broker** (an embedded proxy broker).
+
+Note that a **Managed Agent** bypasses the Runtime Broker layer entirely, with its lifecycle driven directly by a cloud provider API.
+
+For more details, see the [Runtime Broker Guide](/scion/hub-user/runtime-broker/).
 
 ### Agent State Model
 
@@ -105,26 +112,28 @@ To support multi-agent workflows, Scion implements **Agent Ancestry Chains**. Wh
 
 Furthermore, agent identities are **strictly scoped by their project** (e.g., `project--agent`). This naming convention prevents name collisions across different workspaces and ensures agents can only interact with peers and progeny within their designated boundary. Progeny agents also receive granular secret access controls to prevent privilege escalation.
 
-### Workspace Strategy
+### Workspace Sharing Modes
 
-Scion uses one of two strategies to give each agent an isolated git workspace, depending on whether a Hub is in use.
+A **Workspace** is the working directory mounted into a single agent's container at `/workspace`. How it is provisioned across a project's agents is set by the project's **workspace sharing mode**. There is one universal set of three modes, intended for both local and Hub-managed projects:
 
-**Local mode — Git Worktrees:**
-When running without a Hub, Scion uses [Git Worktrees](https://git-scm.com/docs/git-worktree) for isolation.
-- A new worktree is created at `../.scion_worktrees/<project>/<agent>` with a dedicated branch.
-- The worktree is mounted into the agent's container as `/workspace`.
+- **Shared-plain** — One workspace directory is mounted into every agent with no per-agent isolation. This is the model used for plain (non-git) projects.
+- **Worktree-per-agent** — Each agent gets its own [git worktree](https://git-scm.com/docs/git-worktree) over a shared checkout, isolating working trees while sharing one clone's history. Supported in local mode today (not yet on Hub-managed projects).
+- **Clone-per-agent** — Each agent gets its own full git clone of the repository.
+
+**Worktree-per-agent (local git projects):**
+- A new worktree is created (e.g. at `../.scion_worktrees/<project>/<agent>`) with a dedicated branch, and mounted into the agent's container as `/workspace`.
 - Agents operate on the same repository history but have independent working directories.
 - Work is merged back to the main branch manually (e.g., `git merge <agent-branch>`).
 
-**Hub mode — Git Init + Fetch:**
-When a Hub is enabled, all git-based projects (including locally linked ones) use a robust `git init` + `git fetch` provisioning strategy instead of worktrees.
+**Clone-per-agent (Hub-managed git projects):**
+When a Hub manages a git-based project, agents are provisioned with an independent clone via a robust `git init` + `git fetch` strategy rather than a shared worktree.
 - The broker injects `SCION_GIT_CLONE_URL`, `SCION_GIT_BRANCH`, and a `GITHUB_TOKEN` into the container.
-- `sciontool init` inside the container initializes the workspace and fetches the repo over HTTPS, then checks out a `scion/<agent-name>` branch.
+- `sciontool init` inside the container initializes the workspace, fetches the repo over HTTPS, then checks out a `scion/<agent-name>` branch.
 - This approach handles workspaces that already contain `.scion` metadata or `.scion-volumes` directories, clearing stale artifacts before initialization.
 - SSH credentials on the host are not used; a `GITHUB_TOKEN` is required.
 - This strategy is consistent across all broker machines, whether or not the repo exists locally.
 
-This distinction means a project that was previously used in local mode will switch to clone-based provisioning once it is linked to a Hub. See the [About Workspaces](/scion/advanced-local/workspace/) guide for details.
+This means a git project used locally with worktrees may switch to clone-based provisioning once it is managed by a Hub. See the [About Workspaces](/scion/advanced-local/workspace/) guide for details.
 
 ### Resource Isolation
 Scion enforces strict isolation between agents to prevent interference and cross-contamination of credentials or data.
@@ -143,9 +152,10 @@ These extensions ensure agents understand their specific execution environment w
 
 ### Plugin System
 
-Scion supports a plugin architecture built on `hashicorp/go-plugin` for extending system capabilities. Plugins communicate over gRPC and can provide implementations for:
+Scion supports a plugin architecture built on `hashicorp/go-plugin` for extending system capabilities without modifying Scion core. Plugins are out-of-process extensions that communicate over gRPC.
 
-- **Message Broker Plugins**: Custom message delivery backends for agent notifications and structured messaging.
-- **Agent Harness Plugins**: Custom harness implementations that integrate new LLM tools into Scion without modifying the core codebase.
+Today the plugin interface supplies **Message Broker** implementations — custom message delivery backends (e.g. Telegram, Google Chat) that surface agent notifications and structured messaging. Additional plugin types may be added in the future.
 
-The plugin system is currently in its foundational stage, with reference implementations available for both plugin types.
+:::note[Harnesses are not plugins]
+**Harness** implementations (Claude Code, Gemini CLI, Codex, OpenCode, …) are *not* offered as plugins. A harness is external, vendor-supplied agent software that Scion drives; new harnesses are integrated through a **harness-config** and its container-script provisioner, not through the `go-plugin` interface. See the [Glossary](/scion/glossary/) for the distinction.
+:::
