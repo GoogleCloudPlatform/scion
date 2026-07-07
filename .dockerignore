@@ -2,14 +2,12 @@
 .design/
 .scion/
 .gemini/
-*key*
-*secret*
+*.key
+*.pem
+*.secret
 !web/**/*.js
 !web/**/*.ts
 !web/**/*.json
-!pkg/secret/
-!pkg/secret/**
-!pkg/stagedsecrets*
 *.env
 
 # Ignore version control (can be large)
