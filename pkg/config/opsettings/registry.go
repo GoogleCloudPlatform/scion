@@ -298,16 +298,6 @@ func compileSchemas() {
 	}
 }
 
-// schemaPropertyOrFallback tries getSchemaProperty and falls back to the
-// provided schema if the property is not found in the root schema.
-func schemaPropertyOrFallback(root map[string]interface{}, fallback interface{}, path ...string) interface{} {
-	result := getSchemaProperty(root, path...)
-	if m, ok := result.(map[string]interface{}); ok && len(m) == 0 {
-		return fallback
-	}
-	return result
-}
-
 // getSchemaProperty traverses the root schema to find a property definition.
 // The path segments are: property → $ref resolution → nested property.
 func getSchemaProperty(root map[string]interface{}, path ...string) interface{} {
