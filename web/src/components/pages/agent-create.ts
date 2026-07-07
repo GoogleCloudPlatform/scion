@@ -121,6 +121,12 @@ export class ScionPageAgentCreate extends LitElement {
   @state()
   private harnessConfigs: HarnessConfigEntry[] = [];
 
+  @state()
+  private modelSelection: '' | 'small' | 'medium' | 'large' | 'extra-large' | 'other' = '';
+
+  @state()
+  private customModelId = '';
+
   /** ID of an existing agent we're editing (came back from configure page) */
   private editingAgentId: string | null = null;
 
@@ -138,6 +144,7 @@ export class ScionPageAgentCreate extends LitElement {
       defaultMaxDuration?: string;
       defaultGCPIdentityMode?: string;
       defaultGCPIdentityServiceAccountID?: string;
+      defaultModel?: string;
     }
   > = new Map();
 
@@ -541,6 +548,14 @@ export class ScionPageAgentCreate extends LitElement {
           SCION_TELEMETRY_ENABLED: this.telemetryEnabled ? 'true' : 'false',
         },
       };
+
+      const model = this.modelSelection === 'other'
+        ? this.customModelId
+        : this.modelSelection;
+      if (model) {
+        config.model = model;
+      }
+
       body.config = config;
 
       // Validate GCP assign mode
@@ -654,6 +669,14 @@ export class ScionPageAgentCreate extends LitElement {
       const builtLabels = this.buildLabels();
       if (builtLabels) {
         body.labels = builtLabels;
+      }
+
+      // Model selection
+      const model = this.modelSelection === 'other'
+        ? this.customModelId
+        : this.modelSelection;
+      if (model) {
+        body.config = { ...(body.config as Record<string, unknown> || {}), model };
       }
 
       // GCP identity assignment
@@ -772,6 +795,7 @@ private selectBrokerForProject(): void {
       t.defaultHarnessConfig || t.harness || harnessDefault;
 
     // Try project settings default template first
+    let templateResolved = false;
     if (settings?.defaultTemplate) {
       const match = visible.find(
         (t) => t.name === settings.defaultTemplate || t.slug === settings.defaultTemplate
@@ -779,21 +803,34 @@ private selectBrokerForProject(): void {
       if (match) {
         this.templateId = match.id;
         this.setHarnessFromValue(harnessFor(match));
-        return;
+        templateResolved = true;
       }
     }
 
-    // Fallback: template named "default"
-    const fallback = visible.find((t) => t.slug === 'default' || t.name === 'default');
-    if (fallback) {
-      this.templateId = fallback.id;
-      this.setHarnessFromValue(harnessFor(fallback));
-    } else if (visible.length > 0) {
-      this.templateId = visible[0].id;
-      this.setHarnessFromValue(harnessFor(visible[0]));
-    } else {
-      this.templateId = '';
-      this.setHarnessFromValue(harnessDefault);
+    if (!templateResolved) {
+      // Fallback: template named "default"
+      const fallback = visible.find((t) => t.slug === 'default' || t.name === 'default');
+      if (fallback) {
+        this.templateId = fallback.id;
+        this.setHarnessFromValue(harnessFor(fallback));
+      } else if (visible.length > 0) {
+        this.templateId = visible[0].id;
+        this.setHarnessFromValue(harnessFor(visible[0]));
+      } else {
+        this.templateId = '';
+        this.setHarnessFromValue(harnessDefault);
+      }
+    }
+
+    // Pre-populate model from project defaults if user hasn't selected one
+    if (!this.modelSelection && settings?.defaultModel) {
+      const dm = settings.defaultModel;
+      if (['small', 'medium', 'large', 'extra-large'].includes(dm)) {
+        this.modelSelection = dm as 'small' | 'medium' | 'large' | 'extra-large';
+      } else if (dm) {
+        this.modelSelection = 'other';
+        this.customModelId = dm;
+      }
     }
   }
 
@@ -930,6 +967,7 @@ private selectBrokerForProject(): void {
     defaultMaxDuration?: string;
     defaultGCPIdentityMode?: string;
     defaultGCPIdentityServiceAccountID?: string;
+    defaultModel?: string;
   } | null> {
     if (!projectId) return null;
 
@@ -947,6 +985,7 @@ private selectBrokerForProject(): void {
           defaultMaxDuration?: string;
           defaultGCPIdentityMode?: string;
           defaultGCPIdentityServiceAccountID?: string;
+          defaultModel?: string;
         };
         this.projectSettingsCache.set(projectId, data);
         return data;
@@ -1130,6 +1169,42 @@ private selectBrokerForProject(): void {
             </sl-select>
             <div class="hint">Agent configuration template.</div>
           </div>
+
+          <div class="form-field">
+            <label for="model">Model</label>
+            <sl-select
+              id="model"
+              placeholder="Select a model size..."
+              .value=${this.modelSelection}
+              clearable
+              @sl-change=${(e: Event) => {
+                this.modelSelection = (e.target as HTMLElement & { value: string }).value as
+                  | '' | 'small' | 'medium' | 'large' | 'extra-large' | 'other';
+              }}
+            >
+              <sl-option value="small">Small</sl-option>
+              <sl-option value="medium">Medium</sl-option>
+              <sl-option value="large">Large</sl-option>
+              <sl-option value="extra-large">Extra Large</sl-option>
+              <sl-option value="other">Other (specify)</sl-option>
+            </sl-select>
+            <div class="hint">Model size or specific model for this agent.</div>
+          </div>
+          ${this.modelSelection === 'other'
+            ? html`
+                <div class="form-field">
+                  <label for="model-id">Model ID</label>
+                  <sl-input
+                    id="model-id"
+                    placeholder="e.g. claude-opus-4-8"
+                    .value=${this.customModelId}
+                    @sl-input=${(e: Event) => {
+                      this.customModelId = (e.target as HTMLElement & { value: string }).value;
+                    }}
+                  ></sl-input>
+                </div>
+              `
+            : ''}
 
           <div class="form-field">
             <label for="harness">Harness Config</label>
