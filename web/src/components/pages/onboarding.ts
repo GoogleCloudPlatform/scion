@@ -869,8 +869,6 @@ export class ScionPageOnboarding extends LitElement {
       const source = cs?.source;
       return !(status === 'valid' && source === 'local');
     });
-    const allReady = selectedList.length > 0 && needsPull.length === 0;
-
     return html`
       <h2>AI Harnesses</h2>
       <p>Select harnesses and ensure container images are ready.</p>
