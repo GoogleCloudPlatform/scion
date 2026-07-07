@@ -50,6 +50,7 @@ export default defineConfig({
 					label: 'Getting Started',
 					items: [
 						{ label: 'Installation', slug: 'getting-started/install' },
+						{ label: 'Onboarding Wizard', slug: 'getting-started/onboarding' },
 						{ label: 'Tutorial', slug: 'getting-started/tutorial' },
 					],
 				},
