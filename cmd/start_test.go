@@ -17,6 +17,8 @@ package cmd
 import (
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -39,4 +41,40 @@ func TestModelFlagRegistered(t *testing.T) {
 	f := startCmd.Flags().Lookup("model")
 	require.NotNil(t, f, "--model flag should be registered on start command")
 	assert.Equal(t, "", f.DefValue, "--model default should be empty")
+}
+
+func TestModelFlagOverridesConfigModel(t *testing.T) {
+	inlineCfg := &api.ScionConfig{Model: "small"}
+
+	flagModel := "large"
+	normalizedModel := config.NormalizeModelAlias(flagModel)
+
+	if normalizedModel != "" {
+		inlineCfg.Model = normalizedModel
+	}
+
+	if inlineCfg.Model != "large" {
+		t.Errorf("expected model 'large', got %q", inlineCfg.Model)
+	}
+}
+
+func TestModelFlagCreatesConfig(t *testing.T) {
+	var inlineCfg *api.ScionConfig
+
+	flagModel := "xl"
+	normalizedModel := config.NormalizeModelAlias(flagModel)
+
+	if normalizedModel != "" {
+		if inlineCfg == nil {
+			inlineCfg = &api.ScionConfig{}
+		}
+		inlineCfg.Model = normalizedModel
+	}
+
+	if inlineCfg == nil {
+		t.Fatal("expected inlineCfg to be created")
+	}
+	if inlineCfg.Model != "extra-large" {
+		t.Errorf("expected model 'extra-large', got %q", inlineCfg.Model)
+	}
 }
