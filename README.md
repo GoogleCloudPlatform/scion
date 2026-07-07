@@ -84,7 +84,7 @@ scion start debug "Help me debug this error" --attach
 - **True Isolation** — Each agent runs in its own container with separated credentials, config, and a dedicated `git worktree`, preventing merge conflicts.
 - **Parallel Execution** — Run multiple agents concurrently as fully independent processes, locally or remotely.
 - **Attach / Detach** — Agents run in `tmux` sessions for background operation. Attach for human-in-the-loop interaction, enqueue messages while detached, and tunnel into remote agents securely.
-- **Specialization via Templates** — Define agent roles ("Security Auditor", "QA Tester") with custom system prompts and skill sets. See [Templates](https://googlecloudplatform.github.io/scion/advanced-local/templates/).
+- **Specialization via Templates** — Define agent roles ("Security Auditor", "QA Tester") with custom system prompts and skill sets. See [Templates](https://googlecloudplatform.github.io/scion/local/templates/).
 - **Multi-Runtime** — Manage execution across Docker, Podman, Apple containers, and Kubernetes via named profiles.
 - **Observability** — Normalized OTEL telemetry across harnesses for logging and metrics across agent swarms.
 
@@ -110,9 +110,9 @@ Visit our **[Documentation Site](https://googlecloudplatform.github.io/scion/)**
 - **[Concepts](https://googlecloudplatform.github.io/scion/concepts/)**: Understanding Agents, Projects, Harnesses, and Runtimes.
 - **[CLI Reference](https://googlecloudplatform.github.io/scion/reference/cli/)**: Comprehensive guide to all Scion commands.
 - **Guides**:
-    - [Using Templates](https://googlecloudplatform.github.io/scion/advanced-local/templates/)
-    - [Using Tmux](https://googlecloudplatform.github.io/scion/advanced-local/tmux/)
-    - [Kubernetes Runtime](https://googlecloudplatform.github.io/scion/hub-admin/kubernetes/)
+    - [Using Templates](https://googlecloudplatform.github.io/scion/local/templates/)
+    - [Using Tmux](https://googlecloudplatform.github.io/scion/local/tmux/)
+    - [Kubernetes Runtime](https://googlecloudplatform.github.io/scion/hosted/ha/kubernetes/)
 
 ## Project Status
 
