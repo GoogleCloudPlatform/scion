@@ -37,6 +37,7 @@ model_aliases:
   small: claude-haiku-4.5
   medium: claude-sonnet-4.5
   large: claude-opus-4.8
+  extra-large: claude-opus-4.8
 
 command:
   base: ["copilot", "--no-auto-update", "--no-remote", "--no-color",

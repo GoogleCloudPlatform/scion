@@ -1686,9 +1686,10 @@ func TestFriendlyTemplateName(t *testing.T) {
 
 func TestResolveModelAlias(t *testing.T) {
 	aliases := map[string]string{
-		"small":  "haiku",
-		"medium": "sonnet",
-		"large":  "opus",
+		"small":       "haiku",
+		"medium":      "sonnet",
+		"large":       "opus",
+		"extra-large": "opus-xl",
 	}
 
 	tests := []struct {
@@ -1700,6 +1701,8 @@ func TestResolveModelAlias(t *testing.T) {
 		{"alias resolves to concrete name", "large", aliases, "opus"},
 		{"small alias", "small", aliases, "haiku"},
 		{"medium alias", "medium", aliases, "sonnet"},
+		{"extra-large alias resolves", "extra-large", aliases, "opus-xl"},
+		{"xl shorthand resolves via normalization", "xl", aliases, "opus-xl"},
 		{"concrete model passes through", "gemini-pro", aliases, "gemini-pro"},
 		{"empty model passes through", "", aliases, ""},
 		{"nil aliases passes through", "large", nil, "large"},
@@ -1712,6 +1715,29 @@ func TestResolveModelAlias(t *testing.T) {
 			got := ResolveModelAlias(tt.model, tt.aliases)
 			if got != tt.expected {
 				t.Errorf("ResolveModelAlias(%q, ...) = %q, want %q", tt.model, got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestNormalizeModelAlias(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected string
+	}{
+		{"xl", "extra-large"},
+		{"small", "small"},
+		{"medium", "medium"},
+		{"large", "large"},
+		{"extra-large", "extra-large"},
+		{"claude-opus-4-8", "claude-opus-4-8"},
+		{"", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			got := NormalizeModelAlias(tt.input)
+			if got != tt.expected {
+				t.Errorf("NormalizeModelAlias(%q) = %q, want %q", tt.input, got, tt.expected)
 			}
 		})
 	}
@@ -1792,7 +1818,7 @@ func TestWarnDeprecatedTemplateFields(t *testing.T) {
 }
 
 func TestKnownModelAliases(t *testing.T) {
-	expected := []string{"small", "medium", "large"}
+	expected := []string{"small", "medium", "large", "extra-large"}
 	for _, alias := range expected {
 		if !KnownModelAliases[alias] {
 			t.Errorf("expected %q to be a known model alias", alias)

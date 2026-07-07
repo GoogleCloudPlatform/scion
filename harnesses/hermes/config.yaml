@@ -37,6 +37,7 @@ model_aliases:
   small: google/gemini-3.5-flash
   medium: anthropic/claude-sonnet-4
   large: anthropic/claude-opus-4
+  extra-large: anthropic/claude-opus-4
 
 command:
   base: ["hermes", "chat", "--yolo"]

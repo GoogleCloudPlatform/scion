@@ -35,6 +35,7 @@ model_aliases:
   small: gemini-flash-lite
   medium: gemini-flash
   large: gemini-pro
+  extra-large: gemini-pro
 env:
   GEMINI_CLI_NO_RELAUNCH: "true"
 command:

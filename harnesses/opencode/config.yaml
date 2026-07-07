@@ -39,6 +39,7 @@ model_aliases:
   small: claude-sonnet
   medium: claude-sonnet
   large: claude-opus
+  extra-large: claude-opus
 command:
   # task_position is before_base_args because the compiled OpenCode harness
   # emits `opencode --prompt <task> <base_args...>` — flipping this to

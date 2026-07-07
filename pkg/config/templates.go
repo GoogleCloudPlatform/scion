@@ -621,9 +621,10 @@ func ValidateAgnosticTemplate(cfg *api.ScionConfig) error {
 
 // KnownModelAliases is the canonical set of recognized model size aliases.
 var KnownModelAliases = map[string]bool{
-	"small":  true,
-	"medium": true,
-	"large":  true,
+	"small":       true,
+	"medium":      true,
+	"large":       true,
+	"extra-large": true,
 }
 
 // WarnDeprecatedTemplateFields returns deprecation warnings for harness-specific
@@ -641,9 +642,18 @@ func WarnDeprecatedTemplateFields(cfg *api.ScionConfig) []string {
 		warnings = append(warnings, "template sets 'auth_selectedType' which is harness-specific; move it to your harness-config's config.yaml instead")
 	}
 	if cfg.Model != "" && !KnownModelAliases[cfg.Model] {
-		warnings = append(warnings, fmt.Sprintf("template sets 'model' to a concrete model name %q; consider using a size alias (small, medium, large) for portability across harnesses", cfg.Model))
+		warnings = append(warnings, fmt.Sprintf("template sets 'model' to a concrete model name %q; consider using a size alias (small, medium, large, extra-large) for portability across harnesses", cfg.Model))
 	}
 	return warnings
+}
+
+// NormalizeModelAlias normalizes shorthand model alias names to their canonical form.
+// Currently maps "xl" to "extra-large".
+func NormalizeModelAlias(model string) string {
+	if model == "xl" {
+		return "extra-large"
+	}
+	return model
 }
 
 // ResolveModelAlias resolves a model size alias to a concrete model name
@@ -653,6 +663,7 @@ func ResolveModelAlias(model string, aliases map[string]string) string {
 	if model == "" || aliases == nil {
 		return model
 	}
+	model = NormalizeModelAlias(model)
 	if !KnownModelAliases[model] {
 		return model // concrete model name, pass through
 	}

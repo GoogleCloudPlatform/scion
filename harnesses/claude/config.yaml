@@ -40,6 +40,7 @@ model_aliases:
   small: haiku
   medium: sonnet
   large: opus
+  extra-large: opus
 env:
   ANTHROPIC_MODEL: "opus"
   ANTHROPIC_SMALL_FAST_MODEL: "haiku"

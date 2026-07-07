@@ -40,6 +40,7 @@ model_aliases:
   small: gpt-5.4-mini
   medium: gpt-5.4
   large: gpt-5.5
+  extra-large: gpt-5.5
 command:
   base: ["codex", "--sandbox", "danger-full-access", "--dangerously-bypass-approvals-and-sandbox", "--dangerously-bypass-hook-trust"]
   # resume_flag is split on whitespace, so "resume --last" emits two argv tokens
