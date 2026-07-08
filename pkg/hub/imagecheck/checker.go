@@ -138,12 +138,14 @@ func (c *Checker) CheckAll(ctx context.Context, shortImage, longImage string) Th
 	result.Remote.Image = longImage
 
 	if c.local != nil {
-		shortExists, _ := c.local.ImageExists(ctx, shortImage)
-		result.LocalShort.Exists = shortExists
-		if shortExists {
-			if ider, ok := c.local.(LocalImageIDer); ok {
-				if id, err := ider.ImageID(ctx, shortImage); err == nil {
-					result.LocalShort.Hash = id
+		if shortImage != "" {
+			shortExists, _ := c.local.ImageExists(ctx, shortImage)
+			result.LocalShort.Exists = shortExists
+			if shortExists {
+				if ider, ok := c.local.(LocalImageIDer); ok {
+					if id, err := ider.ImageID(ctx, shortImage); err == nil {
+						result.LocalShort.Hash = id
+					}
 				}
 			}
 		}
@@ -186,7 +188,10 @@ func (c *Checker) CheckAll(ctx context.Context, shortImage, longImage string) Th
 		result.ResolvedImage = longImage
 		result.ResolutionSource = "remote"
 	default:
-		result.ResolvedImage = shortImage
+		result.ResolvedImage = longImage
+		if shortImage != "" {
+			result.ResolvedImage = shortImage
+		}
 		result.ResolutionSource = "none"
 	}
 

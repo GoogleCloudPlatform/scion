@@ -655,9 +655,11 @@ export class ScionPageHarnessConfigDetail extends LitElement {
               <td class="image-ref">${st?.local_short?.image || image || '—'}</td>
               <td class="image-hash">${st?.local_short?.exists ? (st.local_short.hash || '—') : ''}</td>
               <td>
-                ${st?.local_short?.exists
-                  ? html`Available${src === 'local_short' ? html`<span class="active-badge">Active</span>` : nothing}`
-                  : html`<span class="not-found">Not found</span>`}
+                ${st
+                  ? (st.local_short?.exists
+                    ? html`Available${src === 'local_short' ? html`<span class="active-badge">Active</span>` : nothing}`
+                    : html`<span class="not-found">Not found</span>`)
+                  : html`<sl-spinner style="font-size: 0.75rem;"></sl-spinner> Checking...`}
               </td>
             </tr>
             <tr class=${src === 'local_long' ? 'active-row' : ''}>
@@ -665,9 +667,11 @@ export class ScionPageHarnessConfigDetail extends LitElement {
               <td class="image-ref">${st?.local_long?.image || '—'}</td>
               <td class="image-hash">${st?.local_long?.exists ? (st.local_long.hash || '—') : ''}</td>
               <td>
-                ${st?.local_long?.exists
-                  ? html`Available${src === 'local_long' ? html`<span class="active-badge">Active</span>` : nothing}`
-                  : html`<span class="not-found">Not found</span>`}
+                ${st
+                  ? (st.local_long?.exists
+                    ? html`Available${src === 'local_long' ? html`<span class="active-badge">Active</span>` : nothing}`
+                    : html`<span class="not-found">Not found</span>`)
+                  : html`<sl-spinner style="font-size: 0.75rem;"></sl-spinner> Checking...`}
               </td>
             </tr>
             <tr class=${src === 'remote' ? 'active-row' : ''}>
@@ -675,10 +679,12 @@ export class ScionPageHarnessConfigDetail extends LitElement {
               <td class="image-ref">${st?.remote?.image || '—'}</td>
               <td class="image-hash">${st?.remote?.exists ? (st.remote.hash || '—') : ''}</td>
               <td>
-                ${st?.remote?.exists
-                  ? html`Available${src === 'remote' ? html`<span class="active-badge">Active</span>` : nothing}
-                    ${st?.remote?.newer_than_local ? html`<span class="newer-badge">Newer version available</span>` : nothing}`
-                  : html`<span class="not-found">Not checked</span>`}
+                ${st
+                  ? (st.remote?.exists
+                    ? html`Available${src === 'remote' ? html`<span class="active-badge">Active</span>` : nothing}
+                      ${st.remote?.newer_than_local ? html`<span class="newer-badge">Newer version available</span>` : nothing}`
+                    : html`<span class="not-found">Not checked</span>`)
+                  : html`<sl-spinner style="font-size: 0.75rem;"></sl-spinner> Checking...`}
               </td>
             </tr>
           </tbody>

@@ -1005,6 +1005,16 @@ func (s *Server) handleHarnessConfigDeleteLocalImage(w http.ResponseWriter, r *h
 		return
 	}
 
+	exists, err := s.imageManager.ImageExists(ctx, image)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "check_failed", fmt.Sprintf("Failed to check image: %v", err), nil)
+		return
+	}
+	if !exists {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "not_found", "image": image})
+		return
+	}
+
 	if err := s.imageManager.RemoveImage(ctx, image); err != nil {
 		writeError(w, http.StatusInternalServerError, "remove_failed", fmt.Sprintf("Failed to remove image: %v", err), nil)
 		return
