@@ -143,7 +143,7 @@ field is updated to reference the built image.`,
 			}
 		}
 
-		updateBuildConfigAndSync(harnessConfigName, hcDir, outputImage)
+		syncBuildToHub(harnessConfigName, hcDir)
 
 		return nil
 	},
@@ -268,7 +268,7 @@ func runCloudBuild(cmd *cobra.Command, harnessConfigName string, hcDir *config.H
 		return fmt.Errorf("cloud Build failed: %w", err)
 	}
 
-	updateBuildConfigAndSync(harnessConfigName, hcDir, outputImage)
+	syncBuildToHub(harnessConfigName, hcDir)
 
 	return nil
 }
@@ -285,48 +285,10 @@ func resolveGCPProject(settings *config.VersionedSettings) string {
 	return strings.TrimSpace(string(out))
 }
 
-// updateBuildConfigAndSync updates the harness config's config.yaml with the
-// new image reference and syncs to Hub.
-func updateBuildConfigAndSync(harnessConfigName string, hcDir *config.HarnessConfigDir, outputImage string) {
-	configPath := filepath.Join(hcDir.Path, "config.yaml")
-	configData, err := os.ReadFile(configPath)
-	if err != nil {
-		fmt.Printf("Warning: failed to read config.yaml for update: %v\n", err)
-		return
-	}
-	var doc yaml.Node
-	if err := yaml.Unmarshal(configData, &doc); err != nil {
-		fmt.Printf("Warning: failed to parse config.yaml: %v\n", err)
-		return
-	}
-	if len(doc.Content) > 0 && doc.Content[0].Kind == yaml.MappingNode {
-		mapping := doc.Content[0]
-		found := false
-		for i := 0; i < len(mapping.Content)-1; i += 2 {
-			if mapping.Content[i].Value == "image" {
-				mapping.Content[i+1].Value = outputImage
-				found = true
-				break
-			}
-		}
-		if !found {
-			mapping.Content = append(mapping.Content,
-				&yaml.Node{Kind: yaml.ScalarNode, Value: "image"},
-				&yaml.Node{Kind: yaml.ScalarNode, Value: outputImage},
-			)
-		}
-	}
-	updatedData, err := yaml.Marshal(&doc)
-	if err != nil {
-		fmt.Printf("Warning: failed to marshal updated config.yaml: %v\n", err)
-		return
-	}
-	if err := os.WriteFile(configPath, updatedData, 0644); err != nil {
-		fmt.Printf("Warning: failed to write updated config.yaml: %v\n", err)
-		return
-	}
-	fmt.Printf("Updated %s image to %s\n", configPath, outputImage)
-
+// syncBuildToHub syncs the harness config to Hub after a build without
+// modifying the image field in config.yaml. The image field is a stable
+// reference; two-phase resolution at agent start prefers local images.
+func syncBuildToHub(harnessConfigName string, hcDir *config.HarnessConfigDir) {
 	var gp string
 	if projectPath != "" {
 		if resolved, err := config.GetResolvedProjectDir(projectPath); err == nil {
