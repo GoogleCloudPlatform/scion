@@ -121,6 +121,18 @@ export class ScionPageHarnessConfigDetail extends LitElement {
   @state()
   private resolvedImage = '';
 
+  @state()
+  private imageStatus: {
+    local_short?: { exists: boolean; image: string; hash: string };
+    local_long?: { exists: boolean; image: string; hash: string };
+    remote?: { exists: boolean; image: string; hash: string; newer_than_local: boolean };
+    resolved_image?: string;
+    resolution_source?: string;
+  } | null = null;
+
+  @state()
+  private imageActionRunning = false;
+
   private fileBrowserDataSource: FileBrowserDataSource | null = null;
   private fileEditorDataSource: FileEditorDataSource | null = null;
   private buildPollTimer: ReturnType<typeof setTimeout> | null = null;
@@ -281,69 +293,78 @@ export class ScionPageHarnessConfigDetail extends LitElement {
       font-weight: 600;
       margin: 0 0 1rem;
     }
-    .image-info {
-      display: flex;
-      align-items: center;
-      gap: 1rem;
-      padding: 0.75rem 1rem;
-      background: var(--sl-color-neutral-50);
+    .image-table {
+      width: 100%;
+      border-collapse: collapse;
       border: 1px solid var(--sl-color-neutral-200);
       border-radius: var(--sl-border-radius-medium);
-      flex-wrap: wrap;
-    }
-    .image-path {
-      font-family: var(--sl-font-mono);
+      overflow: hidden;
       font-size: 0.8125rem;
-      word-break: break-all;
-      flex: 1;
-      min-width: 0;
     }
-    .image-type-badge {
-      display: inline-block;
-      padding: 0.125rem 0.5rem;
-      border-radius: var(--sl-border-radius-pill);
-      font-size: 0.6875rem;
+    .image-table th {
+      text-align: left;
+      padding: 0.5rem 0.75rem;
+      background: var(--sl-color-neutral-100);
       font-weight: 600;
+      font-size: 0.75rem;
+      color: var(--sl-color-neutral-600);
       text-transform: uppercase;
+      letter-spacing: 0.025em;
+    }
+    .image-table td {
+      padding: 0.5rem 0.75rem;
+      border-top: 1px solid var(--sl-color-neutral-200);
+      vertical-align: middle;
+    }
+    .image-table tr.active-row {
+      background: var(--sl-color-success-50, #f0fdf4);
+    }
+    .image-entity-name {
+      font-weight: 600;
       white-space: nowrap;
     }
-    .image-type-badge.local {
-      background: var(--sl-color-neutral-100);
-      color: var(--sl-color-neutral-700);
-    }
-    .image-type-badge.remote {
-      background: var(--sl-color-primary-50);
-      color: var(--sl-color-primary-700);
-    }
-    .image-meta {
+    .image-ref {
+      font-family: var(--sl-font-mono);
       font-size: 0.75rem;
+      color: var(--sl-color-neutral-600);
+      word-break: break-all;
+    }
+    .image-hash {
+      font-family: var(--sl-font-mono);
+      font-size: 0.6875rem;
       color: var(--sl-color-neutral-500);
     }
-    .image-status-indicator {
+    .active-badge {
+      display: inline-block;
+      padding: 0.0625rem 0.375rem;
+      border-radius: var(--sl-border-radius-pill);
+      font-size: 0.625rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      background: var(--sl-color-success-100, #dcfce7);
+      color: var(--sl-color-success-700, #15803d);
+      margin-left: 0.5rem;
+    }
+    .newer-badge {
       display: inline-flex;
       align-items: center;
       gap: 0.25rem;
-      font-size: 0.75rem;
-      font-weight: 600;
-      padding: 0.125rem 0.5rem;
+      padding: 0.0625rem 0.375rem;
       border-radius: var(--sl-border-radius-pill);
-      white-space: nowrap;
-    }
-    .image-status-indicator.valid {
-      background: var(--sl-color-success-100, #dcfce7);
-      color: var(--sl-color-success-700, #15803d);
-    }
-    .image-status-indicator.invalid {
-      background: var(--sl-color-danger-100, #fee2e2);
-      color: var(--sl-color-danger-700, #b91c1c);
-    }
-    .image-status-indicator.error {
+      font-size: 0.625rem;
+      font-weight: 600;
       background: var(--sl-color-warning-100, #fef3c7);
       color: var(--sl-color-warning-700, #a16207);
     }
-    .image-status-indicator.unknown {
-      background: var(--sl-color-neutral-100, #f1f5f9);
-      color: var(--sl-color-neutral-500, #64748b);
+    .not-found {
+      color: var(--sl-color-neutral-400);
+      font-style: italic;
+    }
+    .image-actions {
+      display: flex;
+      gap: 0.5rem;
+      margin-top: 0.75rem;
+      flex-wrap: wrap;
     }
 
     .dialog-warning {
@@ -429,6 +450,10 @@ export class ScionPageHarnessConfigDetail extends LitElement {
       // Create data sources
       this.fileBrowserDataSource = new HarnessConfigFileBrowserDataSource(this.harnessConfigId);
       this.fileEditorDataSource = new HarnessConfigFileEditorDataSource(this.harnessConfigId);
+
+      if (this.harnessConfig.config?.image) {
+        void this.recheckImage();
+      }
     } catch (err) {
       console.error('Failed to load harness config:', err);
       this.error = err instanceof Error ? err.message : 'Failed to load harness config';
@@ -606,39 +631,59 @@ export class ScionPageHarnessConfigDetail extends LitElement {
   private renderImageSection() {
     const hc = this.harnessConfig!;
     const image = hc.config?.image;
-    const hasImageStatus = !!hc.imageStatus && hc.imageStatus !== 'unknown';
-    const showSection = image || this.hasDockerfile || hasImageStatus;
+    const showSection = image || this.hasDockerfile;
     if (!showSection) return nothing;
 
-    const isRemote = image ? this.isRemoteImage(image) : false;
+    const st = this.imageStatus;
+    const src = st?.resolution_source || '';
 
     return html`
       <div class="image-section">
-        <h2>Image</h2>
-        <div class="image-info">
-          ${image ? html`
-            <span class="image-type-badge ${isRemote ? 'remote' : 'local'}">
-              ${isRemote ? 'Remote' : 'Local'}
-            </span>
-            <span class="image-path">${image}</span>
-            <span class="image-status-indicator ${hc.imageStatus || 'unknown'}">
-              ${hc.imageStatus === 'valid' ? 'Image Available' :
-                hc.imageStatus === 'invalid' ? 'Image Not Found' :
-                hc.imageStatus === 'error' ? 'Check Failed' : 'Not Checked'}
-            </span>
-            ${this.resolvedImage && this.resolvedImage !== image ? html`
-              <span class="image-meta">${this.resolvedImage}</span>
-            ` : nothing}
-            <sl-button size="small" variant="text" @click=${this.recheckImage}>
-              <sl-icon slot="prefix" name="arrow-repeat"></sl-icon>
-              Re-check
-            </sl-button>
-          ` : html`
-            <span class="image-meta">No image configured</span>
-          `}
-          ${hc.updated ? html`
-            <span class="image-meta">Last updated: ${new Date(hc.updated).toLocaleString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' })}</span>
-          ` : nothing}
+        <h2>Images</h2>
+        <table class="image-table">
+          <thead>
+            <tr>
+              <th>Entity</th>
+              <th>Image</th>
+              <th>Hash</th>
+              <th>Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr class=${src === 'local_short' ? 'active-row' : ''}>
+              <td class="image-entity-name">Local Build</td>
+              <td class="image-ref">${st?.local_short?.image || image || '—'}</td>
+              <td class="image-hash">${st?.local_short?.exists ? (st.local_short.hash || '—') : ''}</td>
+              <td>
+                ${st?.local_short?.exists
+                  ? html`Available${src === 'local_short' ? html`<span class="active-badge">Active</span>` : nothing}`
+                  : html`<span class="not-found">Not found</span>`}
+              </td>
+            </tr>
+            <tr class=${src === 'local_long' ? 'active-row' : ''}>
+              <td class="image-entity-name">Pulled</td>
+              <td class="image-ref">${st?.local_long?.image || '—'}</td>
+              <td class="image-hash">${st?.local_long?.exists ? (st.local_long.hash || '—') : ''}</td>
+              <td>
+                ${st?.local_long?.exists
+                  ? html`Available${src === 'local_long' ? html`<span class="active-badge">Active</span>` : nothing}`
+                  : html`<span class="not-found">Not found</span>`}
+              </td>
+            </tr>
+            <tr class=${src === 'remote' ? 'active-row' : ''}>
+              <td class="image-entity-name">Remote</td>
+              <td class="image-ref">${st?.remote?.image || '—'}</td>
+              <td class="image-hash">${st?.remote?.exists ? (st.remote.hash || '—') : ''}</td>
+              <td>
+                ${st?.remote?.exists
+                  ? html`Available${src === 'remote' ? html`<span class="active-badge">Active</span>` : nothing}
+                    ${st?.remote?.newer_than_local ? html`<span class="newer-badge">Newer version available</span>` : nothing}`
+                  : html`<span class="not-found">Not checked</span>`}
+              </td>
+            </tr>
+          </tbody>
+        </table>
+        <div class="image-actions">
           ${this.hasDockerfile ? html`
             <sl-button
               size="small"
@@ -650,23 +695,87 @@ export class ScionPageHarnessConfigDetail extends LitElement {
               ${this.buildRunning ? 'Building...' : 'Build Image'}
             </sl-button>
           ` : nothing}
+          ${st?.local_short?.exists ? html`
+            <sl-button
+              size="small"
+              variant="warning"
+              outline
+              @click=${this.deleteLocalImage}
+              ?disabled=${this.imageActionRunning}
+            >
+              <sl-icon slot="prefix" name="trash"></sl-icon>
+              Delete Local
+            </sl-button>
+          ` : nothing}
+          <sl-button
+            size="small"
+            variant="default"
+            @click=${this.pullLatestImage}
+            ?disabled=${this.imageActionRunning}
+          >
+            <sl-icon slot="prefix" name="cloud-download"></sl-icon>
+            Pull Latest
+          </sl-button>
+          <sl-button size="small" variant="text" @click=${this.recheckImage} ?disabled=${this.imageActionRunning}>
+            <sl-icon slot="prefix" name="arrow-repeat"></sl-icon>
+            Re-check Remote
+          </sl-button>
         </div>
       </div>
     `;
   }
 
   private async recheckImage(): Promise<void> {
-    const resp = await apiFetch(
-      `/api/v1/harness-configs/${this.harnessConfigId}/check-image`,
-      { method: 'POST' }
-    );
-    if (resp.ok) {
-      const data = await resp.json();
-      this.resolvedImage = data.resolved_image || '';
-      await this.loadHarnessConfig();
-    } else {
-      const msg = await extractApiError(resp, `HTTP ${resp.status}`);
-      alert(msg);
+    this.imageActionRunning = true;
+    try {
+      const resp = await apiFetch(
+        `/api/v1/harness-configs/${this.harnessConfigId}/image-status`
+      );
+      if (resp.ok) {
+        this.imageStatus = await resp.json();
+        this.resolvedImage = this.imageStatus?.resolved_image || '';
+      } else {
+        const msg = await extractApiError(resp, `HTTP ${resp.status}`);
+        alert(msg);
+      }
+    } finally {
+      this.imageActionRunning = false;
+    }
+  }
+
+  private async deleteLocalImage(): Promise<void> {
+    this.imageActionRunning = true;
+    try {
+      const resp = await apiFetch(
+        `/api/v1/harness-configs/${this.harnessConfigId}/local-image`,
+        { method: 'DELETE' }
+      );
+      if (resp.ok) {
+        await this.recheckImage();
+      } else {
+        const msg = await extractApiError(resp, `HTTP ${resp.status}`);
+        alert(msg);
+      }
+    } finally {
+      this.imageActionRunning = false;
+    }
+  }
+
+  private async pullLatestImage(): Promise<void> {
+    this.imageActionRunning = true;
+    try {
+      const resp = await apiFetch(
+        `/api/v1/harness-configs/${this.harnessConfigId}/pull-image`,
+        { method: 'POST' }
+      );
+      if (resp.ok) {
+        await this.recheckImage();
+      } else {
+        const msg = await extractApiError(resp, `HTTP ${resp.status}`);
+        alert(msg);
+      }
+    } finally {
+      this.imageActionRunning = false;
     }
   }
 
