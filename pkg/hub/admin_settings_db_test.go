@@ -15,7 +15,6 @@
 package hub
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -26,7 +25,6 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
-	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 )
 
@@ -73,7 +71,7 @@ func TestGetServerConfigDB_MetadataFromDB(t *testing.T) {
 	_, _ = ops.Refresh(context.Background())
 
 	rr := httptest.NewRecorder()
-	srv.handleGetServerConfigDB(rr, ops)
+	srv.handleGetServerConfigDB(rr, adminRequest(http.MethodGet, "/api/v1/admin/server-config", ""), ops)
 
 	if rr.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
@@ -132,7 +130,7 @@ func TestGetServerConfigDB_EnvOverridesPresent(t *testing.T) {
 	srv.SetOperationalSettings(ops)
 
 	rr := httptest.NewRecorder()
-	srv.handleGetServerConfigDB(rr, ops)
+	srv.handleGetServerConfigDB(rr, adminRequest(http.MethodGet, "/api/v1/admin/server-config", ""), ops)
 
 	if rr.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
@@ -155,11 +153,74 @@ func TestGetServerConfigDB_EnvOverridesPresent(t *testing.T) {
 	}
 }
 
+func TestGetServerConfigDB_FalseBooleansOverrideFileValues(t *testing.T) {
+	srv, fakeStore, ops := newTestDBServer(t)
+
+	// Seed lifecycle section with explicit false booleans in DB.
+	fakeStore.seed("lifecycle", json.RawMessage(`{
+		"auto_suspend_stalled": false,
+		"soft_delete_retain_files": false,
+		"soft_delete_retention": ""
+	}`))
+	_, _ = ops.Refresh(context.Background())
+
+	rr := httptest.NewRecorder()
+	srv.handleGetServerConfigDB(rr, adminRequest(http.MethodGet, "/api/v1/admin/server-config", ""), ops)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var resp ServerConfigDBResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	// The DB says false; the response MUST reflect false, not a stale file value.
+	if resp.Server == nil || resp.Server.Hub == nil {
+		t.Fatal("expected server.hub to be populated")
+	}
+	if resp.Server.Hub.AutoSuspendStalled == nil {
+		t.Fatal("AutoSuspendStalled should not be nil")
+	}
+	if *resp.Server.Hub.AutoSuspendStalled != false {
+		t.Errorf("AutoSuspendStalled: want false, got %v", *resp.Server.Hub.AutoSuspendStalled)
+	}
+	if resp.Server.Hub.SoftDeleteRetainFiles == nil {
+		t.Fatal("SoftDeleteRetainFiles should not be nil")
+	}
+	if *resp.Server.Hub.SoftDeleteRetainFiles != false {
+		t.Errorf("SoftDeleteRetainFiles: want false, got %v", *resp.Server.Hub.SoftDeleteRetainFiles)
+	}
+}
+
+func TestApplySnapshotToResponse_EmptySlicesOverrideFileValues(t *testing.T) {
+	// Simulate a response pre-loaded from file with non-empty notification channels.
+	resp := &ServerConfigResponse{
+		Server: &config.V1ServerConfig{
+			NotificationChannels: []config.V1NotificationChannelConfig{
+				{Type: "slack"},
+			},
+		},
+	}
+
+	// Snapshot says empty (DB explicitly cleared them).
+	snap := Layer1Snapshot{
+		NotificationChannels: nil,
+	}
+
+	applySnapshotToResponse(resp, snap)
+
+	if len(resp.Server.NotificationChannels) != 0 {
+		t.Errorf("NotificationChannels: want empty, got %v", resp.Server.NotificationChannels)
+	}
+}
+
 func TestGetServerConfigDB_MaskingIntact(t *testing.T) {
 	srv, _, ops := newTestDBServer(t)
 
 	rr := httptest.NewRecorder()
-	srv.handleGetServerConfigDB(rr, ops)
+	srv.handleGetServerConfigDB(rr, adminRequest(http.MethodGet, "/api/v1/admin/server-config", ""), ops)
 
 	if rr.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", rr.Code)
@@ -286,6 +347,147 @@ func TestPutServerConfigDB_MixedValid_Layer0Rejected_NothingWritten(t *testing.T
 	defer fakeStore.mu.Unlock()
 	if len(fakeStore.settings) > 0 {
 		t.Error("expected no writes when Layer-0 keys present")
+	}
+}
+
+func TestPutServerConfigDB_UnclassifiedOnly_200WithIgnoredKeys(t *testing.T) {
+	srv, fakeStore, ops := newTestDBServer(t)
+
+	// Payload containing only unclassified keys — not Layer-0, not Layer-1.
+	sv := "2"
+	body := `{
+		"schema_version": "2",
+		"runtimes": {"go": {"image": "golang:1.21"}},
+		"profiles": {"dev": {}}
+	}`
+	_ = sv
+
+	req := adminRequest(http.MethodPut, "/api/v1/admin/server-config", body)
+	rr := httptest.NewRecorder()
+	srv.handlePutServerConfigDB(rr, req, ops)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var resp map[string]interface{}
+	json.Unmarshal(rr.Body.Bytes(), &resp)
+
+	if resp["status"] != "saved" {
+		t.Errorf("expected status=saved, got %v", resp["status"])
+	}
+
+	// ignored_keys should list the unclassified keys.
+	ignored, ok := resp["ignored_keys"].([]interface{})
+	if !ok || len(ignored) == 0 {
+		t.Fatal("expected non-empty ignored_keys in response")
+	}
+	ignoredSet := make(map[string]bool)
+	for _, k := range ignored {
+		ignoredSet[k.(string)] = true
+	}
+	for _, expected := range []string{"schema_version", "runtimes", "profiles"} {
+		if !ignoredSet[expected] {
+			t.Errorf("expected %q in ignored_keys, got %v", expected, ignored)
+		}
+	}
+
+	// Nothing written to store.
+	fakeStore.mu.Lock()
+	defer fakeStore.mu.Unlock()
+	if len(fakeStore.settings) > 0 {
+		t.Error("expected no sections written to store for unclassified-only PUT")
+	}
+}
+
+func TestPutServerConfigDB_MixedLayer1AndUnclassified_AppliedAndIgnored(t *testing.T) {
+	srv, fakeStore, ops := newTestDBServer(t)
+
+	// Mix of Layer-1 (admin_emails) and unclassified (runtimes, workspace_path).
+	body := `{
+		"workspace_path": "/tmp/ws",
+		"server": {
+			"hub": {"admin_emails": ["admin@test.com"]}
+		},
+		"runtimes": {"go": {"image": "golang:1.21"}}
+	}`
+
+	req := adminRequest(http.MethodPut, "/api/v1/admin/server-config", body)
+	rr := httptest.NewRecorder()
+	srv.handlePutServerConfigDB(rr, req, ops)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var resp map[string]interface{}
+	json.Unmarshal(rr.Body.Bytes(), &resp)
+
+	if resp["status"] != "saved" {
+		t.Errorf("expected status=saved, got %v", resp["status"])
+	}
+
+	// Layer-1 section was written.
+	fakeStore.mu.Lock()
+	_, accessOk := fakeStore.settings["access"]
+	fakeStore.mu.Unlock()
+	if !accessOk {
+		t.Error("expected 'access' section in store after mixed PUT")
+	}
+
+	// ignored_keys should list the unclassified keys.
+	ignored, ok := resp["ignored_keys"].([]interface{})
+	if !ok || len(ignored) == 0 {
+		t.Fatal("expected non-empty ignored_keys for mixed PUT")
+	}
+	ignoredSet := make(map[string]bool)
+	for _, k := range ignored {
+		ignoredSet[k.(string)] = true
+	}
+	if !ignoredSet["runtimes"] {
+		t.Error("expected 'runtimes' in ignored_keys")
+	}
+	if !ignoredSet["workspace_path"] {
+		t.Error("expected 'workspace_path' in ignored_keys")
+	}
+
+	// Verify the Layer-1 data was actually applied.
+	snap := ops.Snapshot()
+	if len(snap.AdminEmails) != 1 || snap.AdminEmails[0] != "admin@test.com" {
+		t.Errorf("expected [admin@test.com], got %v", snap.AdminEmails)
+	}
+}
+
+func TestPutServerConfigDB_ExplicitLayer0_Still422(t *testing.T) {
+	srv, fakeStore, ops := newTestDBServer(t)
+
+	// Explicit Layer-0 key (database) should still be rejected.
+	body := `{
+		"server": {
+			"database": {"driver": "sqlite"}
+		}
+	}`
+
+	req := adminRequest(http.MethodPut, "/api/v1/admin/server-config", body)
+	rr := httptest.NewRecorder()
+	srv.handlePutServerConfigDB(rr, req, ops)
+
+	if rr.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("expected 422, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var resp map[string]interface{}
+	json.Unmarshal(rr.Body.Bytes(), &resp)
+
+	if resp["error"] != "layer0_rejected" {
+		t.Errorf("expected error=layer0_rejected, got %v", resp["error"])
+	}
+
+	// Nothing written to store.
+	fakeStore.mu.Lock()
+	defer fakeStore.mu.Unlock()
+	if len(fakeStore.settings) > 0 {
+		t.Error("expected no writes after Layer-0 rejection")
 	}
 }
 
@@ -794,9 +996,3 @@ func TestMaintenanceDB_ConcurrentRace(t *testing.T) {
 	}
 	wg.Wait()
 }
-
-// Suppress unused import warning for bytes package.
-var _ = bytes.NewBuffer
-
-// Suppress unused import warning for store package.
-var _ = store.ErrNotFound

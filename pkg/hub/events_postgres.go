@@ -437,7 +437,14 @@ func (p *PostgresEventPublisher) runListener() {
 			fn := p.onReconnect
 			p.mu.RUnlock()
 			if fn != nil {
-				go fn()
+				go func() {
+					defer func() {
+						if r := recover(); r != nil {
+							p.log.Error("Reconnect callback panicked", "panic", r)
+						}
+					}()
+					fn()
+				}()
 			}
 		}
 		firstConnect = false

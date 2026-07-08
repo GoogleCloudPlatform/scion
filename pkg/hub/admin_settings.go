@@ -90,7 +90,7 @@ func (s *Server) handleAdminServerConfig(w http.ResponseWriter, r *http.Request)
 	if ops := s.GetOperationalSettings(); ops != nil && s.IsPostgres() {
 		switch r.Method {
 		case http.MethodGet:
-			s.handleGetServerConfigDB(w, ops)
+			s.handleGetServerConfigDB(w, r, ops)
 		case http.MethodPut:
 			s.handlePutServerConfigDB(w, r, ops)
 		default:

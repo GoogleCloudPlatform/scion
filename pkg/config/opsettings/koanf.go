@@ -17,10 +17,63 @@ package opsettings
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/knadh/koanf/providers/confmap"
 	"github.com/knadh/koanf/v2"
 )
+
+// layer0Prefixes defines the Layer-0 bootstrap key prefixes from design §3.1.
+// These are settings that require a restart and MUST NOT be written to the DB.
+// The classification logic matches any key that equals or is nested under these
+// prefixes (e.g. "server.database" matches "server.database.driver").
+//
+// See design §3.1 "Two tiers" table for the full rationale.
+var layer0Prefixes = []string{
+	// Database
+	"server.database",
+	// Listeners
+	"server.hub.port",
+	"server.hub.host",
+	"server.hub.read_timeout",
+	"server.hub.write_timeout",
+	"server.broker",
+	// Auth stack
+	"server.auth.mode",
+	"server.auth.dev_mode",
+	"server.auth.dev_token",
+	"server.auth.proxy",
+	"server.auth.transport",
+	"server.oauth",
+	// Secrets/storage
+	"server.secrets",
+	"server.storage",
+	"server.workspace_storage",
+	// Identity/mode
+	"server.mode",
+	"server.env",
+	"server.hub.hub_id",
+	"server.hub.gcp_project_id",
+	// Logging
+	"server.log_level",
+	"server.log_format",
+	// CORS
+	"server.hub.cors",
+	// Messaging/plugins
+	"server.message_broker",
+	"server.plugins",
+}
+
+// isLayer0Key reports whether the given koanf key belongs to the Layer-0
+// bootstrap set (design §3.1). Matches exact keys and any nested children.
+func isLayer0Key(key string) bool {
+	for _, prefix := range layer0Prefixes {
+		if key == prefix || strings.HasPrefix(key, prefix+".") {
+			return true
+		}
+	}
+	return false
+}
 
 // koanfPathToJSONField maps a koanf path to the JSON field name used in the
 // section document. For most paths the last segment is the field name, but some
@@ -290,17 +343,24 @@ func Layer1KoanfKeys() map[string][]string {
 	return result
 }
 
-// ClassifyKeys partitions a set of koanf keys into Layer-1 (grouped by section)
-// and Layer-0 (unowned). Used by PUT partitioning to reject Layer-0 writes.
-func ClassifyKeys(keys []string) (layer1 map[string][]string, layer0 []string) {
+// ClassifyKeys partitions a set of koanf keys into three groups:
+//   - layer1: keys owned by a Layer-1 section, grouped by section name
+//   - layer0: keys explicitly in the Layer-0 bootstrap set (design §3.1) — must be rejected
+//   - unclassified: keys not in any Layer-1 section and not explicitly Layer-0 — should be ignored
+//
+// Used by PUT partitioning: Layer-1 → write to DB, Layer-0 → 422 reject,
+// unclassified → ignore with warning.
+func ClassifyKeys(keys []string) (layer1 map[string][]string, layer0 []string, unclassified []string) {
 	layer1 = make(map[string][]string)
 	for _, key := range keys {
 		sec := OwningSection(key)
 		if sec != "" {
 			layer1[sec] = append(layer1[sec], key)
-		} else {
+		} else if isLayer0Key(key) {
 			layer0 = append(layer0, key)
+		} else {
+			unclassified = append(unclassified, key)
 		}
 	}
-	return layer1, layer0
+	return layer1, layer0, unclassified
 }

@@ -78,7 +78,7 @@ type ServerConfigUpdateDBRequest struct {
 //
 // Layer-1 sections come from OperationalSettings.Snapshot(); Layer-0 comes from
 // the local GlobalConfig (settings.yaml). Section metadata shows provenance.
-func (s *Server) handleGetServerConfigDB(w http.ResponseWriter, ops *OperationalSettings) {
+func (s *Server) handleGetServerConfigDB(w http.ResponseWriter, r *http.Request, ops *OperationalSettings) {
 	// Build the base response from the file (same as file mode) for Layer-0.
 	globalDir, err := config.GetGlobalDir()
 	if err != nil {
@@ -126,7 +126,7 @@ func (s *Server) handleGetServerConfigDB(w http.ResponseWriter, ops *Operational
 	applySnapshotToResponse(&resp.ServerConfigResponse, snap)
 
 	// Build section metadata from the cache.
-	resp.SectionMeta = s.buildSectionMetadata(ops)
+	resp.SectionMeta = s.buildSectionMetadata(r.Context(), ops)
 
 	// Env overrides.
 	overrides := ops.EnvOverriddenKeys()
@@ -141,9 +141,13 @@ func (s *Server) handleGetServerConfigDB(w http.ResponseWriter, ops *Operational
 
 // applySnapshotToResponse writes Layer-1 snapshot values into the
 // ServerConfigResponse, ensuring the response reflects the merged
-// (env > DB > file > defaults) view.
+// (env > DB > file > defaults) view exactly. The snapshot is the
+// authoritative merged result (env > DB > file > defaults); every
+// field MUST be written unconditionally so that false booleans, empty
+// slices, and zero-value strings from the snapshot override any
+// stale file-loaded values in the response.
 func applySnapshotToResponse(resp *ServerConfigResponse, snap Layer1Snapshot) {
-	// Access
+	// Agent defaults
 	resp.DefaultTemplate = snap.DefaultTemplate
 	resp.DefaultHarnessConfig = snap.DefaultHarnessConfig
 	resp.ImageRegistry = snap.ImageRegistry
@@ -152,10 +156,8 @@ func applySnapshotToResponse(resp *ServerConfigResponse, snap Layer1Snapshot) {
 	resp.DefaultMaxDuration = snap.DefaultMaxDuration
 	resp.DefaultResources = snap.DefaultResources
 
-	// Telemetry
-	if snap.TelemetryConfig != nil {
-		resp.Telemetry = snap.TelemetryConfig
-	}
+	// Telemetry — always set from snapshot (nil = no telemetry configured).
+	resp.Telemetry = snap.TelemetryConfig
 
 	// Ensure server sub-structs exist.
 	if resp.Server == nil {
@@ -173,16 +175,13 @@ func applySnapshotToResponse(resp *ServerConfigResponse, snap Layer1Snapshot) {
 	resp.Server.Auth.UserAccessMode = snap.UserAccessMode
 	resp.Server.Auth.AuthorizedDomains = snap.AuthorizedDomains
 
-	// Lifecycle
-	if snap.AutoSuspendStalled {
-		b := true
-		resp.Server.Hub.AutoSuspendStalled = &b
-	}
+	// Lifecycle — always set booleans from the snapshot, regardless of
+	// true/false, so that a DB-explicit false overrides a file-loaded true.
+	b := snap.AutoSuspendStalled
+	resp.Server.Hub.AutoSuspendStalled = &b
 	resp.Server.Hub.SoftDeleteRetention = snap.SoftDeleteRetention
-	if snap.SoftDeleteRetainFiles {
-		b := true
-		resp.Server.Hub.SoftDeleteRetainFiles = &b
-	}
+	b2 := snap.SoftDeleteRetainFiles
+	resp.Server.Hub.SoftDeleteRetainFiles = &b2
 
 	// Endpoints
 	resp.Server.Hub.PublicURL = snap.PublicURL
@@ -197,41 +196,37 @@ func applySnapshotToResponse(resp *ServerConfigResponse, snap Layer1Snapshot) {
 	resp.Server.GitHubApp.InstallationURL = snap.GitHubInstallationURL
 	resp.Server.GitHubApp.PrivateKeyPath = snap.GitHubPrivateKeyPath
 
-	// Notifications
-	if len(snap.NotificationChannels) > 0 {
-		resp.Server.NotificationChannels = snap.NotificationChannels
-	}
+	// Notifications — always set from snapshot so an explicit empty DB
+	// value overrides file-loaded channels.
+	resp.Server.NotificationChannels = snap.NotificationChannels
 }
 
-// buildSectionMetadata queries the OperationalSettings cache to determine
-// per-section provenance: "db" (present in DB), "file" (section absent from
-// DB but present in settings.yaml fallback), or "default" (neither).
-func (s *Server) buildSectionMetadata(ops *OperationalSettings) map[string]SectionMetadata {
+// buildSectionMetadata reads the OperationalSettings cache to determine
+// per-section provenance: "db" (present in cache), "file" (section absent from
+// cache but present in settings.yaml fallback), or "default" (neither).
+//
+// N4: metadata is served entirely from the enriched cache (sectionState carries
+// UpdatedAt/UpdatedBy since Refresh), eliminating the extra per-GET DB query
+// and the metadata/value consistency window.
+func (s *Server) buildSectionMetadata(_ context.Context, ops *OperationalSettings) map[string]SectionMetadata {
 	meta := make(map[string]SectionMetadata, len(opsettings.Registry))
 
-	// Get DB rows for metadata.
-	rows, err := ops.store.ListHubSettings(s.requestContext())
-	if err != nil {
-		slog.Error("Failed to list hub settings for metadata", "error", err)
-		// Return empty metadata rather than failing the GET.
-		return meta
+	// Read cache snapshot under lock.
+	ops.mu.RLock()
+	cacheSnap := make(map[string]sectionState, len(ops.cache))
+	for name, ss := range ops.cache {
+		cacheSnap[name] = ss
 	}
-
-	rowsBySection := make(map[string]*store.HubSetting, len(rows))
-	for i := range rows {
-		if rows[i].Section != "_meta" {
-			rowsBySection[rows[i].Section] = &rows[i]
-		}
-	}
+	ops.mu.RUnlock()
 
 	for _, sec := range opsettings.Registry {
-		if row, ok := rowsBySection[sec.Name]; ok {
-			t := row.UpdatedAt
+		if ss, ok := cacheSnap[sec.Name]; ok {
+			t := ss.UpdatedAt
 			meta[sec.Name] = SectionMetadata{
 				Source:    "db",
-				Revision:  row.Revision,
+				Revision:  ss.Revision,
 				UpdatedAt: &t,
-				UpdatedBy: row.UpdatedBy,
+				UpdatedBy: ss.UpdatedBy,
 			}
 		} else if s.sectionHasFileValues(ops, sec.Name) {
 			meta[sec.Name] = SectionMetadata{
@@ -262,12 +257,6 @@ func (s *Server) sectionHasFileValues(ops *OperationalSettings, sectionName stri
 	return false
 }
 
-// requestContext returns a background context for internal queries. This is
-// used for metadata queries that don't originate from an HTTP request.
-func (s *Server) requestContext() context.Context {
-	return context.Background()
-}
-
 // handlePutServerConfigDB handles PUT /api/v1/admin/server-config in postgres mode.
 //
 // It partitions incoming fields via the opsettings registry:
@@ -288,11 +277,15 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		updatedBy = caller.Email()
 	}
 
-	// Convert the update request into koanf keys to classify Layer-0 vs Layer-1.
+	// Convert the update request into koanf keys to classify Layer-0 vs Layer-1
+	// vs unclassified. Three-way classification (design §3.1):
+	//   - Layer-1 → write to DB sections
+	//   - Layer-0 (explicit bootstrap set) → 422 rejection
+	//   - Unclassified (e.g. runtimes, profiles, schema_version) → ignored with warning
 	koanfKeys := extractKoanfKeysFromRequest(&req.ServerConfigUpdateRequest)
 
 	// Classify keys.
-	layer1BySec, layer0Keys := opsettings.ClassifyKeys(koanfKeys)
+	layer1BySec, layer0Keys, unclassifiedKeys := opsettings.ClassifyKeys(koanfKeys)
 
 	// Reject if any Layer-0 keys are present — 422 before any write.
 	if len(layer0Keys) > 0 {
@@ -305,6 +298,17 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
+	// Warn about unclassified keys — accepted for shape compatibility with
+	// file mode but not written to DB. Clients can see what was skipped via
+	// the ignored_keys field in the response.
+	if len(unclassifiedKeys) > 0 {
+		sort.Strings(unclassifiedKeys)
+		slog.Warn("PUT server-config: ignoring unclassified keys (not Layer-0, not Layer-1)",
+			"keys", unclassifiedKeys,
+			"user", updatedBy,
+		)
+	}
+
 	// Build per-section documents from the request.
 	sectionDocs, err := buildSectionDocsFromRequest(&req.ServerConfigUpdateRequest, layer1BySec)
 	if err != nil {
@@ -313,25 +317,36 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	}
 
 	// Validate ALL sections before writing ANY (atomic: all-or-nothing).
+	// Collect errors from every section so the client sees all invalid
+	// sections in one response, not just the first one (N6).
+	allValidationErrors := make(map[string][]config.ValidationError)
 	for secName, doc := range sectionDocs {
 		if errs := opsettings.Validate(secName, doc); len(errs) > 0 {
-			writeJSON(w, http.StatusBadRequest, map[string]interface{}{
-				"error":   "validation_failed",
-				"section": secName,
-				"errors":  errs,
-			})
-			return
+			allValidationErrors[secName] = errs
 		}
 	}
+	if len(allValidationErrors) > 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]interface{}{
+			"error":  "validation_failed",
+			"errors": allValidationErrors,
+		})
+		return
+	}
 
-	// Write sections. If a CAS conflict occurs partway, we stop and report
-	// which sections were applied vs conflicted. This is documented behavior:
-	// the store guarantees per-section atomicity, and multi-section PUTs may
-	// partially apply if a CAS conflict occurs after some sections succeed.
+	// Write sections in sorted order for deterministic partial-apply and CAS
+	// behavior: if a conflict occurs partway, exactly the alphabetically-first
+	// sections are applied, giving clients predictable retry semantics.
 	applied := make(map[string]int64)
 	var conflicted []map[string]interface{}
 
-	for secName, doc := range sectionDocs {
+	sortedSections := make([]string, 0, len(sectionDocs))
+	for secName := range sectionDocs {
+		sortedSections = append(sortedSections, secName)
+	}
+	sort.Strings(sortedSections)
+
+	for _, secName := range sortedSections {
+		doc := sectionDocs[secName]
 		expectedRev := int64(-1) // last-writer-wins by default
 		if rev, ok := req.ExpectedRevisions[secName]; ok {
 			expectedRev = rev
@@ -350,8 +365,9 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 				// Stop writing further sections on CAS conflict.
 				break
 			}
+			slog.Error("Failed to update section", "section", secName, "error", err)
 			writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
-				fmt.Sprintf("Failed to update section %q: %v", secName, err), nil)
+				fmt.Sprintf("Failed to update section %q", secName), nil)
 			return
 		}
 		applied[secName] = newRev
@@ -374,13 +390,20 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 
 	appliedKeys := mapKeys(applied)
 
-	writeJSON(w, http.StatusOK, map[string]interface{}{
+	resp := map[string]interface{}{
 		"status": "saved",
 		"reload": map[string]interface{}{
 			"applied":          appliedKeys,
 			"requires_restart": []string{},
 		},
-	})
+	}
+
+	// Report ignored unclassified keys so clients/UI can see what was skipped.
+	if len(unclassifiedKeys) > 0 {
+		resp["ignored_keys"] = unclassifiedKeys
+	}
+
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // getCurrentRevision reads the current revision for a section from the cache.
@@ -728,8 +751,9 @@ func (s *Server) handlePutMaintenanceDB(w http.ResponseWriter, r *http.Request, 
 
 	// last-writer-wins (-1) for maintenance — no CAS needed for this endpoint.
 	if _, err := ops.Update(r.Context(), "maintenance", doc, updatedBy, -1); err != nil {
+		slog.Error("Failed to update maintenance settings", "error", err)
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
-			fmt.Sprintf("Failed to update maintenance settings: %v", err), nil)
+			"Failed to update maintenance settings", nil)
 		return
 	}
 

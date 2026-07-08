@@ -31,10 +31,15 @@ import (
 	"github.com/knadh/koanf/v2"
 )
 
-// sectionState holds the cached value and revision for a single section.
+// sectionState holds the cached value, revision, and provenance metadata for a
+// single section. UpdatedAt and UpdatedBy are populated during Refresh from DB
+// rows, enabling buildSectionMetadata to serve metadata directly from the cache
+// without an extra per-GET DB round-trip (N4).
 type sectionState struct {
-	Value    json.RawMessage
-	Revision int64
+	Value     json.RawMessage
+	Revision  int64
+	UpdatedAt time.Time
+	UpdatedBy string
 }
 
 // Layer1Snapshot is an immutable merged view of all Layer-1 operational settings.
@@ -191,8 +196,10 @@ func (o *OperationalSettings) Refresh(ctx context.Context) ([]string, error) {
 			changed = append(changed, row.Section)
 		}
 		o.cache[row.Section] = sectionState{
-			Value:    row.Value,
-			Revision: row.Revision,
+			Value:     row.Value,
+			Revision:  row.Revision,
+			UpdatedAt: row.UpdatedAt,
+			UpdatedBy: row.UpdatedBy,
 		}
 	}
 
@@ -314,8 +321,10 @@ func (o *OperationalSettings) Update(
 	// Update local cache.
 	o.mu.Lock()
 	o.cache[section] = sectionState{
-		Value:    result.Value,
-		Revision: result.Revision,
+		Value:     result.Value,
+		Revision:  result.Revision,
+		UpdatedAt: result.UpdatedAt,
+		UpdatedBy: result.UpdatedBy,
 	}
 	o.mu.Unlock()
 

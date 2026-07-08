@@ -684,13 +684,16 @@ func TestDetectEnvOverrides(t *testing.T) {
 
 func TestClassifyKeys(t *testing.T) {
 	keys := []string{
-		"server.hub.admin_emails",
-		"server.database.driver",
-		"telemetry.enabled",
-		"server.hub.port",
-		"default_max_turns",
+		"server.hub.admin_emails",     // Layer-1 (access)
+		"server.database.driver",      // Layer-0 (bootstrap)
+		"telemetry.enabled",           // Layer-1 (telemetry)
+		"server.hub.port",             // Layer-0 (bootstrap)
+		"default_max_turns",           // Layer-1 (agent_defaults)
+		"runtimes",                    // unclassified
+		"schema_version",              // unclassified
+		"profiles",                    // unclassified
 	}
-	l1, l0 := ClassifyKeys(keys)
+	l1, l0, unclassified := ClassifyKeys(keys)
 
 	if len(l1["access"]) != 1 || l1["access"][0] != "server.hub.admin_emails" {
 		t.Errorf("expected access to contain admin_emails, got %v", l1["access"])
@@ -713,6 +716,84 @@ func TestClassifyKeys(t *testing.T) {
 		if !expectedL0[k] {
 			t.Errorf("unexpected Layer-0 key: %q", k)
 		}
+	}
+
+	// Unclassified keys — neither Layer-0 nor Layer-1.
+	expectedUnclassified := map[string]bool{
+		"runtimes":       true,
+		"schema_version": true,
+		"profiles":       true,
+	}
+	if len(unclassified) != len(expectedUnclassified) {
+		t.Errorf("expected %d unclassified keys, got %d: %v", len(expectedUnclassified), len(unclassified), unclassified)
+	}
+	for _, k := range unclassified {
+		if !expectedUnclassified[k] {
+			t.Errorf("unexpected unclassified key: %q", k)
+		}
+	}
+}
+
+func TestClassifyKeys_AllLayer0Prefixes(t *testing.T) {
+	// Verify that all explicit Layer-0 bootstrap keys are correctly classified.
+	layer0Keys := []string{
+		"server.database",
+		"server.database.driver",
+		"server.hub.port",
+		"server.hub.host",
+		"server.hub.read_timeout",
+		"server.hub.write_timeout",
+		"server.broker",
+		"server.broker.port",
+		"server.auth.mode",
+		"server.auth.dev_mode",
+		"server.auth.dev_token",
+		"server.auth.proxy",
+		"server.auth.transport",
+		"server.oauth",
+		"server.secrets",
+		"server.storage",
+		"server.workspace_storage",
+		"server.mode",
+		"server.env",
+		"server.hub.hub_id",
+		"server.hub.gcp_project_id",
+		"server.log_level",
+		"server.log_format",
+		"server.hub.cors",
+		"server.message_broker",
+		"server.plugins",
+	}
+
+	_, l0, unclassified := ClassifyKeys(layer0Keys)
+	if len(unclassified) > 0 {
+		t.Errorf("expected no unclassified keys, got %v", unclassified)
+	}
+	if len(l0) != len(layer0Keys) {
+		t.Errorf("expected %d Layer-0 keys, got %d: %v", len(layer0Keys), len(l0), l0)
+	}
+}
+
+func TestClassifyKeys_UnclassifiedKeys(t *testing.T) {
+	// Keys that exist in the settings file but are not Layer-0 or Layer-1.
+	unclassifiedKeys := []string{
+		"runtimes",
+		"harness_configs",
+		"profiles",
+		"schema_version",
+		"active_profile",
+		"workspace_path",
+	}
+
+	l1, l0, unclassified := ClassifyKeys(unclassifiedKeys)
+	if len(l1) > 0 {
+		t.Errorf("expected no Layer-1 keys, got %v", l1)
+	}
+	if len(l0) > 0 {
+		t.Errorf("expected no Layer-0 keys, got %v", l0)
+	}
+	if len(unclassified) != len(unclassifiedKeys) {
+		t.Errorf("expected %d unclassified keys, got %d: %v", len(unclassifiedKeys), len(unclassified), unclassified)
 	}
 }
 
