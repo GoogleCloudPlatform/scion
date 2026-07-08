@@ -201,12 +201,24 @@ interface ServerConfigResponse {
   default_max_model_calls?: number;
   default_max_duration?: string;
   default_resources?: ResourceSpec;
+
+  // Settings-DB metadata (postgres mode only; absent in file/SQLite mode)
+  env_overrides?: string[];
+  section_metadata?: Record<string, SectionMetadataInfo>;
 }
 
 interface ReloadResult {
   applied?: string[];
   requires_restart?: string[];
   error?: string;
+}
+
+/** Per-section provenance metadata from the settings-db GET response (postgres mode). */
+interface SectionMetadataInfo {
+  source: string; // "db" | "file" | "default"
+  revision?: number;
+  updated_at?: string;
+  updated_by?: string;
 }
 
 interface UpdateCommitInfo {
@@ -249,6 +261,52 @@ interface GitHubAppConfigData {
   installation_url?: string;
   rate_limit?: RateLimitInfo;
 }
+
+/**
+ * Mapping from koanf keys (as reported by env_overrides in the settings-db
+ * GET response) to human-readable field labels. Keys present here get a
+ * per-field badge; keys not in this map still appear in the warning banner
+ * with their raw koanf path.
+ */
+const KOANF_KEY_LABELS: Record<string, string> = {
+  // access section
+  'server.hub.admin_emails': 'Admin Emails',
+  'server.auth.user_access_mode': 'User Access Mode',
+  'server.auth.authorized_domains': 'Authorized Domains',
+  // lifecycle section
+  'server.hub.auto_suspend_stalled': 'Auto-Suspend Stalled Agents',
+  'server.hub.soft_delete_retention': 'Soft Delete Retention',
+  'server.hub.soft_delete_retain_files': 'Retain Files on Soft Delete',
+  // telemetry section
+  'telemetry.enabled': 'Telemetry Enabled',
+  'telemetry.cloud.enabled': 'Cloud Export Enabled',
+  'telemetry.cloud.endpoint': 'Cloud Export Endpoint',
+  'telemetry.cloud.protocol': 'Cloud Export Protocol',
+  'telemetry.cloud.provider': 'Cloud Export Provider',
+  'telemetry.hub.enabled': 'Hub Reporting Enabled',
+  'telemetry.hub.report_interval': 'Hub Report Interval',
+  'telemetry.local.enabled': 'Local Telemetry Enabled',
+  'telemetry.local.file': 'Local Telemetry File',
+  'telemetry.local.console': 'Local Telemetry Console',
+  // agent_defaults section
+  default_template: 'Default Template',
+  default_harness_config: 'Default Harness Config',
+  default_max_turns: 'Default Max Turns',
+  default_max_model_calls: 'Default Max Model Calls',
+  default_max_duration: 'Default Max Duration',
+  default_resources: 'Default Resources',
+  // endpoints section
+  'server.hub.public_url': 'Public URL',
+  image_registry: 'Image Registry',
+  // github_app section
+  'server.github_app': 'GitHub App',
+  'server.github_app.app_id': 'GitHub App ID',
+  'server.github_app.api_base_url': 'GitHub App API Base URL',
+  'server.github_app.webhooks_enabled': 'GitHub App Webhooks',
+  'server.github_app.installation_url': 'GitHub App Installation URL',
+  // notifications section
+  'server.notification_channels': 'Notification Channels',
+};
 
 @customElement('scion-page-admin-server-config')
 export class ScionPageAdminServerConfig extends LitElement {
@@ -384,6 +442,11 @@ export class ScionPageAdminServerConfig extends LitElement {
 
   // Keep raw data for sections we don't fully edit
   private rawConfig: ServerConfigResponse | null = null;
+
+  // ── Settings-DB metadata (postgres mode only) ──
+  @state() private envOverrides: string[] = [];
+  @state() private sectionMetadata: Record<string, SectionMetadataInfo> | null = null;
+  @state() private ignoredKeysNotice: string[] | null = null;
 
   static override styles = css`
     :host {
@@ -662,6 +725,108 @@ export class ScionPageAdminServerConfig extends LitElement {
       font-style: italic;
       font-size: 0.8125rem;
     }
+
+    /* ── Settings-DB: env-override banner ── */
+
+    .env-override-banner {
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+      padding: 0.75rem 1rem;
+      margin-bottom: 1.5rem;
+      border-radius: var(--scion-radius, 0.5rem);
+      background: var(--sl-color-warning-50, #fffbeb);
+      border: 1px solid var(--sl-color-warning-200, #fde68a);
+      color: var(--sl-color-warning-800, #92400e);
+      font-size: 0.875rem;
+    }
+
+    .env-override-banner-title {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      font-weight: 600;
+    }
+
+    .env-override-banner-title sl-icon {
+      font-size: 1rem;
+    }
+
+    .env-override-banner-keys {
+      font-size: 0.8125rem;
+      line-height: 1.6;
+    }
+
+    .env-override-banner-keys code {
+      font-family: var(--sl-font-mono, monospace);
+      font-size: 0.75rem;
+      background: var(--sl-color-warning-100, #fef3c7);
+      padding: 0.125rem 0.375rem;
+      border-radius: 0.25rem;
+      margin-right: 0.25rem;
+    }
+
+    /* ── Settings-DB: per-field env badge ── */
+
+    .env-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.25rem;
+      font-size: 0.6875rem;
+      font-weight: 500;
+      color: var(--sl-color-warning-700, #b45309);
+      background: var(--sl-color-warning-50, #fffbeb);
+      border: 1px solid var(--sl-color-warning-200, #fde68a);
+      padding: 0.125rem 0.5rem;
+      border-radius: 9999px;
+      white-space: nowrap;
+    }
+
+    .env-badge sl-icon {
+      font-size: 0.75rem;
+    }
+
+    /* ── Settings-DB: section metadata caption ── */
+
+    .section-meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.75rem;
+      font-size: 0.75rem;
+      color: var(--scion-text-muted, #64748b);
+      margin-top: -0.5rem;
+      margin-bottom: 0.75rem;
+    }
+
+    .section-meta-item {
+      display: flex;
+      align-items: center;
+      gap: 0.25rem;
+    }
+
+    .section-meta-item sl-icon {
+      font-size: 0.75rem;
+    }
+
+    /* ── Settings-DB: ignored keys notice ── */
+
+    .ignored-keys-notice {
+      padding: 0.75rem 1rem;
+      border-radius: var(--scion-radius, 0.5rem);
+      background: var(--sl-color-neutral-50, #f8fafc);
+      border: 1px solid var(--sl-color-neutral-200, #e2e8f0);
+      color: var(--sl-color-neutral-700, #334155);
+      font-size: 0.8125rem;
+      margin-bottom: 1rem;
+    }
+
+    .ignored-keys-notice code {
+      font-family: var(--sl-font-mono, monospace);
+      font-size: 0.75rem;
+      background: var(--sl-color-neutral-100, #f1f5f9);
+      padding: 0.125rem 0.375rem;
+      border-radius: 0.25rem;
+    }
   `;
 
   override connectedCallback(): void {
@@ -673,6 +838,7 @@ export class ScionPageAdminServerConfig extends LitElement {
   private async loadConfig(): Promise<void> {
     this.loading = true;
     this.error = null;
+    this.ignoredKeysNotice = null;
     try {
       const res = await apiFetch('/api/v1/admin/server-config');
       if (!res.ok) {
@@ -804,6 +970,10 @@ export class ScionPageAdminServerConfig extends LitElement {
     }
 
     // Runtimes, harness_configs, profiles preserved via rawConfig
+
+    // Settings-DB metadata (postgres mode only; absent in file/SQLite mode)
+    this.envOverrides = data.env_overrides || [];
+    this.sectionMetadata = data.section_metadata || null;
   }
 
   private buildPayload(): Record<string, unknown> {
@@ -970,6 +1140,7 @@ export class ScionPageAdminServerConfig extends LitElement {
     this.error = null;
     this.successMessage = null;
     this.reloadResult = null;
+    this.ignoredKeysNotice = null;
 
     try {
       const payload = this.buildPayload();
@@ -984,13 +1155,20 @@ export class ScionPageAdminServerConfig extends LitElement {
         return;
       }
 
-      const result = (await res.json()) as { reload?: ReloadResult };
+      const result = (await res.json()) as {
+        reload?: ReloadResult;
+        ignored_keys?: string[];
+      };
       this.reloadResult = result.reload ?? null;
+      const ignoredKeys =
+        result.ignored_keys && result.ignored_keys.length > 0 ? result.ignored_keys : null;
       this.successMessage = 'Settings saved successfully';
 
       // Reload the form with fresh data
       await this.loadConfig();
       this.successMessage = 'Settings saved successfully';
+      // Restore ignored_keys notice after loadConfig clears it
+      this.ignoredKeysNotice = ignoredKeys;
     } catch {
       this.error = 'Failed to save settings';
     } finally {
@@ -1009,6 +1187,7 @@ export class ScionPageAdminServerConfig extends LitElement {
         others require a server restart.
       </p>
 
+      ${this.loading ? nothing : this.renderEnvOverrideBanner()} ${this.renderIgnoredKeysNotice()}
       ${this.error ? html`<div class="status-message error">${this.error}</div>` : nothing}
       ${this.successMessage
         ? html`<div class="status-message success">
@@ -1018,6 +1197,93 @@ export class ScionPageAdminServerConfig extends LitElement {
       ${this.loading
         ? html`<div class="loading-container"><sl-spinner></sl-spinner></div>`
         : this.renderForm()}
+    `;
+  }
+
+  // ── Settings-DB UI helpers ──
+
+  /**
+   * Renders a warning banner when the serving node reports env-var overrides
+   * on Layer-1 settings keys. Lists affected fields in human-readable form.
+   */
+  private renderEnvOverrideBanner(): typeof nothing | ReturnType<typeof html> {
+    if (this.envOverrides.length === 0) return nothing;
+    return html`
+      <div class="env-override-banner">
+        <div class="env-override-banner-title">
+          <sl-icon name="exclamation-triangle"></sl-icon>
+          Some settings are overridden by environment variables on this node
+        </div>
+        <div class="env-override-banner-keys">
+          ${this.envOverrides.map((key) => html`<code>${KOANF_KEY_LABELS[key] || key}</code>`)}
+        </div>
+      </div>
+    `;
+  }
+
+  /**
+   * Renders an inline badge on form fields whose koanf key(s) appear in
+   * env_overrides. Pass one or more koanf keys; badge renders if any match.
+   */
+  private renderEnvBadge(...koanfKeys: string[]): typeof nothing | ReturnType<typeof html> {
+    const overridden = koanfKeys.some((k) => this.envOverrides.includes(k));
+    if (!overridden) return nothing;
+    return html`
+      <span class="env-badge">
+        <sl-icon name="exclamation-triangle"></sl-icon>
+        Overridden by environment on this node
+      </span>
+    `;
+  }
+
+  /**
+   * Renders a subtle per-section metadata caption showing source, revision,
+   * updated_by, and updated_at. Only renders when section_metadata is present
+   * in the GET response (postgres mode).
+   */
+  private renderSectionMeta(sectionName: string): typeof nothing | ReturnType<typeof html> {
+    if (!this.sectionMetadata) return nothing;
+    const meta = this.sectionMetadata[sectionName];
+    if (!meta) return nothing;
+
+    const sourceLabel =
+      meta.source === 'db' ? 'Database' : meta.source === 'file' ? 'File' : 'Default';
+    const sourceIcon =
+      meta.source === 'db' ? 'database' : meta.source === 'file' ? 'file-earmark' : 'gear';
+
+    return html`
+      <div class="section-meta">
+        <span class="section-meta-item">
+          <sl-icon name=${sourceIcon}></sl-icon>
+          Source: ${sourceLabel}${meta.revision ? html` (rev ${meta.revision})` : nothing}
+        </span>
+        ${meta.updated_by
+          ? html`<span class="section-meta-item">
+              <sl-icon name="person"></sl-icon>
+              ${meta.updated_by}
+            </span>`
+          : nothing}
+        ${meta.updated_at
+          ? html`<span class="section-meta-item">
+              <sl-icon name="clock"></sl-icon>
+              ${new Date(meta.updated_at).toLocaleString()}
+            </span>`
+          : nothing}
+      </div>
+    `;
+  }
+
+  /**
+   * Renders a non-blocking notice when the PUT response reports that some
+   * submitted fields were not persisted (ignored_keys).
+   */
+  private renderIgnoredKeysNotice(): typeof nothing | ReturnType<typeof html> {
+    if (!this.ignoredKeysNotice || this.ignoredKeysNotice.length === 0) return nothing;
+    return html`
+      <div class="ignored-keys-notice">
+        <strong>Note:</strong> Some submitted fields were not persisted:
+        ${this.ignoredKeysNotice.map((k) => html` <code>${k}</code>`)}
+      </div>
     `;
   }
 
@@ -1142,17 +1408,19 @@ export class ScionPageAdminServerConfig extends LitElement {
               <div class="update-banner">
                 <div class="update-banner-header">
                   <sl-icon name="info-circle"></sl-icon>
-                  Update available${r.current_branch && r.current_branch !== 'main' ? html` on <code>${r.current_branch}</code>` : nothing} &mdash; ${r.commits_behind} new commit${r.commits_behind === 1 ? '' : 's'}
+                  Update
+                  available${r.current_branch && r.current_branch !== 'main'
+                    ? html` on <code>${r.current_branch}</code>`
+                    : nothing}
+                  &mdash; ${r.commits_behind} new commit${r.commits_behind === 1 ? '' : 's'}
                 </div>
                 ${r.new_commits && r.new_commits.length > 0
                   ? html`
                       <div class="update-commits">
                         ${r.new_commits.map(
                           (c) => html`
-                            <div>
-                              <span class="commit-hash">${c.hash}</span>${c.subject}
-                            </div>
-                          `,
+                            <div><span class="commit-hash">${c.hash}</span>${c.subject}</div>
+                          `
                         )}
                       </div>
                     `
@@ -1172,7 +1440,12 @@ export class ScionPageAdminServerConfig extends LitElement {
             `
           : nothing}
         ${r && !r.update_available
-          ? html`<div class="update-current">Server is up to date${r.current_branch && r.current_branch !== 'main' ? html` on <code>${r.current_branch}</code>` : nothing}.</div>`
+          ? html`<div class="update-current">
+              Server is up to
+              date${r.current_branch && r.current_branch !== 'main'
+                ? html` on <code>${r.current_branch}</code>`
+                : nothing}.
+            </div>`
           : nothing}
       </div>
       ${this.showUpdateConfirm ? this.renderUpdateConfirmDialog() : nothing}
@@ -1237,6 +1510,7 @@ export class ScionPageAdminServerConfig extends LitElement {
           </div>
           <div class="form-field">
             <label>Default Template</label>
+            ${this.renderEnvBadge('default_template')}
             <sl-input
               value=${this.defaultTemplate}
               placeholder="default"
@@ -1247,6 +1521,7 @@ export class ScionPageAdminServerConfig extends LitElement {
           </div>
           <div class="form-field">
             <label>Default Harness Config</label>
+            ${this.renderEnvBadge('default_harness_config')}
             <sl-input
               value=${this.defaultHarnessConfig}
               @sl-input=${(e: Event) => {
@@ -1256,6 +1531,7 @@ export class ScionPageAdminServerConfig extends LitElement {
           </div>
           <div class="form-field full-width">
             <label>Image Registry</label>
+            ${this.renderEnvBadge('image_registry')}
             <span class="hint"
               >Container image registry for agent images (e.g., ghcr.io/myorg)</span
             >
@@ -1282,9 +1558,11 @@ export class ScionPageAdminServerConfig extends LitElement {
 
       <div class="section">
         <h3 class="section-title">Default Agent Limits</h3>
+        ${this.renderSectionMeta('agent_defaults')}
         <div class="form-grid">
           <div class="form-field">
             <label>Default Max Turns</label>
+            ${this.renderEnvBadge('default_max_turns')}
             <span class="hint">Maximum conversation turns for new agents</span>
             <sl-input
               type="number"
@@ -1297,6 +1575,7 @@ export class ScionPageAdminServerConfig extends LitElement {
           </div>
           <div class="form-field">
             <label>Default Max Model Calls</label>
+            ${this.renderEnvBadge('default_max_model_calls')}
             <span class="hint">Maximum LLM API calls for new agents</span>
             <sl-input
               type="number"
@@ -1309,6 +1588,7 @@ export class ScionPageAdminServerConfig extends LitElement {
           </div>
           <div class="form-field full-width">
             <label>Default Max Duration</label>
+            ${this.renderEnvBadge('default_max_duration')}
             <span class="hint">Maximum execution time (Go duration, e.g. 2h, 30m)</span>
             <sl-input
               value=${this.defaultMaxDuration}
@@ -1323,6 +1603,7 @@ export class ScionPageAdminServerConfig extends LitElement {
 
       <div class="section">
         <h3 class="section-title">Default Agent Resources</h3>
+        ${this.renderEnvBadge('default_resources')}
         <div class="form-grid">
           <div class="form-field">
             <label>CPU Request</label>
@@ -1415,6 +1696,7 @@ export class ScionPageAdminServerConfig extends LitElement {
     return html`
       <div class="section">
         <h3 class="section-title">Hub API Server</h3>
+        ${this.renderSectionMeta('endpoints')}
         <div class="form-grid">
           <div class="form-field">
             <label>Port</label>
@@ -1439,6 +1721,7 @@ export class ScionPageAdminServerConfig extends LitElement {
           </div>
           <div class="form-field full-width">
             <label>Public URL</label>
+            ${this.renderEnvBadge('server.hub.public_url')}
             <span class="hint">Endpoint URL for agents to call back to the Hub</span>
             <sl-input
               value=${this.hubPublicUrl}
@@ -1470,6 +1753,7 @@ export class ScionPageAdminServerConfig extends LitElement {
           </div>
           <div class="form-field full-width">
             <label>Admin Emails</label>
+            ${this.renderEnvBadge('server.hub.admin_emails')}
             <span class="hint"
               >Comma-separated list of email addresses to auto-promote to admin</span
             >
@@ -1486,9 +1770,11 @@ export class ScionPageAdminServerConfig extends LitElement {
 
       <div class="section">
         <h3 class="section-title">Agent Lifecycle</h3>
+        ${this.renderSectionMeta('lifecycle')}
         <div class="form-grid">
           <div class="form-field">
             <label>Soft Delete Retention</label>
+            ${this.renderEnvBadge('server.hub.soft_delete_retention')}
             <span class="hint"
               >How long soft-deleted agents are retained (e.g., 72h). Empty disables
               soft-delete.</span
@@ -1502,6 +1788,7 @@ export class ScionPageAdminServerConfig extends LitElement {
             ></sl-input>
           </div>
           <div class="form-field">
+            ${this.renderEnvBadge('server.hub.soft_delete_retain_files')}
             <sl-switch
               ?checked=${this.hubSoftDeleteRetainFiles}
               @sl-change=${(e: Event) => {
@@ -1511,6 +1798,7 @@ export class ScionPageAdminServerConfig extends LitElement {
             >
           </div>
           <div class="form-field">
+            ${this.renderEnvBadge('server.hub.auto_suspend_stalled')}
             <sl-switch
               ?checked=${this.hubAutoSuspendStalled}
               @sl-change=${(e: Event) => {
@@ -1519,9 +1807,8 @@ export class ScionPageAdminServerConfig extends LitElement {
               >Auto-suspend stalled agents</sl-switch
             >
             <span class="hint"
-              >When enabled, agents detected as stalled are automatically
-              suspended (container stopped, session preserved for
-              resume).</span
+              >When enabled, agents detected as stalled are automatically suspended (container
+              stopped, session preserved for resume).</span
             >
           </div>
         </div>
@@ -1727,10 +2014,14 @@ export class ScionPageAdminServerConfig extends LitElement {
     return html`
       <div class="section">
         <h3 class="section-title">User Access Mode</h3>
+        ${this.renderSectionMeta('access')}
         <div class="form-grid">
           <div class="form-field full-width">
             <label>Access Mode</label>
-            <span class="hint">Controls who can log in to this hub. Takes effect immediately (hot-reloaded).</span>
+            ${this.renderEnvBadge('server.auth.user_access_mode')}
+            <span class="hint"
+              >Controls who can log in to this hub. Takes effect immediately (hot-reloaded).</span
+            >
             <sl-select
               value=${this.authUserAccessMode}
               @sl-change=${(e: Event) => {
@@ -1738,16 +2029,21 @@ export class ScionPageAdminServerConfig extends LitElement {
               }}
             >
               <sl-option value="open">Open (all authenticated users)</sl-option>
-              <sl-option value="domain_restricted">Domain Restricted (authorized domains only)</sl-option>
-              <sl-option value="invite_only">Invite Only (allow list + authorized domains)</sl-option>
+              <sl-option value="domain_restricted"
+                >Domain Restricted (authorized domains only)</sl-option
+              >
+              <sl-option value="invite_only"
+                >Invite Only (allow list + authorized domains)</sl-option
+              >
             </sl-select>
             ${this.authUserAccessMode === 'invite_only'
               ? html`<sl-alert variant="warning" open style="margin-top: 0.75rem">
                   <sl-icon slot="icon" name="exclamation-triangle"></sl-icon>
-                  Only emails on the <strong>Allow List</strong> (and admin emails) will be able to log in.
-                  Manage the allow list from the <a href="/admin/users">Users page</a>.
+                  Only emails on the <strong>Allow List</strong> (and admin emails) will be able to
+                  log in. Manage the allow list from the <a href="/admin/users">Users page</a>.
                   ${this.authAuthorizedDomains
-                    ? html`<br/><br/>Authorized domains are also enforced — users must match both the allow list <em>and</em> an authorized domain.`
+                    ? html`<br /><br />Authorized domains are also enforced — users must match both
+                        the allow list <em>and</em> an authorized domain.`
                     : ''}
                 </sl-alert>`
               : ''}
@@ -1784,6 +2080,7 @@ export class ScionPageAdminServerConfig extends LitElement {
           </div>
           <div class="form-field full-width">
             <label>Authorized Domains</label>
+            ${this.renderEnvBadge('server.auth.authorized_domains')}
             <span class="hint"
               >Comma-separated list of email domains allowed to authenticate (empty = all)</span
             >
@@ -1848,8 +2145,10 @@ export class ScionPageAdminServerConfig extends LitElement {
     return html`
       <div class="section">
         <h3 class="section-title">Telemetry</h3>
+        ${this.renderSectionMeta('telemetry')}
         <div class="form-grid">
           <div class="form-field full-width">
+            ${this.renderEnvBadge('telemetry.enabled')}
             <sl-switch
               ?checked=${this.telemetryEnabled}
               @sl-change=${(e: Event) => {
@@ -1866,6 +2165,7 @@ export class ScionPageAdminServerConfig extends LitElement {
         <h3 class="section-title">Cloud Export (OTLP)</h3>
         <div class="form-grid">
           <div class="form-field full-width">
+            ${this.renderEnvBadge('telemetry.cloud.enabled')}
             <sl-switch
               ?checked=${this.telemetryCloudEnabled}
               @sl-change=${(e: Event) => {
@@ -1876,6 +2176,7 @@ export class ScionPageAdminServerConfig extends LitElement {
           </div>
           <div class="form-field full-width">
             <label>Endpoint</label>
+            ${this.renderEnvBadge('telemetry.cloud.endpoint')}
             <sl-input
               value=${this.telemetryCloudEndpoint}
               placeholder="https://otel-collector.example.com:4317"
@@ -1914,6 +2215,7 @@ export class ScionPageAdminServerConfig extends LitElement {
         <h3 class="section-title">Hub Reporting</h3>
         <div class="form-grid">
           <div class="form-field">
+            ${this.renderEnvBadge('telemetry.hub.enabled')}
             <sl-switch
               ?checked=${this.telemetryHubEnabled}
               @sl-change=${(e: Event) => {
@@ -1924,6 +2226,7 @@ export class ScionPageAdminServerConfig extends LitElement {
           </div>
           <div class="form-field">
             <label>Report Interval</label>
+            ${this.renderEnvBadge('telemetry.hub.report_interval')}
             <sl-input
               value=${this.telemetryHubReportInterval}
               placeholder="30s"
@@ -1939,6 +2242,7 @@ export class ScionPageAdminServerConfig extends LitElement {
         <h3 class="section-title">Local Debug Output</h3>
         <div class="form-grid">
           <div class="form-field">
+            ${this.renderEnvBadge('telemetry.local.enabled')}
             <sl-switch
               ?checked=${this.telemetryLocalEnabled}
               @sl-change=${(e: Event) => {
@@ -1948,6 +2252,7 @@ export class ScionPageAdminServerConfig extends LitElement {
             >
           </div>
           <div class="form-field">
+            ${this.renderEnvBadge('telemetry.local.console')}
             <sl-switch
               ?checked=${this.telemetryLocalConsole}
               @sl-change=${(e: Event) => {
@@ -1958,6 +2263,7 @@ export class ScionPageAdminServerConfig extends LitElement {
           </div>
           <div class="form-field full-width">
             <label>Log File</label>
+            ${this.renderEnvBadge('telemetry.local.file')}
             <sl-input
               value=${this.telemetryLocalFile}
               placeholder="/var/log/scion/telemetry.log"
@@ -1982,12 +2288,12 @@ export class ScionPageAdminServerConfig extends LitElement {
           : this.gcpQuotaData
             ? this.renderGCPQuotaContent()
             : html`<p style="color: var(--scion-text-muted);">
-                Click "Load Quota" to fetch current minting statistics.
-              </p>
-              <sl-button size="small" @click=${() => this.loadGCPQuota()}>
-                <sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>
-                Load Quota
-              </sl-button>`}
+                  Click "Load Quota" to fetch current minting statistics.
+                </p>
+                <sl-button size="small" @click=${() => this.loadGCPQuota()}>
+                  <sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>
+                  Load Quota
+                </sl-button>`}
       </div>
     `;
   }
@@ -1998,8 +2304,8 @@ export class ScionPageAdminServerConfig extends LitElement {
     if (!q.minting_configured) {
       return html`
         <p style="color: var(--scion-text-muted);">
-          GCP service account minting is not configured on this Hub.
-          Set <code>GCPProjectID</code> and ensure the Hub SA has
+          GCP service account minting is not configured on this Hub. Set
+          <code>GCPProjectID</code> and ensure the Hub SA has
           <code>roles/iam.serviceAccountCreator</code> to enable minting.
         </p>
       `;
@@ -2031,26 +2337,32 @@ export class ScionPageAdminServerConfig extends LitElement {
         </div>
       </div>
 
-      ${q.projects && q.projects.length > 0 ? html`
-        <h3 class="section-title" style="margin-top: 1.5rem;">Per-Project Usage</h3>
-        <div style="display: flex; flex-direction: column; gap: 0.5rem;">
-          ${q.projects.map(p => html`
-            <div style="display: flex; align-items: center; gap: 0.75rem; padding: 0.75rem; background: var(--scion-bg-subtle, #f8fafc); border: 1px solid var(--scion-border, #e2e8f0); border-radius: var(--scion-radius, 0.5rem);">
-              <sl-icon name="folder"></sl-icon>
-              <div style="flex: 1;">
-                <strong>${p.project_name}</strong>
-              </div>
-              <span style="font-size: 0.875rem; font-weight: 500;">
-                ${p.minted} minted${q.per_project_cap > 0 ? ` / ${q.per_project_cap}` : ''}
-              </span>
+      ${q.projects && q.projects.length > 0
+        ? html`
+            <h3 class="section-title" style="margin-top: 1.5rem;">Per-Project Usage</h3>
+            <div style="display: flex; flex-direction: column; gap: 0.5rem;">
+              ${q.projects.map(
+                (p) => html`
+                  <div
+                    style="display: flex; align-items: center; gap: 0.75rem; padding: 0.75rem; background: var(--scion-bg-subtle, #f8fafc); border: 1px solid var(--scion-border, #e2e8f0); border-radius: var(--scion-radius, 0.5rem);"
+                  >
+                    <sl-icon name="folder"></sl-icon>
+                    <div style="flex: 1;">
+                      <strong>${p.project_name}</strong>
+                    </div>
+                    <span style="font-size: 0.875rem; font-weight: 500;">
+                      ${p.minted} minted${q.per_project_cap > 0 ? ` / ${q.per_project_cap}` : ''}
+                    </span>
+                  </div>
+                `
+              )}
             </div>
-          `)}
-        </div>
-      ` : html`
-        <p style="color: var(--scion-text-muted); margin-top: 1rem;">
-          No service accounts have been minted yet.
-        </p>
-      `}
+          `
+        : html`
+            <p style="color: var(--scion-text-muted); margin-top: 1rem;">
+              No service accounts have been minted yet.
+            </p>
+          `}
 
       <div style="margin-top: 1rem;">
         <sl-button size="small" @click=${() => this.loadGCPQuota()}>
@@ -2079,14 +2391,20 @@ export class ScionPageAdminServerConfig extends LitElement {
 
   private renderGitHubAppTab() {
     return html`
-      ${this.githubAppError ? html`<div class="status-message error">${this.githubAppError}</div>` : ''}
-      ${this.githubAppSuccess ? html`<div class="status-message success">${this.githubAppSuccess}</div>` : ''}
+      ${this.githubAppError
+        ? html`<div class="status-message error">${this.githubAppError}</div>`
+        : ''}
+      ${this.githubAppSuccess
+        ? html`<div class="status-message success">${this.githubAppSuccess}</div>`
+        : ''}
 
       <div class="section">
         <h3 class="section-title">GitHub App Configuration</h3>
+        ${this.renderSectionMeta('github_app')}
         <div class="form-grid">
           <div class="form-field">
             <label>App ID</label>
+            ${this.renderEnvBadge('server.github_app.app_id', 'server.github_app')}
             <span class="hint">The numeric ID of your registered GitHub App</span>
             <sl-input
               .value=${this.githubAppId ? String(this.githubAppId) : ''}
@@ -2099,7 +2417,9 @@ export class ScionPageAdminServerConfig extends LitElement {
           </div>
           <div class="form-field">
             <label>API Base URL</label>
-            <span class="hint">Override for GitHub Enterprise Server (leave empty for github.com)</span>
+            <span class="hint"
+              >Override for GitHub Enterprise Server (leave empty for github.com)</span
+            >
             <sl-input
               .value=${this.githubAppApiBaseUrl}
               placeholder="https://api.github.com"
@@ -2118,13 +2438,17 @@ export class ScionPageAdminServerConfig extends LitElement {
             <sl-textarea
               rows=${4}
               .value=${this.githubAppPrivateKey}
-              placeholder=${this.githubAppHasPrivateKey ? '(configured — leave empty to keep current)' : '-----BEGIN RSA PRIVATE KEY-----\n...'}
+              placeholder=${this.githubAppHasPrivateKey
+                ? '(configured — leave empty to keep current)'
+                : '-----BEGIN RSA PRIVATE KEY-----\n...'}
               @sl-input=${(e: Event) => {
                 this.githubAppPrivateKey = (e.target as HTMLTextAreaElement).value;
               }}
             ></sl-textarea>
             ${this.githubAppHasPrivateKey
-              ? html`<span style="font-size: 0.75rem; color: var(--scion-success-text, #166534);">Stored as hub secret: GITHUB_APP_PRIVATE_KEY</span>`
+              ? html`<span style="font-size: 0.75rem; color: var(--scion-success-text, #166534);"
+                  >Stored as hub secret: GITHUB_APP_PRIVATE_KEY</span
+                >`
               : ''}
           </div>
           <div class="form-field">
@@ -2138,13 +2462,17 @@ export class ScionPageAdminServerConfig extends LitElement {
               type="password"
               password-toggle
               .value=${this.githubAppWebhookSecret}
-              placeholder=${this.githubAppHasWebhookSecret ? '(configured — leave empty to keep current)' : 'whsec_...'}
+              placeholder=${this.githubAppHasWebhookSecret
+                ? '(configured — leave empty to keep current)'
+                : 'whsec_...'}
               @sl-input=${(e: Event) => {
                 this.githubAppWebhookSecret = (e.target as HTMLInputElement).value;
               }}
             ></sl-input>
             ${this.githubAppHasWebhookSecret
-              ? html`<span style="font-size: 0.75rem; color: var(--scion-success-text, #166534);">Stored as hub secret: GITHUB_APP_WEBHOOK_SECRET</span>`
+              ? html`<span style="font-size: 0.75rem; color: var(--scion-success-text, #166534);"
+                  >Stored as hub secret: GITHUB_APP_WEBHOOK_SECRET</span
+                >`
               : ''}
           </div>
           <div class="form-field">
@@ -2161,7 +2489,9 @@ export class ScionPageAdminServerConfig extends LitElement {
           </div>
           <div class="form-field full-width">
             <label>Public Installation URL</label>
-            <span class="hint">The public link where users can install this GitHub App on their org or account</span>
+            <span class="hint"
+              >The public link where users can install this GitHub App on their org or account</span
+            >
             <sl-input
               .value=${this.githubAppInstallationUrl}
               placeholder="https://github.com/apps/your-app-name/installations/new"
@@ -2172,17 +2502,19 @@ export class ScionPageAdminServerConfig extends LitElement {
           </div>
         </div>
 
-        ${this.githubAppRateLimit ? html`
-          <div style="margin-top: 1rem;">
-            <span class="hint">Rate Limit</span>
-            <div style="font-size: 0.875rem; margin-top: 0.25rem;">
-              ${this.githubAppRateLimit.remaining}/${this.githubAppRateLimit.limit} remaining
-              ${this.githubAppRateLimit.remaining < this.githubAppRateLimit.limit / 5
-                ? html`<span style="color: var(--sl-color-danger-600);">  (low)</span>`
-                : ''}
-            </div>
-          </div>
-        ` : ''}
+        ${this.githubAppRateLimit
+          ? html`
+              <div style="margin-top: 1rem;">
+                <span class="hint">Rate Limit</span>
+                <div style="font-size: 0.875rem; margin-top: 0.25rem;">
+                  ${this.githubAppRateLimit.remaining}/${this.githubAppRateLimit.limit} remaining
+                  ${this.githubAppRateLimit.remaining < this.githubAppRateLimit.limit / 5
+                    ? html`<span style="color: var(--sl-color-danger-600);"> (low)</span>`
+                    : ''}
+                </div>
+              </div>
+            `
+          : ''}
 
         <div class="actions">
           <sl-button
@@ -2194,57 +2526,86 @@ export class ScionPageAdminServerConfig extends LitElement {
             Save GitHub App Configuration
           </sl-button>
           ${this.githubAppConfigured
-            ? html`<span style="font-size: 0.75rem; color: var(--scion-success-text, #166534);">Configured</span>`
-            : html`<span style="font-size: 0.75rem; color: var(--scion-text-muted, #64748b);">Not configured</span>`}
+            ? html`<span style="font-size: 0.75rem; color: var(--scion-success-text, #166534);"
+                >Configured</span
+              >`
+            : html`<span style="font-size: 0.75rem; color: var(--scion-text-muted, #64748b);"
+                >Not configured</span
+              >`}
         </div>
       </div>
 
-      ${this.githubAppConfigured ? html`
-        <div class="section">
-          <h3 class="section-title">Installations</h3>
-          <div style="display: flex; gap: 0.5rem; margin-bottom: 1rem;">
-            <sl-button size="small" variant="default"
-              ?loading=${this.githubAppDiscoverLoading}
-              @click=${() => this.handleGitHubAppDiscover()}>
-              <sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>
-              Discover from GitHub
-            </sl-button>
-            <sl-button size="small" variant="default"
-              ?loading=${this.githubAppSyncLoading}
-              @click=${() => this.handleGitHubAppSyncPermissions()}>
-              <sl-icon slot="prefix" name="shield-check"></sl-icon>
-              Sync Permissions
-            </sl-button>
-          </div>
+      ${this.githubAppConfigured
+        ? html`
+            <div class="section">
+              <h3 class="section-title">Installations</h3>
+              <div style="display: flex; gap: 0.5rem; margin-bottom: 1rem;">
+                <sl-button
+                  size="small"
+                  variant="default"
+                  ?loading=${this.githubAppDiscoverLoading}
+                  @click=${() => this.handleGitHubAppDiscover()}
+                >
+                  <sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>
+                  Discover from GitHub
+                </sl-button>
+                <sl-button
+                  size="small"
+                  variant="default"
+                  ?loading=${this.githubAppSyncLoading}
+                  @click=${() => this.handleGitHubAppSyncPermissions()}
+                >
+                  <sl-icon slot="prefix" name="shield-check"></sl-icon>
+                  Sync Permissions
+                </sl-button>
+              </div>
 
-          ${this.githubAppSyncResult ? html`
-            <div class="status-message success">${this.githubAppSyncResult}</div>
-          ` : ''}
-
-          ${this.githubAppInstallationsLoading
-            ? html`<div style="text-align: center; padding: 1rem;"><sl-spinner></sl-spinner></div>`
-            : this.githubAppInstallations.length === 0
-              ? html`<p style="color: var(--scion-text-muted);">No installations found. Click "Discover from GitHub" to sync.</p>`
-              : html`
-                  <div style="display: flex; flex-direction: column; gap: 0.5rem;">
-                    ${this.githubAppInstallations.map(inst => html`
-                      <div style="display: flex; align-items: center; gap: 0.75rem; padding: 0.75rem; background: var(--scion-bg-subtle, #f8fafc); border: 1px solid var(--scion-border, #e2e8f0); border-radius: var(--scion-radius, 0.5rem);">
-                        <sl-icon name=${inst.account_type === 'Organization' ? 'building' : 'person'}></sl-icon>
-                        <div style="flex: 1;">
-                          <strong>${inst.account_login}</strong>
-                          <div style="font-size: 0.75rem; color: var(--scion-text-muted);">
-                            ${inst.account_type} · ${inst.repositories?.length || 0} repos · ID: ${inst.installation_id}
-                          </div>
-                        </div>
-                        <span style="font-size: 0.6875rem; padding: 0.125rem 0.5rem; border-radius: 9999px; background: ${inst.status === 'active' ? '#dcfce7' : '#fef2f2'}; color: ${inst.status === 'active' ? '#166534' : '#991b1b'};">
-                          ${inst.status}
-                        </span>
+              ${this.githubAppSyncResult
+                ? html` <div class="status-message success">${this.githubAppSyncResult}</div> `
+                : ''}
+              ${this.githubAppInstallationsLoading
+                ? html`<div style="text-align: center; padding: 1rem;">
+                    <sl-spinner></sl-spinner>
+                  </div>`
+                : this.githubAppInstallations.length === 0
+                  ? html`<p style="color: var(--scion-text-muted);">
+                      No installations found. Click "Discover from GitHub" to sync.
+                    </p>`
+                  : html`
+                      <div style="display: flex; flex-direction: column; gap: 0.5rem;">
+                        ${this.githubAppInstallations.map(
+                          (inst) => html`
+                            <div
+                              style="display: flex; align-items: center; gap: 0.75rem; padding: 0.75rem; background: var(--scion-bg-subtle, #f8fafc); border: 1px solid var(--scion-border, #e2e8f0); border-radius: var(--scion-radius, 0.5rem);"
+                            >
+                              <sl-icon
+                                name=${inst.account_type === 'Organization' ? 'building' : 'person'}
+                              ></sl-icon>
+                              <div style="flex: 1;">
+                                <strong>${inst.account_login}</strong>
+                                <div style="font-size: 0.75rem; color: var(--scion-text-muted);">
+                                  ${inst.account_type} · ${inst.repositories?.length || 0} repos ·
+                                  ID: ${inst.installation_id}
+                                </div>
+                              </div>
+                              <span
+                                style="font-size: 0.6875rem; padding: 0.125rem 0.5rem; border-radius: 9999px; background: ${inst.status ===
+                                'active'
+                                  ? '#dcfce7'
+                                  : '#fef2f2'}; color: ${inst.status === 'active'
+                                  ? '#166534'
+                                  : '#991b1b'};"
+                              >
+                                ${inst.status}
+                              </span>
+                            </div>
+                          `
+                        )}
                       </div>
-                    `)}
-                  </div>
-                `}
-        </div>
-      ` : ''}
+                    `}
+            </div>
+          `
+        : ''}
     `;
   }
 
@@ -2277,10 +2638,7 @@ export class ScionPageAdminServerConfig extends LitElement {
         this.githubAppPrivateKey = '';
         this.githubAppWebhookSecret = '';
       } else {
-        this.githubAppError = await extractApiError(
-          res,
-          'Failed to load GitHub App configuration',
-        );
+        this.githubAppError = await extractApiError(res, 'Failed to load GitHub App configuration');
       }
     } catch (e) {
       // Non-critical — tab just shows unconfigured state
@@ -2328,8 +2686,15 @@ export class ScionPageAdminServerConfig extends LitElement {
     try {
       const res = await apiFetch('/api/v1/github-app/sync-permissions', { method: 'POST' });
       if (res.ok) {
-        const data = (await res.json()) as { affected_projects?: number; app_permissions?: Record<string, string> };
-        const perms = data.app_permissions ? Object.entries(data.app_permissions).map(([k, v]) => `${k}:${v}`).join(', ') : 'none';
+        const data = (await res.json()) as {
+          affected_projects?: number;
+          app_permissions?: Record<string, string>;
+        };
+        const perms = data.app_permissions
+          ? Object.entries(data.app_permissions)
+              .map(([k, v]) => `${k}:${v}`)
+              .join(', ')
+          : 'none';
         this.githubAppSyncResult = `Permissions synced. App permissions: ${perms}. ${data.affected_projects || 0} project(s) affected.`;
       } else {
         const err = (await res.json().catch(() => ({}))) as { message?: string };
@@ -2432,18 +2797,15 @@ export class ScionPageAdminServerConfig extends LitElement {
         <div>
           <p>
             This will pull the latest code, rebuild the server, and
-            <strong>restart the service</strong>. You will temporarily lose
-            connectivity.
+            <strong>restart the service</strong>. You will temporarily lose connectivity.
           </p>
           <p>
-            Running agent containers are not affected and will continue
-            working through the restart.
+            Running agent containers are not affected and will continue working through the restart.
           </p>
           ${this.updateCheckResult
             ? html`<p>
                 <strong>${this.updateCheckResult.commits_behind}</strong> new
-                commit${this.updateCheckResult.commits_behind === 1 ? '' : 's'}
-                will be applied.
+                commit${this.updateCheckResult.commits_behind === 1 ? '' : 's'} will be applied.
               </p>`
             : nothing}
         </div>
@@ -2452,7 +2814,8 @@ export class ScionPageAdminServerConfig extends LitElement {
           variant="default"
           @click=${() => (this.showUpdateConfirm = false)}
           ?disabled=${this.updateRunning}
-        >Cancel</sl-button>
+          >Cancel</sl-button
+        >
         <sl-button
           slot="footer"
           variant="warning"
@@ -2469,14 +2832,11 @@ export class ScionPageAdminServerConfig extends LitElement {
   private async triggerUpdate(): Promise<void> {
     this.updateRunning = true;
     try {
-      const res = await apiFetch(
-        '/api/v1/admin/maintenance/operations/rebuild-server/run',
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ params: {} }),
-        },
-      );
+      const res = await apiFetch('/api/v1/admin/maintenance/operations/rebuild-server/run', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ params: {} }),
+      });
       if (!res.ok) {
         const errMsg = await extractApiError(res, `HTTP ${res.status}`);
         this.updateCheckError = errMsg;
