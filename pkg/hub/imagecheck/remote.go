@@ -116,6 +116,7 @@ func doRegistryHead(ctx context.Context, client HTTPClient, url, token string, n
 		return CheckResult{
 			Status:    "valid",
 			Source:    "registry",
+			Hash:      resp.Header.Get("Docker-Content-Digest"),
 			CheckedAt: now,
 		}
 	case http.StatusNotFound:
