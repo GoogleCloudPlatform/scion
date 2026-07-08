@@ -29,6 +29,11 @@ node_modules/
 *.md
 !go.mod
 !go.sum
+# Exempt embedded resource files (SKILL.md etc) needed for go:embed directives
+!resources/**
+!web/**/*.js
+!web/**/*.ts
+!web/**/*.json
 
 # Ignore other common large directories
 vendor/
