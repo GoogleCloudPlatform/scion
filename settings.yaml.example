@@ -1,0 +1,231 @@
+# Scion Settings — Annotated Example
+#
+# Copy to ~/.scion/settings.yaml and adjust for your deployment.
+# See docs-site/src/content/docs/reference/server-config.md for full details.
+#
+# Keys are organized by tier:
+#   Layer 0 (bootstrap) — file/env only; requires restart to change.
+#   Layer 1 (operational) — DB-managed in HA (Postgres) mode; file is
+#     seed source / fallback. Can be changed at runtime via the admin API.
+#
+# No secrets are included in this file. Secrets (OAuth client secrets,
+# GitHub App private keys, webhook secrets, broker tokens) belong in a
+# secret backend or environment variables.
+
+schema_version: "1"
+
+# ---------------------------------------------------------------------------
+# Layer 1 — Agent Defaults
+# In Postgres mode these are stored in the hub_settings table (section:
+# agent_defaults) and shared across replicas. In SQLite/workstation mode
+# they are read from this file.
+# ---------------------------------------------------------------------------
+
+# default_template: ""                # Default agent template name
+# default_harness_config: ""          # Default harness configuration name
+# default_max_turns: 0                # Max conversation turns (0 = unlimited)
+# default_max_model_calls: 0          # Max model API calls (0 = unlimited)
+# default_max_duration: ""            # Max agent duration (e.g. "1h", "" = unlimited)
+# default_resources:                  # Default resource spec for agents
+#   cpu: "1"
+#   memory: "512Mi"
+
+# Layer 1 — Image Registry
+# image_registry: ""                  # Container image registry URL
+
+# ---------------------------------------------------------------------------
+# Layer 1 — Telemetry
+# In Postgres mode: section "telemetry" in hub_settings.
+# ---------------------------------------------------------------------------
+
+# telemetry:
+#   enabled: true
+#   cloud:
+#     enabled: false
+#     endpoint: ""
+#     protocol: "grpc"                # "grpc" or "http"
+#     headers: {}
+#     provider: ""
+#     tls:
+#       enabled: false
+#       insecure_skip_verify: false
+#       ca_file: ""
+#     batch:
+#       max_size: 512
+#       timeout: "5s"
+#   hub:
+#     enabled: true
+#     report_interval: "60s"
+#   local:
+#     enabled: false
+#     file: ""
+#     console: false
+#   filter:
+#     enabled: false
+#     respect_debug_mode: true
+#     events:
+#       include: []
+#       exclude: []
+#     attributes:
+#       redact: []
+#       hash: []
+#     sampling:
+#       default: 1.0
+#       rates: {}
+#   resource: {}
+
+server:
+  # -------------------------------------------------------------------------
+  # Layer 0 — Identity & Mode (restart required)
+  # -------------------------------------------------------------------------
+  mode: workstation                    # "workstation" or "hosted"
+  env: prod                            # "prod", "dev", "staging"
+  log_level: info                      # "debug", "info", "warn", "error"
+  # log_format: ""                     # "" (default), "json"
+
+  # -------------------------------------------------------------------------
+  # Layer 0 — Hub Listeners (restart required)
+  # -------------------------------------------------------------------------
+  hub:
+    port: 9810
+    host: "0.0.0.0"
+    # read_timeout: "30s"
+    # write_timeout: "60s"
+    # hub_id: ""                       # Unique hub identifier (auto-generated)
+    # gcp_project_id: ""               # GCP project for SA minting (auto-detected on GCE)
+
+    # Layer 0 — CORS (restart required, middleware-init bound)
+    # cors:
+    #   enabled: true
+    #   allowed_origins: ["*"]
+
+    # Layer 1 — Access (section: access)
+    admin_emails: []                   # Super-admin email addresses
+    # auto_suspend_stalled: true       # Layer 1 (section: lifecycle)
+    # soft_delete_retention: "72h"     # Layer 1 (section: lifecycle)
+    # soft_delete_retain_files: false  # Layer 1 (section: lifecycle)
+    # public_url: ""                   # Layer 1 (section: endpoints)
+
+  # -------------------------------------------------------------------------
+  # Layer 0 — Broker (restart required)
+  # -------------------------------------------------------------------------
+  # broker:
+  #   enabled: false
+  #   port: 9800
+  #   broker_id: ""
+  #   broker_name: ""
+  #   hub_endpoint: ""
+  #   container_hub_endpoint: ""
+  #   broker_token: ""                 # Use env var SCION_SERVER_BROKER_BROKERTOKEN
+  #   auto_provide: false
+
+  # -------------------------------------------------------------------------
+  # Layer 0 — Database (restart required)
+  # -------------------------------------------------------------------------
+  database:
+    driver: sqlite                     # "sqlite" or "postgres"
+    url: "hub.db"                      # File path (sqlite) or connection string (postgres)
+
+  # -------------------------------------------------------------------------
+  # Layer 0 — Authentication (restart required)
+  # -------------------------------------------------------------------------
+  auth:
+    # mode: ""                         # Auth mode override
+    dev_mode: false                    # NEVER true in production
+    # dev_token: ""                    # Use env var SCION_SERVER_AUTH_DEVTOKEN
+    # dev_token_file: ""
+
+    # Layer 1 — Access Control (section: access)
+    user_access_mode: ""               # "open", "domain", "allowlist"
+    authorized_domains: []             # Email domains for domain mode
+
+    # Layer 0 — Proxy auth (restart required)
+    # proxy:
+    #   enabled: false
+    #   header: "X-Forwarded-Email"
+    #   trusted_proxies: []
+
+    # Layer 0 — Transport auth (restart required)
+    # transport:
+    #   iap:
+    #     enabled: false
+    #     audience: ""
+
+  # -------------------------------------------------------------------------
+  # Layer 0 — OAuth (restart required)
+  # -------------------------------------------------------------------------
+  # oauth:
+  #   web:
+  #     google: { client_id: "", client_secret: "" }
+  #     github: { client_id: "", client_secret: "" }
+  #   cli:
+  #     google: { client_id: "", client_secret: "" }
+
+  # -------------------------------------------------------------------------
+  # Layer 0 — Storage (restart required)
+  # -------------------------------------------------------------------------
+  # storage:
+  #   provider: "local"                # "local" or "gcs"
+  #   bucket: ""
+  #   local_path: ""
+
+  # Layer 0 — Workspace Storage (restart required)
+  # workspace_storage:
+  #   provider: "local"                # "local" or "nfs"
+  #   nfs:
+  #     base_path: ""
+
+  # -------------------------------------------------------------------------
+  # Layer 0 — Secrets (restart required)
+  # -------------------------------------------------------------------------
+  # secrets:
+  #   backend: "local"                 # "local" (read-only) or "gcpsm"
+  #   gcp_project_id: ""
+  #   gcp_credentials: ""
+
+  # -------------------------------------------------------------------------
+  # Layer 1 — Notification Channels (section: notifications)
+  # -------------------------------------------------------------------------
+  # notification_channels:
+  #   - type: slack
+  #     params:
+  #       webhook_url: https://hooks.slack.com/services/...
+  #       mention_on_urgent: "@here"
+  #   - type: discord
+  #     params:
+  #       webhook_url: https://discord.com/api/webhooks/...
+  #   - type: email
+  #     params:
+  #       to: oncall@example.com
+  #   - type: webhook
+  #     params:
+  #       webhook_url: https://example.com/scion-notifications
+
+  # -------------------------------------------------------------------------
+  # Layer 0 — Message Broker (restart required)
+  # -------------------------------------------------------------------------
+  # message_broker:
+  #   enabled: false
+  #   type: "inprocess"
+
+  # -------------------------------------------------------------------------
+  # Layer 0 — Plugins (restart required)
+  # -------------------------------------------------------------------------
+  # plugins:
+  #   broker:
+  #     my-plugin:
+  #       path: "/usr/local/bin/my-broker-plugin"
+  #       config: {}
+
+  # -------------------------------------------------------------------------
+  # Layer 1 — GitHub App (section: github_app)
+  # Note: private_key and webhook_secret belong in the secret backend.
+  # webhooks_enabled has a Go zero-value limitation: false is
+  # indistinguishable from omitted with omitempty JSON encoding.
+  # -------------------------------------------------------------------------
+  # github_app:
+  #   app_id: 0
+  #   api_base_url: "https://api.github.com"
+  #   webhooks_enabled: false
+  #   installation_url: ""
+  #   private_key_path: ""

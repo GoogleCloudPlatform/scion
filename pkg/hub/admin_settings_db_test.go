@@ -1505,3 +1505,180 @@ func TestIsZeroStruct(t *testing.T) {
 		t.Error("nil should be zero")
 	}
 }
+
+// ---- N2: Multi-section CAS partial-apply test ----
+
+func TestPutServerConfigDB_CAS_MultiSection_PartialApply(t *testing.T) {
+	srv, fakeStore, ops := newTestDBServer(t)
+
+	// Seed access at revision 1 and lifecycle at revision 1.
+	fakeStore.seed("access", json.RawMessage(`{"admin_emails":["a@test.com"]}`))
+	fakeStore.seed("lifecycle", json.RawMessage(`{"soft_delete_retention":"72h"}`))
+	_, _ = ops.Refresh(context.Background())
+
+	// Advance lifecycle to revision 2 so our expected_revision of 1 is stale.
+	_, _ = ops.Update(context.Background(), "lifecycle",
+		json.RawMessage(`{"soft_delete_retention":"48h"}`), "other@test.com", -1)
+
+	// PUT both sections: access with correct rev (1), lifecycle with stale rev (1).
+	// Sections are written alphabetically: access first (succeeds), lifecycle second (conflicts).
+	body := `{
+		"server": {
+			"hub": {"admin_emails": ["new@test.com"]},
+			"auth": {}
+		},
+		"expected_revisions": {"access": 1, "lifecycle": 1}
+	}`
+	// We also need a lifecycle field in the payload. Lifecycle keys are under hub.
+	body = `{
+		"server": {
+			"hub": {
+				"admin_emails": ["new@test.com"],
+				"soft_delete_retention": "24h"
+			},
+			"auth": {}
+		},
+		"expected_revisions": {"access": 1, "lifecycle": 1}
+	}`
+
+	req := adminRequest(http.MethodPut, "/api/v1/admin/server-config", body)
+	rr := httptest.NewRecorder()
+	srv.handlePutServerConfigDB(rr, req, ops)
+
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("expected 409 Conflict, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var resp map[string]interface{}
+	json.Unmarshal(rr.Body.Bytes(), &resp)
+
+	if resp["error"] != "revision_conflict" {
+		t.Errorf("expected error=revision_conflict, got %v", resp["error"])
+	}
+
+	// access should appear in applied (alphabetically first, correct revision).
+	applied, ok := resp["applied"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected applied map, got %T", resp["applied"])
+	}
+	if _, ok := applied["access"]; !ok {
+		t.Error("expected 'access' in applied map")
+	}
+
+	// lifecycle should appear in conflicted.
+	conflicted, ok := resp["conflicted"].([]interface{})
+	if !ok || len(conflicted) == 0 {
+		t.Fatalf("expected non-empty conflicted array, got %v", resp["conflicted"])
+	}
+	c0 := conflicted[0].(map[string]interface{})
+	if c0["section"] != "lifecycle" {
+		t.Errorf("expected conflicted section=lifecycle, got %v", c0["section"])
+	}
+	if c0["expected_revision"] != float64(1) {
+		t.Errorf("expected expected_revision=1, got %v", c0["expected_revision"])
+	}
+	if c0["current_revision"] != float64(2) {
+		t.Errorf("expected current_revision=2, got %v", c0["current_revision"])
+	}
+}
+
+// ---- N3: Telemetry nil-path test ----
+
+func TestApplySnapshotToResponse_NilTelemetry(t *testing.T) {
+	enabled := true
+	resp := ServerConfigResponse{
+		Telemetry: &config.V1TelemetryConfig{
+			Enabled: &enabled,
+		},
+	}
+
+	snap := Layer1Snapshot{
+		TelemetryConfig: nil,
+	}
+
+	applySnapshotToResponse(&resp, snap)
+
+	if resp.Telemetry != nil {
+		t.Errorf("expected nil telemetry after snapshot with nil TelemetryConfig, got %+v", resp.Telemetry)
+	}
+}
+
+// ---- Schema endpoint tests ----
+
+func TestGetServerConfigSchema_Shape(t *testing.T) {
+	srv, _, _ := newTestDBServer(t)
+
+	req := adminRequest(http.MethodGet, "/api/v1/admin/server-config/schema", "")
+	rr := httptest.NewRecorder()
+	srv.handleAdminServerConfigSchema(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var resp map[string]interface{}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("invalid JSON response: %v", err)
+	}
+
+	sections, ok := resp["sections"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected sections map, got %T", resp["sections"])
+	}
+
+	expectedSections := opsettings.SectionNames()
+	for _, name := range expectedSections {
+		sec, ok := sections[name].(map[string]interface{})
+		if !ok {
+			t.Errorf("missing section %q in schema response", name)
+			continue
+		}
+		if _, ok := sec["schema"]; !ok {
+			t.Errorf("section %q missing 'schema' key", name)
+		}
+		if _, ok := sec["koanf_paths"]; !ok {
+			t.Errorf("section %q missing 'koanf_paths' key", name)
+		}
+	}
+}
+
+func TestGetServerConfigSchema_AuthGating(t *testing.T) {
+	srv, _, _ := newTestDBServer(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/server-config/schema", nil)
+	// No identity in context → unauthenticated.
+	rr := httptest.NewRecorder()
+	srv.handleAdminServerConfigSchema(rr, req)
+
+	if rr.Code != http.StatusForbidden {
+		t.Errorf("expected 403 for unauthenticated request, got %d", rr.Code)
+	}
+}
+
+func TestGetServerConfigSchema_StableOutput(t *testing.T) {
+	srv, _, _ := newTestDBServer(t)
+
+	req1 := adminRequest(http.MethodGet, "/api/v1/admin/server-config/schema", "")
+	rr1 := httptest.NewRecorder()
+	srv.handleAdminServerConfigSchema(rr1, req1)
+
+	req2 := adminRequest(http.MethodGet, "/api/v1/admin/server-config/schema", "")
+	rr2 := httptest.NewRecorder()
+	srv.handleAdminServerConfigSchema(rr2, req2)
+
+	if rr1.Body.String() != rr2.Body.String() {
+		t.Error("schema endpoint returned different output on consecutive calls")
+	}
+}
+
+func TestGetServerConfigSchema_MethodNotAllowed(t *testing.T) {
+	srv, _, _ := newTestDBServer(t)
+
+	req := adminRequest(http.MethodPost, "/api/v1/admin/server-config/schema", `{}`)
+	rr := httptest.NewRecorder()
+	srv.handleAdminServerConfigSchema(rr, req)
+
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Errorf("expected 405 for POST, got %d", rr.Code)
+	}
+}

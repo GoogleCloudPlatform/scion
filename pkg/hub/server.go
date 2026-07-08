@@ -2720,6 +2720,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/admin/allow-list/", s.handleAdminAllowListByEmail)
 	s.mux.HandleFunc("/api/v1/admin/invites", s.handleAdminInvites)
 	s.mux.HandleFunc("/api/v1/admin/invites/", s.handleAdminInviteByID)
+	s.mux.HandleFunc("/api/v1/admin/server-config/schema", s.handleAdminServerConfigSchema)
 	s.mux.HandleFunc("/api/v1/admin/server-config", s.handleAdminServerConfig)
 	s.mux.HandleFunc("/api/v1/admin/agents/reset-auth-all", s.handleAdminResetAuthAll)
 	s.mux.HandleFunc("/api/v1/admin/gcp-quota", s.handleAdminGCPQuota)

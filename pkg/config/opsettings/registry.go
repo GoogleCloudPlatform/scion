@@ -168,6 +168,40 @@ func IsLayer1Key(koanfKey string) bool {
 
 var schemaCompileErr error
 
+// rawSchemas stores the raw JSON-schema definitions per section, populated
+// during compileSchemas(). Used by SchemaInfo() for the schema endpoint.
+var rawSchemas map[string]map[string]interface{}
+
+// SectionSchemaInfo holds the raw schema definition and koanf paths for a
+// section, intended for the GET /admin/server-config/schema endpoint.
+type SectionSchemaInfo struct {
+	Schema     interface{} `json:"schema"`
+	KoanfPaths []string    `json:"koanf_paths"`
+}
+
+// SchemaInfo returns the raw JSON-schema fragment and koanf paths for every
+// registered section. The result is safe to serialize as JSON for the schema
+// endpoint. Returns nil if schemas failed to compile.
+func SchemaInfo() map[string]SectionSchemaInfo {
+	if rawSchemas == nil {
+		return nil
+	}
+	result := make(map[string]SectionSchemaInfo, len(Registry))
+	for _, s := range Registry {
+		info := SectionSchemaInfo{
+			KoanfPaths: s.KoanfPaths,
+		}
+		if info.KoanfPaths == nil {
+			info.KoanfPaths = []string{}
+		}
+		if schema, ok := rawSchemas[s.Name]; ok {
+			info.Schema = schema
+		}
+		result[s.Name] = info
+	}
+	return result
+}
+
 func compileSchemas() {
 	schemaData, err := config.GetSettingsSchemaJSON("1")
 	if err != nil {
@@ -251,6 +285,8 @@ func compileSchemas() {
 		},
 		"notifications": buildNotificationsSchema(),
 	}
+
+	rawSchemas = sectionSchemaMap
 
 	for i := range Registry {
 		s := &Registry[i]

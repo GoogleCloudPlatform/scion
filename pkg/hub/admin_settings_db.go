@@ -35,6 +35,8 @@ import (
 	yamlv3 "gopkg.in/yaml.v3"
 )
 
+const maxSettingsBodySize = 1 << 20 // 1 MB — matches integrations/harness-config convention
+
 // SectionMetadata carries per-section provenance metadata in the GET response
 // (design §3.8, additive shape). The key "section_metadata" is chosen to not
 // collide with any existing ServerConfigResponse field.
@@ -278,7 +280,7 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	// OMITTED fields (keep current value) from EXPLICITLY-SENT empty
 	// values ("", [], null) which CLEAR the field in the section doc.
 	// File-mode behavior is untouched — this is postgres-path only.
-	rawBody, err := readRawBody(r)
+	rawBody, err := readRawBody(w, r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "Invalid request body", nil)
 		return
@@ -664,6 +666,9 @@ func extractKoanfKeysFromRequest(req *ServerConfigUpdateRequest) []string {
 func appendPresenceAwareKeys(keys []string, rawBody []byte) []string {
 	fp, err := parseFieldPresence(rawBody)
 	if err != nil {
+		// Presence detection falls back to omitted-semantics on malformed body;
+		// the typed decode will 400 anyway.
+		slog.Warn("parseFieldPresence failed, falling back to omitted-semantics", "error", err)
 		return keys
 	}
 
@@ -704,8 +709,12 @@ func appendPresenceAwareKeys(keys []string, rawBody []byte) []string {
 // update request, grouped by the Layer-1 sections they belong to.
 // rawBody is used for presence-aware field clearing (N6/N7).
 func buildSectionDocsFromRequest(req *ServerConfigUpdateRequest, layer1BySec map[string][]string, rawBody []byte) (map[string]json.RawMessage, error) {
-	// Parse top-level presence for N6/N7.
-	fp, _ := parseFieldPresence(rawBody)
+	// Parse top-level presence for N6/N7. On error, fall back to nil
+	// (omitted-semantics for all fields); the typed decode will 400 anyway.
+	fp, err := parseFieldPresence(rawBody)
+	if err != nil {
+		slog.Warn("parseFieldPresence failed in buildSectionDocs, falling back to omitted-semantics", "error", err)
+	}
 
 	docs := make(map[string]json.RawMessage)
 
@@ -883,7 +892,7 @@ func (s *Server) handleGetMaintenanceDB(w http.ResponseWriter, ops *OperationalS
 // propagated), then applies locally via ApplyMaintenanceFromSnapshot.
 func (s *Server) handlePutMaintenanceDB(w http.ResponseWriter, r *http.Request, ops *OperationalSettings) {
 	// N7: Read raw body for presence-aware message clearing.
-	rawBody, err := readRawBody(r)
+	rawBody, err := readRawBody(w, r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "Invalid request body", nil)
 		return
@@ -916,7 +925,10 @@ func (s *Server) handlePutMaintenanceDB(w http.ResponseWriter, r *http.Request, 
 
 	// N7: presence-aware message clearing. An explicit empty message ("")
 	// clears the maintenance message; an omitted message field preserves it.
-	fp, _ := parseFieldPresence(rawBody)
+	fp, fpErr := parseFieldPresence(rawBody)
+	if fpErr != nil {
+		slog.Warn("parseFieldPresence failed in maintenance handler, falling back to omitted-semantics", "error", fpErr)
+	}
 	if body.Message != "" {
 		ms.MaintenanceMessage = body.Message
 	} else if fp.has("message") {
@@ -948,13 +960,38 @@ func (s *Server) handlePutMaintenanceDB(w http.ResponseWriter, r *http.Request, 
 	})
 }
 
-// readRawBody reads and returns the full request body as raw bytes.
-// The caller can then unmarshal into typed structs AND walk the raw JSON
-// for presence-aware field clearing (N6/N7).
-func readRawBody(r *http.Request) ([]byte, error) {
+// handleAdminServerConfigSchema handles GET /api/v1/admin/server-config/schema.
+// Returns JSON-schema fragments per section from the opsettings registry,
+// intended for UI form generation and CLI validation. Static metadata — no DB access.
+func (s *Server) handleAdminServerConfigSchema(w http.ResponseWriter, r *http.Request) {
+	user := GetUserIdentityFromContext(r.Context())
+	if user == nil || user.Role() != "admin" {
+		Forbidden(w)
+		return
+	}
+	if r.Method != http.MethodGet {
+		MethodNotAllowed(w)
+		return
+	}
+
+	info := opsettings.SchemaInfo()
+	if info == nil {
+		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Schema information unavailable", nil)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"sections": info,
+	})
+}
+
+// readRawBody reads and returns the full request body as raw bytes, enforcing
+// maxSettingsBodySize via http.MaxBytesReader.
+func readRawBody(w http.ResponseWriter, r *http.Request) ([]byte, error) {
 	if r.Body == nil {
 		return nil, fmt.Errorf("empty request body")
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxSettingsBodySize)
 	var buf bytes.Buffer
 	if _, err := buf.ReadFrom(r.Body); err != nil {
 		return nil, err

@@ -338,3 +338,83 @@ To migrate:
    URL so a misconfiguration will surface on startup rather than silently
    falling back.
 :::
+
+## Two-Tier Settings Architecture (HA Deployments)
+
+In HA deployments where multiple Hub replicas share a Postgres database, settings are split into two tiers to prevent node drift while keeping bootstrap settings file-managed.
+
+### Layer 0 — Bootstrap (file + env only)
+
+Settings required before the database connection exists, or that are restart-bound. Managed exclusively via `settings.yaml` and `SCION_SERVER_*` environment variables. **Cannot be written via the admin API** — `PUT /api/v1/admin/server-config` returns `422` if any Layer-0 key is present.
+
+| Group | Keys (`server.` prefix unless noted) |
+| :--- | :--- |
+| Database | `database.*` |
+| Listeners | `hub.port`, `hub.host`, `hub.read_timeout`, `hub.write_timeout`, `broker.*` |
+| Auth stack | `auth.mode`, `auth.dev_mode`, `auth.dev_token`, `auth.dev_token_file`, `auth.proxy.*`, `auth.transport.*`, `oauth.*` |
+| Secrets/storage | `secrets.*`, `storage.*`, `workspace_storage.*` |
+| Identity/mode | `mode`, `env`, `hub.hub_id`, `hub.gcp_project_id` |
+| Logging | `log_level`, `log_format` |
+| CORS | `hub.cors.*` |
+| Messaging/plugins | `message_broker.*`, `plugins.*` |
+
+### Layer 1 — Operational (Postgres `hub_settings` table)
+
+Settings that can be changed at runtime and are shared across all replicas. Stored as section-per-row in the `hub_settings` table. In SQLite/workstation mode, these fall back to `settings.yaml` (unchanged behavior).
+
+| Section | Contents |
+| :--- | :--- |
+| `access` | `admin_emails`, `user_access_mode`, `authorized_domains` |
+| `lifecycle` | `auto_suspend_stalled`, `soft_delete_retention`, `soft_delete_retain_files` |
+| `maintenance` | `admin_mode`, `maintenance_message` (durable + cluster-wide) |
+| `telemetry` | Full `telemetry.*` subtree (enabled, cloud, hub, local, filter, resource) |
+| `agent_defaults` | `default_template`, `default_harness_config`, `default_max_turns`, `default_max_model_calls`, `default_max_duration`, `default_resources` |
+| `endpoints` | `hub.public_url`, `image_registry` |
+| `github_app` | `app_id`, `api_base_url`, `webhooks_enabled`, `installation_url`, `private_key_path` |
+| `notifications` | `notification_channels[]` |
+| *(reserved)* `global_defaults` | Reserved for future hub-resource design — not implemented |
+
+### Precedence
+
+In Postgres mode, the effective value for any Layer-1 key is resolved in this order (highest priority first):
+
+1. **`SCION_SERVER_*` environment variable** — node-local escape hatch
+2. **`hub_settings` DB row** — cluster-shared, set via admin API
+3. **`settings.yaml` Layer-1 fields** — fallback when key absent in DB
+4. **Compiled defaults**
+
+### Seeding and Migration
+
+- **First startup**: the first replica to start seeds `hub_settings` from its local `settings.yaml` (Layer-1 keys only) under an advisory lock. Subsequent replicas see the seed marker and skip.
+- **Seeding reads file values only** — environment overrides are not baked into shared state.
+- **DB wins**: once a section is seeded/written to DB, the DB row fully owns that section. Omitted fields within the section fall to compiled defaults, not to the file.
+- **Rollback safety**: older builds ignore the `hub_settings` table entirely and read files — rolling back reverts to pre-change behavior.
+
+### Environment Override Warnings
+
+Because env overrides on Layer-1 keys reintroduce per-node drift, the system warns administrators:
+
+- `GET /api/v1/admin/server-config` includes an `env_overrides` array listing which Layer-1 keys are overridden by env vars on the serving node.
+- A startup `WARN` log lists any overridden Layer-1 keys.
+- The admin UI renders a visible warning banner when env overrides are detected.
+
+### Admin API Behavior Notes
+
+**PUT partitioning**: The request body is partitioned by the section registry. Layer-1 fields are written to DB sections. Layer-0 fields trigger a `422` rejection. Unclassified fields (e.g. `runtimes`, `profiles`) are ignored and reported in `ignored_keys`.
+
+**Revision CAS**: The request body may include `expected_revisions` — a map of section name to expected revision number. On mismatch, the response is `409 Conflict` with the conflicting sections and their current revisions. Omitted sections use last-writer-wins semantics. Sections are written in alphabetical order for deterministic partial-apply behavior.
+
+**Presence-aware clearing**: The PUT handler distinguishes **omitted** fields (preserve current DB value) from **explicitly-sent empty values** (`""`, `[]`, `null`) which **clear** the field. This enables clearing admin_emails, user_access_mode, authorized_domains, notification_channels, and public_url without sending every field.
+
+**Maintenance durability**: `PUT /api/v1/admin/maintenance` writes to the `maintenance` section in DB, making admin/maintenance mode durable across restarts and propagated to all replicas. `SCION_SERVER_ADMINMODE` env var still force-enables per node for break-glass access.
+
+**Schema endpoint**: `GET /api/v1/admin/server-config/schema` returns JSON-schema fragments and koanf key paths per section for UI form generation and CLI validation.
+
+:::caution[Go Zero-Value Limitations]
+Due to Go's `omitempty` JSON behavior, boolean `false` is indistinguishable from an omitted field in some contexts. This affects:
+
+- `auto_suspend_stalled` (Layer 1, lifecycle section) — `false` may be treated as omitted
+- `github_app.webhooks_enabled` (Layer 1, github_app section) — `false` may be treated as omitted
+
+When these fields are explicitly set to `false` in the DB, they are correctly applied via the snapshot. However, the raw JSON representation may omit them. The admin API handles this correctly via the presence-aware clearing mechanism.
+:::
