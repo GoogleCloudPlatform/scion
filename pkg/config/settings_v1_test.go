@@ -3294,16 +3294,22 @@ func TestRewriteImageRegistry(t *testing.T) {
 			want:        "us-central1-docker.pkg.dev/example-project/scion-images/scion-gemini:latest",
 		},
 		{
-			name:        "do not rewrite non-scion image",
+			name:        "bare non-scion image rewritten",
 			fullImage:   "ubuntu:22.04",
 			newRegistry: "ghcr.io/myorg",
-			want:        "ubuntu:22.04",
+			want:        "ghcr.io/myorg/ubuntu:22.04",
 		},
 		{
 			name:        "do not rewrite custom registry image",
 			fullImage:   "myregistry.io/custom-agent:v1",
 			newRegistry: "ghcr.io/myorg",
 			want:        "myregistry.io/custom-agent:v1",
+		},
+		{
+			name:        "bare custom harness image rewritten",
+			fullImage:   "my-custom-harness:latest",
+			newRegistry: "ghcr.io/myorg",
+			want:        "ghcr.io/myorg/my-custom-harness:latest",
 		},
 		{
 			name:        "empty registry returns original",

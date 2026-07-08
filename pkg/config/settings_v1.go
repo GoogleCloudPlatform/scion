@@ -189,7 +189,7 @@ func RequireImageRegistry(projectPath, profileName string) error {
 }
 
 // RewriteImageRegistry replaces the registry prefix of a container image reference
-// with newRegistry. Only images whose basename starts with "scion-" are rewritten.
+// with newRegistry for any short-form (non-fully-qualified) image.
 // If newRegistry is empty, the original image is returned unchanged.
 func RewriteImageRegistry(fullImage, newRegistry string) string {
 	if newRegistry == "" || fullImage == "" {
@@ -203,11 +203,6 @@ func RewriteImageRegistry(fullImage, newRegistry string) string {
 		basename = fullImage[lastSlash+1:]
 	} else {
 		basename = fullImage
-	}
-
-	// Only rewrite images following the scion naming convention
-	if !strings.HasPrefix(basename, "scion-") {
-		return fullImage
 	}
 
 	// If the image already has an explicit registry hostname
