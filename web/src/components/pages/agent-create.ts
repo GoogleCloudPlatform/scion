@@ -830,7 +830,7 @@ private selectBrokerForProject(): void {
         this.modelSelection = dm as 'small' | 'medium' | 'large' | 'extra-large';
       } else if (dm) {
         this.modelSelection = 'other';
-        this.customModelId = dm;
+        this.customModelId = settings.defaultModel;
       }
     }
   }
