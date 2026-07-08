@@ -112,6 +112,8 @@ type Runtime interface {
 	GetLogs(ctx context.Context, id string) (string, error)
 	Attach(ctx context.Context, id string) error
 	ImageExists(ctx context.Context, image string) (bool, error)
+	ImageID(ctx context.Context, image string) (string, error)
+	RemoveImage(ctx context.Context, image string) error
 	PullImage(ctx context.Context, image string) error
 	Sync(ctx context.Context, id string, direction SyncDirection) error
 	Exec(ctx context.Context, id string, cmd []string) (string, error)

@@ -210,6 +210,14 @@ func (e *ErrorRuntime) ImageExists(ctx context.Context, image string) (bool, err
 	return false, e.Err
 }
 
+func (e *ErrorRuntime) ImageID(ctx context.Context, image string) (string, error) {
+	return "", e.Err
+}
+
+func (e *ErrorRuntime) RemoveImage(ctx context.Context, image string) error {
+	return e.Err
+}
+
 func (e *ErrorRuntime) PullImage(ctx context.Context, image string) error {
 	return e.Err
 }

@@ -155,6 +155,14 @@ func (r *CloudRunRuntime) ImageExists(ctx context.Context, image string) (bool, 
 	return false, fmt.Errorf("cloudrun: ImageExists not yet implemented")
 }
 
+func (r *CloudRunRuntime) ImageID(ctx context.Context, image string) (string, error) {
+	return "", fmt.Errorf("cloudrun: ImageID not yet implemented")
+}
+
+func (r *CloudRunRuntime) RemoveImage(ctx context.Context, image string) error {
+	return fmt.Errorf("cloudrun: RemoveImage not yet implemented")
+}
+
 func (r *CloudRunRuntime) PullImage(ctx context.Context, image string) error {
 	return fmt.Errorf("cloudrun: PullImage not yet implemented")
 }

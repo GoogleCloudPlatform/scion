@@ -2148,6 +2148,16 @@ func (r *KubernetesRuntime) ImageExists(ctx context.Context, image string) (bool
 	return true, nil
 }
 
+func (r *KubernetesRuntime) ImageID(ctx context.Context, image string) (string, error) {
+	// K8s doesn't have local images — images are pulled by the kubelet.
+	return "", nil
+}
+
+func (r *KubernetesRuntime) RemoveImage(ctx context.Context, image string) error {
+	// K8s doesn't have local images — image lifecycle is managed by the kubelet.
+	return nil
+}
+
 func (r *KubernetesRuntime) PullImage(ctx context.Context, image string) error {
 	// Not strictly needed as Pod creation handles pulling.
 	return nil

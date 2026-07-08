@@ -23,8 +23,6 @@ import (
 	"os"
 	"path/filepath"
 
-	"golang.org/x/sync/errgroup"
-
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -201,28 +199,7 @@ func (s *Server) resolveImageRegistry() string {
 	return os.Getenv("SCION_IMAGE_REGISTRY")
 }
 
-// RecheckAllImageStatuses re-checks image availability for all active
-// harness configs concurrently. Called at server startup after bootstrap completes.
-func (s *Server) RecheckAllImageStatuses(ctx context.Context) {
-	result, err := s.store.ListHarnessConfigs(ctx, store.HarnessConfigFilter{
-		Status: store.HarnessConfigStatusActive,
-	}, store.ListOptions{Limit: 1000})
-	if err != nil {
-		slog.Error("failed to list harness configs for image recheck", "error", err)
-		return
-	}
-
-	g, gctx := errgroup.WithContext(ctx)
-	g.SetLimit(5)
-	for _, hc := range result.Items {
-		if hc.Config == nil || hc.Config.Image == "" {
-			continue
-		}
-		id, image := hc.ID, hc.Config.Image
-		g.Go(func() error {
-			s.checkAndUpdateImageStatus(gctx, id, image)
-			return nil
-		})
-	}
-	_ = g.Wait()
-}
+// RecheckAllImageStatuses is a no-op. Remote registry checks are now
+// on-demand only (via the image-status endpoint). Retained as a stub
+// for callers that invoke it at startup.
+func (s *Server) RecheckAllImageStatuses(_ context.Context) {}

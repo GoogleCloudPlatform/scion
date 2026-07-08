@@ -256,6 +256,19 @@ func (r *DockerRuntime) ImageExists(ctx context.Context, image string) (bool, er
 	return err == nil, nil
 }
 
+func (r *DockerRuntime) ImageID(ctx context.Context, image string) (string, error) {
+	out, err := runSimpleCommand(ctx, r.Command, "image", "inspect", "--format", "{{.ID}}", image)
+	if err != nil {
+		return "", fmt.Errorf("image inspect failed: %w", err)
+	}
+	return strings.TrimSpace(out), nil
+}
+
+func (r *DockerRuntime) RemoveImage(ctx context.Context, image string) error {
+	_, err := runSimpleCommand(ctx, r.Command, "rmi", image)
+	return err
+}
+
 func (r *DockerRuntime) PullImage(ctx context.Context, image string) error {
 	return runInteractiveCommand(r.Command, "pull", image)
 }

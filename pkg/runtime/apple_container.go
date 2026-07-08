@@ -290,6 +290,16 @@ func (r *AppleContainerRuntime) ImageExists(ctx context.Context, image string) (
 	return err == nil, nil
 }
 
+func (r *AppleContainerRuntime) ImageID(ctx context.Context, image string) (string, error) {
+	// Apple Container runtime does not expose image IDs in the same way.
+	return "", nil
+}
+
+func (r *AppleContainerRuntime) RemoveImage(ctx context.Context, image string) error {
+	// Apple Container runtime does not support image removal in the same way.
+	return nil
+}
+
 func (r *AppleContainerRuntime) PullImage(ctx context.Context, image string) error {
 	return runInteractiveCommand(r.Command, "image", "pull", image)
 }

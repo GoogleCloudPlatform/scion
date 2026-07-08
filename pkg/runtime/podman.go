@@ -373,6 +373,19 @@ func (r *PodmanRuntime) ImageExists(ctx context.Context, image string) (bool, er
 	return err == nil, nil
 }
 
+func (r *PodmanRuntime) ImageID(ctx context.Context, image string) (string, error) {
+	out, err := runSimpleCommand(ctx, r.Command, "image", "inspect", "--format", "{{.ID}}", image)
+	if err != nil {
+		return "", fmt.Errorf("image inspect failed: %w", err)
+	}
+	return strings.TrimSpace(out), nil
+}
+
+func (r *PodmanRuntime) RemoveImage(ctx context.Context, image string) error {
+	_, err := runSimpleCommand(ctx, r.Command, "rmi", image)
+	return err
+}
+
 func (r *PodmanRuntime) PullImage(ctx context.Context, image string) error {
 	return runInteractiveCommand(r.Command, "pull", image)
 }
