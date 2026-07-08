@@ -152,6 +152,10 @@ type HTTPAgentDispatcher struct {
 	events          EventPublisher
 	commandBus      CommandBus
 	dispatchMetrics dispatchmetrics.Recorder
+
+	// harnessConfigRepairer syncs a harness-config's DB manifest from GCS
+	// when a hash mismatch is detected during dispatch. Nil = no repair.
+	harnessConfigRepairer func(ctx context.Context, name string) error
 }
 
 // NewHTTPAgentDispatcher creates a new HTTP-based agent dispatcher.
@@ -230,6 +234,36 @@ func (d *HTTPAgentDispatcher) SetCrossNodeDeps(events EventPublisher, bus Comman
 // SetDispatchMetrics wires the dispatch metrics recorder (B5-2).
 func (d *HTTPAgentDispatcher) SetDispatchMetrics(rec dispatchmetrics.Recorder) {
 	d.dispatchMetrics = rec
+}
+
+// SetHarnessConfigRepairer registers a callback that syncs a harness-config's
+// DB manifest from storage when a hash mismatch is detected during dispatch.
+func (d *HTTPAgentDispatcher) SetHarnessConfigRepairer(fn func(ctx context.Context, name string) error) {
+	d.harnessConfigRepairer = fn
+}
+
+// isHashMismatchError reports whether err is a broker hash-mismatch error
+// from harness-config hydration.
+func isHashMismatchError(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "hash mismatch for file")
+}
+
+// repairHarnessConfig attempts to sync the agent's harness-config DB manifest
+// from storage. Returns nil on success so the caller can retry the dispatch.
+func (d *HTTPAgentDispatcher) repairHarnessConfig(ctx context.Context, agent *store.Agent) error {
+	if d.harnessConfigRepairer == nil || agent.AppliedConfig == nil || agent.AppliedConfig.HarnessConfig == "" {
+		return fmt.Errorf("no repairer or harness config")
+	}
+	name := agent.AppliedConfig.HarnessConfig
+	d.log.Warn("hash mismatch detected, attempting DB→storage repair",
+		"agent", agent.Slug, "harnessConfig", name)
+	if err := d.harnessConfigRepairer(ctx, name); err != nil {
+		d.log.Warn("harness-config repair failed", "harnessConfig", name, "error", err)
+		return err
+	}
+	d.log.Info("harness-config repair succeeded, retrying dispatch",
+		"agent", agent.Slug, "harnessConfig", name)
+	return nil
 }
 
 // getBrokerEndpoint retrieves the endpoint URL for a runtime broker.
@@ -688,6 +722,11 @@ func (d *HTTPAgentDispatcher) DispatchAgentCreate(ctx context.Context, agent *st
 	}
 
 	resp, err := d.client.CreateAgent(ctx, agent.RuntimeBrokerID, endpoint, req)
+	if isHashMismatchError(err) {
+		if repairErr := d.repairHarnessConfig(ctx, agent); repairErr == nil {
+			resp, err = d.client.CreateAgent(ctx, agent.RuntimeBrokerID, endpoint, req)
+		}
+	}
 	if err != nil {
 		return err
 	}
@@ -771,6 +810,11 @@ func (d *HTTPAgentDispatcher) DispatchAgentCreateWithGather(ctx context.Context,
 		"agent_id", agent.ID, "agent", agent.Name,
 		"brokerElapsed", time.Since(brokerCallStart).String(),
 		"totalElapsed", time.Since(dispatchStart).String())
+	if isHashMismatchError(err) {
+		if repairErr := d.repairHarnessConfig(ctx, agent); repairErr == nil {
+			resp, envReqs, err = d.client.CreateAgentWithGather(ctx, agent.RuntimeBrokerID, endpoint, req)
+		}
+	}
 	if errors.Is(err, ErrLifecycleDeferred) {
 		return d.deferredCreateWithGather(ctx, agent)
 	}
@@ -1188,6 +1232,11 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 	}
 
 	resp, err := d.client.StartAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID, task, projectPath, projectSlug, harnessConfig, resolvedEnv, resolvedSecrets, inlineConfig, projectInfo.sharedDirs, projectInfo.sharedWorkspace, resume)
+	if isHashMismatchError(err) {
+		if repairErr := d.repairHarnessConfig(ctx, agent); repairErr == nil {
+			resp, err = d.client.StartAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID, task, projectPath, projectSlug, harnessConfig, resolvedEnv, resolvedSecrets, inlineConfig, projectInfo.sharedDirs, projectInfo.sharedWorkspace, resume)
+		}
+	}
 	if errors.Is(err, ErrLifecycleDeferred) {
 		return d.deferredStart(ctx, agent, &StartDispatchArgs{
 			Task:   task,
