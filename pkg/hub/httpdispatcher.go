@@ -281,7 +281,7 @@ func (d *HTTPAgentDispatcher) repairHashMismatch(ctx context.Context, agent *sto
 }
 
 func (d *HTTPAgentDispatcher) repairHarnessConfig(ctx context.Context, agent *store.Agent) error {
-	if d.harnessConfigRepairer == nil || agent.AppliedConfig.HarnessConfig == "" {
+	if d.harnessConfigRepairer == nil || agent.AppliedConfig == nil || agent.AppliedConfig.HarnessConfig == "" {
 		return fmt.Errorf("no repairer or harness config")
 	}
 	name := agent.AppliedConfig.HarnessConfig
@@ -300,7 +300,10 @@ func (d *HTTPAgentDispatcher) repairTemplate(ctx context.Context, agent *store.A
 	if d.templateRepairer == nil {
 		return fmt.Errorf("no template repairer")
 	}
-	ref := agent.AppliedConfig.TemplateID
+	var ref string
+	if agent.AppliedConfig != nil {
+		ref = agent.AppliedConfig.TemplateID
+	}
 	if ref == "" {
 		ref = agent.Template
 	}

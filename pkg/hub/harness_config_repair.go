@@ -16,13 +16,21 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"golang.org/x/sync/errgroup"
+	"golang.org/x/sync/singleflight"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
+
+// repairFlight deduplicates concurrent repair attempts for the same resource.
+// When multiple dispatches hit a hash mismatch simultaneously, only one
+// actually downloads from GCS and updates the DB; the others wait and share
+// the result.
+var repairFlight singleflight.Group
 
 // syncResourceFromStorage synchronises a resource's DB manifest hashes with
 // actual GCS content. In a multi-hub topology the GCS bucket is shared while
@@ -62,9 +70,12 @@ func (s *Server) syncResourceFromStorage(
 
 		obj, getErr := stor.GetObject(ctx, objectPath)
 		if getErr != nil {
-			s.resourceLog.Warn(label+" repair: cannot stat object",
-				"resource", name, "file", file.Path, "error", getErr)
-			continue
+			if errors.Is(getErr, storage.ErrNotFound) {
+				s.resourceLog.Warn(label+" repair: object not found",
+					"resource", name, "file", file.Path)
+				continue
+			}
+			return nil, "", false, fmt.Errorf("get object %q: %w", objectPath, getErr)
 		}
 
 		actualHash := objectMetadataHash(obj)
@@ -72,9 +83,7 @@ func (s *Server) syncResourceFromStorage(
 			var hashErr error
 			actualHash, hashErr = computeStoredHash(ctx, stor, objectPath)
 			if hashErr != nil {
-				s.resourceLog.Warn(label+" repair: cannot hash object",
-					"resource", name, "file", file.Path, "error", hashErr)
-				continue
+				return nil, "", false, fmt.Errorf("compute hash for %q: %w", objectPath, hashErr)
 			}
 		}
 
@@ -96,8 +105,16 @@ func (s *Server) syncResourceFromStorage(
 }
 
 // syncHarnessConfigFromStorage syncs a single harness-config's DB manifest
-// from actual GCS content.
+// from actual GCS content. Concurrent calls for the same config are
+// deduplicated via singleflight.
 func (s *Server) syncHarnessConfigFromStorage(ctx context.Context, hcName string) error {
+	_, err, _ := repairFlight.Do("hc:"+hcName, func() (interface{}, error) {
+		return nil, s.syncHarnessConfigFromStorageInner(context.WithoutCancel(ctx), hcName)
+	})
+	return err
+}
+
+func (s *Server) syncHarnessConfigFromStorageInner(ctx context.Context, hcName string) error {
 	hc, err := s.findHarnessConfigByName(ctx, hcName)
 	if err != nil {
 		return err
@@ -127,8 +144,16 @@ func (s *Server) syncHarnessConfigFromStorage(ctx context.Context, hcName string
 }
 
 // syncTemplateFromStorage syncs a single template's DB manifest from actual
-// GCS content.
+// GCS content. Concurrent calls for the same template are deduplicated via
+// singleflight.
 func (s *Server) syncTemplateFromStorage(ctx context.Context, templateRef string) error {
+	_, err, _ := repairFlight.Do("tmpl:"+templateRef, func() (interface{}, error) {
+		return nil, s.syncTemplateFromStorageInner(context.WithoutCancel(ctx), templateRef)
+	})
+	return err
+}
+
+func (s *Server) syncTemplateFromStorageInner(ctx context.Context, templateRef string) error {
 	tmpl, err := s.findTemplateByRef(ctx, templateRef)
 	if err != nil {
 		return err
@@ -195,6 +220,9 @@ func (s *Server) syncAllResourcesFromStorage(ctx context.Context, kind storage.R
 			s.resourceLog.Error(label+" sync: failed to list", "error", err)
 			return
 		}
+		if result == nil {
+			return
+		}
 		for _, hc := range result.Items {
 			if len(hc.Files) == 0 {
 				continue
@@ -211,6 +239,9 @@ func (s *Server) syncAllResourcesFromStorage(ctx context.Context, kind storage.R
 		}, store.ListOptions{Limit: 1000})
 		if err != nil {
 			s.resourceLog.Error(label+" sync: failed to list", "error", err)
+			return
+		}
+		if result == nil {
 			return
 		}
 		for _, t := range result.Items {
@@ -237,10 +268,18 @@ func (s *Server) syncAllResourcesFromStorage(ctx context.Context, kind storage.R
 			case storage.ResourceKindTemplate:
 				rs = s.templateStore()
 			}
+			if rs == nil {
+				s.resourceLog.Warn(label+" sync: no resource store",
+					"resource", e.name)
+				return nil
+			}
 			report, vErr := rs.ValidateStorage(gctx, e.rec)
 			if vErr != nil {
 				s.resourceLog.Warn(label+" sync: validation error",
 					"resource", e.name, "error", vErr)
+				return nil
+			}
+			if report == nil {
 				return nil
 			}
 			for _, issue := range report.Issues {
@@ -274,7 +313,7 @@ func (s *Server) findHarnessConfigByName(ctx context.Context, name string) (*sto
 	if err != nil {
 		return nil, fmt.Errorf("lookup harness-config %q: %w", name, err)
 	}
-	if len(result.Items) == 0 {
+	if result == nil || len(result.Items) == 0 {
 		return nil, nil
 	}
 	return &result.Items[0], nil
@@ -282,12 +321,10 @@ func (s *Server) findHarnessConfigByName(ctx context.Context, name string) (*sto
 
 // findTemplateByRef looks up an active template by ID or name.
 func (s *Server) findTemplateByRef(ctx context.Context, ref string) (*store.Template, error) {
-	// Try by ID first (UUIDs are passed from the dispatch path).
 	tmpl, err := s.store.GetTemplate(ctx, ref)
 	if err == nil && tmpl != nil {
 		return tmpl, nil
 	}
-	// Fall back to name search.
 	result, err := s.store.ListTemplates(ctx, store.TemplateFilter{
 		Name:   ref,
 		Status: store.TemplateStatusActive,
@@ -295,7 +332,7 @@ func (s *Server) findTemplateByRef(ctx context.Context, ref string) (*store.Temp
 	if err != nil {
 		return nil, fmt.Errorf("lookup template %q: %w", ref, err)
 	}
-	if len(result.Items) == 0 {
+	if result == nil || len(result.Items) == 0 {
 		return nil, nil
 	}
 	return &result.Items[0], nil
