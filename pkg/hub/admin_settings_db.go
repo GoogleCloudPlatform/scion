@@ -15,6 +15,7 @@
 package hub
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -23,6 +24,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"time"
 
@@ -82,6 +84,8 @@ func (s *Server) handleGetServerConfigDB(w http.ResponseWriter, r *http.Request,
 	// Build the base response from the file (same as file mode) for Layer-0.
 	globalDir, err := config.GetGlobalDir()
 	if err != nil {
+		// N3: log the full error server-side for observability.
+		slog.Error("GET server-config: failed to resolve settings directory", "error", err)
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to resolve settings directory", nil)
 		return
 	}
@@ -89,6 +93,8 @@ func (s *Server) handleGetServerConfigDB(w http.ResponseWriter, r *http.Request,
 	settingsPath := filepath.Join(globalDir, "settings.yaml")
 	data, err := os.ReadFile(settingsPath)
 	if err != nil && !os.IsNotExist(err) {
+		// N3: log the full error server-side for observability.
+		slog.Error("GET server-config: failed to read settings file", "path", settingsPath, "error", err)
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to read settings file", nil)
 		return
 	}
@@ -96,6 +102,8 @@ func (s *Server) handleGetServerConfigDB(w http.ResponseWriter, r *http.Request,
 	var vs config.VersionedSettings
 	if data != nil {
 		if err := yamlv3.Unmarshal(data, &vs); err != nil {
+			// N3: log the full error server-side for observability.
+			slog.Error("GET server-config: failed to parse settings file", "path", settingsPath, "error", err)
 			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to parse settings file", nil)
 			return
 		}
@@ -265,8 +273,18 @@ func (s *Server) sectionHasFileValues(ops *OperationalSettings, sectionName stri
 //
 // Supports optional CAS via expected_revisions in the request body.
 func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request, ops *OperationalSettings) {
+	// N6/N7: Read raw body first for presence-aware field clearing,
+	// then decode into the typed struct. This lets us distinguish
+	// OMITTED fields (keep current value) from EXPLICITLY-SENT empty
+	// values ("", [], null) which CLEAR the field in the section doc.
+	// File-mode behavior is untouched — this is postgres-path only.
+	rawBody, err := readRawBody(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "Invalid request body", nil)
+		return
+	}
 	var req ServerConfigUpdateDBRequest
-	if err := readJSON(r, &req); err != nil {
+	if err := json.Unmarshal(rawBody, &req); err != nil {
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "Invalid request body", nil)
 		return
 	}
@@ -282,7 +300,11 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	//   - Layer-1 → write to DB sections
 	//   - Layer-0 (explicit bootstrap set) → 422 rejection
 	//   - Unclassified (e.g. runtimes, profiles, schema_version) → ignored with warning
+	//
+	// N6: Also extract keys for explicitly-sent empty values (for presence-aware
+	// clearing) by walking the raw request body.
 	koanfKeys := extractKoanfKeysFromRequest(&req.ServerConfigUpdateRequest)
+	koanfKeys = appendPresenceAwareKeys(koanfKeys, rawBody)
 
 	// Classify keys.
 	layer1BySec, layer0Keys, unclassifiedKeys := opsettings.ClassifyKeys(koanfKeys)
@@ -310,8 +332,10 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	}
 
 	// Build per-section documents from the request.
-	sectionDocs, err := buildSectionDocsFromRequest(&req.ServerConfigUpdateRequest, layer1BySec)
+	sectionDocs, err := buildSectionDocsFromRequest(&req.ServerConfigUpdateRequest, layer1BySec, rawBody)
 	if err != nil {
+		// N3: log the full error server-side for observability.
+		slog.Error("PUT server-config: failed to build section documents", "error", err)
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to build section documents", nil)
 		return
 	}
@@ -416,9 +440,37 @@ func (s *Server) getCurrentRevision(ops *OperationalSettings, section string) in
 	return 0
 }
 
+// isZeroStruct reports whether a non-nil struct pointer is entirely zero-valued.
+// Used by B1 fix: the web UI's buildPayload() always sends certain Layer-0
+// objects (database, broker, storage, secrets, message_broker) as empty JSON
+// objects ({}). Go unmarshals {} into a non-nil pointer with all zero fields.
+// We treat these "UI artifacts" as not-present rather than rejecting them as
+// Layer-0 writes, while a struct with ANY meaningful (non-zero) value still
+// triggers the Layer-0 422 rejection as designed.
+func isZeroStruct(v interface{}) bool {
+	if v == nil {
+		return true
+	}
+	rv := reflect.ValueOf(v)
+	if rv.Kind() == reflect.Ptr && rv.IsNil() {
+		return true
+	}
+	return reflect.DeepEqual(v, reflect.New(reflect.TypeOf(v).Elem()).Interface())
+}
+
 // extractKoanfKeysFromRequest converts a ServerConfigUpdateRequest into a list
 // of koanf keys representing the fields that are being updated. This enables
 // Layer-0 vs Layer-1 classification via the opsettings registry.
+//
+// B1 fix: nested Layer-0 struct pointers that are non-nil but entirely
+// zero-valued emit nothing (treated as not-present). The web UI's buildPayload()
+// always sends database, broker, storage, secrets, and message_broker as empty
+// objects — these are UI artifacts, not intentional Layer-0 writes. A Layer-0
+// object with ANY meaningful (non-zero) value still triggers 422 rejection.
+//
+// N2 fix: server.env is now extracted (Layer-0). auth.DevMode bool cannot
+// distinguish an explicit false from omission due to Go's zero-value semantics —
+// documented as a known limitation consistent with B1's zero-struct logic.
 func extractKoanfKeysFromRequest(req *ServerConfigUpdateRequest) []string {
 	var keys []string
 
@@ -474,6 +526,10 @@ func extractKoanfKeysFromRequest(req *ServerConfigUpdateRequest) []string {
 		if srv.Mode != "" {
 			keys = append(keys, "server.mode")
 		}
+		// N2: extract server.env for Layer-0 422 per design §3.1.
+		if srv.Env != "" {
+			keys = append(keys, "server.env")
+		}
 		if srv.LogLevel != "" {
 			keys = append(keys, "server.log_level")
 		}
@@ -527,11 +583,20 @@ func extractKoanfKeysFromRequest(req *ServerConfigUpdateRequest) []string {
 			if auth.Mode != "" {
 				keys = append(keys, "server.auth.mode")
 			}
+			// N2: auth.DevMode is a bool (not *bool), so Go's zero value (false)
+			// is indistinguishable from an explicit false in the JSON payload.
+			// This means a PUT with "dev_mode": false won't emit the key and
+			// won't trigger Layer-0 rejection. Practical impact is nil (setting
+			// dev_mode to false is a no-op). This is consistent with B1's
+			// zero-struct logic: zero-valued fields are treated as not-present.
 			if auth.DevMode {
 				keys = append(keys, "server.auth.dev_mode")
 			}
 			if auth.DevToken != "" {
 				keys = append(keys, "server.auth.dev_token")
+			}
+			if auth.DevTokenFile != "" {
+				keys = append(keys, "server.auth.dev_token_file")
 			}
 			if auth.Proxy != nil {
 				keys = append(keys, "server.auth.proxy")
@@ -540,28 +605,40 @@ func extractKoanfKeysFromRequest(req *ServerConfigUpdateRequest) []string {
 				keys = append(keys, "server.auth.transport")
 			}
 		}
-		if srv.Database != nil {
+		// B1 fix: Layer-0 struct pointers that are non-nil but entirely
+		// zero-valued are treated as UI artifacts (not-present). The web UI's
+		// buildPayload() always sends these as empty objects. Only emit the
+		// key when the struct has at least one meaningful (non-zero) field.
+		//
+		// Always-sent UI keys verified from web/src/components/pages/
+		// admin-server-config.ts buildPayload() lines 884-924:
+		//   - database (line 889: server.database = database)
+		//   - broker   (line 882: server.broker = broker)
+		//   - storage  (line 912: server.storage = storage)
+		//   - secrets  (line 918: server.secrets = secrets)
+		//   - message_broker (line 921-924: server.message_broker = {...})
+		if srv.Database != nil && !isZeroStruct(srv.Database) {
 			keys = append(keys, "server.database")
 		}
-		if srv.Broker != nil {
+		if srv.Broker != nil && !isZeroStruct(srv.Broker) {
 			keys = append(keys, "server.broker")
 		}
 		if srv.OAuth != nil {
 			keys = append(keys, "server.oauth")
 		}
-		if srv.Storage != nil {
+		if srv.Storage != nil && !isZeroStruct(srv.Storage) {
 			keys = append(keys, "server.storage")
 		}
-		if srv.Secrets != nil {
+		if srv.Secrets != nil && !isZeroStruct(srv.Secrets) {
 			keys = append(keys, "server.secrets")
 		}
-		if srv.WorkspaceStorage != nil {
+		if srv.WorkspaceStorage != nil && !isZeroStruct(srv.WorkspaceStorage) {
 			keys = append(keys, "server.workspace_storage")
 		}
-		if srv.MessageBroker != nil {
+		if srv.MessageBroker != nil && !isZeroStruct(srv.MessageBroker) {
 			keys = append(keys, "server.message_broker")
 		}
-		if srv.Plugins != nil {
+		if srv.Plugins != nil && !isZeroStruct(srv.Plugins) {
 			keys = append(keys, "server.plugins")
 		}
 		if srv.GitHubApp != nil {
@@ -575,13 +652,65 @@ func extractKoanfKeysFromRequest(req *ServerConfigUpdateRequest) []string {
 	return keys
 }
 
+// appendPresenceAwareKeys adds koanf keys for Layer-1 fields that are
+// explicitly present in the raw JSON but zero-valued in the Go struct.
+// This enables presence-aware clearing (N6): an explicit empty value
+// ("", [], null) in the PUT body should clear the field, but
+// extractKoanfKeysFromRequest can't detect these because Go's zero values
+// make them invisible.
+//
+// Only the clearable Layer-1 fields are checked here:
+// admin_emails, user_access_mode, notification_channels, public_url.
+func appendPresenceAwareKeys(keys []string, rawBody []byte) []string {
+	fp, err := parseFieldPresence(rawBody)
+	if err != nil {
+		return keys
+	}
+
+	keySet := make(map[string]bool, len(keys))
+	for _, k := range keys {
+		keySet[k] = true
+	}
+
+	serverFP := fp.nestedPresence("server")
+	hubFP := serverFP.nestedPresence("hub")
+	authFP := serverFP.nestedPresence("auth")
+
+	// admin_emails: present in hub but empty → add the key.
+	if !keySet["server.hub.admin_emails"] && hubFP.has("admin_emails") {
+		keys = append(keys, "server.hub.admin_emails")
+	}
+	// user_access_mode: present in auth but empty → add the key.
+	if !keySet["server.auth.user_access_mode"] && authFP.has("user_access_mode") {
+		keys = append(keys, "server.auth.user_access_mode")
+	}
+	// authorized_domains: present in auth but empty → add the key.
+	if !keySet["server.auth.authorized_domains"] && authFP.has("authorized_domains") {
+		keys = append(keys, "server.auth.authorized_domains")
+	}
+	// notification_channels: present in server but empty → add the key.
+	if !keySet["server.notification_channels"] && serverFP.has("notification_channels") {
+		keys = append(keys, "server.notification_channels")
+	}
+	// public_url: present in hub but empty → add the key.
+	if !keySet["server.hub.public_url"] && hubFP.has("public_url") {
+		keys = append(keys, "server.hub.public_url")
+	}
+
+	return keys
+}
+
 // buildSectionDocsFromRequest constructs per-section JSON documents from the
 // update request, grouped by the Layer-1 sections they belong to.
-func buildSectionDocsFromRequest(req *ServerConfigUpdateRequest, layer1BySec map[string][]string) (map[string]json.RawMessage, error) {
+// rawBody is used for presence-aware field clearing (N6/N7).
+func buildSectionDocsFromRequest(req *ServerConfigUpdateRequest, layer1BySec map[string][]string, rawBody []byte) (map[string]json.RawMessage, error) {
+	// Parse top-level presence for N6/N7.
+	fp, _ := parseFieldPresence(rawBody)
+
 	docs := make(map[string]json.RawMessage)
 
 	for secName := range layer1BySec {
-		doc, err := buildSingleSectionDoc(req, secName)
+		doc, err := buildSingleSectionDoc(req, secName, fp)
 		if err != nil {
 			return nil, fmt.Errorf("building doc for section %q: %w", secName, err)
 		}
@@ -595,21 +724,49 @@ func buildSectionDocsFromRequest(req *ServerConfigUpdateRequest, layer1BySec map
 
 // buildSingleSectionDoc extracts the fields for a single section from the
 // update request and marshals them into a section document.
-func buildSingleSectionDoc(req *ServerConfigUpdateRequest, secName string) (json.RawMessage, error) {
+//
+// N6/N7 presence-aware clearing (postgres-path only):
+//
+// The fp (fieldPresence) parameter carries the raw JSON structure so we can
+// distinguish OMITTED fields from EXPLICITLY-SENT empty values:
+//   - OMITTED → field not in raw JSON → do NOT include in section doc
+//     (the current DB value is preserved on Refresh)
+//   - EXPLICIT empty ("", [], null) → field IS in raw JSON → include the
+//     zero value in the section doc, which CLEARS it in the DB
+//
+// This applies to: admin_emails, user_access_mode, notification_channels,
+// public_url. File-mode behavior is untouched.
+func buildSingleSectionDoc(req *ServerConfigUpdateRequest, secName string, fp *fieldPresence) (json.RawMessage, error) {
 	var doc interface{}
+
+	// N6/N7: Derive nested presence maps for the server, hub, and auth sub-objects.
+	serverFP := fp.nestedPresence("server")
+	hubFP := serverFP.nestedPresence("hub")
+	authFP := serverFP.nestedPresence("auth")
 
 	switch secName {
 	case "access":
 		d := &opsettings.AccessSettings{}
-		if req.Server != nil && req.Server.Hub != nil && len(req.Server.Hub.AdminEmails) > 0 {
-			d.AdminEmails = req.Server.Hub.AdminEmails
+		if req.Server != nil && req.Server.Hub != nil {
+			// N6: presence-aware — explicit empty [] clears admin_emails.
+			if len(req.Server.Hub.AdminEmails) > 0 {
+				d.AdminEmails = req.Server.Hub.AdminEmails
+			} else if hubFP.has("admin_emails") {
+				// Explicitly sent as [] or null → clear to empty slice.
+				d.AdminEmails = []string{}
+			}
 		}
 		if req.Server != nil && req.Server.Auth != nil {
+			// N6: presence-aware — explicit empty "" clears user_access_mode.
 			if req.Server.Auth.UserAccessMode != "" {
 				d.UserAccessMode = req.Server.Auth.UserAccessMode
+			} else if authFP.has("user_access_mode") {
+				d.UserAccessMode = "" // explicitly cleared
 			}
 			if len(req.Server.Auth.AuthorizedDomains) > 0 {
 				d.AuthorizedDomains = req.Server.Auth.AuthorizedDomains
+			} else if authFP.has("authorized_domains") {
+				d.AuthorizedDomains = []string{}
 			}
 		}
 		doc = d
@@ -656,8 +813,13 @@ func buildSingleSectionDoc(req *ServerConfigUpdateRequest, secName string) (json
 
 	case "endpoints":
 		d := &opsettings.EndpointsSettings{}
-		if req.Server != nil && req.Server.Hub != nil && req.Server.Hub.PublicURL != "" {
-			d.PublicURL = req.Server.Hub.PublicURL
+		if req.Server != nil && req.Server.Hub != nil {
+			// N6: presence-aware — explicit empty "" clears public_url.
+			if req.Server.Hub.PublicURL != "" {
+				d.PublicURL = req.Server.Hub.PublicURL
+			} else if hubFP.has("public_url") {
+				d.PublicURL = "" // explicitly cleared
+			}
 		}
 		if req.ImageRegistry != nil {
 			d.ImageRegistry = *req.ImageRegistry
@@ -678,8 +840,14 @@ func buildSingleSectionDoc(req *ServerConfigUpdateRequest, secName string) (json
 
 	case "notifications":
 		d := &opsettings.NotificationsSettings{}
-		if req.Server != nil && len(req.Server.NotificationChannels) > 0 {
-			d.NotificationChannels = req.Server.NotificationChannels
+		if req.Server != nil {
+			// N6: presence-aware — explicit empty [] or null clears channels.
+			if len(req.Server.NotificationChannels) > 0 {
+				d.NotificationChannels = req.Server.NotificationChannels
+			} else if serverFP.has("notification_channels") {
+				// Explicitly sent as [] or null → clear to empty slice.
+				d.NotificationChannels = []config.V1NotificationChannelConfig{}
+			}
 		}
 		doc = d
 
@@ -714,11 +882,17 @@ func (s *Server) handleGetMaintenanceDB(w http.ResponseWriter, ops *OperationalS
 // Writes the maintenance section via OperationalSettings.Update (durable +
 // propagated), then applies locally via ApplyMaintenanceFromSnapshot.
 func (s *Server) handlePutMaintenanceDB(w http.ResponseWriter, r *http.Request, ops *OperationalSettings) {
+	// N7: Read raw body for presence-aware message clearing.
+	rawBody, err := readRawBody(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "Invalid request body", nil)
+		return
+	}
 	var body struct {
 		Enabled *bool  `json:"enabled"`
 		Message string `json:"message"`
 	}
-	if err := readJSON(r, &body); err != nil {
+	if err := json.Unmarshal(rawBody, &body); err != nil {
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "Invalid request body", nil)
 		return
 	}
@@ -739,12 +913,21 @@ func (s *Server) handlePutMaintenanceDB(w http.ResponseWriter, r *http.Request, 
 	if body.Enabled != nil {
 		ms.AdminMode = *body.Enabled
 	}
+
+	// N7: presence-aware message clearing. An explicit empty message ("")
+	// clears the maintenance message; an omitted message field preserves it.
+	fp, _ := parseFieldPresence(rawBody)
 	if body.Message != "" {
 		ms.MaintenanceMessage = body.Message
+	} else if fp.has("message") {
+		// Explicitly sent as "" → clear the message.
+		ms.MaintenanceMessage = ""
 	}
 
 	doc, err := json.Marshal(ms)
 	if err != nil {
+		// N3: log the full error server-side for observability.
+		slog.Error("PUT maintenance: failed to marshal maintenance settings", "error", err)
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to marshal maintenance settings", nil)
 		return
 	}
@@ -763,6 +946,69 @@ func (s *Server) handlePutMaintenanceDB(w http.ResponseWriter, r *http.Request, 
 		"enabled": s.maintenance.IsEnabled(),
 		"message": s.maintenance.Message(),
 	})
+}
+
+// readRawBody reads and returns the full request body as raw bytes.
+// The caller can then unmarshal into typed structs AND walk the raw JSON
+// for presence-aware field clearing (N6/N7).
+func readRawBody(r *http.Request) ([]byte, error) {
+	if r.Body == nil {
+		return nil, fmt.Errorf("empty request body")
+	}
+	var buf bytes.Buffer
+	if _, err := buf.ReadFrom(r.Body); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+// fieldPresence extracts which JSON fields are explicitly present (including
+// when set to "", [], null) in the raw request body by walking nested
+// map[string]json.RawMessage paths. This powers N6/N7: presence-aware
+// clearing in the postgres PUT path.
+//
+// Semantics:
+//   - OMITTED field → not in the returned set → keep current DB value
+//   - EXPLICITLY-SENT empty ("", [], null) → in the returned set → CLEAR the field
+//   - EXPLICITLY-SENT non-empty → in the returned set → normal update
+//
+// File-mode behavior is untouched — this is postgres-path only.
+type fieldPresence struct {
+	raw map[string]json.RawMessage
+}
+
+// parseFieldPresence parses the top-level raw JSON into a fieldPresence.
+func parseFieldPresence(rawBody []byte) (*fieldPresence, error) {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(rawBody, &raw); err != nil {
+		return nil, err
+	}
+	return &fieldPresence{raw: raw}, nil
+}
+
+// nestedPresence returns a fieldPresence for a nested object key.
+func (fp *fieldPresence) nestedPresence(key string) *fieldPresence {
+	if fp == nil {
+		return nil
+	}
+	val, ok := fp.raw[key]
+	if !ok {
+		return nil
+	}
+	var nested map[string]json.RawMessage
+	if err := json.Unmarshal(val, &nested); err != nil {
+		return nil
+	}
+	return &fieldPresence{raw: nested}
+}
+
+// has reports whether the given field key is explicitly present in the JSON.
+func (fp *fieldPresence) has(key string) bool {
+	if fp == nil {
+		return false
+	}
+	_, ok := fp.raw[key]
+	return ok
 }
 
 // maintenanceMessageOrDefault returns the message or the default if empty.

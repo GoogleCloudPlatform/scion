@@ -390,6 +390,17 @@ func maskSensitiveFields(resp *ServerConfigResponse) {
 		}
 	}
 
+	// N1: Mask GitHubApp private key and webhook secret (pre-existing gap,
+	// applies to both DB-mode and file-mode GET paths).
+	if resp.Server.GitHubApp != nil {
+		if resp.Server.GitHubApp.PrivateKey != "" {
+			resp.Server.GitHubApp.PrivateKey = "********"
+		}
+		if resp.Server.GitHubApp.WebhookSecret != "" {
+			resp.Server.GitHubApp.WebhookSecret = "********"
+		}
+	}
+
 	// Mask notification channel params (may contain webhook URLs/tokens)
 	for i := range resp.Server.NotificationChannels {
 		for k := range resp.Server.NotificationChannels[i].Params {

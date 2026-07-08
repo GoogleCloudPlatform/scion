@@ -42,6 +42,8 @@ var layer0Prefixes = []string{
 	"server.auth.mode",
 	"server.auth.dev_mode",
 	"server.auth.dev_token",
+	// N4: dev_token_file was missing — added per design §3.1 "auth.dev_*".
+	"server.auth.dev_token_file",
 	"server.auth.proxy",
 	"server.auth.transport",
 	"server.oauth",

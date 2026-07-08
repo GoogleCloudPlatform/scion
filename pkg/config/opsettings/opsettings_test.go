@@ -684,14 +684,14 @@ func TestDetectEnvOverrides(t *testing.T) {
 
 func TestClassifyKeys(t *testing.T) {
 	keys := []string{
-		"server.hub.admin_emails",     // Layer-1 (access)
-		"server.database.driver",      // Layer-0 (bootstrap)
-		"telemetry.enabled",           // Layer-1 (telemetry)
-		"server.hub.port",             // Layer-0 (bootstrap)
-		"default_max_turns",           // Layer-1 (agent_defaults)
-		"runtimes",                    // unclassified
-		"schema_version",              // unclassified
-		"profiles",                    // unclassified
+		"server.hub.admin_emails", // Layer-1 (access)
+		"server.database.driver",  // Layer-0 (bootstrap)
+		"telemetry.enabled",       // Layer-1 (telemetry)
+		"server.hub.port",         // Layer-0 (bootstrap)
+		"default_max_turns",       // Layer-1 (agent_defaults)
+		"runtimes",                // unclassified
+		"schema_version",          // unclassified
+		"profiles",                // unclassified
 	}
 	l1, l0, unclassified := ClassifyKeys(keys)
 
@@ -748,6 +748,7 @@ func TestClassifyKeys_AllLayer0Prefixes(t *testing.T) {
 		"server.auth.mode",
 		"server.auth.dev_mode",
 		"server.auth.dev_token",
+		"server.auth.dev_token_file", // N4: was missing
 		"server.auth.proxy",
 		"server.auth.transport",
 		"server.oauth",

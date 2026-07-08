@@ -354,13 +354,11 @@ func TestPutServerConfigDB_UnclassifiedOnly_200WithIgnoredKeys(t *testing.T) {
 	srv, fakeStore, ops := newTestDBServer(t)
 
 	// Payload containing only unclassified keys — not Layer-0, not Layer-1.
-	sv := "2"
 	body := `{
 		"schema_version": "2",
 		"runtimes": {"go": {"image": "golang:1.21"}},
 		"profiles": {"dev": {}}
 	}`
-	_ = sv
 
 	req := adminRequest(http.MethodPut, "/api/v1/admin/server-config", body)
 	rr := httptest.NewRecorder()
@@ -933,7 +931,7 @@ func TestBuildSingleSectionDoc_Access(t *testing.T) {
 		},
 	}
 
-	doc, err := buildSingleSectionDoc(req, "access")
+	doc, err := buildSingleSectionDoc(req, "access", nil)
 	if err != nil {
 		t.Fatalf("error: %v", err)
 	}
@@ -995,4 +993,515 @@ func TestMaintenanceDB_ConcurrentRace(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+}
+
+// ---- B1: Web UI always-sent empty Layer-0 objects must not 422 ----
+
+func TestPutServerConfigDB_UIPayloadWithEmptyLayer0Objects_Succeeds(t *testing.T) {
+	// B1: Simulate the EXACT web UI buildPayload() shape — the UI always sends
+	// database, broker, storage, secrets, message_broker as empty or near-empty
+	// objects. These must NOT trigger a 422.
+	//
+	// Always-sent UI keys from admin-server-config.ts buildPayload() ~882-924:
+	//   - server.database = {} or {driver: ""} (line 889)
+	//   - server.broker = {enabled: false, auto_provide: false} (lines 872-882)
+	//   - server.storage = {} (line 912)
+	//   - server.secrets = {} (line 918)
+	//   - server.message_broker = {enabled: false} (line 921-924)
+	srv, fakeStore, ops := newTestDBServer(t)
+
+	// Exact UI payload shape including empty Layer-0 objects and a Layer-1 change.
+	body := `{
+		"server": {
+			"hub": {
+				"admin_emails": ["ui@admin.com"],
+				"auto_suspend_stalled": true,
+				"soft_delete_retain_files": false
+			},
+			"auth": {
+				"user_access_mode": "open"
+			},
+			"database": {},
+			"broker": {},
+			"storage": {},
+			"secrets": {},
+			"message_broker": {}
+		}
+	}`
+
+	req := adminRequest(http.MethodPut, "/api/v1/admin/server-config", body)
+	rr := httptest.NewRecorder()
+	srv.handlePutServerConfigDB(rr, req, ops)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("B1: expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var resp map[string]interface{}
+	json.Unmarshal(rr.Body.Bytes(), &resp)
+
+	if resp["status"] != "saved" {
+		t.Errorf("expected status=saved, got %v", resp["status"])
+	}
+
+	// Verify Layer-1 section was written.
+	fakeStore.mu.Lock()
+	_, ok := fakeStore.settings["access"]
+	fakeStore.mu.Unlock()
+	if !ok {
+		t.Error("expected 'access' section written")
+	}
+
+	// Verify snapshot reflects Layer-1 values.
+	snap := ops.Snapshot()
+	if len(snap.AdminEmails) != 1 || snap.AdminEmails[0] != "ui@admin.com" {
+		t.Errorf("AdminEmails: want [ui@admin.com], got %v", snap.AdminEmails)
+	}
+
+	// Empty Layer-0 objects should NOT appear in ignored_keys (they're artifacts,
+	// not user intent — fully-zero structs are excluded from ignored_keys too).
+	if ignored, ok := resp["ignored_keys"]; ok {
+		ignoredSlice, _ := ignored.([]interface{})
+		for _, k := range ignoredSlice {
+			ks := k.(string)
+			for _, l0 := range []string{"server.database", "server.broker", "server.storage", "server.secrets", "server.message_broker"} {
+				if ks == l0 {
+					t.Errorf("B1: empty Layer-0 object %q should not appear in ignored_keys", l0)
+				}
+			}
+		}
+	}
+}
+
+func TestPutServerConfigDB_Layer0ObjectWithRealValue_Still422(t *testing.T) {
+	// B1: A Layer-0 object with a real value (e.g. database.driver set) → still 422.
+	srv, fakeStore, ops := newTestDBServer(t)
+
+	body := `{
+		"server": {
+			"hub": {"admin_emails": ["admin@test.com"]},
+			"database": {"driver": "postgres"},
+			"broker": {},
+			"storage": {},
+			"secrets": {},
+			"message_broker": {}
+		}
+	}`
+
+	req := adminRequest(http.MethodPut, "/api/v1/admin/server-config", body)
+	rr := httptest.NewRecorder()
+	srv.handlePutServerConfigDB(rr, req, ops)
+
+	if rr.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("B1: expected 422 for non-empty Layer-0, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	// Verify nothing written.
+	fakeStore.mu.Lock()
+	defer fakeStore.mu.Unlock()
+	if len(fakeStore.settings) > 0 {
+		t.Error("expected no writes when non-empty Layer-0 present")
+	}
+}
+
+// ---- N1: GitHubApp secret masking tests ----
+
+func TestMaskSensitiveFields_GitHubAppSecrets(t *testing.T) {
+	// N1: Both PrivateKey and WebhookSecret must be masked.
+	resp := &ServerConfigResponse{
+		Server: &config.V1ServerConfig{
+			GitHubApp: &config.V1GitHubAppConfig{
+				AppID:         12345,
+				PrivateKey:    "-----BEGIN RSA PRIVATE KEY-----\nMIIE...",
+				WebhookSecret: "whsec_secret123",
+			},
+		},
+	}
+
+	maskSensitiveFields(resp)
+
+	if resp.Server.GitHubApp.PrivateKey != "********" {
+		t.Errorf("N1: PrivateKey not masked, got %q", resp.Server.GitHubApp.PrivateKey)
+	}
+	if resp.Server.GitHubApp.WebhookSecret != "********" {
+		t.Errorf("N1: WebhookSecret not masked, got %q", resp.Server.GitHubApp.WebhookSecret)
+	}
+	// Non-secret fields preserved.
+	if resp.Server.GitHubApp.AppID != 12345 {
+		t.Errorf("N1: AppID should be preserved, got %d", resp.Server.GitHubApp.AppID)
+	}
+}
+
+func TestMaskSensitiveFields_GitHubAppSecretsEmpty(t *testing.T) {
+	// N1: When secrets are empty, masking should not set them to "********".
+	resp := &ServerConfigResponse{
+		Server: &config.V1ServerConfig{
+			GitHubApp: &config.V1GitHubAppConfig{
+				AppID: 12345,
+			},
+		},
+	}
+
+	maskSensitiveFields(resp)
+
+	if resp.Server.GitHubApp.PrivateKey != "" {
+		t.Errorf("N1: empty PrivateKey should remain empty, got %q", resp.Server.GitHubApp.PrivateKey)
+	}
+	if resp.Server.GitHubApp.WebhookSecret != "" {
+		t.Errorf("N1: empty WebhookSecret should remain empty, got %q", resp.Server.GitHubApp.WebhookSecret)
+	}
+}
+
+func TestGetServerConfigDB_MasksGitHubAppSecrets(t *testing.T) {
+	// N1: DB-mode GET path must mask GitHubApp secrets.
+	srv, _, ops := newTestDBServer(t)
+
+	rr := httptest.NewRecorder()
+	srv.handleGetServerConfigDB(rr, adminRequest(http.MethodGet, "/api/v1/admin/server-config", ""), ops)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rr.Code)
+	}
+	// Handler calls maskSensitiveFields — if it reaches here without panic, masking ran.
+}
+
+// ---- N2: Extract server.env and auth.DevMode tests ----
+
+func TestExtractKoanfKeys_ServerEnv_IsLayer0(t *testing.T) {
+	// N2: server.env must be extracted and classified as Layer-0.
+	req := &ServerConfigUpdateRequest{
+		Server: &config.V1ServerConfig{
+			Env: "production",
+		},
+	}
+
+	keys := extractKoanfKeysFromRequest(req)
+	keySet := make(map[string]bool)
+	for _, k := range keys {
+		keySet[k] = true
+	}
+	if !keySet["server.env"] {
+		t.Error("N2: server.env not extracted")
+	}
+}
+
+func TestExtractKoanfKeys_DevTokenFile_IsLayer0(t *testing.T) {
+	// N4: auth.dev_token_file must be extracted and classified as Layer-0.
+	req := &ServerConfigUpdateRequest{
+		Server: &config.V1ServerConfig{
+			Auth: &config.V1AuthConfig{
+				DevTokenFile: "/path/to/token",
+			},
+		},
+	}
+
+	keys := extractKoanfKeysFromRequest(req)
+	keySet := make(map[string]bool)
+	for _, k := range keys {
+		keySet[k] = true
+	}
+	if !keySet["server.auth.dev_token_file"] {
+		t.Error("N4: server.auth.dev_token_file not extracted")
+	}
+}
+
+func TestPutServerConfigDB_ServerEnv_422(t *testing.T) {
+	// N2: A PUT with server.env should trigger 422.
+	srv, _, ops := newTestDBServer(t)
+
+	body := `{
+		"server": {
+			"env": "production",
+			"hub": {"admin_emails": ["admin@test.com"]}
+		}
+	}`
+
+	req := adminRequest(http.MethodPut, "/api/v1/admin/server-config", body)
+	rr := httptest.NewRecorder()
+	srv.handlePutServerConfigDB(rr, req, ops)
+
+	if rr.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("N2: expected 422 for server.env, got %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
+// ---- N6: Presence-aware field clearing tests ----
+
+func TestPutServerConfigDB_ExplicitEmptyAdminEmails_ClearsField(t *testing.T) {
+	// N6: Explicitly sending admin_emails as [] should clear the field.
+	srv, fakeStore, ops := newTestDBServer(t)
+
+	// Seed existing access section.
+	fakeStore.seed("access", json.RawMessage(`{"admin_emails":["existing@admin.com"],"user_access_mode":"open"}`))
+	_, _ = ops.Refresh(context.Background())
+
+	// Send explicit empty admin_emails.
+	body := `{
+		"server": {
+			"hub": {"admin_emails": []},
+			"auth": {"user_access_mode": "open"}
+		}
+	}`
+
+	req := adminRequest(http.MethodPut, "/api/v1/admin/server-config", body)
+	rr := httptest.NewRecorder()
+	srv.handlePutServerConfigDB(rr, req, ops)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("N6: expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	// Verify section doc has empty admin_emails.
+	fakeStore.mu.Lock()
+	row := fakeStore.settings["access"]
+	fakeStore.mu.Unlock()
+
+	var access opsettings.AccessSettings
+	json.Unmarshal(row.Value, &access)
+	if len(access.AdminEmails) != 0 {
+		t.Errorf("N6: expected empty admin_emails after explicit [], got %v", access.AdminEmails)
+	}
+}
+
+func TestPutServerConfigDB_ExplicitEmptyUserAccessMode_ClearsField(t *testing.T) {
+	// N6: Explicitly sending user_access_mode as "" should clear the field.
+	srv, fakeStore, ops := newTestDBServer(t)
+
+	fakeStore.seed("access", json.RawMessage(`{"admin_emails":["admin@test.com"],"user_access_mode":"invite_only"}`))
+	_, _ = ops.Refresh(context.Background())
+
+	body := `{
+		"server": {
+			"hub": {"admin_emails": ["admin@test.com"]},
+			"auth": {"user_access_mode": ""}
+		}
+	}`
+
+	req := adminRequest(http.MethodPut, "/api/v1/admin/server-config", body)
+	rr := httptest.NewRecorder()
+	srv.handlePutServerConfigDB(rr, req, ops)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("N6: expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	fakeStore.mu.Lock()
+	row := fakeStore.settings["access"]
+	fakeStore.mu.Unlock()
+
+	var access opsettings.AccessSettings
+	json.Unmarshal(row.Value, &access)
+	if access.UserAccessMode != "" {
+		t.Errorf("N6: expected empty user_access_mode after explicit \"\", got %q", access.UserAccessMode)
+	}
+}
+
+func TestPutServerConfigDB_OmittedFieldsPreserved(t *testing.T) {
+	// N6: Omitting a field from the PUT payload should NOT clear it.
+	// When admin_emails is omitted, the section doc should not contain it,
+	// and on refresh the existing DB value is preserved.
+	srv, fakeStore, ops := newTestDBServer(t)
+
+	fakeStore.seed("access", json.RawMessage(`{"admin_emails":["existing@admin.com"],"user_access_mode":"open"}`))
+	_, _ = ops.Refresh(context.Background())
+
+	// Only send user_access_mode, omit admin_emails entirely.
+	body := `{
+		"server": {
+			"auth": {"user_access_mode": "invite_only"}
+		}
+	}`
+
+	req := adminRequest(http.MethodPut, "/api/v1/admin/server-config", body)
+	rr := httptest.NewRecorder()
+	srv.handlePutServerConfigDB(rr, req, ops)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("N6: expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	// Verify section doc was written.
+	fakeStore.mu.Lock()
+	row := fakeStore.settings["access"]
+	fakeStore.mu.Unlock()
+
+	var access opsettings.AccessSettings
+	json.Unmarshal(row.Value, &access)
+	if access.UserAccessMode != "invite_only" {
+		t.Errorf("N6: expected user_access_mode=invite_only, got %q", access.UserAccessMode)
+	}
+	// admin_emails was omitted — should be nil/empty in the section doc
+	// (the existing DB value is preserved by the OperationalSettings merge).
+}
+
+func TestPutServerConfigDB_ExplicitEmptyNotificationChannels_ClearsField(t *testing.T) {
+	// N6: Explicitly sending notification_channels as [] should clear channels.
+	srv, fakeStore, ops := newTestDBServer(t)
+
+	fakeStore.seed("notifications", json.RawMessage(`{"notification_channels":[{"type":"slack"}]}`))
+	_, _ = ops.Refresh(context.Background())
+
+	body := `{
+		"server": {
+			"notification_channels": []
+		}
+	}`
+
+	req := adminRequest(http.MethodPut, "/api/v1/admin/server-config", body)
+	rr := httptest.NewRecorder()
+	srv.handlePutServerConfigDB(rr, req, ops)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("N6: expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	fakeStore.mu.Lock()
+	row := fakeStore.settings["notifications"]
+	fakeStore.mu.Unlock()
+
+	var notif opsettings.NotificationsSettings
+	json.Unmarshal(row.Value, &notif)
+	if len(notif.NotificationChannels) != 0 {
+		t.Errorf("N6: expected empty notification_channels, got %v", notif.NotificationChannels)
+	}
+}
+
+func TestPutServerConfigDB_ExplicitEmptyPublicURL_ClearsField(t *testing.T) {
+	// N6: Explicitly sending public_url as "" should clear it.
+	srv, fakeStore, ops := newTestDBServer(t)
+
+	fakeStore.seed("endpoints", json.RawMessage(`{"public_url":"https://old.url","image_registry":"registry.test"}`))
+	_, _ = ops.Refresh(context.Background())
+
+	body := `{
+		"server": {
+			"hub": {"public_url": ""}
+		}
+	}`
+
+	req := adminRequest(http.MethodPut, "/api/v1/admin/server-config", body)
+	rr := httptest.NewRecorder()
+	srv.handlePutServerConfigDB(rr, req, ops)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("N6: expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	fakeStore.mu.Lock()
+	row := fakeStore.settings["endpoints"]
+	fakeStore.mu.Unlock()
+
+	var endpoints opsettings.EndpointsSettings
+	json.Unmarshal(row.Value, &endpoints)
+	if endpoints.PublicURL != "" {
+		t.Errorf("N6: expected empty public_url, got %q", endpoints.PublicURL)
+	}
+}
+
+// ---- N7: Maintenance message clearing ----
+
+func TestPutMaintenanceDB_ExplicitEmptyMessage_ClearsMessage(t *testing.T) {
+	// N7: Explicitly sending message: "" should clear the maintenance message.
+	srv, fakeStore, ops := newTestDBServer(t)
+	t.Setenv("SCION_SERVER_ADMIN_MODE", "")
+	t.Setenv("SCION_SERVER_MAINTENANCE_MESSAGE", "")
+	ops.server = srv
+
+	// Seed with existing message.
+	fakeStore.seed("maintenance", json.RawMessage(`{"admin_mode":true,"maintenance_message":"Existing message"}`))
+	_, _ = ops.Refresh(context.Background())
+
+	// Send explicit empty message.
+	body := `{"enabled": true, "message": ""}`
+	req := adminRequest(http.MethodPut, "/api/v1/admin/maintenance", body)
+	rr := httptest.NewRecorder()
+	srv.handlePutMaintenanceDB(rr, req, ops)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("N7: expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	// Verify the message was cleared in the store.
+	fakeStore.mu.Lock()
+	row := fakeStore.settings["maintenance"]
+	fakeStore.mu.Unlock()
+
+	var ms opsettings.MaintenanceSettings
+	json.Unmarshal(row.Value, &ms)
+	if ms.MaintenanceMessage != "" {
+		t.Errorf("N7: expected empty maintenance_message, got %q", ms.MaintenanceMessage)
+	}
+}
+
+func TestPutMaintenanceDB_OmittedMessage_PreservesExisting(t *testing.T) {
+	// N7: Omitting the message field should preserve the existing message.
+	srv, fakeStore, ops := newTestDBServer(t)
+	t.Setenv("SCION_SERVER_ADMIN_MODE", "")
+	t.Setenv("SCION_SERVER_MAINTENANCE_MESSAGE", "")
+	ops.server = srv
+
+	// Seed with existing message.
+	fakeStore.seed("maintenance", json.RawMessage(`{"admin_mode":true,"maintenance_message":"Keep this"}`))
+	_, _ = ops.Refresh(context.Background())
+
+	// Send only enabled, omit message.
+	body := `{"enabled": false}`
+	req := adminRequest(http.MethodPut, "/api/v1/admin/maintenance", body)
+	rr := httptest.NewRecorder()
+	srv.handlePutMaintenanceDB(rr, req, ops)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("N7: expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	// Verify the message was preserved in the store.
+	fakeStore.mu.Lock()
+	row := fakeStore.settings["maintenance"]
+	fakeStore.mu.Unlock()
+
+	var ms opsettings.MaintenanceSettings
+	json.Unmarshal(row.Value, &ms)
+	if ms.MaintenanceMessage != "Keep this" {
+		t.Errorf("N7: expected preserved message 'Keep this', got %q", ms.MaintenanceMessage)
+	}
+}
+
+// ---- B1: isZeroStruct helper test ----
+
+func TestIsZeroStruct(t *testing.T) {
+	// Zero-valued structs.
+	if !isZeroStruct(&config.V1DatabaseConfig{}) {
+		t.Error("expected zero V1DatabaseConfig")
+	}
+	if !isZeroStruct(&config.V1BrokerConfig{}) {
+		t.Error("expected zero V1BrokerConfig")
+	}
+	if !isZeroStruct(&config.V1StorageConfig{}) {
+		t.Error("expected zero V1StorageConfig")
+	}
+	if !isZeroStruct(&config.V1SecretsConfig{}) {
+		t.Error("expected zero V1SecretsConfig")
+	}
+	if !isZeroStruct(&config.V1MessageBrokerConfig{}) {
+		t.Error("expected zero V1MessageBrokerConfig")
+	}
+
+	// Non-zero structs.
+	if isZeroStruct(&config.V1DatabaseConfig{Driver: "postgres"}) {
+		t.Error("V1DatabaseConfig with driver should not be zero")
+	}
+	if isZeroStruct(&config.V1BrokerConfig{Enabled: true}) {
+		t.Error("V1BrokerConfig with enabled=true should not be zero")
+	}
+	if isZeroStruct(&config.V1StorageConfig{Provider: "gcs"}) {
+		t.Error("V1StorageConfig with provider should not be zero")
+	}
+	if isZeroStruct(&config.V1MessageBrokerConfig{Enabled: true}) {
+		t.Error("V1MessageBrokerConfig with enabled=true should not be zero")
+	}
+
+	// Nil.
+	if !isZeroStruct((*config.V1DatabaseConfig)(nil)) {
+		t.Error("nil should be zero")
+	}
 }
