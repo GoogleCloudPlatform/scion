@@ -770,6 +770,11 @@ func (d *HTTPAgentDispatcher) DispatchAgentProvision(ctx context.Context, agent 
 	}
 
 	resp, err := d.client.CreateAgent(ctx, agent.RuntimeBrokerID, endpoint, req)
+	if isHashMismatchError(err) {
+		if repairErr := d.repairHarnessConfig(ctx, agent); repairErr == nil {
+			resp, err = d.client.CreateAgent(ctx, agent.RuntimeBrokerID, endpoint, req)
+		}
+	}
 	if err != nil {
 		return err
 	}
