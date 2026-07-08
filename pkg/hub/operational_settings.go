@@ -385,6 +385,11 @@ func (o *OperationalSettings) StartPropagation(ctx context.Context, server *Serv
 	go func() {
 		defer o.propagationWg.Done()
 		defer unsub()
+		defer func() {
+			if r := recover(); r != nil {
+				slog.Error("Settings propagation subscription loop panicked — propagation stopped on this replica", "panic", r)
+			}
+		}()
 		o.runSubscriptionLoop(propCtx, ch, server)
 	}()
 
@@ -392,14 +397,21 @@ func (o *OperationalSettings) StartPropagation(ctx context.Context, server *Serv
 	o.propagationWg.Add(1)
 	go func() {
 		defer o.propagationWg.Done()
+		defer func() {
+			if r := recover(); r != nil {
+				slog.Error("Settings propagation poll backstop panicked — propagation stopped on this replica", "panic", r)
+			}
+		}()
 		o.runPollBackstop(propCtx, server)
 	}()
 
 	// --- Reconnect refresh callback (§3.6 reconnect) ---
+	// Use propCtx (not the parent ctx) so reconnect refreshes respect the
+	// propagation lifecycle and stop when StopPropagation cancels propCtx.
 	if pgPub, ok := o.events.(*PostgresEventPublisher); ok {
 		pgPub.SetOnReconnect(func() {
 			slog.Info("Event listener reconnected — refreshing operational settings unconditionally")
-			o.refreshAndApply(ctx, server)
+			o.refreshAndApply(propCtx, server)
 		})
 	}
 }

@@ -189,6 +189,22 @@ func (s *Server) handleAdminMaintenance(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// In postgres mode, delegate to DB-backed handlers: maintenance becomes
+	// durable (persisted in hub_settings) and cluster-wide (propagated via
+	// LISTEN/NOTIFY). File/SQLite mode keeps the exact current behavior
+	// (in-memory state only).
+	if ops := s.GetOperationalSettings(); ops != nil && s.IsPostgres() {
+		switch r.Method {
+		case http.MethodGet:
+			s.handleGetMaintenanceDB(w, ops)
+		case http.MethodPut:
+			s.handlePutMaintenanceDB(w, r, ops)
+		default:
+			MethodNotAllowed(w)
+		}
+		return
+	}
+
 	switch r.Method {
 	case http.MethodGet:
 		writeJSON(w, http.StatusOK, map[string]interface{}{

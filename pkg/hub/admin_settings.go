@@ -84,6 +84,21 @@ func (s *Server) handleAdminServerConfig(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	// In postgres mode, delegate to the DB-backed handlers that use
+	// OperationalSettings for Layer-1 reads/writes (design §3.8).
+	// File/SQLite mode keeps the exact current behavior (file read/write).
+	if ops := s.GetOperationalSettings(); ops != nil && s.IsPostgres() {
+		switch r.Method {
+		case http.MethodGet:
+			s.handleGetServerConfigDB(w, ops)
+		case http.MethodPut:
+			s.handlePutServerConfigDB(w, r, ops)
+		default:
+			MethodNotAllowed(w)
+		}
+		return
+	}
+
 	switch r.Method {
 	case http.MethodGet:
 		s.handleGetServerConfig(w)

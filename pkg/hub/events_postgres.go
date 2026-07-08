@@ -421,11 +421,23 @@ func (p *PostgresEventPublisher) runListener() {
 			// Reconnect after connection loss — invoke the callback so
 			// subscribers can refresh state missed during the gap (Phase 4
 			// settings propagation uses this).
+			//
+			// The callback runs in a goroutine to avoid blocking the
+			// listener loop: a slow post-reconnect refresh (e.g. a DB
+			// round-trip under load) would otherwise delay notification
+			// processing until the refresh completes. The tradeoff is that
+			// a notification arriving during the refresh could be processed
+			// before the refresh finishes, leading to a brief window where
+			// the local cache is stale. This is acceptable because:
+			//   1. The refresh itself is idempotent (revision-based diff).
+			//   2. Any event processed concurrently triggers its own
+			//      refreshAndApply, which will pick up the latest state.
+			//   3. The 60s poll backstop provides an additional safety net.
 			p.mu.RLock()
 			fn := p.onReconnect
 			p.mu.RUnlock()
 			if fn != nil {
-				fn()
+				go fn()
 			}
 		}
 		firstConnect = false
