@@ -1857,9 +1857,10 @@ func (s *Server) CreateAuthenticatedDispatcher() *HTTPAgentDispatcher {
 		dispatcher.SetTransportMinter(s.transportMinter, s.transportAudience)
 	}
 
-	// Wire harness-config hash repair so the dispatcher can auto-fix stale
-	// DB manifests when the shared GCS bucket was updated by another hub.
+	// Wire resource hash repair so the dispatcher can auto-fix stale DB
+	// manifests when the shared GCS bucket was updated by another hub.
 	dispatcher.SetHarnessConfigRepairer(s.syncHarnessConfigFromStorage)
+	dispatcher.SetTemplateRepairer(s.syncTemplateFromStorage)
 
 	return dispatcher
 }
