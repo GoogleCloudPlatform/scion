@@ -63,7 +63,7 @@ func (c *Checker) Check(ctx context.Context, image string) CheckResult {
 	// Bare image names (no registry prefix) are local-only by convention.
 	// Without a local checker we cannot determine availability, so return
 	// "unknown" rather than probing a remote registry that will 401.
-	if isBareImageName(image) {
+	if IsBareImageName(image) {
 		result := CheckResult{
 			Status:    "unknown",
 			CheckedAt: now,
@@ -92,9 +92,9 @@ func (c *Checker) Check(ctx context.Context, image string) CheckResult {
 	return result
 }
 
-// isBareImageName returns true when the image reference has no explicit
+// IsBareImageName returns true when the image reference has no explicit
 // registry prefix (no '.' or ':' in the first path component before any '/').
-func isBareImageName(image string) bool {
+func IsBareImageName(image string) bool {
 	ref := image
 	if i := strings.LastIndex(ref, ":"); i > 0 {
 		possibleTag := ref[i+1:]

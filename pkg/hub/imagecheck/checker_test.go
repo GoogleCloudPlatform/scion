@@ -223,8 +223,8 @@ func TestIsBareImageName(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.image, func(t *testing.T) {
-			if got := isBareImageName(tt.image); got != tt.bare {
-				t.Errorf("isBareImageName(%q) = %v, want %v", tt.image, got, tt.bare)
+			if got := IsBareImageName(tt.image); got != tt.bare {
+				t.Errorf("IsBareImageName(%q) = %v, want %v", tt.image, got, tt.bare)
 			}
 		})
 	}
