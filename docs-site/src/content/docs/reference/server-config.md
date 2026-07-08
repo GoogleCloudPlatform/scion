@@ -355,7 +355,7 @@ Settings required before the database connection exists, or that are restart-bou
 | Secrets/storage | `secrets.*`, `storage.*`, `workspace_storage.*` |
 | Identity/mode | `mode`, `env`, `hub.hub_id`, `hub.gcp_project_id` |
 | Logging | `log_level`, `log_format` |
-| CORS | `hub.cors.*` |
+| CORS | `hub.cors.*`, `broker.cors` |
 | Messaging/plugins | `message_broker.*`, `plugins.*` |
 
 ### Layer 1 — Operational (Postgres `hub_settings` table)

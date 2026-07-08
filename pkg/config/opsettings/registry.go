@@ -17,9 +17,11 @@ package opsettings
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
+	"strings"
+
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/santhosh-tekuri/jsonschema/v6"
-	"strings"
 )
 
 // Section describes a single Layer-1 operational settings section.
@@ -170,6 +172,8 @@ var schemaCompileErr error
 
 // rawSchemas stores the raw JSON-schema definitions per section, populated
 // during compileSchemas(). Used by SchemaInfo() for the schema endpoint.
+// Concurrency: written once during init() and read-only thereafter — safe
+// for concurrent access without synchronization.
 var rawSchemas map[string]map[string]interface{}
 
 // SectionSchemaInfo holds the raw schema definition and koanf paths for a
@@ -184,6 +188,9 @@ type SectionSchemaInfo struct {
 // endpoint. Returns nil if schemas failed to compile.
 func SchemaInfo() map[string]SectionSchemaInfo {
 	if rawSchemas == nil {
+		if schemaCompileErr != nil {
+			slog.Error("Schema compilation failed during init; schema endpoint unavailable", "error", schemaCompileErr)
+		}
 		return nil
 	}
 	result := make(map[string]SectionSchemaInfo, len(Registry))

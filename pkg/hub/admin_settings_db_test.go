@@ -1524,14 +1524,6 @@ func TestPutServerConfigDB_CAS_MultiSection_PartialApply(t *testing.T) {
 	// Sections are written alphabetically: access first (succeeds), lifecycle second (conflicts).
 	body := `{
 		"server": {
-			"hub": {"admin_emails": ["new@test.com"]},
-			"auth": {}
-		},
-		"expected_revisions": {"access": 1, "lifecycle": 1}
-	}`
-	// We also need a lifecycle field in the payload. Lifecycle keys are under hub.
-	body = `{
-		"server": {
 			"hub": {
 				"admin_emails": ["new@test.com"],
 				"soft_delete_retention": "24h"

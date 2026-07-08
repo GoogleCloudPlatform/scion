@@ -141,6 +141,10 @@ type OperationalSettings struct {
 	// and for apply in the propagation loop. Nil until propagation starts.
 	server *Server
 
+	// PollInterval is the backstop poll interval. Defaults to 60s.
+	// Exposed for testing with shortened timers (AC9).
+	PollInterval time.Duration
+
 	// stopPropagation cancels the propagation goroutines (subscriber + poll ticker).
 	stopPropagation context.CancelFunc
 	propagationWg   sync.WaitGroup
@@ -455,19 +459,27 @@ func (o *OperationalSettings) runSubscriptionLoop(ctx context.Context, ch <-chan
 	}
 }
 
-// runPollBackstop runs a ticker at ~60s (with ±10s jitter) that calls Refresh
-// and applies any changes. This is the backstop for missed NOTIFY events
-// (design §3.6). Postgres mode only.
+// runPollBackstop runs a ticker at the configured PollInterval (default 60s,
+// with ±10s jitter) that calls Refresh and applies any changes. This is the
+// backstop for missed NOTIFY events (design §3.6). Postgres mode only.
 func (o *OperationalSettings) runPollBackstop(ctx context.Context, server *Server) {
-	// Initial jitter: 0-10s offset so replicas don't all poll at the same instant.
-	jitter := time.Duration(rand.Int63n(int64(10 * time.Second)))
-	select {
-	case <-ctx.Done():
-		return
-	case <-time.After(jitter):
+	interval := o.PollInterval
+	if interval == 0 {
+		interval = 60 * time.Second
 	}
 
-	ticker := time.NewTicker(60 * time.Second)
+	// Initial jitter: 0-10s offset so replicas don't all poll at the same instant.
+	// Skip jitter for short test intervals.
+	if interval > 5*time.Second {
+		jitter := time.Duration(rand.Int63n(int64(10 * time.Second)))
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(jitter):
+		}
+	}
+
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
 	for {
