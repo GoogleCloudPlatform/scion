@@ -304,6 +304,7 @@ const KOANF_KEY_LABELS: Record<string, string> = {
   'server.github_app.api_base_url': 'GitHub App API Base URL',
   'server.github_app.webhooks_enabled': 'GitHub App Webhooks',
   'server.github_app.installation_url': 'GitHub App Installation URL',
+  'server.github_app.private_key_path': 'GitHub App Private Key Path',
   // notifications section
   'server.notification_channels': 'Notification Channels',
 };
@@ -1162,7 +1163,6 @@ export class ScionPageAdminServerConfig extends LitElement {
       this.reloadResult = result.reload ?? null;
       const ignoredKeys =
         result.ignored_keys && result.ignored_keys.length > 0 ? result.ignored_keys : null;
-      this.successMessage = 'Settings saved successfully';
 
       // Reload the form with fresh data
       await this.loadConfig();
@@ -2187,6 +2187,7 @@ export class ScionPageAdminServerConfig extends LitElement {
           </div>
           <div class="form-field">
             <label>Protocol</label>
+            ${this.renderEnvBadge('telemetry.cloud.protocol')}
             <sl-select
               value=${this.telemetryCloudProtocol || 'grpc'}
               @sl-change=${(e: Event) => {
@@ -2200,6 +2201,7 @@ export class ScionPageAdminServerConfig extends LitElement {
           </div>
           <div class="form-field">
             <label>Provider</label>
+            ${this.renderEnvBadge('telemetry.cloud.provider')}
             <sl-input
               value=${this.telemetryCloudProvider}
               placeholder="e.g., gcp"
@@ -2417,6 +2419,7 @@ export class ScionPageAdminServerConfig extends LitElement {
           </div>
           <div class="form-field">
             <label>API Base URL</label>
+            ${this.renderEnvBadge('server.github_app.api_base_url', 'server.github_app')}
             <span class="hint"
               >Override for GitHub Enterprise Server (leave empty for github.com)</span
             >
@@ -2477,6 +2480,7 @@ export class ScionPageAdminServerConfig extends LitElement {
           </div>
           <div class="form-field">
             <label>Webhooks</label>
+            ${this.renderEnvBadge('server.github_app.webhooks_enabled', 'server.github_app')}
             <span class="hint">Enable to receive installation lifecycle events from GitHub</span>
             <sl-switch
               .checked=${this.githubAppWebhooksEnabled}
@@ -2489,6 +2493,7 @@ export class ScionPageAdminServerConfig extends LitElement {
           </div>
           <div class="form-field full-width">
             <label>Public Installation URL</label>
+            ${this.renderEnvBadge('server.github_app.installation_url', 'server.github_app')}
             <span class="hint"
               >The public link where users can install this GitHub App on their org or account</span
             >
