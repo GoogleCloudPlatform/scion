@@ -641,15 +641,15 @@ func WarnDeprecatedTemplateFields(cfg *api.ScionConfig) []string {
 	if cfg.AuthSelectedType != "" {
 		warnings = append(warnings, "template sets 'auth_selectedType' which is harness-specific; move it to your harness-config's config.yaml instead")
 	}
-	if cfg.Model != "" && !KnownModelAliases[cfg.Model] {
+	if cfg.Model != "" && !KnownModelAliases[NormalizeModelAlias(cfg.Model)] {
 		warnings = append(warnings, fmt.Sprintf("template sets 'model' to a concrete model name %q; consider using a size alias (small, medium, large, extra-large) for portability across harnesses", cfg.Model))
 	}
 	return warnings
 }
 
 // NormalizeModelAlias normalizes shorthand model alias names to their canonical form.
-// Currently maps "xl" to "extra-large".
 func NormalizeModelAlias(model string) string {
+	model = strings.ToLower(model)
 	if model == "xl" {
 		return "extra-large"
 	}

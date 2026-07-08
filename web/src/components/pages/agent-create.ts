@@ -30,6 +30,7 @@ import type {
   Template,
   GCPServiceAccount,
 } from '../../shared/types.js';
+import { normalizeModelAlias } from '../../shared/model-utils.js';
 
 interface HarnessConfigEntry {
   id: string;
@@ -824,7 +825,7 @@ private selectBrokerForProject(): void {
 
     // Pre-populate model from project defaults if user hasn't selected one
     if (!this.modelSelection && settings?.defaultModel) {
-      const dm = settings.defaultModel;
+      const dm = normalizeModelAlias(settings.defaultModel);
       if (['small', 'medium', 'large', 'extra-large'].includes(dm)) {
         this.modelSelection = dm as 'small' | 'medium' | 'large' | 'extra-large';
       } else if (dm) {

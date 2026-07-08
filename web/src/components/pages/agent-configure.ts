@@ -27,6 +27,7 @@ import { customElement, state } from 'lit/decorators.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
 import type { Agent, CapabilityField, GCPIdentityConfig, GCPServiceAccount, HarnessAdvancedCapabilities } from '../../shared/types.js';
+import { normalizeModelAlias } from '../../shared/model-utils.js';
 import type { EnvEntry } from '../shared/env-editor.js';
 import '../shared/env-editor.js';
 
@@ -420,8 +421,9 @@ export class ScionPageAgentConfigure extends LitElement {
 
   private deriveModelSelection(model: string): { selection: '' | 'small' | 'medium' | 'large' | 'extra-large' | 'other'; customId: string } {
     if (!model) return { selection: '', customId: '' };
-    if (['small', 'medium', 'large', 'extra-large'].includes(model)) {
-      return { selection: model as 'small' | 'medium' | 'large' | 'extra-large', customId: '' };
+    const normalized = normalizeModelAlias(model);
+    if (['small', 'medium', 'large', 'extra-large'].includes(normalized)) {
+      return { selection: normalized as 'small' | 'medium' | 'large' | 'extra-large', customId: '' };
     }
     return { selection: 'other', customId: model };
   }
@@ -805,7 +807,7 @@ export class ScionPageAgentConfigure extends LitElement {
 
     return html`
       <div class="form-field">
-        <sl-select label="Model" value=${this.modelSelection} clearable
+        <sl-select label="Model" .value=${this.modelSelection} clearable
             @sl-change=${(e: any) => { this.modelSelection = e.target.value; if (e.target.value !== 'other') this.customModelId = ''; }}>
           <sl-option value="small">Small</sl-option>
           <sl-option value="medium">Medium</sl-option>

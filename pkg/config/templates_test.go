@@ -1726,10 +1726,17 @@ func TestNormalizeModelAlias(t *testing.T) {
 		expected string
 	}{
 		{"xl", "extra-large"},
+		{"XL", "extra-large"},
+		{"Xl", "extra-large"},
 		{"small", "small"},
+		{"Small", "small"},
 		{"medium", "medium"},
+		{"MEDIUM", "medium"},
 		{"large", "large"},
+		{"LARGE", "large"},
 		{"extra-large", "extra-large"},
+		{"Extra-Large", "extra-large"},
+		{"EXTRA-LARGE", "extra-large"},
 		{"claude-opus-4-8", "claude-opus-4-8"},
 		{"", ""},
 	}
@@ -1768,6 +1775,22 @@ func TestWarnDeprecatedTemplateFields(t *testing.T) {
 		warnings := WarnDeprecatedTemplateFields(cfg)
 		if len(warnings) != 0 {
 			t.Errorf("expected no warnings for model alias 'large', got %v", warnings)
+		}
+	})
+
+	t.Run("no warning for xl shorthand", func(t *testing.T) {
+		cfg := &api.ScionConfig{Model: "xl"}
+		warnings := WarnDeprecatedTemplateFields(cfg)
+		if len(warnings) != 0 {
+			t.Errorf("expected no warnings for model alias 'xl', got %v", warnings)
+		}
+	})
+
+	t.Run("no warning for uppercase alias", func(t *testing.T) {
+		cfg := &api.ScionConfig{Model: "LARGE"}
+		warnings := WarnDeprecatedTemplateFields(cfg)
+		if len(warnings) != 0 {
+			t.Errorf("expected no warnings for model alias 'LARGE', got %v", warnings)
 		}
 	})
 

@@ -25,6 +25,7 @@ import { customElement, property, state } from 'lit/decorators.js';
 
 import type { PageData, Project, Template, AdminGroup, GitHubAppProjectStatus, GitHubTokenPermissions, RuntimeBroker, BrokerProfile, GCPServiceAccount } from '../../shared/types.js';
 import { can, canAny } from '../../shared/types.js';
+import { normalizeModelAlias } from '../../shared/model-utils.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
 import '../shared/env-var-list.js';
@@ -882,8 +883,9 @@ export class ScionPageProjectSettings extends LitElement {
         this.configDefaultGCPIdentityMode = this.settings.defaultGCPIdentityMode || '';
         this.configDefaultGCPIdentitySAID = this.settings.defaultGCPIdentityServiceAccountID || '';
         if (this.settings.defaultModel) {
-          if (['small', 'medium', 'large', 'extra-large'].includes(this.settings.defaultModel)) {
-            this.defaultModelSelection = this.settings.defaultModel as 'small' | 'medium' | 'large' | 'extra-large';
+          const dm = normalizeModelAlias(this.settings.defaultModel);
+          if (['small', 'medium', 'large', 'extra-large'].includes(dm)) {
+            this.defaultModelSelection = dm as 'small' | 'medium' | 'large' | 'extra-large';
           } else {
             this.defaultModelSelection = 'other';
             this.defaultCustomModelId = this.settings.defaultModel;
