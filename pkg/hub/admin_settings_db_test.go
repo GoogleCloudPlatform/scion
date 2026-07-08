@@ -306,7 +306,9 @@ func TestPutServerConfigDB_Layer0Keys_Rejected422(t *testing.T) {
 	}
 
 	var resp map[string]interface{}
-	json.Unmarshal(rr.Body.Bytes(), &resp)
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
 
 	if resp["error"] != "layer0_rejected" {
 		t.Errorf("expected error=layer0_rejected, got %v", resp["error"])
@@ -371,7 +373,9 @@ func TestPutServerConfigDB_UnclassifiedOnly_200WithIgnoredKeys(t *testing.T) {
 	}
 
 	var resp map[string]interface{}
-	json.Unmarshal(rr.Body.Bytes(), &resp)
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
 
 	if resp["status"] != "saved" {
 		t.Errorf("expected status=saved, got %v", resp["status"])
@@ -421,7 +425,9 @@ func TestPutServerConfigDB_MixedLayer1AndUnclassified_AppliedAndIgnored(t *testi
 	}
 
 	var resp map[string]interface{}
-	json.Unmarshal(rr.Body.Bytes(), &resp)
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
 
 	if resp["status"] != "saved" {
 		t.Errorf("expected status=saved, got %v", resp["status"])
@@ -477,7 +483,9 @@ func TestPutServerConfigDB_ExplicitLayer0_Still422(t *testing.T) {
 	}
 
 	var resp map[string]interface{}
-	json.Unmarshal(rr.Body.Bytes(), &resp)
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
 
 	if resp["error"] != "layer0_rejected" {
 		t.Errorf("expected error=layer0_rejected, got %v", resp["error"])
@@ -566,7 +574,9 @@ func TestPutServerConfigDB_CAS_StaleRevision_409(t *testing.T) {
 	}
 
 	var resp map[string]interface{}
-	json.Unmarshal(rr.Body.Bytes(), &resp)
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
 
 	if resp["error"] != "revision_conflict" {
 		t.Errorf("expected error=revision_conflict, got %v", resp["error"])
@@ -700,7 +710,9 @@ func TestPutMaintenanceDB_PersistsAndApplies(t *testing.T) {
 	}
 
 	var resp map[string]interface{}
-	json.Unmarshal(rr.Body.Bytes(), &resp)
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
 
 	if resp["enabled"] != true {
 		t.Errorf("expected enabled=true, got %v", resp["enabled"])
@@ -715,7 +727,9 @@ func TestPutMaintenanceDB_PersistsAndApplies(t *testing.T) {
 	}
 
 	var ms opsettings.MaintenanceSettings
-	json.Unmarshal(row.Value, &ms)
+	if err := json.Unmarshal(row.Value, &ms); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
 	if !ms.AdminMode {
 		t.Error("expected admin_mode=true in stored row")
 	}
@@ -738,7 +752,9 @@ func TestGetMaintenanceDB_ReflectsSnapshot(t *testing.T) {
 	}
 
 	var resp map[string]interface{}
-	json.Unmarshal(rr.Body.Bytes(), &resp)
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
 
 	if resp["enabled"] != true {
 		t.Errorf("expected enabled=true, got %v", resp["enabled"])
@@ -792,7 +808,9 @@ func TestFileMode_ServerConfigDispatch(t *testing.T) {
 
 	// Verify no section_metadata in response (file mode doesn't add it).
 	var resp map[string]interface{}
-	json.Unmarshal(rr.Body.Bytes(), &resp)
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
 	if _, ok := resp["section_metadata"]; ok {
 		t.Error("file mode should not include section_metadata")
 	}
@@ -820,7 +838,9 @@ func TestFileMode_PostgresPathsNotTaken(t *testing.T) {
 	}
 
 	var resp map[string]interface{}
-	json.Unmarshal(rr.Body.Bytes(), &resp)
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
 	if _, ok := resp["section_metadata"]; ok {
 		t.Error("sqlite mode should not include section_metadata")
 	}
@@ -1040,7 +1060,9 @@ func TestPutServerConfigDB_UIPayloadWithEmptyLayer0Objects_Succeeds(t *testing.T
 	}
 
 	var resp map[string]interface{}
-	json.Unmarshal(rr.Body.Bytes(), &resp)
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
 
 	if resp["status"] != "saved" {
 		t.Errorf("expected status=saved, got %v", resp["status"])
@@ -1259,7 +1281,9 @@ func TestPutServerConfigDB_ExplicitEmptyAdminEmails_ClearsField(t *testing.T) {
 	fakeStore.mu.Unlock()
 
 	var access opsettings.AccessSettings
-	json.Unmarshal(row.Value, &access)
+	if err := json.Unmarshal(row.Value, &access); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
 	if len(access.AdminEmails) != 0 {
 		t.Errorf("N6: expected empty admin_emails after explicit [], got %v", access.AdminEmails)
 	}
@@ -1292,7 +1316,9 @@ func TestPutServerConfigDB_ExplicitEmptyUserAccessMode_ClearsField(t *testing.T)
 	fakeStore.mu.Unlock()
 
 	var access opsettings.AccessSettings
-	json.Unmarshal(row.Value, &access)
+	if err := json.Unmarshal(row.Value, &access); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
 	if access.UserAccessMode != "" {
 		t.Errorf("N6: expected empty user_access_mode after explicit \"\", got %q", access.UserAccessMode)
 	}
@@ -1328,7 +1354,9 @@ func TestPutServerConfigDB_OmittedFieldsPreserved(t *testing.T) {
 	fakeStore.mu.Unlock()
 
 	var access opsettings.AccessSettings
-	json.Unmarshal(row.Value, &access)
+	if err := json.Unmarshal(row.Value, &access); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
 	if access.UserAccessMode != "invite_only" {
 		t.Errorf("N6: expected user_access_mode=invite_only, got %q", access.UserAccessMode)
 	}
@@ -1362,7 +1390,9 @@ func TestPutServerConfigDB_ExplicitEmptyNotificationChannels_ClearsField(t *test
 	fakeStore.mu.Unlock()
 
 	var notif opsettings.NotificationsSettings
-	json.Unmarshal(row.Value, &notif)
+	if err := json.Unmarshal(row.Value, &notif); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
 	if len(notif.NotificationChannels) != 0 {
 		t.Errorf("N6: expected empty notification_channels, got %v", notif.NotificationChannels)
 	}
@@ -1394,7 +1424,9 @@ func TestPutServerConfigDB_ExplicitEmptyPublicURL_ClearsField(t *testing.T) {
 	fakeStore.mu.Unlock()
 
 	var endpoints opsettings.EndpointsSettings
-	json.Unmarshal(row.Value, &endpoints)
+	if err := json.Unmarshal(row.Value, &endpoints); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
 	if endpoints.PublicURL != "" {
 		t.Errorf("N6: expected empty public_url, got %q", endpoints.PublicURL)
 	}
@@ -1429,7 +1461,9 @@ func TestPutMaintenanceDB_ExplicitEmptyMessage_ClearsMessage(t *testing.T) {
 	fakeStore.mu.Unlock()
 
 	var ms opsettings.MaintenanceSettings
-	json.Unmarshal(row.Value, &ms)
+	if err := json.Unmarshal(row.Value, &ms); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
 	if ms.MaintenanceMessage != "" {
 		t.Errorf("N7: expected empty maintenance_message, got %q", ms.MaintenanceMessage)
 	}
@@ -1462,7 +1496,9 @@ func TestPutMaintenanceDB_OmittedMessage_PreservesExisting(t *testing.T) {
 	fakeStore.mu.Unlock()
 
 	var ms opsettings.MaintenanceSettings
-	json.Unmarshal(row.Value, &ms)
+	if err := json.Unmarshal(row.Value, &ms); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
 	if ms.MaintenanceMessage != "Keep this" {
 		t.Errorf("N7: expected preserved message 'Keep this', got %q", ms.MaintenanceMessage)
 	}
@@ -1544,7 +1580,9 @@ func TestPutServerConfigDB_CAS_MultiSection_PartialApply(t *testing.T) {
 	}
 
 	var resp map[string]interface{}
-	json.Unmarshal(rr.Body.Bytes(), &resp)
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
 
 	if resp["error"] != "revision_conflict" {
 		t.Errorf("expected error=revision_conflict, got %v", resp["error"])
