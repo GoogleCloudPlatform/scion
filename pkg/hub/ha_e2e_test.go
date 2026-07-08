@@ -19,6 +19,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -285,7 +286,7 @@ func TestHA_AC2_ConcurrentSeedingAdvisoryLock(t *testing.T) {
 	}
 }
 
-// seedForTest mimics seedHubSettingsIfNeeded for testing.
+// seedForTest re-implements seedHubSettingsIfNeeded (cmd/server_foreground.go) to isolate the advisory-lock mechanism under test from the production seeding path.
 func seedForTest(ctx context.Context, s store.HubSettingStore, fileK *koanf.Koanf) error {
 	_, err := s.GetHubSetting(ctx, "_meta")
 	if err == nil {
@@ -318,7 +319,7 @@ func seedForTest(ctx context.Context, s store.HubSettingStore, fileK *koanf.Koan
 }
 
 func isNotFound(err error) bool {
-	return err != nil && err.Error() == store.ErrNotFound.Error()
+	return errors.Is(err, store.ErrNotFound)
 }
 
 // ----- AC3: Maintenance persists across restart -----
@@ -590,6 +591,9 @@ func TestHA_AC7_ConcurrentCAS(t *testing.T) {
 }
 
 // ----- AC9: Poll backstop when LISTEN is disrupted -----
+// The reconnect-triggers-immediate-refresh path (SetOnReconnect callback) is
+// verified by inspection of StartPropagation; this test exercises the poll
+// backstop by substituting a noop publisher so no LISTEN events arrive.
 
 func TestHA_AC9_PollBackstopOnListenDisruption(t *testing.T) {
 	requirePG(t)
