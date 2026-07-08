@@ -324,7 +324,10 @@ func compileSchemas() {
 			}
 			var fullDoc interface{}
 			fullBytes, _ := json.Marshal(fullSchema)
-			json.Unmarshal(fullBytes, &fullDoc)
+			if err := json.Unmarshal(fullBytes, &fullDoc); err != nil {
+				schemaCompileErr = fmt.Errorf("opsettings: unmarshalling schema for %s: %w", s.Name, err)
+				return
+			}
 			schemaDoc = fullDoc
 		}
 

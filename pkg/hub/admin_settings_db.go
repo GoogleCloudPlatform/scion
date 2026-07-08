@@ -127,8 +127,8 @@ func (s *Server) handleGetServerConfigDB(w http.ResponseWriter, r *http.Request,
 		},
 	}
 
-	if resp.ServerConfigResponse.SchemaVersion == "" {
-		resp.ServerConfigResponse.SchemaVersion = "1"
+	if resp.SchemaVersion == "" {
+		resp.SchemaVersion = "1"
 	}
 
 	// Overlay Layer-1 fields from the operational settings snapshot.
@@ -454,7 +454,7 @@ func isZeroStruct(v interface{}) bool {
 		return true
 	}
 	rv := reflect.ValueOf(v)
-	if rv.Kind() == reflect.Ptr && rv.IsNil() {
+	if rv.Kind() == reflect.Pointer && rv.IsNil() {
 		return true
 	}
 	return reflect.DeepEqual(v, reflect.New(reflect.TypeOf(v).Elem()).Interface())

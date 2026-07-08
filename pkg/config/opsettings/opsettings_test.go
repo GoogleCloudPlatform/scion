@@ -618,7 +618,9 @@ image_registry: "gcr.io/my-project"
 	// Verify github_app secrets were excluded.
 	ghDoc := sections["github_app"]
 	var ghMap map[string]interface{}
-	json.Unmarshal(ghDoc, &ghMap)
+	if err := json.Unmarshal(ghDoc, &ghMap); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
 	if _, ok := ghMap["private_key"]; ok {
 		t.Error("github_app section must not contain private_key")
 	}

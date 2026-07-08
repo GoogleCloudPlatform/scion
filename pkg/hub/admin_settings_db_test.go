@@ -260,7 +260,9 @@ func TestPutServerConfigDB_PureLayer1_WriteSections(t *testing.T) {
 	}
 
 	var resp map[string]interface{}
-	json.Unmarshal(rr.Body.Bytes(), &resp)
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
 
 	if resp["status"] != "saved" {
 		t.Errorf("expected status=saved, got %v", resp["status"])
