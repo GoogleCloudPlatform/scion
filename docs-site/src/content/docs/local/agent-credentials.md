@@ -16,17 +16,52 @@ Authentication setup depends heavily on how you are running Scion:
 
 ---
 
+## The Container-Script Provisioning Model
+
+All harnesses are now provisioned by a **container-script** (`provision.py`) that runs inside the
+agent container, backed by the shared `scion_harness` Python library. Credential resolution is a
+two-part collaboration:
+
+1. **Host-side gather (Go)**: Before the container starts, Scion collects candidate credentials from environment variables and well-known file paths. In Hub mode this includes only the secrets and variables explicitly injected into the agent; direct Hub-secret access from inside the agent is blocked.
+2. **In-container select (`provision.py`)**: The harness's provisioner evaluates the staged candidates against the harness's declared auth methods, selects one, and writes the harness-native configuration (e.g. `~/.claude.json`, `~/.gemini/settings.json`, `~/.hermes/.env`).
+
+### Source precedence
+
+For each credential key, the resolution order is:
+
+1. **Staged candidate / secret file** — credentials the Hub or CLI explicitly staged for the agent.
+2. **Environment variable** — a matching variable in the agent's process environment.
+3. **Well-known file** — a native credential file at its conventional path (e.g. `~/.config/gcloud/application_default_credentials.json`).
+
+Staged candidates are matched across *all* keys before the process-environment fallback fires, so
+a user-provided secret is never shadowed by a stale container environment variable.
+
+**Vertex AI / GCP metadata** is not a "source" gathered this way — it is an auth *type*
+(`vertex-ai`) selected when a GCP service account is assigned to the agent. At runtime, tokens are
+served by Scion's in-container GCP metadata server.
+
+:::note[Harness-specific ordering]
+Some harnesses have their own precedence among *methods*. For example, Hermes selects the first
+present of `ANTHROPIC_API_KEY` > `OPENAI_API_KEY` > `GOOGLE_API_KEY`; Copilot uses
+`COPILOT_GITHUB_TOKEN` > `GH_TOKEN` > `GITHUB_TOKEN`. See the per-harness sections in
+[Supported Agent Harnesses](/scion/supported-harnesses/).
+:::
+
 ## Authentication Approaches
 
-Scion supports two approaches to harness authentication: the **Automatic (Implicit) Approach** and the **Explicit Path**. Both utilize Scion's unified `ResolvedAuth` pipeline, which relies on a centralized `AuthConfig` gathering and late-binding logic to ensure the correct credentials are used.
+Scion supports two approaches to harness authentication: the **Automatic (Implicit) Approach** and the **Explicit Path**.
 
 ### The Automatic (Implicit) Approach
 
-By default, when an agent starts, Scion runs a unified authentication pipeline to discover and apply credentials:
+By default, when an agent starts, the provisioner discovers and applies credentials automatically:
+it gathers the staged candidates and environment, selects the best method according to the
+harness's declared priority order (usually preferring a direct API key over a credential file),
+validates the result, and writes the harness's native settings. The decision is made right before
+the agent starts (late-binding), so the final strategy reflects whatever credentials are actually
+available at launch.
 
-1. **Gather (`AuthConfig`)**: Scans environment variables and well-known file paths. In Hub mode, this only includes secrets and variables specifically injected into the agent.
-2. **Resolve (`ResolveAuth`)**: The harness evaluates the gathered configuration and selects the best authentication method based on its internal priority order (e.g., usually preferring a direct API key over a credential file). This uses late-binding logic, so the final authentication strategy is decided right before the agent starts.
-3. **Validate & Apply (`ValidateAuth`)**: Scion validates that the selected credentials are correct and configures the harness's native settings (e.g., writing to `.claude.json` or `settings.json`) to use them.
+If no usable credentials are found, provisioning **falls back to no-auth** rather than failing
+(see [No-Auth Fallback](#no-auth-fallback) below).
 
 ### The Explicit Path
 
@@ -131,6 +166,64 @@ scion hub secret set --type file \
 ```
 
 ---
+
+## No-Auth Fallback
+
+When automatic detection finds no usable credentials, and the harness permits it, provisioning
+does **not** abort — it falls back to a **no-auth** mode so the agent still starts (typically
+dropping to an interactive shell). A graceful warning is written to the agent's logs explaining
+that no auth candidates were found and that it is running in no-auth mode.
+
+This lets you launch an agent, log in to the harness interactively (e.g. `copilot login`,
+`hermes setup`, `agy`), and then capture the resulting credentials for reuse (see below).
+
+The fallback applies only to **automatic** resolution. If you selected an auth type via the
+[Explicit Path](#the-explicit-path), the fallback is disabled — the required credentials must be
+present or the agent fails to start with an actionable error.
+
+## Capturing Credentials from a Running Agent
+
+For harnesses that authenticate through an interactive login (rather than a plain API key), you
+can capture the credentials an agent produced and store them as a project secret, so future
+agents start pre-authenticated instead of dropping to no-auth.
+
+After logging in interactively inside the agent (via `scion attach` or the terminal page), run the
+harness bundle's capture script from inside the container:
+
+```bash
+python3 ~/.scion/harness/capture_auth.py
+```
+
+The script reads the harness's capture configuration, locates the credential file(s) the harness
+just wrote (for Antigravity, it can also extract the OAuth token from the container's
+gnome-keyring), and stores each one as a project secret via `sciontool secret set`. Exit codes
+distinguish success (`0`), no credentials found (`2`), and a conflict where the secret already
+exists (`3`) — re-run with the harness's overwrite option to replace it.
+
+:::note
+There is currently no `scion auth capture` CLI wrapper; capture is performed by running
+`capture_auth.py` inside the agent, which delegates to `sciontool secret set`.
+:::
+
+## Repairing Auth on a Running Agent
+
+If a long-running agent's token expires and it cannot self-refresh (for example after a Hub
+signing-key rotation), you can inject a fresh token **without restarting** the agent:
+
+```bash
+scion reset-auth <agent-name>
+```
+
+This writes a fresh Hub token into the running container and signals the agent to reload it. The
+same action is available as a **Reset Auth** button in the web UI. See
+[Diagnostics](#diagnostics) to identify when this is needed.
+
+## Diagnostics
+
+Two diagnostic commands help troubleshoot auth and connectivity:
+
+- **`scion doctor`** (host-side): checks host prerequisites — Git, tmux, the active container runtime (Docker/Podman daemon or Kubernetes cluster access), and related diagnostics. Supports `--format json`.
+- **`sciontool doctor`** (in-container): checks the *agent's* health from inside the container — required environment variables, the Hub token (presence, format, expiry), Hub reachability, token refresh, the GCP metadata server and token acquisition, and the GitHub App token. When the token check fails it prints a remediation hint pointing you at `scion reset-auth`.
 
 ## Agent Progeny & Secret Access
 
