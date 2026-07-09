@@ -487,7 +487,7 @@ export class ScionPageAgentConfigure extends LitElement {
       ? this.customModelId
       : this.modelSelection;
     if (model) config.model = model;
-    if (this.thinkingLevel !== null) config.thinking_level = this.thinkingLevel;
+    config.thinking_level = this.thinkingLevel;
     if (this.image) config.image = this.image;
     if (this.branch) config.branch = this.branch;
     if (this.containerUser) config.user = this.containerUser;

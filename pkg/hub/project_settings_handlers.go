@@ -107,6 +107,13 @@ func (s *Server) handleProjectSettings(w http.ResponseWriter, r *http.Request, p
 			return
 		}
 
+		if req.DefaultThinkingLevel != nil {
+			if tl := *req.DefaultThinkingLevel; tl < 0 || tl > 100 {
+				BadRequest(w, "thinking_level must be between 0 and 100")
+				return
+			}
+		}
+
 		applyProjectSettingsToAnnotations(project, &req)
 
 		if err := s.store.UpdateProject(ctx, project); err != nil {
