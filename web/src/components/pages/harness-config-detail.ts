@@ -119,9 +119,6 @@ export class ScionPageHarnessConfigDetail extends LitElement {
   private deleteError = '';
 
   @state()
-  private resolvedImage = '';
-
-  @state()
   private imageStatus: {
     local_short?: { exists: boolean; image: string; hash: string };
     local_long?: { exists: boolean; image: string; hash: string };
@@ -624,10 +621,6 @@ export class ScionPageHarnessConfigDetail extends LitElement {
       </div>
     `;
   }
-  private isRemoteImage(image: string): boolean {
-    return image.includes('/') && (image.includes('.') || image.includes(':'));
-  }
-
   private renderImageSection() {
     const hc = this.harnessConfig!;
     const image = hc.config?.image;
@@ -739,7 +732,6 @@ export class ScionPageHarnessConfigDetail extends LitElement {
       );
       if (resp.ok) {
         this.imageStatus = await resp.json();
-        this.resolvedImage = this.imageStatus?.resolved_image || '';
       } else {
         const msg = await extractApiError(resp, `HTTP ${resp.status}`);
         alert(msg);
