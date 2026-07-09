@@ -804,20 +804,32 @@ func (s *Server) reconfigureIntegration(ctx context.Context, mgr IntegrationMana
 		configFile = pluginCfg["config_file"]
 	}
 
-	merged, err := config.ResolvePluginConfig(configFile, pluginCfg)
+	// Resolve from file only — do NOT pass the manager's boot-resolved map
+	// as "inline" config, because it contains the file's own keys and would
+	// trigger spurious "inline config keys ignored" deprecation warnings (B2).
+	// Only runtime/wiring keys are carried over via an explicit allowlist,
+	// which also ensures that keys deleted from the config file stay deleted (B3).
+	merged, err := config.ResolvePluginConfig(configFile, nil)
 	if err != nil {
 		slog.Error("Failed to resolve config for reconfigure", "plugin", name, "error", err)
 		merged = make(map[string]string)
-		for k, v := range pluginCfg {
+	}
+
+	// Carry over only runtime/wiring keys from the manager map.
+	runtimeKeys := map[string]bool{
+		"config_file":     true,
+		"hub_url":         true,
+		"hmac_key":        true,
+		"broker_id":       true,
+		"plugin_name":     true,
+		"project_slug_map": true,
+		"database_url":    true,
+		"database_driver": true,
+		"bot_id":          true,
+	}
+	for k, v := range pluginCfg {
+		if runtimeKeys[k] && merged[k] == "" {
 			merged[k] = v
-		}
-	} else {
-		// Carry over runtime/internal keys from the old config that
-		// are not present in the resolved result (e.g. hub_url, hmac_key).
-		for k, v := range pluginCfg {
-			if _, ok := merged[k]; !ok && !config.IsSecretConfigKey(k) {
-				merged[k] = v
-			}
 		}
 	}
 
