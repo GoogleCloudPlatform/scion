@@ -492,6 +492,48 @@ func (m *Manager) ConfigureBroker(name string, extra map[string]string) error {
 	return rpcClient.Configure(merged)
 }
 
+// ReplaceBrokerConfig updates the stored config for a broker plugin and pushes
+// the exact cfg to the running plugin, with no underlay from boot-time config.
+func (m *Manager) ReplaceBrokerConfig(name string, cfg map[string]string) error {
+	key := PluginTypeBroker + ":" + name
+	m.mu.Lock()
+	if dp, ok := m.configs[key]; ok {
+		dp.Config = cfg
+		m.configs[key] = dp
+	}
+	m.mu.Unlock()
+
+	m.mu.RLock()
+	adapter, isGRPC := m.grpcAdapters[key]
+	m.mu.RUnlock()
+
+	if isGRPC {
+		return adapter.Configure(cfg)
+	}
+
+	m.mu.RLock()
+	raw, ok := m.dispensed[key]
+	m.mu.RUnlock()
+	if !ok {
+		return fmt.Errorf("broker plugin not loaded: %s", name)
+	}
+
+	rpcClient, ok := raw.(*BrokerRPCClient)
+	if !ok {
+		return fmt.Errorf("plugin %s is not a broker RPC client", name)
+	}
+
+	merged := make(map[string]string, len(cfg)+1)
+	for k, v := range cfg {
+		merged[k] = v
+	}
+	if rpcClient.hostCallbacksAvailable {
+		merged[hostCallbacksConfigKey] = "true"
+	}
+
+	return rpcClient.Configure(merged)
+}
+
 // GetPluginConfig returns a copy of the stored config map for the named plugin,
 // or nil if the plugin is not loaded. The returned map is safe to read without
 // affecting the manager's internal state.

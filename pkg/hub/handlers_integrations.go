@@ -43,6 +43,7 @@ type IntegrationManager interface {
 	IsSelfManaged(pluginType, name string) bool
 	GetDeploymentMode(pluginType, name string) plugin.DeploymentMode
 	ConfigureBroker(name string, extra map[string]string) error
+	ReplaceBrokerConfig(name string, cfg map[string]string) error
 	Reconnect(pluginType, name string) error
 	BrokerHealthCheck(name string) (status, message string, details map[string]string, err error)
 	BrokerInfo(name string) (version, channelID string, capabilities []string, err error)
@@ -815,17 +816,26 @@ func (s *Server) reconfigureIntegration(ctx context.Context, mgr IntegrationMana
 		merged = make(map[string]string)
 	}
 
-	// Carry over only runtime/wiring keys from the manager map.
+	// Carry over runtime/wiring keys from the manager map.
+	// Wiring keys must be included because ReplaceBrokerConfig uses replace
+	// semantics (no underlay from boot-time config).
 	runtimeKeys := map[string]bool{
-		"config_file":     true,
-		"hub_url":         true,
-		"hmac_key":        true,
-		"broker_id":       true,
-		"plugin_name":     true,
+		"config_file":      true,
+		"hub_url":          true,
+		"hmac_key":         true,
+		"broker_id":        true,
+		"plugin_name":      true,
 		"project_slug_map": true,
-		"database_url":    true,
-		"database_driver": true,
-		"bot_id":          true,
+		"database_url":     true,
+		"database_driver":  true,
+		"bot_id":           true,
+		"mode":             true,
+		"path":             true,
+		"address":          true,
+		"tls_cert_file":    true,
+		"tls_key_file":     true,
+		"tls_ca_file":      true,
+		"tls_skip_verify":  true,
 	}
 	for k, v := range pluginCfg {
 		if runtimeKeys[k] && merged[k] == "" {
@@ -846,9 +856,9 @@ func (s *Server) reconfigureIntegration(ctx context.Context, mgr IntegrationMana
 		merged[m.ConfigKey] = val
 	}
 
-	if err := mgr.ConfigureBroker(name, merged); err != nil {
+	if err := mgr.ReplaceBrokerConfig(name, merged); err != nil {
 		if mgr.IsSelfManaged("broker", name) {
-			slog.Warn("ConfigureBroker failed for self-managed plugin, trying Reconnect",
+			slog.Warn("ReplaceBrokerConfig failed for self-managed plugin, trying Reconnect",
 				"plugin", name, "error", err)
 			return mgr.Reconnect("broker", name)
 		}

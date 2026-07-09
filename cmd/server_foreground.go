@@ -2260,12 +2260,13 @@ func migrateInlineSecrets(ctx context.Context, sb secret.SecretBackend, pluginNa
 			continue
 		}
 		_, _, err := sb.Set(ctx, &secret.SetSecretInput{
-			Name:        m.SecretKey,
-			Value:       val,
-			SecretType:  "environment",
-			Scope:       store.ScopeHub,
-			ScopeID:     hubID,
-			Description: fmt.Sprintf("Auto-migrated from inline config for plugin %s", pluginName),
+			Name:          m.SecretKey,
+			Value:         val,
+			SecretType:    secret.TypeVariable,
+			InjectionMode: "as_needed",
+			Scope:         store.ScopeHub,
+			ScopeID:       hubID,
+			Description:   fmt.Sprintf("Auto-migrated from inline config for plugin %s", pluginName),
 		})
 		if err != nil {
 			log.Printf("Warning: failed to migrate inline secret %s for plugin %q: %v", m.ConfigKey, pluginName, err)

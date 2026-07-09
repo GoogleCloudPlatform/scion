@@ -35,19 +35,21 @@ import (
 // --- mock IntegrationManager ---
 
 type mockIntegrationManager struct {
-	plugins         map[string]map[string]string // name → config
-	selfManaged     map[string]bool
-	deploymentModes map[string]plugin.DeploymentMode
-	healthErr       error
-	infoErr         error
-	configureErr    error
-	reconnectErr    error
-	updateErr       error
-	installErr      error
-	configureCalls  []string
-	reconnectCalls  []string
-	updateCalls     []string
-	installCalls    []string
+	plugins            map[string]map[string]string // name → config
+	selfManaged        map[string]bool
+	deploymentModes    map[string]plugin.DeploymentMode
+	healthErr          error
+	infoErr            error
+	configureErr       error
+	replaceConfigErr   error
+	reconnectErr       error
+	updateErr          error
+	installErr         error
+	configureCalls     []string
+	replaceConfigCalls []string
+	reconnectCalls     []string
+	updateCalls        []string
+	installCalls       []string
 }
 
 func newMockIntegrationManager() *mockIntegrationManager {
@@ -112,6 +114,11 @@ func (m *mockIntegrationManager) GetDeploymentMode(pluginType, name string) plug
 func (m *mockIntegrationManager) ConfigureBroker(name string, extra map[string]string) error {
 	m.configureCalls = append(m.configureCalls, name)
 	return m.configureErr
+}
+
+func (m *mockIntegrationManager) ReplaceBrokerConfig(name string, cfg map[string]string) error {
+	m.replaceConfigCalls = append(m.replaceConfigCalls, name)
+	return m.replaceConfigErr
 }
 
 func (m *mockIntegrationManager) Reconnect(pluginType, name string) error {
@@ -445,8 +452,8 @@ func TestRestartIntegration_OK(t *testing.T) {
 		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
 	}
 
-	if len(mgr.configureCalls) != 1 || mgr.configureCalls[0] != "telegram" {
-		t.Errorf("expected ConfigureBroker call for telegram, got %v", mgr.configureCalls)
+	if len(mgr.replaceConfigCalls) != 1 || mgr.replaceConfigCalls[0] != "telegram" {
+		t.Errorf("expected ReplaceBrokerConfig call for telegram, got %v", mgr.replaceConfigCalls)
 	}
 }
 
@@ -528,8 +535,8 @@ func TestUpdateConfig_WithConfigFile(t *testing.T) {
 		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
 	}
 
-	if len(mgr.configureCalls) != 1 {
-		t.Errorf("expected 1 ConfigureBroker call, got %d", len(mgr.configureCalls))
+	if len(mgr.replaceConfigCalls) != 1 {
+		t.Errorf("expected 1 ReplaceBrokerConfig call, got %d", len(mgr.replaceConfigCalls))
 	}
 }
 
@@ -1528,8 +1535,8 @@ func TestUpdateConfig_HA_SkipsReconfigure(t *testing.T) {
 		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
 	}
 
-	if len(mgr.configureCalls) != 0 {
-		t.Errorf("expected no ConfigureBroker calls for HA integration, got %v", mgr.configureCalls)
+	if len(mgr.replaceConfigCalls) != 0 {
+		t.Errorf("expected no ReplaceBrokerConfig calls for HA integration, got %v", mgr.replaceConfigCalls)
 	}
 }
 
