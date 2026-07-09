@@ -111,10 +111,10 @@ func IsBareImageName(image string) bool {
 }
 
 type ImageEntityStatus struct {
-	Exists        bool   `json:"exists"`
-	Image         string `json:"image,omitempty"`
-	Hash          string `json:"hash,omitempty"`
-	NewerThanLocal bool  `json:"newer_than_local,omitempty"`
+	Exists         bool   `json:"exists"`
+	Image          string `json:"image,omitempty"`
+	Hash           string `json:"hash,omitempty"`
+	NewerThanLocal bool   `json:"newer_than_local,omitempty"`
 }
 
 type ThreeWayImageResult struct {
