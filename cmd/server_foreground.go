@@ -410,10 +410,12 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 					continue
 				}
 
-				// Inject hub credentials into hub-managed broker plugins so they
-				// can authenticate back to the Hub API. Self-managed plugins
-				// handle their own credential lifecycle.
-				if !pluginMgr.IsSelfManaged(scionplugin.PluginTypeBroker, bt) && hubSrv != nil && s != nil {
+				// Inject hub credentials into hub-managed, non-HA broker plugins.
+				// Self-managed plugins handle their own credential lifecycle;
+				// HA integrations pull credentials from env/Secret Manager.
+				if !pluginMgr.IsSelfManaged(scionplugin.PluginTypeBroker, bt) &&
+					pluginMgr.GetDeploymentMode(scionplugin.PluginTypeBroker, bt) != scionplugin.DeploymentModeHA &&
+					hubSrv != nil && s != nil {
 					// Use the same deterministic UUIDv5 as the α migration so the
 					// broker entity created here matches the migrated ID.
 					pluginBrokerNS := uuid.MustParse("5c104390-a1d0-5e9a-9b1e-5c104390a1d0")

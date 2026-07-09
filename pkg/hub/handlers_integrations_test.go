@@ -25,6 +25,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/integrationupdate"
 	"github.com/GoogleCloudPlatform/scion/pkg/plugin"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
@@ -1496,5 +1497,133 @@ func TestIsHAIntegration_Modes(t *testing.T) {
 	mgr2.selfManaged["slack"] = true
 	if srv.isHAIntegration(mgr2, "slack") {
 		t.Error("self-managed without HA mode should not be HA")
+	}
+}
+
+func TestUpdateConfig_HA_SkipsReconfigure(t *testing.T) {
+	if !enttest.Active() {
+		t.Skip("requires Postgres backend; set SCION_TEST_POSTGRES_URL and build with -tags integration")
+	}
+	client := enttest.NewClient(t)
+
+	mgr := newMockIntegrationManager()
+	mgr.plugins["discord"] = map[string]string{}
+	mgr.deploymentModes["discord"] = plugin.DeploymentModeHA
+
+	srv := &Server{dbDriver: "postgres"}
+	srv.pluginManager = mgr
+	srv.entClient = client
+
+	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
+	body := `{"settings":{"guild_id":"12345"}}`
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/admin/integrations/discord/config", strings.NewReader(body))
+	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	rr := httptest.NewRecorder()
+	srv.handleAdminIntegrationByName(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	if len(mgr.configureCalls) != 0 {
+		t.Errorf("expected no ConfigureBroker calls for HA integration, got %v", mgr.configureCalls)
+	}
+}
+
+func TestGetIntegration_HA_ReadsFromPostgres(t *testing.T) {
+	if !enttest.Active() {
+		t.Skip("requires Postgres backend; set SCION_TEST_POSTGRES_URL and build with -tags integration")
+	}
+	client := enttest.NewClient(t)
+
+	mgr := newMockIntegrationManager()
+	mgr.plugins["discord"] = map[string]string{
+		"guild_id": "boot-value",
+		"hub_url":  "https://hub.example.com",
+	}
+	mgr.deploymentModes["discord"] = plugin.DeploymentModeHA
+
+	// Write config to Postgres — this is what PUT would have done.
+	provider := config.NewPostgresConfigProvider(client, "discord")
+	if err := provider.Save(context.Background(), map[string]string{
+		"guild_id":       "db-value",
+		"application_id": "app-from-db",
+	}); err != nil {
+		t.Fatalf("seed config: %v", err)
+	}
+
+	srv := &Server{dbDriver: "postgres"}
+	srv.pluginManager = mgr
+	srv.entClient = client
+
+	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/integrations/discord", nil)
+	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	rr := httptest.NewRecorder()
+	srv.handleAdminIntegrationByName(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var detail IntegrationDetail
+	if err := json.NewDecoder(rr.Body).Decode(&detail); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	// Settings should reflect Postgres values, not boot-time map.
+	if detail.Settings["guild_id"] != "db-value" {
+		t.Errorf("guild_id: expected db-value, got %q", detail.Settings["guild_id"])
+	}
+	if detail.Settings["application_id"] != "app-from-db" {
+		t.Errorf("application_id: expected app-from-db, got %q", detail.Settings["application_id"])
+	}
+	// Internal keys should be filtered out.
+	if _, ok := detail.Settings["hub_url"]; ok {
+		t.Error("hub_url should be filtered from settings")
+	}
+}
+
+func TestGetIntegration_ReadsFromConfigFile(t *testing.T) {
+	dir := t.TempDir()
+	configFile := filepath.Join(dir, "telegram.yaml")
+	if err := os.WriteFile(configFile, []byte("webhook_listen: \":9095\"\ndb_path: /tmp/tg.db\n"), 0600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	mgr := newMockIntegrationManager()
+	mgr.plugins["telegram"] = map[string]string{
+		"config_file":    configFile,
+		"webhook_listen": ":9094",
+		"hub_url":        "https://hub.example.com",
+	}
+
+	srv := &Server{}
+	srv.pluginManager = mgr
+
+	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/integrations/telegram", nil)
+	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	rr := httptest.NewRecorder()
+	srv.handleAdminIntegrationByName(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var detail IntegrationDetail
+	if err := json.NewDecoder(rr.Body).Decode(&detail); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	// Settings should reflect the YAML file values, not the boot-time map.
+	if detail.Settings["webhook_listen"] != ":9095" {
+		t.Errorf("webhook_listen: expected :9095 (from file), got %q", detail.Settings["webhook_listen"])
+	}
+	if detail.Settings["db_path"] != "/tmp/tg.db" {
+		t.Errorf("db_path: expected /tmp/tg.db, got %q", detail.Settings["db_path"])
+	}
+	if _, ok := detail.Settings["hub_url"]; ok {
+		t.Error("hub_url should be filtered from settings")
 	}
 }

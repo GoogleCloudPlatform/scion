@@ -269,10 +269,14 @@ func (s *Server) handleGetIntegration(w http.ResponseWriter, r *http.Request, na
 		return
 	}
 
-	cfg := mgr.GetPluginConfig("broker", name)
-	if cfg == nil {
-		cfg = make(map[string]string)
+	runtimeCfg := mgr.GetPluginConfig("broker", name)
+	if runtimeCfg == nil {
+		runtimeCfg = make(map[string]string)
 	}
+
+	// Resolve settings from the same provider that PUT writes to, so
+	// GET reflects the latest saved state rather than the boot-time map.
+	cfg := s.resolveIntegrationSettings(r.Context(), mgr, name, runtimeCfg)
 
 	detail := IntegrationDetail{
 		Name:           name,
@@ -285,6 +289,43 @@ func (s *Server) handleGetIntegration(w http.ResponseWriter, r *http.Request, na
 	}
 
 	writeJSON(w, http.StatusOK, detail)
+}
+
+// resolveIntegrationSettings returns the current settings for a plugin by
+// reading from the appropriate config provider (Postgres for HA, YAML file for
+// non-HA). Runtime/wiring keys from the manager map are merged as an underlay.
+func (s *Server) resolveIntegrationSettings(ctx context.Context, mgr IntegrationManager, name string, runtimeCfg map[string]string) map[string]string {
+	if s.isHAIntegration(mgr, name) {
+		if s.entClient != nil {
+			provider := config.NewPostgresConfigProvider(s.entClient, name)
+			if settings, err := provider.Load(ctx); err == nil {
+				// Merge runtime keys as underlay — provider values win.
+				for k, v := range runtimeCfg {
+					if _, ok := settings[k]; !ok {
+						settings[k] = v
+					}
+				}
+				return settings
+			}
+			slog.Warn("Failed to load HA config for GET, falling back to manager map", "plugin", name)
+		}
+		return runtimeCfg
+	}
+
+	configFile := runtimeCfg["config_file"]
+	if configFile != "" {
+		if settings, err := config.LoadPluginConfigFile(configFile, nil); err == nil {
+			for k, v := range runtimeCfg {
+				if _, ok := settings[k]; !ok {
+					settings[k] = v
+				}
+			}
+			return settings
+		}
+		slog.Warn("Failed to reload config file for GET, falling back to manager map", "plugin", name)
+	}
+
+	return runtimeCfg
 }
 
 func (s *Server) handleUpdateIntegrationConfig(w http.ResponseWriter, r *http.Request, name string) {
@@ -419,10 +460,14 @@ func (s *Server) handleUpdateIntegrationConfig(w http.ResponseWriter, r *http.Re
 	}
 
 	// Reconfigure the running integration with updated config.
-	if err := s.reconfigureIntegration(r.Context(), mgr, name); err != nil {
-		slog.Error("Failed to reconfigure integration after config update", "plugin", name, "error", err)
-		InternalError(w)
-		return
+	// For HA integrations the DB write + NOTIFY is the reconfigure path —
+	// pushing a hub-side merge over gRPC would race with the DB-backed reload.
+	if !s.isHAIntegration(mgr, name) {
+		if err := s.reconfigureIntegration(r.Context(), mgr, name); err != nil {
+			slog.Error("Failed to reconfigure integration after config update", "plugin", name, "error", err)
+			InternalError(w)
+			return
+		}
 	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
