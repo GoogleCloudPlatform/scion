@@ -804,27 +804,20 @@ func (s *Server) reconfigureIntegration(ctx context.Context, mgr IntegrationMana
 		configFile = pluginCfg["config_file"]
 	}
 
-	merged := make(map[string]string)
-	if configFile != "" {
-		fileMerged, err := config.LoadPluginConfigFile(configFile, nil)
-		if err != nil {
-			slog.Error("Failed to reload config file for reconfigure", "plugin", name, "error", err)
-			for k, v := range pluginCfg {
-				merged[k] = v
-			}
-		} else {
-			merged = fileMerged
-			// Carry over runtime/internal keys from the old config that
-			// are not present in the file (e.g. hub_url, hmac_key).
-			for k, v := range pluginCfg {
-				if _, ok := merged[k]; !ok {
-					merged[k] = v
-				}
-			}
-		}
-	} else {
+	merged, err := config.ResolvePluginConfig(configFile, pluginCfg)
+	if err != nil {
+		slog.Error("Failed to resolve config for reconfigure", "plugin", name, "error", err)
+		merged = make(map[string]string)
 		for k, v := range pluginCfg {
 			merged[k] = v
+		}
+	} else {
+		// Carry over runtime/internal keys from the old config that
+		// are not present in the resolved result (e.g. hub_url, hmac_key).
+		for k, v := range pluginCfg {
+			if _, ok := merged[k]; !ok && !config.IsSecretConfigKey(k) {
+				merged[k] = v
+			}
 		}
 	}
 

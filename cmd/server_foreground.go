@@ -2045,8 +2045,7 @@ func initPluginManager() *scionplugin.Manager {
 		Broker: make(map[string]scionplugin.PluginEntry),
 	}
 	for name, entry := range vs.Server.Plugins.Broker {
-		// Merge config_file contents with inline config (inline overrides file).
-		mergedConfig, mergeErr := config.LoadPluginConfigFile(entry.ConfigFile, entry.Config)
+		mergedConfig, mergeErr := config.ResolvePluginConfig(entry.ConfigFile, entry.Config)
 		if mergeErr != nil {
 			log.Printf("Warning: failed to load config file for plugin %q: %v", name, mergeErr)
 			mergedConfig = entry.Config

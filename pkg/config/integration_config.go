@@ -17,6 +17,7 @@ package config
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -161,6 +162,112 @@ var PluginSecretKeyMap = map[string][]IntegrationSecretMapping{
 	"chat-app": {
 		{SecretGChatSigningKey, "signing_key"},
 	},
+}
+
+// wiringKeys are config keys that always come from settings.yaml inline config,
+// never from the per-plugin YAML file.
+var wiringKeys = map[string]bool{
+	"mode":            true,
+	"path":            true,
+	"address":         true,
+	"tls_cert_file":   true,
+	"tls_key_file":    true,
+	"tls_ca_file":     true,
+	"tls_skip_verify": true,
+	"config_file":     true,
+}
+
+// secretConfigKeys collects all config-level key names that map to secret
+// backend entries (e.g. "bot_token", "signing_key"). Built once from
+// PluginSecretKeyMap.
+var secretConfigKeys map[string]bool
+
+func init() {
+	secretConfigKeys = make(map[string]bool)
+	for _, mappings := range PluginSecretKeyMap {
+		for _, m := range mappings {
+			secretConfigKeys[m.ConfigKey] = true
+		}
+	}
+}
+
+// IsSecretConfigKey reports whether key is a plugin config key that maps to a
+// secret backend entry (e.g. "bot_token", "signing_secret").
+func IsSecretConfigKey(key string) bool {
+	return secretConfigKeys[key]
+}
+
+// backendSecretKeys lists the well-known secret backend key names
+// (TELEGRAM_BOT_TOKEN, etc.) for stripping from config maps.
+var backendSecretKeys = []string{
+	SecretTelegramBotToken, SecretTelegramWebhookKey,
+	SecretDiscordBotToken, SecretDiscordPublicKey,
+	SecretSlackBotToken, SecretSlackAppToken, SecretSlackSigningSecret,
+	SecretGChatSigningKey,
+}
+
+// ResolvePluginConfig builds the config map for a plugin with consistent precedence.
+// If configFile is set, the file is the source of truth for non-wiring keys.
+// Inline config is only used for wiring keys or as fallback when no config_file exists.
+// Secret config keys (bot_token, signing_key, etc.) are always stripped from inline
+// config so that the secret backend takes precedence.
+func ResolvePluginConfig(configFile string, inlineConfig map[string]string) (map[string]string, error) {
+	// Build a clean copy of inline config with secret keys stripped.
+	cleanedInline := make(map[string]string, len(inlineConfig))
+	for k, v := range inlineConfig {
+		if secretConfigKeys[k] {
+			continue
+		}
+		cleanedInline[k] = v
+	}
+	// Also strip backend key names (same filtering applied to file config).
+	for _, sk := range backendSecretKeys {
+		delete(cleanedInline, sk)
+		delete(cleanedInline, strings.ToLower(sk))
+	}
+
+	if configFile == "" {
+		return cleanedInline, nil
+	}
+
+	provider, err := NewYAMLConfigProvider(configFile)
+	if err != nil {
+		return nil, err
+	}
+
+	fileConfig, err := provider.Load(context.Background())
+	if err != nil {
+		return nil, err
+	}
+
+	// Filter backend secret key names from file config.
+	for _, sk := range backendSecretKeys {
+		delete(fileConfig, sk)
+		delete(fileConfig, strings.ToLower(sk))
+	}
+
+	// File is the base for non-wiring keys.
+	merged := make(map[string]string, len(fileConfig)+len(cleanedInline))
+	for k, v := range fileConfig {
+		merged[k] = v
+	}
+
+	// Add only wiring keys from inline; log a deprecation warning for
+	// any non-wiring keys that would be silently ignored.
+	var deprecated []string
+	for k, v := range cleanedInline {
+		if wiringKeys[k] {
+			merged[k] = v
+		} else if v != "" {
+			deprecated = append(deprecated, k)
+		}
+	}
+	if len(deprecated) > 0 {
+		slog.Warn("inline config keys ignored because config_file is set — move them to the config file",
+			"keys", deprecated, "config_file", configFile)
+	}
+
+	return merged, nil
 }
 
 // AddPluginToSettings adds a broker plugin entry to the global settings.yaml.
