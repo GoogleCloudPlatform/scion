@@ -203,6 +203,7 @@ type ProjectSettings struct {
 	DefaultTemplate      string                 `json:"defaultTemplate,omitempty"`
 	DefaultHarnessConfig string                 `json:"defaultHarnessConfig,omitempty"`
 	DefaultModel         string                 `json:"defaultModel,omitempty"`
+	DefaultThinkingLevel *int                   `json:"defaultThinkingLevel,omitempty"`
 	TelemetryEnabled     *bool                  `json:"telemetryEnabled,omitempty"`
 	Bucket               *BucketConfig          `json:"bucket,omitempty"`
 	Runtimes             map[string]interface{} `json:"runtimes,omitempty"`

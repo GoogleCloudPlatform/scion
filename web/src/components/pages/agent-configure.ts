@@ -48,6 +48,7 @@ interface ScionConfigPayload {
     limits?: { cpu?: string; memory?: string };
     disk?: string;
   };
+  thinking_level?: number | null;
   env?: Record<string, string>;
   telemetry?: { enabled?: boolean };
 }
@@ -55,6 +56,7 @@ interface ScionConfigPayload {
 interface AppliedConfig {
   image?: string;
   model?: string;
+  thinkingLevel?: number | null;
   harnessConfig?: string;
   harnessAuth?: string;
   task?: string;
@@ -83,6 +85,7 @@ export class ScionPageAgentConfigure extends LitElement {
   @state() private model = '';
   @state() private modelSelection: '' | 'small' | 'medium' | 'large' | 'extra-large' | 'other' = '';
   @state() private customModelId = '';
+  @state() private thinkingLevel: number | null = null;
   @state() private image = '';
   @state() private branch = '';
   @state() private containerUser = '';
@@ -438,6 +441,7 @@ export class ScionPageAgentConfigure extends LitElement {
     const derived = this.deriveModelSelection(this.model);
     this.modelSelection = derived.selection;
     this.customModelId = derived.customId;
+    this.thinkingLevel = ac?.thinkingLevel ?? ic?.thinking_level ?? null;
     this.image = ac?.image || ic?.image || '';
     this.branch = ic?.branch || '';
     this.containerUser = ic?.user || '';
@@ -483,6 +487,7 @@ export class ScionPageAgentConfigure extends LitElement {
       ? this.customModelId
       : this.modelSelection;
     if (model) config.model = model;
+    if (this.thinkingLevel !== null) config.thinking_level = this.thinkingLevel;
     if (this.image) config.image = this.image;
     if (this.branch) config.branch = this.branch;
     if (this.containerUser) config.user = this.containerUser;
@@ -807,7 +812,7 @@ export class ScionPageAgentConfigure extends LitElement {
 
     return html`
       <div class="form-field">
-        <sl-select label="Model" .value=${this.modelSelection} clearable
+        <sl-select label="Model" placeholder="use harness default" .value=${this.modelSelection} clearable
             @sl-change=${(e: any) => { this.modelSelection = e.target.value; if (e.target.value !== 'other') this.customModelId = ''; }}>
           <sl-option value="small">Small</sl-option>
           <sl-option value="medium">Medium</sl-option>
@@ -823,6 +828,28 @@ export class ScionPageAgentConfigure extends LitElement {
             style="margin-top: 0.75rem">
           </sl-input>
         ` : ''}
+      </div>
+
+      <div class="form-field">
+        <label>Thinking Level${this.thinkingLevel !== null ? html` <span style="font-weight:normal;color:var(--sl-color-neutral-500)">(${this.thinkingLevel})</span>` : ''}</label>
+        <div style="display:flex;align-items:center;gap:0.75rem">
+          <sl-range
+            min="0" max="100" step="1"
+            .value=${this.thinkingLevel ?? 50}
+            ?disabled=${this.thinkingLevel === null}
+            style="flex:1"
+            @sl-input=${(e: any) => { this.thinkingLevel = e.target.value; }}
+          ></sl-range>
+          <sl-checkbox
+            ?checked=${this.thinkingLevel !== null}
+            @sl-change=${(e: any) => { this.thinkingLevel = e.target.checked ? 50 : null; }}
+          >Set</sl-checkbox>
+        </div>
+        <div class="hint" style="display:flex;justify-content:space-between;margin-top:0.25rem">
+          <span>0 = minimal reasoning</span>
+          <span>${this.thinkingLevel === null ? 'Using harness default' : ''}</span>
+          <span>100 = maximum reasoning</span>
+        </div>
       </div>
 
       <div class="form-field">

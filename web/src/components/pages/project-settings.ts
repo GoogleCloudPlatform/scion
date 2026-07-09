@@ -58,6 +58,7 @@ interface ProjectSettings {
   defaultGCPIdentityMode?: string | undefined;
   defaultGCPIdentityServiceAccountID?: string | undefined;
   defaultModel?: string | undefined;
+  defaultThinkingLevel?: number | null | undefined;
 }
 
 interface HarnessConfigEntry {
@@ -176,6 +177,9 @@ export class ScionPageProjectSettings extends LitElement {
 
   @state()
   private defaultCustomModelId = '';
+
+  @state()
+  private defaultThinkingLevel: number | null = null;
 
   @state()
   private gcpServiceAccounts: GCPServiceAccount[] = [];
@@ -893,6 +897,7 @@ export class ScionPageProjectSettings extends LitElement {
         } else {
           this.defaultModelSelection = '';
         }
+        this.defaultThinkingLevel = this.settings.defaultThinkingLevel ?? null;
       }
     } catch (err) {
       console.error('Failed to load project settings:', err);
@@ -987,6 +992,7 @@ export class ScionPageProjectSettings extends LitElement {
         defaultMaxModelCalls: this.configDefaultMaxModelCalls || undefined,
         defaultMaxDuration: this.configDefaultMaxDuration || undefined,
         defaultResources,
+        defaultThinkingLevel: this.defaultThinkingLevel,
         defaultGCPIdentityMode: this.configDefaultGCPIdentityMode || undefined,
         defaultGCPIdentityServiceAccountID:
           this.configDefaultGCPIdentityMode === 'assign'
@@ -1478,7 +1484,7 @@ export class ScionPageProjectSettings extends LitElement {
               <div class="config-field">
                 <label>Default Model</label>
                 <sl-select
-                  placeholder="None (use server default)"
+                  placeholder="use harness default"
                   clearable
                   value=${this.defaultModelSelection}
                   ?disabled=${!canEdit}
@@ -1514,6 +1520,29 @@ export class ScionPageProjectSettings extends LitElement {
                     </div>
                   `
                 : ''}
+
+              <div class="config-field">
+                <label>Default Thinking Level${this.defaultThinkingLevel !== null ? html` <span style="font-weight:normal;color:var(--sl-color-neutral-500)">(${this.defaultThinkingLevel})</span>` : ''}</label>
+                <div style="display:flex;align-items:center;gap:0.75rem">
+                  <sl-range
+                    min="0" max="100" step="1"
+                    .value=${this.defaultThinkingLevel ?? 50}
+                    ?disabled=${this.defaultThinkingLevel === null || !canEdit}
+                    style="flex:1"
+                    @sl-input=${(e: Event) => { this.defaultThinkingLevel = (e.target as HTMLInputElement & { value: number }).value; }}
+                  ></sl-range>
+                  <sl-checkbox
+                    ?checked=${this.defaultThinkingLevel !== null}
+                    ?disabled=${!canEdit}
+                    @sl-change=${(e: Event) => { this.defaultThinkingLevel = (e.target as HTMLInputElement & { checked: boolean }).checked ? 50 : null; }}
+                  >Set</sl-checkbox>
+                </div>
+                <span class="field-help" style="display:flex;justify-content:space-between;margin-top:0.25rem">
+                  <span>0 = minimal reasoning</span>
+                  <span>${this.defaultThinkingLevel === null ? 'Using harness default' : ''}</span>
+                  <span>100 = maximum reasoning</span>
+                </span>
+              </div>
 
               <div class="config-field">
                 <label>Telemetry</label>

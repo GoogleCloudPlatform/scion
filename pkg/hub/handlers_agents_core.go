@@ -1516,6 +1516,9 @@ func (s *Server) updateAgent(w http.ResponseWriter, r *http.Request, id string) 
 		if cfg.Model != "" {
 			agent.AppliedConfig.Model = cfg.Model
 		}
+		if cfg.ThinkingLevel != nil {
+			agent.AppliedConfig.ThinkingLevel = cfg.ThinkingLevel
+		}
 		if cfg.Task != "" {
 			agent.AppliedConfig.Task = cfg.Task
 		}

@@ -329,6 +329,7 @@ export interface AgentInlineConfig {
   max_model_calls?: number;
   max_duration?: string;
   model?: string;
+  thinking_level?: number;
   branch?: string;
   task?: string;
   image?: string;
@@ -375,6 +376,7 @@ export interface AgentAppliedConfig {
   harnessAuth?: string;
   noAuth?: boolean;
   model?: string;
+  thinkingLevel?: number;
   profile?: string;
   task?: string;
   attach?: boolean;

@@ -28,6 +28,7 @@ const (
 	projectSettingDefaultTemplate      = "scion.io/default-template"
 	projectSettingDefaultHarnessConfig = "scion.io/default-harness-config"
 	projectSettingDefaultModel         = "scion.io/default-model"
+	projectSettingDefaultThinkingLevel = "scion.io/default-thinking-level"
 	projectSettingTelemetryEnabled     = "scion.io/telemetry-enabled"
 	projectSettingActiveProfile        = "scion.io/active-profile"
 
@@ -131,6 +132,11 @@ func projectSettingsFromAnnotations(project *store.Project) *hubclient.ProjectSe
 	settings.DefaultTemplate = project.Annotations[projectSettingDefaultTemplate]
 	settings.DefaultHarnessConfig = project.Annotations[projectSettingDefaultHarnessConfig]
 	settings.DefaultModel = project.Annotations[projectSettingDefaultModel]
+	if val, ok := project.Annotations[projectSettingDefaultThinkingLevel]; ok {
+		if n, err := strconv.Atoi(val); err == nil {
+			settings.DefaultThinkingLevel = &n
+		}
+	}
 	settings.ActiveProfile = project.Annotations[projectSettingActiveProfile]
 
 	if val, ok := project.Annotations[projectSettingTelemetryEnabled]; ok {
@@ -197,6 +203,11 @@ func applyProjectSettingsToAnnotations(project *store.Project, settings *hubclie
 	setOrDelete(project.Annotations, projectSettingDefaultTemplate, settings.DefaultTemplate)
 	setOrDelete(project.Annotations, projectSettingDefaultHarnessConfig, settings.DefaultHarnessConfig)
 	setOrDelete(project.Annotations, projectSettingDefaultModel, settings.DefaultModel)
+	if settings.DefaultThinkingLevel != nil {
+		project.Annotations[projectSettingDefaultThinkingLevel] = strconv.Itoa(*settings.DefaultThinkingLevel)
+	} else {
+		delete(project.Annotations, projectSettingDefaultThinkingLevel)
+	}
 	setOrDelete(project.Annotations, projectSettingActiveProfile, settings.ActiveProfile)
 
 	if settings.TelemetryEnabled != nil {
@@ -277,6 +288,11 @@ func applyProjectDefaults(ac *store.AgentAppliedConfig, project *store.Project) 
 	// Apply default model (only if not already set by agent/template/CLI)
 	if ac.Model == "" && settings.DefaultModel != "" {
 		ac.Model = settings.DefaultModel
+	}
+
+	// Apply default thinking level (only if not already set)
+	if ac.ThinkingLevel == nil && settings.DefaultThinkingLevel != nil {
+		ac.ThinkingLevel = settings.DefaultThinkingLevel
 	}
 
 	// Check if there are any project limit/resource defaults to apply

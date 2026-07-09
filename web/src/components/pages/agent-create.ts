@@ -30,7 +30,6 @@ import type {
   Template,
   GCPServiceAccount,
 } from '../../shared/types.js';
-import { normalizeModelAlias } from '../../shared/model-utils.js';
 
 interface HarnessConfigEntry {
   id: string;
@@ -122,12 +121,6 @@ export class ScionPageAgentCreate extends LitElement {
   @state()
   private harnessConfigs: HarnessConfigEntry[] = [];
 
-  @state()
-  private modelSelection: '' | 'small' | 'medium' | 'large' | 'extra-large' | 'other' = '';
-
-  @state()
-  private customModelId = '';
-
   /** ID of an existing agent we're editing (came back from configure page) */
   private editingAgentId: string | null = null;
 
@@ -145,7 +138,6 @@ export class ScionPageAgentCreate extends LitElement {
       defaultMaxDuration?: string;
       defaultGCPIdentityMode?: string;
       defaultGCPIdentityServiceAccountID?: string;
-      defaultModel?: string;
     }
   > = new Map();
 
@@ -550,13 +542,6 @@ export class ScionPageAgentCreate extends LitElement {
         },
       };
 
-      const model = this.modelSelection === 'other'
-        ? this.customModelId
-        : this.modelSelection;
-      if (model) {
-        config.model = model;
-      }
-
       body.config = config;
 
       // Validate GCP assign mode
@@ -670,14 +655,6 @@ export class ScionPageAgentCreate extends LitElement {
       const builtLabels = this.buildLabels();
       if (builtLabels) {
         body.labels = builtLabels;
-      }
-
-      // Model selection
-      const model = this.modelSelection === 'other'
-        ? this.customModelId
-        : this.modelSelection;
-      if (model) {
-        body.config = { ...(body.config as Record<string, unknown> || {}), model };
       }
 
       // GCP identity assignment
@@ -823,16 +800,6 @@ private selectBrokerForProject(): void {
       }
     }
 
-    // Pre-populate model from project defaults if user hasn't selected one
-    if (!this.modelSelection && settings?.defaultModel) {
-      const dm = normalizeModelAlias(settings.defaultModel);
-      if (['small', 'medium', 'large', 'extra-large'].includes(dm)) {
-        this.modelSelection = dm as 'small' | 'medium' | 'large' | 'extra-large';
-      } else if (dm) {
-        this.modelSelection = 'other';
-        this.customModelId = settings.defaultModel;
-      }
-    }
   }
 
   /**
@@ -1170,43 +1137,6 @@ private selectBrokerForProject(): void {
             </sl-select>
             <div class="hint">Agent configuration template.</div>
           </div>
-
-          <div class="form-field">
-            <label for="model">Model</label>
-            <sl-select
-              id="model"
-              placeholder="Select a model size..."
-              .value=${this.modelSelection}
-              clearable
-              @sl-change=${(e: Event) => {
-                this.modelSelection = (e.target as HTMLElement & { value: string }).value as
-                  | '' | 'small' | 'medium' | 'large' | 'extra-large' | 'other';
-                if (this.modelSelection !== 'other') this.customModelId = '';
-              }}
-            >
-              <sl-option value="small">Small</sl-option>
-              <sl-option value="medium">Medium</sl-option>
-              <sl-option value="large">Large</sl-option>
-              <sl-option value="extra-large">Extra Large</sl-option>
-              <sl-option value="other">Other (specify)</sl-option>
-            </sl-select>
-            <div class="hint">Model size or specific model for this agent.</div>
-          </div>
-          ${this.modelSelection === 'other'
-            ? html`
-                <div class="form-field">
-                  <label for="model-id">Model ID</label>
-                  <sl-input
-                    id="model-id"
-                    placeholder="e.g. claude-opus-4-8"
-                    .value=${this.customModelId}
-                    @sl-input=${(e: Event) => {
-                      this.customModelId = (e.target as HTMLElement & { value: string }).value;
-                    }}
-                  ></sl-input>
-                </div>
-              `
-            : ''}
 
           <div class="form-field">
             <label for="harness">Harness Config</label>

@@ -444,6 +444,7 @@ type ScionConfig struct {
 	CommandArgs      []string          `json:"command_args,omitempty" yaml:"command_args,omitempty"`
 	TaskFlag         string            `json:"task_flag,omitempty" yaml:"task_flag,omitempty"`
 	Model            string            `json:"model,omitempty" yaml:"model,omitempty"`
+	ThinkingLevel    *int              `json:"thinking_level,omitempty" yaml:"thinking_level,omitempty"`
 	Kubernetes       *KubernetesConfig `json:"kubernetes,omitempty" yaml:"kubernetes,omitempty"`
 	AuthSelectedType string            `json:"auth_selectedType,omitempty" yaml:"auth_selectedType,omitempty"`
 	Resources        *ResourceSpec     `json:"resources,omitempty" yaml:"resources,omitempty"`

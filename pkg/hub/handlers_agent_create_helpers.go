@@ -95,6 +95,7 @@ func (s *Server) buildAppliedConfig(req CreateAgentRequest, harnessConfig string
 		ac.Image = req.Config.Image
 		ac.Env = req.Config.Env
 		ac.Model = req.Config.Model
+		ac.ThinkingLevel = req.Config.ThinkingLevel
 
 		// Extract ScionConfig-specific fields
 		if req.Config.HarnessConfig != "" {
