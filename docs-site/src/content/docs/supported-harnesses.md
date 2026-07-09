@@ -216,7 +216,7 @@ The following table summarizes the capabilities supported by each agent harness 
 | With Prompt | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ |
 | Custom Session ID | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
 | **Interject** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Interupt Key | C-c | C-c | Esc / C-c | C-c | C-c | C-c | C-c |
+| Interrupt Key | C-c | C-c | Esc / C-c | C-c | C-c | C-c | C-c |
 | **Enqueue** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | **Hooks** | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ✅ |
 | Support | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ✅ |
@@ -228,4 +228,4 @@ The following table summarizes the capabilities supported by each agent harness 
 * **Enqueue**: Ability to send messages to the agent while it's running (supported via the built-in Tmux session).
 * **Hooks**: Support for lifecycle hooks (e.g., `SessionStart`, `AfterTool`).
 * **OpenTelemetry**: Specific events vary by harness and native emitter schema.
-* **System Prompt Override**: Support for providing a custom system prompt to the agent (e.g. via `system_prompt.md`). ◐ = *partial* — the harness has no native system-prompt flag, so Scion prepends the system prompt to the harness's instructions file (e.g. `AGENTS.md`, `GEMINI.md`, `copilot-instructions.md`).
+* **System Prompt Override**: Support for providing a custom system prompt to the agent (e.g. via `system_prompt.md`). The `gemini` harness has full support via `~/.gemini/system_prompt.md`. ◐ = *partial* — the harness has no native system-prompt flag, so Scion prepends the system prompt to the harness's instructions file: `AGENTS.md` for Hermes, `GEMINI.md` for Antigravity, and `copilot-instructions.md` for Copilot.

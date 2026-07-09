@@ -162,7 +162,7 @@ scion skills publish ./deploy-checklist --version 1.1.0 --skill-id <skill-id>
 | `--scope` | `global` | Scope for a **newly created** skill: `core`, `global`, `project`, or `user`. |
 | `--skill-id` | *(auto)* | Publish a new version for an existing skill ID. If omitted, Scion matches by directory name and creates the skill when no match exists. |
 
-**Per-version limits:** at most **50 files**, **10 MB** per file, and **50 MB** total. `.git/`, `.DS_Store`, `__pycache__`, and `.gitignore` entries are excluded automatically.
+**Per-version limits:** at most **50 files**, **10 MB** per file, and **50 MB** total. `.git/`, `.DS_Store`, `__pycache__`, and files matching `.gitignore` patterns are excluded automatically.
 
 On success the command reports the resolved version and its `sha256:` content hash:
 

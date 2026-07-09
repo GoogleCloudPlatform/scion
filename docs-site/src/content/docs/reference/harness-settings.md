@@ -122,7 +122,7 @@ hash before writing.
 scion harness-config list                 # local configs (add --hub to merge in Hub configs)
 scion harness-config show <name>          # details (local path/image, or Hub ID/status/source URL)
 scion harness-config reset <name>         # restore the global dir to embedded defaults
-scion harness-config upgrade [name]       # additively add missing support files / metadata
+scion harness-config upgrade [name]       # add missing support files / metadata
 ```
 
 `reset` overwrites a config with the binary's embedded defaults. `upgrade` is non-destructive: it
