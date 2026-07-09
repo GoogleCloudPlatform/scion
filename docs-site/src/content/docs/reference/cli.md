@@ -163,6 +163,15 @@ Synchronizes the agent workspace between the host and the container.
     - `--dry-run`: Preview changes without syncing.
     - `--exclude <glob>`: Exclude files matching the pattern.
 
+### `scion reset-auth`
+
+Injects a fresh Hub token into a **running** agent's container and signals it to reload, without
+restarting the agent. Use this to recover an agent whose token expired and cannot self-refresh
+(e.g. after a Hub signing-key rotation). Requires a Hub connection. The same action is available
+as a **Reset Auth** button in the web UI.
+
+**Usage:** `scion reset-auth <agent-name>`
+
 ## Configuration & Workspace
 
 ### `scion project`
@@ -275,6 +284,25 @@ Manages external skill registries for [federation](/scion/hosted/single-node/ski
 - `remove <name-or-id>`: Remove a registry.
 - `pin <name-or-id> <skill-uri>`: Pin a content hash for a pinned-trust registry. Flag: `--hash <sha256:...>` (required).
 
+## Harness Configuration
+
+### `scion harness-config` (alias `hc`)
+
+Manages harness-config bundles — the named, versioned definitions of each harness (config,
+image, capabilities, auth, and supporting files). See
+[Harness-Specific Settings](/scion/reference/harness-settings/#managing-harness-configs) for the
+full lifecycle.
+
+- `list`: List local harness-configs. Flags: `--hub` (also include Hub-registered configs).
+- `show <name>`: Show config details (local path/image, or Hub ID, image status, and source URL).
+- `install <source>`: Install a config from a GitHub URL, local path, rclone URI, or archive. Flags: `--name` (override derived name), `--force` (overwrite existing), `--global` (register at global scope on the Hub).
+- `update [name]`: Re-import (refresh) a config from its stored source URL. Flags: `--url <url>` (override/set the stored source URL for one config), `--all` (re-import every config that has a stored source URL). `--url` and `--all` are mutually exclusive; requires a Hub connection.
+- `sync <name>` (alias `push`): Upload a local config to the Hub (changed files only). Flags: `--name` (publish under a different Hub name).
+- `pull <name>`: Download a config from the Hub. Flags: `--to <path>` (destination; defaults to the global dir).
+- `reset <name>`: Restore a config to the binary's embedded defaults.
+- `upgrade [name]`: Additively add missing support files and metadata without clobbering user values. Flags: `--dry-run`, `--activate-script`, `--force`. With no name, upgrades all configs in the global directory.
+- `delete <name>`: Delete a config from the Hub (does not remove local files). The web UI additionally offers an "Also delete stored files" option.
+
 ## Hub Integration
 
 ### `scion hub`
@@ -328,6 +356,21 @@ Manages Scion server components (Hub and Broker).
     - Flags: `--enable-hub`, `--enable-runtime-broker`, `--port`, `--db`, `--dev-auth`.
 
 ## Miscellaneous
+
+### `scion doctor`
+
+Runs host-side diagnostics: checks Git, tmux, the active container runtime, and runtime-specific
+health (Docker/Podman daemon, or Kubernetes cluster/namespace/RBAC/CSI access). Supports
+`--format json`.
+
+**Usage:** `scion doctor [flags]`
+
+:::note[In-container diagnostics]
+A separate **`sciontool doctor`** command runs *inside* an agent container and diagnoses the
+agent's own health — environment variables, Hub token (presence/format/expiry), Hub reachability,
+token refresh, the GCP metadata server, and the GitHub App token. See
+[Harness Authentication](/scion/local/agent-credentials/#diagnostics).
+:::
 
 ### `scion version`
 
