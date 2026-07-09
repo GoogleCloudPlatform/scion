@@ -33,6 +33,27 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/plugin"
 )
 
+// reconfigureRuntimeKeys lists keys that are injected at runtime/wiring time
+// and must be carried over during reconfigure (they are not in config files).
+var reconfigureRuntimeKeys = map[string]bool{
+	"config_file":      true,
+	"hub_url":          true,
+	"hmac_key":         true,
+	"broker_id":        true,
+	"plugin_name":      true,
+	"project_slug_map": true,
+	"database_url":     true,
+	"database_driver":  true,
+	"bot_id":           true,
+	"mode":             true,
+	"path":             true,
+	"address":          true,
+	"tls_cert_file":    true,
+	"tls_key_file":     true,
+	"tls_ca_file":      true,
+	"tls_skip_verify":  true,
+}
+
 // IntegrationManager is the narrow interface satisfied by *plugin.Manager.
 // It lets the hub query and control broker plugins without importing the
 // plugin package directly.
@@ -315,7 +336,7 @@ func (s *Server) resolveIntegrationSettings(ctx context.Context, mgr Integration
 
 	configFile := runtimeCfg["config_file"]
 	if configFile != "" {
-		if settings, err := config.LoadPluginConfigFile(configFile, nil); err == nil {
+		if settings, err := config.ResolvePluginConfig(configFile, nil); err == nil {
 			for k, v := range runtimeCfg {
 				if _, ok := settings[k]; !ok {
 					settings[k] = v
@@ -805,12 +826,16 @@ func (s *Server) reconfigureIntegration(ctx context.Context, mgr IntegrationMana
 		configFile = pluginCfg["config_file"]
 	}
 
-	// Resolve from file only — do NOT pass the manager's boot-resolved map
-	// as "inline" config, because it contains the file's own keys and would
-	// trigger spurious "inline config keys ignored" deprecation warnings (B2).
-	// Only runtime/wiring keys are carried over via an explicit allowlist,
-	// which also ensures that keys deleted from the config file stay deleted (B3).
-	merged, err := config.ResolvePluginConfig(configFile, nil)
+	// When a config file is set, resolve from file only — do NOT pass the
+	// manager's boot-resolved map as "inline" config, because it contains
+	// the file's own keys and would trigger spurious deprecation warnings (B2).
+	// When no config file exists, pass the manager map as inline config so
+	// that inline-only deployments retain their configuration keys.
+	var inlineToPass map[string]string
+	if configFile == "" {
+		inlineToPass = pluginCfg
+	}
+	merged, err := config.ResolvePluginConfig(configFile, inlineToPass)
 	if err != nil {
 		slog.Error("Failed to resolve config for reconfigure", "plugin", name, "error", err)
 		merged = make(map[string]string)
@@ -819,26 +844,8 @@ func (s *Server) reconfigureIntegration(ctx context.Context, mgr IntegrationMana
 	// Carry over runtime/wiring keys from the manager map.
 	// Wiring keys must be included because ReplaceBrokerConfig uses replace
 	// semantics (no underlay from boot-time config).
-	runtimeKeys := map[string]bool{
-		"config_file":      true,
-		"hub_url":          true,
-		"hmac_key":         true,
-		"broker_id":        true,
-		"plugin_name":      true,
-		"project_slug_map": true,
-		"database_url":     true,
-		"database_driver":  true,
-		"bot_id":           true,
-		"mode":             true,
-		"path":             true,
-		"address":          true,
-		"tls_cert_file":    true,
-		"tls_key_file":     true,
-		"tls_ca_file":      true,
-		"tls_skip_verify":  true,
-	}
 	for k, v := range pluginCfg {
-		if runtimeKeys[k] && merged[k] == "" {
+		if reconfigureRuntimeKeys[k] && merged[k] == "" {
 			merged[k] = v
 		}
 	}

@@ -2255,11 +2255,15 @@ func migrateInlineSecrets(ctx context.Context, sb secret.SecretBackend, pluginNa
 		if !has || val == "" {
 			continue
 		}
-		existing, _ := sb.Get(ctx, m.SecretKey, store.ScopeHub, hubID)
+		existing, err := sb.Get(ctx, m.SecretKey, store.ScopeHub, hubID)
+		if err != nil {
+			log.Printf("Warning: failed to check secret backend for %s (plugin %q), skipping migration: %v", m.ConfigKey, pluginName, err)
+			continue
+		}
 		if existing != nil && existing.Value != "" {
 			continue
 		}
-		_, _, err := sb.Set(ctx, &secret.SetSecretInput{
+		_, _, err = sb.Set(ctx, &secret.SetSecretInput{
 			Name:          m.SecretKey,
 			Value:         val,
 			SecretType:    secret.TypeVariable,
