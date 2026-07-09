@@ -36,6 +36,15 @@ The script-based provisioning model (`provisioner.type: container-script`) by wh
 ### Skill
 A reusable, harness-agnostic instruction snippet contributed by a template and mounted into the harness's skills directory at provisioning. Follows the open [Agent Skills](https://agentskills.io/home) convention.
 
+### Skill Bank
+The Hub-backed system for publishing, versioning, resolving, caching, and federating **Skills**. Encompasses the `scion skills` CLI, the Hub **Skill Registry**, semver + content-hash resolution, and the skills web UI — as distinct from a plain template-mounted skill file.
+
+### Skill Registry
+The Hub-side store and resolver for the **Skill Bank**: it holds published skills and their immutable versions, resolves **Skill Reference URIs**, and can federate resolution to external registries (including GitHub and GCP Vertex AI sources).
+
+### Skill Reference URI
+The addressing scheme for a **Skill**: a bare name or a `skill://<registry>/<scope>/<scopeId>/<name>@<version>` URI (with `gh://` and `gcp-skill://` variants for federated sources). Versions may be exact, a semver range, `latest`, or a `sha256:` content hash.
+
 ### Plugin
 An out-of-process extension built on `hashicorp/go-plugin` (gRPC) that supplies a **Message Broker** implementation without modifying Scion core. **Harness implementations are *not* offered as plugins**; additional plugin types may be added in the future.
 

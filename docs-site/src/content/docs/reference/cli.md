@@ -245,6 +245,36 @@ Manages agent templates.
 - `sync [--all]`: Sync project-level templates with the Hub. Use `--all` to sync all templates at once.
 - `status`: Show the sync status of templates relative to the Hub.
 
+## Skill Bank
+
+### `scion skills`
+
+Manages skills in the Hub skill bank — reusable, versioned instruction snippets referenced by URI (`scion skill`, singular, is an alias). See [Skills — Authoring & Publishing](/scion/local/skills/) for the full guide. All subcommands except `create` require a Hub connection.
+
+- `list`: List available skills.
+    - Flags: `--scope <core|global|project|user>`, `--search <text>`, `--tags <a,b>` (comma-separated, AND semantics).
+- `show <name-or-id>`: Show a skill's details and versions.
+- `create <name>`: Scaffold a new local skill directory with a starter `SKILL.md` (local-only; does not publish).
+- `publish <path>`: Publish a local skill directory to the Hub. Limits: 50 files, 10 MB/file, 50 MB total.
+    - Flags: `--version <semver>` (required), `--scope <core|global|project|user>` (default `global` for new skills), `--skill-id <id>`.
+- `versions <name-or-id>`: List all versions of a skill.
+- `resolve <uri>`: Resolve a skill URI to a concrete version, content hash, and file manifest.
+- `deprecate <name-or-id>`: Mark a published version as deprecated.
+    - Flags: `--version <version>` (required), `--message <text>` (required), `--replacement <uri>`.
+- `delete <name-or-id>` (alias `rm`): Soft-delete a skill (archived, retained for history).
+
+### `scion skills registries`
+
+Manages external skill registries for [federation](/scion/hosted/single-node/skill-registry/). Admin operations.
+
+- `list`: List configured registries.
+- `add <name>`: Register an external skill registry.
+    - Flags: `--endpoint <url>` (required, HTTPS), `--trust <trusted|pinned>` (default `pinned`), `--type <hub|gcp>` (default `hub`), `--description <text>`, `--auth-token <token>`, `--resolve-path <path>`.
+- `show <name-or-id>`: Show registry details.
+- `update <name-or-id>`: Update a registry. Flags: `--endpoint`, `--trust`, `--status <active|disabled>`, `--description`, `--auth-token`, `--resolve-path` (only changed flags are applied).
+- `remove <name-or-id>`: Remove a registry.
+- `pin <name-or-id> <skill-uri>`: Pin a content hash for a pinned-trust registry. Flag: `--hash <sha256:...>` (required).
+
 ## Hub Integration
 
 ### `scion hub`

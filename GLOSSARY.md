@@ -40,7 +40,22 @@ _Avoid_: built-in provisioner, plugin provisioner, install script, provision hoo
 **Skill**:
 A reusable, harness-agnostic instruction snippet contributed by a template and mounted into the harness's skills directory at provisioning. Follows the open [Agent Skills](https://agentskills.io/home) convention.
 _Avoid_: prompt snippet, macro, plugin
-_See also_: Template, Plugin
+_See also_: Template, Plugin, Skill Bank
+
+**Skill Bank**:
+The Hub-backed system for publishing, versioning, resolving, caching, and federating Skills. Encompasses the `scion skills` CLI, the Hub Skill Registry, semver + content-hash resolution, and the skills web UI — as distinct from a plain template-mounted skill file.
+_Avoid_: skill store, skill hub, skill catalog
+_See also_: Skill, Skill Registry, Skill Reference URI
+
+**Skill Registry**:
+The Hub-side store and resolver for the Skill Bank: it holds published skills and their immutable versions, resolves Skill Reference URIs, and can federate resolution to external registries (including GitHub and GCP Vertex AI sources).
+_Avoid_: skill repo, skill index
+_See also_: Skill Bank, Skill Reference URI
+
+**Skill Reference URI**:
+The addressing scheme for a Skill: a bare name or a `skill://<registry>/<scope>/<scopeId>/<name>@<version>` URI (with `gh://` and `gcp-skill://` variants for federated sources). Versions may be exact, a semver range, `latest`, or a `sha256:` content hash.
+_Avoid_: skill path, skill locator
+_See also_: Skill Bank, Skill Registry
 
 **Plugin**:
 An out-of-process extension built on `hashicorp/go-plugin` (gRPC) that supplies a Message Broker implementation without modifying Scion core. Harness implementations are *not* offered as plugins; additional plugin types may be added in future.

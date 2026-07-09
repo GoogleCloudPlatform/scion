@@ -193,6 +193,10 @@ scion harness-config reset gemini
 
 Templates can define **skills** — reusable, harness-agnostic instruction snippets that are automatically mounted into the appropriate harness-specific directory during agent provisioning.
 
+:::note
+This section covers **template-mounted** skills that ship inside a template. To publish versioned skills to a Hub-backed registry and reference them by URI from any template, see [Skills — Authoring & Publishing](/scion/local/skills/) and [Skill Registry & Federation](/scion/hosted/single-node/skill-registry/).
+:::
+
 When an agent is created, Scion collects skills from each template in the chain and mounts them into the correct location for the harness:
 
 | Harness | Skills Directory |
