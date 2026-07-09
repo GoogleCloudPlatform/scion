@@ -351,6 +351,19 @@
           "$ref": "#/$defs/harnessNoAuthConfig",
           "description": "Behavior when an agent starts without credentials (NoAuth mode)."
         },
+        "thinking_budget_map": {
+          "type": "object",
+          "additionalProperties": { "type": "integer" },
+          "description": "Maps model identifiers to their thinking-budget token limits."
+        },
+        "thinking_budget_flag": {
+          "type": "string",
+          "description": "CLI flag name used to pass the thinking budget to the harness (e.g., '--thinking-budget')."
+        },
+        "thinking_budget_config_key": {
+          "type": "string",
+          "description": "Harness-native config key used to set the thinking budget in a config file."
+        },
         "dialect": {
           "type": "object",
           "description": "Optional hook dialect metadata.",
