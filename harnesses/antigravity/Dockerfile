@@ -25,7 +25,7 @@ RUN mkdir -p /home/scion/.gemini/antigravity-cli \
   && chown -R scion:scion /home/scion/.gemini /home/scion/.agents
 
 # Pin the CLI to a specific release version.
-ARG AGY_VERSION=1.0.16
+ARG AGY_VERSION=1.1.0
 
 RUN ARCH=$(case "${TARGETARCH:-amd64}" in amd64) echo "x64";; arm64) echo "arm64";; *) echo "${TARGETARCH}";; esac) \
   && curl -fsSL -o /tmp/cli.tar.gz \
