@@ -59,11 +59,11 @@ func (s *Server) syncResourceFromStorage(
 	}
 
 	label := string(kind)
-	updated := make([]store.TemplateFile, len(files))
-	copy(updated, files)
+	updated := make([]store.TemplateFile, 0, len(files))
 
-	for i, file := range updated {
+	for _, file := range files {
 		if file.Hash == "" {
+			updated = append(updated, file)
 			continue
 		}
 		objectPath := storagePath + "/" + file.Path
@@ -71,8 +71,9 @@ func (s *Server) syncResourceFromStorage(
 		obj, getErr := stor.GetObject(ctx, objectPath)
 		if getErr != nil {
 			if errors.Is(getErr, storage.ErrNotFound) {
-				s.resourceLog.Warn(label+" repair: object not found",
+				s.resourceLog.Warn(label+" repair: dropping file missing from storage",
 					"resource", name, "file", file.Path)
+				changed = true
 				continue
 			}
 			return nil, "", false, fmt.Errorf("get object %q: %w", objectPath, getErr)
@@ -87,13 +88,15 @@ func (s *Server) syncResourceFromStorage(
 			}
 		}
 
+		entry := file
 		if actualHash != file.Hash {
 			s.resourceLog.Warn(label+" repair: updating stale file hash",
 				"resource", name, "file", file.Path,
 				"dbHash", file.Hash, "storageHash", actualHash)
-			updated[i].Hash = actualHash
+			entry.Hash = actualHash
 			changed = true
 		}
+		updated = append(updated, entry)
 	}
 
 	if !changed {
