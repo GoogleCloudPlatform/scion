@@ -2049,6 +2049,12 @@ func initPluginManager() *scionplugin.Manager {
 			log.Printf("Warning: failed to load config file for plugin %q: %v", name, mergeErr)
 			mergedConfig = entry.Config
 		}
+		if entry.ConfigFile != "" {
+			if mergedConfig == nil {
+				mergedConfig = make(map[string]string)
+			}
+			mergedConfig["config_file"] = entry.ConfigFile
+		}
 		pluginsCfg.Broker[name] = scionplugin.PluginEntry{
 			Path:          entry.Path,
 			Config:        mergedConfig,

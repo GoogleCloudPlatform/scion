@@ -153,6 +153,12 @@ func (m *Manager) LoadAll(cfg PluginsConfig, pluginsDir string) error {
 
 // LoadOne loads a single plugin by type and name from the given configuration.
 func (m *Manager) LoadOne(pluginType, name string, entry PluginEntry, pluginsDir string) error {
+	if entry.ConfigFile != "" {
+		if entry.Config == nil {
+			entry.Config = make(map[string]string)
+		}
+		entry.Config["config_file"] = entry.ConfigFile
+	}
 	if entry.ResolvedDeploymentMode() == DeploymentModeHA {
 		return m.loadGRPCPlugin(pluginType, name, entry)
 	}

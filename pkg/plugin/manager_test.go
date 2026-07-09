@@ -16,6 +16,8 @@ package plugin
 
 import (
 	"log/slog"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -184,6 +186,74 @@ func (m *mockHostCallbacks) CancelSubscription(pattern string) error {
 		return m.onCancel(pattern)
 	}
 	return nil
+}
+
+func TestGetPluginConfig_ConfigFilePropagated(t *testing.T) {
+	mgr := NewManager(nil)
+
+	mgr.mu.Lock()
+	mgr.configs["broker:telegram"] = DiscoveredPlugin{
+		Name: "telegram",
+		Type: PluginTypeBroker,
+		Config: map[string]string{
+			"config_file":    "/etc/scion/telegram.yaml",
+			"webhook_listen": ":9094",
+		},
+	}
+	mgr.mu.Unlock()
+
+	cfg := mgr.GetPluginConfig(PluginTypeBroker, "telegram")
+	require.NotNil(t, cfg)
+	assert.Equal(t, "/etc/scion/telegram.yaml", cfg["config_file"])
+	assert.Equal(t, ":9094", cfg["webhook_listen"])
+}
+
+func TestGetPluginConfig_NoConfigFile(t *testing.T) {
+	mgr := NewManager(nil)
+
+	mgr.mu.Lock()
+	mgr.configs["broker:nats"] = DiscoveredPlugin{
+		Name:   "nats",
+		Type:   PluginTypeBroker,
+		Config: map[string]string{"url": "nats://localhost:4222"},
+	}
+	mgr.mu.Unlock()
+
+	cfg := mgr.GetPluginConfig(PluginTypeBroker, "nats")
+	require.NotNil(t, cfg)
+	assert.Empty(t, cfg["config_file"])
+}
+
+func TestConfigFilePropagation_EndToEnd(t *testing.T) {
+	dir := t.TempDir()
+	logger := slog.Default()
+
+	brokerDir := filepath.Join(dir, "broker")
+	require.NoError(t, os.MkdirAll(brokerDir, 0755))
+	pluginPath := filepath.Join(brokerDir, "scion-plugin-telegram")
+	require.NoError(t, os.WriteFile(pluginPath, []byte("#!/bin/sh\n"), 0755))
+
+	cfg := PluginsConfig{
+		Broker: map[string]PluginEntry{
+			"telegram": {
+				ConfigFile: "/etc/scion/telegram.yaml",
+				Config:     map[string]string{"webhook_listen": ":9094"},
+			},
+		},
+	}
+
+	discovered := DiscoverPlugins(cfg, dir, logger)
+	require.Len(t, discovered, 1)
+
+	mgr := NewManager(logger)
+	mgr.mu.Lock()
+	mgr.configs["broker:telegram"] = discovered[0]
+	mgr.mu.Unlock()
+
+	pluginCfg := mgr.GetPluginConfig(PluginTypeBroker, "telegram")
+	require.NotNil(t, pluginCfg)
+	assert.Equal(t, "/etc/scion/telegram.yaml", pluginCfg["config_file"],
+		"config_file must be propagated from PluginEntry through DiscoverPlugins to GetPluginConfig")
 }
 
 func TestManagerShutdown_SelfManagedTracking(t *testing.T) {

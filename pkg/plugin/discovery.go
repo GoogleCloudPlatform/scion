@@ -44,6 +44,12 @@ func DiscoverPlugins(cfg PluginsConfig, pluginsDir string, logger *slog.Logger) 
 
 	// 1. From settings configuration
 	for name, entry := range cfg.Broker {
+		if entry.ConfigFile != "" {
+			if entry.Config == nil {
+				entry.Config = make(map[string]string)
+			}
+			entry.Config["config_file"] = entry.ConfigFile
+		}
 		if entry.SelfManaged {
 			discovered = append(discovered, DiscoveredPlugin{
 				Name:        name,

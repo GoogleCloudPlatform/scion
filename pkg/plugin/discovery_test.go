@@ -262,6 +262,73 @@ func TestDiscoverPlugins_MixedModes(t *testing.T) {
 	assert.Equal(t, "localhost:9090", chat.Address)
 }
 
+func TestDiscoverPlugins_ConfigFilePropagated(t *testing.T) {
+	dir := t.TempDir()
+	logger := slog.Default()
+
+	brokerDir := filepath.Join(dir, "broker")
+	require.NoError(t, os.MkdirAll(brokerDir, 0755))
+	pluginPath := filepath.Join(brokerDir, "scion-plugin-telegram")
+	require.NoError(t, os.WriteFile(pluginPath, []byte("#!/bin/sh\n"), 0755))
+
+	cfg := PluginsConfig{
+		Broker: map[string]PluginEntry{
+			"telegram": {
+				ConfigFile: "/etc/scion/telegram.yaml",
+				Config:     map[string]string{"webhook_listen": ":9094"},
+			},
+		},
+	}
+
+	discovered := DiscoverPlugins(cfg, dir, logger)
+	require.Len(t, discovered, 1)
+	assert.Equal(t, "/etc/scion/telegram.yaml", discovered[0].Config["config_file"])
+	assert.Equal(t, ":9094", discovered[0].Config["webhook_listen"])
+}
+
+func TestDiscoverPlugins_ConfigFilePropagated_SelfManaged(t *testing.T) {
+	dir := t.TempDir()
+	logger := slog.Default()
+
+	cfg := PluginsConfig{
+		Broker: map[string]PluginEntry{
+			"googlechat": {
+				SelfManaged: true,
+				Address:     "localhost:9090",
+				ConfigFile:  "/etc/scion/googlechat.yaml",
+				Config:      map[string]string{"project_id": "my-project"},
+			},
+		},
+	}
+
+	discovered := DiscoverPlugins(cfg, dir, logger)
+	require.Len(t, discovered, 1)
+	assert.Equal(t, "/etc/scion/googlechat.yaml", discovered[0].Config["config_file"])
+	assert.Equal(t, "my-project", discovered[0].Config["project_id"])
+}
+
+func TestDiscoverPlugins_NoConfigFile_NoKey(t *testing.T) {
+	dir := t.TempDir()
+	logger := slog.Default()
+
+	brokerDir := filepath.Join(dir, "broker")
+	require.NoError(t, os.MkdirAll(brokerDir, 0755))
+	pluginPath := filepath.Join(brokerDir, "scion-plugin-nats")
+	require.NoError(t, os.WriteFile(pluginPath, []byte("#!/bin/sh\n"), 0755))
+
+	cfg := PluginsConfig{
+		Broker: map[string]PluginEntry{
+			"nats": {
+				Config: map[string]string{"url": "nats://localhost:4222"},
+			},
+		},
+	}
+
+	discovered := DiscoverPlugins(cfg, dir, logger)
+	require.Len(t, discovered, 1)
+	assert.Empty(t, discovered[0].Config["config_file"])
+}
+
 func TestDefaultPluginsDir(t *testing.T) {
 	dir, err := DefaultPluginsDir()
 	require.NoError(t, err)
