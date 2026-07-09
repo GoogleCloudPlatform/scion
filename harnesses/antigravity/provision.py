@@ -28,7 +28,25 @@ assert scion_harness.INTERFACE_VERSION >= 2, (
     f"scion_harness INTERFACE_VERSION {scion_harness.INTERFACE_VERSION} < 2"
 )
 
-PROVISION_VERSION = "2026-06-25T01:00:00Z"
+PROVISION_VERSION = "2026-07-09T01:00:00Z"
+
+FLASH_MODEL = "Gemini 3.5 Flash"
+PRO_MODEL = "Gemini 3.1 Pro"
+
+DEFAULT_THINKING_LEVEL = 50
+
+
+def _resolve_thinking_bucket(model: str, level: int) -> str:
+    """Map a thinking level (0-100) to a named bucket for the given model family."""
+    level = max(0, min(100, level))
+    if PRO_MODEL.lower() in model.lower():
+        return "high" if level >= 50 else "low"
+    # Flash (default)
+    if level >= 67:
+        return "high"
+    if level >= 34:
+        return "medium"
+    return "low"
 
 AGY_MCP_MAPPING: dict[str, Any] = {
     "global_config_file": ".gemini/config/mcp_config.json",
@@ -141,10 +159,21 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
     ctx.write_outputs(resolved, env={})
 
     instructions_file = ctx.harness_config.get("instructions_file") or "GEMINI.md"
-    model = os.environ.get("AGY_MODEL", "") or "Gemini 3.5 Flash"
+    model = (
+        ctx.harness_config.get("model")
+        or os.environ.get("AGY_MODEL", "")
+        or FLASH_MODEL
+    )
+    thinking_raw = os.environ.get("AGY_THINKING_LEVEL", "")
+    thinking_level = int(thinking_raw) if thinking_raw.strip().isdigit() else DEFAULT_THINKING_LEVEL
+    thinking_bucket = _resolve_thinking_bucket(model, thinking_level)
+    ctx.info(f"model={model} thinking_level={thinking_level} bucket={thinking_bucket}")
     _copy_instructions(ctx.bundle_dir, ctx.home, instructions_file)
     _generate_hooks_json(ctx.home)
-    _prestage_onboarding(ctx.home, enterprise=is_enterprise, model=model)
+    _prestage_onboarding(
+        ctx.home, enterprise=is_enterprise, model=model,
+        thinking_bucket=thinking_bucket,
+    )
     _apply_mcp(ctx)
 
     ctx.info(f"method={method}")
@@ -391,7 +420,7 @@ def _copy_instructions(bundle: str, home: str, instructions_file: str) -> None:
 
 def _prestage_onboarding(
     home: str, workspace: str = "/workspace", enterprise: bool = False,
-    model: str = "",
+    model: str = "", thinking_bucket: str = "",
 ) -> None:
     """Pre-stage AGY config files to skip interactive onboarding.
 
@@ -433,6 +462,8 @@ def _prestage_onboarding(
         }
         if model:
             settings["model"] = model
+        if thinking_bucket:
+            settings["thinkingBudget"] = thinking_bucket
         scion_harness.atomic_write_json(settings_path, settings)
 
     # cache/onboarding.json — marks onboarding complete.
