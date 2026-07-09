@@ -65,7 +65,7 @@ interface AppliedConfig {
   };
 }
 
-interface AgentWithConfig extends Agent {
+interface AgentWithConfig extends Omit<Agent, 'appliedConfig'> {
   appliedConfig?: AppliedConfig;
 }
 
