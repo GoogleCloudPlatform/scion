@@ -720,7 +720,7 @@ func (m *Manager) UpdatePlugin(name string, repoPath string) error {
 
 // InstallPlugin builds a plugin binary from source and loads it into the manager.
 // Used for first-time installation of plugins not yet present on the system.
-func (m *Manager) InstallPlugin(name, repoPath, pluginsDir string) error {
+func (m *Manager) InstallPlugin(name, repoPath, pluginsDir, configFile string) error {
 	key := PluginTypeBroker + ":" + name
 	m.mu.RLock()
 	_, alreadyLoaded := m.clients[key]
@@ -757,7 +757,7 @@ func (m *Manager) InstallPlugin(name, repoPath, pluginsDir string) error {
 		return fmt.Errorf("go build failed for plugin %q: %w\n%s", name, err, string(output))
 	}
 
-	return m.LoadOne(PluginTypeBroker, name, PluginEntry{Path: targetPath}, pluginsDir)
+	return m.LoadOne(PluginTypeBroker, name, PluginEntry{Path: targetPath, ConfigFile: configFile}, pluginsDir)
 }
 
 // Shutdown kills all plugin processes gracefully.

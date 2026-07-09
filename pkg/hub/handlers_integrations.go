@@ -47,7 +47,7 @@ type IntegrationManager interface {
 	BrokerHealthCheck(name string) (status, message string, details map[string]string, err error)
 	BrokerInfo(name string) (version, channelID string, capabilities []string, err error)
 	UpdatePlugin(name string, repoPath string) error
-	InstallPlugin(name, repoPath, pluginsDir string) error
+	InstallPlugin(name, repoPath, pluginsDir, configFile string) error
 	GetGRPCBrokerAdapter(name string) plugin.GRPCBrokerClient
 }
 
@@ -605,12 +605,6 @@ func (s *Server) handleInstallIntegration(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	if err := mgr.InstallPlugin(name, repoPath, pluginsDir); err != nil {
-		slog.Error("Failed to install integration", "plugin", name, "error", err)
-		InternalError(w)
-		return
-	}
-
 	configFilePath := "~/.scion/scion-" + name + ".yaml"
 	if err := config.CreatePluginConfigFile(name, configFilePath); err != nil {
 		slog.Error("Failed to create plugin config file", "plugin", name, "error", err)
@@ -623,6 +617,12 @@ func (s *Server) handleInstallIntegration(w http.ResponseWriter, r *http.Request
 	settingsWriteMu.Unlock()
 	if err != nil {
 		slog.Error("Failed to add plugin to settings.yaml", "plugin", name, "error", err)
+		InternalError(w)
+		return
+	}
+
+	if err := mgr.InstallPlugin(name, repoPath, pluginsDir, configFilePath); err != nil {
+		slog.Error("Failed to install integration", "plugin", name, "error", err)
 		InternalError(w)
 		return
 	}

@@ -138,12 +138,15 @@ func (m *mockIntegrationManager) UpdatePlugin(name string, repoPath string) erro
 	return m.updateErr
 }
 
-func (m *mockIntegrationManager) InstallPlugin(name, repoPath, pluginsDir string) error {
+func (m *mockIntegrationManager) InstallPlugin(name, repoPath, pluginsDir, configFile string) error {
 	m.installCalls = append(m.installCalls, name)
 	if m.installErr != nil {
 		return m.installErr
 	}
 	m.plugins[name] = map[string]string{}
+	if configFile != "" {
+		m.plugins[name]["config_file"] = configFile
+	}
 	return nil
 }
 
@@ -1581,6 +1584,25 @@ func TestGetIntegration_HA_ReadsFromPostgres(t *testing.T) {
 	// Internal keys should be filtered out.
 	if _, ok := detail.Settings["hub_url"]; ok {
 		t.Error("hub_url should be filtered from settings")
+	}
+}
+
+func TestInstallPlugin_PassesConfigFile(t *testing.T) {
+	mgr := newMockIntegrationManager()
+
+	if err := mgr.InstallPlugin("telegram", "/repo", "/plugins", "~/.scion/scion-telegram.yaml"); err != nil {
+		t.Fatalf("InstallPlugin: %v", err)
+	}
+
+	cfg := mgr.GetPluginConfig("broker", "telegram")
+	if cfg == nil {
+		t.Fatal("expected non-nil config after install")
+	}
+	if cfg["config_file"] == "" {
+		t.Error("expected config_file to be set after InstallPlugin with configFile parameter")
+	}
+	if cfg["config_file"] != "~/.scion/scion-telegram.yaml" {
+		t.Errorf("expected config_file=~/.scion/scion-telegram.yaml, got %q", cfg["config_file"])
 	}
 }
 
