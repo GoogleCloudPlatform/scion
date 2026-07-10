@@ -102,7 +102,6 @@ func (s *Server) listRuntimeBrokers(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	result.Items = filtered
-	result.TotalCount = len(filtered)
 
 	// Batch-resolve CreatedByName for all brokers
 	s.enrichBrokerCreatorNames(ctx, result.Items)
