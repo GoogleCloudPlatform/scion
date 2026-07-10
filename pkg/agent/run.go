@@ -610,7 +610,9 @@ authDone:
 			opts.Env["SCION_CREATOR"] = u.Username
 		}
 	}
-	opts.Env["SCION_CLI_MODE"] = "agent"
+	if _, ok := opts.Env["SCION_CLI_MODE"]; !ok {
+		opts.Env["SCION_CLI_MODE"] = "agent"
+	}
 
 	// Determine whether hub is explicitly disabled in project settings.
 	// When disabled, we suppress hub env var injection from agent config
