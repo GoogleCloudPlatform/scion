@@ -286,7 +286,7 @@ func (s *Server) handleProjectCacheNotify(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	storagePath := storage.ProjectWorkspaceStoragePath("", projectID)
+	storagePath := storage.ProjectWorkspaceStoragePath(s.HubID(), projectID)
 	if err := gcp.SyncFromGCS(ctx, stor.Bucket(), storagePath+"/files", cachePath); err != nil {
 		RuntimeError(w, "Failed to download workspace from GCS: "+err.Error())
 		return
@@ -347,7 +347,7 @@ func (s *Server) refreshProjectCacheFromBroker(ctx context.Context, project *sto
 		return nil, fmt.Errorf("broker %s has no local path recorded for project %s", brokerID, project.Name)
 	}
 
-	storagePath := storage.ProjectWorkspaceStoragePath("", project.ID)
+	storagePath := storage.ProjectWorkspaceStoragePath(s.HubID(), project.ID)
 
 	// Tunnel request to broker to upload project workspace to GCS.
 	// The workspace path tells the broker which directory to upload.

@@ -382,13 +382,13 @@ func (s *Server) createSkill(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Generate storage path and URI
-	storagePath := storage.SkillStoragePath("", skill.Scope, skill.ScopeID, skill.Slug)
+	storagePath := storage.SkillStoragePath(s.HubID(), skill.Scope, skill.ScopeID, skill.Slug)
 	skill.StoragePath = storagePath
 
 	stor := s.GetStorage()
 	if stor != nil {
 		skill.StorageBucket = stor.Bucket()
-		skill.StorageURI = storage.SkillStorageURI("", stor.Bucket(), skill.Scope, skill.ScopeID, skill.Slug)
+		skill.StorageURI = storage.SkillStorageURI(s.HubID(), stor.Bucket(), skill.Scope, skill.ScopeID, skill.Slug)
 	}
 
 	if err := s.store.CreateSkill(ctx, skill); err != nil {

@@ -104,19 +104,20 @@ type resourcePersistence interface {
 // bootstrapSingle*/syncExisting* routines; construct it per-kind via
 // Server.templateStore / Server.harnessConfigStore.
 type ResourceStore struct {
-	srv  *Server
-	pers resourcePersistence
+	srv   *Server
+	pers  resourcePersistence
+	hubID string
 }
 
 // templateStore returns a ResourceStore for templates.
 func (s *Server) templateStore() *ResourceStore {
-	return &ResourceStore{srv: s, pers: &templatePersistence{s: s}}
+	return &ResourceStore{srv: s, pers: &templatePersistence{s: s}, hubID: s.HubID()}
 }
 
 // harnessConfigStore returns a ResourceStore for harness-configs. harness is the
 // harness type already parsed from the directory's config.yaml by the caller.
 func (s *Server) harnessConfigStore(harness string) *ResourceStore {
-	return &ResourceStore{srv: s, pers: &harnessConfigPersistence{s: s, harness: harness}}
+	return &ResourceStore{srv: s, pers: &harnessConfigPersistence{s: s, harness: harness}, hubID: s.HubID()}
 }
 
 // Bootstrap imports a new resource directory or syncs an existing one into the
@@ -148,7 +149,7 @@ func (rs *ResourceStore) Bootstrap(ctx context.Context, name, dir, scope, scopeI
 
 	if existing == nil {
 		// New resource — create a pending record, upload, then activate.
-		storagePath := storage.ResourceStoragePath("", kind, scope, scopeID, slug)
+		storagePath := storage.ResourceStoragePath(rs.hubID, kind, scope, scopeID, slug)
 		rec := &ResourceRecord{
 			Kind:          kind,
 			ID:            api.NewUUID(),
@@ -159,7 +160,7 @@ func (rs *ResourceStore) Bootstrap(ctx context.Context, name, dir, scope, scopeI
 			Status:        resourceStatusPending,
 			StoragePath:   storagePath,
 			StorageBucket: stor.Bucket(),
-			StorageURI:    storage.ResourceStorageURI("", stor.Bucket(), kind, scope, scopeID, slug),
+			StorageURI:    storage.ResourceStorageURI(rs.hubID, stor.Bucket(), kind, scope, scopeID, slug),
 			SourceURL:     sourceURL,
 			Visibility:    p.DefaultVisibility(),
 		}
@@ -193,7 +194,7 @@ func (rs *ResourceStore) Bootstrap(ctx context.Context, name, dir, scope, scopeI
 
 	storagePath := existing.StoragePath
 	if storagePath == "" {
-		storagePath = storage.ResourceStoragePath("", kind, existing.Scope, existing.ScopeID, existing.Slug)
+		storagePath = storage.ResourceStoragePath(rs.hubID, kind, existing.Scope, existing.ScopeID, existing.Slug)
 	}
 
 	uploaded, written, err := uploadResourceFiles(ctx, stor, storagePath, files, p.Label())

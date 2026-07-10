@@ -75,7 +75,7 @@ func (rs *ResourceStore) ValidateStorage(ctx context.Context, rec *ResourceRecor
 
 	storagePath := rec.StoragePath
 	if storagePath == "" {
-		storagePath = storage.ResourceStoragePath("", rec.Kind, rec.Scope, rec.ScopeID, rec.Slug)
+		storagePath = storage.ResourceStoragePath(rs.hubID, rec.Kind, rec.Scope, rec.ScopeID, rec.Slug)
 	}
 
 	for _, file := range rec.Files {

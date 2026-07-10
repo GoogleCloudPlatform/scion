@@ -195,13 +195,13 @@ func (s *Server) createHarnessConfig(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Generate storage path and URI
-	storagePath := storage.HarnessConfigStoragePath("", hc.Scope, hc.ScopeID, hc.Slug)
+	storagePath := storage.HarnessConfigStoragePath(s.HubID(), hc.Scope, hc.ScopeID, hc.Slug)
 	hc.StoragePath = storagePath
 
 	stor := s.GetStorage()
 	if stor != nil {
 		hc.StorageBucket = stor.Bucket()
-		hc.StorageURI = storage.HarnessConfigStorageURI("", stor.Bucket(), hc.Scope, hc.ScopeID, hc.Slug)
+		hc.StorageURI = storage.HarnessConfigStorageURI(s.HubID(), stor.Bucket(), hc.Scope, hc.ScopeID, hc.Slug)
 	}
 
 	if err := s.store.CreateHarnessConfig(ctx, hc); err != nil {
@@ -803,13 +803,13 @@ func (s *Server) handleHarnessConfigClone(w http.ResponseWriter, r *http.Request
 		clone.Visibility = source.Visibility
 	}
 
-	storagePath := storage.HarnessConfigStoragePath("", clone.Scope, clone.ScopeID, clone.Slug)
+	storagePath := storage.HarnessConfigStoragePath(s.HubID(), clone.Scope, clone.ScopeID, clone.Slug)
 	clone.StoragePath = storagePath
 
 	stor := s.GetStorage()
 	if stor != nil {
 		clone.StorageBucket = stor.Bucket()
-		clone.StorageURI = storage.HarnessConfigStorageURI("", stor.Bucket(), clone.Scope, clone.ScopeID, clone.Slug)
+		clone.StorageURI = storage.HarnessConfigStorageURI(s.HubID(), stor.Bucket(), clone.Scope, clone.ScopeID, clone.Slug)
 	}
 
 	if stor != nil && len(source.Files) > 0 && source.StoragePath != "" {

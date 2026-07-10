@@ -182,7 +182,7 @@ func (s *Server) handleWorkspaceStatus(w http.ResponseWriter, r *http.Request, a
 	stor := s.GetStorage()
 	storageURI := ""
 	if stor != nil {
-		storageURI = storage.WorkspaceStorageURI("", stor.Bucket(), agent.ProjectID, agentID)
+		storageURI = storage.WorkspaceStorageURI(s.HubID(), stor.Bucket(), agent.ProjectID, agentID)
 	}
 
 	// TODO: Fetch last sync info from storage metadata
@@ -233,7 +233,7 @@ func (s *Server) handleWorkspaceSyncFrom(w http.ResponseWriter, r *http.Request,
 	}
 
 	// Get workspace storage path
-	storagePath := storage.WorkspaceStoragePath("", agent.ProjectID, agentID)
+	storagePath := storage.WorkspaceStoragePath(s.HubID(), agent.ProjectID, agentID)
 
 	// Tunnel request to Runtime Broker to upload workspace to GCS
 	cc := s.GetControlChannelManager()
@@ -331,7 +331,7 @@ func (s *Server) handleWorkspaceSyncTo(w http.ResponseWriter, r *http.Request, a
 	}
 
 	// Get workspace storage path
-	storagePath := storage.WorkspaceStoragePath("", agent.ProjectID, agentID)
+	storagePath := storage.WorkspaceStoragePath(s.HubID(), agent.ProjectID, agentID)
 
 	// Check for existing files with matching hashes (incremental sync)
 	expires := time.Now().Add(SignedURLExpiry)
@@ -422,7 +422,7 @@ func (s *Server) handleWorkspaceSyncToFinalize(w http.ResponseWriter, r *http.Re
 	}
 
 	// Get workspace storage path
-	storagePath := storage.WorkspaceStoragePath("", agent.ProjectID, agentID)
+	storagePath := storage.WorkspaceStoragePath(s.HubID(), agent.ProjectID, agentID)
 
 	// Verify all files exist in storage
 	for _, file := range req.Manifest.Files {
@@ -698,7 +698,7 @@ func (s *Server) syncHubManagedWorkspaceBack(ctx context.Context, agent *store.A
 	}
 
 	// Use the project-level storage path for hub-managed projects
-	projectStoragePath := storage.ProjectWorkspaceStoragePath("", project.ID)
+	projectStoragePath := storage.ProjectWorkspaceStoragePath(s.HubID(), project.ID)
 	if err := gcp.SyncFromGCS(ctx, stor.Bucket(), projectStoragePath+"/files", workspacePath); err != nil {
 		s.workspaceLog.Warn("syncHubManagedWorkspaceBack: GCS download failed",
 			"project_id", project.ID, "storagePath", projectStoragePath, "error", err)

@@ -296,7 +296,7 @@ func (rs *ResourceStore) bootstrapSourceCreate(
 	kind := p.Kind()
 	stor := srv.GetStorage()
 
-	storagePath := storage.ResourceStoragePath("", kind, meta.Scope, meta.ScopeID, slug)
+	storagePath := storage.ResourceStoragePath(rs.hubID, kind, meta.Scope, meta.ScopeID, slug)
 	rec := &ResourceRecord{
 		Kind:          kind,
 		ID:            api.NewUUID(),
@@ -307,7 +307,7 @@ func (rs *ResourceStore) bootstrapSourceCreate(
 		Status:        resourceStatusPending,
 		StoragePath:   storagePath,
 		StorageBucket: stor.Bucket(),
-		StorageURI:    storage.ResourceStorageURI("", stor.Bucket(), kind, meta.Scope, meta.ScopeID, slug),
+		StorageURI:    storage.ResourceStorageURI(rs.hubID, stor.Bucket(), kind, meta.Scope, meta.ScopeID, slug),
 		SourceURL:     meta.SourceURL,
 		Visibility:    p.DefaultVisibility(),
 	}
@@ -382,7 +382,7 @@ func (rs *ResourceStore) bootstrapSourceUpdate(
 
 	storagePath := existing.StoragePath
 	if storagePath == "" {
-		storagePath = storage.ResourceStoragePath("", kind, existing.Scope, existing.ScopeID, existing.Slug)
+		storagePath = storage.ResourceStoragePath(rs.hubID, kind, existing.Scope, existing.ScopeID, existing.Slug)
 	}
 
 	uploaded, written, err := uploadResourceFiles(ctx, stor, storagePath, files, p.Label())
@@ -432,7 +432,7 @@ func (rs *ResourceStore) repairStorageIfNeeded(
 
 	storagePath := rec.StoragePath
 	if storagePath == "" {
-		storagePath = storage.ResourceStoragePath("", kind, rec.Scope, rec.ScopeID, rec.Slug)
+		storagePath = storage.ResourceStoragePath(rs.hubID, kind, rec.Scope, rec.ScopeID, rec.Slug)
 	}
 
 	srv.resourceLog.Info(p.Label()+": repairing storage",

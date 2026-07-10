@@ -891,7 +891,7 @@ func (s *Server) syncWorkspaceOnStop(ctx context.Context, agent *store.Agent) {
 		return
 	}
 
-	storagePath := storage.ProjectWorkspaceStoragePath("", project.ID)
+	storagePath := storage.ProjectWorkspaceStoragePath(s.HubID(), project.ID)
 
 	// Tunnel upload request to the broker
 	uploadReq := RuntimeBrokerWorkspaceUploadRequest{

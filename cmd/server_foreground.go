@@ -1326,6 +1326,9 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 	// Hub ID was already resolved and set during initHubServer via ServerConfig.HubID
 	hubID := hubSrv.HubID()
 	log.Printf("Hub instance ID: %s", hubID)
+	if hubID != "" && storageBucket != "" {
+		slog.Info("storage: using hub-scoped GCS paths", "hub_id", hubID, "prefix", "hubs/"+hubID+"/")
+	}
 
 	// Secret backend was initialized before hub.New() and passed via
 	// ServerConfig.SecretBackend so that signing keys are loaded from it
