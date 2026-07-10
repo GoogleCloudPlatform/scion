@@ -1394,6 +1394,11 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 		}
 	}
 
+	// On first boot with hub-namespaced paths, copy legacy GCS objects to
+	// the hub-scoped prefix so that subsequent sync/dispatch uses the
+	// namespaced paths. Runs synchronously before SyncAll* calls.
+	hubSrv.MigrateStorageOnFirstBoot(ctx)
+
 	// Reconcile resource DB manifest hashes against actual GCS content.
 	// In multi-hub mode a peer hub may have uploaded newer files; this ensures
 	// the local DB reflects reality before any dispatch is attempted.
