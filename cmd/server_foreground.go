@@ -2063,7 +2063,7 @@ func initPluginManager(ctx context.Context, secretBackend secret.SecretBackend) 
 			mergedConfig = stripSecretKeys(entry.Config)
 		}
 		if secretBackend != nil {
-			injectPluginSecretsIntoConfig(ctx, secretBackend, name, mergedConfig)
+			mergedConfig = injectPluginSecretsIntoConfig(ctx, secretBackend, name, mergedConfig)
 		}
 		if entry.ConfigFile != "" {
 			if mergedConfig == nil {
@@ -2327,25 +2327,31 @@ func injectPluginSecrets(ctx context.Context, sb secret.SecretBackend, pluginNam
 // Configure. Without this, plugins that validate required keys (e.g.
 // Telegram's bot_token) during Configure would fail because
 // ResolvePluginConfig already stripped inline secrets.
-func injectPluginSecretsIntoConfig(ctx context.Context, sb secret.SecretBackend, pluginName string, cfg map[string]string) {
-	if sb == nil || cfg == nil {
-		return
+func injectPluginSecretsIntoConfig(ctx context.Context, sb secret.SecretBackend, pluginName string, cfg map[string]string) map[string]string {
+	if sb == nil {
+		return cfg
 	}
 
 	mappings, ok := config.PluginSecretKeyMap[pluginName]
 	if !ok {
-		return
+		return cfg
 	}
 
 	hubID := sb.HubID()
 	for _, m := range mappings {
-		if existing, ok := cfg[m.ConfigKey]; ok && existing != "" {
-			continue
+		if cfg != nil {
+			if existing, ok := cfg[m.ConfigKey]; ok && existing != "" {
+				continue
+			}
 		}
 		sv, err := sb.Get(ctx, m.SecretKey, store.ScopeHub, hubID)
 		if err != nil || sv == nil || sv.Value == "" {
 			continue
 		}
+		if cfg == nil {
+			cfg = make(map[string]string)
+		}
 		cfg[m.ConfigKey] = sv.Value
 	}
+	return cfg
 }
