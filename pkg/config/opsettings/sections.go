@@ -62,6 +62,7 @@ type AgentDefaultsSettings struct {
 // EndpointsSettings holds Layer-1 endpoint configuration.
 type EndpointsSettings struct {
 	PublicURL     string `json:"public_url,omitempty"`
+	HubName       string `json:"hub_name,omitempty"`
 	ImageRegistry string `json:"image_registry,omitempty"`
 }
 

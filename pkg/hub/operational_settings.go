@@ -94,6 +94,7 @@ type Layer1Snapshot struct {
 
 	// Endpoints
 	PublicURL     string
+	HubName       string
 	ImageRegistry string
 
 	// GitHub App (non-secret fields only)
@@ -567,6 +568,7 @@ func buildSnapshotFromKoanf(k *koanf.Koanf) Layer1Snapshot {
 
 	// Endpoints
 	snap.PublicURL = k.String("server.hub.public_url")
+	snap.HubName = k.String("server.hub.hub_name")
 	snap.ImageRegistry = k.String("image_registry")
 
 	// GitHub App

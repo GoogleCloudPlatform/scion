@@ -67,6 +67,11 @@ type HubServerConfig struct {
 	// Defaults to sha256(hostname)[:12] if not set.
 	HubID string `json:"hubId" yaml:"hubId" koanf:"hubId"`
 
+	// HubName is a human-readable display name for this hub in HA deployments.
+	// All nodes in a cluster should share the same hub_name.
+	// Defaults to os.Hostname() if not set.
+	HubName string `json:"hubName,omitempty" yaml:"hubName,omitempty" koanf:"hubName"`
+
 	// GCPProjectID is the GCP project ID used for minting service accounts.
 	// If empty, auto-detected from the metadata server when running on GCE/Cloud Run.
 	GCPProjectID string `json:"gcpProjectId,omitempty" yaml:"gcpProjectId,omitempty" koanf:"gcpProjectId"`
@@ -93,6 +98,18 @@ func (c *HubServerConfig) ResolveHubID() string {
 		return c.HubID
 	}
 	return DefaultHubID()
+}
+
+// ResolveHubName returns the configured HubName if set, otherwise falls back to os.Hostname().
+func (c *HubServerConfig) ResolveHubName() string {
+	if c.HubName != "" {
+		return c.HubName
+	}
+	hostname, err := os.Hostname()
+	if err != nil {
+		return "unknown"
+	}
+	return hostname
 }
 
 // RuntimeBrokerConfig holds configuration for the Runtime Broker API server.
@@ -726,6 +743,7 @@ func envKeyToConfigKey(envKey string) string {
 		"gcpprojectid":         "gcpProjectId",
 		"gcpcredentials":       "gcpCredentials",
 		"hubid":                "hubId",
+		"hubname":              "hubName",
 		"adminmode":            "adminMode",
 		"maintenancemessage":   "maintenanceMessage",
 	}
