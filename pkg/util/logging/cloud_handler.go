@@ -55,6 +55,8 @@ type CloudLoggingConfig struct {
 	LogID string
 	// Component is the server component name (e.g., "scion-hub").
 	Component string
+	// HubName is the logical hub identity used in the "hub" log label.
+	HubName string
 	// BufferedByteLimit is the maximum bytes the Cloud Logging client
 	// will buffer. Prevents unbounded memory growth when Cloud Logging
 	// is temporarily unavailable. Default: 8 MiB.
@@ -71,6 +73,7 @@ type CloudHandler struct {
 	client    *gcplog.Client
 	level     slog.Level
 	component string
+	hubName   string
 	hostname  string
 	projectID string
 	attrs     []slog.Attr
@@ -122,6 +125,7 @@ func NewCloudHandler(ctx context.Context, config CloudLoggingConfig, level slog.
 		client:    client,
 		level:     level,
 		component: config.Component,
+		hubName:   config.HubName,
 		hostname:  hostname,
 		projectID: projectID,
 	}
@@ -186,8 +190,11 @@ func (h *CloudHandler) Handle(_ context.Context, r slog.Record) error {
 	labels := map[string]string{
 		"component": h.component,
 	}
+	if h.hubName != "" {
+		labels["hub"] = h.hubName
+	}
 	if h.hostname != "" {
-		labels["hub"] = h.hostname
+		labels["node"] = h.hostname
 	}
 	for _, a := range h.attrs {
 		promoteAttrToLabels(labels, a)
@@ -233,6 +240,7 @@ func (h *CloudHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
 		client:    h.client,
 		level:     h.level,
 		component: h.component,
+		hubName:   h.hubName,
 		hostname:  h.hostname,
 		projectID: h.projectID,
 		attrs:     newAttrs,
@@ -250,6 +258,7 @@ func (h *CloudHandler) WithGroup(name string) slog.Handler {
 		client:    h.client,
 		level:     h.level,
 		component: h.component,
+		hubName:   h.hubName,
 		hostname:  h.hostname,
 		projectID: h.projectID,
 		attrs:     h.attrs,
@@ -265,7 +274,7 @@ func (h *CloudHandler) Client() *gcplog.Client {
 
 // NewCloudHandlerFromClient creates a CloudHandler from an existing client.
 // This avoids opening a second connection for the request log stream.
-func NewCloudHandlerFromClient(client *gcplog.Client, logID, component string, level slog.Level) *CloudHandler {
+func NewCloudHandlerFromClient(client *gcplog.Client, logID, component, hubName string, level slog.Level) *CloudHandler {
 	logger := client.Logger(logID)
 	hostname, _ := os.Hostname()
 	return &CloudHandler{
@@ -273,6 +282,7 @@ func NewCloudHandlerFromClient(client *gcplog.Client, logID, component string, l
 		client:    client,
 		level:     level,
 		component: component,
+		hubName:   hubName,
 		hostname:  hostname,
 		projectID: resolveProjectID(),
 	}

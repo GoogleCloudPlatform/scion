@@ -28,6 +28,8 @@ type HealthResponse struct {
 	Status       string            `json:"status"`
 	Version      string            `json:"version"`
 	ScionVersion string            `json:"scionVersion"`
+	HubID        string            `json:"hub_id,omitempty"`
+	HubName      string            `json:"hub_name,omitempty"`
 	Uptime       string            `json:"uptime"`
 	Checks       map[string]string `json:"checks,omitempty"`
 	Stats        *HealthStats      `json:"stats,omitempty"`
@@ -76,6 +78,8 @@ func (s *Server) GetHealthInfo(ctx context.Context) *HealthResponse {
 		Status:       status,
 		Version:      "0.1.0", // TODO: Get from build info
 		ScionVersion: version.Short(),
+		HubID:        s.HubID(),
+		HubName:      s.HubName(),
 		Uptime:       time.Since(s.startTime).Round(time.Second).String(),
 		Checks:       checks,
 		Stats:        stats,

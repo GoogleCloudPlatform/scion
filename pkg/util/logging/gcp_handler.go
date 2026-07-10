@@ -45,13 +45,14 @@ var levelToSeverity = map[slog.Level]string{
 type GCPHandler struct {
 	handler   slog.Handler
 	component string
+	hubName   string
 	hostname  string
 	projectID string
 	preAttrs  []slog.Attr // tracked for label promotion
 }
 
 // NewGCPHandler creates a new GCPHandler.
-func NewGCPHandler(w io.Writer, opts *slog.HandlerOptions, component string) *GCPHandler {
+func NewGCPHandler(w io.Writer, opts *slog.HandlerOptions, component, hubName string) *GCPHandler {
 	if opts == nil {
 		opts = &slog.HandlerOptions{}
 	}
@@ -94,6 +95,7 @@ func NewGCPHandler(w io.Writer, opts *slog.HandlerOptions, component string) *GC
 	return &GCPHandler{
 		handler:   jsonHandler,
 		component: component,
+		hubName:   hubName,
 		hostname:  hostname,
 		projectID: projectID,
 	}
@@ -108,9 +110,12 @@ func (h *GCPHandler) Handle(ctx context.Context, r slog.Record) error {
 	labels := map[string]string{
 		"component": h.component,
 	}
+	if h.hubName != "" {
+		labels["hub"] = h.hubName
+	}
 	if h.hostname != "" {
 		labels["hostname"] = h.hostname
-		labels["hub"] = h.hostname
+		labels["node"] = h.hostname
 	}
 	for _, a := range h.preAttrs {
 		promoteAttrToLabels(labels, a)
@@ -145,6 +150,7 @@ func (h *GCPHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
 	return &GCPHandler{
 		handler:   h.handler.WithAttrs(attrs),
 		component: h.component,
+		hubName:   h.hubName,
 		hostname:  h.hostname,
 		projectID: h.projectID,
 		preAttrs:  newPreAttrs,
@@ -155,6 +161,7 @@ func (h *GCPHandler) WithGroup(name string) slog.Handler {
 	return &GCPHandler{
 		handler:   h.handler.WithGroup(name),
 		component: h.component,
+		hubName:   h.hubName,
 		hostname:  h.hostname,
 		projectID: h.projectID,
 		preAttrs:  h.preAttrs,

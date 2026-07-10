@@ -98,6 +98,9 @@ func NewMeterProvider(ctx context.Context, gcpProjectID string, opts ...Option) 
 	if envHubID := os.Getenv("SCION_HUB_ID"); envHubID != "" && o.hubID == "" {
 		resAttrs = append(resAttrs, attribute.String("scion.hub.id", envHubID))
 	}
+	if o.hubName != "" {
+		resAttrs = append(resAttrs, attribute.String("scion.hub.name", o.hubName))
+	}
 
 	res, err := resource.New(ctx,
 		resource.WithAttributes(resAttrs...),

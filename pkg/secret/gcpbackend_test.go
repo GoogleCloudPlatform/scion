@@ -21,6 +21,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -30,6 +31,14 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
+
+func testResolveHostname() string {
+	h, err := os.Hostname()
+	if err != nil {
+		return "unknown"
+	}
+	return h
+}
 
 // mockSMClient implements SMClient for testing.
 type mockSMClient struct {
@@ -552,7 +561,7 @@ func TestGCPBackend_Labels(t *testing.T) {
 			"scion-name":         "api_key",
 			"scion-target":       "anthropic_api_key",
 			"scion-userid":       "alice-example-com",
-			"scion-hub-hostname": sanitizeLabel(hostname()),
+			"scion-hub-name": sanitizeLabel(testResolveHostname()),
 		}
 		for k, expected := range expectedLabels {
 			got, ok := labels[k]

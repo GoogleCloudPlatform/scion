@@ -91,7 +91,7 @@ func TestNewOTelHandler_NilProvider(t *testing.T) {
 
 func TestSetupWithOTel_NilProvider(t *testing.T) {
 	// Should fall back to base handler behavior
-	SetupWithOTel("test-component", false, false, nil)
+	SetupWithOTel("test-component", "", false, false, nil)
 
 	// Verify logging still works
 	logger := slog.Default()
@@ -102,13 +102,13 @@ func TestSetupWithOTel_NilProvider(t *testing.T) {
 
 func TestCreateBaseHandler(t *testing.T) {
 	// Test JSON handler (default)
-	h := createBaseHandler("test", false, false)
+	h := createBaseHandler("test", false, false, "")
 	if h == nil {
 		t.Error("createBaseHandler should return a handler")
 	}
 
 	// Test GCP handler
-	h = createBaseHandler("test", false, true)
+	h = createBaseHandler("test", false, true, "")
 	if h == nil {
 		t.Error("createBaseHandler should return GCP handler")
 	}

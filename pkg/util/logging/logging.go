@@ -38,13 +38,13 @@ const (
 // debug enables DEBUG level logging.
 // useGCP formats logs for Google Cloud Logging.
 func Setup(component string, debug bool, useGCP bool) {
-	handler := createBaseHandler(component, debug, useGCP)
+	handler := createBaseHandler(component, debug, useGCP, "")
 	logger := slog.New(handler)
 	slog.SetDefault(logger)
 }
 
 // createBaseHandler creates the base slog handler for local logging.
-func createBaseHandler(component string, debug bool, useGCP bool) slog.Handler {
+func createBaseHandler(component string, debug bool, useGCP bool, hubName string) slog.Handler {
 	level := slog.LevelInfo
 	if debug || os.Getenv("SCION_LOG_LEVEL") == "debug" {
 		level = slog.LevelDebug
@@ -55,7 +55,7 @@ func createBaseHandler(component string, debug bool, useGCP bool) slog.Handler {
 	}
 
 	if useGCP {
-		return NewGCPHandler(os.Stdout, opts, component)
+		return NewGCPHandler(os.Stdout, opts, component, hubName)
 	}
 
 	// Default to JSON handler for structured logging

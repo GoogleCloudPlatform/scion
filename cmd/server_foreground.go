@@ -250,6 +250,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 		if cfg.Hub.GCPProjectID != "" {
 			mp, mpErr := hubmetrics.NewMeterProvider(ctx, cfg.Hub.GCPProjectID,
 				hubmetrics.WithHubID(hubSrv.HubID()),
+				hubmetrics.WithHubName(cfg.Hub.ResolveHubName()),
 			)
 			if mpErr != nil {
 				log.Printf("WARNING: hub metrics export disabled: %v", mpErr)
@@ -549,6 +550,8 @@ func initServerLogging(cmd *cobra.Command) (cleanups []func(), requestLogger *sl
 		component = "scion-broker"
 	}
 
+	hubName := resolveHubNameFromEnv()
+
 	// Initialize OTel logging
 	ctx := context.Background()
 	logProvider, logCleanup, otelErr := logging.InitOTelLogging(ctx, logging.OTelConfig{})
@@ -568,6 +571,7 @@ func initServerLogging(cmd *cobra.Command) (cleanups []func(), requestLogger *sl
 		logLevel := logging.ResolveLogLevel(enableDebug)
 		cfg := logging.CloudLoggingConfig{
 			Component: component,
+			HubName:   hubName,
 		}
 		ch, cloudLogCleanup, cloudErr := logging.NewCloudHandler(ctx, cfg, logLevel)
 		if cloudErr != nil {
@@ -584,12 +588,13 @@ func initServerLogging(cmd *cobra.Command) (cleanups []func(), requestLogger *sl
 		}
 	}
 
-	logging.SetupWithOTel(component, enableDebug, useGCP, logProvider, cloudHandler)
+	logging.SetupWithOTel(component, hubName, enableDebug, useGCP, logProvider, cloudHandler)
 
 	// Initialize request logger
 	reqLogCfg := logging.RequestLoggerConfig{
 		FilePath:   os.Getenv(logging.EnvRequestLogPath),
 		Component:  component,
+		HubName:    hubName,
 		UseGCP:     useGCP,
 		Foreground: serverStartForeground,
 		Level:      logging.ResolveLogLevel(enableDebug),
@@ -611,6 +616,7 @@ func initServerLogging(cmd *cobra.Command) (cleanups []func(), requestLogger *sl
 	// Initialize message logger
 	msgLogCfg := logging.MessageLoggerConfig{
 		Component: component,
+		HubName:   hubName,
 		UseGCP:    useGCP,
 		Level:     logging.ResolveLogLevel(enableDebug),
 	}
@@ -1096,6 +1102,20 @@ func parseAdminEmails(cfg *config.GlobalConfig) []string {
 		log.Printf("Admin emails configured: %v", adminEmailList)
 	}
 	return adminEmailList
+}
+
+// resolveHubNameFromEnv resolves the hub display name from the SCION_HUB_NAME
+// environment variable, falling back to os.Hostname(). This is used during
+// early logging init before the full config is loaded.
+func resolveHubNameFromEnv() string {
+	if v := os.Getenv("SCION_HUB_NAME"); v != "" {
+		return v
+	}
+	h, err := os.Hostname()
+	if err != nil {
+		return "unknown"
+	}
+	return h
 }
 
 // resolveSessionSecret resolves the deployment-wide session secret from the
