@@ -1743,3 +1743,25 @@ func extractAction(r *http.Request, prefix string) (id, action string) {
 	}
 	return
 }
+
+// IsControlChannelConnected reports whether the broker has at least one live
+// control-channel WebSocket. Returns true when no control channel is configured
+// (e.g. Cloud Run stateless brokers) so callers can treat "no channel" as healthy.
+func (s *Server) IsControlChannelConnected() bool {
+	s.hubMu.RLock()
+	defer s.hubMu.RUnlock()
+
+	if len(s.hubConnections) == 0 {
+		return !s.config.ControlChannelEnabled
+	}
+
+	for _, conn := range s.hubConnections {
+		conn.mu.RLock()
+		cc := conn.ControlChannel
+		conn.mu.RUnlock()
+		if cc != nil && cc.IsConnected() {
+			return true
+		}
+	}
+	return !s.config.ControlChannelEnabled
+}

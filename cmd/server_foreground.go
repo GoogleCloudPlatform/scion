@@ -1989,12 +1989,26 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 			defer wg.Done()
 			ticker := time.NewTicker(30 * time.Second)
 			defer ticker.Stop()
+			var prevOnline bool
 			for {
 				select {
 				case <-ctx.Done():
 					return
 				case <-ticker.C:
-					if err := s.UpdateRuntimeBrokerHeartbeat(ctx, brokerID, store.BrokerStatusOnline); err != nil {
+					ccUp := rhSrv.IsControlChannelConnected()
+					status := store.BrokerStatusOnline
+					if !ccUp {
+						status = store.BrokerStatusOffline
+					}
+					if ccUp != prevOnline {
+						if ccUp {
+							log.Printf("Co-located heartbeat: control channel restored, writing online for %s", brokerName)
+						} else {
+							log.Printf("Co-located heartbeat: control channel down, writing offline for %s", brokerName)
+						}
+						prevOnline = ccUp
+					}
+					if err := s.UpdateRuntimeBrokerHeartbeat(ctx, brokerID, status); err != nil {
 						log.Printf("Warning: failed to update internal heartbeat for %s: %v", brokerName, err)
 					}
 				}
