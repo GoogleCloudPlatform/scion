@@ -1109,14 +1109,14 @@ func parseAdminEmails(cfg *config.GlobalConfig) []string {
 
 // resolveHubNameFromEnv resolves the hub display name from environment variables,
 // falling back to os.Hostname(). This is used during early logging init before
-// the full config is loaded. Both SCION_HUB_NAME and the koanf-style
-// SCION_SERVER_HUB_HUBNAME are accepted so that operators setting either one
-// get consistent behavior across early logging and config-driven code paths.
+// the full config is loaded. SCION_SERVER_HUB_HUBNAME (the standard koanf-derived
+// name) takes precedence; SCION_HUB_NAME is accepted as a shorter fallback for
+// simple setups.
 func resolveHubNameFromEnv() string {
-	if v := os.Getenv("SCION_HUB_NAME"); v != "" {
+	if v := os.Getenv("SCION_SERVER_HUB_HUBNAME"); v != "" {
 		return v
 	}
-	if v := os.Getenv("SCION_SERVER_HUB_HUBNAME"); v != "" {
+	if v := os.Getenv("SCION_HUB_NAME"); v != "" {
 		return v
 	}
 	h, err := os.Hostname()

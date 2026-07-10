@@ -439,8 +439,8 @@ func loadConfig(path string) (*chatapp.Config, error) {
 // scion-hub-name matching the hub name, which uniquely identifies
 // the hub in a multi-hub project.
 //
-// The hub name is resolved from the SCION_HUB_NAME environment variable,
-// falling back to os.Hostname().
+// The hub name is resolved from SCION_SERVER_HUB_HUBNAME (the standard
+// koanf-derived name), then SCION_HUB_NAME, falling back to os.Hostname().
 //
 // When multiple secrets match (e.g. after a hub migration that left a stale
 // secret behind), the function prefers a secret with scion-type=internal
@@ -453,7 +453,12 @@ func discoverSigningKey(ctx context.Context, projectID string) (value, resourceN
 	}
 	defer client.Close()
 
-	hubName := os.Getenv("SCION_HUB_NAME")
+	// SCION_SERVER_HUB_HUBNAME (koanf-derived) takes precedence;
+	// SCION_HUB_NAME is a shorter fallback for simple setups.
+	hubName := os.Getenv("SCION_SERVER_HUB_HUBNAME")
+	if hubName == "" {
+		hubName = os.Getenv("SCION_HUB_NAME")
+	}
 	if hubName == "" {
 		h, err := os.Hostname()
 		if err != nil {

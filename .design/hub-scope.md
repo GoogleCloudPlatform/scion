@@ -216,7 +216,7 @@ Add to `settings-v1.schema.json` under `server.hub`:
 ```json
 "hub_name": {
     "type": "string",
-    "pattern": "^[a-z][a-z0-9-]{0,61}[a-z0-9]$",
+    "pattern": "^[a-z]([a-z0-9-]{0,61}[a-z0-9])?$",
     "description": "Human-readable hub identifier for HA deployments. All nodes in a cluster should share the same hub_name.",
     "x-env-var": "SCION_SERVER_HUB_HUBNAME",
     "x-scope": "global"
