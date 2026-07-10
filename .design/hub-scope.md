@@ -316,8 +316,9 @@ Add `WithHubName(name string) Option` function.
 
 // After:
 "scion-hub-name": sanitizeLabel(hubName),
-"scion-hub-node": sanitizeLabel(hostname),  // optional: keep node identity
 ```
+
+The optional `scion-hub-node` label for node-level identity on secrets was deferred — secret labels are informational and node identity is not needed for secret filtering.
 
 Plumb `hubName` into `GCPBackend` via constructor or setter.
 

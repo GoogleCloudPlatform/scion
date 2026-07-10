@@ -555,12 +555,12 @@ func TestGCPBackend_Labels(t *testing.T) {
 	for _, sec := range mock.secrets {
 		labels := sec.Labels
 		expectedLabels := map[string]string{
-			"scion-scope":        "user",
-			"scion-scope-id":     "user-1",
-			"scion-type":         "environment",
-			"scion-name":         "api_key",
-			"scion-target":       "anthropic_api_key",
-			"scion-userid":       "alice-example-com",
+			"scion-scope":    "user",
+			"scion-scope-id": "user-1",
+			"scion-type":     "environment",
+			"scion-name":     "api_key",
+			"scion-target":   "anthropic_api_key",
+			"scion-userid":   "alice-example-com",
 			"scion-hub-name": sanitizeLabel(testResolveHostname()),
 		}
 		for k, expected := range expectedLabels {
@@ -573,6 +573,43 @@ func TestGCPBackend_Labels(t *testing.T) {
 		}
 		if len(labels) != len(expectedLabels) {
 			t.Errorf("expected %d labels, got %d: %v", len(expectedLabels), len(labels), labels)
+		}
+	}
+}
+
+func TestGCPBackend_Labels_ExplicitHubName(t *testing.T) {
+	backend, mock := createTestGCPBackend(t)
+	backend.SetHubName("prod-hub")
+	ctx := context.Background()
+
+	input := &SetSecretInput{
+		Name:       "API_KEY",
+		Value:      "sk-test-456",
+		SecretType: TypeEnvironment,
+		Target:     "ANTHROPIC_API_KEY",
+		Scope:      ScopeUser,
+		ScopeID:    "user-2",
+		UserEmail:  "bob@example.com",
+	}
+
+	_, _, err := backend.Set(ctx, input)
+	if err != nil {
+		t.Fatalf("Set failed: %v", err)
+	}
+
+	mock.mu.Lock()
+	defer mock.mu.Unlock()
+
+	if len(mock.secrets) != 1 {
+		t.Fatalf("expected 1 secret in mock, got %d", len(mock.secrets))
+	}
+
+	for _, sec := range mock.secrets {
+		got, ok := sec.Labels["scion-hub-name"]
+		if !ok {
+			t.Error("missing scion-hub-name label")
+		} else if got != "prod-hub" {
+			t.Errorf("scion-hub-name: expected %q, got %q", "prod-hub", got)
 		}
 	}
 }
