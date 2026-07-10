@@ -84,15 +84,15 @@ func (s *Server) MigrateStorage(ctx context.Context, dryRun, cleanupLegacy bool)
 }
 
 type migratableResource struct {
-	id          string
-	name        string
-	storagePath string
+	id            string
+	name          string
+	storagePath   string
 	storageBucket string
-	scope       string
-	scopeID     string
-	slug        string
-	files       []store.TemplateFile
-	kind        storage.ResourceKind
+	scope         string
+	scopeID       string
+	slug          string
+	files         []store.TemplateFile
+	kind          storage.ResourceKind
 }
 
 func (s *Server) migrateResourceKind(ctx context.Context, kind storage.ResourceKind, hubID string, dryRun, cleanupLegacy bool) MigrateStorageReport {
@@ -106,84 +106,96 @@ func (s *Server) migrateResourceKind(ctx context.Context, kind storage.ResourceK
 
 	switch kind {
 	case storage.ResourceKindTemplate:
-		result, err := s.store.ListTemplates(ctx, store.TemplateFilter{
-			Status: store.TemplateStatusActive,
-		}, store.ListOptions{Limit: 1000})
-		if err != nil {
-			s.resourceLog.Error(label+" migration: failed to list", "error", err)
-			return MigrateStorageReport{}
-		}
-		if result == nil {
-			return MigrateStorageReport{}
-		}
-		if len(result.Items) == 1000 {
-			s.resourceLog.Warn(label+" migration: listing hit 1000 limit, some resources may not be migrated; re-run to continue")
-		}
-		for _, t := range result.Items {
-			resources = append(resources, migratableResource{
-				id:            t.ID,
-				name:          t.Name,
-				storagePath:   t.StoragePath,
-				storageBucket: t.StorageBucket,
-				scope:         t.Scope,
-				scopeID:       t.ScopeID,
-				slug:          t.Slug,
-				files:         t.Files,
-				kind:          kind,
-			})
+		var cursor string
+		for {
+			result, err := s.store.ListTemplates(ctx, store.TemplateFilter{
+				Status: store.TemplateStatusActive,
+			}, store.ListOptions{Limit: 1000, Cursor: cursor})
+			if err != nil {
+				s.resourceLog.Error(label+" migration: failed to list", "error", err)
+				return MigrateStorageReport{}
+			}
+			if result == nil || len(result.Items) == 0 {
+				break
+			}
+			for _, t := range result.Items {
+				resources = append(resources, migratableResource{
+					id:            t.ID,
+					name:          t.Name,
+					storagePath:   t.StoragePath,
+					storageBucket: t.StorageBucket,
+					scope:         t.Scope,
+					scopeID:       t.ScopeID,
+					slug:          t.Slug,
+					files:         t.Files,
+					kind:          kind,
+				})
+			}
+			if result.NextCursor == "" {
+				break
+			}
+			cursor = result.NextCursor
 		}
 
 	case storage.ResourceKindHarnessConfig:
-		result, err := s.store.ListHarnessConfigs(ctx, store.HarnessConfigFilter{
-			Status: store.HarnessConfigStatusActive,
-		}, store.ListOptions{Limit: 1000})
-		if err != nil {
-			s.resourceLog.Error(label+" migration: failed to list", "error", err)
-			return MigrateStorageReport{}
-		}
-		if result == nil {
-			return MigrateStorageReport{}
-		}
-		if len(result.Items) == 1000 {
-			s.resourceLog.Warn(label+" migration: listing hit 1000 limit, some resources may not be migrated; re-run to continue")
-		}
-		for _, hc := range result.Items {
-			resources = append(resources, migratableResource{
-				id:            hc.ID,
-				name:          hc.Name,
-				storagePath:   hc.StoragePath,
-				storageBucket: hc.StorageBucket,
-				scope:         hc.Scope,
-				scopeID:       hc.ScopeID,
-				slug:          hc.Slug,
-				files:         hc.Files,
-				kind:          kind,
-			})
+		var cursor string
+		for {
+			result, err := s.store.ListHarnessConfigs(ctx, store.HarnessConfigFilter{
+				Status: store.HarnessConfigStatusActive,
+			}, store.ListOptions{Limit: 1000, Cursor: cursor})
+			if err != nil {
+				s.resourceLog.Error(label+" migration: failed to list", "error", err)
+				return MigrateStorageReport{}
+			}
+			if result == nil || len(result.Items) == 0 {
+				break
+			}
+			for _, hc := range result.Items {
+				resources = append(resources, migratableResource{
+					id:            hc.ID,
+					name:          hc.Name,
+					storagePath:   hc.StoragePath,
+					storageBucket: hc.StorageBucket,
+					scope:         hc.Scope,
+					scopeID:       hc.ScopeID,
+					slug:          hc.Slug,
+					files:         hc.Files,
+					kind:          kind,
+				})
+			}
+			if result.NextCursor == "" {
+				break
+			}
+			cursor = result.NextCursor
 		}
 
 	case storage.ResourceKindSkill:
-		result, err := s.store.ListSkills(ctx, store.SkillFilter{}, store.ListOptions{Limit: 1000})
-		if err != nil {
-			s.resourceLog.Error(label+" migration: failed to list", "error", err)
-			return MigrateStorageReport{}
-		}
-		if result == nil {
-			return MigrateStorageReport{}
-		}
-		if len(result.Items) == 1000 {
-			s.resourceLog.Warn(label+" migration: listing hit 1000 limit, some resources may not be migrated; re-run to continue")
-		}
-		for _, sk := range result.Items {
-			resources = append(resources, migratableResource{
-				id:            sk.ID,
-				name:          sk.Name,
-				storagePath:   sk.StoragePath,
-				storageBucket: sk.StorageBucket,
-				scope:         sk.Scope,
-				scopeID:       sk.ScopeID,
-				slug:          sk.Slug,
-				kind:          kind,
-			})
+		var cursor string
+		for {
+			result, err := s.store.ListSkills(ctx, store.SkillFilter{}, store.ListOptions{Limit: 1000, Cursor: cursor})
+			if err != nil {
+				s.resourceLog.Error(label+" migration: failed to list", "error", err)
+				return MigrateStorageReport{}
+			}
+			if result == nil || len(result.Items) == 0 {
+				break
+			}
+			for _, sk := range result.Items {
+				resources = append(resources, migratableResource{
+					id:            sk.ID,
+					name:          sk.Name,
+					storagePath:   sk.StoragePath,
+					storageBucket: sk.StorageBucket,
+					scope:         sk.Scope,
+					scopeID:       sk.ScopeID,
+					slug:          sk.Slug,
+					kind:          kind,
+				})
+			}
+			if result.NextCursor == "" {
+				break
+			}
+			cursor = result.NextCursor
 		}
 	}
 

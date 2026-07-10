@@ -86,9 +86,15 @@ func (s *Server) syncResourceFromStorage(
 					legacyObjPath := legacyBase + "/" + file.Path
 					obj, getErr = stor.GetObject(ctx, legacyObjPath)
 					if getErr == nil {
-						s.resourceLog.Warn(label+" repair: found file at legacy path",
-							"resource", name, "file", file.Path,
-							"legacy_path", legacyObjPath)
+						if _, copyErr := stor.Copy(ctx, legacyObjPath, objectPath); copyErr != nil {
+							s.resourceLog.Warn(label+" repair: failed to copy legacy file to namespaced path",
+								"resource", name, "file", file.Path,
+								"from", legacyObjPath, "to", objectPath, "error", copyErr)
+						} else {
+							s.resourceLog.Info(label+" repair: copied legacy file to namespaced path",
+								"resource", name, "file", file.Path,
+								"from", legacyObjPath, "to", objectPath)
+						}
 						goto hashCheck
 					}
 				}

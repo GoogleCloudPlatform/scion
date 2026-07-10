@@ -119,7 +119,7 @@ func runMigrateStorage(cmd *cobra.Command, _ []string) error {
 
 	_, _ = fmt.Fprintf(out, "Initializing storage: gs://%s\n", bucket)
 	stor, err := storage.New(ctx, storage.Config{
-		Provider: storage.ProviderGCS,
+		Provider: storage.Provider(cfg.Storage.Provider),
 		Bucket:   bucket,
 	})
 	if err != nil {
