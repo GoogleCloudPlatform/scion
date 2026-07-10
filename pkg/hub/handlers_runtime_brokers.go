@@ -93,6 +93,17 @@ func (s *Server) listRuntimeBrokers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Exclude message broker plugins (e.g. Discord, Telegram) — they carry
+	// the "scion.io/plugin" label and are not runtime brokers.
+	filtered := result.Items[:0]
+	for _, b := range result.Items {
+		if _, isPlugin := b.Labels["scion.io/plugin"]; !isPlugin {
+			filtered = append(filtered, b)
+		}
+	}
+	result.Items = filtered
+	result.TotalCount = len(filtered)
+
 	// Batch-resolve CreatedByName for all brokers
 	s.enrichBrokerCreatorNames(ctx, result.Items)
 
