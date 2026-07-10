@@ -23,6 +23,7 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"sync"
 
 	smpb "cloud.google.com/go/secretmanager/apiv1/secretmanagerpb"
 	"google.golang.org/grpc/codes"
@@ -38,6 +39,7 @@ type GCPBackend struct {
 	smClient  SMClient
 	projectID string
 	hubID     string
+	mu        sync.RWMutex
 	hubName   string
 }
 
@@ -75,7 +77,9 @@ func (b *GCPBackend) HubID() string {
 
 // SetHubName sets the human-readable hub display name.
 func (b *GCPBackend) SetHubName(name string) {
+	b.mu.Lock()
 	b.hubName = name
+	b.mu.Unlock()
 }
 
 func (b *GCPBackend) Get(ctx context.Context, name, scope, scopeID string) (*SecretWithValue, error) {
@@ -486,8 +490,11 @@ func buildLabels(input *SetSecretInput, target, hubName string) map[string]strin
 
 // resolveHubName returns the hub display name if set, falling back to the machine hostname.
 func (b *GCPBackend) resolveHubName() string {
-	if b.hubName != "" {
-		return b.hubName
+	b.mu.RLock()
+	name := b.hubName
+	b.mu.RUnlock()
+	if name != "" {
+		return name
 	}
 	h, err := os.Hostname()
 	if err != nil {

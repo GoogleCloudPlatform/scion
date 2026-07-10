@@ -114,7 +114,6 @@ func (h *GCPHandler) Handle(ctx context.Context, r slog.Record) error {
 		labels["hub"] = h.hubName
 	}
 	if h.hostname != "" {
-		labels["hostname"] = h.hostname
 		labels["node"] = h.hostname
 	}
 	for _, a := range h.preAttrs {

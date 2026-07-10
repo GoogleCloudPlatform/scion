@@ -47,9 +47,25 @@ func TestGCPHandler(t *testing.T) {
 
 	hostname, _ := os.Hostname()
 	if hostname != "" {
-		assert.Equal(t, hostname, labels["hostname"])
+		assert.Nil(t, labels["hostname"], "hostname label should not be set; use node instead")
 		assert.Equal(t, hostname, labels["node"])
 	}
+}
+
+func TestGCPHandler_HubNameLabel(t *testing.T) {
+	var buf bytes.Buffer
+	opts := &slog.HandlerOptions{Level: slog.LevelInfo}
+	handler := NewGCPHandler(&buf, opts, "test-component", "prod-hub")
+	logger := slog.New(handler)
+
+	logger.Info("test message")
+
+	var data map[string]interface{}
+	err := json.Unmarshal(buf.Bytes(), &data)
+	assert.NoError(t, err)
+
+	labels := data[GCPKeyLabels].(map[string]interface{})
+	assert.Equal(t, "prod-hub", labels["hub"])
 }
 
 func TestGCPHandler_EmptyMessageSuppressed(t *testing.T) {
