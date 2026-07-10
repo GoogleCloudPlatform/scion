@@ -94,6 +94,7 @@ type Layer1Snapshot struct {
 
 	// Endpoints
 	PublicURL     string
+	HubName       string
 	ImageRegistry string
 
 	// GitHub App (non-secret fields only)
@@ -567,6 +568,7 @@ func buildSnapshotFromKoanf(k *koanf.Koanf) Layer1Snapshot {
 
 	// Endpoints
 	snap.PublicURL = k.String("server.hub.public_url")
+	snap.HubName = k.String("server.hub.hub_name")
 	snap.ImageRegistry = k.String("image_registry")
 
 	// GitHub App
@@ -684,6 +686,12 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 		}
 		// In-memory private key and webhook secret are kept as-is (loaded from secrets backend)
 		applied = append(applied, "github_app")
+	}
+
+	// Hub name
+	if snap.HubName != "" {
+		s.config.HubName = snap.HubName
+		applied = append(applied, "hub_name")
 	}
 
 	s.mu.Unlock()

@@ -93,7 +93,7 @@ func init() {
 		},
 		{
 			Name:       "endpoints",
-			KoanfPaths: []string{"server.hub.public_url", "image_registry"},
+			KoanfPaths: []string{"server.hub.public_url", "server.hub.hub_name", "image_registry"},
 			New:        func() any { return &EndpointsSettings{} },
 		},
 		{

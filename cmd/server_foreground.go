@@ -1121,6 +1121,7 @@ func resolveSessionSecret() string {
 func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store, entClient *ent.Client, hubEndpoint, devAuthToken string, adminEmailList []string, adminMode bool, maintenanceMessage string, requestLogger, messageLogger *slog.Logger, globalDir string, pluginMgr *scionplugin.Manager, secretBackend secret.SecretBackend) (*hub.Server, error) {
 	hubCfg := hub.ServerConfig{
 		HubID:                 cfg.Hub.ResolveHubID(),
+		HubName:               cfg.Hub.ResolveHubName(),
 		Port:                  cfg.Hub.Port,
 		Host:                  cfg.Hub.Host,
 		ReadTimeout:           cfg.Hub.ReadTimeout,

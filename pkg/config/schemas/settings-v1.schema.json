@@ -720,6 +720,13 @@
           "description": "Stable hub instance identifier used for hub-scoped secret namespacing.",
           "x-env-var": "SCION_SERVER_HUB_HUBID"
         },
+        "hub_name": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9-]{0,61}[a-z0-9]$",
+          "description": "Human-readable hub display name for HA deployments. All nodes in a cluster should share the same hub_name. Defaults to os.Hostname() if not set.",
+          "x-env-var": "SCION_SERVER_HUB_HUBNAME",
+          "x-scope": "global"
+        },
         "public_url": {
           "type": "string",
           "format": "uri",
