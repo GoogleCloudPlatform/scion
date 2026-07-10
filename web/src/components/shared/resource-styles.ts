@@ -460,6 +460,28 @@ export const resourceStyles = css`
 `;
 
 /**
+ * Shared CSS for broker-type badges ("Hosted" / "External").
+ * Used by both the brokers list and broker detail pages.
+ */
+export const brokerTypeBadgeStyles = css`
+  .broker-type-badge {
+    display: inline-flex;
+    align-items: center;
+    padding: 0.125rem 0.5rem;
+    border-radius: var(--scion-radius, 0.5rem);
+    font-size: 0.75rem;
+    font-weight: 500;
+    background: var(--scion-bg-subtle, #f1f5f9);
+    color: var(--scion-text-muted, #64748b);
+  }
+
+  .broker-type-badge.hosted {
+    background: var(--sl-color-primary-100, #dbeafe);
+    color: var(--sl-color-primary-700, #1d4ed8);
+  }
+`;
+
+/**
  * Shared CSS styles for resource list pages (projects, agents, brokers).
  *
  * Consolidates duplicated header, loading/error/empty state, card grid,

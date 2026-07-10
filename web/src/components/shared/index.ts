@@ -32,7 +32,7 @@ export { ScionNotificationTray } from './notification-tray.js';
 export { ScionInboxTray } from './inbox-tray.js';
 export { ScionViewToggle } from './view-toggle.js';
 export type { ViewMode } from './view-toggle.js';
-export { resourceStyles, listPageStyles } from './resource-styles.js';
+export { resourceStyles, listPageStyles, brokerTypeBadgeStyles } from './resource-styles.js';
 export { ScionJsonBrowser } from './json-browser.js';
 export { ScionAgentLogViewer } from './agent-log-viewer.js';
 export { ScionSharedDirList } from './shared-dir-list.js';

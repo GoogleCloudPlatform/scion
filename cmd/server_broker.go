@@ -121,7 +121,10 @@ func registerGlobalProjectAndBroker(ctx context.Context, s store.Store, brokerID
 		broker.LastHeartbeat = time.Now()
 		// Update profiles from settings (may have changed)
 		broker.Profiles = profiles
-		// Backfill broker-type label for pre-label deployments
+		// Unconditionally set the hosted label. This is safe because
+		// registerGlobalProjectAndBroker is only called for co-located
+		// (hub-embedded) brokers; external brokers register through
+		// CreateBrokerRegistration in brokerauth.go instead.
 		if broker.Labels == nil {
 			broker.Labels = make(map[string]string)
 		}

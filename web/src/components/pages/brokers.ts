@@ -26,7 +26,7 @@ import { customElement, property, state } from 'lit/decorators.js';
 import type { PageData, RuntimeBroker } from '../../shared/types.js';
 import { stateManager } from '../../client/state.js';
 import { extractApiError } from '../../client/api.js';
-import { listPageStyles } from '../shared/resource-styles.js';
+import { listPageStyles, brokerTypeBadgeStyles } from '../shared/resource-styles.js';
 import type { ViewMode } from '../shared/view-toggle.js';
 import '../shared/status-badge.js';
 import '../shared/view-toggle.js';
@@ -68,6 +68,7 @@ export class ScionPageBrokers extends LitElement {
 
   static override styles = [
     listPageStyles,
+    brokerTypeBadgeStyles,
     css`
       .broker-header {
         display: flex;
@@ -122,22 +123,6 @@ export class ScionPageBrokers extends LitElement {
         display: flex;
         flex-wrap: wrap;
         gap: 0.25rem;
-      }
-
-      .broker-type-badge {
-        display: inline-flex;
-        align-items: center;
-        padding: 0.125rem 0.5rem;
-        border-radius: var(--scion-radius, 0.5rem);
-        font-size: 0.75rem;
-        font-weight: 500;
-        background: var(--scion-bg-subtle, #f1f5f9);
-        color: var(--scion-text-muted, #64748b);
-      }
-
-      .broker-type-badge.hosted {
-        background: var(--sl-color-primary-100, #dbeafe);
-        color: var(--sl-color-primary-700, #1d4ed8);
       }
     `,
   ];
