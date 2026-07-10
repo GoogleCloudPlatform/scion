@@ -50,6 +50,7 @@ type Option func(*options)
 type options struct {
 	exportInterval time.Duration
 	hubID          string
+	hubName        string
 }
 
 // WithExportInterval sets the periodic reader interval. Defaults to 60s.
@@ -60,6 +61,11 @@ func WithExportInterval(d time.Duration) Option {
 // WithHubID sets the scion.hub.id resource attribute.
 func WithHubID(id string) Option {
 	return func(o *options) { o.hubID = id }
+}
+
+// WithHubName sets the scion.hub.name resource attribute.
+func WithHubName(name string) Option {
+	return func(o *options) { o.hubName = name }
 }
 
 // NewMeterProvider creates an OTel SDK MeterProvider that exports to GCP Cloud

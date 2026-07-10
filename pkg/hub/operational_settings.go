@@ -688,6 +688,12 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 		applied = append(applied, "github_app")
 	}
 
+	// Hub name
+	if snap.HubName != "" {
+		s.config.HubName = snap.HubName
+		applied = append(applied, "hub_name")
+	}
+
 	s.mu.Unlock()
 
 	// NOTE: Maintenance state is deliberately NOT applied here.

@@ -38,6 +38,7 @@ type GCPBackend struct {
 	smClient  SMClient
 	projectID string
 	hubID     string
+	hubName   string
 }
 
 // NewGCPBackend creates a GCPBackend with a real GCP Secret Manager client.
@@ -70,6 +71,11 @@ func NewGCPBackendWithClient(s store.SecretStore, client SMClient, projectID, hu
 // HubID returns the hub instance ID used for hub-scoped secret namespacing.
 func (b *GCPBackend) HubID() string {
 	return b.hubID
+}
+
+// SetHubName sets the human-readable hub display name.
+func (b *GCPBackend) SetHubName(name string) {
+	b.hubName = name
 }
 
 func (b *GCPBackend) Get(ctx context.Context, name, scope, scopeID string) (*SecretWithValue, error) {

@@ -157,6 +157,8 @@ type ServerConfig struct {
 	// HubID is the unique hub instance ID used for secret namespacing.
 	// If empty, secrets are looked up/stored with an empty scope ID.
 	HubID string
+	// HubName is the human-readable hub display name for HA deployments.
+	HubName string
 	// SecretBackend is the optional secret backend for signing key storage.
 	// When set before New(), ensureSigningKey can load/persist keys through the
 	// production secret backend (e.g., GCP Secret Manager) instead of relying
@@ -1540,6 +1542,13 @@ func (s *Server) HubID() string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.hubID
+}
+
+// HubName returns the human-readable hub display name. Thread-safe.
+func (s *Server) HubName() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.config.HubName
 }
 
 // SetSecretBackend sets the secret backend for pluggable secret storage.
