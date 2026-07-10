@@ -229,6 +229,9 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 		if sbErr != nil {
 			log.Printf("Warning: failed to initialize secret backend: %v", sbErr)
 		}
+		if gcpBackend, ok := secretBackend.(*secret.GCPBackend); ok {
+			gcpBackend.SetHubName(cfg.Hub.ResolveHubName())
+		}
 	}
 
 	// 10b. Initialize plugin manager

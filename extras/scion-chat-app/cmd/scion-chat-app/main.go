@@ -465,8 +465,8 @@ func discoverSigningKey(ctx context.Context, projectID string) (value, resourceN
 	hubNameLabel := strings.ToLower(hubName)
 
 	filter := fmt.Sprintf(
-		"labels.scion-name=user_signing_key AND labels.scion-hub-name=%s",
-		hubNameLabel,
+		"labels.scion-name=user_signing_key AND (labels.scion-hub-name=%s OR labels.scion-hub-hostname=%s)",
+		hubNameLabel, hubNameLabel,
 	)
 
 	slog.Debug("searching Secret Manager for signing key",
@@ -494,7 +494,7 @@ func discoverSigningKey(ctx context.Context, projectID string) (value, resourceN
 	}
 
 	if len(candidates) == 0 {
-		return "", "", fmt.Errorf("no secret with labels scion-name=user_signing_key, scion-hub-name=%s found in project %s", hubNameLabel, projectID)
+		return "", "", fmt.Errorf("no secret with labels scion-name=user_signing_key, scion-hub-name=%s or scion-hub-hostname=%s found in project %s", hubNameLabel, hubNameLabel, projectID)
 	}
 
 	// Pick the best candidate using a scoring heuristic. The hub's current

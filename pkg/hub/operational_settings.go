@@ -27,6 +27,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
+	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/knadh/koanf/v2"
 )
@@ -695,6 +696,14 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 	}
 
 	s.mu.Unlock()
+
+	// Propagate hub_name to the GCP secret backend so new secrets get the
+	// correct label value. Log handlers have a similar limitation (§7.4).
+	if snap.HubName != "" {
+		if gcpBackend, ok := s.secretBackend.(*secret.GCPBackend); ok {
+			gcpBackend.SetHubName(snap.HubName)
+		}
+	}
 
 	// NOTE: Maintenance state is deliberately NOT applied here.
 	// Maintenance is runtime/API-owned state. In file mode, reloadSettings

@@ -256,8 +256,10 @@ Operators deploying HA should set `hub_id` explicitly to the same value on all n
 Existing secrets in GCP Secret Manager have `scion-hub-hostname` labels with per-node hostnames. After adopting `hub_name`:
 - New secrets get `scion-hub-name` (the hub_name) instead of `scion-hub-hostname`
 - Existing secrets retain their old labels (immutable after creation in GCP SM)
-- No automated migration needed — labels are informational, not used for lookup (secret names use HubID for scoping)
+- No automated migration needed for the hub itself — labels are informational, not used for lookup (secret names use HubID for scoping)
 - Operators can re-label via GCP console/API if desired
+
+**Exception: Chat App.** The chat app (`extras/scion-chat-app`) uses label-based discovery via `ListSecrets` with a filter to auto-discover the hub signing key. Unlike the hub, which looks up secrets by computed name, the chat app queries `labels.scion-hub-name=X`. To maintain backward compatibility with secrets created under the old `scion-hub-hostname` label, the chat app uses an OR filter: `(labels.scion-hub-name=X OR labels.scion-hub-hostname=X)`. This ensures discovery works for both pre-upgrade and post-upgrade secrets without requiring manual relabeling.
 
 ---
 
