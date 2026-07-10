@@ -20,6 +20,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -187,6 +188,13 @@ func (a *AuthzService) checkAccessForAgent(ctx context.Context, agent AgentIdent
 		}
 	}
 
+	if a.hasSystemProjectAdminDelegation(ctx, agent) {
+		return Decision{
+			Allowed: true,
+			Reason:  "system project admin delegation",
+		}
+	}
+
 	// 1. Build principal refs: direct agent + effective groups
 	principals := []store.PrincipalRef{
 		{Type: "agent", ID: agent.ID()},
@@ -214,6 +222,34 @@ func (a *AuthzService) checkAccessForAgent(ctx context.Context, agent AgentIdent
 
 	// 3. Delegation fallback: check policies with delegation conditions
 	return a.checkDelegation(ctx, agent, resource, action, policies)
+}
+
+func (a *AuthzService) isSystemProjectAgent(ctx context.Context, agent AgentIdentity) bool {
+	projectID := agent.ProjectID()
+	if projectID == "" {
+		return false
+	}
+	project, err := a.store.GetProject(ctx, projectID)
+	if err != nil || project == nil {
+		return false
+	}
+	return project.Labels[projectcompat.LabelSystemProject] == "true"
+}
+
+func (a *AuthzService) originUserIsCurrentAdmin(ctx context.Context, agent AgentIdentity) bool {
+	originUserID := agent.OriginUserID()
+	if originUserID == "" {
+		return false
+	}
+	user, err := a.store.GetUser(ctx, originUserID)
+	if err != nil || user == nil {
+		return false
+	}
+	return user.Role == "admin"
+}
+
+func (a *AuthzService) hasSystemProjectAdminDelegation(ctx context.Context, agent AgentIdentity) bool {
+	return a.isSystemProjectAgent(ctx, agent) && a.originUserIsCurrentAdmin(ctx, agent)
 }
 
 // checkDelegation handles the delegation fallback for agents.

@@ -316,6 +316,9 @@ func TestEnvKeyToConfigKey(t *testing.T) {
 		{"SECRETS_BACKEND", "secrets.backend"},
 		{"SECRETS_GCPPROJECTID", "secrets.gcpProjectId"},
 		{"SECRETS_GCPCREDENTIALS", "secrets.gcpCredentials"},
+		{"SYSTEM_PROJECT_ENABLED", "systemProject.enabled"},
+		{"SYSTEM_PROJECT_WORKSPACEPATH", "systemProject.workspacePath"},
+		{"SYSTEM_PROJECT_WORKSPACE_PATH", "systemProject.workspacePath"},
 	}
 
 	for _, tc := range tests {

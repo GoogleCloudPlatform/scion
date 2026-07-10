@@ -1531,6 +1531,8 @@ func TestConvertGlobalToV1ServerConfig_RoundTrip(t *testing.T) {
 	gc.RuntimeBroker.Enabled = true
 	gc.RuntimeBroker.BrokerID = "broker-abc"
 	gc.RuntimeBroker.BrokerName = "test-broker"
+	gc.SystemProject.Enabled = true
+	gc.SystemProject.WorkspacePath = "/mnt/scion/system-project"
 	gc.Database.Driver = "sqlite"
 	gc.Auth.Enabled = true
 	gc.Auth.Token = "test-token"
@@ -1543,6 +1545,9 @@ func TestConvertGlobalToV1ServerConfig_RoundTrip(t *testing.T) {
 	assert.Equal(t, true, v1.Broker.Enabled)
 	assert.Equal(t, "broker-abc", v1.Broker.BrokerID)
 	assert.Equal(t, "test-broker", v1.Broker.BrokerName)
+	require.NotNil(t, v1.SystemProject)
+	assert.True(t, v1.SystemProject.Enabled)
+	assert.Equal(t, "/mnt/scion/system-project", v1.SystemProject.WorkspacePath)
 	assert.Equal(t, "sqlite", v1.Database.Driver)
 	assert.Equal(t, true, v1.Auth.DevMode)
 	assert.Equal(t, "test-token", v1.Auth.DevToken)
@@ -1555,6 +1560,8 @@ func TestConvertGlobalToV1ServerConfig_RoundTrip(t *testing.T) {
 	assert.Equal(t, gc.RuntimeBroker.Enabled, gc2.RuntimeBroker.Enabled)
 	assert.Equal(t, gc.RuntimeBroker.BrokerID, gc2.RuntimeBroker.BrokerID)
 	assert.Equal(t, gc.RuntimeBroker.BrokerName, gc2.RuntimeBroker.BrokerName)
+	assert.Equal(t, gc.SystemProject.Enabled, gc2.SystemProject.Enabled)
+	assert.Equal(t, gc.SystemProject.WorkspacePath, gc2.SystemProject.WorkspacePath)
 }
 
 func TestConvertGlobalToV1ServerConfig_Nil(t *testing.T) {

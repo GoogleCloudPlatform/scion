@@ -694,6 +694,12 @@ func loadAndReconcileConfig(cmd *cobra.Command) (*config.GlobalConfig, error) {
 	if cmd.Flags().Changed("storage-dir") {
 		cfg.Storage.LocalPath = storageDir
 	}
+	if cmd.Flags().Changed("enable-system-project") {
+		cfg.SystemProject.Enabled = enableSystemProject
+	}
+	if cmd.Flags().Changed("system-project-workspace-path") {
+		cfg.SystemProject.WorkspacePath = systemProjectWorkspacePath
+	}
 
 	// Standalone broker in hosted mode: default to loopback when host
 	// is not explicitly set. The broker needs to start on loopback so that
@@ -1863,6 +1869,11 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 				hubSrv.SetEmbeddedBrokerID(brokerID)
 			}
 			hubSrv.SetLocalImageChecker(rt)
+			if cfg.SystemProject.Enabled {
+				if err := registerSystemProject(ctx, s, brokerID, brokerName, cfg.SystemProject); err != nil {
+					log.Printf("Warning: failed to register system project: %v", err)
+				}
+			}
 		}
 
 		// Generate or retrieve credentials for co-located mode (idempotent).

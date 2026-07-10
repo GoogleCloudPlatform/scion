@@ -23,6 +23,7 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -182,6 +183,55 @@ func TestEvaluateEndpoint_AgentPolicy(t *testing.T) {
 	var evalResp EvaluateResponse
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&evalResp))
 	assert.True(t, evalResp.Allowed)
+}
+
+func TestEvaluateEndpoint_SystemProjectAgentUsesStoredAncestry(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID:          tid("eval-origin-admin"),
+		Email:       "origin-admin@test.com",
+		DisplayName: "Origin Admin",
+		Role:        store.UserRoleAdmin,
+		Status:      "active",
+	}))
+	require.NoError(t, s.CreateProject(ctx, &store.Project{
+		ID:   tid("eval-system-project"),
+		Name: "System",
+		Slug: "system",
+		Labels: map[string]string{
+			projectcompat.LabelSystemProject: "true",
+		},
+	}))
+	require.NoError(t, s.CreateProject(ctx, &store.Project{
+		ID:   tid("eval-target-project"),
+		Name: "Target",
+		Slug: "target",
+	}))
+	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
+		ID:        tid("eval-system-agent"),
+		Slug:      tid("eval-system-agent"),
+		Name:      "System Agent",
+		ProjectID: tid("eval-system-project"),
+		Phase:     string(state.PhaseRunning),
+		Ancestry:  []string{tid("eval-origin-admin")},
+	}))
+
+	evalReq := EvaluateRequest{
+		PrincipalType: "agent",
+		PrincipalID:   tid("eval-system-agent"),
+		ResourceType:  "project",
+		ResourceID:    tid("eval-target-project"),
+		Action:        "delete",
+	}
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/policies/evaluate", evalReq)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	var evalResp EvaluateResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&evalResp))
+	assert.True(t, evalResp.Allowed)
+	assert.Equal(t, "system project admin delegation", evalResp.Reason)
 }
 
 func TestEvaluateEndpoint_AgentBinding(t *testing.T) {

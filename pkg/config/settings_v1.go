@@ -264,6 +264,7 @@ type V1ServerConfig struct {
 	Env              string                    `json:"env,omitempty" yaml:"env,omitempty" koanf:"env"`
 	Hub              *V1ServerHubConfig        `json:"hub,omitempty" yaml:"hub,omitempty" koanf:"hub"`
 	Broker           *V1BrokerConfig           `json:"broker,omitempty" yaml:"broker,omitempty" koanf:"broker"`
+	SystemProject    *V1SystemProjectConfig    `json:"system_project,omitempty" yaml:"system_project,omitempty" koanf:"system_project"`
 	Database         *V1DatabaseConfig         `json:"database,omitempty" yaml:"database,omitempty" koanf:"database"`
 	Auth             *V1AuthConfig             `json:"auth,omitempty" yaml:"auth,omitempty" koanf:"auth"`
 	OAuth            *V1OAuthConfig            `json:"oauth,omitempty" yaml:"oauth,omitempty" koanf:"oauth"`
@@ -288,6 +289,12 @@ type V1ServerConfig struct {
 
 	// GitHubApp configures the Hub's GitHub App integration for agent git authentication.
 	GitHubApp *V1GitHubAppConfig `json:"github_app,omitempty" yaml:"github_app,omitempty" koanf:"github_app"`
+}
+
+// V1SystemProjectConfig holds the built-in system project settings in settings.yaml format.
+type V1SystemProjectConfig struct {
+	Enabled       bool   `json:"enabled" yaml:"enabled" koanf:"enabled"`
+	WorkspacePath string `json:"workspace_path,omitempty" yaml:"workspace_path,omitempty" koanf:"workspace_path"`
 }
 
 // V1GitHubAppConfig holds the GitHub App configuration in settings.yaml format.
@@ -983,8 +990,10 @@ var knownCompoundFields = []string{
 	"require_trusted_proxy_ip",
 	"soft_delete_retain_files",
 	"soft_delete_retention",
+	"system_project",
 	"authorized_domains",
 	"platform_auth_sa",
+	"workspace_path",
 	"oidc_audience",
 	"jwks_url",
 	"broker_nickname",
@@ -1078,7 +1087,7 @@ func mapEnvKeyRecursive(key string) string {
 // isSectionName checks if a name is a known section in the server config hierarchy.
 func isSectionName(name string) bool {
 	switch name {
-	case "hub", "broker", "database", "auth", "oauth", "storage", "secrets", "cors",
+	case "hub", "broker", "system_project", "database", "auth", "oauth", "storage", "secrets", "cors",
 		"web", "cli", "device", "google", "github", "proxy", "iap", "transport":
 		return true
 	}
@@ -1314,6 +1323,13 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 		}
 	}
 
+	if v1.SystemProject != nil {
+		gc.SystemProject.Enabled = v1.SystemProject.Enabled
+		if v1.SystemProject.WorkspacePath != "" {
+			gc.SystemProject.WorkspacePath = v1.SystemProject.WorkspacePath
+		}
+	}
+
 	// Database config
 	if v1.Database != nil {
 		if v1.Database.Driver != "" {
@@ -1523,6 +1539,11 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 			AllowedHeaders: gc.RuntimeBroker.CORSAllowedHeaders,
 			MaxAge:         gc.RuntimeBroker.CORSMaxAge,
 		},
+	}
+
+	v1.SystemProject = &V1SystemProjectConfig{
+		Enabled:       gc.SystemProject.Enabled,
+		WorkspacePath: gc.SystemProject.WorkspacePath,
 	}
 
 	// Database config

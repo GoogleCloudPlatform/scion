@@ -109,6 +109,28 @@ func TestComputeCapabilitiesBatch_AdminGetsAll(t *testing.T) {
 	}
 }
 
+func TestComputeCapabilitiesBatch_SystemProjectAgentAdminDelegation(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	requireSystemDelegationFixtures(t, ctx, s, "admin")
+
+	agent := &evaluateAgentIdentity{
+		id:        tid("system-agent-cap"),
+		projectID: tid("system-project"),
+		ancestry:  []string{tid("origin-user")},
+	}
+	resources := []Resource{
+		{Type: "agent", ID: tid("agent-cap-1")},
+		{Type: "agent", ID: tid("agent-cap-2")},
+	}
+
+	caps := srv.authzService.ComputeCapabilitiesBatch(ctx, agent, resources, "agent")
+	require.Len(t, caps, 2)
+	for _, cap := range caps {
+		assert.Equal(t, []string{"read", "update", "delete", "start", "stop", "message", "attach"}, cap.Actions)
+	}
+}
+
 func TestComputeCapabilitiesBatch_MixedOwnership(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()

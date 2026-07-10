@@ -29,6 +29,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -134,6 +135,7 @@ func (m *mockRuntimeBrokerClient) RestartAgent(ctx context.Context, brokerID, br
 	m.lastBrokerID = brokerID
 	m.lastEndpoint = brokerEndpoint
 	m.lastAgentID = agentID
+	m.lastResolvedEnv = resolvedEnv
 	return m.returnErr
 }
 
@@ -254,6 +256,162 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate(t *testing.T) {
 	}
 	if mockClient.lastEndpoint != "http://localhost:9800" {
 		t.Errorf("expected endpoint http://localhost:9800, got %s", mockClient.lastEndpoint)
+	}
+}
+
+func TestHTTPAgentDispatcher_SystemProjectCreateUsesAssistantCLIMode(t *testing.T) {
+	ctx := context.Background()
+	memStore := createTestStore(t)
+	requireProjectAndBroker(t, ctx, memStore, true)
+
+	mockClient := &mockRuntimeBrokerClient{}
+	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
+
+	agent := &store.Agent{
+		ID:              tid("agent-system"),
+		Name:            "system-agent",
+		Slug:            "system-agent",
+		ProjectID:       tid("project-system"),
+		RuntimeBrokerID: tid("broker-cli-mode"),
+		AppliedConfig: &store.AgentAppliedConfig{
+			Env: map[string]string{"SCION_CLI_MODE": "agent"},
+		},
+	}
+
+	if err := dispatcher.DispatchAgentCreate(ctx, agent); err != nil {
+		t.Fatalf("DispatchAgentCreate failed: %v", err)
+	}
+	if got := mockClient.lastCreateReq.ResolvedEnv["SCION_CLI_MODE"]; got != "assistant" {
+		t.Fatalf("SCION_CLI_MODE = %q, want assistant", got)
+	}
+}
+
+func TestHTTPAgentDispatcher_SystemProjectRestartUsesAssistantCLIMode(t *testing.T) {
+	ctx := context.Background()
+	memStore := createTestStore(t)
+	requireProjectAndBroker(t, ctx, memStore, true)
+
+	mockClient := &mockRuntimeBrokerClient{}
+	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
+
+	agent := &store.Agent{
+		ID:              tid("agent-system-restart"),
+		Name:            "system-agent",
+		Slug:            "system-agent",
+		ProjectID:       tid("project-system"),
+		RuntimeBrokerID: tid("broker-cli-mode"),
+	}
+
+	if err := dispatcher.DispatchAgentRestart(ctx, agent); err != nil {
+		t.Fatalf("DispatchAgentRestart failed: %v", err)
+	}
+	if got := mockClient.lastResolvedEnv["SCION_CLI_MODE"]; got != "assistant" {
+		t.Fatalf("SCION_CLI_MODE = %q, want assistant", got)
+	}
+}
+
+func TestHTTPAgentDispatcher_SystemProjectStartUsesAssistantCLIMode(t *testing.T) {
+	ctx := context.Background()
+	memStore := createTestStore(t)
+	requireProjectAndBroker(t, ctx, memStore, true)
+
+	mockClient := &mockRuntimeBrokerClient{}
+	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
+
+	agent := &store.Agent{
+		ID:              tid("agent-system-start"),
+		Name:            "system-agent",
+		Slug:            "system-agent",
+		ProjectID:       tid("project-system"),
+		RuntimeBrokerID: tid("broker-cli-mode"),
+		AppliedConfig: &store.AgentAppliedConfig{
+			Env: map[string]string{"SCION_CLI_MODE": "agent"},
+		},
+	}
+
+	if err := dispatcher.DispatchAgentStart(ctx, agent, "", false); err != nil {
+		t.Fatalf("DispatchAgentStart failed: %v", err)
+	}
+	if got := mockClient.lastResolvedEnv["SCION_CLI_MODE"]; got != "assistant" {
+		t.Fatalf("SCION_CLI_MODE = %q, want assistant", got)
+	}
+}
+
+func TestHTTPAgentDispatcher_NormalProjectStartPreservesExplicitCLIMode(t *testing.T) {
+	ctx := context.Background()
+	memStore := createTestStore(t)
+	requireProjectAndBroker(t, ctx, memStore, false)
+
+	mockClient := &mockRuntimeBrokerClient{}
+	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
+
+	agent := &store.Agent{
+		ID:              tid("agent-normal"),
+		Name:            "normal-agent",
+		Slug:            "normal-agent",
+		ProjectID:       tid("project-system"),
+		RuntimeBrokerID: tid("broker-cli-mode"),
+		AppliedConfig: &store.AgentAppliedConfig{
+			Env: map[string]string{"SCION_CLI_MODE": "human"},
+		},
+	}
+
+	if err := dispatcher.DispatchAgentStart(ctx, agent, "", false); err != nil {
+		t.Fatalf("DispatchAgentStart failed: %v", err)
+	}
+	if got := mockClient.lastResolvedEnv["SCION_CLI_MODE"]; got != "human" {
+		t.Fatalf("SCION_CLI_MODE = %q, want human", got)
+	}
+}
+
+func TestHTTPAgentDispatcher_NormalProjectCreateDefaultsAgentCLIMode(t *testing.T) {
+	ctx := context.Background()
+	memStore := createTestStore(t)
+	requireProjectAndBroker(t, ctx, memStore, false)
+
+	mockClient := &mockRuntimeBrokerClient{}
+	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
+
+	agent := &store.Agent{
+		ID:              tid("agent-normal-default"),
+		Name:            "normal-agent",
+		Slug:            "normal-agent",
+		ProjectID:       tid("project-system"),
+		RuntimeBrokerID: tid("broker-cli-mode"),
+	}
+
+	if err := dispatcher.DispatchAgentCreate(ctx, agent); err != nil {
+		t.Fatalf("DispatchAgentCreate failed: %v", err)
+	}
+	if got := mockClient.lastCreateReq.ResolvedEnv["SCION_CLI_MODE"]; got != "agent" {
+		t.Fatalf("SCION_CLI_MODE = %q, want agent", got)
+	}
+}
+
+func requireProjectAndBroker(t *testing.T, ctx context.Context, s store.Store, systemProject bool) {
+	t.Helper()
+	labels := map[string]string{}
+	if systemProject {
+		labels[projectcompat.LabelSystemProject] = "true"
+	}
+	project := &store.Project{
+		ID:     tid("project-system"),
+		Name:   "test-project",
+		Slug:   "test-project",
+		Labels: labels,
+	}
+	if err := s.CreateProject(ctx, project); err != nil {
+		t.Fatalf("failed to create project: %v", err)
+	}
+	broker := &store.RuntimeBroker{
+		ID:       tid("broker-cli-mode"),
+		Name:     "test-broker",
+		Slug:     "test-broker",
+		Endpoint: "http://localhost:9800",
+		Status:   store.BrokerStatusOnline,
+	}
+	if err := s.CreateRuntimeBroker(ctx, broker); err != nil {
+		t.Fatalf("failed to create runtime broker: %v", err)
 	}
 }
 

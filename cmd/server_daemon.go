@@ -112,6 +112,12 @@ func buildDaemonStartArgs(cmd *cobra.Command) []string {
 	if cmd.Flags().Changed("storage-dir") {
 		daemonArgs = append(daemonArgs, fmt.Sprintf("--storage-dir=%s", storageDir))
 	}
+	if cmd.Flags().Changed("enable-system-project") {
+		daemonArgs = append(daemonArgs, "--enable-system-project")
+	}
+	if cmd.Flags().Changed("system-project-workspace-path") {
+		daemonArgs = append(daemonArgs, fmt.Sprintf("--system-project-workspace-path=%s", systemProjectWorkspacePath))
+	}
 	// String/int flags registered only on serverStartCmd: forward when explicitly
 	// set so they survive the re-exec into the --foreground child rather than
 	// falling back to defaults (e.g. --session-secret would otherwise be

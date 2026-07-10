@@ -32,6 +32,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/gcp"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/labels"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -263,6 +264,9 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 	if req.ID != "" {
 		existing, err := s.store.GetProject(ctx, req.ID)
 		if err == nil {
+			if s.rejectReservedProjectSlugForNonAdmin(w, ctx, existing.Slug) {
+				return
+			}
 			// Project already exists — ensure associated groups exist (backfill for
 			// projects created before group support was added). Pass the caller
 			// so they get added as an owner of the members group.
@@ -291,6 +295,9 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 	if baseSlug == "" {
 		baseSlug = api.Slugify(req.Name)
 	}
+	if s.rejectReservedProjectSlugForNonAdmin(w, ctx, baseSlug) {
+		return
+	}
 
 	slug, err := s.store.NextAvailableSlug(ctx, baseSlug)
 	if err != nil {
@@ -301,6 +308,10 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 	displayName := req.Name
 	if slug != baseSlug {
 		displayName = api.DisplayNameWithSerial(req.Name, slug, baseSlug)
+	}
+
+	if s.rejectReservedLabelsForNonAdmin(w, ctx, req.Labels) {
+		return
 	}
 
 	// Apply workspace mode label for git projects with explicit workspace mode.
@@ -431,6 +442,17 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 	s.events.PublishProjectCreated(ctx, project)
 
 	writeJSON(w, http.StatusCreated, project)
+}
+
+func (s *Server) rejectReservedProjectSlugForNonAdmin(w http.ResponseWriter, ctx context.Context, slug string) bool {
+	if !projectcompat.IsReservedProjectSlug(slug) {
+		return false
+	}
+	if user := GetUserIdentityFromContext(ctx); user != nil && user.Role() == "admin" {
+		return false
+	}
+	Forbidden(w)
+	return true
 }
 
 // createProjectGroup creates the implicit project_agents group for a project.
@@ -1000,6 +1022,9 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 		}
 
 		baseSlug := api.Slugify(req.Name)
+		if s.rejectReservedProjectSlugForNonAdmin(w, ctx, baseSlug) {
+			return
+		}
 		slug, err := s.store.NextAvailableSlug(ctx, baseSlug)
 		if err != nil {
 			writeErrorFromErr(w, err, "")
@@ -1009,6 +1034,10 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 		displayName := req.Name
 		if slug != baseSlug {
 			displayName = api.DisplayNameWithSerial(req.Name, slug, baseSlug)
+		}
+
+		if s.rejectReservedLabelsForNonAdmin(w, ctx, req.Labels) {
+			return
 		}
 
 		project = &store.Project{
@@ -1041,6 +1070,9 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 		// Auto-link brokers that have auto_provide enabled
 		s.autoLinkProviders(ctx, project)
 	} else {
+		if s.rejectReservedProjectSlugForNonAdmin(w, ctx, project.Slug) {
+			return
+		}
 		// Existing project — ensure associated groups exist (backfill for
 		// projects created before group support was added). Pass the
 		// authenticated user so they are added as owner of the members
@@ -2049,6 +2081,24 @@ func (s *Server) getProject(w http.ResponseWriter, r *http.Request, id string) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
+func (s *Server) rejectReservedLabelsForNonAdmin(w http.ResponseWriter, ctx context.Context, labels map[string]string) bool {
+	if labels == nil {
+		return false
+	}
+	user := GetUserIdentityFromContext(ctx)
+	if user != nil && user.Role() == "admin" {
+		return false
+	}
+	for key := range labels {
+		if key == projectcompat.LabelScionSystem || key == projectcompat.LabelSystemProject {
+			writeError(w, http.StatusForbidden, ErrCodeForbidden,
+				"Reserved system labels cannot be set by non-admin users", nil)
+			return true
+		}
+	}
+	return false
+}
+
 func (s *Server) updateProject(w http.ResponseWriter, r *http.Request, id string) {
 	ctx := r.Context()
 
@@ -2092,6 +2142,9 @@ func (s *Server) updateProject(w http.ResponseWriter, r *http.Request, id string
 			return
 		}
 		if newSlug != oldSlug {
+			if s.rejectReservedProjectSlugForNonAdmin(w, ctx, newSlug) {
+				return
+			}
 			existing, err := s.store.GetProjectBySlug(ctx, newSlug)
 			if err != nil && err != store.ErrNotFound {
 				writeErrorFromErr(w, err, "")
@@ -2106,6 +2159,9 @@ func (s *Server) updateProject(w http.ResponseWriter, r *http.Request, id string
 		}
 	}
 	if updates.Labels != nil {
+		if s.rejectReservedLabelsForNonAdmin(w, ctx, updates.Labels) {
+			return
+		}
 		project.Labels = updates.Labels
 	}
 	if updates.Visibility != "" {

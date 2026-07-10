@@ -164,6 +164,12 @@ type RuntimeBrokerConfig struct {
 	AllowContainerScriptHarnesses bool `json:"allowContainerScriptHarnesses" yaml:"allowContainerScriptHarnesses" koanf:"allowContainerScriptHarnesses"`
 }
 
+// SystemProjectConfig holds settings for the built-in system project.
+type SystemProjectConfig struct {
+	Enabled       bool   `json:"enabled" yaml:"enabled" koanf:"enabled"`
+	WorkspacePath string `json:"workspacePath,omitempty" yaml:"workspacePath,omitempty" koanf:"workspacePath"`
+}
+
 // DatabaseConfig holds database connection settings.
 type DatabaseConfig struct {
 	Driver string `json:"driver" yaml:"driver" koanf:"driver"` // sqlite, postgres
@@ -322,6 +328,9 @@ type GlobalConfig struct {
 	// Runtime Broker API server settings
 	RuntimeBroker RuntimeBrokerConfig `json:"runtimeBroker" yaml:"runtimeBroker" koanf:"runtimeBroker"`
 
+	// SystemProject controls the optional built-in administration project.
+	SystemProject SystemProjectConfig `json:"systemProject" yaml:"systemProject" koanf:"systemProject"`
+
 	// Database settings
 	Database DatabaseConfig `json:"database" yaml:"database" koanf:"database"`
 
@@ -412,6 +421,9 @@ func DefaultGlobalConfig() GlobalConfig {
 			CORSAllowedHeaders:            []string{"Authorization", "Content-Type", "X-Scion-Broker-Token", "X-API-Key"},
 			CORSMaxAge:                    3600,
 			AllowContainerScriptHarnesses: true,
+		},
+		SystemProject: SystemProjectConfig{
+			Enabled: false,
 		},
 		Database: DatabaseConfig{
 			Driver: "sqlite",
@@ -600,6 +612,8 @@ func loadGlobalConfigLegacy(configPath string) (*GlobalConfig, error) {
 		"runtimeBroker.corsAllowedHeaders":            defaults.RuntimeBroker.CORSAllowedHeaders,
 		"runtimeBroker.corsMaxAge":                    defaults.RuntimeBroker.CORSMaxAge,
 		"runtimeBroker.allowContainerScriptHarnesses": defaults.RuntimeBroker.AllowContainerScriptHarnesses,
+		"systemProject.enabled":                       defaults.SystemProject.Enabled,
+		"systemProject.workspacePath":                 defaults.SystemProject.WorkspacePath,
 		// Database defaults
 		"database.driver": defaults.Database.Driver,
 		"database.url":    defaults.Database.URL,
@@ -759,10 +773,18 @@ func envKeyToConfigKey(envKey string) string {
 		"adminmode":                    "adminMode",
 		"maintenancemessage":           "maintenanceMessage",
 		"disablelegacystoragefallback": "disableLegacyStorageFallback",
+		"systemproject":                "systemProject",
+		"workspacepath":                "workspacePath",
 	}
 
 	// Split by underscore, convert each part
 	parts := strings.Split(strings.ToLower(envKey), "_")
+	if len(parts) >= 2 && parts[0] == "system" && parts[1] == "project" {
+		parts = append([]string{"systemProject"}, parts[2:]...)
+		if len(parts) >= 3 && parts[1] == "workspace" && parts[2] == "path" {
+			parts = append([]string{"systemProject", "workspacePath"}, parts[3:]...)
+		}
+	}
 	for i, part := range parts {
 		if replacement, ok := camelCaseFields[part]; ok {
 			parts[i] = replacement

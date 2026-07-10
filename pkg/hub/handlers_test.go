@@ -2412,6 +2412,207 @@ func TestProjectCreateWithSlug(t *testing.T) {
 	}
 }
 
+func TestProjectCreateRejectsReservedSlugForNonAdmin(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	member := &store.User{
+		ID:          tid("reserved-member"),
+		Email:       "reserved-member@test.com",
+		DisplayName: "Reserved Member",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+	}
+	if err := s.CreateUser(ctx, member); err != nil {
+		t.Fatalf("failed to create member: %v", err)
+	}
+
+	for _, slug := range []string{"system", "global"} {
+		body := CreateProjectRequest{Name: slug, Slug: slug}
+		rec := doRequestAsUser(t, srv, member, http.MethodPost, "/api/v1/projects", body)
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("member create %q: expected status 403, got %d: %s", slug, rec.Code, rec.Body.String())
+		}
+	}
+
+	adminBody := CreateProjectRequest{Name: "System", Slug: "system"}
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects", adminBody)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("admin create reserved slug: expected status 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var project store.Project
+	if err := json.NewDecoder(rec.Body).Decode(&project); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if project.Slug != "system" {
+		t.Fatalf("expected system slug, got %q", project.Slug)
+	}
+}
+
+func TestProjectUpdateRejectsReservedLabelsForNonAdmin(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	member := &store.User{
+		ID:          tid("label-member"),
+		Email:       "label-member@test.com",
+		DisplayName: "Label Member",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+	}
+	if err := s.CreateUser(ctx, member); err != nil {
+		t.Fatalf("failed to create member: %v", err)
+	}
+
+	project := &store.Project{
+		ID:        tid("label-proj"),
+		Slug:      "label-proj",
+		Name:      "Label Project",
+		CreatedBy: member.ID,
+		Created:   time.Now(),
+		Updated:   time.Now(),
+	}
+	if err := s.CreateProject(ctx, project); err != nil {
+		t.Fatalf("failed to create project: %v", err)
+	}
+
+	for _, labelKey := range []string{"scion.io/system-project", "scion.io/system"} {
+		body := map[string]interface{}{
+			"labels": map[string]string{labelKey: "true"},
+		}
+		rec := doRequestAsUser(t, srv, member, http.MethodPatch,
+			fmt.Sprintf("/api/v1/projects/%s", tid("label-proj")), body)
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("member set %q: expected status 403, got %d: %s", labelKey, rec.Code, rec.Body.String())
+		}
+	}
+
+	adminBody := map[string]interface{}{
+		"labels": map[string]string{"scion.io/system-project": "true"},
+	}
+	rec := doRequest(t, srv, http.MethodPatch,
+		fmt.Sprintf("/api/v1/projects/%s", tid("label-proj")), adminBody)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("admin set system label: expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestProjectCreateRejectsReservedLabelsForNonAdmin(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	member := &store.User{
+		ID:          tid("create-label-member"),
+		Email:       "create-label-member@test.com",
+		DisplayName: "Create Label Member",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+	}
+	if err := s.CreateUser(ctx, member); err != nil {
+		t.Fatalf("failed to create member: %v", err)
+	}
+
+	for _, labelKey := range []string{"scion.io/system-project", "scion.io/system"} {
+		body := map[string]interface{}{
+			"name":   "test-create-" + labelKey,
+			"labels": map[string]string{labelKey: "true"},
+		}
+		rec := doRequestAsUser(t, srv, member, http.MethodPost, "/api/v1/projects", body)
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("member create with %q: expected status 403, got %d: %s", labelKey, rec.Code, rec.Body.String())
+		}
+	}
+
+	adminBody := map[string]interface{}{
+		"name":   "admin-system-project",
+		"labels": map[string]string{"scion.io/system-project": "true"},
+	}
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects", adminBody)
+	if rec.Code != http.StatusOK && rec.Code != http.StatusCreated {
+		t.Fatalf("admin create with system label: expected status 200/201, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestProjectRegisterRejectsReservedLabelsForNonAdmin(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	member := &store.User{
+		ID:          tid("register-label-member"),
+		Email:       "register-label-member@test.com",
+		DisplayName: "Register Label Member",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+	}
+	if err := s.CreateUser(ctx, member); err != nil {
+		t.Fatalf("failed to create member: %v", err)
+	}
+
+	for _, labelKey := range []string{"scion.io/system-project", "scion.io/system"} {
+		body := map[string]interface{}{
+			"name":   "test-register-" + labelKey,
+			"labels": map[string]string{labelKey: "true"},
+		}
+		rec := doRequestAsUser(t, srv, member, http.MethodPost, "/api/v1/projects/register", body)
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("member register with %q: expected status 403, got %d: %s", labelKey, rec.Code, rec.Body.String())
+		}
+	}
+}
+
+func TestProjectUpdateRejectsReservedSlugRenameForNonAdmin(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	member := &store.User{
+		ID:          tid("slug-member"),
+		Email:       "slug-member@test.com",
+		DisplayName: "Slug Member",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+	}
+	if err := s.CreateUser(ctx, member); err != nil {
+		t.Fatalf("failed to create member: %v", err)
+	}
+
+	project := &store.Project{
+		ID:        tid("slug-proj"),
+		Slug:      "my-project",
+		Name:      "My Project",
+		CreatedBy: member.ID,
+		Created:   time.Now(),
+		Updated:   time.Now(),
+	}
+	if err := s.CreateProject(ctx, project); err != nil {
+		t.Fatalf("failed to create project: %v", err)
+	}
+
+	for _, slug := range []string{"system", "global"} {
+		body := map[string]interface{}{"slug": slug}
+		rec := doRequestAsUser(t, srv, member, http.MethodPatch,
+			fmt.Sprintf("/api/v1/projects/%s", tid("slug-proj")), body)
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("member rename to %q: expected status 403, got %d: %s", slug, rec.Code, rec.Body.String())
+		}
+	}
+
+	adminBody := map[string]interface{}{"slug": "system"}
+	rec := doRequest(t, srv, http.MethodPatch,
+		fmt.Sprintf("/api/v1/projects/%s", tid("slug-proj")), adminBody)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("admin rename to system: expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp store.Project
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if resp.Slug != "system" {
+		t.Fatalf("expected slug %q, got %q", "system", resp.Slug)
+	}
+}
+
 // ============================================================================
 // Project Rename Tests
 // ============================================================================

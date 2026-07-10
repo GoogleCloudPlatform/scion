@@ -161,6 +161,17 @@ func GetGlobalDir() (string, error) {
 	return filepath.Join(home, GlobalDir), nil
 }
 
+func GetSystemProjectDir(override string) (string, error) {
+	if override != "" {
+		return filepath.Abs(override)
+	}
+	globalDir, err := GetGlobalDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(globalDir, "system-project"), nil
+}
+
 // GetProjectConfigDir returns the directory where project config files (settings.yaml,
 // templates/) live. For git projects with split storage (project-id file exists), this
 // is the external path under ~/.scion/project-configs/. For all other projects

@@ -18,23 +18,29 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// GlobalProjectName is the special name for the default project when hub and runtime-broker run together
-const GlobalProjectName = "global"
+const (
+	// GlobalProjectName is the special name for the default project when hub and runtime-broker run together.
+	GlobalProjectName = "global"
+	// SystemProjectName is the reserved slug for the built-in administration project.
+	SystemProjectName = "system"
+)
 
 var (
-	serverConfigPath    string
-	hubPort             int
-	hubHost             string
-	enableHub           bool
-	enableRuntimeBroker bool
-	runtimeBrokerPort   int
-	dbURL               string
-	noAutoMigrate       bool
-	enableDevAuth       bool
-	enableTestLogin     bool
-	enableDebug         bool
-	storageBucket       string
-	storageDir          string
+	serverConfigPath           string
+	hubPort                    int
+	hubHost                    string
+	enableHub                  bool
+	enableRuntimeBroker        bool
+	runtimeBrokerPort          int
+	dbURL                      string
+	noAutoMigrate              bool
+	enableDevAuth              bool
+	enableTestLogin            bool
+	enableDebug                bool
+	storageBucket              string
+	storageDir                 string
+	enableSystemProject        bool
+	systemProjectWorkspacePath string
 
 	// Template cache settings for Runtime Broker
 	templateCacheDir string
@@ -257,6 +263,8 @@ func init() {
 	// Storage flags
 	serverStartCmd.Flags().StringVar(&storageBucket, "storage-bucket", "", "GCS bucket name for template storage")
 	serverStartCmd.Flags().StringVar(&storageDir, "storage-dir", "", "Local directory for template storage (alternative to GCS)")
+	serverStartCmd.Flags().BoolVar(&enableSystemProject, "enable-system-project", false, "Enable the built-in system project")
+	serverStartCmd.Flags().StringVar(&systemProjectWorkspacePath, "system-project-workspace-path", "", "Workspace path for the system project")
 
 	// Template cache flags (for Runtime Broker)
 	serverStartCmd.Flags().StringVar(&templateCacheDir, "template-cache-dir", "", "Directory for caching templates from Hub (default: ~/.scion/cache/templates)")

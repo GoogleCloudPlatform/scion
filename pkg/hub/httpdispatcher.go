@@ -27,6 +27,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/dispatchmetrics"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/go-jose/go-jose/v4/jwt"
@@ -646,6 +647,11 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 		}
 	}
 
+	if req.ResolvedEnv == nil {
+		req.ResolvedEnv = make(map[string]string)
+	}
+	d.applyCLIModeForAgentProject(ctx, agent, req.ResolvedEnv)
+
 	return req, nil
 }
 
@@ -708,6 +714,34 @@ func (d *HTTPAgentDispatcher) resolveDispatchProjectInfo(ctx context.Context, ag
 		info.projectSlug = project.Slug
 	}
 	return info
+}
+
+func isSystemProject(project *store.Project) bool {
+	return project != nil && project.Labels[projectcompat.LabelSystemProject] == "true"
+}
+
+func (d *HTTPAgentDispatcher) cliModeForAgentProject(ctx context.Context, agent *store.Agent) string {
+	if agent == nil || agent.ProjectID == "" {
+		return "agent"
+	}
+	project, err := d.store.GetProject(ctx, agent.ProjectID)
+	if err != nil {
+		return "agent"
+	}
+	if isSystemProject(project) {
+		return "assistant"
+	}
+	return "agent"
+}
+
+func (d *HTTPAgentDispatcher) applyCLIModeForAgentProject(ctx context.Context, agent *store.Agent, resolvedEnv map[string]string) {
+	if resolvedEnv == nil {
+		return
+	}
+	mode := d.cliModeForAgentProject(ctx, agent)
+	if mode == "assistant" || resolvedEnv["SCION_CLI_MODE"] == "" {
+		resolvedEnv["SCION_CLI_MODE"] = mode
+	}
 }
 
 // applyBrokerResponse updates agent fields from the broker's response.
@@ -1277,6 +1311,8 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 		)
 	}
 
+	d.applyCLIModeForAgentProject(ctx, agent, resolvedEnv)
+
 	// Use agent name as identifier (runtime broker uses name or ID)
 	// Pass the agent's harness config so the broker starts with the correct harness.
 	harnessConfig := ""
@@ -1395,6 +1431,8 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 			resolvedEnv["SCION_TRANSPORT_TOKEN_EXPIRY"] = tExpiry.UTC().Format(time.RFC3339)
 		}
 	}
+
+	d.applyCLIModeForAgentProject(ctx, agent, resolvedEnv)
 
 	err = d.client.RestartAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID, resolvedEnv)
 	if errors.Is(err, ErrLifecycleDeferred) {

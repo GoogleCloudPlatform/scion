@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -697,4 +698,103 @@ func TestAuthz_AncestryAccess_NotInChain(t *testing.T) {
 
 	decision := authz.CheckAccess(ctx, user, resource, ActionRead)
 	assert.False(t, decision.Allowed)
+}
+
+func TestAuthz_SystemProjectAgentAdminDelegation(t *testing.T) {
+	authz, s := authzTestSetup(t)
+	ctx := context.Background()
+	requireSystemDelegationFixtures(t, ctx, s, "admin")
+
+	agent := &evaluateAgentIdentity{
+		id:        tid("system-agent"),
+		projectID: tid("system-project"),
+		ancestry:  []string{tid("origin-user")},
+	}
+	resource := Resource{Type: "project", ID: tid("unrelated-project")}
+
+	decision := authz.CheckAccess(ctx, agent, resource, ActionDelete)
+	assert.True(t, decision.Allowed)
+	assert.Equal(t, "system project admin delegation", decision.Reason)
+}
+
+func TestAuthz_SystemProjectAgentDelegationRequiresCurrentAdmin(t *testing.T) {
+	authz, s := authzTestSetup(t)
+	ctx := context.Background()
+	requireSystemDelegationFixtures(t, ctx, s, "admin")
+
+	agent := &evaluateAgentIdentity{
+		id:        tid("system-agent"),
+		projectID: tid("system-project"),
+		ancestry:  []string{tid("origin-user")},
+	}
+	resource := Resource{Type: "project", ID: tid("unrelated-project")}
+	assert.True(t, authz.CheckAccess(ctx, agent, resource, ActionDelete).Allowed)
+
+	user, err := s.GetUser(ctx, tid("origin-user"))
+	require.NoError(t, err)
+	user.Role = "member"
+	require.NoError(t, s.UpdateUser(ctx, user))
+
+	decision := authz.CheckAccess(ctx, agent, resource, ActionDelete)
+	assert.False(t, decision.Allowed)
+	assert.Equal(t, "default deny", decision.Reason)
+}
+
+func TestAuthz_SystemProjectAgentDelegationRequiresSystemProject(t *testing.T) {
+	authz, s := authzTestSetup(t)
+	ctx := context.Background()
+	requireSystemDelegationFixtures(t, ctx, s, "admin")
+
+	normalProject := &store.Project{ID: tid("normal-project"), Name: "Normal", Slug: "normal"}
+	require.NoError(t, s.CreateProject(ctx, normalProject))
+	agent := &evaluateAgentIdentity{
+		id:        tid("normal-agent"),
+		projectID: tid("normal-project"),
+		ancestry:  []string{tid("origin-user")},
+	}
+
+	decision := authz.CheckAccess(ctx, agent, Resource{Type: "project", ID: tid("unrelated-project")}, ActionDelete)
+	assert.False(t, decision.Allowed)
+	assert.Equal(t, "default deny", decision.Reason)
+}
+
+func TestAuthz_SystemProjectAgentNonAdminOriginDenied(t *testing.T) {
+	authz, s := authzTestSetup(t)
+	ctx := context.Background()
+	requireSystemDelegationFixtures(t, ctx, s, "member")
+
+	agent := &evaluateAgentIdentity{
+		id:        tid("system-agent"),
+		projectID: tid("system-project"),
+		ancestry:  []string{tid("origin-user")},
+	}
+	resource := Resource{Type: "project", ID: tid("unrelated-project")}
+
+	decision := authz.CheckAccess(ctx, agent, resource, ActionDelete)
+	assert.False(t, decision.Allowed)
+	assert.Equal(t, "default deny", decision.Reason)
+}
+
+func requireSystemDelegationFixtures(t *testing.T, ctx context.Context, s store.Store, originRole string) {
+	t.Helper()
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID:          tid("origin-user"),
+		Email:       "origin@test.com",
+		DisplayName: "Origin",
+		Role:        originRole,
+		Status:      "active",
+	}))
+	require.NoError(t, s.CreateProject(ctx, &store.Project{
+		ID:   tid("system-project"),
+		Name: "System",
+		Slug: "system",
+		Labels: map[string]string{
+			projectcompat.LabelSystemProject: "true",
+		},
+	}))
+	require.NoError(t, s.CreateProject(ctx, &store.Project{
+		ID:   tid("unrelated-project"),
+		Name: "Unrelated",
+		Slug: "unrelated",
+	}))
 }

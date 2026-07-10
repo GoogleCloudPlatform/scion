@@ -577,6 +577,7 @@ func (s *Server) handlePolicyEvaluate(w http.ResponseWriter, r *http.Request) {
 		evalIdentity = &evaluateAgentIdentity{
 			id:        agent.ID,
 			projectID: agent.ProjectID,
+			ancestry:  agent.Ancestry,
 		}
 		groupIDs, _ := s.store.GetEffectiveGroupsForAgent(ctx, agent.ID)
 		effectiveGroups = groupIDs
@@ -601,15 +602,32 @@ func (s *Server) handlePolicyEvaluate(w http.ResponseWriter, r *http.Request) {
 type evaluateAgentIdentity struct {
 	id        string
 	projectID string
+	scopes    []AgentTokenScope
+	ancestry  []string
 }
 
-func (e *evaluateAgentIdentity) ID() string                    { return e.id }
-func (e *evaluateAgentIdentity) Type() string                  { return "agent" }
-func (e *evaluateAgentIdentity) ProjectID() string             { return e.projectID }
-func (e *evaluateAgentIdentity) Scopes() []AgentTokenScope     { return nil }
-func (e *evaluateAgentIdentity) HasScope(AgentTokenScope) bool { return true }
-func (e *evaluateAgentIdentity) Ancestry() []string            { return nil }
-func (e *evaluateAgentIdentity) OriginUserID() string          { return "" }
+func (e *evaluateAgentIdentity) ID() string                { return e.id }
+func (e *evaluateAgentIdentity) Type() string              { return "agent" }
+func (e *evaluateAgentIdentity) ProjectID() string         { return e.projectID }
+func (e *evaluateAgentIdentity) Scopes() []AgentTokenScope { return e.scopes }
+func (e *evaluateAgentIdentity) HasScope(scope AgentTokenScope) bool {
+	if len(e.scopes) == 0 {
+		return true
+	}
+	for _, s := range e.scopes {
+		if s == scope {
+			return true
+		}
+	}
+	return false
+}
+func (e *evaluateAgentIdentity) Ancestry() []string { return e.ancestry }
+func (e *evaluateAgentIdentity) OriginUserID() string {
+	if len(e.ancestry) == 0 {
+		return ""
+	}
+	return e.ancestry[0]
+}
 
 // populateResourceContext fills in owner/parent info from the store.
 func populateResourceContext(ctx context.Context, s *Server, resource *Resource, resourceType, resourceID string) {

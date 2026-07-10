@@ -261,6 +261,15 @@ func (a *AuthzService) ComputeCapabilitiesBatch(ctx context.Context, identity Id
 		return caps
 	}
 
+	if agent, ok := identity.(AgentIdentity); ok && a.hasSystemProjectAdminDelegation(ctx, agent) {
+		allCap := allActions(actions)
+		caps := make([]*Capabilities, len(resources))
+		for i := range caps {
+			caps[i] = allCap
+		}
+		return caps
+	}
+
 	// Pre-fetch principals and policies once for the identity
 	principals, policies := a.precomputeForIdentity(ctx, identity)
 
@@ -350,6 +359,8 @@ func (a *AuthzService) precomputeForIdentity(ctx context.Context, identity Ident
 }
 
 // checkAccessPrecomputed evaluates access using pre-fetched principals and policies.
+// NOTE: System-project admin delegation is handled at the batch level in ComputeCapabilitiesBatch,
+// not here. Callers using this function directly will not get delegation behavior.
 func (a *AuthzService) checkAccessPrecomputed(identity Identity, _ []store.PrincipalRef, policies []store.Policy, resource Resource, action Action) Decision {
 	// Owner bypass (already handled in batch caller, but kept for single-resource calls)
 	if user, ok := identity.(UserIdentity); ok {

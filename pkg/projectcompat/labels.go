@@ -16,6 +16,25 @@ package projectcompat
 
 import "strings"
 
+const (
+	LabelScionSystem   = "scion.io/system"
+	LabelSystemProject = "scion.io/system-project"
+)
+
+const (
+	ReservedProjectSlugGlobal = "global"
+	ReservedProjectSlugSystem = "system"
+)
+
+func IsReservedProjectSlug(slug string) bool {
+	switch strings.ToLower(strings.TrimSpace(slug)) {
+	case ReservedProjectSlugGlobal, ReservedProjectSlugSystem:
+		return true
+	default:
+		return false
+	}
+}
+
 func ProjectIDFromLabels(labels map[string]string) string {
 	if labels == nil {
 		return ""

@@ -58,6 +58,7 @@
         },
         "hub": { "$ref": "#/$defs/serverHub" },
         "broker": { "$ref": "#/$defs/serverBroker" },
+        "system_project": { "$ref": "#/$defs/serverSystemProject" },
         "database": { "$ref": "#/$defs/serverDatabase" },
         "auth": { "$ref": "#/$defs/serverAuth" },
         "oauth": { "$ref": "#/$defs/serverOAuth" },
@@ -818,6 +819,26 @@
         },
         "cors": { "$ref": "#/$defs/corsConfig" }
       }
+    },
+    "serverSystemProject": {
+      "type": "object",
+      "description": "Built-in system project settings.",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable the built-in system project.",
+          "x-env-var": "SCION_SERVER_SYSTEM_PROJECT_ENABLED",
+          "x-since": "1"
+        },
+        "workspace_path": {
+          "type": "string",
+          "description": "Filesystem workspace path for the system project. Defaults to ~/.scion/system-project.",
+          "x-env-var": "SCION_SERVER_SYSTEM_PROJECT_WORKSPACE_PATH",
+          "x-since": "1"
+        }
+      },
+      "additionalProperties": false
     },
     "corsConfig": {
       "type": "object",
