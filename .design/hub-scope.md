@@ -1,13 +1,19 @@
-# Design: Hub Scope — Hub Name for HA Multi-Node Deployments
+# Design: Hub Scope — Two-Identifier Hub Identity for HA Multi-Node Deployments
 
 **Issue:** [#392](https://github.com/ptone/scion/issues/392)
-**Status:** Draft
-**Author:** hs-arch agent
+**Status:** Approved
+**Author:** hs-arch agent (refined by hs-em per user direction)
 **Date:** 2026-07-10
 
 ## Summary
 
-Replace hostname-based hub identification with a configurable `hub_name` — a stable, human-readable identifier for a logical hub instance, independent of node hostnames. In HA deployments, all nodes share the same `hub_name`. Hostname is retained for node-level diagnostics only.
+Introduce a two-identifier hub identity model:
+
+1. **hub_id (Layer-0, immutable):** Machine-readable identity for secret namespacing, telemetry, and infrastructure. Currently defaults to `SHA256(hostname)[:12]` (hex). **Refined:** accept any unique string slug as hub_id (not just hex), keeping hex as the suggested default. Changing hub_id effectively creates a new hub (orphans secrets, etc.).
+
+2. **hub_name (Layer-1, mutable):** A new human-readable display name for the hub. Mutable via admin API, synced across replicas. Used in user-facing UI, log labels, and display contexts. Defaults to `os.Hostname()` for backward compatibility.
+
+Hostname is retained for node-level diagnostics only.
 
 ---
 
@@ -19,7 +25,7 @@ The hub currently has two identity mechanisms:
 
 | Identifier | Source | Use |
 |---|---|---|
-| **HubID** | `SHA256(hostname)[:12]` or explicit config | Secret namespacing, telemetry resource attribute |
+| **HubID** | `SHA256(hostname)[:12]` or any explicit string slug | Secret namespacing, telemetry resource attribute |
 | **InstanceID** | UUID (or POD_NAME + UUID) | Broker connection affinity, per-process tracking |
 
 Both are set at startup and immutable for the process lifetime.
@@ -95,13 +101,36 @@ This follows the standard Layer-1 precedence from the settings-db design (§3.4)
 
 ---
 
+## 2b. Hub ID Flexibility (User Refinement)
+
+### 2b.1 Current State
+
+`hub_id` currently defaults to `SHA256(hostname)[:12]` — a 12-character hex string. The `DefaultHubID()` function in `hub_config.go` enforces this format.
+
+### 2b.2 Refinement
+
+Allow `hub_id` to be set as **any unique string slug**, not just hex. The hex value remains the **suggested default** when no explicit value is provided, but operators can set descriptive slugs like `"prod-hub-west"` or `"staging"`.
+
+### 2b.3 Changes Required
+
+1. **Remove hex-only assumption:** `DefaultHubID()` continues to return hex, but explicit values are no longer validated as hex
+2. **Validation:** Apply the same DNS-label-safe constraints as `hub_name` (lowercase alphanumeric + hyphens, 1-63 chars) to ensure compatibility with GCP labels and secret namespacing
+3. **Schema:** Update the `hub_id` schema entry to reflect the relaxed format constraint
+4. **Documentation:** Note that changing `hub_id` orphans existing secrets and effectively creates a new hub
+
+### 2b.4 Immutability Note
+
+`hub_id` remains Layer-0 (bootstrap). It cannot be changed via admin API. Changing it in config/env and restarting effectively creates a new logical hub — existing GCP secrets namespaced under the old hub_id become orphaned.
+
+---
+
 ## 3. Settings Integration
 
 ### 3.1 Layer Classification
 
 | Setting | Layer | Rationale |
 |---|---|---|
-| `hub_id` | **Layer-0** (unchanged) | Needed for secret backend init before DB. Machine-readable. |
+| `hub_id` | **Layer-0** (unchanged) | Needed for secret backend init before DB. Machine-readable. Now accepts any string slug (not just hex). |
 | `hub_name` | **Layer-1** (new) | Human-readable display identifier. Not needed at bootstrap. Can be synced across replicas via DB. |
 
 ### 3.2 Why Layer-1 for hub_name
@@ -218,9 +247,9 @@ In Postgres mode, the DB value propagates automatically to all replicas. In file
 
 ### 4.3 hub_id Alignment
 
-Operators deploying HA should also set `hub_id` explicitly to the same value on all nodes (it's Layer-0, so must be in config/env). This is already the case today — the new `hub_name` doesn't change this requirement.
+Operators deploying HA should set `hub_id` explicitly to the same value on all nodes (it's Layer-0, so must be in config/env). With the relaxed format, operators can now use descriptive slugs like `"prod-hub"` instead of opaque hex strings. If not set, the default remains `SHA256(hostname)[:12]`.
 
-Recommendation: document that `hub_id` should be set explicitly in HA deployments. A future enhancement could auto-derive `hub_id` from `hub_name` when `hub_name` is set and `hub_id` is not.
+**Important:** Changing `hub_id` orphans existing secrets. In HA deployments, all nodes must share the same `hub_id`.
 
 ### 4.4 GCP Secret Label Migration
 
@@ -330,9 +359,9 @@ Replace `scion-hub-hostname` label matching with `scion-hub-name`. This is a fol
 
 ## 6. Phased Implementation Plan
 
-### Phase 1: Config Foundation (Small, No Behavior Change)
+### Phase 1: Config Foundation (No Behavior Change)
 
-**Goal:** Add `hub_name` to config structs, schema, and settings architecture without changing any runtime behavior.
+**Goal:** Add `hub_name` to config structs, schema, and settings. Update `hub_id` to accept any unique string slug. No runtime behavior changes.
 
 **Changes:**
 1. Add `HubName` field to `V1ServerHubConfig` (`settings_v1.go`)
@@ -344,6 +373,8 @@ Replace `scion-hub-hostname` label matching with `scion-hub-name`. This is a fol
 7. Add `HubName` to `Layer1Snapshot`
 8. Add `hub_name` to `ConvertV1ServerToGlobalConfig` and `ConvertGlobalConfigToV1Server`
 9. Wire `hub_name` through `buildSnapshotFromKoanf`
+10. Update `hub_id` schema to accept any string slug (relax hex-only constraint)
+11. Update `hub_id` documentation/comments to reflect slug flexibility
 
 **Tests:** Config loading, V1 conversion, schema validation, opsettings section registration.
 
@@ -401,7 +432,7 @@ Replace `scion-hub-hostname` label matching with `scion-hub-name`. This is a fol
 
 Currently `hub_id` defaults to `SHA256(hostname)[:12]`. If `hub_name` is set, should `hub_id` default to `SHA256(hub_name)[:12]` instead?
 
-**Recommendation:** Not in the initial implementation. This creates a coupling where changing `hub_name` (Layer-1, easy to change) silently changes `hub_id` (Layer-0, hard to change), which would orphan secrets. Keep them independent. Document that operators should set `hub_id` explicitly in HA.
+**Decision:** No. Keep them independent. hub_id is now flexible (accepts any slug), so operators can choose a descriptive value directly. Auto-deriving would create dangerous coupling where changing `hub_name` (Layer-1, easy) silently changes `hub_id` (Layer-0, hard), orphaning secrets.
 
 ### 7.4 Log Handler Hot-Reload
 
