@@ -256,6 +256,15 @@ func (s *Server) warnLegacyPath(resourceName, legacyPath, expectedPath string) {
 	}
 }
 
+// legacyFallbackPath returns the legacy un-namespaced storage path for fallback
+// reads, or "" if legacy fallback is disabled on this server.
+func (s *Server) legacyFallbackPath(path string) string {
+	if !s.LegacyFallbackEnabled() {
+		return ""
+	}
+	return legacyStoragePath(path)
+}
+
 // legacyStoragePath returns the un-namespaced portion of a hub-scoped storage
 // path. If the path doesn't start with "hubs/", returns "" (no fallback needed).
 func legacyStoragePath(path string) string {

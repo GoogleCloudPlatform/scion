@@ -1,7 +1,7 @@
 # Design: GCS Bucket Path Namespacing with Hub ID
 
 **Issue:** [#404](https://github.com/ptone/scion/issues/404)
-**Status:** Design
+**Status:** Implemented
 **Author:** hs-arch2 agent
 **Date:** 2026-07-10
 **Foundation:** PR #667 (hub_id/hub_name from #392) merged into main

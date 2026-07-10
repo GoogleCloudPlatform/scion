@@ -29,16 +29,21 @@ import (
 // repairFlight deduplicates concurrent repair attempts for the same resource.
 // When multiple dispatches hit a hash mismatch simultaneously, only one
 // actually downloads from GCS and updates the DB; the others wait and share
-// the result.
+// the result. With hub-namespaced storage paths, cross-hub hash interference
+// is eliminated; remaining mismatches are from interrupted uploads or manual
+// GCS edits.
 var repairFlight singleflight.Group
 
-// syncResourceFromStorage synchronises a resource's DB manifest hashes with
-// actual GCS content. In a multi-hub topology the GCS bucket is shared while
-// each hub keeps its own DB; when another hub uploads newer content, the local
-// DB manifest becomes stale and causes hash-mismatch errors on broker
-// hydration. This helper downloads each file from storage, recomputes the
-// SHA-256 hash, and returns the updated files + content hash when any file
-// hash has drifted. Returns changed=false when no update is needed.
+// syncResourceFromStorage reconciles a resource's DB manifest hashes with
+// actual GCS content. With hub-namespaced storage paths, cross-hub
+// interference is eliminated — each hub owns its own storage partition.
+// This repair is still needed for legitimate mismatches (interrupted
+// uploads, manual GCS edits, disk corruption, etc.).
+//
+// In a multi-hub topology the GCS bucket is shared while each hub keeps
+// its own DB; this helper downloads each file from storage, recomputes
+// the SHA-256 hash, and returns the updated files + content hash when
+// any file hash has drifted. Returns changed=false when no update is needed.
 func (s *Server) syncResourceFromStorage(
 	ctx context.Context,
 	kind storage.ResourceKind,
@@ -58,7 +63,10 @@ func (s *Server) syncResourceFromStorage(
 		storagePath = storage.ResourceStoragePath(s.HubID(), kind, scope, scopeID, slug)
 	}
 
-	legacyBase := storage.ResourceStoragePath("", kind, scope, scopeID, slug)
+	var legacyBase string
+	if s.LegacyFallbackEnabled() {
+		legacyBase = storage.ResourceStoragePath("", kind, scope, scopeID, slug)
+	}
 
 	label := string(kind)
 	updated := make([]store.TemplateFile, 0, len(files))
@@ -201,13 +209,17 @@ func (s *Server) syncTemplateFromStorageInner(ctx context.Context, templateRef s
 
 // SyncAllHarnessConfigsFromStorage reconciles DB manifest hashes against
 // actual GCS content for all active harness-configs. Call at startup to catch
-// stale manifests left by peer hubs that updated the shared GCS bucket.
+// stale manifests (e.g. interrupted uploads, manual GCS edits). With
+// hub-namespaced storage paths, cross-hub interference is eliminated; this
+// sync handles legitimate single-hub mismatches only.
 func (s *Server) SyncAllHarnessConfigsFromStorage(ctx context.Context) {
 	s.syncAllResourcesFromStorage(ctx, storage.ResourceKindHarnessConfig)
 }
 
 // SyncAllTemplatesFromStorage reconciles DB manifest hashes against actual
-// GCS content for all active templates.
+// GCS content for all active templates. With hub-namespaced storage paths,
+// cross-hub interference is eliminated; this sync handles legitimate
+// single-hub mismatches only (interrupted uploads, manual edits, etc.).
 func (s *Server) SyncAllTemplatesFromStorage(ctx context.Context) {
 	s.syncAllResourcesFromStorage(ctx, storage.ResourceKindTemplate)
 }

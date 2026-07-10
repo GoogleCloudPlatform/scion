@@ -379,6 +379,8 @@ type V1ServerHubConfig struct {
 	SoftDeleteRetainFiles *bool `json:"soft_delete_retain_files,omitempty" yaml:"soft_delete_retain_files,omitempty" koanf:"soft_delete_retain_files"`
 	// AutoSuspendStalled controls whether stalled agents are automatically suspended.
 	AutoSuspendStalled *bool `json:"auto_suspend_stalled,omitempty" yaml:"auto_suspend_stalled,omitempty" koanf:"auto_suspend_stalled"`
+	// DisableLegacyStorageFallback disables legacy un-namespaced storage path fallback.
+	DisableLegacyStorageFallback *bool `json:"disable_legacy_storage_fallback,omitempty" yaml:"disable_legacy_storage_fallback,omitempty" koanf:"disable_legacy_storage_fallback"`
 }
 
 // V1BrokerConfig holds Runtime Broker configuration.
@@ -1251,6 +1253,9 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 		if v1.Hub.AutoSuspendStalled != nil {
 			gc.Hub.AutoSuspendStalled = *v1.Hub.AutoSuspendStalled
 		}
+		if v1.Hub.DisableLegacyStorageFallback != nil {
+			gc.Hub.DisableLegacyStorageFallback = *v1.Hub.DisableLegacyStorageFallback
+		}
 	}
 
 	// Broker config
@@ -1492,6 +1497,10 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 	if gc.Hub.SoftDeleteRetainFiles {
 		retainFiles := true
 		v1Hub.SoftDeleteRetainFiles = &retainFiles
+	}
+	if gc.Hub.DisableLegacyStorageFallback {
+		disableLegacy := true
+		v1Hub.DisableLegacyStorageFallback = &disableLegacy
 	}
 	v1.Hub = v1Hub
 

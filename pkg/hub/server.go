@@ -159,6 +159,9 @@ type ServerConfig struct {
 	HubID string
 	// HubName is the human-readable hub display name for HA deployments.
 	HubName string
+	// DisableLegacyStorageFallback disables the legacy un-namespaced storage
+	// path fallback. When true, only hub-scoped paths are checked.
+	DisableLegacyStorageFallback bool
 	// SecretBackend is the optional secret backend for signing key storage.
 	// When set before New(), ensureSigningKey can load/persist keys through the
 	// production secret backend (e.g., GCP Secret Manager) instead of relying
@@ -1544,6 +1547,13 @@ func (s *Server) HubID() string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.hubID
+}
+
+// LegacyFallbackEnabled returns true when legacy un-namespaced storage path
+// fallback is active (the default). Returns false when the operator has
+// explicitly disabled it after completing migration.
+func (s *Server) LegacyFallbackEnabled() bool {
+	return !s.config.DisableLegacyStorageFallback
 }
 
 // HubName returns the human-readable hub display name. Thread-safe.

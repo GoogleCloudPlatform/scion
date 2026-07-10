@@ -79,7 +79,10 @@ func (rs *ResourceStore) ValidateStorage(ctx context.Context, rec *ResourceRecor
 		storagePath = storage.ResourceStoragePath(rs.hubID, rec.Kind, rec.Scope, rec.ScopeID, rec.Slug)
 	}
 
-	legacyBase := storage.ResourceStoragePath("", rec.Kind, rec.Scope, rec.ScopeID, rec.Slug)
+	var legacyBase string
+	if rs.srv.LegacyFallbackEnabled() {
+		legacyBase = storage.ResourceStoragePath("", rec.Kind, rec.Scope, rec.ScopeID, rec.Slug)
+	}
 
 	for _, file := range rec.Files {
 		objectPath := storagePath + "/" + file.Path
