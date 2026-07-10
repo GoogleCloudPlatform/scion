@@ -677,6 +677,8 @@ type Server struct {
 	// Shared HTTP client for federation proxy calls (no redirect following).
 	federationClient *http.Client
 
+	legacyPathWarnings sync.Map // key: storagePath, prevents duplicate legacy-path warnings
+
 	imageBuildActive atomic.Bool
 	imagePullActive  atomic.Bool
 

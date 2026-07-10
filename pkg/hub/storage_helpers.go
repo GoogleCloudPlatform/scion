@@ -223,11 +223,60 @@ func reconcileResourceStorage(ctx context.Context, stor storage.Storage, storage
 	}
 }
 
+// resolveObjectPath checks if a storage object exists at namespacedPath; if not,
+// falls back to legacyPath. Returns the resolved path and whether the legacy
+// fallback was used. When legacyPath is empty or equals namespacedPath, no
+// fallback is attempted.
+func resolveObjectPath(ctx context.Context, stor storage.Storage, namespacedPath, legacyPath string) (string, bool) {
+	if legacyPath == "" || legacyPath == namespacedPath {
+		return namespacedPath, false
+	}
+	exists, _ := stor.Exists(ctx, namespacedPath)
+	if exists {
+		return namespacedPath, false
+	}
+	exists, _ = stor.Exists(ctx, legacyPath)
+	if exists {
+		return legacyPath, true
+	}
+	return namespacedPath, false
+}
+
+// warnLegacyPath emits a once-per-resource warning when content is served from
+// a legacy un-namespaced GCS path. Duplicate warnings for the same legacyPath
+// are suppressed via Server.legacyPathWarnings.
+func (s *Server) warnLegacyPath(resourceName, legacyPath, expectedPath string) {
+	if _, loaded := s.legacyPathWarnings.LoadOrStore(legacyPath, struct{}{}); !loaded {
+		s.resourceLog.Warn("storage: serving resource from legacy un-namespaced path; "+
+			"run 'scion admin migrate-storage' to migrate",
+			"resource", resourceName,
+			"legacy_path", legacyPath,
+			"expected_path", expectedPath,
+		)
+	}
+}
+
+// legacyStoragePath returns the un-namespaced portion of a hub-scoped storage
+// path. If the path doesn't start with "hubs/", returns "" (no fallback needed).
+func legacyStoragePath(path string) string {
+	if !strings.HasPrefix(path, "hubs/") {
+		return ""
+	}
+	idx := strings.Index(path[5:], "/")
+	if idx < 0 {
+		return ""
+	}
+	return path[5+idx+1:]
+}
+
 // generateDownloadURLs generates signed GET URLs for files under basePath.
 // Returns the download URL infos, a manifest URL (if possible), the expiry time, and any error.
 // Returns a hard error if signing fails for any listed file — callers must not
 // serve a partial URL list, as that produces opaque hydration failures (issue #373).
-func generateDownloadURLs(ctx context.Context, stor storage.Storage, basePath string, files []store.TemplateFile) ([]DownloadURLInfo, string, time.Time, error) {
+//
+// When legacyBasePath is non-empty and a file is not found at basePath, the
+// function retries signing at legacyBasePath before returning an error.
+func generateDownloadURLs(ctx context.Context, stor storage.Storage, basePath, legacyBasePath string, files []store.TemplateFile) ([]DownloadURLInfo, string, time.Time, error) {
 	downloadURLs := make([]DownloadURLInfo, 0, len(files))
 	expires := time.Now().Add(SignedURLExpiry)
 
@@ -237,6 +286,13 @@ func generateDownloadURLs(ctx context.Context, stor storage.Storage, basePath st
 			Method:  "GET",
 			Expires: SignedURLExpiry,
 		})
+		if err != nil && legacyBasePath != "" {
+			legacyObjectPath := legacyBasePath + "/" + file.Path
+			signedURL, err = stor.GenerateSignedURL(ctx, legacyObjectPath, storage.SignedURLOptions{
+				Method:  "GET",
+				Expires: SignedURLExpiry,
+			})
+		}
 		if err != nil {
 			return nil, "", expires, fmt.Errorf("storage object missing: %s (run validate to check storage consistency): %w", file.Path, err)
 		}
@@ -256,6 +312,13 @@ func generateDownloadURLs(ctx context.Context, stor storage.Storage, basePath st
 		Method:  "GET",
 		Expires: SignedURLExpiry,
 	})
+	if err != nil && legacyBasePath != "" {
+		legacyManifest := legacyBasePath + "/manifest.json"
+		signedURL, err = stor.GenerateSignedURL(ctx, legacyManifest, storage.SignedURLOptions{
+			Method:  "GET",
+			Expires: SignedURLExpiry,
+		})
+	}
 	if err != nil {
 		return nil, "", expires, fmt.Errorf("storage object missing: manifest.json (run validate to check storage consistency): %w", err)
 	}

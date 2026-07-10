@@ -1207,7 +1207,8 @@ func (s *Server) handleSkillDownload(w http.ResponseWriter, r *http.Request, ski
 	}
 
 	versionPath := skill.StoragePath + "/" + sv.Version
-	downloadURLs, manifestURL, expires, err := generateDownloadURLs(ctx, stor, versionPath, sv.Files)
+	legacyVersion := legacyStoragePath(versionPath)
+	downloadURLs, manifestURL, expires, err := generateDownloadURLs(ctx, stor, versionPath, legacyVersion, sv.Files)
 	if err != nil {
 		RuntimeError(w, fmt.Sprintf("skill %q version %q: %s", skill.Name, sv.Version, err))
 		return
@@ -1353,7 +1354,7 @@ func (s *Server) handleSkillsResolve(w http.ResponseWriter, r *http.Request) {
 		// Generate download URLs for the resolved version's files
 		if stor != nil && len(sv.Files) > 0 {
 			versionPath := skill.StoragePath + "/" + sv.Version
-			downloadURLs, _, _, dlErr := generateDownloadURLs(ctx, stor, versionPath, sv.Files)
+			downloadURLs, _, _, dlErr := generateDownloadURLs(ctx, stor, versionPath, legacyStoragePath(versionPath), sv.Files)
 			if dlErr != nil {
 				slog.ErrorContext(ctx, "failed to generate download URLs for skill version",
 					"skill", skill.Name, "version", sv.Version, "error", dlErr)

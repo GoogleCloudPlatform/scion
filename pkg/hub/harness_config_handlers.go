@@ -671,7 +671,7 @@ func (s *Server) handleHarnessConfigDownload(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	downloadURLs, manifestURL, expires, err := generateDownloadURLs(ctx, stor, hc.StoragePath, hc.Files)
+	downloadURLs, manifestURL, expires, err := generateDownloadURLs(ctx, stor, hc.StoragePath, legacyStoragePath(hc.StoragePath), hc.Files)
 	if err != nil {
 		RuntimeError(w, fmt.Sprintf("harness-config %q: %s — run 'scion harness-config validate %s' to diagnose", hc.Name, err, hc.Name))
 		return

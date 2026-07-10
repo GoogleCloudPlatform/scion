@@ -47,6 +47,7 @@ const (
 	ValidationIssueMissingManifest     = "missing_manifest"
 	ValidationIssueZeroFilesActive     = "zero_files_active"
 	ValidationIssueContentHashMismatch = "content_hash_mismatch"
+	ValidationIssueLegacyPath          = "legacy_path"
 )
 
 // ValidateStorage checks a resource record's storage consistency. It verifies:
@@ -78,11 +79,26 @@ func (rs *ResourceStore) ValidateStorage(ctx context.Context, rec *ResourceRecor
 		storagePath = storage.ResourceStoragePath(rs.hubID, rec.Kind, rec.Scope, rec.ScopeID, rec.Slug)
 	}
 
+	legacyBase := storage.ResourceStoragePath("", rec.Kind, rec.Scope, rec.ScopeID, rec.Slug)
+
 	for _, file := range rec.Files {
 		objectPath := storagePath + "/" + file.Path
 		obj, err := stor.GetObject(ctx, objectPath)
 		if err != nil {
 			if errors.Is(err, storage.ErrNotFound) {
+				// Try legacy fallback before reporting missing.
+				if legacyBase != storagePath {
+					legacyObjectPath := legacyBase + "/" + file.Path
+					if legacyObj, legacyErr := stor.GetObject(ctx, legacyObjectPath); legacyErr == nil {
+						report.Issues = append(report.Issues, ValidationIssue{
+							Kind:    ValidationIssueLegacyPath,
+							File:    file.Path,
+							Message: fmt.Sprintf("file %q found at legacy path %q, expected at %q", file.Path, legacyObjectPath, objectPath),
+						})
+						obj = legacyObj
+						goto hashCheck
+					}
+				}
 				report.Issues = append(report.Issues, ValidationIssue{
 					Kind:    ValidationIssueMissingObject,
 					File:    file.Path,
@@ -92,6 +108,7 @@ func (rs *ResourceStore) ValidateStorage(ctx context.Context, rec *ResourceRecor
 			}
 			return report, fmt.Errorf("checking object %q: %w", objectPath, err)
 		}
+	hashCheck:
 
 		if file.Hash == "" {
 			continue
@@ -120,10 +137,24 @@ func (rs *ResourceStore) ValidateStorage(ctx context.Context, rec *ResourceRecor
 		return report, fmt.Errorf("checking manifest: %w", err)
 	}
 	if !exists {
-		report.Issues = append(report.Issues, ValidationIssue{
-			Kind:    ValidationIssueMissingManifest,
-			Message: "manifest.json missing from storage",
-		})
+		if legacyBase != storagePath {
+			legacyManifest := legacyBase + "/manifest.json"
+			legacyExists, _ := stor.Exists(ctx, legacyManifest)
+			if legacyExists {
+				report.Issues = append(report.Issues, ValidationIssue{
+					Kind:    ValidationIssueLegacyPath,
+					File:    "manifest.json",
+					Message: fmt.Sprintf("manifest found at legacy path %q, expected at %q", legacyManifest, manifestPath),
+				})
+				exists = true
+			}
+		}
+		if !exists {
+			report.Issues = append(report.Issues, ValidationIssue{
+				Kind:    ValidationIssueMissingManifest,
+				Message: "manifest.json missing from storage",
+			})
+		}
 	}
 
 	return report, nil

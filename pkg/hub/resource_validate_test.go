@@ -440,7 +440,7 @@ func TestGenerateDownloadURLs_ErrorOnMissingObject(t *testing.T) {
 
 	// The mock storage always succeeds for GenerateSignedURL,
 	// so this test validates the success path with the new stricter contract.
-	urls, manifest, _, err := generateDownloadURLs(ctx, stor, "templates/global/test", files)
+	urls, manifest, _, err := generateDownloadURLs(ctx, stor, "templates/global/test", "", files)
 	if err != nil {
 		t.Fatalf("unexpected error with mock (mock always succeeds): %v", err)
 	}

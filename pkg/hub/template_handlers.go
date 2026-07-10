@@ -698,7 +698,7 @@ func (s *Server) handleTemplateDownload(w http.ResponseWriter, r *http.Request, 
 	}
 
 	// Generate download URLs using shared helper
-	downloadURLs, manifestURL, expires, err := generateDownloadURLs(ctx, stor, template.StoragePath, template.Files)
+	downloadURLs, manifestURL, expires, err := generateDownloadURLs(ctx, stor, template.StoragePath, legacyStoragePath(template.StoragePath), template.Files)
 	if err != nil {
 		RuntimeError(w, fmt.Sprintf("template %q: %s — run 'scion template validate %s' to diagnose", template.Name, err, template.Name))
 		return

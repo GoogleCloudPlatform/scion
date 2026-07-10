@@ -58,6 +58,8 @@ func (s *Server) syncResourceFromStorage(
 		storagePath = storage.ResourceStoragePath(s.HubID(), kind, scope, scopeID, slug)
 	}
 
+	legacyBase := storage.ResourceStoragePath("", kind, scope, scopeID, slug)
+
 	label := string(kind)
 	updated := make([]store.TemplateFile, 0, len(files))
 
@@ -71,6 +73,17 @@ func (s *Server) syncResourceFromStorage(
 		obj, getErr := stor.GetObject(ctx, objectPath)
 		if getErr != nil {
 			if errors.Is(getErr, storage.ErrNotFound) {
+				// Try legacy path before dropping the file.
+				if legacyBase != storagePath {
+					legacyObjPath := legacyBase + "/" + file.Path
+					obj, getErr = stor.GetObject(ctx, legacyObjPath)
+					if getErr == nil {
+						s.resourceLog.Warn(label+" repair: found file at legacy path",
+							"resource", name, "file", file.Path,
+							"legacy_path", legacyObjPath)
+						goto hashCheck
+					}
+				}
 				s.resourceLog.Warn(label+" repair: dropping file missing from storage",
 					"resource", name, "file", file.Path)
 				changed = true
@@ -78,6 +91,7 @@ func (s *Server) syncResourceFromStorage(
 			}
 			return nil, "", false, fmt.Errorf("get object %q: %w", objectPath, getErr)
 		}
+	hashCheck:
 
 		actualHash := objectMetadataHash(obj)
 		if actualHash == "" {
