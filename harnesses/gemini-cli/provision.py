@@ -108,10 +108,15 @@ def _update_gemini_settings(settings_path: str, gemini_auth_type: str) -> None:
         auth = {}
         security["auth"] = auth
 
-    if auth.get("selectedType") == gemini_auth_type:
-        return
+    if gemini_auth_type:
+        if auth.get("selectedType") == gemini_auth_type:
+            return
+        auth["selectedType"] = gemini_auth_type
+    else:
+        auth.pop("selectedType", None)
+        if not auth:
+            security.pop("auth", None)
 
-    auth["selectedType"] = gemini_auth_type
     scion_harness.atomic_write_json(expanded, settings)
 
 
@@ -137,8 +142,7 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
     resolved = ctx.select_auth(AUTH)
 
     gemini_auth_type = _GEMINI_AUTH_TYPE_MAP.get(resolved.method, "")
-    if gemini_auth_type:
-        _update_gemini_settings(GEMINI_SETTINGS_FILE, gemini_auth_type)
+    _update_gemini_settings(GEMINI_SETTINGS_FILE, gemini_auth_type)
 
     env = _build_env_overlay(resolved.method, resolved.env_key)
     extra: dict[str, Any] | None = None
