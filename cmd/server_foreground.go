@@ -1989,7 +1989,7 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 			defer wg.Done()
 			ticker := time.NewTicker(30 * time.Second)
 			defer ticker.Stop()
-			var prevOnline bool
+			prevOnline := rhSrv.IsControlChannelConnected()
 			for {
 				select {
 				case <-ctx.Done():

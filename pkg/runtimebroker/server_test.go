@@ -108,6 +108,24 @@ func TestIsControlChannelConnected_MultipleConnections_OneConnected(t *testing.T
 	}
 }
 
+func TestIsControlChannelConnected_NilControlChannel_CCEnabled(t *testing.T) {
+	srv := newTestServer(t)
+	srv.config.ControlChannelEnabled = true
+
+	conn := &HubConnection{
+		Name:           "local",
+		ControlChannel: nil,
+	}
+
+	srv.hubMu.Lock()
+	srv.hubConnections["local"] = conn
+	srv.hubMu.Unlock()
+
+	if srv.IsControlChannelConnected() {
+		t.Error("expected false when connection has nil CC and control channel is enabled")
+	}
+}
+
 func TestIsControlChannelConnected_NilControlChannel_CCNotEnabled(t *testing.T) {
 	srv := newTestServer(t)
 	srv.config.ControlChannelEnabled = false
