@@ -2062,6 +2062,9 @@ func initPluginManager(ctx context.Context, secretBackend secret.SecretBackend) 
 			log.Printf("Warning: failed to load config file for plugin %q: %v", name, mergeErr)
 			mergedConfig = stripSecretKeys(entry.Config)
 		}
+		if secretBackend != nil {
+			injectPluginSecretsIntoConfig(ctx, secretBackend, name, mergedConfig)
+		}
 		if entry.ConfigFile != "" {
 			if mergedConfig == nil {
 				mergedConfig = make(map[string]string)
@@ -2256,7 +2259,7 @@ func migrateInlineSecrets(ctx context.Context, sb secret.SecretBackend, pluginNa
 			continue
 		}
 		existing, err := sb.Get(ctx, m.SecretKey, store.ScopeHub, hubID)
-		if err != nil {
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
 			log.Printf("Warning: failed to check secret backend for %s (plugin %q), skipping migration: %v", m.ConfigKey, pluginName, err)
 			continue
 		}
@@ -2316,5 +2319,33 @@ func injectPluginSecrets(ctx context.Context, sb secret.SecretBackend, pluginNam
 		}
 		creds[m.ConfigKey] = sv.Value
 		slog.Info("Injected secret into broker plugin", "secret", m.SecretKey, "plugin", pluginName, "config_key", m.ConfigKey)
+	}
+}
+
+// injectPluginSecretsIntoConfig loads secrets from the backend directly into
+// the plugin's merged config map so they are available when LoadAll calls
+// Configure. Without this, plugins that validate required keys (e.g.
+// Telegram's bot_token) during Configure would fail because
+// ResolvePluginConfig already stripped inline secrets.
+func injectPluginSecretsIntoConfig(ctx context.Context, sb secret.SecretBackend, pluginName string, cfg map[string]string) {
+	if sb == nil || cfg == nil {
+		return
+	}
+
+	mappings, ok := config.PluginSecretKeyMap[pluginName]
+	if !ok {
+		return
+	}
+
+	hubID := sb.HubID()
+	for _, m := range mappings {
+		if existing, ok := cfg[m.ConfigKey]; ok && existing != "" {
+			continue
+		}
+		sv, err := sb.Get(ctx, m.SecretKey, store.ScopeHub, hubID)
+		if err != nil || sv == nil || sv.Value == "" {
+			continue
+		}
+		cfg[m.ConfigKey] = sv.Value
 	}
 }
