@@ -116,6 +116,9 @@ func (s *Server) migrateResourceKind(ctx context.Context, kind storage.ResourceK
 		if result == nil {
 			return MigrateStorageReport{}
 		}
+		if len(result.Items) == 1000 {
+			s.resourceLog.Warn(label+" migration: listing hit 1000 limit, some resources may not be migrated; re-run to continue")
+		}
 		for _, t := range result.Items {
 			resources = append(resources, migratableResource{
 				id:            t.ID,
@@ -141,6 +144,9 @@ func (s *Server) migrateResourceKind(ctx context.Context, kind storage.ResourceK
 		if result == nil {
 			return MigrateStorageReport{}
 		}
+		if len(result.Items) == 1000 {
+			s.resourceLog.Warn(label+" migration: listing hit 1000 limit, some resources may not be migrated; re-run to continue")
+		}
 		for _, hc := range result.Items {
 			resources = append(resources, migratableResource{
 				id:            hc.ID,
@@ -163,6 +169,9 @@ func (s *Server) migrateResourceKind(ctx context.Context, kind storage.ResourceK
 		}
 		if result == nil {
 			return MigrateStorageReport{}
+		}
+		if len(result.Items) == 1000 {
+			s.resourceLog.Warn(label+" migration: listing hit 1000 limit, some resources may not be migrated; re-run to continue")
 		}
 		for _, sk := range result.Items {
 			resources = append(resources, migratableResource{

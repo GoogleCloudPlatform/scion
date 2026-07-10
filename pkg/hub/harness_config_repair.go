@@ -82,7 +82,7 @@ func (s *Server) syncResourceFromStorage(
 		if getErr != nil {
 			if errors.Is(getErr, storage.ErrNotFound) {
 				// Try legacy path before dropping the file.
-				if legacyBase != storagePath {
+				if legacyBase != "" && legacyBase != storagePath {
 					legacyObjPath := legacyBase + "/" + file.Path
 					obj, getErr = stor.GetObject(ctx, legacyObjPath)
 					if getErr == nil {

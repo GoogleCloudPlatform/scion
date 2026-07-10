@@ -90,7 +90,7 @@ func (rs *ResourceStore) ValidateStorage(ctx context.Context, rec *ResourceRecor
 		if err != nil {
 			if errors.Is(err, storage.ErrNotFound) {
 				// Try legacy fallback before reporting missing.
-				if legacyBase != storagePath {
+				if legacyBase != "" && legacyBase != storagePath {
 					legacyObjectPath := legacyBase + "/" + file.Path
 					if legacyObj, legacyErr := stor.GetObject(ctx, legacyObjectPath); legacyErr == nil {
 						report.Issues = append(report.Issues, ValidationIssue{
@@ -140,7 +140,7 @@ func (rs *ResourceStore) ValidateStorage(ctx context.Context, rec *ResourceRecor
 		return report, fmt.Errorf("checking manifest: %w", err)
 	}
 	if !exists {
-		if legacyBase != storagePath {
+		if legacyBase != "" && legacyBase != storagePath {
 			legacyManifest := legacyBase + "/manifest.json"
 			legacyExists, _ := stor.Exists(ctx, legacyManifest)
 			if legacyExists {

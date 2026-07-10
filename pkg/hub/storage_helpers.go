@@ -223,39 +223,6 @@ func reconcileResourceStorage(ctx context.Context, stor storage.Storage, storage
 	}
 }
 
-// resolveObjectPath checks if a storage object exists at namespacedPath; if not,
-// falls back to legacyPath. Returns the resolved path and whether the legacy
-// fallback was used. When legacyPath is empty or equals namespacedPath, no
-// fallback is attempted.
-func resolveObjectPath(ctx context.Context, stor storage.Storage, namespacedPath, legacyPath string) (string, bool) {
-	if legacyPath == "" || legacyPath == namespacedPath {
-		return namespacedPath, false
-	}
-	exists, _ := stor.Exists(ctx, namespacedPath)
-	if exists {
-		return namespacedPath, false
-	}
-	exists, _ = stor.Exists(ctx, legacyPath)
-	if exists {
-		return legacyPath, true
-	}
-	return namespacedPath, false
-}
-
-// warnLegacyPath emits a once-per-resource warning when content is served from
-// a legacy un-namespaced GCS path. Duplicate warnings for the same legacyPath
-// are suppressed via Server.legacyPathWarnings.
-func (s *Server) warnLegacyPath(resourceName, legacyPath, expectedPath string) {
-	if _, loaded := s.legacyPathWarnings.LoadOrStore(legacyPath, struct{}{}); !loaded {
-		s.resourceLog.Warn("storage: serving resource from legacy un-namespaced path; "+
-			"run 'scion admin migrate-storage' to migrate",
-			"resource", resourceName,
-			"legacy_path", legacyPath,
-			"expected_path", expectedPath,
-		)
-	}
-}
-
 // legacyFallbackPath returns the legacy un-namespaced storage path for fallback
 // reads, or "" if legacy fallback is disabled on this server.
 func (s *Server) legacyFallbackPath(path string) string {
