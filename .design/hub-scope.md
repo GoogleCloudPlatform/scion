@@ -1,7 +1,7 @@
 # Design: Hub Scope — Two-Identifier Hub Identity for HA Multi-Node Deployments
 
 **Issue:** [#392](https://github.com/ptone/scion/issues/392)
-**Status:** Approved
+**Status:** Implemented
 **Author:** hs-arch agent (refined by hs-em per user direction)
 **Date:** 2026-07-10
 
