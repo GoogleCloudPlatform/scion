@@ -37,6 +37,8 @@ const (
 	ConnectionStatusConnected ConnectionStatus = "connected"
 	// ConnectionStatusDisconnected indicates the connection is not active.
 	ConnectionStatusDisconnected ConnectionStatus = "disconnected"
+	// ConnectionStatusReconnecting indicates the control channel dropped and is attempting to reconnect.
+	ConnectionStatusReconnecting ConnectionStatus = "reconnecting"
 	// ConnectionStatusError indicates the connection encountered an error.
 	ConnectionStatusError ConnectionStatus = "error"
 )
@@ -144,6 +146,13 @@ func (hc *HubConnection) Start(ctx context.Context, server *Server) error {
 				PongWait:            60 * time.Second,
 				WriteWait:           10 * time.Second,
 				Debug:               server.config.Debug,
+				OnConnectionStateChange: func(connected bool) {
+					if connected {
+						hc.setStatus(ConnectionStatusConnected)
+					} else {
+						hc.setStatus(ConnectionStatusReconnecting)
+					}
+				},
 			}
 
 			cc := NewControlChannelClient(ccConfig, server.Handler(), server, hc.Name, logging.Subsystem("broker.control-channel"))

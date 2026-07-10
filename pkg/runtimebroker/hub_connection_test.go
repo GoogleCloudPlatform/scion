@@ -710,6 +710,113 @@ func TestConnectionStatus(t *testing.T) {
 	}
 }
 
+func TestConnectionStatus_Reconnecting(t *testing.T) {
+	conn := &HubConnection{
+		Name:   "test",
+		Status: ConnectionStatusConnected,
+	}
+
+	conn.setStatus(ConnectionStatusReconnecting)
+
+	if conn.GetStatus() != ConnectionStatusReconnecting {
+		t.Errorf("expected reconnecting, got %v", conn.GetStatus())
+	}
+
+	// Simulate reconnect
+	conn.setStatus(ConnectionStatusConnected)
+
+	if conn.GetStatus() != ConnectionStatusConnected {
+		t.Errorf("expected connected after reconnect, got %v", conn.GetStatus())
+	}
+}
+
+func TestHubConnectionStatus_OnDisconnect(t *testing.T) {
+	conn := &HubConnection{
+		Name:   "test",
+		Status: ConnectionStatusConnected,
+	}
+
+	// Simulate the callback that would be registered in Start()
+	cb := func(connected bool) {
+		if connected {
+			conn.setStatus(ConnectionStatusConnected)
+		} else {
+			conn.setStatus(ConnectionStatusReconnecting)
+		}
+	}
+
+	// Simulate disconnect
+	cb(false)
+
+	if conn.GetStatus() != ConnectionStatusReconnecting {
+		t.Errorf("expected reconnecting on disconnect, got %v", conn.GetStatus())
+	}
+}
+
+func TestHubConnectionStatus_OnReconnect(t *testing.T) {
+	conn := &HubConnection{
+		Name:   "test",
+		Status: ConnectionStatusReconnecting,
+	}
+
+	// Simulate the callback that would be registered in Start()
+	cb := func(connected bool) {
+		if connected {
+			conn.setStatus(ConnectionStatusConnected)
+		} else {
+			conn.setStatus(ConnectionStatusReconnecting)
+		}
+	}
+
+	// Simulate reconnect
+	cb(true)
+
+	if conn.GetStatus() != ConnectionStatusConnected {
+		t.Errorf("expected connected on reconnect, got %v", conn.GetStatus())
+	}
+}
+
+func TestHubConnectionStatus_DisconnectReconnectCycle(t *testing.T) {
+	conn := &HubConnection{
+		Name:   "test",
+		Status: ConnectionStatusConnected,
+	}
+
+	cb := func(connected bool) {
+		if connected {
+			conn.setStatus(ConnectionStatusConnected)
+		} else {
+			conn.setStatus(ConnectionStatusReconnecting)
+		}
+	}
+
+	// Full cycle: connected -> disconnect -> reconnecting -> reconnect -> connected
+	if conn.GetStatus() != ConnectionStatusConnected {
+		t.Fatalf("expected initial status connected, got %v", conn.GetStatus())
+	}
+
+	cb(false)
+	if conn.GetStatus() != ConnectionStatusReconnecting {
+		t.Errorf("expected reconnecting after disconnect, got %v", conn.GetStatus())
+	}
+
+	cb(true)
+	if conn.GetStatus() != ConnectionStatusConnected {
+		t.Errorf("expected connected after reconnect, got %v", conn.GetStatus())
+	}
+
+	// Second cycle
+	cb(false)
+	if conn.GetStatus() != ConnectionStatusReconnecting {
+		t.Errorf("expected reconnecting after second disconnect, got %v", conn.GetStatus())
+	}
+
+	cb(true)
+	if conn.GetStatus() != ConnectionStatusConnected {
+		t.Errorf("expected connected after second reconnect, got %v", conn.GetStatus())
+	}
+}
+
 func TestCredentialWatcher_AddConnection(t *testing.T) {
 	tmpDir := t.TempDir()
 	credDir := filepath.Join(tmpDir, "hub-credentials")

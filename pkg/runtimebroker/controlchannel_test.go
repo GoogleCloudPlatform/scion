@@ -16,6 +16,7 @@ package runtimebroker
 
 import (
 	"log/slog"
+	"sync"
 	"testing"
 )
 
@@ -49,6 +50,58 @@ func TestControlChannelClient_BuildAuthHeaders_Normalization(t *testing.T) {
 
 	if headers.Get("X-Scion-Signature") == "" {
 		t.Error("Expected Signature header to be set")
+	}
+}
+
+func TestControlChannelClient_MarkDisconnected_InvokesCallback(t *testing.T) {
+	var mu sync.Mutex
+	var calls []bool
+
+	config := ControlChannelConfig{
+		HubEndpoint: "https://hub.example.com",
+		BrokerID:    "test-broker",
+		OnConnectionStateChange: func(connected bool) {
+			mu.Lock()
+			calls = append(calls, connected)
+			mu.Unlock()
+		},
+	}
+	client := NewControlChannelClient(config, nil, nil, "", slog.Default())
+
+	// Simulate connected state
+	client.mu.Lock()
+	client.connected = true
+	client.mu.Unlock()
+
+	client.markDisconnected()
+
+	if client.IsConnected() {
+		t.Error("expected disconnected after markDisconnected")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(calls) != 1 || calls[0] != false {
+		t.Errorf("expected callback with connected=false, got %v", calls)
+	}
+}
+
+func TestControlChannelClient_MarkDisconnected_NilCallback(t *testing.T) {
+	config := ControlChannelConfig{
+		HubEndpoint: "https://hub.example.com",
+		BrokerID:    "test-broker",
+	}
+	client := NewControlChannelClient(config, nil, nil, "", slog.Default())
+
+	client.mu.Lock()
+	client.connected = true
+	client.mu.Unlock()
+
+	// Should not panic with nil callback
+	client.markDisconnected()
+
+	if client.IsConnected() {
+		t.Error("expected disconnected after markDisconnected")
 	}
 }
 

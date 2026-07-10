@@ -58,6 +58,11 @@ type ControlChannelConfig struct {
 
 	// Debug enables verbose logging.
 	Debug bool
+
+	// OnConnectionStateChange is called when the control channel connects
+	// or disconnects. connected=true after a successful handshake,
+	// connected=false when the WebSocket drops.
+	OnConnectionStateChange func(connected bool)
 }
 
 // DefaultControlChannelConfig returns the default configuration.
@@ -242,7 +247,11 @@ func (c *ControlChannelClient) doConnect() error {
 	c.mu.Lock()
 	c.connected = true
 	c.connectedAt = time.Now()
+	cb := c.config.OnConnectionStateChange
 	c.mu.Unlock()
+	if cb != nil {
+		cb(true)
+	}
 
 	// Send connect message
 	connectMsg := wsprotocol.NewConnectMessage(c.config.BrokerID, c.config.Version, c.config.Projects)
@@ -732,7 +741,11 @@ func (c *ControlChannelClient) CloseStream(streamID, reason string, code int) er
 func (c *ControlChannelClient) markDisconnected() {
 	c.mu.Lock()
 	c.connected = false
+	cb := c.config.OnConnectionStateChange
 	c.mu.Unlock()
+	if cb != nil {
+		cb(false)
+	}
 
 	// Close all streams
 	c.streamMu.Lock()
