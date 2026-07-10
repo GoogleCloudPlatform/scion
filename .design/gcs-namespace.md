@@ -198,78 +198,145 @@ DB records store the computed `StoragePath`. After namespacing:
 
 ## 4. Migration Strategy
 
-### 4.1 Options Evaluation
+### 4.1 Approach: Legacy Fallback with Warnings + Content Duplication
 
-| Option | Description | Pros | Cons |
-|---|---|---|---|
-| **Copy-on-first-write** | On first startup with hub-id, copy existing global objects to hub-id prefix | Automatic, no admin action | Expensive for large buckets; race with other hubs; unclear "first startup" detection |
-| **Admin migration command** | `scion hub migrate-storage --hub-id <id>` | Explicit, controllable, auditable | Requires manual step; must handle in-flight operations |
-| **Backward-compat read** | Read from hub-id prefix first, fall back to legacy global path | Graceful transition, no data movement needed | Indefinite legacy support; two reads per miss; complex to reason about which content you're getting |
+Existing hubs sharing a bucket have content at the un-namespaced "global" paths (e.g. `templates/global/claude-agent/`). The migration strategy must handle these deployments gracefully:
 
-### 4.2 Recommendation: Backward-Compatible Read + Admin Migration Command
+1. **Writes** always target the namespaced path (`hubs/{hub-id}/...`)
+2. **Reads** check the namespaced path first; on miss, fall back to the legacy global path **with a log warning**
+3. **Startup migration** duplicates content from the legacy global namespace into the hub's namespaced prefix on first boot
+4. **Admin command** provides explicit, auditable migration for operators who want full control
 
-Use a hybrid approach:
+### 4.2 Legacy Fallback Reads with Warnings
 
-**Phase 1 — Backward-compatible read (automatic):**
-- **Writes** always go to the namespaced path (`hubs/{hub-id}/...`)
-- **Reads** check namespaced path first; on `ErrNotFound`, fall back to the legacy (un-namespaced) path
-- This ensures zero downtime: existing content is immediately accessible, new content goes to the right place
-- The `StoragePath` field on DB records is updated to the namespaced path on next write/sync
+When a resource's content is not found at the hub-namespaced path, the system falls back to the legacy un-namespaced path and emits a warning. This ensures zero downtime during transition while making the un-migrated state visible to operators.
 
-**Phase 2 — Admin migration command (optional, for cleanup):**
-- `scion admin migrate-storage` copies all legacy-path objects to the hub's namespaced prefix
-- Updates all DB records' `StoragePath`, `StorageURI` fields to the namespaced paths
-- After migration, the legacy fallback can be disabled via a config flag
-- Migration is idempotent and safe to re-run
-
-### 4.3 Migration Flow Details
-
-**Startup behavior:**
-1. Hub resolves `hub_id`
-2. `ResourceStore.Bootstrap()` constructs the new namespaced path for each resource
-3. Uploads go to `hubs/{hub-id}/{kind}/{scope}/{slug}/`
-4. DB record updated with new `StoragePath` and `StorageURI`
-5. Legacy objects in the old path are not touched (they'll be cleaned up by explicit migration)
-
-**Read fallback during transition:**
 ```go
-func (rs *ResourceStore) resolveStoragePath(ctx context.Context, stor storage.Storage, 
-    storagePath string, kind ResourceKind, scope, scopeID, slug, hubID string) string {
-    // If record already has a namespaced path, use it
-    if strings.HasPrefix(storagePath, "hubs/") {
-        return storagePath
+// resolveObjectPath attempts the namespaced path first, falls back to legacy
+// with a warning. Returns the resolved path and whether it was a legacy hit.
+func resolveObjectPath(ctx context.Context, stor storage.Storage, 
+    namespacedPath, legacyPath string, log *slog.Logger) (string, bool) {
+    exists, _ := stor.Exists(ctx, namespacedPath)
+    if exists {
+        return namespacedPath, false
     }
-    // Check if content exists at the namespaced path
-    namespacedPath := storage.ResourceStoragePath(hubID, kind, scope, scopeID, slug)
-    if exists, _ := stor.Exists(ctx, namespacedPath + "/"); exists {
-        return namespacedPath
+    exists, _ = stor.Exists(ctx, legacyPath)
+    if exists {
+        log.Warn("storage: serving resource from legacy un-namespaced path; "+
+            "run 'scion admin migrate-storage' to migrate to hub-scoped paths",
+            "legacy_path", legacyPath,
+            "expected_path", namespacedPath)
+        return legacyPath, true
     }
-    // Fall back to legacy path
-    return storagePath
+    return namespacedPath, false // not found at either path
 }
 ```
 
-**Admin migration command:**
+**Where fallback applies:**
+- Download URL generation (`storage_helpers.go:generateDownloadURLs`)
+- Resource validation (`resource_validate.go:ValidateStorage`)
+- Repair/sync from storage (`harness_config_repair.go:syncResourceFromStorage`)
+- Broker-side hydration path resolution (`runtimebroker/handlers.go`)
+
+**Warning frequency:** To avoid log spam, the warning is emitted once per resource per startup cycle (tracked via a `sync.Map` of resource IDs that have already warned). Subsequent reads of the same legacy-path resource are silent until restart.
+
+### 4.3 Startup Content Duplication
+
+On startup, after `hub_id` is resolved, the hub checks whether its namespaced prefix exists in the bucket. If not (first boot with namespacing enabled), it duplicates content from the legacy global namespace:
+
+```go
+func (s *Server) migrateStorageOnFirstBoot(ctx context.Context) {
+    stor := s.GetStorage()
+    hubID := s.HubID()
+    
+    // Check if hub-scoped prefix already has content (not first boot)
+    probe, _ := stor.List(ctx, storage.ListOptions{
+        Prefix:     "hubs/" + hubID + "/",
+        MaxResults: 1,
+    })
+    if probe != nil && len(probe.Objects) > 0 {
+        return // already migrated
+    }
+    
+    // List all resources from DB and copy their legacy GCS objects
+    // to the hub-namespaced prefix
+    s.resourceLog.Info("storage migration: first boot with hub-scoped paths, "+
+        "duplicating content from legacy namespace",
+        "hub_id", hubID)
+    s.duplicateLegacyResources(ctx, hubID)
+}
 ```
-scion admin migrate-storage [--dry-run]
+
+**Duplication flow for each resource:**
+1. Load resource record from DB (template, HC, or skill)
+2. If `StoragePath` does not start with `hubs/`, it's a legacy record
+3. For each file in the resource's manifest:
+   - Copy from legacy GCS path to namespaced GCS path using `stor.Copy()`
+   - `Copy()` is an intra-bucket operation — fast, no data egress
+4. Update the DB record's `StoragePath`, `StorageURI` to the namespaced values
+5. Log the migration: resource name, old path, new path, file count
+
+**Key properties:**
+- **Non-destructive:** Legacy objects are copied, not moved — other hubs still reading legacy paths are unaffected
+- **Idempotent:** If the namespaced prefix already has content, skip
+- **Atomic per-resource:** Each resource's DB record is updated only after all its files are successfully copied
+- **Best-effort:** Copy failures for individual resources are logged and skipped (the legacy fallback ensures the resource remains accessible)
+
+### 4.4 Admin Migration Command
+
+For operators who want explicit control over migration timing, or who want to migrate without restarting:
+
 ```
+scion admin migrate-storage [--dry-run] [--cleanup-legacy]
+```
+
+**Behavior:**
 - Lists all templates, harness-configs, and skills from DB
 - For each resource with a legacy (un-namespaced) `StoragePath`:
-  - Copies all files from legacy path to namespaced path in GCS
+  - Copies all files from legacy path to `hubs/{hub-id}/{kind}/{scope}/{slug}/` in GCS
   - Updates DB record with new `StoragePath`, `StorageURI`
-- Reports count of migrated/skipped resources
+- Reports count of migrated/skipped/failed resources
 - `--dry-run` shows what would be migrated without making changes
+- `--cleanup-legacy` deletes legacy-path objects after successful copy (only safe when all hubs sharing the bucket have been migrated)
 
-### 4.4 Single-Hub Deployments
+**Example output:**
+```
+$ scion admin migrate-storage --dry-run
+Storage migration for hub "prod-hub-west" (dry run)
+  templates/global/claude-agent → hubs/prod-hub-west/templates/global/claude-agent (3 files)
+  harness-configs/global/claude → hubs/prod-hub-west/harness-configs/global/claude (2 files)
+  harness-configs/global/gemini → hubs/prod-hub-west/harness-configs/global/gemini (2 files)
+  skills/global/deploy → hubs/prod-hub-west/skills/global/deploy (4 files)
+Total: 4 resources, 11 files to migrate
+```
+
+### 4.5 Migration Timeline
+
+```
+Phase 1 (deploy):
+  Hub starts with hub_id → writes go to hubs/{hub-id}/...
+  Reads fall back to legacy paths with warnings
+  Startup duplication copies legacy → namespaced (if first boot)
+
+Phase 2 (steady state):
+  All new/updated resources at namespaced paths
+  Legacy reads produce warnings in logs
+  Operators run 'scion admin migrate-storage' for any stragglers
+
+Phase 3 (cleanup, operator-initiated):
+  All hubs sharing the bucket have been migrated
+  Operator runs 'scion admin migrate-storage --cleanup-legacy'
+  Legacy fallback can be disabled via config: storage.legacy_fallback: false
+```
+
+### 4.6 Single-Hub Deployments
 
 When `hub_id` is not explicitly configured and defaults to `SHA256(hostname)[:12]`:
-- The namespacing still applies — this is intentional for future-proofing
-- Single-hub deployments with no shared bucket see no functional change (just longer paths)
-- To opt out entirely: leave hub_id unset AND don't use shared GCS buckets → paths remain unchanged (the `hubID != ""` guard in `ResourceStoragePath` would need hub_id to always be set when GCS is configured)
+- Namespacing still applies — this is intentional for future-proofing
+- Single-hub deployments see no functional change (startup duplication runs once, then all paths are namespaced)
+- The auto-generated hub_id is stable across restarts (deterministic from hostname)
 
-**Decision point:** Should we enforce that `hub_id` is always set when `storage-bucket` is configured? This would prevent accidental unnamespaced deployments but adds a breaking requirement.
-
-**Recommendation:** Yes, when a GCS bucket is configured, require `hub_id` to be explicitly set (or auto-default). Log a startup warning if using auto-generated hub_id with a shared bucket.
+**Recommendation:** When a GCS bucket is configured, log a startup info message showing the hub_id being used for storage namespacing. Log a warning if hub_id is auto-generated in a deployment that appears to be HA (multiple nodes detected via broker connections).
 
 ---
 
@@ -380,39 +447,41 @@ Signed URLs are generated from the storage path. No change needed to signing log
 
 **Test plan:** Create template/HC on hub with explicit hub_id → verify GCS objects at `hubs/{id}/...` path.
 
-### Phase 3: Backward-Compatible Read Fallback
+### Phase 3: Legacy Fallback Reads with Warnings
 
-**Goal:** Reads check namespaced path first, fall back to legacy path for un-migrated resources.
-
-**Changes:**
-1. Implement read fallback in download URL generation (storage_helpers.go)
-2. Implement read fallback in resource validation (resource_validate.go)
-3. Implement read fallback in repair sync (harness_config_repair.go)
-4. Thread hub_id through broker dispatch request or use DB-stored `StoragePath`
-
-**Test plan:** Start hub with legacy data → verify reads resolve from legacy paths. Create new resource → verify reads use namespaced path.
-
-### Phase 4: Admin Migration Command
-
-**Goal:** Provide a tool to migrate legacy data to namespaced paths.
+**Goal:** Reads check namespaced path first, fall back to legacy path with log warnings for un-migrated resources.
 
 **Changes:**
-1. Add `scion admin migrate-storage` command
-2. Implement GCS copy from legacy to namespaced paths
-3. Bulk-update DB records with namespaced `StoragePath`
-4. Add `--dry-run` flag
-5. Add progress reporting
+1. Implement `resolveObjectPath()` helper with namespaced-first, legacy-fallback logic
+2. Wire fallback into download URL generation (`storage_helpers.go`)
+3. Wire fallback into resource validation (`resource_validate.go`)
+4. Wire fallback into repair sync (`harness_config_repair.go`)
+5. Add once-per-resource warning deduplication (`sync.Map`)
+6. Thread hub_id through broker dispatch request or use DB-stored `StoragePath`
 
-**Test plan:** Run migration on test data → verify objects copied, DB updated, no data loss.
+**Test plan:** Start hub with legacy data → verify reads resolve from legacy paths with warnings. Create new resource → verify reads use namespaced path with no warnings.
+
+### Phase 4: Startup Content Duplication + Admin Migration Command
+
+**Goal:** On first boot with namespacing, automatically duplicate legacy content to hub-scoped paths. Provide admin CLI for explicit migration control.
+
+**Changes:**
+1. Implement `migrateStorageOnFirstBoot()` — copies legacy GCS objects to `hubs/{hub-id}/` prefix using `stor.Copy()`
+2. Call from server startup after storage init, before `SyncAll*FromStorage()`
+3. Update DB records with namespaced `StoragePath` after successful copy
+4. Add `scion admin migrate-storage` command with `--dry-run` and `--cleanup-legacy` flags
+5. Add progress reporting and per-resource logging
+
+**Test plan:** Start hub with legacy data and hub_id set → verify objects copied to namespaced prefix, DB updated. Run admin command → verify idempotent re-run. Run with `--cleanup-legacy` → verify legacy objects deleted.
 
 ### Phase 5: Cleanup and Hardening
 
-**Goal:** Remove legacy fallback after migration window, harden configuration.
+**Goal:** Disable legacy fallback after migration window, harden configuration.
 
 **Changes:**
 1. Add config flag to disable legacy fallback (`storage.legacy_fallback: false`)
-2. Require explicit `hub_id` when GCS bucket is configured
-3. Remove self-healing repair logic that was compensating for cross-hub interference (or simplify it)
+2. Log startup warning if hub_id is auto-generated with GCS configured
+3. Simplify self-healing repair logic (cross-hub interference no longer possible with proper namespacing)
 4. Documentation: update HA deployment guide, add migration guide
 
 ---
