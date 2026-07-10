@@ -888,7 +888,6 @@ var (
 		{Name: "id", Type: field.TypeUUID},
 		{Name: "name", Type: field.TypeString},
 		{Name: "slug", Type: field.TypeString},
-		{Name: "type", Type: field.TypeString, Nullable: true},
 		{Name: "mode", Type: field.TypeString, Default: "connected"},
 		{Name: "version", Type: field.TypeString, Nullable: true},
 		{Name: "lock_version", Type: field.TypeInt64, Default: 0},
@@ -924,7 +923,7 @@ var (
 			{
 				Name:    "runtimebroker_status",
 				Unique:  false,
-				Columns: []*schema.Column{RuntimeBrokersColumns[7]},
+				Columns: []*schema.Column{RuntimeBrokersColumns[6]},
 			},
 		},
 	}

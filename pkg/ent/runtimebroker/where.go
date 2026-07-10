@@ -65,11 +65,6 @@ func Slug(v string) predicate.RuntimeBroker {
 	return predicate.RuntimeBroker(sql.FieldEQ(FieldSlug, v))
 }
 
-// Type applies equality check predicate on the "type" field. It's identical to TypeEQ.
-func Type(v string) predicate.RuntimeBroker {
-	return predicate.RuntimeBroker(sql.FieldEQ(FieldType, v))
-}
-
 // Mode applies equality check predicate on the "mode" field. It's identical to ModeEQ.
 func Mode(v string) predicate.RuntimeBroker {
 	return predicate.RuntimeBroker(sql.FieldEQ(FieldMode, v))
@@ -298,81 +293,6 @@ func SlugEqualFold(v string) predicate.RuntimeBroker {
 // SlugContainsFold applies the ContainsFold predicate on the "slug" field.
 func SlugContainsFold(v string) predicate.RuntimeBroker {
 	return predicate.RuntimeBroker(sql.FieldContainsFold(FieldSlug, v))
-}
-
-// TypeEQ applies the EQ predicate on the "type" field.
-func TypeEQ(v string) predicate.RuntimeBroker {
-	return predicate.RuntimeBroker(sql.FieldEQ(FieldType, v))
-}
-
-// TypeNEQ applies the NEQ predicate on the "type" field.
-func TypeNEQ(v string) predicate.RuntimeBroker {
-	return predicate.RuntimeBroker(sql.FieldNEQ(FieldType, v))
-}
-
-// TypeIn applies the In predicate on the "type" field.
-func TypeIn(vs ...string) predicate.RuntimeBroker {
-	return predicate.RuntimeBroker(sql.FieldIn(FieldType, vs...))
-}
-
-// TypeNotIn applies the NotIn predicate on the "type" field.
-func TypeNotIn(vs ...string) predicate.RuntimeBroker {
-	return predicate.RuntimeBroker(sql.FieldNotIn(FieldType, vs...))
-}
-
-// TypeGT applies the GT predicate on the "type" field.
-func TypeGT(v string) predicate.RuntimeBroker {
-	return predicate.RuntimeBroker(sql.FieldGT(FieldType, v))
-}
-
-// TypeGTE applies the GTE predicate on the "type" field.
-func TypeGTE(v string) predicate.RuntimeBroker {
-	return predicate.RuntimeBroker(sql.FieldGTE(FieldType, v))
-}
-
-// TypeLT applies the LT predicate on the "type" field.
-func TypeLT(v string) predicate.RuntimeBroker {
-	return predicate.RuntimeBroker(sql.FieldLT(FieldType, v))
-}
-
-// TypeLTE applies the LTE predicate on the "type" field.
-func TypeLTE(v string) predicate.RuntimeBroker {
-	return predicate.RuntimeBroker(sql.FieldLTE(FieldType, v))
-}
-
-// TypeContains applies the Contains predicate on the "type" field.
-func TypeContains(v string) predicate.RuntimeBroker {
-	return predicate.RuntimeBroker(sql.FieldContains(FieldType, v))
-}
-
-// TypeHasPrefix applies the HasPrefix predicate on the "type" field.
-func TypeHasPrefix(v string) predicate.RuntimeBroker {
-	return predicate.RuntimeBroker(sql.FieldHasPrefix(FieldType, v))
-}
-
-// TypeHasSuffix applies the HasSuffix predicate on the "type" field.
-func TypeHasSuffix(v string) predicate.RuntimeBroker {
-	return predicate.RuntimeBroker(sql.FieldHasSuffix(FieldType, v))
-}
-
-// TypeIsNil applies the IsNil predicate on the "type" field.
-func TypeIsNil() predicate.RuntimeBroker {
-	return predicate.RuntimeBroker(sql.FieldIsNull(FieldType))
-}
-
-// TypeNotNil applies the NotNil predicate on the "type" field.
-func TypeNotNil() predicate.RuntimeBroker {
-	return predicate.RuntimeBroker(sql.FieldNotNull(FieldType))
-}
-
-// TypeEqualFold applies the EqualFold predicate on the "type" field.
-func TypeEqualFold(v string) predicate.RuntimeBroker {
-	return predicate.RuntimeBroker(sql.FieldEqualFold(FieldType, v))
-}
-
-// TypeContainsFold applies the ContainsFold predicate on the "type" field.
-func TypeContainsFold(v string) predicate.RuntimeBroker {
-	return predicate.RuntimeBroker(sql.FieldContainsFold(FieldType, v))
 }
 
 // ModeEQ applies the EQ predicate on the "mode" field.

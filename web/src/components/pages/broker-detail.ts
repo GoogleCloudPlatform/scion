@@ -185,6 +185,22 @@ export class ScionPageBrokerDetail extends LitElement {
       margin-bottom: 2rem;
     }
 
+    .broker-type-badge {
+      display: inline-flex;
+      align-items: center;
+      padding: 0.125rem 0.5rem;
+      border-radius: var(--scion-radius, 0.5rem);
+      font-size: 0.75rem;
+      font-weight: 500;
+      background: var(--scion-bg-subtle, #f1f5f9);
+      color: var(--scion-text-muted, #64748b);
+    }
+
+    .broker-type-badge.hosted {
+      background: var(--sl-color-primary-100, #dbeafe);
+      color: var(--sl-color-primary-700, #1d4ed8);
+    }
+
     .capability-tag {
       display: inline-flex;
       align-items: center;
@@ -504,6 +520,14 @@ export class ScionPageBrokerDetail extends LitElement {
     }
   }
 
+  private renderBrokerTypeBadge() {
+    const brokerType = this.broker?.labels?.['scion.io/broker-type'];
+    if (!brokerType) return '';
+    const label = brokerType.charAt(0).toUpperCase() + brokerType.slice(1);
+    const cssClass = brokerType === 'hosted' ? 'broker-type-badge hosted' : 'broker-type-badge';
+    return html`<span class=${cssClass}>${label}</span>`;
+  }
+
   private getBrokerStatusVariant(status: string): 'success' | 'warning' | 'danger' | 'neutral' {
     switch (status) {
       case 'online':
@@ -592,6 +616,7 @@ export class ScionPageBrokerDetail extends LitElement {
           <div class="header-title">
             <sl-icon name="hdd-rack"></sl-icon>
             <h1>${this.broker.name}</h1>
+            ${this.renderBrokerTypeBadge()}
             <scion-status-badge
               status=${this.getBrokerStatusVariant(this.broker.status)}
               label=${this.broker.status}

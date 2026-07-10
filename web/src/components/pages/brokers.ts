@@ -123,6 +123,22 @@ export class ScionPageBrokers extends LitElement {
         flex-wrap: wrap;
         gap: 0.25rem;
       }
+
+      .broker-type-badge {
+        display: inline-flex;
+        align-items: center;
+        padding: 0.125rem 0.5rem;
+        border-radius: var(--scion-radius, 0.5rem);
+        font-size: 0.75rem;
+        font-weight: 500;
+        background: var(--scion-bg-subtle, #f1f5f9);
+        color: var(--scion-text-muted, #64748b);
+      }
+
+      .broker-type-badge.hosted {
+        background: var(--sl-color-primary-100, #dbeafe);
+        color: var(--sl-color-primary-700, #1d4ed8);
+      }
     `,
   ];
 
@@ -308,6 +324,14 @@ export class ScionPageBrokers extends LitElement {
     `;
   }
 
+  private renderBrokerTypeBadge(broker: RuntimeBroker) {
+    const brokerType = broker.labels?.['scion.io/broker-type'];
+    if (!brokerType) return '';
+    const label = brokerType.charAt(0).toUpperCase() + brokerType.slice(1);
+    const cssClass = brokerType === 'hosted' ? 'broker-type-badge hosted' : 'broker-type-badge';
+    return html`<span class=${cssClass}>${label}</span>`;
+  }
+
   private renderBrokerCard(broker: RuntimeBroker) {
     return html`
       <a href="/brokers/${broker.id}" class="resource-card">
@@ -316,6 +340,7 @@ export class ScionPageBrokers extends LitElement {
             <h3 class="resource-name">
               <sl-icon name="hdd-rack"></sl-icon>
               ${broker.name}
+              ${this.renderBrokerTypeBadge(broker)}
             </h3>
             ${broker.version ? html`<div class="broker-version">v${broker.version}</div>` : ''}
           </div>
@@ -395,6 +420,7 @@ export class ScionPageBrokers extends LitElement {
           <span class="name-cell">
             <sl-icon name="hdd-rack"></sl-icon>
             ${broker.name}
+            ${this.renderBrokerTypeBadge(broker)}
           </span>
         </td>
         <td class="hide-mobile">

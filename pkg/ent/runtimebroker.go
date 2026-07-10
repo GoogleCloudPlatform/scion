@@ -22,8 +22,6 @@ type RuntimeBroker struct {
 	Name string `json:"name,omitempty"`
 	// Slug holds the value of the "slug" field.
 	Slug string `json:"slug,omitempty"`
-	// Type holds the value of the "type" field.
-	Type string `json:"type,omitempty"`
 	// Mode holds the value of the "mode" field.
 	Mode string `json:"mode,omitempty"`
 	// Version holds the value of the "version" field.
@@ -76,7 +74,7 @@ func (*RuntimeBroker) scanValues(columns []string) ([]any, error) {
 			values[i] = new(sql.NullBool)
 		case runtimebroker.FieldLockVersion:
 			values[i] = new(sql.NullInt64)
-		case runtimebroker.FieldName, runtimebroker.FieldSlug, runtimebroker.FieldType, runtimebroker.FieldMode, runtimebroker.FieldVersion, runtimebroker.FieldStatus, runtimebroker.FieldConnectionState, runtimebroker.FieldCapabilities, runtimebroker.FieldSupportedHarnesses, runtimebroker.FieldResources, runtimebroker.FieldRuntimes, runtimebroker.FieldLabels, runtimebroker.FieldAnnotations, runtimebroker.FieldEndpoint, runtimebroker.FieldCreatedBy, runtimebroker.FieldConnectedHubID, runtimebroker.FieldConnectedSessionID:
+		case runtimebroker.FieldName, runtimebroker.FieldSlug, runtimebroker.FieldMode, runtimebroker.FieldVersion, runtimebroker.FieldStatus, runtimebroker.FieldConnectionState, runtimebroker.FieldCapabilities, runtimebroker.FieldSupportedHarnesses, runtimebroker.FieldResources, runtimebroker.FieldRuntimes, runtimebroker.FieldLabels, runtimebroker.FieldAnnotations, runtimebroker.FieldEndpoint, runtimebroker.FieldCreatedBy, runtimebroker.FieldConnectedHubID, runtimebroker.FieldConnectedSessionID:
 			values[i] = new(sql.NullString)
 		case runtimebroker.FieldLastHeartbeat, runtimebroker.FieldConnectedAt, runtimebroker.FieldCreated, runtimebroker.FieldUpdated:
 			values[i] = new(sql.NullTime)
@@ -114,12 +112,6 @@ func (_m *RuntimeBroker) assignValues(columns []string, values []any) error {
 				return fmt.Errorf("unexpected type %T for field slug", values[i])
 			} else if value.Valid {
 				_m.Slug = value.String
-			}
-		case runtimebroker.FieldType:
-			if value, ok := values[i].(*sql.NullString); !ok {
-				return fmt.Errorf("unexpected type %T for field type", values[i])
-			} else if value.Valid {
-				_m.Type = value.String
 			}
 		case runtimebroker.FieldMode:
 			if value, ok := values[i].(*sql.NullString); !ok {
@@ -286,9 +278,6 @@ func (_m *RuntimeBroker) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("slug=")
 	builder.WriteString(_m.Slug)
-	builder.WriteString(", ")
-	builder.WriteString("type=")
-	builder.WriteString(_m.Type)
 	builder.WriteString(", ")
 	builder.WriteString("mode=")
 	builder.WriteString(_m.Mode)

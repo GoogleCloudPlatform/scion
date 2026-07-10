@@ -45,10 +45,6 @@ func (RuntimeBroker) Fields() []ent.Field {
 			NotEmpty(),
 		field.String("slug").
 			NotEmpty(),
-		// type/mode are vestigial columns in the legacy store (the SQLite store
-		// always writes ""); kept Optional for column parity rather than required.
-		field.String("type").
-			Optional(),
 		field.String("mode").
 			Default("connected"),
 		field.String("version").

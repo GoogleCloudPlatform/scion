@@ -36,20 +36,6 @@ func (_c *RuntimeBrokerCreate) SetSlug(v string) *RuntimeBrokerCreate {
 	return _c
 }
 
-// SetType sets the "type" field.
-func (_c *RuntimeBrokerCreate) SetType(v string) *RuntimeBrokerCreate {
-	_c.mutation.SetType(v)
-	return _c
-}
-
-// SetNillableType sets the "type" field if the given value is not nil.
-func (_c *RuntimeBrokerCreate) SetNillableType(v *string) *RuntimeBrokerCreate {
-	if v != nil {
-		_c.SetType(*v)
-	}
-	return _c
-}
-
 // SetMode sets the "mode" field.
 func (_c *RuntimeBrokerCreate) SetMode(v string) *RuntimeBrokerCreate {
 	_c.mutation.SetMode(v)
@@ -496,10 +482,6 @@ func (_c *RuntimeBrokerCreate) createSpec() (*RuntimeBroker, *sqlgraph.CreateSpe
 		_spec.SetField(runtimebroker.FieldSlug, field.TypeString, value)
 		_node.Slug = value
 	}
-	if value, ok := _c.mutation.GetType(); ok {
-		_spec.SetField(runtimebroker.FieldType, field.TypeString, value)
-		_node.Type = value
-	}
 	if value, ok := _c.mutation.Mode(); ok {
 		_spec.SetField(runtimebroker.FieldMode, field.TypeString, value)
 		_node.Mode = value
@@ -653,24 +635,6 @@ func (u *RuntimeBrokerUpsert) SetSlug(v string) *RuntimeBrokerUpsert {
 // UpdateSlug sets the "slug" field to the value that was provided on create.
 func (u *RuntimeBrokerUpsert) UpdateSlug() *RuntimeBrokerUpsert {
 	u.SetExcluded(runtimebroker.FieldSlug)
-	return u
-}
-
-// SetType sets the "type" field.
-func (u *RuntimeBrokerUpsert) SetType(v string) *RuntimeBrokerUpsert {
-	u.Set(runtimebroker.FieldType, v)
-	return u
-}
-
-// UpdateType sets the "type" field to the value that was provided on create.
-func (u *RuntimeBrokerUpsert) UpdateType() *RuntimeBrokerUpsert {
-	u.SetExcluded(runtimebroker.FieldType)
-	return u
-}
-
-// ClearType clears the value of the "type" field.
-func (u *RuntimeBrokerUpsert) ClearType() *RuntimeBrokerUpsert {
-	u.SetNull(runtimebroker.FieldType)
 	return u
 }
 
@@ -1062,27 +1026,6 @@ func (u *RuntimeBrokerUpsertOne) SetSlug(v string) *RuntimeBrokerUpsertOne {
 func (u *RuntimeBrokerUpsertOne) UpdateSlug() *RuntimeBrokerUpsertOne {
 	return u.Update(func(s *RuntimeBrokerUpsert) {
 		s.UpdateSlug()
-	})
-}
-
-// SetType sets the "type" field.
-func (u *RuntimeBrokerUpsertOne) SetType(v string) *RuntimeBrokerUpsertOne {
-	return u.Update(func(s *RuntimeBrokerUpsert) {
-		s.SetType(v)
-	})
-}
-
-// UpdateType sets the "type" field to the value that was provided on create.
-func (u *RuntimeBrokerUpsertOne) UpdateType() *RuntimeBrokerUpsertOne {
-	return u.Update(func(s *RuntimeBrokerUpsert) {
-		s.UpdateType()
-	})
-}
-
-// ClearType clears the value of the "type" field.
-func (u *RuntimeBrokerUpsertOne) ClearType() *RuntimeBrokerUpsertOne {
-	return u.Update(func(s *RuntimeBrokerUpsert) {
-		s.ClearType()
 	})
 }
 
@@ -1693,27 +1636,6 @@ func (u *RuntimeBrokerUpsertBulk) SetSlug(v string) *RuntimeBrokerUpsertBulk {
 func (u *RuntimeBrokerUpsertBulk) UpdateSlug() *RuntimeBrokerUpsertBulk {
 	return u.Update(func(s *RuntimeBrokerUpsert) {
 		s.UpdateSlug()
-	})
-}
-
-// SetType sets the "type" field.
-func (u *RuntimeBrokerUpsertBulk) SetType(v string) *RuntimeBrokerUpsertBulk {
-	return u.Update(func(s *RuntimeBrokerUpsert) {
-		s.SetType(v)
-	})
-}
-
-// UpdateType sets the "type" field to the value that was provided on create.
-func (u *RuntimeBrokerUpsertBulk) UpdateType() *RuntimeBrokerUpsertBulk {
-	return u.Update(func(s *RuntimeBrokerUpsert) {
-		s.UpdateType()
-	})
-}
-
-// ClearType clears the value of the "type" field.
-func (u *RuntimeBrokerUpsertBulk) ClearType() *RuntimeBrokerUpsertBulk {
-	return u.Update(func(s *RuntimeBrokerUpsert) {
-		s.ClearType()
 	})
 }
 

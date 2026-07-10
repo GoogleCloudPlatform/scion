@@ -104,6 +104,9 @@ func registerGlobalProjectAndBroker(ctx context.Context, s store.Store, brokerID
 				Attach: true,
 			},
 			Profiles: profiles,
+			Labels: map[string]string{
+				"scion.io/broker-type": "hosted",
+			},
 		}
 
 		if err := s.CreateRuntimeBroker(ctx, broker); err != nil {
@@ -118,6 +121,11 @@ func registerGlobalProjectAndBroker(ctx context.Context, s store.Store, brokerID
 		broker.LastHeartbeat = time.Now()
 		// Update profiles from settings (may have changed)
 		broker.Profiles = profiles
+		// Backfill broker-type label for pre-label deployments
+		if broker.Labels == nil {
+			broker.Labels = make(map[string]string)
+		}
+		broker.Labels["scion.io/broker-type"] = "hosted"
 		if err := s.UpdateRuntimeBroker(ctx, broker); err != nil {
 			return brokerID, fmt.Errorf("failed to update runtime broker: %w", err)
 		}

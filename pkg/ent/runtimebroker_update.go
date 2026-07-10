@@ -56,26 +56,6 @@ func (_u *RuntimeBrokerUpdate) SetNillableSlug(v *string) *RuntimeBrokerUpdate {
 	return _u
 }
 
-// SetType sets the "type" field.
-func (_u *RuntimeBrokerUpdate) SetType(v string) *RuntimeBrokerUpdate {
-	_u.mutation.SetType(v)
-	return _u
-}
-
-// SetNillableType sets the "type" field if the given value is not nil.
-func (_u *RuntimeBrokerUpdate) SetNillableType(v *string) *RuntimeBrokerUpdate {
-	if v != nil {
-		_u.SetType(*v)
-	}
-	return _u
-}
-
-// ClearType clears the value of the "type" field.
-func (_u *RuntimeBrokerUpdate) ClearType() *RuntimeBrokerUpdate {
-	_u.mutation.ClearType()
-	return _u
-}
-
 // SetMode sets the "mode" field.
 func (_u *RuntimeBrokerUpdate) SetMode(v string) *RuntimeBrokerUpdate {
 	_u.mutation.SetMode(v)
@@ -493,12 +473,6 @@ func (_u *RuntimeBrokerUpdate) sqlSave(ctx context.Context) (_node int, err erro
 	if value, ok := _u.mutation.Slug(); ok {
 		_spec.SetField(runtimebroker.FieldSlug, field.TypeString, value)
 	}
-	if value, ok := _u.mutation.GetType(); ok {
-		_spec.SetField(runtimebroker.FieldType, field.TypeString, value)
-	}
-	if _u.mutation.TypeCleared() {
-		_spec.ClearField(runtimebroker.FieldType, field.TypeString)
-	}
 	if value, ok := _u.mutation.Mode(); ok {
 		_spec.SetField(runtimebroker.FieldMode, field.TypeString, value)
 	}
@@ -643,26 +617,6 @@ func (_u *RuntimeBrokerUpdateOne) SetNillableSlug(v *string) *RuntimeBrokerUpdat
 	if v != nil {
 		_u.SetSlug(*v)
 	}
-	return _u
-}
-
-// SetType sets the "type" field.
-func (_u *RuntimeBrokerUpdateOne) SetType(v string) *RuntimeBrokerUpdateOne {
-	_u.mutation.SetType(v)
-	return _u
-}
-
-// SetNillableType sets the "type" field if the given value is not nil.
-func (_u *RuntimeBrokerUpdateOne) SetNillableType(v *string) *RuntimeBrokerUpdateOne {
-	if v != nil {
-		_u.SetType(*v)
-	}
-	return _u
-}
-
-// ClearType clears the value of the "type" field.
-func (_u *RuntimeBrokerUpdateOne) ClearType() *RuntimeBrokerUpdateOne {
-	_u.mutation.ClearType()
 	return _u
 }
 
@@ -1112,12 +1066,6 @@ func (_u *RuntimeBrokerUpdateOne) sqlSave(ctx context.Context) (_node *RuntimeBr
 	}
 	if value, ok := _u.mutation.Slug(); ok {
 		_spec.SetField(runtimebroker.FieldSlug, field.TypeString, value)
-	}
-	if value, ok := _u.mutation.GetType(); ok {
-		_spec.SetField(runtimebroker.FieldType, field.TypeString, value)
-	}
-	if _u.mutation.TypeCleared() {
-		_spec.ClearField(runtimebroker.FieldType, field.TypeString)
 	}
 	if value, ok := _u.mutation.Mode(); ok {
 		_spec.SetField(runtimebroker.FieldMode, field.TypeString, value)

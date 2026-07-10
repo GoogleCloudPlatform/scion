@@ -1764,6 +1764,14 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 	// Resolve broker name
 	brokerName := resolveBrokerName(cfg, settings, vsBroker)
 
+	// If no explicit name was configured and this is a co-located broker,
+	// use a stable human-readable name instead of the hostname fallback.
+	if enableHub && !simulateRemoteBroker {
+		if hostname, err := os.Hostname(); err == nil && brokerName == hostname {
+			brokerName = "Hosted Broker"
+		}
+	}
+
 	// Enrich logger with broker_id
 	slog.SetDefault(slog.Default().With(slog.String(logging.AttrBrokerID, brokerID)))
 

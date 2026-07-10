@@ -205,6 +205,14 @@ func (s *BrokerAuthService) CreateBrokerRegistration(ctx context.Context, req Cr
 		return nil, errors.New("name is required")
 	}
 
+	// Default broker-type label to "external" if not provided
+	if req.Labels == nil {
+		req.Labels = make(map[string]string)
+	}
+	if _, exists := req.Labels["scion.io/broker-type"]; !exists {
+		req.Labels["scion.io/broker-type"] = "external"
+	}
+
 	// Before generating a new broker ID, check for an existing broker with same name
 	var brokerID string
 	var reregistered bool
