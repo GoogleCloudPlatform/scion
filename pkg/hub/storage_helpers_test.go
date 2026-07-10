@@ -38,9 +38,9 @@ func TestLegacyStoragePath(t *testing.T) {
 			want: "templates/global/my-template",
 		},
 		{
-			name: "hub path with grove scope",
-			path: "hubs/hub-1/templates/groves/g-1/t1",
-			want: "templates/groves/g-1/t1",
+			name: "hub path with project scope",
+			path: "hubs/hub-1/templates/projects/g-1/t1",
+			want: "templates/projects/g-1/t1",
 		},
 		{
 			name: "hub path with harness-config",
