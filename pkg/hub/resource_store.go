@@ -148,7 +148,7 @@ func (rs *ResourceStore) Bootstrap(ctx context.Context, name, dir, scope, scopeI
 
 	if existing == nil {
 		// New resource — create a pending record, upload, then activate.
-		storagePath := storage.ResourceStoragePath(kind, scope, scopeID, slug)
+		storagePath := storage.ResourceStoragePath("", kind, scope, scopeID, slug)
 		rec := &ResourceRecord{
 			Kind:          kind,
 			ID:            api.NewUUID(),
@@ -159,7 +159,7 @@ func (rs *ResourceStore) Bootstrap(ctx context.Context, name, dir, scope, scopeI
 			Status:        resourceStatusPending,
 			StoragePath:   storagePath,
 			StorageBucket: stor.Bucket(),
-			StorageURI:    storage.ResourceStorageURI(stor.Bucket(), kind, scope, scopeID, slug),
+			StorageURI:    storage.ResourceStorageURI("", stor.Bucket(), kind, scope, scopeID, slug),
 			SourceURL:     sourceURL,
 			Visibility:    p.DefaultVisibility(),
 		}
@@ -193,7 +193,7 @@ func (rs *ResourceStore) Bootstrap(ctx context.Context, name, dir, scope, scopeI
 
 	storagePath := existing.StoragePath
 	if storagePath == "" {
-		storagePath = storage.ResourceStoragePath(kind, existing.Scope, existing.ScopeID, existing.Slug)
+		storagePath = storage.ResourceStoragePath("", kind, existing.Scope, existing.ScopeID, existing.Slug)
 	}
 
 	uploaded, written, err := uploadResourceFiles(ctx, stor, storagePath, files, p.Label())

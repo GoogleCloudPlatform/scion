@@ -231,73 +231,86 @@ func resourcePrefix(kind ResourceKind) string {
 // given kind, organized by scope. This is the single source of truth for the
 // scope layout shared by all resource kinds; the per-kind helpers below delegate
 // to it.
-func ResourceStoragePath(kind ResourceKind, scope, scopeID, slug string) string {
+func ResourceStoragePath(hubID string, kind ResourceKind, scope, scopeID, slug string) string {
 	prefix := resourcePrefix(kind)
+	var scopePath string
 	switch scope {
 	case "global":
-		return prefix + "/global/" + slug
+		scopePath = prefix + "/global/" + slug
 	case "grove", "project":
-		return prefix + "/groves/" + scopeID + "/" + slug
+		scopePath = prefix + "/groves/" + scopeID + "/" + slug
 	case "user":
-		return prefix + "/users/" + scopeID + "/" + slug
+		scopePath = prefix + "/users/" + scopeID + "/" + slug
 	default:
-		return prefix + "/" + slug
+		scopePath = prefix + "/" + slug
 	}
+	if hubID != "" {
+		return "hubs/" + hubID + "/" + scopePath
+	}
+	return scopePath
 }
 
 // ResourceStorageURI returns the full bucket URI for a file-based resource.
-func ResourceStorageURI(bucket string, kind ResourceKind, scope, scopeID, slug string) string {
-	return "gs://" + bucket + "/" + ResourceStoragePath(kind, scope, scopeID, slug) + "/"
+func ResourceStorageURI(hubID, bucket string, kind ResourceKind, scope, scopeID, slug string) string {
+	return "gs://" + bucket + "/" + ResourceStoragePath(hubID, kind, scope, scopeID, slug) + "/"
 }
 
 // TemplateStoragePath returns the storage path for a template.
 // Templates are stored under the /templates prefix with scope-based organization.
-func TemplateStoragePath(scope, scopeID, templateSlug string) string {
-	return ResourceStoragePath(ResourceKindTemplate, scope, scopeID, templateSlug)
+func TemplateStoragePath(hubID, scope, scopeID, templateSlug string) string {
+	return ResourceStoragePath(hubID, ResourceKindTemplate, scope, scopeID, templateSlug)
 }
 
 // TemplateStorageURI returns the full storage URI for a template.
-func TemplateStorageURI(bucket, scope, scopeID, templateSlug string) string {
-	return ResourceStorageURI(bucket, ResourceKindTemplate, scope, scopeID, templateSlug)
+func TemplateStorageURI(hubID, bucket, scope, scopeID, templateSlug string) string {
+	return ResourceStorageURI(hubID, bucket, ResourceKindTemplate, scope, scopeID, templateSlug)
 }
 
 // SkillStoragePath returns the storage path for a skill.
 // Skills are stored under the /skills prefix with scope-based organization.
-func SkillStoragePath(scope, scopeID, slug string) string {
-	return ResourceStoragePath(ResourceKindSkill, scope, scopeID, slug)
+func SkillStoragePath(hubID, scope, scopeID, slug string) string {
+	return ResourceStoragePath(hubID, ResourceKindSkill, scope, scopeID, slug)
 }
 
 // SkillStorageURI returns the full storage URI for a skill.
-func SkillStorageURI(bucket, scope, scopeID, slug string) string {
-	return ResourceStorageURI(bucket, ResourceKindSkill, scope, scopeID, slug)
+func SkillStorageURI(hubID, bucket, scope, scopeID, slug string) string {
+	return ResourceStorageURI(hubID, bucket, ResourceKindSkill, scope, scopeID, slug)
 }
 
 // HarnessConfigStoragePath returns the storage path for a harness config.
 // Harness configs are stored under the /harness-configs prefix with scope-based organization.
-func HarnessConfigStoragePath(scope, scopeID, slug string) string {
-	return ResourceStoragePath(ResourceKindHarnessConfig, scope, scopeID, slug)
+func HarnessConfigStoragePath(hubID, scope, scopeID, slug string) string {
+	return ResourceStoragePath(hubID, ResourceKindHarnessConfig, scope, scopeID, slug)
 }
 
 // HarnessConfigStorageURI returns the full storage URI for a harness config.
-func HarnessConfigStorageURI(bucket, scope, scopeID, slug string) string {
-	return ResourceStorageURI(bucket, ResourceKindHarnessConfig, scope, scopeID, slug)
+func HarnessConfigStorageURI(hubID, bucket, scope, scopeID, slug string) string {
+	return ResourceStorageURI(hubID, bucket, ResourceKindHarnessConfig, scope, scopeID, slug)
 }
 
 // WorkspaceStoragePath returns the storage path for an agent's workspace.
 // Workspaces are stored under /workspaces/{groveId}/{agentId}/.
-func WorkspaceStoragePath(groveID, agentID string) string {
-	return "workspaces/" + groveID + "/" + agentID
+func WorkspaceStoragePath(hubID, groveID, agentID string) string {
+	path := "workspaces/" + groveID + "/" + agentID
+	if hubID != "" {
+		return "hubs/" + hubID + "/" + path
+	}
+	return path
 }
 
 // ProjectWorkspaceStoragePath returns the storage path for a hub-managed project's shared workspace.
 // Hub-managed projects share a single workspace across agents (no per-agent worktrees),
 // so the path is grove-level rather than agent-level.
-func ProjectWorkspaceStoragePath(groveID string) string {
-	return "workspaces/" + groveID + "/grove-workspace"
+func ProjectWorkspaceStoragePath(hubID, groveID string) string {
+	path := "workspaces/" + groveID + "/grove-workspace"
+	if hubID != "" {
+		return "hubs/" + hubID + "/" + path
+	}
+	return path
 }
 
 // WorkspaceStorageURI returns the full storage URI for an agent's workspace.
-func WorkspaceStorageURI(bucket, groveID, agentID string) string {
-	path := WorkspaceStoragePath(groveID, agentID)
+func WorkspaceStorageURI(hubID, bucket, groveID, agentID string) string {
+	path := WorkspaceStoragePath(hubID, groveID, agentID)
 	return "gs://" + bucket + "/" + path + "/"
 }

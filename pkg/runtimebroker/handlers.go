@@ -985,7 +985,7 @@ func (s *Server) resourceObjectPath(ctx context.Context, kind storage.ResourceKi
 		if hc.StoragePath != "" {
 			return hc.StoragePath, nil
 		}
-		return storage.ResourceStoragePath(kind, hc.Scope, hc.ScopeID, hc.Slug), nil
+		return storage.ResourceStoragePath("", kind, hc.Scope, hc.ScopeID, hc.Slug), nil
 	default:
 		tmpl, err := conn.HubClient.Templates().Get(ctx, ref)
 		if err != nil {
@@ -1001,7 +1001,7 @@ func (s *Server) resourceObjectPath(ctx context.Context, kind storage.ResourceKi
 		if scopeID == "" {
 			scopeID = tmpl.ProjectID
 		}
-		return storage.ResourceStoragePath(kind, tmpl.Scope, scopeID, tmpl.Slug), nil
+		return storage.ResourceStoragePath("", kind, tmpl.Scope, scopeID, tmpl.Slug), nil
 	}
 }
 

@@ -289,14 +289,14 @@ func (s *Server) createTemplateV2(w http.ResponseWriter, r *http.Request) {
 	// 'active' during finalize (handleTemplateFinalize).
 
 	// Generate storage path and URI
-	storagePath := storage.TemplateStoragePath(template.Scope, template.ScopeID, template.Slug)
+	storagePath := storage.TemplateStoragePath("", template.Scope, template.ScopeID, template.Slug)
 	template.StoragePath = storagePath
 
 	// Get storage client if available
 	stor := s.GetStorage()
 	if stor != nil {
 		template.StorageBucket = stor.Bucket()
-		template.StorageURI = storage.TemplateStorageURI(stor.Bucket(), template.Scope, template.ScopeID, template.Slug)
+		template.StorageURI = storage.TemplateStorageURI("", stor.Bucket(), template.Scope, template.ScopeID, template.Slug)
 	}
 
 	// Create the template record
@@ -843,13 +843,13 @@ func (s *Server) handleTemplateClone(w http.ResponseWriter, r *http.Request, id 
 	}
 
 	// Generate storage path for the clone
-	storagePath := storage.TemplateStoragePath(clone.Scope, clone.ScopeID, clone.Slug)
+	storagePath := storage.TemplateStoragePath("", clone.Scope, clone.ScopeID, clone.Slug)
 	clone.StoragePath = storagePath
 
 	stor := s.GetStorage()
 	if stor != nil {
 		clone.StorageBucket = stor.Bucket()
-		clone.StorageURI = storage.TemplateStorageURI(stor.Bucket(), clone.Scope, clone.ScopeID, clone.Slug)
+		clone.StorageURI = storage.TemplateStorageURI("", stor.Bucket(), clone.Scope, clone.ScopeID, clone.Slug)
 	}
 
 	// Copy files from source to clone location

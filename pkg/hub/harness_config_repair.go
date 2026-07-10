@@ -55,7 +55,7 @@ func (s *Server) syncResourceFromStorage(
 	}
 
 	if storagePath == "" {
-		storagePath = storage.ResourceStoragePath(kind, scope, scopeID, slug)
+		storagePath = storage.ResourceStoragePath("", kind, scope, scopeID, slug)
 	}
 
 	label := string(kind)

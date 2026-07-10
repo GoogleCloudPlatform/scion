@@ -673,7 +673,7 @@ func (s *Server) createAgentInProject(
 				return
 			}
 
-			storagePath := storage.WorkspaceStoragePath(agent.ProjectID, agent.ID)
+			storagePath := storage.WorkspaceStoragePath("", agent.ProjectID, agent.ID)
 			uploadURLs, existingFiles, err := generateWorkspaceUploadURLs(ctx, stor, storagePath, req.WorkspaceFiles)
 			if err != nil {
 				RuntimeError(w, "Failed to generate upload URLs: "+err.Error())
@@ -721,7 +721,7 @@ func (s *Server) createAgentInProject(
 		if !hasLocalPath && !s.isEmbeddedBroker(runtimeBrokerID) {
 			stor := s.GetStorage()
 			if stor != nil {
-				storagePath := storage.ProjectWorkspaceStoragePath(project.ID)
+				storagePath := storage.ProjectWorkspaceStoragePath("", project.ID)
 				if err := gcp.SyncToGCS(ctx, agent.AppliedConfig.Workspace, stor.Bucket(), storagePath+"/files"); err != nil {
 					s.agentLifecycleLog.Warn("Failed to upload hub-managed project workspace to GCS",
 						"agent_id", agent.ID,

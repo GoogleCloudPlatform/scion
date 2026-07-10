@@ -1692,7 +1692,7 @@ func newLocalStorageWithTemplate(t *testing.T, slug string, writeFiles bool) (st
 	if err != nil {
 		t.Fatalf("NewLocal: %v", err)
 	}
-	objectPath := storage.TemplateStoragePath("global", "", slug)
+	objectPath := storage.TemplateStoragePath("", "global", "", slug)
 	dir := stor.ObjectFSPath(objectPath)
 	if writeFiles {
 		if err := os.MkdirAll(dir, 0755); err != nil {

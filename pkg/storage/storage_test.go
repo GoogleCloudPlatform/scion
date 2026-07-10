@@ -19,6 +19,7 @@ import "testing"
 func TestTemplateStoragePath(t *testing.T) {
 	tests := []struct {
 		name         string
+		hubID        string
 		scope        string
 		scopeID      string
 		templateSlug string
@@ -52,11 +53,27 @@ func TestTemplateStoragePath(t *testing.T) {
 			templateSlug: "my-template",
 			want:         "templates/my-template",
 		},
+		{
+			name:         "hub-scoped global",
+			hubID:        "my-hub",
+			scope:        "global",
+			scopeID:      "",
+			templateSlug: "my-template",
+			want:         "hubs/my-hub/templates/global/my-template",
+		},
+		{
+			name:         "hub-scoped grove",
+			hubID:        "my-hub",
+			scope:        "grove",
+			scopeID:      "grove-123",
+			templateSlug: "my-template",
+			want:         "hubs/my-hub/templates/groves/grove-123/my-template",
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := TemplateStoragePath(tt.scope, tt.scopeID, tt.templateSlug)
+			got := TemplateStoragePath(tt.hubID, tt.scope, tt.scopeID, tt.templateSlug)
 			if got != tt.want {
 				t.Errorf("TemplateStoragePath() = %q, want %q", got, tt.want)
 			}
@@ -66,39 +83,51 @@ func TestTemplateStoragePath(t *testing.T) {
 
 func TestTemplateStorageURI(t *testing.T) {
 	bucket := "my-bucket"
-	uri := TemplateStorageURI(bucket, "grove", "grove-123", "my-template")
+	uri := TemplateStorageURI("", bucket, "grove", "grove-123", "my-template")
 	want := "gs://my-bucket/templates/groves/grove-123/my-template/"
 	if uri != want {
 		t.Errorf("TemplateStorageURI() = %q, want %q", uri, want)
+	}
+
+	uri = TemplateStorageURI("my-hub", bucket, "grove", "grove-123", "my-template")
+	want = "gs://my-bucket/hubs/my-hub/templates/groves/grove-123/my-template/"
+	if uri != want {
+		t.Errorf("TemplateStorageURI(hub-scoped) = %q, want %q", uri, want)
 	}
 }
 
 func TestResourceStoragePath(t *testing.T) {
 	tests := []struct {
 		name    string
+		hubID   string
 		kind    ResourceKind
 		scope   string
 		scopeID string
 		slug    string
 		want    string
 	}{
-		{"template global", ResourceKindTemplate, "global", "", "t1", "templates/global/t1"},
-		{"template project", ResourceKindTemplate, "project", "p-1", "t1", "templates/groves/p-1/t1"},
-		{"template grove (legacy)", ResourceKindTemplate, "grove", "g-1", "t1", "templates/groves/g-1/t1"},
-		{"template user", ResourceKindTemplate, "user", "u-1", "t1", "templates/users/u-1/t1"},
-		{"template default", ResourceKindTemplate, "weird", "", "t1", "templates/t1"},
-		{"harness-config global", ResourceKindHarnessConfig, "global", "", "h1", "harness-configs/global/h1"},
-		{"harness-config project", ResourceKindHarnessConfig, "project", "p-1", "h1", "harness-configs/groves/p-1/h1"},
-		{"harness-config grove (legacy)", ResourceKindHarnessConfig, "grove", "g-1", "h1", "harness-configs/groves/g-1/h1"},
-		{"harness-config user", ResourceKindHarnessConfig, "user", "u-1", "h1", "harness-configs/users/u-1/h1"},
-		{"harness-config default", ResourceKindHarnessConfig, "weird", "", "h1", "harness-configs/h1"},
+		{"template global", "", ResourceKindTemplate, "global", "", "t1", "templates/global/t1"},
+		{"template project", "", ResourceKindTemplate, "project", "p-1", "t1", "templates/groves/p-1/t1"},
+		{"template grove (legacy)", "", ResourceKindTemplate, "grove", "g-1", "t1", "templates/groves/g-1/t1"},
+		{"template user", "", ResourceKindTemplate, "user", "u-1", "t1", "templates/users/u-1/t1"},
+		{"template default", "", ResourceKindTemplate, "weird", "", "t1", "templates/t1"},
+		{"harness-config global", "", ResourceKindHarnessConfig, "global", "", "h1", "harness-configs/global/h1"},
+		{"harness-config project", "", ResourceKindHarnessConfig, "project", "p-1", "h1", "harness-configs/groves/p-1/h1"},
+		{"harness-config grove (legacy)", "", ResourceKindHarnessConfig, "grove", "g-1", "h1", "harness-configs/groves/g-1/h1"},
+		{"harness-config user", "", ResourceKindHarnessConfig, "user", "u-1", "h1", "harness-configs/users/u-1/h1"},
+		{"harness-config default", "", ResourceKindHarnessConfig, "weird", "", "h1", "harness-configs/h1"},
+		{"hub-scoped template global", "hub-1", ResourceKindTemplate, "global", "", "t1", "hubs/hub-1/templates/global/t1"},
+		{"hub-scoped template project", "hub-1", ResourceKindTemplate, "project", "p-1", "t1", "hubs/hub-1/templates/groves/p-1/t1"},
+		{"hub-scoped harness-config global", "hub-1", ResourceKindHarnessConfig, "global", "", "h1", "hubs/hub-1/harness-configs/global/h1"},
+		{"hub-scoped harness-config user", "hub-1", ResourceKindHarnessConfig, "user", "u-1", "h1", "hubs/hub-1/harness-configs/users/u-1/h1"},
+		{"hub-scoped skill grove", "hub-1", ResourceKindSkill, "grove", "g-1", "s1", "hubs/hub-1/skills/groves/g-1/s1"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := ResourceStoragePath(tt.kind, tt.scope, tt.scopeID, tt.slug); got != tt.want {
-				t.Errorf("ResourceStoragePath(%q, %q, %q, %q) = %q, want %q",
-					tt.kind, tt.scope, tt.scopeID, tt.slug, got, tt.want)
+			if got := ResourceStoragePath(tt.hubID, tt.kind, tt.scope, tt.scopeID, tt.slug); got != tt.want {
+				t.Errorf("ResourceStoragePath(%q, %q, %q, %q, %q) = %q, want %q",
+					tt.hubID, tt.kind, tt.scope, tt.scopeID, tt.slug, got, tt.want)
 			}
 		})
 	}
@@ -116,22 +145,24 @@ func TestResourceStoragePathWrappers(t *testing.T) {
 		{"user", "u-1", "x"},
 		{"weird", "", "x"},
 	}
-	for _, c := range cases {
-		if got, want := TemplateStoragePath(c.scope, c.scopeID, c.slug),
-			ResourceStoragePath(ResourceKindTemplate, c.scope, c.scopeID, c.slug); got != want {
-			t.Errorf("TemplateStoragePath(%q,%q,%q) = %q, want %q", c.scope, c.scopeID, c.slug, got, want)
-		}
-		if got, want := HarnessConfigStoragePath(c.scope, c.scopeID, c.slug),
-			ResourceStoragePath(ResourceKindHarnessConfig, c.scope, c.scopeID, c.slug); got != want {
-			t.Errorf("HarnessConfigStoragePath(%q,%q,%q) = %q, want %q", c.scope, c.scopeID, c.slug, got, want)
-		}
-		if got, want := TemplateStorageURI(bucket, c.scope, c.scopeID, c.slug),
-			ResourceStorageURI(bucket, ResourceKindTemplate, c.scope, c.scopeID, c.slug); got != want {
-			t.Errorf("TemplateStorageURI = %q, want %q", got, want)
-		}
-		if got, want := HarnessConfigStorageURI(bucket, c.scope, c.scopeID, c.slug),
-			ResourceStorageURI(bucket, ResourceKindHarnessConfig, c.scope, c.scopeID, c.slug); got != want {
-			t.Errorf("HarnessConfigStorageURI = %q, want %q", got, want)
+	for _, hubID := range []string{"", "my-hub"} {
+		for _, c := range cases {
+			if got, want := TemplateStoragePath(hubID, c.scope, c.scopeID, c.slug),
+				ResourceStoragePath(hubID, ResourceKindTemplate, c.scope, c.scopeID, c.slug); got != want {
+				t.Errorf("TemplateStoragePath(%q,%q,%q,%q) = %q, want %q", hubID, c.scope, c.scopeID, c.slug, got, want)
+			}
+			if got, want := HarnessConfigStoragePath(hubID, c.scope, c.scopeID, c.slug),
+				ResourceStoragePath(hubID, ResourceKindHarnessConfig, c.scope, c.scopeID, c.slug); got != want {
+				t.Errorf("HarnessConfigStoragePath(%q,%q,%q,%q) = %q, want %q", hubID, c.scope, c.scopeID, c.slug, got, want)
+			}
+			if got, want := TemplateStorageURI(hubID, bucket, c.scope, c.scopeID, c.slug),
+				ResourceStorageURI(hubID, bucket, ResourceKindTemplate, c.scope, c.scopeID, c.slug); got != want {
+				t.Errorf("TemplateStorageURI = %q, want %q", got, want)
+			}
+			if got, want := HarnessConfigStorageURI(hubID, bucket, c.scope, c.scopeID, c.slug),
+				ResourceStorageURI(hubID, bucket, ResourceKindHarnessConfig, c.scope, c.scopeID, c.slug); got != want {
+				t.Errorf("HarnessConfigStorageURI = %q, want %q", got, want)
+			}
 		}
 	}
 }
@@ -139,6 +170,7 @@ func TestResourceStoragePathWrappers(t *testing.T) {
 func TestWorkspaceStoragePath(t *testing.T) {
 	tests := []struct {
 		name      string
+		hubID     string
 		projectID string
 		agentID   string
 		want      string
@@ -155,11 +187,18 @@ func TestWorkspaceStoragePath(t *testing.T) {
 			agentID:   "agent_456",
 			want:      "workspaces/grove_xyz/agent_456",
 		},
+		{
+			name:      "hub-scoped path",
+			hubID:     "my-hub",
+			projectID: "grove-abc",
+			agentID:   "agent-123",
+			want:      "hubs/my-hub/workspaces/grove-abc/agent-123",
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := WorkspaceStoragePath(tt.projectID, tt.agentID)
+			got := WorkspaceStoragePath(tt.hubID, tt.projectID, tt.agentID)
 			if got != tt.want {
 				t.Errorf("WorkspaceStoragePath() = %q, want %q", got, tt.want)
 			}
@@ -170,6 +209,7 @@ func TestWorkspaceStoragePath(t *testing.T) {
 func TestWorkspaceStorageURI(t *testing.T) {
 	tests := []struct {
 		name      string
+		hubID     string
 		bucket    string
 		projectID string
 		agentID   string
@@ -189,11 +229,19 @@ func TestWorkspaceStorageURI(t *testing.T) {
 			agentID:   "agent-456",
 			want:      "gs://scion-hub-prod/workspaces/grove-xyz/agent-456/",
 		},
+		{
+			name:      "hub-scoped URI",
+			hubID:     "my-hub",
+			bucket:    "scion-hub-dev",
+			projectID: "grove-abc",
+			agentID:   "agent-123",
+			want:      "gs://scion-hub-dev/hubs/my-hub/workspaces/grove-abc/agent-123/",
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := WorkspaceStorageURI(tt.bucket, tt.projectID, tt.agentID)
+			got := WorkspaceStorageURI(tt.hubID, tt.bucket, tt.projectID, tt.agentID)
 			if got != tt.want {
 				t.Errorf("WorkspaceStorageURI() = %q, want %q", got, tt.want)
 			}
@@ -204,6 +252,7 @@ func TestWorkspaceStorageURI(t *testing.T) {
 func TestProjectWorkspaceStoragePath(t *testing.T) {
 	tests := []struct {
 		name      string
+		hubID     string
 		projectID string
 		want      string
 	}{
@@ -217,11 +266,17 @@ func TestProjectWorkspaceStoragePath(t *testing.T) {
 			projectID: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
 			want:      "workspaces/a1b2c3d4-e5f6-7890-abcd-ef1234567890/grove-workspace",
 		},
+		{
+			name:      "hub-scoped grove path",
+			hubID:     "my-hub",
+			projectID: "grove-abc",
+			want:      "hubs/my-hub/workspaces/grove-abc/grove-workspace",
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := ProjectWorkspaceStoragePath(tt.projectID)
+			got := ProjectWorkspaceStoragePath(tt.hubID, tt.projectID)
 			if got != tt.want {
 				t.Errorf("ProjectWorkspaceStoragePath() = %q, want %q", got, tt.want)
 			}
