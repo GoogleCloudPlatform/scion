@@ -232,6 +232,13 @@ export class ScionFileEditor extends LitElement {
     return path.toLowerCase().endsWith('.md');
   }
 
+  /** Whether the current file is a structured data file (JSON/YAML). */
+  private get isStructuredData(): boolean {
+    const path = this.isNewFile ? this.newFileName : this.filePath;
+    const ext = path.includes('.') ? '.' + path.split('.').pop()!.toLowerCase() : '';
+    return ['.json', '.yaml', '.yml'].includes(ext);
+  }
+
   static override styles = css`
     :host {
       display: block;
@@ -487,7 +494,7 @@ export class ScionFileEditor extends LitElement {
               <scion-code-editor
                 .content=${this.currentContent}
                 .language=${getLanguageFromPath(this.isNewFile ? this.newFileName : this.filePath)}
-                ?readonly=${this.readonly}
+                ?readonly=${this.readonly || (this.showPreview && this.isStructuredData)}
                 @content-changed=${this.handleContentChanged}
               ></scion-code-editor>
             `}
@@ -543,7 +550,7 @@ export class ScionFileEditor extends LitElement {
                 </sl-button>
               `
             : nothing}
-          ${this.isMarkdown
+          ${this.isMarkdown || this.isStructuredData
             ? html`
                 <sl-button
                   size="small"

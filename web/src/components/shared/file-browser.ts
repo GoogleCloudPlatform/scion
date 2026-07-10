@@ -415,6 +415,11 @@ function isMarkdownFile(filePath: string): boolean {
   return filePath.toLowerCase().endsWith('.md');
 }
 
+function isStructuredDataFile(filePath: string): boolean {
+  const ext = filePath.includes('.') ? '.' + filePath.split('.').pop()!.toLowerCase() : '';
+  return ['.json', '.yaml', '.yml'].includes(ext);
+}
+
 function isPreviewable(filePath: string): boolean {
   const ext = filePath.includes('.') ? '.' + filePath.split('.').pop()!.toLowerCase() : '';
   return PREVIEWABLE_EXTENSIONS.has(ext);
@@ -930,8 +935,8 @@ export class ScionFileBrowser extends LitElement {
 
   private handlePreview(filePath: string): void {
     if (!this.dataSource) return;
-    // Markdown files get inline preview via the editor component
-    if (isMarkdownFile(filePath)) {
+    // Markdown, JSON, and YAML files get inline preview via the editor component
+    if (isMarkdownFile(filePath) || isStructuredDataFile(filePath)) {
       this.dispatchEvent(
         new CustomEvent('file-preview-requested', {
           detail: { path: filePath },
