@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/sync/errgroup"
@@ -29,6 +30,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 )
+
+var legacyFallbackWarned sync.Map
 
 // fileUploadConcurrency bounds how many of a resource's files upload at once
 // (Phase 4). Storage backends (GCS / local FS) are safe for concurrent uploads
@@ -268,6 +271,11 @@ func generateDownloadURLs(ctx context.Context, stor storage.Storage, basePath, l
 				Method:  "GET",
 				Expires: SignedURLExpiry,
 			})
+			if err == nil {
+				if _, alreadyWarned := legacyFallbackWarned.LoadOrStore(basePath, true); !alreadyWarned {
+					slog.Warn("resource using legacy storage path — run migrate-storage to move to namespaced path", "resource", basePath)
+				}
+			}
 		}
 		if err != nil {
 			return nil, "", expires, fmt.Errorf("storage object missing: %s (run validate to check storage consistency): %w", file.Path, err)
