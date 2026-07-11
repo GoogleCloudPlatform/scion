@@ -957,3 +957,102 @@ func TestBrokerReregistrationNewSecret(t *testing.T) {
 		t.Error("Expected old secret to fail authentication after re-registration")
 	}
 }
+
+func TestBrokerRegistration_SetsLabels(t *testing.T) {
+	svc, s := setupTestBrokerAuthService(t)
+	ctx := context.Background()
+
+	// Register a broker with role label
+	req := CreateBrokerRegistrationRequest{
+		Name: "remote-host",
+		Labels: map[string]string{
+			"scion.io/broker-role": "remote",
+		},
+	}
+
+	resp, err := svc.CreateBrokerRegistration(ctx, req, "admin-user-id")
+	if err != nil {
+		t.Fatalf("CreateBrokerRegistration failed: %v", err)
+	}
+
+	// Verify labels are persisted on the broker record
+	broker, err := s.GetRuntimeBroker(ctx, resp.BrokerID)
+	if err != nil {
+		t.Fatalf("failed to get broker: %v", err)
+	}
+	if broker.Labels["scion.io/broker-role"] != "remote" {
+		t.Errorf("Expected broker-role=remote, got %q", broker.Labels["scion.io/broker-role"])
+	}
+}
+
+func TestBrokerReregistration_MergesLabels(t *testing.T) {
+	svc, s := setupTestBrokerAuthService(t)
+	ctx := context.Background()
+
+	// First registration with custom labels
+	req := CreateBrokerRegistrationRequest{
+		Name: "merge-host",
+		Labels: map[string]string{
+			"scion.io/broker-role": "remote",
+			"custom":              "value1",
+		},
+	}
+
+	resp1, err := svc.CreateBrokerRegistration(ctx, req, "admin")
+	if err != nil {
+		t.Fatalf("First CreateBrokerRegistration failed: %v", err)
+	}
+
+	// Complete the first join (consumes the join token)
+	_, err = svc.CompleteBrokerJoin(ctx, BrokerJoinRequest{
+		BrokerID:  resp1.BrokerID,
+		JoinToken: resp1.JoinToken,
+		Hostname:  "merge-host",
+		Version:   "1.0.0",
+	}, "http://localhost:9810")
+	if err != nil {
+		t.Fatalf("First CompleteBrokerJoin failed: %v", err)
+	}
+
+	// Add a user-set label directly on the broker
+	broker, err := s.GetRuntimeBroker(ctx, resp1.BrokerID)
+	if err != nil {
+		t.Fatalf("failed to get broker: %v", err)
+	}
+	broker.Labels["user-label"] = "user-value"
+	if err := s.UpdateRuntimeBroker(ctx, broker); err != nil {
+		t.Fatalf("failed to update broker: %v", err)
+	}
+
+	// Re-register with same name, different labels
+	req2 := CreateBrokerRegistrationRequest{
+		Name: "merge-host",
+		Labels: map[string]string{
+			"scion.io/broker-role": "remote",
+			"custom":              "value2",
+		},
+	}
+
+	resp2, err := svc.CreateBrokerRegistration(ctx, req2, "admin")
+	if err != nil {
+		t.Fatalf("Second CreateBrokerRegistration failed: %v", err)
+	}
+	if resp2.BrokerID != resp1.BrokerID {
+		t.Fatalf("Expected same broker ID on re-registration")
+	}
+
+	// Verify labels were merged: user-label preserved, custom updated
+	broker, err = s.GetRuntimeBroker(ctx, resp2.BrokerID)
+	if err != nil {
+		t.Fatalf("failed to get broker: %v", err)
+	}
+	if broker.Labels["scion.io/broker-role"] != "remote" {
+		t.Errorf("Expected broker-role=remote, got %q", broker.Labels["scion.io/broker-role"])
+	}
+	if broker.Labels["custom"] != "value2" {
+		t.Errorf("Expected custom=value2, got %q", broker.Labels["custom"])
+	}
+	if broker.Labels["user-label"] != "user-value" {
+		t.Errorf("Expected user-label=user-value to be preserved, got %q", broker.Labels["user-label"])
+	}
+}

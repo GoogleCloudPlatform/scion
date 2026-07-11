@@ -135,3 +135,65 @@ func TestRegisterGlobalGroveAndBroker_DedupCaseInsensitive(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, tid("broker-1"), effectiveID, "should match case-insensitively")
 }
+
+func TestRegisterGlobalProjectAndBroker_SetsEmbeddedLabel(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	settings := &config.Settings{}
+
+	// Register a new co-located broker
+	effectiveID, err := registerGlobalProjectAndBroker(ctx, s, tid("broker-1"), "test-broker", "http://localhost:9800", nil, true, settings)
+	require.NoError(t, err)
+	assert.Equal(t, tid("broker-1"), effectiveID)
+
+	// Verify the broker has the embedded label
+	broker, err := s.GetRuntimeBroker(ctx, tid("broker-1"))
+	require.NoError(t, err)
+	assert.Equal(t, "embedded", broker.Labels["scion.io/broker-role"])
+}
+
+func TestRegisterGlobalProjectAndBroker_LabelsOnReregistration(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	settings := &config.Settings{}
+
+	// First registration
+	_, err := registerGlobalProjectAndBroker(ctx, s, tid("broker-1"), "test-broker", "http://localhost:9800", nil, true, settings)
+	require.NoError(t, err)
+
+	// Manually add a user-set label to simulate prior customization
+	broker, err := s.GetRuntimeBroker(ctx, tid("broker-1"))
+	require.NoError(t, err)
+	broker.Labels["custom-label"] = "custom-value"
+	require.NoError(t, s.UpdateRuntimeBroker(ctx, broker))
+
+	// Re-register (same ID, same name)
+	_, err = registerGlobalProjectAndBroker(ctx, s, tid("broker-1"), "test-broker", "http://localhost:9800", nil, true, settings)
+	require.NoError(t, err)
+
+	// Verify the embedded label is set AND the custom label is preserved
+	broker, err = s.GetRuntimeBroker(ctx, tid("broker-1"))
+	require.NoError(t, err)
+	assert.Equal(t, "embedded", broker.Labels["scion.io/broker-role"])
+	assert.Equal(t, "custom-value", broker.Labels["custom-label"])
+}
+
+func TestRegisterGlobalProjectAndBroker_LabelsOnDedupByName(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	settings := &config.Settings{}
+
+	// First registration
+	_, err := registerGlobalProjectAndBroker(ctx, s, tid("broker-1"), "test-broker", "http://localhost:9800", nil, true, settings)
+	require.NoError(t, err)
+
+	// Second registration with different ID but same name (dedup path)
+	effectiveID, err := registerGlobalProjectAndBroker(ctx, s, tid("broker-2"), "test-broker", "http://localhost:9800", nil, true, settings)
+	require.NoError(t, err)
+	assert.Equal(t, tid("broker-1"), effectiveID)
+
+	// Verify the embedded label survives the dedup re-registration
+	broker, err := s.GetRuntimeBroker(ctx, tid("broker-1"))
+	require.NoError(t, err)
+	assert.Equal(t, "embedded", broker.Labels["scion.io/broker-role"])
+}

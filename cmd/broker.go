@@ -538,6 +538,9 @@ func runBrokerRegister(cmd *cobra.Command, args []string) error {
 				"attach",
 			},
 			AutoProvide: brokerAutoProvide,
+			Labels: map[string]string{
+				"scion.io/broker-role": "remote",
+			},
 		}
 
 		createResp, err := client.RuntimeBrokers().Create(ctx, createReq)

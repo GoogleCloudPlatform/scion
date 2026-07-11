@@ -238,7 +238,16 @@ func (s *BrokerAuthService) CreateBrokerRegistration(ctx context.Context, req Cr
 		brokerID = existingBroker.ID
 		reregistered = true
 		existingBroker.AutoProvide = req.AutoProvide
-		existingBroker.Labels = req.Labels
+		// Merge request labels into existing labels to preserve any
+		// user-set labels while updating registration-provided ones.
+		if len(req.Labels) > 0 {
+			if existingBroker.Labels == nil {
+				existingBroker.Labels = make(map[string]string, len(req.Labels))
+			}
+			for k, v := range req.Labels {
+				existingBroker.Labels[k] = v
+			}
+		}
 		existingBroker.Updated = time.Now()
 		if err := s.store.UpdateRuntimeBroker(ctx, existingBroker); err != nil {
 			return nil, fmt.Errorf("failed to update existing broker: %w", err)
