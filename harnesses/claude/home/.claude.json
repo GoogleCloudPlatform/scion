@@ -12,10 +12,6 @@
   "hasCompletedOnboarding": true,
   "lastOnboardingVersion": "2.1.197",
   "projects": {
-    "/workspace": {
-      "hasTrustDialogAccepted": true,
-      "projectOnboardingSeenCount": 1
-    },
     "/repo-root/.scion/agents/ggg/workspace": {
       "allowedTools": [],
       "mcpContextUris": [],
