@@ -139,7 +139,9 @@ def _detect_claude_version() -> str:
             capture_output=True, text=True, timeout=10,
         )
         if result.returncode == 0 and result.stdout.strip():
-            version = result.stdout.strip().split()[0]
+            raw_version = result.stdout.strip().split()[0]
+            # Extract clean semver from formats like '@anthropic-ai/claude-code/0.2.9' or 'v0.2.9'
+            version = raw_version.split("/")[-1].lstrip("v")
             return version
     except (OSError, subprocess.TimeoutExpired):
         pass
