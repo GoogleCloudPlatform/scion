@@ -36,6 +36,7 @@ RUN go mod download
 COPY cmd/ ./cmd/
 COPY harnesses/ ./harnesses/
 COPY pkg/ ./pkg/
+COPY proto/ ./proto/
 COPY resources/ ./resources/
 COPY web/*.go ./web/
 
