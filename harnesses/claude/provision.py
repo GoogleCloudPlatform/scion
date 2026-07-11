@@ -258,6 +258,14 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
     if count > 0:
         ctx.info(f"applied {count} mcp server(s)")
 
+    harness_cfg = ctx.harness_config
+    instructions_file = str(harness_cfg.get("instructions_file") or ".claude/CLAUDE.md")
+    scion_harness.project_instructions(
+        ctx,
+        instructions_file,
+        system_prompt_mode="none",
+    )
+
 
 if __name__ == "__main__":
     scion_harness.run("claude", provision)
