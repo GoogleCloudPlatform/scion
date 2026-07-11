@@ -251,7 +251,7 @@ func TestClaudeProvisionScript_Integration_HappyPath(t *testing.T) {
 	}
 
 	cmd := exec.Command(pyPath, scriptPath, "--manifest", manifestPath)
-	cmd.Env = append(os.Environ(), "HOME="+home)
+	cmd.Env = append(os.Environ(), "HOME="+home, "PYTHONDONTWRITEBYTECODE=1")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("provision script failed: %v\noutput: %s", err, out)
@@ -363,7 +363,7 @@ func TestClaudeProvisionScript_Integration_NoCreds(t *testing.T) {
 	}
 
 	cmd := exec.Command(pyPath, scriptPath, "--manifest", manifestPath)
-	cmd.Env = append(os.Environ(), "HOME="+home)
+	cmd.Env = append(os.Environ(), "HOME="+home, "PYTHONDONTWRITEBYTECODE=1")
 	out, err := cmd.CombinedOutput()
 	if err == nil {
 		t.Fatalf("expected non-zero exit, got success. output: %s", out)
@@ -446,7 +446,7 @@ func TestClaudeProvisionScript_Integration_APIKeyApproval(t *testing.T) {
 	}
 
 	cmd := exec.Command(pyPath, scriptPath, "--manifest", manifestPath)
-	cmd.Env = append(os.Environ(), "HOME="+home)
+	cmd.Env = append(os.Environ(), "HOME="+home, "PYTHONDONTWRITEBYTECODE=1")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("provision script failed: %v\noutput: %s", err, out)
@@ -547,7 +547,7 @@ func TestClaudeProvisionScript_Integration_VertexAI(t *testing.T) {
 	}
 
 	cmd := exec.Command(pyPath, scriptPath, "--manifest", manifestPath)
-	cmd.Env = append(os.Environ(), "HOME="+home)
+	cmd.Env = append(os.Environ(), "HOME="+home, "PYTHONDONTWRITEBYTECODE=1")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("provision script failed: %v\noutput: %s", err, out)
@@ -649,7 +649,7 @@ func TestClaudeProvisionScript_Integration_VertexAI_NoADC(t *testing.T) {
 	}
 
 	cmd := exec.Command(pyPath, scriptPath, "--manifest", manifestPath)
-	cmd.Env = append(os.Environ(), "HOME="+home)
+	cmd.Env = append(os.Environ(), "HOME="+home, "PYTHONDONTWRITEBYTECODE=1")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("provision script failed (GCP SA / no ADC): %v\noutput: %s", err, out)
@@ -784,7 +784,7 @@ func TestClaudeProvisionScript_Integration_MCP(t *testing.T) {
 	}
 
 	cmd := exec.Command(pyPath, scriptPath, "--manifest", filepath.Join(bundle, "manifest.json"))
-	cmd.Env = append(os.Environ(), "HOME="+home)
+	cmd.Env = append(os.Environ(), "HOME="+home, "PYTHONDONTWRITEBYTECODE=1")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("provision script failed: %v\noutput: %s", err, out)

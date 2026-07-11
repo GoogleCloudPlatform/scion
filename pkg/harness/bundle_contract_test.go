@@ -233,7 +233,7 @@ func runBundleContractCase(t *testing.T, python, hname, caseDir string) {
 
 	// Run provision.py.
 	cmd := exec.Command(python, filepath.Join(bundleDir, "provision.py"), "--manifest", manifestPath)
-	cmd.Env = append(os.Environ(), "HOME="+tmpHome)
+	cmd.Env = append(os.Environ(), "HOME="+tmpHome, "PYTHONDONTWRITEBYTECODE=1")
 	output, err := cmd.CombinedOutput()
 
 	gotExitCode := 0

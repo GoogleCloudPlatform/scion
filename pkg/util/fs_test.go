@@ -103,6 +103,66 @@ func TestCopyDir(t *testing.T) {
 	}
 }
 
+func TestCopyDirSkipsPycache(t *testing.T) {
+	srcDir := t.TempDir()
+	dstDir := t.TempDir()
+
+	// Create structure with __pycache__ and .pyc files:
+	// src/
+	//   script.py
+	//   __pycache__/
+	//     script.cpython-311.pyc
+	//   subdir/
+	//     lib.py
+	//     lib.pyc
+
+	if err := os.WriteFile(filepath.Join(srcDir, "script.py"), []byte("print('hi')"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	pycacheDir := filepath.Join(srcDir, "__pycache__")
+	if err := os.Mkdir(pycacheDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pycacheDir, "script.cpython-311.pyc"), []byte("bytecode"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	subDir := filepath.Join(srcDir, "subdir")
+	if err := os.Mkdir(subDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(subDir, "lib.py"), []byte("def f(): pass"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(subDir, "lib.pyc"), []byte("bytecode"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	targetDir := filepath.Join(dstDir, "target")
+	if err := CopyDir(srcDir, targetDir); err != nil {
+		t.Fatalf("CopyDir failed: %v", err)
+	}
+
+	// .py files should be copied
+	if _, err := os.Stat(filepath.Join(targetDir, "script.py")); err != nil {
+		t.Errorf("script.py should be copied: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(targetDir, "subdir", "lib.py")); err != nil {
+		t.Errorf("subdir/lib.py should be copied: %v", err)
+	}
+
+	// __pycache__ directory should NOT be copied
+	if _, err := os.Stat(filepath.Join(targetDir, "__pycache__")); !os.IsNotExist(err) {
+		t.Errorf("__pycache__ should not be copied, got err=%v", err)
+	}
+
+	// .pyc files should NOT be copied
+	if _, err := os.Stat(filepath.Join(targetDir, "subdir", "lib.pyc")); !os.IsNotExist(err) {
+		t.Errorf("lib.pyc should not be copied, got err=%v", err)
+	}
+}
+
 func TestMakeWritableRecursive(t *testing.T) {
 	tmpDir := t.TempDir()
 

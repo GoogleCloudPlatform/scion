@@ -219,9 +219,12 @@ func (m *LifecycleManager) executeScript(path string) error {
 
 // hookEnv builds the environment for hook scripts. When AgentHome is set,
 // HOME is overridden so that $HOME in hook scripts resolves to the scion
-// user's home directory rather than root's.
+// user's home directory rather than root's. PYTHONDONTWRITEBYTECODE is set
+// to prevent root-owned __pycache__ artifacts from being created during
+// pre-start hooks (which run before privilege drop).
 func (m *LifecycleManager) hookEnv() []string {
 	env := os.Environ()
+	env = append(env, "PYTHONDONTWRITEBYTECODE=1")
 	if m.AgentHome == "" {
 		return env
 	}

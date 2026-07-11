@@ -17,6 +17,7 @@ package util
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -24,11 +25,22 @@ import (
 )
 
 // CopyDir recursively copies a directory tree, attempting to preserve permissions.
-// Source directory must exist.
+// Source directory must exist. Python bytecode artifacts (__pycache__ directories
+// and .pyc files) are skipped to avoid propagating stale, potentially root-owned
+// bytecode into agent homes.
 func CopyDir(src string, dst string) error {
 	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
+		}
+
+		base := filepath.Base(path)
+
+		if info.IsDir() && base == "__pycache__" {
+			return filepath.SkipDir
+		}
+		if !info.IsDir() && strings.HasSuffix(base, ".pyc") {
+			return nil
 		}
 
 		rel, err := filepath.Rel(src, path)
