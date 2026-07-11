@@ -46,6 +46,10 @@ type ContainerScriptHarness struct {
 	// configDirPath is the absolute path to the on-disk harness-config dir
 	// (e.g. ~/.scion/harness-configs/<name>/). Empty for synthetic configs.
 	configDirPath string
+
+	// agentHome is captured during Provision() so that GetCommand() can read
+	// the staged system prompt file without changing the Harness interface.
+	agentHome string
 }
 
 // NewContainerScriptHarness constructs a ContainerScriptHarness from a resolved
@@ -168,7 +172,47 @@ func (c *ContainerScriptHarness) GetCommand(task string, resume bool, baseArgs [
 			}
 		}
 	}
+
+	if prompt := c.readSystemPrompt(); prompt != "" {
+		args = append(args, cmd.SystemPromptFlag, prompt)
+	}
+
 	return args
+}
+
+// readSystemPrompt returns the system prompt content if SystemPromptFlag is
+// configured and a staged or native system prompt file exists on disk. Returns
+// empty string if no system prompt is available (not an error — the agent may
+// simply have no system prompt configured).
+func (c *ContainerScriptHarness) readSystemPrompt() string {
+	if c.entry.Command == nil || c.entry.Command.SystemPromptFlag == "" {
+		return ""
+	}
+	if c.agentHome == "" {
+		return ""
+	}
+
+	// Prefer the staged input written by InjectSystemPrompt; fall back to the
+	// harness-native location (e.g. .claude/system-prompt.md) which may exist
+	// on resume when the staged inputs directory has been cleaned up.
+	paths := []string{
+		filepath.Join(c.agentHome, ".scion", "harness", "inputs", "system-prompt.md"),
+	}
+	if c.entry.SystemPromptFile != "" {
+		paths = append(paths, filepath.Join(c.agentHome, c.entry.SystemPromptFile))
+	}
+
+	for _, p := range paths {
+		data, err := os.ReadFile(p)
+		if err != nil {
+			continue
+		}
+		content := strings.TrimSpace(string(data))
+		if content != "" {
+			return content
+		}
+	}
+	return ""
 }
 
 // GetEnv returns the templated env for the harness.
@@ -332,6 +376,7 @@ type ProvisionPlatform struct {
 //	  secrets/  (populated by runtime secret projection)
 //	agent_home/.scion/hooks/pre-start.d/20-harness-provision  (trusted wrapper)
 func (c *ContainerScriptHarness) Provision(ctx context.Context, agentName, agentDir, agentHome, agentWorkspace string) error {
+	c.agentHome = agentHome
 	bundleHostPath := filepath.Join(agentHome, ".scion", "harness")
 	bundleContainerPath := containerBundlePath(agentHome)
 
