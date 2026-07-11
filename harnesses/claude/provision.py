@@ -49,6 +49,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 from typing import Any
 
@@ -130,12 +131,31 @@ def _apply_api_key_approval(ctx: scion_harness.ProvisionContext, api_key: str) -
     scion_harness.atomic_write_json(claude_json_path, cfg)
 
 
+def _detect_claude_version() -> str:
+    """Detect the installed Claude Code version by running ``claude --version``."""
+    try:
+        result = subprocess.run(
+            ["claude", "--version"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            version = result.stdout.strip().split()[0]
+            return version
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    return ""
+
+
 def _update_project_paths(ctx: scion_harness.ProvisionContext) -> None:
     """Update .claude.json project paths to point at the container workspace.
 
     Mirrors ClaudeCode.provisionClaudeJSON in claude_code.go. Takes the first
     existing project entry's settings and re-keys it to the container workspace
     path. If no project entries exist, creates a default settings map.
+
+    Also pre-trusts /workspace so the trust dialog does not fire when
+    Claude Code is launched there for git-clone-per-agent agents whose
+    ctx.workspace is a subdirectory of /workspace.
     """
     claude_json_path = scion_harness.expand_path(CLAUDE_JSON_FILE)
 
@@ -171,7 +191,22 @@ def _update_project_paths(ctx: scion_harness.ProvisionContext) -> None:
             "exampleFiles": [],
         }
 
-    cfg["projects"] = {ctx.workspace: project_settings}
+    new_projects: dict[str, Any] = {ctx.workspace: project_settings}
+
+    workspace_root = "/workspace"
+    if ctx.workspace != workspace_root:
+        new_projects[workspace_root] = {
+            "hasTrustDialogAccepted": True,
+            "projectOnboardingSeenCount": 1,
+        }
+
+    cfg["projects"] = new_projects
+
+    version = _detect_claude_version()
+    if version:
+        cfg["lastReleaseNotesSeen"] = version
+        cfg["lastOnboardingVersion"] = version
+
     scion_harness.atomic_write_json(claude_json_path, cfg)
 
 
