@@ -994,7 +994,7 @@ func TestBrokerReregistration_MergesLabels(t *testing.T) {
 		Name: "merge-host",
 		Labels: map[string]string{
 			"scion.io/broker-role": "remote",
-			"custom":              "value1",
+			"custom":               "value1",
 		},
 	}
 
@@ -1029,7 +1029,7 @@ func TestBrokerReregistration_MergesLabels(t *testing.T) {
 		Name: "merge-host",
 		Labels: map[string]string{
 			"scion.io/broker-role": "remote",
-			"custom":              "value2",
+			"custom":               "value2",
 		},
 	}
 
