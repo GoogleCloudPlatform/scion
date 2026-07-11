@@ -57,6 +57,7 @@ var harnessConfigListCmd = &cobra.Command{
 
 		// Check for --hub flag
 		showHub, _ := cmd.Flags().GetBool("hub")
+		includeHub := showHub || config.IsHubContext()
 
 		type hcEntry struct {
 			Name    string `json:"name"`
@@ -79,8 +80,8 @@ var harnessConfigListCmd = &cobra.Command{
 			})
 		}
 
-		// Include Hub results if requested
-		if showHub {
+		// Include Hub results if requested or when running in hub context (agent containers)
+		if includeHub {
 			hubCtx, err := CheckHubAvailabilityWithOptions(gp, true)
 			if err == nil && hubCtx != nil {
 				hubResp, err := hubCtx.Client.HarnessConfigs().List(context.Background(), &hubclient.ListHarnessConfigsOptions{
@@ -117,7 +118,7 @@ var harnessConfigListCmd = &cobra.Command{
 			return outputJSON(entries)
 		}
 
-		if showHub {
+		if includeHub {
 			fmt.Printf("%-20s %-12s %-8s %s\n", "NAME", "HARNESS", "SOURCE", "IMAGE")
 			for _, e := range entries {
 				image := e.Image
