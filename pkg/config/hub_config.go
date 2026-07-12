@@ -838,6 +838,58 @@ func LoadEnvKoanf() *koanf.Koanf {
 	return k
 }
 
+// LoadSeedEnvKoanf returns a koanf instance loaded with only the SCION_SEED_*
+// environment variables (no file, no defaults). Uses the same envKeyToConfigKey
+// mapper as LoadEnvKoanf, producing identical key paths after the prefix.
+// e.g. SCION_SEED_SERVER_HUB_ADMINEMAILS → server.hub.adminEmails
+func LoadSeedEnvKoanf() *koanf.Koanf {
+	k := koanf.New(".")
+	_ = k.Load(env.Provider("SCION_SEED_", ".", func(s string) string {
+		key := strings.TrimPrefix(s, "SCION_SEED_")
+		return envKeyToConfigKey(key)
+	}), nil)
+	return k
+}
+
+// LoadBootstrapKoanf computes the full bootstrap merge:
+//
+//	coded defaults → SCION_SEED_* → settings.yaml → SCION_SERVER_*
+//
+// This produces the canonical "bootstrap material" used for seeding and
+// fallback. Each layer merges on top of the previous one, so SCION_SERVER_*
+// wins over yaml, yaml wins over SCION_SEED_*, and SCION_SEED_* wins over
+// coded defaults.
+func LoadBootstrapKoanf() *koanf.Koanf {
+	k := koanf.New(".")
+
+	// 1. Coded defaults (same as LoadFileOnlyKoanf uses — settings.yaml
+	//    contains the canonical defaults via embedded YAML).
+	// LoadFileOnlyKoanf already loads settings.yaml + legacy server.yaml,
+	// but we need finer-grained layering, so we build it step by step.
+
+	// 2. SCION_SEED_* environment variables.
+	seedK := LoadSeedEnvKoanf()
+	_ = k.Merge(seedK)
+
+	// 3. settings.yaml (+ legacy server.yaml).
+	globalDir, err := GetGlobalDir()
+	if err != nil {
+		slog.Warn("LoadBootstrapKoanf: failed to resolve global settings directory", "error", err)
+	}
+	if globalDir != "" {
+		if err := loadSettingsFile(k, globalDir); err != nil {
+			slog.Warn("LoadBootstrapKoanf: failed to load settings file", "dir", globalDir, "error", err)
+		}
+		loadServerConfigFile(k, globalDir)
+	}
+
+	// 4. SCION_SERVER_* environment variables (highest precedence in bootstrap).
+	envK := LoadEnvKoanf()
+	_ = k.Merge(envK)
+
+	return k
+}
+
 // applyEnvOverrides loads SCION_SERVER_ environment variables and merges them
 // into an existing GlobalConfig. This ensures env vars override config file
 // values regardless of which config loading path was used (settings.yaml or

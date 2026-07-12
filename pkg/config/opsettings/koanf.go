@@ -17,6 +17,7 @@ package opsettings
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"github.com/knadh/koanf/providers/confmap"
@@ -365,4 +366,61 @@ func ClassifyKeys(keys []string) (layer1 map[string][]string, layer0 []string, u
 		}
 	}
 	return layer1, layer0, unclassified
+}
+
+// DeprecatedEnvVar describes a SCION_SERVER_* environment variable that targets
+// a Layer-1 key and should be migrated to SCION_SEED_*.
+type DeprecatedEnvVar struct {
+	EnvVar         string // e.g. "SCION_SERVER_HUB_ADMINEMAILS"
+	KoanfKey       string // e.g. "server.hub.admin_emails"
+	SeedEquivalent string // e.g. "SCION_SEED_SERVER_HUB_ADMINEMAILS"
+}
+
+// DetectDeprecatedServerEnv inspects a koanf instance loaded from SCION_SERVER_*
+// env vars and returns entries for any that resolve to Layer-1 keys. These vars
+// should be migrated to SCION_SEED_*. The caller is responsible for logging
+// the returned entries (typically once at startup).
+//
+// envVarPrefix is the raw env prefix used (e.g. "SCION_SERVER_").
+func DetectDeprecatedServerEnv(serverEnvKoanf *koanf.Koanf) []DeprecatedEnvVar {
+	var deprecated []DeprecatedEnvVar
+	for _, key := range serverEnvKoanf.Keys() {
+		if !IsLayer1Key(key) {
+			continue
+		}
+		envSuffix := koanfKeyToEnvSuffix(key)
+		deprecated = append(deprecated, DeprecatedEnvVar{
+			EnvVar:         "SCION_SERVER_" + envSuffix,
+			KoanfKey:       key,
+			SeedEquivalent: "SCION_SEED_" + envSuffix,
+		})
+	}
+	return deprecated
+}
+
+// koanfKeyToEnvSuffix converts a koanf key back to the env var suffix form.
+// e.g. "server.hub.admin_emails" → "SERVER_HUB_ADMINEMAILS"
+// This is the inverse of envKeyToConfigKey (in hub_config.go) — it converts
+// dots to underscores and uppercases, collapsing camelCase/snake_case back to
+// the flat uppercase env form.
+func koanfKeyToEnvSuffix(key string) string {
+	parts := strings.Split(key, ".")
+	for i, part := range parts {
+		// Remove underscores within a segment (snake_case → flat)
+		parts[i] = strings.ToUpper(strings.ReplaceAll(part, "_", ""))
+	}
+	return strings.Join(parts, "_")
+}
+
+// LogDeprecatedServerEnv logs a warning for each deprecated SCION_SERVER_* var
+// targeting a Layer-1 key. Call once at startup.
+func LogDeprecatedServerEnv(serverEnvKoanf *koanf.Koanf, logger *slog.Logger) {
+	deprecated := DetectDeprecatedServerEnv(serverEnvKoanf)
+	for _, d := range deprecated {
+		logger.Warn("SCION_SERVER_* is deprecated for operational settings; use SCION_SEED_*",
+			"env_var", d.EnvVar,
+			"koanf_key", d.KoanfKey,
+			"seed_equivalent", d.SeedEquivalent,
+		)
+	}
 }

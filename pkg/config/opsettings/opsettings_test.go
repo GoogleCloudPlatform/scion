@@ -841,3 +841,114 @@ func TestGlobalDefaultsReserved(t *testing.T) {
 		t.Error("global_defaults should not be registered — it is reserved for future use")
 	}
 }
+
+// --- DetectDeprecatedServerEnv tests ---
+
+func TestDetectDeprecatedServerEnv_Layer1Keys(t *testing.T) {
+	envK := koanf.New(".")
+	_ = envK.Load(confmap.Provider(map[string]interface{}{
+		"server.hub.admin_emails":      []string{"admin@test.com"},
+		"server.auth.user_access_mode": "invite",
+		"telemetry.enabled":            true,
+	}, "."), nil)
+
+	deprecated := DetectDeprecatedServerEnv(envK)
+	if len(deprecated) != 3 {
+		t.Fatalf("expected 3 deprecated vars, got %d: %+v", len(deprecated), deprecated)
+	}
+
+	found := make(map[string]DeprecatedEnvVar)
+	for _, d := range deprecated {
+		found[d.KoanfKey] = d
+	}
+
+	// Check admin_emails
+	if d, ok := found["server.hub.admin_emails"]; !ok {
+		t.Error("expected server.hub.admin_emails in deprecated list")
+	} else {
+		if d.EnvVar != "SCION_SERVER_SERVER_HUB_ADMINEMAILS" {
+			t.Errorf("expected env var SCION_SERVER_SERVER_HUB_ADMINEMAILS, got %q", d.EnvVar)
+		}
+		if d.SeedEquivalent != "SCION_SEED_SERVER_HUB_ADMINEMAILS" {
+			t.Errorf("expected seed equivalent SCION_SEED_SERVER_HUB_ADMINEMAILS, got %q", d.SeedEquivalent)
+		}
+	}
+
+	// Check telemetry.enabled
+	if d, ok := found["telemetry.enabled"]; !ok {
+		t.Error("expected telemetry.enabled in deprecated list")
+	} else {
+		if d.SeedEquivalent != "SCION_SEED_TELEMETRY_ENABLED" {
+			t.Errorf("expected seed equivalent SCION_SEED_TELEMETRY_ENABLED, got %q", d.SeedEquivalent)
+		}
+	}
+}
+
+func TestDetectDeprecatedServerEnv_NoLayer1Keys(t *testing.T) {
+	envK := koanf.New(".")
+	_ = envK.Load(confmap.Provider(map[string]interface{}{
+		"server.database.driver": "postgres",
+		"server.hub.port":        9810,
+		"server.log_level":       "debug",
+	}, "."), nil)
+
+	deprecated := DetectDeprecatedServerEnv(envK)
+	if len(deprecated) != 0 {
+		t.Errorf("expected no deprecated vars for Layer-0 keys, got %d: %+v", len(deprecated), deprecated)
+	}
+}
+
+func TestDetectDeprecatedServerEnv_Empty(t *testing.T) {
+	envK := koanf.New(".")
+	deprecated := DetectDeprecatedServerEnv(envK)
+	if len(deprecated) != 0 {
+		t.Errorf("expected no deprecated vars for empty koanf, got %d", len(deprecated))
+	}
+}
+
+func TestDetectDeprecatedServerEnv_MixedKeys(t *testing.T) {
+	envK := koanf.New(".")
+	_ = envK.Load(confmap.Provider(map[string]interface{}{
+		"server.hub.admin_emails": []string{"admin@test.com"},
+		"server.database.driver":  "postgres",
+		"server.hub.port":         9810,
+		"default_max_turns":       100,
+	}, "."), nil)
+
+	deprecated := DetectDeprecatedServerEnv(envK)
+
+	// Only Layer-1 keys should be flagged: admin_emails and default_max_turns.
+	if len(deprecated) != 2 {
+		t.Fatalf("expected 2 deprecated vars, got %d: %+v", len(deprecated), deprecated)
+	}
+
+	foundKeys := make(map[string]bool)
+	for _, d := range deprecated {
+		foundKeys[d.KoanfKey] = true
+	}
+	if !foundKeys["server.hub.admin_emails"] {
+		t.Error("expected server.hub.admin_emails in deprecated list")
+	}
+	if !foundKeys["default_max_turns"] {
+		t.Error("expected default_max_turns in deprecated list")
+	}
+}
+
+func TestKoanfKeyToEnvSuffix(t *testing.T) {
+	tests := []struct {
+		key  string
+		want string
+	}{
+		{"server.hub.admin_emails", "SERVER_HUB_ADMINEMAILS"},
+		{"telemetry.enabled", "TELEMETRY_ENABLED"},
+		{"default_max_turns", "DEFAULTMAXTURNS"},
+		{"server.auth.user_access_mode", "SERVER_AUTH_USERACCESSMODE"},
+		{"server.hub.public_url", "SERVER_HUB_PUBLICURL"},
+	}
+	for _, tt := range tests {
+		got := koanfKeyToEnvSuffix(tt.key)
+		if got != tt.want {
+			t.Errorf("koanfKeyToEnvSuffix(%q) = %q, want %q", tt.key, got, tt.want)
+		}
+	}
+}
