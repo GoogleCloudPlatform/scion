@@ -207,6 +207,7 @@ interface ServerConfigResponse {
   env_overrides?: string[];
   section_metadata?: Record<string, SectionMetadataInfo>;
   superseded_keys?: Record<string, SupersededKeyInfo[]>;
+  deprecated_env_keys?: DeprecatedEnvKeyInfo[];
 }
 
 interface ReloadResult {
@@ -228,6 +229,13 @@ interface SectionMetadataInfo {
 interface SupersededKeyInfo {
   key: string;
   source: string; // "seed_env" | "yaml" | "server_env"
+}
+
+/** A SCION_SERVER_* env var that targets a Layer-1 key (deprecated, migrate to SCION_SEED_*). */
+interface DeprecatedEnvKeyInfo {
+  env_var: string;
+  koanf_key: string;
+  seed_equivalent: string;
 }
 
 /** Per-field validation error from a 400 validation_failed response. */
@@ -472,6 +480,9 @@ export class ScionPageAdminServerConfig extends LitElement {
   @state() private sectionMetadata: Record<string, SectionMetadataInfo> | null = null;
   @state() private ignoredKeysNotice: string[] | null = null;
   @state() private supersededKeys: Record<string, SupersededKeyInfo[]> | null = null;
+  @state() private deprecatedEnvKeys: DeprecatedEnvKeyInfo[] | null = null;
+  @state() private resetConfirmSection: string | null = null;
+  @state() private resettingSection = false;
 
   // ── Structured save errors (§3.6) ──
   @state() private validationErrors: Record<string, ValidationErrorDetail[]> | null = null;
@@ -880,6 +891,24 @@ export class ScionPageAdminServerConfig extends LitElement {
       margin-bottom: 0.75rem;
     }
 
+    /* ── Settings-DB: section header with reset button ── */
+
+    .section-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin: 0 0 1rem 0;
+      padding-bottom: 0.75rem;
+      border-bottom: 1px solid var(--scion-border, #e2e8f0);
+    }
+
+    .section-header h3 {
+      font-size: 1rem;
+      font-weight: 600;
+      color: var(--scion-text, #1e293b);
+      margin: 0;
+    }
+
     /* ── Settings-DB: superseded key badge ── */
 
     .superseded-badge {
@@ -949,6 +978,56 @@ export class ScionPageAdminServerConfig extends LitElement {
     .superseded-source {
       font-size: 0.6875rem;
       color: var(--sl-color-primary-600, #2563eb);
+    }
+
+    /* ── Settings-DB: deprecated env keys notice ── */
+
+    .deprecated-notice {
+      padding: 0.75rem 1rem;
+      margin-bottom: 1rem;
+      border-radius: var(--scion-radius, 0.5rem);
+      background: var(--sl-color-warning-50, #fffbeb);
+      border: 1px solid var(--sl-color-warning-200, #fde68a);
+      color: var(--sl-color-warning-800, #92400e);
+      font-size: 0.8125rem;
+    }
+
+    .deprecated-notice-title {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      font-weight: 600;
+      margin-bottom: 0.5rem;
+    }
+
+    .deprecated-notice-title sl-icon {
+      font-size: 1rem;
+    }
+
+    .deprecated-notice-list {
+      list-style: none;
+      margin: 0;
+      padding: 0;
+    }
+
+    .deprecated-notice-list li {
+      padding: 0.25rem 0;
+    }
+
+    .deprecated-notice-list code {
+      font-family: var(--sl-font-mono, monospace);
+      font-size: 0.75rem;
+      background: var(--sl-color-warning-100, #fef3c7);
+      padding: 0.125rem 0.375rem;
+      border-radius: 0.25rem;
+    }
+
+    /* ── Settings-DB: reset confirm dialog ── */
+
+    .reset-confirm-text {
+      font-size: 0.875rem;
+      color: var(--scion-text, #1e293b);
+      line-height: 1.5;
     }
 
     /* ── Settings-DB: ignored keys notice ── */
@@ -1243,6 +1322,10 @@ export class ScionPageAdminServerConfig extends LitElement {
     this.envKeys = new Set(this.envOverrides);
     this.sectionMetadata = data.section_metadata || null;
     this.supersededKeys = data.superseded_keys || null;
+    this.deprecatedEnvKeys =
+      data.deprecated_env_keys && data.deprecated_env_keys.length > 0
+        ? data.deprecated_env_keys
+        : null;
   }
 
   private readOnlyReason(koanfKey: string): 'bootstrap' | 'env' | null {
@@ -1701,9 +1784,10 @@ export class ScionPageAdminServerConfig extends LitElement {
       </p>
 
       ${this.loading ? nothing : this.renderEnvOverrideBanner()}
-      ${this.renderSupersededPanel()}
+      ${this.renderDeprecatedEnvNotice()} ${this.renderSupersededPanel()}
       ${this.renderConflictBanner()} ${this.renderValidationErrors()}
       ${this.renderSafetyNetNotice()} ${this.renderIgnoredKeysNotice()}
+      ${this.renderResetConfirmDialog()}
       ${this.error ? html`<div class="status-message error">${this.error}</div>` : nothing}
       ${this.successMessage
         ? html`<div class="status-message success">
@@ -1855,6 +1939,128 @@ export class ScionPageAdminServerConfig extends LitElement {
           )}
         </ul>
       </div>
+    `;
+  }
+
+  /** Renders the page-top deprecation notice for SCION_SERVER_* env vars on Layer-1 keys. */
+  private renderDeprecatedEnvNotice(): typeof nothing | ReturnType<typeof html> {
+    if (!this.deprecatedEnvKeys || this.deprecatedEnvKeys.length === 0) return nothing;
+    return html`
+      <div class="deprecated-notice">
+        <div class="deprecated-notice-title">
+          <sl-icon name="exclamation-triangle"></sl-icon>
+          SCION_SERVER_* variables are deprecated for operational settings — use SCION_SEED_*
+          instead
+        </div>
+        <ul class="deprecated-notice-list">
+          ${this.deprecatedEnvKeys.map(
+            (dk) => html`
+              <li>
+                <code>${dk.env_var}</code> → <code>${dk.seed_equivalent}</code>
+              </li>
+            `
+          )}
+        </ul>
+      </div>
+    `;
+  }
+
+  /** Returns true if a section is managed and can be reset to bootstrap. */
+  private canResetSection(sectionName: string): boolean {
+    if (this.settingsTier !== 'db' || !this.sectionMetadata) return false;
+    const meta = this.sectionMetadata[sectionName];
+    return meta?.origin === 'managed';
+  }
+
+  /** Handles the per-section "Reset to bootstrap" action. */
+  private async handleResetSection(sectionName: string): Promise<void> {
+    this.resettingSection = true;
+    try {
+      const resp = await apiFetch(
+        `/api/v1/admin/server-config/sections/${encodeURIComponent(sectionName)}`,
+        { method: 'DELETE' }
+      );
+      if (!resp.ok) {
+        const errText = await resp.text();
+        this.error = `Reset failed: ${errText}`;
+        return;
+      }
+      this.resetConfirmSection = null;
+      await this.loadConfig();
+      this.successMessage = `Section "${sectionName}" has been reset to deployment configuration.`;
+    } catch (e) {
+      this.error = `Reset failed: ${e instanceof Error ? e.message : String(e)}`;
+    } finally {
+      this.resettingSection = false;
+    }
+  }
+
+  /**
+   * Renders a section header with title and optional "Reset to bootstrap" button
+   * for managed sections in DB mode.
+   */
+  private renderSectionHeader(
+    title: string,
+    sectionName?: string
+  ): ReturnType<typeof html> {
+    if (sectionName && this.canResetSection(sectionName)) {
+      return html`
+        <div class="section-header">
+          <h3>${title}</h3>
+          <sl-button
+            size="small"
+            variant="default"
+            ?loading=${this.resettingSection && this.resetConfirmSection === sectionName}
+            @click=${() => {
+              this.resetConfirmSection = sectionName;
+            }}
+          >
+            <sl-icon slot="prefix" name="arrow-counterclockwise"></sl-icon>
+            Reset to bootstrap
+          </sl-button>
+        </div>
+      `;
+    }
+    return html`<h3 class="section-title">${title}</h3>`;
+  }
+
+  /** Renders the reset confirmation dialog. */
+  private renderResetConfirmDialog(): typeof nothing | ReturnType<typeof html> {
+    if (!this.resetConfirmSection) return nothing;
+    return html`
+      <sl-dialog
+        label="Reset to Bootstrap"
+        ?open=${!!this.resetConfirmSection}
+        @sl-request-close=${() => {
+          this.resetConfirmSection = null;
+        }}
+      >
+        <div class="reset-confirm-text">
+          This will revert the <strong>${this.resetConfirmSection}</strong> section to its
+          deployment-provided values. Any admin-set values in this section will be lost. Continue?
+        </div>
+        <sl-button
+          slot="footer"
+          variant="default"
+          @click=${() => {
+            this.resetConfirmSection = null;
+          }}
+        >
+          Cancel
+        </sl-button>
+        <sl-button
+          slot="footer"
+          variant="danger"
+          ?loading=${this.resettingSection}
+          @click=${() => {
+            if (this.resetConfirmSection) {
+              void this.handleResetSection(this.resetConfirmSection);
+            }
+          }}
+        >
+          Reset
+        </sl-button>
+      </sl-dialog>
     `;
   }
 
@@ -2244,7 +2450,7 @@ export class ScionPageAdminServerConfig extends LitElement {
       </div>
 
       <div class="section">
-        <h3 class="section-title">Default Agent Limits</h3>
+        ${this.renderSectionHeader('Default Agent Limits', 'agent_defaults')}
         ${this.renderSectionMeta('agent_defaults')}
         <div class="form-grid">
           <div class="form-field">
@@ -2403,7 +2609,7 @@ export class ScionPageAdminServerConfig extends LitElement {
   private renderHubServerTab() {
     return html`
       <div class="section">
-        <h3 class="section-title">Hub API Server</h3>
+        ${this.renderSectionHeader('Hub API Server', 'endpoints')}
         ${this.renderSectionMeta('endpoints')}
         <div class="form-grid">
           <div class="form-field">
@@ -2499,7 +2705,7 @@ export class ScionPageAdminServerConfig extends LitElement {
       </div>
 
       <div class="section">
-        <h3 class="section-title">Agent Lifecycle</h3>
+        ${this.renderSectionHeader('Agent Lifecycle', 'lifecycle')}
         ${this.renderSectionMeta('lifecycle')}
         <div class="form-grid">
           <div class="form-field">
@@ -2812,7 +3018,7 @@ export class ScionPageAdminServerConfig extends LitElement {
   private renderAuthTab() {
     return html`
       <div class="section">
-        <h3 class="section-title">User Access Mode</h3>
+        ${this.renderSectionHeader('User Access Mode', 'access')}
         ${this.renderSectionMeta('access')}
         <div class="form-grid">
           <div class="form-field full-width">
@@ -2957,7 +3163,7 @@ export class ScionPageAdminServerConfig extends LitElement {
   private renderTelemetryTab() {
     return html`
       <div class="section">
-        <h3 class="section-title">Telemetry</h3>
+        ${this.renderSectionHeader('Telemetry', 'telemetry')}
         ${this.renderSectionMeta('telemetry')}
         <div class="form-grid">
           <div class="form-field full-width">
@@ -3244,7 +3450,7 @@ export class ScionPageAdminServerConfig extends LitElement {
         : ''}
 
       <div class="section">
-        <h3 class="section-title">GitHub App Configuration</h3>
+        ${this.renderSectionHeader('GitHub App Configuration', 'github_app')}
         ${this.renderSectionMeta('github_app')}
         <div class="form-grid">
           <div class="form-field">
