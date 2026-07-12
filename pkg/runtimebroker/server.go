@@ -1567,6 +1567,11 @@ func (s *Server) registerRoutes() {
 	// Project routes
 	s.mux.HandleFunc("/api/v1/projects/", s.handleProjectBySlug)
 
+	// Image state endpoints
+	s.mux.HandleFunc("/api/v1/images/status", s.handleImageStatus)
+	s.mux.HandleFunc("/api/v1/images/pull", s.handleImagePull)
+	s.mux.HandleFunc("/api/v1/images/local", s.handleImageDeleteLocal)
+
 	// Workspace sync routes (for Hub-initiated sync via control channel)
 	s.mux.HandleFunc("/api/v1/workspace/upload", s.handleWorkspaceUpload)
 	s.mux.HandleFunc("/api/v1/workspace/apply", s.handleWorkspaceApply)

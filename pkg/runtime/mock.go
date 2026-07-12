@@ -31,6 +31,7 @@ type MockRuntime struct {
 	ImageExistsFunc      func(ctx context.Context, image string) (bool, error)
 	ImageIDFunc          func(ctx context.Context, image string) (string, error)
 	RemoveImageFunc      func(ctx context.Context, image string) error
+	PullImageFunc        func(ctx context.Context, image string) error
 	SyncFunc             func(ctx context.Context, id string, direction SyncDirection) error
 	ExecFunc             func(ctx context.Context, id string, cmd []string) (string, error)
 	GetWorkspacePathFunc func(ctx context.Context, id string) (string, error)
@@ -111,6 +112,9 @@ func (m *MockRuntime) RemoveImage(ctx context.Context, image string) error {
 }
 
 func (m *MockRuntime) PullImage(ctx context.Context, image string) error {
+	if m.PullImageFunc != nil {
+		return m.PullImageFunc(ctx, image)
+	}
 	return nil
 }
 
