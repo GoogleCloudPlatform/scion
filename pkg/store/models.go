@@ -613,7 +613,8 @@ const (
 	HarnessConfigStatusArchived = "archived"
 )
 
-// HarnessConfigImageStatus constants
+// HarnessConfigImageStatus constants — reflect registry/reference validity only.
+// Local image availability is runtime-dependent and not persisted here.
 const (
 	HarnessConfigImageStatusUnknown = "unknown"
 	HarnessConfigImageStatusValid   = "valid"

@@ -125,6 +125,8 @@ export class ScionPageHarnessConfigDetail extends LitElement {
     remote?: { exists: boolean; image: string; hash: string; newer_than_local: boolean };
     resolved_image?: string;
     resolution_source?: string;
+    has_local_runtime?: boolean;
+    embedded_broker_name?: string;
   } | null = null;
 
   @state()
@@ -289,6 +291,17 @@ export class ScionPageHarnessConfigDetail extends LitElement {
       font-size: 1.1rem;
       font-weight: 600;
       margin: 0 0 1rem;
+    }
+    .image-section-subtitle {
+      font-size: 0.75rem;
+      font-weight: 400;
+      color: var(--sl-color-neutral-500);
+    }
+    .image-info-note {
+      font-size: 0.8125rem;
+      color: var(--sl-color-neutral-500);
+      margin: 0.5rem 0 0;
+      font-style: italic;
     }
     .image-table {
       width: 100%;
@@ -629,10 +642,12 @@ export class ScionPageHarnessConfigDetail extends LitElement {
 
     const st = this.imageStatus;
     const src = st?.resolution_source || '';
+    const hasRuntime = st?.has_local_runtime !== false;
+    const brokerName = st?.embedded_broker_name;
 
     return html`
       <div class="image-section">
-        <h2>Images</h2>
+        <h2>Images${brokerName ? html` <span class="image-section-subtitle">Runtime: ${brokerName}</span>` : nothing}</h2>
         <table class="image-table">
           <thead>
             <tr>
@@ -643,6 +658,7 @@ export class ScionPageHarnessConfigDetail extends LitElement {
             </tr>
           </thead>
           <tbody>
+            ${hasRuntime ? html`
             <tr class=${src === 'local_short' ? 'active-row' : ''}>
               <td class="image-entity-name">Local Build</td>
               <td class="image-ref">${st?.local_short?.image || image || '—'}</td>
@@ -667,6 +683,7 @@ export class ScionPageHarnessConfigDetail extends LitElement {
                   : html`<sl-spinner style="font-size: 0.75rem;"></sl-spinner> Checking...`}
               </td>
             </tr>
+            ` : nothing}
             <tr class=${src === 'remote' ? 'active-row' : ''}>
               <td class="image-entity-name">Remote</td>
               <td class="image-ref">${st?.remote?.image || '—'}</td>
@@ -682,6 +699,9 @@ export class ScionPageHarnessConfigDetail extends LitElement {
             </tr>
           </tbody>
         </table>
+        ${!hasRuntime && st ? html`
+          <p class="image-info-note">No local runtime available. Images are pulled by the substrate at provision time.</p>
+        ` : nothing}
         <div class="image-actions">
           ${this.hasDockerfile ? html`
             <sl-button
@@ -694,7 +714,7 @@ export class ScionPageHarnessConfigDetail extends LitElement {
               ${this.buildRunning ? 'Building...' : 'Build Image'}
             </sl-button>
           ` : nothing}
-          ${st?.local_short?.exists ? html`
+          ${hasRuntime && st?.local_short?.exists ? html`
             <sl-button
               size="small"
               variant="warning"
@@ -706,6 +726,7 @@ export class ScionPageHarnessConfigDetail extends LitElement {
               Delete Local
             </sl-button>
           ` : nothing}
+          ${hasRuntime ? html`
           <sl-button
             size="small"
             variant="default"
@@ -715,6 +736,7 @@ export class ScionPageHarnessConfigDetail extends LitElement {
             <sl-icon slot="prefix" name="cloud-download"></sl-icon>
             Pull Latest
           </sl-button>
+          ` : nothing}
           <sl-button size="small" variant="text" @click=${this.recheckImage} ?disabled=${this.imageActionRunning}>
             <sl-icon slot="prefix" name="arrow-repeat"></sl-icon>
             Re-check Remote

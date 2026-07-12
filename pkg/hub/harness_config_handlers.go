@@ -626,7 +626,7 @@ func (s *Server) handleHarnessConfigCheckImage(w http.ResponseWriter, r *http.Re
 	registry := s.resolveImageRegistry()
 	resolvedImage := config.RewriteImageRegistry(image, registry)
 	slog.Info("checking image status", "id", hc.ID, "image", image, "resolved", resolvedImage, "registry", registry)
-	result := s.imageChecker.Check(ctx, resolvedImage)
+	result := s.imageChecker.CheckRemoteOnly(ctx, resolvedImage)
 	slog.Info("image check result", "id", hc.ID, "status", result.Status, "source", result.Source, "error", result.Error)
 
 	if err := s.store.UpdateHarnessConfigImageStatus(ctx, hc.ID, result.Status, result.CheckedAt); err != nil {
@@ -976,7 +976,23 @@ func (s *Server) handleHarnessConfigImageStatus(w http.ResponseWriter, r *http.R
 	}
 
 	result := s.imageChecker.CheckAll(ctx, shortImage, longImage)
-	writeJSON(w, http.StatusOK, result)
+
+	resp := struct {
+		imagecheck.ThreeWayImageResult
+		HasLocalRuntime    bool   `json:"has_local_runtime"`
+		EmbeddedBrokerName string `json:"embedded_broker_name,omitempty"`
+	}{
+		ThreeWayImageResult: result,
+		HasLocalRuntime:     s.imageManager != nil,
+	}
+
+	if s.embeddedBrokerID != "" {
+		if broker, err := s.store.GetRuntimeBroker(ctx, s.embeddedBrokerID); err == nil {
+			resp.EmbeddedBrokerName = broker.Name
+		}
+	}
+
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // handleHarnessConfigDeleteLocalImage removes the local short-form image.
