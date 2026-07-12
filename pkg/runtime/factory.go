@@ -116,7 +116,11 @@ func GetRuntime(projectPath string, profileName string) Runtime {
 	case "docker":
 		if _, err := exec.LookPath("docker"); err != nil && os.Getenv("K_SERVICE") != "" {
 			util.Debugf("GetRuntime: docker binary not found and Cloud Run environment detected (K_SERVICE set), using cloudrun runtime")
-			return NewCloudRunRuntime(rtConfig.CloudRun)
+			rt := NewCloudRunRuntime(rtConfig.CloudRun)
+			if vs != nil && vs.Server != nil {
+				rt.WorkspaceStorage = vs.Server.WorkspaceStorage
+			}
+			return rt
 		}
 		dr := NewDockerRuntime()
 		if rtConfig.Host != "" {
