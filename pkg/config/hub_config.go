@@ -729,6 +729,57 @@ func parseCommaSeparatedList(s string) []string {
 	return result
 }
 
+// snakeCaseFields maps flat-lowercased env segments to their snake_case
+// equivalents used by the opsettings registry and settings.yaml. This is
+// the counterpart to camelCaseFields: where camelCaseFields produces keys for
+// Go struct unmarshaling (adminEmails), snakeCaseFields produces keys that
+// match the opsettings keyspace (admin_emails).
+var snakeCaseFields = map[string]string{
+	// Layer-1 compound segments (from opsettings registry)
+	"adminemails":           "admin_emails",
+	"apibaseurl":            "api_base_url",
+	"appid":                 "app_id",
+	"authorizeddomains":     "authorized_domains",
+	"autosuspendstalled":    "auto_suspend_stalled",
+	"cafile":                "ca_file",
+	"defaultharnessconfig":  "default_harness_config",
+	"defaultmaxduration":    "default_max_duration",
+	"defaultmaxmodelcalls":  "default_max_model_calls",
+	"defaultmaxturns":       "default_max_turns",
+	"defaultresources":      "default_resources",
+	"defaulttemplate":       "default_template",
+	"githubapp":             "github_app",
+	"hubname":               "hub_name",
+	"imageregistry":         "image_registry",
+	"insecureskipverify":    "insecure_skip_verify",
+	"installationurl":       "installation_url",
+	"maxsize":               "max_size",
+	"notificationchannels":  "notification_channels",
+	"privatekeypath":        "private_key_path",
+	"publicurl":             "public_url",
+	"reportinterval":        "report_interval",
+	"respectdebugmode":      "respect_debug_mode",
+	"softdeleteretainfiles": "soft_delete_retain_files",
+	"softdeleteretention":   "soft_delete_retention",
+	"useraccessmode":        "user_access_mode",
+	"webhooksenabled":       "webhooks_enabled",
+	// Layer-0 compound segments (from layer0Prefixes)
+	"adminmode":        "admin_mode",
+	"devmode":          "dev_mode",
+	"devtoken":         "dev_token",
+	"devtokenfile":     "dev_token_file",
+	"gcpprojectid":     "gcp_project_id",
+	"hubid":            "hub_id",
+	"logformat":        "log_format",
+	"loglevel":         "log_level",
+	"messagebroker":    "message_broker",
+	"readtimeout":      "read_timeout",
+	"workspacestorage": "workspace_storage",
+	"writetimeout":     "write_timeout",
+	// Maintenance (runtime-only, no yaml, but env detection still needs it)
+	"maintenancemessage": "maintenance_message",
+}
+
 // camelCaseFields maps lowercased environment variable key segments to their
 // camelCase config equivalents. Package-level to avoid re-allocation per call.
 var camelCaseFields = map[string]string{
@@ -797,6 +848,20 @@ func envKeyToConfigKey(envKey string) string {
 	return strings.Join(parts, ".")
 }
 
+// envKeyToOpsettingsKey converts an env var key (after prefix stripping) to a
+// koanf key using snake_case segments that match the opsettings registry and
+// settings.yaml. This is the snake_case counterpart to envKeyToConfigKey.
+// Example: SERVER_HUB_ADMINEMAILS → server.hub.admin_emails
+func envKeyToOpsettingsKey(envKey string) string {
+	parts := strings.Split(strings.ToLower(envKey), "_")
+	for i, part := range parts {
+		if replacement, ok := snakeCaseFields[part]; ok {
+			parts[i] = replacement
+		}
+	}
+	return strings.Join(parts, ".")
+}
+
 // LoadFileOnlyKoanf returns a koanf instance loaded from settings.yaml +
 // embedded defaults, without any environment variable overlay. This produces
 // the "file fallback" Layer for OperationalSettings (settings-db §3.4/§3.9):
@@ -839,14 +904,14 @@ func LoadEnvKoanf() *koanf.Koanf {
 }
 
 // LoadSeedEnvKoanf returns a koanf instance loaded with only the SCION_SEED_*
-// environment variables (no file, no defaults). Uses the same envKeyToConfigKey
-// mapper as LoadEnvKoanf, producing identical key paths after the prefix.
-// e.g. SCION_SEED_SERVER_HUB_ADMINEMAILS → server.hub.adminEmails
+// environment variables (no file, no defaults). Uses envKeyToOpsettingsKey to
+// produce snake_case keys matching the opsettings registry and settings.yaml.
+// e.g. SCION_SEED_SERVER_HUB_ADMINEMAILS → server.hub.admin_emails
 func LoadSeedEnvKoanf() *koanf.Koanf {
 	k := koanf.New(".")
 	_ = k.Load(env.Provider("SCION_SEED_", ".", func(s string) string {
 		key := strings.TrimPrefix(s, "SCION_SEED_")
-		return envKeyToConfigKey(key)
+		return envKeyToOpsettingsKey(key)
 	}), nil)
 	return k
 }
@@ -859,15 +924,30 @@ func LoadSeedEnvKoanf() *koanf.Koanf {
 // fallback. Each layer merges on top of the previous one, so SCION_SERVER_*
 // wins over yaml, yaml wins over SCION_SEED_*, and SCION_SEED_* wins over
 // coded defaults.
+//
+// All layers use snake_case keys matching the opsettings registry
+// (e.g. server.hub.admin_emails, not hub.adminEmails). This ensures
+// ExtractSectionFromKoanf can find values from any layer.
 func LoadBootstrapKoanf() *koanf.Koanf {
 	k := koanf.New(".")
 
-	// 1. Coded defaults (same as LoadFileOnlyKoanf uses — settings.yaml
-	//    contains the canonical defaults via embedded YAML).
-	// LoadFileOnlyKoanf already loads settings.yaml + legacy server.yaml,
-	// but we need finer-grained layering, so we build it step by step.
+	// 1. Coded defaults in the opsettings keyspace (server.* snake_case).
+	defaults := DefaultGlobalConfig()
+	_ = k.Load(confmap.Provider(map[string]interface{}{
+		"server.hub.port":          defaults.Hub.Port,
+		"server.hub.host":          defaults.Hub.Host,
+		"server.hub.admin_emails":  defaults.Hub.AdminEmails,
+		"server.database.driver":   defaults.Database.Driver,
+		"server.database.url":      defaults.Database.URL,
+		"server.auth.dev_mode":     defaults.Auth.Enabled,
+		"server.auth.dev_token":    defaults.Auth.Token,
+		"server.storage.provider":  defaults.Storage.Provider,
+		"server.secrets.backend":   defaults.Secrets.Backend,
+		"server.log_level":         defaults.LogLevel,
+		"server.log_format":        defaults.LogFormat,
+	}, "."), nil)
 
-	// 2. SCION_SEED_* environment variables.
+	// 2. SCION_SEED_* environment variables (snake_case via envKeyToOpsettingsKey).
 	seedK := LoadSeedEnvKoanf()
 	_ = k.Merge(seedK)
 
@@ -884,8 +964,11 @@ func LoadBootstrapKoanf() *koanf.Koanf {
 	}
 
 	// 4. SCION_SERVER_* environment variables (highest precedence in bootstrap).
-	envK := LoadEnvKoanf()
-	_ = k.Merge(envK)
+	// Uses snake_case mapper so keys align with yaml and opsettings registry.
+	_ = k.Load(env.Provider("SCION_SERVER_", ".", func(s string) string {
+		key := strings.TrimPrefix(s, "SCION_SERVER_")
+		return envKeyToOpsettingsKey(key)
+	}), nil)
 
 	return k
 }

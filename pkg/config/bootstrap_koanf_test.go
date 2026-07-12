@@ -21,35 +21,36 @@ import (
 )
 
 // TestLoadSeedEnvKoanf verifies that LoadSeedEnvKoanf loads SCION_SEED_*
-// environment variables and maps them using the same envKeyToConfigKey mapper
-// as LoadEnvKoanf (SCION_SERVER_*).
+// environment variables and maps them to snake_case koanf keys matching
+// the opsettings registry (not camelCase like LoadEnvKoanf).
 func TestLoadSeedEnvKoanf(t *testing.T) {
 	// SCION_SEED_SERVER_HUB_ADMINEMAILS → strip prefix → SERVER_HUB_ADMINEMAILS
-	// → envKeyToConfigKey → server.hub.adminEmails
+	// → envKeyToOpsettingsKey → server.hub.admin_emails (snake_case)
 	t.Setenv("SCION_SEED_SERVER_HUB_ADMINEMAILS", "seed@example.com")
 	t.Setenv("SCION_SEED_SERVER_AUTH_USERACCESSMODE", "invite")
 	t.Setenv("SCION_SEED_SERVER_HUB_PORT", "9999")
 
 	k := LoadSeedEnvKoanf()
 
-	if v := k.String("server.hub.adminEmails"); v != "seed@example.com" {
-		t.Errorf("expected server.hub.adminEmails = 'seed@example.com', got %q", v)
+	if v := k.String("server.hub.admin_emails"); v != "seed@example.com" {
+		t.Errorf("expected server.hub.admin_emails = 'seed@example.com', got %q", v)
 	}
-	if v := k.String("server.auth.userAccessMode"); v != "invite" {
-		t.Errorf("expected server.auth.userAccessMode = 'invite', got %q", v)
+	if v := k.String("server.auth.user_access_mode"); v != "invite" {
+		t.Errorf("expected server.auth.user_access_mode = 'invite', got %q", v)
 	}
 	if v := k.Int("server.hub.port"); v != 9999 {
 		t.Errorf("expected server.hub.port = 9999, got %d", v)
 	}
 }
 
-// TestLoadSeedEnvKoanf_PathMapping verifies that SCION_SEED_* uses the same
-// envKeyToConfigKey function as SCION_SERVER_*. The resulting koanf key paths
-// differ because SCION_SEED_ is a shorter prefix: after stripping, the remainder
-// includes "SERVER_" as a key segment.
+// TestLoadSeedEnvKoanf_PathMapping verifies that SCION_SEED_* uses the
+// snake_case envKeyToOpsettingsKey mapper (matching the opsettings registry),
+// while SCION_SERVER_* uses the camelCase envKeyToConfigKey mapper (matching
+// GlobalConfig struct tags). The resulting koanf key paths differ in both
+// prefix depth and casing convention.
 //
-// SCION_SERVER_HUB_PORT → strip prefix → HUB_PORT → hub.port
-// SCION_SEED_SERVER_HUB_PORT → strip prefix → SERVER_HUB_PORT → server.hub.port
+// SCION_SEED_SERVER_HUB_ADMINEMAILS → server.hub.admin_emails (snake_case)
+// SCION_SERVER_HUB_ADMINEMAILS      → hub.adminEmails          (camelCase)
 func TestLoadSeedEnvKoanf_PathMapping(t *testing.T) {
 	t.Setenv("SCION_SEED_SERVER_HUB_ADMINEMAILS", "seed-value")
 	t.Setenv("SCION_SERVER_HUB_ADMINEMAILS", "server-value")
@@ -64,18 +65,17 @@ func TestLoadSeedEnvKoanf_PathMapping(t *testing.T) {
 		t.Fatal("LoadEnvKoanf returned no keys")
 	}
 
-	// SEED maps to server.hub.adminEmails (SERVER_ is a key segment).
-	if !seedK.Exists("server.hub.adminEmails") {
-		t.Errorf("SCION_SEED_ did not map to server.hub.adminEmails; keys: %v", seedK.Keys())
+	// SEED maps to server.hub.admin_emails (snake_case, SERVER_ is a key segment).
+	if !seedK.Exists("server.hub.admin_emails") {
+		t.Errorf("SCION_SEED_ did not map to server.hub.admin_emails; keys: %v", seedK.Keys())
 	}
-	// SERVER maps to hub.adminEmails (no server. prefix — SERVER is the prefix).
+	// SERVER maps to hub.adminEmails (camelCase, no server. prefix).
 	if !envK.Exists("hub.adminEmails") {
 		t.Errorf("SCION_SERVER_ did not map to hub.adminEmails; keys: %v", envK.Keys())
 	}
 
-	// Verify they map to DIFFERENT koanf keys (by design).
-	if seedK.String("server.hub.adminEmails") != "seed-value" {
-		t.Errorf("SEED value mismatch: got %q", seedK.String("server.hub.adminEmails"))
+	if seedK.String("server.hub.admin_emails") != "seed-value" {
+		t.Errorf("SEED value mismatch: got %q", seedK.String("server.hub.admin_emails"))
 	}
 	if envK.String("hub.adminEmails") != "server-value" {
 		t.Errorf("SERVER value mismatch: got %q", envK.String("hub.adminEmails"))
@@ -101,17 +101,15 @@ func TestLoadSeedEnvKoanf_Empty(t *testing.T) {
 
 // TestLoadBootstrapKoanf_MergeOrder verifies the full merge order:
 //
-//	SCION_SEED_* → settings.yaml → SCION_SERVER_*
+//	coded defaults → SCION_SEED_* → settings.yaml → SCION_SERVER_*
 //
-// Because SEED env keys map to "server.hub.port" (camelCase via envKeyToConfigKey)
-// while yaml loads as "server.hub.port" (snake_case in yaml maps to same path
-// for simple keys like "port"), we can test the SEED-vs-yaml precedence using
-// simple single-segment field names that have no camelCase ambiguity.
+// All layers produce snake_case koanf keys via envKeyToOpsettingsKey, matching
+// the opsettings registry. SEED and yaml both map to "server.hub.port", so we
+// can test their precedence directly.
 //
-// SERVER env keys map to a different koanf namespace (no "server." prefix), so
-// they don't directly override yaml keys at the koanf level — they coexist.
-// This is by design: struct unmarshaling bridges the namespace difference in the
-// actual config consumer (loadGlobalConfigLegacy).
+// SERVER env keys (in bootstrap context) also use the snake_case mapper, but
+// map to a different koanf namespace (no "server." prefix), so they coexist
+// with yaml keys rather than overriding them directly.
 func TestLoadBootstrapKoanf_MergeOrder(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)
@@ -161,8 +159,10 @@ server:
 }
 
 // TestLoadBootstrapKoanf_ServerOverridesYaml_SameKey verifies that SCION_SERVER_*
-// overrides yaml when both produce the same koanf key. This happens for keys
-// where yaml uses a flat structure matching the env mapper output.
+// overrides yaml when both produce the same koanf key. To target the
+// "server.hub.port" koanf key from SCION_SERVER_*, the env var must be
+// SCION_SERVER_SERVER_HUB_PORT (the first SERVER is the env prefix, the
+// second is the "server." key segment).
 func TestLoadBootstrapKoanf_ServerOverridesYaml_SameKey(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)
@@ -171,16 +171,6 @@ func TestLoadBootstrapKoanf_ServerOverridesYaml_SameKey(t *testing.T) {
 		t.Fatalf("mkdir: %v", err)
 	}
 
-	// Use schema_version — loaded as-is from yaml and maps to "schema.version"
-	// from env. Not great either. Use a key that reliably matches.
-	//
-	// Actually, yaml "server.mode" and SCION_SERVER_MODE → "mode" are different.
-	// The simplest overlap is when yaml uses a nested key that, after koanf
-	// flattening, matches the env mapper output. For "server.hub.port":
-	// yaml → server.hub.port (from server.hub.port yaml path)
-	// SCION_SERVER_SERVER_HUB_PORT → strip → SERVER_HUB_PORT → server.hub.port
-	//
-	// So SCION_SERVER_SERVER_* (double SERVER) targets the server.* namespace.
 	settingsContent := `schema_version: "1"
 server:
   hub:
@@ -190,7 +180,8 @@ server:
 		t.Fatalf("write settings.yaml: %v", err)
 	}
 
-	// SCION_SERVER_SERVER_HUB_PORT → strip SCION_SERVER_ → SERVER_HUB_PORT → server.hub.port
+	// SCION_SERVER_SERVER_HUB_PORT → strip SCION_SERVER_ → SERVER_HUB_PORT
+	// → envKeyToOpsettingsKey → server.hub.port
 	t.Setenv("SCION_SERVER_SERVER_HUB_PORT", "5555")
 
 	k := LoadBootstrapKoanf()
@@ -231,6 +222,56 @@ server:
 
 	// Verify SEED value is NOT present (yaml merged on top).
 	// Actually, koanf.Merge replaces keys, so server.hub.port should be 2222.
+}
+
+// TestLoadBootstrapKoanf_CompoundWordKey verifies that compound-word fields
+// (e.g. admin_emails) from SEED env, yaml, and SERVER env all merge into the
+// same snake_case koanf key, proving that ExtractSectionFromKoanf will find
+// values from any layer. This is the test that would have caught the original
+// camelCase/snake_case mismatch (review finding #1, #5).
+func TestLoadBootstrapKoanf_CompoundWordKey(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	scionDir := filepath.Join(tmpDir, ".scion")
+	if err := os.MkdirAll(scionDir, 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	// Case 1: SEED env sets admin_emails, yaml overrides it.
+	t.Setenv("SCION_SEED_SERVER_HUB_ADMINEMAILS", "seed@example.com")
+	settingsContent := `schema_version: "1"
+server:
+  hub:
+    admin_emails:
+      - "yaml@example.com"
+`
+	if err := os.WriteFile(filepath.Join(scionDir, "settings.yaml"), []byte(settingsContent), 0644); err != nil {
+		t.Fatalf("write settings.yaml: %v", err)
+	}
+
+	k := LoadBootstrapKoanf()
+
+	// yaml wins over SEED — both target server.hub.admin_emails (snake_case).
+	emails := k.Strings("server.hub.admin_emails")
+	if len(emails) != 1 || emails[0] != "yaml@example.com" {
+		t.Errorf("yaml should override SEED for admin_emails: expected [yaml@example.com], got %v", emails)
+	}
+
+	// Case 2: SERVER env overrides yaml for same compound-word key.
+	// SCION_SERVER_SERVER_HUB_ADMINEMAILS → server.hub.admin_emails
+	// Note: env provider loads as a string, not a slice, so use String() accessor.
+	t.Setenv("SCION_SERVER_SERVER_HUB_ADMINEMAILS", "server@example.com")
+	k2 := LoadBootstrapKoanf()
+
+	serverVal := k2.String("server.hub.admin_emails")
+	if serverVal != "server@example.com" {
+		t.Errorf("SERVER env should override yaml for admin_emails: expected 'server@example.com', got %q", serverVal)
+	}
+
+	// Case 3: Verify the camelCase key does NOT exist (proving no namespace split).
+	if k2.Exists("server.hub.adminEmails") {
+		t.Error("camelCase key server.hub.adminEmails should not exist — bootstrap uses snake_case")
+	}
 }
 
 func indexOf(s string, c byte) int {

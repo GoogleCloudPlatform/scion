@@ -862,24 +862,39 @@ func TestDetectDeprecatedServerEnv_Layer1Keys(t *testing.T) {
 		found[d.KoanfKey] = d
 	}
 
-	// Check admin_emails
+	// Check admin_emails — koanfKeyToEnvSuffix strips "server." so suffix is HUB_ADMINEMAILS
 	if d, ok := found["server.hub.admin_emails"]; !ok {
 		t.Error("expected server.hub.admin_emails in deprecated list")
 	} else {
-		if d.EnvVar != "SCION_SERVER_SERVER_HUB_ADMINEMAILS" {
-			t.Errorf("expected env var SCION_SERVER_SERVER_HUB_ADMINEMAILS, got %q", d.EnvVar)
+		if d.EnvVar != "SCION_SERVER_HUB_ADMINEMAILS" {
+			t.Errorf("expected env var SCION_SERVER_HUB_ADMINEMAILS, got %q", d.EnvVar)
 		}
 		if d.SeedEquivalent != "SCION_SEED_SERVER_HUB_ADMINEMAILS" {
 			t.Errorf("expected seed equivalent SCION_SEED_SERVER_HUB_ADMINEMAILS, got %q", d.SeedEquivalent)
 		}
 	}
 
-	// Check telemetry.enabled
+	// Check user_access_mode
+	if d, ok := found["server.auth.user_access_mode"]; !ok {
+		t.Error("expected server.auth.user_access_mode in deprecated list")
+	} else {
+		if d.EnvVar != "SCION_SERVER_AUTH_USERACCESSMODE" {
+			t.Errorf("expected env var SCION_SERVER_AUTH_USERACCESSMODE, got %q", d.EnvVar)
+		}
+		if d.SeedEquivalent != "SCION_SEED_SERVER_AUTH_USERACCESSMODE" {
+			t.Errorf("expected seed equivalent SCION_SEED_SERVER_AUTH_USERACCESSMODE, got %q", d.SeedEquivalent)
+		}
+	}
+
+	// Check telemetry.enabled — no server. prefix, so suffix is TELEMETRY_ENABLED
 	if d, ok := found["telemetry.enabled"]; !ok {
 		t.Error("expected telemetry.enabled in deprecated list")
 	} else {
-		if d.SeedEquivalent != "SCION_SEED_TELEMETRY_ENABLED" {
-			t.Errorf("expected seed equivalent SCION_SEED_TELEMETRY_ENABLED, got %q", d.SeedEquivalent)
+		if d.EnvVar != "SCION_SERVER_TELEMETRY_ENABLED" {
+			t.Errorf("expected env var SCION_SERVER_TELEMETRY_ENABLED, got %q", d.EnvVar)
+		}
+		if d.SeedEquivalent != "SCION_SEED_SERVER_TELEMETRY_ENABLED" {
+			t.Errorf("expected seed equivalent SCION_SEED_SERVER_TELEMETRY_ENABLED, got %q", d.SeedEquivalent)
 		}
 	}
 }
@@ -939,11 +954,13 @@ func TestKoanfKeyToEnvSuffix(t *testing.T) {
 		key  string
 		want string
 	}{
-		{"server.hub.admin_emails", "SERVER_HUB_ADMINEMAILS"},
+		// server. prefix is stripped — it maps to the SCION_SERVER_ env prefix
+		{"server.hub.admin_emails", "HUB_ADMINEMAILS"},
+		{"server.auth.user_access_mode", "AUTH_USERACCESSMODE"},
+		{"server.hub.public_url", "HUB_PUBLICURL"},
+		// non-server keys are unchanged
 		{"telemetry.enabled", "TELEMETRY_ENABLED"},
 		{"default_max_turns", "DEFAULTMAXTURNS"},
-		{"server.auth.user_access_mode", "SERVER_AUTH_USERACCESSMODE"},
-		{"server.hub.public_url", "SERVER_HUB_PUBLICURL"},
 	}
 	for _, tt := range tests {
 		got := koanfKeyToEnvSuffix(tt.key)

@@ -388,25 +388,29 @@ func DetectDeprecatedServerEnv(serverEnvKoanf *koanf.Koanf) []DeprecatedEnvVar {
 		if !IsLayer1Key(key) {
 			continue
 		}
+		// koanfKeyToEnvSuffix strips the "server." prefix, so the suffix
+		// is e.g. "HUB_ADMINEMAILS" for key "server.hub.admin_emails".
 		envSuffix := koanfKeyToEnvSuffix(key)
+		// SCION_SERVER_ env var: prefix + suffix (SERVER_ was the stripped prefix).
+		// SCION_SEED_ env var: prefix + SERVER_ + suffix (SERVER_ is a key segment).
 		deprecated = append(deprecated, DeprecatedEnvVar{
 			EnvVar:         "SCION_SERVER_" + envSuffix,
 			KoanfKey:       key,
-			SeedEquivalent: "SCION_SEED_" + envSuffix,
+			SeedEquivalent: "SCION_SEED_SERVER_" + envSuffix,
 		})
 	}
 	return deprecated
 }
 
 // koanfKeyToEnvSuffix converts a koanf key back to the env var suffix form.
-// e.g. "server.hub.admin_emails" → "SERVER_HUB_ADMINEMAILS"
-// This is the inverse of envKeyToConfigKey (in hub_config.go) — it converts
-// dots to underscores and uppercases, collapsing camelCase/snake_case back to
-// the flat uppercase env form.
+// e.g. "server.hub.admin_emails" → "HUB_ADMINEMAILS"
+// The "server." prefix is stripped because it corresponds to the SCION_SERVER_
+// env prefix that was already removed during key mapping. Without stripping,
+// the output would produce double-SERVER var names (SCION_SERVER_SERVER_HUB_...).
 func koanfKeyToEnvSuffix(key string) string {
+	key = strings.TrimPrefix(key, "server.")
 	parts := strings.Split(key, ".")
 	for i, part := range parts {
-		// Remove underscores within a segment (snake_case → flat)
 		parts[i] = strings.ToUpper(strings.ReplaceAll(part, "_", ""))
 	}
 	return strings.Join(parts, "_")
