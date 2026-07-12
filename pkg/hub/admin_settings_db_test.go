@@ -764,23 +764,23 @@ func TestGetMaintenanceDB_ReflectsSnapshot(t *testing.T) {
 	}
 }
 
-func TestMaintenanceDB_EnvOverrideStillWins(t *testing.T) {
+func TestMaintenanceDB_EnvDoesNotOverrideDB(t *testing.T) {
 	srv, fakeStore, ops := newTestDBServer(t)
 
 	// DB says maintenance off.
 	fakeStore.seed("maintenance", json.RawMessage(`{"admin_mode":false}`))
 	_, _ = ops.Refresh(context.Background())
 
-	// But env says on.
+	// Env says on — but per B3 redesign, env no longer force-wins for
+	// maintenance. DB is authoritative in HA mode.
 	t.Setenv("SCION_SERVER_ADMIN_MODE", "true")
 
-	// Apply snapshot with env override.
 	snap := ops.Snapshot()
 	ApplyMaintenanceFromSnapshot(srv, snap)
 
-	// Server should be in maintenance due to env override.
-	if !srv.maintenance.IsEnabled() {
-		t.Error("expected maintenance enabled due to env override")
+	// Server should NOT be in maintenance — DB wins.
+	if srv.maintenance.IsEnabled() {
+		t.Error("expected maintenance disabled — DB wins over env in HA mode")
 	}
 }
 
@@ -1187,6 +1187,266 @@ func TestGetServerConfigDB_MasksGitHubAppSecrets(t *testing.T) {
 		t.Fatalf("expected 200, got %d", rr.Code)
 	}
 	// Handler calls maskSensitiveFields — if it reaches here without panic, masking ran.
+}
+
+// ---- B3: Provenance API tests ----
+
+func TestGetServerConfigDB_SettingsTierIsDB(t *testing.T) {
+	srv, _, ops := newTestDBServer(t)
+
+	rr := httptest.NewRecorder()
+	srv.handleGetServerConfigDB(rr, adminRequest(http.MethodGet, "/api/v1/admin/server-config", ""), ops)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var resp map[string]interface{}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if resp["settings_tier"] != "db" {
+		t.Errorf("settings_tier: want 'db', got %v", resp["settings_tier"])
+	}
+}
+
+func TestGetServerConfigDB_OriginInSectionMetadata(t *testing.T) {
+	fakeStore := newFakeHubSettingStore()
+	fileK := emptyKoanf()
+	envK := emptyKoanf()
+	ops := NewOperationalSettings(fakeStore, fileK, envK)
+
+	// Seed a section with "seeded" origin and another with "managed" origin.
+	fakeStore.seedWithOrigin("access", json.RawMessage(`{"admin_emails":["a@test.com"]}`), "seeded")
+	fakeStore.seedWithOrigin("maintenance", json.RawMessage(`{"admin_mode":false}`), "managed")
+	_, _ = ops.Refresh(context.Background())
+
+	srv := &Server{
+		dbDriver:    "postgres",
+		maintenance: NewMaintenanceState(false, ""),
+	}
+	srv.SetOperationalSettings(ops)
+
+	rr := httptest.NewRecorder()
+	srv.handleGetServerConfigDB(rr, adminRequest(http.MethodGet, "/api/v1/admin/server-config", ""), ops)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var resp ServerConfigDBResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	accessMeta := resp.SectionMeta["access"]
+	if accessMeta.Origin != "seeded" {
+		t.Errorf("access origin: want 'seeded', got %q", accessMeta.Origin)
+	}
+
+	maintMeta := resp.SectionMeta["maintenance"]
+	if maintMeta.Origin != "managed" {
+		t.Errorf("maintenance origin: want 'managed', got %q", maintMeta.Origin)
+	}
+
+	// Sections without DB rows should have no origin.
+	lifecycleMeta := resp.SectionMeta["lifecycle"]
+	if lifecycleMeta.Origin != "" {
+		t.Errorf("lifecycle origin: want empty, got %q", lifecycleMeta.Origin)
+	}
+}
+
+func TestGetServerConfigDB_SupersededKeys(t *testing.T) {
+	fakeStore := newFakeHubSettingStore()
+
+	// Bootstrap koanf has admin_emails from bootstrap merge.
+	bootstrapK := newFileKoanf(t, map[string]interface{}{
+		"server.hub.admin_emails":      []interface{}{"bootstrap@example.com"},
+		"server.auth.user_access_mode": "open",
+	})
+	envK := emptyKoanf()
+	ops := NewOperationalSettings(fakeStore, bootstrapK, envK)
+
+	// Seed access as "managed" with different admin_emails (DB wins, bootstrap is superseded).
+	fakeStore.seedWithOrigin("access", json.RawMessage(`{"admin_emails":["admin@db.com"],"user_access_mode":"open"}`), "managed")
+	_, _ = ops.Refresh(context.Background())
+
+	srv := &Server{
+		dbDriver:    "postgres",
+		maintenance: NewMaintenanceState(false, ""),
+	}
+	srv.SetOperationalSettings(ops)
+
+	rr := httptest.NewRecorder()
+	srv.handleGetServerConfigDB(rr, adminRequest(http.MethodGet, "/api/v1/admin/server-config", ""), ops)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var resp ServerConfigDBResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	// admin_emails differs between bootstrap (["bootstrap@example.com"]) and
+	// DB (["admin@db.com"]), so it should appear in superseded_keys for "access".
+	// user_access_mode is "open" in both → NOT superseded.
+	accessSup, ok := resp.SupersededKeys["access"]
+	if !ok {
+		t.Fatal("expected superseded_keys entry for 'access'")
+	}
+
+	found := false
+	for _, sk := range accessSup {
+		if sk.Key == "admin_emails" {
+			found = true
+			// Source should be "yaml" since bootstrap koanf was loaded from file-like config.
+			if sk.Source != "yaml" {
+				t.Errorf("admin_emails source: want 'yaml', got %q", sk.Source)
+			}
+		}
+		if sk.Key == "user_access_mode" {
+			t.Error("user_access_mode should NOT be superseded (values match)")
+		}
+	}
+	if !found {
+		t.Errorf("expected admin_emails in superseded_keys, got %+v", accessSup)
+	}
+}
+
+func TestGetServerConfigDB_SupersededKeys_SeededSectionExcluded(t *testing.T) {
+	fakeStore := newFakeHubSettingStore()
+	bootstrapK := newFileKoanf(t, map[string]interface{}{
+		"server.hub.admin_emails": []interface{}{"bootstrap@example.com"},
+	})
+	envK := emptyKoanf()
+	ops := NewOperationalSettings(fakeStore, bootstrapK, envK)
+
+	// Seed access as "seeded" — superseded keys only apply to "managed" sections.
+	fakeStore.seedWithOrigin("access", json.RawMessage(`{"admin_emails":["admin@db.com"]}`), "seeded")
+	_, _ = ops.Refresh(context.Background())
+
+	srv := &Server{
+		dbDriver:    "postgres",
+		maintenance: NewMaintenanceState(false, ""),
+	}
+	srv.SetOperationalSettings(ops)
+
+	rr := httptest.NewRecorder()
+	srv.handleGetServerConfigDB(rr, adminRequest(http.MethodGet, "/api/v1/admin/server-config", ""), ops)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var resp ServerConfigDBResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	// Seeded sections should not have superseded keys.
+	if resp.SupersededKeys != nil {
+		if _, ok := resp.SupersededKeys["access"]; ok {
+			t.Error("seeded sections should not appear in superseded_keys")
+		}
+	}
+}
+
+func TestGetServerConfigDB_DeprecatedEnvKeys(t *testing.T) {
+	fakeStore := newFakeHubSettingStore()
+	bootstrapK := emptyKoanf()
+
+	// envKoanf with a SCION_SERVER_* var targeting a Layer-1 key.
+	envK := newEnvKoanf(t, map[string]interface{}{
+		"server.hub.admin_emails": []interface{}{"env@example.com"},
+	})
+	ops := NewOperationalSettings(fakeStore, bootstrapK, envK)
+	_, _ = ops.Refresh(context.Background())
+
+	srv := &Server{
+		dbDriver:    "postgres",
+		maintenance: NewMaintenanceState(false, ""),
+	}
+	srv.SetOperationalSettings(ops)
+
+	rr := httptest.NewRecorder()
+	srv.handleGetServerConfigDB(rr, adminRequest(http.MethodGet, "/api/v1/admin/server-config", ""), ops)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var resp ServerConfigDBResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if len(resp.DeprecatedEnvKeys) == 0 {
+		t.Fatal("expected non-empty deprecated_env_keys")
+	}
+
+	found := false
+	for _, d := range resp.DeprecatedEnvKeys {
+		if d.KoanfKey == "server.hub.admin_emails" {
+			found = true
+			if d.SeedEquivalent == "" {
+				t.Error("expected non-empty seed_equivalent")
+			}
+			if d.EnvVar == "" {
+				t.Error("expected non-empty env_var")
+			}
+		}
+	}
+	if !found {
+		t.Errorf("expected server.hub.admin_emails in deprecated_env_keys, got %+v", resp.DeprecatedEnvKeys)
+	}
+}
+
+func TestGetServerConfigDB_DeprecatedEnvKeys_EmptyWhenNoServerEnvVars(t *testing.T) {
+	srv, _, ops := newTestDBServer(t)
+
+	rr := httptest.NewRecorder()
+	srv.handleGetServerConfigDB(rr, adminRequest(http.MethodGet, "/api/v1/admin/server-config", ""), ops)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var resp ServerConfigDBResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if len(resp.DeprecatedEnvKeys) != 0 {
+		t.Errorf("expected no deprecated_env_keys, got %+v", resp.DeprecatedEnvKeys)
+	}
+}
+
+func TestFileMode_SettingsTierIsFile(t *testing.T) {
+	srv := &Server{
+		maintenance: NewMaintenanceState(false, ""),
+	}
+
+	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/server-config", nil)
+	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	rr := httptest.NewRecorder()
+	srv.handleAdminServerConfig(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var resp map[string]interface{}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if resp["settings_tier"] != "file" {
+		t.Errorf("file mode settings_tier: want 'file', got %v", resp["settings_tier"])
+	}
 }
 
 // ---- N2: Extract server.env and auth.DevMode tests ----

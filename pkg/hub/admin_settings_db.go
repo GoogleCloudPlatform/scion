@@ -32,6 +32,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/version"
+	"github.com/knadh/koanf/v2"
 	yamlv3 "gopkg.in/yaml.v3"
 )
 
@@ -45,6 +46,7 @@ type SectionMetadata struct {
 	Revision  int64      `json:"revision,omitempty"`   // DB revision (0 for file/default)
 	UpdatedAt *time.Time `json:"updated_at,omitempty"` // last update time (DB only)
 	UpdatedBy string     `json:"updated_by,omitempty"` // admin email (DB only)
+	Origin    string     `json:"origin,omitempty"`     // "seeded" or "managed" (DB mode only)
 }
 
 // ServerConfigDBResponse extends the file-mode response with metadata for the
@@ -59,6 +61,29 @@ type ServerConfigDBResponse struct {
 	// EnvOverrides lists Layer-1 koanf keys that are overridden by env vars
 	// on this node — a drift warning for the admin UI.
 	EnvOverrides []string `json:"env_overrides,omitempty"`
+
+	// SupersededKeys maps section name to bootstrap-material keys whose
+	// merged value differs from the DB value (managed sections only).
+	SupersededKeys map[string][]SupersededKey `json:"superseded_keys,omitempty"`
+
+	// DeprecatedEnvKeys lists SCION_SERVER_* env vars that target Layer-1
+	// keys and should be migrated to SCION_SEED_* equivalents.
+	DeprecatedEnvKeys []DeprecatedEnvKeyInfo `json:"deprecated_env_keys,omitempty"`
+}
+
+// SupersededKey represents a bootstrap-material key whose value in the
+// bootstrap merge differs from the admin-set DB value in a managed section.
+type SupersededKey struct {
+	Key    string `json:"key"`
+	Source string `json:"source"` // "seed_env", "yaml", or "server_env"
+}
+
+// DeprecatedEnvKeyInfo represents a SCION_SERVER_* env var that targets a
+// Layer-1 key and should be migrated to the SCION_SEED_* equivalent.
+type DeprecatedEnvKeyInfo struct {
+	EnvVar         string `json:"env_var"`
+	KoanfKey       string `json:"koanf_key"`
+	SeedEquivalent string `json:"seed_equivalent"`
 }
 
 // ServerConfigUpdateDBRequest extends the update request with optional CAS
@@ -131,6 +156,8 @@ func (s *Server) handleGetServerConfigDB(w http.ResponseWriter, r *http.Request,
 		resp.SchemaVersion = "1"
 	}
 
+	resp.ServerConfigResponse.SettingsTier = "db"
+
 	// Overlay Layer-1 fields from the operational settings snapshot.
 	snap := ops.Snapshot()
 	applySnapshotToResponse(&resp.ServerConfigResponse, snap)
@@ -143,6 +170,12 @@ func (s *Server) handleGetServerConfigDB(w http.ResponseWriter, r *http.Request,
 	sort.Strings(overrides)
 	resp.EnvOverrides = overrides
 
+	// Superseded keys (managed sections whose DB value diverges from bootstrap).
+	resp.SupersededKeys = s.computeSupersededKeys(ops)
+
+	// Deprecated env keys (SCION_SERVER_* targeting Layer-1 keys).
+	resp.DeprecatedEnvKeys = s.computeDeprecatedEnvKeys(ops)
+
 	// Mask sensitive fields — same logic as file mode.
 	maskSensitiveFields(&resp.ServerConfigResponse)
 
@@ -151,8 +184,8 @@ func (s *Server) handleGetServerConfigDB(w http.ResponseWriter, r *http.Request,
 
 // applySnapshotToResponse writes Layer-1 snapshot values into the
 // ServerConfigResponse, ensuring the response reflects the merged
-// (env > DB > file > defaults) view exactly. The snapshot is the
-// authoritative merged result (env > DB > file > defaults); every
+// (DB > bootstrap merge) view exactly. The snapshot is the
+// authoritative merged result (DB > bootstrap merge); every
 // field MUST be written unconditionally so that false booleans, empty
 // slices, and zero-value strings from the snapshot override any
 // stale file-loaded values in the response.
@@ -237,6 +270,7 @@ func (s *Server) buildSectionMetadata(_ context.Context, ops *OperationalSetting
 				Revision:  ss.Revision,
 				UpdatedAt: &t,
 				UpdatedBy: ss.UpdatedBy,
+				Origin:    ss.Origin,
 			}
 		} else if s.sectionHasBootstrapValues(ops, sec.Name) {
 			meta[sec.Name] = SectionMetadata{
@@ -265,6 +299,115 @@ func (s *Server) sectionHasBootstrapValues(ops *OperationalSettings, sectionName
 		}
 	}
 	return false
+}
+
+// computeSupersededKeys returns, for each managed section, the bootstrap-material
+// keys whose merged value differs from the DB value. This tells the admin which
+// deployment-config values their explicit DB writes are overriding.
+func (s *Server) computeSupersededKeys(ops *OperationalSettings) map[string][]SupersededKey {
+	ops.mu.RLock()
+	cacheSnap := make(map[string]sectionState, len(ops.cache))
+	for name, ss := range ops.cache {
+		cacheSnap[name] = ss
+	}
+	ops.mu.RUnlock()
+
+	if ops.bootstrapKoanf == nil {
+		return nil
+	}
+
+	// Load individual layers for source attribution.
+	seedEnvK := config.LoadSeedEnvKoanf()
+	serverEnvK := config.LoadEnvKoanf()
+
+	result := make(map[string][]SupersededKey)
+	for _, sec := range opsettings.Registry {
+		ss, ok := cacheSnap[sec.Name]
+		if !ok || ss.Origin != "managed" {
+			continue
+		}
+
+		bootstrapDoc, err := opsettings.ExtractSectionFromKoanf(ops.bootstrapKoanf, sec.Name)
+		if err != nil || bootstrapDoc == nil {
+			continue
+		}
+
+		var dbMap, bootstrapMap map[string]interface{}
+		if err := json.Unmarshal(ss.Value, &dbMap); err != nil {
+			continue
+		}
+		if err := json.Unmarshal(bootstrapDoc, &bootstrapMap); err != nil {
+			continue
+		}
+
+		var superseded []SupersededKey
+		for key, bootstrapVal := range bootstrapMap {
+			dbVal, exists := dbMap[key]
+			if !exists || !reflect.DeepEqual(dbVal, bootstrapVal) {
+				superseded = append(superseded, SupersededKey{
+					Key:    key,
+					Source: detectKeySource(seedEnvK, serverEnvK, sec.Name, key),
+				})
+			}
+		}
+		if len(superseded) > 0 {
+			sort.Slice(superseded, func(i, j int) bool { return superseded[i].Key < superseded[j].Key })
+			result[sec.Name] = superseded
+		}
+	}
+
+	if len(result) == 0 {
+		return nil
+	}
+	return result
+}
+
+// detectKeySource determines which bootstrap layer provides a given section key.
+// It checks the individual layers in reverse precedence order (server_env first,
+// then seed_env, then yaml) and returns the first match.
+func detectKeySource(seedEnvK, serverEnvK *koanf.Koanf, sectionName, key string) string {
+	sec := opsettings.SectionByName(sectionName)
+	if sec == nil {
+		return "yaml"
+	}
+
+	// Map the section-level key (e.g. "admin_emails") to koanf paths and check
+	// which layer provides the value.
+	for _, kp := range sec.KoanfPaths {
+		if opsettings.SectionKeyFromKoanfPath(kp) != key {
+			continue
+		}
+		if serverEnvK != nil && serverEnvK.Exists(kp) {
+			return "server_env"
+		}
+		if seedEnvK != nil && seedEnvK.Exists(kp) {
+			return "seed_env"
+		}
+		return "yaml"
+	}
+
+	return "yaml"
+}
+
+// computeDeprecatedEnvKeys returns SCION_SERVER_* env vars that target Layer-1
+// keys and should be migrated to SCION_SEED_* equivalents.
+func (s *Server) computeDeprecatedEnvKeys(ops *OperationalSettings) []DeprecatedEnvKeyInfo {
+	if ops.envKoanf == nil {
+		return nil
+	}
+	deprecated := opsettings.DetectDeprecatedServerEnv(ops.envKoanf)
+	if len(deprecated) == 0 {
+		return nil
+	}
+	result := make([]DeprecatedEnvKeyInfo, len(deprecated))
+	for i, d := range deprecated {
+		result[i] = DeprecatedEnvKeyInfo{
+			EnvVar:         d.EnvVar,
+			KoanfKey:       d.KoanfKey,
+			SeedEquivalent: d.SeedEquivalent,
+		}
+	}
+	return result
 }
 
 // handlePutServerConfigDB handles PUT /api/v1/admin/server-config in postgres mode.

@@ -368,6 +368,24 @@ func ClassifyKeys(keys []string) (layer1 map[string][]string, layer0 []string, u
 	return layer1, layer0, unclassified
 }
 
+// koanfPathToJSONKey is the reverse of jsonFieldToKoanfPaths: koanf path → JSON field name.
+var koanfPathToJSONKey map[string]string
+
+func init() {
+	koanfPathToJSONKey = make(map[string]string)
+	for _, fields := range jsonFieldToKoanfPaths {
+		for jsonKey, kp := range fields {
+			koanfPathToJSONKey[kp] = jsonKey
+		}
+	}
+}
+
+// SectionKeyFromKoanfPath returns the JSON field name (section-level key) for a
+// given koanf path, or empty string if the path is not in the registry.
+func SectionKeyFromKoanfPath(koanfPath string) string {
+	return koanfPathToJSONKey[koanfPath]
+}
+
 // DeprecatedEnvVar describes a SCION_SERVER_* environment variable that targets
 // a Layer-1 key and should be migrated to SCION_SEED_*.
 type DeprecatedEnvVar struct {

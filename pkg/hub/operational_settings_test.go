@@ -137,6 +137,18 @@ func (f *fakeHubSettingStore) seed(section string, doc json.RawMessage) {
 	}
 }
 
+func (f *fakeHubSettingStore) seedWithOrigin(section string, doc json.RawMessage, origin string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.settings[section] = &store.HubSetting{
+		ID:       section,
+		Section:  section,
+		Value:    doc,
+		Revision: 1,
+		Origin:   origin,
+	}
+}
+
 // --- helpers ---
 
 func newFileKoanf(t *testing.T, flat map[string]interface{}) *koanf.Koanf {

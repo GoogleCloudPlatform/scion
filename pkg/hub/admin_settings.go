@@ -34,6 +34,9 @@ type ServerConfigResponse struct {
 	ScionCommit    string `json:"scion_commit,omitempty"`
 	ScionBuildTime string `json:"scion_build_time,omitempty"`
 
+	// SettingsTier indicates the settings backend: "db" or "file".
+	SettingsTier string `json:"settings_tier,omitempty"`
+
 	SchemaVersion        string                               `json:"schema_version"`
 	ActiveProfile        string                               `json:"active_profile,omitempty"`
 	DefaultTemplate      string                               `json:"default_template,omitempty"`
@@ -126,6 +129,7 @@ func (s *Server) handleGetServerConfig(w http.ResponseWriter) {
 				ScionVersion:   version.Short(),
 				ScionCommit:    version.GetCommit(),
 				ScionBuildTime: version.GetBuildTime(),
+				SettingsTier:   "file",
 				SchemaVersion:  "1",
 			})
 			return
@@ -145,6 +149,7 @@ func (s *Server) handleGetServerConfig(w http.ResponseWriter) {
 		ScionVersion:         version.Short(),
 		ScionCommit:          version.GetCommit(),
 		ScionBuildTime:       version.GetBuildTime(),
+		SettingsTier:         "file",
 		SchemaVersion:        vs.SchemaVersion,
 		ActiveProfile:        vs.ActiveProfile,
 		DefaultTemplate:      vs.DefaultTemplate,
