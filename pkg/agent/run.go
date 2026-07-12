@@ -313,6 +313,13 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		util.Debugf("image resolution: from agent/template config image=%s", resolvedImage)
 	}
 
+	// Apply CLI/dispatch image override before registry rewrite so the
+	// rewrite applies last regardless of the image source.
+	if opts.Image != "" {
+		resolvedImage = opts.Image
+		util.Debugf("image resolution: from CLI/dispatch --image flag image=%s", resolvedImage)
+	}
+
 	// Two-phase image resolution: for short-form (bare) images, prefer a
 	// locally-built image over the registry version. If no local image
 	// exists, fall back to the registry rewrite.
@@ -336,12 +343,6 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 				resolvedImage = rewritten
 			}
 		}
-	}
-
-	// CLI Overrides
-	if opts.Image != "" {
-		resolvedImage = opts.Image
-		util.Debugf("image resolution: from CLI --image flag image=%s", resolvedImage)
 	}
 
 	if resolvedImage == "" {

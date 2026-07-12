@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/dispatchmetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
@@ -153,6 +154,10 @@ type HTTPAgentDispatcher struct {
 	commandBus      CommandBus
 	dispatchMetrics dispatchmetrics.Recorder
 
+	// imageRegistry is the configured image registry prefix for rewriting
+	// bare image names before dispatching to brokers.
+	imageRegistry string
+
 	// Resource hash repair callbacks sync a resource's DB manifest from GCS
 	// when a hash mismatch is detected during dispatch. Nil = no repair.
 	harnessConfigRepairer func(ctx context.Context, name string) error
@@ -241,6 +246,12 @@ func (d *HTTPAgentDispatcher) SetDispatchMetrics(rec dispatchmetrics.Recorder) {
 // DB manifest from storage when a hash mismatch is detected during dispatch.
 func (d *HTTPAgentDispatcher) SetHarnessConfigRepairer(fn func(ctx context.Context, name string) error) {
 	d.harnessConfigRepairer = fn
+}
+
+// SetImageRegistry sets the image registry prefix for rewriting bare image
+// names before dispatching to brokers.
+func (d *HTTPAgentDispatcher) SetImageRegistry(registry string) {
+	d.imageRegistry = registry
 }
 
 // SetTemplateRepairer registers a callback that syncs a template's DB manifest
@@ -430,9 +441,13 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 				ProjectID:    gcpID.ProjectID,
 			}
 		}
+		image := agent.AppliedConfig.Image
+		if image != "" && d.imageRegistry != "" {
+			image = config.RewriteImageRegistry(image, d.imageRegistry)
+		}
 		req.Config = &RemoteAgentConfig{
 			Template:          agent.Template,
-			Image:             agent.AppliedConfig.Image,
+			Image:             image,
 			HarnessConfig:     agent.AppliedConfig.HarnessConfig,
 			HarnessAuth:       agent.AppliedConfig.HarnessAuth,
 			Task:              agent.AppliedConfig.Task,
