@@ -80,7 +80,7 @@ export class ScionPageAgentCreate extends LitElement {
   private templateId = '';
 
   @state()
-  private harness = 'gemini';
+  private harness = 'gemini-cli';
 
   @state()
   private customHarness = '';
@@ -388,7 +388,7 @@ export class ScionPageAgentCreate extends LitElement {
           fetch('/api/v1/runtime-brokers?limit=200', { credentials: 'include' }),
           fetch('/api/v1/templates?status=active&limit=200', { credentials: 'include' }),
           fetch('/api/v1/settings/public', { credentials: 'include' }),
-          fetch('/api/v1/harness-configs?status=active&image_status=valid&limit=100', { credentials: 'include' }),
+          fetch('/api/v1/harness-configs?status=active&limit=100', { credentials: 'include' }),
         ]);
 
       if (projectsRes.ok) {
@@ -767,7 +767,7 @@ private selectBrokerForProject(): void {
 
     // Fetch project settings (used for both template and harness defaults)
     const settings = this.projectId ? await this.fetchProjectSettings(this.projectId) : null;
-    const harnessDefault = settings?.defaultHarnessConfig || 'gemini';
+    const harnessDefault = settings?.defaultHarnessConfig || 'gemini-cli';
 
     const harnessFor = (t: { defaultHarnessConfig?: string; harness?: string }) =>
       t.defaultHarnessConfig || t.harness || harnessDefault;
@@ -864,8 +864,8 @@ private selectBrokerForProject(): void {
   private async loadHarnessConfigs(): Promise<void> {
     try {
       const url = this.projectId
-        ? `/api/v1/harness-configs?status=active&image_status=valid&projectId=${encodeURIComponent(this.projectId)}&limit=100`
-        : '/api/v1/harness-configs?status=active&image_status=valid&limit=100';
+        ? `/api/v1/harness-configs?status=active&projectId=${encodeURIComponent(this.projectId)}&limit=100`
+        : '/api/v1/harness-configs?status=active&limit=100';
       const res = await apiFetch(url);
       if (res.ok) {
         const data = (await res.json()) as { harnessConfigs?: HarnessConfigEntry[] };
@@ -989,7 +989,7 @@ private selectBrokerForProject(): void {
    */
   private setHarnessFromValue(value: string): void {
     const knownNames = this.harnessConfigs.map((hc) => hc.name);
-    const fallbackNames = ['gemini', 'claude', 'opencode', 'codex'];
+    const fallbackNames = ['gemini-cli', 'claude', 'codex', 'copilot', 'opencode'];
     const available = knownNames.length > 0 ? knownNames : fallbackNames;
 
     if (available.includes(value)) {
@@ -1160,12 +1160,12 @@ private selectBrokerForProject(): void {
                       </sl-option>
                     `
                   )
-                : // Fallback: all known/installable harnesses (incl. opt-in), not the default-install set.
-                  html`
-                    <sl-option value="gemini">Gemini</sl-option>
+                : html`
+                    <sl-option value="gemini-cli">Gemini CLI</sl-option>
                     <sl-option value="claude">Claude</sl-option>
-                    <sl-option value="opencode">OpenCode</sl-option>
                     <sl-option value="codex">Codex</sl-option>
+                    <sl-option value="copilot">Copilot</sl-option>
+                    <sl-option value="opencode">OpenCode</sl-option>
                   `}
               <sl-option value="__other__">Other...</sl-option>
             </sl-select>
