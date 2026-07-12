@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
@@ -1009,6 +1010,11 @@ func interactionUserID(i *discordgo.InteractionCreate) string {
 	return ""
 }
 
+var (
+	threadParentsMu sync.Mutex
+	threadParents   = make(map[string]string)
+)
+
 // threadParentID returns the parent channel ID if channelID is a thread,
 // or empty string if it is not a thread or the lookup fails.
 func threadParentID(s *discordgo.Session, channelID string) string {
@@ -1039,7 +1045,18 @@ func resolveChannelLink(ctx context.Context, s *discordgo.Session, store Store, 
 		return nil, err
 	}
 	if link == nil || !link.Active {
-		if parentID := threadParentID(s, channelID); parentID != "" {
+		threadParentsMu.Lock()
+		parentID, cached := threadParents[channelID]
+		threadParentsMu.Unlock()
+
+		if !cached {
+			parentID = threadParentID(s, channelID)
+			threadParentsMu.Lock()
+			threadParents[channelID] = parentID
+			threadParentsMu.Unlock()
+		}
+
+		if parentID != "" {
 			return store.GetChannelLink(ctx, parentID)
 		}
 	}
