@@ -223,6 +223,12 @@ active_profile: apple
 		if runtime.GOOS != "linux" {
 			t.Skip("Cloud Run auto-detection fallback only applies on Linux")
 		}
+		if _, err := exec.LookPath("docker"); err == nil {
+			t.Skip("Skipping: docker binary is available in PATH, cannot test Cloud Run fallback")
+		}
+		if _, err := exec.LookPath("podman"); err == nil {
+			t.Skip("Skipping: podman binary is available in PATH, cannot test Cloud Run fallback")
+		}
 
 		tmpHome := t.TempDir()
 		t.Setenv("HOME", tmpHome)
