@@ -290,3 +290,100 @@ func TestUpsertHubSetting_ConcurrentCASRace(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, int64(2), final.Revision)
 }
+
+// =============================================================================
+// Origin field behavior
+// =============================================================================
+
+func TestUpsertHubSetting_OriginSetOnCreate(t *testing.T) {
+	s := newTestHubSettingStore(t)
+	ctx := context.Background()
+
+	got, err := s.UpsertHubSetting(ctx, "access", json.RawMessage(`{}`), "seed", -1, "seeded")
+	require.NoError(t, err)
+	assert.Equal(t, "seeded", got.Origin)
+
+	got2, err := s.UpsertHubSetting(ctx, "telemetry", json.RawMessage(`{}`), "admin@test.com", 0, "managed")
+	require.NoError(t, err)
+	assert.Equal(t, "managed", got2.Origin)
+}
+
+func TestUpsertHubSetting_OriginDefaultsToSeeded(t *testing.T) {
+	s := newTestHubSettingStore(t)
+	ctx := context.Background()
+
+	got, err := s.UpsertHubSetting(ctx, "access", json.RawMessage(`{}`), "seed", -1, "")
+	require.NoError(t, err)
+	assert.Equal(t, "seeded", got.Origin)
+}
+
+func TestUpsertHubSetting_OriginUpdatedOnWrite(t *testing.T) {
+	s := newTestHubSettingStore(t)
+	ctx := context.Background()
+
+	// Create as seeded.
+	_, err := s.UpsertHubSetting(ctx, "access", json.RawMessage(`{"v":1}`), "seed", -1, "seeded")
+	require.NoError(t, err)
+
+	// Admin update flips to managed.
+	got, err := s.UpsertHubSetting(ctx, "access", json.RawMessage(`{"v":2}`), "admin@test.com", 1, "managed")
+	require.NoError(t, err)
+	assert.Equal(t, "managed", got.Origin)
+
+	// Verify persisted.
+	fetched, err := s.GetHubSetting(ctx, "access")
+	require.NoError(t, err)
+	assert.Equal(t, "managed", fetched.Origin)
+}
+
+// =============================================================================
+// BackfillOrigin
+// =============================================================================
+
+func TestBackfillOrigin(t *testing.T) {
+	s := newTestHubSettingStore(t)
+	ctx := context.Background()
+
+	// Create rows with different updated_by values (all default origin="seeded").
+	_, err := s.UpsertHubSetting(ctx, "access", json.RawMessage(`{}`), "seed", -1, "")
+	require.NoError(t, err)
+	_, err = s.UpsertHubSetting(ctx, "telemetry", json.RawMessage(`{}`), "admin@test.com", 0, "")
+	require.NoError(t, err)
+	_, err = s.UpsertHubSetting(ctx, "_meta", json.RawMessage(`{}`), "system", -1, "")
+	require.NoError(t, err)
+
+	// Run backfill.
+	err = s.BackfillOrigin(ctx)
+	require.NoError(t, err)
+
+	// "access" (updated_by=seed) → stays seeded.
+	access, err := s.GetHubSetting(ctx, "access")
+	require.NoError(t, err)
+	assert.Equal(t, "seeded", access.Origin)
+
+	// "telemetry" (updated_by=admin) → managed.
+	telemetry, err := s.GetHubSetting(ctx, "telemetry")
+	require.NoError(t, err)
+	assert.Equal(t, "managed", telemetry.Origin)
+
+	// "_meta" (exempt) → stays seeded.
+	meta, err := s.GetHubSetting(ctx, "_meta")
+	require.NoError(t, err)
+	assert.Equal(t, "seeded", meta.Origin)
+}
+
+func TestBackfillOrigin_Idempotent(t *testing.T) {
+	s := newTestHubSettingStore(t)
+	ctx := context.Background()
+
+	_, err := s.UpsertHubSetting(ctx, "access", json.RawMessage(`{}`), "admin@test.com", 0, "")
+	require.NoError(t, err)
+
+	// Run twice.
+	require.NoError(t, s.BackfillOrigin(ctx))
+	require.NoError(t, s.BackfillOrigin(ctx))
+
+	got, err := s.GetHubSetting(ctx, "access")
+	require.NoError(t, err)
+	assert.Equal(t, "managed", got.Origin)
+}

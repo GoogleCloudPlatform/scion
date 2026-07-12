@@ -111,6 +111,20 @@ func (f *fakeHubSettingStore) DeleteHubSetting(_ context.Context, section string
 	return nil
 }
 
+func (f *fakeHubSettingStore) BackfillOrigin(_ context.Context) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for section, s := range f.settings {
+		if section == "_meta" {
+			continue
+		}
+		if s.UpdatedBy != "seed" && s.Origin == "seeded" {
+			s.Origin = "managed"
+		}
+	}
+	return nil
+}
+
 // helper to seed a section directly.
 func (f *fakeHubSettingStore) seed(section string, doc json.RawMessage) {
 	f.mu.Lock()

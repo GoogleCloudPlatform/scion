@@ -213,5 +213,26 @@ func (s *HubSettingStore) DeleteHubSetting(ctx context.Context, section string) 
 	return nil
 }
 
+// BackfillOrigin sets the origin column for existing rows that predate
+// the origin field. Rows with updated_by="seed" keep origin="seeded" (the
+// column default). Rows with updated_by!="seed" (admin writes) get
+// origin="managed". The _meta row is exempt. Idempotent — rows that
+// already have the correct origin are unaffected because the column
+// default is "seeded" and this only updates the non-seed rows.
+func (s *HubSettingStore) BackfillOrigin(ctx context.Context) error {
+	_, err := s.client.HubSetting.Update().
+		Where(
+			hubsetting.UpdatedByNEQ("seed"),
+			hubsetting.SectionNEQ("_meta"),
+			hubsetting.OriginEQ(hubsetting.OriginSeeded),
+		).
+		SetOrigin(hubsetting.OriginManaged).
+		Save(ctx)
+	if err != nil {
+		return fmt.Errorf("backfill origin: %w", err)
+	}
+	return nil
+}
+
 // Compile-time assertion.
 var _ store.HubSettingStore = (*HubSettingStore)(nil)

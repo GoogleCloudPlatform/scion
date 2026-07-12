@@ -1337,4 +1337,9 @@ type HubSettingStore interface {
 	// DeleteHubSetting removes a hub setting by section name.
 	// Returns ErrNotFound if the section doesn't exist.
 	DeleteHubSetting(ctx context.Context, section string) error
+
+	// BackfillOrigin sets the origin column for existing rows that predate
+	// the origin field. Rows with updated_by="seed" get origin="seeded";
+	// all other non-_meta rows get origin="managed". Idempotent.
+	BackfillOrigin(ctx context.Context) error
 }
