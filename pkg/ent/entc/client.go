@@ -24,8 +24,10 @@ import (
 	"log/slog"
 	"time"
 
+	atlasmigrate "ariga.io/atlas/sql/migrate"
 	"entgo.io/ent/dialect"
 	entsql "entgo.io/ent/dialect/sql"
+	entschema "entgo.io/ent/dialect/sql/schema"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/stdlib"
@@ -172,88 +174,39 @@ func applyKeepalives(params map[string]string) {
 	}
 }
 
-// TODO: integration test for Postgres reset path (requires postgres container)
-
 // AutoMigrate runs automatic schema migration on the given client.
-// For Postgres, it uses a two-pass strategy:
-//  1. First pass: DROP all tables in the public schema that were created by
-//     a prior Ent schema version (this clears the slate for new tables).
-//  2. Second pass: run Schema.Create to create all tables fresh.
-//
-// Tables that exist with the correct schema are unaffected because DROP is
-// selective (only tables that belong to the Ent schema are dropped).
-// This is safe for a hosted deployment where schema changes are additive
-// and data is re-created from the Hub state on each deployment.
+// It is idempotent: running it against a database that already has some or
+// all Ent-managed tables succeeds without dropping existing data. On
+// Postgres, any DDL statement that fails with SQLSTATE 42P07 ("relation
+// already exists") is silently skipped so that new tables are created
+// alongside pre-existing ones.
 func AutoMigrate(ctx context.Context, client *ent.Client) error {
-	// First: try a clean Schema.Create. If it succeeds (empty DB), we're done.
-	err := client.Schema.Create(
+	return client.Schema.Create(
 		ctx,
 		migrate.WithDropColumn(false),
 		migrate.WithDropIndex(false),
+		entschema.WithApplyHook(skipExistingRelations),
 	)
-	if err == nil {
-		return nil
-	}
+}
 
-	// If we got "already exists" (42P07), the DB has a prior schema.
-	// Drop all Ent-managed tables so Schema.Create can run cleanly.
-	var pgErr *pgconn.PgError
-	if !errors.As(err, &pgErr) || pgErr.Code != "42P07" {
-		return fmt.Errorf("running auto-migration: %w", err)
-	}
-
-	// Use the raw DB connection to drop all tables in the Ent schema.
-	drv, ok := client.Driver().(*entsql.Driver)
-	if !ok {
-		return fmt.Errorf("migration reset requires an entsql.Driver, got %T", client.Driver())
-	}
-	db := drv.DB()
-	// Get all table names from the Ent schema via information_schema.
-	rows, err := db.QueryContext(ctx,
-		"SELECT tablename FROM pg_tables WHERE schemaname='public' ORDER BY tablename")
-	if err != nil {
-		return fmt.Errorf("listing tables for migration reset: %w", err)
-	}
-	defer rows.Close()
-	var tables []string
-	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
-			return fmt.Errorf("scanning table name: %w", err)
-		}
-		tables = append(tables, name)
-	}
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("iterating tables: %w", err)
-	}
-
-	// Create a map of Ent-managed tables for selective dropping.
-	entTables := make(map[string]bool)
-	for _, t := range migrate.Tables {
-		entTables[t.Name] = true
-	}
-
-	slog.Warn("AutoMigrate: dropping all Ent-managed tables for schema reset (hosted mode only)")
-
-	// Tables are dropped individually without a transaction. A crash mid-drop
-	// leaves the DB in a partially-dropped state; this is acceptable for hosted
-	// deployments where data is reconstructed from Hub state on startup.
-	for _, t := range tables {
-		if entTables[t] {
-			quotedName := pgx.Identifier{t}.Sanitize()
-			if _, err := db.ExecContext(ctx, `DROP TABLE IF EXISTS `+quotedName+` CASCADE`); err != nil {
-				return fmt.Errorf("dropping table %q: %w", t, err)
+// skipExistingRelations is an Ent schema ApplyHook that makes DDL
+// idempotent on Postgres by skipping any statement that fails with
+// SQLSTATE 42P07 ("duplicate_table" / "relation already exists").
+func skipExistingRelations(next entschema.Applier) entschema.Applier {
+	return entschema.ApplyFunc(func(ctx context.Context, conn dialect.ExecQuerier, plan *atlasmigrate.Plan) error {
+		for _, c := range plan.Changes {
+			if err := conn.Exec(ctx, c.Cmd, c.Args, nil); err != nil {
+				var pgErr *pgconn.PgError
+				if errors.As(err, &pgErr) && pgErr.Code == "42P07" {
+					slog.Debug("AutoMigrate: skipping existing relation", "stmt", c.Cmd)
+					continue
+				}
+				if c.Comment != "" {
+					err = fmt.Errorf("%s: %w", c.Comment, err)
+				}
+				return err
 			}
 		}
-	}
-
-	// Now run Schema.Create on the empty schema.
-	if err := client.Schema.Create(
-		ctx,
-		migrate.WithDropColumn(false),
-		migrate.WithDropIndex(false),
-	); err != nil {
-		return fmt.Errorf("running auto-migration after reset: %w", err)
-	}
-	return nil
+		return nil
+	})
 }
