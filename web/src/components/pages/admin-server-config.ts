@@ -206,6 +206,7 @@ interface ServerConfigResponse {
   settings_tier?: 'db' | 'file';
   env_overrides?: string[];
   section_metadata?: Record<string, SectionMetadataInfo>;
+  superseded_keys?: Record<string, SupersededKeyInfo[]>;
 }
 
 interface ReloadResult {
@@ -221,6 +222,12 @@ interface SectionMetadataInfo {
   updated_at?: string;
   updated_by?: string;
   origin?: string; // "seeded" | "managed" (DB mode only)
+}
+
+/** A bootstrap-material key whose value differs from the DB value in a managed section. */
+interface SupersededKeyInfo {
+  key: string;
+  source: string; // "seed_env" | "yaml" | "server_env"
 }
 
 /** Per-field validation error from a 400 validation_failed response. */
@@ -464,6 +471,7 @@ export class ScionPageAdminServerConfig extends LitElement {
   @state() private envOverrides: string[] = [];
   @state() private sectionMetadata: Record<string, SectionMetadataInfo> | null = null;
   @state() private ignoredKeysNotice: string[] | null = null;
+  @state() private supersededKeys: Record<string, SupersededKeyInfo[]> | null = null;
 
   // ── Structured save errors (§3.6) ──
   @state() private validationErrors: Record<string, ValidationErrorDetail[]> | null = null;
@@ -872,6 +880,77 @@ export class ScionPageAdminServerConfig extends LitElement {
       margin-bottom: 0.75rem;
     }
 
+    /* ── Settings-DB: superseded key badge ── */
+
+    .superseded-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.25rem;
+      font-size: 0.6875rem;
+      font-weight: 500;
+      color: var(--sl-color-primary-700, #1d4ed8);
+      background: var(--sl-color-primary-50, #eff6ff);
+      border: 1px solid var(--sl-color-primary-200, #bfdbfe);
+      padding: 0.125rem 0.5rem;
+      border-radius: 9999px;
+      white-space: nowrap;
+      cursor: help;
+    }
+
+    .superseded-badge sl-icon {
+      font-size: 0.75rem;
+    }
+
+    /* ── Settings-DB: superseded keys page-top panel ── */
+
+    .superseded-panel {
+      padding: 0.75rem 1rem;
+      margin-bottom: 1rem;
+      border-radius: var(--scion-radius, 0.5rem);
+      background: var(--sl-color-primary-50, #eff6ff);
+      border: 1px solid var(--sl-color-primary-200, #bfdbfe);
+      color: var(--sl-color-primary-800, #1e40af);
+      font-size: 0.8125rem;
+    }
+
+    .superseded-panel-title {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      font-weight: 600;
+      margin-bottom: 0.5rem;
+    }
+
+    .superseded-panel-title sl-icon {
+      font-size: 1rem;
+    }
+
+    .superseded-panel-list {
+      list-style: none;
+      margin: 0;
+      padding: 0;
+    }
+
+    .superseded-panel-list li {
+      padding: 0.25rem 0;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    .superseded-panel-list code {
+      font-family: var(--sl-font-mono, monospace);
+      font-size: 0.75rem;
+      background: var(--sl-color-primary-100, #dbeafe);
+      padding: 0.125rem 0.375rem;
+      border-radius: 0.25rem;
+    }
+
+    .superseded-source {
+      font-size: 0.6875rem;
+      color: var(--sl-color-primary-600, #2563eb);
+    }
+
     /* ── Settings-DB: ignored keys notice ── */
 
     .ignored-keys-notice {
@@ -1163,6 +1242,7 @@ export class ScionPageAdminServerConfig extends LitElement {
     this.envOverrides = data.env_overrides || [];
     this.envKeys = new Set(this.envOverrides);
     this.sectionMetadata = data.section_metadata || null;
+    this.supersededKeys = data.superseded_keys || null;
   }
 
   private readOnlyReason(koanfKey: string): 'bootstrap' | 'env' | null {
@@ -1189,7 +1269,7 @@ export class ScionPageAdminServerConfig extends LitElement {
     if (reason) {
       return html`${this.renderReadOnlyBadge(reason)}<span class="read-only-value">${displayValue || '—'}</span>`;
     }
-    return editableTemplate;
+    return html`${this.renderSupersededBadge(koanfKey)}${editableTemplate}`;
   }
 
   private buildLayer1Payload(): Record<string, unknown> {
@@ -1621,6 +1701,7 @@ export class ScionPageAdminServerConfig extends LitElement {
       </p>
 
       ${this.loading ? nothing : this.renderEnvOverrideBanner()}
+      ${this.renderSupersededPanel()}
       ${this.renderConflictBanner()} ${this.renderValidationErrors()}
       ${this.renderSafetyNetNotice()} ${this.renderIgnoredKeysNotice()}
       ${this.error ? html`<div class="status-message error">${this.error}</div>` : nothing}
@@ -1709,6 +1790,70 @@ export class ScionPageAdminServerConfig extends LitElement {
               ${new Date(meta.updated_at).toLocaleString()}
             </span>`
           : nothing}
+      </div>
+    `;
+  }
+
+  /** Returns true if the given koanf key is superseded in a managed section. */
+  private isSuperseded(koanfKey: string): boolean {
+    if (!this.supersededKeys) return false;
+    return Object.values(this.supersededKeys).some((keys) =>
+      keys.some((sk) => sk.key === koanfKey)
+    );
+  }
+
+  /** Renders a blue ⓘ badge next to a superseded field. */
+  private renderSupersededBadge(koanfKey: string): typeof nothing | ReturnType<typeof html> {
+    if (!this.isSuperseded(koanfKey)) return nothing;
+    return html`<span
+      class="superseded-badge"
+      title="A deployment-provided value differs and is superseded by this database value"
+    >
+      <sl-icon name="info-circle"></sl-icon>
+      ⓘ Superseded
+    </span>`;
+  }
+
+  /** Renders the page-top panel listing all superseded keys across sections. */
+  private renderSupersededPanel(): typeof nothing | ReturnType<typeof html> {
+    if (!this.supersededKeys) return nothing;
+    const allKeys: { section: string; key: string; source: string }[] = [];
+    for (const [section, keys] of Object.entries(this.supersededKeys)) {
+      for (const sk of keys) {
+        allKeys.push({ section, key: sk.key, source: sk.source });
+      }
+    }
+    if (allKeys.length === 0) return nothing;
+
+    const sourceLabel = (s: string) => {
+      switch (s) {
+        case 'seed_env':
+          return 'SCION_SEED_*';
+        case 'yaml':
+          return 'settings.yaml';
+        case 'server_env':
+          return 'SCION_SERVER_*';
+        default:
+          return s;
+      }
+    };
+
+    return html`
+      <div class="superseded-panel">
+        <div class="superseded-panel-title">
+          <sl-icon name="info-circle"></sl-icon>
+          Deployment values superseded by database settings
+        </div>
+        <ul class="superseded-panel-list">
+          ${allKeys.map(
+            (sk) => html`
+              <li>
+                <code>${KOANF_KEY_LABELS[sk.key] || sk.key}</code>
+                <span class="superseded-source">(from ${sourceLabel(sk.source)})</span>
+              </li>
+            `
+          )}
+        </ul>
       </div>
     `;
   }
