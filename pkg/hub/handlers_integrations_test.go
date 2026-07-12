@@ -496,9 +496,13 @@ func TestRestartIntegration_MethodNotAllowed(t *testing.T) {
 }
 
 func TestReconfigureIntegration_PreservesRuntimeKeys(t *testing.T) {
+	// Compute the deterministic broker_id that getPluginHubCreds produces.
+	pluginBrokerNS := uuid.MustParse("5c104390-a1d0-5e9a-9b1e-5c104390a1d0")
+	wantBrokerID := uuid.NewSHA1(pluginBrokerNS, []byte("plugin-broker-telegram")).String()
+
 	mgr := newMockIntegrationManager()
 	mgr.plugins["telegram"] = map[string]string{
-		"hub_url":          "http://hub:8080",
+		"hub_url":          "http://stale:9999",
 		"broker_id":        "br-123",
 		"hmac_key":         "s3cret",
 		"plugin_name":      "telegram",
@@ -508,7 +512,9 @@ func TestReconfigureIntegration_PreservesRuntimeKeys(t *testing.T) {
 		"webhook_listen":   ":9095",
 	}
 
-	srv := &Server{}
+	srv := &Server{
+		config: ServerConfig{HubEndpoint: "http://hub:8080"},
+	}
 
 	if err := srv.reconfigureIntegration(context.Background(), mgr, "telegram"); err != nil {
 		t.Fatal(err)
@@ -519,13 +525,9 @@ func TestReconfigureIntegration_PreservesRuntimeKeys(t *testing.T) {
 	}
 
 	wantKeys := map[string]string{
-		"hub_url":          "http://hub:8080",
-		"broker_id":        "br-123",
-		"hmac_key":         "s3cret",
-		"plugin_name":      "telegram",
-		"project_slug_map": "proj1:slug1",
-		"database_url":     "postgres://localhost/scion",
-		"database_driver":  "postgres",
+		"hub_url":     "http://hub:8080",
+		"broker_id":   wantBrokerID,
+		"plugin_name": "telegram",
 	}
 	for k, want := range wantKeys {
 		got := mgr.lastReplacedConfig[k]
@@ -540,6 +542,9 @@ func TestReconfigureIntegration_PreservesRuntimeKeys(t *testing.T) {
 }
 
 func TestReconfigureIntegration_RuntimeKeysWithConfigFile(t *testing.T) {
+	pluginBrokerNS := uuid.MustParse("5c104390-a1d0-5e9a-9b1e-5c104390a1d0")
+	wantBrokerID := uuid.NewSHA1(pluginBrokerNS, []byte("plugin-broker-telegram")).String()
+
 	tmpDir := t.TempDir()
 	cfgFile := filepath.Join(tmpDir, "telegram.yaml")
 	if err := os.WriteFile(cfgFile, []byte("webhook_listen: \":9095\"\nwebhook_path: /hook\n"), 0644); err != nil {
@@ -549,14 +554,16 @@ func TestReconfigureIntegration_RuntimeKeysWithConfigFile(t *testing.T) {
 	mgr := newMockIntegrationManager()
 	mgr.plugins["telegram"] = map[string]string{
 		"config_file":      cfgFile,
-		"hub_url":          "http://hub:8080",
+		"hub_url":          "http://stale:9999",
 		"broker_id":        "br-456",
 		"hmac_key":         "key123",
 		"plugin_name":      "telegram",
 		"project_slug_map": "p:s",
 	}
 
-	srv := &Server{}
+	srv := &Server{
+		config: ServerConfig{HubEndpoint: "http://hub:8080"},
+	}
 
 	if err := srv.reconfigureIntegration(context.Background(), mgr, "telegram"); err != nil {
 		t.Fatal(err)
@@ -565,16 +572,47 @@ func TestReconfigureIntegration_RuntimeKeysWithConfigFile(t *testing.T) {
 	cfg := mgr.lastReplacedConfig
 
 	if cfg["hub_url"] != "http://hub:8080" {
-		t.Errorf("hub_url lost after reconfigure with config file: got %q", cfg["hub_url"])
+		t.Errorf("hub_url should come from server config: got %q, want %q", cfg["hub_url"], "http://hub:8080")
 	}
-	if cfg["broker_id"] != "br-456" {
-		t.Errorf("broker_id lost after reconfigure with config file: got %q", cfg["broker_id"])
-	}
-	if cfg["hmac_key"] != "key123" {
-		t.Errorf("hmac_key lost after reconfigure with config file: got %q", cfg["hmac_key"])
+	if cfg["broker_id"] != wantBrokerID {
+		t.Errorf("broker_id should be deterministic UUIDv5: got %q, want %q", cfg["broker_id"], wantBrokerID)
 	}
 	if cfg["webhook_listen"] != ":9095" {
 		t.Errorf("config file key webhook_listen should be present: got %q", cfg["webhook_listen"])
+	}
+	if cfg["config_file"] != cfgFile {
+		t.Errorf("config_file should be carried over: got %q, want %q", cfg["config_file"], cfgFile)
+	}
+}
+
+// TestReconfigureIntegration_EmptyManagerConfig verifies that hub wiring keys
+// are reconstructed from live sources even when the plugin manager's config
+// map is empty (the scenario described in issue #430).
+func TestReconfigureIntegration_EmptyManagerConfig(t *testing.T) {
+	pluginBrokerNS := uuid.MustParse("5c104390-a1d0-5e9a-9b1e-5c104390a1d0")
+	wantBrokerID := uuid.NewSHA1(pluginBrokerNS, []byte("plugin-broker-telegram")).String()
+
+	mgr := newMockIntegrationManager()
+	mgr.plugins["telegram"] = map[string]string{}
+
+	srv := &Server{
+		config: ServerConfig{HubEndpoint: "http://hub:8080"},
+	}
+
+	if err := srv.reconfigureIntegration(context.Background(), mgr, "telegram"); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := mgr.lastReplacedConfig
+
+	if cfg["hub_url"] != "http://hub:8080" {
+		t.Errorf("hub_url should come from server config even with empty manager map: got %q", cfg["hub_url"])
+	}
+	if cfg["broker_id"] != wantBrokerID {
+		t.Errorf("broker_id should be deterministic UUIDv5 even with empty manager map: got %q", cfg["broker_id"])
+	}
+	if cfg["plugin_name"] != "telegram" {
+		t.Errorf("plugin_name should be set even with empty manager map: got %q", cfg["plugin_name"])
 	}
 }
 

@@ -31,6 +31,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/integrationupdate"
 	"github.com/GoogleCloudPlatform/scion/pkg/plugin"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 // reconfigureRuntimeKeys lists keys that are injected at runtime/wiring time
@@ -815,20 +816,65 @@ func releasePluginBuildLock(name string) {
 	}
 }
 
+// getPluginHubCreds reconstructs the hub wiring credentials for a broker
+// plugin from live, authoritative sources — the same values that
+// server_foreground.go injects via ConfigureBroker at startup. This avoids
+// relying on the plugin manager's config map, which may be stale or empty
+// after a process restart.
+func (s *Server) getPluginHubCreds(ctx context.Context, name string) map[string]string {
+	creds := make(map[string]string)
+
+	// hub_url: from the server config (same value that startup resolves).
+	if s.config.HubEndpoint != "" {
+		creds["hub_url"] = s.config.HubEndpoint
+	}
+
+	// broker_id: deterministic UUIDv5 — same namespace and seed as startup.
+	pluginBrokerNS := uuid.MustParse("5c104390-a1d0-5e9a-9b1e-5c104390a1d0")
+	legacyID := "plugin-broker-" + name
+	brokerID := uuid.NewSHA1(pluginBrokerNS, []byte(legacyID)).String()
+	creds["broker_id"] = brokerID
+
+	// hmac_key: from BrokerAuthService (idempotent — returns existing key).
+	if authSvc := s.GetBrokerAuthService(); authSvc != nil {
+		if secretKey, err := authSvc.GenerateAndStoreSecret(ctx, brokerID); err == nil {
+			creds["hmac_key"] = secretKey
+		}
+	}
+
+	// plugin_name: the plugin's own name.
+	creds["plugin_name"] = name
+
+	// project_slug_map: from the store.
+	if s.store != nil {
+		if projects, err := s.store.ListProjects(ctx, store.ProjectFilter{}, store.ListOptions{Limit: 500}); err == nil {
+			slugMap := make(map[string]string, len(projects.Items))
+			for _, p := range projects.Items {
+				if p.Slug != "" {
+					slugMap[p.ID] = p.Slug
+				} else {
+					slugMap[p.ID] = p.Name
+				}
+			}
+			if jsonBytes, err := json.Marshal(slugMap); err == nil {
+				creds["project_slug_map"] = string(jsonBytes)
+			}
+		}
+	}
+
+	// database_driver + database_url: only for Postgres backends.
+	if s.dbDriver != "" && s.dbDriver != "sqlite" {
+		creds["database_driver"] = s.dbDriver
+		creds["database_url"] = s.databaseDSN
+	}
+
+	return creds
+}
+
 // reconfigureIntegration reloads config for a plugin and calls ConfigureBroker.
 // For self-managed plugins, it falls back to Reconnect on ConfigureBroker failure.
 func (s *Server) reconfigureIntegration(ctx context.Context, mgr IntegrationManager, name string) error {
 	pluginCfg := mgr.GetPluginConfig("broker", name)
-
-	// Snapshot runtime/wiring keys before any operation that may kill
-	// the plugin process. These keys are not in config files and must
-	// survive the restart cycle.
-	runtimeSnapshot := make(map[string]string, len(reconfigureRuntimeKeys))
-	for k, v := range pluginCfg {
-		if reconfigureRuntimeKeys[k] && v != "" {
-			runtimeSnapshot[k] = v
-		}
-	}
 
 	// Re-read config file if one is configured.
 	configFile := ""
@@ -864,12 +910,28 @@ func (s *Server) reconfigureIntegration(ctx context.Context, mgr IntegrationMana
 		merged[m.ConfigKey] = val
 	}
 
-	// Re-inject runtime/wiring keys from the snapshot captured before the
-	// process restart. These are authoritative values set by the hub at
-	// startup (hub_url, broker_id, hmac_key, etc.) and are not present in
-	// config files. Apply as underlay so file/secret values are not clobbered.
-	for k, v := range runtimeSnapshot {
-		if merged[k] == "" {
+	// Carry over non-hub runtime keys (config_file, mode, path, address,
+	// TLS) from the manager's cached config as underlay.
+	hubKeys := map[string]bool{
+		"hub_url": true, "broker_id": true, "hmac_key": true,
+		"plugin_name": true, "project_slug_map": true,
+		"database_driver": true, "database_url": true,
+	}
+	for k, v := range pluginCfg {
+		if reconfigureRuntimeKeys[k] && !hubKeys[k] && v != "" {
+			if merged[k] == "" {
+				merged[k] = v
+			}
+		}
+	}
+
+	// Reconstruct hub wiring credentials from authoritative live sources
+	// and apply as OVERRIDE. The manager's cached config may be stale or
+	// empty (e.g. after process restart), so we recompute these values the
+	// same way server_foreground.go does at startup.
+	hubCreds := s.getPluginHubCreds(ctx, name)
+	for k, v := range hubCreds {
+		if v != "" {
 			merged[k] = v
 		}
 	}
