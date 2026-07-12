@@ -36,6 +36,14 @@ import (
 
 // reconfigureRuntimeKeys lists keys that are injected at runtime/wiring time
 // and must be carried over during reconfigure (they are not in config files).
+var pluginBrokerNS = uuid.MustParse("5c104390-a1d0-5e9a-9b1e-5c104390a1d0")
+
+var hubKeys = map[string]bool{
+	"hub_url": true, "broker_id": true, "hmac_key": true,
+	"plugin_name": true, "project_slug_map": true,
+	"database_driver": true, "database_url": true,
+}
+
 var reconfigureRuntimeKeys = map[string]bool{
 	"config_file":      true,
 	"hub_url":          true,
@@ -830,14 +838,15 @@ func (s *Server) getPluginHubCreds(ctx context.Context, name string) map[string]
 	}
 
 	// broker_id: deterministic UUIDv5 — same namespace and seed as startup.
-	pluginBrokerNS := uuid.MustParse("5c104390-a1d0-5e9a-9b1e-5c104390a1d0")
 	legacyID := "plugin-broker-" + name
 	brokerID := uuid.NewSHA1(pluginBrokerNS, []byte(legacyID)).String()
 	creds["broker_id"] = brokerID
 
 	// hmac_key: from BrokerAuthService (idempotent — returns existing key).
 	if authSvc := s.GetBrokerAuthService(); authSvc != nil {
-		if secretKey, err := authSvc.GenerateAndStoreSecret(ctx, brokerID); err == nil {
+		if secretKey, err := authSvc.GenerateAndStoreSecret(ctx, brokerID); err != nil {
+			slog.Error("Failed to generate or retrieve HMAC key", "plugin", name, "error", err)
+		} else {
 			creds["hmac_key"] = secretKey
 		}
 	}
@@ -847,7 +856,9 @@ func (s *Server) getPluginHubCreds(ctx context.Context, name string) map[string]
 
 	// project_slug_map: from the store.
 	if s.store != nil {
-		if projects, err := s.store.ListProjects(ctx, store.ProjectFilter{}, store.ListOptions{Limit: 500}); err == nil {
+		if projects, err := s.store.ListProjects(ctx, store.ProjectFilter{}, store.ListOptions{Limit: 500}); err != nil {
+			slog.Warn("Failed to list projects for plugin slug map", "plugin", name, "error", err)
+		} else {
 			slugMap := make(map[string]string, len(projects.Items))
 			for _, p := range projects.Items {
 				if p.Slug != "" {
@@ -912,11 +923,6 @@ func (s *Server) reconfigureIntegration(ctx context.Context, mgr IntegrationMana
 
 	// Carry over non-hub runtime keys (config_file, mode, path, address,
 	// TLS) from the manager's cached config as underlay.
-	hubKeys := map[string]bool{
-		"hub_url": true, "broker_id": true, "hmac_key": true,
-		"plugin_name": true, "project_slug_map": true,
-		"database_driver": true, "database_url": true,
-	}
 	for k, v := range pluginCfg {
 		if reconfigureRuntimeKeys[k] && !hubKeys[k] && v != "" {
 			if merged[k] == "" {
