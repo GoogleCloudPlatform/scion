@@ -686,6 +686,7 @@ type Server struct {
 	imageChecker      *imagecheck.Checker
 	imageManager      imageManager
 	imageStatusFlight singleflight.Group
+	brokerClient      *HybridBrokerClient
 
 	// Mode 3 (HA) integration support fields.
 	// dbDriver records the database backend ("sqlite" or "postgres") for
@@ -1840,6 +1841,7 @@ func (s *Server) CreateAuthenticatedDispatcher() *HTTPAgentDispatcher {
 		if statelessBrokerID := s.GetStatelessEmbeddedBrokerID(); statelessBrokerID != "" {
 			hbc.SetStatelessLocalBrokers([]string{statelessBrokerID})
 		}
+		s.brokerClient = hbc
 		client = hbc
 	} else {
 		client = httpClient

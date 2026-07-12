@@ -470,6 +470,75 @@ func (t *brokerHTTPTransport) ExecAgent(ctx context.Context, brokerID, brokerEnd
 	return result.Output, result.ExitCode, nil
 }
 
+// BrokerImageStatusResponse is the response from a broker's /api/v1/images/status endpoint.
+type BrokerImageStatusResponse struct {
+	LocalShort *BrokerImageEntityState `json:"local_short,omitempty"`
+	LocalLong  *BrokerImageEntityState `json:"local_long,omitempty"`
+}
+
+// BrokerImageEntityState describes the local state of a single image entity on a broker.
+type BrokerImageEntityState struct {
+	Exists bool   `json:"exists"`
+	Hash   string `json:"hash,omitempty"`
+}
+
+func (t *brokerHTTPTransport) ImageStatus(ctx context.Context, brokerID, brokerEndpoint, shortImage, longImage string) (*BrokerImageStatusResponse, error) {
+	query := url.Values{}
+	if shortImage != "" {
+		query.Set("short", shortImage)
+	}
+	if longImage != "" {
+		query.Set("long", longImage)
+	}
+	endpoint := fmt.Sprintf("%s/api/v1/images/status?%s", strings.TrimSuffix(brokerEndpoint, "/"), query.Encode())
+
+	resp, err := t.doRequest(ctx, brokerID, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("broker returned status %d", resp.StatusCode)
+	}
+
+	var result BrokerImageStatusResponse
+	if err := t.decodeResponse(resp, &result); err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
+
+func (t *brokerHTTPTransport) PullImage(ctx context.Context, brokerID, brokerEndpoint, image string) error {
+	endpoint := fmt.Sprintf("%s/api/v1/images/pull", strings.TrimSuffix(brokerEndpoint, "/"))
+	body, err := json.Marshal(map[string]string{"image": image})
+	if err != nil {
+		return fmt.Errorf("failed to marshal request: %w", err)
+	}
+	resp, err := t.doRequest(ctx, brokerID, http.MethodPost, endpoint, body)
+	if err != nil {
+		return fmt.Errorf("failed to send request: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode >= 400 {
+		return brokerHTTPError(resp)
+	}
+	return nil
+}
+
+func (t *brokerHTTPTransport) DeleteImage(ctx context.Context, brokerID, brokerEndpoint, image string) error {
+	endpoint := fmt.Sprintf("%s/api/v1/images/%s", strings.TrimSuffix(brokerEndpoint, "/"), url.PathEscape(image))
+	resp, err := t.doRequest(ctx, brokerID, http.MethodDelete, endpoint, nil)
+	if err != nil {
+		return fmt.Errorf("failed to send request: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode >= 400 {
+		return brokerHTTPError(resp)
+	}
+	return nil
+}
+
 func (t *brokerHTTPTransport) CleanupProject(ctx context.Context, brokerID, brokerEndpoint, projectSlug, projectID string) error {
 	endpoint := fmt.Sprintf("%s/api/v1/projects/%s", strings.TrimSuffix(brokerEndpoint, "/"), url.PathEscape(projectSlug))
 	if projectID != "" {
