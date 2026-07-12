@@ -727,7 +727,7 @@ func (s *Server) handleHarnessConfigCheckImage(w http.ResponseWriter, r *http.Re
 						if err != nil {
 							return
 						}
-						if imgResp.LocalShort != nil && imgResp.LocalShort.Exists {
+						if imgResp != nil && imgResp.LocalShort != nil && imgResp.LocalShort.Exists {
 							mu.Lock()
 							found = true
 							mu.Unlock()
@@ -1179,7 +1179,7 @@ func (s *Server) handleHarnessConfigImageStatus(w http.ResponseWriter, r *http.R
 				} else {
 					entry.Reachable = false
 				}
-			} else {
+			} else if imgResp != nil {
 				entry.Reachable = true
 				entry.LocalShort = imgResp.LocalShort
 				entry.LocalLong = imgResp.LocalLong
