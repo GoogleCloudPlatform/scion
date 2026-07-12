@@ -862,6 +862,36 @@ func envKeyToOpsettingsKey(envKey string) string {
 	return strings.Join(parts, ".")
 }
 
+// serverSubKeys is the set of first-segment koanf keys (after snake_case
+// mapping) that belong under the "server." namespace in settings.yaml.
+// Derived from the V1ServerConfig koanf tags.
+var serverSubKeys = map[string]bool{
+	"hub": true, "broker": true, "database": true,
+	"auth": true, "oauth": true, "storage": true,
+	"workspace_storage": true, "secrets": true,
+	"log_level": true, "log_format": true,
+	"notification_channels": true, "message_broker": true,
+	"plugins": true, "github_app": true,
+	"mode": true, "env": true,
+}
+
+// serverEnvToOpsettingsKey maps a SCION_SERVER_* env var key (after prefix
+// stripping) to the opsettings koanf keyspace. For keys whose first segment
+// belongs to V1ServerConfig (e.g. hub, auth, database), it prepends "server."
+// so that SCION_SERVER_HUB_ADMINEMAILS → server.hub.admin_emails.
+// Non-server keys (e.g. telemetry, default_template) pass through unchanged.
+func serverEnvToOpsettingsKey(envKey string) string {
+	key := envKeyToOpsettingsKey(envKey)
+	firstSeg := key
+	if dot := strings.Index(key, "."); dot >= 0 {
+		firstSeg = key[:dot]
+	}
+	if serverSubKeys[firstSeg] {
+		return "server." + key
+	}
+	return key
+}
+
 // LoadFileOnlyKoanf returns a koanf instance loaded from settings.yaml +
 // embedded defaults, without any environment variable overlay. This produces
 // the "file fallback" Layer for OperationalSettings (settings-db §3.4/§3.9):
@@ -891,14 +921,15 @@ func LoadFileOnlyKoanf() *koanf.Koanf {
 }
 
 // LoadEnvKoanf returns a koanf instance loaded with only the SCION_SERVER_*
-// environment variables (no file, no defaults). This is used by the
-// OperationalSettings service to detect which Layer-1 keys are overridden by
-// env vars on this node (settings-db §3.4).
+// environment variables (no file, no defaults). Keys are mapped to the
+// opsettings registry keyspace (snake_case with server.* prefix where
+// appropriate) so that DetectEnvOverrides and DetectDeprecatedServerEnv can
+// match them against the registry.
 func LoadEnvKoanf() *koanf.Koanf {
 	k := koanf.New(".")
 	_ = k.Load(env.Provider("SCION_SERVER_", ".", func(s string) string {
 		key := strings.TrimPrefix(s, "SCION_SERVER_")
-		return envKeyToConfigKey(key)
+		return serverEnvToOpsettingsKey(key)
 	}), nil)
 	return k
 }
@@ -964,13 +995,48 @@ func LoadBootstrapKoanf() *koanf.Koanf {
 	}
 
 	// 4. SCION_SERVER_* environment variables (highest precedence in bootstrap).
-	// Uses snake_case mapper so keys align with yaml and opsettings registry.
+	// Uses serverEnvToOpsettingsKey which re-adds the "server." prefix for keys
+	// that belong under V1ServerConfig (e.g. HUB_ADMINEMAILS → server.hub.admin_emails).
 	_ = k.Load(env.Provider("SCION_SERVER_", ".", func(s string) string {
 		key := strings.TrimPrefix(s, "SCION_SERVER_")
-		return envKeyToOpsettingsKey(key)
+		return serverEnvToOpsettingsKey(key)
 	}), nil)
 
+	// 5. Split comma-separated list values from env vars. Koanf's env provider
+	// loads everything as strings; list fields need explicit splitting so
+	// ExtractSectionFromKoanf produces JSON arrays, not bare strings.
+	splitCommaSeparatedKoanfKeys(k)
+
 	return k
+}
+
+// commaSplitKoanfKeys lists koanf paths that represent list values and may
+// arrive as comma-separated strings from environment variables.
+var commaSplitKoanfKeys = []string{
+	"server.hub.admin_emails",
+	"server.auth.authorized_domains",
+}
+
+// splitCommaSeparatedKoanfKeys splits comma-separated string values into slices
+// for known list keys. Koanf's env provider loads all values as strings, but
+// list fields must be slices for correct JSON serialization by ExtractSectionFromKoanf.
+func splitCommaSeparatedKoanfKeys(k *koanf.Koanf) {
+	for _, key := range commaSplitKoanfKeys {
+		if !k.Exists(key) {
+			continue
+		}
+		val := k.Get(key)
+		s, ok := val.(string)
+		if !ok || !strings.Contains(s, ",") {
+			continue
+		}
+		parts := parseCommaSeparatedList(s)
+		sliceVal := make([]interface{}, len(parts))
+		for i, p := range parts {
+			sliceVal[i] = p
+		}
+		_ = k.Load(confmap.Provider(map[string]interface{}{key: sliceVal}, "."), nil)
+	}
 }
 
 // applyEnvOverrides loads SCION_SERVER_ environment variables and merges them
