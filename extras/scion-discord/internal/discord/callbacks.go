@@ -511,7 +511,7 @@ func (h *CallbackHandler) handleDefaultCallback(s *discordgo.Session, i *discord
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	link, err := h.store.GetChannelLink(ctx, i.ChannelID)
+	link, err := resolveChannelLink(ctx, s, h.store, i.ChannelID)
 	if err != nil || link == nil {
 		h.respondUpdate(s, i, "This channel is not linked to a project.", nil)
 		return
@@ -572,7 +572,7 @@ func (h *CallbackHandler) handleNotifCallback(s *discordgo.Session, i *discordgo
 	discordUserID := interactionUserID(i)
 
 	// Look up the channel link to determine the project.
-	link, err := h.store.GetChannelLink(ctx, i.ChannelID)
+	link, err := resolveChannelLink(ctx, s, h.store, i.ChannelID)
 	if err != nil || link == nil {
 		h.respondUpdate(s, i, "This channel is not linked to a project.", nil)
 		return

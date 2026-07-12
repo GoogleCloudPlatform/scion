@@ -968,6 +968,12 @@ func (b *DiscordBroker) handleIncomingMessage(s *discordgo.Session, m *discordgo
 		return
 	}
 
+	// Drop system messages (thread created, channel rename, pin, etc.)
+	// while keeping normal messages and replies.
+	if m.Type != discordgo.MessageTypeDefault && m.Type != discordgo.MessageTypeReply {
+		return
+	}
+
 	b.mu.RLock()
 	store := b.store
 	botUser := b.botUser
@@ -982,20 +988,10 @@ func (b *DiscordBroker) handleIncomingMessage(s *discordgo.Session, m *discordgo
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	link, err := store.GetChannelLink(ctx, channelID)
+	link, err := resolveChannelLink(ctx, s, store, channelID)
 	if err != nil {
 		b.log.Error("Failed to get channel link", "channel_id", channelID, "error", err)
 		return
-	}
-	// If no direct link, check if this is a thread whose parent channel is linked.
-	if link == nil || !link.Active {
-		if parentID, isThread := b.resolveThreadParent(channelID); isThread && parentID != "" {
-			link, err = store.GetChannelLink(ctx, parentID)
-			if err != nil {
-				b.log.Error("Failed to get parent channel link", "parent_id", parentID, "error", err)
-				return
-			}
-		}
 	}
 	if link == nil || !link.Active {
 		return
@@ -1021,7 +1017,9 @@ func (b *DiscordBroker) handleIncomingMessage(s *discordgo.Session, m *discordgo
 	}
 
 	// Fallback: unaddressed text → default agent (if configured).
-	if len(targets) == 0 && link.DefaultAgent != "" {
+	// Skip if the message @-mentions a non-bot Discord user — those are
+	// directed at humans, not the bot's default agent.
+	if len(targets) == 0 && link.DefaultAgent != "" && !hasNonBotMentions(m.Message, botUserID) {
 		text := strings.TrimSpace(m.Content)
 		if text != "" && !strings.HasPrefix(text, "/") {
 			targets = []string{link.DefaultAgent}
@@ -1660,6 +1658,17 @@ func generateRequestID() string {
 	b := make([]byte, 12)
 	rand.Read(b)
 	return hex.EncodeToString(b)
+}
+
+// hasNonBotMentions returns true if the message @-mentions any Discord user
+// other than the bot itself.
+func hasNonBotMentions(m *discordgo.Message, botUserID string) bool {
+	for _, u := range m.Mentions {
+		if u.ID != botUserID {
+			return true
+		}
+	}
+	return false
 }
 
 // agentSlugs extracts slug strings from a slice of AgentInfo.
