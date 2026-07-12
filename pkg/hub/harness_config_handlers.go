@@ -986,8 +986,8 @@ func (s *Server) handleHarnessConfigImageStatus(w http.ResponseWriter, r *http.R
 		HasLocalRuntime:     s.imageManager != nil,
 	}
 
-	if s.embeddedBrokerID != "" {
-		if broker, err := s.store.GetRuntimeBroker(ctx, s.embeddedBrokerID); err == nil {
+	if brokerID := s.GetEmbeddedBrokerID(); brokerID != "" {
+		if broker, err := s.store.GetRuntimeBroker(ctx, brokerID); err == nil {
 			resp.EmbeddedBrokerName = broker.Name
 		}
 	}

@@ -171,7 +171,7 @@ func (s *Server) checkAndUpdateImageStatus(ctx context.Context, hcID, image stri
 	registry := s.resolveImageRegistry()
 	resolvedImage := config.RewriteImageRegistry(image, registry)
 
-	result := s.imageChecker.Check(ctx, resolvedImage)
+	result := s.imageChecker.CheckRemoteOnly(ctx, resolvedImage)
 	if result.Error != "" {
 		slog.Warn("image status check returned error", "id", hcID, "image", image, "resolved", resolvedImage, "status", result.Status, "error", result.Error)
 	}
