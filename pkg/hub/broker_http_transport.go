@@ -470,6 +470,16 @@ func (t *brokerHTTPTransport) ExecAgent(ctx context.Context, brokerID, brokerEnd
 	return result.Output, result.ExitCode, nil
 }
 
+// BrokerUnsupportedError indicates that a broker responded but does not support
+// the requested endpoint (e.g. an old broker that hasn't been upgraded yet).
+type BrokerUnsupportedError struct {
+	StatusCode int
+}
+
+func (e *BrokerUnsupportedError) Error() string {
+	return fmt.Sprintf("broker does not support this endpoint (HTTP %d)", e.StatusCode)
+}
+
 // BrokerImageStatusResponse is the response from a broker's /api/v1/images/status endpoint.
 type BrokerImageStatusResponse struct {
 	LocalShort *BrokerImageEntityState `json:"local_short,omitempty"`
@@ -498,6 +508,9 @@ func (t *brokerHTTPTransport) ImageStatus(ctx context.Context, brokerID, brokerE
 	}
 	defer func() { _ = resp.Body.Close() }()
 
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, &BrokerUnsupportedError{StatusCode: resp.StatusCode}
+	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("broker returned status %d", resp.StatusCode)
 	}

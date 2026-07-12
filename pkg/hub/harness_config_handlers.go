@@ -16,6 +16,7 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -71,6 +72,7 @@ type BrokerImageEntry struct {
 	BrokerID         string                  `json:"broker_id"`
 	BrokerName       string                  `json:"broker_name"`
 	Reachable        bool                    `json:"reachable"`
+	Unsupported      bool                    `json:"unsupported,omitempty"`
 	LocalShort       *BrokerImageEntityState `json:"local_short,omitempty"`
 	LocalLong        *BrokerImageEntityState `json:"local_long,omitempty"`
 	NewerInRegistry  bool                    `json:"newer_in_registry,omitempty"`
@@ -88,6 +90,12 @@ func (s *Server) checkRegistryImage(ctx context.Context, longImage string) Regis
 	now := time.Now()
 	if longImage == "" {
 		return RegistryImageStatus{CheckedAt: now}
+	}
+	if imagecheck.IsBareImageName(longImage) {
+		return RegistryImageStatus{
+			Image:     longImage,
+			CheckedAt: now,
+		}
 	}
 	result := s.imageChecker.CheckRemoteOnly(ctx, longImage)
 	return RegistryImageStatus{
@@ -690,7 +698,7 @@ func (s *Server) handleHarnessConfigCheckImage(w http.ResponseWriter, r *http.Re
 	slog.Info("checking image status", "id", hc.ID, "image", image, "resolved", resolvedImage, "registry", registry)
 
 	if imagecheck.IsBareImageName(image) {
-		status := "not_found"
+		status := store.HarnessConfigImageStatusUnknown
 		source := "broker_check"
 
 		if s.brokerClient != nil {
@@ -701,6 +709,12 @@ func (s *Server) handleHarnessConfigCheckImage(w http.ResponseWriter, r *http.Re
 				var mu sync.Mutex
 				for i := range brokerResult.Items {
 					b := &brokerResult.Items[i]
+					if _, isPlugin := b.Labels["scion.io/plugin"]; isPlugin {
+						continue
+					}
+					if !s.canDispatchToBroker(ctx, b) {
+						continue
+					}
 					if !isNodeBoundBroker(b) {
 						continue
 					}
@@ -722,8 +736,16 @@ func (s *Server) handleHarnessConfigCheckImage(w http.ResponseWriter, r *http.Re
 				}
 				wg.Wait()
 				if found {
-					status = "valid"
+					status = store.HarnessConfigImageStatusValid
 				}
+			}
+		}
+
+		if status != store.HarnessConfigImageStatusValid && resolvedImage != image {
+			result := s.imageChecker.CheckRemoteOnly(ctx, resolvedImage)
+			if result.Status == "valid" {
+				status = store.HarnessConfigImageStatusValid
+				source = "registry"
 			}
 		}
 
@@ -1110,6 +1132,12 @@ func (s *Server) handleHarnessConfigImageStatus(w http.ResponseWriter, r *http.R
 	var proxyEntries []ProxyBrokerEntry
 	for i := range brokerResult.Items {
 		b := &brokerResult.Items[i]
+		if _, isPlugin := b.Labels["scion.io/plugin"]; isPlugin {
+			continue
+		}
+		if !s.canDispatchToBroker(ctx, b) {
+			continue
+		}
 		if isNodeBoundBroker(b) {
 			nodeBound = append(nodeBound, b)
 		} else {
@@ -1144,7 +1172,13 @@ func (s *Server) handleHarnessConfigImageStatus(w http.ResponseWriter, r *http.R
 
 			imgResp, err := s.brokerClient.ImageStatus(brokerCtx, b.ID, b.Endpoint, shortImage, longImage)
 			if err != nil {
-				entry.Reachable = false
+				var unsupported *BrokerUnsupportedError
+				if errors.As(err, &unsupported) {
+					entry.Reachable = true
+					entry.Unsupported = true
+				} else {
+					entry.Reachable = false
+				}
 			} else {
 				entry.Reachable = true
 				entry.LocalShort = imgResp.LocalShort
@@ -1212,6 +1246,10 @@ func (s *Server) handleHarnessConfigDeleteLocalImage(w http.ResponseWriter, r *h
 		broker, err := s.store.GetRuntimeBroker(ctx, brokerID)
 		if err != nil {
 			writeErrorFromErr(w, err, "")
+			return
+		}
+		if !s.canDispatchToBroker(ctx, broker) {
+			writeError(w, http.StatusForbidden, "forbidden", "You do not have permission to perform image operations on this broker", nil)
 			return
 		}
 		if !isNodeBoundBroker(broker) {
@@ -1282,6 +1320,10 @@ func (s *Server) handleHarnessConfigPullImage(w http.ResponseWriter, r *http.Req
 		broker, err := s.store.GetRuntimeBroker(ctx, brokerID)
 		if err != nil {
 			writeErrorFromErr(w, err, "")
+			return
+		}
+		if !s.canDispatchToBroker(ctx, broker) {
+			writeError(w, http.StatusForbidden, "forbidden", "You do not have permission to perform image operations on this broker", nil)
 			return
 		}
 		if !isNodeBoundBroker(broker) {

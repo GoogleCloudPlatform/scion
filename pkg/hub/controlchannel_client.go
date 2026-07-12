@@ -276,6 +276,10 @@ func (c *ControlChannelBrokerClient) CreateAgentWithGather(ctx context.Context, 
 		return nil, nil, err
 	}
 
+	if resp.StatusCode >= 400 {
+		return nil, nil, fmt.Errorf("runtime broker returned error %d: %s", resp.StatusCode, string(resp.Body))
+	}
+
 	if resp.StatusCode == http.StatusAccepted {
 		var envReqs RemoteEnvRequirementsResponse
 		if err := json.Unmarshal(resp.Body, &envReqs); err != nil {
@@ -372,9 +376,16 @@ func (c *ControlChannelBrokerClient) ImageStatus(ctx context.Context, brokerID, 
 		query.Set("long", longImage)
 	}
 
-	resp, err := c.doRequest(ctx, brokerID, "GET", "/api/v1/images/status", query.Encode(), nil)
+	resp, err := c.doRequestRaw(ctx, brokerID, "GET", "/api/v1/images/status", query.Encode(), nil)
 	if err != nil {
 		return nil, err
+	}
+
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, &BrokerUnsupportedError{StatusCode: resp.StatusCode}
+	}
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("runtime broker returned error %d: %s", resp.StatusCode, string(resp.Body))
 	}
 
 	var result BrokerImageStatusResponse
@@ -385,6 +396,9 @@ func (c *ControlChannelBrokerClient) ImageStatus(ctx context.Context, brokerID, 
 }
 
 // PullImage asks a broker to pull an image via control channel.
+// Note: inherits the tunnel's RequestTimeout (default 120s). Large image pulls
+// may exceed this timeout and report an error even though the pull continues
+// broker-side. A future async-pull mechanism would address this limitation.
 func (c *ControlChannelBrokerClient) PullImage(ctx context.Context, brokerID, image string) error {
 	body, err := json.Marshal(map[string]string{"image": image})
 	if err != nil {
@@ -430,8 +444,8 @@ func (c *ControlChannelBrokerClient) FinalizeEnv(ctx context.Context, brokerID, 
 }
 
 // doRequestRaw tunnels an HTTP request through the control channel without
-// treating non-2xx status codes as errors. This is needed for env-gather
-// where 202 is a valid non-error response.
+// treating non-2xx status codes as errors. Callers are responsible for
+// inspecting resp.StatusCode themselves.
 func (c *ControlChannelBrokerClient) doRequestRaw(ctx context.Context, brokerID, method, path, query string, body []byte) (*wsprotocol.ResponseEnvelope, error) {
 	if !c.manager.IsConnected(brokerID) {
 		return nil, fmt.Errorf("broker %s not connected via control channel", brokerID)
@@ -446,10 +460,6 @@ func (c *ControlChannelBrokerClient) doRequestRaw(ctx context.Context, brokerID,
 	resp, err := c.manager.TunnelRequest(ctx, brokerID, req)
 	if err != nil {
 		return nil, fmt.Errorf("control channel request failed: %w", err)
-	}
-
-	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("runtime broker returned error %d: %s", resp.StatusCode, string(resp.Body))
 	}
 
 	return resp, nil
