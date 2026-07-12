@@ -820,6 +820,16 @@ func releasePluginBuildLock(name string) {
 func (s *Server) reconfigureIntegration(ctx context.Context, mgr IntegrationManager, name string) error {
 	pluginCfg := mgr.GetPluginConfig("broker", name)
 
+	// Snapshot runtime/wiring keys before any operation that may kill
+	// the plugin process. These keys are not in config files and must
+	// survive the restart cycle.
+	runtimeSnapshot := make(map[string]string, len(reconfigureRuntimeKeys))
+	for k, v := range pluginCfg {
+		if reconfigureRuntimeKeys[k] && v != "" {
+			runtimeSnapshot[k] = v
+		}
+	}
+
 	// Re-read config file if one is configured.
 	configFile := ""
 	if pluginCfg != nil {
@@ -841,15 +851,6 @@ func (s *Server) reconfigureIntegration(ctx context.Context, mgr IntegrationMana
 		merged = make(map[string]string)
 	}
 
-	// Carry over runtime/wiring keys from the manager map.
-	// Wiring keys must be included because ReplaceBrokerConfig uses replace
-	// semantics (no underlay from boot-time config).
-	for k, v := range pluginCfg {
-		if reconfigureRuntimeKeys[k] && merged[k] == "" {
-			merged[k] = v
-		}
-	}
-
 	// Inject secrets from the secret backend.
 	mappings := config.PluginSecretKeyMap[name]
 	for _, m := range mappings {
@@ -861,6 +862,16 @@ func (s *Server) reconfigureIntegration(ctx context.Context, mgr IntegrationMana
 			continue
 		}
 		merged[m.ConfigKey] = val
+	}
+
+	// Re-inject runtime/wiring keys from the snapshot captured before the
+	// process restart. These are authoritative values set by the hub at
+	// startup (hub_url, broker_id, hmac_key, etc.) and are not present in
+	// config files. Apply as underlay so file/secret values are not clobbered.
+	for k, v := range runtimeSnapshot {
+		if merged[k] == "" {
+			merged[k] = v
+		}
 	}
 
 	if err := mgr.ReplaceBrokerConfig(name, merged); err != nil {

@@ -47,6 +47,7 @@ type mockIntegrationManager struct {
 	installErr         error
 	configureCalls     []string
 	replaceConfigCalls []string
+	lastReplacedConfig map[string]string
 	reconnectCalls     []string
 	updateCalls        []string
 	installCalls       []string
@@ -118,6 +119,10 @@ func (m *mockIntegrationManager) ConfigureBroker(name string, extra map[string]s
 
 func (m *mockIntegrationManager) ReplaceBrokerConfig(name string, cfg map[string]string) error {
 	m.replaceConfigCalls = append(m.replaceConfigCalls, name)
+	m.lastReplacedConfig = make(map[string]string, len(cfg))
+	for k, v := range cfg {
+		m.lastReplacedConfig[k] = v
+	}
 	return m.replaceConfigErr
 }
 
@@ -487,6 +492,89 @@ func TestRestartIntegration_MethodNotAllowed(t *testing.T) {
 
 	if rr.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("expected 405, got %d", rr.Code)
+	}
+}
+
+func TestReconfigureIntegration_PreservesRuntimeKeys(t *testing.T) {
+	mgr := newMockIntegrationManager()
+	mgr.plugins["telegram"] = map[string]string{
+		"hub_url":          "http://hub:8080",
+		"broker_id":        "br-123",
+		"hmac_key":         "s3cret",
+		"plugin_name":      "telegram",
+		"project_slug_map": "proj1:slug1",
+		"database_url":     "postgres://localhost/scion",
+		"database_driver":  "postgres",
+		"webhook_listen":   ":9095",
+	}
+
+	srv := &Server{}
+
+	if err := srv.reconfigureIntegration(context.Background(), mgr, "telegram"); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(mgr.replaceConfigCalls) != 1 {
+		t.Fatalf("expected 1 ReplaceBrokerConfig call, got %d", len(mgr.replaceConfigCalls))
+	}
+
+	wantKeys := map[string]string{
+		"hub_url":          "http://hub:8080",
+		"broker_id":        "br-123",
+		"hmac_key":         "s3cret",
+		"plugin_name":      "telegram",
+		"project_slug_map": "proj1:slug1",
+		"database_url":     "postgres://localhost/scion",
+		"database_driver":  "postgres",
+	}
+	for k, want := range wantKeys {
+		got := mgr.lastReplacedConfig[k]
+		if got != want {
+			t.Errorf("runtime key %q: got %q, want %q", k, got, want)
+		}
+	}
+
+	if got := mgr.lastReplacedConfig["webhook_listen"]; got != ":9095" {
+		t.Errorf("non-runtime key webhook_listen: got %q, want %q", got, ":9095")
+	}
+}
+
+func TestReconfigureIntegration_RuntimeKeysWithConfigFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfgFile := filepath.Join(tmpDir, "telegram.yaml")
+	if err := os.WriteFile(cfgFile, []byte("webhook_listen: \":9095\"\nwebhook_path: /hook\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	mgr := newMockIntegrationManager()
+	mgr.plugins["telegram"] = map[string]string{
+		"config_file":      cfgFile,
+		"hub_url":          "http://hub:8080",
+		"broker_id":        "br-456",
+		"hmac_key":         "key123",
+		"plugin_name":      "telegram",
+		"project_slug_map": "p:s",
+	}
+
+	srv := &Server{}
+
+	if err := srv.reconfigureIntegration(context.Background(), mgr, "telegram"); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := mgr.lastReplacedConfig
+
+	if cfg["hub_url"] != "http://hub:8080" {
+		t.Errorf("hub_url lost after reconfigure with config file: got %q", cfg["hub_url"])
+	}
+	if cfg["broker_id"] != "br-456" {
+		t.Errorf("broker_id lost after reconfigure with config file: got %q", cfg["broker_id"])
+	}
+	if cfg["hmac_key"] != "key123" {
+		t.Errorf("hmac_key lost after reconfigure with config file: got %q", cfg["hmac_key"])
+	}
+	if cfg["webhook_listen"] != ":9095" {
+		t.Errorf("config file key webhook_listen should be present: got %q", cfg["webhook_listen"])
 	}
 }
 
