@@ -16,7 +16,9 @@ package runtime
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -217,4 +219,77 @@ active_profile: apple
 		}
 	})
 
+	t.Run("AutoDetect_CloudRun_When_No_Docker", func(t *testing.T) {
+		if runtime.GOOS != "linux" {
+			t.Skip("Cloud Run auto-detection fallback only applies on Linux")
+		}
+
+		tmpHome := t.TempDir()
+		t.Setenv("HOME", tmpHome)
+		t.Setenv("SCION_GROVE", "")
+		t.Setenv("K_SERVICE", "scion-hub")
+
+		oldWd, _ := os.Getwd()
+		tmpWd := t.TempDir()
+		if err := os.Chdir(tmpWd); err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = os.Chdir(oldWd) }()
+
+		r := GetRuntime("", "")
+		if _, ok := r.(*CloudRunRuntime); !ok {
+			t.Errorf("expected *CloudRunRuntime when K_SERVICE is set and no docker/podman in PATH, got %T", r)
+		}
+	})
+
+	t.Run("AutoDetect_Docker_Fallback_Without_CloudRun", func(t *testing.T) {
+		if runtime.GOOS != "linux" {
+			t.Skip("Linux auto-detection path only applies on Linux")
+		}
+
+		tmpHome := t.TempDir()
+		t.Setenv("HOME", tmpHome)
+		t.Setenv("SCION_GROVE", "")
+		t.Setenv("K_SERVICE", "")
+
+		oldWd, _ := os.Getwd()
+		tmpWd := t.TempDir()
+		if err := os.Chdir(tmpWd); err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = os.Chdir(oldWd) }()
+
+		// With empty PATH and no K_SERVICE, should still fall back to docker
+		r := GetRuntime("", "")
+		if _, ok := r.(*DockerRuntime); !ok {
+			t.Errorf("expected *DockerRuntime as fallback when no runtime found and not Cloud Run, got %T", r)
+		}
+	})
+}
+
+func TestGetRuntime_AutoDetect_Docker_When_Binary_Available(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Linux auto-detection path only applies on Linux")
+	}
+	if _, err := exec.LookPath("docker"); err != nil {
+		t.Skip("docker not available in test environment")
+	}
+
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	t.Setenv("SCION_GROVE", "")
+	t.Setenv("K_SERVICE", "scion-hub")
+
+	oldWd, _ := os.Getwd()
+	tmpWd := t.TempDir()
+	if err := os.Chdir(tmpWd); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(oldWd) }()
+
+	// Even with K_SERVICE set, docker binary in PATH should take priority
+	r := GetRuntime("", "")
+	if _, ok := r.(*DockerRuntime); !ok {
+		t.Errorf("expected *DockerRuntime when docker binary is available (even with K_SERVICE set), got %T", r)
+	}
 }

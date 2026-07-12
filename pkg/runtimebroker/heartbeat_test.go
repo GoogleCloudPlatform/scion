@@ -545,3 +545,26 @@ func TestHeartbeatService_AuxiliaryRuntimeDedupSameAgent(t *testing.T) {
 		t.Errorf("Expected the same agent to be deduplicated to 1, got %d", got)
 	}
 }
+
+func TestHeartbeatService_ManagerReturnsEmptyList(t *testing.T) {
+	client := &mockRuntimeBrokerService{}
+	mgr := &heartbeatMockManager{agents: nil, err: nil}
+	svc := NewHeartbeatService(client, "broker-1", time.Hour, mgr, nil, slog.Default())
+
+	if err := svc.ForceHeartbeat(context.Background()); err != nil {
+		t.Fatalf("ForceHeartbeat failed: %v", err)
+	}
+
+	calls := client.getHeartbeatCalls()
+	if len(calls) != 1 {
+		t.Fatalf("Expected 1 heartbeat call, got %d", len(calls))
+	}
+
+	heartbeat := calls[0].Heartbeat
+	if heartbeat.Status != "online" {
+		t.Errorf("Expected status 'online', got %q", heartbeat.Status)
+	}
+	if len(heartbeat.Projects) != 0 {
+		t.Errorf("Expected 0 projects when manager returns empty list, got %d", len(heartbeat.Projects))
+	}
+}

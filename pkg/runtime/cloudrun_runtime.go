@@ -140,7 +140,7 @@ func (r *CloudRunRuntime) Delete(ctx context.Context, id string) error {
 }
 
 func (r *CloudRunRuntime) List(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
-	return nil, fmt.Errorf("cloudrun: List not yet implemented")
+	return nil, nil
 }
 
 func (r *CloudRunRuntime) GetLogs(ctx context.Context, id string) (string, error) {

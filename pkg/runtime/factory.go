@@ -86,13 +86,20 @@ func GetRuntime(projectPath string, profileName string) Runtime {
 				util.Debugf("GetRuntime: no runtime detected on macOS, defaulting to docker")
 			}
 		} else {
-			// On Linux, prefer podman over docker when both are available
+			// On Linux, prefer podman over docker when both are available.
+			// If neither is found, check for Cloud Run environment.
 			if _, err := exec.LookPath("podman"); err == nil {
 				runtimeType = "podman"
 				util.Debugf("GetRuntime: detected 'podman' on Linux")
+			} else if _, err := exec.LookPath("docker"); err == nil {
+				runtimeType = "docker"
+				util.Debugf("GetRuntime: detected 'docker' on Linux")
+			} else if os.Getenv("K_SERVICE") != "" {
+				runtimeType = "cloudrun"
+				util.Debugf("GetRuntime: no container runtime binary found, detected Cloud Run environment (K_SERVICE set)")
 			} else {
 				runtimeType = "docker"
-				util.Debugf("GetRuntime: 'podman' not found on Linux, using docker")
+				util.Debugf("GetRuntime: no container runtime found on Linux, defaulting to docker")
 			}
 		}
 	}
@@ -107,6 +114,10 @@ func GetRuntime(projectPath string, profileName string) Runtime {
 	case "container":
 		return NewAppleContainerRuntime()
 	case "docker":
+		if _, err := exec.LookPath("docker"); err != nil && os.Getenv("K_SERVICE") != "" {
+			util.Debugf("GetRuntime: docker binary not found and Cloud Run environment detected (K_SERVICE set), using cloudrun runtime")
+			return NewCloudRunRuntime(rtConfig.CloudRun)
+		}
 		dr := NewDockerRuntime()
 		if rtConfig.Host != "" {
 			dr.Host = rtConfig.Host

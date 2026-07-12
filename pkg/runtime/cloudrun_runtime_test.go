@@ -87,9 +87,12 @@ func TestCloudRunRuntime_LifecycleMethodsReturnNotImplemented(t *testing.T) {
 	}
 
 	t.Run("List", func(t *testing.T) {
-		_, err := rt.List(ctx, nil)
-		if err == nil || !strings.Contains(err.Error(), "not yet implemented") {
-			t.Errorf("List() error = %v, want 'not yet implemented'", err)
+		agents, err := rt.List(ctx, nil)
+		if err != nil {
+			t.Errorf("List() error = %v, want nil", err)
+		}
+		if agents != nil {
+			t.Errorf("List() agents = %v, want nil", agents)
 		}
 	})
 
