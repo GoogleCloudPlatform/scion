@@ -527,8 +527,12 @@ func (t *brokerHTTPTransport) PullImage(ctx context.Context, brokerID, brokerEnd
 }
 
 func (t *brokerHTTPTransport) DeleteImage(ctx context.Context, brokerID, brokerEndpoint, image string) error {
-	endpoint := fmt.Sprintf("%s/api/v1/images/%s", strings.TrimSuffix(brokerEndpoint, "/"), url.PathEscape(image))
-	resp, err := t.doRequest(ctx, brokerID, http.MethodDelete, endpoint, nil)
+	endpoint := fmt.Sprintf("%s/api/v1/images/local", strings.TrimSuffix(brokerEndpoint, "/"))
+	body, err := json.Marshal(map[string]string{"image": image})
+	if err != nil {
+		return fmt.Errorf("failed to marshal request: %w", err)
+	}
+	resp, err := t.doRequest(ctx, brokerID, http.MethodDelete, endpoint, body)
 	if err != nil {
 		return fmt.Errorf("failed to send request: %w", err)
 	}

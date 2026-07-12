@@ -396,8 +396,11 @@ func (c *ControlChannelBrokerClient) PullImage(ctx context.Context, brokerID, im
 
 // DeleteImage asks a broker to remove a local image via control channel.
 func (c *ControlChannelBrokerClient) DeleteImage(ctx context.Context, brokerID, image string) error {
-	path := fmt.Sprintf("/api/v1/images/%s", url.PathEscape(image))
-	_, err := c.doRequest(ctx, brokerID, "DELETE", path, "", nil)
+	body, err := json.Marshal(map[string]string{"image": image})
+	if err != nil {
+		return fmt.Errorf("failed to marshal request: %w", err)
+	}
+	_, err = c.doRequest(ctx, brokerID, "DELETE", "/api/v1/images/local", "", body)
 	return err
 }
 

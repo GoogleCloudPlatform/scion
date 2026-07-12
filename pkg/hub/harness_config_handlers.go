@@ -693,35 +693,37 @@ func (s *Server) handleHarnessConfigCheckImage(w http.ResponseWriter, r *http.Re
 		status := "not_found"
 		source := "broker_check"
 
-		brokerResult, err := s.store.ListRuntimeBrokers(ctx, store.RuntimeBrokerFilter{}, store.ListOptions{Limit: 100})
-		if err == nil {
-			var found bool
-			var wg sync.WaitGroup
-			var mu sync.Mutex
-			for i := range brokerResult.Items {
-				b := &brokerResult.Items[i]
-				if !isNodeBoundBroker(b) {
-					continue
+		if s.brokerClient != nil {
+			brokerResult, err := s.store.ListRuntimeBrokers(ctx, store.RuntimeBrokerFilter{}, store.ListOptions{Limit: 100})
+			if err == nil {
+				var found bool
+				var wg sync.WaitGroup
+				var mu sync.Mutex
+				for i := range brokerResult.Items {
+					b := &brokerResult.Items[i]
+					if !isNodeBoundBroker(b) {
+						continue
+					}
+					wg.Add(1)
+					go func(broker *store.RuntimeBroker) {
+						defer wg.Done()
+						brokerCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+						defer cancel()
+						imgResp, err := s.brokerClient.ImageStatus(brokerCtx, broker.ID, broker.Endpoint, image, "")
+						if err != nil {
+							return
+						}
+						if imgResp.LocalShort != nil && imgResp.LocalShort.Exists {
+							mu.Lock()
+							found = true
+							mu.Unlock()
+						}
+					}(b)
 				}
-				wg.Add(1)
-				go func(broker *store.RuntimeBroker) {
-					defer wg.Done()
-					brokerCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
-					defer cancel()
-					imgResp, err := s.brokerClient.ImageStatus(brokerCtx, broker.ID, broker.Endpoint, image, "")
-					if err != nil {
-						return
-					}
-					if imgResp.LocalShort != nil && imgResp.LocalShort.Exists {
-						mu.Lock()
-						found = true
-						mu.Unlock()
-					}
-				}(b)
-			}
-			wg.Wait()
-			if found {
-				status = "valid"
+				wg.Wait()
+				if found {
+					status = "valid"
+				}
 			}
 		}
 
@@ -1090,6 +1092,14 @@ func (s *Server) handleHarnessConfigImageStatus(w http.ResponseWriter, r *http.R
 
 	registryStatus := s.checkRegistryImage(ctx, longImage)
 
+	if s.brokerClient == nil {
+		writeJSON(w, http.StatusOK, AggregatedImageStatusResponse{
+			Image:    image,
+			Registry: &registryStatus,
+		})
+		return
+	}
+
 	brokerResult, err := s.store.ListRuntimeBrokers(ctx, store.RuntimeBrokerFilter{}, store.ListOptions{Limit: 100})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "broker_list_failed", fmt.Sprintf("Failed to list brokers: %v", err), nil)
@@ -1103,11 +1113,15 @@ func (s *Server) handleHarnessConfigImageStatus(w http.ResponseWriter, r *http.R
 		if isNodeBoundBroker(b) {
 			nodeBound = append(nodeBound, b)
 		} else {
-			runtime := ""
+			var runtimeTypes []string
+			seen := map[string]bool{}
 			for _, p := range b.Profiles {
-				runtime = p.Type
-				break
+				if !seen[p.Type] {
+					runtimeTypes = append(runtimeTypes, p.Type)
+					seen[p.Type] = true
+				}
 			}
+			runtime := strings.Join(runtimeTypes, ",")
 			proxyEntries = append(proxyEntries, ProxyBrokerEntry{
 				BrokerID: b.ID, BrokerName: b.Name, Runtime: runtime,
 			})
@@ -1191,9 +1205,17 @@ func (s *Server) handleHarnessConfigDeleteLocalImage(w http.ResponseWriter, r *h
 
 	brokerID := r.URL.Query().Get("broker_id")
 	if brokerID != "" {
+		if s.brokerClient == nil {
+			writeError(w, http.StatusServiceUnavailable, "no_broker_client", "Broker routing not available", nil)
+			return
+		}
 		broker, err := s.store.GetRuntimeBroker(ctx, brokerID)
 		if err != nil {
 			writeErrorFromErr(w, err, "")
+			return
+		}
+		if !isNodeBoundBroker(broker) {
+			writeError(w, http.StatusBadRequest, "invalid_broker", "Image operations are only supported on node-bound brokers", nil)
 			return
 		}
 		if err := s.brokerClient.DeleteImage(ctx, broker.ID, broker.Endpoint, image); err != nil {
@@ -1253,9 +1275,17 @@ func (s *Server) handleHarnessConfigPullImage(w http.ResponseWriter, r *http.Req
 
 	brokerID := r.URL.Query().Get("broker_id")
 	if brokerID != "" {
+		if s.brokerClient == nil {
+			writeError(w, http.StatusServiceUnavailable, "no_broker_client", "Broker routing not available", nil)
+			return
+		}
 		broker, err := s.store.GetRuntimeBroker(ctx, brokerID)
 		if err != nil {
 			writeErrorFromErr(w, err, "")
+			return
+		}
+		if !isNodeBoundBroker(broker) {
+			writeError(w, http.StatusBadRequest, "invalid_broker", "Image operations are only supported on node-bound brokers", nil)
 			return
 		}
 		if err := s.brokerClient.PullImage(ctx, broker.ID, broker.Endpoint, pullImage); err != nil {
