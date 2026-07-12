@@ -949,6 +949,50 @@ func TestInstallIntegration_UnknownPlugin(t *testing.T) {
 	}
 }
 
+func TestInstallIntegration_PreservesExistingConfigFile(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	scionDir := filepath.Join(tmpHome, ".scion")
+	if err := os.MkdirAll(scionDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(scionDir, "scion-telegram.yaml")
+	originalContent := "bot_token: \"secret-keep-me\"\n"
+	if err := os.WriteFile(configPath, []byte(originalContent), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	repoDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repoDir, "extras", "scion-telegram"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	mgr := newMockIntegrationManager()
+
+	srv := &Server{}
+	srv.pluginManager = mgr
+	srv.config.MaintenanceConfig.RepoPath = repoDir
+
+	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/integrations/telegram/install", nil)
+	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	rr := httptest.NewRecorder()
+	srv.handleAdminIntegrationByName(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("failed to read config file after install: %v", err)
+	}
+	if string(data) != originalContent {
+		t.Errorf("config file was overwritten: got %q, want %q", string(data), originalContent)
+	}
+}
+
 // --- Available integrations endpoint ---
 
 func TestListAvailableIntegrations_NoRepoPath(t *testing.T) {

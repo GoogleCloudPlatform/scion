@@ -628,10 +628,23 @@ func (s *Server) handleInstallIntegration(w http.ResponseWriter, r *http.Request
 	}
 
 	configFilePath := "~/.scion/scion-" + name + ".yaml"
-	if err := config.CreatePluginConfigFile(name, configFilePath); err != nil {
-		slog.Error("Failed to create plugin config file", "plugin", name, "error", err)
-		InternalError(w)
-		return
+	resolvedConfigPath := configFilePath
+	if home, err := os.UserHomeDir(); err == nil {
+		resolvedConfigPath = filepath.Join(home, configFilePath[2:])
+	}
+	if _, err := os.Stat(resolvedConfigPath); err != nil {
+		if !os.IsNotExist(err) {
+			slog.Error("Failed to check plugin config file", "plugin", name, "path", resolvedConfigPath, "error", err)
+			InternalError(w)
+			return
+		}
+		if err := config.CreatePluginConfigFile(name, configFilePath); err != nil {
+			slog.Error("Failed to create plugin config file", "plugin", name, "error", err)
+			InternalError(w)
+			return
+		}
+	} else {
+		slog.Info("Plugin config file already exists, preserving", "plugin", name, "path", resolvedConfigPath)
 	}
 
 	settingsWriteMu.Lock()
