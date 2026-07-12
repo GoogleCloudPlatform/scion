@@ -41,6 +41,7 @@ type sectionState struct {
 	Revision  int64
 	UpdatedAt time.Time
 	UpdatedBy string
+	Origin    string
 }
 
 // Layer1Snapshot is an immutable merged view of all Layer-1 operational settings.
@@ -130,7 +131,7 @@ type SettingsUpdatedEvent struct {
 // In file/SQLite mode the legacy reloadSettings path is used instead.
 type OperationalSettings struct {
 	store        store.HubSettingStore
-	fileFallback *koanf.Koanf    // Layer-1 keys from settings.yaml + defaults (file values only, never env)
+	bootstrapKoanf *koanf.Koanf    // Full bootstrap merge: defaults → SEED → yaml → SERVER
 	envOverrides map[string]bool // Layer-1 koanf keys satisfied by env
 	envKoanf     *koanf.Koanf    // env-only koanf for merge
 	mu           sync.RWMutex
@@ -154,13 +155,12 @@ type OperationalSettings struct {
 
 // NewOperationalSettings creates a new OperationalSettings service.
 //
-// fileFallback is a koanf instance loaded from settings.yaml (file values only,
-// no env overlay) representing the Layer-1 fallback when a section is absent
-// from the DB. envKoanf is a koanf instance containing only SCION_SERVER_*
-// environment variable keys for the precedence merge.
+// bootstrapKoanf is the full bootstrap merge (defaults → SEED → yaml → SERVER)
+// used as the fallback for sections absent from the DB. envKoanf is retained
+// only for env-override detection; it is NOT merged into Snapshot.
 func NewOperationalSettings(
 	st store.HubSettingStore,
-	fileFallback *koanf.Koanf,
+	bootstrapKoanf *koanf.Koanf,
 	envKoanf *koanf.Koanf,
 ) *OperationalSettings {
 	envOverrides := make(map[string]bool)
@@ -170,7 +170,7 @@ func NewOperationalSettings(
 
 	return &OperationalSettings{
 		store:        st,
-		fileFallback: fileFallback,
+		bootstrapKoanf: bootstrapKoanf,
 		envOverrides: envOverrides,
 		envKoanf:     envKoanf,
 		cache:        make(map[string]sectionState),
@@ -206,6 +206,7 @@ func (o *OperationalSettings) Refresh(ctx context.Context) ([]string, error) {
 			Revision:  row.Revision,
 			UpdatedAt: row.UpdatedAt,
 			UpdatedBy: row.UpdatedBy,
+			Origin:    row.Origin,
 		}
 	}
 
@@ -251,7 +252,7 @@ func (o *OperationalSettings) Snapshot() Layer1Snapshot {
 			continue
 		}
 		// Extract this section from the file fallback and load it.
-		doc, err := opsettings.ExtractSectionFromKoanf(o.fileFallback, sec.Name)
+		doc, err := opsettings.ExtractSectionFromKoanf(o.bootstrapKoanf, sec.Name)
 		if err != nil {
 			continue
 		}
@@ -332,6 +333,7 @@ func (o *OperationalSettings) Update(
 		Revision:  result.Revision,
 		UpdatedAt: result.UpdatedAt,
 		UpdatedBy: result.UpdatedBy,
+		Origin:    result.Origin,
 	}
 	o.mu.Unlock()
 

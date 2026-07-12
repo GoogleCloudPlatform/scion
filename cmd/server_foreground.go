@@ -1443,7 +1443,6 @@ func initOperationalSettings(ctx context.Context, cfg *config.GlobalConfig, hubS
 	}
 
 	// Build koanf instances.
-	fileKoanf := config.LoadFileOnlyKoanf()
 	envKoanf := config.LoadEnvKoanf()
 	bootstrapKoanf := config.LoadBootstrapKoanf()
 
@@ -1476,7 +1475,7 @@ func initOperationalSettings(ctx context.Context, cfg *config.GlobalConfig, hubS
 	}
 
 	// --- Create OperationalSettings, Refresh, and apply ---
-	ops := hub.NewOperationalSettings(settingStore, fileKoanf, envKoanf)
+	ops := hub.NewOperationalSettings(settingStore, bootstrapKoanf, envKoanf)
 
 	changed, err := ops.Refresh(ctx)
 	if err != nil {

@@ -238,7 +238,7 @@ func (s *Server) buildSectionMetadata(_ context.Context, ops *OperationalSetting
 				UpdatedAt: &t,
 				UpdatedBy: ss.UpdatedBy,
 			}
-		} else if s.sectionHasFileValues(ops, sec.Name) {
+		} else if s.sectionHasBootstrapValues(ops, sec.Name) {
 			meta[sec.Name] = SectionMetadata{
 				Source: "file",
 			}
@@ -252,15 +252,15 @@ func (s *Server) buildSectionMetadata(_ context.Context, ops *OperationalSetting
 	return meta
 }
 
-// sectionHasFileValues checks whether the file fallback koanf has any non-zero
+// sectionHasBootstrapValues checks whether the bootstrap koanf has any non-zero
 // values for the given section's koanf paths.
-func (s *Server) sectionHasFileValues(ops *OperationalSettings, sectionName string) bool {
+func (s *Server) sectionHasBootstrapValues(ops *OperationalSettings, sectionName string) bool {
 	sec := opsettings.SectionByName(sectionName)
 	if sec == nil || len(sec.KoanfPaths) == 0 {
 		return false
 	}
 	for _, kp := range sec.KoanfPaths {
-		if ops.fileFallback != nil && ops.fileFallback.Exists(kp) {
+		if ops.bootstrapKoanf != nil && ops.bootstrapKoanf.Exists(kp) {
 			return true
 		}
 	}
