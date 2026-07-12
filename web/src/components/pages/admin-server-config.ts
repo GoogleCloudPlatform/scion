@@ -220,6 +220,7 @@ interface SectionMetadataInfo {
   revision?: number;
   updated_at?: string;
   updated_by?: string;
+  origin?: string; // "seeded" | "managed" (DB mode only)
 }
 
 /** Per-field validation error from a 400 validation_failed response. */
@@ -859,6 +860,16 @@ export class ScionPageAdminServerConfig extends LitElement {
 
     .section-meta-item sl-icon {
       font-size: 0.75rem;
+    }
+
+    /* ── Settings-DB: seeded section caption ── */
+
+    .seeded-caption {
+      font-size: 0.8125rem;
+      font-style: italic;
+      color: var(--scion-text-muted, #64748b);
+      margin-top: -0.5rem;
+      margin-bottom: 0.75rem;
     }
 
     /* ── Settings-DB: ignored keys notice ── */
@@ -1661,14 +1672,19 @@ export class ScionPageAdminServerConfig extends LitElement {
   }
 
   /**
-   * Renders a subtle per-section metadata caption showing source, revision,
-   * updated_by, and updated_at. Only renders when section_metadata is present
-   * in the GET response (postgres mode).
+   * Renders per-section origin caption. Seeded sections show a tracking message;
+   * managed sections show source/revision/updated_by/updated_at metadata.
    */
   private renderSectionMeta(sectionName: string): typeof nothing | ReturnType<typeof html> {
     if (!this.sectionMetadata) return nothing;
     const meta = this.sectionMetadata[sectionName];
     if (!meta) return nothing;
+
+    if (this.settingsTier === 'db' && meta.origin === 'seeded') {
+      return html`<div class="seeded-caption">
+        Tracking deployment configuration — will re-sync on restart until edited
+      </div>`;
+    }
 
     const sourceLabel =
       meta.source === 'db' ? 'Database' : meta.source === 'file' ? 'File' : 'Default';
