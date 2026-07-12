@@ -792,6 +792,33 @@ export class ScionPageAdminServerConfig extends LitElement {
       margin-right: 0.25rem;
     }
 
+    /* ── Layer-aware: read-only field rendering ── */
+
+    .read-only-value {
+      font-size: 0.875rem;
+      color: var(--scion-text, #1e293b);
+      padding: 0.5rem 0.75rem;
+      background: var(--scion-bg, #f8fafc);
+      border: 1px solid var(--scion-border, #e2e8f0);
+      border-radius: var(--scion-radius, 0.5rem);
+      min-height: 1.5em;
+    }
+
+    .read-only-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.25rem;
+      font-size: 0.6875rem;
+      font-weight: 500;
+      color: var(--sl-color-neutral-600, #475569);
+      background: var(--sl-color-neutral-100, #f1f5f9);
+      border: 1px solid var(--sl-color-neutral-200, #e2e8f0);
+      padding: 0.125rem 0.5rem;
+      border-radius: 9999px;
+      white-space: nowrap;
+      font-style: italic;
+    }
+
     /* ── Settings-DB: per-field env badge ── */
 
     .env-badge {
@@ -1120,6 +1147,33 @@ export class ScionPageAdminServerConfig extends LitElement {
     this.envOverrides = data.env_overrides || [];
     this.envKeys = new Set(this.envOverrides);
     this.sectionMetadata = data.section_metadata || null;
+  }
+
+  private readOnlyReason(koanfKey: string): 'bootstrap' | 'env' | null {
+    if (this.settingsTier === 'db') {
+      return this.layer1Keys.has(koanfKey) ? null : 'bootstrap';
+    }
+    return this.envKeys.has(koanfKey) ? 'env' : null;
+  }
+
+  private renderReadOnlyBadge(reason: 'bootstrap' | 'env'): ReturnType<typeof html> {
+    const text =
+      reason === 'bootstrap'
+        ? '🔒 Managed via deployment configuration'
+        : '🔒 Set via environment variable';
+    return html`<span class="read-only-badge">${text}</span>`;
+  }
+
+  private renderFieldValue(
+    koanfKey: string,
+    displayValue: string,
+    editableTemplate: ReturnType<typeof html>
+  ): ReturnType<typeof html> {
+    const reason = this.readOnlyReason(koanfKey);
+    if (reason) {
+      return html`${this.renderReadOnlyBadge(reason)}<span class="read-only-value">${displayValue || '—'}</span>`;
+    }
+    return editableTemplate;
   }
 
   private buildPayload(): Record<string, unknown> {
@@ -1738,97 +1792,126 @@ export class ScionPageAdminServerConfig extends LitElement {
           <div class="form-field">
             <label>Server Mode</label>
             <span class="hint">Operating mode: workstation or production</span>
-            <sl-select
-              value=${this.serverMode || 'workstation'}
-              @sl-change=${(e: Event) => {
-                this.serverMode = (e.target as HTMLSelectElement).value;
-              }}
-            >
-              <sl-option value="workstation">Workstation</sl-option>
-              <sl-option value="production">Production</sl-option>
-            </sl-select>
+            ${this.renderFieldValue(
+              'server.mode',
+              this.serverMode || 'workstation',
+              html`<sl-select
+                value=${this.serverMode || 'workstation'}
+                @sl-change=${(e: Event) => {
+                  this.serverMode = (e.target as HTMLSelectElement).value;
+                }}
+              >
+                <sl-option value="workstation">Workstation</sl-option>
+                <sl-option value="production">Production</sl-option>
+              </sl-select>`
+            )}
           </div>
           <div class="form-field">
             <label>Log Level</label>
-            <sl-select
-              value=${this.logLevel || 'info'}
-              @sl-change=${(e: Event) => {
-                this.logLevel = (e.target as HTMLSelectElement).value;
-              }}
-            >
-              <sl-option value="debug">Debug</sl-option>
-              <sl-option value="info">Info</sl-option>
-              <sl-option value="warn">Warn</sl-option>
-              <sl-option value="error">Error</sl-option>
-            </sl-select>
+            ${this.renderFieldValue(
+              'server.log_level',
+              this.logLevel || 'info',
+              html`<sl-select
+                value=${this.logLevel || 'info'}
+                @sl-change=${(e: Event) => {
+                  this.logLevel = (e.target as HTMLSelectElement).value;
+                }}
+              >
+                <sl-option value="debug">Debug</sl-option>
+                <sl-option value="info">Info</sl-option>
+                <sl-option value="warn">Warn</sl-option>
+                <sl-option value="error">Error</sl-option>
+              </sl-select>`
+            )}
           </div>
           <div class="form-field">
             <label>Log Format</label>
-            <sl-select
-              value=${this.logFormat || 'text'}
-              @sl-change=${(e: Event) => {
-                this.logFormat = (e.target as HTMLSelectElement).value;
-              }}
-            >
-              <sl-option value="text">Text</sl-option>
-              <sl-option value="json">JSON</sl-option>
-            </sl-select>
+            ${this.renderFieldValue(
+              'server.log_format',
+              this.logFormat || 'text',
+              html`<sl-select
+                value=${this.logFormat || 'text'}
+                @sl-change=${(e: Event) => {
+                  this.logFormat = (e.target as HTMLSelectElement).value;
+                }}
+              >
+                <sl-option value="text">Text</sl-option>
+                <sl-option value="json">JSON</sl-option>
+              </sl-select>`
+            )}
           </div>
           <div class="form-field">
             <label>Active Profile</label>
             <span class="hint">Default runtime profile for agents</span>
-            <sl-input
-              value=${this.activeProfile}
-              placeholder="default"
-              @sl-input=${(e: Event) => {
-                this.activeProfile = (e.target as HTMLInputElement).value;
-              }}
-            ></sl-input>
+            ${this.renderFieldValue(
+              'active_profile',
+              this.activeProfile,
+              html`<sl-input
+                value=${this.activeProfile}
+                placeholder="default"
+                @sl-input=${(e: Event) => {
+                  this.activeProfile = (e.target as HTMLInputElement).value;
+                }}
+              ></sl-input>`
+            )}
           </div>
           <div class="form-field">
             <label>Default Template</label>
-            ${this.renderEnvBadge('default_template')}
-            <sl-input
-              value=${this.defaultTemplate}
-              placeholder="default"
-              @sl-input=${(e: Event) => {
-                this.defaultTemplate = (e.target as HTMLInputElement).value;
-              }}
-            ></sl-input>
+            ${this.renderFieldValue(
+              'default_template',
+              this.defaultTemplate,
+              html`${this.renderEnvBadge('default_template')}<sl-input
+                value=${this.defaultTemplate}
+                placeholder="default"
+                @sl-input=${(e: Event) => {
+                  this.defaultTemplate = (e.target as HTMLInputElement).value;
+                }}
+              ></sl-input>`
+            )}
           </div>
           <div class="form-field">
             <label>Default Harness Config</label>
-            ${this.renderEnvBadge('default_harness_config')}
-            <sl-input
-              value=${this.defaultHarnessConfig}
-              @sl-input=${(e: Event) => {
-                this.defaultHarnessConfig = (e.target as HTMLInputElement).value;
-              }}
-            ></sl-input>
+            ${this.renderFieldValue(
+              'default_harness_config',
+              this.defaultHarnessConfig,
+              html`${this.renderEnvBadge('default_harness_config')}<sl-input
+                value=${this.defaultHarnessConfig}
+                @sl-input=${(e: Event) => {
+                  this.defaultHarnessConfig = (e.target as HTMLInputElement).value;
+                }}
+              ></sl-input>`
+            )}
           </div>
           <div class="form-field full-width">
             <label>Image Registry</label>
-            ${this.renderEnvBadge('image_registry')}
             <span class="hint"
               >Container image registry for agent images (e.g., ghcr.io/myorg)</span
             >
-            <sl-input
-              value=${this.imageRegistry}
-              placeholder="ghcr.io/myorg"
-              @sl-input=${(e: Event) => {
-                this.imageRegistry = (e.target as HTMLInputElement).value;
-              }}
-            ></sl-input>
+            ${this.renderFieldValue(
+              'image_registry',
+              this.imageRegistry,
+              html`${this.renderEnvBadge('image_registry')}<sl-input
+                value=${this.imageRegistry}
+                placeholder="ghcr.io/myorg"
+                @sl-input=${(e: Event) => {
+                  this.imageRegistry = (e.target as HTMLInputElement).value;
+                }}
+              ></sl-input>`
+            )}
           </div>
           <div class="form-field full-width">
             <label>Workspace Path</label>
             <span class="hint">Override default workspace path for agent worktrees</span>
-            <sl-input
-              value=${this.workspacePath}
-              @sl-input=${(e: Event) => {
-                this.workspacePath = (e.target as HTMLInputElement).value;
-              }}
-            ></sl-input>
+            ${this.renderFieldValue(
+              'workspace_path',
+              this.workspacePath,
+              html`<sl-input
+                value=${this.workspacePath}
+                @sl-input=${(e: Event) => {
+                  this.workspacePath = (e.target as HTMLInputElement).value;
+                }}
+              ></sl-input>`
+            )}
           </div>
         </div>
       </div>
@@ -1839,48 +1922,60 @@ export class ScionPageAdminServerConfig extends LitElement {
         <div class="form-grid">
           <div class="form-field">
             <label>Default Max Turns</label>
-            ${this.renderEnvBadge('default_max_turns')}
             <span class="hint">Maximum conversation turns for new agents</span>
-            <sl-input
-              type="number"
-              value=${this.defaultMaxTurns ? String(this.defaultMaxTurns) : ''}
-              placeholder="No limit"
-              @sl-input=${(e: Event) => {
-                this.defaultMaxTurns = parseInt((e.target as HTMLInputElement).value) || 0;
-              }}
-            ></sl-input>
+            ${this.renderFieldValue(
+              'default_max_turns',
+              this.defaultMaxTurns ? String(this.defaultMaxTurns) : '',
+              html`${this.renderEnvBadge('default_max_turns')}<sl-input
+                type="number"
+                value=${this.defaultMaxTurns ? String(this.defaultMaxTurns) : ''}
+                placeholder="No limit"
+                @sl-input=${(e: Event) => {
+                  this.defaultMaxTurns = parseInt((e.target as HTMLInputElement).value) || 0;
+                }}
+              ></sl-input>`
+            )}
           </div>
           <div class="form-field">
             <label>Default Max Model Calls</label>
-            ${this.renderEnvBadge('default_max_model_calls')}
             <span class="hint">Maximum LLM API calls for new agents</span>
-            <sl-input
-              type="number"
-              value=${this.defaultMaxModelCalls ? String(this.defaultMaxModelCalls) : ''}
-              placeholder="No limit"
-              @sl-input=${(e: Event) => {
-                this.defaultMaxModelCalls = parseInt((e.target as HTMLInputElement).value) || 0;
-              }}
-            ></sl-input>
+            ${this.renderFieldValue(
+              'default_max_model_calls',
+              this.defaultMaxModelCalls ? String(this.defaultMaxModelCalls) : '',
+              html`${this.renderEnvBadge('default_max_model_calls')}<sl-input
+                type="number"
+                value=${this.defaultMaxModelCalls ? String(this.defaultMaxModelCalls) : ''}
+                placeholder="No limit"
+                @sl-input=${(e: Event) => {
+                  this.defaultMaxModelCalls = parseInt((e.target as HTMLInputElement).value) || 0;
+                }}
+              ></sl-input>`
+            )}
           </div>
           <div class="form-field full-width">
             <label>Default Max Duration</label>
-            ${this.renderEnvBadge('default_max_duration')}
             <span class="hint">Maximum execution time (Go duration, e.g. 2h, 30m)</span>
-            <sl-input
-              value=${this.defaultMaxDuration}
-              placeholder="e.g. 2h, 30m"
-              @sl-input=${(e: Event) => {
-                this.defaultMaxDuration = (e.target as HTMLInputElement).value;
-              }}
-            ></sl-input>
+            ${this.renderFieldValue(
+              'default_max_duration',
+              this.defaultMaxDuration,
+              html`${this.renderEnvBadge('default_max_duration')}<sl-input
+                value=${this.defaultMaxDuration}
+                placeholder="e.g. 2h, 30m"
+                @sl-input=${(e: Event) => {
+                  this.defaultMaxDuration = (e.target as HTMLInputElement).value;
+                }}
+              ></sl-input>`
+            )}
           </div>
         </div>
       </div>
 
       <div class="section">
         <h3 class="section-title">Default Agent Resources</h3>
-        ${this.renderEnvBadge('default_resources')}
+        ${this.renderFieldValue(
+          'default_resources',
+          [this.defaultResCpuReq, this.defaultResMemReq, this.defaultResCpuLim, this.defaultResMemLim, this.defaultResDisk].filter(Boolean).join(', '),
+          html`${this.renderEnvBadge('default_resources')}
         <div class="form-grid">
           <div class="form-field">
             <label>CPU Request</label>
@@ -1932,7 +2027,8 @@ export class ScionPageAdminServerConfig extends LitElement {
               }}
             ></sl-input>
           </div>
-        </div>
+        </div>`
+        )}
       </div>
 
       ${this.renderMessageBrokerSection()}
@@ -1945,24 +2041,32 @@ export class ScionPageAdminServerConfig extends LitElement {
         <h3 class="section-title">Message Broker</h3>
         <div class="form-grid">
           <div class="form-field">
-            <sl-switch
-              ?checked=${this.messageBrokerEnabled}
-              @sl-change=${(e: Event) => {
-                this.messageBrokerEnabled = (e.target as HTMLInputElement).checked;
-              }}
-              >Enable Message Broker</sl-switch
-            >
+            ${this.renderFieldValue(
+              'server.message_broker.enabled',
+              this.messageBrokerEnabled ? 'Enabled' : 'Disabled',
+              html`<sl-switch
+                ?checked=${this.messageBrokerEnabled}
+                @sl-change=${(e: Event) => {
+                  this.messageBrokerEnabled = (e.target as HTMLInputElement).checked;
+                }}
+                >Enable Message Broker</sl-switch
+              >`
+            )}
           </div>
           <div class="form-field">
             <label>Type</label>
-            <sl-select
-              value=${this.messageBrokerType || 'inprocess'}
-              @sl-change=${(e: Event) => {
-                this.messageBrokerType = (e.target as HTMLSelectElement).value;
-              }}
-            >
-              <sl-option value="inprocess">In-Process</sl-option>
-            </sl-select>
+            ${this.renderFieldValue(
+              'server.message_broker.type',
+              this.messageBrokerType || 'inprocess',
+              html`<sl-select
+                value=${this.messageBrokerType || 'inprocess'}
+                @sl-change=${(e: Event) => {
+                  this.messageBrokerType = (e.target as HTMLSelectElement).value;
+                }}
+              >
+                <sl-option value="inprocess">In-Process</sl-option>
+              </sl-select>`
+            )}
           </div>
         </div>
       </div>
@@ -1978,69 +2082,91 @@ export class ScionPageAdminServerConfig extends LitElement {
           <div class="form-field">
             <label>Port</label>
             <span class="hint">Requires restart</span>
-            <sl-input
-              type="number"
-              value=${String(this.hubPort || 9810)}
-              @sl-input=${(e: Event) => {
-                this.hubPort = parseInt((e.target as HTMLInputElement).value) || 0;
-              }}
-            ></sl-input>
+            ${this.renderFieldValue(
+              'server.hub.port',
+              String(this.hubPort || 9810),
+              html`<sl-input
+                type="number"
+                value=${String(this.hubPort || 9810)}
+                @sl-input=${(e: Event) => {
+                  this.hubPort = parseInt((e.target as HTMLInputElement).value) || 0;
+                }}
+              ></sl-input>`
+            )}
           </div>
           <div class="form-field">
             <label>Host</label>
             <span class="hint">Requires restart</span>
-            <sl-input
-              value=${this.hubHost || '0.0.0.0'}
-              @sl-input=${(e: Event) => {
-                this.hubHost = (e.target as HTMLInputElement).value;
-              }}
-            ></sl-input>
+            ${this.renderFieldValue(
+              'server.hub.host',
+              this.hubHost || '0.0.0.0',
+              html`<sl-input
+                value=${this.hubHost || '0.0.0.0'}
+                @sl-input=${(e: Event) => {
+                  this.hubHost = (e.target as HTMLInputElement).value;
+                }}
+              ></sl-input>`
+            )}
           </div>
           <div class="form-field full-width">
             <label>Public URL</label>
-            ${this.renderEnvBadge('server.hub.public_url')}
             <span class="hint">Endpoint URL for agents to call back to the Hub</span>
-            <sl-input
-              value=${this.hubPublicUrl}
-              placeholder="https://hub.example.com"
-              @sl-input=${(e: Event) => {
-                this.hubPublicUrl = (e.target as HTMLInputElement).value;
-              }}
-            ></sl-input>
+            ${this.renderFieldValue(
+              'server.hub.public_url',
+              this.hubPublicUrl,
+              html`${this.renderEnvBadge('server.hub.public_url')}<sl-input
+                value=${this.hubPublicUrl}
+                placeholder="https://hub.example.com"
+                @sl-input=${(e: Event) => {
+                  this.hubPublicUrl = (e.target as HTMLInputElement).value;
+                }}
+              ></sl-input>`
+            )}
           </div>
           <div class="form-field">
             <label>Read Timeout</label>
-            <sl-input
-              value=${this.hubReadTimeout || '30s'}
-              placeholder="30s"
-              @sl-input=${(e: Event) => {
-                this.hubReadTimeout = (e.target as HTMLInputElement).value;
-              }}
-            ></sl-input>
+            ${this.renderFieldValue(
+              'server.hub.read_timeout',
+              this.hubReadTimeout || '30s',
+              html`<sl-input
+                value=${this.hubReadTimeout || '30s'}
+                placeholder="30s"
+                @sl-input=${(e: Event) => {
+                  this.hubReadTimeout = (e.target as HTMLInputElement).value;
+                }}
+              ></sl-input>`
+            )}
           </div>
           <div class="form-field">
             <label>Write Timeout</label>
-            <sl-input
-              value=${this.hubWriteTimeout || '60s'}
-              placeholder="60s"
-              @sl-input=${(e: Event) => {
-                this.hubWriteTimeout = (e.target as HTMLInputElement).value;
-              }}
-            ></sl-input>
+            ${this.renderFieldValue(
+              'server.hub.write_timeout',
+              this.hubWriteTimeout || '60s',
+              html`<sl-input
+                value=${this.hubWriteTimeout || '60s'}
+                placeholder="60s"
+                @sl-input=${(e: Event) => {
+                  this.hubWriteTimeout = (e.target as HTMLInputElement).value;
+                }}
+              ></sl-input>`
+            )}
           </div>
           <div class="form-field full-width">
             <label>Admin Emails</label>
-            ${this.renderEnvBadge('server.hub.admin_emails')}
             <span class="hint"
               >Comma-separated list of email addresses to auto-promote to admin</span
             >
-            <sl-input
-              value=${this.hubAdminEmails}
-              placeholder="admin@example.com, ops@example.com"
-              @sl-input=${(e: Event) => {
-                this.hubAdminEmails = (e.target as HTMLInputElement).value;
-              }}
-            ></sl-input>
+            ${this.renderFieldValue(
+              'server.hub.admin_emails',
+              this.hubAdminEmails,
+              html`${this.renderEnvBadge('server.hub.admin_emails')}<sl-input
+                value=${this.hubAdminEmails}
+                placeholder="admin@example.com, ops@example.com"
+                @sl-input=${(e: Event) => {
+                  this.hubAdminEmails = (e.target as HTMLInputElement).value;
+                }}
+              ></sl-input>`
+            )}
           </div>
         </div>
       </div>
@@ -2051,38 +2177,47 @@ export class ScionPageAdminServerConfig extends LitElement {
         <div class="form-grid">
           <div class="form-field">
             <label>Soft Delete Retention</label>
-            ${this.renderEnvBadge('server.hub.soft_delete_retention')}
             <span class="hint"
               >How long soft-deleted agents are retained (e.g., 72h). Empty disables
               soft-delete.</span
             >
-            <sl-input
-              value=${this.hubSoftDeleteRetention}
-              placeholder="72h"
-              @sl-input=${(e: Event) => {
-                this.hubSoftDeleteRetention = (e.target as HTMLInputElement).value;
-              }}
-            ></sl-input>
+            ${this.renderFieldValue(
+              'server.hub.soft_delete_retention',
+              this.hubSoftDeleteRetention || '—',
+              html`${this.renderEnvBadge('server.hub.soft_delete_retention')}<sl-input
+                value=${this.hubSoftDeleteRetention}
+                placeholder="72h"
+                @sl-input=${(e: Event) => {
+                  this.hubSoftDeleteRetention = (e.target as HTMLInputElement).value;
+                }}
+              ></sl-input>`
+            )}
           </div>
           <div class="form-field">
-            ${this.renderEnvBadge('server.hub.soft_delete_retain_files')}
-            <sl-switch
-              ?checked=${this.hubSoftDeleteRetainFiles}
-              @sl-change=${(e: Event) => {
-                this.hubSoftDeleteRetainFiles = (e.target as HTMLInputElement).checked;
-              }}
-              >Retain files on soft delete</sl-switch
-            >
+            ${this.renderFieldValue(
+              'server.hub.soft_delete_retain_files',
+              this.hubSoftDeleteRetainFiles ? 'Enabled' : 'Disabled',
+              html`${this.renderEnvBadge('server.hub.soft_delete_retain_files')}<sl-switch
+                ?checked=${this.hubSoftDeleteRetainFiles}
+                @sl-change=${(e: Event) => {
+                  this.hubSoftDeleteRetainFiles = (e.target as HTMLInputElement).checked;
+                }}
+                >Retain files on soft delete</sl-switch
+              >`
+            )}
           </div>
           <div class="form-field">
-            ${this.renderEnvBadge('server.hub.auto_suspend_stalled')}
-            <sl-switch
-              ?checked=${this.hubAutoSuspendStalled}
-              @sl-change=${(e: Event) => {
-                this.hubAutoSuspendStalled = (e.target as HTMLInputElement).checked;
-              }}
-              >Auto-suspend stalled agents</sl-switch
-            >
+            ${this.renderFieldValue(
+              'server.hub.auto_suspend_stalled',
+              this.hubAutoSuspendStalled ? 'Enabled' : 'Disabled',
+              html`${this.renderEnvBadge('server.hub.auto_suspend_stalled')}<sl-switch
+                ?checked=${this.hubAutoSuspendStalled}
+                @sl-change=${(e: Event) => {
+                  this.hubAutoSuspendStalled = (e.target as HTMLInputElement).checked;
+                }}
+                >Auto-suspend stalled agents</sl-switch
+              >`
+            )}
             <span class="hint"
               >When enabled, agents detected as stalled are automatically suspended (container
               stopped, session preserved for resume).</span
@@ -2099,48 +2234,64 @@ export class ScionPageAdminServerConfig extends LitElement {
         <h3 class="section-title">Runtime Broker</h3>
         <div class="form-grid">
           <div class="form-field full-width">
-            <sl-switch
-              ?checked=${this.brokerEnabled}
-              @sl-change=${(e: Event) => {
-                this.brokerEnabled = (e.target as HTMLInputElement).checked;
-              }}
-              >Enable Runtime Broker</sl-switch
-            >
+            ${this.renderFieldValue(
+              'server.broker.enabled',
+              this.brokerEnabled ? 'Enabled' : 'Disabled',
+              html`<sl-switch
+                ?checked=${this.brokerEnabled}
+                @sl-change=${(e: Event) => {
+                  this.brokerEnabled = (e.target as HTMLInputElement).checked;
+                }}
+                >Enable Runtime Broker</sl-switch
+              >`
+            )}
             <span class="hint">Requires restart</span>
           </div>
           <div class="form-field">
             <label>Port</label>
             <span class="hint">Requires restart</span>
-            <sl-input
-              type="number"
-              value=${String(this.brokerPort || 9800)}
-              @sl-input=${(e: Event) => {
-                this.brokerPort = parseInt((e.target as HTMLInputElement).value) || 0;
-              }}
-            ></sl-input>
+            ${this.renderFieldValue(
+              'server.broker.port',
+              String(this.brokerPort || 9800),
+              html`<sl-input
+                type="number"
+                value=${String(this.brokerPort || 9800)}
+                @sl-input=${(e: Event) => {
+                  this.brokerPort = parseInt((e.target as HTMLInputElement).value) || 0;
+                }}
+              ></sl-input>`
+            )}
           </div>
           <div class="form-field">
             <label>Host</label>
             <span class="hint">Requires restart</span>
-            <sl-input
-              value=${this.brokerHost || '0.0.0.0'}
-              @sl-input=${(e: Event) => {
-                this.brokerHost = (e.target as HTMLInputElement).value;
-              }}
-            ></sl-input>
+            ${this.renderFieldValue(
+              'server.broker.host',
+              this.brokerHost || '0.0.0.0',
+              html`<sl-input
+                value=${this.brokerHost || '0.0.0.0'}
+                @sl-input=${(e: Event) => {
+                  this.brokerHost = (e.target as HTMLInputElement).value;
+                }}
+              ></sl-input>`
+            )}
           </div>
           <div class="form-field full-width">
             <label>Hub Endpoint</label>
             <span class="hint"
               >Hub API endpoint for status reporting (when Hub not co-located)</span
             >
-            <sl-input
-              value=${this.brokerHubEndpoint}
-              placeholder="https://hub.example.com"
-              @sl-input=${(e: Event) => {
-                this.brokerHubEndpoint = (e.target as HTMLInputElement).value;
-              }}
-            ></sl-input>
+            ${this.renderFieldValue(
+              'server.broker.hub_endpoint',
+              this.brokerHubEndpoint || '—',
+              html`<sl-input
+                value=${this.brokerHubEndpoint}
+                placeholder="https://hub.example.com"
+                @sl-input=${(e: Event) => {
+                  this.brokerHubEndpoint = (e.target as HTMLInputElement).value;
+                }}
+              ></sl-input>`
+            )}
           </div>
           <div class="form-field full-width">
             <label>Container Hub Endpoint</label>
@@ -2148,39 +2299,55 @@ export class ScionPageAdminServerConfig extends LitElement {
               >Override Hub URL injected into agent containers (e.g.,
               host.containers.internal)</span
             >
-            <sl-input
-              value=${this.brokerContainerHubEndpoint}
-              @sl-input=${(e: Event) => {
-                this.brokerContainerHubEndpoint = (e.target as HTMLInputElement).value;
-              }}
-            ></sl-input>
+            ${this.renderFieldValue(
+              'server.broker.container_hub_endpoint',
+              this.brokerContainerHubEndpoint || '—',
+              html`<sl-input
+                value=${this.brokerContainerHubEndpoint}
+                @sl-input=${(e: Event) => {
+                  this.brokerContainerHubEndpoint = (e.target as HTMLInputElement).value;
+                }}
+              ></sl-input>`
+            )}
           </div>
           <div class="form-field">
             <label>Broker Name</label>
-            <sl-input
-              value=${this.brokerName}
-              @sl-input=${(e: Event) => {
-                this.brokerName = (e.target as HTMLInputElement).value;
-              }}
-            ></sl-input>
+            ${this.renderFieldValue(
+              'server.broker.name',
+              this.brokerName || '—',
+              html`<sl-input
+                value=${this.brokerName}
+                @sl-input=${(e: Event) => {
+                  this.brokerName = (e.target as HTMLInputElement).value;
+                }}
+              ></sl-input>`
+            )}
           </div>
           <div class="form-field">
             <label>Broker Nickname</label>
-            <sl-input
-              value=${this.brokerNickname}
-              @sl-input=${(e: Event) => {
-                this.brokerNickname = (e.target as HTMLInputElement).value;
-              }}
-            ></sl-input>
+            ${this.renderFieldValue(
+              'server.broker.nickname',
+              this.brokerNickname || '—',
+              html`<sl-input
+                value=${this.brokerNickname}
+                @sl-input=${(e: Event) => {
+                  this.brokerNickname = (e.target as HTMLInputElement).value;
+                }}
+              ></sl-input>`
+            )}
           </div>
           <div class="form-field full-width">
-            <sl-switch
-              ?checked=${this.brokerAutoProvide}
-              @sl-change=${(e: Event) => {
-                this.brokerAutoProvide = (e.target as HTMLInputElement).checked;
-              }}
-              >Auto-provide to hub projects</sl-switch
-            >
+            ${this.renderFieldValue(
+              'server.broker.auto_provide',
+              this.brokerAutoProvide ? 'Enabled' : 'Disabled',
+              html`<sl-switch
+                ?checked=${this.brokerAutoProvide}
+                @sl-change=${(e: Event) => {
+                  this.brokerAutoProvide = (e.target as HTMLInputElement).checked;
+                }}
+                >Auto-provide to hub projects</sl-switch
+              >`
+            )}
           </div>
         </div>
       </div>
@@ -2195,28 +2362,36 @@ export class ScionPageAdminServerConfig extends LitElement {
           <div class="form-field">
             <label>Driver</label>
             <span class="hint">Requires restart</span>
-            <sl-select
-              value=${this.dbDriver || 'sqlite'}
-              @sl-change=${(e: Event) => {
-                this.dbDriver = (e.target as HTMLSelectElement).value;
-              }}
-            >
-              <sl-option value="sqlite">SQLite</sl-option>
-              <sl-option value="postgres">PostgreSQL</sl-option>
-            </sl-select>
+            ${this.renderFieldValue(
+              'server.database.driver',
+              this.dbDriver || 'sqlite',
+              html`<sl-select
+                value=${this.dbDriver || 'sqlite'}
+                @sl-change=${(e: Event) => {
+                  this.dbDriver = (e.target as HTMLSelectElement).value;
+                }}
+              >
+                <sl-option value="sqlite">SQLite</sl-option>
+                <sl-option value="postgres">PostgreSQL</sl-option>
+              </sl-select>`
+            )}
           </div>
           <div class="form-field">
             <label>URL</label>
             <span class="hint"
               >Requires restart. ${this.dbUrl === '********' ? 'Value is masked.' : ''}</span
             >
-            <sl-input
-              value=${this.dbUrl}
-              placeholder="Path or connection string"
-              @sl-input=${(e: Event) => {
-                this.dbUrl = (e.target as HTMLInputElement).value;
-              }}
-            ></sl-input>
+            ${this.renderFieldValue(
+              'server.database.url',
+              this.dbUrl === '********' ? '********' : (this.dbUrl || '—'),
+              html`<sl-input
+                value=${this.dbUrl}
+                placeholder="Path or connection string"
+                @sl-input=${(e: Event) => {
+                  this.dbUrl = (e.target as HTMLInputElement).value;
+                }}
+              ></sl-input>`
+            )}
           </div>
         </div>
       </div>
@@ -2226,33 +2401,45 @@ export class ScionPageAdminServerConfig extends LitElement {
         <div class="form-grid">
           <div class="form-field">
             <label>Provider</label>
-            <sl-select
-              value=${this.storageProvider || 'local'}
-              @sl-change=${(e: Event) => {
-                this.storageProvider = (e.target as HTMLSelectElement).value;
-              }}
-            >
-              <sl-option value="local">Local</sl-option>
-              <sl-option value="gcs">Google Cloud Storage</sl-option>
-            </sl-select>
+            ${this.renderFieldValue(
+              'server.storage.provider',
+              this.storageProvider || 'local',
+              html`<sl-select
+                value=${this.storageProvider || 'local'}
+                @sl-change=${(e: Event) => {
+                  this.storageProvider = (e.target as HTMLSelectElement).value;
+                }}
+              >
+                <sl-option value="local">Local</sl-option>
+                <sl-option value="gcs">Google Cloud Storage</sl-option>
+              </sl-select>`
+            )}
           </div>
           <div class="form-field">
             <label>Bucket</label>
-            <sl-input
-              value=${this.storageBucket}
-              @sl-input=${(e: Event) => {
-                this.storageBucket = (e.target as HTMLInputElement).value;
-              }}
-            ></sl-input>
+            ${this.renderFieldValue(
+              'server.storage.bucket',
+              this.storageBucket || '—',
+              html`<sl-input
+                value=${this.storageBucket}
+                @sl-input=${(e: Event) => {
+                  this.storageBucket = (e.target as HTMLInputElement).value;
+                }}
+              ></sl-input>`
+            )}
           </div>
           <div class="form-field full-width">
             <label>Local Path</label>
-            <sl-input
-              value=${this.storageLocalPath}
-              @sl-input=${(e: Event) => {
-                this.storageLocalPath = (e.target as HTMLInputElement).value;
-              }}
-            ></sl-input>
+            ${this.renderFieldValue(
+              'server.storage.local_path',
+              this.storageLocalPath || '—',
+              html`<sl-input
+                value=${this.storageLocalPath}
+                @sl-input=${(e: Event) => {
+                  this.storageLocalPath = (e.target as HTMLInputElement).value;
+                }}
+              ></sl-input>`
+            )}
           </div>
         </div>
       </div>
@@ -2263,24 +2450,32 @@ export class ScionPageAdminServerConfig extends LitElement {
           <div class="form-field">
             <label>Backend</label>
             <span class="hint">Requires restart</span>
-            <sl-select
-              value=${this.secretsBackend || 'local'}
-              @sl-change=${(e: Event) => {
-                this.secretsBackend = (e.target as HTMLSelectElement).value;
-              }}
-            >
-              <sl-option value="local">Local</sl-option>
-              <sl-option value="gcpsm">GCP Secret Manager</sl-option>
-            </sl-select>
+            ${this.renderFieldValue(
+              'server.secrets.backend',
+              this.secretsBackend || 'local',
+              html`<sl-select
+                value=${this.secretsBackend || 'local'}
+                @sl-change=${(e: Event) => {
+                  this.secretsBackend = (e.target as HTMLSelectElement).value;
+                }}
+              >
+                <sl-option value="local">Local</sl-option>
+                <sl-option value="gcpsm">GCP Secret Manager</sl-option>
+              </sl-select>`
+            )}
           </div>
           <div class="form-field">
             <label>GCP Project ID</label>
-            <sl-input
-              value=${this.secretsGCPProjectId}
-              @sl-input=${(e: Event) => {
-                this.secretsGCPProjectId = (e.target as HTMLInputElement).value;
-              }}
-            ></sl-input>
+            ${this.renderFieldValue(
+              'server.secrets.gcp_project_id',
+              this.secretsGCPProjectId || '—',
+              html`<sl-input
+                value=${this.secretsGCPProjectId}
+                @sl-input=${(e: Event) => {
+                  this.secretsGCPProjectId = (e.target as HTMLInputElement).value;
+                }}
+              ></sl-input>`
+            )}
           </div>
         </div>
       </div>
@@ -2295,24 +2490,27 @@ export class ScionPageAdminServerConfig extends LitElement {
         <div class="form-grid">
           <div class="form-field full-width">
             <label>Access Mode</label>
-            ${this.renderEnvBadge('server.auth.user_access_mode')}
             <span class="hint"
               >Controls who can log in to this hub. Takes effect immediately (hot-reloaded).</span
             >
-            <sl-select
-              value=${this.authUserAccessMode}
-              @sl-change=${(e: Event) => {
-                this.authUserAccessMode = (e.target as HTMLSelectElement).value;
-              }}
-            >
-              <sl-option value="open">Open (all authenticated users)</sl-option>
-              <sl-option value="domain_restricted"
-                >Domain Restricted (authorized domains only)</sl-option
+            ${this.renderFieldValue(
+              'server.auth.user_access_mode',
+              this.authUserAccessMode,
+              html`${this.renderEnvBadge('server.auth.user_access_mode')}<sl-select
+                value=${this.authUserAccessMode}
+                @sl-change=${(e: Event) => {
+                  this.authUserAccessMode = (e.target as HTMLSelectElement).value;
+                }}
               >
-              <sl-option value="invite_only"
-                >Invite Only (allow list + authorized domains)</sl-option
-              >
-            </sl-select>
+                <sl-option value="open">Open (all authenticated users)</sl-option>
+                <sl-option value="domain_restricted"
+                  >Domain Restricted (authorized domains only)</sl-option
+                >
+                <sl-option value="invite_only"
+                  >Invite Only (allow list + authorized domains)</sl-option
+                >
+              </sl-select>`
+            )}
             ${this.authUserAccessMode === 'invite_only'
               ? html`<sl-alert variant="warning" open style="margin-top: 0.75rem">
                   <sl-icon slot="icon" name="exclamation-triangle"></sl-icon>
@@ -2332,13 +2530,17 @@ export class ScionPageAdminServerConfig extends LitElement {
         <h3 class="section-title">Development Auth</h3>
         <div class="form-grid">
           <div class="form-field full-width">
-            <sl-switch
-              ?checked=${this.authDevMode}
-              @sl-change=${(e: Event) => {
-                this.authDevMode = (e.target as HTMLInputElement).checked;
-              }}
-              >Enable Dev Auth</sl-switch
-            >
+            ${this.renderFieldValue(
+              'server.auth.dev_mode',
+              this.authDevMode ? 'Enabled' : 'Disabled',
+              html`<sl-switch
+                ?checked=${this.authDevMode}
+                @sl-change=${(e: Event) => {
+                  this.authDevMode = (e.target as HTMLInputElement).checked;
+                }}
+                >Enable Dev Auth</sl-switch
+              >`
+            )}
             <span class="hint">Requires restart. NOT for production use.</span>
           </div>
           <div class="form-field full-width">
@@ -2348,26 +2550,33 @@ export class ScionPageAdminServerConfig extends LitElement {
                 ? 'Value is masked. Clear to auto-generate.'
                 : 'Leave empty to auto-generate.'}</span
             >
-            <sl-input
-              value=${this.authDevToken}
-              @sl-input=${(e: Event) => {
-                this.authDevToken = (e.target as HTMLInputElement).value;
-              }}
-            ></sl-input>
+            ${this.renderFieldValue(
+              'server.auth.dev_token',
+              this.authDevToken === '********' ? '********' : (this.authDevToken || '—'),
+              html`<sl-input
+                value=${this.authDevToken}
+                @sl-input=${(e: Event) => {
+                  this.authDevToken = (e.target as HTMLInputElement).value;
+                }}
+              ></sl-input>`
+            )}
           </div>
           <div class="form-field full-width">
             <label>Authorized Domains</label>
-            ${this.renderEnvBadge('server.auth.authorized_domains')}
             <span class="hint"
               >Comma-separated list of email domains allowed to authenticate (empty = all)</span
             >
-            <sl-input
-              value=${this.authAuthorizedDomains}
-              placeholder="example.com, corp.example.com"
-              @sl-input=${(e: Event) => {
-                this.authAuthorizedDomains = (e.target as HTMLInputElement).value;
-              }}
-            ></sl-input>
+            ${this.renderFieldValue(
+              'server.auth.authorized_domains',
+              this.authAuthorizedDomains || '—',
+              html`${this.renderEnvBadge('server.auth.authorized_domains')}<sl-input
+                value=${this.authAuthorizedDomains}
+                placeholder="example.com, corp.example.com"
+                @sl-input=${(e: Event) => {
+                  this.authAuthorizedDomains = (e.target as HTMLInputElement).value;
+                }}
+              ></sl-input>`
+            )}
           </div>
         </div>
       </div>
@@ -2425,14 +2634,17 @@ export class ScionPageAdminServerConfig extends LitElement {
         ${this.renderSectionMeta('telemetry')}
         <div class="form-grid">
           <div class="form-field full-width">
-            ${this.renderEnvBadge('telemetry.enabled')}
-            <sl-switch
-              ?checked=${this.telemetryEnabled}
-              @sl-change=${(e: Event) => {
-                this.telemetryEnabled = (e.target as HTMLInputElement).checked;
-              }}
-              >Enable Telemetry Collection</sl-switch
-            >
+            ${this.renderFieldValue(
+              'telemetry.enabled',
+              this.telemetryEnabled ? 'Enabled' : 'Disabled',
+              html`${this.renderEnvBadge('telemetry.enabled')}<sl-switch
+                ?checked=${this.telemetryEnabled}
+                @sl-change=${(e: Event) => {
+                  this.telemetryEnabled = (e.target as HTMLInputElement).checked;
+                }}
+                >Enable Telemetry Collection</sl-switch
+              >`
+            )}
             <span class="hint">Default opt-in state for new agents</span>
           </div>
         </div>
@@ -2442,50 +2654,62 @@ export class ScionPageAdminServerConfig extends LitElement {
         <h3 class="section-title">Cloud Export (OTLP)</h3>
         <div class="form-grid">
           <div class="form-field full-width">
-            ${this.renderEnvBadge('telemetry.cloud.enabled')}
-            <sl-switch
-              ?checked=${this.telemetryCloudEnabled}
-              @sl-change=${(e: Event) => {
-                this.telemetryCloudEnabled = (e.target as HTMLInputElement).checked;
-              }}
-              >Enable Cloud Export</sl-switch
-            >
+            ${this.renderFieldValue(
+              'telemetry.cloud.enabled',
+              this.telemetryCloudEnabled ? 'Enabled' : 'Disabled',
+              html`${this.renderEnvBadge('telemetry.cloud.enabled')}<sl-switch
+                ?checked=${this.telemetryCloudEnabled}
+                @sl-change=${(e: Event) => {
+                  this.telemetryCloudEnabled = (e.target as HTMLInputElement).checked;
+                }}
+                >Enable Cloud Export</sl-switch
+              >`
+            )}
           </div>
           <div class="form-field full-width">
             <label>Endpoint</label>
-            ${this.renderEnvBadge('telemetry.cloud.endpoint')}
-            <sl-input
-              value=${this.telemetryCloudEndpoint}
-              placeholder="https://otel-collector.example.com:4317"
-              @sl-input=${(e: Event) => {
-                this.telemetryCloudEndpoint = (e.target as HTMLInputElement).value;
-              }}
-            ></sl-input>
+            ${this.renderFieldValue(
+              'telemetry.cloud.endpoint',
+              this.telemetryCloudEndpoint || '—',
+              html`${this.renderEnvBadge('telemetry.cloud.endpoint')}<sl-input
+                value=${this.telemetryCloudEndpoint}
+                placeholder="https://otel-collector.example.com:4317"
+                @sl-input=${(e: Event) => {
+                  this.telemetryCloudEndpoint = (e.target as HTMLInputElement).value;
+                }}
+              ></sl-input>`
+            )}
           </div>
           <div class="form-field">
             <label>Protocol</label>
-            ${this.renderEnvBadge('telemetry.cloud.protocol')}
-            <sl-select
-              value=${this.telemetryCloudProtocol || 'grpc'}
-              @sl-change=${(e: Event) => {
-                this.telemetryCloudProtocol = (e.target as HTMLSelectElement).value;
-              }}
-            >
-              <sl-option value="grpc">gRPC</sl-option>
-              <sl-option value="http/protobuf">HTTP/Protobuf</sl-option>
-              <sl-option value="http/json">HTTP/JSON</sl-option>
-            </sl-select>
+            ${this.renderFieldValue(
+              'telemetry.cloud.protocol',
+              this.telemetryCloudProtocol || 'grpc',
+              html`${this.renderEnvBadge('telemetry.cloud.protocol')}<sl-select
+                value=${this.telemetryCloudProtocol || 'grpc'}
+                @sl-change=${(e: Event) => {
+                  this.telemetryCloudProtocol = (e.target as HTMLSelectElement).value;
+                }}
+              >
+                <sl-option value="grpc">gRPC</sl-option>
+                <sl-option value="http/protobuf">HTTP/Protobuf</sl-option>
+                <sl-option value="http/json">HTTP/JSON</sl-option>
+              </sl-select>`
+            )}
           </div>
           <div class="form-field">
             <label>Provider</label>
-            ${this.renderEnvBadge('telemetry.cloud.provider')}
-            <sl-input
-              value=${this.telemetryCloudProvider}
-              placeholder="e.g., gcp"
-              @sl-input=${(e: Event) => {
-                this.telemetryCloudProvider = (e.target as HTMLInputElement).value;
-              }}
-            ></sl-input>
+            ${this.renderFieldValue(
+              'telemetry.cloud.provider',
+              this.telemetryCloudProvider || '—',
+              html`${this.renderEnvBadge('telemetry.cloud.provider')}<sl-input
+                value=${this.telemetryCloudProvider}
+                placeholder="e.g., gcp"
+                @sl-input=${(e: Event) => {
+                  this.telemetryCloudProvider = (e.target as HTMLInputElement).value;
+                }}
+              ></sl-input>`
+            )}
           </div>
         </div>
       </div>
@@ -2494,25 +2718,31 @@ export class ScionPageAdminServerConfig extends LitElement {
         <h3 class="section-title">Hub Reporting</h3>
         <div class="form-grid">
           <div class="form-field">
-            ${this.renderEnvBadge('telemetry.hub.enabled')}
-            <sl-switch
-              ?checked=${this.telemetryHubEnabled}
-              @sl-change=${(e: Event) => {
-                this.telemetryHubEnabled = (e.target as HTMLInputElement).checked;
-              }}
-              >Enable Hub Reporting</sl-switch
-            >
+            ${this.renderFieldValue(
+              'telemetry.hub.enabled',
+              this.telemetryHubEnabled ? 'Enabled' : 'Disabled',
+              html`${this.renderEnvBadge('telemetry.hub.enabled')}<sl-switch
+                ?checked=${this.telemetryHubEnabled}
+                @sl-change=${(e: Event) => {
+                  this.telemetryHubEnabled = (e.target as HTMLInputElement).checked;
+                }}
+                >Enable Hub Reporting</sl-switch
+              >`
+            )}
           </div>
           <div class="form-field">
             <label>Report Interval</label>
-            ${this.renderEnvBadge('telemetry.hub.report_interval')}
-            <sl-input
-              value=${this.telemetryHubReportInterval}
-              placeholder="30s"
-              @sl-input=${(e: Event) => {
-                this.telemetryHubReportInterval = (e.target as HTMLInputElement).value;
-              }}
-            ></sl-input>
+            ${this.renderFieldValue(
+              'telemetry.hub.report_interval',
+              this.telemetryHubReportInterval || '—',
+              html`${this.renderEnvBadge('telemetry.hub.report_interval')}<sl-input
+                value=${this.telemetryHubReportInterval}
+                placeholder="30s"
+                @sl-input=${(e: Event) => {
+                  this.telemetryHubReportInterval = (e.target as HTMLInputElement).value;
+                }}
+              ></sl-input>`
+            )}
           </div>
         </div>
       </div>
@@ -2521,35 +2751,44 @@ export class ScionPageAdminServerConfig extends LitElement {
         <h3 class="section-title">Local Debug Output</h3>
         <div class="form-grid">
           <div class="form-field">
-            ${this.renderEnvBadge('telemetry.local.enabled')}
-            <sl-switch
-              ?checked=${this.telemetryLocalEnabled}
-              @sl-change=${(e: Event) => {
-                this.telemetryLocalEnabled = (e.target as HTMLInputElement).checked;
-              }}
-              >Enable Local Output</sl-switch
-            >
+            ${this.renderFieldValue(
+              'telemetry.local.enabled',
+              this.telemetryLocalEnabled ? 'Enabled' : 'Disabled',
+              html`${this.renderEnvBadge('telemetry.local.enabled')}<sl-switch
+                ?checked=${this.telemetryLocalEnabled}
+                @sl-change=${(e: Event) => {
+                  this.telemetryLocalEnabled = (e.target as HTMLInputElement).checked;
+                }}
+                >Enable Local Output</sl-switch
+              >`
+            )}
           </div>
           <div class="form-field">
-            ${this.renderEnvBadge('telemetry.local.console')}
-            <sl-switch
-              ?checked=${this.telemetryLocalConsole}
-              @sl-change=${(e: Event) => {
-                this.telemetryLocalConsole = (e.target as HTMLInputElement).checked;
-              }}
-              >Console Output</sl-switch
-            >
+            ${this.renderFieldValue(
+              'telemetry.local.console',
+              this.telemetryLocalConsole ? 'Enabled' : 'Disabled',
+              html`${this.renderEnvBadge('telemetry.local.console')}<sl-switch
+                ?checked=${this.telemetryLocalConsole}
+                @sl-change=${(e: Event) => {
+                  this.telemetryLocalConsole = (e.target as HTMLInputElement).checked;
+                }}
+                >Console Output</sl-switch
+              >`
+            )}
           </div>
           <div class="form-field full-width">
             <label>Log File</label>
-            ${this.renderEnvBadge('telemetry.local.file')}
-            <sl-input
-              value=${this.telemetryLocalFile}
-              placeholder="/var/log/scion/telemetry.log"
-              @sl-input=${(e: Event) => {
-                this.telemetryLocalFile = (e.target as HTMLInputElement).value;
-              }}
-            ></sl-input>
+            ${this.renderFieldValue(
+              'telemetry.local.file',
+              this.telemetryLocalFile || '—',
+              html`${this.renderEnvBadge('telemetry.local.file')}<sl-input
+                value=${this.telemetryLocalFile}
+                placeholder="/var/log/scion/telemetry.log"
+                @sl-input=${(e: Event) => {
+                  this.telemetryLocalFile = (e.target as HTMLInputElement).value;
+                }}
+              ></sl-input>`
+            )}
           </div>
         </div>
       </div>
@@ -2683,30 +2922,36 @@ export class ScionPageAdminServerConfig extends LitElement {
         <div class="form-grid">
           <div class="form-field">
             <label>App ID</label>
-            ${this.renderEnvBadge('server.github_app.app_id', 'server.github_app')}
             <span class="hint">The numeric ID of your registered GitHub App</span>
-            <sl-input
-              .value=${this.githubAppId ? String(this.githubAppId) : ''}
-              placeholder="e.g. 123456"
-              inputmode="numeric"
-              @sl-input=${(e: Event) => {
-                this.githubAppId = parseInt((e.target as HTMLInputElement).value) || 0;
-              }}
-            ></sl-input>
+            ${this.renderFieldValue(
+              'server.github_app.app_id',
+              this.githubAppId ? String(this.githubAppId) : '—',
+              html`${this.renderEnvBadge('server.github_app.app_id', 'server.github_app')}<sl-input
+                .value=${this.githubAppId ? String(this.githubAppId) : ''}
+                placeholder="e.g. 123456"
+                inputmode="numeric"
+                @sl-input=${(e: Event) => {
+                  this.githubAppId = parseInt((e.target as HTMLInputElement).value) || 0;
+                }}
+              ></sl-input>`
+            )}
           </div>
           <div class="form-field">
             <label>API Base URL</label>
-            ${this.renderEnvBadge('server.github_app.api_base_url', 'server.github_app')}
             <span class="hint"
               >Override for GitHub Enterprise Server (leave empty for github.com)</span
             >
-            <sl-input
-              .value=${this.githubAppApiBaseUrl}
-              placeholder="https://api.github.com"
-              @sl-input=${(e: Event) => {
-                this.githubAppApiBaseUrl = (e.target as HTMLInputElement).value;
-              }}
-            ></sl-input>
+            ${this.renderFieldValue(
+              'server.github_app.api_base_url',
+              this.githubAppApiBaseUrl || '—',
+              html`${this.renderEnvBadge('server.github_app.api_base_url', 'server.github_app')}<sl-input
+                .value=${this.githubAppApiBaseUrl}
+                placeholder="https://api.github.com"
+                @sl-input=${(e: Event) => {
+                  this.githubAppApiBaseUrl = (e.target as HTMLInputElement).value;
+                }}
+              ></sl-input>`
+            )}
           </div>
           <div class="form-field full-width">
             <label>Private Key (PEM)</label>
@@ -2757,30 +3002,36 @@ export class ScionPageAdminServerConfig extends LitElement {
           </div>
           <div class="form-field">
             <label>Webhooks</label>
-            ${this.renderEnvBadge('server.github_app.webhooks_enabled', 'server.github_app')}
             <span class="hint">Enable to receive installation lifecycle events from GitHub</span>
-            <sl-switch
-              .checked=${this.githubAppWebhooksEnabled}
-              @sl-change=${(e: Event) => {
-                this.githubAppWebhooksEnabled = (e.target as HTMLInputElement).checked;
-              }}
-            >
-              ${this.githubAppWebhooksEnabled ? 'Enabled' : 'Disabled'}
-            </sl-switch>
+            ${this.renderFieldValue(
+              'server.github_app.webhooks_enabled',
+              this.githubAppWebhooksEnabled ? 'Enabled' : 'Disabled',
+              html`${this.renderEnvBadge('server.github_app.webhooks_enabled', 'server.github_app')}<sl-switch
+                .checked=${this.githubAppWebhooksEnabled}
+                @sl-change=${(e: Event) => {
+                  this.githubAppWebhooksEnabled = (e.target as HTMLInputElement).checked;
+                }}
+              >
+                ${this.githubAppWebhooksEnabled ? 'Enabled' : 'Disabled'}
+              </sl-switch>`
+            )}
           </div>
           <div class="form-field full-width">
             <label>Public Installation URL</label>
-            ${this.renderEnvBadge('server.github_app.installation_url', 'server.github_app')}
             <span class="hint"
               >The public link where users can install this GitHub App on their org or account</span
             >
-            <sl-input
-              .value=${this.githubAppInstallationUrl}
-              placeholder="https://github.com/apps/your-app-name/installations/new"
-              @sl-input=${(e: Event) => {
-                this.githubAppInstallationUrl = (e.target as HTMLInputElement).value;
-              }}
-            ></sl-input>
+            ${this.renderFieldValue(
+              'server.github_app.installation_url',
+              this.githubAppInstallationUrl || '—',
+              html`${this.renderEnvBadge('server.github_app.installation_url', 'server.github_app')}<sl-input
+                .value=${this.githubAppInstallationUrl}
+                placeholder="https://github.com/apps/your-app-name/installations/new"
+                @sl-input=${(e: Event) => {
+                  this.githubAppInstallationUrl = (e.target as HTMLInputElement).value;
+                }}
+              ></sl-input>`
+            )}
           </div>
         </div>
 
