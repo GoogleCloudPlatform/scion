@@ -1176,26 +1176,159 @@ export class ScionPageAdminServerConfig extends LitElement {
     return editableTemplate;
   }
 
-  private buildPayload(): Record<string, unknown> {
+  private buildLayer1Payload(): Record<string, unknown> {
     const payload: Record<string, unknown> = {};
+    const ok = (key: string) => this.readOnlyReason(key) === null;
 
-    // General
-    payload.active_profile = this.activeProfile || undefined;
-    payload.default_template = this.defaultTemplate || undefined;
-    payload.default_harness_config = this.defaultHarnessConfig || undefined;
-    payload.image_registry = this.imageRegistry || undefined;
-    payload.workspace_path = this.workspacePath || undefined;
+    // General — only Layer-1 top-level keys
+    if (ok('default_template')) payload.default_template = this.defaultTemplate || undefined;
+    if (ok('default_harness_config'))
+      payload.default_harness_config = this.defaultHarnessConfig || undefined;
+    if (ok('image_registry')) payload.image_registry = this.imageRegistry || undefined;
 
     // Default agent limits
-    payload.default_max_turns = this.defaultMaxTurns || undefined;
-    payload.default_max_model_calls = this.defaultMaxModelCalls || undefined;
-    payload.default_max_duration = this.defaultMaxDuration || undefined;
+    if (ok('default_max_turns')) payload.default_max_turns = this.defaultMaxTurns || undefined;
+    if (ok('default_max_model_calls'))
+      payload.default_max_model_calls = this.defaultMaxModelCalls || undefined;
+    if (ok('default_max_duration'))
+      payload.default_max_duration = this.defaultMaxDuration || undefined;
+
     if (
-      this.defaultResCpuReq ||
-      this.defaultResMemReq ||
-      this.defaultResCpuLim ||
-      this.defaultResMemLim ||
-      this.defaultResDisk
+      ok('default_resources') &&
+      (this.defaultResCpuReq ||
+        this.defaultResMemReq ||
+        this.defaultResCpuLim ||
+        this.defaultResMemLim ||
+        this.defaultResDisk)
+    ) {
+      const defaultResources: Record<string, unknown> = {};
+      if (this.defaultResCpuReq || this.defaultResMemReq) {
+        defaultResources.requests = {
+          cpu: this.defaultResCpuReq || undefined,
+          memory: this.defaultResMemReq || undefined,
+        };
+      }
+      if (this.defaultResCpuLim || this.defaultResMemLim) {
+        defaultResources.limits = {
+          cpu: this.defaultResCpuLim || undefined,
+          memory: this.defaultResMemLim || undefined,
+        };
+      }
+      if (this.defaultResDisk) defaultResources.disk = this.defaultResDisk;
+      payload.default_resources = defaultResources;
+    }
+
+    const server: Record<string, unknown> = {};
+
+    // Hub — only Layer-1 hub fields
+    const hub: Record<string, unknown> = {};
+    if (ok('server.hub.public_url') && this.hubPublicUrl) hub.public_url = this.hubPublicUrl;
+    if (ok('server.hub.admin_emails')) {
+      hub.admin_emails = this.hubAdminEmails
+        ? this.hubAdminEmails
+            .split(',')
+            .map((s) => s.trim())
+            .filter(Boolean)
+        : [];
+    }
+    if (ok('server.hub.soft_delete_retention') && this.hubSoftDeleteRetention)
+      hub.soft_delete_retention = this.hubSoftDeleteRetention;
+    if (ok('server.hub.soft_delete_retain_files'))
+      hub.soft_delete_retain_files = this.hubSoftDeleteRetainFiles;
+    if (ok('server.hub.auto_suspend_stalled'))
+      hub.auto_suspend_stalled = this.hubAutoSuspendStalled;
+    if (Object.keys(hub).length > 0) server.hub = hub;
+
+    // Auth — only Layer-1 auth fields
+    const auth: Record<string, unknown> = {};
+    if (ok('server.auth.user_access_mode') && this.authUserAccessMode) {
+      auth.user_access_mode = this.authUserAccessMode;
+    }
+    if (ok('server.auth.authorized_domains') && this.authAuthorizedDomains) {
+      auth.authorized_domains = this.authAuthorizedDomains
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean);
+    }
+    if (Object.keys(auth).length > 0) server.auth = auth;
+
+    // Broker, database, storage, secrets, message_broker — all Layer-0, omitted
+
+    // Preserve notification channels, OAuth, and GitHub App from raw config
+    if (this.rawConfig?.server?.notification_channels) {
+      server.notification_channels = this.rawConfig.server.notification_channels;
+    }
+    if (this.rawConfig?.server?.oauth) {
+      server.oauth = this.rawConfig.server.oauth;
+    }
+    if (this.rawConfig?.server?.github_app) {
+      server.github_app = this.rawConfig.server.github_app;
+    }
+
+    if (Object.keys(server).length > 0) payload.server = server;
+
+    // Telemetry — all Layer-1
+    if (ok('telemetry.enabled')) {
+      const telemetry: Record<string, unknown> = {
+        enabled: this.telemetryEnabled,
+      };
+      if (ok('telemetry.cloud.enabled')) {
+        telemetry.cloud = {
+          enabled: this.telemetryCloudEnabled,
+          endpoint: this.telemetryCloudEndpoint || undefined,
+          protocol: this.telemetryCloudProtocol || undefined,
+          provider: this.telemetryCloudProvider || undefined,
+        };
+      }
+      if (ok('telemetry.hub.enabled')) {
+        telemetry.hub = {
+          enabled: this.telemetryHubEnabled,
+          report_interval: this.telemetryHubReportInterval || undefined,
+        };
+      }
+      if (ok('telemetry.local.enabled')) {
+        telemetry.local = {
+          enabled: this.telemetryLocalEnabled,
+          file: this.telemetryLocalFile || undefined,
+          console: this.telemetryLocalConsole,
+        };
+      }
+      payload.telemetry = telemetry;
+    }
+
+    // Preserve runtimes, harness_configs, profiles from raw config
+    if (this.rawConfig?.runtimes) payload.runtimes = this.rawConfig.runtimes;
+    if (this.rawConfig?.harness_configs) payload.harness_configs = this.rawConfig.harness_configs;
+    if (this.rawConfig?.profiles) payload.profiles = this.rawConfig.profiles;
+
+    return payload;
+  }
+
+  private buildFilePayload(): Record<string, unknown> {
+    const payload: Record<string, unknown> = {};
+    const ok = (key: string) => this.readOnlyReason(key) === null;
+
+    // General
+    if (ok('active_profile')) payload.active_profile = this.activeProfile || undefined;
+    if (ok('default_template')) payload.default_template = this.defaultTemplate || undefined;
+    if (ok('default_harness_config'))
+      payload.default_harness_config = this.defaultHarnessConfig || undefined;
+    if (ok('image_registry')) payload.image_registry = this.imageRegistry || undefined;
+    if (ok('workspace_path')) payload.workspace_path = this.workspacePath || undefined;
+
+    // Default agent limits
+    if (ok('default_max_turns')) payload.default_max_turns = this.defaultMaxTurns || undefined;
+    if (ok('default_max_model_calls'))
+      payload.default_max_model_calls = this.defaultMaxModelCalls || undefined;
+    if (ok('default_max_duration'))
+      payload.default_max_duration = this.defaultMaxDuration || undefined;
+    if (
+      ok('default_resources') &&
+      (this.defaultResCpuReq ||
+        this.defaultResMemReq ||
+        this.defaultResCpuLim ||
+        this.defaultResMemLim ||
+        this.defaultResDisk)
     ) {
       const defaultResources: Record<string, unknown> = {};
       if (this.defaultResCpuReq || this.defaultResMemReq) {
@@ -1216,82 +1349,96 @@ export class ScionPageAdminServerConfig extends LitElement {
 
     // Server
     const server: Record<string, unknown> = {};
-    server.mode = this.serverMode || undefined;
-    server.log_level = this.logLevel || undefined;
-    server.log_format = this.logFormat || undefined;
+    if (ok('server.mode')) server.mode = this.serverMode || undefined;
+    if (ok('server.log_level')) server.log_level = this.logLevel || undefined;
+    if (ok('server.log_format')) server.log_format = this.logFormat || undefined;
 
     // Hub server
     const hub: Record<string, unknown> = {};
-    if (this.hubPort) hub.port = this.hubPort;
-    if (this.hubHost) hub.host = this.hubHost;
-    if (this.hubPublicUrl) hub.public_url = this.hubPublicUrl;
-    if (this.hubReadTimeout) hub.read_timeout = this.hubReadTimeout;
-    if (this.hubWriteTimeout) hub.write_timeout = this.hubWriteTimeout;
-    hub.admin_emails = this.hubAdminEmails
-      ? this.hubAdminEmails
-          .split(',')
-          .map((s) => s.trim())
-          .filter(Boolean)
-      : [];
-    if (this.hubSoftDeleteRetention) hub.soft_delete_retention = this.hubSoftDeleteRetention;
-    hub.soft_delete_retain_files = this.hubSoftDeleteRetainFiles;
-    hub.auto_suspend_stalled = this.hubAutoSuspendStalled;
+    if (ok('server.hub.port') && this.hubPort) hub.port = this.hubPort;
+    if (ok('server.hub.host') && this.hubHost) hub.host = this.hubHost;
+    if (ok('server.hub.public_url') && this.hubPublicUrl) hub.public_url = this.hubPublicUrl;
+    if (ok('server.hub.read_timeout') && this.hubReadTimeout)
+      hub.read_timeout = this.hubReadTimeout;
+    if (ok('server.hub.write_timeout') && this.hubWriteTimeout)
+      hub.write_timeout = this.hubWriteTimeout;
+    if (ok('server.hub.admin_emails')) {
+      hub.admin_emails = this.hubAdminEmails
+        ? this.hubAdminEmails
+            .split(',')
+            .map((s) => s.trim())
+            .filter(Boolean)
+        : [];
+    }
+    if (ok('server.hub.soft_delete_retention') && this.hubSoftDeleteRetention)
+      hub.soft_delete_retention = this.hubSoftDeleteRetention;
+    if (ok('server.hub.soft_delete_retain_files'))
+      hub.soft_delete_retain_files = this.hubSoftDeleteRetainFiles;
+    if (ok('server.hub.auto_suspend_stalled'))
+      hub.auto_suspend_stalled = this.hubAutoSuspendStalled;
     server.hub = hub;
 
     // Broker
     const broker: Record<string, unknown> = {};
-    broker.enabled = this.brokerEnabled;
-    if (this.brokerPort) broker.port = this.brokerPort;
-    if (this.brokerHost) broker.host = this.brokerHost;
-    if (this.brokerHubEndpoint) broker.hub_endpoint = this.brokerHubEndpoint;
-    if (this.brokerContainerHubEndpoint)
+    if (ok('server.broker.enabled')) broker.enabled = this.brokerEnabled;
+    if (ok('server.broker.port') && this.brokerPort) broker.port = this.brokerPort;
+    if (ok('server.broker.host') && this.brokerHost) broker.host = this.brokerHost;
+    if (ok('server.broker.hub_endpoint') && this.brokerHubEndpoint)
+      broker.hub_endpoint = this.brokerHubEndpoint;
+    if (ok('server.broker.container_hub_endpoint') && this.brokerContainerHubEndpoint)
       broker.container_hub_endpoint = this.brokerContainerHubEndpoint;
-    if (this.brokerName) broker.broker_name = this.brokerName;
-    if (this.brokerNickname) broker.broker_nickname = this.brokerNickname;
-    broker.auto_provide = this.brokerAutoProvide;
+    if (ok('server.broker.name') && this.brokerName) broker.broker_name = this.brokerName;
+    if (ok('server.broker.nickname') && this.brokerNickname)
+      broker.broker_nickname = this.brokerNickname;
+    if (ok('server.broker.auto_provide')) broker.auto_provide = this.brokerAutoProvide;
     server.broker = broker;
 
-    // Database — only send driver, not masked URL
+    // Database
     const database: Record<string, unknown> = {};
-    if (this.dbDriver) database.driver = this.dbDriver;
-    // Don't send masked URL back
-    if (this.dbUrl && this.dbUrl !== '********') database.url = this.dbUrl;
+    if (ok('server.database.driver') && this.dbDriver) database.driver = this.dbDriver;
+    if (ok('server.database.url') && this.dbUrl && this.dbUrl !== '********')
+      database.url = this.dbUrl;
     server.database = database;
 
     // Auth
     const auth: Record<string, unknown> = {};
-    auth.dev_mode = this.authDevMode;
-    // Don't send masked token back
-    if (this.authDevToken && this.authDevToken !== '********') auth.dev_token = this.authDevToken;
-    if (this.authAuthorizedDomains) {
+    if (ok('server.auth.dev_mode')) auth.dev_mode = this.authDevMode;
+    if (ok('server.auth.dev_token') && this.authDevToken && this.authDevToken !== '********')
+      auth.dev_token = this.authDevToken;
+    if (ok('server.auth.authorized_domains') && this.authAuthorizedDomains) {
       auth.authorized_domains = this.authAuthorizedDomains
         .split(',')
         .map((s) => s.trim())
         .filter(Boolean);
     }
-    if (this.authUserAccessMode) {
+    if (ok('server.auth.user_access_mode') && this.authUserAccessMode) {
       auth.user_access_mode = this.authUserAccessMode;
     }
     server.auth = auth;
 
     // Storage
     const storage: Record<string, unknown> = {};
-    if (this.storageProvider) storage.provider = this.storageProvider;
-    if (this.storageBucket) storage.bucket = this.storageBucket;
-    if (this.storageLocalPath) storage.local_path = this.storageLocalPath;
+    if (ok('server.storage.provider') && this.storageProvider)
+      storage.provider = this.storageProvider;
+    if (ok('server.storage.bucket') && this.storageBucket) storage.bucket = this.storageBucket;
+    if (ok('server.storage.local_path') && this.storageLocalPath)
+      storage.local_path = this.storageLocalPath;
     server.storage = storage;
 
     // Secrets
     const secrets: Record<string, unknown> = {};
-    if (this.secretsBackend) secrets.backend = this.secretsBackend;
-    if (this.secretsGCPProjectId) secrets.gcp_project_id = this.secretsGCPProjectId;
+    if (ok('server.secrets.backend') && this.secretsBackend) secrets.backend = this.secretsBackend;
+    if (ok('server.secrets.gcp_project_id') && this.secretsGCPProjectId)
+      secrets.gcp_project_id = this.secretsGCPProjectId;
     server.secrets = secrets;
 
     // Message Broker
-    server.message_broker = {
-      enabled: this.messageBrokerEnabled,
-      type: this.messageBrokerType || undefined,
-    };
+    if (ok('server.message_broker.enabled')) {
+      server.message_broker = {
+        enabled: this.messageBrokerEnabled,
+        type: ok('server.message_broker.type') ? this.messageBrokerType || undefined : undefined,
+      };
+    }
 
     // Preserve notification channels, OAuth, and GitHub App from raw config
     if (this.rawConfig?.server?.notification_channels) {
@@ -1307,25 +1454,38 @@ export class ScionPageAdminServerConfig extends LitElement {
     payload.server = server;
 
     // Telemetry
-    const telemetry: Record<string, unknown> = {
-      enabled: this.telemetryEnabled,
-    };
-    telemetry.cloud = {
-      enabled: this.telemetryCloudEnabled,
-      endpoint: this.telemetryCloudEndpoint || undefined,
-      protocol: this.telemetryCloudProtocol || undefined,
-      provider: this.telemetryCloudProvider || undefined,
-    };
-    telemetry.hub = {
-      enabled: this.telemetryHubEnabled,
-      report_interval: this.telemetryHubReportInterval || undefined,
-    };
-    telemetry.local = {
-      enabled: this.telemetryLocalEnabled,
-      file: this.telemetryLocalFile || undefined,
-      console: this.telemetryLocalConsole,
-    };
-    payload.telemetry = telemetry;
+    const telemetry: Record<string, unknown> = {};
+    if (ok('telemetry.enabled')) telemetry.enabled = this.telemetryEnabled;
+    if (ok('telemetry.cloud.enabled')) {
+      telemetry.cloud = {
+        enabled: this.telemetryCloudEnabled,
+        endpoint: ok('telemetry.cloud.endpoint')
+          ? this.telemetryCloudEndpoint || undefined
+          : undefined,
+        protocol: ok('telemetry.cloud.protocol')
+          ? this.telemetryCloudProtocol || undefined
+          : undefined,
+        provider: ok('telemetry.cloud.provider')
+          ? this.telemetryCloudProvider || undefined
+          : undefined,
+      };
+    }
+    if (ok('telemetry.hub.enabled')) {
+      telemetry.hub = {
+        enabled: this.telemetryHubEnabled,
+        report_interval: ok('telemetry.hub.report_interval')
+          ? this.telemetryHubReportInterval || undefined
+          : undefined,
+      };
+    }
+    if (ok('telemetry.local.enabled')) {
+      telemetry.local = {
+        enabled: this.telemetryLocalEnabled,
+        file: ok('telemetry.local.file') ? this.telemetryLocalFile || undefined : undefined,
+        console: ok('telemetry.local.console') ? this.telemetryLocalConsole : undefined,
+      };
+    }
+    if (Object.keys(telemetry).length > 0) payload.telemetry = telemetry;
 
     // Preserve runtimes, harness_configs, profiles from raw config
     if (this.rawConfig?.runtimes) payload.runtimes = this.rawConfig.runtimes;
@@ -1350,7 +1510,8 @@ export class ScionPageAdminServerConfig extends LitElement {
     this.clearSaveErrors();
 
     try {
-      const payload = this.buildPayload();
+      const payload =
+        this.settingsTier === 'db' ? this.buildLayer1Payload() : this.buildFilePayload();
       const res = await apiFetch('/api/v1/admin/server-config', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
