@@ -696,6 +696,14 @@ func (b *TelegramBrokerV2) Publish(ctx context.Context, topic string, msg *messa
 		return b.publishInputNeeded(ctx, api, sq, chatIDs, msg, agentSlug, projectID)
 	}
 
+	// Determine thread ID for Telegram forum topics.
+	var threadOpts []SendOption
+	if msg != nil && msg.ThreadID != "" {
+		if tid, err := strconv.ParseInt(msg.ThreadID, 10, 64); err == nil && tid != 0 {
+			threadOpts = append(threadOpts, SendOption{MessageThreadID: tid})
+		}
+	}
+
 	// File attachment: check msg.Attachments (scion CLI --attach flag convention)
 	// first, then fall back to telegram_attachment_path metadata key.
 	if msg != nil {
@@ -709,7 +717,7 @@ func (b *TelegramBrokerV2) Publish(ctx context.Context, topic string, msg *messa
 			// Translate /workspace/<file> → /home/scion/.scion/projects/<projectSlug>/<file>
 			// Agent containers mount the hub's project directory as /workspace.
 			attachPath = b.resolveAttachmentPath(ctx, store, attachPath, projectID)
-			return b.publishAttachment(ctx, api, chatIDs, msg, agentSlug, attachPath)
+			return b.publishAttachment(ctx, api, chatIDs, msg, agentSlug, attachPath, threadOpts...)
 		}
 	}
 
@@ -746,14 +754,6 @@ func (b *TelegramBrokerV2) Publish(ctx context.Context, topic string, msg *messa
 	if msg != nil && msg.Metadata != nil {
 		if v, ok := msg.Metadata["telegram_message_id"]; ok {
 			replyToMsgID, _ = strconv.ParseInt(v, 10, 64)
-		}
-	}
-
-	// Determine thread ID for Telegram forum topics.
-	var threadOpts []SendOption
-	if msg != nil && msg.ThreadID != "" {
-		if tid, err := strconv.ParseInt(msg.ThreadID, 10, 64); err == nil && tid != 0 {
-			threadOpts = append(threadOpts, SendOption{MessageThreadID: tid})
 		}
 	}
 
@@ -1257,7 +1257,7 @@ func (b *TelegramBrokerV2) resolveAttachmentPath(ctx context.Context, store Stor
 // NOT work when agents and the plugin run in separate GKE pods with isolated
 // volumes. A future telegram_attachment_url metadata key should support
 // fetching the file from a URL (e.g. GCS signed URL) instead.
-func (b *TelegramBrokerV2) publishAttachment(ctx context.Context, api *TelegramAPIClient, chatIDs []int64, msg *messages.StructuredMessage, agentSlug, attachPath string) error {
+func (b *TelegramBrokerV2) publishAttachment(ctx context.Context, api *TelegramAPIClient, chatIDs []int64, msg *messages.StructuredMessage, agentSlug, attachPath string, opts ...SendOption) error {
 	f, err := os.Open(attachPath)
 	if err != nil {
 		b.log.Error("Failed to open attachment file",
@@ -1287,7 +1287,7 @@ func (b *TelegramBrokerV2) publishAttachment(ctx context.Context, api *TelegramA
 			}
 		}
 
-		_, err := api.SendDocument(ctx, chatID, filename, f, caption, "")
+		_, err := api.SendDocument(ctx, chatID, filename, f, caption, "", opts...)
 		if err != nil {
 			var apiErr *APIError
 			if errors.As(err, &apiErr) && apiErr.IsTransient() {

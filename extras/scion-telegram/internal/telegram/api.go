@@ -642,7 +642,7 @@ func (c *TelegramAPIClient) SendMessageWithForceReply(ctx context.Context, chatI
 // access to agent files — a future telegram_attachment_url metadata key
 // should fetch the file from a URL (GCS signed URL or hub download endpoint)
 // instead.
-func (c *TelegramAPIClient) SendDocument(ctx context.Context, chatID int64, filename string, document io.Reader, caption, parseMode string) (*TGMessage, error) {
+func (c *TelegramAPIClient) SendDocument(ctx context.Context, chatID int64, filename string, document io.Reader, caption, parseMode string, opts ...SendOption) (*TGMessage, error) {
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
 
@@ -657,6 +657,13 @@ func (c *TelegramAPIClient) SendDocument(ctx context.Context, chatID int64, file
 	if parseMode != "" {
 		if err := writer.WriteField("parse_mode", parseMode); err != nil {
 			return nil, fmt.Errorf("write parse_mode field: %w", err)
+		}
+	}
+	for _, opt := range opts {
+		if opt.MessageThreadID != 0 {
+			if err := writer.WriteField("message_thread_id", fmt.Sprintf("%d", opt.MessageThreadID)); err != nil {
+				return nil, fmt.Errorf("write message_thread_id field: %w", err)
+			}
 		}
 	}
 
