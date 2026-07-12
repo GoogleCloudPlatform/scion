@@ -142,6 +142,10 @@ The `local` backend does not store secret values. Any attempt to create or updat
 
 ## Environment Variables
 
+:::tip[Database Mode]
+When running with a postgres database, operational settings (Layer-1) can be configured via `SCION_SEED_*` environment variables and managed in the admin UI. See the [Admin Settings Model](/reference/admin-settings/) for details on the seeded/managed lifecycle and the `SCION_SEED_*` namespace.
+:::
+
 All server settings can be overridden via environment variables using the `SCION_SERVER_` prefix and snake_case naming.
 
 **Examples:**
