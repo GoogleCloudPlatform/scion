@@ -94,7 +94,8 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	}
 	if _, err := os.Stat(globalDir); os.IsNotExist(err) {
 		log.Println("Initializing global scion directory...")
-		if err := config.InitGlobal(harness.EmbedOnlyHarnesses()); err != nil {
+		initOpts := config.InitMachineOpts{SkipRuntimeCheck: hostedMode}
+		if err := config.InitGlobal(harness.EmbedOnlyHarnesses(), initOpts); err != nil {
 			return fmt.Errorf("failed to initialize global config: %w", err)
 		}
 	} else if !hostedMode {

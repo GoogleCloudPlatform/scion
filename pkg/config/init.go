@@ -534,6 +534,11 @@ func writeProjectSettings(externalPath, workspacePath, projectID string, opt Ini
 
 // InitMachineOpts controls optional behavior for InitMachine.
 type InitMachineOpts struct {
+	// SkipRuntimeCheck skips local container runtime detection.
+	// Use this when initializing on a hosted server where no local
+	// container runtime is available (e.g. Cloud Run).
+	SkipRuntimeCheck bool
+
 	// ImageRegistry is the container image registry to configure.
 	// If non-empty, it is written into settings after seeding.
 	ImageRegistry string
@@ -561,13 +566,21 @@ func InitMachine(harnesses []api.Harness, opts ...InitMachineOpts) error {
 		return fmt.Errorf("failed to create global directory: %w", err)
 	}
 
+	var opt InitMachineOpts
+	if len(opts) > 0 {
+		opt = opts[0]
+	}
+
 	// Create global settings file if it doesn't exist
 	settingsPath := GetSettingsPath(globalDir)
 	if settingsPath == "" {
-		// Detect a functioning container runtime before seeding settings
-		detectedRuntime, err := DetectLocalRuntime()
-		if err != nil {
-			return err
+		var detectedRuntime string
+		if !opt.SkipRuntimeCheck {
+			var err error
+			detectedRuntime, err = DetectLocalRuntime()
+			if err != nil {
+				return err
+			}
 		}
 
 		// Seed default YAML settings with the detected runtime
@@ -583,11 +596,6 @@ func InitMachine(harnesses []api.Harness, opts ...InitMachineOpts) error {
 		if err := os.WriteFile(newSettingsPath, defaultSettings, 0644); err != nil {
 			return fmt.Errorf("failed to seed global settings.yaml: %w", err)
 		}
-	}
-
-	var opt InitMachineOpts
-	if len(opts) > 0 {
-		opt = opts[0]
 	}
 
 	agentsDir := filepath.Join(globalDir, "agents")

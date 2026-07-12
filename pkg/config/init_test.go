@@ -541,6 +541,26 @@ func TestInitMachine_FailsWithNoRuntime(t *testing.T) {
 	}
 }
 
+func TestInitMachine_SkipRuntimeCheck(t *testing.T) {
+	tmpDir := t.TempDir()
+	mockRuntimeDetectionNone(t)
+
+	origHome := os.Getenv("HOME")
+	_ = os.Setenv("HOME", tmpDir)
+	defer func() { _ = os.Setenv("HOME", origHome) }()
+
+	err := InitMachine(GetMockHarnesses(), InitMachineOpts{SkipRuntimeCheck: true})
+	if err != nil {
+		t.Fatalf("expected InitMachine with SkipRuntimeCheck to succeed, got: %v", err)
+	}
+
+	globalDir := filepath.Join(tmpDir, GlobalDir)
+	settingsPath := GetSettingsPath(globalDir)
+	if settingsPath == "" {
+		t.Fatal("expected settings.yaml to be created")
+	}
+}
+
 func TestInitProject_FailsWithNoRuntime(t *testing.T) {
 	tmpDir := t.TempDir()
 	mockRuntimeDetectionNone(t)
