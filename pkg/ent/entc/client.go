@@ -192,19 +192,34 @@ func AutoMigrate(ctx context.Context, client *ent.Client) error {
 // skipExistingRelations is an Ent schema ApplyHook that makes DDL
 // idempotent on Postgres by skipping any statement that fails with
 // SQLSTATE 42P07 ("duplicate_table" / "relation already exists").
+//
+// Each statement is wrapped in a SAVEPOINT so that a 42P07 failure can
+// be rolled back without aborting the surrounding transaction — in
+// Postgres, any statement error marks the transaction as aborted and
+// all subsequent commands are rejected until a ROLLBACK (TO SAVEPOINT).
 func skipExistingRelations(next entschema.Applier) entschema.Applier {
 	return entschema.ApplyFunc(func(ctx context.Context, conn dialect.ExecQuerier, plan *atlasmigrate.Plan) error {
-		for _, c := range plan.Changes {
+		for i, c := range plan.Changes {
+			sp := fmt.Sprintf("migrate_change_%d", i)
+			if err := conn.Exec(ctx, fmt.Sprintf("SAVEPOINT %s", sp), []any{}, nil); err != nil {
+				return fmt.Errorf("creating savepoint: %w", err)
+			}
 			if err := conn.Exec(ctx, c.Cmd, c.Args, nil); err != nil {
 				var pgErr *pgconn.PgError
 				if errors.As(err, &pgErr) && pgErr.Code == "42P07" {
 					slog.Debug("AutoMigrate: skipping existing relation", "stmt", c.Cmd)
+					if rbErr := conn.Exec(ctx, fmt.Sprintf("ROLLBACK TO SAVEPOINT %s", sp), []any{}, nil); rbErr != nil {
+						return fmt.Errorf("rolling back savepoint after 42P07: %w", rbErr)
+					}
 					continue
 				}
 				if c.Comment != "" {
 					err = fmt.Errorf("%s: %w", c.Comment, err)
 				}
 				return err
+			}
+			if err := conn.Exec(ctx, fmt.Sprintf("RELEASE SAVEPOINT %s", sp), []any{}, nil); err != nil {
+				return fmt.Errorf("releasing savepoint: %w", err)
 			}
 		}
 		return nil
