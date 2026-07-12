@@ -27,6 +27,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/integrationupdate"
+	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
 	"github.com/GoogleCloudPlatform/scion/pkg/plugin"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
 	"github.com/google/uuid"
@@ -160,6 +161,10 @@ func (m *mockIntegrationManager) InstallPlugin(name, repoPath, pluginsDir, confi
 		m.plugins[name]["config_file"] = configFile
 	}
 	return nil
+}
+
+func (m *mockIntegrationManager) GetBroker(name string) (eventbus.EventBus, error) {
+	return nil, fmt.Errorf("mock: GetBroker not wired")
 }
 
 func (m *mockIntegrationManager) GetGRPCBrokerAdapter(name string) plugin.GRPCBrokerClient {
