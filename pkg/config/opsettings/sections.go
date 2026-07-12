@@ -71,7 +71,7 @@ type EndpointsSettings struct {
 type GitHubAppSettings struct {
 	AppID           int64  `json:"app_id,omitempty"`
 	APIBaseURL      string `json:"api_base_url,omitempty"`
-	WebhooksEnabled bool   `json:"webhooks_enabled,omitempty"`
+	WebhooksEnabled *bool  `json:"webhooks_enabled,omitempty"`
 	InstallationURL string `json:"installation_url,omitempty"`
 	PrivateKeyPath  string `json:"private_key_path,omitempty"`
 }

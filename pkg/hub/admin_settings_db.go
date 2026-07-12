@@ -984,7 +984,12 @@ func buildSingleSectionDoc(req *ServerConfigUpdateRequest, secName string, fp *f
 			ga := req.Server.GitHubApp
 			d.AppID = ga.AppID
 			d.APIBaseURL = ga.APIBaseURL
-			d.WebhooksEnabled = ga.WebhooksEnabled
+			// #391: webhooks_enabled is a plain bool in the request; use
+			// fieldPresence to distinguish explicit false from omitted.
+			githubFP := serverFP.nestedPresence("github_app")
+			if ga.WebhooksEnabled || githubFP.has("webhooks_enabled") {
+				d.WebhooksEnabled = &ga.WebhooksEnabled
+			}
 			d.InstallationURL = ga.InstallationURL
 			d.PrivateKeyPath = ga.PrivateKeyPath
 		}

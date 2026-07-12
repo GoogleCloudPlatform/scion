@@ -1147,12 +1147,12 @@ export class ScionPageAdminServerConfig extends LitElement {
     if (this.hubPublicUrl) hub.public_url = this.hubPublicUrl;
     if (this.hubReadTimeout) hub.read_timeout = this.hubReadTimeout;
     if (this.hubWriteTimeout) hub.write_timeout = this.hubWriteTimeout;
-    if (this.hubAdminEmails) {
-      hub.admin_emails = this.hubAdminEmails
-        .split(',')
-        .map((s) => s.trim())
-        .filter(Boolean);
-    }
+    hub.admin_emails = this.hubAdminEmails
+      ? this.hubAdminEmails
+          .split(',')
+          .map((s) => s.trim())
+          .filter(Boolean)
+      : [];
     if (this.hubSoftDeleteRetention) hub.soft_delete_retention = this.hubSoftDeleteRetention;
     hub.soft_delete_retain_files = this.hubSoftDeleteRetainFiles;
     hub.auto_suspend_stalled = this.hubAutoSuspendStalled;

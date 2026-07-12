@@ -1974,3 +1974,187 @@ func TestGetServerConfigSchema_MethodNotAllowed(t *testing.T) {
 		t.Errorf("expected 405 for POST, got %d", rr.Code)
 	}
 }
+
+// ---- #391: Boolean and field-clearing round-trip correctness ----
+
+func TestRoundTrip_AutoSuspendStalled_TruePersists(t *testing.T) {
+	srv, _, ops := newTestDBServer(t)
+
+	body := `{
+		"server": {
+			"hub": {"auto_suspend_stalled": true}
+		}
+	}`
+	req := adminRequest(http.MethodPut, "/api/v1/admin/server-config", body)
+	rr := httptest.NewRecorder()
+	srv.handlePutServerConfigDB(rr, req, ops)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("PUT: expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	snap := ops.Snapshot()
+	if !snap.AutoSuspendStalled {
+		t.Error("#391: AutoSuspendStalled should be true after saving true")
+	}
+}
+
+func TestRoundTrip_AutoSuspendStalled_FalsePersists(t *testing.T) {
+	srv, fakeStore, ops := newTestDBServer(t)
+
+	// First set it to true.
+	fakeStore.seed("lifecycle", json.RawMessage(`{"auto_suspend_stalled":true}`))
+	_, _ = ops.Refresh(context.Background())
+	if !ops.Snapshot().AutoSuspendStalled {
+		t.Fatal("precondition: AutoSuspendStalled should be true")
+	}
+
+	// Now set it to false.
+	body := `{
+		"server": {
+			"hub": {"auto_suspend_stalled": false}
+		}
+	}`
+	req := adminRequest(http.MethodPut, "/api/v1/admin/server-config", body)
+	rr := httptest.NewRecorder()
+	srv.handlePutServerConfigDB(rr, req, ops)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("PUT: expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	snap := ops.Snapshot()
+	if snap.AutoSuspendStalled {
+		t.Error("#391: AutoSuspendStalled should be false after saving false, not reverted to default/true")
+	}
+}
+
+func TestRoundTrip_AdminEmails_SetThenClear(t *testing.T) {
+	srv, _, ops := newTestDBServer(t)
+
+	// Step 1: Set admin_emails to ["a@b.com"].
+	body := `{
+		"server": {
+			"hub": {"admin_emails": ["a@b.com"]},
+			"auth": {"user_access_mode": "open"}
+		}
+	}`
+	req := adminRequest(http.MethodPut, "/api/v1/admin/server-config", body)
+	rr := httptest.NewRecorder()
+	srv.handlePutServerConfigDB(rr, req, ops)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("PUT(set): expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	snap := ops.Snapshot()
+	if len(snap.AdminEmails) != 1 || snap.AdminEmails[0] != "a@b.com" {
+		t.Fatalf("precondition: AdminEmails should be [a@b.com], got %v", snap.AdminEmails)
+	}
+
+	// Step 2: Clear admin_emails to [].
+	body = `{
+		"server": {
+			"hub": {"admin_emails": []},
+			"auth": {"user_access_mode": "open"}
+		}
+	}`
+	req = adminRequest(http.MethodPut, "/api/v1/admin/server-config", body)
+	rr = httptest.NewRecorder()
+	srv.handlePutServerConfigDB(rr, req, ops)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("PUT(clear): expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	snap = ops.Snapshot()
+	if len(snap.AdminEmails) != 0 {
+		t.Errorf("#391: AdminEmails should be empty after clearing to [], got %v", snap.AdminEmails)
+	}
+}
+
+func TestRoundTrip_TelemetryEnabled_FalsePersists(t *testing.T) {
+	srv, _, ops := newTestDBServer(t)
+
+	// Step 1: Set telemetry.enabled to true.
+	body := `{
+		"telemetry": {"enabled": true}
+	}`
+	req := adminRequest(http.MethodPut, "/api/v1/admin/server-config", body)
+	rr := httptest.NewRecorder()
+	srv.handlePutServerConfigDB(rr, req, ops)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("PUT(true): expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	snap := ops.Snapshot()
+	if snap.TelemetryConfig == nil || snap.TelemetryConfig.Enabled == nil || !*snap.TelemetryConfig.Enabled {
+		t.Fatal("precondition: telemetry.enabled should be true")
+	}
+
+	// Step 2: Set telemetry.enabled to false.
+	body = `{
+		"telemetry": {"enabled": false}
+	}`
+	req = adminRequest(http.MethodPut, "/api/v1/admin/server-config", body)
+	rr = httptest.NewRecorder()
+	srv.handlePutServerConfigDB(rr, req, ops)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("PUT(false): expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	snap = ops.Snapshot()
+	if snap.TelemetryConfig == nil || snap.TelemetryConfig.Enabled == nil {
+		t.Fatal("#391: telemetry.enabled should not be nil after saving false")
+	}
+	if *snap.TelemetryConfig.Enabled {
+		t.Error("#391: telemetry.enabled should be false after saving false, not reverted to default/true")
+	}
+}
+
+func TestRoundTrip_WebhooksEnabled_FalsePersists(t *testing.T) {
+	srv, fakeStore, ops := newTestDBServer(t)
+
+	// Seed with webhooks_enabled = true.
+	fakeStore.seed("github_app", json.RawMessage(`{"app_id":42,"webhooks_enabled":true}`))
+	_, _ = ops.Refresh(context.Background())
+	if !ops.Snapshot().GitHubWebhooksEnabled {
+		t.Fatal("precondition: GitHubWebhooksEnabled should be true")
+	}
+
+	// Set webhooks_enabled to false.
+	body := `{
+		"server": {
+			"github_app": {"app_id": 42, "webhooks_enabled": false}
+		}
+	}`
+	req := adminRequest(http.MethodPut, "/api/v1/admin/server-config", body)
+	rr := httptest.NewRecorder()
+	srv.handlePutServerConfigDB(rr, req, ops)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("PUT: expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	// Verify the section doc stores *false (not omitted).
+	fakeStore.mu.Lock()
+	row := fakeStore.settings["github_app"]
+	fakeStore.mu.Unlock()
+
+	var ga opsettings.GitHubAppSettings
+	if err := json.Unmarshal(row.Value, &ga); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
+	if ga.WebhooksEnabled == nil {
+		t.Fatal("#391: WebhooksEnabled should be *false in section doc, not nil (omitted)")
+	}
+	if *ga.WebhooksEnabled {
+		t.Error("#391: WebhooksEnabled should be false in section doc")
+	}
+
+	// Verify snapshot reads back false.
+	snap := ops.Snapshot()
+	if snap.GitHubWebhooksEnabled {
+		t.Error("#391: GitHubWebhooksEnabled should be false after saving false")
+	}
+}
