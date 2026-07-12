@@ -15,13 +15,17 @@
 package hub
 
 import (
+	"errors"
 	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/version"
 	yamlv3 "gopkg.in/yaml.v3"
 )
@@ -110,6 +114,62 @@ func (s *Server) handleAdminServerConfig(w http.ResponseWriter, r *http.Request)
 	default:
 		MethodNotAllowed(w)
 	}
+}
+
+// handleAdminServerConfigSectionReset handles
+// DELETE /api/v1/admin/server-config/sections/{name}
+// Resets a managed section back to bootstrap material by deleting the DB row.
+// Postgres mode only; admin-gated. Design §3.2.4.
+func (s *Server) handleAdminServerConfigSectionReset(w http.ResponseWriter, r *http.Request) {
+	user := GetUserIdentityFromContext(r.Context())
+	if user == nil || user.Role() != "admin" {
+		Forbidden(w)
+		return
+	}
+
+	if r.Method != http.MethodDelete {
+		MethodNotAllowed(w)
+		return
+	}
+
+	ops := s.GetOperationalSettings()
+	if ops == nil || !s.IsPostgres() {
+		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
+			"Section reset is only available in postgres mode", nil)
+		return
+	}
+
+	sectionName := strings.TrimPrefix(r.URL.Path, "/api/v1/admin/server-config/sections/")
+	if sectionName == "" {
+		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
+			"Section name is required", nil)
+		return
+	}
+
+	sec := opsettings.SectionByName(sectionName)
+	if sec == nil {
+		writeError(w, http.StatusNotFound, ErrCodeNotFound,
+			"Unknown section: "+sectionName, nil)
+		return
+	}
+
+	if err := ops.DeleteSection(r.Context(), sectionName); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeError(w, http.StatusNotFound, ErrCodeNotFound,
+				"Section not found in database: "+sectionName, nil)
+			return
+		}
+		slog.Error("Failed to reset section", "section", sectionName, "error", err)
+		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+			"Failed to reset section", nil)
+		return
+	}
+
+	slog.Info("Section reset to bootstrap", "section", sectionName, "by", user.Email())
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"reset":   true,
+		"section": sectionName,
+	})
 }
 
 // handleGetServerConfig reads and returns the global settings.yaml.

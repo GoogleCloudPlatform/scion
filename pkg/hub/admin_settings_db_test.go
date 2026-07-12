@@ -2158,3 +2158,66 @@ func TestRoundTrip_WebhooksEnabled_FalsePersists(t *testing.T) {
 		t.Error("#391: GitHubWebhooksEnabled should be false after saving false")
 	}
 }
+
+// ---- DELETE /api/v1/admin/server-config/sections/{name} (reset) ----
+
+func TestResetSection_DeletesManagedSection(t *testing.T) {
+	srv, fakeStore, ops := newTestDBServer(t)
+
+	// Seed a managed section.
+	fakeStore.seedWithOrigin("access", json.RawMessage(`{"admin_emails":["admin@db.com"],"user_access_mode":"open"}`), "managed")
+	_, _ = ops.Refresh(context.Background())
+
+	rr := httptest.NewRecorder()
+	srv.handleAdminServerConfigSectionReset(rr, adminRequest(http.MethodDelete, "/api/v1/admin/server-config/sections/access", ""))
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	// Row should be deleted.
+	fakeStore.mu.Lock()
+	_, exists := fakeStore.settings["access"]
+	fakeStore.mu.Unlock()
+	if exists {
+		t.Error("expected access row to be deleted after reset")
+	}
+}
+
+func TestResetSection_RejectsNonDelete(t *testing.T) {
+	srv, _, _ := newTestDBServer(t)
+
+	rr := httptest.NewRecorder()
+	srv.handleAdminServerConfigSectionReset(rr, adminRequest(http.MethodGet, "/api/v1/admin/server-config/sections/access", ""))
+
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Errorf("expected 405, got %d", rr.Code)
+	}
+}
+
+func TestResetSection_RejectsUnknownSection(t *testing.T) {
+	srv, _, _ := newTestDBServer(t)
+
+	rr := httptest.NewRecorder()
+	srv.handleAdminServerConfigSectionReset(rr, adminRequest(http.MethodDelete, "/api/v1/admin/server-config/sections/nonexistent", ""))
+
+	if rr.Code != http.StatusNotFound {
+		t.Errorf("expected 404, got %d", rr.Code)
+	}
+}
+
+func TestResetSection_RequiresAdmin(t *testing.T) {
+	srv, _, _ := newTestDBServer(t)
+
+	// Non-admin request.
+	r := httptest.NewRequest(http.MethodDelete, "/api/v1/admin/server-config/sections/access", nil)
+	viewer := NewAuthenticatedUser("u2", "viewer@example.com", "Viewer", "viewer", "cli")
+	r = r.WithContext(contextWithIdentity(r.Context(), viewer))
+
+	rr := httptest.NewRecorder()
+	srv.handleAdminServerConfigSectionReset(rr, r)
+
+	if rr.Code != http.StatusForbidden {
+		t.Errorf("expected 403, got %d", rr.Code)
+	}
+}

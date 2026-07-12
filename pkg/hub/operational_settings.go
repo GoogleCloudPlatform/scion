@@ -349,6 +349,34 @@ func (o *OperationalSettings) Update(
 	return result.Revision, nil
 }
 
+// DeleteSection removes a section row from the store, evicts it from the local
+// cache, publishes an event so peers refresh, and self-applies. The section
+// falls back to bootstrap material immediately (design §3.2.4).
+func (o *OperationalSettings) DeleteSection(ctx context.Context, section string) error {
+	if err := o.store.DeleteHubSetting(ctx, section); err != nil {
+		return err
+	}
+
+	o.mu.Lock()
+	delete(o.cache, section)
+	o.mu.Unlock()
+
+	if o.events != nil {
+		o.events.PublishRaw(settingsUpdatedSubject, SettingsUpdatedEvent{
+			Section:  section,
+			Revision: 0,
+		})
+	}
+
+	if o.server != nil {
+		snap := o.Snapshot()
+		ApplySnapshot(o.server, snap)
+		ApplyMaintenanceFromSnapshot(o.server, snap)
+	}
+
+	return nil
+}
+
 // EnvOverriddenKeys returns the list of Layer-1 koanf keys that are overridden
 // by environment variables on this node.
 func (o *OperationalSettings) EnvOverriddenKeys() []string {
