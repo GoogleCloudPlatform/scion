@@ -240,9 +240,9 @@ func TestSubscription_MaintenanceApplied_WithoutEnvOverride(t *testing.T) {
 	}
 }
 
-func TestSubscription_MaintenanceNotOverridden_WhenEnvSet(t *testing.T) {
-	// When SCION_SERVER_ADMIN_MODE env is set, propagated maintenance changes
-	// should not override the env setting.
+func TestSubscription_MaintenancePropagated_EnvDoesNotOverride(t *testing.T) {
+	// In HA mode, propagated maintenance changes apply as-is — env does NOT
+	// override (cluster-consistency requirement).
 	setEnvForTest(t, "SCION_SERVER_ADMIN_MODE", "true")
 	setEnvForTest(t, "SCION_SERVER_MAINTENANCE_MESSAGE", "env-break-glass")
 
@@ -263,7 +263,7 @@ func TestSubscription_MaintenanceNotOverridden_WhenEnvSet(t *testing.T) {
 	ops.StartPropagation(ctx, srv)
 	defer ops.StopPropagation()
 
-	// Another replica disables maintenance via DB — but env should win here
+	// Another replica disables maintenance via DB.
 	fakeStore.mu.Lock()
 	fakeStore.settings["maintenance"] = &store.HubSetting{
 		ID:       "maintenance",
@@ -281,12 +281,12 @@ func TestSubscription_MaintenanceNotOverridden_WhenEnvSet(t *testing.T) {
 	// Give time for propagation
 	time.Sleep(500 * time.Millisecond)
 
-	// Env override should still win
-	if !srv.maintenance.IsEnabled() {
-		t.Error("maintenance should remain enabled (env override wins)")
+	// DB wins — env no longer overrides in HA mode.
+	if srv.maintenance.IsEnabled() {
+		t.Error("maintenance should be disabled (DB propagation wins, env no longer overrides)")
 	}
-	if srv.maintenance.Message() != "env-break-glass" {
-		t.Errorf("message should be 'env-break-glass', got %q", srv.maintenance.Message())
+	if srv.maintenance.Message() != "done" {
+		t.Errorf("message should be 'done', got %q", srv.maintenance.Message())
 	}
 }
 
@@ -378,9 +378,6 @@ func TestIdempotency_DoubleApply(t *testing.T) {
 	srv := &Server{
 		maintenance: NewMaintenanceState(false, ""),
 	}
-
-	setEnvForTest(t, "SCION_SERVER_ADMIN_MODE", "")
-	setEnvForTest(t, "SCION_SERVER_MAINTENANCE_MESSAGE", "")
 
 	snap := Layer1Snapshot{
 		AdminEmails:        []string{"admin@test.com"},

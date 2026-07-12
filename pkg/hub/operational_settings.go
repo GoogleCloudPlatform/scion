@@ -20,7 +20,6 @@ import (
 	"fmt"
 	"log/slog"
 	"math/rand"
-	"os"
 	"sync"
 	"time"
 
@@ -51,7 +50,7 @@ type sectionState struct {
 //
 // Field population depends on the source:
 //   - Postgres mode (OperationalSettings.Snapshot): ALL fields are populated via
-//     the full koanf merge (env > DB > file > defaults). This includes
+//     the koanf merge (DB > bootstrap merge). This includes
 //     SoftDeleteRetention, SoftDeleteRetainFiles, PublicURL, ImageRegistry,
 //     DefaultTemplate, DefaultHarnessConfig, DefaultMaxTurns, DefaultMaxModelCalls,
 //     DefaultMaxDuration, DefaultResources, and NotificationChannels.
@@ -223,13 +222,13 @@ func (o *OperationalSettings) Refresh(ctx context.Context) ([]string, error) {
 
 // Snapshot returns an immutable merged Layer-1 view.
 //
-// Precedence (per §3.4):
+// Precedence (per design §3.1):
 //
-//	env > DB > file > defaults
+//	DB rows > bootstrap merge (defaults → SEED → yaml → SERVER)
 //
-// Absent-vs-empty: a DB row present for a section fully owns that section
-// (its omitted fields fall to compiled defaults, not to the file). A deleted
-// row restores file fallback for that section.
+// DB sections fully own their keys; absent sections fall back to the bootstrap
+// merge. Env vars are NOT merged on top — they feed the bootstrap layer and
+// are honored as seed input during the deprecation window.
 func (o *OperationalSettings) Snapshot() Layer1Snapshot {
 	o.mu.RLock()
 	dbSections := make(map[string]json.RawMessage, len(o.cache))
@@ -238,11 +237,10 @@ func (o *OperationalSettings) Snapshot() Layer1Snapshot {
 	}
 	o.mu.RUnlock()
 
-	// Build the merged koanf: start with file fallback, overlay DB sections,
-	// then overlay env.
+	// Build the merged koanf: bootstrap fallback, overlaid by DB sections.
 	merged := koanf.New(".")
 
-	// Layer: file fallback (lowest precedence for Layer-1 keys).
+	// Layer: bootstrap merge (lowest precedence for Layer-1 keys).
 	// Only load keys for sections NOT present in DB.
 	for _, sec := range opsettings.Registry {
 		if _, inDB := dbSections[sec.Name]; inDB {
@@ -259,18 +257,9 @@ func (o *OperationalSettings) Snapshot() Layer1Snapshot {
 		_ = loadSectionDocIntoKoanf(merged, sec.Name, doc)
 	}
 
-	// Layer: DB sections.
+	// Layer: DB sections (highest precedence — DB wins over bootstrap).
 	for name, doc := range dbSections {
 		_ = loadSectionDocIntoKoanf(merged, name, doc)
-	}
-
-	// Layer: env overrides (highest precedence).
-	if o.envKoanf != nil {
-		for _, key := range o.envKoanf.Keys() {
-			if opsettings.IsLayer1Key(key) {
-				_ = merged.Set(key, o.envKoanf.Get(key))
-			}
-		}
 	}
 
 	snap := buildSnapshotFromKoanf(merged)
@@ -742,33 +731,15 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 //   - If snap.HasMaintenanceRow is true: apply DB values, UNLESS the
 //     SCION_SERVER_ADMIN_MODE env var is set (per-node break-glass override).
 //
-// Phase 4 will call this on propagation events — a changed maintenance row
-// propagated from another node MUST apply, but env force-enable still wins
-// on this node.
+// ApplyMaintenanceFromSnapshot applies the maintenance settings from the
+// snapshot to the server's maintenance state. In HA mode, maintenance must
+// be cluster-consistent — per-node env force-win is removed.
 func ApplyMaintenanceFromSnapshot(s *Server, snap Layer1Snapshot) {
 	if !snap.HasMaintenanceRow {
-		// No maintenance row in DB — leave MaintenanceState as initialized
-		// at startup (which already honors the env var).
 		return
 	}
 
-	adminMode := snap.AdminMode
-	message := snap.MaintenanceMessage
-
-	// SCION_SERVER_ADMIN_MODE env var overrides bidirectionally: it can
-	// force-enable OR force-disable admin mode on this node, matching the
-	// pre-existing startup semantics in cmd/server_foreground.go:80-82.
-	// The design doc says "force-enables" but we keep parity with existing
-	// behavior (which parses the value as a boolean). The docs phase will
-	// document the bidirectional override.
-	if v := os.Getenv("SCION_SERVER_ADMIN_MODE"); v != "" {
-		adminMode = v == "true" || v == "1" || v == "yes"
-	}
-	if v := os.Getenv("SCION_SERVER_MAINTENANCE_MESSAGE"); v != "" {
-		message = v
-	}
-
-	s.maintenance.Set(adminMode, message)
+	s.maintenance.Set(snap.AdminMode, snap.MaintenanceMessage)
 }
 
 // applySnapshotLogLevel applies the log-level portion of the snapshot.

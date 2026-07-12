@@ -163,10 +163,10 @@ func emptyKoanf() *koanf.Koanf {
 
 // --- Tests ---
 
-func TestSnapshot_Precedence_EnvOverDBOverFileOverDefault(t *testing.T) {
-	// File says admin_emails = ["file@example.com"]
-	fileK := newFileKoanf(t, map[string]interface{}{
-		"server.hub.admin_emails":      []interface{}{"file@example.com"},
+func TestSnapshot_Precedence_DBOverBootstrap(t *testing.T) {
+	// Bootstrap merge says admin_emails = ["bootstrap@example.com"]
+	bootstrapK := newFileKoanf(t, map[string]interface{}{
+		"server.hub.admin_emails":      []interface{}{"bootstrap@example.com"},
 		"server.auth.user_access_mode": "open",
 	})
 
@@ -174,12 +174,12 @@ func TestSnapshot_Precedence_EnvOverDBOverFileOverDefault(t *testing.T) {
 	fakeStore := newFakeHubSettingStore()
 	fakeStore.seed("access", json.RawMessage(`{"admin_emails":["db@example.com"],"user_access_mode":"domain_restricted"}`))
 
-	// Env says admin_emails = ["env@example.com"]
+	// Env koanf is provided but NOT merged on top — only used for override detection.
 	envK := newEnvKoanf(t, map[string]interface{}{
 		"server.hub.admin_emails": []interface{}{"env@example.com"},
 	})
 
-	ops := NewOperationalSettings(fakeStore, fileK, envK)
+	ops := NewOperationalSettings(fakeStore, bootstrapK, envK)
 	_, err := ops.Refresh(context.Background())
 	if err != nil {
 		t.Fatalf("Refresh: %v", err)
@@ -187,14 +187,19 @@ func TestSnapshot_Precedence_EnvOverDBOverFileOverDefault(t *testing.T) {
 
 	snap := ops.Snapshot()
 
-	// env > DB > file: admin_emails should be from env
-	if len(snap.AdminEmails) != 1 || snap.AdminEmails[0] != "env@example.com" {
-		t.Errorf("AdminEmails: want [env@example.com], got %v", snap.AdminEmails)
+	// DB wins over bootstrap (env is NOT merged on top).
+	if len(snap.AdminEmails) != 1 || snap.AdminEmails[0] != "db@example.com" {
+		t.Errorf("AdminEmails: want [db@example.com], got %v", snap.AdminEmails)
 	}
 
-	// user_access_mode not overridden by env, so DB wins
 	if snap.UserAccessMode != "domain_restricted" {
 		t.Errorf("UserAccessMode: want domain_restricted, got %s", snap.UserAccessMode)
+	}
+
+	// Env overrides are still detected (for the GET response) even though
+	// they don't affect Snapshot merge.
+	if len(snap.EnvOverrides) != 1 || snap.EnvOverrides[0] != "server.hub.admin_emails" {
+		t.Errorf("EnvOverrides: want [server.hub.admin_emails], got %v", snap.EnvOverrides)
 	}
 }
 
@@ -655,14 +660,9 @@ func TestSnapshot_GitHubAppExcludesSecrets(t *testing.T) {
 
 // --- NB5 regression tests ---
 
-func TestApplyMaintenanceFromSnapshot_EnvWinsOverAbsentDBRow(t *testing.T) {
-	// Scenario: no maintenance row in DB, but SCION_SERVER_ADMIN_MODE=true env set.
-	// Expected: MaintenanceState retains whatever it was initialized with (env at startup).
-	// ApplyMaintenanceFromSnapshot should be a no-op when HasMaintenanceRow is false.
-	setEnvForTest(t, "SCION_SERVER_ADMIN_MODE", "true")
-
+func TestApplyMaintenanceFromSnapshot_NoOpWhenNoDBRow(t *testing.T) {
 	srv := &Server{
-		maintenance: NewMaintenanceState(true, "env-set"), // initialized from env at startup
+		maintenance: NewMaintenanceState(true, "startup-value"),
 	}
 
 	snap := Layer1Snapshot{
@@ -672,49 +672,16 @@ func TestApplyMaintenanceFromSnapshot_EnvWinsOverAbsentDBRow(t *testing.T) {
 
 	ApplyMaintenanceFromSnapshot(srv, snap)
 
-	// Should remain as initialized — no-op because no DB row.
+	// No-op when HasMaintenanceRow is false — retains startup state.
 	if !srv.maintenance.IsEnabled() {
 		t.Error("want maintenance enabled (no-op when HasMaintenanceRow=false)")
 	}
-	if srv.maintenance.Message() != "env-set" {
-		t.Errorf("want message 'env-set', got %q", srv.maintenance.Message())
+	if srv.maintenance.Message() != "startup-value" {
+		t.Errorf("want message 'startup-value', got %q", srv.maintenance.Message())
 	}
 }
 
-func TestApplyMaintenanceFromSnapshot_EnvWinsOverFalseDBRow(t *testing.T) {
-	// Scenario: maintenance row exists in DB with admin_mode=false,
-	// but SCION_SERVER_ADMIN_MODE=true env var is set (break-glass).
-	// Expected: env wins — maintenance enabled.
-	setEnvForTest(t, "SCION_SERVER_ADMIN_MODE", "true")
-	setEnvForTest(t, "SCION_SERVER_MAINTENANCE_MESSAGE", "env-break-glass")
-
-	srv := &Server{
-		maintenance: NewMaintenanceState(false, ""),
-	}
-
-	snap := Layer1Snapshot{
-		AdminMode:          false,
-		MaintenanceMessage: "from-db",
-		HasMaintenanceRow:  true, // DB row exists
-	}
-
-	ApplyMaintenanceFromSnapshot(srv, snap)
-
-	if !srv.maintenance.IsEnabled() {
-		t.Error("want maintenance enabled (env override wins)")
-	}
-	if srv.maintenance.Message() != "env-break-glass" {
-		t.Errorf("want message 'env-break-glass', got %q", srv.maintenance.Message())
-	}
-}
-
-func TestApplyMaintenanceFromSnapshot_DBRowAppliedWhenNoEnv(t *testing.T) {
-	// Scenario: maintenance row exists in DB with admin_mode=true,
-	// no env override set. Expected: DB values applied.
-	// Ensure env vars are unset by t.Setenv (overrides then restores).
-	setEnvForTest(t, "SCION_SERVER_ADMIN_MODE", "")
-	setEnvForTest(t, "SCION_SERVER_MAINTENANCE_MESSAGE", "")
-
+func TestApplyMaintenanceFromSnapshot_DBRowApplied(t *testing.T) {
 	srv := &Server{
 		maintenance: NewMaintenanceState(false, ""),
 	}
@@ -732,6 +699,33 @@ func TestApplyMaintenanceFromSnapshot_DBRowAppliedWhenNoEnv(t *testing.T) {
 	}
 	if srv.maintenance.Message() != "DB maintenance" {
 		t.Errorf("want message 'DB maintenance', got %q", srv.maintenance.Message())
+	}
+}
+
+func TestApplyMaintenanceFromSnapshot_EnvDoesNotOverrideDB(t *testing.T) {
+	// Env vars are set, but maintenance comes from DB — env no longer
+	// force-wins in HA mode (cluster-consistency requirement).
+	setEnvForTest(t, "SCION_SERVER_ADMIN_MODE", "true")
+	setEnvForTest(t, "SCION_SERVER_MAINTENANCE_MESSAGE", "env-msg")
+
+	srv := &Server{
+		maintenance: NewMaintenanceState(false, ""),
+	}
+
+	snap := Layer1Snapshot{
+		AdminMode:          false,
+		MaintenanceMessage: "from-db",
+		HasMaintenanceRow:  true,
+	}
+
+	ApplyMaintenanceFromSnapshot(srv, snap)
+
+	// DB wins — env does NOT override.
+	if srv.maintenance.IsEnabled() {
+		t.Error("want maintenance disabled (DB says false, env no longer overrides)")
+	}
+	if srv.maintenance.Message() != "from-db" {
+		t.Errorf("want message 'from-db', got %q", srv.maintenance.Message())
 	}
 }
 
