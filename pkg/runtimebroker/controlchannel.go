@@ -106,6 +106,8 @@ type AgentLookup interface {
 	RuntimeCommand() string
 }
 
+const defaultMaxConcurrentDispatches = 20
+
 // ControlChannelClient manages the WebSocket connection to the Hub.
 type ControlChannelClient struct {
 	config         ControlChannelConfig
@@ -116,6 +118,10 @@ type ControlChannelClient struct {
 	log            *slog.Logger
 	streams        map[string]*StreamHandler
 	streamMu       sync.RWMutex
+
+	// dispatchSem limits concurrent async request dispatches to prevent
+	// unbounded goroutine growth under load.
+	dispatchSem chan struct{}
 
 	// Connection state
 	connected   bool
@@ -153,6 +159,7 @@ func NewControlChannelClient(config ControlChannelConfig, handlers http.Handler,
 		connectionName: connectionName,
 		log:            log,
 		streams:        make(map[string]*StreamHandler),
+		dispatchSem:    make(chan struct{}, defaultMaxConcurrentDispatches),
 	}
 }
 
@@ -467,11 +474,38 @@ func (c *ControlChannelClient) handleMessage(data []byte) error {
 	}
 }
 
-// handleRequest processes a tunneled HTTP request.
-func (c *ControlChannelClient) handleRequest(data []byte) (retErr error) {
+// handleRequest parses the request envelope and dispatches it asynchronously
+// so the message loop is never blocked by slow HTTP handlers (e.g. container
+// creation that can take 60-90s). Without this, the single-threaded message
+// loop cannot call ReadMessage while a handler is running, pong frames are
+// never consumed, and the hub's PongWait expires — dropping the WebSocket.
+func (c *ControlChannelClient) handleRequest(data []byte) error {
 	var req wsprotocol.RequestEnvelope
 	if err := json.Unmarshal(data, &req); err != nil {
 		return fmt.Errorf("failed to parse request: %w", err)
+	}
+
+	if c.config.Debug {
+		c.log.Debug("Control channel request", "method", req.Method, "path", req.Path)
+	}
+
+	c.wg.Add(1)
+	go c.dispatchRequest(req)
+	return nil
+}
+
+// dispatchRequest runs the HTTP handler for a tunneled request and sends the
+// response back over the WebSocket. It acquires the dispatch semaphore to
+// bound concurrency and releases it when done.
+func (c *ControlChannelClient) dispatchRequest(req wsprotocol.RequestEnvelope) {
+	defer c.wg.Done()
+
+	// Acquire dispatch semaphore to limit concurrent goroutines.
+	select {
+	case c.dispatchSem <- struct{}{}:
+		defer func() { <-c.dispatchSem }()
+	case <-c.ctx.Done():
+		return
 	}
 
 	// Recover from panics (e.g. httptest.NewRequest on malformed URLs) to
@@ -481,14 +515,10 @@ func (c *ControlChannelClient) handleRequest(data []byte) (retErr error) {
 			c.log.Error("Panic in control channel request handler", "panic", r, "method", req.Method, "path", req.Path)
 			resp := wsprotocol.NewResponseEnvelope(req.RequestID, http.StatusBadRequest, nil, []byte(fmt.Sprintf(`{"error":"request caused panic: %v"}`, r)))
 			if writeErr := c.conn.WriteJSON(resp); writeErr != nil {
-				retErr = fmt.Errorf("failed to send panic error response: %w", writeErr)
+				c.log.Error("Failed to send panic error response", "error", writeErr)
 			}
 		}
 	}()
-
-	if c.config.Debug {
-		c.log.Debug("Control channel request", "method", req.Method, "path", req.Path)
-	}
 
 	// Build HTTP request
 	path := req.Path
@@ -527,8 +557,9 @@ func (c *ControlChannelClient) handleRequest(data []byte) (retErr error) {
 
 	resp := wsprotocol.NewResponseEnvelope(req.RequestID, result.StatusCode, headers, respBody)
 
-	// Send response
-	return c.conn.WriteJSON(resp)
+	if err := c.conn.WriteJSON(resp); err != nil {
+		c.log.Error("Failed to send response", "error", err, "requestID", req.RequestID)
+	}
 }
 
 // handleStreamOpen processes a stream open request.
