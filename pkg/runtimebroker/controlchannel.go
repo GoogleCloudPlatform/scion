@@ -489,15 +489,16 @@ func (c *ControlChannelClient) handleRequest(data []byte) error {
 		c.log.Debug("Control channel request", "method", req.Method, "path", req.Path)
 	}
 
+	conn := c.conn
 	c.wg.Add(1)
-	go c.dispatchRequest(req)
+	go c.dispatchRequest(conn, req)
 	return nil
 }
 
 // dispatchRequest runs the HTTP handler for a tunneled request and sends the
 // response back over the WebSocket. It acquires the dispatch semaphore to
 // bound concurrency and releases it when done.
-func (c *ControlChannelClient) dispatchRequest(req wsprotocol.RequestEnvelope) {
+func (c *ControlChannelClient) dispatchRequest(conn *wsprotocol.Connection, req wsprotocol.RequestEnvelope) {
 	defer c.wg.Done()
 
 	// Acquire dispatch semaphore to limit concurrent goroutines.
@@ -514,7 +515,7 @@ func (c *ControlChannelClient) dispatchRequest(req wsprotocol.RequestEnvelope) {
 		if r := recover(); r != nil {
 			c.log.Error("Panic in control channel request handler", "panic", r, "method", req.Method, "path", req.Path)
 			resp := wsprotocol.NewResponseEnvelope(req.RequestID, http.StatusBadRequest, nil, []byte(fmt.Sprintf(`{"error":"request caused panic: %v"}`, r)))
-			if writeErr := c.conn.WriteJSON(resp); writeErr != nil {
+			if writeErr := conn.WriteJSON(resp); writeErr != nil {
 				c.log.Error("Failed to send panic error response", "error", writeErr)
 			}
 		}
@@ -557,7 +558,7 @@ func (c *ControlChannelClient) dispatchRequest(req wsprotocol.RequestEnvelope) {
 
 	resp := wsprotocol.NewResponseEnvelope(req.RequestID, result.StatusCode, headers, respBody)
 
-	if err := c.conn.WriteJSON(resp); err != nil {
+	if err := conn.WriteJSON(resp); err != nil {
 		c.log.Error("Failed to send response", "error", err, "requestID", req.RequestID)
 	}
 }

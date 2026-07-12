@@ -252,7 +252,7 @@ func TestDispatchRequest_SendsResponse(t *testing.T) {
 	}
 
 	client.wg.Add(1)
-	go client.dispatchRequest(req)
+	go client.dispatchRequest(brokerConn, req)
 	client.wg.Wait()
 
 	// Read the response from the hub side
@@ -303,7 +303,7 @@ func TestDispatchRequest_PanicRecovery(t *testing.T) {
 	}
 
 	client.wg.Add(1)
-	go client.dispatchRequest(req)
+	go client.dispatchRequest(brokerConn, req)
 	client.wg.Wait()
 
 	// Should receive a 400 error response, not crash
@@ -365,7 +365,7 @@ func TestDispatchRequest_SemaphoreLimitsConcurrency(t *testing.T) {
 			Path:      "/test",
 		}
 		client.wg.Add(1)
-		go client.dispatchRequest(req)
+		go client.dispatchRequest(brokerConn, req)
 	}
 
 	// Give goroutines time to all reach the semaphore
@@ -416,7 +416,7 @@ func TestDispatchRequest_ContextCancelledBeforeSemaphore(t *testing.T) {
 	}
 
 	client.wg.Add(1)
-	go client.dispatchRequest(req)
+	go client.dispatchRequest(brokerConn, req)
 
 	// Give the goroutine time to reach the select
 	time.Sleep(50 * time.Millisecond)
