@@ -559,6 +559,19 @@ func TestInitMachine_SkipRuntimeCheck(t *testing.T) {
 	if settingsPath == "" {
 		t.Fatal("expected settings.yaml to be created")
 	}
+
+	// Verify the settings file contains a valid runtime (not empty)
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("failed to read settings: %v", err)
+	}
+	content := string(data)
+	if strings.Contains(content, "runtime: \n") || strings.Contains(content, "runtime:  ") {
+		t.Fatal("expected a valid runtime in settings.yaml when SkipRuntimeCheck is true, got empty runtime")
+	}
+	if !strings.Contains(content, "runtime: docker") {
+		t.Errorf("expected runtime to default to 'docker' when SkipRuntimeCheck is true, got:\n%s", content)
+	}
 }
 
 func TestInitProject_FailsWithNoRuntime(t *testing.T) {

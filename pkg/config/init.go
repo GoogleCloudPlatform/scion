@@ -581,6 +581,8 @@ func InitMachine(harnesses []api.Harness, opts ...InitMachineOpts) error {
 			if err != nil {
 				return err
 			}
+		} else {
+			detectedRuntime = "docker"
 		}
 
 		// Seed default YAML settings with the detected runtime
