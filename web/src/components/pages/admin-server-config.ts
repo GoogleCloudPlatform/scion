@@ -203,6 +203,7 @@ interface ServerConfigResponse {
   default_resources?: ResourceSpec;
 
   // Settings-DB metadata (postgres mode only; absent in file/SQLite mode)
+  settings_tier?: 'db' | 'file';
   env_overrides?: string[];
   section_metadata?: Record<string, SectionMetadataInfo>;
 }
@@ -320,6 +321,8 @@ const KOANF_KEY_LABELS: Record<string, string> = {
   // notifications section
   'server.notification_channels': 'Notification Channels',
 };
+
+const STATIC_LAYER1_KEYS: Set<string> = new Set(Object.keys(KOANF_KEY_LABELS));
 
 @customElement('scion-page-admin-server-config')
 export class ScionPageAdminServerConfig extends LitElement {
@@ -465,6 +468,11 @@ export class ScionPageAdminServerConfig extends LitElement {
   @state() private validationErrors: Record<string, ValidationErrorDetail[]> | null = null;
   @state() private conflictInfo: ConflictInfo | null = null;
   @state() private safetyNetKeys: string[] | null = null;
+
+  // ── Layer-aware rendering state ──
+  private settingsTier: 'db' | 'file' = 'file';
+  private layer1Keys: Set<string> = new Set(STATIC_LAYER1_KEYS);
+  private envKeys: Set<string> = new Set();
 
   static override styles = css`
     :host {
@@ -960,7 +968,10 @@ export class ScionPageAdminServerConfig extends LitElement {
     this.error = null;
     this.ignoredKeysNotice = null;
     try {
-      const res = await apiFetch('/api/v1/admin/server-config');
+      const [res] = await Promise.all([
+        apiFetch('/api/v1/admin/server-config'),
+        this.loadSchemaKeys(),
+      ]);
       if (!res.ok) {
         this.error = await extractApiError(res, 'Failed to load server configuration');
         return;
@@ -975,6 +986,19 @@ export class ScionPageAdminServerConfig extends LitElement {
       this.error = 'Failed to connect to server';
     } finally {
       this.loading = false;
+    }
+  }
+
+  private async loadSchemaKeys(): Promise<void> {
+    try {
+      const res = await apiFetch('/api/v1/admin/server-config/schema');
+      if (!res.ok) return;
+      const data = (await res.json()) as { layer1_keys?: string[] };
+      if (data.layer1_keys && data.layer1_keys.length > 0) {
+        this.layer1Keys = new Set(data.layer1_keys);
+      }
+    } catch {
+      // Fall back to STATIC_LAYER1_KEYS (already the default)
     }
   }
 
@@ -1092,7 +1116,9 @@ export class ScionPageAdminServerConfig extends LitElement {
     // Runtimes, harness_configs, profiles preserved via rawConfig
 
     // Settings-DB metadata (postgres mode only; absent in file/SQLite mode)
+    this.settingsTier = data.settings_tier || 'file';
     this.envOverrides = data.env_overrides || [];
+    this.envKeys = new Set(this.envOverrides);
     this.sectionMetadata = data.section_metadata || null;
   }
 
