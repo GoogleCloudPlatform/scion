@@ -175,8 +175,21 @@ func registerGlobalProjectAndBroker(ctx context.Context, s store.Store, brokerID
 	return brokerID, nil
 }
 
+// isLocalOnlyRuntime returns true for runtime types that require a local daemon
+// or hardware and cannot function in a hosted cloud environment.
+func isLocalOnlyRuntime(runtimeType string) bool {
+	switch runtimeType {
+	case "docker", "podman", "container":
+		return true
+	}
+	return false
+}
+
 // buildStoreBrokerProfiles builds store.BrokerProfile objects from settings.Profiles.
 // If no profiles are defined in settings, returns a default profile with the detected runtime type.
+// When the detected default runtime is not local-only (e.g. cloudrun, kubernetes),
+// profiles referencing local-only runtimes (docker, podman, container) are
+// filtered out because no local daemon is available in those environments.
 func buildStoreBrokerProfiles(settings *config.Settings, defaultRuntimeType string) []store.BrokerProfile {
 	// If no settings or no profiles defined, return a default profile
 	if settings == nil || len(settings.Profiles) == 0 {
@@ -191,6 +204,10 @@ func buildStoreBrokerProfiles(settings *config.Settings, defaultRuntimeType stri
 		runtimeType := profileCfg.Runtime
 		if runtimeType == "" {
 			runtimeType = defaultRuntimeType
+		}
+
+		if !isLocalOnlyRuntime(defaultRuntimeType) && isLocalOnlyRuntime(runtimeType) {
+			continue
 		}
 
 		// Look up runtime config to get additional info (context, namespace for K8s)
@@ -209,6 +226,12 @@ func buildStoreBrokerProfiles(settings *config.Settings, defaultRuntimeType stri
 			Context:   context,
 			Namespace: namespace,
 		})
+	}
+
+	if len(profiles) == 0 {
+		profiles = []store.BrokerProfile{
+			{Name: "default", Type: defaultRuntimeType, Available: true},
+		}
 	}
 
 	return profiles

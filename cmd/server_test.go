@@ -23,6 +23,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
+	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
 	"github.com/stretchr/testify/assert"
@@ -196,4 +197,121 @@ func TestRegisterGlobalProjectAndBroker_LabelsOnDedupByName(t *testing.T) {
 	broker, err := s.GetRuntimeBroker(ctx, tid("broker-1"))
 	require.NoError(t, err)
 	assert.Equal(t, "embedded", broker.Labels["scion.io/broker-role"])
+}
+func TestBuildStoreBrokerProfiles_CloudRunFiltersLocalRuntimes(t *testing.T) {
+	settings := &config.Settings{
+		Profiles: map[string]config.ProfileConfig{
+			"local":  {Runtime: "docker"},
+			"remote": {Runtime: "kubernetes"},
+		},
+	}
+
+	profiles := buildStoreBrokerProfiles(settings, "cloudrun")
+
+	assert.Len(t, profiles, 1, "Cloud Run should filter out docker profile")
+	assert.Equal(t, "kubernetes", profiles[0].Type)
+	assert.Equal(t, "remote", profiles[0].Name)
+}
+
+func TestBuildStoreBrokerProfiles_DockerDefaultKeepsAllProfiles(t *testing.T) {
+	settings := &config.Settings{
+		Profiles: map[string]config.ProfileConfig{
+			"local":  {Runtime: "docker"},
+			"remote": {Runtime: "kubernetes"},
+		},
+	}
+
+	profiles := buildStoreBrokerProfiles(settings, "docker")
+
+	assert.Len(t, profiles, 2, "docker default should keep all profiles")
+	types := map[string]bool{}
+	for _, p := range profiles {
+		types[p.Type] = true
+	}
+	assert.True(t, types["docker"])
+	assert.True(t, types["kubernetes"])
+}
+
+func TestBuildStoreBrokerProfiles_EmptyAfterFilterFallsBackToDefault(t *testing.T) {
+	settings := &config.Settings{
+		Profiles: map[string]config.ProfileConfig{
+			"local": {Runtime: "docker"},
+		},
+	}
+
+	profiles := buildStoreBrokerProfiles(settings, "cloudrun")
+
+	assert.Len(t, profiles, 1, "should fall back to default profile when all are filtered")
+	assert.Equal(t, "default", profiles[0].Name)
+	assert.Equal(t, "cloudrun", profiles[0].Type)
+	assert.True(t, profiles[0].Available)
+}
+
+func TestBuildStoreBrokerProfiles_StarterHubKeepsDockerProfiles(t *testing.T) {
+	settings := &config.Settings{
+		Profiles: map[string]config.ProfileConfig{
+			"local":  {Runtime: "docker"},
+			"remote": {Runtime: "kubernetes"},
+		},
+	}
+
+	profiles := buildStoreBrokerProfiles(settings, "docker")
+
+	assert.Len(t, profiles, 2, "starter hub (docker default) should keep docker profiles")
+	types := map[string]bool{}
+	for _, p := range profiles {
+		types[p.Type] = true
+	}
+	assert.True(t, types["docker"], "docker profile should be present")
+	assert.True(t, types["kubernetes"], "kubernetes profile should be present")
+}
+
+func TestRegisterGlobalGroveAndBroker_CloudRunSuppressesDockerProfile(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	settings := &config.Settings{
+		Profiles: map[string]config.ProfileConfig{
+			"local":  {Runtime: "docker"},
+			"remote": {Runtime: "kubernetes"},
+		},
+	}
+	rt := &runtime.MockRuntime{NameFunc: func() string { return "cloudrun" }}
+
+	_, err := registerGlobalProjectAndBroker(ctx, s, tid("broker-1"), "hosted-broker", "http://localhost:9800", rt, true, settings)
+	require.NoError(t, err)
+
+	broker, err := s.GetRuntimeBroker(ctx, tid("broker-1"))
+	require.NoError(t, err)
+
+	for _, p := range broker.Profiles {
+		assert.NotEqual(t, "docker", p.Type, "docker profile should not appear in Cloud Run mode")
+	}
+	assert.Len(t, broker.Profiles, 1)
+	assert.Equal(t, "kubernetes", broker.Profiles[0].Type)
+}
+
+func TestRegisterGlobalGroveAndBroker_StarterHubKeepsDockerProfile(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	settings := &config.Settings{
+		Profiles: map[string]config.ProfileConfig{
+			"local":  {Runtime: "docker"},
+			"remote": {Runtime: "kubernetes"},
+		},
+	}
+	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
+
+	_, err := registerGlobalProjectAndBroker(ctx, s, tid("broker-1"), "starter-hub", "http://localhost:9800", rt, true, settings)
+	require.NoError(t, err)
+
+	broker, err := s.GetRuntimeBroker(ctx, tid("broker-1"))
+	require.NoError(t, err)
+
+	assert.Len(t, broker.Profiles, 2, "starter hub should keep all profiles including docker")
+	types := map[string]bool{}
+	for _, p := range broker.Profiles {
+		types[p.Type] = true
+	}
+	assert.True(t, types["docker"], "docker profile should be present on starter hub")
+	assert.True(t, types["kubernetes"], "kubernetes profile should be present")
 }
