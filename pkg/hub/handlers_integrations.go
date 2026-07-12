@@ -516,6 +516,11 @@ func (s *Server) handleRestartIntegration(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	// reconfigureIntegration pushes new config to the running plugin process
+	// (via ReplaceBrokerConfig) without killing it, so the existing spoke's
+	// RPC connection remains valid — no refreshBrokerSpoke needed here.
+	// Contrast with handleUpdateIntegration which rebuilds the binary and
+	// restarts the process, requiring a spoke refresh.
 	if err := s.reconfigureIntegration(r.Context(), mgr, name); err != nil {
 		slog.Error("Failed to restart integration", "plugin", name, "error", err)
 		InternalError(w)

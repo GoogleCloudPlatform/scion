@@ -47,6 +47,9 @@ type FanOutEventBus struct {
 	mu    sync.RWMutex
 	buses []NamedEventBus
 	log   *slog.Logger
+
+	subMu         sync.Mutex
+	subscriptions []string
 }
 
 // NewFanOutEventBus creates a FanOutEventBus that delegates to the given children.
@@ -152,6 +155,11 @@ func (f *FanOutEventBus) Subscribe(pattern string, handler EventHandler) (Subscr
 		}
 		subs = append(subs, sub)
 	}
+
+	f.subMu.Lock()
+	f.subscriptions = append(f.subscriptions, pattern)
+	f.subMu.Unlock()
+
 	return &fanOutSubscription{subs: subs}, nil
 }
 
@@ -237,6 +245,21 @@ func (f *FanOutEventBus) ReplaceSpoke(name string, newBus NamedEventBus) error {
 	if err := oldBus.Close(); err != nil {
 		f.log.Error("failed to close old spoke during replace", "bus", name, "error", err)
 	}
+
+	// Replay existing subscriptions onto the new spoke so it receives the
+	// same event patterns as the spoke it replaced.
+	f.subMu.Lock()
+	subs := make([]string, len(f.subscriptions))
+	copy(subs, f.subscriptions)
+	f.subMu.Unlock()
+
+	for _, pattern := range subs {
+		if _, err := newBus.Bus.Subscribe(pattern, nil); err != nil {
+			f.log.Error("failed to replay subscription to replaced spoke",
+				"spoke", newBus.Name, "pattern", pattern, "error", err.Error())
+		}
+	}
+
 	return nil
 }
 
