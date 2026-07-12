@@ -292,11 +292,18 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 	}
 
 	baseSlug := req.Slug
-	if baseSlug == "" {
+	slugExplicit := baseSlug != ""
+	if !slugExplicit {
 		baseSlug = api.Slugify(req.Name)
 	}
-	if s.rejectReservedProjectSlugForNonAdmin(w, ctx, baseSlug) {
-		return
+	if projectcompat.IsReservedProjectSlug(baseSlug) {
+		if slugExplicit {
+			if s.rejectReservedProjectSlugForNonAdmin(w, ctx, baseSlug) {
+				return
+			}
+		} else {
+			baseSlug = baseSlug + "-project"
+		}
 	}
 
 	slug, err := s.store.NextAvailableSlug(ctx, baseSlug)
@@ -1022,8 +1029,8 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 		}
 
 		baseSlug := api.Slugify(req.Name)
-		if s.rejectReservedProjectSlugForNonAdmin(w, ctx, baseSlug) {
-			return
+		if projectcompat.IsReservedProjectSlug(baseSlug) {
+			baseSlug = baseSlug + "-project"
 		}
 		slug, err := s.store.NextAvailableSlug(ctx, baseSlug)
 		if err != nil {

@@ -231,6 +231,15 @@ func registerSystemProject(ctx context.Context, s store.Store, brokerID, brokerN
 		if !errors.Is(err, store.ErrAlreadyExists) {
 			return fmt.Errorf("failed to add system project provider: %w", err)
 		}
+		if existing, getErr := s.GetProjectProvider(ctx, project.ID, brokerID); getErr == nil && existing.LocalPath != workspacePath {
+			log.Printf("Warning: system project workspace path changed from %q to %q; updating provider", existing.LocalPath, workspacePath)
+			existing.LocalPath = workspacePath
+			if addErr := s.RemoveProjectProvider(ctx, project.ID, brokerID); addErr != nil {
+				log.Printf("Warning: failed to remove stale system project provider: %v", addErr)
+			} else if addErr = s.AddProjectProvider(ctx, existing); addErr != nil {
+				log.Printf("Warning: failed to re-add system project provider with updated path: %v", addErr)
+			}
+		}
 		if err := s.UpdateProviderStatus(ctx, project.ID, brokerID, store.BrokerStatusOnline); err != nil {
 			log.Printf("Warning: failed to update system project provider status: %v", err)
 		}

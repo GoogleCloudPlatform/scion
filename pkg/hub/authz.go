@@ -18,9 +18,9 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"sync"
 	"time"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -80,6 +80,9 @@ type EvaluationDetail struct {
 type AuthzService struct {
 	store  store.Store
 	logger *slog.Logger
+
+	systemProjectOnce sync.Once
+	systemProjectID   string
 }
 
 // NewAuthzService creates a new AuthzService.
@@ -224,16 +227,23 @@ func (a *AuthzService) checkAccessForAgent(ctx context.Context, agent AgentIdent
 	return a.checkDelegation(ctx, agent, resource, action, policies)
 }
 
+func (a *AuthzService) getSystemProjectID(ctx context.Context) string {
+	a.systemProjectOnce.Do(func() {
+		project, err := a.store.GetProjectBySlug(ctx, "system")
+		if err != nil || project == nil {
+			return
+		}
+		a.systemProjectID = project.ID
+	})
+	return a.systemProjectID
+}
+
 func (a *AuthzService) isSystemProjectAgent(ctx context.Context, agent AgentIdentity) bool {
 	projectID := agent.ProjectID()
 	if projectID == "" {
 		return false
 	}
-	project, err := a.store.GetProject(ctx, projectID)
-	if err != nil || project == nil {
-		return false
-	}
-	return project.Labels[projectcompat.LabelSystemProject] == "true"
+	return projectID == a.getSystemProjectID(ctx)
 }
 
 func (a *AuthzService) originUserIsCurrentAdmin(ctx context.Context, agent AgentIdentity) bool {
@@ -245,7 +255,7 @@ func (a *AuthzService) originUserIsCurrentAdmin(ctx context.Context, agent Agent
 	if err != nil || user == nil {
 		return false
 	}
-	return user.Role == "admin"
+	return user.Role == "admin" && user.Status == "active"
 }
 
 func (a *AuthzService) hasSystemProjectAdminDelegation(ctx context.Context, agent AgentIdentity) bool {
