@@ -1020,9 +1020,14 @@ export class ScionPageAdminServerConfig extends LitElement {
     try {
       const res = await apiFetch('/api/v1/admin/server-config/schema');
       if (!res.ok) return;
-      const data = (await res.json()) as { layer1_keys?: string[] };
-      if (data.layer1_keys && data.layer1_keys.length > 0) {
-        this.layer1Keys = new Set(data.layer1_keys);
+      const data = (await res.json()) as {
+        sections?: Record<string, { koanf_paths?: string[] }>;
+      };
+      if (data.sections) {
+        const keys = Object.values(data.sections).flatMap(
+          (s) => s.koanf_paths ?? [],
+        );
+        if (keys.length > 0) this.layer1Keys = new Set(keys);
       }
     } catch {
       // Fall back to STATIC_LAYER1_KEYS (already the default)
