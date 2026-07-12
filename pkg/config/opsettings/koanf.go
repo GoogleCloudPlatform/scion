@@ -391,12 +391,22 @@ func DetectDeprecatedServerEnv(serverEnvKoanf *koanf.Koanf) []DeprecatedEnvVar {
 		// koanfKeyToEnvSuffix strips the "server." prefix, so the suffix
 		// is e.g. "HUB_ADMINEMAILS" for key "server.hub.admin_emails".
 		envSuffix := koanfKeyToEnvSuffix(key)
-		// SCION_SERVER_ env var: prefix + suffix (SERVER_ was the stripped prefix).
-		// SCION_SEED_ env var: prefix + SERVER_ + suffix (SERVER_ is a key segment).
+
+		// SEED prefix depends on whether the key lives under server.*:
+		// - server.hub.admin_emails → SCION_SEED_SERVER_HUB_ADMINEMAILS
+		//   (strips SCION_SEED_ → SERVER_HUB_ADMINEMAILS → server.hub.admin_emails)
+		// - telemetry.enabled → SCION_SEED_TELEMETRY_ENABLED
+		//   (strips SCION_SEED_ → TELEMETRY_ENABLED → telemetry.enabled)
+		var seedPrefix string
+		if strings.HasPrefix(key, "server.") {
+			seedPrefix = "SCION_SEED_SERVER_"
+		} else {
+			seedPrefix = "SCION_SEED_"
+		}
 		deprecated = append(deprecated, DeprecatedEnvVar{
 			EnvVar:         "SCION_SERVER_" + envSuffix,
 			KoanfKey:       key,
-			SeedEquivalent: "SCION_SEED_SERVER_" + envSuffix,
+			SeedEquivalent: seedPrefix + envSuffix,
 		})
 	}
 	return deprecated

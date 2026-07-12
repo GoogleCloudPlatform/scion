@@ -886,15 +886,16 @@ func TestDetectDeprecatedServerEnv_Layer1Keys(t *testing.T) {
 		}
 	}
 
-	// Check telemetry.enabled — no server. prefix, so suffix is TELEMETRY_ENABLED
+	// Check telemetry.enabled — no server. prefix, so SEED equivalent uses
+	// SCION_SEED_ (not SCION_SEED_SERVER_) to map back to telemetry.enabled.
 	if d, ok := found["telemetry.enabled"]; !ok {
 		t.Error("expected telemetry.enabled in deprecated list")
 	} else {
 		if d.EnvVar != "SCION_SERVER_TELEMETRY_ENABLED" {
 			t.Errorf("expected env var SCION_SERVER_TELEMETRY_ENABLED, got %q", d.EnvVar)
 		}
-		if d.SeedEquivalent != "SCION_SEED_SERVER_TELEMETRY_ENABLED" {
-			t.Errorf("expected seed equivalent SCION_SEED_SERVER_TELEMETRY_ENABLED, got %q", d.SeedEquivalent)
+		if d.SeedEquivalent != "SCION_SEED_TELEMETRY_ENABLED" {
+			t.Errorf("expected seed equivalent SCION_SEED_TELEMETRY_ENABLED, got %q", d.SeedEquivalent)
 		}
 	}
 }
