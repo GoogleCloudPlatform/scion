@@ -1077,9 +1077,6 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 		// Auto-link brokers that have auto_provide enabled
 		s.autoLinkProviders(ctx, project)
 	} else {
-		if s.rejectReservedProjectSlugForNonAdmin(w, ctx, project.Slug) {
-			return
-		}
 		// Existing project — ensure associated groups exist (backfill for
 		// projects created before group support was added). Pass the
 		// authenticated user so they are added as owner of the members

@@ -775,6 +775,31 @@ func TestAuthz_SystemProjectAgentNonAdminOriginDenied(t *testing.T) {
 	assert.Equal(t, "default deny", decision.Reason)
 }
 
+func TestAuthz_SystemProjectAgentSuspendedAdminDenied(t *testing.T) {
+	authz, s := authzTestSetup(t)
+	ctx := context.Background()
+
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID: tid("suspended-admin"), Email: "suspended@test.com",
+		DisplayName: "Suspended", Role: "admin", Status: "suspended",
+	}))
+	require.NoError(t, s.CreateProject(ctx, &store.Project{
+		ID: tid("system-project"), Name: "System", Slug: "system",
+		Labels: map[string]string{projectcompat.LabelSystemProject: "true"},
+	}))
+
+	agent := &evaluateAgentIdentity{
+		id:        tid("system-agent"),
+		projectID: tid("system-project"),
+		ancestry:  []string{tid("suspended-admin")},
+	}
+	resource := Resource{Type: "project", ID: tid("any-project")}
+
+	decision := authz.CheckAccess(ctx, agent, resource, ActionDelete)
+	assert.False(t, decision.Allowed)
+	assert.Equal(t, "default deny", decision.Reason)
+}
+
 func requireSystemDelegationFixtures(t *testing.T, ctx context.Context, s store.Store, originRole string) {
 	t.Helper()
 	require.NoError(t, s.CreateUser(ctx, &store.User{

@@ -81,8 +81,9 @@ type AuthzService struct {
 	store  store.Store
 	logger *slog.Logger
 
-	systemProjectOnce sync.Once
-	systemProjectID   string
+	systemProjectMu        sync.Mutex
+	systemProjectID        string
+	systemProjectIDCached  bool
 }
 
 // NewAuthzService creates a new AuthzService.
@@ -228,13 +229,17 @@ func (a *AuthzService) checkAccessForAgent(ctx context.Context, agent AgentIdent
 }
 
 func (a *AuthzService) getSystemProjectID(ctx context.Context) string {
-	a.systemProjectOnce.Do(func() {
-		project, err := a.store.GetProjectBySlug(ctx, "system")
-		if err != nil || project == nil {
-			return
-		}
-		a.systemProjectID = project.ID
-	})
+	a.systemProjectMu.Lock()
+	defer a.systemProjectMu.Unlock()
+	if a.systemProjectIDCached {
+		return a.systemProjectID
+	}
+	project, err := a.store.GetProjectBySlug(ctx, "system")
+	if err != nil || project == nil {
+		return ""
+	}
+	a.systemProjectID = project.ID
+	a.systemProjectIDCached = true
 	return a.systemProjectID
 }
 

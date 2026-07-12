@@ -239,10 +239,6 @@ func (c *ControlChannelClient) doConnect() error {
 	}
 
 	c.conn = conn
-	c.mu.Lock()
-	c.connected = true
-	c.connectedAt = time.Now()
-	c.mu.Unlock()
 
 	// Send connect message
 	connectMsg := wsprotocol.NewConnectMessage(c.config.BrokerID, c.config.Version, c.config.Projects)
@@ -256,6 +252,11 @@ func (c *ControlChannelClient) doConnect() error {
 		_ = c.conn.Close()
 		return fmt.Errorf("connection handshake failed: %w", err)
 	}
+
+	c.mu.Lock()
+	c.connected = true
+	c.connectedAt = time.Now()
+	c.mu.Unlock()
 
 	c.log.Info("Connected to Hub control channel", "sessionID", c.sessionID)
 	return nil
