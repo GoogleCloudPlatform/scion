@@ -51,6 +51,10 @@ func (HubSetting) Fields() []ent.Field {
 		field.String("updated_by").
 			Optional().
 			Comment("Email of the admin who last wrote this section"),
+		field.Enum("origin").
+			Values("seeded", "managed").
+			Default("seeded").
+			Comment("Tracks whether this section is bootstrap-managed (seeded) or admin-owned (managed)"),
 		field.Time("create_time").
 			Default(time.Now).
 			Immutable(),

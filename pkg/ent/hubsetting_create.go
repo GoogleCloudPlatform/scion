@@ -65,6 +65,20 @@ func (_c *HubSettingCreate) SetNillableUpdatedBy(v *string) *HubSettingCreate {
 	return _c
 }
 
+// SetOrigin sets the "origin" field.
+func (_c *HubSettingCreate) SetOrigin(v hubsetting.Origin) *HubSettingCreate {
+	_c.mutation.SetOrigin(v)
+	return _c
+}
+
+// SetNillableOrigin sets the "origin" field if the given value is not nil.
+func (_c *HubSettingCreate) SetNillableOrigin(v *hubsetting.Origin) *HubSettingCreate {
+	if v != nil {
+		_c.SetOrigin(*v)
+	}
+	return _c
+}
+
 // SetCreateTime sets the "create_time" field.
 func (_c *HubSettingCreate) SetCreateTime(v time.Time) *HubSettingCreate {
 	_c.mutation.SetCreateTime(v)
@@ -146,6 +160,10 @@ func (_c *HubSettingCreate) defaults() {
 		v := hubsetting.DefaultRevision
 		_c.mutation.SetRevision(v)
 	}
+	if _, ok := _c.mutation.Origin(); !ok {
+		v := hubsetting.DefaultOrigin
+		_c.mutation.SetOrigin(v)
+	}
 	if _, ok := _c.mutation.CreateTime(); !ok {
 		v := hubsetting.DefaultCreateTime()
 		_c.mutation.SetCreateTime(v)
@@ -175,6 +193,14 @@ func (_c *HubSettingCreate) check() error {
 	}
 	if _, ok := _c.mutation.Revision(); !ok {
 		return &ValidationError{Name: "revision", err: errors.New(`ent: missing required field "HubSetting.revision"`)}
+	}
+	if _, ok := _c.mutation.Origin(); !ok {
+		return &ValidationError{Name: "origin", err: errors.New(`ent: missing required field "HubSetting.origin"`)}
+	}
+	if v, ok := _c.mutation.Origin(); ok {
+		if err := hubsetting.OriginValidator(v); err != nil {
+			return &ValidationError{Name: "origin", err: fmt.Errorf(`ent: validator failed for field "HubSetting.origin": %w`, err)}
+		}
 	}
 	if _, ok := _c.mutation.CreateTime(); !ok {
 		return &ValidationError{Name: "create_time", err: errors.New(`ent: missing required field "HubSetting.create_time"`)}
@@ -233,6 +259,10 @@ func (_c *HubSettingCreate) createSpec() (*HubSetting, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.UpdatedBy(); ok {
 		_spec.SetField(hubsetting.FieldUpdatedBy, field.TypeString, value)
 		_node.UpdatedBy = value
+	}
+	if value, ok := _c.mutation.Origin(); ok {
+		_spec.SetField(hubsetting.FieldOrigin, field.TypeEnum, value)
+		_node.Origin = value
 	}
 	if value, ok := _c.mutation.CreateTime(); ok {
 		_spec.SetField(hubsetting.FieldCreateTime, field.TypeTime, value)
@@ -351,6 +381,18 @@ func (u *HubSettingUpsert) UpdateUpdatedBy() *HubSettingUpsert {
 // ClearUpdatedBy clears the value of the "updated_by" field.
 func (u *HubSettingUpsert) ClearUpdatedBy() *HubSettingUpsert {
 	u.SetNull(hubsetting.FieldUpdatedBy)
+	return u
+}
+
+// SetOrigin sets the "origin" field.
+func (u *HubSettingUpsert) SetOrigin(v hubsetting.Origin) *HubSettingUpsert {
+	u.Set(hubsetting.FieldOrigin, v)
+	return u
+}
+
+// UpdateOrigin sets the "origin" field to the value that was provided on create.
+func (u *HubSettingUpsert) UpdateOrigin() *HubSettingUpsert {
+	u.SetExcluded(hubsetting.FieldOrigin)
 	return u
 }
 
@@ -484,6 +526,20 @@ func (u *HubSettingUpsertOne) UpdateUpdatedBy() *HubSettingUpsertOne {
 func (u *HubSettingUpsertOne) ClearUpdatedBy() *HubSettingUpsertOne {
 	return u.Update(func(s *HubSettingUpsert) {
 		s.ClearUpdatedBy()
+	})
+}
+
+// SetOrigin sets the "origin" field.
+func (u *HubSettingUpsertOne) SetOrigin(v hubsetting.Origin) *HubSettingUpsertOne {
+	return u.Update(func(s *HubSettingUpsert) {
+		s.SetOrigin(v)
+	})
+}
+
+// UpdateOrigin sets the "origin" field to the value that was provided on create.
+func (u *HubSettingUpsertOne) UpdateOrigin() *HubSettingUpsertOne {
+	return u.Update(func(s *HubSettingUpsert) {
+		s.UpdateOrigin()
 	})
 }
 
@@ -786,6 +842,20 @@ func (u *HubSettingUpsertBulk) UpdateUpdatedBy() *HubSettingUpsertBulk {
 func (u *HubSettingUpsertBulk) ClearUpdatedBy() *HubSettingUpsertBulk {
 	return u.Update(func(s *HubSettingUpsert) {
 		s.ClearUpdatedBy()
+	})
+}
+
+// SetOrigin sets the "origin" field.
+func (u *HubSettingUpsertBulk) SetOrigin(v hubsetting.Origin) *HubSettingUpsertBulk {
+	return u.Update(func(s *HubSettingUpsert) {
+		s.SetOrigin(v)
+	})
+}
+
+// UpdateOrigin sets the "origin" field to the value that was provided on create.
+func (u *HubSettingUpsertBulk) UpdateOrigin() *HubSettingUpsertBulk {
+	return u.Update(func(s *HubSettingUpsert) {
+		s.UpdateOrigin()
 	})
 }
 

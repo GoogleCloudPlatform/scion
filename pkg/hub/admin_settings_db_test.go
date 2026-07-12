@@ -537,7 +537,7 @@ func TestPutServerConfigDB_SchemaValidationFailure_NothingWritten(t *testing.T) 
 	// Actually, Go's json decoder is loose with types, so we use a different
 	// approach: directly call Update with a bad doc to test schema validation.
 	badDoc := json.RawMessage(`{"admin_emails": "not-an-array"}`)
-	_, err := ops.Update(context.Background(), "access", badDoc, "test@user.com", -1)
+	_, err := ops.Update(context.Background(), "access", badDoc, "test@user.com", -1, "managed")
 	if err == nil {
 		t.Fatal("expected validation error for bad access doc, got nil")
 	}
@@ -1556,7 +1556,7 @@ func TestPutServerConfigDB_CAS_MultiSection_PartialApply(t *testing.T) {
 
 	// Advance lifecycle to revision 2 so our expected_revision of 1 is stale.
 	_, _ = ops.Update(context.Background(), "lifecycle",
-		json.RawMessage(`{"soft_delete_retention":"48h"}`), "other@test.com", -1)
+		json.RawMessage(`{"soft_delete_retention":"48h"}`), "other@test.com", -1, "managed")
 
 	// PUT both sections: access with correct rev (1), lifecycle with stale rev (1).
 	// Sections are written alphabetically: access first (succeeds), lifecycle second (conflicts).

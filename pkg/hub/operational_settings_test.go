@@ -67,7 +67,7 @@ func (f *fakeHubSettingStore) ListHubSettings(_ context.Context) ([]store.HubSet
 	return out, nil
 }
 
-func (f *fakeHubSettingStore) UpsertHubSetting(_ context.Context, section string, value json.RawMessage, updatedBy string, expectedRevision int64) (*store.HubSetting, error) {
+func (f *fakeHubSettingStore) UpsertHubSetting(_ context.Context, section string, value json.RawMessage, updatedBy string, expectedRevision int64, origin string) (*store.HubSetting, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
@@ -95,6 +95,7 @@ func (f *fakeHubSettingStore) UpsertHubSetting(_ context.Context, section string
 		Value:     value,
 		Revision:  rev,
 		UpdatedBy: updatedBy,
+		Origin:    origin,
 	}
 	f.settings[section] = s
 	return s, nil
@@ -315,7 +316,7 @@ func TestUpdate_ValidatesAndCaches(t *testing.T) {
 
 	// Valid access doc
 	doc := json.RawMessage(`{"admin_emails":["admin@test.com"],"user_access_mode":"open"}`)
-	rev, err := ops.Update(context.Background(), "access", doc, "test@user.com", -1)
+	rev, err := ops.Update(context.Background(), "access", doc, "test@user.com", -1, "managed")
 	if err != nil {
 		t.Fatalf("Update: %v", err)
 	}
@@ -336,7 +337,7 @@ func TestUpdate_ValidationFailure(t *testing.T) {
 
 	// Invalid access doc (admin_emails should be an array, not a string)
 	doc := json.RawMessage(`{"admin_emails":"not-an-array"}`)
-	_, err := ops.Update(context.Background(), "access", doc, "test@user.com", -1)
+	_, err := ops.Update(context.Background(), "access", doc, "test@user.com", -1, "managed")
 	if err == nil {
 		t.Fatal("expected validation error, got nil")
 	}

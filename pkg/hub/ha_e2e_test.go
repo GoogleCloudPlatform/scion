@@ -304,7 +304,7 @@ func seedForTest(ctx context.Context, s store.HubSettingStore, fileK *koanf.Koan
 		if err != nil {
 			continue
 		}
-		if _, err := s.UpsertHubSetting(ctx, sec.Name, doc, "seed", -1); err != nil {
+		if _, err := s.UpsertHubSetting(ctx, sec.Name, doc, "seed", -1, "seeded"); err != nil {
 			return err
 		}
 	}
@@ -314,7 +314,7 @@ func seedForTest(ctx context.Context, s store.HubSettingStore, fileK *koanf.Koan
 		"seeded_at":    time.Now().UTC().Format(time.RFC3339),
 		"seed_version": "1",
 	})
-	_, err = s.UpsertHubSetting(ctx, "_meta", metaDoc, "seed", -1)
+	_, err = s.UpsertHubSetting(ctx, "_meta", metaDoc, "seed", -1, "seeded")
 	return err
 }
 
@@ -445,7 +445,7 @@ func TestHA_AC5_EnvOverrideOneHub(t *testing.T) {
 	// Seed access section in DB.
 	_, err = cs.UpsertHubSetting(ctx, "access",
 		json.RawMessage(`{"admin_emails":["db@test.com"],"user_access_mode":"open"}`),
-		"seed", -1)
+		"seed", -1, "seeded")
 	require.NoError(t, err)
 
 	// Hub A: with env override on admin_emails.
@@ -508,7 +508,7 @@ func TestHA_AC7_ConcurrentCAS(t *testing.T) {
 	// Seed access section.
 	_, err := env.storeA.UpsertHubSetting(ctx, "access",
 		json.RawMessage(`{"admin_emails":["orig@test.com"],"user_access_mode":"open"}`),
-		"seed", -1)
+		"seed", -1, "seeded")
 	require.NoError(t, err)
 	_, err = env.opsA.Refresh(ctx)
 	require.NoError(t, err)
@@ -684,11 +684,11 @@ func TestHA_AC10_RollbackSafety(t *testing.T) {
 
 	_, err = cs.UpsertHubSetting(ctx, "access",
 		json.RawMessage(`{"admin_emails":["db@test.com"],"user_access_mode":"invite_only"}`),
-		"admin", -1)
+		"admin", -1, "managed")
 	require.NoError(t, err)
 	_, err = cs.UpsertHubSetting(ctx, "maintenance",
 		json.RawMessage(`{"admin_mode":true,"maintenance_message":"DB maintenance"}`),
-		"admin", -1)
+		"admin", -1, "managed")
 	require.NoError(t, err)
 	_ = client.Close()
 

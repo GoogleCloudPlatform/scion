@@ -313,13 +313,14 @@ func (o *OperationalSettings) Update(
 	doc json.RawMessage,
 	updatedBy string,
 	expectedRevision int64,
+	origin string,
 ) (int64, error) {
 	// Validate via opsettings registry.
 	if errs := opsettings.Validate(section, doc); len(errs) > 0 {
 		return 0, fmt.Errorf("validation failed for section %q: %v", section, errs)
 	}
 
-	result, err := o.store.UpsertHubSetting(ctx, section, doc, updatedBy, expectedRevision)
+	result, err := o.store.UpsertHubSetting(ctx, section, doc, updatedBy, expectedRevision, origin)
 	if err != nil {
 		return 0, err
 	}

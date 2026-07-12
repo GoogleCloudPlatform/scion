@@ -450,11 +450,11 @@ func init() {
 	// hubsetting.DefaultRevision holds the default value on creation for the revision field.
 	hubsetting.DefaultRevision = hubsettingDescRevision.Default.(int64)
 	// hubsettingDescCreateTime is the schema descriptor for create_time field.
-	hubsettingDescCreateTime := hubsettingFields[5].Descriptor()
+	hubsettingDescCreateTime := hubsettingFields[6].Descriptor()
 	// hubsetting.DefaultCreateTime holds the default value on creation for the create_time field.
 	hubsetting.DefaultCreateTime = hubsettingDescCreateTime.Default.(func() time.Time)
 	// hubsettingDescUpdateTime is the schema descriptor for update_time field.
-	hubsettingDescUpdateTime := hubsettingFields[6].Descriptor()
+	hubsettingDescUpdateTime := hubsettingFields[7].Descriptor()
 	// hubsetting.DefaultUpdateTime holds the default value on creation for the update_time field.
 	hubsetting.DefaultUpdateTime = hubsettingDescUpdateTime.Default.(func() time.Time)
 	// hubsetting.UpdateDefaultUpdateTime holds the default value on update for the update_time field.

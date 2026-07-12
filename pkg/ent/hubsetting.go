@@ -27,6 +27,8 @@ type HubSetting struct {
 	Revision int64 `json:"revision,omitempty"`
 	// Email of the admin who last wrote this section
 	UpdatedBy string `json:"updated_by,omitempty"`
+	// Tracks whether this section is bootstrap-managed (seeded) or admin-owned (managed)
+	Origin hubsetting.Origin `json:"origin,omitempty"`
 	// CreateTime holds the value of the "create_time" field.
 	CreateTime time.Time `json:"create_time,omitempty"`
 	// UpdateTime holds the value of the "update_time" field.
@@ -43,7 +45,7 @@ func (*HubSetting) scanValues(columns []string) ([]any, error) {
 			values[i] = new([]byte)
 		case hubsetting.FieldRevision:
 			values[i] = new(sql.NullInt64)
-		case hubsetting.FieldSection, hubsetting.FieldUpdatedBy:
+		case hubsetting.FieldSection, hubsetting.FieldUpdatedBy, hubsetting.FieldOrigin:
 			values[i] = new(sql.NullString)
 		case hubsetting.FieldCreateTime, hubsetting.FieldUpdateTime:
 			values[i] = new(sql.NullTime)
@@ -95,6 +97,12 @@ func (_m *HubSetting) assignValues(columns []string, values []any) error {
 				return fmt.Errorf("unexpected type %T for field updated_by", values[i])
 			} else if value.Valid {
 				_m.UpdatedBy = value.String
+			}
+		case hubsetting.FieldOrigin:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field origin", values[i])
+			} else if value.Valid {
+				_m.Origin = hubsetting.Origin(value.String)
 			}
 		case hubsetting.FieldCreateTime:
 			if value, ok := values[i].(*sql.NullTime); !ok {
@@ -155,6 +163,9 @@ func (_m *HubSetting) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("updated_by=")
 	builder.WriteString(_m.UpdatedBy)
+	builder.WriteString(", ")
+	builder.WriteString("origin=")
+	builder.WriteString(fmt.Sprintf("%v", _m.Origin))
 	builder.WriteString(", ")
 	builder.WriteString("create_time=")
 	builder.WriteString(_m.CreateTime.Format(time.ANSIC))

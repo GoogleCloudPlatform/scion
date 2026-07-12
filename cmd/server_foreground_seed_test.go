@@ -56,7 +56,7 @@ func (f *fakeHubSettingStore) ListHubSettings(_ context.Context) ([]store.HubSet
 	return out, nil
 }
 
-func (f *fakeHubSettingStore) UpsertHubSetting(_ context.Context, section string, value json.RawMessage, updatedBy string, _ int64) (*store.HubSetting, error) {
+func (f *fakeHubSettingStore) UpsertHubSetting(_ context.Context, section string, value json.RawMessage, updatedBy string, _ int64, origin string) (*store.HubSetting, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	existing, ok := f.settings[section]
@@ -70,6 +70,7 @@ func (f *fakeHubSettingStore) UpsertHubSetting(_ context.Context, section string
 		Value:     value,
 		Revision:  rev,
 		UpdatedBy: updatedBy,
+		Origin:    origin,
 	}
 	f.settings[section] = s
 	return s, nil

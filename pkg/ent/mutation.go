@@ -15483,6 +15483,7 @@ type HubSettingMutation struct {
 	revision      *int64
 	addrevision   *int64
 	updated_by    *string
+	origin        *hubsetting.Origin
 	create_time   *time.Time
 	update_time   *time.Time
 	clearedFields map[string]struct{}
@@ -15787,6 +15788,42 @@ func (m *HubSettingMutation) ResetUpdatedBy() {
 	delete(m.clearedFields, hubsetting.FieldUpdatedBy)
 }
 
+// SetOrigin sets the "origin" field.
+func (m *HubSettingMutation) SetOrigin(h hubsetting.Origin) {
+	m.origin = &h
+}
+
+// Origin returns the value of the "origin" field in the mutation.
+func (m *HubSettingMutation) Origin() (r hubsetting.Origin, exists bool) {
+	v := m.origin
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldOrigin returns the old "origin" field's value of the HubSetting entity.
+// If the HubSetting object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *HubSettingMutation) OldOrigin(ctx context.Context) (v hubsetting.Origin, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldOrigin is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldOrigin requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldOrigin: %w", err)
+	}
+	return oldValue.Origin, nil
+}
+
+// ResetOrigin resets all changes to the "origin" field.
+func (m *HubSettingMutation) ResetOrigin() {
+	m.origin = nil
+}
+
 // SetCreateTime sets the "create_time" field.
 func (m *HubSettingMutation) SetCreateTime(t time.Time) {
 	m.create_time = &t
@@ -15893,7 +15930,7 @@ func (m *HubSettingMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *HubSettingMutation) Fields() []string {
-	fields := make([]string, 0, 6)
+	fields := make([]string, 0, 7)
 	if m.section != nil {
 		fields = append(fields, hubsetting.FieldSection)
 	}
@@ -15905,6 +15942,9 @@ func (m *HubSettingMutation) Fields() []string {
 	}
 	if m.updated_by != nil {
 		fields = append(fields, hubsetting.FieldUpdatedBy)
+	}
+	if m.origin != nil {
+		fields = append(fields, hubsetting.FieldOrigin)
 	}
 	if m.create_time != nil {
 		fields = append(fields, hubsetting.FieldCreateTime)
@@ -15928,6 +15968,8 @@ func (m *HubSettingMutation) Field(name string) (ent.Value, bool) {
 		return m.Revision()
 	case hubsetting.FieldUpdatedBy:
 		return m.UpdatedBy()
+	case hubsetting.FieldOrigin:
+		return m.Origin()
 	case hubsetting.FieldCreateTime:
 		return m.CreateTime()
 	case hubsetting.FieldUpdateTime:
@@ -15949,6 +15991,8 @@ func (m *HubSettingMutation) OldField(ctx context.Context, name string) (ent.Val
 		return m.OldRevision(ctx)
 	case hubsetting.FieldUpdatedBy:
 		return m.OldUpdatedBy(ctx)
+	case hubsetting.FieldOrigin:
+		return m.OldOrigin(ctx)
 	case hubsetting.FieldCreateTime:
 		return m.OldCreateTime(ctx)
 	case hubsetting.FieldUpdateTime:
@@ -15989,6 +16033,13 @@ func (m *HubSettingMutation) SetField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetUpdatedBy(v)
+		return nil
+	case hubsetting.FieldOrigin:
+		v, ok := value.(hubsetting.Origin)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetOrigin(v)
 		return nil
 	case hubsetting.FieldCreateTime:
 		v, ok := value.(time.Time)
@@ -16088,6 +16139,9 @@ func (m *HubSettingMutation) ResetField(name string) error {
 		return nil
 	case hubsetting.FieldUpdatedBy:
 		m.ResetUpdatedBy()
+		return nil
+	case hubsetting.FieldOrigin:
+		m.ResetOrigin()
 		return nil
 	case hubsetting.FieldCreateTime:
 		m.ResetCreateTime()

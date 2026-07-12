@@ -56,7 +56,7 @@ func TestUpsertHubSetting_Create(t *testing.T) {
 	ctx := context.Background()
 
 	val := json.RawMessage(`{"admin_emails":["a@b.com"]}`)
-	got, err := s.UpsertHubSetting(ctx, "access", val, "admin@test.com", 0)
+	got, err := s.UpsertHubSetting(ctx, "access", val, "admin@test.com", 0, "")
 	require.NoError(t, err)
 
 	assert.Equal(t, "access", got.Section)
@@ -83,11 +83,11 @@ func TestUpsertHubSetting_CreateOnly_Conflict(t *testing.T) {
 	ctx := context.Background()
 
 	val := json.RawMessage(`{"enabled":true}`)
-	_, err := s.UpsertHubSetting(ctx, "telemetry", val, "admin@test.com", 0)
+	_, err := s.UpsertHubSetting(ctx, "telemetry", val, "admin@test.com", 0, "")
 	require.NoError(t, err)
 
 	// Second create-only for the same section should fail.
-	_, err = s.UpsertHubSetting(ctx, "telemetry", val, "other@test.com", 0)
+	_, err = s.UpsertHubSetting(ctx, "telemetry", val, "other@test.com", 0, "")
 	assert.ErrorIs(t, err, store.ErrRevisionConflict)
 }
 
@@ -101,13 +101,13 @@ func TestUpsertHubSetting_UpdateWithRevisionBump(t *testing.T) {
 
 	// Create.
 	v1 := json.RawMessage(`{"mode":"open"}`)
-	created, err := s.UpsertHubSetting(ctx, "access", v1, "admin@test.com", 0)
+	created, err := s.UpsertHubSetting(ctx, "access", v1, "admin@test.com", 0, "")
 	require.NoError(t, err)
 	assert.Equal(t, int64(1), created.Revision)
 
 	// Update with correct revision.
 	v2 := json.RawMessage(`{"mode":"invite_only"}`)
-	updated, err := s.UpsertHubSetting(ctx, "access", v2, "admin2@test.com", 1)
+	updated, err := s.UpsertHubSetting(ctx, "access", v2, "admin2@test.com", 1, "")
 	require.NoError(t, err)
 	assert.Equal(t, int64(2), updated.Revision)
 	assert.JSONEq(t, `{"mode":"invite_only"}`, string(updated.Value))
@@ -128,11 +128,11 @@ func TestUpsertHubSetting_CAS_Conflict(t *testing.T) {
 	ctx := context.Background()
 
 	val := json.RawMessage(`{"k":"v"}`)
-	_, err := s.UpsertHubSetting(ctx, "lifecycle", val, "admin@test.com", 0)
+	_, err := s.UpsertHubSetting(ctx, "lifecycle", val, "admin@test.com", 0, "")
 	require.NoError(t, err)
 
 	// Update with wrong revision → conflict.
-	_, err = s.UpsertHubSetting(ctx, "lifecycle", val, "admin@test.com", 99)
+	_, err = s.UpsertHubSetting(ctx, "lifecycle", val, "admin@test.com", 99, "")
 	assert.ErrorIs(t, err, store.ErrRevisionConflict)
 }
 
@@ -145,7 +145,7 @@ func TestUpsertHubSetting_CAS_MissingRow(t *testing.T) {
 	ctx := context.Background()
 
 	val := json.RawMessage(`{"k":"v"}`)
-	_, err := s.UpsertHubSetting(ctx, "nonexistent", val, "admin@test.com", 5)
+	_, err := s.UpsertHubSetting(ctx, "nonexistent", val, "admin@test.com", 5, "")
 	assert.ErrorIs(t, err, store.ErrRevisionConflict)
 }
 
@@ -159,13 +159,13 @@ func TestUpsertHubSetting_Unconditional(t *testing.T) {
 
 	// Create via unconditional upsert.
 	v1 := json.RawMessage(`{"a":1}`)
-	got, err := s.UpsertHubSetting(ctx, "maintenance", v1, "seed", -1)
+	got, err := s.UpsertHubSetting(ctx, "maintenance", v1, "seed", -1, "seeded")
 	require.NoError(t, err)
 	assert.Equal(t, int64(1), got.Revision)
 
 	// Overwrite via unconditional upsert — should succeed regardless of revision.
 	v2 := json.RawMessage(`{"a":2}`)
-	got2, err := s.UpsertHubSetting(ctx, "maintenance", v2, "seed2", -1)
+	got2, err := s.UpsertHubSetting(ctx, "maintenance", v2, "seed2", -1, "")
 	require.NoError(t, err)
 	assert.Equal(t, int64(2), got2.Revision)
 	assert.JSONEq(t, `{"a":2}`, string(got2.Value))
@@ -185,11 +185,11 @@ func TestListHubSettings(t *testing.T) {
 	assert.Empty(t, list)
 
 	// Create a few sections.
-	_, err = s.UpsertHubSetting(ctx, "access", json.RawMessage(`{}`), "", -1)
+	_, err = s.UpsertHubSetting(ctx, "access", json.RawMessage(`{}`), "", -1, "")
 	require.NoError(t, err)
-	_, err = s.UpsertHubSetting(ctx, "telemetry", json.RawMessage(`{}`), "", -1)
+	_, err = s.UpsertHubSetting(ctx, "telemetry", json.RawMessage(`{}`), "", -1, "")
 	require.NoError(t, err)
-	_, err = s.UpsertHubSetting(ctx, "maintenance", json.RawMessage(`{}`), "", -1)
+	_, err = s.UpsertHubSetting(ctx, "maintenance", json.RawMessage(`{}`), "", -1, "")
 	require.NoError(t, err)
 
 	list, err = s.ListHubSettings(ctx)
@@ -210,7 +210,7 @@ func TestDeleteHubSetting(t *testing.T) {
 	s := newTestHubSettingStore(t)
 	ctx := context.Background()
 
-	_, err := s.UpsertHubSetting(ctx, "access", json.RawMessage(`{}`), "", -1)
+	_, err := s.UpsertHubSetting(ctx, "access", json.RawMessage(`{}`), "", -1, "")
 	require.NoError(t, err)
 
 	err = s.DeleteHubSetting(ctx, "access")
@@ -238,11 +238,11 @@ func TestUpsertHubSetting_ClearsUpdatedBy(t *testing.T) {
 	ctx := context.Background()
 
 	// Create with updatedBy.
-	_, err := s.UpsertHubSetting(ctx, "access", json.RawMessage(`{}`), "admin@test.com", 0)
+	_, err := s.UpsertHubSetting(ctx, "access", json.RawMessage(`{}`), "admin@test.com", 0, "")
 	require.NoError(t, err)
 
 	// Update with empty updatedBy — should clear it.
-	got, err := s.UpsertHubSetting(ctx, "access", json.RawMessage(`{}`), "", 1)
+	got, err := s.UpsertHubSetting(ctx, "access", json.RawMessage(`{}`), "", 1, "")
 	require.NoError(t, err)
 	assert.Empty(t, got.UpdatedBy)
 }
@@ -256,7 +256,7 @@ func TestUpsertHubSetting_ConcurrentCASRace(t *testing.T) {
 	ctx := context.Background()
 
 	// Create the initial row.
-	_, err := s.UpsertHubSetting(ctx, "race", json.RawMessage(`{"v":0}`), "setup", 0)
+	_, err := s.UpsertHubSetting(ctx, "race", json.RawMessage(`{"v":0}`), "setup", 0, "")
 	require.NoError(t, err)
 
 	const goroutines = 10
@@ -271,7 +271,7 @@ func TestUpsertHubSetting_ConcurrentCASRace(t *testing.T) {
 		go func(n int) {
 			defer wg.Done()
 			val := json.RawMessage(`{"v":` + string(rune('0'+n)) + `}`)
-			_, err := s.UpsertHubSetting(ctx, "race", val, "racer", 1)
+			_, err := s.UpsertHubSetting(ctx, "race", val, "racer", 1, "")
 			if err == nil {
 				wins.Add(1)
 			} else {

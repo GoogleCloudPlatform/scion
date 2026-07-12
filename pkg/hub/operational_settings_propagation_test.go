@@ -90,7 +90,7 @@ func TestPublishOnUpdate_EmitsCorrectSubjectPayload(t *testing.T) {
 	ops.SetEventPublisher(fakeEP)
 
 	doc := json.RawMessage(`{"admin_emails":["admin@test.com"],"user_access_mode":"open"}`)
-	rev, err := ops.Update(context.Background(), "access", doc, "test@user.com", -1)
+	rev, err := ops.Update(context.Background(), "access", doc, "test@user.com", -1, "managed")
 	if err != nil {
 		t.Fatalf("Update: %v", err)
 	}
@@ -126,7 +126,7 @@ func TestPublishOnUpdate_NoPublishWhenNoEventPublisher(t *testing.T) {
 	// No SetEventPublisher call — simulates SQLite mode.
 
 	doc := json.RawMessage(`{"admin_emails":["admin@test.com"]}`)
-	_, err := ops.Update(context.Background(), "access", doc, "test@user.com", -1)
+	_, err := ops.Update(context.Background(), "access", doc, "test@user.com", -1, "managed")
 	if err != nil {
 		t.Fatalf("Update should not fail without event publisher: %v", err)
 	}
@@ -434,7 +434,7 @@ func TestSQLiteMode_NoPublisherNoSubscriptionNoTicker(t *testing.T) {
 
 	// Update should succeed without publishing
 	doc := json.RawMessage(`{"admin_emails":["admin@test.com"]}`)
-	_, err := ops.Update(context.Background(), "access", doc, "test@user.com", -1)
+	_, err := ops.Update(context.Background(), "access", doc, "test@user.com", -1, "managed")
 	if err != nil {
 		t.Fatalf("Update in SQLite mode should not fail: %v", err)
 	}
@@ -470,7 +470,7 @@ func TestSelfApply_WritingNodeAppliesSynchronously(t *testing.T) {
 
 	// Update access section
 	doc := json.RawMessage(`{"admin_emails":["self-apply@test.com"],"user_access_mode":"invite_only"}`)
-	_, err := ops.Update(context.Background(), "access", doc, "test@user.com", -1)
+	_, err := ops.Update(context.Background(), "access", doc, "test@user.com", -1, "managed")
 	if err != nil {
 		t.Fatalf("Update: %v", err)
 	}
@@ -506,7 +506,7 @@ func TestSelfApply_MaintenanceAppliedSynchronously(t *testing.T) {
 
 	// Update maintenance section
 	doc := json.RawMessage(`{"admin_mode":true,"maintenance_message":"Self-applied maintenance"}`)
-	_, err := ops.Update(context.Background(), "maintenance", doc, "admin@test.com", -1)
+	_, err := ops.Update(context.Background(), "maintenance", doc, "admin@test.com", -1, "managed")
 	if err != nil {
 		t.Fatalf("Update: %v", err)
 	}
@@ -550,7 +550,7 @@ func TestConcurrentPropagation(t *testing.T) {
 			defer wg.Done()
 			for j := 0; j < iterations; j++ {
 				doc := json.RawMessage(`{"admin_emails":["concurrent@test.com"]}`)
-				_, _ = ops.Update(ctx, "access", doc, "test", -1)
+				_, _ = ops.Update(ctx, "access", doc, "test", -1, "managed")
 			}
 		}()
 	}

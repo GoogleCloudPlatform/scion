@@ -3,6 +3,7 @@
 package hubsetting
 
 import (
+	"fmt"
 	"time"
 
 	"entgo.io/ent/dialect/sql"
@@ -22,6 +23,8 @@ const (
 	FieldRevision = "revision"
 	// FieldUpdatedBy holds the string denoting the updated_by field in the database.
 	FieldUpdatedBy = "updated_by"
+	// FieldOrigin holds the string denoting the origin field in the database.
+	FieldOrigin = "origin"
 	// FieldCreateTime holds the string denoting the create_time field in the database.
 	FieldCreateTime = "create_time"
 	// FieldUpdateTime holds the string denoting the update_time field in the database.
@@ -37,6 +40,7 @@ var Columns = []string{
 	FieldValue,
 	FieldRevision,
 	FieldUpdatedBy,
+	FieldOrigin,
 	FieldCreateTime,
 	FieldUpdateTime,
 }
@@ -66,6 +70,32 @@ var (
 	DefaultID func() uuid.UUID
 )
 
+// Origin defines the type for the "origin" enum field.
+type Origin string
+
+// OriginSeeded is the default value of the Origin enum.
+const DefaultOrigin = OriginSeeded
+
+// Origin values.
+const (
+	OriginSeeded  Origin = "seeded"
+	OriginManaged Origin = "managed"
+)
+
+func (o Origin) String() string {
+	return string(o)
+}
+
+// OriginValidator is a validator for the "origin" field enum values. It is called by the builders before save.
+func OriginValidator(o Origin) error {
+	switch o {
+	case OriginSeeded, OriginManaged:
+		return nil
+	default:
+		return fmt.Errorf("hubsetting: invalid enum value for origin field: %q", o)
+	}
+}
+
 // OrderOption defines the ordering options for the HubSetting queries.
 type OrderOption func(*sql.Selector)
 
@@ -87,6 +117,11 @@ func ByRevision(opts ...sql.OrderTermOption) OrderOption {
 // ByUpdatedBy orders the results by the updated_by field.
 func ByUpdatedBy(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldUpdatedBy, opts...).ToFunc()
+}
+
+// ByOrigin orders the results by the origin field.
+func ByOrigin(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldOrigin, opts...).ToFunc()
 }
 
 // ByCreateTime orders the results by the create_time field.

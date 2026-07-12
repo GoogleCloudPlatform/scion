@@ -463,6 +463,7 @@ var (
 		{Name: "value", Type: field.TypeJSON},
 		{Name: "revision", Type: field.TypeInt64, Default: 1},
 		{Name: "updated_by", Type: field.TypeString, Nullable: true},
+		{Name: "origin", Type: field.TypeEnum, Enums: []string{"seeded", "managed"}, Default: "seeded"},
 		{Name: "create_time", Type: field.TypeTime},
 		{Name: "update_time", Type: field.TypeTime},
 	}

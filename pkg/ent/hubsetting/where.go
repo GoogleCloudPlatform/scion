@@ -260,6 +260,26 @@ func UpdatedByContainsFold(v string) predicate.HubSetting {
 	return predicate.HubSetting(sql.FieldContainsFold(FieldUpdatedBy, v))
 }
 
+// OriginEQ applies the EQ predicate on the "origin" field.
+func OriginEQ(v Origin) predicate.HubSetting {
+	return predicate.HubSetting(sql.FieldEQ(FieldOrigin, v))
+}
+
+// OriginNEQ applies the NEQ predicate on the "origin" field.
+func OriginNEQ(v Origin) predicate.HubSetting {
+	return predicate.HubSetting(sql.FieldNEQ(FieldOrigin, v))
+}
+
+// OriginIn applies the In predicate on the "origin" field.
+func OriginIn(vs ...Origin) predicate.HubSetting {
+	return predicate.HubSetting(sql.FieldIn(FieldOrigin, vs...))
+}
+
+// OriginNotIn applies the NotIn predicate on the "origin" field.
+func OriginNotIn(vs ...Origin) predicate.HubSetting {
+	return predicate.HubSetting(sql.FieldNotIn(FieldOrigin, vs...))
+}
+
 // CreateTimeEQ applies the EQ predicate on the "create_time" field.
 func CreateTimeEQ(v time.Time) predicate.HubSetting {
 	return predicate.HubSetting(sql.FieldEQ(FieldCreateTime, v))

@@ -51,7 +51,7 @@ func TestContention_HubSettingCAS(t *testing.T) {
 
 	// Seed the row with revision 1.
 	val := json.RawMessage(`{"v":0}`)
-	_, err := cs.UpsertHubSetting(ctx, section, val, "setup", 0)
+	_, err := cs.UpsertHubSetting(ctx, section, val, "setup", 0, "")
 	require.NoError(t, err)
 
 	var wins, conflicts atomic.Int64
@@ -63,7 +63,7 @@ func TestContention_HubSettingCAS(t *testing.T) {
 	// revision 2 which mismatches their expectedRevision=1.
 	runConcurrently(n, func(i int) {
 		v := json.RawMessage(fmt.Sprintf(`{"v":%d}`, i))
-		_, err := cs.UpsertHubSetting(ctx, section, v, fmt.Sprintf("racer-%d", i), 1)
+		_, err := cs.UpsertHubSetting(ctx, section, v, fmt.Sprintf("racer-%d", i), 1, "")
 		switch {
 		case err == nil:
 			wins.Add(1)
@@ -104,7 +104,7 @@ func TestContention_HubSettingCreateOnly(t *testing.T) {
 	errs := make(chan error, n)
 
 	runConcurrently(n, func(i int) {
-		_, err := cs.UpsertHubSetting(ctx, section, val, fmt.Sprintf("creator-%d", i), 0)
+		_, err := cs.UpsertHubSetting(ctx, section, val, fmt.Sprintf("creator-%d", i), 0, "")
 		switch {
 		case err == nil:
 			wins.Add(1)

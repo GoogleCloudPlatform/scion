@@ -2083,6 +2083,7 @@ type HubSetting struct {
 	Value     json.RawMessage `json:"value"`
 	Revision  int64           `json:"revision"`
 	UpdatedBy string          `json:"updatedBy,omitempty"`
+	Origin    string          `json:"origin,omitempty"`
 	CreatedAt time.Time       `json:"createdAt"`
 	UpdatedAt time.Time       `json:"updatedAt"`
 }

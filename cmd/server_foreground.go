@@ -1547,7 +1547,7 @@ func seedHubSettingsIfNeeded(ctx context.Context, s store.HubSettingStore, fileK
 			continue
 		}
 
-		_, err = s.UpsertHubSetting(ctx, sec.Name, doc, "seed", -1) // unconditional upsert
+		_, err = s.UpsertHubSetting(ctx, sec.Name, doc, "seed", -1, "seeded") // unconditional upsert
 		if err != nil {
 			return fmt.Errorf("seeding section %q: %w", sec.Name, err)
 		}
@@ -1560,7 +1560,7 @@ func seedHubSettingsIfNeeded(ctx context.Context, s store.HubSettingStore, fileK
 		"seeded_at":    time.Now().UTC().Format(time.RFC3339),
 		"seed_version": "1",
 	})
-	if _, err := s.UpsertHubSetting(ctx, "_meta", metaDoc, "seed", -1); err != nil {
+	if _, err := s.UpsertHubSetting(ctx, "_meta", metaDoc, "seed", -1, "seeded"); err != nil {
 		return fmt.Errorf("writing _meta sentinel: %w", err)
 	}
 

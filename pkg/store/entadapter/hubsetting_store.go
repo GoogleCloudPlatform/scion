@@ -60,6 +60,7 @@ func entHubSettingToStore(e *ent.HubSetting) *store.HubSetting {
 		Value:     e.Value,
 		Revision:  e.Revision,
 		UpdatedBy: e.UpdatedBy,
+		Origin:    string(e.Origin),
 		CreatedAt: e.CreateTime,
 		UpdatedAt: e.UpdateTime,
 	}
@@ -108,6 +109,7 @@ func (s *HubSettingStore) UpsertHubSetting(
 	value json.RawMessage,
 	updatedBy string,
 	expectedRevision int64,
+	origin string,
 ) (*store.HubSetting, error) {
 	// Detect dialect BEFORE opening a transaction — with SQLite's
 	// MaxOpenConns=1 the dialect-probe query would deadlock if the
@@ -140,6 +142,9 @@ func (s *HubSettingStore) UpsertHubSetting(
 			SetRevision(1)
 		if updatedBy != "" {
 			create.SetUpdatedBy(updatedBy)
+		}
+		if origin != "" {
+			create.SetOrigin(hubsetting.Origin(origin))
 		}
 		row, err := create.Save(ctx)
 		if err != nil {
@@ -180,6 +185,9 @@ func (s *HubSettingStore) UpsertHubSetting(
 		update.SetUpdatedBy(updatedBy)
 	} else {
 		update.ClearUpdatedBy()
+	}
+	if origin != "" {
+		update.SetOrigin(hubsetting.Origin(origin))
 	}
 	row, err := update.Save(ctx)
 	if err != nil {

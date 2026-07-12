@@ -378,7 +378,7 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 			expectedRev = rev
 		}
 
-		newRev, err := ops.Update(r.Context(), secName, doc, updatedBy, expectedRev)
+		newRev, err := ops.Update(r.Context(), secName, doc, updatedBy, expectedRev, "managed")
 		if err != nil {
 			if errors.Is(err, store.ErrRevisionConflict) {
 				// Report the conflict with current revision.
@@ -945,7 +945,7 @@ func (s *Server) handlePutMaintenanceDB(w http.ResponseWriter, r *http.Request, 
 	}
 
 	// last-writer-wins (-1) for maintenance — no CAS needed for this endpoint.
-	if _, err := ops.Update(r.Context(), "maintenance", doc, updatedBy, -1); err != nil {
+	if _, err := ops.Update(r.Context(), "maintenance", doc, updatedBy, -1, "managed"); err != nil {
 		slog.Error("Failed to update maintenance settings", "error", err)
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
 			"Failed to update maintenance settings", nil)

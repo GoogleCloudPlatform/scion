@@ -97,6 +97,20 @@ func (_u *HubSettingUpdate) ClearUpdatedBy() *HubSettingUpdate {
 	return _u
 }
 
+// SetOrigin sets the "origin" field.
+func (_u *HubSettingUpdate) SetOrigin(v hubsetting.Origin) *HubSettingUpdate {
+	_u.mutation.SetOrigin(v)
+	return _u
+}
+
+// SetNillableOrigin sets the "origin" field if the given value is not nil.
+func (_u *HubSettingUpdate) SetNillableOrigin(v *hubsetting.Origin) *HubSettingUpdate {
+	if v != nil {
+		_u.SetOrigin(*v)
+	}
+	return _u
+}
+
 // SetUpdateTime sets the "update_time" field.
 func (_u *HubSettingUpdate) SetUpdateTime(v time.Time) *HubSettingUpdate {
 	_u.mutation.SetUpdateTime(v)
@@ -151,6 +165,11 @@ func (_u *HubSettingUpdate) check() error {
 			return &ValidationError{Name: "section", err: fmt.Errorf(`ent: validator failed for field "HubSetting.section": %w`, err)}
 		}
 	}
+	if v, ok := _u.mutation.Origin(); ok {
+		if err := hubsetting.OriginValidator(v); err != nil {
+			return &ValidationError{Name: "origin", err: fmt.Errorf(`ent: validator failed for field "HubSetting.origin": %w`, err)}
+		}
+	}
 	return nil
 }
 
@@ -188,6 +207,9 @@ func (_u *HubSettingUpdate) sqlSave(ctx context.Context) (_node int, err error) 
 	}
 	if _u.mutation.UpdatedByCleared() {
 		_spec.ClearField(hubsetting.FieldUpdatedBy, field.TypeString)
+	}
+	if value, ok := _u.mutation.Origin(); ok {
+		_spec.SetField(hubsetting.FieldOrigin, field.TypeEnum, value)
 	}
 	if value, ok := _u.mutation.UpdateTime(); ok {
 		_spec.SetField(hubsetting.FieldUpdateTime, field.TypeTime, value)
@@ -279,6 +301,20 @@ func (_u *HubSettingUpdateOne) ClearUpdatedBy() *HubSettingUpdateOne {
 	return _u
 }
 
+// SetOrigin sets the "origin" field.
+func (_u *HubSettingUpdateOne) SetOrigin(v hubsetting.Origin) *HubSettingUpdateOne {
+	_u.mutation.SetOrigin(v)
+	return _u
+}
+
+// SetNillableOrigin sets the "origin" field if the given value is not nil.
+func (_u *HubSettingUpdateOne) SetNillableOrigin(v *hubsetting.Origin) *HubSettingUpdateOne {
+	if v != nil {
+		_u.SetOrigin(*v)
+	}
+	return _u
+}
+
 // SetUpdateTime sets the "update_time" field.
 func (_u *HubSettingUpdateOne) SetUpdateTime(v time.Time) *HubSettingUpdateOne {
 	_u.mutation.SetUpdateTime(v)
@@ -346,6 +382,11 @@ func (_u *HubSettingUpdateOne) check() error {
 			return &ValidationError{Name: "section", err: fmt.Errorf(`ent: validator failed for field "HubSetting.section": %w`, err)}
 		}
 	}
+	if v, ok := _u.mutation.Origin(); ok {
+		if err := hubsetting.OriginValidator(v); err != nil {
+			return &ValidationError{Name: "origin", err: fmt.Errorf(`ent: validator failed for field "HubSetting.origin": %w`, err)}
+		}
+	}
 	return nil
 }
 
@@ -400,6 +441,9 @@ func (_u *HubSettingUpdateOne) sqlSave(ctx context.Context) (_node *HubSetting, 
 	}
 	if _u.mutation.UpdatedByCleared() {
 		_spec.ClearField(hubsetting.FieldUpdatedBy, field.TypeString)
+	}
+	if value, ok := _u.mutation.Origin(); ok {
+		_spec.SetField(hubsetting.FieldOrigin, field.TypeEnum, value)
 	}
 	if value, ok := _u.mutation.UpdateTime(); ok {
 		_spec.SetField(hubsetting.FieldUpdateTime, field.TypeTime, value)
