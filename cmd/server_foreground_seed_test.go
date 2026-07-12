@@ -64,6 +64,9 @@ func (f *fakeHubSettingStore) UpsertHubSetting(_ context.Context, section string
 	if ok {
 		rev = existing.Revision + 1
 	}
+	if origin == "" {
+		origin = "seeded"
+	}
 	s := &store.HubSetting{
 		ID:        section,
 		Section:   section,
@@ -100,41 +103,9 @@ func (f *fakeHubSettingStore) BackfillOrigin(_ context.Context) error {
 	return nil
 }
 
-// --- seedHubSettingsIfNeeded tests ---
+// --- syncHubSettings tests ---
 
-func TestSeedHubSettingsIfNeeded_MetaSentinel(t *testing.T) {
-	// When _meta row already exists, seeding should be skipped entirely.
-	fs := newFakeHubSettingStore()
-	fs.settings["_meta"] = &store.HubSetting{
-		ID:       "_meta",
-		Section:  "_meta",
-		Value:    json.RawMessage(`{"seeded_from":"/test","seeded_at":"2026-01-01T00:00:00Z","seed_version":"1"}`),
-		Revision: 1,
-	}
-
-	k := koanf.New(".")
-	_ = k.Load(confmap.Provider(map[string]interface{}{
-		"server.hub.admin_emails":      []interface{}{"admin@test.com"},
-		"server.auth.user_access_mode": "open",
-	}, "."), nil)
-
-	err := seedHubSettingsIfNeeded(context.Background(), fs, k, "/tmp/test")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	// No sections should have been seeded.
-	fs.mu.Lock()
-	defer fs.mu.Unlock()
-	for section := range fs.settings {
-		if section != "_meta" {
-			t.Errorf("unexpected section seeded: %s", section)
-		}
-	}
-}
-
-func TestSeedHubSettingsIfNeeded_ExtractsSections(t *testing.T) {
-	// With no _meta row, seeding should extract sections from the koanf file.
+func TestSyncHubSettings_SeedsNewSections(t *testing.T) {
 	fs := newFakeHubSettingStore()
 
 	k := koanf.New(".")
@@ -144,19 +115,20 @@ func TestSeedHubSettingsIfNeeded_ExtractsSections(t *testing.T) {
 		"server.hub.auto_suspend_stalled": true,
 	}, "."), nil)
 
-	err := seedHubSettingsIfNeeded(context.Background(), fs, k, "/tmp/test")
+	err := syncHubSettings(context.Background(), fs, k)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// _meta should be written
 	fs.mu.Lock()
 	defer fs.mu.Unlock()
+
+	// _meta should be written.
 	if _, ok := fs.settings["_meta"]; !ok {
 		t.Error("expected _meta sentinel to be written")
 	}
 
-	// access section should have been seeded with admin_emails
+	// access section should have been seeded with admin_emails.
 	access, ok := fs.settings["access"]
 	if !ok {
 		t.Fatal("expected access section to be seeded")
@@ -164,10 +136,117 @@ func TestSeedHubSettingsIfNeeded_ExtractsSections(t *testing.T) {
 	if !strings.Contains(string(access.Value), "admin@test.com") {
 		t.Errorf("access section missing admin_emails: %s", access.Value)
 	}
+	if access.Origin != "seeded" {
+		t.Errorf("access origin: want seeded, got %s", access.Origin)
+	}
 }
 
-func TestSeedHubSettingsIfNeeded_MaintenanceSkipped(t *testing.T) {
-	// Maintenance section has no koanf paths — it should not be seeded.
+func TestSyncHubSettings_SkipsManagedSections(t *testing.T) {
+	fs := newFakeHubSettingStore()
+
+	// Pre-populate access as managed (admin-written).
+	fs.settings["access"] = &store.HubSetting{
+		ID:        "access",
+		Section:   "access",
+		Value:     json.RawMessage(`{"admin_emails":["admin-custom@test.com"]}`),
+		Revision:  5,
+		UpdatedBy: "admin@test.com",
+		Origin:    "managed",
+	}
+
+	k := koanf.New(".")
+	_ = k.Load(confmap.Provider(map[string]interface{}{
+		"server.hub.admin_emails":      []interface{}{"bootstrap@test.com"},
+		"server.auth.user_access_mode": "open",
+	}, "."), nil)
+
+	err := syncHubSettings(context.Background(), fs, k)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+
+	// access should NOT have been overwritten — still has custom value.
+	access := fs.settings["access"]
+	if !strings.Contains(string(access.Value), "admin-custom@test.com") {
+		t.Errorf("managed access section was overwritten: %s", access.Value)
+	}
+	if access.Revision != 5 {
+		t.Errorf("managed access revision changed: want 5, got %d", access.Revision)
+	}
+}
+
+func TestSyncHubSettings_UpdatesSeededWhenChanged(t *testing.T) {
+	fs := newFakeHubSettingStore()
+
+	// Pre-populate access as seeded with old bootstrap value.
+	fs.settings["access"] = &store.HubSetting{
+		ID:        "access",
+		Section:   "access",
+		Value:     json.RawMessage(`{"admin_emails":["old@test.com"],"user_access_mode":"open"}`),
+		Revision:  1,
+		UpdatedBy: "seed",
+		Origin:    "seeded",
+	}
+
+	k := koanf.New(".")
+	_ = k.Load(confmap.Provider(map[string]interface{}{
+		"server.hub.admin_emails":      []interface{}{"new@test.com"},
+		"server.auth.user_access_mode": "open",
+	}, "."), nil)
+
+	err := syncHubSettings(context.Background(), fs, k)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+
+	access := fs.settings["access"]
+	if !strings.Contains(string(access.Value), "new@test.com") {
+		t.Errorf("seeded access section was not updated: %s", access.Value)
+	}
+	if access.Revision != 2 {
+		t.Errorf("seeded access revision: want 2 (bumped), got %d", access.Revision)
+	}
+}
+
+func TestSyncHubSettings_SkipsWriteOnEquality(t *testing.T) {
+	fs := newFakeHubSettingStore()
+
+	k := koanf.New(".")
+	_ = k.Load(confmap.Provider(map[string]interface{}{
+		"server.hub.admin_emails":      []interface{}{"admin@test.com"},
+		"server.auth.user_access_mode": "open",
+	}, "."), nil)
+
+	// First sync — creates the rows.
+	err := syncHubSettings(context.Background(), fs, k)
+	if err != nil {
+		t.Fatalf("first sync: %v", err)
+	}
+
+	fs.mu.Lock()
+	accessRev := fs.settings["access"].Revision
+	fs.mu.Unlock()
+
+	// Second sync with identical bootstrap — revision should NOT bump.
+	err = syncHubSettings(context.Background(), fs, k)
+	if err != nil {
+		t.Fatalf("second sync: %v", err)
+	}
+
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	if fs.settings["access"].Revision != accessRev {
+		t.Errorf("skip-write-on-equality failed: access revision bumped from %d to %d", accessRev, fs.settings["access"].Revision)
+	}
+}
+
+func TestSyncHubSettings_MaintenanceSkipped(t *testing.T) {
 	fs := newFakeHubSettingStore()
 
 	k := koanf.New(".")
@@ -175,7 +254,7 @@ func TestSeedHubSettingsIfNeeded_MaintenanceSkipped(t *testing.T) {
 		"server.hub.admin_emails": []interface{}{"admin@test.com"},
 	}, "."), nil)
 
-	err := seedHubSettingsIfNeeded(context.Background(), fs, k, "/tmp/test")
+	err := syncHubSettings(context.Background(), fs, k)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -183,12 +262,11 @@ func TestSeedHubSettingsIfNeeded_MaintenanceSkipped(t *testing.T) {
 	fs.mu.Lock()
 	defer fs.mu.Unlock()
 	if _, ok := fs.settings["maintenance"]; ok {
-		t.Error("maintenance section should not be seeded (no koanf paths)")
+		t.Error("maintenance section should not be synced (no koanf paths)")
 	}
 }
 
-func TestSeedHubSettingsIfNeeded_GitHubAppNoSecrets(t *testing.T) {
-	// The seeded github_app section should not contain private_key or webhook_secret.
+func TestSyncHubSettings_GitHubAppNoSecrets(t *testing.T) {
 	fs := newFakeHubSettingStore()
 
 	k := koanf.New(".")
@@ -198,7 +276,7 @@ func TestSeedHubSettingsIfNeeded_GitHubAppNoSecrets(t *testing.T) {
 		"server.github_app.private_key_path": "/path/to/key.pem",
 	}, "."), nil)
 
-	err := seedHubSettingsIfNeeded(context.Background(), fs, k, "/tmp/test")
+	err := syncHubSettings(context.Background(), fs, k)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -211,12 +289,81 @@ func TestSeedHubSettingsIfNeeded_GitHubAppNoSecrets(t *testing.T) {
 	}
 
 	docStr := string(gh.Value)
-	// The GitHubAppSettings struct does not have private_key or webhook_secret
-	// fields, so they are structurally excluded from the seeded document.
 	if strings.Contains(docStr, "private_key\"") && !strings.Contains(docStr, "private_key_path") {
 		t.Errorf("github_app doc should not contain bare private_key: %s", docStr)
 	}
 	if strings.Contains(docStr, "webhook_secret") {
 		t.Errorf("github_app doc should not contain webhook_secret: %s", docStr)
+	}
+}
+
+func TestSyncHubSettings_EveryBootRunsEvenWithMeta(t *testing.T) {
+	fs := newFakeHubSettingStore()
+
+	// Pre-populate _meta (simulating a previous boot's sync).
+	fs.settings["_meta"] = &store.HubSetting{
+		ID:       "_meta",
+		Section:  "_meta",
+		Value:    json.RawMessage(`{"synced_at":"2026-01-01T00:00:00Z","seed_version":"2"}`),
+		Revision: 1,
+		Origin:   "seeded",
+	}
+
+	k := koanf.New(".")
+	_ = k.Load(confmap.Provider(map[string]interface{}{
+		"server.hub.admin_emails":      []interface{}{"admin@test.com"},
+		"server.auth.user_access_mode": "open",
+	}, "."), nil)
+
+	err := syncHubSettings(context.Background(), fs, k)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+
+	// Unlike the old sentinel-gated approach, sync should still run and
+	// seed missing sections even when _meta already exists.
+	if _, ok := fs.settings["access"]; !ok {
+		t.Error("expected access section to be seeded even though _meta existed")
+	}
+}
+
+func TestSyncHubSettings_BackfillsPreOriginRows(t *testing.T) {
+	fs := newFakeHubSettingStore()
+
+	// Pre-populate with rows that have no origin set (simulating pre-origin data).
+	fs.settings["access"] = &store.HubSetting{
+		ID:        "access",
+		Section:   "access",
+		Value:     json.RawMessage(`{"admin_emails":["admin@custom.com"]}`),
+		Revision:  3,
+		UpdatedBy: "admin@test.com",
+		Origin:    "seeded", // column default — but updated_by is not "seed"
+	}
+
+	k := koanf.New(".")
+	_ = k.Load(confmap.Provider(map[string]interface{}{
+		"server.hub.admin_emails":      []interface{}{"bootstrap@test.com"},
+		"server.auth.user_access_mode": "open",
+	}, "."), nil)
+
+	err := syncHubSettings(context.Background(), fs, k)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+
+	// BackfillOrigin should have flipped this to "managed" because
+	// updated_by != "seed". Then syncHubSettings should skip it.
+	access := fs.settings["access"]
+	if access.Origin != "managed" {
+		t.Errorf("expected backfill to set origin=managed, got %s", access.Origin)
+	}
+	if !strings.Contains(string(access.Value), "admin@custom.com") {
+		t.Errorf("managed row should not have been overwritten: %s", access.Value)
 	}
 }

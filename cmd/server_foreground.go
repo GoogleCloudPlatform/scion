@@ -15,6 +15,7 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -1437,17 +1438,20 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 func initOperationalSettings(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Server, s store.Store, globalDir string) error {
 	settingStore, ok := s.(store.HubSettingStore)
 	if !ok {
-		// Store does not implement HubSettingStore — skip (should not happen
-		// with postgres, but guard defensively).
 		log.Println("WARNING: store does not implement HubSettingStore; skipping operational settings init")
 		return nil
 	}
 
-	// Build the file-only and env-only koanf instances.
+	// Build koanf instances.
 	fileKoanf := config.LoadFileOnlyKoanf()
 	envKoanf := config.LoadEnvKoanf()
+	bootstrapKoanf := config.LoadBootstrapKoanf()
 
-	// --- Seeding under advisory lock ---
+	// Log deprecation warnings for SCION_SERVER_* env vars that overlap
+	// Layer-1 settings (these should use SCION_SEED_* instead).
+	opsettings.LogDeprecatedServerEnv(envKoanf, slog.Default())
+
+	// --- Every-boot re-sync under advisory lock ---
 	locker, hasLocker := s.(store.AdvisoryLocker)
 	if hasLocker {
 		acquired, release, err := locker.TryAdvisoryLock(ctx, store.LockHubSettingsSeed)
@@ -1455,24 +1459,19 @@ func initOperationalSettings(ctx context.Context, cfg *config.GlobalConfig, hubS
 			return fmt.Errorf("acquiring hub_settings_seed advisory lock: %w", err)
 		}
 		if acquired {
-			seedErr := seedHubSettingsIfNeeded(ctx, settingStore, fileKoanf, globalDir)
-			// Release the advisory lock immediately after seeding (scoped
-			// release per design §3.9) — Refresh below does not need the lock.
+			syncErr := syncHubSettings(ctx, settingStore, bootstrapKoanf)
 			if rerr := release(); rerr != nil {
 				slog.Error("Failed to release hub_settings_seed advisory lock", "error", rerr)
 			}
-			if seedErr != nil {
-				return fmt.Errorf("seeding hub settings: %w", seedErr)
+			if syncErr != nil {
+				return fmt.Errorf("syncing hub settings: %w", syncErr)
 			}
 		} else {
-			// Another replica is seeding — that's fine, we'll pick up the
-			// results via Refresh below.
-			log.Println("Hub settings seed lock held by another replica; skipping seed")
+			log.Println("Hub settings seed lock held by another replica; skipping sync")
 		}
 	} else {
-		// No advisory locking (shouldn't happen on postgres, but handle).
-		if err := seedHubSettingsIfNeeded(ctx, settingStore, fileKoanf, globalDir); err != nil {
-			return fmt.Errorf("seeding hub settings: %w", err)
+		if err := syncHubSettings(ctx, settingStore, bootstrapKoanf); err != nil {
+			return fmt.Errorf("syncing hub settings: %w", err)
 		}
 	}
 
@@ -1493,7 +1492,6 @@ func initOperationalSettings(ctx context.Context, cfg *config.GlobalConfig, hubS
 
 	hubSrv.SetOperationalSettings(ops)
 
-	// --- WARN log for env-overridden Layer-1 keys (§3.4) ---
 	if envKeys := ops.EnvOverriddenKeys(); len(envKeys) > 0 {
 		slog.Warn("Layer-1 settings overridden by SCION_SERVER_* env vars on this node — these values diverge from the shared DB",
 			"keys", envKeys)
@@ -1515,56 +1513,73 @@ func startSettingsPropagation(ctx context.Context, hubSrv *hub.Server, eventPub 
 	slog.Info("Settings change propagation started (subscribe + poll backstop)")
 }
 
-// seedHubSettingsIfNeeded checks for the _meta sentinel row; if absent, seeds
-// each registry section from the file's Layer-1 keys. Sections with no koanf
-// paths (e.g. maintenance) are skipped — they start with compiled defaults.
-func seedHubSettingsIfNeeded(ctx context.Context, s store.HubSettingStore, fileKoanf *koanf.Koanf, globalDir string) error {
-	// Check for _meta sentinel.
-	_, err := s.GetHubSetting(ctx, "_meta")
-	if err == nil {
-		// _meta exists — seeding already done.
-		log.Println("Hub settings already seeded (_meta row present); skipping seed")
-		return nil
-	}
-	if !errors.Is(err, store.ErrNotFound) {
-		return fmt.Errorf("checking _meta row: %w", err)
+// syncHubSettings performs every-boot re-sync of hub_settings from bootstrap
+// material. For each registered section:
+//   - If the row is absent or origin=="seeded": write the bootstrap doc
+//     (skip-write-on-equality to avoid revision bumps and event churn).
+//   - If origin=="managed": skip — admin owns this section.
+//
+// Also runs BackfillOrigin for pre-origin rows and writes the _meta sentinel.
+func syncHubSettings(ctx context.Context, s store.HubSettingStore, bootstrapKoanf *koanf.Koanf) error {
+	// Backfill origin for rows created before the origin column existed.
+	if err := s.BackfillOrigin(ctx); err != nil {
+		return fmt.Errorf("backfilling origin: %w", err)
 	}
 
-	// No _meta — seed.
-	log.Println("Seeding hub_settings from settings.yaml...")
-
-	settingsPath := filepath.Join(globalDir, "settings.yaml")
+	log.Println("Syncing hub_settings from bootstrap material...")
 
 	for _, sec := range opsettings.Registry {
-		// Skip sections with no koanf paths (e.g. maintenance — runtime-only).
 		if len(sec.KoanfPaths) == 0 {
 			continue
 		}
 
-		doc, err := opsettings.ExtractSectionFromKoanf(fileKoanf, sec.Name)
+		bootstrapDoc, err := opsettings.ExtractSectionFromKoanf(bootstrapKoanf, sec.Name)
 		if err != nil {
-			slog.Warn("Failed to extract section for seeding; skipping", "section", sec.Name, "error", err)
+			slog.Warn("Failed to extract section for sync; skipping", "section", sec.Name, "error", err)
 			continue
 		}
 
-		_, err = s.UpsertHubSetting(ctx, sec.Name, doc, "seed", -1, "seeded") // unconditional upsert
-		if err != nil {
-			return fmt.Errorf("seeding section %q: %w", sec.Name, err)
+		existing, err := s.GetHubSetting(ctx, sec.Name)
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			return fmt.Errorf("checking section %q: %w", sec.Name, err)
 		}
-		log.Printf("  Seeded section: %s", sec.Name)
+
+		if existing == nil {
+			// No row — create with bootstrap material.
+			if _, err := s.UpsertHubSetting(ctx, sec.Name, bootstrapDoc, "seed", -1, "seeded"); err != nil {
+				return fmt.Errorf("seeding section %q: %w", sec.Name, err)
+			}
+			log.Printf("  Seeded section: %s (new)", sec.Name)
+			continue
+		}
+
+		if existing.Origin == "managed" {
+			slog.Debug("Skipping managed section", "section", sec.Name)
+			continue
+		}
+
+		// Origin is "seeded" — update only if content differs.
+		if bytes.Equal(existing.Value, bootstrapDoc) {
+			slog.Debug("Seeded section unchanged; skipping write", "section", sec.Name)
+			continue
+		}
+
+		if _, err := s.UpsertHubSetting(ctx, sec.Name, bootstrapDoc, "seed", -1, "seeded"); err != nil {
+			return fmt.Errorf("re-syncing section %q: %w", sec.Name, err)
+		}
+		log.Printf("  Re-synced section: %s (content changed)", sec.Name)
 	}
 
-	// Write _meta sentinel.
+	// Write/update _meta sentinel.
 	metaDoc, _ := json.Marshal(map[string]interface{}{
-		"seeded_from":  settingsPath,
-		"seeded_at":    time.Now().UTC().Format(time.RFC3339),
-		"seed_version": "1",
+		"synced_at":    time.Now().UTC().Format(time.RFC3339),
+		"seed_version": "2",
 	})
 	if _, err := s.UpsertHubSetting(ctx, "_meta", metaDoc, "seed", -1, "seeded"); err != nil {
 		return fmt.Errorf("writing _meta sentinel: %w", err)
 	}
 
-	log.Println("Hub settings seeding complete")
+	log.Println("Hub settings sync complete")
 	return nil
 }
 
