@@ -221,6 +221,18 @@ interface SectionMetadataInfo {
   updated_by?: string;
 }
 
+/** Per-field validation error from a 400 validation_failed response. */
+interface ValidationErrorDetail {
+  field: string;
+  message: string;
+}
+
+/** Conflict info from a 409 revision_conflict response. */
+interface ConflictInfo {
+  message: string;
+  conflicted: { section: string; expected_revision?: number; current_revision?: number }[];
+}
+
 interface UpdateCommitInfo {
   hash: string;
   subject: string;
@@ -448,6 +460,11 @@ export class ScionPageAdminServerConfig extends LitElement {
   @state() private envOverrides: string[] = [];
   @state() private sectionMetadata: Record<string, SectionMetadataInfo> | null = null;
   @state() private ignoredKeysNotice: string[] | null = null;
+
+  // ── Structured save errors (§3.6) ──
+  @state() private validationErrors: Record<string, ValidationErrorDetail[]> | null = null;
+  @state() private conflictInfo: ConflictInfo | null = null;
+  @state() private safetyNetKeys: string[] | null = null;
 
   static override styles = css`
     :host {
@@ -828,6 +845,108 @@ export class ScionPageAdminServerConfig extends LitElement {
       padding: 0.125rem 0.375rem;
       border-radius: 0.25rem;
     }
+
+    /* ── Structured error handling (§3.6) ── */
+
+    .conflict-banner {
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+      padding: 0.75rem 1rem;
+      margin-bottom: 1rem;
+      border-radius: var(--scion-radius, 0.5rem);
+      background: var(--sl-color-warning-50, #fffbeb);
+      border: 1px solid var(--sl-color-warning-200, #fde68a);
+      color: var(--sl-color-warning-800, #92400e);
+      font-size: 0.875rem;
+    }
+
+    .conflict-banner-title {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      font-weight: 600;
+    }
+
+    .conflict-banner-title sl-icon {
+      font-size: 1rem;
+    }
+
+    .conflict-banner-actions {
+      display: flex;
+      gap: 0.5rem;
+      margin-top: 0.25rem;
+    }
+
+    .safety-net-notice {
+      padding: 0.75rem 1rem;
+      margin-bottom: 1rem;
+      border-radius: var(--scion-radius, 0.5rem);
+      background: var(--sl-color-neutral-50, #f8fafc);
+      border: 1px solid var(--sl-color-neutral-200, #e2e8f0);
+      color: var(--sl-color-neutral-700, #334155);
+      font-size: 0.8125rem;
+    }
+
+    .safety-net-notice code {
+      font-family: var(--sl-font-mono, monospace);
+      font-size: 0.75rem;
+      background: var(--sl-color-neutral-100, #f1f5f9);
+      padding: 0.125rem 0.375rem;
+      border-radius: 0.25rem;
+    }
+
+    .validation-errors {
+      padding: 0.75rem 1rem;
+      margin-bottom: 1rem;
+      border-radius: var(--scion-radius, 0.5rem);
+      background: var(--scion-error-bg, #fef2f2);
+      border: 1px solid var(--scion-error-border, #fca5a5);
+      color: var(--scion-error-text, #991b1b);
+      font-size: 0.875rem;
+    }
+
+    .validation-errors-title {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      font-weight: 600;
+      margin-bottom: 0.5rem;
+    }
+
+    .validation-errors-title sl-icon {
+      font-size: 1rem;
+    }
+
+    .validation-errors-section {
+      margin-top: 0.5rem;
+    }
+
+    .validation-errors-section-name {
+      font-weight: 600;
+      font-size: 0.8125rem;
+      margin-bottom: 0.25rem;
+    }
+
+    .validation-errors-list {
+      list-style: none;
+      padding: 0;
+      margin: 0 0 0 0.5rem;
+      font-size: 0.8125rem;
+    }
+
+    .validation-errors-list li {
+      padding: 0.125rem 0;
+    }
+
+    .validation-errors-list li code {
+      font-family: var(--sl-font-mono, monospace);
+      font-size: 0.75rem;
+      background: rgba(0, 0, 0, 0.05);
+      padding: 0.125rem 0.375rem;
+      border-radius: 0.25rem;
+      margin-right: 0.25rem;
+    }
   `;
 
   override connectedCallback(): void {
@@ -1136,12 +1255,19 @@ export class ScionPageAdminServerConfig extends LitElement {
     return payload;
   }
 
-  private async handleSave(): Promise<void> {
-    this.saving = true;
+  private clearSaveErrors(): void {
     this.error = null;
     this.successMessage = null;
     this.reloadResult = null;
     this.ignoredKeysNotice = null;
+    this.validationErrors = null;
+    this.conflictInfo = null;
+    this.safetyNetKeys = null;
+  }
+
+  private async handleSave(): Promise<void> {
+    this.saving = true;
+    this.clearSaveErrors();
 
     try {
       const payload = this.buildPayload();
@@ -1152,7 +1278,7 @@ export class ScionPageAdminServerConfig extends LitElement {
       });
 
       if (!res.ok) {
-        this.error = await extractApiError(res, 'Failed to save settings');
+        await this.handleSaveError(res);
         return;
       }
 
@@ -1176,6 +1302,56 @@ export class ScionPageAdminServerConfig extends LitElement {
     }
   }
 
+  private async handleSaveError(res: Response): Promise<void> {
+    let body: Record<string, unknown>;
+    try {
+      body = (await res.json()) as Record<string, unknown>;
+    } catch {
+      this.error = 'Failed to save settings';
+      return;
+    }
+
+    switch (body.error) {
+      case 'validation_failed':
+        this.validationErrors = (body.errors as Record<string, ValidationErrorDetail[]>) ?? null;
+        this.scrollToFirstError();
+        break;
+
+      case 'revision_conflict':
+        this.conflictInfo = {
+          message:
+            (body.message as string) ||
+            'Settings have been changed since you loaded this page.',
+          conflicted: (body.conflicted as ConflictInfo['conflicted']) ?? [],
+        };
+        break;
+
+      case 'layer0_rejected': {
+        const keys = (body.keys as string[]) ?? [];
+        this.safetyNetKeys = keys;
+        console.log(
+          '[admin-server-config] layer0_rejected — bootstrap keys in payload:',
+          keys,
+        );
+        break;
+      }
+
+      default:
+        this.error =
+          (body.message as string) ||
+          (typeof body.error === 'string' ? body.error : null) ||
+          'An unexpected error occurred';
+        break;
+    }
+  }
+
+  private scrollToFirstError(): void {
+    requestAnimationFrame(() => {
+      const el = this.shadowRoot?.querySelector('.validation-errors');
+      el?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
+  }
+
   override render() {
     return html`
       <div class="header">
@@ -1187,7 +1363,9 @@ export class ScionPageAdminServerConfig extends LitElement {
         others require a server restart.
       </p>
 
-      ${this.loading ? nothing : this.renderEnvOverrideBanner()} ${this.renderIgnoredKeysNotice()}
+      ${this.loading ? nothing : this.renderEnvOverrideBanner()}
+      ${this.renderConflictBanner()} ${this.renderValidationErrors()}
+      ${this.renderSafetyNetNotice()} ${this.renderIgnoredKeysNotice()}
       ${this.error ? html`<div class="status-message error">${this.error}</div>` : nothing}
       ${this.successMessage
         ? html`<div class="status-message success">
@@ -1283,6 +1461,79 @@ export class ScionPageAdminServerConfig extends LitElement {
       <div class="ignored-keys-notice">
         <strong>Note:</strong> Some submitted fields were not persisted:
         ${this.ignoredKeysNotice.map((k) => html` <code>${k}</code>`)}
+      </div>
+    `;
+  }
+
+  private renderValidationErrors(): typeof nothing | ReturnType<typeof html> {
+    if (!this.validationErrors) return nothing;
+    const sections = Object.entries(this.validationErrors);
+    if (sections.length === 0) return nothing;
+    return html`
+      <div class="validation-errors">
+        <div class="validation-errors-title">
+          <sl-icon name="exclamation-circle"></sl-icon>
+          Some settings could not be saved due to validation errors
+        </div>
+        ${sections.map(
+          ([section, errors]) => html`
+            <div class="validation-errors-section">
+              <div class="validation-errors-section-name">${section}</div>
+              <ul class="validation-errors-list">
+                ${(errors as ValidationErrorDetail[]).map(
+                  (err) => html`
+                    <li>
+                      ${err.field ? html`<code>${err.field}</code>` : nothing}
+                      ${err.message || err}
+                    </li>
+                  `,
+                )}
+              </ul>
+            </div>
+          `,
+        )}
+      </div>
+    `;
+  }
+
+  private renderConflictBanner(): typeof nothing | ReturnType<typeof html> {
+    if (!this.conflictInfo) return nothing;
+    return html`
+      <div class="conflict-banner">
+        <div class="conflict-banner-title">
+          <sl-icon name="exclamation-triangle"></sl-icon>
+          Settings have been changed since you loaded this page
+        </div>
+        <div>Please reload to see the latest values before saving again.</div>
+        <div class="conflict-banner-actions">
+          <sl-button
+            size="small"
+            variant="warning"
+            @click=${() => {
+              void this.loadConfig();
+              this.conflictInfo = null;
+            }}
+          >
+            <sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>
+            Reload
+          </sl-button>
+        </div>
+      </div>
+    `;
+  }
+
+  private renderSafetyNetNotice(): typeof nothing | ReturnType<typeof html> {
+    if (!this.safetyNetKeys || this.safetyNetKeys.length === 0) return nothing;
+    return html`
+      <div class="safety-net-notice">
+        <strong>Unexpected error:</strong> The following bootstrap settings were included in the
+        save request but cannot be changed here:
+        ${this.safetyNetKeys.map((k) => html` <code>${k}</code>`)}
+        <br />
+        <span style="font-size: 0.75rem; color: var(--scion-text-muted, #64748b);">
+          These settings are managed via deployment configuration (settings.yaml / env).
+          This error should not normally occur — check the browser console for details.
+        </span>
       </div>
     `;
   }
