@@ -246,6 +246,83 @@ func TestSyncHubSettings_SkipsWriteOnEquality(t *testing.T) {
 	}
 }
 
+func TestSyncHubSettings_SkipsWriteOnSemanticEquality(t *testing.T) {
+	// Simulates Postgres jsonb behavior: the stored value has different
+	// whitespace/key ordering but is semantically identical.
+	fs := newFakeHubSettingStore()
+
+	k := koanf.New(".")
+	_ = k.Load(confmap.Provider(map[string]interface{}{
+		"server.hub.admin_emails":      []interface{}{"admin@test.com"},
+		"server.auth.user_access_mode": "open",
+	}, "."), nil)
+
+	// First sync — creates the rows.
+	err := syncHubSettings(context.Background(), fs, k)
+	if err != nil {
+		t.Fatalf("first sync: %v", err)
+	}
+
+	fs.mu.Lock()
+	accessRev := fs.settings["access"].Revision
+	// Simulate jsonb re-serialization: re-order keys and change whitespace.
+	origVal := fs.settings["access"].Value
+	var parsed map[string]interface{}
+	if err := json.Unmarshal(origVal, &parsed); err != nil {
+		t.Fatalf("unmarshal stored value: %v", err)
+	}
+	// Re-marshal (Go map iteration is random, but we also add indentation
+	// to guarantee byte-level difference from compact json.Marshal output).
+	reordered, _ := json.MarshalIndent(parsed, "", "  ")
+	if string(reordered) == string(origVal) {
+		// Force a difference by adding whitespace.
+		reordered = json.RawMessage("  " + strings.TrimSpace(string(origVal)) + "  ")
+		// That won't unmarshal the same, so use a subtler approach:
+		reordered = json.RawMessage(`{ "user_access_mode" : "open" }`)
+	}
+	fs.settings["access"].Value = reordered
+	fs.mu.Unlock()
+
+	// Second sync — values are semantically equal despite byte differences.
+	err = syncHubSettings(context.Background(), fs, k)
+	if err != nil {
+		t.Fatalf("second sync: %v", err)
+	}
+
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	if fs.settings["access"].Revision != accessRev {
+		t.Errorf("semantic equality check failed: access revision bumped from %d to %d (jsonb re-serialization not handled)", accessRev, fs.settings["access"].Revision)
+	}
+}
+
+func TestJsonEqual(t *testing.T) {
+	tests := []struct {
+		name string
+		a, b string
+		want bool
+	}{
+		{"identical", `{"a":1}`, `{"a":1}`, true},
+		{"key reorder", `{"a":1,"b":2}`, `{"b":2,"a":1}`, true},
+		{"whitespace", `{"a": 1}`, `{"a":1}`, true},
+		{"different values", `{"a":1}`, `{"a":2}`, false},
+		{"extra key", `{"a":1}`, `{"a":1,"b":2}`, false},
+		{"empty objects", `{}`, `{}`, true},
+		{"nested equal", `{"a":{"b":1}}`, `{"a":{"b":1}}`, true},
+		{"nested different", `{"a":{"b":1}}`, `{"a":{"b":2}}`, false},
+		{"arrays equal", `[1,2,3]`, `[1,2,3]`, true},
+		{"arrays differ order", `[1,2,3]`, `[3,2,1]`, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := jsonEqual(json.RawMessage(tt.a), json.RawMessage(tt.b))
+			if got != tt.want {
+				t.Errorf("jsonEqual(%s, %s) = %v, want %v", tt.a, tt.b, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestSyncHubSettings_MaintenanceSkipped(t *testing.T) {
 	fs := newFakeHubSettingStore()
 

@@ -27,6 +27,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -1558,7 +1559,9 @@ func syncHubSettings(ctx context.Context, s store.HubSettingStore, bootstrapKoan
 		}
 
 		// Origin is "seeded" — update only if content differs.
-		if bytes.Equal(existing.Value, bootstrapDoc) {
+		// Compare semantically (not byte-for-byte) because Postgres jsonb
+		// re-serializes values, changing whitespace and key ordering.
+		if jsonEqual(existing.Value, bootstrapDoc) {
 			slog.Debug("Seeded section unchanged; skipping write", "section", sec.Name)
 			continue
 		}
@@ -1580,6 +1583,19 @@ func syncHubSettings(ctx context.Context, s store.HubSettingStore, bootstrapKoan
 
 	log.Println("Hub settings sync complete")
 	return nil
+}
+
+// jsonEqual compares two JSON documents semantically, ignoring whitespace
+// and key ordering differences (as Postgres jsonb re-serializes values).
+func jsonEqual(a, b json.RawMessage) bool {
+	var aVal, bVal interface{}
+	if err := json.Unmarshal(a, &aVal); err != nil {
+		return bytes.Equal(a, b)
+	}
+	if err := json.Unmarshal(b, &bVal); err != nil {
+		return bytes.Equal(a, b)
+	}
+	return reflect.DeepEqual(aVal, bVal)
 }
 
 // initHubStorage initializes the storage backend for the Hub server.
