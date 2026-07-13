@@ -17,10 +17,12 @@
 package hub
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -280,6 +282,69 @@ func TestSkillAuthz_CreateSkill_UserScope_UnauthenticatedRejected(t *testing.T) 
 	})
 	assert.Equal(t, http.StatusUnauthorized, rec.Code,
 		"unauthenticated user-scope create should be rejected; got: %s", rec.Body.String())
+}
+
+// ============================================================================
+// Unauthenticated access to private skills
+// ============================================================================
+
+func TestSkillAuthz_ListSkills_NilIdentitySeesOnlyPublic(t *testing.T) {
+	srv, s, alice, _, project := setupSkillAuthzTest(t)
+
+	createTestSkill(t, s, "private-skill", store.SkillScopeProject, project.ID, alice.ID)
+
+	publicSkill := createTestSkill(t, s, "public-list-skill", store.SkillScopeProject, project.ID, alice.ID)
+	publicSkill.Visibility = store.VisibilityPublic
+	require.NoError(t, s.UpdateSkill(context.Background(), publicSkill))
+
+	// Bypass auth middleware to reach the handler with nil identity (defense-in-depth).
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/skills?scope=project&scopeId="+project.ID, nil)
+	rec := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusOK, rec.Code)
+
+	var resp ListSkillsResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+
+	for _, sk := range resp.Skills {
+		assert.Equal(t, store.VisibilityPublic, sk.Skill.Visibility,
+			"nil-identity list should only contain public skills, got %q with visibility %q", sk.Skill.Name, sk.Skill.Visibility)
+	}
+	assert.Equal(t, 1, len(resp.Skills), "should see exactly the one public skill")
+}
+
+func TestSkillAuthz_Resolve_NilIdentityPrivateDenied(t *testing.T) {
+	srv, s, alice, _, project := setupSkillAuthzTest(t)
+	skill := createTestSkill(t, s, "private-resolve-skill", store.SkillScopeProject, project.ID, alice.ID)
+
+	sv := &store.SkillVersion{
+		ID:      api.NewUUID(),
+		SkillID: skill.ID,
+		Version: "1.0.0",
+		Status:  store.SkillVersionStatusPublished,
+		Created: time.Now(),
+	}
+	require.NoError(t, s.CreateSkillVersion(context.Background(), sv))
+
+	body, err := json.Marshal(ResolveSkillsRequest{
+		Skills:    []ResolveSkillRef{{URI: "skill://project/" + project.ID + "/private-resolve-skill"}},
+		ProjectID: project.ID,
+	})
+	require.NoError(t, err)
+
+	// Bypass auth middleware to reach the handler with nil identity (defense-in-depth).
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/skills/resolve", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusOK, rec.Code)
+
+	var resp ResolveSkillsResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+
+	assert.Empty(t, resp.Resolved, "private skill should not be resolved with nil identity")
+	require.NotEmpty(t, resp.Errors, "private skill should produce a forbidden error")
+	assert.Equal(t, "forbidden", resp.Errors[0].Code)
 }
 
 // ============================================================================

@@ -259,7 +259,9 @@ func (s *Server) listSkills(w http.ResponseWriter, r *http.Request) {
 		}
 	} else {
 		for i := range result.Items {
-			skills = append(skills, SkillWithCapabilities{Skill: result.Items[i]})
+			if result.Items[i].Visibility == store.VisibilityPublic {
+				skills = append(skills, SkillWithCapabilities{Skill: result.Items[i]})
+			}
 		}
 	}
 
@@ -1327,15 +1329,20 @@ func (s *Server) handleSkillsResolve(w http.ResponseWriter, r *http.Request) {
 
 		if skill.Visibility != store.VisibilityPublic {
 			identity := GetIdentityFromContext(ctx)
-			if identity != nil {
-				decision := s.authzService.CheckAccess(ctx, identity, skillResource(skill), ActionRead)
-				if !decision.Allowed {
-					resolveErrors = append(resolveErrors, ResolveSkillError{
-						URI: skillRef.URI, Code: "forbidden",
-						Message: "you do not have permission to access this skill",
-					})
-					continue
-				}
+			if identity == nil {
+				resolveErrors = append(resolveErrors, ResolveSkillError{
+					URI: skillRef.URI, Code: "forbidden",
+					Message: "you do not have permission to access this skill",
+				})
+				continue
+			}
+			decision := s.authzService.CheckAccess(ctx, identity, skillResource(skill), ActionRead)
+			if !decision.Allowed {
+				resolveErrors = append(resolveErrors, ResolveSkillError{
+					URI: skillRef.URI, Code: "forbidden",
+					Message: "you do not have permission to access this skill",
+				})
+				continue
 			}
 		}
 
