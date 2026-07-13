@@ -1,24 +1,3 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
-  <defs>
-    <linearGradient id="leaf" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0%" stop-color="#4ade80"/>
-      <stop offset="100%" stop-color="#16a34a"/>
-    </linearGradient>
-    <linearGradient id="stem" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0%" stop-color="#22c55e"/>
-      <stop offset="100%" stop-color="#15803d"/>
-    </linearGradient>
-  </defs>
-  <!-- Stem -->
-  <path d="M32 58 C32 58 32 30 32 28" stroke="url(#stem)" stroke-width="4" stroke-linecap="round" fill="none"/>
-  <!-- Left leaf -->
-  <path d="M32 34 C24 32 14 24 12 12 C20 12 30 18 32 28" fill="url(#leaf)"/>
-  <!-- Right leaf -->
-  <path d="M32 28 C34 18 42 10 52 8 C52 18 44 28 34 32" fill="url(#leaf)" opacity="0.85"/>
-  <!-- Left leaf vein -->
-  <path d="M32 32 C26 28 20 20 16 14" stroke="#15803d" stroke-width="0.8" stroke-linecap="round" fill="none" opacity="0.4"/>
-  <!-- Right leaf vein -->
-  <path d="M33 30 C38 24 44 18 48 12" stroke="#15803d" stroke-width="0.8" stroke-linecap="round" fill="none" opacity="0.4"/>
-  <!-- Ground -->
-  <ellipse cx="32" cy="58" rx="12" ry="3" fill="#92400e" opacity="0.25"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+  <text x="50" y="75" font-size="80" text-anchor="middle">🌱</text>
 </svg>
