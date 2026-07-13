@@ -381,6 +381,15 @@ func SectionKeyFromKoanfPath(koanfPath string) string {
 	return koanfPathToJSONKey[koanfPath]
 }
 
+// KoanfPathFromSectionKey returns the full koanf path for a section-level JSON
+// key, or empty string if no mapping exists for the given section/key pair.
+func KoanfPathFromSectionKey(sectionName, jsonKey string) string {
+	if mapping, ok := jsonFieldToKoanfPaths[sectionName]; ok {
+		return mapping[jsonKey]
+	}
+	return ""
+}
+
 // DeprecatedEnvVar describes a SCION_SERVER_* environment variable that targets
 // a Layer-1 key and should be migrated to SCION_SEED_*.
 type DeprecatedEnvVar struct {

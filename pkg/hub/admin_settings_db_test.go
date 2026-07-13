@@ -1340,6 +1340,7 @@ func TestGetServerConfigDB_SupersededKeys(t *testing.T) {
 	// admin_emails differs between bootstrap (["bootstrap@example.com"]) and
 	// DB (["admin@db.com"]), so it should appear in superseded_keys for "access".
 	// user_access_mode is "open" in both → NOT superseded.
+	// Keys must be full koanf paths so the frontend can match them.
 	accessSup, ok := resp.SupersededKeys["access"]
 	if !ok {
 		t.Fatal("expected superseded_keys entry for 'access'")
@@ -1347,19 +1348,21 @@ func TestGetServerConfigDB_SupersededKeys(t *testing.T) {
 
 	found := false
 	for _, sk := range accessSup {
-		if sk.Key == "admin_emails" {
+		if sk.Key == "server.hub.admin_emails" {
 			found = true
-			// Source should be "yaml" since bootstrap koanf was loaded from file-like config.
 			if sk.Source != "yaml" {
 				t.Errorf("admin_emails source: want 'yaml', got %q", sk.Source)
 			}
 		}
-		if sk.Key == "user_access_mode" {
+		if sk.Key == "admin_emails" {
+			t.Error("superseded key should use full koanf path, not section-level JSON key")
+		}
+		if sk.Key == "server.auth.user_access_mode" || sk.Key == "user_access_mode" {
 			t.Error("user_access_mode should NOT be superseded (values match)")
 		}
 	}
 	if !found {
-		t.Errorf("expected admin_emails in superseded_keys, got %+v", accessSup)
+		t.Errorf("expected server.hub.admin_emails in superseded_keys, got %+v", accessSup)
 	}
 }
 

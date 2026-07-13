@@ -340,8 +340,12 @@ func (s *Server) computeSupersededKeys(ops *OperationalSettings) map[string][]Su
 		for key, bootstrapVal := range bootstrapMap {
 			dbVal, exists := dbMap[key]
 			if !exists || !reflect.DeepEqual(dbVal, bootstrapVal) {
+				koanfPath := opsettings.KoanfPathFromSectionKey(sec.Name, key)
+				if koanfPath == "" {
+					koanfPath = key
+				}
 				superseded = append(superseded, SupersededKey{
-					Key:    key,
+					Key:    koanfPath,
 					Source: detectKeySource(seedEnvK, serverEnvK, sec.Name, key),
 				})
 			}

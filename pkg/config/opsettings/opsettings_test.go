@@ -951,6 +951,27 @@ func TestDetectDeprecatedServerEnv_MixedKeys(t *testing.T) {
 	}
 }
 
+func TestKoanfPathFromSectionKey(t *testing.T) {
+	tests := []struct {
+		section string
+		jsonKey string
+		want    string
+	}{
+		{"access", "admin_emails", "server.hub.admin_emails"},
+		{"access", "user_access_mode", "server.auth.user_access_mode"},
+		{"github_app", "webhooks_enabled", "server.github_app.webhooks_enabled"},
+		{"endpoints", "public_url", "server.hub.public_url"},
+		{"access", "nonexistent_key", ""},
+		{"nonexistent_section", "admin_emails", ""},
+	}
+	for _, tt := range tests {
+		got := KoanfPathFromSectionKey(tt.section, tt.jsonKey)
+		if got != tt.want {
+			t.Errorf("KoanfPathFromSectionKey(%q, %q) = %q, want %q", tt.section, tt.jsonKey, got, tt.want)
+		}
+	}
+}
+
 func TestKoanfKeyToEnvSuffix(t *testing.T) {
 	tests := []struct {
 		key  string
