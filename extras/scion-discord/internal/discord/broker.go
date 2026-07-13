@@ -1519,6 +1519,10 @@ const maxDiscordAttachmentSize = 25 * 1024 * 1024 // 25 MB
 // will NOT work when agents and the plugin run in separate pods with isolated
 // volumes. See #397 for the tracked fix.
 func (b *DiscordBroker) downloadDiscordAttachment(ctx context.Context, att *discordgo.MessageAttachment, projectSlug string) (agentPath, placeholder string, err error) {
+	if projectSlug == "" {
+		return "", "", fmt.Errorf("project slug is empty")
+	}
+
 	if att.Size > maxDiscordAttachmentSize {
 		return "", "", fmt.Errorf("attachment too large (%d bytes, max %d)", att.Size, maxDiscordAttachmentSize)
 	}
@@ -1528,7 +1532,7 @@ func (b *DiscordBroker) downloadDiscordAttachment(ctx context.Context, att *disc
 		return "", "", fmt.Errorf("create request for %q: %w", att.Filename, err)
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := b.httpClient.Do(req)
 	if err != nil {
 		return "", "", fmt.Errorf("download %q: %w", att.Filename, err)
 	}
@@ -1538,8 +1542,8 @@ func (b *DiscordBroker) downloadDiscordAttachment(ctx context.Context, att *disc
 		return "", "", fmt.Errorf("download %q: HTTP %d", att.Filename, resp.StatusCode)
 	}
 
-	fileName := att.Filename
-	if fileName == "" {
+	fileName := filepath.Base(att.Filename)
+	if fileName == "" || fileName == "." || fileName == "/" {
 		fileName = att.ID
 	}
 	timestamp := time.Now().Unix()
@@ -1557,7 +1561,8 @@ func (b *DiscordBroker) downloadDiscordAttachment(ctx context.Context, att *disc
 	}
 	defer f.Close()
 
-	if _, err := io.Copy(f, resp.Body); err != nil {
+	if _, err := io.Copy(f, io.LimitReader(resp.Body, maxDiscordAttachmentSize)); err != nil {
+		f.Close()
 		os.Remove(destPath)
 		return "", "", fmt.Errorf("write file: %w", err)
 	}
