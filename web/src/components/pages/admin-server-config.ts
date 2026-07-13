@@ -1360,17 +1360,17 @@ export class ScionPageAdminServerConfig extends LitElement {
     const ok = (key: string) => this.readOnlyReason(key) === null;
 
     // General — only Layer-1 top-level keys
-    if (ok('default_template')) payload.default_template = this.defaultTemplate || undefined;
+    if (ok('default_template')) payload.default_template = this.defaultTemplate;
     if (ok('default_harness_config'))
-      payload.default_harness_config = this.defaultHarnessConfig || undefined;
-    if (ok('image_registry')) payload.image_registry = this.imageRegistry || undefined;
+      payload.default_harness_config = this.defaultHarnessConfig;
+    if (ok('image_registry')) payload.image_registry = this.imageRegistry;
 
     // Default agent limits
-    if (ok('default_max_turns')) payload.default_max_turns = this.defaultMaxTurns || undefined;
+    if (ok('default_max_turns')) payload.default_max_turns = this.defaultMaxTurns;
     if (ok('default_max_model_calls'))
-      payload.default_max_model_calls = this.defaultMaxModelCalls || undefined;
+      payload.default_max_model_calls = this.defaultMaxModelCalls;
     if (ok('default_max_duration'))
-      payload.default_max_duration = this.defaultMaxDuration || undefined;
+      payload.default_max_duration = this.defaultMaxDuration;
 
     if (
       ok('default_resources') &&
@@ -1401,7 +1401,7 @@ export class ScionPageAdminServerConfig extends LitElement {
 
     // Hub — only Layer-1 hub fields
     const hub: Record<string, unknown> = {};
-    if (ok('server.hub.public_url') && this.hubPublicUrl) hub.public_url = this.hubPublicUrl;
+    if (ok('server.hub.public_url')) hub.public_url = this.hubPublicUrl;
     if (ok('server.hub.admin_emails')) {
       hub.admin_emails = this.hubAdminEmails
         ? this.hubAdminEmails
@@ -1410,7 +1410,7 @@ export class ScionPageAdminServerConfig extends LitElement {
             .filter(Boolean)
         : [];
     }
-    if (ok('server.hub.soft_delete_retention') && this.hubSoftDeleteRetention)
+    if (ok('server.hub.soft_delete_retention'))
       hub.soft_delete_retention = this.hubSoftDeleteRetention;
     if (ok('server.hub.soft_delete_retain_files'))
       hub.soft_delete_retain_files = this.hubSoftDeleteRetainFiles;
@@ -1420,14 +1420,16 @@ export class ScionPageAdminServerConfig extends LitElement {
 
     // Auth — only Layer-1 auth fields
     const auth: Record<string, unknown> = {};
-    if (ok('server.auth.user_access_mode') && this.authUserAccessMode) {
+    if (ok('server.auth.user_access_mode')) {
       auth.user_access_mode = this.authUserAccessMode;
     }
-    if (ok('server.auth.authorized_domains') && this.authAuthorizedDomains) {
+    if (ok('server.auth.authorized_domains')) {
       auth.authorized_domains = this.authAuthorizedDomains
-        .split(',')
-        .map((s) => s.trim())
-        .filter(Boolean);
+        ? this.authAuthorizedDomains
+            .split(',')
+            .map((s) => s.trim())
+            .filter(Boolean)
+        : [];
     }
     if (Object.keys(auth).length > 0) server.auth = auth;
 
@@ -1454,21 +1456,21 @@ export class ScionPageAdminServerConfig extends LitElement {
       if (ok('telemetry.cloud.enabled')) {
         telemetry.cloud = {
           enabled: this.telemetryCloudEnabled,
-          endpoint: this.telemetryCloudEndpoint || undefined,
-          protocol: this.telemetryCloudProtocol || undefined,
-          provider: this.telemetryCloudProvider || undefined,
+          endpoint: this.telemetryCloudEndpoint,
+          protocol: this.telemetryCloudProtocol,
+          provider: this.telemetryCloudProvider,
         };
       }
       if (ok('telemetry.hub.enabled')) {
         telemetry.hub = {
           enabled: this.telemetryHubEnabled,
-          report_interval: this.telemetryHubReportInterval || undefined,
+          report_interval: this.telemetryHubReportInterval,
         };
       }
       if (ok('telemetry.local.enabled')) {
         telemetry.local = {
           enabled: this.telemetryLocalEnabled,
-          file: this.telemetryLocalFile || undefined,
+          file: this.telemetryLocalFile,
           console: this.telemetryLocalConsole,
         };
       }
