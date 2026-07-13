@@ -1587,6 +1587,9 @@ func syncHubSettings(ctx context.Context, s store.HubSettingStore, bootstrapKoan
 
 // jsonEqual compares two JSON documents semantically, ignoring whitespace
 // and key ordering differences (as Postgres jsonb re-serializes values).
+// Both inputs must come through json.Unmarshal so numeric types are
+// consistently float64. If either path changes to produce integer types
+// (e.g. a custom decoder), semantically equal values could compare unequal.
 func jsonEqual(a, b json.RawMessage) bool {
 	var aVal, bVal interface{}
 	if err := json.Unmarshal(a, &aVal); err != nil {

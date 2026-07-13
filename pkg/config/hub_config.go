@@ -963,6 +963,10 @@ func LoadBootstrapKoanf() *koanf.Koanf {
 	k := koanf.New(".")
 
 	// 1. Coded defaults in the opsettings keyspace (server.* snake_case).
+	// NOTE: This is a manually maintained subset of GlobalConfig defaults.
+	// If new defaulted keys are added to GlobalConfig (or its nested structs),
+	// they must be added here too, otherwise bootstrap material will be
+	// incomplete for sections that rely on them during initial seeding.
 	defaults := DefaultGlobalConfig()
 	_ = k.Load(confmap.Provider(map[string]interface{}{
 		"server.hub.port":          defaults.Hub.Port,

@@ -244,7 +244,12 @@ func (o *OperationalSettings) Snapshot() Layer1Snapshot {
 	// Only load keys for sections NOT present in DB.
 	for _, sec := range opsettings.Registry {
 		if _, inDB := dbSections[sec.Name]; inDB {
-			continue // DB fully owns this section
+			// DB rows must contain complete section documents. The Update
+			// path builds a full document from the PUT payload, so partial
+			// rows should not occur in normal operation. If a partial row
+			// is created externally, missing keys will have zero values
+			// rather than bootstrap defaults.
+			continue
 		}
 		if len(sec.KoanfPaths) == 0 {
 			continue
