@@ -98,7 +98,7 @@ auth:
     api-key:
       required_env:
         - any_of: ["COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"]
-    config-file:
+    auth-file:
       required_files:
         - name: COPILOT_CONFIG
           type: file
@@ -110,4 +110,4 @@ auth:
       GH_TOKEN: api-key
       GITHUB_TOKEN: api-key
     files:
-      COPILOT_CONFIG: config-file
+      COPILOT_CONFIG: auth-file

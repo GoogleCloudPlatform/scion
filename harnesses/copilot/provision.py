@@ -62,7 +62,7 @@ AUTH = scion_harness.AuthSpec(
             env_fallback=True,
         ),
         scion_harness.file_method(
-            "config-file",
+            "auth-file",
             path=COPILOT_CONFIG_FILE,
             hint=f"provide copilot config at {COPILOT_CONFIG_FILE}",
             secret_key="COPILOT_CONFIG",
@@ -188,7 +188,7 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
             )
         env["COPILOT_GITHUB_TOKEN"] = secret
 
-    if resolved.method == "config-file":
+    if resolved.method == "auth-file":
         _write_copilot_config_file(ctx)
         extra = {"config_file_written": True}
 
