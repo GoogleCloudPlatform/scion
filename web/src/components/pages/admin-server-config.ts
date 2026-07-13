@@ -1435,12 +1435,10 @@ export class ScionPageAdminServerConfig extends LitElement {
 
     // Broker, database, storage, secrets, message_broker — all Layer-0, omitted
 
-    // Preserve notification channels, OAuth, and GitHub App from raw config
+    // Preserve notification channels and GitHub App from raw config
+    // (server.oauth is Layer-0 / secrets stack — excluded from DB payload)
     if (this.rawConfig?.server?.notification_channels) {
       server.notification_channels = this.rawConfig.server.notification_channels;
-    }
-    if (this.rawConfig?.server?.oauth) {
-      server.oauth = this.rawConfig.server.oauth;
     }
     if (this.rawConfig?.server?.github_app) {
       server.github_app = this.rawConfig.server.github_app;
