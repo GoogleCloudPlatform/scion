@@ -418,7 +418,10 @@ export class ScionPageSkillDetail extends LitElement {
 
   private getSkillUri(): string {
     if (!this.skill) return '';
-    return `${this.skill.scope}:${this.skill.slug}@latest`;
+    const scopePath = this.skill.scopeId
+      ? `${this.skill.scope}/${this.skill.scopeId}`
+      : this.skill.scope;
+    return `skill://scion/${scopePath}/${this.skill.slug}@latest`;
   }
 
   private async copyUri(): Promise<void> {

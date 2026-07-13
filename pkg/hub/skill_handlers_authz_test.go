@@ -220,6 +220,36 @@ func TestSkillAuthz_Resolve_ForbiddenSkill(t *testing.T) {
 	assert.Equal(t, "forbidden", resp.Errors[0].Code)
 }
 
+func TestSkillAuthz_Resolve_PublicSkillAllowed(t *testing.T) {
+	srv, s, alice, bob, _ := setupSkillAuthzTest(t)
+	skill := createTestSkill(t, s, "public-skill", store.SkillScopeGlobal, "", alice.ID)
+
+	// Mark the skill as public.
+	skill.Visibility = store.VisibilityPublic
+	require.NoError(t, s.UpdateSkill(context.Background(), skill))
+
+	sv := &store.SkillVersion{
+		ID:      api.NewUUID(),
+		SkillID: skill.ID,
+		Version: "1.0.0",
+		Status:  store.SkillVersionStatusPublished,
+		Created: time.Now(),
+	}
+	require.NoError(t, s.CreateSkillVersion(context.Background(), sv))
+
+	rec := doRequestAsUser(t, srv, bob, http.MethodPost, "/api/v1/skills/resolve", ResolveSkillsRequest{
+		Skills: []ResolveSkillRef{{URI: "skill://scion/global/public-skill"}},
+	})
+	assert.Equal(t, http.StatusOK, rec.Code)
+
+	var resp ResolveSkillsResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+
+	assert.Empty(t, resp.Errors, "public skill should not produce authorization errors")
+	require.NotEmpty(t, resp.Resolved, "public skill should be resolved for any authenticated user")
+	assert.Equal(t, "public-skill", resp.Resolved[0].Name)
+}
+
 // ============================================================================
 // H2: createSkill user scope tests
 // ============================================================================

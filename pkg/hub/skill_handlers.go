@@ -252,7 +252,7 @@ func (s *Server) listSkills(w http.ResponseWriter, r *http.Request) {
 		}
 		caps := s.authzService.ComputeCapabilitiesBatch(ctx, identity, resources, "skill")
 		for i := range result.Items {
-			if !capabilityAllows(caps[i], ActionRead) {
+			if !capabilityAllows(caps[i], ActionRead) && result.Items[i].Visibility != store.VisibilityPublic {
 				continue
 			}
 			skills = append(skills, SkillWithCapabilities{Skill: result.Items[i], Cap: caps[i]})
@@ -413,7 +413,7 @@ func (s *Server) getSkill(w http.ResponseWriter, r *http.Request, id string) {
 	}
 
 	identity := GetIdentityFromContext(ctx)
-	if identity != nil {
+	if identity != nil && skill.Visibility != store.VisibilityPublic {
 		decision := s.authzService.CheckAccess(ctx, identity, skillResource(skill), ActionRead)
 		if !decision.Allowed {
 			NotFound(w, "Skill")
@@ -550,7 +550,7 @@ func (s *Server) listSkillVersions(w http.ResponseWriter, r *http.Request, skill
 	}
 
 	identity := GetIdentityFromContext(ctx)
-	if identity != nil {
+	if identity != nil && skill.Visibility != store.VisibilityPublic {
 		decision := s.authzService.CheckAccess(ctx, identity, skillResource(skill), ActionRead)
 		if !decision.Allowed {
 			NotFound(w, "Skill")
@@ -580,7 +580,7 @@ func (s *Server) getSkillVersion(w http.ResponseWriter, r *http.Request, skillID
 	}
 
 	identity := GetIdentityFromContext(ctx)
-	if identity != nil {
+	if identity != nil && skill.Visibility != store.VisibilityPublic {
 		decision := s.authzService.CheckAccess(ctx, identity, skillResource(skill), ActionRead)
 		if !decision.Allowed {
 			NotFound(w, "Skill")
@@ -1180,7 +1180,7 @@ func (s *Server) handleSkillDownload(w http.ResponseWriter, r *http.Request, ski
 	}
 
 	identity := GetIdentityFromContext(ctx)
-	if identity != nil {
+	if identity != nil && skill.Visibility != store.VisibilityPublic {
 		decision := s.authzService.CheckAccess(ctx, identity, skillResource(skill), ActionRead)
 		if !decision.Allowed {
 			NotFound(w, "Skill")
@@ -1241,7 +1241,7 @@ func (s *Server) handleSkillResolveSingle(w http.ResponseWriter, r *http.Request
 	}
 
 	identity := GetIdentityFromContext(ctx)
-	if identity != nil {
+	if identity != nil && skill.Visibility != store.VisibilityPublic {
 		decision := s.authzService.CheckAccess(ctx, identity, skillResource(skill), ActionRead)
 		if !decision.Allowed {
 			NotFound(w, "Skill")
@@ -1325,15 +1325,17 @@ func (s *Server) handleSkillsResolve(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		identity := GetIdentityFromContext(ctx)
-		if identity != nil {
-			decision := s.authzService.CheckAccess(ctx, identity, skillResource(skill), ActionRead)
-			if !decision.Allowed {
-				resolveErrors = append(resolveErrors, ResolveSkillError{
-					URI: skillRef.URI, Code: "forbidden",
-					Message: "you do not have permission to access this skill",
-				})
-				continue
+		if skill.Visibility != store.VisibilityPublic {
+			identity := GetIdentityFromContext(ctx)
+			if identity != nil {
+				decision := s.authzService.CheckAccess(ctx, identity, skillResource(skill), ActionRead)
+				if !decision.Allowed {
+					resolveErrors = append(resolveErrors, ResolveSkillError{
+						URI: skillRef.URI, Code: "forbidden",
+						Message: "you do not have permission to access this skill",
+					})
+					continue
+				}
 			}
 		}
 
