@@ -97,7 +97,8 @@ def _write_copilot_config_file(ctx: scion_harness.ProvisionContext) -> None:
     if not content.strip():
         raise scion_harness.ProvisionError("COPILOT_CONFIG secret is empty")
     try:
-        json.loads(content)
+        lines = [ln for ln in content.splitlines() if not ln.strip().startswith("//")]
+        json.loads("\n".join(lines))
     except json.JSONDecodeError as exc:
         raise scion_harness.ProvisionError(
             f"COPILOT_CONFIG secret is not valid JSON: {exc}"
@@ -154,8 +155,12 @@ def _ensure_settings(ctx: scion_harness.ProvisionContext) -> None:
         except (OSError, json.JSONDecodeError):
             pass
 
-    if "trustedFolders" not in config:
+    folders = config.get("trustedFolders")
+    if not isinstance(folders, list):
         config["trustedFolders"] = [ctx.workspace]
+        scion_harness.atomic_write_json(config_path, config)
+    elif ctx.workspace not in folders:
+        folders.append(ctx.workspace)
         scion_harness.atomic_write_json(config_path, config)
 
 
