@@ -129,12 +129,12 @@ type SettingsUpdatedEvent struct {
 // It is owned by the Server and used only when database.driver == "postgres".
 // In file/SQLite mode the legacy reloadSettings path is used instead.
 type OperationalSettings struct {
-	store        store.HubSettingStore
+	store          store.HubSettingStore
 	bootstrapKoanf *koanf.Koanf    // Full bootstrap merge: defaults → SEED → yaml → SERVER
-	envOverrides map[string]bool // Layer-1 koanf keys satisfied by env
-	envKoanf     *koanf.Koanf    // env-only koanf for merge
-	mu           sync.RWMutex
-	cache        map[string]sectionState // section name → cached value + revision
+	envOverrides   map[string]bool // Layer-1 koanf keys satisfied by env
+	envKoanf       *koanf.Koanf    // env-only koanf for merge
+	mu             sync.RWMutex
+	cache          map[string]sectionState // section name → cached value + revision
 
 	// Event publisher for cross-replica propagation (nil in SQLite/file mode).
 	events EventPublisher
@@ -168,11 +168,11 @@ func NewOperationalSettings(
 	}
 
 	return &OperationalSettings{
-		store:        st,
+		store:          st,
 		bootstrapKoanf: bootstrapKoanf,
-		envOverrides: envOverrides,
-		envKoanf:     envKoanf,
-		cache:        make(map[string]sectionState),
+		envOverrides:   envOverrides,
+		envKoanf:       envKoanf,
+		cache:          make(map[string]sectionState),
 	}
 }
 

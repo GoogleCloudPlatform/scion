@@ -969,17 +969,17 @@ func LoadBootstrapKoanf() *koanf.Koanf {
 	// incomplete for sections that rely on them during initial seeding.
 	defaults := DefaultGlobalConfig()
 	_ = k.Load(confmap.Provider(map[string]interface{}{
-		"server.hub.port":          defaults.Hub.Port,
-		"server.hub.host":          defaults.Hub.Host,
-		"server.hub.admin_emails":  defaults.Hub.AdminEmails,
-		"server.database.driver":   defaults.Database.Driver,
-		"server.database.url":      defaults.Database.URL,
-		"server.auth.dev_mode":     defaults.Auth.Enabled,
-		"server.auth.dev_token":    defaults.Auth.Token,
-		"server.storage.provider":  defaults.Storage.Provider,
-		"server.secrets.backend":   defaults.Secrets.Backend,
-		"server.log_level":         defaults.LogLevel,
-		"server.log_format":        defaults.LogFormat,
+		"server.hub.port":         defaults.Hub.Port,
+		"server.hub.host":         defaults.Hub.Host,
+		"server.hub.admin_emails": defaults.Hub.AdminEmails,
+		"server.database.driver":  defaults.Database.Driver,
+		"server.database.url":     defaults.Database.URL,
+		"server.auth.dev_mode":    defaults.Auth.Enabled,
+		"server.auth.dev_token":   defaults.Auth.Token,
+		"server.storage.provider": defaults.Storage.Provider,
+		"server.secrets.backend":  defaults.Secrets.Backend,
+		"server.log_level":        defaults.LogLevel,
+		"server.log_format":       defaults.LogFormat,
 	}, "."), nil)
 
 	// 2. SCION_SEED_* environment variables (snake_case via envKeyToOpsettingsKey).
