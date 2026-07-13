@@ -814,8 +814,55 @@ func TestFileMode_ServerConfigDispatch(t *testing.T) {
 	if _, ok := resp["section_metadata"]; ok {
 		t.Error("file mode should not include section_metadata")
 	}
-	if _, ok := resp["env_overrides"]; ok {
-		t.Error("file mode should not include env_overrides")
+	// env_overrides IS included in file mode when SCION_SERVER_* vars are set
+	// (H1 fix). Without env vars, it's omitted.
+}
+
+func TestFileMode_EnvOverrides(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("SCION_SERVER_HUB_ADMINEMAILS", "admin@test.com")
+	t.Setenv("SCION_SERVER_DATABASE_DRIVER", "postgres")
+
+	srv := &Server{
+		maintenance: NewMaintenanceState(false, ""),
+	}
+
+	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/server-config", nil)
+	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	rr := httptest.NewRecorder()
+	srv.handleAdminServerConfig(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("file-mode GET: expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var resp map[string]interface{}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
+
+	overrides, ok := resp["env_overrides"]
+	if !ok {
+		t.Fatal("file-mode response should include env_overrides when SCION_SERVER_* vars are set")
+	}
+
+	overrideList, ok := overrides.([]interface{})
+	if !ok {
+		t.Fatalf("env_overrides should be an array, got %T", overrides)
+	}
+
+	found := make(map[string]bool)
+	for _, v := range overrideList {
+		found[v.(string)] = true
+	}
+
+	if !found["server.hub.admin_emails"] {
+		t.Error("expected server.hub.admin_emails in env_overrides")
+	}
+	if !found["server.database.driver"] {
+		t.Error("expected server.database.driver in env_overrides (all env keys reported)")
 	}
 }
 

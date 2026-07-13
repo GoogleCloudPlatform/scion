@@ -298,17 +298,12 @@ func EnvOverriddenLayer1Keys(envKeys []string) []string {
 	return overridden
 }
 
-// DetectEnvOverrides creates a koanf instance from the SCION_ environment
-// variables and returns which Layer-1 keys are overridden by env.
-// The envMapper should be the same mapper used by the main config loader.
+// DetectEnvOverrides returns all koanf keys present in the SCION_SERVER_*
+// env koanf. This includes Layer-0 and Layer-1 keys alike — the caller
+// uses the list to show which fields are env-pinned in the admin UI
+// (both file-mode and DB-mode).
 func DetectEnvOverrides(envKoanf *koanf.Koanf) []string {
-	var overridden []string
-	for _, key := range envKoanf.Keys() {
-		if IsLayer1Key(key) {
-			overridden = append(overridden, key)
-		}
-	}
-	return overridden
+	return envKoanf.Keys()
 }
 
 // ExtractAllSections extracts all registered section documents from a fully

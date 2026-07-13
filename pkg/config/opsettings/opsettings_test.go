@@ -677,8 +677,9 @@ func TestDetectEnvOverrides(t *testing.T) {
 	if !found["telemetry.enabled"] {
 		t.Error("expected telemetry.enabled in overrides")
 	}
-	if found["server.database.driver"] {
-		t.Error("server.database.driver should not be in Layer-1 overrides")
+	// After H1 generalization, all env keys are returned (not just Layer-1).
+	if !found["server.database.driver"] {
+		t.Error("expected server.database.driver in overrides (all env keys reported)")
 	}
 }
 

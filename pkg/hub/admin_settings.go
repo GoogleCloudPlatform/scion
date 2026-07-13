@@ -20,6 +20,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -58,6 +59,11 @@ type ServerConfigResponse struct {
 	DefaultMaxModelCalls int               `json:"default_max_model_calls,omitempty"`
 	DefaultMaxDuration   string            `json:"default_max_duration,omitempty"`
 	DefaultResources     *api.ResourceSpec `json:"default_resources,omitempty"`
+
+	// EnvOverrides lists koanf keys overridden by SCION_SERVER_* env vars
+	// on this node. Present in both file-mode and DB-mode responses so the
+	// admin UI can show env-pinned fields regardless of settings tier.
+	EnvOverrides []string `json:"env_overrides,omitempty"`
 }
 
 // ServerConfigUpdateRequest is the payload for updating settings.
@@ -184,14 +190,19 @@ func (s *Server) handleGetServerConfig(w http.ResponseWriter) {
 	data, err := os.ReadFile(settingsPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			// Return empty/default response if no settings file exists
-			writeJSON(w, http.StatusOK, ServerConfigResponse{
+			resp := ServerConfigResponse{
 				ScionVersion:   version.Short(),
 				ScionCommit:    version.GetCommit(),
 				ScionBuildTime: version.GetBuildTime(),
 				SettingsTier:   "file",
 				SchemaVersion:  "1",
-			})
+			}
+			envK := config.LoadEnvKoanf()
+			if envOverrides := opsettings.DetectEnvOverrides(envK); len(envOverrides) > 0 {
+				sort.Strings(envOverrides)
+				resp.EnvOverrides = envOverrides
+			}
+			writeJSON(w, http.StatusOK, resp)
 			return
 		}
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to read settings file", nil)
@@ -225,6 +236,14 @@ func (s *Server) handleGetServerConfig(w http.ResponseWriter) {
 		DefaultMaxModelCalls: vs.DefaultMaxModelCalls,
 		DefaultMaxDuration:   vs.DefaultMaxDuration,
 		DefaultResources:     vs.DefaultResources,
+	}
+
+	// Env overrides — detect SCION_SERVER_* env vars so the admin UI can
+	// show env-pinned fields in file mode too (H1).
+	envK := config.LoadEnvKoanf()
+	if envOverrides := opsettings.DetectEnvOverrides(envK); len(envOverrides) > 0 {
+		sort.Strings(envOverrides)
+		resp.EnvOverrides = envOverrides
 	}
 
 	maskSensitiveFields(&resp)

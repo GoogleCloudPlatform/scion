@@ -429,9 +429,9 @@ func TestSnapshot_EnvOverrides_Listed(t *testing.T) {
 	if !overrides["server.auth.user_access_mode"] {
 		t.Error("expected server.auth.user_access_mode in EnvOverrides")
 	}
-	// Layer-0 key should NOT be in EnvOverrides (it's not a Layer-1 key)
-	if overrides["server.hub.port"] {
-		t.Error("server.hub.port is Layer-0 and should not be in EnvOverrides")
+	// After H1 generalization, all env keys are reported (including Layer-0).
+	if !overrides["server.hub.port"] {
+		t.Error("expected server.hub.port in EnvOverrides (all env keys reported)")
 	}
 }
 

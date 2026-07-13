@@ -58,10 +58,6 @@ type ServerConfigDBResponse struct {
 	// SectionMetadata maps section name to its provenance metadata.
 	SectionMeta map[string]SectionMetadata `json:"section_metadata,omitempty"`
 
-	// EnvOverrides lists Layer-1 koanf keys that are overridden by env vars
-	// on this node — a drift warning for the admin UI.
-	EnvOverrides []string `json:"env_overrides,omitempty"`
-
 	// SupersededKeys maps section name to bootstrap-material keys whose
 	// merged value differs from the DB value (managed sections only).
 	SupersededKeys map[string][]SupersededKey `json:"superseded_keys,omitempty"`
@@ -168,7 +164,7 @@ func (s *Server) handleGetServerConfigDB(w http.ResponseWriter, r *http.Request,
 	// Env overrides.
 	overrides := ops.EnvOverriddenKeys()
 	sort.Strings(overrides)
-	resp.EnvOverrides = overrides
+	resp.ServerConfigResponse.EnvOverrides = overrides
 
 	// Superseded keys (managed sections whose DB value diverges from bootstrap).
 	resp.SupersededKeys = s.computeSupersededKeys(ops)
