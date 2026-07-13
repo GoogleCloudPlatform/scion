@@ -273,12 +273,17 @@ server:
 
 	// Case 2: SERVER env overrides yaml for same compound-word key.
 	// SCION_SERVER_HUB_ADMINEMAILS maps directly to server.hub.admin_emails.
+	// After splitCommaSeparatedKoanfKeys, even a single value is wrapped as a slice.
 	t.Setenv("SCION_SERVER_HUB_ADMINEMAILS", "server@example.com")
 	k2 := LoadBootstrapKoanf()
 
-	serverVal := k2.String("server.hub.admin_emails")
-	if serverVal != "server@example.com" {
-		t.Errorf("SERVER env should override yaml for admin_emails: expected 'server@example.com', got %q", serverVal)
+	serverVal := k2.Get("server.hub.admin_emails")
+	serverSlice, ok := serverVal.([]interface{})
+	if !ok {
+		t.Fatalf("SERVER env admin_emails should be []interface{}, got %T: %v", serverVal, serverVal)
+	}
+	if len(serverSlice) != 1 || serverSlice[0] != "server@example.com" {
+		t.Errorf("SERVER env should override yaml for admin_emails: expected [server@example.com], got %v", serverSlice)
 	}
 
 	// Case 3: Verify the camelCase key does NOT exist (proving no namespace split).
@@ -332,6 +337,34 @@ func TestLoadBootstrapKoanf_CommaSplit(t *testing.T) {
 	}
 	if len(slice) != 3 {
 		t.Errorf("expected 3 elements, got %d: %v", len(slice), slice)
+	}
+}
+
+// TestLoadBootstrapKoanf_SingleValueListEnv verifies that a single-value
+// (no comma) env var for a known list field produces an array, not a string.
+func TestLoadBootstrapKoanf_SingleValueListEnv(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	if err := os.MkdirAll(filepath.Join(tmpDir, ".scion"), 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	t.Setenv("SCION_SEED_SERVER_HUB_ADMINEMAILS", "single@example.com")
+
+	k := LoadBootstrapKoanf()
+
+	val := k.Get("server.hub.admin_emails")
+	slice, ok := val.([]interface{})
+	if !ok {
+		t.Fatalf("expected server.hub.admin_emails to be []interface{}, got %T: %v", val, val)
+	}
+	if len(slice) != 1 {
+		t.Errorf("expected 1 element, got %d: %v", len(slice), slice)
+	}
+	if len(slice) > 0 {
+		if s, ok := slice[0].(string); !ok || s != "single@example.com" {
+			t.Errorf("expected slice[0] = 'single@example.com', got %v", slice[0])
+		}
 	}
 }
 

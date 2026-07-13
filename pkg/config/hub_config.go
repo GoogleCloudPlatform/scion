@@ -1031,7 +1031,7 @@ func splitCommaSeparatedKoanfKeys(k *koanf.Koanf) {
 		}
 		val := k.Get(key)
 		s, ok := val.(string)
-		if !ok || !strings.Contains(s, ",") {
+		if !ok {
 			continue
 		}
 		parts := parseCommaSeparatedList(s)
