@@ -74,7 +74,7 @@ capabilities:
     agent_instructions: { support: "yes" }
   auth:
     api_key: { support: "yes" }
-    auth_file: { support: "no", reason: "OAuth capture not implemented in initial version" }
+    auth_file: { support: "yes" }
     oauth_token: { support: "no" }
     vertex_ai: { support: "no", reason: "Copilot uses GitHub auth, not GCP" }
   mcp:
@@ -98,8 +98,16 @@ auth:
     api-key:
       required_env:
         - any_of: ["COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"]
+    config-file:
+      required_files:
+        - name: COPILOT_CONFIG
+          type: file
+          target_suffix: "/.copilot/config.json"
+          field: CopilotConfigFile
   autodetect:
     env:
       COPILOT_GITHUB_TOKEN: api-key
       GH_TOKEN: api-key
       GITHUB_TOKEN: api-key
+    files:
+      COPILOT_CONFIG: config-file

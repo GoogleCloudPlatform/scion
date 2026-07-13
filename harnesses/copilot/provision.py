@@ -47,6 +47,8 @@ assert scion_harness.INTERFACE_VERSION >= 2, (
     f"got {scion_harness.INTERFACE_VERSION}"
 )
 
+COPILOT_CONFIG_FILE = "~/.copilot/config.json"
+
 AUTH = scion_harness.AuthSpec(
     "copilot",
     [
@@ -58,6 +60,12 @@ AUTH = scion_harness.AuthSpec(
                 'with a fine-grained PAT that has "Copilot Requests" permission'
             ),
             env_fallback=True,
+        ),
+        scion_harness.file_method(
+            "config-file",
+            path=COPILOT_CONFIG_FILE,
+            hint=f"provide copilot config at {COPILOT_CONFIG_FILE}",
+            secret_key="COPILOT_CONFIG",
         ),
     ],
     fallback_to_none_on_error=True,
@@ -79,6 +87,29 @@ def _read_token(ctx: scion_harness.ProvisionContext, env_key: str) -> str:
         except OSError:
             pass
     return os.environ.get(env_key, "")
+
+
+def _write_copilot_config_file(ctx: scion_harness.ProvisionContext) -> None:
+    """Write ~/.copilot/config.json from a staged COPILOT_CONFIG file secret."""
+    content = ctx.read_file_secret("COPILOT_CONFIG")
+    if not content:
+        return
+    if not content.strip():
+        raise scion_harness.ProvisionError("COPILOT_CONFIG secret is empty")
+    try:
+        json.loads(content)
+    except json.JSONDecodeError as exc:
+        raise scion_harness.ProvisionError(
+            f"COPILOT_CONFIG secret is not valid JSON: {exc}"
+        ) from exc
+    config_dir = scion_harness.expand_path("~/.copilot")
+    os.makedirs(config_dir, exist_ok=True)
+    target = os.path.join(config_dir, "config.json")
+    tmp = target + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(content)
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, target)
 
 
 def _write_mcp_config(ctx: scion_harness.ProvisionContext, servers: dict[str, Any]) -> None:
@@ -142,6 +173,7 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
         resolved = scion_harness.ResolvedAuth(method="none")
 
     env: dict[str, str] = {}
+    extra: dict[str, Any] | None = None
     if resolved.method == "api-key" and resolved.env_key:
         secret = _read_token(ctx, resolved.env_key)
         if not secret:
@@ -151,7 +183,11 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
             )
         env["COPILOT_GITHUB_TOKEN"] = secret
 
-    ctx.write_outputs(resolved, env=env)
+    if resolved.method == "config-file":
+        _write_copilot_config_file(ctx)
+        extra = {"config_file_written": True}
+
+    ctx.write_outputs(resolved, env=env, extra=extra)
 
     target = os.path.join(ctx.workspace, ".github", "copilot-instructions.md")
     try:
