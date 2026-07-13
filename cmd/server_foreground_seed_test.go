@@ -276,7 +276,6 @@ func TestSyncHubSettings_SkipsWriteOnSemanticEquality(t *testing.T) {
 	reordered, _ := json.MarshalIndent(parsed, "", "  ")
 	if string(reordered) == string(origVal) {
 		// Force a difference by adding whitespace.
-		reordered = json.RawMessage("  " + strings.TrimSpace(string(origVal)) + "  ")
 		// That won't unmarshal the same, so use a subtler approach:
 		reordered = json.RawMessage(`{ "user_access_mode" : "open" }`)
 	}

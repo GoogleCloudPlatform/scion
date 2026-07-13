@@ -127,7 +127,7 @@ func TestLoadSeedEnvKoanf_Empty(t *testing.T) {
 		if len(e) > 11 && e[:11] == "SCION_SEED_" {
 			key := e[:indexOf(e, '=')]
 			t.Setenv(key, "")
-			os.Unsetenv(key)
+			_ = os.Unsetenv(key)
 		}
 	}
 
@@ -169,7 +169,7 @@ server:
 	}
 
 	// Case 2: Remove yaml → SEED wins.
-	os.Remove(filepath.Join(scionDir, "settings.yaml"))
+	_ = os.Remove(filepath.Join(scionDir, "settings.yaml"))
 	k2 := LoadBootstrapKoanf()
 	if v := k2.Int("server.hub.port"); v != 1111 {
 		t.Errorf("without yaml, SEED should provide value: expected 1111, got %d", v)

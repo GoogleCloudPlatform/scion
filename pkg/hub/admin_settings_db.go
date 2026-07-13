@@ -152,7 +152,7 @@ func (s *Server) handleGetServerConfigDB(w http.ResponseWriter, r *http.Request,
 		resp.SchemaVersion = "1"
 	}
 
-	resp.ServerConfigResponse.SettingsTier = "db"
+	resp.SettingsTier = "db"
 
 	// Overlay Layer-1 fields from the operational settings snapshot.
 	snap := ops.Snapshot()
@@ -164,7 +164,7 @@ func (s *Server) handleGetServerConfigDB(w http.ResponseWriter, r *http.Request,
 	// Env overrides.
 	overrides := ops.EnvOverriddenKeys()
 	sort.Strings(overrides)
-	resp.ServerConfigResponse.EnvOverrides = overrides
+	resp.EnvOverrides = overrides
 
 	// Superseded keys (managed sections whose DB value diverges from bootstrap).
 	resp.SupersededKeys = s.computeSupersededKeys(ops)
