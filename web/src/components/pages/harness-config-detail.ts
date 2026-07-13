@@ -1093,7 +1093,17 @@ export class ScionPageHarnessConfigDetail extends LitElement {
 
       const result = await response.json();
       const count = result?.count ?? result?.harnessConfigs?.length ?? 0;
-      this.reimportStatus = `Refreshed successfully (${count} config${count !== 1 ? 's' : ''} updated).`;
+      const failed: Array<{name: string; reason: string}> = result?.failed ?? [];
+
+      if (failed.length > 0) {
+        const reasons = failed.map((f: {name: string; reason: string}) => `${f.name}: ${f.reason}`).join('\n');
+        this.reimportError = `${failed.length} config(s) failed validation:\n${reasons}`;
+        if (count > 0) {
+          this.reimportStatus = `${count} config(s) updated, but some failed.`;
+        }
+      } else {
+        this.reimportStatus = `Refreshed successfully (${count} config${count !== 1 ? 's' : ''} updated).`;
+      }
       await this.loadHarnessConfig();
     } catch (err) {
       this.reimportError = err instanceof Error ? err.message : 'Failed to refresh from source';

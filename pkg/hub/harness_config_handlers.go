@@ -1071,15 +1071,27 @@ func (s *Server) handleHarnessConfigReimport(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	imported, err := run(nil)
+	var failures []ImportFailure
+	imported, err := run(failureCollector(&failures))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "reimport_failed", err.Error(), nil)
+		return
+	}
+
+	if len(imported) == 0 && len(failures) > 0 {
+		reasons := make([]string, len(failures))
+		for i, f := range failures {
+			reasons[i] = f.Name + ": " + f.Reason
+		}
+		writeError(w, http.StatusBadRequest, "reimport_failed",
+			"config.yaml validation failed: "+strings.Join(reasons, "; "), nil)
 		return
 	}
 
 	writeJSON(w, http.StatusOK, ImportHarnessConfigsResponse{
 		HarnessConfigs: imported,
 		Count:          len(imported),
+		Failed:         failures,
 	})
 }
 

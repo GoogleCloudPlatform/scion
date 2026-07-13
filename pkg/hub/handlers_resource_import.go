@@ -34,10 +34,17 @@ type ImportTemplatesRequest struct {
 	Names         []string `json:"names,omitempty"`
 }
 
+// ImportFailure pairs a resource name with the reason it failed to import.
+type ImportFailure struct {
+	Name   string `json:"name"`
+	Reason string `json:"reason"`
+}
+
 // ImportTemplatesResponse is returned after a direct template import completes.
 type ImportTemplatesResponse struct {
-	Templates []string `json:"templates"`
-	Count     int      `json:"count"`
+	Templates []string        `json:"templates"`
+	Count     int             `json:"count"`
+	Failed    []ImportFailure `json:"failed,omitempty"`
 }
 
 // handleProjectImportTemplates imports templates directly from a remote URL into
@@ -116,15 +123,27 @@ func (s *Server) handleProjectImportTemplates(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	imported, err := run(nil)
+	var failures []ImportFailure
+	imported, err := run(failureCollector(&failures))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "import_failed", err.Error(), nil)
+		return
+	}
+
+	if len(imported) == 0 && len(failures) > 0 {
+		reasons := make([]string, len(failures))
+		for i, f := range failures {
+			reasons[i] = f.Name + ": " + f.Reason
+		}
+		writeError(w, http.StatusBadRequest, "import_failed",
+			"config validation failed: "+strings.Join(reasons, "; "), nil)
 		return
 	}
 
 	writeJSON(w, http.StatusOK, ImportTemplatesResponse{
 		Templates: imported,
 		Count:     len(imported),
+		Failed:    failures,
 	})
 }
 
@@ -138,8 +157,9 @@ type ImportHarnessConfigsRequest struct {
 
 // ImportHarnessConfigsResponse is returned after a direct harness-config import completes.
 type ImportHarnessConfigsResponse struct {
-	HarnessConfigs []string `json:"harnessConfigs"`
-	Count          int      `json:"count"`
+	HarnessConfigs []string        `json:"harnessConfigs"`
+	Count          int             `json:"count"`
+	Failed         []ImportFailure `json:"failed,omitempty"`
 }
 
 // handleProjectImportHarnessConfigs imports harness-configs directly from a
@@ -215,15 +235,27 @@ func (s *Server) handleProjectImportHarnessConfigs(w http.ResponseWriter, r *htt
 		return
 	}
 
-	imported, err := run(nil)
+	var failures []ImportFailure
+	imported, err := run(failureCollector(&failures))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "import_failed", err.Error(), nil)
+		return
+	}
+
+	if len(imported) == 0 && len(failures) > 0 {
+		reasons := make([]string, len(failures))
+		for i, f := range failures {
+			reasons[i] = f.Name + ": " + f.Reason
+		}
+		writeError(w, http.StatusBadRequest, "import_failed",
+			"config.yaml validation failed: "+strings.Join(reasons, "; "), nil)
 		return
 	}
 
 	writeJSON(w, http.StatusOK, ImportHarnessConfigsResponse{
 		HarnessConfigs: imported,
 		Count:          len(imported),
+		Failed:         failures,
 	})
 }
 
@@ -246,9 +278,10 @@ type ImportResourcesRequest struct {
 
 // ImportResourcesResponse reports the result of a unified import.
 type ImportResourcesResponse struct {
-	Kind     string   `json:"kind"`
-	Imported []string `json:"imported"`
-	Count    int      `json:"count"`
+	Kind     string          `json:"kind"`
+	Imported []string        `json:"imported"`
+	Count    int             `json:"count"`
+	Failed   []ImportFailure `json:"failed,omitempty"`
 }
 
 // handleResourcesImport handles POST /api/v1/resources/import: a single,
@@ -357,16 +390,41 @@ func (s *Server) handleResourcesImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	imported, err := run(nil)
+	var failures []ImportFailure
+	imported, err := run(failureCollector(&failures))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "import_failed", err.Error(), nil)
 		return
 	}
+
+	if len(imported) == 0 && len(failures) > 0 {
+		reasons := make([]string, len(failures))
+		for i, f := range failures {
+			reasons[i] = f.Name + ": " + f.Reason
+		}
+		writeError(w, http.StatusBadRequest, "import_failed",
+			"config validation failed: "+strings.Join(reasons, "; "), nil)
+		return
+	}
+
 	writeJSON(w, http.StatusOK, ImportResourcesResponse{
 		Kind:     req.Kind,
 		Imported: imported,
 		Count:    len(imported),
+		Failed:   failures,
 	})
+}
+
+// failureCollector returns a progress callback that records ImportEventFailed
+// events into the provided slice. The caller passes this to the import driver
+// instead of nil so that per-resource validation failures are surfaced in the
+// non-streaming JSON response.
+func failureCollector(failures *[]ImportFailure) importProgressFunc {
+	return func(ev ResourceImportEvent) {
+		if ev.Type == ImportEventFailed {
+			*failures = append(*failures, ImportFailure{Name: ev.Name, Reason: ev.Reason})
+		}
+	}
 }
 
 // importAcceptsNDJSON reports whether the client opted into a streaming
