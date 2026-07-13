@@ -964,7 +964,7 @@ func (b *DiscordBroker) handleIncomingMessage(s *discordgo.Session, m *discordgo
 		return
 	}
 
-	if m.Content == "" {
+	if m.Content == "" && len(m.Attachments) == 0 {
 		return
 	}
 
@@ -1054,6 +1054,29 @@ func (b *DiscordBroker) handleIncomingMessage(s *discordgo.Session, m *discordgo
 	// Strip bot and agent mentions from message text.
 	cleanText := stripMentions(m.Content, botUserID, targets)
 	cleanText = strings.TrimSpace(cleanText)
+
+	// Download Discord attachments and build metadata.
+	var attachmentPaths []string
+	for _, att := range m.Attachments {
+		if att == nil || att.URL == "" {
+			continue
+		}
+		agentPath, placeholder, err := b.downloadDiscordAttachment(ctx, att, link.ProjectSlug)
+		if err != nil {
+			b.log.Error("Failed to download Discord attachment",
+				"filename", att.Filename, "error", err)
+			continue
+		}
+		attachmentPaths = append(attachmentPaths, agentPath)
+		if placeholder != "" {
+			if cleanText != "" {
+				cleanText = cleanText + "\n" + placeholder
+			} else {
+				cleanText = placeholder
+			}
+		}
+	}
+
 	if cleanText == "" {
 		return
 	}
@@ -1075,15 +1098,16 @@ func (b *DiscordBroker) handleIncomingMessage(s *discordgo.Session, m *discordgo
 		recipient := "agent:" + agentSlug
 
 		msg := &messages.StructuredMessage{
-			Version:   messages.Version,
-			Timestamp: m.Timestamp.UTC().Format(time.RFC3339),
-			Channel:   "discord",
-			ThreadID:  channelID,
-			Sender:    sender,
-			SenderID:  senderID,
-			Recipient: recipient,
-			Msg:       cleanText,
-			Type:      messages.TypeInstruction,
+			Version:     messages.Version,
+			Timestamp:   m.Timestamp.UTC().Format(time.RFC3339),
+			Channel:     "discord",
+			ThreadID:    channelID,
+			Sender:      sender,
+			SenderID:    senderID,
+			Recipient:   recipient,
+			Msg:         cleanText,
+			Type:        messages.TypeInstruction,
+			Attachments: attachmentPaths,
 			Metadata: map[string]string{
 				"discord_channel_id": channelID,
 				"discord_message_id": m.ID,
@@ -1481,6 +1505,75 @@ func (b *DiscordBroker) resolveAttachmentPath(ctx context.Context, attachPath, p
 
 	b.log.Debug("Resolved attachment path", "original", attachPath, "resolved", hostPath)
 	return hostPath
+}
+
+const maxDiscordAttachmentSize = 25 * 1024 * 1024 // 25 MB
+
+// downloadDiscordAttachment downloads a file from a Discord message attachment
+// and saves it to the agent's workspace downloads directory. Returns the
+// agent-relative path and a placeholder string for the message body.
+//
+// NOTE: This writes to the host filesystem at /home/scion/.scion/projects/<slug>/downloads/.
+// The agent container must share this volume mount for the file to be visible
+// at /workspace/downloads/. This works in single-VM / shared-dir setups but
+// will NOT work when agents and the plugin run in separate pods with isolated
+// volumes. See #397 for the tracked fix.
+func (b *DiscordBroker) downloadDiscordAttachment(ctx context.Context, att *discordgo.MessageAttachment, projectSlug string) (agentPath, placeholder string, err error) {
+	if att.Size > maxDiscordAttachmentSize {
+		return "", "", fmt.Errorf("attachment too large (%d bytes, max %d)", att.Size, maxDiscordAttachmentSize)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, att.URL, nil)
+	if err != nil {
+		return "", "", fmt.Errorf("create request for %q: %w", att.Filename, err)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", "", fmt.Errorf("download %q: %w", att.Filename, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", "", fmt.Errorf("download %q: HTTP %d", att.Filename, resp.StatusCode)
+	}
+
+	fileName := att.Filename
+	if fileName == "" {
+		fileName = att.ID
+	}
+	timestamp := time.Now().Unix()
+	destName := fmt.Sprintf("discord_%d_%s", timestamp, fileName)
+
+	hostDir := filepath.Join("/home/scion/.scion/projects", projectSlug, "downloads")
+	if err := os.MkdirAll(hostDir, 0o755); err != nil {
+		return "", "", fmt.Errorf("create downloads dir: %w", err)
+	}
+
+	destPath := filepath.Join(hostDir, destName)
+	f, err := os.Create(destPath)
+	if err != nil {
+		return "", "", fmt.Errorf("create file: %w", err)
+	}
+	defer f.Close()
+
+	if _, err := io.Copy(f, resp.Body); err != nil {
+		os.Remove(destPath)
+		return "", "", fmt.Errorf("write file: %w", err)
+	}
+
+	agentPath = filepath.Join("/workspace/downloads", destName)
+	contentType := att.ContentType
+	if contentType == "" {
+		contentType = "file"
+	}
+	placeholder = fmt.Sprintf("[Attachment: %s (%s)]", fileName, contentType)
+
+	b.log.Info("Downloaded Discord attachment",
+		"filename", fileName, "content_type", contentType,
+		"path", destPath, "agent_path", agentPath)
+
+	return agentPath, placeholder, nil
 }
 
 // --- Topic parsing ---
