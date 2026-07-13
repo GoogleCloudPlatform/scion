@@ -437,16 +437,32 @@ export class ScionSecretList extends LitElement {
             required
           ></sl-input>
 
-          <sl-input
-            label="Value"
-            placeholder="Secret value"
-            value=${this.dialogValue}
-            type="password"
-            @sl-input=${(e: Event) => {
-              this.dialogValue = (e.target as HTMLInputElement).value;
-            }}
-            required
-          ></sl-input>
+          ${this.dialogType === 'file'
+            ? html`
+                <sl-textarea
+                  label="Value"
+                  placeholder="Paste file contents (e.g. private key)"
+                  value=${this.dialogValue}
+                  rows="6"
+                  resize="vertical"
+                  @sl-input=${(e: Event) => {
+                    this.dialogValue = (e.target as HTMLTextAreaElement).value;
+                  }}
+                  required
+                ></sl-textarea>
+              `
+            : html`
+                <sl-input
+                  label="Value"
+                  placeholder="Secret value"
+                  value=${this.dialogValue}
+                  type="password"
+                  @sl-input=${(e: Event) => {
+                    this.dialogValue = (e.target as HTMLInputElement).value;
+                  }}
+                  required
+                ></sl-input>
+              `}
 
           <div class="dialog-hint">
             <sl-icon name="info-circle"></sl-icon>
