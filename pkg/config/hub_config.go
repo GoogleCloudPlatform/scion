@@ -1034,12 +1034,16 @@ func splitCommaSeparatedKoanfKeys(k *koanf.Koanf) {
 		if !ok {
 			continue
 		}
-		parts := parseCommaSeparatedList(s)
-		sliceVal := make([]interface{}, len(parts))
-		for i, p := range parts {
-			sliceVal[i] = p
+		if strings.Contains(s, ",") {
+			parts := parseCommaSeparatedList(s)
+			sliceVal := make([]interface{}, len(parts))
+			for i, p := range parts {
+				sliceVal[i] = p
+			}
+			_ = k.Load(confmap.Provider(map[string]interface{}{key: sliceVal}, "."), nil)
+		} else {
+			_ = k.Load(confmap.Provider(map[string]interface{}{key: []interface{}{s}}, "."), nil)
 		}
-		_ = k.Load(confmap.Provider(map[string]interface{}{key: sliceVal}, "."), nil)
 	}
 }
 
