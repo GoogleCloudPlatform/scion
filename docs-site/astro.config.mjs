@@ -108,6 +108,7 @@ export default defineConfig({
 						{ label: 'Workspaces & Sharing Modes', slug: 'local/workspaces-and-sharing' },
 						{ label: 'Templates & Roles', slug: 'local/templates' },
 						{ label: 'Skills (Authoring & Publishing)', slug: 'local/skills' },
+						{ label: 'GCP Skill Registry', slug: 'local/skill-registry-gcp' },
 						{ label: 'Agent Credentials', slug: 'local/agent-credentials' },
 						{ label: 'Custom Images', slug: 'local/custom-images' },
 						{ label: 'Tmux Sessions', slug: 'local/tmux' },
