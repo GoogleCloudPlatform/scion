@@ -171,7 +171,7 @@ skills:
 
 The `gcp-skill://` scheme follows the format `gcp-skill://<alias>/<skillId>@<version>`, where:
 
-- **`alias`** — the registry alias configured in your [skill federation settings](/scion/hosted/single-node/skill-registry/)
+- **`alias`** — the registry alias configured in your [skill federation settings](/hosted/single-node/skill-registry/)
 - **`skillId`** — the skill name as registered in GCP
 - **`version`** — an optional version specifier (defaults to latest)
 
