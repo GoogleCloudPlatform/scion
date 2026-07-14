@@ -182,6 +182,9 @@ export class ScionPageProjectSettings extends LitElement {
   private defaultThinkingLevel: number | null = null;
 
   @state()
+  private copiedDefaultSAEmail = false;
+
+  @state()
   private gcpServiceAccounts: GCPServiceAccount[] = [];
 
   // GitHub App integration
@@ -1597,28 +1600,56 @@ export class ScionPageProjectSettings extends LitElement {
                 ? html`
                     <div class="config-field">
                       <label>Service Account</label>
-                      <sl-select
-                        placeholder="Select a verified service account"
-                        clearable
-                        value=${this.configDefaultGCPIdentitySAID}
-                        ?disabled=${!canEdit}
-                        @sl-change=${(e: Event) => {
-                          this.configDefaultGCPIdentitySAID = (e.target as HTMLSelectElement).value;
-                        }}
-                      >
-                        ${this.gcpServiceAccounts.length > 0
-                          ? this.gcpServiceAccounts.map(
-                              (sa) => html`
-                                <sl-option value=${sa.id}>
-                                  ${sa.displayName || sa.email}
-                                  <small>(${sa.email})</small>
-                                </sl-option>
-                              `
-                            )
-                          : html`<sl-option value="" disabled
-                              >No verified service accounts available</sl-option
-                            >`}
-                      </sl-select>
+                      <div style="display: flex; align-items: center; gap: 0.25rem;">
+                        ${this.configDefaultGCPIdentitySAID
+                          ? html`
+                              <sl-tooltip content=${this.copiedDefaultSAEmail ? 'Copied!' : 'Copy email'}>
+                                <sl-icon-button
+                                  name=${this.copiedDefaultSAEmail ? 'clipboard-check' : 'clipboard'}
+                                  label="Copy service account email"
+                                  style="font-size: 1rem;"
+                                  @click=${() => {
+                                    const sa = this.gcpServiceAccounts.find(
+                                      (s) => s.id === this.configDefaultGCPIdentitySAID
+                                    );
+                                    if (sa) {
+                                      void navigator.clipboard.writeText(sa.email).then(() => {
+                                        this.copiedDefaultSAEmail = true;
+                                        setTimeout(() => {
+                                          this.copiedDefaultSAEmail = false;
+                                        }, 1500);
+                                      });
+                                    }
+                                  }}
+                                ></sl-icon-button>
+                              </sl-tooltip>
+                            `
+                          : ''}
+                        <sl-select
+                          style="flex: 1;"
+                          placeholder="Select a verified service account"
+                          clearable
+                          value=${this.configDefaultGCPIdentitySAID}
+                          ?disabled=${!canEdit}
+                          @sl-change=${(e: Event) => {
+                            this.configDefaultGCPIdentitySAID = (e.target as HTMLSelectElement).value;
+                            this.copiedDefaultSAEmail = false;
+                          }}
+                        >
+                          ${this.gcpServiceAccounts.length > 0
+                            ? this.gcpServiceAccounts.map(
+                                (sa) => html`
+                                  <sl-option value=${sa.id}>
+                                    ${sa.displayName || sa.email}
+                                    <small>(${sa.email})</small>
+                                  </sl-option>
+                                `
+                              )
+                            : html`<sl-option value="" disabled
+                                >No verified service accounts available</sl-option
+                              >`}
+                        </sl-select>
+                      </div>
                       <span class="field-help"
                         >The GCP service account to assign to new agents by default. Only verified accounts are shown.</span
                       >

@@ -62,6 +62,9 @@ export class ScionGCPServiceAccountList extends LitElement {
   // Quota info
   @state() private mintQuota: GCPMintQuotaInfo | null = null;
 
+  // Copy-to-clipboard state
+  @state() private copiedEmail: string | null = null;
+
   // Verify-failed dialog state
   @state() private verifyFailedOpen = false;
   @state() private verifyFailedHubEmail = '';
@@ -550,6 +553,18 @@ export class ScionGCPServiceAccountList extends LitElement {
     `;
   }
 
+  private async copyEmail(email: string): Promise<void> {
+    try {
+      await navigator.clipboard.writeText(email);
+      this.copiedEmail = email;
+      setTimeout(() => {
+        this.copiedEmail = null;
+      }, 1500);
+    } catch {
+      // Clipboard unavailable
+    }
+  }
+
   private renderRow(account: GCPServiceAccount) {
     const isDeleting = this.deletingId === account.id;
     const isVerifying = this.verifyingId === account.id;
@@ -566,6 +581,14 @@ export class ScionGCPServiceAccountList extends LitElement {
             </div>
             ${account.email}
             ${account.managed ? html`<span class="managed-badge">Hub-minted</span>` : ''}
+            <sl-tooltip content=${this.copiedEmail === account.email ? 'Copied!' : 'Copy email'}>
+              <sl-icon-button
+                name=${this.copiedEmail === account.email ? 'clipboard-check' : 'clipboard'}
+                label="Copy email"
+                style="font-size: 0.875rem;"
+                @click=${() => this.copyEmail(account.email)}
+              ></sl-icon-button>
+            </sl-tooltip>
           </div>
         </td>
         <td class="hide-mobile">
