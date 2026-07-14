@@ -65,6 +65,11 @@ services:
       type: tcp
       target: "localhost:9222"
       timeout: "10s"
+
+skills:
+  - uri: "skill://scion/global/idea-refine@latest"
+  - uri: "skill://scion/core/scion@^1.0"
+    optional: true
 ```
 
 ### agents.md (Agent Instructions)
@@ -116,6 +121,51 @@ Skill instructions and reference material here.
 During agent provisioning, Scion automatically merges skills from the template into the correct harness-specific location (e.g. `.claude/skills/` for Claude, `.gemini/skills/` for Gemini). The agent's LLM harness discovers and loads these skills at runtime.
 
 Use skills to package domain knowledge, tool-usage patterns, or specialized workflows that a role needs. Skills are portable across harnesses and reusable across templates.
+
+## Registry Skills (URI References)
+
+In addition to local `skills/` directories, templates can declare skill dependencies from the skill bank registry using URI references in `scion-agent.yaml`. These skills are downloaded and installed at provision time.
+
+### URI Format
+
+```
+skill://<registry>/<scope>/<name>@<version>
+```
+
+- **registry**: The registry host (typically `scion`)
+- **scope**: Where the skill lives — `core` (platform skills), `global` (hub-wide), `project/<id>` (project-scoped), or `user/<id>` (user-scoped)
+- **name**: The skill name
+- **version**: Version constraint — an exact version (`1.0.0`), a range (`^1.0`), or `latest`
+
+Examples:
+- `skill://scion/global/idea-refine@latest` — a global-scope skill from the Hub
+- `skill://scion/core/scion@^1.0` — a core platform skill
+- `skill://scion/project/my-custom-skill@1.0.0` — a project-scoped skill
+
+### Declaring Skills in scion-agent.yaml
+
+Add a `skills:` list to `scion-agent.yaml`:
+
+```yaml
+skills:
+  - uri: "skill://scion/global/idea-refine@latest"
+  - uri: "skill://scion/core/scion@^1.0"
+    optional: true        # provisioning succeeds even if this can't be resolved
+  - uri: "skill://scion/global/code-reviewer@latest"
+    as: "review"          # install under a different directory name
+```
+
+Each entry supports three fields:
+- **`uri`** (required): The skill URI
+- **`optional`** (default `false`): When `true`, provisioning continues even if the skill can't be resolved. When `false`, unresolvable skills cause provisioning to fail.
+- **`as`** (optional): Install the skill under a different directory name than its registry name
+
+### When to Use URI References vs Local Skills
+
+- **URI references**: Use for published, shared skills from the skill bank — skills that exist independently of this template and may be updated separately. Good for widely-useful skills like `idea-refine`, domain-specific utilities, or skills maintained by other teams.
+- **Local `skills/` directory**: Use for skills specific to this template's workflow that aren't published to the registry. Also for skills you want to customize beyond what the registry version provides.
+
+If a skill is useful to multiple templates and is published to the registry, reference it by URI rather than copying the `SKILL.md` locally. Local skills take precedence over registry skills of the same name, so you can always override a URI-referenced skill with a local version if needed.
 
 ## The Orchestrator Pattern
 
@@ -173,7 +223,10 @@ For each role, create the template directory with its files. Write worker templa
 
 ### 4. Add Skills When Appropriate
 
-If a role needs specialized domain knowledge or tool-usage patterns that would benefit from being a discrete, reusable skill file rather than inline in `agents.md`, add it to the template's `skills/` directory.
+If a role needs specialized domain knowledge or tool-usage patterns that would benefit from being a discrete, reusable skill file rather than inline in `agents.md`:
+
+- **For skills already published in the registry**: Add a URI reference in `scion-agent.yaml` under `skills:`. This is preferred — it avoids duplicating skill content and picks up registry updates automatically.
+- **For custom skills specific to this template**: Create a `SKILL.md` file in the template's `skills/` directory.
 
 ### 5. Validate
 
@@ -183,6 +236,8 @@ If a role needs specialized domain knowledge or tool-usage patterns that would b
 - [ ] Template directory names are kebab-case
 - [ ] The workflow matches the user's intent
 - [ ] No CLI usage instructions are duplicated in templates
+- [ ] For skills referenced by URI: verify the URI format is correct (`skill://registry/scope/name@version`)
+- [ ] Required skills (non-optional) will cause provisioning to fail if unresolvable — mark skills `optional: true` if the team can function without them
 
 ## Extending an Existing Team
 
@@ -216,3 +271,5 @@ Read the existing templates in `.scion/templates/` to understand:
 - **Don't create `home/` directories** in custom templates. The default template provides all infrastructure.
 - **Template names = directory names**. The `description` in `scion-agent.yaml` is cosmetic; the `--type` value is the directory name.
 - **Skills are harness-portable**. Write `SKILL.md` content without assuming a specific harness — scion mounts skills into the correct location automatically.
+- **URI skills resolve at provision time**. Agents must be connected to a Hub with the skill in its registry. Use `optional: true` for skills that are nice-to-have but not essential.
+- **Local skills take precedence**. If a template's `skills/` directory contains a skill with the same name as a URI-referenced skill, the local version wins.
