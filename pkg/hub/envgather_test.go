@@ -19,6 +19,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -203,9 +204,10 @@ func TestEnvGather_HubDispatch_NeedsGather(t *testing.T) {
 	}
 }
 
-// TestEnvGather_HubDispatch_FinalizeEnv tests that DispatchFinalizeEnv properly
-// sends gathered env to the broker.
-func TestEnvGather_HubDispatch_FinalizeEnv(t *testing.T) {
+// TestEnvGather_HubDispatch_FinalizeEnv_Replay tests that DispatchFinalizeEnv
+// replays a full create request with gathered env merged at highest precedence,
+// instead of calling the legacy broker finalize-env action.
+func TestEnvGather_HubDispatch_FinalizeEnv_Replay(t *testing.T) {
 	ctx := context.Background()
 	memStore := createTestStore(t)
 
@@ -229,6 +231,9 @@ func TestEnvGather_HubDispatch_FinalizeEnv(t *testing.T) {
 		Slug:            "test-agent-3",
 		ProjectID:       tid("project-1"),
 		RuntimeBrokerID: tid("broker-3"),
+		AppliedConfig: &store.AgentAppliedConfig{
+			HarnessConfig: "claude",
+		},
 	}
 
 	gatheredEnv := map[string]string{
@@ -241,11 +246,265 @@ func TestEnvGather_HubDispatch_FinalizeEnv(t *testing.T) {
 		t.Fatalf("DispatchFinalizeEnv failed: %v", err)
 	}
 
-	if !mockClient.finalizeCalled {
-		t.Error("expected FinalizeEnv to be called")
+	// Replay uses CreateAgentWithGather, NOT FinalizeEnv
+	if !mockClient.createWithGatherCalled {
+		t.Error("expected CreateAgentWithGather to be called (replay path)")
 	}
-	if mockClient.lastFinalizeEnv["SECRET"] != "gathered-secret-value" {
-		t.Errorf("expected SECRET=gathered-secret-value, got %q", mockClient.lastFinalizeEnv["SECRET"])
+	if mockClient.finalizeCalled {
+		t.Error("expected FinalizeEnv NOT to be called (legacy path)")
+	}
+
+	// Gathered env should be merged into the request
+	if mockClient.lastCreateReq == nil {
+		t.Fatal("expected CreateReq to be captured")
+	}
+	if mockClient.lastCreateReq.ResolvedEnv["SECRET"] != "gathered-secret-value" {
+		t.Errorf("expected SECRET=gathered-secret-value, got %q", mockClient.lastCreateReq.ResolvedEnv["SECRET"])
+	}
+	if mockClient.lastCreateReq.ResolvedEnv["API_KEY"] != "gathered-api-key" {
+		t.Errorf("expected API_KEY=gathered-api-key, got %q", mockClient.lastCreateReq.ResolvedEnv["API_KEY"])
+	}
+	if !mockClient.lastCreateReq.GatherEnv {
+		t.Error("expected GatherEnv=true in replay request")
+	}
+}
+
+// TestEnvGather_FinalizeReplay_EmptyPendingEnvGather is the #376 regression test:
+// finalize dispatched to a broker whose pendingEnvGather is empty (i.e. a fresh
+// instance that never saw the original create) succeeds because replay carries
+// the full request state.
+func TestEnvGather_FinalizeReplay_EmptyPendingEnvGather(t *testing.T) {
+	ctx := context.Background()
+	memStore := createTestStore(t)
+
+	broker := &store.RuntimeBroker{
+		ID:       tid("broker-ha"),
+		Name:     "ha-broker",
+		Slug:     "ha-broker",
+		Endpoint: "http://localhost:9800",
+		Status:   store.BrokerStatusOnline,
+	}
+	if err := memStore.CreateRuntimeBroker(ctx, broker); err != nil {
+		t.Fatal(err)
+	}
+
+	// Mock simulates a fresh broker instance — CreateAgentWithGather succeeds
+	// because the replay carries everything needed (no pending state lookup).
+	mockClient := &envGatherMockBrokerClient{}
+	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, true, slog.Default())
+
+	agent := &store.Agent{
+		ID:              tid("agent-ha"),
+		Name:            "ha-agent",
+		Slug:            "ha-agent",
+		ProjectID:       tid("project-1"),
+		RuntimeBrokerID: tid("broker-ha"),
+		Phase:           string(state.PhaseProvisioning),
+		AppliedConfig: &store.AgentAppliedConfig{
+			HarnessConfig: "claude",
+		},
+	}
+
+	gatheredEnv := map[string]string{
+		"GEMINI_API_KEY": "gathered-key",
+	}
+
+	err := dispatcher.DispatchFinalizeEnv(ctx, agent, gatheredEnv)
+	if err != nil {
+		t.Fatalf("DispatchFinalizeEnv on fresh broker instance should succeed, got: %v", err)
+	}
+
+	if !mockClient.createWithGatherCalled {
+		t.Error("expected replay via CreateAgentWithGather")
+	}
+	if mockClient.lastCreateReq.ResolvedEnv["GEMINI_API_KEY"] != "gathered-key" {
+		t.Errorf("expected gathered key in request, got %q", mockClient.lastCreateReq.ResolvedEnv["GEMINI_API_KEY"])
+	}
+}
+
+// TestEnvGather_FinalizeReplay_MergePrecedence tests that CLI-gathered values
+// override storage-resolved values for the same key, and that a nil ResolvedEnv
+// doesn't panic.
+func TestEnvGather_FinalizeReplay_MergePrecedence(t *testing.T) {
+	ctx := context.Background()
+	memStore := createTestStore(t)
+
+	broker := &store.RuntimeBroker{
+		ID:       tid("broker-prec"),
+		Name:     "prec-broker",
+		Slug:     "prec-broker",
+		Endpoint: "http://localhost:9800",
+		Status:   store.BrokerStatusOnline,
+	}
+	if err := memStore.CreateRuntimeBroker(ctx, broker); err != nil {
+		t.Fatal(err)
+	}
+
+	// Store an env var in project scope — this will be in ResolvedEnv from buildCreateRequest
+	project := &store.Project{ID: tid("project-prec"), Name: "prec-project", Slug: "prec-project"}
+	if err := memStore.CreateProject(ctx, project); err != nil {
+		t.Fatal(err)
+	}
+	if err := memStore.CreateEnvVar(ctx, &store.EnvVar{
+		ID: tid("env-prec-1"), Key: "API_KEY", Value: "storage-value",
+		Scope: "project", ScopeID: tid("project-prec"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	mockClient := &envGatherMockBrokerClient{}
+	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, true, slog.Default())
+
+	agent := &store.Agent{
+		ID:              tid("agent-prec"),
+		Name:            "prec-agent",
+		Slug:            "prec-agent",
+		ProjectID:       tid("project-prec"),
+		RuntimeBrokerID: tid("broker-prec"),
+		AppliedConfig: &store.AgentAppliedConfig{
+			HarnessConfig: "claude",
+		},
+	}
+
+	gatheredEnv := map[string]string{
+		"API_KEY": "cli-gathered-value",
+	}
+
+	err := dispatcher.DispatchFinalizeEnv(ctx, agent, gatheredEnv)
+	if err != nil {
+		t.Fatalf("DispatchFinalizeEnv failed: %v", err)
+	}
+
+	// CLI-gathered value should win over storage-resolved value
+	if mockClient.lastCreateReq.ResolvedEnv["API_KEY"] != "cli-gathered-value" {
+		t.Errorf("expected CLI-gathered value to win, got %q", mockClient.lastCreateReq.ResolvedEnv["API_KEY"])
+	}
+}
+
+// TestEnvGather_FinalizeReplay_StillMissing tests that when the replay returns 202
+// with remaining Needs, the dispatcher returns ErrEnvStillMissing and the handler
+// responds with a structured missing-env response.
+func TestEnvGather_FinalizeReplay_StillMissing(t *testing.T) {
+	ctx := context.Background()
+	memStore := createTestStore(t)
+
+	broker := &store.RuntimeBroker{
+		ID:       tid("broker-still"),
+		Name:     "still-broker",
+		Slug:     "still-broker",
+		Endpoint: "http://localhost:9800",
+		Status:   store.BrokerStatusOnline,
+	}
+	if err := memStore.CreateRuntimeBroker(ctx, broker); err != nil {
+		t.Fatal(err)
+	}
+
+	// Mock broker returns 202 with remaining needs
+	mockClient := &envGatherMockBrokerClient{
+		gatherReturnEnvReqs: &RemoteEnvRequirementsResponse{
+			AgentID:  tid("agent-still"),
+			Required: []string{"KEY_A", "KEY_B"},
+			HubHas:   []string{"KEY_A"},
+			Needs:    []string{"KEY_B"},
+		},
+	}
+	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, true, slog.Default())
+
+	agent := &store.Agent{
+		ID:              tid("agent-still"),
+		Name:            "still-agent",
+		Slug:            "still-agent",
+		ProjectID:       tid("project-1"),
+		RuntimeBrokerID: tid("broker-still"),
+		AppliedConfig: &store.AgentAppliedConfig{
+			HarnessConfig: "claude",
+		},
+	}
+
+	err := dispatcher.DispatchFinalizeEnv(ctx, agent, map[string]string{"KEY_A": "val"})
+	if err == nil {
+		t.Fatal("expected ErrEnvStillMissing, got nil")
+	}
+
+	var stillMissing *ErrEnvStillMissing
+	if !errors.As(err, &stillMissing) {
+		t.Fatalf("expected *ErrEnvStillMissing, got %T: %v", err, err)
+	}
+	if len(stillMissing.Requirements.Needs) != 1 || stillMissing.Requirements.Needs[0] != "KEY_B" {
+		t.Errorf("expected Needs=[KEY_B], got %v", stillMissing.Requirements.Needs)
+	}
+}
+
+// TestEnvGather_FinalizeReplay_StillMissing_Handler tests the full HTTP handler path
+// when replay returns still-missing keys: the handler returns 422 with a structured response.
+func TestEnvGather_FinalizeReplay_StillMissing_Handler(t *testing.T) {
+	srv, st := testServer(t)
+	ctx := context.Background()
+
+	project := &store.Project{ID: tid("project-still-h"), Name: "still-h-project", Slug: "still-h-project"}
+	if err := st.CreateProject(ctx, project); err != nil {
+		t.Fatal(err)
+	}
+
+	broker := &store.RuntimeBroker{
+		ID: tid("broker-still-h"), Name: "still-h-broker", Slug: "still-h-broker",
+		Endpoint: "http://localhost:9800", Status: store.BrokerStatusOnline,
+	}
+	if err := st.CreateRuntimeBroker(ctx, broker); err != nil {
+		t.Fatal(err)
+	}
+
+	agent := &store.Agent{
+		ID:              tid("agent-still-h"),
+		Name:            "still-h-agent",
+		Slug:            "still-h-agent",
+		ProjectID:       tid("project-still-h"),
+		RuntimeBrokerID: tid("broker-still-h"),
+		Phase:           string(state.PhaseProvisioning),
+		AppliedConfig:   &store.AgentAppliedConfig{HarnessConfig: "claude"},
+	}
+	if err := st.CreateAgent(ctx, agent); err != nil {
+		t.Fatal(err)
+	}
+
+	// Mock returns 202 with remaining needs on CreateAgentWithGather (the replay path)
+	mockClient := &envGatherMockBrokerClient{
+		gatherReturnEnvReqs: &RemoteEnvRequirementsResponse{
+			AgentID:  tid("agent-still-h"),
+			Required: []string{"KEY_A", "KEY_B"},
+			HubHas:   []string{"KEY_A"},
+			Needs:    []string{"KEY_B"},
+		},
+	}
+	dispatcher := NewHTTPAgentDispatcherWithClient(st, mockClient, true, slog.Default())
+	srv.SetDispatcher(dispatcher)
+
+	reqBody := map[string]interface{}{
+		"env": map[string]string{"KEY_A": "val-a"},
+	}
+
+	path := fmt.Sprintf("/api/v1/projects/%s/agents/still-h-agent/env", tid("project-still-h"))
+	rec := doRequest(t, srv, http.MethodPost, path, reqBody)
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("expected 422, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var errResp ErrorResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &errResp); err != nil {
+		t.Fatal("failed to decode error response:", err)
+	}
+	if errResp.Error.Code != ErrCodeMissingEnvVars {
+		t.Errorf("expected error code %q, got %q", ErrCodeMissingEnvVars, errResp.Error.Code)
+	}
+
+	// Agent should still be in provisioning (not promoted to running)
+	updated, err := st.GetAgent(ctx, tid("agent-still-h"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Phase != string(state.PhaseProvisioning) {
+		t.Errorf("expected agent to stay in provisioning, got %q", updated.Phase)
 	}
 }
 
@@ -462,12 +721,16 @@ func TestEnvGather_HubHandler_SubmitEnv(t *testing.T) {
 		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	if !mockClient.finalizeCalled {
-		t.Error("expected FinalizeEnv to be called on broker")
+	// Replay path: should use CreateAgentWithGather, not FinalizeEnv
+	if !mockClient.createWithGatherCalled {
+		t.Error("expected CreateAgentWithGather to be called (replay path)")
 	}
 
-	if mockClient.lastFinalizeEnv["GEMINI_API_KEY"] != "test-api-key-value" {
-		t.Errorf("expected GEMINI_API_KEY=test-api-key-value, got %q", mockClient.lastFinalizeEnv["GEMINI_API_KEY"])
+	if mockClient.lastCreateReq == nil {
+		t.Fatal("expected CreateReq to be captured")
+	}
+	if mockClient.lastCreateReq.ResolvedEnv["GEMINI_API_KEY"] != "test-api-key-value" {
+		t.Errorf("expected GEMINI_API_KEY=test-api-key-value, got %q", mockClient.lastCreateReq.ResolvedEnv["GEMINI_API_KEY"])
 	}
 
 	// Agent should be updated to running

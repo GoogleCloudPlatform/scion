@@ -923,7 +923,20 @@ func (d *HTTPAgentDispatcher) deferredCreateWithGather(ctx context.Context, agen
 	return cr.EnvRequirements, nil
 }
 
-// DispatchFinalizeEnv sends gathered env vars to the broker to complete agent creation.
+// ErrEnvStillMissing is returned when a replay-based finalize discovers that
+// required env keys are still unsatisfied after merging CLI-gathered values.
+type ErrEnvStillMissing struct {
+	Requirements *RemoteEnvRequirementsResponse
+}
+
+func (e *ErrEnvStillMissing) Error() string {
+	return fmt.Sprintf("env still missing after finalize: %v", e.Requirements.Needs)
+}
+
+// DispatchFinalizeEnv replays a full create request with CLI-gathered env merged
+// at highest precedence, instead of calling the broker's stateful finalize-env
+// action. This makes the finalize HA-safe: the replay can land on any broker
+// replica because it carries the complete request state.
 func (d *HTTPAgentDispatcher) DispatchFinalizeEnv(ctx context.Context, agent *store.Agent, env map[string]string) error {
 	if err := requireRuntimeBrokerAssigned(agent); err != nil {
 		return err
@@ -934,12 +947,36 @@ func (d *HTTPAgentDispatcher) DispatchFinalizeEnv(ctx context.Context, agent *st
 		return err
 	}
 
-	resp, err := d.client.FinalizeEnv(ctx, agent.RuntimeBrokerID, endpoint, agent.ID, env)
+	req, err := d.buildCreateRequest(ctx, agent, "DispatchFinalizeEnv")
+	if err != nil {
+		return err
+	}
+	req.GatherEnv = true
+
+	if req.ResolvedEnv == nil {
+		req.ResolvedEnv = map[string]string{}
+	}
+	for k, v := range env {
+		req.ResolvedEnv[k] = v
+	}
+
+	req.EnvSources = d.buildEnvSources(ctx, agent, req.ResolvedEnv)
+
+	resp, envReqs, err := d.client.CreateAgentWithGather(ctx, agent.RuntimeBrokerID, endpoint, req)
+	if isHashMismatchError(err) {
+		if repairErr := d.repairHashMismatch(ctx, agent, err); repairErr == nil {
+			resp, envReqs, err = d.client.CreateAgentWithGather(ctx, agent.RuntimeBrokerID, endpoint, req)
+		}
+	}
 	if errors.Is(err, ErrLifecycleDeferred) {
 		return d.deferredFinalizeEnv(ctx, agent, env)
 	}
 	if err != nil {
 		return err
+	}
+
+	if envReqs != nil && len(envReqs.Needs) > 0 {
+		return &ErrEnvStillMissing{Requirements: envReqs}
 	}
 
 	if resp != nil {

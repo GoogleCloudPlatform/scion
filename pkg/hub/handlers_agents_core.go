@@ -1146,6 +1146,12 @@ func (s *Server) submitAgentEnv(w http.ResponseWriter, r *http.Request, projectI
 	}
 
 	if err := dispatcher.DispatchFinalizeEnv(ctx, agent, req.Env); err != nil {
+		var stillMissing *ErrEnvStillMissing
+		if errors.As(err, &stillMissing) {
+			MissingEnvVars(w, stillMissing.Requirements.Needs,
+				s.buildEnvGatherResponse(ctx, agent, stillMissing.Requirements))
+			return
+		}
 		RuntimeError(w, "Failed to finalize env on runtime broker: "+err.Error())
 		return
 	}
