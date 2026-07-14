@@ -502,21 +502,6 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			}
 
 			if len(needs) > 0 {
-				// Store pending state for finalize-env
-				s.pendingEnvGatherMu.Lock()
-				now := time.Now()
-				s.cleanupExpiredPendingLocked(now)
-				s.upsertPendingState(&pendingAgentState{
-					AgentID:   agentKey,
-					Request:   &req,
-					MergedEnv: env,
-					CreatedAt: now,
-					UpdatedAt: now,
-					State:     pendingStatePending,
-					RequestID: req.RequestID,
-				})
-				s.pendingEnvGatherMu.Unlock()
-
 				if s.config.Debug {
 					s.envSecretLog.Debug("Env-gather: returning 202 with requirements",
 						"required", required,
@@ -1184,8 +1169,6 @@ func (s *Server) handleAgentAction(w http.ResponseWriter, r *http.Request, id, p
 		s.getStats(w, r, id, projectID)
 	case api.AgentActionHasPrompt:
 		s.checkAgentPrompt(w, r, id, projectID)
-	case api.AgentActionFinalizeEnv:
-		s.finalizeEnv(w, r, id)
 	}
 }
 
@@ -2344,123 +2327,6 @@ func (s *Server) resolveHarnessConfigForEnvGather(req CreateAgentRequest, settin
 		return ""
 	}
 	return res.Name
-}
-
-// finalizeEnv handles the second phase of env-gather: receiving gathered env vars
-// from the Hub and starting the agent with the complete environment.
-func (s *Server) finalizeEnv(w http.ResponseWriter, r *http.Request, id string) {
-	ctx := r.Context()
-
-	var req FinalizeEnvRequest
-	if err := readJSON(r, &req); err != nil {
-		BadRequest(w, "Invalid request body: "+err.Error())
-		return
-	}
-
-	// Look up pending state
-	s.pendingEnvGatherMu.Lock()
-	s.cleanupExpiredPendingLocked(time.Now())
-	pending, ok := s.pendingEnvGather[id]
-	if ok && pending.State == pendingStateFinalizing {
-		s.pendingEnvGatherMu.Unlock()
-		writeError(w, http.StatusConflict, ErrCodeConflict, "agent finalize-env already in progress", map[string]interface{}{
-			"agentId": id,
-		})
-		return
-	}
-	if ok {
-		pending.State = pendingStateFinalizing
-		pending.UpdatedAt = time.Now()
-		pending.FinalizeRuns++
-		s.upsertPendingState(pending)
-	}
-	s.pendingEnvGatherMu.Unlock()
-
-	if !ok {
-		NotFound(w, "Pending agent")
-		return
-	}
-
-	// Merge gathered env into the previously merged env
-	for k, v := range req.Env {
-		pending.MergedEnv[k] = v
-	}
-
-	if s.config.Debug {
-		s.envSecretLog.Debug("Finalize-env: merging gathered env", "gatheredKeys", len(req.Env), "totalEnv", len(pending.MergedEnv))
-	}
-
-	origReq := pending.Request
-
-	// Build unified start context from the original pending request + merged env
-	sc, err := s.buildStartContext(ctx, startContextInputs{
-		Name:            origReq.Name,
-		AgentID:         origReq.ID,
-		Slug:            origReq.Slug,
-		ProjectPath:     origReq.ProjectPath,
-		ProjectSlug:     origReq.ProjectSlug,
-		ProjectID:       origReq.ProjectID,
-		Config:          origReq.Config,
-		InlineConfig:    origReq.InlineConfig,
-		SharedDirs:      origReq.SharedDirs,
-		HubEndpoint:     origReq.HubEndpoint,
-		AgentToken:      origReq.AgentToken,
-		CreatorName:     origReq.CreatorName,
-		ResolvedEnv:     pending.MergedEnv,
-		ResolvedSecrets: origReq.ResolvedSecrets,
-		NoAuth:          origReq.NoAuth,
-		Attach:          origReq.Attach,
-		HTTPRequest:     r,
-	})
-	if err != nil {
-		TemplateError(w, err.Error())
-		return
-	}
-	opts := sc.Opts
-
-	if s.config.Debug {
-		s.envSecretLog.Debug("Finalize-env: StartOptions built from pending request",
-			"name", opts.Name,
-			"projectPath", opts.ProjectPath,
-			"template", opts.Template,
-			"image", opts.Image,
-			"profile", opts.Profile,
-			"harnessConfig", opts.HarnessConfig,
-			"hasConfig", origReq.Config != nil,
-		)
-	}
-
-	// Start the agent
-	agentInfo, err := sc.Manager.Start(ctx, opts)
-	if err != nil {
-		// Keep pending state for retry on transient start failures.
-		s.pendingEnvGatherMu.Lock()
-		if cur, exists := s.pendingEnvGather[id]; exists {
-			cur.State = pendingStatePending
-			cur.UpdatedAt = time.Now()
-			s.upsertPendingState(cur)
-		}
-		s.pendingEnvGatherMu.Unlock()
-		RuntimeError(w, "Failed to create agent: "+err.Error())
-		return
-	}
-
-	s.pendingEnvGatherMu.Lock()
-	s.deletePendingState(id)
-	s.pendingEnvGatherMu.Unlock()
-
-	s.agentLifecycleLog.Info("Agent created (finalize-env)",
-		"agent_id", origReq.ID, "project_id", origReq.ProjectID,
-		"name", origReq.Name, "slug", origReq.Slug,
-		"phase", string(state.PhaseRunning),
-		"container_status", agentInfo.ContainerStatus)
-
-	resp := CreateAgentResponse{
-		Agent:   agentInfoPtr(AgentInfoToResponse(*agentInfo)),
-		Created: true,
-	}
-
-	writeJSON(w, http.StatusCreated, resp)
 }
 
 // resolveManagerForAgent returns the appropriate agent.Manager for an existing

@@ -391,27 +391,6 @@ func (t *brokerHTTPTransport) CreateAgentWithGather(ctx context.Context, brokerI
 	return &result, nil, nil
 }
 
-func (t *brokerHTTPTransport) FinalizeEnv(ctx context.Context, brokerID, brokerEndpoint, agentID string, env map[string]string) (*RemoteAgentResponse, error) {
-	endpoint := fmt.Sprintf("%s/api/v1/agents/%s/finalize-env", strings.TrimSuffix(brokerEndpoint, "/"), url.PathEscape(agentID))
-	body, err := json.Marshal(map[string]interface{}{"env": env})
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal request: %w", err)
-	}
-	resp, err := t.doRequest(ctx, brokerID, http.MethodPost, endpoint, body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to send request: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode >= 400 {
-		return nil, brokerHTTPError(resp)
-	}
-	var result RemoteAgentResponse
-	if err := t.decodeResponse(resp, &result); err != nil {
-		return nil, err
-	}
-	return &result, nil
-}
-
 func (t *brokerHTTPTransport) GetAgentLogs(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, tail int) (string, error) {
 	endpoint := fmt.Sprintf("%s/api/v1/agents/%s/logs", strings.TrimSuffix(brokerEndpoint, "/"), url.PathEscape(agentID))
 	sep := "?"

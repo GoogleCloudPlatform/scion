@@ -25,14 +25,10 @@ import (
 )
 
 const (
-	pendingStatePending    = "pending"
-	pendingStateFinalizing = "finalizing"
-
 	dispatchAttemptInProgress = "in_progress"
 	dispatchAttemptSucceeded  = "succeeded"
 	dispatchAttemptFailed     = "failed"
 
-	pendingStateTTL    = 24 * time.Hour
 	dispatchAttemptTTL = 24 * time.Hour
 )
 
@@ -40,14 +36,8 @@ func (s *Server) initStateStore() error {
 	if s.stateDir == "" {
 		return nil
 	}
-	if err := os.MkdirAll(s.pendingStateDir(), 0755); err != nil {
-		return fmt.Errorf("create pending state dir: %w", err)
-	}
 	if err := os.MkdirAll(s.dispatchAttemptDir(), 0755); err != nil {
 		return fmt.Errorf("create dispatch attempt dir: %w", err)
-	}
-	if err := s.loadPendingState(); err != nil {
-		return fmt.Errorf("load pending state: %w", err)
 	}
 	if err := s.loadDispatchAttempts(); err != nil {
 		return fmt.Errorf("load dispatch attempts: %w", err)
@@ -55,63 +45,12 @@ func (s *Server) initStateStore() error {
 	return nil
 }
 
-func (s *Server) pendingStateDir() string {
-	return filepath.Join(s.stateDir, "pending-env")
-}
-
 func (s *Server) dispatchAttemptDir() string {
 	return filepath.Join(s.stateDir, "dispatch-attempts")
 }
 
-func (s *Server) pendingStatePath(agentID string) string {
-	return filepath.Join(s.pendingStateDir(), agentID+".json")
-}
-
 func (s *Server) dispatchAttemptPath(requestID string) string {
 	return filepath.Join(s.dispatchAttemptDir(), requestID+".json")
-}
-
-func (s *Server) loadPendingState() error {
-	entries, err := os.ReadDir(s.pendingStateDir())
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil
-		}
-		return err
-	}
-	now := time.Now()
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
-			continue
-		}
-		p := filepath.Join(s.pendingStateDir(), e.Name())
-		raw, err := os.ReadFile(p)
-		if err != nil {
-			continue
-		}
-		var st pendingAgentState
-		if err := json.Unmarshal(raw, &st); err != nil {
-			continue
-		}
-		if st.AgentID == "" {
-			st.AgentID = strings.TrimSuffix(e.Name(), ".json")
-		}
-		if st.CreatedAt.IsZero() {
-			st.CreatedAt = now
-		}
-		if st.UpdatedAt.IsZero() {
-			st.UpdatedAt = st.CreatedAt
-		}
-		if st.State == "" {
-			st.State = pendingStatePending
-		}
-		if now.Sub(st.UpdatedAt) > pendingStateTTL {
-			_ = os.Remove(p)
-			continue
-		}
-		s.pendingEnvGather[st.AgentID] = &st
-	}
-	return nil
 }
 
 func (s *Server) loadDispatchAttempts() error {
@@ -164,34 +103,6 @@ func (s *Server) writeJSONFile(path string, v interface{}) error {
 		return err
 	}
 	return os.Rename(tmp, path)
-}
-
-func (s *Server) upsertPendingState(st *pendingAgentState) {
-	if st == nil || st.AgentID == "" {
-		return
-	}
-	if st.UpdatedAt.IsZero() {
-		st.UpdatedAt = time.Now()
-	}
-	s.pendingEnvGather[st.AgentID] = st
-	if s.stateDir != "" {
-		_ = s.writeJSONFile(s.pendingStatePath(st.AgentID), st)
-	}
-}
-
-func (s *Server) deletePendingState(agentID string) {
-	delete(s.pendingEnvGather, agentID)
-	if s.stateDir != "" {
-		_ = os.Remove(s.pendingStatePath(agentID))
-	}
-}
-
-func (s *Server) cleanupExpiredPendingLocked(now time.Time) {
-	for id, st := range s.pendingEnvGather {
-		if now.Sub(st.UpdatedAt) > pendingStateTTL {
-			s.deletePendingState(id)
-		}
-	}
 }
 
 func (s *Server) beginCreateAttempt(requestID, agentID string) (*dispatchAttempt, *dispatchAttempt) {

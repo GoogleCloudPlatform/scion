@@ -36,10 +36,7 @@ type envGatherMockBrokerClient struct {
 
 	// Env-gather fields
 	createWithGatherCalled bool
-	finalizeCalled         bool
 	gatherReturnEnvReqs    *RemoteEnvRequirementsResponse
-	lastFinalizeAgentID    string
-	lastFinalizeEnv        map[string]string
 }
 
 func (m *envGatherMockBrokerClient) CreateAgentWithGather(ctx context.Context, brokerID, brokerEndpoint string, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error) {
@@ -63,23 +60,6 @@ func (m *envGatherMockBrokerClient) CreateAgentWithGather(ctx context.Context, b
 		},
 		Created: true,
 	}, nil, nil
-}
-
-func (m *envGatherMockBrokerClient) FinalizeEnv(ctx context.Context, brokerID, brokerEndpoint, agentID string, env map[string]string) (*RemoteAgentResponse, error) {
-	m.finalizeCalled = true
-	m.lastFinalizeAgentID = agentID
-	m.lastFinalizeEnv = env
-	if m.returnErr != nil {
-		return nil, m.returnErr
-	}
-	return &RemoteAgentResponse{
-		Agent: &RemoteAgentInfo{
-			ID:     agentID,
-			Name:   agentID,
-			Status: "running",
-		},
-		Created: true,
-	}, nil
 }
 
 // TestEnvGather_HubDispatch_AllSatisfied tests that when env-gather is enabled
@@ -246,12 +226,9 @@ func TestEnvGather_HubDispatch_FinalizeEnv_Replay(t *testing.T) {
 		t.Fatalf("DispatchFinalizeEnv failed: %v", err)
 	}
 
-	// Replay uses CreateAgentWithGather, NOT FinalizeEnv
+	// Replay uses CreateAgentWithGather
 	if !mockClient.createWithGatherCalled {
 		t.Error("expected CreateAgentWithGather to be called (replay path)")
-	}
-	if mockClient.finalizeCalled {
-		t.Error("expected FinalizeEnv NOT to be called (legacy path)")
 	}
 
 	// Gathered env should be merged into the request

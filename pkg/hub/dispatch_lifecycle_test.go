@@ -193,25 +193,6 @@ func TestHybridBrokerClient_CreateAgentWithGather_RouteGate(t *testing.T) {
 	})
 }
 
-func TestHybridBrokerClient_FinalizeEnv_RouteGate(t *testing.T) {
-	const remoteBroker = "broker-remote"
-
-	mgr := NewControlChannelManager(DefaultControlChannelConfig(), slog.Default())
-	c := NewHybridBrokerClient(mgr, &fakeHTTPClient{}, nil, false)
-
-	t.Run("routeForward returns ErrLifecycleDeferred", func(t *testing.T) {
-		c.SetAffinityLookup(func(context.Context, string) (string, bool) { return "hubA", true })
-		_, err := c.FinalizeEnv(context.Background(), remoteBroker, "", "a1", nil)
-		assert.ErrorIs(t, err, ErrLifecycleDeferred)
-	})
-
-	t.Run("routeUndeliverable returns ErrLifecycleDeferred", func(t *testing.T) {
-		c.SetAffinityLookup(func(context.Context, string) (string, bool) { return "", false })
-		_, err := c.FinalizeEnv(context.Background(), remoteBroker, "", "a1", nil)
-		assert.ErrorIs(t, err, ErrLifecycleDeferred)
-	})
-}
-
 // =========================================================================
 // B4-3/B4-4: Dispatch args round-trip
 // =========================================================================

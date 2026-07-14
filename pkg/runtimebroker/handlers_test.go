@@ -24,7 +24,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -2031,59 +2030,6 @@ func TestCreateAgentWithGitCloneAndBranch(t *testing.T) {
 	}
 	if got := mgr.lastEnv["SCION_GIT_BRANCH"]; got != "main" {
 		t.Errorf("expected SCION_GIT_BRANCH='main', got %q", got)
-	}
-}
-
-func TestFinalizeEnvPassesAgentBranch(t *testing.T) {
-	srv, mgr := newTestServerWithGitCloneCapture()
-	agentID := "test-finalize-branch-id"
-
-	// Seed pending env-gather state with a branch and gitClone config
-	srv.pendingEnvGatherMu.Lock()
-	srv.pendingEnvGather[agentID] = &pendingAgentState{
-		AgentID: agentID,
-		Request: &CreateAgentRequest{
-			Name:        "finalize-branch-agent",
-			ProjectPath: "",
-			Config: &CreateAgentConfig{
-				Template: "claude",
-				Branch:   "my-feature",
-				GitClone: &api.GitCloneConfig{
-					URL:    "https://github.com/example/repo.git",
-					Branch: "main",
-					Depth:  1,
-				},
-			},
-		},
-		MergedEnv: map[string]string{},
-		CreatedAt: time.Now(),
-		UpdatedAt: time.Now(),
-		State:     pendingStatePending,
-	}
-	srv.pendingEnvGatherMu.Unlock()
-
-	body := `{"env": {"GEMINI_API_KEY": "test-key"}}`
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+agentID+"/finalize-env", strings.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-
-	srv.Handler().ServeHTTP(w, req)
-
-	if w.Code != http.StatusCreated {
-		t.Fatalf("expected status %d, got %d: %s", http.StatusCreated, w.Code, w.Body.String())
-	}
-
-	if mgr.lastEnv == nil {
-		t.Fatal("expected environment variables to be set, got nil")
-	}
-	if got := mgr.lastEnv["SCION_AGENT_BRANCH"]; got != "my-feature" {
-		t.Errorf("expected SCION_AGENT_BRANCH='my-feature', got %q", got)
-	}
-	if got := mgr.lastEnv["SCION_GIT_BRANCH"]; got != "main" {
-		t.Errorf("expected SCION_GIT_BRANCH='main', got %q", got)
-	}
-	if got := mgr.lastEnv["SCION_GIT_CLONE_URL"]; got != "https://github.com/example/repo.git" {
-		t.Errorf("expected SCION_GIT_CLONE_URL set, got %q", got)
 	}
 }
 

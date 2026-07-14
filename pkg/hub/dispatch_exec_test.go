@@ -701,13 +701,6 @@ func (c *deferredDataOpTestClient) CheckAgentPrompt(_ context.Context, brokerID,
 	return false, nil
 }
 
-func (c *deferredDataOpTestClient) FinalizeEnv(_ context.Context, brokerID, _, _ string, _ map[string]string) (*RemoteAgentResponse, error) {
-	if brokerID != c.localBroker {
-		return nil, ErrLifecycleDeferred
-	}
-	return nil, nil
-}
-
 func (c *deferredDataOpTestClient) CreateAgentWithGather(_ context.Context, brokerID, _ string, _ *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error) {
 	if brokerID != c.localBroker {
 		return nil, nil, ErrLifecycleDeferred

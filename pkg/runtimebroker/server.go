@@ -210,11 +210,6 @@ type Server struct {
 	credLastScan    time.Time
 	credWatcherStop chan struct{}
 
-	// Pending env-gather state: agents waiting for env var submission.
-	// Keyed by immutable agent ID.
-	pendingEnvGather   map[string]*pendingAgentState
-	pendingEnvGatherMu sync.Mutex
-
 	// dispatchAttempts tracks request-id based create-attempt state for
 	// idempotency and auditability.
 	dispatchAttempts   map[string]*dispatchAttempt
@@ -256,18 +251,6 @@ type auxiliaryRuntime struct {
 	Manager agent.Manager
 }
 
-// pendingAgentState holds the partial state for an agent waiting on env-gather.
-type pendingAgentState struct {
-	AgentID      string
-	Request      *CreateAgentRequest
-	MergedEnv    map[string]string
-	CreatedAt    time.Time
-	UpdatedAt    time.Time
-	State        string
-	RequestID    string
-	FinalizeRuns int
-}
-
 type dispatchAttempt struct {
 	RequestID  string
 	Operation  string
@@ -299,7 +282,6 @@ func New(cfg ServerConfig, mgr agent.Manager, rt scionrt.Runtime) *Server {
 		startTime:         time.Now(),
 		version:           "0.1.0", // TODO: Get from build info
 		hubConnections:    make(map[string]*HubConnection),
-		pendingEnvGather:  make(map[string]*pendingAgentState),
 		dispatchAttempts:  make(map[string]*dispatchAttempt),
 		auxiliaryRuntimes: make(map[string]auxiliaryRuntime),
 

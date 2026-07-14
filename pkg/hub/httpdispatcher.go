@@ -93,10 +93,6 @@ func (c *HTTPRuntimeBrokerClient) CreateAgentWithGather(ctx context.Context, bro
 	return c.transport.CreateAgentWithGather(ctx, brokerID, brokerEndpoint, req)
 }
 
-func (c *HTTPRuntimeBrokerClient) FinalizeEnv(ctx context.Context, brokerID, brokerEndpoint, agentID string, env map[string]string) (*RemoteAgentResponse, error) {
-	return c.transport.FinalizeEnv(ctx, brokerID, brokerEndpoint, agentID, env)
-}
-
 func (c *HTTPRuntimeBrokerClient) GetAgentLogs(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, tail int) (string, error) {
 	return c.transport.GetAgentLogs(ctx, brokerID, brokerEndpoint, agentID, projectID, tail)
 }

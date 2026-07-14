@@ -418,31 +418,6 @@ func (c *ControlChannelBrokerClient) DeleteImage(ctx context.Context, brokerID, 
 	return err
 }
 
-// FinalizeEnv sends gathered env vars to a broker to complete agent creation via control channel.
-func (c *ControlChannelBrokerClient) FinalizeEnv(ctx context.Context, brokerID, brokerEndpoint, agentID string, env map[string]string) (*RemoteAgentResponse, error) {
-	_ = brokerEndpoint
-	path := fmt.Sprintf("/api/v1/agents/%s/finalize-env", url.PathEscape(agentID))
-
-	body, err := json.Marshal(map[string]interface{}{
-		"env": env,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal request: %w", err)
-	}
-
-	resp, err := c.doRequest(ctx, brokerID, "POST", path, "", body)
-	if err != nil {
-		return nil, err
-	}
-
-	var result RemoteAgentResponse
-	if err := json.Unmarshal(resp.Body, &result); err != nil {
-		return nil, fmt.Errorf("failed to decode response: %w", err)
-	}
-
-	return &result, nil
-}
-
 // doRequestRaw tunnels an HTTP request through the control channel without
 // treating non-2xx status codes as errors. Callers are responsible for
 // inspecting resp.StatusCode themselves.
@@ -746,17 +721,3 @@ func (c *HybridBrokerClient) DeleteImage(ctx context.Context, brokerID, brokerEn
 	return fmt.Errorf("HTTP client does not support image delete")
 }
 
-// FinalizeEnv sends gathered env vars to a broker, using route() to decide the
-// delivery path. routeLocal uses the control-channel tunnel, routeHTTP falls
-// back to HTTP, and routeForward/routeUndeliverable return ErrLifecycleDeferred
-// so the caller can write durable intent + wait.
-func (c *HybridBrokerClient) FinalizeEnv(ctx context.Context, brokerID, brokerEndpoint, agentID string, env map[string]string) (*RemoteAgentResponse, error) {
-	switch c.route(ctx, brokerID, brokerEndpoint) {
-	case routeLocal:
-		return c.controlChannel.FinalizeEnv(ctx, brokerID, brokerEndpoint, agentID, env)
-	case routeHTTP:
-		return c.httpClient.FinalizeEnv(ctx, brokerID, brokerEndpoint, agentID, env)
-	default:
-		return nil, ErrLifecycleDeferred
-	}
-}

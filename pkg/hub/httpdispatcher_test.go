@@ -175,12 +175,6 @@ func (m *mockRuntimeBrokerClient) CheckAgentPrompt(ctx context.Context, brokerID
 	return false, m.returnErr
 }
 
-func (m *mockRuntimeBrokerClient) FinalizeEnv(ctx context.Context, brokerID, brokerEndpoint, agentID string, env map[string]string) (*RemoteAgentResponse, error) {
-	return &RemoteAgentResponse{
-		Agent: &RemoteAgentInfo{ID: agentID, Name: agentID, Phase: string(state.PhaseRunning)},
-	}, m.returnErr
-}
-
 func (m *mockRuntimeBrokerClient) GetAgentLogs(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, tail int) (string, error) {
 	return "", nil
 }

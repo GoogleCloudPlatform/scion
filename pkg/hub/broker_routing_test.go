@@ -72,9 +72,6 @@ func (f *fakeHTTPClient) CheckAgentPrompt(context.Context, string, string, strin
 func (f *fakeHTTPClient) CreateAgentWithGather(context.Context, string, string, *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error) {
 	return nil, nil, nil
 }
-func (f *fakeHTTPClient) FinalizeEnv(context.Context, string, string, string, map[string]string) (*RemoteAgentResponse, error) {
-	return nil, nil
-}
 func (f *fakeHTTPClient) GetAgentLogs(context.Context, string, string, string, string, int) (string, error) {
 	return "", nil
 }

@@ -364,10 +364,6 @@ type RuntimeBrokerClient interface {
 	// projectID scopes the lookup to a specific project (required for uniqueness).
 	CheckAgentPrompt(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string) (bool, error)
 
-	// FinalizeEnv sends gathered env vars to a broker to complete agent creation
-	// after an initial 202 env-gather response.
-	FinalizeEnv(ctx context.Context, brokerID, brokerEndpoint, agentID string, env map[string]string) (*RemoteAgentResponse, error)
-
 	// CreateAgentWithGather creates an agent and handles 202 env-gather responses.
 	// Returns (response, nil, nil) on success, (nil, envReqs, nil) on 202, or (nil, nil, err) on error.
 	CreateAgentWithGather(ctx context.Context, brokerID, brokerEndpoint string, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error)

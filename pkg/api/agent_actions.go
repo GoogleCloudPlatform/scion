@@ -36,7 +36,6 @@ const (
 	AgentActionLogs              = "logs"
 	AgentActionStats             = "stats"
 	AgentActionHasPrompt         = "has-prompt"
-	AgentActionFinalizeEnv       = "finalize-env"
 	AgentActionResetAuth         = "reset-auth"
 )
 
@@ -47,7 +46,7 @@ func RuntimeBrokerAgentActionMethod(action string) (string, bool) {
 	switch action {
 	case AgentActionLogs, AgentActionStats, AgentActionHasPrompt:
 		return http.MethodGet, true
-	case AgentActionStart, AgentActionStop, AgentActionSuspend, AgentActionRestart, AgentActionMessage, AgentActionExec, AgentActionFinalizeEnv, AgentActionResetAuth:
+	case AgentActionStart, AgentActionStop, AgentActionSuspend, AgentActionRestart, AgentActionMessage, AgentActionExec, AgentActionResetAuth:
 		return http.MethodPost, true
 	default:
 		return "", false

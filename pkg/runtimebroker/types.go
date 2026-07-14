@@ -451,12 +451,6 @@ type EnvRequirementsResponse struct {
 	SecretInfo map[string]api.SecretKeyInfo `json:"secretInfo,omitempty"`
 }
 
-// FinalizeEnvRequest is sent to the broker to supply gathered env vars
-// and complete agent creation after a 202 env-gather response.
-type FinalizeEnvRequest struct {
-	Env map[string]string `json:"env"`
-}
-
 // ============================================================================
 // Interaction Types
 // ============================================================================

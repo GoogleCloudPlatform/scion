@@ -98,11 +98,6 @@ func (c *AuthenticatedBrokerClient) CleanupProject(ctx context.Context, brokerID
 	return c.transport.CleanupProject(ctx, brokerID, brokerEndpoint, projectSlug, projectID)
 }
 
-// FinalizeEnv sends gathered env vars to a broker to complete agent creation.
-func (c *AuthenticatedBrokerClient) FinalizeEnv(ctx context.Context, brokerID, brokerEndpoint, agentID string, env map[string]string) (*RemoteAgentResponse, error) {
-	return c.transport.FinalizeEnv(ctx, brokerID, brokerEndpoint, agentID, env)
-}
-
 // ImageStatus queries a broker's local image state.
 func (c *AuthenticatedBrokerClient) ImageStatus(ctx context.Context, brokerID, brokerEndpoint, shortImage, longImage string) (*BrokerImageStatusResponse, error) {
 	return c.transport.ImageStatus(ctx, brokerID, brokerEndpoint, shortImage, longImage)
