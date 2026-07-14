@@ -179,5 +179,5 @@ For the federation setup that connects your Scion Hub to a GCP registry, see [Sk
 
 ## See also
 
-- [Skills — Authoring & Publishing](/scion/local/skills/) — the full skills guide, including URI formats and scopes.
+- [Skills — Authoring & Publishing](/local/skills/) — the full skills guide, including URI formats and scopes.
 - [Skill Registry & Federation](/scion/hosted/single-node/skill-registry/) — Hub-side registry administration and external registry federation.
