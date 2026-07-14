@@ -72,6 +72,19 @@ skills:
     optional: true
 ```
 
+### Fields to Never Use
+
+These fields are deprecated or cause broken agent startup — never include them in generated `scion-agent.yaml` files:
+
+| Field | Reason |
+|---|---|
+| `harness` | Deprecated — causes runtime error |
+| `harness_config` | Unnecessary; project defaults apply automatically |
+| `explicit_workspace` | Causes interactive theme prompt instead of running |
+| `config_dir` | Breaks harness startup |
+
+A minimal valid `scion-agent.yaml` needs only `schema_version`, `description`, and `agent_instructions`. Add only the fields listed under "Optional fields" above.
+
 ### agents.md (Agent Instructions)
 
 This file contains the behavioral instructions injected into the agent's context. 
@@ -273,3 +286,4 @@ Read the existing templates in `.scion/templates/` to understand:
 - **Skills are harness-portable**. Write `SKILL.md` content without assuming a specific harness — scion mounts skills into the correct location automatically.
 - **URI skills resolve at provision time**. Agents must be connected to a Hub with the skill in its registry. Use `optional: true` for skills that are nice-to-have but not essential.
 - **Local skills take precedence**. If a template's `skills/` directory contains a skill with the same name as a URI-referenced skill, the local version wins.
+- **Never set `harness`, `harness_config`, `explicit_workspace`, or `config_dir`** — these fields are deprecated or cause broken agent startup. Omit them entirely. Project defaults handle harness selection automatically.
