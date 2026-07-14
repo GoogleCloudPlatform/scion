@@ -210,6 +210,15 @@ interface ServerConfigResponse {
   deprecated_env_keys?: DeprecatedEnvKeyInfo[];
 }
 
+interface HarnessConfigEntry {
+  id: string;
+  name: string;
+  slug: string;
+  displayName?: string;
+  harness: string;
+  scope: string;
+}
+
 interface ReloadResult {
   applied?: string[];
   requires_restart?: string[];
@@ -367,6 +376,9 @@ export class ScionPageAdminServerConfig extends LitElement {
   @state() private activeProfile = '';
   @state() private defaultTemplate = '';
   @state() private defaultHarnessConfig = '';
+  @state() private harnessConfigSelection = '';
+  @state() private customHarnessConfig = '';
+  @state() private harnessConfigs: HarnessConfigEntry[] = [];
   @state() private imageRegistry = '';
   @state() private workspacePath = '';
 
@@ -1156,6 +1168,7 @@ export class ScionPageAdminServerConfig extends LitElement {
   override connectedCallback(): void {
     super.connectedCallback();
     void this.loadConfig();
+    void this.loadHarnessConfigs();
     void this.loadGitHubAppInstallations();
   }
 
@@ -1213,6 +1226,7 @@ export class ScionPageAdminServerConfig extends LitElement {
     this.activeProfile = data.active_profile || '';
     this.defaultTemplate = data.default_template || '';
     this.defaultHarnessConfig = data.default_harness_config || '';
+    this.syncHarnessConfigSelection();
     this.imageRegistry = data.image_registry || '';
     this.workspacePath = data.workspace_path || '';
 
@@ -1328,6 +1342,44 @@ export class ScionPageAdminServerConfig extends LitElement {
         : null;
   }
 
+  private async loadHarnessConfigs(): Promise<void> {
+    try {
+      const res = await apiFetch('/api/v1/harness-configs?status=active&limit=100');
+      if (res.ok) {
+        const data = (await res.json()) as { harnessConfigs?: HarnessConfigEntry[] };
+        this.harnessConfigs = data.harnessConfigs || [];
+        this.syncHarnessConfigSelection();
+      }
+    } catch {
+      // Non-critical — dropdown falls back to hardcoded options
+    }
+  }
+
+  private syncHarnessConfigSelection(): void {
+    const value = this.defaultHarnessConfig;
+    if (!value) {
+      this.harnessConfigSelection = '';
+      this.customHarnessConfig = '';
+      return;
+    }
+    const knownNames = this.harnessConfigs.map((hc) => hc.name);
+    const fallbackNames = ['gemini-cli', 'claude', 'codex', 'copilot', 'opencode'];
+    const available = knownNames.length > 0 ? knownNames : fallbackNames;
+    if (available.includes(value)) {
+      this.harnessConfigSelection = value;
+      this.customHarnessConfig = '';
+    } else {
+      this.harnessConfigSelection = '__other__';
+      this.customHarnessConfig = value;
+    }
+  }
+
+  private get resolvedHarnessConfig(): string {
+    return this.harnessConfigSelection === '__other__'
+      ? this.customHarnessConfig
+      : this.harnessConfigSelection;
+  }
+
   private readOnlyReason(koanfKey: string): 'bootstrap' | 'env' | null {
     if (this.settingsTier === 'db') {
       return this.layer1Keys.has(koanfKey) ? null : 'bootstrap';
@@ -1362,7 +1414,7 @@ export class ScionPageAdminServerConfig extends LitElement {
     // General — only Layer-1 top-level keys
     if (ok('default_template')) payload.default_template = this.defaultTemplate;
     if (ok('default_harness_config'))
-      payload.default_harness_config = this.defaultHarnessConfig;
+      payload.default_harness_config = this.resolvedHarnessConfig;
     if (ok('image_registry')) payload.image_registry = this.imageRegistry;
 
     // Default agent limits
@@ -2406,15 +2458,53 @@ export class ScionPageAdminServerConfig extends LitElement {
             <label>Default Harness Config</label>
             ${this.renderFieldValue(
               'default_harness_config',
-              this.defaultHarnessConfig,
-              html`${this.renderEnvBadge('default_harness_config')}<sl-input
-                value=${this.defaultHarnessConfig}
-                @sl-input=${(e: Event) => {
-                  this.defaultHarnessConfig = (e.target as HTMLInputElement).value;
-                }}
-              ></sl-input>`
+              this.resolvedHarnessConfig,
+              html`${this.renderEnvBadge('default_harness_config')}
+            <sl-select
+              .value=${this.harnessConfigSelection}
+              @sl-change=${(e: Event) => {
+                this.harnessConfigSelection = (e.target as HTMLSelectElement).value;
+                if (this.harnessConfigSelection !== '__other__') {
+                  this.customHarnessConfig = '';
+                }
+              }}
+            >
+              <sl-option value="">None</sl-option>
+              ${this.harnessConfigs.length > 0
+                ? this.harnessConfigs.map(
+                    (hc) => html`
+                      <sl-option value=${hc.name}>
+                        ${hc.displayName || hc.name}
+                        ${hc.harness ? html` <small>(${hc.harness})</small>` : ''}
+                      </sl-option>
+                    `
+                  )
+                : html`
+                    <sl-option value="gemini-cli">Gemini CLI</sl-option>
+                    <sl-option value="claude">Claude</sl-option>
+                    <sl-option value="codex">Codex</sl-option>
+                    <sl-option value="copilot">Copilot</sl-option>
+                    <sl-option value="opencode">OpenCode</sl-option>
+                  `}
+              <sl-option value="__other__">Other (specify)</sl-option>
+            </sl-select>`
             )}
           </div>
+          ${this.harnessConfigSelection === '__other__'
+            ? html`
+                <div class="form-field">
+                  <label>Custom Harness Config Name</label>
+                  <sl-input
+                    value=${this.customHarnessConfig}
+                    placeholder="e.g. my-custom-harness"
+                    @sl-input=${(e: Event) => {
+                      this.customHarnessConfig = (e.target as HTMLInputElement).value;
+                    }}
+                  ></sl-input>
+                  <span class="hint">Name of the harness config directory (from .scion/harness-configs/).</span>
+                </div>
+              `
+            : nothing}
           <div class="form-field full-width">
             <label>Image Registry</label>
             <span class="hint"
