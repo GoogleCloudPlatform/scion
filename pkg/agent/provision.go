@@ -780,13 +780,7 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 		}
 	}
 
-	// Step 3b: Auto-inject workspace skills from /workspace/skills/
-	wsInjectedContent, err := injectWorkspaceSkills(projectDir, agentHome, skillsDir, injCtx, nil)
-	if err != nil {
-		return "", "", nil, fmt.Errorf("failed to inject workspace skills: %w", err)
-	}
-
-	// Step 3d: Resolve and install referenced skills from skill bank
+	// Step 3b: Resolve and install referenced skills from skill bank
 	var resolvedSkillsRecord *SkillResolutionRecord
 	if len(finalScionCfg.Skills) > 0 {
 		resolver := SkillResolverFromContext(ctx)
@@ -934,23 +928,12 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 				}
 			}
 			if content != nil {
-				// Append workspace skill content for harnesses without native skill support
-				if len(wsInjectedContent) > 0 {
-					content = append(content, wsInjectedContent...)
-				}
-
 				util.Debugf("ProvisionAgent: injecting agent instructions (%d bytes) into %s", len(content), agentHome)
 				if err := h.InjectAgentInstructions(agentHome, content); err != nil {
 					return "", "", nil, fmt.Errorf("failed to inject agent instructions: %w", err)
 				}
 			} else {
 				util.Debugf("ProvisionAgent: agent_instructions resolved to nil, skipping injection")
-			}
-		} else if len(wsInjectedContent) > 0 {
-			// No agent_instructions configured, but workspace skills need fallback injection
-			util.Debugf("ProvisionAgent: injecting workspace skill fallback content (%d bytes) into %s", len(wsInjectedContent), agentHome)
-			if err := h.InjectAgentInstructions(agentHome, wsInjectedContent); err != nil {
-				return "", "", nil, fmt.Errorf("failed to inject workspace skill fallback instructions: %w", err)
 			}
 		} else {
 			util.Debugf("ProvisionAgent: no agent_instructions configured and no agents.md found in template")
@@ -991,17 +974,9 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 		// No template chain, but inline config may have content fields
 		if finalScionCfg.AgentInstructions != "" {
 			content := []byte(finalScionCfg.AgentInstructions)
-			if len(wsInjectedContent) > 0 {
-				content = append(content, wsInjectedContent...)
-			}
 			util.Debugf("ProvisionAgent: injecting inline agent_instructions (%d bytes, no template)", len(content))
 			if err := h.InjectAgentInstructions(agentHome, content); err != nil {
 				return "", "", nil, fmt.Errorf("failed to inject agent instructions: %w", err)
-			}
-		} else if len(wsInjectedContent) > 0 {
-			util.Debugf("ProvisionAgent: injecting workspace skill fallback content (%d bytes, no template)", len(wsInjectedContent))
-			if err := h.InjectAgentInstructions(agentHome, wsInjectedContent); err != nil {
-				return "", "", nil, fmt.Errorf("failed to inject workspace skill fallback instructions: %w", err)
 			}
 		}
 		if finalScionCfg.SystemPrompt != "" {
@@ -1234,7 +1209,7 @@ func parseSkillFrontmatter(data []byte) skillFrontmatter {
 }
 
 // workspaceSkillsInjectionContext holds the context needed to evaluate
-// conditional injection of workspace skills.
+// conditional injection of platform skills.
 type workspaceSkillsInjectionContext struct {
 	IsGit      bool
 	HubEnabled bool
@@ -1326,98 +1301,6 @@ func injectPlatformSkills(
 	}
 
 	return nil
-}
-
-// injectWorkspaceSkills discovers skills in the workspace-level skills/
-// directory and injects them into the agent. For harnesses that support
-// skills (skillsDir != ""), skill directories are copied into the agent
-// home. For harnesses without skill support, SKILL.md content is appended
-// to the provided agent instructions content.
-//
-// Template skills take precedence: if a template already installed a skill
-// with the same directory name, the workspace skill is skipped.
-//
-// Returns updated content (only modified when skillsDir == "").
-func injectWorkspaceSkills(
-	projectDir string,
-	agentHome string,
-	skillsDir string,
-	injCtx workspaceSkillsInjectionContext,
-	content []byte,
-) ([]byte, error) {
-	// Workspace skills live at the workspace root, sibling to .scion/
-	workspaceRoot := projectDir
-	if filepath.Base(projectDir) == config.DotScion {
-		workspaceRoot = filepath.Dir(projectDir)
-	}
-	wsSkillsDir := filepath.Join(workspaceRoot, "skills")
-
-	entries, err := os.ReadDir(wsSkillsDir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			util.Debugf("provision: no workspace skills directory at %s", wsSkillsDir)
-			return content, nil
-		}
-		return content, fmt.Errorf("failed to read workspace skills directory: %w", err)
-	}
-
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			if entry.Type()&os.ModeSymlink != 0 {
-				util.Debugf("provision: skipping symlinked skill %q (symlinks not supported)", entry.Name())
-			}
-			continue
-		}
-		if strings.HasPrefix(entry.Name(), ".") {
-			continue
-		}
-		skillName := entry.Name()
-		skillSrc := filepath.Join(wsSkillsDir, skillName)
-
-		// Read SKILL.md once for both frontmatter parsing and fallback injection
-		skillMD := filepath.Join(skillSrc, "SKILL.md")
-		skillMDData, skillMDErr := os.ReadFile(skillMD)
-
-		var fm skillFrontmatter
-		if skillMDErr == nil {
-			fm = parseSkillFrontmatter(skillMDData)
-		}
-
-		if !shouldInjectSkill(fm, injCtx) {
-			util.Debugf("provision: skipping workspace skill %q (inject_when=%q not satisfied)", skillName, fm.InjectWhen)
-			continue
-		}
-
-		if skillsDir != "" {
-			// Harness supports skills — copy the skill directory
-			skillDest := filepath.Join(agentHome, skillsDir, skillName)
-
-			// Template skills take precedence: skip if already present
-			if _, err := os.Stat(skillDest); err == nil {
-				util.Debugf("provision: workspace skill %q skipped (template skill takes precedence)", skillName)
-				continue
-			}
-
-			if err := os.MkdirAll(skillDest, 0755); err != nil {
-				return content, fmt.Errorf("failed to create workspace skill dir %s: %w", skillName, err)
-			}
-			if err := util.CopyDir(skillSrc, skillDest); err != nil {
-				return content, fmt.Errorf("failed to copy workspace skill %s: %w", skillName, err)
-			}
-			util.Debugf("provision: injected workspace skill %q into %s", skillName, skillDest)
-		} else {
-			// Harness lacks skill support — composite SKILL.md content into agent instructions
-			if skillMDErr != nil {
-				util.Debugf("provision: workspace skill %q has no SKILL.md, skipping fallback injection", skillName)
-				continue
-			}
-			util.Debugf("provision: compositing workspace skill %q SKILL.md (%d bytes) into agent instructions", skillName, len(skillMDData))
-			content = append(content, '\n')
-			content = append(content, skillMDData...)
-		}
-	}
-
-	return content, nil
 }
 
 func GetSavedProfile(agentName string, projectPath string) string {

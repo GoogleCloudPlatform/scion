@@ -226,14 +226,11 @@ Most commands accept either a skill **name** or **ID**. Add the global `--format
 `scion skill` (singular) is an alias for `scion skills`.
 :::
 
-## Platform and workspace skills
+## Platform skills
 
-Beyond skills you publish, two categories are injected automatically at provisioning:
+Beyond skills you publish, **platform skills** are injected automatically at provisioning — a set of skills embedded in the Scion binary and injected into every agent. They provide baseline capabilities without any Hub or template setup.
 
-- **Platform skills** — a set of skills embedded in the Scion binary and injected into every agent. They provide baseline capabilities without any Hub or template setup.
-- **Workspace skills** — skills discovered in a project's top-level `skills/` directory and injected into agents created from that project.
-
-Both honor an optional `inject_when` frontmatter condition in `SKILL.md`, which gates injection on the agent's environment:
+Platform skills honor an optional `inject_when` frontmatter condition in `SKILL.md`, which gates injection on the agent's environment:
 
 | `inject_when` | Injected when |
 | :--- | :--- |
@@ -241,7 +238,7 @@ Both honor an optional `inject_when` frontmatter condition in `SKILL.md`, which 
 | `git_workspace` | The workspace is a git repository. |
 | `hub_enabled` | The agent is connected to a Hub. |
 
-A skill supplied by a template always takes precedence over a platform or workspace skill of the same name. For harnesses that do not support a skills directory, a workspace skill's `SKILL.md` content is instead composited into the agent's instructions as a fallback.
+A skill supplied by a template always takes precedence over a platform skill of the same name.
 
 ## See also
 

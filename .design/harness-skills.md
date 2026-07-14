@@ -40,9 +40,8 @@ This plan outlines the implementation of a standardized "Skills" support for Sci
 *   [x] **Action:** Add a placeholder `skills/` directory to the default template.
     *   **Files:** `pkg/config/embeds/templates/default/skills/.gitkeep`
     *   **Details:** Ensure that `scion init` or agent creation creates a visible structure for users to follow.
-*   [ ] **Action:** (Optional) Add a built-in "scion" skill.
-    *   **Files:** `pkg/config/embeds/skills/scion/SKILL.md`, `pkg/config/embeds/skills/scion/scripts/...`
-    *   **Details:** Integrate the existing skills in the root `skills/` directory into the default template so agents can manage themselves out-of-the-box.
+*   [x] **Action:** (Optional) Add a built-in "scion" skill.
+    *   **Details:** Done — skills are now embedded as platform skills in `resources/platform_skills/` and injected via `injectPlatformSkills()`. The root `skills/` directory and workspace skill overlay have been removed.
 
 ## 4. Verification Strategy
 *   **Automated Tests:**
