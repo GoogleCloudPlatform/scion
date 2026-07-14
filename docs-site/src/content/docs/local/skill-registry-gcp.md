@@ -175,7 +175,7 @@ The `gcp-skill://` scheme follows the format `gcp-skill://<alias>/<skillId>@<ver
 - **`skillId`** — the skill name as registered in GCP
 - **`version`** — an optional version specifier (defaults to latest)
 
-For the federation setup that connects your Scion Hub to a GCP registry, see [Skill Registry & Federation](/scion/hosted/single-node/skill-registry/).
+For the federation setup that connects your Scion Hub to a GCP registry, see [Skill Registry & Federation](/hosted/single-node/skill-registry/).
 
 ## See also
 
