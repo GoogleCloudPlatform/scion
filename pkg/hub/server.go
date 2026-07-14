@@ -597,6 +597,7 @@ type Server struct {
 	// statelessEmbeddedBroker is true when the embedded broker identity is a
 	// replica-independent API adapter rather than a process-owned control channel.
 	statelessEmbeddedBroker bool
+	runtimeReloadFunc       func() bool        // Callback to reload the co-located broker runtime; returns true if swapped
 	workstation             bool               // True when running in workstation (non-production) mode
 	scheduler               *Scheduler         // Unified scheduler for recurring tasks
 	cleanupOnce             sync.Once          // Ensures CleanupResources runs only once
@@ -1396,6 +1397,16 @@ func (s *Server) SetStatelessEmbeddedBrokerID(id string) {
 	defer s.mu.Unlock()
 	s.embeddedBrokerID = id
 	s.statelessEmbeddedBroker = id != ""
+}
+
+// SetRuntimeReloadFunc registers a callback that reloads the co-located
+// broker's container runtime. Called during startup wiring so that
+// reloadSettings can trigger a runtime swap without a full restart.
+// The callback returns true if the runtime was actually swapped.
+func (s *Server) SetRuntimeReloadFunc(fn func() bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.runtimeReloadFunc = fn
 }
 
 // GetEmbeddedBrokerID returns the co-located broker ID, if any.

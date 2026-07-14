@@ -218,10 +218,17 @@ func (s *Server) handlePutRuntime(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Update the image checker so it uses the newly selected runtime for
-	// local image existence checks instead of the previously configured one.
+	// Update the image checker and co-located broker runtime so they use
+	// the newly selected runtime instead of the previously configured one.
 	rt := runtime.GetRuntime("", "")
 	s.SetLocalImageChecker(rt)
+
+	s.mu.RLock()
+	reloadFn := s.runtimeReloadFunc
+	s.mu.RUnlock()
+	if reloadFn != nil {
+		reloadFn()
+	}
 
 	writeJSON(w, http.StatusOK, systemRuntimeResponse{
 		Detected:   req.Runtime,

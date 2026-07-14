@@ -257,6 +257,22 @@ func (s *Server) reloadSettings() map[string]interface{} {
 		results["applied"] = applied
 	}
 
+	// Detect container runtime changes and reload the co-located broker.
+	// This covers the onboarding wizard flow where the user selects a
+	// different runtime (e.g. podman) after the server auto-detected one
+	// at startup. Without this, the broker continues using the stale
+	// runtime until a manual server restart.
+	s.mu.RLock()
+	reloadFn := s.runtimeReloadFunc
+	s.mu.RUnlock()
+	if reloadFn != nil {
+		if reloaded := reloadFn(); reloaded {
+			applied := results["applied"].([]string)
+			applied = append(applied, "broker_runtime")
+			results["applied"] = applied
+		}
+	}
+
 	return results
 }
 

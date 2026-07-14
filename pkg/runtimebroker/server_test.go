@@ -16,6 +16,8 @@ package runtimebroker
 
 import (
 	"testing"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
 func TestIsControlChannelConnected_NoConnections_CCNotEnabled(t *testing.T) {
@@ -141,5 +143,24 @@ func TestIsControlChannelConnected_NilControlChannel_CCNotEnabled(t *testing.T) 
 
 	if !srv.IsControlChannelConnected() {
 		t.Error("expected true when connections exist without CC and CC is not enabled (Cloud Run)")
+	}
+}
+
+func TestSwapRuntime(t *testing.T) {
+	srv := newTestServer(t)
+
+	if got := srv.RuntimeName(); got != "mock" {
+		t.Fatalf("initial runtime = %q, want %q", got, "mock")
+	}
+
+	newRT := &runtime.MockRuntime{NameFunc: func() string { return "podman" }}
+	srv.SwapRuntime(newRT)
+
+	if got := srv.RuntimeName(); got != "podman" {
+		t.Errorf("after swap runtime = %q, want %q", got, "podman")
+	}
+
+	if srv.manager == nil {
+		t.Error("manager should be re-created after swap")
 	}
 }

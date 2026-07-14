@@ -351,6 +351,29 @@ func New(cfg ServerConfig, mgr agent.Manager, rt scionrt.Runtime) *Server {
 	return srv
 }
 
+// RuntimeName returns the name of the currently active container runtime.
+func (s *Server) RuntimeName() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.runtime.Name()
+}
+
+// SwapRuntime replaces the broker's container runtime and agent manager.
+// This is called when the co-located hub detects a runtime configuration
+// change (e.g. during onboarding) so the broker picks up the new engine
+// without requiring a full server restart.
+func (s *Server) SwapRuntime(rt scionrt.Runtime) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	old := s.runtime.Name()
+	s.runtime = rt
+	s.manager = agent.NewManager(rt)
+	slog.Info("Runtime broker swapped container runtime",
+		"old", old,
+		"new", rt.Name(),
+	)
+}
+
 // initHubIntegration initializes the shared template cache and hub connections.
 func (s *Server) initHubIntegration() error {
 	// 1. Initialize shared template cache

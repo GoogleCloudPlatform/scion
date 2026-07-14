@@ -1989,6 +1989,20 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 		rhSrv.SetMessageLogger(messageLogger)
 	}
 
+	// Wire runtime reload so reloadSettings can swap the broker's container
+	// engine without a full server restart (fixes onboarding wizard flow).
+	if hubSrv != nil && colocatedBrokerRegistered {
+		hubSrv.SetRuntimeReloadFunc(func() bool {
+			newRT := runtime.GetRuntime("", "")
+			if newRT.Name() == rhSrv.RuntimeName() {
+				return false
+			}
+			rhSrv.SwapRuntime(newRT)
+			hubSrv.SetLocalImageChecker(newRT)
+			return true
+		})
+	}
+
 	if webSrv != nil {
 		webSrv.SetBrokerHealthProvider(func(ctx context.Context) interface{} {
 			return rhSrv.GetHealthInfo(ctx)
