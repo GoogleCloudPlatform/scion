@@ -389,7 +389,11 @@ func (s *Server) handleExistingAgent(
 		// session (Claude --continue) rather than starting fresh.
 		resume := existingAgent.Phase == string(state.PhaseSuspended)
 		if err := dispatcher.DispatchAgentStart(ctx, existingAgent, req.Task, resume); err != nil {
-			RuntimeError(w, "Failed to resume suspended agent: "+err.Error())
+			if isContainerNameConflict(err) {
+				Conflict(w, "Agent name is already in use by a stopped container. Please delete the existing agent or choose a different name.")
+			} else {
+				RuntimeError(w, "Failed to resume suspended agent: "+err.Error())
+			}
 			return existingAgentErrored
 		}
 
@@ -442,7 +446,11 @@ func (s *Server) handleExistingAgent(
 			// A stopped agent restarts with a fresh harness session even when
 			// resume was requested (mirrors the local CLI's effectiveResume).
 			if err := dispatcher.DispatchAgentStart(ctx, existingAgent, req.Task, false); err != nil {
-				RuntimeError(w, "Failed to resume stopped agent: "+err.Error())
+				if isContainerNameConflict(err) {
+					Conflict(w, "Agent name is already in use by a stopped container. Please delete the existing agent or choose a different name.")
+				} else {
+					RuntimeError(w, "Failed to resume stopped agent: "+err.Error())
+				}
 				return existingAgentErrored
 			}
 
@@ -515,7 +523,11 @@ func (s *Server) handleExistingAgent(
 		// response (status, container info) onto existingAgent in-place.
 		// A created/provisioning agent has no prior session to resume.
 		if err := dispatcher.DispatchAgentStart(ctx, existingAgent, req.Task, false); err != nil {
-			RuntimeError(w, "Failed to start agent: "+err.Error())
+			if isContainerNameConflict(err) {
+				Conflict(w, "Agent name is already in use by a stopped container. Please delete the existing agent or choose a different name.")
+			} else {
+				RuntimeError(w, "Failed to start agent: "+err.Error())
+			}
 			return existingAgentErrored
 		}
 

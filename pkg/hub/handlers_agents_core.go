@@ -793,7 +793,11 @@ func (s *Server) createAgentInProject(
 					// trigger spurious sync-registration attempts.
 					_ = dispatcher.DispatchAgentDelete(ctx, agent, true, true, false, time.Time{})
 					_ = s.store.DeleteAgent(ctx, agent.ID)
-					RuntimeError(w, "Failed to dispatch to runtime broker: "+err.Error())
+					if isContainerNameConflict(err) {
+						Conflict(w, "Agent name is already in use by a stopped container. Please delete the existing agent or choose a different name.")
+					} else {
+						RuntimeError(w, "Failed to dispatch to runtime broker: "+err.Error())
+					}
 					return
 				} else if envReqs != nil {
 					// Broker returned 202: needs env gather
@@ -830,7 +834,11 @@ func (s *Server) createAgentInProject(
 					// trigger spurious sync-registration attempts.
 					_ = dispatcher.DispatchAgentDelete(ctx, agent, true, true, false, time.Time{})
 					_ = s.store.DeleteAgent(ctx, agent.ID)
-					RuntimeError(w, "Failed to dispatch to runtime broker: "+err.Error())
+					if isContainerNameConflict(err) {
+						Conflict(w, "Agent name is already in use by a stopped container. Please delete the existing agent or choose a different name.")
+					} else {
+						RuntimeError(w, "Failed to dispatch to runtime broker: "+err.Error())
+					}
 					return
 				} else if envReqs != nil && len(envReqs.Needs) > 0 {
 					// Broker reported missing required env vars — fail the dispatch.
@@ -2053,4 +2061,8 @@ func (s *Server) handleAgentResetAuth(w http.ResponseWriter, r *http.Request, id
 	writeJSON(w, http.StatusOK, map[string]string{
 		"message": "Auth reset dispatched successfully",
 	})
+}
+
+func isContainerNameConflict(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "already in use")
 }

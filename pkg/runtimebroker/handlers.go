@@ -807,7 +807,11 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 					"agent_id", req.ID, "project_id", req.ProjectID, "agent", opts.Name)
 			}
 		}
-		RuntimeError(w, "Failed to create agent: "+err.Error())
+		if errors.Is(err, agent.ErrContainerNameInUse) {
+			Conflict(w, err.Error())
+		} else {
+			RuntimeError(w, "Failed to create agent: "+err.Error())
+		}
 		return
 	}
 
@@ -1309,7 +1313,11 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 	if err != nil {
 		s.agentLifecycleLog.Error("Agent start failed",
 			"agent_id", id, "error", err)
-		RuntimeError(w, "Failed to start agent: "+err.Error())
+		if errors.Is(err, agent.ErrContainerNameInUse) {
+			Conflict(w, err.Error())
+		} else {
+			RuntimeError(w, "Failed to start agent: "+err.Error())
+		}
 		return
 	}
 
