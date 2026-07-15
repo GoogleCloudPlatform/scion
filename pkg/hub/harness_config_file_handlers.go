@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -247,6 +248,16 @@ func (s *Server) handleHarnessConfigFileWrite(w http.ResponseWriter, r *http.Req
 	}
 
 	hc.ContentHash = computeContentHash(hc.Files)
+
+	if filePath == "config.yaml" {
+		if entry, err := config.ParseHarnessConfigYAML(content); err == nil {
+			if hc.Config == nil {
+				hc.Config = &store.HarnessConfigData{}
+			}
+			hc.Config.Image = entry.Image
+		}
+	}
+
 	if err := s.store.UpdateHarnessConfig(ctx, hc); err != nil {
 		RuntimeError(w, "Failed to update harness config manifest")
 		return
