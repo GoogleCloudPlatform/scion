@@ -197,14 +197,8 @@ def _write_opencode_auth_file(ctx: sh.ProvisionContext) -> None:
         raise sh.ProvisionError(
             f"OPENCODE_AUTH secret is not valid JSON: {exc}"
         ) from exc
-    auth_dir = sh.expand_path("~/.local/share/opencode")
-    os.makedirs(auth_dir, exist_ok=True)
-    target = os.path.join(auth_dir, "auth.json")
-    tmp = target + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        f.write(content)
-    os.chmod(tmp, 0o600)
-    os.replace(tmp, target)
+    target = sh.expand_path("~/.local/share/opencode/auth.json")
+    sh.atomic_write_text(target, content, mode=0o600)
 
 
 def _write_mcp_config(servers: dict[str, Any]) -> None:
