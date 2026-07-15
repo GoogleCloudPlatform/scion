@@ -34,7 +34,7 @@ brew install homebrew-scion/scion/scion
 This installs the `scion` CLI — pre-configured to use `ghcr.io/homebrew-scion` as the default image registry — along with the `scion-plugin-telegram` broker plugin. To upgrade later:
 
 ```bash
-brew update && brew upgrade scion
+brew update && brew upgrade homebrew-scion/scion/scion
 ```
 
 Then start the Workstation server:

@@ -35,7 +35,7 @@ This installs:
 To upgrade later:
 
 ```bash
-brew update && brew upgrade scion
+brew update && brew upgrade homebrew-scion/scion/scion
 ```
 
 ### Quick start
@@ -51,16 +51,12 @@ Your browser opens to the [Onboarding Wizard](/scion/getting-started/onboarding/
 (Docker, Podman, or Apple Container), identity configuration, container image setup (pulling from
 `ghcr.io/homebrew-scion`), and creating your first workspace.
 
-After onboarding, start your first agent:
-
-```bash
-scion start my-agent "Your task here"
-```
+After onboarding, start your first agent in the web UI:
 
 :::note[Using Homebrew?]
-The onboarding wizard performs machine initialization and image setup for you, so you can skip
+The onboarding wizard performs machine initialization and image setup for you, so you can skip many of
 the [Prerequisites](#prerequisites) and [Configuration](#configuration) sections below — they
-apply to a from-source install or a fully manual, CLI-only (Local mode) setup.
+apply to a from-source install or a fully manual, CLI-only (Local mode) setup. You will still need a container runtime - podman is recommended.
 :::
 
 ---
