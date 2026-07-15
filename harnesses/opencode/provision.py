@@ -197,7 +197,7 @@ def _write_opencode_auth_file(ctx: sh.ProvisionContext) -> None:
         raise sh.ProvisionError(
             f"OPENCODE_AUTH secret is not valid JSON: {exc}"
         ) from exc
-    target = sh.expand_path("~/.local/share/opencode/auth.json")
+    target = sh.expand_path(OPENCODE_AUTH_FILE)
     sh.atomic_write_text(target, content, mode=0o600)
 
 
