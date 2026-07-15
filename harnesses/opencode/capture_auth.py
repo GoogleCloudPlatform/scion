@@ -28,14 +28,20 @@ _OPENCODE_AUTH = os.path.join(
 )
 
 
-def _capture_auth_json(force: bool = False) -> bool:
-    """Capture ~/.local/share/opencode/auth.json as an OPENCODE_AUTH file secret."""
+def _capture_auth_json(quiet: bool = False) -> bool:
+    """Capture ~/.local/share/opencode/auth.json as an OPENCODE_AUTH file secret.
+
+    Uses --force unconditionally: capture_auth_main() may have already set
+    OPENCODE_AUTH via capture-auth-config.json, and re-capturing from the
+    same source file is always safe.
+    """
     if not os.path.isfile(_OPENCODE_AUTH):
-        print(
-            f"capture-auth: {_OPENCODE_AUTH} not found — "
-            "run 'opencode auth login' first, then re-run this script",
-            file=sys.stderr,
-        )
+        if not quiet:
+            print(
+                f"capture-auth: {_OPENCODE_AUTH} not found — "
+                "run 'opencode auth login' first, then re-run this script",
+                file=sys.stderr,
+            )
         return False
 
     cmd = [
@@ -43,9 +49,8 @@ def _capture_auth_json(force: bool = False) -> bool:
         f"@{_OPENCODE_AUTH}",
         "--type", "file",
         "--target", _OPENCODE_AUTH,
+        "--force",
     ]
-    if force:
-        cmd.append("--force")
 
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
@@ -57,25 +62,19 @@ def _capture_auth_json(force: bool = False) -> bool:
         return False
 
     if result.returncode != 0:
-        stderr = result.stderr.strip()
-        if "already exists" in stderr.lower():
-            print(
-                'capture-auth: OPENCODE_AUTH already exists (use --force to overwrite)',
-            )
-            return False
-        print(f"capture-auth: failed to set OPENCODE_AUTH: {stderr}", file=sys.stderr)
+        print(f"capture-auth: failed to set OPENCODE_AUTH: {result.stderr.strip()}", file=sys.stderr)
         return False
 
-    print(f"capture-auth: OPENCODE_AUTH: captured from {_OPENCODE_AUTH}")
+    if not quiet:
+        print(f"capture-auth: OPENCODE_AUTH: captured from {_OPENCODE_AUTH}")
     return True
 
 
 if __name__ == "__main__":
     rc = scion_harness.capture_auth_main()
 
-    force = "--force" in sys.argv
-    config_ok = _capture_auth_json(force)
+    auth_ok = _capture_auth_json(quiet=(rc == 0))
 
-    if rc != 0 and config_ok:
+    if rc != 0 and auth_ok:
         sys.exit(0)
     sys.exit(rc)
