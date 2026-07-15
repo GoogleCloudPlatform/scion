@@ -186,9 +186,9 @@ def _translate_mcp_server(name: str, spec: dict[str, Any]) -> dict[str, Any] | N
 
 def _write_opencode_auth_file(ctx: sh.ProvisionContext) -> None:
     """Write ~/.local/share/opencode/auth.json from a staged OPENCODE_AUTH file secret."""
-    content = ctx.read_file_secret("OPENCODE_AUTH")
-    if not content:
+    if "OPENCODE_AUTH" not in ctx.file_secret_files:
         return
+    content = ctx.read_file_secret("OPENCODE_AUTH")
     if not content.strip():
         raise sh.ProvisionError("OPENCODE_AUTH secret is empty")
     try:
