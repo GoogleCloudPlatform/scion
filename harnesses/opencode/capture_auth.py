@@ -76,6 +76,8 @@ if __name__ == "__main__":
     force = "--force" in sys.argv
     config_ok = _capture_auth_json(force)
 
-    if rc != 0 and config_ok:
+    if not config_ok:
+        sys.exit(rc if rc != 0 else 1)
+    if rc == 2:
         sys.exit(0)
     sys.exit(rc)
