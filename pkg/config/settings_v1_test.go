@@ -850,7 +850,9 @@ active_profile: local
 `
 	require.NoError(t, os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(versionedSettings), 0644))
 
-	assert.True(t, detectHierarchyFormat(""))
+	hasVersioned, missingSchemaVersion := detectHierarchyFormat("")
+	assert.True(t, hasVersioned)
+	assert.False(t, missingSchemaVersion)
 }
 
 func TestDetectHierarchyFormat_Legacy(t *testing.T) {
@@ -874,7 +876,9 @@ harnesses:
 `
 	require.NoError(t, os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(legacySettings), 0644))
 
-	assert.False(t, detectHierarchyFormat(""))
+	hasVersioned, missingSchemaVersion := detectHierarchyFormat("")
+	assert.False(t, hasVersioned)
+	assert.False(t, missingSchemaVersion)
 }
 
 func TestDetectHierarchyFormat_NoFiles(t *testing.T) {
@@ -888,7 +892,9 @@ func TestDetectHierarchyFormat_NoFiles(t *testing.T) {
 	defer func() { _ = os.Chdir(originalWd) }()
 	_ = os.Chdir(tmpDir)
 
-	assert.False(t, detectHierarchyFormat(""))
+	hasVersioned, missingSchemaVersion := detectHierarchyFormat("")
+	assert.False(t, hasVersioned)
+	assert.False(t, missingSchemaVersion)
 }
 
 func TestDetectHierarchyFormat_GroveVersioned(t *testing.T) {
@@ -921,7 +927,39 @@ active_profile: custom
 `
 	require.NoError(t, os.WriteFile(filepath.Join(projectDir, "settings.yaml"), []byte(versionedSettings), 0644))
 
-	assert.True(t, detectHierarchyFormat(projectDir))
+	hasVersioned, missingSchemaVersion := detectHierarchyFormat(projectDir)
+	assert.True(t, hasVersioned)
+	assert.False(t, missingSchemaVersion)
+}
+
+func TestDetectHierarchyFormat_V1StructuralIndicators(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	originalHome := os.Getenv("HOME")
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
+
+	originalWd, _ := os.Getwd()
+	defer func() { _ = os.Chdir(originalWd) }()
+	_ = os.Chdir(tmpDir)
+
+	globalScionDir := filepath.Join(tmpDir, ".scion")
+	require.NoError(t, os.MkdirAll(globalScionDir, 0755))
+
+	// v1-shaped but missing schema_version
+	v1ShapedSettings := `active_profile: cr
+runtimes:
+  cr:
+    type: cloudrun
+    cloudrun:
+      project: my-project
+      region: us-central1
+`
+	require.NoError(t, os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(v1ShapedSettings), 0644))
+
+	hasVersioned, missingSchemaVersion := detectHierarchyFormat("")
+	assert.True(t, hasVersioned, "v1-shaped file without schema_version should be detected as versioned")
+	assert.True(t, missingSchemaVersion, "should flag that schema_version is missing")
 }
 
 // --- ResolveHarnessConfig tests ---

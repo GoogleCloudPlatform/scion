@@ -55,7 +55,9 @@ func (e ValidationError) Error() string {
 // whether it uses the versioned format or the legacy format.
 //
 // Returns:
-//   - version: the schema_version value if present (e.g., "1"), or "" for legacy/empty
+//   - version: the schema_version value if present (e.g., "1"), or "1" if v1-only
+//     runtime fields are detected (type, cloudrun, gke, list_all_namespaces), or ""
+//     for legacy/empty files.
 //   - isLegacy: true if the file uses the legacy format (has "harnesses" key but no schema_version)
 //
 // An empty or missing file returns ("", false).
@@ -90,9 +92,43 @@ func DetectSettingsFormat(data []byte) (version string, isLegacy bool) {
 		return "", true
 	}
 
+	// Check for v1-only structural indicators in runtime entries.
+	// A runtimes map containing type, cloudrun, gke, or list_all_namespaces
+	// keys indicates a v1-format file that is missing the schema_version marker.
+	// Treat as versioned v1 to prevent silent data loss via the legacy loading path.
+	if hasV1RuntimeIndicators(raw) {
+		return "1", false
+	}
+
 	// No schema_version and no harnesses key — could be a minimal or empty file.
 	// Treat as neither versioned nor legacy (will use defaults).
 	return "", false
+}
+
+// hasV1RuntimeIndicators reports whether a parsed settings map contains v1-only
+// runtime fields (type, cloudrun, gke, list_all_namespaces) that are absent from
+// the legacy RuntimeConfig struct. Used to detect v1-shaped files missing schema_version.
+func hasV1RuntimeIndicators(raw map[string]interface{}) bool {
+	runtimes, ok := raw["runtimes"]
+	if !ok {
+		return false
+	}
+	rmap, ok := runtimes.(map[string]interface{})
+	if !ok {
+		return false
+	}
+	for _, rv := range rmap {
+		entry, ok := rv.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		for _, key := range []string{"type", "cloudrun", "gke", "list_all_namespaces"} {
+			if _, has := entry[key]; has {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // ValidateSettings validates raw settings data (YAML or JSON) against the
