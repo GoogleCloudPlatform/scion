@@ -1612,13 +1612,13 @@ export class ScionPageProjectSettings extends LitElement {
                                     const sa = this.gcpServiceAccounts.find(
                                       (s) => s.id === this.configDefaultGCPIdentitySAID
                                     );
-                                    if (sa) {
+                                    if (sa && navigator.clipboard) {
                                       void navigator.clipboard.writeText(sa.email).then(() => {
                                         this.copiedDefaultSAEmail = true;
                                         setTimeout(() => {
                                           this.copiedDefaultSAEmail = false;
                                         }, 1500);
-                                      });
+                                      }).catch(() => {});
                                     }
                                   }}
                                 ></sl-icon-button>
