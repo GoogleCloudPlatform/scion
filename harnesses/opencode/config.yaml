@@ -71,9 +71,11 @@ capabilities:
     project_scope: { support: "no", reason: "OpenCode does not distinguish project-scoped MCP" }
 no_auth:
   behavior: drop-to-shell
+  command: opencode auth login
   message: |
     This agent started without credentials.
-    Run your OpenCode authentication setup.
+    Run: opencode auth login
+    Complete the interactive login flow.
     Then run: python3 /home/scion/.scion/harness/capture_auth.py
 auth:
   default_type: api-key
