@@ -1282,6 +1282,9 @@ func TestGatherAuthWithEnv_EmptyAuthMetaNoEnvVars(t *testing.T) {
 func TestGatherAuthWithEnv_ConfigDrivenMultipleAuthTypes(t *testing.T) {
 	t.Setenv("COPILOT_GITHUB_TOKEN", "ghp_test")
 	t.Setenv("GOOGLE_CLOUD_PROJECT", "my-project")
+	t.Setenv("GOOGLE_CLOUD_REGION", "")
+	t.Setenv("GOOGLE_CLOUD_LOCATION", "")
+	t.Setenv("CLOUD_ML_REGION", "")
 
 	authMeta := &config.HarnessAuthMetadata{
 		Types: map[string]config.HarnessAuthTypeMetadata{
