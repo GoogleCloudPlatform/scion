@@ -57,8 +57,9 @@ func isContainerNameInUseError(err error) bool {
 	if err == nil {
 		return false
 	}
-	msg := err.Error()
-	return strings.Contains(msg, "already in use")
+	msg := strings.ToLower(err.Error())
+	return (strings.Contains(msg, "container name") && strings.Contains(msg, "already in use")) ||
+		strings.Contains(msg, "is already in use by container")
 }
 
 func isTmuxShellNotFoundError(err error) bool {

@@ -2064,5 +2064,10 @@ func (s *Server) handleAgentResetAuth(w http.ResponseWriter, r *http.Request, id
 }
 
 func isContainerNameConflict(err error) bool {
-	return err != nil && strings.Contains(err.Error(), "already in use")
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return (strings.Contains(msg, "container name") && strings.Contains(msg, "already in use")) ||
+		strings.Contains(msg, "is already in use by container")
 }
