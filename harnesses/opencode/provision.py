@@ -234,7 +234,10 @@ def _write_model_config(model: str) -> None:
         if isinstance(existing, dict):
             config_data = existing
 
-    config_data["model"] = model
+    if model:
+        config_data["model"] = model
+    else:
+        config_data.pop("model", None)
     sh.atomic_write_json(config_path, config_data)
 
 
@@ -279,8 +282,7 @@ def provision(ctx: sh.ProvisionContext) -> None:
     sh.apply_mcp_translated(ctx, _translate_mcp_server, _write_mcp_config)
 
     resolved_model = str(ctx.model_resolution.get("resolved_model") or "").strip()
-    if resolved_model:
-        _write_model_config(resolved_model)
+    _write_model_config(resolved_model)
 
     ctx.info(f"method={resolved.method}" + (f" model={resolved_model}" if resolved_model else ""))
 
