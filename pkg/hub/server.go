@@ -1496,9 +1496,6 @@ func (s *Server) SetIntegrationHA(dbDriver string, client *ent.Client, dsn strin
 	s.entClient = client
 	s.databaseDSN = dsn
 
-	if client != nil && s.discordLinkService != nil {
-		s.discordLinkService.SetEntClient(client)
-	}
 	s.mu.Unlock()
 
 	if client != nil {

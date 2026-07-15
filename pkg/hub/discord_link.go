@@ -15,22 +15,17 @@
 package hub
 
 import (
-	"context"
 	"log/slog"
 	"net"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/GoogleCloudPlatform/scion/pkg/ent"
-	"github.com/GoogleCloudPlatform/scion/pkg/ent/discordpendinglink"
 )
 
 const discordLinkCodeTTL = 15 * time.Minute
 
 // discordPendingLink holds state for a pending Discord account linking.
-// Used only by the in-memory fallback when no Ent client is available.
 type discordPendingLink struct {
 	Code          string
 	DiscordUserID string
@@ -40,15 +35,11 @@ type discordPendingLink struct {
 	UserEmail     string
 }
 
-// DiscordLinkService manages pending Discord account link codes.
-// When an Ent client is available (Postgres mode), pending links are stored
-// in the discord_pending_links table for cross-instance consistency.
-// When no Ent client is set, falls back to an in-memory map (single-node).
+// DiscordLinkService manages pending Discord account link codes using an
+// in-memory map (single-node only).
 type DiscordLinkService struct {
 	mu      sync.Mutex
-	pending map[string]*discordPendingLink // in-memory fallback
-
-	entClient *ent.Client // nil when running on SQLite
+	pending map[string]*discordPendingLink
 
 	verifyMu       sync.Mutex
 	verifyLimiters map[string]*tokenBucket
@@ -69,17 +60,6 @@ func NewDiscordLinkService() *DiscordLinkService {
 	return s
 }
 
-// SetEntClient enables DB-backed storage for pending link codes.
-func (s *DiscordLinkService) SetEntClient(client *ent.Client) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.entClient = client
-}
-
-func (s *DiscordLinkService) useDB() bool {
-	return s.entClient != nil
-}
-
 // RegisterCode stores a pending link code from the Discord plugin.
 func (s *DiscordLinkService) RegisterCode(code, discordUserID string) {
 	s.mu.Lock()
@@ -87,28 +67,6 @@ func (s *DiscordLinkService) RegisterCode(code, discordUserID string) {
 
 	upperCode := strings.ToUpper(code)
 
-	if s.useDB() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-
-		// Remove any existing pending code for this discord user.
-		_, _ = s.entClient.DiscordPendingLink.Delete().
-			Where(discordpendinglink.DiscordUserIDEQ(discordUserID)).
-			Exec(ctx)
-
-		err := s.entClient.DiscordPendingLink.Create().
-			SetCode(upperCode).
-			SetDiscordUserID(discordUserID).
-			SetStatus("pending").
-			SetExpiresAt(time.Now().Add(discordLinkCodeTTL)).
-			Exec(ctx)
-		if err != nil {
-			slog.Error("Failed to register discord link code in DB", "error", err)
-		}
-		return
-	}
-
-	// In-memory fallback.
 	for c, p := range s.pending {
 		if p.DiscordUserID == discordUserID {
 			delete(s.pending, c)
@@ -130,41 +88,6 @@ func (s *DiscordLinkService) VerifyCode(code, userID, userEmail string) (discord
 
 	upperCode := strings.ToUpper(code)
 
-	if s.useDB() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-
-		row, queryErr := s.entClient.DiscordPendingLink.Query().
-			Where(discordpendinglink.CodeEQ(upperCode)).
-			Only(ctx)
-		if queryErr != nil {
-			if ent.IsNotFound(queryErr) {
-				return "", "code_not_found"
-			}
-			slog.Error("Failed to query discord link code", "error", queryErr)
-			return "", "code_not_found"
-		}
-		if time.Now().After(row.ExpiresAt) {
-			_ = s.entClient.DiscordPendingLink.DeleteOne(row).Exec(ctx)
-			return "", "code_expired"
-		}
-		if row.Status == "confirmed" {
-			return row.DiscordUserID, ""
-		}
-
-		_, updateErr := s.entClient.DiscordPendingLink.UpdateOne(row).
-			SetStatus("confirmed").
-			SetUserID(userID).
-			SetUserEmail(userEmail).
-			Save(ctx)
-		if updateErr != nil {
-			slog.Error("Failed to confirm discord link code", "error", updateErr)
-			return "", "code_not_found"
-		}
-		return row.DiscordUserID, ""
-	}
-
-	// In-memory fallback.
 	p, ok := s.pending[upperCode]
 	if !ok {
 		return "", "code_not_found"
@@ -187,23 +110,6 @@ func (s *DiscordLinkService) GetStatusByDiscordUser(discordUserID string) (statu
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if s.useDB() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-
-		row, err := s.entClient.DiscordPendingLink.Query().
-			Where(discordpendinglink.DiscordUserIDEQ(discordUserID)).
-			Only(ctx)
-		if err != nil {
-			return "not_found", "", ""
-		}
-		if time.Now().After(row.ExpiresAt) {
-			return "expired", "", ""
-		}
-		return row.Status, row.UserID, row.UserEmail
-	}
-
-	// In-memory fallback.
 	for _, p := range s.pending {
 		if p.DiscordUserID == discordUserID {
 			if time.Now().After(p.ExpiresAt) {
@@ -220,16 +126,6 @@ func (s *DiscordLinkService) ConsumePending(discordUserID string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if s.useDB() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_, _ = s.entClient.DiscordPendingLink.Delete().
-			Where(discordpendinglink.DiscordUserIDEQ(discordUserID)).
-			Exec(ctx)
-		return
-	}
-
-	// In-memory fallback.
 	for code, p := range s.pending {
 		if p.DiscordUserID == discordUserID {
 			delete(s.pending, code)
@@ -285,20 +181,9 @@ func (s *DiscordLinkService) cleanupLoop() {
 			now := time.Now()
 
 			s.mu.Lock()
-			if s.useDB() {
-				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-				_, err := s.entClient.DiscordPendingLink.Delete().
-					Where(discordpendinglink.ExpiresAtLT(now)).
-					Exec(ctx)
-				cancel()
-				if err != nil {
-					slog.Warn("Failed to clean up expired discord link codes", "error", err)
-				}
-			} else {
-				for code, p := range s.pending {
-					if now.After(p.ExpiresAt) {
-						delete(s.pending, code)
-					}
+			for code, p := range s.pending {
+				if now.After(p.ExpiresAt) {
+					delete(s.pending, code)
 				}
 			}
 			s.mu.Unlock()

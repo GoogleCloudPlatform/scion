@@ -27,9 +27,6 @@ type BrokerJoinToken func(*sql.Selector)
 // BrokerSecret is the predicate function for brokersecret builders.
 type BrokerSecret func(*sql.Selector)
 
-// DiscordPendingLink is the predicate function for discordpendinglink builders.
-type DiscordPendingLink func(*sql.Selector)
-
 // EnvVar is the predicate function for envvar builders.
 type EnvVar func(*sql.Selector)
 

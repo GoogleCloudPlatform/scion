@@ -19,7 +19,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokerdispatch"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokerjointoken"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokersecret"
-	"github.com/GoogleCloudPlatform/scion/pkg/ent/discordpendinglink"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/envvar"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/gcpserviceaccount"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/githubinstallation"
@@ -119,7 +118,6 @@ func checkColumn(t, c string) error {
 			brokerdispatch.Table:           brokerdispatch.ValidColumn,
 			brokerjointoken.Table:          brokerjointoken.ValidColumn,
 			brokersecret.Table:             brokersecret.ValidColumn,
-			discordpendinglink.Table:       discordpendinglink.ValidColumn,
 			envvar.Table:                   envvar.ValidColumn,
 			gcpserviceaccount.Table:        gcpserviceaccount.ValidColumn,
 			githubinstallation.Table:       githubinstallation.ValidColumn,

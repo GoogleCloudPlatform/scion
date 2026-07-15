@@ -211,35 +211,6 @@ var (
 		Columns:    BrokerSecretsColumns,
 		PrimaryKey: []*schema.Column{BrokerSecretsColumns[0]},
 	}
-	// DiscordPendingLinksColumns holds the columns for the "discord_pending_links" table.
-	DiscordPendingLinksColumns = []*schema.Column{
-		{Name: "id", Type: field.TypeInt, Increment: true},
-		{Name: "code", Type: field.TypeString, Unique: true},
-		{Name: "discord_user_id", Type: field.TypeString},
-		{Name: "status", Type: field.TypeString, Default: "pending"},
-		{Name: "user_id", Type: field.TypeString, Default: ""},
-		{Name: "user_email", Type: field.TypeString, Default: ""},
-		{Name: "expires_at", Type: field.TypeTime},
-		{Name: "created_at", Type: field.TypeTime},
-	}
-	// DiscordPendingLinksTable holds the schema information for the "discord_pending_links" table.
-	DiscordPendingLinksTable = &schema.Table{
-		Name:       "discord_pending_links",
-		Columns:    DiscordPendingLinksColumns,
-		PrimaryKey: []*schema.Column{DiscordPendingLinksColumns[0]},
-		Indexes: []*schema.Index{
-			{
-				Name:    "discordpendinglink_discord_user_id",
-				Unique:  false,
-				Columns: []*schema.Column{DiscordPendingLinksColumns[2]},
-			},
-			{
-				Name:    "discordpendinglink_expires_at",
-				Unique:  false,
-				Columns: []*schema.Column{DiscordPendingLinksColumns[6]},
-			},
-		},
-	}
 	// EnvVarsColumns holds the columns for the "env_vars" table.
 	EnvVarsColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeUUID},
@@ -1319,7 +1290,6 @@ var (
 		BrokerDispatchTable,
 		BrokerJoinTokensTable,
 		BrokerSecretsTable,
-		DiscordPendingLinksTable,
 		EnvVarsTable,
 		GcpServiceAccountsTable,
 		GithubInstallationsTable,
@@ -1372,9 +1342,6 @@ func init() {
 	}
 	BrokerSecretsTable.Annotation = &entsql.Annotation{
 		Table: "broker_secrets",
-	}
-	DiscordPendingLinksTable.Annotation = &entsql.Annotation{
-		Table: "discord_pending_links",
 	}
 	EnvVarsTable.Annotation = &entsql.Annotation{
 		Table: "env_vars",

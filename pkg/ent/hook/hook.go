@@ -93,18 +93,6 @@ func (f BrokerSecretFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value
 	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.BrokerSecretMutation", m)
 }
 
-// The DiscordPendingLinkFunc type is an adapter to allow the use of ordinary
-// function as DiscordPendingLink mutator.
-type DiscordPendingLinkFunc func(context.Context, *ent.DiscordPendingLinkMutation) (ent.Value, error)
-
-// Mutate calls f(ctx, m).
-func (f DiscordPendingLinkFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
-	if mv, ok := m.(*ent.DiscordPendingLinkMutation); ok {
-		return f(ctx, mv)
-	}
-	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.DiscordPendingLinkMutation", m)
-}
-
 // The EnvVarFunc type is an adapter to allow the use of ordinary
 // function as EnvVar mutator.
 type EnvVarFunc func(context.Context, *ent.EnvVarMutation) (ent.Value, error)
