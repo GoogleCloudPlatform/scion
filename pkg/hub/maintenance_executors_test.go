@@ -108,21 +108,25 @@ func TestRebuildServerExecutor_BuildsToStagingThenInstalls(t *testing.T) {
 	}
 	lines := strings.Split(strings.TrimSpace(string(logData)), "\n")
 
-	// Expect 6 commands: git fetch, git pull, make web, go build, sudo install, systemctl restart.
-	if len(lines) != 6 {
-		t.Fatalf("expected 6 commands, got %d:\n%s", len(lines), string(logData))
+	// Expect 7 commands: git rev-parse (branch detection, runs at step-building time),
+	// git fetch, git reset --hard, make web, go build, sudo install, systemctl restart.
+	if len(lines) != 7 {
+		t.Fatalf("expected 7 commands, got %d:\n%s", len(lines), string(logData))
 	}
 
-	// Verify fetch + pull sequence.
-	if !strings.Contains(lines[0], "git fetch origin") {
-		t.Errorf("expected git fetch origin, got: %s", lines[0])
+	// Verify branch detection + fetch + reset sequence.
+	if !strings.Contains(lines[0], "git rev-parse") {
+		t.Errorf("expected git rev-parse (branch detection), got: %s", lines[0])
 	}
-	if !strings.Contains(lines[1], "git pull") {
-		t.Errorf("expected git pull, got: %s", lines[1])
+	if !strings.Contains(lines[1], "git fetch origin") {
+		t.Errorf("expected git fetch origin, got: %s", lines[1])
+	}
+	if !strings.Contains(lines[2], "git reset --hard") {
+		t.Errorf("expected git reset --hard, got: %s", lines[2])
 	}
 
 	// Verify go build targets the staging path inside the repo dir, not the final binary.
-	goLine := lines[3]
+	goLine := lines[4]
 	stagingBinary := filepath.Join(repoDir, "scion.rebuild")
 	if !strings.Contains(goLine, "-o "+stagingBinary) {
 		t.Errorf("go build should target staging path %q, got: %s", stagingBinary, goLine)
@@ -132,7 +136,7 @@ func TestRebuildServerExecutor_BuildsToStagingThenInstalls(t *testing.T) {
 	}
 
 	// Verify sudo install moves the staging binary to the final destination.
-	sudoInstallLine := lines[4]
+	sudoInstallLine := lines[5]
 	if !strings.Contains(sudoInstallLine, "sudo install") {
 		t.Errorf("expected sudo install command, got: %s", sudoInstallLine)
 	}
@@ -141,7 +145,7 @@ func TestRebuildServerExecutor_BuildsToStagingThenInstalls(t *testing.T) {
 	}
 
 	// Verify restart uses sudo systemctl (not bare systemctl).
-	restartLine := lines[5]
+	restartLine := lines[6]
 	if !strings.Contains(restartLine, "sudo systemctl restart test-scion") {
 		t.Errorf("expected 'sudo systemctl restart test-scion', got: %s", restartLine)
 	}
