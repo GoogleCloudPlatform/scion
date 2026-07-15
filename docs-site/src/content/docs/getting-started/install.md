@@ -11,18 +11,70 @@ which you want, read [Choosing a Mode](/scion/choosing-a-mode/) first.
 
 :::tip[Prefer a guided setup?]
 For Workstation mode, the [Onboarding Wizard](/scion/getting-started/onboarding/) walks you
-through the whole setup in your browser — no config files to edit. Install Scion (with its web
-assets), then run `scion server start`.
+through the whole setup in your browser — no config files to edit. Install Scion with Homebrew
+(below), then run `scion server start`.
 :::
+
+## Install with Homebrew (recommended)
+
+The easiest way to get a ready-to-run Scion — CLI plus embedded web UI — is the community
+[homebrew-scion](https://github.com/homebrew-scion/homebrew-scion) tap:
+
+```bash
+brew tap homebrew-scion/scion
+brew install homebrew-scion/scion/scion
+```
+
+This installs:
+
+- **`scion`** — the main CLI, pre-configured to use `ghcr.io/homebrew-scion` as the default
+  image registry, so the harness images are pulled for you.
+- **`scion-plugin-telegram`** — the Telegram broker plugin, installed automatically alongside
+  the CLI.
+
+To upgrade later:
+
+```bash
+brew update && brew upgrade scion
+```
+
+### Quick start
+
+Start the Workstation combo server:
+
+```bash
+scion server start
+```
+
+Your browser opens to the [Onboarding Wizard](/scion/getting-started/onboarding/) at
+`http://127.0.0.1:8080/onboarding`, which handles the rest of setup for you — runtime detection
+(Docker, Podman, or Apple Container), identity configuration, container image setup (pulling from
+`ghcr.io/homebrew-scion`), and creating your first workspace.
+
+After onboarding, start your first agent:
+
+```bash
+scion start my-agent "Your task here"
+```
+
+:::note[Using Homebrew?]
+The onboarding wizard performs machine initialization and image setup for you, so you can skip
+the [Prerequisites](#prerequisites) and [Configuration](#configuration) sections below — they
+apply to a from-source install or a fully manual, CLI-only (Local mode) setup.
+:::
+
+---
 
 ## Prerequisites
 
-### 1. Go
-Scion is written in Go. You need Go 1.26 or later installed (see the `go` directive in the
-repository's `go.mod`).
-- [Download and install Go](https://golang.org/doc/install)
+These apply when you build [from source](#install-from-source) or configure Scion manually. The
+onboarding wizard checks the runtime and Git requirements for you.
 
-While a binary may be available from the github releases page, this is an active project and it is currently best to regularly build from source.
+### 1. Go
+Go is required only to build Scion **from source**. You need Go 1.26 or later installed (see the
+`go` directive in the repository's `go.mod`). Homebrew installs a prebuilt binary, so you can
+skip this if you installed with `brew`.
+- [Download and install Go](https://golang.org/doc/install)
 
 ### 2. Container Runtime
 Scion requires a container runtime to manage agents. You can use Docker, Podman, or the Apple Virtualization Framework (experimental).
@@ -59,9 +111,12 @@ For Debian you may need to build from source, see the [git site](https://git-scm
 
 ---
 
-## Scion Installation
+## Install from Source
 
-### From Source
+Building from source is the alternative to [Homebrew](#install-with-homebrew-recommended) — use
+it if you are contributing to Scion or prefer to build the binary yourself.
+
+### From Source (`go install`)
 You can install Scion directly using `go install`:
 
 ```bash

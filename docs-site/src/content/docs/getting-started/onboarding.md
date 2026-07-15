@@ -15,7 +15,7 @@ The wizard sets up **Workstation mode** — a single-tenant Scion server (Hub + 
 
 Before you start, you need a working Scion install and a container runtime. See the [Installation guide](/scion/getting-started/install/) for details. In short:
 
-- Scion installed with its web assets. Use **Homebrew** (`brew install scion`) for a ready-to-run install; a bare `go install` does **not** embed the web UI, so the wizard would load blank.
+- Scion installed with its web assets. Use **Homebrew** (`brew tap homebrew-scion/scion && brew install homebrew-scion/scion/scion`) for a ready-to-run install; a bare `go install` does **not** embed the web UI, so the wizard would load blank. See the [Installation guide](/scion/getting-started/install/#install-with-homebrew-recommended) for details.
 - A container runtime — Docker, Podman, or Apple Container.
 - Git 2.47 or later (the wizard flags older versions).
 

@@ -22,14 +22,36 @@ The visualization above replays the actual telemetry collected from messages and
 
 ## Quick Start
 
-### Workstation Quick Start (Homebrew)
+### Install with Homebrew (recommended)
+
+The easiest way to get Scion is the community [homebrew-scion](https://github.com/homebrew-scion/homebrew-scion) tap:
 
 ```bash
-brew install scion
+brew tap homebrew-scion/scion
+brew install homebrew-scion/scion/scion
+```
+
+This installs the `scion` CLI — pre-configured to use `ghcr.io/homebrew-scion` as the default image registry — along with the `scion-plugin-telegram` broker plugin. To upgrade later:
+
+```bash
+brew update && brew upgrade scion
+```
+
+Then start the Workstation server:
+
+```bash
 scion server start
 ```
 
-Your browser will open to the onboarding wizard at `http://127.0.0.1:8080/onboarding`, which walks you through machine setup, runtime detection, harness selection, and creating your first project.
+Your browser opens to the onboarding wizard at `http://127.0.0.1:8080/onboarding`, which walks you through runtime detection (Docker, Podman, or Apple Container), identity configuration, container image setup, and creating your first workspace.
+
+After onboarding, start your first agent:
+
+```bash
+scion start my-agent "Your task here"
+```
+
+See the [homebrew-scion tap](https://github.com/homebrew-scion/homebrew-scion) for the full list of pre-built multi-arch container images and distribution details.
 
 ### Install from Source
 
