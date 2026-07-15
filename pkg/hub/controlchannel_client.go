@@ -720,4 +720,3 @@ func (c *HybridBrokerClient) DeleteImage(ctx context.Context, brokerID, brokerEn
 	}
 	return fmt.Errorf("HTTP client does not support image delete")
 }
-
