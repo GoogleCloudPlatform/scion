@@ -1100,7 +1100,7 @@ export class ScionPageOnboarding extends LitElement {
         return;
       }
       const data = (await res.json()) as { jobId: string };
-      this.subscribeToImageJob(data.jobId, harnesses.length);
+      this.subscribeToImageJob(data.jobId, 0);
     } catch {
       this.error = 'Failed to connect to the server.';
       this.imagePulling = false;
@@ -1150,7 +1150,7 @@ export class ScionPageOnboarding extends LitElement {
 
           if (status === 'done' || status === 'exists' || status === 'error') {
             completedImages.add(fullImageName);
-            if (completedImages.size >= totalImages) {
+            if (this.pullTotal > 0 && completedImages.size >= this.pullTotal) {
               finishPull();
             }
           }

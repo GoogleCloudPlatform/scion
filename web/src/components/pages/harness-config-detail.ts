@@ -679,7 +679,7 @@ export class ScionPageHarnessConfigDetail extends LitElement {
             : ''}
           ${hc.sourceUrl
             ? html`<span class="source-url">Source:
-                <a href=${hc.sourceUrl} target="_blank" rel="noopener">${hc.sourceUrl}</a>
+                <a href=${hc.sourceUrl.replace(/^git\+/, '')} target="_blank" rel="noopener">${hc.sourceUrl}</a>
               </span>`
             : ''}
         </div>

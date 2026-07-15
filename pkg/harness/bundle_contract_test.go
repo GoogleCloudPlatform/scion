@@ -231,9 +231,24 @@ func runBundleContractCase(t *testing.T, python, hname, caseDir string) {
 		t.Fatalf("write manifest.json: %v", err)
 	}
 
-	// Run provision.py.
+	// Run provision.py. Strip ambient GCP credentials so env_fallback in
+	// provision.py cannot pick up host credentials and alter auth selection.
+	gcpAmbient := map[string]bool{
+		"GOOGLE_CLOUD_PROJECT":           true,
+		"GOOGLE_CLOUD_REGION":            true,
+		"GOOGLE_CLOUD_LOCATION":          true,
+		"CLOUD_ML_REGION":                true,
+		"GOOGLE_APPLICATION_CREDENTIALS": true,
+	}
+	baseEnv := make([]string, 0, len(os.Environ()))
+	for _, e := range os.Environ() {
+		key, _, _ := strings.Cut(e, "=")
+		if !gcpAmbient[key] {
+			baseEnv = append(baseEnv, e)
+		}
+	}
 	cmd := exec.Command(python, filepath.Join(bundleDir, "provision.py"), "--manifest", manifestPath)
-	cmd.Env = append(os.Environ(), "HOME="+tmpHome, "PYTHONDONTWRITEBYTECODE=1")
+	cmd.Env = append(baseEnv, "HOME="+tmpHome, "PYTHONDONTWRITEBYTECODE=1")
 	output, err := cmd.CombinedOutput()
 
 	gotExitCode := 0

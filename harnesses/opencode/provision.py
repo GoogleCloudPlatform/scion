@@ -184,6 +184,23 @@ def _translate_mcp_server(name: str, spec: dict[str, Any]) -> dict[str, Any] | N
     return None
 
 
+def _write_opencode_auth_file(ctx: sh.ProvisionContext) -> None:
+    """Write ~/.local/share/opencode/auth.json from a staged OPENCODE_AUTH file secret."""
+    if "OPENCODE_AUTH" not in ctx.file_secret_files:
+        return
+    content = ctx.read_file_secret("OPENCODE_AUTH")
+    if not content.strip():
+        raise sh.ProvisionError("OPENCODE_AUTH secret is empty")
+    try:
+        json.loads(content)
+    except json.JSONDecodeError as exc:
+        raise sh.ProvisionError(
+            f"OPENCODE_AUTH secret is not valid JSON: {exc}"
+        ) from exc
+    target = sh.expand_path("~/.local/share/opencode/auth.json")
+    sh.atomic_write_text(target, content, mode=0o600)
+
+
 def _write_mcp_config(servers: dict[str, Any]) -> None:
     """Merge translated MCP servers into ~/.config/opencode/opencode.json."""
     config_path = sh.expand_path(OPENCODE_CONFIG_FILE)
@@ -247,6 +264,10 @@ def provision(ctx: sh.ProvisionContext) -> None:
 
     extra: dict[str, Any] = {}
     env: dict[str, str] = {}
+
+    if resolved.method == "auth-file":
+        _write_opencode_auth_file(ctx)
+        extra["auth_file_written"] = True
 
     if resolved.method == "vertex-ai":
         extra["vertex_project_env"] = "VERTEXAI_PROJECT"

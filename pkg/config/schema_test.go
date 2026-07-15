@@ -91,6 +91,61 @@ harnesses:
 	assert.False(t, isLegacy)
 }
 
+func TestDetectSettingsFormat_V1RuntimeTypeIndicator(t *testing.T) {
+	// v1-shaped: runtimes entry with type key but no schema_version
+	data := []byte(`
+active_profile: cr
+runtimes:
+  cr:
+    type: cloudrun
+    cloudrun:
+      project: my-project
+      region: us-central1
+`)
+	version, isLegacy := DetectSettingsFormat(data)
+	assert.Equal(t, "1", version, "v1-shaped runtime with type key should be detected as versioned")
+	assert.False(t, isLegacy)
+}
+
+func TestDetectSettingsFormat_V1RuntimeGKEIndicator(t *testing.T) {
+	data := []byte(`
+active_profile: k8s
+runtimes:
+  k8s:
+    gke: true
+    context: my-cluster
+`)
+	version, isLegacy := DetectSettingsFormat(data)
+	assert.Equal(t, "1", version, "v1-shaped runtime with gke key should be detected as versioned")
+	assert.False(t, isLegacy)
+}
+
+func TestDetectSettingsFormat_V1RuntimeListAllNamespacesIndicator(t *testing.T) {
+	data := []byte(`
+active_profile: k8s
+runtimes:
+  k8s:
+    list_all_namespaces: true
+`)
+	version, isLegacy := DetectSettingsFormat(data)
+	assert.Equal(t, "1", version, "v1-shaped runtime with list_all_namespaces key should be detected as versioned")
+	assert.False(t, isLegacy)
+}
+
+func TestDetectSettingsFormat_LegacyRuntimeNoV1Indicators(t *testing.T) {
+	// Legacy runtimes without v1-only keys should not trigger v1 detection
+	data := []byte(`
+active_profile: local
+runtimes:
+  local:
+    host: docker
+    namespace: default
+`)
+	version, isLegacy := DetectSettingsFormat(data)
+	assert.Equal(t, "", version, "legacy runtime without v1 fields should not be detected as versioned")
+	assert.False(t, isLegacy)
+}
+
 // --- ValidateSettings tests ---
 
 func TestValidateSettings_ValidV1(t *testing.T) {

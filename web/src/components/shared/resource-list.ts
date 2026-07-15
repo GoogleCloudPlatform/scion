@@ -331,7 +331,7 @@ export class ScionResourceList extends LitElement {
       }
       const data = (await response.json()) as Record<string, ResourceItem[]>;
       const list = this.kind === 'template' ? data.templates : data.harnessConfigs;
-      this.items = Array.isArray(list) ? list : [];
+      this.items = (Array.isArray(list) ? list : []).slice().sort((a, b) => (a.displayName || a.name).localeCompare(b.displayName || b.name));
     } catch (err) {
       console.error(`Failed to load ${this.apiResource}:`, err);
       this.error = err instanceof Error ? err.message : `Failed to load ${this.apiResource}`;
@@ -458,7 +458,7 @@ export class ScionResourceList extends LitElement {
       }
       const data = (await response.json()) as Record<string, ResourceItem[]>;
       const list = this.kind === 'template' ? data.templates : data.harnessConfigs;
-      this.globalItems = Array.isArray(list) ? list : [];
+      this.globalItems = (Array.isArray(list) ? list : []).slice().sort((a, b) => (a.displayName || a.name).localeCompare(b.displayName || b.name));
     } catch (err) {
       this.globalError = err instanceof Error ? err.message : 'Failed to load global resources';
     } finally {
