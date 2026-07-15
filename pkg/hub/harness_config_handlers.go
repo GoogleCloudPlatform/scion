@@ -1128,7 +1128,7 @@ func (s *Server) handleHarnessConfigImageStatus(w http.ResponseWriter, r *http.R
 
 	if s.brokerClient == nil {
 		if s.imageManager != nil {
-\t\t\tentry := s.buildLocalImageEntry(ctx, shortImage, longImage, registryStatus)
+			entry := s.buildLocalImageEntry(ctx, shortImage, longImage, registryStatus)
 			writeJSON(w, http.StatusOK, AggregatedImageStatusResponse{
 				Image:    image,
 				Registry: &registryStatus,
