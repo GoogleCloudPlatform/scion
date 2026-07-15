@@ -163,6 +163,10 @@ func (m *mockIntegrationManager) InstallPlugin(name, repoPath, pluginsDir, confi
 	return nil
 }
 
+func (m *mockIntegrationManager) LoadOne(pluginType, name string, entry plugin.PluginEntry, pluginsDir string) error {
+	return nil
+}
+
 func (m *mockIntegrationManager) GetBroker(name string) (eventbus.EventBus, error) {
 	return nil, fmt.Errorf("mock: GetBroker not wired")
 }

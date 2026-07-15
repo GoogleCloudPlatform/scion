@@ -1100,14 +1100,14 @@ export class ScionPageOnboarding extends LitElement {
         return;
       }
       const data = (await res.json()) as { jobId: string };
-      this.subscribeToImageJob(data.jobId, 0);
+      this.subscribeToImageJob(data.jobId);
     } catch {
       this.error = 'Failed to connect to the server.';
       this.imagePulling = false;
     }
   }
 
-  private subscribeToImageJob(jobId: string, totalImages: number): void {
+  private subscribeToImageJob(jobId: string): void {
     this.cleanupImageEvents();
 
     const url = `/events?sub=${encodeURIComponent('system.images.' + jobId)}`;
