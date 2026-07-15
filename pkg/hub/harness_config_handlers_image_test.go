@@ -280,6 +280,60 @@ func TestImageStatusHandler_NoNodeBoundBrokers(t *testing.T) {
 	}
 }
 
+type fakeImageManager struct {
+	exists map[string]bool
+}
+
+func (f *fakeImageManager) ImageExists(_ context.Context, image string) (bool, error) {
+	return f.exists[image], nil
+}
+func (f *fakeImageManager) PullImage(context.Context, string) error   { return nil }
+func (f *fakeImageManager) RemoveImage(context.Context, string) error { return nil }
+func (f *fakeImageManager) Name() string                              { return "Podman" }
+
+func TestImageStatusHandler_ProxyBrokersWithLocalImageManager(t *testing.T) {
+	srv, db := setupImageStatusTest(t)
+
+	createTestBroker(t, db, "broker1", "k8s-broker", "", []store.BrokerProfile{{Type: "kubernetes"}}, nil)
+	hc := createTestHarnessConfig(t, db, "hc1", "my-image:latest")
+
+	transport := newBrokerHTTPTransport(false, nil)
+	srv.brokerClient = &HybridBrokerClient{
+		controlChannel: &ControlChannelBrokerClient{manager: &neverConnectedTunnel{}},
+		httpClient:     transport,
+	}
+
+	mgr := &fakeImageManager{exists: map[string]bool{"my-image:latest": true}}
+	srv.imageManager = mgr
+	srv.imageChecker.SetLocal(mgr)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/harness-configs/"+hc.ID+"/image-status", nil)
+	rr := httptest.NewRecorder()
+	srv.handleHarnessConfigImageStatus(rr, req, hc.ID)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var resp AggregatedImageStatusResponse
+	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode: %v", err)
+	}
+
+	if len(resp.Brokers) != 1 {
+		t.Fatalf("expected 1 broker entry (local), got %d", len(resp.Brokers))
+	}
+	if !resp.Brokers[0].Reachable {
+		t.Error("expected local entry to be reachable")
+	}
+	if resp.Brokers[0].BrokerName != "Podman" {
+		t.Errorf("expected broker name %q, got %q", "Podman", resp.Brokers[0].BrokerName)
+	}
+	if len(resp.ProxyBrokers) != 1 {
+		t.Errorf("expected 1 proxy broker, got %d", len(resp.ProxyBrokers))
+	}
+}
+
 func TestImageStatusHandler_BareImageCheck(t *testing.T) {
 	srv, db := setupImageStatusTest(t)
 
