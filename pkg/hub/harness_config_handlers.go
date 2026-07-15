@@ -1241,7 +1241,7 @@ func (s *Server) handleHarnessConfigImageStatus(w http.ResponseWriter, r *http.R
 // co-located container runtime (Docker/Podman) when no broker client is
 // available. This ensures workstation-mode users see pulled image state
 // and the Build Image option.
-func (s *Server) buildLocalImageEntry(ctx context.Context, shortImage, longImage string, registryStatus *RegistryImageStatus) BrokerImageEntry {
+func (s *Server) buildLocalImageEntry(ctx context.Context, shortImage, longImage string, registryStatus RegistryImageStatus) BrokerImageEntry {
 	result := s.imageChecker.CheckAll(ctx, shortImage, longImage)
 
 	brokerName := "Local Runtime"
