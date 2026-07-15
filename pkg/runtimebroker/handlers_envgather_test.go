@@ -1528,6 +1528,57 @@ profiles:
 	}
 }
 
+// TestEnvGather_VertexAI_ADCSatisfiedByProcessEnv tests that vertex-ai gcloud-adc
+// requirement is satisfied when GOOGLE_APPLICATION_CREDENTIALS is set in the
+// broker's process environment (not in resolvedEnv). This covers workstation mode
+// where the ADC path is auto-detected at startup and exported as a process env var.
+func TestEnvGather_VertexAI_ADCSatisfiedByProcessEnv(t *testing.T) {
+	srv, _, projectDir := newTestServerWithHarnessConfig(t, "claude",
+		"harness: claude\nimage: test-image\nuser: scion\nauth_selected_type: vertex-ai\n",
+		`
+schema_version: "1"
+harness_configs:
+  claude:
+    harness: claude
+profiles:
+  default:
+    runtime: mock
+`)
+
+	// Set GOOGLE_APPLICATION_CREDENTIALS in process env (not in resolvedEnv)
+	t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", "/tmp/fake-adc.json")
+
+	// Provide project and region in resolvedEnv, but NO gcloud-adc file secret
+	// and NO GOOGLE_APPLICATION_CREDENTIALS in resolvedEnv
+	body := `{
+		"name": "test-agent-vertex-proc-env",
+		"id": "agent-uuid-vpe",
+		"gatherEnv": true,
+		"grovePath": "` + projectDir + `",
+		"resolvedEnv": {
+			"GOOGLE_CLOUD_PROJECT": "my-project",
+			"GOOGLE_CLOUD_REGION": "us-central1"
+		},
+		"config": {"template": "claude", "profile": "default"}
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(w, req)
+
+	// Should NOT return 202 with gcloud-adc in needs — process env satisfies it
+	if w.Code == http.StatusAccepted {
+		var envReqs EnvRequirementsResponse
+		_ = json.Unmarshal(w.Body.Bytes(), &envReqs)
+		for _, k := range envReqs.Needs {
+			if k == "gcloud-adc" {
+				t.Fatalf("gcloud-adc should not be in needs when GOOGLE_APPLICATION_CREDENTIALS is set in process env, got needs=%v", envReqs.Needs)
+			}
+		}
+	}
+}
+
 // TestEnvGather_AutoDetectVertexAI_FromGCPProject tests that when no auth type
 // is explicitly selected, providing GOOGLE_CLOUD_PROJECT (e.g. from hub-scoped
 // env vars) auto-detects vertex-ai auth and requires region instead of an API key.

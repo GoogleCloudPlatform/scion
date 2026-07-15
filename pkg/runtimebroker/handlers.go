@@ -2172,10 +2172,17 @@ func (s *Server) extractRequiredEnvKeys(req CreateAgentRequest, hydratedHarnessC
 
 			for _, as := range authSecrets {
 				if _, ok := fileSecrets[as.Key]; !ok {
-					// Check if any alternative env keys satisfy this requirement.
+					// Check if any alternative env keys satisfy this requirement
+					// via resolved env, inline config env, or process env (the
+					// latter covers workstation mode where PR #719 sets
+					// GOOGLE_APPLICATION_CREDENTIALS at startup).
 					altSatisfied := false
 					for _, altKey := range as.AlternativeEnvKeys {
 						if v, ok := req.ResolvedEnv[altKey]; ok && v != "" {
+							altSatisfied = true
+							break
+						}
+						if v := os.Getenv(altKey); v != "" {
 							altSatisfied = true
 							break
 						}
