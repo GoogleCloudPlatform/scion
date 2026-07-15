@@ -293,7 +293,6 @@ type V1ServerConfig struct {
 
 	// GitHubApp configures the Hub's GitHub App integration for agent git authentication.
 	GitHubApp *V1GitHubAppConfig `json:"github_app,omitempty" yaml:"github_app,omitempty" koanf:"github_app"`
-
 }
 
 // V1GitHubAppConfig holds the GitHub App configuration in settings.yaml format.
