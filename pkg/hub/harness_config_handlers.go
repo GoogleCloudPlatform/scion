@@ -1127,6 +1127,15 @@ func (s *Server) handleHarnessConfigImageStatus(w http.ResponseWriter, r *http.R
 	registryStatus := s.checkRegistryImage(ctx, longImage)
 
 	if s.brokerClient == nil {
+		if s.imageManager != nil {
+			entry := s.buildLocalImageEntry(ctx, shortImage, longImage, &registryStatus)
+			writeJSON(w, http.StatusOK, AggregatedImageStatusResponse{
+				Image:    image,
+				Registry: &registryStatus,
+				Brokers:  []BrokerImageEntry{entry},
+			})
+			return
+		}
 		writeJSON(w, http.StatusOK, AggregatedImageStatusResponse{
 			Image:    image,
 			Registry: &registryStatus,
@@ -1226,6 +1235,52 @@ func (s *Server) handleHarnessConfigImageStatus(w http.ResponseWriter, r *http.R
 		ProxyBrokers: proxyEntries,
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// buildLocalImageEntry constructs a BrokerImageEntry using the hub's
+// co-located container runtime (Docker/Podman) when no broker client is
+// available. This ensures workstation-mode users see pulled image state
+// and the Build Image option.
+func (s *Server) buildLocalImageEntry(ctx context.Context, shortImage, longImage string, registryStatus *RegistryImageStatus) BrokerImageEntry {
+	result := s.imageChecker.CheckAll(ctx, shortImage, longImage)
+
+	brokerName := "Local Runtime"
+	if namer, ok := s.imageManager.(interface{ Name() string }); ok {
+		if n := namer.Name(); n != "" {
+			brokerName = n
+		}
+	}
+
+	entry := BrokerImageEntry{
+		BrokerName: brokerName,
+		Reachable:  true,
+	}
+	if shortImage != "" {
+		entry.LocalShort = &BrokerImageEntityState{Exists: result.LocalShort.Exists, Hash: result.LocalShort.Hash}
+	}
+	if longImage != "" {
+		entry.LocalLong = &BrokerImageEntityState{Exists: result.LocalLong.Exists, Hash: result.LocalLong.Hash}
+	}
+
+	if entry.LocalLong != nil && entry.LocalLong.Exists && registryStatus.Hash != "" && entry.LocalLong.Hash != "" {
+		entry.NewerInRegistry = registryStatus.Hash != entry.LocalLong.Hash
+	}
+
+	switch {
+	case entry.LocalShort != nil && entry.LocalShort.Exists:
+		entry.ResolvedImage = shortImage
+		entry.ResolutionSource = "local_short"
+	case entry.LocalLong != nil && entry.LocalLong.Exists:
+		entry.ResolvedImage = longImage
+		entry.ResolutionSource = "local_long"
+	case registryStatus.Exists:
+		entry.ResolvedImage = longImage
+		entry.ResolutionSource = "remote"
+	default:
+		entry.ResolutionSource = "none"
+	}
+
+	return entry
 }
 
 // handleHarnessConfigDeleteLocalImage removes the local short-form image.
