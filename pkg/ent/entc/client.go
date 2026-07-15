@@ -181,12 +181,14 @@ func applyKeepalives(params map[string]string) {
 // already exists") is silently skipped so that new tables are created
 // alongside pre-existing ones.
 func AutoMigrate(ctx context.Context, client *ent.Client) error {
-	return client.Schema.Create(
-		ctx,
+	migrateOpts := []entschema.MigrateOption{
 		migrate.WithDropColumn(false),
 		migrate.WithDropIndex(false),
-		entschema.WithApplyHook(skipExistingRelations),
-	)
+	}
+	if client.Driver().Dialect() == dialect.Postgres {
+		migrateOpts = append(migrateOpts, entschema.WithApplyHook(skipExistingRelations))
+	}
+	return client.Schema.Create(ctx, migrateOpts...)
 }
 
 // skipExistingRelations is an Ent schema ApplyHook that makes DDL
