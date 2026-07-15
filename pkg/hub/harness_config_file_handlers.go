@@ -368,6 +368,14 @@ func (s *Server) handleHarnessConfigFileUpload(w http.ResponseWriter, r *http.Re
 
 	hc.Files = files
 	hc.ContentHash = computeContentHash(hc.Files)
+
+	if image := extractImageFromStorage(ctx, stor, hc.StoragePath); image != "" {
+		if hc.Config == nil {
+			hc.Config = &store.HarnessConfigData{}
+		}
+		hc.Config.Image = image
+	}
+
 	if err := s.store.UpdateHarnessConfig(ctx, hc); err != nil {
 		RuntimeError(w, "Failed to update harness config manifest")
 		return
