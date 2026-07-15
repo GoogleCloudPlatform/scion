@@ -307,8 +307,8 @@ func TestSkillAuthz_ListSkills_NilIdentitySeesOnlyPublic(t *testing.T) {
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
 
 	for _, sk := range resp.Skills {
-		assert.Equal(t, store.VisibilityPublic, sk.Skill.Visibility,
-			"nil-identity list should only contain public skills, got %q with visibility %q", sk.Skill.Name, sk.Skill.Visibility)
+		assert.Equal(t, store.VisibilityPublic, sk.Visibility,
+			"nil-identity list should only contain public skills, got %q with visibility %q", sk.Name, sk.Visibility)
 	}
 	assert.Equal(t, 1, len(resp.Skills), "should see exactly the one public skill")
 }
