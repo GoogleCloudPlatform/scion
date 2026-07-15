@@ -78,7 +78,6 @@ const PLATFORM_FIELDS: Record<string, PlatformFieldDef[]> = {
     { key: 'webhook_url', label: 'Webhook URL', description: 'Public URL for Telegram to send webhook updates to', defaultValue: '' },
     { key: 'webhook_listen', label: 'Webhook Listen', description: 'HTTP listen address for webhook mode', defaultValue: ':9094' },
     { key: 'db_path', label: 'Database Path', description: 'Path to SQLite database', defaultValue: 'telegram_v2.db' },
-    { key: 'database_url', label: 'Database URL', description: 'PostgreSQL connection string for HA/Mode 3 deployments (leave empty for SQLite)', defaultValue: '' },
     { key: 'skip_set_webhook', label: 'Skip Webhook Registration', description: 'Set to true when running in HA mode to skip automatic webhook registration', defaultValue: 'false' },
     { key: 'agent_cache_ttl', label: 'Agent Cache TTL', description: 'How long to cache agent info', defaultValue: '5m' },
     { key: 'send_queue_size', label: 'Send Queue Size', description: 'Buffer size for outbound message queue (0 = unbuffered)', defaultValue: '0' },
