@@ -492,9 +492,20 @@ func (s *Server) createProjectMembersGroupAndPolicy(ctx context.Context, project
 		OwnerID:   project.OwnerID,
 		CreatedBy: project.CreatedBy,
 	}
-	if err := s.store.CreateGroup(ctx, membersGroup); err != nil {
-		if !errors.Is(err, store.ErrAlreadyExists) {
-			slog.Warn("failed to create project members group", "project_id", project.ID, "error", err.Error())
+	createErr := s.store.CreateGroup(ctx, membersGroup)
+	if createErr != nil && errors.Is(createErr, store.ErrInvalidInput) && membersGroup.OwnerID != "" {
+		// FK violation: the owner user does not exist in the store. This can occur
+		// when authentication uses proxy headers without provisioning a DB user record
+		// (e.g. legacy trusted-proxy auth on a fresh Postgres deployment). Retry
+		// without OwnerID so the group and its associated policy are still created.
+		slog.Warn("project members group owner not found, retrying without owner",
+			"project_id", project.ID, "owner_id", membersGroup.OwnerID, "error", createErr.Error())
+		membersGroup.OwnerID = ""
+		createErr = s.store.CreateGroup(ctx, membersGroup)
+	}
+	if createErr != nil {
+		if !errors.Is(createErr, store.ErrAlreadyExists) {
+			slog.Warn("failed to create project members group", "project_id", project.ID, "error", createErr.Error())
 			return
 		}
 		// Slug conflict — look up existing group

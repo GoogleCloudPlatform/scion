@@ -1457,6 +1457,40 @@ func TestProjectRegister_ExistingProject_CreatesMembershipGroup(t *testing.T) {
 	assert.True(t, ownerIDs[DevUserID], "linking user should be an owner")
 }
 
+// TestCreateProjectMembersGroup_OwnerNotInStore verifies that when the project
+// owner does not yet exist in the users table (e.g. legacy proxy auth on a
+// fresh Postgres deployment), the members group is still created without an
+// OwnerID rather than failing with an FK constraint violation.
+func TestCreateProjectMembersGroup_OwnerNotInStore(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	// Create a project whose OwnerID is a valid UUID but has no corresponding
+	// user record — simulating the fresh-deployment proxy-auth scenario described
+	// in issue #434.
+	ghostOwnerID := api.NewUUID()
+	project := &store.Project{
+		ID:        api.NewUUID(),
+		Name:      "Ghost Owner Project",
+		Slug:      "ghost-owner-project",
+		CreatedBy: ghostOwnerID,
+		OwnerID:   ghostOwnerID,
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+
+	// createProjectMembersGroupAndPolicy should not return an error even though
+	// the owner user does not exist. It should retry without OwnerID.
+	srv.createProjectMembersGroupAndPolicy(ctx, project)
+
+	// The members group must still have been created.
+	membersSlug := "project:" + project.Slug + ":members"
+	group, err := s.GetGroupBySlug(ctx, membersSlug)
+	require.NoError(t, err, "members group should have been created despite missing owner")
+	assert.Equal(t, project.ID, group.ProjectID)
+	// OwnerID should be empty because the referenced user did not exist.
+	assert.Empty(t, group.OwnerID, "group OwnerID should be empty when owner user is not in store")
+}
+
 // =============================================================================
 // Git-Workspace Hybrid (Shared Workspace Mode) Tests
 // =============================================================================
