@@ -1376,7 +1376,7 @@ export class ScionPageAdminServerConfig extends LitElement {
 
   private get resolvedHarnessConfig(): string {
     return this.harnessConfigSelection === '__other__'
-      ? this.customHarnessConfig
+      ? this.customHarnessConfig.trim()
       : this.harnessConfigSelection;
   }
 
