@@ -61,19 +61,6 @@ mcp:
     sse: http
     streamable-http: http
 
-hooks:
-  dialect: copilot
-  config_file: .copilot/hooks/scion.json
-  lifecycle_events:
-    - sessionStart
-    - sessionEnd
-    - userPromptSubmitted
-    - preToolUse
-    - postToolUse
-    - errorOccurred
-    - agentStop
-    - subagentStop
-
 capabilities:
   limits:
     max_turns: { support: "no", reason: "Copilot CLI turn events do not carry a turn counter" }
