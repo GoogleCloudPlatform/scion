@@ -37,6 +37,7 @@ type Manager struct {
 	selfManaged     map[string]bool             // "type:name" -> true if self-managed
 	grpcAdapters    map[string]GRPCBrokerClient // "type:name" -> gRPC adapter
 	configs         map[string]DiscoveredPlugin // "type:name" -> original config (for reconnection)
+	configFiles     map[string]string           // "type:name" -> config file path (immutable after load)
 	pluginEntries   map[string]PluginEntry      // "type:name" -> original PluginEntry (for mode resolution)
 	mu              sync.RWMutex
 	logger          *slog.Logger
@@ -58,6 +59,7 @@ func NewManager(logger *slog.Logger) *Manager {
 		selfManaged:     make(map[string]bool),
 		grpcAdapters:    make(map[string]GRPCBrokerClient),
 		configs:         make(map[string]DiscoveredPlugin),
+		configFiles:     make(map[string]string),
 		pluginEntries:   make(map[string]PluginEntry),
 		logger:          logger,
 		brokerCallbacks: &HostCallbacksForwarder{},
@@ -206,6 +208,9 @@ func (m *Manager) loadGRPCPlugin(pluginType, name string, entry PluginEntry) err
 	}
 	m.grpcAdapters[key] = adapter
 	m.pluginEntries[key] = entry
+	if entry.ConfigFile != "" {
+		m.configFiles[key] = entry.ConfigFile
+	}
 	m.mu.Unlock()
 
 	m.logger.Info("Loaded gRPC plugin",
@@ -299,6 +304,9 @@ func (m *Manager) loadPlugin(dp DiscoveredPlugin) error {
 	m.clients[key] = client
 	m.selfManaged[key] = dp.SelfManaged
 	m.configs[key] = dp
+	if cf := dp.Config["config_file"]; cf != "" {
+		m.configFiles[key] = cf
+	}
 	// Cache the dispensed interface so subsequent Get() calls don't
 	// trigger a second Dispense (which would start another AcceptAndServe
 	// on the same MuxBroker stream ID, causing a timeout).
@@ -559,6 +567,16 @@ func (m *Manager) GetPluginConfig(pluginType, name string) map[string]string {
 		return out
 	}
 	return nil
+}
+
+// GetPluginConfigFile returns the config file path for the named plugin.
+// Unlike GetPluginConfig, this value is set once at load time and is not
+// affected by ReplaceBrokerConfig overwrites.
+func (m *Manager) GetPluginConfigFile(pluginType, name string) string {
+	key := pluginType + ":" + name
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.configFiles[key]
 }
 
 // HasPlugin returns true if a plugin with the given type and name is loaded
@@ -852,6 +870,7 @@ func (m *Manager) Shutdown() {
 	m.selfManaged = make(map[string]bool)
 	m.grpcAdapters = make(map[string]GRPCBrokerClient)
 	m.configs = make(map[string]DiscoveredPlugin)
+	m.configFiles = make(map[string]string)
 	m.pluginEntries = make(map[string]PluginEntry)
 
 	goplugin.CleanupClients()

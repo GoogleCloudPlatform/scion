@@ -93,6 +93,17 @@ func (m *mockIntegrationManager) GetPluginConfig(pluginType, name string) map[st
 	return out
 }
 
+func (m *mockIntegrationManager) GetPluginConfigFile(pluginType, name string) string {
+	if pluginType != "broker" {
+		return ""
+	}
+	cfg, ok := m.plugins[name]
+	if !ok {
+		return ""
+	}
+	return cfg["config_file"]
+}
+
 func (m *mockIntegrationManager) IsSelfManaged(pluginType, name string) bool {
 	if pluginType != "broker" {
 		return false

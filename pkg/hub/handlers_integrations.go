@@ -72,6 +72,7 @@ type IntegrationManager interface {
 	ListPlugins() []string
 	HasPlugin(pluginType, name string) bool
 	GetPluginConfig(pluginType, name string) map[string]string
+	GetPluginConfigFile(pluginType, name string) string
 	IsSelfManaged(pluginType, name string) bool
 	GetDeploymentMode(pluginType, name string) plugin.DeploymentMode
 	ConfigureBroker(name string, extra map[string]string) error
@@ -396,7 +397,10 @@ func (s *Server) resolveIntegrationSettings(ctx context.Context, mgr Integration
 		return runtimeCfg
 	}
 
-	configFile := runtimeCfg["config_file"]
+	configFile := mgr.GetPluginConfigFile("broker", name)
+	if configFile == "" {
+		configFile = runtimeCfg["config_file"]
+	}
 	if configFile != "" {
 		if settings, err := config.ResolvePluginConfig(configFile, nil); err == nil {
 			for k, v := range runtimeCfg {
@@ -484,10 +488,12 @@ func (s *Server) handleUpdateIntegrationConfig(w http.ResponseWriter, r *http.Re
 			provider = pgProvider
 			haConfigTx = haTx
 		} else {
-			pluginCfg := mgr.GetPluginConfig("broker", name)
-			configFile := ""
-			if pluginCfg != nil {
-				configFile = pluginCfg["config_file"]
+			configFile := mgr.GetPluginConfigFile("broker", name)
+			if configFile == "" {
+				pluginCfg := mgr.GetPluginConfig("broker", name)
+				if pluginCfg != nil {
+					configFile = pluginCfg["config_file"]
+				}
 			}
 
 			if configFile == "" {
@@ -1021,9 +1027,10 @@ func (s *Server) getPluginHubCreds(ctx context.Context, name string) map[string]
 func (s *Server) reconfigureIntegration(ctx context.Context, mgr IntegrationManager, name string) error {
 	pluginCfg := mgr.GetPluginConfig("broker", name)
 
-	// Re-read config file if one is configured.
-	configFile := ""
-	if pluginCfg != nil {
+	// Re-read config file if one is configured. Prefer the immutable
+	// configFiles store over the mutable runtime config map.
+	configFile := mgr.GetPluginConfigFile("broker", name)
+	if configFile == "" && pluginCfg != nil {
 		configFile = pluginCfg["config_file"]
 	}
 
