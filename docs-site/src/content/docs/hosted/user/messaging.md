@@ -36,6 +36,13 @@ For teams or individuals who prefer external notifications, Scion supports nativ
 
 To configure Discord notifications, see the [Hub Administration Guide](/scion/hosted/single-node/hub-server/#discord-integration).
 
+## Telegram
+
+Scion also supports **bidirectional** messaging over Telegram: message your agents from a
+Telegram group and receive their replies in the chat. For a step-by-step Workstation setup,
+see [Setting Up Telegram](/scion/getting-started/telegram/); for how it fits alongside other
+channels, see [External Channels](/scion/hosted/user/external-channels/).
+
 ## Agent `ask_user` Integration
 
 When an agent uses the `ask_user` tool (or similar mechanism depending on the harness), Scion automatically performs two actions:

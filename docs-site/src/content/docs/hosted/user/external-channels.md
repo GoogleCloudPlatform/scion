@@ -14,9 +14,15 @@ The Telegram integration provides **bidirectional messaging** — users can mess
 ### How It Works
 
 - A Telegram bot (created via [@BotFather](https://core.telegram.org/bots#botfather)) acts as the bridge between Telegram groups and the Scion Hub.
-- The bot runs as a Hub plugin (`scion-plugin-telegram`), which must be built and configured in the Hub's `settings.yaml`.
+- The bot runs as a Hub plugin (`scion-plugin-telegram`). Homebrew installs it automatically; you configure it from the Hub admin UI (or, for a from-source install, in the Hub's `settings.yaml`).
 - **Group linking:** Use the `/setup` bot command in a Telegram group to link it to a Scion project.
 - **Identity linking:** Use `/register` to associate your Telegram account with your Scion Hub identity.
+
+:::tip[Workstation quick start]
+New to Telegram in Workstation mode? Follow the step-by-step
+[Setting Up Telegram](/scion/getting-started/telegram/) tutorial — bot creation, plugin
+configuration from the web UI, registration, and your first message.
+:::
 
 ### Routing & Commands
 
@@ -32,7 +38,7 @@ Each linked group can be configured via `/settings`:
 - **Commentary:** Show agent reply messages (responses to other agents) in the group.
 - **Group notifications (`grp`):** Post agent state change notifications (completed, error, waiting for input) in the group chat.
 
-For full setup instructions, bot configuration, and troubleshooting, see [extras/scion-telegram/README.md](https://github.com/GoogleCloudPlatform/scion/tree/main/extras/scion-telegram).
+For a guided Workstation walkthrough, see [Setting Up Telegram](/scion/getting-started/telegram/). For advanced deployment (webhook mode, HA/standalone, `settings.yaml` reference), see [extras/scion-telegram/README.md](https://github.com/GoogleCloudPlatform/scion/tree/main/extras/scion-telegram).
 
 ## Discord
 

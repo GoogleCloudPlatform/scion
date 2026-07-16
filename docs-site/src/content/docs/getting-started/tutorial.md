@@ -61,3 +61,7 @@ scion delete my-first-agent
 This will stop the agent container and clean up its resources. By default, its git branch is removed, so be sure to merge any changes you want to keep before deleting the agent!
 
 This gives you the very basics of the command, you can use `scion --help` and `scion <cmd> --help` to learn more about each of the commands in the tool.
+
+## Next steps
+
+Want to talk to your agents from your phone? Follow [Setting Up Telegram](/scion/getting-started/telegram/) to message agents and receive their replies over Telegram.

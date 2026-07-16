@@ -97,6 +97,7 @@ export default defineConfig({
 						{ label: 'Installation', slug: 'getting-started/install' },
 						{ label: 'Onboarding Wizard', slug: 'getting-started/onboarding' },
 						{ label: 'Tutorial', slug: 'getting-started/tutorial' },
+						{ label: 'Setting Up Telegram', slug: 'getting-started/telegram' },
 					],
 				},
 				{
