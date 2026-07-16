@@ -8,6 +8,9 @@ Each bundle includes everything needed to run the harness: configuration
 (`config.yaml`), a container-side provisioner (`provision.py`), a Dockerfile,
 and a Cloud Build configuration.
 
+Building your own harness? See the [Harness-Config Authoring
+Guide](authoring-guide.md).
+
 ## Available Bundles
 
 | Bundle | Description | Install |
