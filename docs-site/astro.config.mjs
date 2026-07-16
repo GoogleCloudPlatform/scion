@@ -167,11 +167,11 @@ export default defineConfig({
 				},
 				{
 					label: 'Technical Reference',
-					autogenerate: { directory: 'reference' },
+					items: [{ autogenerate: { directory: 'reference' } }],
 				},
 				{
 					label: 'Contributing',
-					autogenerate: { directory: 'contributing' },
+					items: [{ autogenerate: { directory: 'contributing' } }],
 				},
 			],
 		}),
