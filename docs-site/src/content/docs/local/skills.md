@@ -7,7 +7,7 @@ A **skill** is a reusable, harness-agnostic instruction snippet — a folder con
 
 Scion supports two ways to deliver skills to agents:
 
-- **Template-mounted skills** — skill folders committed inside a template's `skills/` directory. These travel with the template and require no Hub. See [Working with Templates & Harnesses](/scion/local/templates/#skills).
+- **Template-mounted skills** — skill folders committed inside a template's `skills/` directory. These travel with the template and require no Hub. See [Templates & Roles](/scion/local/templates/#skills).
 - **The Skill Bank** — a Hub-backed registry that lets you publish versioned skills once and reference them by URI from any template or agent, with semantic-version resolution, content-hash caching, and federation across external registries.
 
 This page covers the Skill Bank: how to author, publish, version, and consume skills with the `scion skills` command group. For Hub-side registry administration and federation, see [Skill Registry & Federation](/scion/hosted/single-node/skill-registry/).
@@ -243,5 +243,5 @@ A skill supplied by a template always takes precedence over a platform skill of 
 ## See also
 
 - [Skill Registry & Federation](/scion/hosted/single-node/skill-registry/) — Hub-side registry administration, external registries, and trust/pinning.
-- [Working with Templates & Harnesses](/scion/local/templates/#skills) — template-mounted skills.
+- [Templates & Roles](/scion/local/templates/#skills) — template-mounted skills.
 - [Scion CLI Reference](/scion/reference/cli/#scion-skills) — the full `scion skills` command reference.
