@@ -22,7 +22,7 @@ Copilot-native concerns handled here:
   - Auth token is always exposed as COPILOT_GITHUB_TOKEN in env.json.
   - MCP servers translate to Copilot's native format in ~/.copilot/mcp-config.json
     (stdio→local, sse/streamable-http→http).
-  - Instructions project to ~/.github/copilot-instructions.md.
+  - Instructions project to ~/.copilot/copilot-instructions.md (configurable).
   - ~/.copilot/settings.json and config.json get sane defaults.
 
 Exception to §4.2 (env.json placeholder policy): copilot receives its auth
@@ -195,11 +195,11 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
     ctx.write_outputs(resolved, env=env, extra=extra)
 
     harness_cfg = ctx.harness_config
-    instructions_file = str(
-        harness_cfg.get("instructions_file") or ".github/copilot-instructions.md"
-    )
+    instructions_file = harness_cfg.get('instructions_file') or '~/.copilot/copilot-instructions.md'
+    target = os.path.expanduser(instructions_file)
+    os.makedirs(os.path.dirname(target), exist_ok=True)
     try:
-        scion_harness.project_instructions(ctx, instructions_file)
+        scion_harness.project_instructions(ctx, target)
     except OSError as exc:
         ctx.warn(f"failed to project instructions: {exc}")
 
