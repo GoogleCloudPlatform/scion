@@ -1083,6 +1083,13 @@ func (s *Server) reconfigureIntegration(ctx context.Context, mgr IntegrationMana
 		}
 	}
 
+	// Preserve the config_file path in the merged map so that
+	// ReplaceBrokerConfig doesn't overwrite dp.Config with a map that
+	// lacks the key, which would cause subsequent reloads to lose it.
+	if configFile != "" {
+		merged["config_file"] = configFile
+	}
+
 	if err := mgr.ReplaceBrokerConfig(name, merged); err != nil {
 		if mgr.IsSelfManaged("broker", name) {
 			slog.Warn("ReplaceBrokerConfig failed for self-managed plugin, trying Reconnect",

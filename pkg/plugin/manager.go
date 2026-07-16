@@ -210,6 +210,8 @@ func (m *Manager) loadGRPCPlugin(pluginType, name string, entry PluginEntry) err
 	m.pluginEntries[key] = entry
 	if entry.ConfigFile != "" {
 		m.configFiles[key] = entry.ConfigFile
+	} else {
+		delete(m.configFiles, key)
 	}
 	m.mu.Unlock()
 
@@ -306,6 +308,8 @@ func (m *Manager) loadPlugin(dp DiscoveredPlugin) error {
 	m.configs[key] = dp
 	if cf := dp.Config["config_file"]; cf != "" {
 		m.configFiles[key] = cf
+	} else {
+		delete(m.configFiles, key)
 	}
 	// Cache the dispensed interface so subsequent Get() calls don't
 	// trigger a second Dispense (which would start another AcceptAndServe
