@@ -60,7 +60,7 @@ python3 /home/scion/.scion/harness/capture_auth.py
 - **No telemetry integration** — Copilot's OpenTelemetry configuration surface
   is undocumented.
 - **System prompt is approximate** — system prompt content is prepended to
-  `.github/copilot-instructions.md`; there is no native `--system-prompt` flag.
+  `~/.copilot/copilot-instructions.md`; there is no native `--system-prompt` flag.
 - **No project-scoped MCP** — project-scoped MCP server entries are demoted to
   global scope.
 - **Subscription required** — an active GitHub Copilot subscription is required.
