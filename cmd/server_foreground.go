@@ -395,118 +395,141 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 
 		// Initialize message broker from versioned settings.
 		// Uses FanOutBroker to support multiple simultaneous broker plugins.
-		if vs, err := config.LoadVersionedSettings(""); err == nil && vs.Server != nil && vs.Server.MessageBroker != nil && vs.Server.MessageBroker.Enabled {
-			var namedBuses []eventbus.NamedEventBus
-
-			// InProcessEventBus is always present for local pub/sub routing.
-			inproc := eventbus.NewInProcessEventBus(logging.Subsystem("hub.eventbus.inprocess"))
-			namedBuses = append(namedBuses, eventbus.NamedEventBus{Name: "inprocess", Bus: inproc})
-
-			// Resolve the list of plugin broker types.
-			brokerTypes := vs.Server.MessageBroker.Types
-			if len(brokerTypes) == 0 && vs.Server.MessageBroker.Type != "" && vs.Server.MessageBroker.Type != "inprocess" {
-				brokerTypes = []string{vs.Server.MessageBroker.Type}
-			}
-
-			for _, bt := range brokerTypes {
-				if !pluginMgr.HasPlugin(scionplugin.PluginTypeBroker, bt) {
-					log.Printf("Warning: broker plugin %q not loaded, skipping", bt)
-					continue
+		if vs, err := config.LoadVersionedSettings(""); err == nil && vs.Server != nil {
+			// Auto-enable message broker when broker plugins are configured
+			// but message_broker.enabled was not explicitly set (#472).
+			if vs.Server.Plugins != nil && len(vs.Server.Plugins.Broker) > 0 {
+				if vs.Server.MessageBroker == nil {
+					vs.Server.MessageBroker = &config.V1MessageBrokerConfig{}
 				}
-				b, pluginErr := pluginMgr.GetBroker(bt)
-				if pluginErr != nil {
-					log.Printf("Warning: failed to get broker plugin %q: %v", bt, pluginErr)
-					continue
-				}
-
-				// Inject hub credentials into hub-managed, non-HA broker plugins.
-				// Self-managed plugins handle their own credential lifecycle;
-				// HA integrations pull credentials from env/Secret Manager.
-				if !pluginMgr.IsSelfManaged(scionplugin.PluginTypeBroker, bt) &&
-					pluginMgr.GetDeploymentMode(scionplugin.PluginTypeBroker, bt) != scionplugin.DeploymentModeHA &&
-					hubSrv != nil && s != nil {
-					// Use the same deterministic UUIDv5 as the α migration so the
-					// broker entity created here matches the migrated ID.
-					pluginBrokerNS := uuid.MustParse("5c104390-a1d0-5e9a-9b1e-5c104390a1d0")
-					legacyID := "plugin-broker-" + bt
-					brokerID := uuid.NewSHA1(pluginBrokerNS, []byte(legacyID)).String()
-					if authSvc := hubSrv.GetBrokerAuthService(); authSvc != nil {
-						// Ensure the runtime broker entity exists (required by
-						// the broker_secrets foreign key constraint).
-						if _, err := s.GetRuntimeBroker(ctx, brokerID); err != nil {
-							pluginBroker := &store.RuntimeBroker{
-								ID:              brokerID,
-								Name:            "plugin-" + bt,
-								Slug:            api.Slugify("plugin-" + bt),
-								Version:         "0.1.0",
-								Status:          store.BrokerStatusOnline,
-								ConnectionState: "embedded",
-								Labels:          map[string]string{"scion.io/plugin": bt},
-								Created:         time.Now(),
-								Updated:         time.Now(),
-							}
-							if createErr := s.CreateRuntimeBroker(ctx, pluginBroker); createErr != nil {
-								log.Printf("Warning: failed to register broker entity for plugin %q: %v", bt, createErr)
-							}
+				if !vs.Server.MessageBroker.Enabled {
+					vs.Server.MessageBroker.Enabled = true
+					seen := make(map[string]bool, len(vs.Server.MessageBroker.Types))
+					for _, t := range vs.Server.MessageBroker.Types {
+						seen[t] = true
+					}
+					for name := range vs.Server.Plugins.Broker {
+						if !seen[name] {
+							vs.Server.MessageBroker.Types = append(vs.Server.MessageBroker.Types, name)
+							seen[name] = true
 						}
-						secretKey, secretErr := authSvc.GenerateAndStoreSecret(ctx, brokerID)
-						if secretErr != nil {
-							log.Printf("Warning: failed to generate secret for broker plugin %q: %v", bt, secretErr)
-						} else {
-							hubCreds := map[string]string{
-								"hub_url":     hubEndpoint,
-								"hmac_key":    secretKey,
-								"broker_id":   brokerID,
-								"plugin_name": bt,
+					}
+					log.Printf("Auto-enabled message broker for configured broker plugin(s): %v", vs.Server.MessageBroker.Types)
+				}
+			}
+			if vs.Server.MessageBroker != nil && vs.Server.MessageBroker.Enabled {
+				var namedBuses []eventbus.NamedEventBus
+
+				// InProcessEventBus is always present for local pub/sub routing.
+				inproc := eventbus.NewInProcessEventBus(logging.Subsystem("hub.eventbus.inprocess"))
+				namedBuses = append(namedBuses, eventbus.NamedEventBus{Name: "inprocess", Bus: inproc})
+
+				// Resolve the list of plugin broker types.
+				brokerTypes := vs.Server.MessageBroker.Types
+				if len(brokerTypes) == 0 && vs.Server.MessageBroker.Type != "" && vs.Server.MessageBroker.Type != "inprocess" {
+					brokerTypes = []string{vs.Server.MessageBroker.Type}
+				}
+
+				for _, bt := range brokerTypes {
+					if !pluginMgr.HasPlugin(scionplugin.PluginTypeBroker, bt) {
+						log.Printf("Warning: broker plugin %q not loaded, skipping", bt)
+						continue
+					}
+					b, pluginErr := pluginMgr.GetBroker(bt)
+					if pluginErr != nil {
+						log.Printf("Warning: failed to get broker plugin %q: %v", bt, pluginErr)
+						continue
+					}
+
+					// Inject hub credentials into hub-managed, non-HA broker plugins.
+					// Self-managed plugins handle their own credential lifecycle;
+					// HA integrations pull credentials from env/Secret Manager.
+					if !pluginMgr.IsSelfManaged(scionplugin.PluginTypeBroker, bt) &&
+						pluginMgr.GetDeploymentMode(scionplugin.PluginTypeBroker, bt) != scionplugin.DeploymentModeHA &&
+						hubSrv != nil && s != nil {
+						// Use the same deterministic UUIDv5 as the α migration so the
+						// broker entity created here matches the migrated ID.
+						pluginBrokerNS := uuid.MustParse("5c104390-a1d0-5e9a-9b1e-5c104390a1d0")
+						legacyID := "plugin-broker-" + bt
+						brokerID := uuid.NewSHA1(pluginBrokerNS, []byte(legacyID)).String()
+						if authSvc := hubSrv.GetBrokerAuthService(); authSvc != nil {
+							// Ensure the runtime broker entity exists (required by
+							// the broker_secrets foreign key constraint).
+							if _, err := s.GetRuntimeBroker(ctx, brokerID); err != nil {
+								pluginBroker := &store.RuntimeBroker{
+									ID:              brokerID,
+									Name:            "plugin-" + bt,
+									Slug:            api.Slugify("plugin-" + bt),
+									Version:         "0.1.0",
+									Status:          store.BrokerStatusOnline,
+									ConnectionState: "embedded",
+									Labels:          map[string]string{"scion.io/plugin": bt},
+									Created:         time.Now(),
+									Updated:         time.Now(),
+								}
+								if createErr := s.CreateRuntimeBroker(ctx, pluginBroker); createErr != nil {
+									log.Printf("Warning: failed to register broker entity for plugin %q: %v", bt, createErr)
+								}
 							}
-							// Inject project slug map so hub-managed plugins can resolve
-							// human-readable project names without user-level API access.
-							if projects, listErr := s.ListProjects(ctx, store.ProjectFilter{}, store.ListOptions{Limit: 500}); listErr == nil {
-								slugMap := make(map[string]string, len(projects.Items))
-								for _, p := range projects.Items {
-									if p.Slug != "" {
-										slugMap[p.ID] = p.Slug
-									} else {
-										slugMap[p.ID] = p.Name
+							secretKey, secretErr := authSvc.GenerateAndStoreSecret(ctx, brokerID)
+							if secretErr != nil {
+								log.Printf("Warning: failed to generate secret for broker plugin %q: %v", bt, secretErr)
+							} else {
+								hubCreds := map[string]string{
+									"hub_url":     hubEndpoint,
+									"hmac_key":    secretKey,
+									"broker_id":   brokerID,
+									"plugin_name": bt,
+								}
+								// Inject project slug map so hub-managed plugins can resolve
+								// human-readable project names without user-level API access.
+								if projects, listErr := s.ListProjects(ctx, store.ProjectFilter{}, store.ListOptions{Limit: 500}); listErr == nil {
+									slugMap := make(map[string]string, len(projects.Items))
+									for _, p := range projects.Items {
+										if p.Slug != "" {
+											slugMap[p.ID] = p.Slug
+										} else {
+											slugMap[p.ID] = p.Name
+										}
+									}
+									if jsonBytes, jsonErr := json.Marshal(slugMap); jsonErr == nil {
+										hubCreds["project_slug_map"] = string(jsonBytes)
 									}
 								}
-								if jsonBytes, jsonErr := json.Marshal(slugMap); jsonErr == nil {
-									hubCreds["project_slug_map"] = string(jsonBytes)
+								if cfg.Database.Driver != "" && cfg.Database.Driver != "sqlite" {
+									hubCreds["database_driver"] = cfg.Database.Driver
+									hubCreds["database_url"] = cfg.Database.URL
 								}
-							}
-							if cfg.Database.Driver != "" && cfg.Database.Driver != "sqlite" {
-								hubCreds["database_driver"] = cfg.Database.Driver
-								hubCreds["database_url"] = cfg.Database.URL
-							}
-							// Inject chat integration secrets from the secret backend.
-							// Pass the plugin's merged config so secrets are only injected
-							// when not already set by file or inline config.
-							brokerCfg := pluginMgr.GetPluginConfig(scionplugin.PluginTypeBroker, bt)
-							injectPluginSecrets(ctx, secretBackend, bt, brokerCfg, hubCreds)
-							if cfgErr := pluginMgr.ConfigureBroker(bt, hubCreds); cfgErr != nil {
-								log.Printf("Warning: failed to inject hub credentials into broker plugin %q: %v", bt, cfgErr)
-							} else {
-								log.Printf("Injected hub credentials into broker plugin %q (broker_id=%s)", bt, brokerID)
+								// Inject chat integration secrets from the secret backend.
+								// Pass the plugin's merged config so secrets are only injected
+								// when not already set by file or inline config.
+								brokerCfg := pluginMgr.GetPluginConfig(scionplugin.PluginTypeBroker, bt)
+								injectPluginSecrets(ctx, secretBackend, bt, brokerCfg, hubCreds)
+								if cfgErr := pluginMgr.ConfigureBroker(bt, hubCreds); cfgErr != nil {
+									log.Printf("Warning: failed to inject hub credentials into broker plugin %q: %v", bt, cfgErr)
+								} else {
+									log.Printf("Injected hub credentials into broker plugin %q (broker_id=%s)", bt, brokerID)
+								}
 							}
 						}
 					}
+
+					observer := isObserverBroker(pluginMgr, bt)
+					channelID := pluginChannelID(pluginMgr, bt)
+					namedBuses = append(namedBuses, eventbus.NamedEventBus{
+						Name: bt, Bus: b, Observer: observer, ChannelID: channelID,
+					})
+					log.Printf("Message broker spoke added: name=%s channel_id=%s observer=%v", bt, channelID, observer)
 				}
 
-				observer := isObserverBroker(pluginMgr, bt)
-				channelID := pluginChannelID(pluginMgr, bt)
-				namedBuses = append(namedBuses, eventbus.NamedEventBus{
-					Name: bt, Bus: b, Observer: observer, ChannelID: channelID,
-				})
-				log.Printf("Message broker spoke added: name=%s channel_id=%s observer=%v", bt, channelID, observer)
-			}
+				fanout := eventbus.NewFanOutEventBus(namedBuses, logging.Subsystem("hub.eventbus.fanout"))
+				hubSrv.StartMessageBroker(fanout)
+				log.Printf("Message broker started: fan-out with %d spoke(s)", len(namedBuses))
 
-			fanout := eventbus.NewFanOutEventBus(namedBuses, logging.Subsystem("hub.eventbus.fanout"))
-			hubSrv.StartMessageBroker(fanout)
-			log.Printf("Message broker started: fan-out with %d spoke(s)", len(namedBuses))
-
-			// Wire the broker proxy as the host callbacks target for broker plugins.
-			if proxy := hubSrv.GetMessageBrokerProxy(); proxy != nil {
-				pluginMgr.SetBrokerHostCallbacks(proxy)
+				// Wire the broker proxy as the host callbacks target for broker plugins.
+				if proxy := hubSrv.GetMessageBrokerProxy(); proxy != nil {
+					pluginMgr.SetBrokerHostCallbacks(proxy)
+				}
 			}
 		}
 
