@@ -3,7 +3,7 @@ title: Harness Authentication
 description: Configuring LLM credentials for Scion agents to access model providers.
 ---
 
-Scion automatically handles discovering and injecting LLM credentials into agent containers so that the underlying harnesses (Claude, Gemini, etc.) can authenticate with their respective model providers (Anthropic, Google, OpenAI). 
+Scion automatically handles discovering and injecting LLM credentials into agent containers so that the underlying harnesses (Claude, Gemini, etc.) can authenticate with their respective model providers (Anthropic, Google, OpenAI).
 
 > **Note**: This documentation covers how harnesses gain access to LLM models, as well as how agents authenticate to Git repositories.
 
@@ -18,12 +18,16 @@ Authentication setup depends heavily on how you are running Scion:
 
 ## The Container-Script Provisioning Model
 
-All harnesses are now provisioned by a **container-script** (`provision.py`) that runs inside the
+All harnesses are provisioned by a **container-script** (`provision.py`) that runs inside the
 agent container, backed by the shared `scion_harness` Python library. Credential resolution is a
 two-part collaboration:
 
 1. **Host-side gather (Go)**: Before the container starts, Scion collects candidate credentials from environment variables and well-known file paths. In Hub mode this includes only the secrets and variables explicitly injected into the agent; direct Hub-secret access from inside the agent is blocked.
-2. **In-container select (`provision.py`)**: The harness's provisioner evaluates the staged candidates against the harness's declared auth methods, selects one, and writes the harness-native configuration (e.g. `~/.claude.json`, `~/.gemini/settings.json`, `~/.hermes/.env`).
+2. **In-container select (`provision.py`)**: The harness's provisioner evaluates the staged candidates against the harness's declared auth methods (the `auth:` block in its `config.yaml`), selects one, and writes the harness-native configuration (e.g. `~/.claude.json`, `~/.gemini/settings.json`, `~/.hermes/.env`).
+
+The selection logic lives in each bundle's `provision.py` via `scion_harness.AuthSpec` /
+`ctx.select_auth(...)`. The order of methods in that spec — not the `config.yaml` `autodetect`
+map — determines which credential wins when several are present.
 
 ### Source precedence
 
@@ -41,11 +45,49 @@ a user-provided secret is never shadowed by a stale container environment variab
 served by Scion's in-container GCP metadata server.
 
 :::note[Harness-specific ordering]
-Some harnesses have their own precedence among *methods*. For example, Hermes selects the first
+Each harness declares its own precedence among *methods*. For example, Hermes selects the first
 present of `ANTHROPIC_API_KEY` > `OPENAI_API_KEY` > `GOOGLE_API_KEY`; Copilot uses
-`COPILOT_GITHUB_TOKEN` > `GH_TOKEN` > `GITHUB_TOKEN`. See the per-harness sections in
+`COPILOT_GITHUB_TOKEN` > `GH_TOKEN` > `GITHUB_TOKEN`; Claude uses `ANTHROPIC_API_KEY` >
+`CLAUDE_CODE_OAUTH_TOKEN` > auth-file > `vertex-ai`. See the per-harness sections in
 [Supported Agent Harnesses](/scion/supported-harnesses/).
 :::
+
+---
+
+## The Three-Stage Auth Workflow
+
+Beyond a plain API key, most harnesses authenticate through an interactive login. Scion supports
+this with a **no-auth start → authenticate → capture** workflow that lets you bring an agent up
+with no credentials, log in interactively, and then persist the resulting credentials so future
+agents start pre-authenticated.
+
+1. **No-auth start** — When no usable credentials are found, provisioning does **not** fail. The
+   agent still starts and drops to an interactive shell, with a graceful warning explaining that it
+   is running in no-auth mode. See [No-Auth Fallback](#no-auth-fallback).
+2. **Authenticate** — Inside the agent (via `scion attach` or the terminal page), you run the
+   harness's native login command (e.g. `claude setup-token`, `codex login --device-auth`,
+   `copilot login`, `agy`). Each bundle's no-auth message tells you exactly which command to run.
+3. **Capture** — You run the bundle's `capture_auth.py`, which locates the credential files the
+   harness just wrote and stores them as project secrets. On the next start, the host stages those
+   secrets back into the agent and provisioning selects them automatically. See
+   [Capturing Credentials](#capturing-credentials-from-a-running-agent).
+
+If you already have a plain API key (or a credential file) you can skip stages 1–3 entirely by
+providing it up front — see [Credential Sources & Setup](#credential-sources--setup).
+
+The per-harness login and capture details:
+
+| Harness | No-auth login command | Captured secret(s) |
+| :--- | :--- | :--- |
+| **Claude** | `claude setup-token` | `CLAUDE_AUTH` (file `~/.claude/.credentials.json`); `CLAUDE_CODE_OAUTH_TOKEN` (extracted from the terminal scrollback after `setup-token`) |
+| **Gemini** | native Gemini auth (e.g. OAuth login) | `GEMINI_OAUTH_CREDS` (file `~/.gemini/oauth_creds.json`) |
+| **Codex** | `codex login --device-auth` | `CODEX_AUTH` (file `~/.codex/auth.json`) |
+| **OpenCode** | `opencode auth login` | `OPENCODE_AUTH` (file `~/.local/share/opencode/auth.json`) |
+| **Copilot** | `copilot login` | `COPILOT_CONFIG` (file `~/.copilot/config.json`) |
+| **Hermes** | `hermes setup` | *(none — Hermes is API-key only; provide the key up front)* |
+| **Antigravity** | `agy` | `AGY_TOKEN` (file `~/.gemini/antigravity-cli/antigravity-oauth-token`, with a gnome-keyring fallback) |
+
+---
 
 ## Authentication Approaches
 
@@ -72,11 +114,15 @@ When you configure the explicit path, the automatic fallback is disabled. The cr
 The available explicit authentication types are:
 
 - **Provider API Key** (`api-key`): Direct API key authentication.
+- **OAuth Token** (`oauth-token`): A raw OAuth token injected via an environment variable (e.g. Claude's `CLAUDE_CODE_OAUTH_TOKEN`).
 - **Vertex Model Garden** (`vertex-ai`): Google Cloud Vertex AI using Application Default Credentials (ADC).
-- **Harness specific credential file** (`auth-file`): A credential file native to the harness, such as an OAuth token file.
+- **Harness specific credential file** (`auth-file`): A credential file native to the harness, such as an OAuth credentials file.
+
+Not every harness supports every type — see the
+[auth capability matrix](/scion/supported-harnesses/#feature-capability-matrix).
 
 :::note
-Scion translates these universal explicit auth types to harness-native values internally. You should always use the universal values (`api-key`, `vertex-ai`, `auth-file`) in your Scion configuration.
+Scion translates these universal explicit auth types to harness-native values internally. You should always use the universal values (`api-key`, `oauth-token`, `vertex-ai`, `auth-file`) in your Scion configuration.
 :::
 
 ---
@@ -92,7 +138,10 @@ This is the simplest method, relying on standard environment variables to provid
 **Required Sources:**
 - **Claude**: `ANTHROPIC_API_KEY`
 - **Gemini**: `GEMINI_API_KEY` or `GOOGLE_API_KEY`
-- **OpenCode/Codex**: `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, or `CODEX_API_KEY`
+- **OpenCode**: `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` (Anthropic preferred)
+- **Codex**: `CODEX_API_KEY` or `OPENAI_API_KEY` (Codex-specific key preferred)
+- **Hermes**: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or `GOOGLE_API_KEY` (in that order)
+- **Copilot**: a GitHub token via `COPILOT_GITHUB_TOKEN`, `GH_TOKEN`, or `GITHUB_TOKEN`
 
 **Local Setup:**
 ```bash
@@ -107,15 +156,32 @@ scion hub secret set ANTHROPIC_API_KEY "sk-ant-api01-..."
 scion hub secret set GEMINI_API_KEY "AIza..."
 ```
 
+### OAuth Token (`oauth-token`)
+
+Some harnesses accept a raw OAuth token through an environment variable instead of a full
+credential file. This is distinct from the `auth-file` method (a file on disk) and from
+Antigravity's file-based OAuth token.
+
+**Required Sources:**
+- **Claude**: `CLAUDE_CODE_OAUTH_TOKEN` (generate on your host with `claude setup-token`).
+
+**Hub Setup:**
+```bash
+scion hub secret set CLAUDE_CODE_OAUTH_TOKEN "sk-ant-oat01-..."
+```
+
+This is also the token that Claude's `capture_auth.py` stores automatically after an in-agent
+`claude setup-token` login (see [Capturing Credentials](#capturing-credentials-from-a-running-agent)).
+
 ### Vertex Model Garden (`vertex-ai`)
 
-Uses Google Cloud's Vertex AI endpoints with Application Default Credentials (ADC). Scion supports two primary ways to authenticate in Hub mode: via an assigned GCP Identity (Service Account) or an injected ADC file secret.
+Uses Google Cloud's Vertex AI endpoints with Application Default Credentials (ADC). Scion supports two primary ways to authenticate in Hub mode: via an assigned GCP Identity (Service Account) or an injected ADC file secret. Supported by Claude, Gemini, and OpenCode (Codex, Copilot, and Hermes do not support Vertex AI).
 
 **Required Sources:**
 - **Assigned GCP Identity** (Hub Mode): If the agent is assigned a Hub-managed GCP Service Account via metadata emulation, Vertex AI will automatically use it. This is the recommended and most secure approach.
 - **ADC JSON file** (Fallback/Local): Automatically discovered at `~/.config/gcloud/application_default_credentials.json` if present locally. In Hub mode, you can upload an ADC file via the `gcloud-adc` file secret or specify the `GOOGLE_APPLICATION_CREDENTIALS` environment variable pointing to a custom credential file.
 - `GOOGLE_CLOUD_PROJECT`: Your Google Cloud project ID.
-- `GOOGLE_CLOUD_REGION`: The region (e.g., `us-east5`). Required for Claude, optional but recommended for Gemini.
+- `GOOGLE_CLOUD_REGION`: The region (e.g., `us-east5`). Required for Claude, optional but recommended for Gemini. `CLOUD_ML_REGION` and `GOOGLE_CLOUD_LOCATION` are accepted as alternatives.
 
 **Local Setup:**
 ```bash
@@ -147,18 +213,27 @@ The `gcloud-adc` secret automatically writes the ADC file to the well-known GCP 
 
 ### Harness specific credential file (`auth-file`)
 
-Some harnesses support their own specific credential files, such as OAuth tokens.
+Some harnesses authenticate with their own credential files, such as OAuth credential files. Scion
+stages the file at the harness's expected path inside the container. The file is provided either by
+uploading it as a **file secret**, or (locally) by having it present at its conventional path on
+your host, where Scion discovers it and mounts it into the agent.
 
-**Required Sources:**
-- **Gemini**: `~/.gemini/oauth_creds.json`
-- **Codex**: `~/.codex/auth.json`
-- **OpenCode**: `~/.local/share/opencode/auth.json`
+**Well-known paths & file-secret keys:**
+
+| Harness | Container path | File-secret key |
+| :--- | :--- | :--- |
+| **Gemini** | `~/.gemini/oauth_creds.json` | `GEMINI_OAUTH_CREDS` |
+| **Claude** | `~/.claude/.credentials.json` | `CLAUDE_AUTH` |
+| **Codex** | `~/.codex/auth.json` | `CODEX_AUTH` |
+| **OpenCode** | `~/.local/share/opencode/auth.json` | `OPENCODE_AUTH` |
+| **Copilot** | `~/.copilot/config.json` | `COPILOT_CONFIG` |
+| **Antigravity** | `~/.gemini/antigravity-cli/antigravity-oauth-token` | `AGY_TOKEN` |
 
 **Local Setup:**
-If you have run the harness's native authentication command (e.g., `gemini auth login` on your host), Scion will automatically detect the resulting credential file and mount it into the agent.
+If you have run the harness's native authentication command (e.g. an OAuth login on your host), Scion will automatically detect the resulting credential file and mount it into the agent.
 
 **Hub Setup:**
-Similar to ADC, you can upload these specific credential files as secrets via the Web Interface or CLI:
+Upload the credential file as a file secret via the Web Interface or CLI, targeting the harness's expected path:
 ```bash
 scion hub secret set --type file \
   --target ~/.gemini/oauth_creds.json \
@@ -172,10 +247,13 @@ scion hub secret set --type file \
 When automatic detection finds no usable credentials, and the harness permits it, provisioning
 does **not** abort — it falls back to a **no-auth** mode so the agent still starts (typically
 dropping to an interactive shell). A graceful warning is written to the agent's logs explaining
-that no auth candidates were found and that it is running in no-auth mode.
+that no auth candidates were found, that it is running in no-auth mode, and which login command to
+run next.
 
-This lets you launch an agent, log in to the harness interactively (e.g. `copilot login`,
-`hermes setup`, `agy`), and then capture the resulting credentials for reuse (see below).
+This lets you launch an agent, log in to the harness interactively (e.g. `claude setup-token`,
+`copilot login`, `hermes setup`, `agy`), and then capture the resulting credentials for reuse
+(see below). Every bundle declares `no_auth.behavior: drop-to-shell` along with the harness's
+login command and message.
 
 The fallback applies only to **automatic** resolution. If you selected an auth type via the
 [Explicit Path](#the-explicit-path), the fallback is disabled — the required credentials must be
@@ -194,29 +272,98 @@ harness bundle's capture script from inside the container:
 python3 ~/.scion/harness/capture_auth.py
 ```
 
-The script reads the harness's capture configuration, locates the credential file(s) the harness
-just wrote (for Antigravity, it can also extract the OAuth token from the container's
-gnome-keyring), and stores each one as a project secret via `sciontool secret set`. Exit codes
-distinguish success (`0`), no credentials found (`2`), and a conflict where the secret already
-exists (`3`) — re-run with the harness's overwrite option to replace it.
+### How capture works
+
+The host generates a capture manifest (`inputs/capture-auth-config.json`) from the harness's
+`auth.types.*.required_files` declarations — every credential file the harness can authenticate
+with that has a well-known path. `capture_auth.py` reads that manifest, locates each file the
+harness just wrote, and stores it as a project secret by shelling out to
+`sciontool secret set <key> @<file> --type <type> --target <path>`.
+
+- **What is captured** — the harness's credential file(s). For example, Codex captures
+  `~/.codex/auth.json` as the `CODEX_AUTH` file secret; Gemini captures
+  `~/.gemini/oauth_creds.json` as `GEMINI_OAUTH_CREDS`. See the table in
+  [The Three-Stage Auth Workflow](#the-three-stage-auth-workflow).
+- **Where it goes** — into the project **secret store** (the Hub's secret store in Hub mode). This
+  is why captured credentials survive container restarts: the file lives in the store, not in the
+  ephemeral container, and the host re-stages it on every subsequent start.
+- **Harness-specific extras** — some bundles override the generic flow:
+  - **Claude** additionally scans the terminal scrollback for the `sk-ant-oat…` token printed by
+    `claude setup-token` and stores it as the `CLAUDE_CODE_OAUTH_TOKEN` environment secret.
+  - **Antigravity** falls back to extracting `AGY_TOKEN` from the container's gnome-keyring (via
+    `secret-tool`) when no token file is found on disk.
+- **API-key-only harnesses** — Hermes declares no credential files, so there is nothing for
+  `capture_auth.py` to capture; provide its API key up front instead.
+
+### Exit codes
+
+The script's exit code distinguishes outcomes:
+
+| Code | Meaning |
+| :--- | :--- |
+| `0` | One or more credentials captured successfully. |
+| `2` | No credentials found to capture (nothing logged in yet, or the harness has no capturable files). |
+| `3` | A conflict — a secret with that key already exists. Re-run with `--force` to overwrite it. |
+| `1` | An error occurred while capturing. |
+
+```bash
+# Overwrite an existing captured secret
+python3 ~/.scion/harness/capture_auth.py --force
+```
 
 :::note
 There is currently no `scion auth capture` CLI wrapper; capture is performed by running
 `capture_auth.py` inside the agent, which delegates to `sciontool secret set`.
 :::
 
+## Persistence Across Restarts
+
+Once captured, credentials live in the project secret store rather than in the ephemeral agent
+container. On each subsequent start:
+
+1. The host-side gather stages the stored secret back into the agent (as a candidate or file
+   secret).
+2. `provision.py` finds it and selects the corresponding auth method automatically.
+3. The agent starts pre-authenticated — no interactive login required.
+
+This means the no-auth → authenticate → capture cycle is a **one-time** cost per credential.
+Restarting, stopping, or resuming the agent reuses the captured secret.
+
+### Clearing or replacing captured credentials
+
+Captured credentials are ordinary project secrets, so you manage them with the secret commands:
+
+```bash
+# Replace a captured credential: re-run capture with --force, or overwrite the secret directly
+scion hub secret set CODEX_AUTH @~/.codex/auth.json --type file --target ~/.codex/auth.json
+
+# Remove a captured credential entirely
+scion hub secret clear CODEX_AUTH
+```
+
+After clearing a captured secret, the next agent start reverts to no-auth (or whatever other
+credential is available), letting you re-run the login → capture cycle.
+
+:::caution[`scion reset-auth` is not for clearing captured credentials]
+`scion reset-auth` refreshes an agent's **Hub token**, not its captured harness credentials — see
+[Repairing Auth on a Running Agent](#repairing-auth-on-a-running-agent). To clear or replace a
+captured harness credential, use the secret commands above.
+:::
+
 ## Repairing Auth on a Running Agent
 
-If a long-running agent's token expires and it cannot self-refresh (for example after a Hub
+If a long-running agent's **Hub token** expires and it cannot self-refresh (for example after a Hub
 signing-key rotation), you can inject a fresh token **without restarting** the agent:
 
 ```bash
 scion reset-auth <agent-name>
 ```
 
-This writes a fresh Hub token into the running container and signals the agent to reload it. The
-same action is available as a **Reset Auth** button in the web UI. See
-[Diagnostics](#diagnostics) to identify when this is needed.
+This generates a new token on the Hub, pushes it into the running container, and signals the agent
+to restart its token-refresh loop. It requires Hub connectivity and only works on a **running**
+agent (a stopped agent gets a fresh token on its next start). The same action is available as a
+**Reset Auth** button in the web UI. See [Diagnostics](#diagnostics) to identify when this is
+needed.
 
 ## Diagnostics
 
@@ -227,22 +374,29 @@ Two diagnostic commands help troubleshoot auth and connectivity:
 
 ## Agent Progeny & Secret Access
 
-When an agent creates sub-agents (progeny), Scion enforces strict controls over which secrets those child agents can access. 
+When an agent creates sub-agents (progeny), Scion enforces strict controls over which secrets those child agents can access.
 
-By default, child agents operate under a **granular secret access** model. They do not automatically inherit all secrets from the project or their parent. Instead, they only have access to the credentials necessary to perform their specific tasks, maintaining a least-privilege security boundary across the agent ancestry chain. 
+By default, child agents operate under a **granular secret access** model. They do not automatically inherit all secrets from the project or their parent. Instead, they only have access to the credentials necessary to perform their specific tasks, maintaining a least-privilege security boundary across the agent ancestry chain.
 
 ---
 
 ## Troubleshooting
 
 ### "no valid auth method found"
-The harness couldn't find any usable credentials through the automatic implicit approach. Check that you have exported the correct environment variables locally, or that your Hub secrets are properly assigned and available to the agent's workspace.
+The harness couldn't find any usable credentials through the automatic implicit approach. Check that you have exported the correct environment variables locally, or that your Hub secrets are properly assigned and available to the agent's workspace. If you intend to log in interactively, the agent will have dropped to a shell in no-auth mode instead — follow the printed login command, then capture.
 
 ### "auth type selected but..."
 You have configured the **Explicit Path** (e.g., selecting `vertex-ai`) but the specific credentials required for that path (like `GOOGLE_CLOUD_PROJECT`) are missing. The explicit path disables fallback, so ensure all required sources for the chosen explicit type are provided.
 
+### "unknown auth type"
+The value you passed to `--harness-auth` (or `auth_selectedType`) is not one this harness supports. Valid universal types are `api-key`, `oauth-token`, `auth-file`, and `vertex-ai`, but each harness only accepts a subset — see the [auth capability matrix](/scion/supported-harnesses/#feature-capability-matrix).
+
+### `capture_auth.py` reports "no credentials found to capture" (exit 2)
+Either you have not completed the interactive login yet, or the harness has no capturable credential file (e.g. Hermes is API-key only). Complete the login command printed in the no-auth message first, then re-run capture.
+
 ### Vertex AI not activating
 For Claude, Vertex Model Garden requires **all three** variables: credentials, project, and region. If any are missing, it will not authenticate. For Gemini, both credentials and a project are required. Ensure these are set either in your local environment or as Hub secrets.
+
 ## Git Authentication
 
 Scion agents frequently need to interact with remote Git repositories to push changes, open PRs, or sync states. Authentication with GitHub is handled securely using native GitHub App integration or Personal Access Tokens (PATs).

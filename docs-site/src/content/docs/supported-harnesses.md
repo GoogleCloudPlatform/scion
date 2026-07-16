@@ -45,9 +45,13 @@ Auth type can be explicitly set via `auth_selectedType` in your Scion settings p
 A harness for Anthropic's "Claude Code" agent.
 
 ### Authentication
-Claude supports two authentication methods (auto-detected in this order):
+Claude supports four authentication methods (auto-detected in this precedence order):
 - **API Key** (`api-key`): Set `ANTHROPIC_API_KEY` in your host environment. Scion propagates this to the agent and pre-approves it in `.claude.json` so Claude Code does not prompt for confirmation.
+- **OAuth Token** (`oauth-token`): Set `CLAUDE_CODE_OAUTH_TOKEN` (generate with `claude setup-token`). This is also the token captured automatically after an in-agent `claude setup-token` login.
+- **Auth File** (`auth-file`): Uses `~/.claude/.credentials.json` (file-secret key `CLAUDE_AUTH`) if available.
 - **Vertex AI** (`vertex-ai`): Uses Google Cloud's Vertex AI endpoint with ADC, `GOOGLE_CLOUD_PROJECT`, and `GOOGLE_CLOUD_REGION`.
+
+If no credentials are found, the agent drops to a shell — run `claude setup-token` interactively, then capture the credential with `capture_auth.py` (see [Harness Authentication](/scion/local/agent-credentials/#capturing-credentials-from-a-running-agent)).
 
 Auth type can be explicitly set via `auth_selectedType` in your Scion settings profile. See [Agent Credentials](/scion/local/agent-credentials/) for details.
 
@@ -222,6 +226,10 @@ The following table summarizes the capabilities supported by each agent harness 
 | Support | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ✅ |
 | **OpenTelemetry** | ✅ | ✅  | ❌ | ✅  | ❌ | ❌ | ❌ |
 | **System Prompt Override** | ✅ | ✅ | ❌ | ❌ | ◐ | ◐ | ◐ |
+| **Auth: API Key** | ✅ | ✅ | ✅ | ✅ | ✅¹ | ✅ | ❌ |
+| **Auth: OAuth Token** | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| **Auth: Auth File** | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅² |
+| **Auth: Vertex AI** | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ✅ |
 
 * **Resume with Prompt**: Ability to provide a new task/prompt when resuming an existing session.
 * **Interject** (pending feature): Key used to interrupt the agent (e.g., stop generation).
@@ -229,3 +237,6 @@ The following table summarizes the capabilities supported by each agent harness 
 * **Hooks**: Support for lifecycle hooks (e.g., `SessionStart`, `AfterTool`).
 * **OpenTelemetry**: Specific events vary by harness and native emitter schema.
 * **System Prompt Override**: Support for providing a custom system prompt to the agent (e.g. via `system_prompt.md`). The `gemini` harness has full support via `~/.gemini/system_prompt.md`. ◐ = *partial* — the harness has no native system-prompt flag, so Scion prepends the system prompt to the harness's instructions file: `AGENTS.md` for Hermes, `GEMINI.md` for Antigravity, and `copilot-instructions.md` for Copilot.
+* **Auth types**: The universal auth types (`api-key`, `oauth-token`, `auth-file`, `vertex-ai`) each harness accepts. Set an explicit type with `--harness-auth` or `auth_selectedType`; otherwise Scion auto-detects. See [Harness Authentication](/scion/local/agent-credentials/).
+    * ¹ **Copilot** authenticates with a **GitHub token** (`COPILOT_GITHUB_TOKEN` / `GH_TOKEN` / `GITHUB_TOKEN`) under the `api-key` type, not an LLM-provider key.
+    * ² **Antigravity**'s `oauth-token` default type is a **file-based** OAuth token (`AGY_TOKEN` at `~/.gemini/antigravity-cli/antigravity-oauth-token`), captured under the auth-file capability — it does not accept a raw injected OAuth token the way Claude does.
