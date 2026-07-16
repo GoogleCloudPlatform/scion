@@ -30,7 +30,7 @@ This installs:
 - **`scion`** — the main CLI, pre-configured to use `ghcr.io/homebrew-scion` as the default
   image registry, so the harness images are pulled for you.
 - **`scion-plugin-telegram`** — the Telegram broker plugin, installed automatically alongside
-  the CLI.
+  the CLI. To connect it, follow [Setting Up Telegram](/scion/getting-started/telegram/).
 
 To upgrade later:
 
