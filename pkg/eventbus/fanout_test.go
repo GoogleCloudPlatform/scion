@@ -418,6 +418,42 @@ func TestFanOutEventBus_ChannelRoutingWithChannelID(t *testing.T) {
 	chatApp.mu.Unlock()
 }
 
+func TestFanOutEventBus_AddSpokeReplaysSubscriptions(t *testing.T) {
+	b1 := newStubEventBus()
+
+	fan := NewFanOutEventBus([]NamedEventBus{
+		{Name: "b1", Bus: b1},
+	}, slog.Default())
+
+	// Subscribe before adding the new spoke.
+	if _, err := fan.Subscribe("events.>", func(_ context.Context, _ string, _ *messages.StructuredMessage) {}); err != nil {
+		t.Fatalf("subscribe failed: %v", err)
+	}
+	if _, err := fan.Subscribe("commands.*", func(_ context.Context, _ string, _ *messages.StructuredMessage) {}); err != nil {
+		t.Fatalf("subscribe failed: %v", err)
+	}
+
+	// Track subscriptions replayed to the new spoke.
+	newBus := newStubEventBus()
+	var replayed []string
+	newBus.subscribeFunc = func(pattern string, _ EventHandler) (Subscription, error) {
+		replayed = append(replayed, pattern)
+		return &stubSubscription{}, nil
+	}
+
+	if err := fan.AddSpoke(NamedEventBus{Name: "new", Bus: newBus}); err != nil {
+		t.Fatalf("AddSpoke failed: %v", err)
+	}
+
+	if len(replayed) != 2 {
+		t.Fatalf("expected 2 replayed subscriptions, got %d", len(replayed))
+	}
+	if replayed[0] != "events.>" || replayed[1] != "commands.*" {
+		t.Errorf("unexpected replayed patterns: %v", replayed)
+	}
+}
+
+
 func TestFanOutEventBus_Subscribe(t *testing.T) {
 	b1 := newStubEventBus()
 	b2 := newStubEventBus()
