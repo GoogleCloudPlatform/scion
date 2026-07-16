@@ -332,23 +332,17 @@ func (s *Server) handleGetIntegration(w http.ResponseWriter, r *http.Request, na
 		// Fallback: plugin may be in settings.yaml but not loaded (e.g. bot_token
 		// was missing at startup so LoadOne failed). Return a stub detail so the
 		// UI can show the configuration form instead of an error toast.
-		if globalDir, err := config.GetGlobalDir(); err == nil {
-			if vs, err := config.LoadSingleFileVersioned(globalDir); err == nil {
-				if vs.Server != nil && vs.Server.Plugins != nil {
-					if _, ok := vs.Server.Plugins.Broker[name]; ok {
-						writeJSON(w, http.StatusOK, IntegrationDetail{
-							Name:     name,
-							Platform: resolvePlatform(name),
-							Settings: map[string]string{},
-							Status: &IntegrationStatus{
-								Connected: false,
-								Message:   "Plugin installed — configure required fields to activate",
-							},
-						})
-						return
-					}
-				}
-			}
+		if installedPluginSettingsEntry(name) != nil {
+			writeJSON(w, http.StatusOK, IntegrationDetail{
+				Name:     name,
+				Platform: resolvePlatform(name),
+				Settings: map[string]string{},
+				Status: &IntegrationStatus{
+					Connected: false,
+					Message:   "Plugin installed — configure required fields to activate",
+				},
+			})
+			return
 		}
 		NotFound(w, "integration")
 		return
@@ -421,9 +415,33 @@ func (s *Server) handleUpdateIntegrationConfig(w http.ResponseWriter, r *http.Re
 	mgr := s.pluginManager
 	s.mu.RUnlock()
 
-	if mgr == nil || !mgr.HasPlugin("broker", name) {
+	if mgr == nil {
 		NotFound(w, "integration")
 		return
+	}
+
+	loaded := mgr.HasPlugin("broker", name)
+	var settingsEntry *config.V1PluginEntry
+	if !loaded {
+		// Mirror handleGetIntegration's fallback: the plugin may be registered
+		// in settings.yaml but not loaded — on a fresh install LoadOne fails
+		// because required fields (e.g. bot_token) don't exist yet. GET already
+		// returns a stub so the UI can show the config form; PUT must accept
+		// that form's submission, otherwise the required fields can never be
+		// saved and the integration can never activate.
+		settingsEntry = installedPluginSettingsEntry(name)
+		if settingsEntry == nil {
+			NotFound(w, "integration")
+			return
+		}
+	}
+
+	isHA := false
+	if loaded {
+		isHA = s.isHAIntegration(mgr, name)
+	} else {
+		pe := plugin.PluginEntry{SelfManaged: settingsEntry.SelfManaged, Mode: settingsEntry.Mode}
+		isHA = pe.ResolvedDeploymentMode() == plugin.DeploymentModeHA
 	}
 
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
@@ -468,7 +486,7 @@ func (s *Server) handleUpdateIntegrationConfig(w http.ResponseWriter, r *http.Re
 		var provider config.IntegrationConfigProvider
 		var haConfigTx *ent.Tx
 
-		if s.isHAIntegration(mgr, name) {
+		if isHA {
 			if !s.requirePostgres(w) {
 				return
 			}
@@ -488,12 +506,17 @@ func (s *Server) handleUpdateIntegrationConfig(w http.ResponseWriter, r *http.Re
 			provider = pgProvider
 			haConfigTx = haTx
 		} else {
-			configFile := mgr.GetPluginConfigFile("broker", name)
-			if configFile == "" {
-				pluginCfg := mgr.GetPluginConfig("broker", name)
-				if pluginCfg != nil {
-					configFile = pluginCfg["config_file"]
+			configFile := ""
+			if loaded {
+				configFile = mgr.GetPluginConfigFile("broker", name)
+				if configFile == "" {
+					pluginCfg := mgr.GetPluginConfig("broker", name)
+					if pluginCfg != nil {
+						configFile = pluginCfg["config_file"]
+					}
 				}
+			} else {
+				configFile = settingsEntry.ConfigFile
 			}
 
 			if configFile == "" {
@@ -552,11 +575,26 @@ func (s *Server) handleUpdateIntegrationConfig(w http.ResponseWriter, r *http.Re
 	// Reconfigure the running integration with updated config.
 	// For HA integrations the DB write + NOTIFY is the reconfigure path —
 	// pushing a hub-side merge over gRPC would race with the DB-backed reload.
-	if !s.isHAIntegration(mgr, name) {
-		if err := s.reconfigureIntegration(r.Context(), mgr, name); err != nil {
-			slog.Error("Failed to reconfigure integration after config update", "plugin", name, "error", err)
-			InternalError(w)
-			return
+	if loaded {
+		if !isHA {
+			if err := s.reconfigureIntegration(r.Context(), mgr, name); err != nil {
+				slog.Error("Failed to reconfigure integration after config update", "plugin", name, "error", err)
+				InternalError(w)
+				return
+			}
+		}
+	} else {
+		// The plugin was installed but never loaded (required fields were
+		// missing at install/startup). Now that config and secrets are saved,
+		// try to activate it. Failure is non-fatal: the config is persisted,
+		// and the plugin will load on the next server restart once all its
+		// required fields are present.
+		if err := s.activateInstalledIntegration(ctx, mgr, name, settingsEntry); err != nil {
+			slog.Warn("Config saved but plugin activation failed (likely still missing required fields)",
+				"plugin", name, "error", err)
+		} else {
+			s.refreshBrokerSpoke(mgr, name)
+			slog.Info("Plugin activated after config update", "plugin", name)
 		}
 	}
 
@@ -838,6 +876,72 @@ func (s *Server) handleListAvailableIntegrations(w http.ResponseWriter, _ *http.
 }
 
 // --- Helpers ---
+
+// installedPluginSettingsEntry returns the settings.yaml broker entry for the
+// named plugin, or nil if the plugin is not registered there. Used as the
+// fallback identity check for plugins that are installed (present in
+// settings.yaml) but not loaded into the manager (LoadOne failed because
+// required fields were missing).
+func installedPluginSettingsEntry(name string) *config.V1PluginEntry {
+	globalDir, err := config.GetGlobalDir()
+	if err != nil {
+		return nil
+	}
+	vs, err := config.LoadSingleFileVersioned(globalDir)
+	if err != nil || vs.Server == nil || vs.Server.Plugins == nil {
+		return nil
+	}
+	entry, ok := vs.Server.Plugins.Broker[name]
+	if !ok {
+		return nil
+	}
+	return &entry
+}
+
+// activateInstalledIntegration loads a plugin that is registered in
+// settings.yaml but not yet running. It builds the same fully-resolved config
+// map that server startup builds — file settings, secret-backend secrets, and
+// hub wiring credentials — so the plugin's Configure call succeeds on load.
+func (s *Server) activateInstalledIntegration(ctx context.Context, mgr IntegrationManager, name string, entry *config.V1PluginEntry) error {
+	merged, err := config.ResolvePluginConfig(entry.ConfigFile, entry.Config)
+	if err != nil {
+		slog.Warn("Failed to resolve config file for plugin activation", "plugin", name, "error", err)
+		merged = make(map[string]string)
+	}
+
+	for _, m := range config.PluginSecretKeyMap[name] {
+		if merged[m.ConfigKey] != "" {
+			continue
+		}
+		if val, err := s.LoadChatIntegrationSecret(ctx, m.SecretKey); err == nil && val != "" {
+			merged[m.ConfigKey] = val
+		}
+	}
+
+	for k, v := range s.getPluginHubCreds(ctx, name) {
+		if v != "" {
+			merged[k] = v
+		}
+	}
+
+	pluginsDir, err := plugin.DefaultPluginsDir()
+	if err != nil {
+		return err
+	}
+
+	return mgr.LoadOne(plugin.PluginTypeBroker, name, plugin.PluginEntry{
+		Path:          entry.Path,
+		Config:        merged,
+		ConfigFile:    entry.ConfigFile,
+		SelfManaged:   entry.SelfManaged,
+		Mode:          entry.Mode,
+		Address:       entry.Address,
+		TLSCertFile:   entry.TLSCertFile,
+		TLSKeyFile:    entry.TLSKeyFile,
+		TLSCAFile:     entry.TLSCAFile,
+		TLSSkipVerify: entry.TLSSkipVerify,
+	}, pluginsDir)
+}
 
 // pluginNameFromKey extracts the plugin name from a "type:name" key,
 // returning only broker plugin names.
@@ -1140,7 +1244,14 @@ func (s *Server) refreshBrokerSpoke(mgr IntegrationManager, name string) {
 		ChannelID: channelID,
 	}
 	if err := fanout.ReplaceSpoke(name, spoke); err != nil {
-		slog.Error("Failed to replace broker spoke", "plugin", name, "error", err)
+		// No existing spoke — the plugin was activated after startup (e.g. it
+		// failed to load at boot and was configured via the admin UI). Add it.
+		if addErr := fanout.AddSpoke(spoke); addErr != nil {
+			slog.Error("Failed to replace or add broker spoke", "plugin", name,
+				"replace_error", err, "add_error", addErr)
+		} else {
+			slog.Info("Added broker spoke for newly activated plugin", "plugin", name)
+		}
 	} else {
 		slog.Info("Replaced broker spoke after plugin restart", "plugin", name)
 	}
