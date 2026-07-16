@@ -107,11 +107,11 @@ func servePlugin() {
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
 	var impl plugin.MessageBrokerPluginInterface
-	if os.Getenv("SCION_TELEGRAM_V2") == "1" {
-		impl = telegram.NewV2(log)
-		log.Info("Using Telegram broker v2")
-	} else {
+	if os.Getenv("SCION_TELEGRAM_V1") == "1" {
 		impl = telegram.New(log)
+		log.Info("Using Telegram broker v1 (legacy)")
+	} else {
+		impl = telegram.NewV2(log)
 	}
 
 	goplugin.Serve(&goplugin.ServeConfig{

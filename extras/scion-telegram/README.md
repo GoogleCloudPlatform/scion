@@ -79,10 +79,10 @@ plugins:
         # agent_cache_ttl: 5m      # how long to cache agent lists from hub
 ```
 
-Add the V2 environment variable to your hub's env file (e.g., `hub.env`):
+V2 is the default broker. To fall back to the legacy V1 broker, set:
 
 ```bash
-SCION_TELEGRAM_V2=1
+SCION_TELEGRAM_V1=1
 ```
 
 ### 4. Configure Caddy (Webhook Mode)
@@ -132,7 +132,7 @@ curl -s -X POST "https://api.telegram.org/bot<TOKEN>/setWebhook" \
 sudo systemctl restart scion-hub
 
 # Or manually
-SCION_TELEGRAM_V2=1 ./scion server
+./scion server
 ```
 
 The hub will discover and launch `scion-plugin-telegram` as a managed subprocess. Look for `Telegram v2 broker configured` in the logs to confirm startup.
@@ -295,7 +295,7 @@ These keys go in `plugins.broker.telegram.config` in `settings.yaml`:
 
 | Variable | Value | Description |
 |----------|-------|-------------|
-| `SCION_TELEGRAM_V2` | `1` | **Required.** Enables the v2 broker with dynamic group linking |
+| `SCION_TELEGRAM_V1` | `1` | Optional. Falls back to the legacy v1 broker (v2 is the default) |
 | `SCION_MAINTENANCE_REPO_BRANCH` | e.g., `scion/chat-tee` | Optional. Use a development branch for hub provisioning |
 
 ### Example settings.yaml (Complete)
