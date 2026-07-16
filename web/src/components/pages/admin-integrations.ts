@@ -1009,14 +1009,14 @@ export class ScionPageAdminIntegrations extends LitElement {
   }
 
   private renderSecretsSection(d: IntegrationDetail) {
-    const secretKeys = Object.keys(d.has_secrets || {});
-    if (secretKeys.length === 0) return nothing;
-
     const platform = resolvePlatform(d.name);
     const secretDefs = PLATFORM_SECRETS[platform] ?? [];
+    const secretKeys = Object.keys(d.has_secrets || {});
+    if (secretDefs.length === 0 && secretKeys.length === 0) return nothing;
+
     const secretDefMap = new Map(secretDefs.map((s) => [s.key, s]));
     const sortedKeys = [
-      ...secretDefs.filter((s) => secretKeys.includes(s.key)).map((s) => s.key),
+      ...secretDefs.map((s) => s.key),
       ...secretKeys.filter((k) => !secretDefMap.has(k)),
     ];
 
@@ -1027,7 +1027,7 @@ export class ScionPageAdminIntegrations extends LitElement {
           const def = secretDefMap.get(key);
           const label = def?.label ?? key;
           const isRequired = def?.required ?? false;
-          const isConfigured = d.has_secrets[key];
+          const isConfigured = d.has_secrets?.[key];
           return html`
             <div class="secret-row">
               <div style="min-width: 10rem;">
