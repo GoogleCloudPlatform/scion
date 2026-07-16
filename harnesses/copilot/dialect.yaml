@@ -1,0 +1,46 @@
+# Scion data-driven dialect spec for GitHub Copilot CLI hook events.
+# Staged to $HOME/.scion/harness/dialect.yaml at agent start.
+dialect: copilot
+
+event_name_field: hook_event_name
+
+mappings:
+  # Session lifecycle.
+  sessionStart:
+    event: session-start
+  sessionEnd:
+    event: session-end
+
+  # Prompt lifecycle.
+  userPromptSubmitted:
+    event: prompt-submit
+    fields:
+      prompt: prompt
+      session_id: session_id
+
+  # Tool lifecycle.
+  preToolUse:
+    event: tool-start
+    fields:
+      tool_name: tool_name
+      tool_input: tool_input
+  postToolUse:
+    event: tool-end
+    fields:
+      tool_name: tool_name
+      tool_output: tool_output
+      success: success
+      error: error
+
+  # Error events.
+  errorOccurred:
+    event: notification
+    fields:
+      error: error
+      message: message
+
+  # Agent completion.
+  agentStop:
+    event: agent-end
+  subagentStop:
+    event: subagent-end

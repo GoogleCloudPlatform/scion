@@ -121,6 +121,49 @@ def _write_mcp_config(ctx: scion_harness.ProvisionContext, servers: dict[str, An
     scion_harness.atomic_write_json(config_path, {"mcpServers": servers})
 
 
+_COPILOT_HOOK_EVENTS = [
+    "sessionStart",
+    "sessionEnd",
+    "userPromptSubmitted",
+    "preToolUse",
+    "postToolUse",
+    "errorOccurred",
+    "agentStop",
+    "subagentStop",
+]
+
+
+def _write_hooks(home: str) -> None:
+    """Write ~/.copilot/hooks/scion.json wiring Copilot events to sciontool.
+
+    Each hook fires ``sciontool hook <event> --dialect=copilot`` which creates
+    a synthetic event and processes it through the copilot mapping dialect
+    (staged as dialect.yaml alongside this script).
+    """
+    hooks: dict[str, list[dict[str, Any]]] = {}
+    for event in _COPILOT_HOOK_EVENTS:
+        hooks[event] = [
+            {
+                "type": "command",
+                "bash": f"sciontool hook {event} --dialect=copilot",
+            }
+        ]
+
+    hooks_data: dict[str, Any] = {"version": 1, "hooks": hooks}
+
+    hooks_dir = os.path.join(home, ".copilot", "hooks")
+    os.makedirs(hooks_dir, exist_ok=True)
+    hooks_path = os.path.join(hooks_dir, "scion.json")
+    try:
+        scion_harness.atomic_write_json(hooks_path, hooks_data)
+    except (OSError, PermissionError) as exc:
+        print(
+            f"copilot provision: warning: could not write hooks to "
+            f"{hooks_path}: {exc}",
+            file=sys.stderr,
+        )
+
+
 def _ensure_settings(ctx: scion_harness.ProvisionContext) -> None:
     """Ensure ~/.copilot/settings.json and config.json have sane defaults."""
     config_dir = os.path.join(ctx.home, ".copilot")
@@ -239,6 +282,8 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
     scion_harness.apply_mcp_translated(
         ctx, translate_mcp, lambda servers: _write_mcp_config(ctx, servers)
     )
+
+    _write_hooks(ctx.home)
 
     try:
         _ensure_settings(ctx)
