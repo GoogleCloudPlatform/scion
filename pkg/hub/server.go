@@ -50,7 +50,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 	"github.com/google/uuid"
 	"github.com/robfig/cron/v3"
-	"golang.org/x/sync/singleflight"
 )
 
 const (
@@ -680,10 +679,9 @@ type Server struct {
 	imageBuildActive atomic.Bool
 	imagePullActive  atomic.Bool
 
-	imageChecker      *imagecheck.Checker
-	imageManager      imageManager
-	imageStatusFlight singleflight.Group
-	brokerClient      *HybridBrokerClient
+	imageChecker *imagecheck.Checker
+	imageManager imageManager
+	brokerClient *HybridBrokerClient
 
 	// Mode 3 (HA) integration support fields.
 	// dbDriver records the database backend ("sqlite" or "postgres") for
