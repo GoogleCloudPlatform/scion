@@ -62,6 +62,28 @@ interface PlatformFieldDef {
   defaultValue: string;
 }
 
+interface PlatformSecretDef {
+  key: string;
+  label: string;
+  description: string;
+  required?: boolean;
+}
+
+const PLATFORM_SECRETS: Record<string, PlatformSecretDef[]> = {
+  telegram: [
+    { key: 'bot_token', label: 'Bot Token', description: 'Telegram bot token from @BotFather', required: true },
+    { key: 'webhook_secret', label: 'Webhook Secret', description: 'Secret for webhook verification (webhook mode only)' },
+  ],
+  discord: [
+    { key: 'bot_token', label: 'Bot Token', description: 'Discord bot token', required: true },
+  ],
+  slack: [
+    { key: 'bot_token', label: 'Bot Token', description: 'Slack bot token (xoxb-...)', required: true },
+    { key: 'app_token', label: 'App Token', description: 'Slack app-level token for Socket Mode (xapp-...)' },
+    { key: 'signing_secret', label: 'Signing Secret', description: 'Slack signing secret for HTTP mode' },
+  ],
+};
+
 function resolvePlatform(name: string): string {
   switch (name) {
     case 'telegram': return 'telegram';
@@ -376,6 +398,51 @@ export class ScionPageAdminIntegrations extends LitElement {
 
     .secret-input {
       flex: 1;
+    }
+
+    .required-tag {
+      display: inline-block;
+      font-size: 0.6875rem;
+      font-weight: 600;
+      color: var(--scion-error-text, #991b1b);
+      background: var(--scion-error-bg, #fef2f2);
+      border: 1px solid var(--scion-error-border, #fca5a5);
+      border-radius: 0.25rem;
+      padding: 0.0625rem 0.375rem;
+      margin-left: 0.375rem;
+      text-transform: uppercase;
+      letter-spacing: 0.025em;
+      vertical-align: middle;
+    }
+
+    .setup-banner {
+      display: flex;
+      align-items: flex-start;
+      gap: 0.75rem;
+      padding: 1rem 1.25rem;
+      margin-bottom: 1.5rem;
+      background: var(--scion-warning-bg, #fffbeb);
+      border: 1px solid var(--scion-warning-border, #fcd34d);
+      border-radius: var(--scion-radius-lg, 0.75rem);
+      font-size: 0.875rem;
+      color: var(--scion-warning-text, #92400e);
+    }
+
+    .setup-banner sl-icon {
+      font-size: 1.25rem;
+      flex-shrink: 0;
+      margin-top: 0.125rem;
+    }
+
+    .setup-banner strong {
+      display: block;
+      margin-bottom: 0.25rem;
+    }
+
+    .secret-description {
+      font-size: 0.75rem;
+      color: var(--scion-text-muted, #64748b);
+      margin-top: 0.125rem;
     }
   `;
 
@@ -773,8 +840,9 @@ export class ScionPageAdminIntegrations extends LitElement {
       <p class="detail-platform">${this.platformLabel(d.platform)} · ${this.deploymentModeLabel(d.deployment_mode)}</p>
 
       ${this.renderStatusSection(d.status)}
-      ${this.renderConfigSection(d)}
+      ${this.renderSetupBanner(d)}
       ${this.renderSecretsSection(d)}
+      ${this.renderConfigSection(d)}
       ${this.renderActionsSection()}
     `;
   }
@@ -919,26 +987,65 @@ export class ScionPageAdminIntegrations extends LitElement {
     `;
   }
 
+  private renderSetupBanner(d: IntegrationDetail) {
+    const platform = resolvePlatform(d.name);
+    const secretDefs = PLATFORM_SECRETS[platform] ?? [];
+    const missingRequired = secretDefs.filter(
+      (s) => s.required && !d.has_secrets?.[s.key]
+    );
+    if (missingRequired.length === 0) return nothing;
+
+    const platformName = this.platformLabel(d.platform);
+    const fieldNames = missingRequired.map((s) => s.label).join(', ');
+    return html`
+      <div class="setup-banner">
+        <sl-icon name="exclamation-triangle"></sl-icon>
+        <div>
+          <strong>${platformName} requires setup to operate</strong>
+          Enter your ${fieldNames} below to get started.
+        </div>
+      </div>
+    `;
+  }
+
   private renderSecretsSection(d: IntegrationDetail) {
     const secretKeys = Object.keys(d.has_secrets || {});
     if (secretKeys.length === 0) return nothing;
 
+    const platform = resolvePlatform(d.name);
+    const secretDefs = PLATFORM_SECRETS[platform] ?? [];
+    const secretDefMap = new Map(secretDefs.map((s) => [s.key, s]));
+    const sortedKeys = [
+      ...secretDefs.filter((s) => secretKeys.includes(s.key)).map((s) => s.key),
+      ...secretKeys.filter((k) => !secretDefMap.has(k)),
+    ];
+
     return html`
       <div class="section">
         <h3 class="section-title">Secrets</h3>
-        ${secretKeys.map(
-          (key) => html`
+        ${sortedKeys.map((key) => {
+          const def = secretDefMap.get(key);
+          const label = def?.label ?? key;
+          const isRequired = def?.required ?? false;
+          const isConfigured = d.has_secrets[key];
+          return html`
             <div class="secret-row">
-              <span class="secret-key">${key}</span>
+              <div style="min-width: 10rem;">
+                <span class="secret-key">
+                  ${label}${isRequired ? html`<span class="required-tag">Required</span>` : nothing}
+                </span>
+                ${def?.description ? html`<div class="secret-description">${def.description}</div>` : nothing}
+              </div>
               <span class="secret-status">
-                ${d.has_secrets[key]
-                  ? html`<sl-badge variant="success">Set</sl-badge>`
-                  : html`<sl-badge variant="warning">Not set</sl-badge>`}
+                ${isConfigured
+                  ? html`<sl-badge variant="success">Configured</sl-badge>`
+                  : html`<sl-badge variant="danger">Not configured</sl-badge>`}
               </span>
               <sl-input
                 class="secret-input"
                 type="password"
-                placeholder=${d.has_secrets[key] ? 'Enter new value to update' : 'Enter value'}
+                password-toggle
+                placeholder=${isConfigured ? 'Enter new value to update' : `Enter ${label.toLowerCase()}`}
                 .value=${this.editedSecrets[key] ?? ''}
                 @sl-change=${(e: Event) => {
                   this.editedSecrets = {
@@ -948,8 +1055,8 @@ export class ScionPageAdminIntegrations extends LitElement {
                 }}
               ></sl-input>
             </div>
-          `
-        )}
+          `;
+        })}
       </div>
     `;
   }
