@@ -561,13 +561,21 @@ func (m *Manager) GetPluginConfig(pluginType, name string) map[string]string {
 	return nil
 }
 
-// HasPlugin returns true if a plugin with the given type and name is loaded.
+// HasPlugin returns true if a plugin with the given type and name is loaded
+// or registered (has config). A plugin may be registered via settings.yaml
+// but not yet active if its binary failed to load or the connection dropped.
 func (m *Manager) HasPlugin(pluginType, name string) bool {
 	key := pluginType + ":" + name
 	m.mu.RLock()
 	_, ok := m.clients[key]
 	if !ok {
 		_, ok = m.grpcAdapters[key]
+	}
+	if !ok {
+		_, ok = m.configs[key]
+	}
+	if !ok {
+		_, ok = m.pluginEntries[key]
 	}
 	m.mu.RUnlock()
 	return ok
@@ -581,12 +589,14 @@ func (m *Manager) IsSelfManaged(pluginType, name string) bool {
 	return m.selfManaged[key]
 }
 
-// ListPlugins returns a list of all loaded plugin keys ("type:name").
+// ListPlugins returns a list of all loaded or registered plugin keys ("type:name").
+// This includes plugins whose config was registered but whose process is not
+// currently active (e.g. binary failed to load).
 func (m *Manager) ListPlugins() []string {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	seen := make(map[string]bool, len(m.clients)+len(m.grpcAdapters))
+	seen := make(map[string]bool, len(m.clients)+len(m.grpcAdapters)+len(m.configs)+len(m.pluginEntries))
 	keys := make([]string, 0, len(m.clients)+len(m.grpcAdapters))
 	for k := range m.clients {
 		if !seen[k] {
@@ -595,6 +605,18 @@ func (m *Manager) ListPlugins() []string {
 		}
 	}
 	for k := range m.grpcAdapters {
+		if !seen[k] {
+			keys = append(keys, k)
+			seen[k] = true
+		}
+	}
+	for k := range m.configs {
+		if !seen[k] {
+			keys = append(keys, k)
+			seen[k] = true
+		}
+	}
+	for k := range m.pluginEntries {
 		if !seen[k] {
 			keys = append(keys, k)
 			seen[k] = true

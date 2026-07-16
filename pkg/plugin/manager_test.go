@@ -41,6 +41,40 @@ func TestManagerHasPlugin_NotLoaded(t *testing.T) {
 	assert.False(t, mgr.HasPlugin(PluginTypeBroker, "nats"))
 }
 
+func TestManagerHasPlugin_RegisteredButNotActive(t *testing.T) {
+	mgr := NewManager(nil)
+
+	mgr.mu.Lock()
+	mgr.configs["broker:telegram"] = DiscoveredPlugin{
+		Name: "telegram",
+		Type: PluginTypeBroker,
+		Config: map[string]string{
+			"config_file": "/etc/scion/telegram.yaml",
+		},
+	}
+	mgr.mu.Unlock()
+
+	assert.True(t, mgr.HasPlugin(PluginTypeBroker, "telegram"),
+		"HasPlugin should return true for a registered-but-not-active plugin")
+	assert.False(t, mgr.HasPlugin(PluginTypeBroker, "discord"),
+		"HasPlugin should return false for a completely unknown plugin")
+}
+
+func TestManagerListPlugins_IncludesRegistered(t *testing.T) {
+	mgr := NewManager(nil)
+
+	mgr.mu.Lock()
+	mgr.configs["broker:telegram"] = DiscoveredPlugin{
+		Name: "telegram",
+		Type: PluginTypeBroker,
+	}
+	mgr.mu.Unlock()
+
+	plugins := mgr.ListPlugins()
+	assert.Contains(t, plugins, "broker:telegram",
+		"ListPlugins should include registered-but-not-active plugins")
+}
+
 func TestManagerGet_NotLoaded(t *testing.T) {
 	mgr := NewManager(nil)
 
