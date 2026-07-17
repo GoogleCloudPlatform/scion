@@ -273,7 +273,7 @@ active_profile: apple
 	})
 }
 
-func TestGetRuntime_AutoDetect_Docker_When_Binary_Available(t *testing.T) {
+func TestGetRuntime_CloudRun_Precedence_Over_Docker(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("Linux auto-detection path only applies on Linux")
 	}
