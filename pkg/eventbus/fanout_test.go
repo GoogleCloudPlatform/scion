@@ -453,7 +453,6 @@ func TestFanOutEventBus_AddSpokeReplaysSubscriptions(t *testing.T) {
 	}
 }
 
-
 func TestFanOutEventBus_Subscribe(t *testing.T) {
 	b1 := newStubEventBus()
 	b2 := newStubEventBus()
