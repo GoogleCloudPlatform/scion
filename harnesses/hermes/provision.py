@@ -205,6 +205,7 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
     resolved = ctx.select_auth(AUTH)
 
     # Write auth credentials to ~/.hermes/.env so Hermes can read them.
+    vertex_env: dict[str, str] = {}
     if resolved.method == "api-key":
         api_key = ctx.read_secret(resolved.env_key)
         if not api_key:
@@ -215,7 +216,8 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
         _write_hermes_env({resolved.env_key: api_key})
 
     elif resolved.method == "vertex-ai":
-        _write_hermes_env(_build_vertex_env(ctx))
+        vertex_env = _build_vertex_env(ctx)
+        _write_hermes_env(vertex_env)
 
     # Instruction projection via the lib.
     harness_cfg = ctx.harness_config
@@ -244,7 +246,7 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
     # For vertex-ai, propagate project/region into the container env so
     # Hermes's vertex adapter picks them up alongside ADC.
     if resolved.method == "vertex-ai":
-        env_payload.update(_build_vertex_env(ctx))
+        env_payload.update(vertex_env)
 
     # Write standard outputs.
     extra: dict[str, Any] | None = None

@@ -226,6 +226,43 @@ class VertexAIProvisionTest(unittest.TestCase):
             self.assertEqual(env["HERMES_INFERENCE_MODEL"], "google/gemini-2.5-pro")
 
 
+class VertexRegionFallbackTest(unittest.TestCase):
+    """Test VERTEX_REGION → GOOGLE_CLOUD_REGION → GOOGLE_CLOUD_LOCATION → us-central1."""
+
+    def _region(self, env_overrides: dict[str, str]) -> str:
+        with tempfile.TemporaryDirectory() as tmp, clean_vertex_env():
+            bundle = os.path.join(tmp, "bundle")
+            os.makedirs(os.path.join(bundle, "inputs"))
+            os.makedirs(os.path.join(bundle, "outputs"))
+
+            secrets_dir = os.path.join(bundle, "secrets")
+            os.makedirs(secrets_dir, exist_ok=True)
+            env_secret_files: dict[str, str] = {}
+            for k, v in env_overrides.items():
+                path = os.path.join(secrets_dir, k)
+                with open(path, "w") as f:
+                    f.write(v)
+                env_secret_files[k] = path
+
+            ctx = _make_ctx(bundle, env_vars=list(env_overrides), env_secret_files=env_secret_files)
+            return provision._build_vertex_env(ctx).get("VERTEX_REGION", "")
+
+    def test_vertex_region_preferred(self) -> None:
+        self.assertEqual(
+            self._region({"VERTEX_REGION": "europe-west1", "GOOGLE_CLOUD_REGION": "asia-east1"}),
+            "europe-west1",
+        )
+
+    def test_google_cloud_region_second(self) -> None:
+        self.assertEqual(self._region({"GOOGLE_CLOUD_REGION": "asia-east1"}), "asia-east1")
+
+    def test_google_cloud_location_third(self) -> None:
+        self.assertEqual(self._region({"GOOGLE_CLOUD_LOCATION": "us-west1"}), "us-west1")
+
+    def test_default_us_central1(self) -> None:
+        self.assertEqual(self._region({}), "us-central1")
+
+
 class NoAuthModeTest(unittest.TestCase):
     def test_no_auth_activates_when_env_keys_empty_but_candidates_has_metadata(self) -> None:
         """auth-candidates.json always has metadata (schema_version etc.) even
