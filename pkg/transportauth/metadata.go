@@ -73,7 +73,7 @@ func (s *MetadataSource) Token() (string, error) {
 	}
 
 	url := fmt.Sprintf("%s/computeMetadata/v1/instance/service-accounts/default/identity?audience=%s&format=full",
-		s.metadataBaseURL, s.audience)
+		s.metadataBaseURL, url.QueryEscape(s.audience))
 
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
