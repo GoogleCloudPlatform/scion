@@ -344,6 +344,9 @@ func GetTemplateChain(name string) ([]*Template, error) {
 
 	tpl, err := FindTemplate(name)
 	if err != nil {
+		if name == "default" {
+			return chain, nil
+		}
 		return nil, err
 	}
 	chain = append(chain, tpl)
@@ -407,6 +410,11 @@ func GetTemplateChainInProject(name, projectPath string) ([]*Template, error) {
 
 	tpl, err := FindTemplateInProjectPath(name, projectPath)
 	if err != nil {
+		if name == "default" {
+			// When the default template is not found, proceed without it
+			// (e.g. hub-dispatched agents on brokers with no local templates)
+			return chain, nil
+		}
 		return nil, err
 	}
 	chain = append(chain, tpl)

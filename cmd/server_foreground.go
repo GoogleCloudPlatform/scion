@@ -2282,12 +2282,29 @@ func deriveCloudRunLogicalBrokerID(settings *config.VersionedSettings, rt runtim
 	if settings == nil || rt == nil || rt.Name() != "cloudrun" {
 		return "", fmt.Errorf("deriveCloudRunLogicalBrokerID requires cloudrun runtime (got settings=%v, rt=%v)", settings != nil, rt)
 	}
+	// Scan all profiles to find one backed by a cloudrun runtime with project+region.
+	// This avoids requiring active_profile to point to the cloudrun profile, which
+	// would make cloudrun the default dispatch profile — conflicting with k8s dispatch.
+	for profileName := range settings.Profiles {
+		rtConfig, runtimeType, err := settings.ResolveRuntime(profileName)
+		if err != nil || runtimeType != "cloudrun" || rtConfig.CloudRun == nil {
+			continue
+		}
+		projectID := strings.TrimSpace(rtConfig.CloudRun.Project)
+		location := strings.TrimSpace(rtConfig.CloudRun.Region)
+		if projectID == "" || location == "" {
+			continue
+		}
+		seed := fmt.Sprintf("cloudrun:%s:%s", projectID, location)
+		return uuid.NewSHA1(cloudRunLogicalBrokerNamespace, []byte(seed)).String(), nil
+	}
+	// Fall back to resolving via active_profile for backward compatibility.
 	rtConfig, runtimeType, err := settings.ResolveRuntime("")
 	if err != nil {
 		return "", fmt.Errorf("deriveCloudRunLogicalBrokerID: failed to resolve runtime: %w", err)
 	}
 	if runtimeType != "cloudrun" || rtConfig.CloudRun == nil {
-		return "", fmt.Errorf("deriveCloudRunLogicalBrokerID: expected cloudrun runtime, got %q", runtimeType)
+		return "", fmt.Errorf("deriveCloudRunLogicalBrokerID: no cloudrun profile with project+region found in settings (active profile runtime: %q)", runtimeType)
 	}
 	projectID := strings.TrimSpace(rtConfig.CloudRun.Project)
 	location := strings.TrimSpace(rtConfig.CloudRun.Region)

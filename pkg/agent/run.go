@@ -336,11 +336,28 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	// Two-phase image resolution: for short-form (bare) images, prefer a
 	// locally-built image over the registry version. If no local image
 	// exists, fall back to the registry rewrite.
+	// NOTE: The local-exists check only applies to runtimes with local image
+	// storage (docker, podman, container). Runtimes like kubernetes and cloudrun
+	// always return true from ImageExists (images are pulled on demand by the
+	// node), so we must skip the local check to ensure registry rewrite applies.
 	if settings != nil && resolvedImage != "" {
 		imageRegistry := settings.ResolveImageRegistry(opts.Profile)
 		if imageRegistry != "" && imagecheck.IsBareImageName(resolvedImage) {
-			localExists, localErr := m.Runtime.ImageExists(ctx, resolvedImage)
-			if localErr == nil && localExists {
+			runtimeName := ""
+			if m.Runtime != nil {
+				runtimeName = m.Runtime.Name()
+			}
+			hasLocalImages := runtimeName == "docker" || runtimeName == "podman" ||
+				runtimeName == "container" || runtimeName == "apple-container"
+			localExists := false
+			if hasLocalImages {
+				var localErr error
+				localExists, localErr = m.Runtime.ImageExists(ctx, resolvedImage)
+				if localErr != nil {
+					localExists = false
+				}
+			}
+			if localExists {
 				util.Debugf("image resolution: using local short-form image %s", resolvedImage)
 			} else {
 				rewritten := config.RewriteImageRegistry(resolvedImage, imageRegistry)
