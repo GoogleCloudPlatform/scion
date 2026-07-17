@@ -28,6 +28,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -2285,7 +2286,14 @@ func deriveCloudRunLogicalBrokerID(settings *config.VersionedSettings, rt runtim
 	// Scan all profiles to find one backed by a cloudrun runtime with project+region.
 	// This avoids requiring active_profile to point to the cloudrun profile, which
 	// would make cloudrun the default dispatch profile — conflicting with k8s dispatch.
+	// Sort profile names for deterministic iteration: if multiple cloudrun profiles
+	// exist, the first alphabetically wins, producing a stable broker ID across restarts.
+	profileNames := make([]string, 0, len(settings.Profiles))
 	for profileName := range settings.Profiles {
+		profileNames = append(profileNames, profileName)
+	}
+	sort.Strings(profileNames)
+	for _, profileName := range profileNames {
 		rtConfig, runtimeType, err := settings.ResolveRuntime(profileName)
 		if err != nil || runtimeType != "cloudrun" || rtConfig.CloudRun == nil {
 			continue
