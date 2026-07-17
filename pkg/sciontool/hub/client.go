@@ -19,7 +19,6 @@ package hub
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -34,6 +33,7 @@ import (
 	"time"
 
 	state "github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 )
 
 // ErrTokenRefreshUnauthorized indicates the hub rejected the token refresh
@@ -160,7 +160,7 @@ type Client struct {
 	maxRetries     int
 	retryBaseDelay time.Duration
 	retryMaxDelay  time.Duration
-	oidcSource     oidcTokenSource // transport-layer OIDC token source (nil = disabled)
+	oidcSource     transportauth.TokenSource // transport-layer OIDC token source (nil = disabled)
 }
 
 // NewClient creates a new Hub client from environment variables.
@@ -533,7 +533,7 @@ func (c *Client) applyRefreshTokens(tokens []RefreshTokenEntry) {
 			// Update the OIDC transport's token source
 			if c.oidcSource != nil {
 				entryExpiry := time.Now().Add(time.Duration(entry.ExpiresIn) * time.Second)
-				c.oidcSource.setToken(entry.Value, entryExpiry)
+				c.oidcSource.SetToken(entry.Value, entryExpiry)
 			}
 			// app/scion_access is already handled via the legacy token field above
 		}
@@ -549,20 +549,18 @@ func (c *Client) adjustRefreshForTransportTokens(proposed time.Time) time.Time {
 		return proposed
 	}
 
-	// Read the transport token expiry from the source
-	switch src := c.oidcSource.(type) {
-	case *injectedTokenSource:
-		src.mu.RLock()
-		expiry := src.expiresAt
-		src.mu.RUnlock()
-		if !expiry.IsZero() {
-			transportRefresh := expiry.Add(-oidcRefreshMargin)
-			if transportRefresh.Before(proposed) {
-				return transportRefresh
-			}
+	// MetadataSource self-refreshes; only InjectedSource needs refresh
+	// driven from here.
+	if _, ok := c.oidcSource.(*transportauth.InjectedSource); !ok {
+		return proposed
+	}
+
+	expiry := c.oidcSource.Expiry()
+	if !expiry.IsZero() {
+		transportRefresh := expiry.Add(-transportauth.RefreshMargin)
+		if transportRefresh.Before(proposed) {
+			return transportRefresh
 		}
-	case *metadataTokenSource:
-		// Metadata source self-refreshes; no need to drive refresh from here.
 	}
 	return proposed
 }
@@ -1046,32 +1044,9 @@ func IsGitHubAppEnabled() bool {
 }
 
 // ParseTokenExpiry extracts the expiry time from a JWT token without
-// validating the signature. This is safe for scheduling purposes since
-// the Hub will validate the token on each request.
+// validating the signature. Delegates to transportauth.ParseTokenExpiry.
 func ParseTokenExpiry(tokenString string) (time.Time, error) {
-	parts := strings.Split(tokenString, ".")
-	if len(parts) != 3 {
-		return time.Time{}, fmt.Errorf("invalid JWT format: expected 3 parts, got %d", len(parts))
-	}
-
-	// Decode the payload (second part)
-	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
-	if err != nil {
-		return time.Time{}, fmt.Errorf("failed to decode JWT payload: %w", err)
-	}
-
-	var claims struct {
-		Exp int64 `json:"exp"`
-	}
-	if err := json.Unmarshal(payload, &claims); err != nil {
-		return time.Time{}, fmt.Errorf("failed to parse JWT claims: %w", err)
-	}
-
-	if claims.Exp == 0 {
-		return time.Time{}, fmt.Errorf("token has no expiry claim")
-	}
-
-	return time.Unix(claims.Exp, 0), nil
+	return transportauth.ParseTokenExpiry(tokenString)
 }
 
 // isLocalhostURL returns true if the URL points to localhost or 127.0.0.1,
