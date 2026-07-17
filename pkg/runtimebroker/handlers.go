@@ -24,6 +24,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -181,8 +182,15 @@ func (s *Server) buildInfoProfiles(defaultRuntimeType string) []BrokerProfile {
 		}
 	}
 
+	names := make([]string, 0, len(vs.Profiles))
+	for name := range vs.Profiles {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
 	var profiles []BrokerProfile
-	for name, profileCfg := range vs.Profiles {
+	for _, name := range names {
+		profileCfg := vs.Profiles[name]
 		rtType := profileCfg.Runtime
 		if rtType == "" {
 			rtType = defaultRuntimeType
@@ -194,7 +202,7 @@ func (s *Server) buildInfoProfiles(defaultRuntimeType string) []BrokerProfile {
 
 		var ctx, ns string
 		if vs.Runtimes != nil {
-			if rtCfg, ok := vs.Runtimes[profileCfg.Runtime]; ok {
+			if rtCfg, ok := vs.Runtimes[rtType]; ok {
 				ctx = rtCfg.Context
 				ns = rtCfg.Namespace
 			}
