@@ -221,6 +221,7 @@ func (t *roundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 	}
 	tok, err := t.source.Token()
 	if err != nil {
+		slog.Debug("OIDC transport token fetch failed, proceeding without header", "error", err)
 		return t.base.RoundTrip(req)
 	}
 	req = req.Clone(req.Context())
