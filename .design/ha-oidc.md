@@ -3,7 +3,7 @@
 **Project:** ha-run (HA Cloud Run workstream)
 **Author:** har-arch (architect agent)
 **Date:** 2026-07-17
-**Status:** Draft for review
+**Status:** Approved — all 6 open questions resolved with ptone on thread 5668, 2026-07-17
 **References:** ptone/scion#488, [broker OIDC gist](https://gist.github.com/chiefkarlin/403fb9cfb493c0d2ad3fdd1c418cc0d2), `docs-site/src/content/docs/hosted/ha/auth-proxy-iap.md`
 
 ---
@@ -389,9 +389,12 @@ Each phase is independently reviewable, mergeable, and leaves the tree releasabl
 - Optional: registration Job manifest snippet replacing `install-broker.sh`.
 - Exit criteria: docs reviewed; end-to-end checklist validated on the reference deployment.
 
-**Phase 5 — Workstation CLI + attach (M, scope pending Q1/Q3)**
-- `transportauth/adcsource` (idtoken over ADC, supports SA impersonation); CLI config
-  (`hub.transport.mode/audience` in settings + env).
+**Phase 5 — Workstation CLI + attach (M, confirmed in scope per Q1/Q3)**
+- `transportauth/adcsource` (idtoken over ADC; supports SA impersonation and JSON SA keys via
+  standard `GOOGLE_APPLICATION_CREDENTIALS`); CLI config via workstation `settings.yaml`
+  (`hub.transport.mode` / `hub.transport.audience`) with env vars taking precedence (per Q6).
+- Broker token-source resolution gains metadata → ADC fallback, covering off-GCP brokers with
+  SA keys (per Q5) — no bespoke off-GCP mechanism.
 - Collision handling live: `Proxy-Authorization` (IAP) / `X-Serverless-Authorization`
   (invoker) for OAuth-bearer CLI users; verify IAP header-precedence risk (§3.2).
 - `scion attach`: transport token in `Authorization` at dial; scion user token moved to a
@@ -405,23 +408,34 @@ Phase 3 = one PR; Phase 4 = docs PR; Phase 5 = 1–2 PRs after user sign-off on 
 
 ## 8. Open questions (for ptone, raised on thread 5668)
 
-- **Q1 — Workstation CLI scope.** The gist's "key discovery" is that external workstations are
-  fully blocked. Include ADC/impersonation support (Phase 5) in this workstream, or file as
-  follow-up? *Recommendation: include as Phase 5 — separately mergeable, high user pain.*
-- **Q2 — Broker config surface.** Are per-connection credentials-file fields + env overrides
-  the right shape, or should transport settings live in broker `settings.yaml`
-  (`server.broker.transport`) instead? *Recommendation: credentials file + env, since audience
-  is inherently per-hub.*
-- **Q3 — `scion attach` behind IAP.** In scope for this workstream (needs a small hub-side
-  header addition), or defer? *Recommendation: in scope, Phase 5.*
-- **Q4 — Test environment.** Is a live IAP-fronted hub available to validate the
-  `Proxy-Authorization` fall-through (§3.2 risk) and the custom-OAuth-client audience? Fake-IAP
-  tests cover logic but not Google's proxy behavior.
-- **Q5 — Non-GCP brokers behind IAP.** Any requirement for brokers running outside GCP
-  (on-prem) to reach an IAP hub? Would need an ADC/token-file source; currently out of scope.
-- **Q6 — Auto-detection default.** `hubclient.New()` auto-enabling transport auth from env
-  means extras (chat-app, a2a-bridge) silently gain it too. Acceptable, or should extras
-  opt in explicitly? *Recommendation: auto — env presence is the operator's explicit signal.*
+- **Q1 — Workstation CLI scope.** ~~Include ADC/impersonation support in this workstream?~~
+  **RESOLVED (ptone, 2026-07-17): yes — ADC support is in scope. Phase 5 is confirmed part of
+  this workstream.**
+- **Q2 — Broker config surface.** **RESOLVED (ptone, 2026-07-17): Option A — per-connection
+  credentials-file fields + env overrides. Docs must explain that per-connection placement
+  exists for the multi-hub scenario (each hub has its own IAP OAuth client ID / audience; a
+  broker may face an IAP hub and a plain hub simultaneously).**
+- **Q3 — `scion attach` behind IAP.** **RESOLVED (ptone, 2026-07-17): in scope — folded into
+  Phase 5 (hub-side header addition on the attach endpoint + client dialer change).**
+- **Q4 — Test environment.** **RESOLVED (ptone, 2026-07-17): a live IAP-fronted hub exists in
+  a separate environment. Validation process: each PR ships with a test plan; the PR is shared
+  with agents running in the IAP environment (which hold the needed credential access) to
+  execute the plan, and any issues come back as PR feedback. Developer briefs for Phases 2/3/5
+  must therefore include an explicit test-plan section in the PR description; the
+  `Proxy-Authorization` fall-through check (§3.2) goes in the Phase 5 test plan.**
+- **Q5 — Non-GCP brokers behind IAP.** **RESOLVED (ptone, 2026-07-17): special support is out
+  of scope. ADC handles the majority of off-GCP cases via JSON SA keys — i.e., the Phase 5
+  `ADCSource` (which `idtoken` supports natively for SA-key ADC) should be wired as a broker
+  token-source fallback when the metadata server is unavailable, rather than building any
+  bespoke off-GCP mechanism. No dedicated config surface beyond the standard
+  GOOGLE_APPLICATION_CREDENTIALS convention.**
+- **Q6 — Auto-detection default.** **RESOLVED (ptone, 2026-07-17): auto-detection approved,
+  with one addition — for workstation ADC human users, transport settings must also be
+  configurable via a key in the workstation `settings.yaml` (e.g. `hub.transport.mode` /
+  `hub.transport.audience`), since maintaining env vars across shells is inconvenient.
+  Resolution order: env vars win over settings.yaml; either activates the transport layer.
+  The settings-file path applies to the CLI (Phase 5); containerized agents/brokers keep
+  env/credentials-file as primary.**
 
 ---
 
