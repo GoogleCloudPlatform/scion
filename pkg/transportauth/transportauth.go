@@ -100,7 +100,7 @@ func ParseTokenExpiry(tokenString string) (time.Time, error) {
 		return time.Time{}, fmt.Errorf("invalid JWT format: expected 3 parts, got %d", len(parts))
 	}
 
-	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	payload, err := base64.RawURLEncoding.DecodeString(strings.TrimRight(parts[1], "="))
 	if err != nil {
 		return time.Time{}, fmt.Errorf("failed to decode JWT payload: %w", err)
 	}
