@@ -368,11 +368,6 @@
           "type": "object",
           "description": "Optional hook dialect metadata.",
           "additionalProperties": true
-        },
-        "hooks": {
-          "type": "object",
-          "description": "Declarative hooks metadata for the harness (dialect, config_file, supported_events).",
-          "additionalProperties": true
         }
       },
       "additionalProperties": false
