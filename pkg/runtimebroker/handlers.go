@@ -161,6 +161,16 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
+// isLocalOnlyRuntime returns true for runtime types that require a local daemon
+// or hardware and cannot function in a hosted cloud environment.
+func isLocalOnlyRuntime(runtimeType string) bool {
+	switch runtimeType {
+	case "docker", "podman", "container":
+		return true
+	}
+	return false
+}
+
 // buildInfoProfiles enumerates configured profiles from effective settings.
 // Falls back to a single "default" profile when no profiles are configured.
 func (s *Server) buildInfoProfiles(defaultRuntimeType string) []BrokerProfile {
@@ -178,13 +188,16 @@ func (s *Server) buildInfoProfiles(defaultRuntimeType string) []BrokerProfile {
 			rtType = defaultRuntimeType
 		}
 
+		if !isLocalOnlyRuntime(defaultRuntimeType) && isLocalOnlyRuntime(rtType) {
+			continue
+		}
+
 		var ctx, ns string
-		if rtCfg, ok := vs.Runtimes[profileCfg.Runtime]; ok {
-			if rtCfg.Type != "" {
-				rtType = rtCfg.Type
+		if vs.Runtimes != nil {
+			if rtCfg, ok := vs.Runtimes[profileCfg.Runtime]; ok {
+				ctx = rtCfg.Context
+				ns = rtCfg.Namespace
 			}
-			ctx = rtCfg.Context
-			ns = rtCfg.Namespace
 		}
 
 		profiles = append(profiles, BrokerProfile{
