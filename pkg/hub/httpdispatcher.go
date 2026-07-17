@@ -138,6 +138,7 @@ type HTTPAgentDispatcher struct {
 	devAuthToken      string               // Dev auth token to inject into agent env (dev-auth mode only)
 	transportMinter   TransportTokenMinter // Optional transport token minter for OIDC dispatch
 	transportAudience string               // OIDC audience for transport tokens
+	transportMode     string               // Transport auth mode (iap, cloudrun_invoker)
 	debug             bool
 	log               *slog.Logger
 
@@ -211,11 +212,12 @@ func (d *HTTPAgentDispatcher) SetAuthzService(a *AuthzService) {
 	d.authzService = a
 }
 
-// SetTransportMinter sets the transport token minter and audience for injecting
-// transport-layer OIDC tokens into agent dispatch payloads.
-func (d *HTTPAgentDispatcher) SetTransportMinter(minter TransportTokenMinter, audience string) {
+// SetTransportMinter sets the transport token minter, audience, and mode for
+// injecting transport-layer OIDC tokens into agent dispatch payloads.
+func (d *HTTPAgentDispatcher) SetTransportMinter(minter TransportTokenMinter, audience, mode string) {
 	d.transportMinter = minter
 	d.transportAudience = audience
+	d.transportMode = mode
 }
 
 // SetGitHubAppMinter sets the GitHub App token minter for resolving
@@ -654,6 +656,9 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 			req.ResolvedEnv["SCION_TRANSPORT_TOKEN"] = tToken
 			req.ResolvedEnv["SCION_TRANSPORT_AUDIENCE"] = d.transportAudience
 			req.ResolvedEnv["SCION_TRANSPORT_TOKEN_EXPIRY"] = tExpiry.UTC().Format(time.RFC3339)
+			if d.transportMode != "" {
+				req.ResolvedEnv["SCION_TRANSPORT_MODE"] = d.transportMode
+			}
 		}
 	}
 
@@ -1274,6 +1279,9 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 			resolvedEnv["SCION_TRANSPORT_TOKEN"] = tToken
 			resolvedEnv["SCION_TRANSPORT_AUDIENCE"] = d.transportAudience
 			resolvedEnv["SCION_TRANSPORT_TOKEN_EXPIRY"] = tExpiry.UTC().Format(time.RFC3339)
+			if d.transportMode != "" {
+				resolvedEnv["SCION_TRANSPORT_MODE"] = d.transportMode
+			}
 		}
 	}
 
@@ -1441,6 +1449,9 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 			resolvedEnv["SCION_TRANSPORT_TOKEN"] = tToken
 			resolvedEnv["SCION_TRANSPORT_AUDIENCE"] = d.transportAudience
 			resolvedEnv["SCION_TRANSPORT_TOKEN_EXPIRY"] = tExpiry.UTC().Format(time.RFC3339)
+			if d.transportMode != "" {
+				resolvedEnv["SCION_TRANSPORT_MODE"] = d.transportMode
+			}
 		}
 	}
 

@@ -617,6 +617,7 @@ type Server struct {
 	// Transport token minter for agent outbound auth (nil = transport auth disabled)
 	transportMinter   TransportTokenMinter
 	transportAudience string
+	transportMode     string
 
 	// GCP token generator for agent identity (nil = GCP identity disabled)
 	gcpTokenGenerator GCPTokenGenerator
@@ -862,6 +863,7 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 	if cfg.TransportMinter != nil {
 		srv.transportMinter = cfg.TransportMinter
 		srv.transportAudience = cfg.TransportAudience
+		srv.transportMode = cfg.TransportMode
 		slog.Info("Transport token minter configured",
 			"mode", cfg.TransportMode,
 			"audience", cfg.TransportAudience)
@@ -1900,7 +1902,7 @@ func (s *Server) CreateAuthenticatedDispatcher() *HTTPAgentDispatcher {
 
 	// Configure transport token minter if available
 	if s.transportMinter != nil && s.transportAudience != "" {
-		dispatcher.SetTransportMinter(s.transportMinter, s.transportAudience)
+		dispatcher.SetTransportMinter(s.transportMinter, s.transportAudience, s.transportMode)
 	}
 
 	// Wire resource hash repair so the dispatcher can auto-fix stale DB
