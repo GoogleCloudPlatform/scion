@@ -2090,8 +2090,10 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 		}
 	}()
 
-	// Start internal heartbeat loop for co-located operation
-	if colocatedBrokerRegistered {
+	// Start internal heartbeat loop for co-located operation.
+	// Skip for stateless Cloud Run brokers — the Hub manages the
+	// logical broker status directly and no container daemon is present.
+	if colocatedBrokerRegistered && !statelessCloudRunBroker {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()

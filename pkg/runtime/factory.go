@@ -86,17 +86,18 @@ func GetRuntime(projectPath string, profileName string) Runtime {
 				util.Debugf("GetRuntime: no runtime detected on macOS, defaulting to docker")
 			}
 		} else {
-			// On Linux, prefer podman over docker when both are available.
-			// If neither is found, check for Cloud Run environment.
-			if _, err := exec.LookPath("podman"); err == nil {
+			// On Linux, check for Cloud Run environment first. On Cloud Run
+			// the docker daemon is never available even when the CLI binary
+			// is present in the image, so cloudrun must take precedence.
+			if os.Getenv("K_SERVICE") != "" {
+				runtimeType = "cloudrun"
+				util.Debugf("GetRuntime: Cloud Run environment detected (K_SERVICE set), using cloudrun runtime")
+			} else if _, err := exec.LookPath("podman"); err == nil {
 				runtimeType = "podman"
 				util.Debugf("GetRuntime: detected 'podman' on Linux")
 			} else if _, err := exec.LookPath("docker"); err == nil {
 				runtimeType = "docker"
 				util.Debugf("GetRuntime: detected 'docker' on Linux")
-			} else if os.Getenv("K_SERVICE") != "" {
-				runtimeType = "cloudrun"
-				util.Debugf("GetRuntime: no container runtime binary found, detected Cloud Run environment (K_SERVICE set)")
 			} else {
 				runtimeType = "docker"
 				util.Debugf("GetRuntime: no container runtime found on Linux, defaulting to docker")
@@ -114,13 +115,18 @@ func GetRuntime(projectPath string, profileName string) Runtime {
 	case "container":
 		return NewAppleContainerRuntime()
 	case "docker":
-		if _, err := exec.LookPath("docker"); err != nil && os.Getenv("K_SERVICE") != "" {
-			util.Debugf("GetRuntime: docker binary not found and Cloud Run environment detected (K_SERVICE set), using cloudrun runtime")
+		// On Cloud Run the docker daemon is unavailable regardless of
+		// whether the CLI binary exists in the container image.
+		if os.Getenv("K_SERVICE") != "" {
+			util.Debugf("GetRuntime: Cloud Run environment detected (K_SERVICE set), docker daemon unavailable — using cloudrun runtime")
 			rt := NewCloudRunRuntime(rtConfig.CloudRun)
 			if vs != nil && vs.Server != nil {
 				rt.WorkspaceStorage = vs.Server.WorkspaceStorage
 			}
 			return rt
+		}
+		if _, err := exec.LookPath("docker"); err != nil {
+			util.Debugf("GetRuntime: docker binary not found, returning DockerRuntime (will fail on use)")
 		}
 		dr := NewDockerRuntime()
 		if rtConfig.Host != "" {
