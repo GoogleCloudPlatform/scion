@@ -64,7 +64,7 @@ mcp:
 hooks:
   dialect: copilot
   config_file: .copilot/hooks/scion.json
-  lifecycle_events:
+  supported_events:
     - sessionStart
     - sessionEnd
     - userPromptSubmitted
@@ -95,20 +95,6 @@ capabilities:
     sse: { support: "yes", reason: "Copilot maps SSE to its http transport type" }
     streamable_http: { support: "yes" }
     project_scope: { support: "no", reason: "Project-scoped MCP (.mcp.json) not implemented; entries demoted to global" }
-
-# Declarative hooks metadata — not parsed by Go layer, used for documentation and tooling
-hooks:
-  dialect: copilot
-  config_file: ~/.copilot/hooks/scion.json
-  supported_events:
-    - sessionStart
-    - sessionEnd
-    - userPromptSubmitted
-    - preToolUse
-    - postToolUse
-    - errorOccurred
-    - agentStop
-    - subagentStop
 
 no_auth:
   behavior: drop-to-shell
