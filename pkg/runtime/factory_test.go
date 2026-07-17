@@ -293,9 +293,10 @@ func TestGetRuntime_AutoDetect_Docker_When_Binary_Available(t *testing.T) {
 	}
 	defer func() { _ = os.Chdir(oldWd) }()
 
-	// Even with K_SERVICE set, docker binary in PATH should take priority
+	// K_SERVICE takes precedence over docker binary presence: on Cloud Run
+	// the docker daemon is unavailable even when the CLI binary exists.
 	r := GetRuntime("", "")
-	if _, ok := r.(*DockerRuntime); !ok {
-		t.Errorf("expected *DockerRuntime when docker binary is available (even with K_SERVICE set), got %T", r)
+	if _, ok := r.(*CloudRunRuntime); !ok {
+		t.Errorf("expected *CloudRunRuntime when K_SERVICE is set (even with docker binary available), got %T", r)
 	}
 }
