@@ -45,6 +45,7 @@ const (
 func (c *Client) configureOIDCTransport() {
 	if tok := os.Getenv(transportauth.EnvTransportToken); tok != "" {
 		source := transportauth.NewInjectedSource()
+		source.WarnLog = log.Debug
 		expiry, err := transportauth.ParseTokenExpiry(tok)
 		if err != nil {
 			expiry = time.Now().Add(transportauth.DefaultTTL)

@@ -20,10 +20,16 @@ import (
 	"time"
 )
 
+// LogFunc is a printf-style logging callback.
+type LogFunc func(format string, args ...interface{})
+
 // InjectedSource holds a transport token injected by the hub via the
 // dispatch payload (cold start) and refreshed via the tokens[] array on
 // subsequent refresh calls.
 type InjectedSource struct {
+	// WarnLog, if non-nil, is called when the token is near expiry.
+	WarnLog LogFunc
+
 	mu        sync.RWMutex
 	token     string
 	expiresAt time.Time
@@ -41,6 +47,12 @@ func (s *InjectedSource) Token() (string, error) {
 
 	if s.token == "" {
 		return "", fmt.Errorf("oidc: no transport token available")
+	}
+
+	if !s.expiresAt.IsZero() && time.Now().After(s.expiresAt.Add(-RefreshMargin)) {
+		if s.WarnLog != nil {
+			s.WarnLog("OIDC transport token is near expiry or expired, returning anyway")
+		}
 	}
 
 	return s.token, nil

@@ -119,3 +119,8 @@ func (s *MetadataSource) Expiry() time.Time {
 	defer s.mu.RUnlock()
 	return s.expiresAt
 }
+
+// Audience returns the OIDC audience this source requests tokens for.
+func (s *MetadataSource) Audience() string {
+	return s.audience
+}

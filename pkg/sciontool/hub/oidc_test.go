@@ -80,8 +80,9 @@ func TestConfigureOIDCTransport_MetadataMode(t *testing.T) {
 	c.configureOIDCTransport()
 
 	require.NotNil(t, c.oidcSource)
-	_, ok := c.oidcSource.(*transportauth.MetadataSource)
+	src, ok := c.oidcSource.(*transportauth.MetadataSource)
 	assert.True(t, ok, "should use MetadataSource")
+	assert.Equal(t, "https://hub.example.com", src.Audience())
 }
 
 func TestConfigureOIDCTransport_MetadataMode_AudienceOverride(t *testing.T) {
@@ -101,8 +102,9 @@ func TestConfigureOIDCTransport_MetadataMode_AudienceOverride(t *testing.T) {
 	c.configureOIDCTransport()
 
 	require.NotNil(t, c.oidcSource)
-	_, ok := c.oidcSource.(*transportauth.MetadataSource)
+	src, ok := c.oidcSource.(*transportauth.MetadataSource)
 	assert.True(t, ok, "should use MetadataSource")
+	assert.Equal(t, "https://custom-audience.example.com", src.Audience())
 }
 
 func TestConfigureOIDCTransport_NotOnGCP(t *testing.T) {
