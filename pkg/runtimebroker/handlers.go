@@ -155,12 +155,54 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 			Attach: true,
 			Exec:   true,
 		},
-		Profiles: []BrokerProfile{
-			{Name: "default", Type: runtimeType, Available: true},
-		},
+		Profiles: s.buildInfoProfiles(runtimeType),
 	}
 
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// buildInfoProfiles enumerates configured profiles from effective settings.
+// Falls back to a single "default" profile when no profiles are configured.
+func (s *Server) buildInfoProfiles(defaultRuntimeType string) []BrokerProfile {
+	vs, _, err := config.LoadEffectiveSettings("")
+	if err != nil || len(vs.Profiles) == 0 {
+		return []BrokerProfile{
+			{Name: "default", Type: defaultRuntimeType, Available: true},
+		}
+	}
+
+	var profiles []BrokerProfile
+	for name, profileCfg := range vs.Profiles {
+		rtType := profileCfg.Runtime
+		if rtType == "" {
+			rtType = defaultRuntimeType
+		}
+
+		var ctx, ns string
+		if rtCfg, ok := vs.Runtimes[profileCfg.Runtime]; ok {
+			if rtCfg.Type != "" {
+				rtType = rtCfg.Type
+			}
+			ctx = rtCfg.Context
+			ns = rtCfg.Namespace
+		}
+
+		profiles = append(profiles, BrokerProfile{
+			Name:      name,
+			Type:      rtType,
+			Available: true,
+			Context:   ctx,
+			Namespace: ns,
+		})
+	}
+
+	if len(profiles) == 0 {
+		return []BrokerProfile{
+			{Name: "default", Type: defaultRuntimeType, Available: true},
+		}
+	}
+
+	return profiles
 }
 
 // handleHubConnections returns live status of all hub connections.
