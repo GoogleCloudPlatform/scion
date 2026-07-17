@@ -771,7 +771,7 @@ def project_instructions(
     target: str,
     *,
     marker_label: str | None = None,
-    include_skills: bool = True,
+    include_skills: bool = False,
     system_prompt_mode: str | None = None,
     skills_dir: str | None = None,
 ) -> None:

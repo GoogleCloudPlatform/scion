@@ -155,7 +155,7 @@ class NoAuthModeTest(unittest.TestCase):
 
 
 class InstructionProjectionTest(unittest.TestCase):
-    def test_composes_prompts_and_skills(self) -> None:
+    def test_composes_prompts_without_skills_by_default(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             home = os.path.join(tmp, "home")
             bundle = os.path.join(tmp, "bundle")
@@ -200,8 +200,8 @@ class InstructionProjectionTest(unittest.TestCase):
             self.assertEqual(content.count(MANAGED_BEGIN), 1)
             self.assertIn("# System Instruction\n\nSystem rules", content)
             self.assertIn("# Agent Instructions\n\nAgent rules", content)
-            self.assertIn("## example\n\n# Example Skill\n\nUse this skill.", content)
-            self.assertIn("## second\n\n# Second Skill\n\nUse this other skill.", content)
+            self.assertNotIn("# Skills", content)
+            self.assertNotIn("# Example Skill", content)
 
     def test_cleans_stale_managed_block_when_inputs_empty(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

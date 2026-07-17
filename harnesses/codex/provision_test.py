@@ -51,7 +51,7 @@ def temporary_home(path: str):
 
 
 class CodexProvisionTest(unittest.TestCase):
-    def test_instruction_projection_composes_prompts_and_skills(self) -> None:
+    def test_instruction_projection_composes_prompts_without_skills_by_default(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             home = os.path.join(tmp, "home")
             bundle = os.path.join(tmp, "bundle")
@@ -96,12 +96,11 @@ class CodexProvisionTest(unittest.TestCase):
             self.assertEqual(content.count(MANAGED_BEGIN), 1)
             self.assertIn("# System Instruction\n\nSystem rules", content)
             self.assertIn("# Agent Instructions\n\nAgent rules", content)
-            self.assertIn("# Skills\n\n## example\n\n# Example Skill", content)
-            self.assertIn("# Skills\n\n## example\n\n# Example Skill\n\nUse this skill.\n\n## second", content)
+            self.assertNotIn("# Skills", content)
+            self.assertNotIn("# Example Skill", content)
             self.assertIn(
                 "# System Instruction\n\nSystem rules\n\n"
-                "# Agent Instructions\n\nAgent rules\n\n"
-                "# Skills\n\n## example",
+                "# Agent Instructions\n\nAgent rules",
                 content,
             )
 

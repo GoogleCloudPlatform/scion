@@ -142,8 +142,11 @@ etc.) — the agent runs unattended inside a sandboxed container.
 | `system_prompt_mode` | `native` (tool has a real system-prompt channel), `prepend_to_instructions` (downgrade into the instructions file), or `none`. |
 
 `scion_harness.project_instructions()` honors `system_prompt_mode` and
-`skills_dir` from these fields — declare them and let the library do the
-composition (see below).
+`skills_dir` from these fields. It projects system prompt and instruction
+content by default, but `include_skills` defaults to `False` because scion's
+host-side provisioner already installs skills as individual files under
+`skills_dir`. Only pass `include_skills=True` for a harness that has no native
+skills directory and must inline `SKILL.md` content into its instruction file.
 
 ### Models
 
@@ -356,7 +359,9 @@ helpers), never from `os.environ`.
 1. Select an auth method (`ctx.select_auth(AUTH)`) and write the tool's
    native credential file(s) or env overlay.
 2. Project instructions: `scion_harness.project_instructions(ctx,
-   instructions_file)`.
+   instructions_file)`. Leave `include_skills` at its default `False` when
+   your config declares `skills_dir`; pass `include_skills=True` only for
+   harnesses that cannot load skills from files.
 3. Translate MCP servers (`apply_mcp_servers_simple` or
    `apply_mcp_translated`).
 4. Reconcile telemetry into native client settings if the tool supports it
@@ -433,9 +438,12 @@ Key API surface:
   is configured and no candidates were staged.
 - **`project_instructions(ctx, target, ...)`** — composes
   `inputs/system-prompt.md` (per `system_prompt_mode`),
-  `inputs/instructions.md`, and installed `SKILL.md` files from `skills_dir`
-  into the target file inside `<!-- BEGIN/END SCION MANAGED -->` markers,
-  preserving user content outside the block.
+  `inputs/instructions.md`, and, only when `include_skills=True`, installed
+  `SKILL.md` files from `skills_dir` into the target file inside
+  `<!-- BEGIN/END SCION MANAGED -->` markers, preserving user content outside
+  the block. `include_skills` defaults to `False`; keep it that way for
+  harnesses that declare `skills_dir`, because those skills are installed as
+  native files by the host-side provisioner.
 - **MCP** — `apply_mcp_servers_simple(bundle_path, mcp_mapping, workspace)`
   for JSON-native tools (driven by the `mcp:` block);
   `apply_mcp_translated(ctx, translate_fn, write_fn)` for custom formats

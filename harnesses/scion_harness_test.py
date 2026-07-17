@@ -387,6 +387,40 @@ class TestProjectInstructions(unittest.TestCase):
         self.assertIn("Agent Instructions", content)
         self.assertIn("Do the thing.", content)
 
+    def test_skills_excluded_by_default_and_included_explicitly(self):
+        with tempfile.TemporaryDirectory() as home:
+            skill_dir = os.path.join(home, ".test", "skills", "example")
+            os.makedirs(skill_dir)
+            with open(os.path.join(skill_dir, "SKILL.md"), "w") as f:
+                f.write("# Example Skill\n\nUse this skill.")
+
+            old_home = os.environ.get("HOME")
+            os.environ["HOME"] = home
+            try:
+                ctx = _make_ctx(harness_config={"skills_dir": ".test/skills"})
+                inputs = ctx.inputs_dir
+                with open(os.path.join(inputs, "instructions.md"), "w") as f:
+                    f.write("Do the thing.")
+
+                default_target = os.path.join(home, "default.md")
+                sh.project_instructions(ctx, default_target)
+                with open(default_target) as f:
+                    default_content = f.read()
+                self.assertNotIn("# Skills", default_content)
+                self.assertNotIn("# Example Skill", default_content)
+
+                explicit_target = os.path.join(home, "explicit.md")
+                sh.project_instructions(ctx, explicit_target, include_skills=True)
+                with open(explicit_target) as f:
+                    explicit_content = f.read()
+                self.assertIn("# Skills", explicit_content)
+                self.assertIn("# Example Skill", explicit_content)
+            finally:
+                if old_home is None:
+                    os.environ.pop("HOME", None)
+                else:
+                    os.environ["HOME"] = old_home
+
     def test_strips_existing_managed_block(self):
         ctx = _make_ctx()
         inputs = ctx.inputs_dir

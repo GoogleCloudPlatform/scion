@@ -266,7 +266,6 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
         ctx,
         instructions_file,
         system_prompt_mode="none",
-        include_skills=False,
     )
 
 
