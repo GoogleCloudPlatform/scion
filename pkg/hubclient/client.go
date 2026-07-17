@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
 
@@ -105,7 +106,8 @@ type Client interface {
 
 // client is the concrete implementation of Client.
 type client struct {
-	transport *apiclient.Transport
+	transport        *apiclient.Transport
+	transportAuthSet bool
 
 	agents                *agentService
 	projects              *projectService
@@ -136,6 +138,26 @@ func New(baseURL string, opts ...Option) (Client, error) {
 
 	for _, opt := range opts {
 		opt(c)
+	}
+
+	// Auto-detect transport auth from environment when not explicitly set.
+	// FromEnv() returns nil when transport auth is not configured, so this
+	// is zero-impact for non-IAP deployments.
+	if !c.transportAuthSet {
+		if src, err := transportauth.FromEnv(); err == nil && src != nil {
+			mode := transportauth.ModeFromEnv()
+			if c.transport.HTTPClient == nil {
+				c.transport.HTTPClient = &http.Client{}
+			}
+			if c.transport.HTTPClient.Transport == nil {
+				c.transport.HTTPClient.Transport = http.DefaultTransport
+			}
+			c.transport.HTTPClient.Transport = transportauth.Wrap(
+				c.transport.HTTPClient.Transport,
+				src,
+				mode,
+			)
+		}
 	}
 
 	// Initialize service implementations
@@ -477,5 +499,28 @@ func WithHMACAuth(brokerID string, secretKey []byte) Option {
 			BrokerID:  brokerID,
 			SecretKey: secretKey,
 		}
+	}
+}
+
+// WithTransportAuth wraps the client's HTTP transport with transport-layer
+// OIDC authentication. When src is nil, auto-detection in New() is suppressed
+// but no wrapping is applied (opt-out).
+func WithTransportAuth(src transportauth.TokenSource, mode transportauth.HeaderMode) Option {
+	return func(c *client) {
+		c.transportAuthSet = true
+		if src == nil {
+			return
+		}
+		if c.transport.HTTPClient == nil {
+			c.transport.HTTPClient = &http.Client{}
+		}
+		if c.transport.HTTPClient.Transport == nil {
+			c.transport.HTTPClient.Transport = http.DefaultTransport
+		}
+		c.transport.HTTPClient.Transport = transportauth.Wrap(
+			c.transport.HTTPClient.Transport,
+			src,
+			mode,
+		)
 	}
 }
