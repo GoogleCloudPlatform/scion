@@ -141,6 +141,11 @@ etc.) — the agent runs unattended inside a sandboxed container.
 | `system_prompt_file` | Home-relative native system-prompt file, if the tool has one. |
 | `system_prompt_mode` | `native` (tool has a real system-prompt channel), `prepend_to_instructions` (downgrade into the instructions file), or `none`. |
 
+> **All paths must be relative** (e.g. `.copilot/skills`, not `~/.copilot/skills`).
+> The Go provisioner joins them with `agentHome` via `filepath.Join`; `~` is
+> **not** expanded and will produce a broken literal path like
+> `/home/scion/~/.copilot/skills`.
+
 `scion_harness.project_instructions()` honors `system_prompt_mode` and
 `skills_dir` from these fields — declare them and let the library do the
 composition (see below).
