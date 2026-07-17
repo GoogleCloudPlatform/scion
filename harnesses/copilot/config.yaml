@@ -27,10 +27,10 @@ provisioner:
   required_image_tools:
     - python3
 
-config_dir: ~/.copilot
-skills_dir: ~/.copilot/skills
+config_dir: .copilot
+skills_dir: .copilot/skills
 interrupt_key: C-c
-instructions_file: ~/.copilot/copilot-instructions.md
+instructions_file: .copilot/copilot-instructions.md
 system_prompt_mode: prepend_to_instructions
 
 model_aliases:
