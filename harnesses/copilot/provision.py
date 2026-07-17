@@ -238,8 +238,8 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
     ctx.write_outputs(resolved, env=env, extra=extra)
 
     harness_cfg = ctx.harness_config
-    instructions_file = harness_cfg.get('instructions_file') or '~/.copilot/copilot-instructions.md'
-    target = os.path.expanduser(instructions_file)
+    instructions_file = harness_cfg.get('instructions_file') or '.copilot/copilot-instructions.md'
+    target = os.path.join(ctx.home, instructions_file)
     os.makedirs(os.path.dirname(target), exist_ok=True)
     try:
         scion_harness.project_instructions(ctx, target)
