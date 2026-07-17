@@ -31,11 +31,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends ripgrep \
 RUN apt-get update && apt-get install -y --no-install-recommends python3-pip \
   && apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# Install Hermes Agent via pip
+# Install Hermes Agent with Vertex AI support (google-auth for ADC)
 RUN if [ -n "${HERMES_VERSION}" ]; then \
-      pip install --no-cache-dir --break-system-packages "hermes-agent==${HERMES_VERSION}"; \
+      pip install --no-cache-dir --break-system-packages "hermes-agent[vertex]==${HERMES_VERSION}"; \
     else \
-      pip install --no-cache-dir --break-system-packages hermes-agent; \
+      pip install --no-cache-dir --break-system-packages "hermes-agent[vertex]"; \
     fi
 
 RUN mkdir -p /home/scion/.hermes /home/scion/.hermes/skills \

@@ -24,10 +24,12 @@ ContainerScriptHarness has already:
 
 This script's job:
 
-  1. Determine which API key is available, with precedence:
-         ANTHROPIC_API_KEY > OPENAI_API_KEY > GOOGLE_API_KEY.
-  2. Read the secret value from the staged secrets/<NAME> file and write it
-     to ~/.hermes/.env (Hermes reads secrets from this dotenv file).
+  1. Determine which auth method is available, with precedence:
+         api-key (ANTHROPIC/OPENAI/GOOGLE_API_KEY) > vertex-ai (ADC).
+  2. For api-key: read the secret and write to ~/.hermes/.env.
+     For vertex-ai: resolve project/region and write Vertex config to
+     ~/.hermes/.env; propagate VERTEX_PROJECT_ID and VERTEX_REGION
+     into the container env overlay.
   3. Compose staged Scion prompt inputs into AGENTS.md (instruction
      projection — Hermes auto-reads AGENTS.md as context).
   4. Apply MCP server configuration to ~/.hermes/mcp.json.
@@ -64,9 +66,48 @@ AUTH = scion_harness.AuthSpec(
             any_of=["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GOOGLE_API_KEY"],
             hint="set ANTHROPIC_API_KEY, OPENAI_API_KEY, or GOOGLE_API_KEY",
         ),
+        scion_harness.env_method(
+            "vertex-ai",
+            any_of=["VERTEX_PROJECT_ID", "GOOGLE_CLOUD_PROJECT"],
+            hint="set VERTEX_PROJECT_ID or GOOGLE_CLOUD_PROJECT "
+                 "(with ADC or GCP service account) for Vertex AI",
+        ),
     ],
     fallback_to_none_on_error=True,
 )
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _resolve_vertex_var(
+    ctx: scion_harness.ProvisionContext, *names: str, default: str = "",
+) -> str:
+    """Return the first non-empty value from staged secrets or env vars."""
+    for name in names:
+        val = ctx.read_secret(name, env_fallback=True)
+        if val:
+            return val
+    return default
+
+
+def _build_vertex_env(ctx: scion_harness.ProvisionContext) -> dict[str, str]:
+    """Build the Vertex AI env vars dict from staged secrets and environment."""
+    env: dict[str, str] = {}
+    project_id = _resolve_vertex_var(ctx, "VERTEX_PROJECT_ID", "GOOGLE_CLOUD_PROJECT")
+    if project_id:
+        env["VERTEX_PROJECT_ID"] = project_id
+    region = _resolve_vertex_var(
+        ctx, "VERTEX_REGION", "GOOGLE_CLOUD_REGION", "GOOGLE_CLOUD_LOCATION",
+        default="us-central1",
+    )
+    env["VERTEX_REGION"] = region
+    creds_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "")
+    if creds_path:
+        env["GOOGLE_APPLICATION_CREDENTIALS"] = creds_path
+    return env
+
 
 # ---------------------------------------------------------------------------
 # Native: ~/.hermes/.env writer
@@ -163,7 +204,7 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
     """Hermes provisioning logic."""
     resolved = ctx.select_auth(AUTH)
 
-    # Write the API key to ~/.hermes/.env so Hermes can read it.
+    # Write auth credentials to ~/.hermes/.env so Hermes can read them.
     if resolved.method == "api-key":
         api_key = ctx.read_secret(resolved.env_key)
         if not api_key:
@@ -172,6 +213,9 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
                 "was staged at the recorded path; check ApplyAuthSettings"
             )
         _write_hermes_env({resolved.env_key: api_key})
+
+    elif resolved.method == "vertex-ai":
+        _write_hermes_env(_build_vertex_env(ctx))
 
     # Instruction projection via the lib.
     harness_cfg = ctx.harness_config
@@ -194,9 +238,19 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
     resolved_model = str(ctx.model_resolution.get("resolved_model") or "").strip()
     if resolved_model:
         env_payload["HERMES_INFERENCE_MODEL"] = resolved_model
+    elif resolved.method == "vertex-ai":
+        env_payload["HERMES_INFERENCE_MODEL"] = "google/gemini-2.5-flash"
+
+    # For vertex-ai, propagate project/region into the container env so
+    # Hermes's vertex adapter picks them up alongside ADC.
+    if resolved.method == "vertex-ai":
+        env_payload.update(_build_vertex_env(ctx))
 
     # Write standard outputs.
-    ctx.write_outputs(resolved, env=env_payload)
+    extra: dict[str, Any] | None = None
+    if resolved.method == "vertex-ai":
+        extra = {"vertex_ai": True}
+    ctx.write_outputs(resolved, env=env_payload, extra=extra)
 
     # MCP server configuration.
     _apply_mcp_servers(ctx)

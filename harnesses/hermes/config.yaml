@@ -60,7 +60,7 @@ capabilities:
     api_key: { support: "yes" }
     auth_file: { support: "no" }
     oauth_token: { support: "no" }
-    vertex_ai: { support: "no", reason: "Hermes gemini provider uses Google AI Studio API keys, not Vertex AI ADC" }
+    vertex_ai: { support: "yes" }
   mcp:
     stdio: { support: "yes" }
     sse: { support: "yes" }
@@ -81,8 +81,24 @@ auth:
     api-key:
       required_env:
         - any_of: ["GOOGLE_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"]
+    vertex-ai:
+      required_env:
+        - any_of: ["VERTEX_PROJECT_ID", "GOOGLE_CLOUD_PROJECT"]
+      required_files:
+        - name: gcloud-adc
+          type: file
+          description: "Google Cloud Application Default Credentials (ADC) file for vertex-ai authentication"
+          field: GoogleAppCredentials
+          alternative_env_keys: ["GOOGLE_APPLICATION_CREDENTIALS"]
+          skipped_when_gcp_service_account_assigned: true
+          required: true
   autodetect:
     env:
       GOOGLE_API_KEY: api-key
       OPENAI_API_KEY: api-key
       ANTHROPIC_API_KEY: api-key
+      VERTEX_PROJECT_ID: vertex-ai
+      GOOGLE_CLOUD_PROJECT: vertex-ai
+      GOOGLE_APPLICATION_CREDENTIALS: vertex-ai
+    files:
+      gcloud-adc: vertex-ai
