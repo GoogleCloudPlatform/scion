@@ -691,7 +691,7 @@ func extractTarGz(tarGzPath, destPath string) error {
 		if err != nil {
 			return fmt.Errorf("failed to read tar header: %w", err)
 		}
-		if header.Typeflag == tar.TypeDir || header.Typeflag == tar.TypeReg || header.Typeflag == tar.TypeRegA || header.Typeflag == tar.TypeSymlink {
+		if header.Typeflag == tar.TypeDir || header.Typeflag == tar.TypeReg || header.Typeflag == tar.TypeSymlink {
 			entries = append(entries, header.Name)
 		}
 	}

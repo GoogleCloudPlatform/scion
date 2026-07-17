@@ -699,8 +699,11 @@ func loadAndReconcileConfig(cmd *cobra.Command) (*config.GlobalConfig, error) {
 			if home, err := os.UserHomeDir(); err == nil {
 				adcPath := filepath.Join(home, ".config", "gcloud", "application_default_credentials.json")
 				if _, err := os.Stat(adcPath); err == nil {
-					os.Setenv("GOOGLE_APPLICATION_CREDENTIALS", adcPath)
-					log.Printf("GCP: auto-detected gcloud ADC credentials at %s", adcPath)
+					if err := os.Setenv("GOOGLE_APPLICATION_CREDENTIALS", adcPath); err != nil {
+						log.Printf("GCP: failed to set GOOGLE_APPLICATION_CREDENTIALS: %v", err)
+					} else {
+						log.Printf("GCP: auto-detected gcloud ADC credentials at %s", adcPath)
+					}
 				}
 			}
 		}
