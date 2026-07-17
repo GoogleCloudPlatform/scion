@@ -18,6 +18,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
+	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 )
 
 var doctorCmd = &cobra.Command{
@@ -53,6 +54,9 @@ func runDoctor() int {
 	// --- Environment ---
 	failures += checkEnvironment()
 
+	// --- Transport Auth ---
+	transportSrc := checkTransportAuth()
+
 	// --- Token ---
 	tokenExpiry, tokenSubject := checkToken()
 
@@ -60,13 +64,13 @@ func runDoctor() int {
 	hubURL := resolveHubURL()
 	hubReachable := false
 	if hubURL != "" {
-		hubReachable = checkHubConnectivity(hubURL)
+		hubReachable = checkHubConnectivity(hubURL, transportSrc)
 	}
 
 	// --- Authentication ---
 	tokenValid := false
 	if hubURL != "" && hubReachable {
-		tokenValid = checkAuthentication(hubURL, &failures)
+		tokenValid = checkAuthentication(hubURL, &failures, transportSrc)
 	}
 
 	// --- GCP Metadata ---
@@ -197,10 +201,56 @@ func resolveHubURL() string {
 	return hubURL
 }
 
-func checkHubConnectivity(hubURL string) bool {
+func checkTransportAuth() transportauth.TokenSource {
+	fmt.Println("\n--- Transport Auth ---")
+
+	src, err := transportauth.FromEnv()
+	if err != nil {
+		fmt.Printf("[WARN] Transport auth error: %v\n", err)
+		return nil
+	}
+	if src == nil {
+		fmt.Println("[INFO] Transport Auth: none")
+		return nil
+	}
+
+	switch src.(type) {
+	case *transportauth.InjectedSource:
+		expiry := src.Expiry()
+		if expiry.IsZero() {
+			fmt.Println("[ OK ] Transport Auth: injected")
+		} else {
+			fmt.Printf("[ OK ] Transport Auth: injected (expires %s)\n", expiry.Format(time.RFC3339))
+		}
+	case *transportauth.MetadataSource:
+		audience := os.Getenv(transportauth.EnvTransportAudience)
+		if audience == "" {
+			audience = os.Getenv(transportauth.EnvHubOIDCAudience)
+		}
+		fmt.Printf("[ OK ] Transport Auth: metadata (audience: %s)\n", audience)
+	default:
+		fmt.Println("[ OK ] Transport Auth: active")
+	}
+
+	return src
+}
+
+func wrapTransport(client *http.Client, src transportauth.TokenSource) {
+	if src == nil {
+		return
+	}
+	mode := transportauth.ModeFromEnv()
+	if client.Transport == nil {
+		client.Transport = http.DefaultTransport
+	}
+	client.Transport = transportauth.Wrap(client.Transport, src, mode)
+}
+
+func checkHubConnectivity(hubURL string, transportSrc transportauth.TokenSource) bool {
 	fmt.Println("\n--- Hub Connectivity ---")
 
 	client := &http.Client{Timeout: 5 * time.Second}
+	wrapTransport(client, transportSrc)
 	healthURL := strings.TrimSuffix(hubURL, "/") + "/healthz"
 
 	resp, err := client.Get(healthURL)
@@ -219,7 +269,7 @@ func checkHubConnectivity(hubURL string) bool {
 	return true
 }
 
-func checkAuthentication(hubURL string, failures *int) bool {
+func checkAuthentication(hubURL string, failures *int, transportSrc transportauth.TokenSource) bool {
 	fmt.Println("\n--- Authentication ---")
 
 	agentID := os.Getenv("SCION_AGENT_ID")
@@ -232,6 +282,7 @@ func checkAuthentication(hubURL string, failures *int) bool {
 	}
 
 	client := &http.Client{Timeout: 5 * time.Second}
+	wrapTransport(client, transportSrc)
 
 	// Test with a heartbeat (least disruptive authenticated call)
 	statusURL := fmt.Sprintf("%s/api/v1/agents/%s/status",
