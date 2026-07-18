@@ -843,6 +843,9 @@ func (s *AgentStore) ReassignAgentsToBroker(ctx context.Context, agents []*store
 		}
 		ids = append(ids, uid)
 	}
+	if len(ids) == 0 {
+		return 0, nil
+	}
 
 	affected, err := s.client.Agent.Update().
 		Where(agent.IDIn(ids...)).
@@ -875,11 +878,13 @@ func (s *AgentStore) ReassignProjectBroker(ctx context.Context, oldBrokerID, new
 		Where(runtimebroker.IDEQ(oldUID)).
 		Select(runtimebroker.FieldStatus).
 		Only(ctx)
+	if err != nil && !ent.IsNotFound(err) {
+		return 0, err
+	}
 	if err == nil && oldBroker.Status == store.BrokerStatusOnline {
 		// Old broker is still online — do not reassign its projects.
 		return 0, nil
 	}
-	// err != nil means broker not found (missing) — safe to reassign.
 
 	affected, err := s.client.Project.Update().
 		Where(project.DefaultRuntimeBrokerIDEQ(oldBrokerID)).

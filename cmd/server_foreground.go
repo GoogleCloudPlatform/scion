@@ -2274,7 +2274,10 @@ func resolveBrokerID(ctx context.Context, cfg *config.GlobalConfig, settings *co
 
 	// Recover from DB: if exactly one embedded broker exists, reuse its ID.
 	if brokerID == "" && s != nil {
-		if embedded, err := s.FindEmbeddedBroker(ctx); err == nil && embedded != nil {
+		embedded, err := s.FindEmbeddedBroker(ctx)
+		if err != nil {
+			log.Printf("Warning: failed to query database for broker ID recovery: %v", err)
+		} else if embedded != nil {
 			brokerID = embedded.ID
 			log.Printf("NOTICE: recovered broker ID %s from database (single embedded broker)", brokerID)
 			// Persist so we don't re-recover on next boot (writes to both legacy

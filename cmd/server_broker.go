@@ -172,7 +172,9 @@ func registerGlobalProjectAndBroker(ctx context.Context, s store.Store, brokerID
 		// Mark stale broker records as offline so they don't appear active.
 		for oldID := range oldBrokerIDs {
 			if err := s.MarkBrokerOffline(ctx, oldID); err != nil {
-				log.Printf("Warning: failed to mark broker %s offline: %v", oldID, err)
+				if err != store.ErrNotFound {
+					log.Printf("Warning: failed to mark broker %s offline: %v", oldID, err)
+				}
 			} else {
 				log.Printf("NOTICE: marked stale broker %s as offline", oldID)
 			}
