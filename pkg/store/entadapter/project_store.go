@@ -1012,6 +1012,42 @@ func (s *ProjectStore) ReleaseAndMarkBrokerOffline(ctx context.Context, brokerID
 	return false, store.ErrVersionConflict
 }
 
+// MarkBrokerOffline sets a broker's status to offline. Used during startup
+// repair to ensure stale broker records that were never properly shut down are
+// explicitly marked offline. Uses the version-CAS loop for safe concurrency.
+// Returns ErrNotFound if the broker doesn't exist.
+func (s *ProjectStore) MarkBrokerOffline(ctx context.Context, brokerID string) error {
+	uid, err := parseUUID(brokerID)
+	if err != nil {
+		return err
+	}
+
+	now := time.Now()
+	for attempt := 0; attempt < maxCASRetries; attempt++ {
+		cur, err := s.client.RuntimeBroker.Get(ctx, uid)
+		if err != nil {
+			return mapError(err)
+		}
+		// Already offline — nothing to do.
+		if cur.Status == store.BrokerStatusOffline {
+			return nil
+		}
+		affected, err := s.client.RuntimeBroker.Update().
+			Where(runtimebroker.IDEQ(uid), runtimebroker.LockVersionEQ(cur.LockVersion)).
+			SetStatus(store.BrokerStatusOffline).
+			SetUpdated(now).
+			AddLockVersion(1).
+			Save(ctx)
+		if err != nil {
+			return mapError(err)
+		}
+		if affected == 1 {
+			return nil
+		}
+	}
+	return store.ErrVersionConflict
+}
+
 // ReapStaleBrokerAffinity clears affinity (connected_hub_id/connected_session_id/
 // connected_at) for brokers that still claim affinity but whose last_heartbeat
 // is older than staleBefore. Does not change broker status.

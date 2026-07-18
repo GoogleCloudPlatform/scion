@@ -185,6 +185,13 @@ type AgentStore interface {
 	// ReassignAgentsToBroker bulk-updates the RuntimeBrokerID of the given agents
 	// to the specified broker ID. Returns the number of agents updated.
 	ReassignAgentsToBroker(ctx context.Context, agents []*Agent, brokerID string) (int, error)
+
+	// ReassignProjectBroker updates projects whose DefaultRuntimeBrokerID
+	// matches oldBrokerID to point to newBrokerID. Only projects whose current
+	// default broker is offline or missing are updated — projects pointing to
+	// active remote brokers are left untouched. Returns the number of projects
+	// updated.
+	ReassignProjectBroker(ctx context.Context, oldBrokerID, newBrokerID string) (int, error)
 }
 
 // AgentFilter defines criteria for filtering agents.
@@ -370,6 +377,12 @@ type RuntimeBrokerStore interface {
 	// and whose connected_hub_id is not NULL (i.e. they still claim affinity).
 	// Returns the number of rows cleared. Does not change broker status.
 	ReapStaleBrokerAffinity(ctx context.Context, staleBefore time.Time) (cleared int, err error)
+
+	// MarkBrokerOffline sets a broker's status to offline. This is used during
+	// startup repair to ensure stale broker records that were never properly
+	// shut down are explicitly marked offline. Returns ErrNotFound if the
+	// broker doesn't exist. No-op if the broker is already offline.
+	MarkBrokerOffline(ctx context.Context, brokerID string) error
 }
 
 // RuntimeBrokerFilter defines criteria for filtering runtime brokers.

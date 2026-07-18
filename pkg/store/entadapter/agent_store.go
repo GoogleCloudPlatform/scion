@@ -28,6 +28,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/predicate"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/project"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/runtimebroker"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -846,6 +847,43 @@ func (s *AgentStore) ReassignAgentsToBroker(ctx context.Context, agents []*store
 	affected, err := s.client.Agent.Update().
 		Where(agent.IDIn(ids...)).
 		SetRuntimeBrokerID(brokerID).
+		Save(ctx)
+	if err != nil {
+		return 0, err
+	}
+	return affected, nil
+}
+
+// ReassignProjectBroker updates projects whose DefaultRuntimeBrokerID matches
+// oldBrokerID to point to newBrokerID. It applies the same multi-broker safety
+// guard as FindOrphanedAgents: the old broker must be offline or missing — if
+// it is still online, no projects are updated (it's a legitimate remote
+// broker). Returns the number of projects updated.
+func (s *AgentStore) ReassignProjectBroker(ctx context.Context, oldBrokerID, newBrokerID string) (int, error) {
+	if oldBrokerID == newBrokerID {
+		return 0, nil
+	}
+
+	// Safety guard: check if the old broker is still online. If so, it is a
+	// legitimate remote broker and its projects must not be touched.
+	oldUID, err := uuid.Parse(oldBrokerID)
+	if err != nil {
+		return 0, fmt.Errorf("invalid oldBrokerID %q: %w", oldBrokerID, err)
+	}
+
+	oldBroker, err := s.client.RuntimeBroker.Query().
+		Where(runtimebroker.IDEQ(oldUID)).
+		Select(runtimebroker.FieldStatus).
+		Only(ctx)
+	if err == nil && oldBroker.Status == store.BrokerStatusOnline {
+		// Old broker is still online — do not reassign its projects.
+		return 0, nil
+	}
+	// err != nil means broker not found (missing) — safe to reassign.
+
+	affected, err := s.client.Project.Update().
+		Where(project.DefaultRuntimeBrokerIDEQ(oldBrokerID)).
+		SetDefaultRuntimeBrokerID(newBrokerID).
 		Save(ctx)
 	if err != nil {
 		return 0, err
