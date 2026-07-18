@@ -164,7 +164,7 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
         or os.environ.get("AGY_MODEL", "")
         or FLASH_MODEL
     )
-    thinking_raw = os.environ.get("SCION_THINKING_LEVEL", "")
+    thinking_raw = os.environ.get("SCION_THINKING_LEVEL") or os.environ.get("AGY_THINKING_LEVEL", "")
     thinking_level = int(thinking_raw) if thinking_raw.strip().isdigit() else DEFAULT_THINKING_LEVEL
     thinking_bucket = _resolve_thinking_bucket(model, thinking_level)
     ctx.info(f"model={model} thinking_level={thinking_level} bucket={thinking_bucket}")
