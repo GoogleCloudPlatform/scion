@@ -429,11 +429,15 @@ func RunAgent(cmd *cobra.Command, args []string, resume bool) error {
 		}
 		inlineCfg.Model = normalizedModel
 	}
-	if thinkingLevelFlag >= 0 && thinkingLevelFlag <= 100 {
+	if thinkingLevelFlag != -1 {
+		if thinkingLevelFlag < 0 || thinkingLevelFlag > 100 {
+			return fmt.Errorf("invalid --thinking-level value %d: must be between 0 and 100", thinkingLevelFlag)
+		}
 		if inlineCfg == nil {
 			inlineCfg = &api.ScionConfig{}
 		}
-		inlineCfg.ThinkingLevel = &thinkingLevelFlag
+		val := thinkingLevelFlag
+		inlineCfg.ThinkingLevel = &val
 	}
 
 	// This allows starting/resuming an agent even if it exists on Hub but not locally
