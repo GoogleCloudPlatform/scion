@@ -585,3 +585,129 @@ func TestFromEnv_NothingConfigured(t *testing.T) {
 	require.NoError(t, err)
 	assert.Nil(t, src)
 }
+
+// --- ModeFromString tests ---
+
+func TestModeFromString_IAP(t *testing.T) {
+	assert.Equal(t, HeaderProxyAuthorization, ModeFromString("iap"))
+}
+
+func TestModeFromString_CloudRunInvoker(t *testing.T) {
+	assert.Equal(t, HeaderServerlessAuthorization, ModeFromString("cloudrun_invoker"))
+}
+
+func TestModeFromString_Unknown(t *testing.T) {
+	assert.Equal(t, HeaderAuthorization, ModeFromString("unknown"))
+}
+
+// --- FromSettings tests ---
+
+type fakeADCSource struct {
+	audience string
+	token    string
+	expiry   time.Time
+}
+
+func (f *fakeADCSource) Token() (string, error) {
+	if f.token == "" {
+		return "", fmt.Errorf("no token")
+	}
+	return f.token, nil
+}
+func (f *fakeADCSource) SetToken(token string, expiry time.Time) {
+	f.token = token
+	f.expiry = expiry
+}
+func (f *fakeADCSource) Expiry() time.Time { return f.expiry }
+
+func fakeADCNew(audience string) (TokenSource, error) {
+	tok := makeTestJWT(time.Now().Add(1 * time.Hour))
+	return &fakeADCSource{audience: audience, token: tok}, nil
+}
+
+func TestFromSettings_EnvOverridesSettings(t *testing.T) {
+	token := makeTestJWT(time.Now().Add(1 * time.Hour))
+	t.Setenv(EnvTransportToken, token)
+
+	settings := &TransportSettings{Mode: "iap", Audience: "from-settings"}
+	src, mode, err := FromSettings(settings, fakeADCNew)
+	require.NoError(t, err)
+	require.NotNil(t, src)
+	_, ok := src.(*InjectedSource)
+	assert.True(t, ok, "env var should take precedence over settings")
+	// When env has the token, ModeFromEnv() is used.
+	_ = mode
+}
+
+func TestFromSettings_SettingsAudience(t *testing.T) {
+	cleanup := overrideGCPDetection(false)
+	defer cleanup()
+
+	_ = os.Unsetenv(EnvTransportToken)
+	_ = os.Unsetenv(EnvTransportAudience)
+	_ = os.Unsetenv(EnvHubOIDCAudience)
+	_ = os.Unsetenv(EnvTransportMode)
+
+	settings := &TransportSettings{Mode: "iap", Audience: "https://settings-audience.example.com"}
+	src, mode, err := FromSettings(settings, fakeADCNew)
+	require.NoError(t, err)
+	require.NotNil(t, src)
+	_, ok := src.(*fakeADCSource)
+	assert.True(t, ok, "should use ADC when not on GCE")
+	assert.Equal(t, HeaderProxyAuthorization, mode, "should use IAP mode from settings")
+}
+
+func TestFromSettings_NilSettings(t *testing.T) {
+	cleanup := overrideGCPDetection(false)
+	defer cleanup()
+
+	_ = os.Unsetenv(EnvTransportToken)
+
+	src, _, err := FromSettings(nil, fakeADCNew)
+	require.NoError(t, err)
+	assert.Nil(t, src, "nil settings should return nil")
+}
+
+func TestFromSettings_EmptyAudience(t *testing.T) {
+	cleanup := overrideGCPDetection(false)
+	defer cleanup()
+
+	_ = os.Unsetenv(EnvTransportToken)
+
+	settings := &TransportSettings{Mode: "iap", Audience: ""}
+	src, _, err := FromSettings(settings, fakeADCNew)
+	require.NoError(t, err)
+	assert.Nil(t, src, "empty audience should return nil")
+}
+
+func TestFromSettings_EnvModeOverridesSettingsMode(t *testing.T) {
+	cleanup := overrideGCPDetection(false)
+	defer cleanup()
+
+	_ = os.Unsetenv(EnvTransportToken)
+	_ = os.Unsetenv(EnvTransportAudience)
+	_ = os.Unsetenv(EnvHubOIDCAudience)
+	t.Setenv(EnvTransportMode, "cloudrun_invoker")
+
+	settings := &TransportSettings{Mode: "iap", Audience: "https://audience.example.com"}
+	_, mode, err := FromSettings(settings, fakeADCNew)
+	require.NoError(t, err)
+	assert.Equal(t, HeaderServerlessAuthorization, mode, "env mode should override settings mode")
+}
+
+func TestFromSettings_MetadataOnGCE(t *testing.T) {
+	cleanup := overrideGCPDetection(true)
+	defer cleanup()
+
+	_ = os.Unsetenv(EnvTransportToken)
+	_ = os.Unsetenv(EnvTransportAudience)
+	_ = os.Unsetenv(EnvHubOIDCAudience)
+	_ = os.Unsetenv(EnvMetadataMode)
+
+	settings := &TransportSettings{Mode: "iap", Audience: "https://audience.example.com"}
+	src, _, err := FromSettings(settings, fakeADCNew)
+	require.NoError(t, err)
+	require.NotNil(t, src)
+	_, ok := src.(*MetadataSource)
+	assert.True(t, ok, "should prefer metadata on GCE")
+}

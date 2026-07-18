@@ -81,6 +81,15 @@ type BucketConfig struct {
 //   - SCION_HUB_TOKEN: Bearer token for Hub authentication
 //   - SCION_HUB_API_KEY: API key for Hub authentication (alternative to token)
 //   - SCION_HUB_ENABLED: Set to "true" to enable Hub integration
+// HubTransportConfig defines transport-layer auth settings for traversing
+// platform guards (IAP, Cloud Run invoker IAM) in front of the Hub.
+type HubTransportConfig struct {
+	// Mode is the transport auth mode: "iap" or "cloudrun_invoker".
+	Mode string `json:"mode,omitempty" yaml:"mode,omitempty" koanf:"mode"`
+	// Audience is the OIDC audience (typically the IAP OAuth client ID).
+	Audience string `json:"audience,omitempty" yaml:"audience,omitempty" koanf:"audience"`
+}
+
 type HubClientConfig struct {
 	// Enabled indicates whether Hub integration is enabled.
 	// When enabled and configured, agent operations are routed through the Hub.
@@ -115,6 +124,9 @@ type HubClientConfig struct {
 	// Used to determine whether hub-only agents were created by other brokers
 	// (after this timestamp) or were locally deleted (before this timestamp).
 	LastSyncedAt string `json:"lastSyncedAt,omitempty" yaml:"lastSyncedAt,omitempty" koanf:"lastSyncedAt"`
+	// Transport defines transport-layer auth settings for traversing platform
+	// guards (IAP, Cloud Run invoker IAM) in front of the Hub.
+	Transport *HubTransportConfig `json:"transport,omitempty" yaml:"transport,omitempty" koanf:"transport"`
 }
 
 type CLIConfig struct {
@@ -681,6 +693,16 @@ func GetSettingValue(s *Settings, key string) (string, error) {
 			return s.CLI.Mode, nil
 		}
 		return "", nil
+	case "hub.transport.mode":
+		if s.Hub != nil && s.Hub.Transport != nil {
+			return s.Hub.Transport.Mode, nil
+		}
+		return "", nil
+	case "hub.transport.audience":
+		if s.Hub != nil && s.Hub.Transport != nil {
+			return s.Hub.Transport.Audience, nil
+		}
+		return "", nil
 	}
 
 	// Handle hub_connections.<name>.endpoint keys
@@ -746,6 +768,10 @@ func GetSettingsMap(s *Settings) map[string]string {
 			m["hub.brokerToken"] = "********" // Mask broker token
 		}
 		m["hub.lastSyncedAt"] = s.Hub.LastSyncedAt
+		if s.Hub.Transport != nil {
+			m["hub.transport.mode"] = s.Hub.Transport.Mode
+			m["hub.transport.audience"] = s.Hub.Transport.Audience
+		}
 	}
 	if s.CLI != nil {
 		if s.CLI.AutoHelp != nil {
