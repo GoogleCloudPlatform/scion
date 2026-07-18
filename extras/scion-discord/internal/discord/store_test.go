@@ -664,6 +664,137 @@ func TestPendingAskUser(t *testing.T) {
 	})
 }
 
+// --- Thread defaults ---
+
+func TestThreadDefaultCRUD(t *testing.T) {
+	t.Run("GetReturnsEmptyWhenNoneSet", func(t *testing.T) {
+		store := newTestStore(t)
+		ctx := context.Background()
+
+		slug, err := store.GetThreadDefault(ctx, "chan-1", "thread-1")
+		require.NoError(t, err)
+		assert.Equal(t, "", slug)
+	})
+
+	t.Run("SetAndGetRoundTrip", func(t *testing.T) {
+		store := newTestStore(t)
+		ctx := context.Background()
+
+		require.NoError(t, store.SetThreadDefault(ctx, "chan-1", "thread-1", "coder"))
+
+		slug, err := store.GetThreadDefault(ctx, "chan-1", "thread-1")
+		require.NoError(t, err)
+		assert.Equal(t, "coder", slug)
+	})
+
+	t.Run("Upsert", func(t *testing.T) {
+		store := newTestStore(t)
+		ctx := context.Background()
+
+		require.NoError(t, store.SetThreadDefault(ctx, "chan-1", "thread-1", "coder"))
+		require.NoError(t, store.SetThreadDefault(ctx, "chan-1", "thread-1", "reviewer"))
+
+		slug, err := store.GetThreadDefault(ctx, "chan-1", "thread-1")
+		require.NoError(t, err)
+		assert.Equal(t, "reviewer", slug)
+	})
+
+	t.Run("Delete", func(t *testing.T) {
+		store := newTestStore(t)
+		ctx := context.Background()
+
+		require.NoError(t, store.SetThreadDefault(ctx, "chan-1", "thread-1", "coder"))
+		require.NoError(t, store.DeleteThreadDefault(ctx, "chan-1", "thread-1"))
+
+		slug, err := store.GetThreadDefault(ctx, "chan-1", "thread-1")
+		require.NoError(t, err)
+		assert.Equal(t, "", slug)
+	})
+
+	t.Run("DeleteForChannel", func(t *testing.T) {
+		store := newTestStore(t)
+		ctx := context.Background()
+
+		require.NoError(t, store.SetThreadDefault(ctx, "chan-1", "thread-1", "coder"))
+		require.NoError(t, store.SetThreadDefault(ctx, "chan-1", "thread-2", "reviewer"))
+		require.NoError(t, store.SetThreadDefault(ctx, "chan-2", "thread-3", "tester"))
+
+		require.NoError(t, store.DeleteThreadDefaultsForChannel(ctx, "chan-1"))
+
+		slug, err := store.GetThreadDefault(ctx, "chan-1", "thread-1")
+		require.NoError(t, err)
+		assert.Equal(t, "", slug)
+
+		slug, err = store.GetThreadDefault(ctx, "chan-1", "thread-2")
+		require.NoError(t, err)
+		assert.Equal(t, "", slug)
+
+		// Different channel should be unaffected.
+		slug, err = store.GetThreadDefault(ctx, "chan-2", "thread-3")
+		require.NoError(t, err)
+		assert.Equal(t, "tester", slug)
+	})
+
+	t.Run("Isolation", func(t *testing.T) {
+		store := newTestStore(t)
+		ctx := context.Background()
+
+		require.NoError(t, store.SetThreadDefault(ctx, "chan-1", "thread-1", "coder"))
+		require.NoError(t, store.SetThreadDefault(ctx, "chan-2", "thread-1", "reviewer"))
+
+		slug1, err := store.GetThreadDefault(ctx, "chan-1", "thread-1")
+		require.NoError(t, err)
+		assert.Equal(t, "coder", slug1)
+
+		slug2, err := store.GetThreadDefault(ctx, "chan-2", "thread-1")
+		require.NoError(t, err)
+		assert.Equal(t, "reviewer", slug2)
+	})
+}
+
+func TestDeleteChannelLinkCascade(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	// Create a channel link.
+	require.NoError(t, store.CreateChannelLink(ctx, &ChannelLink{
+		ChannelID: "chan-1",
+		GuildID:   "guild-1",
+		ProjectID: "proj-1",
+		LinkedAt:  time.Now().UTC(),
+		Active:    true,
+	}))
+
+	// Set thread defaults for that channel.
+	require.NoError(t, store.SetThreadDefault(ctx, "chan-1", "thread-1", "coder"))
+	require.NoError(t, store.SetThreadDefault(ctx, "chan-1", "thread-2", "reviewer"))
+
+	// Also set a thread default for a different channel (should not be affected).
+	require.NoError(t, store.SetThreadDefault(ctx, "chan-2", "thread-3", "tester"))
+
+	// Delete the channel link.
+	require.NoError(t, store.DeleteChannelLink(ctx, "chan-1"))
+
+	// Verify channel link is deleted.
+	got, err := store.GetChannelLink(ctx, "chan-1")
+	require.NoError(t, err)
+	assert.Nil(t, got)
+
+	// Verify thread defaults for chan-1 are also deleted.
+	slug, err := store.GetThreadDefault(ctx, "chan-1", "thread-1")
+	require.NoError(t, err)
+	assert.Equal(t, "", slug)
+
+	slug, err = store.GetThreadDefault(ctx, "chan-1", "thread-2")
+	require.NoError(t, err)
+	assert.Equal(t, "", slug)
+
+	// Verify thread defaults for chan-2 are unaffected.
+	slug, err = store.GetThreadDefault(ctx, "chan-2", "thread-3")
+	require.NoError(t, err)
+	assert.Equal(t, "tester", slug)
+}
+
 // --- Store lifecycle ---
 
 func TestStore_OpenInvalidPath(t *testing.T) {

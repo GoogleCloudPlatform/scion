@@ -31,6 +31,12 @@ type Store interface {
 	DeactivateLinksForGuild(ctx context.Context, guildID string) error
 	DeleteChannelLink(ctx context.Context, channelID string) error
 
+	// Thread defaults — per-thread agent overrides
+	GetThreadDefault(ctx context.Context, channelID, threadID string) (string, error)
+	SetThreadDefault(ctx context.Context, channelID, threadID, agentSlug string) error
+	DeleteThreadDefault(ctx context.Context, channelID, threadID string) error
+	DeleteThreadDefaultsForChannel(ctx context.Context, channelID string) error
+
 	// User mappings (Discord user <-> Scion identity)
 	CreateUserMapping(ctx context.Context, mapping *DiscordUserMapping) error
 	GetUserMapping(ctx context.Context, discordUserID string) (*DiscordUserMapping, error)
@@ -247,6 +253,13 @@ CREATE TABLE IF NOT EXISTS notification_prefs (
 	updated_at TEXT NOT NULL,
 	PRIMARY KEY (discord_user_id, project_id, agent_slug)
 );
+
+CREATE TABLE IF NOT EXISTS thread_defaults (
+	channel_id TEXT NOT NULL,
+	thread_id  TEXT NOT NULL,
+	agent_slug TEXT NOT NULL,
+	PRIMARY KEY (channel_id, thread_id)
+);
 `
 	_, err := s.db.Exec(ddl)
 	if err != nil {
@@ -344,7 +357,47 @@ func (s *sqliteStore) DeactivateLinksForGuild(ctx context.Context, guildID strin
 }
 
 func (s *sqliteStore) DeleteChannelLink(ctx context.Context, channelID string) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM channel_links WHERE channel_id = ?`, channelID)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM thread_defaults WHERE channel_id = ?`, channelID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM channel_links WHERE channel_id = ?`, channelID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// --- Thread defaults ---
+
+func (s *sqliteStore) GetThreadDefault(ctx context.Context, channelID, threadID string) (string, error) {
+	const q = `SELECT agent_slug FROM thread_defaults WHERE channel_id = ? AND thread_id = ?`
+	var slug string
+	err := s.db.QueryRowContext(ctx, q, channelID, threadID).Scan(&slug)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	return slug, err
+}
+
+func (s *sqliteStore) SetThreadDefault(ctx context.Context, channelID, threadID, agentSlug string) error {
+	const q = `INSERT INTO thread_defaults (channel_id, thread_id, agent_slug)
+               VALUES (?, ?, ?)
+               ON CONFLICT(channel_id, thread_id) DO UPDATE SET agent_slug=excluded.agent_slug`
+	_, err := s.db.ExecContext(ctx, q, channelID, threadID, agentSlug)
+	return err
+}
+
+func (s *sqliteStore) DeleteThreadDefault(ctx context.Context, channelID, threadID string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM thread_defaults WHERE channel_id = ? AND thread_id = ?`, channelID, threadID)
+	return err
+}
+
+func (s *sqliteStore) DeleteThreadDefaultsForChannel(ctx context.Context, channelID string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM thread_defaults WHERE channel_id = ?`, channelID)
 	return err
 }
 

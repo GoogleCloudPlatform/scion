@@ -152,7 +152,7 @@ func (h *CallbackHandler) handleSetupDefaultAgent(s *discordgo.Session, i *disco
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	link, _ := h.store.GetChannelLink(ctx, i.ChannelID)
+	link, _ := resolveChannelLink(ctx, s, h.store, i.ChannelID)
 	if link == nil {
 		h.respondUpdate(s, i, "Setup session expired. Please use `/scion setup` again.", nil)
 		return
@@ -177,12 +177,18 @@ func (h *CallbackHandler) handleSetupDefaultAgent(s *discordgo.Session, i *disco
 }
 
 // saveChannelLink persists a channel-to-project link.
+// If the interaction is in a thread, the link is saved against the parent channel.
 func (h *CallbackHandler) saveChannelLink(ctx context.Context, i *discordgo.InteractionCreate, projectID, projectSlug, agentSlug string) {
 	linkedBy := interactionUserID(i)
 	guildID := i.GuildID
 
+	channelID := i.ChannelID
+	if parentID := threadParentID(h.session, channelID); parentID != "" {
+		channelID = parentID
+	}
+
 	link := &ChannelLink{
-		ChannelID:          i.ChannelID,
+		ChannelID:          channelID,
 		GuildID:            guildID,
 		ProjectID:          projectID,
 		ProjectSlug:        projectSlug,
@@ -499,10 +505,12 @@ func (h *CallbackHandler) handleSettingsCallback(s *discordgo.Session, i *discor
 
 // handleDefaultCallback handles default agent selection buttons.
 // custom_id formats:
-//   - default:set:<agentSlug>  — set agent as default
-//   - default:none             — clear default agent
+//   - default:set:<agentSlug>             — set channel-level default
+//   - default:set:<agentSlug>:<threadID>  — set thread-level default
+//   - default:none                        — clear channel-level default
+//   - default:none:<threadID>             — clear thread-level default
 func (h *CallbackHandler) handleDefaultCallback(s *discordgo.Session, i *discordgo.InteractionCreate, customID string) {
-	parts := strings.SplitN(customID, ":", 3)
+	parts := strings.SplitN(customID, ":", 4)
 	if len(parts) < 2 {
 		h.log.Warn("Malformed default callback custom_id", "custom_id", customID)
 		return
@@ -520,14 +528,35 @@ func (h *CallbackHandler) handleDefaultCallback(s *discordgo.Session, i *discord
 	action := parts[1]
 	switch action {
 	case "none":
-		link.DefaultAgent = ""
-		if err := h.store.UpdateChannelLink(ctx, link); err != nil {
-			h.log.Error("Failed to clear default agent", "error", err)
-			h.respondUpdate(s, i, "Failed to clear default agent. Please try again.", nil)
-			return
+		// Check for thread ID: "default:none:<threadID>"
+		threadID := ""
+		if len(parts) >= 3 {
+			threadID = parts[2]
 		}
-		h.respondUpdate(s, i, "Default agent cleared for this channel.", nil)
-		h.log.Info("Default agent cleared via button", "channel_id", i.ChannelID)
+		if threadID != "" {
+			// Thread-level: delete thread default.
+			if err := h.store.DeleteThreadDefault(ctx, link.ChannelID, threadID); err != nil {
+				h.log.Error("Failed to clear thread default", "error", err)
+				h.respondUpdate(s, i, "Failed to clear thread default. Please try again.", nil)
+				return
+			}
+			msg := "Thread default agent cleared."
+			if link.DefaultAgent != "" {
+				msg += fmt.Sprintf(" Messages will use the channel default (**%s**).", link.DefaultAgent)
+			}
+			h.respondUpdate(s, i, msg, nil)
+			h.log.Info("Thread default cleared via button", "channel_id", link.ChannelID, "thread_id", threadID)
+		} else {
+			// Channel-level: existing behavior.
+			link.DefaultAgent = ""
+			if err := h.store.UpdateChannelLink(ctx, link); err != nil {
+				h.log.Error("Failed to clear default agent", "error", err)
+				h.respondUpdate(s, i, "Failed to clear default agent. Please try again.", nil)
+				return
+			}
+			h.respondUpdate(s, i, "Default agent cleared for this channel.", nil)
+			h.log.Info("Default agent cleared via button", "channel_id", i.ChannelID)
+		}
 
 	case "set":
 		if len(parts) < 3 {
@@ -535,14 +564,30 @@ func (h *CallbackHandler) handleDefaultCallback(s *discordgo.Session, i *discord
 			return
 		}
 		agentSlug := parts[2]
-		link.DefaultAgent = agentSlug
-		if err := h.store.UpdateChannelLink(ctx, link); err != nil {
-			h.log.Error("Failed to set default agent", "error", err)
-			h.respondUpdate(s, i, "Failed to set default agent. Please try again.", nil)
-			return
+		threadID := ""
+		if len(parts) >= 4 {
+			threadID = parts[3]
 		}
-		h.respondUpdate(s, i, fmt.Sprintf("Default agent set to **%s** for this channel.", agentSlug), nil)
-		h.log.Info("Default agent set via button", "channel_id", i.ChannelID, "agent", agentSlug)
+		if threadID != "" {
+			// Thread-level: set thread default.
+			if err := h.store.SetThreadDefault(ctx, link.ChannelID, threadID, agentSlug); err != nil {
+				h.log.Error("Failed to set thread default", "error", err)
+				h.respondUpdate(s, i, "Failed to set thread default. Please try again.", nil)
+				return
+			}
+			h.respondUpdate(s, i, fmt.Sprintf("Default agent for this thread set to **%s**.", agentSlug), nil)
+			h.log.Info("Thread default set via button", "channel_id", link.ChannelID, "thread_id", threadID, "agent", agentSlug)
+		} else {
+			// Channel-level: existing behavior.
+			link.DefaultAgent = agentSlug
+			if err := h.store.UpdateChannelLink(ctx, link); err != nil {
+				h.log.Error("Failed to set default agent", "error", err)
+				h.respondUpdate(s, i, "Failed to set default agent. Please try again.", nil)
+				return
+			}
+			h.respondUpdate(s, i, fmt.Sprintf("Default agent set to **%s** for this channel.", agentSlug), nil)
+			h.log.Info("Default agent set via button", "channel_id", i.ChannelID, "agent", agentSlug)
+		}
 
 	default:
 		h.log.Debug("Unknown default action", "action", action, "custom_id", customID)

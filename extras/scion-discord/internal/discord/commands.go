@@ -435,8 +435,28 @@ func (h *CommandHandler) HandleSetup(s *discordgo.Session, i *discordgo.Interact
 		return
 	}
 
+	// If running in a thread/forum topic, resolve the parent channel.
+	effectiveChannelID := i.ChannelID
+	parentID := threadParentID(s, i.ChannelID)
+	if parentID != "" {
+		parentLink, err := h.store.GetChannelLink(ctx, parentID)
+		if err != nil {
+			h.log.Error("Failed to check parent channel link", "error", err, "parent_id", parentID)
+			h.followup(s, i, "Something went wrong. Please try again.")
+			return
+		}
+		if parentLink != nil && parentLink.Active {
+			h.followup(s, i, fmt.Sprintf(
+				"This channel is already set up (project **%s**). Use `/scion default` to set a per-thread default agent.",
+				parentLink.ProjectSlug,
+			))
+			return
+		}
+		effectiveChannelID = parentID
+	}
+
 	// Check existing link.
-	link, err := h.store.GetChannelLink(ctx, i.ChannelID)
+	link, err := h.store.GetChannelLink(ctx, effectiveChannelID)
 	if err != nil {
 		h.log.Error("Failed to check channel link", "error", err, "channel_id", i.ChannelID)
 		h.followup(s, i, "Something went wrong. Please try again.")
@@ -647,6 +667,9 @@ func (h *CommandHandler) HandleStatus(s *discordgo.Session, i *discordgo.Interac
 		return
 	}
 
+	// Detect thread context for default info display.
+	statusParentID := threadParentID(s, i.ChannelID)
+
 	for _, agent := range agents {
 		if agent.Slug == agentSlug {
 			emoji := activityEmoji(agent.Activity)
@@ -654,7 +677,20 @@ func (h *CommandHandler) HandleStatus(s *discordgo.Session, i *discordgo.Interac
 			if activity == "" {
 				activity = "unknown"
 			}
-			h.followup(s, i, fmt.Sprintf("%s **%s** -- %s", emoji, agent.Slug, activity))
+			statusMsg := fmt.Sprintf("%s **%s** -- %s", emoji, agent.Slug, activity)
+			if statusParentID != "" {
+				threadDefault, _ := h.store.GetThreadDefault(ctx, link.ChannelID, i.ChannelID)
+				if threadDefault != "" {
+					statusMsg += fmt.Sprintf("\nThread default: **%s**", threadDefault)
+				}
+				channelDefault := link.DefaultAgent
+				if channelDefault != "" {
+					statusMsg += fmt.Sprintf("\nChannel default: **%s**", channelDefault)
+				} else {
+					statusMsg += "\nChannel default: none"
+				}
+			}
+			h.followup(s, i, statusMsg)
 			return
 		}
 	}
@@ -792,6 +828,8 @@ func (h *CommandHandler) HandleLogs(s *discordgo.Session, i *discordgo.Interacti
 }
 
 // HandleDefault shows agent selection buttons for setting the default agent.
+// When invoked from a thread, it manages per-thread overrides instead of
+// the channel-level default.
 func (h *CommandHandler) HandleDefault(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -819,22 +857,53 @@ func (h *CommandHandler) HandleDefault(s *discordgo.Session, i *discordgo.Intera
 		return
 	}
 
+	// Detect thread context.
+	parentID := threadParentID(s, i.ChannelID)
+	isThread := parentID != ""
+	threadID := ""
+	if isThread {
+		threadID = i.ChannelID
+	}
+
+	// Determine the current effective default for highlighting.
+	currentDefault := link.DefaultAgent
+	if isThread {
+		td, err := h.store.GetThreadDefault(ctx, link.ChannelID, threadID)
+		if err != nil {
+			h.log.Error("Failed to get thread default", "error", err)
+		} else if td != "" {
+			currentDefault = td
+		}
+	}
+
+	promptText := "Select the default agent for this channel:"
+	if isThread {
+		promptText = "Select the default agent for this thread:"
+		if link.DefaultAgent != "" {
+			promptText += fmt.Sprintf("\nChannel-wide default: **%s**", link.DefaultAgent)
+		}
+	}
+
 	var currentText string
-	if link.DefaultAgent != "" {
-		currentText = fmt.Sprintf("Current default: **%s**\n", link.DefaultAgent)
+	if currentDefault != "" {
+		currentText = fmt.Sprintf("Current default: **%s**\n", currentDefault)
 	}
 
 	var rows []discordgo.MessageComponent
 	var buttons []discordgo.MessageComponent
 	for idx, slug := range agents {
 		style := discordgo.SecondaryButton
-		if slug == link.DefaultAgent {
+		if slug == currentDefault {
 			style = discordgo.PrimaryButton
+		}
+		customID := fmt.Sprintf("default:set:%s", slug)
+		if threadID != "" {
+			customID = fmt.Sprintf("default:set:%s:%s", slug, threadID)
 		}
 		buttons = append(buttons, discordgo.Button{
 			Label:    slug,
 			Style:    style,
-			CustomID: fmt.Sprintf("default:set:%s", slug),
+			CustomID: customID,
 		})
 		if len(buttons) == 5 || idx == len(agents)-1 {
 			rows = append(rows, discordgo.ActionsRow{Components: buttons})
@@ -845,19 +914,23 @@ func (h *CommandHandler) HandleDefault(s *discordgo.Session, i *discordgo.Intera
 		}
 	}
 	if len(rows) < 5 {
+		noneCustomID := "default:none"
+		if threadID != "" {
+			noneCustomID = fmt.Sprintf("default:none:%s", threadID)
+		}
 		rows = append(rows, discordgo.ActionsRow{
 			Components: []discordgo.MessageComponent{
 				discordgo.Button{
 					Label:    "None",
 					Style:    discordgo.DangerButton,
-					CustomID: "default:none",
+					CustomID: noneCustomID,
 				},
 			},
 		})
 	}
 
 	_, _ = s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
-		Content:    currentText + "Select the default agent for this channel:",
+		Content:    currentText + promptText,
 		Components: rows,
 	})
 }

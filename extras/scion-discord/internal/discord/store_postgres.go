@@ -105,6 +105,13 @@ CREATE TABLE IF NOT EXISTS discord_notification_prefs (
 	updated_at TIMESTAMPTZ NOT NULL,
 	PRIMARY KEY (discord_user_id, project_id, agent_slug)
 );
+
+CREATE TABLE IF NOT EXISTS discord_thread_defaults (
+	channel_id TEXT NOT NULL,
+	thread_id  TEXT NOT NULL,
+	agent_slug TEXT NOT NULL,
+	PRIMARY KEY (channel_id, thread_id)
+);
 `
 	_, err := s.db.Exec(ddl)
 	return err
@@ -184,7 +191,47 @@ func (s *postgresStore) DeactivateLinksForGuild(ctx context.Context, guildID str
 }
 
 func (s *postgresStore) DeleteChannelLink(ctx context.Context, channelID string) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM discord_channel_links WHERE channel_id = $1`, channelID)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM discord_thread_defaults WHERE channel_id = $1`, channelID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM discord_channel_links WHERE channel_id = $1`, channelID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// --- Thread defaults ---
+
+func (s *postgresStore) GetThreadDefault(ctx context.Context, channelID, threadID string) (string, error) {
+	const q = `SELECT agent_slug FROM discord_thread_defaults WHERE channel_id = $1 AND thread_id = $2`
+	var slug string
+	err := s.db.QueryRowContext(ctx, q, channelID, threadID).Scan(&slug)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	return slug, err
+}
+
+func (s *postgresStore) SetThreadDefault(ctx context.Context, channelID, threadID, agentSlug string) error {
+	const q = `INSERT INTO discord_thread_defaults (channel_id, thread_id, agent_slug)
+               VALUES ($1, $2, $3)
+               ON CONFLICT(channel_id, thread_id) DO UPDATE SET agent_slug=EXCLUDED.agent_slug`
+	_, err := s.db.ExecContext(ctx, q, channelID, threadID, agentSlug)
+	return err
+}
+
+func (s *postgresStore) DeleteThreadDefault(ctx context.Context, channelID, threadID string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM discord_thread_defaults WHERE channel_id = $1 AND thread_id = $2`, channelID, threadID)
+	return err
+}
+
+func (s *postgresStore) DeleteThreadDefaultsForChannel(ctx context.Context, channelID string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM discord_thread_defaults WHERE channel_id = $1`, channelID)
 	return err
 }
 

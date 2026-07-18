@@ -1039,13 +1039,23 @@ func (b *DiscordBroker) handleIncomingMessage(s *discordgo.Session, m *discordgo
 		}
 	}
 
+	// Resolve effective default — thread override first, then channel fallback.
+	effectiveDefault := link.DefaultAgent
+	if parentID, isThread := b.resolveThreadParent(channelID); isThread {
+		if threadDefault, err := store.GetThreadDefault(ctx, parentID, channelID); err != nil {
+			b.log.Error("Failed to get thread default", "error", err)
+		} else if threadDefault != "" {
+			effectiveDefault = threadDefault
+		}
+	}
+
 	// Fallback: unaddressed text → default agent (if configured).
 	// Skip if the message @-mentions a non-bot Discord user — those are
 	// directed at humans, not the bot's default agent.
-	if len(targets) == 0 && link.DefaultAgent != "" && !hasNonBotMentions(m.Message, botUserID) {
+	if len(targets) == 0 && effectiveDefault != "" && !hasNonBotMentions(m.Message, botUserID) {
 		text := strings.TrimSpace(m.Content)
 		if text != "" && !strings.HasPrefix(text, "/") {
-			targets = []string{link.DefaultAgent}
+			targets = []string{effectiveDefault}
 		}
 	}
 
