@@ -482,10 +482,15 @@ spec:
         - name: register
           image: YOUR_SCION_IMAGE
           env:
+            # Env vars enable the scion binary to traverse IAP for the
+            # registration HTTP request itself.
             - name: SCION_TRANSPORT_MODE
               value: "iap"
             - name: SCION_TRANSPORT_AUDIENCE
               value: "1234567890-abc.apps.googleusercontent.com"
+          volumeMounts:
+            - name: broker-credentials
+              mountPath: /home/scion/.scion
           command:
             - scion
             - hub
@@ -493,15 +498,24 @@ spec:
             - register
             - --name
             - my-broker
+            # CLI flags ensure transport values are persisted to the
+            # credentials file for the broker daemon to inherit.
             - --transport-mode
             - iap
             - --transport-audience
             - "1234567890-abc.apps.googleusercontent.com"
             - https://hub.example.com
+      volumes:
+        # The credentials file must persist beyond the Job pod so the
+        # broker Deployment can read it. Use a PVC, a Secret, or any
+        # shared volume accessible to the broker Deployment.
+        - name: broker-credentials
+          persistentVolumeClaim:
+            claimName: broker-credentials  # replace with your PVC
   backoffLimit: 2
 ```
 
-After the Job completes, the credentials file is written to the broker's storage. The broker Deployment (using the same KSA and transport env vars) picks up the credentials on startup.
+After the Job completes, the credentials file is written to the shared volume. The broker Deployment (mounting the same volume, with the same KSA and transport env vars) picks up the credentials on startup.
 
 ### GKE deployment summary
 
