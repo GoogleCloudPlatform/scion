@@ -33,20 +33,17 @@ PROVISION_VERSION = "2026-07-09T01:00:00Z"
 FLASH_MODEL = "Gemini 3.5 Flash"
 PRO_MODEL = "Gemini 3.1 Pro"
 
-DEFAULT_THINKING_LEVEL = 50
 
-
-def _resolve_thinking_bucket(model: str, level: int) -> str:
-    """Map a thinking level (0-100) to a named bucket for the given model family."""
+def _resolve_thinking_tier(level: int) -> str:
+    """Map a thinking level (0-100) to one of AGY's 4 CLI tiers."""
     level = max(0, min(100, level))
-    if PRO_MODEL.lower() in model.lower():
-        return "high" if level >= 50 else "low"
-    # Flash (default)
-    if level >= 67:
-        return "high"
-    if level >= 34:
-        return "medium"
-    return "low"
+    if level >= 75:
+        return "High"
+    if level >= 50:
+        return "Medium"
+    if level >= 25:
+        return "Low"
+    return "Minimal"
 
 AGY_MCP_MAPPING: dict[str, Any] = {
     "global_config_file": ".gemini/config/mcp_config.json",
@@ -155,24 +152,28 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
 
     is_enterprise = method == "vertex-ai"
 
-    _generate_wrapper_script(ctx.home, has_token, is_enterprise)
-    ctx.write_outputs(resolved, env={})
-
     instructions_file = ctx.harness_config.get("instructions_file") or "GEMINI.md"
     model = (
         ctx.harness_config.get("model")
         or os.environ.get("AGY_MODEL", "")
         or FLASH_MODEL
     )
-    thinking_raw = os.environ.get("SCION_THINKING_LEVEL") or os.environ.get("AGY_THINKING_LEVEL", "")
-    thinking_level = int(thinking_raw) if thinking_raw.strip().isdigit() else DEFAULT_THINKING_LEVEL
-    thinking_bucket = _resolve_thinking_bucket(model, thinking_level)
-    ctx.info(f"model={model} thinking_level={thinking_level} bucket={thinking_bucket}")
+    thinking_raw = os.environ.get("SCION_THINKING_LEVEL", "").strip()
+    thinking_tier: str | None = None
+    if thinking_raw.isdigit():
+        thinking_level = int(thinking_raw)
+        thinking_tier = _resolve_thinking_tier(thinking_level)
+        ctx.info(f"model={model} thinking_level={thinking_level} tier={thinking_tier}")
+    else:
+        ctx.info(f"model={model} thinking_level=unset (using AGY default)")
+
+    _generate_wrapper_script(ctx.home, has_token, is_enterprise, thinking_tier=thinking_tier)
+    ctx.write_outputs(resolved, env={})
     _copy_instructions(ctx.bundle_dir, ctx.home, instructions_file)
     _generate_hooks_json(ctx.home)
     _prestage_onboarding(
         ctx.home, enterprise=is_enterprise, model=model,
-        thinking_bucket=thinking_bucket,
+        thinking_tier=thinking_tier,
     )
     _apply_mcp(ctx)
 
@@ -253,7 +254,10 @@ def _generate_hooks_json(home: str) -> None:
         )
 
 
-def _generate_wrapper_script(home: str, has_token: bool, is_enterprise: bool) -> None:
+def _generate_wrapper_script(
+    home: str, has_token: bool, is_enterprise: bool,
+    thinking_tier: str | None = None,
+) -> None:
     """Generate agy-wrapper.sh that inits keyring and execs AGY.
 
     The keyring daemons must run in the same process tree as AGY so they
@@ -379,7 +383,7 @@ print('agy-wrapper: marked enterprise onboarding complete', file=sys.stderr)
 fi
 
 # Exec AGY with all arguments passed through
-exec agy --dangerously-skip-permissions "$@"
+exec agy --dangerously-skip-permissions{f' --thinking-level {thinking_tier}' if thinking_tier else ''} "$@"
 """
 
     wrapper_path = os.path.join(home, ".scion", "harness", "agy-wrapper.sh")
@@ -420,7 +424,7 @@ def _copy_instructions(bundle: str, home: str, instructions_file: str) -> None:
 
 def _prestage_onboarding(
     home: str, workspace: str = "/workspace", enterprise: bool = False,
-    model: str = "", thinking_bucket: str = "",
+    model: str = "", thinking_tier: str | None = None,
 ) -> None:
     """Pre-stage AGY config files to skip interactive onboarding.
 
@@ -462,8 +466,6 @@ def _prestage_onboarding(
         }
         if model:
             settings["model"] = model
-        if thinking_bucket:
-            settings["thinkingBudget"] = thinking_bucket
         scion_harness.atomic_write_json(settings_path, settings)
 
     # cache/onboarding.json — marks onboarding complete.

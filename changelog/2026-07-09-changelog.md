@@ -4,7 +4,7 @@ Thinking-level controls arrived across the stack: a 0-100 slider in the web UI, 
 
 ## 🚀 Features
 * **[Agent]:** Thinking level field + model choice UX refactor — added a 0-100 thinking level slider (checkbox-toggled, unset = harness default) to agent edit and project defaults. Model choice removed from agent creation form (now agent-level setting). `ThinkingLevel *int` wired through create, update, and project defaults apply paths with server-side 0-100 validation (#662).
-* **[Antigravity]:** Model range with thinking-level bucket mapping — `small`/`medium` → Flash, `large`/`extra-large` → Pro. Provisioner maps `AGY_THINKING_LEVEL` (0-100) to named buckets: Flash low/medium/high, Pro low/high (#660).
+* **[Antigravity]:** Model range with thinking-level tier mapping — `small`/`medium` → Flash, `large`/`extra-large` → Pro. Provisioner maps `SCION_THINKING_LEVEL` (0-100) to 4 CLI tiers: Minimal/Low/Medium/High via `--thinking-level` flag (#660).
 * **[Config]:** Added `thinking_budget` fields (`ThinkingBudgetMap`, `ThinkingBudgetFlag`, `ThinkingBudgetConfigKey`) to harness config JSON schema — previously rejected by `additionalProperties: false` (#661).
 
 ## 🐛 Fixes
