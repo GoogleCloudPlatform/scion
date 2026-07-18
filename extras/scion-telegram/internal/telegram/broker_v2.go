@@ -1272,7 +1272,7 @@ func (b *TelegramBrokerV2) publishAttachment(ctx context.Context, api *TelegramA
 	}
 	defer f.Close()
 
-	filename := filepath.Base(attachPath)
+	filename := filepath.Base(strings.ReplaceAll(attachPath, "\\", "/"))
 	if name, ok := msg.Metadata["telegram_attachment_name"]; ok && name != "" {
 		filename = name
 	}
@@ -1568,6 +1568,9 @@ func (b *TelegramBrokerV2) getUpdatesV2(ctx context.Context, offset int64, timeo
 // --- Inbound message handling ---
 
 func (b *TelegramBrokerV2) handleIncomingMessageV2(tgMsg *TGMessage) {
+	if tgMsg == nil {
+		return
+	}
 	hasAttachment := tgMsg.Photo != nil || tgMsg.Document != nil || tgMsg.Audio != nil || tgMsg.Video != nil
 	hasSkippedAttachment := tgMsg.Sticker != nil || tgMsg.Animation != nil
 
@@ -1997,9 +2000,10 @@ func (b *TelegramBrokerV2) downloadTelegramFile(ctx context.Context, tgMsg *TGMe
 	}
 
 	// Sanitize the filename to prevent path traversal via user-controlled
-	// fields (e.g. Document.FileName, Audio.Title). filepath.Base strips
-	// any directory components so the file stays in the downloads dir.
-	fileName = filepath.Base(fileName)
+	// fields (e.g. Document.FileName, Audio.Title). Replacing backslashes
+	// with forward slashes first ensures that both Windows and Unix path
+	// separators are stripped regardless of the host OS.
+	fileName = filepath.Base(strings.ReplaceAll(fileName, "\\", "/"))
 	if fileName == "." || fileName == "" {
 		fileName = fmt.Sprintf("file_%s", fileID)
 	}
@@ -2053,6 +2057,7 @@ func (b *TelegramBrokerV2) downloadTelegramFile(ctx context.Context, tgMsg *TGMe
 	} else {
 		agentPath = filepath.Join("/workspace/downloads", destName)
 	}
+	agentPath = filepath.ToSlash(agentPath)
 	placeholder = fmt.Sprintf("📎 [%s attached: %s]", fileType, fileName)
 
 	b.log.Info("Downloaded telegram file",
