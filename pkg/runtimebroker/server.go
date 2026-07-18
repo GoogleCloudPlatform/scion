@@ -41,6 +41,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/templatecache"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
+	"github.com/GoogleCloudPlatform/scion/pkg/transportauth/adcsource"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 )
@@ -526,7 +527,7 @@ func (s *Server) createHubConnection(name string, creds *brokercredentials.Broke
 	// Resolve transport auth once and share between REST client and control channel
 	var transportSrc transportauth.TokenSource
 	var transportMode transportauth.HeaderMode
-	src, mode, err := transportauth.ResolveBrokerTransport(creds.TransportMode, creds.TransportAudience, nil)
+	src, mode, err := transportauth.ResolveBrokerTransport(creds.TransportMode, creds.TransportAudience, adcsource.New)
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve transport auth: %w", err)
 	}

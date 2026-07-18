@@ -38,16 +38,17 @@ type ADCSource struct {
 	mu     sync.RWMutex
 	token  string
 	expiry time.Time
+	ts     oauth2.TokenSource
 }
 
 // New creates an ADCSource that mints OIDC ID tokens for the given audience.
-// It validates that ADC is available by creating a test token source.
+// It validates that ADC is available by creating a token source upfront.
 func New(audience string) (transportauth.TokenSource, error) {
-	_, err := idtoken.NewTokenSource(context.Background(), audience)
+	ts, err := idtoken.NewTokenSource(context.Background(), audience)
 	if err != nil {
 		return nil, fmt.Errorf("ADC not available: %w", err)
 	}
-	return &ADCSource{audience: audience}, nil
+	return &ADCSource{audience: audience, ts: ts}, nil
 }
 
 // newTokenSourceFunc is overridable for testing.
@@ -70,12 +71,15 @@ func (s *ADCSource) Token() (string, error) {
 		return s.token, nil
 	}
 
-	ts, err := newTokenSourceFunc(context.Background(), s.audience)
-	if err != nil {
-		return "", fmt.Errorf("oidc: ADC token source: %w", err)
+	if s.ts == nil {
+		ts, err := newTokenSourceFunc(context.Background(), s.audience)
+		if err != nil {
+			return "", fmt.Errorf("oidc: ADC token source: %w", err)
+		}
+		s.ts = ts
 	}
 
-	tok, err := ts.Token()
+	tok, err := s.ts.Token()
 	if err != nil {
 		return "", fmt.Errorf("oidc: ADC token fetch: %w", err)
 	}

@@ -171,7 +171,11 @@ func attachViaHub(hubCtx *HubContext, agentName string) error {
 
 	// Resolve transport auth for IAP/Cloud Run traversal.
 	var attachOpts []wsclient.AttachOption
-	if transportSrc, transportMode, err := resolveAttachTransport(); err == nil && transportSrc != nil {
+	transportSrc, transportMode, err := resolveAttachTransport()
+	if err != nil {
+		return fmt.Errorf("failed to resolve transport auth: %w", err)
+	}
+	if transportSrc != nil {
 		attachOpts = append(attachOpts, wsclient.WithTransport(transportSrc, transportMode))
 	}
 
