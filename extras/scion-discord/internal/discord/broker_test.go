@@ -335,11 +335,11 @@ func TestResolveRecipientChannels(t *testing.T) {
 
 	// Seed a user mapping and conversation context.
 	require.NoError(t, store.CreateUserMapping(ctx, &DiscordUserMapping{
-		DiscordUserID:  "discord-user-1",
+		DiscordUserID:   "discord-user-1",
 		DiscordUsername: "alice_discord",
-		ScionUserID:    "scion-uuid-123",
-		ScionEmail:     "alice@example.com",
-		LinkedAt:       time.Now(),
+		ScionUserID:     "scion-uuid-123",
+		ScionEmail:      "alice@example.com",
+		LinkedAt:        time.Now(),
 	}))
 	require.NoError(t, store.SetConversationContext(ctx, &ConversationContext{
 		DiscordUserID: "discord-user-1",
