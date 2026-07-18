@@ -42,7 +42,7 @@ type ADCSource struct {
 
 // New creates an ADCSource that mints OIDC ID tokens for the given audience.
 // It validates that ADC is available by creating a test token source.
-func New(audience string) (*ADCSource, error) {
+func New(audience string) (transportauth.TokenSource, error) {
 	_, err := idtoken.NewTokenSource(context.Background(), audience)
 	if err != nil {
 		return nil, fmt.Errorf("ADC not available: %w", err)

@@ -15,16 +15,52 @@
 package transportauth
 
 import (
+	"fmt"
 	"os"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
+
+// mockADCSource implements TokenSource for testing.
+type mockADCSource struct {
+	audience string
+	token    string
+	expiry   time.Time
+}
+
+func (m *mockADCSource) Token() (string, error) {
+	if m.token == "" {
+		return "", fmt.Errorf("no token")
+	}
+	return m.token, nil
+}
+
+func (m *mockADCSource) SetToken(token string, expiry time.Time) {
+	m.token = token
+	m.expiry = expiry
+}
+
+func (m *mockADCSource) Expiry() time.Time {
+	return m.expiry
+}
+
+func mockADCNew(audience string) (TokenSource, error) {
+	return &mockADCSource{audience: audience, token: makeTestJWT(time.Now().Add(1 * time.Hour))}, nil
+}
+
+func mockADCNewFailing(audience string) (TokenSource, error) {
+	return nil, fmt.Errorf("ADC not available")
+}
 
 func TestResolveBrokerTransport_NoConfig(t *testing.T) {
 	os.Unsetenv(EnvTransportMode)
 	os.Unsetenv(EnvTransportAudience)
 
-	src, mode, err := ResolveBrokerTransport("", "")
+	src, mode, err := ResolveBrokerTransport("", "", nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -37,10 +73,14 @@ func TestResolveBrokerTransport_NoConfig(t *testing.T) {
 }
 
 func TestResolveBrokerTransport_FromCredentials(t *testing.T) {
+	cleanup := overrideGCPDetection(true)
+	defer cleanup()
+
 	os.Unsetenv(EnvTransportMode)
 	os.Unsetenv(EnvTransportAudience)
+	os.Unsetenv(EnvMetadataMode)
 
-	src, mode, err := ResolveBrokerTransport("iap", "test-audience.apps.googleusercontent.com")
+	src, mode, err := ResolveBrokerTransport("iap", "test-audience.apps.googleusercontent.com", nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -61,10 +101,14 @@ func TestResolveBrokerTransport_FromCredentials(t *testing.T) {
 }
 
 func TestResolveBrokerTransport_EnvOverridesCreds(t *testing.T) {
+	cleanup := overrideGCPDetection(true)
+	defer cleanup()
+
 	t.Setenv(EnvTransportMode, "cloudrun_invoker")
 	t.Setenv(EnvTransportAudience, "env-audience")
+	os.Unsetenv(EnvMetadataMode)
 
-	src, mode, err := ResolveBrokerTransport("iap", "creds-audience")
+	src, mode, err := ResolveBrokerTransport("iap", "creds-audience", nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -82,10 +126,14 @@ func TestResolveBrokerTransport_EnvOverridesCreds(t *testing.T) {
 }
 
 func TestResolveBrokerTransport_PartialEnvOverride(t *testing.T) {
+	cleanup := overrideGCPDetection(true)
+	defer cleanup()
+
 	t.Setenv(EnvTransportMode, "iap")
 	os.Unsetenv(EnvTransportAudience)
+	os.Unsetenv(EnvMetadataMode)
 
-	src, mode, err := ResolveBrokerTransport("cloudrun_invoker", "creds-audience")
+	src, mode, err := ResolveBrokerTransport("cloudrun_invoker", "creds-audience", nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -104,10 +152,14 @@ func TestResolveBrokerTransport_PartialEnvOverride(t *testing.T) {
 }
 
 func TestResolveBrokerTransport_AudienceOnlyCreatesSource(t *testing.T) {
+	cleanup := overrideGCPDetection(true)
+	defer cleanup()
+
 	os.Unsetenv(EnvTransportMode)
 	os.Unsetenv(EnvTransportAudience)
+	os.Unsetenv(EnvMetadataMode)
 
-	src, mode, err := ResolveBrokerTransport("", "audience-only")
+	src, mode, err := ResolveBrokerTransport("", "audience-only", nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -123,7 +175,7 @@ func TestResolveBrokerTransport_ModeWithoutAudience(t *testing.T) {
 	os.Unsetenv(EnvTransportMode)
 	os.Unsetenv(EnvTransportAudience)
 
-	src, _, err := ResolveBrokerTransport("iap", "")
+	src, _, err := ResolveBrokerTransport("iap", "", nil)
 	if err == nil {
 		t.Fatal("expected error when mode is set but audience is empty")
 	}
@@ -133,6 +185,74 @@ func TestResolveBrokerTransport_ModeWithoutAudience(t *testing.T) {
 	if !strings.Contains(err.Error(), "audience is required") {
 		t.Errorf("expected error to contain 'audience is required', got: %v", err)
 	}
+}
+
+func TestResolveBrokerTransport_MetadataPrecedence(t *testing.T) {
+	cleanup := overrideGCPDetection(true)
+	defer cleanup()
+
+	os.Unsetenv(EnvMetadataMode)
+	t.Setenv(EnvTransportAudience, "https://audience.example.com")
+	os.Unsetenv(EnvTransportMode)
+
+	src, _, err := ResolveBrokerTransport("", "", mockADCNew)
+	require.NoError(t, err)
+	require.NotNil(t, src)
+	_, ok := src.(*MetadataSource)
+	assert.True(t, ok, "should return MetadataSource when on GCE")
+}
+
+func TestResolveBrokerTransport_ADCFallback(t *testing.T) {
+	cleanup := overrideGCPDetection(false)
+	defer cleanup()
+
+	t.Setenv(EnvTransportAudience, "https://audience.example.com")
+	os.Unsetenv(EnvTransportMode)
+
+	src, _, err := ResolveBrokerTransport("", "", mockADCNew)
+	require.NoError(t, err)
+	require.NotNil(t, src)
+	_, ok := src.(*mockADCSource)
+	assert.True(t, ok, "should fall back to ADC when not on GCE")
+}
+
+func TestResolveBrokerTransport_ADCFallbackWhenMetadataBlocked(t *testing.T) {
+	cleanup := overrideGCPDetection(true)
+	defer cleanup()
+
+	t.Setenv(EnvMetadataMode, "assign")
+	t.Setenv(EnvTransportAudience, "https://audience.example.com")
+	os.Unsetenv(EnvTransportMode)
+
+	src, _, err := ResolveBrokerTransport("", "", mockADCNew)
+	require.NoError(t, err)
+	require.NotNil(t, src)
+	_, ok := src.(*mockADCSource)
+	assert.True(t, ok, "should fall back to ADC when SCION_METADATA_MODE is set")
+}
+
+func TestResolveBrokerTransport_NilADCConstructor(t *testing.T) {
+	cleanup := overrideGCPDetection(false)
+	defer cleanup()
+
+	t.Setenv(EnvTransportAudience, "https://audience.example.com")
+	os.Unsetenv(EnvTransportMode)
+
+	src, _, err := ResolveBrokerTransport("", "", nil)
+	require.NoError(t, err)
+	assert.Nil(t, src, "should return nil when ADC constructor is nil and not on GCE")
+}
+
+func TestResolveBrokerTransport_ADCError(t *testing.T) {
+	cleanup := overrideGCPDetection(false)
+	defer cleanup()
+
+	t.Setenv(EnvTransportAudience, "https://audience.example.com")
+	os.Unsetenv(EnvTransportMode)
+
+	_, _, err := ResolveBrokerTransport("", "", mockADCNewFailing)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "ADC not available")
 }
 
 func TestModeFromString(t *testing.T) {
