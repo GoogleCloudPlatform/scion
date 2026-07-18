@@ -509,9 +509,11 @@ func getAuthInfo(settings *config.Settings, endpoint string) authInfo {
 		return info
 	}
 
-	// Check for proxy-auth mode: transport auth is active but no PAT/token.
-	// This is acceptable when the hub is behind IAP in proxy-auth mode —
-	// the broker's identity comes from the IAP assertion, not from a PAT.
+	// Proxy-auth mode: transport auth is active but no PAT/token configured.
+	// This checks only transport auth presence, not hub proxy mode, because:
+	// (a) getAuthInfo is informational — it doesn't enforce access control,
+	// (b) the client cannot know the hub's proxy-auth mode at this point,
+	// (c) the hub validates the IAP assertion server-side, which is the real guard.
 	if src, err := transportauth.FromEnv(); src != nil && err == nil {
 		info.Method = "Proxy-auth (transport)"
 		info.MethodType = "proxy-auth"

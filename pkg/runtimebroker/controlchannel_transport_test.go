@@ -15,7 +15,6 @@
 package runtimebroker
 
 import (
-	"net/http"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -202,25 +201,4 @@ func TestBuildAuthHeaders_NoSecretKey_WithTransport(t *testing.T) {
 	if pa := headers.Get("Proxy-Authorization"); pa != "Bearer no-hmac-token" {
 		t.Errorf("Proxy-Authorization: expected %q, got %q", "Bearer no-hmac-token", pa)
 	}
-}
-
-// fakeIAPMiddleware simulates IAP by rejecting requests without the expected token.
-func fakeIAPMiddleware(expectedToken string, next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		token := ""
-		if auth := r.Header.Get("Proxy-Authorization"); auth != "" {
-			token = auth
-		} else if auth := r.Header.Get("Authorization"); auth != "" {
-			token = auth
-		}
-
-		expected := "Bearer " + expectedToken
-		if token != expected {
-			w.Header().Set("Content-Type", "text/html")
-			w.WriteHeader(http.StatusForbidden)
-			w.Write([]byte("<html><body>Sign in with Google</body></html>"))
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
 }

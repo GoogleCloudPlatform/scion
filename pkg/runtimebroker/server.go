@@ -522,6 +522,17 @@ func (s *Server) createHubConnection(name string, creds *brokercredentials.Broke
 
 	// Build hub client options
 	opts := buildHubClientOpts(creds, secretKey)
+
+	// Resolve transport auth once and share between REST client and control channel
+	var transportSrc transportauth.TokenSource
+	var transportMode transportauth.HeaderMode
+	if src, mode, err := transportauth.ResolveBrokerTransport(creds.TransportMode, creds.TransportAudience); err == nil && src != nil {
+		transportSrc = src
+		transportMode = mode
+		opts = append(opts, hubclient.WithTransportAuth(src, mode))
+		slog.Info("Hub connection using transport auth", "name", name, "mode", creds.TransportMode)
+	}
+
 	client, err := hubclient.New(hubEndpoint, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create Hub client: %w", err)
@@ -538,22 +549,18 @@ func (s *Server) createHubConnection(name string, creds *brokercredentials.Broke
 	}
 
 	conn := &HubConnection{
-		Name:        name,
-		HubEndpoint: hubEndpoint,
-		BrokerID:    creds.BrokerID,
-		AuthMode:    creds.AuthMode,
-		Credentials: creds,
-		SecretKey:   secretKey,
-		HubClient:   client,
-		Hydrator:    hydrator,
-		HCResolver:  hcResolver,
-		Status:      ConnectionStatusDisconnected,
-	}
-
-	// Resolve transport auth for the control channel WebSocket
-	if src, mode, err := transportauth.ResolveBrokerTransport(creds.TransportMode, creds.TransportAudience); err == nil && src != nil {
-		conn.TransportSource = src
-		conn.TransportMode = mode
+		Name:            name,
+		HubEndpoint:     hubEndpoint,
+		BrokerID:        creds.BrokerID,
+		AuthMode:        creds.AuthMode,
+		Credentials:     creds,
+		SecretKey:       secretKey,
+		TransportSource: transportSrc,
+		TransportMode:   transportMode,
+		HubClient:       client,
+		Hydrator:        hydrator,
+		HCResolver:      hcResolver,
+		Status:          ConnectionStatusDisconnected,
 	}
 
 	return conn, nil
@@ -572,10 +579,13 @@ func (s *Server) createHubConnectionFromConfig() (*HubConnection, error) {
 		slog.Info("Hub client using auto dev authentication")
 	}
 
-	// Transport auth from env vars (no credentials file for config-based connections)
+	// Resolve transport auth once from env and share between REST client and control channel
+	var transportSrc transportauth.TokenSource
+	var transportMode transportauth.HeaderMode
 	if src, err := transportauth.FromEnv(); src != nil && err == nil {
-		mode := transportauth.ModeFromEnv()
-		opts = append(opts, hubclient.WithTransportAuth(src, mode))
+		transportSrc = src
+		transportMode = transportauth.ModeFromEnv()
+		opts = append(opts, hubclient.WithTransportAuth(src, transportMode))
 	}
 
 	client, err := hubclient.New(s.config.HubEndpoint, opts...)
@@ -593,19 +603,15 @@ func (s *Server) createHubConnectionFromConfig() (*HubConnection, error) {
 	}
 
 	conn := &HubConnection{
-		Name:        "default",
-		HubEndpoint: s.config.HubEndpoint,
-		BrokerID:    s.config.BrokerID,
-		HubClient:   client,
-		Hydrator:    hydrator,
-		HCResolver:  hcResolver,
-		Status:      ConnectionStatusDisconnected,
-	}
-
-	// Resolve transport auth for control channel WebSocket
-	if src, err := transportauth.FromEnv(); src != nil && err == nil {
-		conn.TransportSource = src
-		conn.TransportMode = transportauth.ModeFromEnv()
+		Name:            "default",
+		HubEndpoint:     s.config.HubEndpoint,
+		BrokerID:        s.config.BrokerID,
+		TransportSource: transportSrc,
+		TransportMode:   transportMode,
+		HubClient:       client,
+		Hydrator:        hydrator,
+		HCResolver:      hcResolver,
+		Status:          ConnectionStatusDisconnected,
 	}
 
 	return conn, nil

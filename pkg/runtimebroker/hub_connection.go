@@ -236,8 +236,17 @@ func (hc *HubConnection) Reinitialize(ctx context.Context, server *Server, creds
 	}
 	hc.SecretKey = secretKey
 
-	// Create new Hub client
+	// Create new Hub client, resolving transport auth once for both REST and WebSocket
 	opts := buildHubClientOpts(creds, secretKey)
+	if src, mode, err := transportauth.ResolveBrokerTransport(creds.TransportMode, creds.TransportAudience); err == nil && src != nil {
+		hc.TransportSource = src
+		hc.TransportMode = mode
+		opts = append(opts, hubclient.WithTransportAuth(src, mode))
+	} else {
+		hc.TransportSource = nil
+		hc.TransportMode = 0
+	}
+
 	client, err := hubclient.New(creds.HubEndpoint, opts...)
 	if err != nil {
 		hc.setStatus(ConnectionStatusError)
@@ -251,15 +260,6 @@ func (hc *HubConnection) Reinitialize(ctx context.Context, server *Server, creds
 	}
 	if server.hcCache != nil {
 		hc.HCResolver = templatecache.NewHarnessConfigResolver(server.hcCache, client)
-	}
-
-	// Re-resolve transport auth for the control channel
-	if src, mode, err := transportauth.ResolveBrokerTransport(creds.TransportMode, creds.TransportAudience); err == nil && src != nil {
-		hc.TransportSource = src
-		hc.TransportMode = mode
-	} else {
-		hc.TransportSource = nil
-		hc.TransportMode = 0
 	}
 
 	slog.Info("Hub connection reinitialized", "name", hc.Name, "brokerID", creds.BrokerID)
@@ -290,12 +290,6 @@ func buildHubClientOpts(creds *brokercredentials.BrokerCredentials, secretKey []
 			opts = append(opts, hubclient.WithAutoDevAuth())
 			slog.Info("Hub client using auto dev authentication (no secret key)", "name", creds.Name)
 		}
-	}
-
-	// Transport auth for IAP-protected hubs
-	if src, mode, err := transportauth.ResolveBrokerTransport(creds.TransportMode, creds.TransportAudience); err == nil && src != nil {
-		opts = append(opts, hubclient.WithTransportAuth(src, mode))
-		slog.Info("Hub client using transport auth", "name", creds.Name, "mode", creds.TransportMode)
 	}
 
 	return opts
