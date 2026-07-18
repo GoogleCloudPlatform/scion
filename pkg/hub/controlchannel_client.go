@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -34,9 +35,29 @@ import (
 // sent through the WebSocket control channel without exceeding the broker's
 // read limit. The RequestEnvelope.Body field is base64-encoded in JSON, adding
 // ~33% overhead, so the safe body threshold for a 1MB wire limit is ~768KB.
-// Requests exceeding this limit are rejected before encoding with a clear error
-// so callers (e.g. HybridBrokerClient) can fall back to direct HTTP (issue #165).
+// Requests exceeding this limit are rejected before encoding so callers
+// (e.g. HybridBrokerClient) can detect ErrPayloadTooLarge and fall back to
+// direct HTTP (issue #165).
 const maxControlChannelBodySize = 768 * 1024 // 768KB → ~1MB on wire after base64
+
+// ErrPayloadTooLarge is returned by the control channel client when a request
+// body exceeds maxControlChannelBodySize. Callers should use errors.As to
+// detect this condition and fall back to direct HTTP rather than propagating
+// the error.
+type ErrPayloadTooLarge struct {
+	Method string
+	Path   string
+	Size   int
+	Limit  int
+}
+
+func (e *ErrPayloadTooLarge) Error() string {
+	return fmt.Sprintf(
+		"control channel payload too large: %s %s body is %d bytes (limit %d); "+
+			"use direct HTTP to reach this broker instead (issue #165)",
+		e.Method, e.Path, e.Size, e.Limit,
+	)
+}
 
 // ControlChannelBrokerClient implements RuntimeBrokerClient by tunneling requests
 // through the control channel WebSocket connection.
@@ -426,17 +447,20 @@ func (c *ControlChannelBrokerClient) DeleteImage(ctx context.Context, brokerID, 
 	return err
 }
 
-// checkBodySize returns an error if the body is too large to tunnel safely
-// through the control channel WebSocket without exceeding the broker's read
-// limit. The Body field is base64-encoded in the RequestEnvelope JSON, so the
-// actual wire size is roughly len(body)*4/3 plus envelope metadata.
+// checkBodySize returns an *ErrPayloadTooLarge if the body is too large to
+// tunnel safely through the control channel WebSocket without exceeding the
+// broker's read limit. The Body field is base64-encoded in the RequestEnvelope
+// JSON, so the actual wire size is roughly len(body)*4/3 plus envelope
+// metadata. Callers should use errors.As(err, &ErrPayloadTooLarge{}) to detect
+// this condition and fall back to direct HTTP.
 func checkBodySize(method, path string, body []byte) error {
 	if len(body) > maxControlChannelBodySize {
-		return fmt.Errorf(
-			"control channel payload too large: %s %s body is %d bytes (limit %d); "+
-				"use direct HTTP to reach this broker instead (issue #165)",
-			method, path, len(body), maxControlChannelBodySize,
-		)
+		return &ErrPayloadTooLarge{
+			Method: method,
+			Path:   path,
+			Size:   len(body),
+			Limit:  maxControlChannelBodySize,
+		}
 	}
 	return nil
 }
@@ -565,9 +589,20 @@ func (c *HybridBrokerClient) useControlChannel(brokerID string) bool {
 }
 
 // CreateAgent creates an agent, preferring control channel.
+// If the control channel rejects the payload as too large (ErrPayloadTooLarge),
+// it falls back to direct HTTP so the agent creation can still succeed.
 func (c *HybridBrokerClient) CreateAgent(ctx context.Context, brokerID, brokerEndpoint string, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, error) {
 	if c.useControlChannel(brokerID) {
-		return c.controlChannel.CreateAgent(ctx, brokerID, brokerEndpoint, req)
+		resp, err := c.controlChannel.CreateAgent(ctx, brokerID, brokerEndpoint, req)
+		if err == nil {
+			return resp, nil
+		}
+		var payloadErr *ErrPayloadTooLarge
+		if errors.As(err, &payloadErr) {
+			// Payload too large for the WebSocket channel — fall back to HTTP.
+			return c.httpClient.CreateAgent(ctx, brokerID, brokerEndpoint, req)
+		}
+		return nil, err
 	}
 	return c.httpClient.CreateAgent(ctx, brokerID, brokerEndpoint, req)
 }
@@ -677,10 +712,21 @@ func (c *HybridBrokerClient) CheckAgentPrompt(ctx context.Context, brokerID, bro
 // to decide the delivery path. routeLocal uses the control-channel tunnel,
 // routeHTTP falls back to HTTP, and routeForward/routeUndeliverable return
 // ErrLifecycleDeferred so the caller can write durable intent + wait.
+// If the control channel rejects the payload as too large (ErrPayloadTooLarge),
+// it falls back to direct HTTP regardless of the routing decision.
 func (c *HybridBrokerClient) CreateAgentWithGather(ctx context.Context, brokerID, brokerEndpoint string, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error) {
 	switch c.route(ctx, brokerID, brokerEndpoint) {
 	case routeLocal:
-		return c.controlChannel.CreateAgentWithGather(ctx, brokerID, brokerEndpoint, req)
+		resp, envReqs, err := c.controlChannel.CreateAgentWithGather(ctx, brokerID, brokerEndpoint, req)
+		if err == nil {
+			return resp, envReqs, nil
+		}
+		var payloadErr *ErrPayloadTooLarge
+		if errors.As(err, &payloadErr) {
+			// Payload too large for the WebSocket channel — fall back to HTTP.
+			return c.httpClient.CreateAgentWithGather(ctx, brokerID, brokerEndpoint, req)
+		}
+		return nil, nil, err
 	case routeHTTP:
 		return c.httpClient.CreateAgentWithGather(ctx, brokerID, brokerEndpoint, req)
 	default:
