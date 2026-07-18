@@ -1739,7 +1739,7 @@ func (b *TelegramBrokerV2) handleGroupMessage(tgMsg *TGMessage) {
 	// later (offset>0) do not block default routing; resolveUserMentions
 	// injects the resolved scion identity for those.
 	if len(targets) == 0 && effectiveDefault != "" {
-		hasAttachment := tgMsg.Photo != nil || tgMsg.Document != nil
+		hasAttachment := tgMsg.Photo != nil || tgMsg.Document != nil || tgMsg.Audio != nil || tgMsg.Video != nil
 		text := strings.TrimSpace(tgMsg.Text)
 		textRoutes := text != "" && !strings.HasPrefix(text, "/") && !strings.HasPrefix(text, "@") && !hasNonBotUserMention(tgMsg, botUsername, agents)
 		if textRoutes || hasAttachment {
@@ -1996,6 +1996,14 @@ func (b *TelegramBrokerV2) downloadTelegramFile(ctx context.Context, tgMsg *TGMe
 		return "", "", fmt.Errorf("message has no downloadable attachment")
 	}
 
+	// Sanitize the filename to prevent path traversal via user-controlled
+	// fields (e.g. Document.FileName, Audio.Title). filepath.Base strips
+	// any directory components so the file stays in the downloads dir.
+	fileName = filepath.Base(fileName)
+	if fileName == "." || fileName == "" {
+		fileName = fmt.Sprintf("file_%s", fileID)
+	}
+
 	if fileSize > maxTelegramFileSize {
 		return "", "", fmt.Errorf("file too large (%d bytes, max %d)", fileSize, maxTelegramFileSize)
 	}
@@ -2037,7 +2045,14 @@ func (b *TelegramBrokerV2) downloadTelegramFile(ctx context.Context, tgMsg *TGMe
 		return "", "", fmt.Errorf("write file: %w", err)
 	}
 
-	agentPath = filepath.Join("/workspace/downloads", destName)
+	// Derive the agent-visible path from the same base used to save the file.
+	// When a custom downloads_path is configured, the agent sees that path
+	// directly; otherwise it sees the conventional /workspace/downloads mount.
+	if b.downloadsPath != "" {
+		agentPath = filepath.Join(b.downloadsPath, destName)
+	} else {
+		agentPath = filepath.Join("/workspace/downloads", destName)
+	}
 	placeholder = fmt.Sprintf("📎 [%s attached: %s]", fileType, fileName)
 
 	b.log.Info("Downloaded telegram file",

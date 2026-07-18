@@ -2810,6 +2810,199 @@ func TestV2_HandleGroupMessage_PreBlockWithLanguage(t *testing.T) {
 	assert.Equal(t, "```go\nfmt.Println(\"hello\")\n```", deliveredMsg.Msg)
 }
 
+// --- Fix H1: captionless audio/video routes to default agent ---
+
+func TestV2_HandleIncoming_CaptionlessAudioRoutesToDefaultAgent(t *testing.T) {
+	tgSrv := newFakeTGServerV2(t)
+	hub := newFakeHubClient()
+	hub.agents["proj-1"] = []AgentInfo{{Slug: "coder"}}
+	b := newTestBrokerV2WithHub(t, tgSrv, hub)
+
+	ctx := context.Background()
+	require.NoError(t, b.store.SaveUserMapping(ctx, &TelegramUserMapping{
+		TelegramUserID: "456",
+		ScionEmail:     "alice@example.com",
+		LinkedAt:       time.Now().UTC(),
+	}))
+
+	tmpDir := t.TempDir()
+	require.NoError(t, b.store.SaveGroupLink(ctx, &GroupLink{
+		ChatID:       -200,
+		ProjectID:    "proj-1",
+		ProjectSlug:  filepath.Base(tmpDir),
+		DefaultAgent: "coder",
+		LinkedAt:     time.Now().UTC(),
+		Active:       true,
+	}))
+	require.NoError(t, b.store.SaveProjectAgents(ctx, &ProjectAgents{
+		ProjectID:   "proj-1",
+		Agents:      []AgentInfo{{Slug: "coder"}},
+		RefreshedAt: time.Now(),
+	}))
+
+	var deliveredMsg *messages.StructuredMessage
+	done := make(chan struct{}, 1)
+	b.InboundHandler = func(_ string, msg *messages.StructuredMessage) {
+		deliveredMsg = msg
+		select {
+		case done <- struct{}{}:
+		default:
+		}
+	}
+
+	// Audio with NO caption and NO @mention — must route via Fallback 3.
+	b.handleIncomingMessageV2(&TGMessage{
+		MessageID: 60,
+		From:      &TGUser{ID: 456, Username: "alice"},
+		Chat:      TGChat{ID: -200, Type: "group"},
+		Date:      time.Now().Unix(),
+		Audio: &TGAudio{
+			FileID:       "audio-nocap",
+			FileUniqueID: "auduniqnocap",
+			FileName:     "song.mp3",
+			FileSize:     4096,
+			Duration:     30,
+		},
+	})
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for delivery — captionless audio was dropped")
+	}
+
+	require.NotNil(t, deliveredMsg)
+	assert.Contains(t, deliveredMsg.Msg, "Audio attached")
+	assert.Len(t, deliveredMsg.Attachments, 1)
+	assert.Contains(t, deliveredMsg.Attachments[0], "song.mp3")
+}
+
+func TestV2_HandleIncoming_CaptionlessVideoRoutesToDefaultAgent(t *testing.T) {
+	tgSrv := newFakeTGServerV2(t)
+	hub := newFakeHubClient()
+	hub.agents["proj-1"] = []AgentInfo{{Slug: "coder"}}
+	b := newTestBrokerV2WithHub(t, tgSrv, hub)
+
+	ctx := context.Background()
+	require.NoError(t, b.store.SaveUserMapping(ctx, &TelegramUserMapping{
+		TelegramUserID: "456",
+		ScionEmail:     "alice@example.com",
+		LinkedAt:       time.Now().UTC(),
+	}))
+
+	tmpDir := t.TempDir()
+	require.NoError(t, b.store.SaveGroupLink(ctx, &GroupLink{
+		ChatID:       -200,
+		ProjectID:    "proj-1",
+		ProjectSlug:  filepath.Base(tmpDir),
+		DefaultAgent: "coder",
+		LinkedAt:     time.Now().UTC(),
+		Active:       true,
+	}))
+	require.NoError(t, b.store.SaveProjectAgents(ctx, &ProjectAgents{
+		ProjectID:   "proj-1",
+		Agents:      []AgentInfo{{Slug: "coder"}},
+		RefreshedAt: time.Now(),
+	}))
+
+	var deliveredMsg *messages.StructuredMessage
+	done := make(chan struct{}, 1)
+	b.InboundHandler = func(_ string, msg *messages.StructuredMessage) {
+		deliveredMsg = msg
+		select {
+		case done <- struct{}{}:
+		default:
+		}
+	}
+
+	// Video with NO caption and NO @mention — must route via Fallback 3.
+	b.handleIncomingMessageV2(&TGMessage{
+		MessageID: 61,
+		From:      &TGUser{ID: 456, Username: "alice"},
+		Chat:      TGChat{ID: -200, Type: "group"},
+		Date:      time.Now().Unix(),
+		Video: &TGVideo{
+			FileID:       "video-nocap",
+			FileUniqueID: "viduniqnocap",
+			FileSize:     10000,
+			Width:        640,
+			Height:       480,
+			Duration:     5,
+		},
+	})
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for delivery — captionless video was dropped")
+	}
+
+	require.NotNil(t, deliveredMsg)
+	assert.Contains(t, deliveredMsg.Msg, "Video attached")
+	assert.Len(t, deliveredMsg.Attachments, 1)
+	assert.Contains(t, deliveredMsg.Attachments[0], "video_viduniqnocap.mp4")
+}
+
+// --- Fix M1: path traversal in Audio.Title ---
+
+func TestV2_DownloadTelegramFile_AudioTitlePathTraversal(t *testing.T) {
+	tgSrv := newFakeTGServerV2(t)
+	b := newTestBrokerV2(t, tgSrv)
+
+	ctx := context.Background()
+	slug := filepath.Base(t.TempDir())
+
+	tgMsg := &TGMessage{
+		Audio: &TGAudio{
+			FileID:       "audio-evil",
+			FileUniqueID: "audevil",
+			FileSize:     1024,
+			Duration:     5,
+			Title:        "../../etc/passwd",
+		},
+	}
+
+	agentPath, _, err := b.downloadTelegramFile(ctx, tgMsg, slug)
+	require.NoError(t, err)
+	// The path-traversal components must be stripped — the file should be
+	// named "passwd.ogg" (filepath.Base of "../../etc/passwd.ogg"), not
+	// contain any ".." segments.
+	assert.NotContains(t, agentPath, "..")
+	assert.Contains(t, agentPath, "passwd.ogg")
+}
+
+// --- Fix M2: agentPath reflects custom downloads_path ---
+
+func TestV2_DownloadTelegramFile_ConfiguredDownloadsPathAgentPath(t *testing.T) {
+	tgSrv := newFakeTGServerV2(t)
+	b := newTestBrokerV2(t, tgSrv)
+
+	// Set a custom downloads path.
+	customDir := filepath.Join(t.TempDir(), "shared-attachments")
+	b.downloadsPath = customDir
+
+	ctx := context.Background()
+
+	tgMsg := &TGMessage{
+		Document: &TGDocument{
+			FileID:       "doc-agent-path",
+			FileUniqueID: "docuniqap",
+			FileName:     "report.pdf",
+			MimeType:     "application/pdf",
+			FileSize:     2048,
+		},
+	}
+
+	agentPath, _, err := b.downloadTelegramFile(ctx, tgMsg, "any-slug")
+	require.NoError(t, err)
+
+	// agentPath must start with the custom downloads path, NOT /workspace/downloads.
+	assert.True(t, strings.HasPrefix(agentPath, customDir),
+		"agentPath %q should start with custom downloads dir %q", agentPath, customDir)
+	assert.NotContains(t, agentPath, "/workspace/downloads")
+	assert.Contains(t, agentPath, "report.pdf")
+}
+
 func TestV2_HandleGroupMessage_CodeSpanWithDefaultAgent(t *testing.T) {
 	tgSrv := newFakeTGServerV2(t)
 	hub := newFakeHubClient()
