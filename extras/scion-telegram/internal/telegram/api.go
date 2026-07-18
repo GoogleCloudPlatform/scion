@@ -77,6 +77,47 @@ type TGDocument struct {
 	FileSize     int64  `json:"file_size"`
 }
 
+// TGAudio represents an audio file sent in a Telegram message.
+type TGAudio struct {
+	FileID       string `json:"file_id"`
+	FileUniqueID string `json:"file_unique_id"`
+	Duration     int    `json:"duration"`
+	Performer    string `json:"performer,omitempty"`
+	Title        string `json:"title,omitempty"`
+	FileName     string `json:"file_name,omitempty"`
+	MimeType     string `json:"mime_type,omitempty"`
+	FileSize     int64  `json:"file_size"`
+}
+
+// TGVideo represents a video file sent in a Telegram message.
+type TGVideo struct {
+	FileID       string `json:"file_id"`
+	FileUniqueID string `json:"file_unique_id"`
+	Width        int    `json:"width"`
+	Height       int    `json:"height"`
+	Duration     int    `json:"duration"`
+	FileName     string `json:"file_name,omitempty"`
+	MimeType     string `json:"mime_type,omitempty"`
+	FileSize     int64  `json:"file_size"`
+}
+
+// TGSticker represents a sticker sent in a Telegram message.
+type TGSticker struct {
+	FileID       string `json:"file_id"`
+	FileUniqueID string `json:"file_unique_id"`
+	Type         string `json:"type"`
+	FileSize     int64  `json:"file_size"`
+}
+
+// TGAnimation represents an animation (GIF) sent in a Telegram message.
+type TGAnimation struct {
+	FileID       string `json:"file_id"`
+	FileUniqueID string `json:"file_unique_id"`
+	FileName     string `json:"file_name,omitempty"`
+	MimeType     string `json:"mime_type,omitempty"`
+	FileSize     int64  `json:"file_size"`
+}
+
 // TGFile represents a file ready for download, returned by the getFile API.
 type TGFile struct {
 	FileID   string `json:"file_id"`
@@ -98,6 +139,10 @@ type TGMessage struct {
 	MigrateToChatID int64           `json:"migrate_to_chat_id,omitempty"`
 	Photo           []PhotoSize     `json:"photo,omitempty"`
 	Document        *TGDocument     `json:"document,omitempty"`
+	Audio           *TGAudio        `json:"audio,omitempty"`
+	Video           *TGVideo        `json:"video,omitempty"`
+	Sticker         *TGSticker      `json:"sticker,omitempty"`
+	Animation       *TGAnimation    `json:"animation,omitempty"`
 }
 
 // MessageEntity represents a special entity in a Telegram message (e.g. @mentions, commands).
