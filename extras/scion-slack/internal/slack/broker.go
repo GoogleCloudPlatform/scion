@@ -440,8 +440,14 @@ func (b *SlackBroker) Publish(ctx context.Context, topic string, msg *messages.S
 	}
 
 	// Replace scion user emails with Slack @mentions in the message body.
-	if msg != nil && store != nil {
-		msg.Msg = resolveOutboundMentions(ctx, store, msg.Msg)
+	// Create a shallow copy to avoid mutating the shared msg pointer.
+	if store != nil {
+		resolvedMsg := resolveOutboundMentions(ctx, store, msg.Msg)
+		if resolvedMsg != msg.Msg {
+			msgCopy := *msg
+			msgCopy.Msg = resolvedMsg
+			msg = &msgCopy
+		}
 	}
 
 	senderSlug := agentSlug
@@ -870,6 +876,10 @@ func resolveOutboundMentions(ctx context.Context, store Store, text string) stri
 		return text
 	}
 
+	// Cache email→SlackUserID lookups within this call to avoid redundant
+	// DB queries when the same email appears multiple times.
+	emailCache := make(map[string]string)
+
 	// Process in reverse order so indices remain valid after replacement.
 	for i := len(matches) - 1; i >= 0; i-- {
 		start, end := matches[i][0], matches[i][1]
@@ -892,12 +902,22 @@ func resolveOutboundMentions(ctx context.Context, store Store, text string) stri
 			email = strings.TrimPrefix(email, "user:")
 		}
 
-		mapping, err := store.GetUserMappingByEmail(ctx, email)
-		if err != nil || mapping == nil || mapping.SlackUserID == "" {
+		var slackUserID string
+		if id, cached := emailCache[email]; cached {
+			slackUserID = id
+		} else {
+			mapping, err := store.GetUserMappingByEmail(ctx, email)
+			if err == nil && mapping != nil {
+				slackUserID = mapping.SlackUserID
+			}
+			emailCache[email] = slackUserID
+		}
+
+		if slackUserID == "" {
 			continue
 		}
 
-		text = text[:start] + "<@" + mapping.SlackUserID + ">" + text[end:]
+		text = text[:start] + "<@" + slackUserID + ">" + text[end:]
 	}
 
 	return text
