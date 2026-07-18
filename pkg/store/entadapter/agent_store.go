@@ -17,6 +17,7 @@ package entadapter
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"sync"
 	"time"
 
@@ -777,9 +778,9 @@ func parseUUIDList(ids []string) []uuid.UUID {
 // currentBrokerID are excluded so that a running multi-broker setup does not
 // have its agents reassigned.
 func (s *AgentStore) FindOrphanedAgents(ctx context.Context, currentBrokerID string) ([]*store.Agent, error) {
-	currentUID, err := uuid.Parse(currentBrokerID)
-	if err != nil {
-		return nil, err
+	parsedID, parseErr := uuid.Parse(currentBrokerID)
+	if parseErr != nil {
+		return nil, fmt.Errorf("invalid currentBrokerID %q: %w", currentBrokerID, parseErr)
 	}
 
 	// Collect IDs of all online brokers (excluding the current one, which may
@@ -787,7 +788,7 @@ func (s *AgentStore) FindOrphanedAgents(ctx context.Context, currentBrokerID str
 	onlineBrokers, err := s.client.RuntimeBroker.Query().
 		Where(
 			runtimebroker.StatusEQ(store.BrokerStatusOnline),
-			runtimebroker.IDNEQ(currentUID),
+			runtimebroker.IDNEQ(parsedID),
 		).
 		Select(runtimebroker.FieldID).
 		All(ctx)

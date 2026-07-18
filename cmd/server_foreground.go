@@ -2277,8 +2277,11 @@ func resolveBrokerID(ctx context.Context, cfg *config.GlobalConfig, settings *co
 		if embedded, err := s.FindEmbeddedBroker(ctx); err == nil && embedded != nil {
 			brokerID = embedded.ID
 			log.Printf("NOTICE: recovered broker ID %s from database (single embedded broker)", brokerID)
-			// Persist so we don't re-recover on next boot
-			_ = config.UpdateSetting(globalDir, "hub.brokerId", brokerID, true)
+			// Persist so we don't re-recover on next boot (writes to both legacy
+			// hub.brokerId and versioned server.broker.broker_id via UpdateSetting).
+			if err := config.UpdateSetting(globalDir, "hub.brokerId", brokerID, true); err != nil {
+				log.Printf("Warning: failed to persist recovered broker ID to settings: %v", err)
+			}
 		}
 	}
 
