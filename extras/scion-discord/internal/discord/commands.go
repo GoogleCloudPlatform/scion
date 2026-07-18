@@ -436,38 +436,37 @@ func (h *CommandHandler) HandleSetup(s *discordgo.Session, i *discordgo.Interact
 	}
 
 	// If running in a thread/forum topic, resolve the parent channel.
-	effectiveChannelID := i.ChannelID
+	var link *ChannelLink
 	parentID := threadParentID(s, i.ChannelID)
 	if parentID != "" {
-		parentLink, err := h.store.GetChannelLink(ctx, parentID)
+		link, err = h.store.GetChannelLink(ctx, parentID)
 		if err != nil {
 			h.log.Error("Failed to check parent channel link", "error", err, "parent_id", parentID)
 			h.followup(s, i, "Something went wrong. Please try again.")
 			return
 		}
-		if parentLink != nil && parentLink.Active {
+		if link != nil && link.Active {
 			h.followup(s, i, fmt.Sprintf(
 				"This channel is already set up (project **%s**). Use `/scion default` to set a per-thread default agent.",
-				parentLink.ProjectSlug,
+				link.ProjectSlug,
 			))
 			return
 		}
-		effectiveChannelID = parentID
-	}
-
-	// Check existing link.
-	link, err := h.store.GetChannelLink(ctx, effectiveChannelID)
-	if err != nil {
-		h.log.Error("Failed to check channel link", "error", err, "channel_id", i.ChannelID)
-		h.followup(s, i, "Something went wrong. Please try again.")
-		return
-	}
-	if link != nil {
-		h.followup(s, i, fmt.Sprintf(
-			"This channel is already linked to project **%s**.\nUse `/scion unlink` first to change it.",
-			link.ProjectSlug,
-		))
-		return
+	} else {
+		// Check existing link.
+		link, err = h.store.GetChannelLink(ctx, i.ChannelID)
+		if err != nil {
+			h.log.Error("Failed to check channel link", "error", err, "channel_id", i.ChannelID)
+			h.followup(s, i, "Something went wrong. Please try again.")
+			return
+		}
+		if link != nil {
+			h.followup(s, i, fmt.Sprintf(
+				"This channel is already linked to project **%s**.\nUse `/scion unlink` first to change it.",
+				link.ProjectSlug,
+			))
+			return
+		}
 	}
 
 	// Get user's projects.
@@ -679,8 +678,10 @@ func (h *CommandHandler) HandleStatus(s *discordgo.Session, i *discordgo.Interac
 			}
 			statusMsg := fmt.Sprintf("%s **%s** -- %s", emoji, agent.Slug, activity)
 			if statusParentID != "" {
-				threadDefault, _ := h.store.GetThreadDefault(ctx, link.ChannelID, i.ChannelID)
-				if threadDefault != "" {
+				threadDefault, err := h.store.GetThreadDefault(ctx, link.ChannelID, i.ChannelID)
+				if err != nil {
+					h.log.Error("Failed to get thread default", "error", err)
+				} else if threadDefault != "" {
 					statusMsg += fmt.Sprintf("\nThread default: **%s**", threadDefault)
 				}
 				channelDefault := link.DefaultAgent
