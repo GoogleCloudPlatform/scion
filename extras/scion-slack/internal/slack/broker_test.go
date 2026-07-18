@@ -229,17 +229,17 @@ func TestResolveOutboundMentions(t *testing.T) {
 
 	// Seed a registered user with a Slack user ID.
 	require.NoError(t, store.CreateUserMapping(ctx, &SlackUserMapping{
-		SlackUserID:  "U12345ABC",
+		SlackUserID:   "U12345ABC",
 		SlackUsername: "ptone805",
-		ScionEmail:   "ptone@google.com",
-		LinkedAt:     time.Now().UTC(),
+		ScionEmail:    "ptone@google.com",
+		LinkedAt:      time.Now().UTC(),
 	}))
 	// Seed a user without a Slack user ID (empty — should not replace).
 	require.NoError(t, store.CreateUserMapping(ctx, &SlackUserMapping{
-		SlackUserID:  "",
+		SlackUserID:   "",
 		SlackUsername: "nousername",
-		ScionEmail:   "nousername@example.com",
-		LinkedAt:     time.Now().UTC(),
+		ScionEmail:    "nousername@example.com",
+		LinkedAt:      time.Now().UTC(),
 	}))
 
 	tests := []struct {
