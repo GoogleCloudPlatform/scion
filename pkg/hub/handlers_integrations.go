@@ -17,6 +17,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -622,7 +623,38 @@ func (s *Server) handleRestartIntegration(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	// Post-restart validation: check that the plugin is wired into the FanOut.
+	warnings := s.validateIntegrationWiring(name)
+
+	response := map[string]interface{}{
+		"status": "ok",
+	}
+	if len(warnings) > 0 {
+		response["warnings"] = warnings
+	}
+
+	writeJSON(w, http.StatusOK, response)
+}
+
+// validateIntegrationWiring checks that the named plugin is wired into the
+// FanOut event bus as a spoke. Returns warnings for any issues found.
+func (s *Server) validateIntegrationWiring(name string) []string {
+	var warnings []string
+
+	proxy := s.GetMessageBrokerProxy()
+	if proxy == nil {
+		warnings = append(warnings, "message broker not initialized")
+		return warnings
+	}
+	fanout, ok := proxy.bus.(*eventbus.FanOutEventBus)
+	if !ok {
+		return warnings
+	}
+	if !fanout.HasSpoke(name) {
+		warnings = append(warnings, fmt.Sprintf("plugin %q is not wired into the FanOut event bus — messages will not be routed", name))
+	}
+
+	return warnings
 }
 
 func (s *Server) handleIntegrationHealth(w http.ResponseWriter, r *http.Request, name string) {

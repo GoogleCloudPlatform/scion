@@ -146,6 +146,8 @@ type DiscordBroker struct {
 	sendQueue *SendQueue
 	webhooks  *WebhookManager
 
+	gatewayConnected bool // set true in handleReady, false on disconnect
+
 	threadParents map[string]string // channelID -> parentID (cached thread lookups)
 
 	agentCacheTTL  time.Duration
@@ -757,7 +759,8 @@ func (b *DiscordBroker) HealthCheck() (*plugin.HealthStatus, error) {
 	}
 
 	details := map[string]string{
-		"subscriptions": fmt.Sprintf("%d", len(b.subs)),
+		"subscriptions":     fmt.Sprintf("%d", len(b.subs)),
+		"gateway_connected": fmt.Sprintf("%v", b.gatewayConnected),
 	}
 
 	if b.botUser != nil {
@@ -766,6 +769,15 @@ func (b *DiscordBroker) HealthCheck() (*plugin.HealthStatus, error) {
 	}
 	if b.hubURL != "" {
 		details["hub_url"] = b.hubURL
+	}
+
+	// Report degraded when gateway is disconnected but subscriptions are active.
+	if !b.gatewayConnected && len(b.subs) > 0 {
+		return &plugin.HealthStatus{
+			Status:  "degraded",
+			Message: "gateway not connected (subscriptions active but no gateway session)",
+			Details: details,
+		}, nil
 	}
 
 	return &plugin.HealthStatus{
@@ -787,6 +799,7 @@ func (b *DiscordBroker) startGateway() error {
 
 	// Register gateway event handlers.
 	session.AddHandler(b.handleReady)
+	session.AddHandler(b.handleDisconnect)
 	session.AddHandler(b.handleGuildCreate)
 	session.AddHandler(b.handleGuildDelete)
 	session.AddHandler(b.handleMessageCreate)
@@ -807,6 +820,7 @@ func (b *DiscordBroker) startGateway() error {
 func (b *DiscordBroker) handleReady(_ *discordgo.Session, r *discordgo.Ready) {
 	b.mu.Lock()
 	b.botUser = r.User
+	b.gatewayConnected = true
 	commands := b.commands
 	b.mu.Unlock()
 
@@ -823,6 +837,15 @@ func (b *DiscordBroker) handleReady(_ *discordgo.Session, r *discordgo.Ready) {
 			b.log.Error("Failed to register slash commands", "error", err)
 		}
 	}
+}
+
+// handleDisconnect is called when the bot disconnects from the Discord gateway.
+func (b *DiscordBroker) handleDisconnect(_ *discordgo.Session, _ *discordgo.Disconnect) {
+	b.mu.Lock()
+	b.gatewayConnected = false
+	b.mu.Unlock()
+
+	b.log.Warn("Discord gateway disconnected")
 }
 
 // handleGuildCreate is called when the bot joins a guild or when guild

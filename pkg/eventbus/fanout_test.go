@@ -470,3 +470,55 @@ func TestFanOutEventBus_Subscribe(t *testing.T) {
 		t.Fatalf("unexpected unsubscribe error: %v", err)
 	}
 }
+
+func TestFanOutEventBus_HasSpoke(t *testing.T) {
+	b1 := newStubEventBus()
+	b2 := newStubEventBus()
+
+	fan := NewFanOutEventBus([]NamedEventBus{
+		{Name: "discord", Bus: b1},
+		{Name: "inprocess", Bus: b2},
+	}, slog.Default())
+
+	if !fan.HasSpoke("discord") {
+		t.Error("expected HasSpoke('discord') = true")
+	}
+	if !fan.HasSpoke("inprocess") {
+		t.Error("expected HasSpoke('inprocess') = true")
+	}
+	if fan.HasSpoke("telegram") {
+		t.Error("expected HasSpoke('telegram') = false")
+	}
+	if fan.HasSpoke("") {
+		t.Error("expected HasSpoke('') = false")
+	}
+}
+
+func TestFanOutEventBus_HasSpokeAfterAddRemove(t *testing.T) {
+	b1 := newStubEventBus()
+	fan := NewFanOutEventBus([]NamedEventBus{
+		{Name: "inprocess", Bus: b1},
+	}, slog.Default())
+
+	// Initially no discord spoke.
+	if fan.HasSpoke("discord") {
+		t.Fatal("expected HasSpoke('discord') = false before add")
+	}
+
+	// Add a spoke.
+	b2 := newStubEventBus()
+	if err := fan.AddSpoke(NamedEventBus{Name: "discord", Bus: b2}); err != nil {
+		t.Fatalf("AddSpoke failed: %v", err)
+	}
+	if !fan.HasSpoke("discord") {
+		t.Fatal("expected HasSpoke('discord') = true after add")
+	}
+
+	// Remove the spoke.
+	if err := fan.RemoveSpoke("discord"); err != nil {
+		t.Fatalf("RemoveSpoke failed: %v", err)
+	}
+	if fan.HasSpoke("discord") {
+		t.Fatal("expected HasSpoke('discord') = false after remove")
+	}
+}

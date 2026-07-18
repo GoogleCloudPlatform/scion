@@ -268,6 +268,18 @@ func (f *FanOutEventBus) replaySubscriptions(bus NamedEventBus) {
 	}
 }
 
+// HasSpoke reports whether a spoke with the given name exists.
+func (f *FanOutEventBus) HasSpoke(name string) bool {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	for _, nb := range f.buses {
+		if nb.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
 // RemoveSpoke removes a spoke by name and closes it.
 func (f *FanOutEventBus) RemoveSpoke(name string) error {
 	if name == InProcessBusName {

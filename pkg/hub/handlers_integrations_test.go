@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -488,6 +489,102 @@ func TestRestartIntegration_OK(t *testing.T) {
 
 	if len(mgr.replaceConfigCalls) != 1 || mgr.replaceConfigCalls[0] != "telegram" {
 		t.Errorf("expected ReplaceBrokerConfig call for telegram, got %v", mgr.replaceConfigCalls)
+	}
+}
+
+func TestRestartIntegration_WithSpokeWired(t *testing.T) {
+	mgr := newMockIntegrationManager()
+	mgr.plugins["discord"] = map[string]string{}
+
+	// Create a FanOutEventBus with a discord spoke.
+	inproc := eventbus.NewInProcessEventBus(slog.Default())
+	discordBus := eventbus.NewInProcessEventBus(slog.Default())
+	fanout := eventbus.NewFanOutEventBus([]eventbus.NamedEventBus{
+		{Name: "inprocess", Bus: inproc},
+		{Name: "discord", Bus: discordBus},
+	}, slog.Default())
+
+	proxy := NewMessageBrokerProxy(fanout, nil, nil, nil, slog.Default())
+
+	srv := &Server{}
+	srv.pluginManager = mgr
+	srv.SetMessageBrokerProxy(proxy)
+
+	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/integrations/discord/restart", nil)
+	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	rr := httptest.NewRecorder()
+	srv.handleAdminIntegrationByName(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var resp map[string]interface{}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+	if resp["status"] != "ok" {
+		t.Errorf("expected status 'ok', got %v", resp["status"])
+	}
+	// No warnings expected when spoke is wired.
+	if _, hasWarnings := resp["warnings"]; hasWarnings {
+		t.Errorf("expected no warnings when spoke is wired, got %v", resp["warnings"])
+	}
+}
+
+func TestRestartIntegration_WithoutSpokeWired(t *testing.T) {
+	mgr := newMockIntegrationManager()
+	mgr.plugins["discord"] = map[string]string{}
+
+	// Create a FanOutEventBus WITHOUT a discord spoke.
+	inproc := eventbus.NewInProcessEventBus(slog.Default())
+	fanout := eventbus.NewFanOutEventBus([]eventbus.NamedEventBus{
+		{Name: "inprocess", Bus: inproc},
+	}, slog.Default())
+
+	proxy := NewMessageBrokerProxy(fanout, nil, nil, nil, slog.Default())
+
+	srv := &Server{}
+	srv.pluginManager = mgr
+	srv.SetMessageBrokerProxy(proxy)
+
+	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/integrations/discord/restart", nil)
+	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	rr := httptest.NewRecorder()
+	srv.handleAdminIntegrationByName(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var resp map[string]interface{}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+	if resp["status"] != "ok" {
+		t.Errorf("expected status 'ok', got %v", resp["status"])
+	}
+	// Warnings expected when spoke is NOT wired.
+	warnings, ok := resp["warnings"].([]interface{})
+	if !ok || len(warnings) == 0 {
+		t.Fatalf("expected warnings when spoke is not wired, got %v", resp["warnings"])
+	}
+	warning := fmt.Sprintf("%v", warnings[0])
+	if !strings.Contains(warning, "not wired") {
+		t.Errorf("expected warning about spoke not being wired, got %q", warning)
+	}
+}
+
+func TestValidateIntegrationWiring_NoProxy(t *testing.T) {
+	srv := &Server{}
+	warnings := srv.validateIntegrationWiring("discord")
+	if len(warnings) != 1 {
+		t.Fatalf("expected 1 warning, got %d", len(warnings))
+	}
+	if !strings.Contains(warnings[0], "message broker not initialized") {
+		t.Errorf("unexpected warning: %s", warnings[0])
 	}
 }
 

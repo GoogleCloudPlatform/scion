@@ -398,3 +398,76 @@ func TestResolveRecipientChannels(t *testing.T) {
 		assert.Len(t, channels, 1)
 	})
 }
+
+// --- HealthCheck gateway_connected tests ---
+
+func TestHealthCheck_GatewayConnected(t *testing.T) {
+	b := &DiscordBroker{
+		log:              discardLogger(),
+		session:          &discordgo.Session{},
+		subs:             map[string]bool{"test.>": true},
+		sentIDs:          make(map[string]time.Time),
+		gatewayConnected: true,
+	}
+
+	status, err := b.HealthCheck()
+	require.NoError(t, err)
+	assert.Equal(t, "healthy", status.Status)
+	assert.Equal(t, "discord bot operational", status.Message)
+	assert.Equal(t, "true", status.Details["gateway_connected"])
+}
+
+func TestHealthCheck_GatewayDisconnectedWithSubs(t *testing.T) {
+	b := &DiscordBroker{
+		log:              discardLogger(),
+		session:          &discordgo.Session{},
+		subs:             map[string]bool{"test.>": true},
+		sentIDs:          make(map[string]time.Time),
+		gatewayConnected: false,
+	}
+
+	status, err := b.HealthCheck()
+	require.NoError(t, err)
+	assert.Equal(t, "degraded", status.Status)
+	assert.Contains(t, status.Message, "gateway not connected")
+	assert.Equal(t, "false", status.Details["gateway_connected"])
+}
+
+func TestHealthCheck_GatewayDisconnectedNoSubs(t *testing.T) {
+	b := &DiscordBroker{
+		log:              discardLogger(),
+		session:          &discordgo.Session{},
+		subs:             map[string]bool{},
+		sentIDs:          make(map[string]time.Time),
+		gatewayConnected: false,
+	}
+
+	status, err := b.HealthCheck()
+	require.NoError(t, err)
+	// No subscriptions → no degraded status even if gateway disconnected.
+	assert.Equal(t, "healthy", status.Status)
+	assert.Equal(t, "false", status.Details["gateway_connected"])
+}
+
+func TestHealthCheck_Closed(t *testing.T) {
+	b := &DiscordBroker{
+		log:    discardLogger(),
+		closed: true,
+	}
+
+	status, err := b.HealthCheck()
+	require.NoError(t, err)
+	assert.Equal(t, "unhealthy", status.Status)
+}
+
+func TestHealthCheck_NoSession(t *testing.T) {
+	b := &DiscordBroker{
+		log:     discardLogger(),
+		session: nil,
+	}
+
+	status, err := b.HealthCheck()
+	require.NoError(t, err)
+	assert.Equal(t, "degraded", status.Status)
+	assert.Contains(t, status.Message, "not configured")
+}

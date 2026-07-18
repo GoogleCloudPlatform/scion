@@ -418,6 +418,31 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 					log.Printf("Auto-enabled message broker for configured broker plugin(s): %v", vs.Server.MessageBroker.Types)
 				}
 			}
+
+			// Auto-populate: if message_broker.enabled but types is empty while
+			// broker plugins exist, populate types from the plugin list.
+			if vs.Server.Plugins != nil && vs.Server.MessageBroker != nil &&
+				vs.Server.MessageBroker.Enabled && len(vs.Server.MessageBroker.Types) == 0 && len(vs.Server.Plugins.Broker) > 0 {
+				for name := range vs.Server.Plugins.Broker {
+					vs.Server.MessageBroker.Types = append(vs.Server.MessageBroker.Types, name)
+				}
+				log.Printf("NOTICE: message_broker.types was empty — auto-populated from plugins: %v", vs.Server.MessageBroker.Types)
+			}
+
+			// Warn on plugin-not-in-types
+			if vs.Server.Plugins != nil && vs.Server.MessageBroker != nil &&
+				vs.Server.MessageBroker.Enabled && len(vs.Server.MessageBroker.Types) > 0 {
+				typesSet := make(map[string]bool, len(vs.Server.MessageBroker.Types))
+				for _, t := range vs.Server.MessageBroker.Types {
+					typesSet[t] = true
+				}
+				for name := range vs.Server.Plugins.Broker {
+					if !typesSet[name] {
+						log.Printf("WARNING: Broker plugin %q is loaded but not listed in message_broker.types — it will NOT participate in message routing", name)
+					}
+				}
+			}
+
 			if vs.Server.MessageBroker != nil && vs.Server.MessageBroker.Enabled {
 				var namedBuses []eventbus.NamedEventBus
 
