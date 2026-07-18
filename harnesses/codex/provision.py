@@ -390,7 +390,7 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
     instructions_file = str(harness_cfg.get("instructions_file") or ".codex/AGENTS.md")
     scion_harness.project_instructions(ctx, instructions_file)
 
-    thinking_raw = os.environ.get("AGY_THINKING_LEVEL", "")
+    thinking_raw = os.environ.get("SCION_THINKING_LEVEL", "")
     reasoning_effort: str | None = None
     if thinking_raw.strip().isdigit():
         thinking_level = int(thinking_raw)
