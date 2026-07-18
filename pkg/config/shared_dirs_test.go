@@ -217,7 +217,7 @@ func TestSharedDirHostPath(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := SharedDirHostPath(tt.home, tt.slug, tt.projectID, tt.sharedDirName)
-			assert.True(t, strings.HasSuffix(got, tt.wantSuffix),
+			assert.True(t, strings.HasSuffix(got, filepath.FromSlash(tt.wantSuffix)),
 				"SharedDirHostPath() = %q, want suffix %q", got, tt.wantSuffix)
 		})
 	}

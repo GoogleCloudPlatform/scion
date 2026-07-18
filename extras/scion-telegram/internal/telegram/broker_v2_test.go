@@ -3237,7 +3237,7 @@ func TestV2_ResolveAttachmentPath_SharedDirPaths(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := b.resolveAttachmentPath(ctx, nil, tt.path, tt.projectID)
-			assert.True(t, strings.HasSuffix(got, tt.wantEnd),
+			assert.True(t, strings.HasSuffix(got, filepath.FromSlash(tt.wantEnd)),
 				"resolveAttachmentPath(%q) = %q, want suffix %q", tt.path, got, tt.wantEnd)
 		})
 	}

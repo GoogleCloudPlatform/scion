@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -597,7 +598,7 @@ func TestResolveAttachmentPath_SharedDirPaths(t *testing.T) {
 			if tt.wantEmpty {
 				assert.Empty(t, got, "resolveAttachmentPath(%q) should return empty", tt.path)
 			} else {
-				assert.True(t, strings.HasSuffix(got, tt.wantEnd),
+				assert.True(t, strings.HasSuffix(got, filepath.FromSlash(tt.wantEnd)),
 					"resolveAttachmentPath(%q) = %q, want suffix %q", tt.path, got, tt.wantEnd)
 			}
 		})

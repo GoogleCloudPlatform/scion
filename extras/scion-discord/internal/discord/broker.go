@@ -1607,9 +1607,9 @@ func (b *DiscordBroker) resolveSharedDirAttachmentPath(ctx context.Context, atta
 		hostPath = sharedDirBase
 	} else {
 		hostPath = filepath.Join(sharedDirBase, relPath)
-		if !strings.HasPrefix(hostPath, sharedDirBase+"/") {
+		if !strings.HasPrefix(hostPath, sharedDirBase+string(filepath.Separator)) {
 			b.log.Warn("Resolved shared dir path escapes directory",
-				"host_path", hostPath, "expected_prefix", sharedDirBase+"/")
+				"host_path", hostPath, "expected_prefix", sharedDirBase+string(filepath.Separator))
 			return ""
 		}
 	}
