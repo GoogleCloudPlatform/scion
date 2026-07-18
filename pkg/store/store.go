@@ -174,6 +174,17 @@ type AgentStore interface {
 	// whose activity is not a terminal sticky state or already stalled/offline.
 	// Returns the updated agent records for event publishing.
 	MarkStalledAgents(ctx context.Context, activityThreshold, heartbeatRecency time.Time) ([]Agent, error)
+
+	// FindOrphanedAgents returns agents whose RuntimeBrokerID references a broker
+	// that is offline or does not exist, and who are not in terminal states
+	// (stopped, error). Agents assigned to the given currentBrokerID are excluded.
+	// This guards against reassigning agents that belong to active remote brokers
+	// in multi-broker setups.
+	FindOrphanedAgents(ctx context.Context, currentBrokerID string) ([]*Agent, error)
+
+	// ReassignAgentsToBroker bulk-updates the RuntimeBrokerID of the given agents
+	// to the specified broker ID. Returns the number of agents updated.
+	ReassignAgentsToBroker(ctx context.Context, agents []*Agent, brokerID string) (int, error)
 }
 
 // AgentFilter defines criteria for filtering agents.
@@ -320,6 +331,12 @@ type RuntimeBrokerStore interface {
 
 	// ListRuntimeBrokers returns runtime brokers matching the filter criteria.
 	ListRuntimeBrokers(ctx context.Context, filter RuntimeBrokerFilter, opts ListOptions) (*ListResult[RuntimeBroker], error)
+
+	// FindEmbeddedBroker returns the single embedded broker if exactly one
+	// exists, or nil if zero or multiple embedded brokers are found (ambiguous).
+	// "Embedded" means the broker's labels contain {"scion.io/broker-role": "embedded"}.
+	// Used to recover broker ID from DB when settings are lost.
+	FindEmbeddedBroker(ctx context.Context) (*RuntimeBroker, error)
 
 	// UpdateRuntimeBrokerHeartbeat updates the last heartbeat and status.
 	UpdateRuntimeBrokerHeartbeat(ctx context.Context, id string, status string) error

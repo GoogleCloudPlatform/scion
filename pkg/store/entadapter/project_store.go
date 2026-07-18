@@ -21,6 +21,9 @@ import (
 	"strings"
 	"time"
 
+	"entgo.io/ent/dialect"
+	entsql "entgo.io/ent/dialect/sql"
+
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
@@ -804,6 +807,52 @@ func (s *ProjectStore) ListRuntimeBrokers(ctx context.Context, filter store.Runt
 		Items:      items,
 		TotalCount: totalCount,
 	}, nil
+}
+
+// FindEmbeddedBroker returns the single embedded broker if exactly one exists,
+// or nil if zero or multiple embedded brokers are found. "Embedded" means the
+// broker's labels JSON contains {"scion.io/broker-role": "embedded"}.
+// Used to recover the broker ID from the DB when settings are lost.
+func (s *ProjectStore) FindEmbeddedBroker(ctx context.Context) (*store.RuntimeBroker, error) {
+	brokers, err := s.client.RuntimeBroker.Query().
+		Where(brokerLabelContains("scion.io/broker-role", "embedded")).
+		Limit(2). // Only need to know if there's exactly one
+		All(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if len(brokers) != 1 {
+		return nil, nil // Zero or ambiguous — caller should generate a new ID
+	}
+	return entBrokerToStore(brokers[0]), nil
+}
+
+// brokerLabelContains returns an Ent predicate restricting results to runtime
+// brokers whose `labels` JSON object contains the given key-value pair.
+// This is the RuntimeBroker equivalent of the agent labelContains in dialect.go.
+func brokerLabelContains(key, value string) predicate.RuntimeBroker {
+	return func(s *entsql.Selector) {
+		col := s.C(runtimebroker.FieldLabels)
+		switch s.Dialect() {
+		case dialect.Postgres:
+			s.Where(entsql.P(func(b *entsql.Builder) {
+				b.WriteString(col).
+					WriteString(" @> ").
+					Arg(fmt.Sprintf(`{%q:%q}`, key, value)).
+					WriteString("::jsonb")
+			}))
+		default: // SQLite
+			s.Where(entsql.P(func(b *entsql.Builder) {
+				escapedKey := strings.ReplaceAll(key, `"`, `\"`)
+				b.WriteString("json_extract(").
+					WriteString(col).
+					WriteString(", ").
+					Arg(fmt.Sprintf(`$."%s"`, escapedKey)).
+					WriteString(") = ").
+					Arg(value)
+			}))
+		}
+	}
 }
 
 // UpdateRuntimeBrokerHeartbeat updates the broker's status and last-heartbeat

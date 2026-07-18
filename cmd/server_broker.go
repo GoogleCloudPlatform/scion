@@ -136,6 +136,22 @@ func registerGlobalProjectAndBroker(ctx context.Context, s store.Store, brokerID
 		}
 	}
 
+	// Re-assign agents orphaned by broker ID changes.
+	// An agent is orphaned when its RuntimeBrokerID points to a broker that
+	// is offline/missing AND the agent is not in a terminal state.
+	// Guard: agents under active remote brokers are NOT reassigned.
+	orphaned, orphanErr := s.FindOrphanedAgents(ctx, brokerID)
+	if orphanErr != nil {
+		log.Printf("Warning: failed to query orphaned agents: %v", orphanErr)
+	} else if len(orphaned) > 0 {
+		reassigned, reassignErr := s.ReassignAgentsToBroker(ctx, orphaned, brokerID)
+		if reassignErr != nil {
+			log.Printf("Warning: failed to re-assign %d orphaned agent(s): %v", len(orphaned), reassignErr)
+		} else {
+			log.Printf("NOTICE: re-assigned %d orphaned agent(s) to broker %s", reassigned, brokerID)
+		}
+	}
+
 	// Now that the runtime broker exists, set it as the default for the project
 	if projectNeedsDefaultBroker {
 		globalProject.DefaultRuntimeBrokerID = brokerID

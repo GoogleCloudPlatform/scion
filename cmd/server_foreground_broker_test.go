@@ -15,6 +15,7 @@
 package cmd
 
 import (
+	"context"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -55,7 +56,7 @@ func TestResolveBrokerIDPrefersConfiguredIDOverDefault(t *testing.T) {
 		Hub: &config.HubClientConfig{BrokerID: "configured-broker"},
 	}
 
-	got := resolveBrokerID(cfg, settings, nil, t.TempDir(), "cloudrun-default")
+	got := resolveBrokerID(context.Background(), cfg, settings, nil, t.TempDir(), "cloudrun-default", nil)
 
 	assert.Equal(t, "configured-broker", got)
 }
