@@ -58,7 +58,12 @@ export class ScionPageProfileTelegram extends LitElement {
         this._autoSubmit();
       }
     }
-    void this._generateQrCode();
+  }
+
+  override willUpdate(changedProperties: Map<PropertyKey, unknown>): void {
+    if (changedProperties.has('_code')) {
+      void this._generateQrCode();
+    }
   }
 
   private _buildRegistrationUrl(): string {
@@ -70,9 +75,9 @@ export class ScionPageProfileTelegram extends LitElement {
   }
 
   private async _generateQrCode(): Promise<void> {
+    const url = this._buildRegistrationUrl();
     try {
-      const url = this._buildRegistrationUrl();
-      this._qrDataUrl = await QRCode.toDataURL(url, {
+      const qrDataUrl = await QRCode.toDataURL(url, {
         width: 200,
         margin: 2,
         errorCorrectionLevel: 'M',
@@ -81,8 +86,13 @@ export class ScionPageProfileTelegram extends LitElement {
           light: '#ffffff',
         },
       });
+      if (url === this._buildRegistrationUrl()) {
+        this._qrDataUrl = qrDataUrl;
+      }
     } catch {
-      this._qrDataUrl = '';
+      if (url === this._buildRegistrationUrl()) {
+        this._qrDataUrl = '';
+      }
     }
   }
 
@@ -313,7 +323,6 @@ export class ScionPageProfileTelegram extends LitElement {
       .replace(/[^A-Z0-9]/g, '')
       .slice(0, 6);
     input.value = this._code;
-    void this._generateQrCode();
   }
 
   private async _handleSubmit(e: Event): Promise<void> {
