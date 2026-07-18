@@ -81,6 +81,7 @@ type BucketConfig struct {
 //   - SCION_HUB_TOKEN: Bearer token for Hub authentication
 //   - SCION_HUB_API_KEY: API key for Hub authentication (alternative to token)
 //   - SCION_HUB_ENABLED: Set to "true" to enable Hub integration
+//
 // HubTransportConfig defines transport-layer auth settings for traversing
 // platform guards (IAP, Cloud Run invoker IAM) in front of the Hub.
 type HubTransportConfig struct {
