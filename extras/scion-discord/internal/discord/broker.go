@@ -20,6 +20,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -48,6 +49,9 @@ const (
 	// OriginMarkerValue is the marker value for hub-originated messages.
 	OriginMarkerValue = "hub"
 )
+
+// outboundEmailRe matches scion user emails in outbound messages, with optional "user:" prefix.
+var outboundEmailRe = regexp.MustCompile(`(?:user:)?[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}`)
 
 // Config holds Discord-specific configuration parsed from the plugin config map.
 type Config struct {
@@ -532,6 +536,11 @@ func (b *DiscordBroker) Publish(ctx context.Context, topic string, msg *messages
 		senderSlug = strings.TrimPrefix(msg.Sender, "agent:")
 	}
 
+	// Replace scion user emails with Discord @mentions in the message body.
+	if msg != nil && store != nil && msg.Msg != "" {
+		msg.Msg = resolveOutboundMentions(ctx, store, msg.Msg)
+	}
+
 	// Format the message text. When sending via webhook, the webhook username
 	// already shows the agent name, so we skip the agent name header and just
 	// send the body with prefix tags.
@@ -786,6 +795,51 @@ func (b *DiscordBroker) HealthCheck() (*plugin.HealthStatus, error) {
 		Message: "discord bot operational",
 		Details: details,
 	}, nil
+}
+
+// --- Outbound mention resolution ---
+
+// resolveOutboundMentions scans text for scion user emails (with optional
+// "user:" prefix) and replaces them with Discord @mentions when the user
+// has a mapping in the store.
+func resolveOutboundMentions(ctx context.Context, store Store, text string) string {
+	if store == nil || text == "" {
+		return text
+	}
+
+	matches := outboundEmailRe.FindAllStringIndex(text, -1)
+	if len(matches) == 0 {
+		return text
+	}
+
+	for i := len(matches) - 1; i >= 0; i-- {
+		start, end := matches[i][0], matches[i][1]
+
+		if start > 0 {
+			prev := text[start-1]
+			if prev == '/' || prev == ':' {
+				continue
+			}
+		}
+		if end < len(text) && text[end] == '/' {
+			continue
+		}
+
+		match := text[start:end]
+		email := match
+		if strings.HasPrefix(email, "user:") {
+			email = strings.TrimPrefix(email, "user:")
+		}
+
+		mapping, err := store.GetUserMappingByEmail(ctx, email)
+		if err != nil || mapping == nil {
+			continue
+		}
+
+		text = text[:start] + FormatDiscordMention(mapping.DiscordUserID) + text[end:]
+	}
+
+	return text
 }
 
 // --- Gateway setup ---

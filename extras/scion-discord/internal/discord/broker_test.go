@@ -604,3 +604,101 @@ func TestResolveAttachmentPath_SharedDirPaths(t *testing.T) {
 		})
 	}
 }
+
+func TestResolveOutboundMentions(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	// User with Discord ID and username.
+	require.NoError(t, store.CreateUserMapping(ctx, &DiscordUserMapping{
+		DiscordUserID:   "100",
+		DiscordUsername: "ptone805",
+		ScionEmail:      "ptone@google.com",
+		LinkedAt:        time.Now().UTC(),
+	}))
+	// User with Discord ID but no username — should still produce <@id> mention.
+	require.NoError(t, store.CreateUserMapping(ctx, &DiscordUserMapping{
+		DiscordUserID: "200",
+		ScionEmail:    "nousername@example.com",
+		LinkedAt:      time.Now().UTC(),
+	}))
+
+	tests := []struct {
+		name string
+		text string
+		want string
+	}{
+		{
+			name: "user:email replaced",
+			text: "Hey user:ptone@google.com check this",
+			want: "Hey <@100> check this",
+		},
+		{
+			name: "standalone email replaced",
+			text: "Hey ptone@google.com check this",
+			want: "Hey <@100> check this",
+		},
+		{
+			name: "user with no username still uses ID mention",
+			text: "Contact nousername@example.com please",
+			want: "Contact <@200> please",
+		},
+		{
+			name: "unknown email leaves as-is",
+			text: "Contact unknown@example.com please",
+			want: "Contact unknown@example.com please",
+		},
+		{
+			name: "email in URL skipped",
+			text: "See https://ptone@google.com/path",
+			want: "See https://ptone@google.com/path",
+		},
+		{
+			name: "mailto skipped",
+			text: "Send to mailto:ptone@google.com",
+			want: "Send to mailto:ptone@google.com",
+		},
+		{
+			name: "multiple emails",
+			text: "user:ptone@google.com and nousername@example.com",
+			want: "<@100> and <@200>",
+		},
+		{
+			name: "email at start of text",
+			text: "ptone@google.com said hello",
+			want: "<@100> said hello",
+		},
+		{
+			name: "email at end of text",
+			text: "message from ptone@google.com",
+			want: "message from <@100>",
+		},
+		{
+			name: "empty text",
+			text: "",
+			want: "",
+		},
+		{
+			name: "no emails",
+			text: "just a regular message",
+			want: "just a regular message",
+		},
+		{
+			name: "email followed by slash skipped",
+			text: "http://ptone@google.com/foo",
+			want: "http://ptone@google.com/foo",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := resolveOutboundMentions(ctx, store, tt.text)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+
+	t.Run("nil store returns text unchanged", func(t *testing.T) {
+		got := resolveOutboundMentions(ctx, nil, "ptone@google.com")
+		assert.Equal(t, "ptone@google.com", got)
+	})
+}
