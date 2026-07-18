@@ -537,9 +537,7 @@ func (b *DiscordBroker) Publish(ctx context.Context, topic string, msg *messages
 	}
 
 	// Replace scion user emails with Discord @mentions in the message body.
-	if msg != nil && store != nil && msg.Msg != "" {
-		msg.Msg = resolveOutboundMentions(ctx, store, msg.Msg)
-	}
+	msg.Msg = resolveOutboundMentions(ctx, store, msg.Msg)
 
 	// Format the message text. When sending via webhook, the webhook username
 	// already shows the agent name, so we skip the agent name header and just
