@@ -1561,8 +1561,9 @@ type Message struct {
 	// DispatchState tracks cross-node delivery of the message to the broker:
 	// pending|dispatched|failed. The message row is its own durable dispatch
 	// intent (design §5.2/§6.1).
-	DispatchState string     `json:"dispatchState,omitempty"`
-	DispatchedAt  *time.Time `json:"dispatchedAt,omitempty"`
+	DispatchState         string     `json:"dispatchState,omitempty"`
+	DispatchedAt          *time.Time `json:"dispatchedAt,omitempty"`
+	DispatchFailureReason *string    `json:"dispatchFailureReason,omitempty"`
 }
 
 // MarshalJSON implements custom marshaling to support legacy groveId field.

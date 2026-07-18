@@ -126,8 +126,16 @@ func runMessagesList(cmd *cobra.Command, args []string) error {
 		if len(msgText) > 60 {
 			msgText = msgText[:57] + "..."
 		}
-		fmt.Printf("%-12s  %-14s  %-14s  %-20s  %s\n",
-			shortID, agentDisplay, truncate(m.Type, 14), timeStr, msgText)
+		dispatchInfo := ""
+		if m.DispatchState == "failed" {
+			dispatchInfo = " [DELIVERY FAILED"
+			if m.DispatchFailureReason != nil && *m.DispatchFailureReason != "" {
+				dispatchInfo += ": " + *m.DispatchFailureReason
+			}
+			dispatchInfo += "]"
+		}
+		fmt.Printf("%-12s  %-14s  %-14s  %-20s  %s%s\n",
+			shortID, agentDisplay, truncate(m.Type, 14), timeStr, msgText, dispatchInfo)
 	}
 
 	return nil

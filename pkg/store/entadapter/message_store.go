@@ -77,8 +77,9 @@ func entMessageToStore(e *ent.Message) *store.Message {
 		AgentID:       e.AgentID,
 		GroupID:       e.GroupID,
 		CreatedAt:     e.Created,
-		DispatchState: e.DispatchState,
-		DispatchedAt:  e.DispatchedAt,
+		DispatchState:         e.DispatchState,
+		DispatchedAt:          e.DispatchedAt,
+		DispatchFailureReason: e.DispatchFailureReason,
 	}
 }
 

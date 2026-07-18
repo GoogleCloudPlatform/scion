@@ -147,12 +147,11 @@ func (s *Server) handleMessageRoutes(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleAgentMessages handles GET /api/v1/agents/{id}/messages.
-// Returns both sides of the conversation between the authenticated user
-// and the specified agent (messages where the user is either the sender
-// or the recipient, scoped to this agent). Authorisation is enforced via
-// the agent read permission rather than a per-row recipient check, so
-// agents' outbound replies and the user's own sent messages both render
-// in the viewer.
+// Returns messages involving the specified agent, filtered by the caller's
+// permission level. Users who can manage the agent (owners, project admins,
+// global admins) see all messages; other users see only messages where they
+// are a participant (sender or recipient), preserving privacy across users
+// who share read access to the same agent.
 func (s *Server) handleAgentMessages(w http.ResponseWriter, r *http.Request, agentID string) {
 	if r.Method != http.MethodGet {
 		MethodNotAllowed(w)
@@ -172,10 +171,16 @@ func (s *Server) handleAgentMessages(w http.ResponseWriter, r *http.Request, age
 		return
 	}
 
-	decision := s.authzService.CheckAccess(ctx, user, agentResource(agent), ActionRead)
-	if !decision.Allowed {
-		writeError(w, http.StatusForbidden, ErrCodeForbidden, "Access denied", nil)
-		return
+	// Check manage first — manage implies read and lets us skip a second
+	// authz lookup for users who have it.
+	res := agentResource(agent)
+	canManage := s.authzService.CheckAccess(ctx, user, res, ActionManage)
+	if !canManage.Allowed {
+		decision := s.authzService.CheckAccess(ctx, user, res, ActionRead)
+		if !decision.Allowed {
+			writeError(w, http.StatusForbidden, ErrCodeForbidden, "Access denied", nil)
+			return
+		}
 	}
 
 	q := r.URL.Query()
@@ -195,7 +200,6 @@ func (s *Server) handleAgentMessages(w http.ResponseWriter, r *http.Request, age
 	filter := store.MessageFilter{
 		AgentID: agentID,
 	}
-	canManage := s.authzService.CheckAccess(ctx, user, agentResource(agent), ActionManage)
 	if !canManage.Allowed {
 		filter.ParticipantID = user.ID()
 	}
@@ -246,10 +250,16 @@ func (s *Server) handleAgentMessagesStream(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	decision := s.authzService.CheckAccess(ctx, user, agentResource(agent), ActionRead)
-	if !decision.Allowed {
-		writeError(w, http.StatusForbidden, ErrCodeForbidden, "Access denied", nil)
-		return
+	// Check manage first — manage implies read and lets us skip a second
+	// authz lookup for users who have it.
+	res := agentResource(agent)
+	canManage := s.authzService.CheckAccess(ctx, user, res, ActionManage)
+	if !canManage.Allowed {
+		decision := s.authzService.CheckAccess(ctx, user, res, ActionRead)
+		if !decision.Allowed {
+			writeError(w, http.StatusForbidden, ErrCodeForbidden, "Access denied", nil)
+			return
+		}
 	}
 
 	flusher, ok := w.(http.Flusher)
@@ -278,7 +288,6 @@ func (s *Server) handleAgentMessagesStream(w http.ResponseWriter, r *http.Reques
 	// Users who can manage the agent see all messages; others only see
 	// messages where they are a participant.
 	userID := user.ID()
-	canManage := s.authzService.CheckAccess(ctx, user, agentResource(agent), ActionManage)
 	filterStream := !canManage.Allowed
 
 	heartbeat := time.NewTicker(30 * time.Second)
