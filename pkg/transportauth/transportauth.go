@@ -22,6 +22,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"strings"
@@ -119,10 +120,10 @@ func ParseTokenExpiry(tokenString string) (time.Time, error) {
 	return time.Unix(claims.Exp, 0), nil
 }
 
-// ModeFromEnv reads SCION_TRANSPORT_MODE and returns the corresponding
-// HeaderMode. Returns HeaderAuthorization when unset or unrecognised.
-func ModeFromEnv() HeaderMode {
-	switch os.Getenv(EnvTransportMode) {
+// ModeFromString converts a transport mode string to a HeaderMode constant.
+// Returns HeaderAuthorization for empty or unrecognised values.
+func ModeFromString(mode string) HeaderMode {
+	switch mode {
 	case "iap":
 		return HeaderProxyAuthorization
 	case "cloudrun_invoker":
@@ -130,6 +131,12 @@ func ModeFromEnv() HeaderMode {
 	default:
 		return HeaderAuthorization
 	}
+}
+
+// ModeFromEnv reads SCION_TRANSPORT_MODE and returns the corresponding
+// HeaderMode. Returns HeaderAuthorization when unset or unrecognised.
+func ModeFromEnv() HeaderMode {
+	return ModeFromString(os.Getenv(EnvTransportMode))
 }
 
 // FromEnv resolves a TokenSource from environment variables. Returns

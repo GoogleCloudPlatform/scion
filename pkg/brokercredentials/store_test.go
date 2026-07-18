@@ -356,6 +356,63 @@ func TestStore_JSONFormat(t *testing.T) {
 	}
 }
 
+func TestStore_TransportFieldsRoundTrip(t *testing.T) {
+	tempDir := t.TempDir()
+	credPath := filepath.Join(tempDir, "broker-credentials.json")
+	store := NewStore(credPath)
+
+	creds := &BrokerCredentials{
+		BrokerID:          "broker-iap",
+		SecretKey:         base64.StdEncoding.EncodeToString([]byte("secret")),
+		HubEndpoint:       "https://hub.example.com",
+		TransportMode:     "iap",
+		TransportAudience: "12345.apps.googleusercontent.com",
+	}
+
+	if err := store.Save(creds); err != nil {
+		t.Fatalf("Save failed: %v", err)
+	}
+
+	loaded, err := store.Load()
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+
+	if loaded.TransportMode != "iap" {
+		t.Errorf("TransportMode: expected %q, got %q", "iap", loaded.TransportMode)
+	}
+	if loaded.TransportAudience != "12345.apps.googleusercontent.com" {
+		t.Errorf("TransportAudience: expected %q, got %q", "12345.apps.googleusercontent.com", loaded.TransportAudience)
+	}
+}
+
+func TestStore_TransportFieldsBackwardCompatibility(t *testing.T) {
+	tempDir := t.TempDir()
+	credPath := filepath.Join(tempDir, "broker-credentials.json")
+
+	// Write old-format JSON without transport fields
+	oldJSON := `{"brokerId": "old-broker", "secretKey": "c2VjcmV0", "hubEndpoint": "https://hub.example.com"}`
+	if err := os.WriteFile(credPath, []byte(oldJSON), 0600); err != nil {
+		t.Fatalf("Failed to write: %v", err)
+	}
+
+	store := NewStore(credPath)
+	loaded, err := store.Load()
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+
+	if loaded.TransportMode != "" {
+		t.Errorf("Expected empty TransportMode for old creds, got %q", loaded.TransportMode)
+	}
+	if loaded.TransportAudience != "" {
+		t.Errorf("Expected empty TransportAudience for old creds, got %q", loaded.TransportAudience)
+	}
+	if loaded.BrokerID != "old-broker" {
+		t.Errorf("BrokerID: expected %q, got %q", "old-broker", loaded.BrokerID)
+	}
+}
+
 func TestStore_ModTime(t *testing.T) {
 	tempDir := t.TempDir()
 	credPath := filepath.Join(tempDir, "broker-credentials.json")

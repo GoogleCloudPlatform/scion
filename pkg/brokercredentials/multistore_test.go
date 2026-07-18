@@ -524,6 +524,115 @@ func TestMultiStore_SaveValidation(t *testing.T) {
 	}
 }
 
+func TestMultiStore_TransportFieldsRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	store := NewMultiStore(dir)
+
+	creds := &BrokerCredentials{
+		Name:              "iap-hub",
+		BrokerID:          "broker-iap",
+		SecretKey:         base64.StdEncoding.EncodeToString([]byte("secret")),
+		HubEndpoint:       "https://iap-hub.example.com",
+		AuthMode:          AuthModeHMAC,
+		TransportMode:     "iap",
+		TransportAudience: "12345.apps.googleusercontent.com",
+	}
+
+	if err := store.Save(creds); err != nil {
+		t.Fatalf("Save failed: %v", err)
+	}
+
+	loaded, err := store.Load("iap-hub")
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+
+	if loaded.TransportMode != "iap" {
+		t.Errorf("TransportMode: expected %q, got %q", "iap", loaded.TransportMode)
+	}
+	if loaded.TransportAudience != "12345.apps.googleusercontent.com" {
+		t.Errorf("TransportAudience: expected %q, got %q", "12345.apps.googleusercontent.com", loaded.TransportAudience)
+	}
+}
+
+func TestMultiStore_TransportFieldsBackwardCompatibility(t *testing.T) {
+	dir := t.TempDir()
+	store := NewMultiStore(dir)
+
+	// Write old-format JSON without transport fields
+	oldJSON := `{"name": "old-hub", "brokerId": "old-broker", "secretKey": "c2VjcmV0"}`
+	if err := os.MkdirAll(dir, DirMode); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "old-hub.json"), []byte(oldJSON), FileMode); err != nil {
+		t.Fatal(err)
+	}
+
+	loaded, err := store.Load("old-hub")
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+
+	if loaded.TransportMode != "" {
+		t.Errorf("Expected empty TransportMode, got %q", loaded.TransportMode)
+	}
+	if loaded.TransportAudience != "" {
+		t.Errorf("Expected empty TransportAudience, got %q", loaded.TransportAudience)
+	}
+}
+
+func TestMultiStore_MixedTransportConfigs(t *testing.T) {
+	dir := t.TempDir()
+	store := NewMultiStore(dir)
+
+	// IAP hub
+	iapCreds := &BrokerCredentials{
+		Name:              "iap-hub",
+		BrokerID:          "broker-iap",
+		SecretKey:         base64.StdEncoding.EncodeToString([]byte("secret1")),
+		HubEndpoint:       "https://iap-hub.example.com",
+		AuthMode:          AuthModeHMAC,
+		TransportMode:     "iap",
+		TransportAudience: "12345.apps.googleusercontent.com",
+	}
+	// Plain hub (no transport auth)
+	plainCreds := &BrokerCredentials{
+		Name:        "plain-hub",
+		BrokerID:    "broker-plain",
+		SecretKey:   base64.StdEncoding.EncodeToString([]byte("secret2")),
+		HubEndpoint: "https://plain-hub.example.com",
+		AuthMode:    AuthModeHMAC,
+	}
+
+	if err := store.Save(iapCreds); err != nil {
+		t.Fatalf("Save IAP failed: %v", err)
+	}
+	if err := store.Save(plainCreds); err != nil {
+		t.Fatalf("Save plain failed: %v", err)
+	}
+
+	// Verify IAP hub has transport config
+	iap, err := store.Load("iap-hub")
+	if err != nil {
+		t.Fatalf("Load IAP failed: %v", err)
+	}
+	if iap.TransportMode != "iap" {
+		t.Errorf("IAP TransportMode: expected %q, got %q", "iap", iap.TransportMode)
+	}
+
+	// Verify plain hub has no transport config
+	plain, err := store.Load("plain-hub")
+	if err != nil {
+		t.Fatalf("Load plain failed: %v", err)
+	}
+	if plain.TransportMode != "" {
+		t.Errorf("Plain TransportMode: expected empty, got %q", plain.TransportMode)
+	}
+	if plain.TransportAudience != "" {
+		t.Errorf("Plain TransportAudience: expected empty, got %q", plain.TransportAudience)
+	}
+}
+
 func TestMultiStore_LoadPopulatesName(t *testing.T) {
 	dir := t.TempDir()
 	store := NewMultiStore(dir)

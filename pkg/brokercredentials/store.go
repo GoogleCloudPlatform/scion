@@ -69,6 +69,10 @@ type BrokerCredentials struct {
 	AuthMode AuthMode `json:"authMode,omitempty"`
 	// RegisteredAt is when this broker was registered with the Hub.
 	RegisteredAt time.Time `json:"registeredAt"`
+	// TransportMode is the transport-layer auth mode ("iap" or "cloudrun_invoker").
+	TransportMode string `json:"transportMode,omitempty"`
+	// TransportAudience is the OIDC audience for transport-layer auth.
+	TransportAudience string `json:"transportAudience,omitempty"`
 }
 
 // Store manages broker credentials on the local filesystem.

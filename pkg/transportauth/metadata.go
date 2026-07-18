@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -72,10 +73,10 @@ func (s *MetadataSource) Token() (string, error) {
 		return s.token, nil
 	}
 
-	url := fmt.Sprintf("%s/computeMetadata/v1/instance/service-accounts/default/identity?audience=%s&format=full",
+	fetchURL := fmt.Sprintf("%s/computeMetadata/v1/instance/service-accounts/default/identity?audience=%s&format=full",
 		s.metadataBaseURL, url.QueryEscape(s.audience))
 
-	req, err := http.NewRequest("GET", url, nil)
+	req, err := http.NewRequest("GET", fetchURL, nil)
 	if err != nil {
 		return "", fmt.Errorf("oidc: build request: %w", err)
 	}
