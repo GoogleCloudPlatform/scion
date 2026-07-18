@@ -203,7 +203,7 @@ type MaintenanceConfig struct {
 	ImageRegistry string
 	// ImageTag is the default image tag to pull (default: "latest").
 	ImageTag string
-	// Harnesses is the list of harness names whose images should be pulled (e.g., ["claude", "gemini", "opencode", "codex"]).
+	// Harnesses is the list of harness names whose images should be pulled (e.g., ["claude", "antigravity", "opencode", "codex"]).
 	Harnesses []string
 	// RuntimeBin overrides auto-detection of the container runtime binary (docker, podman).
 	RuntimeBin string

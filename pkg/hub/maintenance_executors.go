@@ -160,7 +160,7 @@ type PullImagesExecutor struct {
 	runtimeBin string   // "docker", "podman", or "container"
 	registry   string   // image registry prefix
 	tag        string   // image tag (default "latest")
-	harnesses  []string // harness names (e.g., "claude", "gemini")
+	harnesses  []string // harness names (e.g., "claude", "antigravity")
 }
 
 func (e *PullImagesExecutor) Run(ctx context.Context, logger io.Writer, params map[string]string) error {
@@ -192,7 +192,7 @@ func (e *PullImagesExecutor) Run(ctx context.Context, logger io.Writer, params m
 
 	harnesses := e.harnesses
 	if len(harnesses) == 0 {
-		harnesses = []string{"claude", "gemini"}
+		harnesses = []string{"claude", "antigravity"}
 	}
 
 	log.Debug("Starting pull-images",
