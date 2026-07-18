@@ -283,6 +283,11 @@ func TestResolveOutboundMentions(t *testing.T) {
 			want: "<@U12345ABC> and nousername@example.com",
 		},
 		{
+			name: "same email appears twice",
+			text: "ptone@google.com and then ptone@google.com again",
+			want: "<@U12345ABC> and then <@U12345ABC> again",
+		},
+		{
 			name: "email at start of text",
 			text: "ptone@google.com said hello",
 			want: "<@U12345ABC> said hello",
