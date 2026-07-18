@@ -583,6 +583,12 @@ func TestResolveAttachmentPath_SharedDirPaths(t *testing.T) {
 			projectID: "550e8400-e29b-41d4-a716-446655440000",
 			wantEmpty: true,
 		},
+		{
+			name:      "path traversal in shared dir name rejected",
+			path:      "/scion-volumes/../.scion/settings.yaml",
+			projectID: "550e8400-e29b-41d4-a716-446655440000",
+			wantEmpty: true,
+		},
 	}
 
 	for _, tt := range tests {

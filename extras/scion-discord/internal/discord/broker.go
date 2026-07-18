@@ -1573,6 +1573,11 @@ func (b *DiscordBroker) resolveSharedDirAttachmentPath(ctx context.Context, atta
 
 	parts := strings.SplitN(trimmed, "/", 2)
 	sharedDirName := parts[0]
+	if sharedDirName == "" || sharedDirName == "." || sharedDirName == ".." {
+		b.log.Warn("Invalid shared dir name in attachment path",
+			"attach_path", attachPath, "shared_dir_name", sharedDirName)
+		return ""
+	}
 	relPath := ""
 	if len(parts) > 1 {
 		relPath = filepath.Clean(parts[1])
