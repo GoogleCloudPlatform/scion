@@ -254,10 +254,15 @@ def _is_toml_key_line(line: str, key: str) -> bool:
 def _strip_toml_top_level_key(content: str, key: str) -> str:
     """Remove a top-level TOML key = value line from content."""
     lines = content.split("\n")
-    kept = [
-        line for line in lines
-        if not _is_toml_key_line(line, key) or line.strip().startswith("[")
-    ]
+    kept = []
+    in_section = False
+    for line in lines:
+        s = line.strip()
+        if s.startswith("["):
+            in_section = True
+        if not in_section and _is_toml_key_line(line, key):
+            continue
+        kept.append(line)
     return "\n".join(kept)
 
 
@@ -390,12 +395,15 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
     instructions_file = str(harness_cfg.get("instructions_file") or ".codex/AGENTS.md")
     scion_harness.project_instructions(ctx, instructions_file)
 
-    thinking_raw = os.environ.get("SCION_THINKING_LEVEL", "")
+    thinking_raw = os.environ.get("SCION_THINKING_LEVEL", "").strip()
     reasoning_effort: str | None = None
-    if thinking_raw.strip().isdigit():
-        thinking_level = int(thinking_raw)
-        reasoning_effort = _resolve_reasoning_effort(thinking_level)
-        ctx.info(f"thinking_level={thinking_level} reasoning_effort={reasoning_effort}")
+    if thinking_raw:
+        try:
+            thinking_level = int(thinking_raw)
+            reasoning_effort = _resolve_reasoning_effort(thinking_level)
+            ctx.info(f"thinking_level={thinking_level} reasoning_effort={reasoning_effort}")
+        except ValueError:
+            pass
 
     telemetry_payload = ctx.telemetry
     telemetry = telemetry_payload.get("telemetry") if isinstance(telemetry_payload, dict) else None

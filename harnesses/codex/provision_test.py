@@ -274,6 +274,11 @@ class CodexProvisionTest(unittest.TestCase):
                 self.assertNotIn('"low"', content)
                 self.assertIn('other_key = "value"', content)
 
+    def test_strip_toml_top_level_key_section_safety(self) -> None:
+        content = '[otel]\nreasoning_effort = "low"\n[other]\nkey = "val"\n'
+        result = provision._strip_toml_top_level_key(content, "reasoning_effort")
+        self.assertIn('reasoning_effort = "low"', result)
+
     def test_strip_toml_top_level_key_does_not_match_prefixed_keys(self) -> None:
         content = 'reasoning_effort = "low"\nreasoning_effort_extended = "yes"\n'
         result = provision._strip_toml_top_level_key(content, "reasoning_effort")
