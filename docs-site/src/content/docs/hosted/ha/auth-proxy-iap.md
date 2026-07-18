@@ -341,3 +341,174 @@ server:
 ### Reference scripts
 
 The `scripts/cloudrun/` directory on the `pr/cloudrun-hub` branch contains reference deployment scripts (deploy.sh, entrypoint.sh, hub-settings-template.yaml) for a Cloud Run + IAP topology that can serve as a starting point.
+
+## Brokers behind IAP
+
+When the Hub is behind IAP, **Runtime Brokers** must also carry a transport-layer OIDC token on every request — just like agents do. However, brokers are long-lived *originators*: nothing injects a transport token into them, so they must mint their own OIDC tokens from their runtime identity (GKE Workload Identity or ambient GCE service account).
+
+This section covers the deployment and configuration steps to connect brokers to an IAP-protected Hub.
+
+### Custom OAuth 2.0 Client ID requirement
+
+The Google-managed OAuth client that Cloud Run auto-provisions when IAP is enabled **does not support programmatic (service-account) authentication**. This means brokers (and any other machine client) cannot use it to mint OIDC tokens.
+
+You must:
+
+1. **Create a custom OAuth 2.0 Client ID** in the Google Cloud Console under **APIs & Services → Credentials → Create Credentials → OAuth client ID** (application type: Web application).
+2. **Bind the custom client ID to the IAP settings** for your Hub's backend service (Console → Security → IAP → select backend → Edit OAuth Client → Use custom client).
+
+The custom client ID (e.g., `1234567890-abc.apps.googleusercontent.com`) becomes the **OIDC audience** for all machine clients — both agents and brokers.
+
+:::note
+This is the same audience value used in `auth.transport.oidc_audience` in the Hub's `settings.yaml`. See [Transport configuration](#transport-configuration) above.
+:::
+
+### Broker Workload Identity setup
+
+Brokers running in GKE use [Workload Identity](https://cloud.google.com/kubernetes-engine/docs/how-to/workload-identity) to mint OIDC tokens from the GCE metadata server.
+
+1. **Create a Google Service Account (GSA)** for brokers:
+   ```bash
+   gcloud iam service-accounts create scion-broker \
+     --display-name="Scion Broker"
+   ```
+
+2. **Grant the GSA access to traverse the platform guard.** The required role depends on the transport mode:
+
+   | Transport mode | Role | Target |
+   |---|---|---|
+   | `iap` | `roles/iap.httpsResourceAccessor` | Hub backend service |
+   | `cloudrun_invoker` | `roles/run.invoker` | Hub Cloud Run service |
+
+   For IAP:
+   ```bash
+   gcloud iap web add-iam-policy-binding \
+     --resource-type=backend-services \
+     --service=YOUR_BACKEND_SERVICE_NAME \
+     --member="serviceAccount:scion-broker@PROJECT_ID.iam.gserviceaccount.com" \
+     --role="roles/iap.httpsResourceAccessor"
+   ```
+
+3. **Bind the broker's Kubernetes Service Account (KSA) to the GSA** via the Workload Identity annotation:
+   ```bash
+   # Allow the KSA to impersonate the GSA
+   gcloud iam service-accounts add-iam-policy-binding \
+     scion-broker@PROJECT_ID.iam.gserviceaccount.com \
+     --member="serviceAccount:PROJECT_ID.svc.id.goog[NAMESPACE/BROKER_KSA_NAME]" \
+     --role="roles/iam.workloadIdentityUser"
+
+   # Annotate the KSA
+   kubectl annotate serviceaccount BROKER_KSA_NAME \
+     --namespace NAMESPACE \
+     iam.gke.io/gcp-service-account=scion-broker@PROJECT_ID.iam.gserviceaccount.com
+   ```
+
+The broker can now mint OIDC ID tokens for the configured audience via the metadata server, which the transport layer uses automatically.
+
+### Broker transport configuration
+
+Broker transport auth has two configuration layers: **environment variables** (for containerized brokers in Kubernetes) and **credentials-file fields** (for per-connection config).
+
+#### Environment variables
+
+Set these on the broker's Kubernetes Deployment:
+
+| Variable | Description |
+|---|---|
+| `SCION_TRANSPORT_MODE` | Transport mode: `iap` or `cloudrun_invoker` |
+| `SCION_TRANSPORT_AUDIENCE` | OIDC audience — the custom OAuth 2.0 Client ID (for `iap` mode) or the Hub URL (for `cloudrun_invoker` mode) |
+
+```yaml
+env:
+  - name: SCION_TRANSPORT_MODE
+    value: "iap"
+  - name: SCION_TRANSPORT_AUDIENCE
+    value: "1234567890-abc.apps.googleusercontent.com"
+```
+
+#### Credentials-file fields
+
+The broker credentials file (written by `scion hub brokers register`) can also store transport settings per hub connection:
+
+```json
+{
+  "brokerId": "...",
+  "secretKey": "...",
+  "hubEndpoint": "https://hub.example.com",
+  "transportMode": "iap",
+  "transportAudience": "1234567890-abc.apps.googleusercontent.com"
+}
+```
+
+**Environment variables override credentials-file values.** This allows Kubernetes Deployment manifests to set transport config declaratively while the credentials file retains the values persisted at registration time.
+
+:::tip[Multi-hub brokers]
+Per-connection placement in the credentials file exists for the **multi-hub scenario**: each hub connection can have its own `transportMode` and `transportAudience` (different IAP OAuth client IDs). A single broker can serve both IAP-protected and plain hubs simultaneously. See [Multi-Broker Setup](/scion/hosted/ha/multi-broker/) for details.
+:::
+
+### Broker registration without PAT (proxy-auth mode)
+
+With transport auth configured, `scion hub brokers register` works through IAP natively — no Personal Access Token (PAT) or hub token is needed. The broker authenticates via the IAP assertion of its service account identity.
+
+When the Hub is in `proxy` auth mode and the broker has a valid transport token source (Workload Identity), the registration command:
+
+1. Sends the OIDC transport token in the `Authorization` header to traverse IAP.
+2. IAP verifies the token and passes the request through to the Hub.
+3. The Hub identifies the caller via the IAP assertion (`X-Goog-IAP-JWT-Assertion`) and completes the registration.
+
+This retires the manual `install-broker.sh` curl-from-a-pod workaround.
+
+The `register` command also persists `transportMode` and `transportAudience` into the credentials file automatically, so the broker daemon inherits them on startup.
+
+### Registration Job manifest
+
+Instead of manual shell scripts, use a Kubernetes Job to register the broker. The Job runs with the broker's KSA (which has Workload Identity configured) and the transport environment variables:
+
+```yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: register-broker
+  namespace: scion
+spec:
+  template:
+    metadata:
+      labels:
+        app: scion-broker-register
+    spec:
+      serviceAccountName: scion-broker  # KSA with Workload Identity annotation
+      restartPolicy: Never
+      containers:
+        - name: register
+          image: YOUR_SCION_IMAGE
+          env:
+            - name: SCION_TRANSPORT_MODE
+              value: "iap"
+            - name: SCION_TRANSPORT_AUDIENCE
+              value: "1234567890-abc.apps.googleusercontent.com"
+          command:
+            - scion
+            - hub
+            - brokers
+            - register
+            - --name
+            - my-broker
+            - --transport-mode
+            - iap
+            - --transport-audience
+            - "1234567890-abc.apps.googleusercontent.com"
+            - https://hub.example.com
+  backoffLimit: 2
+```
+
+After the Job completes, the credentials file is written to the broker's storage. The broker Deployment (using the same KSA and transport env vars) picks up the credentials on startup.
+
+### GKE deployment summary
+
+| Step | What |
+|---|---|
+| 1 | Create a custom OAuth 2.0 Client ID; bind it to the Hub service's IAP settings |
+| 2 | Create a broker GSA; grant `roles/iap.httpsResourceAccessor` on the Hub backend service |
+| 3 | Bind KSA ↔ GSA via Workload Identity annotation on the broker's Kubernetes service account |
+| 4 | Broker Deployment env: `SCION_TRANSPORT_MODE=iap`, `SCION_TRANSPORT_AUDIENCE=<custom client id>` |
+| 5 | One-time registration Job (same KSA) runs `scion hub brokers register` — no curl scripts |
