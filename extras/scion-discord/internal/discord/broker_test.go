@@ -328,3 +328,73 @@ func TestPublish_MediaChannelWithoutThreadID_ReturnsError(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "forum/media channel")
 }
+
+func TestResolveRecipientChannels(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+
+	// Seed a user mapping and conversation context.
+	require.NoError(t, store.CreateUserMapping(ctx, &DiscordUserMapping{
+		DiscordUserID:  "discord-user-1",
+		DiscordUsername: "alice_discord",
+		ScionUserID:    "scion-uuid-123",
+		ScionEmail:     "alice@example.com",
+		LinkedAt:       time.Now(),
+	}))
+	require.NoError(t, store.SetConversationContext(ctx, &ConversationContext{
+		DiscordUserID: "discord-user-1",
+		ProjectID:     "proj-1",
+		AgentSlug:     "coder",
+		LastChannelID: "channel-42",
+		LastMessageAt: time.Now(),
+	}))
+
+	b := &DiscordBroker{
+		log:   discardLogger(),
+		store: store,
+	}
+
+	t.Run("email lookup succeeds", func(t *testing.T) {
+		channels := b.resolveRecipientChannels(ctx, "user:alice@example.com", "", "proj-1", "coder")
+		assert.Equal(t, []string{"channel-42"}, channels)
+	})
+
+	t.Run("display name with recipientID fallback", func(t *testing.T) {
+		// Hub rewrites recipient to display name; email lookup fails,
+		// but recipientID-based fallback finds the correct mapping.
+		channels := b.resolveRecipientChannels(ctx, "user:Alice", "scion-uuid-123", "proj-1", "coder")
+		assert.Equal(t, []string{"channel-42"}, channels)
+	})
+
+	t.Run("display name without recipientID returns nil", func(t *testing.T) {
+		// No recipientID provided — fallback cannot execute.
+		channels := b.resolveRecipientChannels(ctx, "user:Alice", "", "proj-1", "coder")
+		assert.Nil(t, channels)
+	})
+
+	t.Run("non-user recipient returns nil", func(t *testing.T) {
+		channels := b.resolveRecipientChannels(ctx, "agent:coder", "", "proj-1", "coder")
+		assert.Nil(t, channels)
+	})
+
+	t.Run("email lookup preferred over recipientID", func(t *testing.T) {
+		// When email lookup succeeds, recipientID is not used.
+		channels := b.resolveRecipientChannels(ctx, "user:alice@example.com", "scion-uuid-123", "proj-1", "coder")
+		assert.Equal(t, []string{"channel-42"}, channels)
+	})
+
+	t.Run("fallback to latest conversation context", func(t *testing.T) {
+		// Add a second conversation context for a different agent.
+		require.NoError(t, store.SetConversationContext(ctx, &ConversationContext{
+			DiscordUserID: "discord-user-1",
+			ProjectID:     "proj-1",
+			AgentSlug:     "reviewer",
+			LastChannelID: "channel-99",
+			LastMessageAt: time.Now(),
+		}))
+		// With an unknown agent slug, should fall back to the latest context.
+		channels := b.resolveRecipientChannels(ctx, "user:Alice", "scion-uuid-123", "proj-1", "unknown-agent")
+		assert.NotNil(t, channels)
+		assert.Len(t, channels, 1)
+	})
+}

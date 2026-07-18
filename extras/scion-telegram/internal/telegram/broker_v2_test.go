@@ -2606,3 +2606,58 @@ func TestV2_HandleGroupMessage_CodeSpanWithDefaultAgent(t *testing.T) {
 
 	assert.Equal(t, "check the `config` file", deliveredMsg.Msg)
 }
+
+func TestResolveRecipientChats(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+
+	// Seed a user mapping and conversation context.
+	require.NoError(t, store.SaveUserMapping(ctx, &TelegramUserMapping{
+		TelegramUserID:   "tg-user-1",
+		TelegramUsername: "alice_tg",
+		ScionUserID:      "scion-uuid-456",
+		ScionEmail:       "alice@example.com",
+		LinkedAt:         time.Now(),
+	}))
+	require.NoError(t, store.SaveConversationContext(ctx, &ConversationContext{
+		TelegramUserID: "tg-user-1",
+		ProjectID:      "proj-1",
+		AgentSlug:      "coder",
+		LastChatID:     12345,
+		LastMessageAt:  time.Now(),
+	}))
+
+	b := &TelegramBrokerV2{
+		log:   slog.New(slog.NewTextHandler(os.Stdout, nil)),
+		store: store,
+	}
+
+	t.Run("email lookup succeeds", func(t *testing.T) {
+		chats := b.resolveRecipientChats(ctx, "user:alice@example.com", "", "proj-1", "coder")
+		assert.Equal(t, []int64{12345}, chats)
+	})
+
+	t.Run("display name with recipientID fallback", func(t *testing.T) {
+		// Hub rewrites recipient to display name; email lookup fails,
+		// but recipientID-based fallback finds the correct mapping.
+		chats := b.resolveRecipientChats(ctx, "user:Alice", "scion-uuid-456", "proj-1", "coder")
+		assert.Equal(t, []int64{12345}, chats)
+	})
+
+	t.Run("display name without recipientID returns nil", func(t *testing.T) {
+		// No recipientID provided — fallback cannot execute.
+		chats := b.resolveRecipientChats(ctx, "user:Alice", "", "proj-1", "coder")
+		assert.Nil(t, chats)
+	})
+
+	t.Run("non-user recipient returns nil", func(t *testing.T) {
+		chats := b.resolveRecipientChats(ctx, "agent:coder", "", "proj-1", "coder")
+		assert.Nil(t, chats)
+	})
+
+	t.Run("email lookup preferred over recipientID", func(t *testing.T) {
+		// When email lookup succeeds, recipientID is not used.
+		chats := b.resolveRecipientChats(ctx, "user:alice@example.com", "scion-uuid-456", "proj-1", "coder")
+		assert.Equal(t, []int64{12345}, chats)
+	})
+}

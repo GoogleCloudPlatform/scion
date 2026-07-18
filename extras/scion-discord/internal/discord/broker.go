@@ -487,7 +487,7 @@ func (b *DiscordBroker) Publish(ctx context.Context, topic string, msg *messages
 		if ccSlug == "" && msg.Sender != "" && strings.HasPrefix(msg.Sender, "agent:") {
 			ccSlug = strings.TrimPrefix(msg.Sender, "agent:")
 		}
-		channelIDs = b.resolveRecipientChannels(ctx, msg.Recipient, projectID, ccSlug)
+		channelIDs = b.resolveRecipientChannels(ctx, msg.Recipient, msg.RecipientID, projectID, ccSlug)
 	}
 
 	// Priority 3: Broadcast to all ChannelLinks for the project.
@@ -1370,7 +1370,10 @@ func (b *DiscordBroker) isForumChannel(channelID string) bool {
 }
 
 // resolveRecipientChannels looks up target channels for a specific recipient.
-func (b *DiscordBroker) resolveRecipientChannels(ctx context.Context, recipient, projectID, agentSlug string) []string {
+// It first attempts email-based lookup via GetUserMappingByEmail; if that fails
+// (e.g. because the hub rewrote the recipient to a display name), it falls back
+// to looking up the scion user UUID via GetUserMappingByScionUserID.
+func (b *DiscordBroker) resolveRecipientChannels(ctx context.Context, recipient, recipientID, projectID, agentSlug string) []string {
 	email := strings.TrimPrefix(recipient, "user:")
 	if email == recipient {
 		return nil
@@ -1385,6 +1388,12 @@ func (b *DiscordBroker) resolveRecipientChannels(ctx context.Context, recipient,
 	}
 
 	mapping, err := store.GetUserMappingByEmail(ctx, email)
+
+	// Fallback: try scion user ID lookup (handles display-name recipients).
+	if (err != nil || mapping == nil) && recipientID != "" {
+		mapping, err = store.GetUserMappingByScionUserID(ctx, recipientID)
+	}
+
 	if err != nil || mapping == nil {
 		return nil
 	}
