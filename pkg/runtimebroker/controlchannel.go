@@ -318,7 +318,7 @@ func (c *ControlChannelClient) buildAuthHeaders() (http.Header, error) {
 		// Still apply transport auth even without HMAC (proxy-auth mode)
 		if c.config.TransportSource != nil {
 			if err := transportauth.ApplyHeaders(headers, c.config.TransportSource, c.config.TransportMode); err != nil {
-				slog.Warn("failed to apply transport auth headers", "error", err)
+				return nil, fmt.Errorf("failed to apply transport auth headers: %w", err)
 			}
 		}
 		return headers, nil
@@ -353,7 +353,7 @@ func (c *ControlChannelClient) buildAuthHeaders() (http.Header, error) {
 	// Transport-layer OIDC for IAP-protected hubs
 	if c.config.TransportSource != nil {
 		if err := transportauth.ApplyHeaders(headers, c.config.TransportSource, c.config.TransportMode); err != nil {
-			slog.Warn("failed to apply transport auth headers", "error", err)
+			return nil, fmt.Errorf("failed to apply transport auth headers: %w", err)
 		}
 	}
 

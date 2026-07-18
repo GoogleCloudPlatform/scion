@@ -526,7 +526,11 @@ func (s *Server) createHubConnection(name string, creds *brokercredentials.Broke
 	// Resolve transport auth once and share between REST client and control channel
 	var transportSrc transportauth.TokenSource
 	var transportMode transportauth.HeaderMode
-	if src, mode, err := transportauth.ResolveBrokerTransport(creds.TransportMode, creds.TransportAudience); err == nil && src != nil {
+	src, mode, err := transportauth.ResolveBrokerTransport(creds.TransportMode, creds.TransportAudience)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve transport auth: %w", err)
+	}
+	if src != nil {
 		transportSrc = src
 		transportMode = mode
 		opts = append(opts, hubclient.WithTransportAuth(src, mode))

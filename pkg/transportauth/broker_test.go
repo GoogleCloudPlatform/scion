@@ -16,6 +16,7 @@ package transportauth
 
 import (
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -115,6 +116,22 @@ func TestResolveBrokerTransport_AudienceOnlyCreatesSource(t *testing.T) {
 	}
 	if mode != HeaderAuthorization {
 		t.Errorf("expected HeaderAuthorization (default), got %v", mode)
+	}
+}
+
+func TestResolveBrokerTransport_ModeWithoutAudience(t *testing.T) {
+	os.Unsetenv(EnvTransportMode)
+	os.Unsetenv(EnvTransportAudience)
+
+	src, _, err := ResolveBrokerTransport("iap", "")
+	if err == nil {
+		t.Fatal("expected error when mode is set but audience is empty")
+	}
+	if src != nil {
+		t.Error("expected nil source on error")
+	}
+	if !strings.Contains(err.Error(), "audience is required") {
+		t.Errorf("expected error to contain 'audience is required', got: %v", err)
 	}
 }
 

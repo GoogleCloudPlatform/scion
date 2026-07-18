@@ -2006,7 +2006,11 @@ func getHubClientForConnection(name string) (hubclient.Client, error) {
 	}
 
 	// Transport auth for IAP-protected hubs
-	if src, mode, err := transportauth.ResolveBrokerTransport(creds.TransportMode, creds.TransportAudience); err == nil && src != nil {
+	src, mode, err := transportauth.ResolveBrokerTransport(creds.TransportMode, creds.TransportAudience)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve transport auth: %w", err)
+	}
+	if src != nil {
 		opts = append(opts, hubclient.WithTransportAuth(src, mode))
 	}
 

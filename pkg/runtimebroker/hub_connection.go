@@ -238,7 +238,12 @@ func (hc *HubConnection) Reinitialize(ctx context.Context, server *Server, creds
 
 	// Create new Hub client, resolving transport auth once for both REST and WebSocket
 	opts := buildHubClientOpts(creds, secretKey)
-	if src, mode, err := transportauth.ResolveBrokerTransport(creds.TransportMode, creds.TransportAudience); err == nil && src != nil {
+	src, mode, err := transportauth.ResolveBrokerTransport(creds.TransportMode, creds.TransportAudience)
+	if err != nil {
+		hc.setStatus(ConnectionStatusError)
+		return fmt.Errorf("failed to resolve transport auth: %w", err)
+	}
+	if src != nil {
 		hc.TransportSource = src
 		hc.TransportMode = mode
 		opts = append(opts, hubclient.WithTransportAuth(src, mode))

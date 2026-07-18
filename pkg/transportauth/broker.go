@@ -14,7 +14,10 @@
 
 package transportauth
 
-import "os"
+import (
+	"fmt"
+	"os"
+)
 
 // ResolveBrokerTransport resolves transport auth config for a broker connection
 // using a two-level precedence: env vars override credentials-file values.
@@ -36,6 +39,10 @@ func ResolveBrokerTransport(transportMode, transportAudience string) (TokenSourc
 
 	if mode == "" && audience == "" {
 		return nil, 0, nil
+	}
+
+	if audience == "" {
+		return nil, 0, fmt.Errorf("transport audience is required when transport auth is enabled")
 	}
 
 	src := NewMetadataSource(audience)
