@@ -897,10 +897,20 @@ func (b *TelegramBrokerV2) resolveRecipientChats(ctx context.Context, recipient,
 	}
 
 	mapping, err := b.store.GetUserMappingByEmail(ctx, email)
+	if err != nil {
+		b.log.Error("Failed to look up user mapping by email", "email", email, "error", err)
+	}
 
 	// Fallback: try scion user ID lookup (handles display-name recipients).
 	if (err != nil || mapping == nil) && recipientID != "" {
-		mapping, err = b.store.GetUserMappingByScionUserID(ctx, recipientID)
+		var fallbackErr error
+		mapping, fallbackErr = b.store.GetUserMappingByScionUserID(ctx, recipientID)
+		if fallbackErr != nil {
+			b.log.Error("Failed to look up user mapping by scion user ID", "recipientID", recipientID, "error", fallbackErr)
+			err = fallbackErr
+		} else {
+			err = nil
+		}
 	}
 
 	if err != nil || mapping == nil {
