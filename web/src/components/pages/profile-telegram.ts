@@ -24,6 +24,7 @@
 
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
+import QRCode from 'qrcode';
 import { apiFetch } from '../../client/api.js';
 
 @customElement('scion-page-profile-telegram')
@@ -40,16 +41,48 @@ export class ScionPageProfileTelegram extends LitElement {
   @state()
   private _autoLinked = false;
 
+  @state()
+  private _qrDataUrl = '';
+
   override connectedCallback(): void {
     super.connectedCallback();
     const params = new URLSearchParams(window.location.search);
     const code = params.get('code');
     if (code) {
-      this._code = code.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 6);
+      this._code = code
+        .toUpperCase()
+        .replace(/[^A-Z0-9]/g, '')
+        .slice(0, 6);
       if (this._code.length === 6) {
         this._autoLinked = true;
         this._autoSubmit();
       }
+    }
+    void this._generateQrCode();
+  }
+
+  private _buildRegistrationUrl(): string {
+    const base = `${window.location.origin}/profile/telegram`;
+    if (this._code.length === 6) {
+      return `${base}?code=${this._code}`;
+    }
+    return base;
+  }
+
+  private async _generateQrCode(): Promise<void> {
+    try {
+      const url = this._buildRegistrationUrl();
+      this._qrDataUrl = await QRCode.toDataURL(url, {
+        width: 200,
+        margin: 2,
+        errorCorrectionLevel: 'M',
+        color: {
+          dark: '#1e293b',
+          light: '#ffffff',
+        },
+      });
+    } catch {
+      this._qrDataUrl = '';
     }
   }
 
@@ -67,14 +100,17 @@ export class ScionPageProfileTelegram extends LitElement {
       if (resp.ok) {
         await resp.json();
         this._status = 'success';
-        this._message = 'Telegram account linked successfully! You can close this page and return to Telegram.';
+        this._message =
+          'Telegram account linked successfully! You can close this page and return to Telegram.';
         this._code = '';
       } else {
         const errData = (await resp.json().catch(() => null)) as {
           message?: string;
         } | null;
         this._status = 'error';
-        this._message = errData?.message || 'Code not found or expired. Please try again with a new code from the bot.';
+        this._message =
+          errData?.message ||
+          'Code not found or expired. Please try again with a new code from the bot.';
       }
     } catch {
       this._status = 'error';
@@ -200,12 +236,84 @@ export class ScionPageProfileTelegram extends LitElement {
       color: var(--scion-text-muted, #64748b);
       padding: 0.5rem 0;
     }
+
+    .qr-section {
+      display: flex;
+      align-items: flex-start;
+      gap: 1.5rem;
+      margin-bottom: 1.25rem;
+    }
+
+    .qr-code {
+      flex-shrink: 0;
+      border: 1px solid var(--scion-border, #e2e8f0);
+      border-radius: 0.5rem;
+      padding: 0.5rem;
+      background: #ffffff;
+    }
+
+    .qr-code img {
+      display: block;
+      width: 160px;
+      height: 160px;
+    }
+
+    .qr-info {
+      flex: 1;
+      min-width: 0;
+    }
+
+    .qr-info p {
+      font-size: 0.8125rem;
+      color: var(--scion-text-muted, #64748b);
+      margin: 0 0 0.75rem 0;
+      line-height: 1.5;
+    }
+
+    .registration-link {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      background: var(--scion-surface-alt, #f8fafc);
+      border: 1px solid var(--scion-border, #e2e8f0);
+      border-radius: 0.375rem;
+      padding: 0.5rem 0.75rem;
+      font-size: 0.75rem;
+      font-family: monospace;
+      word-break: break-all;
+      color: var(--scion-text, #1e293b);
+    }
+
+    .registration-link a {
+      color: var(--sl-color-primary-600, #2563eb);
+      text-decoration: none;
+      word-break: break-all;
+    }
+
+    .registration-link a:hover {
+      text-decoration: underline;
+    }
+
+    @media (max-width: 480px) {
+      .qr-section {
+        flex-direction: column;
+        align-items: center;
+      }
+
+      .qr-info {
+        text-align: center;
+      }
+    }
   `;
 
   private _handleInput(e: Event): void {
     const input = e.target as HTMLInputElement & { value: string };
-    this._code = input.value.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 6);
+    this._code = input.value
+      .toUpperCase()
+      .replace(/[^A-Z0-9]/g, '')
+      .slice(0, 6);
     input.value = this._code;
+    void this._generateQrCode();
   }
 
   private async _handleSubmit(e: Event): Promise<void> {
@@ -230,14 +338,17 @@ export class ScionPageProfileTelegram extends LitElement {
       if (resp.ok) {
         await resp.json();
         this._status = 'success';
-        this._message = 'Telegram account linked successfully! You can close this page and return to Telegram.';
+        this._message =
+          'Telegram account linked successfully! You can close this page and return to Telegram.';
         this._code = '';
       } else {
         const errData = (await resp.json().catch(() => null)) as {
           message?: string;
         } | null;
         this._status = 'error';
-        this._message = errData?.message || 'Code not found or expired. Please try again with a new code from the bot.';
+        this._message =
+          errData?.message ||
+          'Code not found or expired. Please try again with a new code from the bot.';
       }
     } catch {
       this._status = 'error';
@@ -253,6 +364,7 @@ export class ScionPageProfileTelegram extends LitElement {
           Link Telegram Account
         </h2>
 
+        ${this._status === 'submitting' ? nothing : this._renderQrCode()}
         ${this._status === 'submitting'
           ? html`
               <div class="auto-link-status">
@@ -281,6 +393,27 @@ export class ScionPageProfileTelegram extends LitElement {
     `;
   }
 
+  private _renderQrCode() {
+    if (!this._qrDataUrl) return nothing;
+
+    const url = this._buildRegistrationUrl();
+
+    return html`
+      <div class="qr-section">
+        <div class="qr-code">
+          <img src=${this._qrDataUrl} alt="QR code for Telegram registration" />
+        </div>
+        <div class="qr-info">
+          <p>Scan this QR code with your phone to open the registration link directly.</p>
+          <div class="registration-link">
+            <sl-icon name="link-45deg" style="flex-shrink:0;font-size:0.875rem;"></sl-icon>
+            <a href=${url}>${url}</a>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
   private _renderForm() {
     return html`
       <div class="settings-card">
@@ -289,11 +422,16 @@ export class ScionPageProfileTelegram extends LitElement {
           Link Telegram Account
         </h2>
 
+        ${this._renderQrCode()}
+
         <div class="instructions">
           <ol>
             <li>Open a direct message with the Scion Telegram bot</li>
             <li>Send <strong>/register</strong> to the bot</li>
-            <li>Enter the 6-character code below</li>
+            <li>
+              Enter the 6-character code below, or scan the QR code above on the device where you
+              received the link
+            </li>
           </ol>
         </div>
 
