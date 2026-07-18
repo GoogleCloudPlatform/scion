@@ -774,8 +774,8 @@ func (b *TelegramBrokerV2) Publish(ctx context.Context, topic string, msg *messa
 		}
 		if err != nil {
 			var apiErr *APIError
-			if errors.As(err, &apiErr) && apiErr.IsTransient() {
-				b.log.Warn("Transient Telegram API error, dropping message",
+			if errors.As(err, &apiErr) && apiErr.Code == http.StatusTooManyRequests {
+				b.log.Warn("Rate-limited by Telegram API, dropping message",
 					"chat_id", chatID, "topic", topic,
 					"code", apiErr.Code, "retry_after_sec", apiErr.RetryAfterSec,
 					"error", err)
@@ -941,8 +941,8 @@ func (b *TelegramBrokerV2) publishInputNeeded(ctx context.Context, api *Telegram
 		}
 		if err != nil {
 			var apiErr *APIError
-			if errors.As(err, &apiErr) && apiErr.IsTransient() {
-				b.log.Warn("Transient error sending input-needed",
+			if errors.As(err, &apiErr) && apiErr.Code == http.StatusTooManyRequests {
+				b.log.Warn("Rate-limited sending input-needed",
 					"chat_id", chatID, "error", err)
 				continue
 			}
@@ -1074,8 +1074,8 @@ func (b *TelegramBrokerV2) publishStateChangeDM(ctx context.Context, api *Telegr
 	}
 	if err != nil {
 		var apiErr *APIError
-		if errors.As(err, &apiErr) && apiErr.IsTransient() {
-			b.log.Warn("Transient error sending state-change DM",
+		if errors.As(err, &apiErr) && apiErr.Code == http.StatusTooManyRequests {
+			b.log.Warn("Rate-limited sending state-change DM",
 				"telegram_user_id", tgUserID, "error", err)
 			return nil
 		}
@@ -1155,8 +1155,8 @@ func (b *TelegramBrokerV2) publishInputNeededDM(ctx context.Context, api *Telegr
 	}
 	if err != nil {
 		var apiErr *APIError
-		if errors.As(err, &apiErr) && apiErr.IsTransient() {
-			b.log.Warn("Transient error sending input-needed DM",
+		if errors.As(err, &apiErr) && apiErr.Code == http.StatusTooManyRequests {
+			b.log.Warn("Rate-limited sending input-needed DM",
 				"telegram_user_id", tgUserID, "error", err)
 			return nil
 		}
@@ -1290,8 +1290,8 @@ func (b *TelegramBrokerV2) publishAttachment(ctx context.Context, api *TelegramA
 		_, err := api.SendDocument(ctx, chatID, filename, f, caption, "", opts...)
 		if err != nil {
 			var apiErr *APIError
-			if errors.As(err, &apiErr) && apiErr.IsTransient() {
-				b.log.Warn("Transient error sending attachment",
+			if errors.As(err, &apiErr) && apiErr.Code == http.StatusTooManyRequests {
+				b.log.Warn("Rate-limited sending attachment",
 					"chat_id", chatID, "error", err)
 				continue
 			}

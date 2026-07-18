@@ -17,6 +17,7 @@ package telegram
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -926,7 +927,7 @@ func TestPublish_Swallows429(t *testing.T) {
 	assert.NoError(t, err, "429 should be swallowed, not propagated")
 }
 
-func TestPublish_Swallows5xx(t *testing.T) {
+func TestPublish_Propagates5xx(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
@@ -959,7 +960,12 @@ func TestPublish_Swallows5xx(t *testing.T) {
 
 	msg := messages.NewInstruction("user:alice", "agent:coder", "server error")
 	err := b.Publish(context.Background(), "test.topic", msg)
-	assert.NoError(t, err, "5xx should be swallowed, not propagated")
+	require.Error(t, err, "5xx errors must be propagated to the caller")
+
+	var apiErr *APIError
+	require.True(t, errors.As(err, &apiErr), "error should be an APIError")
+	assert.Equal(t, 502, apiErr.Code)
+	assert.Contains(t, apiErr.Description, "Bad Gateway")
 }
 
 func TestPublish_PropagatesPermanentError(t *testing.T) {
