@@ -102,6 +102,47 @@ Persistence settings for the Hub.
 | `dev_token` | string | | Static token for dev mode. |
 | `authorized_domains` | list | `[]` | Limit access to specific email domains. |
 
+### Transport Auth (`server.auth.transport`)
+
+Transport auth configuration for the platform guard (IAP or Cloud Run invoker). See [Proxy Auth (Google IAP)](/scion/hosted/ha/auth-proxy-iap/) for the full deployment guide.
+
+| Field | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `mode` | string | `"none"` | Transport auth mode: `none`, `iap`, or `cloudrun_invoker`. |
+| `oidc_audience` | string | | OIDC audience for transport tokens. For `iap`: the IAP OAuth client ID. For `cloudrun_invoker`: the Hub URL (auto-derived from `hub.public_url` if empty). |
+| `platform_auth_sa` | string | | Dedicated service account the Hub impersonates to mint OIDC ID tokens for agents. |
+
+#### Agent transport environment variables
+
+When transport auth is configured, the Hub injects these environment variables into agent containers at dispatch time:
+
+| Variable | Description |
+| :--- | :--- |
+| `SCION_TRANSPORT_TOKEN` | Initial Google OIDC ID token for the transport layer. |
+| `SCION_TRANSPORT_AUDIENCE` | Audience the transport token was minted for. |
+| `SCION_TRANSPORT_TOKEN_EXPIRY` | Token expiry in RFC 3339 format. |
+| `SCION_TRANSPORT_MODE` | Transport mode (`iap` or `cloudrun_invoker`). Injected alongside the other three transport vars so that in-agent clients can select the correct header placement. |
+
+#### Broker transport configuration
+
+Brokers are long-lived originators that mint their own OIDC tokens (via GKE Workload Identity or ambient GCE SA). Transport settings are configured via environment variables or per-connection credentials-file fields.
+
+**Environment variables** (for containerized brokers):
+
+| Variable | Description |
+| :--- | :--- |
+| `SCION_TRANSPORT_MODE` | Transport mode: `iap` or `cloudrun_invoker`. |
+| `SCION_TRANSPORT_AUDIENCE` | OIDC audience — the custom OAuth 2.0 Client ID (for `iap`) or Hub URL (for `cloudrun_invoker`). |
+
+**Credentials-file fields** (per hub connection, persisted by `scion hub brokers register`):
+
+| Field | Type | Description |
+| :--- | :--- | :--- |
+| `transportMode` | string | Transport mode: `iap` or `cloudrun_invoker`. |
+| `transportAudience` | string | OIDC audience for the transport token. |
+
+Environment variables override credentials-file values. Per-connection credentials-file fields support the multi-hub scenario where each hub has a different IAP OAuth client ID.
+
 ### OAuth (`server.oauth`)
 
 OAuth provider credentials.
