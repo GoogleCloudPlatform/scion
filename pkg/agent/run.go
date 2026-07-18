@@ -636,6 +636,9 @@ authDone:
 	if _, ok := opts.Env["SCION_MODEL"]; !ok && finalScionCfg != nil && finalScionCfg.Model != "" {
 		opts.Env["SCION_MODEL"] = finalScionCfg.Model
 	}
+	if _, ok := opts.Env["SCION_THINKING_LEVEL"]; !ok && finalScionCfg != nil && finalScionCfg.ThinkingLevel != nil {
+		opts.Env["SCION_THINKING_LEVEL"] = strconv.Itoa(*finalScionCfg.ThinkingLevel)
+	}
 	if _, ok := opts.Env["SCION_CREATOR"]; !ok {
 		if u, err := user.Current(); err == nil {
 			opts.Env["SCION_CREATOR"] = u.Username
