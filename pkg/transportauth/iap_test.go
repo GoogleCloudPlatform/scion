@@ -37,7 +37,7 @@ func fakeIAPMiddleware(expectedToken string, next http.Handler) http.Handler {
 		if token != expected {
 			w.Header().Set("Content-Type", "text/html")
 			w.WriteHeader(http.StatusForbidden)
-			w.Write([]byte("<html><body>Sign in with Google</body></html>"))
+			_, _ = w.Write([]byte("<html><body>Sign in with Google</body></html>"))
 			return
 		}
 		next.ServeHTTP(w, r)
@@ -47,7 +47,7 @@ func fakeIAPMiddleware(expectedToken string, next http.Handler) http.Handler {
 func TestFakeIAP_RejectsWithoutToken(t *testing.T) {
 	backend := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"status":"ok"}`))
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
 	})
 
 	srv := httptest.NewServer(fakeIAPMiddleware("valid-token", backend))
@@ -57,7 +57,7 @@ func TestFakeIAP_RejectsWithoutToken(t *testing.T) {
 	if err != nil {
 		t.Fatalf("request failed: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusForbidden {
 		t.Errorf("expected 403, got %d", resp.StatusCode)
@@ -67,7 +67,7 @@ func TestFakeIAP_RejectsWithoutToken(t *testing.T) {
 func TestFakeIAP_AcceptsWithToken(t *testing.T) {
 	backend := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"status":"ok"}`))
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
 	})
 
 	srv := httptest.NewServer(fakeIAPMiddleware("valid-token", backend))
@@ -80,7 +80,7 @@ func TestFakeIAP_AcceptsWithToken(t *testing.T) {
 	if err != nil {
 		t.Fatalf("request failed: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("expected 200, got %d", resp.StatusCode)
@@ -92,7 +92,7 @@ func TestWrap_ThroughFakeIAP(t *testing.T) {
 
 	backend := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"status":"ok"}`))
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
 	})
 
 	srv := httptest.NewServer(fakeIAPMiddleware(testToken, backend))
@@ -111,7 +111,7 @@ func TestWrap_ThroughFakeIAP(t *testing.T) {
 	if err != nil {
 		t.Fatalf("request failed: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("expected 200, got %d", resp.StatusCode)
@@ -137,7 +137,7 @@ func TestWrap_FailsThroughFakeIAP_WrongToken(t *testing.T) {
 	if err != nil {
 		t.Fatalf("request failed: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusForbidden {
 		t.Errorf("expected 403, got %d", resp.StatusCode)
@@ -149,7 +149,7 @@ func TestApplyHeaders_ThroughFakeIAP(t *testing.T) {
 
 	backend := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("connected"))
+		_, _ = w.Write([]byte("connected"))
 	})
 
 	srv := httptest.NewServer(fakeIAPMiddleware(testToken, backend))
@@ -172,7 +172,7 @@ func TestApplyHeaders_ThroughFakeIAP(t *testing.T) {
 	if err != nil {
 		t.Fatalf("request failed: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("expected 200, got %d", resp.StatusCode)

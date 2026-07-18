@@ -194,13 +194,5 @@ func resolveAttachTransport() (transportauth.TokenSource, transportauth.HeaderMo
 		}
 	}
 
-	adcNew := func(audience string) (transportauth.TokenSource, error) {
-		src, err := adcsource.New(audience)
-		if err != nil {
-			return nil, err
-		}
-		return src, nil
-	}
-
-	return transportauth.FromSettings(ts, adcNew)
+	return transportauth.FromSettings(ts, adcsource.New)
 }

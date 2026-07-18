@@ -42,7 +42,7 @@ func doctorIAPMiddleware(expectedToken string, next http.Handler) http.Handler {
 		if auth != "Bearer "+expectedToken {
 			w.Header().Set("Content-Type", "text/html")
 			w.WriteHeader(http.StatusFound)
-			fmt.Fprint(w, "<html><body>Sign in with Google</body></html>")
+			_, _ = fmt.Fprint(w, "<html><body>Sign in with Google</body></html>")
 			return
 		}
 		next.ServeHTTP(w, r)
@@ -141,11 +141,11 @@ func TestCheckAuthentication_WithTransportAuth(t *testing.T) {
 			return
 		}
 		w.WriteHeader(http.StatusOK)
-		fmt.Fprint(w, `{"status":"ok"}`)
+		_, _ = fmt.Fprint(w, `{"status":"ok"}`)
 	})
 	handler.HandleFunc("/api/v1/agents/test-agent/token/refresh", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		fmt.Fprint(w, `{"token":"new-token"}`)
+		_, _ = fmt.Fprint(w, `{"token":"new-token"}`)
 	})
 
 	server := httptest.NewServer(doctorIAPMiddleware(transportToken, handler))

@@ -16,7 +16,6 @@ package transportauth
 
 import (
 	"fmt"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -57,8 +56,8 @@ func mockADCNewFailing(audience string) (TokenSource, error) {
 }
 
 func TestResolveBrokerTransport_NoConfig(t *testing.T) {
-	os.Unsetenv(EnvTransportMode)
-	os.Unsetenv(EnvTransportAudience)
+	t.Setenv(EnvTransportMode, "")
+	t.Setenv(EnvTransportAudience, "")
 
 	src, mode, err := ResolveBrokerTransport("", "", nil)
 	if err != nil {
@@ -76,9 +75,9 @@ func TestResolveBrokerTransport_FromCredentials(t *testing.T) {
 	cleanup := overrideGCPDetection(true)
 	defer cleanup()
 
-	os.Unsetenv(EnvTransportMode)
-	os.Unsetenv(EnvTransportAudience)
-	os.Unsetenv(EnvMetadataMode)
+	t.Setenv(EnvTransportMode, "")
+	t.Setenv(EnvTransportAudience, "")
+	t.Setenv(EnvMetadataMode, "")
 
 	src, mode, err := ResolveBrokerTransport("iap", "test-audience.apps.googleusercontent.com", nil)
 	if err != nil {
@@ -106,7 +105,7 @@ func TestResolveBrokerTransport_EnvOverridesCreds(t *testing.T) {
 
 	t.Setenv(EnvTransportMode, "cloudrun_invoker")
 	t.Setenv(EnvTransportAudience, "env-audience")
-	os.Unsetenv(EnvMetadataMode)
+	t.Setenv(EnvMetadataMode, "")
 
 	src, mode, err := ResolveBrokerTransport("iap", "creds-audience", nil)
 	if err != nil {
@@ -130,8 +129,8 @@ func TestResolveBrokerTransport_PartialEnvOverride(t *testing.T) {
 	defer cleanup()
 
 	t.Setenv(EnvTransportMode, "iap")
-	os.Unsetenv(EnvTransportAudience)
-	os.Unsetenv(EnvMetadataMode)
+	t.Setenv(EnvTransportAudience, "")
+	t.Setenv(EnvMetadataMode, "")
 
 	src, mode, err := ResolveBrokerTransport("cloudrun_invoker", "creds-audience", nil)
 	if err != nil {
@@ -155,9 +154,9 @@ func TestResolveBrokerTransport_AudienceOnlyCreatesSource(t *testing.T) {
 	cleanup := overrideGCPDetection(true)
 	defer cleanup()
 
-	os.Unsetenv(EnvTransportMode)
-	os.Unsetenv(EnvTransportAudience)
-	os.Unsetenv(EnvMetadataMode)
+	t.Setenv(EnvTransportMode, "")
+	t.Setenv(EnvTransportAudience, "")
+	t.Setenv(EnvMetadataMode, "")
 
 	src, mode, err := ResolveBrokerTransport("", "audience-only", nil)
 	if err != nil {
@@ -172,8 +171,8 @@ func TestResolveBrokerTransport_AudienceOnlyCreatesSource(t *testing.T) {
 }
 
 func TestResolveBrokerTransport_ModeWithoutAudience(t *testing.T) {
-	os.Unsetenv(EnvTransportMode)
-	os.Unsetenv(EnvTransportAudience)
+	t.Setenv(EnvTransportMode, "")
+	t.Setenv(EnvTransportAudience, "")
 
 	src, _, err := ResolveBrokerTransport("iap", "", nil)
 	if err == nil {
@@ -191,9 +190,9 @@ func TestResolveBrokerTransport_MetadataPrecedence(t *testing.T) {
 	cleanup := overrideGCPDetection(true)
 	defer cleanup()
 
-	os.Unsetenv(EnvMetadataMode)
+	t.Setenv(EnvMetadataMode, "")
 	t.Setenv(EnvTransportAudience, "https://audience.example.com")
-	os.Unsetenv(EnvTransportMode)
+	t.Setenv(EnvTransportMode, "")
 
 	src, _, err := ResolveBrokerTransport("", "", mockADCNew)
 	require.NoError(t, err)
@@ -207,7 +206,7 @@ func TestResolveBrokerTransport_ADCFallback(t *testing.T) {
 	defer cleanup()
 
 	t.Setenv(EnvTransportAudience, "https://audience.example.com")
-	os.Unsetenv(EnvTransportMode)
+	t.Setenv(EnvTransportMode, "")
 
 	src, _, err := ResolveBrokerTransport("", "", mockADCNew)
 	require.NoError(t, err)
@@ -222,7 +221,7 @@ func TestResolveBrokerTransport_ADCFallbackWhenMetadataBlocked(t *testing.T) {
 
 	t.Setenv(EnvMetadataMode, "assign")
 	t.Setenv(EnvTransportAudience, "https://audience.example.com")
-	os.Unsetenv(EnvTransportMode)
+	t.Setenv(EnvTransportMode, "")
 
 	src, _, err := ResolveBrokerTransport("", "", mockADCNew)
 	require.NoError(t, err)
@@ -236,7 +235,7 @@ func TestResolveBrokerTransport_NilADCConstructor(t *testing.T) {
 	defer cleanup()
 
 	t.Setenv(EnvTransportAudience, "https://audience.example.com")
-	os.Unsetenv(EnvTransportMode)
+	t.Setenv(EnvTransportMode, "")
 
 	src, _, err := ResolveBrokerTransport("", "", nil)
 	require.NoError(t, err)
@@ -248,7 +247,7 @@ func TestResolveBrokerTransport_ADCError(t *testing.T) {
 	defer cleanup()
 
 	t.Setenv(EnvTransportAudience, "https://audience.example.com")
-	os.Unsetenv(EnvTransportMode)
+	t.Setenv(EnvTransportMode, "")
 
 	_, _, err := ResolveBrokerTransport("", "", mockADCNewFailing)
 	assert.Error(t, err)

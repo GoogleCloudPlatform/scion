@@ -40,9 +40,9 @@ func TestFromEnv_ProxyAuthState_WithTransportToken(t *testing.T) {
 }
 
 func TestFromEnv_NoTransportAuth(t *testing.T) {
-	os.Unsetenv(EnvTransportToken)
-	os.Unsetenv(EnvTransportAudience)
-	os.Unsetenv(EnvHubOIDCAudience)
+	t.Setenv(EnvTransportToken, "")
+	t.Setenv(EnvTransportAudience, "")
+	t.Setenv(EnvHubOIDCAudience, "")
 
 	origOnGCE := IsOnGCEFunc
 	defer func() { IsOnGCEFunc = origOnGCE }()
@@ -58,8 +58,8 @@ func TestFromEnv_NoTransportAuth(t *testing.T) {
 }
 
 func TestFromEnv_MetadataOnGCE(t *testing.T) {
-	os.Unsetenv(EnvTransportToken)
-	os.Unsetenv(EnvMetadataMode)
+	t.Setenv(EnvTransportToken, "")
+	t.Setenv(EnvMetadataMode, "")
 	t.Setenv(EnvTransportAudience, "test-audience-for-gce")
 
 	origOnGCE := IsOnGCEFunc
@@ -83,8 +83,8 @@ func TestFromEnv_MetadataOnGCE(t *testing.T) {
 }
 
 func TestRegistrationPersistence_TransportFields(t *testing.T) {
-	os.Unsetenv(EnvTransportMode)
-	os.Unsetenv(EnvTransportAudience)
+	t.Setenv(EnvTransportMode, "")
+	t.Setenv(EnvTransportAudience, "")
 
 	// Simulate what runBrokerRegister does: resolve from flags then env
 	flagMode := "iap"
