@@ -76,7 +76,7 @@ var (
 	inlineConfigPath      string
 	labelFlags            []string
 	modelFlag             string
-	thinkingLevelFlag     int
+	thinkingLevelFlag     int = -1
 )
 
 func parseLabels(raw []string) (map[string]string, error) {
