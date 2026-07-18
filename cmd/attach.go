@@ -26,6 +26,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
+	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
+	"github.com/GoogleCloudPlatform/scion/pkg/transportauth/adcsource"
 	"github.com/GoogleCloudPlatform/scion/pkg/wsclient"
 	"github.com/spf13/cobra"
 )
@@ -167,5 +169,38 @@ func attachViaHub(hubCtx *HubContext, agentName string) error {
 		agentID = agentName // Fall back to name if ID not set
 	}
 
-	return wsclient.AttachToAgent(context.Background(), hubCtx.Endpoint, token, agentID)
+	// Resolve transport auth for IAP/Cloud Run traversal.
+	var attachOpts []wsclient.AttachOption
+	if transportSrc, transportMode, err := resolveAttachTransport(); err == nil && transportSrc != nil {
+		attachOpts = append(attachOpts, wsclient.WithTransport(transportSrc, transportMode))
+	}
+
+	return wsclient.AttachToAgent(context.Background(), hubCtx.Endpoint, token, agentID, attachOpts...)
+}
+
+// resolveAttachTransport resolves transport auth for the attach WebSocket path.
+// It checks env vars first, then settings.yaml. Returns (nil, _, nil) when
+// transport auth is not configured.
+func resolveAttachTransport() (transportauth.TokenSource, transportauth.HeaderMode, error) {
+	// Load settings for transport config.
+	resolvedPath, _, _ := config.ResolveProjectPath(projectPath)
+	settings, _ := config.LoadSettings(resolvedPath)
+
+	var ts *transportauth.TransportSettings
+	if settings != nil && settings.Hub != nil && settings.Hub.Transport != nil {
+		ts = &transportauth.TransportSettings{
+			Mode:     settings.Hub.Transport.Mode,
+			Audience: settings.Hub.Transport.Audience,
+		}
+	}
+
+	adcNew := func(audience string) (transportauth.TokenSource, error) {
+		src, err := adcsource.New(audience)
+		if err != nil {
+			return nil, err
+		}
+		return src, nil
+	}
+
+	return transportauth.FromSettings(ts, adcNew)
 }

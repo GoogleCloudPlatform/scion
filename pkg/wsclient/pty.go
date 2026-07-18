@@ -30,6 +30,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 	"github.com/GoogleCloudPlatform/scion/pkg/wsprotocol"
 	"github.com/gorilla/websocket"
 	"golang.org/x/term"
@@ -55,6 +56,10 @@ type PTYClientConfig struct {
 	Cols int
 	// Rows is the initial terminal height.
 	Rows int
+	// TransportSource provides OIDC transport tokens for IAP traversal.
+	TransportSource transportauth.TokenSource
+	// TransportMode controls header placement for the transport token.
+	TransportMode transportauth.HeaderMode
 }
 
 // PTYClient manages a WebSocket PTY connection.
@@ -91,6 +96,13 @@ func (c *PTYClient) Connect(ctx context.Context) error {
 	headers := http.Header{}
 	if c.config.Token != "" {
 		headers.Set("Authorization", "Bearer "+c.config.Token)
+	}
+
+	// Apply transport auth headers for IAP/Cloud Run traversal.
+	if c.config.TransportSource != nil {
+		if err := transportauth.ApplyHeaders(headers, c.config.TransportSource, c.config.TransportMode); err != nil {
+			slog.Debug("Transport auth header failed, proceeding without", "error", err)
+		}
 	}
 
 	// Connect with timeout
@@ -450,7 +462,7 @@ func (c *PTYClient) Close() error {
 }
 
 // AttachToAgent is a convenience function that connects and runs a PTY session.
-func AttachToAgent(ctx context.Context, endpoint, token, slug string) error {
+func AttachToAgent(ctx context.Context, endpoint, token, slug string, opts ...AttachOption) error {
 	// Get terminal size
 	cols, rows := 80, 24
 	if fd := int(os.Stdin.Fd()); term.IsTerminal(fd) {
@@ -460,13 +472,19 @@ func AttachToAgent(ctx context.Context, endpoint, token, slug string) error {
 		}
 	}
 
-	client := NewPTYClient(PTYClientConfig{
+	cfg := PTYClientConfig{
 		Endpoint: endpoint,
 		Token:    token,
 		Slug:     slug,
 		Cols:     cols,
 		Rows:     rows,
-	})
+	}
+
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+
+	client := NewPTYClient(cfg)
 
 	if err := client.Connect(ctx); err != nil {
 		return err
@@ -474,6 +492,17 @@ func AttachToAgent(ctx context.Context, endpoint, token, slug string) error {
 	defer func() { _ = client.Close() }()
 
 	return client.Run()
+}
+
+// AttachOption configures optional parameters for AttachToAgent.
+type AttachOption func(*PTYClientConfig)
+
+// WithTransport sets the transport auth source and header mode for IAP traversal.
+func WithTransport(src transportauth.TokenSource, mode transportauth.HeaderMode) AttachOption {
+	return func(c *PTYClientConfig) {
+		c.TransportSource = src
+		c.TransportMode = mode
+	}
 }
 
 // BuildDirectAttachURL builds a URL for direct attachment to a runtime broker.
