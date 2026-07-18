@@ -63,6 +63,35 @@ To verify which projects your broker is currently serving:
 scion broker status
 ```
 
+## Transport Auth for IAP-Protected Hubs
+
+When the Hub is behind [Google IAP](/scion/hosted/ha/auth-proxy-iap/), the broker must carry a transport-layer OIDC token on every request. Transport auth is configured either during registration or via environment variables.
+
+### Configuration at registration time
+
+The `scion hub brokers register` command accepts transport flags that are persisted to the credentials file:
+
+```bash
+scion hub brokers register \
+  --name my-broker \
+  --transport-mode iap \
+  --transport-audience "1234567890-abc.apps.googleusercontent.com" \
+  https://hub.example.com
+```
+
+| Flag | Description |
+|---|---|
+| `--transport-mode` | Transport mode: `iap` or `cloudrun_invoker` |
+| `--transport-audience` | OIDC audience — the custom OAuth 2.0 Client ID (for `iap`) or Hub URL (for `cloudrun_invoker`) |
+
+These values are written to the credentials file as `transportMode` and `transportAudience`, so the broker daemon automatically uses them on startup.
+
+### Environment variable overrides
+
+For containerized brokers, set `SCION_TRANSPORT_MODE` and `SCION_TRANSPORT_AUDIENCE` as environment variables in the Deployment manifest. Environment variables override credentials-file values.
+
+See [Brokers behind IAP](/scion/hosted/ha/auth-proxy-iap/#brokers-behind-iap) for the full deployment guide, including Workload Identity setup and the registration Job manifest.
+
 ## Security & Isolation
 
 When you register your machine as a broker:

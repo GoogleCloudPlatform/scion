@@ -51,6 +51,18 @@ When starting an agent, the Hub selects an available broker automatically. You c
   scion broker status
   ```
 
+## IAP-Protected Hubs
+
+When the Hub is behind [Google IAP](/scion/hosted/ha/auth-proxy-iap/), **all** brokers connecting to it need transport auth configured. Each broker must carry an OIDC token to traverse the platform guard.
+
+In a multi-hub setup using the broker's multistore, each hub connection can have its own transport settings:
+
+- **`transportMode`** and **`transportAudience`** are per-connection fields in the credentials file. Different hubs may use different IAP OAuth client IDs.
+- A single broker can serve both IAP-protected and plain (non-IAP) hubs simultaneously — connections without transport fields behave as before.
+- Environment variables (`SCION_TRANSPORT_MODE`, `SCION_TRANSPORT_AUDIENCE`) apply globally and override all credential-file values. Use per-connection fields when serving hubs with different audiences.
+
+See [Brokers behind IAP](/scion/hosted/ha/auth-proxy-iap/#brokers-behind-iap) for the full deployment guide.
+
 ## Considerations
 
 - Each broker manages its own **port pools, container images, and local storage**. Images must be available on each broker independently.

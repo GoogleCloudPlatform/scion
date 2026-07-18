@@ -89,6 +89,10 @@ When running in Google Kubernetes Engine (GKE), Scion natively supports Workload
 
 This provides the agent container with an ambient identity, which the underlying harness (e.g., Gemini or Claude via Vertex) can automatically resolve using Application Default Credentials (ADC).
 
+:::note[Broker Workload Identity]
+Runtime Brokers use the same Workload Identity mechanism for OIDC transport tokens when connecting to an IAP-protected Hub. The broker's GSA needs `roles/iap.httpsResourceAccessor` on the Hub backend service (or `roles/run.invoker` for Cloud Run invoker mode) — this is separate from the agent dispatch transport SA. See [Brokers behind IAP](/scion/hosted/ha/auth-proxy-iap/#brokers-behind-iap) for the full setup.
+:::
+
 ## Architecture & Security
 
 ### Native Client & In-Cluster Authentication
