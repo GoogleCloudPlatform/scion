@@ -1,7 +1,10 @@
 package slack
 
 import (
+	"context"
+	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -9,6 +12,15 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/plugin"
 )
+
+func newTestStore(t *testing.T) Store {
+	t.Helper()
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	store, err := NewSQLiteStore(dbPath)
+	require.NoError(t, err)
+	t.Cleanup(func() { store.Close() })
+	return store
+}
 
 func TestNewBroker(t *testing.T) {
 	b := NewBroker(nil)
@@ -209,4 +221,103 @@ func TestHubErrorUserFacingMessage(t *testing.T) {
 			assert.Contains(t, he.userFacingMessage(), tt.expected)
 		})
 	}
+}
+
+func TestResolveOutboundMentions(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	// Seed a registered user with a Slack user ID.
+	require.NoError(t, store.CreateUserMapping(ctx, &SlackUserMapping{
+		SlackUserID:  "U12345ABC",
+		SlackUsername: "ptone805",
+		ScionEmail:   "ptone@google.com",
+		LinkedAt:     time.Now().UTC(),
+	}))
+	// Seed a user without a Slack user ID (empty — should not replace).
+	require.NoError(t, store.CreateUserMapping(ctx, &SlackUserMapping{
+		SlackUserID:  "",
+		SlackUsername: "nousername",
+		ScionEmail:   "nousername@example.com",
+		LinkedAt:     time.Now().UTC(),
+	}))
+
+	tests := []struct {
+		name string
+		text string
+		want string
+	}{
+		{
+			name: "user:email replaced",
+			text: "Hey user:ptone@google.com check this",
+			want: "Hey <@U12345ABC> check this",
+		},
+		{
+			name: "standalone email replaced",
+			text: "Hey ptone@google.com check this",
+			want: "Hey <@U12345ABC> check this",
+		},
+		{
+			name: "no slack user ID leaves as-is",
+			text: "Contact nousername@example.com please",
+			want: "Contact nousername@example.com please",
+		},
+		{
+			name: "unknown email leaves as-is",
+			text: "Contact unknown@example.com please",
+			want: "Contact unknown@example.com please",
+		},
+		{
+			name: "email in URL skipped",
+			text: "See https://ptone@google.com/path",
+			want: "See https://ptone@google.com/path",
+		},
+		{
+			name: "mailto skipped",
+			text: "Send to mailto:ptone@google.com",
+			want: "Send to mailto:ptone@google.com",
+		},
+		{
+			name: "multiple emails",
+			text: "user:ptone@google.com and nousername@example.com",
+			want: "<@U12345ABC> and nousername@example.com",
+		},
+		{
+			name: "email at start of text",
+			text: "ptone@google.com said hello",
+			want: "<@U12345ABC> said hello",
+		},
+		{
+			name: "email at end of text",
+			text: "message from ptone@google.com",
+			want: "message from <@U12345ABC>",
+		},
+		{
+			name: "empty text",
+			text: "",
+			want: "",
+		},
+		{
+			name: "no emails",
+			text: "just a regular message",
+			want: "just a regular message",
+		},
+		{
+			name: "email followed by slash skipped",
+			text: "http://ptone@google.com/foo",
+			want: "http://ptone@google.com/foo",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := resolveOutboundMentions(ctx, store, tt.text)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+
+	t.Run("nil store returns text unchanged", func(t *testing.T) {
+		got := resolveOutboundMentions(ctx, nil, "ptone@google.com")
+		assert.Equal(t, "ptone@google.com", got)
+	})
 }
