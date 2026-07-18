@@ -40,6 +40,7 @@ import (
 	scionrt "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/templatecache"
+	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 )
@@ -563,6 +564,12 @@ func (s *Server) createHubConnectionFromConfig() (*HubConnection, error) {
 	} else {
 		opts = append(opts, hubclient.WithAutoDevAuth())
 		slog.Info("Hub client using auto dev authentication")
+	}
+
+	// Transport auth from env vars (no credentials file for config-based connections)
+	if src, err := transportauth.FromEnv(); src != nil && err == nil {
+		mode := transportauth.ModeFromEnv()
+		opts = append(opts, hubclient.WithTransportAuth(src, mode))
 	}
 
 	client, err := hubclient.New(s.config.HubEndpoint, opts...)

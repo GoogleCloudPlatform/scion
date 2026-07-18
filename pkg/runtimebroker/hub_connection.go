@@ -26,6 +26,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/templatecache"
+	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 )
 
@@ -271,6 +272,12 @@ func buildHubClientOpts(creds *brokercredentials.BrokerCredentials, secretKey []
 			opts = append(opts, hubclient.WithAutoDevAuth())
 			slog.Info("Hub client using auto dev authentication (no secret key)", "name", creds.Name)
 		}
+	}
+
+	// Transport auth for IAP-protected hubs
+	if src, mode, err := transportauth.ResolveBrokerTransport(creds.TransportMode, creds.TransportAudience); err == nil && src != nil {
+		opts = append(opts, hubclient.WithTransportAuth(src, mode))
+		slog.Info("Hub client using transport auth", "name", creds.Name, "mode", creds.TransportMode)
 	}
 
 	return opts

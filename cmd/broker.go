@@ -30,6 +30,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/daemon"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubsync"
+	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/GoogleCloudPlatform/scion/pkg/version"
 	"github.com/google/uuid"
@@ -1984,6 +1985,11 @@ func getHubClientForConnection(name string) (hubclient.Client, error) {
 		} else {
 			opts = append(opts, hubclient.WithAutoDevAuth())
 		}
+	}
+
+	// Transport auth for IAP-protected hubs
+	if src, mode, err := transportauth.ResolveBrokerTransport(creds.TransportMode, creds.TransportAudience); err == nil && src != nil {
+		opts = append(opts, hubclient.WithTransportAuth(src, mode))
 	}
 
 	client, err := hubclient.New(creds.HubEndpoint, opts...)
