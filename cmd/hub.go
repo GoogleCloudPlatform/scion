@@ -34,6 +34,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/credentials"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubsync"
+	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/GoogleCloudPlatform/scion/pkg/version"
 	"github.com/spf13/cobra"
@@ -505,6 +506,16 @@ func getAuthInfo(settings *config.Settings, endpoint string) authInfo {
 		info.MethodType = "devauth"
 		info.Source = source
 		info.IsDevAuth = true
+		return info
+	}
+
+	// Check for proxy-auth mode: transport auth is active but no PAT/token.
+	// This is acceptable when the hub is behind IAP in proxy-auth mode —
+	// the broker's identity comes from the IAP assertion, not from a PAT.
+	if src, err := transportauth.FromEnv(); src != nil && err == nil {
+		info.Method = "Proxy-auth (transport)"
+		info.MethodType = "proxy-auth"
+		info.Source = "transport auth"
 		return info
 	}
 
