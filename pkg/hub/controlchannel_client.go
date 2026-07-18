@@ -30,6 +30,14 @@ import (
 	"github.com/google/uuid"
 )
 
+// maxControlChannelBodySize is the maximum body size (in bytes) that can be
+// sent through the WebSocket control channel without exceeding the broker's
+// read limit. The RequestEnvelope.Body field is base64-encoded in JSON, adding
+// ~33% overhead, so the safe body threshold for a 1MB wire limit is ~768KB.
+// Requests exceeding this limit are rejected before encoding with a clear error
+// so callers (e.g. HybridBrokerClient) can fall back to direct HTTP (issue #165).
+const maxControlChannelBodySize = 768 * 1024 // 768KB → ~1MB on wire after base64
+
 // ControlChannelBrokerClient implements RuntimeBrokerClient by tunneling requests
 // through the control channel WebSocket connection.
 type ControlChannelBrokerClient struct {
@@ -418,12 +426,31 @@ func (c *ControlChannelBrokerClient) DeleteImage(ctx context.Context, brokerID, 
 	return err
 }
 
+// checkBodySize returns an error if the body is too large to tunnel safely
+// through the control channel WebSocket without exceeding the broker's read
+// limit. The Body field is base64-encoded in the RequestEnvelope JSON, so the
+// actual wire size is roughly len(body)*4/3 plus envelope metadata.
+func checkBodySize(method, path string, body []byte) error {
+	if len(body) > maxControlChannelBodySize {
+		return fmt.Errorf(
+			"control channel payload too large: %s %s body is %d bytes (limit %d); "+
+				"use direct HTTP to reach this broker instead (issue #165)",
+			method, path, len(body), maxControlChannelBodySize,
+		)
+	}
+	return nil
+}
+
 // doRequestRaw tunnels an HTTP request through the control channel without
 // treating non-2xx status codes as errors. Callers are responsible for
 // inspecting resp.StatusCode themselves.
 func (c *ControlChannelBrokerClient) doRequestRaw(ctx context.Context, brokerID, method, path, query string, body []byte) (*wsprotocol.ResponseEnvelope, error) {
 	if !c.manager.IsConnected(brokerID) {
 		return nil, fmt.Errorf("broker %s not connected via control channel", brokerID)
+	}
+
+	if err := checkBodySize(method, path, body); err != nil {
+		return nil, err
 	}
 
 	headers, err := c.buildRequestHeaders(ctx, brokerID, method, path, query, body)
@@ -444,6 +471,10 @@ func (c *ControlChannelBrokerClient) doRequestRaw(ctx context.Context, brokerID,
 func (c *ControlChannelBrokerClient) doRequest(ctx context.Context, brokerID, method, path, query string, body []byte) (*wsprotocol.ResponseEnvelope, error) {
 	if !c.manager.IsConnected(brokerID) {
 		return nil, fmt.Errorf("broker %s not connected via control channel", brokerID)
+	}
+
+	if err := checkBodySize(method, path, body); err != nil {
+		return nil, err
 	}
 
 	headers, err := c.buildRequestHeaders(ctx, brokerID, method, path, query, body)

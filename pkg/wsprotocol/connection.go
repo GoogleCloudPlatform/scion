@@ -32,7 +32,7 @@ const (
 	DefaultPingInterval    = 30 * time.Second
 	DefaultPongWait        = 60 * time.Second
 	DefaultWriteWait       = 10 * time.Second
-	DefaultMaxMessageSize  = 64 * 1024 // 64KB
+	DefaultMaxMessageSize  = 1024 * 1024 // 1MB — raised from 64KB to accommodate large agent creation payloads (see issue #165)
 )
 
 // ConnectionConfig holds configuration for a WebSocket connection.

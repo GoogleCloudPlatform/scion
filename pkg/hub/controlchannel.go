@@ -52,7 +52,7 @@ func DefaultControlChannelConfig() ControlChannelConfig {
 		PingInterval:   30 * time.Second,
 		PongWait:       60 * time.Second,
 		WriteWait:      10 * time.Second,
-		MaxMessageSize: 64 * 1024, // 64KB
+		MaxMessageSize: 1024 * 1024, // 1MB — must be large enough to carry RemoteCreateAgentRequest payloads (see issue #165)
 		RequestTimeout: 120 * time.Second,
 		Debug:          false,
 	}

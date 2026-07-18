@@ -246,7 +246,14 @@ func (c *ControlChannelClient) doConnect() error {
 	// for closing resp.Body in that case — otherwise the transport holds the
 	// connection open and leaks the file descriptor. Drain-and-close before
 	// returning the error.
-	conn, resp, err := wsprotocol.Dial(c.ctx, wsURL, headers)
+	//
+	// Use DialWithConfig so the broker's read limit matches the hub's write
+	// limit. The default 64KB was too small for RemoteCreateAgentRequest
+	// payloads that include InlineConfig, resolved env/secrets, and a JWT
+	// (see issue #165). 1MB aligns with the hub-side MaxMessageSize.
+	connCfg := wsprotocol.DefaultConnectionConfig()
+	connCfg.MaxMessageSize = 1024 * 1024 // 1MB
+	conn, resp, err := wsprotocol.DialWithConfig(c.ctx, wsURL, headers, connCfg)
 	if err != nil {
 		if resp != nil {
 			_, _ = io.Copy(io.Discard, resp.Body)

@@ -874,7 +874,7 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 		PingInterval:   30 * time.Second,
 		PongWait:       60 * time.Second,
 		WriteWait:      10 * time.Second,
-		MaxMessageSize: 64 * 1024,
+		MaxMessageSize: 1024 * 1024, // 1MB — see issue #165
 		RequestTimeout: 120 * time.Second,
 		Debug:          cfg.Debug,
 	}, logging.Subsystem("hub.control-channel"))
