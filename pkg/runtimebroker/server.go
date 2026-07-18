@@ -550,6 +550,12 @@ func (s *Server) createHubConnection(name string, creds *brokercredentials.Broke
 		Status:      ConnectionStatusDisconnected,
 	}
 
+	// Resolve transport auth for the control channel WebSocket
+	if src, mode, err := transportauth.ResolveBrokerTransport(creds.TransportMode, creds.TransportAudience); err == nil && src != nil {
+		conn.TransportSource = src
+		conn.TransportMode = mode
+	}
+
 	return conn, nil
 }
 
@@ -594,6 +600,12 @@ func (s *Server) createHubConnectionFromConfig() (*HubConnection, error) {
 		Hydrator:    hydrator,
 		HCResolver:  hcResolver,
 		Status:      ConnectionStatusDisconnected,
+	}
+
+	// Resolve transport auth for control channel WebSocket
+	if src, err := transportauth.FromEnv(); src != nil && err == nil {
+		conn.TransportSource = src
+		conn.TransportMode = transportauth.ModeFromEnv()
 	}
 
 	return conn, nil

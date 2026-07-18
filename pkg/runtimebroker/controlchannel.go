@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 	"github.com/GoogleCloudPlatform/scion/pkg/wsprotocol"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -58,6 +59,11 @@ type ControlChannelConfig struct {
 
 	// Debug enables verbose logging.
 	Debug bool
+
+	// TransportSource provides OIDC tokens for transport-layer auth (IAP).
+	TransportSource transportauth.TokenSource
+	// TransportMode controls which HTTP header carries the transport token.
+	TransportMode transportauth.HeaderMode
 
 	// OnConnectionStateChange is called when the control channel connects
 	// or disconnects. connected=true after a successful handshake,
@@ -308,8 +314,13 @@ func (c *ControlChannelClient) buildAuthHeaders() (http.Header, error) {
 	headers := http.Header{}
 
 	if len(c.config.SecretKey) == 0 {
-		// No auth configured
 		headers.Set("X-Scion-Broker-ID", c.config.BrokerID)
+		// Still apply transport auth even without HMAC (proxy-auth mode)
+		if c.config.TransportSource != nil {
+			if err := transportauth.ApplyHeaders(headers, c.config.TransportSource, c.config.TransportMode); err != nil {
+				slog.Warn("failed to apply transport auth headers", "error", err)
+			}
+		}
 		return headers, nil
 	}
 
@@ -337,6 +348,13 @@ func (c *ControlChannelClient) buildAuthHeaders() (http.Header, error) {
 	// Copy the signed headers
 	for key := range req.Header {
 		headers.Set(key, req.Header.Get(key))
+	}
+
+	// Transport-layer OIDC for IAP-protected hubs
+	if c.config.TransportSource != nil {
+		if err := transportauth.ApplyHeaders(headers, c.config.TransportSource, c.config.TransportMode); err != nil {
+			slog.Warn("failed to apply transport auth headers", "error", err)
+		}
 	}
 
 	return headers, nil

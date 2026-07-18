@@ -54,6 +54,13 @@ type HubConnection struct {
 	Credentials *brokercredentials.BrokerCredentials
 	SecretKey   []byte // decoded from Credentials.SecretKey
 
+	// TransportSource and TransportMode are resolved per-connection for
+	// the control channel WebSocket. The REST hubclient handles its own
+	// transport auth via WithTransportAuth(), but the control channel
+	// dials directly and needs these to build auth headers.
+	TransportSource transportauth.TokenSource
+	TransportMode   transportauth.HeaderMode
+
 	HubClient      hubclient.Client
 	Hydrator       *templatecache.Hydrator
 	HCResolver     *templatecache.Resolver // harness-config hydrator
@@ -147,6 +154,8 @@ func (hc *HubConnection) Start(ctx context.Context, server *Server) error {
 				PongWait:            60 * time.Second,
 				WriteWait:           10 * time.Second,
 				Debug:               server.config.Debug,
+				TransportSource:     hc.TransportSource,
+				TransportMode:       hc.TransportMode,
 				OnConnectionStateChange: func(connected bool) {
 					if connected {
 						hc.setStatus(ConnectionStatusConnected)
@@ -242,6 +251,15 @@ func (hc *HubConnection) Reinitialize(ctx context.Context, server *Server, creds
 	}
 	if server.hcCache != nil {
 		hc.HCResolver = templatecache.NewHarnessConfigResolver(server.hcCache, client)
+	}
+
+	// Re-resolve transport auth for the control channel
+	if src, mode, err := transportauth.ResolveBrokerTransport(creds.TransportMode, creds.TransportAudience); err == nil && src != nil {
+		hc.TransportSource = src
+		hc.TransportMode = mode
+	} else {
+		hc.TransportSource = nil
+		hc.TransportMode = 0
 	}
 
 	slog.Info("Hub connection reinitialized", "name", hc.Name, "brokerID", creds.BrokerID)
