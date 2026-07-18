@@ -35,6 +35,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/plugin"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
@@ -1206,14 +1207,22 @@ func (b *TelegramBrokerV2) publishInputNeededDM(ctx context.Context, api *Telegr
 	return nil
 }
 
-// resolveAttachmentPath translates an agent-relative /workspace path to the
-// corresponding host-side path under /home/scion/.scion/projects/<slug>/.
-// Agent containers mount /home/scion/.scion/projects/<slug> as /workspace.
-// Accepts "/workspace/file", "/workspace", "workspace/file", "workspace",
-// and bare relative paths like "file.png". Falls back to the original path
-// if translation is not possible.
+// resolveAttachmentPath translates agent-side paths to host-side paths.
+//
+// Supported container-side paths:
+//   - /workspace/<file>  → ~/.scion/projects/<slug>/<file>
+//   - /scion-volumes/<name>/<file> → ~/.scion/project-configs/<slug>__<shortUUID>/shared-dirs/<name>/<file>
+//   - /workspace/.scion-volumes/<name>/<file> → same as /scion-volumes/<name>/<file>
+//
+// Also accepts bare relative paths and "workspace/" without leading slash.
+// Falls back to the original path if translation is not possible.
 func (b *TelegramBrokerV2) resolveAttachmentPath(ctx context.Context, store Store, attachPath, projectID string) string {
 	originalPath := attachPath
+
+	// Handle /scion-volumes/<name>/... container-internal shared dir paths.
+	if strings.HasPrefix(attachPath, "/scion-volumes/") || attachPath == "/scion-volumes" {
+		return b.resolveSharedDirAttachmentPath(ctx, store, attachPath, projectID)
+	}
 
 	var relPath string
 	switch {
@@ -1238,17 +1247,17 @@ func (b *TelegramBrokerV2) resolveAttachmentPath(ctx context.Context, store Stor
 		return attachPath
 	}
 
-	// Look up project slug from group links, falling back to the injected slug map.
-	slug := ""
-	if store != nil && projectID != "" {
-		links, err := store.GetGroupLinksForProject(ctx, projectID)
-		if err == nil && len(links) > 0 && links[0].ProjectSlug != "" {
-			slug = links[0].ProjectSlug
-		}
+	// In-workspace shared dirs are mounted at /workspace/.scion-volumes/<name>
+	// inside containers. Redirect to shared dir resolution.
+	if strings.HasPrefix(relPath, ".scion-volumes/") {
+		containerPath := "/scion-volumes/" + strings.TrimPrefix(relPath, ".scion-volumes/")
+		return b.resolveSharedDirAttachmentPath(ctx, store, containerPath, projectID)
 	}
-	if slug == "" && projectID != "" {
-		slug = b.projectSlugMap[projectID]
+	if relPath == ".scion-volumes" {
+		return attachPath
 	}
+
+	slug := b.resolveProjectSlug(ctx, store, projectID)
 	if slug == "" {
 		b.log.Debug("Attachment path unchanged, no project slug found",
 			"original", originalPath, "project_id", projectID)
@@ -1270,6 +1279,75 @@ func (b *TelegramBrokerV2) resolveAttachmentPath(ctx context.Context, store Stor
 
 	b.log.Debug("Resolved attachment path", "original", originalPath, "resolved", hostPath)
 	return hostPath
+}
+
+// resolveSharedDirAttachmentPath translates a container-internal shared dir
+// path (/scion-volumes/<name>/...) to the host-side path under
+// ~/.scion/project-configs/<slug>__<shortUUID>/shared-dirs/<name>/.
+func (b *TelegramBrokerV2) resolveSharedDirAttachmentPath(ctx context.Context, store Store, attachPath, projectID string) string {
+	trimmed := strings.TrimPrefix(attachPath, "/scion-volumes/")
+	if trimmed == "" || trimmed == attachPath {
+		b.log.Warn("Invalid shared dir attachment path", "attach_path", attachPath)
+		return attachPath
+	}
+
+	parts := strings.SplitN(trimmed, "/", 2)
+	sharedDirName := parts[0]
+	relPath := ""
+	if len(parts) > 1 {
+		relPath = filepath.Clean(parts[1])
+		if strings.HasPrefix(relPath, "..") || filepath.IsAbs(relPath) {
+			b.log.Warn("Shared dir attachment path escapes directory",
+				"attach_path", attachPath, "rel_path", relPath)
+			return attachPath
+		}
+	}
+
+	slug := b.resolveProjectSlug(ctx, store, projectID)
+	if slug == "" || projectID == "" {
+		b.log.Debug("Shared dir path unchanged, no project slug or ID",
+			"original", attachPath, "project_id", projectID)
+		return attachPath
+	}
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		b.log.Warn("Failed to resolve home dir for shared dir path", "error", err)
+		return attachPath
+	}
+
+	sharedDirBase := config.SharedDirHostPath(home, slug, projectID, sharedDirName)
+	var hostPath string
+	if relPath == "" || relPath == "." {
+		hostPath = sharedDirBase
+	} else {
+		hostPath = filepath.Join(sharedDirBase, relPath)
+		if !strings.HasPrefix(hostPath, sharedDirBase+"/") {
+			b.log.Warn("Resolved shared dir path escapes directory",
+				"host_path", hostPath, "expected_prefix", sharedDirBase+"/")
+			return attachPath
+		}
+	}
+
+	b.log.Debug("Resolved shared dir attachment path",
+		"original", attachPath, "resolved", hostPath)
+	return hostPath
+}
+
+// resolveProjectSlug looks up the project slug from the store (group links)
+// or the hub-injected slug map.
+func (b *TelegramBrokerV2) resolveProjectSlug(ctx context.Context, store Store, projectID string) string {
+	slug := ""
+	if store != nil && projectID != "" {
+		links, err := store.GetGroupLinksForProject(ctx, projectID)
+		if err == nil && len(links) > 0 && links[0].ProjectSlug != "" {
+			slug = links[0].ProjectSlug
+		}
+	}
+	if slug == "" && projectID != "" {
+		slug = b.projectSlugMap[projectID]
+	}
+	return slug
 }
 
 // publishAttachment reads a file from the local filesystem and sends it to

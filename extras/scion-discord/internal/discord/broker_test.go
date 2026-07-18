@@ -471,3 +471,129 @@ func TestHealthCheck_NoSession(t *testing.T) {
 	assert.Equal(t, "degraded", status.Status)
 	assert.Contains(t, status.Message, "not configured")
 }
+
+// --- resolveAttachmentPath tests ---
+
+func TestResolveAttachmentPath_WorkspacePaths(t *testing.T) {
+	b := &DiscordBroker{
+		log: discardLogger(),
+		projectSlugMap: map[string]string{
+			"proj-1": "my-project",
+		},
+	}
+
+	ctx := context.Background()
+
+	tests := []struct {
+		name      string
+		path      string
+		projectID string
+		want      string
+	}{
+		{
+			name:      "workspace with leading slash",
+			path:      "/workspace/file.txt",
+			projectID: "proj-1",
+			want:      "/home/scion/.scion/projects/my-project/file.txt",
+		},
+		{
+			name:      "workspace without leading slash",
+			path:      "workspace/file.txt",
+			projectID: "proj-1",
+			want:      "/home/scion/.scion/projects/my-project/file.txt",
+		},
+		{
+			name:      "bare workspace",
+			path:      "/workspace",
+			projectID: "proj-1",
+			want:      "/home/scion/.scion/projects/my-project",
+		},
+		{
+			name:      "relative path",
+			path:      "file.txt",
+			projectID: "proj-1",
+			want:      "/home/scion/.scion/projects/my-project/file.txt",
+		},
+		{
+			name:      "no project slug returns empty",
+			path:      "/workspace/file.txt",
+			projectID: "unknown-proj",
+			want:      "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := b.resolveAttachmentPath(ctx, tt.path, tt.projectID)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestResolveAttachmentPath_SharedDirPaths(t *testing.T) {
+	b := &DiscordBroker{
+		log: discardLogger(),
+		projectSlugMap: map[string]string{
+			"550e8400-e29b-41d4-a716-446655440000": "my-project",
+		},
+	}
+
+	ctx := context.Background()
+
+	tests := []struct {
+		name      string
+		path      string
+		projectID string
+		wantEnd   string // suffix to match (avoids hardcoding HOME)
+		wantEmpty bool
+	}{
+		{
+			name:      "scion-volumes path with file",
+			path:      "/scion-volumes/scratchpad/projects/chat-admin/report.png",
+			projectID: "550e8400-e29b-41d4-a716-446655440000",
+			wantEnd:   "project-configs/my-project__550e8400/shared-dirs/scratchpad/projects/chat-admin/report.png",
+		},
+		{
+			name:      "scion-volumes path bare dir",
+			path:      "/scion-volumes/build-cache",
+			projectID: "550e8400-e29b-41d4-a716-446655440000",
+			wantEnd:   "project-configs/my-project__550e8400/shared-dirs/build-cache",
+		},
+		{
+			name:      "scion-volumes with trailing slash file",
+			path:      "/scion-volumes/scratchpad/file.txt",
+			projectID: "550e8400-e29b-41d4-a716-446655440000",
+			wantEnd:   "project-configs/my-project__550e8400/shared-dirs/scratchpad/file.txt",
+		},
+		{
+			name:      "in-workspace scion-volumes",
+			path:      "/workspace/.scion-volumes/cache/data.bin",
+			projectID: "550e8400-e29b-41d4-a716-446655440000",
+			wantEnd:   "project-configs/my-project__550e8400/shared-dirs/cache/data.bin",
+		},
+		{
+			name:      "no project slug returns empty",
+			path:      "/scion-volumes/scratchpad/file.txt",
+			projectID: "unknown-proj",
+			wantEmpty: true,
+		},
+		{
+			name:      "path traversal rejected",
+			path:      "/scion-volumes/scratchpad/../../etc/passwd",
+			projectID: "550e8400-e29b-41d4-a716-446655440000",
+			wantEmpty: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := b.resolveAttachmentPath(ctx, tt.path, tt.projectID)
+			if tt.wantEmpty {
+				assert.Empty(t, got, "resolveAttachmentPath(%q) should return empty", tt.path)
+			} else {
+				assert.True(t, strings.HasSuffix(got, tt.wantEnd),
+					"resolveAttachmentPath(%q) = %q, want suffix %q", tt.path, got, tt.wantEnd)
+			}
+		})
+	}
+}

@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 )
@@ -156,4 +157,21 @@ func GetSharedDirInfos(projectDir string, dirs []api.SharedDir) ([]SharedDirInfo
 		})
 	}
 	return infos, nil
+}
+
+// SharedDirHostPath computes the host-side directory path for a shared
+// directory given the user's home directory, the project slug, project ID,
+// and shared dir name.  This is used by host-process plugins (Telegram,
+// Discord) that receive container-internal paths (/scion-volumes/<name>)
+// and need to translate them to host-side paths without requiring access to
+// the project's .scion marker file.
+//
+// The returned path is under ~/.scion/project-configs/<slug>__<shortUUID>/shared-dirs/<name>.
+func SharedDirHostPath(home, slug, projectID, sharedDirName string) string {
+	shortUUID := strings.ReplaceAll(projectID, "-", "")
+	if len(shortUUID) > 8 {
+		shortUUID = shortUUID[:8]
+	}
+	dirName := fmt.Sprintf("%s__%s", slug, shortUUID)
+	return filepath.Join(home, GlobalDir, ProjectConfigsDir, dirName, SharedDirsSubdir, sharedDirName)
 }

@@ -28,6 +28,7 @@ import (
 	"github.com/bwmarrin/discordgo"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/plugin"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
@@ -1485,11 +1486,21 @@ func (b *DiscordBroker) resolveStaleChannelSlugs(ctx context.Context) {
 
 // --- Attachment helpers ---
 
-// resolveAttachmentPath translates an agent-relative /workspace path to the
-// host-side path under /home/scion/.scion/projects/<slug>/. Agent containers
-// mount /home/scion/.scion/projects/<slug> as /workspace.
+// resolveAttachmentPath translates agent-side paths to host-side paths.
+//
+// Supported container-side paths:
+//   - /workspace/<file>  → ~/.scion/projects/<slug>/<file>
+//   - /scion-volumes/<name>/<file> → ~/.scion/project-configs/<slug>__<shortUUID>/shared-dirs/<name>/<file>
+//   - /workspace/.scion-volumes/<name>/<file> → same as /scion-volumes/<name>/<file>
+//
+// Also accepts bare relative paths and "workspace/" without leading slash.
 // Returns empty string if the path is unsafe or cannot be resolved.
 func (b *DiscordBroker) resolveAttachmentPath(ctx context.Context, attachPath, projectID string) string {
+	// Handle /scion-volumes/<name>/... container-internal shared dir paths.
+	if strings.HasPrefix(attachPath, "/scion-volumes/") || attachPath == "/scion-volumes" {
+		return b.resolveSharedDirAttachmentPath(ctx, attachPath, projectID)
+	}
+
 	var relPath string
 	switch {
 	case strings.HasPrefix(attachPath, "/workspace/"):
@@ -1515,17 +1526,17 @@ func (b *DiscordBroker) resolveAttachmentPath(ctx context.Context, attachPath, p
 		return ""
 	}
 
-	// Look up project slug from channel links, falling back to the injected slug map.
-	slug := ""
-	if b.store != nil && projectID != "" {
-		links, err := b.store.GetChannelLinksForProject(ctx, projectID)
-		if err == nil && len(links) > 0 && links[0].ProjectSlug != "" {
-			slug = links[0].ProjectSlug
-		}
+	// In-workspace shared dirs are mounted at /workspace/.scion-volumes/<name>
+	// inside containers. Redirect to shared dir resolution.
+	if strings.HasPrefix(relPath, ".scion-volumes/") {
+		containerPath := "/scion-volumes/" + strings.TrimPrefix(relPath, ".scion-volumes/")
+		return b.resolveSharedDirAttachmentPath(ctx, containerPath, projectID)
 	}
-	if slug == "" && projectID != "" {
-		slug = b.projectSlugMap[projectID]
+	if relPath == ".scion-volumes" {
+		return ""
 	}
+
+	slug := b.resolveProjectSlug(ctx, projectID)
 	if slug == "" {
 		b.log.Warn("Cannot resolve attachment path: no project slug found",
 			"attach_path", attachPath, "project_id", projectID)
@@ -1547,6 +1558,76 @@ func (b *DiscordBroker) resolveAttachmentPath(ctx context.Context, attachPath, p
 
 	b.log.Debug("Resolved attachment path", "original", attachPath, "resolved", hostPath)
 	return hostPath
+}
+
+// resolveSharedDirAttachmentPath translates a container-internal shared dir
+// path (/scion-volumes/<name>/...) to the host-side path under
+// ~/.scion/project-configs/<slug>__<shortUUID>/shared-dirs/<name>/.
+// Returns empty string if the path is unsafe or cannot be resolved.
+func (b *DiscordBroker) resolveSharedDirAttachmentPath(ctx context.Context, attachPath, projectID string) string {
+	trimmed := strings.TrimPrefix(attachPath, "/scion-volumes/")
+	if trimmed == "" || trimmed == attachPath {
+		b.log.Warn("Invalid shared dir attachment path", "attach_path", attachPath)
+		return ""
+	}
+
+	parts := strings.SplitN(trimmed, "/", 2)
+	sharedDirName := parts[0]
+	relPath := ""
+	if len(parts) > 1 {
+		relPath = filepath.Clean(parts[1])
+		if strings.HasPrefix(relPath, "..") || filepath.IsAbs(relPath) {
+			b.log.Warn("Shared dir attachment path escapes directory",
+				"attach_path", attachPath, "rel_path", relPath)
+			return ""
+		}
+	}
+
+	slug := b.resolveProjectSlug(ctx, projectID)
+	if slug == "" || projectID == "" {
+		b.log.Warn("Cannot resolve shared dir path: no project slug or ID",
+			"attach_path", attachPath, "project_id", projectID)
+		return ""
+	}
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		b.log.Warn("Failed to resolve home dir for shared dir path", "error", err)
+		return ""
+	}
+
+	sharedDirBase := config.SharedDirHostPath(home, slug, projectID, sharedDirName)
+	var hostPath string
+	if relPath == "" || relPath == "." {
+		hostPath = sharedDirBase
+	} else {
+		hostPath = filepath.Join(sharedDirBase, relPath)
+		if !strings.HasPrefix(hostPath, sharedDirBase+"/") {
+			b.log.Warn("Resolved shared dir path escapes directory",
+				"host_path", hostPath, "expected_prefix", sharedDirBase+"/")
+			return ""
+		}
+	}
+
+	b.log.Debug("Resolved shared dir attachment path",
+		"original", attachPath, "resolved", hostPath)
+	return hostPath
+}
+
+// resolveProjectSlug looks up the project slug from the store (channel links)
+// or the hub-injected slug map.
+func (b *DiscordBroker) resolveProjectSlug(ctx context.Context, projectID string) string {
+	slug := ""
+	if b.store != nil && projectID != "" {
+		links, err := b.store.GetChannelLinksForProject(ctx, projectID)
+		if err == nil && len(links) > 0 && links[0].ProjectSlug != "" {
+			slug = links[0].ProjectSlug
+		}
+	}
+	if slug == "" && projectID != "" {
+		slug = b.projectSlugMap[projectID]
+	}
+	return slug
 }
 
 const maxDiscordAttachmentSize = 25 * 1024 * 1024 // 25 MB

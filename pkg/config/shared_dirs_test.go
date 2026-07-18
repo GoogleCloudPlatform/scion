@@ -17,6 +17,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -184,4 +185,40 @@ func TestGetSharedDirsBasePath_GitProject(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, basePath, SharedDirsSubdir)
 	assert.Contains(t, basePath, "project-configs")
+}
+
+func TestSharedDirHostPath(t *testing.T) {
+	tests := []struct {
+		name          string
+		home          string
+		slug          string
+		projectID     string
+		sharedDirName string
+		wantSuffix    string
+	}{
+		{
+			name:          "standard UUID",
+			home:          "/home/scion",
+			slug:          "my-project",
+			projectID:     "550e8400-e29b-41d4-a716-446655440000",
+			sharedDirName: "scratchpad",
+			wantSuffix:    "project-configs/my-project__550e8400/shared-dirs/scratchpad",
+		},
+		{
+			name:          "short UUID without dashes",
+			home:          "/home/scion",
+			slug:          "test",
+			projectID:     "abcdef12",
+			sharedDirName: "build-cache",
+			wantSuffix:    "project-configs/test__abcdef12/shared-dirs/build-cache",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := SharedDirHostPath(tt.home, tt.slug, tt.projectID, tt.sharedDirName)
+			assert.True(t, strings.HasSuffix(got, tt.wantSuffix),
+				"SharedDirHostPath() = %q, want suffix %q", got, tt.wantSuffix)
+		})
+	}
 }
