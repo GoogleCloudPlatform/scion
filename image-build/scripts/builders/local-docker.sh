@@ -99,7 +99,7 @@ builder_build() {
   done
 
   local arg
-  for arg in "${build_args[@]}"; do
+  for arg in ${build_args[@]+"${build_args[@]}"}; do
     cmd+=(--build-arg "${arg}")
   done
 
