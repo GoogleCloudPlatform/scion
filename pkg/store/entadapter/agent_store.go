@@ -777,12 +777,17 @@ func parseUUIDList(ids []string) []uuid.UUID {
 // currentBrokerID are excluded so that a running multi-broker setup does not
 // have its agents reassigned.
 func (s *AgentStore) FindOrphanedAgents(ctx context.Context, currentBrokerID string) ([]*store.Agent, error) {
+	currentUID, err := uuid.Parse(currentBrokerID)
+	if err != nil {
+		return nil, err
+	}
+
 	// Collect IDs of all online brokers (excluding the current one, which may
 	// not be stamped online yet during startup).
 	onlineBrokers, err := s.client.RuntimeBroker.Query().
 		Where(
 			runtimebroker.StatusEQ(store.BrokerStatusOnline),
-			runtimebroker.IDNEQ(uuid.MustParse(currentBrokerID)),
+			runtimebroker.IDNEQ(currentUID),
 		).
 		Select(runtimebroker.FieldID).
 		All(ctx)
@@ -804,7 +809,7 @@ func (s *AgentStore) FindOrphanedAgents(ctx context.Context, currentBrokerID str
 	rows, err := s.client.Agent.Query().
 		Where(
 			agent.RuntimeBrokerIDNotIn(excludeIDs...),
-			agent.RuntimeBrokerIDNEQ(""),   // Must have a broker assignment
+			agent.RuntimeBrokerIDNEQ(""),        // Must have a broker assignment
 			agent.PhaseNotIn(terminalPhases...), // Not in a terminal state
 			agent.DeletedAtIsNil(),              // Not soft-deleted
 		).
