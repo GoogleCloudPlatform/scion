@@ -21,6 +21,214 @@ import (
 	"unicode/utf8"
 )
 
+// maxBodyMentions is the maximum number of body mentions to include.
+const maxBodyMentions = 5
+
+// Mention represents a classified @mention in a message.
+type Mention struct {
+	Name     string // agent slug or username (without @)
+	Kind     string // "agent", "user", "unknown"
+	Identity string // resolved: "agent:agent-a", "user:email@example.com", "unknown"
+}
+
+// ClassifiedMentions holds the result of position-aware mention parsing.
+type ClassifiedMentions struct {
+	StartMentions []Mention // @mentions at the beginning of the message (primary recipients)
+	BodyMentions  []Mention // @mentions in the body of the message (mention notifications)
+	StrippedBody  string    // message text with start mentions removed, body mentions left in
+}
+
+// classifyMentions performs position-aware classification of @mentions in a message.
+// It separates leading @mentions (primary recipients) from inline body @mentions
+// (mention notifications). The bot username is skipped. If @all appears at the
+// start, an empty ClassifiedMentions is returned (let existing broadcast logic handle it).
+func classifyMentions(text string, botUsername string, knownAgents []string, userResolver func(username string) (email string, found bool)) ClassifiedMentions {
+	if text == "" {
+		return ClassifiedMentions{}
+	}
+
+	// Build case-insensitive agent lookup, mapping lowercase → original case.
+	agentMap := make(map[string]string, len(knownAgents))
+	for _, a := range knownAgents {
+		agentMap[strings.ToLower(a)] = a
+	}
+
+	lowerBot := strings.ToLower(botUsername)
+
+	// cleanMentionName strips @ prefix and trailing punctuation from a token,
+	// using the same logic as extractAgentMentions.
+	cleanName := func(token string) string {
+		name := strings.TrimPrefix(token, "@")
+		name = strings.TrimRightFunc(name, func(r rune) bool {
+			return unicode.IsPunct(r) && r != '_' && r != '-'
+		})
+		return name
+	}
+
+	// classifyName classifies a cleaned mention name into a Mention.
+	classifyName := func(name string) (Mention, bool) {
+		lower := strings.ToLower(name)
+		// Check for @all — signals broadcast.
+		if lower == "all" {
+			return Mention{}, false
+		}
+		// Skip bot username.
+		if lowerBot != "" && lower == lowerBot {
+			return Mention{}, false
+		}
+		// Check known agents.
+		if originalCase, ok := agentMap[lower]; ok {
+			return Mention{
+				Name:     originalCase,
+				Kind:     "agent",
+				Identity: "agent:" + originalCase,
+			}, true
+		}
+		// Try user resolver.
+		if userResolver != nil {
+			if email, found := userResolver(name); found {
+				return Mention{
+					Name:     name,
+					Kind:     "user",
+					Identity: "user:" + email,
+				}, true
+			}
+		}
+		// Unknown mention.
+		return Mention{
+			Name:     name,
+			Kind:     "unknown",
+			Identity: "unknown",
+		}, true
+	}
+
+	tokens := strings.Fields(text)
+	if len(tokens) == 0 {
+		return ClassifiedMentions{}
+	}
+
+	// Phase 1: Scan consecutive leading @mentions.
+	startEnd := 0 // index of first non-@ token
+	for startEnd < len(tokens) {
+		if !strings.HasPrefix(tokens[startEnd], "@") {
+			break
+		}
+		startEnd++
+	}
+
+	var startMentions []Mention
+	startSeen := make(map[string]bool)
+
+	for i := 0; i < startEnd; i++ {
+		name := cleanName(tokens[i])
+		if name == "" {
+			continue
+		}
+		lower := strings.ToLower(name)
+
+		// @all at start → return empty, let broadcast logic handle it.
+		if lower == "all" {
+			return ClassifiedMentions{}
+		}
+
+		// Skip bot username.
+		if lowerBot != "" && lower == lowerBot {
+			continue
+		}
+
+		m, ok := classifyName(name)
+		if !ok {
+			continue
+		}
+
+		if !startSeen[lower] {
+			startSeen[lower] = true
+			startMentions = append(startMentions, m)
+		}
+	}
+
+	// Compute stripped body: everything from the first non-@ token onward,
+	// preserving original spacing by using byte positions from the original text.
+	var strippedBody string
+	if startEnd < len(tokens) {
+		// Find the byte offset of the first non-@ token in the original text.
+		// We need to find the N-th whitespace-separated token's start position.
+		idx := 0
+		tokenCount := 0
+		for idx < len(text) {
+			// Skip whitespace.
+			for idx < len(text) && (text[idx] == ' ' || text[idx] == '\t' || text[idx] == '\n' || text[idx] == '\r') {
+				idx++
+			}
+			if idx >= len(text) {
+				break
+			}
+			if tokenCount == startEnd {
+				break
+			}
+			// Skip non-whitespace.
+			for idx < len(text) && text[idx] != ' ' && text[idx] != '\t' && text[idx] != '\n' && text[idx] != '\r' {
+				idx++
+			}
+			tokenCount++
+		}
+		if idx < len(text) {
+			strippedBody = text[idx:]
+		}
+	}
+
+	// Phase 2: Scan body tokens for @mentions.
+	var bodyMentions []Mention
+	bodySeen := make(map[string]bool)
+	// Merge start mentions into bodySeen for dedup.
+	for _, m := range startMentions {
+		bodySeen[strings.ToLower(m.Name)] = true
+	}
+
+	for i := startEnd; i < len(tokens) && len(bodyMentions) < maxBodyMentions; i++ {
+		if !strings.HasPrefix(tokens[i], "@") {
+			continue
+		}
+		name := cleanName(tokens[i])
+		if name == "" {
+			continue
+		}
+		lower := strings.ToLower(name)
+
+		// Skip @all in body.
+		if lower == "all" {
+			continue
+		}
+		// Skip bot.
+		if lowerBot != "" && lower == lowerBot {
+			continue
+		}
+		// Skip duplicates (including dedup with start mentions).
+		if bodySeen[lower] {
+			continue
+		}
+
+		m, ok := classifyName(name)
+		if !ok {
+			continue
+		}
+
+		// Skip unknown/unresolvable mentions in body (per spec).
+		if m.Kind == "unknown" {
+			continue
+		}
+
+		bodySeen[lower] = true
+		bodyMentions = append(bodyMentions, m)
+	}
+
+	return ClassifiedMentions{
+		StartMentions: startMentions,
+		BodyMentions:  bodyMentions,
+		StrippedBody:  strippedBody,
+	}
+}
+
 // resolveTargetAgents determines which agents a message should be routed to.
 // Returns a deduplicated list of agent slugs and whether @all was used.
 //

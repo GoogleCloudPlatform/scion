@@ -247,6 +247,25 @@ func (m *StructuredMessage) LogAttrs() []any {
 	return attrs
 }
 
+// NewMention creates a new mention notification message.
+// mentionSource identifies the primary recipient(s) whose conversation triggered the mention
+// (e.g., "agent:coder" or "group[user:alice agent:coder agent:reviewer]").
+func NewMention(sender, recipient, msg, mentionSource string) *StructuredMessage {
+	m := &StructuredMessage{
+		Version:   Version,
+		Timestamp: time.Now().UTC().Format(time.RFC3339),
+		Sender:    sender,
+		Recipient: recipient,
+		Msg:       msg,
+		Type:      TypeMention,
+		Metadata:  map[string]string{},
+	}
+	if mentionSource != "" {
+		m.Metadata["mention_source"] = mentionSource
+	}
+	return m
+}
+
 // SenderPrefix returns the type prefix for a sender identity string.
 // For example, "user:alice" returns "user", "agent:code-reviewer" returns "agent".
 func SenderPrefix(identity string) string {

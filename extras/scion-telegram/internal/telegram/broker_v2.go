@@ -1925,12 +1925,34 @@ func (b *TelegramBrokerV2) handleGroupMessage(tgMsg *TGMessage) {
 		}
 	}
 
+	// Classify mentions by position (start vs. body) for mention notifications.
+	// Skip classification for @all broadcasts — those are handled by existing logic.
+	var classified ClassifiedMentions
+	if !isAll {
+		classified = classifyMentions(tgMsg.Text, botUsername, agents, func(username string) (string, bool) {
+			// User resolver: for now return not-found. Unresolvable @chatUser
+			// mentions are dropped per the design doc.
+			return "", false
+		})
+	}
+
 	// Resolve @username mentions to scion user identities and replace
 	// text_mention display names with "user:email" in the message text.
 	resolvedText, resolvedMentionsJSON := b.resolveUserMentions(ctx, tgMsg)
 
-	// Strip bot/agent mentions to get clean message text.
-	cleanText := stripMentions(resolvedText, botUsername, targets)
+	// Strip only start-mention agent slugs (not body mentions) so body mentions
+	// remain in the delivered text. For @all or fallback routing (no classifyMentions
+	// result), fall back to stripping all targets.
+	stripSlugs := targets
+	if !isAll && len(classified.StartMentions) > 0 {
+		stripSlugs = make([]string, 0, len(classified.StartMentions))
+		for _, m := range classified.StartMentions {
+			if m.Kind == "agent" {
+				stripSlugs = append(stripSlugs, m.Name)
+			}
+		}
+	}
+	cleanText := stripMentions(resolvedText, botUsername, stripSlugs)
 	cleanText = strings.TrimSpace(cleanText)
 
 	// Download file attachments (photos/documents/audio/video).
@@ -2048,6 +2070,76 @@ func (b *TelegramBrokerV2) handleGroupMessage(tgMsg *TGMessage) {
 				}
 				b.api.SendMessage(ctx, chatID, "Message delivery failed: "+deliveryErr, replyTo) //nolint:errcheck
 			}
+		}
+	}
+
+	// Deliver TypeMention messages for body mentions (agents referenced
+	// inline in the message body, not as primary recipients).
+	if !isAll && len(classified.BodyMentions) > 0 {
+		// Build the mention source: the primary recipient identity.
+		var mentionSource string
+		if recipientsSet != "" {
+			mentionSource = recipientsSet
+		} else if len(targets) == 1 {
+			mentionSource = "agent:" + targets[0]
+		}
+
+		// Use StrippedBody (start mentions removed, body mentions preserved)
+		// as the message text for mention recipients.
+		mentionText := classified.StrippedBody
+		if placeholder != "" {
+			if mentionText != "" {
+				mentionText = mentionText + "\n" + placeholder
+			} else {
+				mentionText = placeholder
+			}
+		}
+
+		// Build a set of primary targets for dedup.
+		targetSet := make(map[string]bool, len(targets))
+		for _, slug := range targets {
+			targetSet[strings.ToLower(slug)] = true
+		}
+
+		for _, mention := range classified.BodyMentions {
+			if mention.Kind != "agent" {
+				continue
+			}
+			// Skip if the agent is already a primary target (dedup).
+			if targetSet[strings.ToLower(mention.Name)] {
+				continue
+			}
+			if mentionText == "" {
+				continue
+			}
+
+			mentionRecipient := "agent:" + mention.Name
+			mentionTopic := projectcompat.AgentTopic(link.ProjectID, mention.Name)
+
+			mentionMsg := messages.NewMention(sender, mentionRecipient, mentionText, mentionSource)
+			mentionMsg.SenderID = senderID
+			mentionMsg.Channel = "telegram"
+			mentionMsg.Metadata["telegram_chat_id"] = strconv.FormatInt(chatID, 10)
+			mentionMsg.Metadata["telegram_message_id"] = strconv.FormatInt(tgMsg.MessageID, 10)
+			mentionMsg.Metadata["project_id"] = link.ProjectID
+
+			if tgMsg.MessageThreadID != 0 {
+				mentionMsg.ThreadID = strconv.FormatInt(tgMsg.MessageThreadID, 10)
+			}
+
+			if attachmentPath != "" {
+				mentionMsg.Attachments = []string{attachmentPath}
+			}
+
+			if resolvedMentionsJSON != "" {
+				mentionMsg.Metadata["resolved_mentions"] = resolvedMentionsJSON
+			}
+
+			b.log.Debug("Delivering mention notification",
+				"topic", mentionTopic, "sender", sender, "mentioned_agent", mention.Name,
+				"mention_source", mentionSource)
+
+			b.deliverInboundWithFeedback(ctx, mentionTopic, mentionMsg) //nolint:errcheck
 		}
 	}
 }

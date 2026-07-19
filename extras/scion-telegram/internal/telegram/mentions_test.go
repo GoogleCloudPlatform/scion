@@ -21,6 +21,177 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
+// --- classifyMentions tests ---
+
+// noUserResolver is a stub that always returns not found.
+func noUserResolver(username string) (string, bool) { return "", false }
+
+// testUserResolver resolves "chatUser" → "chat@example.com".
+func testUserResolver(username string) (string, bool) {
+	if strings.ToLower(username) == "chatuser" {
+		return "chat@example.com", true
+	}
+	return "", false
+}
+
+func TestClassifyMentions_StartMentionsOnly(t *testing.T) {
+	// "@agent-a @agent-b do this task"
+	result := classifyMentions("@agent-a @agent-b do this task", "BotName", []string{"agent-a", "agent-b"}, noUserResolver)
+
+	assert.Len(t, result.StartMentions, 2)
+	assert.Equal(t, "agent-a", result.StartMentions[0].Name)
+	assert.Equal(t, "agent", result.StartMentions[0].Kind)
+	assert.Equal(t, "agent:agent-a", result.StartMentions[0].Identity)
+	assert.Equal(t, "agent-b", result.StartMentions[1].Name)
+	assert.Len(t, result.BodyMentions, 0)
+	assert.Equal(t, "do this task", result.StrippedBody)
+}
+
+func TestClassifyMentions_StartAndBodyMentions(t *testing.T) {
+	// "@agent-a do this and cc @agent-b"
+	result := classifyMentions("@agent-a do this and cc @agent-b", "BotName", []string{"agent-a", "agent-b"}, noUserResolver)
+
+	assert.Len(t, result.StartMentions, 1)
+	assert.Equal(t, "agent-a", result.StartMentions[0].Name)
+	assert.Len(t, result.BodyMentions, 1)
+	assert.Equal(t, "agent-b", result.BodyMentions[0].Name)
+	assert.Equal(t, "agent:agent-b", result.BodyMentions[0].Identity)
+	assert.Equal(t, "do this and cc @agent-b", result.StrippedBody)
+}
+
+func TestClassifyMentions_MultipleStartOneBody(t *testing.T) {
+	// "@agent-a @agent-b do this cc @agent-c"
+	result := classifyMentions("@agent-a @agent-b do this cc @agent-c", "BotName", []string{"agent-a", "agent-b", "agent-c"}, noUserResolver)
+
+	assert.Len(t, result.StartMentions, 2)
+	assert.Equal(t, "agent-a", result.StartMentions[0].Name)
+	assert.Equal(t, "agent-b", result.StartMentions[1].Name)
+	assert.Len(t, result.BodyMentions, 1)
+	assert.Equal(t, "agent-c", result.BodyMentions[0].Name)
+}
+
+func TestClassifyMentions_NoStartMentions(t *testing.T) {
+	// "do this @agent-a and @agent-b"
+	result := classifyMentions("do this @agent-a and @agent-b", "BotName", []string{"agent-a", "agent-b"}, noUserResolver)
+
+	assert.Len(t, result.StartMentions, 0)
+	assert.Len(t, result.BodyMentions, 2)
+	assert.Equal(t, "agent-a", result.BodyMentions[0].Name)
+	assert.Equal(t, "agent-b", result.BodyMentions[1].Name)
+	assert.Equal(t, "do this @agent-a and @agent-b", result.StrippedBody)
+}
+
+func TestClassifyMentions_UserMentionResolved(t *testing.T) {
+	// "@chatUser do this for @agent-a"
+	result := classifyMentions("@chatUser do this for @agent-a", "BotName", []string{"agent-a"}, testUserResolver)
+
+	assert.Len(t, result.StartMentions, 1)
+	assert.Equal(t, "chatUser", result.StartMentions[0].Name)
+	assert.Equal(t, "user", result.StartMentions[0].Kind)
+	assert.Equal(t, "user:chat@example.com", result.StartMentions[0].Identity)
+	assert.Len(t, result.BodyMentions, 1)
+	assert.Equal(t, "agent-a", result.BodyMentions[0].Name)
+}
+
+func TestClassifyMentions_UnresolvableUser(t *testing.T) {
+	// "@chatUser do this" with noUserResolver
+	result := classifyMentions("@chatUser do this", "BotName", []string{"agent-a"}, noUserResolver)
+
+	assert.Len(t, result.StartMentions, 1)
+	assert.Equal(t, "unknown", result.StartMentions[0].Kind)
+	assert.Equal(t, "unknown", result.StartMentions[0].Identity)
+	assert.Len(t, result.BodyMentions, 0)
+}
+
+func TestClassifyMentions_SelfDedup(t *testing.T) {
+	// "@agent-a do this and ask @agent-a again"
+	result := classifyMentions("@agent-a do this and ask @agent-a again", "BotName", []string{"agent-a"}, noUserResolver)
+
+	assert.Len(t, result.StartMentions, 1)
+	assert.Equal(t, "agent-a", result.StartMentions[0].Name)
+	assert.Len(t, result.BodyMentions, 0) // agent-a already in start, so skipped in body
+}
+
+func TestClassifyMentions_NoMentions(t *testing.T) {
+	// "fix the tests" — no mentions at all; stripped body is the full text
+	// (nothing was removed since there are no start mentions)
+	result := classifyMentions("fix the tests", "BotName", []string{"agent-a"}, noUserResolver)
+
+	assert.Len(t, result.StartMentions, 0)
+	assert.Len(t, result.BodyMentions, 0)
+	assert.Equal(t, "fix the tests", result.StrippedBody)
+}
+
+func TestClassifyMentions_AllBroadcast(t *testing.T) {
+	// "@all deploy" → empty ClassifiedMentions
+	result := classifyMentions("@all deploy", "BotName", []string{"agent-a", "agent-b"}, noUserResolver)
+
+	assert.Len(t, result.StartMentions, 0)
+	assert.Len(t, result.BodyMentions, 0)
+	assert.Equal(t, "", result.StrippedBody)
+}
+
+func TestClassifyMentions_BotNameSkipped(t *testing.T) {
+	// "@BotName @agent-a do this"
+	result := classifyMentions("@BotName @agent-a do this", "BotName", []string{"agent-a"}, noUserResolver)
+
+	assert.Len(t, result.StartMentions, 1)
+	assert.Equal(t, "agent-a", result.StartMentions[0].Name)
+	assert.Len(t, result.BodyMentions, 0)
+	assert.Equal(t, "do this", result.StrippedBody)
+}
+
+func TestClassifyMentions_BodyMentionCap(t *testing.T) {
+	// Message with 7 body mentions → only first 5
+	text := "do this @a1 @a2 @a3 @a4 @a5 @a6 @a7"
+	agents := []string{"a1", "a2", "a3", "a4", "a5", "a6", "a7"}
+	result := classifyMentions(text, "BotName", agents, noUserResolver)
+
+	assert.Len(t, result.StartMentions, 0)
+	assert.Len(t, result.BodyMentions, 5)
+	assert.Equal(t, "a1", result.BodyMentions[0].Name)
+	assert.Equal(t, "a5", result.BodyMentions[4].Name)
+}
+
+func TestClassifyMentions_CaseInsensitiveAgentMatch(t *testing.T) {
+	// "@AGENT-A do this" should match "agent-a" (case-insensitive)
+	result := classifyMentions("@AGENT-A do this", "BotName", []string{"agent-a"}, noUserResolver)
+
+	assert.Len(t, result.StartMentions, 1)
+	assert.Equal(t, "agent-a", result.StartMentions[0].Name) // uses original case from knownAgents
+	assert.Equal(t, "agent:agent-a", result.StartMentions[0].Identity)
+}
+
+func TestClassifyMentions_PreservesOriginalSpacing(t *testing.T) {
+	// "@agent-a   do   this   task" — stripped body preserves original spacing
+	result := classifyMentions("@agent-a   do   this   task", "BotName", []string{"agent-a"}, noUserResolver)
+
+	assert.Equal(t, "do   this   task", result.StrippedBody)
+}
+
+func TestClassifyMentions_UnknownBodyMentionsSkipped(t *testing.T) {
+	// Body mentions that are "unknown" should be skipped per spec
+	result := classifyMentions("@agent-a do this and cc @unknownPerson", "BotName", []string{"agent-a"}, noUserResolver)
+
+	assert.Len(t, result.StartMentions, 1)
+	assert.Len(t, result.BodyMentions, 0) // @unknownPerson is unknown, skipped in body
+}
+
+func TestClassifyMentions_EmptyText(t *testing.T) {
+	result := classifyMentions("", "BotName", []string{"agent-a"}, noUserResolver)
+	assert.Len(t, result.StartMentions, 0)
+	assert.Len(t, result.BodyMentions, 0)
+	assert.Equal(t, "", result.StrippedBody)
+}
+
+func TestClassifyMentions_TrailingPunctuation(t *testing.T) {
+	// "@agent-a, do this" — trailing comma stripped from agent name
+	result := classifyMentions("@agent-a, do this", "BotName", []string{"agent-a"}, noUserResolver)
+
+	assert.Len(t, result.StartMentions, 1)
+	assert.Equal(t, "agent-a", result.StartMentions[0].Name)
+}
+
 func TestResolveTargetAgents_BotMentionOnly(t *testing.T) {
 	msg := &TGMessage{
 		Text: "@ScionHubBot please help",
