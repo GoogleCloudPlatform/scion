@@ -707,6 +707,7 @@ func TestResolveOutboundMentions(t *testing.T) {
 // senderSlug derivation — uses shared deriveSenderSlug from format.go
 // ---------------------------------------------------------------------------
 
+
 func TestDeriveSenderSlug(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -752,6 +753,7 @@ func TestDeriveSenderSlug(t *testing.T) {
 		})
 	}
 }
+
 
 func TestHandleGuildDelete(t *testing.T) {
 	t.Run("bot removed — deactivates links", func(t *testing.T) {
