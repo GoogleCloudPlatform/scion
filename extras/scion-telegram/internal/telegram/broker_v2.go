@@ -1990,6 +1990,11 @@ func (b *TelegramBrokerV2) handleGroupMessage(tgMsg *TGMessage) {
 				targets = filteredTargets
 			}
 		}
+
+		// If body-mention filter emptied targets, restore default agent so instruction is delivered.
+		if len(targets) == 0 && effectiveDefault != "" {
+			targets = []string{effectiveDefault}
+		}
 	}
 
 	cleanText := stripMentions(resolvedText, botUsername, stripSlugs)

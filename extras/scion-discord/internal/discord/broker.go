@@ -1196,6 +1196,11 @@ func (b *DiscordBroker) handleIncomingMessage(s *discordgo.Session, m *discordgo
 				targets = filteredTargets
 			}
 		}
+
+		// If body-mention filter emptied targets, restore default agent so instruction is delivered.
+		if len(targets) == 0 && effectiveDefault != "" {
+			targets = []string{effectiveDefault}
+		}
 	}
 
 	// Strip bot and start-mention agent mentions from message text.
