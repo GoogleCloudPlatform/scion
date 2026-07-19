@@ -444,11 +444,11 @@ func TestProvisionAgentWorkspaceFlag(t *testing.T) {
 		t.Errorf("expected volume source %q, got %q", evalCustomWorkspace, evalSource)
 	}
 
-	// 2. Test relative path for --workspace
+	// 2. Test relative path for --workspace (resolved against project root)
 	relativeWorkspace := "some-subdir"
 
-	_ = os.MkdirAll(filepath.Join(tmpDir, relativeWorkspace), 0755)
-	absRelativeWorkspace, _ := filepath.Abs(filepath.Join(tmpDir, relativeWorkspace))
+	_ = os.MkdirAll(filepath.Join(projectDir, relativeWorkspace), 0755)
+	absRelativeWorkspace, _ := filepath.Abs(filepath.Join(projectDir, relativeWorkspace))
 	evalAbsRelativeWorkspace, _ := filepath.EvalSymlinks(absRelativeWorkspace)
 
 	_, _, cfg, err = ProvisionAgent(context.Background(), "rel-agent", "claude", "", "", projectScionDir, "", "", "", relativeWorkspace)
@@ -2700,4 +2700,227 @@ func TestProvisionAgent_MandatoryPreamble(t *testing.T) {
 			t.Errorf("expected inline content in instructions, got %q", string(content))
 		}
 	})
+}
+
+func TestResolveWorkspaceSubdir(t *testing.T) {
+	root := t.TempDir()
+
+	t.Run("valid subdir", func(t *testing.T) {
+		subdir := filepath.Join(root, "packages", "web")
+		_ = os.MkdirAll(subdir, 0755)
+
+		result, err := resolveWorkspaceSubdir(root, "packages/web")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		evalSubdir, _ := filepath.EvalSymlinks(subdir)
+		if result != evalSubdir {
+			t.Errorf("expected %q, got %q", evalSubdir, result)
+		}
+	})
+
+	t.Run("dot resolves to root", func(t *testing.T) {
+		result, err := resolveWorkspaceSubdir(root, ".")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if result != root {
+			t.Errorf("expected %q, got %q", root, result)
+		}
+	})
+
+	t.Run("absolute path rejected", func(t *testing.T) {
+		_, err := resolveWorkspaceSubdir(root, "/absolute/path")
+		if err == nil {
+			t.Fatal("expected error for absolute path")
+		}
+		if !strings.Contains(err.Error(), "must be relative") {
+			t.Errorf("expected 'must be relative' in error, got: %v", err)
+		}
+	})
+
+	t.Run("dotdot traversal rejected", func(t *testing.T) {
+		_, err := resolveWorkspaceSubdir(root, "..")
+		if err == nil {
+			t.Fatal("expected error for '..' traversal")
+		}
+		if !strings.Contains(err.Error(), "escapes project root") {
+			t.Errorf("expected 'escapes project root' in error, got: %v", err)
+		}
+	})
+
+	t.Run("nested dotdot traversal rejected", func(t *testing.T) {
+		_ = os.MkdirAll(filepath.Join(root, "a"), 0755)
+		_, err := resolveWorkspaceSubdir(root, "a/../../b")
+		if err == nil {
+			t.Fatal("expected error for nested '..' traversal")
+		}
+		if !strings.Contains(err.Error(), "escapes project root") {
+			t.Errorf("expected 'escapes project root' in error, got: %v", err)
+		}
+	})
+
+	t.Run("symlink to outside rejected", func(t *testing.T) {
+		outsideDir := t.TempDir()
+		linkPath := filepath.Join(root, "escape-link")
+		if err := os.Symlink(outsideDir, linkPath); err != nil {
+			t.Skipf("cannot create symlink: %v", err)
+		}
+
+		_, err := resolveWorkspaceSubdir(root, "escape-link")
+		if err == nil {
+			t.Fatal("expected error for symlink escaping project root")
+		}
+		if !strings.Contains(err.Error(), "outside project root") {
+			t.Errorf("expected 'outside project root' in error, got: %v", err)
+		}
+	})
+
+	t.Run("nonexistent path rejected", func(t *testing.T) {
+		_, err := resolveWorkspaceSubdir(root, "does-not-exist")
+		if err == nil {
+			t.Fatal("expected error for nonexistent path")
+		}
+		if !strings.Contains(err.Error(), "does not exist") {
+			t.Errorf("expected 'does not exist' in error, got: %v", err)
+		}
+	})
+}
+
+func TestResolveProjectRoot(t *testing.T) {
+	t.Run("with WorkspacePath set", func(t *testing.T) {
+		settings := &config.VersionedSettings{
+			WorkspacePath: "/some/path",
+		}
+		result := resolveProjectRoot(settings, "/project/.scion")
+		if result != "/some/path" {
+			t.Errorf("expected /some/path, got %q", result)
+		}
+	})
+
+	t.Run("nil settings", func(t *testing.T) {
+		result := resolveProjectRoot(nil, "/project/.scion")
+		if result != "/project" {
+			t.Errorf("expected /project, got %q", result)
+		}
+	})
+
+	t.Run("empty WorkspacePath", func(t *testing.T) {
+		settings := &config.VersionedSettings{
+			WorkspacePath: "",
+		}
+		result := resolveProjectRoot(settings, "/project/.scion")
+		if result != "/project" {
+			t.Errorf("expected /project, got %q", result)
+		}
+	})
+}
+
+func TestProvisionAgent_RelativeWorkspace(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	oldWd, _ := os.Getwd()
+	_ = os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
+
+	originalHome := os.Getenv("HOME")
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
+
+	globalScionDir := filepath.Join(tmpDir, ".scion")
+	globalTemplatesDir := filepath.Join(globalScionDir, "templates")
+	_ = os.MkdirAll(globalTemplatesDir, 0755)
+
+	seedTestHarnessConfig(t, globalScionDir, "claude", "claude")
+
+	tplDir := filepath.Join(globalTemplatesDir, "claude")
+	_ = os.MkdirAll(tplDir, 0755)
+	tplConfig := `{"default_harness_config": "claude"}`
+	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(tplConfig), 0644)
+
+	projectDir := filepath.Join(tmpDir, "project")
+	_ = os.MkdirAll(projectDir, 0755)
+
+	projectScionDir := filepath.Join(projectDir, ".scion")
+	_ = os.MkdirAll(projectScionDir, 0755)
+	_ = os.WriteFile(filepath.Join(projectDir, ".gitignore"), []byte("agents/"), 0644)
+
+	// Create subdirectory under project root
+	subdir := filepath.Join(projectDir, "packages", "web")
+	_ = os.MkdirAll(subdir, 0755)
+	evalSubdir, _ := filepath.EvalSymlinks(subdir)
+
+	agentName := "rel-ws-agent"
+	_, ws, cfg, err := ProvisionAgent(context.Background(), agentName, "claude", "", "", projectScionDir, "", "", "", "packages/web")
+	if err != nil {
+		t.Fatalf("ProvisionAgent failed: %v", err)
+	}
+
+	// agentWorkspace should be "" (managed workspace not used)
+	if ws != "" {
+		t.Errorf("expected empty workspace path for relative workspace agent, got %q", ws)
+	}
+
+	// ExplicitWorkspace should be true
+	if !cfg.ExplicitWorkspace {
+		t.Error("expected ExplicitWorkspace to be true")
+	}
+
+	// /workspace volume mount source should point to the subdir
+	found := false
+	for _, v := range cfg.Volumes {
+		if v.Target == "/workspace" {
+			found = true
+			evalSource, _ := filepath.EvalSymlinks(v.Source)
+			if evalSource != evalSubdir {
+				t.Errorf("expected volume source %q, got %q", evalSubdir, evalSource)
+			}
+			break
+		}
+	}
+	if !found {
+		t.Error("expected /workspace volume mount not found in config")
+	}
+}
+
+func TestProvisionAgent_RelativeWorkspace_GitClone_Rejected(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	oldWd, _ := os.Getwd()
+	_ = os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
+
+	originalHome := os.Getenv("HOME")
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
+
+	globalScionDir := filepath.Join(tmpDir, ".scion")
+	globalTemplatesDir := filepath.Join(globalScionDir, "templates")
+	_ = os.MkdirAll(globalTemplatesDir, 0755)
+
+	seedTestHarnessConfig(t, globalScionDir, "claude", "claude")
+
+	tplDir := filepath.Join(globalTemplatesDir, "claude")
+	_ = os.MkdirAll(tplDir, 0755)
+	tplConfig := `{"default_harness_config": "claude"}`
+	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(tplConfig), 0644)
+
+	projectDir := filepath.Join(tmpDir, "project")
+	projectScionDir := filepath.Join(projectDir, ".scion")
+	_ = os.MkdirAll(projectScionDir, 0755)
+
+	gitClone := &api.GitCloneConfig{
+		URL:    "https://github.com/example/repo.git",
+		Branch: "main",
+		Depth:  1,
+	}
+	ctx := api.ContextWithGitClone(context.Background(), gitClone)
+
+	_, _, _, err := ProvisionAgent(ctx, "gitclone-rel-agent", "claude", "", "", projectScionDir, "", "", "", "packages/web")
+	if err == nil {
+		t.Fatal("expected error for relative workspace with git-clone")
+	}
+	if !strings.Contains(err.Error(), "relative --workspace is not supported for git-clone projects") {
+		t.Errorf("expected error about relative workspace not supported for git-clone, got: %v", err)
+	}
 }

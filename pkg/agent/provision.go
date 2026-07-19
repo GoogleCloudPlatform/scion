@@ -398,6 +398,54 @@ func resolveHarnessConfigDir(ctx context.Context, name, projectPath string, temp
 	return config.FindHarnessConfigDir(name, projectPath, templatePaths...)
 }
 
+// resolveProjectRoot determines the project root directory on this broker.
+// Used for resolving relative --workspace paths against the project's logical root.
+func resolveProjectRoot(settings *config.VersionedSettings, projectDir string) string {
+	if settings != nil && settings.WorkspacePath != "" {
+		return settings.WorkspacePath
+	}
+	return filepath.Dir(projectDir)
+}
+
+// resolveWorkspaceSubdir resolves a relative workspace subdirectory path
+// against a project root, with containment checks to prevent directory
+// traversal and symlink escapes.
+func resolveWorkspaceSubdir(projectRoot, subdir string) (string, error) {
+	if filepath.IsAbs(subdir) {
+		return "", fmt.Errorf("workspace subdir must be relative, got absolute path: %s", subdir)
+	}
+
+	cleaned := filepath.Clean(subdir)
+	if cleaned == "." {
+		return projectRoot, nil
+	}
+	if strings.HasPrefix(cleaned, "..") {
+		return "", fmt.Errorf("workspace subdir %q escapes project root (contains '..')", subdir)
+	}
+
+	joined := filepath.Join(projectRoot, cleaned)
+
+	if _, err := os.Stat(joined); os.IsNotExist(err) {
+		return "", fmt.Errorf("workspace subdirectory does not exist: %s", joined)
+	}
+
+	realRoot, err := filepath.EvalSymlinks(projectRoot)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve project root: %w", err)
+	}
+	realJoined, err := filepath.EvalSymlinks(joined)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve workspace subdir: %w", err)
+	}
+
+	rel, err := filepath.Rel(realRoot, realJoined)
+	if err != nil || strings.HasPrefix(rel, "..") {
+		return "", fmt.Errorf("workspace subdir %q resolves to %s which is outside project root %s", subdir, realJoined, realRoot)
+	}
+
+	return realJoined, nil
+}
+
 func ProvisionAgent(ctx context.Context, agentName string, templateName string, agentImage string, harnessConfig string, projectPath string, profileName string, optionalStatus string, branch string, workspace string, inlineConfig ...*api.ScionConfig) (string, string, *api.ScionConfig, error) {
 	provisionStart := time.Now()
 	// 1. Prepare agent directories
@@ -482,6 +530,12 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	// Check for git clone mode from context
 	gitClone := api.GitCloneFromContext(ctx)
 
+	// Reject relative workspace for git-clone projects early, before the
+	// workspace resolution logic where gitClone takes priority.
+	if gitClone != nil && workspace != "" && !filepath.IsAbs(workspace) {
+		return "", "", nil, fmt.Errorf("relative --workspace is not supported for git-clone projects; use an absolute path or remove --workspace")
+	}
+
 	// Workspace Resolution Logic
 	if gitClone != nil {
 		// Git clone mode: ensure the workspace directory exists and is ready
@@ -512,18 +566,30 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	} else if workspace != "" {
 		// Case 1: Explicit Workspace provided
 		// This overrides everything else. We mount this path directly.
-		absWorkspace, err := filepath.Abs(workspace)
-		if err != nil {
-			return "", "", nil, fmt.Errorf("failed to resolve absolute path for workspace %s: %w", workspace, err)
+		if filepath.IsAbs(workspace) {
+			// Current behavior: mount this exact host path
+			absWorkspace, err := filepath.Abs(workspace)
+			if err != nil {
+				return "", "", nil, fmt.Errorf("failed to resolve absolute path for workspace %s: %w", workspace, err)
+			}
+			if _, err := os.Stat(absWorkspace); os.IsNotExist(err) {
+				return "", "", nil, fmt.Errorf("workspace path does not exist: %s", absWorkspace)
+			}
+			workspaceSource = absWorkspace
+			agentWorkspace = ""
+			explicitWorkspace = true
+		} else {
+			// NEW: resolve relative subdir against project root
+			// (gitClone + relative workspace is rejected above)
+			projectRoot := resolveProjectRoot(settings, projectDir)
+			resolved, err := resolveWorkspaceSubdir(projectRoot, workspace)
+			if err != nil {
+				return "", "", nil, err
+			}
+			workspaceSource = resolved
+			agentWorkspace = ""
+			explicitWorkspace = true
 		}
-
-		if _, err := os.Stat(absWorkspace); os.IsNotExist(err) {
-			return "", "", nil, fmt.Errorf("workspace path does not exist: %s", absWorkspace)
-		}
-
-		workspaceSource = absWorkspace
-		agentWorkspace = "" // We are not using the managed local workspace directory
-		explicitWorkspace = true
 
 	} else if isGit {
 		// Case 2: Git Repository (and no explicit workspace)
