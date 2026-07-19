@@ -441,3 +441,33 @@ func TestTruncateForDiscord_Truncates(t *testing.T) {
 	assert.LessOrEqual(t, len(result), 2000)
 	assert.True(t, strings.HasSuffix(result, truncationSuffix))
 }
+
+// ---------------------------------------------------------------------------
+// formatObservedEmbed
+// ---------------------------------------------------------------------------
+
+func TestFormatObservedEmbed_AgentToAgent(t *testing.T) {
+	msg := &messages.StructuredMessage{
+		Sender:    "agent:builder",
+		Recipient: "agent:reviewer",
+		Msg:       "please review this change",
+	}
+	embed := formatObservedEmbed(msg)
+	require.NotNil(t, embed)
+	assert.Equal(t, "builder → reviewer", embed.Title)
+	assert.Equal(t, "please review this change", embed.Description)
+	assert.Equal(t, 0x808080, embed.Color)
+}
+
+func TestFormatObservedEmbed_NonAgentSender(t *testing.T) {
+	// When sender is not an agent, TrimPrefix is a no-op and returns the full sender string.
+	msg := &messages.StructuredMessage{
+		Sender:    "user:alice@example.com",
+		Recipient: "agent:coder",
+		Msg:       "hello",
+	}
+	embed := formatObservedEmbed(msg)
+	require.NotNil(t, embed)
+	assert.Equal(t, "user:alice@example.com → coder", embed.Title)
+	assert.Equal(t, "hello", embed.Description)
+}

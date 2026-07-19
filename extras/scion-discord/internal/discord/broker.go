@@ -531,9 +531,13 @@ func (b *DiscordBroker) Publish(ctx context.Context, topic string, msg *messages
 		msg.Type == messages.TypeInstruction
 
 	// Extract agent slug from sender for webhook username.
-	senderSlug := agentSlug
-	if senderSlug == "" && strings.HasPrefix(msg.Sender, "agent:") {
+	// Prefer msg.Sender so observed agent-to-agent messages display under the sender's identity.
+	var senderSlug string
+	if strings.HasPrefix(msg.Sender, "agent:") {
 		senderSlug = strings.TrimPrefix(msg.Sender, "agent:")
+	}
+	if senderSlug == "" {
+		senderSlug = agentSlug // fallback to topic agent for non-agent senders
 	}
 
 	// Replace scion user emails with Discord @mentions in the message body.
@@ -597,6 +601,13 @@ func (b *DiscordBroker) Publish(ctx context.Context, topic string, msg *messages
 	isStateChange := msg != nil && msg.Type == messages.TypeStateChange
 	needsFilter := isAgentToAgent || isStateChange
 
+	// Build an embed for observed agent-to-agent messages so they are
+	// visually distinct from direct messages (gray sidebar, sender→recipient title).
+	var observeEmbeds []*discordgo.MessageEmbed
+	if isAgentToAgent {
+		observeEmbeds = []*discordgo.MessageEmbed{formatObservedEmbed(msg)}
+	}
+
 	// Send to each target channel.
 	var errs []error
 	for _, channelID := range channelIDs {
@@ -642,9 +653,9 @@ func (b *DiscordBroker) Publish(ctx context.Context, topic string, msg *messages
 			// webhook on the parent channel and execute with thread_id.
 			parentID, isThread := b.resolveThreadParent(channelID)
 			if isThread && parentID != "" {
-				_, err = webhooks.SendAsAgentInThread(parentID, channelID, senderSlug, text, nil, nil, files)
+				_, err = webhooks.SendAsAgentInThread(parentID, channelID, senderSlug, text, observeEmbeds, nil, files)
 			} else {
-				_, err = webhooks.SendAsAgent(channelID, senderSlug, text, nil, nil, files)
+				_, err = webhooks.SendAsAgent(channelID, senderSlug, text, observeEmbeds, nil, files)
 			}
 			if err != nil {
 				// Fallback to bot API if webhook send fails.

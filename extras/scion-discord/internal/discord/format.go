@@ -401,3 +401,15 @@ func SplitLongMessage(text string, maxLen int) []string {
 	}
 	return chunks
 }
+
+// formatObservedEmbed creates an embed for observed/relayed agent-to-agent
+// messages. The gray sidebar visually distinguishes them from direct messages.
+func formatObservedEmbed(msg *messages.StructuredMessage) *discordgo.MessageEmbed {
+	senderSlug := strings.TrimPrefix(msg.Sender, "agent:")
+	recipientSlug := strings.TrimPrefix(msg.Recipient, "agent:")
+	return &discordgo.MessageEmbed{
+		Title:       fmt.Sprintf("%s → %s", senderSlug, recipientSlug),
+		Description: msg.Msg,
+		Color:       0x808080, // gray sidebar distinguishes relayed from direct messages
+	}
+}
