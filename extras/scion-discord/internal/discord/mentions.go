@@ -176,6 +176,140 @@ func extractUnresolvedMentions(text string, botUserID string, knownAgents []stri
 	return unresolved
 }
 
+// Mention represents a classified @mention in a message.
+type Mention struct {
+	Name     string // agent slug or username (without @)
+	Kind     string // "agent", "user", "unknown"
+	Identity string // resolved: "agent:agent-a", "user:email@example.com", "unknown"
+}
+
+// ClassifiedMentions holds the result of position-aware mention parsing.
+type ClassifiedMentions struct {
+	StartMentions []Mention // @mentions at the beginning of the message (primary recipients)
+	BodyMentions  []Mention // @mentions in the body of the message (mention notifications)
+	StrippedBody  string    // message text with start mentions removed, body mentions left in
+}
+
+// maxBodyMentions caps the number of body mentions to avoid spam.
+const maxBodyMentions = 5
+
+// classifyMentions performs position-aware classification of @mentions in text.
+//
+// It separates leading @mentions (start mentions used for routing) from
+// @mentions embedded in the body (used for mention notifications).
+// Discord bot mentions (<@ID> format) are skipped — they are handled separately.
+// If @all is found at the start, returns empty ClassifiedMentions.
+func classifyMentions(text string, botUserID string, knownAgents []string, userResolver func(username string) (email string, found bool)) ClassifiedMentions {
+	tokens := strings.Fields(text)
+	if len(tokens) == 0 {
+		return ClassifiedMentions{}
+	}
+
+	known := make(map[string]string, len(knownAgents))
+	for _, a := range knownAgents {
+		known[strings.ToLower(a)] = a
+	}
+
+	// classifyToken resolves a single @token into a Mention.
+	// Returns the Mention and true if resolved, or zero Mention and false if
+	// the token should be skipped (bot mention, empty name, unknown non-agent).
+	classifyToken := func(token string) (Mention, bool) {
+		// Skip Discord bot mentions: <@ID> or <@!ID>
+		if strings.HasPrefix(token, "<@") && strings.HasSuffix(token, ">") {
+			return Mention{}, false
+		}
+		if !strings.HasPrefix(token, "@") {
+			return Mention{}, false
+		}
+
+		name := strings.TrimPrefix(token, "@")
+		name = strings.TrimRightFunc(name, func(r rune) bool {
+			return unicode.IsPunct(r) && r != '_' && r != '-'
+		})
+		if name == "" {
+			return Mention{}, false
+		}
+
+		lower := strings.ToLower(name)
+		if slug, ok := known[lower]; ok {
+			return Mention{Name: slug, Kind: "agent", Identity: "agent:" + slug}, true
+		}
+		if userResolver != nil {
+			if email, found := userResolver(name); found {
+				return Mention{Name: name, Kind: "user", Identity: "user:" + email}, true
+			}
+		}
+		return Mention{Name: name, Kind: "unknown", Identity: "unknown"}, true
+	}
+
+	// Phase 1: scan leading tokens for start mentions.
+	var startMentions []Mention
+	var startTokenCount int
+
+	for _, token := range tokens {
+		// Skip Discord bot mentions at the start — they don't count as
+		// @agent mentions and shouldn't break the leading-mention scan.
+		if strings.HasPrefix(token, "<@") && strings.HasSuffix(token, ">") {
+			startTokenCount++
+			continue
+		}
+		if !strings.HasPrefix(token, "@") {
+			break // first non-mention token ends the start region
+		}
+
+		name := strings.TrimPrefix(token, "@")
+		name = strings.TrimRightFunc(name, func(r rune) bool {
+			return unicode.IsPunct(r) && r != '_' && r != '-'
+		})
+		if name == "" {
+			break
+		}
+
+		// @all at start → return empty, let broadcast logic handle it.
+		if strings.ToLower(name) == "all" {
+			return ClassifiedMentions{}
+		}
+
+		m, ok := classifyToken(token)
+		if ok {
+			startMentions = append(startMentions, m)
+		}
+		startTokenCount++
+	}
+
+	// Build StrippedBody by dropping the leading mention tokens.
+	bodyTokens := tokens[startTokenCount:]
+	strippedBody := strings.Join(bodyTokens, " ")
+
+	// Phase 2: scan body tokens for @mentions.
+	startSeen := make(map[string]bool, len(startMentions))
+	for _, sm := range startMentions {
+		startSeen[strings.ToLower(sm.Name)] = true
+	}
+
+	var bodyMentions []Mention
+	for _, token := range bodyTokens {
+		if len(bodyMentions) >= maxBodyMentions {
+			break
+		}
+		m, ok := classifyToken(token)
+		if !ok || m.Kind == "unknown" {
+			continue
+		}
+		// Deduplicate: skip if already a start mention.
+		if startSeen[strings.ToLower(m.Name)] {
+			continue
+		}
+		bodyMentions = append(bodyMentions, m)
+	}
+
+	return ClassifiedMentions{
+		StartMentions: startMentions,
+		BodyMentions:  bodyMentions,
+		StrippedBody:  strippedBody,
+	}
+}
+
 // agentFromReply extracts the agent slug from a referenced message.
 // When a user replies to a webhook message, the webhook username IS the agent
 // slug (since the Discord plugin uses per-agent webhooks with the agent slug

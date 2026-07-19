@@ -334,3 +334,133 @@ func TestAgentFromReply_WebhookWithHyphenatedSlug(t *testing.T) {
 	}
 	assert.Equal(t, "my-agent", agentFromReply(ref, "BOT123"))
 }
+
+// --- classifyMentions tests ---
+
+// noopResolver is a userResolver that never finds a match.
+func noopResolver(_ string) (string, bool) { return "", false }
+
+func TestClassifyMentions_StartMentionsOnly(t *testing.T) {
+	result := classifyMentions("@agent-a @agent-b do this", "BOT123",
+		[]string{"agent-a", "agent-b"}, noopResolver)
+
+	assert.Equal(t, []Mention{
+		{Name: "agent-a", Kind: "agent", Identity: "agent:agent-a"},
+		{Name: "agent-b", Kind: "agent", Identity: "agent:agent-b"},
+	}, result.StartMentions)
+	assert.Empty(t, result.BodyMentions)
+	assert.Equal(t, "do this", result.StrippedBody)
+}
+
+func TestClassifyMentions_StartAndBodyMentions(t *testing.T) {
+	result := classifyMentions("@agent-a do this cc @agent-b", "BOT123",
+		[]string{"agent-a", "agent-b"}, noopResolver)
+
+	assert.Equal(t, []Mention{
+		{Name: "agent-a", Kind: "agent", Identity: "agent:agent-a"},
+	}, result.StartMentions)
+	assert.Equal(t, []Mention{
+		{Name: "agent-b", Kind: "agent", Identity: "agent:agent-b"},
+	}, result.BodyMentions)
+	assert.Equal(t, "do this cc @agent-b", result.StrippedBody)
+}
+
+func TestClassifyMentions_BodyMentionsOnly(t *testing.T) {
+	result := classifyMentions("do this @agent-a and @agent-b", "BOT123",
+		[]string{"agent-a", "agent-b"}, noopResolver)
+
+	assert.Empty(t, result.StartMentions)
+	assert.Equal(t, []Mention{
+		{Name: "agent-a", Kind: "agent", Identity: "agent:agent-a"},
+		{Name: "agent-b", Kind: "agent", Identity: "agent:agent-b"},
+	}, result.BodyMentions)
+	assert.Equal(t, "do this @agent-a and @agent-b", result.StrippedBody)
+}
+
+func TestClassifyMentions_SelfDedup(t *testing.T) {
+	// @agent-a at start, then @agent-a in body → body should be empty (deduped).
+	result := classifyMentions("@agent-a do this and ask @agent-a again", "BOT123",
+		[]string{"agent-a"}, noopResolver)
+
+	assert.Equal(t, []Mention{
+		{Name: "agent-a", Kind: "agent", Identity: "agent:agent-a"},
+	}, result.StartMentions)
+	assert.Empty(t, result.BodyMentions)
+}
+
+func TestClassifyMentions_NoMentions(t *testing.T) {
+	result := classifyMentions("fix the tests", "BOT123",
+		[]string{"agent-a", "agent-b"}, noopResolver)
+
+	assert.Empty(t, result.StartMentions)
+	assert.Empty(t, result.BodyMentions)
+	assert.Equal(t, "fix the tests", result.StrippedBody)
+}
+
+func TestClassifyMentions_AllAtStart(t *testing.T) {
+	// @all → return empty ClassifiedMentions (broadcast).
+	result := classifyMentions("@all deploy", "BOT123",
+		[]string{"agent-a", "agent-b"}, noopResolver)
+
+	assert.Empty(t, result.StartMentions)
+	assert.Empty(t, result.BodyMentions)
+	assert.Equal(t, "", result.StrippedBody)
+}
+
+func TestClassifyMentions_BodyMentionCap(t *testing.T) {
+	// 7 body mentions → only first 5 should be captured.
+	text := "do this @a1 @a2 @a3 @a4 @a5 @a6 @a7"
+	agents := []string{"a1", "a2", "a3", "a4", "a5", "a6", "a7"}
+	result := classifyMentions(text, "BOT123", agents, noopResolver)
+
+	assert.Empty(t, result.StartMentions)
+	assert.Len(t, result.BodyMentions, 5)
+	assert.Equal(t, "a1", result.BodyMentions[0].Name)
+	assert.Equal(t, "a5", result.BodyMentions[4].Name)
+}
+
+func TestClassifyMentions_DiscordBotMentionSkipped(t *testing.T) {
+	// <@BOT_ID> should be skipped, @agent-a should be a start mention.
+	result := classifyMentions("<@BOT123> @agent-a do this", "BOT123",
+		[]string{"agent-a"}, noopResolver)
+
+	assert.Equal(t, []Mention{
+		{Name: "agent-a", Kind: "agent", Identity: "agent:agent-a"},
+	}, result.StartMentions)
+	assert.Empty(t, result.BodyMentions)
+	assert.Equal(t, "do this", result.StrippedBody)
+}
+
+func TestClassifyMentions_EmptyText(t *testing.T) {
+	result := classifyMentions("", "BOT123", []string{"agent-a"}, noopResolver)
+	assert.Empty(t, result.StartMentions)
+	assert.Empty(t, result.BodyMentions)
+	assert.Equal(t, "", result.StrippedBody)
+}
+
+func TestClassifyMentions_UserResolver(t *testing.T) {
+	resolver := func(username string) (string, bool) {
+		if username == "alice" {
+			return "alice@example.com", true
+		}
+		return "", false
+	}
+	result := classifyMentions("@agent-a do this cc @alice", "BOT123",
+		[]string{"agent-a"}, resolver)
+
+	assert.Equal(t, []Mention{
+		{Name: "agent-a", Kind: "agent", Identity: "agent:agent-a"},
+	}, result.StartMentions)
+	assert.Equal(t, []Mention{
+		{Name: "alice", Kind: "user", Identity: "user:alice@example.com"},
+	}, result.BodyMentions)
+}
+
+func TestClassifyMentions_UnknownBodyMentionsSkipped(t *testing.T) {
+	// Unknown mentions in the body should be skipped.
+	result := classifyMentions("do this @stranger", "BOT123",
+		[]string{"agent-a"}, noopResolver)
+
+	assert.Empty(t, result.StartMentions)
+	assert.Empty(t, result.BodyMentions)
+}
