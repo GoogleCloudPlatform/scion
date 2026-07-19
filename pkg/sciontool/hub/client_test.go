@@ -27,6 +27,7 @@ import (
 	"time"
 
 	state "github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -801,6 +802,69 @@ func TestClient_StartTokenRefresh(t *testing.T) {
 
 		assert.Equal(t, int32(1), atomic.LoadInt32(&authLostCount), "OnAuthLost should fire exactly once")
 		assert.True(t, sawUnauthorized.Load(), "401 refresh error should wrap ErrTokenRefreshUnauthorized")
+	})
+
+	t.Run("initial schedule adjusted for transport token TTL", func(t *testing.T) {
+		// Regression test: the initial refreshAt must account for transport
+		// tokens that expire sooner than the app token. Without the fix,
+		// the first refresh fires at T+8h (2h before the 10h app token
+		// expiry), but the transport token dies at T+1h.
+		cleanup := SetTokenHome(t.TempDir())
+		defer cleanup()
+
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			futureExpiry := time.Now().Add(10 * time.Hour).UTC().Format(time.RFC3339)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"token":"refreshed-token","expires_at":"` + futureExpiry + `"}`))
+		}))
+		defer server.Close()
+
+		// Set up an InjectedSource with a transport token that already needs
+		// refreshing: it expires in 2 minutes, and the refresh margin is 5m,
+		// so adjustRefreshForTransportTokens returns a time in the past →
+		// the timer fires immediately (delay clamped to 0).
+		source := transportauth.NewInjectedSource()
+		transportExpiry := time.Now().Add(2 * time.Minute)
+		source.SetToken("transport-tok", transportExpiry)
+
+		client := NewClientWithConfig(server.URL, "old-token", "agent-123")
+		client.oidcSource = source
+
+		// App token refresh at T+8h — without the fix, this is what would be
+		// used and the refresh would never fire in the test timeout.
+		appRefreshAt := time.Now().Add(8 * time.Hour)
+
+		refreshFired := make(chan time.Time, 1)
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+
+		start := time.Now()
+		done := client.StartTokenRefresh(ctx, &TokenRefreshConfig{
+			RefreshAt: appRefreshAt,
+			Timeout:   5 * time.Second,
+			OnRefreshed: func(newExpiry time.Time) {
+				select {
+				case refreshFired <- time.Now():
+				default:
+				}
+			},
+		})
+
+		// With the fix, the adjusted schedule is now - 3min (in the past),
+		// so the refresh fires immediately. Without the fix, the 8h app
+		// schedule means this blocks until the 2s context timeout.
+		select {
+		case fired := <-refreshFired:
+			elapsed := fired.Sub(start)
+			assert.Less(t, elapsed, 500*time.Millisecond,
+				"refresh should fire almost immediately when transport token needs refreshing")
+		case <-time.After(2 * time.Second):
+			t.Fatal("refresh did not fire within 2s — initial schedule was NOT adjusted for transport token TTL")
+		}
+
+		cancel()
+		<-done
 	})
 }
 

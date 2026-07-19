@@ -671,6 +671,11 @@ func (c *Client) StartTokenRefresh(ctx context.Context, config *TokenRefreshConf
 		}
 
 		refreshAt := config.RefreshAt
+		// Adjust the initial schedule for transport tokens. Without this,
+		// the first refresh fires based on the app token's ~10h expiry
+		// (at T+8h), but the transport (OIDC/IAP) token expires at ~T+1h.
+		// adjustRefreshForTransportTokens picks the earlier deadline.
+		refreshAt = c.adjustRefreshForTransportTokens(refreshAt)
 		consecutiveFailures := 0
 		authLostNotified := false
 
