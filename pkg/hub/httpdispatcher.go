@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -429,7 +430,10 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 		// ensuring a consistent workspace strategy regardless of whether
 		// the broker happens to have the repo locally.
 		if projectInfo.projectPath != "" {
-			workspace = ""
+			if workspace == "" || filepath.IsAbs(workspace) {
+				workspace = ""
+			}
+			// else: relative workspace -- keep it; broker joins with its own project root
 		}
 		var remoteGCPIdentity *RemoteGCPIdentityConfig
 		if gcpID := agent.AppliedConfig.GCPIdentity; gcpID != nil {

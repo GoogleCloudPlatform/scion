@@ -3505,3 +3505,109 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_FullyQualifiedImageNotRewritten
 			mockClient.lastCreateReq.Config.Image)
 	}
 }
+
+func TestBuildCreateRequest_RelativeWorkspaceSurvives(t *testing.T) {
+	ctx := context.Background()
+	memStore := createTestStore(t)
+
+	// Create the project with a GitRemote so it is treated as a linked project
+	// (not hub-managed). This ensures buildCreateRequest looks up the
+	// provider's LocalPath.
+	project := &store.Project{
+		ID:        tid("project-relws"),
+		Name:      "test-project",
+		Slug:      "test-project-relws",
+		GitRemote: "https://github.com/example/repo.git",
+	}
+	if err := memStore.CreateProject(ctx, project); err != nil {
+		t.Fatalf("failed to create project: %v", err)
+	}
+
+	// Create a runtime broker
+	broker := &store.RuntimeBroker{
+		ID:       tid("broker-relws"),
+		Name:     "test-broker",
+		Slug:     "test-broker-relws",
+		Endpoint: "http://localhost:9800",
+		Status:   store.BrokerStatusOnline,
+	}
+	if err := memStore.CreateRuntimeBroker(ctx, broker); err != nil {
+		t.Fatalf("failed to create runtime broker: %v", err)
+	}
+
+	// Add a project provider record WITH a local path
+	provider := &store.ProjectProvider{
+		ProjectID:  tid("project-relws"),
+		BrokerID:   tid("broker-relws"),
+		BrokerName: "test-broker",
+		LocalPath:  "/home/user/projects/myproject/.scion",
+		Status:     store.BrokerStatusOnline,
+	}
+	if err := memStore.AddProjectProvider(ctx, provider); err != nil {
+		t.Fatalf("failed to add project provider: %v", err)
+	}
+
+	mockClient := &mockRuntimeBrokerClient{}
+	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
+
+	t.Run("relative workspace survives", func(t *testing.T) {
+		agent := &store.Agent{
+			ID:              tid("agent-relws-1"),
+			Name:            "test-agent-rel",
+			Slug:            "test-agent-rel",
+			ProjectID:       tid("project-relws"),
+			RuntimeBrokerID: tid("broker-relws"),
+			AppliedConfig: &store.AgentAppliedConfig{
+				Workspace: "packages/web",
+			},
+		}
+
+		err := dispatcher.DispatchAgentCreate(ctx, agent)
+		if err != nil {
+			t.Fatalf("DispatchAgentCreate failed: %v", err)
+		}
+
+		if !mockClient.createCalled {
+			t.Fatal("expected CreateAgent to be called")
+		}
+		if mockClient.lastCreateReq.Config == nil {
+			t.Fatal("expected Config to be present in create request")
+		}
+		if mockClient.lastCreateReq.Config.Workspace != "packages/web" {
+			t.Errorf("expected relative workspace 'packages/web' to survive, got %q",
+				mockClient.lastCreateReq.Config.Workspace)
+		}
+	})
+
+	t.Run("absolute workspace still cleared", func(t *testing.T) {
+		mockClient.createCalled = false
+		mockClient.lastCreateReq = nil
+
+		agent := &store.Agent{
+			ID:              tid("agent-relws-2"),
+			Name:            "test-agent-abs",
+			Slug:            "test-agent-abs",
+			ProjectID:       tid("project-relws"),
+			RuntimeBrokerID: tid("broker-relws"),
+			AppliedConfig: &store.AgentAppliedConfig{
+				Workspace: "/hub/managed/path",
+			},
+		}
+
+		err := dispatcher.DispatchAgentCreate(ctx, agent)
+		if err != nil {
+			t.Fatalf("DispatchAgentCreate failed: %v", err)
+		}
+
+		if !mockClient.createCalled {
+			t.Fatal("expected CreateAgent to be called")
+		}
+		if mockClient.lastCreateReq.Config == nil {
+			t.Fatal("expected Config to be present in create request")
+		}
+		if mockClient.lastCreateReq.Config.Workspace != "" {
+			t.Errorf("expected absolute workspace to be cleared, got %q",
+				mockClient.lastCreateReq.Config.Workspace)
+		}
+	})
+}
