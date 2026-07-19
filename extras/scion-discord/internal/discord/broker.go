@@ -1138,10 +1138,13 @@ func (b *DiscordBroker) handleIncomingMessage(s *discordgo.Session, m *discordgo
 	}
 
 	// Classify mentions by position before stripping.
-	classified := classifyMentions(m.Content, botUserID, agents, func(username string) (string, bool) {
-		// User resolution via store mapping is not yet wired up.
-		return "", false
-	})
+	var classified ClassifiedMentions
+	if !isAll {
+		classified = classifyMentions(m.Content, botUserID, agents, func(username string) (string, bool) {
+			// User resolution via store mapping is not yet wired up.
+			return "", false
+		})
+	}
 
 	// Determine which agent slugs are start-mentions (to strip from text).
 	// Only strip start-mention agents; body mentions stay in text.
@@ -1245,49 +1248,47 @@ func (b *DiscordBroker) handleIncomingMessage(s *discordgo.Session, m *discordgo
 	}
 
 	// Deliver TypeMention notifications for body mentions.
-	targetSet := make(map[string]bool, len(targets))
-	for _, slug := range targets {
-		targetSet[slug] = true
-	}
-
-	// Build the mention source: who the primary message was addressed to.
-	var mentionSource string
-	if len(targets) == 1 {
-		mentionSource = "agent:" + targets[0]
-	} else if len(targets) > 1 {
-		recipientIDs := make([]string, len(targets))
-		for i, slug := range targets {
-			recipientIDs[i] = "agent:" + slug
-		}
-		mentionSource = messages.FormatGroupRecipients(sender, recipientIDs)
-	}
-
-	for _, bm := range classified.BodyMentions {
-		if bm.Kind != "agent" {
-			continue
-		}
-		// Skip agents already receiving the primary message.
-		if targetSet[bm.Name] {
-			continue
+	if !isAll && len(classified.BodyMentions) > 0 {
+		targetSet := make(map[string]bool, len(targets))
+		for _, slug := range targets {
+			targetSet[slug] = true
 		}
 
-		mentionMsg := messages.NewMention(sender, "agent:"+bm.Name, cleanText, mentionSource)
-		mentionMsg.SenderID = senderID
-		mentionMsg.Channel = "discord"
-		mentionMsg.ThreadID = channelID
-		mentionMsg.Metadata["discord_channel_id"] = channelID
-		mentionMsg.Metadata["discord_message_id"] = m.ID
-		mentionMsg.Metadata["discord_guild_id"] = m.GuildID
-		mentionMsg.Metadata["project_id"] = link.ProjectID
+		// Build the mention source: who the primary message was addressed to.
+		var mentionSource string
+		if groupRecipients != "" {
+			mentionSource = groupRecipients
+		} else if len(targets) == 1 {
+			mentionSource = "agent:" + targets[0]
+		}
 
-		mentionTopic := projectcompat.AgentTopic(link.ProjectID, bm.Name)
+		for _, bm := range classified.BodyMentions {
+			if bm.Kind != "agent" {
+				continue
+			}
+			// Skip agents already receiving the primary message.
+			if targetSet[bm.Name] {
+				continue
+			}
 
-		b.log.Debug("Delivering body mention notification",
-			"topic", mentionTopic, "sender", sender, "mentioned_agent", bm.Name)
+			mentionMsg := messages.NewMention(sender, "agent:"+bm.Name, cleanText, mentionSource)
+			mentionMsg.SenderID = senderID
+			mentionMsg.Channel = "discord"
+			mentionMsg.ThreadID = channelID
+			mentionMsg.Metadata["discord_channel_id"] = channelID
+			mentionMsg.Metadata["discord_message_id"] = m.ID
+			mentionMsg.Metadata["discord_guild_id"] = m.GuildID
+			mentionMsg.Metadata["project_id"] = link.ProjectID
 
-		if he := b.deliverInbound(mentionTopic, mentionMsg); he != nil {
-			b.log.Warn("Failed to deliver mention notification",
-				"agent", bm.Name, "error", he.userFacingMessage())
+			mentionTopic := projectcompat.AgentTopic(link.ProjectID, bm.Name)
+
+			b.log.Debug("Delivering body mention notification",
+				"topic", mentionTopic, "sender", sender, "mentioned_agent", bm.Name)
+
+			if he := b.deliverInbound(mentionTopic, mentionMsg); he != nil {
+				b.log.Warn("Failed to deliver mention notification",
+					"agent", bm.Name, "error", he.userFacingMessage())
+			}
 		}
 	}
 }

@@ -1925,20 +1925,21 @@ func (b *TelegramBrokerV2) handleGroupMessage(tgMsg *TGMessage) {
 		}
 	}
 
+	// Resolve @username mentions to scion user identities and replace
+	// text_mention display names with "user:email" in the message text.
+	resolvedText, resolvedMentionsJSON := b.resolveUserMentions(ctx, tgMsg)
+
 	// Classify mentions by position (start vs. body) for mention notifications.
 	// Skip classification for @all broadcasts — those are handled by existing logic.
+	// Run on resolvedText so body-mention recipients get resolved user identities.
 	var classified ClassifiedMentions
 	if !isAll {
-		classified = classifyMentions(tgMsg.Text, botUsername, agents, func(username string) (string, bool) {
+		classified = classifyMentions(resolvedText, botUsername, agents, func(username string) (string, bool) {
 			// User resolver: for now return not-found. Unresolvable @chatUser
 			// mentions are dropped per the design doc.
 			return "", false
 		})
 	}
-
-	// Resolve @username mentions to scion user identities and replace
-	// text_mention display names with "user:email" in the message text.
-	resolvedText, resolvedMentionsJSON := b.resolveUserMentions(ctx, tgMsg)
 
 	// Strip only start-mention agent slugs (not body mentions) so body mentions
 	// remain in the delivered text. For @all or fallback routing (no classifyMentions

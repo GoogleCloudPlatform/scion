@@ -151,29 +151,33 @@ func classifyMentions(text string, botUsername string, knownAgents []string, use
 	// preserving original spacing by using byte positions from the original text.
 	var strippedBody string
 	if startEnd < len(tokens) {
-		// Find the byte offset of the first non-@ token in the original text.
-		// We need to find the N-th whitespace-separated token's start position.
+		// Find the byte offset of the first body token (the startEnd-th
+		// whitespace-separated token) in the original text, using
+		// unicode.IsSpace to match strings.Fields' splitting behavior.
 		idx := 0
 		tokenCount := 0
-		for idx < len(text) {
+		runes := []rune(text)
+		for idx < len(runes) {
 			// Skip whitespace.
-			for idx < len(text) && (text[idx] == ' ' || text[idx] == '\t' || text[idx] == '\n' || text[idx] == '\r') {
+			for idx < len(runes) && unicode.IsSpace(runes[idx]) {
 				idx++
 			}
-			if idx >= len(text) {
+			if idx >= len(runes) {
 				break
 			}
 			if tokenCount == startEnd {
 				break
 			}
 			// Skip non-whitespace.
-			for idx < len(text) && text[idx] != ' ' && text[idx] != '\t' && text[idx] != '\n' && text[idx] != '\r' {
+			for idx < len(runes) && !unicode.IsSpace(runes[idx]) {
 				idx++
 			}
 			tokenCount++
 		}
-		if idx < len(text) {
-			strippedBody = text[idx:]
+		if idx < len(runes) {
+			// Convert rune offset back to byte offset.
+			byteOffset := len(string(runes[:idx]))
+			strippedBody = text[byteOffset:]
 		}
 	}
 

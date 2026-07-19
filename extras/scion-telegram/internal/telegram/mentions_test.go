@@ -169,6 +169,16 @@ func TestClassifyMentions_PreservesOriginalSpacing(t *testing.T) {
 	assert.Equal(t, "do   this   task", result.StrippedBody)
 }
 
+func TestClassifyMentions_UnicodeWhitespace(t *testing.T) {
+	// Non-breaking space (U+00A0) between mention and body text.
+	text := "@agent-a do this"
+	result := classifyMentions(text, "BotName", []string{"agent-a"}, noUserResolver)
+
+	assert.Len(t, result.StartMentions, 1)
+	assert.Equal(t, "agent-a", result.StartMentions[0].Name)
+	assert.Equal(t, "do this", result.StrippedBody)
+}
+
 func TestClassifyMentions_UnknownBodyMentionsSkipped(t *testing.T) {
 	// Body mentions that are "unknown" should be skipped per spec
 	result := classifyMentions("@agent-a do this and cc @unknownPerson", "BotName", []string{"agent-a"}, noUserResolver)

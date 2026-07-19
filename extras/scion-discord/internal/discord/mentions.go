@@ -282,9 +282,9 @@ func classifyMentions(text string, botUserID string, knownAgents []string, userR
 	strippedBody := strings.Join(bodyTokens, " ")
 
 	// Phase 2: scan body tokens for @mentions.
-	startSeen := make(map[string]bool, len(startMentions))
+	seen := make(map[string]bool, len(startMentions))
 	for _, sm := range startMentions {
-		startSeen[strings.ToLower(sm.Name)] = true
+		seen[strings.ToLower(sm.Name)] = true
 	}
 
 	var bodyMentions []Mention
@@ -296,10 +296,12 @@ func classifyMentions(text string, botUserID string, knownAgents []string, userR
 		if !ok || m.Kind == "unknown" {
 			continue
 		}
-		// Deduplicate: skip if already a start mention.
-		if startSeen[strings.ToLower(m.Name)] {
+		// Deduplicate: skip if already seen (start mention or earlier body mention).
+		lower := strings.ToLower(m.Name)
+		if seen[lower] {
 			continue
 		}
+		seen[lower] = true
 		bodyMentions = append(bodyMentions, m)
 	}
 

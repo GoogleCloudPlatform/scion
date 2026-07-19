@@ -464,3 +464,16 @@ func TestClassifyMentions_UnknownBodyMentionsSkipped(t *testing.T) {
 	assert.Empty(t, result.StartMentions)
 	assert.Empty(t, result.BodyMentions)
 }
+
+func TestClassifyMentions_BodyMentionDedup(t *testing.T) {
+	// Duplicate @agent-b in body should be deduplicated.
+	result := classifyMentions("@agent-a hey @agent-b check @agent-b", "BOT123",
+		[]string{"agent-a", "agent-b"}, noopResolver)
+
+	assert.Equal(t, []Mention{
+		{Name: "agent-a", Kind: "agent", Identity: "agent:agent-a"},
+	}, result.StartMentions)
+	assert.Equal(t, []Mention{
+		{Name: "agent-b", Kind: "agent", Identity: "agent:agent-b"},
+	}, result.BodyMentions)
+}
