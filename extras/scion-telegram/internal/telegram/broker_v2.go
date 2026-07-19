@@ -1953,6 +1953,27 @@ func (b *TelegramBrokerV2) handleGroupMessage(tgMsg *TGMessage) {
 			}
 		}
 	}
+	// Filter targets to only start-mention agents.
+	// Body-mention agents will be handled by the TypeMention delivery loop.
+	startMentionSet := make(map[string]bool)
+	for _, sm := range classified.StartMentions {
+		if sm.Kind == "agent" {
+			startMentionSet[strings.ToLower(sm.Name)] = true
+		}
+	}
+
+	// Replace targets with only the start-mention agents.
+	// (Keep isAll path unchanged — @all means all agents are start targets)
+	if !isAll && len(classified.StartMentions) > 0 {
+		filteredTargets := make([]string, 0, len(classified.StartMentions))
+		for _, t := range targets {
+			if startMentionSet[strings.ToLower(t)] {
+				filteredTargets = append(filteredTargets, t)
+			}
+		}
+		targets = filteredTargets
+	}
+
 	cleanText := stripMentions(resolvedText, botUsername, stripSlugs)
 	cleanText = strings.TrimSpace(cleanText)
 
