@@ -278,3 +278,58 @@ func TestIsLocalhostURL(t *testing.T) {
 		})
 	}
 }
+
+func TestIAPAudienceToCloudRunURL(t *testing.T) {
+	tests := []struct {
+		name     string
+		audience string
+		want     string
+	}{
+		{
+			name:     "valid audience",
+			audience: "/projects/721899303052/locations/us-central1/services/scion-hub",
+			want:     "https://scion-hub-721899303052.us-central1.run.app",
+		},
+		{
+			name:     "valid audience with trailing slash",
+			audience: "/projects/721899303052/locations/us-central1/services/scion-hub/",
+			want:     "https://scion-hub-721899303052.us-central1.run.app",
+		},
+		{
+			name:     "valid audience with whitespace",
+			audience: "  /projects/123456/locations/europe-west1/services/my-svc  ",
+			want:     "https://my-svc-123456.europe-west1.run.app",
+		},
+		{
+			name:     "missing leading slash",
+			audience: "projects/123456/locations/us-central1/services/scion-hub",
+			want:     "",
+		},
+		{
+			name:     "wrong structure",
+			audience: "/projects/123456/regions/us-central1/services/scion-hub",
+			want:     "",
+		},
+		{
+			name:     "empty string",
+			audience: "",
+			want:     "",
+		},
+		{
+			name:     "too few parts",
+			audience: "/projects/123456/locations/us-central1",
+			want:     "",
+		},
+		{
+			name:     "empty service name",
+			audience: "/projects/123456/locations/us-central1/services/",
+			want:     "",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := iapAudienceToCloudRunURL(tt.audience)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}

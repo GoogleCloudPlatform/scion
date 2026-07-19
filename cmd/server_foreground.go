@@ -1170,10 +1170,15 @@ func resolveHubEndpoint(cfg *config.GlobalConfig, brokerSettings *config.Setting
 // iapAudienceToCloudRunURL converts a Cloud Run native IAP audience path
 // (/projects/<number>/locations/<region>/services/<service>) to the
 // corresponding Cloud Run service URL (https://<service>-<number>.<region>.run.app).
+//
+// NOTE: This produces legacy-format Cloud Run URLs (<service>-<number>.<region>.run.app).
+// Newer Cloud Run services use the format <service>-<hash>-<region>.a.run.app where
+// the hash cannot be derived from the project number. For those services, set
+// SCION_SERVER_BASE_URL explicitly instead of relying on this derivation.
 func iapAudienceToCloudRunURL(audience string) string {
 	// Expected format: /projects/<project-number>/locations/<region>/services/<service>
-	parts := strings.Split(strings.TrimSpace(audience), "/")
-	if len(parts) != 7 || parts[1] != "projects" || parts[3] != "locations" || parts[5] != "services" {
+	parts := strings.Split(strings.TrimRight(strings.TrimSpace(audience), "/"), "/")
+	if len(parts) != 7 || parts[0] != "" || parts[1] != "projects" || parts[3] != "locations" || parts[5] != "services" {
 		return ""
 	}
 	projectNumber := parts[2]
