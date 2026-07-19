@@ -1992,8 +1992,13 @@ func (b *TelegramBrokerV2) handleGroupMessage(tgMsg *TGMessage) {
 		}
 
 		// If body-mention filter emptied targets, restore default agent so instruction is delivered.
-		if len(targets) == 0 && effectiveDefault != "" {
-			targets = []string{effectiveDefault}
+		if len(targets) == 0 && len(classified.StartMentions) == 0 && effectiveDefault != "" {
+			hasAttachment := tgMsg.Photo != nil || tgMsg.Document != nil || tgMsg.Audio != nil || tgMsg.Video != nil
+			text := strings.TrimSpace(tgMsg.Text)
+			textRoutes := text != "" && !strings.HasPrefix(text, "/") && !hasNonBotUserMention(tgMsg, botUsername, agents)
+			if (textRoutes || hasAttachment) && slices.Contains(agents, effectiveDefault) {
+				targets = []string{effectiveDefault}
+			}
 		}
 	}
 
