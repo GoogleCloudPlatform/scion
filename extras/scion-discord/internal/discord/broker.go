@@ -532,13 +532,7 @@ func (b *DiscordBroker) Publish(ctx context.Context, topic string, msg *messages
 
 	// Extract agent slug from sender for webhook username.
 	// Prefer msg.Sender so observed agent-to-agent messages display under the sender's identity.
-	var senderSlug string
-	if strings.HasPrefix(msg.Sender, "agent:") {
-		senderSlug = strings.TrimPrefix(msg.Sender, "agent:")
-	}
-	if senderSlug == "" {
-		senderSlug = agentSlug // fallback to topic agent for non-agent senders
-	}
+	senderSlug := deriveSenderSlug(msg.Sender, agentSlug)
 
 	// Replace scion user emails with Discord @mentions in the message body.
 	msg.Msg = resolveOutboundMentions(ctx, store, msg.Msg)

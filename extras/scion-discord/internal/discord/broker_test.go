@@ -704,21 +704,8 @@ func TestResolveOutboundMentions(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// senderSlug derivation (mirrors broker.go publish logic)
+// senderSlug derivation — uses shared deriveSenderSlug from format.go
 // ---------------------------------------------------------------------------
-
-// deriveSenderSlug mirrors the senderSlug logic in publishToDiscord so we can
-// unit-test it without wiring up the full broker.
-func deriveSenderSlug(sender, agentSlug string) string {
-	var senderSlug string
-	if strings.HasPrefix(sender, "agent:") {
-		senderSlug = strings.TrimPrefix(sender, "agent:")
-	}
-	if senderSlug == "" {
-		senderSlug = agentSlug
-	}
-	return senderSlug
-}
 
 func TestDeriveSenderSlug(t *testing.T) {
 	tests := []struct {

@@ -405,6 +405,9 @@ func SplitLongMessage(text string, maxLen int) []string {
 // formatObservedEmbed creates an embed for observed/relayed agent-to-agent
 // messages. The gray sidebar visually distinguishes them from direct messages.
 func formatObservedEmbed(msg *messages.StructuredMessage) *discordgo.MessageEmbed {
+	if msg == nil {
+		return nil
+	}
 	senderSlug := strings.TrimPrefix(msg.Sender, "agent:")
 	recipientSlug := strings.TrimPrefix(msg.Recipient, "agent:")
 	return &discordgo.MessageEmbed{
@@ -412,4 +415,17 @@ func formatObservedEmbed(msg *messages.StructuredMessage) *discordgo.MessageEmbe
 		Description: msg.Msg,
 		Color:       0x808080, // gray sidebar distinguishes relayed from direct messages
 	}
+}
+
+// deriveSenderSlug extracts the sender's display slug from the message sender
+// field, falling back to the topic-derived agentSlug when the sender is not an agent.
+func deriveSenderSlug(sender, agentSlug string) string {
+	var senderSlug string
+	if strings.HasPrefix(sender, "agent:") {
+		senderSlug = strings.TrimPrefix(sender, "agent:")
+	}
+	if senderSlug == "" {
+		senderSlug = agentSlug
+	}
+	return senderSlug
 }
