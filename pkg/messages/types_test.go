@@ -29,6 +29,7 @@ func TestValidateType(t *testing.T) {
 		{TypeStateChange, false},
 		{TypeAssistantReply, false},
 		{TypeGroupSet, false},
+		{TypeMention, false},
 		{"unknown", true},
 		{"", true},
 	}
@@ -388,6 +389,55 @@ func TestLogAttrsWithRecipients(t *testing.T) {
 	}
 	if !found {
 		t.Error("LogAttrs() should include recipients when set")
+	}
+}
+
+func TestStructuredMessage_ValidateMention(t *testing.T) {
+	m := &StructuredMessage{
+		Version:   Version,
+		Timestamp: "2026-07-19T10:00:00Z",
+		Sender:    "agent:relay",
+		Recipient: "agent:worker",
+		Msg:       "you were mentioned in a message",
+		Type:      TypeMention,
+		Metadata: map[string]string{
+			"mention_source":   "agent:agent-a",
+			"mention_position": "body",
+		},
+	}
+	if err := m.Validate(); err != nil {
+		t.Errorf("unexpected error for valid mention message: %v", err)
+	}
+}
+
+func TestNewMention(t *testing.T) {
+	m := NewMention("agent:relay", "agent:worker", "you were mentioned", "group[sender,agent:a,agent:b]")
+	if m.Version != Version {
+		t.Errorf("version = %d, want %d", m.Version, Version)
+	}
+	if m.Type != TypeMention {
+		t.Errorf("type = %q, want %q", m.Type, TypeMention)
+	}
+	if m.Sender != "agent:relay" {
+		t.Errorf("sender = %q, want %q", m.Sender, "agent:relay")
+	}
+	if m.Recipient != "agent:worker" {
+		t.Errorf("recipient = %q, want %q", m.Recipient, "agent:worker")
+	}
+	if m.Msg != "you were mentioned" {
+		t.Errorf("msg = %q, want %q", m.Msg, "you were mentioned")
+	}
+	if m.Timestamp == "" {
+		t.Error("timestamp should be set")
+	}
+	if m.Metadata == nil {
+		t.Fatal("metadata should not be nil")
+	}
+	if got := m.Metadata["mention_source"]; got != "group[sender,agent:a,agent:b]" {
+		t.Errorf("metadata[mention_source] = %q, want %q", got, "group[sender,agent:a,agent:b]")
+	}
+	if got := m.Metadata["mention_position"]; got != "body" {
+		t.Errorf("metadata[mention_position] = %q, want %q", got, "body")
 	}
 }
 

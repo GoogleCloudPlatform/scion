@@ -55,6 +55,7 @@ const (
 	TypeStateChange    = "state-change"
 	TypeAssistantReply = "assistant-reply"
 	TypeGroupSet       = "group-set"
+	TypeMention        = "mention"
 )
 
 // Visibility constants control which consumers see a message.
@@ -84,6 +85,7 @@ var validTypes = map[string]bool{
 	TypeStateChange:    true,
 	TypeAssistantReply: true,
 	TypeGroupSet:       true,
+	TypeMention:        true,
 }
 
 // StructuredMessage represents a formatted Scion message.
@@ -117,7 +119,7 @@ type StructuredMessage struct {
 // ValidateType returns an error if the message type is not in the closed enum.
 func ValidateType(t string) error {
 	if !validTypes[t] {
-		return fmt.Errorf("invalid message type %q: must be one of: instruction, input-needed, state-change, assistant-reply, group-set", t)
+		return fmt.Errorf("invalid message type %q: must be one of: instruction, input-needed, state-change, assistant-reply, group-set, mention", t)
 	}
 	return nil
 }
@@ -194,6 +196,24 @@ func NewNotification(sender, recipient, msg, msgType string) *StructuredMessage 
 		Recipient: recipient,
 		Msg:       msg,
 		Type:      msgType,
+	}
+}
+
+// NewMention creates a mention notification message.
+// mentionSource identifies who the primary recipient of the original message was
+// (e.g., "agent:agent-a" or "group[sender,agent:a,agent:b]").
+func NewMention(sender, recipient, msg, mentionSource string) *StructuredMessage {
+	return &StructuredMessage{
+		Version:   Version,
+		Timestamp: time.Now().UTC().Format(time.RFC3339),
+		Sender:    sender,
+		Recipient: recipient,
+		Msg:       msg,
+		Type:      TypeMention,
+		Metadata: map[string]string{
+			"mention_source":   mentionSource,
+			"mention_position": "body",
+		},
 	}
 }
 
