@@ -278,8 +278,35 @@ func classifyMentions(text string, botUserID string, knownAgents []string, userR
 	}
 
 	// Build StrippedBody by dropping the leading mention tokens.
+	// Use byte-offset preservation to avoid destroying formatting.
+	var strippedBody string
+	if startTokenCount < len(tokens) {
+		idx := 0
+		tokenCount := 0
+		runes := []rune(text)
+		for idx < len(runes) {
+			// Skip whitespace.
+			for idx < len(runes) && unicode.IsSpace(runes[idx]) {
+				idx++
+			}
+			if idx >= len(runes) {
+				break
+			}
+			if tokenCount == startTokenCount {
+				break
+			}
+			// Skip non-whitespace.
+			for idx < len(runes) && !unicode.IsSpace(runes[idx]) {
+				idx++
+			}
+			tokenCount++
+		}
+		if idx < len(runes) {
+			byteOffset := len(string(runes[:idx]))
+			strippedBody = text[byteOffset:]
+		}
+	}
 	bodyTokens := tokens[startTokenCount:]
-	strippedBody := strings.Join(bodyTokens, " ")
 
 	// Phase 2: scan body tokens for @mentions.
 	seen := make(map[string]bool, len(startMentions))

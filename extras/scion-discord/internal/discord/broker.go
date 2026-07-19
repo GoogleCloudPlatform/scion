@@ -1148,16 +1148,20 @@ func (b *DiscordBroker) handleIncomingMessage(s *discordgo.Session, m *discordgo
 
 	// Determine which agent slugs are start-mentions (to strip from text).
 	// Only strip start-mention agents; body mentions stay in text.
-	var startMentionSlugs []string
-	for _, sm := range classified.StartMentions {
-		if sm.Kind == "agent" {
-			startMentionSlugs = append(startMentionSlugs, sm.Name)
+	// For @all or fallback routing, fall back to stripping all targets.
+	stripSlugs := targets
+	if !isAll && len(classified.StartMentions) > 0 {
+		stripSlugs = make([]string, 0, len(classified.StartMentions))
+		for _, sm := range classified.StartMentions {
+			if sm.Kind == "agent" {
+				stripSlugs = append(stripSlugs, sm.Name)
+			}
 		}
 	}
 
 	// Strip bot and start-mention agent mentions from message text.
 	// Body-mention agents remain visible in the delivered text.
-	cleanText := stripMentions(m.Content, botUserID, startMentionSlugs)
+	cleanText := stripMentions(m.Content, botUserID, stripSlugs)
 	cleanText = strings.TrimSpace(cleanText)
 
 	// Download Discord attachments and build metadata.
@@ -1251,7 +1255,7 @@ func (b *DiscordBroker) handleIncomingMessage(s *discordgo.Session, m *discordgo
 	if !isAll && len(classified.BodyMentions) > 0 {
 		targetSet := make(map[string]bool, len(targets))
 		for _, slug := range targets {
-			targetSet[slug] = true
+			targetSet[strings.ToLower(slug)] = true
 		}
 
 		// Build the mention source: who the primary message was addressed to.
@@ -1267,7 +1271,7 @@ func (b *DiscordBroker) handleIncomingMessage(s *discordgo.Session, m *discordgo
 				continue
 			}
 			// Skip agents already receiving the primary message.
-			if targetSet[bm.Name] {
+			if targetSet[strings.ToLower(bm.Name)] {
 				continue
 			}
 
@@ -1279,6 +1283,9 @@ func (b *DiscordBroker) handleIncomingMessage(s *discordgo.Session, m *discordgo
 			mentionMsg.Metadata["discord_message_id"] = m.ID
 			mentionMsg.Metadata["discord_guild_id"] = m.GuildID
 			mentionMsg.Metadata["project_id"] = link.ProjectID
+			if len(attachmentPaths) > 0 {
+				mentionMsg.Attachments = attachmentPaths
+			}
 
 			mentionTopic := projectcompat.AgentTopic(link.ProjectID, bm.Name)
 
