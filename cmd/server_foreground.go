@@ -866,9 +866,12 @@ func validateHostedHAPreflight(cfg *config.GlobalConfig) error {
 	if transportAudience == "" {
 		return fmt.Errorf("hosted HA deployment requires server.auth.transport.oidc_audience")
 	}
-	if transportAudience != proxyAudience {
-		return fmt.Errorf("hosted HA deployment requires server.auth.transport.oidc_audience to match server.auth.proxy.iap.audience")
-	}
+	// Note: transport.oidc_audience and proxy.iap.audience are intentionally
+	// allowed to differ. proxy.iap.audience is the Cloud Run native IAP
+	// audience path used for validating incoming IAP-signed JWTs, while
+	// transport.oidc_audience is the audience minted into OIDC tokens for
+	// dispatched agents (typically the IAP OAuth client ID). IAP requires
+	// the OAuth client ID format for token validation, not the Cloud Run path.
 	if strings.TrimSpace(cfg.Auth.Transport.PlatformAuthSA) == "" {
 		return fmt.Errorf("hosted HA deployment requires server.auth.transport.platform_auth_sa")
 	}
@@ -1143,6 +1146,16 @@ func resolveHubEndpoint(cfg *config.GlobalConfig, brokerSettings *config.Setting
 		return hubEndpoint
 	}
 
+	// In hosted mode with IAP authentication, derive the Cloud Run URL from
+	// the IAP audience. This prevents the localhost:8080 fallback which is
+	// unreachable from GKE-dispatched agents.
+	if hostedMode && cfg.Auth.Proxy != nil && cfg.Auth.Proxy.IAP != nil && cfg.Auth.Proxy.IAP.Audience != "" {
+		if cloudRunURL := iapAudienceToCloudRunURL(cfg.Auth.Proxy.IAP.Audience); cloudRunURL != "" {
+			log.Printf("Hub endpoint derived from IAP audience: %s", cloudRunURL)
+			return cloudRunURL
+		}
+	}
+
 	port := cfg.Hub.Port
 	if enableWeb {
 		port = webPort
@@ -1152,6 +1165,24 @@ func resolveHubEndpoint(cfg *config.GlobalConfig, brokerSettings *config.Setting
 		log.Printf("Auto-computed hub endpoint for combo mode: %s", hubEndpoint)
 	}
 	return hubEndpoint
+}
+
+// iapAudienceToCloudRunURL converts a Cloud Run native IAP audience path
+// (/projects/<number>/locations/<region>/services/<service>) to the
+// corresponding Cloud Run service URL (https://<service>-<number>.<region>.run.app).
+func iapAudienceToCloudRunURL(audience string) string {
+	// Expected format: /projects/<project-number>/locations/<region>/services/<service>
+	parts := strings.Split(strings.TrimSpace(audience), "/")
+	if len(parts) != 7 || parts[1] != "projects" || parts[3] != "locations" || parts[5] != "services" {
+		return ""
+	}
+	projectNumber := parts[2]
+	region := parts[4]
+	service := parts[6]
+	if projectNumber == "" || region == "" || service == "" {
+		return ""
+	}
+	return fmt.Sprintf("https://%s-%s.%s.run.app", service, projectNumber, region)
 }
 
 // parseAdminEmails parses admin emails from the flag or config.
