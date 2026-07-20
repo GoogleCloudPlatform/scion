@@ -59,7 +59,7 @@ func TestPopulateAgentConfig_RelativeWorkspacePreserved(t *testing.T) {
 			"relative workspace should not be overwritten by hub-managed path")
 	})
 
-	t.Run("absolute workspace overwritten", func(t *testing.T) {
+	t.Run("absolute workspace preserved", func(t *testing.T) {
 		agent := &store.Agent{
 			ID: tid("agent-abs"),
 			AppliedConfig: &store.AgentAppliedConfig{
@@ -69,10 +69,8 @@ func TestPopulateAgentConfig_RelativeWorkspacePreserved(t *testing.T) {
 
 		srv.populateAgentConfig(context.Background(), agent, project, nil)
 
-		expectedPath, err := hubManagedProjectPath(slug)
-		require.NoError(t, err)
-		assert.Equal(t, expectedPath, agent.AppliedConfig.Workspace,
-			"absolute workspace should be overwritten with hub-managed path")
+		assert.Equal(t, "/absolute/path", agent.AppliedConfig.Workspace,
+			"absolute workspace should be preserved as user override")
 	})
 
 	t.Run("empty workspace overwritten", func(t *testing.T) {

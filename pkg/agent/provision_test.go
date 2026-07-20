@@ -2785,6 +2785,21 @@ func TestResolveWorkspaceSubdir(t *testing.T) {
 			t.Errorf("expected 'does not exist' in error, got: %v", err)
 		}
 	})
+
+	t.Run("dotdot-prefixed directory name accepted", func(t *testing.T) {
+		// A directory named "..data" does not escape the root
+		dotdotDir := filepath.Join(root, "..data")
+		_ = os.MkdirAll(dotdotDir, 0755)
+
+		result, err := resolveWorkspaceSubdir(root, "..data")
+		if err != nil {
+			t.Fatalf("unexpected error for '..data' directory: %v", err)
+		}
+		evalDotdotDir, _ := filepath.EvalSymlinks(dotdotDir)
+		if result != evalDotdotDir {
+			t.Errorf("expected %q, got %q", evalDotdotDir, result)
+		}
+	})
 }
 
 func TestResolveProjectRoot(t *testing.T) {
@@ -2810,6 +2825,13 @@ func TestResolveProjectRoot(t *testing.T) {
 			WorkspacePath: "",
 		}
 		result := resolveProjectRoot(settings, "/project/.scion")
+		if result != "/project" {
+			t.Errorf("expected /project, got %q", result)
+		}
+	})
+
+	t.Run("projectDir without .scion suffix", func(t *testing.T) {
+		result := resolveProjectRoot(nil, "/project")
 		if result != "/project" {
 			t.Errorf("expected /project, got %q", result)
 		}

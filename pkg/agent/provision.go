@@ -404,7 +404,10 @@ func resolveProjectRoot(settings *config.VersionedSettings, projectDir string) s
 	if settings != nil && settings.WorkspacePath != "" {
 		return settings.WorkspacePath
 	}
-	return filepath.Dir(projectDir)
+	if filepath.Base(projectDir) == config.DotScion {
+		return filepath.Dir(projectDir)
+	}
+	return projectDir
 }
 
 // resolveWorkspaceSubdir resolves a relative workspace subdirectory path
@@ -419,7 +422,7 @@ func resolveWorkspaceSubdir(projectRoot, subdir string) (string, error) {
 	if cleaned == "." {
 		return projectRoot, nil
 	}
-	if strings.HasPrefix(cleaned, "..") {
+	if cleaned == ".." || strings.HasPrefix(cleaned, ".."+string(filepath.Separator)) {
 		return "", fmt.Errorf("workspace subdir %q escapes project root (contains '..')", subdir)
 	}
 
@@ -439,7 +442,7 @@ func resolveWorkspaceSubdir(projectRoot, subdir string) (string, error) {
 	}
 
 	rel, err := filepath.Rel(realRoot, realJoined)
-	if err != nil || strings.HasPrefix(rel, "..") {
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return "", fmt.Errorf("workspace subdir %q resolves to %s which is outside project root %s", subdir, realJoined, realRoot)
 	}
 
