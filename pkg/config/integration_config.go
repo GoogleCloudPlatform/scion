@@ -348,6 +348,7 @@ func CreatePluginConfigFile(pluginName, configFilePath string) error {
 	switch pluginName {
 	case "discord":
 		content += "application_id: \"\"\n"
+		content += "guild_ids: \"\"\n"
 	case "slack":
 		content += "socket_mode: \"false\"\n"
 		content += "listen_address: \":3000\"\n"

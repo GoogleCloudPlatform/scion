@@ -60,6 +60,7 @@ interface PlatformFieldDef {
   label: string;
   description: string;
   defaultValue: string;
+  placeholder?: string;
 }
 
 interface PlatformSecretDef {
@@ -109,6 +110,7 @@ const PLATFORM_FIELDS: Record<string, PlatformFieldDef[]> = {
   ],
   discord: [
     { key: 'application_id', label: 'Application ID', description: 'Discord application ID for slash commands', defaultValue: '' },
+    { key: 'guild_ids', label: 'Allowed Guild IDs', description: 'Comma-separated Discord server IDs. Leave empty to register commands globally across all servers the bot joins.', defaultValue: '', placeholder: 'Global — all servers' },
   ],
   slack: [
     { key: 'socket_mode', label: 'Socket Mode', description: 'Use Slack Socket Mode instead of HTTP webhooks (no public URL needed)', defaultValue: 'false' },
@@ -954,7 +956,7 @@ export class ScionPageAdminIntegrations extends LitElement {
                 <label>${field.label}</label>
                 <sl-input
                   .value=${this.editedSettings[field.key] ?? field.defaultValue}
-                  placeholder=${field.defaultValue}
+                  placeholder=${field.placeholder ?? field.defaultValue}
                   @sl-change=${(e: Event) => {
                     this.editedSettings = {
                       ...this.editedSettings,
