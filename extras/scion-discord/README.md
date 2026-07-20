@@ -94,7 +94,7 @@ server:
           # Comma-separated list of Discord guild (server) IDs.
           # Leave empty for global commands (can take up to 1 hour to propagate).
           # guild_ids: "111111111111111111,222222222222222222"
-          guild_id: ""
+          guild_ids: ""
 
           # SQLite database for channel links, user mappings, and state.
           # Default: discord.db (relative to hub working directory).
