@@ -143,6 +143,20 @@ func TestSourceURLFormat(t *testing.T) {
 	}
 }
 
+func TestMandatoryBoilerplateFS(t *testing.T) {
+	fsys := MandatoryBoilerplateFS()
+	if fsys == nil {
+		t.Fatal("MandatoryBoilerplateFS() returned nil")
+	}
+	data, err := fs.ReadFile(fsys, "agent-instructions-preamble.md")
+	if err != nil {
+		t.Fatalf("cannot read agent-instructions-preamble.md: %v", err)
+	}
+	if len(data) == 0 {
+		t.Error("agent-instructions-preamble.md is empty")
+	}
+}
+
 func assertSourceURL(t *testing.T, r BundledResource) {
 	t.Helper()
 	if r.Kind == storage.ResourceKindHarnessConfig {

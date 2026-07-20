@@ -2632,12 +2632,46 @@ func TestProvisionAgent_MandatoryPreamble(t *testing.T) {
 				string(realPreamble), string(content))
 		}
 	})
-}
 
-// min returns the smaller of a and b.
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
+	t.Run("inline config agent receives preamble prepended to inline instructions", func(t *testing.T) {
+		if realPreamble == nil {
+			t.Skip("mandatory preamble is empty — skipping injection check")
+		}
+		_, projectScionDir := setupGenericEnv(t)
+
+		inlineInstructions := "# Inline Instructions\nDo inline things.\n"
+		inlineCfg := &api.ScionConfig{
+			AgentInstructions: inlineInstructions,
+		}
+
+		// Use templateName="default" with no default template seeded on disk so
+		// GetTemplateChainInProject returns an empty chain without error, which
+		// triggers the else-if inlineCfg path in ProvisionAgent.
+		// Pass "generic" as harnessConfig so the seeded harness-config is used.
+		agentHome, _, _, err := ProvisionAgent(
+			context.Background(),
+			"preamble-inline-agent",
+			"default", // no default template on disk → empty chain → inline path
+			"", "generic", projectScionDir,
+			"", "", "", "",
+			inlineCfg,
+		)
+		if err != nil {
+			t.Fatalf("ProvisionAgent failed: %v", err)
+		}
+
+		// Generic harness writes instructions to agents.md in agentHome.
+		instrFile := filepath.Join(agentHome, "agents.md")
+		content, err := os.ReadFile(instrFile)
+		if err != nil {
+			t.Fatalf("failed to read instructions file: %v", err)
+		}
+		if !bytes.HasPrefix(content, realPreamble) {
+			t.Errorf("expected inline-config instructions to start with mandatory preamble\npreamble: %q\ngot start: %q",
+				string(realPreamble), string(content[:min(len(content), len(realPreamble)+20)]))
+		}
+		if !bytes.Contains(content, []byte("# Inline Instructions")) {
+			t.Errorf("expected inline content in instructions, got %q", string(content))
+		}
+	})
 }

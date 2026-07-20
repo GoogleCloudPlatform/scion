@@ -941,7 +941,7 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 					return "", "", nil, fmt.Errorf("failed to inject agent instructions: %w", err)
 				}
 			} else {
-				util.Debugf("ProvisionAgent: agent_instructions resolved to nil, skipping injection")
+				util.Debugf("ProvisionAgent: both mandatory preamble and template content are nil, skipping injection")
 			}
 		} else if len(mandatoryPreamble) > 0 {
 			util.Debugf("ProvisionAgent: no agent_instructions configured; injecting mandatory preamble only (%d bytes)", len(mandatoryPreamble))
