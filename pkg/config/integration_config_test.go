@@ -19,6 +19,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 func TestYAMLConfigProvider_LoadNonExistent(t *testing.T) {
@@ -307,6 +309,152 @@ func TestResolvePluginConfig_BackendKeyNamesStrippedFromBothSources(t *testing.T
 	}
 	if result["inbound_mode"] != "poll" {
 		t.Errorf("non-secret file key should survive: got %q", result["inbound_mode"])
+	}
+}
+
+// setupTestHome sets HOME to a temp dir and creates the .scion subdirectory
+// so that GetGlobalDir() returns a predictable path. Returns the .scion dir
+// and the settings.yaml path within it.
+func setupTestHome(t *testing.T) (globalDir, settingsPath string) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	globalDir = filepath.Join(home, ".scion")
+	if err := os.MkdirAll(globalDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	settingsPath = filepath.Join(globalDir, "settings.yaml")
+	return globalDir, settingsPath
+}
+
+func TestAddPluginToMessageBrokerTypes_NewPlugin(t *testing.T) {
+	_, settingsPath := setupTestHome(t)
+
+	// Seed a minimal settings.yaml.
+	if err := os.WriteFile(settingsPath, []byte("server:\n  plugins: {}\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := AddPluginToMessageBrokerTypes("telegram"); err != nil {
+		t.Fatalf("AddPluginToMessageBrokerTypes() error: %v", err)
+	}
+
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Parse back and verify.
+	var raw map[string]interface{}
+	if err := yaml.Unmarshal(data, &raw); err != nil {
+		t.Fatal(err)
+	}
+
+	server := raw["server"].(map[string]interface{})
+	mb := server["message_broker"].(map[string]interface{})
+
+	if enabled, ok := mb["enabled"].(bool); !ok || !enabled {
+		t.Error("expected message_broker.enabled = true")
+	}
+
+	typesRaw, ok := mb["types"].([]interface{})
+	if !ok {
+		t.Fatal("expected message_broker.types to be a list")
+	}
+	if len(typesRaw) != 1 || typesRaw[0] != "telegram" {
+		t.Errorf("expected types=[telegram], got %v", typesRaw)
+	}
+}
+
+func TestAddPluginToMessageBrokerTypes_Idempotent(t *testing.T) {
+	_, settingsPath := setupTestHome(t)
+
+	if err := os.WriteFile(settingsPath, []byte("server:\n  message_broker:\n    enabled: true\n    types:\n      - telegram\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := AddPluginToMessageBrokerTypes("telegram"); err != nil {
+		t.Fatalf("AddPluginToMessageBrokerTypes() error: %v", err)
+	}
+
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var raw map[string]interface{}
+	if err := yaml.Unmarshal(data, &raw); err != nil {
+		t.Fatal(err)
+	}
+
+	server := raw["server"].(map[string]interface{})
+	mb := server["message_broker"].(map[string]interface{})
+	typesRaw := mb["types"].([]interface{})
+	if len(typesRaw) != 1 {
+		t.Errorf("expected types list to remain length 1 (idempotent), got %v", typesRaw)
+	}
+}
+
+func TestAddPluginToMessageBrokerTypes_AppendsSecondPlugin(t *testing.T) {
+	_, settingsPath := setupTestHome(t)
+
+	if err := os.WriteFile(settingsPath, []byte("server:\n  message_broker:\n    enabled: true\n    types:\n      - telegram\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := AddPluginToMessageBrokerTypes("discord"); err != nil {
+		t.Fatalf("AddPluginToMessageBrokerTypes() error: %v", err)
+	}
+
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var raw map[string]interface{}
+	if err := yaml.Unmarshal(data, &raw); err != nil {
+		t.Fatal(err)
+	}
+
+	server := raw["server"].(map[string]interface{})
+	mb := server["message_broker"].(map[string]interface{})
+	typesRaw := mb["types"].([]interface{})
+	if len(typesRaw) != 2 {
+		t.Fatalf("expected 2 types, got %v", typesRaw)
+	}
+	if typesRaw[0] != "telegram" || typesRaw[1] != "discord" {
+		t.Errorf("expected [telegram discord], got %v", typesRaw)
+	}
+}
+
+func TestAddPluginToMessageBrokerTypes_NoSettingsFile(t *testing.T) {
+	_, settingsPath := setupTestHome(t)
+
+	// No settings.yaml exists yet — the function should create one.
+	if err := AddPluginToMessageBrokerTypes("slack"); err != nil {
+		t.Fatalf("AddPluginToMessageBrokerTypes() error: %v", err)
+	}
+
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var raw map[string]interface{}
+	if err := yaml.Unmarshal(data, &raw); err != nil {
+		t.Fatal(err)
+	}
+
+	server := raw["server"].(map[string]interface{})
+	mb := server["message_broker"].(map[string]interface{})
+
+	if enabled, ok := mb["enabled"].(bool); !ok || !enabled {
+		t.Error("expected message_broker.enabled = true")
+	}
+
+	typesRaw := mb["types"].([]interface{})
+	if len(typesRaw) != 1 || typesRaw[0] != "slack" {
+		t.Errorf("expected types=[slack], got %v", typesRaw)
 	}
 }
 

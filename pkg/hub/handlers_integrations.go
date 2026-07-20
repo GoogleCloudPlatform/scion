@@ -803,6 +803,9 @@ func (s *Server) handleInstallIntegration(w http.ResponseWriter, r *http.Request
 
 	settingsWriteMu.Lock()
 	err = config.AddPluginToSettings(name, configFilePath)
+	if err == nil {
+		err = config.AddPluginToMessageBrokerTypes(name)
+	}
 	settingsWriteMu.Unlock()
 	if err != nil {
 		slog.Error("Failed to add plugin to settings.yaml", "plugin", name, "error", err)
