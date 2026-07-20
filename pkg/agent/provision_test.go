@@ -2423,9 +2423,9 @@ func TestLoadMandatoryPreamble(t *testing.T) {
 
 	t.Run("mix of .md and non-.md files — only .md returned", func(t *testing.T) {
 		fsys := fstest.MapFS{
-			"preamble.md":  &fstest.MapFile{Data: []byte("# Preamble\n")},
-			"config.yaml":  &fstest.MapFile{Data: []byte("key: value\n")},
-			"readme.txt":   &fstest.MapFile{Data: []byte("some text\n")},
+			"preamble.md": &fstest.MapFile{Data: []byte("# Preamble\n")},
+			"config.yaml": &fstest.MapFile{Data: []byte("key: value\n")},
+			"readme.txt":  &fstest.MapFile{Data: []byte("some text\n")},
 		}
 		result, err := loadMandatoryPreamble(fsys)
 		if err != nil {
