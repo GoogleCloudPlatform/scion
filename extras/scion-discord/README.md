@@ -42,6 +42,8 @@ Go to the **OAuth2** tab, then **URL Generator**:
 2. Select the bot permissions listed below (or use the permissions integer `329101954112`)
 3. Copy the generated URL and open it to invite the bot
 
+> **Multi-server:** The same invite URL works for all servers. Each server admin opens the URL and selects their server. See [Multi-Server Setup](#multi-server-setup) for details.
+
 #### Required Bot Permissions
 
 | Permission | Purpose |
@@ -88,8 +90,10 @@ server:
           application_id: "your-application-id"
           public_key: "your-public-key"
 
-          # Guild-scoped command registration (instant updates, good for dev).
+          # Per-guild command registration (instant, recommended for multi-server).
+          # Comma-separated list of Discord guild (server) IDs.
           # Leave empty for global commands (can take up to 1 hour to propagate).
+          # guild_ids: "111111111111111111,222222222222222222"
           guild_id: ""
 
           # SQLite database for channel links, user mappings, and state.
@@ -118,6 +122,53 @@ The hub will discover and launch `scion-plugin-discord` as a managed subprocess.
 1. **Invite the bot** to your Discord server using the OAuth2 URL
 2. **Run `/scion setup`** in any channel → select a project from the list
 3. **Register your identity:** run `/scion register` → click the link → authenticate on your hub's profile page (`/profile/discord`)
+
+## Multi-Server Setup
+
+The Discord bot supports multiple servers simultaneously with a single bot token and Gateway connection.
+
+### Invite to Additional Servers
+
+The same OAuth2 invite URL works for all servers — each server admin selects their server in Discord's authorization dialog. No per-server unique URLs are needed.
+
+### Configure Guild IDs
+
+For instant slash command availability on specific servers, set `guild_ids` to a comma-separated list of Discord guild (server) IDs:
+
+```yaml
+guild_ids: "111111111111111111,222222222222222222"
+```
+
+To find a guild ID: enable Developer Mode in Discord (Settings → Advanced → Developer Mode), then right-click the server name → Copy Server ID.
+
+**Registration modes:**
+
+| Config | Behavior |
+|--------|----------|
+| `guild_ids: ""` (default) | Global registration — commands appear on ALL servers (may take up to 1hr) |
+| `guild_ids: "<id1>,<id2>"` | Per-guild registration — commands appear instantly on listed servers only |
+| `guild_id: "<id>"` | (Deprecated) Same as guild_ids with a single ID |
+
+When using per-guild registration, unlisted servers will not have `/scion` commands available. The bot is effectively non-functional on those servers.
+
+### Guild Removal
+
+When the bot is removed from a server, all channel links for that server are automatically deactivated. Messages will no longer be sent to channels on the removed server.
+
+If a server experiences a temporary Discord outage, links are preserved and resume automatically when the server becomes available again.
+
+### Trust Model
+
+**One bot = one trust domain.** All servers sharing the same bot token can see the same set of projects (via `/scion setup`). User registration is per-user, not per-server — a user registered on one server is registered on all servers the bot serves.
+
+If you need isolation between servers, use separate bot tokens (separate Discord Applications) with separate Scion hub deployments.
+
+### Operational Notes
+
+- **Rate limits** are shared across all servers (one bot token = one Discord REST API budget)
+- **User registration** is per-user, not per-server
+- **Channel links** include the server name for disambiguation in `/scion info` output
+- **Sharding** is not supported — Discord requires sharding at 2,500+ guilds, which is beyond typical self-hosted Scion deployments
 
 ## Agent-Led Installation and Setup
 
@@ -233,7 +284,8 @@ These keys go in `plugins.broker.discord.config` in `settings.yaml`:
 | `bot_token` | **Yes** | — | Discord bot token |
 | `application_id` | **Yes** | — | Discord application ID |
 | `public_key` | No | — | Discord application public key |
-| `guild_id` | No | — | Guild ID for guild-scoped slash commands (empty = global) |
+| `guild_ids` | No | — | Comma-separated guild IDs for per-guild slash command registration (instant updates). Empty = global commands (may take up to 1hr to propagate) |
+| `guild_id` | No | — | (Deprecated) Alias for `guild_ids`; accepts a single guild ID |
 | `db_path` | No | `discord.db` | Path to SQLite database for persistent state |
 | `mention_routing` | No | `true` | Enable @-mention routing for messages |
 | `send_queue_size` | No | `100` | Max queued outbound messages per channel |
@@ -260,7 +312,7 @@ server:
           bot_token: "MTIzNDU2Nzg5.example.token"
           application_id: "123456789012345678"
           public_key: "abcdef1234567890abcdef1234567890abcdef1234567890"
-          guild_id: "987654321098765432"
+          guild_ids: "987654321098765432,123456789012345678"
           db_path: /var/lib/scion/discord.db
 ```
 
@@ -353,7 +405,8 @@ docker run -e DATABASE_URL=... -e DISCORD_BOT_TOKEN=... scion-discord
 | `DISCORD_HUB_URL` | **Yes** | — | Hub base URL for registration API / inbound delivery |
 | `DISCORD_BROKER_ID` | **Yes** | — | Registered broker ID (UUID) |
 | `DISCORD_HMAC_KEY` | **Yes** | — | Base64-encoded HMAC secret for hub authentication |
-| `DISCORD_GUILD_ID` | No | — | Guild ID for guild-scoped commands |
+| `DISCORD_GUILD_IDS` | No | — | Comma-separated guild IDs for per-guild commands |
+| `DISCORD_GUILD_ID` | No | — | (Deprecated) Alias for `DISCORD_GUILD_IDS` |
 | `GRPC_PORT` | No | `50051` | gRPC listen port |
 | `CONFIG_FILE` | No | — | Path to local YAML config file |
 | `UPDATE_HOOK` | No | — | Command to run on update signal (default: exit for platform restart) |
