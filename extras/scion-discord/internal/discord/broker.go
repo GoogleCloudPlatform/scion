@@ -58,7 +58,7 @@ type Config struct {
 	BotToken       string
 	ApplicationID  string
 	PublicKey      string
-	GuildID        string // empty = global commands
+	GuildIDs       []string // parsed from comma-separated "guild_ids" config value; empty = global commands
 	DBPath         string
 	MentionRouting bool
 }
@@ -235,8 +235,20 @@ func (b *DiscordBroker) Configure(config map[string]string) error {
 			BotToken:       botToken,
 			ApplicationID:  config["application_id"],
 			PublicKey:      config["public_key"],
-			GuildID:        config["guild_id"],
 			MentionRouting: true, // default
+		}
+
+		// Parse guild IDs: prefer "guild_ids" (comma-separated), fall back to "guild_id" for backward compat.
+		guildIDsRaw := config["guild_ids"]
+		if guildIDsRaw == "" {
+			guildIDsRaw = config["guild_id"]
+		}
+		if guildIDsRaw != "" {
+			for _, id := range strings.Split(guildIDsRaw, ",") {
+				if trimmed := strings.TrimSpace(id); trimmed != "" {
+					cfg.GuildIDs = append(cfg.GuildIDs, trimmed)
+				}
+			}
 		}
 
 		if v, ok := config["mention_routing"]; ok && v != "" {
@@ -297,7 +309,7 @@ func (b *DiscordBroker) Configure(config map[string]string) error {
 
 		b.log.Info("Discord broker phase 1 configured",
 			"application_id", cfg.ApplicationID,
-			"guild_id", cfg.GuildID,
+			"guild_ids", cfg.GuildIDs,
 			"db_path", cfg.DBPath,
 			"mention_routing", cfg.MentionRouting,
 		)
@@ -310,12 +322,12 @@ func (b *DiscordBroker) Configure(config map[string]string) error {
 
 		// Create component handlers.
 		appID := ""
-		guildID := ""
+		var guildIDs []string
 		if b.config != nil {
 			appID = b.config.ApplicationID
-			guildID = b.config.GuildID
+			guildIDs = b.config.GuildIDs
 		}
-		b.commands = NewCommandHandler(b.store, b.session, b.hubClient, b.deliverInbound, appID, guildID, b.agentCacheTTL, b.log)
+		b.commands = NewCommandHandler(b.store, b.session, b.hubClient, b.deliverInbound, appID, guildIDs, b.agentCacheTTL, b.log)
 		b.callbacks = NewCallbackHandler(b.store, b.session, b.hubClient, b.deliverInbound, b.log)
 		b.registration = NewRegistrationHandler(b.store, b.session, b.hubURL, b.hmacKey, b.brokerID, b.log)
 

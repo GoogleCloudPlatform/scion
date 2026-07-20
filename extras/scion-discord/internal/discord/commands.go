@@ -2,6 +2,7 @@ package discord
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -52,14 +53,14 @@ type CommandHandler struct {
 	hubClient      HubClient
 	log            *slog.Logger
 	appID          string
-	guildID        string // empty = global commands
+	guildIDs       []string // empty = global commands
 	agentCacheTTL  time.Duration
 	deliverInbound func(topic string, msg *messages.StructuredMessage) *hubError
 }
 
 // NewCommandHandler creates a new CommandHandler. agentCacheTTL controls how
 // long agent lists are cached before refreshing from the Hub API.
-func NewCommandHandler(store Store, session *discordgo.Session, hubClient HubClient, deliverInbound func(string, *messages.StructuredMessage) *hubError, appID, guildID string, agentCacheTTL time.Duration, log *slog.Logger) *CommandHandler {
+func NewCommandHandler(store Store, session *discordgo.Session, hubClient HubClient, deliverInbound func(string, *messages.StructuredMessage) *hubError, appID string, guildIDs []string, agentCacheTTL time.Duration, log *slog.Logger) *CommandHandler {
 	if log == nil {
 		log = slog.Default()
 	}
@@ -70,13 +71,30 @@ func NewCommandHandler(store Store, session *discordgo.Session, hubClient HubCli
 		deliverInbound: deliverInbound,
 		log:            log,
 		appID:          appID,
-		guildID:        guildID,
+		guildIDs:       guildIDs,
 		agentCacheTTL:  agentCacheTTL,
 	}
 }
 
 // RegisterCommands registers the /scion command and its subcommands with Discord.
+// When guild IDs are configured, commands are registered per-guild for instant
+// availability. When no guild IDs are configured, commands are registered globally.
 func (h *CommandHandler) RegisterCommands() error {
+	if len(h.guildIDs) == 0 {
+		return h.RegisterCommandsForGuild("")
+	}
+	var errs []error
+	for _, guildID := range h.guildIDs {
+		if err := h.RegisterCommandsForGuild(guildID); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// RegisterCommandsForGuild registers the /scion command for a single guild.
+// Pass an empty guildID for global (non-guild-scoped) registration.
+func (h *CommandHandler) RegisterCommandsForGuild(guildID string) error {
 	cmd := &discordgo.ApplicationCommand{
 		Name:        "scion",
 		Description: "Scion agent management",
@@ -197,12 +215,16 @@ func (h *CommandHandler) RegisterCommands() error {
 		},
 	}
 
-	_, err := h.session.ApplicationCommandCreate(h.appID, h.guildID, cmd)
+	_, err := h.session.ApplicationCommandCreate(h.appID, guildID, cmd)
 	if err != nil {
-		return fmt.Errorf("registering /scion command: %w", err)
+		return fmt.Errorf("registering /scion command for guild %q: %w", guildID, err)
 	}
 
-	h.log.Info("Registered /scion slash command", "app_id", h.appID, "guild_id", h.guildID)
+	logGuildID := guildID
+	if logGuildID == "" {
+		logGuildID = "global"
+	}
+	h.log.Info("Registered /scion slash command", "app_id", h.appID, "guild_id", logGuildID)
 	return nil
 }
 

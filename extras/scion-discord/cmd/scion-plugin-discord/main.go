@@ -60,7 +60,8 @@ func main() {
 	fmt.Println("  bot_token        (required) Discord bot token")
 	fmt.Println("  application_id   Discord application ID (for slash commands)")
 	fmt.Println("  public_key       Discord public key (for interaction verification)")
-	fmt.Println("  guild_id         Guild ID for guild-scoped commands (empty = global)")
+	fmt.Println("  guild_ids        Comma-separated guild IDs for per-guild commands (empty = global)")
+	fmt.Println("  guild_id         (deprecated) Alias for guild_ids with a single ID")
 	fmt.Println("  hub_url          Hub API URL for inbound message delivery")
 	fmt.Println("  hmac_key         Base64-encoded HMAC key for hub authentication")
 	fmt.Println("  broker_id        Broker ID for HMAC signing")
@@ -152,7 +153,7 @@ func serveStandalone() {
 		ConfigFile:  os.Getenv("CONFIG_FILE"),
 		EnvPrefix:   "DISCORD",
 		EnvKeys: []string{
-			"bot_token", "application_id", "public_key", "guild_id",
+			"bot_token", "application_id", "public_key", "guild_ids", "guild_id",
 			"hub_url", "hmac_key", "broker_id",
 			"mention_routing", "send_queue_size", "send_min_delay",
 			"agent_cache_ttl",
