@@ -934,6 +934,37 @@ func (b *DiscordBroker) handleGuildCreate(_ *discordgo.Session, g *discordgo.Gui
 	if err := b.store.UpdateGuildName(ctx, g.ID, g.Name); err != nil {
 		b.log.Error("Failed to update guild name for channel links", "guild_id", g.ID, "error", err)
 	}
+
+	b.mu.RLock()
+	commands := b.commands
+	config := b.config
+	b.mu.RUnlock()
+
+	if config == nil || commands == nil {
+		return
+	}
+
+	// If guild_ids is configured (non-empty), register commands for allowed guilds.
+	if len(config.GuildIDs) > 0 {
+		allowed := false
+		for _, id := range config.GuildIDs {
+			if id == g.ID {
+				allowed = true
+				break
+			}
+		}
+		if allowed {
+			go func(guildID, guildName string) {
+				if err := commands.RegisterCommandsForGuild(guildID); err != nil {
+					b.log.Error("Failed to register commands for guild", "guild_id", guildID, "guild_name", guildName, "error", err)
+				}
+			}(g.ID, g.Name)
+		} else {
+			b.log.Info("Guild not in guild_ids allow-list, skipping command registration",
+				"guild_id", g.ID, "guild_name", g.Name)
+		}
+	}
+	// If guild_ids is empty (global mode), no action needed — global commands propagate automatically.
 }
 
 // handleGuildDelete is called when the bot is removed from a guild or
