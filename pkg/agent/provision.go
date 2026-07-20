@@ -1254,6 +1254,9 @@ func shouldInjectSkill(fm skillFrontmatter, injCtx workspaceSkillsInjectionConte
 // in lexical filename order and concatenates them separated by double newlines.
 // Returns nil if the FS contains no non-empty .md files.
 func loadMandatoryPreamble(boilerplateFS fs.FS) ([]byte, error) {
+	if boilerplateFS == nil {
+		return nil, nil
+	}
 	entries, err := fs.ReadDir(boilerplateFS, ".")
 	if err != nil {
 		return nil, fmt.Errorf("read mandatory boilerplate: %w", err)
@@ -1268,7 +1271,7 @@ func loadMandatoryPreamble(boilerplateFS fs.FS) ([]byte, error) {
 			return nil, fmt.Errorf("read mandatory boilerplate %s: %w", e.Name(), err)
 		}
 		if len(bytes.TrimSpace(data)) > 0 {
-			parts = append(parts, bytes.TrimRight(data, "\n"))
+			parts = append(parts, bytes.TrimRight(data, "\r\n"))
 		}
 	}
 	if len(parts) == 0 {

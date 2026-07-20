@@ -2353,6 +2353,16 @@ func TestInjectPlatformSkills(t *testing.T) {
 }
 
 func TestLoadMandatoryPreamble(t *testing.T) {
+	t.Run("nil FS returns nil without panic", func(t *testing.T) {
+		result, err := loadMandatoryPreamble(nil)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if result != nil {
+			t.Errorf("expected nil for nil FS, got %q", string(result))
+		}
+	})
+
 	t.Run("empty FS returns nil", func(t *testing.T) {
 		fsys := fstest.MapFS{}
 		result, err := loadMandatoryPreamble(fsys)
@@ -2361,6 +2371,22 @@ func TestLoadMandatoryPreamble(t *testing.T) {
 		}
 		if result != nil {
 			t.Errorf("expected nil for empty FS, got %q", string(result))
+		}
+	})
+
+	t.Run("CRLF-terminated file has trailing CR stripped", func(t *testing.T) {
+		fsys := fstest.MapFS{
+			"crlf.md": &fstest.MapFile{
+				Data: []byte("# Hello\r\nWorld\r\n"),
+			},
+		}
+		result, err := loadMandatoryPreamble(fsys)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		// TrimRight with "\r\n" cutset removes trailing CR and LF characters.
+		if string(result) != "# Hello\r\nWorld" {
+			t.Errorf("expected trailing CRLF stripped, got %q", string(result))
 		}
 	})
 
