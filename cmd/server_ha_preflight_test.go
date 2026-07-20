@@ -97,13 +97,11 @@ func TestValidateHostedHAPreflightRejectsUnsafeBackends(t *testing.T) {
 			},
 			wantErr: "Cloud Run native IAP audience",
 		},
-		{
-			name: "transport audience mismatch",
-			mutate: func(cfg *config.GlobalConfig) {
-				cfg.Auth.Transport.OIDCAudience = "/projects/123456789/locations/us-central1/services/other"
-			},
-			wantErr: "oidc_audience to match",
-		},
+		// Note: "transport audience mismatch" case was removed because PR #814
+		// intentionally decoupled transport.oidc_audience from proxy.iap.audience.
+		// transport.oidc_audience is the IAP OAuth client ID used for minting OIDC
+		// tokens, while proxy.iap.audience is the Cloud Run resource path for
+		// validating incoming IAP-signed JWTs. These are expected to differ.
 	}
 
 	for _, tt := range tests {
