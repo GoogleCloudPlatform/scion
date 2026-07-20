@@ -1016,7 +1016,7 @@ func TestExpiredEventsFromDowntimeStillFire(t *testing.T) {
 		allExpired := true
 		for i := 0; i < 3; i++ {
 			e := ms.getEvent(fmt.Sprintf("downtime-%d", i))
-			if e.Status != store.ScheduledEventExpired {
+			if e == nil || e.Status != store.ScheduledEventExpired {
 				allExpired = false
 				break
 			}
@@ -1028,7 +1028,11 @@ func TestExpiredEventsFromDowntimeStillFire(t *testing.T) {
 		case <-deadline:
 			for i := 0; i < 3; i++ {
 				e := ms.getEvent(fmt.Sprintf("downtime-%d", i))
-				t.Errorf("event downtime-%d: expected status %q, got %q", i, store.ScheduledEventExpired, e.Status)
+				status := "nil"
+				if e != nil {
+					status = e.Status
+				}
+				t.Errorf("event downtime-%d: expected status %q, got %q", i, store.ScheduledEventExpired, status)
 			}
 			t.Fatalf("timed out waiting for expired events; fired count: %d", fired.Load())
 		default:
