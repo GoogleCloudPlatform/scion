@@ -917,7 +917,8 @@ func (b *DiscordBroker) handleGuildCreate(_ *discordgo.Session, g *discordgo.Gui
 
 	// Update guild name for all existing channel links in this guild.
 	// This handles guild renames and populates the name for pre-migration links.
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 	if err := b.store.UpdateGuildName(ctx, g.ID, g.Name); err != nil {
 		b.log.Error("Failed to update guild name for channel links", "guild_id", g.ID, "error", err)
 	}
@@ -933,7 +934,8 @@ func (b *DiscordBroker) handleGuildDelete(_ *discordgo.Session, g *discordgo.Gui
 	}
 	// Bot was removed from guild — deactivate all channel links.
 	b.log.Info("Bot removed from guild, deactivating channel links", "guild_id", g.ID)
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 	if err := b.store.DeactivateLinksForGuild(ctx, g.ID); err != nil {
 		b.log.Error("Failed to deactivate channel links for removed guild", "guild_id", g.ID, "error", err)
 	}

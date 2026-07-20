@@ -189,8 +189,10 @@ func (h *CallbackHandler) saveChannelLink(ctx context.Context, i *discordgo.Inte
 
 	// Resolve guild name from the session's guild cache.
 	var guildName string
-	if guild, err := h.session.State.Guild(guildID); err == nil {
-		guildName = guild.Name
+	if h.session.State != nil {
+		if guild, err := h.session.State.Guild(guildID); err == nil {
+			guildName = guild.Name
+		}
 	}
 
 	link := &ChannelLink{
