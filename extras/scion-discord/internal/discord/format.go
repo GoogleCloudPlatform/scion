@@ -421,7 +421,6 @@ func formatObservedEmbed(msg *messages.StructuredMessage) *discordgo.MessageEmbe
 	}
 }
 
-
 // deriveSenderSlug extracts the sender's display slug from the message sender
 // field, falling back to the topic-derived agentSlug when the sender is not an agent.
 func deriveSenderSlug(sender, agentSlug string) string {
