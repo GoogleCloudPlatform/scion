@@ -205,8 +205,8 @@ func TestBuildPod_GKESecrets_Environment(t *testing.T) {
 			if v.CSI == nil {
 				t.Fatal("expected CSI volume source")
 			}
-			if v.CSI.Driver != "secrets-store.csi.x-k8s.io" {
-				t.Errorf("expected CSI driver secrets-store.csi.x-k8s.io, got %s", v.CSI.Driver)
+			if v.CSI.Driver != "secrets-store-gke.csi.k8s.io" {
+				t.Errorf("expected CSI driver secrets-store-gke.csi.k8s.io (GKE managed add-on), got %s", v.CSI.Driver)
 			}
 			if v.CSI.VolumeAttributes["secretProviderClass"] != "scion-agent-test-agent" {
 				t.Errorf("expected secretProviderClass scion-agent-test-agent, got %s", v.CSI.VolumeAttributes["secretProviderClass"])
@@ -508,8 +508,8 @@ func TestCreateSecretProviderClass(t *testing.T) {
 	if !ok {
 		t.Fatal("expected spec in SPC")
 	}
-	if spec["provider"] != "gcp" {
-		t.Errorf("expected provider gcp, got %v", spec["provider"])
+	if spec["provider"] != "gke" {
+		t.Errorf("expected provider gke (GKE managed add-on), got %v", spec["provider"])
 	}
 
 	// Check that parameters.secrets contains the GCP SM paths

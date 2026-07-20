@@ -594,8 +594,15 @@ func (r *KubernetesRuntime) createSecretProviderClass(ctx context.Context, names
 		}
 	}
 
+	// GKE's managed Secret Manager add-on registers its provider as "gke",
+	// whereas the upstream open-source CSI driver uses "gcp".
+	providerName := "gcp"
+	if r.GKEMode {
+		providerName = "gke"
+	}
+
 	spec := map[string]interface{}{
-		"provider": "gcp",
+		"provider": providerName,
 		"parameters": map[string]interface{}{
 			"secrets": string(secretsParam),
 		},
@@ -986,12 +993,19 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 			spcName := fmt.Sprintf("scion-agent-%s", config.Name)
 			envSecretName := fmt.Sprintf("scion-agent-%s-env", config.Name)
 
-			// Add CSI volume (required for secretObjects sync)
+			// Add CSI volume (required for secretObjects sync).
+			// GKE's managed add-on registers the driver as
+			// "secrets-store-gke.csi.k8s.io"; the upstream open-source
+			// driver uses "secrets-store.csi.x-k8s.io".
+			csiDriverName := "secrets-store.csi.x-k8s.io"
+			if r.GKEMode {
+				csiDriverName = "secrets-store-gke.csi.k8s.io"
+			}
 			extraVolumes = append(extraVolumes, corev1.Volume{
 				Name: "secrets-store",
 				VolumeSource: corev1.VolumeSource{
 					CSI: &corev1.CSIVolumeSource{
-						Driver:   "secrets-store.csi.x-k8s.io",
+						Driver:   csiDriverName,
 						ReadOnly: boolPtr(true),
 						VolumeAttributes: map[string]string{
 							"secretProviderClass": spcName,
