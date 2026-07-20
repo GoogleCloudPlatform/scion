@@ -88,7 +88,7 @@ In projects with multiple users:
 
 ## Verification Checklist
 
-- [ ] Does the message have a clear recipient (`agent:`, `user:`, or `set[]`)?
+- [ ] Does the message have a clear recipient (`agent:`, `user:`, or `group[]`)?
 - [ ] Is the message functional and free of filler/banter?
 - [ ] Does it include concrete references (paths, IDs, errors)?
 - [ ] If a decision is needed, are concrete options and a recommendation provided?

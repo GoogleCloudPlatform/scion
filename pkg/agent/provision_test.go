@@ -2297,16 +2297,16 @@ func TestInjectPlatformSkills(t *testing.T) {
 		}
 	})
 
-	t.Run("skill with scripts subdirectory is fully copied", func(t *testing.T) {
+	t.Run("skill with nested subdirectory is fully copied", func(t *testing.T) {
 		agentHome := t.TempDir()
 		skillsDir := ".claude/commands"
 
 		skillsFS := fstest.MapFS{
-			"scion/SKILL.md": &fstest.MapFile{
-				Data: []byte("---\nname: scion\n---\n\n# Scion\n"),
+			"scion-agent-manage/SKILL.md": &fstest.MapFile{
+				Data: []byte("---\nname: scion-agent-manage\n---\n\n# Scion Agent Manage\n"),
 			},
-			"scion/scripts/start-agent.sh": &fstest.MapFile{
-				Data: []byte("#!/bin/bash\necho start"),
+			"scion-agent-manage/docs/reference.md": &fstest.MapFile{
+				Data: []byte("# Reference\nAgent management reference docs."),
 			},
 		}
 
@@ -2315,13 +2315,13 @@ func TestInjectPlatformSkills(t *testing.T) {
 			t.Fatalf("injectPlatformSkills failed: %v", err)
 		}
 
-		dest := filepath.Join(agentHome, skillsDir, "scion", "scripts", "start-agent.sh")
+		dest := filepath.Join(agentHome, skillsDir, "scion-agent-manage", "docs", "reference.md")
 		data, err := os.ReadFile(dest)
 		if err != nil {
-			t.Fatalf("expected script to be copied, got error: %v", err)
+			t.Fatalf("expected nested file to be copied, got error: %v", err)
 		}
-		if !strings.Contains(string(data), "echo start") {
-			t.Errorf("script content mismatch: %q", string(data))
+		if !strings.Contains(string(data), "reference docs") {
+			t.Errorf("nested file content mismatch: %q", string(data))
 		}
 	})
 

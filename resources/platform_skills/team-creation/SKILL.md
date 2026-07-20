@@ -196,8 +196,6 @@ Workers don't communicate directly with each other — the orchestrator reads ou
 ### Orchestrator agents.md Structure
 
 ```markdown
-[status reporting boilerplate]
-
 ## Role: Team Orchestrator
 
 You are the orchestrator for [team description]. Your job is to:
@@ -244,7 +242,6 @@ If a role needs specialized domain knowledge or tool-usage patterns that would b
 ### 5. Validate
 
 - [ ] Every template has `scion-agent.yaml` with `schema_version: "1"`
-- [ ] Every `agents.md` starts with the status reporting boilerplate
 - [ ] The orchestrator references the correct template names
 - [ ] Template directory names are kebab-case
 - [ ] The workflow matches the user's intent
