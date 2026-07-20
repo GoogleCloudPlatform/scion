@@ -21,3 +21,6 @@ var templatesFS embed.FS
 
 //go:embed all:platform_skills/*
 var platformSkillsFS embed.FS
+
+//go:embed all:mandatory_boilerplate/*
+var mandatoryBoilerplateFS embed.FS

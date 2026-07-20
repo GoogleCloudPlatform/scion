@@ -129,3 +129,14 @@ func PlatformSkillsFS() fs.FS {
 	}
 	return sub
 }
+
+// MandatoryBoilerplateFS returns the embedded filesystem containing mandatory
+// agent instruction preamble content. Files are read in lexical order and
+// prepended to every agent's instructions at provision time.
+func MandatoryBoilerplateFS() fs.FS {
+	sub, err := fs.Sub(mandatoryBoilerplateFS, "mandatory_boilerplate")
+	if err != nil {
+		panic(fmt.Sprintf("resources: sub mandatory_boilerplate FS: %v", err))
+	}
+	return sub
+}

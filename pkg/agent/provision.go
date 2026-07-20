@@ -15,6 +15,7 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -892,6 +893,12 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 
 	// Step 4: Inject agent instructions
 
+	// Load mandatory preamble — prepended to all agent instructions.
+	mandatoryPreamble, err := loadMandatoryPreamble(resources.MandatoryBoilerplateFS())
+	if err != nil {
+		return "", "", nil, fmt.Errorf("failed to load mandatory boilerplate: %w", err)
+	}
+
 	// Determine whether inline config provided content directly (already resolved).
 	// If so, we skip template-based file resolution for that field.
 	inlineProvidedAgentInstructions := inlineCfg != nil && inlineCfg.AgentInstructions != ""
@@ -927,13 +934,19 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 					return "", "", nil, fmt.Errorf("failed to resolve agent_instructions: %w", err)
 				}
 			}
-			if content != nil {
-				util.Debugf("ProvisionAgent: injecting agent instructions (%d bytes) into %s", len(content), agentHome)
-				if err := h.InjectAgentInstructions(agentHome, content); err != nil {
+			composed := composeInstructions(mandatoryPreamble, content)
+			if composed != nil {
+				util.Debugf("ProvisionAgent: injecting agent instructions (%d bytes) into %s", len(composed), agentHome)
+				if err := h.InjectAgentInstructions(agentHome, composed); err != nil {
 					return "", "", nil, fmt.Errorf("failed to inject agent instructions: %w", err)
 				}
 			} else {
 				util.Debugf("ProvisionAgent: agent_instructions resolved to nil, skipping injection")
+			}
+		} else if len(mandatoryPreamble) > 0 {
+			util.Debugf("ProvisionAgent: no agent_instructions configured; injecting mandatory preamble only (%d bytes)", len(mandatoryPreamble))
+			if err := h.InjectAgentInstructions(agentHome, mandatoryPreamble); err != nil {
+				return "", "", nil, fmt.Errorf("failed to inject agent instructions: %w", err)
 			}
 		} else {
 			util.Debugf("ProvisionAgent: no agent_instructions configured and no agents.md found in template")
@@ -974,8 +987,14 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 		// No template chain, but inline config may have content fields
 		if finalScionCfg.AgentInstructions != "" {
 			content := []byte(finalScionCfg.AgentInstructions)
-			util.Debugf("ProvisionAgent: injecting inline agent_instructions (%d bytes, no template)", len(content))
-			if err := h.InjectAgentInstructions(agentHome, content); err != nil {
+			composed := composeInstructions(mandatoryPreamble, content)
+			util.Debugf("ProvisionAgent: injecting inline agent_instructions (%d bytes, no template)", len(composed))
+			if err := h.InjectAgentInstructions(agentHome, composed); err != nil {
+				return "", "", nil, fmt.Errorf("failed to inject agent instructions: %w", err)
+			}
+		} else if len(mandatoryPreamble) > 0 {
+			util.Debugf("ProvisionAgent: injecting mandatory preamble only (%d bytes, no template, no inline instructions)", len(mandatoryPreamble))
+			if err := h.InjectAgentInstructions(agentHome, mandatoryPreamble); err != nil {
 				return "", "", nil, fmt.Errorf("failed to inject agent instructions: %w", err)
 			}
 		}
@@ -1229,6 +1248,50 @@ func shouldInjectSkill(fm skillFrontmatter, injCtx workspaceSkillsInjectionConte
 		util.Debugf("provision: unknown inject_when=%q for skill %q, skipping", fm.InjectWhen, fm.Name)
 		return false
 	}
+}
+
+// loadMandatoryPreamble reads all .md files from the mandatory boilerplate FS
+// in lexical filename order and concatenates them separated by double newlines.
+// Returns nil if the FS contains no non-empty .md files.
+func loadMandatoryPreamble(boilerplateFS fs.FS) ([]byte, error) {
+	entries, err := fs.ReadDir(boilerplateFS, ".")
+	if err != nil {
+		return nil, fmt.Errorf("read mandatory boilerplate: %w", err)
+	}
+	var parts [][]byte
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".md") {
+			continue
+		}
+		data, err := fs.ReadFile(boilerplateFS, e.Name())
+		if err != nil {
+			return nil, fmt.Errorf("read mandatory boilerplate %s: %w", e.Name(), err)
+		}
+		if len(bytes.TrimSpace(data)) > 0 {
+			parts = append(parts, bytes.TrimRight(data, "\n"))
+		}
+	}
+	if len(parts) == 0 {
+		return nil, nil
+	}
+	return bytes.Join(parts, []byte("\n\n")), nil
+}
+
+// composeInstructions prepends the mandatory preamble to template content.
+// If preamble is nil/empty, returns templateContent unchanged.
+// If templateContent is nil/empty, returns preamble alone.
+func composeInstructions(preamble, templateContent []byte) []byte {
+	if len(preamble) == 0 {
+		return templateContent
+	}
+	if len(bytes.TrimSpace(templateContent)) == 0 {
+		return preamble
+	}
+	result := make([]byte, 0, len(preamble)+2+len(templateContent))
+	result = append(result, preamble...)
+	result = append(result, '\n', '\n')
+	result = append(result, templateContent...)
+	return result
 }
 
 // injectPlatformSkills copies platform skills from the embedded filesystem

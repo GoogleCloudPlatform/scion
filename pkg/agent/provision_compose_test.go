@@ -188,8 +188,8 @@ agent_instructions: my-instructions.md
 		if err != nil {
 			t.Fatalf("expected CLAUDE.md to exist: %v", err)
 		}
-		if string(data) != "Instructions from file." {
-			t.Errorf("expected content from file, got %q", string(data))
+		if !strings.Contains(string(data), "Instructions from file.") {
+			t.Errorf("expected content from file in agent instructions, got %q", string(data))
 		}
 	})
 }
