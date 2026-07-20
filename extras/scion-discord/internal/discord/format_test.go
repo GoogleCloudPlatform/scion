@@ -459,6 +459,26 @@ func TestFormatObservedEmbed_AgentToAgent(t *testing.T) {
 	assert.Equal(t, 0x808080, embed.Color)
 }
 
+func TestFormatObservedEmbed_NilMessage(t *testing.T) {
+	embed := formatObservedEmbed(nil)
+	assert.Nil(t, embed)
+}
+
+func TestFormatObservedEmbed_TruncatesLongDescription(t *testing.T) {
+	longMsg := strings.Repeat("x", maxEmbedDescriptionLength+500)
+	msg := &messages.StructuredMessage{
+		Sender:    "agent:builder",
+		Recipient: "agent:reviewer",
+		Msg:       longMsg,
+	}
+	embed := formatObservedEmbed(msg)
+	require.NotNil(t, embed)
+	assert.LessOrEqual(t, len(embed.Description), maxEmbedDescriptionLength)
+	assert.True(t, strings.HasSuffix(embed.Description, truncationSuffix))
+	assert.Equal(t, "builder → reviewer", embed.Title)
+	assert.Equal(t, 0x808080, embed.Color)
+}
+
 func TestFormatObservedEmbed_NonAgentSender(t *testing.T) {
 	// When sender is not an agent, TrimPrefix is a no-op and returns the full sender string.
 	msg := &messages.StructuredMessage{

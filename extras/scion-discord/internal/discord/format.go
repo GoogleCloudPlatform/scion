@@ -410,9 +410,13 @@ func formatObservedEmbed(msg *messages.StructuredMessage) *discordgo.MessageEmbe
 	}
 	senderSlug := strings.TrimPrefix(msg.Sender, "agent:")
 	recipientSlug := strings.TrimPrefix(msg.Recipient, "agent:")
+	description := msg.Msg
+	if len(description) > maxEmbedDescriptionLength {
+		description = truncateForDiscord(description, maxEmbedDescriptionLength)
+	}
 	return &discordgo.MessageEmbed{
 		Title:       fmt.Sprintf("%s → %s", senderSlug, recipientSlug),
-		Description: msg.Msg,
+		Description: description,
 		Color:       0x808080, // gray sidebar distinguishes relayed from direct messages
 	}
 }
