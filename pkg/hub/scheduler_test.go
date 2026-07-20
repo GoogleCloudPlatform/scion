@@ -455,11 +455,17 @@ func (m *mockScheduledEventStore) GetTemplateBySlug(_ context.Context, _, _, _ s
 	return nil, store.ErrNotFound
 }
 
-// getEvent returns an event by ID (test helper, no error).
+// getEvent returns a snapshot of an event by ID (test helper, no error).
+// It returns a copy so callers can read fields without holding the lock.
 func (m *mockScheduledEventStore) getEvent(id string) *store.ScheduledEvent {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.events[id]
+	evt, ok := m.events[id]
+	if !ok {
+		return nil
+	}
+	cp := *evt
+	return &cp
 }
 
 func TestOneShotTimerFiresAtCorrectTime(t *testing.T) {
@@ -1002,24 +1008,36 @@ func TestExpiredEventsFromDowntimeStillFire(t *testing.T) {
 
 	s.Start(serverCtx)
 
-	// Wait for all expired events to fire
-	deadline := time.After(1 * time.Second)
-	for fired.Load() < 3 {
-
+	// Wait for all expired events to fire AND be marked as expired.
+	// The handler callback (fired.Add) completes before fireEvent updates the
+	// store status, so we must poll the status directly to avoid a race.
+	deadline := time.After(2 * time.Second)
+	for {
+		allExpired := true
+		for i := 0; i < 3; i++ {
+			e := ms.getEvent(fmt.Sprintf("downtime-%d", i))
+			if e.Status != store.ScheduledEventExpired {
+				allExpired = false
+				break
+			}
+		}
+		if allExpired {
+			break
+		}
 		select {
 		case <-deadline:
-			t.Fatalf("expected 3 expired events to fire, got %d", fired.Load())
+			for i := 0; i < 3; i++ {
+				e := ms.getEvent(fmt.Sprintf("downtime-%d", i))
+				t.Errorf("event downtime-%d: expected status %q, got %q", i, store.ScheduledEventExpired, e.Status)
+			}
+			t.Fatalf("timed out waiting for expired events; fired count: %d", fired.Load())
 		default:
 			time.Sleep(10 * time.Millisecond)
 		}
 	}
 
-	// Verify all events were marked as expired (not just fired)
-	for i := 0; i < 3; i++ {
-		e := ms.getEvent(fmt.Sprintf("downtime-%d", i))
-		if e.Status != store.ScheduledEventExpired {
-			t.Errorf("event downtime-%d: expected status %q, got %q", i, store.ScheduledEventExpired, e.Status)
-		}
+	if fired.Load() != 3 {
+		t.Errorf("expected 3 handler invocations, got %d", fired.Load())
 	}
 
 	s.Stop()
