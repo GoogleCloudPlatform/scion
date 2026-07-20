@@ -444,6 +444,40 @@ export class ScionPageAdminIntegrations extends LitElement {
       color: var(--scion-text-muted, #64748b);
       margin-top: 0.125rem;
     }
+
+    .invite-link-container {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 1rem;
+      flex-wrap: wrap;
+    }
+
+    .invite-link-info {
+      display: flex;
+      align-items: flex-start;
+      gap: 0.75rem;
+    }
+
+    .invite-link-info sl-icon {
+      font-size: 1.25rem;
+      color: var(--scion-primary, #3b82f6);
+      flex-shrink: 0;
+      margin-top: 0.125rem;
+    }
+
+    .invite-link-description {
+      margin: 0;
+      font-size: 0.875rem;
+      font-weight: 500;
+      color: var(--scion-text, #1e293b);
+    }
+
+    .invite-link-permissions {
+      margin: 0.25rem 0 0;
+      font-size: 0.75rem;
+      color: var(--scion-text-muted, #64748b);
+    }
   `;
 
   private get currentName(): string | null {
@@ -843,6 +877,7 @@ export class ScionPageAdminIntegrations extends LitElement {
       ${this.renderSetupBanner(d)}
       ${this.renderSecretsSection(d)}
       ${this.renderConfigSection(d)}
+      ${this.renderDiscordInviteLink(d)}
       ${this.renderActionsSection()}
     `;
   }
@@ -982,6 +1017,43 @@ export class ScionPageAdminIntegrations extends LitElement {
               </div>
             `
           )}
+        </div>
+      </div>
+    `;
+  }
+
+  private renderDiscordInviteLink(d: IntegrationDetail) {
+    const platform = resolvePlatform(d.name);
+    if (platform !== 'discord') return nothing;
+
+    const appId = (this.editedSettings['application_id'] ?? '').trim();
+    if (!appId) return nothing;
+
+    const inviteUrl = `https://discord.com/api/oauth2/authorize?client_id=${encodeURIComponent(appId)}&permissions=329101954112&scope=bot%20applications.commands`;
+
+    return html`
+      <div class="section">
+        <h3 class="section-title">Bot Setup</h3>
+        <div class="invite-link-container">
+          <div class="invite-link-info">
+            <sl-icon name="robot"></sl-icon>
+            <div>
+              <p class="invite-link-description">Add the bot to your Discord server</p>
+              <p class="invite-link-permissions">
+                Grants required permissions: Send Messages, Read Message History, View Channels, Embed Links, Manage Webhooks
+              </p>
+            </div>
+          </div>
+          <sl-button
+            variant="primary"
+            size="small"
+            href=${inviteUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            <sl-icon slot="prefix" name="box-arrow-up-right"></sl-icon>
+            Invite Bot to Server
+          </sl-button>
         </div>
       </div>
     `;
