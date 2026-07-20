@@ -83,12 +83,21 @@ func (h *CommandHandler) RegisterCommands() error {
 	if len(h.guildIDs) == 0 {
 		return h.RegisterCommandsForGuild("")
 	}
+	var wg sync.WaitGroup
+	var mu sync.Mutex
 	var errs []error
 	for _, guildID := range h.guildIDs {
-		if err := h.RegisterCommandsForGuild(guildID); err != nil {
-			errs = append(errs, err)
-		}
+		wg.Add(1)
+		go func(gID string) {
+			defer wg.Done()
+			if err := h.RegisterCommandsForGuild(gID); err != nil {
+				mu.Lock()
+				errs = append(errs, err)
+				mu.Unlock()
+			}
+		}(guildID)
 	}
+	wg.Wait()
 	return errors.Join(errs...)
 }
 
