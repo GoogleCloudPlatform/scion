@@ -657,11 +657,19 @@ func (b *DiscordBroker) Publish(ctx context.Context, topic string, msg *messages
 			// Send via webhook with per-agent identity.
 			// For threads (forum channels, text channel threads), create the
 			// webhook on the parent channel and execute with thread_id.
+			//
+			// When observe embeds are present (agent-to-agent messages), send
+			// only the embed — passing text content alongside embeds causes
+			// Discord to display the message body twice.
+			webhookText := text
+			if len(observeEmbeds) > 0 {
+				webhookText = ""
+			}
 			parentID, isThread := b.resolveThreadParent(channelID)
 			if isThread && parentID != "" {
-				_, err = webhooks.SendAsAgentInThread(parentID, channelID, senderSlug, text, observeEmbeds, nil, files)
+				_, err = webhooks.SendAsAgentInThread(parentID, channelID, senderSlug, webhookText, observeEmbeds, nil, files)
 			} else {
-				_, err = webhooks.SendAsAgent(channelID, senderSlug, text, observeEmbeds, nil, files)
+				_, err = webhooks.SendAsAgent(channelID, senderSlug, webhookText, observeEmbeds, nil, files)
 			}
 			if err != nil {
 				// Fallback to bot API if webhook send fails.
