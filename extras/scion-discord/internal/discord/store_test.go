@@ -221,6 +221,86 @@ func TestChannelLinkCRUD(t *testing.T) {
 		assert.True(t, got3.Active)
 	})
 
+	t.Run("GuildNamePersistedOnCreate", func(t *testing.T) {
+		store := newTestStore(t)
+		ctx := context.Background()
+
+		require.NoError(t, store.CreateChannelLink(ctx, &ChannelLink{
+			ChannelID: "100",
+			GuildID:   "guild-1",
+			GuildName: "Test Server",
+			ProjectID: "proj-1",
+			LinkedAt:  time.Now().UTC(),
+			Active:    true,
+		}))
+
+		got, err := store.GetChannelLink(ctx, "100")
+		require.NoError(t, err)
+		require.NotNil(t, got)
+		assert.Equal(t, "Test Server", got.GuildName)
+	})
+
+	t.Run("UpdateGuildName", func(t *testing.T) {
+		store := newTestStore(t)
+		ctx := context.Background()
+
+		// Create two links in the same guild.
+		for _, chID := range []string{"100", "200"} {
+			require.NoError(t, store.CreateChannelLink(ctx, &ChannelLink{
+				ChannelID: chID,
+				GuildID:   "guild-1",
+				GuildName: "Old Name",
+				ProjectID: "proj-1",
+				LinkedAt:  time.Now().UTC(),
+				Active:    true,
+			}))
+		}
+		// Create a link in a different guild.
+		require.NoError(t, store.CreateChannelLink(ctx, &ChannelLink{
+			ChannelID: "300",
+			GuildID:   "guild-2",
+			GuildName: "Other Server",
+			ProjectID: "proj-2",
+			LinkedAt:  time.Now().UTC(),
+			Active:    true,
+		}))
+
+		// Update guild name for guild-1.
+		require.NoError(t, store.UpdateGuildName(ctx, "guild-1", "New Name"))
+
+		got1, err := store.GetChannelLink(ctx, "100")
+		require.NoError(t, err)
+		assert.Equal(t, "New Name", got1.GuildName)
+
+		got2, err := store.GetChannelLink(ctx, "200")
+		require.NoError(t, err)
+		assert.Equal(t, "New Name", got2.GuildName)
+
+		// Different guild should be unchanged.
+		got3, err := store.GetChannelLink(ctx, "300")
+		require.NoError(t, err)
+		assert.Equal(t, "Other Server", got3.GuildName)
+	})
+
+	t.Run("GuildNameDefaultsToEmpty", func(t *testing.T) {
+		store := newTestStore(t)
+		ctx := context.Background()
+
+		// Create without setting GuildName — should default to "".
+		require.NoError(t, store.CreateChannelLink(ctx, &ChannelLink{
+			ChannelID: "100",
+			GuildID:   "guild-1",
+			ProjectID: "proj-1",
+			LinkedAt:  time.Now().UTC(),
+			Active:    true,
+		}))
+
+		got, err := store.GetChannelLink(ctx, "100")
+		require.NoError(t, err)
+		require.NotNil(t, got)
+		assert.Equal(t, "", got.GuildName)
+	})
+
 	t.Run("Delete", func(t *testing.T) {
 		store := newTestStore(t)
 		ctx := context.Background()

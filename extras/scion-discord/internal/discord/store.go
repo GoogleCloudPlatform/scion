@@ -29,6 +29,7 @@ type Store interface {
 	GetAllChannelLinks(ctx context.Context) ([]*ChannelLink, error)
 	UpdateChannelLink(ctx context.Context, link *ChannelLink) error
 	DeactivateLinksForGuild(ctx context.Context, guildID string) error
+	UpdateGuildName(ctx context.Context, guildID, name string) error
 	DeleteChannelLink(ctx context.Context, channelID string) error
 
 	// Thread defaults — per-thread agent overrides
@@ -81,6 +82,7 @@ type Store interface {
 type ChannelLink struct {
 	ChannelID          string
 	GuildID            string
+	GuildName          string // populated at link time, refreshed on GuildCreate
 	ProjectID          string
 	ProjectSlug        string
 	DefaultAgent       string
@@ -272,6 +274,7 @@ CREATE TABLE IF NOT EXISTS thread_defaults (
 func (s *sqliteStore) migrateSchema() {
 	migrations := []string{
 		`ALTER TABLE channel_links ADD COLUMN show_state_changes INTEGER NOT NULL DEFAULT 1`,
+		`ALTER TABLE channel_links ADD COLUMN guild_name TEXT NOT NULL DEFAULT ''`,
 	}
 	for _, m := range migrations {
 		if _, err := s.db.Exec(m); err != nil {
@@ -291,16 +294,17 @@ func (s *sqliteStore) Close() error {
 
 func (s *sqliteStore) CreateChannelLink(ctx context.Context, link *ChannelLink) error {
 	const q = `
-INSERT INTO channel_links (channel_id, guild_id, project_id, project_slug, default_agent, linked_by, linked_at, active, show_agent_to_agent, show_assistant_reply, show_state_changes, notify_in_group, chat_only)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+INSERT INTO channel_links (channel_id, guild_id, guild_name, project_id, project_slug, default_agent, linked_by, linked_at, active, show_agent_to_agent, show_assistant_reply, show_state_changes, notify_in_group, chat_only)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(channel_id) DO UPDATE SET
-	guild_id=excluded.guild_id, project_id=excluded.project_id, project_slug=excluded.project_slug,
+	guild_id=excluded.guild_id, guild_name=excluded.guild_name,
+	project_id=excluded.project_id, project_slug=excluded.project_slug,
 	default_agent=excluded.default_agent, linked_by=excluded.linked_by, linked_at=excluded.linked_at,
 	active=excluded.active, show_agent_to_agent=excluded.show_agent_to_agent,
 	show_assistant_reply=excluded.show_assistant_reply, show_state_changes=excluded.show_state_changes,
 	notify_in_group=excluded.notify_in_group, chat_only=excluded.chat_only`
 	_, err := s.db.ExecContext(ctx, q,
-		link.ChannelID, link.GuildID, link.ProjectID, link.ProjectSlug,
+		link.ChannelID, link.GuildID, link.GuildName, link.ProjectID, link.ProjectSlug,
 		link.DefaultAgent, link.LinkedBy, link.LinkedAt.UTC().Format(time.RFC3339),
 		boolToInt(link.Active), boolToInt(link.ShowAgentToAgent),
 		boolToInt(link.ShowAssistantReply), boolToInt(link.ShowStateChanges),
@@ -309,13 +313,13 @@ ON CONFLICT(channel_id) DO UPDATE SET
 }
 
 func (s *sqliteStore) GetChannelLink(ctx context.Context, channelID string) (*ChannelLink, error) {
-	const q = `SELECT channel_id, guild_id, project_id, project_slug, default_agent, linked_by, linked_at, active, show_agent_to_agent, show_assistant_reply, show_state_changes, notify_in_group, chat_only FROM channel_links WHERE channel_id = ?`
+	const q = `SELECT channel_id, guild_id, guild_name, project_id, project_slug, default_agent, linked_by, linked_at, active, show_agent_to_agent, show_assistant_reply, show_state_changes, notify_in_group, chat_only FROM channel_links WHERE channel_id = ?`
 	row := s.db.QueryRowContext(ctx, q, channelID)
 	return scanChannelLink(row)
 }
 
 func (s *sqliteStore) GetChannelLinksForProject(ctx context.Context, projectID string) ([]*ChannelLink, error) {
-	const q = `SELECT channel_id, guild_id, project_id, project_slug, default_agent, linked_by, linked_at, active, show_agent_to_agent, show_assistant_reply, show_state_changes, notify_in_group, chat_only FROM channel_links WHERE project_id = ?`
+	const q = `SELECT channel_id, guild_id, guild_name, project_id, project_slug, default_agent, linked_by, linked_at, active, show_agent_to_agent, show_assistant_reply, show_state_changes, notify_in_group, chat_only FROM channel_links WHERE project_id = ?`
 	rows, err := s.db.QueryContext(ctx, q, projectID)
 	if err != nil {
 		return nil, err
@@ -325,7 +329,7 @@ func (s *sqliteStore) GetChannelLinksForProject(ctx context.Context, projectID s
 }
 
 func (s *sqliteStore) GetAllChannelLinks(ctx context.Context) ([]*ChannelLink, error) {
-	const q = `SELECT channel_id, guild_id, project_id, project_slug, default_agent, linked_by, linked_at, active, show_agent_to_agent, show_assistant_reply, show_state_changes, notify_in_group, chat_only FROM channel_links`
+	const q = `SELECT channel_id, guild_id, guild_name, project_id, project_slug, default_agent, linked_by, linked_at, active, show_agent_to_agent, show_assistant_reply, show_state_changes, notify_in_group, chat_only FROM channel_links`
 	rows, err := s.db.QueryContext(ctx, q)
 	if err != nil {
 		return nil, err
@@ -337,12 +341,12 @@ func (s *sqliteStore) GetAllChannelLinks(ctx context.Context) ([]*ChannelLink, e
 func (s *sqliteStore) UpdateChannelLink(ctx context.Context, link *ChannelLink) error {
 	const q = `
 UPDATE channel_links SET
-	guild_id=?, project_id=?, project_slug=?, default_agent=?, linked_by=?, linked_at=?,
+	guild_id=?, guild_name=?, project_id=?, project_slug=?, default_agent=?, linked_by=?, linked_at=?,
 	active=?, show_agent_to_agent=?, show_assistant_reply=?, show_state_changes=?,
 	notify_in_group=?, chat_only=?
 WHERE channel_id=?`
 	_, err := s.db.ExecContext(ctx, q,
-		link.GuildID, link.ProjectID, link.ProjectSlug,
+		link.GuildID, link.GuildName, link.ProjectID, link.ProjectSlug,
 		link.DefaultAgent, link.LinkedBy, link.LinkedAt.UTC().Format(time.RFC3339),
 		boolToInt(link.Active), boolToInt(link.ShowAgentToAgent),
 		boolToInt(link.ShowAssistantReply), boolToInt(link.ShowStateChanges),
@@ -353,6 +357,11 @@ WHERE channel_id=?`
 
 func (s *sqliteStore) DeactivateLinksForGuild(ctx context.Context, guildID string) error {
 	_, err := s.db.ExecContext(ctx, `UPDATE channel_links SET active = 0 WHERE guild_id = ?`, guildID)
+	return err
+}
+
+func (s *sqliteStore) UpdateGuildName(ctx context.Context, guildID, name string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE channel_links SET guild_name = ? WHERE guild_id = ?`, name, guildID)
 	return err
 }
 
@@ -685,7 +694,7 @@ func scanChannelLink(row *sql.Row) (*ChannelLink, error) {
 	var link ChannelLink
 	var linkedAt string
 	var active, showA2A, showAssistantReply, showStateChanges, notifyInGroup, chatOnly int
-	err := row.Scan(&link.ChannelID, &link.GuildID, &link.ProjectID, &link.ProjectSlug,
+	err := row.Scan(&link.ChannelID, &link.GuildID, &link.GuildName, &link.ProjectID, &link.ProjectSlug,
 		&link.DefaultAgent, &link.LinkedBy, &linkedAt, &active, &showA2A,
 		&showAssistantReply, &showStateChanges, &notifyInGroup, &chatOnly)
 	if err == sql.ErrNoRows {
@@ -713,7 +722,7 @@ func scanChannelLinks(rows *sql.Rows) ([]*ChannelLink, error) {
 		var link ChannelLink
 		var linkedAt string
 		var active, showA2A, showAssistantReply, showStateChanges, notifyInGroup, chatOnly int
-		err := rows.Scan(&link.ChannelID, &link.GuildID, &link.ProjectID, &link.ProjectSlug,
+		err := rows.Scan(&link.ChannelID, &link.GuildID, &link.GuildName, &link.ProjectID, &link.ProjectSlug,
 			&link.DefaultAgent, &link.LinkedBy, &linkedAt, &active, &showA2A,
 			&showAssistantReply, &showStateChanges, &notifyInGroup, &chatOnly)
 		if err != nil {

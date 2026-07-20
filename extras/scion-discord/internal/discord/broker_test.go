@@ -752,3 +752,116 @@ func TestDeriveSenderSlug(t *testing.T) {
 		})
 	}
 }
+
+func TestHandleGuildDelete(t *testing.T) {
+	t.Run("bot removed — deactivates links", func(t *testing.T) {
+		store := newTestBrokerStore(t)
+		ctx := context.Background()
+
+		// Create two links in the target guild.
+		for _, chID := range []string{"100", "200"} {
+			require.NoError(t, store.CreateChannelLink(ctx, &ChannelLink{
+				ChannelID: chID,
+				GuildID:   "guild-1",
+				ProjectID: "proj-1",
+				LinkedAt:  time.Now().UTC(),
+				Active:    true,
+			}))
+		}
+
+		b := &DiscordBroker{
+			log:   discardLogger(),
+			store: store,
+		}
+
+		// Simulate bot removal (Unavailable = false).
+		b.handleGuildDelete(nil, &discordgo.GuildDelete{
+			Guild: &discordgo.Guild{ID: "guild-1"},
+		})
+
+		got1, err := store.GetChannelLink(ctx, "100")
+		require.NoError(t, err)
+		require.NotNil(t, got1)
+		assert.False(t, got1.Active, "link should be deactivated after guild removal")
+
+		got2, err := store.GetChannelLink(ctx, "200")
+		require.NoError(t, err)
+		require.NotNil(t, got2)
+		assert.False(t, got2.Active, "link should be deactivated after guild removal")
+	})
+
+	t.Run("guild unavailable — does not deactivate links", func(t *testing.T) {
+		store := newTestBrokerStore(t)
+		ctx := context.Background()
+
+		require.NoError(t, store.CreateChannelLink(ctx, &ChannelLink{
+			ChannelID: "100",
+			GuildID:   "guild-1",
+			ProjectID: "proj-1",
+			LinkedAt:  time.Now().UTC(),
+			Active:    true,
+		}))
+
+		b := &DiscordBroker{
+			log:   discardLogger(),
+			store: store,
+		}
+
+		// Simulate temporary outage (Unavailable = true).
+		b.handleGuildDelete(nil, &discordgo.GuildDelete{
+			Guild: &discordgo.Guild{ID: "guild-1", Unavailable: true},
+		})
+
+		got, err := store.GetChannelLink(ctx, "100")
+		require.NoError(t, err)
+		require.NotNil(t, got)
+		assert.True(t, got.Active, "link should remain active during outage")
+	})
+}
+
+func TestHandleGuildCreate_UpdatesGuildName(t *testing.T) {
+	store := newTestBrokerStore(t)
+	ctx := context.Background()
+
+	// Create links with an old guild name.
+	for _, chID := range []string{"100", "200"} {
+		require.NoError(t, store.CreateChannelLink(ctx, &ChannelLink{
+			ChannelID: chID,
+			GuildID:   "guild-1",
+			GuildName: "Old Name",
+			ProjectID: "proj-1",
+			LinkedAt:  time.Now().UTC(),
+			Active:    true,
+		}))
+	}
+
+	b := &DiscordBroker{
+		log:   discardLogger(),
+		store: store,
+	}
+
+	// Simulate GuildCreate with a new name.
+	b.handleGuildCreate(nil, &discordgo.GuildCreate{
+		Guild: &discordgo.Guild{
+			ID:   "guild-1",
+			Name: "Renamed Server",
+		},
+	})
+
+	got1, err := store.GetChannelLink(ctx, "100")
+	require.NoError(t, err)
+	assert.Equal(t, "Renamed Server", got1.GuildName)
+
+	got2, err := store.GetChannelLink(ctx, "200")
+	require.NoError(t, err)
+	assert.Equal(t, "Renamed Server", got2.GuildName)
+}
+
+func newTestBrokerStore(t *testing.T) Store {
+	t.Helper()
+	dbPath := filepath.Join(t.TempDir(), "broker_test.db")
+	store, err := NewSQLiteStore(dbPath)
+	require.NoError(t, err)
+	t.Cleanup(func() { store.Close() })
+	return store
+}

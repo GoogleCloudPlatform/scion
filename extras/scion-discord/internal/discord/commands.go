@@ -633,6 +633,9 @@ func (h *CommandHandler) HandleInfo(s *discordgo.Session, i *discordgo.Interacti
 	if i.ChannelID != "" {
 		link, linkErr := resolveChannelLink(ctx, s, h.store, i.ChannelID)
 		if linkErr == nil && link != nil {
+			if link.GuildName != "" {
+				sb.WriteString(fmt.Sprintf("\n**Server:** %s", link.GuildName))
+			}
 			sb.WriteString(fmt.Sprintf("\n**Channel project:** %s", link.ProjectSlug))
 			if link.DefaultAgent != "" {
 				sb.WriteString(fmt.Sprintf("\n**Default agent:** %s", link.DefaultAgent))

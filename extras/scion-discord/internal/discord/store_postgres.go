@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
@@ -114,7 +115,22 @@ CREATE TABLE IF NOT EXISTS discord_thread_defaults (
 );
 `
 	_, err := s.db.Exec(ddl)
-	return err
+	if err != nil {
+		return err
+	}
+	s.migrateSchema()
+	return nil
+}
+
+func (s *postgresStore) migrateSchema() {
+	migrations := []string{
+		`ALTER TABLE discord_channel_links ADD COLUMN IF NOT EXISTS guild_name TEXT NOT NULL DEFAULT ''`,
+	}
+	for _, m := range migrations {
+		if _, err := s.db.Exec(m); err != nil {
+			slog.Warn("Failed to run Postgres migration", "migration", m, "error", err)
+		}
+	}
 }
 
 func (s *postgresStore) Close() error {
@@ -125,16 +141,17 @@ func (s *postgresStore) Close() error {
 
 func (s *postgresStore) CreateChannelLink(ctx context.Context, link *ChannelLink) error {
 	const q = `
-INSERT INTO discord_channel_links (channel_id, guild_id, project_id, project_slug, default_agent, linked_by, linked_at, active, show_agent_to_agent, show_assistant_reply, show_state_changes, notify_in_group, chat_only)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+INSERT INTO discord_channel_links (channel_id, guild_id, guild_name, project_id, project_slug, default_agent, linked_by, linked_at, active, show_agent_to_agent, show_assistant_reply, show_state_changes, notify_in_group, chat_only)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
 ON CONFLICT(channel_id) DO UPDATE SET
-	guild_id=EXCLUDED.guild_id, project_id=EXCLUDED.project_id, project_slug=EXCLUDED.project_slug,
+	guild_id=EXCLUDED.guild_id, guild_name=EXCLUDED.guild_name,
+	project_id=EXCLUDED.project_id, project_slug=EXCLUDED.project_slug,
 	default_agent=EXCLUDED.default_agent, linked_by=EXCLUDED.linked_by, linked_at=EXCLUDED.linked_at,
 	active=EXCLUDED.active, show_agent_to_agent=EXCLUDED.show_agent_to_agent,
 	show_assistant_reply=EXCLUDED.show_assistant_reply, show_state_changes=EXCLUDED.show_state_changes,
 	notify_in_group=EXCLUDED.notify_in_group, chat_only=EXCLUDED.chat_only`
 	_, err := s.db.ExecContext(ctx, q,
-		link.ChannelID, link.GuildID, link.ProjectID, link.ProjectSlug,
+		link.ChannelID, link.GuildID, link.GuildName, link.ProjectID, link.ProjectSlug,
 		link.DefaultAgent, link.LinkedBy, link.LinkedAt.UTC(),
 		link.Active, link.ShowAgentToAgent,
 		link.ShowAssistantReply, link.ShowStateChanges,
@@ -143,13 +160,13 @@ ON CONFLICT(channel_id) DO UPDATE SET
 }
 
 func (s *postgresStore) GetChannelLink(ctx context.Context, channelID string) (*ChannelLink, error) {
-	const q = `SELECT channel_id, guild_id, project_id, project_slug, default_agent, linked_by, linked_at, active, show_agent_to_agent, show_assistant_reply, show_state_changes, notify_in_group, chat_only FROM discord_channel_links WHERE channel_id = $1`
+	const q = `SELECT channel_id, guild_id, guild_name, project_id, project_slug, default_agent, linked_by, linked_at, active, show_agent_to_agent, show_assistant_reply, show_state_changes, notify_in_group, chat_only FROM discord_channel_links WHERE channel_id = $1`
 	row := s.db.QueryRowContext(ctx, q, channelID)
 	return pgScanChannelLink(row)
 }
 
 func (s *postgresStore) GetChannelLinksForProject(ctx context.Context, projectID string) ([]*ChannelLink, error) {
-	const q = `SELECT channel_id, guild_id, project_id, project_slug, default_agent, linked_by, linked_at, active, show_agent_to_agent, show_assistant_reply, show_state_changes, notify_in_group, chat_only FROM discord_channel_links WHERE project_id = $1`
+	const q = `SELECT channel_id, guild_id, guild_name, project_id, project_slug, default_agent, linked_by, linked_at, active, show_agent_to_agent, show_assistant_reply, show_state_changes, notify_in_group, chat_only FROM discord_channel_links WHERE project_id = $1`
 	rows, err := s.db.QueryContext(ctx, q, projectID)
 	if err != nil {
 		return nil, err
@@ -159,7 +176,7 @@ func (s *postgresStore) GetChannelLinksForProject(ctx context.Context, projectID
 }
 
 func (s *postgresStore) GetAllChannelLinks(ctx context.Context) ([]*ChannelLink, error) {
-	const q = `SELECT channel_id, guild_id, project_id, project_slug, default_agent, linked_by, linked_at, active, show_agent_to_agent, show_assistant_reply, show_state_changes, notify_in_group, chat_only FROM discord_channel_links`
+	const q = `SELECT channel_id, guild_id, guild_name, project_id, project_slug, default_agent, linked_by, linked_at, active, show_agent_to_agent, show_assistant_reply, show_state_changes, notify_in_group, chat_only FROM discord_channel_links`
 	rows, err := s.db.QueryContext(ctx, q)
 	if err != nil {
 		return nil, err
@@ -171,12 +188,12 @@ func (s *postgresStore) GetAllChannelLinks(ctx context.Context) ([]*ChannelLink,
 func (s *postgresStore) UpdateChannelLink(ctx context.Context, link *ChannelLink) error {
 	const q = `
 UPDATE discord_channel_links SET
-	guild_id=$1, project_id=$2, project_slug=$3, default_agent=$4, linked_by=$5, linked_at=$6,
-	active=$7, show_agent_to_agent=$8, show_assistant_reply=$9, show_state_changes=$10,
-	notify_in_group=$11, chat_only=$12
-WHERE channel_id=$13`
+	guild_id=$1, guild_name=$2, project_id=$3, project_slug=$4, default_agent=$5, linked_by=$6, linked_at=$7,
+	active=$8, show_agent_to_agent=$9, show_assistant_reply=$10, show_state_changes=$11,
+	notify_in_group=$12, chat_only=$13
+WHERE channel_id=$14`
 	_, err := s.db.ExecContext(ctx, q,
-		link.GuildID, link.ProjectID, link.ProjectSlug,
+		link.GuildID, link.GuildName, link.ProjectID, link.ProjectSlug,
 		link.DefaultAgent, link.LinkedBy, link.LinkedAt.UTC(),
 		link.Active, link.ShowAgentToAgent,
 		link.ShowAssistantReply, link.ShowStateChanges,
@@ -187,6 +204,11 @@ WHERE channel_id=$13`
 
 func (s *postgresStore) DeactivateLinksForGuild(ctx context.Context, guildID string) error {
 	_, err := s.db.ExecContext(ctx, `UPDATE discord_channel_links SET active = FALSE WHERE guild_id = $1`, guildID)
+	return err
+}
+
+func (s *postgresStore) UpdateGuildName(ctx context.Context, guildID, name string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE discord_channel_links SET guild_name = $1 WHERE guild_id = $2`, name, guildID)
 	return err
 }
 
@@ -485,7 +507,7 @@ func (s *postgresStore) GetNotificationPrefs(ctx context.Context, discordUserID,
 
 func pgScanChannelLink(row *sql.Row) (*ChannelLink, error) {
 	var link ChannelLink
-	err := row.Scan(&link.ChannelID, &link.GuildID, &link.ProjectID, &link.ProjectSlug,
+	err := row.Scan(&link.ChannelID, &link.GuildID, &link.GuildName, &link.ProjectID, &link.ProjectSlug,
 		&link.DefaultAgent, &link.LinkedBy, &link.LinkedAt, &link.Active, &link.ShowAgentToAgent,
 		&link.ShowAssistantReply, &link.ShowStateChanges, &link.NotifyInGroup, &link.ChatOnly)
 	if err == sql.ErrNoRows {
@@ -501,7 +523,7 @@ func pgScanChannelLinks(rows *sql.Rows) ([]*ChannelLink, error) {
 	var links []*ChannelLink
 	for rows.Next() {
 		var link ChannelLink
-		err := rows.Scan(&link.ChannelID, &link.GuildID, &link.ProjectID, &link.ProjectSlug,
+		err := rows.Scan(&link.ChannelID, &link.GuildID, &link.GuildName, &link.ProjectID, &link.ProjectSlug,
 			&link.DefaultAgent, &link.LinkedBy, &link.LinkedAt, &link.Active, &link.ShowAgentToAgent,
 			&link.ShowAssistantReply, &link.ShowStateChanges, &link.NotifyInGroup, &link.ChatOnly)
 		if err != nil {

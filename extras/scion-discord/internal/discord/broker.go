@@ -914,14 +914,29 @@ func (b *DiscordBroker) handleGuildCreate(_ *discordgo.Session, g *discordgo.Gui
 		"guild_name", g.Name,
 		"member_count", g.MemberCount,
 	)
+
+	// Update guild name for all existing channel links in this guild.
+	// This handles guild renames and populates the name for pre-migration links.
+	ctx := context.Background()
+	if err := b.store.UpdateGuildName(ctx, g.ID, g.Name); err != nil {
+		b.log.Error("Failed to update guild name for channel links", "guild_id", g.ID, "error", err)
+	}
 }
 
 // handleGuildDelete is called when the bot is removed from a guild or
 // when a guild becomes unavailable.
 func (b *DiscordBroker) handleGuildDelete(_ *discordgo.Session, g *discordgo.GuildDelete) {
-	b.log.Info("Discord guild unavailable",
-		"guild_id", g.ID,
-	)
+	if g.Unavailable {
+		// Discord outage — guild temporarily unavailable, do not deactivate.
+		b.log.Debug("Guild temporarily unavailable", "guild_id", g.ID)
+		return
+	}
+	// Bot was removed from guild — deactivate all channel links.
+	b.log.Info("Bot removed from guild, deactivating channel links", "guild_id", g.ID)
+	ctx := context.Background()
+	if err := b.store.DeactivateLinksForGuild(ctx, g.ID); err != nil {
+		b.log.Error("Failed to deactivate channel links for removed guild", "guild_id", g.ID, "error", err)
+	}
 }
 
 // handleMessageCreate is called for every new message in channels the bot
