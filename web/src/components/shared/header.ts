@@ -27,6 +27,9 @@ import type { User } from '../../shared/types.js';
 import './notification-tray.js';
 import './inbox-tray.js';
 
+/** URL for the Scion documentation site, opened by the Help button. */
+const DOCS_URL = 'https://googlecloudplatform.github.io/scion/overview/';
+
 @customElement('scion-header')
 export class ScionHeader extends LitElement {
   /**
@@ -269,7 +272,13 @@ export class ScionHeader extends LitElement {
           <scion-inbox-tray .user=${this.user}></scion-inbox-tray>
           <scion-notification-tray .user=${this.user}></scion-notification-tray>
           <sl-tooltip content="Help">
-            <sl-icon-button name="question-circle" label="Help"></sl-icon-button>
+            <sl-icon-button
+              name="question-circle"
+              label="Help"
+              @click=${(): void => {
+                window.open(DOCS_URL, '_blank', 'noopener,noreferrer');
+              }}
+            ></sl-icon-button>
           </sl-tooltip>
           <div class="theme-switch">
             <sl-icon name="sun" class=${this.isDark ? '' : 'active-icon'}></sl-icon>
