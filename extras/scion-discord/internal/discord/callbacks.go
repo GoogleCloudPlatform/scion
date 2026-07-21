@@ -206,7 +206,7 @@ func (h *CallbackHandler) saveChannelLink(ctx context.Context, i *discordgo.Inte
 		LinkedAt:           time.Now(),
 		Active:             true,
 		ShowAssistantReply: false,
-		ShowStateChanges:   true,
+		ShowStateChanges:   false,
 		NotifyInGroup:      true,
 	}
 

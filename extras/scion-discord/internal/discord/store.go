@@ -196,7 +196,7 @@ CREATE TABLE IF NOT EXISTS channel_links (
 	active INTEGER NOT NULL DEFAULT 1,
 	show_agent_to_agent INTEGER NOT NULL DEFAULT 0,
 	show_assistant_reply INTEGER NOT NULL DEFAULT 1,
-	show_state_changes INTEGER NOT NULL DEFAULT 1,
+	show_state_changes INTEGER NOT NULL DEFAULT 0,
 	notify_in_group INTEGER NOT NULL DEFAULT 1,
 	chat_only INTEGER NOT NULL DEFAULT 0
 );
@@ -273,7 +273,7 @@ CREATE TABLE IF NOT EXISTS thread_defaults (
 
 func (s *sqliteStore) migrateSchema() {
 	migrations := []string{
-		`ALTER TABLE channel_links ADD COLUMN show_state_changes INTEGER NOT NULL DEFAULT 1`,
+		`ALTER TABLE channel_links ADD COLUMN show_state_changes INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE channel_links ADD COLUMN guild_name TEXT NOT NULL DEFAULT ''`,
 	}
 	for _, m := range migrations {
