@@ -81,9 +81,13 @@ const (
 )
 
 // NewRegistrationHandler creates a new RegistrationHandler.
-func NewRegistrationHandler(store Store, api *TelegramAPIClient, hubURL, hmacKey, brokerID string, log *slog.Logger) *RegistrationHandler {
+// If httpClient is nil, a default client with a 15s timeout is used.
+func NewRegistrationHandler(store Store, api *TelegramAPIClient, hubURL, hmacKey, brokerID string, httpClient *http.Client, log *slog.Logger) *RegistrationHandler {
 	if log == nil {
 		log = slog.Default()
+	}
+	if httpClient == nil {
+		httpClient = &http.Client{Timeout: 15 * time.Second}
 	}
 	return &RegistrationHandler{
 		store:      store,
@@ -91,7 +95,7 @@ func NewRegistrationHandler(store Store, api *TelegramAPIClient, hubURL, hmacKey
 		hubURL:     hubURL,
 		hmacKey:    hmacKey,
 		brokerID:   brokerID,
-		httpClient: &http.Client{Timeout: 15 * time.Second},
+		httpClient: httpClient,
 		log:        log,
 		pending:    make(map[string]*pendingLinkReg),
 	}

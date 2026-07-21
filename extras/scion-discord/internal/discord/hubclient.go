@@ -20,12 +20,16 @@ type httpHubClient struct {
 }
 
 // NewHTTPHubClient creates a new HubClient that calls the Scion Hub API.
-func NewHTTPHubClient(hubURL, hmacKey, brokerID string) HubClient {
+// If httpClient is nil, a default client with a 15s timeout is used.
+func NewHTTPHubClient(hubURL, hmacKey, brokerID string, httpClient *http.Client) HubClient {
+	if httpClient == nil {
+		httpClient = &http.Client{Timeout: 15 * time.Second}
+	}
 	return &httpHubClient{
 		hubURL:     hubURL,
 		hmacKey:    hmacKey,
 		brokerID:   brokerID,
-		httpClient: &http.Client{Timeout: 15 * time.Second},
+		httpClient: httpClient,
 	}
 }
 

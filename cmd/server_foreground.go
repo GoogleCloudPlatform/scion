@@ -522,6 +522,14 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 										hubCreds["project_slug_map"] = string(jsonBytes)
 									}
 								}
+								// Inject transport auth config so plugins can authenticate
+								// with IAP-protected hub endpoints.
+								if cfg.Auth.Transport != nil && cfg.Auth.Transport.Mode != "" {
+									hubCreds["transport_mode"] = cfg.Auth.Transport.Mode
+								}
+								if cfg.Auth.Transport != nil && cfg.Auth.Transport.OIDCAudience != "" {
+									hubCreds["transport_audience"] = cfg.Auth.Transport.OIDCAudience
+								}
 								if cfg.Database.Driver != "" && cfg.Database.Driver != "sqlite" {
 									hubCreds["database_driver"] = cfg.Database.Driver
 									hubCreds["database_url"] = cfg.Database.URL
