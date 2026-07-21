@@ -36,7 +36,7 @@ import (
 )
 
 const (
-	defaultAgentCacheTTL = 5 * time.Minute
+	defaultAgentCacheTTL = 30 * time.Second
 	defaultDBPath        = "discord.db"
 
 	// dedupTTL is how long a message ID is remembered for deduplication.
