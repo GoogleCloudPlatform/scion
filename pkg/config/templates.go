@@ -656,9 +656,18 @@ func WarnDeprecatedTemplateFields(cfg *api.ScionConfig) []string {
 }
 
 // NormalizeModelAlias normalizes shorthand model alias names to their canonical form.
+// Handles single-letter shortcuts (S/M/L) and the XL shorthand in addition
+// to case normalization.
 func NormalizeModelAlias(model string) string {
 	model = strings.ToLower(model)
-	if model == "xl" {
+	switch model {
+	case "s":
+		return "small"
+	case "m":
+		return "medium"
+	case "l":
+		return "large"
+	case "xl":
 		return "extra-large"
 	}
 	return model

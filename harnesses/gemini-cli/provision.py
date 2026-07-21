@@ -138,20 +138,33 @@ def _build_env_overlay(method: str, env_key: str) -> dict[str, str]:
     return {}
 
 
-def _apply_native_system_prompt(ctx: scion_harness.ProvisionContext) -> None:
+def _is_meaningful_system_prompt(text: str) -> bool:
+    """Return True if text has substantive content, not just a placeholder."""
+    stripped = text.strip()
+    if not stripped:
+        return False
+    if stripped.lower() in ("# placeholder",):
+        return False
+    return True
+
+
+def _apply_native_system_prompt(ctx: scion_harness.ProvisionContext) -> bool:
     """Write the staged system prompt to the native Gemini CLI location.
 
     config.yaml declares system_prompt_file (.gemini/system_prompt.md) and
     system_prompt_mode (native), so the prompt goes into its own file rather
     than being prepended to the instructions file.
+
+    Returns True if a meaningful system prompt was written (so the caller
+    can inject the GEMINI_SYSTEM_MD env var).
     """
     system_prompt = ctx.read_input_text("system-prompt.md")
     if not system_prompt.strip():
-        return
+        return False
 
     target = str(ctx.harness_config.get("system_prompt_file") or "")
     if not target:
-        return
+        return False
 
     full = os.path.join(ctx.home, target)
     parent = os.path.dirname(full)
@@ -162,6 +175,57 @@ def _apply_native_system_prompt(ctx: scion_harness.ProvisionContext) -> None:
         f.write(system_prompt)
     os.replace(tmp, full)
     ctx.info(f"wrote system prompt to {full}")
+    return _is_meaningful_system_prompt(system_prompt)
+
+
+def _resolve_model_alias(ctx: scion_harness.ProvisionContext) -> None:
+    """Resolve SCION_MODEL alias using harness_config model_aliases.
+
+    When SCION_MODEL is a tier name (e.g. 'large', 'L', 'Small') rather
+    than a concrete model string, resolve it via the model_aliases map
+    from config.yaml and update ~/.gemini/settings.json accordingly.
+    """
+    raw_model = os.environ.get("SCION_MODEL", "")
+    if not raw_model:
+        return
+
+    aliases: dict[str, str] = ctx.harness_config.get("model_aliases") or {}
+    if not aliases:
+        return
+
+    # Normalize: lowercase, handle single-letter and shorthand aliases.
+    normalized = raw_model.lower()
+    _shorthand = {"s": "small", "m": "medium", "l": "large", "xl": "extra-large"}
+    normalized = _shorthand.get(normalized, normalized)
+
+    concrete = aliases.get(normalized)
+    if not concrete:
+        # Already a concrete model name (not a known alias) — nothing to do.
+        return
+
+    if concrete == raw_model:
+        return
+
+    ctx.info(f"resolved model alias {raw_model!r} → {concrete!r}")
+
+    # Update Gemini settings.json so the CLI uses the resolved model.
+    settings_path = scion_harness.expand_path(GEMINI_SETTINGS_FILE)
+    settings: dict[str, Any] = {}
+    if os.path.isfile(settings_path):
+        try:
+            settings = scion_harness.load_json(settings_path) or {}
+        except (OSError, json.JSONDecodeError):
+            settings = {}
+    if not isinstance(settings, dict):
+        settings = {}
+
+    model_section = settings.get("model")
+    if not isinstance(model_section, dict):
+        model_section = {}
+        settings["model"] = model_section
+
+    model_section["name"] = concrete
+    scion_harness.atomic_write_json(settings_path, settings)
 
 
 def provision(ctx: scion_harness.ProvisionContext) -> None:
@@ -175,10 +239,20 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
     if resolved.method == "vertex-ai":
         extra = {"vertex_ai": True}
 
+    # Check system prompt before writing outputs so we can inject
+    # GEMINI_SYSTEM_MD into the env overlay when it has real content.
+    has_system_prompt = _apply_native_system_prompt(ctx)
+    if has_system_prompt:
+        sp_file = str(ctx.harness_config.get("system_prompt_file") or "")
+        if sp_file:
+            env["GEMINI_SYSTEM_MD"] = os.path.join(ctx.home, sp_file)
+
     ctx.write_outputs(resolved, env=env, extra=extra)
     ctx.info(f"method={resolved.method}")
 
-    _apply_native_system_prompt(ctx)
+    # Resolve model alias (e.g. 'large' → 'gemini-3.1-pro-preview') and
+    # update ~/.gemini/settings.json so the CLI uses the concrete model.
+    _resolve_model_alias(ctx)
 
     harness_cfg = ctx.harness_config
     instructions_file = str(harness_cfg.get("instructions_file") or ".gemini/GEMINI.md")
