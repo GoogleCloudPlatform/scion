@@ -157,6 +157,7 @@ func serveStandalone() {
 			"hub_url", "hmac_key", "broker_id",
 			"mention_routing", "send_queue_size", "send_min_delay",
 			"agent_cache_ttl",
+			"transport_mode", "transport_audience",
 		},
 		UpdateHook: os.Getenv("UPDATE_HOOK"),
 		Log:        log,
