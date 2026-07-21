@@ -47,7 +47,7 @@ CREATE TABLE IF NOT EXISTS discord_channel_links (
 	active BOOLEAN NOT NULL DEFAULT TRUE,
 	show_agent_to_agent BOOLEAN NOT NULL DEFAULT FALSE,
 	show_assistant_reply BOOLEAN NOT NULL DEFAULT TRUE,
-	show_state_changes BOOLEAN NOT NULL DEFAULT TRUE,
+	show_state_changes BOOLEAN NOT NULL DEFAULT FALSE,
 	notify_in_group BOOLEAN NOT NULL DEFAULT TRUE,
 	chat_only BOOLEAN NOT NULL DEFAULT FALSE
 );
