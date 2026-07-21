@@ -478,6 +478,24 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 		}
 	}
 
+	// Clone req.ResolvedEnv to avoid mutating the shared agent.AppliedConfig.Env
+	// map, which is a direct reference and may be read concurrently.
+	if req.ResolvedEnv != nil {
+		clonedEnv := make(map[string]string, len(req.ResolvedEnv))
+		for k, v := range req.ResolvedEnv {
+			clonedEnv[k] = v
+		}
+		req.ResolvedEnv = clonedEnv
+	}
+	if agent.AppliedConfig != nil && agent.AppliedConfig.Model != "" {
+		if req.ResolvedEnv == nil {
+			req.ResolvedEnv = make(map[string]string)
+		}
+		if _, ok := req.ResolvedEnv["SCION_MODEL"]; !ok {
+			req.ResolvedEnv["SCION_MODEL"] = agent.AppliedConfig.Model
+		}
+	}
+
 	// Resolve env vars from Hub storage (user/project/broker scopes) and merge.
 	// Storage env vars fill in keys not already set (with a non-empty value)
 	// by explicit config env vars. Empty-value config entries are passthrough
@@ -1175,6 +1193,13 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 		}
 	}
 
+	// Inject SCION_MODEL from applied config model override
+	if agent.AppliedConfig != nil && agent.AppliedConfig.Model != "" {
+		if _, ok := resolvedEnv["SCION_MODEL"]; !ok {
+			resolvedEnv["SCION_MODEL"] = agent.AppliedConfig.Model
+		}
+	}
+
 	// Merge env vars from Hub storage; storage vars fill in keys not already
 	// set (with a non-empty value) by explicit config env vars.
 	// Empty-value config entries are passthrough markers — storage values
@@ -1416,6 +1441,13 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 	}
 	if d.hubEndpoint != "" {
 		resolvedEnv["SCION_HUB_ENDPOINT"] = d.hubEndpoint
+	}
+
+	// Inject SCION_MODEL from applied config model override
+	if agent.AppliedConfig != nil && agent.AppliedConfig.Model != "" {
+		if _, ok := resolvedEnv["SCION_MODEL"]; !ok {
+			resolvedEnv["SCION_MODEL"] = agent.AppliedConfig.Model
+		}
 	}
 
 	if d.tokenGenerator != nil {
