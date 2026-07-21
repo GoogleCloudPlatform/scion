@@ -365,8 +365,8 @@ func AddPluginToMessageBrokerTypes(pluginName string) error {
 		server["message_broker"] = mb
 	}
 
-	// Ensure enabled.
-	mb["enabled"] = true
+	// Read existing enabled state.
+	enabled, _ := mb["enabled"].(bool)
 
 	// Read existing types list.
 	var types []string
@@ -380,15 +380,24 @@ func AddPluginToMessageBrokerTypes(pluginName string) error {
 		}
 	}
 
-	// Check for duplicates.
+	// Check if the plugin is already present.
+	hasPlugin := false
 	for _, t := range types {
 		if t == pluginName {
-			// Already present — nothing to do.
-			return nil
+			hasPlugin = true
+			break
 		}
 	}
 
-	types = append(types, pluginName)
+	// If already enabled and the plugin is present, nothing to do.
+	if enabled && hasPlugin {
+		return nil
+	}
+
+	mb["enabled"] = true
+	if !hasPlugin {
+		types = append(types, pluginName)
+	}
 
 	// Convert back to []interface{} for YAML marshalling.
 	iface := make([]interface{}, len(types))

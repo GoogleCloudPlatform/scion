@@ -395,6 +395,41 @@ func TestAddPluginToMessageBrokerTypes_Idempotent(t *testing.T) {
 	}
 }
 
+func TestAddPluginToMessageBrokerTypes_PluginPresentButDisabled(t *testing.T) {
+	_, settingsPath := setupTestHome(t)
+
+	// Plugin is already in types but enabled is false.
+	if err := os.WriteFile(settingsPath, []byte("server:\n  message_broker:\n    enabled: false\n    types:\n      - telegram\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := AddPluginToMessageBrokerTypes("telegram"); err != nil {
+		t.Fatalf("AddPluginToMessageBrokerTypes() error: %v", err)
+	}
+
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var raw map[string]interface{}
+	if err := yaml.Unmarshal(data, &raw); err != nil {
+		t.Fatal(err)
+	}
+
+	server := raw["server"].(map[string]interface{})
+	mb := server["message_broker"].(map[string]interface{})
+
+	if enabled, ok := mb["enabled"].(bool); !ok || !enabled {
+		t.Error("expected message_broker.enabled = true after re-enabling")
+	}
+
+	typesRaw := mb["types"].([]interface{})
+	if len(typesRaw) != 1 || typesRaw[0] != "telegram" {
+		t.Errorf("expected types=[telegram] (no duplicate), got %v", typesRaw)
+	}
+}
+
 func TestAddPluginToMessageBrokerTypes_AppendsSecondPlugin(t *testing.T) {
 	_, settingsPath := setupTestHome(t)
 
