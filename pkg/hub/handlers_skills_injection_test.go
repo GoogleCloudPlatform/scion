@@ -997,7 +997,10 @@ func TestUserInjectedSkills_UnauthorizedWithoutToken(t *testing.T) {
 // Hub-scope: GET
 // =============================================================================
 
-func TestGetHubInjectedSkills_EmptyByDefault(t *testing.T) {
+func TestGetHubInjectedSkills_DefaultState(t *testing.T) {
+	// After hub startup, platform skills are automatically seeded into the
+	// system list by seedPlatformSkillInsertions (Phase 6). The system list
+	// is therefore non-empty, while user_defined starts empty.
 	srv, _, _, alice, _ := setupInjectedSkillsTest(t)
 
 	rec := doRequestAsUser(t, srv, alice, http.MethodGet,
@@ -1006,7 +1009,12 @@ func TestGetHubInjectedSkills_EmptyByDefault(t *testing.T) {
 
 	var resp api.HubSkillInjectionSetting
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
-	assert.Empty(t, resp.System)
+	// System entries are seeded from the embedded platform skills on startup.
+	assert.NotEmpty(t, resp.System, "system list must contain seeded platform skills")
+	for _, ref := range resp.System {
+		assert.True(t, ref.Optional)
+	}
+	// No user-configured skills yet.
 	assert.Empty(t, resp.UserDefined)
 }
 

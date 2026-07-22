@@ -944,6 +944,12 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 		seedDevUser(ctx, s, cfg.DevUserConfig)
 	}
 
+	// Seed platform skills into hub_settings["injected_skills"].system (idempotent).
+	// Runs on every startup so that the system list is always in sync with the binary.
+	if err := srv.seedPlatformSkillInsertions(ctx); err != nil {
+		slog.Warn("Failed to seed platform skill insertions", "error", err)
+	}
+
 	// Abort any maintenance operations/migrations left in "running" state from
 	// a previous server instance that was restarted mid-operation.
 	if runs, migrations, err := s.AbortRunningMaintenanceOps(ctx); err != nil {
