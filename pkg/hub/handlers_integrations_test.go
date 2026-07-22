@@ -55,6 +55,7 @@ type mockIntegrationManager struct {
 	installCalls       []string
 	loadOneCalls       []string
 	loadOneErr         error
+	brokers            map[string]eventbus.EventBus // name → bus (for GetBroker)
 }
 
 func newMockIntegrationManager() *mockIntegrationManager {
@@ -189,6 +190,11 @@ func (m *mockIntegrationManager) LoadOne(pluginType, name string, entry plugin.P
 }
 
 func (m *mockIntegrationManager) GetBroker(name string) (eventbus.EventBus, error) {
+	if m.brokers != nil {
+		if b, ok := m.brokers[name]; ok {
+			return b, nil
+		}
+	}
 	return nil, fmt.Errorf("mock: GetBroker not wired")
 }
 
@@ -586,6 +592,75 @@ func TestValidateIntegrationWiring_NoProxy(t *testing.T) {
 	if !strings.Contains(warnings[0], "message broker not initialized") {
 		t.Errorf("unexpected warning: %s", warnings[0])
 	}
+}
+
+// --- ensureBrokerSpoke tests ---
+
+func TestEnsureBrokerSpoke_AddsWhenMissing(t *testing.T) {
+	mgr := newMockIntegrationManager()
+	mgr.plugins["discord"] = map[string]string{}
+
+	discordBus := eventbus.NewInProcessEventBus(slog.Default())
+	mgr.brokers = map[string]eventbus.EventBus{"discord": discordBus}
+
+	// FanOut has only the inprocess spoke — discord is missing.
+	inproc := eventbus.NewInProcessEventBus(slog.Default())
+	fanout := eventbus.NewFanOutEventBus([]eventbus.NamedEventBus{
+		{Name: "inprocess", Bus: inproc},
+	}, slog.Default())
+
+	proxy := NewMessageBrokerProxy(fanout, nil, nil, nil, slog.Default())
+	srv := &Server{}
+	srv.pluginManager = mgr
+	srv.SetMessageBrokerProxy(proxy)
+
+	if fanout.HasSpoke("discord") {
+		t.Fatal("precondition failed: discord spoke should not exist yet")
+	}
+
+	srv.ensureBrokerSpoke(mgr, "discord")
+
+	if !fanout.HasSpoke("discord") {
+		t.Fatal("ensureBrokerSpoke should have added the discord spoke")
+	}
+}
+
+func TestEnsureBrokerSpoke_NoopWhenAlreadyPresent(t *testing.T) {
+	mgr := newMockIntegrationManager()
+	mgr.plugins["discord"] = map[string]string{}
+
+	discordBus := eventbus.NewInProcessEventBus(slog.Default())
+	mgr.brokers = map[string]eventbus.EventBus{"discord": discordBus}
+
+	// FanOut already has a discord spoke.
+	inproc := eventbus.NewInProcessEventBus(slog.Default())
+	existingDiscordBus := eventbus.NewInProcessEventBus(slog.Default())
+	fanout := eventbus.NewFanOutEventBus([]eventbus.NamedEventBus{
+		{Name: "inprocess", Bus: inproc},
+		{Name: "discord", Bus: existingDiscordBus},
+	}, slog.Default())
+
+	proxy := NewMessageBrokerProxy(fanout, nil, nil, nil, slog.Default())
+	srv := &Server{}
+	srv.pluginManager = mgr
+	srv.SetMessageBrokerProxy(proxy)
+
+	// Should be a no-op — HasSpoke returns true, AddSpoke is never called.
+	srv.ensureBrokerSpoke(mgr, "discord")
+
+	if !fanout.HasSpoke("discord") {
+		t.Fatal("discord spoke should still exist")
+	}
+}
+
+func TestEnsureBrokerSpoke_NoProxyIsNoop(t *testing.T) {
+	mgr := newMockIntegrationManager()
+	mgr.plugins["discord"] = map[string]string{}
+
+	srv := &Server{}
+	srv.pluginManager = mgr
+	// No proxy set — should not panic.
+	srv.ensureBrokerSpoke(mgr, "discord")
 }
 
 func TestRestartIntegration_NotFound(t *testing.T) {

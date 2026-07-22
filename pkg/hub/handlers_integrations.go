@@ -583,6 +583,9 @@ func (s *Server) handleUpdateIntegrationConfig(w http.ResponseWriter, r *http.Re
 				InternalError(w)
 				return
 			}
+			// The plugin may have been installed mid-session and never wired
+			// into the FanOut at startup. Ensure it has a spoke now.
+			s.ensureBrokerSpoke(mgr, name)
 		}
 	} else {
 		// The plugin was installed but never loaded (required fields were
@@ -615,13 +618,17 @@ func (s *Server) handleRestartIntegration(w http.ResponseWriter, r *http.Request
 	// reconfigureIntegration pushes new config to the running plugin process
 	// (via ReplaceBrokerConfig) without killing it, so the existing spoke's
 	// RPC connection remains valid — no refreshBrokerSpoke needed here.
-	// Contrast with handleUpdateIntegration which rebuilds the binary and
-	// restarts the process, requiring a spoke refresh.
+	// However the spoke may never have been added (e.g. first install before
+	// a full hub restart), so ensure it exists.
 	if err := s.reconfigureIntegration(r.Context(), mgr, name); err != nil {
 		slog.Error("Failed to restart integration", "plugin", name, "error", err)
 		InternalError(w)
 		return
 	}
+
+	// Ensure the plugin is wired as a FanOut spoke — it may have been
+	// installed mid-session and never added at startup.
+	s.ensureBrokerSpoke(mgr, name)
 
 	// Post-restart validation: check that the plugin is wired into the FanOut.
 	warnings := s.validateIntegrationWiring(name)
@@ -845,6 +852,10 @@ func (s *Server) handleInstallIntegration(w http.ResponseWriter, r *http.Request
 		// can reconfigure via the admin UI.
 		slog.Warn("Plugin installed but initial reconfigure failed", "plugin", name, "error", err)
 	}
+
+	// Wire the newly installed plugin into the FanOut so it receives
+	// Subscribe() calls (and can start its gateway).
+	s.ensureBrokerSpoke(mgr, name)
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
@@ -1239,6 +1250,58 @@ func (s *Server) reconfigureIntegration(ctx context.Context, mgr IntegrationMana
 	}
 
 	return nil
+}
+
+// ensureBrokerSpoke adds the plugin as a FanOut spoke if it is not already
+// registered. Unlike refreshBrokerSpoke it never calls ReplaceSpoke, so it
+// is safe to call on a running plugin — existing connections are preserved.
+// This fills the gap where handleInstallIntegration, handleRestartIntegration,
+// and handleUpdateIntegrationConfig (loaded-branch) all call
+// reconfigureIntegration but never wire the plugin into the FanOut, causing
+// Subscribe() (and therefore startGateway()) to never fire.
+func (s *Server) ensureBrokerSpoke(mgr IntegrationManager, name string) {
+	proxy := s.GetMessageBrokerProxy()
+	if proxy == nil {
+		return
+	}
+	fanout, ok := proxy.bus.(*eventbus.FanOutEventBus)
+	if !ok {
+		return
+	}
+	if fanout.HasSpoke(name) {
+		return // already wired — nothing to do
+	}
+
+	newBus, err := mgr.GetBroker(name)
+	if err != nil {
+		slog.Warn("ensureBrokerSpoke: cannot get broker, skipping spoke add",
+			"plugin", name, "error", err)
+		return
+	}
+
+	var observer bool
+	var channelID string
+	if _, cID, caps, infoErr := mgr.BrokerInfo(name); infoErr == nil {
+		channelID = cID
+		for _, cap := range caps {
+			if strings.EqualFold(cap, "observer") {
+				observer = true
+				break
+			}
+		}
+	}
+
+	spoke := eventbus.NamedEventBus{
+		Name:      name,
+		Bus:       newBus,
+		Observer:  observer,
+		ChannelID: channelID,
+	}
+	if err := fanout.AddSpoke(spoke); err != nil {
+		slog.Error("ensureBrokerSpoke: failed to add spoke", "plugin", name, "error", err)
+	} else {
+		slog.Info("Wired broker plugin as FanOut spoke after admin operation", "plugin", name)
+	}
 }
 
 // refreshBrokerSpoke replaces the stale fan-out eventbus spoke for a broker
