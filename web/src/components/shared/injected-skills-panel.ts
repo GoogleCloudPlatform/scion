@@ -343,7 +343,7 @@ export class ScionInjectedSkillsPanel extends LitElement {
         }));
       }
     } catch (err) {
-      if (err instanceof DOMException && err.name === 'AbortError') {
+      if (err instanceof Error && err.name === 'AbortError') {
         return; // Silently abort — caller will call load() again with the correct scope
       }
       this.error = err instanceof Error ? err.message : 'Failed to load injected skills';
