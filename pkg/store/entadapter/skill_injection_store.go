@@ -20,7 +20,6 @@ import (
 
 	entsql "entgo.io/ent/dialect/sql"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	entskillinjection "github.com/GoogleCloudPlatform/scion/pkg/ent/skillinjection"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -156,11 +155,11 @@ func (s *SkillInjectionStore) RemoveSkillInjection(ctx context.Context, id strin
 }
 
 // SetSkillInjections atomically replaces the full list for a scope+scopeID.
-// All existing entries for (scope, scopeID) are deleted and the new list is
+// All existing entries for (scope, scopeID) are deleted and the new entries are
 // bulk-inserted in a single serializable transaction. On Postgres the transaction
 // is retried on serialization failure so concurrent calls are safe under READ
-// COMMITTED default isolation.
-func (s *SkillInjectionStore) SetSkillInjections(ctx context.Context, scope, scopeID string, refs []api.SkillReference, createdBy string) error {
+// COMMITTED default isolation. SortOrder is taken from each entry as-is.
+func (s *SkillInjectionStore) SetSkillInjections(ctx context.Context, scope, scopeID string, entries []store.SkillInjection, createdBy string) error {
 	return runSerializableEntTx(ctx, s.client, func(ctx context.Context, tx *ent.Tx) error {
 		// Delete all existing entries for this scope+scopeID.
 		_, err := tx.SkillInjection.Delete().
@@ -173,22 +172,22 @@ func (s *SkillInjectionStore) SetSkillInjections(ctx context.Context, scope, sco
 			return mapError(err)
 		}
 
-		if len(refs) == 0 {
+		if len(entries) == 0 {
 			return nil
 		}
 
 		// Bulk-insert all new entries in a single round-trip.
 		now := time.Now()
-		builders := make([]*ent.SkillInjectionCreate, 0, len(refs))
-		for i, ref := range refs {
+		builders := make([]*ent.SkillInjectionCreate, 0, len(entries))
+		for _, entry := range entries {
 			builders = append(builders, tx.SkillInjection.Create().
 				SetID(uuid.New()).
 				SetScope(entskillinjection.Scope(scope)).
 				SetScopeID(scopeID).
-				SetSkillURI(ref.URI).
-				SetNillableSkillAs(nullableString(ref.As)).
-				SetOptional(ref.Optional).
-				SetSortOrder(i).
+				SetSkillURI(entry.SkillURI).
+				SetNillableSkillAs(nullableString(entry.SkillAs)).
+				SetOptional(entry.Optional).
+				SetSortOrder(entry.SortOrder).
 				SetCreatedAt(now).
 				SetNillableCreatedBy(nullableString(createdBy)))
 		}

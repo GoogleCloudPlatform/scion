@@ -76,7 +76,8 @@ func (s *Server) listProjectInjectedSkills(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// Read access check.
+	// Read access check. Only UserIdentity callers (web users) are permitted;
+	// agent/broker tokens are rejected by the else-guard below.
 	if userIdent, ok := identity.(UserIdentity); ok {
 		decision := s.authzService.CheckAccess(ctx, userIdent, Resource{
 			Type:    "project",
@@ -87,6 +88,9 @@ func (s *Server) listProjectInjectedSkills(w http.ResponseWriter, r *http.Reques
 			Forbidden(w)
 			return
 		}
+	} else {
+		Forbidden(w)
+		return
 	}
 
 	sis, err := s.store.ListSkillInjections(ctx, store.SkillInjectionScopeProject, projectID)
@@ -222,8 +226,23 @@ func (s *Server) setProjectInjectedSkills(w http.ResponseWriter, r *http.Request
 		createdBy = userIdent.ID()
 	}
 
-	refs := skillInjectionEntriesToRefs(req.Entries)
-	if err := s.store.SetSkillInjections(ctx, store.SkillInjectionScopeProject, projectID, refs, createdBy); err != nil {
+	injections := make([]store.SkillInjection, 0, len(req.Entries))
+	for i, e := range req.Entries {
+		sortOrder := e.SortOrder
+		if sortOrder == 0 {
+			sortOrder = i // default to request position when not explicitly set
+		}
+		injections = append(injections, store.SkillInjection{
+			Scope:     store.SkillInjectionScopeProject,
+			ScopeID:   projectID,
+			SkillURI:  e.SkillURI,
+			SkillAs:   e.SkillAs,
+			Optional:  e.Optional,
+			SortOrder: sortOrder,
+			CreatedBy: createdBy,
+		})
+	}
+	if err := s.store.SetSkillInjections(ctx, store.SkillInjectionScopeProject, projectID, injections, createdBy); err != nil {
 		writeErrorFromErr(w, err, "")
 		return
 	}
@@ -272,6 +291,26 @@ func (s *Server) removeProjectInjectedSkill(w http.ResponseWriter, r *http.Reque
 		}
 	} else {
 		Forbidden(w)
+		return
+	}
+
+	// Fetch-then-verify: confirm the entry belongs to this project before
+	// deleting. This prevents IDOR where a project-A admin could delete a
+	// project-B entry by guessing its UUID (C-2).
+	projectEntries, err := s.store.ListSkillInjections(ctx, store.SkillInjectionScopeProject, projectID)
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+	owned := false
+	for _, e := range projectEntries {
+		if e.ID == entryID {
+			owned = true
+			break
+		}
+	}
+	if !owned {
+		NotFound(w, "Skill injection entry")
 		return
 	}
 
@@ -397,8 +436,23 @@ func (s *Server) setUserInjectedSkills(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	refs := skillInjectionEntriesToRefs(req.Entries)
-	if err := s.store.SetSkillInjections(ctx, store.SkillInjectionScopeUser, userIdent.ID(), refs, userIdent.ID()); err != nil {
+	injections := make([]store.SkillInjection, 0, len(req.Entries))
+	for i, e := range req.Entries {
+		sortOrder := e.SortOrder
+		if sortOrder == 0 {
+			sortOrder = i // default to request position when not explicitly set
+		}
+		injections = append(injections, store.SkillInjection{
+			Scope:     store.SkillInjectionScopeUser,
+			ScopeID:   userIdent.ID(),
+			SkillURI:  e.SkillURI,
+			SkillAs:   e.SkillAs,
+			Optional:  e.Optional,
+			SortOrder: sortOrder,
+			CreatedBy: userIdent.ID(),
+		})
+	}
+	if err := s.store.SetSkillInjections(ctx, store.SkillInjectionScopeUser, userIdent.ID(), injections, userIdent.ID()); err != nil {
 		writeErrorFromErr(w, err, "")
 		return
 	}
@@ -420,6 +474,26 @@ func (s *Server) removeUserInjectedSkill(w http.ResponseWriter, r *http.Request,
 	userIdent := GetUserIdentityFromContext(ctx)
 	if userIdent == nil {
 		Unauthorized(w)
+		return
+	}
+
+	// Fetch-then-verify: confirm the entry belongs to this user before
+	// deleting. This prevents IDOR where user A could delete user B's entry
+	// by guessing its UUID (C-1).
+	userEntries, err := s.store.ListSkillInjections(ctx, store.SkillInjectionScopeUser, userIdent.ID())
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+	owned := false
+	for _, e := range userEntries {
+		if e.ID == entryID {
+			owned = true
+			break
+		}
+	}
+	if !owned {
+		NotFound(w, "Skill injection entry")
 		return
 	}
 
@@ -523,11 +597,19 @@ func (s *Server) setHubInjectedSkills(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Read current setting to preserve the system entries.
+	// If the stored blob exists but is corrupt, return 500 rather than
+	// silently destroying system skill entries (H-1).
 	var existing api.HubSkillInjectionSetting
 	if setting, err := s.store.GetHubSetting(ctx, "injected_skills"); err == nil {
 		if jsonErr := json.Unmarshal(setting.Value, &existing); jsonErr != nil {
-			slog.Warn("failed to parse existing hub injected_skills setting, resetting", "error", jsonErr)
+			slog.Error("failed to parse existing hub injected_skills setting", "error", jsonErr)
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+				"internal error: failed to parse current hub skill settings", nil)
+			return
 		}
+	} else if !errors.Is(err, store.ErrNotFound) {
+		writeErrorFromErr(w, err, "")
+		return
 	}
 	// System entries are never overwritten via this endpoint.
 	existing.UserDefined = req.UserDefined
@@ -573,20 +655,6 @@ func skillInjectionToEntry(si store.SkillInjection) api.SkillInjectionEntry {
 		Optional:  si.Optional,
 		SortOrder: si.SortOrder,
 	}
-}
-
-// skillInjectionEntriesToRefs converts a slice of api.SkillInjectionEntry to
-// a slice of api.SkillReference suitable for SetSkillInjections.
-func skillInjectionEntriesToRefs(entries []api.SkillInjectionEntry) []api.SkillReference {
-	refs := make([]api.SkillReference, 0, len(entries))
-	for _, e := range entries {
-		refs = append(refs, api.SkillReference{
-			URI:      e.SkillURI,
-			As:       e.SkillAs,
-			Optional: e.Optional,
-		})
-	}
-	return refs
 }
 
 // enrichSkillInjections converts store.SkillInjection records to api.SkillInjectionEntry

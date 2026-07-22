@@ -19,8 +19,6 @@ import (
 	"encoding/json"
 	"errors"
 	"time"
-
-	"github.com/GoogleCloudPlatform/scion/pkg/api"
 )
 
 // Common errors returned by store implementations.
@@ -1357,11 +1355,6 @@ type SkillRegistryStore interface {
 
 // SkillInjectionStore defines persistence operations for the injected-skills
 // list scoped to a project or user.
-//
-// Design note: SetSkillInjections accepts []api.SkillReference (the wire type)
-// rather than []SkillInjection so that callers do not have to pre-allocate and
-// hydrate full SkillInjection records. The store package already depends on the
-// api package (see models.go), so this does not introduce any new import cycle.
 type SkillInjectionStore interface {
 	// ListSkillInjections returns all skill injections for the given scope+scopeID,
 	// ordered by sort_order ascending.
@@ -1383,10 +1376,12 @@ type SkillInjectionStore interface {
 	RemoveSkillInjection(ctx context.Context, id string) error
 
 	// SetSkillInjections atomically replaces the full list for a scope+scopeID.
-	// All existing entries for (scope, scopeID) are deleted and the new list
-	// is inserted in a single transaction. refs is converted to SkillInjection
-	// rows with the given createdBy value.
-	SetSkillInjections(ctx context.Context, scope, scopeID string, refs []api.SkillReference, createdBy string) error
+	// All existing entries for (scope, scopeID) are deleted and the new entries
+	// are inserted in a single transaction. SortOrder is taken from each entry;
+	// callers should set it before calling (handlers default to request position).
+	// Phase 3 note: provisioner integration will call this with []SkillInjection
+	// constructed from the merged hub+project+user lists.
+	SetSkillInjections(ctx context.Context, scope, scopeID string, entries []SkillInjection, createdBy string) error
 
 	// DeleteSkillInjectionsByScope removes all skill injection entries for the
 	// given scope+scopeID. Used during project or user deletion to cascade-clean

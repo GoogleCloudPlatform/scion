@@ -240,19 +240,19 @@ func TestSkillInjection_SetSkillInjectionsAtomicReplace(t *testing.T) {
 	}
 	require.NoError(t, s.AddSkillInjection(ctx, si))
 
-	// Replace with two new refs.
-	refs := []api.SkillReference{
-		{URI: "skill://org/new-skill-a@2.0.0", As: "a"},
-		{URI: "skill://org/new-skill-b@3.0.0", Optional: true},
+	// Replace with two new entries (explicit SortOrder so we can verify round-trip).
+	entries := []store.SkillInjection{
+		{Scope: store.SkillInjectionScopeProject, ScopeID: projectID, SkillURI: "skill://org/new-skill-a@2.0.0", SkillAs: "a", SortOrder: 0},
+		{Scope: store.SkillInjectionScopeProject, ScopeID: projectID, SkillURI: "skill://org/new-skill-b@3.0.0", Optional: true, SortOrder: 1},
 	}
-	require.NoError(t, s.SetSkillInjections(ctx, store.SkillInjectionScopeProject, projectID, refs, "user-xyz"))
+	require.NoError(t, s.SetSkillInjections(ctx, store.SkillInjectionScopeProject, projectID, entries, "user-xyz"))
 
 	// The old entry should be gone; only the two new entries should exist.
 	list, err := s.ListSkillInjections(ctx, store.SkillInjectionScopeProject, projectID)
 	require.NoError(t, err)
 	require.Len(t, list, 2)
 
-	// Verify ordering and content.
+	// Verify ordering and content (returned sorted by SortOrder asc).
 	assert.Equal(t, 0, list[0].SortOrder)
 	assert.Equal(t, "skill://org/new-skill-a@2.0.0", list[0].SkillURI)
 	assert.Equal(t, "a", list[0].SkillAs)
@@ -315,7 +315,7 @@ func TestSkillInjection_SetSkillInjections_DoesNotAffectOtherScopes(t *testing.T
 
 	// Replace only proj1.
 	require.NoError(t, s.SetSkillInjections(ctx, store.SkillInjectionScopeProject, proj1,
-		[]api.SkillReference{{URI: "skill://org/replaced@2.0.0"}}, ""))
+		[]store.SkillInjection{{Scope: store.SkillInjectionScopeProject, ScopeID: proj1, SkillURI: "skill://org/replaced@2.0.0"}}, ""))
 
 	// proj2 should be unchanged.
 	list2, err := s.ListSkillInjections(ctx, store.SkillInjectionScopeProject, proj2)

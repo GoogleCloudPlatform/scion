@@ -18,14 +18,17 @@ package hub
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -241,6 +244,36 @@ func TestSetProjectInjectedSkills_ReplacesListAtomically(t *testing.T) {
 	assert.Contains(t, uris, "scion://new-skill-b@2.0")
 }
 
+// TestSetProjectInjectedSkills_SortOrderPreserved verifies M-2:
+// explicit SortOrder values are preserved through a PUT bulk-replace round-trip.
+func TestSetProjectInjectedSkills_SortOrderPreserved(t *testing.T) {
+	srv, s, project, alice, _ := setupInjectedSkillsTest(t)
+	ctx := context.Background()
+
+	newList := api.SkillInjectionList{
+		Entries: []api.SkillInjectionEntry{
+			{SkillURI: "scion://skill-c@1.0", SortOrder: 30},
+			{SkillURI: "scion://skill-a@1.0", SortOrder: 10},
+			{SkillURI: "scion://skill-b@1.0", SortOrder: 20},
+		},
+	}
+	rec := doRequestAsUser(t, srv, alice, http.MethodPut,
+		"/api/v1/projects/"+project.ID+"/injected-skills", newList)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	// Fetch from store directly — entries are returned sorted by SortOrder ascending.
+	sis, err := s.ListSkillInjections(ctx, store.SkillInjectionScopeProject, project.ID)
+	require.NoError(t, err)
+	require.Len(t, sis, 3)
+	// Store returns them sorted by sort_order, so expect 10, 20, 30.
+	assert.Equal(t, 10, sis[0].SortOrder)
+	assert.Equal(t, "scion://skill-a@1.0", sis[0].SkillURI)
+	assert.Equal(t, 20, sis[1].SortOrder)
+	assert.Equal(t, "scion://skill-b@1.0", sis[1].SkillURI)
+	assert.Equal(t, 30, sis[2].SortOrder)
+	assert.Equal(t, "scion://skill-c@1.0", sis[2].SkillURI)
+}
+
 func TestSetProjectInjectedSkills_EmptyListClearsAll(t *testing.T) {
 	srv, s, project, alice, _ := setupInjectedSkillsTest(t)
 	ctx := context.Background()
@@ -294,6 +327,43 @@ func TestRemoveProjectInjectedSkill_NotFound(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 }
 
+// TestRemoveProjectInjectedSkill_CrossProjectIDORRejected verifies C-2:
+// a project-A admin cannot delete a project-B entry by supplying a cross-project UUID.
+func TestRemoveProjectInjectedSkill_CrossProjectIDORRejected(t *testing.T) {
+	srv, s, project, alice, _ := setupInjectedSkillsTest(t)
+	ctx := context.Background()
+
+	// Create a second project also owned by alice.
+	projectB := &store.Project{
+		ID:        tid("si-project-b"),
+		Name:      "Project B",
+		Slug:      "project-b",
+		OwnerID:   alice.ID,
+		CreatedBy: alice.ID,
+	}
+	require.NoError(t, s.CreateProject(ctx, projectB))
+	srv.createProjectMembersGroupAndPolicy(ctx, projectB)
+
+	// Add an entry to project B.
+	siB := &store.SkillInjection{
+		Scope:    store.SkillInjectionScopeProject,
+		ScopeID:  projectB.ID,
+		SkillURI: "scion://project-b-skill@1.0",
+	}
+	require.NoError(t, s.AddSkillInjection(ctx, siB))
+
+	// Alice tries to DELETE project-B's entry via project (project-A)'s URL.
+	// This is the IDOR: the UUID exists in the DB but belongs to project-B, not project.
+	rec := doRequestAsUser(t, srv, alice, http.MethodDelete,
+		"/api/v1/projects/"+project.ID+"/injected-skills/"+siB.ID, nil)
+	assert.Equal(t, http.StatusNotFound, rec.Code, "cross-project DELETE must return 404")
+
+	// Verify the entry in project B is untouched.
+	entries, err := s.ListSkillInjections(ctx, store.SkillInjectionScopeProject, projectB.ID)
+	require.NoError(t, err)
+	assert.Len(t, entries, 1, "project-B entry must not have been deleted")
+}
+
 // =============================================================================
 // Project-scope: authorization
 // =============================================================================
@@ -322,6 +392,40 @@ func TestProjectInjectedSkills_NotFoundForMissingProject(t *testing.T) {
 	rec := doRequestAsUser(t, srv, alice, http.MethodGet,
 		"/api/v1/projects/"+tid("does-not-exist")+"/injected-skills", nil)
 	assert.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+// TestListProjectInjectedSkills_ForbiddenForAgentToken verifies M-1:
+// non-UserIdentity callers (e.g. agent tokens) receive 403 Forbidden for the
+// GET endpoint, just like write endpoints do.
+func TestListProjectInjectedSkills_ForbiddenForAgentToken(t *testing.T) {
+	srv, s, project, _, _ := setupInjectedSkillsTest(t)
+	ctx := context.Background()
+
+	// Create an agent in the project so we can generate a valid agent token.
+	agent := &store.Agent{
+		ID:        tid("si-authz-agent"),
+		Slug:      "authz-agent",
+		Name:      "Authz Agent",
+		ProjectID: project.ID,
+		Phase:     string(state.PhaseRunning),
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	tokenSvc := srv.GetAgentTokenService()
+	require.NotNil(t, tokenSvc)
+
+	agentToken, err := tokenSvc.GenerateAgentToken(agent.ID, project.ID, []AgentTokenScope{ScopeAgentStatusUpdate}, nil)
+	require.NoError(t, err)
+
+	// Agent tokens are a non-UserIdentity caller; the else-guard must reject them.
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/v1/projects/"+project.ID+"/injected-skills", nil)
+	req.Header.Set("X-Scion-Agent-Token", agentToken)
+
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusForbidden, rec.Code,
+		"agent token must receive 403 on GET project injected-skills")
 }
 
 // =============================================================================
@@ -497,6 +601,32 @@ func TestRemoveUserInjectedSkill_NotFound(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 }
 
+// TestRemoveUserInjectedSkill_CrossUserIDORRejected verifies C-1:
+// user A cannot delete user B's entry by guessing its UUID via /users/me/.
+func TestRemoveUserInjectedSkill_CrossUserIDORRejected(t *testing.T) {
+	srv, s, _, alice, bob := setupInjectedSkillsTest(t)
+	ctx := context.Background()
+
+	// Add an entry to Bob's user-scope list.
+	siBob := &store.SkillInjection{
+		Scope:    store.SkillInjectionScopeUser,
+		ScopeID:  bob.ID,
+		SkillURI: "scion://bob-private-skill@1.0",
+	}
+	require.NoError(t, s.AddSkillInjection(ctx, siBob))
+
+	// Alice tries to DELETE Bob's entry via her own /users/me/ path.
+	// The entry UUID belongs to Bob, not Alice.
+	rec := doRequestAsUser(t, srv, alice, http.MethodDelete,
+		"/api/v1/users/me/injected-skills/"+siBob.ID, nil)
+	assert.Equal(t, http.StatusNotFound, rec.Code, "cross-user DELETE must return 404")
+
+	// Verify Bob's entry is untouched.
+	entries, err := s.ListSkillInjections(ctx, store.SkillInjectionScopeUser, bob.ID)
+	require.NoError(t, err)
+	assert.Len(t, entries, 1, "Bob's entry must not have been deleted by Alice")
+}
+
 // =============================================================================
 // User-scope: authorization
 // =============================================================================
@@ -654,4 +784,55 @@ func TestSetHubInjectedSkills_UnauthorizedWithoutToken(t *testing.T) {
 	rec := doRequestNoAuth(t, srv, http.MethodPut,
 		"/api/v1/hub/settings/injected-skills", body)
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+}
+
+// dbBacked is a local interface satisfied by entadapter.CompositeStore,
+// which exposes the underlying *sql.DB for raw-SQL access in tests.
+type dbBacked interface {
+	DB() *sql.DB
+}
+
+// TestSetHubInjectedSkills_CorruptBlobReturns500 verifies H-1:
+// if the stored hub_settings blob is invalid JSON, PUT returns 500 and does NOT
+// overwrite the stored value (no silent destruction of system skill entries).
+func TestSetHubInjectedSkills_CorruptBlobReturns500(t *testing.T) {
+	srv, s, _, _, _ := setupInjectedSkillsTest(t)
+	ctx := context.Background()
+
+	// First seed a valid row so the table row exists.
+	initial := api.HubSkillInjectionSetting{
+		System:      []api.SkillReference{{URI: "scion://system-skill@1.0"}},
+		UserDefined: []api.SkillReference{},
+	}
+	validBlob, err := json.Marshal(initial)
+	require.NoError(t, err)
+	_, err = s.UpsertHubSetting(ctx, "injected_skills", validBlob, "system", -1, "managed")
+	require.NoError(t, err)
+
+	// Corrupt the blob via raw SQL — Ent validates JSON on write, so we bypass it.
+	db, ok := s.(dbBacked)
+	require.True(t, ok, "test store must implement DB() *sql.DB")
+	corruptBlob := "this is not valid json {{{"
+	_, err = db.DB().ExecContext(ctx,
+		`UPDATE hub_settings SET value = ? WHERE section = 'injected_skills'`, corruptBlob)
+	require.NoError(t, err)
+
+	// Admin (dev user) attempts a PUT — handler must detect the corrupt blob and return 500.
+	body := map[string]interface{}{
+		"user_defined": []map[string]interface{}{
+			{"uri": "scion://should-not-persist@1.0"},
+		},
+	}
+	rec := doRequest(t, srv, http.MethodPut,
+		"/api/v1/hub/settings/injected-skills", body)
+	assert.Equal(t, http.StatusInternalServerError, rec.Code,
+		"PUT must return 500 when stored hub blob is corrupt")
+
+	// Verify the stored value was not overwritten by the failed PUT.
+	var storedValue string
+	row := db.DB().QueryRowContext(ctx,
+		`SELECT value FROM hub_settings WHERE section = 'injected_skills'`)
+	require.NoError(t, row.Scan(&storedValue))
+	assert.Equal(t, corruptBlob, storedValue,
+		"corrupt stored blob must not be overwritten by the failed PUT")
 }
