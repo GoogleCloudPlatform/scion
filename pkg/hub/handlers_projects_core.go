@@ -2291,8 +2291,10 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, id string
 
 	// Clean up project-scoped skill injections (best-effort).
 	// These use scope/scope_id without FK cascade.
-	if err := s.store.DeleteSkillInjectionsByScope(ctx, store.ScopeProject, id); err != nil {
+	if n, err := s.store.DeleteSkillInjectionsByScope(ctx, store.SkillInjectionScopeProject, id); err != nil {
 		slog.Warn("failed to delete project skill injections", "project_id", id, "error", err)
+	} else if n > 0 {
+		slog.Info("deleted project skill injections", "project_id", id, "count", n)
 	}
 
 	// Warn about retained managed GCP service accounts (best-effort).

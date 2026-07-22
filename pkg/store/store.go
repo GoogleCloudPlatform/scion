@@ -1368,6 +1368,9 @@ type SkillInjectionStore interface {
 	ListSkillInjections(ctx context.Context, scope, scopeID string) ([]SkillInjection, error)
 
 	// AddSkillInjection creates a new skill injection entry.
+	// If si.ID is empty, an ID is auto-generated and written back to si.ID on
+	// success. Callers that need a stable ID before the call can pre-populate
+	// si.ID with any valid UUID string.
 	// Returns ErrAlreadyExists if an entry with the same (scope, scope_id, skill_uri) already exists.
 	AddSkillInjection(ctx context.Context, si *SkillInjection) error
 
@@ -1387,8 +1390,8 @@ type SkillInjectionStore interface {
 
 	// DeleteSkillInjectionsByScope removes all skill injection entries for the
 	// given scope+scopeID. Used during project or user deletion to cascade-clean
-	// rows that have no FK cascade.
-	DeleteSkillInjectionsByScope(ctx context.Context, scope, scopeID string) error
+	// rows that have no FK cascade. Returns the number of rows deleted.
+	DeleteSkillInjectionsByScope(ctx context.Context, scope, scopeID string) (int, error)
 }
 
 // HubSettingStore defines persistence operations for operational hub settings.

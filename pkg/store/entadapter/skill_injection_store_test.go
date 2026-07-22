@@ -397,8 +397,10 @@ func TestSkillInjection_DeleteSkillInjectionsByScope(t *testing.T) {
 		SkillURI: "skill://org/c@1.0.0",
 	}))
 
-	// Delete proj1's entries.
-	require.NoError(t, s.DeleteSkillInjectionsByScope(ctx, store.SkillInjectionScopeProject, proj1))
+	// Delete proj1's entries; expect 2 rows removed.
+	n, err := s.DeleteSkillInjectionsByScope(ctx, store.SkillInjectionScopeProject, proj1)
+	require.NoError(t, err)
+	assert.Equal(t, 2, n, "expected 2 rows deleted for proj1")
 
 	// proj1 should now be empty.
 	list1, err := s.ListSkillInjections(ctx, store.SkillInjectionScopeProject, proj1)
@@ -410,8 +412,10 @@ func TestSkillInjection_DeleteSkillInjectionsByScope(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, list2, 1)
 
-	// Deleting an already-empty scope should succeed without error.
-	require.NoError(t, s.DeleteSkillInjectionsByScope(ctx, store.SkillInjectionScopeProject, proj1))
+	// Deleting an already-empty scope should succeed without error and return 0.
+	n, err = s.DeleteSkillInjectionsByScope(ctx, store.SkillInjectionScopeProject, proj1)
+	require.NoError(t, err)
+	assert.Equal(t, 0, n, "expected 0 rows deleted for already-empty scope")
 }
 
 // TestSkillInjection_AddDuplicateURIReturnsAlreadyExists verifies that adding a
@@ -453,6 +457,36 @@ func TestSkillInjection_UpdateNotFound(t *testing.T) {
 		SkillURI: "skill://org/some@1.0.0",
 	})
 	assert.ErrorIs(t, err, store.ErrNotFound)
+}
+
+// TestSkillInjection_AddAutoGeneratesID verifies that AddSkillInjection
+// auto-generates a UUID when si.ID is empty and writes it back on success.
+func TestSkillInjection_AddAutoGeneratesID(t *testing.T) {
+	s := newTestSkillInjectionStore(t)
+	ctx := context.Background()
+
+	projectID := uuid.NewString()
+
+	si := &store.SkillInjection{
+		// ID intentionally left empty — store should auto-generate.
+		Scope:    store.SkillInjectionScopeProject,
+		ScopeID:  projectID,
+		SkillURI: "skill://org/auto-id@1.0.0",
+	}
+
+	require.NoError(t, s.AddSkillInjection(ctx, si))
+	assert.NotEmpty(t, si.ID, "si.ID should be populated after Add")
+	assert.False(t, si.CreatedAt.IsZero(), "si.CreatedAt should be set after Add")
+
+	// The auto-generated ID should be a valid UUID.
+	_, err := uuid.Parse(si.ID)
+	assert.NoError(t, err, "si.ID should be a valid UUID")
+
+	// The entry should be retrievable by the generated ID.
+	list, err := s.ListSkillInjections(ctx, store.SkillInjectionScopeProject, projectID)
+	require.NoError(t, err)
+	require.Len(t, list, 1)
+	assert.Equal(t, si.ID, list[0].ID)
 }
 
 // TestSkillInjection_AddDoesNotMutateOnFailure verifies that AddSkillInjection

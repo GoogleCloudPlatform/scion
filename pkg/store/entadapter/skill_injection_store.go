@@ -74,16 +74,25 @@ func (s *SkillInjectionStore) ListSkillInjections(ctx context.Context, scope, sc
 }
 
 // AddSkillInjection creates a new skill injection entry.
+// If si.ID is empty a UUID is auto-generated and written back to si.ID on
+// success, mirroring the behaviour of SetSkillInjections. Callers that need a
+// stable ID before the call can pre-populate si.ID with any valid UUID string.
 // Returns ErrAlreadyExists if an entry with the same (scope, scope_id, skill_uri) already exists.
 func (s *SkillInjectionStore) AddSkillInjection(ctx context.Context, si *store.SkillInjection) error {
-	uid, err := parseUUID(si.ID)
-	if err != nil {
-		return err
+	var uid uuid.UUID
+	if si.ID == "" {
+		uid = uuid.New()
+	} else {
+		var err error
+		uid, err = parseUUID(si.ID)
+		if err != nil {
+			return err
+		}
 	}
 
 	createdAt := time.Now()
 
-	_, err = s.client.SkillInjection.Create().
+	_, err := s.client.SkillInjection.Create().
 		SetID(uid).
 		SetScope(entskillinjection.Scope(si.Scope)).
 		SetScopeID(si.ScopeID).
@@ -99,7 +108,8 @@ func (s *SkillInjectionStore) AddSkillInjection(ctx context.Context, si *store.S
 	}
 
 	// Only write back to si after Save succeeds to avoid mutating caller's
-	// struct with a CreatedAt that was never persisted.
+	// struct with a CreatedAt/ID that was never persisted.
+	si.ID = uid.String()
 	si.CreatedAt = createdAt
 	return nil
 }
@@ -189,13 +199,13 @@ func (s *SkillInjectionStore) SetSkillInjections(ctx context.Context, scope, sco
 
 // DeleteSkillInjectionsByScope removes all skill injection entries for the given
 // scope+scopeID. It is used during project or user deletion to cascade-clean
-// entries that have no FK cascade.
-func (s *SkillInjectionStore) DeleteSkillInjectionsByScope(ctx context.Context, scope, scopeID string) error {
-	_, err := s.client.SkillInjection.Delete().
+// entries that have no FK cascade. Returns the number of rows deleted.
+func (s *SkillInjectionStore) DeleteSkillInjectionsByScope(ctx context.Context, scope, scopeID string) (int, error) {
+	n, err := s.client.SkillInjection.Delete().
 		Where(
 			entskillinjection.ScopeEQ(entskillinjection.Scope(scope)),
 			entskillinjection.ScopeIDEQ(scopeID),
 		).
 		Exec(ctx)
-	return mapError(err)
+	return n, mapError(err)
 }
