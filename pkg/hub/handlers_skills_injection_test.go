@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -1013,6 +1014,8 @@ func TestGetHubInjectedSkills_DefaultState(t *testing.T) {
 	assert.NotEmpty(t, resp.System, "system list must contain seeded platform skills")
 	for _, ref := range resp.System {
 		assert.True(t, ref.Optional)
+		assert.True(t, strings.HasPrefix(ref.URI, platformSkillURIPrefix),
+			"system entry URI %q must start with %q", ref.URI, platformSkillURIPrefix)
 	}
 	// No user-configured skills yet.
 	assert.Empty(t, resp.UserDefined)
@@ -1147,6 +1150,49 @@ func TestSetHubInjectedSkills_UnauthorizedWithoutToken(t *testing.T) {
 	rec := doRequestNoAuth(t, srv, http.MethodPut,
 		"/api/v1/hub/settings/injected-skills", body)
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+}
+
+// TestSetHubInjectedSkills_SystemBodyFieldIgnored verifies that a 'system' array
+// included in the PUT request body does NOT overwrite the stored system entries.
+// System entries are immutable via this endpoint and are always taken from the DB.
+func TestSetHubInjectedSkills_SystemBodyFieldIgnored(t *testing.T) {
+	srv, s, _, _, _ := setupInjectedSkillsTest(t)
+	ctx := context.Background()
+
+	// Pre-seed a known system entry (simulating seeded platform skills).
+	initial := api.HubSkillInjectionSetting{
+		System:      []api.SkillReference{{URI: "scion-platform://known-system-skill"}},
+		UserDefined: []api.SkillReference{},
+	}
+	raw, err := json.Marshal(initial)
+	require.NoError(t, err)
+	_, err = s.UpsertHubSetting(ctx, "injected_skills", raw, "seed", -1, "seeded")
+	require.NoError(t, err)
+
+	// PUT with a 'system' field in the body — the handler must ignore it.
+	body := map[string]interface{}{
+		"user_defined": []map[string]interface{}{
+			{"uri": "skill://admin/my-skill"},
+		},
+		"system": []map[string]interface{}{
+			{"uri": "skill://attacker/injected-system-skill"},
+		},
+	}
+	rec := doRequest(t, srv, http.MethodPut,
+		"/api/v1/hub/settings/injected-skills", body)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	var resp api.HubSkillInjectionSetting
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+
+	// System entries must be unchanged — the 'system' body field is ignored.
+	require.Len(t, resp.System, 1, "system list must preserve the DB value, not the request body")
+	assert.Equal(t, "scion-platform://known-system-skill", resp.System[0].URI,
+		"system entries must come from the DB, not from the PUT body")
+
+	// user_defined must have been updated as requested.
+	require.Len(t, resp.UserDefined, 1)
+	assert.Equal(t, "skill://admin/my-skill", resp.UserDefined[0].URI)
 }
 
 // dbBacked is a local interface satisfied by entadapter.CompositeStore,

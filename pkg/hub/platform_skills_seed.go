@@ -15,12 +15,14 @@
 package hub
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"reflect"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -42,6 +44,8 @@ const platformSkillURIPrefix = "scion-platform://"
 //
 // Idempotent: calling more than once produces the same result.
 // Preserves user_defined entries: only the system sub-list is replaced.
+//
+// TODO: make PlatformSkillsFS injectable for testability; see GitHub issue #548
 func (s *Server) seedPlatformSkillInsertions(ctx context.Context) error {
 	skillsFS := resources.PlatformSkillsFS()
 
@@ -51,6 +55,9 @@ func (s *Server) seedPlatformSkillInsertions(ctx context.Context) error {
 	}
 
 	var systemRefs []api.SkillReference
+	// Note: inject_when conditions from platform skill metadata are not evaluated here.
+	// Skills are seeded as optional system entries regardless of inject_when; the
+	// provisioner's existing injectPlatformSkills (Step 3a2) applies inject_when filtering.
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			continue
@@ -72,18 +79,22 @@ func (s *Server) seedPlatformSkillInsertions(ctx context.Context) error {
 	// Preserve any existing user_defined entries so a hub restart never wipes
 	// admin-managed skills.
 	var userDefined []api.SkillReference
+	var existingValue json.RawMessage
 	if existing, getErr := s.store.GetHubSetting(ctx, "injected_skills"); getErr == nil {
+		existingValue = existing.Value
 		var prev api.HubSkillInjectionSetting
-		if jsonErr := json.Unmarshal(existing.Value, &prev); jsonErr == nil {
-			userDefined = prev.UserDefined
-		} else {
-			slog.Warn("seedPlatformSkillInsertions: could not parse existing hub skill setting; user_defined will be reset",
-				"error", jsonErr)
+		if jsonErr := json.Unmarshal(existing.Value, &prev); jsonErr != nil {
+			// Corrupt blob — return an error rather than silently wiping user_defined
+			// (mirrors the PUT handler's HTTP 500 behaviour for the same scenario).
+			return fmt.Errorf("seedPlatformSkillInsertions: parse existing setting: %w", jsonErr)
 		}
+		userDefined = prev.UserDefined
 	} else if !errors.Is(getErr, store.ErrNotFound) {
-		slog.Warn("seedPlatformSkillInsertions: could not read existing hub skill setting; user_defined will be reset",
-			"error", getErr)
+		// Real store error (not merely absent) — return rather than silently
+		// proceeding with userDefined=nil, which would wipe admin-managed skills.
+		return fmt.Errorf("seedPlatformSkillInsertions: read existing setting: %w", getErr)
 	}
+	// ErrNotFound is the expected first-run case; proceed with userDefined=nil.
 
 	setting := api.HubSkillInjectionSetting{
 		System:      systemRefs,
@@ -95,11 +106,33 @@ func (s *Server) seedPlatformSkillInsertions(ctx context.Context) error {
 		return fmt.Errorf("seedPlatformSkillInsertions: marshal: %w", marshalErr)
 	}
 
+	// Skip the upsert when the stored content is already identical to avoid
+	// spurious revision bumps and event churn on every restart (L2).
+	if existingValue != nil && jsonEqualSeed(existingValue, value) {
+		slog.Debug("seedPlatformSkillInsertions: content unchanged; skipping write")
+		slog.Info("Seeded platform skills into hub injected_skills (no change)", "count", len(systemRefs))
+		return nil
+	}
+
 	// expectedRevision=-1 is the unconditional-upsert / idempotent-seed pattern.
-	if _, upsertErr := s.store.UpsertHubSetting(ctx, "injected_skills", value, "seeded", -1, "seeded"); upsertErr != nil {
+	// updatedBy="seed" is required so BackfillOrigin correctly identifies this row.
+	if _, upsertErr := s.store.UpsertHubSetting(ctx, "injected_skills", value, "seed", -1, "seeded"); upsertErr != nil {
 		return fmt.Errorf("seedPlatformSkillInsertions: upsert: %w", upsertErr)
 	}
 
 	slog.Info("Seeded platform skills into hub injected_skills", "count", len(systemRefs))
 	return nil
+}
+
+// jsonEqualSeed compares two JSON documents semantically, ignoring whitespace
+// and key-ordering differences (as storage backends may re-serialize values).
+func jsonEqualSeed(a, b json.RawMessage) bool {
+	var aVal, bVal interface{}
+	if err := json.Unmarshal(a, &aVal); err != nil {
+		return bytes.Equal(a, b)
+	}
+	if err := json.Unmarshal(b, &bVal); err != nil {
+		return bytes.Equal(a, b)
+	}
+	return reflect.DeepEqual(aVal, bVal)
 }

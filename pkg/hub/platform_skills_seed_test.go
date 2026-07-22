@@ -19,20 +19,27 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
-// newSeedTestServer creates a minimal Server backed by a real in-memory SQLite
-// store.  Only the store field is set — sufficient for seedPlatformSkillInsertions.
-func newSeedTestServer(t *testing.T) *Server {
-	t.Helper()
-	srv, _ := testServer(t)
-	return srv
+// errUpsertStore wraps a store.Store and returns a fixed error for every
+// UpsertHubSetting call.  Used to verify seedPlatformSkillInsertions propagates
+// the error rather than panicking or silently succeeding.
+type errUpsertStore struct {
+	store.Store
+	upsertErr error
+}
+
+func (e *errUpsertStore) UpsertHubSetting(ctx context.Context, section string, value json.RawMessage,
+	updatedBy string, expectedRevision int64, origin string) (*store.HubSetting, error) {
+	return nil, e.upsertErr
 }
 
 // TestSeedPlatformSkillInsertions_SetsSystemEntries verifies that calling
@@ -127,4 +134,32 @@ func TestSeedPlatformSkillInsertions_PreservesUserDefined(t *testing.T) {
 	require.Len(t, setting.UserDefined, 2, "user_defined must be preserved after seeding")
 	assert.Equal(t, "skill://scion/global/my-custom-skill", setting.UserDefined[0].URI)
 	assert.Equal(t, "skill://scion/global/another-skill", setting.UserDefined[1].URI)
+}
+
+// TestSeedPlatformSkillInsertions_UpsertError verifies that when UpsertHubSetting
+// returns an error, seedPlatformSkillInsertions propagates the error rather than
+// panicking or silently succeeding.
+func TestSeedPlatformSkillInsertions_UpsertError(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	// Pre-seed a setting with a stale system entry that does not match what the
+	// embedded FS will produce.  This ensures the L2 equality check does not
+	// short-circuit before reaching UpsertHubSetting.
+	stale := api.HubSkillInjectionSetting{
+		System: []api.SkillReference{{URI: "scion-platform://old-skill-not-in-binary"}},
+	}
+	raw, err := json.Marshal(stale)
+	require.NoError(t, err)
+	_, err = s.UpsertHubSetting(ctx, "injected_skills", raw, "seed", -1, "seeded")
+	require.NoError(t, err)
+
+	// Wrap the store so UpsertHubSetting always fails.
+	wantErr := errors.New("store unavailable")
+	srv.store = &errUpsertStore{Store: s, upsertErr: wantErr}
+
+	seedErr := srv.seedPlatformSkillInsertions(ctx)
+	require.Error(t, seedErr, "seedPlatformSkillInsertions must return an error when UpsertHubSetting fails")
+	assert.ErrorContains(t, seedErr, "upsert",
+		"error message must mention the upsert step")
 }
