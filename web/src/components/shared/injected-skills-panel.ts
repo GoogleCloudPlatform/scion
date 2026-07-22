@@ -85,8 +85,8 @@ export class ScionInjectedSkillsPanel extends LitElement {
   @state() private dialogLoading = false;
   @state() private dialogError: string | null = null;
 
-  // Delete
-  @state() private deletingId: string | null = null;
+  // Delete — tracked by index to avoid key collisions on hub rows (all have id='')
+  @state() private _deletingIndex: number | null = null;
 
   // Drag
   @state() private dragSourceIndex: number | null = null;
@@ -448,6 +448,8 @@ export class ScionInjectedSkillsPanel extends LitElement {
     this.dialogSelectedSkill = null;
     if (this.searchTimer) clearTimeout(this.searchTimer);
     if (!query.trim()) {
+      this.cancelSearch();
+      this.dialogSkillSearching = false;
       this.dialogSkillResults = [];
       return;
     }
@@ -521,13 +523,14 @@ export class ScionInjectedSkillsPanel extends LitElement {
   }
 
   private handleDragOver(index: number, e: DragEvent): void {
-    e.preventDefault();
     const targetRow = this.rows[index];
     if (targetRow?.readonly) {
-      // Readonly rows reject drops — no highlight, no insert position update
+      // Readonly rows reject drops — no highlight, no cursor change, no position update.
+      // Do NOT call e.preventDefault() so the browser keeps its default "no-drop" cursor.
       if (e.dataTransfer) e.dataTransfer.dropEffect = 'none';
       return;
     }
+    e.preventDefault();
     if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
     this.dragOverIndex = index;
   }
@@ -658,7 +661,7 @@ export class ScionInjectedSkillsPanel extends LitElement {
   }
 
   private renderRow(row: SkillRow, index: number, canEdit: boolean) {
-    const isDeleting = this.deletingId === (row.id || row.uri);
+    const isDeleting = this._deletingIndex === index;
     const isDragging = this.dragSourceIndex === index;
     const isDragOver = this.dragOverIndex === index;
     const rowReadonly = row.readonly;
@@ -740,14 +743,14 @@ export class ScionInjectedSkillsPanel extends LitElement {
     if (!confirm(`Remove skill "${label}" from this ${this.scope === 'hub' ? 'hub' : this.scope === 'project' ? 'project' : 'profile'}?`)) {
       return;
     }
-    this.deletingId = row.id || row.uri;
+    this._deletingIndex = rowIndex;
     try {
       await this.deleteEntry(row, rowIndex);
     } catch (err) {
       console.error('Failed to delete skill:', err);
       alert(err instanceof Error ? err.message : 'Failed to remove skill');
     } finally {
-      this.deletingId = null;
+      this._deletingIndex = null;
     }
   }
 
