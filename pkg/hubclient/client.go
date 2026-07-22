@@ -100,6 +100,12 @@ type Client interface {
 	// Invites returns the invite code management operations interface.
 	Invites() InviteService
 
+	// ProjectInjectedSkills returns an InjectedSkillsService scoped to a project.
+	ProjectInjectedSkills(projectID string) InjectedSkillsService
+
+	// UserInjectedSkills returns an InjectedSkillsService scoped to the current user.
+	UserInjectedSkills() InjectedSkillsService
+
 	// Health checks API availability.
 	Health(ctx context.Context) (*HealthResponse, error)
 }
