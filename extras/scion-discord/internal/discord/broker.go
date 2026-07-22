@@ -327,6 +327,9 @@ func (b *DiscordBroker) Configure(config map[string]string) error {
 			b.log.Warn("Failed to resolve transport auth, continuing without IAP tokens", "error", err)
 		}
 		if src != nil {
+			if b.httpClient == nil {
+				b.httpClient = &http.Client{Timeout: 10 * time.Second}
+			}
 			b.httpClient.Transport = transportauth.Wrap(b.httpClient.Transport, src, mode)
 			b.log.Info("Transport auth configured for Discord broker",
 				"mode", transportMode, "audience", transportAudience)

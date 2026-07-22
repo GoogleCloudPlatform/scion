@@ -276,9 +276,18 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (string, 
 			// GKE hybrid path: the managed SM add-on lacks RBAC to sync
 			// secretObjects into K8s Secrets, so we create a K8s Secret
 			// directly for environment-type secrets (env vars need
-			// secretKeyRef). File-type secrets are served by the CSI mount.
-			if _, err := r.createAgentSecret(ctx, namespace, config.Name, config.ResolvedSecrets, config.Labels); err != nil {
-				return "", fmt.Errorf("failed to create agent secret for env vars: %w", err)
+			// secretKeyRef). File-type secrets are served by the CSI mount
+			// and must NOT be duplicated into etcd.
+			var envSecrets []api.ResolvedSecret
+			for _, s := range config.ResolvedSecrets {
+				if s.Type != "file" {
+					envSecrets = append(envSecrets, s)
+				}
+			}
+			if len(envSecrets) > 0 {
+				if _, err := r.createAgentSecret(ctx, namespace, config.Name, envSecrets, config.Labels); err != nil {
+					return "", fmt.Errorf("failed to create agent secret for env vars: %w", err)
+				}
 			}
 		} else {
 			if _, err := r.createAgentSecret(ctx, namespace, config.Name, config.ResolvedSecrets, config.Labels); err != nil {
