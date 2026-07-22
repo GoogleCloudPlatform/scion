@@ -94,10 +94,7 @@ export class ScionInjectedSkillsPanel extends LitElement {
 
   private searchTimer: ReturnType<typeof setTimeout> | null = null;
   private _searchAbortController: AbortController | null = null;
-  /** True while a load() fetch is in-flight — prevents concurrent load() races. */
-  private _loading = false;
-  /** True when a scopeId/scope change arrived while a load was in-flight. */
-  private _pendingLoad = false;
+  private _loadAbortController: AbortController | null = null;
 
   static override styles = [
     resourceStyles,
@@ -255,6 +252,8 @@ export class ScionInjectedSkillsPanel extends LitElement {
       this.searchTimer = null;
     }
     this.cancelSearch();
+    this._loadAbortController?.abort();
+    this._loadAbortController = null;
   }
 
   /** Abort any in-flight skill search and clear the controller reference. */
@@ -277,20 +276,18 @@ export class ScionInjectedSkillsPanel extends LitElement {
   }
 
   async load(): Promise<void> {
-    // Guard against concurrent in-flight loads (e.g. updated() firing twice in
-    // rapid succession). _loading is a plain field (not reactive) so it doesn't
-    // collide with the this.loading reactive state used for the spinner.
-    // If a scopeId change arrives mid-flight, queue exactly one follow-up load
-    // rather than dropping it silently — see _pendingLoad handling in finally.
-    if (this._loading) {
-      this._pendingLoad = true;
-      return;
-    }
-    this._loading = true;
+    // Cancel any in-flight load and start fresh — same pattern as _searchAbortController.
+    // This handles rapid scope/scopeId changes: the stale request is aborted immediately
+    // and only the latest load() commits rows to state.
+    this._loadAbortController?.abort();
+    this._loadAbortController = new AbortController();
+    const { signal } = this._loadAbortController;
+
     this.loading = true;
     this.error = null;
     try {
-      const res = await apiFetch(this.apiBase);
+      const res = await apiFetch(this.apiBase, { signal });
+      if (signal.aborted) return; // Aborted after fetch completed — discard
       if (!res.ok) {
         throw new Error(await extractApiError(res, `HTTP ${res.status}`));
       }
@@ -299,6 +296,7 @@ export class ScionInjectedSkillsPanel extends LitElement {
           system?: Array<{ uri: string; as?: string; optional?: boolean }>;
           user_defined?: Array<{ uri: string; as?: string; optional?: boolean }>;
         };
+        if (signal.aborted) return; // Aborted while parsing — discard
         const systemRows: SkillRow[] = (data.system || []).map((s, i) => ({
           id: '',
           uri: s.uri,
@@ -332,6 +330,7 @@ export class ScionInjectedSkillsPanel extends LitElement {
             skillSlug?: string;
           }>;
         };
+        if (signal.aborted) return; // Aborted while parsing — discard
         this.rows = (data.entries || []).map((e) => ({
           id: e.id,
           uri: e.skillUri,
@@ -344,13 +343,13 @@ export class ScionInjectedSkillsPanel extends LitElement {
         }));
       }
     } catch (err) {
+      if (err instanceof DOMException && err.name === 'AbortError') {
+        return; // Silently abort — caller will call load() again with the correct scope
+      }
       this.error = err instanceof Error ? err.message : 'Failed to load injected skills';
     } finally {
-      this._loading = false;
-      this.loading = false;
-      if (this._pendingLoad) {
-        this._pendingLoad = false;
-        void this.load(); // one retry for the queued scopeId-change request
+      if (!signal.aborted) {
+        this.loading = false;
       }
     }
   }
