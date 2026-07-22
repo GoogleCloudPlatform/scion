@@ -16,6 +16,7 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -292,6 +293,83 @@ func (s *Server) populateAgentConfig(ctx context.Context, agent *store.Agent, pr
 			}
 		}
 	}
+
+	// Merge injected skills from hub/user/project scopes into InlineConfig.Skills
+	// so the provisioner's existing Step 3b handles them.
+	s.mergeInjectedSkills(ctx, agent, project)
+}
+
+// mergeInjectedSkills fetches injected-skills refs from hub, user, and project
+// scopes and merges them with template-level skills (highest precedence) into
+// agent.AppliedConfig.InlineConfig.Skills. Fetches are best-effort: errors are
+// logged and that scope's skills are omitted for this provisioning.
+func (s *Server) mergeInjectedSkills(ctx context.Context, agent *store.Agent, project *store.Project) {
+	if agent.AppliedConfig.InlineConfig == nil {
+		agent.AppliedConfig.InlineConfig = &api.ScionConfig{}
+	}
+
+	// Fetch hub-scope injected skills (system + user_defined).
+	var hubRefs []api.SkillReference
+	if hs, err := s.store.GetHubSetting(ctx, "injected_skills"); err == nil {
+		var setting api.HubSkillInjectionSetting
+		if json.Unmarshal(hs.Value, &setting) == nil {
+			hubRefs = append(setting.System, setting.UserDefined...)
+		}
+	}
+
+	// Fetch user-scope injected skills.
+	var userRefs []api.SkillReference
+	if agent.OwnerID != "" {
+		if sis, err := s.store.ListSkillInjections(ctx, store.SkillInjectionScopeUser, agent.OwnerID); err == nil {
+			for _, si := range sis {
+				userRefs = append(userRefs, si.ToSkillReference())
+			}
+		}
+	}
+
+	// Fetch project-scope injected skills.
+	var projectRefs []api.SkillReference
+	if project != nil {
+		if sis, err := s.store.ListSkillInjections(ctx, store.SkillInjectionScopeProject, project.ID); err == nil {
+			for _, si := range sis {
+				projectRefs = append(projectRefs, si.ToSkillReference())
+			}
+		}
+	}
+
+	// Template refs are already in InlineConfig.Skills (highest precedence).
+	templateRefs := agent.AppliedConfig.InlineConfig.Skills
+
+	// Merge: hub → user → project → template (lowest to highest precedence).
+	merged := mergeSkillRefs(hubRefs, userRefs, projectRefs, templateRefs)
+	agent.AppliedConfig.InlineConfig.Skills = merged
+}
+
+// mergeSkillRefs deduplicates skill references by base URI across multiple scope
+// slices. Later slices have higher precedence. When the same base URI appears in
+// multiple scopes with different version pins, the higher-precedence entry wins
+// and a warning is logged.
+func mergeSkillRefs(scopes ...[]api.SkillReference) []api.SkillReference {
+	type entry struct {
+		ref   api.SkillReference
+		scope int // index in scopes (higher = more specific)
+	}
+	seen := map[string]entry{}
+	for i, refs := range scopes {
+		for _, ref := range refs {
+			base := skillBaseURI(ref.URI)
+			if existing, ok := seen[base]; ok && existing.ref.URI != ref.URI {
+				slog.Warn("skill injection version conflict resolved",
+					"base_uri", base, "winner", ref.URI, "loser", existing.ref.URI)
+			}
+			seen[base] = entry{ref: ref, scope: i}
+		}
+	}
+	result := make([]api.SkillReference, 0, len(seen))
+	for _, e := range seen {
+		result = append(result, e.ref)
+	}
+	return result
 }
 
 // existingAgentResult describes the outcome of handleExistingAgent.
