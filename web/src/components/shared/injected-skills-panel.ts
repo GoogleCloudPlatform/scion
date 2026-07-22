@@ -404,6 +404,10 @@ export class ScionInjectedSkillsPanel extends LitElement {
     return ref;
   }
 
+  // Note: hub-scope skill injection uses a PUT-whole-list API (no per-item DELETE endpoint).
+  // Concurrent deletes can cause a lost-update race: if two deletes are in flight simultaneously,
+  // the second PUT will overwrite the first. This is an architectural limitation of the hub API
+  // and should be addressed by adding a per-item DELETE endpoint in a future change.
   private async putHubUserDefined(
     userDefined: Array<{ uri: string; as?: string; optional?: boolean }>
   ): Promise<void> {
@@ -527,7 +531,6 @@ export class ScionInjectedSkillsPanel extends LitElement {
     if (targetRow?.readonly) {
       // Readonly rows reject drops — no highlight, no cursor change, no position update.
       // Do NOT call e.preventDefault() so the browser keeps its default "no-drop" cursor.
-      if (e.dataTransfer) e.dataTransfer.dropEffect = 'none';
       return;
     }
     e.preventDefault();
