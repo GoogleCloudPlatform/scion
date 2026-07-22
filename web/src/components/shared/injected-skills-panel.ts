@@ -93,6 +93,7 @@ export class ScionInjectedSkillsPanel extends LitElement {
   @state() private dragOverIndex: number | null = null;
 
   private searchTimer: ReturnType<typeof setTimeout> | null = null;
+  private _searchAbortController: AbortController | null = null;
 
   static override styles = [
     resourceStyles,
@@ -228,6 +229,15 @@ export class ScionInjectedSkillsPanel extends LitElement {
     void this.load();
   }
 
+  override disconnectedCallback(): void {
+    super.disconnectedCallback();
+    if (this.searchTimer) {
+      clearTimeout(this.searchTimer);
+      this.searchTimer = null;
+    }
+    this._searchAbortController?.abort();
+  }
+
   // ── API helpers ──────────────────────────────────────────────────────────
 
   private get apiBase(): string {
@@ -337,7 +347,7 @@ export class ScionInjectedSkillsPanel extends LitElement {
       const res = await apiFetch(`${this.apiBase}/${encodeURIComponent(row.id)}`, {
         method: 'DELETE',
       });
-      if (!res.ok && res.status !== 204) {
+      if (!res.ok) {
         throw new Error(await extractApiError(res, `Failed to delete skill (HTTP ${res.status})`));
       }
     }
@@ -437,15 +447,20 @@ export class ScionInjectedSkillsPanel extends LitElement {
   }
 
   private async searchSkills(query: string): Promise<void> {
+    this._searchAbortController?.abort();
+    this._searchAbortController = new AbortController();
+    const { signal } = this._searchAbortController;
     try {
       const res = await apiFetch(
-        `/api/v1/skills?q=${encodeURIComponent(query)}&status=active&limit=20`
+        `/api/v1/skills?q=${encodeURIComponent(query)}&status=active&limit=20`,
+        { signal }
       );
       if (res.ok) {
         const data = (await res.json()) as { skills?: Skill[] } | Skill[];
         this.dialogSkillResults = Array.isArray(data) ? data : (data as { skills?: Skill[] }).skills || [];
       }
-    } catch {
+    } catch (err) {
+      if (err instanceof Error && err.name === 'AbortError') return; // Stale request — discard
       // Non-critical — just show no results
     } finally {
       this.dialogSkillSearching = false;
@@ -494,6 +509,12 @@ export class ScionInjectedSkillsPanel extends LitElement {
 
   private handleDragOver(index: number, e: DragEvent): void {
     e.preventDefault();
+    const targetRow = this.rows[index];
+    if (targetRow?.readonly) {
+      // Readonly rows reject drops — no highlight, no insert position update
+      if (e.dataTransfer) e.dataTransfer.dropEffect = 'none';
+      return;
+    }
     if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
     this.dragOverIndex = index;
   }
@@ -509,9 +530,11 @@ export class ScionInjectedSkillsPanel extends LitElement {
       this.dragSourceIndex = null;
       return;
     }
+    const sourceIndex = this.dragSourceIndex;
+    const insertAt = targetIndex > sourceIndex ? targetIndex - 1 : targetIndex;
     const newOrder = [...this.rows];
-    const [moved] = newOrder.splice(this.dragSourceIndex, 1);
-    newOrder.splice(targetIndex, 0, moved);
+    const [moved] = newOrder.splice(sourceIndex, 1);
+    newOrder.splice(insertAt, 0, moved);
     this.dragSourceIndex = null;
     // Optimistic update
     this.rows = newOrder;
@@ -632,7 +655,7 @@ export class ScionInjectedSkillsPanel extends LitElement {
         class=${[isDragging ? 'dragging' : '', isDragOver ? 'drag-over' : ''].join(' ')}
         draggable=${draggable ? 'true' : 'false'}
         @dragstart=${draggable ? (e: DragEvent) => this.handleDragStart(index, e) : nothing}
-        @dragover=${draggable ? (e: DragEvent) => this.handleDragOver(index, e) : nothing}
+        @dragover=${canEdit ? (e: DragEvent) => this.handleDragOver(index, e) : nothing}
         @dragleave=${draggable ? () => this.handleDragLeave() : nothing}
         @drop=${draggable ? (e: DragEvent) => this.handleDrop(index, e) : nothing}
         @dragend=${draggable ? () => this.handleDragEnd() : nothing}
