@@ -38,6 +38,7 @@ import '../shared/subscription-manager.js';
 import '../shared/schedule-list.js';
 import '../shared/resource-list.js';
 import '../shared/resource-import.js';
+import '../shared/injected-skills-panel.js';
 
 
 interface ProjectResourceSpec {
@@ -1836,6 +1837,7 @@ export class ScionPageProjectSettings extends LitElement {
           <sl-tab slot="nav" panel="templates" ?active=${this.activeResourcesTab === 'templates'}>Templates</sl-tab>
           <sl-tab slot="nav" panel="harness-configs" ?active=${this.activeResourcesTab === 'harness-configs'}>Harness Configs</sl-tab>
           <sl-tab slot="nav" panel="gcp-sa" ?active=${this.activeResourcesTab === 'gcp-sa'}>GCP Service Accounts</sl-tab>
+          <sl-tab slot="nav" panel="skills" ?active=${this.activeResourcesTab === 'skills'}>Skills</sl-tab>
 
           <sl-tab-panel name="env-vars">
             <scion-env-var-list
@@ -1872,6 +1874,13 @@ export class ScionPageProjectSettings extends LitElement {
             <scion-gcp-service-account-list
               projectId=${this.projectId}
             ></scion-gcp-service-account-list>
+          </sl-tab-panel>
+
+          <sl-tab-panel name="skills">
+            <scion-injected-skills-panel
+              scope="project"
+              scopeId=${this.projectId}
+            ></scion-injected-skills-panel>
           </sl-tab-panel>
         </sl-tab-group>
       </div>

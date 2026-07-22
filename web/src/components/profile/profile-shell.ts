@@ -37,6 +37,7 @@ const PROFILE_TITLES: Record<string, string> = {
   '/profile/secrets': 'Secrets',
   '/profile/settings': 'Settings',
   '/profile/tokens': 'Access Tokens',
+  '/profile/skills': 'Skills',
 };
 
 @customElement('scion-profile-shell')

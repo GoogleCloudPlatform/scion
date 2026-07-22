@@ -45,6 +45,7 @@ const PROFILE_SECTIONS: NavSection[] = [
       { path: '/profile/env', label: 'Environment Variables', icon: 'terminal' },
       { path: '/profile/secrets', label: 'Secrets', icon: 'shield-lock' },
       { path: '/profile/tokens', label: 'Access Tokens', icon: 'key' },
+      { path: '/profile/skills', label: 'Skills', icon: 'puzzle' },
     ],
   },
   {

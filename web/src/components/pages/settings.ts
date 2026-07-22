@@ -29,6 +29,7 @@ import '../shared/env-var-list.js';
 import '../shared/secret-list.js';
 import '../shared/resource-list.js';
 import '../shared/resource-import.js';
+import '../shared/injected-skills-panel.js';
 
 @customElement('scion-page-settings')
 export class ScionPageSettings extends LitElement {
@@ -145,6 +146,9 @@ export class ScionPageSettings extends LitElement {
           <sl-tab slot="nav" panel="harness-configs" ?active=${this.activeTab === 'harness-configs'}
             >Harness Configs</sl-tab
           >
+          <sl-tab slot="nav" panel="skills" ?active=${this.activeTab === 'skills'}
+            >Skills</sl-tab
+          >
 
           <sl-tab-panel name="env-vars">
             <scion-env-var-list scope="hub" apiBasePath="/api/v1" compact></scion-env-var-list>
@@ -192,6 +196,15 @@ export class ScionPageSettings extends LitElement {
               canDelete
               @resource-changed=${() => this.refreshList('harness-configs-list')}
             ></scion-resource-list>
+          </sl-tab-panel>
+
+          <sl-tab-panel name="skills">
+            <p class="tab-intro">
+              Skills automatically injected into all agents on this hub. System entries are
+              seeded from built-in platform skills and are read-only. User-defined entries
+              can be added and removed by hub admins.
+            </p>
+            <scion-injected-skills-panel scope="hub"></scion-injected-skills-panel>
           </sl-tab-panel>
         </sl-tab-group>
       </div>
