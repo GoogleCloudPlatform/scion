@@ -86,4 +86,4 @@ comment in `seedPlatformSkillInsertions`.
 
 ## Commit Hash
 
-(To be filled after commit)
+`4ca80fcc` — fix(p6): address all review findings for platform skills seed
