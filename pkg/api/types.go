@@ -688,7 +688,7 @@ type SkillReference struct {
 
 // SkillInjectionEntry is the API representation of one injected-skills list entry.
 type SkillInjectionEntry struct {
-	ID        string `json:"id,omitempty"`        // set on read, not required on write
+	ID        string `json:"id,omitempty"` // set on read, not required on write
 	SkillURI  string `json:"skillUri"`
 	SkillAs   string `json:"skillAs,omitempty"`
 	Optional  bool   `json:"optional,omitempty"`
@@ -708,7 +708,6 @@ type HubSkillInjectionSetting struct {
 	System      []SkillReference `json:"system"`       // seeded from binary, immutable
 	UserDefined []SkillReference `json:"user_defined"` // admin-managed
 }
-
 
 // SecretKeyInfo provides metadata about a required secret key, including
 // a human-readable description and the source that declared it.

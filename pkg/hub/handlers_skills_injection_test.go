@@ -303,9 +303,9 @@ func TestSetProjectInjectedSkills_MixedSortOrder(t *testing.T) {
 	// Entry 2: no explicit SortOrder → gets default i+1 = 3
 	newList := api.SkillInjectionList{
 		Entries: []api.SkillInjectionEntry{
-			{SkillURI: "scion://skill-auto-0@1.0"},            // default → 1
+			{SkillURI: "scion://skill-auto-0@1.0"},                    // default → 1
 			{SkillURI: "scion://skill-explicit-1@1.0", SortOrder: 10}, // explicit 10
-			{SkillURI: "scion://skill-auto-2@1.0"},            // default → 3
+			{SkillURI: "scion://skill-auto-2@1.0"},                    // default → 3
 		},
 	}
 	rec := doRequestAsUser(t, srv, alice, http.MethodPut,
@@ -344,7 +344,7 @@ func TestSetProjectInjectedSkills_ExplicitSortOrder1CollisionFree(t *testing.T) 
 	// Entry 1: explicit sortOrder = 1.
 	newList := api.SkillInjectionList{
 		Entries: []api.SkillInjectionEntry{
-			{SkillURI: "scion://proj-auto@1.0"},                 // default, must NOT get 1
+			{SkillURI: "scion://proj-auto@1.0"},                     // default, must NOT get 1
 			{SkillURI: "scion://proj-explicit-1@1.0", SortOrder: 1}, // explicit 1
 		},
 	}
@@ -802,9 +802,9 @@ func TestSetUserInjectedSkills_MixedSortOrder(t *testing.T) {
 
 	newList := api.SkillInjectionList{
 		Entries: []api.SkillInjectionEntry{
-			{SkillURI: "scion://user-auto-0@1.0"},                    // default → 1
+			{SkillURI: "scion://user-auto-0@1.0"},                     // default → 1
 			{SkillURI: "scion://user-explicit-10@1.0", SortOrder: 10}, // explicit 10
-			{SkillURI: "scion://user-auto-2@1.0"},                    // default → 3
+			{SkillURI: "scion://user-auto-2@1.0"},                     // default → 3
 		},
 	}
 	rec := doRequestAsUser(t, srv, alice, http.MethodPut,
@@ -843,7 +843,7 @@ func TestSetUserInjectedSkills_ExplicitSortOrder1CollisionFree(t *testing.T) {
 	// Entry 1: explicit sortOrder = 1.
 	newList := api.SkillInjectionList{
 		Entries: []api.SkillInjectionEntry{
-			{SkillURI: "scion://user-auto@1.0"},                  // default, must NOT get 1
+			{SkillURI: "scion://user-auto@1.0"},                     // default, must NOT get 1
 			{SkillURI: "scion://user-explicit-1@1.0", SortOrder: 1}, // explicit 1
 		},
 	}
