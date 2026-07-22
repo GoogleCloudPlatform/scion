@@ -28,7 +28,7 @@
  *             (system entries are always read-only; user_defined entries editable)
  */
 
-import { LitElement, html, css, nothing } from 'lit';
+import { LitElement, html, css, nothing, type PropertyValues } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
 import type { Skill } from '../../shared/types.js';
@@ -94,6 +94,8 @@ export class ScionInjectedSkillsPanel extends LitElement {
 
   private searchTimer: ReturnType<typeof setTimeout> | null = null;
   private _searchAbortController: AbortController | null = null;
+  /** True while a load() fetch is in-flight — prevents concurrent load() races. */
+  private _loading = false;
 
   static override styles = [
     resourceStyles,
@@ -226,7 +228,22 @@ export class ScionInjectedSkillsPanel extends LitElement {
 
   override connectedCallback(): void {
     super.connectedCallback();
-    void this.load();
+    // Lit applies element properties/attributes AFTER connectedCallback via its
+    // update cycle. For project-scoped panels, scopeId may still be '' here,
+    // which would produce a malformed URL (/api/v1/projects//injected-skills).
+    // Guard: only load now if scope is set and (for project) scopeId is non-empty.
+    // updated() re-triggers load() once both values are available.
+    if (this.scope && (this.scope !== 'project' || this.scopeId)) {
+      void this.load();
+    }
+  }
+
+  override updated(changedProperties: PropertyValues): void {
+    if (changedProperties.has('scope') || changedProperties.has('scopeId')) {
+      if (this.scope && (this.scope !== 'project' || this.scopeId)) {
+        void this.load();
+      }
+    }
   }
 
   override disconnectedCallback(): void {
@@ -258,6 +275,11 @@ export class ScionInjectedSkillsPanel extends LitElement {
   }
 
   async load(): Promise<void> {
+    // Guard against concurrent in-flight loads (e.g. updated() firing twice in
+    // rapid succession). _loading is a plain field (not reactive) so it doesn't
+    // collide with the this.loading reactive state used for the spinner.
+    if (this._loading) return;
+    this._loading = true;
     this.loading = true;
     this.error = null;
     try {
@@ -317,6 +339,7 @@ export class ScionInjectedSkillsPanel extends LitElement {
     } catch (err) {
       this.error = err instanceof Error ? err.message : 'Failed to load injected skills';
     } finally {
+      this._loading = false;
       this.loading = false;
     }
   }
@@ -550,19 +573,24 @@ export class ScionInjectedSkillsPanel extends LitElement {
       return;
     }
     const sourceIndex = this.dragSourceIndex;
-    // Splice source out first, then insert at targetIndex — no adjustment needed.
-    // This correctly handles drag-down (source < target), drag-up (source > target),
-    // and the adjacent-down case (targetIndex === sourceIndex + 1).
-    const insertAt = targetIndex;
     const newOrder = [...this.rows];
     const [moved] = newOrder.splice(sourceIndex, 1);
+    // For drag-down (source < target), removing the source shifts all elements
+    // after it up by 1. targetIndex now points one slot past the intended drop
+    // position (the element AFTER the intended target). Subtract 1 to correct.
+    // For drag-up (source > target), indices are unaffected — no adjustment.
+    const insertAt = sourceIndex < targetIndex ? targetIndex - 1 : targetIndex;
     newOrder.splice(insertAt, 0, moved);
     this.dragSourceIndex = null;
     // Optimistic update
     this.rows = newOrder;
     void this.reorder(newOrder).catch((err) => {
       console.error('Reorder failed:', err);
-      void this.load(); // Revert
+      // Revert optimistic update; if reload also fails, surface an error message.
+      void this.load().catch((reloadErr) => {
+        console.error('Failed to reload after reorder error:', reloadErr);
+        this.error = 'Failed to reload — please refresh';
+      });
     });
   }
 
@@ -679,7 +707,7 @@ export class ScionInjectedSkillsPanel extends LitElement {
         @dragstart=${draggable ? (e: DragEvent) => this.handleDragStart(index, e) : nothing}
         @dragover=${canEdit ? (e: DragEvent) => this.handleDragOver(index, e) : nothing}
         @dragleave=${canEdit ? () => this.handleDragLeave() : nothing}
-        @drop=${draggable ? (e: DragEvent) => this.handleDrop(index, e) : nothing}
+        @drop=${(e: DragEvent) => this.handleDrop(index, e)}
         @dragend=${draggable ? () => this.handleDragEnd() : nothing}
       >
         ${canEdit
@@ -746,9 +774,19 @@ export class ScionInjectedSkillsPanel extends LitElement {
     if (!confirm(`Remove skill "${label}" from this ${this.scope === 'hub' ? 'hub' : this.scope === 'project' ? 'project' : 'profile'}?`)) {
       return;
     }
-    this._deletingIndex = rowIndex;
+    // Guard against stale rowIndex: a concurrent drag-reorder between the click
+    // and the confirm() call could shift row positions. Re-find the row by its
+    // stable identity (URI + id) before committing the delete.
+    let resolvedIndex = rowIndex;
+    const currentAtIndex = this.rows[rowIndex];
+    if (!currentAtIndex || currentAtIndex.uri !== row.uri || currentAtIndex.id !== row.id) {
+      const found = this.rows.findIndex((r) => r.uri === row.uri && r.id === row.id);
+      if (found === -1) return; // Row no longer present — cancel delete
+      resolvedIndex = found;
+    }
+    this._deletingIndex = resolvedIndex;
     try {
-      await this.deleteEntry(row, rowIndex);
+      await this.deleteEntry(row, resolvedIndex);
     } catch (err) {
       console.error('Failed to delete skill:', err);
       alert(err instanceof Error ? err.message : 'Failed to remove skill');
