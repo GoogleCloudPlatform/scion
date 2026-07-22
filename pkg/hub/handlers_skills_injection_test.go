@@ -274,6 +274,70 @@ func TestSetProjectInjectedSkills_SortOrderPreserved(t *testing.T) {
 	assert.Equal(t, "scion://skill-c@1.0", sis[2].SkillURI)
 }
 
+// TestSetProjectInjectedSkills_MixedSortOrder verifies N-1:
+// a mixed list (some entries with explicit SortOrder, some without) produces
+// non-colliding sort orders after a PUT bulk-replace.
+func TestSetProjectInjectedSkills_MixedSortOrder(t *testing.T) {
+	srv, s, project, alice, _ := setupInjectedSkillsTest(t)
+	ctx := context.Background()
+
+	// Entry 0: no explicit SortOrder → gets default i+1 = 1
+	// Entry 1: explicit SortOrder = 1 (would collide with the default if we used i=0)
+	// Entry 2: no explicit SortOrder → gets default i+1 = 3
+	newList := api.SkillInjectionList{
+		Entries: []api.SkillInjectionEntry{
+			{SkillURI: "scion://skill-auto-0@1.0"},            // default → 1
+			{SkillURI: "scion://skill-explicit-1@1.0", SortOrder: 10}, // explicit 10
+			{SkillURI: "scion://skill-auto-2@1.0"},            // default → 3
+		},
+	}
+	rec := doRequestAsUser(t, srv, alice, http.MethodPut,
+		"/api/v1/projects/"+project.ID+"/injected-skills", newList)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	sis, err := s.ListSkillInjections(ctx, store.SkillInjectionScopeProject, project.ID)
+	require.NoError(t, err)
+	require.Len(t, sis, 3)
+
+	// Collect sort orders and verify they are all distinct.
+	orders := make(map[int]string)
+	for _, si := range sis {
+		prev, collision := orders[si.SortOrder]
+		assert.False(t, collision, "sort order %d collides between %q and %q", si.SortOrder, prev, si.SkillURI)
+		orders[si.SortOrder] = si.SkillURI
+	}
+	assert.Len(t, orders, 3, "all three sort orders must be distinct")
+
+	// The explicit entry must preserve its value.
+	for _, si := range sis {
+		if si.SkillURI == "scion://skill-explicit-1@1.0" {
+			assert.Equal(t, 10, si.SortOrder, "explicit SortOrder must be stored as-is")
+		}
+	}
+}
+
+// TestSetProjectInjectedSkills_EmptySkillURIRejected verifies N-2 (project scope):
+// a PUT with any entry missing skillUri returns 400 and nothing is stored.
+func TestSetProjectInjectedSkills_EmptySkillURIRejected(t *testing.T) {
+	srv, s, project, alice, _ := setupInjectedSkillsTest(t)
+	ctx := context.Background()
+
+	badList := api.SkillInjectionList{
+		Entries: []api.SkillInjectionEntry{
+			{SkillURI: "scion://valid-skill@1.0"},
+			{SkillURI: ""},
+		},
+	}
+	rec := doRequestAsUser(t, srv, alice, http.MethodPut,
+		"/api/v1/projects/"+project.ID+"/injected-skills", badList)
+	assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+
+	// Nothing should have been stored.
+	sis, err := s.ListSkillInjections(ctx, store.SkillInjectionScopeProject, project.ID)
+	require.NoError(t, err)
+	assert.Empty(t, sis, "no entries must be stored when any skillUri is empty")
+}
+
 func TestSetProjectInjectedSkills_EmptyListClearsAll(t *testing.T) {
 	srv, s, project, alice, _ := setupInjectedSkillsTest(t)
 	ctx := context.Background()
@@ -567,6 +631,97 @@ func TestSetUserInjectedSkills_ReplacesListAtomically(t *testing.T) {
 	sis, err := s.ListSkillInjections(ctx, store.SkillInjectionScopeUser, alice.ID)
 	require.NoError(t, err)
 	assert.Len(t, sis, 2)
+}
+
+// TestSetUserInjectedSkills_SortOrderPreserved verifies N-3:
+// explicit SortOrder values are preserved through a PUT bulk-replace round-trip
+// for the user scope.
+func TestSetUserInjectedSkills_SortOrderPreserved(t *testing.T) {
+	srv, s, _, alice, _ := setupInjectedSkillsTest(t)
+	ctx := context.Background()
+
+	newList := api.SkillInjectionList{
+		Entries: []api.SkillInjectionEntry{
+			{SkillURI: "scion://user-skill-c@1.0", SortOrder: 30},
+			{SkillURI: "scion://user-skill-a@1.0", SortOrder: 10},
+			{SkillURI: "scion://user-skill-b@1.0", SortOrder: 20},
+		},
+	}
+	rec := doRequestAsUser(t, srv, alice, http.MethodPut,
+		"/api/v1/users/me/injected-skills", newList)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	// Fetch from store directly — entries are returned sorted by SortOrder ascending.
+	sis, err := s.ListSkillInjections(ctx, store.SkillInjectionScopeUser, alice.ID)
+	require.NoError(t, err)
+	require.Len(t, sis, 3)
+	// Store returns them sorted by sort_order, so expect 10, 20, 30.
+	assert.Equal(t, 10, sis[0].SortOrder)
+	assert.Equal(t, "scion://user-skill-a@1.0", sis[0].SkillURI)
+	assert.Equal(t, 20, sis[1].SortOrder)
+	assert.Equal(t, "scion://user-skill-b@1.0", sis[1].SkillURI)
+	assert.Equal(t, 30, sis[2].SortOrder)
+	assert.Equal(t, "scion://user-skill-c@1.0", sis[2].SkillURI)
+}
+
+// TestSetUserInjectedSkills_MixedSortOrder verifies N-1 for user scope:
+// a mixed list produces non-colliding sort orders.
+func TestSetUserInjectedSkills_MixedSortOrder(t *testing.T) {
+	srv, s, _, alice, _ := setupInjectedSkillsTest(t)
+	ctx := context.Background()
+
+	newList := api.SkillInjectionList{
+		Entries: []api.SkillInjectionEntry{
+			{SkillURI: "scion://user-auto-0@1.0"},                    // default → 1
+			{SkillURI: "scion://user-explicit-10@1.0", SortOrder: 10}, // explicit 10
+			{SkillURI: "scion://user-auto-2@1.0"},                    // default → 3
+		},
+	}
+	rec := doRequestAsUser(t, srv, alice, http.MethodPut,
+		"/api/v1/users/me/injected-skills", newList)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	sis, err := s.ListSkillInjections(ctx, store.SkillInjectionScopeUser, alice.ID)
+	require.NoError(t, err)
+	require.Len(t, sis, 3)
+
+	// All sort orders must be distinct.
+	orders := make(map[int]string)
+	for _, si := range sis {
+		prev, collision := orders[si.SortOrder]
+		assert.False(t, collision, "sort order %d collides between %q and %q", si.SortOrder, prev, si.SkillURI)
+		orders[si.SortOrder] = si.SkillURI
+	}
+	assert.Len(t, orders, 3)
+
+	// Explicit entry must keep its value.
+	for _, si := range sis {
+		if si.SkillURI == "scion://user-explicit-10@1.0" {
+			assert.Equal(t, 10, si.SortOrder)
+		}
+	}
+}
+
+// TestSetUserInjectedSkills_EmptySkillURIRejected verifies N-2 (user scope):
+// a PUT with any entry missing skillUri returns 400 and nothing is stored.
+func TestSetUserInjectedSkills_EmptySkillURIRejected(t *testing.T) {
+	srv, s, _, alice, _ := setupInjectedSkillsTest(t)
+	ctx := context.Background()
+
+	badList := api.SkillInjectionList{
+		Entries: []api.SkillInjectionEntry{
+			{SkillURI: "scion://valid-user-skill@1.0"},
+			{SkillURI: ""},
+		},
+	}
+	rec := doRequestAsUser(t, srv, alice, http.MethodPut,
+		"/api/v1/users/me/injected-skills", badList)
+	assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+
+	// Nothing should have been stored.
+	sis, err := s.ListSkillInjections(ctx, store.SkillInjectionScopeUser, alice.ID)
+	require.NoError(t, err)
+	assert.Empty(t, sis, "no entries must be stored when any skillUri is empty")
 }
 
 // =============================================================================

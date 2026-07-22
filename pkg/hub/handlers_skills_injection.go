@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -226,11 +227,19 @@ func (s *Server) setProjectInjectedSkills(w http.ResponseWriter, r *http.Request
 		createdBy = userIdent.ID()
 	}
 
+	// Validate all entries before committing any changes (N-2).
+	for i, entry := range req.Entries {
+		if strings.TrimSpace(entry.SkillURI) == "" {
+			BadRequest(w, fmt.Sprintf("entry %d: skillUri is required", i))
+			return
+		}
+	}
+
 	injections := make([]store.SkillInjection, 0, len(req.Entries))
 	for i, e := range req.Entries {
 		sortOrder := e.SortOrder
 		if sortOrder == 0 {
-			sortOrder = i // default to request position when not explicitly set
+			sortOrder = i + 1 // default to 1-based request position to avoid collision with explicit 0→N-1 values (N-1)
 		}
 		injections = append(injections, store.SkillInjection{
 			Scope:     store.SkillInjectionScopeProject,
@@ -436,11 +445,19 @@ func (s *Server) setUserInjectedSkills(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Validate all entries before committing any changes (N-2).
+	for i, entry := range req.Entries {
+		if strings.TrimSpace(entry.SkillURI) == "" {
+			BadRequest(w, fmt.Sprintf("entry %d: skillUri is required", i))
+			return
+		}
+	}
+
 	injections := make([]store.SkillInjection, 0, len(req.Entries))
 	for i, e := range req.Entries {
 		sortOrder := e.SortOrder
 		if sortOrder == 0 {
-			sortOrder = i // default to request position when not explicitly set
+			sortOrder = i + 1 // default to 1-based request position to avoid collision with explicit 0→N-1 values (N-1)
 		}
 		injections = append(injections, store.SkillInjection{
 			Scope:     store.SkillInjectionScopeUser,
