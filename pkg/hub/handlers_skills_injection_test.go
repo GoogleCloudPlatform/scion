@@ -416,6 +416,36 @@ func TestSetProjectInjectedSkills_EmptyListClearsAll(t *testing.T) {
 	assert.Empty(t, sis)
 }
 
+// TestSetProjectInjectedSkills_NormalizesSkillURI verifies that a bulk PUT with
+// leading/trailing whitespace in skillUri stores the trimmed value.
+func TestSetProjectInjectedSkills_NormalizesSkillURI(t *testing.T) {
+	srv, s, project, alice, _ := setupInjectedSkillsTest(t)
+	ctx := context.Background()
+
+	newList := api.SkillInjectionList{
+		Entries: []api.SkillInjectionEntry{
+			{SkillURI: "  scion://proj-trimmed-skill@1.0  "},
+		},
+	}
+	rec := doRequestAsUser(t, srv, alice, http.MethodPut,
+		"/api/v1/projects/"+project.ID+"/injected-skills", newList)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	// The response should contain the trimmed URI.
+	var resp api.SkillInjectionList
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	require.Len(t, resp.Entries, 1)
+	assert.Equal(t, "scion://proj-trimmed-skill@1.0", resp.Entries[0].SkillURI,
+		"response URI must be trimmed")
+
+	// The stored value must also be trimmed.
+	sis, err := s.ListSkillInjections(ctx, store.SkillInjectionScopeProject, project.ID)
+	require.NoError(t, err)
+	require.Len(t, sis, 1)
+	assert.Equal(t, "scion://proj-trimmed-skill@1.0", sis[0].SkillURI,
+		"stored URI must not have surrounding whitespace")
+}
+
 // =============================================================================
 // Project-scope: delete
 // =============================================================================
@@ -862,6 +892,36 @@ func TestSetUserInjectedSkills_EmptySkillURIRejected(t *testing.T) {
 	sis, err := s.ListSkillInjections(ctx, store.SkillInjectionScopeUser, alice.ID)
 	require.NoError(t, err)
 	assert.Empty(t, sis, "no entries must be stored when any skillUri is empty")
+}
+
+// TestSetUserInjectedSkills_NormalizesSkillURI verifies that a bulk PUT with
+// leading/trailing whitespace in skillUri stores the trimmed value.
+func TestSetUserInjectedSkills_NormalizesSkillURI(t *testing.T) {
+	srv, s, _, alice, _ := setupInjectedSkillsTest(t)
+	ctx := context.Background()
+
+	newList := api.SkillInjectionList{
+		Entries: []api.SkillInjectionEntry{
+			{SkillURI: "  scion://user-trimmed-skill@1.0  "},
+		},
+	}
+	rec := doRequestAsUser(t, srv, alice, http.MethodPut,
+		"/api/v1/users/me/injected-skills", newList)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	// The response should contain the trimmed URI.
+	var resp api.SkillInjectionList
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	require.Len(t, resp.Entries, 1)
+	assert.Equal(t, "scion://user-trimmed-skill@1.0", resp.Entries[0].SkillURI,
+		"response URI must be trimmed")
+
+	// The stored value must also be trimmed.
+	sis, err := s.ListSkillInjections(ctx, store.SkillInjectionScopeUser, alice.ID)
+	require.NoError(t, err)
+	require.Len(t, sis, 1)
+	assert.Equal(t, "scion://user-trimmed-skill@1.0", sis[0].SkillURI,
+		"stored URI must not have surrounding whitespace")
 }
 
 // =============================================================================

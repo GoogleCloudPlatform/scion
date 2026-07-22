@@ -246,7 +246,7 @@ func (s *Server) setProjectInjectedSkills(w http.ResponseWriter, r *http.Request
 		injections = append(injections, store.SkillInjection{
 			Scope:     store.SkillInjectionScopeProject,
 			ScopeID:   projectID,
-			SkillURI:  e.SkillURI,
+			SkillURI:  strings.TrimSpace(e.SkillURI),
 			SkillAs:   e.SkillAs,
 			Optional:  e.Optional,
 			SortOrder: so,
@@ -474,7 +474,7 @@ func (s *Server) setUserInjectedSkills(w http.ResponseWriter, r *http.Request) {
 		injections = append(injections, store.SkillInjection{
 			Scope:     store.SkillInjectionScopeUser,
 			ScopeID:   userIdent.ID(),
-			SkillURI:  e.SkillURI,
+			SkillURI:  strings.TrimSpace(e.SkillURI),
 			SkillAs:   e.SkillAs,
 			Optional:  e.Optional,
 			SortOrder: so,
