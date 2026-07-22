@@ -235,7 +235,13 @@ export class ScionInjectedSkillsPanel extends LitElement {
       clearTimeout(this.searchTimer);
       this.searchTimer = null;
     }
+    this.cancelSearch();
+  }
+
+  /** Abort any in-flight skill search and clear the controller reference. */
+  private cancelSearch(): void {
     this._searchAbortController?.abort();
+    this._searchAbortController = null;
   }
 
   // ── API helpers ──────────────────────────────────────────────────────────
@@ -336,11 +342,12 @@ export class ScionInjectedSkillsPanel extends LitElement {
     await this.load();
   }
 
-  private async deleteEntry(row: SkillRow): Promise<void> {
+  private async deleteEntry(row: SkillRow, rowIndex: number): Promise<void> {
     if (this.scope === 'hub') {
-      // For hub: remove from user_defined and PUT
+      // For hub: remove from user_defined and PUT.
+      // Filter by index (not URI) so duplicate URIs don't cause silent double-deletion.
       const userDefined = this.rows
-        .filter((r) => !r.readonly && r.uri !== row.uri)
+        .filter((r, i) => !r.readonly && i !== rowIndex)
         .map((r) => this.rowToSkillRef(r));
       await this.putHubUserDefined(userDefined);
     } else {
@@ -432,6 +439,8 @@ export class ScionInjectedSkillsPanel extends LitElement {
       clearTimeout(this.searchTimer);
       this.searchTimer = null;
     }
+    // Abort any in-flight search so it doesn't update state after close.
+    this.cancelSearch();
   }
 
   private handleSearchInput(query: string): void {
@@ -463,7 +472,11 @@ export class ScionInjectedSkillsPanel extends LitElement {
       if (err instanceof Error && err.name === 'AbortError') return; // Stale request — discard
       // Non-critical — just show no results
     } finally {
-      this.dialogSkillSearching = false;
+      // Only clear the spinner if this request was not aborted — a newer in-flight
+      // request (or closeDialog) may have aborted it and its spinner is still needed.
+      if (!signal.aborted) {
+        this.dialogSkillSearching = false;
+      }
     }
   }
 
@@ -531,7 +544,10 @@ export class ScionInjectedSkillsPanel extends LitElement {
       return;
     }
     const sourceIndex = this.dragSourceIndex;
-    const insertAt = targetIndex > sourceIndex ? targetIndex - 1 : targetIndex;
+    // Splice source out first, then insert at targetIndex — no adjustment needed.
+    // This correctly handles drag-down (source < target), drag-up (source > target),
+    // and the adjacent-down case (targetIndex === sourceIndex + 1).
+    const insertAt = targetIndex;
     const newOrder = [...this.rows];
     const [moved] = newOrder.splice(sourceIndex, 1);
     newOrder.splice(insertAt, 0, moved);
@@ -656,7 +672,7 @@ export class ScionInjectedSkillsPanel extends LitElement {
         draggable=${draggable ? 'true' : 'false'}
         @dragstart=${draggable ? (e: DragEvent) => this.handleDragStart(index, e) : nothing}
         @dragover=${canEdit ? (e: DragEvent) => this.handleDragOver(index, e) : nothing}
-        @dragleave=${draggable ? () => this.handleDragLeave() : nothing}
+        @dragleave=${canEdit ? () => this.handleDragLeave() : nothing}
         @drop=${draggable ? (e: DragEvent) => this.handleDrop(index, e) : nothing}
         @dragend=${draggable ? () => this.handleDragEnd() : nothing}
       >
@@ -708,7 +724,7 @@ export class ScionInjectedSkillsPanel extends LitElement {
                         name="trash"
                         label="Remove"
                         ?disabled=${isDeleting}
-                        @click=${() => this.handleDeleteRow(row)}
+                        @click=${() => this.handleDeleteRow(row, index)}
                         style="color: var(--sl-color-danger-600, #dc2626);"
                       ></sl-icon-button>
                     `}
@@ -719,14 +735,14 @@ export class ScionInjectedSkillsPanel extends LitElement {
     `;
   }
 
-  private async handleDeleteRow(row: SkillRow): Promise<void> {
+  private async handleDeleteRow(row: SkillRow, rowIndex: number): Promise<void> {
     const label = row.skillName || row.uri;
     if (!confirm(`Remove skill "${label}" from this ${this.scope === 'hub' ? 'hub' : this.scope === 'project' ? 'project' : 'profile'}?`)) {
       return;
     }
     this.deletingId = row.id || row.uri;
     try {
-      await this.deleteEntry(row);
+      await this.deleteEntry(row, rowIndex);
     } catch (err) {
       console.error('Failed to delete skill:', err);
       alert(err instanceof Error ? err.message : 'Failed to remove skill');
