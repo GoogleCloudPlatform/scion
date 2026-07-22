@@ -191,6 +191,23 @@ func TestAddProjectInjectedSkill_MissingSkillURI(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
+// TestAddProjectInjectedSkill_WhitespaceSkillURIRejected verifies C1 (project scope):
+// a POST with a whitespace-only skillUri returns 400.
+func TestAddProjectInjectedSkill_WhitespaceSkillURIRejected(t *testing.T) {
+	srv, s, project, alice, _ := setupInjectedSkillsTest(t)
+	ctx := context.Background()
+
+	body := api.SkillInjectionEntry{SkillURI: "   "}
+	rec := doRequestAsUser(t, srv, alice, http.MethodPost,
+		"/api/v1/projects/"+project.ID+"/injected-skills", body)
+	assert.Equal(t, http.StatusBadRequest, rec.Code, "whitespace-only skillUri must return 400")
+
+	// Nothing should have been stored.
+	sis, err := s.ListSkillInjections(ctx, store.SkillInjectionScopeProject, project.ID)
+	require.NoError(t, err)
+	assert.Empty(t, sis, "no entry must be stored for a whitespace-only skillUri")
+}
+
 func TestAddProjectInjectedSkill_DuplicateReturnsConflict(t *testing.T) {
 	srv, _, project, alice, _ := setupInjectedSkillsTest(t)
 
@@ -316,6 +333,46 @@ func TestSetProjectInjectedSkills_MixedSortOrder(t *testing.T) {
 	}
 }
 
+// TestSetProjectInjectedSkills_ExplicitSortOrder1CollisionFree verifies C4 (project scope):
+// when a caller sets sortOrder=1 on one entry and leaves another entry's sortOrder=0,
+// the default-assigned value does not collide with the explicit 1.
+func TestSetProjectInjectedSkills_ExplicitSortOrder1CollisionFree(t *testing.T) {
+	srv, s, project, alice, _ := setupInjectedSkillsTest(t)
+	ctx := context.Background()
+
+	// Entry 0: no explicit sortOrder (would naively get 1 via i+1 — the residual collision).
+	// Entry 1: explicit sortOrder = 1.
+	newList := api.SkillInjectionList{
+		Entries: []api.SkillInjectionEntry{
+			{SkillURI: "scion://proj-auto@1.0"},                 // default, must NOT get 1
+			{SkillURI: "scion://proj-explicit-1@1.0", SortOrder: 1}, // explicit 1
+		},
+	}
+	rec := doRequestAsUser(t, srv, alice, http.MethodPut,
+		"/api/v1/projects/"+project.ID+"/injected-skills", newList)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	sis, err := s.ListSkillInjections(ctx, store.SkillInjectionScopeProject, project.ID)
+	require.NoError(t, err)
+	require.Len(t, sis, 2)
+
+	// All sort orders must be distinct.
+	orders := make(map[int]string)
+	for _, si := range sis {
+		prev, collision := orders[si.SortOrder]
+		assert.False(t, collision, "sort order %d collides between %q and %q", si.SortOrder, prev, si.SkillURI)
+		orders[si.SortOrder] = si.SkillURI
+	}
+	assert.Len(t, orders, 2, "both entries must have distinct sort orders")
+
+	// The explicit entry must preserve its value.
+	for _, si := range sis {
+		if si.SkillURI == "scion://proj-explicit-1@1.0" {
+			assert.Equal(t, 1, si.SortOrder, "explicit sortOrder=1 must be preserved")
+		}
+	}
+}
+
 // TestSetProjectInjectedSkills_EmptySkillURIRejected verifies N-2 (project scope):
 // a PUT with any entry missing skillUri returns 400 and nothing is stored.
 func TestSetProjectInjectedSkills_EmptySkillURIRejected(t *testing.T) {
@@ -426,6 +483,32 @@ func TestRemoveProjectInjectedSkill_CrossProjectIDORRejected(t *testing.T) {
 	entries, err := s.ListSkillInjections(ctx, store.SkillInjectionScopeProject, projectB.ID)
 	require.NoError(t, err)
 	assert.Len(t, entries, 1, "project-B entry must not have been deleted")
+}
+
+// TestRemoveProjectInjectedSkill_TrailingSlash verifies C2:
+// a DELETE request with a trailing slash on the project-scope endpoint is routed
+// correctly (not 404'd by the router) and succeeds.
+func TestRemoveProjectInjectedSkill_TrailingSlash(t *testing.T) {
+	srv, s, project, alice, _ := setupInjectedSkillsTest(t)
+	ctx := context.Background()
+
+	si := &store.SkillInjection{
+		Scope:    store.SkillInjectionScopeProject,
+		ScopeID:  project.ID,
+		SkillURI: "scion://trailing-slash-skill@1.0",
+	}
+	require.NoError(t, s.AddSkillInjection(ctx, si))
+
+	// DELETE with trailing slash — must be routed to the handler, not 404'd.
+	rec := doRequestAsUser(t, srv, alice, http.MethodDelete,
+		"/api/v1/projects/"+project.ID+"/injected-skills/"+si.ID+"/", nil)
+	assert.Equal(t, http.StatusNoContent, rec.Code,
+		"DELETE with trailing slash must succeed (not 404)")
+
+	// Verify the entry was actually removed.
+	sis, err := s.ListSkillInjections(ctx, store.SkillInjectionScopeProject, project.ID)
+	require.NoError(t, err)
+	assert.Empty(t, sis, "entry must be removed even when DELETE URL has trailing slash")
 }
 
 // =============================================================================
@@ -585,6 +668,23 @@ func TestAddUserInjectedSkill_MissingSkillURI(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
+// TestAddUserInjectedSkill_WhitespaceSkillURIRejected verifies C1 (user scope):
+// a POST with a whitespace-only skillUri returns 400.
+func TestAddUserInjectedSkill_WhitespaceSkillURIRejected(t *testing.T) {
+	srv, s, _, alice, _ := setupInjectedSkillsTest(t)
+	ctx := context.Background()
+
+	body := api.SkillInjectionEntry{SkillURI: "\t  \t"}
+	rec := doRequestAsUser(t, srv, alice, http.MethodPost,
+		"/api/v1/users/me/injected-skills", body)
+	assert.Equal(t, http.StatusBadRequest, rec.Code, "whitespace-only skillUri must return 400")
+
+	// Nothing should have been stored.
+	sis, err := s.ListSkillInjections(ctx, store.SkillInjectionScopeUser, alice.ID)
+	require.NoError(t, err)
+	assert.Empty(t, sis, "no entry must be stored for a whitespace-only skillUri")
+}
+
 func TestAddUserInjectedSkill_DuplicateReturnsConflict(t *testing.T) {
 	srv, _, _, alice, _ := setupInjectedSkillsTest(t)
 
@@ -698,6 +798,46 @@ func TestSetUserInjectedSkills_MixedSortOrder(t *testing.T) {
 	for _, si := range sis {
 		if si.SkillURI == "scion://user-explicit-10@1.0" {
 			assert.Equal(t, 10, si.SortOrder)
+		}
+	}
+}
+
+// TestSetUserInjectedSkills_ExplicitSortOrder1CollisionFree verifies C4 (user scope):
+// when a caller sets sortOrder=1 on one entry and leaves another entry's sortOrder=0,
+// the default-assigned value does not collide with the explicit 1.
+func TestSetUserInjectedSkills_ExplicitSortOrder1CollisionFree(t *testing.T) {
+	srv, s, _, alice, _ := setupInjectedSkillsTest(t)
+	ctx := context.Background()
+
+	// Entry 0: no explicit sortOrder (would naively get 1 via i+1 — the residual collision).
+	// Entry 1: explicit sortOrder = 1.
+	newList := api.SkillInjectionList{
+		Entries: []api.SkillInjectionEntry{
+			{SkillURI: "scion://user-auto@1.0"},                  // default, must NOT get 1
+			{SkillURI: "scion://user-explicit-1@1.0", SortOrder: 1}, // explicit 1
+		},
+	}
+	rec := doRequestAsUser(t, srv, alice, http.MethodPut,
+		"/api/v1/users/me/injected-skills", newList)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	sis, err := s.ListSkillInjections(ctx, store.SkillInjectionScopeUser, alice.ID)
+	require.NoError(t, err)
+	require.Len(t, sis, 2)
+
+	// All sort orders must be distinct.
+	orders := make(map[int]string)
+	for _, si := range sis {
+		prev, collision := orders[si.SortOrder]
+		assert.False(t, collision, "sort order %d collides between %q and %q", si.SortOrder, prev, si.SkillURI)
+		orders[si.SortOrder] = si.SkillURI
+	}
+	assert.Len(t, orders, 2, "both entries must have distinct sort orders")
+
+	// The explicit entry must preserve its value.
+	for _, si := range sis {
+		if si.SkillURI == "scion://user-explicit-1@1.0" {
+			assert.Equal(t, 1, si.SortOrder, "explicit sortOrder=1 must be preserved")
 		}
 	}
 }

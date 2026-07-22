@@ -80,11 +80,7 @@ func (s *Server) listProjectInjectedSkills(w http.ResponseWriter, r *http.Reques
 	// Read access check. Only UserIdentity callers (web users) are permitted;
 	// agent/broker tokens are rejected by the else-guard below.
 	if userIdent, ok := identity.(UserIdentity); ok {
-		decision := s.authzService.CheckAccess(ctx, userIdent, Resource{
-			Type:    "project",
-			ID:      project.ID,
-			OwnerID: project.OwnerID,
-		}, ActionRead)
+		decision := s.authzService.CheckAccess(ctx, userIdent, projectResource(project), ActionRead)
 		if !decision.Allowed {
 			Forbidden(w)
 			return
@@ -127,11 +123,7 @@ func (s *Server) addProjectInjectedSkill(w http.ResponseWriter, r *http.Request,
 
 	// Write access check (project owner/admin).
 	if userIdent, ok := identity.(UserIdentity); ok {
-		decision := s.authzService.CheckAccess(ctx, userIdent, Resource{
-			Type:    "project",
-			ID:      project.ID,
-			OwnerID: project.OwnerID,
-		}, ActionUpdate)
+		decision := s.authzService.CheckAccess(ctx, userIdent, projectResource(project), ActionUpdate)
 		if !decision.Allowed {
 			Forbidden(w)
 			return
@@ -146,6 +138,7 @@ func (s *Server) addProjectInjectedSkill(w http.ResponseWriter, r *http.Request,
 		BadRequest(w, "Invalid request body: "+err.Error())
 		return
 	}
+	entry.SkillURI = strings.TrimSpace(entry.SkillURI)
 	if entry.SkillURI == "" {
 		ValidationError(w, "skillUri is required", nil)
 		return
@@ -202,11 +195,7 @@ func (s *Server) setProjectInjectedSkills(w http.ResponseWriter, r *http.Request
 
 	// Write access check (project owner/admin).
 	if userIdent, ok := identity.(UserIdentity); ok {
-		decision := s.authzService.CheckAccess(ctx, userIdent, Resource{
-			Type:    "project",
-			ID:      project.ID,
-			OwnerID: project.OwnerID,
-		}, ActionUpdate)
+		decision := s.authzService.CheckAccess(ctx, userIdent, projectResource(project), ActionUpdate)
 		if !decision.Allowed {
 			Forbidden(w)
 			return
@@ -235,11 +224,24 @@ func (s *Server) setProjectInjectedSkills(w http.ResponseWriter, r *http.Request
 		}
 	}
 
+	// Build set of explicitly-assigned sort orders (C4: collision-free defaults).
+	explicit := make(map[int]bool)
+	for _, e := range req.Entries {
+		if e.SortOrder != 0 {
+			explicit[e.SortOrder] = true
+		}
+	}
+	nextDefault := 1
 	injections := make([]store.SkillInjection, 0, len(req.Entries))
-	for i, e := range req.Entries {
-		sortOrder := e.SortOrder
-		if sortOrder == 0 {
-			sortOrder = i + 1 // default to 1-based request position to avoid collision with explicit 0→N-1 values (N-1)
+	for _, e := range req.Entries {
+		so := e.SortOrder
+		if so == 0 {
+			for explicit[nextDefault] {
+				nextDefault++
+			}
+			so = nextDefault
+			explicit[nextDefault] = true
+			nextDefault++
 		}
 		injections = append(injections, store.SkillInjection{
 			Scope:     store.SkillInjectionScopeProject,
@@ -247,7 +249,7 @@ func (s *Server) setProjectInjectedSkills(w http.ResponseWriter, r *http.Request
 			SkillURI:  e.SkillURI,
 			SkillAs:   e.SkillAs,
 			Optional:  e.Optional,
-			SortOrder: sortOrder,
+			SortOrder: so,
 			CreatedBy: createdBy,
 		})
 	}
@@ -289,11 +291,7 @@ func (s *Server) removeProjectInjectedSkill(w http.ResponseWriter, r *http.Reque
 
 	// Write access check.
 	if userIdent, ok := identity.(UserIdentity); ok {
-		decision := s.authzService.CheckAccess(ctx, userIdent, Resource{
-			Type:    "project",
-			ID:      project.ID,
-			OwnerID: project.OwnerID,
-		}, ActionUpdate)
+		decision := s.authzService.CheckAccess(ctx, userIdent, projectResource(project), ActionUpdate)
 		if !decision.Allowed {
 			Forbidden(w)
 			return
@@ -401,6 +399,7 @@ func (s *Server) addUserInjectedSkill(w http.ResponseWriter, r *http.Request) {
 		BadRequest(w, "Invalid request body: "+err.Error())
 		return
 	}
+	entry.SkillURI = strings.TrimSpace(entry.SkillURI)
 	if entry.SkillURI == "" {
 		ValidationError(w, "skillUri is required", nil)
 		return
@@ -453,11 +452,24 @@ func (s *Server) setUserInjectedSkills(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Build set of explicitly-assigned sort orders (C4: collision-free defaults).
+	explicit := make(map[int]bool)
+	for _, e := range req.Entries {
+		if e.SortOrder != 0 {
+			explicit[e.SortOrder] = true
+		}
+	}
+	nextDefault := 1
 	injections := make([]store.SkillInjection, 0, len(req.Entries))
-	for i, e := range req.Entries {
-		sortOrder := e.SortOrder
-		if sortOrder == 0 {
-			sortOrder = i + 1 // default to 1-based request position to avoid collision with explicit 0→N-1 values (N-1)
+	for _, e := range req.Entries {
+		so := e.SortOrder
+		if so == 0 {
+			for explicit[nextDefault] {
+				nextDefault++
+			}
+			so = nextDefault
+			explicit[nextDefault] = true
+			nextDefault++
 		}
 		injections = append(injections, store.SkillInjection{
 			Scope:     store.SkillInjectionScopeUser,
@@ -465,7 +477,7 @@ func (s *Server) setUserInjectedSkills(w http.ResponseWriter, r *http.Request) {
 			SkillURI:  e.SkillURI,
 			SkillAs:   e.SkillAs,
 			Optional:  e.Optional,
-			SortOrder: sortOrder,
+			SortOrder: so,
 			CreatedBy: userIdent.ID(),
 		})
 	}

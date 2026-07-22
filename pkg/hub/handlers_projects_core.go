@@ -1376,6 +1376,7 @@ func (s *Server) handleProjectRoutes(w http.ResponseWriter, r *http.Request) {
 	if strings.HasPrefix(subPath, "injected-skills") {
 		siPath := strings.TrimPrefix(subPath, "injected-skills")
 		siPath = strings.TrimPrefix(siPath, "/")
+		siPath = strings.TrimSuffix(siPath, "/")
 		if siPath == "" {
 			s.handleProjectInjectedSkills(w, r, projectID)
 		} else {
