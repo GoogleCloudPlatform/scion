@@ -169,8 +169,15 @@ func isSkillURI(s string) bool {
 	return strings.Contains(s, "://")
 }
 
-// isUUIDLike returns true when s is a valid UUID.
+// isUUIDLike returns true when s is a standard 36-character UUID
+// (8-4-4-4-12 with dashes). The length check is required because
+// uuid.Parse also accepts URN ("urn:uuid:…", 45 chars), braced
+// ("{uuid}", 38 chars), and 32-char hex-without-dashes forms that
+// must not be treated as entry IDs.
 func isUUIDLike(s string) bool {
+	if len(s) != 36 {
+		return false
+	}
 	_, err := uuid.Parse(s)
 	return err == nil
 }

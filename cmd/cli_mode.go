@@ -31,7 +31,8 @@ var assistantDenied = map[string]bool{
 }
 
 // agentAllowed lists commands available in agent mode.
-// Parent commands are implicitly allowed when any child is allowed.
+// Every entry — including parent commands — must be listed explicitly;
+// parents are NOT implicitly allowed when a child is listed.
 var agentAllowed = map[string]bool{
 	"create":                      true,
 	"delete":                      true,

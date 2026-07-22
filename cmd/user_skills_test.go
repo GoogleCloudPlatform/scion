@@ -89,7 +89,7 @@ func setupUserSkillsProject(t *testing.T, endpoint string) (tmpHome, projectDir 
 	require.NoError(t, os.MkdirAll(projectDir, 0755))
 
 	settings := map[string]interface{}{
-		"project_id": "test-grove",
+		"project_id": "test-project",
 		"hub": map[string]interface{}{
 			"enabled":  true,
 			"endpoint": endpoint,
@@ -237,10 +237,25 @@ func TestRunUserSkillsList_JSONOutput(t *testing.T) {
 }
 
 func TestRunUserSkillsAdd_NoURIError(t *testing.T) {
-	// Plain string (no "://") → error without contacting hub.
+	// Set up a mock hub and record whether it was ever contacted.
+	hubCalled := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hubCalled = true
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+	setUserSkillsHubEnv(t, server.URL)
+
+	orig := projectPath
+	defer func() { projectPath = orig }()
+	_, projectDir := setupUserSkillsProject(t, server.URL)
+	projectPath = projectDir
+
+	// Plain string (no "://") → validation error before hub is contacted.
 	err := runUserSkillsAdd(userSkillsAddCmd, []string{"mypkg"})
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "skill URI is required (expected format containing ://)")
+	assert.False(t, hubCalled, "hub must not be contacted when the argument is not a skill URI")
 }
 
 func TestRunUserSkillsAdd_Success(t *testing.T) {
