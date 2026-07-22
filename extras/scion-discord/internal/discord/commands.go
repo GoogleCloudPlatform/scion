@@ -195,6 +195,13 @@ func (h *CommandHandler) RegisterCommandsForGuild(guildID string) error {
 				Type:        discordgo.ApplicationCommandOptionSubCommand,
 				Name:        "default",
 				Description: "Set or show the default agent for this channel",
+				Options: []*discordgo.ApplicationCommandOption{{
+					Type:         discordgo.ApplicationCommandOptionString,
+					Name:         "agent",
+					Description:  "Agent name (leave empty to show/clear current default)",
+					Required:     false,
+					Autocomplete: true,
+				}},
 			},
 			{
 				Type:        discordgo.ApplicationCommandOptionSubCommand,
@@ -397,7 +404,7 @@ func helpText() string {
 		"`/scion stop <agent>` — Stop an agent\n" +
 		"`/scion msg <agent> <text>` — Send a message to an agent\n" +
 		"`/scion logs <agent>` — View agent logs\n" +
-		"`/scion default` — Set or clear the default agent\n" +
+		"`/scion default [agent]` — Set or clear the default agent\n" +
 		"`/scion register` — Link your Discord account to Scion Hub\n" +
 		"`/scion unregister` — Unlink your Discord account\n" +
 		"`/scion settings` — Configure channel notification settings\n" +
@@ -865,6 +872,11 @@ func (h *CommandHandler) HandleLogs(s *discordgo.Session, i *discordgo.Interacti
 // HandleDefault shows agent selection buttons for setting the default agent.
 // When invoked from a thread, it manages per-thread overrides instead of
 // the channel-level default.
+//
+// Hybrid routing:
+//   - If the "agent" parameter is provided: validate and set the default directly.
+//   - If no parameter + ≤20 agents: show the existing button grid.
+//   - If no parameter + >20 agents: show info + prompt to use autocomplete.
 func (h *CommandHandler) HandleDefault(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -900,6 +912,51 @@ func (h *CommandHandler) HandleDefault(s *discordgo.Session, i *discordgo.Intera
 		threadID = i.ChannelID
 	}
 
+	// If the "agent" parameter was provided, set the default directly.
+	agentParam := getSubcommandOption(i, "agent")
+	if agentParam != "" {
+		// Validate that the agent exists in the project.
+		found := false
+		for _, slug := range agents {
+			if slug == agentParam {
+				found = true
+				break
+			}
+		}
+		if !found {
+			h.followup(s, i, fmt.Sprintf(
+				"Agent **%s** not found in this project. Use `/scion agents` to see available agents.",
+				agentParam,
+			))
+			return
+		}
+
+		// Set the default at the appropriate level.
+		if isThread {
+			if err := h.store.SetThreadDefault(ctx, link.ChannelID, threadID, agentParam); err != nil {
+				h.log.Error("Failed to set thread default", "error", err)
+				h.followup(s, i, "Failed to set thread default. Please try again.")
+				return
+			}
+			h.followup(s, i, fmt.Sprintf("Default agent for this thread set to **%s**.", agentParam))
+			h.log.Info("Thread default set via autocomplete",
+				"channel_id", link.ChannelID, "thread_id", threadID, "agent", agentParam)
+		} else {
+			link.DefaultAgent = agentParam
+			if err := h.store.UpdateChannelLink(ctx, link); err != nil {
+				h.log.Error("Failed to set default agent", "error", err)
+				h.followup(s, i, "Failed to set default agent. Please try again.")
+				return
+			}
+			h.followup(s, i, fmt.Sprintf("Default agent set to **%s** for this channel.", agentParam))
+			h.log.Info("Default agent set via autocomplete",
+				"channel_id", i.ChannelID, "agent", agentParam)
+		}
+		return
+	}
+
+	// No agent parameter — show UI based on agent count.
+
 	// Determine the current effective default for highlighting.
 	currentDefault := link.DefaultAgent
 	if isThread {
@@ -911,17 +968,57 @@ func (h *CommandHandler) HandleDefault(s *discordgo.Session, i *discordgo.Intera
 		}
 	}
 
+	var currentText string
+	if currentDefault != "" {
+		currentText = fmt.Sprintf("Current default: **%s**\n", currentDefault)
+	}
+
+	// Large project path (>20 agents): info message + clear button only.
+	if len(agents) > 20 {
+		promptText := fmt.Sprintf(
+			"This project has %d agents. Use `/scion default agent:<name>` with autocomplete to select.",
+			len(agents),
+		)
+		if isThread {
+			promptText = fmt.Sprintf(
+				"This project has %d agents. Use `/scion default agent:<name>` with autocomplete to select a thread default.",
+				len(agents),
+			)
+			if link.DefaultAgent != "" {
+				promptText += fmt.Sprintf("\nChannel-wide default: **%s**", link.DefaultAgent)
+			}
+		}
+
+		noneCustomID := "default:none"
+		if threadID != "" {
+			noneCustomID = fmt.Sprintf("default:none:%s", threadID)
+		}
+		rows := []discordgo.MessageComponent{
+			discordgo.ActionsRow{
+				Components: []discordgo.MessageComponent{
+					discordgo.Button{
+						Label:    "Clear Default",
+						Style:    discordgo.DangerButton,
+						CustomID: noneCustomID,
+					},
+				},
+			},
+		}
+
+		_, _ = s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
+			Content:    currentText + promptText,
+			Components: rows,
+		})
+		return
+	}
+
+	// Small project path (≤20 agents): existing button grid.
 	promptText := "Select the default agent for this channel:"
 	if isThread {
 		promptText = "Select the default agent for this thread:"
 		if link.DefaultAgent != "" {
 			promptText += fmt.Sprintf("\nChannel-wide default: **%s**", link.DefaultAgent)
 		}
-	}
-
-	var currentText string
-	if currentDefault != "" {
-		currentText = fmt.Sprintf("Current default: **%s**\n", currentDefault)
 	}
 
 	var rows []discordgo.MessageComponent
