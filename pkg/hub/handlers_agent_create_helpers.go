@@ -330,7 +330,10 @@ func (s *Server) mergeInjectedSkills(ctx context.Context, agent *store.Agent, pr
 	var userRefs []api.SkillReference
 	if agent.OwnerID != "" {
 		if sis, err := s.store.ListSkillInjections(ctx, store.SkillInjectionScopeUser, agent.OwnerID); err != nil {
-			slog.Warn("mergeInjectedSkills: failed to fetch user injected skills", "error", err)
+			if !errors.Is(err, store.ErrNotFound) {
+				slog.Warn("mergeInjectedSkills: failed to fetch user injected skills", "error", err)
+			}
+			// continue, best-effort
 		} else {
 			for _, si := range sis {
 				userRefs = append(userRefs, si.ToSkillReference())
@@ -342,7 +345,10 @@ func (s *Server) mergeInjectedSkills(ctx context.Context, agent *store.Agent, pr
 	var projectRefs []api.SkillReference
 	if project != nil {
 		if sis, err := s.store.ListSkillInjections(ctx, store.SkillInjectionScopeProject, project.ID); err != nil {
-			slog.Warn("mergeInjectedSkills: failed to fetch project injected skills", "error", err)
+			if !errors.Is(err, store.ErrNotFound) {
+				slog.Warn("mergeInjectedSkills: failed to fetch project injected skills", "error", err)
+			}
+			// continue, best-effort
 		} else {
 			for _, si := range sis {
 				projectRefs = append(projectRefs, si.ToSkillReference())
@@ -383,8 +389,9 @@ func mergeSkillRefs(scopes ...[]api.SkillReference) []api.SkillReference {
 	// the first-seen entry. This avoids misleading log noise when 3+ scopes
 	// conflict (e.g. labelling transient intermediates as "winner").
 	for base, winner := range seen {
-		if orig, ok := first[base]; ok && orig.URI != winner.URI {
-			slog.Warn("skill injection version conflict resolved",
+		orig := first[base]
+		if orig.URI != winner.URI {
+			slog.Warn("possible skill injection version conflict or duplicate URI",
 				"base_uri", base, "winner", winner.URI, "original", orig.URI)
 		}
 	}
