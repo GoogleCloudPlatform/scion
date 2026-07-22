@@ -1278,6 +1278,10 @@ func (s *Server) ensureBrokerSpoke(mgr IntegrationManager, name string) {
 			"plugin", name, "error", err)
 		return
 	}
+	if newBus == nil {
+		slog.Warn("ensureBrokerSpoke: broker is nil, skipping spoke add", "plugin", name)
+		return
+	}
 
 	var observer bool
 	var channelID string
