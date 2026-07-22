@@ -1,0 +1,641 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package hub
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"log/slog"
+	"net/http"
+	"strings"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
+)
+
+// =============================================================================
+// Project-scope injected skills
+// =============================================================================
+
+// handleProjectInjectedSkills routes GET/POST/PUT on
+// /api/v1/projects/{projectId}/injected-skills.
+func (s *Server) handleProjectInjectedSkills(w http.ResponseWriter, r *http.Request, projectID string) {
+	switch r.Method {
+	case http.MethodGet:
+		s.listProjectInjectedSkills(w, r, projectID)
+	case http.MethodPost:
+		s.addProjectInjectedSkill(w, r, projectID)
+	case http.MethodPut:
+		s.setProjectInjectedSkills(w, r, projectID)
+	default:
+		MethodNotAllowed(w)
+	}
+}
+
+// handleProjectInjectedSkillByID routes DELETE on
+// /api/v1/projects/{projectId}/injected-skills/{id}.
+func (s *Server) handleProjectInjectedSkillByID(w http.ResponseWriter, r *http.Request, projectID, entryID string) {
+	switch r.Method {
+	case http.MethodDelete:
+		s.removeProjectInjectedSkill(w, r, projectID, entryID)
+	default:
+		MethodNotAllowed(w)
+	}
+}
+
+// listProjectInjectedSkills handles GET /api/v1/projects/{projectId}/injected-skills.
+func (s *Server) listProjectInjectedSkills(w http.ResponseWriter, r *http.Request, projectID string) {
+	ctx := r.Context()
+
+	project, err := s.store.GetProject(ctx, projectID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			NotFound(w, "Project")
+			return
+		}
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	identity := GetIdentityFromContext(ctx)
+	if identity == nil {
+		Unauthorized(w)
+		return
+	}
+
+	// Read access check.
+	if userIdent, ok := identity.(UserIdentity); ok {
+		decision := s.authzService.CheckAccess(ctx, userIdent, Resource{
+			Type:    "project",
+			ID:      project.ID,
+			OwnerID: project.OwnerID,
+		}, ActionRead)
+		if !decision.Allowed {
+			Forbidden(w)
+			return
+		}
+	}
+
+	sis, err := s.store.ListSkillInjections(ctx, store.SkillInjectionScopeProject, projectID)
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, api.SkillInjectionList{
+		Entries: s.enrichSkillInjections(ctx, sis),
+	})
+}
+
+// addProjectInjectedSkill handles POST /api/v1/projects/{projectId}/injected-skills.
+func (s *Server) addProjectInjectedSkill(w http.ResponseWriter, r *http.Request, projectID string) {
+	ctx := r.Context()
+
+	project, err := s.store.GetProject(ctx, projectID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			NotFound(w, "Project")
+			return
+		}
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	identity := GetIdentityFromContext(ctx)
+	if identity == nil {
+		Unauthorized(w)
+		return
+	}
+
+	// Write access check (project owner/admin).
+	if userIdent, ok := identity.(UserIdentity); ok {
+		decision := s.authzService.CheckAccess(ctx, userIdent, Resource{
+			Type:    "project",
+			ID:      project.ID,
+			OwnerID: project.OwnerID,
+		}, ActionUpdate)
+		if !decision.Allowed {
+			Forbidden(w)
+			return
+		}
+	} else {
+		Forbidden(w)
+		return
+	}
+
+	var entry api.SkillInjectionEntry
+	if err := readJSON(r, &entry); err != nil {
+		BadRequest(w, "Invalid request body: "+err.Error())
+		return
+	}
+	if entry.SkillURI == "" {
+		ValidationError(w, "skillUri is required", nil)
+		return
+	}
+
+	var createdBy string
+	if userIdent, ok := identity.(UserIdentity); ok {
+		createdBy = userIdent.ID()
+	}
+
+	si := &store.SkillInjection{
+		Scope:     store.SkillInjectionScopeProject,
+		ScopeID:   projectID,
+		SkillURI:  entry.SkillURI,
+		SkillAs:   entry.SkillAs,
+		Optional:  entry.Optional,
+		SortOrder: entry.SortOrder,
+		CreatedBy: createdBy,
+	}
+
+	if err := s.store.AddSkillInjection(ctx, si); err != nil {
+		if errors.Is(err, store.ErrAlreadyExists) {
+			writeError(w, http.StatusConflict, ErrCodeConflict,
+				"An entry for this skill URI already exists in this project", nil)
+			return
+		}
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, skillInjectionToEntry(*si))
+}
+
+// setProjectInjectedSkills handles PUT /api/v1/projects/{projectId}/injected-skills.
+// Bulk-replaces the full list atomically.
+func (s *Server) setProjectInjectedSkills(w http.ResponseWriter, r *http.Request, projectID string) {
+	ctx := r.Context()
+
+	project, err := s.store.GetProject(ctx, projectID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			NotFound(w, "Project")
+			return
+		}
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	identity := GetIdentityFromContext(ctx)
+	if identity == nil {
+		Unauthorized(w)
+		return
+	}
+
+	// Write access check (project owner/admin).
+	if userIdent, ok := identity.(UserIdentity); ok {
+		decision := s.authzService.CheckAccess(ctx, userIdent, Resource{
+			Type:    "project",
+			ID:      project.ID,
+			OwnerID: project.OwnerID,
+		}, ActionUpdate)
+		if !decision.Allowed {
+			Forbidden(w)
+			return
+		}
+	} else {
+		Forbidden(w)
+		return
+	}
+
+	var req api.SkillInjectionList
+	if err := readJSON(r, &req); err != nil {
+		BadRequest(w, "Invalid request body: "+err.Error())
+		return
+	}
+
+	var createdBy string
+	if userIdent, ok := identity.(UserIdentity); ok {
+		createdBy = userIdent.ID()
+	}
+
+	refs := skillInjectionEntriesToRefs(req.Entries)
+	if err := s.store.SetSkillInjections(ctx, store.SkillInjectionScopeProject, projectID, refs, createdBy); err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	// Return the new list.
+	sis, err := s.store.ListSkillInjections(ctx, store.SkillInjectionScopeProject, projectID)
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+	writeJSON(w, http.StatusOK, api.SkillInjectionList{
+		Entries: s.enrichSkillInjections(ctx, sis),
+	})
+}
+
+// removeProjectInjectedSkill handles DELETE /api/v1/projects/{projectId}/injected-skills/{id}.
+func (s *Server) removeProjectInjectedSkill(w http.ResponseWriter, r *http.Request, projectID, entryID string) {
+	ctx := r.Context()
+
+	project, err := s.store.GetProject(ctx, projectID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			NotFound(w, "Project")
+			return
+		}
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	identity := GetIdentityFromContext(ctx)
+	if identity == nil {
+		Unauthorized(w)
+		return
+	}
+
+	// Write access check.
+	if userIdent, ok := identity.(UserIdentity); ok {
+		decision := s.authzService.CheckAccess(ctx, userIdent, Resource{
+			Type:    "project",
+			ID:      project.ID,
+			OwnerID: project.OwnerID,
+		}, ActionUpdate)
+		if !decision.Allowed {
+			Forbidden(w)
+			return
+		}
+	} else {
+		Forbidden(w)
+		return
+	}
+
+	if err := s.store.RemoveSkillInjection(ctx, entryID); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			NotFound(w, "Skill injection entry")
+			return
+		}
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// =============================================================================
+// User-scope injected skills (/users/me/...)
+// =============================================================================
+
+// handleUserMeInjectedSkills routes GET/POST/PUT on
+// /api/v1/users/me/injected-skills.
+func (s *Server) handleUserMeInjectedSkills(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		s.listUserInjectedSkills(w, r)
+	case http.MethodPost:
+		s.addUserInjectedSkill(w, r)
+	case http.MethodPut:
+		s.setUserInjectedSkills(w, r)
+	default:
+		MethodNotAllowed(w)
+	}
+}
+
+// handleUserMeInjectedSkillByID routes DELETE on
+// /api/v1/users/me/injected-skills/{id}.
+func (s *Server) handleUserMeInjectedSkillByID(w http.ResponseWriter, r *http.Request, entryID string) {
+	switch r.Method {
+	case http.MethodDelete:
+		s.removeUserInjectedSkill(w, r, entryID)
+	default:
+		MethodNotAllowed(w)
+	}
+}
+
+// listUserInjectedSkills handles GET /api/v1/users/me/injected-skills.
+func (s *Server) listUserInjectedSkills(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	userIdent := GetUserIdentityFromContext(ctx)
+	if userIdent == nil {
+		Unauthorized(w)
+		return
+	}
+
+	sis, err := s.store.ListSkillInjections(ctx, store.SkillInjectionScopeUser, userIdent.ID())
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, api.SkillInjectionList{
+		Entries: s.enrichSkillInjections(ctx, sis),
+	})
+}
+
+// addUserInjectedSkill handles POST /api/v1/users/me/injected-skills.
+func (s *Server) addUserInjectedSkill(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	userIdent := GetUserIdentityFromContext(ctx)
+	if userIdent == nil {
+		Unauthorized(w)
+		return
+	}
+
+	var entry api.SkillInjectionEntry
+	if err := readJSON(r, &entry); err != nil {
+		BadRequest(w, "Invalid request body: "+err.Error())
+		return
+	}
+	if entry.SkillURI == "" {
+		ValidationError(w, "skillUri is required", nil)
+		return
+	}
+
+	si := &store.SkillInjection{
+		Scope:     store.SkillInjectionScopeUser,
+		ScopeID:   userIdent.ID(),
+		SkillURI:  entry.SkillURI,
+		SkillAs:   entry.SkillAs,
+		Optional:  entry.Optional,
+		SortOrder: entry.SortOrder,
+		CreatedBy: userIdent.ID(),
+	}
+
+	if err := s.store.AddSkillInjection(ctx, si); err != nil {
+		if errors.Is(err, store.ErrAlreadyExists) {
+			writeError(w, http.StatusConflict, ErrCodeConflict,
+				"An entry for this skill URI already exists in your list", nil)
+			return
+		}
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, skillInjectionToEntry(*si))
+}
+
+// setUserInjectedSkills handles PUT /api/v1/users/me/injected-skills.
+func (s *Server) setUserInjectedSkills(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	userIdent := GetUserIdentityFromContext(ctx)
+	if userIdent == nil {
+		Unauthorized(w)
+		return
+	}
+
+	var req api.SkillInjectionList
+	if err := readJSON(r, &req); err != nil {
+		BadRequest(w, "Invalid request body: "+err.Error())
+		return
+	}
+
+	refs := skillInjectionEntriesToRefs(req.Entries)
+	if err := s.store.SetSkillInjections(ctx, store.SkillInjectionScopeUser, userIdent.ID(), refs, userIdent.ID()); err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	sis, err := s.store.ListSkillInjections(ctx, store.SkillInjectionScopeUser, userIdent.ID())
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+	writeJSON(w, http.StatusOK, api.SkillInjectionList{
+		Entries: s.enrichSkillInjections(ctx, sis),
+	})
+}
+
+// removeUserInjectedSkill handles DELETE /api/v1/users/me/injected-skills/{id}.
+func (s *Server) removeUserInjectedSkill(w http.ResponseWriter, r *http.Request, entryID string) {
+	ctx := r.Context()
+
+	userIdent := GetUserIdentityFromContext(ctx)
+	if userIdent == nil {
+		Unauthorized(w)
+		return
+	}
+
+	if err := s.store.RemoveSkillInjection(ctx, entryID); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			NotFound(w, "Skill injection entry")
+			return
+		}
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// =============================================================================
+// Hub-scope injected skills
+// =============================================================================
+
+// handleHubInjectedSkills routes GET/PUT on
+// /api/v1/hub/settings/injected-skills.
+func (s *Server) handleHubInjectedSkills(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		s.getHubInjectedSkills(w, r)
+	case http.MethodPut:
+		s.setHubInjectedSkills(w, r)
+	default:
+		MethodNotAllowed(w)
+	}
+}
+
+// getHubInjectedSkills handles GET /api/v1/hub/settings/injected-skills.
+// Any authenticated user can read the hub-scope list (needed for merge at provision time).
+func (s *Server) getHubInjectedSkills(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	identity := GetIdentityFromContext(ctx)
+	if identity == nil {
+		Unauthorized(w)
+		return
+	}
+
+	setting, err := s.store.GetHubSetting(ctx, "injected_skills")
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			// Not configured yet — return empty arrays.
+			writeJSON(w, http.StatusOK, api.HubSkillInjectionSetting{
+				System:      []api.SkillReference{},
+				UserDefined: []api.SkillReference{},
+			})
+			return
+		}
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	var hubSetting api.HubSkillInjectionSetting
+	if err := json.Unmarshal(setting.Value, &hubSetting); err != nil {
+		slog.Error("failed to parse hub injected_skills setting", "error", err)
+		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+			"Failed to parse hub injected skills setting", nil)
+		return
+	}
+
+	// Ensure non-nil arrays in response.
+	if hubSetting.System == nil {
+		hubSetting.System = []api.SkillReference{}
+	}
+	if hubSetting.UserDefined == nil {
+		hubSetting.UserDefined = []api.SkillReference{}
+	}
+
+	writeJSON(w, http.StatusOK, hubSetting)
+}
+
+// setHubInjectedSkills handles PUT /api/v1/hub/settings/injected-skills.
+// Hub admin only. Updates only the user_defined portion; system entries are immutable.
+func (s *Server) setHubInjectedSkills(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	user := GetUserIdentityFromContext(ctx)
+	if user == nil {
+		Unauthorized(w)
+		return
+	}
+	if user.Role() != "admin" {
+		Forbidden(w)
+		return
+	}
+
+	var req struct {
+		UserDefined []api.SkillReference `json:"user_defined"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		BadRequest(w, "Invalid request body: "+err.Error())
+		return
+	}
+	if req.UserDefined == nil {
+		req.UserDefined = []api.SkillReference{}
+	}
+
+	// Read current setting to preserve the system entries.
+	var existing api.HubSkillInjectionSetting
+	if setting, err := s.store.GetHubSetting(ctx, "injected_skills"); err == nil {
+		if jsonErr := json.Unmarshal(setting.Value, &existing); jsonErr != nil {
+			slog.Warn("failed to parse existing hub injected_skills setting, resetting", "error", jsonErr)
+		}
+	}
+	// System entries are never overwritten via this endpoint.
+	existing.UserDefined = req.UserDefined
+
+	raw, err := json.Marshal(existing)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+			"Failed to serialize hub injected skills setting", nil)
+		return
+	}
+
+	result, err := s.store.UpsertHubSetting(ctx, "injected_skills", raw, user.ID(), -1, "managed")
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	var updated api.HubSkillInjectionSetting
+	if err := json.Unmarshal(result.Value, &updated); err != nil {
+		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+			"Failed to parse updated hub injected skills setting", nil)
+		return
+	}
+	if updated.System == nil {
+		updated.System = []api.SkillReference{}
+	}
+	if updated.UserDefined == nil {
+		updated.UserDefined = []api.SkillReference{}
+	}
+	writeJSON(w, http.StatusOK, updated)
+}
+
+// =============================================================================
+// Shared helpers
+// =============================================================================
+
+// skillInjectionToEntry converts a store.SkillInjection to an api.SkillInjectionEntry.
+func skillInjectionToEntry(si store.SkillInjection) api.SkillInjectionEntry {
+	return api.SkillInjectionEntry{
+		ID:        si.ID,
+		SkillURI:  si.SkillURI,
+		SkillAs:   si.SkillAs,
+		Optional:  si.Optional,
+		SortOrder: si.SortOrder,
+	}
+}
+
+// skillInjectionEntriesToRefs converts a slice of api.SkillInjectionEntry to
+// a slice of api.SkillReference suitable for SetSkillInjections.
+func skillInjectionEntriesToRefs(entries []api.SkillInjectionEntry) []api.SkillReference {
+	refs := make([]api.SkillReference, 0, len(entries))
+	for _, e := range entries {
+		refs = append(refs, api.SkillReference{
+			URI:      e.SkillURI,
+			As:       e.SkillAs,
+			Optional: e.Optional,
+		})
+	}
+	return refs
+}
+
+// enrichSkillInjections converts store.SkillInjection records to api.SkillInjectionEntry
+// records and enriches them with skill bank metadata where available.
+// Enrichment is best-effort: any lookup error leaves SkillName/SkillSlug empty.
+func (s *Server) enrichSkillInjections(ctx context.Context, sis []store.SkillInjection) []api.SkillInjectionEntry {
+	entries := make([]api.SkillInjectionEntry, 0, len(sis))
+	for _, si := range sis {
+		e := skillInjectionToEntry(si)
+		// Attempt to enrich from the skill bank by listing skills and matching URI.
+		// Use the slug (last path segment of the URI, stripping version) as a hint.
+		baseURI := skillBaseURI(si.SkillURI)
+		slug := skillSlugFromURI(baseURI)
+		if slug != "" {
+			// Try global scope first, then fall back to any scope.
+			skill, err := s.store.GetSkillBySlug(ctx, slug, store.SkillScopeGlobal, "")
+			if err != nil {
+				// Also try core scope.
+				skill, err = s.store.GetSkillBySlug(ctx, slug, store.SkillScopeCore, "")
+			}
+			if err == nil && skill != nil {
+				e.SkillName = skill.Name
+				e.SkillSlug = skill.Slug
+			}
+		}
+		entries = append(entries, e)
+	}
+	return entries
+}
+
+// skillBaseURI strips the version specifier from a skill URI.
+// "scion://my-skill@1.0" → "scion://my-skill"; "scion://my-skill" → "scion://my-skill".
+func skillBaseURI(uri string) string {
+	if i := strings.LastIndex(uri, "@"); i > strings.Index(uri, "://") {
+		return uri[:i]
+	}
+	return uri
+}
+
+// skillSlugFromURI extracts a slug from the last path segment of a skill URI.
+// "scion://my-skill" → "my-skill"; "https://example.com/skills/my-skill" → "my-skill".
+func skillSlugFromURI(uri string) string {
+	// Strip scheme.
+	if idx := strings.Index(uri, "://"); idx >= 0 {
+		uri = uri[idx+3:]
+	}
+	// Take last path segment.
+	if idx := strings.LastIndex(uri, "/"); idx >= 0 {
+		uri = uri[idx+1:]
+	}
+	return uri
+}

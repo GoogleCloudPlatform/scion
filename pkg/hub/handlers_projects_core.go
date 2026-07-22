@@ -1372,6 +1372,19 @@ func (s *Server) handleProjectRoutes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Check for nested /injected-skills path
+	if strings.HasPrefix(subPath, "injected-skills") {
+		siPath := strings.TrimPrefix(subPath, "injected-skills")
+		siPath = strings.TrimPrefix(siPath, "/")
+		if siPath == "" {
+			s.handleProjectInjectedSkills(w, r, projectID)
+		} else {
+			s.handleProjectInjectedSkillByID(w, r, projectID, siPath)
+		}
+		return
+	}
+
+
 	// Check for nested /gcp-service-accounts path
 	if strings.HasPrefix(subPath, "gcp-service-accounts") {
 		saPath := strings.TrimPrefix(subPath, "gcp-service-accounts")

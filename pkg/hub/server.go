@@ -2735,6 +2735,18 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/users/me/groups", s.handleMyGroups)
 	s.mux.HandleFunc("/api/v1/principals/", s.handlePrincipalRoutes)
 
+	// User-scoped injected-skills endpoints (/users/me/...)
+	s.mux.HandleFunc("/api/v1/users/me/injected-skills", s.handleUserMeInjectedSkills)
+	s.mux.HandleFunc("/api/v1/users/me/injected-skills/", func(w http.ResponseWriter, r *http.Request) {
+		entryID := strings.TrimPrefix(r.URL.Path, "/api/v1/users/me/injected-skills/")
+		entryID = strings.TrimSuffix(entryID, "/")
+		s.handleUserMeInjectedSkillByID(w, r, entryID)
+	})
+
+	// Hub-scope injected-skills endpoint
+	s.mux.HandleFunc("/api/v1/hub/settings/injected-skills", s.handleHubInjectedSkills)
+
+
 	// Broker registration endpoints (Runtime Broker HMAC authentication)
 	s.mux.HandleFunc("/api/v1/brokers", s.handleBrokersEndpoint)
 	s.mux.HandleFunc("/api/v1/brokers/join", s.handleBrokerJoin)
