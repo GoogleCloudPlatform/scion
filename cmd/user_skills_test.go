@@ -274,13 +274,19 @@ func TestRunUserSkillsAdd_WithAliasAndOptional(t *testing.T) {
 	projectPath = projectDir
 	outputFormat = ""
 
-	// Set flags on the command.
+	// Save and restore --as flag so this test does not pollute others.
+	prevAs, _ := userSkillsAddCmd.Flags().GetString("as")
+	t.Cleanup(func() { _ = userSkillsAddCmd.Flags().Set("as", prevAs) })
 	_ = userSkillsAddCmd.Flags().Set("as", "my-alias")
+
+	// Save and restore --optional flag.
+	prevOpt, _ := userSkillsAddCmd.Flags().GetBool("optional")
+	prevOptStr := "false"
+	if prevOpt {
+		prevOptStr = "true"
+	}
+	t.Cleanup(func() { _ = userSkillsAddCmd.Flags().Set("optional", prevOptStr) })
 	_ = userSkillsAddCmd.Flags().Set("optional", "true")
-	defer func() {
-		_ = userSkillsAddCmd.Flags().Set("as", "")
-		_ = userSkillsAddCmd.Flags().Set("optional", "false")
-	}()
 
 	err := runUserSkillsAdd(userSkillsAddCmd, []string{"scion://new-user-skill"})
 	assert.NoError(t, err)

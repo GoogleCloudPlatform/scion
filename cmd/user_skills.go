@@ -105,8 +105,7 @@ func init() {
 }
 
 // resolveUserSkillsService returns an InjectedSkillsService for the current user.
-// ctx should be a bounded context (e.g. with timeout) created by the caller.
-func resolveUserSkillsService(ctx context.Context) (hubclient.InjectedSkillsService, error) {
+func resolveUserSkillsService() (hubclient.InjectedSkillsService, error) {
 	hubCtx, err := CheckHubAvailabilityWithOptions(projectPath, true)
 	if err != nil {
 		return nil, fmt.Errorf("hub connection required: %w", err)
@@ -121,7 +120,7 @@ func runUserSkillsList(cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	svc, err := resolveUserSkillsService(ctx)
+	svc, err := resolveUserSkillsService()
 	if err != nil {
 		return err
 	}
@@ -150,7 +149,7 @@ func runUserSkillsAdd(cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	svc, err := resolveUserSkillsService(ctx)
+	svc, err := resolveUserSkillsService()
 	if err != nil {
 		return err
 	}
@@ -184,7 +183,7 @@ func runUserSkillsRemove(cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	svc, err := resolveUserSkillsService(ctx)
+	svc, err := resolveUserSkillsService()
 	if err != nil {
 		return err
 	}
