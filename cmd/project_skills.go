@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"text/tabwriter"
 	"time"
 
@@ -164,12 +165,7 @@ func splitProjectSkillsArgs(args []string) (projectArg, skillRef string) {
 
 // isSkillURI returns true when s looks like a skill URI (contains "://").
 func isSkillURI(s string) bool {
-	for i := 0; i+2 < len(s); i++ {
-		if s[i] == ':' && s[i+1] == '/' && s[i+2] == '/' {
-			return true
-		}
-	}
-	return false
+	return strings.Contains(s, "://")
 }
 
 // isUUIDLike returns true when s matches standard UUID format (8-4-4-4-12 hex).
@@ -227,7 +223,7 @@ func runProjectSkillsList(cmd *cobra.Command, args []string) error {
 func runProjectSkillsAdd(cmd *cobra.Command, args []string) error {
 	projectArg, skillURI := splitProjectSkillsArgs(args)
 	if skillURI == "" {
-		return fmt.Errorf("skill URI is required")
+		return fmt.Errorf("expected a skill URI (containing ://), got %q", projectArg)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -238,8 +234,8 @@ func runProjectSkillsAdd(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	as, _ := cmd.Flags().GetString("as")
-	optional, _ := cmd.Flags().GetBool("optional")
+	as := projectSkillsAs
+	optional := projectSkillsOptional
 
 	entry, err := svc.Add(ctx, &hubclient.AddInjectedSkillRequest{
 		SkillURI: skillURI,
@@ -312,7 +308,10 @@ func resolveInjectedSkillEntryID(ctx context.Context, svc hubclient.InjectedSkil
 		}
 		return "", fmt.Errorf("no injected skill with URI %q found", ref)
 	}
-	// Otherwise treat it as a direct entry UUID.
+	// Otherwise it must be a UUID; reject anything else to avoid a silent misrouted path segment.
+	if !isUUIDLike(ref) {
+		return "", fmt.Errorf("invalid skill entry ID: %q (expected UUID or skill URI)", ref)
+	}
 	return ref, nil
 }
 

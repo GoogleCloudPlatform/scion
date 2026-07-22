@@ -370,7 +370,7 @@ func TestRunProjectSkillsAdd_NoURIError(t *testing.T) {
 	err := runProjectSkillsAdd(projectSkillsAddCmd, []string{"my-project"})
 	// "my-project" is treated as a project name (not a URI), skill ref is empty.
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "skill URI is required")
+	assert.Contains(t, err.Error(), "expected a skill URI (containing ://)") // improved message shows what was received
 }
 
 func TestRunProjectSkillsRemove_ByID(t *testing.T) {

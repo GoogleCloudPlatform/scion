@@ -105,7 +105,8 @@ func init() {
 }
 
 // resolveUserSkillsService returns an InjectedSkillsService for the current user.
-func resolveUserSkillsService() (hubclient.InjectedSkillsService, error) {
+// ctx should be a bounded context (e.g. with timeout) created by the caller.
+func resolveUserSkillsService(ctx context.Context) (hubclient.InjectedSkillsService, error) {
 	hubCtx, err := CheckHubAvailabilityWithOptions(projectPath, true)
 	if err != nil {
 		return nil, fmt.Errorf("hub connection required: %w", err)
@@ -117,13 +118,13 @@ func resolveUserSkillsService() (hubclient.InjectedSkillsService, error) {
 }
 
 func runUserSkillsList(cmd *cobra.Command, args []string) error {
-	svc, err := resolveUserSkillsService()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	svc, err := resolveUserSkillsService(ctx)
 	if err != nil {
 		return err
 	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
 
 	list, err := svc.List(ctx)
 	if err != nil {
@@ -146,16 +147,16 @@ func runUserSkillsList(cmd *cobra.Command, args []string) error {
 func runUserSkillsAdd(cmd *cobra.Command, args []string) error {
 	skillURI := args[0]
 
-	svc, err := resolveUserSkillsService()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	svc, err := resolveUserSkillsService(ctx)
 	if err != nil {
 		return err
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	as, _ := cmd.Flags().GetString("as")
-	optional, _ := cmd.Flags().GetBool("optional")
+	as := userSkillsAs
+	optional := userSkillsOptional
 
 	entry, err := svc.Add(ctx, &hubclient.AddInjectedSkillRequest{
 		SkillURI: skillURI,
@@ -180,13 +181,13 @@ func runUserSkillsAdd(cmd *cobra.Command, args []string) error {
 func runUserSkillsRemove(cmd *cobra.Command, args []string) error {
 	skillRef := args[0]
 
-	svc, err := resolveUserSkillsService()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	svc, err := resolveUserSkillsService(ctx)
 	if err != nil {
 		return err
 	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
 
 	entryID, err := resolveInjectedSkillEntryID(ctx, svc, skillRef)
 	if err != nil {

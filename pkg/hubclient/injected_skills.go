@@ -17,6 +17,7 @@ package hubclient
 import (
 	"context"
 	"fmt"
+	"net/url"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
@@ -107,7 +108,7 @@ func (s *projectInjectedSkillsService) Set(ctx context.Context, entries []api.Sk
 
 // Remove deletes a single entry from the project's injected-skills list.
 func (s *projectInjectedSkillsService) Remove(ctx context.Context, entryID string) error {
-	resp, err := s.c.delete(ctx, s.basePath()+"/"+entryID, nil)
+	resp, err := s.c.delete(ctx, s.basePath()+"/"+url.PathEscape(entryID), nil)
 	if err != nil {
 		return err
 	}
@@ -149,7 +150,7 @@ func (s *userInjectedSkillsService) Set(ctx context.Context, entries []api.Skill
 
 // Remove deletes a single entry from the user's injected-skills list.
 func (s *userInjectedSkillsService) Remove(ctx context.Context, entryID string) error {
-	resp, err := s.c.delete(ctx, s.basePath()+"/"+entryID, nil)
+	resp, err := s.c.delete(ctx, s.basePath()+"/"+url.PathEscape(entryID), nil)
 	if err != nil {
 		return err
 	}
