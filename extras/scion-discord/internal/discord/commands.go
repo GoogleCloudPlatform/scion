@@ -915,15 +915,15 @@ func (h *CommandHandler) HandleDefault(s *discordgo.Session, i *discordgo.Intera
 	// If the "agent" parameter was provided, set the default directly.
 	agentParam := getSubcommandOption(i, "agent")
 	if agentParam != "" {
-		// Validate that the agent exists in the project.
-		found := false
+		// Validate that the agent exists in the project (case-insensitive).
+		matchedSlug := ""
 		for _, slug := range agents {
-			if slug == agentParam {
-				found = true
+			if strings.EqualFold(slug, agentParam) {
+				matchedSlug = slug
 				break
 			}
 		}
-		if !found {
+		if matchedSlug == "" {
 			h.followup(s, i, fmt.Sprintf(
 				"Agent **%s** not found in this project. Use `/scion agents` to see available agents.",
 				agentParam,
@@ -931,26 +931,26 @@ func (h *CommandHandler) HandleDefault(s *discordgo.Session, i *discordgo.Intera
 			return
 		}
 
-		// Set the default at the appropriate level.
+		// Set the default at the appropriate level using the correctly-cased slug.
 		if isThread {
-			if err := h.store.SetThreadDefault(ctx, link.ChannelID, threadID, agentParam); err != nil {
+			if err := h.store.SetThreadDefault(ctx, link.ChannelID, threadID, matchedSlug); err != nil {
 				h.log.Error("Failed to set thread default", "error", err)
 				h.followup(s, i, "Failed to set thread default. Please try again.")
 				return
 			}
-			h.followup(s, i, fmt.Sprintf("Default agent for this thread set to **%s**.", agentParam))
+			h.followup(s, i, fmt.Sprintf("Default agent for this thread set to **%s**.", matchedSlug))
 			h.log.Info("Thread default set via autocomplete",
-				"channel_id", link.ChannelID, "thread_id", threadID, "agent", agentParam)
+				"channel_id", link.ChannelID, "thread_id", threadID, "agent", matchedSlug)
 		} else {
-			link.DefaultAgent = agentParam
+			link.DefaultAgent = matchedSlug
 			if err := h.store.UpdateChannelLink(ctx, link); err != nil {
 				h.log.Error("Failed to set default agent", "error", err)
 				h.followup(s, i, "Failed to set default agent. Please try again.")
 				return
 			}
-			h.followup(s, i, fmt.Sprintf("Default agent set to **%s** for this channel.", agentParam))
+			h.followup(s, i, fmt.Sprintf("Default agent set to **%s** for this channel.", matchedSlug))
 			h.log.Info("Default agent set via autocomplete",
-				"channel_id", i.ChannelID, "agent", agentParam)
+				"channel_id", i.ChannelID, "agent", matchedSlug)
 		}
 		return
 	}
