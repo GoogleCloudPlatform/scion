@@ -219,6 +219,9 @@ func runProjectSkillsAdd(cmd *cobra.Command, args []string) error {
 	if skillURI == "" {
 		return fmt.Errorf("skill URI is required (expected format containing ://), got %q", args[0])
 	}
+	if !isSkillURI(skillURI) {
+		return fmt.Errorf("expected a skill URI (containing ://), got %q", skillURI)
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()

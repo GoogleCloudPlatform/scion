@@ -373,6 +373,29 @@ func TestRunProjectSkillsAdd_NoURIError(t *testing.T) {
 	assert.Contains(t, err.Error(), "skill URI is required (expected format containing ://)") // message quotes the actual arg
 }
 
+func TestRunProjectSkillsAdd_NoURIError_TwoArgs(t *testing.T) {
+	// Set up a mock hub and record whether it was ever contacted.
+	hubCalled := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hubCalled = true
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+	setProjectSkillsHubEnv(t, server.URL)
+
+	orig := projectPath
+	defer func() { projectPath = orig }()
+	projectDir := setupProjectSkillsProject(t, server.URL)
+	projectPath = projectDir
+
+	// Two args: project name + plain string (no "://") → validation error before hub is contacted.
+	err := runProjectSkillsAdd(projectSkillsAddCmd, []string{"my-project", "notauri"})
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "://", "error should mention the URI format requirement")
+	assert.Contains(t, err.Error(), "notauri", "error should quote the invalid skill URI, not the project name")
+	assert.False(t, hubCalled, "hub must not be contacted when the argument is not a skill URI")
+}
+
 func TestRunProjectSkillsRemove_ByID(t *testing.T) {
 	server := newProjectSkillsMockServer(t)
 	defer server.Close()
