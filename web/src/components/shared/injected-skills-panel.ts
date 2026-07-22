@@ -96,6 +96,8 @@ export class ScionInjectedSkillsPanel extends LitElement {
   private _searchAbortController: AbortController | null = null;
   /** True while a load() fetch is in-flight — prevents concurrent load() races. */
   private _loading = false;
+  /** True when a scopeId/scope change arrived while a load was in-flight. */
+  private _pendingLoad = false;
 
   static override styles = [
     resourceStyles,
@@ -278,7 +280,12 @@ export class ScionInjectedSkillsPanel extends LitElement {
     // Guard against concurrent in-flight loads (e.g. updated() firing twice in
     // rapid succession). _loading is a plain field (not reactive) so it doesn't
     // collide with the this.loading reactive state used for the spinner.
-    if (this._loading) return;
+    // If a scopeId change arrives mid-flight, queue exactly one follow-up load
+    // rather than dropping it silently — see _pendingLoad handling in finally.
+    if (this._loading) {
+      this._pendingLoad = true;
+      return;
+    }
     this._loading = true;
     this.loading = true;
     this.error = null;
@@ -341,6 +348,10 @@ export class ScionInjectedSkillsPanel extends LitElement {
     } finally {
       this._loading = false;
       this.loading = false;
+      if (this._pendingLoad) {
+        this._pendingLoad = false;
+        void this.load(); // one retry for the queued scopeId-change request
+      }
     }
   }
 
