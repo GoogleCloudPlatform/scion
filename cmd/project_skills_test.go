@@ -165,7 +165,7 @@ func setupProjectSkillsProject(t *testing.T, endpoint string) string {
 	require.NoError(t, os.MkdirAll(projectDir, 0755))
 
 	settings := map[string]interface{}{
-		"grove_id": testProjectID,
+		"project_id": testProjectID,
 		"hub": map[string]interface{}{
 			"enabled":   true,
 			"endpoint":  endpoint,
@@ -254,10 +254,10 @@ func setProjectSkillsHubEnv(t *testing.T, serverURL string) {
 func TestRunProjectSkillsList_Empty(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		switch {
-		case r.URL.Path == "/healthz":
+		switch r.URL.Path {
+		case "/healthz":
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
-		case r.URL.Path == "/api/v1/projects/"+testProjectID+"/injected-skills":
+		case "/api/v1/projects/" + testProjectID + "/injected-skills":
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{"entries": []interface{}{}})
 		default:
 			w.WriteHeader(http.StatusNotFound)
@@ -370,7 +370,7 @@ func TestRunProjectSkillsAdd_NoURIError(t *testing.T) {
 	err := runProjectSkillsAdd(projectSkillsAddCmd, []string{"my-project"})
 	// "my-project" is treated as a project name (not a URI), skill ref is empty.
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "expected a skill URI (containing ://)") // improved message shows what was received
+	assert.Contains(t, err.Error(), "skill URI is required (expected format containing ://)") // message quotes the actual arg
 }
 
 func TestRunProjectSkillsRemove_ByID(t *testing.T) {
@@ -445,8 +445,8 @@ func TestRunProjectSkillsRemove_NoRefError(t *testing.T) {
 func TestRunProjectSkillsList_APIError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		switch {
-		case r.URL.Path == "/healthz":
+		switch r.URL.Path {
+		case "/healthz":
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
 		default:
 			w.WriteHeader(http.StatusInternalServerError)

@@ -146,6 +146,10 @@ func runUserSkillsList(cmd *cobra.Command, args []string) error {
 func runUserSkillsAdd(cmd *cobra.Command, args []string) error {
 	skillURI := args[0]
 
+	if !isSkillURI(skillURI) {
+		return fmt.Errorf("skill URI is required (expected format containing ://), got %q", skillURI)
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 

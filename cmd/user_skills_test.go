@@ -89,7 +89,7 @@ func setupUserSkillsProject(t *testing.T, endpoint string) (tmpHome, projectDir 
 	require.NoError(t, os.MkdirAll(projectDir, 0755))
 
 	settings := map[string]interface{}{
-		"grove_id": "test-grove",
+		"project_id": "test-grove",
 		"hub": map[string]interface{}{
 			"enabled":  true,
 			"endpoint": endpoint,
@@ -175,10 +175,10 @@ func setUserSkillsHubEnv(t *testing.T, serverURL string) {
 func TestRunUserSkillsList_Empty(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		switch {
-		case r.URL.Path == "/healthz":
+		switch r.URL.Path {
+		case "/healthz":
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
-		case r.URL.Path == "/api/v1/users/me/injected-skills":
+		case "/api/v1/users/me/injected-skills":
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{"entries": []interface{}{}})
 		default:
 			w.WriteHeader(http.StatusNotFound)
@@ -234,6 +234,13 @@ func TestRunUserSkillsList_JSONOutput(t *testing.T) {
 
 	err := runUserSkillsList(userSkillsListCmd, nil)
 	assert.NoError(t, err)
+}
+
+func TestRunUserSkillsAdd_NoURIError(t *testing.T) {
+	// Plain string (no "://") → error without contacting hub.
+	err := runUserSkillsAdd(userSkillsAddCmd, []string{"mypkg"})
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "skill URI is required (expected format containing ://)")
 }
 
 func TestRunUserSkillsAdd_Success(t *testing.T) {
@@ -351,8 +358,8 @@ func TestRunUserSkillsRemove_URINotFound(t *testing.T) {
 func TestRunUserSkillsList_APIError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		switch {
-		case r.URL.Path == "/healthz":
+		switch r.URL.Path {
+		case "/healthz":
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
 		default:
 			w.WriteHeader(http.StatusInternalServerError)

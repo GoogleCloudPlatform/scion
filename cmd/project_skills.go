@@ -25,6 +25,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 )
 
@@ -168,24 +169,10 @@ func isSkillURI(s string) bool {
 	return strings.Contains(s, "://")
 }
 
-// isUUIDLike returns true when s matches standard UUID format (8-4-4-4-12 hex).
+// isUUIDLike returns true when s is a valid UUID.
 func isUUIDLike(s string) bool {
-	if len(s) != 36 {
-		return false
-	}
-	for i, c := range s {
-		switch i {
-		case 8, 13, 18, 23:
-			if c != '-' {
-				return false
-			}
-		default:
-			if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
-				return false
-			}
-		}
-	}
-	return true
+	_, err := uuid.Parse(s)
+	return err == nil
 }
 
 func runProjectSkillsList(cmd *cobra.Command, args []string) error {
@@ -223,7 +210,7 @@ func runProjectSkillsList(cmd *cobra.Command, args []string) error {
 func runProjectSkillsAdd(cmd *cobra.Command, args []string) error {
 	projectArg, skillURI := splitProjectSkillsArgs(args)
 	if skillURI == "" {
-		return fmt.Errorf("expected a skill URI (containing ://), got %q", projectArg)
+		return fmt.Errorf("skill URI is required (expected format containing ://), got %q", args[0])
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
