@@ -56,6 +56,7 @@ type CompositeStore struct {
 	*SkillStore
 	*SkillRegistryStore
 	*HubSettingStore
+	*SkillInjectionStore
 
 	client *ent.Client
 }
@@ -89,6 +90,7 @@ func NewCompositeStore(client *ent.Client) *CompositeStore {
 		SkillStore:          NewSkillStore(client),
 		SkillRegistryStore:  NewSkillRegistryStore(client),
 		HubSettingStore:     NewHubSettingStore(client),
+		SkillInjectionStore: NewSkillInjectionStore(client),
 		client:              client,
 	}
 }

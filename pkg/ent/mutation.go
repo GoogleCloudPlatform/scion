@@ -47,6 +47,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/schema"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/skill"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/skillinjection"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/skillregistry"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/skillversion"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/subscriptiontemplate"
@@ -98,6 +99,7 @@ const (
 	TypeScheduledEvent           = "ScheduledEvent"
 	TypeSecret                   = "Secret"
 	TypeSkill                    = "Skill"
+	TypeSkillInjection           = "SkillInjection"
 	TypeSkillRegistry            = "SkillRegistry"
 	TypeSkillVersion             = "SkillVersion"
 	TypeSubscriptionTemplate     = "SubscriptionTemplate"
@@ -34190,6 +34192,793 @@ func (m *SkillMutation) ClearEdge(name string) error {
 // It returns an error if the edge is not defined in the schema.
 func (m *SkillMutation) ResetEdge(name string) error {
 	return fmt.Errorf("unknown Skill edge %s", name)
+}
+
+// SkillInjectionMutation represents an operation that mutates the SkillInjection nodes in the graph.
+type SkillInjectionMutation struct {
+	config
+	op            Op
+	typ           string
+	id            *uuid.UUID
+	scope         *skillinjection.Scope
+	scope_id      *string
+	skill_uri     *string
+	skill_as      *string
+	optional      *bool
+	sort_order    *int
+	addsort_order *int
+	created_at    *time.Time
+	created_by    *string
+	clearedFields map[string]struct{}
+	done          bool
+	oldValue      func(context.Context) (*SkillInjection, error)
+	predicates    []predicate.SkillInjection
+}
+
+var _ ent.Mutation = (*SkillInjectionMutation)(nil)
+
+// skillinjectionOption allows management of the mutation configuration using functional options.
+type skillinjectionOption func(*SkillInjectionMutation)
+
+// newSkillInjectionMutation creates new mutation for the SkillInjection entity.
+func newSkillInjectionMutation(c config, op Op, opts ...skillinjectionOption) *SkillInjectionMutation {
+	m := &SkillInjectionMutation{
+		config:        c,
+		op:            op,
+		typ:           TypeSkillInjection,
+		clearedFields: make(map[string]struct{}),
+	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
+}
+
+// withSkillInjectionID sets the ID field of the mutation.
+func withSkillInjectionID(id uuid.UUID) skillinjectionOption {
+	return func(m *SkillInjectionMutation) {
+		var (
+			err   error
+			once  sync.Once
+			value *SkillInjection
+		)
+		m.oldValue = func(ctx context.Context) (*SkillInjection, error) {
+			once.Do(func() {
+				if m.done {
+					err = errors.New("querying old values post mutation is not allowed")
+				} else {
+					value, err = m.Client().SkillInjection.Get(ctx, id)
+				}
+			})
+			return value, err
+		}
+		m.id = &id
+	}
+}
+
+// withSkillInjection sets the old SkillInjection of the mutation.
+func withSkillInjection(node *SkillInjection) skillinjectionOption {
+	return func(m *SkillInjectionMutation) {
+		m.oldValue = func(context.Context) (*SkillInjection, error) {
+			return node, nil
+		}
+		m.id = &node.ID
+	}
+}
+
+// Client returns a new `ent.Client` from the mutation. If the mutation was
+// executed in a transaction (ent.Tx), a transactional client is returned.
+func (m SkillInjectionMutation) Client() *Client {
+	client := &Client{config: m.config}
+	client.init()
+	return client
+}
+
+// Tx returns an `ent.Tx` for mutations that were executed in transactions;
+// it returns an error otherwise.
+func (m SkillInjectionMutation) Tx() (*Tx, error) {
+	if _, ok := m.driver.(*txDriver); !ok {
+		return nil, errors.New("ent: mutation is not running in a transaction")
+	}
+	tx := &Tx{config: m.config}
+	tx.init()
+	return tx, nil
+}
+
+// SetID sets the value of the id field. Note that this
+// operation is only accepted on creation of SkillInjection entities.
+func (m *SkillInjectionMutation) SetID(id uuid.UUID) {
+	m.id = &id
+}
+
+// ID returns the ID value in the mutation. Note that the ID is only available
+// if it was provided to the builder or after it was returned from the database.
+func (m *SkillInjectionMutation) ID() (id uuid.UUID, exists bool) {
+	if m.id == nil {
+		return
+	}
+	return *m.id, true
+}
+
+// IDs queries the database and returns the entity ids that match the mutation's predicate.
+// That means, if the mutation is applied within a transaction with an isolation level such
+// as sql.LevelSerializable, the returned ids match the ids of the rows that will be updated
+// or updated by the mutation.
+func (m *SkillInjectionMutation) IDs(ctx context.Context) ([]uuid.UUID, error) {
+	switch {
+	case m.op.Is(OpUpdateOne | OpDeleteOne):
+		id, exists := m.ID()
+		if exists {
+			return []uuid.UUID{id}, nil
+		}
+		fallthrough
+	case m.op.Is(OpUpdate | OpDelete):
+		return m.Client().SkillInjection.Query().Where(m.predicates...).IDs(ctx)
+	default:
+		return nil, fmt.Errorf("IDs is not allowed on %s operations", m.op)
+	}
+}
+
+// SetScope sets the "scope" field.
+func (m *SkillInjectionMutation) SetScope(s skillinjection.Scope) {
+	m.scope = &s
+}
+
+// Scope returns the value of the "scope" field in the mutation.
+func (m *SkillInjectionMutation) Scope() (r skillinjection.Scope, exists bool) {
+	v := m.scope
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldScope returns the old "scope" field's value of the SkillInjection entity.
+// If the SkillInjection object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *SkillInjectionMutation) OldScope(ctx context.Context) (v skillinjection.Scope, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldScope is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldScope requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldScope: %w", err)
+	}
+	return oldValue.Scope, nil
+}
+
+// ResetScope resets all changes to the "scope" field.
+func (m *SkillInjectionMutation) ResetScope() {
+	m.scope = nil
+}
+
+// SetScopeID sets the "scope_id" field.
+func (m *SkillInjectionMutation) SetScopeID(s string) {
+	m.scope_id = &s
+}
+
+// ScopeID returns the value of the "scope_id" field in the mutation.
+func (m *SkillInjectionMutation) ScopeID() (r string, exists bool) {
+	v := m.scope_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldScopeID returns the old "scope_id" field's value of the SkillInjection entity.
+// If the SkillInjection object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *SkillInjectionMutation) OldScopeID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldScopeID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldScopeID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldScopeID: %w", err)
+	}
+	return oldValue.ScopeID, nil
+}
+
+// ResetScopeID resets all changes to the "scope_id" field.
+func (m *SkillInjectionMutation) ResetScopeID() {
+	m.scope_id = nil
+}
+
+// SetSkillURI sets the "skill_uri" field.
+func (m *SkillInjectionMutation) SetSkillURI(s string) {
+	m.skill_uri = &s
+}
+
+// SkillURI returns the value of the "skill_uri" field in the mutation.
+func (m *SkillInjectionMutation) SkillURI() (r string, exists bool) {
+	v := m.skill_uri
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldSkillURI returns the old "skill_uri" field's value of the SkillInjection entity.
+// If the SkillInjection object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *SkillInjectionMutation) OldSkillURI(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldSkillURI is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldSkillURI requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldSkillURI: %w", err)
+	}
+	return oldValue.SkillURI, nil
+}
+
+// ResetSkillURI resets all changes to the "skill_uri" field.
+func (m *SkillInjectionMutation) ResetSkillURI() {
+	m.skill_uri = nil
+}
+
+// SetSkillAs sets the "skill_as" field.
+func (m *SkillInjectionMutation) SetSkillAs(s string) {
+	m.skill_as = &s
+}
+
+// SkillAs returns the value of the "skill_as" field in the mutation.
+func (m *SkillInjectionMutation) SkillAs() (r string, exists bool) {
+	v := m.skill_as
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldSkillAs returns the old "skill_as" field's value of the SkillInjection entity.
+// If the SkillInjection object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *SkillInjectionMutation) OldSkillAs(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldSkillAs is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldSkillAs requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldSkillAs: %w", err)
+	}
+	return oldValue.SkillAs, nil
+}
+
+// ClearSkillAs clears the value of the "skill_as" field.
+func (m *SkillInjectionMutation) ClearSkillAs() {
+	m.skill_as = nil
+	m.clearedFields[skillinjection.FieldSkillAs] = struct{}{}
+}
+
+// SkillAsCleared returns if the "skill_as" field was cleared in this mutation.
+func (m *SkillInjectionMutation) SkillAsCleared() bool {
+	_, ok := m.clearedFields[skillinjection.FieldSkillAs]
+	return ok
+}
+
+// ResetSkillAs resets all changes to the "skill_as" field.
+func (m *SkillInjectionMutation) ResetSkillAs() {
+	m.skill_as = nil
+	delete(m.clearedFields, skillinjection.FieldSkillAs)
+}
+
+// SetOptional sets the "optional" field.
+func (m *SkillInjectionMutation) SetOptional(b bool) {
+	m.optional = &b
+}
+
+// Optional returns the value of the "optional" field in the mutation.
+func (m *SkillInjectionMutation) Optional() (r bool, exists bool) {
+	v := m.optional
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldOptional returns the old "optional" field's value of the SkillInjection entity.
+// If the SkillInjection object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *SkillInjectionMutation) OldOptional(ctx context.Context) (v bool, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldOptional is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldOptional requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldOptional: %w", err)
+	}
+	return oldValue.Optional, nil
+}
+
+// ResetOptional resets all changes to the "optional" field.
+func (m *SkillInjectionMutation) ResetOptional() {
+	m.optional = nil
+}
+
+// SetSortOrder sets the "sort_order" field.
+func (m *SkillInjectionMutation) SetSortOrder(i int) {
+	m.sort_order = &i
+	m.addsort_order = nil
+}
+
+// SortOrder returns the value of the "sort_order" field in the mutation.
+func (m *SkillInjectionMutation) SortOrder() (r int, exists bool) {
+	v := m.sort_order
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldSortOrder returns the old "sort_order" field's value of the SkillInjection entity.
+// If the SkillInjection object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *SkillInjectionMutation) OldSortOrder(ctx context.Context) (v int, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldSortOrder is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldSortOrder requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldSortOrder: %w", err)
+	}
+	return oldValue.SortOrder, nil
+}
+
+// AddSortOrder adds i to the "sort_order" field.
+func (m *SkillInjectionMutation) AddSortOrder(i int) {
+	if m.addsort_order != nil {
+		*m.addsort_order += i
+	} else {
+		m.addsort_order = &i
+	}
+}
+
+// AddedSortOrder returns the value that was added to the "sort_order" field in this mutation.
+func (m *SkillInjectionMutation) AddedSortOrder() (r int, exists bool) {
+	v := m.addsort_order
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetSortOrder resets all changes to the "sort_order" field.
+func (m *SkillInjectionMutation) ResetSortOrder() {
+	m.sort_order = nil
+	m.addsort_order = nil
+}
+
+// SetCreatedAt sets the "created_at" field.
+func (m *SkillInjectionMutation) SetCreatedAt(t time.Time) {
+	m.created_at = &t
+}
+
+// CreatedAt returns the value of the "created_at" field in the mutation.
+func (m *SkillInjectionMutation) CreatedAt() (r time.Time, exists bool) {
+	v := m.created_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCreatedAt returns the old "created_at" field's value of the SkillInjection entity.
+// If the SkillInjection object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *SkillInjectionMutation) OldCreatedAt(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCreatedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCreatedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCreatedAt: %w", err)
+	}
+	return oldValue.CreatedAt, nil
+}
+
+// ResetCreatedAt resets all changes to the "created_at" field.
+func (m *SkillInjectionMutation) ResetCreatedAt() {
+	m.created_at = nil
+}
+
+// SetCreatedBy sets the "created_by" field.
+func (m *SkillInjectionMutation) SetCreatedBy(s string) {
+	m.created_by = &s
+}
+
+// CreatedBy returns the value of the "created_by" field in the mutation.
+func (m *SkillInjectionMutation) CreatedBy() (r string, exists bool) {
+	v := m.created_by
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCreatedBy returns the old "created_by" field's value of the SkillInjection entity.
+// If the SkillInjection object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *SkillInjectionMutation) OldCreatedBy(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCreatedBy is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCreatedBy requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCreatedBy: %w", err)
+	}
+	return oldValue.CreatedBy, nil
+}
+
+// ClearCreatedBy clears the value of the "created_by" field.
+func (m *SkillInjectionMutation) ClearCreatedBy() {
+	m.created_by = nil
+	m.clearedFields[skillinjection.FieldCreatedBy] = struct{}{}
+}
+
+// CreatedByCleared returns if the "created_by" field was cleared in this mutation.
+func (m *SkillInjectionMutation) CreatedByCleared() bool {
+	_, ok := m.clearedFields[skillinjection.FieldCreatedBy]
+	return ok
+}
+
+// ResetCreatedBy resets all changes to the "created_by" field.
+func (m *SkillInjectionMutation) ResetCreatedBy() {
+	m.created_by = nil
+	delete(m.clearedFields, skillinjection.FieldCreatedBy)
+}
+
+// Where appends a list predicates to the SkillInjectionMutation builder.
+func (m *SkillInjectionMutation) Where(ps ...predicate.SkillInjection) {
+	m.predicates = append(m.predicates, ps...)
+}
+
+// WhereP appends storage-level predicates to the SkillInjectionMutation builder. Using this method,
+// users can use type-assertion to append predicates that do not depend on any generated package.
+func (m *SkillInjectionMutation) WhereP(ps ...func(*sql.Selector)) {
+	p := make([]predicate.SkillInjection, len(ps))
+	for i := range ps {
+		p[i] = ps[i]
+	}
+	m.Where(p...)
+}
+
+// Op returns the operation name.
+func (m *SkillInjectionMutation) Op() Op {
+	return m.op
+}
+
+// SetOp allows setting the mutation operation.
+func (m *SkillInjectionMutation) SetOp(op Op) {
+	m.op = op
+}
+
+// Type returns the node type of this mutation (SkillInjection).
+func (m *SkillInjectionMutation) Type() string {
+	return m.typ
+}
+
+// Fields returns all fields that were changed during this mutation. Note that in
+// order to get all numeric fields that were incremented/decremented, call
+// AddedFields().
+func (m *SkillInjectionMutation) Fields() []string {
+	fields := make([]string, 0, 8)
+	if m.scope != nil {
+		fields = append(fields, skillinjection.FieldScope)
+	}
+	if m.scope_id != nil {
+		fields = append(fields, skillinjection.FieldScopeID)
+	}
+	if m.skill_uri != nil {
+		fields = append(fields, skillinjection.FieldSkillURI)
+	}
+	if m.skill_as != nil {
+		fields = append(fields, skillinjection.FieldSkillAs)
+	}
+	if m.optional != nil {
+		fields = append(fields, skillinjection.FieldOptional)
+	}
+	if m.sort_order != nil {
+		fields = append(fields, skillinjection.FieldSortOrder)
+	}
+	if m.created_at != nil {
+		fields = append(fields, skillinjection.FieldCreatedAt)
+	}
+	if m.created_by != nil {
+		fields = append(fields, skillinjection.FieldCreatedBy)
+	}
+	return fields
+}
+
+// Field returns the value of a field with the given name. The second boolean
+// return value indicates that this field was not set, or was not defined in the
+// schema.
+func (m *SkillInjectionMutation) Field(name string) (ent.Value, bool) {
+	switch name {
+	case skillinjection.FieldScope:
+		return m.Scope()
+	case skillinjection.FieldScopeID:
+		return m.ScopeID()
+	case skillinjection.FieldSkillURI:
+		return m.SkillURI()
+	case skillinjection.FieldSkillAs:
+		return m.SkillAs()
+	case skillinjection.FieldOptional:
+		return m.Optional()
+	case skillinjection.FieldSortOrder:
+		return m.SortOrder()
+	case skillinjection.FieldCreatedAt:
+		return m.CreatedAt()
+	case skillinjection.FieldCreatedBy:
+		return m.CreatedBy()
+	}
+	return nil, false
+}
+
+// OldField returns the old value of the field from the database. An error is
+// returned if the mutation operation is not UpdateOne, or the query to the
+// database failed.
+func (m *SkillInjectionMutation) OldField(ctx context.Context, name string) (ent.Value, error) {
+	switch name {
+	case skillinjection.FieldScope:
+		return m.OldScope(ctx)
+	case skillinjection.FieldScopeID:
+		return m.OldScopeID(ctx)
+	case skillinjection.FieldSkillURI:
+		return m.OldSkillURI(ctx)
+	case skillinjection.FieldSkillAs:
+		return m.OldSkillAs(ctx)
+	case skillinjection.FieldOptional:
+		return m.OldOptional(ctx)
+	case skillinjection.FieldSortOrder:
+		return m.OldSortOrder(ctx)
+	case skillinjection.FieldCreatedAt:
+		return m.OldCreatedAt(ctx)
+	case skillinjection.FieldCreatedBy:
+		return m.OldCreatedBy(ctx)
+	}
+	return nil, fmt.Errorf("unknown SkillInjection field %s", name)
+}
+
+// SetField sets the value of a field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *SkillInjectionMutation) SetField(name string, value ent.Value) error {
+	switch name {
+	case skillinjection.FieldScope:
+		v, ok := value.(skillinjection.Scope)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetScope(v)
+		return nil
+	case skillinjection.FieldScopeID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetScopeID(v)
+		return nil
+	case skillinjection.FieldSkillURI:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetSkillURI(v)
+		return nil
+	case skillinjection.FieldSkillAs:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetSkillAs(v)
+		return nil
+	case skillinjection.FieldOptional:
+		v, ok := value.(bool)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetOptional(v)
+		return nil
+	case skillinjection.FieldSortOrder:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetSortOrder(v)
+		return nil
+	case skillinjection.FieldCreatedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCreatedAt(v)
+		return nil
+	case skillinjection.FieldCreatedBy:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCreatedBy(v)
+		return nil
+	}
+	return fmt.Errorf("unknown SkillInjection field %s", name)
+}
+
+// AddedFields returns all numeric fields that were incremented/decremented during
+// this mutation.
+func (m *SkillInjectionMutation) AddedFields() []string {
+	var fields []string
+	if m.addsort_order != nil {
+		fields = append(fields, skillinjection.FieldSortOrder)
+	}
+	return fields
+}
+
+// AddedField returns the numeric value that was incremented/decremented on a field
+// with the given name. The second boolean return value indicates that this field
+// was not set, or was not defined in the schema.
+func (m *SkillInjectionMutation) AddedField(name string) (ent.Value, bool) {
+	switch name {
+	case skillinjection.FieldSortOrder:
+		return m.AddedSortOrder()
+	}
+	return nil, false
+}
+
+// AddField adds the value to the field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *SkillInjectionMutation) AddField(name string, value ent.Value) error {
+	switch name {
+	case skillinjection.FieldSortOrder:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddSortOrder(v)
+		return nil
+	}
+	return fmt.Errorf("unknown SkillInjection numeric field %s", name)
+}
+
+// ClearedFields returns all nullable fields that were cleared during this
+// mutation.
+func (m *SkillInjectionMutation) ClearedFields() []string {
+	var fields []string
+	if m.FieldCleared(skillinjection.FieldSkillAs) {
+		fields = append(fields, skillinjection.FieldSkillAs)
+	}
+	if m.FieldCleared(skillinjection.FieldCreatedBy) {
+		fields = append(fields, skillinjection.FieldCreatedBy)
+	}
+	return fields
+}
+
+// FieldCleared returns a boolean indicating if a field with the given name was
+// cleared in this mutation.
+func (m *SkillInjectionMutation) FieldCleared(name string) bool {
+	_, ok := m.clearedFields[name]
+	return ok
+}
+
+// ClearField clears the value of the field with the given name. It returns an
+// error if the field is not defined in the schema.
+func (m *SkillInjectionMutation) ClearField(name string) error {
+	switch name {
+	case skillinjection.FieldSkillAs:
+		m.ClearSkillAs()
+		return nil
+	case skillinjection.FieldCreatedBy:
+		m.ClearCreatedBy()
+		return nil
+	}
+	return fmt.Errorf("unknown SkillInjection nullable field %s", name)
+}
+
+// ResetField resets all changes in the mutation for the field with the given name.
+// It returns an error if the field is not defined in the schema.
+func (m *SkillInjectionMutation) ResetField(name string) error {
+	switch name {
+	case skillinjection.FieldScope:
+		m.ResetScope()
+		return nil
+	case skillinjection.FieldScopeID:
+		m.ResetScopeID()
+		return nil
+	case skillinjection.FieldSkillURI:
+		m.ResetSkillURI()
+		return nil
+	case skillinjection.FieldSkillAs:
+		m.ResetSkillAs()
+		return nil
+	case skillinjection.FieldOptional:
+		m.ResetOptional()
+		return nil
+	case skillinjection.FieldSortOrder:
+		m.ResetSortOrder()
+		return nil
+	case skillinjection.FieldCreatedAt:
+		m.ResetCreatedAt()
+		return nil
+	case skillinjection.FieldCreatedBy:
+		m.ResetCreatedBy()
+		return nil
+	}
+	return fmt.Errorf("unknown SkillInjection field %s", name)
+}
+
+// AddedEdges returns all edge names that were set/added in this mutation.
+func (m *SkillInjectionMutation) AddedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// AddedIDs returns all IDs (to other nodes) that were added for the given edge
+// name in this mutation.
+func (m *SkillInjectionMutation) AddedIDs(name string) []ent.Value {
+	return nil
+}
+
+// RemovedEdges returns all edge names that were removed in this mutation.
+func (m *SkillInjectionMutation) RemovedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// RemovedIDs returns all IDs (to other nodes) that were removed for the edge with
+// the given name in this mutation.
+func (m *SkillInjectionMutation) RemovedIDs(name string) []ent.Value {
+	return nil
+}
+
+// ClearedEdges returns all edge names that were cleared in this mutation.
+func (m *SkillInjectionMutation) ClearedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// EdgeCleared returns a boolean which indicates if the edge with the given name
+// was cleared in this mutation.
+func (m *SkillInjectionMutation) EdgeCleared(name string) bool {
+	return false
+}
+
+// ClearEdge clears the value of the edge with the given name. It returns an error
+// if that edge is not defined in the schema.
+func (m *SkillInjectionMutation) ClearEdge(name string) error {
+	return fmt.Errorf("unknown SkillInjection unique edge %s", name)
+}
+
+// ResetEdge resets all changes to the edge with the given name in this mutation.
+// It returns an error if the edge is not defined in the schema.
+func (m *SkillInjectionMutation) ResetEdge(name string) error {
+	return fmt.Errorf("unknown SkillInjection edge %s", name)
 }
 
 // SkillRegistryMutation represents an operation that mutates the SkillRegistry nodes in the graph.

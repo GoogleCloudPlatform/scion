@@ -49,6 +49,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/scheduledevent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/skill"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/skillinjection"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/skillregistry"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/skillversion"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/subscriptiontemplate"
@@ -128,6 +129,8 @@ type Client struct {
 	Secret *SecretClient
 	// Skill is the client for interacting with the Skill builders.
 	Skill *SkillClient
+	// SkillInjection is the client for interacting with the SkillInjection builders.
+	SkillInjection *SkillInjectionClient
 	// SkillRegistry is the client for interacting with the SkillRegistry builders.
 	SkillRegistry *SkillRegistryClient
 	// SkillVersion is the client for interacting with the SkillVersion builders.
@@ -184,6 +187,7 @@ func (c *Client) init() {
 	c.ScheduledEvent = NewScheduledEventClient(c.config)
 	c.Secret = NewSecretClient(c.config)
 	c.Skill = NewSkillClient(c.config)
+	c.SkillInjection = NewSkillInjectionClient(c.config)
 	c.SkillRegistry = NewSkillRegistryClient(c.config)
 	c.SkillVersion = NewSkillVersionClient(c.config)
 	c.SubscriptionTemplate = NewSubscriptionTemplateClient(c.config)
@@ -315,6 +319,7 @@ func (c *Client) Tx(ctx context.Context) (*Tx, error) {
 		ScheduledEvent:           NewScheduledEventClient(cfg),
 		Secret:                   NewSecretClient(cfg),
 		Skill:                    NewSkillClient(cfg),
+		SkillInjection:           NewSkillInjectionClient(cfg),
 		SkillRegistry:            NewSkillRegistryClient(cfg),
 		SkillVersion:             NewSkillVersionClient(cfg),
 		SubscriptionTemplate:     NewSubscriptionTemplateClient(cfg),
@@ -373,6 +378,7 @@ func (c *Client) BeginTx(ctx context.Context, opts *sql.TxOptions) (*Tx, error) 
 		ScheduledEvent:           NewScheduledEventClient(cfg),
 		Secret:                   NewSecretClient(cfg),
 		Skill:                    NewSkillClient(cfg),
+		SkillInjection:           NewSkillInjectionClient(cfg),
 		SkillRegistry:            NewSkillRegistryClient(cfg),
 		SkillVersion:             NewSkillVersionClient(cfg),
 		SubscriptionTemplate:     NewSubscriptionTemplateClient(cfg),
@@ -416,8 +422,8 @@ func (c *Client) Use(hooks ...Hook) {
 		c.MaintenanceOperationRun, c.Message, c.Notification,
 		c.NotificationSubscription, c.PolicyBinding, c.Project, c.ProjectContributor,
 		c.ProjectSyncState, c.RuntimeBroker, c.Schedule, c.ScheduledEvent, c.Secret,
-		c.Skill, c.SkillRegistry, c.SkillVersion, c.SubscriptionTemplate, c.Template,
-		c.User, c.UserAccessToken,
+		c.Skill, c.SkillInjection, c.SkillRegistry, c.SkillVersion,
+		c.SubscriptionTemplate, c.Template, c.User, c.UserAccessToken,
 	} {
 		n.Use(hooks...)
 	}
@@ -435,8 +441,8 @@ func (c *Client) Intercept(interceptors ...Interceptor) {
 		c.MaintenanceOperationRun, c.Message, c.Notification,
 		c.NotificationSubscription, c.PolicyBinding, c.Project, c.ProjectContributor,
 		c.ProjectSyncState, c.RuntimeBroker, c.Schedule, c.ScheduledEvent, c.Secret,
-		c.Skill, c.SkillRegistry, c.SkillVersion, c.SubscriptionTemplate, c.Template,
-		c.User, c.UserAccessToken,
+		c.Skill, c.SkillInjection, c.SkillRegistry, c.SkillVersion,
+		c.SubscriptionTemplate, c.Template, c.User, c.UserAccessToken,
 	} {
 		n.Intercept(interceptors...)
 	}
@@ -511,6 +517,8 @@ func (c *Client) Mutate(ctx context.Context, m Mutation) (Value, error) {
 		return c.Secret.mutate(ctx, m)
 	case *SkillMutation:
 		return c.Skill.mutate(ctx, m)
+	case *SkillInjectionMutation:
+		return c.SkillInjection.mutate(ctx, m)
 	case *SkillRegistryMutation:
 		return c.SkillRegistry.mutate(ctx, m)
 	case *SkillVersionMutation:
@@ -5189,6 +5197,139 @@ func (c *SkillClient) mutate(ctx context.Context, m *SkillMutation) (Value, erro
 	}
 }
 
+// SkillInjectionClient is a client for the SkillInjection schema.
+type SkillInjectionClient struct {
+	config
+}
+
+// NewSkillInjectionClient returns a client for the SkillInjection from the given config.
+func NewSkillInjectionClient(c config) *SkillInjectionClient {
+	return &SkillInjectionClient{config: c}
+}
+
+// Use adds a list of mutation hooks to the hooks stack.
+// A call to `Use(f, g, h)` equals to `skillinjection.Hooks(f(g(h())))`.
+func (c *SkillInjectionClient) Use(hooks ...Hook) {
+	c.hooks.SkillInjection = append(c.hooks.SkillInjection, hooks...)
+}
+
+// Intercept adds a list of query interceptors to the interceptors stack.
+// A call to `Intercept(f, g, h)` equals to `skillinjection.Intercept(f(g(h())))`.
+func (c *SkillInjectionClient) Intercept(interceptors ...Interceptor) {
+	c.inters.SkillInjection = append(c.inters.SkillInjection, interceptors...)
+}
+
+// Create returns a builder for creating a SkillInjection entity.
+func (c *SkillInjectionClient) Create() *SkillInjectionCreate {
+	mutation := newSkillInjectionMutation(c.config, OpCreate)
+	return &SkillInjectionCreate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// CreateBulk returns a builder for creating a bulk of SkillInjection entities.
+func (c *SkillInjectionClient) CreateBulk(builders ...*SkillInjectionCreate) *SkillInjectionCreateBulk {
+	return &SkillInjectionCreateBulk{config: c.config, builders: builders}
+}
+
+// MapCreateBulk creates a bulk creation builder from the given slice. For each item in the slice, the function creates
+// a builder and applies setFunc on it.
+func (c *SkillInjectionClient) MapCreateBulk(slice any, setFunc func(*SkillInjectionCreate, int)) *SkillInjectionCreateBulk {
+	rv := reflect.ValueOf(slice)
+	if rv.Kind() != reflect.Slice {
+		return &SkillInjectionCreateBulk{err: fmt.Errorf("calling to SkillInjectionClient.MapCreateBulk with wrong type %T, need slice", slice)}
+	}
+	builders := make([]*SkillInjectionCreate, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		builders[i] = c.Create()
+		setFunc(builders[i], i)
+	}
+	return &SkillInjectionCreateBulk{config: c.config, builders: builders}
+}
+
+// Update returns an update builder for SkillInjection.
+func (c *SkillInjectionClient) Update() *SkillInjectionUpdate {
+	mutation := newSkillInjectionMutation(c.config, OpUpdate)
+	return &SkillInjectionUpdate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOne returns an update builder for the given entity.
+func (c *SkillInjectionClient) UpdateOne(_m *SkillInjection) *SkillInjectionUpdateOne {
+	mutation := newSkillInjectionMutation(c.config, OpUpdateOne, withSkillInjection(_m))
+	return &SkillInjectionUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOneID returns an update builder for the given id.
+func (c *SkillInjectionClient) UpdateOneID(id uuid.UUID) *SkillInjectionUpdateOne {
+	mutation := newSkillInjectionMutation(c.config, OpUpdateOne, withSkillInjectionID(id))
+	return &SkillInjectionUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// Delete returns a delete builder for SkillInjection.
+func (c *SkillInjectionClient) Delete() *SkillInjectionDelete {
+	mutation := newSkillInjectionMutation(c.config, OpDelete)
+	return &SkillInjectionDelete{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// DeleteOne returns a builder for deleting the given entity.
+func (c *SkillInjectionClient) DeleteOne(_m *SkillInjection) *SkillInjectionDeleteOne {
+	return c.DeleteOneID(_m.ID)
+}
+
+// DeleteOneID returns a builder for deleting the given entity by its id.
+func (c *SkillInjectionClient) DeleteOneID(id uuid.UUID) *SkillInjectionDeleteOne {
+	builder := c.Delete().Where(skillinjection.ID(id))
+	builder.mutation.id = &id
+	builder.mutation.op = OpDeleteOne
+	return &SkillInjectionDeleteOne{builder}
+}
+
+// Query returns a query builder for SkillInjection.
+func (c *SkillInjectionClient) Query() *SkillInjectionQuery {
+	return &SkillInjectionQuery{
+		config: c.config,
+		ctx:    &QueryContext{Type: TypeSkillInjection},
+		inters: c.Interceptors(),
+	}
+}
+
+// Get returns a SkillInjection entity by its id.
+func (c *SkillInjectionClient) Get(ctx context.Context, id uuid.UUID) (*SkillInjection, error) {
+	return c.Query().Where(skillinjection.ID(id)).Only(ctx)
+}
+
+// GetX is like Get, but panics if an error occurs.
+func (c *SkillInjectionClient) GetX(ctx context.Context, id uuid.UUID) *SkillInjection {
+	obj, err := c.Get(ctx, id)
+	if err != nil {
+		panic(err)
+	}
+	return obj
+}
+
+// Hooks returns the client hooks.
+func (c *SkillInjectionClient) Hooks() []Hook {
+	return c.hooks.SkillInjection
+}
+
+// Interceptors returns the client interceptors.
+func (c *SkillInjectionClient) Interceptors() []Interceptor {
+	return c.inters.SkillInjection
+}
+
+func (c *SkillInjectionClient) mutate(ctx context.Context, m *SkillInjectionMutation) (Value, error) {
+	switch m.Op() {
+	case OpCreate:
+		return (&SkillInjectionCreate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdate:
+		return (&SkillInjectionUpdate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdateOne:
+		return (&SkillInjectionUpdateOne{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpDelete, OpDeleteOne:
+		return (&SkillInjectionDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
+	default:
+		return nil, fmt.Errorf("ent: unknown SkillInjection mutation op: %q", m.Op())
+	}
+}
+
 // SkillRegistryClient is a client for the SkillRegistry schema.
 type SkillRegistryClient struct {
 	config
@@ -6045,8 +6186,8 @@ type (
 		MaintenanceOperation, MaintenanceOperationRun, Message, Notification,
 		NotificationSubscription, PolicyBinding, Project, ProjectContributor,
 		ProjectSyncState, RuntimeBroker, Schedule, ScheduledEvent, Secret, Skill,
-		SkillRegistry, SkillVersion, SubscriptionTemplate, Template, User,
-		UserAccessToken []ent.Hook
+		SkillInjection, SkillRegistry, SkillVersion, SubscriptionTemplate, Template,
+		User, UserAccessToken []ent.Hook
 	}
 	inters struct {
 		AccessPolicy, Agent, AllowListEntry, ApiKey, BrokerDispatch, BrokerJoinToken,
@@ -6056,7 +6197,7 @@ type (
 		MaintenanceOperation, MaintenanceOperationRun, Message, Notification,
 		NotificationSubscription, PolicyBinding, Project, ProjectContributor,
 		ProjectSyncState, RuntimeBroker, Schedule, ScheduledEvent, Secret, Skill,
-		SkillRegistry, SkillVersion, SubscriptionTemplate, Template, User,
-		UserAccessToken []ent.Interceptor
+		SkillInjection, SkillRegistry, SkillVersion, SubscriptionTemplate, Template,
+		User, UserAccessToken []ent.Interceptor
 	}
 )

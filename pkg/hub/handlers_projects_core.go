@@ -2289,6 +2289,12 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, id string
 		slog.Info("deleted project secrets", "project_id", id, "count", n)
 	}
 
+	// Clean up project-scoped skill injections (best-effort).
+	// These use scope/scope_id without FK cascade.
+	if err := s.store.DeleteSkillInjectionsByScope(ctx, store.ScopeProject, id); err != nil {
+		slog.Warn("failed to delete project skill injections", "project_id", id, "error", err)
+	}
+
 	// Warn about retained managed GCP service accounts (best-effort).
 	// Managed SAs are NOT deleted from GCP — only unlinked from the project.
 	s.warnManagedGCPServiceAccounts(ctx, id)

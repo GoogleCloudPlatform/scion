@@ -1053,6 +1053,36 @@ var (
 			},
 		},
 	}
+	// SkillInjectionsColumns holds the columns for the "skill_injections" table.
+	SkillInjectionsColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "scope", Type: field.TypeEnum, Enums: []string{"project", "user"}},
+		{Name: "scope_id", Type: field.TypeString},
+		{Name: "skill_uri", Type: field.TypeString},
+		{Name: "skill_as", Type: field.TypeString, Nullable: true},
+		{Name: "optional", Type: field.TypeBool, Default: false},
+		{Name: "sort_order", Type: field.TypeInt, Default: 0},
+		{Name: "created_at", Type: field.TypeTime},
+		{Name: "created_by", Type: field.TypeString, Nullable: true},
+	}
+	// SkillInjectionsTable holds the schema information for the "skill_injections" table.
+	SkillInjectionsTable = &schema.Table{
+		Name:       "skill_injections",
+		Columns:    SkillInjectionsColumns,
+		PrimaryKey: []*schema.Column{SkillInjectionsColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "skillinjection_scope_scope_id",
+				Unique:  false,
+				Columns: []*schema.Column{SkillInjectionsColumns[1], SkillInjectionsColumns[2]},
+			},
+			{
+				Name:    "skillinjection_scope_scope_id_skill_uri",
+				Unique:  true,
+				Columns: []*schema.Column{SkillInjectionsColumns[1], SkillInjectionsColumns[2], SkillInjectionsColumns[3]},
+			},
+		},
+	}
 	// SkillRegistriesColumns holds the columns for the "skill_registries" table.
 	SkillRegistriesColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeUUID},
@@ -1316,6 +1346,7 @@ var (
 		ScheduledEventsTable,
 		SecretsTable,
 		SkillsTable,
+		SkillInjectionsTable,
 		SkillRegistriesTable,
 		SkillVersionsTable,
 		SubscriptionTemplatesTable,

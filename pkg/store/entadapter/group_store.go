@@ -61,6 +61,16 @@ func parseGetID(s string) (uuid.UUID, error) {
 	return uid, nil
 }
 
+// nullableString returns a pointer to s if it is non-empty, otherwise nil.
+// Used with SetNillable* Ent setters to avoid persisting empty strings as
+// optional fields.
+func nullableString(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
+}
+
 // mapError converts Ent errors to store errors.
 func mapError(err error) error {
 	if err == nil {

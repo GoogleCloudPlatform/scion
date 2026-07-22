@@ -19,6 +19,8 @@ import (
 	"encoding/json"
 	"errors"
 	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 )
 
 // Common errors returned by store implementations.
@@ -125,6 +127,9 @@ type Store interface {
 
 	// HubSetting operations (Two-Tier Settings Architecture)
 	HubSettingStore
+
+	// SkillInjection operations (Injected-Skills List)
+	SkillInjectionStore
 }
 
 // AgentStore defines agent-related persistence operations.
@@ -1345,6 +1350,46 @@ type SkillRegistryStore interface {
 // =============================================================================
 // Hub Settings (Two-Tier Settings Architecture)
 // =============================================================================
+
+// =============================================================================
+// Skill Injections (Injected-Skills List)
+// =============================================================================
+
+// SkillInjectionStore defines persistence operations for the injected-skills
+// list scoped to a project or user.
+//
+// Design note: SetSkillInjections accepts []api.SkillReference (the wire type)
+// rather than []SkillInjection so that callers do not have to pre-allocate and
+// hydrate full SkillInjection records. The store package already depends on the
+// api package (see models.go), so this does not introduce any new import cycle.
+type SkillInjectionStore interface {
+	// ListSkillInjections returns all skill injections for the given scope+scopeID,
+	// ordered by sort_order ascending.
+	ListSkillInjections(ctx context.Context, scope, scopeID string) ([]SkillInjection, error)
+
+	// AddSkillInjection creates a new skill injection entry.
+	// Returns ErrAlreadyExists if an entry with the same (scope, scope_id, skill_uri) already exists.
+	AddSkillInjection(ctx context.Context, si *SkillInjection) error
+
+	// UpdateSkillInjection updates the mutable fields of a skill injection entry.
+	// Returns ErrNotFound if the entry with the given ID does not exist.
+	UpdateSkillInjection(ctx context.Context, si *SkillInjection) error
+
+	// RemoveSkillInjection deletes a skill injection entry by ID.
+	// Returns ErrNotFound if the entry doesn't exist.
+	RemoveSkillInjection(ctx context.Context, id string) error
+
+	// SetSkillInjections atomically replaces the full list for a scope+scopeID.
+	// All existing entries for (scope, scopeID) are deleted and the new list
+	// is inserted in a single transaction. refs is converted to SkillInjection
+	// rows with the given createdBy value.
+	SetSkillInjections(ctx context.Context, scope, scopeID string, refs []api.SkillReference, createdBy string) error
+
+	// DeleteSkillInjectionsByScope removes all skill injection entries for the
+	// given scope+scopeID. Used during project or user deletion to cascade-clean
+	// rows that have no FK cascade.
+	DeleteSkillInjectionsByScope(ctx context.Context, scope, scopeID string) error
+}
 
 // HubSettingStore defines persistence operations for operational hub settings.
 // Each setting is a section (e.g. "access", "telemetry") with a JSON value.

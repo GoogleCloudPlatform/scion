@@ -23,6 +23,7 @@ import (
 
 	"entgo.io/ent/dialect"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -306,4 +307,65 @@ func (c *CompositeStore) RunSerializable(ctx context.Context, fn func(ctx contex
 		return nil
 	}
 	return fmt.Errorf("RunSerializable: exhausted %d attempts: %w", attempts, lastErr)
+}
+
+// runSerializableEntTx runs fn inside an ent.Tx with serializable isolation on
+// Postgres, retrying on serialization failures. On SQLite it runs a plain
+// transaction with no retry.
+//
+// This is the ent-native counterpart to CompositeStore.RunSerializable: use it
+// when a store method cannot hold a reference to CompositeStore but still needs
+// serializable transaction semantics.
+//
+// fn MUST be idempotent — it can be invoked more than once. It must NOT call
+// tx.Commit or tx.Rollback; the caller manages the transaction lifecycle.
+func runSerializableEntTx(ctx context.Context, client *ent.Client, fn func(ctx context.Context, tx *ent.Tx) error) error {
+	isPostgres := client.Driver().Dialect() == dialect.Postgres
+
+	var opts *sql.TxOptions
+	if isPostgres {
+		opts = &sql.TxOptions{Isolation: sql.LevelSerializable}
+	}
+
+	attempts := 1
+	if isPostgres {
+		attempts = maxSerializableRetries
+	}
+
+	var lastErr error
+	for attempt := 0; attempt < attempts; attempt++ {
+		var tx *ent.Tx
+		var err error
+		if opts != nil {
+			tx, err = client.BeginTx(ctx, opts)
+		} else {
+			tx, err = client.Tx(ctx)
+		}
+		if err != nil {
+			if isSerializationFailure(err) {
+				lastErr = err
+				continue
+			}
+			return err
+		}
+
+		if err := fn(ctx, tx); err != nil {
+			_ = tx.Rollback()
+			if isSerializationFailure(err) {
+				lastErr = err
+				continue
+			}
+			return err
+		}
+
+		if err := tx.Commit(); err != nil {
+			if isSerializationFailure(err) {
+				lastErr = err
+				continue
+			}
+			return err
+		}
+		return nil
+	}
+	return fmt.Errorf("runSerializableEntTx: exhausted %d attempts: %w", attempts, lastErr)
 }

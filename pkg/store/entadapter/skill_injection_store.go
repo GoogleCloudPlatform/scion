@@ -1,0 +1,201 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package entadapter
+
+import (
+	"context"
+	"time"
+
+	entsql "entgo.io/ent/dialect/sql"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent"
+	entskillinjection "github.com/GoogleCloudPlatform/scion/pkg/ent/skillinjection"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/google/uuid"
+)
+
+// SkillInjectionStore implements store.SkillInjectionStore using Ent ORM.
+type SkillInjectionStore struct {
+	client *ent.Client
+}
+
+// NewSkillInjectionStore creates a new Ent-backed SkillInjectionStore.
+func NewSkillInjectionStore(client *ent.Client) *SkillInjectionStore {
+	return &SkillInjectionStore{client: client}
+}
+
+// entSkillInjectionToStore converts an ent.SkillInjection to a store.SkillInjection.
+func entSkillInjectionToStore(e *ent.SkillInjection) store.SkillInjection {
+	return store.SkillInjection{
+		ID:        e.ID.String(),
+		Scope:     string(e.Scope), // convert enum to string
+		ScopeID:   e.ScopeID,
+		SkillURI:  e.SkillURI,
+		SkillAs:   e.SkillAs,
+		Optional:  e.Optional,
+		SortOrder: e.SortOrder,
+		CreatedAt: e.CreatedAt,
+		CreatedBy: e.CreatedBy,
+	}
+}
+
+// ListSkillInjections returns all skill injections for a given scope+scopeID,
+// ordered by sort_order ascending.
+func (s *SkillInjectionStore) ListSkillInjections(ctx context.Context, scope, scopeID string) ([]store.SkillInjection, error) {
+	rows, err := s.client.SkillInjection.Query().
+		Where(
+			entskillinjection.ScopeEQ(entskillinjection.Scope(scope)),
+			entskillinjection.ScopeIDEQ(scopeID),
+		).
+		Order(entskillinjection.BySortOrder(entsql.OrderAsc())).
+		All(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+
+	result := make([]store.SkillInjection, 0, len(rows))
+	for _, e := range rows {
+		result = append(result, entSkillInjectionToStore(e))
+	}
+	return result, nil
+}
+
+// AddSkillInjection creates a new skill injection entry.
+// Returns ErrAlreadyExists if an entry with the same (scope, scope_id, skill_uri) already exists.
+func (s *SkillInjectionStore) AddSkillInjection(ctx context.Context, si *store.SkillInjection) error {
+	uid, err := parseUUID(si.ID)
+	if err != nil {
+		return err
+	}
+
+	createdAt := time.Now()
+
+	_, err = s.client.SkillInjection.Create().
+		SetID(uid).
+		SetScope(entskillinjection.Scope(si.Scope)).
+		SetScopeID(si.ScopeID).
+		SetSkillURI(si.SkillURI).
+		SetNillableSkillAs(nullableString(si.SkillAs)).
+		SetOptional(si.Optional).
+		SetSortOrder(si.SortOrder).
+		SetCreatedAt(createdAt).
+		SetNillableCreatedBy(nullableString(si.CreatedBy)).
+		Save(ctx)
+	if err != nil {
+		return mapError(err)
+	}
+
+	// Only write back to si after Save succeeds to avoid mutating caller's
+	// struct with a CreatedAt that was never persisted.
+	si.CreatedAt = createdAt
+	return nil
+}
+
+// UpdateSkillInjection updates the mutable fields of a skill injection entry.
+// Returns ErrNotFound if the entry with the given ID does not exist.
+func (s *SkillInjectionStore) UpdateSkillInjection(ctx context.Context, si *store.SkillInjection) error {
+	uid, err := parseUUID(si.ID)
+	if err != nil {
+		return err
+	}
+
+	update := s.client.SkillInjection.UpdateOneID(uid).
+		SetSkillURI(si.SkillURI).
+		SetOptional(si.Optional).
+		SetSortOrder(si.SortOrder)
+
+	if si.SkillAs != "" {
+		update = update.SetSkillAs(si.SkillAs)
+	} else {
+		update = update.ClearSkillAs()
+	}
+
+	_, err = update.Save(ctx)
+	if err != nil {
+		return mapError(err)
+	}
+	return nil
+}
+
+// RemoveSkillInjection deletes a skill injection entry by ID.
+// Returns ErrNotFound if the entry doesn't exist.
+func (s *SkillInjectionStore) RemoveSkillInjection(ctx context.Context, id string) error {
+	uid, err := parseUUID(id)
+	if err != nil {
+		return err
+	}
+
+	err = s.client.SkillInjection.DeleteOneID(uid).Exec(ctx)
+	if err != nil {
+		return mapError(err)
+	}
+	return nil
+}
+
+// SetSkillInjections atomically replaces the full list for a scope+scopeID.
+// All existing entries for (scope, scopeID) are deleted and the new list is
+// bulk-inserted in a single serializable transaction. On Postgres the transaction
+// is retried on serialization failure so concurrent calls are safe under READ
+// COMMITTED default isolation.
+func (s *SkillInjectionStore) SetSkillInjections(ctx context.Context, scope, scopeID string, refs []api.SkillReference, createdBy string) error {
+	return runSerializableEntTx(ctx, s.client, func(ctx context.Context, tx *ent.Tx) error {
+		// Delete all existing entries for this scope+scopeID.
+		_, err := tx.SkillInjection.Delete().
+			Where(
+				entskillinjection.ScopeEQ(entskillinjection.Scope(scope)),
+				entskillinjection.ScopeIDEQ(scopeID),
+			).
+			Exec(ctx)
+		if err != nil {
+			return mapError(err)
+		}
+
+		if len(refs) == 0 {
+			return nil
+		}
+
+		// Bulk-insert all new entries in a single round-trip.
+		now := time.Now()
+		builders := make([]*ent.SkillInjectionCreate, 0, len(refs))
+		for i, ref := range refs {
+			builders = append(builders, tx.SkillInjection.Create().
+				SetID(uuid.New()).
+				SetScope(entskillinjection.Scope(scope)).
+				SetScopeID(scopeID).
+				SetSkillURI(ref.URI).
+				SetNillableSkillAs(nullableString(ref.As)).
+				SetOptional(ref.Optional).
+				SetSortOrder(i).
+				SetCreatedAt(now).
+				SetNillableCreatedBy(nullableString(createdBy)))
+		}
+
+		return mapError(tx.SkillInjection.CreateBulk(builders...).Exec(ctx))
+	})
+}
+
+// DeleteSkillInjectionsByScope removes all skill injection entries for the given
+// scope+scopeID. It is used during project or user deletion to cascade-clean
+// entries that have no FK cascade.
+func (s *SkillInjectionStore) DeleteSkillInjectionsByScope(ctx context.Context, scope, scopeID string) error {
+	_, err := s.client.SkillInjection.Delete().
+		Where(
+			entskillinjection.ScopeEQ(entskillinjection.Scope(scope)),
+			entskillinjection.ScopeIDEQ(scopeID),
+		).
+		Exec(ctx)
+	return mapError(err)
+}
