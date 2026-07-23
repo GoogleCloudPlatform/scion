@@ -248,6 +248,7 @@ export class ScionInjectedSkillsPanel extends LitElement {
         // the cleared state with stale data from the previous scope.
         this._loadAbortController?.abort();
         this._loadAbortController = null;
+        this.loading = false;
         this.rows = [];
         this.error = null;
       }
