@@ -17,14 +17,15 @@
 /**
  * View Toggle Component
  *
- * A compact two-button toggle for switching between grid (card) and list (table) views.
- * Persists the selected view in localStorage and dispatches a `view-change` CustomEvent.
+ * A compact toggle for switching between grid (card) and list (table) views,
+ * with an optional third segment linking to a graph view. Persists the
+ * selected view in localStorage and dispatches a `view-change` CustomEvent.
  */
 
-import { LitElement, html, css } from 'lit';
+import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property } from 'lit/decorators.js';
 
-export type ViewMode = 'grid' | 'list';
+export type ViewMode = 'grid' | 'list' | 'graph';
 
 @customElement('scion-view-toggle')
 export class ScionViewToggle extends LitElement {
@@ -40,6 +41,14 @@ export class ScionViewToggle extends LitElement {
   @property({ type: String })
   storageKey = '';
 
+  /**
+   * When set, shows a third "graph" segment rendered as a link to this URL
+   * (the SPA router intercepts it). The graph segment also appears, as a
+   * plain active button, when the current view is 'graph'.
+   */
+  @property({ type: String })
+  graphHref = '';
+
   static override styles = css`
     :host {
       display: inline-flex;
@@ -52,7 +61,8 @@ export class ScionViewToggle extends LitElement {
       overflow: hidden;
     }
 
-    button {
+    button,
+    a {
       display: inline-flex;
       align-items: center;
       justify-content: center;
@@ -63,23 +73,28 @@ export class ScionViewToggle extends LitElement {
       color: var(--scion-text-muted, #64748b);
       cursor: pointer;
       padding: 0;
+      text-decoration: none;
       transition: all 150ms ease;
     }
 
-    button:first-child {
+    button:not(:last-child),
+    a:not(:last-child) {
       border-right: 1px solid var(--scion-border, #e2e8f0);
     }
 
-    button:hover:not(.active) {
+    button:hover:not(.active),
+    a:hover:not(.active) {
       background: var(--scion-bg-subtle, #f1f5f9);
     }
 
-    button.active {
+    button.active,
+    a.active {
       background: var(--scion-primary, #3b82f6);
       color: white;
     }
 
-    button sl-icon {
+    button sl-icon,
+    a sl-icon {
       font-size: 0.875rem;
     }
   `;
@@ -97,7 +112,8 @@ export class ScionViewToggle extends LitElement {
   private setView(mode: ViewMode): void {
     if (this.view === mode) return;
     this.view = mode;
-    if (this.storageKey) {
+    // 'graph' is a navigation target, not a persisted list rendering mode.
+    if (this.storageKey && mode !== 'graph') {
       localStorage.setItem(this.storageKey, mode);
     }
     this.dispatchEvent(
@@ -107,6 +123,28 @@ export class ScionViewToggle extends LitElement {
         composed: true,
       })
     );
+  }
+
+  private renderGraphSegment() {
+    if (this.graphHref) {
+      return html`
+        <a
+          class=${this.view === 'graph' ? 'active' : ''}
+          href=${this.graphHref}
+          title="Graph view"
+        >
+          <sl-icon name="diagram-3"></sl-icon>
+        </a>
+      `;
+    }
+    if (this.view === 'graph') {
+      return html`
+        <button class="active" title="Graph view">
+          <sl-icon name="diagram-3"></sl-icon>
+        </button>
+      `;
+    }
+    return nothing;
   }
 
   override render() {
@@ -126,6 +164,7 @@ export class ScionViewToggle extends LitElement {
         >
           <sl-icon name="list-ul"></sl-icon>
         </button>
+        ${this.renderGraphSegment()}
       </div>
     `;
   }

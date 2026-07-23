@@ -170,6 +170,7 @@ const ROUTES: RouteConfig[] = [
   { pattern: /^\/projects\/[^/]+\/metrics$/, tag: 'scion-page-metrics', load: () => import('../components/pages/metrics-dashboard.js') },
   { pattern: /^\/projects\/[^/]+$/, tag: 'scion-page-project-detail', load: () => import('../components/pages/project-detail.js') },
   { pattern: /^\/agents\/new$/, tag: 'scion-page-agent-create', load: () => import('../components/pages/agent-create.js') },
+  { pattern: /^\/agents\/graph$/, tag: 'scion-page-agent-graph', load: () => import('../components/pages/agent-graph.js') },
   { pattern: /^\/agents\/[^/]+\/configure$/, tag: 'scion-page-agent-configure', load: () => import('../components/pages/agent-configure.js') },
   { pattern: /^\/agents\/[^/]+\/terminal$/, tag: 'scion-page-terminal', load: () => import('../components/pages/terminal.js') },
   { pattern: /^\/agents\/[^/]+$/, tag: 'scion-page-agent-detail', load: () => import('../components/pages/agent-detail.js') },

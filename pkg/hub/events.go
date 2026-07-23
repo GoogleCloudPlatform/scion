@@ -115,22 +115,23 @@ type AgentStatusEvent struct {
 // Unlike status deltas this carries the full agent snapshot so that
 // subscribers can render a complete row without an extra REST fetch.
 type AgentCreatedEvent struct {
-	AgentID         string `json:"agentId"`
-	ProjectID       string `json:"projectId"`
-	GroveID         string `json:"groveId"`
-	Name            string `json:"name"`
-	Slug            string `json:"slug"`
-	Template        string `json:"template,omitempty"`
-	Phase           string `json:"phase,omitempty"`
-	Activity        string `json:"activity,omitempty"`
-	ContainerStatus string `json:"containerStatus,omitempty"`
-	Image           string `json:"image,omitempty"`
-	Runtime         string `json:"runtime,omitempty"`
-	RuntimeBrokerID string `json:"runtimeBrokerId,omitempty"`
-	CreatedBy       string `json:"createdBy,omitempty"`
-	Visibility      string `json:"visibility,omitempty"`
-	TaskSummary     string `json:"taskSummary,omitempty"`
-	Created         string `json:"created,omitempty"`
+	AgentID         string   `json:"agentId"`
+	ProjectID       string   `json:"projectId"`
+	GroveID         string   `json:"groveId"`
+	Name            string   `json:"name"`
+	Slug            string   `json:"slug"`
+	Template        string   `json:"template,omitempty"`
+	Phase           string   `json:"phase,omitempty"`
+	Activity        string   `json:"activity,omitempty"`
+	ContainerStatus string   `json:"containerStatus,omitempty"`
+	Image           string   `json:"image,omitempty"`
+	Runtime         string   `json:"runtime,omitempty"`
+	RuntimeBrokerID string   `json:"runtimeBrokerId,omitempty"`
+	CreatedBy       string   `json:"createdBy,omitempty"`
+	Visibility      string   `json:"visibility,omitempty"`
+	TaskSummary     string   `json:"taskSummary,omitempty"`
+	Created         string   `json:"created,omitempty"`
+	Ancestry        []string `json:"ancestry,omitempty"`
 }
 
 // AgentDeletedEvent is published when an agent is deleted.
@@ -393,6 +394,7 @@ func (p *eventBuilder) PublishAgentCreated(_ context.Context, agent *store.Agent
 		CreatedBy:       agent.CreatedBy,
 		Visibility:      agent.Visibility,
 		TaskSummary:     agent.TaskSummary,
+		Ancestry:        agent.Ancestry,
 	}
 	if !agent.Created.IsZero() {
 		evt.Created = agent.Created.Format("2006-01-02T15:04:05Z07:00")
