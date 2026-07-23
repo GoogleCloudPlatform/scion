@@ -153,7 +153,14 @@ func (s *Server) addProjectInjectedSkill(w http.ResponseWriter, r *http.Request,
 	// append at the end (max existing sortOrder + 1).
 	sortOrder := entry.SortOrder
 	if sortOrder == 0 {
-		existing, _ := s.store.ListSkillInjections(ctx, store.SkillInjectionScopeProject, projectID)
+		existing, err := s.store.ListSkillInjections(ctx, store.SkillInjectionScopeProject, projectID)
+		if err != nil {
+			writeErrorFromErr(w, err, "")
+			return
+		}
+		// Note: sort_order assignment is best-effort; concurrent POSTs may produce
+		// duplicate sort_order values. Full ordering is maintained by the client via
+		// the bulk PUT endpoint. See issue #548 for tracking.
 		maxOrder := 0
 		for _, e := range existing {
 			if e.SortOrder > maxOrder {
@@ -431,7 +438,14 @@ func (s *Server) addUserInjectedSkill(w http.ResponseWriter, r *http.Request) {
 	// append at the end (max existing sortOrder + 1).
 	sortOrder := entry.SortOrder
 	if sortOrder == 0 {
-		existing, _ := s.store.ListSkillInjections(ctx, store.SkillInjectionScopeUser, userIdent.ID())
+		existing, err := s.store.ListSkillInjections(ctx, store.SkillInjectionScopeUser, userIdent.ID())
+		if err != nil {
+			writeErrorFromErr(w, err, "")
+			return
+		}
+		// Note: sort_order assignment is best-effort; concurrent POSTs may produce
+		// duplicate sort_order values. Full ordering is maintained by the client via
+		// the bulk PUT endpoint. See issue #548 for tracking.
 		maxOrder := 0
 		for _, e := range existing {
 			if e.SortOrder > maxOrder {
@@ -750,6 +764,12 @@ func (s *Server) enrichSkillInjections(ctx context.Context, sis []store.SkillInj
 		result, err := s.store.ListSkills(ctx, store.SkillFilter{Scope: scope}, store.ListOptions{Limit: 1000})
 		if err != nil || result == nil {
 			continue
+		}
+		if result.TotalCount > len(result.Items) {
+			slog.Warn("skill enrichment truncated: more skills exist than fetched",
+				"scope", scope,
+				"fetched", len(result.Items),
+				"total", result.TotalCount)
 		}
 		for i := range result.Items {
 			sk := &result.Items[i]

@@ -244,7 +244,10 @@ export class ScionInjectedSkillsPanel extends LitElement {
       } else {
         // Clear stale rows when scope/scopeId becomes invalid so that a panel
         // reused with a new (empty) scopeId does not show data from the
-        // previous scope.
+        // previous scope. Abort any in-flight load first so it cannot overwrite
+        // the cleared state with stale data from the previous scope.
+        this._loadAbortController?.abort();
+        this._loadAbortController = null;
         this.rows = [];
         this.error = null;
       }
