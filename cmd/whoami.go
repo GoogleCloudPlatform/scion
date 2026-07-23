@@ -124,7 +124,7 @@ func buildWhoamiResult(slug, name string) WhoamiResult {
 
 	// Construct hubUrl from hubEndpoint + id (no API call needed).
 	if hubEndpoint != "" && id != "" {
-		result.HubURL = fmt.Sprintf("%s/agents/%s", hubEndpoint, id)
+		result.HubURL = fmt.Sprintf("%s/agents/%s", strings.TrimSuffix(hubEndpoint, "/"), id)
 	}
 
 	return result
