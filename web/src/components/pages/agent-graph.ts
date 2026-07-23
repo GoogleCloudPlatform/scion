@@ -564,16 +564,26 @@ export class AgentGraphPage extends LitElement {
       related.add(parent.id);
       cur = parent;
     }
-    // Walk down: repeated sweeps until closure (forests are small).
-    let grew = true;
-    while (grew) {
-      grew = false;
-      for (const a of agents) {
-        if (related.has(a.id)) continue;
-        const pid = parentIdOf(a);
-        if (pid && related.has(pid)) {
-          related.add(a.id);
-          grew = true;
+    // Walk down with BFS over a child adjacency map. Seeded from the
+    // hovered agent only, so ancestors' other branches (the hovered
+    // agent's siblings and cousins) stay dim.
+    const childrenOf = new Map<string, string[]>();
+    for (const a of agents) {
+      const pid = parentIdOf(a);
+      if (!pid) continue;
+      const siblings = childrenOf.get(pid);
+      if (siblings) {
+        siblings.push(a.id);
+      } else {
+        childrenOf.set(pid, [a.id]);
+      }
+    }
+    const queue = [hovered.id];
+    for (let head = 0; head < queue.length; head++) {
+      for (const childId of childrenOf.get(queue[head]) ?? []) {
+        if (!related.has(childId)) {
+          related.add(childId);
+          queue.push(childId);
         }
       }
     }
