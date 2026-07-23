@@ -17,7 +17,9 @@ package brokerclient
 
 import (
 	"context"
+	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
@@ -76,6 +78,21 @@ func (c *client) Health(ctx context.Context) (*runtimebroker.HealthResponse, err
 	resp, err := c.transport.Get(ctx, "/healthz", nil)
 	if err != nil {
 		return nil, err
+	}
+	// Only check for proxy interception on 2xx responses. A non-2xx with a
+	// non-JSON body (e.g. a 502 HTML error page from a load balancer) is a
+	// genuine server/infrastructure error and should be surfaced as-is by
+	// DecodeResponse, not misdiagnosed as proxy interception.
+	ct := resp.Header.Get("Content-Type")
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 &&
+		ct != "" && !strings.HasPrefix(strings.ToLower(ct), "application/json") {
+		_ = resp.Body.Close()
+		return nil, fmt.Errorf(
+			"broker health endpoint returned %s (Content-Type: %s); "+
+				"this may indicate a reverse proxy (e.g. Google Cloud Run GFE) "+
+				"is intercepting /healthz — check your deployment configuration",
+			resp.Status, ct,
+		)
 	}
 	return apiclient.DecodeResponse[runtimebroker.HealthResponse](resp)
 }

@@ -828,6 +828,7 @@ func runHubStatus(cmd *cobra.Command, args []string) error {
 	var client hubclient.Client
 	var health *hubclient.HealthResponse
 	var clientErr error
+	var healthErr error
 	authVerified := false
 
 	if endpoint != "" && !noHub {
@@ -835,7 +836,8 @@ func runHubStatus(cmd *cobra.Command, args []string) error {
 		if clientErr == nil {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			health, _ = client.Health(ctx)
+			health, healthErr = client.Health(ctx)
+			healthErr = hubclient.HintProxyError(healthErr)
 		}
 	}
 
@@ -902,7 +904,20 @@ func runHubStatus(cmd *cobra.Command, args []string) error {
 		fmt.Println("Hub Server")
 		fmt.Println("----------")
 		if health == nil {
-			fmt.Printf("Connection: failed\n")
+			if healthErr != nil {
+				// Split multi-line errors (e.g. hint appended by HintProxyError)
+				// so that only the primary error appears on the "Connection: failed"
+				// line and the hint is printed separately beneath it.
+				errStr := healthErr.Error()
+				if nl := strings.IndexByte(errStr, '\n'); nl >= 0 {
+					fmt.Printf("Connection: failed (%s)\n", errStr[:nl])
+					fmt.Println(errStr[nl+1:])
+				} else {
+					fmt.Printf("Connection: failed (%s)\n", errStr)
+				}
+			} else {
+				fmt.Printf("Connection: failed\n")
+			}
 		} else {
 			fmt.Printf("Connection: ok\n")
 			fmt.Printf("Hub Version: %s\n", health.Version)

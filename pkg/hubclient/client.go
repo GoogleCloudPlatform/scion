@@ -18,6 +18,7 @@ package hubclient
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
@@ -386,13 +387,48 @@ func (c *client) checkForDeprecation(resp *http.Response) {
 	}
 }
 
+// isProxyIntercepted reports whether a 2xx response looks like a proxy
+// intercept (non-JSON content type). GFE on Cloud Run returns "text/plain".
+func isProxyIntercepted(resp *http.Response) bool {
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return false
+	}
+	ct := resp.Header.Get("Content-Type")
+	// If Content-Type is absent, pass through to DecodeResponse (which will
+	// succeed if the body is valid JSON, or fail with its own error).
+	// Compare case-insensitively per RFC 9110 §8.3.1.
+	return ct != "" && !strings.HasPrefix(strings.ToLower(ct), "application/json")
+}
+
+// HintProxyError returns err unchanged in most cases. If the error message
+// matches the pattern produced by apiclient.DecodeResponse when a proxy
+// intercepts a health endpoint and returns a non-JSON body, it appends a
+// diagnostic hint suggesting a Cloud Run / GFE configuration issue.
+//
+// Note: the trigger ("failed to decode response") fires for any JSON decode
+// failure, including a genuinely malformed response from the hub server
+// itself. In that (rare) scenario the proxy hint is a false positive. The
+// design accepted this trade-off: real servers set application/json and
+// decode correctly; a second decode failure after the Content-Type fallback
+// strongly suggests the proxy intercepted /health as well as /healthz.
+func HintProxyError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if strings.Contains(err.Error(), "failed to decode response") {
+		return fmt.Errorf("%w\nHint: a reverse proxy may be intercepting "+
+			"/healthz and /health — check your Cloud Run or GFE configuration", err)
+	}
+	return err
+}
+
 // Health checks API availability.
 func (c *client) Health(ctx context.Context) (*HealthResponse, error) {
 	resp, err := c.get(ctx, "/healthz", nil)
 	if err != nil {
 		return nil, err
 	}
-	if resp.StatusCode == 404 {
+	if resp.StatusCode == 404 || isProxyIntercepted(resp) {
 		_ = resp.Body.Close()
 		resp, err = c.get(ctx, "/health", nil)
 		if err != nil {
