@@ -17,12 +17,12 @@
 /**
  * View Toggle Component
  *
- * A compact toggle for switching between grid (card) and list (table) views,
- * with an optional third segment linking to a graph view. Persists the
- * selected view in localStorage and dispatches a `view-change` CustomEvent.
+ * A compact toggle for switching between grid (card), list (table), and graph
+ * (inline tree) views. Persists the selected view in localStorage and
+ * dispatches a `view-change` CustomEvent.
  */
 
-import { LitElement, html, css, nothing } from 'lit';
+import { LitElement, html, css } from 'lit';
 import { customElement, property } from 'lit/decorators.js';
 
 export type ViewMode = 'grid' | 'list' | 'graph';
@@ -40,14 +40,6 @@ export class ScionViewToggle extends LitElement {
    */
   @property({ type: String })
   storageKey = '';
-
-  /**
-   * When set, shows a third "graph" segment rendered as a link to this URL
-   * (the SPA router intercepts it). The graph segment also appears, as a
-   * plain active button, when the current view is 'graph'.
-   */
-  @property({ type: String })
-  graphHref = '';
 
   static override styles = css`
     :host {
@@ -103,7 +95,7 @@ export class ScionViewToggle extends LitElement {
     super.connectedCallback();
     if (this.storageKey) {
       const stored = localStorage.getItem(this.storageKey) as ViewMode | null;
-      if (stored === 'grid' || stored === 'list') {
+      if (stored === 'grid' || stored === 'list' || stored === 'graph') {
         this.view = stored;
       }
     }
@@ -112,8 +104,7 @@ export class ScionViewToggle extends LitElement {
   private setView(mode: ViewMode): void {
     if (this.view === mode) return;
     this.view = mode;
-    // 'graph' is a navigation target, not a persisted list rendering mode.
-    if (this.storageKey && mode !== 'graph') {
+    if (this.storageKey) {
       localStorage.setItem(this.storageKey, mode);
     }
     this.dispatchEvent(
@@ -126,25 +117,15 @@ export class ScionViewToggle extends LitElement {
   }
 
   private renderGraphSegment() {
-    if (this.graphHref) {
-      return html`
-        <a
-          class=${this.view === 'graph' ? 'active' : ''}
-          href=${this.graphHref}
-          title="Graph view"
-        >
-          <sl-icon name="diagram-3"></sl-icon>
-        </a>
-      `;
-    }
-    if (this.view === 'graph') {
-      return html`
-        <button class="active" title="Graph view">
-          <sl-icon name="diagram-3"></sl-icon>
-        </button>
-      `;
-    }
-    return nothing;
+    return html`
+      <button
+        class=${this.view === 'graph' ? 'active' : ''}
+        title="Graph view"
+        @click=${() => this.setView('graph')}
+      >
+        <sl-icon name="diagram-3"></sl-icon>
+      </button>
+    `;
   }
 
   override render() {
