@@ -434,8 +434,9 @@ export class ScionPageAgents extends LitElement {
     if (this.labelFilter.trim() && this.labelFilter.includes('=')) {
       params.append('label', this.labelFilter.trim());
     }
+    params.set('limit', '500');
     const qs = params.toString();
-    const url = qs ? `/api/v1/agents?${qs}` : '/api/v1/agents';
+    const url = `/api/v1/agents?${qs}`;
     const response = await apiFetch(url);
 
     if (!response.ok) {
