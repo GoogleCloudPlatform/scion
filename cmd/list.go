@@ -112,7 +112,7 @@ func listAgentsLocal() error {
 		return err
 	}
 
-	return displayAgents(agents, listAll, false, false, 0)
+	return displayAgents(agents, listAll, false)
 }
 
 // listAgentsViaHub lists agents using the Hub API
@@ -152,14 +152,10 @@ func listAgentsViaHub(hubCtx *HubContext) error {
 		return wrapHubError(fmt.Errorf("failed to list agents via Hub: %w", err))
 	}
 
-	// Determine truncation before any client-side filtering
-	totalCount := resp.Page.TotalCount
-	wasTruncated := totalCount > len(resp.Agents)
-
 	// Warn on stderr when results are truncated
-	if wasTruncated {
+	if resp.Page.TotalCount > len(resp.Agents) {
 		fmt.Fprintf(os.Stderr, "Warning: showing %d of %d agents. Use --count %d to see all.\n",
-			len(resp.Agents), totalCount, totalCount)
+			len(resp.Agents), resp.Page.TotalCount, resp.Page.TotalCount)
 	}
 
 	// Convert Hub agents to local AgentInfo format
@@ -174,7 +170,7 @@ func listAgentsViaHub(hubCtx *HubContext) error {
 	// Client-side enrichment: fetch broker/project names if not provided by Hub
 	enrichAgentsClientSide(ctx, hubCtx.Client, agents)
 
-	return displayAgents(agents, listAll, true, wasTruncated, totalCount)
+	return displayAgents(agents, listAll, true)
 }
 
 // enrichAgentsClientSide populates Grove and RuntimeBrokerName fields client-side
@@ -395,7 +391,7 @@ func sortAgentsByField(agents []api.AgentInfo) {
 	})
 }
 
-func displayAgents(agents []api.AgentInfo, all bool, hubMode bool, wasTruncated bool, totalCount int) error {
+func displayAgents(agents []api.AgentInfo, all bool, hubMode bool) error {
 	if listRunning {
 		agents = filterRunningAgents(agents)
 	}
@@ -424,23 +420,6 @@ func displayAgents(agents []api.AgentInfo, all bool, hubMode bool, wasTruncated 
 		}
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
-		// When server-side truncation occurred, wrap in an envelope with metadata.
-		// Use wasTruncated (determined pre-filter) to avoid false positives
-		// when client-side filters (--running, --phase, etc.) reduce the count.
-		if wasTruncated {
-			output := struct {
-				Agents    []api.AgentInfo `json:"agents"`
-				Truncated bool            `json:"truncated,omitempty"`
-				Total     int             `json:"totalCount"`
-				Shown     int             `json:"shownCount"`
-			}{
-				Agents:    agents,
-				Truncated: true,
-				Total:     totalCount,
-				Shown:     len(agents),
-			}
-			return enc.Encode(output)
-		}
 		return enc.Encode(agents)
 	}
 

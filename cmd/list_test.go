@@ -131,7 +131,7 @@ func TestDisplayAgentsLocalMode(t *testing.T) {
 	r, w, _ := os.Pipe()
 	os.Stdout = w
 
-	err := displayAgents(agents, false, false, false, 0)
+	err := displayAgents(agents, false, false)
 	_ = w.Close()
 	os.Stdout = old
 
@@ -192,7 +192,7 @@ func TestDisplayAgentsHubMode(t *testing.T) {
 	r, w, _ := os.Pipe()
 	os.Stdout = w
 
-	err := displayAgents(agents, false, true, false, 0)
+	err := displayAgents(agents, false, true)
 	_ = w.Close()
 	os.Stdout = old
 
@@ -267,7 +267,7 @@ func TestDisplayAgentsSortByTime(t *testing.T) {
 	r, w, _ := os.Pipe()
 	os.Stdout = w
 
-	err := displayAgents(agents, false, false, false, 0)
+	err := displayAgents(agents, false, false)
 	_ = w.Close()
 	os.Stdout = old
 
@@ -301,7 +301,7 @@ func TestDisplayAgentsEmpty(t *testing.T) {
 	r, w, _ := os.Pipe()
 	os.Stdout = w
 
-	err := displayAgents(nil, false, false, false, 0)
+	err := displayAgents(nil, false, false)
 	_ = w.Close()
 	os.Stdout = old
 
@@ -323,7 +323,7 @@ func TestDisplayAgentsEmptyAll(t *testing.T) {
 	r, w, _ := os.Pipe()
 	os.Stdout = w
 
-	err := displayAgents(nil, true, false, false, 0)
+	err := displayAgents(nil, true, false)
 	_ = w.Close()
 	os.Stdout = old
 
@@ -364,7 +364,7 @@ func TestDisplayAgentsFriendlyTemplateName(t *testing.T) {
 	r, w, _ := os.Pipe()
 	os.Stdout = w
 
-	err := displayAgents(agents, false, false, false, 0)
+	err := displayAgents(agents, false, false)
 	_ = w.Close()
 	os.Stdout = old
 
@@ -549,7 +549,7 @@ func TestDisplayAgentsRunningFlag(t *testing.T) {
 	r, w, _ := os.Pipe()
 	os.Stdout = w
 
-	err := displayAgents(agents, false, false, false, 0)
+	err := displayAgents(agents, false, false)
 	_ = w.Close()
 	os.Stdout = old
 
@@ -600,7 +600,7 @@ func TestFilterAgentsByPhase(t *testing.T) {
 	r, w, _ := os.Pipe()
 	os.Stdout = w
 
-	err := displayAgents(agents, false, false, false, 0)
+	err := displayAgents(agents, false, false)
 	_ = w.Close()
 	os.Stdout = old
 
@@ -640,7 +640,7 @@ func TestFilterAgentsByActivity(t *testing.T) {
 	r, w, _ := os.Pipe()
 	os.Stdout = w
 
-	err := displayAgents(agents, false, false, false, 0)
+	err := displayAgents(agents, false, false)
 	_ = w.Close()
 	os.Stdout = old
 
@@ -676,7 +676,7 @@ func TestFilterAgentsByTemplate(t *testing.T) {
 	r, w, _ := os.Pipe()
 	os.Stdout = w
 
-	err := displayAgents(agents, false, false, false, 0)
+	err := displayAgents(agents, false, false)
 	_ = w.Close()
 	os.Stdout = old
 
@@ -713,7 +713,7 @@ func TestFilterAgentsCombined(t *testing.T) {
 	r, w, _ := os.Pipe()
 	os.Stdout = w
 
-	err := displayAgents(agents, false, false, false, 0)
+	err := displayAgents(agents, false, false)
 	_ = w.Close()
 	os.Stdout = old
 
@@ -748,7 +748,7 @@ func TestSortAgentsByName(t *testing.T) {
 	r, w, _ := os.Pipe()
 	os.Stdout = w
 
-	err := displayAgents(agents, false, false, false, 0)
+	err := displayAgents(agents, false, false)
 	_ = w.Close()
 	os.Stdout = old
 
@@ -790,7 +790,7 @@ func TestSortAgentsByCreated(t *testing.T) {
 	r, w, _ := os.Pipe()
 	os.Stdout = w
 
-	err := displayAgents(agents, false, false, false, 0)
+	err := displayAgents(agents, false, false)
 	_ = w.Close()
 	os.Stdout = old
 
@@ -834,7 +834,7 @@ func TestSortAgentsReverse(t *testing.T) {
 	r, w, _ := os.Pipe()
 	os.Stdout = w
 
-	err := displayAgents(agents, false, false, false, 0)
+	err := displayAgents(agents, false, false)
 	_ = w.Close()
 	os.Stdout = old
 
@@ -874,7 +874,7 @@ func TestDisplayAgentsFilteredEmpty(t *testing.T) {
 	r, w, _ := os.Pipe()
 	os.Stdout = w
 
-	err := displayAgents(agents, false, false, false, 0)
+	err := displayAgents(agents, false, false)
 	_ = w.Close()
 	os.Stdout = old
 
@@ -1067,7 +1067,7 @@ func TestListTruncationWarning(t *testing.T) {
 	}
 }
 
-func TestListTruncationJSONEnvelope(t *testing.T) {
+func TestListJSONAlwaysBareArray(t *testing.T) {
 	agents := []api.AgentInfo{
 		{Name: "agent-1", Phase: "running", Template: "default", Runtime: "docker", Project: "p"},
 		{Name: "agent-2", Phase: "running", Template: "default", Runtime: "docker", Project: "p"},
@@ -1078,12 +1078,11 @@ func TestListTruncationJSONEnvelope(t *testing.T) {
 	outputFormat = "json"
 	defer func() { outputFormat = oldOutputFormat }()
 
-	// Test with truncation: totalCount > len(agents)
 	oldStdout := os.Stdout
 	r, w, _ := os.Pipe()
 	os.Stdout = w
 
-	err := displayAgents(agents, false, false, true, 5)
+	err := displayAgents(agents, false, false)
 
 	_ = w.Close()
 	os.Stdout = oldStdout
@@ -1095,101 +1094,17 @@ func TestListTruncationJSONEnvelope(t *testing.T) {
 	var buf bytes.Buffer
 	_, _ = buf.ReadFrom(r)
 
-	var envelope struct {
-		Agents    []api.AgentInfo `json:"agents"`
-		Truncated bool            `json:"truncated"`
-		Total     int             `json:"totalCount"`
-		Shown     int             `json:"shownCount"`
-	}
-	if err := json.Unmarshal(buf.Bytes(), &envelope); err != nil {
-		t.Fatalf("failed to decode JSON envelope: %v\noutput: %s", err, buf.String())
-	}
-
-	if !envelope.Truncated {
-		t.Error("expected truncated=true")
-	}
-	if envelope.Total != 5 {
-		t.Errorf("expected totalCount=5, got %d", envelope.Total)
-	}
-	if envelope.Shown != 2 {
-		t.Errorf("expected shownCount=2, got %d", envelope.Shown)
-	}
-	if len(envelope.Agents) != 2 {
-		t.Errorf("expected 2 agents, got %d", len(envelope.Agents))
-	}
-}
-
-func TestListNoTruncationJSONBareArray(t *testing.T) {
-	agents := []api.AgentInfo{
-		{Name: "agent-1", Phase: "running", Template: "default", Runtime: "docker", Project: "p"},
-	}
-
-	// Save and restore global flags
-	oldOutputFormat := outputFormat
-	outputFormat = "json"
-	defer func() { outputFormat = oldOutputFormat }()
-
-	// Test without truncation: totalCount == len(agents)
-	oldStdout := os.Stdout
-	r, w, _ := os.Pipe()
-	os.Stdout = w
-
-	err := displayAgents(agents, false, false, false, 0)
-
-	_ = w.Close()
-	os.Stdout = oldStdout
-
-	if err != nil {
-		t.Fatalf("displayAgents returned error: %v", err)
-	}
-
-	var buf bytes.Buffer
-	_, _ = buf.ReadFrom(r)
-
-	// When not truncated, output should be a bare JSON array
+	// JSON output must always be a bare array, never an envelope
 	output := strings.TrimSpace(buf.String())
 	if !strings.HasPrefix(output, "[") {
-		t.Errorf("expected bare JSON array when not truncated, got: %s", output)
-	}
-}
-
-func TestListJSONNoFalseTruncationWithClientFilter(t *testing.T) {
-	// Regression test: when the server returns all agents (no truncation)
-	// but client-side filters (e.g. --running) reduce the list, the JSON
-	// output must NOT show a truncation envelope.
-	agents := []api.AgentInfo{
-		{Name: "running-agent", Phase: "running", Template: "default", Runtime: "docker", Project: "p"},
-		{Name: "stopped-agent", Phase: "stopped", Template: "default", Runtime: "docker", Project: "p"},
+		t.Errorf("expected bare JSON array, got: %s", output)
 	}
 
-	// Enable --running filter so one agent is filtered out client-side
-	oldListRunning := listRunning
-	oldOutputFormat := outputFormat
-	listRunning = true
-	outputFormat = "json"
-	defer func() { listRunning = oldListRunning; outputFormat = oldOutputFormat }()
-
-	oldStdout := os.Stdout
-	r, w, _ := os.Pipe()
-	os.Stdout = w
-
-	// wasTruncated=false, totalCount=2 (server returned all 2)
-	err := displayAgents(agents, false, false, false, 2)
-
-	_ = w.Close()
-	os.Stdout = oldStdout
-
-	if err != nil {
-		t.Fatalf("displayAgents returned error: %v", err)
+	var arr []api.AgentInfo
+	if err := json.Unmarshal(buf.Bytes(), &arr); err != nil {
+		t.Fatalf("failed to decode bare JSON array: %v\noutput: %s", err, buf.String())
 	}
-
-	var buf bytes.Buffer
-	_, _ = buf.ReadFrom(r)
-
-	// Output should be a bare JSON array (not an envelope), because the
-	// server did NOT truncate — the reduction was client-side only.
-	output := strings.TrimSpace(buf.String())
-	if !strings.HasPrefix(output, "[") {
-		t.Errorf("expected bare JSON array when server did not truncate, got: %s", output)
+	if len(arr) != 2 {
+		t.Errorf("expected 2 agents in array, got %d", len(arr))
 	}
 }
