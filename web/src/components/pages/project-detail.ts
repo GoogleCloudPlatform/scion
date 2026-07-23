@@ -1086,6 +1086,8 @@ export class ScionPageProjectDetail extends LitElement {
   }
 
   private onViewChange(e: CustomEvent<{ view: ViewMode }>): void {
+    // 'graph' is a link segment handled by the router, never an event here.
+    if (e.detail.view === 'graph') return;
     this.viewMode = e.detail.view;
   }
 
@@ -1434,6 +1436,7 @@ export class ScionPageProjectDetail extends LitElement {
           <scion-view-toggle
             .view=${this.viewMode}
             storageKey="scion-view-project-agents"
+            graphHref="/agents/graph?project=${this.projectId}"
             @view-change=${this.onViewChange}
           ></scion-view-toggle>
           ${can(this.agentScopeCapabilities, 'stop_all') && this.hasRunningAgents() ? html`
