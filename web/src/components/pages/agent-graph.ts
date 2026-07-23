@@ -68,6 +68,8 @@ export class AgentGraphPage extends LitElement {
   @state() private error: string | null = null;
   @state() private projectFilter = '';
   @state() private showUsers = false;
+  /** True when the page was entered with a ?project= param already set in the URL. */
+  private initiallyProjectScoped = false;
   @state() private hoverId: string | null = null;
   @state() private collapsedIds: ReadonlySet<string> = new Set();
   @state() private scale = 1;
@@ -326,6 +328,7 @@ export class AgentGraphPage extends LitElement {
 
     const params = new URLSearchParams(window.location.search);
     this.projectFilter = params.get('project') || '';
+    this.initiallyProjectScoped = !!params.get('project');
     this.focusId = params.get('focus') || '';
     this.showUsers = localStorage.getItem('scion-graph-show-users') === 'true';
 
@@ -596,8 +599,13 @@ export class AgentGraphPage extends LitElement {
   private onViewChange(e: CustomEvent<{ view: ViewMode }>): void {
     const mode = e.detail.view;
     if (mode === 'graph') return;
-    localStorage.setItem('scion-view-agents', mode);
-    window.history.pushState({}, '', '/agents');
+    if (this.initiallyProjectScoped && this.projectFilter) {
+      localStorage.setItem('scion-view-project-agents', mode);
+      window.history.pushState({}, '', `/projects/${this.projectFilter}`);
+    } else {
+      localStorage.setItem('scion-view-agents', mode);
+      window.history.pushState({}, '', '/agents');
+    }
     window.dispatchEvent(new PopStateEvent('popstate'));
   }
 
@@ -606,6 +614,7 @@ export class AgentGraphPage extends LitElement {
       <div class="header">
         <h1>Agents</h1>
         <div class="header-actions">
+          ${this.initiallyProjectScoped ? nothing : html`
           <sl-select
             size="small"
             placeholder="All projects"
@@ -615,7 +624,7 @@ export class AgentGraphPage extends LitElement {
             style="min-width: 180px"
           >
             ${this.projects.map(p => html`<sl-option value=${p.id}>${p.name}</sl-option>`)}
-          </sl-select>
+          </sl-select>`}
           <sl-switch
             size="small"
             ?checked=${this.showUsers}
