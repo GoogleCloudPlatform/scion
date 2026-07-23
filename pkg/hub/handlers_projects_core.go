@@ -1372,6 +1372,19 @@ func (s *Server) handleProjectRoutes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Check for nested /injected-skills path
+	if strings.HasPrefix(subPath, "injected-skills") {
+		siPath := strings.TrimPrefix(subPath, "injected-skills")
+		siPath = strings.TrimPrefix(siPath, "/")
+		siPath = strings.TrimSuffix(siPath, "/")
+		if siPath == "" {
+			s.handleProjectInjectedSkills(w, r, projectID)
+		} else {
+			s.handleProjectInjectedSkillByID(w, r, projectID, siPath)
+		}
+		return
+	}
+
 	// Check for nested /gcp-service-accounts path
 	if strings.HasPrefix(subPath, "gcp-service-accounts") {
 		saPath := strings.TrimPrefix(subPath, "gcp-service-accounts")
@@ -2287,6 +2300,14 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, id string
 		slog.Warn("failed to delete project secrets", "project_id", id, "error", err)
 	} else if n > 0 {
 		slog.Info("deleted project secrets", "project_id", id, "count", n)
+	}
+
+	// Clean up project-scoped skill injections (best-effort).
+	// These use scope/scope_id without FK cascade.
+	if n, err := s.store.DeleteSkillInjectionsByScope(ctx, store.SkillInjectionScopeProject, id); err != nil {
+		slog.Warn("failed to delete project skill injections", "project_id", id, "error", err)
+	} else if n > 0 {
+		slog.Info("deleted project skill injections", "project_id", id, "count", n)
 	}
 
 	// Warn about retained managed GCP service accounts (best-effort).

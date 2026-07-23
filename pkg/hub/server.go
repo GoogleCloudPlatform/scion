@@ -944,6 +944,12 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 		seedDevUser(ctx, s, cfg.DevUserConfig)
 	}
 
+	// Seed platform skills into hub_settings["injected_skills"].system (idempotent).
+	// Runs on every startup so that the system list is always in sync with the binary.
+	if err := srv.seedPlatformSkillInsertions(ctx); err != nil {
+		slog.Warn("Failed to seed platform skill insertions", "error", err)
+	}
+
 	// Abort any maintenance operations/migrations left in "running" state from
 	// a previous server instance that was restarted mid-operation.
 	if runs, migrations, err := s.AbortRunningMaintenanceOps(ctx); err != nil {
@@ -2734,6 +2740,17 @@ func (s *Server) registerRoutes() {
 	// Principal resolution endpoints (Phase 4)
 	s.mux.HandleFunc("/api/v1/users/me/groups", s.handleMyGroups)
 	s.mux.HandleFunc("/api/v1/principals/", s.handlePrincipalRoutes)
+
+	// User-scoped injected-skills endpoints (/users/me/...)
+	s.mux.HandleFunc("/api/v1/users/me/injected-skills", s.handleUserMeInjectedSkills)
+	s.mux.HandleFunc("/api/v1/users/me/injected-skills/", func(w http.ResponseWriter, r *http.Request) {
+		entryID := strings.TrimPrefix(r.URL.Path, "/api/v1/users/me/injected-skills/")
+		entryID = strings.TrimSuffix(entryID, "/")
+		s.handleUserMeInjectedSkillByID(w, r, entryID)
+	})
+
+	// Hub-scope injected-skills endpoint
+	s.mux.HandleFunc("/api/v1/hub/settings/injected-skills", s.handleHubInjectedSkills)
 
 	// Broker registration endpoints (Runtime Broker HMAC authentication)
 	s.mux.HandleFunc("/api/v1/brokers", s.handleBrokersEndpoint)

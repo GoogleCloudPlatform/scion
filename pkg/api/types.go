@@ -686,6 +686,29 @@ type SkillReference struct {
 	Optional bool   `json:"optional,omitempty" yaml:"optional,omitempty" koanf:"optional"`
 }
 
+// SkillInjectionEntry is the API representation of one injected-skills list entry.
+type SkillInjectionEntry struct {
+	ID        string `json:"id,omitempty"` // set on read, not required on write
+	SkillURI  string `json:"skillUri"`
+	SkillAs   string `json:"skillAs,omitempty"`
+	Optional  bool   `json:"optional,omitempty"`
+	SortOrder int    `json:"sortOrder,omitempty"`
+	// Enriched fields (populated when URI maps to a known skill bank entry):
+	SkillName string `json:"skillName,omitempty"`
+	SkillSlug string `json:"skillSlug,omitempty"`
+}
+
+// SkillInjectionList is the list response wrapper for injected-skills endpoints.
+type SkillInjectionList struct {
+	Entries []SkillInjectionEntry `json:"entries"`
+}
+
+// HubSkillInjectionSetting is the value stored in hub_settings["injected_skills"].
+type HubSkillInjectionSetting struct {
+	System      []SkillReference `json:"system"`       // seeded from binary, immutable
+	UserDefined []SkillReference `json:"user_defined"` // admin-managed
+}
+
 // SecretKeyInfo provides metadata about a required secret key, including
 // a human-readable description and the source that declared it.
 type SecretKeyInfo struct {

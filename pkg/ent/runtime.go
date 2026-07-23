@@ -39,6 +39,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/schema"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/skill"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/skillinjection"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/skillregistry"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/skillversion"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/subscriptiontemplate"
@@ -976,6 +977,24 @@ func init() {
 	skillDescID := skillFields[0].Descriptor()
 	// skill.DefaultID holds the default value on creation for the id field.
 	skill.DefaultID = skillDescID.Default.(func() uuid.UUID)
+	skillinjectionFields := schema.SkillInjection{}.Fields()
+	_ = skillinjectionFields
+	// skillinjectionDescOptional is the schema descriptor for optional field.
+	skillinjectionDescOptional := skillinjectionFields[5].Descriptor()
+	// skillinjection.DefaultOptional holds the default value on creation for the optional field.
+	skillinjection.DefaultOptional = skillinjectionDescOptional.Default.(bool)
+	// skillinjectionDescSortOrder is the schema descriptor for sort_order field.
+	skillinjectionDescSortOrder := skillinjectionFields[6].Descriptor()
+	// skillinjection.DefaultSortOrder holds the default value on creation for the sort_order field.
+	skillinjection.DefaultSortOrder = skillinjectionDescSortOrder.Default.(int)
+	// skillinjectionDescCreatedAt is the schema descriptor for created_at field.
+	skillinjectionDescCreatedAt := skillinjectionFields[7].Descriptor()
+	// skillinjection.DefaultCreatedAt holds the default value on creation for the created_at field.
+	skillinjection.DefaultCreatedAt = skillinjectionDescCreatedAt.Default.(func() time.Time)
+	// skillinjectionDescID is the schema descriptor for id field.
+	skillinjectionDescID := skillinjectionFields[0].Descriptor()
+	// skillinjection.DefaultID holds the default value on creation for the id field.
+	skillinjection.DefaultID = skillinjectionDescID.Default.(func() uuid.UUID)
 	skillregistryFields := schema.SkillRegistry{}.Fields()
 	_ = skillregistryFields
 	// skillregistryDescName is the schema descriptor for name field.

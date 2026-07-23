@@ -78,6 +78,8 @@ type Tx struct {
 	Secret *SecretClient
 	// Skill is the client for interacting with the Skill builders.
 	Skill *SkillClient
+	// SkillInjection is the client for interacting with the SkillInjection builders.
+	SkillInjection *SkillInjectionClient
 	// SkillRegistry is the client for interacting with the SkillRegistry builders.
 	SkillRegistry *SkillRegistryClient
 	// SkillVersion is the client for interacting with the SkillVersion builders.
@@ -254,6 +256,7 @@ func (tx *Tx) init() {
 	tx.ScheduledEvent = NewScheduledEventClient(tx.config)
 	tx.Secret = NewSecretClient(tx.config)
 	tx.Skill = NewSkillClient(tx.config)
+	tx.SkillInjection = NewSkillInjectionClient(tx.config)
 	tx.SkillRegistry = NewSkillRegistryClient(tx.config)
 	tx.SkillVersion = NewSkillVersionClient(tx.config)
 	tx.SubscriptionTemplate = NewSubscriptionTemplateClient(tx.config)

@@ -16,9 +16,11 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
+	"sort"
 	"strconv"
 	"time"
 
@@ -292,6 +294,115 @@ func (s *Server) populateAgentConfig(ctx context.Context, agent *store.Agent, pr
 			}
 		}
 	}
+
+	// Merge injected skills from hub/user/project scopes into InlineConfig.Skills
+	// so the provisioner's existing Step 3b handles them.
+	s.mergeInjectedSkills(ctx, agent, project)
+}
+
+// mergeInjectedSkills fetches injected-skills refs from hub, user, and project
+// scopes and merges them with template-level skills (highest precedence) into
+// agent.AppliedConfig.InlineConfig.Skills. Fetches are best-effort: errors are
+// logged and that scope's skills are omitted for this provisioning.
+func (s *Server) mergeInjectedSkills(ctx context.Context, agent *store.Agent, project *store.Project) {
+	if agent.AppliedConfig.InlineConfig == nil {
+		agent.AppliedConfig.InlineConfig = &api.ScionConfig{}
+	}
+
+	// Fetch hub-scope injected skills (system + user_defined).
+	// ErrNotFound is the normal case when no hub skills are configured; all
+	// other errors are unexpected and logged as warnings (best-effort).
+	var hubRefs []api.SkillReference
+	if hs, err := s.store.GetHubSetting(ctx, "injected_skills"); err != nil {
+		if !errors.Is(err, store.ErrNotFound) {
+			slog.Warn("mergeInjectedSkills: failed to fetch hub injected skills setting", "error", err)
+		}
+	} else {
+		var setting api.HubSkillInjectionSetting
+		if err := json.Unmarshal(hs.Value, &setting); err != nil {
+			slog.Warn("mergeInjectedSkills: failed to unmarshal hub injected skills setting", "error", err)
+		} else {
+			hubRefs = append(setting.System, setting.UserDefined...)
+		}
+	}
+
+	// Fetch user-scope injected skills.
+	var userRefs []api.SkillReference
+	if agent.OwnerID != "" {
+		if sis, err := s.store.ListSkillInjections(ctx, store.SkillInjectionScopeUser, agent.OwnerID); err != nil {
+			if !errors.Is(err, store.ErrNotFound) {
+				slog.Warn("mergeInjectedSkills: failed to fetch user injected skills", "error", err)
+			}
+			// continue, best-effort
+		} else {
+			for _, si := range sis {
+				userRefs = append(userRefs, si.ToSkillReference())
+			}
+		}
+	}
+
+	// Fetch project-scope injected skills.
+	var projectRefs []api.SkillReference
+	if project != nil {
+		if sis, err := s.store.ListSkillInjections(ctx, store.SkillInjectionScopeProject, project.ID); err != nil {
+			if !errors.Is(err, store.ErrNotFound) {
+				slog.Warn("mergeInjectedSkills: failed to fetch project injected skills", "error", err)
+			}
+			// continue, best-effort
+		} else {
+			for _, si := range sis {
+				projectRefs = append(projectRefs, si.ToSkillReference())
+			}
+		}
+	}
+
+	// Template refs are already in InlineConfig.Skills (highest precedence).
+	templateRefs := agent.AppliedConfig.InlineConfig.Skills
+
+	// Merge: hub → user → project → template (lowest to highest precedence).
+	merged := mergeSkillRefs(hubRefs, userRefs, projectRefs, templateRefs)
+	agent.AppliedConfig.InlineConfig.Skills = merged
+}
+
+// mergeSkillRefs deduplicates skill references by base URI across multiple scope
+// slices. Later slices have higher precedence. When the same base URI appears in
+// multiple scopes with different version pins, the higher-precedence entry wins.
+// A single warning is emitted per base URI where the winning version differs from
+// the first-seen version (version conflict). The result is returned in ascending
+// base-URI order for deterministic output.
+func mergeSkillRefs(scopes ...[]api.SkillReference) []api.SkillReference {
+	// seen holds the current winner (last write wins — highest precedence).
+	// first holds the initial entry per base URI so we can detect version conflicts
+	// without firing intermediate warnings for every overwrite in a 3+ scope chain.
+	seen := map[string]api.SkillReference{}
+	first := map[string]api.SkillReference{}
+	for _, refs := range scopes {
+		for _, ref := range refs {
+			base := skillBaseURI(ref.URI)
+			if _, ok := seen[base]; !ok {
+				first[base] = ref
+			}
+			seen[base] = ref
+		}
+	}
+	// Warn once per base URI where the final winner has a different version than
+	// the first-seen entry. This avoids misleading log noise when 3+ scopes
+	// conflict (e.g. labelling transient intermediates as "winner").
+	for base, winner := range seen {
+		orig := first[base]
+		if orig.URI != winner.URI {
+			slog.Warn("possible skill injection version conflict or duplicate URI",
+				"base_uri", base, "winner", winner.URI, "original", orig.URI)
+		}
+	}
+	result := make([]api.SkillReference, 0, len(seen))
+	for _, ref := range seen {
+		result = append(result, ref)
+	}
+	sort.Slice(result, func(i, j int) bool {
+		return skillBaseURI(result[i].URI) < skillBaseURI(result[j].URI)
+	})
+	return result
 }
 
 // existingAgentResult describes the outcome of handleExistingAgent.

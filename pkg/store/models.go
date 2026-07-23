@@ -2110,3 +2110,31 @@ const (
 	SkillVersionStatusDeprecated = "deprecated"
 	SkillVersionStatusArchived   = "archived"
 )
+
+// =============================================================================
+// Skill Injections (Injected-Skills List)
+// =============================================================================
+
+// SkillInjection is one entry in a project's or user's injected-skills list.
+type SkillInjection struct {
+	ID        string    `json:"id"`
+	Scope     string    `json:"scope"`
+	ScopeID   string    `json:"scopeId"`
+	SkillURI  string    `json:"skillUri"`
+	SkillAs   string    `json:"skillAs,omitempty"`
+	Optional  bool      `json:"optional"`
+	SortOrder int       `json:"sortOrder"`
+	CreatedAt time.Time `json:"createdAt"`
+	CreatedBy string    `json:"createdBy,omitempty"`
+}
+
+// ToSkillReference converts to the api.SkillReference wire type used by the provisioner.
+func (si SkillInjection) ToSkillReference() api.SkillReference {
+	return api.SkillReference{URI: si.SkillURI, As: si.SkillAs, Optional: si.Optional}
+}
+
+// SkillInjectionScope constants for skill injection scope values.
+const (
+	SkillInjectionScopeProject = "project"
+	SkillInjectionScopeUser    = "user"
+)

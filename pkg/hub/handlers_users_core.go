@@ -15,6 +15,7 @@
 package hub
 
 import (
+	"log/slog"
 	"net/http"
 	"strconv"
 
@@ -186,7 +187,17 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
 }
 
 func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request, id string) {
-	if err := s.store.DeleteUser(r.Context(), id); err != nil {
+	ctx := r.Context()
+
+	// Clean up user-scoped skill injections before deleting the user record.
+	// These rows have no FK cascade, so they must be removed explicitly.
+	if n, err := s.store.DeleteSkillInjectionsByScope(ctx, store.SkillInjectionScopeUser, id); err != nil {
+		slog.Warn("failed to delete user skill injections", "user_id", id, "error", err)
+	} else if n > 0 {
+		slog.Info("deleted user skill injections", "user_id", id, "count", n)
+	}
+
+	if err := s.store.DeleteUser(ctx, id); err != nil {
 		writeErrorFromErr(w, err, "")
 		return
 	}

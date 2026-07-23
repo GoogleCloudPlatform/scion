@@ -125,6 +125,9 @@ type Store interface {
 
 	// HubSetting operations (Two-Tier Settings Architecture)
 	HubSettingStore
+
+	// SkillInjection operations (Injected-Skills List)
+	SkillInjectionStore
 }
 
 // AgentStore defines agent-related persistence operations.
@@ -1345,6 +1348,46 @@ type SkillRegistryStore interface {
 // =============================================================================
 // Hub Settings (Two-Tier Settings Architecture)
 // =============================================================================
+
+// =============================================================================
+// Skill Injections (Injected-Skills List)
+// =============================================================================
+
+// SkillInjectionStore defines persistence operations for the injected-skills
+// list scoped to a project or user.
+type SkillInjectionStore interface {
+	// ListSkillInjections returns all skill injections for the given scope+scopeID,
+	// ordered by sort_order ascending.
+	ListSkillInjections(ctx context.Context, scope, scopeID string) ([]SkillInjection, error)
+
+	// AddSkillInjection creates a new skill injection entry.
+	// If si.ID is empty, an ID is auto-generated and written back to si.ID on
+	// success. Callers that need a stable ID before the call can pre-populate
+	// si.ID with any valid UUID string.
+	// Returns ErrAlreadyExists if an entry with the same (scope, scope_id, skill_uri) already exists.
+	AddSkillInjection(ctx context.Context, si *SkillInjection) error
+
+	// UpdateSkillInjection updates the mutable fields of a skill injection entry.
+	// Returns ErrNotFound if the entry with the given ID does not exist.
+	UpdateSkillInjection(ctx context.Context, si *SkillInjection) error
+
+	// RemoveSkillInjection deletes a skill injection entry by ID.
+	// Returns ErrNotFound if the entry doesn't exist.
+	RemoveSkillInjection(ctx context.Context, id string) error
+
+	// SetSkillInjections atomically replaces the full list for a scope+scopeID.
+	// All existing entries for (scope, scopeID) are deleted and the new entries
+	// are inserted in a single transaction. SortOrder is taken from each entry;
+	// callers should set it before calling (handlers default to request position).
+	// Phase 3 note: provisioner integration will call this with []SkillInjection
+	// constructed from the merged hub+project+user lists.
+	SetSkillInjections(ctx context.Context, scope, scopeID string, entries []SkillInjection, createdBy string) error
+
+	// DeleteSkillInjectionsByScope removes all skill injection entries for the
+	// given scope+scopeID. Used during project or user deletion to cascade-clean
+	// rows that have no FK cascade. Returns the number of rows deleted.
+	DeleteSkillInjectionsByScope(ctx context.Context, scope, scopeID string) (int, error)
+}
 
 // HubSettingStore defines persistence operations for operational hub settings.
 // Each setting is a section (e.g. "access", "telemetry") with a JSON value.

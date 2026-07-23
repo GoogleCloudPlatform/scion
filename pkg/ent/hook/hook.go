@@ -405,6 +405,18 @@ func (f SkillFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error
 	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.SkillMutation", m)
 }
 
+// The SkillInjectionFunc type is an adapter to allow the use of ordinary
+// function as SkillInjection mutator.
+type SkillInjectionFunc func(context.Context, *ent.SkillInjectionMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f SkillInjectionFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.SkillInjectionMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.SkillInjectionMutation", m)
+}
+
 // The SkillRegistryFunc type is an adapter to allow the use of ordinary
 // function as SkillRegistry mutator.
 type SkillRegistryFunc func(context.Context, *ent.SkillRegistryMutation) (ent.Value, error)

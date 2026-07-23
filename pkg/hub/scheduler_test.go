@@ -455,6 +455,14 @@ func (m *mockScheduledEventStore) GetTemplateBySlug(_ context.Context, _, _, _ s
 	return nil, store.ErrNotFound
 }
 
+func (m *mockScheduledEventStore) GetHubSetting(_ context.Context, _ string) (*store.HubSetting, error) {
+	return nil, store.ErrNotFound
+}
+
+func (m *mockScheduledEventStore) ListSkillInjections(_ context.Context, _, _ string) ([]store.SkillInjection, error) {
+	return nil, nil
+}
+
 // getEvent returns a snapshot of an event by ID (test helper, no error).
 // It returns a copy so callers can read fields without holding the lock.
 func (m *mockScheduledEventStore) getEvent(id string) *store.ScheduledEvent {
