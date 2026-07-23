@@ -429,6 +429,10 @@ export interface Agent {
   createdBy?: string;
   appliedConfig?: AgentAppliedConfig;
 
+  // Ordered ancestor chain [root, ..., parent]; last entry is the direct
+  // parent (user or spawning agent). Drives the lineage graph view.
+  ancestry?: string[];
+
   // Status tab fields (limits tracking)
   currentTurns?: number;
   currentModelCalls?: number;
