@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -901,5 +902,135 @@ func TestTokenDelete(t *testing.T) {
 	err := client.Tokens().Delete(context.Background(), "token-123")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+// TestHealth_GFEInterception_FallsBackToHealth verifies that when /healthz
+// returns 200 with a non-JSON Content-Type (GFE proxy interception), Health()
+// falls back to /health and returns the correct HealthResponse.
+func TestHealth_GFEInterception_FallsBackToHealth(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/healthz":
+			w.Header().Set("Content-Type", "text/plain")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("OK"))
+		case "/health":
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(HealthResponse{Status: "ok", Version: "1.0.0"})
+		default:
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client, _ := New(server.URL)
+	health, err := client.Health(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if health.Status != "ok" {
+		t.Errorf("expected status 'ok', got %q", health.Status)
+	}
+}
+
+// TestHealth_404_FallsBackToHealth verifies that when /healthz returns 404,
+// Health() falls back to /health (the pre-existing documented fallback).
+func TestHealth_404_FallsBackToHealth(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/healthz":
+			w.WriteHeader(http.StatusNotFound)
+		case "/health":
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(HealthResponse{Status: "ok", Version: "1.0.0"})
+		default:
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client, _ := New(server.URL)
+	health, err := client.Health(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if health.Status != "ok" {
+		t.Errorf("expected status 'ok', got %q", health.Status)
+	}
+}
+
+// TestHealth_BothEndpointsIntercepted verifies that when both /healthz and
+// /health return non-JSON responses, Health() returns a non-nil decode error.
+func TestHealth_BothEndpointsIntercepted(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("OK"))
+	}))
+	defer server.Close()
+
+	client, _ := New(server.URL)
+	health, err := client.Health(context.Background())
+	if err == nil {
+		t.Fatalf("expected an error when both endpoints return non-JSON, got nil (health=%v)", health)
+	}
+	if !strings.Contains(err.Error(), "failed to decode response") {
+		t.Errorf("expected decode error, got: %v", err)
+	}
+}
+
+// TestHealth_AbsentContentType_JSON verifies that when /healthz returns 200
+// with no Content-Type header but a valid JSON body, Health() succeeds without
+// falling back (absent CT passes through to DecodeResponse).
+//
+// Note: Go's httptest server auto-sniffs Content-Type if none is set. To
+// simulate a truly absent header (ct == ""), we explicitly set Content-Type
+// to the empty string before writing the body — this prevents sniffing while
+// leaving the header value empty, which is what our check evaluates.
+func TestHealth_AbsentContentType_JSON(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/healthz" {
+			t.Errorf("expected only /healthz to be called, got %s", r.URL.Path)
+		}
+		// Explicitly set to "" to prevent httptest server's content-type sniffing
+		// while still causing resp.Header.Get("Content-Type") to return "".
+		w.Header().Set("Content-Type", "")
+		_ = json.NewEncoder(w).Encode(HealthResponse{Status: "ok", Version: "2.0.0"})
+	}))
+	defer server.Close()
+
+	client, _ := New(server.URL)
+	health, err := client.Health(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if health.Status != "ok" {
+		t.Errorf("expected status 'ok', got %q", health.Status)
+	}
+}
+
+// TestHealth_AbsentContentType_NonJSON verifies that when /healthz returns 200
+// with no Content-Type header and a non-JSON body, Health() returns a decode
+// error (no fallback triggered — absent CT means isProxyIntercepted is false).
+func TestHealth_AbsentContentType_NonJSON(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/healthz" {
+			t.Errorf("expected only /healthz to be called, got %s", r.URL.Path)
+		}
+		// Explicitly set to "" to prevent httptest server's content-type sniffing.
+		w.Header().Set("Content-Type", "")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("plain text, not json"))
+	}))
+	defer server.Close()
+
+	client, _ := New(server.URL)
+	health, err := client.Health(context.Background())
+	if err == nil {
+		t.Fatalf("expected decode error, got nil (health=%v)", health)
+	}
+	if !strings.Contains(err.Error(), "failed to decode response") {
+		t.Errorf("expected decode error, got: %v", err)
 	}
 }
