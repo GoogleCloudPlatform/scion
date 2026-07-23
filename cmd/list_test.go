@@ -968,7 +968,7 @@ func TestListCountFlag(t *testing.T) {
 	oldListAll := listAll
 	oldListCount := listCount
 	oldOutputFormat := outputFormat
-	listAll = true  // avoid project ID lookup
+	listAll = true // avoid project ID lookup
 	listCount = 10
 	outputFormat = ""
 	defer func() {

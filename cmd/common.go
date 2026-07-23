@@ -1010,12 +1010,16 @@ func startAgentViaHub(hubCtx *HubContext, agentName, task string, resume bool, i
 					if agentID == "" {
 						agentID = agentName
 					}
+					attachOpts, transportSrc, err := resolveAttachOptions()
+					if err != nil {
+						return err
+					}
 					token := getHubAccessToken(hubCtx.Endpoint)
-					if token == "" {
+					if token == "" && transportSrc == nil {
 						return fmt.Errorf("no access token found for Hub\n\nPlease login first: scion hub auth login")
 					}
 					statusf("Attaching to agent '%s' via Hub...\n", agentName)
-					return wsclient.AttachToAgent(context.Background(), hubCtx.Endpoint, token, agentID)
+					return wsclient.AttachToAgent(context.Background(), hubCtx.Endpoint, token, agentID, attachOpts...)
 				}
 				if agentPhase == string(state.PhaseError) || agentPhase == string(state.PhaseStopped) {
 					return fmt.Errorf("agent '%s' failed to start (phase: %s)", agentName, agentPhase)
@@ -1111,14 +1115,23 @@ func startAgentViaHub(hubCtx *HubContext, agentName, task string, resume bool, i
 	}
 
 ready:
-	// Get access token for WebSocket authentication
+	// Resolve transport auth for IAP/Cloud Run traversal FIRST — in IAP mode
+	// there is no application-level token by design, so transport auth must be
+	// determined before deciding whether an app token is required.
+	attachOpts, transportSrc, err := resolveAttachOptions()
+	if err != nil {
+		return err
+	}
+
+	// Get access token for WebSocket authentication.
+	// Only require an application token when no transport source is configured.
 	token := getHubAccessToken(hubCtx.Endpoint)
-	if token == "" {
+	if token == "" && transportSrc == nil {
 		return fmt.Errorf("no access token found for Hub\n\nPlease login first: scion hub auth login")
 	}
 
 	statusf("Attaching to agent '%s' via Hub...\n", agentName)
-	return wsclient.AttachToAgent(context.Background(), hubCtx.Endpoint, token, agentID)
+	return wsclient.AttachToAgent(context.Background(), hubCtx.Endpoint, token, agentID, attachOpts...)
 }
 
 func createAgentWithBrokerResolution(ctx context.Context, hubCtx *HubContext, projectID string, req *hubclient.CreateAgentRequest) (*hubclient.CreateAgentResponse, error) {
