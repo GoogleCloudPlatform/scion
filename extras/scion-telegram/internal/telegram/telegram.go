@@ -40,6 +40,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/plugin"
+	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 )
 
 const (
@@ -266,6 +267,22 @@ func (b *TelegramBroker) Configure(config map[string]string) error {
 		return fmt.Errorf("failed to validate bot token: %w", err)
 	}
 	b.botInfo = bot
+
+	// Resolve transport auth for IAP-protected hub endpoints.
+	transportMode := config["transport_mode"]
+	transportAudience := config["transport_audience"]
+	src, mode, tErr := transportauth.ResolveBrokerTransport(transportMode, transportAudience, nil)
+	if tErr != nil {
+		b.log.Warn("Failed to resolve transport auth, continuing without IAP tokens", "error", tErr)
+	}
+	if src != nil {
+		if b.httpClient == nil {
+			b.httpClient = &http.Client{Timeout: 10 * time.Second}
+		}
+		b.httpClient.Transport = transportauth.Wrap(b.httpClient.Transport, src, mode)
+		b.log.Info("Transport auth configured for Telegram broker",
+			"mode", transportMode, "audience", transportAudience)
+	}
 
 	// Start registration server if an address is configured
 	if b.registerAddr != "" {

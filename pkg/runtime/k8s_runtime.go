@@ -273,6 +273,22 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (string, 
 			if _, err := r.createSecretProviderClass(ctx, namespace, config.Name, config.ResolvedSecrets, config.Labels); err != nil {
 				return "", fmt.Errorf("failed to create SecretProviderClass: %w", err)
 			}
+			// GKE hybrid path: the managed SM add-on lacks RBAC to sync
+			// secretObjects into K8s Secrets, so we create a K8s Secret
+			// directly for environment-type secrets (env vars need
+			// secretKeyRef). File-type secrets are served by the CSI mount
+			// and must NOT be duplicated into etcd.
+			var envSecrets []api.ResolvedSecret
+			for _, s := range config.ResolvedSecrets {
+				if s.Type != "file" {
+					envSecrets = append(envSecrets, s)
+				}
+			}
+			if len(envSecrets) > 0 {
+				if _, err := r.createAgentSecret(ctx, namespace, config.Name, envSecrets, config.Labels); err != nil {
+					return "", fmt.Errorf("failed to create agent secret for env vars: %w", err)
+				}
+			}
 		} else {
 			if _, err := r.createAgentSecret(ctx, namespace, config.Name, config.ResolvedSecrets, config.Labels); err != nil {
 				return "", fmt.Errorf("failed to launch container: %w", err)
@@ -553,7 +569,11 @@ func (r *KubernetesRuntime) createSecretProviderClass(ctx context.Context, names
 		return "", fmt.Errorf("failed to marshal secrets parameter: %w", err)
 	}
 
-	// Build secretObjects for env-type secrets (synced to a K8s Secret)
+	// Build secretObjects for env-type secrets (synced to a K8s Secret).
+	// On GKE managed add-on, skip entirely — the add-on's ClusterRole lacks
+	// RBAC to create K8s Secrets, so secretObjects are dead config that
+	// produces FailedToCreateSecret events. Env vars are handled by the
+	// K8s Secret created via createAgentSecret() in the hybrid path.
 	type secretObjectData struct {
 		Key        string `json:"key"`
 		ObjectName string `json:"objectName"`
@@ -564,24 +584,26 @@ func (r *KubernetesRuntime) createSecretProviderClass(ctx context.Context, names
 		Data       []secretObjectData `json:"data"`
 	}
 
-	var envData []secretObjectData
-	for _, s := range secrets {
-		if s.Ref == "" || s.Type != "environment" {
-			continue
-		}
-		envData = append(envData, secretObjectData{
-			Key:        s.Name,
-			ObjectName: s.Name,
-		})
-	}
-
 	var secretObjects []secretObject
-	if len(envData) > 0 {
-		secretObjects = append(secretObjects, secretObject{
-			SecretName: envSecretName,
-			Type:       "Opaque",
-			Data:       envData,
-		})
+	if !r.GKEMode {
+		var envData []secretObjectData
+		for _, s := range secrets {
+			if s.Ref == "" || s.Type != "environment" {
+				continue
+			}
+			envData = append(envData, secretObjectData{
+				Key:        s.Name,
+				ObjectName: s.Name,
+			})
+		}
+
+		if len(envData) > 0 {
+			secretObjects = append(secretObjects, secretObject{
+				SecretName: envSecretName,
+				Type:       "Opaque",
+				Data:       envData,
+			})
+		}
 	}
 
 	// Build labels
@@ -594,8 +616,15 @@ func (r *KubernetesRuntime) createSecretProviderClass(ctx context.Context, names
 		}
 	}
 
+	// GKE's managed Secret Manager add-on registers its provider as "gke",
+	// whereas the upstream open-source CSI driver uses "gcp".
+	providerName := "gcp"
+	if r.GKEMode {
+		providerName = "gke"
+	}
+
 	spec := map[string]interface{}{
-		"provider": "gcp",
+		"provider": providerName,
 		"parameters": map[string]interface{}{
 			"secrets": string(secretsParam),
 		},
@@ -982,16 +1011,25 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 		agentSecretName := fmt.Sprintf("scion-agent-%s", config.Name)
 
 		if useGKEPath {
-			// GKE path: CSI volume for file-type secrets, secretKeyRef to -env secret for env vars
+			// GKE hybrid path: CSI volume for file-type secrets, secretKeyRef
+			// to K8s Secret (scion-agent-{name}) for env vars. The managed
+			// SM add-on cannot sync secretObjects, so env vars reference the
+			// Hub-created K8s Secret instead of the CSI-synced -env secret.
 			spcName := fmt.Sprintf("scion-agent-%s", config.Name)
-			envSecretName := fmt.Sprintf("scion-agent-%s-env", config.Name)
 
-			// Add CSI volume (required for secretObjects sync)
+			// Add CSI volume (required for file-type secret mounts).
+			// GKE's managed add-on registers the driver as
+			// "secrets-store-gke.csi.k8s.io"; the upstream open-source
+			// driver uses "secrets-store.csi.x-k8s.io".
+			csiDriverName := "secrets-store.csi.x-k8s.io"
+			if r.GKEMode {
+				csiDriverName = "secrets-store-gke.csi.k8s.io"
+			}
 			extraVolumes = append(extraVolumes, corev1.Volume{
 				Name: "secrets-store",
 				VolumeSource: corev1.VolumeSource{
 					CSI: &corev1.CSIVolumeSource{
-						Driver:   "secrets-store.csi.x-k8s.io",
+						Driver:   csiDriverName,
 						ReadOnly: boolPtr(true),
 						VolumeAttributes: map[string]string{
 							"secretProviderClass": spcName,
@@ -1012,7 +1050,7 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 						Name: s.Target,
 						ValueFrom: &corev1.EnvVarSource{
 							SecretKeyRef: &corev1.SecretKeySelector{
-								LocalObjectReference: corev1.LocalObjectReference{Name: envSecretName},
+								LocalObjectReference: corev1.LocalObjectReference{Name: agentSecretName},
 								Key:                  s.Name,
 							},
 						},

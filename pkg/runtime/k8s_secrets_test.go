@@ -205,8 +205,8 @@ func TestBuildPod_GKESecrets_Environment(t *testing.T) {
 			if v.CSI == nil {
 				t.Fatal("expected CSI volume source")
 			}
-			if v.CSI.Driver != "secrets-store.csi.x-k8s.io" {
-				t.Errorf("expected CSI driver secrets-store.csi.x-k8s.io, got %s", v.CSI.Driver)
+			if v.CSI.Driver != "secrets-store-gke.csi.k8s.io" {
+				t.Errorf("expected CSI driver secrets-store-gke.csi.k8s.io (GKE managed add-on), got %s", v.CSI.Driver)
 			}
 			if v.CSI.VolumeAttributes["secretProviderClass"] != "scion-agent-test-agent" {
 				t.Errorf("expected secretProviderClass scion-agent-test-agent, got %s", v.CSI.VolumeAttributes["secretProviderClass"])
@@ -217,8 +217,10 @@ func TestBuildPod_GKESecrets_Environment(t *testing.T) {
 		t.Fatal("expected secrets-store CSI volume")
 	}
 
-	// Environment secrets should reference the -env K8s Secret
-	envSecretName := "scion-agent-test-agent-env"
+	// GKE hybrid path: environment secrets reference the Hub-created K8s
+	// Secret (scion-agent-{name}), NOT the CSI-synced -env secret, because
+	// the GKE managed SM add-on lacks RBAC for secretObjects sync.
+	agentSecretName := "scion-agent-test-agent"
 	foundEnv := false
 	for _, env := range pod.Spec.Containers[0].Env {
 		if env.Name == "API_KEY" {
@@ -226,8 +228,8 @@ func TestBuildPod_GKESecrets_Environment(t *testing.T) {
 			if env.ValueFrom == nil || env.ValueFrom.SecretKeyRef == nil {
 				t.Fatal("API_KEY should have ValueFrom.SecretKeyRef in GKE mode")
 			}
-			if env.ValueFrom.SecretKeyRef.Name != envSecretName {
-				t.Errorf("expected secret ref to %s, got %s", envSecretName, env.ValueFrom.SecretKeyRef.Name)
+			if env.ValueFrom.SecretKeyRef.Name != agentSecretName {
+				t.Errorf("expected secret ref to %s, got %s", agentSecretName, env.ValueFrom.SecretKeyRef.Name)
 			}
 		}
 	}
@@ -508,8 +510,8 @@ func TestCreateSecretProviderClass(t *testing.T) {
 	if !ok {
 		t.Fatal("expected spec in SPC")
 	}
-	if spec["provider"] != "gcp" {
-		t.Errorf("expected provider gcp, got %v", spec["provider"])
+	if spec["provider"] != "gke" {
+		t.Errorf("expected provider gke (GKE managed add-on), got %v", spec["provider"])
 	}
 
 	// Check that parameters.secrets contains the GCP SM paths
@@ -653,6 +655,236 @@ func TestDelete_PodNotFound_StillCleansSecrets(t *testing.T) {
 
 func writeTestFile(path, content string) error {
 	return os.WriteFile(path, []byte(content), 0644)
+}
+
+func TestCreateSecretProviderClass_GKE_SkipsSecretObjects(t *testing.T) {
+	clientset := k8sfake.NewClientset()
+	scheme := k8sruntime.NewScheme()
+	scheme.AddKnownTypeWithName(
+		schema.GroupVersionKind{Group: "secrets-store.csi.x-k8s.io", Version: "v1", Kind: "SecretProviderClass"},
+		&k8sruntime.Unknown{},
+	)
+	scheme.AddKnownTypeWithName(
+		schema.GroupVersionKind{Group: "secrets-store.csi.x-k8s.io", Version: "v1", Kind: "SecretProviderClassList"},
+		&k8sruntime.Unknown{},
+	)
+	dynClient := fake.NewSimpleDynamicClient(scheme)
+	client := k8s.NewTestClient(dynClient, clientset)
+	rt := NewKubernetesRuntime(client)
+	rt.GKEMode = true
+	ctx := context.Background()
+
+	secrets := []api.ResolvedSecret{
+		{Name: "API_KEY", Type: "environment", Target: "API_KEY", Value: "sk-123", Source: "user", Ref: "projects/my-project/secrets/api-key"},
+		{Name: "TLS_CERT", Type: "file", Target: "/etc/ssl/cert.pem", Value: "cert-data", Source: "user", Ref: "projects/my-project/secrets/tls-cert"},
+	}
+	labels := map[string]string{"scion.name": "test-agent"}
+
+	name, err := rt.createSecretProviderClass(ctx, "default", "test-agent", secrets, labels)
+	if err != nil {
+		t.Fatalf("createSecretProviderClass failed: %v", err)
+	}
+
+	spc, err := dynClient.Resource(k8s.SecretProviderClassGVR).Namespace("default").Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("failed to get SPC: %v", err)
+	}
+
+	spec := spc.Object["spec"].(map[string]interface{})
+
+	// GKE mode should NOT have secretObjects — the managed add-on lacks
+	// RBAC to create K8s Secrets, so they would just generate errors.
+	if _, exists := spec["secretObjects"]; exists {
+		t.Error("GKE mode SPC should NOT have secretObjects (managed add-on lacks RBAC)")
+	}
+
+	// Verify provider is still "gke"
+	if spec["provider"] != "gke" {
+		t.Errorf("expected provider gke, got %v", spec["provider"])
+	}
+}
+
+func TestCreateSecretProviderClass_NonGKE_HasSecretObjects(t *testing.T) {
+	clientset := k8sfake.NewClientset()
+	scheme := k8sruntime.NewScheme()
+	scheme.AddKnownTypeWithName(
+		schema.GroupVersionKind{Group: "secrets-store.csi.x-k8s.io", Version: "v1", Kind: "SecretProviderClass"},
+		&k8sruntime.Unknown{},
+	)
+	scheme.AddKnownTypeWithName(
+		schema.GroupVersionKind{Group: "secrets-store.csi.x-k8s.io", Version: "v1", Kind: "SecretProviderClassList"},
+		&k8sruntime.Unknown{},
+	)
+	dynClient := fake.NewSimpleDynamicClient(scheme)
+	client := k8s.NewTestClient(dynClient, clientset)
+	rt := NewKubernetesRuntime(client)
+	rt.GKEMode = false // Non-GKE (upstream open-source driver)
+	ctx := context.Background()
+
+	secrets := []api.ResolvedSecret{
+		{Name: "API_KEY", Type: "environment", Target: "API_KEY", Value: "sk-123", Source: "user", Ref: "projects/my-project/secrets/api-key"},
+	}
+	labels := map[string]string{"scion.name": "test-agent"}
+
+	name, err := rt.createSecretProviderClass(ctx, "default", "test-agent", secrets, labels)
+	if err != nil {
+		t.Fatalf("createSecretProviderClass failed: %v", err)
+	}
+
+	spc, err := dynClient.Resource(k8s.SecretProviderClassGVR).Namespace("default").Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("failed to get SPC: %v", err)
+	}
+
+	spec := spc.Object["spec"].(map[string]interface{})
+
+	// Non-GKE mode should RETAIN secretObjects (upstream driver has RBAC)
+	secretObjects, exists := spec["secretObjects"]
+	if !exists {
+		t.Fatal("non-GKE mode SPC should have secretObjects")
+	}
+	soSlice, ok := secretObjects.([]interface{})
+	if !ok || len(soSlice) == 0 {
+		t.Error("secretObjects should be a non-empty slice")
+	}
+
+	// Verify provider is "gcp" (upstream)
+	if spec["provider"] != "gcp" {
+		t.Errorf("expected provider gcp, got %v", spec["provider"])
+	}
+}
+
+func TestBuildPod_GKEHybrid_MixedSecrets(t *testing.T) {
+	// Test the hybrid GKE path with both file and environment secrets.
+	// File secrets should use CSI mounts; env secrets should reference
+	// the Hub-created K8s Secret (scion-agent-{name}).
+	rt, _, _ := newTestK8sRuntime()
+	rt.GKEMode = true
+
+	config := RunConfig{
+		Name:         "mixed-agent",
+		Image:        "test:latest",
+		UnixUsername: "scion",
+		ResolvedSecrets: []api.ResolvedSecret{
+			{Name: "API_KEY", Type: "environment", Target: "API_KEY", Value: "sk-123", Source: "user", Ref: "projects/p/secrets/api-key"},
+			{Name: "DB_PASS", Type: "environment", Target: "DATABASE_PASSWORD", Value: "pw", Source: "project", Ref: "projects/p/secrets/db-pass"},
+			{Name: "TLS_CERT", Type: "file", Target: "/etc/ssl/cert.pem", Value: "cert-data", Source: "user", Ref: "projects/p/secrets/tls-cert"},
+		},
+	}
+
+	pod, err := rt.buildPod("default", config)
+	if err != nil {
+		t.Fatalf("buildPod failed: %v", err)
+	}
+
+	agentSecretName := "scion-agent-mixed-agent"
+
+	// 1. Env secrets should reference agentSecretName (not -env)
+	envFound := map[string]bool{"API_KEY": false, "DATABASE_PASSWORD": false}
+	for _, env := range pod.Spec.Containers[0].Env {
+		if env.Name == "API_KEY" || env.Name == "DATABASE_PASSWORD" {
+			envFound[env.Name] = true
+			if env.ValueFrom == nil || env.ValueFrom.SecretKeyRef == nil {
+				t.Fatalf("%s should have SecretKeyRef", env.Name)
+			}
+			if env.ValueFrom.SecretKeyRef.Name != agentSecretName {
+				t.Errorf("%s: expected secret ref %s, got %s", env.Name, agentSecretName, env.ValueFrom.SecretKeyRef.Name)
+			}
+		}
+	}
+	for name, found := range envFound {
+		if !found {
+			t.Errorf("expected env var %s not found in pod spec", name)
+		}
+	}
+
+	// 2. File secret should use CSI subPath mount
+	foundFileMount := false
+	for _, vm := range pod.Spec.Containers[0].VolumeMounts {
+		if vm.Name == "secrets-store" && vm.MountPath == "/etc/ssl/cert.pem" {
+			foundFileMount = true
+			if vm.SubPath != "TLS_CERT" {
+				t.Errorf("expected SubPath TLS_CERT, got %s", vm.SubPath)
+			}
+		}
+	}
+	if !foundFileMount {
+		t.Error("expected CSI subPath mount for TLS_CERT file secret")
+	}
+
+	// 3. CSI volume should be present with GKE driver
+	foundCSI := false
+	for _, v := range pod.Spec.Volumes {
+		if v.Name == "secrets-store" && v.CSI != nil {
+			foundCSI = true
+			if v.CSI.Driver != "secrets-store-gke.csi.k8s.io" {
+				t.Errorf("expected GKE CSI driver, got %s", v.CSI.Driver)
+			}
+		}
+	}
+	if !foundCSI {
+		t.Error("expected secrets-store CSI volume")
+	}
+}
+
+func TestRun_GKEHybrid_CreatesBothSPCAndSecret(t *testing.T) {
+	// Verify that in GKE mode with Refs, Run() creates BOTH a
+	// SecretProviderClass (for CSI file mounts) AND a K8s Secret
+	// (for environment-type secrets).
+	clientset := k8sfake.NewClientset()
+	scheme := k8sruntime.NewScheme()
+	scheme.AddKnownTypeWithName(
+		schema.GroupVersionKind{Group: "secrets-store.csi.x-k8s.io", Version: "v1", Kind: "SecretProviderClass"},
+		&k8sruntime.Unknown{},
+	)
+	scheme.AddKnownTypeWithName(
+		schema.GroupVersionKind{Group: "secrets-store.csi.x-k8s.io", Version: "v1", Kind: "SecretProviderClassList"},
+		&k8sruntime.Unknown{},
+	)
+	dynClient := fake.NewSimpleDynamicClient(scheme)
+	client := k8s.NewTestClient(dynClient, clientset)
+	rt := NewKubernetesRuntime(client)
+	rt.GKEMode = true
+	ctx := context.Background()
+
+	secrets := []api.ResolvedSecret{
+		{Name: "API_KEY", Type: "environment", Target: "API_KEY", Value: "sk-123", Source: "user", Ref: "projects/p/secrets/api-key"},
+		{Name: "TLS_CERT", Type: "file", Target: "/etc/ssl/cert.pem", Value: "cert-data", Source: "user", Ref: "projects/p/secrets/tls-cert"},
+	}
+	labels := map[string]string{"scion.name": "test-agent"}
+
+	// Call createSecretProviderClass (simulates Run's first call)
+	spcName, err := rt.createSecretProviderClass(ctx, "default", "test-agent", secrets, labels)
+	if err != nil {
+		t.Fatalf("createSecretProviderClass failed: %v", err)
+	}
+	if spcName == "" {
+		t.Fatal("expected non-empty SPC name")
+	}
+
+	// Call createAgentSecret (simulates Run's second call in GKE hybrid path)
+	secretName, err := rt.createAgentSecret(ctx, "default", "test-agent", secrets, labels)
+	if err != nil {
+		t.Fatalf("createAgentSecret failed: %v", err)
+	}
+	if secretName != "scion-agent-test-agent" {
+		t.Errorf("expected secret name scion-agent-test-agent, got %s", secretName)
+	}
+
+	// Verify SPC exists
+	_, err = dynClient.Resource(k8s.SecretProviderClassGVR).Namespace("default").Get(ctx, spcName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("SPC should exist: %v", err)
+	}
+
+	// Verify K8s Secret exists with env secret data
+	k8sSecret, err := clientset.CoreV1().Secrets("default").Get(ctx, secretName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("K8s Secret should exist: %v", err)
+	}
+	if string(k8sSecret.Data["API_KEY"]) != "sk-123" {
+		t.Errorf("expected API_KEY=sk-123 in K8s Secret, got %s", string(k8sSecret.Data["API_KEY"]))
+	}
 }
 
 func TestCreateSecretProviderClass_NoRefs(t *testing.T) {

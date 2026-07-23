@@ -33,6 +33,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/plugin"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
+	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 )
 
 const (
@@ -317,8 +318,25 @@ func (b *DiscordBroker) Configure(config map[string]string) error {
 
 	// Phase 2: Hub credentials and component handlers.
 	if b.hubURL != "" && b.session != nil {
-		// Create hub client.
-		b.hubClient = NewHTTPHubClient(b.hubURL, b.hmacKey, b.brokerID)
+		// Resolve transport auth for IAP-protected hub endpoints.
+		// Uses the same ResolveBrokerTransport pattern as the runtime broker.
+		transportMode := config["transport_mode"]
+		transportAudience := config["transport_audience"]
+		src, mode, err := transportauth.ResolveBrokerTransport(transportMode, transportAudience, nil)
+		if err != nil {
+			b.log.Warn("Failed to resolve transport auth, continuing without IAP tokens", "error", err)
+		}
+		if src != nil {
+			if b.httpClient == nil {
+				b.httpClient = &http.Client{Timeout: 10 * time.Second}
+			}
+			b.httpClient.Transport = transportauth.Wrap(b.httpClient.Transport, src, mode)
+			b.log.Info("Transport auth configured for Discord broker",
+				"mode", transportMode, "audience", transportAudience)
+		}
+
+		// Create hub client, sharing the broker's (possibly wrapped) httpClient.
+		b.hubClient = NewHTTPHubClient(b.hubURL, b.hmacKey, b.brokerID, b.httpClient)
 
 		// Create component handlers.
 		appID := ""
@@ -329,7 +347,7 @@ func (b *DiscordBroker) Configure(config map[string]string) error {
 		}
 		b.commands = NewCommandHandler(b.store, b.session, b.hubClient, b.deliverInbound, appID, guildIDs, b.agentCacheTTL, b.log)
 		b.callbacks = NewCallbackHandler(b.store, b.session, b.hubClient, b.deliverInbound, b.log)
-		b.registration = NewRegistrationHandler(b.store, b.session, b.hubURL, b.hmacKey, b.brokerID, b.log)
+		b.registration = NewRegistrationHandler(b.store, b.session, b.hubURL, b.hmacKey, b.brokerID, b.httpClient, b.log)
 
 		// Parse hub-injected project slug map (projectID -> slug).
 		if slugMapJSON, ok := config["project_slug_map"]; ok && slugMapJSON != "" {

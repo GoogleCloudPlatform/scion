@@ -39,6 +39,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/plugin"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
+	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 )
 
 const (
@@ -284,13 +285,30 @@ func (b *TelegramBrokerV2) Configure(config map[string]string) error {
 		}
 	}
 
-	// Create hub client.
-	b.hubClient = NewHTTPHubClient(b.hubURL, b.hmacKey, b.brokerID)
+	// Resolve transport auth for IAP-protected hub endpoints.
+	// Uses the same ResolveBrokerTransport pattern as the runtime broker.
+	transportMode := config["transport_mode"]
+	transportAudience := config["transport_audience"]
+	src, mode, tErr := transportauth.ResolveBrokerTransport(transportMode, transportAudience, nil)
+	if tErr != nil {
+		b.log.Warn("Failed to resolve transport auth, continuing without IAP tokens", "error", tErr)
+	}
+	if src != nil {
+		if b.httpClient == nil {
+			b.httpClient = &http.Client{Timeout: 10 * time.Second}
+		}
+		b.httpClient.Transport = transportauth.Wrap(b.httpClient.Transport, src, mode)
+		b.log.Info("Transport auth configured for Telegram v2 broker",
+			"mode", transportMode, "audience", transportAudience)
+	}
+
+	// Create hub client, sharing the broker's (possibly wrapped) httpClient.
+	b.hubClient = NewHTTPHubClient(b.hubURL, b.hmacKey, b.brokerID, b.httpClient)
 
 	// Create component handlers.
 	b.commands = NewCommandHandler(b.store, b.api, b.hubClient, bot.Username, b.log)
 	b.callbacks = NewCallbackHandler(b.store, b.api, b.hubClient, b.log)
-	b.registration = NewRegistrationHandler(b.store, b.api, b.hubURL, b.hmacKey, b.brokerID, b.log)
+	b.registration = NewRegistrationHandler(b.store, b.api, b.hubURL, b.hmacKey, b.brokerID, b.httpClient, b.log)
 
 	// Handle v1 migration: import chat routes as group links.
 	if routesJSON, ok := config["v1_chat_routes"]; ok && routesJSON != "" {
