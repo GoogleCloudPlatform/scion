@@ -27,7 +27,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/credentials"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
-	"github.com/GoogleCloudPlatform/scion/pkg/wsclient"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -229,82 +228,188 @@ func TestAttachViaHub_IAPMode_EmptyToken_PassesGate(t *testing.T) {
 	// confirms the gate was cleared and the code reached the connection attempt.
 }
 
-// TestAttachViaHub_StartAgentSite_PlainMode_EmptyToken verifies that the
-// workspace-upload attach path in startAgentViaHub() preserves the plain-mode
-// invariant: no transport source + empty app token → "no access token" error.
-// This covers common.go site 1 (the workspace-upload polling loop attach).
-func TestAttachViaHub_StartAgentSite_PlainMode_EmptyToken(t *testing.T) {
+// newStartAgentMockHubServer creates a minimal mock Hub server sufficient for
+// exercising the attach path of startAgentViaHub() (site 2, the ready: label).
+// It handles the suspend-check GET, project GET (git-remote display), agent
+// CREATE POST, and the polling GET — all of which are reached before the token
+// gate in the non-workspace-upload code path.
+func newStartAgentMockHubServer(t *testing.T, projectID, agentName, agentID string) *httptest.Server {
+	t.Helper()
+	agentPath := "/api/v1/projects/" + projectID + "/agents/" + agentName
+	agentsPath := "/api/v1/projects/" + projectID + "/agents"
+	projectGetPath := "/api/v1/projects/" + projectID
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/healthz":
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
+
+		case r.Method == http.MethodGet && r.URL.Path == projectGetPath:
+			// Git-remote display: return a project with no GitRemote to suppress output.
+			_ = json.NewEncoder(w).Encode(hubclient.Project{ID: projectID, Name: "test"})
+
+		case r.Method == http.MethodGet && r.URL.Path == agentPath:
+			// Suspend check (pre-create) and polling (post-create): return running.
+			_ = json.NewEncoder(w).Encode(hubclient.Agent{
+				ID:    agentID,
+				Name:  agentName,
+				Phase: "running",
+			})
+
+		case r.Method == http.MethodPost && r.URL.Path == agentsPath:
+			// Create: return a minimal response with no UploadURLs and no EnvGather
+			// so the workspace-upload branch (site 1) is skipped.
+			_ = json.NewEncoder(w).Encode(hubclient.CreateAgentResponse{
+				Agent: &hubclient.Agent{
+					ID:   agentID,
+					Name: agentName,
+					// Created is zero-value → hubsync watermark update is skipped.
+				},
+			})
+
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// saveAttachTestState saves the package-level variables that startAgentViaHub
+// reads, and returns a function that restores them.
+func saveAttachTestState() func() {
+	origAttach := attach
+	origTemplate := templateName
+	origBranch := branch
+	origWorkspace := workspace
+	origBroker := runtimeBrokerID
+	origHConfig := harnessConfigFlag
+	origHAuth := harnessAuthFlag
+	origNoNotify := startNoNotify
+	origLabels := labelFlags
+	return func() {
+		attach = origAttach
+		templateName = origTemplate
+		branch = origBranch
+		workspace = origWorkspace
+		runtimeBrokerID = origBroker
+		harnessConfigFlag = origHConfig
+		harnessAuthFlag = origHAuth
+		startNoNotify = origNoNotify
+		labelFlags = origLabels
+	}
+}
+
+// TestStartAgentViaHub_Site2_PlainMode_EmptyToken_RequiresAppToken directly
+// calls startAgentViaHub() with attach=true and exercises site 2 (the ready:
+// label in the main polling path). In plain mode (nil transport source) with an
+// empty app token the function must return "no access token found for Hub",
+// confirming the invariant is preserved in the real function path.
+//
+// Site 1 (workspace-upload path, ~common.go:1013) is not directly exercised
+// here because it requires Hub-supplied UploadURLs and a Workspace.FinalizeSyncTo
+// response — complexity that exceeds the scope of a unit test. The gate logic at
+// site 1 is structurally identical to site 2 and was verified by code review.
+func TestStartAgentViaHub_Site2_PlainMode_EmptyToken_RequiresAppToken(t *testing.T) {
 	clearAppTokenSources(t)
 
-	// Stub to plain mode (nil transport source).
+	restore := saveAttachTestState()
+	defer restore()
+	attach = true
+	templateName = ""
+	labelFlags = nil
+	runtimeBrokerID = ""
+	harnessConfigFlag = ""
+	harnessAuthFlag = ""
+
+	// Stub resolveAttachTransportFn to return nil (plain mode — no transport auth).
 	orig := resolveAttachTransportFn
 	resolveAttachTransportFn = func() (transportauth.TokenSource, transportauth.HeaderMode, error) {
 		return nil, transportauth.HeaderAuthorization, nil
 	}
 	defer func() { resolveAttachTransportFn = orig }()
 
-	// Verify the gate logic by calling it directly through the stub path.
-	// We exercise the same gate condition that both common.go sites use.
-	var attachOpts []wsclient.AttachOption
-	transportSrc, transportMode, err := resolveAttachTransportFn()
-	require.NoError(t, err)
-	if transportSrc != nil {
-		attachOpts = append(attachOpts, wsclient.WithTransport(transportSrc, transportMode))
-	}
-	token := getHubAccessToken("https://hub.example.com")
+	const (
+		projectID = "proj-start-plain-789"
+		agentName = "start-plain-agent"
+		agentID   = "start-plain-uuid"
+	)
 
-	require.Empty(t, token, "app token should be empty in plain mode with cleared sources")
-	require.Nil(t, transportSrc, "transport source should be nil in plain mode")
-	// Confirmed: token == "" && transportSrc == nil → the gate would fire.
-	assert.True(t, token == "" && transportSrc == nil,
-		"gate condition must be true when both token and transport src are absent")
-	_ = attachOpts
+	srv := newStartAgentMockHubServer(t, projectID, agentName, agentID)
+	client, err := hubclient.New(srv.URL)
+	require.NoError(t, err)
+
+	hubCtx := &HubContext{
+		Client:    client,
+		Endpoint:  srv.URL,
+		ProjectID: projectID,
+		// ProjectPath is empty → workspace scan and hubsync calls are skipped.
+	}
+
+	err = startAgentViaHub(hubCtx, agentName, "", false, nil)
+
+	require.Error(t, err)
+	assert.True(t, strings.Contains(err.Error(), "no access token found for Hub"),
+		"plain mode with empty token should reach 'no access token found for Hub' in startAgentViaHub site 2; got: %v", err)
 }
 
-// TestAttachViaHub_StartAgentSite_IAPMode_WithTransportOpts verifies that when
-// a transport source is present (IAP mode), the common.go attach sites pass
-// WithTransport opts to AttachToAgent and do not gate on the app token.
-func TestAttachViaHub_StartAgentSite_IAPMode_WithTransportOpts(t *testing.T) {
+// TestStartAgentViaHub_Site2_IAPMode_EmptyToken_PassesGate directly calls
+// startAgentViaHub() with attach=true and exercises site 2 (the ready: label in
+// the main polling path). With a transport source present (IAP mode) and an empty
+// app token the function must NOT return "no access token found for Hub" — it
+// should clear the gate and fail at the WebSocket dial, confirming that issue #851
+// is fixed in the startAgentViaHub() path too.
+//
+// Site 1 (workspace-upload path) is not directly exercised here — see the comment
+// on TestStartAgentViaHub_Site2_PlainMode_EmptyToken_RequiresAppToken for why.
+func TestStartAgentViaHub_Site2_IAPMode_EmptyToken_PassesGate(t *testing.T) {
 	clearAppTokenSources(t)
 
-	fakeSrc := &fakeTransportSource{
-		token:  "oidc-token-for-iap",
-		expiry: time.Now().Add(1 * time.Hour),
-	}
+	restore := saveAttachTestState()
+	defer restore()
+	attach = true
+	templateName = ""
+	labelFlags = nil
+	runtimeBrokerID = ""
+	harnessConfigFlag = ""
+	harnessAuthFlag = ""
 
-	// Stub to IAP mode (non-nil transport source).
+	// Stub resolveAttachTransportFn to return a fake IAP transport source.
 	orig := resolveAttachTransportFn
 	resolveAttachTransportFn = func() (transportauth.TokenSource, transportauth.HeaderMode, error) {
-		return fakeSrc, transportauth.HeaderProxyAuthorization, nil
+		return &fakeTransportSource{
+			token:  "fake-oidc-token",
+			expiry: time.Now().Add(1 * time.Hour),
+		}, transportauth.HeaderProxyAuthorization, nil
 	}
 	defer func() { resolveAttachTransportFn = orig }()
 
-	// Simulate the gate + opts logic that both common.go sites execute.
-	var attachOpts []wsclient.AttachOption
-	transportSrc, transportMode, err := resolveAttachTransportFn()
+	const (
+		projectID = "proj-start-iap-abc"
+		agentName = "start-iap-agent"
+		agentID   = "start-iap-uuid"
+	)
+
+	srv := newStartAgentMockHubServer(t, projectID, agentName, agentID)
+	client, err := hubclient.New(srv.URL)
 	require.NoError(t, err)
-	if transportSrc != nil {
-		attachOpts = append(attachOpts, wsclient.WithTransport(transportSrc, transportMode))
+
+	hubCtx := &HubContext{
+		Client:    client,
+		Endpoint:  srv.URL,
+		ProjectID: projectID,
+		// ProjectPath is empty → workspace scan and hubsync calls are skipped.
 	}
-	token := getHubAccessToken("https://hub.example.com")
 
-	require.Empty(t, token, "app token should be empty in IAP mode with cleared sources")
-	require.NotNil(t, transportSrc, "transport source should be non-nil in IAP mode")
+	err = startAgentViaHub(hubCtx, agentName, "", false, nil)
 
-	// Gate must NOT fire: token == "" but transportSrc != nil.
-	gateWouldFire := token == "" && transportSrc == nil
-	assert.False(t, gateWouldFire,
-		"gate must NOT fire when transport source is present (IAP mode)")
-
-	// Exactly one WithTransport option should have been constructed.
-	assert.Len(t, attachOpts, 1,
-		"WithTransport option must be appended when transport source is present")
-
-	// Apply the option to a config and verify the transport source is wired up.
-	cfg := wsclient.PTYClientConfig{}
-	attachOpts[0](&cfg)
-	assert.Equal(t, fakeSrc, cfg.TransportSource,
-		"TransportSource must be the fake source we provided")
-	assert.Equal(t, transportauth.HeaderProxyAuthorization, cfg.TransportMode,
-		"TransportMode must match HeaderProxyAuthorization for IAP")
+	// Must NOT fail with the pre-fix "no access token found for Hub" error.
+	if err != nil {
+		assert.False(t, strings.Contains(err.Error(), "no access token found for Hub"),
+			"IAP mode with transport source should pass the token gate in startAgentViaHub site 2; got: %v", err)
+	}
+	// The function is expected to fail at the WebSocket dial step (the mock HTTP
+	// server does not handle WebSocket upgrades) — that confirms the gate was
+	// cleared and the connection attempt was reached.
 }
