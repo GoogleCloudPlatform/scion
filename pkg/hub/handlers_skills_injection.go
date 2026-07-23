@@ -149,13 +149,27 @@ func (s *Server) addProjectInjectedSkill(w http.ResponseWriter, r *http.Request,
 		createdBy = userIdent.ID()
 	}
 
+	// Determine sort order: use the client-supplied value if non-zero, otherwise
+	// append at the end (max existing sortOrder + 1).
+	sortOrder := entry.SortOrder
+	if sortOrder == 0 {
+		existing, _ := s.store.ListSkillInjections(ctx, store.SkillInjectionScopeProject, projectID)
+		maxOrder := 0
+		for _, e := range existing {
+			if e.SortOrder > maxOrder {
+				maxOrder = e.SortOrder
+			}
+		}
+		sortOrder = maxOrder + 1
+	}
+
 	si := &store.SkillInjection{
 		Scope:     store.SkillInjectionScopeProject,
 		ScopeID:   projectID,
 		SkillURI:  entry.SkillURI,
 		SkillAs:   entry.SkillAs,
 		Optional:  entry.Optional,
-		SortOrder: entry.SortOrder,
+		SortOrder: sortOrder,
 		CreatedBy: createdBy,
 	}
 
@@ -217,11 +231,19 @@ func (s *Server) setProjectInjectedSkills(w http.ResponseWriter, r *http.Request
 	}
 
 	// Validate all entries before committing any changes (N-2).
+	seenURIs := make(map[string]bool)
 	for i, entry := range req.Entries {
-		if strings.TrimSpace(entry.SkillURI) == "" {
+		uri := strings.TrimSpace(entry.SkillURI)
+		if uri == "" {
 			BadRequest(w, fmt.Sprintf("entry %d: skillUri is required", i))
 			return
 		}
+		if seenURIs[uri] {
+			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
+				fmt.Sprintf("duplicate skillUri in request: %s", uri), nil)
+			return
+		}
+		seenURIs[uri] = true
 	}
 
 	// Build set of explicitly-assigned sort orders (C4: collision-free defaults).
@@ -405,13 +427,27 @@ func (s *Server) addUserInjectedSkill(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Determine sort order: use the client-supplied value if non-zero, otherwise
+	// append at the end (max existing sortOrder + 1).
+	sortOrder := entry.SortOrder
+	if sortOrder == 0 {
+		existing, _ := s.store.ListSkillInjections(ctx, store.SkillInjectionScopeUser, userIdent.ID())
+		maxOrder := 0
+		for _, e := range existing {
+			if e.SortOrder > maxOrder {
+				maxOrder = e.SortOrder
+			}
+		}
+		sortOrder = maxOrder + 1
+	}
+
 	si := &store.SkillInjection{
 		Scope:     store.SkillInjectionScopeUser,
 		ScopeID:   userIdent.ID(),
 		SkillURI:  entry.SkillURI,
 		SkillAs:   entry.SkillAs,
 		Optional:  entry.Optional,
-		SortOrder: entry.SortOrder,
+		SortOrder: sortOrder,
 		CreatedBy: userIdent.ID(),
 	}
 
@@ -445,11 +481,19 @@ func (s *Server) setUserInjectedSkills(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Validate all entries before committing any changes (N-2).
+	seenURIs := make(map[string]bool)
 	for i, entry := range req.Entries {
-		if strings.TrimSpace(entry.SkillURI) == "" {
+		uri := strings.TrimSpace(entry.SkillURI)
+		if uri == "" {
 			BadRequest(w, fmt.Sprintf("entry %d: skillUri is required", i))
 			return
 		}
+		if seenURIs[uri] {
+			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
+				fmt.Sprintf("duplicate skillUri in request: %s", uri), nil)
+			return
+		}
+		seenURIs[uri] = true
 	}
 
 	// Build set of explicitly-assigned sort orders (C4: collision-free defaults).
@@ -689,24 +733,39 @@ func skillInjectionToEntry(si store.SkillInjection) api.SkillInjectionEntry {
 // enrichSkillInjections converts store.SkillInjection records to api.SkillInjectionEntry
 // records and enriches them with skill bank metadata where available.
 // Enrichment is best-effort: any lookup error leaves SkillName/SkillSlug empty.
+//
+// To avoid N+1 queries, we batch-load all core and global skills in two list
+// calls and build an in-memory slug→skill map before iterating the entries.
+// Global entries take precedence over core entries when slugs collide.
 func (s *Server) enrichSkillInjections(ctx context.Context, sis []store.SkillInjection) []api.SkillInjectionEntry {
+	if len(sis) == 0 {
+		return []api.SkillInjectionEntry{}
+	}
+
+	// Build slug→skill map via two batch queries (core first, then global so
+	// that global entries win on slug collision — matching the previous per-entry
+	// lookup priority).
+	skillBySlug := make(map[string]*store.Skill)
+	for _, scope := range []string{store.SkillScopeCore, store.SkillScopeGlobal} {
+		result, err := s.store.ListSkills(ctx, store.SkillFilter{Scope: scope}, store.ListOptions{Limit: 1000})
+		if err != nil || result == nil {
+			continue
+		}
+		for i := range result.Items {
+			sk := &result.Items[i]
+			skillBySlug[sk.Slug] = sk
+		}
+	}
+
 	entries := make([]api.SkillInjectionEntry, 0, len(sis))
 	for _, si := range sis {
 		e := skillInjectionToEntry(si)
-		// Attempt to enrich from the skill bank by listing skills and matching URI.
-		// Use the slug (last path segment of the URI, stripping version) as a hint.
 		baseURI := skillBaseURI(si.SkillURI)
 		slug := skillSlugFromURI(baseURI)
 		if slug != "" {
-			// Try global scope first, then fall back to any scope.
-			skill, err := s.store.GetSkillBySlug(ctx, slug, store.SkillScopeGlobal, "")
-			if err != nil {
-				// Also try core scope.
-				skill, err = s.store.GetSkillBySlug(ctx, slug, store.SkillScopeCore, "")
-			}
-			if err == nil && skill != nil {
-				e.SkillName = skill.Name
-				e.SkillSlug = skill.Slug
+			if sk, ok := skillBySlug[slug]; ok {
+				e.SkillName = sk.Name
+				e.SkillSlug = sk.Slug
 			}
 		}
 		entries = append(entries, e)

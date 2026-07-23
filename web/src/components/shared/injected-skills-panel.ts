@@ -238,9 +238,15 @@ export class ScionInjectedSkillsPanel extends LitElement {
   }
 
   override updated(changedProperties: PropertyValues): void {
-    if (changedProperties.has('scope') || changedProperties.has('scopeId')) {
+    if (changedProperties.has('scopeId') || changedProperties.has('scope')) {
       if (this.scope && (this.scope !== 'project' || this.scopeId)) {
         void this.load();
+      } else {
+        // Clear stale rows when scope/scopeId becomes invalid so that a panel
+        // reused with a new (empty) scopeId does not show data from the
+        // previous scope.
+        this.rows = [];
+        this.error = null;
       }
     }
   }
