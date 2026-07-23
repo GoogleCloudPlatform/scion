@@ -80,7 +80,7 @@ func (c *client) Health(ctx context.Context) (*runtimebroker.HealthResponse, err
 		return nil, err
 	}
 	ct := resp.Header.Get("Content-Type")
-	if ct != "" && !strings.HasPrefix(ct, "application/json") {
+	if ct != "" && !strings.HasPrefix(strings.ToLower(ct), "application/json") {
 		_ = resp.Body.Close()
 		return nil, fmt.Errorf(
 			"broker health endpoint returned %s (Content-Type: %s); "+
