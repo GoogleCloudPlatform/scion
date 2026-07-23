@@ -163,8 +163,22 @@ export class ScionAgentTreeView extends LitElement {
       marker-end: url(#arrow-lit);
     }
 
-    .node {
+    /*
+     * Agent node wrapper — provides absolute positioning in the stage and a
+     * stacking context for the collapse chip (which is a sibling of the <a>,
+     * not a child, to satisfy the HTML spec: interactive content must not be
+     * nested). Hover on the wrapper raises the whole card above its neighbours.
+     */
+    .node-wrapper {
       position: absolute;
+    }
+
+    .node-wrapper:hover {
+      z-index: 2;
+    }
+
+    .node {
+      position: relative; /* establishes stacking context for z-index */
       box-sizing: border-box;
       width: 180px;
       height: 76px;
@@ -200,7 +214,6 @@ export class ScionAgentTreeView extends LitElement {
     .node:hover {
       box-shadow: var(--sl-shadow-medium, 0 3px 10px rgba(0, 0, 0, 0.18));
       transform: translateY(-1px) scale(1.02);
-      z-index: 2;
     }
 
     .node.dim {
@@ -239,7 +252,11 @@ export class ScionAgentTreeView extends LitElement {
       max-width: 100%;
     }
 
-    /* Collapse/expand toggle chip */
+    /*
+     * Collapse/expand chip — positioned relative to .node-wrapper (the nearest
+     * positioned ancestor), not the <a> it used to live inside. The wrapper is
+     * position:absolute, so bottom:-9px still hangs 9 px below the card.
+     */
     .collapse-chip {
       position: absolute;
       bottom: -9px;
@@ -267,8 +284,12 @@ export class ScionAgentTreeView extends LitElement {
       color: var(--sl-color-primary-600);
     }
 
-    /* User (human) nodes */
+    /*
+     * User (human) nodes are placed directly in the stage (no wrapper div),
+     * so they keep position:absolute and use inline left/top for placement.
+     */
     .node.user {
+      position: absolute;
       border-style: dashed;
       border-left-style: solid;
       border-left-color: var(--sl-color-neutral-400);
@@ -319,6 +340,24 @@ export class ScionAgentTreeView extends LitElement {
   override disconnectedCallback(): void {
     super.disconnectedCallback();
     this.removeEventListener('wheel', this.boundOnWheel);
+  }
+
+  override willUpdate(changedProperties: Map<PropertyKey, unknown>): void {
+    super.willUpdate(changedProperties);
+    if (changedProperties.has('agents')) {
+      const oldAgents = changedProperties.get('agents') as Agent[] | undefined;
+      // Re-fit when agents arrive for the first time or when the project
+      // context switches (first agent's projectId changes). SSE status
+      // updates on the same set don't reset the viewport.
+      if (
+        !oldAgents ||
+        oldAgents.length === 0 ||
+        this.agents.length === 0 ||
+        oldAgents[0]?.projectId !== this.agents[0]?.projectId
+      ) {
+        this.didAutoFit = false;
+      }
+    }
   }
 
   // --- Pan & zoom -----------------------------------------------------------
@@ -381,7 +420,7 @@ export class ScionAgentTreeView extends LitElement {
     for (const el of e.composedPath()) {
       if (el === this.canvasEl) break;
       const tag = (el as HTMLElement).tagName;
-      if (tag === 'A' || tag === 'SL-BUTTON') return;
+      if (tag === 'A' || tag === 'BUTTON' || tag === 'SL-BUTTON') return;
     }
     this.dragging = true;
     this.dragStartX = e.clientX;
@@ -407,6 +446,9 @@ export class ScionAgentTreeView extends LitElement {
   private onShowUsersChange(e: Event): void {
     this.showUsers = (e.target as HTMLInputElement & { checked: boolean }).checked;
     localStorage.setItem('scion-graph-show-users', String(this.showUsers));
+    // Toggling user nodes changes the canvas dimensions significantly; re-fit
+    // so newly added user nodes (or freed space after hiding them) are visible.
+    this.didAutoFit = false;
   }
 
   // --- Hover lineage highlight ---------------------------------------------
@@ -499,10 +541,31 @@ export class ScionAgentTreeView extends LitElement {
 
     // First render with content: center on the deep-linked agent if there is
     // one (and it survived filtering), otherwise fit the forest.
+    // Only commit didAutoFit = true once the canvas has a non-zero size
+    // (it can be 0 when the component is hidden or mid-CSS-transition), so
+    // the fit retries on the next render rather than getting permanently
+    // skipped.
     if (!this.didAutoFit) {
-      this.didAutoFit = true;
       const focus = this.focusId ? nodes.find(n => n.agent.id === this.focusId) : undefined;
-      requestAnimationFrame(() => (focus ? this.centerOn(focus) : this.fitToView(width, height)));
+      const capturedW = width;
+      const capturedH = height;
+      requestAnimationFrame(() => {
+        const canvas = this.canvasEl;
+        if (canvas) {
+          const rect = canvas.getBoundingClientRect();
+          if (rect.width === 0 || rect.height === 0) {
+            // Canvas not visible yet — leave didAutoFit = false so the next
+            // render will retry.
+            return;
+          }
+        }
+        this.didAutoFit = true;
+        if (focus) {
+          this.centerOn(focus);
+        } else {
+          this.fitToView(capturedW, capturedH);
+        }
+      });
     }
 
     return html`
@@ -591,22 +654,32 @@ export class ScionAgentTreeView extends LitElement {
     const dim = related !== null && !related.has(agent.id);
     const descendants = hiddenCounts.get(agent.id) ?? 0;
     const collapsed = this.collapsedIds.has(agent.id);
+    // The <button> (collapse chip) must NOT be nested inside the <a> (node
+    // link) — interactive content cannot be nested per the HTML spec and
+    // causes accessibility and browser-behaviour problems. Instead, both are
+    // children of a positioned wrapper div so the chip can still be
+    // absolutely positioned relative to the card via the wrapper.
     return html`
-      <a
-        class="node ${dim ? 'dim' : ''} ${agent.id === this.focusId ? 'focus' : ''}"
-        href="/agents/${agent.id}"
-        style="left: ${n.px}px; top: ${n.py}px; border-left-color: ${color}"
-        title=${`${agent.name}${agent.template ? ` — ${agent.template}` : ''}${isRoot && creator ? `\ncreated by ${creator}` : ''}`}
+      <div
+        class="node-wrapper"
+        style="left: ${n.px}px; top: ${n.py}px;"
         @pointerenter=${() => (this.hoverId = agent.id)}
         @pointerleave=${() => (this.hoverId = null)}
       >
-        <span class="name">${agent.name}</span>
-        <scion-status-badge
-          status=${status as StatusType}
-          label=${status}
-          size="small"
-        ></scion-status-badge>
-        ${agent.template ? html`<span class="meta">${agent.template}</span>` : nothing}
+        <a
+          class="node ${dim ? 'dim' : ''} ${agent.id === this.focusId ? 'focus' : ''}"
+          href="/agents/${agent.id}"
+          style="border-left-color: ${color}"
+          title=${`${agent.name}${agent.template ? ` — ${agent.template}` : ''}${isRoot && creator ? `\ncreated by ${creator}` : ''}`}
+        >
+          <span class="name">${agent.name}</span>
+          <scion-status-badge
+            status=${status as StatusType}
+            label=${status}
+            size="small"
+          ></scion-status-badge>
+          ${agent.template ? html`<span class="meta">${agent.template}</span>` : nothing}
+        </a>
         ${descendants > 0 ? html`
           <button
             class="collapse-chip"
@@ -614,7 +687,7 @@ export class ScionAgentTreeView extends LitElement {
             @click=${(e: Event) => this.toggleCollapse(agent.id, e)}
           >${collapsed ? `+${descendants}` : '−'}</button>
         ` : nothing}
-      </a>
+      </div>
     `;
   }
 
