@@ -116,6 +116,10 @@ func init() {
 	rootCmd.AddCommand(attachCmd)
 }
 
+// resolveAttachTransportFn is the function used to resolve transport auth for
+// the attach WebSocket path. It can be overridden in tests to inject a mock.
+var resolveAttachTransportFn func() (transportauth.TokenSource, transportauth.HeaderMode, error) = resolveAttachTransport
+
 // attachViaHub attaches to an agent via Hub WebSocket connection.
 func attachViaHub(hubCtx *HubContext, agentName string) error {
 	PrintUsingHub(hubCtx.Endpoint)
@@ -154,29 +158,34 @@ func attachViaHub(hubCtx *HubContext, agentName string) error {
 			agentName, statusInfo, agentName)
 	}
 
-	// Get access token for WebSocket authentication
-	token := getHubAccessToken(hubCtx.Endpoint)
-	if token == "" {
-		return fmt.Errorf("no access token found for Hub\n\nPlease login first: scion hub auth login")
-	}
-
-	fmt.Printf("Attaching to agent '%s' via Hub...\n", agentName)
-
-	// Connect via WebSocket
-	// Use agent UUID for the PTY endpoint
-	agentID := agent.ID
-	if agentID == "" {
-		agentID = agentName // Fall back to name if ID not set
-	}
-
-	// Resolve transport auth for IAP/Cloud Run traversal.
+	// Resolve transport auth for IAP/Cloud Run traversal FIRST — in IAP mode
+	// there is no application-level token by design (auth happens via
+	// Proxy-Authorization at the transport layer), so we must determine
+	// whether transport auth is available before deciding if an app token is
+	// required.
 	var attachOpts []wsclient.AttachOption
-	transportSrc, transportMode, err := resolveAttachTransport()
+	transportSrc, transportMode, err := resolveAttachTransportFn()
 	if err != nil {
 		return fmt.Errorf("failed to resolve transport auth: %w", err)
 	}
 	if transportSrc != nil {
 		attachOpts = append(attachOpts, wsclient.WithTransport(transportSrc, transportMode))
+	}
+
+	// Get access token for WebSocket authentication.
+	// In IAP/proxy-auth mode there is no application-level token by design —
+	// only require one when no transport source is configured.
+	token := getHubAccessToken(hubCtx.Endpoint)
+	if token == "" && transportSrc == nil {
+		return fmt.Errorf("no access token found for Hub\n\nPlease login first: scion hub auth login")
+	}
+
+	fmt.Printf("Attaching to agent '%s' via Hub...\n", agentName)
+
+	// Use agent UUID for the PTY endpoint.
+	agentID := agent.ID
+	if agentID == "" {
+		agentID = agentName // Fall back to name if ID not set
 	}
 
 	return wsclient.AttachToAgent(context.Background(), hubCtx.Endpoint, token, agentID, attachOpts...)
