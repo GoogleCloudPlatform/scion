@@ -599,8 +599,13 @@ export class AgentGraphPage extends LitElement {
   private onViewChange(e: CustomEvent<{ view: ViewMode }>): void {
     const mode = e.detail.view;
     if (mode === 'graph') return;
-    localStorage.setItem('scion-view-agents', mode);
-    window.history.pushState({}, '', '/agents');
+    if (this.initiallyProjectScoped && this.projectFilter) {
+      localStorage.setItem('scion-view-project-agents', mode);
+      window.history.pushState({}, '', `/projects/${this.projectFilter}`);
+    } else {
+      localStorage.setItem('scion-view-agents', mode);
+      window.history.pushState({}, '', '/agents');
+    }
     window.dispatchEvent(new PopStateEvent('popstate'));
   }
 
