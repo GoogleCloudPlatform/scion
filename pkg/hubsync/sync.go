@@ -294,7 +294,7 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 	defer cancel()
 
 	if _, err := client.Health(ctx); err != nil {
-		return nil, wrapHubError(fmt.Errorf("hub at %s is not responding: %w", endpoint, err))
+		return nil, wrapHubError(fmt.Errorf("hub at %s is not responding: %w", endpoint, hintProxyError(err)))
 	}
 
 	// Get broker ID
@@ -1388,6 +1388,19 @@ func isLocalhostEndpoint(endpoint string) bool {
 	}
 	host := u.Hostname()
 	return host == "localhost" || host == "127.0.0.1" || host == "::1"
+}
+
+// hintProxyError wraps a Health() error with a proxy-interception hint when
+// the error pattern suggests a non-JSON response from both health endpoints.
+func hintProxyError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if strings.Contains(err.Error(), "failed to decode response") {
+		return fmt.Errorf("%w\n(Hint: a reverse proxy may be intercepting "+
+			"/healthz and /health — check your Cloud Run or GFE configuration)", err)
+	}
+	return err
 }
 
 // wrapHubError wraps a Hub error with guidance to disable Hub integration.

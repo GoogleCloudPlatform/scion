@@ -828,6 +828,7 @@ func runHubStatus(cmd *cobra.Command, args []string) error {
 	var client hubclient.Client
 	var health *hubclient.HealthResponse
 	var clientErr error
+	var healthErr error
 	authVerified := false
 
 	if endpoint != "" && !noHub {
@@ -835,7 +836,8 @@ func runHubStatus(cmd *cobra.Command, args []string) error {
 		if clientErr == nil {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			health, _ = client.Health(ctx)
+			health, healthErr = client.Health(ctx)
+			healthErr = hintProxyError(healthErr)
 		}
 	}
 
@@ -902,7 +904,11 @@ func runHubStatus(cmd *cobra.Command, args []string) error {
 		fmt.Println("Hub Server")
 		fmt.Println("----------")
 		if health == nil {
-			fmt.Printf("Connection: failed\n")
+			if healthErr != nil {
+				fmt.Printf("Connection: failed (%s)\n", healthErr)
+			} else {
+				fmt.Printf("Connection: failed\n")
+			}
 		} else {
 			fmt.Printf("Connection: ok\n")
 			fmt.Printf("Hub Version: %s\n", health.Version)
@@ -2011,6 +2017,19 @@ func valueOrNone(s string) string {
 		return "(not configured)"
 	}
 	return s
+}
+
+// hintProxyError wraps a Health() error with a proxy-interception hint when
+// the error pattern suggests a non-JSON response from both health endpoints.
+func hintProxyError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if strings.Contains(err.Error(), "failed to decode response") {
+		return fmt.Errorf("%w\n(Hint: a reverse proxy may be intercepting "+
+			"/healthz and /health — check your Cloud Run or GFE configuration)", err)
+	}
+	return err
 }
 
 func truncate(s string, maxLen int) string {
