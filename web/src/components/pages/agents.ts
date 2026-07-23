@@ -35,6 +35,7 @@ import { listPageStyles } from '../shared/resource-styles.js';
 import type { ViewMode } from '../shared/view-toggle.js';
 import '../shared/status-badge.js';
 import '../shared/view-toggle.js';
+import '../shared/agent-tree-view.js';
 
 @customElement('scion-page-agents')
 export class ScionPageAgents extends LitElement {
@@ -309,7 +310,7 @@ export class ScionPageAgents extends LitElement {
 
     // Read persisted view mode
     const stored = localStorage.getItem('scion-view-agents') as ViewMode | null;
-    if (stored === 'grid' || stored === 'list') {
+    if (stored === 'grid' || stored === 'list' || stored === 'graph') {
       this.viewMode = stored;
     }
 
@@ -569,8 +570,6 @@ export class ScionPageAgents extends LitElement {
   }
 
   private onViewChange(e: CustomEvent<{ view: ViewMode }>): void {
-    // 'graph' is a link segment handled by the router, never an event here.
-    if (e.detail.view === 'graph') return;
     this.viewMode = e.detail.view;
   }
 
@@ -695,7 +694,6 @@ export class ScionPageAgents extends LitElement {
           <scion-view-toggle
             .view=${this.viewMode}
             storageKey="scion-view-agents"
-            graphHref="/agents/graph"
             @view-change=${this.onViewChange}
           ></scion-view-toggle>
           ${can(this.scopeCapabilities, 'stop_all') && this.hasRunningAgents() ? html`
@@ -845,6 +843,9 @@ export class ScionPageAgents extends LitElement {
       `;
     }
 
+    if (this.viewMode === 'graph') {
+      return html`<scion-agent-tree-view .agents=${filtered}></scion-agent-tree-view>`;
+    }
     return this.viewMode === 'grid' ? this.renderGrid() : this.renderTable();
   }
 

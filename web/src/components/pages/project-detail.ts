@@ -33,6 +33,7 @@ import '../shared/git-remote-display.js';
 import type { ViewMode } from '../shared/view-toggle.js';
 import '../shared/status-badge.js';
 import '../shared/view-toggle.js';
+import '../shared/agent-tree-view.js';
 import '../shared/agent-message-viewer.js';
 import '../shared/file-browser.js';
 import '../shared/file-editor.js';
@@ -709,7 +710,7 @@ export class ScionPageProjectDetail extends LitElement {
 
     // Read persisted view mode
     const stored = localStorage.getItem('scion-view-project-agents') as ViewMode | null;
-    if (stored === 'grid' || stored === 'list') {
+    if (stored === 'grid' || stored === 'list' || stored === 'graph') {
       this.viewMode = stored;
     }
 
@@ -1086,8 +1087,6 @@ export class ScionPageProjectDetail extends LitElement {
   }
 
   private onViewChange(e: CustomEvent<{ view: ViewMode }>): void {
-    // 'graph' is a link segment handled by the router, never an event here.
-    if (e.detail.view === 'graph') return;
     this.viewMode = e.detail.view;
   }
 
@@ -1436,7 +1435,6 @@ export class ScionPageProjectDetail extends LitElement {
           <scion-view-toggle
             .view=${this.viewMode}
             storageKey="scion-view-project-agents"
-            graphHref="/agents/graph?project=${this.projectId}"
             @view-change=${this.onViewChange}
           ></scion-view-toggle>
           ${can(this.agentScopeCapabilities, 'stop_all') && this.hasRunningAgents() ? html`
@@ -1461,7 +1459,9 @@ export class ScionPageProjectDetail extends LitElement {
           ${this.renderFilterBar()}
           ${this.displayAgents.length === 0
             ? html`<div class="empty-filter-state">No agents match the current filter.</div>`
-            : this.viewMode === 'grid' ? this.renderAgentGrid() : this.renderAgentTable()}
+            : this.viewMode === 'graph'
+              ? html`<scion-agent-tree-view .agents=${this.displayAgents}></scion-agent-tree-view>`
+              : this.viewMode === 'grid' ? this.renderAgentGrid() : this.renderAgentTable()}
         `}
 
       ${this.project?.cloudLogging ? this.renderMessagesSection() : nothing}
