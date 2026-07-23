@@ -15,11 +15,15 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
+	"time"
 
 	"github.com/spf13/cobra"
+
+	sciontoolhub "github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
 )
 
 // WhoamiResult is the JSON output shape for `scion whoami --format json`.
@@ -49,6 +53,14 @@ type WhoamiResult struct {
 	TaskSummary string            `json:"taskSummary,omitempty"`
 }
 
+// whoamiFull controls whether the --full flag was set.
+var whoamiFull bool
+
+// newHubClient is the default Hub client factory. Overridden in tests.
+var newHubClient = func() *sciontoolhub.Client {
+	return sciontoolhub.NewClient()
+}
+
 var whoamiCmd = &cobra.Command{
 	Use:   "whoami",
 	Short: "Print the current agent's identity",
@@ -68,9 +80,20 @@ When run outside an agent container, falls back to the system whoami command.`,
 			slug = name
 		}
 
+		result := buildWhoamiResult(slug, name)
+
+		// Enrich with Hub data when --full is requested.
+		if whoamiFull {
+			enrichFromHub(cmd, &result)
+		}
+
 		if isJSONOutput() {
-			result := buildWhoamiResult(slug, name)
 			return outputJSON(result)
+		}
+
+		if whoamiFull {
+			printFullPlainText(result)
+			return nil
 		}
 
 		fmt.Println(slug)
@@ -107,6 +130,75 @@ func buildWhoamiResult(slug, name string) WhoamiResult {
 	return result
 }
 
+// enrichFromHub attempts to populate Tier 2 fields from the Hub API.
+// On failure, it emits a stderr warning and returns Tier 1 fields only.
+func enrichFromHub(cmd *cobra.Command, result *WhoamiResult) {
+	client := newHubClient()
+	if client == nil || !client.IsConfigured() {
+		fmt.Fprintln(os.Stderr, "Warning: Hub not available; --full fields omitted")
+		return
+	}
+
+	parentCtx := cmd.Context()
+	if parentCtx == nil {
+		parentCtx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(parentCtx, 5*time.Second)
+	defer cancel()
+
+	self, err := client.GetSelf(ctx)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: Hub query failed: %v; --full fields omitted\n", err)
+		return
+	}
+
+	result.Phase = self.Phase
+	result.Activity = self.Activity
+	result.Labels = self.Labels
+	result.Annotations = self.Annotations
+	result.Ancestry = self.Ancestry
+	result.TaskSummary = self.TaskSummary
+}
+
+// printFullPlainText prints a human-readable multi-line summary of all available fields.
+func printFullPlainText(r WhoamiResult) {
+	if r.Name != "" {
+		fmt.Printf("Agent:    %s (%s)\n", r.Slug, r.Name)
+	} else {
+		fmt.Printf("Agent:    %s\n", r.Slug)
+	}
+	if r.ID != "" {
+		fmt.Printf("ID:       %s\n", r.ID)
+	}
+	if r.Project != "" {
+		fmt.Printf("Project:  %s\n", r.Project)
+	}
+	if r.Template != "" {
+		fmt.Printf("Template: %s\n", r.Template)
+	}
+	if r.Harness != "" {
+		fmt.Printf("Harness:  %s\n", r.Harness)
+	}
+	if r.Model != "" {
+		fmt.Printf("Model:    %s\n", r.Model)
+	}
+	if r.Creator != "" {
+		fmt.Printf("Creator:  %s\n", r.Creator)
+	}
+	if r.BrokerName != "" {
+		fmt.Printf("Broker:   %s\n", r.BrokerName)
+	}
+	if r.Phase != "" {
+		fmt.Printf("Phase:    %s\n", r.Phase)
+	}
+	if r.Activity != "" {
+		fmt.Printf("Activity: %s\n", r.Activity)
+	}
+	if r.HubURL != "" {
+		fmt.Printf("Hub:      %s\n", r.HubURL)
+	}
+}
+
 func runSystemWhoami() error {
 	path, err := exec.LookPath("whoami")
 	if err != nil {
@@ -120,4 +212,6 @@ func runSystemWhoami() error {
 
 func init() {
 	rootCmd.AddCommand(whoamiCmd)
+	whoamiCmd.Flags().BoolVar(&whoamiFull, "full", false,
+		"Include enriched fields from the Hub (phase, activity, labels, ancestry)")
 }

@@ -1406,3 +1406,57 @@ func (c *Client) FetchGCPIdentityToken(ctx context.Context, audience string) (st
 
 	return result.Token, nil
 }
+
+// AgentSelf is the subset of Hub agent fields returned by GetSelf.
+// It covers the Tier 2 fields needed by `scion whoami --full`.
+type AgentSelf struct {
+	Phase       string            `json:"phase,omitempty"`
+	Activity    string            `json:"activity,omitempty"`
+	Labels      map[string]string `json:"labels,omitempty"`
+	Annotations map[string]string `json:"annotations,omitempty"`
+	Ancestry    []string          `json:"ancestry,omitempty"`
+	TaskSummary string            `json:"taskSummary,omitempty"`
+}
+
+// GetSelf fetches the current agent's metadata from the Hub API.
+// It calls GET /api/v1/agents/{agentID} and decodes only the fields
+// needed for `scion whoami --full`. Returns an error if the Hub is
+// unreachable or returns a non-2xx status.
+func (c *Client) GetSelf(ctx context.Context) (*AgentSelf, error) {
+	if !c.IsConfigured() {
+		return nil, fmt.Errorf("hub client not configured")
+	}
+
+	endpoint := fmt.Sprintf("%s/api/v1/agents/%s",
+		strings.TrimSuffix(c.hubURL, "/"), c.agentID)
+
+	c.tokenMu.RLock()
+	currentToken := c.token
+	c.tokenMu.RUnlock()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("X-Scion-Agent-Token", currentToken)
+
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to send request: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	respBody, _ := io.ReadAll(resp.Body)
+
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("hub returned error %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var result AgentSelf
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	return &result, nil
+}

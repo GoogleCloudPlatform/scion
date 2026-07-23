@@ -17,12 +17,18 @@ package cmd
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	sciontoolhub "github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
 )
 
 func captureStdout(t *testing.T, fn func()) string {
@@ -34,6 +40,20 @@ func captureStdout(t *testing.T, fn func()) string {
 	fn()
 	_ = w.Close()
 	os.Stdout = old
+	var buf bytes.Buffer
+	_, _ = io.Copy(&buf, r)
+	return buf.String()
+}
+
+func captureStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+	old := os.Stderr
+	os.Stderr = w
+	fn()
+	_ = w.Close()
+	os.Stderr = old
 	var buf bytes.Buffer
 	_, _ = io.Copy(&buf, r)
 	return buf.String()
@@ -225,6 +245,178 @@ func TestWhoamiHubURL(t *testing.T) {
 		require.NoError(t, json.Unmarshal([]byte(out), &raw))
 		assert.NotContains(t, raw, "hubUrl")
 	})
+}
+
+func TestWhoamiFull(t *testing.T) {
+	// Set up a mock Hub server.
+	agentResp := map[string]interface{}{
+		"id":          "agent-full-id",
+		"slug":        "full-agent",
+		"name":        "Full Agent",
+		"phase":       "running",
+		"activity":    "working",
+		"labels":      map[string]string{"env": "prod", "team": "infra"},
+		"annotations": map[string]string{"note": "test annotation"},
+		"ancestry":    []string{"user-root", "parent-agent"},
+		"taskSummary": "Implementing feature X",
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, http.MethodGet, r.Method)
+		assert.Contains(t, r.URL.Path, "/api/v1/agents/agent-full-id")
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(agentResp)
+	}))
+	defer srv.Close()
+
+	// Set env vars.
+	t.Setenv("SCION_AGENT_SLUG", "full-agent")
+	t.Setenv("SCION_AGENT_NAME", "Full Agent")
+	t.Setenv("SCION_AGENT_ID", "agent-full-id")
+	t.Setenv("SCION_HUB_ENDPOINT", srv.URL)
+
+	// Override the Hub client factory with one pointing at our test server.
+	cleanup := sciontoolhub.SetHubTestSandboxed()
+	defer cleanup()
+	origFactory := newHubClient
+	newHubClient = func() *sciontoolhub.Client {
+		return sciontoolhub.NewClientWithConfig(srv.URL, "test-token", "agent-full-id")
+	}
+	defer func() { newHubClient = origFactory }()
+
+	// Save and restore the --full flag.
+	oldFull := whoamiFull
+	whoamiFull = true
+	defer func() { whoamiFull = oldFull }()
+
+	oldFormat := outputFormat
+	outputFormat = "json"
+	defer func() { outputFormat = oldFormat }()
+
+	cmd := whoamiCmd
+	out := captureStdout(t, func() {
+		err := cmd.RunE(cmd, nil)
+		require.NoError(t, err)
+	})
+
+	var result WhoamiResult
+	require.NoError(t, json.Unmarshal([]byte(out), &result))
+
+	// Tier 1 fields.
+	assert.Equal(t, "full-agent", result.Slug)
+	assert.Equal(t, "Full Agent", result.Name)
+	assert.Equal(t, "agent-full-id", result.ID)
+	assert.Equal(t, fmt.Sprintf("%s/agents/agent-full-id", srv.URL), result.HubURL)
+
+	// Tier 2 fields from Hub API.
+	assert.Equal(t, "running", result.Phase)
+	assert.Equal(t, "working", result.Activity)
+	assert.Equal(t, map[string]string{"env": "prod", "team": "infra"}, result.Labels)
+	assert.Equal(t, map[string]string{"note": "test annotation"}, result.Annotations)
+	assert.Equal(t, []string{"user-root", "parent-agent"}, result.Ancestry)
+	assert.Equal(t, "Implementing feature X", result.TaskSummary)
+}
+
+func TestWhoamiFullNoHub(t *testing.T) {
+	t.Setenv("SCION_AGENT_SLUG", "nohub-agent")
+	t.Setenv("SCION_AGENT_NAME", "NoHub Agent")
+	t.Setenv("SCION_AGENT_ID", "agent-nohub-id")
+	// No Hub endpoint set — client will be nil.
+	t.Setenv("SCION_HUB_ENDPOINT", "")
+
+	// Override the Hub client factory to return nil (no Hub).
+	origFactory := newHubClient
+	newHubClient = func() *sciontoolhub.Client {
+		return nil
+	}
+	defer func() { newHubClient = origFactory }()
+
+	oldFull := whoamiFull
+	whoamiFull = true
+	defer func() { whoamiFull = oldFull }()
+
+	oldFormat := outputFormat
+	outputFormat = "json"
+	defer func() { outputFormat = oldFormat }()
+
+	cmd := whoamiCmd
+
+	var stderr string
+	out := captureStdout(t, func() {
+		stderr = captureStderr(t, func() {
+			err := cmd.RunE(cmd, nil)
+			require.NoError(t, err) // Must exit 0 even without Hub.
+		})
+	})
+
+	// Verify stderr warning.
+	assert.Contains(t, stderr, "Hub not available")
+
+	// Verify Tier 1 fields are still present.
+	var result WhoamiResult
+	require.NoError(t, json.Unmarshal([]byte(out), &result))
+	assert.Equal(t, "nohub-agent", result.Slug)
+	assert.Equal(t, "NoHub Agent", result.Name)
+	assert.Equal(t, "agent-nohub-id", result.ID)
+
+	// Verify Tier 2 fields are absent.
+	var raw map[string]interface{}
+	require.NoError(t, json.Unmarshal([]byte(out), &raw))
+	assert.NotContains(t, raw, "phase")
+	assert.NotContains(t, raw, "activity")
+	assert.NotContains(t, raw, "labels")
+	assert.NotContains(t, raw, "annotations")
+	assert.NotContains(t, raw, "ancestry")
+	assert.NotContains(t, raw, "taskSummary")
+}
+
+func TestWhoamiFullPlainText(t *testing.T) {
+	t.Setenv("SCION_AGENT_SLUG", "text-agent")
+	t.Setenv("SCION_AGENT_NAME", "Text Agent")
+	t.Setenv("SCION_AGENT_ID", "agent-text-id")
+	t.Setenv("SCION_PROJECT", "my-project")
+	t.Setenv("SCION_TEMPLATE_NAME", "developer")
+	t.Setenv("SCION_HARNESS", "claude")
+	t.Setenv("SCION_MODEL", "sonnet")
+	t.Setenv("SCION_CREATOR", "ptone")
+	t.Setenv("SCION_BROKER_NAME", "my-broker")
+	t.Setenv("SCION_HUB_ENDPOINT", "https://hub.example.com")
+
+	// Override the Hub client factory to return nil (skip Hub enrichment for this test).
+	origFactory := newHubClient
+	newHubClient = func() *sciontoolhub.Client {
+		return nil
+	}
+	defer func() { newHubClient = origFactory }()
+
+	oldFull := whoamiFull
+	whoamiFull = true
+	defer func() { whoamiFull = oldFull }()
+
+	// Plain text (not JSON).
+	oldFormat := outputFormat
+	outputFormat = ""
+	defer func() { outputFormat = oldFormat }()
+
+	cmd := whoamiCmd
+	out := captureStdout(t, func() {
+		_ = captureStderr(t, func() {
+			err := cmd.RunE(cmd, nil)
+			require.NoError(t, err)
+		})
+	})
+
+	assert.Contains(t, out, "Agent:    text-agent (Text Agent)")
+	assert.Contains(t, out, "ID:       agent-text-id")
+	assert.Contains(t, out, "Project:  my-project")
+	assert.Contains(t, out, "Template: developer")
+	assert.Contains(t, out, "Harness:  claude")
+	assert.Contains(t, out, "Model:    sonnet")
+	assert.Contains(t, out, "Creator:  ptone")
+	assert.Contains(t, out, "Broker:   my-broker")
+	assert.Contains(t, out, "Hub:      https://hub.example.com/agents/agent-text-id")
+
+	// Verify plain-text does not contain JSON braces.
+	assert.False(t, strings.HasPrefix(strings.TrimSpace(out), "{"))
 }
 
 func TestWhoamiNameOnly(t *testing.T) {
