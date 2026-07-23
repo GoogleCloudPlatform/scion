@@ -29,7 +29,7 @@
   "disableWorkflows": true,
   "disableRemoteControl": true,
   "disableClaudeAiConnectors": true,
-  "disableArtifact": true,
+  "disableArtifacts": true,
   "includeCoAuthoredBy": false,
   "gitAttribution": false,
   "hooks": {
