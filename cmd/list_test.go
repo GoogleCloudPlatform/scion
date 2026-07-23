@@ -16,6 +16,10 @@ package cmd
 
 import (
 	"bytes"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
@@ -127,7 +131,7 @@ func TestDisplayAgentsLocalMode(t *testing.T) {
 	r, w, _ := os.Pipe()
 	os.Stdout = w
 
-	err := displayAgents(agents, false, false)
+	err := displayAgents(agents, false, false, false, 0)
 	_ = w.Close()
 	os.Stdout = old
 
@@ -188,7 +192,7 @@ func TestDisplayAgentsHubMode(t *testing.T) {
 	r, w, _ := os.Pipe()
 	os.Stdout = w
 
-	err := displayAgents(agents, false, true)
+	err := displayAgents(agents, false, true, false, 0)
 	_ = w.Close()
 	os.Stdout = old
 
@@ -263,7 +267,7 @@ func TestDisplayAgentsSortByTime(t *testing.T) {
 	r, w, _ := os.Pipe()
 	os.Stdout = w
 
-	err := displayAgents(agents, false, false)
+	err := displayAgents(agents, false, false, false, 0)
 	_ = w.Close()
 	os.Stdout = old
 
@@ -297,7 +301,7 @@ func TestDisplayAgentsEmpty(t *testing.T) {
 	r, w, _ := os.Pipe()
 	os.Stdout = w
 
-	err := displayAgents(nil, false, false)
+	err := displayAgents(nil, false, false, false, 0)
 	_ = w.Close()
 	os.Stdout = old
 
@@ -319,7 +323,7 @@ func TestDisplayAgentsEmptyAll(t *testing.T) {
 	r, w, _ := os.Pipe()
 	os.Stdout = w
 
-	err := displayAgents(nil, true, false)
+	err := displayAgents(nil, true, false, false, 0)
 	_ = w.Close()
 	os.Stdout = old
 
@@ -360,7 +364,7 @@ func TestDisplayAgentsFriendlyTemplateName(t *testing.T) {
 	r, w, _ := os.Pipe()
 	os.Stdout = w
 
-	err := displayAgents(agents, false, false)
+	err := displayAgents(agents, false, false, false, 0)
 	_ = w.Close()
 	os.Stdout = old
 
@@ -545,7 +549,7 @@ func TestDisplayAgentsRunningFlag(t *testing.T) {
 	r, w, _ := os.Pipe()
 	os.Stdout = w
 
-	err := displayAgents(agents, false, false)
+	err := displayAgents(agents, false, false, false, 0)
 	_ = w.Close()
 	os.Stdout = old
 
@@ -596,7 +600,7 @@ func TestFilterAgentsByPhase(t *testing.T) {
 	r, w, _ := os.Pipe()
 	os.Stdout = w
 
-	err := displayAgents(agents, false, false)
+	err := displayAgents(agents, false, false, false, 0)
 	_ = w.Close()
 	os.Stdout = old
 
@@ -636,7 +640,7 @@ func TestFilterAgentsByActivity(t *testing.T) {
 	r, w, _ := os.Pipe()
 	os.Stdout = w
 
-	err := displayAgents(agents, false, false)
+	err := displayAgents(agents, false, false, false, 0)
 	_ = w.Close()
 	os.Stdout = old
 
@@ -672,7 +676,7 @@ func TestFilterAgentsByTemplate(t *testing.T) {
 	r, w, _ := os.Pipe()
 	os.Stdout = w
 
-	err := displayAgents(agents, false, false)
+	err := displayAgents(agents, false, false, false, 0)
 	_ = w.Close()
 	os.Stdout = old
 
@@ -709,7 +713,7 @@ func TestFilterAgentsCombined(t *testing.T) {
 	r, w, _ := os.Pipe()
 	os.Stdout = w
 
-	err := displayAgents(agents, false, false)
+	err := displayAgents(agents, false, false, false, 0)
 	_ = w.Close()
 	os.Stdout = old
 
@@ -744,7 +748,7 @@ func TestSortAgentsByName(t *testing.T) {
 	r, w, _ := os.Pipe()
 	os.Stdout = w
 
-	err := displayAgents(agents, false, false)
+	err := displayAgents(agents, false, false, false, 0)
 	_ = w.Close()
 	os.Stdout = old
 
@@ -786,7 +790,7 @@ func TestSortAgentsByCreated(t *testing.T) {
 	r, w, _ := os.Pipe()
 	os.Stdout = w
 
-	err := displayAgents(agents, false, false)
+	err := displayAgents(agents, false, false, false, 0)
 	_ = w.Close()
 	os.Stdout = old
 
@@ -830,7 +834,7 @@ func TestSortAgentsReverse(t *testing.T) {
 	r, w, _ := os.Pipe()
 	os.Stdout = w
 
-	err := displayAgents(agents, false, false)
+	err := displayAgents(agents, false, false, false, 0)
 	_ = w.Close()
 	os.Stdout = old
 
@@ -870,7 +874,7 @@ func TestDisplayAgentsFilteredEmpty(t *testing.T) {
 	r, w, _ := os.Pipe()
 	os.Stdout = w
 
-	err := displayAgents(agents, false, false)
+	err := displayAgents(agents, false, false, false, 0)
 	_ = w.Close()
 	os.Stdout = old
 
@@ -927,5 +931,265 @@ func TestValidateListFlags(t *testing.T) {
 				t.Fatalf("unexpected error: %v", err)
 			}
 		})
+	}
+}
+
+func TestValidateListFlagsNegativeCount(t *testing.T) {
+	oldListCount := listCount
+	listCount = -5
+	defer func() { listCount = oldListCount }()
+
+	err := validateListFlags()
+	if err == nil {
+		t.Fatal("expected error for negative --count, got nil")
+	}
+	if !strings.Contains(err.Error(), "non-negative") {
+		t.Errorf("error %q should mention non-negative", err.Error())
+	}
+}
+
+func TestListCountFlag(t *testing.T) {
+	var receivedLimit string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedLimit = r.URL.Query().Get("limit")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"agents": [], "totalCount": 0}`))
+	}))
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	if err != nil {
+		t.Fatalf("hubclient.New failed: %v", err)
+	}
+
+	hubCtx := &HubContext{Client: client, Endpoint: server.URL}
+
+	// Save and restore global flags
+	oldListAll := listAll
+	oldListCount := listCount
+	oldOutputFormat := outputFormat
+	listAll = true  // avoid project ID lookup
+	listCount = 10
+	outputFormat = ""
+	defer func() {
+		listAll = oldListAll
+		listCount = oldListCount
+		outputFormat = oldOutputFormat
+	}()
+
+	// Capture stdout (displayAgents writes there)
+	oldStdout := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	err = listAgentsViaHub(hubCtx)
+
+	_ = w.Close()
+	os.Stdout = oldStdout
+	var buf bytes.Buffer
+	_, _ = buf.ReadFrom(r)
+
+	if err != nil {
+		t.Fatalf("listAgentsViaHub returned error: %v", err)
+	}
+
+	if receivedLimit != "10" {
+		t.Errorf("expected limit=10 in API request, got limit=%q", receivedLimit)
+	}
+}
+
+func TestListTruncationWarning(t *testing.T) {
+	// Server returns 2 agents but totalCount=5, indicating truncation
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := map[string]interface{}{
+			"agents": []map[string]interface{}{
+				{"id": "a1", "name": "agent-1", "phase": "running"},
+				{"id": "a2", "name": "agent-2", "phase": "running"},
+			},
+			"totalCount": 5,
+		}
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	if err != nil {
+		t.Fatalf("hubclient.New failed: %v", err)
+	}
+
+	hubCtx := &HubContext{Client: client, Endpoint: server.URL}
+
+	// Save and restore global flags
+	oldListAll := listAll
+	oldListCount := listCount
+	oldOutputFormat := outputFormat
+	listAll = true
+	listCount = 0
+	outputFormat = ""
+	defer func() {
+		listAll = oldListAll
+		listCount = oldListCount
+		outputFormat = oldOutputFormat
+	}()
+
+	// Capture stderr for the truncation warning
+	oldStderr := os.Stderr
+	stderrR, stderrW, _ := os.Pipe()
+	os.Stderr = stderrW
+
+	// Capture stdout (displayAgents writes table output there)
+	oldStdout := os.Stdout
+	stdoutR, stdoutW, _ := os.Pipe()
+	os.Stdout = stdoutW
+
+	err = listAgentsViaHub(hubCtx)
+
+	_ = stderrW.Close()
+	_ = stdoutW.Close()
+	os.Stderr = oldStderr
+	os.Stdout = oldStdout
+
+	var stderrBuf bytes.Buffer
+	_, _ = stderrBuf.ReadFrom(stderrR)
+	// drain stdout
+	var stdoutBuf bytes.Buffer
+	_, _ = stdoutBuf.ReadFrom(stdoutR)
+
+	if err != nil {
+		t.Fatalf("listAgentsViaHub returned error: %v", err)
+	}
+
+	stderrOutput := stderrBuf.String()
+	expectedWarning := fmt.Sprintf("Warning: showing %d of %d agents. Use --count %d to see all.", 2, 5, 5)
+	if !strings.Contains(stderrOutput, expectedWarning) {
+		t.Errorf("expected truncation warning %q in stderr, got: %q", expectedWarning, stderrOutput)
+	}
+}
+
+func TestListTruncationJSONEnvelope(t *testing.T) {
+	agents := []api.AgentInfo{
+		{Name: "agent-1", Phase: "running", Template: "default", Runtime: "docker", Project: "p"},
+		{Name: "agent-2", Phase: "running", Template: "default", Runtime: "docker", Project: "p"},
+	}
+
+	// Save and restore global flags
+	oldOutputFormat := outputFormat
+	outputFormat = "json"
+	defer func() { outputFormat = oldOutputFormat }()
+
+	// Test with truncation: totalCount > len(agents)
+	oldStdout := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	err := displayAgents(agents, false, false, true, 5)
+
+	_ = w.Close()
+	os.Stdout = oldStdout
+
+	if err != nil {
+		t.Fatalf("displayAgents returned error: %v", err)
+	}
+
+	var buf bytes.Buffer
+	_, _ = buf.ReadFrom(r)
+
+	var envelope struct {
+		Agents    []api.AgentInfo `json:"agents"`
+		Truncated bool            `json:"truncated"`
+		Total     int             `json:"totalCount"`
+		Shown     int             `json:"shownCount"`
+	}
+	if err := json.Unmarshal(buf.Bytes(), &envelope); err != nil {
+		t.Fatalf("failed to decode JSON envelope: %v\noutput: %s", err, buf.String())
+	}
+
+	if !envelope.Truncated {
+		t.Error("expected truncated=true")
+	}
+	if envelope.Total != 5 {
+		t.Errorf("expected totalCount=5, got %d", envelope.Total)
+	}
+	if envelope.Shown != 2 {
+		t.Errorf("expected shownCount=2, got %d", envelope.Shown)
+	}
+	if len(envelope.Agents) != 2 {
+		t.Errorf("expected 2 agents, got %d", len(envelope.Agents))
+	}
+}
+
+func TestListNoTruncationJSONBareArray(t *testing.T) {
+	agents := []api.AgentInfo{
+		{Name: "agent-1", Phase: "running", Template: "default", Runtime: "docker", Project: "p"},
+	}
+
+	// Save and restore global flags
+	oldOutputFormat := outputFormat
+	outputFormat = "json"
+	defer func() { outputFormat = oldOutputFormat }()
+
+	// Test without truncation: totalCount == len(agents)
+	oldStdout := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	err := displayAgents(agents, false, false, false, 0)
+
+	_ = w.Close()
+	os.Stdout = oldStdout
+
+	if err != nil {
+		t.Fatalf("displayAgents returned error: %v", err)
+	}
+
+	var buf bytes.Buffer
+	_, _ = buf.ReadFrom(r)
+
+	// When not truncated, output should be a bare JSON array
+	output := strings.TrimSpace(buf.String())
+	if !strings.HasPrefix(output, "[") {
+		t.Errorf("expected bare JSON array when not truncated, got: %s", output)
+	}
+}
+
+func TestListJSONNoFalseTruncationWithClientFilter(t *testing.T) {
+	// Regression test: when the server returns all agents (no truncation)
+	// but client-side filters (e.g. --running) reduce the list, the JSON
+	// output must NOT show a truncation envelope.
+	agents := []api.AgentInfo{
+		{Name: "running-agent", Phase: "running", Template: "default", Runtime: "docker", Project: "p"},
+		{Name: "stopped-agent", Phase: "stopped", Template: "default", Runtime: "docker", Project: "p"},
+	}
+
+	// Enable --running filter so one agent is filtered out client-side
+	oldListRunning := listRunning
+	oldOutputFormat := outputFormat
+	listRunning = true
+	outputFormat = "json"
+	defer func() { listRunning = oldListRunning; outputFormat = oldOutputFormat }()
+
+	oldStdout := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	// wasTruncated=false, totalCount=2 (server returned all 2)
+	err := displayAgents(agents, false, false, false, 2)
+
+	_ = w.Close()
+	os.Stdout = oldStdout
+
+	if err != nil {
+		t.Fatalf("displayAgents returned error: %v", err)
+	}
+
+	var buf bytes.Buffer
+	_, _ = buf.ReadFrom(r)
+
+	// Output should be a bare JSON array (not an envelope), because the
+	// server did NOT truncate — the reduction was client-side only.
+	output := strings.TrimSpace(buf.String())
+	if !strings.HasPrefix(output, "[") {
+		t.Errorf("expected bare JSON array when server did not truncate, got: %s", output)
 	}
 }

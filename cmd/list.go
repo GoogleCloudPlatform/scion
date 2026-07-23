@@ -46,6 +46,7 @@ var (
 	sortField      string
 	sortReverse    bool
 	filterLabels   []string
+	listCount      int
 )
 
 var validSortFields = map[string]bool{
@@ -111,7 +112,7 @@ func listAgentsLocal() error {
 		return err
 	}
 
-	return displayAgents(agents, listAll, false)
+	return displayAgents(agents, listAll, false, false, 0)
 }
 
 // listAgentsViaHub lists agents using the Hub API
@@ -131,6 +132,9 @@ func listAgentsViaHub(hubCtx *HubContext) error {
 		Phase:          filterPhase,
 		Labels:         parsedLabels,
 	}
+	if listCount > 0 {
+		opts.Page.Limit = listCount
+	}
 	agentSvc := hubCtx.Client.Agents()
 
 	if !listAll {
@@ -148,6 +152,16 @@ func listAgentsViaHub(hubCtx *HubContext) error {
 		return wrapHubError(fmt.Errorf("failed to list agents via Hub: %w", err))
 	}
 
+	// Determine truncation before any client-side filtering
+	totalCount := resp.Page.TotalCount
+	wasTruncated := totalCount > len(resp.Agents)
+
+	// Warn on stderr when results are truncated
+	if wasTruncated {
+		fmt.Fprintf(os.Stderr, "Warning: showing %d of %d agents. Use --count %d to see all.\n",
+			len(resp.Agents), totalCount, totalCount)
+	}
+
 	// Convert Hub agents to local AgentInfo format
 	agents := make([]api.AgentInfo, len(resp.Agents))
 	for i, a := range resp.Agents {
@@ -160,7 +174,7 @@ func listAgentsViaHub(hubCtx *HubContext) error {
 	// Client-side enrichment: fetch broker/project names if not provided by Hub
 	enrichAgentsClientSide(ctx, hubCtx.Client, agents)
 
-	return displayAgents(agents, listAll, true)
+	return displayAgents(agents, listAll, true, wasTruncated, totalCount)
 }
 
 // enrichAgentsClientSide populates Grove and RuntimeBrokerName fields client-side
@@ -293,6 +307,9 @@ func filterRunningAgents(agents []api.AgentInfo) []api.AgentInfo {
 
 // validateListFlags checks that filter and sort flag values are valid.
 func validateListFlags() error {
+	if listCount < 0 {
+		return fmt.Errorf("invalid --count value %d: must be non-negative", listCount)
+	}
 	if filterPhase != "" {
 		filterPhase = strings.ToLower(filterPhase)
 		if !state.Phase(filterPhase).IsValid() {
@@ -378,7 +395,7 @@ func sortAgentsByField(agents []api.AgentInfo) {
 	})
 }
 
-func displayAgents(agents []api.AgentInfo, all bool, hubMode bool) error {
+func displayAgents(agents []api.AgentInfo, all bool, hubMode bool, wasTruncated bool, totalCount int) error {
 	if listRunning {
 		agents = filterRunningAgents(agents)
 	}
@@ -407,6 +424,23 @@ func displayAgents(agents []api.AgentInfo, all bool, hubMode bool) error {
 		}
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
+		// When server-side truncation occurred, wrap in an envelope with metadata.
+		// Use wasTruncated (determined pre-filter) to avoid false positives
+		// when client-side filters (--running, --phase, etc.) reduce the count.
+		if wasTruncated {
+			output := struct {
+				Agents    []api.AgentInfo `json:"agents"`
+				Truncated bool            `json:"truncated,omitempty"`
+				Total     int             `json:"totalCount"`
+				Shown     int             `json:"shownCount"`
+			}{
+				Agents:    agents,
+				Truncated: true,
+				Total:     totalCount,
+				Shown:     len(agents),
+			}
+			return enc.Encode(output)
+		}
 		return enc.Encode(agents)
 	}
 
@@ -694,4 +728,5 @@ func init() {
 	listCmd.Flags().StringVar(&sortField, "sort", "", "Sort by field (name, phase, created, updated, last-seen)")
 	listCmd.Flags().BoolVar(&sortReverse, "reverse", false, "Reverse sort order")
 	listCmd.Flags().StringArrayVar(&filterLabels, "label", nil, "Filter by label in key=value format (repeatable)")
+	listCmd.Flags().IntVar(&listCount, "count", 0, "Maximum number of agents to return (default: server limit)")
 }
