@@ -94,3 +94,30 @@ func TestBrokerHealth_ServerError(t *testing.T) {
 		t.Fatalf("expected error for 503 response, got nil (health=%v)", health)
 	}
 }
+
+// TestBrokerHealth_NonJSONErrorPage verifies that a non-2xx response with a
+// non-JSON Content-Type (e.g. a 502 HTML error page from a load balancer) is
+// surfaced as a real status error, NOT misdiagnosed as proxy interception.
+// This guards the 2xx guard added to the proxy-interception check.
+func TestBrokerHealth_NonJSONErrorPage(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusBadGateway) // 502 from a load balancer
+		_, _ = w.Write([]byte(`<html><body>Bad Gateway</body></html>`))
+	}))
+	defer server.Close()
+
+	client, err := New(server.URL)
+	if err != nil {
+		t.Fatalf("failed to create client: %v", err)
+	}
+	health, err := client.Health(context.Background())
+	if err == nil {
+		t.Fatalf("expected error for 502 response, got nil (health=%v)", health)
+	}
+	// Must NOT produce a proxy-hint diagnosis — the real status error should surface.
+	msg := err.Error()
+	if strings.Contains(msg, "reverse proxy") || strings.Contains(msg, "GFE") {
+		t.Errorf("502 from load balancer should not produce a proxy-hint diagnosis, got: %v", err)
+	}
+}
