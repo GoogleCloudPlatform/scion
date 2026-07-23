@@ -429,7 +429,7 @@ func (s *ProjectStore) ListProjects(ctx context.Context, filter store.ProjectFil
 
 	limit := opts.Limit
 	if limit <= 0 {
-		limit = 50
+		limit = 500
 	}
 
 	if opts.Cursor != "" {

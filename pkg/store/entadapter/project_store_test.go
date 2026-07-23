@@ -629,7 +629,7 @@ func TestListProjects_CursorPagination(t *testing.T) {
 	ps := newTestProjectStore(t)
 	ctx := context.Background()
 
-	const total = 125 // more than two default pages
+	const total = 125 // more than two pages at pageSize=50
 	created := make(map[string]bool, total)
 	for i := 0; i < total; i++ {
 		p := newProject(i)
@@ -637,10 +637,11 @@ func TestListProjects_CursorPagination(t *testing.T) {
 		created[p.ID] = true
 	}
 
-	// A single default call must not exceed one page, and must advertise more.
-	first, err := ps.ListProjects(ctx, store.ProjectFilter{}, store.ListOptions{})
+	// Use an explicit page size (50) to exercise cursor across multiple pages.
+	const pageSize = 50
+	first, err := ps.ListProjects(ctx, store.ProjectFilter{}, store.ListOptions{Limit: pageSize})
 	require.NoError(t, err)
-	assert.LessOrEqual(t, len(first.Items), 50, "default page must cap at 50 rows")
+	assert.LessOrEqual(t, len(first.Items), pageSize, "page must cap at requested limit")
 	assert.NotEmpty(t, first.NextCursor, "more pages exist, so NextCursor must be set")
 
 	// Walking the cursor must enumerate every project exactly once.
@@ -648,7 +649,7 @@ func TestListProjects_CursorPagination(t *testing.T) {
 	cursor := ""
 	for pages := 0; ; pages++ {
 		require.LessOrEqual(t, pages, total, "pagination did not terminate")
-		page, err := ps.ListProjects(ctx, store.ProjectFilter{}, store.ListOptions{Cursor: cursor})
+		page, err := ps.ListProjects(ctx, store.ProjectFilter{}, store.ListOptions{Limit: pageSize, Cursor: cursor})
 		require.NoError(t, err)
 		for _, p := range page.Items {
 			require.False(t, seen[p.ID], "duplicate project across pages: %s", p.ID)
