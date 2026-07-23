@@ -16,6 +16,10 @@ package cmd
 
 import (
 	"bytes"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
@@ -927,5 +931,180 @@ func TestValidateListFlags(t *testing.T) {
 				t.Fatalf("unexpected error: %v", err)
 			}
 		})
+	}
+}
+
+func TestValidateListFlagsNegativeCount(t *testing.T) {
+	oldListCount := listCount
+	listCount = -5
+	defer func() { listCount = oldListCount }()
+
+	err := validateListFlags()
+	if err == nil {
+		t.Fatal("expected error for negative --count, got nil")
+	}
+	if !strings.Contains(err.Error(), "non-negative") {
+		t.Errorf("error %q should mention non-negative", err.Error())
+	}
+}
+
+func TestListCountFlag(t *testing.T) {
+	var receivedLimit string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedLimit = r.URL.Query().Get("limit")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"agents": [], "totalCount": 0}`))
+	}))
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	if err != nil {
+		t.Fatalf("hubclient.New failed: %v", err)
+	}
+
+	hubCtx := &HubContext{Client: client, Endpoint: server.URL}
+
+	// Save and restore global flags
+	oldListAll := listAll
+	oldListCount := listCount
+	oldOutputFormat := outputFormat
+	listAll = true  // avoid project ID lookup
+	listCount = 10
+	outputFormat = ""
+	defer func() {
+		listAll = oldListAll
+		listCount = oldListCount
+		outputFormat = oldOutputFormat
+	}()
+
+	// Capture stdout (displayAgents writes there)
+	oldStdout := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	err = listAgentsViaHub(hubCtx)
+
+	_ = w.Close()
+	os.Stdout = oldStdout
+	var buf bytes.Buffer
+	_, _ = buf.ReadFrom(r)
+
+	if err != nil {
+		t.Fatalf("listAgentsViaHub returned error: %v", err)
+	}
+
+	if receivedLimit != "10" {
+		t.Errorf("expected limit=10 in API request, got limit=%q", receivedLimit)
+	}
+}
+
+func TestListTruncationWarning(t *testing.T) {
+	// Server returns 2 agents but totalCount=5, indicating truncation
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := map[string]interface{}{
+			"agents": []map[string]interface{}{
+				{"id": "a1", "name": "agent-1", "phase": "running"},
+				{"id": "a2", "name": "agent-2", "phase": "running"},
+			},
+			"totalCount": 5,
+		}
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	if err != nil {
+		t.Fatalf("hubclient.New failed: %v", err)
+	}
+
+	hubCtx := &HubContext{Client: client, Endpoint: server.URL}
+
+	// Save and restore global flags
+	oldListAll := listAll
+	oldListCount := listCount
+	oldOutputFormat := outputFormat
+	listAll = true
+	listCount = 0
+	outputFormat = ""
+	defer func() {
+		listAll = oldListAll
+		listCount = oldListCount
+		outputFormat = oldOutputFormat
+	}()
+
+	// Capture stderr for the truncation warning
+	oldStderr := os.Stderr
+	stderrR, stderrW, _ := os.Pipe()
+	os.Stderr = stderrW
+
+	// Capture stdout (displayAgents writes table output there)
+	oldStdout := os.Stdout
+	stdoutR, stdoutW, _ := os.Pipe()
+	os.Stdout = stdoutW
+
+	err = listAgentsViaHub(hubCtx)
+
+	_ = stderrW.Close()
+	_ = stdoutW.Close()
+	os.Stderr = oldStderr
+	os.Stdout = oldStdout
+
+	var stderrBuf bytes.Buffer
+	_, _ = stderrBuf.ReadFrom(stderrR)
+	// drain stdout
+	var stdoutBuf bytes.Buffer
+	_, _ = stdoutBuf.ReadFrom(stdoutR)
+
+	if err != nil {
+		t.Fatalf("listAgentsViaHub returned error: %v", err)
+	}
+
+	stderrOutput := stderrBuf.String()
+	expectedWarning := fmt.Sprintf("Warning: showing %d of %d agents. Use --count %d to see all.", 2, 5, 5)
+	if !strings.Contains(stderrOutput, expectedWarning) {
+		t.Errorf("expected truncation warning %q in stderr, got: %q", expectedWarning, stderrOutput)
+	}
+}
+
+func TestListJSONAlwaysBareArray(t *testing.T) {
+	agents := []api.AgentInfo{
+		{Name: "agent-1", Phase: "running", Template: "default", Runtime: "docker", Project: "p"},
+		{Name: "agent-2", Phase: "running", Template: "default", Runtime: "docker", Project: "p"},
+	}
+
+	// Save and restore global flags
+	oldOutputFormat := outputFormat
+	outputFormat = "json"
+	defer func() { outputFormat = oldOutputFormat }()
+
+	oldStdout := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	err := displayAgents(agents, false, false)
+
+	_ = w.Close()
+	os.Stdout = oldStdout
+
+	if err != nil {
+		t.Fatalf("displayAgents returned error: %v", err)
+	}
+
+	var buf bytes.Buffer
+	_, _ = buf.ReadFrom(r)
+
+	// JSON output must always be a bare array, never an envelope
+	output := strings.TrimSpace(buf.String())
+	if !strings.HasPrefix(output, "[") {
+		t.Errorf("expected bare JSON array, got: %s", output)
+	}
+
+	var arr []api.AgentInfo
+	if err := json.Unmarshal(buf.Bytes(), &arr); err != nil {
+		t.Fatalf("failed to decode bare JSON array: %v\noutput: %s", err, buf.String())
+	}
+	if len(arr) != 2 {
+		t.Errorf("expected 2 agents in array, got %d", len(arr))
 	}
 }

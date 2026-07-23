@@ -49,6 +49,52 @@ func TestAgentService_List_QueryParameters(t *testing.T) {
 	}
 }
 
+func TestListAgentsPageLimit(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		limit := r.URL.Query().Get("limit")
+		if limit != "25" {
+			t.Errorf("expected limit=25 in query, got limit=%q", limit)
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"agents": [], "totalCount": 0}`))
+	}))
+	defer server.Close()
+
+	client, err := New(server.URL)
+	if err != nil {
+		t.Fatalf("New failed: %v", err)
+	}
+
+	opts := &ListAgentsOptions{}
+	opts.Page.Limit = 25
+	_, err = client.Agents().List(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("List failed: %v", err)
+	}
+}
+
+func TestListAgentsPageLimitZeroOmitted(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		limit := r.URL.Query().Get("limit")
+		if limit != "" {
+			t.Errorf("expected no limit param when Limit=0, got limit=%q", limit)
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"agents": [], "totalCount": 0}`))
+	}))
+	defer server.Close()
+
+	client, err := New(server.URL)
+	if err != nil {
+		t.Fatalf("New failed: %v", err)
+	}
+
+	_, err = client.Agents().List(context.Background(), &ListAgentsOptions{})
+	if err != nil {
+		t.Fatalf("List failed: %v", err)
+	}
+}
+
 func TestSubscriptionService_List_QueryParameters(t *testing.T) {
 	projectID := "project-123"
 

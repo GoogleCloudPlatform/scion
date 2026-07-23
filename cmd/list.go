@@ -46,6 +46,7 @@ var (
 	sortField      string
 	sortReverse    bool
 	filterLabels   []string
+	listCount      int
 )
 
 var validSortFields = map[string]bool{
@@ -131,6 +132,9 @@ func listAgentsViaHub(hubCtx *HubContext) error {
 		Phase:          filterPhase,
 		Labels:         parsedLabels,
 	}
+	if listCount > 0 {
+		opts.Page.Limit = listCount
+	}
 	agentSvc := hubCtx.Client.Agents()
 
 	if !listAll {
@@ -146,6 +150,12 @@ func listAgentsViaHub(hubCtx *HubContext) error {
 	resp, err := agentSvc.List(ctx, opts)
 	if err != nil {
 		return wrapHubError(fmt.Errorf("failed to list agents via Hub: %w", err))
+	}
+
+	// Warn on stderr when results are truncated
+	if resp.Page.TotalCount > len(resp.Agents) {
+		fmt.Fprintf(os.Stderr, "Warning: showing %d of %d agents. Use --count %d to see all.\n",
+			len(resp.Agents), resp.Page.TotalCount, resp.Page.TotalCount)
 	}
 
 	// Convert Hub agents to local AgentInfo format
@@ -293,6 +303,9 @@ func filterRunningAgents(agents []api.AgentInfo) []api.AgentInfo {
 
 // validateListFlags checks that filter and sort flag values are valid.
 func validateListFlags() error {
+	if listCount < 0 {
+		return fmt.Errorf("invalid --count value %d: must be non-negative", listCount)
+	}
 	if filterPhase != "" {
 		filterPhase = strings.ToLower(filterPhase)
 		if !state.Phase(filterPhase).IsValid() {
@@ -694,4 +707,5 @@ func init() {
 	listCmd.Flags().StringVar(&sortField, "sort", "", "Sort by field (name, phase, created, updated, last-seen)")
 	listCmd.Flags().BoolVar(&sortReverse, "reverse", false, "Reverse sort order")
 	listCmd.Flags().StringArrayVar(&filterLabels, "label", nil, "Filter by label in key=value format (repeatable)")
+	listCmd.Flags().IntVar(&listCount, "count", 0, "Maximum number of agents to return (default: server limit)")
 }

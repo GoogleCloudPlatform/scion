@@ -5082,3 +5082,125 @@ func TestAgentLifecycleSuspend_RejectsNonRunningAgent(t *testing.T) {
 	assert.Equal(t, string(state.PhaseStopped), updated.Phase,
 		"rejected suspend must not change the agent's phase")
 }
+
+// ============================================================================
+// List Agents Default Limit Tests
+// ============================================================================
+
+func TestListAgents_DefaultLimit500(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	// Create a project
+	project := &store.Project{
+		ID:   tid("project-deflimit"),
+		Name: "Default Limit Project",
+		Slug: "default-limit-project",
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+
+	// Create 55 agents — more than the old default of 50
+	for i := 0; i < 55; i++ {
+		agent := &store.Agent{
+			ID:        tid(fmt.Sprintf("agent-deflimit-%03d", i)),
+			Slug:      fmt.Sprintf("agent-deflimit-%03d-slug", i),
+			Name:      fmt.Sprintf("Agent DefLimit %03d", i),
+			ProjectID: project.ID,
+			Phase:     string(state.PhaseRunning),
+		}
+		require.NoError(t, s.CreateAgent(ctx, agent))
+	}
+
+	// List agents with no limit parameter — should return all 55 (default is now 500)
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/agents?projectId="+project.ID, nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp ListAgentsResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+
+	assert.Equal(t, 55, len(resp.Agents),
+		"default limit should be 500, so all 55 agents should be returned without explicit ?limit=")
+}
+
+func TestListAgents_ExplicitLimit(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	// Create a project
+	project := &store.Project{
+		ID:   tid("project-explimit"),
+		Name: "Explicit Limit Project",
+		Slug: "explicit-limit-project",
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+
+	// Create 20 agents
+	for i := 0; i < 20; i++ {
+		agent := &store.Agent{
+			ID:        tid(fmt.Sprintf("agent-explimit-%03d", i)),
+			Slug:      fmt.Sprintf("agent-explimit-%03d-slug", i),
+			Name:      fmt.Sprintf("Agent ExpLimit %03d", i),
+			ProjectID: project.ID,
+			Phase:     string(state.PhaseRunning),
+		}
+		require.NoError(t, s.CreateAgent(ctx, agent))
+	}
+
+	// List agents with explicit limit=10
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/agents?projectId="+project.ID+"&limit=10", nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp ListAgentsResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+
+	assert.Equal(t, 10, len(resp.Agents),
+		"explicit ?limit=10 should return exactly 10 agents")
+}
+
+func TestListAgents_ResponseMetadata(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	// Create a project
+	project := &store.Project{
+		ID:   tid("project-metadata"),
+		Name: "Metadata Project",
+		Slug: "metadata-project",
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+
+	// Create 5 agents
+	for i := 0; i < 5; i++ {
+		agent := &store.Agent{
+			ID:        tid(fmt.Sprintf("agent-metadata-%03d", i)),
+			Slug:      fmt.Sprintf("agent-metadata-%03d-slug", i),
+			Name:      fmt.Sprintf("Agent Metadata %03d", i),
+			ProjectID: project.ID,
+			Phase:     string(state.PhaseRunning),
+		}
+		require.NoError(t, s.CreateAgent(ctx, agent))
+	}
+
+	// List agents with limit=3 to trigger pagination
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/agents?projectId="+project.ID+"&limit=3", nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	// Parse response as raw JSON to verify field presence
+	var raw map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &raw))
+
+	_, hasTotalCount := raw["totalCount"]
+	assert.True(t, hasTotalCount, "response should include totalCount field")
+
+	_, hasNextCursor := raw["nextCursor"]
+	assert.True(t, hasNextCursor, "response should include nextCursor field when results are paginated")
+
+	// Also verify the values via typed parsing
+	var resp ListAgentsResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+
+	assert.Equal(t, 3, len(resp.Agents), "should return 3 agents as requested by limit")
+	// When authenticated, totalCount reflects the auth-filtered returned count
+	assert.Greater(t, resp.TotalCount, 0, "totalCount should be present and non-zero")
+	assert.NotEmpty(t, resp.NextCursor, "nextCursor should be non-empty when more results exist")
+}

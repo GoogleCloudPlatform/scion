@@ -18,6 +18,7 @@ package entadapter
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -629,7 +630,7 @@ func TestListProjects_CursorPagination(t *testing.T) {
 	ps := newTestProjectStore(t)
 	ctx := context.Background()
 
-	const total = 125 // more than two default pages
+	const total = 125 // more than two pages at pageSize=50
 	created := make(map[string]bool, total)
 	for i := 0; i < total; i++ {
 		p := newProject(i)
@@ -637,10 +638,11 @@ func TestListProjects_CursorPagination(t *testing.T) {
 		created[p.ID] = true
 	}
 
-	// A single default call must not exceed one page, and must advertise more.
-	first, err := ps.ListProjects(ctx, store.ProjectFilter{}, store.ListOptions{})
+	// Use an explicit page size (50) to exercise cursor across multiple pages.
+	const pageSize = 50
+	first, err := ps.ListProjects(ctx, store.ProjectFilter{}, store.ListOptions{Limit: pageSize})
 	require.NoError(t, err)
-	assert.LessOrEqual(t, len(first.Items), 50, "default page must cap at 50 rows")
+	assert.LessOrEqual(t, len(first.Items), pageSize, "page must cap at requested limit")
 	assert.NotEmpty(t, first.NextCursor, "more pages exist, so NextCursor must be set")
 
 	// Walking the cursor must enumerate every project exactly once.
@@ -648,7 +650,7 @@ func TestListProjects_CursorPagination(t *testing.T) {
 	cursor := ""
 	for pages := 0; ; pages++ {
 		require.LessOrEqual(t, pages, total, "pagination did not terminate")
-		page, err := ps.ListProjects(ctx, store.ProjectFilter{}, store.ListOptions{Cursor: cursor})
+		page, err := ps.ListProjects(ctx, store.ProjectFilter{}, store.ListOptions{Limit: pageSize, Cursor: cursor})
 		require.NoError(t, err)
 		for _, p := range page.Items {
 			require.False(t, seen[p.ID], "duplicate project across pages: %s", p.ID)
@@ -664,4 +666,30 @@ func TestListProjects_CursorPagination(t *testing.T) {
 	for id := range created {
 		assert.True(t, seen[id], "project missing from pagination: %s", id)
 	}
+}
+
+// TestListProjects_MaxLimit verifies that ListProjects with a Limit exceeding
+// 1000 is capped at maxProjectListLimit=1000.
+func TestListProjects_MaxLimit(t *testing.T) {
+	ps := newTestProjectStore(t)
+	ctx := context.Background()
+
+	// Create 1010 projects — just over the max limit.
+	const total = 1010
+	for i := 0; i < total; i++ {
+		p := &store.Project{
+			ID:         uuid.NewString(),
+			Name:       fmt.Sprintf("proj-%04d", i),
+			Slug:       fmt.Sprintf("proj-%04d", i),
+			Visibility: store.VisibilityPrivate,
+		}
+		require.NoError(t, ps.CreateProject(ctx, p))
+	}
+
+	// Requesting a limit above the max (2000) should cap at 1000.
+	result, err := ps.ListProjects(ctx, store.ProjectFilter{}, store.ListOptions{Limit: 2000})
+	require.NoError(t, err)
+	assert.Equal(t, total, result.TotalCount, "TotalCount should reflect all projects")
+	assert.Len(t, result.Items, 1000, "Limit>1000 must be capped at maxProjectListLimit=1000")
+	assert.NotEmpty(t, result.NextCursor, "more projects exist, so NextCursor must be set")
 }

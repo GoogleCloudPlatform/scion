@@ -172,7 +172,7 @@ func (s *Server) listProjects(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	limit := 50
+	limit := 500
 	if l := query.Get("limit"); l != "" {
 		if parsed, err := strconv.Atoi(l); err == nil && parsed > 0 {
 			limit = parsed
@@ -1652,7 +1652,7 @@ func (s *Server) listProjectAgents(w http.ResponseWriter, r *http.Request, proje
 		filter.Labels = parsed
 	}
 
-	limit := 50
+	limit := 500
 	if l := query.Get("limit"); l != "" {
 		if parsed, err := strconv.Atoi(l); err == nil && parsed > 0 {
 			limit = parsed

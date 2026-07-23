@@ -37,8 +37,8 @@ import (
 // the legacy SQLite agent store so listing behavior is identical across
 // backends.
 const (
-	defaultAgentListLimit = 50
-	maxAgentListLimit     = 200
+	defaultAgentListLimit = 500
+	maxAgentListLimit     = 500
 )
 
 // AgentStore implements the store.AgentStore sub-interface using the Ent ORM.
@@ -402,6 +402,14 @@ func (s *AgentStore) ListAgents(ctx context.Context, filter store.AgentFilter, o
 		limit = maxAgentListLimit
 	}
 
+	if opts.Cursor != "" {
+		pred, err := s.agentCursorPredicate(ctx, opts.Cursor)
+		if err != nil {
+			return nil, err
+		}
+		query.Where(pred)
+	}
+
 	// Fetch one extra row to detect whether a further page exists.
 	rows, err := query.
 		Order(agent.ByCreated(entsql.OrderDesc())).
@@ -494,6 +502,23 @@ func agentFilterPredicates(filter store.AgentFilter) ([]predicate.Agent, error) 
 	}
 
 	return preds, nil
+}
+
+// agentCursorPredicate builds the keyset predicate for paginating after the
+// agent identified by cursor (an agent ID).
+func (s *AgentStore) agentCursorPredicate(ctx context.Context, cursor string) (predicate.Agent, error) {
+	cursorUID, err := parseUUID(cursor)
+	if err != nil {
+		return nil, fmt.Errorf("invalid cursor: %w", err)
+	}
+	c, err := s.client.Agent.Get(ctx, cursorUID)
+	if err != nil {
+		return nil, fmt.Errorf("invalid cursor: %w", mapError(err))
+	}
+	return agent.Or(
+		agent.CreatedLT(c.Created),
+		agent.And(agent.CreatedEQ(c.Created), agent.IDLT(cursorUID)),
+	), nil
 }
 
 // UpdateAgentStatus applies a partial, status-only update. It is the hottest
