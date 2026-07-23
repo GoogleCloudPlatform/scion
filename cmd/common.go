@@ -1010,13 +1010,9 @@ func startAgentViaHub(hubCtx *HubContext, agentName, task string, resume bool, i
 					if agentID == "" {
 						agentID = agentName
 					}
-					var attachOpts []wsclient.AttachOption
-					transportSrc, transportMode, err := resolveAttachTransportFn()
+					attachOpts, transportSrc, err := resolveAttachOptions()
 					if err != nil {
-						return fmt.Errorf("failed to resolve transport auth: %w", err)
-					}
-					if transportSrc != nil {
-						attachOpts = append(attachOpts, wsclient.WithTransport(transportSrc, transportMode))
+						return err
 					}
 					token := getHubAccessToken(hubCtx.Endpoint)
 					if token == "" && transportSrc == nil {
@@ -1122,13 +1118,9 @@ ready:
 	// Resolve transport auth for IAP/Cloud Run traversal FIRST — in IAP mode
 	// there is no application-level token by design, so transport auth must be
 	// determined before deciding whether an app token is required.
-	var attachOpts []wsclient.AttachOption
-	transportSrc, transportMode, err := resolveAttachTransportFn()
+	attachOpts, transportSrc, err := resolveAttachOptions()
 	if err != nil {
-		return fmt.Errorf("failed to resolve transport auth: %w", err)
-	}
-	if transportSrc != nil {
-		attachOpts = append(attachOpts, wsclient.WithTransport(transportSrc, transportMode))
+		return err
 	}
 
 	// Get access token for WebSocket authentication.

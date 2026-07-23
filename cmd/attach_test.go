@@ -217,15 +217,13 @@ func TestAttachViaHub_IAPMode_EmptyToken_PassesGate(t *testing.T) {
 
 	err = attachViaHub(hubCtx, agentName)
 
-	// The call must NOT fail with "no access token found for Hub" — that was
-	// the pre-fix behaviour that blocked IAP users entirely.
-	if err != nil {
-		assert.False(t, strings.Contains(err.Error(), "no access token found for Hub"),
-			"IAP mode with transport source should pass the token gate; got: %v", err)
-	}
-	// The function will fail at the WebSocket dial stage (the test HTTP server
-	// does not handle WebSocket upgrades), which is the expected outcome — it
-	// confirms the gate was cleared and the code reached the connection attempt.
+	// The function is expected to fail at the WebSocket dial step (the mock HTTP
+	// server does not handle WebSocket upgrades) — that confirms the gate was
+	// cleared and the connection attempt was reached. Use require.Error so the
+	// assert.NotContains below is not silently skipped when err is nil.
+	require.Error(t, err, "expected a WS dial error — gate should have been cleared in IAP mode")
+	assert.NotContains(t, err.Error(), "no access token found for Hub",
+		"IAP mode with transport source should pass the token gate; got: %v", err)
 }
 
 // newStartAgentMockHubServer creates a minimal mock Hub server sufficient for
@@ -404,12 +402,11 @@ func TestStartAgentViaHub_Site2_IAPMode_EmptyToken_PassesGate(t *testing.T) {
 
 	err = startAgentViaHub(hubCtx, agentName, "", false, nil)
 
-	// Must NOT fail with the pre-fix "no access token found for Hub" error.
-	if err != nil {
-		assert.False(t, strings.Contains(err.Error(), "no access token found for Hub"),
-			"IAP mode with transport source should pass the token gate in startAgentViaHub site 2; got: %v", err)
-	}
 	// The function is expected to fail at the WebSocket dial step (the mock HTTP
 	// server does not handle WebSocket upgrades) — that confirms the gate was
-	// cleared and the connection attempt was reached.
+	// cleared and the connection attempt was reached. Use require.Error so the
+	// assert.NotContains below is not silently skipped when err is nil.
+	require.Error(t, err, "expected a WS dial error — gate should have been cleared in IAP mode")
+	assert.NotContains(t, err.Error(), "no access token found for Hub",
+		"IAP mode with transport source should pass the token gate in startAgentViaHub site 2; got: %v", err)
 }

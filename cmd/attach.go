@@ -120,6 +120,22 @@ func init() {
 // the attach WebSocket path. It can be overridden in tests to inject a mock.
 var resolveAttachTransportFn func() (transportauth.TokenSource, transportauth.HeaderMode, error) = resolveAttachTransport
 
+// resolveAttachOptions resolves transport auth and builds the AttachOption
+// slice for a Hub WebSocket attach. It returns the transport source alongside
+// the options so callers can use transportSrc in the token-gate check (an
+// application token is only required when transportSrc == nil).
+func resolveAttachOptions() ([]wsclient.AttachOption, transportauth.TokenSource, error) {
+	transportSrc, transportMode, err := resolveAttachTransportFn()
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to resolve transport auth: %w", err)
+	}
+	var opts []wsclient.AttachOption
+	if transportSrc != nil {
+		opts = append(opts, wsclient.WithTransport(transportSrc, transportMode))
+	}
+	return opts, transportSrc, nil
+}
+
 // attachViaHub attaches to an agent via Hub WebSocket connection.
 func attachViaHub(hubCtx *HubContext, agentName string) error {
 	PrintUsingHub(hubCtx.Endpoint)
@@ -163,13 +179,9 @@ func attachViaHub(hubCtx *HubContext, agentName string) error {
 	// Proxy-Authorization at the transport layer), so we must determine
 	// whether transport auth is available before deciding if an app token is
 	// required.
-	var attachOpts []wsclient.AttachOption
-	transportSrc, transportMode, err := resolveAttachTransportFn()
+	attachOpts, transportSrc, err := resolveAttachOptions()
 	if err != nil {
-		return fmt.Errorf("failed to resolve transport auth: %w", err)
-	}
-	if transportSrc != nil {
-		attachOpts = append(attachOpts, wsclient.WithTransport(transportSrc, transportMode))
+		return err
 	}
 
 	// Get access token for WebSocket authentication.
