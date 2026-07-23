@@ -386,13 +386,25 @@ func (c *client) checkForDeprecation(resp *http.Response) {
 	}
 }
 
+// isProxyIntercepted reports whether a 2xx response looks like a proxy
+// intercept (non-JSON content type). GFE on Cloud Run returns "text/plain".
+func isProxyIntercepted(resp *http.Response) bool {
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return false
+	}
+	ct := resp.Header.Get("Content-Type")
+	// If Content-Type is absent, pass through to DecodeResponse (which will
+	// succeed if the body is valid JSON, or fail with its own error).
+	return ct != "" && !strings.HasPrefix(ct, "application/json")
+}
+
 // Health checks API availability.
 func (c *client) Health(ctx context.Context) (*HealthResponse, error) {
 	resp, err := c.get(ctx, "/healthz", nil)
 	if err != nil {
 		return nil, err
 	}
-	if resp.StatusCode == 404 {
+	if resp.StatusCode == 404 || isProxyIntercepted(resp) {
 		_ = resp.Body.Close()
 		resp, err = c.get(ctx, "/health", nil)
 		if err != nil {
