@@ -73,6 +73,17 @@ func NewGitHubSkillResolver() *GitHubSkillResolver {
 	}
 }
 
+// NewGitHubSkillResolverWithToken constructs a GitHubSkillResolver with an
+// explicit default token. If token is empty, falls back to the GITHUB_TOKEN
+// environment variable (same as NewGitHubSkillResolver).
+func NewGitHubSkillResolverWithToken(token string) *GitHubSkillResolver {
+	r := NewGitHubSkillResolver()
+	if token != "" {
+		r.token = token
+	}
+	return r
+}
+
 func (r *GitHubSkillResolver) ResolverName() string { return "github" }
 
 func (r *GitHubSkillResolver) Resolve(ctx context.Context, refs []api.SkillReference, opts ResolveOpts) (*ResolveResult, error) {

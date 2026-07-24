@@ -755,7 +755,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	if conn := s.resolveHubConnection(r); conn != nil && conn.HubClient != nil {
 		hubResolver := agent.NewHubSkillResolver(conn.HubClient.Skills())
 		router := agent.NewRoutingSkillResolver(hubResolver)
-		ghResolver := agent.NewGitHubSkillResolver()
+		ghResolver := agent.NewGitHubSkillResolverWithToken(req.ResolvedEnv["GITHUB_TOKEN"])
 		router.Register("gh", ghResolver)
 
 		// GCP resolver uses Hub API for registry alias lookup.
