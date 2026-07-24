@@ -115,8 +115,8 @@ func normalizeGHShorthand(uri string) (string, error) {
 	if idx := strings.LastIndex(rest, "@"); idx >= 0 {
 		ref := rest[idx+1:]
 		rest = rest[:idx]
-		if ref == "" {
-			return "", fmt.Errorf("invalid gh:// URI %q: empty ref after @", uri)
+		if ref == "" || ref == "." || ref == ".." {
+			return "", fmt.Errorf("invalid gh:// URI %q: invalid ref %q", uri, ref)
 		}
 		refSuffix = "@" + ref
 	}
@@ -137,7 +137,7 @@ func normalizeGHShorthand(uri string) (string, error) {
 	if !validGHComponent.MatchString(parts[1]) || parts[1] == "." || parts[1] == ".." {
 		return "", fmt.Errorf("invalid gh:// URI %q: invalid repo %q (must match [a-zA-Z0-9._-]+)", uri, parts[1])
 	}
-	if strings.Contains(parts[2], "..") || strings.ContainsAny(parts[2], "?#&=") {
+	if parts[2] == "." || strings.Contains(parts[2], "..") || strings.ContainsAny(parts[2], "?#&=") {
 		return "", fmt.Errorf("invalid gh:// URI %q: invalid skill name %q", uri, parts[2])
 	}
 

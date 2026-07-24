@@ -89,7 +89,7 @@ function validateGHShorthand(uri: string): string {
   const atIdx = main.lastIndexOf('@');
   if (atIdx >= 0) {
     const ref = main.slice(atIdx + 1);
-    if (!ref) throw new Error('Invalid gh:// URI: empty ref after @');
+    if (!ref || ref === '.' || ref === '..') throw new Error('Invalid gh:// URI: invalid ref (must not be empty, ".", or "..")');
     main = main.slice(0, atIdx);
     refSuffix = '@' + ref;
   }

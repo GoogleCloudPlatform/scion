@@ -115,7 +115,22 @@ func TestNormalizeSkillURI(t *testing.T) {
 		{
 			name:    "gh shorthand empty ref after @",
 			input:   "gh://org/repo/skill@",
-			wantErr: "empty ref after @",
+			wantErr: "invalid ref",
+		},
+		{
+			name:    "gh shorthand dot as ref rejected",
+			input:   "gh://org/repo/skill@.",
+			wantErr: "invalid ref",
+		},
+		{
+			name:    "gh shorthand dotdot as ref rejected",
+			input:   "gh://org/repo/skill@..",
+			wantErr: "invalid ref",
+		},
+		{
+			name:    "gh shorthand single-dot skill name rejected",
+			input:   "gh://org/repo/.",
+			wantErr: "invalid skill name",
 		},
 
 		// ── GitHub tree URL → gh:// shorthand ───────────────────────────────
