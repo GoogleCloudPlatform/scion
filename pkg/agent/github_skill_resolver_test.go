@@ -710,6 +710,109 @@ func TestGitHubSkillResolver_MissingNamedSecret(t *testing.T) {
 	}
 }
 
+func TestGitHubSkillResolver_CacheHitCredentialCheck(t *testing.T) {
+	server, mux := newTestGitHubServer(t)
+	apiCalls := 0
+
+	mux.HandleFunc("/repos/owner/repo/commits/HEAD", func(w http.ResponseWriter, _ *http.Request) {
+		apiCalls++
+		_, _ = w.Write([]byte(testCommitSHA))
+	})
+	mux.HandleFunc("/repos/owner/repo/contents/skills/my-skill", func(w http.ResponseWriter, _ *http.Request) {
+		apiCalls++
+		_ = json.NewEncoder(w).Encode([]githubContentEntry{
+			{Name: "SKILL.md", Path: "skills/my-skill/SKILL.md", Type: "file", Size: 5},
+		})
+	})
+	mux.HandleFunc("/raw/owner/repo/"+testCommitSHA+"/skills/my-skill/SKILL.md", func(w http.ResponseWriter, _ *http.Request) {
+		apiCalls++
+		_, _ = w.Write([]byte("hello"))
+	})
+
+	cache, err := NewGitHubResolutionCache(t.TempDir(), 5*time.Minute)
+	if err != nil {
+		t.Fatalf("cache creation failed: %v", err)
+	}
+
+	t.Run("cache hit with valid credential succeeds without API call", func(t *testing.T) {
+		apiCalls = 0
+		resolver := &GitHubSkillResolver{
+			httpClient: server.Client(),
+			token:      "default-token",
+			apiBase:    server.URL,
+			rawBase:    server.URL + "/raw",
+			provisionCredentials: map[string]string{
+				"SKILLS_TOKEN": "valid-secret-value",
+			},
+			resolutionCache: cache,
+		}
+
+		// First call — populates cache
+		result1, err := resolver.Resolve(context.Background(), []api.SkillReference{
+			{URI: "gh://owner/repo/my-skill?token=SKILLS_TOKEN"},
+		}, ResolveOpts{})
+		if err != nil {
+			t.Fatalf("first Resolve failed: %v", err)
+		}
+		if len(result1.Errors) != 0 {
+			t.Fatalf("unexpected errors on first call: %v", result1.Errors)
+		}
+		callsAfterFirst := apiCalls
+
+		// Second call with same valid credential — should hit cache, no new API calls
+		result2, err := resolver.Resolve(context.Background(), []api.SkillReference{
+			{URI: "gh://owner/repo/my-skill?token=SKILLS_TOKEN"},
+		}, ResolveOpts{})
+		if err != nil {
+			t.Fatalf("second Resolve failed: %v", err)
+		}
+		if len(result2.Errors) != 0 {
+			t.Fatalf("unexpected errors on cache hit: %v", result2.Errors)
+		}
+		if len(result2.Resolved) != 1 {
+			t.Fatalf("expected 1 resolved skill on cache hit, got %d", len(result2.Resolved))
+		}
+		if apiCalls != callsAfterFirst {
+			t.Errorf("expected no new API calls on cache hit, got %d additional calls", apiCalls-callsAfterFirst)
+		}
+	})
+
+	t.Run("cache hit with missing credential returns error", func(t *testing.T) {
+		apiCallsBefore := apiCalls
+
+		// A resolver that has a populated cache but lacks the named secret
+		resolverNoSecret := &GitHubSkillResolver{
+			httpClient:           server.Client(),
+			token:                "default-token",
+			apiBase:              server.URL,
+			rawBase:              server.URL + "/raw",
+			provisionCredentials: map[string]string{}, // SKILLS_TOKEN not present
+			resolutionCache:      cache,
+		}
+
+		result, err := resolverNoSecret.Resolve(context.Background(), []api.SkillReference{
+			{URI: "gh://owner/repo/my-skill?token=SKILLS_TOKEN"},
+		}, ResolveOpts{})
+		if err != nil {
+			t.Fatalf("Resolve returned unexpected Go error: %v", err)
+		}
+		// Should get a resolve error, not a cache hit success
+		if len(result.Errors) != 1 {
+			t.Fatalf("expected 1 error (credential check on cache hit), got %d errors and %d resolved", len(result.Errors), len(result.Resolved))
+		}
+		if result.Errors[0].Code != "resolve_failed" {
+			t.Errorf("expected code resolve_failed, got %s", result.Errors[0].Code)
+		}
+		if !strings.Contains(result.Errors[0].Message, "SKILLS_TOKEN") {
+			t.Errorf("error should mention secret name, got: %s", result.Errors[0].Message)
+		}
+		// No new API calls should have been made (cache hit path, rejected before fetch)
+		if apiCalls != apiCallsBefore {
+			t.Errorf("expected no new API calls when credential check fails on cache hit, got %d", apiCalls-apiCallsBefore)
+		}
+	})
+}
+
 type stubSkillResolver struct {
 	result *ResolveResult
 }

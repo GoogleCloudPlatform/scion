@@ -74,22 +74,15 @@ func NewGitHubSkillResolver() *GitHubSkillResolver {
 	}
 }
 
-// NewGitHubSkillResolverWithToken constructs a GitHubSkillResolver with an
-// explicit default token. If token is empty, falls back to the GITHUB_TOKEN
-// environment variable (same as NewGitHubSkillResolver).
-func NewGitHubSkillResolverWithToken(token string) *GitHubSkillResolver {
-	r := NewGitHubSkillResolver()
-	if token != "" {
-		r.token = token
-	}
-	return r
-}
-
 // NewGitHubSkillResolverWithCredentials constructs a resolver with an explicit
 // default token and a named-credential map for per-URI lookup.
+// If defaultToken is empty, falls back to the GITHUB_TOKEN environment variable.
 // provisionCredentials maps secret name → value; may be nil.
 func NewGitHubSkillResolverWithCredentials(defaultToken string, provisionCredentials map[string]string) *GitHubSkillResolver {
-	r := NewGitHubSkillResolverWithToken(defaultToken)
+	r := NewGitHubSkillResolver()
+	if defaultToken != "" {
+		r.token = defaultToken
+	}
 	r.provisionCredentials = provisionCredentials
 	return r
 }
@@ -99,15 +92,15 @@ func NewGitHubSkillResolverWithCredentials(defaultToken string, provisionCredent
 // If the named secret is not found, it returns an error.
 // If no TokenSecretName is set, it returns the default token.
 func (r *GitHubSkillResolver) tokenForRef(ref *GitHubSkillRef) (string, error) {
-	if ref.TokenSecretName != "" {
-		if r.provisionCredentials != nil {
-			if val, ok := r.provisionCredentials[ref.TokenSecretName]; ok && val != "" {
-				return val, nil
-			}
-		}
-		return "", fmt.Errorf("secret %q not found in ProvisionCredentials; ensure it is set at project scope", ref.TokenSecretName)
+	if ref.TokenSecretName == "" {
+		return r.token, nil
 	}
-	return r.token, nil
+	// In Go, reading from a nil map is safe and returns "". Both nil map and
+	// missing/empty key produce the same error: the secret is unavailable.
+	if val := r.provisionCredentials[ref.TokenSecretName]; val != "" {
+		return val, nil
+	}
+	return "", fmt.Errorf("secret %q not found in ProvisionCredentials; ensure it is set at project scope", ref.TokenSecretName)
 }
 
 func (r *GitHubSkillResolver) ResolverName() string { return "github" }
@@ -137,10 +130,25 @@ func (r *GitHubSkillResolver) Resolve(ctx context.Context, refs []api.SkillRefer
 	return result, nil
 }
 
+// resolutionCacheKey returns a canonical cache key for a skill ref that
+// excludes the ?token= credential selector. Two refs that point to the same
+// content but use different token names share one cache entry; the fetched
+// file content is identical regardless of which credential was used.
+func resolutionCacheKey(ghRef *GitHubSkillRef) string {
+	return fmt.Sprintf("gh://%s/%s/%s@%s", ghRef.Owner, ghRef.Repo, ghRef.SkillPath, ghRef.Ref)
+}
+
 func (r *GitHubSkillResolver) resolveOne(ctx context.Context, ghRef *GitHubSkillRef, ref api.SkillReference) (*ResolvedSkill, error) {
-	// Check resolution cache first
+	// Check resolution cache first using a key that excludes the ?token= param
+	// so that multiple token names for the same skill share one cache entry.
+	cacheKey := resolutionCacheKey(ghRef)
 	if r.resolutionCache != nil {
-		if cached, ok := r.resolutionCache.Get(ref.URI); ok {
+		if cached, ok := r.resolutionCache.Get(cacheKey); ok {
+			// Validate credential even on cache hit — callers without the
+			// named secret must not receive cached private skill content.
+			if _, err := r.tokenForRef(ghRef); err != nil {
+				return nil, err
+			}
 			util.Debugf("github: resolution cache hit for %s", ref.URI)
 			result := cached
 			result.As = ref.As
@@ -214,9 +222,9 @@ func (r *GitHubSkillResolver) resolveOne(ctx context.Context, ghRef *GitHubSkill
 		Files:   resolvedFiles,
 	}
 
-	// Store in resolution cache
+	// Store in resolution cache under the token-agnostic key.
 	if r.resolutionCache != nil {
-		r.resolutionCache.Put(ref.URI, *resolved)
+		r.resolutionCache.Put(cacheKey, *resolved)
 	}
 
 	return resolved, nil
