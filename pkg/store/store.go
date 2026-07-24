@@ -991,6 +991,9 @@ type NotificationStore interface {
 	AcknowledgeAllNotifications(ctx context.Context, subscriberType, subscriberID string) error
 
 	// MarkNotificationDispatched marks a notification as dispatched.
+	// Call this only after delivery was at least attempted (success or failure).
+	// Do NOT call it when delivery was skipped entirely (e.g. no broker, no
+	// dispatcher) — that would silently lose the notification.
 	// Returns ErrNotFound if the notification doesn't exist.
 	MarkNotificationDispatched(ctx context.Context, id string) error
 

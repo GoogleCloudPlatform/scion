@@ -606,11 +606,12 @@ func TestNotificationDispatcher_NilDispatcher(t *testing.T) {
 	// No dispatch calls since dispatcher is nil
 	assert.Empty(t, env.dispatcher.getCalls())
 
-	// Notification should be stored and marked dispatched (best-effort)
+	// Notification should be stored but NOT marked dispatched — the notification
+	// was never delivered so falsely marking it dispatched would silently lose it.
 	notifs, err := env.store.GetNotifications(context.Background(), store.SubscriberTypeAgent, env.subscriber.Slug, false)
 	require.NoError(t, err)
 	assert.Len(t, notifs, 1)
-	assert.True(t, notifs[0].Dispatched)
+	assert.False(t, notifs[0].Dispatched, "notification must not be marked dispatched when no dispatcher is available")
 }
 
 func TestNotificationDispatcher_CaseInsensitiveStatus(t *testing.T) {
