@@ -84,7 +84,7 @@ func NormalizeSkillURI(input string) (string, error)
 | `https://github.com/owner/repo/tree/ref/skills/skill-name` | `gh://owner/repo/skill-name@ref` | Skills-convention shorthand |
 | `https://github.com/owner/repo/tree/ref/other/deep/path` | `https://github.com/owner/repo/tree/ref/other/deep/path` | Non-standard path; kept as full URL |
 | `https://github.com/owner/repo/blob/ref/.../filename.ext` | parent dir → apply tree rule | Strip last segment if it contains `.` |
-| `scion://skill-name` | `skill://skill-name` | Alias fix; logged as transformation |
+| `scion://skill-name` | error | Not supported; use `skill://`; docs bug tracked at #561 |
 | `skill://...` or bare name | same (validated) | Via existing `ParseSkillURI` |
 | `https://github.com/owner/repo` (bare repo) | error | No skill path |
 | `https://github.com/owner/repo/tree/main` (no path) | error | No skill path after ref |
@@ -151,15 +151,13 @@ The `isSkillURI` check (`strings.Contains(s, "://")`) can be removed or replaced
 
 ---
 
-### 4. `scion://` Alias Fix
+### 4. `scion://` Handling
 
-`scion://` is documented in CLI help text and examples for `scion project skills add` and `scion user skills add`. However, `detectScheme()` in `routing_skill_resolver.go` routes it to scheme `"scion"`, which has no registered resolver → silent provision-time failure.
+`scion://` appears in CLI help text and examples but has no registered resolver — it fails silently at provision time. The correct scheme is `skill://`.
 
-**Fix in `NormalizeSkillURI`:** Replace `scion://` with `skill://` in the normalizer. The replacement is transparent to users — `scion://my-skill` is accepted and stored as `skill://my-skill`.
+**Decision (2026-07-24, user sign-off):** `scion://` is rejected by `NormalizeSkillURI` with a clear error: `"scion:// is not a supported scheme; use skill:// for hub-bank skills"`. No alias or silent normalization.
 
-Additionally, update the CLI help text examples to use `skill://` directly, so new users learn the correct scheme. The normalization remains for backward compatibility with existing stored entries (though any existing `scion://` entries in the DB would still fail until re-added — see §Migration).
-
-**Open question #1 (product decision, my recommendation):** Should `scion://` be normalized to `skill://` silently (recommendation: yes — it's a docs bug, not user error) or rejected with a message ("use skill:// instead")? I recommend silent normalization with a transformation notice in the CLI, because users who followed the documented examples shouldn't need to re-enter their skills.
+The underlying docs bug is tracked at ptone/scion#561 and will be addressed by a separate cleanup agent (CLI help text updated to use `skill://`). The design doc update entry in the transform table changes from "normalized to skill://" to "rejected with error".
 
 ---
 
@@ -240,8 +238,8 @@ Allow `gh://owner/repo/path/to/skill` as a 4+-segment path form, eliminating the
 
 - **No schema change.** URIs are stored as `text` columns; the canonical form is valid for existing DB values.
 - **Existing stored URIs are not migrated.** Entries already in the DB retain their current form. If a user previously stored `https://github.com/org/repo/tree/main/skills/my-skill` as a full URL, it continues to work (resolver handles both forms). The deduplication improvement only applies to new entries added after this change.
-- **`scion://` in existing DB entries.** Any existing `scion://` entries remain broken (no registered resolver) until the user removes and re-adds them. The normalization prevents new `scion://` entries from being stored. A one-time DB migration to replace `scion://` → `skill://` is recommended post-deploy but is not part of this design.
-- **Backward compat for API callers.** Programmatic callers (hub API clients) that POST a valid normalized URI see no change. Callers that POST `scion://` or a full GitHub URL will now receive the canonical form silently.
+- **`scion://` in existing DB entries.** Any existing `scion://` entries remain broken (no registered resolver). The normalizer rejects new `scion://` input with a clear error. Existing stored entries are unaffected by this feature; cleanup tracked at ptone/scion#561.
+- **Backward compat for API callers.** Programmatic callers (hub API clients) that POST a valid normalized URI see no change. Callers that POST a full GitHub URL will receive the canonical `gh://` form.
 - **CLI behavior change.** `isSkillURI()` currently rejects bare names (no `://`). After this change, bare names are accepted (normalized to hub-skill bare name form). This is strictly more permissive.
 
 ---
@@ -250,11 +248,7 @@ Allow `gh://owner/repo/path/to/skill` as a 4+-segment path form, eliminating the
 
 ### OQ1: `scion://` — silent normalize vs. reject-with-guidance?
 
-**Recommendation:** Normalize silently to `skill://` with a CLI transformation notice. Rationale: documented in CLI examples, so users who followed docs are not at fault. Silent fix with a note is friendlier than telling them they did something wrong.
-
-**Alternative:** Return an error: `"scion:// is not a registered scheme; use skill:// instead"`. Simpler code (no alias), but breaks users who followed the docs.
-
-**Needs user sign-off.**
+**Resolved (2026-07-24):** Reject `scion://` with a clear error. Do not add a normalization alias. The docs/examples bug is tracked at ptone/scion#561 and will be cleaned up separately by a dedicated agent. Error message: `"scion:// is not a supported scheme; use skill:// for hub-bank skills"`.
 
 ### OQ2: `blob` URL handling — support or reject?
 
@@ -328,7 +322,7 @@ The QA tester should verify:
 
 6. **Bare name** — `my-skill` is accepted as a bare hub-skill name.
 
-7. **`scion://` → `skill://`** — `scion://my-skill` is accepted and stored as `skill://my-skill`. CLI prints a transformation notice.
+7. **`scion://` rejected** — `scion://my-skill` produces a 422 error with a message pointing to `skill://`. No entry is stored.
 
 **Validation (error cases):**
 
