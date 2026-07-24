@@ -1777,7 +1777,7 @@ func GetAgent(ctx context.Context, agentName string, templateName string, agentI
 		}
 		if hcName != "" {
 			hcDir, err := resolveHarnessConfigDir(ctx, hcName, projectPath)
-			if err == nil && hcDir.Config.ModelAliases != nil {
+			if err == nil && hcDir != nil && hcDir.Config.ModelAliases != nil {
 				resolved := config.ResolveModelAlias(finalCfg.Model, hcDir.Config.ModelAliases)
 				if resolved != finalCfg.Model {
 					util.Debugf("GetAgent: resolved model alias %q → %q", finalCfg.Model, resolved)

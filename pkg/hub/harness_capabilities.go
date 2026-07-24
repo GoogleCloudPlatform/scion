@@ -126,14 +126,14 @@ func (s *Server) resolveAgentHarnessCapabilities(ctx context.Context, agent *sto
 // model_aliases map. Returns the input unchanged if no alias mapping exists
 // or any lookup fails.
 func (s *Server) resolveModelAliasForAgent(ctx context.Context, agent *store.Agent, model string) string {
-	if agent.AppliedConfig == nil || model == "" {
+	if agent == nil || agent.AppliedConfig == nil || model == "" {
 		return model
 	}
 
 	// Try by ID first (fast path — stamped during create)
 	if hcID := agent.AppliedConfig.HarnessConfigID; hcID != "" {
 		hc, err := s.store.GetHarnessConfig(ctx, hcID)
-		if err == nil && hc.Config != nil && len(hc.Config.ModelAliases) > 0 {
+		if err == nil && hc != nil && hc.Config != nil && len(hc.Config.ModelAliases) > 0 {
 			return config.ResolveModelAlias(model, hc.Config.ModelAliases)
 		}
 	}
