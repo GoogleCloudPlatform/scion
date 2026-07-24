@@ -499,7 +499,7 @@ type ListSecretsResponse struct {
 
 type SetSecretRequest struct {
 	Value         string `json:"value"`
-	Encoding      string `json:"encoding,omitempty"`      // "base64" (default, value is base64-encoded) or "raw" (value is literal text)
+	Encoding      string `json:"encoding,omitempty"` // "base64" (default, value is base64-encoded) or "raw" (value is literal text)
 	Scope         string `json:"scope,omitempty"`
 	ScopeID       string `json:"scopeId,omitempty"`
 	Description   string `json:"description,omitempty"`
