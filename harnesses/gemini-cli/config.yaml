@@ -33,7 +33,7 @@ system_prompt_file: .gemini/system_prompt.md
 system_prompt_mode: native
 model_aliases:
   small: gemini-flash-lite
-  medium: gemini-3.5-flash
+  medium: gemini-3.6-flash
   large: gemini-3.1-pro-preview
   extra-large: gemini-3.1-pro-preview
 env:
