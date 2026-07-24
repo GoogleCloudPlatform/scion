@@ -417,6 +417,82 @@ func TestAgentSecrets_RawValueRoundtrip(t *testing.T) {
 	}
 }
 
+// TestProjectSecretByKey_RawValueRoundtrip verifies the raw-value fallback for
+// the project-scoped secret endpoint stores exactly the original string.
+func TestProjectSecretByKey_RawValueRoundtrip(t *testing.T) {
+	srv, s := testServer(t)
+	localBackend := secret.NewLocalBackend(s, "test-hub-id")
+	srv.SetSecretBackend(localBackend)
+	ctx := context.Background()
+
+	projectID := tid("proj-roundtrip")
+	project := &store.Project{
+		ID:      projectID,
+		Name:    "Roundtrip Project",
+		Slug:    "roundtrip-project",
+		OwnerID: DevUserID,
+		Created: time.Now(),
+		Updated: time.Now(),
+	}
+	if err := s.CreateProject(ctx, project); err != nil {
+		t.Fatalf("failed to create project: %v", err)
+	}
+
+	rawValue := "proj!raw$value&special<chars>"
+	body := SetSecretRequest{Value: rawValue}
+	rec := doRequest(t, srv, http.MethodPut,
+		"/api/v1/projects/"+projectID+"/secrets/PROJ_ROUND_KEY", body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	stored, err := localBackend.Get(ctx, "PROJ_ROUND_KEY", store.ScopeProject, projectID)
+	if err != nil {
+		t.Fatalf("failed to retrieve stored secret: %v", err)
+	}
+	if stored.Value != rawValue {
+		t.Errorf("roundtrip: stored value %q != original %q", stored.Value, rawValue)
+	}
+}
+
+// TestBrokerSecretByKey_RawValueRoundtrip verifies the raw-value fallback for
+// the runtime-broker-scoped secret endpoint stores exactly the original string.
+func TestBrokerSecretByKey_RawValueRoundtrip(t *testing.T) {
+	srv, s := testServer(t)
+	localBackend := secret.NewLocalBackend(s, "test-hub-id")
+	srv.SetSecretBackend(localBackend)
+	ctx := context.Background()
+
+	brokerID := tid("broker-roundtrip")
+	broker := &store.RuntimeBroker{
+		ID:      brokerID,
+		Name:    "Roundtrip Broker",
+		Slug:    "roundtrip-broker",
+		Status:  store.BrokerStatusOnline,
+		Created: time.Now(),
+		Updated: time.Now(),
+	}
+	if err := s.CreateRuntimeBroker(ctx, broker); err != nil {
+		t.Fatalf("failed to create broker: %v", err)
+	}
+
+	rawValue := "broker!raw$value&special<chars>"
+	body := SetSecretRequest{Value: rawValue}
+	rec := doRequest(t, srv, http.MethodPut,
+		"/api/v1/runtime-brokers/"+brokerID+"/secrets/BROKER_ROUND_KEY", body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	stored, err := localBackend.Get(ctx, "BROKER_ROUND_KEY", store.ScopeRuntimeBroker, brokerID)
+	if err != nil {
+		t.Fatalf("failed to retrieve stored secret: %v", err)
+	}
+	if stored.Value != rawValue {
+		t.Errorf("roundtrip: stored value %q != original %q", stored.Value, rawValue)
+	}
+}
+
 // Ensure the agent fixture is usable from this file (it uses a local import
 // via setupAgentSecretTest which references state.PhaseRunning).
 var _ = state.PhaseRunning
