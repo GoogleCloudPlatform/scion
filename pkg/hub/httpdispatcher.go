@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"path/filepath"
 	"strings"
 	"time"
@@ -34,6 +35,7 @@ import (
 	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/attribute"
+	"golang.org/x/sync/errgroup"
 )
 
 // HTTPRuntimeBrokerClient is an HTTP-based implementation of RuntimeBrokerClient.
@@ -485,20 +487,12 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 	// Clone req.ResolvedEnv to avoid mutating the shared agent.AppliedConfig.Env
 	// map, which is a direct reference and may be read concurrently.
 	if req.ResolvedEnv != nil {
-		clonedEnv := make(map[string]string, len(req.ResolvedEnv))
-		for k, v := range req.ResolvedEnv {
-			clonedEnv[k] = v
-		}
-		req.ResolvedEnv = clonedEnv
+		req.ResolvedEnv = maps.Clone(req.ResolvedEnv)
 	}
-	if agent.AppliedConfig != nil && agent.AppliedConfig.Model != "" {
-		if req.ResolvedEnv == nil {
-			req.ResolvedEnv = make(map[string]string)
-		}
-		if _, ok := req.ResolvedEnv["SCION_MODEL"]; !ok {
-			req.ResolvedEnv["SCION_MODEL"] = agent.AppliedConfig.Model
-		}
+	if req.ResolvedEnv == nil {
+		req.ResolvedEnv = make(map[string]string)
 	}
+	injectModelEnv(req.ResolvedEnv, agent.AppliedConfig)
 
 	// Resolve env vars from Hub storage (user/project/broker scopes) and merge.
 	// Storage env vars fill in keys not already set (with a non-empty value)
@@ -642,6 +636,58 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 		}
 	}
 
+	// Collect project-scope secrets for provision-time credential resolution.
+	// These are NOT merged into ResolvedEnv and will not appear in the container env.
+	// Skipped for NoAuth agents just as ResolvedSecrets are skipped.
+	if !noAuth && agent.ProjectID != "" && d.secretBackend != nil {
+		projectSecrets, listErr := d.secretBackend.List(ctx, secret.Filter{
+			Scope:   secret.ScopeProject,
+			ScopeID: agent.ProjectID,
+		})
+		if listErr != nil {
+			if d.debug {
+				d.log.Warn("buildCreateRequest: failed to list project secrets for ProvisionCredentials",
+					"agent_id", agent.ID, "error", listErr)
+			}
+		} else if len(projectSecrets) > 0 {
+			type namedValue struct{ name, value string }
+			fetched := make([]namedValue, len(projectSecrets))
+
+			g, gctx := errgroup.WithContext(ctx)
+			for i, sm := range projectSecrets {
+				if sm.SecretType == store.SecretTypeInternal {
+					continue
+				}
+				i, sm := i, sm // capture loop vars
+				g.Go(func() error {
+					sv, getErr := d.secretBackend.Get(gctx, sm.Name, secret.ScopeProject, agent.ProjectID)
+					if getErr != nil {
+						if d.debug {
+							d.log.Warn("buildCreateRequest: failed to get project secret for ProvisionCredentials",
+								"agent_id", agent.ID, "secret", sm.Name, "error", getErr)
+						}
+						return nil // don't fail the group for individual secrets
+					}
+					if sv != nil && sv.Value != "" {
+						fetched[i] = namedValue{sm.Name, sv.Value}
+					}
+					return nil
+				})
+			}
+			_ = g.Wait()
+
+			creds := make(map[string]string)
+			for _, nv := range fetched {
+				if nv.name != "" {
+					creds[nv.name] = nv.value
+				}
+			}
+			if len(creds) > 0 {
+				req.ProvisionCredentials = creds
+			}
+		}
+	}
+
 	// Log a summary of env resolution sources
 	if d.debug {
 		configEnvCount := 0
@@ -653,6 +699,7 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 			"storageEnvCount", len(envFromStorage),
 			"resolvedSecretsCount", len(req.ResolvedSecrets),
 			"totalResolvedEnvCount", len(req.ResolvedEnv),
+			"provisionCredentialsCount", len(req.ProvisionCredentials),
 		)
 	}
 
@@ -1197,12 +1244,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 		}
 	}
 
-	// Inject SCION_MODEL from applied config model override
-	if agent.AppliedConfig != nil && agent.AppliedConfig.Model != "" {
-		if _, ok := resolvedEnv["SCION_MODEL"]; !ok {
-			resolvedEnv["SCION_MODEL"] = agent.AppliedConfig.Model
-		}
-	}
+	injectModelEnv(resolvedEnv, agent.AppliedConfig)
 
 	// Merge env vars from Hub storage; storage vars fill in keys not already
 	// set (with a non-empty value) by explicit config env vars.
@@ -1447,12 +1489,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 		resolvedEnv["SCION_HUB_ENDPOINT"] = d.hubEndpoint
 	}
 
-	// Inject SCION_MODEL from applied config model override
-	if agent.AppliedConfig != nil && agent.AppliedConfig.Model != "" {
-		if _, ok := resolvedEnv["SCION_MODEL"]; !ok {
-			resolvedEnv["SCION_MODEL"] = agent.AppliedConfig.Model
-		}
-	}
+	injectModelEnv(resolvedEnv, agent.AppliedConfig)
 
 	if d.tokenGenerator != nil {
 		var additionalScopes []AgentTokenScope
@@ -1628,6 +1665,18 @@ func (d *HTTPAgentDispatcher) deferredCheckPrompt(ctx context.Context, agent *st
 }
 
 // =============================================================================
+// injectModelEnv sets SCION_MODEL in env from the agent's applied config model,
+// if a model is configured and the key is not already present in env.
+// env must be non-nil.
+func injectModelEnv(env map[string]string, cfg *store.AgentAppliedConfig) {
+	if cfg == nil || cfg.Model == "" {
+		return
+	}
+	if _, ok := env["SCION_MODEL"]; !ok {
+		env["SCION_MODEL"] = cfg.Model
+	}
+}
+
 // Cross-node lifecycle dispatch (B4-2)
 // =============================================================================
 

@@ -409,13 +409,23 @@ func mergeSkillRefs(scopes ...[]api.SkillReference) []api.SkillReference {
 				"base_uri", base, "winner", winner.URI, "original", orig.URI)
 		}
 	}
-	result := make([]api.SkillReference, 0, len(seen))
-	for _, ref := range seen {
-		result = append(result, ref)
+	// Build result slice using the already-computed keys from `seen` for the sort
+	// to avoid re-calling skillBaseURI O(n log n) times.
+	type entry struct {
+		base string
+		ref  api.SkillReference
 	}
-	sort.Slice(result, func(i, j int) bool {
-		return skillBaseURI(result[i].URI) < skillBaseURI(result[j].URI)
+	entries := make([]entry, 0, len(seen))
+	for base, ref := range seen {
+		entries = append(entries, entry{base, ref})
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].base < entries[j].base
 	})
+	result := make([]api.SkillReference, len(entries))
+	for i, e := range entries {
+		result[i] = e.ref
+	}
 	return result
 }
 

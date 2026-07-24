@@ -116,6 +116,57 @@ func TestParseGHShorthand(t *testing.T) {
 				SkillPath: "skills/skill",
 			},
 		},
+		{
+			name: "with ?token= param",
+			uri:  "gh://owner/repo/skill?token=MY_TOKEN",
+			want: &GitHubSkillRef{
+				Owner:           "owner",
+				Repo:            "repo",
+				SkillName:       "skill",
+				Ref:             "",
+				SkillPath:       "skills/skill",
+				TokenSecretName: "MY_TOKEN",
+			},
+		},
+		{
+			name: "with @ref and ?token= param",
+			uri:  "gh://owner/repo/skill@main?token=MY_TOKEN",
+			want: &GitHubSkillRef{
+				Owner:           "owner",
+				Repo:            "repo",
+				SkillName:       "skill",
+				Ref:             "main",
+				SkillPath:       "skills/skill",
+				TokenSecretName: "MY_TOKEN",
+			},
+		},
+		{
+			name: "no ?token= param — TokenSecretName empty",
+			uri:  "gh://owner/repo/skill",
+			want: &GitHubSkillRef{
+				Owner:           "owner",
+				Repo:            "repo",
+				SkillName:       "skill",
+				Ref:             "",
+				SkillPath:       "skills/skill",
+				TokenSecretName: "",
+			},
+		},
+		{
+			name:      "?token= with invalid lowercase name",
+			uri:       "gh://owner/repo/skill?token=invalid-name",
+			wantError: true,
+		},
+		{
+			name:      "?token= with empty value",
+			uri:       "gh://owner/repo/skill?token=",
+			wantError: true,
+		},
+		{
+			name:      "unsupported query parameter",
+			uri:       "gh://owner/repo/skill?foo=bar",
+			wantError: true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -144,6 +195,9 @@ func TestParseGHShorthand(t *testing.T) {
 			}
 			if got.SkillPath != tt.want.SkillPath {
 				t.Errorf("SkillPath = %q, want %q", got.SkillPath, tt.want.SkillPath)
+			}
+			if got.TokenSecretName != tt.want.TokenSecretName {
+				t.Errorf("TokenSecretName = %q, want %q", got.TokenSecretName, tt.want.TokenSecretName)
 			}
 			if got.Raw != tt.uri {
 				t.Errorf("Raw = %q, want %q", got.Raw, tt.uri)

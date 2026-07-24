@@ -448,6 +448,12 @@ type RemoteCreateAgentRequest struct {
 	// (e.g. "shared", "per-agent", "worktree-per-agent"). Threaded from the
 	// Hub so the broker can branch dispatch without re-deriving from labels.
 	WorkspaceMode string `json:"workspaceMode,omitempty"`
+
+	// ProvisionCredentials carries project-scope secrets for use by core provision
+	// logic (skill resolution, URI variable substitution, credential helpers).
+	// These are NEVER forwarded to the agent container environment or harness scripts.
+	// Populated by the Hub from project-scope secrets at dispatch time.
+	ProvisionCredentials map[string]string `json:"provisionCredentials,omitempty"`
 }
 
 // ResolvedSecret represents a secret resolved by the Hub for projection into an agent container.
