@@ -348,11 +348,12 @@ func (nd *NotificationDispatcher) dispatchToAgent(ctx context.Context, sub *stor
 	}
 
 	if subscriber.RuntimeBrokerID == "" {
-		nd.log.Warn("Subscriber agent has no runtime broker, skipping dispatch",
-			"subscriberID", sub.SubscriberID)
-		if err := nd.store.MarkNotificationDispatched(ctx, notif.ID); err != nil {
-			nd.log.Error("Failed to mark notification dispatched", "notificationID", notif.ID, "error", err)
-		}
+		nd.log.Error("Subscriber agent has no runtime broker; notification NOT dispatched",
+			"subscriberID", sub.SubscriberID, "notificationID", notif.ID)
+		// Do NOT mark as dispatched — the notification was never delivered.
+		// Leaving it undelivered preserves the record and makes the failure
+		// explicit; a future retry mechanism can sweep for undelivered
+		// notifications and redeliver them once a broker is assigned.
 		return
 	}
 
