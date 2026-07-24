@@ -24,6 +24,7 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
 )
@@ -71,14 +72,25 @@ func ValidateConfig(cfg *Config) error {
 	if cfg.Hub.User == "" {
 		return fmt.Errorf("hub.user is required")
 	}
-	if cfg.Auth.Scheme != "" && cfg.Auth.Scheme != "apiKey" && cfg.Auth.Scheme != "bearer" && cfg.Auth.Scheme != "none" {
-		return fmt.Errorf("unsupported auth.scheme: %q (supported: apiKey, bearer, none)", cfg.Auth.Scheme)
+	switch cfg.Auth.Scheme {
+	case "", "apiKey", "bearer", "none", "hubUAT", "hubJWT":
+		// valid
+	default:
+		return fmt.Errorf("unsupported auth.scheme: %q (supported: apiKey, bearer, none, hubUAT, hubJWT)", cfg.Auth.Scheme)
 	}
 	if (cfg.Auth.Scheme == "apiKey" || cfg.Auth.Scheme == "bearer") && cfg.Auth.APIKey == "" {
 		return fmt.Errorf("auth.api_key is required when auth.scheme is %q", cfg.Auth.Scheme)
 	}
-	if cfg.Auth.APIKey == "" && cfg.Auth.Scheme != "none" {
+	// api_key is required for legacy schemes and the default (empty) scheme.
+	// hubUAT and hubJWT do not use api_key — they validate per-user credentials instead.
+	if cfg.Auth.APIKey == "" && cfg.Auth.Scheme != "none" && cfg.Auth.Scheme != "hubUAT" && cfg.Auth.Scheme != "hubJWT" {
 		return fmt.Errorf("auth.api_key is required (set auth.scheme: \"none\" to explicitly disable authentication)")
+	}
+	if cfg.Auth.UATCacheTTL < 0 {
+		return fmt.Errorf("auth.uat_cache_ttl must not be negative")
+	}
+	if cfg.Auth.UATCacheTTL > 300*time.Second {
+		return fmt.Errorf("auth.uat_cache_ttl must not exceed 300s")
 	}
 	if cfg.Bridge.Provider.URL != "" {
 		if _, err := url.Parse(cfg.Bridge.Provider.URL); err != nil {
@@ -90,10 +102,15 @@ func ValidateConfig(cfg *Config) error {
 
 // WarnOnOpenAuth logs a warning if the auth configuration leaves the bridge open.
 func (s *Server) WarnOnOpenAuth() {
-	if s.config.Auth.Scheme == "none" {
+	switch s.config.Auth.Scheme {
+	case "none":
 		s.log.Warn("bridge auth is explicitly DISABLED (auth.scheme: none) — all requests will be accepted without authentication")
-	} else if s.config.Auth.Scheme == "" {
+	case "":
 		s.log.Warn("auth.scheme is empty: bridge will accept credentials from both X-API-Key and Authorization headers")
+	case "hubUAT":
+		s.log.Info("bridge auth: hubUAT — per-user Scion UAT authentication enabled")
+	case "hubJWT":
+		s.log.Info("bridge auth: hubJWT — per-user Scion JWT authentication enabled")
 	}
 	if s.config.RateLimit.TrustProxy {
 		s.log.Warn("rate_limit.trust_proxy is enabled — X-Forwarded-For is trusted unconditionally, which allows clients to spoof their IP and bypass per-IP rate limits; consider adding network-level proxy restrictions")
