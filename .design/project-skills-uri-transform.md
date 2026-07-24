@@ -20,7 +20,7 @@ Users adding skills via `scion project skills add`, `scion user skills add`, or 
 **Goals:**
 1. Accept full GitHub tree (and blob) URLs as input and transform them to the canonical `gh://` form.
 2. Reject unrecognized or ambiguous inputs with specific, actionable error messages.
-3. Fix the `scion://` latent bug by normalizing to `skill://` at input time.
+3. Reject `scion://` input with a clear error pointing to `skill://` (the docs/example bug is tracked at #561).
 4. Enforce one canonical stored form so deduplication works correctly.
 5. Provide input-time feedback in the CLI (transform notice) and web UI (live preview).
 
@@ -66,7 +66,7 @@ Add a `NormalizeSkillURI(input string) (string, error)` function to `pkg/api/ski
 //    → gh://owner/repo/skill-name@ref[?token=SECRET_NAME]   (blob: strip filename, then apply tree rules)
 //
 //  scion://skill-name
-//    → skill://skill-name   (alias fix; see §4 below)
+//    → Error: "scion:// is not a supported scheme; use skill:// for hub-bank skills"
 //
 //  skill://... or bare name
 //    → validated via ParseSkillURI, returned as-is
@@ -93,7 +93,7 @@ func NormalizeSkillURI(input string) (string, error)
 
 **`?token=SECRET_NAME` passthrough:** Present in input → preserved in output unchanged. The normalizer validates the secret name format (`[A-Z][A-Z0-9_]*`) but does not look up the value.
 
-**`blob` URL handling:** If the last path segment contains a `.` (looks like a filename), strip it and use the parent directory as the skill path. Apply the same rule as a `tree` URL. This covers the dominant pattern (`skills/skill-name/SKILL.md`, `skills/skill-name/README.md`). If the parent directory is empty after stripping, return an error.
+**`blob` URL handling:** Strip the last path segment unconditionally (GitHub blob URLs always end in a filename — this is cleaner than a dot-check which would miss files without extensions like `Makefile`). Apply the same rule as a `tree` URL after stripping. If the parent directory is empty after stripping, return an error.
 
 **`scion://` alias:** See §4.
 
@@ -113,7 +113,7 @@ if entry.SkillURI == "" {
 }
 normalized, err := api.NormalizeSkillURI(entry.SkillURI)
 if err != nil {
-    ValidationError(w, err.Error(), nil)  // HTTP 422
+    ValidationError(w, err.Error(), nil)  // HTTP 400
     return
 }
 entry.SkillURI = normalized
@@ -122,7 +122,7 @@ entry.SkillURI = normalized
 
 Also apply in the **bulk PUT** endpoints (`setProjectInjectedSkills`, `setUserInjectedSkills`) where the per-entry URI is trimmed and dedup-checked. Each entry's URI is normalized before the dedup set and before storage.
 
-**HTTP response on invalid URI:** `422 Unprocessable Entity` with the error message from `NormalizeSkillURI`. Not 400 — the input was structurally valid JSON but semantically invalid. This is consistent with how `ValidationError` is used elsewhere in the handler.
+**HTTP response on invalid URI:** `400 Bad Request` (via `ValidationError`, which uses `http.StatusBadRequest`). Tests assert 400.
 
 ---
 
@@ -175,14 +175,14 @@ function normalizeSkillURI(input: string): { canonical: string; transformed: boo
 Supported transforms in TypeScript:
 1. `https://github.com/owner/repo/tree/ref/skills/skill-name` → `gh://owner/repo/skill-name@ref`
 2. `https://github.com/owner/repo/blob/ref/.../file.ext` → strip filename → apply #1
-3. `scion://skill` → `skill://skill`
+3. `scion://skill` → error: "scion:// is not a supported scheme; use skill:// for hub-bank skills"
 4. `gh://...` → validate 3-segment form, pass through
 5. `skill://...` → pass through
 6. Other `://` schemes → throw with error message
 
 If `transformed === true`, show a brief "Transformed to: `gh://...`" message below the input before the user clicks Add.
 
-**Fallback:** If the TypeScript normalizer misses a case, the hub's Go implementation is authoritative and returns a 422 with a clear message that the UI can display.
+**Fallback:** If the TypeScript normalizer misses a case, the hub's Go implementation is authoritative and returns a 400 with a clear message that the UI can display.
 
 ---
 
@@ -204,7 +204,7 @@ Example messages:
 
 ### A. Hub-only, no CLI/web normalization
 
-Only the hub normalizes. CLI and web UI send raw input; the hub returns 422 on invalid.
+Only the hub normalizes. CLI and web UI send raw input; the hub returns 400 on invalid.
 
 **Rejected:** CLI users see a round-trip error with no pre-flight feedback. Acceptable security baseline, but poor UX. We implement both (hub authoritative + clients normalize for immediate feedback) at low additional cost since the Go function is shared between hub and CLI via `pkg/api`.
 
@@ -278,7 +278,7 @@ Add `NormalizeSkillURI` calls in `pkg/hub/handlers_skills_injection.go`:
 - `setProjectInjectedSkills` bulk PUT (inner loop)
 - `setUserInjectedSkills` bulk PUT (inner loop)
 
-Return `ValidationError` (422) on normalization error.
+Return `ValidationError` (400) on normalization error.
 
 Integration test: POST a full GitHub URL → verify stored URI is the canonical `gh://` form.
 
@@ -294,7 +294,7 @@ Update CLI help text and examples: replace `scion://` with `skill://`.
 
 Add `normalizeSkillURI` in `injected-skills-panel.ts` (or a shared utility module).
 Show transformation preview below the input field when a GitHub URL is entered.
-Handle 422 responses from hub by displaying the error message inline.
+Handle 400 responses from hub by displaying the error message inline.
 
 ---
 
@@ -316,17 +316,17 @@ The QA tester should verify:
 
 6. **Bare name** — `my-skill` is accepted as a bare hub-skill name.
 
-7. **`scion://` rejected** — `scion://my-skill` produces a 422 error with a message pointing to `skill://`. No entry is stored.
+7. **`scion://` rejected** — `scion://my-skill` produces a 400 error with a message pointing to `skill://`. No entry is stored.
 
 **Validation (error cases):**
 
-8. **Bare repo URL** — `https://github.com/org/repo` produces a 422 error with message referencing the expected `/tree/ref/path` format.
+8. **Bare repo URL** — `https://github.com/org/repo` produces a 400 error with message referencing the expected `/tree/ref/path` format.
 
-9. **Unsupported scheme** — `gcp-skill://something` produces a 422 with a message explaining the scheme is not accepted via this command.
+9. **Unsupported scheme** — `gcp-skill://something` produces a 400 with a message explaining the scheme is not accepted via this command.
 
-10. **Unknown scheme** — `ftp://anything` produces a 422 with the actionable error message.
+10. **Unknown scheme** — `ftp://anything` produces a 400 with the actionable error message.
 
-11. **Invalid `gh://` format** — `gh://owner-only` (too few segments) produces a 422.
+11. **Invalid `gh://` format** — `gh://owner-only` (too few segments) produces a 400.
 
 **Canonical storage (deduplication):**
 
