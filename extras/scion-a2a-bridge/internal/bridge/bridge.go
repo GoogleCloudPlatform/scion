@@ -257,18 +257,39 @@ func (b *Bridge) SendMessage(ctx context.Context, projectSlug, agentSlug, contex
 		return nil, fmt.Errorf("resolve context: %w", err)
 	}
 
+	caller := callerIdentityFromContext(ctx) // nil in legacy mode
+
+	// writeClient: used for Hub write operations (send message, cancel interrupt).
+	// In per-user mode, this is a short-lived client authenticated as the caller.
+	// In legacy mode, it's the bridge admin client.
+	writeClient := b.hubClient
+	senderUser := b.config.Hub.User
+
+	if caller != nil {
+		senderUser = caller.Email
+		var clientErr error
+		writeClient, clientErr = b.callerHubClient(caller)
+		if clientErr != nil {
+			return nil, fmt.Errorf("creating per-user hub client: %w", clientErr)
+		}
+	}
+
 	taskID := uuid.New().String()
 	now := time.Now()
 	task := &state.Task{
-		ID:        taskID,
-		ContextID: agentCtx.ContextID,
-		ProjectID: agentCtx.ProjectID,
-		AgentSlug: agentCtx.AgentSlug,
-		AgentID:   agentCtx.AgentID,
-		State:     TaskStateSubmitted,
-		CreatedAt: now,
-		UpdatedAt: now,
-		Metadata:  "{}",
+		ID:           taskID,
+		ContextID:    agentCtx.ContextID,
+		ProjectID:    agentCtx.ProjectID,
+		AgentSlug:    agentCtx.AgentSlug,
+		AgentID:      agentCtx.AgentID,
+		State:        TaskStateSubmitted,
+		CallerUserID: "", // default for legacy
+		CreatedAt:    now,
+		UpdatedAt:    now,
+		Metadata:     "{}",
+	}
+	if caller != nil {
+		task.CallerUserID = caller.UserID
 	}
 	if err := b.store.CreateTask(task); err != nil {
 		return nil, fmt.Errorf("create task: %w", err)
@@ -278,19 +299,15 @@ func (b *Bridge) SendMessage(ctx context.Context, projectSlug, agentSlug, contex
 	}
 
 	scionMsg := TranslateA2AToScion(parts)
-	scionMsg.Sender = fmt.Sprintf("user:%s", b.config.Hub.User)
+	scionMsg.Sender = fmt.Sprintf("user:%s", senderUser)
 	scionMsg.Recipient = fmt.Sprintf("agent:%s", agentCtx.AgentSlug)
 	scionMsg.Metadata = map[string]string{"a2aTaskId": taskID}
 
 	if b.broker != nil {
-		pattern := projectcompat.UserTopic(agentCtx.ProjectID, b.config.Hub.User)
-		if err := b.broker.RequestSubscription(pattern); err != nil {
-			b.log.Warn("failed to request subscription", "pattern", pattern, "error", err)
-		}
-		// Subscribe to legacy grove topic as well during transition.
-		legacyPattern := projectcompat.LegacyUserTopic(agentCtx.ProjectID, b.config.Hub.User)
-		if err := b.broker.RequestSubscription(legacyPattern); err != nil {
-			b.log.Warn("failed to request legacy subscription", "pattern", legacyPattern, "error", err)
+		if caller != nil {
+			b.subscribeAllUserTopics(agentCtx.ProjectID)
+		} else {
+			b.subscribeAdminUserTopics(agentCtx.ProjectID)
 		}
 	}
 
@@ -302,7 +319,7 @@ func (b *Bridge) SendMessage(ctx context.Context, projectSlug, agentSlug, contex
 			defer b.wg.Done()
 			sendCtx, cancel := context.WithTimeout(b.shutdownCtx, 30*time.Second)
 			defer cancel()
-			if _, err := b.hubClient.Agents().SendStructuredMessage(sendCtx, agentCtx.AgentID, scionMsg, false, false, false); err != nil {
+			if _, err := writeClient.Agents().SendStructuredMessage(sendCtx, agentCtx.AgentID, scionMsg, false, false, false); err != nil {
 				b.log.Error("non-blocking send failed", "error", err, "task_id", taskID)
 				if err := b.store.UpdateTaskState(taskID, TaskStateFailed); err != nil {
 					b.log.Error("failed to update task state", "error", err, "task_id", taskID)
@@ -337,7 +354,7 @@ func (b *Bridge) SendMessage(ctx context.Context, projectSlug, agentSlug, contex
 	// Keep task registered in activeTasks — the agent's eventual state-change
 	// to completed/failed will close it via dispatchToActiveTask.
 
-	if _, err := b.hubClient.Agents().SendStructuredMessage(ctx, agentCtx.AgentID, scionMsg, false, false, false); err != nil {
+	if _, err := writeClient.Agents().SendStructuredMessage(ctx, agentCtx.AgentID, scionMsg, false, false, false); err != nil {
 		if err := b.store.UpdateTaskState(taskID, TaskStateFailed); err != nil {
 			b.log.Error("failed to update task state", "error", err, "task_id", taskID)
 		}
@@ -404,26 +421,42 @@ func (b *Bridge) sendFollowUp(ctx context.Context, projectSlug, agentSlug, taskI
 		return nil, fmt.Errorf("%w: state is %s", ErrTaskTerminal, task.State)
 	}
 
+	caller := callerIdentityFromContext(ctx)
+
+	// Per-user isolation: the follow-up caller must match the task's owner.
+	if caller != nil && task.CallerUserID != "" && caller.UserID != task.CallerUserID {
+		return nil, fmt.Errorf("%w: %s", ErrAgentNotFound, taskID)
+	}
+
+	// Use per-user client if caller identity is present.
+	writeClient := b.hubClient
+	senderUser := b.config.Hub.User
+	if caller != nil {
+		senderUser = caller.Email
+		var clientErr error
+		writeClient, clientErr = b.callerHubClient(caller)
+		if clientErr != nil {
+			return nil, fmt.Errorf("creating per-user hub client: %w", clientErr)
+		}
+	}
+
 	agentID := task.AgentID
 	if agent := b.lookupAgent(ctx, task.ProjectID, task.AgentSlug); agent != nil {
 		agentID = agent.ID
 	}
 
 	scionMsg := TranslateA2AToScion(parts)
-	scionMsg.Sender = fmt.Sprintf("user:%s", b.config.Hub.User)
+	scionMsg.Sender = fmt.Sprintf("user:%s", senderUser)
 	scionMsg.Recipient = fmt.Sprintf("agent:%s", task.AgentSlug)
 	scionMsg.Metadata = map[string]string{"a2aTaskId": taskID}
 
 	// Re-request broker subscriptions in case the broker reconnected since
 	// the original task was created (subscriptions may have been lost).
 	if b.broker != nil {
-		pattern := projectcompat.UserTopic(task.ProjectID, b.config.Hub.User)
-		if err := b.broker.RequestSubscription(pattern); err != nil {
-			b.log.Warn("failed to re-request subscription for follow-up", "pattern", pattern, "error", err)
-		}
-		legacyPattern := projectcompat.LegacyUserTopic(task.ProjectID, b.config.Hub.User)
-		if err := b.broker.RequestSubscription(legacyPattern); err != nil {
-			b.log.Warn("failed to re-request legacy subscription for follow-up", "pattern", legacyPattern, "error", err)
+		if caller != nil {
+			b.subscribeAllUserTopics(task.ProjectID)
+		} else {
+			b.subscribeAdminUserTopics(task.ProjectID)
 		}
 	}
 
@@ -439,7 +472,7 @@ func (b *Bridge) sendFollowUp(ctx context.Context, projectSlug, agentSlug, taskI
 		defer b.removeWaiter(taskID)
 		defer b.unregisterActiveTask(taskID, aKey)
 
-		if _, err := b.hubClient.Agents().SendStructuredMessage(ctx, agentID, scionMsg, false, false, false); err != nil {
+		if _, err := writeClient.Agents().SendStructuredMessage(ctx, agentID, scionMsg, false, false, false); err != nil {
 			b.failFollowUpTask(taskID)
 			return nil, fmt.Errorf("send follow-up to agent: %w", err)
 		}
@@ -480,7 +513,7 @@ func (b *Bridge) sendFollowUp(ctx context.Context, projectSlug, agentSlug, taskI
 		defer b.wg.Done()
 		sendCtx, cancel := context.WithTimeout(b.shutdownCtx, 30*time.Second)
 		defer cancel()
-		if _, err := b.hubClient.Agents().SendStructuredMessage(sendCtx, agentID, scionMsg, false, false, false); err != nil {
+		if _, err := writeClient.Agents().SendStructuredMessage(sendCtx, agentID, scionMsg, false, false, false); err != nil {
 			b.log.Error("non-blocking follow-up send failed", "error", err, "task_id", taskID)
 			b.failFollowUpTask(taskID)
 			b.unregisterActiveTask(taskID, aKey)
@@ -494,13 +527,27 @@ func (b *Bridge) sendFollowUp(ctx context.Context, projectSlug, agentSlug, taskI
 	}, nil
 }
 
-// GetTask retrieves a task by ID.
+// GetTask retrieves a task by ID. Per-user isolation: if CallerIdentity is
+// present and the task has a CallerUserID, only the task's owner can read it.
 func (b *Bridge) GetTask(ctx context.Context, taskID string) (*TaskResult, error) {
 	task, err := b.store.GetTask(taskID)
 	if err != nil {
 		return nil, fmt.Errorf("get task: %w", err)
 	}
 	if task == nil {
+		return nil, nil
+	}
+
+	// Per-user isolation: if the request has a caller identity AND the task
+	// was created by a per-user caller, deny access to other users.
+	// Legacy tasks (CallerUserID == "") are visible to all legacy callers
+	// but NOT to per-user callers (prevents information leakage across modes).
+	caller := callerIdentityFromContext(ctx)
+	if caller != nil && task.CallerUserID != "" && caller.UserID != task.CallerUserID {
+		return nil, nil // not found (avoids leaking existence)
+	}
+	if caller != nil && task.CallerUserID == "" {
+		// Per-user caller cannot see legacy tasks — prevents mode mixing.
 		return nil, nil
 	}
 
@@ -513,9 +560,19 @@ func (b *Bridge) GetTask(ctx context.Context, taskID string) (*TaskResult, error
 	}, nil
 }
 
-// ListTasks returns tasks for a given context.
+// ListTasks returns tasks for a given context. Per-user isolation:
+// if CallerIdentity is present, only the caller's tasks are returned.
 func (b *Bridge) ListTasks(ctx context.Context, contextID string) ([]TaskResult, error) {
-	tasks, err := b.store.ListTasksByContext(ctx, contextID)
+	caller := callerIdentityFromContext(ctx)
+
+	var tasks []state.Task
+	var err error
+	if caller != nil {
+		// Per-user mode: only list tasks created by this caller.
+		tasks, err = b.store.ListTasksByContextAndCaller(ctx, contextID, caller.UserID)
+	} else {
+		tasks, err = b.store.ListTasksByContext(ctx, contextID)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("list tasks: %w", err)
 	}
@@ -532,7 +589,9 @@ func (b *Bridge) ListTasks(ctx context.Context, contextID string) ([]TaskResult,
 }
 
 // CancelTask cancels an in-progress task, notifying stream and push subscribers,
-// and sending an interrupt to the Hub to stop the agent.
+// and sending an interrupt to the Hub to stop the agent. Per-user isolation:
+// if CallerIdentity is present and the task has a CallerUserID, only the
+// task's owner can cancel it.
 func (b *Bridge) CancelTask(ctx context.Context, taskID string) (*TaskResult, error) {
 	task, err := b.store.GetTask(taskID)
 	if err != nil {
@@ -541,6 +600,16 @@ func (b *Bridge) CancelTask(ctx context.Context, taskID string) (*TaskResult, er
 	if task == nil {
 		return nil, nil
 	}
+
+	// Per-user isolation (same logic as GetTask).
+	caller := callerIdentityFromContext(ctx)
+	if caller != nil && task.CallerUserID != "" && caller.UserID != task.CallerUserID {
+		return nil, nil // not found
+	}
+	if caller != nil && task.CallerUserID == "" {
+		return nil, nil // per-user caller cannot cancel legacy tasks
+	}
+
 	if IsTerminalState(task.State) {
 		return nil, fmt.Errorf("task %s is already in terminal state: %s", taskID, task.State)
 	}
@@ -836,6 +905,53 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n] + "..."
+}
+
+// callerHubClient creates a per-request Hub client authenticated as the caller.
+// For UAT callers, the original token is passed through to the Hub.
+// For JWT callers, a fresh 5-minute JWT is minted for the caller's identity.
+func (b *Bridge) callerHubClient(caller *CallerIdentity) (hubclient.Client, error) {
+	switch caller.TokenType {
+	case "uat":
+		return hubclient.New(b.config.Hub.Endpoint,
+			hubclient.WithBearerToken(caller.RawToken))
+	case "jwt":
+		// Re-mint a 5-minute JWT for the caller's identity using the bridge's
+		// signing key. This is the same infrastructure used for the bridge's
+		// own admin identity.
+		mintAuth := identity.NewMintingAuth(b.minter,
+			caller.UserID, caller.Email, caller.Role, 5*time.Minute)
+		return hubclient.New(b.config.Hub.Endpoint,
+			hubclient.WithAuthenticator(mintAuth))
+	default:
+		return nil, fmt.Errorf("unknown token type: %s", caller.TokenType)
+	}
+}
+
+// subscribeAllUserTopics subscribes to the wildcard user topic for per-user
+// mode. This captures replies to all users' messages in the project.
+// The broker's eventbus supports NATS-style * wildcards (confirmed by
+// TestInProcessEventBus_WildcardSubscribe).
+func (b *Bridge) subscribeAllUserTopics(projectID string) {
+	pattern := projectcompat.AllUserTopic(projectID)
+	if err := b.broker.RequestSubscription(pattern); err != nil {
+		b.log.Warn("failed to request wildcard subscription", "pattern", pattern, "error", err)
+	}
+	// Note: no LegacyAllUserTopic exists in projectcompat, so legacy wildcard
+	// subscription is not available. Legacy user topics use the scion.grove.*
+	// prefix which will be phased out.
+}
+
+// subscribeAdminUserTopics subscribes to the bridge admin's user topic (legacy mode).
+func (b *Bridge) subscribeAdminUserTopics(projectID string) {
+	pattern := projectcompat.UserTopic(projectID, b.config.Hub.User)
+	if err := b.broker.RequestSubscription(pattern); err != nil {
+		b.log.Warn("failed to request subscription", "pattern", pattern, "error", err)
+	}
+	legacyPattern := projectcompat.LegacyUserTopic(projectID, b.config.Hub.User)
+	if err := b.broker.RequestSubscription(legacyPattern); err != nil {
+		b.log.Warn("failed to request legacy subscription", "pattern", legacyPattern, "error", err)
+	}
 }
 
 // GenerateAgentCard builds an agent card for the given project and agent,
