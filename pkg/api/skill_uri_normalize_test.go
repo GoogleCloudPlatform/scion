@@ -73,6 +73,26 @@ func TestNormalizeSkillURI(t *testing.T) {
 			wantErr: "invalid owner",
 		},
 		{
+			name:    "gh shorthand dot as owner rejected",
+			input:   "gh://./repo/skill",
+			wantErr: "invalid owner",
+		},
+		{
+			name:    "gh shorthand dotdot as owner rejected",
+			input:   "gh://../repo/skill",
+			wantErr: "invalid owner",
+		},
+		{
+			name:    "gh shorthand dot as repo rejected",
+			input:   "gh://org/./skill",
+			wantErr: "invalid repo",
+		},
+		{
+			name:    "gh shorthand dotdot as repo rejected",
+			input:   "gh://org/../skill",
+			wantErr: "invalid repo",
+		},
+		{
 			name:    "gh shorthand dotdot in skill",
 			input:   "gh://org/repo/..evil",
 			wantErr: "invalid skill name",
@@ -184,6 +204,36 @@ func TestNormalizeSkillURI(t *testing.T) {
 			name:    "github dotdot path traversal",
 			input:   "https://github.com/org/repo/tree/main/skills/../secret",
 			wantErr: "must not contain '..'",
+		},
+		{
+			name:    "github dot as owner rejected",
+			input:   "https://github.com/./repo/tree/main/skills/my-skill",
+			wantErr: "invalid owner",
+		},
+		{
+			name:    "github dotdot as owner rejected",
+			input:   "https://github.com/../repo/tree/main/skills/my-skill",
+			wantErr: "invalid owner",
+		},
+		{
+			name:    "github dot as repo rejected",
+			input:   "https://github.com/org/./tree/main/skills/my-skill",
+			wantErr: "invalid repo",
+		},
+		{
+			name:    "github dotdot as repo rejected",
+			input:   "https://github.com/org/../tree/main/skills/my-skill",
+			wantErr: "invalid repo",
+		},
+		{
+			name:    "github dot as ref rejected",
+			input:   "https://github.com/org/repo/tree/./skills/my-skill",
+			wantErr: "invalid ref",
+		},
+		{
+			name:    "github dotdot as ref rejected",
+			input:   "https://github.com/org/repo/tree/../skills/my-skill",
+			wantErr: "invalid ref",
 		},
 
 		// ── scion:// rejected ────────────────────────────────────────────────

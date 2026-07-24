@@ -94,7 +94,7 @@ function validateGHShorthand(uri: string): string {
     refSuffix = '@' + ref;
   }
   const parts = main.split('/');
-  if (parts.length !== 3 || parts.some((p) => !p)) {
+  if (parts.length !== 3 || parts.some((p) => !p || p === '.' || p === '..')) {
     throw new Error('Invalid gh:// URI: expected gh://owner/repo/skill-name[@ref][?token=SECRET_NAME]');
   }
   return 'gh://' + main + refSuffix + tokenSuffix;
@@ -114,11 +114,15 @@ function normalizeGitHubURL(uri: string): string {
     const query = rest.slice(qIdx + 1);
     rest = rest.slice(0, qIdx);
     if (!query.startsWith('token=')) throw new Error('Invalid GitHub URL: only ?token=SECRET_NAME is supported');
+    const tokenName = query.slice('token='.length);
+    if (!tokenName || !/^[A-Z][A-Z0-9_]*$/.test(tokenName)) {
+      throw new Error('Invalid GitHub URL: ?token= value must be an uppercase env-var name (e.g. SKILLS_TOKEN)');
+    }
     tokenSuffix = '?' + query;
   }
   const segments = rest.split('/');
   const [owner, repo, keyword, ref, ...pathParts] = segments;
-  if (!owner || !repo || !keyword || !ref) {
+  if (!owner || !repo || !keyword || !ref || owner === '.' || owner === '..' || repo === '.' || repo === '..' || ref === '.' || ref === '..') {
     throw new Error('Invalid GitHub URL: expected https://github.com/owner/repo/tree/ref/path/to/skill');
   }
   const kw = keyword.toLowerCase();

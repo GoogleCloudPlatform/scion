@@ -131,10 +131,10 @@ func normalizeGHShorthand(uri string) (string, error) {
 			return "", fmt.Errorf("invalid gh:// URI %q: empty path component", uri)
 		}
 	}
-	if !validGHComponent.MatchString(parts[0]) {
+	if !validGHComponent.MatchString(parts[0]) || parts[0] == "." || parts[0] == ".." {
 		return "", fmt.Errorf("invalid gh:// URI %q: invalid owner %q (must match [a-zA-Z0-9._-]+)", uri, parts[0])
 	}
-	if !validGHComponent.MatchString(parts[1]) {
+	if !validGHComponent.MatchString(parts[1]) || parts[1] == "." || parts[1] == ".." {
 		return "", fmt.Errorf("invalid gh:// URI %q: invalid repo %q (must match [a-zA-Z0-9._-]+)", uri, parts[1])
 	}
 	if strings.Contains(parts[2], "..") || strings.ContainsAny(parts[2], "?#&=") {
@@ -190,14 +190,14 @@ func normalizeGitHubURL(uri string) (string, error) {
 	keyword := strings.ToLower(parts[2])
 	ref := parts[3]
 
-	if !validGHComponent.MatchString(owner) {
+	if !validGHComponent.MatchString(owner) || owner == "." || owner == ".." {
 		return "", fmt.Errorf("invalid GitHub URL %q: invalid owner %q", uri, owner)
 	}
-	if !validGHComponent.MatchString(repo) {
+	if !validGHComponent.MatchString(repo) || repo == "." || repo == ".." {
 		return "", fmt.Errorf("invalid GitHub URL %q: invalid repo %q", uri, repo)
 	}
-	if ref == "" {
-		return "", fmt.Errorf("invalid GitHub URL %q: empty ref", uri)
+	if ref == "" || ref == "." || ref == ".." {
+		return "", fmt.Errorf("invalid GitHub URL %q: empty or invalid ref %q", uri, ref)
 	}
 
 	var skillFullPath string
