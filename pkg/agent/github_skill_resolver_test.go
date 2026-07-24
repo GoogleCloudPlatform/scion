@@ -813,6 +813,92 @@ func TestGitHubSkillResolver_CacheHitCredentialCheck(t *testing.T) {
 	})
 }
 
+func TestGitHubSkillResolver_CrossCredentialCacheIsolation(t *testing.T) {
+	// Verify that two resolvers with different credentials for the same URI
+	// do NOT share a cache entry. This prevents cross-credential information
+	// disclosure where a lower-privilege token would receive cached content
+	// fetched by a higher-privilege token.
+	server, mux := newTestGitHubServer(t)
+	apiCalls := 0
+
+	mux.HandleFunc("/repos/owner/repo/commits/HEAD", func(w http.ResponseWriter, _ *http.Request) {
+		apiCalls++
+		_, _ = w.Write([]byte(testCommitSHA))
+	})
+	mux.HandleFunc("/repos/owner/repo/contents/skills/my-skill", func(w http.ResponseWriter, _ *http.Request) {
+		apiCalls++
+		_ = json.NewEncoder(w).Encode([]githubContentEntry{
+			{Name: "SKILL.md", Path: "skills/my-skill/SKILL.md", Type: "file", Size: 5},
+		})
+	})
+	mux.HandleFunc("/raw/owner/repo/"+testCommitSHA+"/skills/my-skill/SKILL.md", func(w http.ResponseWriter, _ *http.Request) {
+		apiCalls++
+		_, _ = w.Write([]byte("hello"))
+	})
+
+	// Use a shared cache to demonstrate isolation.
+	cache, err := NewGitHubResolutionCache(t.TempDir(), 5*time.Minute)
+	if err != nil {
+		t.Fatalf("cache creation failed: %v", err)
+	}
+
+	// Resolver A uses token "token-alpha".
+	resolverA := &GitHubSkillResolver{
+		httpClient:      server.Client(),
+		token:           "token-alpha",
+		apiBase:         server.URL,
+		rawBase:         server.URL + "/raw",
+		resolutionCache: cache,
+	}
+
+	// Resolver B uses a different token "token-beta" but requests the same URI.
+	resolverB := &GitHubSkillResolver{
+		httpClient:      server.Client(),
+		token:           "token-beta",
+		apiBase:         server.URL,
+		rawBase:         server.URL + "/raw",
+		resolutionCache: cache,
+	}
+
+	uri := []api.SkillReference{{URI: "gh://owner/repo/my-skill"}}
+
+	// First call via resolver A — populates cache under alpha's key.
+	resultA, err := resolverA.Resolve(context.Background(), uri, ResolveOpts{})
+	if err != nil {
+		t.Fatalf("resolverA Resolve failed: %v", err)
+	}
+	if len(resultA.Errors) != 0 {
+		t.Fatalf("resolverA: unexpected errors: %v", resultA.Errors)
+	}
+	callsAfterA := apiCalls
+
+	// Second call via resolver B — must NOT hit resolver A's cache entry.
+	// Because tokens differ, the cache keys differ, so a fresh API call is required.
+	resultB, err := resolverB.Resolve(context.Background(), uri, ResolveOpts{})
+	if err != nil {
+		t.Fatalf("resolverB Resolve failed: %v", err)
+	}
+	if len(resultB.Errors) != 0 {
+		t.Fatalf("resolverB: unexpected errors: %v", resultB.Errors)
+	}
+	if apiCalls == callsAfterA {
+		t.Errorf("expected resolver B to make new API calls (different token = different cache key), but no additional calls were made — cross-credential cache sharing detected")
+	}
+
+	// Third call via resolver B — now should hit resolver B's own cache entry.
+	callsAfterB := apiCalls
+	resultB2, err := resolverB.Resolve(context.Background(), uri, ResolveOpts{})
+	if err != nil {
+		t.Fatalf("resolverB second Resolve failed: %v", err)
+	}
+	if len(resultB2.Errors) != 0 {
+		t.Fatalf("resolverB second call: unexpected errors: %v", resultB2.Errors)
+	}
+	if apiCalls != callsAfterB {
+		t.Errorf("expected resolver B's second call to hit its own cache entry, got %d additional API calls", apiCalls-callsAfterB)
+	}
+}
+
 type stubSkillResolver struct {
 	result *ResolveResult
 }

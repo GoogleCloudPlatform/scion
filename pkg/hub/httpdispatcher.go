@@ -35,6 +35,7 @@ import (
 	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/attribute"
+	"golang.org/x/sync/errgroup"
 )
 
 // HTTPRuntimeBrokerClient is an HTTP-based implementation of RuntimeBrokerClient.
@@ -649,23 +650,40 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 					"agent_id", agent.ID, "error", listErr)
 			}
 		} else if len(projectSecrets) > 0 {
-			req.ProvisionCredentials = make(map[string]string, len(projectSecrets))
-			for _, sm := range projectSecrets {
+			type namedValue struct{ name, value string }
+			fetched := make([]namedValue, len(projectSecrets))
+
+			g, gctx := errgroup.WithContext(ctx)
+			for i, sm := range projectSecrets {
 				if sm.SecretType == store.SecretTypeInternal {
 					continue
 				}
-				sv, getErr := d.secretBackend.Get(ctx, sm.Name, secret.ScopeProject, agent.ProjectID)
-				if getErr != nil {
-					if d.debug {
-						d.log.Warn("buildCreateRequest: failed to get project secret for ProvisionCredentials",
-							"agent_id", agent.ID, "secret_name", sm.Name, "error", getErr)
+				i, sm := i, sm // capture loop vars
+				g.Go(func() error {
+					sv, getErr := d.secretBackend.Get(gctx, sm.Name, secret.ScopeProject, agent.ProjectID)
+					if getErr != nil {
+						if d.debug {
+							d.log.Warn("buildCreateRequest: failed to get project secret for ProvisionCredentials",
+								"agent_id", agent.ID, "secret", sm.Name, "error", getErr)
+						}
+						return nil // don't fail the group for individual secrets
 					}
-				} else if sv != nil && sv.Value != "" {
-					req.ProvisionCredentials[sm.Name] = sv.Value
+					if sv != nil && sv.Value != "" {
+						fetched[i] = namedValue{sm.Name, sv.Value}
+					}
+					return nil
+				})
+			}
+			_ = g.Wait()
+
+			creds := make(map[string]string)
+			for _, nv := range fetched {
+				if nv.name != "" {
+					creds[nv.name] = nv.value
 				}
 			}
-			if len(req.ProvisionCredentials) == 0 {
-				req.ProvisionCredentials = nil
+			if len(creds) > 0 {
+				req.ProvisionCredentials = creds
 			}
 		}
 	}

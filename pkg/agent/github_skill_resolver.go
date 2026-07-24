@@ -17,6 +17,7 @@ package agent
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -130,36 +131,38 @@ func (r *GitHubSkillResolver) Resolve(ctx context.Context, refs []api.SkillRefer
 	return result, nil
 }
 
-// resolutionCacheKey returns a canonical cache key for a skill ref that
-// excludes the ?token= credential selector. Two refs that point to the same
-// content but use different token names share one cache entry; the fetched
-// file content is identical regardless of which credential was used.
-func resolutionCacheKey(ghRef *GitHubSkillRef) string {
-	return fmt.Sprintf("gh://%s/%s/%s@%s", ghRef.Owner, ghRef.Repo, ghRef.SkillPath, ghRef.Ref)
+// resolutionCacheKey returns a canonical cache key for a skill ref.
+// A SHA-256 hash of the token is included so that different credentials
+// produce separate cache entries, preventing cross-credential cache sharing
+// of private content. The raw token is never used as a key value.
+func resolutionCacheKey(ghRef *GitHubSkillRef, token string) string {
+	var tokenSuffix string
+	if token != "" {
+		h := sha256.Sum256([]byte(token))
+		tokenSuffix = "#" + hex.EncodeToString(h[:8]) // 16-char hex prefix of hash
+	}
+	return fmt.Sprintf("gh://%s/%s/%s@%s%s",
+		ghRef.Owner, ghRef.Repo, ghRef.SkillPath, ghRef.Ref, tokenSuffix)
 }
 
 func (r *GitHubSkillResolver) resolveOne(ctx context.Context, ghRef *GitHubSkillRef, ref api.SkillReference) (*ResolvedSkill, error) {
-	// Check resolution cache first using a key that excludes the ?token= param
-	// so that multiple token names for the same skill share one cache entry.
-	cacheKey := resolutionCacheKey(ghRef)
+	// Resolve credential first — before cache check.
+	// This ensures: (1) missing credentials fail immediately, (2) the token
+	// hash is available for the cache key, isolating cache entries per credential.
+	token, err := r.tokenForRef(ghRef)
+	if err != nil {
+		return nil, err
+	}
+
+	cacheKey := resolutionCacheKey(ghRef, token)
 	if r.resolutionCache != nil {
 		if cached, ok := r.resolutionCache.Get(cacheKey); ok {
-			// Validate credential even on cache hit — callers without the
-			// named secret must not receive cached private skill content.
-			if _, err := r.tokenForRef(ghRef); err != nil {
-				return nil, err
-			}
+			// No separate tokenForRef needed here — token already validated above.
 			util.Debugf("github: resolution cache hit for %s", ref.URI)
 			result := cached
 			result.As = ref.As
 			return &result, nil
 		}
-	}
-
-	// Resolve the per-URI token once; all API calls for this ref use it.
-	token, err := r.tokenForRef(ghRef)
-	if err != nil {
-		return nil, err
 	}
 
 	commitSHA, err := r.resolveCommitSHA(ctx, ghRef, token)
@@ -222,7 +225,7 @@ func (r *GitHubSkillResolver) resolveOne(ctx context.Context, ghRef *GitHubSkill
 		Files:   resolvedFiles,
 	}
 
-	// Store in resolution cache under the token-agnostic key.
+	// Store in resolution cache under the token-hashed key.
 	if r.resolutionCache != nil {
 		r.resolutionCache.Put(cacheKey, *resolved)
 	}
