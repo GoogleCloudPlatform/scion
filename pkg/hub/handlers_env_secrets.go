@@ -731,6 +731,15 @@ func (s *Server) setSecret(w http.ResponseWriter, r *http.Request, key string) {
 		return
 	}
 
+	if req.Encoding != "" && req.Encoding != "base64" && req.Encoding != "raw" {
+		ValidationError(w, "encoding must be \"base64\" or \"raw\"", map[string]interface{}{
+			"field":   "encoding",
+			"value":   req.Encoding,
+			"allowed": []string{"base64", "raw"},
+		})
+		return
+	}
+
 	var decoded []byte
 	if req.Encoding == "raw" {
 		// Caller explicitly opted in to raw text — store the value as-is.
@@ -951,6 +960,15 @@ func (s *Server) handleAgentSecrets(w http.ResponseWriter, r *http.Request, agen
 
 	if req.Value == "" {
 		ValidationError(w, "value is required", nil)
+		return
+	}
+
+	if req.Encoding != "" && req.Encoding != "base64" && req.Encoding != "raw" {
+		ValidationError(w, "encoding must be \"base64\" or \"raw\"", map[string]interface{}{
+			"field":   "encoding",
+			"value":   req.Encoding,
+			"allowed": []string{"base64", "raw"},
+		})
 		return
 	}
 
@@ -1452,6 +1470,14 @@ func (s *Server) handleProjectSecretByKey(w http.ResponseWriter, r *http.Request
 		}
 		if req.Value == "" {
 			ValidationError(w, "value is required", nil)
+			return
+		}
+		if req.Encoding != "" && req.Encoding != "base64" && req.Encoding != "raw" {
+			ValidationError(w, "encoding must be \"base64\" or \"raw\"", map[string]interface{}{
+				"field":   "encoding",
+				"value":   req.Encoding,
+				"allowed": []string{"base64", "raw"},
+			})
 			return
 		}
 		var decoded []byte
@@ -2118,6 +2144,14 @@ func (s *Server) handleBrokerSecretByKey(w http.ResponseWriter, r *http.Request,
 		}
 		if req.Value == "" {
 			ValidationError(w, "value is required", nil)
+			return
+		}
+		if req.Encoding != "" && req.Encoding != "base64" && req.Encoding != "raw" {
+			ValidationError(w, "encoding must be \"base64\" or \"raw\"", map[string]interface{}{
+				"field":   "encoding",
+				"value":   req.Encoding,
+				"allowed": []string{"base64", "raw"},
+			})
 			return
 		}
 		var decoded []byte

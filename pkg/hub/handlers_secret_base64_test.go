@@ -572,6 +572,33 @@ func TestBrokerSecretByKey_SizeLimit_ReturnsJSONError(t *testing.T) {
 	checkJSONError(t, rec.Body.String())
 }
 
+// ============================================================================
+// Unrecognized encoding value (all handlers share the same guard)
+// ============================================================================
+
+// TestSetSecret_UnrecognizedEncoding_Returns400 confirms that an encoding value
+// other than "" / "base64" / "raw" is rejected with a structured JSON 400, so
+// typos like "bas64" or "Base64" are caught rather than silently treated as
+// strict base64.
+func TestSetSecret_UnrecognizedEncoding_Returns400(t *testing.T) {
+	srv, s := testServer(t)
+	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id"))
+
+	body := SetSecretRequest{
+		Value:    base64.StdEncoding.EncodeToString([]byte("value")),
+		Encoding: "bas64", // typo — not a valid encoding value
+	}
+	rec := doRequest(t, srv, http.MethodPut, "/api/v1/secrets/UNK_ENC_KEY", body)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("unrecognized encoding: expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+	checkJSONError(t, rec.Body.String())
+	// Confirm the error body mentions the invalid value so callers can self-diagnose.
+	if !strings.Contains(rec.Body.String(), "bas64") {
+		t.Errorf("expected error body to contain the invalid encoding value, got: %s", rec.Body.String())
+	}
+}
+
 // Ensure the agent fixture is usable from this file (it uses a local import
 // via setupAgentSecretTest which references state.PhaseRunning).
 var _ = state.PhaseRunning
