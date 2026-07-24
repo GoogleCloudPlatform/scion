@@ -1765,6 +1765,28 @@ func GetAgent(ctx context.Context, agentName string, templateName string, agentI
 
 	finalCfg := config.MergeScionConfig(mergedCfg, agentCfg)
 
+	// Resolve model size aliases for existing agents.
+	// Mirrors the alias resolution in ProvisionAgent (line 778-785).
+	// This covers the case where scion-agent.json was written with a raw alias
+	// (e.g. by applyInlineConfigUpdate before the hub-side fix) or where the
+	// agent was created before the hub resolved aliases at storage time.
+	if finalCfg.Model != "" {
+		hcName := finalCfg.HarnessConfig
+		if hcName == "" {
+			hcName = finalCfg.DefaultHarnessConfig
+		}
+		if hcName != "" {
+			hcDir, err := resolveHarnessConfigDir(ctx, hcName, projectPath)
+			if err == nil && hcDir != nil && hcDir.Config.ModelAliases != nil {
+				resolved := config.ResolveModelAlias(finalCfg.Model, hcDir.Config.ModelAliases)
+				if resolved != finalCfg.Model {
+					util.Debugf("GetAgent: resolved model alias %q → %q", finalCfg.Model, resolved)
+					finalCfg.Model = resolved
+				}
+			}
+		}
+	}
+
 	// Ensure Info is populated from agent-info.json if available
 	if agentInfo != nil {
 		finalCfg.Info = agentInfo

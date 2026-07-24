@@ -1535,7 +1535,9 @@ func (s *Server) updateAgent(w http.ResponseWriter, r *http.Request, id string) 
 			agent.AppliedConfig.Image = cfg.Image
 		}
 		if cfg.Model != "" {
-			agent.AppliedConfig.Model = cfg.Model
+			resolved := s.resolveModelAliasForAgent(ctx, agent, cfg.Model)
+			agent.AppliedConfig.Model = resolved
+			cfg.Model = resolved // ensures InlineConfig (set later) also carries resolved value
 		}
 		if cfg.ThinkingLevel != nil {
 			if tl := *cfg.ThinkingLevel; tl < 0 || tl > 100 {

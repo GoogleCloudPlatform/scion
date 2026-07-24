@@ -19,6 +19,7 @@ import (
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -118,6 +119,41 @@ func (s *Server) resolveAgentHarnessType(ctx context.Context, agent *store.Agent
 func (s *Server) resolveAgentHarnessCapabilities(ctx context.Context, agent *store.Agent) (string, api.HarnessAdvancedCapabilities) {
 	resolvedHarness := s.resolveAgentHarnessType(ctx, agent)
 	return resolvedHarness, harness.New(resolvedHarness).AdvancedCapabilities()
+}
+
+// resolveModelAliasForAgent resolves a model size alias (e.g. "extra-large")
+// to a concrete model name (e.g. "fable") using the agent's harness config's
+// model_aliases map. Returns the input unchanged if no alias mapping exists
+// or any lookup fails.
+func (s *Server) resolveModelAliasForAgent(ctx context.Context, agent *store.Agent, model string) string {
+	if agent == nil || agent.AppliedConfig == nil || model == "" {
+		return model
+	}
+
+	// Try by ID first (fast path — stamped during create)
+	if hcID := agent.AppliedConfig.HarnessConfigID; hcID != "" {
+		hc, err := s.store.GetHarnessConfig(ctx, hcID)
+		if err == nil && hc != nil && hc.Config != nil && len(hc.Config.ModelAliases) > 0 {
+			return config.ResolveModelAlias(model, hc.Config.ModelAliases)
+		}
+	}
+
+	// Fallback: by slug (project scope, then global)
+	hcSlug := agent.AppliedConfig.HarnessConfig
+	if hcSlug == "" {
+		return model
+	}
+	var hc *store.HarnessConfig
+	if agent.ProjectID != "" {
+		hc, _ = s.store.GetHarnessConfigBySlug(ctx, hcSlug, store.HarnessConfigScopeProject, agent.ProjectID)
+	}
+	if hc == nil {
+		hc, _ = s.store.GetHarnessConfigBySlug(ctx, hcSlug, store.HarnessConfigScopeGlobal, "")
+	}
+	if hc != nil && hc.Config != nil && len(hc.Config.ModelAliases) > 0 {
+		return config.ResolveModelAlias(model, hc.Config.ModelAliases)
+	}
+	return model
 }
 
 func supportReason(field api.CapabilityField) string {

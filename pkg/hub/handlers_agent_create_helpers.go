@@ -262,6 +262,20 @@ func (s *Server) populateAgentConfig(ctx context.Context, agent *store.Agent, pr
 		}
 	}
 
+	// Resolve model size aliases (e.g. "extra-large" → "fable") so that
+	// AppliedConfig.Model and InlineConfig.Model carry the concrete model
+	// name. This prevents raw aliases from leaking into SCION_MODEL env var
+	// (set by httpdispatcher) and --model CLI flag (set by run.go).
+	if agent.AppliedConfig.Model != "" {
+		resolved := s.resolveModelAliasForAgent(ctx, agent, agent.AppliedConfig.Model)
+		if resolved != agent.AppliedConfig.Model {
+			agent.AppliedConfig.Model = resolved
+			if agent.AppliedConfig.InlineConfig != nil && agent.AppliedConfig.InlineConfig.Model != "" {
+				agent.AppliedConfig.InlineConfig.Model = resolved
+			}
+		}
+	}
+
 	// Merge hub-level telemetry config as lowest-priority default.
 	// Only applies when no per-agent or template telemetry config is set.
 	s.mu.RLock()
