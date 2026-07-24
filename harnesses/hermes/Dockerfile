@@ -25,6 +25,7 @@ ARG HERMES_VERSION=
 RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
   && apt-get install -y --no-install-recommends nodejs \
   && rm -f /etc/apt/sources.list.d/nodesource.sources \
+           /etc/apt/sources.list.d/nodesource.list \
            /etc/apt/preferences.d/nodejs \
            /etc/apt/preferences.d/nsolid \
            /usr/share/keyrings/nodesource.gpg \
