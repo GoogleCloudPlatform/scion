@@ -33,6 +33,24 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 )
 
+// ErrCodeInvalidParams is the JSON-RPC error code for invalid params.
+// Previously defined in handler.go; kept here for test compatibility.
+const ErrCodeInvalidParams = -32602
+
+// SendMessageParams mirrors the A2A message/send params for test assertions.
+type SendMessageParams struct {
+	TaskID        string             `json:"taskId,omitempty"`
+	Message       Message            `json:"message"`
+	Configuration *SendMessageConfig `json:"configuration,omitempty"`
+}
+
+// SendMessageConfig mirrors the A2A configuration block.
+type SendMessageConfig struct {
+	Blocking *bool `json:"blocking,omitempty"`
+}
+
+func boolPtr(b bool) *bool { return &b }
+
 // --- Mock hubclient ---
 
 // mockAgentService implements hubclient.AgentService for testing.
@@ -827,7 +845,7 @@ func TestHandleSendMessage_PassesTaskIDToSendMessage(t *testing.T) {
 	hub := &mockHubClient{agents: agents}
 	bridge := New(store, hub, nil, cfg, nil, log)
 	defer bridge.Shutdown()
-	srv := NewServer(bridge, cfg, nil, log)
+	srv := NewServer(bridge, cfg, nil, log, testHandler())
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 
@@ -894,7 +912,7 @@ func TestHandleSendMessage_ErrTaskTerminal_ReturnsCorrectError(t *testing.T) {
 	hub := &mockHubClient{agents: agents}
 	bridge := New(store, hub, nil, cfg, nil, log)
 	defer bridge.Shutdown()
-	srv := NewServer(bridge, cfg, nil, log)
+	srv := NewServer(bridge, cfg, nil, log, testHandler())
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 
@@ -941,7 +959,7 @@ func TestHandleSendMessage_UnknownTaskID_ReturnsAgentNotFound(t *testing.T) {
 	hub := &mockHubClient{agents: agents}
 	bridge := New(store, hub, nil, cfg, nil, log)
 	defer bridge.Shutdown()
-	srv := NewServer(bridge, cfg, nil, log)
+	srv := NewServer(bridge, cfg, nil, log, testHandler())
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 
@@ -1001,7 +1019,7 @@ func TestHandleSendMessage_NoTaskID_RoutesToNewTask(t *testing.T) {
 	hub := &mockHubClient{agents: agents}
 	bridge := New(store, hub, nil, cfg, nil, log)
 	defer bridge.Shutdown()
-	srv := NewServer(bridge, cfg, nil, log)
+	srv := NewServer(bridge, cfg, nil, log, testHandler())
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 
@@ -1174,5 +1192,3 @@ func TestSendFollowUp_MessageContentTranslated(t *testing.T) {
 }
 
 // --- Helpers ---
-
-func boolPtr(b bool) *bool { return &b }

@@ -30,8 +30,6 @@ import (
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
 	"github.com/a2aproject/a2a-go/v2/a2asrv/taskstore"
 
-	"context"
-
 	"github.com/GoogleCloudPlatform/scion/extras/scion-a2a-bridge/internal/state"
 )
 
