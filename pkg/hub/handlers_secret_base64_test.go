@@ -14,19 +14,20 @@
 
 //go:build !no_sqlite
 
-// Package hub – tests for the base64/raw-value fallback and structured error
-// responses in all four secret-write handlers:
+// Package hub – tests for the Encoding field and base64/raw-value handling in
+// all four secret-write handlers:
 //
 //   - setSecret             (PUT /api/v1/secrets/{key})
 //   - handleAgentSecrets    (PUT /api/v1/agents/{id}/secrets/{key})
 //   - handleProjectSecretByKey (PUT /api/v1/projects/{id}/secrets/{key})
 //   - handleBrokerSecretByKey  (PUT /api/v1/runtime-brokers/{id}/secrets/{key})
 //
-// The tests cover three scenarios per handler:
-//  1. Valid base64-encoded value → 200/201 (backward compat, CLI behaviour)
-//  2. Raw/non-base64 value       → 200/201 (new fallback, fixes web-UI regression)
-//  3. Remaining 400 validations  → body is parseable JSON with {"error":…}
-//     (path traversal and file size limit)
+// Contract under test:
+//   - Default (encoding omitted or "base64"): value MUST be valid base64; any
+//     invalid base64 is rejected with 400 JSON — no silent fallback.
+//   - Encoding "raw": value is stored as literal text with no decoding.
+//   - Remaining validations (path traversal, size limit) still reject with
+//     structured JSON 400s regardless of encoding.
 
 package hub
 
@@ -64,7 +65,8 @@ func checkJSONError(t *testing.T, body string) {
 // setSecret (PUT /api/v1/secrets/{key})
 // ============================================================================
 
-func TestSetSecret_Base64Value_Works(t *testing.T) {
+// TestSetSecret_ValidBase64_Works confirms backward-compatible base64 path works.
+func TestSetSecret_ValidBase64_Works(t *testing.T) {
 	srv, s := testServer(t)
 	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id"))
 
@@ -73,24 +75,110 @@ func TestSetSecret_Base64Value_Works(t *testing.T) {
 	}
 	rec := doRequest(t, srv, http.MethodPut, "/api/v1/secrets/BASE64_KEY", body)
 	if rec.Code != http.StatusOK {
-		t.Fatalf("base64 value: expected 200, got %d: %s", rec.Code, rec.Body.String())
+		t.Fatalf("valid base64: expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 
-func TestSetSecret_RawValue_FallsBack(t *testing.T) {
+// TestSetSecret_InvalidBase64_DefaultEncoding_Returns400 confirms that without
+// explicit encoding="raw", values that fail base64 decode are rejected.
+func TestSetSecret_InvalidBase64_DefaultEncoding_Returns400(t *testing.T) {
 	srv, s := testServer(t)
 	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id"))
 
-	// Send raw text that is NOT valid base64 (contains punctuation that base64 rejects).
 	body := SetSecretRequest{
+		// Raw text with characters that make it invalid base64.
 		Value: "raw!value$that=is*not-base64",
 	}
-	rec := doRequest(t, srv, http.MethodPut, "/api/v1/secrets/RAW_KEY", body)
+	rec := doRequest(t, srv, http.MethodPut, "/api/v1/secrets/RAW_KEY_NO_ENC", body)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("invalid base64 without encoding field: expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+	checkJSONError(t, rec.Body.String())
+}
+
+// TestSetSecret_ValidBase64LookingValue_DefaultEncoding_Decoded ensures that
+// values which happen to be valid base64 (e.g. "admin123") are decoded rather
+// than stored raw under the default path.  This is the correct behavior — if
+// the caller wants literal storage they must set Encoding:"raw".
+func TestSetSecret_ValidBase64LookingValue_DefaultEncoding_Decoded(t *testing.T) {
+	srv, s := testServer(t)
+	localBackend := secret.NewLocalBackend(s, "test-hub-id")
+	srv.SetSecretBackend(localBackend)
+	ctx := context.Background()
+
+	// "YWRtaW4xMjM=" is base64 for "admin123".
+	base64OfAdmin123 := base64.StdEncoding.EncodeToString([]byte("admin123"))
+	body := SetSecretRequest{Value: base64OfAdmin123}
+	rec := doRequest(t, srv, http.MethodPut, "/api/v1/secrets/ADMIN123_KEY", body)
 	if rec.Code != http.StatusOK {
-		t.Fatalf("raw value fallback: expected 200 (not 400), got %d: %s", rec.Code, rec.Body.String())
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	stored, err := localBackend.Get(ctx, "ADMIN123_KEY", store.ScopeUser, DevUserID)
+	if err != nil {
+		t.Fatalf("failed to retrieve stored secret: %v", err)
+	}
+	// The stored value should be the decoded "admin123", not the base64 string.
+	if stored.Value != "admin123" {
+		t.Errorf("expected stored value %q, got %q", "admin123", stored.Value)
 	}
 }
 
+// TestSetSecret_RawEncoding_StoresLiteralValue confirms encoding="raw" stores
+// the value byte-for-byte, including text that happens to be valid base64.
+func TestSetSecret_RawEncoding_StoresLiteralValue(t *testing.T) {
+	srv, s := testServer(t)
+	localBackend := secret.NewLocalBackend(s, "test-hub-id")
+	srv.SetSecretBackend(localBackend)
+	ctx := context.Background()
+
+	// "testtest" is valid base64 (decodes to binary), but with encoding=raw
+	// it must be stored literally.
+	rawValue := "testtest"
+	body := SetSecretRequest{
+		Value:    rawValue,
+		Encoding: "raw",
+	}
+	rec := doRequest(t, srv, http.MethodPut, "/api/v1/secrets/RAW_ENC_KEY", body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("encoding=raw: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	stored, err := localBackend.Get(ctx, "RAW_ENC_KEY", store.ScopeUser, DevUserID)
+	if err != nil {
+		t.Fatalf("failed to retrieve stored secret: %v", err)
+	}
+	if stored.Value != rawValue {
+		t.Errorf("encoding=raw roundtrip: stored %q != original %q", stored.Value, rawValue)
+	}
+}
+
+// TestSetSecret_RawEncoding_SpecialCharsLiteral confirms encoding="raw" stores
+// arbitrary special-character strings without any encoding/decoding.
+func TestSetSecret_RawEncoding_SpecialCharsLiteral(t *testing.T) {
+	srv, s := testServer(t)
+	localBackend := secret.NewLocalBackend(s, "test-hub-id")
+	srv.SetSecretBackend(localBackend)
+	ctx := context.Background()
+
+	rawValue := "pa$$w0rd!with&special<chars>"
+	body := SetSecretRequest{
+		Value:    rawValue,
+		Encoding: "raw",
+	}
+	rec := doRequest(t, srv, http.MethodPut, "/api/v1/secrets/SPECIAL_KEY", body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("encoding=raw special chars: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	stored, err := localBackend.Get(ctx, "SPECIAL_KEY", store.ScopeUser, DevUserID)
+	if err != nil {
+		t.Fatalf("failed to retrieve stored secret: %v", err)
+	}
+	if stored.Value != rawValue {
+		t.Errorf("encoding=raw roundtrip: stored %q != original %q", stored.Value, rawValue)
+	}
+}
+
+// TestSetSecret_PathTraversal_ReturnsJSONError confirms the path-traversal
+// validation still produces structured JSON regardless of encoding.
 func TestSetSecret_PathTraversal_ReturnsJSONError(t *testing.T) {
 	srv, s := testServer(t)
 	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id"))
@@ -107,17 +195,18 @@ func TestSetSecret_PathTraversal_ReturnsJSONError(t *testing.T) {
 	checkJSONError(t, rec.Body.String())
 }
 
+// TestSetSecret_SizeLimit_ReturnsJSONError confirms the size-limit validation
+// still produces structured JSON; uses encoding=raw to reach that check with
+// an oversized value.
 func TestSetSecret_SizeLimit_ReturnsJSONError(t *testing.T) {
 	srv, s := testServer(t)
 	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id"))
 
-	// Send a raw value that exceeds 64 KiB as a file type.
-	// The fallback decodes to []byte(req.Value), so len(decoded) == len(rawValue).
-	bigValue := strings.Repeat("x", 64*1024+1)
 	body := SetSecretRequest{
-		Value:  bigValue,
-		Type:   "file",
-		Target: "/tmp/big-file.txt",
+		Value:    strings.Repeat("x", 64*1024+1),
+		Encoding: "raw",
+		Type:     "file",
+		Target:   "/tmp/big-file.txt",
 	}
 	rec := doRequest(t, srv, http.MethodPut, "/api/v1/secrets/BIG_KEY", body)
 	if rec.Code != http.StatusBadRequest {
@@ -130,29 +219,81 @@ func TestSetSecret_SizeLimit_ReturnsJSONError(t *testing.T) {
 // handleAgentSecrets (PUT /api/v1/agents/{id}/secrets/{key})
 // ============================================================================
 
-func TestAgentSecrets_Base64Value_Works_Compat(t *testing.T) {
+func TestAgentSecrets_ValidBase64_Works(t *testing.T) {
 	srv, _, agentID, _, agentToken := setupAgentSecretTest(t)
 
 	body := AgentSetSecretRequest{
 		Value: base64.StdEncoding.EncodeToString([]byte("agent-secret")),
 	}
 	rec := doRequestWithAgentToken(t, srv, http.MethodPut,
-		"/api/v1/agents/"+agentID+"/secrets/COMPAT_KEY", body, agentToken)
+		"/api/v1/agents/"+agentID+"/secrets/AGENT_B64_KEY", body, agentToken)
 	if rec.Code != http.StatusCreated {
-		t.Fatalf("base64 compat: expected 201, got %d: %s", rec.Code, rec.Body.String())
+		t.Fatalf("valid base64: expected 201, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 
-func TestAgentSecrets_RawValue_FallsBack(t *testing.T) {
+func TestAgentSecrets_InvalidBase64_DefaultEncoding_Returns400(t *testing.T) {
 	srv, _, agentID, _, agentToken := setupAgentSecretTest(t)
 
 	body := AgentSetSecretRequest{
 		Value: "raw!value$that=is*not-base64",
 	}
 	rec := doRequestWithAgentToken(t, srv, http.MethodPut,
-		"/api/v1/agents/"+agentID+"/secrets/RAW_AGENT_KEY", body, agentToken)
+		"/api/v1/agents/"+agentID+"/secrets/AGENT_RAW_NO_ENC", body, agentToken)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("invalid base64 without encoding: expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+	checkJSONError(t, rec.Body.String())
+}
+
+func TestAgentSecrets_RawEncoding_StoresLiteralValue(t *testing.T) {
+	srv, s, agentID, projectID, agentToken := setupAgentSecretTest(t)
+	localBackend := secret.NewLocalBackend(s, "test-hub-id")
+	srv.SetSecretBackend(localBackend)
+	ctx := context.Background()
+
+	// "password" is valid base64, but encoding=raw must store it literally.
+	rawValue := "password"
+	body := AgentSetSecretRequest{
+		Value:    rawValue,
+		Encoding: "raw",
+	}
+	rec := doRequestWithAgentToken(t, srv, http.MethodPut,
+		"/api/v1/agents/"+agentID+"/secrets/AGENT_RAW_ENC_KEY", body, agentToken)
 	if rec.Code != http.StatusCreated {
-		t.Fatalf("raw fallback: expected 201 (not 400), got %d: %s", rec.Code, rec.Body.String())
+		t.Fatalf("encoding=raw: expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+	stored, err := localBackend.Get(ctx, "AGENT_RAW_ENC_KEY", store.ScopeProject, projectID)
+	if err != nil {
+		t.Fatalf("failed to retrieve stored secret: %v", err)
+	}
+	if stored.Value != rawValue {
+		t.Errorf("encoding=raw roundtrip: stored %q != original %q", stored.Value, rawValue)
+	}
+}
+
+func TestAgentSecrets_RawEncoding_SpecialCharsLiteral(t *testing.T) {
+	srv, s, agentID, projectID, agentToken := setupAgentSecretTest(t)
+	localBackend := secret.NewLocalBackend(s, "test-hub-id")
+	srv.SetSecretBackend(localBackend)
+	ctx := context.Background()
+
+	rawValue := "agent_raw!value@host"
+	body := AgentSetSecretRequest{
+		Value:    rawValue,
+		Encoding: "raw",
+	}
+	rec := doRequestWithAgentToken(t, srv, http.MethodPut,
+		"/api/v1/agents/"+agentID+"/secrets/AGENT_SPECIAL_KEY", body, agentToken)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("encoding=raw: expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+	stored, err := localBackend.Get(ctx, "AGENT_SPECIAL_KEY", store.ScopeProject, projectID)
+	if err != nil {
+		t.Fatalf("failed to retrieve stored secret: %v", err)
+	}
+	if stored.Value != rawValue {
+		t.Errorf("encoding=raw roundtrip: stored %q != original %q", stored.Value, rawValue)
 	}
 }
 
@@ -175,11 +316,11 @@ func TestAgentSecrets_PathTraversal_ReturnsJSONError(t *testing.T) {
 func TestAgentSecrets_SizeLimit_ReturnsJSONError(t *testing.T) {
 	srv, _, agentID, _, agentToken := setupAgentSecretTest(t)
 
-	bigValue := strings.Repeat("a", 64*1024+1)
 	body := AgentSetSecretRequest{
-		Value:  bigValue,
-		Type:   "file",
-		Target: "/tmp/bigfile.dat",
+		Value:    strings.Repeat("a", 64*1024+1),
+		Encoding: "raw",
+		Type:     "file",
+		Target:   "/tmp/bigfile.dat",
 	}
 	rec := doRequestWithAgentToken(t, srv, http.MethodPut,
 		"/api/v1/agents/"+agentID+"/secrets/BIG_AGENT_KEY", body, agentToken)
@@ -202,9 +343,9 @@ func setupProjectSecretTest(t *testing.T) (*Server, string) {
 	projectID := tid("proj-secret-b64")
 	project := &store.Project{
 		ID:      projectID,
-		Name:    "Base64 Fallback Project",
-		Slug:    "base64-fallback-project",
-		OwnerID: DevUserID, // makes the test-user (admin) the owner
+		Name:    "Encoding Test Project",
+		Slug:    "encoding-test-project",
+		OwnerID: DevUserID,
 		Created: time.Now(),
 		Updated: time.Now(),
 	}
@@ -214,7 +355,7 @@ func setupProjectSecretTest(t *testing.T) (*Server, string) {
 	return srv, projectID
 }
 
-func TestProjectSecretByKey_Base64Value_Works(t *testing.T) {
+func TestProjectSecretByKey_ValidBase64_Works(t *testing.T) {
 	srv, projectID := setupProjectSecretTest(t)
 
 	body := SetSecretRequest{
@@ -223,20 +364,57 @@ func TestProjectSecretByKey_Base64Value_Works(t *testing.T) {
 	rec := doRequest(t, srv, http.MethodPut,
 		"/api/v1/projects/"+projectID+"/secrets/PROJ_B64_KEY", body)
 	if rec.Code != http.StatusOK {
-		t.Fatalf("base64 value: expected 200, got %d: %s", rec.Code, rec.Body.String())
+		t.Fatalf("valid base64: expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 
-func TestProjectSecretByKey_RawValue_FallsBack(t *testing.T) {
+func TestProjectSecretByKey_InvalidBase64_DefaultEncoding_Returns400(t *testing.T) {
 	srv, projectID := setupProjectSecretTest(t)
 
 	body := SetSecretRequest{
 		Value: "raw!value$that=is*not-base64",
 	}
 	rec := doRequest(t, srv, http.MethodPut,
-		"/api/v1/projects/"+projectID+"/secrets/PROJ_RAW_KEY", body)
+		"/api/v1/projects/"+projectID+"/secrets/PROJ_INVALID_KEY", body)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("invalid base64 without encoding: expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+	checkJSONError(t, rec.Body.String())
+}
+
+func TestProjectSecretByKey_RawEncoding_StoresLiteralValue(t *testing.T) {
+	srv, s := testServer(t)
+	localBackend := secret.NewLocalBackend(s, "test-hub-id")
+	srv.SetSecretBackend(localBackend)
+	ctx := context.Background()
+
+	projectID := tid("proj-roundtrip")
+	project := &store.Project{
+		ID:      projectID,
+		Name:    "Roundtrip Project",
+		Slug:    "roundtrip-project",
+		OwnerID: DevUserID,
+		Created: time.Now(),
+		Updated: time.Now(),
+	}
+	if err := s.CreateProject(ctx, project); err != nil {
+		t.Fatalf("failed to create project: %v", err)
+	}
+
+	// "admin123" is coincidentally valid base64 — encoding=raw must store it literally.
+	rawValue := "admin123"
+	body := SetSecretRequest{Value: rawValue, Encoding: "raw"}
+	rec := doRequest(t, srv, http.MethodPut,
+		"/api/v1/projects/"+projectID+"/secrets/PROJ_ROUND_KEY", body)
 	if rec.Code != http.StatusOK {
-		t.Fatalf("raw fallback: expected 200 (not 400), got %d: %s", rec.Code, rec.Body.String())
+		t.Fatalf("encoding=raw: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	stored, err := localBackend.Get(ctx, "PROJ_ROUND_KEY", store.ScopeProject, projectID)
+	if err != nil {
+		t.Fatalf("failed to retrieve stored secret: %v", err)
+	}
+	if stored.Value != rawValue {
+		t.Errorf("encoding=raw roundtrip: stored %q != original %q", stored.Value, rawValue)
 	}
 }
 
@@ -259,11 +437,11 @@ func TestProjectSecretByKey_PathTraversal_ReturnsJSONError(t *testing.T) {
 func TestProjectSecretByKey_SizeLimit_ReturnsJSONError(t *testing.T) {
 	srv, projectID := setupProjectSecretTest(t)
 
-	bigValue := strings.Repeat("z", 64*1024+1)
 	body := SetSecretRequest{
-		Value:  bigValue,
-		Type:   "file",
-		Target: "/tmp/bigfile.txt",
+		Value:    strings.Repeat("z", 64*1024+1),
+		Encoding: "raw",
+		Type:     "file",
+		Target:   "/tmp/bigfile.txt",
 	}
 	rec := doRequest(t, srv, http.MethodPut,
 		"/api/v1/projects/"+projectID+"/secrets/PROJ_BIG_KEY", body)
@@ -286,8 +464,8 @@ func setupBrokerSecretTest(t *testing.T) (*Server, string) {
 	brokerID := tid("broker-secret-b64")
 	broker := &store.RuntimeBroker{
 		ID:      brokerID,
-		Name:    "Base64 Fallback Broker",
-		Slug:    "base64-fallback-broker",
+		Name:    "Encoding Test Broker",
+		Slug:    "encoding-test-broker",
 		Status:  store.BrokerStatusOnline,
 		Created: time.Now(),
 		Updated: time.Now(),
@@ -298,7 +476,7 @@ func setupBrokerSecretTest(t *testing.T) (*Server, string) {
 	return srv, brokerID
 }
 
-func TestBrokerSecretByKey_Base64Value_Works(t *testing.T) {
+func TestBrokerSecretByKey_ValidBase64_Works(t *testing.T) {
 	srv, brokerID := setupBrokerSecretTest(t)
 
 	body := SetSecretRequest{
@@ -307,20 +485,57 @@ func TestBrokerSecretByKey_Base64Value_Works(t *testing.T) {
 	rec := doRequest(t, srv, http.MethodPut,
 		"/api/v1/runtime-brokers/"+brokerID+"/secrets/BROKER_B64_KEY", body)
 	if rec.Code != http.StatusOK {
-		t.Fatalf("base64 value: expected 200, got %d: %s", rec.Code, rec.Body.String())
+		t.Fatalf("valid base64: expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 
-func TestBrokerSecretByKey_RawValue_FallsBack(t *testing.T) {
+func TestBrokerSecretByKey_InvalidBase64_DefaultEncoding_Returns400(t *testing.T) {
 	srv, brokerID := setupBrokerSecretTest(t)
 
 	body := SetSecretRequest{
 		Value: "raw!value$that=is*not-base64",
 	}
 	rec := doRequest(t, srv, http.MethodPut,
-		"/api/v1/runtime-brokers/"+brokerID+"/secrets/BROKER_RAW_KEY", body)
+		"/api/v1/runtime-brokers/"+brokerID+"/secrets/BROKER_INVALID_KEY", body)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("invalid base64 without encoding: expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+	checkJSONError(t, rec.Body.String())
+}
+
+func TestBrokerSecretByKey_RawEncoding_StoresLiteralValue(t *testing.T) {
+	srv, s := testServer(t)
+	localBackend := secret.NewLocalBackend(s, "test-hub-id")
+	srv.SetSecretBackend(localBackend)
+	ctx := context.Background()
+
+	brokerID := tid("broker-roundtrip")
+	broker := &store.RuntimeBroker{
+		ID:      brokerID,
+		Name:    "Roundtrip Broker",
+		Slug:    "roundtrip-broker",
+		Status:  store.BrokerStatusOnline,
+		Created: time.Now(),
+		Updated: time.Now(),
+	}
+	if err := s.CreateRuntimeBroker(ctx, broker); err != nil {
+		t.Fatalf("failed to create broker: %v", err)
+	}
+
+	// "testtest" is valid base64 — encoding=raw must store it literally.
+	rawValue := "testtest"
+	body := SetSecretRequest{Value: rawValue, Encoding: "raw"}
+	rec := doRequest(t, srv, http.MethodPut,
+		"/api/v1/runtime-brokers/"+brokerID+"/secrets/BROKER_ROUND_KEY", body)
 	if rec.Code != http.StatusOK {
-		t.Fatalf("raw fallback: expected 200 (not 400), got %d: %s", rec.Code, rec.Body.String())
+		t.Fatalf("encoding=raw: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	stored, err := localBackend.Get(ctx, "BROKER_ROUND_KEY", store.ScopeRuntimeBroker, brokerID)
+	if err != nil {
+		t.Fatalf("failed to retrieve stored secret: %v", err)
+	}
+	if stored.Value != rawValue {
+		t.Errorf("encoding=raw roundtrip: stored %q != original %q", stored.Value, rawValue)
 	}
 }
 
@@ -343,11 +558,11 @@ func TestBrokerSecretByKey_PathTraversal_ReturnsJSONError(t *testing.T) {
 func TestBrokerSecretByKey_SizeLimit_ReturnsJSONError(t *testing.T) {
 	srv, brokerID := setupBrokerSecretTest(t)
 
-	bigValue := strings.Repeat("b", 64*1024+1)
 	body := SetSecretRequest{
-		Value:  bigValue,
-		Type:   "file",
-		Target: "/tmp/brokerfile.dat",
+		Value:    strings.Repeat("b", 64*1024+1),
+		Encoding: "raw",
+		Type:     "file",
+		Target:   "/tmp/brokerfile.dat",
 	}
 	rec := doRequest(t, srv, http.MethodPut,
 		"/api/v1/runtime-brokers/"+brokerID+"/secrets/BROKER_BIG_KEY", body)
@@ -355,142 +570,6 @@ func TestBrokerSecretByKey_SizeLimit_ReturnsJSONError(t *testing.T) {
 		t.Fatalf("size limit: expected 400, got %d: %s", rec.Code, rec.Body.String())
 	}
 	checkJSONError(t, rec.Body.String())
-}
-
-// ============================================================================
-// Cross-cutting: verify raw-value roundtrip stores the correct bytes
-// ============================================================================
-
-// TestSetSecret_RawValueRoundtrip verifies that when a raw (non-base64) value
-// is accepted via the fallback, the stored bytes equal the original raw string —
-// not some corrupted decoding of it.
-func TestSetSecret_RawValueRoundtrip(t *testing.T) {
-	srv, s := testServer(t)
-	localBackend := secret.NewLocalBackend(s, "test-hub-id")
-	srv.SetSecretBackend(localBackend)
-	ctx := context.Background()
-
-	rawValue := "pa$$w0rd!with&special<chars>"
-	body := SetSecretRequest{
-		Value: rawValue,
-		Scope: "user",
-	}
-	rec := doRequest(t, srv, http.MethodPut, "/api/v1/secrets/ROUNDTRIP_KEY", body)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
-	}
-
-	// Retrieve the stored secret via the backend and verify the stored value matches.
-	stored, err := localBackend.Get(ctx, "ROUNDTRIP_KEY", store.ScopeUser, DevUserID)
-	if err != nil {
-		t.Fatalf("failed to retrieve stored secret: %v", err)
-	}
-	if stored.Value != rawValue {
-		t.Errorf("roundtrip: stored value %q != original %q", stored.Value, rawValue)
-	}
-}
-
-// TestAgentSecrets_RawValueRoundtrip performs the same roundtrip check for the
-// agent secret endpoint.
-func TestAgentSecrets_RawValueRoundtrip(t *testing.T) {
-	srv, s, agentID, projectID, agentToken := setupAgentSecretTest(t)
-	localBackend := secret.NewLocalBackend(s, "test-hub-id")
-	srv.SetSecretBackend(localBackend)
-	ctx := context.Background()
-
-	rawValue := "agent_raw!value@host"
-	body := AgentSetSecretRequest{
-		Value: rawValue,
-	}
-	rec := doRequestWithAgentToken(t, srv, http.MethodPut,
-		"/api/v1/agents/"+agentID+"/secrets/AGENT_ROUND_KEY", body, agentToken)
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
-	}
-
-	stored, err := localBackend.Get(ctx, "AGENT_ROUND_KEY", store.ScopeProject, projectID)
-	if err != nil {
-		t.Fatalf("failed to retrieve stored secret: %v", err)
-	}
-	if stored.Value != rawValue {
-		t.Errorf("roundtrip: stored value %q != original %q", stored.Value, rawValue)
-	}
-}
-
-// TestProjectSecretByKey_RawValueRoundtrip verifies the raw-value fallback for
-// the project-scoped secret endpoint stores exactly the original string.
-func TestProjectSecretByKey_RawValueRoundtrip(t *testing.T) {
-	srv, s := testServer(t)
-	localBackend := secret.NewLocalBackend(s, "test-hub-id")
-	srv.SetSecretBackend(localBackend)
-	ctx := context.Background()
-
-	projectID := tid("proj-roundtrip")
-	project := &store.Project{
-		ID:      projectID,
-		Name:    "Roundtrip Project",
-		Slug:    "roundtrip-project",
-		OwnerID: DevUserID,
-		Created: time.Now(),
-		Updated: time.Now(),
-	}
-	if err := s.CreateProject(ctx, project); err != nil {
-		t.Fatalf("failed to create project: %v", err)
-	}
-
-	rawValue := "proj!raw$value&special<chars>"
-	body := SetSecretRequest{Value: rawValue}
-	rec := doRequest(t, srv, http.MethodPut,
-		"/api/v1/projects/"+projectID+"/secrets/PROJ_ROUND_KEY", body)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
-	}
-
-	stored, err := localBackend.Get(ctx, "PROJ_ROUND_KEY", store.ScopeProject, projectID)
-	if err != nil {
-		t.Fatalf("failed to retrieve stored secret: %v", err)
-	}
-	if stored.Value != rawValue {
-		t.Errorf("roundtrip: stored value %q != original %q", stored.Value, rawValue)
-	}
-}
-
-// TestBrokerSecretByKey_RawValueRoundtrip verifies the raw-value fallback for
-// the runtime-broker-scoped secret endpoint stores exactly the original string.
-func TestBrokerSecretByKey_RawValueRoundtrip(t *testing.T) {
-	srv, s := testServer(t)
-	localBackend := secret.NewLocalBackend(s, "test-hub-id")
-	srv.SetSecretBackend(localBackend)
-	ctx := context.Background()
-
-	brokerID := tid("broker-roundtrip")
-	broker := &store.RuntimeBroker{
-		ID:      brokerID,
-		Name:    "Roundtrip Broker",
-		Slug:    "roundtrip-broker",
-		Status:  store.BrokerStatusOnline,
-		Created: time.Now(),
-		Updated: time.Now(),
-	}
-	if err := s.CreateRuntimeBroker(ctx, broker); err != nil {
-		t.Fatalf("failed to create broker: %v", err)
-	}
-
-	rawValue := "broker!raw$value&special<chars>"
-	body := SetSecretRequest{Value: rawValue}
-	rec := doRequest(t, srv, http.MethodPut,
-		"/api/v1/runtime-brokers/"+brokerID+"/secrets/BROKER_ROUND_KEY", body)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
-	}
-
-	stored, err := localBackend.Get(ctx, "BROKER_ROUND_KEY", store.ScopeRuntimeBroker, brokerID)
-	if err != nil {
-		t.Fatalf("failed to retrieve stored secret: %v", err)
-	}
-	if stored.Value != rawValue {
-		t.Errorf("roundtrip: stored value %q != original %q", stored.Value, rawValue)
-	}
 }
 
 // Ensure the agent fixture is usable from this file (it uses a local import

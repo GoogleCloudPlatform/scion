@@ -499,6 +499,7 @@ type ListSecretsResponse struct {
 
 type SetSecretRequest struct {
 	Value         string `json:"value"`
+	Encoding      string `json:"encoding,omitempty"`      // "base64" (default, value is base64-encoded) or "raw" (value is literal text)
 	Scope         string `json:"scope,omitempty"`
 	ScopeID       string `json:"scopeId,omitempty"`
 	Description   string `json:"description,omitempty"`
@@ -730,12 +731,18 @@ func (s *Server) setSecret(w http.ResponseWriter, r *http.Request, key string) {
 		return
 	}
 
-	decoded, err := base64.StdEncoding.DecodeString(req.Value)
-	if err != nil {
-		// Value is not base64-encoded — treat as raw text.
-		// This makes the endpoint work for both the CLI (which sends base64)
-		// and the web UI or any other caller that sends raw text.
+	var decoded []byte
+	if req.Encoding == "raw" {
+		// Caller explicitly opted in to raw text — store the value as-is.
 		decoded = []byte(req.Value)
+	} else {
+		// Default: value must be base64-encoded (matches CLI behaviour).
+		var decErr error
+		decoded, decErr = base64.StdEncoding.DecodeString(req.Value)
+		if decErr != nil {
+			BadRequest(w, "value must be base64-encoded")
+			return
+		}
 	}
 
 	// Validate and default secret type
@@ -866,10 +873,11 @@ func (s *Server) deleteSecret(w http.ResponseWriter, r *http.Request, key string
 
 // AgentSetSecretRequest is the request body for agent-initiated secret creation.
 type AgentSetSecretRequest struct {
-	Value  string `json:"value"`            // Base64-encoded secret value
-	Type   string `json:"type,omitempty"`   // environment (default), variable, file
-	Target string `json:"target,omitempty"` // Injection target path
-	Force  bool   `json:"force,omitempty"`  // Overwrite existing secret
+	Value    string `json:"value"`              // Secret value (base64-encoded by default; use Encoding:"raw" for literal text)
+	Encoding string `json:"encoding,omitempty"` // "base64" (default) or "raw" (value is literal text, no decoding)
+	Type     string `json:"type,omitempty"`     // environment (default), variable, file
+	Target   string `json:"target,omitempty"`   // Injection target path
+	Force    bool   `json:"force,omitempty"`    // Overwrite existing secret
 }
 
 // AgentSetSecretResponse is returned on successful agent secret creation.
@@ -946,12 +954,18 @@ func (s *Server) handleAgentSecrets(w http.ResponseWriter, r *http.Request, agen
 		return
 	}
 
-	decoded, err := base64.StdEncoding.DecodeString(req.Value)
-	if err != nil {
-		// Value is not base64-encoded — treat as raw text.
-		// This makes the endpoint work for both the CLI (which sends base64)
-		// and the web UI or any other caller that sends raw text.
+	var decoded []byte
+	if req.Encoding == "raw" {
+		// Caller explicitly opted in to raw text — store the value as-is.
 		decoded = []byte(req.Value)
+	} else {
+		// Default: value must be base64-encoded (matches CLI behaviour).
+		var decErr error
+		decoded, decErr = base64.StdEncoding.DecodeString(req.Value)
+		if decErr != nil {
+			BadRequest(w, "value must be base64-encoded")
+			return
+		}
 	}
 
 	// Validate and default secret type.
@@ -1440,12 +1454,18 @@ func (s *Server) handleProjectSecretByKey(w http.ResponseWriter, r *http.Request
 			ValidationError(w, "value is required", nil)
 			return
 		}
-		decoded, err := base64.StdEncoding.DecodeString(req.Value)
-		if err != nil {
-			// Value is not base64-encoded — treat as raw text.
-			// This makes the endpoint work for both the CLI (which sends base64)
-			// and the web UI or any other caller that sends raw text.
+		var decoded []byte
+		if req.Encoding == "raw" {
+			// Caller explicitly opted in to raw text — store the value as-is.
 			decoded = []byte(req.Value)
+		} else {
+			// Default: value must be base64-encoded (matches CLI behaviour).
+			var decErr error
+			decoded, decErr = base64.StdEncoding.DecodeString(req.Value)
+			if decErr != nil {
+				BadRequest(w, "value must be base64-encoded")
+				return
+			}
 		}
 		secretType := req.Type
 		if secretType == "" {
@@ -2100,12 +2120,18 @@ func (s *Server) handleBrokerSecretByKey(w http.ResponseWriter, r *http.Request,
 			ValidationError(w, "value is required", nil)
 			return
 		}
-		decoded, err := base64.StdEncoding.DecodeString(req.Value)
-		if err != nil {
-			// Value is not base64-encoded — treat as raw text.
-			// This makes the endpoint work for both the CLI (which sends base64)
-			// and the web UI or any other caller that sends raw text.
+		var decoded []byte
+		if req.Encoding == "raw" {
+			// Caller explicitly opted in to raw text — store the value as-is.
 			decoded = []byte(req.Value)
+		} else {
+			// Default: value must be base64-encoded (matches CLI behaviour).
+			var decErr error
+			decoded, decErr = base64.StdEncoding.DecodeString(req.Value)
+			if decErr != nil {
+				BadRequest(w, "value must be base64-encoded")
+				return
+			}
 		}
 		secretType := req.Type
 		if secretType == "" {
