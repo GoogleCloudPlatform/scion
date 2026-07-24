@@ -43,10 +43,10 @@ project-scope skills (template > project > user > hub).
 
 Examples:
   scion user skills list
-  scion user skills add scion://my-skill
-  scion user skills add scion://my-skill@1.2 --as alias --optional
+  scion user skills add skill://my-skill
+  scion user skills add skill://my-skill@1.2 --as alias --optional
   scion user skills remove <id>
-  scion user skills remove scion://my-skill`,
+  scion user skills remove skill://my-skill`,
 }
 
 // userSkillsListCmd implements `scion user skills list`.
@@ -65,8 +65,8 @@ var userSkillsAddCmd = &cobra.Command{
 	Long: `Add a skill URI to your personal injected-skills list.
 
 Examples:
-  scion user skills add scion://my-skill
-  scion user skills add scion://my-skill@1.2 --as alias --optional`,
+  scion user skills add skill://my-skill
+  scion user skills add skill://my-skill@1.2 --as alias --optional`,
 	Args: cobra.ExactArgs(1),
 	RunE: runUserSkillsAdd,
 }
@@ -82,7 +82,7 @@ The entry can be identified by its UUID or by the full skill URI.
 
 Examples:
   scion user skills remove <uuid>
-  scion user skills remove scion://my-skill`,
+  scion user skills remove skill://my-skill`,
 	Args: cobra.ExactArgs(1),
 	RunE: runUserSkillsRemove,
 }

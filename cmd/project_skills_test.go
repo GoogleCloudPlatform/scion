@@ -35,8 +35,8 @@ func TestIsSkillURI(t *testing.T) {
 		input string
 		want  bool
 	}{
-		{"scion://my-skill", true},
-		{"scion://my-skill@1.0", true},
+		{"skill://my-skill", true},
+		{"skill://my-skill@1.0", true},
 		{"gcs://bucket/path", true},
 		{"github://org/repo/skill", true},
 		{"", false},
@@ -67,9 +67,9 @@ func TestSplitProjectSkillsArgs(t *testing.T) {
 		},
 		{
 			name:           "uri only",
-			args:           []string{"scion://my-skill"},
+			args:           []string{"skill://my-skill"},
 			wantProjectArg: "",
-			wantSkillRef:   "scion://my-skill",
+			wantSkillRef:   "skill://my-skill",
 		},
 		{
 			name:           "project name only",
@@ -79,9 +79,9 @@ func TestSplitProjectSkillsArgs(t *testing.T) {
 		},
 		{
 			name:           "project then uri",
-			args:           []string{"my-project", "scion://my-skill"},
+			args:           []string{"my-project", "skill://my-skill"},
 			wantProjectArg: "my-project",
-			wantSkillRef:   "scion://my-skill",
+			wantSkillRef:   "skill://my-skill",
 		},
 		{
 			name:           "project then uuid",
@@ -185,7 +185,7 @@ func newProjectSkillsMockServer(t *testing.T) *httptest.Server {
 	entries := []map[string]interface{}{
 		{
 			"id":        testEntryID1,
-			"skillUri":  "scion://skill-one",
+			"skillUri":  "skill://skill-one",
 			"skillAs":   "skill1",
 			"optional":  false,
 			"sortOrder": 0,
@@ -193,7 +193,7 @@ func newProjectSkillsMockServer(t *testing.T) *httptest.Server {
 		},
 		{
 			"id":        testEntryID2,
-			"skillUri":  "scion://skill-two",
+			"skillUri":  "skill://skill-two",
 			"optional":  true,
 			"sortOrder": 1,
 		},
@@ -336,7 +336,7 @@ func TestRunProjectSkillsAdd_Success(t *testing.T) {
 	projectSkillsOptional = false
 
 	// Single arg: URI only (project inferred from settings)
-	err := runProjectSkillsAdd(projectSkillsAddCmd, []string{"scion://new-skill"})
+	err := runProjectSkillsAdd(projectSkillsAddCmd, []string{"skill://new-skill"})
 	assert.NoError(t, err)
 }
 
@@ -361,7 +361,7 @@ func TestRunProjectSkillsAdd_WithAlias(t *testing.T) {
 	// Simulate flag state for the command:
 	_ = projectSkillsAddCmd.Flags().Set("as", "my-alias")
 
-	err := runProjectSkillsAdd(projectSkillsAddCmd, []string{"scion://new-skill"})
+	err := runProjectSkillsAdd(projectSkillsAddCmd, []string{"skill://new-skill"})
 	assert.NoError(t, err)
 }
 
@@ -430,7 +430,7 @@ func TestRunProjectSkillsRemove_ByURI(t *testing.T) {
 	outputFormat = ""
 
 	// Remove by URI: should list first, then delete by resolved ID.
-	err := runProjectSkillsRemove(projectSkillsRemoveCmd, []string{"scion://skill-one"})
+	err := runProjectSkillsRemove(projectSkillsRemoveCmd, []string{"skill://skill-one"})
 	assert.NoError(t, err)
 }
 
@@ -448,7 +448,7 @@ func TestRunProjectSkillsRemove_URINotFound(t *testing.T) {
 	projectPath = projectDir
 	outputFormat = ""
 
-	err := runProjectSkillsRemove(projectSkillsRemoveCmd, []string{"scion://nonexistent-skill"})
+	err := runProjectSkillsRemove(projectSkillsRemoveCmd, []string{"skill://nonexistent-skill"})
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "no injected skill with URI")
 }

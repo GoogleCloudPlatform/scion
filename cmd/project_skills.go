@@ -45,10 +45,10 @@ When omitted, the project is inferred from the current directory's Hub link.
 Examples:
   scion project skills list
   scion project skills list my-project
-  scion project skills add scion://my-skill
-  scion project skills add my-project scion://my-skill --as my-alias --optional
+  scion project skills add skill://my-skill
+  scion project skills add my-project skill://my-skill --as my-alias --optional
   scion project skills remove <id>
-  scion project skills remove my-project scion://my-skill`,
+  scion project skills remove my-project skill://my-skill`,
 }
 
 // projectSkillsListCmd implements `scion project skills list [project]`.
@@ -71,9 +71,9 @@ current directory's Hub link. When both arguments are present, the first
 is the project name/slug/UUID and the second is the skill URI.
 
 Examples:
-  scion project skills add scion://my-skill
-  scion project skills add my-project scion://my-skill
-  scion project skills add my-project scion://my-skill@1.2 --as alias --optional`,
+  scion project skills add skill://my-skill
+  scion project skills add my-project skill://my-skill
+  scion project skills add my-project skill://my-skill@1.2 --as alias --optional`,
 	Args: cobra.RangeArgs(1, 2),
 	RunE: runProjectSkillsAdd,
 }
@@ -91,9 +91,9 @@ is removed.
 
 Examples:
   scion project skills remove <uuid>
-  scion project skills remove scion://my-skill
+  scion project skills remove skill://my-skill
   scion project skills remove my-project <uuid>
-  scion project skills remove my-project scion://my-skill`,
+  scion project skills remove my-project skill://my-skill`,
 	Args: cobra.RangeArgs(1, 2),
 	RunE: runProjectSkillsRemove,
 }
