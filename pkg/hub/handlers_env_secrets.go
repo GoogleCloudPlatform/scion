@@ -732,8 +732,10 @@ func (s *Server) setSecret(w http.ResponseWriter, r *http.Request, key string) {
 
 	decoded, err := base64.StdEncoding.DecodeString(req.Value)
 	if err != nil {
-		BadRequest(w, "value must be base64-encoded")
-		return
+		// Value is not base64-encoded — treat as raw text.
+		// This makes the endpoint work for both the CLI (which sends base64)
+		// and the web UI or any other caller that sends raw text.
+		decoded = []byte(req.Value)
 	}
 
 	// Validate and default secret type
@@ -946,8 +948,10 @@ func (s *Server) handleAgentSecrets(w http.ResponseWriter, r *http.Request, agen
 
 	decoded, err := base64.StdEncoding.DecodeString(req.Value)
 	if err != nil {
-		BadRequest(w, "value must be base64-encoded")
-		return
+		// Value is not base64-encoded — treat as raw text.
+		// This makes the endpoint work for both the CLI (which sends base64)
+		// and the web UI or any other caller that sends raw text.
+		decoded = []byte(req.Value)
 	}
 
 	// Validate and default secret type.
@@ -1438,8 +1442,10 @@ func (s *Server) handleProjectSecretByKey(w http.ResponseWriter, r *http.Request
 		}
 		decoded, err := base64.StdEncoding.DecodeString(req.Value)
 		if err != nil {
-			BadRequest(w, "value must be base64-encoded")
-			return
+			// Value is not base64-encoded — treat as raw text.
+			// This makes the endpoint work for both the CLI (which sends base64)
+			// and the web UI or any other caller that sends raw text.
+			decoded = []byte(req.Value)
 		}
 		secretType := req.Type
 		if secretType == "" {
@@ -2096,8 +2102,10 @@ func (s *Server) handleBrokerSecretByKey(w http.ResponseWriter, r *http.Request,
 		}
 		decoded, err := base64.StdEncoding.DecodeString(req.Value)
 		if err != nil {
-			BadRequest(w, "value must be base64-encoded")
-			return
+			// Value is not base64-encoded — treat as raw text.
+			// This makes the endpoint work for both the CLI (which sends base64)
+			// and the web UI or any other caller that sends raw text.
+			decoded = []byte(req.Value)
 		}
 		secretType := req.Type
 		if secretType == "" {
