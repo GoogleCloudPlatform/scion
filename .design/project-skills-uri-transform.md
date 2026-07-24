@@ -252,13 +252,7 @@ Allow `gh://owner/repo/path/to/skill` as a 4+-segment path form, eliminating the
 
 ### OQ2: `blob` URL handling — support or reject?
 
-**Recommendation:** Support `blob` URLs with the filename-stripping heuristic. The pattern (`skills/my-skill/SKILL.md` or `skills/my-skill/README.md`) is universal for well-formed skills. The heuristic is: "strip the last path segment if it contains a `.`".
-
-**Risk:** If a user pastes `https://github.com/org/repo/blob/main/skills/my-skill/some.dir.with.dots` (a directory with dots, unlikely but possible), the heuristic would incorrectly strip it. The error would be caught at provision time (skill directory not found).
-
-**Alternative:** Reject `blob` URLs with: `"Paste the directory URL instead of the file URL: replace /blob/ with /tree/ and omit the filename"`. Explicit and safe, but adds friction.
-
-**Needs user sign-off.**
+**Resolved (2026-07-24):** Support `blob` URLs. Heuristic: strip the last path segment unconditionally (GitHub blob URLs always end in a filename). If the remaining path is empty after stripping, return an error. This is cleaner than the dot-check heuristic (no false positives for files without extensions, e.g., `Makefile`).
 
 ---
 
