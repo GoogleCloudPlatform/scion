@@ -44,12 +44,35 @@ plugin:
 
 # External authentication for A2A clients calling the bridge.
 auth:
-  # Supported schemes: "apiKey" (default for MVP), "bearer".
+  # Supported schemes:
+  #   "apiKey"  — shared static key via X-API-Key header (default for MVP)
+  #   "bearer"  — shared static key via Authorization: Bearer header
+  #   "hubUAT"  — per-user Scion UAT (scion_pat_*) auth; tokens validated
+  #               via Hub /api/v1/auth/me; identity propagated to Hub calls
+  #   "hubJWT"  — per-user Scion JWT auth; tokens validated locally using
+  #               the hub.signing_key; identity propagated to Hub calls
+  #   "none"    — no authentication (not recommended for production)
   scheme: "apiKey"
 
-  # Static API key. Clients pass this in the X-API-Key header.
+  # Static API key (required for "apiKey" and "bearer" schemes only).
   # Use an env var reference for production: "${A2A_API_KEY}"
   api_key: "${A2A_API_KEY}"
+
+  # UAT introspection cache TTL for "hubUAT" scheme (optional).
+  # Default: 60s. Maximum: 300s. A revoked UAT stops working within
+  # one TTL of revocation.
+  # uat_cache_ttl: 60s
+
+  # --- Per-user UAT auth (recommended for desktop app federation) ---
+  # scheme: "hubUAT"
+  # Callers present "Authorization: Bearer scion_pat_..." tokens.
+  # No api_key needed. The bridge validates each token via Hub /api/v1/auth/me.
+  # uat_cache_ttl: 60s
+
+  # --- Per-user JWT auth (for CLI/scripted access) ---
+  # scheme: "hubJWT"
+  # Callers present Scion user JWTs. The hub.signing_key is used for
+  # local JWT validation. No api_key needed.
 
 # Groves exposed through the bridge. Each project maps to a set of
 # Scion agents that become discoverable A2A endpoints.
