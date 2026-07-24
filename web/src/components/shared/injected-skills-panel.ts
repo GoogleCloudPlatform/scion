@@ -37,6 +37,113 @@ import { resourceStyles } from './resource-styles.js';
 
 export type InjectedSkillsScope = 'project' | 'user' | 'hub';
 
+// ── Skill URI client-side normalization ──────────────────────────────────────
+// Mirrors NormalizeSkillURI in pkg/api/skill_uri_normalize.go.
+// The hub's Go implementation is authoritative; these functions provide
+// immediate client-side feedback for the most common cases.
+
+/** Result of client-side URI normalization. */
+interface NormalizeResult {
+  canonical: string;
+  /** True when canonical differs from the original input. */
+  transformed: boolean;
+}
+
+/**
+ * Normalizes a user-supplied skill URI to its canonical stored form.
+ * Throws an Error with an actionable message for unsupported inputs.
+ */
+function normalizeSkillURIClient(input: string): NormalizeResult {
+  const trimmed = input.trim();
+  if (!trimmed) throw new Error('Skill URI is required');
+  const lower = trimmed.toLowerCase();
+  if (lower.startsWith('gh://')) {
+    return { canonical: validateGHShorthand(trimmed), transformed: false };
+  }
+  if (lower.startsWith('https://github.com/') || lower.startsWith('http://github.com/')) {
+    const canonical = normalizeGitHubURL(trimmed);
+    return { canonical, transformed: canonical !== trimmed };
+  }
+  if (lower.startsWith('scion://')) {
+    throw new Error('scion:// is not a supported scheme; use skill:// for hub-bank skills');
+  }
+  // skill://, bare names, other schemes — pass through to the hub for validation.
+  return { canonical: trimmed, transformed: false };
+}
+
+function validateGHShorthand(uri: string): string {
+  let main = uri.slice('gh://'.length);
+  let tokenSuffix = '';
+  const qIdx = main.indexOf('?');
+  if (qIdx >= 0) {
+    const query = main.slice(qIdx + 1);
+    main = main.slice(0, qIdx);
+    if (!query.startsWith('token=')) throw new Error('Invalid gh:// URI: only ?token=SECRET_NAME is supported');
+    const tokenName = query.slice('token='.length);
+    if (!tokenName || !/^[A-Z][A-Z0-9_]*$/.test(tokenName)) {
+      throw new Error('Invalid gh:// URI: ?token= value must be an uppercase env-var name (e.g. SKILLS_TOKEN)');
+    }
+    tokenSuffix = '?' + query;
+  }
+  let refSuffix = '';
+  const atIdx = main.lastIndexOf('@');
+  if (atIdx >= 0) {
+    const ref = main.slice(atIdx + 1);
+    if (!ref) throw new Error('Invalid gh:// URI: empty ref after @');
+    main = main.slice(0, atIdx);
+    refSuffix = '@' + ref;
+  }
+  const parts = main.split('/');
+  if (parts.length !== 3 || parts.some((p) => !p)) {
+    throw new Error('Invalid gh:// URI: expected gh://owner/repo/skill-name[@ref][?token=SECRET_NAME]');
+  }
+  return 'gh://' + main + refSuffix + tokenSuffix;
+}
+
+function normalizeGitHubURL(uri: string): string {
+  let rest = uri;
+  for (const prefix of ['https://github.com/', 'http://github.com/']) {
+    if (rest.toLowerCase().startsWith(prefix)) {
+      rest = rest.slice(prefix.length);
+      break;
+    }
+  }
+  let tokenSuffix = '';
+  const qIdx = rest.indexOf('?');
+  if (qIdx >= 0) {
+    const query = rest.slice(qIdx + 1);
+    rest = rest.slice(0, qIdx);
+    if (!query.startsWith('token=')) throw new Error('Invalid GitHub URL: only ?token=SECRET_NAME is supported');
+    tokenSuffix = '?' + query;
+  }
+  const segments = rest.split('/');
+  const [owner, repo, keyword, ref, ...pathParts] = segments;
+  if (!owner || !repo || !keyword || !ref) {
+    throw new Error('Invalid GitHub URL: expected https://github.com/owner/repo/tree/ref/path/to/skill');
+  }
+  const kw = keyword.toLowerCase();
+  let fullPath: string;
+  if (kw === 'tree') {
+    fullPath = pathParts.join('/');
+    if (!fullPath) throw new Error('Invalid GitHub URL: missing skill path after ref; example: .../tree/main/skills/my-skill');
+  } else if (kw === 'blob') {
+    const filePath = pathParts.join('/');
+    if (!filePath) throw new Error('Invalid GitHub URL: missing file path after ref');
+    const lastSlash = filePath.lastIndexOf('/');
+    if (lastSlash < 0) throw new Error('Invalid GitHub URL: cannot determine skill directory from blob URL (no parent directory)');
+    fullPath = filePath.slice(0, lastSlash);
+    if (!fullPath) throw new Error('Invalid GitHub URL: cannot determine skill directory from blob URL');
+  } else {
+    throw new Error(`Invalid GitHub URL: expected /tree/ or /blob/ after owner/repo, got /${keyword}/`);
+  }
+  // Use gh:// shorthand for skills/skill-name paths (standard layout).
+  const pathSegs = fullPath.split('/');
+  if (pathSegs.length === 2 && pathSegs[0].toLowerCase() === 'skills' && pathSegs[1]) {
+    return `gh://${owner}/${repo}/${pathSegs[1]}@${ref}${tokenSuffix}`;
+  }
+  return `https://github.com/${owner}/${repo}/tree/${ref}/${fullPath}${tokenSuffix}`;
+}
+
 /** Normalized internal row — covers both SkillInjectionEntry and SkillReference shapes. */
 interface SkillRow {
   /** Entry ID — present for project/user scopes (from SkillInjectionEntry); empty for hub. */
@@ -84,6 +191,8 @@ export class ScionInjectedSkillsPanel extends LitElement {
   @state() private dialogOptional = false;
   @state() private dialogLoading = false;
   @state() private dialogError: string | null = null;
+  /** When a URI input is transformed to canonical form, holds the preview string. */
+  @state() private dialogTransformed: string | null = null;
 
   // Delete — tracked by index to avoid key collisions on hub rows (all have id='')
   @state() private _deletingIndex: number | null = null;
@@ -477,6 +586,7 @@ export class ScionInjectedSkillsPanel extends LitElement {
     this.dialogOptional = false;
     this.dialogLoading = false;
     this.dialogError = null;
+    this.dialogTransformed = null;
     this.dialogOpen = true;
   }
 
@@ -541,9 +651,17 @@ export class ScionInjectedSkillsPanel extends LitElement {
       // Build a skill bank URI from the skill's slug
       uri = `skill://${this.dialogSelectedSkill.slug}`;
     } else {
-      uri = this.dialogUri.trim();
-      if (!uri) {
+      const raw = this.dialogUri.trim();
+      if (!raw) {
         this.dialogError = 'Skill URI is required';
+        return;
+      }
+      // Normalize client-side before sending; the hub is authoritative for edge cases.
+      try {
+        const result = normalizeSkillURIClient(raw);
+        uri = result.canonical;
+      } catch (normErr) {
+        this.dialogError = normErr instanceof Error ? normErr.message : 'Invalid skill URI';
         return;
       }
     }
@@ -907,13 +1025,27 @@ export class ScionInjectedSkillsPanel extends LitElement {
             : html`
                 <sl-input
                   label="Skill URI"
-                  placeholder="e.g. skill://my-skill or gs://bucket/path/skill.yaml"
-                  help-text="Skill bank URI (skill://slug), GCS path, or GitHub URL."
+                  placeholder="e.g. skill://scion/core/my-skill or https://github.com/org/repo/tree/main/skills/my-skill"
+                  help-text="Hub-skill URI (skill://…), GitHub tree or blob URL (auto-transformed), or gh:// shorthand."
                   .value=${this.dialogUri}
                   @sl-input=${(e: Event) => {
-                    this.dialogUri = (e.target as HTMLInputElement).value;
+                    const val = (e.target as HTMLInputElement).value;
+                    this.dialogUri = val;
+                    // Live transform preview: attempt normalization on each keystroke.
+                    try {
+                      const result = normalizeSkillURIClient(val);
+                      this.dialogTransformed = result.transformed ? result.canonical : null;
+                    } catch {
+                      this.dialogTransformed = null;
+                    }
                   }}
                 ></sl-input>
+                ${this.dialogTransformed
+                  ? html`<div class="dialog-hint">
+                      <sl-icon name="arrow-right-circle"></sl-icon>
+                      Will be stored as: <strong>${this.dialogTransformed}</strong>
+                    </div>`
+                  : nothing}
               `}
 
           <sl-input
