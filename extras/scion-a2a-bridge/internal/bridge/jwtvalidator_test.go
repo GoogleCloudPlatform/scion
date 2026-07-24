@@ -16,6 +16,7 @@ package bridge
 
 import (
 	"crypto/rand"
+	"strings"
 	"testing"
 	"time"
 
@@ -183,6 +184,23 @@ func TestJWTValidator_CLIToken(t *testing.T) {
 	}
 	if id.UserID != "user-1" {
 		t.Errorf("UserID = %q, want %q", id.UserID, "user-1")
+	}
+}
+
+func TestJWTValidator_RefreshTokenRejected(t *testing.T) {
+	key := testSigningKey(t)
+	v := NewJWTValidator(key)
+
+	claims := validClaims()
+	claims.TokenType = "refresh"
+
+	token := mintTestJWT(t, key, claims)
+	_, err := v.Validate(token)
+	if err == nil {
+		t.Fatal("expected error for refresh token")
+	}
+	if !strings.Contains(err.Error(), "refresh tokens") {
+		t.Errorf("error should mention refresh tokens, got: %v", err)
 	}
 }
 

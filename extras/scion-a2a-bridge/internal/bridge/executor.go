@@ -24,6 +24,7 @@ import (
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 )
 
@@ -98,21 +99,34 @@ func (e *ScionExecutor) Execute(ctx context.Context, execCtx *a2asrv.ExecutorCon
 			}
 		}
 
+		// Per-user identity propagation: use the caller's credentials for Hub
+		// writes, sender field, and broker subscriptions (mirrors Bridge.SendMessage).
+		caller := callerIdentityFromContext(ctx) // nil in legacy mode
+		var writeClient hubclient.Client = e.bridge.hubClient
+		senderUser := e.bridge.config.Hub.User
+
+		if caller != nil {
+			senderUser = caller.Email
+			var clientErr error
+			writeClient, clientErr = e.bridge.callerHubClient(caller)
+			if clientErr != nil {
+				yield(nil, fmt.Errorf("creating per-user hub client: %w", clientErr))
+				return
+			}
+		}
+
 		// Translate A2A message parts to Scion format.
 		scionMsg := TranslateA2APartsToScion(execCtx.Message.Parts)
-		scionMsg.Sender = fmt.Sprintf("user:%s", e.bridge.config.Hub.User)
+		scionMsg.Sender = fmt.Sprintf("user:%s", senderUser)
 		scionMsg.Recipient = fmt.Sprintf("agent:%s", agentCtx.AgentSlug)
 		scionMsg.Metadata = map[string]string{"a2aTaskId": string(taskID)}
 
 		// Request broker subscription for responses.
 		if e.bridge.broker != nil {
-			pattern := fmt.Sprintf("scion.project.%s.user.%s.messages", agentCtx.ProjectID, e.bridge.config.Hub.User)
-			if err := e.bridge.broker.RequestSubscription(pattern); err != nil {
-				e.log.Warn("failed to request subscription", "pattern", pattern, "error", err)
-			}
-			legacyPattern := fmt.Sprintf("scion.grove.%s.user.%s.messages", agentCtx.ProjectID, e.bridge.config.Hub.User)
-			if err := e.bridge.broker.RequestSubscription(legacyPattern); err != nil {
-				e.log.Warn("failed to request legacy subscription", "pattern", legacyPattern, "error", err)
+			if caller != nil {
+				e.bridge.subscribeAllUserTopics(agentCtx.ProjectID)
+			} else {
+				e.bridge.subscribeAdminUserTopics(agentCtx.ProjectID)
 			}
 		}
 
@@ -130,8 +144,8 @@ func (e *ScionExecutor) Execute(ctx context.Context, execCtx *a2asrv.ExecutorCon
 		})
 		defer e.bridge.removeWaiter(string(taskID))
 
-		// Send to Hub.
-		if _, err := e.bridge.hubClient.Agents().SendStructuredMessage(ctx, agentCtx.AgentID, scionMsg, false, false, false); err != nil {
+		// Send to Hub using the per-user or admin client.
+		if _, err := writeClient.Agents().SendStructuredMessage(ctx, agentCtx.AgentID, scionMsg, false, false, false); err != nil {
 			e.log.Error("failed to send message to agent", "error", err, "task_id", taskID, "agent_id", agentCtx.AgentID)
 			failMsg := a2a.NewMessage(a2a.MessageRoleAgent, a2a.NewTextPart("Failed to route message to agent"))
 			yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateFailed, failMsg), nil)
@@ -213,17 +227,32 @@ func (e *ScionExecutor) Cancel(ctx context.Context, execCtx *a2asrv.ExecutorCont
 				yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateCanceled, nil), nil)
 				return
 			}
+
+			// Per-user identity propagation for cancel interrupts.
+			caller := callerIdentityFromContext(ctx)
+			var cancelClient hubclient.Client = e.bridge.hubClient
+			senderUser := e.bridge.config.Hub.User
+			if caller != nil {
+				senderUser = caller.Email
+				if cc, err := e.bridge.callerHubClient(caller); err == nil {
+					cancelClient = cc
+				} else {
+					e.log.Warn("cancel: failed to create per-user client, falling back to admin",
+						"error", err, "task_id", taskID)
+				}
+			}
+
 			if agent := e.bridge.lookupAgent(ctx, route.ProjectSlug, route.AgentSlug); agent != nil {
 				interruptMsg := &messages.StructuredMessage{
 					Version:   1,
 					Timestamp: time.Now().UTC().Format(time.RFC3339),
-					Sender:    fmt.Sprintf("user:%s", e.bridge.config.Hub.User),
+					Sender:    fmt.Sprintf("user:%s", senderUser),
 					Recipient: fmt.Sprintf("agent:%s", route.AgentSlug),
 					Msg:       "Task cancelled by A2A client.",
 					Type:      messages.TypeInstruction,
 					Metadata:  map[string]string{"a2aTaskId": string(taskID)},
 				}
-				if _, err := e.bridge.hubClient.Agents().SendStructuredMessage(ctx, agent.ID, interruptMsg, true, false, false); err != nil {
+				if _, err := cancelClient.Agents().SendStructuredMessage(ctx, agent.ID, interruptMsg, true, false, false); err != nil {
 					e.log.Error("failed to send cancel interrupt", "error", err, "task_id", taskID)
 				}
 			}

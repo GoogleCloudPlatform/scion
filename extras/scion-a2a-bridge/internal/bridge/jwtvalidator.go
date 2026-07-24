@@ -77,6 +77,11 @@ func (v *JWTValidator) Validate(tokenString string) (*CallerIdentity, error) {
 		return nil, fmt.Errorf("JWT claims validation: %w", err)
 	}
 
+	// Reject refresh tokens — only access tokens are valid for API calls.
+	if claims.TokenType == "refresh" {
+		return nil, fmt.Errorf("refresh tokens are not accepted for API authentication")
+	}
+
 	if claims.UserID == "" || claims.Email == "" {
 		return nil, fmt.Errorf("JWT missing required claims (uid=%q, email=%q)", claims.UserID, claims.Email)
 	}

@@ -620,21 +620,33 @@ func (b *Bridge) CancelTask(ctx context.Context, taskID string) (*TaskResult, er
 	b.unregisterActiveTask(taskID, aKey)
 
 	// Send interrupt to the agent via Hub, re-resolving if the stored AgentID is stale.
+	// Use per-user client when CallerIdentity is present (M1).
 	if b.hubClient != nil && task.AgentID != "" {
 		targetAgentID := task.AgentID
 		if agent := b.lookupAgent(ctx, task.ProjectID, task.AgentSlug); agent != nil {
 			targetAgentID = agent.ID
 		}
+		cancelClient := b.hubClient
+		senderUser := b.config.Hub.User
+		if caller != nil {
+			senderUser = caller.Email
+			if cc, err := b.callerHubClient(caller); err == nil {
+				cancelClient = cc
+			} else {
+				b.log.Warn("CancelTask: failed to create per-user client, falling back to admin",
+					"error", err, "task_id", taskID)
+			}
+		}
 		interruptMsg := &messages.StructuredMessage{
 			Version:   1,
 			Timestamp: time.Now().UTC().Format(time.RFC3339),
-			Sender:    fmt.Sprintf("user:%s", b.config.Hub.User),
+			Sender:    fmt.Sprintf("user:%s", senderUser),
 			Recipient: fmt.Sprintf("agent:%s", task.AgentSlug),
 			Msg:       "Task cancelled by A2A client.",
 			Type:      messages.TypeInstruction,
 			Metadata:  map[string]string{"a2aTaskId": taskID},
 		}
-		if _, err := b.hubClient.Agents().SendStructuredMessage(ctx, targetAgentID, interruptMsg, true, false, false); err != nil {
+		if _, err := cancelClient.Agents().SendStructuredMessage(ctx, targetAgentID, interruptMsg, true, false, false); err != nil {
 			b.log.Error("failed to send cancel interrupt to agent", "error", err, "task_id", taskID, "agent_id", targetAgentID)
 		}
 	}
