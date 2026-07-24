@@ -103,6 +103,9 @@ func ValidateConfig(cfg *Config) error {
 	if cfg.Auth.APIKey == "" && cfg.Auth.Scheme != "none" && cfg.Auth.Scheme != "hubUAT" && cfg.Auth.Scheme != "hubJWT" {
 		return fmt.Errorf("auth.api_key is required (set auth.scheme: \"none\" to explicitly disable authentication)")
 	}
+	if cfg.Auth.Scheme == "hubJWT" && cfg.Hub.SigningKey == "" && cfg.Hub.SigningKeySecret == "" {
+		return fmt.Errorf("hub.signing_key or hub.signing_key_secret is required when auth.scheme is hubJWT")
+	}
 	if cfg.Auth.UATCacheTTL < 0 {
 		return fmt.Errorf("auth.uat_cache_ttl must not be negative")
 	}

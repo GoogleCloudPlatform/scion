@@ -440,9 +440,10 @@ func TestValidateConfig_NewSchemes(t *testing.T) {
 	}
 
 	tests := []struct {
-		name    string
-		auth    AuthConfig
-		wantErr bool
+		name       string
+		auth       AuthConfig
+		hubOverride *HubConfig // if non-nil, overrides base Hub config
+		wantErr    bool
 	}{
 		{
 			name:    "hubUAT/valid",
@@ -450,9 +451,15 @@ func TestValidateConfig_NewSchemes(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name:    "hubJWT/valid",
+			name:       "hubJWT/valid",
+			auth:       AuthConfig{Scheme: "hubJWT"},
+			hubOverride: &HubConfig{Endpoint: "http://hub", User: "admin@test", SigningKey: "test-secret-key"},
+			wantErr:    false,
+		},
+		{
+			name:    "hubJWT/missing-signing-key",
 			auth:    AuthConfig{Scheme: "hubJWT"},
-			wantErr: false,
+			wantErr: true,
 		},
 		{
 			name:    "hubUAT/with-ttl",
@@ -495,6 +502,9 @@ func TestValidateConfig_NewSchemes(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := base
 			cfg.Auth = tt.auth
+			if tt.hubOverride != nil {
+				cfg.Hub = *tt.hubOverride
+			}
 			err := ValidateConfig(&cfg)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("ValidateConfig() error = %v, wantErr = %v", err, tt.wantErr)

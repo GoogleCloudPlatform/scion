@@ -19,6 +19,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"sync"
 	"time"
@@ -111,7 +112,7 @@ func (v *UATValidator) Validate(ctx context.Context, token string) (*CallerIdent
 	}
 
 	var user userResponse
-	if err := json.NewDecoder(resp.Body).Decode(&user); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&user); err != nil {
 		return nil, fmt.Errorf("decode auth/me response: %w", err)
 	}
 	if user.ID == "" || user.Email == "" {
@@ -130,13 +131,6 @@ func (v *UATValidator) Validate(ctx context.Context, token string) (*CallerIdent
 	v.cache[key] = &uatCacheEntry{
 		identity:  identity,
 		expiresAt: time.Now().Add(v.ttl),
-	}
-	// Lazy eviction: remove expired entries while we hold the lock.
-	now := time.Now()
-	for k, e := range v.cache {
-		if now.After(e.expiresAt) {
-			delete(v.cache, k)
-		}
 	}
 	v.mu.Unlock()
 

@@ -68,6 +68,8 @@ func (v *JWTValidator) Validate(tokenString string) (*CallerIdentity, error) {
 	}
 
 	// Validate standard claims (issuer, audience, expiry, not-before).
+	// Note: jwt.Claims.Validate uses a default 1-minute leeway for time
+	// comparisons, which tolerates minor clock drift between Hub and bridge.
 	expected := jwt.Expected{
 		Issuer:      jwtIssuer,
 		AnyAudience: jwt.Audience{jwtAudience},
