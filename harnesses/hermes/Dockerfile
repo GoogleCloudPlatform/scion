@@ -18,9 +18,16 @@ FROM ${BASE_IMAGE}
 
 ARG HERMES_VERSION=
 
-# Install Node.js 22 LTS (required by Hermes for tool execution)
+# Install Node.js 22 LTS (required by Hermes for tool execution).
+# After installing, remove the nodesource apt-source entries so that
+# subsequent RUN layers' apt-get update does not re-fetch the nodesource
+# InRelease file, which causes a QEMU arm64 "Cannot allocate memory" crash.
 RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
   && apt-get install -y --no-install-recommends nodejs \
+  && rm -f /etc/apt/sources.list.d/nodesource.sources \
+           /etc/apt/preferences.d/nodejs \
+           /etc/apt/preferences.d/nsolid \
+           /usr/share/keyrings/nodesource.gpg \
   && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Install ripgrep (required by Hermes for code search)
