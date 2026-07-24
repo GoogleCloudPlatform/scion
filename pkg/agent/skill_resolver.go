@@ -589,9 +589,14 @@ func writeSkillFileContent(content []byte, destPath string) error {
 	if err != nil {
 		return fmt.Errorf("failed to create file: %w", err)
 	}
-	defer func() { _ = f.Close() }()
+	defer func() { _ = f.Close() }() // safety net for panics / early returns
 	if _, err := f.Write(content); err != nil {
 		return fmt.Errorf("failed to write file: %w", err)
+	}
+	// Explicit close to catch flush errors (e.g. disk full). The deferred
+	// close above is a no-op after an explicit close, so it is safe to leave.
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("failed to close file: %w", err)
 	}
 	util.Debugf("provision: wrote pre-fetched skill file %s (%d bytes)", filepath.Base(destPath), len(content))
 	return nil
