@@ -108,13 +108,13 @@ func newUserSkillsMockServer(t *testing.T) *httptest.Server {
 	entries := []map[string]interface{}{
 		{
 			"id":        testUserEntryID1,
-			"skillUri":  "scion://user-skill-one",
+			"skillUri":  "skill://user-skill-one",
 			"optional":  false,
 			"sortOrder": 0,
 		},
 		{
 			"id":        testUserEntryID2,
-			"skillUri":  "scion://user-skill-two",
+			"skillUri":  "skill://user-skill-two",
 			"skillAs":   "skill2",
 			"optional":  true,
 			"sortOrder": 1,
@@ -278,7 +278,7 @@ func TestRunUserSkillsAdd_Success(t *testing.T) {
 	userSkillsAs = ""
 	userSkillsOptional = false
 
-	err := runUserSkillsAdd(userSkillsAddCmd, []string{"scion://new-user-skill"})
+	err := runUserSkillsAdd(userSkillsAddCmd, []string{"skill://new-user-skill"})
 	assert.NoError(t, err)
 }
 
@@ -310,7 +310,7 @@ func TestRunUserSkillsAdd_WithAliasAndOptional(t *testing.T) {
 	t.Cleanup(func() { _ = userSkillsAddCmd.Flags().Set("optional", prevOptStr) })
 	_ = userSkillsAddCmd.Flags().Set("optional", "true")
 
-	err := runUserSkillsAdd(userSkillsAddCmd, []string{"scion://new-user-skill"})
+	err := runUserSkillsAdd(userSkillsAddCmd, []string{"skill://new-user-skill"})
 	assert.NoError(t, err)
 }
 
@@ -347,7 +347,7 @@ func TestRunUserSkillsRemove_ByURI(t *testing.T) {
 	outputFormat = ""
 
 	// Remove by URI — resolves via list first.
-	err := runUserSkillsRemove(userSkillsRemoveCmd, []string{"scion://user-skill-one"})
+	err := runUserSkillsRemove(userSkillsRemoveCmd, []string{"skill://user-skill-one"})
 	assert.NoError(t, err)
 }
 
@@ -365,7 +365,7 @@ func TestRunUserSkillsRemove_URINotFound(t *testing.T) {
 	projectPath = projectDir
 	outputFormat = ""
 
-	err := runUserSkillsRemove(userSkillsRemoveCmd, []string{"scion://nonexistent"})
+	err := runUserSkillsRemove(userSkillsRemoveCmd, []string{"skill://nonexistent"})
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "no injected skill with URI")
 }
