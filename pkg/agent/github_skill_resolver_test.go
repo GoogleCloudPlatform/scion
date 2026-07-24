@@ -575,6 +575,141 @@ func TestRetryDelay(t *testing.T) {
 	})
 }
 
+func TestGitHubSkillResolver_TokenForRef(t *testing.T) {
+	t.Run("named secret present returns correct value", func(t *testing.T) {
+		r := &GitHubSkillResolver{
+			token: "default-token",
+			provisionCredentials: map[string]string{
+				"MY_SECRET": "secret-value",
+			},
+		}
+		ref := &GitHubSkillRef{TokenSecretName: "MY_SECRET"}
+		got, err := r.tokenForRef(ref)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != "secret-value" {
+			t.Errorf("expected secret-value, got %q", got)
+		}
+	})
+
+	t.Run("named secret missing returns error", func(t *testing.T) {
+		r := &GitHubSkillResolver{
+			token:                "default-token",
+			provisionCredentials: map[string]string{},
+		}
+		ref := &GitHubSkillRef{TokenSecretName: "MISSING_SECRET"}
+		_, err := r.tokenForRef(ref)
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+		if !strings.Contains(err.Error(), "MISSING_SECRET") {
+			t.Errorf("error should mention secret name, got: %v", err)
+		}
+		if !strings.Contains(err.Error(), "ProvisionCredentials") {
+			t.Errorf("error should mention ProvisionCredentials, got: %v", err)
+		}
+	})
+
+	t.Run("named secret with nil provisionCredentials returns error", func(t *testing.T) {
+		r := &GitHubSkillResolver{
+			token:                "default-token",
+			provisionCredentials: nil,
+		}
+		ref := &GitHubSkillRef{TokenSecretName: "MY_SECRET"}
+		_, err := r.tokenForRef(ref)
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+	})
+
+	t.Run("empty TokenSecretName returns default token", func(t *testing.T) {
+		r := &GitHubSkillResolver{
+			token: "default-token",
+			provisionCredentials: map[string]string{
+				"OTHER_SECRET": "other-value",
+			},
+		}
+		ref := &GitHubSkillRef{TokenSecretName: ""}
+		got, err := r.tokenForRef(ref)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != "default-token" {
+			t.Errorf("expected default-token, got %q", got)
+		}
+	})
+}
+
+func TestGitHubSkillResolver_PerURIToken(t *testing.T) {
+	server, mux := newTestGitHubServer(t)
+
+	var gotAuth string
+	mux.HandleFunc("/repos/owner/repo/commits/HEAD", func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		_, _ = w.Write([]byte(testCommitSHA))
+	})
+	mux.HandleFunc("/repos/owner/repo/contents/skills/my-skill", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode([]githubContentEntry{
+			{Name: "SKILL.md", Path: "skills/my-skill/SKILL.md", Type: "file", Size: 5},
+		})
+	})
+	mux.HandleFunc("/raw/owner/repo/"+testCommitSHA+"/skills/my-skill/SKILL.md", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("hello"))
+	})
+
+	resolver := &GitHubSkillResolver{
+		httpClient: server.Client(),
+		token:      "default-token",
+		apiBase:    server.URL,
+		rawBase:    server.URL + "/raw",
+		provisionCredentials: map[string]string{
+			"SKILLS_TOKEN": "per-uri-token",
+		},
+	}
+
+	result, err := resolver.Resolve(context.Background(), []api.SkillReference{
+		{URI: "gh://owner/repo/my-skill?token=SKILLS_TOKEN"},
+	}, ResolveOpts{})
+
+	if err != nil {
+		t.Fatalf("Resolve failed: %v", err)
+	}
+	if len(result.Errors) != 0 {
+		t.Fatalf("unexpected errors: %v", result.Errors)
+	}
+	if gotAuth != "Bearer per-uri-token" {
+		t.Errorf("expected per-uri-token to be used, got Authorization: %q", gotAuth)
+	}
+}
+
+func TestGitHubSkillResolver_MissingNamedSecret(t *testing.T) {
+	resolver := &GitHubSkillResolver{
+		httpClient:           http.DefaultClient,
+		token:                "default-token",
+		apiBase:              "http://unused",
+		rawBase:              "http://unused",
+		provisionCredentials: map[string]string{},
+	}
+
+	result, err := resolver.Resolve(context.Background(), []api.SkillReference{
+		{URI: "gh://owner/repo/my-skill?token=MISSING_SECRET"},
+	}, ResolveOpts{})
+
+	if err != nil {
+		t.Fatalf("Resolve failed: %v", err)
+	}
+	if len(result.Errors) != 1 {
+		t.Fatalf("expected 1 error, got %d: %v", len(result.Errors), result.Errors)
+	}
+	if result.Errors[0].Code != "resolve_failed" {
+		t.Errorf("expected code resolve_failed, got %s", result.Errors[0].Code)
+	}
+	if !strings.Contains(result.Errors[0].Message, "MISSING_SECRET") {
+		t.Errorf("error should mention secret name, got: %s", result.Errors[0].Message)
+	}
+}
+
 type stubSkillResolver struct {
 	result *ResolveResult
 }

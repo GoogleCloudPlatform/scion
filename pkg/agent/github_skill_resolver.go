@@ -48,11 +48,12 @@ const (
 // GitHubSkillResolver resolves skills from GitHub repositories
 // using the GitHub Contents API.
 type GitHubSkillResolver struct {
-	httpClient      *http.Client
-	token           string // GITHUB_TOKEN for authenticated requests
-	apiBase         string // Default: githubAPIBase, override in tests
-	rawBase         string // Default: githubRawBase, override in tests
-	resolutionCache *GitHubResolutionCache
+	httpClient           *http.Client
+	token                string            // Default GITHUB_TOKEN for authenticated requests
+	provisionCredentials map[string]string // Per-URI named credentials from ProvisionCredentials
+	apiBase              string            // Default: githubAPIBase, override in tests
+	rawBase              string            // Default: githubRawBase, override in tests
+	resolutionCache      *GitHubResolutionCache
 }
 
 // NewGitHubSkillResolver creates a resolver for gh:// and GitHub URL skills.
@@ -82,6 +83,31 @@ func NewGitHubSkillResolverWithToken(token string) *GitHubSkillResolver {
 		r.token = token
 	}
 	return r
+}
+
+// NewGitHubSkillResolverWithCredentials constructs a resolver with an explicit
+// default token and a named-credential map for per-URI lookup.
+// provisionCredentials maps secret name → value; may be nil.
+func NewGitHubSkillResolverWithCredentials(defaultToken string, provisionCredentials map[string]string) *GitHubSkillResolver {
+	r := NewGitHubSkillResolverWithToken(defaultToken)
+	r.provisionCredentials = provisionCredentials
+	return r
+}
+
+// tokenForRef returns the appropriate GitHub token for the given ref.
+// If ref.TokenSecretName is set, it looks up the named secret in provisionCredentials.
+// If the named secret is not found, it returns an error.
+// If no TokenSecretName is set, it returns the default token.
+func (r *GitHubSkillResolver) tokenForRef(ref *GitHubSkillRef) (string, error) {
+	if ref.TokenSecretName != "" {
+		if r.provisionCredentials != nil {
+			if val, ok := r.provisionCredentials[ref.TokenSecretName]; ok && val != "" {
+				return val, nil
+			}
+		}
+		return "", fmt.Errorf("secret %q not found in ProvisionCredentials; ensure it is set at project scope", ref.TokenSecretName)
+	}
+	return r.token, nil
 }
 
 func (r *GitHubSkillResolver) ResolverName() string { return "github" }
@@ -122,12 +148,18 @@ func (r *GitHubSkillResolver) resolveOne(ctx context.Context, ghRef *GitHubSkill
 		}
 	}
 
-	commitSHA, err := r.resolveCommitSHA(ctx, ghRef)
+	// Resolve the per-URI token once; all API calls for this ref use it.
+	token, err := r.tokenForRef(ghRef)
+	if err != nil {
+		return nil, err
+	}
+
+	commitSHA, err := r.resolveCommitSHA(ctx, ghRef, token)
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve ref for %s: %w", ghRef.Raw, err)
 	}
 
-	contents, err := r.listContents(ctx, ghRef, commitSHA)
+	contents, err := r.listContents(ctx, ghRef, commitSHA, token)
 	if err != nil {
 		return nil, err
 	}
@@ -149,7 +181,7 @@ func (r *GitHubSkillResolver) resolveOne(ctx context.Context, ghRef *GitHubSkill
 			continue
 		}
 
-		content, err := r.downloadRawFile(ctx, ghRef, commitSHA, entry.Path)
+		content, err := r.downloadRawFile(ctx, ghRef, commitSHA, entry.Path, token)
 		if err != nil {
 			return nil, fmt.Errorf("failed to download %s: %w", entry.Path, err)
 		}
@@ -199,7 +231,7 @@ type githubContentEntry struct {
 	DownloadURL string `json:"download_url"`
 }
 
-func (r *GitHubSkillResolver) resolveCommitSHA(ctx context.Context, ghRef *GitHubSkillRef) (string, error) {
+func (r *GitHubSkillResolver) resolveCommitSHA(ctx context.Context, ghRef *GitHubSkillRef, token string) (string, error) {
 	ref := ghRef.Ref
 	if ref == "" {
 		ref = "HEAD"
@@ -212,7 +244,7 @@ func (r *GitHubSkillResolver) resolveCommitSHA(ctx context.Context, ghRef *GitHu
 		return "", err
 	}
 	req.Header.Set("Accept", "application/vnd.github.v3.sha")
-	r.setAuthHeader(req)
+	r.setAuthHeader(req, token)
 
 	resp, err := r.doWithRetry(ctx, req)
 	if err != nil {
@@ -238,7 +270,7 @@ func (r *GitHubSkillResolver) resolveCommitSHA(ctx context.Context, ghRef *GitHu
 	return sha, nil
 }
 
-func (r *GitHubSkillResolver) listContents(ctx context.Context, ghRef *GitHubSkillRef, commitSHA string) ([]githubContentEntry, error) {
+func (r *GitHubSkillResolver) listContents(ctx context.Context, ghRef *GitHubSkillRef, commitSHA string, token string) ([]githubContentEntry, error) {
 	escapedPath := escapePathSegments(ghRef.SkillPath)
 	reqURL := fmt.Sprintf("%s/repos/%s/%s/contents/%s?ref=%s",
 		r.apiBase, url.PathEscape(ghRef.Owner), url.PathEscape(ghRef.Repo), escapedPath, url.QueryEscape(commitSHA))
@@ -248,7 +280,7 @@ func (r *GitHubSkillResolver) listContents(ctx context.Context, ghRef *GitHubSki
 		return nil, err
 	}
 	req.Header.Set("Accept", "application/vnd.github.v3+json")
-	r.setAuthHeader(req)
+	r.setAuthHeader(req, token)
 
 	resp, err := r.doWithRetry(ctx, req)
 	if err != nil {
@@ -272,14 +304,14 @@ func (r *GitHubSkillResolver) listContents(ctx context.Context, ghRef *GitHubSki
 	return entries, nil
 }
 
-func (r *GitHubSkillResolver) downloadRawFile(ctx context.Context, ghRef *GitHubSkillRef, commitSHA, filePath string) ([]byte, error) {
+func (r *GitHubSkillResolver) downloadRawFile(ctx context.Context, ghRef *GitHubSkillRef, commitSHA, filePath string, token string) ([]byte, error) {
 	reqURL := r.rawContentURL(ghRef, commitSHA, filePath)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
 	if err != nil {
 		return nil, err
 	}
-	r.setAuthHeader(req)
+	r.setAuthHeader(req, token)
 
 	resp, err := r.doWithRetry(ctx, req)
 	if err != nil {
@@ -314,9 +346,9 @@ func escapePathSegments(p string) string {
 	return strings.Join(segments, "/")
 }
 
-func (r *GitHubSkillResolver) setAuthHeader(req *http.Request) {
-	if r.token != "" {
-		req.Header.Set("Authorization", "Bearer "+r.token)
+func (r *GitHubSkillResolver) setAuthHeader(req *http.Request, token string) {
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
 	}
 }
 

@@ -642,6 +642,30 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 		}
 	}
 
+	// Collect project-scope secrets for provision-time credential resolution.
+	// These are NOT merged into ResolvedEnv and will not appear in the container env.
+	if agent.ProjectID != "" && d.secretBackend != nil {
+		projectSecrets, listErr := d.secretBackend.List(ctx, secret.Filter{
+			Scope:   secret.ScopeProject,
+			ScopeID: agent.ProjectID,
+		})
+		if listErr == nil && len(projectSecrets) > 0 {
+			req.ProvisionCredentials = make(map[string]string, len(projectSecrets))
+			for _, sm := range projectSecrets {
+				if sm.SecretType == store.SecretTypeInternal {
+					continue
+				}
+				sv, getErr := d.secretBackend.Get(ctx, sm.Name, secret.ScopeProject, agent.ProjectID)
+				if getErr == nil && sv != nil && sv.Value != "" {
+					req.ProvisionCredentials[sm.Name] = sv.Value
+				}
+			}
+			if len(req.ProvisionCredentials) == 0 {
+				req.ProvisionCredentials = nil
+			}
+		}
+	}
+
 	// Log a summary of env resolution sources
 	if d.debug {
 		configEnvCount := 0
