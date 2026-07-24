@@ -143,6 +143,12 @@ func (s *Server) addProjectInjectedSkill(w http.ResponseWriter, r *http.Request,
 		ValidationError(w, "skillUri is required", nil)
 		return
 	}
+	normalizedURI, err := api.NormalizeSkillURI(entry.SkillURI)
+	if err != nil {
+		ValidationError(w, err.Error(), nil)
+		return
+	}
+	entry.SkillURI = normalizedURI
 
 	var createdBy string
 	if userIdent, ok := identity.(UserIdentity); ok {
@@ -237,7 +243,7 @@ func (s *Server) setProjectInjectedSkills(w http.ResponseWriter, r *http.Request
 		createdBy = userIdent.ID()
 	}
 
-	// Validate all entries before committing any changes (N-2).
+	// Validate and normalize all entries before committing any changes (N-2).
 	seenURIs := make(map[string]bool)
 	for i, entry := range req.Entries {
 		uri := strings.TrimSpace(entry.SkillURI)
@@ -245,12 +251,18 @@ func (s *Server) setProjectInjectedSkills(w http.ResponseWriter, r *http.Request
 			BadRequest(w, fmt.Sprintf("entry %d: skillUri is required", i))
 			return
 		}
-		if seenURIs[uri] {
-			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
-				fmt.Sprintf("duplicate skillUri in request: %s", uri), nil)
+		normalized, normErr := api.NormalizeSkillURI(uri)
+		if normErr != nil {
+			ValidationError(w, fmt.Sprintf("entry %d: %s", i, normErr.Error()), nil)
 			return
 		}
-		seenURIs[uri] = true
+		req.Entries[i].SkillURI = normalized
+		if seenURIs[normalized] {
+			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
+				fmt.Sprintf("duplicate skillUri in request: %s", normalized), nil)
+			return
+		}
+		seenURIs[normalized] = true
 	}
 
 	// Build set of explicitly-assigned sort orders (C4: collision-free defaults).
@@ -275,7 +287,7 @@ func (s *Server) setProjectInjectedSkills(w http.ResponseWriter, r *http.Request
 		injections = append(injections, store.SkillInjection{
 			Scope:     store.SkillInjectionScopeProject,
 			ScopeID:   projectID,
-			SkillURI:  strings.TrimSpace(e.SkillURI),
+			SkillURI:  e.SkillURI,
 			SkillAs:   e.SkillAs,
 			Optional:  e.Optional,
 			SortOrder: so,
@@ -433,6 +445,12 @@ func (s *Server) addUserInjectedSkill(w http.ResponseWriter, r *http.Request) {
 		ValidationError(w, "skillUri is required", nil)
 		return
 	}
+	normalizedURI, err := api.NormalizeSkillURI(entry.SkillURI)
+	if err != nil {
+		ValidationError(w, err.Error(), nil)
+		return
+	}
+	entry.SkillURI = normalizedURI
 
 	// Determine sort order: use the client-supplied value if non-zero, otherwise
 	// append at the end (max existing sortOrder + 1).
@@ -494,7 +512,7 @@ func (s *Server) setUserInjectedSkills(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Validate all entries before committing any changes (N-2).
+	// Validate and normalize all entries before committing any changes (N-2).
 	seenURIs := make(map[string]bool)
 	for i, entry := range req.Entries {
 		uri := strings.TrimSpace(entry.SkillURI)
@@ -502,12 +520,18 @@ func (s *Server) setUserInjectedSkills(w http.ResponseWriter, r *http.Request) {
 			BadRequest(w, fmt.Sprintf("entry %d: skillUri is required", i))
 			return
 		}
-		if seenURIs[uri] {
-			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
-				fmt.Sprintf("duplicate skillUri in request: %s", uri), nil)
+		normalized, normErr := api.NormalizeSkillURI(uri)
+		if normErr != nil {
+			ValidationError(w, fmt.Sprintf("entry %d: %s", i, normErr.Error()), nil)
 			return
 		}
-		seenURIs[uri] = true
+		req.Entries[i].SkillURI = normalized
+		if seenURIs[normalized] {
+			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
+				fmt.Sprintf("duplicate skillUri in request: %s", normalized), nil)
+			return
+		}
+		seenURIs[normalized] = true
 	}
 
 	// Build set of explicitly-assigned sort orders (C4: collision-free defaults).
@@ -532,7 +556,7 @@ func (s *Server) setUserInjectedSkills(w http.ResponseWriter, r *http.Request) {
 		injections = append(injections, store.SkillInjection{
 			Scope:     store.SkillInjectionScopeUser,
 			ScopeID:   userIdent.ID(),
-			SkillURI:  strings.TrimSpace(e.SkillURI),
+			SkillURI:  e.SkillURI,
 			SkillAs:   e.SkillAs,
 			Optional:  e.Optional,
 			SortOrder: so,

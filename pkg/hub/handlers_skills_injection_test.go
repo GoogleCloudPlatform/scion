@@ -109,7 +109,7 @@ func TestListProjectInjectedSkills_ReturnsEntries(t *testing.T) {
 	si := &store.SkillInjection{
 		Scope:    store.SkillInjectionScopeProject,
 		ScopeID:  project.ID,
-		SkillURI: "scion://test-skill@1.0",
+		SkillURI: "skill://scion/test-skill@1.0",
 	}
 	require.NoError(t, s.AddSkillInjection(ctx, si))
 
@@ -120,7 +120,7 @@ func TestListProjectInjectedSkills_ReturnsEntries(t *testing.T) {
 	var resp api.SkillInjectionList
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
 	assert.Len(t, resp.Entries, 1)
-	assert.Equal(t, "scion://test-skill@1.0", resp.Entries[0].SkillURI)
+	assert.Equal(t, "skill://scion/test-skill@1.0", resp.Entries[0].SkillURI)
 	assert.NotEmpty(t, resp.Entries[0].ID)
 }
 
@@ -143,7 +143,7 @@ func TestListProjectInjectedSkills_IsolatedBetweenProjects(t *testing.T) {
 	si2 := &store.SkillInjection{
 		Scope:    store.SkillInjectionScopeProject,
 		ScopeID:  project2.ID,
-		SkillURI: "scion://beta-skill@1.0",
+		SkillURI: "skill://scion/beta-skill@1.0",
 	}
 	require.NoError(t, s.AddSkillInjection(ctx, si2))
 
@@ -165,7 +165,7 @@ func TestAddProjectInjectedSkill_Success(t *testing.T) {
 	srv, s, project, alice, _ := setupInjectedSkillsTest(t)
 	ctx := context.Background()
 
-	body := api.SkillInjectionEntry{SkillURI: "scion://my-skill@2.0", Optional: true}
+	body := api.SkillInjectionEntry{SkillURI: "skill://scion/my-skill@2.0", Optional: true}
 	rec := doRequestAsUser(t, srv, alice, http.MethodPost,
 		"/api/v1/projects/"+project.ID+"/injected-skills", body)
 	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
@@ -173,14 +173,14 @@ func TestAddProjectInjectedSkill_Success(t *testing.T) {
 	var entry api.SkillInjectionEntry
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&entry))
 	assert.NotEmpty(t, entry.ID)
-	assert.Equal(t, "scion://my-skill@2.0", entry.SkillURI)
+	assert.Equal(t, "skill://scion/my-skill@2.0", entry.SkillURI)
 	assert.True(t, entry.Optional)
 
 	// Verify in store.
 	sis, err := s.ListSkillInjections(ctx, store.SkillInjectionScopeProject, project.ID)
 	require.NoError(t, err)
 	assert.Len(t, sis, 1)
-	assert.Equal(t, "scion://my-skill@2.0", sis[0].SkillURI)
+	assert.Equal(t, "skill://scion/my-skill@2.0", sis[0].SkillURI)
 }
 
 func TestAddProjectInjectedSkill_MissingSkillURI(t *testing.T) {
@@ -212,7 +212,7 @@ func TestAddProjectInjectedSkill_WhitespaceSkillURIRejected(t *testing.T) {
 func TestAddProjectInjectedSkill_DuplicateReturnsConflict(t *testing.T) {
 	srv, _, project, alice, _ := setupInjectedSkillsTest(t)
 
-	body := api.SkillInjectionEntry{SkillURI: "scion://dup-skill@1.0"}
+	body := api.SkillInjectionEntry{SkillURI: "skill://scion/dup-skill@1.0"}
 	rec := doRequestAsUser(t, srv, alice, http.MethodPost,
 		"/api/v1/projects/"+project.ID+"/injected-skills", body)
 	require.Equal(t, http.StatusCreated, rec.Code)
@@ -234,15 +234,15 @@ func TestSetProjectInjectedSkills_ReplacesListAtomically(t *testing.T) {
 	si := &store.SkillInjection{
 		Scope:    store.SkillInjectionScopeProject,
 		ScopeID:  project.ID,
-		SkillURI: "scion://old-skill@1.0",
+		SkillURI: "skill://scion/old-skill@1.0",
 	}
 	require.NoError(t, s.AddSkillInjection(ctx, si))
 
 	// Replace with two new entries.
 	newList := api.SkillInjectionList{
 		Entries: []api.SkillInjectionEntry{
-			{SkillURI: "scion://new-skill-a@1.0"},
-			{SkillURI: "scion://new-skill-b@2.0", Optional: true},
+			{SkillURI: "skill://scion/new-skill-a@1.0"},
+			{SkillURI: "skill://scion/new-skill-b@2.0", Optional: true},
 		},
 	}
 	rec := doRequestAsUser(t, srv, alice, http.MethodPut,
@@ -258,8 +258,8 @@ func TestSetProjectInjectedSkills_ReplacesListAtomically(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, sis, 2)
 	uris := []string{sis[0].SkillURI, sis[1].SkillURI}
-	assert.Contains(t, uris, "scion://new-skill-a@1.0")
-	assert.Contains(t, uris, "scion://new-skill-b@2.0")
+	assert.Contains(t, uris, "skill://scion/new-skill-a@1.0")
+	assert.Contains(t, uris, "skill://scion/new-skill-b@2.0")
 }
 
 // TestSetProjectInjectedSkills_SortOrderPreserved verifies M-2:
@@ -270,9 +270,9 @@ func TestSetProjectInjectedSkills_SortOrderPreserved(t *testing.T) {
 
 	newList := api.SkillInjectionList{
 		Entries: []api.SkillInjectionEntry{
-			{SkillURI: "scion://skill-c@1.0", SortOrder: 30},
-			{SkillURI: "scion://skill-a@1.0", SortOrder: 10},
-			{SkillURI: "scion://skill-b@1.0", SortOrder: 20},
+			{SkillURI: "skill://scion/skill-c@1.0", SortOrder: 30},
+			{SkillURI: "skill://scion/skill-a@1.0", SortOrder: 10},
+			{SkillURI: "skill://scion/skill-b@1.0", SortOrder: 20},
 		},
 	}
 	rec := doRequestAsUser(t, srv, alice, http.MethodPut,
@@ -285,11 +285,11 @@ func TestSetProjectInjectedSkills_SortOrderPreserved(t *testing.T) {
 	require.Len(t, sis, 3)
 	// Store returns them sorted by sort_order, so expect 10, 20, 30.
 	assert.Equal(t, 10, sis[0].SortOrder)
-	assert.Equal(t, "scion://skill-a@1.0", sis[0].SkillURI)
+	assert.Equal(t, "skill://scion/skill-a@1.0", sis[0].SkillURI)
 	assert.Equal(t, 20, sis[1].SortOrder)
-	assert.Equal(t, "scion://skill-b@1.0", sis[1].SkillURI)
+	assert.Equal(t, "skill://scion/skill-b@1.0", sis[1].SkillURI)
 	assert.Equal(t, 30, sis[2].SortOrder)
-	assert.Equal(t, "scion://skill-c@1.0", sis[2].SkillURI)
+	assert.Equal(t, "skill://scion/skill-c@1.0", sis[2].SkillURI)
 }
 
 // TestSetProjectInjectedSkills_MixedSortOrder verifies N-1:
@@ -304,9 +304,9 @@ func TestSetProjectInjectedSkills_MixedSortOrder(t *testing.T) {
 	// Entry 2: no explicit SortOrder → gets default i+1 = 3
 	newList := api.SkillInjectionList{
 		Entries: []api.SkillInjectionEntry{
-			{SkillURI: "scion://skill-auto-0@1.0"},                    // default → 1
-			{SkillURI: "scion://skill-explicit-1@1.0", SortOrder: 10}, // explicit 10
-			{SkillURI: "scion://skill-auto-2@1.0"},                    // default → 3
+			{SkillURI: "skill://scion/skill-auto-0@1.0"},                    // default → 1
+			{SkillURI: "skill://scion/skill-explicit-1@1.0", SortOrder: 10}, // explicit 10
+			{SkillURI: "skill://scion/skill-auto-2@1.0"},                    // default → 3
 		},
 	}
 	rec := doRequestAsUser(t, srv, alice, http.MethodPut,
@@ -328,7 +328,7 @@ func TestSetProjectInjectedSkills_MixedSortOrder(t *testing.T) {
 
 	// The explicit entry must preserve its value.
 	for _, si := range sis {
-		if si.SkillURI == "scion://skill-explicit-1@1.0" {
+		if si.SkillURI == "skill://scion/skill-explicit-1@1.0" {
 			assert.Equal(t, 10, si.SortOrder, "explicit SortOrder must be stored as-is")
 		}
 	}
@@ -345,8 +345,8 @@ func TestSetProjectInjectedSkills_ExplicitSortOrder1CollisionFree(t *testing.T) 
 	// Entry 1: explicit sortOrder = 1.
 	newList := api.SkillInjectionList{
 		Entries: []api.SkillInjectionEntry{
-			{SkillURI: "scion://proj-auto@1.0"},                     // default, must NOT get 1
-			{SkillURI: "scion://proj-explicit-1@1.0", SortOrder: 1}, // explicit 1
+			{SkillURI: "skill://scion/proj-auto@1.0"},                     // default, must NOT get 1
+			{SkillURI: "skill://scion/proj-explicit-1@1.0", SortOrder: 1}, // explicit 1
 		},
 	}
 	rec := doRequestAsUser(t, srv, alice, http.MethodPut,
@@ -368,7 +368,7 @@ func TestSetProjectInjectedSkills_ExplicitSortOrder1CollisionFree(t *testing.T) 
 
 	// The explicit entry must preserve its value.
 	for _, si := range sis {
-		if si.SkillURI == "scion://proj-explicit-1@1.0" {
+		if si.SkillURI == "skill://scion/proj-explicit-1@1.0" {
 			assert.Equal(t, 1, si.SortOrder, "explicit sortOrder=1 must be preserved")
 		}
 	}
@@ -382,7 +382,7 @@ func TestSetProjectInjectedSkills_EmptySkillURIRejected(t *testing.T) {
 
 	badList := api.SkillInjectionList{
 		Entries: []api.SkillInjectionEntry{
-			{SkillURI: "scion://valid-skill@1.0"},
+			{SkillURI: "skill://scion/valid-skill@1.0"},
 			{SkillURI: ""},
 		},
 	}
@@ -403,7 +403,7 @@ func TestSetProjectInjectedSkills_EmptyListClearsAll(t *testing.T) {
 	si := &store.SkillInjection{
 		Scope:    store.SkillInjectionScopeProject,
 		ScopeID:  project.ID,
-		SkillURI: "scion://to-be-cleared@1.0",
+		SkillURI: "skill://scion/to-be-cleared@1.0",
 	}
 	require.NoError(t, s.AddSkillInjection(ctx, si))
 
@@ -425,7 +425,7 @@ func TestSetProjectInjectedSkills_NormalizesSkillURI(t *testing.T) {
 
 	newList := api.SkillInjectionList{
 		Entries: []api.SkillInjectionEntry{
-			{SkillURI: "  scion://proj-trimmed-skill@1.0  "},
+			{SkillURI: "  skill://scion/proj-trimmed-skill@1.0  "},
 		},
 	}
 	rec := doRequestAsUser(t, srv, alice, http.MethodPut,
@@ -436,15 +436,64 @@ func TestSetProjectInjectedSkills_NormalizesSkillURI(t *testing.T) {
 	var resp api.SkillInjectionList
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
 	require.Len(t, resp.Entries, 1)
-	assert.Equal(t, "scion://proj-trimmed-skill@1.0", resp.Entries[0].SkillURI,
+	assert.Equal(t, "skill://scion/proj-trimmed-skill@1.0", resp.Entries[0].SkillURI,
 		"response URI must be trimmed")
 
 	// The stored value must also be trimmed.
 	sis, err := s.ListSkillInjections(ctx, store.SkillInjectionScopeProject, project.ID)
 	require.NoError(t, err)
 	require.Len(t, sis, 1)
-	assert.Equal(t, "scion://proj-trimmed-skill@1.0", sis[0].SkillURI,
+	assert.Equal(t, "skill://scion/proj-trimmed-skill@1.0", sis[0].SkillURI,
 		"stored URI must not have surrounding whitespace")
+}
+
+// TestAddProjectInjectedSkill_NormalizesGitHubURL verifies that posting a full
+// GitHub tree URL auto-transforms it to the canonical gh:// form.
+func TestAddProjectInjectedSkill_NormalizesGitHubURL(t *testing.T) {
+	srv, s, project, alice, _ := setupInjectedSkillsTest(t)
+	ctx := context.Background()
+
+	body := api.SkillInjectionEntry{
+		SkillURI: "https://github.com/org/repo/tree/main/skills/my-skill",
+	}
+	rec := doRequestAsUser(t, srv, alice, http.MethodPost,
+		"/api/v1/projects/"+project.ID+"/injected-skills", body)
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+
+	var entry api.SkillInjectionEntry
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&entry))
+	assert.Equal(t, "gh://org/repo/my-skill@main", entry.SkillURI,
+		"GitHub tree URL should be transformed to canonical gh:// form")
+
+	sis, err := s.ListSkillInjections(ctx, store.SkillInjectionScopeProject, project.ID)
+	require.NoError(t, err)
+	require.Len(t, sis, 1)
+	assert.Equal(t, "gh://org/repo/my-skill@main", sis[0].SkillURI,
+		"stored URI must be the canonical gh:// form")
+}
+
+// TestAddProjectInjectedSkill_RejectsInvalidScheme verifies that unsupported
+// schemes return a 400 with a specific error.
+func TestAddProjectInjectedSkill_RejectsInvalidScheme(t *testing.T) {
+	srv, _, project, alice, _ := setupInjectedSkillsTest(t)
+
+	tests := []struct {
+		name string
+		uri  string
+	}{
+		{"scion scheme", "scion://my-skill"},
+		{"ftp scheme", "ftp://example.com/skill"},
+		{"bare repo github URL", "https://github.com/org/repo"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body := api.SkillInjectionEntry{SkillURI: tt.uri}
+			rec := doRequestAsUser(t, srv, alice, http.MethodPost,
+				"/api/v1/projects/"+project.ID+"/injected-skills", body)
+			assert.Equal(t, http.StatusBadRequest, rec.Code,
+				"invalid URI %q should return 400, body: %s", tt.uri, rec.Body.String())
+		})
+	}
 }
 
 // =============================================================================
@@ -458,7 +507,7 @@ func TestRemoveProjectInjectedSkill_Success(t *testing.T) {
 	si := &store.SkillInjection{
 		Scope:    store.SkillInjectionScopeProject,
 		ScopeID:  project.ID,
-		SkillURI: "scion://removable-skill@1.0",
+		SkillURI: "skill://scion/removable-skill@1.0",
 	}
 	require.NoError(t, s.AddSkillInjection(ctx, si))
 
@@ -500,7 +549,7 @@ func TestRemoveProjectInjectedSkill_CrossProjectIDORRejected(t *testing.T) {
 	siB := &store.SkillInjection{
 		Scope:    store.SkillInjectionScopeProject,
 		ScopeID:  projectB.ID,
-		SkillURI: "scion://project-b-skill@1.0",
+		SkillURI: "skill://scion/project-b-skill@1.0",
 	}
 	require.NoError(t, s.AddSkillInjection(ctx, siB))
 
@@ -526,7 +575,7 @@ func TestRemoveProjectInjectedSkill_TrailingSlash(t *testing.T) {
 	si := &store.SkillInjection{
 		Scope:    store.SkillInjectionScopeProject,
 		ScopeID:  project.ID,
-		SkillURI: "scion://trailing-slash-skill@1.0",
+		SkillURI: "skill://scion/trailing-slash-skill@1.0",
 	}
 	require.NoError(t, s.AddSkillInjection(ctx, si))
 
@@ -558,7 +607,7 @@ func TestProjectInjectedSkills_ForbiddenForNonMember(t *testing.T) {
 	srv, _, project, _, bob := setupInjectedSkillsTest(t)
 
 	// Bob is not a member of the project, so POST should be forbidden.
-	body := api.SkillInjectionEntry{SkillURI: "scion://forbidden@1.0"}
+	body := api.SkillInjectionEntry{SkillURI: "skill://scion/forbidden@1.0"}
 	rec := doRequestAsUser(t, srv, bob, http.MethodPost,
 		"/api/v1/projects/"+project.ID+"/injected-skills", body)
 	assert.Equal(t, http.StatusForbidden, rec.Code)
@@ -629,7 +678,7 @@ func TestListUserInjectedSkills_ReturnsOwnEntries(t *testing.T) {
 	si := &store.SkillInjection{
 		Scope:    store.SkillInjectionScopeUser,
 		ScopeID:  alice.ID,
-		SkillURI: "scion://alice-skill@1.0",
+		SkillURI: "skill://scion/alice-skill@1.0",
 	}
 	require.NoError(t, s.AddSkillInjection(ctx, si))
 
@@ -640,7 +689,7 @@ func TestListUserInjectedSkills_ReturnsOwnEntries(t *testing.T) {
 	var resp api.SkillInjectionList
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
 	assert.Len(t, resp.Entries, 1)
-	assert.Equal(t, "scion://alice-skill@1.0", resp.Entries[0].SkillURI)
+	assert.Equal(t, "skill://scion/alice-skill@1.0", resp.Entries[0].SkillURI)
 }
 
 func TestListUserInjectedSkills_IsolatedBetweenUsers(t *testing.T) {
@@ -651,7 +700,7 @@ func TestListUserInjectedSkills_IsolatedBetweenUsers(t *testing.T) {
 	siBob := &store.SkillInjection{
 		Scope:    store.SkillInjectionScopeUser,
 		ScopeID:  bob.ID,
-		SkillURI: "scion://bob-skill@1.0",
+		SkillURI: "skill://scion/bob-skill@1.0",
 	}
 	require.NoError(t, s.AddSkillInjection(ctx, siBob))
 
@@ -673,7 +722,7 @@ func TestAddUserInjectedSkill_Success(t *testing.T) {
 	srv, s, _, alice, _ := setupInjectedSkillsTest(t)
 	ctx := context.Background()
 
-	body := api.SkillInjectionEntry{SkillURI: "scion://my-user-skill@1.0", SkillAs: "alias"}
+	body := api.SkillInjectionEntry{SkillURI: "skill://scion/my-user-skill@1.0", SkillAs: "alias"}
 	rec := doRequestAsUser(t, srv, alice, http.MethodPost,
 		"/api/v1/users/me/injected-skills", body)
 	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
@@ -681,7 +730,7 @@ func TestAddUserInjectedSkill_Success(t *testing.T) {
 	var entry api.SkillInjectionEntry
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&entry))
 	assert.NotEmpty(t, entry.ID)
-	assert.Equal(t, "scion://my-user-skill@1.0", entry.SkillURI)
+	assert.Equal(t, "skill://scion/my-user-skill@1.0", entry.SkillURI)
 	assert.Equal(t, "alias", entry.SkillAs)
 
 	// Verify in store.
@@ -719,7 +768,7 @@ func TestAddUserInjectedSkill_WhitespaceSkillURIRejected(t *testing.T) {
 func TestAddUserInjectedSkill_DuplicateReturnsConflict(t *testing.T) {
 	srv, _, _, alice, _ := setupInjectedSkillsTest(t)
 
-	body := api.SkillInjectionEntry{SkillURI: "scion://dup-user-skill@1.0"}
+	body := api.SkillInjectionEntry{SkillURI: "skill://scion/dup-user-skill@1.0"}
 	rec := doRequestAsUser(t, srv, alice, http.MethodPost,
 		"/api/v1/users/me/injected-skills", body)
 	require.Equal(t, http.StatusCreated, rec.Code)
@@ -741,14 +790,14 @@ func TestSetUserInjectedSkills_ReplacesListAtomically(t *testing.T) {
 	si := &store.SkillInjection{
 		Scope:    store.SkillInjectionScopeUser,
 		ScopeID:  alice.ID,
-		SkillURI: "scion://old-user-skill@1.0",
+		SkillURI: "skill://scion/old-user-skill@1.0",
 	}
 	require.NoError(t, s.AddSkillInjection(ctx, si))
 
 	newList := api.SkillInjectionList{
 		Entries: []api.SkillInjectionEntry{
-			{SkillURI: "scion://new-user-skill-a@1.0"},
-			{SkillURI: "scion://new-user-skill-b@2.0"},
+			{SkillURI: "skill://scion/new-user-skill-a@1.0"},
+			{SkillURI: "skill://scion/new-user-skill-b@2.0"},
 		},
 	}
 	rec := doRequestAsUser(t, srv, alice, http.MethodPut,
@@ -773,9 +822,9 @@ func TestSetUserInjectedSkills_SortOrderPreserved(t *testing.T) {
 
 	newList := api.SkillInjectionList{
 		Entries: []api.SkillInjectionEntry{
-			{SkillURI: "scion://user-skill-c@1.0", SortOrder: 30},
-			{SkillURI: "scion://user-skill-a@1.0", SortOrder: 10},
-			{SkillURI: "scion://user-skill-b@1.0", SortOrder: 20},
+			{SkillURI: "skill://scion/user-skill-c@1.0", SortOrder: 30},
+			{SkillURI: "skill://scion/user-skill-a@1.0", SortOrder: 10},
+			{SkillURI: "skill://scion/user-skill-b@1.0", SortOrder: 20},
 		},
 	}
 	rec := doRequestAsUser(t, srv, alice, http.MethodPut,
@@ -788,11 +837,11 @@ func TestSetUserInjectedSkills_SortOrderPreserved(t *testing.T) {
 	require.Len(t, sis, 3)
 	// Store returns them sorted by sort_order, so expect 10, 20, 30.
 	assert.Equal(t, 10, sis[0].SortOrder)
-	assert.Equal(t, "scion://user-skill-a@1.0", sis[0].SkillURI)
+	assert.Equal(t, "skill://scion/user-skill-a@1.0", sis[0].SkillURI)
 	assert.Equal(t, 20, sis[1].SortOrder)
-	assert.Equal(t, "scion://user-skill-b@1.0", sis[1].SkillURI)
+	assert.Equal(t, "skill://scion/user-skill-b@1.0", sis[1].SkillURI)
 	assert.Equal(t, 30, sis[2].SortOrder)
-	assert.Equal(t, "scion://user-skill-c@1.0", sis[2].SkillURI)
+	assert.Equal(t, "skill://scion/user-skill-c@1.0", sis[2].SkillURI)
 }
 
 // TestSetUserInjectedSkills_MixedSortOrder verifies N-1 for user scope:
@@ -803,9 +852,9 @@ func TestSetUserInjectedSkills_MixedSortOrder(t *testing.T) {
 
 	newList := api.SkillInjectionList{
 		Entries: []api.SkillInjectionEntry{
-			{SkillURI: "scion://user-auto-0@1.0"},                     // default → 1
-			{SkillURI: "scion://user-explicit-10@1.0", SortOrder: 10}, // explicit 10
-			{SkillURI: "scion://user-auto-2@1.0"},                     // default → 3
+			{SkillURI: "skill://scion/user-auto-0@1.0"},                     // default → 1
+			{SkillURI: "skill://scion/user-explicit-10@1.0", SortOrder: 10}, // explicit 10
+			{SkillURI: "skill://scion/user-auto-2@1.0"},                     // default → 3
 		},
 	}
 	rec := doRequestAsUser(t, srv, alice, http.MethodPut,
@@ -827,7 +876,7 @@ func TestSetUserInjectedSkills_MixedSortOrder(t *testing.T) {
 
 	// Explicit entry must keep its value.
 	for _, si := range sis {
-		if si.SkillURI == "scion://user-explicit-10@1.0" {
+		if si.SkillURI == "skill://scion/user-explicit-10@1.0" {
 			assert.Equal(t, 10, si.SortOrder)
 		}
 	}
@@ -844,8 +893,8 @@ func TestSetUserInjectedSkills_ExplicitSortOrder1CollisionFree(t *testing.T) {
 	// Entry 1: explicit sortOrder = 1.
 	newList := api.SkillInjectionList{
 		Entries: []api.SkillInjectionEntry{
-			{SkillURI: "scion://user-auto@1.0"},                     // default, must NOT get 1
-			{SkillURI: "scion://user-explicit-1@1.0", SortOrder: 1}, // explicit 1
+			{SkillURI: "skill://scion/user-auto@1.0"},                     // default, must NOT get 1
+			{SkillURI: "skill://scion/user-explicit-1@1.0", SortOrder: 1}, // explicit 1
 		},
 	}
 	rec := doRequestAsUser(t, srv, alice, http.MethodPut,
@@ -867,7 +916,7 @@ func TestSetUserInjectedSkills_ExplicitSortOrder1CollisionFree(t *testing.T) {
 
 	// The explicit entry must preserve its value.
 	for _, si := range sis {
-		if si.SkillURI == "scion://user-explicit-1@1.0" {
+		if si.SkillURI == "skill://scion/user-explicit-1@1.0" {
 			assert.Equal(t, 1, si.SortOrder, "explicit sortOrder=1 must be preserved")
 		}
 	}
@@ -881,7 +930,7 @@ func TestSetUserInjectedSkills_EmptySkillURIRejected(t *testing.T) {
 
 	badList := api.SkillInjectionList{
 		Entries: []api.SkillInjectionEntry{
-			{SkillURI: "scion://valid-user-skill@1.0"},
+			{SkillURI: "skill://scion/valid-user-skill@1.0"},
 			{SkillURI: ""},
 		},
 	}
@@ -903,7 +952,7 @@ func TestSetUserInjectedSkills_NormalizesSkillURI(t *testing.T) {
 
 	newList := api.SkillInjectionList{
 		Entries: []api.SkillInjectionEntry{
-			{SkillURI: "  scion://user-trimmed-skill@1.0  "},
+			{SkillURI: "  skill://scion/user-trimmed-skill@1.0  "},
 		},
 	}
 	rec := doRequestAsUser(t, srv, alice, http.MethodPut,
@@ -914,14 +963,14 @@ func TestSetUserInjectedSkills_NormalizesSkillURI(t *testing.T) {
 	var resp api.SkillInjectionList
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
 	require.Len(t, resp.Entries, 1)
-	assert.Equal(t, "scion://user-trimmed-skill@1.0", resp.Entries[0].SkillURI,
+	assert.Equal(t, "skill://scion/user-trimmed-skill@1.0", resp.Entries[0].SkillURI,
 		"response URI must be trimmed")
 
 	// The stored value must also be trimmed.
 	sis, err := s.ListSkillInjections(ctx, store.SkillInjectionScopeUser, alice.ID)
 	require.NoError(t, err)
 	require.Len(t, sis, 1)
-	assert.Equal(t, "scion://user-trimmed-skill@1.0", sis[0].SkillURI,
+	assert.Equal(t, "skill://scion/user-trimmed-skill@1.0", sis[0].SkillURI,
 		"stored URI must not have surrounding whitespace")
 }
 
@@ -936,7 +985,7 @@ func TestRemoveUserInjectedSkill_Success(t *testing.T) {
 	si := &store.SkillInjection{
 		Scope:    store.SkillInjectionScopeUser,
 		ScopeID:  alice.ID,
-		SkillURI: "scion://removable-user-skill@1.0",
+		SkillURI: "skill://scion/removable-user-skill@1.0",
 	}
 	require.NoError(t, s.AddSkillInjection(ctx, si))
 
@@ -967,7 +1016,7 @@ func TestRemoveUserInjectedSkill_CrossUserIDORRejected(t *testing.T) {
 	siBob := &store.SkillInjection{
 		Scope:    store.SkillInjectionScopeUser,
 		ScopeID:  bob.ID,
-		SkillURI: "scion://bob-private-skill@1.0",
+		SkillURI: "skill://scion/bob-private-skill@1.0",
 	}
 	require.NoError(t, s.AddSkillInjection(ctx, siBob))
 
@@ -1044,8 +1093,8 @@ func TestGetHubInjectedSkills_ReturnsStoredSetting(t *testing.T) {
 
 	// Pre-seed via store.
 	setting := api.HubSkillInjectionSetting{
-		System:      []api.SkillReference{{URI: "scion://platform-skill@1.0"}},
-		UserDefined: []api.SkillReference{{URI: "scion://admin-skill@1.0"}},
+		System:      []api.SkillReference{{URI: "skill://scion/platform-skill@1.0"}},
+		UserDefined: []api.SkillReference{{URI: "skill://scion/admin-skill@1.0"}},
 	}
 	raw, err := json.Marshal(setting)
 	require.NoError(t, err)
@@ -1059,9 +1108,9 @@ func TestGetHubInjectedSkills_ReturnsStoredSetting(t *testing.T) {
 	var resp api.HubSkillInjectionSetting
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
 	assert.Len(t, resp.System, 1)
-	assert.Equal(t, "scion://platform-skill@1.0", resp.System[0].URI)
+	assert.Equal(t, "skill://scion/platform-skill@1.0", resp.System[0].URI)
 	assert.Len(t, resp.UserDefined, 1)
-	assert.Equal(t, "scion://admin-skill@1.0", resp.UserDefined[0].URI)
+	assert.Equal(t, "skill://scion/admin-skill@1.0", resp.UserDefined[0].URI)
 }
 
 // =============================================================================
@@ -1075,7 +1124,7 @@ func TestSetHubInjectedSkills_AdminCanUpdate(t *testing.T) {
 	// Dev user is admin. Use doRequest which uses the dev token.
 	body := map[string]interface{}{
 		"user_defined": []map[string]interface{}{
-			{"uri": "scion://hub-custom-skill@1.0"},
+			{"uri": "skill://scion/hub-custom-skill@1.0"},
 		},
 	}
 	rec := doRequest(t, srv, http.MethodPut,
@@ -1085,7 +1134,7 @@ func TestSetHubInjectedSkills_AdminCanUpdate(t *testing.T) {
 	var resp api.HubSkillInjectionSetting
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
 	assert.Len(t, resp.UserDefined, 1)
-	assert.Equal(t, "scion://hub-custom-skill@1.0", resp.UserDefined[0].URI)
+	assert.Equal(t, "skill://scion/hub-custom-skill@1.0", resp.UserDefined[0].URI)
 
 	// Verify in store.
 	hs, err := s.GetHubSetting(ctx, "injected_skills")
@@ -1101,7 +1150,7 @@ func TestSetHubInjectedSkills_PreservesSystemEntries(t *testing.T) {
 
 	// Pre-seed a system entry (simulating seeded platform skills).
 	initial := api.HubSkillInjectionSetting{
-		System:      []api.SkillReference{{URI: "scion://system-skill@1.0"}},
+		System:      []api.SkillReference{{URI: "skill://scion/system-skill@1.0"}},
 		UserDefined: []api.SkillReference{},
 	}
 	raw, err := json.Marshal(initial)
@@ -1112,7 +1161,7 @@ func TestSetHubInjectedSkills_PreservesSystemEntries(t *testing.T) {
 	// Admin updates user_defined only.
 	body := map[string]interface{}{
 		"user_defined": []map[string]interface{}{
-			{"uri": "scion://admin-added-skill@1.0"},
+			{"uri": "skill://scion/admin-added-skill@1.0"},
 		},
 	}
 	rec := doRequest(t, srv, http.MethodPut,
@@ -1123,9 +1172,9 @@ func TestSetHubInjectedSkills_PreservesSystemEntries(t *testing.T) {
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
 	// System entry must still be present.
 	assert.Len(t, resp.System, 1)
-	assert.Equal(t, "scion://system-skill@1.0", resp.System[0].URI)
+	assert.Equal(t, "skill://scion/system-skill@1.0", resp.System[0].URI)
 	assert.Len(t, resp.UserDefined, 1)
-	assert.Equal(t, "scion://admin-added-skill@1.0", resp.UserDefined[0].URI)
+	assert.Equal(t, "skill://scion/admin-added-skill@1.0", resp.UserDefined[0].URI)
 }
 
 func TestSetHubInjectedSkills_ForbiddenForNonAdmin(t *testing.T) {
@@ -1133,7 +1182,7 @@ func TestSetHubInjectedSkills_ForbiddenForNonAdmin(t *testing.T) {
 
 	body := map[string]interface{}{
 		"user_defined": []map[string]interface{}{
-			{"uri": "scion://unauthorized-skill@1.0"},
+			{"uri": "skill://scion/unauthorized-skill@1.0"},
 		},
 	}
 	rec := doRequestAsUser(t, srv, bob, http.MethodPut,
@@ -1210,7 +1259,7 @@ func TestSetHubInjectedSkills_CorruptBlobReturns500(t *testing.T) {
 
 	// First seed a valid row so the table row exists.
 	initial := api.HubSkillInjectionSetting{
-		System:      []api.SkillReference{{URI: "scion://system-skill@1.0"}},
+		System:      []api.SkillReference{{URI: "skill://scion/system-skill@1.0"}},
 		UserDefined: []api.SkillReference{},
 	}
 	validBlob, err := json.Marshal(initial)
@@ -1229,7 +1278,7 @@ func TestSetHubInjectedSkills_CorruptBlobReturns500(t *testing.T) {
 	// Admin (dev user) attempts a PUT — handler must detect the corrupt blob and return 500.
 	body := map[string]interface{}{
 		"user_defined": []map[string]interface{}{
-			{"uri": "scion://should-not-persist@1.0"},
+			{"uri": "skill://scion/should-not-persist@1.0"},
 		},
 	}
 	rec := doRequest(t, srv, http.MethodPut,

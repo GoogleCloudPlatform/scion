@@ -94,8 +94,8 @@ func parseGHShorthand(uri string) (*GitHubSkillRef, error) {
 	if idx := strings.LastIndex(rest, "@"); idx >= 0 {
 		ref = rest[idx+1:]
 		rest = rest[:idx]
-		if ref == "" {
-			return nil, fmt.Errorf("invalid gh:// URI %q: empty ref after @", uri)
+		if ref == "" || ref == "." || ref == ".." {
+			return nil, fmt.Errorf("invalid gh:// URI %q: invalid ref %q", uri, ref)
 		}
 	}
 
@@ -108,14 +108,14 @@ func parseGHShorthand(uri string) (*GitHubSkillRef, error) {
 			return nil, fmt.Errorf("invalid gh:// URI %q: empty path component", uri)
 		}
 	}
-	if !validGitHubComponent.MatchString(parts[0]) {
+	if !validGitHubComponent.MatchString(parts[0]) || parts[0] == "." || parts[0] == ".." {
 		return nil, fmt.Errorf("invalid gh:// URI %q: invalid owner %q", uri, parts[0])
 	}
-	if !validGitHubComponent.MatchString(parts[1]) {
+	if !validGitHubComponent.MatchString(parts[1]) || parts[1] == "." || parts[1] == ".." {
 		return nil, fmt.Errorf("invalid gh:// URI %q: invalid repo %q", uri, parts[1])
 	}
-	if strings.Contains(parts[2], "..") {
-		return nil, fmt.Errorf("invalid gh:// URI %q: skill name must not contain '..'", uri)
+	if parts[2] == "." || strings.Contains(parts[2], "..") {
+		return nil, fmt.Errorf("invalid gh:// URI %q: skill name must not contain '.' or '..'", uri)
 	}
 	if strings.ContainsAny(parts[2], "?#&=") {
 		return nil, fmt.Errorf("invalid gh:// URI %q: skill name contains invalid characters", uri)
@@ -173,10 +173,10 @@ func parseGitHubFullURL(uri string) (*GitHubSkillRef, error) {
 
 	owner := parts[0]
 	repo := parts[1]
-	if !validGitHubComponent.MatchString(owner) {
+	if !validGitHubComponent.MatchString(owner) || owner == "." || owner == ".." {
 		return nil, fmt.Errorf("invalid GitHub URL %q: invalid owner %q", uri, owner)
 	}
-	if !validGitHubComponent.MatchString(repo) {
+	if !validGitHubComponent.MatchString(repo) || repo == "." || repo == ".." {
 		return nil, fmt.Errorf("invalid GitHub URL %q: invalid repo %q", uri, repo)
 	}
 	refAndPath := parts[3] + "/" + parts[4]
@@ -188,6 +188,9 @@ func parseGitHubFullURL(uri string) (*GitHubSkillRef, error) {
 		return nil, fmt.Errorf("invalid GitHub URL %q: missing skill path after ref", uri)
 	}
 	ref := refParts[0]
+	if ref == "." || ref == ".." {
+		return nil, fmt.Errorf("invalid GitHub URL %q: invalid ref %q", uri, ref)
+	}
 	skillFullPath := refParts[1]
 
 	pathParts := strings.Split(skillFullPath, "/")
