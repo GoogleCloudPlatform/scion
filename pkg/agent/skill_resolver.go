@@ -98,6 +98,12 @@ type ResolvedFile struct {
 	URL  string
 	Hash string
 	Size int64
+	// Content holds the pre-fetched file bytes when available (e.g. from the
+	// GitHub resolver, which downloads each file during resolution for hashing).
+	// If non-nil, installOneSkill writes this directly and skips the network
+	// re-download, preventing unauthenticated requests that would 404 on
+	// private repos. The json:"-" tag keeps this out of the resolution cache.
+	Content []byte `json:"-"`
 }
 
 // --- Context injection ---
@@ -299,8 +305,16 @@ func installOneSkill(ctx context.Context, skill ResolvedSkill, dest, skillsDest 
 			}
 		}
 
-		// S5: Download with transport constraints
-		if err := downloadSkillFile(ctx, f.URL, destPath, defaultMaxFileSize); err != nil {
+		// S5: Write pre-fetched content or download with transport constraints.
+		// GitHubSkillResolver carries content bytes from the authenticated
+		// resolution-phase download; using them here avoids a second,
+		// unauthenticated raw.githubusercontent.com request that would 404 on
+		// private repos.
+		if f.Content != nil {
+			if err := writeSkillFileContent(f.Content, destPath); err != nil {
+				return nil, fmt.Errorf("failed to write %s: %w", f.Path, err)
+			}
+		} else if err := downloadSkillFile(ctx, f.URL, destPath, defaultMaxFileSize); err != nil {
 			return nil, fmt.Errorf("failed to download %s: %w", f.Path, err)
 		}
 
@@ -541,6 +555,23 @@ func downloadSkillFile(ctx context.Context, fileURL, destPath string, maxSize in
 	// S5: Do not log the URL (may contain signed tokens)
 	util.Debugf("provision: downloaded skill file %s (%d bytes)", filepath.Base(destPath), n)
 
+	return nil
+}
+
+// writeSkillFileContent writes pre-fetched content bytes directly to destPath,
+// bypassing the network download. This is used when the resolver already holds
+// the file bytes in memory (e.g. GitHubSkillResolver downloads each file during
+// resolution for hashing) so that no second unauthenticated request is needed.
+func writeSkillFileContent(content []byte, destPath string) error {
+	f, err := os.Create(destPath)
+	if err != nil {
+		return fmt.Errorf("failed to create file: %w", err)
+	}
+	defer func() { _ = f.Close() }()
+	if _, err := f.Write(content); err != nil {
+		return fmt.Errorf("failed to write file: %w", err)
+	}
+	util.Debugf("provision: wrote pre-fetched skill file %s (%d bytes)", filepath.Base(destPath), len(content))
 	return nil
 }
 
