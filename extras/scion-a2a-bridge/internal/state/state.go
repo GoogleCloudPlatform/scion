@@ -25,15 +25,16 @@ import (
 
 // Task represents an A2A task mapped to a Scion agent interaction.
 type Task struct {
-	ID        string
-	ContextID string
-	ProjectID string
-	AgentSlug string
-	AgentID   string
-	State     string
-	CreatedAt time.Time
-	UpdatedAt time.Time
-	Metadata  string
+	ID           string
+	ContextID    string
+	ProjectID    string
+	AgentSlug    string
+	AgentID      string
+	State        string
+	CallerUserID string // Per-user auth: Hub user ID of the caller. Empty for legacy-mode tasks.
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
+	Metadata     string
 }
 
 // Context maps an A2A contextId to a Scion agent.
@@ -142,6 +143,25 @@ func (s *Store) migrate() error {
 		}
 	}
 
+	// Incremental migrations: add columns to existing tables.
+	// Each uses IF NOT EXISTS-style guards so they are safe to re-run.
+	incrementalMigrations := []struct {
+		check string // Query that succeeds if migration already applied
+		apply string // DDL to run if check fails
+	}{
+		{
+			check: `SELECT caller_user_id FROM tasks LIMIT 0`,
+			apply: `ALTER TABLE tasks ADD COLUMN caller_user_id TEXT NOT NULL DEFAULT ''`,
+		},
+	}
+	for _, im := range incrementalMigrations {
+		if _, err := s.db.Exec(im.check); err != nil {
+			if _, err := s.db.Exec(im.apply); err != nil {
+				return fmt.Errorf("incremental migration: %w", err)
+			}
+		}
+	}
+
 	return nil
 }
 
@@ -150,9 +170,9 @@ func (s *Store) migrate() error {
 // CreateTask inserts a new task record.
 func (s *Store) CreateTask(t *Task) error {
 	_, err := s.db.Exec(
-		`INSERT INTO tasks (id, context_id, project_id, agent_slug, agent_id, state, created_at, updated_at, metadata)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		t.ID, t.ContextID, t.ProjectID, t.AgentSlug, t.AgentID, t.State, t.CreatedAt, t.UpdatedAt, t.Metadata,
+		`INSERT INTO tasks (id, context_id, project_id, agent_slug, agent_id, state, caller_user_id, created_at, updated_at, metadata)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		t.ID, t.ContextID, t.ProjectID, t.AgentSlug, t.AgentID, t.State, t.CallerUserID, t.CreatedAt, t.UpdatedAt, t.Metadata,
 	)
 	if err != nil {
 		return fmt.Errorf("create task: %w", err)
@@ -164,9 +184,9 @@ func (s *Store) CreateTask(t *Task) error {
 func (s *Store) GetTask(id string) (*Task, error) {
 	t := &Task{}
 	err := s.db.QueryRow(
-		`SELECT id, context_id, project_id, agent_slug, agent_id, state, created_at, updated_at, metadata
+		`SELECT id, context_id, project_id, agent_slug, agent_id, state, caller_user_id, created_at, updated_at, metadata
 		 FROM tasks WHERE id = ?`, id,
-	).Scan(&t.ID, &t.ContextID, &t.ProjectID, &t.AgentSlug, &t.AgentID, &t.State, &t.CreatedAt, &t.UpdatedAt, &t.Metadata)
+	).Scan(&t.ID, &t.ContextID, &t.ProjectID, &t.AgentSlug, &t.AgentID, &t.State, &t.CallerUserID, &t.CreatedAt, &t.UpdatedAt, &t.Metadata)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -207,7 +227,7 @@ func (s *Store) UpdateTaskState(id, state string) error {
 // ListTasksByContext returns all tasks for the given context.
 func (s *Store) ListTasksByContext(ctx context.Context, contextID string) ([]Task, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, context_id, project_id, agent_slug, agent_id, state, created_at, updated_at, metadata
+		`SELECT id, context_id, project_id, agent_slug, agent_id, state, caller_user_id, created_at, updated_at, metadata
 		 FROM tasks WHERE context_id = ? ORDER BY created_at DESC`, contextID,
 	)
 	if err != nil {
@@ -218,7 +238,7 @@ func (s *Store) ListTasksByContext(ctx context.Context, contextID string) ([]Tas
 	var tasks []Task
 	for rows.Next() {
 		var t Task
-		if err := rows.Scan(&t.ID, &t.ContextID, &t.ProjectID, &t.AgentSlug, &t.AgentID, &t.State, &t.CreatedAt, &t.UpdatedAt, &t.Metadata); err != nil {
+		if err := rows.Scan(&t.ID, &t.ContextID, &t.ProjectID, &t.AgentSlug, &t.AgentID, &t.State, &t.CallerUserID, &t.CreatedAt, &t.UpdatedAt, &t.Metadata); err != nil {
 			return nil, fmt.Errorf("scan task: %w", err)
 		}
 		tasks = append(tasks, t)
@@ -229,7 +249,7 @@ func (s *Store) ListTasksByContext(ctx context.Context, contextID string) ([]Tas
 // ListTasksByAgent returns all tasks for a given project and agent.
 func (s *Store) ListTasksByAgent(projectID, agentSlug string) ([]Task, error) {
 	rows, err := s.db.Query(
-		`SELECT id, context_id, project_id, agent_slug, agent_id, state, created_at, updated_at, metadata
+		`SELECT id, context_id, project_id, agent_slug, agent_id, state, caller_user_id, created_at, updated_at, metadata
 		 FROM tasks WHERE project_id = ? AND agent_slug = ? ORDER BY created_at DESC`, projectID, agentSlug,
 	)
 	if err != nil {
@@ -240,7 +260,29 @@ func (s *Store) ListTasksByAgent(projectID, agentSlug string) ([]Task, error) {
 	var tasks []Task
 	for rows.Next() {
 		var t Task
-		if err := rows.Scan(&t.ID, &t.ContextID, &t.ProjectID, &t.AgentSlug, &t.AgentID, &t.State, &t.CreatedAt, &t.UpdatedAt, &t.Metadata); err != nil {
+		if err := rows.Scan(&t.ID, &t.ContextID, &t.ProjectID, &t.AgentSlug, &t.AgentID, &t.State, &t.CallerUserID, &t.CreatedAt, &t.UpdatedAt, &t.Metadata); err != nil {
+			return nil, fmt.Errorf("scan task: %w", err)
+		}
+		tasks = append(tasks, t)
+	}
+	return tasks, rows.Err()
+}
+
+// ListTasksByContextAndCaller returns tasks for the given context filtered by caller user ID.
+func (s *Store) ListTasksByContextAndCaller(ctx context.Context, contextID, callerUserID string) ([]Task, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, context_id, project_id, agent_slug, agent_id, state, caller_user_id, created_at, updated_at, metadata
+		 FROM tasks WHERE context_id = ? AND caller_user_id = ? ORDER BY created_at DESC`, contextID, callerUserID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list tasks by context and caller: %w", err)
+	}
+	defer rows.Close()
+
+	var tasks []Task
+	for rows.Next() {
+		var t Task
+		if err := rows.Scan(&t.ID, &t.ContextID, &t.ProjectID, &t.AgentSlug, &t.AgentID, &t.State, &t.CallerUserID, &t.CreatedAt, &t.UpdatedAt, &t.Metadata); err != nil {
 			return nil, fmt.Errorf("scan task: %w", err)
 		}
 		tasks = append(tasks, t)
