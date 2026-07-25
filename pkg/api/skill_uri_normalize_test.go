@@ -275,9 +275,9 @@ func TestNormalizeSkillURI(t *testing.T) {
 			want:  "skill://project/my-skill",
 		},
 		{
-			name:    "skill:// with only one segment treated as registry missing name",
-			input:   "skill://my-skill",
-			wantErr: "missing skill name",
+			name:  "skill:// with only one segment accepted as skill name (AC #5)",
+			input: "skill://my-skill",
+			want:  "skill://my-skill",
 		},
 
 		// ── bare name passthrough ────────────────────────────────────────────

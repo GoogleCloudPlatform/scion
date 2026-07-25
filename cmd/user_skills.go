@@ -147,10 +147,6 @@ func runUserSkillsList(cmd *cobra.Command, args []string) error {
 func runUserSkillsAdd(cmd *cobra.Command, args []string) error {
 	skillURI := args[0]
 
-	if !isSkillURI(skillURI) {
-		return fmt.Errorf("skill URI is required (expected format containing ://), got %q", skillURI)
-	}
-
 	normalized, err := api.NormalizeSkillURI(skillURI)
 	if err != nil {
 		return fmt.Errorf("invalid skill URI: %w", err)

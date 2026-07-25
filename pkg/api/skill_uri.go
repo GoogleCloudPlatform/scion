@@ -147,6 +147,15 @@ func parseFullURI(raw string, uri *SkillURI) (*SkillURI, error) {
 		return parseAliasPath(raw, uri, pathSegments, version)
 	}
 
+	// Single non-alias segment (e.g. skill://my-skill): treat as the skill name
+	// with the default registry. The grammar comment states all qualifiers are
+	// optional — skill://[registry/][scope/]name[@version] — so a bare
+	// skill://name form is unambiguous and equivalent to skill://scion/name.
+	if len(pathSegments) == 0 && registry != "" {
+		uri.Registry = defaultRegistry
+		return parseAliasPath(raw, uri, []string{registry}, version)
+	}
+
 	if registry == "" {
 		registry = defaultRegistry
 	}
