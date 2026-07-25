@@ -1262,3 +1262,188 @@ func TestBuildStartContext_NoAuth(t *testing.T) {
 		}
 	})
 }
+
+// TestBuildStartContext_WorkspaceMode verifies that SCION_WORKSPACE_MODE is emitted
+// with the correct canonical value for each wire label, and defaults to shared-plain.
+func TestBuildStartContext_WorkspaceMode(t *testing.T) {
+	cases := []struct {
+		name      string
+		wireLabel string
+		wantMode  string
+	}{
+		{
+			name:      "shared wire label",
+			wireLabel: store.WorkspaceModeShared,
+			wantMode:  "shared-plain",
+		},
+		{
+			name:      "per-agent wire label",
+			wireLabel: store.WorkspaceModePerAgent,
+			wantMode:  "clone-per-agent",
+		},
+		{
+			name:      "worktree-per-agent wire label",
+			wireLabel: store.WorkspaceModeWorktreePerAgent,
+			wantMode:  "worktree-per-agent",
+		},
+		{
+			name:      "empty wire label defaults to shared-plain",
+			wireLabel: "",
+			wantMode:  "shared-plain",
+		},
+		{
+			name:      "unrecognized wire label defaults to shared-plain",
+			wireLabel: "unknown-mode",
+			wantMode:  "shared-plain",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := DefaultServerConfig()
+			cfg.StateDir = t.TempDir()
+			srv := newTestServerForStartContext(t, cfg)
+
+			r := httptest.NewRequest("POST", "/api/v1/agents", nil)
+			sc, err := srv.buildStartContext(context.Background(), startContextInputs{
+				Name:          "agent-1",
+				WorkspaceMode: tc.wireLabel,
+				HTTPRequest:   r,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := sc.Opts.Env["SCION_WORKSPACE_MODE"]; got != tc.wantMode {
+				t.Errorf("SCION_WORKSPACE_MODE: got %q, want %q", got, tc.wantMode)
+			}
+		})
+	}
+}
+
+// TestBuildStartContext_WorkspaceMode_StartPathFallback verifies that on the
+// start/restart path (WorkspaceMode==""), a hub-injected SCION_WORKSPACE_MODE in
+// resolvedEnv is propagated to the container env, and the broker-side code does
+// not overwrite it with the shared-plain default.
+func TestBuildStartContext_WorkspaceMode_StartPathFallback(t *testing.T) {
+	cfg := DefaultServerConfig()
+	cfg.StateDir = t.TempDir()
+	srv := newTestServerForStartContext(t, cfg)
+
+	r := httptest.NewRequest("POST", "/api/v1/agents", nil)
+	sc, err := srv.buildStartContext(context.Background(), startContextInputs{
+		Name: "agent-resume",
+		// Hub injects canonical value via resolvedEnv on start path.
+		ResolvedEnv: map[string]string{
+			"SCION_WORKSPACE_MODE": "clone-per-agent",
+			"SCION_WORKSPACE_GIT":  "true",
+		},
+		// WorkspaceMode intentionally empty (start/restart path).
+		HTTPRequest: r,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got := sc.Opts.Env["SCION_WORKSPACE_MODE"]; got != "clone-per-agent" {
+		t.Errorf("SCION_WORKSPACE_MODE: got %q, want %q", got, "clone-per-agent")
+	}
+	if got := sc.Opts.Env["SCION_WORKSPACE_GIT"]; got != "true" {
+		t.Errorf("SCION_WORKSPACE_GIT: got %q, want %q", got, "true")
+	}
+}
+
+// TestBuildStartContext_WorkspaceGit verifies that SCION_WORKSPACE_GIT is emitted
+// correctly based on the provisioning path.
+func TestBuildStartContext_WorkspaceGit(t *testing.T) {
+	t.Run("git clone config implies git workspace", func(t *testing.T) {
+		cfg := DefaultServerConfig()
+		cfg.StateDir = t.TempDir()
+		srv := newTestServerForStartContext(t, cfg)
+
+		r := httptest.NewRequest("POST", "/api/v1/agents", nil)
+		sc, err := srv.buildStartContext(context.Background(), startContextInputs{
+			Name: "agent-clone",
+			Config: &CreateAgentConfig{
+				GitClone: &api.GitCloneConfig{
+					URL:    "https://github.com/example/repo.git",
+					Branch: "main",
+				},
+			},
+			HTTPRequest: r,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := sc.Opts.Env["SCION_WORKSPACE_GIT"]; got != "true" {
+			t.Errorf("SCION_WORKSPACE_GIT: got %q, want %q", got, "true")
+		}
+	})
+
+	t.Run("no git clone and no workspace implies absent git var", func(t *testing.T) {
+		cfg := DefaultServerConfig()
+		cfg.StateDir = t.TempDir()
+		srv := newTestServerForStartContext(t, cfg)
+
+		r := httptest.NewRequest("POST", "/api/v1/agents", nil)
+		sc, err := srv.buildStartContext(context.Background(), startContextInputs{
+			Name:        "agent-plain",
+			Config:      &CreateAgentConfig{},
+			HTTPRequest: r,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if v, present := sc.Opts.Env["SCION_WORKSPACE_GIT"]; present {
+			t.Errorf("SCION_WORKSPACE_GIT should be absent for non-git workspace, got %q", v)
+		}
+	})
+
+	t.Run("start path hub-injected SCION_WORKSPACE_GIT propagates", func(t *testing.T) {
+		cfg := DefaultServerConfig()
+		cfg.StateDir = t.TempDir()
+		srv := newTestServerForStartContext(t, cfg)
+
+		r := httptest.NewRequest("POST", "/api/v1/agents", nil)
+		sc, err := srv.buildStartContext(context.Background(), startContextInputs{
+			Name: "agent-start",
+			ResolvedEnv: map[string]string{
+				"SCION_WORKSPACE_GIT": "true",
+			},
+			HTTPRequest: r,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := sc.Opts.Env["SCION_WORKSPACE_GIT"]; got != "true" {
+			t.Errorf("SCION_WORKSPACE_GIT: got %q, want %q", got, "true")
+		}
+	})
+
+	t.Run("shared-plain git workspace on disk", func(t *testing.T) {
+		// Create a temporary git repo to simulate a shared-plain git workspace
+		gitDir := t.TempDir()
+		initCmd := exec.Command("git", "init", gitDir)
+		if out, err := initCmd.CombinedOutput(); err != nil {
+			t.Skipf("git init failed: %s", string(out))
+		}
+
+		cfg := DefaultServerConfig()
+		cfg.StateDir = t.TempDir()
+		srv := newTestServerForStartContext(t, cfg)
+
+		r := httptest.NewRequest("POST", "/api/v1/agents", nil)
+		sc, err := srv.buildStartContext(context.Background(), startContextInputs{
+			Name: "agent-shared-git",
+			Config: &CreateAgentConfig{
+				Workspace: gitDir,
+			},
+			HTTPRequest: r,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := sc.Opts.Env["SCION_WORKSPACE_GIT"]; got != "true" {
+			t.Errorf("SCION_WORKSPACE_GIT: got %q, want %q (shared git workspace on disk should set it)", got, "true")
+		}
+	})
+}

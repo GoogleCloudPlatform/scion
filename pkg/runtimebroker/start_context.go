@@ -31,6 +31,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
 
 // startContext holds all the resolved state needed to start an agent.
@@ -311,6 +312,21 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		env["SCION_PROJECT_PATH"] = in.ProjectPath
 	}
 
+	// Emit canonical workspace sharing mode.
+	// On the create path, in.WorkspaceMode carries the wire label and we
+	// resolve it to the canonical value here. On start/restart paths,
+	// in.WorkspaceMode is empty but the hub pre-resolves the canonical value
+	// into resolvedEnv["SCION_WORKSPACE_MODE"] (see httpdispatcher.go); it was
+	// already merged into env in step 1 above, so the var is already present.
+	// Either way, we ensure a guaranteed non-empty value with a safe default.
+	if in.WorkspaceMode != "" {
+		env["SCION_WORKSPACE_MODE"] = string(store.ResolveWorkspaceSharingMode(in.WorkspaceMode))
+	}
+	if env["SCION_WORKSPACE_MODE"] == "" {
+		// Empty or unrecognized — default to shared-plain for backward compatibility.
+		env["SCION_WORKSPACE_MODE"] = string(store.SharingModeSharedPlain)
+	}
+
 	// 6. Broker identity
 	if s.config.BrokerName != "" {
 		env["SCION_BROKER_NAME"] = s.config.BrokerName
@@ -452,6 +468,9 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	}
 
 	// --- Shared workspace mode (git-workspace hybrid) ---
+	// Deprecated: SCION_SHARED_WORKSPACE — superseded by SCION_WORKSPACE_MODE +
+	// SCION_WORKSPACE_GIT. Kept for compatibility during the transition period.
+	// Removal is tracked in https://github.com/ptone/scion/issues/575.
 	if in.Config != nil && in.Config.SharedWorkspace {
 		env["SCION_SHARED_WORKSPACE"] = "true"
 		if s.config.Debug {
@@ -494,6 +513,28 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 				"cloneURL", gc.URL, "branch", gc.Branch, "depth", gc.Depth)
 		}
 	}
+
+	// --- SCION_WORKSPACE_GIT ---
+	// Emit when the workspace is (or will be) a git repository. Mode alone is
+	// insufficient because shared-plain may or may not be git-backed.
+	//
+	// Priority:
+	//  1. worktreeProvisioned: host-side worktree was set up — always git.
+	//  2. opts.GitClone != nil: in-container clone configured — always git.
+	//  3. opts.Workspace on disk: shared-plain git workspace (check .git).
+	//  4. in.ResolvedEnv fallback: hub-injected on start/restart paths before
+	//     the on-disk workspace exists (e.g. clone-per-agent pre-clone).
+	isGitWorkspace := worktreeProvisioned || opts.GitClone != nil
+	if !isGitWorkspace && opts.Workspace != "" {
+		isGitWorkspace = util.IsGitRepoDir(opts.Workspace)
+	}
+	if !isGitWorkspace {
+		isGitWorkspace = in.ResolvedEnv["SCION_WORKSPACE_GIT"] == "true"
+	}
+	if isGitWorkspace {
+		env["SCION_WORKSPACE_GIT"] = "true"
+	}
+	// Absent when false — avoids encoding a "false" string agents must parse.
 
 	// --- Env + telemetry + secrets ---
 	opts.Env = env
