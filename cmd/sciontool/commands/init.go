@@ -327,7 +327,7 @@ func runInit(args []string) int {
 
 	// Configure git credentials for shared-workspace projects (git-workspace hybrid).
 	// The workspace is pre-cloned on the host; agents need credentials to push/pull.
-	if os.Getenv("SCION_SHARED_WORKSPACE") == "true" {
+	if resolveIsSharedGitWorkspace() {
 		configureSharedWorkspaceGit(agentHome)
 	}
 
@@ -1675,6 +1675,26 @@ func ensureWorkspaceOwnership(workspacePath string, uid, gid, currentEUID int, c
 	if err := chown(workspacePath, uid, gid); err != nil {
 		log.Error("Failed to chown workspace to UID=%d GID=%d: %v", uid, gid, err)
 	}
+}
+
+// resolveIsSharedGitWorkspace returns true when the agent is in a shared-plain
+// git workspace and should configure git credentials accordingly.
+//
+// Prefers the new canonical workspace mode env vars (SCION_WORKSPACE_MODE +
+// SCION_WORKSPACE_GIT) emitted by brokers >= workspace-mode-env release.
+// Falls back to the legacy SCION_SHARED_WORKSPACE var for older broker versions
+// that don't yet emit the new vars.
+//
+// Deprecated: SCION_SHARED_WORKSPACE — use SCION_WORKSPACE_MODE + SCION_WORKSPACE_GIT.
+// Removal is tracked in https://github.com/ptone/scion/issues/575.
+func resolveIsSharedGitWorkspace() bool {
+	if workspaceMode := os.Getenv("SCION_WORKSPACE_MODE"); workspaceMode != "" {
+		// New path: broker emits canonical workspace mode vars.
+		// A shared-plain workspace is git-backed when SCION_WORKSPACE_GIT=true.
+		return workspaceMode == "shared-plain" && os.Getenv("SCION_WORKSPACE_GIT") == "true"
+	}
+	// Fallback: older broker that only emits SCION_SHARED_WORKSPACE.
+	return os.Getenv("SCION_SHARED_WORKSPACE") == "true"
 }
 
 // configureSharedWorkspaceGit sets up git credentials for shared-workspace
