@@ -103,6 +103,10 @@ func TestParseSkillURI_ValidForms(t *testing.T) {
 		{"skill://registry.example.com/core/my-skill@1.0", "registry.example.com", "core", "", "my-skill", "1.0"},
 		// No scope, no version
 		{"skill://scion/my-skill", "scion", "", "", "my-skill", "latest"},
+		// Single name after skill:// — equivalent to skill://scion/<name> (AC #5)
+		{"skill://my-skill", "scion", "", "", "my-skill", "latest"},
+		{"skill://my-skill@1.2", "scion", "", "", "my-skill", "1.2"},
+		{"skill://security-audit-v2", "scion", "", "", "security-audit-v2", "latest"},
 	}
 
 	for _, tc := range tests {
@@ -151,6 +155,11 @@ func TestParseSkillURI_InvalidForms(t *testing.T) {
 		{"UPPER", "uppercase bare name"},
 		{"-leading-hyphen", "leading hyphen in bare name"},
 		{"skill://scion/core/" + strings.Repeat("a", 65) + "@1.0", "name too long"},
+		// Alias forms with no skill name still error (alias branch wins over single-segment rule)
+		{"skill://project", "alias project with no skill name"},
+		{"skill://user", "alias user with no skill name"},
+		// Empty URI after skill://
+		{"skill://", "empty after skill://"},
 	}
 
 	for _, tc := range tests {

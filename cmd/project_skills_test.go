@@ -388,13 +388,19 @@ func TestRunProjectSkillsAdd_NoURIError_TwoArgs(t *testing.T) {
 	projectDir := setupProjectSkillsProject(t, server.URL)
 	projectPath = projectDir
 
-	// Two args: project name + an actually-invalid URI (scion:// is explicitly rejected by
-	// NormalizeSkillURI) → validation error before hub is contacted.
+	// Case 1: invalid scheme — scion:// is explicitly rejected by NormalizeSkillURI.
 	// Note: bare skill names are valid per AC #6; use a genuinely bad URI instead.
 	err := runProjectSkillsAdd(projectSkillsAddCmd, []string{"my-project", "scion://forbidden"})
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "scion://", "error should quote the offending URI scheme")
 	assert.False(t, hubCalled, "hub must not be contacted when NormalizeSkillURI rejects the URI")
+
+	// Case 2: invalid bare name (uppercase) — error quotes the skill, not the project name.
+	hubCalled = false
+	err = runProjectSkillsAdd(projectSkillsAddCmd, []string{"my-project", "MySkill"})
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "MySkill", "error should quote the invalid skill name, not the project name")
+	assert.False(t, hubCalled, "hub must not be contacted when NormalizeSkillURI rejects the bare name")
 }
 
 func TestRunProjectSkillsAdd_BareSkillName(t *testing.T) {

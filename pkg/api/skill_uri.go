@@ -68,11 +68,12 @@ func ValidateSkillName(name string) error {
 
 // ParseSkillURI parses a skill URI string into its components.
 // Accepts all forms from the normative grammar:
-//   - Full:      skill://scion/core/scion@^1.0
-//   - No reg:    skill:///core/scion@^1.0
-//   - No ver:    skill://scion/core/scion
-//   - Alias:     skill://project/my-skill@latest
-//   - Bare:      scion
+//   - Full:        skill://scion/core/scion@^1.0
+//   - No reg:      skill:///core/scion@^1.0
+//   - No ver:      skill://scion/core/scion
+//   - Alias:       skill://project/my-skill@latest
+//   - Single name: skill://my-skill  (equivalent to skill://scion/my-skill; AC #5)
+//   - Bare:        scion
 //
 // Returns an error for invalid URIs (empty name, invalid scope, bad chars).
 func ParseSkillURI(raw string) (*SkillURI, error) {
