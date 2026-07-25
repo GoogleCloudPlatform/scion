@@ -47,7 +47,7 @@ model_aliases:
   extra-large: fable
 env:
   ANTHROPIC_MODEL: "opus"
-  ANTHROPIC_SMALL_FAST_MODEL: "haiku"
+  ANTHROPIC_DEFAULT_HAIKU_MODEL: "haiku-4-5"
 command:
   base: ["claude", "--no-chrome", "--dangerously-skip-permissions"]
   resume_flag: "--continue"
