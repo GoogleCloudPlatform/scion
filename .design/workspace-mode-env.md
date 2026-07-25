@@ -343,10 +343,10 @@ still read `SCION_SHARED_WORKSPACE`. This PR therefore:
    compatibility with older broker versions).
 3. Adds a `// Deprecated:` comment on the `SCION_SHARED_WORKSPACE` emission site.
 
-Phase 2 (eventual removal of `SCION_SHARED_WORKSPACE`) is tracked in a separate
-issue filed by the coordinator — see **ptone/scion#TBD** (issue number to be
-added once filed). The implementation phases below include a sciontool update
-task for the compatibility shim.
+Phase 2 (eventual removal of `SCION_SHARED_WORKSPACE`) is tracked in
+[ptone/scion#575](https://github.com/ptone/scion/issues/575). The
+implementation phases below include a sciontool update task for the
+compatibility shim.
 
 ---
 
@@ -409,7 +409,7 @@ task for the compatibility shim.
 1. Add "Runtime Environment Variables" section to `workspace.md` or
    `workspaces-and-sharing.md` documenting `SCION_WORKSPACE_MODE` (values,
    defaults) and `SCION_WORKSPACE_GIT` (boolean-presence contract). Note
-   `SCION_SHARED_WORKSPACE` as deprecated with the tracking issue reference.
+   `SCION_SHARED_WORKSPACE` as deprecated, referencing #575 for removal.
 2. Fix the shared-directories "both locations" doc bug in `workspace.md:190-191`
    (either/or per `SharedDir.InWorkspace`, not always-both).
 3. Update `skills.md:233-240` inject_when table if needed.
