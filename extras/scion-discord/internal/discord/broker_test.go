@@ -3,6 +3,7 @@ package discord
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -864,4 +865,200 @@ func newTestBrokerStore(t *testing.T) Store {
 	require.NoError(t, err)
 	t.Cleanup(func() { store.Close() })
 	return store
+}
+
+// recordingTransport captures outbound Discord REST calls so Publish can be
+// exercised without touching the network.
+type recordingTransport struct {
+	paths []string
+}
+
+func (rt *recordingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	rt.paths = append(rt.paths, req.URL.Path)
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(strings.NewReader(`{}`)),
+		Header:     make(http.Header),
+		Request:    req,
+	}, nil
+}
+
+// newRecordingSession returns a Session whose REST calls are intercepted, with
+// the given channels seeded into its state cache.
+func newRecordingSession(t *testing.T, channels []*discordgo.Channel) (*discordgo.Session, *recordingTransport) {
+	t.Helper()
+	s, err := discordgo.New("Bot test-token")
+	require.NoError(t, err)
+
+	rt := &recordingTransport{}
+	s.Client = &http.Client{Transport: rt}
+	s.MaxRestRetries = 0
+	s.ShouldRetryOnRateLimit = false
+
+	_ = s.State.GuildAdd(&discordgo.Guild{ID: testGuildID})
+	for _, ch := range channels {
+		if ch.GuildID == "" {
+			ch.GuildID = testGuildID
+		}
+		_ = s.State.ChannelAdd(ch)
+	}
+	return s, rt
+}
+
+// TestPublish_ObserveFilter_ThreadResolvesParentLink covers the fail-closed
+// observe filter for messages routed directly at a thread snowflake.
+//
+// Channel links are only ever persisted against parent channels
+// (saveChannelLink rewrites thread IDs to the parent), so the filter must use
+// resolveChannelLink rather than a bare store.GetChannelLink — otherwise every
+// thread looks unlinked and agent-to-agent traffic is blocked even when observe
+// mode is explicitly enabled on the parent.
+func TestPublish_ObserveFilter_ThreadResolvesParentLink(t *testing.T) {
+	tests := []struct {
+		name string
+		// parentLink is nil when the parent channel has no link row at all.
+		parentLink       *ChannelLink
+		wantDelivered    bool
+		wantDeliveredMsg string
+	}{
+		{
+			name:             "thread with no parent link is filtered out",
+			parentLink:       nil,
+			wantDelivered:    false,
+			wantDeliveredMsg: "unlinked thread must fail closed",
+		},
+		{
+			name: "thread whose parent enables observe is delivered",
+			parentLink: &ChannelLink{
+				ShowAgentToAgent: true,
+			},
+			wantDelivered:    true,
+			wantDeliveredMsg: "observe mode on the parent must allow agent-to-agent through",
+		},
+		{
+			name: "thread whose parent disables observe is filtered out",
+			parentLink: &ChannelLink{
+				ShowAgentToAgent: false,
+			},
+			wantDelivered:    false,
+			wantDeliveredMsg: "observe mode off on the parent must filter agent-to-agent",
+		},
+	}
+
+	for i, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+
+			// Unique IDs per case: resolveChannelLink memoises thread parents
+			// in a package-level cache that outlives individual tests.
+			parentID := fmt.Sprintf("parent-%d", i)
+			threadID := fmt.Sprintf("thread-%d", i)
+			t.Cleanup(func() {
+				threadParentsMu.Lock()
+				delete(threadParents, threadID)
+				threadParentsMu.Unlock()
+			})
+
+			session, rt := newRecordingSession(t, []*discordgo.Channel{
+				{ID: parentID, Type: discordgo.ChannelTypeGuildText},
+				{
+					ID:       threadID,
+					Type:     discordgo.ChannelTypeGuildPublicThread,
+					ParentID: parentID,
+				},
+			})
+
+			store := newTestBrokerStore(t)
+			if tt.parentLink != nil {
+				link := *tt.parentLink
+				link.ChannelID = parentID
+				link.GuildID = testGuildID
+				link.ProjectID = "proj-1"
+				link.ProjectSlug = "proj"
+				link.Active = true
+				link.LinkedAt = time.Now()
+				require.NoError(t, store.CreateChannelLink(ctx, &link))
+			}
+
+			b := testBroker(session)
+			b.log = discardLogger()
+			b.store = store
+
+			// Agent-to-agent message routed straight at the thread snowflake.
+			msg := &messages.StructuredMessage{
+				Version:   messages.Version,
+				Channel:   "discord",
+				Sender:    "agent:alice",
+				Recipient: "agent:bob",
+				Msg:       fmt.Sprintf("observe payload %d", i),
+				Type:      messages.TypeInstruction,
+				ThreadID:  threadID,
+			}
+
+			require.NoError(t, b.Publish(ctx, "proj-1.agent.alice", msg))
+
+			delivered := len(rt.paths) > 0
+			assert.Equal(t, tt.wantDelivered, delivered, tt.wantDeliveredMsg)
+			if tt.wantDelivered {
+				assert.Contains(t, strings.Join(rt.paths, ","), threadID,
+					"message should be delivered to the thread, not the parent")
+			}
+		})
+	}
+}
+
+// TestPublish_ObserveFilter_StateChangeThreadResolvesParentLink is the
+// state-change counterpart: ShowStateChanges lives on the parent link too.
+func TestPublish_ObserveFilter_StateChangeThreadResolvesParentLink(t *testing.T) {
+	for i, showStateChanges := range []bool{false, true} {
+		t.Run(fmt.Sprintf("show_state_changes=%v", showStateChanges), func(t *testing.T) {
+			ctx := context.Background()
+
+			parentID := fmt.Sprintf("sc-parent-%d", i)
+			threadID := fmt.Sprintf("sc-thread-%d", i)
+			t.Cleanup(func() {
+				threadParentsMu.Lock()
+				delete(threadParents, threadID)
+				threadParentsMu.Unlock()
+			})
+
+			session, rt := newRecordingSession(t, []*discordgo.Channel{
+				{ID: parentID, Type: discordgo.ChannelTypeGuildText},
+				{
+					ID:       threadID,
+					Type:     discordgo.ChannelTypeGuildPublicThread,
+					ParentID: parentID,
+				},
+			})
+
+			store := newTestBrokerStore(t)
+			require.NoError(t, store.CreateChannelLink(ctx, &ChannelLink{
+				ChannelID:        parentID,
+				GuildID:          testGuildID,
+				ProjectID:        "proj-1",
+				ProjectSlug:      "proj",
+				Active:           true,
+				LinkedAt:         time.Now(),
+				ShowStateChanges: showStateChanges,
+			}))
+
+			b := testBroker(session)
+			b.log = discardLogger()
+			b.store = store
+
+			msg := &messages.StructuredMessage{
+				Version:  messages.Version,
+				Channel:  "discord",
+				Sender:   "agent:alice",
+				Msg:      fmt.Sprintf("state change %d", i),
+				Type:     messages.TypeStateChange,
+				ThreadID: threadID,
+			}
+
+			require.NoError(t, b.Publish(ctx, "proj-1.agent.alice", msg))
+
+			assert.Equal(t, showStateChanges, len(rt.paths) > 0,
+				"state change delivery must follow the parent link's ShowStateChanges flag")
+		})
+	}
 }
