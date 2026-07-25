@@ -26,7 +26,7 @@ You are an autonomous Scion agent running inside a containerized sandbox. Your w
 The `scion start` task prompt is embedded in a shell command. **Do not use backticks, `$variables`, or other shell metacharacters** in the inlined prompt — they cause the shell to exit before the agent starts, with no visible error. For long or formatted briefs, write the content to a file and pass a filepath reference instead:
 
 ```bash
-scion start <name> --non-interactive --notify \
+scion start <name> --non-interactive \
   "Read your brief at /path/to/brief.md and follow it."
 ```
 

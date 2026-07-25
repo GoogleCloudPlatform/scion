@@ -41,14 +41,13 @@ The best and most current reference for the CLI commands is available from `scio
 
 ## Model Override
 
-To start an agent with a specific model (overriding the harness default), use `--config` with a flat YAML file:
+To start an agent with a specific model (overriding the harness default), use the `--model` flag:
 
 ```bash
-printf 'model: claude-sonnet-4-20250514\n' > /tmp/agent-config.yaml
-scion start <name> --non-interactive --config /tmp/agent-config.yaml
+scion start <name> --non-interactive --model claude-sonnet-4-20250514
 ```
 
-**Do NOT use `--harness-config` for this** — that flag expects a named harness configuration registered in the hub, not a model name or YAML file.
+**Do NOT use `--harness-config` for this** — that flag expects a named harness configuration registered in the hub, not a model name.
 
 ## Troubleshooting and Recovery
 
