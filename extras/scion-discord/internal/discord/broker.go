@@ -648,15 +648,27 @@ func (b *DiscordBroker) Publish(ctx context.Context, topic string, msg *messages
 
 		if needsFilter && store != nil {
 			link, linkErr := store.GetChannelLink(ctx, channelID)
-			if linkErr == nil && link != nil {
-				if isAgentToAgent && !link.ShowAgentToAgent {
-					b.log.Debug("Filtering agent-to-agent message", "channel_id", channelID)
-					continue
-				}
-				if isStateChange && !link.ShowStateChanges {
-					b.log.Debug("Filtering state change notification", "channel_id", channelID)
-					continue
-				}
+			if linkErr != nil {
+				b.log.Warn("Failed to look up channel link; applying fail-closed filter",
+					"channel_id", channelID, "error", linkErr)
+			}
+			// Fail closed: a missing link (or a failed lookup) is treated the
+			// same as a link with observe settings disabled. Threads reached by
+			// direct ThreadID routing often have no channel_link row, and
+			// defaulting to "deliver everything" leaked agent-to-agent traffic
+			// and state changes into channels with observe mode off.
+			showAgentToAgent := link != nil && link.ShowAgentToAgent
+			showStateChanges := link != nil && link.ShowStateChanges
+
+			if isAgentToAgent && !showAgentToAgent {
+				b.log.Debug("Filtering agent-to-agent message",
+					"channel_id", channelID, "linked", link != nil)
+				continue
+			}
+			if isStateChange && !showStateChanges {
+				b.log.Debug("Filtering state change notification",
+					"channel_id", channelID, "linked", link != nil)
+				continue
 			}
 		}
 
