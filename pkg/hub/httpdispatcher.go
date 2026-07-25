@@ -1302,6 +1302,23 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 		resolvedEnv["SCION_HUB_ENDPOINT"] = d.hubEndpoint
 	}
 
+	// Inject canonical workspace sharing mode and git-ness so the broker can
+	// surface them in the container env on the start path.  The createAgent
+	// path carries these via WorkspaceMode in the request body; the startAgent
+	// path relies on resolvedEnv injection (this block) following the existing
+	// SCION_AGENT_ID / SCION_METADATA_MODE pattern.
+	if projectInfo.workspaceMode != "" {
+		resolvedEnv["SCION_WORKSPACE_MODE"] = string(store.ResolveWorkspaceSharingMode(projectInfo.workspaceMode))
+	}
+	switch projectInfo.workspaceMode {
+	case store.WorkspaceModePerAgent, store.WorkspaceModeWorktreePerAgent:
+		resolvedEnv["SCION_WORKSPACE_GIT"] = "true"
+	case store.WorkspaceModeShared, "":
+		if agent.AppliedConfig != nil && agent.AppliedConfig.GitClone != nil {
+			resolvedEnv["SCION_WORKSPACE_GIT"] = "true"
+		}
+	}
+
 	// Inject GCP identity env vars so the broker can configure the
 	// metadata-server sidecar correctly on (re-)start.  During the
 	// createAgent path this information travels inside CreateAgentConfig,
@@ -1487,6 +1504,22 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 	}
 	if d.hubEndpoint != "" {
 		resolvedEnv["SCION_HUB_ENDPOINT"] = d.hubEndpoint
+	}
+
+	// Inject canonical workspace sharing mode and git-ness so the broker can
+	// surface them in the container env on the restart path.  Follows the same
+	// pattern as DispatchAgentStart.
+	projectInfo := d.resolveDispatchProjectInfo(ctx, agent)
+	if projectInfo.workspaceMode != "" {
+		resolvedEnv["SCION_WORKSPACE_MODE"] = string(store.ResolveWorkspaceSharingMode(projectInfo.workspaceMode))
+	}
+	switch projectInfo.workspaceMode {
+	case store.WorkspaceModePerAgent, store.WorkspaceModeWorktreePerAgent:
+		resolvedEnv["SCION_WORKSPACE_GIT"] = "true"
+	case store.WorkspaceModeShared, "":
+		if agent.AppliedConfig != nil && agent.AppliedConfig.GitClone != nil {
+			resolvedEnv["SCION_WORKSPACE_GIT"] = "true"
+		}
 	}
 
 	injectModelEnv(resolvedEnv, agent.AppliedConfig)
