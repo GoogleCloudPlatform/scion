@@ -658,13 +658,13 @@ func (b *DiscordBroker) Publish(ctx context.Context, topic string, msg *messages
 					"channel_id", channelID, "error", linkErr)
 				link = nil
 			}
-			// Fail closed: a missing link (or a failed lookup) is treated the
-			// same as a link with observe settings disabled. Channels with no
-			// link row at all should not receive observe traffic; defaulting to
-			// "deliver everything" leaked agent-to-agent traffic and state
-			// changes into channels with observe mode off.
-			showAgentToAgent := link != nil && link.ShowAgentToAgent
-			showStateChanges := link != nil && link.ShowStateChanges
+			// Fail closed: a missing link, an inactive link, or a failed lookup
+			// is treated the same as a link with observe settings disabled.
+			// Channels with no link row at all should not receive observe
+			// traffic; defaulting to "deliver everything" leaked agent-to-agent
+			// traffic and state changes into channels with observe mode off.
+			showAgentToAgent := link != nil && link.Active && link.ShowAgentToAgent
+			showStateChanges := link != nil && link.Active && link.ShowStateChanges
 
 			if isAgentToAgent && !showAgentToAgent {
 				b.log.Debug("Filtering agent-to-agent message",
