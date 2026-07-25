@@ -336,7 +336,7 @@ func TestRunProjectSkillsAdd_Success(t *testing.T) {
 	projectSkillsOptional = false
 
 	// Single arg: URI only (project inferred from settings)
-	err := runProjectSkillsAdd(projectSkillsAddCmd, []string{"skill://new-skill"})
+	err := runProjectSkillsAdd(projectSkillsAddCmd, []string{"skill://scion/new-skill"})
 	assert.NoError(t, err)
 }
 
@@ -361,7 +361,7 @@ func TestRunProjectSkillsAdd_WithAlias(t *testing.T) {
 	// Simulate flag state for the command:
 	_ = projectSkillsAddCmd.Flags().Set("as", "my-alias")
 
-	err := runProjectSkillsAdd(projectSkillsAddCmd, []string{"skill://new-skill"})
+	err := runProjectSkillsAdd(projectSkillsAddCmd, []string{"skill://scion/new-skill"})
 	assert.NoError(t, err)
 }
 

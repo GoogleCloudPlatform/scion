@@ -278,7 +278,7 @@ func TestRunUserSkillsAdd_Success(t *testing.T) {
 	userSkillsAs = ""
 	userSkillsOptional = false
 
-	err := runUserSkillsAdd(userSkillsAddCmd, []string{"skill://new-user-skill"})
+	err := runUserSkillsAdd(userSkillsAddCmd, []string{"skill://scion/new-user-skill"})
 	assert.NoError(t, err)
 }
 
@@ -310,7 +310,7 @@ func TestRunUserSkillsAdd_WithAliasAndOptional(t *testing.T) {
 	t.Cleanup(func() { _ = userSkillsAddCmd.Flags().Set("optional", prevOptStr) })
 	_ = userSkillsAddCmd.Flags().Set("optional", "true")
 
-	err := runUserSkillsAdd(userSkillsAddCmd, []string{"skill://new-user-skill"})
+	err := runUserSkillsAdd(userSkillsAddCmd, []string{"skill://scion/new-user-skill"})
 	assert.NoError(t, err)
 }
 
