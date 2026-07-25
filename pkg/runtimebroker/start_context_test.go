@@ -1354,6 +1354,13 @@ func TestBuildStartContext_WorkspaceMode_StartPathFallback(t *testing.T) {
 
 // TestBuildStartContext_WorkspaceGit verifies that SCION_WORKSPACE_GIT is emitted
 // correctly based on the provisioning path.
+//
+// Coverage note: the highest-priority path — worktreeProvisioned=true (from
+// tryProvisionWorktree in start_context.go) — is not covered here because it
+// requires a real host-side git repository setup that is outside unit test scope.
+// The code path is simple (isGitWorkspace := worktreeProvisioned || ...) and
+// covered by the worktree integration tests. The remaining three priority levels
+// (GitClone config, on-disk git dir, hub-injected resolvedEnv) are tested below.
 func TestBuildStartContext_WorkspaceGit(t *testing.T) {
 	t.Run("git clone config implies git workspace", func(t *testing.T) {
 		cfg := DefaultServerConfig()

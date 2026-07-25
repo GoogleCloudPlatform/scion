@@ -3736,53 +3736,120 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_InjectsWorkspaceMode(t *testing.
 
 // TestHTTPAgentDispatcher_DispatchAgentRestart_InjectsWorkspaceMode verifies that
 // DispatchAgentRestart injects SCION_WORKSPACE_MODE and SCION_WORKSPACE_GIT into
-// resolvedEnv, following the same semantics as the start path.
+// resolvedEnv, following the same semantics as DispatchAgentStart. Uses a table
+// matching the DispatchAgentStart test cases so coverage is symmetric.
 func TestHTTPAgentDispatcher_DispatchAgentRestart_InjectsWorkspaceMode(t *testing.T) {
 	ctx := context.Background()
-	memStore := createTestStore(t)
 
-	project := &store.Project{
-		ID:        tid("proj-restart-wm"),
-		Name:      "restart-wm-test",
-		Slug:      "restart-wm-test",
-		GitRemote: "https://github.com/example/repo.git",
-		Labels:    map[string]string{store.LabelWorkspaceMode: store.WorkspaceModePerAgent},
-	}
-	if err := memStore.CreateProject(ctx, project); err != nil {
-		t.Fatalf("failed to create project: %v", err)
+	type testCase struct {
+		name               string
+		workspaceModeLabel string
+		gitRemote          string
+		appliedGitClone    *api.GitCloneConfig
+		wantMode           string
+		wantGit            bool
 	}
 
-	broker := &store.RuntimeBroker{
-		ID:       tid("broker-restart-wm"),
-		Name:     "test-broker",
-		Slug:     "test-broker",
-		Endpoint: "http://localhost:9800",
-		Status:   store.BrokerStatusOnline,
-	}
-	if err := memStore.CreateRuntimeBroker(ctx, broker); err != nil {
-		t.Fatalf("failed to create runtime broker: %v", err)
+	cases := []testCase{
+		{
+			name:               "shared-plain no git",
+			workspaceModeLabel: store.WorkspaceModeShared,
+			wantMode:           "shared-plain",
+			wantGit:            false,
+		},
+		{
+			name:               "shared-plain with git clone in applied config",
+			workspaceModeLabel: store.WorkspaceModeShared,
+			gitRemote:          "https://github.com/example/repo.git",
+			appliedGitClone:    &api.GitCloneConfig{URL: "https://github.com/example/repo.git"},
+			wantMode:           "shared-plain",
+			wantGit:            true,
+		},
+		{
+			name:               "clone-per-agent",
+			workspaceModeLabel: store.WorkspaceModePerAgent,
+			gitRemote:          "https://github.com/example/repo.git",
+			wantMode:           "clone-per-agent",
+			wantGit:            true,
+		},
+		{
+			name:               "worktree-per-agent",
+			workspaceModeLabel: store.WorkspaceModeWorktreePerAgent,
+			gitRemote:          "https://github.com/example/repo.git",
+			wantMode:           "worktree-per-agent",
+			wantGit:            true,
+		},
+		{
+			// When no workspace mode label is set, the hub does not inject
+			// SCION_WORKSPACE_MODE. The broker applies the shared-plain default.
+			name:               "empty label: hub does not inject mode",
+			workspaceModeLabel: "",
+			wantMode:           "",
+			wantGit:            false,
+		},
 	}
 
-	mockClient := &mockRuntimeBrokerClient{}
-	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			memStore := createTestStore(t)
 
-	agent := &store.Agent{
-		ID:              tid("agent-restart-wm"),
-		Name:            "test-agent",
-		Slug:            "test-agent",
-		ProjectID:       project.ID,
-		RuntimeBrokerID: broker.ID,
-	}
+			labels := map[string]string{}
+			if tc.workspaceModeLabel != "" {
+				labels[store.LabelWorkspaceMode] = tc.workspaceModeLabel
+			}
+			project := &store.Project{
+				ID:        tid("proj-rwm-" + tc.name),
+				Name:      "restart-wm-test",
+				Slug:      "restart-wm-test",
+				GitRemote: tc.gitRemote,
+				Labels:    labels,
+			}
+			if err := memStore.CreateProject(ctx, project); err != nil {
+				t.Fatalf("failed to create project: %v", err)
+			}
 
-	if err := dispatcher.DispatchAgentRestart(ctx, agent); err != nil {
-		t.Fatalf("DispatchAgentRestart failed: %v", err)
-	}
+			broker := &store.RuntimeBroker{
+				ID:       tid("broker-rwm-" + tc.name),
+				Name:     "test-broker",
+				Slug:     "test-broker",
+				Endpoint: "http://localhost:9800",
+				Status:   store.BrokerStatusOnline,
+			}
+			if err := memStore.CreateRuntimeBroker(ctx, broker); err != nil {
+				t.Fatalf("failed to create runtime broker: %v", err)
+			}
 
-	env := mockClient.lastRestartResolvedEnv
-	if got := env["SCION_WORKSPACE_MODE"]; got != "clone-per-agent" {
-		t.Errorf("SCION_WORKSPACE_MODE: got %q, want %q", got, "clone-per-agent")
-	}
-	if got := env["SCION_WORKSPACE_GIT"]; got != "true" {
-		t.Errorf("SCION_WORKSPACE_GIT: got %q, want %q", got, "true")
+			mockClient := &mockRuntimeBrokerClient{}
+			dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
+
+			agent := &store.Agent{
+				ID:              tid("agent-rwm-" + tc.name),
+				Name:            "test-agent",
+				Slug:            "test-agent",
+				ProjectID:       project.ID,
+				RuntimeBrokerID: broker.ID,
+				AppliedConfig: &store.AgentAppliedConfig{
+					GitClone: tc.appliedGitClone,
+				},
+			}
+
+			if err := dispatcher.DispatchAgentRestart(ctx, agent); err != nil {
+				t.Fatalf("DispatchAgentRestart failed: %v", err)
+			}
+
+			env := mockClient.lastRestartResolvedEnv
+			if got := env["SCION_WORKSPACE_MODE"]; got != tc.wantMode {
+				t.Errorf("SCION_WORKSPACE_MODE: got %q, want %q", got, tc.wantMode)
+			}
+			if tc.wantGit {
+				if env["SCION_WORKSPACE_GIT"] != "true" {
+					t.Errorf("SCION_WORKSPACE_GIT: got %q, want %q", env["SCION_WORKSPACE_GIT"], "true")
+				}
+			} else {
+				if _, present := env["SCION_WORKSPACE_GIT"]; present {
+					t.Errorf("SCION_WORKSPACE_GIT: expected absent (false), but got %q", env["SCION_WORKSPACE_GIT"])
+				}
+			}
+		})
 	}
 }

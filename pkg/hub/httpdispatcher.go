@@ -1314,6 +1314,13 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 	case store.WorkspaceModePerAgent, store.WorkspaceModeWorktreePerAgent:
 		resolvedEnv["SCION_WORKSPACE_GIT"] = "true"
 	case store.WorkspaceModeShared, "":
+		// For shared-plain, git-ness is detected from the applied GitClone config.
+		// Note: broker-local linked projects where the workspace is already a
+		// git repo on disk but has no HTTPS GitClone config cannot be detected
+		// as git-backed here. The broker's on-disk util.IsGitRepoDir check in
+		// buildStartContext covers this for the create path; on start/restart paths
+		// SCION_WORKSPACE_GIT will be absent for such workspaces. This is an
+		// acknowledged limitation noted in the design doc.
 		if agent.AppliedConfig != nil && agent.AppliedConfig.GitClone != nil {
 			resolvedEnv["SCION_WORKSPACE_GIT"] = "true"
 		}
@@ -1517,6 +1524,9 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 	case store.WorkspaceModePerAgent, store.WorkspaceModeWorktreePerAgent:
 		resolvedEnv["SCION_WORKSPACE_GIT"] = "true"
 	case store.WorkspaceModeShared, "":
+		// See DispatchAgentStart for the acknowledged limitation: broker-local
+		// linked projects without a GitClone config cannot be detected as
+		// git-backed here.
 		if agent.AppliedConfig != nil && agent.AppliedConfig.GitClone != nil {
 			resolvedEnv["SCION_WORKSPACE_GIT"] = "true"
 		}
