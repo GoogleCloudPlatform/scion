@@ -39,6 +39,17 @@ The best and most current reference for the CLI commands is available from `scio
 
 6. **Preserve branches**: When deleting agents whose work might need review, use `--preserve-branch`.
 
+## Model Override
+
+To start an agent with a specific model (overriding the harness default), use `--config` with a flat YAML file:
+
+```bash
+printf 'model: claude-sonnet-4-20250514\n' > /tmp/agent-config.yaml
+scion start <name> --non-interactive --config /tmp/agent-config.yaml
+```
+
+**Do NOT use `--harness-config` for this** — that flag expects a named harness configuration registered in the hub, not a model name or YAML file.
+
 ## Troubleshooting and Recovery
 
 Most stuck agents are recoverable without recreation. Always start with `scion look <agent>` to inspect current state before acting.

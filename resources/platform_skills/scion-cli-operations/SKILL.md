@@ -21,6 +21,15 @@ You are an autonomous Scion agent running inside a containerized sandbox. Your w
 - **Do Not Use Global**: Never use the `--global` option; you are operating in a grove workspace and it is set implicitly by default.
 - **Do Not Interact with Settings or Login Commands**.
 
+## Shell Safety for Task Prompts
+
+The `scion start` task prompt is embedded in a shell command. **Do not use backticks, `$variables`, or other shell metacharacters** in the inlined prompt — they cause the shell to exit before the agent starts, with no visible error. For long or formatted briefs, write the content to a file and pass a filepath reference instead:
+
+```bash
+scion start <name> --non-interactive --notify \
+  "Read your brief at /path/to/brief.md and follow it."
+```
+
 ## Recommended Commands
 
 - **Inspect an Agent**: `scion look <agent-id>` — inspect the recent output and current terminal-UI state of any running agent.
