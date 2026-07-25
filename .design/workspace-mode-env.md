@@ -2,7 +2,7 @@
 
 **Issue:** [ptone/scion#572](https://github.com/ptone/scion/issues/572)  
 **Project slug:** `workspace-mode-env`  
-**Status:** Draft — 3 open questions pending user input (see §Open Questions)
+**Status:** Finalized — all open questions resolved (see §Open Questions for decisions)
 
 ---
 
@@ -319,50 +319,40 @@ approach requires zero new storage.
 
 ## Open Questions
 
-Three decisions require user input before the design can be finalized.
-Raised serially below; do not continue past each until the user replies.
+All three questions resolved (2026-07-25). Decisions recorded below.
 
 **OQ1 — Canonical vs. wire labels in `SCION_WORKSPACE_MODE`:**  
-The design above emits canonical values (`shared-plain`, `clone-per-agent`,
-`worktree-per-agent`). This aligns with the glossary and the issue's
-recommendation. Confirm this is correct, or specify if wire labels (`shared`,
-`per-agent`, `worktree-per-agent`) are preferred. This decision is
-**load-bearing** — the string values baked into the env var become an agent API
-contract.
+✅ **Decision: canonical values.** `SCION_WORKSPACE_MODE` emits `shared-plain`,
+`clone-per-agent`, `worktree-per-agent` — aligned with the glossary. Wire labels
+(`shared`, `per-agent`, `worktree-per-agent`) are not exposed to agents.
+This is a stable agent API contract; new modes require a new canonical constant
+in `store.WorkspaceSharingMode` and a doc update, not a rename.
 
 **OQ2 — Ship Change 3 (WorkspaceMode propagation fix) with this PR or separately:**  
-Change 3 is a correctness bug on its own merits — restarted/resumed agents
-currently fall back to `shared-plain` regardless of their actual isolation
-level. Two options:
-- **Option A (together):** Ship Change 3 in the same PR. The fix is a
-  prerequisite for Changes 1 and 2 to be correct on restart paths.
-  Slightly larger PR, but logically cohesive.
-- **Option B (split):** File a separate issue for Change 3 (broker
-  WorkspaceMode propagation bug), fix it first, then ship Changes 1 and 2
-  in a follow-up. Cleaner history, but requires coordination between two PRs
-  and a narrow window where agents on restart still get wrong mode.
-
-The design doc is written to support either. This decision affects the phased
-plan below.
+✅ **Decision: Option A — ship all three changes together.** The propagation fix
+is a correctness prerequisite for Changes 1 and 2 to be accurate on restart
+paths. Single cohesive PR.
 
 **OQ3 — Deprecate `SCION_SHARED_WORKSPACE` once `SCION_WORKSPACE_MODE` lands:**  
-`SCION_SHARED_WORKSPACE=true` is currently consumed only by
-`sciontool init` (`cmd/sciontool/commands/init.go:330`) to detect shared-plain
-git workspaces. With `SCION_WORKSPACE_MODE=shared-plain` and
-`SCION_WORKSPACE_GIT=true` available, sciontool could read those instead.
-Two options:
-- **Option A (deprecate):** Keep emitting `SCION_SHARED_WORKSPACE` in this PR
-  for backward compat, update sciontool to read the new vars, then remove the
-  old var in a follow-up.
-- **Option B (retain independently):** Keep `SCION_SHARED_WORKSPACE` as-is
-  indefinitely; it serves a narrow sciontool bootstrap purpose and the
-  consolidation cost may not be worth it.
+✅ **Decision: Option A — deprecate, with a compatibility period.** Sciontool
+and the broker/hub do not always ship together; older `sciontool` builds may
+still read `SCION_SHARED_WORKSPACE`. This PR therefore:
+1. Continues emitting `SCION_SHARED_WORKSPACE` unchanged.
+2. Updates `sciontool init` to prefer `SCION_WORKSPACE_MODE` + `SCION_WORKSPACE_GIT`
+   (falling back to `SCION_SHARED_WORKSPACE` when the new vars are absent, for
+   compatibility with older broker versions).
+3. Adds a `// Deprecated:` comment on the `SCION_SHARED_WORKSPACE` emission site.
+
+Phase 2 (eventual removal of `SCION_SHARED_WORKSPACE`) is tracked in a separate
+issue filed by the coordinator — see **ptone/scion#TBD** (issue number to be
+added once filed). The implementation phases below include a sciontool update
+task for the compatibility shim.
 
 ---
 
 ## Implementation Phases
 
-*(Adjusts based on answer to OQ2. Shown here as Option A — all together.)*
+*(All three changes ship together per OQ2 decision. sciontool compat shim added per OQ3.)*
 
 ### Phase 0 — Bug fix: WorkspaceMode propagation (Change 3)
 
@@ -401,13 +391,25 @@ Two options:
      var present.
    - Non-git shared workspace → var absent.
 
-### Phase 3 — Documentation
+### Phase 3 — sciontool compatibility shim (OQ3)
+
+**Commit scope:** `cmd/sciontool/commands/init.go`.
+
+1. Update `sciontool init` to prefer `SCION_WORKSPACE_MODE` + `SCION_WORKSPACE_GIT`
+   when both are present, with fallback to `SCION_SHARED_WORKSPACE` for
+   older broker versions that don't yet emit the new vars.
+2. Add a `// Deprecated: use SCION_WORKSPACE_MODE+SCION_WORKSPACE_GIT` comment
+   on the `SCION_SHARED_WORKSPACE` emission site in `start_context.go`.
+3. Add tests for both code paths in the fallback logic.
+
+### Phase 4 — Documentation
 
 **Commit scope:** `docs-site/`.
 
 1. Add "Runtime Environment Variables" section to `workspace.md` or
    `workspaces-and-sharing.md` documenting `SCION_WORKSPACE_MODE` (values,
-   defaults) and `SCION_WORKSPACE_GIT` (boolean-presence contract).
+   defaults) and `SCION_WORKSPACE_GIT` (boolean-presence contract). Note
+   `SCION_SHARED_WORKSPACE` as deprecated with the tracking issue reference.
 2. Fix the shared-directories "both locations" doc bug in `workspace.md:190-191`
    (either/or per `SharedDir.InWorkspace`, not always-both).
 3. Update `skills.md:233-240` inject_when table if needed.
@@ -442,8 +444,11 @@ The QA tester should verify:
    - Agent in a project with no `scion.dev/workspace-mode` label.
    - `SCION_WORKSPACE_MODE` → `shared-plain`.
 
-6. **`SCION_SHARED_WORKSPACE` still emitted** (if OQ3 → retain):
-   - Existing shared-plain git agents still receive `SCION_SHARED_WORKSPACE=true`.
+6. **`SCION_SHARED_WORKSPACE` backward compatibility (OQ3 deprecation):**
+   - Existing shared-plain git agents still receive `SCION_SHARED_WORKSPACE=true`
+     (emitted unchanged; deprecation period is in effect).
+   - `sciontool init` works correctly when only `SCION_SHARED_WORKSPACE` is
+     present (older broker, no new vars) AND when only the new vars are present.
 
 7. **Documentation:**
    - `workspace.md` or `workspaces-and-sharing.md` documents both new vars.
