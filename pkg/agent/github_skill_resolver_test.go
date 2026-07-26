@@ -21,7 +21,10 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -896,6 +899,138 @@ func TestGitHubSkillResolver_CrossCredentialCacheIsolation(t *testing.T) {
 	}
 	if apiCalls != callsAfterB {
 		t.Errorf("expected resolver B's second call to hit its own cache entry, got %d additional API calls", apiCalls-callsAfterB)
+	}
+}
+
+// TestGitHubPrivateRepoInstall_NoDoubleDownload is a regression test for a bug
+// where the install phase made a second, unauthenticated raw.githubusercontent.com
+// request to fetch file content that was already downloaded (with auth) during
+// resolution. Private repos return HTTP 404 to unauthenticated raw requests, so
+// the install phase would fail even though resolution succeeded.
+//
+// The fix (Option A): ResolvedFile.Content carries the bytes from resolution so
+// the install phase writes them directly and skips the network re-download.
+func TestGitHubPrivateRepoInstall_NoDoubleDownload(t *testing.T) {
+	skillContent := "# Private Skill\nSecret content."
+	readmeContent := "# README\nAlso secret."
+
+	// Track raw-content requests so we can assert auth behaviour.
+	var rawTotal atomic.Int32
+	var rawUnauthenticated atomic.Int32
+
+	server, mux := newTestGitHubServer(t)
+
+	// Commits endpoint — requires auth (private repo behaviour).
+	mux.HandleFunc("/repos/private-org/private-repo/commits/HEAD", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") == "" {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = w.Write([]byte(testCommitSHA))
+	})
+
+	// Contents listing — requires auth.
+	mux.HandleFunc("/repos/private-org/private-repo/contents/skills/secret-skill", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") == "" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode([]githubContentEntry{
+			{Name: "SKILL.md", Path: "skills/secret-skill/SKILL.md", Type: "file", Size: len(skillContent)},
+			{Name: "README.md", Path: "skills/secret-skill/README.md", Type: "file", Size: len(readmeContent)},
+		})
+	})
+
+	// Raw content — return 404 without auth, simulating GitHub private repo behaviour.
+	// Any request here without a Bearer token is exactly the unauthenticated
+	// re-download that the bug caused during the install phase.
+	mux.HandleFunc("/raw/private-org/private-repo/"+testCommitSHA+"/skills/secret-skill/SKILL.md",
+		func(w http.ResponseWriter, r *http.Request) {
+			rawTotal.Add(1)
+			if r.Header.Get("Authorization") == "" {
+				rawUnauthenticated.Add(1)
+				http.NotFound(w, r)
+				return
+			}
+			_, _ = w.Write([]byte(skillContent))
+		})
+	mux.HandleFunc("/raw/private-org/private-repo/"+testCommitSHA+"/skills/secret-skill/README.md",
+		func(w http.ResponseWriter, r *http.Request) {
+			rawTotal.Add(1)
+			if r.Header.Get("Authorization") == "" {
+				rawUnauthenticated.Add(1)
+				http.NotFound(w, r)
+				return
+			}
+			_, _ = w.Write([]byte(readmeContent))
+		})
+
+	resolver := newTestGitHubResolver(server)
+
+	// Phase 1: Resolve (authenticated — should succeed and populate f.Content).
+	result, err := resolver.Resolve(context.Background(), []api.SkillReference{
+		{URI: "gh://private-org/private-repo/secret-skill"},
+	}, ResolveOpts{})
+	if err != nil {
+		t.Fatalf("Resolve failed: %v", err)
+	}
+	if len(result.Errors) != 0 {
+		t.Fatalf("unexpected resolve errors: %v", result.Errors)
+	}
+	if len(result.Resolved) != 1 {
+		t.Fatalf("expected 1 resolved skill, got %d", len(result.Resolved))
+	}
+
+	// All resolved files must carry pre-fetched content.
+	skill := result.Resolved[0]
+	for _, f := range skill.Files {
+		if f.Content == nil {
+			t.Errorf("file %q has nil Content after Resolve; install phase would make an unauthenticated re-download", f.Path)
+		}
+	}
+
+	// Record how many raw requests the resolution phase made (should be 2: one per file).
+	rawAfterResolve := rawTotal.Load()
+
+	// Phase 2: Install — must use pre-fetched content, not re-download.
+	agentHome := t.TempDir()
+	skillsDest := filepath.Join(agentHome, ".claude", "skills")
+
+	_, err = installResolvedSkills(context.Background(), result.Resolved, skillsDest, agentHome)
+	if err != nil {
+		// If the fix is absent, this fails with "download failed with status 404"
+		// because the install phase hits the mock server without a token.
+		t.Fatalf("installResolvedSkills failed (install phase may have made an unauthenticated re-download): %v", err)
+	}
+
+	// Verify files are present and correct on disk.
+	for _, tc := range []struct {
+		path string
+		want string
+	}{
+		{"SKILL.md", skillContent},
+		{"README.md", readmeContent},
+	} {
+		installed := filepath.Join(skillsDest, "secret-skill", tc.path)
+		data, err := os.ReadFile(installed)
+		if err != nil {
+			t.Fatalf("failed to read installed file %s: %v", tc.path, err)
+		}
+		if string(data) != tc.want {
+			t.Errorf("installed %s = %q, want %q", tc.path, string(data), tc.want)
+		}
+	}
+
+	// The raw endpoint must not have been hit again during install.
+	rawAfterInstall := rawTotal.Load()
+	if rawAfterInstall != rawAfterResolve {
+		t.Errorf("install phase made %d additional raw request(s); expected 0 (content should come from ResolvedFile.Content)",
+			rawAfterInstall-rawAfterResolve)
+	}
+
+	// No unauthenticated requests must have occurred at all.
+	if n := rawUnauthenticated.Load(); n > 0 {
+		t.Errorf("install phase made %d unauthenticated raw request(s); private-repo content would 404", n)
 	}
 }
 

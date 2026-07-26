@@ -201,10 +201,11 @@ func (r *GitHubSkillResolver) resolveOne(ctx context.Context, ghRef *GitHubSkill
 		relPath := strings.TrimPrefix(entry.Path, ghRef.SkillPath+"/")
 
 		resolvedFiles = append(resolvedFiles, ResolvedFile{
-			Path: relPath,
-			URL:  r.rawContentURL(ghRef, commitSHA, entry.Path),
-			Hash: hash,
-			Size: int64(len(content)),
+			Path:    relPath,
+			URL:     r.rawContentURL(ghRef, commitSHA, entry.Path),
+			Hash:    hash,
+			Size:    int64(len(content)),
+			Content: content, // Carry bytes so install phase skips unauthenticated re-download.
 		})
 		fileInfos = append(fileInfos, transfer.FileInfo{Path: relPath, Hash: hash})
 	}

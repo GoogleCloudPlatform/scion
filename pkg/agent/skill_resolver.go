@@ -98,6 +98,21 @@ type ResolvedFile struct {
 	URL  string
 	Hash string
 	Size int64
+	// Content holds the pre-fetched file bytes when available (e.g. from the
+	// GitHub resolver, which downloads each file during resolution for hashing).
+	// If non-nil, installOneSkill writes this directly and skips the network
+	// re-download, preventing unauthenticated requests that would 404 on
+	// private repos.
+	//
+	// The json:"-" tag intentionally excludes Content from the on-disk
+	// GitHubResolutionCache. Entries loaded from disk (e.g. after a broker
+	// restart within the TTL window) will have Content == nil and fall back
+	// to downloadSkillFile, which makes an unauthenticated request. For private
+	// repos this means the restart-within-TTL path has the same limitation as
+	// before this fix. A follow-up is needed to address that narrower window
+	// (e.g. by not caching private-repo entries to disk, or by re-fetching
+	// content when the disk-cache entry is used for install).
+	Content []byte `json:"-"`
 }
 
 // --- Context injection ---
@@ -299,8 +314,22 @@ func installOneSkill(ctx context.Context, skill ResolvedSkill, dest, skillsDest 
 			}
 		}
 
-		// S5: Download with transport constraints
-		if err := downloadSkillFile(ctx, f.URL, destPath, defaultMaxFileSize); err != nil {
+		// S5: Write pre-fetched content or download with transport constraints.
+		// GitHubSkillResolver carries content bytes from the authenticated
+		// resolution-phase download; using them here avoids a second,
+		// unauthenticated raw.githubusercontent.com request that would 404 on
+		// private repos.
+		//
+		// Note: entries loaded from the on-disk resolution cache have
+		// Content == nil (json:"-" strips it), so they fall through to
+		// downloadSkillFile. This means the post-restart, within-TTL path
+		// retains the pre-fix limitation for private repos. See the Content
+		// field doc on ResolvedFile for details.
+		if f.Content != nil {
+			if err := writeSkillFileContent(f.Content, destPath); err != nil {
+				return nil, fmt.Errorf("failed to write %s: %w", f.Path, err)
+			}
+		} else if err := downloadSkillFile(ctx, f.URL, destPath, defaultMaxFileSize); err != nil {
 			return nil, fmt.Errorf("failed to download %s: %w", f.Path, err)
 		}
 
@@ -541,6 +570,35 @@ func downloadSkillFile(ctx context.Context, fileURL, destPath string, maxSize in
 	// S5: Do not log the URL (may contain signed tokens)
 	util.Debugf("provision: downloaded skill file %s (%d bytes)", filepath.Base(destPath), n)
 
+	return nil
+}
+
+// writeSkillFileContent writes pre-fetched content bytes directly to destPath,
+// bypassing the network download. This is used when the resolver already holds
+// the file bytes in memory (e.g. GitHubSkillResolver downloads each file during
+// resolution for hashing) so that no second unauthenticated request is needed.
+//
+// Callers are responsible for pre-bounding content to a safe size. The GitHub
+// resolver enforces githubMaxFileSize (10 MB) before populating ResolvedFile.Content;
+// the check here is a defensive backstop for any future resolver that sets Content.
+func writeSkillFileContent(content []byte, destPath string) error {
+	if int64(len(content)) > defaultMaxFileSize {
+		return fmt.Errorf("pre-fetched content exceeds maximum size of %d bytes", defaultMaxFileSize)
+	}
+	f, err := os.Create(destPath)
+	if err != nil {
+		return fmt.Errorf("failed to create file: %w", err)
+	}
+	defer func() { _ = f.Close() }() // safety net for panics / early returns
+	if _, err := f.Write(content); err != nil {
+		return fmt.Errorf("failed to write file: %w", err)
+	}
+	// Explicit close to catch flush errors (e.g. disk full). The deferred
+	// close above is a no-op after an explicit close, so it is safe to leave.
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("failed to close file: %w", err)
+	}
+	util.Debugf("provision: wrote pre-fetched skill file %s (%d bytes)", filepath.Base(destPath), len(content))
 	return nil
 }
 
