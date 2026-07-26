@@ -152,9 +152,20 @@ func parseFullURI(raw string, uri *SkillURI) (*SkillURI, error) {
 	// with the default registry. The grammar comment states all qualifiers are
 	// optional — skill://[registry/][scope/]name[@version] — so a bare
 	// skill://name form is unambiguous and equivalent to skill://scion/name.
+	// Fields are assigned inline rather than delegating to parseAliasPath to
+	// keep the logic self-contained and avoid an unnecessary slice allocation.
 	if len(pathSegments) == 0 && registry != "" {
 		uri.Registry = defaultRegistry
-		return parseAliasPath(raw, uri, []string{registry}, version)
+		uri.Name = registry
+		if err := ValidateSkillName(uri.Name); err != nil {
+			return nil, fmt.Errorf("invalid skill URI %q: %w", raw, err)
+		}
+		if version == "" {
+			uri.Version = defaultVersion
+		} else {
+			uri.Version = version
+		}
+		return uri, nil
 	}
 
 	if registry == "" {
