@@ -30,6 +30,8 @@ scion start <name> --non-interactive \
   "Read your brief at /path/to/brief.md and follow it."
 ```
 
+**Use absolute paths** in task prompts and briefs. A sub-agent's working directory may differ from yours — relative paths resolve against the sub-agent's `/workspace`, not yours.
+
 ## Recommended Commands
 
 - **Inspect an Agent**: `scion look <agent-id>` — inspect the recent output and current terminal-UI state of any running agent.

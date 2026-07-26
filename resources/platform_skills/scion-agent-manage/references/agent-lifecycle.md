@@ -51,6 +51,12 @@ accepted. Time-box it; do not leave agents stopped indefinitely.
    | "Check with leads about cleanup" | Ask leads which of **their sub-agents** are safe to delete |
    | A lead's own readiness signal | **Never** authorizes deleting that lead |
 
+5. **A notification is not proof of completion.** State-change notifications fire on
+   sub-task transitions, not only on full-task completion. Before treating an agent as
+   done, verify with `scion look <agent>` and confirm the artifact it owed — commit
+   pushed, file written, PR opened. Acting on the notification alone causes premature
+   follow-up dispatch against a state that does not yet exist.
+
 ## Anti-patterns
 
 - **Deleting an agent immediately on completion signal.** Wait for explicit confirmation
