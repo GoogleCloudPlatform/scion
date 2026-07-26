@@ -39,6 +39,29 @@ The best and most current reference for the CLI commands is available from `scio
 
 6. **Preserve branches**: When deleting agents whose work might need review, use `--preserve-branch`.
 
+## Briefing
+
+Every agent you create needs a brief. Write the brief to a **shared scratchpad file and
+pass the filepath** — do not inline a long brief into the creation command.
+
+```bash
+scion start <name> --non-interactive \
+  "Read your brief at /scion-volumes/scratchpad/briefs/<name>.md and follow it."
+```
+
+A brief states:
+
+| Section | Content |
+|---|---|
+| Task | what to do, in one or two sentences |
+| Context | what has already been decided, and where to read it |
+| Boundaries | what is explicitly out of scope |
+| Deliverable | what artifact is owed, and in what shape |
+| Reporting | who to report to, and when |
+
+For shell-escaping rules when passing prompts, see the `scion-cli-operations` skill —
+do not improvise quoting.
+
 ## Model Override
 
 To start an agent with a specific model (overriding the harness default), use the `--model` flag:
@@ -50,3 +73,5 @@ scion start <name> --non-interactive --model claude-sonnet-4-20250514
 **Do NOT use `--harness-config` for this** — that flag expects a named harness configuration registered in the hub, not a model name.
 
 For troubleshooting agents that are stalled, have hit an error, or are stuck see references/troubleshooting.md
+
+For agent lifecycle rules — when to delete, when to stop, and who may authorize deletion — see references/agent-lifecycle.md
