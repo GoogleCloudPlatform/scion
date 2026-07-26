@@ -251,11 +251,32 @@ func TestRunUserSkillsAdd_NoURIError(t *testing.T) {
 	_, projectDir := setupUserSkillsProject(t, server.URL)
 	projectPath = projectDir
 
-	// Plain string (no "://") → validation error before hub is contacted.
-	err := runUserSkillsAdd(userSkillsAddCmd, []string{"mypkg"})
+	// scion:// is explicitly rejected by NormalizeSkillURI before the hub is contacted.
+	// Note: bare skill names are valid per AC #6 (e.g. "my-skill"); use a genuinely
+	// invalid URI instead.
+	err := runUserSkillsAdd(userSkillsAddCmd, []string{"scion://forbidden"})
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "skill URI is required (expected format containing ://)")
-	assert.False(t, hubCalled, "hub must not be contacted when the argument is not a skill URI")
+	assert.Contains(t, err.Error(), "scion://", "error should identify the rejected scheme")
+	assert.False(t, hubCalled, "hub must not be contacted when NormalizeSkillURI rejects the URI")
+}
+
+func TestRunUserSkillsAdd_BareSkillName(t *testing.T) {
+	// Bare skill names (no "://") are valid since #866: NormalizeSkillURI accepts them.
+	server := newUserSkillsMockServer(t)
+	defer server.Close()
+	setUserSkillsHubEnv(t, server.URL)
+
+	orig := projectPath
+	defer func() { projectPath = orig }()
+	origFmt := outputFormat
+	defer func() { outputFormat = origFmt }()
+
+	_, projectDir := setupUserSkillsProject(t, server.URL)
+	projectPath = projectDir
+	outputFormat = ""
+
+	err := runUserSkillsAdd(userSkillsAddCmd, []string{"bare-skill"})
+	assert.NoError(t, err)
 }
 
 func TestRunUserSkillsAdd_Success(t *testing.T) {
@@ -278,7 +299,7 @@ func TestRunUserSkillsAdd_Success(t *testing.T) {
 	userSkillsAs = ""
 	userSkillsOptional = false
 
-	err := runUserSkillsAdd(userSkillsAddCmd, []string{"skill://new-user-skill"})
+	err := runUserSkillsAdd(userSkillsAddCmd, []string{"skill://scion/new-user-skill"})
 	assert.NoError(t, err)
 }
 
@@ -310,7 +331,7 @@ func TestRunUserSkillsAdd_WithAliasAndOptional(t *testing.T) {
 	t.Cleanup(func() { _ = userSkillsAddCmd.Flags().Set("optional", prevOptStr) })
 	_ = userSkillsAddCmd.Flags().Set("optional", "true")
 
-	err := runUserSkillsAdd(userSkillsAddCmd, []string{"skill://new-user-skill"})
+	err := runUserSkillsAdd(userSkillsAddCmd, []string{"skill://scion/new-user-skill"})
 	assert.NoError(t, err)
 }
 

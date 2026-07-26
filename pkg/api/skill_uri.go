@@ -68,11 +68,12 @@ func ValidateSkillName(name string) error {
 
 // ParseSkillURI parses a skill URI string into its components.
 // Accepts all forms from the normative grammar:
-//   - Full:      skill://scion/core/scion@^1.0
-//   - No reg:    skill:///core/scion@^1.0
-//   - No ver:    skill://scion/core/scion
-//   - Alias:     skill://project/my-skill@latest
-//   - Bare:      scion
+//   - Full:        skill://scion/core/scion@^1.0
+//   - No reg:      skill:///core/scion@^1.0
+//   - No ver:      skill://scion/core/scion
+//   - Alias:       skill://project/my-skill@latest
+//   - Single name: skill://my-skill  (equivalent to skill://scion/my-skill; AC #5)
+//   - Bare:        scion
 //
 // Returns an error for invalid URIs (empty name, invalid scope, bad chars).
 func ParseSkillURI(raw string) (*SkillURI, error) {
@@ -145,6 +146,26 @@ func parseFullURI(raw string, uri *SkillURI) (*SkillURI, error) {
 
 		// For alias forms like skill://project/my-skill, pathSegments are the rest
 		return parseAliasPath(raw, uri, pathSegments, version)
+	}
+
+	// Single non-alias segment (e.g. skill://my-skill): treat as the skill name
+	// with the default registry. The grammar comment states all qualifiers are
+	// optional — skill://[registry/][scope/]name[@version] — so a bare
+	// skill://name form is unambiguous and equivalent to skill://scion/name.
+	// Fields are assigned inline rather than delegating to parseAliasPath to
+	// keep the logic self-contained and avoid an unnecessary slice allocation.
+	if len(pathSegments) == 0 && registry != "" {
+		uri.Registry = defaultRegistry
+		uri.Name = registry
+		if err := ValidateSkillName(uri.Name); err != nil {
+			return nil, fmt.Errorf("invalid skill URI %q: %w", raw, err)
+		}
+		if version == "" {
+			uri.Version = defaultVersion
+		} else {
+			uri.Version = version
+		}
+		return uri, nil
 	}
 
 	if registry == "" {
