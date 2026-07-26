@@ -184,11 +184,13 @@ scion shared-dir remove <name>
 
 ### Mounting Shared Directories
 
-When an agent is created in a project that has shared directories, they are automatically mounted into the agent's container. 
+When an agent is created in a project that has shared directories, they are automatically mounted into the agent's container.
 
-By default, they are available at two locations within the agent:
-- **Standard Path:** `/scion-volumes/<name>`
-- **Workspace Path:** `/workspace/.scion-volumes/<name>`
+Each shared directory's mount location depends on its `in_workspace` setting:
+- **`in_workspace: false` (default):** `/scion-volumes/<name>` — mounted at the standard volume path, outside the workspace.
+- **`in_workspace: true`:** `/workspace/.scion-volumes/<name>` — mounted inside the workspace tree.
+
+A shared directory is mounted at one of these locations, not both.
 
 ### Web Dashboard File Viewer
 

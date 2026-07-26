@@ -895,3 +895,71 @@ func TestEnsureWorkspaceOwnership_ChownsWhenRoot(t *testing.T) {
 		t.Fatalf("unexpected chown call: path=%q uid=%d gid=%d", gotPath, gotUID, gotGID)
 	}
 }
+
+// TestResolveIsSharedGitWorkspace verifies the compat shim logic for detecting
+// a shared-plain git workspace. It covers both the new canonical vars and the
+// legacy SCION_SHARED_WORKSPACE fallback path.
+func TestResolveIsSharedGitWorkspace(t *testing.T) {
+	cases := []struct {
+		name          string
+		workspaceMode string
+		workspaceGit  string
+		sharedLegacy  string
+		want          bool
+	}{
+		{
+			name:          "new vars: shared-plain + git → true",
+			workspaceMode: "shared-plain",
+			workspaceGit:  "true",
+			want:          true,
+		},
+		{
+			name:          "new vars: clone-per-agent + git → false (not shared)",
+			workspaceMode: "clone-per-agent",
+			workspaceGit:  "true",
+			want:          false,
+		},
+		{
+			name:          "new vars: shared-plain without git → false",
+			workspaceMode: "shared-plain",
+			workspaceGit:  "",
+			want:          false,
+		},
+		{
+			name:          "new vars: worktree-per-agent + git → false (not shared)",
+			workspaceMode: "worktree-per-agent",
+			workspaceGit:  "true",
+			want:          false,
+		},
+		{
+			name:         "legacy: SCION_SHARED_WORKSPACE=true → true (fallback)",
+			sharedLegacy: "true",
+			want:         true,
+		},
+		{
+			name:         "legacy: SCION_SHARED_WORKSPACE absent → false",
+			sharedLegacy: "",
+			want:         false,
+		},
+		{
+			name:          "new vars take precedence: mode set + legacy true → follows mode",
+			workspaceMode: "clone-per-agent",
+			workspaceGit:  "true",
+			sharedLegacy:  "true",
+			want:          false, // mode=clone-per-agent means not shared-plain
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("SCION_WORKSPACE_MODE", tc.workspaceMode)
+			t.Setenv("SCION_WORKSPACE_GIT", tc.workspaceGit)
+			t.Setenv("SCION_SHARED_WORKSPACE", tc.sharedLegacy)
+
+			got := resolveIsSharedGitWorkspace()
+			if got != tc.want {
+				t.Errorf("resolveIsSharedGitWorkspace() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

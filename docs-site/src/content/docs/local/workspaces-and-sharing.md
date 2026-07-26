@@ -61,6 +61,30 @@ A useful rule of thumb:
 
 Note that the same git project used locally with worktrees may switch to clone-based provisioning once it is managed by a Hub, because Worktree-per-agent is not yet supported for Hub-managed projects.
 
+## Runtime environment variables
+
+Agents can discover their workspace provisioning at startup through two environment variables emitted by the broker into every container.
+
+### `SCION_WORKSPACE_MODE`
+
+The canonical workspace sharing mode for the project. Always present; defaults to `shared-plain` when no mode label is set.
+
+| Value | Description |
+|---|---|
+| `shared-plain` | One workspace directory shared by all agents (no per-agent isolation). |
+| `clone-per-agent` | Each agent has its own full git clone. |
+| `worktree-per-agent` | Each agent has its own git worktree over a shared checkout. |
+
+**Example:** An agent in a Hub-managed git project reads `SCION_WORKSPACE_MODE=clone-per-agent` to know it has a private checkout and can safely commit without affecting other agents.
+
+### `SCION_WORKSPACE_GIT`
+
+Present (value `"true"`) when the workspace is a git repository. Absent when the workspace is not git-backed.
+
+`SCION_WORKSPACE_GIT` is separate from `SCION_WORKSPACE_MODE` because `shared-plain` can be either git-backed or a plain directory — the mode alone cannot disambiguate. Absent means false; there is no `"false"` string value.
+
+**Compatibility note:** Older broker versions emitted only `SCION_SHARED_WORKSPACE=true` for shared-plain git workspaces. The `sciontool init` compat shim prefers the new vars and falls back to `SCION_SHARED_WORKSPACE` when they are absent. `SCION_SHARED_WORKSPACE` is deprecated and tracked for removal in [ptone/scion#575](https://github.com/ptone/scion/issues/575).
+
 ## Related workspace concepts
 
 A few adjacent terms are worth distinguishing from the sharing mode itself:

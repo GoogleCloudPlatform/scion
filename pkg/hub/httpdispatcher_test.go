@@ -48,30 +48,31 @@ func createTestStore(t *testing.T) store.Store {
 
 // mockRuntimeBrokerClient is a mock implementation of RuntimeBrokerClient for testing.
 type mockRuntimeBrokerClient struct {
-	createCalled     bool
-	startCalled      bool
-	stopCalled       bool
-	restartCalled    bool
-	deleteCalled     bool
-	messageCalled    bool
-	cleanupCalled    bool
-	lastBrokerID     string
-	lastEndpoint     string
-	lastAgentID      string
-	lastTask         string
-	lastProjectPath  string
-	lastProjectSlug  string
-	lastMessage      string
-	lastInterrupt    bool
-	lastResolvedEnv  map[string]string
-	lastInlineConfig *api.ScionConfig
-	lastCreateReq    *RemoteCreateAgentRequest
-	lastDeleteOpts   struct{ deleteFiles, removeBranch bool }
-	returnErr        error
-	cleanupErr       error
-	startReturnResp  *RemoteAgentResponse // custom start response if set
-	cleanupCalls     int
-	cleanupSlugs     []string
+	createCalled           bool
+	startCalled            bool
+	stopCalled             bool
+	restartCalled          bool
+	deleteCalled           bool
+	messageCalled          bool
+	cleanupCalled          bool
+	lastBrokerID           string
+	lastEndpoint           string
+	lastAgentID            string
+	lastTask               string
+	lastProjectPath        string
+	lastProjectSlug        string
+	lastMessage            string
+	lastInterrupt          bool
+	lastResolvedEnv        map[string]string
+	lastRestartResolvedEnv map[string]string
+	lastInlineConfig       *api.ScionConfig
+	lastCreateReq          *RemoteCreateAgentRequest
+	lastDeleteOpts         struct{ deleteFiles, removeBranch bool }
+	returnErr              error
+	cleanupErr             error
+	startReturnResp        *RemoteAgentResponse // custom start response if set
+	cleanupCalls           int
+	cleanupSlugs           []string
 }
 
 func (m *mockRuntimeBrokerClient) CreateAgent(ctx context.Context, brokerID, brokerEndpoint string, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, error) {
@@ -134,6 +135,7 @@ func (m *mockRuntimeBrokerClient) RestartAgent(ctx context.Context, brokerID, br
 	m.lastBrokerID = brokerID
 	m.lastEndpoint = brokerEndpoint
 	m.lastAgentID = agentID
+	m.lastRestartResolvedEnv = resolvedEnv
 	return m.returnErr
 }
 
@@ -3610,4 +3612,244 @@ func TestBuildCreateRequest_RelativeWorkspaceSurvives(t *testing.T) {
 				mockClient.lastCreateReq.Config.Workspace)
 		}
 	})
+}
+
+// TestHTTPAgentDispatcher_DispatchAgentStart_InjectsWorkspaceMode verifies that
+// DispatchAgentStart injects SCION_WORKSPACE_MODE (canonical) and SCION_WORKSPACE_GIT
+// into resolvedEnv for each of the three workspace sharing modes.
+func TestHTTPAgentDispatcher_DispatchAgentStart_InjectsWorkspaceMode(t *testing.T) {
+	ctx := context.Background()
+
+	type testCase struct {
+		name               string
+		workspaceModeLabel string // project label value (wire format)
+		gitRemote          string
+		appliedGitClone    *api.GitCloneConfig
+		wantMode           string
+		wantGit            bool
+	}
+
+	cases := []testCase{
+		{
+			name:               "shared-plain no git",
+			workspaceModeLabel: store.WorkspaceModeShared,
+			wantMode:           "shared-plain",
+			wantGit:            false,
+		},
+		{
+			name:               "shared-plain with git clone in applied config",
+			workspaceModeLabel: store.WorkspaceModeShared,
+			gitRemote:          "https://github.com/example/repo.git",
+			appliedGitClone:    &api.GitCloneConfig{URL: "https://github.com/example/repo.git"},
+			wantMode:           "shared-plain",
+			wantGit:            true,
+		},
+		{
+			name:               "clone-per-agent",
+			workspaceModeLabel: store.WorkspaceModePerAgent,
+			gitRemote:          "https://github.com/example/repo.git",
+			wantMode:           "clone-per-agent",
+			wantGit:            true,
+		},
+		{
+			name:               "worktree-per-agent",
+			workspaceModeLabel: store.WorkspaceModeWorktreePerAgent,
+			gitRemote:          "https://github.com/example/repo.git",
+			wantMode:           "worktree-per-agent",
+			wantGit:            true,
+		},
+		{
+			// When no workspace mode label is set, the hub does not inject
+			// SCION_WORKSPACE_MODE. The broker applies the shared-plain default
+			// in buildStartContext when the key is absent from resolvedEnv.
+			name:               "empty label: hub does not inject mode",
+			workspaceModeLabel: "",
+			wantMode:           "", // absent from hub-injected resolvedEnv
+			wantGit:            false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			memStore := createTestStore(t)
+
+			labels := map[string]string{}
+			if tc.workspaceModeLabel != "" {
+				labels[store.LabelWorkspaceMode] = tc.workspaceModeLabel
+			}
+			project := &store.Project{
+				ID:        tid("proj-wm-" + tc.name),
+				Name:      "workspace-mode-test",
+				Slug:      "workspace-mode-test",
+				GitRemote: tc.gitRemote,
+				Labels:    labels,
+			}
+			if err := memStore.CreateProject(ctx, project); err != nil {
+				t.Fatalf("failed to create project: %v", err)
+			}
+
+			broker := &store.RuntimeBroker{
+				ID:       tid("broker-wm-" + tc.name),
+				Name:     "test-broker",
+				Slug:     "test-broker",
+				Endpoint: "http://localhost:9800",
+				Status:   store.BrokerStatusOnline,
+			}
+			if err := memStore.CreateRuntimeBroker(ctx, broker); err != nil {
+				t.Fatalf("failed to create runtime broker: %v", err)
+			}
+
+			mockClient := &mockRuntimeBrokerClient{}
+			dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
+
+			agent := &store.Agent{
+				ID:              tid("agent-wm-" + tc.name),
+				Name:            "test-agent",
+				Slug:            "test-agent",
+				ProjectID:       project.ID,
+				RuntimeBrokerID: broker.ID,
+				AppliedConfig: &store.AgentAppliedConfig{
+					GitClone: tc.appliedGitClone,
+				},
+			}
+
+			if err := dispatcher.DispatchAgentStart(ctx, agent, "", false); err != nil {
+				t.Fatalf("DispatchAgentStart failed: %v", err)
+			}
+
+			env := mockClient.lastResolvedEnv
+			if got := env["SCION_WORKSPACE_MODE"]; got != tc.wantMode {
+				t.Errorf("SCION_WORKSPACE_MODE: got %q, want %q", got, tc.wantMode)
+			}
+			if tc.wantGit {
+				if env["SCION_WORKSPACE_GIT"] != "true" {
+					t.Errorf("SCION_WORKSPACE_GIT: got %q, want %q", env["SCION_WORKSPACE_GIT"], "true")
+				}
+			} else {
+				if _, present := env["SCION_WORKSPACE_GIT"]; present {
+					t.Errorf("SCION_WORKSPACE_GIT: expected absent (false), but got %q", env["SCION_WORKSPACE_GIT"])
+				}
+			}
+		})
+	}
+}
+
+// TestHTTPAgentDispatcher_DispatchAgentRestart_InjectsWorkspaceMode verifies that
+// DispatchAgentRestart injects SCION_WORKSPACE_MODE and SCION_WORKSPACE_GIT into
+// resolvedEnv, following the same semantics as DispatchAgentStart. Uses a table
+// matching the DispatchAgentStart test cases so coverage is symmetric.
+func TestHTTPAgentDispatcher_DispatchAgentRestart_InjectsWorkspaceMode(t *testing.T) {
+	ctx := context.Background()
+
+	type testCase struct {
+		name               string
+		workspaceModeLabel string
+		gitRemote          string
+		appliedGitClone    *api.GitCloneConfig
+		wantMode           string
+		wantGit            bool
+	}
+
+	cases := []testCase{
+		{
+			name:               "shared-plain no git",
+			workspaceModeLabel: store.WorkspaceModeShared,
+			wantMode:           "shared-plain",
+			wantGit:            false,
+		},
+		{
+			name:               "shared-plain with git clone in applied config",
+			workspaceModeLabel: store.WorkspaceModeShared,
+			gitRemote:          "https://github.com/example/repo.git",
+			appliedGitClone:    &api.GitCloneConfig{URL: "https://github.com/example/repo.git"},
+			wantMode:           "shared-plain",
+			wantGit:            true,
+		},
+		{
+			name:               "clone-per-agent",
+			workspaceModeLabel: store.WorkspaceModePerAgent,
+			gitRemote:          "https://github.com/example/repo.git",
+			wantMode:           "clone-per-agent",
+			wantGit:            true,
+		},
+		{
+			name:               "worktree-per-agent",
+			workspaceModeLabel: store.WorkspaceModeWorktreePerAgent,
+			gitRemote:          "https://github.com/example/repo.git",
+			wantMode:           "worktree-per-agent",
+			wantGit:            true,
+		},
+		{
+			// When no workspace mode label is set, the hub does not inject
+			// SCION_WORKSPACE_MODE. The broker applies the shared-plain default.
+			name:               "empty label: hub does not inject mode",
+			workspaceModeLabel: "",
+			wantMode:           "",
+			wantGit:            false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			memStore := createTestStore(t)
+
+			labels := map[string]string{}
+			if tc.workspaceModeLabel != "" {
+				labels[store.LabelWorkspaceMode] = tc.workspaceModeLabel
+			}
+			project := &store.Project{
+				ID:        tid("proj-rwm-" + tc.name),
+				Name:      "restart-wm-test",
+				Slug:      "restart-wm-test",
+				GitRemote: tc.gitRemote,
+				Labels:    labels,
+			}
+			if err := memStore.CreateProject(ctx, project); err != nil {
+				t.Fatalf("failed to create project: %v", err)
+			}
+
+			broker := &store.RuntimeBroker{
+				ID:       tid("broker-rwm-" + tc.name),
+				Name:     "test-broker",
+				Slug:     "test-broker",
+				Endpoint: "http://localhost:9800",
+				Status:   store.BrokerStatusOnline,
+			}
+			if err := memStore.CreateRuntimeBroker(ctx, broker); err != nil {
+				t.Fatalf("failed to create runtime broker: %v", err)
+			}
+
+			mockClient := &mockRuntimeBrokerClient{}
+			dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
+
+			agent := &store.Agent{
+				ID:              tid("agent-rwm-" + tc.name),
+				Name:            "test-agent",
+				Slug:            "test-agent",
+				ProjectID:       project.ID,
+				RuntimeBrokerID: broker.ID,
+				AppliedConfig: &store.AgentAppliedConfig{
+					GitClone: tc.appliedGitClone,
+				},
+			}
+
+			if err := dispatcher.DispatchAgentRestart(ctx, agent); err != nil {
+				t.Fatalf("DispatchAgentRestart failed: %v", err)
+			}
+
+			env := mockClient.lastRestartResolvedEnv
+			if got := env["SCION_WORKSPACE_MODE"]; got != tc.wantMode {
+				t.Errorf("SCION_WORKSPACE_MODE: got %q, want %q", got, tc.wantMode)
+			}
+			if tc.wantGit {
+				if env["SCION_WORKSPACE_GIT"] != "true" {
+					t.Errorf("SCION_WORKSPACE_GIT: got %q, want %q", env["SCION_WORKSPACE_GIT"], "true")
+				}
+			} else {
+				if _, present := env["SCION_WORKSPACE_GIT"]; present {
+					t.Errorf("SCION_WORKSPACE_GIT: expected absent (false), but got %q", env["SCION_WORKSPACE_GIT"])
+				}
+			}
+		})
+	}
 }

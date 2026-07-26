@@ -1302,6 +1302,34 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 		resolvedEnv["SCION_HUB_ENDPOINT"] = d.hubEndpoint
 	}
 
+	// Inject canonical workspace sharing mode and git-ness so the broker can
+	// surface them in the container env on the start path.  The createAgent
+	// path carries these via WorkspaceMode in the request body; the startAgent
+	// path relies on resolvedEnv injection (this block) following the existing
+	// SCION_AGENT_ID / SCION_METADATA_MODE pattern.
+	//
+	// Resolve once so the switch below uses canonical constants — unrecognized
+	// or future wire labels safely fall back to shared-plain behavior.
+	resolvedMode := store.ResolveWorkspaceSharingMode(projectInfo.workspaceMode)
+	if projectInfo.workspaceMode != "" {
+		resolvedEnv["SCION_WORKSPACE_MODE"] = string(resolvedMode)
+	}
+	switch resolvedMode {
+	case store.SharingModeClonePerAgent, store.SharingModeWorktreePerAgent:
+		resolvedEnv["SCION_WORKSPACE_GIT"] = "true"
+	case store.SharingModeSharedPlain:
+		// For shared-plain, git-ness is detected from the applied GitClone config.
+		// Note: broker-local linked projects where the workspace is already a
+		// git repo on disk but has no HTTPS GitClone config cannot be detected
+		// as git-backed here. The broker's on-disk util.IsGitRepoDir check in
+		// buildStartContext covers this for the create path; on start/restart paths
+		// SCION_WORKSPACE_GIT will be absent for such workspaces. This is an
+		// acknowledged limitation noted in the design doc.
+		if agent.AppliedConfig != nil && agent.AppliedConfig.GitClone != nil {
+			resolvedEnv["SCION_WORKSPACE_GIT"] = "true"
+		}
+	}
+
 	// Inject GCP identity env vars so the broker can configure the
 	// metadata-server sidecar correctly on (re-)start.  During the
 	// createAgent path this information travels inside CreateAgentConfig,
@@ -1487,6 +1515,26 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 	}
 	if d.hubEndpoint != "" {
 		resolvedEnv["SCION_HUB_ENDPOINT"] = d.hubEndpoint
+	}
+
+	// Inject canonical workspace sharing mode and git-ness so the broker can
+	// surface them in the container env on the restart path.  Follows the same
+	// pattern as DispatchAgentStart (resolve once, switch on canonical constants).
+	projectInfo := d.resolveDispatchProjectInfo(ctx, agent)
+	resolvedMode := store.ResolveWorkspaceSharingMode(projectInfo.workspaceMode)
+	if projectInfo.workspaceMode != "" {
+		resolvedEnv["SCION_WORKSPACE_MODE"] = string(resolvedMode)
+	}
+	switch resolvedMode {
+	case store.SharingModeClonePerAgent, store.SharingModeWorktreePerAgent:
+		resolvedEnv["SCION_WORKSPACE_GIT"] = "true"
+	case store.SharingModeSharedPlain:
+		// See DispatchAgentStart for the acknowledged limitation: broker-local
+		// linked projects without a GitClone config cannot be detected as
+		// git-backed here.
+		if agent.AppliedConfig != nil && agent.AppliedConfig.GitClone != nil {
+			resolvedEnv["SCION_WORKSPACE_GIT"] = "true"
+		}
 	}
 
 	injectModelEnv(resolvedEnv, agent.AppliedConfig)
