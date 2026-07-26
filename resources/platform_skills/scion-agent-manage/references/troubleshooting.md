@@ -15,7 +15,7 @@ Most stuck agents are recoverable without recreation. Always start with `scion l
 | Phase `starting` + activity `completed` | Duplicate sciontool process reset phase via hub API | Kill duplicate process, recreate |
 | Context at 100% | Memory/context limit reached | Send raw clear sequence (see below) |
 | `gh` CLI returns 401 | Stale `GH_TOKEN` env var, not an agent state issue | Fall back to `curl` with known-good token |
-| Rebase fails "unrelated histories" | Shallow clone hides common ancestor | `git fetch --unshallow` then retry rebase |
+| Rebase fails "unrelated histories" | Shallow clone hides common ancestor | `git fetch --unshallow` then retry `git rebase origin/main` — **not** force-push or branch recreation |
 | Interactive prompt blocking agent | Harness waiting for user input | `scion message <agent> --raw "ENTER"` or appropriate dismissal |
 
 ## Context Clear
