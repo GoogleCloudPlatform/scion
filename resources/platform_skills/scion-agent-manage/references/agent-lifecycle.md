@@ -24,6 +24,7 @@ accepted. Time-box it; do not leave agents stopped indefinitely.
 |---|---|---|
 | Developer, reviewer — clear start and end | The agent's creator/supervisor | Once output is accepted and verified |
 | Investigator, architect — may hold an open question | The agent's creator/supervisor | **Only after all questions to humans are answered** and the conversation is explicitly done |
+| Project initiator — the first agent on a project, whatever role it started as | **Only on explicit human instruction** | It is the project's continuity point from first research through closure; its starting role does not govern its lifespan |
 | Engineering manager, coordinator, project lead | **Only on explicit human instruction naming the workstream** | Human says "close down the X workstream" or equivalent |
 
 ### Rules
