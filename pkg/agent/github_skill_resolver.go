@@ -67,9 +67,10 @@ func NewGitHubSkillResolver() *GitHubSkillResolver {
 		var cacheErr error
 		cache, cacheErr = NewGitHubResolutionCache(cacheDir, DefaultResolutionCacheTTL)
 		if cacheErr != nil {
-			// Log so a broken cache is visible rather than silently degrading
-			// to uncached operation (every request makes a fresh GitHub API call).
-			util.Debugf("github: failed to initialize resolution cache at %s: %v (proceeding without cache)", cacheDir, cacheErr)
+			// Print to stderr unconditionally (not debug-gated): a broken cache causes
+			// every request to make fresh GitHub API calls, contributing directly to
+			// rate-limit exhaustion. Operators need to see this in production logs.
+			fmt.Fprintf(os.Stderr, "github: WARNING: failed to initialize resolution cache at %s: %v (proceeding without cache)\n", cacheDir, cacheErr)
 		}
 	}
 	return &GitHubSkillResolver{
@@ -284,21 +285,24 @@ func (r *GitHubSkillResolver) resolveCommitSHA(ctx context.Context, ghRef *GitHu
 		ref = "HEAD"
 	}
 
+	// Warn before any API call path — including listContents and downloadRawFile
+	// called by the parent resolveOne after this function returns. Even when the
+	// full-SHA short-circuit below skips the SHA-lookup call, those subsequent
+	// calls still go out unauthenticated; the operator needs advance notice.
+	// Unauthenticated GitHub API calls are limited to 60/hr per outbound IP
+	// (shared across all broker instances on Cloud Run / Cloud NAT).
+	// To fix: set GITHUB_TOKEN in the project secrets or the broker's environment.
+	if token == "" {
+		fmt.Fprintf(os.Stderr, "github: WARNING: no GITHUB_TOKEN configured for %s; "+
+			"making unauthenticated GitHub API call (limit: 60 req/hr per IP). "+
+			"Set a GITHUB_TOKEN project secret or broker env var to increase the limit.\n", ghRef.Raw)
+	}
+
 	// Short-circuit: if the ref is already a full 40-char lowercase hex commit SHA,
 	// no API call is needed — the ref IS the resolved SHA.
 	if isFullCommitSHA(ref) {
 		util.Debugf("github: ref %s is already a full SHA, skipping resolveCommitSHA API call", ref)
 		return ref, nil
-	}
-
-	if token == "" {
-		// Warn early — unauthenticated GitHub API calls are limited to 60/hr per
-		// outbound IP (shared across all broker instances on Cloud Run / Cloud NAT).
-		// This limit is exhausted quickly under any multi-agent workload.
-		// To fix: set GITHUB_TOKEN in the project secrets or the broker's environment.
-		fmt.Fprintf(os.Stderr, "github: WARNING: no GITHUB_TOKEN configured for %s; "+
-			"making unauthenticated GitHub API call (limit: 60 req/hr per IP). "+
-			"Set a GITHUB_TOKEN project secret or broker env var to increase the limit.\n", ghRef.Raw)
 	}
 
 	reqURL := fmt.Sprintf("%s/repos/%s/%s/commits/%s", r.apiBase,

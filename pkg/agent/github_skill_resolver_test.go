@@ -1151,6 +1151,27 @@ func TestNewGitHubSkillResolverWithCredentials_ProvisionCredentialsFallback(t *t
 	}
 }
 
+// TestNewGitHubSkillResolverWithCredentials_NilProvisionCredentials verifies that
+// passing nil provisionCredentials is safe when no GITHUB_TOKEN fallback is needed.
+// In Go, reading from a nil map returns "" (zero value), so the fallback is a no-op.
+func TestNewGitHubSkillResolverWithCredentials_NilProvisionCredentials(t *testing.T) {
+	old := os.Getenv("GITHUB_TOKEN")
+	if err := os.Unsetenv("GITHUB_TOKEN"); err != nil {
+		t.Fatalf("failed to unset GITHUB_TOKEN: %v", err)
+	}
+	t.Cleanup(func() {
+		if old != "" {
+			_ = os.Setenv("GITHUB_TOKEN", old)
+		}
+	})
+
+	// Must not panic; token should remain empty when no credential is available.
+	r := NewGitHubSkillResolverWithCredentials("", nil)
+	if r.token != "" {
+		t.Errorf("expected empty token with nil provisionCredentials and no env var, got %q", r.token)
+	}
+}
+
 // TestNewGitHubSkillResolverWithCredentials_ExplicitTokenWins verifies that an
 // explicit defaultToken takes precedence over any provision credential.
 func TestNewGitHubSkillResolverWithCredentials_ExplicitTokenWins(t *testing.T) {
