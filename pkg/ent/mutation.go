@@ -40,6 +40,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/predicate"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/project"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/projectcontributor"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/projectprestarthook"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/projectsyncstate"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/runtimebroker"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/schedule"
@@ -93,6 +94,7 @@ const (
 	TypePolicyBinding            = "PolicyBinding"
 	TypeProject                  = "Project"
 	TypeProjectContributor       = "ProjectContributor"
+	TypeProjectPreStartHook      = "ProjectPreStartHook"
 	TypeProjectSyncState         = "ProjectSyncState"
 	TypeRuntimeBroker            = "RuntimeBroker"
 	TypeSchedule                 = "Schedule"
@@ -27038,6 +27040,884 @@ func (m *ProjectContributorMutation) ClearEdge(name string) error {
 // It returns an error if the edge is not defined in the schema.
 func (m *ProjectContributorMutation) ResetEdge(name string) error {
 	return fmt.Errorf("unknown ProjectContributor edge %s", name)
+}
+
+// ProjectPreStartHookMutation represents an operation that mutates the ProjectPreStartHook nodes in the graph.
+type ProjectPreStartHookMutation struct {
+	config
+	op            Op
+	typ           string
+	id            *uuid.UUID
+	project_id    *string
+	name          *string
+	slug          *string
+	description   *string
+	script        *string
+	status        *projectprestarthook.Status
+	created_by    *string
+	updated_by    *string
+	created       *time.Time
+	updated       *time.Time
+	clearedFields map[string]struct{}
+	done          bool
+	oldValue      func(context.Context) (*ProjectPreStartHook, error)
+	predicates    []predicate.ProjectPreStartHook
+}
+
+var _ ent.Mutation = (*ProjectPreStartHookMutation)(nil)
+
+// projectprestarthookOption allows management of the mutation configuration using functional options.
+type projectprestarthookOption func(*ProjectPreStartHookMutation)
+
+// newProjectPreStartHookMutation creates new mutation for the ProjectPreStartHook entity.
+func newProjectPreStartHookMutation(c config, op Op, opts ...projectprestarthookOption) *ProjectPreStartHookMutation {
+	m := &ProjectPreStartHookMutation{
+		config:        c,
+		op:            op,
+		typ:           TypeProjectPreStartHook,
+		clearedFields: make(map[string]struct{}),
+	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
+}
+
+// withProjectPreStartHookID sets the ID field of the mutation.
+func withProjectPreStartHookID(id uuid.UUID) projectprestarthookOption {
+	return func(m *ProjectPreStartHookMutation) {
+		var (
+			err   error
+			once  sync.Once
+			value *ProjectPreStartHook
+		)
+		m.oldValue = func(ctx context.Context) (*ProjectPreStartHook, error) {
+			once.Do(func() {
+				if m.done {
+					err = errors.New("querying old values post mutation is not allowed")
+				} else {
+					value, err = m.Client().ProjectPreStartHook.Get(ctx, id)
+				}
+			})
+			return value, err
+		}
+		m.id = &id
+	}
+}
+
+// withProjectPreStartHook sets the old ProjectPreStartHook of the mutation.
+func withProjectPreStartHook(node *ProjectPreStartHook) projectprestarthookOption {
+	return func(m *ProjectPreStartHookMutation) {
+		m.oldValue = func(context.Context) (*ProjectPreStartHook, error) {
+			return node, nil
+		}
+		m.id = &node.ID
+	}
+}
+
+// Client returns a new `ent.Client` from the mutation. If the mutation was
+// executed in a transaction (ent.Tx), a transactional client is returned.
+func (m ProjectPreStartHookMutation) Client() *Client {
+	client := &Client{config: m.config}
+	client.init()
+	return client
+}
+
+// Tx returns an `ent.Tx` for mutations that were executed in transactions;
+// it returns an error otherwise.
+func (m ProjectPreStartHookMutation) Tx() (*Tx, error) {
+	if _, ok := m.driver.(*txDriver); !ok {
+		return nil, errors.New("ent: mutation is not running in a transaction")
+	}
+	tx := &Tx{config: m.config}
+	tx.init()
+	return tx, nil
+}
+
+// SetID sets the value of the id field. Note that this
+// operation is only accepted on creation of ProjectPreStartHook entities.
+func (m *ProjectPreStartHookMutation) SetID(id uuid.UUID) {
+	m.id = &id
+}
+
+// ID returns the ID value in the mutation. Note that the ID is only available
+// if it was provided to the builder or after it was returned from the database.
+func (m *ProjectPreStartHookMutation) ID() (id uuid.UUID, exists bool) {
+	if m.id == nil {
+		return
+	}
+	return *m.id, true
+}
+
+// IDs queries the database and returns the entity ids that match the mutation's predicate.
+// That means, if the mutation is applied within a transaction with an isolation level such
+// as sql.LevelSerializable, the returned ids match the ids of the rows that will be updated
+// or updated by the mutation.
+func (m *ProjectPreStartHookMutation) IDs(ctx context.Context) ([]uuid.UUID, error) {
+	switch {
+	case m.op.Is(OpUpdateOne | OpDeleteOne):
+		id, exists := m.ID()
+		if exists {
+			return []uuid.UUID{id}, nil
+		}
+		fallthrough
+	case m.op.Is(OpUpdate | OpDelete):
+		return m.Client().ProjectPreStartHook.Query().Where(m.predicates...).IDs(ctx)
+	default:
+		return nil, fmt.Errorf("IDs is not allowed on %s operations", m.op)
+	}
+}
+
+// SetProjectID sets the "project_id" field.
+func (m *ProjectPreStartHookMutation) SetProjectID(s string) {
+	m.project_id = &s
+}
+
+// ProjectID returns the value of the "project_id" field in the mutation.
+func (m *ProjectPreStartHookMutation) ProjectID() (r string, exists bool) {
+	v := m.project_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldProjectID returns the old "project_id" field's value of the ProjectPreStartHook entity.
+// If the ProjectPreStartHook object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ProjectPreStartHookMutation) OldProjectID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldProjectID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldProjectID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldProjectID: %w", err)
+	}
+	return oldValue.ProjectID, nil
+}
+
+// ResetProjectID resets all changes to the "project_id" field.
+func (m *ProjectPreStartHookMutation) ResetProjectID() {
+	m.project_id = nil
+}
+
+// SetName sets the "name" field.
+func (m *ProjectPreStartHookMutation) SetName(s string) {
+	m.name = &s
+}
+
+// Name returns the value of the "name" field in the mutation.
+func (m *ProjectPreStartHookMutation) Name() (r string, exists bool) {
+	v := m.name
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldName returns the old "name" field's value of the ProjectPreStartHook entity.
+// If the ProjectPreStartHook object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ProjectPreStartHookMutation) OldName(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldName is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldName requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldName: %w", err)
+	}
+	return oldValue.Name, nil
+}
+
+// ResetName resets all changes to the "name" field.
+func (m *ProjectPreStartHookMutation) ResetName() {
+	m.name = nil
+}
+
+// SetSlug sets the "slug" field.
+func (m *ProjectPreStartHookMutation) SetSlug(s string) {
+	m.slug = &s
+}
+
+// Slug returns the value of the "slug" field in the mutation.
+func (m *ProjectPreStartHookMutation) Slug() (r string, exists bool) {
+	v := m.slug
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldSlug returns the old "slug" field's value of the ProjectPreStartHook entity.
+// If the ProjectPreStartHook object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ProjectPreStartHookMutation) OldSlug(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldSlug is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldSlug requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldSlug: %w", err)
+	}
+	return oldValue.Slug, nil
+}
+
+// ResetSlug resets all changes to the "slug" field.
+func (m *ProjectPreStartHookMutation) ResetSlug() {
+	m.slug = nil
+}
+
+// SetDescription sets the "description" field.
+func (m *ProjectPreStartHookMutation) SetDescription(s string) {
+	m.description = &s
+}
+
+// Description returns the value of the "description" field in the mutation.
+func (m *ProjectPreStartHookMutation) Description() (r string, exists bool) {
+	v := m.description
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldDescription returns the old "description" field's value of the ProjectPreStartHook entity.
+// If the ProjectPreStartHook object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ProjectPreStartHookMutation) OldDescription(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldDescription is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldDescription requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldDescription: %w", err)
+	}
+	return oldValue.Description, nil
+}
+
+// ClearDescription clears the value of the "description" field.
+func (m *ProjectPreStartHookMutation) ClearDescription() {
+	m.description = nil
+	m.clearedFields[projectprestarthook.FieldDescription] = struct{}{}
+}
+
+// DescriptionCleared returns if the "description" field was cleared in this mutation.
+func (m *ProjectPreStartHookMutation) DescriptionCleared() bool {
+	_, ok := m.clearedFields[projectprestarthook.FieldDescription]
+	return ok
+}
+
+// ResetDescription resets all changes to the "description" field.
+func (m *ProjectPreStartHookMutation) ResetDescription() {
+	m.description = nil
+	delete(m.clearedFields, projectprestarthook.FieldDescription)
+}
+
+// SetScript sets the "script" field.
+func (m *ProjectPreStartHookMutation) SetScript(s string) {
+	m.script = &s
+}
+
+// Script returns the value of the "script" field in the mutation.
+func (m *ProjectPreStartHookMutation) Script() (r string, exists bool) {
+	v := m.script
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldScript returns the old "script" field's value of the ProjectPreStartHook entity.
+// If the ProjectPreStartHook object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ProjectPreStartHookMutation) OldScript(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldScript is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldScript requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldScript: %w", err)
+	}
+	return oldValue.Script, nil
+}
+
+// ResetScript resets all changes to the "script" field.
+func (m *ProjectPreStartHookMutation) ResetScript() {
+	m.script = nil
+}
+
+// SetStatus sets the "status" field.
+func (m *ProjectPreStartHookMutation) SetStatus(pr projectprestarthook.Status) {
+	m.status = &pr
+}
+
+// Status returns the value of the "status" field in the mutation.
+func (m *ProjectPreStartHookMutation) Status() (r projectprestarthook.Status, exists bool) {
+	v := m.status
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldStatus returns the old "status" field's value of the ProjectPreStartHook entity.
+// If the ProjectPreStartHook object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ProjectPreStartHookMutation) OldStatus(ctx context.Context) (v projectprestarthook.Status, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldStatus is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldStatus requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldStatus: %w", err)
+	}
+	return oldValue.Status, nil
+}
+
+// ResetStatus resets all changes to the "status" field.
+func (m *ProjectPreStartHookMutation) ResetStatus() {
+	m.status = nil
+}
+
+// SetCreatedBy sets the "created_by" field.
+func (m *ProjectPreStartHookMutation) SetCreatedBy(s string) {
+	m.created_by = &s
+}
+
+// CreatedBy returns the value of the "created_by" field in the mutation.
+func (m *ProjectPreStartHookMutation) CreatedBy() (r string, exists bool) {
+	v := m.created_by
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCreatedBy returns the old "created_by" field's value of the ProjectPreStartHook entity.
+// If the ProjectPreStartHook object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ProjectPreStartHookMutation) OldCreatedBy(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCreatedBy is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCreatedBy requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCreatedBy: %w", err)
+	}
+	return oldValue.CreatedBy, nil
+}
+
+// ClearCreatedBy clears the value of the "created_by" field.
+func (m *ProjectPreStartHookMutation) ClearCreatedBy() {
+	m.created_by = nil
+	m.clearedFields[projectprestarthook.FieldCreatedBy] = struct{}{}
+}
+
+// CreatedByCleared returns if the "created_by" field was cleared in this mutation.
+func (m *ProjectPreStartHookMutation) CreatedByCleared() bool {
+	_, ok := m.clearedFields[projectprestarthook.FieldCreatedBy]
+	return ok
+}
+
+// ResetCreatedBy resets all changes to the "created_by" field.
+func (m *ProjectPreStartHookMutation) ResetCreatedBy() {
+	m.created_by = nil
+	delete(m.clearedFields, projectprestarthook.FieldCreatedBy)
+}
+
+// SetUpdatedBy sets the "updated_by" field.
+func (m *ProjectPreStartHookMutation) SetUpdatedBy(s string) {
+	m.updated_by = &s
+}
+
+// UpdatedBy returns the value of the "updated_by" field in the mutation.
+func (m *ProjectPreStartHookMutation) UpdatedBy() (r string, exists bool) {
+	v := m.updated_by
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldUpdatedBy returns the old "updated_by" field's value of the ProjectPreStartHook entity.
+// If the ProjectPreStartHook object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ProjectPreStartHookMutation) OldUpdatedBy(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldUpdatedBy is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldUpdatedBy requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldUpdatedBy: %w", err)
+	}
+	return oldValue.UpdatedBy, nil
+}
+
+// ClearUpdatedBy clears the value of the "updated_by" field.
+func (m *ProjectPreStartHookMutation) ClearUpdatedBy() {
+	m.updated_by = nil
+	m.clearedFields[projectprestarthook.FieldUpdatedBy] = struct{}{}
+}
+
+// UpdatedByCleared returns if the "updated_by" field was cleared in this mutation.
+func (m *ProjectPreStartHookMutation) UpdatedByCleared() bool {
+	_, ok := m.clearedFields[projectprestarthook.FieldUpdatedBy]
+	return ok
+}
+
+// ResetUpdatedBy resets all changes to the "updated_by" field.
+func (m *ProjectPreStartHookMutation) ResetUpdatedBy() {
+	m.updated_by = nil
+	delete(m.clearedFields, projectprestarthook.FieldUpdatedBy)
+}
+
+// SetCreated sets the "created" field.
+func (m *ProjectPreStartHookMutation) SetCreated(t time.Time) {
+	m.created = &t
+}
+
+// Created returns the value of the "created" field in the mutation.
+func (m *ProjectPreStartHookMutation) Created() (r time.Time, exists bool) {
+	v := m.created
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCreated returns the old "created" field's value of the ProjectPreStartHook entity.
+// If the ProjectPreStartHook object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ProjectPreStartHookMutation) OldCreated(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCreated is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCreated requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCreated: %w", err)
+	}
+	return oldValue.Created, nil
+}
+
+// ResetCreated resets all changes to the "created" field.
+func (m *ProjectPreStartHookMutation) ResetCreated() {
+	m.created = nil
+}
+
+// SetUpdated sets the "updated" field.
+func (m *ProjectPreStartHookMutation) SetUpdated(t time.Time) {
+	m.updated = &t
+}
+
+// Updated returns the value of the "updated" field in the mutation.
+func (m *ProjectPreStartHookMutation) Updated() (r time.Time, exists bool) {
+	v := m.updated
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldUpdated returns the old "updated" field's value of the ProjectPreStartHook entity.
+// If the ProjectPreStartHook object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ProjectPreStartHookMutation) OldUpdated(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldUpdated is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldUpdated requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldUpdated: %w", err)
+	}
+	return oldValue.Updated, nil
+}
+
+// ResetUpdated resets all changes to the "updated" field.
+func (m *ProjectPreStartHookMutation) ResetUpdated() {
+	m.updated = nil
+}
+
+// Where appends a list predicates to the ProjectPreStartHookMutation builder.
+func (m *ProjectPreStartHookMutation) Where(ps ...predicate.ProjectPreStartHook) {
+	m.predicates = append(m.predicates, ps...)
+}
+
+// WhereP appends storage-level predicates to the ProjectPreStartHookMutation builder. Using this method,
+// users can use type-assertion to append predicates that do not depend on any generated package.
+func (m *ProjectPreStartHookMutation) WhereP(ps ...func(*sql.Selector)) {
+	p := make([]predicate.ProjectPreStartHook, len(ps))
+	for i := range ps {
+		p[i] = ps[i]
+	}
+	m.Where(p...)
+}
+
+// Op returns the operation name.
+func (m *ProjectPreStartHookMutation) Op() Op {
+	return m.op
+}
+
+// SetOp allows setting the mutation operation.
+func (m *ProjectPreStartHookMutation) SetOp(op Op) {
+	m.op = op
+}
+
+// Type returns the node type of this mutation (ProjectPreStartHook).
+func (m *ProjectPreStartHookMutation) Type() string {
+	return m.typ
+}
+
+// Fields returns all fields that were changed during this mutation. Note that in
+// order to get all numeric fields that were incremented/decremented, call
+// AddedFields().
+func (m *ProjectPreStartHookMutation) Fields() []string {
+	fields := make([]string, 0, 10)
+	if m.project_id != nil {
+		fields = append(fields, projectprestarthook.FieldProjectID)
+	}
+	if m.name != nil {
+		fields = append(fields, projectprestarthook.FieldName)
+	}
+	if m.slug != nil {
+		fields = append(fields, projectprestarthook.FieldSlug)
+	}
+	if m.description != nil {
+		fields = append(fields, projectprestarthook.FieldDescription)
+	}
+	if m.script != nil {
+		fields = append(fields, projectprestarthook.FieldScript)
+	}
+	if m.status != nil {
+		fields = append(fields, projectprestarthook.FieldStatus)
+	}
+	if m.created_by != nil {
+		fields = append(fields, projectprestarthook.FieldCreatedBy)
+	}
+	if m.updated_by != nil {
+		fields = append(fields, projectprestarthook.FieldUpdatedBy)
+	}
+	if m.created != nil {
+		fields = append(fields, projectprestarthook.FieldCreated)
+	}
+	if m.updated != nil {
+		fields = append(fields, projectprestarthook.FieldUpdated)
+	}
+	return fields
+}
+
+// Field returns the value of a field with the given name. The second boolean
+// return value indicates that this field was not set, or was not defined in the
+// schema.
+func (m *ProjectPreStartHookMutation) Field(name string) (ent.Value, bool) {
+	switch name {
+	case projectprestarthook.FieldProjectID:
+		return m.ProjectID()
+	case projectprestarthook.FieldName:
+		return m.Name()
+	case projectprestarthook.FieldSlug:
+		return m.Slug()
+	case projectprestarthook.FieldDescription:
+		return m.Description()
+	case projectprestarthook.FieldScript:
+		return m.Script()
+	case projectprestarthook.FieldStatus:
+		return m.Status()
+	case projectprestarthook.FieldCreatedBy:
+		return m.CreatedBy()
+	case projectprestarthook.FieldUpdatedBy:
+		return m.UpdatedBy()
+	case projectprestarthook.FieldCreated:
+		return m.Created()
+	case projectprestarthook.FieldUpdated:
+		return m.Updated()
+	}
+	return nil, false
+}
+
+// OldField returns the old value of the field from the database. An error is
+// returned if the mutation operation is not UpdateOne, or the query to the
+// database failed.
+func (m *ProjectPreStartHookMutation) OldField(ctx context.Context, name string) (ent.Value, error) {
+	switch name {
+	case projectprestarthook.FieldProjectID:
+		return m.OldProjectID(ctx)
+	case projectprestarthook.FieldName:
+		return m.OldName(ctx)
+	case projectprestarthook.FieldSlug:
+		return m.OldSlug(ctx)
+	case projectprestarthook.FieldDescription:
+		return m.OldDescription(ctx)
+	case projectprestarthook.FieldScript:
+		return m.OldScript(ctx)
+	case projectprestarthook.FieldStatus:
+		return m.OldStatus(ctx)
+	case projectprestarthook.FieldCreatedBy:
+		return m.OldCreatedBy(ctx)
+	case projectprestarthook.FieldUpdatedBy:
+		return m.OldUpdatedBy(ctx)
+	case projectprestarthook.FieldCreated:
+		return m.OldCreated(ctx)
+	case projectprestarthook.FieldUpdated:
+		return m.OldUpdated(ctx)
+	}
+	return nil, fmt.Errorf("unknown ProjectPreStartHook field %s", name)
+}
+
+// SetField sets the value of a field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *ProjectPreStartHookMutation) SetField(name string, value ent.Value) error {
+	switch name {
+	case projectprestarthook.FieldProjectID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetProjectID(v)
+		return nil
+	case projectprestarthook.FieldName:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetName(v)
+		return nil
+	case projectprestarthook.FieldSlug:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetSlug(v)
+		return nil
+	case projectprestarthook.FieldDescription:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetDescription(v)
+		return nil
+	case projectprestarthook.FieldScript:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetScript(v)
+		return nil
+	case projectprestarthook.FieldStatus:
+		v, ok := value.(projectprestarthook.Status)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetStatus(v)
+		return nil
+	case projectprestarthook.FieldCreatedBy:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCreatedBy(v)
+		return nil
+	case projectprestarthook.FieldUpdatedBy:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetUpdatedBy(v)
+		return nil
+	case projectprestarthook.FieldCreated:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCreated(v)
+		return nil
+	case projectprestarthook.FieldUpdated:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetUpdated(v)
+		return nil
+	}
+	return fmt.Errorf("unknown ProjectPreStartHook field %s", name)
+}
+
+// AddedFields returns all numeric fields that were incremented/decremented during
+// this mutation.
+func (m *ProjectPreStartHookMutation) AddedFields() []string {
+	return nil
+}
+
+// AddedField returns the numeric value that was incremented/decremented on a field
+// with the given name. The second boolean return value indicates that this field
+// was not set, or was not defined in the schema.
+func (m *ProjectPreStartHookMutation) AddedField(name string) (ent.Value, bool) {
+	return nil, false
+}
+
+// AddField adds the value to the field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *ProjectPreStartHookMutation) AddField(name string, value ent.Value) error {
+	switch name {
+	}
+	return fmt.Errorf("unknown ProjectPreStartHook numeric field %s", name)
+}
+
+// ClearedFields returns all nullable fields that were cleared during this
+// mutation.
+func (m *ProjectPreStartHookMutation) ClearedFields() []string {
+	var fields []string
+	if m.FieldCleared(projectprestarthook.FieldDescription) {
+		fields = append(fields, projectprestarthook.FieldDescription)
+	}
+	if m.FieldCleared(projectprestarthook.FieldCreatedBy) {
+		fields = append(fields, projectprestarthook.FieldCreatedBy)
+	}
+	if m.FieldCleared(projectprestarthook.FieldUpdatedBy) {
+		fields = append(fields, projectprestarthook.FieldUpdatedBy)
+	}
+	return fields
+}
+
+// FieldCleared returns a boolean indicating if a field with the given name was
+// cleared in this mutation.
+func (m *ProjectPreStartHookMutation) FieldCleared(name string) bool {
+	_, ok := m.clearedFields[name]
+	return ok
+}
+
+// ClearField clears the value of the field with the given name. It returns an
+// error if the field is not defined in the schema.
+func (m *ProjectPreStartHookMutation) ClearField(name string) error {
+	switch name {
+	case projectprestarthook.FieldDescription:
+		m.ClearDescription()
+		return nil
+	case projectprestarthook.FieldCreatedBy:
+		m.ClearCreatedBy()
+		return nil
+	case projectprestarthook.FieldUpdatedBy:
+		m.ClearUpdatedBy()
+		return nil
+	}
+	return fmt.Errorf("unknown ProjectPreStartHook nullable field %s", name)
+}
+
+// ResetField resets all changes in the mutation for the field with the given name.
+// It returns an error if the field is not defined in the schema.
+func (m *ProjectPreStartHookMutation) ResetField(name string) error {
+	switch name {
+	case projectprestarthook.FieldProjectID:
+		m.ResetProjectID()
+		return nil
+	case projectprestarthook.FieldName:
+		m.ResetName()
+		return nil
+	case projectprestarthook.FieldSlug:
+		m.ResetSlug()
+		return nil
+	case projectprestarthook.FieldDescription:
+		m.ResetDescription()
+		return nil
+	case projectprestarthook.FieldScript:
+		m.ResetScript()
+		return nil
+	case projectprestarthook.FieldStatus:
+		m.ResetStatus()
+		return nil
+	case projectprestarthook.FieldCreatedBy:
+		m.ResetCreatedBy()
+		return nil
+	case projectprestarthook.FieldUpdatedBy:
+		m.ResetUpdatedBy()
+		return nil
+	case projectprestarthook.FieldCreated:
+		m.ResetCreated()
+		return nil
+	case projectprestarthook.FieldUpdated:
+		m.ResetUpdated()
+		return nil
+	}
+	return fmt.Errorf("unknown ProjectPreStartHook field %s", name)
+}
+
+// AddedEdges returns all edge names that were set/added in this mutation.
+func (m *ProjectPreStartHookMutation) AddedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// AddedIDs returns all IDs (to other nodes) that were added for the given edge
+// name in this mutation.
+func (m *ProjectPreStartHookMutation) AddedIDs(name string) []ent.Value {
+	return nil
+}
+
+// RemovedEdges returns all edge names that were removed in this mutation.
+func (m *ProjectPreStartHookMutation) RemovedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// RemovedIDs returns all IDs (to other nodes) that were removed for the edge with
+// the given name in this mutation.
+func (m *ProjectPreStartHookMutation) RemovedIDs(name string) []ent.Value {
+	return nil
+}
+
+// ClearedEdges returns all edge names that were cleared in this mutation.
+func (m *ProjectPreStartHookMutation) ClearedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// EdgeCleared returns a boolean which indicates if the edge with the given name
+// was cleared in this mutation.
+func (m *ProjectPreStartHookMutation) EdgeCleared(name string) bool {
+	return false
+}
+
+// ClearEdge clears the value of the edge with the given name. It returns an error
+// if that edge is not defined in the schema.
+func (m *ProjectPreStartHookMutation) ClearEdge(name string) error {
+	return fmt.Errorf("unknown ProjectPreStartHook unique edge %s", name)
+}
+
+// ResetEdge resets all changes to the edge with the given name in this mutation.
+// It returns an error if the edge is not defined in the schema.
+func (m *ProjectPreStartHookMutation) ResetEdge(name string) error {
+	return fmt.Errorf("unknown ProjectPreStartHook edge %s", name)
 }
 
 // ProjectSyncStateMutation represents an operation that mutates the ProjectSyncState nodes in the graph.

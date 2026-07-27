@@ -32,6 +32,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/policybinding"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/project"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/projectcontributor"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/projectprestarthook"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/projectsyncstate"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/runtimebroker"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/schedule"
@@ -785,6 +786,38 @@ func init() {
 	projectcontributorDescID := projectcontributorFields[0].Descriptor()
 	// projectcontributor.DefaultID holds the default value on creation for the id field.
 	projectcontributor.DefaultID = projectcontributorDescID.Default.(func() uuid.UUID)
+	projectprestarthookFields := schema.ProjectPreStartHook{}.Fields()
+	_ = projectprestarthookFields
+	// projectprestarthookDescProjectID is the schema descriptor for project_id field.
+	projectprestarthookDescProjectID := projectprestarthookFields[1].Descriptor()
+	// projectprestarthook.ProjectIDValidator is a validator for the "project_id" field. It is called by the builders before save.
+	projectprestarthook.ProjectIDValidator = projectprestarthookDescProjectID.Validators[0].(func(string) error)
+	// projectprestarthookDescName is the schema descriptor for name field.
+	projectprestarthookDescName := projectprestarthookFields[2].Descriptor()
+	// projectprestarthook.NameValidator is a validator for the "name" field. It is called by the builders before save.
+	projectprestarthook.NameValidator = projectprestarthookDescName.Validators[0].(func(string) error)
+	// projectprestarthookDescSlug is the schema descriptor for slug field.
+	projectprestarthookDescSlug := projectprestarthookFields[3].Descriptor()
+	// projectprestarthook.SlugValidator is a validator for the "slug" field. It is called by the builders before save.
+	projectprestarthook.SlugValidator = projectprestarthookDescSlug.Validators[0].(func(string) error)
+	// projectprestarthookDescScript is the schema descriptor for script field.
+	projectprestarthookDescScript := projectprestarthookFields[5].Descriptor()
+	// projectprestarthook.ScriptValidator is a validator for the "script" field. It is called by the builders before save.
+	projectprestarthook.ScriptValidator = projectprestarthookDescScript.Validators[0].(func(string) error)
+	// projectprestarthookDescCreated is the schema descriptor for created field.
+	projectprestarthookDescCreated := projectprestarthookFields[9].Descriptor()
+	// projectprestarthook.DefaultCreated holds the default value on creation for the created field.
+	projectprestarthook.DefaultCreated = projectprestarthookDescCreated.Default.(func() time.Time)
+	// projectprestarthookDescUpdated is the schema descriptor for updated field.
+	projectprestarthookDescUpdated := projectprestarthookFields[10].Descriptor()
+	// projectprestarthook.DefaultUpdated holds the default value on creation for the updated field.
+	projectprestarthook.DefaultUpdated = projectprestarthookDescUpdated.Default.(func() time.Time)
+	// projectprestarthook.UpdateDefaultUpdated holds the default value on update for the updated field.
+	projectprestarthook.UpdateDefaultUpdated = projectprestarthookDescUpdated.UpdateDefault.(func() time.Time)
+	// projectprestarthookDescID is the schema descriptor for id field.
+	projectprestarthookDescID := projectprestarthookFields[0].Descriptor()
+	// projectprestarthook.DefaultID holds the default value on creation for the id field.
+	projectprestarthook.DefaultID = projectprestarthookDescID.Default.(func() uuid.UUID)
 	projectsyncstateFields := schema.ProjectSyncState{}.Fields()
 	_ = projectsyncstateFields
 	// projectsyncstateDescBrokerID is the schema descriptor for broker_id field.

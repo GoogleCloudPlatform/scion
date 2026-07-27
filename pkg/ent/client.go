@@ -43,6 +43,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/policybinding"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/project"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/projectcontributor"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/projectprestarthook"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/projectsyncstate"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/runtimebroker"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/schedule"
@@ -117,6 +118,8 @@ type Client struct {
 	Project *ProjectClient
 	// ProjectContributor is the client for interacting with the ProjectContributor builders.
 	ProjectContributor *ProjectContributorClient
+	// ProjectPreStartHook is the client for interacting with the ProjectPreStartHook builders.
+	ProjectPreStartHook *ProjectPreStartHookClient
 	// ProjectSyncState is the client for interacting with the ProjectSyncState builders.
 	ProjectSyncState *ProjectSyncStateClient
 	// RuntimeBroker is the client for interacting with the RuntimeBroker builders.
@@ -181,6 +184,7 @@ func (c *Client) init() {
 	c.PolicyBinding = NewPolicyBindingClient(c.config)
 	c.Project = NewProjectClient(c.config)
 	c.ProjectContributor = NewProjectContributorClient(c.config)
+	c.ProjectPreStartHook = NewProjectPreStartHookClient(c.config)
 	c.ProjectSyncState = NewProjectSyncStateClient(c.config)
 	c.RuntimeBroker = NewRuntimeBrokerClient(c.config)
 	c.Schedule = NewScheduleClient(c.config)
@@ -313,6 +317,7 @@ func (c *Client) Tx(ctx context.Context) (*Tx, error) {
 		PolicyBinding:            NewPolicyBindingClient(cfg),
 		Project:                  NewProjectClient(cfg),
 		ProjectContributor:       NewProjectContributorClient(cfg),
+		ProjectPreStartHook:      NewProjectPreStartHookClient(cfg),
 		ProjectSyncState:         NewProjectSyncStateClient(cfg),
 		RuntimeBroker:            NewRuntimeBrokerClient(cfg),
 		Schedule:                 NewScheduleClient(cfg),
@@ -372,6 +377,7 @@ func (c *Client) BeginTx(ctx context.Context, opts *sql.TxOptions) (*Tx, error) 
 		PolicyBinding:            NewPolicyBindingClient(cfg),
 		Project:                  NewProjectClient(cfg),
 		ProjectContributor:       NewProjectContributorClient(cfg),
+		ProjectPreStartHook:      NewProjectPreStartHookClient(cfg),
 		ProjectSyncState:         NewProjectSyncStateClient(cfg),
 		RuntimeBroker:            NewRuntimeBrokerClient(cfg),
 		Schedule:                 NewScheduleClient(cfg),
@@ -421,9 +427,9 @@ func (c *Client) Use(hooks ...Hook) {
 		c.LifecycleHook, c.LifecycleHookAgentPhase, c.MaintenanceOperation,
 		c.MaintenanceOperationRun, c.Message, c.Notification,
 		c.NotificationSubscription, c.PolicyBinding, c.Project, c.ProjectContributor,
-		c.ProjectSyncState, c.RuntimeBroker, c.Schedule, c.ScheduledEvent, c.Secret,
-		c.Skill, c.SkillInjection, c.SkillRegistry, c.SkillVersion,
-		c.SubscriptionTemplate, c.Template, c.User, c.UserAccessToken,
+		c.ProjectPreStartHook, c.ProjectSyncState, c.RuntimeBroker, c.Schedule,
+		c.ScheduledEvent, c.Secret, c.Skill, c.SkillInjection, c.SkillRegistry,
+		c.SkillVersion, c.SubscriptionTemplate, c.Template, c.User, c.UserAccessToken,
 	} {
 		n.Use(hooks...)
 	}
@@ -440,9 +446,9 @@ func (c *Client) Intercept(interceptors ...Interceptor) {
 		c.LifecycleHook, c.LifecycleHookAgentPhase, c.MaintenanceOperation,
 		c.MaintenanceOperationRun, c.Message, c.Notification,
 		c.NotificationSubscription, c.PolicyBinding, c.Project, c.ProjectContributor,
-		c.ProjectSyncState, c.RuntimeBroker, c.Schedule, c.ScheduledEvent, c.Secret,
-		c.Skill, c.SkillInjection, c.SkillRegistry, c.SkillVersion,
-		c.SubscriptionTemplate, c.Template, c.User, c.UserAccessToken,
+		c.ProjectPreStartHook, c.ProjectSyncState, c.RuntimeBroker, c.Schedule,
+		c.ScheduledEvent, c.Secret, c.Skill, c.SkillInjection, c.SkillRegistry,
+		c.SkillVersion, c.SubscriptionTemplate, c.Template, c.User, c.UserAccessToken,
 	} {
 		n.Intercept(interceptors...)
 	}
@@ -505,6 +511,8 @@ func (c *Client) Mutate(ctx context.Context, m Mutation) (Value, error) {
 		return c.Project.mutate(ctx, m)
 	case *ProjectContributorMutation:
 		return c.ProjectContributor.mutate(ctx, m)
+	case *ProjectPreStartHookMutation:
+		return c.ProjectPreStartHook.mutate(ctx, m)
 	case *ProjectSyncStateMutation:
 		return c.ProjectSyncState.mutate(ctx, m)
 	case *RuntimeBrokerMutation:
@@ -4399,6 +4407,139 @@ func (c *ProjectContributorClient) mutate(ctx context.Context, m *ProjectContrib
 	}
 }
 
+// ProjectPreStartHookClient is a client for the ProjectPreStartHook schema.
+type ProjectPreStartHookClient struct {
+	config
+}
+
+// NewProjectPreStartHookClient returns a client for the ProjectPreStartHook from the given config.
+func NewProjectPreStartHookClient(c config) *ProjectPreStartHookClient {
+	return &ProjectPreStartHookClient{config: c}
+}
+
+// Use adds a list of mutation hooks to the hooks stack.
+// A call to `Use(f, g, h)` equals to `projectprestarthook.Hooks(f(g(h())))`.
+func (c *ProjectPreStartHookClient) Use(hooks ...Hook) {
+	c.hooks.ProjectPreStartHook = append(c.hooks.ProjectPreStartHook, hooks...)
+}
+
+// Intercept adds a list of query interceptors to the interceptors stack.
+// A call to `Intercept(f, g, h)` equals to `projectprestarthook.Intercept(f(g(h())))`.
+func (c *ProjectPreStartHookClient) Intercept(interceptors ...Interceptor) {
+	c.inters.ProjectPreStartHook = append(c.inters.ProjectPreStartHook, interceptors...)
+}
+
+// Create returns a builder for creating a ProjectPreStartHook entity.
+func (c *ProjectPreStartHookClient) Create() *ProjectPreStartHookCreate {
+	mutation := newProjectPreStartHookMutation(c.config, OpCreate)
+	return &ProjectPreStartHookCreate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// CreateBulk returns a builder for creating a bulk of ProjectPreStartHook entities.
+func (c *ProjectPreStartHookClient) CreateBulk(builders ...*ProjectPreStartHookCreate) *ProjectPreStartHookCreateBulk {
+	return &ProjectPreStartHookCreateBulk{config: c.config, builders: builders}
+}
+
+// MapCreateBulk creates a bulk creation builder from the given slice. For each item in the slice, the function creates
+// a builder and applies setFunc on it.
+func (c *ProjectPreStartHookClient) MapCreateBulk(slice any, setFunc func(*ProjectPreStartHookCreate, int)) *ProjectPreStartHookCreateBulk {
+	rv := reflect.ValueOf(slice)
+	if rv.Kind() != reflect.Slice {
+		return &ProjectPreStartHookCreateBulk{err: fmt.Errorf("calling to ProjectPreStartHookClient.MapCreateBulk with wrong type %T, need slice", slice)}
+	}
+	builders := make([]*ProjectPreStartHookCreate, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		builders[i] = c.Create()
+		setFunc(builders[i], i)
+	}
+	return &ProjectPreStartHookCreateBulk{config: c.config, builders: builders}
+}
+
+// Update returns an update builder for ProjectPreStartHook.
+func (c *ProjectPreStartHookClient) Update() *ProjectPreStartHookUpdate {
+	mutation := newProjectPreStartHookMutation(c.config, OpUpdate)
+	return &ProjectPreStartHookUpdate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOne returns an update builder for the given entity.
+func (c *ProjectPreStartHookClient) UpdateOne(_m *ProjectPreStartHook) *ProjectPreStartHookUpdateOne {
+	mutation := newProjectPreStartHookMutation(c.config, OpUpdateOne, withProjectPreStartHook(_m))
+	return &ProjectPreStartHookUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOneID returns an update builder for the given id.
+func (c *ProjectPreStartHookClient) UpdateOneID(id uuid.UUID) *ProjectPreStartHookUpdateOne {
+	mutation := newProjectPreStartHookMutation(c.config, OpUpdateOne, withProjectPreStartHookID(id))
+	return &ProjectPreStartHookUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// Delete returns a delete builder for ProjectPreStartHook.
+func (c *ProjectPreStartHookClient) Delete() *ProjectPreStartHookDelete {
+	mutation := newProjectPreStartHookMutation(c.config, OpDelete)
+	return &ProjectPreStartHookDelete{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// DeleteOne returns a builder for deleting the given entity.
+func (c *ProjectPreStartHookClient) DeleteOne(_m *ProjectPreStartHook) *ProjectPreStartHookDeleteOne {
+	return c.DeleteOneID(_m.ID)
+}
+
+// DeleteOneID returns a builder for deleting the given entity by its id.
+func (c *ProjectPreStartHookClient) DeleteOneID(id uuid.UUID) *ProjectPreStartHookDeleteOne {
+	builder := c.Delete().Where(projectprestarthook.ID(id))
+	builder.mutation.id = &id
+	builder.mutation.op = OpDeleteOne
+	return &ProjectPreStartHookDeleteOne{builder}
+}
+
+// Query returns a query builder for ProjectPreStartHook.
+func (c *ProjectPreStartHookClient) Query() *ProjectPreStartHookQuery {
+	return &ProjectPreStartHookQuery{
+		config: c.config,
+		ctx:    &QueryContext{Type: TypeProjectPreStartHook},
+		inters: c.Interceptors(),
+	}
+}
+
+// Get returns a ProjectPreStartHook entity by its id.
+func (c *ProjectPreStartHookClient) Get(ctx context.Context, id uuid.UUID) (*ProjectPreStartHook, error) {
+	return c.Query().Where(projectprestarthook.ID(id)).Only(ctx)
+}
+
+// GetX is like Get, but panics if an error occurs.
+func (c *ProjectPreStartHookClient) GetX(ctx context.Context, id uuid.UUID) *ProjectPreStartHook {
+	obj, err := c.Get(ctx, id)
+	if err != nil {
+		panic(err)
+	}
+	return obj
+}
+
+// Hooks returns the client hooks.
+func (c *ProjectPreStartHookClient) Hooks() []Hook {
+	return c.hooks.ProjectPreStartHook
+}
+
+// Interceptors returns the client interceptors.
+func (c *ProjectPreStartHookClient) Interceptors() []Interceptor {
+	return c.inters.ProjectPreStartHook
+}
+
+func (c *ProjectPreStartHookClient) mutate(ctx context.Context, m *ProjectPreStartHookMutation) (Value, error) {
+	switch m.Op() {
+	case OpCreate:
+		return (&ProjectPreStartHookCreate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdate:
+		return (&ProjectPreStartHookUpdate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdateOne:
+		return (&ProjectPreStartHookUpdateOne{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpDelete, OpDeleteOne:
+		return (&ProjectPreStartHookDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
+	default:
+		return nil, fmt.Errorf("ent: unknown ProjectPreStartHook mutation op: %q", m.Op())
+	}
+}
+
 // ProjectSyncStateClient is a client for the ProjectSyncState schema.
 type ProjectSyncStateClient struct {
 	config
@@ -6185,9 +6326,9 @@ type (
 		IntegrationUpdate, InviteCode, LifecycleHook, LifecycleHookAgentPhase,
 		MaintenanceOperation, MaintenanceOperationRun, Message, Notification,
 		NotificationSubscription, PolicyBinding, Project, ProjectContributor,
-		ProjectSyncState, RuntimeBroker, Schedule, ScheduledEvent, Secret, Skill,
-		SkillInjection, SkillRegistry, SkillVersion, SubscriptionTemplate, Template,
-		User, UserAccessToken []ent.Hook
+		ProjectPreStartHook, ProjectSyncState, RuntimeBroker, Schedule, ScheduledEvent,
+		Secret, Skill, SkillInjection, SkillRegistry, SkillVersion,
+		SubscriptionTemplate, Template, User, UserAccessToken []ent.Hook
 	}
 	inters struct {
 		AccessPolicy, Agent, AllowListEntry, ApiKey, BrokerDispatch, BrokerJoinToken,
@@ -6196,8 +6337,8 @@ type (
 		IntegrationUpdate, InviteCode, LifecycleHook, LifecycleHookAgentPhase,
 		MaintenanceOperation, MaintenanceOperationRun, Message, Notification,
 		NotificationSubscription, PolicyBinding, Project, ProjectContributor,
-		ProjectSyncState, RuntimeBroker, Schedule, ScheduledEvent, Secret, Skill,
-		SkillInjection, SkillRegistry, SkillVersion, SubscriptionTemplate, Template,
-		User, UserAccessToken []ent.Interceptor
+		ProjectPreStartHook, ProjectSyncState, RuntimeBroker, Schedule, ScheduledEvent,
+		Secret, Skill, SkillInjection, SkillRegistry, SkillVersion,
+		SubscriptionTemplate, Template, User, UserAccessToken []ent.Interceptor
 	}
 )
