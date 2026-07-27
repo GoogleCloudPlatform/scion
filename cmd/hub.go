@@ -300,6 +300,7 @@ func init() {
 	hubCmd.AddCommand(hubDisableCmd)
 	hubCmd.AddCommand(hubLinkCmd)
 	hubCmd.AddCommand(hubUnlinkCmd)
+	hubCmd.AddCommand(hubHookCmd)
 
 	// Project subcommands
 	hubProjectsCmd.AddCommand(hubProjectsInfoCmd)
