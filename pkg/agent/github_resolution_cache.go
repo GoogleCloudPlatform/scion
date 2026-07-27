@@ -29,7 +29,11 @@ const (
 	// DefaultResolutionCacheTTL is how long a cached resolution result is
 	// considered fresh. GitHub content can change, so this is a balance
 	// between freshness and avoiding rate limits.
-	DefaultResolutionCacheTTL = 5 * time.Minute
+	DefaultResolutionCacheTTL = 30 * time.Minute
+
+	// DefaultSHAResolutionCacheTTL is the TTL for SHA-pinned skill refs.
+	// Full SHA refs are immutable, so they can be cached for much longer.
+	DefaultSHAResolutionCacheTTL = 24 * time.Hour
 
 	resolutionCacheFileName = "github-resolution-cache.json"
 )
@@ -158,9 +162,9 @@ func (c *GitHubResolutionCache) evictExpired() {
 	}
 }
 
-// githubResolutionCacheDir returns the directory for storing GitHub
+// GitHubResolutionCacheDir returns the directory for storing GitHub
 // resolution cache files.
-func githubResolutionCacheDir() (string, error) {
+func GitHubResolutionCacheDir() (string, error) {
 	globalDir, err := config.GetGlobalDir()
 	if err != nil {
 		return "", err

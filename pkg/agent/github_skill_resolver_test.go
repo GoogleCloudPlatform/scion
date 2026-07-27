@@ -1145,7 +1145,7 @@ func TestNewGitHubSkillResolverWithCredentials_ProvisionCredentialsFallback(t *t
 		"GITHUB_TOKEN": "provision-secret-token",
 		"OTHER_SECRET": "other-value",
 	}
-	r := NewGitHubSkillResolverWithCredentials("", creds)
+	r := NewGitHubSkillResolverWithCredentials("", creds, nil)
 	if r.token != "provision-secret-token" {
 		t.Errorf("expected token from provisionCredentials fallback, got %q", r.token)
 	}
@@ -1166,7 +1166,7 @@ func TestNewGitHubSkillResolverWithCredentials_NilProvisionCredentials(t *testin
 	})
 
 	// Must not panic; token should remain empty when no credential is available.
-	r := NewGitHubSkillResolverWithCredentials("", nil)
+	r := NewGitHubSkillResolverWithCredentials("", nil, nil)
 	if r.token != "" {
 		t.Errorf("expected empty token with nil provisionCredentials and no env var, got %q", r.token)
 	}
@@ -1178,7 +1178,7 @@ func TestNewGitHubSkillResolverWithCredentials_ExplicitTokenWins(t *testing.T) {
 	creds := map[string]string{
 		"GITHUB_TOKEN": "provision-secret-token",
 	}
-	r := NewGitHubSkillResolverWithCredentials("explicit-token", creds)
+	r := NewGitHubSkillResolverWithCredentials("explicit-token", creds, nil)
 	if r.token != "explicit-token" {
 		t.Errorf("expected explicit token to win, got %q", r.token)
 	}
@@ -1226,6 +1226,89 @@ func TestGitHubSkillResolver_FullSHAPinnedSkill(t *testing.T) {
 	// Version should be the first 12 chars of the pinned SHA.
 	if result.Resolved[0].Version != testCommitSHA[:12] {
 		t.Errorf("expected version %s, got %s", testCommitSHA[:12], result.Resolved[0].Version)
+	}
+}
+
+// TestGitHubSkillResolver_SharedCacheSingleton verifies that when a shared
+// (non-nil) cache is passed to NewGitHubSkillResolverWithCredentials, two
+// sequential resolve calls for the same URI produce only one underlying API
+// call (second is a cache hit).
+func TestGitHubSkillResolver_SharedCacheSingleton(t *testing.T) {
+	server, mux := newTestGitHubServer(t)
+	apiCalls := 0
+
+	mux.HandleFunc("/repos/owner/repo/commits/main", func(w http.ResponseWriter, _ *http.Request) {
+		apiCalls++
+		_, _ = w.Write([]byte(testCommitSHA))
+	})
+	mux.HandleFunc("/repos/owner/repo/contents/skills/my-skill", func(w http.ResponseWriter, _ *http.Request) {
+		apiCalls++
+		_ = json.NewEncoder(w).Encode([]githubContentEntry{
+			{Name: "SKILL.md", Path: "skills/my-skill/SKILL.md", Type: "file", Size: 5},
+		})
+	})
+	mux.HandleFunc("/raw/owner/repo/"+testCommitSHA+"/skills/my-skill/SKILL.md", func(w http.ResponseWriter, _ *http.Request) {
+		apiCalls++
+		_, _ = w.Write([]byte("hello"))
+	})
+
+	// Create a shared cache
+	cache, err := NewGitHubResolutionCache(t.TempDir(), 5*time.Minute)
+	if err != nil {
+		t.Fatalf("cache creation failed: %v", err)
+	}
+
+	// Create two resolvers sharing the same cache
+	resolver1 := &GitHubSkillResolver{
+		httpClient:      server.Client(),
+		token:           "test-token",
+		apiBase:         server.URL,
+		rawBase:         server.URL + "/raw",
+		resolutionCache: cache,
+	}
+
+	resolver2 := &GitHubSkillResolver{
+		httpClient:      server.Client(),
+		token:           "test-token",
+		apiBase:         server.URL,
+		rawBase:         server.URL + "/raw",
+		resolutionCache: cache,
+	}
+
+	uri := []api.SkillReference{{URI: "gh://owner/repo/my-skill@main"}}
+
+	// First call via resolver1 — should hit the API
+	result1, err := resolver1.Resolve(context.Background(), uri, ResolveOpts{})
+	if err != nil {
+		t.Fatalf("resolver1 Resolve failed: %v", err)
+	}
+	if len(result1.Errors) != 0 {
+		t.Fatalf("resolver1: unexpected errors: %v", result1.Errors)
+	}
+	if len(result1.Resolved) != 1 {
+		t.Fatalf("expected 1 resolved skill from resolver1, got %d", len(result1.Resolved))
+	}
+	firstCallAPICalls := apiCalls
+
+	// Second call via resolver2 (different resolver instance, same cache) — should use cache
+	result2, err := resolver2.Resolve(context.Background(), uri, ResolveOpts{})
+	if err != nil {
+		t.Fatalf("resolver2 Resolve failed: %v", err)
+	}
+	if len(result2.Errors) != 0 {
+		t.Fatalf("resolver2: unexpected errors: %v", result2.Errors)
+	}
+	if len(result2.Resolved) != 1 {
+		t.Fatalf("expected 1 resolved skill from resolver2, got %d", len(result2.Resolved))
+	}
+
+	// Verify no new API calls were made (cache hit)
+	if apiCalls != firstCallAPICalls {
+		t.Errorf("expected no new API calls on cache hit from shared cache, but got %d additional calls", apiCalls-firstCallAPICalls)
+	}
+
+	if result2.Resolved[0].Name != result1.Resolved[0].Name {
+		t.Errorf("cached result name mismatch: %s vs %s", result2.Resolved[0].Name, result1.Resolved[0].Name)
 	}
 }
 
