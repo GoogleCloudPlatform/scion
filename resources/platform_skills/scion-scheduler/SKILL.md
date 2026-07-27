@@ -100,8 +100,8 @@ owned by something that can reason about it.
 - **Cron is UTC.** There is no timezone configuration — convert from local
   time before writing the expression.
 - **`cancel` vs `pause` vs `delete`:** `cancel` is for one-shot events only.
-  `pause` and `delete` are for recurring schedules only. Using the wrong one
-  on the wrong type errors.
+  `pause` and `delete` are for recurring schedules only. Using the wrong command
+  on the wrong type will result in an error.
 - **Schedule names must be unique** within the project.
 - **Clean up recurring schedules** when the task they serve is complete —
   they fire indefinitely until paused or deleted.
