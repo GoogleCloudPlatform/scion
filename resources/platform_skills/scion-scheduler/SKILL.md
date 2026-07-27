@@ -19,7 +19,7 @@ For full command syntax: `scion schedule --help` and its subcommands.
 
 Scion has two scheduling mechanisms. They solve different problems:
 
-| | `scion message --in/--at` | `scion schedule create` |
+| | `scion message --in/--at` | `scion schedule create` / `create-recurring` |
 |---|---|---|
 | Nature | fire-and-forget delayed send | durable, project-scoped event |
 | Manageable | no handle once sent | list, inspect, cancel, pause, resume, delete, history |
