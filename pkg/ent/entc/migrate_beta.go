@@ -61,6 +61,7 @@ var migrationEntities = []string{
 	"Notification",
 	"NotificationSubscription",
 	"ProjectContributor",
+	"ProjectPreStartHook",
 	"ProjectSyncState",
 	"RuntimeBroker",
 	"Schedule",
