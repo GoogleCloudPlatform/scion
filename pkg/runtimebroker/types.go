@@ -430,6 +430,11 @@ type CreateAgentConfig struct {
 
 	// GCPIdentity holds the GCP identity assignment for the agent.
 	GCPIdentity *GCPIdentityConfig `json:"gcpIdentity,omitempty"`
+
+	// ProjectPreStartHookScript is the active project pre-start hook script,
+	// inlined at agent-create time. The broker writes it to
+	// pre-start.d/30-project-custom before the agent container starts.
+	ProjectPreStartHookScript string `json:"projectPreStartHookScript,omitempty"`
 }
 
 // GCPIdentityConfig holds GCP identity configuration passed from Hub to Broker.

@@ -510,6 +510,11 @@ type RemoteAgentConfig struct {
 
 	// GCPIdentity holds the GCP identity assignment for the agent.
 	GCPIdentity *RemoteGCPIdentityConfig `json:"gcpIdentity,omitempty"`
+
+	// ProjectPreStartHookScript is the active project pre-start hook script,
+	// inlined at agent-create time. The broker writes it to
+	// pre-start.d/30-project-custom before the agent starts.
+	ProjectPreStartHookScript string `json:"projectPreStartHookScript,omitempty"`
 }
 
 // RemoteGCPIdentityConfig holds GCP identity configuration sent from Hub to Broker.
