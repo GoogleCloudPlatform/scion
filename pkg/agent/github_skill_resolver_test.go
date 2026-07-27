@@ -1034,6 +1034,180 @@ func TestGitHubPrivateRepoInstall_NoDoubleDownload(t *testing.T) {
 	}
 }
 
+// TestIsFullCommitSHA verifies the full-SHA detection helper.
+func TestIsFullCommitSHA(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want bool
+	}{
+		{"full 40-char lowercase hex", "abc123def456abc123def456abc123def456abcd", true},
+		{"all zeros (valid SHA)", "0000000000000000000000000000000000000000", true},
+		{"uppercase hex rejected", "ABC123DEF456ABC123DEF456ABC123DEF456ABCD", false},
+		{"mixed case rejected", "Abc123def456abc123def456abc123def456abcd", false},
+		{"39 chars too short", "abc123def456abc123def456abc123def456abc", false},
+		{"41 chars too long", "abc123def456abc123def456abc123def456abcde", false},
+		{"branch name rejected", "main", false},
+		{"short SHA (12 char) rejected", "abc123def456", false},
+		{"empty string rejected", "", false},
+		{"non-hex chars rejected", "abc123def456abc123def456abc123def456zzzz", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isFullCommitSHA(tt.in); got != tt.want {
+				t.Errorf("isFullCommitSHA(%q) = %v, want %v", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestResolveCommitSHA_FullSHAShortCircuit verifies that resolveCommitSHA skips
+// the GitHub API entirely when the ref is already a full 40-char commit SHA.
+func TestResolveCommitSHA_FullSHAShortCircuit(t *testing.T) {
+	server, mux := newTestGitHubServer(t)
+	apiCalled := false
+	mux.HandleFunc("/repos/owner/repo/commits/", func(w http.ResponseWriter, _ *http.Request) {
+		apiCalled = true
+		_, _ = w.Write([]byte(testCommitSHA))
+	})
+
+	resolver := newTestGitHubResolver(server)
+	ghRef := &GitHubSkillRef{
+		Owner:     "owner",
+		Repo:      "repo",
+		SkillPath: "skills/my-skill",
+		SkillName: "my-skill",
+		Ref:       testCommitSHA, // already a full SHA
+		Raw:       "gh://owner/repo/my-skill@" + testCommitSHA,
+	}
+
+	got, err := resolver.resolveCommitSHA(context.Background(), ghRef, "test-token")
+	if err != nil {
+		t.Fatalf("resolveCommitSHA failed: %v", err)
+	}
+	if got != testCommitSHA {
+		t.Errorf("expected %s, got %s", testCommitSHA, got)
+	}
+	if apiCalled {
+		t.Error("API should not have been called for a full-SHA ref, but it was")
+	}
+}
+
+// TestResolveCommitSHA_BranchStillCallsAPI verifies that branch names (non-SHA refs)
+// still trigger the GitHub API call.
+func TestResolveCommitSHA_BranchStillCallsAPI(t *testing.T) {
+	server, mux := newTestGitHubServer(t)
+	apiCalled := false
+	mux.HandleFunc("/repos/owner/repo/commits/main", func(w http.ResponseWriter, _ *http.Request) {
+		apiCalled = true
+		_, _ = w.Write([]byte(testCommitSHA))
+	})
+
+	resolver := newTestGitHubResolver(server)
+	ghRef := &GitHubSkillRef{
+		Owner:     "owner",
+		Repo:      "repo",
+		SkillPath: "skills/my-skill",
+		SkillName: "my-skill",
+		Ref:       "main",
+		Raw:       "gh://owner/repo/my-skill@main",
+	}
+
+	got, err := resolver.resolveCommitSHA(context.Background(), ghRef, "test-token")
+	if err != nil {
+		t.Fatalf("resolveCommitSHA failed: %v", err)
+	}
+	if got != testCommitSHA {
+		t.Errorf("expected %s, got %s", testCommitSHA, got)
+	}
+	if !apiCalled {
+		t.Error("API should have been called for a branch-name ref, but it was not")
+	}
+}
+
+// TestNewGitHubSkillResolverWithCredentials_ProvisionCredentialsFallback verifies
+// that when no explicit defaultToken is provided and the broker env lacks
+// GITHUB_TOKEN, the resolver falls back to a GITHUB_TOKEN entry in
+// provisionCredentials. This is the auth wiring fix for bare gh:// URIs.
+func TestNewGitHubSkillResolverWithCredentials_ProvisionCredentialsFallback(t *testing.T) {
+	// Ensure no GITHUB_TOKEN in the process env (clear it, restore after test).
+	old := os.Getenv("GITHUB_TOKEN")
+	if err := os.Unsetenv("GITHUB_TOKEN"); err != nil {
+		t.Fatalf("failed to unset GITHUB_TOKEN: %v", err)
+	}
+	t.Cleanup(func() {
+		if old != "" {
+			_ = os.Setenv("GITHUB_TOKEN", old)
+		}
+	})
+
+	creds := map[string]string{
+		"GITHUB_TOKEN": "provision-secret-token",
+		"OTHER_SECRET": "other-value",
+	}
+	r := NewGitHubSkillResolverWithCredentials("", creds)
+	if r.token != "provision-secret-token" {
+		t.Errorf("expected token from provisionCredentials fallback, got %q", r.token)
+	}
+}
+
+// TestNewGitHubSkillResolverWithCredentials_ExplicitTokenWins verifies that an
+// explicit defaultToken takes precedence over any provision credential.
+func TestNewGitHubSkillResolverWithCredentials_ExplicitTokenWins(t *testing.T) {
+	creds := map[string]string{
+		"GITHUB_TOKEN": "provision-secret-token",
+	}
+	r := NewGitHubSkillResolverWithCredentials("explicit-token", creds)
+	if r.token != "explicit-token" {
+		t.Errorf("expected explicit token to win, got %q", r.token)
+	}
+}
+
+// TestGitHubSkillResolver_FullSHAPinnedSkill verifies end-to-end resolution
+// of a skill pinned to a full commit SHA makes no resolveCommitSHA API call.
+func TestGitHubSkillResolver_FullSHAPinnedSkill(t *testing.T) {
+	server, mux := newTestGitHubServer(t)
+	commitEndpointCalled := false
+
+	// Register the commit endpoint — it should NOT be called.
+	mux.HandleFunc("/repos/owner/repo/commits/"+testCommitSHA, func(w http.ResponseWriter, _ *http.Request) {
+		commitEndpointCalled = true
+		_, _ = w.Write([]byte(testCommitSHA))
+	})
+
+	// Contents and raw endpoints are needed for the full resolution flow.
+	mux.HandleFunc("/repos/owner/repo/contents/skills/my-skill", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode([]githubContentEntry{
+			{Name: "SKILL.md", Path: "skills/my-skill/SKILL.md", Type: "file", Size: 5},
+		})
+	})
+	mux.HandleFunc("/raw/owner/repo/"+testCommitSHA+"/skills/my-skill/SKILL.md", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("hello"))
+	})
+
+	resolver := newTestGitHubResolver(server)
+
+	result, err := resolver.Resolve(context.Background(), []api.SkillReference{
+		{URI: "gh://owner/repo/my-skill@" + testCommitSHA},
+	}, ResolveOpts{})
+	if err != nil {
+		t.Fatalf("Resolve failed: %v", err)
+	}
+	if len(result.Errors) != 0 {
+		t.Fatalf("unexpected errors: %v", result.Errors)
+	}
+	if len(result.Resolved) != 1 {
+		t.Fatalf("expected 1 resolved skill, got %d", len(result.Resolved))
+	}
+	if commitEndpointCalled {
+		t.Error("commit resolution API endpoint was called for a full-SHA ref; expected short-circuit")
+	}
+	// Version should be the first 12 chars of the pinned SHA.
+	if result.Resolved[0].Version != testCommitSHA[:12] {
+		t.Errorf("expected version %s, got %s", testCommitSHA[:12], result.Resolved[0].Version)
+	}
+}
+
 type stubSkillResolver struct {
 	result *ResolveResult
 }

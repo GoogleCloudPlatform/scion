@@ -64,7 +64,13 @@ type GitHubSkillResolver struct {
 func NewGitHubSkillResolver() *GitHubSkillResolver {
 	var cache *GitHubResolutionCache
 	if cacheDir, err := githubResolutionCacheDir(); err == nil {
-		cache, _ = NewGitHubResolutionCache(cacheDir, DefaultResolutionCacheTTL)
+		var cacheErr error
+		cache, cacheErr = NewGitHubResolutionCache(cacheDir, DefaultResolutionCacheTTL)
+		if cacheErr != nil {
+			// Log so a broken cache is visible rather than silently degrading
+			// to uncached operation (every request makes a fresh GitHub API call).
+			util.Debugf("github: failed to initialize resolution cache at %s: %v (proceeding without cache)", cacheDir, cacheErr)
+		}
 	}
 	return &GitHubSkillResolver{
 		httpClient:      &http.Client{Timeout: githubAPITimeout},
@@ -77,12 +83,26 @@ func NewGitHubSkillResolver() *GitHubSkillResolver {
 
 // NewGitHubSkillResolverWithCredentials constructs a resolver with an explicit
 // default token and a named-credential map for per-URI lookup.
-// If defaultToken is empty, falls back to the GITHUB_TOKEN environment variable.
+//
+// Token resolution order for bare gh:// URIs (no ?token= suffix):
+//  1. defaultToken (from req.ResolvedEnv["GITHUB_TOKEN"] — GitHub App or env-type secret).
+//  2. GITHUB_TOKEN from the broker process environment (os.Getenv, set by NewGitHubSkillResolver).
+//  3. GITHUB_TOKEN from provisionCredentials (project secret of any type).
+//  4. No token — unauthenticated calls, subject to GitHub's 60 req/hr per-IP limit.
+//
 // provisionCredentials maps secret name → value; may be nil.
 func NewGitHubSkillResolverWithCredentials(defaultToken string, provisionCredentials map[string]string) *GitHubSkillResolver {
 	r := NewGitHubSkillResolver()
 	if defaultToken != "" {
 		r.token = defaultToken
+	} else if r.token == "" {
+		// Neither an explicit token nor the broker-env GITHUB_TOKEN is available.
+		// Fall back to a project-scoped provision credential named GITHUB_TOKEN.
+		// This covers projects that store GITHUB_TOKEN as a secret but not as an
+		// env-type secret (which would have been included in req.ResolvedEnv).
+		if val := provisionCredentials["GITHUB_TOKEN"]; val != "" {
+			r.token = val
+		}
 	}
 	r.provisionCredentials = provisionCredentials
 	return r
@@ -243,10 +263,42 @@ type githubContentEntry struct {
 	DownloadURL string `json:"download_url"`
 }
 
+// isFullCommitSHA reports whether s is a complete 40-character lowercase
+// hexadecimal commit SHA. Such a ref is already fully resolved and requires
+// no GitHub API call to "resolve" it further.
+func isFullCommitSHA(s string) bool {
+	if len(s) != 40 {
+		return false
+	}
+	for _, c := range s {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
 func (r *GitHubSkillResolver) resolveCommitSHA(ctx context.Context, ghRef *GitHubSkillRef, token string) (string, error) {
 	ref := ghRef.Ref
 	if ref == "" {
 		ref = "HEAD"
+	}
+
+	// Short-circuit: if the ref is already a full 40-char lowercase hex commit SHA,
+	// no API call is needed — the ref IS the resolved SHA.
+	if isFullCommitSHA(ref) {
+		util.Debugf("github: ref %s is already a full SHA, skipping resolveCommitSHA API call", ref)
+		return ref, nil
+	}
+
+	if token == "" {
+		// Warn early — unauthenticated GitHub API calls are limited to 60/hr per
+		// outbound IP (shared across all broker instances on Cloud Run / Cloud NAT).
+		// This limit is exhausted quickly under any multi-agent workload.
+		// To fix: set GITHUB_TOKEN in the project secrets or the broker's environment.
+		fmt.Fprintf(os.Stderr, "github: WARNING: no GITHUB_TOKEN configured for %s; "+
+			"making unauthenticated GitHub API call (limit: 60 req/hr per IP). "+
+			"Set a GITHUB_TOKEN project secret or broker env var to increase the limit.\n", ghRef.Raw)
 	}
 
 	reqURL := fmt.Sprintf("%s/repos/%s/%s/commits/%s", r.apiBase,
