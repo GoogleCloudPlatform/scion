@@ -63,13 +63,16 @@ type GitHubSkillResolver struct {
 // are reused to avoid redundant GitHub API calls.
 func NewGitHubSkillResolver() *GitHubSkillResolver {
 	var cache *GitHubResolutionCache
-	if cacheDir, err := githubResolutionCacheDir(); err == nil {
+	cacheDir, cacheDirErr := githubResolutionCacheDir()
+	if cacheDirErr != nil {
+		// Print to stderr unconditionally: without a cache every request hits the
+		// GitHub API fresh, directly contributing to rate-limit exhaustion.
+		fmt.Fprintf(os.Stderr, "github: WARNING: failed to determine resolution cache dir: %v; proceeding without cache\n", cacheDirErr)
+	} else {
 		var cacheErr error
 		cache, cacheErr = NewGitHubResolutionCache(cacheDir, DefaultResolutionCacheTTL)
 		if cacheErr != nil {
-			// Print to stderr unconditionally (not debug-gated): a broken cache causes
-			// every request to make fresh GitHub API calls, contributing directly to
-			// rate-limit exhaustion. Operators need to see this in production logs.
+			// Same rationale: operators need to see cache failures in production logs.
 			fmt.Fprintf(os.Stderr, "github: WARNING: failed to initialize resolution cache at %s: %v (proceeding without cache)\n", cacheDir, cacheErr)
 		}
 	}
