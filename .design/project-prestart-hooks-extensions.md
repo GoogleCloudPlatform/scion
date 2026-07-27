@@ -598,16 +598,11 @@ created after this feature ships.
 
 ## Open Questions
 
-1. **Hub hook list access for non-admins (web UI).** The project settings page
-   needs to show the "Inherited from hub" banner even for project owners who are
-   not hub admins. The proposed GET `/api/v1/pre-start-hooks` call from the page
-   requires deciding whether non-admin users can read the hub hook list (read-only
-   GET). The current design proposes allowing it — hub admins control the hook
-   content (and project owners can already observe that a hook is staged in their
-   agents). If read access is restricted to hub-admin only, the `inheritedHook`
-   banner must be omitted for non-admin project owners, which degrades transparency.
-   **Recommendation:** Allow read (GET list/detail) for any authenticated user;
-   restrict all mutations to hub admin. Mirrors HarnessConfig GET authorization.
+1. ~~**Hub hook list access for non-admins (web UI).**~~ **Resolved (2026-07-27):**
+   Read (GET list/detail) is open to any authenticated user; all mutations
+   (POST/PUT/DELETE/activate) require hub admin. Mirrors HarnessConfig GET
+   authorization. The "Inherited from hub" banner in project settings is therefore
+   always visible to project owners.
 
 2. **CLI: where does `scion hub hook` live in the command tree?** The current design
    places it under `scion hub hook` (subcommand of `hubCmd`). If hub admin commands
