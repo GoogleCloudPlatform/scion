@@ -172,6 +172,16 @@ type AgentAppliedConfig struct {
 
 	// GCPIdentity holds the GCP identity assignment for this agent.
 	GCPIdentity *GCPIdentityConfig `json:"gcpIdentity,omitempty"`
+
+	// ProjectPreStartHookID is the ID of the active pre-start hook for this
+	// agent's project at creation time. Used for audit and lineage tracking.
+	ProjectPreStartHookID string `json:"projectPreStartHookId,omitempty"`
+
+	// ProjectPreStartHookScript is the script content of the active pre-start
+	// hook, inlined at agent-create time for zero-latency delivery to the broker.
+	// Bounded to 64 KB at the Hub API layer. When non-empty, the broker stages it
+	// into $HOME/.scion/hooks/pre-start.d/30-project-custom before container start.
+	ProjectPreStartHookScript string `json:"projectPreStartHookScript,omitempty"`
 }
 
 // Project type constants.

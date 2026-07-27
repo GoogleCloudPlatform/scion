@@ -1443,6 +1443,19 @@ func (s *Server) handleProjectRoutes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Check for nested /pre-start-hooks path
+	if strings.HasPrefix(subPath, "pre-start-hooks") {
+		pshPath := strings.TrimPrefix(subPath, "pre-start-hooks")
+		pshPath = strings.TrimPrefix(pshPath, "/")
+		pshPath = strings.TrimSuffix(pshPath, "/")
+		if pshPath == "" {
+			s.handleProjectPreStartHooks(w, r, projectID)
+		} else {
+			s.handleProjectPreStartHookByID(w, r, projectID, pshPath)
+		}
+		return
+	}
+
 	// Check for nested /settings path
 	if subPath == "settings" {
 		s.handleProjectSettings(w, r, projectID)
