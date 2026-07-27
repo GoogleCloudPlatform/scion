@@ -154,9 +154,11 @@ func (s *ProjectPreStartHookStore) CreateProjectPreStartHook(ctx context.Context
 		SetUpdated(hook.Updated)
 	if hook.ID != "" {
 		uid, err := parseUUID(hook.ID)
-		if err == nil {
-			create = create.SetID(uid)
+		if err != nil {
+			_ = tx.Rollback()
+			return nil, fmt.Errorf("%w: invalid hook ID: %w", store.ErrInvalidInput, err)
 		}
+		create = create.SetID(uid)
 	}
 	if hook.Description != "" {
 		create = create.SetDescription(hook.Description)

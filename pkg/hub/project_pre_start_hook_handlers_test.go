@@ -207,6 +207,22 @@ func TestProjectPreStartHooks_Update(t *testing.T) {
 	assert.Equal(t, "#!/bin/sh\necho updated\n", updated.Script)
 }
 
+func TestProjectPreStartHooks_Update_EmptyNameRejected(t *testing.T) {
+	srv, s := testServer(t)
+	project := createTestProjectForPSH(t, s)
+
+	body := CreateProjectPreStartHookRequest{Name: "Original", Script: "#!/bin/sh\necho original\n"}
+	createRec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+project.ID+"/pre-start-hooks", body)
+	require.Equal(t, http.StatusCreated, createRec.Code)
+	var created store.ProjectPreStartHook
+	require.NoError(t, json.NewDecoder(createRec.Body).Decode(&created))
+
+	emptyName := ""
+	updateBody := UpdateProjectPreStartHookRequest{Name: &emptyName}
+	rec := doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+project.ID+"/pre-start-hooks/"+created.ID, updateBody)
+	assert.Equal(t, http.StatusBadRequest, rec.Code, "empty name should be rejected")
+}
+
 // =============================================================================
 // POST /pre-start-hooks/{id}/activate
 // =============================================================================

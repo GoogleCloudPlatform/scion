@@ -279,6 +279,10 @@ func (s *Server) handleProjectPreStartHookByID(w http.ResponseWriter, r *http.Re
 			BadRequest(w, "script exceeds 64 KB size limit")
 			return
 		}
+		if req.Name != nil && *req.Name == "" {
+			ValidationError(w, "name cannot be empty", nil)
+			return
+		}
 
 		existing, err := s.store.GetProjectPreStartHook(ctx, hookID, projectID)
 		if err != nil {

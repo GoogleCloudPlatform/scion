@@ -162,7 +162,13 @@ func resolveProjectHookClient(ctx context.Context, projectArg string) (hubclient
 	return hubCtx.Client.ProjectPreStartHooks(projectID), nil
 }
 
+// scriptMaxBytes is the client-side read limit, mirroring the server's 64 KB
+// enforcement. We read one extra byte to detect over-limit files early so the
+// CLI can emit a clear error before sending anything to the server.
+const scriptMaxBytes = 64 * 1024
+
 // readScriptContent reads script content from a file path or stdin ("-").
+// It enforces a 64 KB client-side limit to avoid buffering huge inputs.
 func readScriptContent(path string) (string, error) {
 	var r io.Reader
 	if path == "-" {
@@ -175,9 +181,14 @@ func readScriptContent(path string) (string, error) {
 		defer f.Close()
 		r = f
 	}
-	data, err := io.ReadAll(r)
+	// Read at most scriptMaxBytes+1 so we can detect over-limit files without
+	// buffering the whole thing.
+	data, err := io.ReadAll(io.LimitReader(r, scriptMaxBytes+1))
 	if err != nil {
 		return "", fmt.Errorf("read script: %w", err)
+	}
+	if len(data) > scriptMaxBytes {
+		return "", fmt.Errorf("script size exceeds the 64 KB limit")
 	}
 	return string(data), nil
 }
