@@ -24,9 +24,31 @@ type ProjectPreStartHookCreate struct {
 	conflict []sql.ConflictOption
 }
 
+// SetScope sets the "scope" field.
+func (_c *ProjectPreStartHookCreate) SetScope(v projectprestarthook.Scope) *ProjectPreStartHookCreate {
+	_c.mutation.SetScope(v)
+	return _c
+}
+
+// SetNillableScope sets the "scope" field if the given value is not nil.
+func (_c *ProjectPreStartHookCreate) SetNillableScope(v *projectprestarthook.Scope) *ProjectPreStartHookCreate {
+	if v != nil {
+		_c.SetScope(*v)
+	}
+	return _c
+}
+
 // SetProjectID sets the "project_id" field.
 func (_c *ProjectPreStartHookCreate) SetProjectID(v string) *ProjectPreStartHookCreate {
 	_c.mutation.SetProjectID(v)
+	return _c
+}
+
+// SetNillableProjectID sets the "project_id" field if the given value is not nil.
+func (_c *ProjectPreStartHookCreate) SetNillableProjectID(v *string) *ProjectPreStartHookCreate {
+	if v != nil {
+		_c.SetProjectID(*v)
+	}
 	return _c
 }
 
@@ -181,6 +203,14 @@ func (_c *ProjectPreStartHookCreate) ExecX(ctx context.Context) {
 
 // defaults sets the default values of the builder before save.
 func (_c *ProjectPreStartHookCreate) defaults() {
+	if _, ok := _c.mutation.Scope(); !ok {
+		v := projectprestarthook.DefaultScope
+		_c.mutation.SetScope(v)
+	}
+	if _, ok := _c.mutation.ProjectID(); !ok {
+		v := projectprestarthook.DefaultProjectID
+		_c.mutation.SetProjectID(v)
+	}
 	if _, ok := _c.mutation.Status(); !ok {
 		v := projectprestarthook.DefaultStatus
 		_c.mutation.SetStatus(v)
@@ -201,12 +231,12 @@ func (_c *ProjectPreStartHookCreate) defaults() {
 
 // check runs all checks and user-defined validators on the builder.
 func (_c *ProjectPreStartHookCreate) check() error {
-	if _, ok := _c.mutation.ProjectID(); !ok {
-		return &ValidationError{Name: "project_id", err: errors.New(`ent: missing required field "ProjectPreStartHook.project_id"`)}
+	if _, ok := _c.mutation.Scope(); !ok {
+		return &ValidationError{Name: "scope", err: errors.New(`ent: missing required field "ProjectPreStartHook.scope"`)}
 	}
-	if v, ok := _c.mutation.ProjectID(); ok {
-		if err := projectprestarthook.ProjectIDValidator(v); err != nil {
-			return &ValidationError{Name: "project_id", err: fmt.Errorf(`ent: validator failed for field "ProjectPreStartHook.project_id": %w`, err)}
+	if v, ok := _c.mutation.Scope(); ok {
+		if err := projectprestarthook.ScopeValidator(v); err != nil {
+			return &ValidationError{Name: "scope", err: fmt.Errorf(`ent: validator failed for field "ProjectPreStartHook.scope": %w`, err)}
 		}
 	}
 	if _, ok := _c.mutation.Name(); !ok {
@@ -283,6 +313,10 @@ func (_c *ProjectPreStartHookCreate) createSpec() (*ProjectPreStartHook, *sqlgra
 		_node.ID = id
 		_spec.ID.Value = &id
 	}
+	if value, ok := _c.mutation.Scope(); ok {
+		_spec.SetField(projectprestarthook.FieldScope, field.TypeEnum, value)
+		_node.Scope = value
+	}
 	if value, ok := _c.mutation.ProjectID(); ok {
 		_spec.SetField(projectprestarthook.FieldProjectID, field.TypeString, value)
 		_node.ProjectID = value
@@ -330,7 +364,7 @@ func (_c *ProjectPreStartHookCreate) createSpec() (*ProjectPreStartHook, *sqlgra
 // of the `INSERT` statement. For example:
 //
 //	client.ProjectPreStartHook.Create().
-//		SetProjectID(v).
+//		SetScope(v).
 //		OnConflict(
 //			// Update the row with the new values
 //			// the was proposed for insertion.
@@ -339,7 +373,7 @@ func (_c *ProjectPreStartHookCreate) createSpec() (*ProjectPreStartHook, *sqlgra
 //		// Override some of the fields with custom
 //		// update values.
 //		Update(func(u *ent.ProjectPreStartHookUpsert) {
-//			SetProjectID(v+v).
+//			SetScope(v+v).
 //		}).
 //		Exec(ctx)
 func (_c *ProjectPreStartHookCreate) OnConflict(opts ...sql.ConflictOption) *ProjectPreStartHookUpsertOne {
@@ -375,6 +409,18 @@ type (
 	}
 )
 
+// SetScope sets the "scope" field.
+func (u *ProjectPreStartHookUpsert) SetScope(v projectprestarthook.Scope) *ProjectPreStartHookUpsert {
+	u.Set(projectprestarthook.FieldScope, v)
+	return u
+}
+
+// UpdateScope sets the "scope" field to the value that was provided on create.
+func (u *ProjectPreStartHookUpsert) UpdateScope() *ProjectPreStartHookUpsert {
+	u.SetExcluded(projectprestarthook.FieldScope)
+	return u
+}
+
 // SetProjectID sets the "project_id" field.
 func (u *ProjectPreStartHookUpsert) SetProjectID(v string) *ProjectPreStartHookUpsert {
 	u.Set(projectprestarthook.FieldProjectID, v)
@@ -384,6 +430,12 @@ func (u *ProjectPreStartHookUpsert) SetProjectID(v string) *ProjectPreStartHookU
 // UpdateProjectID sets the "project_id" field to the value that was provided on create.
 func (u *ProjectPreStartHookUpsert) UpdateProjectID() *ProjectPreStartHookUpsert {
 	u.SetExcluded(projectprestarthook.FieldProjectID)
+	return u
+}
+
+// ClearProjectID clears the value of the "project_id" field.
+func (u *ProjectPreStartHookUpsert) ClearProjectID() *ProjectPreStartHookUpsert {
+	u.SetNull(projectprestarthook.FieldProjectID)
 	return u
 }
 
@@ -552,6 +604,20 @@ func (u *ProjectPreStartHookUpsertOne) Update(set func(*ProjectPreStartHookUpser
 	return u
 }
 
+// SetScope sets the "scope" field.
+func (u *ProjectPreStartHookUpsertOne) SetScope(v projectprestarthook.Scope) *ProjectPreStartHookUpsertOne {
+	return u.Update(func(s *ProjectPreStartHookUpsert) {
+		s.SetScope(v)
+	})
+}
+
+// UpdateScope sets the "scope" field to the value that was provided on create.
+func (u *ProjectPreStartHookUpsertOne) UpdateScope() *ProjectPreStartHookUpsertOne {
+	return u.Update(func(s *ProjectPreStartHookUpsert) {
+		s.UpdateScope()
+	})
+}
+
 // SetProjectID sets the "project_id" field.
 func (u *ProjectPreStartHookUpsertOne) SetProjectID(v string) *ProjectPreStartHookUpsertOne {
 	return u.Update(func(s *ProjectPreStartHookUpsert) {
@@ -563,6 +629,13 @@ func (u *ProjectPreStartHookUpsertOne) SetProjectID(v string) *ProjectPreStartHo
 func (u *ProjectPreStartHookUpsertOne) UpdateProjectID() *ProjectPreStartHookUpsertOne {
 	return u.Update(func(s *ProjectPreStartHookUpsert) {
 		s.UpdateProjectID()
+	})
+}
+
+// ClearProjectID clears the value of the "project_id" field.
+func (u *ProjectPreStartHookUpsertOne) ClearProjectID() *ProjectPreStartHookUpsertOne {
+	return u.Update(func(s *ProjectPreStartHookUpsert) {
+		s.ClearProjectID()
 	})
 }
 
@@ -835,7 +908,7 @@ func (_c *ProjectPreStartHookCreateBulk) ExecX(ctx context.Context) {
 //		// Override some of the fields with custom
 //		// update values.
 //		Update(func(u *ent.ProjectPreStartHookUpsert) {
-//			SetProjectID(v+v).
+//			SetScope(v+v).
 //		}).
 //		Exec(ctx)
 func (_c *ProjectPreStartHookCreateBulk) OnConflict(opts ...sql.ConflictOption) *ProjectPreStartHookUpsertBulk {
@@ -917,6 +990,20 @@ func (u *ProjectPreStartHookUpsertBulk) Update(set func(*ProjectPreStartHookUpse
 	return u
 }
 
+// SetScope sets the "scope" field.
+func (u *ProjectPreStartHookUpsertBulk) SetScope(v projectprestarthook.Scope) *ProjectPreStartHookUpsertBulk {
+	return u.Update(func(s *ProjectPreStartHookUpsert) {
+		s.SetScope(v)
+	})
+}
+
+// UpdateScope sets the "scope" field to the value that was provided on create.
+func (u *ProjectPreStartHookUpsertBulk) UpdateScope() *ProjectPreStartHookUpsertBulk {
+	return u.Update(func(s *ProjectPreStartHookUpsert) {
+		s.UpdateScope()
+	})
+}
+
 // SetProjectID sets the "project_id" field.
 func (u *ProjectPreStartHookUpsertBulk) SetProjectID(v string) *ProjectPreStartHookUpsertBulk {
 	return u.Update(func(s *ProjectPreStartHookUpsert) {
@@ -928,6 +1015,13 @@ func (u *ProjectPreStartHookUpsertBulk) SetProjectID(v string) *ProjectPreStartH
 func (u *ProjectPreStartHookUpsertBulk) UpdateProjectID() *ProjectPreStartHookUpsertBulk {
 	return u.Update(func(s *ProjectPreStartHookUpsert) {
 		s.UpdateProjectID()
+	})
+}
+
+// ClearProjectID clears the value of the "project_id" field.
+func (u *ProjectPreStartHookUpsertBulk) ClearProjectID() *ProjectPreStartHookUpsertBulk {
+	return u.Update(func(s *ProjectPreStartHookUpsert) {
+		s.ClearProjectID()
 	})
 }
 

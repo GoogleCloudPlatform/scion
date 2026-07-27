@@ -15,6 +15,8 @@ const (
 	Label = "project_pre_start_hook"
 	// FieldID holds the string denoting the id field in the database.
 	FieldID = "id"
+	// FieldScope holds the string denoting the scope field in the database.
+	FieldScope = "scope"
 	// FieldProjectID holds the string denoting the project_id field in the database.
 	FieldProjectID = "project_id"
 	// FieldName holds the string denoting the name field in the database.
@@ -42,6 +44,7 @@ const (
 // Columns holds all SQL columns for projectprestarthook fields.
 var Columns = []string{
 	FieldID,
+	FieldScope,
 	FieldProjectID,
 	FieldName,
 	FieldSlug,
@@ -65,8 +68,8 @@ func ValidColumn(column string) bool {
 }
 
 var (
-	// ProjectIDValidator is a validator for the "project_id" field. It is called by the builders before save.
-	ProjectIDValidator func(string) error
+	// DefaultProjectID holds the default value on creation for the "project_id" field.
+	DefaultProjectID string
 	// NameValidator is a validator for the "name" field. It is called by the builders before save.
 	NameValidator func(string) error
 	// SlugValidator is a validator for the "slug" field. It is called by the builders before save.
@@ -82,6 +85,32 @@ var (
 	// DefaultID holds the default value on creation for the "id" field.
 	DefaultID func() uuid.UUID
 )
+
+// Scope defines the type for the "scope" enum field.
+type Scope string
+
+// ScopeProject is the default value of the Scope enum.
+const DefaultScope = ScopeProject
+
+// Scope values.
+const (
+	ScopeProject Scope = "project"
+	ScopeHub     Scope = "hub"
+)
+
+func (s Scope) String() string {
+	return string(s)
+}
+
+// ScopeValidator is a validator for the "scope" field enum values. It is called by the builders before save.
+func ScopeValidator(s Scope) error {
+	switch s {
+	case ScopeProject, ScopeHub:
+		return nil
+	default:
+		return fmt.Errorf("projectprestarthook: invalid enum value for scope field: %q", s)
+	}
+}
 
 // Status defines the type for the "status" enum field.
 type Status string
@@ -115,6 +144,11 @@ type OrderOption func(*sql.Selector)
 // ByID orders the results by the id field.
 func ByID(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldID, opts...).ToFunc()
+}
+
+// ByScope orders the results by the scope field.
+func ByScope(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldScope, opts...).ToFunc()
 }
 
 // ByProjectID orders the results by the project_id field.

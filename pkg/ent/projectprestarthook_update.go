@@ -28,6 +28,20 @@ func (_u *ProjectPreStartHookUpdate) Where(ps ...predicate.ProjectPreStartHook) 
 	return _u
 }
 
+// SetScope sets the "scope" field.
+func (_u *ProjectPreStartHookUpdate) SetScope(v projectprestarthook.Scope) *ProjectPreStartHookUpdate {
+	_u.mutation.SetScope(v)
+	return _u
+}
+
+// SetNillableScope sets the "scope" field if the given value is not nil.
+func (_u *ProjectPreStartHookUpdate) SetNillableScope(v *projectprestarthook.Scope) *ProjectPreStartHookUpdate {
+	if v != nil {
+		_u.SetScope(*v)
+	}
+	return _u
+}
+
 // SetProjectID sets the "project_id" field.
 func (_u *ProjectPreStartHookUpdate) SetProjectID(v string) *ProjectPreStartHookUpdate {
 	_u.mutation.SetProjectID(v)
@@ -39,6 +53,12 @@ func (_u *ProjectPreStartHookUpdate) SetNillableProjectID(v *string) *ProjectPre
 	if v != nil {
 		_u.SetProjectID(*v)
 	}
+	return _u
+}
+
+// ClearProjectID clears the value of the "project_id" field.
+func (_u *ProjectPreStartHookUpdate) ClearProjectID() *ProjectPreStartHookUpdate {
+	_u.mutation.ClearProjectID()
 	return _u
 }
 
@@ -207,9 +227,9 @@ func (_u *ProjectPreStartHookUpdate) defaults() {
 
 // check runs all checks and user-defined validators on the builder.
 func (_u *ProjectPreStartHookUpdate) check() error {
-	if v, ok := _u.mutation.ProjectID(); ok {
-		if err := projectprestarthook.ProjectIDValidator(v); err != nil {
-			return &ValidationError{Name: "project_id", err: fmt.Errorf(`ent: validator failed for field "ProjectPreStartHook.project_id": %w`, err)}
+	if v, ok := _u.mutation.Scope(); ok {
+		if err := projectprestarthook.ScopeValidator(v); err != nil {
+			return &ValidationError{Name: "scope", err: fmt.Errorf(`ent: validator failed for field "ProjectPreStartHook.scope": %w`, err)}
 		}
 	}
 	if v, ok := _u.mutation.Name(); ok {
@@ -247,8 +267,14 @@ func (_u *ProjectPreStartHookUpdate) sqlSave(ctx context.Context) (_node int, er
 			}
 		}
 	}
+	if value, ok := _u.mutation.Scope(); ok {
+		_spec.SetField(projectprestarthook.FieldScope, field.TypeEnum, value)
+	}
 	if value, ok := _u.mutation.ProjectID(); ok {
 		_spec.SetField(projectprestarthook.FieldProjectID, field.TypeString, value)
+	}
+	if _u.mutation.ProjectIDCleared() {
+		_spec.ClearField(projectprestarthook.FieldProjectID, field.TypeString)
 	}
 	if value, ok := _u.mutation.Name(); ok {
 		_spec.SetField(projectprestarthook.FieldName, field.TypeString, value)
@@ -303,6 +329,20 @@ type ProjectPreStartHookUpdateOne struct {
 	mutation *ProjectPreStartHookMutation
 }
 
+// SetScope sets the "scope" field.
+func (_u *ProjectPreStartHookUpdateOne) SetScope(v projectprestarthook.Scope) *ProjectPreStartHookUpdateOne {
+	_u.mutation.SetScope(v)
+	return _u
+}
+
+// SetNillableScope sets the "scope" field if the given value is not nil.
+func (_u *ProjectPreStartHookUpdateOne) SetNillableScope(v *projectprestarthook.Scope) *ProjectPreStartHookUpdateOne {
+	if v != nil {
+		_u.SetScope(*v)
+	}
+	return _u
+}
+
 // SetProjectID sets the "project_id" field.
 func (_u *ProjectPreStartHookUpdateOne) SetProjectID(v string) *ProjectPreStartHookUpdateOne {
 	_u.mutation.SetProjectID(v)
@@ -314,6 +354,12 @@ func (_u *ProjectPreStartHookUpdateOne) SetNillableProjectID(v *string) *Project
 	if v != nil {
 		_u.SetProjectID(*v)
 	}
+	return _u
+}
+
+// ClearProjectID clears the value of the "project_id" field.
+func (_u *ProjectPreStartHookUpdateOne) ClearProjectID() *ProjectPreStartHookUpdateOne {
+	_u.mutation.ClearProjectID()
 	return _u
 }
 
@@ -495,9 +541,9 @@ func (_u *ProjectPreStartHookUpdateOne) defaults() {
 
 // check runs all checks and user-defined validators on the builder.
 func (_u *ProjectPreStartHookUpdateOne) check() error {
-	if v, ok := _u.mutation.ProjectID(); ok {
-		if err := projectprestarthook.ProjectIDValidator(v); err != nil {
-			return &ValidationError{Name: "project_id", err: fmt.Errorf(`ent: validator failed for field "ProjectPreStartHook.project_id": %w`, err)}
+	if v, ok := _u.mutation.Scope(); ok {
+		if err := projectprestarthook.ScopeValidator(v); err != nil {
+			return &ValidationError{Name: "scope", err: fmt.Errorf(`ent: validator failed for field "ProjectPreStartHook.scope": %w`, err)}
 		}
 	}
 	if v, ok := _u.mutation.Name(); ok {
@@ -552,8 +598,14 @@ func (_u *ProjectPreStartHookUpdateOne) sqlSave(ctx context.Context) (_node *Pro
 			}
 		}
 	}
+	if value, ok := _u.mutation.Scope(); ok {
+		_spec.SetField(projectprestarthook.FieldScope, field.TypeEnum, value)
+	}
 	if value, ok := _u.mutation.ProjectID(); ok {
 		_spec.SetField(projectprestarthook.FieldProjectID, field.TypeString, value)
+	}
+	if _u.mutation.ProjectIDCleared() {
+		_spec.ClearField(projectprestarthook.FieldProjectID, field.TypeString)
 	}
 	if value, ok := _u.mutation.Name(); ok {
 		_spec.SetField(projectprestarthook.FieldName, field.TypeString, value)

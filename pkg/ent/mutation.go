@@ -27048,6 +27048,7 @@ type ProjectPreStartHookMutation struct {
 	op            Op
 	typ           string
 	id            *uuid.UUID
+	scope         *projectprestarthook.Scope
 	project_id    *string
 	name          *string
 	slug          *string
@@ -27168,6 +27169,42 @@ func (m *ProjectPreStartHookMutation) IDs(ctx context.Context) ([]uuid.UUID, err
 	}
 }
 
+// SetScope sets the "scope" field.
+func (m *ProjectPreStartHookMutation) SetScope(pr projectprestarthook.Scope) {
+	m.scope = &pr
+}
+
+// Scope returns the value of the "scope" field in the mutation.
+func (m *ProjectPreStartHookMutation) Scope() (r projectprestarthook.Scope, exists bool) {
+	v := m.scope
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldScope returns the old "scope" field's value of the ProjectPreStartHook entity.
+// If the ProjectPreStartHook object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ProjectPreStartHookMutation) OldScope(ctx context.Context) (v projectprestarthook.Scope, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldScope is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldScope requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldScope: %w", err)
+	}
+	return oldValue.Scope, nil
+}
+
+// ResetScope resets all changes to the "scope" field.
+func (m *ProjectPreStartHookMutation) ResetScope() {
+	m.scope = nil
+}
+
 // SetProjectID sets the "project_id" field.
 func (m *ProjectPreStartHookMutation) SetProjectID(s string) {
 	m.project_id = &s
@@ -27199,9 +27236,22 @@ func (m *ProjectPreStartHookMutation) OldProjectID(ctx context.Context) (v strin
 	return oldValue.ProjectID, nil
 }
 
+// ClearProjectID clears the value of the "project_id" field.
+func (m *ProjectPreStartHookMutation) ClearProjectID() {
+	m.project_id = nil
+	m.clearedFields[projectprestarthook.FieldProjectID] = struct{}{}
+}
+
+// ProjectIDCleared returns if the "project_id" field was cleared in this mutation.
+func (m *ProjectPreStartHookMutation) ProjectIDCleared() bool {
+	_, ok := m.clearedFields[projectprestarthook.FieldProjectID]
+	return ok
+}
+
 // ResetProjectID resets all changes to the "project_id" field.
 func (m *ProjectPreStartHookMutation) ResetProjectID() {
 	m.project_id = nil
+	delete(m.clearedFields, projectprestarthook.FieldProjectID)
 }
 
 // SetName sets the "name" field.
@@ -27601,7 +27651,10 @@ func (m *ProjectPreStartHookMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *ProjectPreStartHookMutation) Fields() []string {
-	fields := make([]string, 0, 10)
+	fields := make([]string, 0, 11)
+	if m.scope != nil {
+		fields = append(fields, projectprestarthook.FieldScope)
+	}
 	if m.project_id != nil {
 		fields = append(fields, projectprestarthook.FieldProjectID)
 	}
@@ -27640,6 +27693,8 @@ func (m *ProjectPreStartHookMutation) Fields() []string {
 // schema.
 func (m *ProjectPreStartHookMutation) Field(name string) (ent.Value, bool) {
 	switch name {
+	case projectprestarthook.FieldScope:
+		return m.Scope()
 	case projectprestarthook.FieldProjectID:
 		return m.ProjectID()
 	case projectprestarthook.FieldName:
@@ -27669,6 +27724,8 @@ func (m *ProjectPreStartHookMutation) Field(name string) (ent.Value, bool) {
 // database failed.
 func (m *ProjectPreStartHookMutation) OldField(ctx context.Context, name string) (ent.Value, error) {
 	switch name {
+	case projectprestarthook.FieldScope:
+		return m.OldScope(ctx)
 	case projectprestarthook.FieldProjectID:
 		return m.OldProjectID(ctx)
 	case projectprestarthook.FieldName:
@@ -27698,6 +27755,13 @@ func (m *ProjectPreStartHookMutation) OldField(ctx context.Context, name string)
 // type.
 func (m *ProjectPreStartHookMutation) SetField(name string, value ent.Value) error {
 	switch name {
+	case projectprestarthook.FieldScope:
+		v, ok := value.(projectprestarthook.Scope)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetScope(v)
+		return nil
 	case projectprestarthook.FieldProjectID:
 		v, ok := value.(string)
 		if !ok {
@@ -27798,6 +27862,9 @@ func (m *ProjectPreStartHookMutation) AddField(name string, value ent.Value) err
 // mutation.
 func (m *ProjectPreStartHookMutation) ClearedFields() []string {
 	var fields []string
+	if m.FieldCleared(projectprestarthook.FieldProjectID) {
+		fields = append(fields, projectprestarthook.FieldProjectID)
+	}
 	if m.FieldCleared(projectprestarthook.FieldDescription) {
 		fields = append(fields, projectprestarthook.FieldDescription)
 	}
@@ -27821,6 +27888,9 @@ func (m *ProjectPreStartHookMutation) FieldCleared(name string) bool {
 // error if the field is not defined in the schema.
 func (m *ProjectPreStartHookMutation) ClearField(name string) error {
 	switch name {
+	case projectprestarthook.FieldProjectID:
+		m.ClearProjectID()
+		return nil
 	case projectprestarthook.FieldDescription:
 		m.ClearDescription()
 		return nil
@@ -27838,6 +27908,9 @@ func (m *ProjectPreStartHookMutation) ClearField(name string) error {
 // It returns an error if the field is not defined in the schema.
 func (m *ProjectPreStartHookMutation) ResetField(name string) error {
 	switch name {
+	case projectprestarthook.FieldScope:
+		m.ResetScope()
+		return nil
 	case projectprestarthook.FieldProjectID:
 		m.ResetProjectID()
 		return nil

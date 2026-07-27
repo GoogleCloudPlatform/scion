@@ -18,6 +18,8 @@ type ProjectPreStartHook struct {
 	config `json:"-"`
 	// ID of the ent.
 	ID uuid.UUID `json:"id,omitempty"`
+	// Scope holds the value of the "scope" field.
+	Scope projectprestarthook.Scope `json:"scope,omitempty"`
 	// ProjectID holds the value of the "project_id" field.
 	ProjectID string `json:"project_id,omitempty"`
 	// Name holds the value of the "name" field.
@@ -46,7 +48,7 @@ func (*ProjectPreStartHook) scanValues(columns []string) ([]any, error) {
 	values := make([]any, len(columns))
 	for i := range columns {
 		switch columns[i] {
-		case projectprestarthook.FieldProjectID, projectprestarthook.FieldName, projectprestarthook.FieldSlug, projectprestarthook.FieldDescription, projectprestarthook.FieldScript, projectprestarthook.FieldStatus, projectprestarthook.FieldCreatedBy, projectprestarthook.FieldUpdatedBy:
+		case projectprestarthook.FieldScope, projectprestarthook.FieldProjectID, projectprestarthook.FieldName, projectprestarthook.FieldSlug, projectprestarthook.FieldDescription, projectprestarthook.FieldScript, projectprestarthook.FieldStatus, projectprestarthook.FieldCreatedBy, projectprestarthook.FieldUpdatedBy:
 			values[i] = new(sql.NullString)
 		case projectprestarthook.FieldCreated, projectprestarthook.FieldUpdated:
 			values[i] = new(sql.NullTime)
@@ -72,6 +74,12 @@ func (_m *ProjectPreStartHook) assignValues(columns []string, values []any) erro
 				return fmt.Errorf("unexpected type %T for field id", values[i])
 			} else if value != nil {
 				_m.ID = *value
+			}
+		case projectprestarthook.FieldScope:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field scope", values[i])
+			} else if value.Valid {
+				_m.Scope = projectprestarthook.Scope(value.String)
 			}
 		case projectprestarthook.FieldProjectID:
 			if value, ok := values[i].(*sql.NullString); !ok {
@@ -169,6 +177,9 @@ func (_m *ProjectPreStartHook) String() string {
 	var builder strings.Builder
 	builder.WriteString("ProjectPreStartHook(")
 	builder.WriteString(fmt.Sprintf("id=%v, ", _m.ID))
+	builder.WriteString("scope=")
+	builder.WriteString(fmt.Sprintf("%v", _m.Scope))
+	builder.WriteString(", ")
 	builder.WriteString("project_id=")
 	builder.WriteString(_m.ProjectID)
 	builder.WriteString(", ")

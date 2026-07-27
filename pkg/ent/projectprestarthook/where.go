@@ -100,6 +100,26 @@ func Updated(v time.Time) predicate.ProjectPreStartHook {
 	return predicate.ProjectPreStartHook(sql.FieldEQ(FieldUpdated, v))
 }
 
+// ScopeEQ applies the EQ predicate on the "scope" field.
+func ScopeEQ(v Scope) predicate.ProjectPreStartHook {
+	return predicate.ProjectPreStartHook(sql.FieldEQ(FieldScope, v))
+}
+
+// ScopeNEQ applies the NEQ predicate on the "scope" field.
+func ScopeNEQ(v Scope) predicate.ProjectPreStartHook {
+	return predicate.ProjectPreStartHook(sql.FieldNEQ(FieldScope, v))
+}
+
+// ScopeIn applies the In predicate on the "scope" field.
+func ScopeIn(vs ...Scope) predicate.ProjectPreStartHook {
+	return predicate.ProjectPreStartHook(sql.FieldIn(FieldScope, vs...))
+}
+
+// ScopeNotIn applies the NotIn predicate on the "scope" field.
+func ScopeNotIn(vs ...Scope) predicate.ProjectPreStartHook {
+	return predicate.ProjectPreStartHook(sql.FieldNotIn(FieldScope, vs...))
+}
+
 // ProjectIDEQ applies the EQ predicate on the "project_id" field.
 func ProjectIDEQ(v string) predicate.ProjectPreStartHook {
 	return predicate.ProjectPreStartHook(sql.FieldEQ(FieldProjectID, v))
@@ -153,6 +173,16 @@ func ProjectIDHasPrefix(v string) predicate.ProjectPreStartHook {
 // ProjectIDHasSuffix applies the HasSuffix predicate on the "project_id" field.
 func ProjectIDHasSuffix(v string) predicate.ProjectPreStartHook {
 	return predicate.ProjectPreStartHook(sql.FieldHasSuffix(FieldProjectID, v))
+}
+
+// ProjectIDIsNil applies the IsNil predicate on the "project_id" field.
+func ProjectIDIsNil() predicate.ProjectPreStartHook {
+	return predicate.ProjectPreStartHook(sql.FieldIsNull(FieldProjectID))
+}
+
+// ProjectIDNotNil applies the NotNil predicate on the "project_id" field.
+func ProjectIDNotNil() predicate.ProjectPreStartHook {
+	return predicate.ProjectPreStartHook(sql.FieldNotNull(FieldProjectID))
 }
 
 // ProjectIDEqualFold applies the EqualFold predicate on the "project_id" field.
