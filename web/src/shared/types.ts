@@ -904,3 +904,30 @@ export interface Policy {
   updated: string;
   createdBy?: string;
 }
+
+/**
+ * Minimal pre-start hook fields used by the inherited-hub indicator.
+ */
+export interface PreStartHookSummary {
+  id: string;
+  name: string;
+  slug: string;
+  scope: 'project' | 'hub';
+  status: string;
+}
+
+/**
+ * Pre-start hook from the Hub API (project- or hub-scoped).
+ * Mirrors the Go `store.ProjectPreStartHook` struct.
+ */
+export interface PreStartHook extends PreStartHookSummary {
+  /** Empty for hub-scoped hooks. */
+  projectId?: string;
+  description?: string;
+  /** Raw script content. Bounded to 64 KB by the Hub API. */
+  script: string;
+  createdBy?: string;
+  updatedBy?: string;
+  created: string;
+  updated: string;
+}
