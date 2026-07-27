@@ -434,12 +434,12 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 
 	// Re-stage the project pre-start hook on restart. The script content is
 	// baked into StartOptions at agent-create time and forwarded by the broker,
-	// so no Hub round-trip is needed. Log and continue on error: the script was
-	// likely already staged at provision time; if the file is genuinely missing
-	// the pre-start hook manager will abort startup with a clear error message.
+	// so no Hub round-trip is needed. A write failure is fatal: if the file is
+	// absent on a fresh restart the abort guard in init.go (projectHookStaged)
+	// will not fire, so the hook would silently not run — worse than aborting.
 	if opts.ProjectPreStartHookScript != "" {
 		if err := harness.WriteProjectPreStartHook(agentHome, opts.ProjectPreStartHookScript); err != nil {
-			util.Debugf("Start: project pre-start hook re-staging failed: %v", err)
+			return nil, fmt.Errorf("re-stage project pre-start hook: %w", err)
 		}
 	}
 

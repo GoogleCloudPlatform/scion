@@ -107,13 +107,21 @@ func (s *ProjectPreStartHookStore) ListProjectPreStartHooks(ctx context.Context,
 }
 
 // CreateProjectPreStartHook creates a new hook and atomically archives any
-// existing active hook for the same project.
+// existing active hook for the same project. The new hook is always created
+// with status "active"; passing any other status is rejected to prevent
+// callers from inserting an archived hook without going through the
+// archive-on-create semantics.
 func (s *ProjectPreStartHookStore) CreateProjectPreStartHook(ctx context.Context, hook *store.ProjectPreStartHook) (*store.ProjectPreStartHook, error) {
 	now := time.Now()
 	hook.Created = now
 	hook.Updated = now
+	// Normalise: treat empty status as active; reject any other value.
 	if hook.Status == "" {
 		hook.Status = store.ProjectPreStartHookStatusActive
+	}
+	if hook.Status != store.ProjectPreStartHookStatusActive {
+		return nil, fmt.Errorf("%w: new hooks must be created with status %q, got %q",
+			store.ErrInvalidInput, store.ProjectPreStartHookStatusActive, hook.Status)
 	}
 
 	tx, err := s.client.Tx(ctx)
@@ -184,7 +192,10 @@ func (s *ProjectPreStartHookStore) UpdateProjectPreStartHook(ctx context.Context
 	}
 
 	now := time.Now()
+	// Add a project-ID predicate so a caller cannot accidentally update a hook
+	// that belongs to a different project even if they somehow have the UUID.
 	upd := s.client.ProjectPreStartHook.UpdateOneID(uid).
+		Where(entpsh.ProjectID(hook.ProjectID)).
 		SetUpdated(now)
 	if hook.Name != "" {
 		upd = upd.SetName(hook.Name)
@@ -258,7 +269,9 @@ func (s *ProjectPreStartHookStore) ActivateProjectPreStartHook(ctx context.Conte
 }
 
 // DeleteProjectPreStartHook hard-deletes a hook. Returns store.ErrInvalidInput
-// if the hook is currently active.
+// if the hook is currently active AND is not the only hook in the project.
+// Deleting the last remaining active hook (with no archived hooks to fall
+// back to) is allowed so that operators can fully remove all pre-start hooks.
 func (s *ProjectPreStartHookStore) DeleteProjectPreStartHook(ctx context.Context, hookID, projectID string) error {
 	uid, err := parseUUID(hookID)
 	if err != nil {
@@ -278,8 +291,21 @@ func (s *ProjectPreStartHookStore) DeleteProjectPreStartHook(ctx context.Context
 		}
 		return fmt.Errorf("get project pre-start hook for delete: %w", err)
 	}
+
+	// If the hook is active, only reject the delete when there are other hooks
+	// still in the project. If this is the last/only hook, a hard delete is
+	// allowed so operators can fully clear all pre-start hooks.
 	if e.Status == entpsh.StatusActive {
-		return fmt.Errorf("%w: cannot delete an active hook; archive it first", store.ErrInvalidInput)
+		total, err := s.client.ProjectPreStartHook.Query().
+			Where(entpsh.ProjectID(projectID)).
+			Count(ctx)
+		if err != nil {
+			return fmt.Errorf("count hooks for delete guard: %w", err)
+		}
+		if total > 1 {
+			return fmt.Errorf("%w: cannot delete an active hook while other hooks exist; activate another hook first", store.ErrInvalidInput)
+		}
+		// total == 1: this is the only hook — fall through to delete.
 	}
 
 	if err := s.client.ProjectPreStartHook.DeleteOneID(uid).Exec(ctx); err != nil {

@@ -206,6 +206,7 @@ func TestUpdateProjectPreStartHook(t *testing.T) {
 
 	updated, err := s.UpdateProjectPreStartHook(ctx, &store.ProjectPreStartHook{
 		ID:        created.ID,
+		ProjectID: "proj-1",
 		Name:      "Updated name",
 		Script:    "#!/bin/sh\necho updated\n",
 		UpdatedBy: "editor@example.com",
@@ -275,10 +276,12 @@ func TestActivateProjectPreStartHook_WrongProject(t *testing.T) {
 // DeleteProjectPreStartHook
 // =============================================================================
 
-func TestDeleteProjectPreStartHook_Active(t *testing.T) {
+func TestDeleteProjectPreStartHook_OnlyActive_Succeeds(t *testing.T) {
 	s := newTestPSHStore(t)
 	ctx := context.Background()
 
+	// When this is the last (only) hook in the project, deleting the active
+	// hook is allowed so operators can fully clear all pre-start hooks.
 	hook, err := s.CreateProjectPreStartHook(ctx, &store.ProjectPreStartHook{
 		ProjectID: "proj-1",
 		Name:      "Hook",
@@ -288,8 +291,37 @@ func TestDeleteProjectPreStartHook_Active(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, store.ProjectPreStartHookStatusActive, hook.Status)
 
-	// Deleting an active hook should fail.
 	err = s.DeleteProjectPreStartHook(ctx, hook.ID, "proj-1")
+	require.NoError(t, err, "deleting the only active hook should succeed")
+
+	_, err = s.GetProjectPreStartHook(ctx, hook.ID, "proj-1")
+	assert.ErrorIs(t, err, store.ErrNotFound)
+}
+
+func TestDeleteProjectPreStartHook_Active_WithOtherHooks_Rejected(t *testing.T) {
+	s := newTestPSHStore(t)
+	ctx := context.Background()
+
+	// Create two hooks: first is archived (second is active).
+	_, err := s.CreateProjectPreStartHook(ctx, &store.ProjectPreStartHook{
+		ProjectID: "proj-1",
+		Name:      "First",
+		Slug:      "first",
+		Script:    "#!/bin/sh\n",
+	})
+	require.NoError(t, err)
+
+	second, err := s.CreateProjectPreStartHook(ctx, &store.ProjectPreStartHook{
+		ProjectID: "proj-1",
+		Name:      "Second",
+		Slug:      "second",
+		Script:    "#!/bin/sh\n",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, store.ProjectPreStartHookStatusActive, second.Status)
+
+	// Deleting the active hook when another hook exists should fail.
+	err = s.DeleteProjectPreStartHook(ctx, second.ID, "proj-1")
 	assert.ErrorIs(t, err, store.ErrInvalidInput)
 }
 

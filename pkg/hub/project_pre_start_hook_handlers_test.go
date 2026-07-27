@@ -248,18 +248,37 @@ func TestProjectPreStartHooks_Activate(t *testing.T) {
 // DELETE /pre-start-hooks/{id}
 // =============================================================================
 
-func TestProjectPreStartHooks_Delete_Active_Rejected(t *testing.T) {
+func TestProjectPreStartHooks_Delete_OnlyActive_Succeeds(t *testing.T) {
 	srv, s := testServer(t)
 	project := createTestProjectForPSH(t, s)
 
+	// When this is the only hook, deleting the active hook is allowed.
 	body := CreateProjectPreStartHookRequest{Name: "Hook", Script: "#!/bin/sh\n"}
 	createRec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+project.ID+"/pre-start-hooks", body)
 	require.Equal(t, http.StatusCreated, createRec.Code)
 	var hook store.ProjectPreStartHook
 	require.NoError(t, json.NewDecoder(createRec.Body).Decode(&hook))
 
-	// Deleting the active hook must fail.
 	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/projects/"+project.ID+"/pre-start-hooks/"+hook.ID, nil)
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+}
+
+func TestProjectPreStartHooks_Delete_Active_WithOtherHooks_Rejected(t *testing.T) {
+	srv, s := testServer(t)
+	project := createTestProjectForPSH(t, s)
+
+	// Create two hooks so the first is archived and the second is active.
+	first := CreateProjectPreStartHookRequest{Name: "First", Slug: "first", Script: "#!/bin/sh\n"}
+	doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+project.ID+"/pre-start-hooks", first)
+
+	second := CreateProjectPreStartHookRequest{Name: "Second", Slug: "second", Script: "#!/bin/sh\n"}
+	rec2 := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+project.ID+"/pre-start-hooks", second)
+	require.Equal(t, http.StatusCreated, rec2.Code)
+	var secondHook store.ProjectPreStartHook
+	require.NoError(t, json.NewDecoder(rec2.Body).Decode(&secondHook))
+
+	// Deleting the active hook when another exists must fail.
+	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/projects/"+project.ID+"/pre-start-hooks/"+secondHook.ID, nil)
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 

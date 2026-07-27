@@ -18,7 +18,6 @@ import (
 	"errors"
 	"net/http"
 	"strings"
-	"unicode/utf8"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -123,14 +122,20 @@ func (s *Server) handleProjectPreStartHooks(w http.ResponseWriter, r *http.Reque
 			ValidationError(w, "script is required", nil)
 			return
 		}
-		if utf8.RuneCountInString(req.Script) > 0 && len(req.Script) > projectPreStartHookScriptMaxBytes {
+		if len(req.Script) > projectPreStartHookScriptMaxBytes {
 			BadRequest(w, "script exceeds 64 KB size limit")
 			return
 		}
 
+		// Always run through Slugify so that a caller-supplied slug is
+		// normalised (lowercased, special chars stripped) just as a
+		// name-derived slug is. This prevents spaces, slashes, or other
+		// URL-hostile characters from reaching the store.
 		slug := req.Slug
 		if slug == "" {
 			slug = api.Slugify(req.Name)
+		} else {
+			slug = api.Slugify(slug)
 		}
 		if slug == "" {
 			ValidationError(w, "slug is required (or provide a name that can be slugified)", nil)
@@ -286,7 +291,7 @@ func (s *Server) handleProjectPreStartHookByID(w http.ResponseWriter, r *http.Re
 		}
 
 		// Apply partial updates.
-		updated := &store.ProjectPreStartHook{ID: existing.ID}
+		updated := &store.ProjectPreStartHook{ID: existing.ID, ProjectID: existing.ProjectID}
 		if req.Name != nil {
 			updated.Name = *req.Name
 		} else {
@@ -339,7 +344,7 @@ func (s *Server) handleProjectPreStartHookByID(w http.ResponseWriter, r *http.Re
 				return
 			}
 			if errors.Is(err, store.ErrInvalidInput) {
-				BadRequest(w, "cannot delete an active hook; archive it first by activating another hook")
+				BadRequest(w, "cannot delete an active hook while other hooks exist; activate another hook first, then delete this one")
 				return
 			}
 			writeErrorFromErr(w, err, "")
