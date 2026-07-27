@@ -78,6 +78,21 @@ In projects with multiple users:
 - Do NOT notify other users when replying to a specific individual.
 - Handle each user's requests within their own context.
 
+## Message Length Limit
+
+`scion message` silently fails above approximately **2000 characters** — it
+dumps the CLI `--help` text instead of delivering the message or returning an
+error. An agent checking only the exit code will believe the message was sent.
+
+If your message is long:
+- Split it into two or more messages, each under ~1800 characters.
+- Or write the content to a shared file and send a short message with the
+  file path.
+
+The failure signature (a `--help` dump) looks like a malformed command, not
+an oversized message — check message length first when debugging silent
+delivery failures.
+
 ## Anti-Patterns and Red Flags
 
 - **Red Flag**: Using `--broadcast`.
