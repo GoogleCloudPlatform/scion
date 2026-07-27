@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -396,4 +397,166 @@ func extractSkillURIs(refs []api.SkillReference) []string {
 		out = append(out, r.URI)
 	}
 	return out
+}
+
+// =============================================================================
+// Pre-start hook stamping — project hook, hub fallback, neither
+// =============================================================================
+
+// setupPreStartHookStampingTest returns a server, store, and a persisted
+// project for pre-start hook stamping assertions.
+func setupPreStartHookStampingTest(t *testing.T) (*Server, store.Store, *store.Project) {
+	t.Helper()
+	t.Setenv("HOME", t.TempDir())
+
+	srv, s := testServer(t)
+	project := &store.Project{
+		ID:         tid("psh-stamp-" + t.Name()),
+		Name:       "PSH Stamping Project",
+		Slug:       "psh-stamp-" + strings.ToLower(t.Name()),
+		Visibility: "private",
+		OwnerID:    "dev@localhost",
+	}
+	require.NoError(t, s.CreateProject(t.Context(), project))
+	return srv, s, project
+}
+
+// newStampingAgent returns an agent with a fixed workspace so that
+// populateAgentConfig does not depend on hub-managed path resolution.
+func newStampingAgent() *store.Agent {
+	return &store.Agent{
+		ID: "agent-psh-stamp",
+		AppliedConfig: &store.AgentAppliedConfig{
+			Workspace: "/tmp/workspace",
+		},
+	}
+}
+
+// The hub hook is the fallback when the project has no active hook.
+func TestPopulateAgentConfig_PreStartHook_HubFallback(t *testing.T) {
+	srv, s, project := setupPreStartHookStampingTest(t)
+
+	hubHook, err := s.CreateHubPreStartHook(t.Context(), &store.ProjectPreStartHook{
+		Scope:  store.PreStartHookScopeHub,
+		Name:   "Hub baseline",
+		Slug:   "hub-baseline",
+		Script: "#!/bin/sh\necho hub\n",
+	})
+	require.NoError(t, err)
+
+	agent := newStampingAgent()
+	srv.populateAgentConfig(t.Context(), agent, project, nil)
+
+	assert.Equal(t, hubHook.ID, agent.AppliedConfig.ProjectPreStartHookID)
+	assert.Equal(t, "#!/bin/sh\necho hub\n", agent.AppliedConfig.ProjectPreStartHookScript)
+}
+
+// A project hook overrides the hub hook entirely — only one hook ever runs.
+func TestPopulateAgentConfig_PreStartHook_ProjectOverridesHub(t *testing.T) {
+	srv, s, project := setupPreStartHookStampingTest(t)
+
+	_, err := s.CreateHubPreStartHook(t.Context(), &store.ProjectPreStartHook{
+		Scope:  store.PreStartHookScopeHub,
+		Name:   "Hub baseline",
+		Slug:   "hub-baseline",
+		Script: "#!/bin/sh\necho hub\n",
+	})
+	require.NoError(t, err)
+
+	projectHook, err := s.CreateProjectPreStartHook(t.Context(), &store.ProjectPreStartHook{
+		ProjectID: project.ID,
+		Name:      "Project hook",
+		Slug:      "project-hook",
+		Script:    "#!/bin/sh\necho project\n",
+	})
+	require.NoError(t, err)
+
+	agent := newStampingAgent()
+	srv.populateAgentConfig(t.Context(), agent, project, nil)
+
+	assert.Equal(t, projectHook.ID, agent.AppliedConfig.ProjectPreStartHookID)
+	assert.Equal(t, "#!/bin/sh\necho project\n", agent.AppliedConfig.ProjectPreStartHookScript)
+	assert.NotContains(t, agent.AppliedConfig.ProjectPreStartHookScript, "echo hub")
+}
+
+// Only a project hook exists — unchanged v1 behaviour.
+func TestPopulateAgentConfig_PreStartHook_ProjectOnly(t *testing.T) {
+	srv, s, project := setupPreStartHookStampingTest(t)
+
+	projectHook, err := s.CreateProjectPreStartHook(t.Context(), &store.ProjectPreStartHook{
+		ProjectID: project.ID,
+		Name:      "Project hook",
+		Slug:      "project-hook",
+		Script:    "#!/bin/sh\necho project\n",
+	})
+	require.NoError(t, err)
+
+	agent := newStampingAgent()
+	srv.populateAgentConfig(t.Context(), agent, project, nil)
+
+	assert.Equal(t, projectHook.ID, agent.AppliedConfig.ProjectPreStartHookID)
+	assert.Equal(t, "#!/bin/sh\necho project\n", agent.AppliedConfig.ProjectPreStartHookScript)
+}
+
+// Regression: no hooks at any scope means nothing is staged.
+func TestPopulateAgentConfig_PreStartHook_NoneStagesNothing(t *testing.T) {
+	srv, _, project := setupPreStartHookStampingTest(t)
+
+	agent := newStampingAgent()
+	srv.populateAgentConfig(t.Context(), agent, project, nil)
+
+	assert.Empty(t, agent.AppliedConfig.ProjectPreStartHookID)
+	assert.Empty(t, agent.AppliedConfig.ProjectPreStartHookScript)
+}
+
+// An archived project hook must not shadow the active hub hook.
+func TestPopulateAgentConfig_PreStartHook_ArchivedProjectHookFallsBackToHub(t *testing.T) {
+	srv, s, project := setupPreStartHookStampingTest(t)
+
+	projectHook, err := s.CreateProjectPreStartHook(t.Context(), &store.ProjectPreStartHook{
+		ProjectID: project.ID,
+		Name:      "Project hook",
+		Slug:      "project-hook",
+		Script:    "#!/bin/sh\necho project\n",
+	})
+	require.NoError(t, err)
+
+	hubHook, err := s.CreateHubPreStartHook(t.Context(), &store.ProjectPreStartHook{
+		Scope:  store.PreStartHookScopeHub,
+		Name:   "Hub baseline",
+		Slug:   "hub-baseline",
+		Script: "#!/bin/sh\necho hub\n",
+	})
+	require.NoError(t, err)
+
+	// Deleting the only project hook leaves the project with no active hook.
+	require.NoError(t, s.DeleteProjectPreStartHook(t.Context(), projectHook.ID, project.ID))
+
+	agent := newStampingAgent()
+	srv.populateAgentConfig(t.Context(), agent, project, nil)
+
+	assert.Equal(t, hubHook.ID, agent.AppliedConfig.ProjectPreStartHookID)
+	assert.Equal(t, "#!/bin/sh\necho hub\n", agent.AppliedConfig.ProjectPreStartHookScript)
+}
+
+// An explicitly pre-stamped hook ID is never overwritten by either scope.
+func TestPopulateAgentConfig_PreStartHook_PreStampedIDPreserved(t *testing.T) {
+	srv, s, project := setupPreStartHookStampingTest(t)
+
+	_, err := s.CreateHubPreStartHook(t.Context(), &store.ProjectPreStartHook{
+		Scope:  store.PreStartHookScopeHub,
+		Name:   "Hub baseline",
+		Slug:   "hub-baseline",
+		Script: "#!/bin/sh\necho hub\n",
+	})
+	require.NoError(t, err)
+
+	agent := newStampingAgent()
+	agent.AppliedConfig.ProjectPreStartHookID = "preset-hook-id"
+	agent.AppliedConfig.ProjectPreStartHookScript = "#!/bin/sh\necho preset\n"
+
+	srv.populateAgentConfig(t.Context(), agent, project, nil)
+
+	assert.Equal(t, "preset-hook-id", agent.AppliedConfig.ProjectPreStartHookID)
+	assert.Equal(t, "#!/bin/sh\necho preset\n", agent.AppliedConfig.ProjectPreStartHookScript)
 }

@@ -262,16 +262,36 @@ func (s *Server) populateAgentConfig(ctx context.Context, agent *store.Agent, pr
 		}
 	}
 
-	// Stamp project pre-start hook for broker delivery.
-	// Resolve the active hook for the project and inline its script content into
-	// AppliedConfig so the broker can stage it without an extra Hub round-trip.
-	// Mirrors the HarnessConfigID stamping pattern above.
+	// Stamp the pre-start hook for broker delivery.
+	// Resolve the active hook and inline its script content into AppliedConfig
+	// so the broker can stage it without an extra Hub round-trip. Mirrors the
+	// HarnessConfigID stamping pattern above.
+	//
+	// Resolution is a two-step fallback (see
+	// .design/project-prestart-hooks-extensions.md section 1):
+	//   1. The project's active hook wins outright.
+	//   2. Otherwise the hub-wide active hook applies, if any.
+	//   3. Neither → no script staged.
+	// Either way the broker stages a single file (30-project-custom) and
+	// AppliedConfig.ProjectPreStartHookID records which hook it came from, so
+	// no scope-specific fields are needed downstream.
 	if project != nil && agent.AppliedConfig.ProjectPreStartHookID == "" {
+		// 1. Project-scoped hook (takes precedence).
 		hook, hookErr := s.store.GetActiveProjectPreStartHook(ctx, project.ID)
 		if hookErr != nil && !errors.Is(hookErr, store.ErrNotFound) {
 			s.agentLifecycleLog.Warn("failed to resolve project pre-start hook",
 				"project_id", project.ID, "error", hookErr)
 		}
+
+		// 2. Hub-scoped fallback, only when no project hook was found.
+		if hook == nil {
+			var hubErr error
+			hook, hubErr = s.store.GetActiveHubPreStartHook(ctx)
+			if hubErr != nil && !errors.Is(hubErr, store.ErrNotFound) {
+				s.agentLifecycleLog.Warn("failed to resolve hub pre-start hook", "error", hubErr)
+			}
+		}
+
 		if hook != nil {
 			agent.AppliedConfig.ProjectPreStartHookID = hook.ID
 			agent.AppliedConfig.ProjectPreStartHookScript = hook.Script
