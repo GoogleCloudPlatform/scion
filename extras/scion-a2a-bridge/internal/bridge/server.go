@@ -24,6 +24,7 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
 )
@@ -32,22 +33,39 @@ var slugRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
 
 // Server is the A2A HTTP server that routes requests to the SDK handler.
 type Server struct {
-	bridge     *Bridge
-	config     *Config
-	metrics    *Metrics
-	log        *slog.Logger
-	sdkHandler http.Handler // SDK JSON-RPC handler
+	bridge       *Bridge
+	config       *Config
+	metrics      *Metrics
+	log          *slog.Logger
+	sdkHandler   http.Handler // SDK JSON-RPC handler
+	uatValidator *UATValidator
+	jwtValidator *JWTValidator
 }
 
 // NewServer creates a new A2A protocol server backed by the SDK.
 func NewServer(bridge *Bridge, cfg *Config, metrics *Metrics, log *slog.Logger, sdkHandler http.Handler) *Server {
-	return &Server{
+	s := &Server{
 		bridge:     bridge,
 		config:     cfg,
 		metrics:    metrics,
 		log:        log,
 		sdkHandler: sdkHandler,
 	}
+	// Initialize per-user auth validators based on the configured scheme.
+	switch cfg.Auth.Scheme {
+	case "hubUAT":
+		s.uatValidator = NewUATValidator(cfg.Hub.Endpoint, cfg.Auth.UATCacheTTL)
+	case "hubJWT":
+		// JWTValidator is initialized later via SetJWTValidator once the
+		// signing key is loaded (it may come from Secret Manager).
+	}
+	return s
+}
+
+// SetJWTValidator sets the JWT validator for hubJWT mode. Called after the
+// signing key is loaded (which may require Secret Manager access).
+func (s *Server) SetJWTValidator(v *JWTValidator) {
+	s.jwtValidator = v
 }
 
 // ValidateConfig checks that required configuration fields are present and consistent.
@@ -71,14 +89,28 @@ func ValidateConfig(cfg *Config) error {
 	if cfg.Hub.User == "" {
 		return fmt.Errorf("hub.user is required")
 	}
-	if cfg.Auth.Scheme != "" && cfg.Auth.Scheme != "apiKey" && cfg.Auth.Scheme != "bearer" && cfg.Auth.Scheme != "none" {
-		return fmt.Errorf("unsupported auth.scheme: %q (supported: apiKey, bearer, none)", cfg.Auth.Scheme)
+	switch cfg.Auth.Scheme {
+	case "", "apiKey", "bearer", "none", "hubUAT", "hubJWT":
+		// valid
+	default:
+		return fmt.Errorf("unsupported auth.scheme: %q (supported: apiKey, bearer, none, hubUAT, hubJWT)", cfg.Auth.Scheme)
 	}
 	if (cfg.Auth.Scheme == "apiKey" || cfg.Auth.Scheme == "bearer") && cfg.Auth.APIKey == "" {
 		return fmt.Errorf("auth.api_key is required when auth.scheme is %q", cfg.Auth.Scheme)
 	}
-	if cfg.Auth.APIKey == "" && cfg.Auth.Scheme != "none" {
+	// api_key is required for legacy schemes and the default (empty) scheme.
+	// hubUAT and hubJWT do not use api_key — they validate per-user credentials instead.
+	if cfg.Auth.APIKey == "" && cfg.Auth.Scheme != "none" && cfg.Auth.Scheme != "hubUAT" && cfg.Auth.Scheme != "hubJWT" {
 		return fmt.Errorf("auth.api_key is required (set auth.scheme: \"none\" to explicitly disable authentication)")
+	}
+	if cfg.Auth.Scheme == "hubJWT" && cfg.Hub.SigningKey == "" && cfg.Hub.SigningKeySecret == "" {
+		return fmt.Errorf("hub.signing_key or hub.signing_key_secret is required when auth.scheme is hubJWT")
+	}
+	if cfg.Auth.UATCacheTTL < 0 {
+		return fmt.Errorf("auth.uat_cache_ttl must not be negative")
+	}
+	if cfg.Auth.UATCacheTTL > 300*time.Second {
+		return fmt.Errorf("auth.uat_cache_ttl must not exceed 300s")
 	}
 	if cfg.Bridge.Provider.URL != "" {
 		if _, err := url.Parse(cfg.Bridge.Provider.URL); err != nil {
@@ -90,10 +122,15 @@ func ValidateConfig(cfg *Config) error {
 
 // WarnOnOpenAuth logs a warning if the auth configuration leaves the bridge open.
 func (s *Server) WarnOnOpenAuth() {
-	if s.config.Auth.Scheme == "none" {
+	switch s.config.Auth.Scheme {
+	case "none":
 		s.log.Warn("bridge auth is explicitly DISABLED (auth.scheme: none) — all requests will be accepted without authentication")
-	} else if s.config.Auth.Scheme == "" {
+	case "":
 		s.log.Warn("auth.scheme is empty: bridge will accept credentials from both X-API-Key and Authorization headers")
+	case "hubUAT":
+		s.log.Info("bridge auth: hubUAT — per-user Scion UAT authentication enabled")
+	case "hubJWT":
+		s.log.Info("bridge auth: hubJWT — per-user Scion JWT authentication enabled")
 	}
 	if s.config.RateLimit.TrustProxy {
 		s.log.Warn("rate_limit.trust_proxy is enabled — X-Forwarded-For is trusted unconditionally, which allows clients to spoof their IP and bypass per-IP rate limits; consider adding network-level proxy restrictions")
@@ -285,7 +322,7 @@ func writeJSONRPCError(w http.ResponseWriter, id interface{}, code int, message 
 	json.NewEncoder(w).Encode(resp)
 }
 
-// authMiddleware validates API key authentication on non-public endpoints.
+// authMiddleware validates authentication on non-public endpoints.
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Public endpoints skip auth.
@@ -301,40 +338,92 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		if s.config.Auth.Scheme == "none" {
+		switch s.config.Auth.Scheme {
+		case "none":
 			next.ServeHTTP(w, r)
 			return
-		}
 
-		var apiKey string
-		switch s.config.Auth.Scheme {
-		case "apiKey":
-			apiKey = r.Header.Get("X-API-Key")
-		case "bearer":
-			auth := r.Header.Get("Authorization")
-			if strings.HasPrefix(auth, "Bearer ") {
-				apiKey = strings.TrimPrefix(auth, "Bearer ")
+		case "hubUAT":
+			token := extractBearerOrAPIKey(r)
+			if !strings.HasPrefix(token, "scion_pat_") {
+				http.Error(w, "unauthorized: expected scion_pat_* token", http.StatusUnauthorized)
+				return
 			}
+			caller, err := s.uatValidator.Validate(r.Context(), token)
+			if err != nil {
+				s.log.Debug("UAT validation failed", "error", err)
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			ctx := withCallerIdentity(r.Context(), caller)
+			next.ServeHTTP(w, r.WithContext(ctx))
+			return
+
+		case "hubJWT":
+			token := extractBearerToken(r)
+			if token == "" {
+				http.Error(w, "unauthorized: missing bearer token", http.StatusUnauthorized)
+				return
+			}
+			if s.jwtValidator == nil {
+				s.log.Error("hubJWT scheme configured but JWT validator not initialized")
+				http.Error(w, "internal server error", http.StatusInternalServerError)
+				return
+			}
+			caller, err := s.jwtValidator.Validate(token)
+			if err != nil {
+				s.log.Debug("JWT validation failed", "error", err)
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			ctx := withCallerIdentity(r.Context(), caller)
+			next.ServeHTTP(w, r.WithContext(ctx))
+			return
+
 		default:
-			// When auth.scheme is unset (empty), accept credentials from either
-			// X-API-Key or Authorization: Bearer headers for convenience.
-			apiKey = r.Header.Get("X-API-Key")
-			if apiKey == "" {
-				auth := r.Header.Get("Authorization")
-				if strings.HasPrefix(auth, "Bearer ") {
-					apiKey = strings.TrimPrefix(auth, "Bearer ")
+			// Legacy schemes: "apiKey", "bearer", or "" (accept either header).
+			// No CallerIdentity is injected.
+			var apiKey string
+			switch s.config.Auth.Scheme {
+			case "apiKey":
+				apiKey = r.Header.Get("X-API-Key")
+			case "bearer":
+				apiKey = extractBearerToken(r)
+			default:
+				// When auth.scheme is unset (empty), accept credentials from either
+				// X-API-Key or Authorization: Bearer headers for convenience.
+				apiKey = r.Header.Get("X-API-Key")
+				if apiKey == "" {
+					apiKey = extractBearerToken(r)
 				}
 			}
-		}
 
-		// Compare SHA-256 hashes to avoid leaking key length via timing.
-		expectedHash := sha256.Sum256([]byte(s.config.Auth.APIKey))
-		providedHash := sha256.Sum256([]byte(apiKey))
-		if subtle.ConstantTimeCompare(expectedHash[:], providedHash[:]) != 1 {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return
-		}
+			// Compare SHA-256 hashes to avoid leaking key length via timing.
+			expectedHash := sha256.Sum256([]byte(s.config.Auth.APIKey))
+			providedHash := sha256.Sum256([]byte(apiKey))
+			if subtle.ConstantTimeCompare(expectedHash[:], providedHash[:]) != 1 {
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
 
-		next.ServeHTTP(w, r)
+			next.ServeHTTP(w, r)
+		}
 	})
+}
+
+// extractBearerToken extracts the token from an Authorization: Bearer header.
+func extractBearerToken(r *http.Request) string {
+	auth := r.Header.Get("Authorization")
+	if strings.HasPrefix(auth, "Bearer ") {
+		return strings.TrimPrefix(auth, "Bearer ")
+	}
+	return ""
+}
+
+// extractBearerOrAPIKey extracts a token from Authorization: Bearer or X-API-Key headers.
+func extractBearerOrAPIKey(r *http.Request) string {
+	if token := extractBearerToken(r); token != "" {
+		return token
+	}
+	return r.Header.Get("X-API-Key")
 }

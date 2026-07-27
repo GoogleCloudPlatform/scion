@@ -67,3 +67,86 @@ The A2A (Agent-to-Agent protocol) bridge exposes Scion agents as **standard A2A 
 This is useful for integrating Scion agents into larger multi-agent systems or exposing them to third-party A2A-compatible clients.
 
 For setup and configuration, see [extras/scion-a2a-bridge/README.md](https://github.com/GoogleCloudPlatform/scion/tree/main/extras/scion-a2a-bridge).
+
+### Desktop App Federation (Claude Desktop, Codex Desktop)
+
+Desktop A2A clients (such as Claude Desktop and Codex Desktop) can interact with Scion agents using per-user authentication. Each user presents their own Scion User Access Token (UAT), and the bridge propagates their identity to the Hub for audit logging and access control.
+
+#### Prerequisites
+
+- The bridge operator has deployed the A2A bridge with `auth.scheme: hubUAT`.
+- Your Scion Hub account has access to the target project.
+
+#### Step 1: Create a UAT
+
+Create a Scion UAT scoped to your project with the required permissions:
+
+```bash
+scion token create --name "claude-desktop" --project <project-slug> \
+  --scope agent:message,agent:read --expires 365d
+```
+
+This returns a `scion_pat_...` token. Copy it securely — it will not be shown again.
+
+#### Step 2: Configure Your Desktop App
+
+In your desktop A2A client's provider settings:
+
+- **Endpoint:** `https://<bridge-host>/projects/<project-slug>/agents/<agent-slug>`
+- **Auth type:** Bearer token
+- **Token:** Paste your `scion_pat_...` token
+
+To discover available agents, query the bridge's agent card:
+
+```bash
+curl https://<bridge-host>/.well-known/agent-card.json
+```
+
+Or for a specific agent:
+
+```bash
+curl https://<bridge-host>/projects/<project-slug>/agents/<agent-slug>/.well-known/agent-card.json
+```
+
+#### Step 3: Test the Connection
+
+Verify end-to-end connectivity with a `message/send` call:
+
+```bash
+curl -X POST https://<bridge-host>/projects/<project-slug>/agents/<agent-slug>/jsonrpc \
+  -H "Authorization: Bearer scion_pat_..." \
+  -H "Content-Type: application/json" \
+  -d '{
+    "jsonrpc": "2.0",
+    "id": "1",
+    "method": "message/send",
+    "params": {
+      "message": {
+        "role": "user",
+        "parts": [{"type": "text", "text": "Hello from desktop!"}]
+      }
+    }
+  }'
+```
+
+#### Required Scopes
+
+| Scope | Purpose |
+|-------|---------|
+| `agent:message` | Send messages to agents |
+| `agent:read` | List agents and read task status |
+
+#### Per-User Isolation
+
+When the bridge uses `hubUAT` or `hubJWT` auth, each user's tasks are isolated:
+
+- You can only see and cancel tasks you created.
+- The Hub's audit logs reflect your identity, not the bridge admin's.
+- If your UAT is revoked, access stops within 60 seconds (the bridge's cache TTL).
+
+:::note[Bridge operator note]
+To enable per-user auth, set `auth.scheme: hubUAT` in `scion-a2a-bridge.yaml`.
+The `auth.api_key` field is not needed for this scheme. See the
+[sample config](https://github.com/GoogleCloudPlatform/scion/tree/main/extras/scion-a2a-bridge/scion-a2a-bridge.yaml.sample)
+for details.
+:::
