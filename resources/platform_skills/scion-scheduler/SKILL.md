@@ -61,6 +61,17 @@ detector from flagging you during the wait. **Neither replaces the other.**
 agent or a scheduled event already tracked by the orchestration system —
 those fire their own state-change notifications.
 
+## Self-scheduling
+
+To schedule a message to yourself, resolve your own agent name first:
+
+```bash
+scion schedule create --non-interactive --type message \
+  --agent "$(scion whoami --non-interactive --format json | jq -r .name)" \
+  --message "Check if deployment completed" \
+  --in 15m
+```
+
 ## Two event types
 
 ### One-shot events
