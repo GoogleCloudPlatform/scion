@@ -80,7 +80,20 @@ In projects with multiple users:
 
 ## Message Length Limit
 
-scion message fails when the message exceeds the character limit (approximately **2000 characters**). Because the CLI prints the full --help usage text alongside the error, the failure can be easily mistaken for a malformed command. Note that the command still returns a non-zero exit code, so agents checking the exit code will detect the failure.\n\nIf your message is long:\n- Split it into two or more messages, each under ~1800 characters.\n- Or write the content to a shared file and send a short message with the\n  file path.\n\nThe failure signature (a --help dump) looks like a malformed command, not\nan oversized message — check message length first when debugging these\ndelivery failures.
+Messages to **users** (agent-to-human-inbox path) are limited to **2000
+characters** (counted as Unicode runes, not bytes — CJK and emoji each
+count as one character). Agent-to-agent messages have **no enforced cap
+in code** and are not subject to this limit.
+
+When the limit is exceeded, the command returns a non-zero exit code but
+also dumps the full CLI `--help` text — the actual error line
+(`validation_error: message exceeds 2000 character limit`) scrolls off if
+you pipe to `tail`. Pipe to `head` to surface it.
+
+If your user-directed message is long:
+- Split it into two or more messages, each under ~1800 characters.
+- Or write the content to a shared file and send a short message with the
+  file path.
 
 ## Anti-Patterns and Red Flags
 
