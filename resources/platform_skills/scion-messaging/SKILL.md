@@ -80,18 +80,7 @@ In projects with multiple users:
 
 ## Message Length Limit
 
-`scion message` silently fails above approximately **2000 characters** — it
-dumps the CLI `--help` text instead of delivering the message or returning an
-error. An agent checking only the exit code will believe the message was sent.
-
-If your message is long:
-- Split it into two or more messages, each under ~1800 characters.
-- Or write the content to a shared file and send a short message with the
-  file path.
-
-The failure signature (a `--help` dump) looks like a malformed command, not
-an oversized message — check message length first when debugging silent
-delivery failures.
+scion message fails when the message exceeds the character limit (approximately **2000 characters**). Because the CLI prints the full --help usage text alongside the error, the failure can be easily mistaken for a malformed command. Note that the command still returns a non-zero exit code, so agents checking the exit code will detect the failure.\n\nIf your message is long:\n- Split it into two or more messages, each under ~1800 characters.\n- Or write the content to a shared file and send a short message with the\n  file path.\n\nThe failure signature (a --help dump) looks like a malformed command, not\nan oversized message — check message length first when debugging these\ndelivery failures.
 
 ## Anti-Patterns and Red Flags
 
