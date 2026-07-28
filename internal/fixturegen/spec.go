@@ -98,7 +98,7 @@ func Spec() []TableFixture {
 		}},
 		{Table: "runtime_brokers", Rows: []row{
 			{
-				"id": brokerID, "name": "broker-1", "slug": "broker-1", "type": "docker",
+				"id": brokerID, "name": "broker-1", "slug": "broker-1",
 				"status": "online", "created_at": baseTime, "updated_at": baseTime,
 				"capabilities": `{"webPty":true,"sync":true,"attach":false}`,
 			},
@@ -375,6 +375,52 @@ func Spec() []TableFixture {
 				"id": "07000000-0000-0000-0000-000000000001", "operation_key": "purge_deleted_agents",
 				"status": "completed", "started_at": baseTime, "completed_at": baseTime.Add(time.Minute),
 				"started_by": userID, "result": `{"purged":3}`, "log": "done",
+			},
+		}},
+
+		// ---- Hub settings / integrations ----
+		{Table: "hub_settings", Rows: []row{
+			{
+				"id": "hs000000-0000-0000-0000-000000000001", "section": "access",
+				"value": `{"allowList":true}`, "revision": int64(1), "origin": "seeded",
+				"create_time": baseTime, "update_time": baseTime,
+			},
+		}},
+		{Table: "integration_configs", Rows: []row{
+			{
+				"id": "ic000000-0000-0000-0000-000000000001", "integration": "github",
+				"config": `{"appId":112233}`, "enabled": true,
+				"create_time": baseTime, "update_time": baseTime,
+			},
+		}},
+		{Table: "integration_updates", Rows: []row{
+			{
+				"id": "iu000000-0000-0000-0000-000000000001", "integration": "github",
+				"state": "completed", "new_version": "2.0.0", "requested_by": userID,
+				"create_time": baseTime, "update_time": baseTime,
+			},
+		}},
+
+		// ---- Project pre-start hooks ----
+		{Table: "project_pre_start_hooks", Rows: []row{
+			{
+				"id": "ph000000-0000-0000-0000-000000000001", "project_id": projectID,
+				"name": "env-setup", "slug": "env-setup",
+				"script":     "#!/bin/sh\necho 'pre-start hook running'",
+				"status":     "active",
+				"created_by": userID,
+				"created_at": baseTime, "updated_at": baseTime,
+			},
+		}},
+
+		// ---- Skill injections ----
+		{Table: "skill_injections", Rows: []row{
+			{
+				"id": "si000000-0000-0000-0000-000000000001",
+				"scope": "project", "scope_id": projectID,
+				"skill_uri": "registry:reviewer@1.0.0",
+				"optional":   false, "sort_order": 0,
+				"created_at": baseTime, "created_by": userID,
 			},
 		}},
 	}
