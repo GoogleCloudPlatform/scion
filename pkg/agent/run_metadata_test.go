@@ -157,6 +157,51 @@ func TestHasMetadataInterception(t *testing.T) {
 			env:  nil,
 			want: false,
 		},
+		// Regression: these all passed the old strings.HasPrefix test and
+		// enabled interception, while the broker's equality check on the same
+		// value rejected them. Two layers, opposite conclusions, same input.
+		{
+			name: "blocked is not block",
+			env:  []string{"SCION_METADATA_MODE=blocked"},
+			want: false,
+		},
+		{
+			name: "assigned is not assign",
+			env:  []string{"SCION_METADATA_MODE=assigned"},
+			want: false,
+		},
+		{
+			name: "trailing whitespace is not a known mode",
+			env:  []string{"SCION_METADATA_MODE=block "},
+			want: false,
+		},
+		{
+			name: "known mode as a prefix of a longer value",
+			env:  []string{"SCION_METADATA_MODE=block-everything"},
+			want: false,
+		},
+		// A different variable that merely starts with the same characters must
+		// not be read as the mode. The old prefix form was anchored to
+		// "SCION_METADATA_MODE=" so it got this right; pinning it so the exact
+		// comparison keeps getting it right.
+		{
+			name: "different variable with a shared prefix",
+			env:  []string{"SCION_METADATA_MODE_OVERRIDE=block"},
+			want: false,
+		},
+		{
+			name: "empty mode value",
+			env:  []string{"SCION_METADATA_MODE="},
+			want: false,
+		},
+		// Contradictory duplicates resolve to interception-on, the restrictive
+		// direction. Documents existing any-match behaviour, which the exact
+		// comparison preserves.
+		{
+			name: "contradictory duplicate prefers interception",
+			env:  []string{"SCION_METADATA_MODE=passthrough", "SCION_METADATA_MODE=block"},
+			want: true,
+		},
 	}
 
 	for _, tt := range tests {
