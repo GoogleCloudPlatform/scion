@@ -449,20 +449,30 @@ seen.
 
 ### 4.4 Harness fallback list consistency cleanup
 
-Two components hardcode a fallback list of harness names for when the
+Three components hardcode a fallback list of harness names for when the
 harness-config API returns nothing, and they disagree:
 
 | Component | Hardcoded list |
 | --- | --- |
 | `project-settings.ts` | `gemini`, `claude`, `opencode`, `codex` |
 | `admin-server-config.ts` | `gemini-cli`, `claude`, `codex`, `copilot`, `opencode` |
+| `agent-create.ts` | `gemini-cli`, `claude`, `codex`, `copilot`, `opencode` |
+
+Each site duplicates the list twice over: once as a `fallbackNames` array
+(`project-settings.ts` has only the markup form) and once as a hardcoded block
+of `<sl-option>` elements.
 
 The canonical set, from `harnesses/*/config.yaml`, is: `claude`, `codex`,
 `copilot`, `gemini-cli`, `opencode`, `antigravity`, `hermes`.
 
 `project-settings.ts` is outright wrong — `gemini` is not a harness name; the
-correct identifier is `gemini-cli`. Both lists are missing `antigravity` and
-`hermes`, and `project-settings.ts` is additionally missing `copilot`.
+correct identifier is `gemini-cli`. All three lists are missing `antigravity`
+and `hermes`, and `project-settings.ts` is additionally missing `copilot`.
+
+In `agent-create.ts` the list drives logic rather than just display:
+`setHarnessFromValue()` treats any value absent from it as `__other__`, so with
+an empty harness-config response a project defaulting to `antigravity` or
+`hermes` renders as "Other..." and is silently demoted to a custom string.
 
 **Fix.** New module `web/src/shared/harness-utils.ts`, following the existing
 `web/src/shared/` convention (`model-utils.ts`, `types.ts`, `lineage.ts`):
@@ -480,8 +490,17 @@ export const KNOWN_HARNESS_NAMES = [
 ] as const;
 ```
 
-Both components import it and delete their local arrays. A comment on the
-constant points at `harnesses/` as the source of truth.
+All three components import it and delete both their local arrays and their
+hardcoded `<sl-option>` blocks, rendering the fallback options by mapping over
+`KNOWN_HARNESS_NAMES` instead. A comment on the constant points at `harnesses/`
+as the source of truth.
+
+The module also exports a `harnessDisplayName(name)` helper. The components
+render human-readable labels ("Gemini CLI", "OpenCode"), and
+`harnesses/<name>/config.yaml` has no display-name field to derive them from, so
+the labels cannot be dropped without a visual regression. The helper is a
+display-only map with a passthrough fallback for unknown identifiers;
+`KNOWN_HARNESS_NAMES` remains the source of truth for which harnesses exist.
 
 This is a small, independently reviewable, zero-risk change with no API
 dependency — it is sequenced first (Phase 0) so it can land in parallel with the
@@ -1007,15 +1026,19 @@ shippable, and leaves the tree green.
 
 ### Phase 0 — Harness list consistency (no API dependency)
 
-- Add `web/src/shared/harness-utils.ts` with `KNOWN_HARNESS_NAMES`.
-- Consume it in `project-settings.ts` and `admin-server-config.ts`; delete both
-  local arrays.
-- `make web-typecheck && make web`.
+- Add `web/src/shared/harness-utils.ts` with `KNOWN_HARNESS_NAMES` and
+  `harnessDisplayName()`.
+- Consume it in `project-settings.ts`, `admin-server-config.ts` and
+  `agent-create.ts`; delete the local arrays and the hardcoded `<sl-option>`
+  blocks in all three.
+- `make web-typecheck && make web`, plus a test asserting all three components
+  import the shared constant rather than redeclaring a list.
 
-*Rationale for going first:* zero backend dependency, fixes an outright bug
-(`gemini` is not a harness name), and can land in parallel with Phase 1.
+*Rationale for going first:* zero backend dependency, fixes two outright bugs
+(`gemini` is not a harness name; `agent-create.ts` demotes `antigravity` and
+`hermes` to "Other..."), and can land in parallel with Phase 1.
 
-**Size:** XS. **Files:** 3.
+**Size:** XS. **Files:** 5 (3 components, 1 new module, 1 new test).
 
 ### Phase 1 — Precedence normalisation (D-2)
 
@@ -1196,8 +1219,11 @@ both succeed with distinct slugs.
 
 ### 9.3 Frontend tests
 
-- `harness-utils` is imported (not redeclared) by both components — a grep-style
-  assertion in the existing web test suite is sufficient.
+- `harness-utils` is imported (not redeclared) by all three components — a
+  grep-style assertion in the existing web test suite is sufficient. It should
+  also catch hardcoded `<sl-option>` harness blocks, not just array literals.
+- `KNOWN_HARNESS_NAMES` matches the directory names under `harnesses/`, so the
+  list cannot silently drift from the source of truth.
 - `project-settings.ts` renders `Hub default: 200` as the placeholder when
   `defaultMaxTurns` is unset with a hub value.
 - Renders `Use hub default (claude)` as the empty select option label.
@@ -1263,7 +1289,9 @@ only, and an existing agent's `AppliedConfig` is already persisted.
 
 - Phase 0 changes which harness names appear in a *fallback* list used only when
   the harness-config API returns nothing. In practice this list is rarely
-  reached; correcting `gemini` → `gemini-cli` fixes a latent bug.
+  reached; correcting `gemini` → `gemini-cli` fixes a latent bug, and adding
+  `antigravity`/`hermes` stops `agent-create.ts` demoting those two to
+  "Other..." when the fallback path is taken.
 - Feature B is purely additive; no existing project is touched by a clone.
 
 **Data compatibility:** clones created by Phase 4 are ordinary projects. Nothing
@@ -1320,7 +1348,8 @@ requested.
 3. Loading the settings page and pressing Save without editing anything produces
    a PUT identical to today's — no hub value is ever promoted into a project
    annotation.
-4. Both harness fallback lists are identical and canonical.
+4. All three harness fallback lists are identical and canonical, because all
+   three are the same list.
 5. A Postgres-mode hub with `agent_defaults` configured actually applies them to
    new agents (D-1).
 6. A project whose `default-harness-config` annotation disagrees with its
