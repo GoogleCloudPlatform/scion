@@ -1965,6 +1965,27 @@ func (s *Server) updateAgent(w http.ResponseWriter, r *http.Request, id string) 
 				writeErrorFromErr(w, err, "GCP service account not found")
 				return
 			}
+			// These two checks mirror the create path (see the assign branch of
+			// createAgentInProject) deliberately, character for character. Without
+			// them, "create with no service account, then PATCH one in" walks
+			// straight around the hardened create path — it needs only update
+			// rights on the agent, which the creator has by definition.
+			//
+			// Kept as a near-duplicate rather than factored into a shared helper on
+			// purpose: hub-scoped service accounts are to become pickable in any
+			// project, which turns the ScopeID equality test into a scope-aware
+			// check at BOTH sites. A duplicate that greps identically is what makes
+			// the second site impossible to miss during that pass; a DRY version
+			// that diverges here would present as a service-account bug rather than
+			// a missed conversion.
+			if sa.ScopeID != agent.ProjectID {
+				ValidationError(w, "GCP service account does not belong to this project", nil)
+				return
+			}
+			if !sa.Verified {
+				ValidationError(w, "GCP service account is not verified; verify it before assigning to agents", nil)
+				return
+			}
 			agent.AppliedConfig.GCPIdentity = &store.GCPIdentityConfig{
 				MetadataMode:        store.GCPMetadataModeAssign,
 				ServiceAccountID:    sa.ID,
