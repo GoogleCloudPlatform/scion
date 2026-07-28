@@ -506,12 +506,20 @@ func TestAgentPatch_UnverifiedHubScopedSA_StillRejected(t *testing.T) {
 // ============================================================================
 
 // setProjectDefaultSA configures the project's default GCP identity through
-// the real settings route.
+// the real settings route, and requires the route to ACCEPT it.
 //
-// Going through HTTP rather than writing annotations directly is the point of
-// this helper: it demonstrates that nothing validates the service account ID
-// on the way in, so a hub-scoped default is configurable on the current branch
-// today. Site 3's failure was live, not latent.
+// This helper originally existed to demonstrate the opposite. Its comment read
+// "nothing validates the service account ID on the way in... Site 3's failure
+// was live, not latent," and that was true and correctly evidenced when it was
+// written: the settings PUT wrote the ID unchecked. Defect #22 added write-time
+// validation, so the demonstration no longer holds and the helper has inverted
+// meaning — it now shows which defaults the PUT still admits.
+//
+// Only valid defaults may be set through here. A VERIFIED HUB-SCOPED account is
+// one of them, deliberately: ReachableFromProject's ScopeHub arm returns true
+// unconditionally (pkg/store/models.go:1552), because a hub-scoped account is
+// legitimately pickable from any project. That is why this helper still has a
+// caller. For defaults the PUT now refuses, see setStaleProjectDefaultSA.
 func setProjectDefaultSA(t *testing.T, f *bypassAgentsFixture, saID string) {
 	t.Helper()
 	rec := doRequestAsUser(t, f.srv, f.owner, http.MethodPut,
@@ -521,7 +529,43 @@ func setProjectDefaultSA(t *testing.T, f *bypassAgentsFixture, saID string) {
 			"defaultGCPIdentityServiceAccountID": saID,
 		})
 	require.Equal(t, http.StatusOK, rec.Code,
-		"project settings accept no validation of the SA id; got: %s", rec.Body.String())
+		"this default must remain settable through the API; got: %s", rec.Body.String())
+}
+
+// setStaleProjectDefaultSA writes the default-identity annotations straight to
+// the store, bypassing the settings route.
+//
+// IT BYPASSES HTTP ON PURPOSE, NOT FOR CONVENIENCE. Since defect #22 the
+// settings PUT validates the service account ID, so the states constructed here
+// CANNOT be reached through the API at all — that is what #22 did. Do not
+// "tidy" these callers back onto setProjectDefaultSA: they will fail, and the
+// failure would misread as the API having regressed. If a caller's default is
+// one the PUT should accept, it belongs on the HTTP helper instead, so that the
+// acceptance stays covered at the API boundary.
+//
+// THE SCENARIOS ARE NOT DEAD, SO DO NOT DELETE THEM AS UNREACHABLE. A future
+// reader can correctly observe that no API path produces this state and
+// conclude the tests below are vestigial. They are not. The state arises in
+// production as a STALE value: an account that was validly set as the default
+// and was afterwards deleted, un-verified, or moved out of reach. #22 closed
+// the write; it cannot close the drift, because the drift happens after the
+// write. Guarding consumption against that is the separately-owned work on
+// handlers_agents_core.go:655.
+//
+// Distinct from the inline annotation write in authz_bypass_agents_test.go:862,
+// which constructs a VALID default directly. That one could go through the API;
+// these cannot. Keeping the two apart is the point.
+func setStaleProjectDefaultSA(t *testing.T, f *bypassAgentsFixture, saID string) {
+	t.Helper()
+	ctx := context.Background()
+	proj, err := f.store.GetProject(ctx, f.proj.ID)
+	require.NoError(t, err)
+	if proj.Annotations == nil {
+		proj.Annotations = map[string]string{}
+	}
+	proj.Annotations[projectSettingDefaultGCPIdentityMode] = store.GCPMetadataModeAssign
+	proj.Annotations[projectSettingDefaultGCPIdentitySAID] = saID
+	require.NoError(t, f.store.UpdateProject(ctx, proj))
 }
 
 // createdAgentIdentity creates an agent with no explicit GCP identity and
@@ -584,10 +628,17 @@ func TestAgentCreate_HubScopedProjectDefault_IsApplied(t *testing.T) {
 // population is projects nobody re-saves plus defaults that went stale after
 // being set validly, e.g. the account was later deleted or unverified. A slow
 // leak, not a standing breakage.)
+//
+// Since #22 this default can no longer be INSTALLED through the API — the PUT
+// refuses another project's account outright, and this test now builds the
+// state directly. That narrows the exposure the paragraph above describes to
+// the stale case alone, and it is why the setup bypasses HTTP. The refusal
+// itself is covered at the boundary by
+// TestProjectSettings_DefaultGCPIdentity_OtherProjectSAIsNotAnOracle.
 func TestAgentCreate_OtherProjectDefault_StillFallsThroughToBlock(t *testing.T) {
 	f := bypassAgentsSetup(t)
 	sa := bypassAgentsCreateSA(t, f, f.other.ID, true)
-	setProjectDefaultSA(t, f, sa.ID)
+	setStaleProjectDefaultSA(t, f, sa.ID)
 
 	identity := createdAgentIdentity(t, f, "bad-default-agent")
 	assert.Equal(t, store.GCPMetadataModeBlock, identity.MetadataMode,
@@ -599,10 +650,20 @@ func TestAgentCreate_OtherProjectDefault_StillFallsThroughToBlock(t *testing.T) 
 // gates as at the two caller-supplied sites, checked here because this site
 // spells the two conditions in a single boolean expression where losing one is
 // a one-character edit.
+//
+// This is the crossing that matters most to keep: the scope gate PASSES here
+// (hub-scoped is reachable from every project) and only the verification gate
+// refuses. A change that collapses the two conditions into one would still
+// satisfy the scope half and this is the test that would notice.
+//
+// Setup is direct because #22 stops an unverified account being set as a
+// default at all; the state now arises only by an account losing verification
+// after it was validly set. The write-time refusal is covered at the boundary
+// by TestProjectSettings_DefaultGCPIdentity_RejectsUnverifiedHubScopedSA.
 func TestAgentCreate_UnverifiedHubScopedDefault_FallsThroughToBlock(t *testing.T) {
 	f := bypassAgentsSetup(t)
 	sa := hubScopedSAForAgent(t, f, false)
-	setProjectDefaultSA(t, f, sa.ID)
+	setStaleProjectDefaultSA(t, f, sa.ID)
 
 	identity := createdAgentIdentity(t, f, "unverified-default-agent")
 	assert.Equal(t, store.GCPMetadataModeBlock, identity.MetadataMode,

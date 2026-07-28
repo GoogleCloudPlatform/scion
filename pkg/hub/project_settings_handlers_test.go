@@ -597,6 +597,45 @@ func TestProjectSettings_DefaultGCPIdentity_RejectsUnverifiedSA(t *testing.T) {
 		"this SA is already readable by the caller, so naming the reason discloses nothing")
 }
 
+// The crossing case: hub-scoped AND unverified. The scope gate passes here —
+// a hub-scoped account is reachable from every project — so verification is
+// the only thing left refusing it.
+//
+// Worth its own test rather than folding into _RejectsUnverifiedSA above,
+// which uses a project-scoped account and would therefore still pass if the
+// scope check alone rejected the write and verification were never consulted.
+// Only this combination can tell those two apart.
+//
+// This case arrived from the other side. It was covered at the consumption
+// site (TestAgentCreate_UnverifiedHubScopedDefault_FallsThroughToBlock) and
+// not at the write site; that test used to install its default through this
+// very route, so #22 turned it red and exposed the gap. Both ends now assert
+// it independently.
+func TestProjectSettings_DefaultGCPIdentity_RejectsUnverifiedHubScopedSA(t *testing.T) {
+	srv, s := testServer(t)
+	project := createTestProjectForSettings(t, s)
+
+	sa := &store.GCPServiceAccount{
+		ID:      tid("sa-hub-unverified-" + t.Name()),
+		Scope:   store.ScopeHub,
+		ScopeID: "some-hub-instance", // Provenance only; never compared.
+		Email:   "hub-unverified@proj.iam.gserviceaccount.com",
+
+		ProjectID: "gcp-proj",
+		Verified:  false,
+		CreatedAt: time.Now(),
+	}
+	require.NoError(t, s.CreateGCPServiceAccount(t.Context(), sa))
+
+	rec := doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+project.ID+"/settings",
+		hubclient.ProjectSettings{DefaultGCPIdentityServiceAccountID: sa.ID})
+	require.Equal(t, http.StatusBadRequest, rec.Code,
+		"hub scope makes an account reachable, not usable; it must still be verified. got: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "not verified",
+		"the refusal must name verification, not reachability: a hub-scoped account IS reachable here, "+
+			"and reporting it as unavailable would send an operator looking for a scope problem that does not exist")
+}
+
 // mode=assign with no SA is the same defect in different clothes: the
 // consumption path falls straight through to block.
 func TestProjectSettings_DefaultGCPIdentity_RejectsAssignModeWithoutSA(t *testing.T) {
