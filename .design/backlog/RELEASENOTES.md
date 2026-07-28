@@ -10,6 +10,21 @@
 - **Resolved project settings endpoint** — `GET /api/v1/projects/{projectId}/settings/resolved` reports every project setting alongside whether a hub-level default exists. Requires `ActionRead` on the project (not admin-gated), so project owners can see that hub defaults exist. Despite the name it does **not** return an effective value: precedence is owned by the code that applies it, and a second implementation here would drift silently. `hubDefault` is tri-state (`present`/`absent`/`unknown`) — `unknown` means the hub could not determine it, and must not be rendered as "no hub default". See the [reference page](https://googlecloudplatform.github.io/scion/reference/project-settings-resolved/).
 - All container images built and published to Artifact Registry (core-base, scion-base, scion-claude, scion-gemini, scion-opencode, scion-codex)
 
+### Changed
+- **Eight broker authentication event types begin emitting.** `register`, `deregister`, `join`,
+  `rotate`, `revoke`, `link`, `unlink` and **`auth_failure`** produce log records again. They have
+  emitted **nothing at all** until now, so **plan for the added log volume** — anything consuming
+  these events necessarily treats their absence as normal today, because absence is all there has
+  ever been. Administrative events log at INFO and any failure logs at WARN. The one high-volume
+  type, per-request `auth_success`, now logs at DEBUG and so stays out of normal operation; that
+  was the volume problem behind the original silencing, and it is fixed at the level of the one
+  noisy type rather than by muting the other eight. Downstream consumers have not been surveyed.
+- **Service-account assignment decisions are now audited.** Assigning a GCP service account to an
+  agent (create, PATCH, project default) or to a lifecycle hook's execution identity emits a record
+  on **both allow and deny**. While the `actAs` check is inert (see below), allow records carry
+  mechanism `check-disabled`, which is what distinguishes "allowed because IAM said so" from
+  "allowed because nobody asked". Records are log lines, not a queryable store.
+
 ### Known limitations
 - **GCP `iam.serviceAccounts.actAs` checking is inert on service-account assignment.** Assigning a
   GCP service account to an agent (create and PATCH) and setting a lifecycle hook's execution

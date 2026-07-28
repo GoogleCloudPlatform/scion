@@ -166,9 +166,14 @@ type ActAsGate struct {
 
 // EvaluateActAs runs the shared actAs decision sequence AND emits the audit
 // record for it. It is the only exported entry point, deliberately: a surface
-// cannot reach the decision without also producing the record, because the
-// pure sequence is unexported. Future surfaces inherit the audit trail by
-// construction rather than by remembering to add it (design §7).
+// in another package cannot reach the decision without also producing the
+// record, because the pure sequence is unexported. Future surfaces inherit the
+// audit trail by construction rather than by remembering to add it (design §7).
+//
+// ⚠️ THAT IS A GUARANTEE ABOUT OTHER PACKAGES ONLY. Within pkg/store,
+// evaluateActAs is directly callable and the property holds by the absence of
+// in-package callers rather than by enforcement. Known good today, with the
+// precondition named at evaluateActAs — read it before adding a caller here.
 //
 // The decision logic itself is evaluateActAs, which is unchanged and remains
 // pure and directly testable. This function adds recording, and only recording.

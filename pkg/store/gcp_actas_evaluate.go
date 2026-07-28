@@ -90,6 +90,23 @@ const (
 // construction rather than by the author remembering (design §7). This function
 // stays pure so the decision ordering remains directly testable without a sink.
 //
+// ⚠️ THE GUARANTEE STOPS AT THE PACKAGE BOUNDARY, AND THAT LIMIT IS THE WHOLE
+// OF IT. Unexporting stops pkg/hub and pkg/lifecyclehooks from reaching a
+// verdict unaudited; it does nothing about pkg/store. Inside this package this
+// function is directly callable and the compiler will not object, so the
+// property "every decision produces a record" holds here only because no
+// non-test caller in pkg/store calls it — an absence, not an enforcement, and
+// an absence that a single future in-package call site would end silently. The
+// tests in gcp_actas_evaluate_test.go are already such callers, benignly and on
+// purpose, because the point of keeping this pure is that the ordering stays
+// testable without a sink.
+//
+// SO: CALLERS INSIDE pkg/store MUST GO THROUGH EvaluateActAs TOO. This function
+// is package-private for the audit guarantee, not for convenience, and calling
+// it directly from non-test code in this package would drop the record with
+// nothing to catch it. If a legitimate in-package caller ever appears, the
+// honest fix is to give it the sink, not to widen this door.
+//
 // The sequence, in order, with the reason each step is where it is:
 //
 //  1. Nil target denies. Nothing to check.
