@@ -335,8 +335,33 @@ fi
 
 cd "$(dirname "$0")/.."
 
+# Report which tree was actually analysed, on every path.
+#
+# A stale checkout runs the tip's script against old source and produces output
+# that is well-formed, plausible, and wrong — over-reporting looks exactly like a
+# developer having missed work, and under-reporting looks like a clean build.
+# Neither is detectable from the output itself, so the output has to carry its
+# own provenance. Deciding whether this sha is the branch tip stays with the
+# person acting on it: comparing against a remote would need either network I/O
+# or a possibly-stale ref, which relocates the same lie somewhere harder to see.
+provenance() {
+  local sha
+  if ! sha="$(git rev-parse --short HEAD 2>/dev/null)"; then
+    printf '(not a git worktree)'
+    return
+  fi
+  if [[ -n "$(git status --porcelain 2>/dev/null)" ]]; then
+    printf '%s-dirty' "$sha"
+  else
+    printf '%s' "$sha"
+  fi
+}
+
 if ! command -v rg >/dev/null 2>&1; then
-  echo "Warning: ripgrep (rg) not found — skipping authz-guards check" >&2
+  # Not a clean result. Distinguish it from one loudly: this exits 0, and an
+  # exit 0 that never looked at any source must not be mistaken for zero
+  # findings by whoever is deciding to open a gate on the strength of it.
+  echo "check-authz-guards: ripgrep (rg) not found — NOTHING WAS ANALYSED (skipped, not clean)" >&2
   exit 0
 fi
 
@@ -350,6 +375,10 @@ mapfile -t candidate_files < <(
 )
 
 if [[ ${#candidate_files[@]} -eq 0 ]]; then
+  # Also not a clean result. In this repo the getter always matches something,
+  # so zero candidates means the scan ran somewhere unexpected (wrong cwd, empty
+  # checkout) rather than that the codebase is clean.
+  echo "check-authz-guards: analysed $(provenance) — no candidate files matched, NOTHING WAS ANALYSED (skipped, not clean)" >&2
   exit 0
 fi
 
@@ -359,6 +388,7 @@ trap 'rm -f "$tmp"' EXIT
 awk "$classifier" "${candidate_files[@]}" >"$tmp" || true
 
 if [[ ! -s "$tmp" ]]; then
+  echo "check-authz-guards: analysed $(provenance), no violations"
   exit 0
 fi
 
@@ -386,6 +416,8 @@ allowlist="$(printf '%s\n' "${allowed_paths[@]}" | sed 's/\$$/:/' | paste -sd '|
 
 violations="$(grep -Ev "$allowlist" "$tmp" || true)"
 if [[ -n "$violations" ]]; then
+  echo "check-authz-guards: analysed $(provenance) — confirm this is the branch tip before acting on the list below" >&2
+  echo >&2
   echo "Authorization check inside an identity-kind guard with no fail-closed branch:" >&2
   echo "$violations" >&2
   echo >&2
@@ -399,3 +431,5 @@ if [[ -n "$violations" ]]; then
   echo "it to allowed_paths in this script with a comment explaining why." >&2
   exit 1
 fi
+
+echo "check-authz-guards: analysed $(provenance), no violations"
