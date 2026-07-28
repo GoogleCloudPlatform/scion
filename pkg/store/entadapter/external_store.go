@@ -75,19 +75,39 @@ func entGCPToStore(e *ent.GCPServiceAccount) *store.GCPServiceAccount {
 	return sa
 }
 
-// normalizeGCPVerificationStatus resolves an unset VerificationStatus. The empty
-// string is not one of the three valid states, so callers that populate only the
-// Verified bool still have to end up with a coherent row. Resolving it here —
-// once, on write — is what lets reads return the stored value verbatim instead
-// of re-deriving it every time.
-func normalizeGCPVerificationStatus(sa *store.GCPServiceAccount) string {
-	if sa.VerificationStatus != "" {
-		return sa.VerificationStatus
+// normalizeGCPVerification makes the (Verified, VerificationStatus,
+// VerificationError) triple coherent before it is persisted. The empty status
+// string is not one of the three valid states, so callers that populate only
+// the Verified bool still have to end up with a coherent row. Resolving it
+// here — once, on write — is what lets reads return the stored value verbatim
+// instead of re-deriving it every time.
+//
+// Verified == true forces "verified" and clears any error. On a well-formed row
+// this is a no-op; on a malformed one it is a repair. The case that needs it is
+// a read-modify-write of a row already sitting at "failed": flipping Verified to
+// true without this would leave status "failed" beside a stale error message,
+// and nothing would ever heal it, because both backfill rules require the row to
+// still be at "unverified".
+//
+// Verified == false only fills in a blank status and otherwise leaves the row
+// alone, which preserves the verified=false + "failed" + error combination the
+// live verification path writes.
+//
+// The backfill (BackfillGCPVerificationStatus) deliberately does not apply this
+// same coherence pass, and the asymmetry is not that the write path is better
+// informed in general — for Verified == true both have the same information.
+// It is that verified=false with verified_at NULL is irreducibly ambiguous from
+// stored state alone: never-checked and failed-its-first-check look identical.
+// Only a caller performing the write can tell those apart, so the backfill has
+// to leave every verified=false row where it found it.
+func normalizeGCPVerification(sa *store.GCPServiceAccount) {
+	switch {
+	case sa.Verified:
+		sa.VerificationStatus = store.GCPVerificationVerified
+		sa.VerificationError = ""
+	case sa.VerificationStatus == "":
+		sa.VerificationStatus = store.GCPVerificationUnverified
 	}
-	if sa.Verified {
-		return store.GCPVerificationVerified
-	}
-	return store.GCPVerificationUnverified
 }
 
 // CreateGCPServiceAccount registers a new GCP service account.
@@ -99,9 +119,9 @@ func (s *ExternalStore) CreateGCPServiceAccount(ctx context.Context, sa *store.G
 	if sa.CreatedAt.IsZero() {
 		sa.CreatedAt = time.Now()
 	}
-	// Write the resolved status back so the caller's struct — which handlers
-	// return directly in the HTTP response — matches the persisted row.
-	sa.VerificationStatus = normalizeGCPVerificationStatus(sa)
+	// Normalise in place so the caller's struct — which handlers return directly
+	// in the HTTP response — matches the persisted row.
+	normalizeGCPVerification(sa)
 
 	create := s.client.GCPServiceAccount.Create().
 		SetID(id).
@@ -148,7 +168,7 @@ func (s *ExternalStore) UpdateGCPServiceAccount(ctx context.Context, sa *store.G
 	if err != nil {
 		return err
 	}
-	sa.VerificationStatus = normalizeGCPVerificationStatus(sa)
+	normalizeGCPVerification(sa)
 
 	update := s.client.GCPServiceAccount.UpdateOneID(id).
 		SetEmail(sa.Email).

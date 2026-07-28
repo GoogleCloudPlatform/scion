@@ -256,6 +256,11 @@ func GCPServiceAccountDomain() Domain[store.GCPServiceAccount] {
 		VerifyMutated: func(t *testing.T, got *store.GCPServiceAccount) {
 			assert.Contains(t, got.DisplayName, "Renamed ")
 			assert.True(t, got.Verified)
+			// Mutate flips only the bool, so this pins the coherence invariant
+			// as a cross-store contract: no implementation may persist
+			// Verified=true beside a status that says otherwise.
+			assert.Equal(t, store.GCPVerificationVerified, got.VerificationStatus)
+			assert.Empty(t, got.VerificationError)
 		},
 		Delete: func(ctx context.Context, s store.Store, id string) error {
 			return s.DeleteGCPServiceAccount(ctx, id)

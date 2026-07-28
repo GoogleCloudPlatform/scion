@@ -333,6 +333,66 @@ func TestExternalStore_GCPServiceAccount_NormalizesUnsetStatus(t *testing.T) {
 	assert.Equal(t, store.GCPVerificationUnverified, got.VerificationStatus)
 }
 
+// R-1: a caller that re-verifies successfully but only flips the bool — the
+// read-modify-write shape, where Verified is carried over from the row rather
+// than set deliberately alongside the status. Without the coherence invariant
+// the row keeps status "failed" and a stale error beside Verified=true, and it
+// never heals: both backfill rules require the row to still be at "unverified".
+func TestExternalStore_GCPServiceAccount_SuccessfulReverifyHealsFailedRow(t *testing.T) {
+	ctx := context.Background()
+	s := newTestExternalStore(t)
+
+	sa := newTestSA(uuid.NewString())
+	sa.Verified = false
+	sa.VerificationStatus = store.GCPVerificationFailed
+	sa.VerificationError = "IAM policy missing tokenCreator"
+	require.NoError(t, s.CreateGCPServiceAccount(ctx, sa))
+
+	got, err := s.GetGCPServiceAccount(ctx, sa.ID)
+	require.NoError(t, err)
+	require.Equal(t, store.GCPVerificationFailed, got.VerificationStatus)
+
+	// The whole point: status and error are left exactly as they were read.
+	got.Verified = true
+	got.VerifiedAt = time.Now()
+	require.NoError(t, s.UpdateGCPServiceAccount(ctx, got))
+
+	assert.Equal(t, store.GCPVerificationVerified, got.VerificationStatus,
+		"the caller's struct is returned in the HTTP response, so it must be healed too")
+	assert.Empty(t, got.VerificationError)
+
+	got, err = s.GetGCPServiceAccount(ctx, sa.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.GCPVerificationVerified, got.VerificationStatus)
+	assert.Empty(t, got.VerificationError, "the stale failure message must not outlive the failure")
+}
+
+// The other half of the invariant: Verified=false must not be normalised into
+// anything. A live failure keeps its status and its message.
+func TestExternalStore_GCPServiceAccount_UnverifiedRowsLeftAlone(t *testing.T) {
+	ctx := context.Background()
+	s := newTestExternalStore(t)
+
+	sa := newTestSA(uuid.NewString())
+	sa.Verified = false
+	sa.VerificationStatus = store.GCPVerificationFailed
+	sa.VerificationError = "caller does not have permission to impersonate"
+	require.NoError(t, s.CreateGCPServiceAccount(ctx, sa))
+
+	got, err := s.GetGCPServiceAccount(ctx, sa.ID)
+	require.NoError(t, err)
+
+	// A no-op update — an unrelated field changes, verification does not.
+	got.DisplayName = "renamed"
+	require.NoError(t, s.UpdateGCPServiceAccount(ctx, got))
+
+	got, err = s.GetGCPServiceAccount(ctx, sa.ID)
+	require.NoError(t, err)
+	assert.False(t, got.Verified)
+	assert.Equal(t, store.GCPVerificationFailed, got.VerificationStatus)
+	assert.Equal(t, "caller does not have permission to impersonate", got.VerificationError)
+}
+
 func TestExternalStore_BackfillGCPVerificationStatus(t *testing.T) {
 	ctx := context.Background()
 	s, client := newTestExternalStoreWithClient(t)
