@@ -246,9 +246,25 @@ func TestScanForStrayProjectSettingConsts_NoTestFileIsAnError(t *testing.T) {
 	assert.Zero(t, sourceFileConsts)
 }
 
-// TestScanForStrayProjectSettingConsts_SeesBuildTaggedFiles pins the property
-// that made os.ReadDir + parser.ParseFile the right replacement for the
-// deprecated parser.ParseDir: the scan is BUILD-TAG BLIND.
+// TestScanForStrayProjectSettingConsts_SelectsFilesRegardlessOfBuildTags pins
+// the selection behaviour that made os.ReadDir + parser.ParseFile the right
+// replacement for the deprecated parser.ParseDir: every .go file in the
+// directory is parsed, and a //go:build line does not remove one.
+//
+// WHAT THIS TEST DOES NOT DO, because the name and the fixture both suggest
+// otherwise: IN A t.TempDir() THE BUILD TAG IS INERT. Nothing compiles these
+// files, so //go:build is an ordinary comment here and os.ReadDir would list the
+// file with or without it. This test cannot witness tag-blindness against a
+// constraint that is actually in force, and a reader who sees //go:build in a
+// fixture will assume it does.
+//
+// The load-bearing demonstration was a probe planted in the real pkg/hub, where
+// the tag WAS in force: go list reported 0 GoFiles for that file under
+// -tags no_sqlite and 1 untagged, proving the compiler could not see it, and the
+// guard reported it as a stray anyway. That probe is not shippable — it requires
+// mutating the package under test — so it lives as a reproduction in
+// reviews/pr597-unreviewed-paths-review.md (pt-rev-3). This test is the
+// shippable remainder.
 //
 // staticcheck's SA1019 recommends go/packages, and its advertised advantage is
 // that it applies build tags. For this guard that advantage is a defect. A
@@ -264,7 +280,7 @@ func TestScanForStrayProjectSettingConsts_NoTestFileIsAnError(t *testing.T) {
 // behaviour that nothing would notice losing is indistinguishable from luck.
 //
 // Probe by pt-rev-3.
-func TestScanForStrayProjectSettingConsts_SeesBuildTaggedFiles(t *testing.T) {
+func TestScanForStrayProjectSettingConsts_SelectsFilesRegardlessOfBuildTags(t *testing.T) {
 	dir := t.TempDir()
 	writeGoFixture(t, dir, projectSettingsSourceFile,
 		"package hub\n\nconst projectSettingProbeSource = \"scion.io/probe-source\"\n")
@@ -286,10 +302,11 @@ func TestScanForStrayProjectSettingConsts_SeesBuildTaggedFiles(t *testing.T) {
 			"the scan is not parsing, so the assertion below would pass vacuously")
 
 	assert.Equal(t, []string{"tagged_stray.go: projectSettingTaggedStray"}, strays,
-		"a projectSetting* constant in a build-tag-excluded file was NOT reported. The scan has "+
-			"become build-tag aware — most likely a migration to go/packages, which staticcheck "+
-			"SA1019 recommends. Tag-blindness is required here: a constant invisible to the "+
-			"current build is still dropped on clone. Keep os.ReadDir + parser.ParseFile.")
+		"a projectSetting* constant in a file carrying a //go:build line was NOT reported, so "+
+			"file selection has started depending on build tags — most likely a migration to "+
+			"go/packages, which staticcheck SA1019 recommends. That property is required here: a "+
+			"constant invisible to the current build is still dropped when a project is cloned. "+
+			"Keep os.ReadDir + parser.ParseFile.")
 }
 
 // scanForStrayProjectSettingConsts parses every .go file directly in dir and
