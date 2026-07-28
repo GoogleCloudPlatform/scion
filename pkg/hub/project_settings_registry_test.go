@@ -15,10 +15,13 @@
 package hub
 
 import (
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -160,52 +163,124 @@ func TestProjectSettingKeys_NoDrift(t *testing.T) {
 // across the package), this asserts the narrower and more useful property: the
 // source file is the *only* declaration site, so parsing it is sufficient.
 func TestProjectSettingKeys_NoConstantsOutsideSourceFile(t *testing.T) {
-	fset := token.NewFileSet()
-	pkgs, err := parser.ParseDir(fset, ".", nil, 0)
-	require.NoError(t, err, "failed to parse the pkg/hub directory")
-	require.NotEmpty(t, pkgs, "parsed no packages; this guard is not looking at anything")
+	strays, sourceFileConsts, err := scanForStrayProjectSettingConsts(".")
 
-	sawSourceFile := false
-	for _, pkg := range pkgs {
-		for path, file := range pkg.Files {
-			if filepath.Base(path) == projectSettingsSourceFile {
-				sawSourceFile = true
+	// The scan reports instrument failures — nothing parsed, source file absent,
+	// no constants found where they are known to be — as an error rather than as
+	// a clean result, because every one of them would otherwise present as "no
+	// strays found" and pass. Fatal, not logged: a broken instrument must not be
+	// allowed to reach the assertion below and satisfy it vacuously.
+	require.NoError(t, err, "the stray-constant scan could not have found anything")
+
+	// Positive control: the source file is known to declare these constants, so
+	// a zero here means the parse or the name matcher stopped working, not that
+	// the tree is clean.
+	require.NotZerof(t, sourceFileConsts,
+		"parsed %s but found no projectSetting* constants in it; the parse or "+
+			"isProjectSettingConstName is broken and this guard is checking nothing",
+		projectSettingsSourceFile)
+
+	assert.Emptyf(t, strays,
+		"projectSetting* constants are declared outside %s: %v. The drift guard only "+
+			"parses %s, so these would not be required to appear in projectSettingKeys "+
+			"and the settings would be silently dropped on clone. Move them into %s.",
+		projectSettingsSourceFile, strays, projectSettingsSourceFile, projectSettingsSourceFile)
+}
+
+// TestScanForStrayProjectSettingConsts_EmptyDirIsAnError is the negative control
+// for the guard above, kept executable rather than asserted once by hand.
+//
+// The guard's pass condition is an empty result, which is exactly what a scan
+// that examined nothing also produces. Pointed at an empty directory the scan
+// must refuse to return a clean answer; if this test ever fails, the guard above
+// has become a no-op and would stay green through the removal of the property it
+// is protecting.
+func TestScanForStrayProjectSettingConsts_EmptyDirIsAnError(t *testing.T) {
+	strays, sourceFileConsts, err := scanForStrayProjectSettingConsts(t.TempDir())
+
+	require.Error(t, err,
+		"scanning an empty directory returned a clean result; the guard is a no-op")
+	assert.Empty(t, strays)
+	assert.Zero(t, sourceFileConsts)
+}
+
+// scanForStrayProjectSettingConsts parses every .go file directly in dir and
+// reports (a) each projectSetting* constant declared outside
+// projectSettingsSourceFile, as "file: name", and (b) how many such constants
+// were declared inside it.
+//
+// It returns an error, rather than an empty result, for every condition under
+// which it could not have found a stray: the directory could not be read, it
+// held no .go files, projectSettingsSourceFile was not among them, or a file
+// failed to parse. Distinguishing "found nothing" from "looked at nothing" is
+// the entire reason this is a function returning an error instead of a loop
+// inside the test.
+//
+// File selection reproduces what parser.ParseDir with a nil filter selected
+// before it was deprecated: every .go file directly in dir, subdirectories
+// excluded, test files INCLUDED. Test files are then exempted from the constant
+// check by the _test.go skip below, which is where the exemption belongs —
+// filtering them out of the file set instead would look equivalent while
+// quietly changing which files the source-file and parse checks can see.
+func scanForStrayProjectSettingConsts(dir string) (strays []string, sourceFileConsts int, err error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, 0, fmt.Errorf("reading %s: %w", dir, err)
+	}
+
+	goFiles := make([]string, 0, len(entries))
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".go") {
+			continue
+		}
+		goFiles = append(goFiles, e.Name())
+	}
+	if len(goFiles) == 0 {
+		return nil, 0, fmt.Errorf("no .go files in %s; the scan is not looking at anything", dir)
+	}
+	if !slices.Contains(goFiles, projectSettingsSourceFile) {
+		return nil, 0, fmt.Errorf(
+			"%s is not among the %d .go files in %s; has it been renamed? "+
+				"Update projectSettingsSourceFile", projectSettingsSourceFile, len(goFiles), dir)
+	}
+
+	fset := token.NewFileSet()
+	for _, name := range goFiles {
+		file, parseErr := parser.ParseFile(fset, filepath.Join(dir, name), nil, 0)
+		if parseErr != nil {
+			return nil, 0, fmt.Errorf("parsing %s: %w", name, parseErr)
+		}
+
+		isSourceFile := name == projectSettingsSourceFile
+		// Test files may legitimately reference these names.
+		if !isSourceFile && strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+
+		for _, decl := range file.Decls {
+			gen, ok := decl.(*ast.GenDecl)
+			if !ok || gen.Tok != token.CONST {
 				continue
 			}
-			// Test files may legitimately reference these names.
-			if strings.HasSuffix(path, "_test.go") {
-				continue
-			}
-			for _, decl := range file.Decls {
-				gen, ok := decl.(*ast.GenDecl)
-				if !ok || gen.Tok != token.CONST {
+			for _, spec := range gen.Specs {
+				vs, ok := spec.(*ast.ValueSpec)
+				if !ok {
 					continue
 				}
-				for _, spec := range gen.Specs {
-					vs, ok := spec.(*ast.ValueSpec)
-					if !ok {
+				for _, constName := range vs.Names {
+					if !isProjectSettingConstName(constName.Name) {
 						continue
 					}
-					for _, name := range vs.Names {
-						assert.Falsef(t, isProjectSettingConstName(name.Name),
-							"%s declares %s outside %s. The drift guard only parses %s, "+
-								"so this constant would not be required to appear in "+
-								"projectSettingKeys and the setting would be silently dropped "+
-								"on clone. Move it into %s.",
-							path, name.Name, projectSettingsSourceFile,
-							projectSettingsSourceFile, projectSettingsSourceFile)
+					if isSourceFile {
+						sourceFileConsts++
+						continue
 					}
+					strays = append(strays, name+": "+constName.Name)
 				}
 			}
 		}
 	}
-
-	// Anti-vacuity: if the source file were renamed, every file would be
-	// skipped by the filepath.Base check above and this test would pass while
-	// checking nothing.
-	require.True(t, sawSourceFile,
-		"did not encounter %s while scanning the package; has it been renamed? "+
-			"Update projectSettingsSourceFile.", projectSettingsSourceFile)
+	return strays, sourceFileConsts, nil
 }
 
 // TestProjectSettingKeys_Count pins the number of project settings, so that an
