@@ -323,6 +323,13 @@ func (l *LogAuditLogger) LogGCPTokenEvent(ctx context.Context, event *GCPTokenEv
 		slog.String("agent_id", event.AgentID),
 		slog.String("project_id", event.ProjectID),
 		slog.String("sa_email", event.ServiceAccountEmail),
+		// sa_id is emitted unconditionally, like its siblings above. Every
+		// caller of LogGCPTokenGeneration already supplies it and it was
+		// populated on the struct all along — it was simply never written out,
+		// so the field existed in the schema and in memory but not in any log
+		// anyone could read. Emitting it only when non-empty would make the key
+		// come and go between records and defeat the point of a stable schema.
+		slog.String("sa_id", event.ServiceAccountID),
 	}
 
 	if event.FailReason != "" {
