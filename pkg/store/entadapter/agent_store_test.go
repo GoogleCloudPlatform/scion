@@ -700,3 +700,140 @@ func ids(agents []store.Agent) []string {
 	}
 	return out
 }
+
+// =============================================================================
+// applied_config validation on read (P7.4)
+// =============================================================================
+
+// TestParseAppliedConfig covers the decode-and-sanitise rules directly. The two
+// failure modes used to be silent in different ways: the unmarshal error was
+// dropped by an `err == nil` guard, and an unusable metadata mode was passed
+// through untouched.
+func TestParseAppliedConfig(t *testing.T) {
+	t.Run("valid config round-trips", func(t *testing.T) {
+		cfg, err := parseAppliedConfig(`{"image":"img:1","gcpIdentity":{"metadataMode":"assign","serviceAccountEmail":"sa@x.iam.gserviceaccount.com"}}`)
+		require.NoError(t, err)
+		require.NotNil(t, cfg)
+		assert.Equal(t, "img:1", cfg.Image)
+		require.NotNil(t, cfg.GCPIdentity)
+		assert.Equal(t, "assign", cfg.GCPIdentity.MetadataMode)
+	})
+
+	t.Run("all three modes are accepted", func(t *testing.T) {
+		for _, mode := range []string{"assign", "block", "passthrough"} {
+			cfg, err := parseAppliedConfig(`{"gcpIdentity":{"metadataMode":"` + mode + `"}}`)
+			require.NoError(t, err, "mode %q should be valid", mode)
+			require.NotNil(t, cfg.GCPIdentity, "mode %q should be retained", mode)
+			assert.Equal(t, mode, cfg.GCPIdentity.MetadataMode)
+		}
+	})
+
+	t.Run("absent gcpIdentity is not an error", func(t *testing.T) {
+		// No GCP decision was made. That is different from a decision that
+		// names no mode, and only the latter is corruption.
+		cfg, err := parseAppliedConfig(`{"image":"img:1"}`)
+		require.NoError(t, err)
+		require.NotNil(t, cfg)
+		assert.Nil(t, cfg.GCPIdentity)
+	})
+
+	t.Run("corrupt JSON returns an error and no config", func(t *testing.T) {
+		cfg, err := parseAppliedConfig(`{"image": "img:1"`)
+		require.Error(t, err, "a corrupt applied_config must not be silently discarded")
+		assert.Nil(t, cfg)
+		assert.Contains(t, err.Error(), "not valid JSON")
+	})
+
+	t.Run("not-JSON-at-all returns an error", func(t *testing.T) {
+		cfg, err := parseAppliedConfig(`this is not json`)
+		require.Error(t, err)
+		assert.Nil(t, cfg)
+	})
+
+	t.Run("empty metadata mode drops the GCP identity but keeps the rest", func(t *testing.T) {
+		// The case that motivates the check: a non-nil GCPIdentity asserting a
+		// GCP decision was made while naming no decision. Strictly worse than
+		// nil, because nothing downstream has a safe default to read from it.
+		cfg, err := parseAppliedConfig(`{"image":"img:1","harnessConfig":"hc","gcpIdentity":{"metadataMode":""}}`)
+		require.Error(t, err)
+		require.NotNil(t, cfg, "unrelated config must survive a bad metadata mode")
+		assert.Nil(t, cfg.GCPIdentity, "the unusable GCP identity must be dropped")
+		assert.Equal(t, "img:1", cfg.Image)
+		assert.Equal(t, "hc", cfg.HarnessConfig)
+	})
+
+	t.Run("unknown metadata mode drops the GCP identity", func(t *testing.T) {
+		for _, mode := range []string{"blocked", "Block", "sandbox", " block"} {
+			cfg, err := parseAppliedConfig(`{"image":"img:1","gcpIdentity":{"metadataMode":"` + mode + `"}}`)
+			require.Error(t, err, "mode %q should be rejected", mode)
+			require.NotNil(t, cfg)
+			assert.Nil(t, cfg.GCPIdentity, "mode %q should have been dropped", mode)
+			assert.Equal(t, "img:1", cfg.Image)
+		}
+	})
+}
+
+// TestAgentStore_AppliedConfigValidatedOnRead exercises the same rules through
+// a real round-trip, so the sanitising is pinned where callers actually meet it
+// rather than only in the helper.
+func TestAgentStore_AppliedConfigValidatedOnRead(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("unusable metadata mode is dropped on read", func(t *testing.T) {
+		s, projectID := newTestAgentStore(t)
+		a := makeAgent(projectID, "bad-mode")
+		a.AppliedConfig = &store.AgentAppliedConfig{
+			Image:       "img:1",
+			GCPIdentity: &store.GCPIdentityConfig{MetadataMode: ""},
+		}
+		require.NoError(t, s.CreateAgent(ctx, a))
+
+		got, err := s.GetAgent(ctx, a.ID)
+		require.NoError(t, err, "one bad field must not make the agent unreadable")
+		require.NotNil(t, got.AppliedConfig)
+		assert.Nil(t, got.AppliedConfig.GCPIdentity,
+			"an unusable metadata mode must not reach callers; the agent falls back to the secure default")
+		assert.Equal(t, "img:1", got.AppliedConfig.Image)
+	})
+
+	t.Run("valid config is untouched", func(t *testing.T) {
+		s, projectID := newTestAgentStore(t)
+		a := makeAgent(projectID, "good-mode")
+		a.AppliedConfig = &store.AgentAppliedConfig{
+			GCPIdentity: &store.GCPIdentityConfig{
+				MetadataMode:        store.GCPMetadataModeAssign,
+				ServiceAccountEmail: "sa@x.iam.gserviceaccount.com",
+			},
+		}
+		require.NoError(t, s.CreateAgent(ctx, a))
+
+		got, err := s.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		require.NotNil(t, got.AppliedConfig.GCPIdentity)
+		assert.Equal(t, store.GCPMetadataModeAssign, got.AppliedConfig.GCPIdentity.MetadataMode)
+		assert.Equal(t, "sa@x.iam.gserviceaccount.com", got.AppliedConfig.GCPIdentity.ServiceAccountEmail)
+	})
+
+	t.Run("listing survives a corrupt row", func(t *testing.T) {
+		// The reason entAgentToStore logs instead of returning: a corrupt row
+		// must not take the whole listing down with it.
+		s, projectID := newTestAgentStore(t)
+		good := makeAgent(projectID, "good-row")
+		require.NoError(t, s.CreateAgent(ctx, good))
+		bad := makeAgent(projectID, "corrupt-row")
+		require.NoError(t, s.CreateAgent(ctx, bad))
+
+		// Write raw invalid JSON straight past the store's own marshalling.
+		require.NoError(t, s.client.Agent.UpdateOneID(uuid.MustParse(bad.ID)).
+			SetAppliedConfig(`{"image": "img:1"`).Exec(ctx))
+
+		result, err := s.ListAgents(ctx, store.AgentFilter{}, store.ListOptions{Limit: 10})
+		require.NoError(t, err, "a corrupt applied_config must not break listing")
+		assert.Len(t, result.Items, 2)
+		for _, item := range result.Items {
+			if item.ID == bad.ID {
+				assert.Nil(t, item.AppliedConfig, "the corrupt config must be dropped, not half-parsed")
+			}
+		}
+	})
+}
