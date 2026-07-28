@@ -670,7 +670,7 @@ func (s *Server) createAgentInProject(
 		// The whole gate lives in authorizeSAAssignment, including the ordering of
 		// the two layers, so the create and PATCH paths cannot drift apart on the
 		// part that matters. Read it there before changing either call.
-		if !s.authorizeSAAssignment(w, r, sa) {
+		if !s.authorizeSAAssignment(w, r, sa, SurfaceAgentCreate) {
 			return
 		}
 
@@ -950,6 +950,37 @@ func (s *Server) createAgentInProject(
 						ServiceAccountEmail: sa.Email,
 						ProjectID:           sa.ProjectID,
 					}
+
+					// A service account was just bound to an agent, so it is
+					// recorded (design §7). This is a BINDING record and not a
+					// decision record: no permission was checked, because the
+					// account is not caller-supplied. See
+					// store.MechanismProjectDefault.
+					//
+					// ⚠️ THIS ADDS AUDIT ONLY. It does not gate anything, and it
+					// must not: the ruling above stands. Do not "upgrade" this to
+					// EvaluateActAs — the binding carries no ActAsOutcome
+					// precisely so that anyone later driving enforcement from
+					// these records cannot fail this path closed by accident.
+					//
+					// Recorded here rather than skipped because item D's
+					// compliance report has to be able to find these bindings,
+					// and a binding that produces no record is indistinguishable
+					// from no binding at all.
+					//
+					// The caller is recorded as the actor, not as an evaluated
+					// principal. An error resolving it is not fatal to agent
+					// creation: an unattributed record still beats none, and the
+					// zero Principal renders as kind "unknown".
+					principal, perr := s.callerPrincipal(ctx)
+					if perr != nil {
+						slog.Debug("project-default SA binding: caller could not be resolved for the audit record",
+							"surface", SurfaceProjectDefault, "error", perr.Error())
+					}
+					store.RecordSABinding(ctx, s.GetAuditLogger(), SurfaceProjectDefault,
+						principal, sa,
+						"service account came from project settings, not from the caller, "+
+							"so no caller permission was evaluated")
 				} else {
 					// SA not found/invalid — fall back to block
 					agent.AppliedConfig.GCPIdentity = &store.GCPIdentityConfig{
@@ -2020,7 +2051,7 @@ func (s *Server) updateAgent(w http.ResponseWriter, r *http.Request, id string) 
 			// PATCH is the surface that most needs it: reassigning an existing
 			// agent's identity is the cheapest way to acquire a service account
 			// you could not have been given at create time.
-			if !s.authorizeSAAssignment(w, r, sa) {
+			if !s.authorizeSAAssignment(w, r, sa, SurfaceAgentPatch) {
 				return
 			}
 			agent.AppliedConfig.GCPIdentity = &store.GCPIdentityConfig{

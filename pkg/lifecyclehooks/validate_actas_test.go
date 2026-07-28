@@ -74,7 +74,7 @@ func TestExecutionIdentity_AllowedCallerPasses(t *testing.T) {
 	checker := store.NewFakeCallerPermissionChecker().AllowTarget(hookSAEmail)
 
 	err := ValidateHook(context.Background(), hookWithIdentity(), defaultResolver(),
-		defaultCaller(), checker)
+		defaultCaller(), checker, noAudit())
 	if err != nil {
 		t.Fatalf("expected the hook to validate for a permitted caller, got: %v", err)
 	}
@@ -86,7 +86,7 @@ func TestExecutionIdentity_DeniedCallerRejected(t *testing.T) {
 	checker := store.NewFakeCallerPermissionChecker().DenyTarget(hookSAEmail, "no actAs grant")
 
 	err := ValidateHook(context.Background(), hookWithIdentity(), defaultResolver(),
-		defaultCaller(), checker)
+		defaultCaller(), checker, noAudit())
 	if !hasExecutionIdentityError(t, err) {
 		t.Fatalf("a caller without actAs must not be able to set this execution identity; got: %v", err)
 	}
@@ -103,7 +103,7 @@ func TestExecutionIdentity_IndeterminateDenies(t *testing.T) {
 		IndeterminateTarget(hookSAEmail, "troubleshooter returned UNKNOWN_INFO")
 
 	err := ValidateHook(context.Background(), hookWithIdentity(), defaultResolver(),
-		defaultCaller(), checker)
+		defaultCaller(), checker, noAudit())
 	if !hasExecutionIdentityError(t, err) {
 		t.Fatal("an indeterminate actAs result must deny, not pass")
 	}
@@ -116,7 +116,7 @@ func TestExecutionIdentity_CheckerErrorDenies(t *testing.T) {
 		FailTarget(hookSAEmail, errors.New("IAM API timeout"))
 
 	err := ValidateHook(context.Background(), hookWithIdentity(), defaultResolver(),
-		defaultCaller(), checker)
+		defaultCaller(), checker, noAudit())
 	if !hasExecutionIdentityError(t, err) {
 		t.Fatal("a checker transport error must deny, not pass")
 	}
@@ -127,7 +127,7 @@ func TestExecutionIdentity_CheckerErrorDenies(t *testing.T) {
 // ever starts failing, the fix is at the call site, never here.
 func TestExecutionIdentity_NilCheckerDenies(t *testing.T) {
 	err := ValidateHook(context.Background(), hookWithIdentity(), defaultResolver(),
-		defaultCaller(), nil)
+		defaultCaller(), nil, noAudit())
 	if !hasExecutionIdentityError(t, err) {
 		t.Fatal("a nil checker must deny; switching the check off is done with " +
 			"store.NewDisabledCallerPermissionChecker, not with nil")
@@ -139,7 +139,7 @@ func TestExecutionIdentity_NilCheckerDenies(t *testing.T) {
 // absence denies, explicit-off allows.
 func TestExecutionIdentity_DisabledCheckerAllows(t *testing.T) {
 	err := ValidateHook(context.Background(), hookWithIdentity(), defaultResolver(),
-		defaultCaller(), store.NewDisabledCallerPermissionChecker())
+		defaultCaller(), store.NewDisabledCallerPermissionChecker(), noAudit())
 	if err != nil {
 		t.Fatalf("the disabled checker must allow, so that turning the check off "+
 			"is not an outage; got: %v", err)
@@ -153,7 +153,7 @@ func TestExecutionIdentity_CallerWithoutGCPIdentityDenied(t *testing.T) {
 	blockModeAgent := store.Principal{Kind: store.PrincipalAgent, ID: "agent-001"}
 
 	err := ValidateHook(context.Background(), hookWithIdentity(), defaultResolver(),
-		blockModeAgent, checker)
+		blockModeAgent, checker, noAudit())
 	if !hasExecutionIdentityError(t, err) {
 		t.Fatal("an agent with no GCP identity has nothing that could hold actAs and must be denied")
 	}
@@ -170,7 +170,7 @@ func TestExecutionIdentity_ZeroPrincipalDenied(t *testing.T) {
 	checker := store.NewFakeCallerPermissionChecker().AllowTarget(hookSAEmail)
 
 	err := ValidateHook(context.Background(), hookWithIdentity(), defaultResolver(),
-		store.Principal{}, checker)
+		store.Principal{}, checker, noAudit())
 	if !hasExecutionIdentityError(t, err) {
 		t.Fatal("the zero Principal is PrincipalUnknown and must be denied")
 	}
@@ -188,7 +188,7 @@ func TestExecutionIdentity_SameAccountPropagationAllowed(t *testing.T) {
 		ServiceAccountEmail: hookSAEmail,
 	}
 
-	err := ValidateHook(context.Background(), hookWithIdentity(), defaultResolver(), sameSA, checker)
+	err := ValidateHook(context.Background(), hookWithIdentity(), defaultResolver(), sameSA, checker, noAudit())
 	if err != nil {
 		t.Fatalf("an agent already acting as the target account escalates nothing by "+
 			"naming it as a hook identity; got: %v", err)
@@ -208,7 +208,7 @@ func TestExecutionIdentity_SameAccountIsCaseInsensitive(t *testing.T) {
 		ServiceAccountEmail: strings.ToUpper(hookSAEmail),
 	}
 
-	err := ValidateHook(context.Background(), hookWithIdentity(), defaultResolver(), sameSA, checker)
+	err := ValidateHook(context.Background(), hookWithIdentity(), defaultResolver(), sameSA, checker, noAudit())
 	if err != nil {
 		t.Fatalf("a case difference is not a different service account; got: %v", err)
 	}
@@ -224,7 +224,7 @@ func TestExecutionIdentity_DifferentAccountIsNotPropagation(t *testing.T) {
 		ServiceAccountEmail: "something-else@example.iam.gserviceaccount.com",
 	}
 
-	err := ValidateHook(context.Background(), hookWithIdentity(), defaultResolver(), otherSA, checker)
+	err := ValidateHook(context.Background(), hookWithIdentity(), defaultResolver(), otherSA, checker, noAudit())
 	if !hasExecutionIdentityError(t, err) {
 		t.Fatal("holding one service account must not confer the right to run as another")
 	}
@@ -239,7 +239,7 @@ func TestExecutionIdentity_EmptyIdentityNeedsNoPermission(t *testing.T) {
 	h.ExecutionIdentity = ""
 
 	// nil checker: if the gate ran at all this would deny.
-	err := ValidateHook(context.Background(), h, defaultResolver(), store.Principal{}, nil)
+	err := ValidateHook(context.Background(), h, defaultResolver(), store.Principal{}, nil, noAudit())
 	if err != nil {
 		t.Fatalf("a hook with no execution identity has nothing to authorize; got: %v", err)
 	}
@@ -255,7 +255,7 @@ func TestExecutionIdentity_PermissionIsIndependentOfVerification(t *testing.T) {
 	checker := store.NewFakeCallerPermissionChecker().
 		AllowTarget("pending@example.iam.gserviceaccount.com")
 
-	err := ValidateHook(context.Background(), h, defaultResolver(), defaultCaller(), checker)
+	err := ValidateHook(context.Background(), h, defaultResolver(), defaultCaller(), checker, noAudit())
 	if !hasExecutionIdentityError(t, err) {
 		t.Fatal("an unverified account must still be rejected for a permitted caller")
 	}
@@ -276,7 +276,7 @@ func TestExecutionIdentity_PermissionDoesNotBypassScope(t *testing.T) {
 	checker := store.NewFakeCallerPermissionChecker().
 		AllowTarget("proj@example.iam.gserviceaccount.com")
 
-	err := ValidateHook(context.Background(), h, defaultResolver(), defaultCaller(), checker)
+	err := ValidateHook(context.Background(), h, defaultResolver(), defaultCaller(), checker, noAudit())
 	if !hasExecutionIdentityError(t, err) {
 		t.Fatal("actAs permission must not admit a project-scoped account into a hub-scoped hook")
 	}
@@ -297,7 +297,7 @@ func TestExecutionIdentity_ChecksTheImmediateCaller(t *testing.T) {
 	}
 
 	if err := ValidateHook(context.Background(), hookWithIdentity(), defaultResolver(),
-		caller, checker); err != nil {
+		caller, checker, noAudit()); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 

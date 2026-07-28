@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 )
 
@@ -202,7 +203,17 @@ type AuditLogger interface {
 	LogLifecycleHookExecutionEvent(ctx context.Context, event *LifecycleHookExecutionEvent) error
 	// LogAgentSecretReadEvent logs an agent secret read event.
 	LogAgentSecretReadEvent(ctx context.Context, event *AgentSecretReadEvent) error
+	// RecordSAAssignment logs a service-account assignment decision or binding
+	// (svc-accnt design §7). Named to match store.SAAssignmentAuditSink, which
+	// this method exists to satisfy: pkg/lifecyclehooks emits these too and
+	// cannot import pkg/hub.
+	RecordSAAssignment(ctx context.Context, event *store.SAAssignmentEvent) error
 }
+
+// Compile-time assertion that an AuditLogger is usable as the store-side sink.
+// If these drift, the lifecycle-hook surface silently loses its audit trail —
+// it would fall back to the nil-sink warning path rather than fail to build.
+var _ store.SAAssignmentAuditSink = AuditLogger(nil)
 
 // LogAuditLogger is a simple implementation that logs to the standard logger.
 type LogAuditLogger struct {
@@ -459,6 +470,70 @@ func (l *LogAuditLogger) LogAgentSecretReadEvent(ctx context.Context, event *Age
 	}
 
 	l.logger().LogAttrs(ctx, level, "agent secret read event", attrs...)
+
+	return nil
+}
+
+// RecordSAAssignment logs a service-account assignment record (design §7).
+//
+// Both record kinds come through here and they are NOT the same event, so the
+// attributes differ rather than being padded to a common shape:
+//
+//   - A DECISION record carries the permission that was checked and the verdict.
+//   - A BINDING record carries neither, because neither exists. Nothing was
+//     checked and nothing was decided — the account came from project settings,
+//     not from the caller. Emitting decision="indeterminate" to fill the slot
+//     would be a fabricated verdict, and worse, ActAsIndeterminate DENIES, so
+//     anyone later driving enforcement from these records would break routine
+//     agent creation. The absence of the attribute is the honest encoding.
+//
+// The nil-receiver case is safe: nothing here dereferences l.
+func (l *LogAuditLogger) RecordSAAssignment(ctx context.Context, event *store.SAAssignmentEvent) error {
+	if event == nil {
+		return nil
+	}
+
+	// Denials and indeterminates are warnings; allows and plain bindings are
+	// informational. A binding has no decision and is never a warning — nothing
+	// was refused.
+	level := slog.LevelInfo
+	if event.Decision != nil && *event.Decision != store.ActAsAllowed {
+		level = slog.LevelWarn
+	}
+
+	attrs := []slog.Attr{
+		slog.String("event_type", string(event.Type)),
+		slog.String("surface", event.Surface),
+		slog.String("caller_kind", event.Caller.Kind.String()),
+		slog.String("caller_id", event.Caller.ID),
+		slog.String("target_sa_id", event.TargetSAID),
+		slog.String("target_sa_email", event.TargetSAEmail),
+		slog.String("mechanism", event.Mechanism),
+	}
+
+	// The caller's own GCP principal, when it has one. This is what an IAM
+	// binding would have to name, so it is the field that makes a denial
+	// actionable.
+	if principal := event.Caller.GCPPrincipalID(); principal != "" {
+		attrs = append(attrs, slog.String("caller_gcp_principal", principal))
+	}
+	if event.Permission != "" {
+		attrs = append(attrs, slog.String("permission", event.Permission))
+	}
+	if event.Decision != nil {
+		attrs = append(attrs, slog.String("decision", event.Decision.String()))
+	}
+	if event.Reason != "" {
+		attrs = append(attrs, slog.String("reason", event.Reason))
+	}
+	// ⚠️ Omitted entirely when nil. Not serialised as null and not coerced to
+	// false: false asserts that a cache was consulted and missed, which would
+	// be a fabricated live IAM call. See store.SAAssignmentEvent.CacheHit.
+	if event.CacheHit != nil {
+		attrs = append(attrs, slog.Bool("cache_hit", *event.CacheHit))
+	}
+
+	slog.LogAttrs(ctx, level, "SA assignment audit event", attrs...)
 
 	return nil
 }

@@ -19,7 +19,7 @@ import (
 	"strings"
 )
 
-// Mechanism values produced by EvaluateActAs itself, as opposed to those
+// Mechanism values produced by evaluateActAs itself, as opposed to those
 // produced by a checker implementation.
 const (
 	// MechanismCheckUnwired marks a denial caused by a nil checker. This is a
@@ -72,7 +72,7 @@ const (
 	MechanismUnspecified = "unspecified"
 )
 
-// EvaluateActAs is the single decision sequence for "may this caller act as
+// evaluateActAs is the single decision sequence for "may this caller act as
 // this service account", shared by every surface that gates on it.
 //
 // ⚠️ IT EXISTS TO BE THE ONLY COPY. Two surfaces gate on this today — agent
@@ -82,6 +82,13 @@ const (
 // because each one looks locally reasonable. Surfaces are expected to differ in
 // how they REPORT the result (HTTP 403 versus a FieldError) and in what they
 // log; they must not differ in how they REACH it.
+//
+// ⚠️ IT IS UNEXPORTED ON PURPOSE. Surfaces call the exported EvaluateActAs in
+// gcp_actas_audit.go, which wraps this and emits the audit record. Keeping the
+// pure sequence package-private means a new surface cannot reach a decision
+// without also filing a record for it — the audit trail is inherited by
+// construction rather than by the author remembering (design §7). This function
+// stays pure so the decision ordering remains directly testable without a sink.
 //
 // The sequence, in order, with the reason each step is where it is:
 //
@@ -115,7 +122,7 @@ const (
 // stamped and honoured — see MechanismUnattributableAllow. An audit record that
 // cannot say which check produced a permit is the failure the mechanism field
 // exists to prevent, and it is only ever missed during an incident.
-func EvaluateActAs(
+func evaluateActAs(
 	ctx context.Context,
 	checker CallerPermissionChecker,
 	caller Principal,

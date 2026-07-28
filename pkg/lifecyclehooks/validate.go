@@ -132,13 +132,20 @@ const SurfaceHookExecutionIdentity = "hook-execution-identity"
 // no identity). If saResolver is nil and execution_identity is non-empty,
 // a validation error is returned.
 //
-// caller and actAs are REQUIRED, and are positional parameters rather than
-// optional fields on purpose: adding them to a struct or defaulting them would
-// let a new call site acquire the ungated behaviour by omission. Every caller
-// is forced by the compiler to say who is asking and what should check them.
-// A nil actAs denies (store.MechanismCheckUnwired); switching the check off is
-// done by passing store.NewDisabledCallerPermissionChecker, which is a value
-// somebody has to construct.
+// caller, actAs and audit are REQUIRED, and are positional parameters rather
+// than optional fields on purpose: adding them to a struct or defaulting them
+// would let a new call site acquire the ungated behaviour by omission. Every
+// caller is forced by the compiler to say who is asking, what should check
+// them, and where the record goes. A nil actAs denies
+// (store.MechanismCheckUnwired); switching the check off is done by passing
+// store.NewDisabledCallerPermissionChecker, which is a value somebody has to
+// construct.
+//
+// audit is the §7 sink. A nil audit WARNS and proceeds rather than denying,
+// which is deliberately unlike a nil actAs: a missing checker means we do not
+// know whether the caller is permitted, while a missing sink means we know and
+// cannot file it. Failing closed on the latter would turn a logging
+// misconfiguration into an outage.
 //
 // ⚠️ THIS AUTHORIZATION IS WRITE-TIME ONLY, AND THAT IS A RESIDUAL RISK, NOT A
 // DESIGN GOAL. The permission is evaluated when a hook is created or updated
@@ -162,6 +169,7 @@ func ValidateHook(
 	saResolver GCPServiceAccountResolver,
 	caller store.Principal,
 	actAs store.CallerPermissionChecker,
+	audit store.SAAssignmentAuditSink,
 ) error {
 	var errs []FieldError
 
@@ -208,7 +216,7 @@ func ValidateHook(
 
 	// --- execution_identity ---
 	if hook.Action != nil {
-		errs = append(errs, validateExecutionIdentity(ctx, hook, saResolver, caller, actAs)...)
+		errs = append(errs, validateExecutionIdentity(ctx, hook, saResolver, caller, actAs, audit)...)
 	}
 
 	// --- untrusted-variable guard (static, create/update time) ---
@@ -433,6 +441,7 @@ func validateExecutionIdentity(
 	resolver GCPServiceAccountResolver,
 	caller store.Principal,
 	actAs store.CallerPermissionChecker,
+	audit store.SAAssignmentAuditSink,
 ) []FieldError {
 	if hook.ExecutionIdentity == "" {
 		// Webhook actions allow empty execution_identity.
@@ -507,7 +516,15 @@ func validateExecutionIdentity(
 	// The decision sequence is store.EvaluateActAs, shared with the agent
 	// service-account assignment surface in pkg/hub. This surface chooses only
 	// how to report the result. Do not reimplement the ordering here.
-	result, err := store.EvaluateActAs(ctx, actAs, caller, sa)
+	result, err := store.EvaluateActAs(ctx, store.ActAsGate{
+		Checker: actAs,
+		Caller:  caller,
+		// Constant, not a parameter: this package has exactly one actAs
+		// surface, so there is nothing for a call site to get wrong or to
+		// leave blank.
+		Surface: SurfaceHookExecutionIdentity,
+		Audit:   audit,
+	}, sa)
 	if err != nil {
 		// Diagnostic only; EvaluateActAs has already forced the outcome to
 		// indeterminate, which fails the check below.

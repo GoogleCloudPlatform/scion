@@ -21,7 +21,7 @@ import (
 	"testing"
 )
 
-// EvaluateActAs is the single shared decision sequence. Every surface that
+// evaluateActAs is the single shared decision sequence. Every surface that
 // gates on actAs routes through it, so the ordering pinned here is the ordering
 // everywhere.
 
@@ -38,7 +38,7 @@ func evalUser() Principal {
 func TestEvaluateActAs_NilTargetDenies(t *testing.T) {
 	checker := NewFakeCallerPermissionChecker().AllowTarget(evalTargetEmail)
 
-	got, err := EvaluateActAs(context.Background(), checker, evalUser(), nil)
+	got, err := evaluateActAs(context.Background(), checker, evalUser(), nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -54,7 +54,7 @@ func TestEvaluateActAs_NilTargetDenies(t *testing.T) {
 // TestEvaluateActAs_DisabledCheckerAllows: absence denies, explicit-off allows.
 // If these two ever agree, the distinction the design rests on is gone.
 func TestEvaluateActAs_NilCheckerDenies(t *testing.T) {
-	got, err := EvaluateActAs(context.Background(), nil, evalUser(), evalTarget())
+	got, err := evaluateActAs(context.Background(), nil, evalUser(), evalTarget())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -67,7 +67,7 @@ func TestEvaluateActAs_NilCheckerDenies(t *testing.T) {
 }
 
 func TestEvaluateActAs_DisabledCheckerAllows(t *testing.T) {
-	got, err := EvaluateActAs(context.Background(), NewDisabledCallerPermissionChecker(),
+	got, err := evaluateActAs(context.Background(), NewDisabledCallerPermissionChecker(),
 		evalUser(), evalTarget())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -86,7 +86,7 @@ func TestEvaluateActAs_DisabledCheckerAllows(t *testing.T) {
 func TestEvaluateActAs_NilCheckerDeniesEvenForSameAccount(t *testing.T) {
 	sameSA := Principal{Kind: PrincipalAgent, ID: "agent-1", ServiceAccountEmail: evalTargetEmail}
 
-	got, _ := EvaluateActAs(context.Background(), nil, sameSA, evalTarget())
+	got, _ := evaluateActAs(context.Background(), nil, sameSA, evalTarget())
 	if got.Outcome != ActAsDenied {
 		t.Errorf("an unwired checker must deny even on the same-account path; got %s", got.Outcome)
 	}
@@ -100,7 +100,7 @@ func TestEvaluateActAs_SameAccountAllowsWithoutRoundTrip(t *testing.T) {
 	checker := NewFakeCallerPermissionChecker().DenyTarget(evalTargetEmail, "should not be consulted")
 	sameSA := Principal{Kind: PrincipalAgent, ID: "agent-1", ServiceAccountEmail: evalTargetEmail}
 
-	got, _ := EvaluateActAs(context.Background(), checker, sameSA, evalTarget())
+	got, _ := evaluateActAs(context.Background(), checker, sameSA, evalTarget())
 	if got.Outcome != ActAsAllowed {
 		t.Errorf("a caller already acting as the target escalates nothing; got %s", got.Outcome)
 	}
@@ -120,7 +120,7 @@ func TestEvaluateActAs_SameAccountIsCaseInsensitive(t *testing.T) {
 		ServiceAccountEmail: strings.ToUpper(evalTargetEmail),
 	}
 
-	got, _ := EvaluateActAs(context.Background(), checker, sameSA, evalTarget())
+	got, _ := evaluateActAs(context.Background(), checker, sameSA, evalTarget())
 	if got.Outcome != ActAsAllowed {
 		t.Errorf("a case difference is not a different service account; got %s", got.Outcome)
 	}
@@ -134,7 +134,7 @@ func TestEvaluateActAs_EmptyEmailsDoNotMatch(t *testing.T) {
 	blockMode := Principal{Kind: PrincipalAgent, ID: "agent-1"} // no SA email
 	malformed := &GCPServiceAccount{ID: "sa-bad", Email: ""}    // no email
 
-	got, _ := EvaluateActAs(context.Background(), checker, blockMode, malformed)
+	got, _ := evaluateActAs(context.Background(), checker, blockMode, malformed)
 	if got.Outcome == ActAsAllowed {
 		t.Fatal("empty-equals-empty must not be treated as same-account propagation")
 	}
@@ -147,7 +147,7 @@ func TestEvaluateActAs_NoCallerIdentityDeniesWithoutRoundTrip(t *testing.T) {
 	checker := NewFakeCallerPermissionChecker().AllowTarget(evalTargetEmail)
 	blockMode := Principal{Kind: PrincipalAgent, ID: "agent-1"}
 
-	got, _ := EvaluateActAs(context.Background(), checker, blockMode, evalTarget())
+	got, _ := evaluateActAs(context.Background(), checker, blockMode, evalTarget())
 	if got.Outcome != ActAsDenied {
 		t.Errorf("a caller with no GCP identity must be denied; got %s", got.Outcome)
 	}
@@ -163,7 +163,7 @@ func TestEvaluateActAs_NoCallerIdentityDeniesWithoutRoundTrip(t *testing.T) {
 func TestEvaluateActAs_ZeroPrincipalDenies(t *testing.T) {
 	checker := NewFakeCallerPermissionChecker().AllowTarget(evalTargetEmail)
 
-	got, _ := EvaluateActAs(context.Background(), checker, Principal{}, evalTarget())
+	got, _ := evaluateActAs(context.Background(), checker, Principal{}, evalTarget())
 	if got.Outcome != ActAsDenied {
 		t.Errorf("the zero Principal is PrincipalUnknown and must be denied; got %s", got.Outcome)
 	}
@@ -172,7 +172,7 @@ func TestEvaluateActAs_ZeroPrincipalDenies(t *testing.T) {
 func TestEvaluateActAs_DelegatesToChecker(t *testing.T) {
 	t.Run("allow", func(t *testing.T) {
 		checker := NewFakeCallerPermissionChecker().AllowTarget(evalTargetEmail)
-		got, err := EvaluateActAs(context.Background(), checker, evalUser(), evalTarget())
+		got, err := evaluateActAs(context.Background(), checker, evalUser(), evalTarget())
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -186,7 +186,7 @@ func TestEvaluateActAs_DelegatesToChecker(t *testing.T) {
 
 	t.Run("deny", func(t *testing.T) {
 		checker := NewFakeCallerPermissionChecker().DenyTarget(evalTargetEmail, "no grant")
-		got, _ := EvaluateActAs(context.Background(), checker, evalUser(), evalTarget())
+		got, _ := evaluateActAs(context.Background(), checker, evalUser(), evalTarget())
 		if got.Outcome != ActAsDenied {
 			t.Errorf("expected the checker's denial to be returned; got %s", got.Outcome)
 		}
@@ -194,7 +194,7 @@ func TestEvaluateActAs_DelegatesToChecker(t *testing.T) {
 
 	t.Run("indeterminate is not an allow", func(t *testing.T) {
 		checker := NewFakeCallerPermissionChecker().IndeterminateTarget(evalTargetEmail, "UNKNOWN_INFO")
-		got, _ := EvaluateActAs(context.Background(), checker, evalUser(), evalTarget())
+		got, _ := evaluateActAs(context.Background(), checker, evalUser(), evalTarget())
 		if got.Allowed() {
 			t.Error("indeterminate must not read as permission")
 		}
@@ -203,12 +203,12 @@ func TestEvaluateActAs_DelegatesToChecker(t *testing.T) {
 
 // ⚠️ A checker returning (Allowed, err) is malformed, and this is the one place
 // that can stop that becoming an allow. The contract says error carries no
-// verdict; EvaluateActAs enforces it rather than trusting it.
+// verdict; evaluateActAs enforces it rather than trusting it.
 func TestEvaluateActAs_ErrorForcesIndeterminateEvenIfCheckerSaidAllowed(t *testing.T) {
 	boom := errors.New("IAM API timeout")
 	checker := &malformedChecker{result: ActAsResult{Outcome: ActAsAllowed, Mechanism: "bogus"}, err: boom}
 
-	got, err := EvaluateActAs(context.Background(), checker, evalUser(), evalTarget())
+	got, err := evaluateActAs(context.Background(), checker, evalUser(), evalTarget())
 	if !errors.Is(err, boom) {
 		t.Errorf("the error must be returned for diagnostics; got %v", err)
 	}
@@ -236,7 +236,7 @@ func TestEvaluateActAs_ErrorReplacesMechanismAndReason(t *testing.T) {
 		err: errors.New("IAM API timeout"),
 	}
 
-	got, _ := EvaluateActAs(context.Background(), checker, evalUser(), evalTarget())
+	got, _ := evaluateActAs(context.Background(), checker, evalUser(), evalTarget())
 
 	if got.Mechanism != MechanismCheckFailed {
 		t.Errorf("expected mechanism %q, got %q", MechanismCheckFailed, got.Mechanism)
@@ -260,7 +260,7 @@ func TestEvaluateActAs_ErrorTextDoesNotLeakIntoReason(t *testing.T) {
 		err:    errors.New("rpc error: policy binding user:secret@example.com role roles/owner"),
 	}
 
-	got, _ := EvaluateActAs(context.Background(), checker, evalUser(), evalTarget())
+	got, _ := evaluateActAs(context.Background(), checker, evalUser(), evalTarget())
 	if strings.Contains(got.Reason, "secret@example.com") {
 		t.Errorf("raw error text must not be folded into the caller-visible reason; got: %q", got.Reason)
 	}
@@ -272,7 +272,7 @@ func TestEvaluateActAs_ErrorTextDoesNotLeakIntoReason(t *testing.T) {
 func TestEvaluateActAs_AllowWithoutMechanismIsNotHonoured(t *testing.T) {
 	checker := &malformedChecker{result: ActAsResult{Outcome: ActAsAllowed}} // no mechanism
 
-	got, _ := EvaluateActAs(context.Background(), checker, evalUser(), evalTarget())
+	got, _ := evaluateActAs(context.Background(), checker, evalUser(), evalTarget())
 	if got.Allowed() {
 		t.Fatal("an allow that names no check must not be honoured")
 	}
@@ -287,7 +287,7 @@ func TestEvaluateActAs_AllowWithoutMechanismIsNotHonoured(t *testing.T) {
 func TestEvaluateActAs_DenialWithoutMechanismIsNamed(t *testing.T) {
 	checker := &malformedChecker{result: ActAsResult{Outcome: ActAsDenied}} // no mechanism
 
-	got, _ := EvaluateActAs(context.Background(), checker, evalUser(), evalTarget())
+	got, _ := evaluateActAs(context.Background(), checker, evalUser(), evalTarget())
 	if got.Outcome != ActAsDenied {
 		t.Errorf("a denial must remain a denial; got %s", got.Outcome)
 	}
@@ -304,7 +304,7 @@ func TestEvaluateActAs_MechanismIsNeverEmpty(t *testing.T) {
 		{Outcome: ActAsIndeterminate},
 	}
 	for _, c := range cases {
-		got, _ := EvaluateActAs(context.Background(), &malformedChecker{result: c}, evalUser(), evalTarget())
+		got, _ := evaluateActAs(context.Background(), &malformedChecker{result: c}, evalUser(), evalTarget())
 		if got.Mechanism == "" {
 			t.Errorf("mechanism must never be empty; outcome %s produced a blank", c.Outcome)
 		}
@@ -312,7 +312,7 @@ func TestEvaluateActAs_MechanismIsNeverEmpty(t *testing.T) {
 }
 
 // malformedChecker returns whatever it is told to, including combinations the
-// CallerPermissionChecker contract forbids, so that EvaluateActAs's defences
+// CallerPermissionChecker contract forbids, so that evaluateActAs's defences
 // against a non-conforming implementation can be exercised.
 type malformedChecker struct {
 	result ActAsResult

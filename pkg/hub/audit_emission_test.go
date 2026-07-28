@@ -21,6 +21,8 @@ import (
 	"log/slog"
 	"strings"
 	"testing"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 // These tests assert on EMITTED OUTPUT, not on struct fields.
@@ -355,5 +357,233 @@ func TestBrokerAuthEvent_FailedAdminActionIsWarn(t *testing.T) {
 	}
 	if rec["level"] != "WARN" {
 		t.Errorf("level: got %v, want WARN", rec["level"])
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Item A: SA assignment records (design §7)
+// ---------------------------------------------------------------------------
+
+const saAuditMsg = "SA assignment audit event"
+
+// saDecisionEvent builds a decision record with everything populated, so each
+// test can vary one thing.
+func saDecisionEvent(outcome store.ActAsOutcome) *store.SAAssignmentEvent {
+	return &store.SAAssignmentEvent{
+		Type:          store.SAAssignmentDecision,
+		Surface:       "agent-create",
+		Caller:        store.Principal{Kind: store.PrincipalUser, ID: "u-1", Email: "dev@example.com"},
+		TargetSAID:    "sa-1",
+		TargetSAEmail: "worker@p.iam.gserviceaccount.com",
+		Permission:    store.PermissionActAs,
+		Mechanism:     store.MechanismCheckDisabled,
+		Decision:      &outcome,
+		Reason:        "checking is switched off",
+	}
+}
+
+// TestSAAssignment_AllowIsEmitted. An audit trail that records only refusals
+// cannot answer "who was given this account", which is the question asked after
+// an incident.
+func TestSAAssignment_AllowIsEmitted(t *testing.T) {
+	buf := captureAuditLogs(t)
+	_ = NewLogAuditLogger("[Test]", false).
+		RecordSAAssignment(context.Background(), saDecisionEvent(store.ActAsAllowed))
+
+	rec := auditRecordWithMsg(t, buf, saAuditMsg)
+	if rec == nil {
+		t.Fatal("no SA assignment record was emitted on the allow path")
+	}
+	for field, want := range map[string]any{
+		"level":                "INFO",
+		"event_type":           "sa_assignment_decision",
+		"surface":              "agent-create",
+		"caller_kind":          "user",
+		"caller_id":            "u-1",
+		"caller_gcp_principal": "user:dev@example.com",
+		"target_sa_id":         "sa-1",
+		"target_sa_email":      "worker@p.iam.gserviceaccount.com",
+		"permission":           store.PermissionActAs,
+		"mechanism":            store.MechanismCheckDisabled,
+		"decision":             "allowed",
+	} {
+		if rec[field] != want {
+			t.Errorf("%s: got %v, want %v", field, rec[field], want)
+		}
+	}
+}
+
+// TestSAAssignment_MechanismSurvivesTheAllowPath is the reason the allow record
+// is worth emitting at all while the gate is inert. "Allowed because IAM said
+// so" and "allowed because nobody asked" are the same outcome and completely
+// different facts, and the mechanism is the only place that difference is
+// recorded. Without it, the current toggle-off records would be
+// indistinguishable from enforced approvals.
+func TestSAAssignment_MechanismSurvivesTheAllowPath(t *testing.T) {
+	buf := captureAuditLogs(t)
+	_ = NewLogAuditLogger("[Test]", false).
+		RecordSAAssignment(context.Background(), saDecisionEvent(store.ActAsAllowed))
+
+	rec := auditRecordWithMsg(t, buf, saAuditMsg)
+	if rec == nil {
+		t.Fatal("no record emitted")
+	}
+	if rec["mechanism"] != store.MechanismCheckDisabled {
+		t.Errorf("mechanism: got %v, want %q", rec["mechanism"], store.MechanismCheckDisabled)
+	}
+}
+
+// TestSAAssignment_DenialIsWarn — a denial is the record an operator goes
+// looking for, and it must not be filed at the same level as routine traffic.
+func TestSAAssignment_DenialIsWarn(t *testing.T) {
+	for _, outcome := range []store.ActAsOutcome{store.ActAsDenied, store.ActAsIndeterminate} {
+		t.Run(outcome.String(), func(t *testing.T) {
+			buf := captureAuditLogs(t)
+			_ = NewLogAuditLogger("[Test]", false).
+				RecordSAAssignment(context.Background(), saDecisionEvent(outcome))
+
+			rec := auditRecordWithMsg(t, buf, saAuditMsg)
+			if rec == nil {
+				t.Fatal("no record emitted on the deny path")
+			}
+			if rec["level"] != "WARN" {
+				t.Errorf("level: got %v, want WARN", rec["level"])
+			}
+			if rec["decision"] != outcome.String() {
+				t.Errorf("decision: got %v, want %q", rec["decision"], outcome.String())
+			}
+		})
+	}
+}
+
+// TestSAAssignment_CacheHitIsAbsentFromTheWireWhenNil is the ruled behaviour,
+// and it is asserted against the RAW BYTES rather than the parsed map because
+// the two failures being excluded look different on the wire and identical
+// after parsing: `"cache_hit":null` and `"cache_hit":false` both arrive at a
+// lenient consumer as false, which fabricates a cache miss — i.e. asserts a
+// live IAM call that never happened. The key must simply not be there.
+func TestSAAssignment_CacheHitIsAbsentFromTheWireWhenNil(t *testing.T) {
+	buf := captureAuditLogs(t)
+	event := saDecisionEvent(store.ActAsAllowed)
+	if event.CacheHit != nil {
+		t.Fatal("fixture is wrong: CacheHit must start nil")
+	}
+	_ = NewLogAuditLogger("[Test]", false).RecordSAAssignment(context.Background(), event)
+
+	if strings.Contains(buf.String(), "cache_hit") {
+		t.Errorf("cache_hit appears on the wire when no cache was consulted: %s", buf.String())
+	}
+	rec := auditRecordWithMsg(t, buf, saAuditMsg)
+	if rec == nil {
+		t.Fatal("no record emitted")
+	}
+	if _, present := rec["cache_hit"]; present {
+		t.Error("cache_hit key is present; nil must be omitted, not serialised")
+	}
+}
+
+// TestSAAssignment_CacheHitIsEmittedWhenConsulted is the other half, and
+// without it the previous test would also pass on an implementation that never
+// emitted the field at all. False in particular must survive: a genuine cache
+// MISS is a real observation and is exactly what nil is not.
+func TestSAAssignment_CacheHitIsEmittedWhenConsulted(t *testing.T) {
+	for _, hit := range []bool{true, false} {
+		t.Run(map[bool]string{true: "hit", false: "miss"}[hit], func(t *testing.T) {
+			buf := captureAuditLogs(t)
+			event := saDecisionEvent(store.ActAsAllowed)
+			event.CacheHit = &hit
+			_ = NewLogAuditLogger("[Test]", false).RecordSAAssignment(context.Background(), event)
+
+			rec := auditRecordWithMsg(t, buf, saAuditMsg)
+			if rec == nil {
+				t.Fatal("no record emitted")
+			}
+			got, present := rec["cache_hit"]
+			if !present {
+				t.Fatal("cache_hit missing although a cache was consulted")
+			}
+			if got != hit {
+				t.Errorf("cache_hit: got %v, want %v", got, hit)
+			}
+		})
+	}
+}
+
+// TestSAAssignment_BindingRecordCarriesNoVerdict. A project-default binding
+// decided nothing, so the record must not appear to contain a verdict. See
+// store.SAAssignmentEvent.Decision for why every available ActAsOutcome value
+// would be a lie here — and why the one that would be picked by default,
+// Indeterminate, denies.
+func TestSAAssignment_BindingRecordCarriesNoVerdict(t *testing.T) {
+	buf := captureAuditLogs(t)
+	_ = NewLogAuditLogger("[Test]", false).RecordSAAssignment(context.Background(),
+		&store.SAAssignmentEvent{
+			Type:          store.SAAssignmentBinding,
+			Surface:       "project-default",
+			Caller:        store.Principal{Kind: store.PrincipalUser, ID: "u-1", Email: "dev@example.com"},
+			TargetSAID:    "sa-1",
+			TargetSAEmail: "worker@p.iam.gserviceaccount.com",
+			Mechanism:     store.MechanismProjectDefault,
+			Reason:        "the project's default service account",
+		})
+
+	body := buf.String()
+	if strings.Contains(body, `"decision"`) {
+		t.Errorf("a binding record carries a decision: %s", body)
+	}
+	if strings.Contains(body, `"permission"`) {
+		t.Errorf("a binding record names a permission that was never checked: %s", body)
+	}
+
+	rec := auditRecordWithMsg(t, buf, saAuditMsg)
+	if rec == nil {
+		t.Fatal("no binding record emitted; a binding that produces no record is " +
+			"indistinguishable from no binding")
+	}
+	if rec["level"] != "INFO" {
+		t.Errorf("level: got %v, want INFO — nothing was refused", rec["level"])
+	}
+	if rec["event_type"] != "sa_binding" {
+		t.Errorf("event_type: got %v, want sa_binding", rec["event_type"])
+	}
+	// The mechanism has to say WHY there is no gate. "ungated" would read as a
+	// gap and invite someone to close it; this says there is nothing to close.
+	if rec["mechanism"] != store.MechanismProjectDefault {
+		t.Errorf("mechanism: got %v, want %q", rec["mechanism"], store.MechanismProjectDefault)
+	}
+}
+
+// TestSAAssignment_CallerWithoutGCPIdentityOmitsThePrincipal — a block-mode
+// agent has no IAM principal, and emitting an empty one would suggest the
+// lookup failed rather than that there is nothing to look up.
+func TestSAAssignment_CallerWithoutGCPIdentityOmitsThePrincipal(t *testing.T) {
+	buf := captureAuditLogs(t)
+	event := saDecisionEvent(store.ActAsDenied)
+	event.Caller = store.Principal{Kind: store.PrincipalAgent, ID: "agent-1"}
+	event.Mechanism = store.MechanismNoCallerIdentity
+	_ = NewLogAuditLogger("[Test]", false).RecordSAAssignment(context.Background(), event)
+
+	rec := auditRecordWithMsg(t, buf, saAuditMsg)
+	if rec == nil {
+		t.Fatal("no record emitted")
+	}
+	if _, present := rec["caller_gcp_principal"]; present {
+		t.Errorf("caller_gcp_principal present for a caller that has none: %v", rec["caller_gcp_principal"])
+	}
+	// The caller is still identified. "Some agent was refused" is not a record.
+	if rec["caller_id"] != "agent-1" || rec["caller_kind"] != "agent" {
+		t.Errorf("caller not identified: kind=%v id=%v", rec["caller_kind"], rec["caller_id"])
+	}
+}
+
+// TestSAAssignment_NilEventDoesNotPanic — these emits sit on the agent-creation
+// path. An audit change must never be able to take it down.
+func TestSAAssignment_NilEventDoesNotPanic(t *testing.T) {
+	if err := NewLogAuditLogger("[Test]", false).RecordSAAssignment(context.Background(), nil); err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+	var nilLogger *LogAuditLogger
+	if err := nilLogger.RecordSAAssignment(context.Background(), saDecisionEvent(store.ActAsAllowed)); err != nil {
+		t.Errorf("unexpected error from nil receiver: %v", err)
 	}
 }

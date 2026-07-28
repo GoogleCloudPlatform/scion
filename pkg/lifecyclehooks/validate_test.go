@@ -108,6 +108,22 @@ func uncheckedActAs() store.CallerPermissionChecker {
 	return store.NewDisabledCallerPermissionChecker()
 }
 
+// discardAudit is the audit sink for tests whose subject is not the audit
+// record. It accepts and drops.
+//
+// ⚠️ Deliberately NOT nil. A nil sink is a distinct, meaningful state — it
+// warns that a decision went unrecorded — and using it as the default here
+// would make every structural-validation test exercise the misconfiguration
+// path and bury the warning in noise until it meant nothing. Tests that care
+// about the nil-sink behaviour pass nil explicitly.
+type discardAudit struct{}
+
+func (discardAudit) RecordSAAssignment(_ context.Context, _ *store.SAAssignmentEvent) error {
+	return nil
+}
+
+func noAudit() store.SAAssignmentAuditSink { return discardAudit{} }
+
 // validHTTPHook returns a minimal valid http hook for test setup.
 func validHTTPHook() *store.LifecycleHook {
 	return &store.LifecycleHook{
@@ -150,7 +166,7 @@ func TestValidateHook_Triggers(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			h := validHTTPHook()
 			h.Trigger = tc.trigger
-			err := ValidateHook(context.Background(), h, defaultResolver(), defaultCaller(), uncheckedActAs())
+			err := ValidateHook(context.Background(), h, defaultResolver(), defaultCaller(), uncheckedActAs(), noAudit())
 			if tc.wantErr && err == nil {
 				t.Errorf("expected validation error for trigger %q, got nil", tc.trigger)
 			}
@@ -183,7 +199,7 @@ func TestValidateHook_ScopeType(t *testing.T) {
 			h := validHTTPHook()
 			h.ScopeType = tc.scopeType
 			h.ScopeID = tc.scopeID
-			err := ValidateHook(context.Background(), h, defaultResolver(), defaultCaller(), uncheckedActAs())
+			err := ValidateHook(context.Background(), h, defaultResolver(), defaultCaller(), uncheckedActAs(), noAudit())
 			if tc.wantErr && err == nil {
 				t.Errorf("expected validation error for scopeType=%q scopeID=%q, got nil", tc.scopeType, tc.scopeID)
 			}
@@ -219,7 +235,7 @@ func TestValidateHook_ActionTypes(t *testing.T) {
 				h.Action.Method = "POST"
 				h.ExecutionIdentity = "" // webhook doesn't require it
 			}
-			err := ValidateHook(context.Background(), h, defaultResolver(), defaultCaller(), uncheckedActAs())
+			err := ValidateHook(context.Background(), h, defaultResolver(), defaultCaller(), uncheckedActAs(), noAudit())
 			if tc.wantErr && err == nil {
 				t.Errorf("expected validation error for type %q, got nil", tc.aType)
 			}
@@ -256,7 +272,7 @@ func TestValidateHook_HTTPMethods(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			h := validHTTPHook()
 			h.Action.Method = tc.method
-			err := ValidateHook(context.Background(), h, defaultResolver(), defaultCaller(), uncheckedActAs())
+			err := ValidateHook(context.Background(), h, defaultResolver(), defaultCaller(), uncheckedActAs(), noAudit())
 			if tc.wantErr && err == nil {
 				t.Errorf("expected validation error for method %q, got nil", tc.method)
 			}
@@ -443,7 +459,7 @@ func TestValidateHook_WebhookRules(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			err := ValidateHook(context.Background(), tc.hook, defaultResolver(), defaultCaller(), uncheckedActAs())
+			err := ValidateHook(context.Background(), tc.hook, defaultResolver(), defaultCaller(), uncheckedActAs(), noAudit())
 			if tc.wantErr {
 				if err == nil {
 					t.Fatalf("expected error containing %q, got nil", tc.errMsg)
@@ -483,7 +499,7 @@ func TestValidateHook_URLValidation(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			h := validHTTPHook()
 			h.Action.URL = tc.url
-			err := ValidateHook(context.Background(), h, defaultResolver(), defaultCaller(), uncheckedActAs())
+			err := ValidateHook(context.Background(), h, defaultResolver(), defaultCaller(), uncheckedActAs(), noAudit())
 			if tc.wantErr && err == nil {
 				t.Errorf("expected validation error for URL %q, got nil", tc.url)
 			}
@@ -517,7 +533,7 @@ func TestValidateHook_Timeout(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			h := validHTTPHook()
 			h.Action.TimeoutSeconds = tc.timeout
-			err := ValidateHook(context.Background(), h, defaultResolver(), defaultCaller(), uncheckedActAs())
+			err := ValidateHook(context.Background(), h, defaultResolver(), defaultCaller(), uncheckedActAs(), noAudit())
 			if tc.wantErr && err == nil {
 				t.Errorf("expected validation error for timeout %d, got nil", tc.timeout)
 			}
@@ -611,7 +627,7 @@ func TestValidateHook_ExecutionIdentity(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			err := ValidateHook(context.Background(), tc.hook, defaultResolver(), defaultCaller(), uncheckedActAs())
+			err := ValidateHook(context.Background(), tc.hook, defaultResolver(), defaultCaller(), uncheckedActAs(), noAudit())
 			if tc.wantErr {
 				if err == nil {
 					t.Fatalf("expected error containing %q, got nil", tc.errMsg)
@@ -667,7 +683,7 @@ func TestValidateHook_HeaderNameInjection(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			h := validHTTPHook()
 			h.Action.Headers = tc.headers
-			err := ValidateHook(context.Background(), h, defaultResolver(), defaultCaller(), uncheckedActAs())
+			err := ValidateHook(context.Background(), h, defaultResolver(), defaultCaller(), uncheckedActAs(), noAudit())
 			if tc.wantErr && err == nil {
 				t.Error("expected validation error for header name injection, got nil")
 			}
@@ -699,7 +715,7 @@ func TestValidateHook_OnError(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			h := validHTTPHook()
 			h.Action.OnError = tc.onError
-			err := ValidateHook(context.Background(), h, defaultResolver(), defaultCaller(), uncheckedActAs())
+			err := ValidateHook(context.Background(), h, defaultResolver(), defaultCaller(), uncheckedActAs(), noAudit())
 			if tc.wantErr && err == nil {
 				t.Errorf("expected validation error for onError %q, got nil", tc.onError)
 			}
@@ -715,7 +731,7 @@ func TestValidateHook_OnErrorDefaultsToLog(t *testing.T) {
 	h := validHTTPHook()
 	h.Action.OnError = ""
 
-	err := ValidateHook(context.Background(), h, defaultResolver(), defaultCaller(), uncheckedActAs())
+	err := ValidateHook(context.Background(), h, defaultResolver(), defaultCaller(), uncheckedActAs(), noAudit())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -734,7 +750,7 @@ func TestValidateHook_NilAction(t *testing.T) {
 		ScopeType: "hub",
 		Action:    nil,
 	}
-	err := ValidateHook(context.Background(), h, defaultResolver(), defaultCaller(), uncheckedActAs())
+	err := ValidateHook(context.Background(), h, defaultResolver(), defaultCaller(), uncheckedActAs(), noAudit())
 	if err == nil {
 		t.Fatal("expected error for nil action, got nil")
 	}
@@ -806,7 +822,7 @@ func TestValidateHook_HTTPActionRequiresHTTPS(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			err := ValidateHook(context.Background(), tc.hook, defaultResolver(), defaultCaller(), uncheckedActAs())
+			err := ValidateHook(context.Background(), tc.hook, defaultResolver(), defaultCaller(), uncheckedActAs(), noAudit())
 			if tc.wantErr {
 				if err == nil {
 					t.Fatalf("expected error containing %q, got nil", tc.errMsg)

@@ -23,11 +23,33 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
-// SurfaceAgentAssign names the agent service-account assignment surface in
-// audit records and in the startup warning. Surfaces are named individually
-// rather than collectively because the same disabled checker degrades to
-// different things in different places — see NewDisabledCallerPermissionChecker.
+// SurfaceAgentAssign names the agent service-account assignment surface as a
+// family, for the startup warning and for wiring. Surfaces are named
+// individually rather than collectively because the same disabled checker
+// degrades to different things in different places — see
+// NewDisabledCallerPermissionChecker.
 const SurfaceAgentAssign = "agent-assign"
+
+// The individual call sites within that family. Audit records name these
+// rather than SurfaceAgentAssign, because "an SA was assigned at agent
+// creation" and "an SA was swapped onto an existing agent" are different
+// events with different blast radii, and a record that cannot tell them apart
+// cannot answer the question anyone actually asks of it (design §7).
+//
+// The gate logic is identical for both; only the label differs.
+const (
+	// SurfaceAgentCreate is assignment during agent creation.
+	SurfaceAgentCreate = "agent-create"
+
+	// SurfaceAgentPatch is assignment onto an already-existing agent.
+	SurfaceAgentPatch = "agent-patch"
+
+	// SurfaceProjectDefault is an SA bound from project settings rather than
+	// supplied by the caller. ⚠️ This surface produces BINDING records, never
+	// decision records: nothing is authorized there, by ruling (P4 item F). See
+	// store.MechanismProjectDefault.
+	SurfaceProjectDefault = "project-default"
+)
 
 // saAssignCheckMode values. The mode gates the GCP layer only; the Hub policy
 // layer is not switchable.
@@ -224,13 +246,16 @@ func (s *Server) hookIdentityCheckerFor() store.CallerPermissionChecker {
 //     should be reported rather than explained away by §8.2 — that ruling is
 //     about hub-scoped accounts and plain hub members, and nothing else.
 //
+// surface names the call site for the audit record — SurfaceAgentCreate or
+// SurfaceAgentPatch. It affects labelling only, never the decision.
+//
 // Returns true if the assignment may proceed. On false it has already written
 // the response and the caller must return immediately.
-func (s *Server) authorizeSAAssignment(w http.ResponseWriter, r *http.Request, sa *store.GCPServiceAccount) bool {
+func (s *Server) authorizeSAAssignment(w http.ResponseWriter, r *http.Request, sa *store.GCPServiceAccount, surface string) bool {
 	if sa == nil {
 		// Caller bug rather than a policy outcome; deny rather than panic.
 		slog.Error("service-account assignment denied: nil service account",
-			"surface", SurfaceAgentAssign)
+			"surface", surface)
 		writeForbidden(w, "")
 		return false
 	}
@@ -260,14 +285,24 @@ func (s *Server) authorizeSAAssignment(w http.ResponseWriter, r *http.Request, s
 	// and logged, not how it is reached. Do not reintroduce any of those steps
 	// here; two copies of this ordering is the thing EvaluateActAs exists to
 	// prevent.
-	result, err := store.EvaluateActAs(ctx, s.saAssignCheckerFor(), principal, sa)
+	//
+	// EvaluateActAs also emits the §7 audit record, on allow and deny alike.
+	// That is why it takes the sink: the record is not this surface's to
+	// remember, and a surface that forgot it would be indistinguishable from
+	// one where nothing happened.
+	result, err := store.EvaluateActAs(ctx, store.ActAsGate{
+		Checker: s.saAssignCheckerFor(),
+		Caller:  principal,
+		Surface: surface,
+		Audit:   s.GetAuditLogger(),
+	}, sa)
 	if err != nil {
 		// Per the interface contract an error is a transport or programming
 		// failure and carries no verdict; EvaluateActAs has already forced the
 		// outcome to Indeterminate, which denies below. Logged apart from the
 		// outcome so a transport failure is not read as an IAM denial.
 		slog.Warn("service-account assignment: caller-permission check failed",
-			"surface", SurfaceAgentAssign, "caller", principal.ID,
+			"surface", surface, "caller", principal.ID,
 			"targetSA", sa.Email, "error", err.Error())
 	}
 
@@ -277,7 +312,7 @@ func (s *Server) authorizeSAAssignment(w http.ResponseWriter, r *http.Request, s
 		logAuthzDenial(r, identity, resource, ActionAssign,
 			"actAs "+result.Outcome.String()+" ("+result.Mechanism+"): "+result.Reason)
 		slog.Warn("service-account assignment denied",
-			"surface", SurfaceAgentAssign, "callerKind", principal.Kind.String(),
+			"surface", surface, "callerKind", principal.Kind.String(),
 			"caller", principal.ID, "targetSA", sa.Email,
 			"outcome", result.Outcome.String(), "mechanism", result.Mechanism,
 			"reason", result.Reason)
@@ -315,7 +350,7 @@ func (s *Server) authorizeSAAssignment(w http.ResponseWriter, r *http.Request, s
 	// same outcome and different facts. Only one of them is a control having
 	// been applied, and the audit record is where that difference survives.
 	slog.Info("service-account assignment allowed",
-		"surface", SurfaceAgentAssign, "callerKind", principal.Kind.String(),
+		"surface", surface, "callerKind", principal.Kind.String(),
 		"caller", principal.ID, "targetSA", sa.Email,
 		"mechanism", result.Mechanism)
 	return true
