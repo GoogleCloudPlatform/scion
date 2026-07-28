@@ -20,6 +20,9 @@ import (
 	"encoding/json"
 	"net/http"
 	"testing"
+	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
@@ -448,13 +451,35 @@ func TestApplyProjectDefaults_ResourcesMerge(t *testing.T) {
 	})
 }
 
+// newSettingsTestSA builds a project-scoped, verified SA belonging to project.
+func newSettingsTestSA(t *testing.T, s store.Store, projectID, idName string) *store.GCPServiceAccount {
+	t.Helper()
+	sa := &store.GCPServiceAccount{
+		ID:                 tid(idName + t.Name()),
+		Scope:              store.ScopeProject,
+		ScopeID:            projectID,
+		Email:              idName + "@proj.iam.gserviceaccount.com",
+		ProjectID:          "gcp-proj",
+		Verified:           true,
+		VerifiedAt:         time.Now(),
+		VerificationStatus: store.GCPVerificationVerified,
+		CreatedAt:          time.Now(),
+	}
+	require.NoError(t, s.CreateGCPServiceAccount(t.Context(), sa))
+	return sa
+}
+
+// This test previously PUT "sa-123" — an ID that did not exist — and asserted
+// 200, which pinned the unvalidated write as correct behaviour. It now uses a
+// real verified SA; the rejection cases live in the tests below.
 func TestProjectSettings_DefaultGCPIdentity(t *testing.T) {
 	srv, s := testServer(t)
 	project := createTestProjectForSettings(t, s)
+	sa := newSettingsTestSA(t, s, project.ID, "sa-default")
 
 	putBody := hubclient.ProjectSettings{
 		DefaultGCPIdentityMode:             "assign",
-		DefaultGCPIdentityServiceAccountID: "sa-123",
+		DefaultGCPIdentityServiceAccountID: sa.ID,
 	}
 
 	rec := doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+project.ID+"/settings", putBody)
@@ -463,7 +488,7 @@ func TestProjectSettings_DefaultGCPIdentity(t *testing.T) {
 	var putResp hubclient.ProjectSettings
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&putResp))
 	assert.Equal(t, "assign", putResp.DefaultGCPIdentityMode)
-	assert.Equal(t, "sa-123", putResp.DefaultGCPIdentityServiceAccountID)
+	assert.Equal(t, sa.ID, putResp.DefaultGCPIdentityServiceAccountID)
 
 	// GET should return persisted values
 	rec = doRequest(t, srv, http.MethodGet, "/api/v1/projects/"+project.ID+"/settings", nil)
@@ -472,7 +497,7 @@ func TestProjectSettings_DefaultGCPIdentity(t *testing.T) {
 	var getResp hubclient.ProjectSettings
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&getResp))
 	assert.Equal(t, "assign", getResp.DefaultGCPIdentityMode)
-	assert.Equal(t, "sa-123", getResp.DefaultGCPIdentityServiceAccountID)
+	assert.Equal(t, sa.ID, getResp.DefaultGCPIdentityServiceAccountID)
 }
 
 func TestProjectSettings_ClearDefaultGCPIdentity(t *testing.T) {
@@ -496,6 +521,216 @@ func TestProjectSettings_ClearDefaultGCPIdentity(t *testing.T) {
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
 	assert.Empty(t, resp.DefaultGCPIdentityMode)
 	assert.Empty(t, resp.DefaultGCPIdentityServiceAccountID)
+}
+
+// The tests below cover #22: the settings PUT used to store
+// DefaultGCPIdentityServiceAccountID unvalidated and return 200, after which
+// createAgentInProject silently fell back to metadataMode=block. Each case is a
+// value that would have been accepted before and produced that silent failure.
+
+func TestProjectSettings_DefaultGCPIdentity_RejectsUnknownSA(t *testing.T) {
+	srv, s := testServer(t)
+	project := createTestProjectForSettings(t, s)
+
+	rec := doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+project.ID+"/settings",
+		hubclient.ProjectSettings{DefaultGCPIdentityServiceAccountID: "no-such-sa"})
+	require.Equal(t, http.StatusBadRequest, rec.Code,
+		"a default pointing at a nonexistent SA must be refused at write time; got: %s", rec.Body.String())
+
+	// The bad value must not have been persisted.
+	rec = doRequest(t, srv, http.MethodGet, "/api/v1/projects/"+project.ID+"/settings", nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var got hubclient.ProjectSettings
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&got))
+	assert.Empty(t, got.DefaultGCPIdentityServiceAccountID)
+}
+
+// Not-found and not-reachable must be indistinguishable, or the PUT becomes an
+// existence oracle: a project owner could enumerate other projects' SA IDs by
+// watching which ones fail differently.
+func TestProjectSettings_DefaultGCPIdentity_OtherProjectSAIsNotAnOracle(t *testing.T) {
+	srv, s := testServer(t)
+	project := createTestProjectForSettings(t, s)
+
+	other := &store.Project{
+		ID:         tid("other-project-" + t.Name()),
+		Name:       "Other Project",
+		Slug:       "other-project",
+		Visibility: "private",
+	}
+	require.NoError(t, s.CreateProject(t.Context(), other))
+	otherSA := newSettingsTestSA(t, s, other.ID, "sa-elsewhere")
+
+	recOther := doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+project.ID+"/settings",
+		hubclient.ProjectSettings{DefaultGCPIdentityServiceAccountID: otherSA.ID})
+	require.Equal(t, http.StatusBadRequest, recOther.Code,
+		"another project's SA must not be settable as this project's default; got: %s", recOther.Body.String())
+
+	recUnknown := doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+project.ID+"/settings",
+		hubclient.ProjectSettings{DefaultGCPIdentityServiceAccountID: "no-such-sa"})
+	require.Equal(t, http.StatusBadRequest, recUnknown.Code)
+
+	assert.Equal(t, recUnknown.Body.String(), recOther.Body.String(),
+		"an SA that exists elsewhere and one that does not exist must be indistinguishable to the caller")
+}
+
+func TestProjectSettings_DefaultGCPIdentity_RejectsUnverifiedSA(t *testing.T) {
+	srv, s := testServer(t)
+	project := createTestProjectForSettings(t, s)
+
+	sa := &store.GCPServiceAccount{
+		ID:        tid("sa-unverified-" + t.Name()),
+		Scope:     store.ScopeProject,
+		ScopeID:   project.ID,
+		Email:     "unverified@proj.iam.gserviceaccount.com",
+		ProjectID: "gcp-proj",
+		Verified:  false,
+		CreatedAt: time.Now(),
+	}
+	require.NoError(t, s.CreateGCPServiceAccount(t.Context(), sa))
+
+	rec := doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+project.ID+"/settings",
+		hubclient.ProjectSettings{DefaultGCPIdentityServiceAccountID: sa.ID})
+	require.Equal(t, http.StatusBadRequest, rec.Code,
+		"consumption requires sa.Verified, so the write must too; got: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "not verified",
+		"this SA is already readable by the caller, so naming the reason discloses nothing")
+}
+
+// mode=assign with no SA is the same defect in different clothes: the
+// consumption path falls straight through to block.
+func TestProjectSettings_DefaultGCPIdentity_RejectsAssignModeWithoutSA(t *testing.T) {
+	srv, s := testServer(t)
+	project := createTestProjectForSettings(t, s)
+
+	rec := doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+project.ID+"/settings",
+		hubclient.ProjectSettings{DefaultGCPIdentityMode: "assign"})
+	require.Equal(t, http.StatusBadRequest, rec.Code,
+		"mode=assign with no service account saves a setting that does nothing; got: %s", rec.Body.String())
+}
+
+// Clearing must always be permitted: it is the operator's only escape from a
+// value that has since gone bad (SA deleted or un-verified after being set).
+func TestProjectSettings_DefaultGCPIdentity_ClearingAlwaysAllowed(t *testing.T) {
+	srv, s := testServer(t)
+	project := createTestProjectForSettings(t, s)
+	sa := newSettingsTestSA(t, s, project.ID, "sa-to-clear")
+
+	rec := doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+project.ID+"/settings",
+		hubclient.ProjectSettings{DefaultGCPIdentityMode: "assign", DefaultGCPIdentityServiceAccountID: sa.ID})
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	rec = doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+project.ID+"/settings",
+		hubclient.ProjectSettings{})
+	require.Equal(t, http.StatusOK, rec.Code, "clearing must never be blocked; got: %s", rec.Body.String())
+
+	var got hubclient.ProjectSettings
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&got))
+	assert.Empty(t, got.DefaultGCPIdentityServiceAccountID)
+}
+
+// TestProjectSettings_HubScopedDefaultAcceptedButNotYetConsumed pins a
+// DISAGREEMENT between two sites, not a setting.
+//
+// The validator added for #22 does its scope check by calling
+// gcpSAReachableFromProject, which admits hub-scoped SAs — correct under Q5
+// option A, where a hub-scoped SA is legitimately pickable in any project. The
+// consumption site at handlers_agents_core.go:655 still uses bare
+// `sa.ScopeID == projectID`, which rejects them and falls through to block.
+//
+// So today: the PUT says 200 and agent creation silently blocks. Both halves are
+// asserted below and both hold, so this test is green now.
+//
+// WHEN STEP 4 OF THE GOAL 2 LANDING SEQUENCE CONVERTS :655 TO THE HELPER, HALF B
+// FLIPS TO "assign" AND THIS TEST GOES RED. That is intended. It is how whoever
+// does step 4 finds out that #22's validator was coupled to their change. Update
+// half B to expect assign at that point — do not weaken half A, the validator is
+// the correct side of the disagreement.
+func TestProjectSettings_HubScopedDefaultAcceptedButNotYetConsumed(t *testing.T) {
+	disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
+	srv, s, project := setupCreateAgentServer(t, disp)
+
+	hubSA := &store.GCPServiceAccount{
+		ID:                 tid("sa-hub-default-" + t.Name()),
+		Scope:              store.ScopeHub,
+		ScopeID:            "hub-instance-1",
+		Email:              "hub-default@hub.iam.gserviceaccount.com",
+		ProjectID:          "hub-gcp-project",
+		Verified:           true,
+		VerifiedAt:         time.Now(),
+		VerificationStatus: store.GCPVerificationVerified,
+		CreatedAt:          time.Now(),
+	}
+	require.NoError(t, s.CreateGCPServiceAccount(t.Context(), hubSA))
+
+	// Half A — the validator admits it.
+	rec := doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+project.ID+"/settings",
+		hubclient.ProjectSettings{
+			DefaultGCPIdentityMode:             store.GCPMetadataModeAssign,
+			DefaultGCPIdentityServiceAccountID: hubSA.ID,
+		})
+	require.Equal(t, http.StatusOK, rec.Code,
+		"a hub-scoped SA is pickable in any project under Q5 option A; got: %s", rec.Body.String())
+
+	// Guard against a vacuous pass: half B would also see "block" if the setting
+	// had simply not persisted, which would make this test green for the wrong
+	// reason and useless as a tripwire.
+	rec = doRequest(t, srv, http.MethodGet, "/api/v1/projects/"+project.ID+"/settings", nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var saved hubclient.ProjectSettings
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&saved))
+	require.Equal(t, hubSA.ID, saved.DefaultGCPIdentityServiceAccountID,
+		"the hub-scoped default must actually be stored for half B to mean anything")
+	require.Equal(t, store.GCPMetadataModeAssign, saved.DefaultGCPIdentityMode)
+
+	// Half B — consumption does not honour it yet.
+	rec = doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
+		Name:      "hub-default-agent",
+		ProjectID: project.ID,
+		Task:      "do something",
+	})
+	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+
+	var resp CreateAgentResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.NotNil(t, resp.Agent.AppliedConfig.GCPIdentity)
+	assert.Equal(t, store.GCPMetadataModeBlock, resp.Agent.AppliedConfig.GCPIdentity.MetadataMode,
+		"if this is now 'assign', :655 has been converted — see this test's doc comment before changing it")
+}
+
+// TestGCPServiceAccount_HubScopedCreateStillRejected is a DELIBERATE TRIPWIRE for
+// the ordering of the Goal 2 landing sequence. It asserts that a feature does not
+// exist yet, which is why it explains itself at length.
+//
+// The sequence is strict:
+//
+//	step 3 — relocate gcpSAReachableFromProject to pkg/store
+//	step 4 — convert the three assign sites to it:
+//	         handlers_agents_core.go:472 (create), :655 (project default),
+//	         :1669 (PATCH)
+//	step 5 — item A, POST scope=hub
+//
+// Item A is the trap commit: small, additive, and it reads as independent of
+// everything above it, so it is the one most likely to land early. If it lands
+// before step 4, hub-scoped SAs become creatable while all three assign sites
+// still reject them — listable, fetchable, verifiable, and silently unusable.
+//
+// The paired test above catches step 4 landing. Nothing caught item A landing
+// first, which is the order we actually fear. This does.
+//
+// DELETING THIS TEST IS PART OF ITEM A, and must not be done until steps 3 and 4
+// are green.
+func TestGCPServiceAccount_HubScopedCreateStillRejected(t *testing.T) {
+	srv, _ := testServer(t)
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/gcp-service-accounts?scope=hub",
+		map[string]string{"email": "new-hub-sa@hub.iam.gserviceaccount.com"})
+
+	require.Equal(t, http.StatusBadRequest, rec.Code,
+		"hub-scoped SA creation is held at item A, step 5 of 5; if this now succeeds, "+
+			"confirm steps 3 and 4 landed first and then delete this test: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "not enabled",
+		"the refusal must stay explicit — a 404 here would read as a missing route")
 }
 
 func TestApplyProjectDefaults_GCPIdentityNotApplied(t *testing.T) {
