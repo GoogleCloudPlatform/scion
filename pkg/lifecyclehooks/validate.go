@@ -22,6 +22,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
@@ -109,15 +110,59 @@ type GCPServiceAccountResolver interface {
 	GetGCPServiceAccount(ctx context.Context, id string) (*store.GCPServiceAccount, error)
 }
 
+// SurfaceHookExecutionIdentity names this surface in audit records and in the
+// startup warning that accompanies a disabled checker.
+//
+// ⚠️ IT DEGRADES DIFFERENTLY FROM THE AGENT-ASSIGN SURFACE, which is why the
+// two are named separately rather than covered by one message about "the IAM
+// check". Agent assignment also has a Hub policy layer (ActionAssign), so a
+// disabled checker there leaves it POLICY-GATED. Here there is no second layer:
+// setting execution_identity is gated by the caller's ability to write the hook
+// and by the scope and verification checks below, none of which asks whether
+// the caller may act as the account. With the checker disabled this surface is
+// UNGATED with respect to actAs.
+const SurfaceHookExecutionIdentity = "hook-execution-identity"
+
 // ValidateHook validates a LifecycleHook for correctness before persist or
 // update. It checks structural well-formedness, trigger/action validity,
-// execution-identity resolution, and the untrusted-variable guard for the
-// action template.
+// execution-identity resolution, the caller's permission to act as that
+// identity, and the untrusted-variable guard for the action template.
 //
 // saResolver may be nil only when execution_identity is empty (webhook with
 // no identity). If saResolver is nil and execution_identity is non-empty,
 // a validation error is returned.
-func ValidateHook(ctx context.Context, hook *store.LifecycleHook, saResolver GCPServiceAccountResolver) error {
+//
+// caller and actAs are REQUIRED, and are positional parameters rather than
+// optional fields on purpose: adding them to a struct or defaulting them would
+// let a new call site acquire the ungated behaviour by omission. Every caller
+// is forced by the compiler to say who is asking and what should check them.
+// A nil actAs denies (store.MechanismCheckUnwired); switching the check off is
+// done by passing store.NewDisabledCallerPermissionChecker, which is a value
+// somebody has to construct.
+//
+// ⚠️ THIS AUTHORIZATION IS WRITE-TIME ONLY, AND THAT IS A RESIDUAL RISK, NOT A
+// DESIGN GOAL. The permission is evaluated when a hook is created or updated
+// and never again. The executor resolves the identity and mints a token
+// (lifecycle_hook_executor.go resolveIdentityAndToken) without re-checking
+// either this permission or sa.Verified. Two consequences follow, and neither
+// is fixed here:
+//
+//   - Enabling the check later is NOT a kill switch. Hooks written while it was
+//     off keep executing with their existing identities, because nothing
+//     re-evaluates them. The toggle governs new writes only.
+//   - Revoking a caller's actAs grant in IAM does not stop hooks they already
+//     wrote.
+//
+// Closing this requires an execution-time check in the executor and is tracked
+// separately. Do not read the presence of this gate as meaning a running hook's
+// identity has been authorized recently.
+func ValidateHook(
+	ctx context.Context,
+	hook *store.LifecycleHook,
+	saResolver GCPServiceAccountResolver,
+	caller store.Principal,
+	actAs store.CallerPermissionChecker,
+) error {
 	var errs []FieldError
 
 	// Default an empty scope to hub (matching the store default) BEFORE the
@@ -163,7 +208,7 @@ func ValidateHook(ctx context.Context, hook *store.LifecycleHook, saResolver GCP
 
 	// --- execution_identity ---
 	if hook.Action != nil {
-		errs = append(errs, validateExecutionIdentity(ctx, hook, saResolver)...)
+		errs = append(errs, validateExecutionIdentity(ctx, hook, saResolver, caller, actAs)...)
 	}
 
 	// --- untrusted-variable guard (static, create/update time) ---
@@ -375,8 +420,20 @@ func isTokenChar(c byte) bool {
 }
 
 // validateExecutionIdentity checks that execution_identity references a valid,
-// verified GCP service account within the hook's scope.
-func validateExecutionIdentity(ctx context.Context, hook *store.LifecycleHook, resolver GCPServiceAccountResolver) []FieldError {
+// verified GCP service account within the hook's scope, and that the caller is
+// permitted to act as it.
+//
+// The scope and verification checks answer "is this account USABLE here". The
+// actAs check answers "may THIS CALLER use it". They are independent questions
+// and both must pass — an account can be perfectly in-scope and verified and
+// still be one the caller has no business running as.
+func validateExecutionIdentity(
+	ctx context.Context,
+	hook *store.LifecycleHook,
+	resolver GCPServiceAccountResolver,
+	caller store.Principal,
+	actAs store.CallerPermissionChecker,
+) []FieldError {
 	if hook.ExecutionIdentity == "" {
 		// Webhook actions allow empty execution_identity.
 		if hook.Action != nil && hook.Action.Type == store.LifecycleHookActionWebhook {
@@ -436,6 +493,48 @@ func validateExecutionIdentity(ctx context.Context, hook *store.LifecycleHook, r
 				Message: fmt.Sprintf("project-scoped hook requires a service account in the same project; SA %q has scope %s/%s", sa.Email, sa.Scope, sa.ScopeID),
 			})
 		}
+	}
+
+	// --- caller permission (actAs) ---
+	//
+	// Runs regardless of whether the checks above produced errors, and
+	// deliberately so: if it ran only on an otherwise-clean hook, the
+	// permission verdict would depend on unrelated validation state, and a
+	// caller could learn which accounts exist by watching this check appear and
+	// disappear. Validation collects field errors rather than short-circuiting,
+	// so reporting both "not verified" and "not permitted" is the normal shape.
+	//
+	// The decision sequence is store.EvaluateActAs, shared with the agent
+	// service-account assignment surface in pkg/hub. This surface chooses only
+	// how to report the result. Do not reimplement the ordering here.
+	result, err := store.EvaluateActAs(ctx, actAs, caller, sa)
+	if err != nil {
+		// Diagnostic only; EvaluateActAs has already forced the outcome to
+		// indeterminate, which fails the check below.
+		slog.Warn("lifecycle hook execution identity: caller-permission check failed",
+			"surface", SurfaceHookExecutionIdentity, "hook", hook.ID,
+			"caller", caller.ID, "targetSA", sa.Email, "error", err.Error())
+	}
+	if result.Outcome != store.ActAsAllowed {
+		slog.Warn("lifecycle hook execution identity denied",
+			"surface", SurfaceHookExecutionIdentity, "hook", hook.ID,
+			"callerKind", caller.Kind.String(), "caller", caller.ID,
+			"targetSA", sa.Email, "outcome", result.Outcome.String(),
+			"mechanism", result.Mechanism, "reason", result.Reason)
+		errs = append(errs, FieldError{
+			Field: "executionIdentity",
+			Message: fmt.Sprintf(
+				"you don't have permission to run hooks as service account %q (%s is required): %s",
+				sa.Email, store.PermissionActAs, result.Reason),
+		})
+	} else {
+		// Recorded on the allow path too: "allowed because IAM said so" and
+		// "allowed because nobody asked" are the same outcome and different
+		// facts, and only the audit record preserves the difference.
+		slog.Info("lifecycle hook execution identity allowed",
+			"surface", SurfaceHookExecutionIdentity, "hook", hook.ID,
+			"callerKind", caller.Kind.String(), "caller", caller.ID,
+			"targetSA", sa.Email, "mechanism", result.Mechanism)
 	}
 
 	return errs

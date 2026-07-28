@@ -158,8 +158,18 @@ func (s *Server) createLifecycleHook(w http.ResponseWriter, r *http.Request, use
 	}
 
 	// Validate using the M2 validation library.
+	//
+	// A caller we cannot establish is refused rather than passed through as a
+	// zero Principal. The zero value would fail closed inside the gate anyway,
+	// but relying on that would make the denial look like a permission result
+	// rather than the identity failure it is.
+	caller, err := s.callerPrincipal(r.Context())
+	if err != nil {
+		writeForbidden(w, "You don't have permission to set a hook execution identity")
+		return
+	}
 	resolver := &storeGCPServiceAccountResolver{store: s.store}
-	if err := lifecyclehooks.ValidateHook(r.Context(), hook, resolver); err != nil {
+	if err := lifecyclehooks.ValidateHook(r.Context(), hook, resolver, caller, s.hookIdentityCheckerFor()); err != nil {
 		if ve, ok := err.(*lifecyclehooks.ValidationError); ok {
 			writeLifecycleHookValidationError(w, ve)
 			return
@@ -275,8 +285,17 @@ func (s *Server) updateLifecycleHook(w http.ResponseWriter, r *http.Request, id 
 	existing.Enabled = req.Enabled
 
 	// Validate the updated hook.
+	//
+	// The update path needs this at least as much as create: ExecutionIdentity
+	// is mutable above, so editing an existing hook is the cheaper route to
+	// running as an account you could not have been given at create time.
+	caller, err := s.callerPrincipal(r.Context())
+	if err != nil {
+		writeForbidden(w, "You don't have permission to set a hook execution identity")
+		return
+	}
 	resolver := &storeGCPServiceAccountResolver{store: s.store}
-	if err := lifecyclehooks.ValidateHook(r.Context(), existing, resolver); err != nil {
+	if err := lifecyclehooks.ValidateHook(r.Context(), existing, resolver, caller, s.hookIdentityCheckerFor()); err != nil {
 		if ve, ok := err.(*lifecyclehooks.ValidationError); ok {
 			writeLifecycleHookValidationError(w, ve)
 			return

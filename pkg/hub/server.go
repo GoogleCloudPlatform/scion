@@ -45,6 +45,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/githubapp"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/imagecheck"
+	"github.com/GoogleCloudPlatform/scion/pkg/lifecyclehooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/dbmetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/dispatchmetrics"
@@ -736,6 +737,16 @@ type Server struct {
 	saAssignChecker   store.CallerPermissionChecker
 	saAssignCheckMode string
 
+	// The same pair for the lifecycle-hook execution-identity surface. A
+	// SEPARATE field rather than a shared one, deliberately: the two surfaces
+	// degrade differently when the check is off (agent assign falls back to
+	// policy-gated, hook identity falls back to ungated), so an operator must
+	// be able to reason about — and eventually enable — them independently.
+	// Sharing one field would make that impossible and would hide the
+	// difference behind a single innocuous-looking setting.
+	hookIdentityChecker   store.CallerPermissionChecker
+	hookIdentityCheckMode string
+
 	// GCP token rate limiter (nil = no rate limiting)
 	gcpTokenRateLimiter *GCPTokenRateLimiter
 
@@ -1153,6 +1164,20 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 			"assignment is gated by Hub policy only, and no caller is checked for "+
 			store.PermissionActAs+" on the target account",
 			"surface", SurfaceAgentAssign, "mode", srv.saAssignCheckMode)
+	}
+
+	// Same wiring for the lifecycle-hook execution-identity surface, installed
+	// separately because it degrades to something strictly worse. See the
+	// field comment and SurfaceHookExecutionIdentity.
+	srv.hookIdentityCheckMode = SAAssignCheckOff
+	srv.hookIdentityChecker = store.NewDisabledCallerPermissionChecker()
+	if srv.hookIdentityCheckMode == SAAssignCheckOff {
+		slog.Warn("GCP caller-permission checking is OFF for lifecycle-hook execution identity: "+
+			"any caller who may write a hook may run it as any in-scope verified service account, "+
+			"and no caller is checked for "+store.PermissionActAs+" on it. Unlike agent "+
+			"service-account assignment, this surface has NO second policy layer to fall back on",
+			"surface", lifecyclehooks.SurfaceHookExecutionIdentity,
+			"mode", srv.hookIdentityCheckMode)
 	}
 
 	// Seed default policies and groups (idempotent)

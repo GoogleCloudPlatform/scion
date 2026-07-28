@@ -19,7 +19,6 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
-	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -153,6 +152,31 @@ func (s *Server) saAssignCheckerFor() store.CallerPermissionChecker {
 	return s.saAssignChecker
 }
 
+// hookIdentityCheckerFor resolves the caller-permission checker for one
+// lifecycle-hook validation. Same three cases and same reasoning as
+// saAssignCheckerFor — read that first — against this surface's own mode and
+// checker fields.
+//
+// Kept as a separate function rather than a shared one parameterised by
+// surface: the two are one short function each, and the cost of the duplication
+// is far lower than the cost of a future change to "the checker resolver"
+// silently altering a surface whose degraded state is worse. The decision that
+// must not be duplicated is the actAs ordering, and that lives in
+// store.EvaluateActAs.
+func (s *Server) hookIdentityCheckerFor() store.CallerPermissionChecker {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if s.hookIdentityCheckMode == SAAssignCheckOff {
+		return s.hookIdentityChecker
+	}
+	if s.gcpTokenGenerator == nil {
+		return store.NewUnavailableCallerPermissionChecker(
+			"caller-permission checking is enforced but this Hub has no GCP token generator configured")
+	}
+	return s.hookIdentityChecker
+}
+
 // authorizeSAAssignment gates assigning a GCP service account to an agent.
 //
 // TWO INDEPENDENT LAYERS, BOTH REQUIRED, NEITHER SUBSUMING THE OTHER:
@@ -226,51 +250,19 @@ func (s *Server) authorizeSAAssignment(w http.ResponseWriter, r *http.Request, s
 		return false
 	}
 
-	// Same-service-account propagation: a caller assigning the account it
-	// already holds grants nothing it does not already have, so there is no
-	// privilege to escalate and no reason to ask GCP. This is what lets an
-	// agent create a child that inherits its identity on a hub where the
-	// caller's own actAs grant is not itself introspectable.
-	//
-	// Both sides must be non-empty. sa.Email is never empty in practice, but an
-	// empty-equals-empty match here would turn every block-mode agent into a
-	// permitted assigner of a malformed account.
-	if principal.Kind == store.PrincipalAgent &&
-		principal.ServiceAccountEmail != "" && sa.Email != "" &&
-		strings.EqualFold(principal.ServiceAccountEmail, sa.Email) {
-		slog.Debug("service-account assignment allowed: same-account propagation",
-			"surface", SurfaceAgentAssign, "caller", principal.ID, "targetSA", sa.Email)
-		return true
-	}
-
-	// A caller with no GCP identity cannot hold actAs on anything. Covers
-	// block-mode and passthrough-mode agents. This is a denial rather than an
-	// error: there is nothing to check, and nothing to check means no.
-	if !principal.HasGCPIdentity() {
-		logAuthzDenial(r, identity, resource, ActionAssign,
-			"caller has no GCP identity of its own")
-		writeForbidden(w, "Your identity cannot be granted permission to use this GCP service account")
-		return false
-	}
-
-	// A nil checker is a wiring bug, never a configuration. "Disabled" is an
-	// explicit object; see NewDisabledCallerPermissionChecker. Failing closed
-	// here is what stops a future surface from switching the control off by
-	// forgetting to wire it.
-	checker := s.saAssignCheckerFor()
-	if checker == nil {
-		slog.Error("service-account assignment denied: no caller-permission checker wired",
-			"surface", SurfaceAgentAssign, "targetSA", sa.Email)
-		writeForbidden(w, "GCP permission checking is not configured on this Hub")
-		return false
-	}
-
-	result, err := checker.CanActAs(ctx, principal, sa)
+	// The decision sequence — same-account propagation, no-GCP-identity denial,
+	// unwired-checker denial, then the checker itself — lives in
+	// store.EvaluateActAs and is shared with the lifecycle-hook
+	// execution-identity surface. This surface owns how the result is REPORTED
+	// and logged, not how it is reached. Do not reintroduce any of those steps
+	// here; two copies of this ordering is the thing EvaluateActAs exists to
+	// prevent.
+	result, err := store.EvaluateActAs(ctx, s.saAssignCheckerFor(), principal, sa)
 	if err != nil {
 		// Per the interface contract an error is a transport or programming
-		// failure and carries no verdict. The verdict is in result.Outcome,
-		// whose zero value is Indeterminate, which denies below. Logged apart
-		// from the outcome so a transport failure is not read as an IAM denial.
+		// failure and carries no verdict; EvaluateActAs has already forced the
+		// outcome to Indeterminate, which denies below. Logged apart from the
+		// outcome so a transport failure is not read as an IAM denial.
 		slog.Warn("service-account assignment: caller-permission check failed",
 			"surface", SurfaceAgentAssign, "caller", principal.ID,
 			"targetSA", sa.Email, "error", err.Error())
@@ -286,8 +278,23 @@ func (s *Server) authorizeSAAssignment(w http.ResponseWriter, r *http.Request, s
 			"caller", principal.ID, "targetSA", sa.Email,
 			"outcome", result.Outcome.String(), "mechanism", result.Mechanism,
 			"reason", result.Reason)
-		writeForbidden(w, "You don't have permission to use this GCP service account ("+
-			store.PermissionActAs+" is required on "+sa.Email+")")
+
+		// The 403 body varies by mechanism because the remedies are different
+		// and none of them is guessable from "denied": a missing actAs grant is
+		// fixed in IAM, a caller with no GCP identity is fixed by giving the
+		// agent one, and an unwired checker is fixed by an operator and not by
+		// the caller at all. Mechanism is not secret — it names which check
+		// ran, never what any policy contains.
+		switch result.Mechanism {
+		case store.MechanismNoCallerIdentity:
+			writeForbidden(w, "Your identity cannot be granted permission to use this GCP service account")
+		case store.MechanismCheckUnwired, store.MechanismCheckUnavailable:
+			writeForbidden(w, "GCP permission checking is not available on this Hub; "+
+				"service-account assignment is refused until it is configured")
+		default:
+			writeForbidden(w, "You don't have permission to use this GCP service account ("+
+				store.PermissionActAs+" is required on "+sa.Email+")")
+		}
 		return false
 	}
 
