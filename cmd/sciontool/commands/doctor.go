@@ -357,12 +357,29 @@ func checkAuthentication(hubURL string, failures *int, transportSrc transportaut
 }
 
 func checkGCPMetadata(failures *int) {
-	mode := os.Getenv("SCION_METADATA_MODE")
-	if mode == "" {
+	// os.LookupEnv, not os.Getenv: "nobody configured a metadata mode" and "a
+	// mode is configured but unusable" are different conditions, and only the
+	// first is a reason to skip the check silently. This mirrors ConfigFromEnv,
+	// which resolves the same three cases the same way.
+	rawMode, present := os.LookupEnv("SCION_METADATA_MODE")
+	if !present {
 		return
 	}
 
 	fmt.Println("\n--- GCP Metadata ---")
+
+	// Passthrough runs no metadata server on purpose, so probing for one and
+	// reporting it unreachable would fail a correctly configured agent.
+	if rawMode == "passthrough" {
+		fmt.Println("[ OK ] Mode: passthrough — no metadata server expected")
+		return
+	}
+
+	mode := rawMode
+	if mode == "" {
+		fmt.Println("[WARN] SCION_METADATA_MODE is set but empty — the sidecar falls back to block mode")
+		mode = "block"
+	}
 
 	port := 18380
 	if p := os.Getenv("SCION_METADATA_PORT"); p != "" {
