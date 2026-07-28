@@ -163,6 +163,41 @@ func (s *ExternalStore) GetGCPServiceAccount(ctx context.Context, id string) (*s
 }
 
 // UpdateGCPServiceAccount updates a GCP service account record.
+//
+// THE INVARIANT, WHICH IS WHAT TO TEST FOR AND WHAT SURVIVES A REWRITE OF THIS
+// FUNCTION: no request may change which principal owns a service account, or
+// which scope it lives in. CreatedBy, Scope and ScopeID are AUTHORIZATION
+// INPUTS, not record data, and this function is a write path reachable from
+// ordinary handlers. Created is immutable for the ordinary reason.
+//
+// FOUR FIELDS ARE ABSENT FROM THE BUILDER BELOW ON PURPOSE: CreatedBy, Scope,
+// ScopeID, Created. Their absence is the only thing enforcing the invariant.
+// There is no validation, no schema immutability and no test that fails if you
+// add them -- so if you are here to add a setter, this comment is the entire
+// control, and you have just reached it.
+//
+// WHY THOSE THREE ARE AUTHORIZATION INPUTS, in this repo, today:
+//   - CreatedBy feeds Resource.OwnerID for a service account. The owner bypass
+//     in checkAccessForUser returns Allowed on an OwnerID match before any
+//     membership or policy is consulted. Writable CreatedBy is therefore a
+//     writable authorization bypass.
+//   - Scope selects which arm of gcpServiceAccountVerdict runs, and the user
+//     arm is a bare CreatedBy equality with no admin bypass.
+//   - ScopeID is the project an account is confined to, and is what
+//     ReachableFromProject compares.
+//
+// THE NATURAL REPAIR IS THE VIOLATION, which is why this is written as a
+// warning and not a note. The obvious tidy-up is to make Update symmetric with
+// Create. That reads as consistency work, it produces a small diff, and one of
+// its lines would make the owner bypass writable through any handler that
+// round-trips an account through Update -- including the verify path, so no new
+// route is needed. This exact edit shape has already been performed on this
+// function pair: 45c2a1c0 changed Create and Update together to make them
+// match. It was correct. The next one may not be.
+//
+// If a caller genuinely needs to move an account between scopes or owners, that
+// is a separate, separately authorized operation with its own name. It is not
+// a field added here.
 func (s *ExternalStore) UpdateGCPServiceAccount(ctx context.Context, sa *store.GCPServiceAccount) error {
 	id, err := parseUUID(sa.ID)
 	if err != nil {
