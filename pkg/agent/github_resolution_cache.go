@@ -27,12 +27,13 @@ import (
 
 const (
 	// DefaultResolutionCacheTTL is how long a cached resolution result is
-	// considered fresh. GitHub content can change, so this is a balance
-	// between freshness and avoiding rate limits.
+	// considered fresh for branch/tag refs. GitHub content can change, so
+	// this is a balance between freshness and avoiding rate limits.
 	DefaultResolutionCacheTTL = 30 * time.Minute
 
-	// DefaultSHAResolutionCacheTTL is the TTL for SHA-pinned skill refs.
-	// Full SHA refs are immutable, so they can be cached for much longer.
+	// DefaultSHAResolutionCacheTTL is how long a cached resolution result
+	// for a full commit SHA is considered fresh. SHAs are immutable, so we
+	// cache them for much longer to avoid redundant API calls.
 	DefaultSHAResolutionCacheTTL = 24 * time.Hour
 
 	resolutionCacheFileName = "github-resolution-cache.json"

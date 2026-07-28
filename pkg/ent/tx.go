@@ -30,6 +30,8 @@ type Tx struct {
 	EnvVar *EnvVarClient
 	// GCPServiceAccount is the client for interacting with the GCPServiceAccount builders.
 	GCPServiceAccount *GCPServiceAccountClient
+	// GitHubResolutionCache is the client for interacting with the GitHubResolutionCache builders.
+	GitHubResolutionCache *GitHubResolutionCacheClient
 	// GithubInstallation is the client for interacting with the GithubInstallation builders.
 	GithubInstallation *GithubInstallationClient
 	// Group is the client for interacting with the Group builders.
@@ -234,6 +236,7 @@ func (tx *Tx) init() {
 	tx.BrokerSecret = NewBrokerSecretClient(tx.config)
 	tx.EnvVar = NewEnvVarClient(tx.config)
 	tx.GCPServiceAccount = NewGCPServiceAccountClient(tx.config)
+	tx.GitHubResolutionCache = NewGitHubResolutionCacheClient(tx.config)
 	tx.GithubInstallation = NewGithubInstallationClient(tx.config)
 	tx.Group = NewGroupClient(tx.config)
 	tx.GroupMembership = NewGroupMembershipClient(tx.config)

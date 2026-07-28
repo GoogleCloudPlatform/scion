@@ -33,6 +33,9 @@ type EnvVar func(*sql.Selector)
 // GCPServiceAccount is the predicate function for gcpserviceaccount builders.
 type GCPServiceAccount func(*sql.Selector)
 
+// GitHubResolutionCache is the predicate function for githubresolutioncache builders.
+type GitHubResolutionCache func(*sql.Selector)
+
 // GithubInstallation is the predicate function for githubinstallation builders.
 type GithubInstallation func(*sql.Selector)
 

@@ -24,14 +24,20 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/Masterminds/semver/v3"
 	"golang.org/x/sync/errgroup"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
+)
+
+const (
+	githubAPIBase = "https://api.github.com"
 )
 
 // CreateSkillRequest is the request body for creating a skill.
@@ -1297,6 +1303,19 @@ func (s *Server) handleSkillsResolve(w http.ResponseWriter, r *http.Request) {
 	var resolveErrors []ResolveSkillError
 
 	for _, skillRef := range req.Skills {
+		// GitHub skill resolution: gh:// URIs are handled by the Hub's GitHub resolution cache
+		if strings.HasPrefix(skillRef.URI, "gh://") {
+			ghResolved, err := s.resolveGitHubSkill(ctx, skillRef.URI, req.ProjectID)
+			if err != nil {
+				resolveErrors = append(resolveErrors, ResolveSkillError{
+					URI: skillRef.URI, Code: "resolve_failed", Message: err.Error(),
+				})
+			} else {
+				resolved = append(resolved, *ghResolved)
+			}
+			continue
+		}
+
 		uri, err := api.ParseSkillURI(skillRef.URI)
 		if err != nil {
 			resolveErrors = append(resolveErrors, ResolveSkillError{
@@ -1471,4 +1490,155 @@ func skillResource(s *store.Skill) Resource {
 		r.ParentID = s.ScopeID
 	}
 	return r
+}
+
+// resolveGitHubToken determines the GitHub token scope and mints a token if needed.
+// Returns (installID, token, error).
+// - installID is the GitHub App installation ID (as string) or "public" for unauthenticated.
+// - token is the minted GitHub App token (or empty for public).
+func (s *Server) resolveGitHubToken(ctx context.Context, projectID string) (installID, token string, err error) {
+	if projectID == "" {
+		return "public", "", nil
+	}
+
+	project, err := s.store.GetProject(ctx, projectID)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to get project: %w", err)
+	}
+
+	if project.GitHubInstallationID == nil {
+		return "public", "", nil
+	}
+
+	mintedToken, _, err := s.mintGitHubAppToken(ctx, project)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to mint GitHub App token: %w", err)
+	}
+
+	installID = strconv.FormatInt(*project.GitHubInstallationID, 10)
+	return installID, mintedToken, nil
+}
+
+// resolveGitHubSkill resolves a gh:// skill URI via the Hub's GitHub resolution cache.
+// This method is called by handleSkillsResolve for gh:// URIs. It:
+// 1. Parses the gh:// URI
+// 2. Determines the token scope (GitHub App installation ID or "public")
+// 3. Checks the DB-backed resolution cache
+// 4. On cache miss, calls GitHub API to resolve commit SHA and file list
+// 5. Stores the result in the cache and returns it
+func (s *Server) resolveGitHubSkill(ctx context.Context, rawURI, projectID string) (*ResolvedSkillResponse, error) {
+	// 1. Parse gh:// URI
+	ghRef, err := agent.ParseGitHubSkillURI(rawURI)
+	if err != nil {
+		return nil, fmt.Errorf("invalid gh:// URI: %w", err)
+	}
+
+	// 2. Determine token scope
+	installID, token, err := s.resolveGitHubToken(ctx, projectID)
+	if err != nil {
+		return nil, err
+	}
+
+	// 3. Compute cache key
+	cacheKey := computeCacheKey(ghRef.Owner, ghRef.Repo, ghRef.SkillPath, ghRef.Ref, installID)
+
+	// 4. Check cache
+	if s.ghResolutionStore != nil {
+		entry, hit, err := s.ghResolutionStore.Get(ctx, cacheKey)
+		if err != nil {
+			slog.WarnContext(ctx, "github_resolution_cache: cache lookup failed",
+				"uri", rawURI, "error", err)
+		} else if hit {
+			slog.InfoContext(ctx, "github_resolution_cache: cache hit",
+				"uri", rawURI, "commit_sha", entry.CommitSHA[:12], "cache_hit", true)
+			return buildResolvedSkillResponse(ghRef, entry), nil
+		}
+	}
+
+	// 5. Cache miss: call GitHub API
+	apiBase := githubAPIBase
+	if s.config.GitHubAppConfig.APIBaseURL != "" {
+		apiBase = s.config.GitHubAppConfig.APIBaseURL
+	}
+
+	commitSHA, err := ghResolveCommitSHA(ctx, apiBase, ghRef.Owner, ghRef.Repo, ghRef.Ref, token)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve commit SHA: %w", err)
+	}
+
+	fileEntries, err := ghListContents(ctx, apiBase, ghRef.Owner, ghRef.Repo, ghRef.SkillPath, commitSHA, token)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list contents: %w", err)
+	}
+
+	if len(fileEntries) == 0 {
+		return nil, fmt.Errorf("no files found at %s in %s/%s", ghRef.SkillPath, ghRef.Owner, ghRef.Repo)
+	}
+
+	// 6. Compute bundle hash
+	bundleHash := computeBundleHash(fileEntries)
+
+	// 7. Determine TTL based on ref type
+	var ttl time.Duration
+	if isFullCommitSHA(ghRef.Ref) {
+		ttl = agent.DefaultSHAResolutionCacheTTL
+	} else {
+		ttl = agent.DefaultResolutionCacheTTL
+	}
+
+	// 8. Store in cache
+	entry := GitHubCacheEntry{
+		CommitSHA:   commitSHA,
+		FileEntries: fileEntries,
+		BundleHash:  bundleHash,
+		TokenScope:  installID,
+		ExpiresAt:   time.Now().Add(ttl),
+		OriginalURI: rawURI,
+	}
+
+	if s.ghResolutionStore != nil {
+		if err := s.ghResolutionStore.Put(ctx, cacheKey, entry); err != nil {
+			slog.WarnContext(ctx, "github_resolution_cache: failed to store entry",
+				"uri", rawURI, "error", err)
+		}
+	}
+
+	slog.InfoContext(ctx, "github_resolution_cache: cache miss, resolved via API",
+		"uri", rawURI, "commit_sha", commitSHA[:12], "files", len(fileEntries), "cache_hit", false)
+
+	return buildResolvedSkillResponse(ghRef, &entry), nil
+}
+
+// buildResolvedSkillResponse constructs a ResolvedSkillResponse from a cache entry.
+func buildResolvedSkillResponse(ghRef *agent.GitHubSkillRef, entry *GitHubCacheEntry) *ResolvedSkillResponse {
+	files := make([]DownloadURLInfo, len(entry.FileEntries))
+	for i, f := range entry.FileEntries {
+		files[i] = DownloadURLInfo{
+			Path: f.Path,
+			URL:  f.URL,
+			Size: f.Size,
+			Hash: f.Hash,
+		}
+	}
+
+	return &ResolvedSkillResponse{
+		URI:             ghRef.Raw,
+		Name:            ghRef.SkillName,
+		ResolvedVersion: entry.CommitSHA[:12], // Short SHA for display
+		ContentHash:     entry.BundleHash,
+		Files:           files,
+	}
+}
+
+// computeBundleHash computes the content hash from file entries.
+func computeBundleHash(files []GitHubFileEntry) string {
+	// Convert to transfer.FileInfo for hash computation
+	fileInfos := make([]transfer.FileInfo, len(files))
+	for i, f := range files {
+		fileInfos[i] = transfer.FileInfo{
+			Path: f.Path,
+			Hash: f.Hash,
+		}
+	}
+	return transfer.ComputeContentHash(fileInfos)
 }

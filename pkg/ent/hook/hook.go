@@ -117,6 +117,18 @@ func (f GCPServiceAccountFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.
 	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.GCPServiceAccountMutation", m)
 }
 
+// The GitHubResolutionCacheFunc type is an adapter to allow the use of ordinary
+// function as GitHubResolutionCache mutator.
+type GitHubResolutionCacheFunc func(context.Context, *ent.GitHubResolutionCacheMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f GitHubResolutionCacheFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.GitHubResolutionCacheMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.GitHubResolutionCacheMutation", m)
+}
+
 // The GithubInstallationFunc type is an adapter to allow the use of ordinary
 // function as GithubInstallation mutator.
 type GithubInstallationFunc func(context.Context, *ent.GithubInstallationMutation) (ent.Value, error)
