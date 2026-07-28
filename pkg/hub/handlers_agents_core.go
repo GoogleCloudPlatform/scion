@@ -658,6 +658,19 @@ func (s *Server) createAgentInProject(
 
 		// Authorization: any caller who can see the SA can assign it.
 		// SA management (create/mint/delete) is gated on ActionManage elsewhere.
+		//
+		// Read this before assuming it constrains agents — today it does not.
+		// The ScopeID equality above has already confined the service account to
+		// the caller's own project, and an agent holds read access across its own
+		// project, so for agent callers this call cannot deny anything. It is a
+		// real gate for users: a user with update rights on the agent but no read
+		// access to the service account is refused here.
+		//
+		// It stops being a no-op once hub-scoped service accounts become pickable
+		// in any project, because that turns the ScopeID equality into a
+		// scope-aware check and service accounts outside the caller's project
+		// start reaching this line. The PATCH path carries the same call for the
+		// same reason.
 		if !s.authorizeMsg(w, r, gcpServiceAccountResource(sa), ActionRead,
 			"You don't have permission to assign GCP service accounts in this project") {
 			return
@@ -1984,6 +1997,14 @@ func (s *Server) updateAgent(w http.ResponseWriter, r *http.Request, id string) 
 			}
 			if !sa.Verified {
 				ValidationError(w, "GCP service account is not verified; verify it before assigning to agents", nil)
+				return
+			}
+			// Parity with the create path: any caller who can see the service
+			// account may assign it. See the matching call in
+			// createAgentInProject for why this is narrow today and why it is
+			// nonetheless spelled out at both sites.
+			if !s.authorizeMsg(w, r, gcpServiceAccountResource(sa), ActionRead,
+				"You don't have permission to assign GCP service accounts in this project") {
 				return
 			}
 			agent.AppliedConfig.GCPIdentity = &store.GCPIdentityConfig{

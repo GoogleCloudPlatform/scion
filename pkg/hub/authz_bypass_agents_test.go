@@ -519,6 +519,68 @@ func TestBypassAgents_UpdateAgentServiceAccountChecks(t *testing.T) {
 		assert.Equal(t, sa.ID, got.AppliedConfig.GCPIdentity.ServiceAccountID)
 	})
 
+	t.Run("a user who can update the agent but cannot read the service account is denied", func(t *testing.T) {
+		// The live arm of the PATCH authorization call, and the reason it is
+		// worth having even though it constrains no agent today.
+		//
+		// The caller owns the agent, so ActionUpdate on it is granted by owner
+		// bypass. The service account is in the same project but was created by
+		// someone else, and the caller is neither an admin nor a project
+		// owner/admin, so nothing grants read on it. Update rights on an agent
+		// must not be convertible into the use of a service account the caller
+		// cannot see — which is exactly what create already refuses.
+		f := bypassAgentsSetup(t)
+
+		updater := &store.User{
+			ID:          tid("bypass-updater"),
+			Email:       "updater@example.com",
+			DisplayName: "Agent Updater",
+			Role:        store.UserRoleMember,
+			Status:      "active",
+			Created:     time.Now(),
+		}
+		require.NoError(t, f.store.CreateUser(context.Background(), updater))
+
+		owned := &store.Agent{
+			ID:        uuid.New().String(),
+			Slug:      "bypass-updater-agent",
+			Name:      "bypass-updater-agent",
+			ProjectID: f.proj.ID,
+			Phase:     string(state.PhaseCreated),
+			CreatedBy: updater.ID,
+			OwnerID:   updater.ID,
+		}
+		require.NoError(t, f.store.CreateAgent(context.Background(), owned))
+
+		// Created by the project owner, not by the caller.
+		sa := bypassAgentsCreateSA(t, f, f.proj.ID, true)
+
+		body := map[string]interface{}{
+			"gcp_identity": map[string]interface{}{
+				"metadata_mode":      store.GCPMetadataModeAssign,
+				"service_account_id": sa.ID,
+			},
+		}
+
+		// Precondition: the caller really can update this agent, so the denial
+		// below is attributable to the service account and not to the agent.
+		rec := doRequestAsUser(t, f.srv, updater, http.MethodPatch, "/api/v1/agents/"+owned.ID,
+			map[string]interface{}{"task_summary": "mine to update"})
+		require.Equal(t, http.StatusOK, rec.Code,
+			"precondition: the caller must have update rights on its own agent; got: %s", rec.Body.String())
+
+		rec = doRequestAsUser(t, f.srv, updater, http.MethodPatch, "/api/v1/agents/"+owned.ID, body)
+		assert.Equal(t, http.StatusForbidden, rec.Code,
+			"update rights on an agent must not confer use of an unreadable service account; got: %s",
+			rec.Body.String())
+
+		got, err := f.store.GetAgent(context.Background(), owned.ID)
+		require.NoError(t, err)
+		if got.AppliedConfig != nil {
+			assert.Nil(t, got.AppliedConfig.GCPIdentity)
+		}
+	})
+
 	t.Run("an agent cannot PATCH a service account onto a project peer", func(t *testing.T) {
 		// The authorization half of §4.5: even a well-formed, in-project,
 		// verified assignment must fail for a caller with no update rights.
