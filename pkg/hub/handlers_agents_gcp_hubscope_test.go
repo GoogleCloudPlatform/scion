@@ -363,9 +363,22 @@ func TestAgentCreate_HubScopedProjectDefault_IsApplied(t *testing.T) {
 // The project-default site's confinement, which must also survive: a default
 // naming another project's account still falls through to block.
 //
-// The silence is a separate, separately-filed defect and is not fixed here.
-// The assertion pins the confinement so that fixing the silence later cannot
-// quietly drop it as well.
+// What this test defends against is narrower than its name suggests, so read
+// this before changing it. The silence above is a real and separately-filed
+// defect: an operator whose default is unusable sees "GCP access is
+// mysteriously broken" rather than a rejection. The realistic risk is not that
+// nobody fixes that — it is that it gets fixed by making the assign SUCCEED,
+// because a passing assign is the obvious way to stop the complaint. This
+// assertion is what stands between a usability complaint and a cross-project
+// service account being handed to an agent. Fixing the silence is welcome;
+// fixing it here, by admitting the account, is the bug.
+//
+// (Scale, for whoever sizes that work: the settings PUT is a full replace —
+// setOrDelete deletes on empty, so every write restates the value and the next
+// settings save on a project repairs or re-rejects a bad default. The exposed
+// population is projects nobody re-saves plus defaults that went stale after
+// being set validly, e.g. the account was later deleted or unverified. A slow
+// leak, not a standing breakage.)
 func TestAgentCreate_OtherProjectDefault_StillFallsThroughToBlock(t *testing.T) {
 	f := bypassAgentsSetup(t)
 	sa := bypassAgentsCreateSA(t, f, f.other.ID, true)
