@@ -204,11 +204,21 @@ func TestGCPSA_FlatByID_DisclosureRule_HubIs403_UserIs404(t *testing.T) {
 	// Same caller, same action, both denied by policy -- only the disclosure
 	// answer differs.
 	hubRec := doRequestAsUser(t, srv, owner, http.MethodDelete, flatSAPath+hubSA.ID, nil)
+	userRec := doRequestAsUser(t, srv, owner, http.MethodDelete, flatSAPath+userSA.ID, nil)
+
+	// THE DIVERGENCE IS THE SUBJECT, asserted before either specific code. For
+	// a REASONED refusal the disclosure answer tracks establishability, so these
+	// two must not converge -- in either direction. (Contrast the noIdentity
+	// refusal, where the subject is the SAMENESS: see the #45 tests below. Same
+	// idiom, opposite requirement, and the difference is who is refused.)
+	require.NotEqual(t, hubRec.Code, userRec.Code,
+		"hub-scoped and user-scoped refusals of an IDENTIFIED caller must disclose differently; "+
+			"both gave %d", hubRec.Code)
+
 	require.Equal(t, http.StatusForbidden, hubRec.Code,
 		"hub-scoped: any authenticated caller can already list these, so a 404 would conceal "+
 			"nothing and only make the refusal harder to diagnose; got: %s", hubRec.Body.String())
 
-	userRec := doRequestAsUser(t, srv, owner, http.MethodDelete, flatSAPath+userSA.ID, nil)
 	require.Equal(t, http.StatusNotFound, userRec.Code,
 		"user-scoped: no other surface exposes these, so a 403 would be an existence oracle "+
 			"this route invented; got: %s", userRec.Body.String())
@@ -218,13 +228,23 @@ func TestGCPSA_FlatByID_DisclosureRule_HubIs403_UserIs404(t *testing.T) {
 }
 
 // The verdict/renderer split must not have changed what the NESTED routes
-// answer. The nested caller has already named the project, so a 403 discloses
-// nothing they did not supply themselves, and every nested refusal stays a 403.
+// answer to a REASONED refusal -- an identified caller who was evaluated
+// against a policy and lost. Such a caller has already named the project, so a
+// 403 discloses nothing they did not supply themselves.
 //
 // This is the regression guard on the refactor, not a new requirement. If it
 // fails, the split leaked the flat route's disclosure policy into the nested
 // one -- which would turn existing 403s into 404s and silently change what
 // every current client sees.
+//
+// "REASONED" IS LOAD-BEARING AND WAS ADDED BY #45. Design §8.4 asked for a
+// guard that "the nested routes still render 403", without the qualifier, and
+// this test was written to that sentence. But an identity-less caller is also
+// refused by these routes, and for that caller 403 is an existence-and-scope
+// oracle -- see TestGCPSA_NestedByID_NoIdentity_TheFourRowsAreIndistinguishable
+// below, and §8.5, where sa-arch records the missing qualifier as a spec
+// defect. Both callers below are identified, which is why this test is
+// unaffected by that fix and still means what it meant.
 func TestGCPSA_Nested_StillRenders403AfterVerdictSplit(t *testing.T) {
 	srv, s, owner, member, _, project := setupGCPAuthzTest(t)
 
@@ -469,14 +489,105 @@ func TestGCPSA_FlatByID_NoIdentity_HubAndUserAreIndistinguishable(t *testing.T) 
 	require.Equal(t, http.StatusNotFound, hubRec.Code,
 		"a caller with no identity has established nothing anywhere; got: %s", hubRec.Body.String())
 
-	// The nested route keeps its 403. The disclosure answer differs per route on
-	// purpose: a nested caller supplied the project themselves. Pinned here so
-	// that "make the two renderers agree" is visibly a change in behaviour and
-	// not a tidy-up.
+	// AND THE ROUTES AGREE. This block first pinned the nested route's 403, so
+	// that "make the two renderers agree" would read as a behaviour change --
+	// right instinct, wrong target, and sa-arch filed it as #45: the renderers
+	// SHOULD agree on this arm, so the pin was freezing a defect as if it were
+	// specified. What cannot be made green by reopening the divergence in either
+	// direction is an assertion whose subject is the sameness itself.
 	nested := doRequestWithAgentToken(t, srv, http.MethodGet,
 		"/api/v1/projects/"+project.ID+"/gcp-service-accounts/"+hubSA.ID, nil, agentToken)
-	require.Equal(t, http.StatusForbidden, nested.Code,
-		"the nested renderer answers 403 for an identity-less caller; got: %s", nested.Body.String())
+	require.Equal(t, hubRec.Code, nested.Code,
+		"the two renderers must answer an identity-less caller alike: flat gave %d, nested gave %d (%s)",
+		hubRec.Code, nested.Code, nested.Body.String())
+}
+
+// #45, found by sa-arch. THE NESTED ROUTE WAS THE SAME ORACLE WITH A WIDER
+// SURFACE, and the #42 commit pinned its 403 as intended behaviour.
+//
+// The four rows below are the whole finding. To an identity-less caller naming
+// a project P, the old nested DELETE answered 403 for "project-scoped in P" and
+// for "hub-scoped", 404 for "unreachable" and for "nonexistent". That status
+// separated existence from non-existence; it separated hub scope from project
+// scope, since ReachableFromProject is unconditionally true for hub scope; and
+// iterating P over the projects an agent can name turned the third row into the
+// owning project of any account id.
+//
+// ONE TEST OVER ALL FOUR ROWS, asserting they are indistinguishable from each
+// other, rather than four assertions of 404. Four such assertions can be
+// harmonised one at a time by a future change; the sameness cannot be restored
+// piecemeal once broken.
+func TestGCPSA_NestedByID_NoIdentity_TheFourRowsAreIndistinguishable(t *testing.T) {
+	srv, s, owner, _, _, project := setupGCPAuthzTest(t)
+	ctx := context.Background()
+
+	other := &store.Project{
+		ID:        tid("proj-elsewhere-45"),
+		Name:      "Elsewhere",
+		Slug:      "elsewhere-45",
+		OwnerID:   owner.ID,
+		CreatedBy: owner.ID,
+		Created:   time.Now(),
+		Updated:   time.Now(),
+	}
+	require.NoError(t, s.CreateProject(ctx, other))
+
+	agent := &store.Agent{
+		ID:           tid("agent-nested-sa-probe"),
+		Slug:         "nested-sa-probe",
+		Name:         "Nested SA Probe",
+		ProjectID:    project.ID,
+		Phase:        string(state.PhaseRunning),
+		StateVersion: 1,
+		Created:      time.Now(),
+		Updated:      time.Now(),
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	agentToken, err := srv.agentTokenService.GenerateAgentToken(agent.ID, project.ID, nil, nil)
+	require.NoError(t, err)
+
+	hubSA := mkSA(t, s, "sa-nested-45-hub", "hub45@p.iam.gserviceaccount.com",
+		store.ScopeHub, "hub-instance-1", tid("user-stranger"))
+	hereSA := mkSA(t, s, "sa-nested-45-here", "here45@p.iam.gserviceaccount.com",
+		store.ScopeProject, project.ID, tid("user-stranger"))
+	elsewhereSA := mkSA(t, s, "sa-nested-45-away", "away45@p.iam.gserviceaccount.com",
+		store.ScopeProject, other.ID, tid("user-stranger"))
+
+	rows := []struct {
+		what string
+		id   string
+	}{
+		{"nonexistent", tid("sa-nested-45-ghost")},
+		{"project-scoped in another project", elsewhereSA.ID},
+		{"project-scoped in the named project", hereSA.ID},
+		{"hub-scoped", hubSA.ID},
+	}
+
+	// DELETE, not GET: delete authorizes unconditionally, while the read path
+	// authorizes only hub scope (an older gap, #598). Delete is therefore where
+	// all four rows pass through the renderer under test.
+	codes := make(map[string]int, len(rows))
+	for _, row := range rows {
+		rec := doRequestWithAgentToken(t, srv, http.MethodDelete,
+			"/api/v1/projects/"+project.ID+"/gcp-service-accounts/"+row.id, nil, agentToken)
+		codes[row.what] = rec.Code
+	}
+
+	base := codes[rows[0].what]
+	for _, row := range rows[1:] {
+		require.Equal(t, base, codes[row.what],
+			"an identity-less caller must not tell %q from %q by status: %d vs %d (all four rows: %v)",
+			rows[0].what, row.what, base, codes[row.what], codes)
+	}
+	require.Equal(t, http.StatusNotFound, base,
+		"and the shared answer is the one a nonexistent id already gave; got %v", codes)
+
+	// Status parity would also be satisfied by four successful deletes. It was
+	// a refusal, and the accounts prove it.
+	require.True(t, saExists(t, s, hubSA.ID), "hub-scoped account must survive")
+	require.True(t, saExists(t, s, hereSA.ID), "project-scoped account must survive")
+	require.True(t, saExists(t, s, elsewhereSA.ID), "the other project's account must survive")
 }
 
 // The same leak on the write verb, because the fix lives in the renderer and a

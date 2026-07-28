@@ -200,12 +200,47 @@ func (s *Server) gcpServiceAccountVerdict(ctx context.Context, sa *store.GCPServ
 }
 
 // authorizeGCPServiceAccount renders a verdict for the PROJECT-NESTED routes:
-// every refusal is a 403, exactly as before the verdict/renderer split.
+// an IDENTIFIED caller's refusal is a 403, exactly as before the
+// verdict/renderer split. An identity-less caller gets 404, the same as the
+// flat route.
 //
-// Unchanged behaviour is the requirement here, not an accident of the
-// refactor. To reach a nested by-id route a caller has already named the
-// project the account lives in, so a 403 discloses nothing they did not supply
-// themselves. The flat route's renderer is authorizeGCPServiceAccountFlat.
+// Unchanged behaviour is the requirement for the identified arms, not an
+// accident of the refactor. To reach a nested by-id route a caller has already
+// named the project the account lives in, so a 403 discloses nothing they did
+// not supply themselves. The flat route's renderer is
+// authorizeGCPServiceAccountFlat.
+//
+// THE noIdentity ARM IS THE EXCEPTION, AND IT IS #45, found by sa-arch running
+// the #42 invariant against the arm the #42 commit PINNED. Same sentence, one
+// route over:
+//
+//	AN IDENTITY-LESS CALLER MUST NOT BE ABLE TO TELL TWO SCOPES APART BY
+//	STATUS CODE.
+//
+// The rest of this comment is the cause. The "403 discloses nothing they did
+// not supply themselves" justification above is TRUE, and it is about the
+// PROJECT. What a 403 here discloses is the ACCOUNT: that the id exists, and
+// -- because ReachableFromProject returns true unconditionally for hub scope
+// (store/models.go, ScopeHub arm) while project scope requires ScopeID ==
+// projectID -- which scope it has. Right sentence, wrong noun. Before this
+// arm, nested DELETE answered an identity-less caller naming project P:
+//
+//	id does not exist           -> 404
+//	project-scoped SA in Q != P -> 404 (unreachable)
+//	project-scoped SA in P      -> 403
+//	hub-scoped SA               -> 403, from EVERY P
+//
+// so the status separated existence from non-existence, hub scope from project
+// scope, and -- by iterating P -- named the owning project of a project-scoped
+// account. All three refusals now read 404, which is also what the
+// unreachable and the nonexistent cases already read.
+//
+// CHANGING THIS ARM CANNOT ALTER ANY IDENTIFIED CALLER'S EXPERIENCE, which is
+// why it does not breach the unchanged-behaviour requirement above:
+// gcpServiceAccountVerdict sets noIdentity exactly when
+// GetUserIdentityFromContext returns nil, so anyone with a user identity
+// leaves through the scope arms below with their reason string intact. The
+// callers inside this arm are agents, which authenticate but carry no user.
 func (s *Server) authorizeGCPServiceAccount(w http.ResponseWriter, r *http.Request, sa *store.GCPServiceAccount, action Action) bool {
 	verdict, err := s.gcpServiceAccountVerdict(r.Context(), sa, action)
 	if err != nil {
@@ -216,7 +251,7 @@ func (s *Server) authorizeGCPServiceAccount(w http.ResponseWriter, r *http.Reque
 		return true
 	}
 	if verdict.noIdentity {
-		Forbidden(w)
+		NotFound(w, "GCP Service Account")
 		return false
 	}
 	writeError(w, http.StatusForbidden, ErrCodeForbidden, verdict.reason, nil)
@@ -464,12 +499,26 @@ func (s *Server) getGCPServiceAccount(w http.ResponseWriter, r *http.Request, pr
 		return
 	}
 
-	// Hub-scoped SAs get a real read check. Project-scoped reads are left
-	// exactly as they were — this handler has never had an authorization call,
-	// and adding one here would deny ordinary project members who can read
-	// their project's SAs today. That pre-existing gap is the route-authz
-	// manifest's problem (#598), not this phase's; what must not happen is a
-	// hub-wide credential inheriting the same absence of a check.
+	// Hub-scoped SAs get a read check. Project-scoped reads are left exactly as
+	// they were — this handler has never had an authorization call, and adding
+	// one here would deny ordinary project members who can read their project's
+	// SAs today. That pre-existing gap is the route-authz manifest's problem
+	// (#598), not this phase's.
+	//
+	// ⚠️ WHAT THIS CHECK ACTUALLY DENIES: not much, and knowing that is the
+	// point. hub-member-read-all is ResourceType "*" with ScopeType "hub"
+	// (seed.go, seedDefaultPoliciesAndGroups), and ScopeType "hub" matches
+	// neither arm of the matchesResource scope switch (authz.go), so no scope
+	// filter applies and it grants read on hub-scoped accounts to EVERY
+	// logged-in user. The only callers this check refuses are identity-less
+	// ones. Treat it as an authenticated-caller check, not as a restriction,
+	// and do not add a hub-scoped WRITE gate on ActionRead or ActionList
+	// expecting it to hold — it would be inert on arrival.
+	//
+	// #46, sa-arch's wording; the earlier text here claimed this check kept a
+	// hub-wide credential from inheriting the gap above, which the wildcard
+	// removes. WHO may read hub-scoped accounts is an open policy question with
+	// ptone and is deliberately not changed here.
 	if sa.Scope == store.ScopeHub {
 		if !s.authorizeGCPServiceAccount(w, r, sa, ActionRead) {
 			return

@@ -378,10 +378,13 @@ func (s *Server) authorizeGCPServiceAccountFlat(w http.ResponseWriter, r *http.R
 	// explicitly false for the caller receiving it. (The reason string is also
 	// empty on a noIdentity verdict, so that 403 carried no message at all.)
 	//
-	// 404 rather than the nested route's 403, because the disclosure question is
-	// answered per route and the answers differ for good reason: a nested caller
-	// supplied the project themselves, while an identity-less caller here has
-	// established nothing anywhere.
+	// 404, AND THE NESTED RENDERER NOW ANSWERS 404 HERE TOO (#45). This commit
+	// originally reasoned that the two routes should differ, because a nested
+	// caller supplied the project themselves. That is true of the PROJECT and
+	// beside the point: what the refusal discloses is the ACCOUNT -- its
+	// existence and its scope -- which a nested caller supplied nothing about.
+	// The invariant is a property of the resource, so it is enforced in both
+	// renderers or in neither. See authorizeGCPServiceAccount's doc.
 	if verdict.noIdentity {
 		NotFound(w, "GCP Service Account")
 		return false
