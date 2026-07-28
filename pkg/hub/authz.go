@@ -415,8 +415,15 @@ func matchesResource(policy store.Policy, resource Resource) bool {
 	// Scope matching
 	switch policy.ScopeType {
 	case "project":
-		// Policy scoped to a project — resource must be in that project
-		if policy.ScopeID != "" && resource.ParentType == "project" && resource.ParentID != policy.ScopeID {
+		// A project-scoped policy applies only to resources that resolve to
+		// that project. Parentless / hub-scoped resources resolve to "" and
+		// must NOT match — fail closed rather than falling through (#595).
+		//
+		// There is deliberately no outer `policy.ScopeID != ""` guard: a
+		// project-scoped policy with an empty ScopeID must match nothing, not
+		// everything. pid == "" is already rejected, and a non-empty pid can
+		// never equal an empty ScopeID, so the two clauses cover it.
+		if pid := projectIDForResource(resource); pid == "" || pid != policy.ScopeID {
 			return false
 		}
 	case "resource":

@@ -111,6 +111,19 @@ func TestEvaluateEndpoint_ScopeOverride(t *testing.T) {
 		ID: tid("eval-user-scope"), Email: "scope@test.com", DisplayName: "Scope User", Role: "member", Status: "active",
 	}))
 
+	// A concrete resource in the scoped project. The request must name a real
+	// resource: a project-scoped policy only applies to resources that resolve
+	// to that project (#595), and an evaluate request with no resourceId
+	// describes a parentless one. See
+	// TestEvaluateEndpoint_ProjectScopedPolicyDoesNotMatchParentlessResource.
+	require.NoError(t, s.CreateProject(ctx, &store.Project{
+		ID: tid("eval-project-scope"), Name: "Scope Project", Slug: "eval-project-scope",
+	}))
+	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
+		ID: tid("eval-agent-scope"), Slug: tid("eval-agent-scope"), Name: "Scope Agent",
+		ProjectID: tid("eval-project-scope"), Phase: string(state.PhaseRunning),
+	}))
+
 	// Create hub-level deny
 	hubPolicy := &store.Policy{
 		ID: tid("hub-deny-1"), Name: "Hub Deny", ScopeType: "hub",
@@ -124,7 +137,7 @@ func TestEvaluateEndpoint_ScopeOverride(t *testing.T) {
 	// Create project-level allow (should override hub deny)
 	projectPolicy := &store.Policy{
 		ID: tid("project-allow-1"), Name: "Project Allow", ScopeType: "project",
-		ScopeID: "project-scope-1", ResourceType: "agent",
+		ScopeID: tid("eval-project-scope"), ResourceType: "agent",
 		Actions: []string{"read"}, Effect: "allow",
 	}
 	require.NoError(t, s.CreatePolicy(ctx, projectPolicy))
@@ -136,6 +149,7 @@ func TestEvaluateEndpoint_ScopeOverride(t *testing.T) {
 		PrincipalType: "user",
 		PrincipalID:   tid("eval-user-scope"),
 		ResourceType:  "agent",
+		ResourceID:    tid("eval-agent-scope"),
 		Action:        "read",
 	}
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/policies/evaluate", evalReq)
@@ -145,6 +159,56 @@ func TestEvaluateEndpoint_ScopeOverride(t *testing.T) {
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&evalResp))
 	assert.True(t, evalResp.Allowed)
 	assert.Equal(t, "project", evalResp.Scope)
+	assert.Equal(t, tid("project-allow-1"), evalResp.MatchedPolicy)
+}
+
+// TestEvaluateEndpoint_ProjectScopedPolicyDoesNotMatchParentlessResource pins a
+// behaviour change from the #595 class fix.
+//
+// handlePolicyEvaluate only populates parent context when the request names a
+// resourceId, so an evaluate request without one describes a resource that
+// belongs to no project. A project-scoped policy no longer matches such a
+// resource: abstract evaluation of a project-scoped policy is deny by
+// construction. Previously the scope check fell through and the policy matched,
+// which made the simulator report allow for a request that a real, concrete
+// resource would have had denied.
+func TestEvaluateEndpoint_ProjectScopedPolicyDoesNotMatchParentlessResource(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID: tid("eval-user-parentless"), Email: "parentless@test.com",
+		DisplayName: "Parentless User", Role: "member", Status: "active",
+	}))
+	require.NoError(t, s.CreateProject(ctx, &store.Project{
+		ID: tid("eval-project-parentless"), Name: "Parentless Project", Slug: "eval-parentless",
+	}))
+
+	projectPolicy := &store.Policy{
+		ID: tid("project-allow-parentless"), Name: "Project Allow Parentless", ScopeType: "project",
+		ScopeID: tid("eval-project-parentless"), ResourceType: "agent",
+		Actions: []string{"read"}, Effect: "allow",
+	}
+	require.NoError(t, s.CreatePolicy(ctx, projectPolicy))
+	require.NoError(t, s.AddPolicyBinding(ctx, &store.PolicyBinding{
+		PolicyID: tid("project-allow-parentless"), PrincipalType: "user", PrincipalID: tid("eval-user-parentless"),
+	}))
+
+	// No ResourceID: the evaluated resource has no project.
+	evalReq := EvaluateRequest{
+		PrincipalType: "user",
+		PrincipalID:   tid("eval-user-parentless"),
+		ResourceType:  "agent",
+		Action:        "read",
+	}
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/policies/evaluate", evalReq)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	var evalResp EvaluateResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&evalResp))
+	assert.False(t, evalResp.Allowed)
+	assert.Equal(t, "default deny", evalResp.Reason)
+	assert.Empty(t, evalResp.MatchedPolicy)
 }
 
 func TestEvaluateEndpoint_AgentPolicy(t *testing.T) {

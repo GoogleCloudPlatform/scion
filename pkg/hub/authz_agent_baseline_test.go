@@ -338,3 +338,216 @@ func TestIsReadClassAction(t *testing.T) {
 			"isReadClassAction(%s)", action)
 	}
 }
+
+// =============================================================================
+// matchesResource project-scope class defect (ptone/scion#595)
+// =============================================================================
+
+// TestMatchesResource_ProjectScopeIsAllowList pins the fix for #595: the
+// `case "project"` arm was a deny-list that only rejected resources declaring a
+// *disagreeing* project parent, so every parentless resource fell through and
+// matched. It is now an allow-list keyed on projectIDForResource.
+func TestMatchesResource_ProjectScopeIsAllowList(t *testing.T) {
+	const projectA = "project-a"
+	const projectB = "project-b"
+
+	policy := func(resourceType string) store.Policy {
+		return store.Policy{
+			ResourceType: resourceType,
+			ScopeType:    "project",
+			ScopeID:      projectA,
+			Actions:      []string{"*"},
+			Effect:       "allow",
+		}
+	}
+
+	// Every builder in capabilities.go that can produce a parentless resource.
+	// Each of these matched a project-scoped policy before the fix.
+	parentless := []struct {
+		name     string
+		resource Resource
+	}{
+		{"template", templateResource(&store.Template{ID: "tmpl-1"})},
+		{"broker", brokerResource(&store.RuntimeBroker{ID: "broker-1"})},
+		{"user", userResource(&store.User{ID: "user-1"})},
+		{"hub-scoped group", groupResource(&store.Group{ID: "group-1"})},
+		{"hub-scoped policy", policyResource(&store.Policy{ID: "policy-1", ScopeType: "hub"})},
+		{"global harness config", harnessConfigResource(&store.HarnessConfig{
+			ID: "hc-global", Scope: store.HarnessConfigScopeGlobal,
+		})},
+		{"user harness config", harnessConfigResource(&store.HarnessConfig{
+			ID: "hc-user", Scope: store.HarnessConfigScopeUser, ScopeID: "user-1",
+		})},
+	}
+
+	for _, tt := range parentless {
+		t.Run("parentless/"+tt.name, func(t *testing.T) {
+			require.Empty(t, projectIDForResource(tt.resource),
+				"fixture must be parentless for this case to be meaningful")
+			assert.False(t, matchesResource(policy(tt.resource.Type), tt.resource),
+				"a project-scoped policy must not reach a parentless resource")
+			assert.False(t, matchesResource(policy("*"), tt.resource),
+				"nor via a wildcard resourceType")
+		})
+	}
+
+	// Resources that do resolve to a project behave as before.
+	t.Run("same-project child matches", func(t *testing.T) {
+		r := agentResource(&store.Agent{ID: "agent-1", ProjectID: projectA})
+		assert.True(t, matchesResource(policy("agent"), r))
+		assert.True(t, matchesResource(policy("*"), r))
+	})
+
+	t.Run("other-project child does not match", func(t *testing.T) {
+		r := agentResource(&store.Agent{ID: "agent-2", ProjectID: projectB})
+		assert.False(t, matchesResource(policy("agent"), r))
+		assert.False(t, matchesResource(policy("*"), r))
+	})
+
+	// The project resource itself must still match its own project-scoped
+	// policy — this is the behaviour the old code got right only by accident
+	// (it matched every project), and it must survive the fix.
+	t.Run("the project itself matches", func(t *testing.T) {
+		r := projectResource(&store.Project{ID: projectA})
+		assert.True(t, matchesResource(policy("project"), r))
+	})
+
+	t.Run("a different project does not match", func(t *testing.T) {
+		r := projectResource(&store.Project{ID: projectB})
+		assert.False(t, matchesResource(policy("project"), r))
+	})
+
+	// Project-scoped conditional builders, on the affirmative side.
+	t.Run("project-scoped group matches its project", func(t *testing.T) {
+		r := groupResource(&store.Group{ID: "group-2", ProjectID: projectA})
+		assert.True(t, matchesResource(policy("group"), r))
+	})
+
+	t.Run("project-scoped harness config matches its project", func(t *testing.T) {
+		r := harnessConfigResource(&store.HarnessConfig{
+			ID: "hc-proj", Scope: store.HarnessConfigScopeProject, ScopeID: projectA,
+		})
+		assert.True(t, matchesResource(policy("harness_config"), r))
+	})
+
+	t.Run("project-scoped policy resource matches its project", func(t *testing.T) {
+		r := policyResource(&store.Policy{ID: "policy-2", ScopeType: "project", ScopeID: projectA})
+		assert.True(t, matchesResource(policy("policy"), r))
+	})
+}
+
+// TestMatchesResource_ProjectScopeEmptyScopeIDMatchesNothing pins the dropped
+// outer `policy.ScopeID != ""` guard. Keeping that guard would reproduce the
+// same "absence means unconstrained" overload one level up: a project-scoped
+// policy with an empty ScopeID would skip the check and match everything.
+//
+// This is a behaviour change for such a policy — it matched everything before.
+// It is not reachable through the API (createPolicy requires scopeId for
+// project scope) and no seeded row produces it, so this is hardening.
+func TestMatchesResource_ProjectScopeEmptyScopeIDMatchesNothing(t *testing.T) {
+	policy := store.Policy{
+		ResourceType: "*",
+		ScopeType:    "project",
+		ScopeID:      "",
+		Actions:      []string{"*"},
+		Effect:       "allow",
+	}
+
+	resources := []Resource{
+		agentResource(&store.Agent{ID: "agent-1", ProjectID: "project-a"}),
+		projectResource(&store.Project{ID: "project-a"}),
+		templateResource(&store.Template{ID: "tmpl-1"}),
+		brokerResource(&store.RuntimeBroker{ID: "broker-1"}),
+		userResource(&store.User{ID: "user-1"}),
+		{},
+	}
+
+	for _, r := range resources {
+		assert.False(t, matchesResource(policy, r),
+			"project-scoped policy with empty ScopeID must match nothing (type=%q)", r.Type)
+	}
+}
+
+// TestMatchesResource_HubAndResourceScopesUnchanged confirms the fix is
+// confined to the `case "project"` arm.
+func TestMatchesResource_HubAndResourceScopesUnchanged(t *testing.T) {
+	parentless := templateResource(&store.Template{ID: "tmpl-1"})
+	child := agentResource(&store.Agent{ID: "agent-1", ProjectID: "project-a"})
+
+	hub := store.Policy{ResourceType: "*", ScopeType: "hub"}
+	assert.True(t, matchesResource(hub, parentless))
+	assert.True(t, matchesResource(hub, child))
+
+	resScope := store.Policy{ResourceType: "*", ScopeType: "resource", ScopeID: "tmpl-1"}
+	assert.True(t, matchesResource(resScope, parentless))
+	assert.False(t, matchesResource(resScope, child))
+}
+
+// TestMatchesResource_SeededPoliciesUnaffected verifies the blast-radius claim
+// in the PR description against the real seeded rows rather than against copies
+// of their literals: the only configurations whose behaviour changes are
+// user-authored project-scoped policies targeting a parentless resource type.
+//
+//   - seed.go's hub-member-read-all and hub-member-create-projects are
+//     ScopeType "hub", so the `case "project"` arm never runs for them.
+//   - handlers_projects_core.go's project:<slug>:member-create-agents is
+//     project-scoped but ResourceType "agent"; agent resources always carry a
+//     project parent, so it matches exactly the same set as before.
+func TestMatchesResource_SeededPoliciesUnaffected(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	seedDefaultPoliciesAndGroups(ctx, s)
+
+	project := &store.Project{
+		ID: tid("seed-check-project"), Name: "Seed Check", Slug: "seed-check",
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+	srv.createProjectMembersGroupAndPolicy(ctx, project)
+
+	byName := func(name string) store.Policy {
+		t.Helper()
+		res, err := s.ListPolicies(ctx, store.PolicyFilter{Name: name}, store.ListOptions{Limit: 1})
+		require.NoError(t, err)
+		require.Len(t, res.Items, 1, "expected seeded policy %q to exist", name)
+		return res.Items[0]
+	}
+
+	// Representative resources spanning parentless, own-project and
+	// other-project. A hub-scoped policy must match all of them.
+	sameProjectAgent := agentResource(&store.Agent{ID: tid("seed-agent"), ProjectID: project.ID})
+	otherProjectAgent := agentResource(&store.Agent{ID: tid("seed-agent-other"), ProjectID: tid("seed-other-project")})
+	parentlessTemplate := templateResource(&store.Template{ID: tid("seed-template")})
+	ownProject := projectResource(project)
+
+	for _, name := range []string{"hub-member-read-all", "hub-member-create-projects"} {
+		t.Run(name, func(t *testing.T) {
+			p := byName(name)
+			require.Equal(t, "hub", p.ScopeType,
+				"if this policy ever becomes project-scoped, the blast-radius claim must be re-evaluated")
+			// Hub scope short-circuits the scope switch entirely; matching is
+			// decided by resource type alone, exactly as before the fix.
+			for _, r := range []Resource{sameProjectAgent, otherProjectAgent, parentlessTemplate, ownProject} {
+				expected := p.ResourceType == "*" || p.ResourceType == r.Type
+				assert.Equal(t, expected, matchesResource(p, r),
+					"hub-scoped policy %q vs resource type %q", name, r.Type)
+			}
+		})
+	}
+
+	t.Run("project:<slug>:member-create-agents", func(t *testing.T) {
+		p := byName("project:" + project.Slug + ":member-create-agents")
+		require.Equal(t, "project", p.ScopeType)
+		require.Equal(t, "agent", p.ResourceType,
+			"the type check runs before scope matching; if this ever widens, the blast-radius claim must be re-evaluated")
+		require.Equal(t, project.ID, p.ScopeID)
+
+		// Agent resources always carry a project parent, so this policy's match
+		// set is identical before and after the fix.
+		assert.True(t, matchesResource(p, sameProjectAgent))
+		assert.False(t, matchesResource(p, otherProjectAgent))
+		// Non-agent resources are rejected on type, never reaching scope.
+		assert.False(t, matchesResource(p, parentlessTemplate))
+		assert.False(t, matchesResource(p, ownProject))
+	})
+}
