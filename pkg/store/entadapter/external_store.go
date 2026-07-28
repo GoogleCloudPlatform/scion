@@ -210,6 +210,11 @@ func (s *ExternalStore) DeleteGCPServiceAccount(ctx context.Context, id string) 
 // overwritten — including the first-check-failure case, where verified_at is
 // NULL and the else-branch of a naive three-way backfill would clobber it back
 // to "unverified".
+//
+// Deliberately not on store.GCPServiceAccountStore. This is a one-off migration
+// concern with a single caller (CompositeStore.Migrate, which reaches it through
+// the embedded *ExternalStore); putting it on the domain interface would oblige
+// every future store implementation to carry it forever.
 func (s *ExternalStore) BackfillGCPVerificationStatus(ctx context.Context) error {
 	if _, err := s.client.GCPServiceAccount.Update().
 		Where(
