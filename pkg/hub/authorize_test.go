@@ -516,7 +516,7 @@ func TestAuthorizeAgentLifecycle_DenialIsLogged(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// requireAdmin (moved verbatim from skill_registry_handlers.go)
+// requireAdmin (promoted out of skill_registry_handlers.go)
 // ---------------------------------------------------------------------------
 
 func TestRequireAdmin_IdentityKinds(t *testing.T) {
@@ -527,26 +527,110 @@ func TestRequireAdmin_IdentityKinds(t *testing.T) {
 		identity   Identity
 		wantOK     bool
 		wantStatus int
+		// wantPrincipalType is the principal_type expected on the denial log
+		// line, or "" when no denial log is expected (allow, or 401 before any
+		// principal exists).
+		wantPrincipalType string
 	}{
-		{"nil identity", nil, false, http.StatusUnauthorized},
-		{"admin user", authzHelperAdmin(), true, 0},
-		{"non-admin user", authzHelperMember(), false, http.StatusForbidden},
-		{"agent identity", authzHelperAgent(authzHelperProjectA, ScopeAgentCreate), false, http.StatusUnauthorized},
-		{"broker identity", NewBrokerIdentity("authz-broker"), false, http.StatusUnauthorized},
+		{
+			name: "nil identity is unauthenticated", identity: nil,
+			wantOK: false, wantStatus: http.StatusUnauthorized,
+		},
+		{
+			name: "admin user", identity: authzHelperAdmin(),
+			wantOK: true,
+		},
+		{
+			name: "dev-auth identity is treated as a user", identity: NewDevUser(DevUserConfig{Username: "dev"}),
+			wantOK: true,
+		},
+		{
+			name: "non-admin user is forbidden, not unauthorized", identity: authzHelperMember(),
+			wantOK: false, wantStatus: http.StatusForbidden, wantPrincipalType: "user",
+		},
+		{
+			// Regression: this returned 401 "Authentication required" to an
+			// authenticated agent, because requireAdmin resolved the identity
+			// with GetUserIdentityFromContext.
+			name: "authenticated agent is forbidden, not unauthorized", identity: authzHelperAgent(authzHelperProjectA, ScopeAgentCreate),
+			wantOK: false, wantStatus: http.StatusForbidden, wantPrincipalType: "agent",
+		},
+		{
+			name: "authenticated broker is forbidden, not unauthorized", identity: NewBrokerIdentity("authz-broker"),
+			wantOK: false, wantStatus: http.StatusForbidden, wantPrincipalType: "broker",
+		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			buf := authzHelperCaptureLogs(t)
 			rec := httptest.NewRecorder()
+
 			_, ok := srv.requireAdmin(rec, authzHelperRequest(tc.identity))
 			if ok != tc.wantOK {
 				t.Fatalf("requireAdmin() ok = %v, want %v (body: %s)", ok, tc.wantOK, rec.Body.String())
 			}
-			if tc.wantOK {
+			if !tc.wantOK && rec.Code != tc.wantStatus {
+				t.Errorf("status = %d, want %d (body: %s)", rec.Code, tc.wantStatus, rec.Body.String())
+			}
+
+			// requireAdmin gates the hub's admin endpoints, so every denial
+			// must leave an audit trail, exactly as authorize does.
+			found := authzHelperDenialRecord(t, buf)
+			if tc.wantPrincipalType == "" {
+				if found != nil {
+					t.Errorf("unexpected denial log: %v", found)
+				}
 				return
 			}
-			if rec.Code != tc.wantStatus {
-				t.Errorf("status = %d, want %d (body: %s)", rec.Code, tc.wantStatus, rec.Body.String())
+			if found == nil {
+				t.Fatalf("expected an 'authorization denied' log record, got: %s", buf.String())
+			}
+			if found["principal_type"] != tc.wantPrincipalType {
+				t.Errorf("denial log principal_type = %v, want %q", found["principal_type"], tc.wantPrincipalType)
+			}
+			if found["resource_type"] != "hub" {
+				t.Errorf("denial log resource_type = %v, want \"hub\"", found["resource_type"])
+			}
+			if found["path"] != "/api/v1/authz-test" {
+				t.Errorf("denial log path = %v, want the request path", found["path"])
+			}
+			if reason, _ := found["reason"].(string); reason == "" {
+				t.Errorf("denial log is missing 'reason': %v", found)
+			}
+		})
+	}
+}
+
+// TestRequireAdmin_DenialReasons pins the two distinct denial reasons apart, so
+// an operator reading the log can tell "wrong kind of caller" from "right kind,
+// wrong role".
+func TestRequireAdmin_DenialReasons(t *testing.T) {
+	srv, _ := testServer(t)
+
+	tests := []struct {
+		name       string
+		identity   Identity
+		wantReason string
+	}{
+		{"non-user caller", authzHelperAgent(authzHelperProjectA), "non-user identity"},
+		{"non-admin user", authzHelperMember(), "not an admin"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			buf := authzHelperCaptureLogs(t)
+			rec := httptest.NewRecorder()
+
+			if _, ok := srv.requireAdmin(rec, authzHelperRequest(tc.identity)); ok {
+				t.Fatal("expected denial")
+			}
+			found := authzHelperDenialRecord(t, buf)
+			if found == nil {
+				t.Fatalf("expected an 'authorization denied' log record, got: %s", buf.String())
+			}
+			if found["reason"] != tc.wantReason {
+				t.Errorf("denial log reason = %v, want %q", found["reason"], tc.wantReason)
 			}
 		})
 	}

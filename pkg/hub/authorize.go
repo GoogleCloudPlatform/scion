@@ -241,18 +241,42 @@ func (s *Server) authorizeAgentLifecycle(w http.ResponseWriter, r *http.Request,
 }
 
 // requireAdmin returns the calling user identity if it is a hub admin, writing
-// 401 or 403 and returning false otherwise. Moved here verbatim from
-// skill_registry_handlers.go, where it was file-private by accident rather than
-// by design.
+// 401 for an unauthenticated caller and 403 for any authenticated caller that
+// is not an admin user, and returning false in both cases.
+//
+// It resolves the identity with GetIdentityFromContext rather than
+// GetUserIdentityFromContext. The latter returns nil for agent and broker
+// callers, which conflates "nobody is authenticated" with "the authenticated
+// caller is not a user" — the same conflation that produced #591. Here it
+// merely produced a wrong status code (an authenticated agent was told
+// "Authentication required"), but the distinction is worth keeping honest:
+// this helper gates the hub's admin endpoints.
 func (s *Server) requireAdmin(w http.ResponseWriter, r *http.Request) (UserIdentity, bool) {
-	identity := GetUserIdentityFromContext(r.Context())
+	// Synthetic resource: requireAdmin is a role check on the hub itself
+	// rather than a policy check on an addressable resource.
+	resource := Resource{Type: "hub", ID: r.URL.Path}
+
+	identity := GetIdentityFromContext(r.Context())
 	if identity == nil {
-		writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required", nil)
+		Unauthorized(w)
 		return nil, false
 	}
-	if identity.Role() != store.UserRoleAdmin {
+
+	// The assertion, rather than a switch on Type(), is deliberate: the question
+	// this helper asks is "can this caller answer Role()". It admits both "user"
+	// and dev-auth "dev" identities (DevUser implements UserIdentity) and denies
+	// everything else, including a "user"-typed identity too degenerate to have
+	// a role.
+	user, ok := identity.(UserIdentity)
+	if !ok {
+		logAuthzDenial(r, identity, resource, ActionManage, "non-user identity")
 		Forbidden(w)
 		return nil, false
 	}
-	return identity, true
+	if user.Role() != store.UserRoleAdmin {
+		logAuthzDenial(r, identity, resource, ActionManage, "not an admin")
+		Forbidden(w)
+		return nil, false
+	}
+	return user, true
 }
