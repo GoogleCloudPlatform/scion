@@ -79,8 +79,13 @@ func seedDefaultPoliciesAndGroups(ctx context.Context, s store.Store) {
 }
 
 // projectAssignPolicyName returns the name of a project's service-account
-// assign policy. Policy names are unique hub-wide, which is what makes both
-// the per-project creation path and the startup backfill idempotent.
+// assign policy.
+//
+// ⚠️ Policy names are NOT unique hub-wide — there is no such constraint; see
+// ensureProjectAssignPolicy. Idempotency here comes from that function looking
+// the name up before creating, and from this being the only code that writes
+// this name. It is a convention this package keeps, not an invariant the store
+// enforces.
 //
 // ── Why this policy exists ────────────────────────────────────────────────
 //
@@ -113,7 +118,7 @@ func seedDefaultPoliciesAndGroups(ctx context.Context, s store.Store) {
 //
 // Project scope dissolves that structurally rather than managing it:
 // matchesResource rejects a project-scoped policy against a resource that
-// resolves to no project ("pid == ” || pid != policy.ScopeID", fail closed
+// resolves to no project (pid == "" || pid != policy.ScopeID, fail closed
 // rather than fall through — #595). gcpServiceAccountResource gives a project
 // parent only to project-scoped accounts, so a hub-scoped account yields
 // pid == "" and this policy CANNOT match it. No code-side guard is needed, and
