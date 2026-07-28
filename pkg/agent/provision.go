@@ -370,7 +370,11 @@ func (m *AgentManager) Provision(ctx context.Context, opts api.StartOptions) (*a
 	// pre-start.d/30-project-custom so it runs after the harness provisioner
 	// (20-harness-provision). A staging failure is fatal — the project owner
 	// explicitly configured this script and a silent skip would be misleading.
-	if opts.ProjectPreStartHookScript != "" {
+	//
+	// Called unconditionally: with an empty script the helper removes any
+	// previously staged file, so a hook that no longer applies cannot survive
+	// on a reused agent home.
+	{
 		agentHome := config.GetAgentHomePath(opts.ProjectPath, opts.Name)
 		if err := harness.WriteProjectPreStartHook(agentHome, opts.ProjectPreStartHookScript); err != nil {
 			return cfg, fmt.Errorf("stage project pre-start hook: %w", err)

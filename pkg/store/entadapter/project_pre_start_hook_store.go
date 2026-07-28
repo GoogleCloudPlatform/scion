@@ -288,16 +288,27 @@ func (s *ProjectPreStartHookStore) activateHook(ctx context.Context, scope entps
 // if the hook is currently active AND is not the only hook in the scope.
 // Deleting the last remaining active hook (with no archived hooks to fall back
 // to) is allowed so that operators can fully remove all pre-start hooks.
+//
+// The read, the guard count, and the delete all run inside one transaction:
+// evaluated separately, two concurrent deletes of the last two hooks in a scope
+// could each observe total > 1, each be rejected, or — with different
+// interleavings — both proceed and leave the scope empty unintentionally.
 func (s *ProjectPreStartHookStore) deleteHook(ctx context.Context, scope entpsh.Scope, hookID, projectID string) error {
 	uid, err := parseUUID(hookID)
 	if err != nil {
 		return store.ErrNotFound
 	}
 
+	tx, err := s.client.Tx(ctx)
+	if err != nil {
+		return fmt.Errorf("begin transaction: %w", err)
+	}
+
 	// Verify the hook exists in this scope and check its status.
 	preds := append(pshScopePreds(scope, projectID), entpsh.ID(uid))
-	e, err := s.client.ProjectPreStartHook.Query().Where(preds...).Only(ctx)
+	e, err := tx.ProjectPreStartHook.Query().Where(preds...).Only(ctx)
 	if err != nil {
+		_ = tx.Rollback()
 		if ent.IsNotFound(err) {
 			return store.ErrNotFound
 		}
@@ -308,23 +319,30 @@ func (s *ProjectPreStartHookStore) deleteHook(ctx context.Context, scope entpsh.
 	// still in the scope. If this is the last/only hook, a hard delete is
 	// allowed so operators can fully clear all pre-start hooks.
 	if e.Status == entpsh.StatusActive {
-		total, err := s.client.ProjectPreStartHook.Query().
+		total, err := tx.ProjectPreStartHook.Query().
 			Where(pshScopePreds(scope, projectID)...).
 			Count(ctx)
 		if err != nil {
+			_ = tx.Rollback()
 			return fmt.Errorf("count hooks for delete guard: %w", err)
 		}
 		if total > 1 {
+			_ = tx.Rollback()
 			return fmt.Errorf("%w: cannot delete an active hook while other hooks exist; activate another hook first", store.ErrInvalidInput)
 		}
 		// total == 1: this is the only hook — fall through to delete.
 	}
 
-	if err := s.client.ProjectPreStartHook.DeleteOneID(uid).Exec(ctx); err != nil {
+	if err := tx.ProjectPreStartHook.DeleteOneID(uid).Exec(ctx); err != nil {
+		_ = tx.Rollback()
 		if ent.IsNotFound(err) {
 			return store.ErrNotFound
 		}
 		return fmt.Errorf("delete %s pre-start hook: %w", scope, err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit: %w", err)
 	}
 	return nil
 }

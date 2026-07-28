@@ -188,6 +188,17 @@ func IsUnauthorizedError(err error) bool {
 	return false
 }
 
+// IsForbiddenError checks if an error is a forbidden (403) API error.
+// Note this is distinct from IsUnauthorizedError, which matches 401 only:
+// an authenticated caller who lacks the required role gets 403.
+func IsForbiddenError(err error) bool {
+	var apiErr *APIError
+	if errors.As(err, &apiErr) {
+		return apiErr.IsForbidden()
+	}
+	return false
+}
+
 // IsConflictError checks if an error is a conflict API error.
 func IsConflictError(err error) bool {
 	var apiErr *APIError

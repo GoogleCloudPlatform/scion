@@ -35,10 +35,13 @@ func TestWriteProjectPreStartHook_CreatesFile(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, script, string(data))
 
-	// File must be executable.
+	// Owner-executable only: the script may carry project secrets and only the
+	// owner ever runs it.
 	info, err := os.Stat(target)
 	require.NoError(t, err)
-	assert.True(t, info.Mode()&0111 != 0, "file should be executable")
+	assert.True(t, info.Mode()&0100 != 0, "file should be owner-executable")
+	assert.Equal(t, os.FileMode(0700), info.Mode().Perm(),
+		"hook script must not be group- or world-accessible")
 }
 
 func TestWriteProjectPreStartHook_Idempotent(t *testing.T) {
@@ -62,6 +65,37 @@ func TestWriteProjectPreStartHook_EmptyScript_NoOp(t *testing.T) {
 	target := filepath.Join(agentHome, ".scion", "hooks", "pre-start.d", ProjectPreStartHookFilename)
 	_, statErr := os.Stat(target)
 	assert.True(t, os.IsNotExist(statErr), "file should not be created for empty script")
+}
+
+// An empty script means "no hook applies" — a previously staged script must be
+// removed so it cannot survive on a reused agent home after the hook is deleted.
+func TestWriteProjectPreStartHook_EmptyScript_RemovesStaleFile(t *testing.T) {
+	agentHome := t.TempDir()
+
+	require.NoError(t, WriteProjectPreStartHook(agentHome, "#!/bin/sh\necho stale\n"))
+	target := filepath.Join(agentHome, ".scion", "hooks", "pre-start.d", ProjectPreStartHookFilename)
+	require.FileExists(t, target)
+
+	require.NoError(t, WriteProjectPreStartHook(agentHome, ""))
+
+	_, statErr := os.Stat(target)
+	assert.True(t, os.IsNotExist(statErr), "stale hook script should be removed")
+}
+
+// A file staged by an older build with mode 0755 must be tightened on rewrite;
+// os.WriteFile alone leaves the mode of an existing file untouched.
+func TestWriteProjectPreStartHook_TightensLegacyPermissions(t *testing.T) {
+	agentHome := t.TempDir()
+	dir := filepath.Join(agentHome, ".scion", "hooks", "pre-start.d")
+	require.NoError(t, os.MkdirAll(dir, 0755))
+	target := filepath.Join(dir, ProjectPreStartHookFilename)
+	require.NoError(t, os.WriteFile(target, []byte("#!/bin/sh\necho legacy\n"), 0755))
+
+	require.NoError(t, WriteProjectPreStartHook(agentHome, "#!/bin/sh\necho current\n"))
+
+	info, err := os.Stat(target)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0700), info.Mode().Perm())
 }
 
 func TestWriteProjectPreStartHook_CreatesDirectory(t *testing.T) {

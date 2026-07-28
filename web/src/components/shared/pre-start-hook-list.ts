@@ -433,7 +433,13 @@ export class ScionPreStartHookList extends LitElement {
   }
 
   private async handleDelete(hook: PreStartHook): Promise<void> {
-    if (!confirm(`Delete pre-start hook "${hook.name}"? This cannot be undone.`)) {
+    // Deletion is not retroactive: the script is baked into each agent's
+    // applied configuration at creation time, so existing agents keep running
+    // it on every restart until they are recreated.
+    const message =
+      `Delete pre-start hook "${hook.name}"? This cannot be undone. ` +
+      'Existing agents that inherited this hook will continue to run it until recreated.';
+    if (!confirm(message)) {
       return;
     }
     this.busyId = hook.id;

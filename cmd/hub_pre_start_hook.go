@@ -103,7 +103,12 @@ var hubHookDeleteCmd = &cobra.Command{
 	Short:   "Delete an archived hub-scoped pre-start hook",
 	Long: `Delete a hub-scoped pre-start hook. Archived hooks may be deleted directly.
 Deleting the active hook requires --force, and the Hub still refuses the delete
-when other hub hooks exist — activate a different hook first in that case.`,
+when other hub hooks exist — activate a different hook first in that case.
+
+Note: deleting a hub hook only prevents it from being applied to future agents.
+Agents already created continue to run the hook script on every restart until
+they are recreated (the script is baked into the agent's applied configuration
+at creation time).`,
 	Args: cobra.ExactArgs(1),
 	RunE: runHubHookDelete,
 }
@@ -194,7 +199,7 @@ func runHubHookList(cmd *cobra.Command, args []string) error {
 
 	list, err := svc.List(ctx)
 	if err != nil {
-		if apiclient.IsUnauthorizedError(err) {
+		if apiclient.IsUnauthorizedError(err) || apiclient.IsForbiddenError(err) {
 			return fmt.Errorf("not authorized to view hub pre-start hooks; run 'scion hub auth login'")
 		}
 		return fmt.Errorf("list hub pre-start hooks: %w", err)
@@ -239,7 +244,7 @@ func runHubHookShow(cmd *cobra.Command, args []string) error {
 		if apiclient.IsNotFoundError(err) {
 			return fmt.Errorf("hub hook %q not found", hookRef)
 		}
-		if apiclient.IsUnauthorizedError(err) {
+		if apiclient.IsUnauthorizedError(err) || apiclient.IsForbiddenError(err) {
 			return fmt.Errorf("not authorized to view hub pre-start hooks; run 'scion hub auth login'")
 		}
 		return fmt.Errorf("get hub hook: %w", err)
@@ -286,7 +291,7 @@ func runHubHookCreate(cmd *cobra.Command, args []string) error {
 		Script:      scriptContent,
 	})
 	if err != nil {
-		if apiclient.IsUnauthorizedError(err) {
+		if apiclient.IsUnauthorizedError(err) || apiclient.IsForbiddenError(err) {
 			return fmt.Errorf("not authorized to manage hub pre-start hooks (hub administrator required)")
 		}
 		return fmt.Errorf("create hub pre-start hook: %w", err)
@@ -336,7 +341,7 @@ func runHubHookUpdate(cmd *cobra.Command, args []string) error {
 
 	hook, err := svc.Update(ctx, hookID, req)
 	if err != nil {
-		if apiclient.IsUnauthorizedError(err) {
+		if apiclient.IsUnauthorizedError(err) || apiclient.IsForbiddenError(err) {
 			return fmt.Errorf("not authorized to manage hub pre-start hooks (hub administrator required)")
 		}
 		return fmt.Errorf("update hub pre-start hook: %w", err)
@@ -368,7 +373,7 @@ func runHubHookActivate(cmd *cobra.Command, args []string) error {
 
 	hook, err := svc.Activate(ctx, hookID)
 	if err != nil {
-		if apiclient.IsUnauthorizedError(err) {
+		if apiclient.IsUnauthorizedError(err) || apiclient.IsForbiddenError(err) {
 			return fmt.Errorf("not authorized to manage hub pre-start hooks (hub administrator required)")
 		}
 		return fmt.Errorf("activate hub pre-start hook: %w", err)
@@ -406,7 +411,7 @@ func runHubHookDelete(cmd *cobra.Command, args []string) error {
 			if apiclient.IsNotFoundError(err) {
 				return fmt.Errorf("hub hook %q not found", hookRef)
 			}
-			if apiclient.IsUnauthorizedError(err) {
+			if apiclient.IsUnauthorizedError(err) || apiclient.IsForbiddenError(err) {
 				return fmt.Errorf("not authorized to view hub pre-start hooks; run 'scion hub auth login'")
 			}
 			return fmt.Errorf("get hub hook: %w", err)
@@ -417,7 +422,7 @@ func runHubHookDelete(cmd *cobra.Command, args []string) error {
 	}
 
 	if err := svc.Delete(ctx, hookID); err != nil {
-		if apiclient.IsUnauthorizedError(err) {
+		if apiclient.IsUnauthorizedError(err) || apiclient.IsForbiddenError(err) {
 			return fmt.Errorf("not authorized to manage hub pre-start hooks (hub administrator required)")
 		}
 		return fmt.Errorf("delete hub pre-start hook: %w", err)
@@ -428,5 +433,7 @@ func runHubHookDelete(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Printf("Deleted hub pre-start hook (ID: %s)\n", hookID)
+	fmt.Println("Note: agents created before this delete keep running the hook on every " +
+		"restart until they are recreated.")
 	return nil
 }

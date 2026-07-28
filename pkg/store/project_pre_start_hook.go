@@ -87,8 +87,11 @@ type ProjectPreStartHookStore interface {
 	// archives all other hooks for the same project atomically.
 	ActivateProjectPreStartHook(ctx context.Context, hookID, projectID string) (*ProjectPreStartHook, error)
 
-	// DeleteProjectPreStartHook hard-deletes a hook. Returns store.ErrInvalidInput
-	// if the hook is currently active (caller must archive it first).
+	// DeleteProjectPreStartHook hard-deletes a project-scoped hook.
+	// Returns store.ErrInvalidInput if the hook is active and other hooks exist
+	// in the same project scope (activate another hook first). Deleting the last
+	// active hook (when it is the sole hook) is permitted so that operators can
+	// fully clear a project's pre-start hooks.
 	DeleteProjectPreStartHook(ctx context.Context, hookID, projectID string) error
 
 	// --- Hub-scoped hooks -------------------------------------------------

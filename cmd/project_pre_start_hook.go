@@ -98,7 +98,12 @@ var projectHookDeleteCmd = &cobra.Command{
 	Short:   "Delete an archived pre-start hook",
 	Long: `Delete a pre-start hook. Only archived hooks may be deleted. To delete
 the active hook, first activate a different hook (or there is no replacement),
-then delete it.`,
+then delete it.
+
+Note: deleting a hook only prevents it from being applied to future agents.
+Agents already created continue to run the hook script on every restart until
+they are recreated (the script is baked into the agent's applied configuration
+at creation time).`,
 	Args: cobra.RangeArgs(1, 2),
 	RunE: runProjectHookDelete,
 }
@@ -331,7 +336,7 @@ func runProjectHookCreate(cmd *cobra.Command, args []string) error {
 		Script:      scriptContent,
 	})
 	if err != nil {
-		if apiclient.IsUnauthorizedError(err) {
+		if apiclient.IsUnauthorizedError(err) || apiclient.IsForbiddenError(err) {
 			return fmt.Errorf("not authorized to manage pre-start hooks for this project")
 		}
 		return fmt.Errorf("create pre-start hook: %w", err)
@@ -381,7 +386,7 @@ func runProjectHookUpdate(cmd *cobra.Command, args []string) error {
 
 	hook, err := svc.Update(ctx, hookID, req)
 	if err != nil {
-		if apiclient.IsUnauthorizedError(err) {
+		if apiclient.IsUnauthorizedError(err) || apiclient.IsForbiddenError(err) {
 			return fmt.Errorf("not authorized to manage pre-start hooks for this project")
 		}
 		return fmt.Errorf("update pre-start hook: %w", err)
@@ -413,7 +418,7 @@ func runProjectHookActivate(cmd *cobra.Command, args []string) error {
 
 	hook, err := svc.Activate(ctx, hookID)
 	if err != nil {
-		if apiclient.IsUnauthorizedError(err) {
+		if apiclient.IsUnauthorizedError(err) || apiclient.IsForbiddenError(err) {
 			return fmt.Errorf("not authorized to manage pre-start hooks for this project")
 		}
 		return fmt.Errorf("activate pre-start hook: %w", err)
@@ -444,7 +449,7 @@ func runProjectHookDelete(cmd *cobra.Command, args []string) error {
 	}
 
 	if err := svc.Delete(ctx, hookID); err != nil {
-		if apiclient.IsUnauthorizedError(err) {
+		if apiclient.IsUnauthorizedError(err) || apiclient.IsForbiddenError(err) {
 			return fmt.Errorf("not authorized to manage pre-start hooks for this project")
 		}
 		return fmt.Errorf("delete pre-start hook: %w", err)
