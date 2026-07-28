@@ -287,7 +287,7 @@ func (s *Server) validateDefaultGCPIdentity(w http.ResponseWriter, ctx context.C
 		return false
 	}
 
-	if !gcpSAReachableFromProject(sa, projectID) {
+	if !sa.ReachableFromProject(projectID) {
 		BadRequest(w, notAvailable)
 		return false
 	}

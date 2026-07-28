@@ -629,24 +629,25 @@ func TestProjectSettings_DefaultGCPIdentity_ClearingAlwaysAllowed(t *testing.T) 
 	assert.Empty(t, got.DefaultGCPIdentityServiceAccountID)
 }
 
-// TestProjectSettings_HubScopedDefaultAcceptedButNotYetConsumed pins a
-// DISAGREEMENT between two sites, not a setting.
+// TestProjectSettings_HubScopedDefaultIsAcceptedAndConsumed pins that the write
+// site and the consumption site AGREE about hub-scoped service accounts.
 //
-// The validator added for #22 does its scope check by calling
-// gcpSAReachableFromProject, which admits hub-scoped SAs — correct under Q5
-// option A, where a hub-scoped SA is legitimately pickable in any project. The
-// consumption site at handlers_agents_core.go:655 still uses bare
-// `sa.ScopeID == projectID`, which rejects them and falls through to block.
+// It was originally written to pin their DISAGREEMENT. The #22 validator admits
+// a hub-scoped SA — correct under Q5 option A, where such an account is
+// legitimately pickable in any project — while handlers_agents_core.go:655 still
+// used bare `sa.ScopeID == projectID` and silently fell through to block. Both
+// halves were asserted so that converting :655 would turn this test RED and
+// reach whoever did the conversion.
 //
-// So today: the PUT says 200 and agent creation silently blocks. Both halves are
-// asserted below and both hold, so this test is green now.
+// It worked: step 4 of the Goal 2 landing sequence (a44b2950) landed and half B
+// failed on exactly the assertion that named it. Half B now expects assign. Half
+// A was never in question — the validator was always the correct side.
 //
-// WHEN STEP 4 OF THE GOAL 2 LANDING SEQUENCE CONVERTS :655 TO THE HELPER, HALF B
-// FLIPS TO "assign" AND THIS TEST GOES RED. That is intended. It is how whoever
-// does step 4 finds out that #22's validator was coupled to their change. Update
-// half B to expect assign at that point — do not weaken half A, the validator is
-// the correct side of the disagreement.
-func TestProjectSettings_HubScopedDefaultAcceptedButNotYetConsumed(t *testing.T) {
+// Keep both halves asserted together. The value here is not either behaviour on
+// its own; it is that a hub-scoped default which is ACCEPTED at write time is
+// also HONOURED at creation time. If those two ever diverge again, in either
+// direction, this is the test that says so.
+func TestProjectSettings_HubScopedDefaultIsAcceptedAndConsumed(t *testing.T) {
 	disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
 	srv, s, project := setupCreateAgentServer(t, disp)
 
@@ -683,7 +684,7 @@ func TestProjectSettings_HubScopedDefaultAcceptedButNotYetConsumed(t *testing.T)
 		"the hub-scoped default must actually be stored for half B to mean anything")
 	require.Equal(t, store.GCPMetadataModeAssign, saved.DefaultGCPIdentityMode)
 
-	// Half B — consumption does not honour it yet.
+	// Half B — consumption honours it.
 	rec = doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
 		Name:      "hub-default-agent",
 		ProjectID: project.ID,
@@ -694,8 +695,11 @@ func TestProjectSettings_HubScopedDefaultAcceptedButNotYetConsumed(t *testing.T)
 	var resp CreateAgentResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	require.NotNil(t, resp.Agent.AppliedConfig.GCPIdentity)
-	assert.Equal(t, store.GCPMetadataModeBlock, resp.Agent.AppliedConfig.GCPIdentity.MetadataMode,
-		"if this is now 'assign', :655 has been converted — see this test's doc comment before changing it")
+	assert.Equal(t, store.GCPMetadataModeAssign, resp.Agent.AppliedConfig.GCPIdentity.MetadataMode,
+		"a hub-scoped default accepted by the PUT must be honoured at agent creation; "+
+			"if this is 'block' again, the write and consumption sites have diverged")
+	assert.Equal(t, hubSA.ID, resp.Agent.AppliedConfig.GCPIdentity.ServiceAccountID)
+	assert.Equal(t, hubSA.Email, resp.Agent.AppliedConfig.GCPIdentity.ServiceAccountEmail)
 }
 
 // TestGCPServiceAccount_HubScopedCreateStillRejected is a DELIBERATE TRIPWIRE for
@@ -704,22 +708,35 @@ func TestProjectSettings_HubScopedDefaultAcceptedButNotYetConsumed(t *testing.T)
 //
 // The sequence is strict:
 //
-//	step 3 — relocate gcpSAReachableFromProject to pkg/store
-//	step 4 — convert the three assign sites to it:
-//	         handlers_agents_core.go:472 (create), :655 (project default),
-//	         :1669 (PATCH)
+//	step 1 — P0.4 assign grant baseline, both arms
+//	step 2 — convert the assignment authorization from ActionRead to ActionAssign
+//	step 3 — relocate the reachability predicate to pkg/store        [LANDED]
+//	step 4 — convert the three assign sites to it                    [LANDED]
 //	step 5 — item A, POST scope=hub
 //
-// Item A is the trap commit: small, additive, and it reads as independent of
-// everything above it, so it is the one most likely to land early. If it lands
-// before step 4, hub-scoped SAs become creatable while all three assign sites
-// still reject them — listable, fetchable, verifiable, and silently unusable.
+// THE HOLD ON ITEM A IS A SECURITY HOLD, AND IT NOW HANGS ON STEP 2 — NOT ON
+// STEPS 3 AND 4, WHICH HAVE LANDED. The distinction matters, because a comment
+// naming only 3 and 4 would describe a hold that no longer exists for the reason
+// it gives, which is worse than no comment.
 //
-// The paired test above catches step 4 landing. Nothing caught item A landing
-// first, which is the order we actually fear. This does.
+// What changed: before step 4, an early item A was merely broken. The assign
+// sites compared sa.ScopeID against the project ID, so a hub-scoped SA was
+// refused with a fail-closed 400. Step 4 removed that 400 by design. What now
+// stands between a hub-scoped SA and assignment is the ActionRead check alone —
+// and hub-member-read-all matches every hub-scoped SA for every hub member,
+// because the SA resource is parentless and that policy is hub-scoped.
 //
-// DELETING THIS TEST IS PART OF ITEM A, and must not be done until steps 3 and 4
-// are green.
+// So landing item A before step 2 does not produce a feature that half-works. It
+// produces hub-scoped credentials assignable by any member of any project: the
+// cross-project exposure of design 8.2, live. Step 2 is what closes it, because
+// the ActionAssign arm is project-scoped and a project-scoped policy cannot match
+// a parentless resource.
+//
+// The paired test above caught step 4 landing. This one catches item A landing
+// early, which is the ordering that now carries the security consequence.
+//
+// DELETING THIS TEST IS PART OF ITEM A, and must not be done until step 2 is
+// green. Steps 3 and 4 are necessary but no longer sufficient.
 func TestGCPServiceAccount_HubScopedCreateStillRejected(t *testing.T) {
 	srv, _ := testServer(t)
 
@@ -727,8 +744,9 @@ func TestGCPServiceAccount_HubScopedCreateStillRejected(t *testing.T) {
 		map[string]string{"email": "new-hub-sa@hub.iam.gserviceaccount.com"})
 
 	require.Equal(t, http.StatusBadRequest, rec.Code,
-		"hub-scoped SA creation is held at item A, step 5 of 5; if this now succeeds, "+
-			"confirm steps 3 and 4 landed first and then delete this test: %s", rec.Body.String())
+		"hub-scoped SA creation is held at item A, step 5 of 5, and the hold is a SECURITY hold "+
+			"that hangs on step 2 (ActionAssign conversion), not on steps 3 and 4; if this now "+
+			"succeeds, confirm step 2 landed before deleting this test: %s", rec.Body.String())
 	assert.Contains(t, rec.Body.String(), "not enabled",
 		"the refusal must stay explicit — a 404 here would read as a missing route")
 }
