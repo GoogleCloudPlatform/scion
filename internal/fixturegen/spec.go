@@ -416,10 +416,10 @@ func Spec() []TableFixture {
 		// ---- Skill injections ----
 		{Table: "skill_injections", Rows: []row{
 			{
-				"id": "si000000-0000-0000-0000-000000000001",
+				"id":    "si000000-0000-0000-0000-000000000001",
 				"scope": "project", "scope_id": projectID,
 				"skill_uri": "registry:reviewer@1.0.0",
-				"optional":   false, "sort_order": 0,
+				"optional":  false, "sort_order": 0,
 				"created_at": baseTime, "created_by": userID,
 			},
 		}},
