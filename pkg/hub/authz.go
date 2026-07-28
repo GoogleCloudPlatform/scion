@@ -285,29 +285,40 @@ func (a *AuthzService) checkAccessForAgent(ctx context.Context, agent AgentIdent
 	//      grant assign explicitly. Do not cite this arm as
 	//      "reachability-preserving" without that qualification.
 	//
-	// ⚠️ This grant is safe ONLY while service-account assignment is confined
-	// to the caller's own project. Two things enforce that today: the
-	// sa.ScopeID != projectID check in createAgentInProject, and
-	// gcpServiceAccountResource, which gives a project parent only to
-	// project-scoped accounts — so a hub-scoped account yields pid == "" here
-	// and this arm cannot fire for it.
+	// ⚠️ WHAT CONFINES THIS ARM, and read the next paragraph before citing
+	// anything else. The confinement is `pid != ""` in the predicate
+	// immediately below, combined with gcpServiceAccountResource giving a
+	// project parent only to project-scoped accounts. A hub-scoped account is
+	// parentless, so projectIDForResource yields "" and this arm cannot fire
+	// for it. That is a property of the authorization engine and of the
+	// resource builder. It does not depend on any handler.
+	//
+	// Do NOT justify this arm by the scope check in createAgentInProject. An
+	// earlier version of this comment did exactly that, naming the
+	// `sa.ScopeID != projectID` equality as an enforcing mechanism. That check
+	// was replaced by sa.ReachableFromProject in a44b2950, which admits
+	// hub-scoped accounts from every project — so the stated justification
+	// became false while the arm it justified stayed correct for a reason the
+	// comment had not recorded. A confinement argument that names a call site
+	// can be invalidated by a commit to that call site, silently. Name engine
+	// properties only.
 	//
 	// The human half of this baseline is the per-project assign policy in
-	// seed.go (projectAssignPolicyName), and it is confined by the SAME guard
-	// read the other way: this arm by `pid != ""` immediately below,
-	// that policy by `pid == ""` in matchesResource, which refuses to match a
-	// project-scoped policy against a parentless resource (#595). One
-	// discipline applied in two places, not two unrelated accidents. Neither
-	// side needs a code-side revocation to stay confined, and neither should
-	// grow one.
+	// seed.go (projectAssignPolicyName), confined by the SAME engine property
+	// read the other way: this arm by `pid != ""` here, that policy by
+	// `pid == ""` in matchesResource, which refuses to match a project-scoped
+	// policy against a parentless resource (#595). One discipline in two
+	// places, not two unrelated accidents. Neither side needs a code-side
+	// revocation to stay confined, and neither should grow one.
 	//
-	// Goal 2 relaxes that confinement to make accounts hub-scoped and
-	// assignable across projects. At that moment neither guard holds: this arm
-	// stops being a restatement of existing reach and becomes the only thing
-	// standing between any agent and any service account on the hub. The
-	// coupling is escalated to ptone as task #19; the relaxation must not land
-	// before it is ruled. If you are here to relax scope, this arm is part of
-	// your change.
+	// Goal 2 makes hub-scoped accounts assignable across projects. That does
+	// not breach this arm — a hub-scoped account stays parentless, so this arm
+	// still cannot fire for it, which is the fail-closed outcome §8.2 rules
+	// correct: hub-scoped accounts are assignable by hub admins and the
+	// account's creator and nobody else. If you are here to make hub-scoped
+	// accounts broadly assignable, that is task #19 and this arm is NOT the
+	// place to do it; widening `pid != ""` would grant every agent every
+	// service account on the hub.
 	if action == ActionAssign && resource.Type == "gcp_service_account" {
 		if pid := projectIDForResource(resource); pid != "" && pid == agent.ProjectID() {
 			return Decision{

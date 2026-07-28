@@ -113,26 +113,44 @@ func seedDefaultPoliciesAndGroups(ctx context.Context, s store.Store) {
 //
 // Project scope dissolves that structurally rather than managing it:
 // matchesResource rejects a project-scoped policy against a resource that
-// resolves to no project ("pid == '' || pid != policy.ScopeID", fail closed
+// resolves to no project ("pid == ” || pid != policy.ScopeID", fail closed
 // rather than fall through — #595). gcpServiceAccountResource gives a project
 // parent only to project-scoped accounts, so a hub-scoped account yields
 // pid == "" and this policy CANNOT match it. No code-side guard is needed, and
 // none should be added: a policy that presents as applied but is revoked
 // elsewhere is the shape this change exists to avoid.
 //
-// ⚠️ The same confinement claim covers the agent-side arm (step 3b of
-// checkAccessForAgent), for the same reason from the same guard: arm 1 is
-// confined by `pid != ""` in checkAccessForAgent, this arm by `pid == ""` in
-// matchesResource. It is the #595 discipline applied in two places, not two
-// unrelated accidents. Both are safe ONLY while service-account assignment is
-// confined to the caller's own project — also enforced handler-side by the
-// sa.ScopeID != projectID check in createAgentInProject.
+// ⚠️ WHAT CONFINES THIS POLICY is matchesResource alone: it refuses to match a
+// project-scoped policy against a resource that resolves to no project (#595).
+// That is a property of the authorization engine. It holds no matter what any
+// handler does, and it is the only thing that needs to be true.
 //
-// Goal 2 relaxes that confinement to make accounts hub-scoped and assignable
-// across projects. At that moment neither guard holds and this policy stops
-// being a restatement of existing reach. The coupling is escalated to ptone as
-// task #19; the relaxation must not land before it is ruled. If you are here
-// to relax scope, this policy is part of your change.
+// Do NOT justify this policy by the scope check in createAgentInProject. An
+// earlier version of this comment named `sa.ScopeID != projectID` there as an
+// enforcing mechanism; a44b2950 replaced it with sa.ReachableFromProject,
+// which admits hub-scoped accounts from every project. The justification went
+// stale while the policy stayed correct for a reason the comment had not
+// recorded. A confinement argument that names a call site can be invalidated
+// by a commit to that call site, silently. Name engine properties only.
+//
+// The agent-side arm (step 3b of checkAccessForAgent) is confined by the SAME
+// engine property read the other way: that arm by `pid != ""`, this policy by
+// `pid == ""` in matchesResource. One discipline in two places, not two
+// unrelated accidents.
+//
+// Goal 2 makes hub-scoped accounts assignable across projects. That does not
+// breach this policy — a hub-scoped account stays parentless, so this policy
+// still cannot match it, which is the fail-closed outcome §8.2 rules correct:
+// hub-scoped accounts are assignable by hub admins and the account's creator
+// and nobody else. If you are here to make hub-scoped accounts broadly
+// assignable, that is task #19, and doing it by adding a hub-scoped assign
+// policy would grant every hub member every service account on the hub.
+//
+// ⚠️ #19 CONSTRAINT: whatever implements that toggle must NOT do it by
+// deleting or editing a grant by name. CreatePolicy enforces no name
+// uniqueness, so a name identifies a SET of rows, and ListPolicies(Name:X,
+// Limit:1) returns an arbitrary element of it. Additive operations are safe;
+// revocation by name is not.
 //
 // ── Scope of the "preserves existing reach" claim ─────────────────────────
 //
