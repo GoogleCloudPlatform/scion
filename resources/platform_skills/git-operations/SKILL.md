@@ -2,16 +2,16 @@
 name: git-operations
 description: >-
   Git safety and operational guidance for Scion agents. Covers working tree
-  resets, rebase pitfalls, and general git behaviour that agents should know
+  resets, rebase pitfalls, and general git behavior that agents should know
   regardless of workspace mode. For workspace-mode-specific git rules, see
-  the workspace skill.
+  the git-sandbox skill.
 ---
 
 # Git Operations
 
 General git safety rules for Scion agents. These apply regardless of
 workspace sharing mode — for mode-specific guidance (worktree isolation,
-shared-plain index hazards, clone-per-agent remotes), see the `workspace`
+shared-plain index hazards, clone-per-agent remotes), see the `git-sandbox`
 skill.
 
 ## Working Tree Reset Safety
