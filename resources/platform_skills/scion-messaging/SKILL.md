@@ -61,7 +61,7 @@ The `scion message` command provides powerful flags for advanced orchestration:
 - **`--raw`**: Sends literal keystrokes to an agent's tmux terminal (e.g., `scion message agent:editor --raw "ENTER"`). Useful for unblocking interactive prompts.
 - **`--wake`**: Resumes a suspended agent and delivers the message.
 - **`--interrupt`**: Interrupts the target agent's current process before delivering the message (use with caution).
-- **`--notify`**: Subscribes you to state-change notifications (e.g., completion, stall) for the target agent.
+- **`--notify`**: Subscribes you to state-change notifications (e.g., completion, stall) for the target agent. Note: `--notify` on `scion start` is **deprecated** — agents that create other agents are automatically subscribed via creation ancestry. Use `--notify` on `scion message` only when subscribing to an agent you did not create.
 - **`--attach <file>`**: Attaches one or more files to the message.
 - **`--in <delay>`**: Schedules a message for a relative delay (e.g., `--in 5m`).
 - **`--at <time>`**: Schedules a message for an absolute time (e.g., `--at "2026-06-10 14:00"`).
@@ -100,7 +100,7 @@ If your user-directed message is long:
 - **Red Flag**: Using `--broadcast`.
 - **Red Flag**: An agent goes silent for >30 minutes without a milestone update or "blocked" status.
 - **Anti-Pattern**: Sending "I'm still here" or other low-signal filler messages.
-- **Anti-Pattern**: Using `sleep` to wait for something; use `sciontool status blocked` instead.
+- **Anti-Pattern**: Using `sleep` to wait for something; use `sciontool status blocked` instead. For external processes that emit no notification (CI, builds, deploys), pair `status blocked` with a scheduled self-callback — see the `scion-scheduler` skill → **Waiting on external processes**.
 - **Anti-Pattern**: Repeating the entire original brief in a follow-up message (exhausts context).
 
 ## Verification Checklist
