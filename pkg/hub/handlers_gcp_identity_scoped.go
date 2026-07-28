@@ -354,6 +354,39 @@ func (s *Server) authorizeGCPServiceAccountFlat(w http.ResponseWriter, r *http.R
 		return true
 	}
 
+	// NO IDENTITY -> 404, BEFORE THE SCOPE SWITCH. #42, found by sa-arch.
+	//
+	// THE INVARIANT, WHICH IS THE THING TO TEST FOR AND THE THING THAT SURVIVES
+	// A REWRITE OF THIS FUNCTION: an identity-less caller must not be able to
+	// tell two scopes apart by status code.
+	//
+	// The rest of this comment is the CAUSE, which is only the reason the
+	// invariant was broken in one particular arrangement of the code (aid-em).
+	// Read the sentence above; the paragraphs below explain why it once failed.
+	//
+	// Without this arm the switch below runs anyway and answers 403 for hub
+	// scope, 404 for user scope -- which is precisely the leak the noIdentity
+	// flag exists to prevent. A caller carrying no user identity could tell the
+	// two apart by status alone, on a route where it has established nothing.
+	//
+	// AND THE CALLER IS NOT HYPOTHETICAL: GetUserIdentityFromContext returns nil
+	// for an AGENT, and agents authenticate perfectly well -- UnifiedAuthMiddle-
+	// ware admits them -- so every authenticated agent reaching this route lands
+	// here. The hub arm's 403 rests on "every user is joined to hub-members on
+	// login", which is false for agents: agent principals never include
+	// hub-members. It would have been granting a disclosure on a premise
+	// explicitly false for the caller receiving it. (The reason string is also
+	// empty on a noIdentity verdict, so that 403 carried no message at all.)
+	//
+	// 404 rather than the nested route's 403, because the disclosure question is
+	// answered per route and the answers differ for good reason: a nested caller
+	// supplied the project themselves, while an identity-less caller here has
+	// established nothing anywhere.
+	if verdict.noIdentity {
+		NotFound(w, "GCP Service Account")
+		return false
+	}
+
 	switch sa.Scope {
 	case store.ScopeHub:
 		// 403. Existence is ALREADY ESTABLISHABLE by any authenticated caller:

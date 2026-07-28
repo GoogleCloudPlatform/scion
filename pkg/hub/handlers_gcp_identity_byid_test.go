@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/require"
 )
@@ -410,4 +411,109 @@ func TestGCPSA_FlatByID_CollectionRouteStillReachable(t *testing.T) {
 	emails := topLevelSAEmails(t, srv, owner, "scope=hub")
 	require.Contains(t, emails, hub,
 		"adding /api/v1/gcp-service-accounts/ must not shadow /api/v1/gcp-service-accounts")
+}
+
+// #42. THE FLAT RENDERER LEAKED WHICH ARM IT WOULD HAVE HIT, to a caller that
+// had established nothing at all. Found by sa-arch reviewing acc4285d.
+//
+// gcpSAVerdict.noIdentity exists, in its own doc's words, "so a renderer can
+// answer it generically instead of leaking which arm it would have hit". The
+// nested renderer honoured that; the flat one checked allowed and fell straight
+// into the scope switch, which answers 403 for hub scope and 404 for user
+// scope. An identity-less caller could therefore separate the two by status.
+//
+// AND THAT CALLER IS ORDINARY. GetUserIdentityFromContext returns nil for an
+// AGENT, and agents authenticate perfectly well, so every authenticated agent
+// reaching this route took the leaking path. The hub arm's 403 rests on "every
+// user is joined to hub-members on login" -- which is FALSE FOR AGENTS, whose
+// principals never include hub-members. The disclosure was being granted on a
+// premise explicitly false for the caller receiving it.
+//
+// ONE TEST ASSERTING THE TWO STATUSES ARE NOW IDENTICAL, not two tests each
+// pinning 404. Two such tests can both be made green by a change that reopens
+// the divergence in the other direction, or by a cleanup that harmonises one to
+// whatever the code happens to do; a test whose subject IS the sameness cannot.
+func TestGCPSA_FlatByID_NoIdentity_HubAndUserAreIndistinguishable(t *testing.T) {
+	srv, s, _, _, _, project := setupGCPAuthzTest(t)
+	ctx := context.Background()
+
+	agent := &store.Agent{
+		ID:           tid("agent-flat-sa-probe"),
+		Slug:         "flat-sa-probe",
+		Name:         "Flat SA Probe",
+		ProjectID:    project.ID,
+		Phase:        string(state.PhaseRunning),
+		StateVersion: 1,
+		Created:      time.Now(),
+		Updated:      time.Now(),
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	agentToken, err := srv.agentTokenService.GenerateAgentToken(agent.ID, project.ID, nil, nil)
+	require.NoError(t, err)
+
+	hubSA := mkSA(t, s, "sa-flat-noid-hub", "hubwide@p.iam.gserviceaccount.com",
+		store.ScopeHub, "hub-instance-1", tid("user-stranger"))
+	userSA := mkSA(t, s, "sa-flat-noid-user", "personal@p.iam.gserviceaccount.com",
+		store.ScopeUser, tid("user-stranger"), tid("user-stranger"))
+
+	hubRec := doRequestWithAgentToken(t, srv, http.MethodGet, flatSAPath+hubSA.ID, nil, agentToken)
+	userRec := doRequestWithAgentToken(t, srv, http.MethodGet, flatSAPath+userSA.ID, nil, agentToken)
+
+	require.Equal(t, hubRec.Code, userRec.Code,
+		"an identity-less caller must not be able to tell a hub-scoped account from a user-scoped "+
+			"one by status: hub gave %d, user gave %d", hubRec.Code, userRec.Code)
+
+	// And the shared answer is the one that reveals least. Asserted after the
+	// sameness, not instead of it -- sameness at 403 would be a different bug.
+	require.Equal(t, http.StatusNotFound, hubRec.Code,
+		"a caller with no identity has established nothing anywhere; got: %s", hubRec.Body.String())
+
+	// The nested route keeps its 403. The disclosure answer differs per route on
+	// purpose: a nested caller supplied the project themselves. Pinned here so
+	// that "make the two renderers agree" is visibly a change in behaviour and
+	// not a tidy-up.
+	nested := doRequestWithAgentToken(t, srv, http.MethodGet,
+		"/api/v1/projects/"+project.ID+"/gcp-service-accounts/"+hubSA.ID, nil, agentToken)
+	require.Equal(t, http.StatusForbidden, nested.Code,
+		"the nested renderer answers 403 for an identity-less caller; got: %s", nested.Body.String())
+}
+
+// The same leak on the write verb, because the fix lives in the renderer and a
+// renderer is reached by every verb. DELETE also gives an observable a status
+// cannot forge: the account is still there afterwards.
+func TestGCPSA_FlatByID_NoIdentity_DeleteIsAlsoIndistinguishable(t *testing.T) {
+	srv, s, _, _, _, project := setupGCPAuthzTest(t)
+	ctx := context.Background()
+
+	agent := &store.Agent{
+		ID:           tid("agent-flat-sa-del"),
+		Slug:         "flat-sa-del",
+		Name:         "Flat SA Del",
+		ProjectID:    project.ID,
+		Phase:        string(state.PhaseRunning),
+		StateVersion: 1,
+		Created:      time.Now(),
+		Updated:      time.Now(),
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	agentToken, err := srv.agentTokenService.GenerateAgentToken(agent.ID, project.ID, nil, nil)
+	require.NoError(t, err)
+
+	hubSA := mkSA(t, s, "sa-flat-del-hub", "hubdel@p.iam.gserviceaccount.com",
+		store.ScopeHub, "hub-instance-1", tid("user-stranger"))
+	userSA := mkSA(t, s, "sa-flat-del-user", "userdel@p.iam.gserviceaccount.com",
+		store.ScopeUser, tid("user-stranger"), tid("user-stranger"))
+
+	hubRec := doRequestWithAgentToken(t, srv, http.MethodDelete, flatSAPath+hubSA.ID, nil, agentToken)
+	userRec := doRequestWithAgentToken(t, srv, http.MethodDelete, flatSAPath+userSA.ID, nil, agentToken)
+
+	require.Equal(t, hubRec.Code, userRec.Code,
+		"delete must not distinguish the scopes for an identity-less caller either: hub gave %d, user gave %d",
+		hubRec.Code, userRec.Code)
+	require.Equal(t, http.StatusNotFound, hubRec.Code)
+
+	require.True(t, saExists(t, s, hubSA.ID), "the hub-scoped account must survive a refused delete")
+	require.True(t, saExists(t, s, userSA.ID), "the user-scoped account must survive a refused delete")
 }
