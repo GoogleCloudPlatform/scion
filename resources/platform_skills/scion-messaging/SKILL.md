@@ -95,6 +95,33 @@ If your user-directed message is long:
 - Or write the content to a shared file and send a short message with the
   file path.
 
+## Inbound Message Types
+
+**Check the `type` field before replying.** Only `instruction` is addressed
+to you. `state-change` and `input-needed` are notifications *about* another
+agent — they require no reply.
+
+**Never answer an `input-needed` message.** When an agent calls
+`sciontool status ask_user`, the question text is embedded in a notification
+dispatched to that agent's **subscribers** (including any agent that created
+it). The message arrives as `"<name> is WAITING_FOR_INPUT: <question>"` with
+type `input-needed`. It looks like a direct question, but it is not — that
+agent is blocked waiting for a **human**, and a peer's reply cannot clear it.
+
+Answering `input-needed` messages causes:
+- Wasted tokens — the reply goes nowhere useful.
+- False loop signals — repeated echoes look like a stuck agent when they are just re-signals.
+- **Scope violations** — answering a question meant for a human can make a recommendation look ratified.
+
+**If an `input-needed` echo looks like it needs your input**, the routing is
+likely wrong. Tell the peer to check the recipient on its prompt, and tell the
+human. Do not answer repeatedly — each appearance is a status re-signal, not
+impatience.
+
+**To request a peer's input, send an `instruction`** via `scion message
+agent:<name>`. Do not rely on your `ask_user` status signal to reach them — it
+is a broadcast to subscribers, not a delivery to an addressee.
+
 ## Anti-Patterns and Red Flags
 
 - **Red Flag**: Using `--broadcast`.
