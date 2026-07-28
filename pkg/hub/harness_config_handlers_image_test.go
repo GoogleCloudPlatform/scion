@@ -98,12 +98,20 @@ func setupImageStatusTest(t *testing.T) (*Server, store.Store) {
 
 // imageStatusRequest builds a request carrying an authenticated admin identity.
 //
-// These handlers filter the broker list through canDispatchToBroker, which denies
-// a caller with no identity at all (#591) — previously it allowed them. In
-// production the auth middleware guarantees an identity is present by the time a
-// handler runs; these tests invoke the handler directly, bypassing it, so they
-// have to supply one themselves. Without it every broker is filtered out and the
-// aggregation under test has nothing to aggregate.
+// These handlers filter the broker list through canDispatchToBroker, which now
+// denies a caller with no identity at all where it previously allowed one
+// (#591). These tests invoke the handler directly, bypassing the auth
+// middleware, so before this helper they ran with an empty context — and every
+// broker was filtered out, leaving the aggregation under test nothing to
+// aggregate.
+//
+// That they broke is not a reason to soften the deny: it is evidence that the
+// fail-open was load-bearing at this call site, which is the finding, not a side
+// effect. Nor is it a production behaviour change — in production the auth
+// middleware guarantees an identity is present by the time these handlers run.
+// Supplying the identity the middleware would have supplied is the repair; the
+// alternative, relaxing canDispatchToBroker so unauthenticated callers keep
+// seeing brokers, is the bug.
 func imageStatusRequest(method, path string) *http.Request {
 	req := httptest.NewRequest(method, path, nil)
 	return req.WithContext(contextWithIdentity(req.Context(),
