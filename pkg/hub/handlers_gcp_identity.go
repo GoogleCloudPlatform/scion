@@ -89,34 +89,13 @@ type verificationFailedDetails struct {
 	TargetEmail            string `json:"targetEmail"`
 }
 
-// gcpSAReachableFromProject reports whether sa can be addressed through the
-// per-project API for projectID.
-//
-// A project-scoped SA is reachable only from its own project. A hub-scoped SA
-// is reachable from every project — that is the point of Goal 2, since an
-// agent in any project may be assigned one. Any other scope (notably
-// user-scope) is not reachable through a project route at all.
-//
-// This replaces a bare `sa.ScopeID != projectID` comparison, which rejected
-// hub-scoped SAs because it compared a hub instance ID against a project ID
-// and never looked at Scope. Matching on Scope first is what makes the
-// hub-scoped case expressible.
-//
-// It is a *visibility* predicate and nothing more. It deliberately does not
-// authorize: a hub-scoped SA that is visible here must still clear the
-// hub-level check in authorizeGCPServiceAccount. Keeping the two apart is what
-// stops "reachable from this project" from quietly becoming "manageable by
-// this project's owner".
-func gcpSAReachableFromProject(sa *store.GCPServiceAccount, projectID string) bool {
-	switch sa.Scope {
-	case store.ScopeHub:
-		return true
-	case store.ScopeProject:
-		return sa.ScopeID == projectID
-	default:
-		return false
-	}
-}
+// The reachability predicate these handlers use is
+// (*store.GCPServiceAccount).ReachableFromProject. It lives on the store type
+// rather than here because the same question is asked outside this package --
+// see pkg/lifecyclehooks/validate.go -- and packages that cannot import hub
+// would otherwise have to reimplement it. Read its doc comment before changing
+// any caller: it answers visibility only, and the authorization that must
+// follow it for a hub-scoped account is authorizeGCPServiceAccount below.
 
 // authorizeGCPServiceAccount performs the scope-appropriate authorization check
 // for an action on a service account, writing the error response itself and
@@ -420,7 +399,7 @@ func (s *Server) getGCPServiceAccount(w http.ResponseWriter, r *http.Request, pr
 		return
 	}
 
-	if !gcpSAReachableFromProject(sa, projectID) {
+	if !sa.ReachableFromProject(projectID) {
 		NotFound(w, "GCP Service Account")
 		return
 	}
@@ -451,7 +430,7 @@ func (s *Server) deleteGCPServiceAccount(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
-	if !gcpSAReachableFromProject(sa, projectID) {
+	if !sa.ReachableFromProject(projectID) {
 		NotFound(w, "GCP Service Account")
 		return
 	}
@@ -479,7 +458,7 @@ func (s *Server) verifyGCPServiceAccount(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
-	if !gcpSAReachableFromProject(sa, projectID) {
+	if !sa.ReachableFromProject(projectID) {
 		NotFound(w, "GCP Service Account")
 		return
 	}

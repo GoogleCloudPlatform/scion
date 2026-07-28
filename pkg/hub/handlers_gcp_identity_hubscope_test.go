@@ -163,7 +163,7 @@ func TestGCPSA_Delete_HubScoped_AdminAllowed(t *testing.T) {
 		"a hub admin must be able to delete a hub-scoped SA; got: %s", rec.Body.String())
 }
 
-// Regression guard on the other half of gcpSAReachableFromProject. Opening the
+// Regression guard on the other half of ReachableFromProject. Opening the
 // guard to hub scope must not open it to somebody else's project: the rewrite
 // went from "ScopeID must equal this project" to a switch on Scope, and the
 // project arm has to keep the equality it replaced.
