@@ -57,7 +57,19 @@ A brief states:
 | Context | what has already been decided, and where to read it |
 | Boundaries | what is explicitly out of scope |
 | Deliverable | what artifact is owed, and in what shape |
-| Reporting | who to report to, and when |
+| Reporting | who to report to, and when — including who to ask when blocked (see below) |
+
+### Direct questions to the person who can answer them
+
+When an agent needs a decision or input, it should ask the person named in the
+brief's **Reporting** row — not relay through the coordinator unless the
+coordinator *is* that person. An agent created to work with a specific user or
+lead already knows who to ask; routing the question through an intermediary
+wastes a round trip and risks the question being reframed in transit.
+
+When writing a brief, make the Reporting row explicit enough that the agent
+knows who to message for decisions. If different questions go to different
+people, say so.
 
 For shell-escaping rules when passing prompts, see the `scion-cli-operations` skill —
 do not improvise quoting.
