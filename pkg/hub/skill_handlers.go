@@ -1505,6 +1505,9 @@ func (s *Server) resolveGitHubToken(ctx context.Context, projectID string) (inst
 	if err != nil {
 		return "", "", fmt.Errorf("failed to get project: %w", err)
 	}
+	if project == nil {
+		return "", "", fmt.Errorf("project %s not found", projectID)
+	}
 
 	if project.GitHubInstallationID == nil {
 		return "public", "", nil
@@ -1550,7 +1553,7 @@ func (s *Server) resolveGitHubSkill(ctx context.Context, rawURI, projectID strin
 				"uri", rawURI, "error", err)
 		} else if hit {
 			slog.InfoContext(ctx, "github_resolution_cache: cache hit",
-				"uri", rawURI, "commit_sha", entry.CommitSHA[:12], "cache_hit", true)
+				"uri", rawURI, "commit_sha", safeShortSHA(entry.CommitSHA), "cache_hit", true)
 			return buildResolvedSkillResponse(ghRef, entry), nil
 		}
 	}
@@ -1604,7 +1607,7 @@ func (s *Server) resolveGitHubSkill(ctx context.Context, rawURI, projectID strin
 	}
 
 	slog.InfoContext(ctx, "github_resolution_cache: cache miss, resolved via API",
-		"uri", rawURI, "commit_sha", commitSHA[:12], "files", len(fileEntries), "cache_hit", false)
+		"uri", rawURI, "commit_sha", safeShortSHA(commitSHA), "files", len(fileEntries), "cache_hit", false)
 
 	return buildResolvedSkillResponse(ghRef, &entry), nil
 }
@@ -1624,10 +1627,20 @@ func buildResolvedSkillResponse(ghRef *agent.GitHubSkillRef, entry *GitHubCacheE
 	return &ResolvedSkillResponse{
 		URI:             ghRef.Raw,
 		Name:            ghRef.SkillName,
-		ResolvedVersion: entry.CommitSHA[:12], // Short SHA for display
+		ResolvedVersion: safeShortSHA(entry.CommitSHA), // Short SHA for display
 		ContentHash:     entry.BundleHash,
 		Files:           files,
 	}
+}
+
+// safeShortSHA returns the first 12 characters of a SHA string, or the full
+// string if it is shorter than 12 characters (e.g. in tests or after DB
+// corruption). Prevents a panic on bare sha[:12] slicing.
+func safeShortSHA(sha string) string {
+	if len(sha) < 12 {
+		return sha
+	}
+	return sha[:12]
 }
 
 // computeBundleHash computes the content hash from file entries.

@@ -151,11 +151,11 @@ func ghResolveCommitSHA(ctx context.Context, apiBase, owner, repo, ref, token st
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024*1024))
 		return "", fmt.Errorf("GitHub API error %d resolving %s@%s: %s", resp.StatusCode, repo, ref, string(body))
 	}
 
-	shaBytes, err := io.ReadAll(resp.Body)
+	shaBytes, err := io.ReadAll(io.LimitReader(resp.Body, 1024*1024))
 	if err != nil {
 		return "", fmt.Errorf("failed to read commit SHA response: %w", err)
 	}
@@ -190,7 +190,7 @@ func ghListContents(ctx context.Context, apiBase, owner, repo, path, commitSHA, 
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024*1024))
 		return nil, fmt.Errorf("GitHub API error %d listing %s/%s at %s: %s", resp.StatusCode, owner, repo, path, string(body))
 	}
 
