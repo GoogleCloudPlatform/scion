@@ -16,6 +16,7 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"testing"
@@ -196,4 +197,144 @@ func TestGCPSA_Get_ProjectScoped_CrossProjectNotFound(t *testing.T) {
 		fmt.Sprintf("/api/v1/projects/%s/gcp-service-accounts/%s", project.ID, sa.ID), nil)
 	require.Equal(t, http.StatusNotFound, rec.Code,
 		"a project-scoped SA must not be reachable through a different project; got: %s", rec.Body.String())
+}
+
+// listSAEmails issues a nested list request and returns the emails it returned,
+// which is the only part of the response these tests care about.
+func listSAEmails(t *testing.T, srv *Server, user *store.User, path string) []string {
+	t.Helper()
+	rec := doRequestAsUser(t, srv, user, http.MethodGet, path, nil)
+	require.Equal(t, http.StatusOK, rec.Code, "list failed: %s", rec.Body.String())
+
+	var resp ListGCPServiceAccountsResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+
+	emails := make([]string, 0, len(resp.Items))
+	for _, item := range resp.Items {
+		emails = append(emails, item.Email)
+	}
+	return emails
+}
+
+// seedListMix creates the three-account fixture the list tests share: one in
+// the caller's project, one in a different project, one hub-scoped.
+func seedListMix(t *testing.T, ctx context.Context, s store.Store, owner *store.User, project *store.Project) (mine, hub string) {
+	t.Helper()
+
+	other := &store.Project{
+		ID: tid("project-list-other"), Name: "Other", Slug: "other-list",
+		OwnerID: owner.ID, CreatedBy: owner.ID, Created: time.Now(), Updated: time.Now(),
+	}
+	require.NoError(t, s.CreateProject(ctx, other))
+
+	mk := func(idName, email, scope, scopeID, createdBy string) {
+		require.NoError(t, s.CreateGCPServiceAccount(ctx, &store.GCPServiceAccount{
+			ID: tid(idName), Scope: scope, ScopeID: scopeID, Email: email,
+			ProjectID: "gcp-proj", CreatedBy: createdBy, CreatedAt: time.Now(),
+		}))
+	}
+	mine = "mine@p.iam.gserviceaccount.com"
+	hub = "hubwide@p.iam.gserviceaccount.com"
+	mk("sa-list-mine", mine, store.ScopeProject, project.ID, owner.ID)
+	mk("sa-list-other", "other@p.iam.gserviceaccount.com", store.ScopeProject, other.ID, owner.ID)
+	// The hub-scoped account is created by a stranger on purpose.
+	// gcpServiceAccountResource sets OwnerID from CreatedBy, and CheckAccess
+	// short-circuits for a resource's owner — correctly, since whoever minted a
+	// hub-scoped SA does keep rights over it. Seeding it under the project
+	// owner would fire that short-circuit and make the scope tests pass for a
+	// reason that has nothing to do with scope.
+	mk("sa-list-hub", hub, store.ScopeHub, "hub-instance-1", tid("user-hub-sa-creator"))
+
+	return mine, hub
+}
+
+// The nested list default must not change. Existing callers -- the project
+// settings management view among them -- get exactly what they got before:
+// this project's accounts and nothing else. Hub-scoped accounts are excluded
+// here on purpose, because that view offers edit affordances the caller does
+// not have over them.
+func TestGCPSA_ListNested_DefaultExcludesHubScoped(t *testing.T) {
+	srv, s, owner, _, _, project := setupGCPAuthzTest(t)
+	ctx := context.Background()
+
+	mine, hub := seedListMix(t, ctx, s, owner, project)
+
+	emails := listSAEmails(t, srv, owner,
+		fmt.Sprintf("/api/v1/projects/%s/gcp-service-accounts", project.ID))
+	require.ElementsMatch(t, []string{mine}, emails,
+		"the default nested list must stay project-only; hub-scoped SA %q leaked", hub)
+}
+
+// includeHubScoped=true is what the assign picker sends: an agent in this
+// project can be given either its own project's SA or a hub-wide one, so the
+// picker needs both in one list.
+//
+// The other project's SA is the load-bearing part of the assertion. Widening
+// to hub scope must not degrade into "return everything" -- and because the
+// union is a single store predicate rather than two queries stitched together,
+// there is one place where that could go wrong.
+func TestGCPSA_ListNested_IncludeHubScopedUnions(t *testing.T) {
+	srv, s, owner, _, _, project := setupGCPAuthzTest(t)
+	ctx := context.Background()
+
+	mine, hub := seedListMix(t, ctx, s, owner, project)
+
+	emails := listSAEmails(t, srv, owner,
+		fmt.Sprintf("/api/v1/projects/%s/gcp-service-accounts?includeHubScoped=true", project.ID))
+	require.ElementsMatch(t, []string{mine, hub}, emails,
+		"includeHubScoped must add hub-scoped SAs and nothing else")
+}
+
+// Anything other than the literal "true" leaves the default alone. Spelled out
+// because the flag widens what a caller sees, so an unparseable value must
+// fail closed rather than being treated as "present, therefore on".
+func TestGCPSA_ListNested_IncludeHubScopedFalsyIgnored(t *testing.T) {
+	srv, s, owner, _, _, project := setupGCPAuthzTest(t)
+	ctx := context.Background()
+
+	mine, _ := seedListMix(t, ctx, s, owner, project)
+
+	for _, raw := range []string{"", "false", "1", "yes", "TRUE"} {
+		emails := listSAEmails(t, srv, owner,
+			fmt.Sprintf("/api/v1/projects/%s/gcp-service-accounts?includeHubScoped=%s", project.ID, raw))
+		require.ElementsMatch(t, []string{mine}, emails,
+			"includeHubScoped=%q must not widen the list", raw)
+	}
+}
+
+// The union is a visibility change, not an authority change: a hub-scoped SA
+// that appears in a project's list must not carry delete capability for the
+// project owner. The per-item capabilities come from
+// ComputeCapabilitiesBatch over gcpServiceAccountResource, which leaves
+// hub-scoped SAs parentless, so the UI arrives at the same answer the delete
+// handler does. Asserted because a picker and a management view render from
+// this same payload, and a stale "delete" affordance on a hub-wide credential
+// would be an invitation to a 403 at best.
+func TestGCPSA_ListNested_HubScopedItemHasNoDeleteCapability(t *testing.T) {
+	srv, s, owner, _, _, project := setupGCPAuthzTest(t)
+	ctx := context.Background()
+
+	mine, hub := seedListMix(t, ctx, s, owner, project)
+
+	rec := doRequestAsUser(t, srv, owner, http.MethodGet,
+		fmt.Sprintf("/api/v1/projects/%s/gcp-service-accounts?includeHubScoped=true", project.ID), nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	var resp ListGCPServiceAccountsResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+
+	seen := map[string]bool{}
+	for _, item := range resp.Items {
+		require.NotNil(t, item.Cap, "capabilities should be computed for %s", item.Email)
+		seen[item.Email] = true
+		switch item.Email {
+		case hub:
+			require.NotContains(t, item.Cap.Actions, string(ActionDelete),
+				"project owner must not be offered delete on a hub-scoped SA")
+		case mine:
+			require.Contains(t, item.Cap.Actions, string(ActionDelete),
+				"project owner should still be offered delete on their own project's SA")
+		}
+	}
+	require.True(t, seen[hub] && seen[mine], "fixture did not appear in the response")
 }

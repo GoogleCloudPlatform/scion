@@ -327,9 +327,24 @@ type ListGCPServiceAccountsResponse struct {
 
 func (s *Server) listGCPServiceAccounts(w http.ResponseWriter, r *http.Request, projectID string) {
 	ctx := r.Context()
+
+	// This one route serves two callers with opposite needs. The assign picker
+	// wants the project's accounts plus the hub-wide ones, because either can
+	// be given to an agent. The project settings management view wants only the
+	// project's, because listing hub-scoped accounts there offers the user rows
+	// the view cannot edit. Neither is more correct, so the caller says which
+	// it wants and the default stays project-only: every existing client keeps
+	// its current response byte for byte.
+	//
+	// Unlike the top-level route there is no scope parameter to validate
+	// against here -- the route is project-scoped by construction -- so the
+	// flag is accepted unconditionally.
+	includeHubScoped := r.URL.Query().Get("includeHubScoped") == "true"
+
 	sas, err := s.store.ListGCPServiceAccounts(ctx, store.GCPServiceAccountFilter{
-		Scope:   store.ScopeProject,
-		ScopeID: projectID,
+		Scope:            store.ScopeProject,
+		ScopeID:          projectID,
+		IncludeHubScoped: includeHubScoped,
 	})
 	if err != nil {
 		writeErrorFromErr(w, err, "")
@@ -366,6 +381,11 @@ func (s *Server) listGCPServiceAccounts(w http.ResponseWriter, r *http.Request, 
 	var mintQuota *GCPMintQuotaInfo
 	if s.gcpIAMAdmin != nil && s.config.GCPProjectID != "" {
 		managed := true
+		// Deliberately not widened by includeHubScoped. This counts against
+		// GCPMintCapPerProject, so it must stay a count of what this project
+		// minted; hub-scoped accounts are not charged to any one project and
+		// including them would shrink every project's remaining quota by the
+		// hub-wide total.
 		projectCount, _ := s.store.CountGCPServiceAccounts(ctx, store.GCPServiceAccountFilter{
 			Scope:   store.ScopeProject,
 			ScopeID: projectID,
