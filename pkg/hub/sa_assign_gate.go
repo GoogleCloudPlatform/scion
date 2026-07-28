@@ -291,6 +291,15 @@ func (s *Server) authorizeSAAssignment(w http.ResponseWriter, r *http.Request, s
 		case store.MechanismCheckUnwired, store.MechanismCheckUnavailable:
 			writeForbidden(w, "GCP permission checking is not available on this Hub; "+
 				"service-account assignment is refused until it is configured")
+		case store.MechanismCheckFailed:
+			// Transient and not the caller's fault. Deliberately does not tell
+			// them to request a grant they may already hold.
+			writeForbidden(w, "Could not verify your permission to use this GCP service "+
+				"account because the check did not complete; try again")
+		case store.MechanismUnattributableAllow:
+			// A checker bug, not a caller problem. Says nothing actionable to
+			// the caller because there is nothing they can do about it.
+			writeForbidden(w, "Could not verify your permission to use this GCP service account")
 		default:
 			writeForbidden(w, "You don't have permission to use this GCP service account ("+
 				store.PermissionActAs+" is required on "+sa.Email+")")

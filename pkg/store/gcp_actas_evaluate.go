@@ -37,6 +37,39 @@ const (
 
 	// MechanismNoTarget marks a denial because no target account was supplied.
 	MechanismNoTarget = "no-target"
+
+	// MechanismCheckFailed marks a result where the checker was consulted but
+	// did not return a verdict — a transport or programming failure.
+	//
+	// ⚠️ It REPLACES whatever mechanism and reason the checker reported, rather
+	// than being recorded alongside them. A failed check that kept its
+	// reported reason produces an audit record like "Outcome: indeterminate,
+	// Mechanism: iam-getIamPolicy, Reason: caller has roles/..." — which
+	// asserts that IAM was consulted and answered. It was not. Preserving a
+	// verdict-shaped explanation for a call that produced no verdict is worse
+	// than recording nothing, because it reads as evidence.
+	MechanismCheckFailed = "check-failed"
+
+	// MechanismUnattributableAllow marks an allow that was DOWNGRADED to a
+	// denial because the checker reported no mechanism.
+	//
+	// An allow nobody can attribute is the exact thing the audit record exists
+	// to prevent: "allowed because IAM said so" and "allowed because nobody
+	// asked" become indistinguishable, and the difference is only ever needed
+	// after the fact, when it can no longer be recovered. A checker that
+	// allows without naming the check is malformed in the same way as one that
+	// returns (Allowed, err), and is treated the same way.
+	//
+	// Alertable by design: no conforming checker produces this, so any
+	// occurrence is a bug in a checker implementation and not a caller problem.
+	MechanismUnattributableAllow = "allow-unattributable"
+
+	// MechanismUnspecified marks a DENIAL from a checker that reported no
+	// mechanism. Unlike the allow case this does not change the outcome — a
+	// denial is already the safe direction, and downgrading it further would
+	// achieve nothing — but it is still named rather than left empty so it can
+	// be alerted on as the checker bug it is.
+	MechanismUnspecified = "unspecified"
 )
 
 // EvaluateActAs is the single decision sequence for "may this caller act as
@@ -70,13 +103,18 @@ const (
 //
 // An error from the checker is diagnostic and carries no verdict, per the
 // CallerPermissionChecker contract. It is returned to the caller for logging,
-// but the outcome is forced to ActAsIndeterminate regardless of what the
-// implementation put there: a checker returning (Allowed, err) is malformed,
-// and this is the one place that can stop that from becoming an allow.
+// but the whole result is replaced: outcome forced to ActAsIndeterminate,
+// mechanism to MechanismCheckFailed, reason to one that says no verdict was
+// obtained. A checker returning (Allowed, err) is malformed and this is the one
+// place that can stop it becoming an allow — and a preserved reason from a call
+// that never answered is worse than no reason at all, because it reads as
+// evidence that IAM was consulted.
 //
-// Mechanism is never empty on return. An audit record saying "denied" with no
-// mechanism is not actionable, and the gap would only ever be noticed during an
-// incident.
+// THE RESULT IS ALWAYS ATTRIBUTABLE. Mechanism is never empty on return, and an
+// ALLOW that arrives without one is downgraded to indeterminate rather than
+// stamped and honoured — see MechanismUnattributableAllow. An audit record that
+// cannot say which check produced a permit is the failure the mechanism field
+// exists to prevent, and it is only ever missed during an incident.
 func EvaluateActAs(
 	ctx context.Context,
 	checker CallerPermissionChecker,
@@ -124,10 +162,46 @@ func EvaluateActAs(
 		// contract says error carries no verdict, and this is where a
 		// non-conforming implementation is prevented from turning a transport
 		// failure into an allow.
-		result.Outcome = ActAsIndeterminate
+		//
+		// The mechanism and reason are REPLACED, not kept. Whatever the checker
+		// reported describes a verdict it did not reach; leaving it in place
+		// produces an audit record that asserts IAM was consulted and answered.
+		// The attempted mechanism is preserved inside the reason because it is
+		// useful for triage and is a fixed identifier chosen by our own
+		// implementations.
+		attempted := result.Mechanism
+		if attempted == "" {
+			attempted = "caller-permission"
+		}
+		return ActAsResult{
+			Outcome:   ActAsIndeterminate,
+			Mechanism: MechanismCheckFailed,
+			Reason: "the " + attempted + " check did not complete, so no verdict was " +
+				"obtained; this is not a statement about the caller's permissions",
+		}, err
+		// ⚠️ The underlying error is deliberately NOT folded into Reason.
+		// Reason is surfaced to the caller on denial, and an error from a
+		// remote IAM call is not a string this package can promise is free of
+		// policy content. Both consumers already log err separately with the
+		// full text, which is where it belongs.
 	}
+
 	if result.Mechanism == "" {
-		result.Mechanism = "unspecified"
+		// An unattributable ALLOW is not an allow. See
+		// MechanismUnattributableAllow: a permit nobody can account for defeats
+		// the reason the mechanism field is mandatory, and a checker that emits
+		// one is malformed. Fails closed.
+		if result.Outcome == ActAsAllowed {
+			return ActAsResult{
+				Outcome:   ActAsIndeterminate,
+				Mechanism: MechanismUnattributableAllow,
+				Reason: "the checker allowed this caller without naming the check that " +
+					"produced the decision; an unattributable allow is not honoured",
+			}, nil
+		}
+		// A denial with no mechanism stays a denial — already the safe
+		// direction — but is named so it is alertable rather than blank.
+		result.Mechanism = MechanismUnspecified
 	}
 	return result, err
 }

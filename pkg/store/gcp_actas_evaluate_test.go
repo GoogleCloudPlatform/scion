@@ -220,14 +220,94 @@ func TestEvaluateActAs_ErrorForcesIndeterminateEvenIfCheckerSaidAllowed(t *testi
 	}
 }
 
-// Mechanism is mandatory on every emitted result: a denial with no mechanism is
-// not actionable, and the gap would only ever be noticed during an incident.
-func TestEvaluateActAs_MechanismIsNeverEmpty(t *testing.T) {
+// ⚠️ A FAILED CHECK MUST NOT LEAVE BEHIND A VERDICT-SHAPED EXPLANATION. Forcing
+// the outcome is not enough on its own: a record reading "indeterminate /
+// iam-getIamPolicy / caller has roles/iam.serviceAccountUser" asserts that IAM
+// was consulted and answered, which is the precise distinction the mechanism
+// field exists to preserve. The reason from a call that produced no verdict is
+// worse than no reason, because it reads as evidence.
+func TestEvaluateActAs_ErrorReplacesMechanismAndReason(t *testing.T) {
+	checker := &malformedChecker{
+		result: ActAsResult{
+			Outcome:   ActAsAllowed,
+			Mechanism: "iam-getIamPolicy",
+			Reason:    "caller has roles/iam.serviceAccountUser",
+		},
+		err: errors.New("IAM API timeout"),
+	}
+
+	got, _ := EvaluateActAs(context.Background(), checker, evalUser(), evalTarget())
+
+	if got.Mechanism != MechanismCheckFailed {
+		t.Errorf("expected mechanism %q, got %q", MechanismCheckFailed, got.Mechanism)
+	}
+	if strings.Contains(got.Reason, "roles/iam.serviceAccountUser") {
+		t.Errorf("the checker's verdict-shaped reason must not survive a failed check; got: %q", got.Reason)
+	}
+	// The attempted mechanism is still useful for triage, so it is preserved
+	// inside the reason rather than discarded outright.
+	if !strings.Contains(got.Reason, "iam-getIamPolicy") {
+		t.Errorf("the attempted mechanism should be recorded for triage; got: %q", got.Reason)
+	}
+}
+
+// The raw error must not reach Reason: Reason is surfaced to callers on denial,
+// and a remote IAM error is not a string this package can promise is free of
+// policy content. Consumers log the error separately.
+func TestEvaluateActAs_ErrorTextDoesNotLeakIntoReason(t *testing.T) {
+	checker := &malformedChecker{
+		result: ActAsResult{Outcome: ActAsIndeterminate, Mechanism: "iam-getIamPolicy"},
+		err:    errors.New("rpc error: policy binding user:secret@example.com role roles/owner"),
+	}
+
+	got, _ := EvaluateActAs(context.Background(), checker, evalUser(), evalTarget())
+	if strings.Contains(got.Reason, "secret@example.com") {
+		t.Errorf("raw error text must not be folded into the caller-visible reason; got: %q", got.Reason)
+	}
+}
+
+// ⚠️ AN UNATTRIBUTABLE ALLOW IS NOT AN ALLOW. A permit nobody can account for
+// defeats the whole reason the mechanism field is mandatory, so it is
+// downgraded rather than stamped with a neutral word and honoured.
+func TestEvaluateActAs_AllowWithoutMechanismIsNotHonoured(t *testing.T) {
+	checker := &malformedChecker{result: ActAsResult{Outcome: ActAsAllowed}} // no mechanism
+
+	got, _ := EvaluateActAs(context.Background(), checker, evalUser(), evalTarget())
+	if got.Allowed() {
+		t.Fatal("an allow that names no check must not be honoured")
+	}
+	if got.Mechanism != MechanismUnattributableAllow {
+		t.Errorf("expected mechanism %q so the checker bug is alertable, got %q",
+			MechanismUnattributableAllow, got.Mechanism)
+	}
+}
+
+// A denial with no mechanism stays a denial — already the safe direction — but
+// is named rather than left blank so it can be alerted on.
+func TestEvaluateActAs_DenialWithoutMechanismIsNamed(t *testing.T) {
 	checker := &malformedChecker{result: ActAsResult{Outcome: ActAsDenied}} // no mechanism
 
 	got, _ := EvaluateActAs(context.Background(), checker, evalUser(), evalTarget())
-	if got.Mechanism == "" {
-		t.Error("mechanism must never be empty on a returned result")
+	if got.Outcome != ActAsDenied {
+		t.Errorf("a denial must remain a denial; got %s", got.Outcome)
+	}
+	if got.Mechanism != MechanismUnspecified {
+		t.Errorf("expected mechanism %q, got %q", MechanismUnspecified, got.Mechanism)
+	}
+}
+
+// Mechanism is mandatory on every emitted result, whatever the checker did.
+func TestEvaluateActAs_MechanismIsNeverEmpty(t *testing.T) {
+	cases := []ActAsResult{
+		{Outcome: ActAsAllowed},
+		{Outcome: ActAsDenied},
+		{Outcome: ActAsIndeterminate},
+	}
+	for _, c := range cases {
+		got, _ := EvaluateActAs(context.Background(), &malformedChecker{result: c}, evalUser(), evalTarget())
+		if got.Mechanism == "" {
+			t.Errorf("mechanism must never be empty; outcome %s produced a blank", c.Outcome)
+		}
 	}
 }
 
