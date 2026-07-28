@@ -127,6 +127,9 @@ func (m *mockHubClient) ProjectInjectedSkills(projectID string) hubclient.Inject
 	return nil
 }
 func (m *mockHubClient) UserInjectedSkills() hubclient.InjectedSkillsService { return nil }
+func (m *mockHubClient) ProjectPreStartHooks(projectID string) hubclient.ProjectPreStartHookService {
+	return nil
+}
 func (m *mockHubClient) Health(ctx context.Context) (*hubclient.HealthResponse, error) {
 	return nil, nil
 }
