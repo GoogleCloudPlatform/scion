@@ -121,6 +121,15 @@ func ConfigFromEnv() *Config {
 	case modePassthrough:
 		return nil
 	default:
+		// This arm delivers most of block, but not all of it, and the gap is
+		// worth knowing about. It is only reachable when something other than
+		// the broker populated the environment — the broker now rejects unknown
+		// modes upstream with a 400 — and in that case
+		// agent.hasMetadataInterception is false, so the container gets no
+		// NET_ADMIN and setupIPTablesRedirect fails (non-fatally). The SA
+		// endpoints below still return 403, so no credential leaks; but traffic
+		// to 169.254.169.254 is not intercepted. Treat this as damage control
+		// for a malformed environment, not as a hard block guarantee.
 		log.Error("metadata: unrecognised SCION_METADATA_MODE %q — falling back to %q. "+
 			"Valid modes are %q, %q, %q.",
 			rawMode, modeBlock, modeBlock, modeAssign, modePassthrough)
