@@ -204,6 +204,94 @@ func TestScanForStrayProjectSettingConsts_EmptyDirIsAnError(t *testing.T) {
 	assert.Zero(t, sourceFileConsts)
 }
 
+// writeGoFixture writes one .go file into a scan fixture directory. The content
+// is only ever parsed, never compiled, so it need not build.
+func writeGoFixture(t *testing.T, dir, name, content string) {
+	t.Helper()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, name), []byte(content), 0o600))
+}
+
+// TestScanForStrayProjectSettingConsts_NoTestFileIsAnError covers an input class
+// the scan handles and nothing else supplies: a directory holding .go files,
+// including the source file, but no _test.go file at all.
+//
+// The scan's three instrument-failure guards fire in sequence — no .go files,
+// then source file absent, then no test file — and the empty-directory control
+// above stops at the first. So the third was reachable only through a narrowed
+// selection in production code, and never through the suite.
+//
+// This is a coverage gap rather than a guard on a guard: the case would be worth
+// testing even if the third check did not exist, because "a file set with no test
+// file" is a distinct input the function makes a decision about.
+//
+// Probe by pt-rev-3.
+func TestScanForStrayProjectSettingConsts_NoTestFileIsAnError(t *testing.T) {
+	dir := t.TempDir()
+	writeGoFixture(t, dir, projectSettingsSourceFile,
+		"package hub\n\nconst projectSettingProbeSource = \"scion.io/probe-source\"\n")
+	writeGoFixture(t, dir, "helper.go", "package hub\n")
+
+	strays, sourceFileConsts, err := scanForStrayProjectSettingConsts(dir)
+
+	require.Error(t, err,
+		"a file set containing .go files and the source file but NO _test.go file returned a "+
+			"clean result; the scan can no longer tell a complete selection from one narrowed "+
+			"to exclude test files")
+	// Pin which guard fired. Without this the test would also pass if the scan
+	// failed for one of the two earlier reasons, which are already covered and
+	// are not what this case is about.
+	assert.Contains(t, err.Error(), "_test.go",
+		"the scan errored, but not on the missing-test-file condition this case exists to reach")
+	assert.Empty(t, strays)
+	assert.Zero(t, sourceFileConsts)
+}
+
+// TestScanForStrayProjectSettingConsts_SeesBuildTaggedFiles pins the property
+// that made os.ReadDir + parser.ParseFile the right replacement for the
+// deprecated parser.ParseDir: the scan is BUILD-TAG BLIND.
+//
+// staticcheck's SA1019 recommends go/packages, and its advertised advantage is
+// that it applies build tags. For this guard that advantage is a defect. A
+// projectSetting* constant in a file excluded from the current build is still a
+// constant the drift guard cannot see, still absent from projectSettingKeys, and
+// still silently dropped when a project is cloned. It has to be caught anyway.
+//
+// Without this test the property is preserved but UNEXERCISED. Every //go:build
+// !no_sqlite file in pkg/hub today is a _test.go file, and test files are exempt
+// from the constant check regardless, so nothing on the current tree would go red
+// if tag-blindness were lost: a migration to go/packages would compile, pass every
+// other test in this file, and reopen the data-loss path in silence. Correct
+// behaviour that nothing would notice losing is indistinguishable from luck.
+//
+// Probe by pt-rev-3.
+func TestScanForStrayProjectSettingConsts_SeesBuildTaggedFiles(t *testing.T) {
+	dir := t.TempDir()
+	writeGoFixture(t, dir, projectSettingsSourceFile,
+		"package hub\n\nconst projectSettingProbeSource = \"scion.io/probe-source\"\n")
+	// Satisfies the test-file requirement without declaring anything.
+	writeGoFixture(t, dir, "probe_selection_test.go", "package hub\n")
+	// The stray: excluded from the no_sqlite build exactly as the real !no_sqlite
+	// files in pkg/hub are, so a tag-aware loader would not report it.
+	writeGoFixture(t, dir, "tagged_stray.go",
+		"//go:build !no_sqlite\n\npackage hub\n\n"+
+			"const projectSettingTaggedStray = \"scion.io/tagged-stray\"\n")
+
+	strays, sourceFileConsts, err := scanForStrayProjectSettingConsts(dir)
+	require.NoError(t, err)
+
+	// Positive control, same reason as in the guard above: a zero here means the
+	// scan stopped parsing, not that the planted file was judged clean.
+	require.NotZero(t, sourceFileConsts,
+		"the stand-in source file declares a projectSetting* constant and none was counted; "+
+			"the scan is not parsing, so the assertion below would pass vacuously")
+
+	assert.Equal(t, []string{"tagged_stray.go: projectSettingTaggedStray"}, strays,
+		"a projectSetting* constant in a build-tag-excluded file was NOT reported. The scan has "+
+			"become build-tag aware — most likely a migration to go/packages, which staticcheck "+
+			"SA1019 recommends. Tag-blindness is required here: a constant invisible to the "+
+			"current build is still dropped on clone. Keep os.ReadDir + parser.ParseFile.")
+}
+
 // scanForStrayProjectSettingConsts parses every .go file directly in dir and
 // reports (a) each projectSetting* constant declared outside
 // projectSettingsSourceFile, as "file: name", and (b) how many such constants
