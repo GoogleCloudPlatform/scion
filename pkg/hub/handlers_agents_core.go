@@ -94,6 +94,13 @@ type CreateAgentRequest struct {
 	// rather than create a brand-new one. When true and a stopped agent with
 	// the same name exists, the Hub recovers it instead of creating fresh.
 	Resume bool `json:"resume,omitempty"`
+	// ForceResume permits resuming an agent the Hub considers failed
+	// (phase=error), such as one whose host crashed mid-run. Without it such an
+	// agent is rejected as a duplicate. Only meaningful alongside Resume, and
+	// deliberately does NOT cover phase=running: a live agent must not be
+	// recreated out from under itself. The harness receives its resume flag so
+	// the prior session is continued rather than restarted fresh.
+	ForceResume bool `json:"forceResume,omitempty"`
 	// NoAuth indicates the agent should start with zero injected credentials.
 	// When true, the Hub skips secret resolution and the broker skips credential injection.
 	NoAuth bool `json:"noAuth,omitempty"`

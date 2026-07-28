@@ -652,3 +652,50 @@ func TestPopulateAgentConfig_PreStartHook_PreStampedIDPreserved(t *testing.T) {
 	assert.Equal(t, "preset-hook-id", agent.AppliedConfig.ProjectPreStartHookID)
 	assert.Equal(t, "#!/bin/sh\necho preset\n", agent.AppliedConfig.ProjectPreStartHookScript)
 }
+
+// TestResumeInPlaceDecision covers the guard that lets `scion resume --force`
+// recover an agent whose host crashed mid-run (phase=error), which is
+// otherwise rejected as a duplicate with a 409.
+func TestResumeInPlaceDecision(t *testing.T) {
+	tests := []struct {
+		name        string
+		phase       string
+		resume      bool
+		force       bool
+		wantInPlace bool
+		wantForced  bool
+	}{
+		// Baseline: resume must be explicitly requested.
+		{"no resume requested, stopped", "stopped", false, false, false, false},
+		{"no resume requested, error", "error", false, false, false, false},
+		{"force without resume is inert", "error", false, true, false, false},
+
+		// Pre-existing behavior: stopped resumes in place but with a FRESH
+		// session (forced=false), mirroring the local CLI's effectiveResume.
+		{"stopped resumes in place, fresh session", "stopped", true, false, true, false},
+
+		// The fix: error phase is recoverable only with force, and continues
+		// the interrupted session.
+		{"error rejected without force", "error", true, false, false, false},
+		{"error recovered with force, session continued", "error", true, true, true, true},
+
+		// Running is never forceable — a live agent must not be recreated.
+		{"running rejected without force", "running", true, false, false, false},
+		{"running rejected even with force", "running", true, true, false, false},
+
+		// Suspended is handled earlier in handleExistingAgent; it should not
+		// be picked up by this guard.
+		{"suspended not handled here", "suspended", true, true, false, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			inPlace, forced := resumeInPlaceDecision(tt.phase, tt.resume, tt.force)
+			assert.Equal(t, tt.wantInPlace, inPlace, "resumeInPlace")
+			assert.Equal(t, tt.wantForced, forced, "forcedRecovery")
+			if forced {
+				assert.True(t, inPlace, "forcedRecovery implies resumeInPlace")
+			}
+		})
+	}
+}

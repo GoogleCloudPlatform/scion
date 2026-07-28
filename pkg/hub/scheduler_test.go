@@ -475,10 +475,6 @@ func (m *mockScheduledEventStore) ListSkillInjections(_ context.Context, _, _ st
 	return nil, nil
 }
 
-func (m *mockScheduledEventStore) GetActiveProjectPreStartHook(_ context.Context, _ string) (*store.ProjectPreStartHook, error) {
-	return nil, store.ErrNotFound
-}
-
 // getEvent returns a snapshot of an event by ID (test helper, no error).
 // It returns a copy so callers can read fields without holding the lock.
 func (m *mockScheduledEventStore) getEvent(id string) *store.ScheduledEvent {

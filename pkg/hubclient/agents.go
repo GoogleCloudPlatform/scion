@@ -172,6 +172,7 @@ type CreateAgentRequest struct {
 	Annotations     map[string]string `json:"annotations,omitempty"`
 	Config          *api.ScionConfig  `json:"config,omitempty"`
 	Resume          bool              `json:"resume,omitempty"`
+	ForceResume     bool              `json:"forceResume,omitempty"`
 	Attach          bool              `json:"attach,omitempty"`        // If true, signals interactive attach mode to the broker/harness
 	ProvisionOnly   bool              `json:"provisionOnly,omitempty"` // If true, provision only (write task to prompt.md) without starting
 	// WorkspaceFiles is populated for non-git workspace bootstrap.
