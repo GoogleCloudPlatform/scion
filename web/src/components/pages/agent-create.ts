@@ -40,6 +40,7 @@ interface HarnessConfigEntry {
   scope: string;
 }
 import { isSharedWorkspace } from '../../shared/types.js';
+import { KNOWN_HARNESS_NAMES, harnessDisplayName } from '../../shared/harness-utils.js';
 import { apiFetch, parseApiError } from '../../client/api.js';
 import '../shared/status-badge.js';
 
@@ -997,8 +998,8 @@ private selectBrokerForProject(): void {
    */
   private setHarnessFromValue(value: string): void {
     const knownNames = this.harnessConfigs.map((hc) => hc.name);
-    const fallbackNames = ['gemini-cli', 'claude', 'codex', 'copilot', 'opencode'];
-    const available = knownNames.length > 0 ? knownNames : fallbackNames;
+    const available: readonly string[] =
+      knownNames.length > 0 ? knownNames : KNOWN_HARNESS_NAMES;
 
     if (available.includes(value)) {
       this.harness = value;
@@ -1168,13 +1169,11 @@ private selectBrokerForProject(): void {
                       </sl-option>
                     `
                   )
-                : html`
-                    <sl-option value="gemini-cli">Gemini CLI</sl-option>
-                    <sl-option value="claude">Claude</sl-option>
-                    <sl-option value="codex">Codex</sl-option>
-                    <sl-option value="copilot">Copilot</sl-option>
-                    <sl-option value="opencode">OpenCode</sl-option>
-                  `}
+                : KNOWN_HARNESS_NAMES.map(
+                    (name) => html`
+                      <sl-option value=${name}>${harnessDisplayName(name)}</sl-option>
+                    `
+                  )}
               <sl-option value="__other__">Other...</sl-option>
             </sl-select>
             <div class="hint">

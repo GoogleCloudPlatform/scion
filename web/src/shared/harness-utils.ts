@@ -42,8 +42,15 @@ export type KnownHarnessName = (typeof KNOWN_HARNESS_NAMES)[number];
 /**
  * Human-readable labels for the canonical harnesses.
  *
- * `harnesses/<name>/config.yaml` has no display-name field, so these are
- * maintained here purely for presentation.
+ * DISPLAY ONLY. `KNOWN_HARNESS_NAMES` above is the source of truth for which
+ * harnesses exist; this map only decides how each one is spelled in the UI.
+ * Never branch on these strings.
+ *
+ * `harnesses/<name>/config.yaml` has no display-name field, so these labels
+ * cannot be derived and are maintained here by hand. The values below are
+ * transcribed from the markup they replaced, so there is no visual change.
+ * `antigravity` and `hermes` had no prior rendering (they were missing from
+ * every fallback list), so their labels are new.
  */
 const HARNESS_DISPLAY_NAMES: Record<KnownHarnessName, string> = {
   claude: 'Claude',

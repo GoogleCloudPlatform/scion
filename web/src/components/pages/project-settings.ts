@@ -26,6 +26,7 @@ import { customElement, property, state } from 'lit/decorators.js';
 import type { PageData, Project, Template, AdminGroup, GitHubAppProjectStatus, GitHubTokenPermissions, RuntimeBroker, BrokerProfile, GCPServiceAccount, PreStartHook, PreStartHookSummary } from '../../shared/types.js';
 import { can, canAny } from '../../shared/types.js';
 import { normalizeModelAlias } from '../../shared/model-utils.js';
+import { KNOWN_HARNESS_NAMES, harnessDisplayName } from '../../shared/harness-utils.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
 import '../shared/env-var-list.js';
@@ -1501,12 +1502,11 @@ export class ScionPageProjectSettings extends LitElement {
                         `
                       )
                     : // Fallback: all known/installable harnesses (incl. opt-in), not the default-install set.
-                      html`
-                        <sl-option value="gemini">Gemini</sl-option>
-                        <sl-option value="claude">Claude</sl-option>
-                        <sl-option value="opencode">OpenCode</sl-option>
-                        <sl-option value="codex">Codex</sl-option>
-                      `}
+                      KNOWN_HARNESS_NAMES.map(
+                        (name) => html`
+                          <sl-option value=${name}>${harnessDisplayName(name)}</sl-option>
+                        `
+                      )}
                 </sl-select>
                 <span class="field-help"
                   >Harness configuration used by default for new agents.</span
