@@ -54,6 +54,10 @@ jobs:
         working-directory: ./web
         run: npm run typecheck
 
+      - name: Run Web Tests
+        working-directory: ./web
+        run: npm test
+
       - name: Format Check
         run: |
           UNFORMATTED=$(gofmt -l .)
