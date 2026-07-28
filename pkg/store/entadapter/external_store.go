@@ -263,12 +263,33 @@ func (s *ExternalStore) BackfillGCPVerificationStatus(ctx context.Context) error
 // gcpFilterPredicates builds the Ent predicates for a GCPServiceAccountFilter.
 func gcpFilterPredicates(filter store.GCPServiceAccountFilter) []predicate.GCPServiceAccount {
 	var preds []predicate.GCPServiceAccount
+
+	// Scope and ScopeID are collected separately from the other terms because
+	// IncludeHubScoped rewrites their combination rather than adding to it.
+	var scopePreds []predicate.GCPServiceAccount
 	if filter.Scope != "" {
-		preds = append(preds, gcpserviceaccount.ScopeEQ(filter.Scope))
+		scopePreds = append(scopePreds, gcpserviceaccount.ScopeEQ(filter.Scope))
 	}
 	if filter.ScopeID != "" {
-		preds = append(preds, gcpserviceaccount.ScopeIDEQ(filter.ScopeID))
+		scopePreds = append(scopePreds, gcpserviceaccount.ScopeIDEQ(filter.ScopeID))
 	}
+
+	switch {
+	case !filter.IncludeHubScoped, len(scopePreds) == 0:
+		// No widening requested, or nothing to widen: with no scope terms the
+		// query already spans every scope, and OR-ing hub scope onto it would
+		// be a no-op that reads like a restriction.
+		preds = append(preds, scopePreds...)
+	default:
+		// (scope terms) OR (scope = hub), as one predicate, so the union is a
+		// single SQL statement and Email/Managed below still AND across the
+		// whole of it.
+		preds = append(preds, gcpserviceaccount.Or(
+			gcpserviceaccount.And(scopePreds...),
+			gcpserviceaccount.ScopeEQ(store.ScopeHub),
+		))
+	}
+
 	if filter.Email != "" {
 		preds = append(preds, gcpserviceaccount.EmailEQ(filter.Email))
 	}
