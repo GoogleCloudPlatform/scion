@@ -218,8 +218,49 @@ func (a *AuthzService) checkAccessForAgent(ctx context.Context, agent AgentIdent
 		return decision
 	}
 
-	// 3. Delegation fallback: check policies with delegation conditions
+	// 3. Project-scoped read baseline.
+	//
+	// An agent may perform read-class actions on resources in its own project.
+	// This codifies the project-isolation gate these paths already relied on
+	// before #591; it grants nothing that was not already reachable — it
+	// consolidates the hand-rolled per-handler isolation checks into one
+	// enforced location.
+	//
+	// Four properties are load-bearing; do not change them casually:
+	//
+	//   1. Position. This runs *after* policy evaluation, which returns any
+	//      matched policy — allow or deny — before we get here. That makes the
+	//      baseline revocable: an admin can bind an explicit deny policy to the
+	//      project's implicit "project:<slug>:agents" group and it wins. Moving
+	//      this block earlier would make the baseline unconditional.
+	//   2. The pid != "" guard. Resources with no project (broker, template,
+	//      the GitHub App config, hub-scoped resources) yield "" from
+	//      projectIDForResource. Without the guard, "" would equal an agent's
+	//      empty ProjectID and the baseline would allow everything.
+	//   3. Read-class is ActionRead and ActionList only. Deliberately not
+	//      ActionAttach (PTY/exec/message mutate a running agent), not
+	//      ActionCreate (gated by token scope in authorizeAgentCreate), and no
+	//      mutating action.
+	//   4. It grants nothing new relative to pre-#591 behaviour.
+	if isReadClassAction(action) {
+		if pid := projectIDForResource(resource); pid != "" && pid == agent.ProjectID() {
+			return Decision{
+				Allowed: true,
+				Reason:  "agent project read baseline",
+				Scope:   "project",
+			}
+		}
+	}
+
+	// 4. Delegation fallback: check policies with delegation conditions
 	return a.checkDelegation(ctx, agent, resource, action, policies)
+}
+
+// isReadClassAction reports whether an action is read-class for the purposes of
+// the agent project baseline. Read-class is deliberately narrow: read and list
+// only. See checkAccessForAgent for why.
+func isReadClassAction(a Action) bool {
+	return a == ActionRead || a == ActionList
 }
 
 // checkDelegation handles the delegation fallback for agents.
