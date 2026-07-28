@@ -33,6 +33,24 @@ function readWebSource(relPath: string): string {
   return readFileSync(resolve(REPO_ROOT, 'web', relPath), 'utf8');
 }
 
+/**
+ * Harness identifiers a redeclared local list could be built from: the
+ * canonical seven plus the bogus `gemini` that Phase 0 removed.
+ */
+const FORBIDDEN_IDENTS: readonly string[] = [...KNOWN_HARNESS_NAMES, 'gemini'];
+
+/** Single-quoted harness identifier, e.g. `'gemini-cli'`. */
+const IDENT = String.raw`'(?:${FORBIDDEN_IDENTS.join('|')})'`;
+
+/**
+ * Matches an array literal containing two or more harness identifiers in a row,
+ * anywhere in the array -- so reordering the elements, or leading with a name
+ * that is not a harness, does not defeat it.
+ */
+const HARNESS_ARRAY_LITERAL = new RegExp(
+  String.raw`\[[^\]]*${IDENT}\s*,\s*${IDENT}`
+);
+
 describe('KNOWN_HARNESS_NAMES', () => {
   it('matches the harnesses/ directory, which is the source of truth', () => {
     const harnessesDir = resolve(REPO_ROOT, 'harnesses');
@@ -91,19 +109,24 @@ describe('harness fallback list is not duplicated in components', () => {
     // The old shape was e.g.
     //   const fallbackNames = ['gemini-cli', 'claude', 'codex', ...];
     expect(src).not.toMatch(/\bfallbackNames\s*=/);
-    // Any array literal pairing two or more canonical harness identifiers is a
-    // redeclared list, regardless of the variable name.
-    expect(src).not.toMatch(/\[\s*'(claude|codex|copilot|gemini-cli|opencode)'\s*,\s*'/);
+    // Any array literal pairing two or more harness identifiers is a redeclared
+    // list, regardless of variable name, element order, or which name comes
+    // first. The alternation deliberately includes the bogus 'gemini' -- a
+    // reintroduced ['gemini', 'claude', ...] is the exact bug this phase fixed,
+    // so it must be caught even though 'gemini' is not a canonical name.
+    expect(src).not.toMatch(HARNESS_ARRAY_LITERAL);
   });
 
   it.each(CONSUMERS)('%s hardcodes no harness sl-option elements', (relPath) => {
     const src = readWebSource(relPath);
     // Fallback options must be produced by mapping over KNOWN_HARNESS_NAMES,
-    // not written out one <sl-option value="claude"> at a time.
-    const hardcoded = [...src.matchAll(/<sl-option\s+value="([^"]+)"/g)].map((m) => m[1]);
-    const harnessOptions = hardcoded.filter(
-      (v) => (KNOWN_HARNESS_NAMES as readonly string[]).includes(v) || v === 'gemini'
+    // not written out one <sl-option value="claude"> at a time. Both quote
+    // styles are matched; dynamic `value=${name}` bindings are intentionally
+    // not matched, since those are the correct, mapped form.
+    const hardcoded = [...src.matchAll(/<sl-option\s+value=("([^"]*)"|'([^']*)')/g)].map(
+      (m) => m[2] ?? m[3]
     );
+    const harnessOptions = hardcoded.filter((v) => FORBIDDEN_IDENTS.includes(v));
     expect(harnessOptions).toEqual([]);
   });
 });

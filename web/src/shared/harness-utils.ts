@@ -25,6 +25,14 @@
  * This list is only a *fallback*. At runtime the UI prefers the harness configs
  * returned by `GET /api/v1/harness-configs`; these names are used to populate
  * selects when that call returns nothing (empty result, or a failed request).
+ *
+ * ORDERING: this is also the order the names render in every fallback select.
+ * The first five are the harnesses the UI already offered, kept alphabetical;
+ * `antigravity` and `hermes` were appended when they were added. Append new
+ * harnesses to the end rather than re-sorting, so that the position of the
+ * existing options stays stable for people used to the list. Order carries no
+ * meaning beyond display — nothing selects by index, and every select binds its
+ * value to component state rather than defaulting to the first option.
  */
 export const KNOWN_HARNESS_NAMES = [
   'claude',

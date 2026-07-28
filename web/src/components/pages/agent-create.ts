@@ -769,7 +769,7 @@ private selectBrokerForProject(): void {
   /**
    * Select the default template and harness config for the current project using project settings.
    * Falls back to a template named "default", then the first available template.
-   * The harness config is determined by: template defaultHarnessConfig > template harness > project default > 'gemini'.
+   * The harness config is determined by: template defaultHarnessConfig > template harness > project default > 'gemini-cli'.
    */
   private async selectDefaultTemplate(): Promise<void> {
     const visible = this.filteredTemplates;
@@ -998,8 +998,7 @@ private selectBrokerForProject(): void {
    */
   private setHarnessFromValue(value: string): void {
     const knownNames = this.harnessConfigs.map((hc) => hc.name);
-    const available: readonly string[] =
-      knownNames.length > 0 ? knownNames : KNOWN_HARNESS_NAMES;
+    const available: readonly string[] = knownNames.length > 0 ? knownNames : KNOWN_HARNESS_NAMES;
 
     if (available.includes(value)) {
       this.harness = value;

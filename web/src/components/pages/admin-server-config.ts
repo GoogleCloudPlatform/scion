@@ -1364,8 +1364,7 @@ export class ScionPageAdminServerConfig extends LitElement {
       return;
     }
     const knownNames = this.harnessConfigs.map((hc) => hc.name);
-    const available: readonly string[] =
-      knownNames.length > 0 ? knownNames : KNOWN_HARNESS_NAMES;
+    const available: readonly string[] = knownNames.length > 0 ? knownNames : KNOWN_HARNESS_NAMES;
     if (available.includes(value)) {
       this.harnessConfigSelection = value;
       this.customHarnessConfig = '';
