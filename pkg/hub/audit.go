@@ -233,40 +233,85 @@ func (l *LogAuditLogger) logger() *slog.Logger {
 }
 
 // LogBrokerAuthEvent logs a broker authentication event to the standard logger.
+//
+// ⚠️ HISTORY, BECAUSE THE NO-OP THIS REPLACES WAS DELIBERATE. Commit 500efd1a
+// ("fix: remove broker auth audit log") deleted the body of this method and
+// left `return nil`. The commit message gives no rationale, but the cause is
+// legible from the call graph: AuditableBrokerAuthMiddleware calls this on
+// EVERY broker-authenticated request, and the deleted code logged success at
+// LevelInfo. A broker polls the Hub continuously, so that was an INFO line per
+// request — untenable, and worth fixing.
+//
+// The fix was over-broad. Nine event types route through this method, and only
+// ONE of them — auth_success — is per-request. The other eight (register,
+// deregister, join, rotate, revoke, link, unlink, and auth_FAILURE) are emitted
+// by explicit helper calls at administrative moments, are low-volume, and are
+// the security-relevant ones. Silencing the method silenced all nine to quiet
+// one. The result was that broker authentication FAILURES left no trace
+// anywhere, which is the single event here most worth having.
+//
+// So the volume problem is solved where it actually lives, at the level of the
+// one noisy event type, rather than by discarding the other eight:
+//
+//   - auth_success  -> Debug. Per-request. Available when investigating,
+//     absent from normal operation. This is the case 500efd1a was fixing.
+//   - any failure   -> Warn. Includes auth_failure. Never suppressed: a
+//     credential being rejected is the reason this event exists.
+//   - everything else -> Info. Administrative, low-volume, and each one
+//     changes who can talk to the Hub.
 func (l *LogAuditLogger) LogBrokerAuthEvent(ctx context.Context, event *BrokerAuthEvent) error {
 	if event == nil {
 		return nil
 	}
+
 	level := slog.LevelInfo
-	if !event.Success {
+	switch {
+	case !event.Success:
+		// Warn regardless of type. A failed rotate or a failed join is as
+		// interesting as a failed auth.
 		level = slog.LevelWarn
-	} else if event.EventType == BrokerAuthEventAuthSuccess {
+	case event.EventType == BrokerAuthEventAuthSuccess:
 		level = slog.LevelDebug
 	}
 
 	attrs := []slog.Attr{
 		slog.String("event_type", string(event.EventType)),
-		slog.String("broker_id", event.BrokerID),
 		slog.Bool("success", event.Success),
+		slog.String("broker_id", event.BrokerID),
+		slog.String("ip_address", event.IPAddress),
 	}
 
 	if event.BrokerName != "" {
 		attrs = append(attrs, slog.String("broker_name", event.BrokerName))
 	}
-	if event.ActorID != "" {
-		attrs = append(attrs, slog.String("actor_id", event.ActorID))
-	}
-	if event.ActorType != "" {
-		attrs = append(attrs, slog.String("actor_type", event.ActorType))
+	if event.UserAgent != "" {
+		attrs = append(attrs, slog.String("user_agent", event.UserAgent))
 	}
 	if event.FailReason != "" {
 		attrs = append(attrs, slog.String("fail_reason", event.FailReason))
 	}
+	if event.ActorID != "" {
+		// Emitted as a pair: an actor id without its type is ambiguous between
+		// a user and a broker acting on its own behalf.
+		attrs = append(attrs, slog.String("actor_id", event.ActorID))
+		attrs = append(attrs, slog.String("actor_type", event.ActorType))
+	}
+
+	// Details is emitted unconditionally, NOT debug-gated as it was before
+	// 500efd1a. That gating was a defect the no-op hid: the only in-tree
+	// producers are LogLinkEvent and LogUnlinkEvent, and the only key they set
+	// is projectId. Debug-gating it means a link record says "broker B was
+	// linked" without saying to what — an event stripped of the one field that
+	// makes it mean anything.
+	//
+	// Security: Details is free-form and this method does not vet it. Callers
+	// must not put secret material in it — the same rule that governs
+	// LifecycleHookExecutionEvent.
 	for k, v := range event.Details {
 		attrs = append(attrs, slog.String(k, v))
 	}
 
-	l.logger().LogAttrs(ctx, level, "broker auth event", attrs...)
+	l.logger().LogAttrs(ctx, level, "Broker auth audit event", attrs...)
 
 	return nil
 }

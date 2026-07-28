@@ -182,3 +182,178 @@ func TestGCPTokenEvent_EmptyServiceAccountIDStillEmitsKey(t *testing.T) {
 		t.Error("sa_id key should be present even when the value is empty")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Item C: LogBrokerAuthEvent
+// ---------------------------------------------------------------------------
+
+// TestBrokerAuthEvent_FailureIsEmittedAtWarn is the regression test for the
+// gap left by 500efd1a. A rejected broker credential left no trace anywhere
+// while this method was a no-op; that is the single event here most worth
+// having, and it must never be suppressed.
+func TestBrokerAuthEvent_FailureIsEmittedAtWarn(t *testing.T) {
+	buf := captureAuditLogs(t)
+	logger := NewLogAuditLogger("[Test]", false)
+
+	err := logger.LogBrokerAuthEvent(context.Background(), &BrokerAuthEvent{
+		EventType:  BrokerAuthEventAuthFailure,
+		BrokerID:   "broker-1",
+		IPAddress:  "203.0.113.7",
+		Success:    false,
+		FailReason: "signature mismatch",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	rec := auditRecordWithMsg(t, buf, "Broker auth audit event")
+	if rec == nil {
+		t.Fatal("broker auth failure produced no audit record")
+	}
+	if rec["level"] != "WARN" {
+		t.Errorf("level: got %v, want WARN", rec["level"])
+	}
+	if rec["event_type"] != string(BrokerAuthEventAuthFailure) {
+		t.Errorf("event_type: got %v", rec["event_type"])
+	}
+	if rec["fail_reason"] != "signature mismatch" {
+		t.Errorf("fail_reason: got %v", rec["fail_reason"])
+	}
+	if rec["broker_id"] != "broker-1" {
+		t.Errorf("broker_id: got %v", rec["broker_id"])
+	}
+	if rec["ip_address"] != "203.0.113.7" {
+		t.Errorf("ip_address: got %v", rec["ip_address"])
+	}
+}
+
+// TestBrokerAuthEvent_SuccessIsDebugLevel pins the concession to 500efd1a.
+// auth_success is emitted per-request by AuditableBrokerAuthMiddleware, so it
+// must not reappear at INFO — that was the actual defect being fixed.
+func TestBrokerAuthEvent_SuccessIsDebugLevel(t *testing.T) {
+	buf := captureAuditLogs(t)
+	logger := NewLogAuditLogger("[Test]", false)
+
+	_ = logger.LogBrokerAuthEvent(context.Background(), &BrokerAuthEvent{
+		EventType: BrokerAuthEventAuthSuccess,
+		BrokerID:  "broker-1",
+		Success:   true,
+	})
+
+	rec := auditRecordWithMsg(t, buf, "Broker auth audit event")
+	if rec == nil {
+		t.Fatal("expected auth_success to be emitted at debug, got no record")
+	}
+	if rec["level"] != "DEBUG" {
+		t.Errorf("level: got %v, want DEBUG — per-request event must not be INFO", rec["level"])
+	}
+}
+
+// TestBrokerAuthEvent_AdminEventsAreInfoLevel: the low-volume administrative
+// events are the ones 500efd1a silenced as collateral. Each changes who can
+// talk to the Hub and belongs in normal operation, not behind a debug flag.
+func TestBrokerAuthEvent_AdminEventsAreInfoLevel(t *testing.T) {
+	for _, et := range []BrokerAuthEventType{
+		BrokerAuthEventRegister,
+		BrokerAuthEventDeregister,
+		BrokerAuthEventJoin,
+		BrokerAuthEventRotate,
+		BrokerAuthEventRevoke,
+		BrokerAuthEventLink,
+		BrokerAuthEventUnlink,
+	} {
+		t.Run(string(et), func(t *testing.T) {
+			buf := captureAuditLogs(t)
+			logger := NewLogAuditLogger("[Test]", false)
+
+			_ = logger.LogBrokerAuthEvent(context.Background(), &BrokerAuthEvent{
+				EventType: et,
+				BrokerID:  "broker-1",
+				Success:   true,
+			})
+
+			rec := auditRecordWithMsg(t, buf, "Broker auth audit event")
+			if rec == nil {
+				t.Fatalf("%s produced no audit record", et)
+			}
+			if rec["level"] != "INFO" {
+				t.Errorf("level: got %v, want INFO", rec["level"])
+			}
+		})
+	}
+}
+
+// TestBrokerAuthEvent_LinkCarriesProjectID covers the debug-gating defect the
+// no-op was hiding. LogLinkEvent puts projectId in Details, and a link record
+// without it says "broker B was linked" without saying to what.
+func TestBrokerAuthEvent_LinkCarriesProjectID(t *testing.T) {
+	// debug=false deliberately: the field must survive with debug OFF.
+	buf := captureAuditLogs(t)
+	logger := NewLogAuditLogger("[Test]", false)
+
+	LogLinkEvent(context.Background(), logger,
+		"broker-1", "broker-name", "project-42", "user-9", "203.0.113.7")
+
+	rec := auditRecordWithMsg(t, buf, "Broker auth audit event")
+	if rec == nil {
+		t.Fatal("link event produced no audit record")
+	}
+	if rec["projectId"] != "project-42" {
+		t.Errorf("projectId: got %v, want %q (Details must not be debug-gated)", rec["projectId"], "project-42")
+	}
+	if rec["broker_name"] != "broker-name" {
+		t.Errorf("broker_name: got %v", rec["broker_name"])
+	}
+}
+
+// TestBrokerAuthEvent_ActorIsEmittedAsAPair: an actor id without its type is
+// ambiguous between a user and a broker acting on its own behalf.
+func TestBrokerAuthEvent_ActorIsEmittedAsAPair(t *testing.T) {
+	buf := captureAuditLogs(t)
+	logger := NewLogAuditLogger("[Test]", false)
+
+	LogRegistrationEvent(context.Background(), logger,
+		"broker-1", "broker-name", "user-9", "203.0.113.7")
+
+	rec := auditRecordWithMsg(t, buf, "Broker auth audit event")
+	if rec == nil {
+		t.Fatal("registration produced no audit record")
+	}
+	if rec["actor_id"] != "user-9" {
+		t.Errorf("actor_id: got %v", rec["actor_id"])
+	}
+	if rec["actor_type"] != "user" {
+		t.Errorf("actor_type: got %v", rec["actor_type"])
+	}
+}
+
+// TestBrokerAuthEvent_NilEventDoesNotPanic — the helpers guard a nil logger but
+// nothing guarantees a non-nil event.
+func TestBrokerAuthEvent_NilEventDoesNotPanic(t *testing.T) {
+	logger := NewLogAuditLogger("[Test]", false)
+	if err := logger.LogBrokerAuthEvent(context.Background(), nil); err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+// TestBrokerAuthEvent_FailedAdminActionIsWarn: the level switch keys on success
+// first, so a failed rotate is a warning even though rotate is administrative.
+func TestBrokerAuthEvent_FailedAdminActionIsWarn(t *testing.T) {
+	buf := captureAuditLogs(t)
+	logger := NewLogAuditLogger("[Test]", false)
+
+	_ = logger.LogBrokerAuthEvent(context.Background(), &BrokerAuthEvent{
+		EventType:  BrokerAuthEventRotate,
+		BrokerID:   "broker-1",
+		Success:    false,
+		FailReason: "store unavailable",
+	})
+
+	rec := auditRecordWithMsg(t, buf, "Broker auth audit event")
+	if rec == nil {
+		t.Fatal("failed rotate produced no audit record")
+	}
+	if rec["level"] != "WARN" {
+		t.Errorf("level: got %v, want WARN", rec["level"])
+	}
+}
