@@ -15,6 +15,7 @@
 package hub
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -97,46 +98,76 @@ type verificationFailedDetails struct {
 // any caller: it answers visibility only, and the authorization that must
 // follow it for a hub-scoped account is authorizeGCPServiceAccount below.
 
-// authorizeGCPServiceAccount performs the scope-appropriate authorization check
-// for an action on a service account, writing the error response itself and
-// returning false when the caller must stop.
+// gcpSAVerdict is the answer to the POLICY question about a service account:
+// may this caller perform this action on it. It carries no HTTP status,
+// because the status is not a property of the verdict.
 //
-// The scope split is the substance of it. While every SA was project-scoped, a
-// project-level ActionManage check was a complete statement of authority over
-// one. A hub-scoped SA is reachable from every project, so that same check
-// would let any project's owner delete a credential the whole hub depends on.
-// Hub-scoped SAs are therefore checked against the SA resource itself, which
-// gcpServiceAccountResource leaves parentless for non-project scopes (P0.2) so
-// that only a hub-scoped policy can match it. That containment relies on
-// matchesResource treating a parentless resource as outside every
-// project-scoped policy's reach — the #595 fix, without which a project-scoped
-// policy would match a hub-scoped SA and this branch would not hold.
-//
-// Shape follows deleteHarnessConfig's three-branch scope switch.
-func (s *Server) authorizeGCPServiceAccount(w http.ResponseWriter, r *http.Request, sa *store.GCPServiceAccount, action Action) bool {
-	ctx := r.Context()
+// See gcpServiceAccountVerdict for why the two are separated.
+type gcpSAVerdict struct {
+	allowed bool
 
+	// reason is the refusal, phrased for a 403 body. Empty when allowed, and
+	// empty when noIdentity is set -- an unauthenticated caller is told
+	// nothing.
+	reason string
+
+	// noIdentity distinguishes "no user on this request" from a scope arm's
+	// denial, so a renderer can answer it generically instead of leaking which
+	// arm it would have hit.
+	noIdentity bool
+}
+
+// gcpServiceAccountVerdict decides whether the caller may perform action on sa,
+// and WRITES NOTHING.
+//
+// THE SPLIT IS THE POINT, AND IT IS sa-arch'S FINDING. This function used to
+// decide and write in one step. That fused two questions that are genuinely
+// different:
+//
+//   - POLICY: may this caller do this? Answered here, once, for every route.
+//   - DISCLOSURE: should a refusal read as 403 or 404? That depends on whether
+//     the caller could have established the account's existence some other
+//     way, which is a property OF THE ROUTE and not of the policy.
+//
+// While the two were fused, a route that needed a different disclosure answer
+// had no way to get one except by re-deriving the policy test ahead of the
+// call -- which is exactly the second, drifting description of who-may-do-what
+// that the single function existed to prevent. The flat by-id route needs 404
+// for user scope, so the split is what lets it have that without owning a
+// second copy of the creator test.
+//
+// The scope split inside is the older substance and is unchanged. While every
+// SA was project-scoped, a project-level ActionManage check was a complete
+// statement of authority over one. A hub-scoped SA is reachable from every
+// project, so that same check would let any project's owner delete a credential
+// the whole hub depends on. Hub-scoped SAs are therefore checked against the SA
+// resource itself, which gcpServiceAccountResource leaves parentless for
+// non-project scopes (P0.2) so that only a hub-scoped policy can match it. That
+// containment relies on matchesResource treating a parentless resource as
+// outside every project-scoped policy's reach — the #595 fix, without which a
+// project-scoped policy would match a hub-scoped SA and this branch would not
+// hold.
+func (s *Server) gcpServiceAccountVerdict(ctx context.Context, sa *store.GCPServiceAccount, action Action) (gcpSAVerdict, error) {
 	user := GetUserIdentityFromContext(ctx)
 	if user == nil {
-		Forbidden(w)
-		return false
+		return gcpSAVerdict{noIdentity: true}, nil
 	}
 
 	switch sa.Scope {
 	case store.ScopeHub:
 		decision := s.authzService.CheckAccess(ctx, user, gcpServiceAccountResource(sa), action)
 		if !decision.Allowed {
-			writeError(w, http.StatusForbidden, ErrCodeForbidden,
-				"You don't have permission to manage hub-scoped GCP service accounts", nil)
-			return false
+			return gcpSAVerdict{
+				reason: "You don't have permission to manage hub-scoped GCP service accounts",
+			}, nil
 		}
+
 	case store.ScopeProject:
 		// Unchanged from the pre-Goal-2 behaviour, deliberately: this phase adds
 		// hub scope, it does not retune who may manage a project's own SAs.
 		project, err := s.store.GetProject(ctx, sa.ScopeID)
 		if err != nil {
-			writeErrorFromErr(w, err, "")
-			return false
+			return gcpSAVerdict{}, err
 		}
 		decision := s.authzService.CheckAccess(ctx, user, Resource{
 			Type:    "project",
@@ -144,23 +175,52 @@ func (s *Server) authorizeGCPServiceAccount(w http.ResponseWriter, r *http.Reque
 			OwnerID: project.OwnerID,
 		}, ActionManage)
 		if !decision.Allowed {
-			writeError(w, http.StatusForbidden, ErrCodeForbidden,
-				"You don't have permission to manage GCP service accounts in this project", nil)
-			return false
+			return gcpSAVerdict{
+				reason: "You don't have permission to manage GCP service accounts in this project",
+			}, nil
 		}
+
 	case store.ScopeUser:
+		// THE ONLY CREATOR TEST FOR USER-SCOPED ACCOUNTS. No admin bypass:
+		// every caller but the creator is denied, admins included. Both routes
+		// reach this line; neither has a copy of it.
 		if sa.CreatedBy != user.ID() {
-			writeError(w, http.StatusForbidden, ErrCodeForbidden,
-				"You don't have permission to manage another user's GCP service account", nil)
-			return false
+			return gcpSAVerdict{
+				reason: "You don't have permission to manage another user's GCP service account",
+			}, nil
 		}
+
 	default:
-		writeError(w, http.StatusForbidden, ErrCodeForbidden,
-			"Management is not supported for this service account scope", nil)
-		return false
+		return gcpSAVerdict{
+			reason: "Management is not supported for this service account scope",
+		}, nil
 	}
 
-	return true
+	return gcpSAVerdict{allowed: true}, nil
+}
+
+// authorizeGCPServiceAccount renders a verdict for the PROJECT-NESTED routes:
+// every refusal is a 403, exactly as before the verdict/renderer split.
+//
+// Unchanged behaviour is the requirement here, not an accident of the
+// refactor. To reach a nested by-id route a caller has already named the
+// project the account lives in, so a 403 discloses nothing they did not supply
+// themselves. The flat route's renderer is authorizeGCPServiceAccountFlat.
+func (s *Server) authorizeGCPServiceAccount(w http.ResponseWriter, r *http.Request, sa *store.GCPServiceAccount, action Action) bool {
+	verdict, err := s.gcpServiceAccountVerdict(r.Context(), sa, action)
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return false
+	}
+	if verdict.allowed {
+		return true
+	}
+	if verdict.noIdentity {
+		Forbidden(w)
+		return false
+	}
+	writeError(w, http.StatusForbidden, ErrCodeForbidden, verdict.reason, nil)
+	return false
 }
 
 type createGCPServiceAccountResponse struct {
@@ -467,6 +527,21 @@ func (s *Server) verifyGCPServiceAccount(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
+	s.runGCPServiceAccountVerification(w, r, sa)
+}
+
+// runGCPServiceAccountVerification performs the impersonation check and
+// persists its outcome. It assumes the caller has already located the account
+// and authorized ActionVerify on it.
+//
+// Extracted so that the nested route and the flat by-id route share one body.
+// The two differ only in how they find the account -- a project path versus a
+// parentless one -- and everything after that point is the same operation. Two
+// copies would drift, and the direction they would drift in is the bad one:
+// this body writes verification state that the assign gate later trusts, so a
+// copy that forgot to persist a FAILURE would leave an account reading as
+// verified after a verification that did not pass.
+func (s *Server) runGCPServiceAccountVerification(w http.ResponseWriter, r *http.Request, sa *store.GCPServiceAccount) {
 	// Fail-closed: if no token generator is configured, we cannot verify.
 	if s.gcpTokenGenerator == nil {
 		writeError(w, http.StatusServiceUnavailable, "gcp_not_configured",
@@ -478,7 +553,7 @@ func (s *Server) verifyGCPServiceAccount(w http.ResponseWriter, r *http.Request,
 	if err := s.gcpTokenGenerator.VerifyImpersonation(r.Context(), sa.Email); err != nil {
 		// Persist the failure status
 		sa.Verified = false
-		sa.VerificationStatus = "failed"
+		sa.VerificationStatus = store.GCPVerificationFailed
 		sa.VerificationError = err.Error()
 		_ = s.store.UpdateGCPServiceAccount(r.Context(), sa)
 

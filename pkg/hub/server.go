@@ -3108,10 +3108,17 @@ func (s *Server) registerRoutes() {
 
 	// Scope-addressed service accounts. The project-nested routes under
 	// /api/v1/projects/{id}/gcp-service-accounts remain registered and
-	// unchanged; this route exists for scopes that have no project to nest
-	// under. Only the collection is registered -- individual accounts keep
-	// their nested address, since P4 does not need a second way to name one.
+	// unchanged; these routes exist for scopes that have no project to nest
+	// under.
+	//
+	// The by-id subtree serves PARENTLESS accounts only -- hub and user scope.
+	// A project-scoped account is 404 there, so this is not a second address
+	// for accounts that already have one; it is the only address for accounts
+	// that have none. P4 registered the collection alone because it only
+	// needed to list; P5 needs to view, re-verify and delete a hub-scoped
+	// account from a UI and a CLI that are not inside any project.
 	s.mux.HandleFunc("/api/v1/gcp-service-accounts", s.handleGCPServiceAccounts)
+	s.mux.HandleFunc("/api/v1/gcp-service-accounts/", s.handleGCPServiceAccountByID)
 
 	s.mux.HandleFunc("/api/v1/skills", s.handleSkills)
 	s.mux.HandleFunc("/api/v1/skills/", s.handleSkillByID)
