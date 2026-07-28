@@ -2080,27 +2080,13 @@ func (s *Server) handleProjectAgentAction(w http.ResponseWriter, r *http.Request
 		}
 	}
 
-	// For interactive actions, enforce policy-based authorization (owner or admin only)
+	// For interactive actions, enforce lifecycle authorization for every caller
+	// kind: users via policy, agents via ScopeAgentLifecycle within their own
+	// project, everything else denied. authorizeAgentLifecycle logs the denial.
 	switch action {
 	case api.AgentActionStart, api.AgentActionStop, api.AgentActionSuspend, api.AgentActionRestart, api.AgentActionMessage, api.AgentActionExec:
-		if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
-			decision := s.authzService.CheckAccess(ctx, userIdent, agentResource(agent), ActionAttach)
-			if !decision.Allowed {
-				s.projectsLogger().Warn("agent authz check failed",
-					"agent_id", agent.ID,
-					"agent_slug", agent.Slug,
-					"agent_owner_id", agent.OwnerID,
-					"agent_created_by", agent.CreatedBy,
-					"user_id", userIdent.ID(),
-					"user_email", userIdent.Email(),
-					"user_role", userIdent.Role(),
-					"action", action,
-					"decision_reason", decision.Reason,
-				)
-				writeError(w, http.StatusForbidden, ErrCodeForbidden,
-					"Only the agent's creator can interact with it", nil)
-				return
-			}
+		if !s.authorizeAgentLifecycle(w, r, agent) {
+			return
 		}
 	}
 
@@ -2208,13 +2194,8 @@ func (s *Server) updateProject(w http.ResponseWriter, r *http.Request, id string
 		return
 	}
 
-	if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
-		decision := s.authzService.CheckAccess(ctx, userIdent, projectResource(project), ActionUpdate)
-		if !decision.Allowed {
-			writeError(w, http.StatusForbidden, ErrCodeForbidden,
-				"You do not have permission to update this project", nil)
-			return
-		}
+	if !s.authorize(w, r, projectResource(project), ActionUpdate) {
+		return
 	}
 
 	var updates struct {
@@ -2381,13 +2362,8 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, id string
 		return
 	}
 
-	if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
-		decision := s.authzService.CheckAccess(ctx, userIdent, projectResource(project), ActionDelete)
-		if !decision.Allowed {
-			writeError(w, http.StatusForbidden, ErrCodeForbidden,
-				"You do not have permission to delete this project", nil)
-			return
-		}
+	if !s.authorize(w, r, projectResource(project), ActionDelete) {
+		return
 	}
 
 	// Dispatch agent deletions to runtime brokers so containers are stopped

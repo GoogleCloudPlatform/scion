@@ -1074,6 +1074,23 @@ func (s *Server) resolveRuntimeBroker(ctx context.Context, w http.ResponseWriter
 // without writing an HTTP response. Returns true if allowed (or if no user identity is present).
 // Auto-provide brokers are dispatchable by any authenticated user since they are
 // shared infrastructure (e.g. a combo hub-broker server's default broker).
+//
+// TODO(#591): the `userIdent == nil → return true` fail-open below is a known
+// #591 bypass and is deliberately NOT converted in this PR — it is on hold
+// pending a decision, together with its twin checkBrokerDispatchAccess
+// (handlers_runtime_brokers.go). Both must land identically.
+//
+// Converting it as design §4.4 words it ("remove the nil branch") panics: the
+// nil UserIdentity reaches CheckAccess, which opens with switch identity.Type().
+// Threading the real identity through instead compiles and denies — but this is
+// the broker-SELECTION filter for agent creation, not an endpoint guard, and the
+// action is ActionDispatch, which the Part 2 read-class baseline (ActionRead /
+// ActionList) does not cover. An agent would pass authorizeAgentCreate and then
+// find no dispatchable broker, so the fix would break its own permitted flow.
+// Verified empirically: that change turns the agent-scoped create tests into 422
+// "no runtime brokers available". AutoProvide sits after the nil check, so
+// single-broker and combo hub-broker deployments would keep working and the
+// breakage would surface only where brokers are not auto-provide.
 func (s *Server) canDispatchToBroker(ctx context.Context, broker *store.RuntimeBroker) bool {
 	userIdent := GetUserIdentityFromContext(ctx)
 	if userIdent == nil {
