@@ -84,7 +84,20 @@ function open_block(line) {
 }
 function count(line, re,   tmp) { tmp = line; return gsub(re, "&", tmp) }
 
-FNR == 1 { in_block = 0; in_nil_block = 0; nil_var = "" }
+FNR == 1 { in_block = 0; in_nil_block = 0; nil_var = ""; cur_func = "?" }
+
+# Track the enclosing top-level function so findings can be named rather than
+# merely located. Line numbers move whenever anything above them is edited; a
+# function name does not, which makes both the allowlist entries and the
+# reviewer checklist stable across unrelated changes. Only column-0 `func`
+# matches, so closures inside a body do not clobber the name.
+/^func / {
+  fname = $0
+  sub(/^func[[:space:]]+/, "", fname)
+  sub(/^\([^)]*\)[[:space:]]*/, "", fname)
+  sub(/[[:space:]]*\(.*$/, "", fname)
+  cur_func = fname
+}
 
 {
   # Shape 3: an explicit "not a user, so allow" early return. Tracked separately
@@ -116,8 +129,8 @@ FNR == 1 { in_block = 0; in_nil_block = 0; nil_var = "" }
     nil_depth += count($0, "\\{") - count($0, "\\}")
     if (nil_depth <= 0) {
       if (nil_last ~ /^[[:space:]]*return[[:space:]]+true[[:space:]]*$/) {
-        printf "%s:%d: if %s == nil { ... return true } (fail-open on non-user caller)\n",
-          FILENAME, pending_nil_line, pending_nil
+        printf "%s:%d: %s(): if %s == nil { ... return true } (fail-open on non-user caller)\n",
+          FILENAME, pending_nil_line, cur_func, pending_nil
       }
       in_nil_block = 0
       next
@@ -134,7 +147,7 @@ FNR == 1 { in_block = 0; in_nil_block = 0; nil_var = "" }
       if (has_authz &&
           $0 !~ /\}[[:space:]]*else\b/ &&
           last_body !~ /^[[:space:]]*(return|continue|break|panic\()/) {
-        printf "%s:%d: %s\n", FILENAME, start, opener
+        printf "%s:%d: %s(): %s\n", FILENAME, start, cur_func, opener
       }
       in_block = 0
       # A `} else if <ident>, ok := ...` line closes one guard and opens the
@@ -354,6 +367,16 @@ fi
 # #591 Part 1 — do not add entries to make a red build green. A new hit is
 # either a real bypass (fix the call site with s.authorize) or a classifier
 # false positive (fix this script, and extend the self-test fixture above).
+#
+# If an entry ever does become necessary, anchor it on file + enclosing function
+# + guard shape, NOT on the line number. Line numbers move whenever anything
+# above them is edited, and a stale line-anchored entry fails in the dangerous
+# direction: it can drift onto an unrelated site and mask a real bypass that was
+# never reviewed. Findings are printed as `file:line: function(): guard` for
+# exactly this reason. Note that a function may contain more than one guard of
+# the same shape (addGroupMember does), so file + function is not always unique;
+# where it is not, say so in the entry's comment rather than assuming it pins
+# one site.
 allowed_paths=(
   # (intentionally empty)
   "^$"
