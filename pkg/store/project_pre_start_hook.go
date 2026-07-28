@@ -30,19 +30,19 @@ const (
 // inlined into AgentAppliedConfig and later staged by the broker at
 // $HOME/.scion/hooks/pre-start.d/30-project-custom before the container starts.
 type ProjectPreStartHook struct {
-	ID          string    `json:"id"`
-	ProjectID   string    `json:"projectId"`
-	Name        string    `json:"name"`
-	Slug        string    `json:"slug"`
-	Description string    `json:"description,omitempty"`
+	ID          string `json:"id"`
+	ProjectID   string `json:"projectId"`
+	Name        string `json:"name"`
+	Slug        string `json:"slug"`
+	Description string `json:"description,omitempty"`
 	// Script is the raw script content (e.g. #!/bin/sh ...).
 	// Bounded to 64 KB at the Hub API layer.
-	Script      string    `json:"script"`
-	Status      string    `json:"status"` // "active" | "archived"
-	CreatedBy   string    `json:"createdBy,omitempty"`
-	UpdatedBy   string    `json:"updatedBy,omitempty"`
-	Created     time.Time `json:"created"`
-	Updated     time.Time `json:"updated"`
+	Script    string    `json:"script"`
+	Status    string    `json:"status"` // "active" | "archived"
+	CreatedBy string    `json:"createdBy,omitempty"`
+	UpdatedBy string    `json:"updatedBy,omitempty"`
+	Created   time.Time `json:"created"`
+	Updated   time.Time `json:"updated"`
 }
 
 // ProjectPreStartHookStore defines project pre-start hook persistence operations.

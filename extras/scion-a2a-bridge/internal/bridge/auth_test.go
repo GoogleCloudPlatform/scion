@@ -440,10 +440,10 @@ func TestValidateConfig_NewSchemes(t *testing.T) {
 	}
 
 	tests := []struct {
-		name       string
-		auth       AuthConfig
+		name        string
+		auth        AuthConfig
 		hubOverride *HubConfig // if non-nil, overrides base Hub config
-		wantErr    bool
+		wantErr     bool
 	}{
 		{
 			name:    "hubUAT/valid",
@@ -451,10 +451,10 @@ func TestValidateConfig_NewSchemes(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name:       "hubJWT/valid",
-			auth:       AuthConfig{Scheme: "hubJWT"},
+			name:        "hubJWT/valid",
+			auth:        AuthConfig{Scheme: "hubJWT"},
 			hubOverride: &HubConfig{Endpoint: "http://hub", User: "admin@test", SigningKey: "test-secret-key"},
-			wantErr:    false,
+			wantErr:     false,
 		},
 		{
 			name:    "hubJWT/missing-signing-key",
