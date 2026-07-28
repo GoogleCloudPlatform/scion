@@ -103,6 +103,8 @@ you whether they are addressed to you or are notifications about another agent.
 - **`instruction`** — addressed to you. Read and act on it.
 - **`state-change`** — a notification that an agent changed state (e.g., completed, stalled). No reply needed.
 - **`input-needed`** — an agent is waiting for input. See below.
+- **`mention`** — you were CC'd or mentioned in a message primarily directed at someone else. Treat as FYI — no action needed unless the message text clearly directs you to do something.
+- **`group-set`** — a user @-mentioned multiple agents (not `@all`). Read and act on it like an `instruction`.
 
 ### Handling `input-needed`
 
