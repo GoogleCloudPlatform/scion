@@ -587,14 +587,14 @@ func TestDetectHarnessFromContent(t *testing.T) {
 			name:         "default_harness_config field",
 			content:      "default_harness_config: gemini-web\n",
 			templateName: "my-template",
-			wantHarness:  "gemini",
+			wantHarness:  "gemini-cli",
 			wantConfig:   "gemini-web",
 		},
 		{
 			name:         "hyphenated keys normalized",
 			content:      "default-harness-config: gemini-pro\n",
 			templateName: "my-template",
-			wantHarness:  "gemini",
+			wantHarness:  "gemini-cli",
 			wantConfig:   "gemini-pro",
 		},
 		{
@@ -629,7 +629,7 @@ func TestDetectHarnessFromContent(t *testing.T) {
 			name:         "invalid yaml falls back to template name",
 			content:      ": invalid: yaml: [",
 			templateName: "gemini-template",
-			wantHarness:  "gemini",
+			wantHarness:  "gemini-cli",
 			wantConfig:   "",
 		},
 	}
@@ -672,8 +672,8 @@ func TestHandleTemplateFileWrite_UpdatesHarness(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to get updated template: %v", err)
 	}
-	if updated.Harness != "gemini" {
-		t.Errorf("expected harness 'gemini', got %q", updated.Harness)
+	if updated.Harness != "gemini-cli" {
+		t.Errorf("expected harness 'gemini-cli', got %q", updated.Harness)
 	}
 	if updated.DefaultHarnessConfig != "gemini-web" {
 		t.Errorf("expected defaultHarnessConfig 'gemini-web', got %q", updated.DefaultHarnessConfig)

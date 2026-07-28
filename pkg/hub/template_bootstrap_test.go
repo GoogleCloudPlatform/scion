@@ -660,8 +660,8 @@ func TestDetectHarnessFromConfig_NameBased(t *testing.T) {
 	}{
 		{"claude", "claude"},
 		{"my-claude-template", "claude"},
-		{"gemini", "gemini"},
-		{"custom-gemini-pro", "gemini"},
+		{"gemini", "gemini-cli"},
+		{"custom-gemini-pro", "gemini-cli"},
 		{"opencode", "opencode"},
 		{"codex", "codex"},
 		{"default", ""},
@@ -710,8 +710,8 @@ func TestDetectHarnessFromConfig_DefaultHarnessConfig(t *testing.T) {
 	}
 
 	got := detectHarnessFromConfig(dir, "my-template")
-	if got.Harness != "gemini" {
-		t.Errorf("expected Harness 'gemini', got %q", got.Harness)
+	if got.Harness != "gemini-cli" {
+		t.Errorf("expected Harness 'gemini-cli', got %q", got.Harness)
 	}
 	if got.DefaultHarnessConfig != "gemini-web" {
 		t.Errorf("expected DefaultHarnessConfig 'gemini-web', got %q", got.DefaultHarnessConfig)

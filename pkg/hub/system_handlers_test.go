@@ -241,18 +241,19 @@ func TestSystemInit_EmbedOnlyHarness(t *testing.T) {
 	)
 	defer restore()
 
-	// Gemini is embed-only (not in the bundled catalog). This must not 500.
+	// gemini-cli is the correct harness name (not the retired "gemini" alias).
+	// This must succeed and seed the harness-config on disk.
 	rec := doWorkstationRequest(t, srv, http.MethodPost, "/api/v1/system/init", map[string]interface{}{
-		"harnesses": []string{"gemini"},
+		"harnesses": []string{"gemini-cli"},
 	})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	// Gemini harness-config should be seeded via the embed-only path.
-	geminiConfig := filepath.Join(tmpHome, ".scion", "harness-configs", "gemini", "config.yaml")
+	// gemini-cli harness-config should be seeded on disk.
+	geminiConfig := filepath.Join(tmpHome, ".scion", "harness-configs", "gemini-cli", "config.yaml")
 	if _, err := os.Stat(geminiConfig); err != nil {
-		t.Errorf("expected gemini config.yaml to be created: %v", err)
+		t.Errorf("expected gemini-cli config.yaml to be created: %v", err)
 	}
 }
 

@@ -165,7 +165,7 @@ func inferHarnessFromName(name string) string {
 	case strings.Contains(lower, "claude"):
 		return "claude"
 	case strings.Contains(lower, "gemini"):
-		return "gemini"
+		return "gemini-cli"
 	case strings.Contains(lower, "opencode"):
 		return "opencode"
 	case strings.Contains(lower, "codex"):

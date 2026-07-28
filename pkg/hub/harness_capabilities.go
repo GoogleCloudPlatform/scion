@@ -28,8 +28,8 @@ func canonicalHarnessName(name string) string {
 	switch strings.ToLower(strings.TrimSpace(name)) {
 	case "claude":
 		return "claude"
-	case "gemini":
-		return "gemini"
+	case "gemini", "gemini-cli":
+		return "gemini-cli"
 	case "opencode":
 		return "opencode"
 	case "codex":

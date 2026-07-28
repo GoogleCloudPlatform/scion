@@ -1257,10 +1257,13 @@ func TestAddProvider(t *testing.T) {
 		t.Fatalf("failed to create runtime broker: %v", err)
 	}
 
+	// Use a real temp directory so the localPath validation passes.
+	localPath := t.TempDir()
+
 	// Add provider via API
 	body := map[string]interface{}{
 		"brokerId":  broker.ID,
-		"localPath": "/home/user/project/.scion",
+		"localPath": localPath,
 		"mode":      "connected",
 	}
 
@@ -1280,8 +1283,8 @@ func TestAddProvider(t *testing.T) {
 	if resp.Provider.BrokerID != broker.ID {
 		t.Errorf("expected broker ID %q, got %q", broker.ID, resp.Provider.BrokerID)
 	}
-	if resp.Provider.LocalPath != "/home/user/project/.scion" {
-		t.Errorf("expected localPath, got %q", resp.Provider.LocalPath)
+	if resp.Provider.LocalPath != localPath {
+		t.Errorf("expected localPath %q, got %q", localPath, resp.Provider.LocalPath)
 	}
 
 	// Verify project now has default runtime broker set
