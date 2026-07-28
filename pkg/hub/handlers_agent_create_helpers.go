@@ -523,6 +523,9 @@ func (s *Server) createNotifySubscription(ctx context.Context, agentID, projectI
 // phase may be restarted in place rather than rejected as a duplicate, and
 // whether the harness should be handed its resume flag when that happens.
 //
+// Local (non-Hub) mode applies the same contract in localResumeDecision
+// (cmd/common.go); keep the two in step.
+//
 // A stopped agent restarts with a *fresh* harness session even when resume was
 // requested, mirroring the local CLI's effectiveResume. A forced recovery is
 // the opposite case: the agent died without a clean shutdown (typically a host

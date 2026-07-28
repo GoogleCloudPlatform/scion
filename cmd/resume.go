@@ -30,10 +30,11 @@ The agent-name is required as the first argument. Subsequent arguments
 are optional and form a task prompt to be added to the resumed session
 (if supported by the harness).
 
-Use --force to recover an agent the Hub considers failed (phase=error), such
-as one whose host crashed mid-run. Normally such an agent is rejected as a
-duplicate. --force acts on one named agent at a time and never applies to a
-running agent, which must not be recreated while it is live.`,
+An agent in the error phase (e.g. one whose host crashed mid-run) is refused
+unless --force is given. --force is an error-phase recovery tool only: it acts
+on one named agent at a time, has no effect on a cleanly stopped agent (which
+always starts a fresh session), and never applies to a running agent, which
+must not be recreated while it is live.`,
 	Args:              cobra.MinimumNArgs(1),
 	ValidArgsFunction: getAgentNames,
 	RunE: func(cmd *cobra.Command, args []string) error {
