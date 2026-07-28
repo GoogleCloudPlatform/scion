@@ -78,11 +78,29 @@ func projectResource(g *store.Project) Resource {
 
 // templateResource constructs a Resource from a store.Template for capability computation.
 func templateResource(t *store.Template) Resource {
-	return Resource{
+	r := Resource{
 		Type:    "template",
 		ID:      t.ID,
 		OwnerID: t.OwnerID,
 	}
+	// Project-scoped templates are children of their project (mirrors
+	// harnessConfigResource and policyResource). Without this the resource is
+	// parentless, and since #595 made project-scoped policy matching an
+	// allow-list, a parentless resource matches no project-scoped policy at
+	// all — so project-scoped template policies would match nothing.
+	//
+	// ScopeID is the authoritative field. Deliberately no fallback to the
+	// deprecated t.ProjectID (store/models.go): a deprecated field must not
+	// become load-bearing in the authz engine. Legacy ProjectID-only rows are
+	// handled by backfill, not here.
+	//
+	// Global- and user-scoped templates stay parentless, which is correct:
+	// they do not belong to a project.
+	if t.Scope == store.TemplateScopeProject && t.ScopeID != "" {
+		r.ParentType = "project"
+		r.ParentID = t.ScopeID
+	}
+	return r
 }
 
 // harnessConfigResource constructs a Resource from a store.HarnessConfig for capability computation.

@@ -367,7 +367,15 @@ func TestMatchesResource_ProjectScopeIsAllowList(t *testing.T) {
 		name     string
 		resource Resource
 	}{
-		{"template", templateResource(&store.Template{ID: "tmpl-1"})},
+		{"global template", templateResource(&store.Template{
+			ID: "tmpl-global", Scope: store.TemplateScopeGlobal,
+		})},
+		{"user template", templateResource(&store.Template{
+			ID: "tmpl-user", Scope: store.TemplateScopeUser, ScopeID: "user-1",
+		})},
+		{"project template with empty ScopeID", templateResource(&store.Template{
+			ID: "tmpl-noscope", Scope: store.TemplateScopeProject,
+		})},
 		{"broker", brokerResource(&store.RuntimeBroker{ID: "broker-1"})},
 		{"user", userResource(&store.User{ID: "user-1"})},
 		{"hub-scoped group", groupResource(&store.Group{ID: "group-1"})},
@@ -433,6 +441,131 @@ func TestMatchesResource_ProjectScopeIsAllowList(t *testing.T) {
 	t.Run("project-scoped policy resource matches its project", func(t *testing.T) {
 		r := policyResource(&store.Policy{ID: "policy-2", ScopeType: "project", ScopeID: projectA})
 		assert.True(t, matchesResource(policy("policy"), r))
+	})
+
+	t.Run("project-scoped template matches its project", func(t *testing.T) {
+		r := templateResource(&store.Template{
+			ID: "tmpl-proj", Scope: store.TemplateScopeProject, ScopeID: projectA,
+		})
+		assert.True(t, matchesResource(policy("template"), r))
+		assert.True(t, matchesResource(policy("*"), r))
+	})
+
+	t.Run("project-scoped template does not match another project", func(t *testing.T) {
+		r := templateResource(&store.Template{
+			ID: "tmpl-proj", Scope: store.TemplateScopeProject, ScopeID: projectA,
+		})
+		policyForB := store.Policy{
+			ResourceType: "template",
+			ScopeType:    "project",
+			ScopeID:      projectB,
+			Actions:      []string{"*"},
+			Effect:       "allow",
+		}
+		assert.False(t, matchesResource(policyForB, r))
+	})
+}
+
+// TestTemplateResource_ProjectParent pins the builder itself.
+//
+// templateResource used to return a parentless Resource for every scope. Under
+// the pre-#595 deny-list matcher that was invisible: parentless resources fell
+// through and matched every project-scoped policy, so project-scoped template
+// policies appeared to work. The allow-list removed the accident and exposed
+// the defect — project-scoped template policies matched nothing.
+//
+// The two changes therefore belong together, the same way #595 itself does:
+// the matcher stops guessing, so the builder has to tell the truth.
+func TestTemplateResource_ProjectParent(t *testing.T) {
+	t.Run("project-scoped template is a child of its project", func(t *testing.T) {
+		r := templateResource(&store.Template{
+			ID: "tmpl-1", Scope: store.TemplateScopeProject, ScopeID: "project-a",
+		})
+		assert.Equal(t, "project", r.ParentType)
+		assert.Equal(t, "project-a", r.ParentID)
+		assert.Equal(t, "project-a", projectIDForResource(r))
+	})
+
+	// Scopes that genuinely do not belong to a project must stay parentless.
+	// Giving them a parent would hand project owner/admin bypass — and the
+	// agent read baseline — access to templates outside any project.
+	for _, tc := range []struct {
+		name     string
+		template store.Template
+	}{
+		{"global", store.Template{ID: "t-global", Scope: store.TemplateScopeGlobal}},
+		{"user", store.Template{ID: "t-user", Scope: store.TemplateScopeUser, ScopeID: "user-1"}},
+		{"unset scope", store.Template{ID: "t-unset"}},
+	} {
+		t.Run("parentless/"+tc.name, func(t *testing.T) {
+			r := templateResource(&tc.template)
+			assert.Empty(t, r.ParentType)
+			assert.Empty(t, r.ParentID)
+			assert.Empty(t, projectIDForResource(r))
+		})
+	}
+
+	// The deprecated ProjectID field must not be load-bearing in the authz
+	// engine. A row carrying only the legacy field stays parentless; those rows
+	// are a backfill concern, not an authz fallback (#595 follow-up).
+	t.Run("deprecated ProjectID is not a fallback", func(t *testing.T) {
+		r := templateResource(&store.Template{
+			ID: "tmpl-legacy", Scope: store.TemplateScopeProject, ProjectID: "project-a",
+		})
+		assert.Empty(t, r.ParentType, "ScopeID is authoritative; ProjectID must not be consulted")
+		assert.Empty(t, projectIDForResource(r))
+	})
+}
+
+// TestTemplateResource_UATConfinement pins the security consequence of giving
+// project-scoped templates a parent, which is the reason this change is more
+// than a matcher companion fix.
+//
+// enforceUATConstraints confines a project-pinned user access token with:
+//
+//	resource.ParentType == "project" && resource.ParentID != token project -> deny
+//
+// A parentless template satisfies neither that arm nor the resource.Type ==
+// "project" arm, so before this change a UAT pinned to project A was NOT
+// confined against project B's templates — it fell through to the scope check
+// and, for an admin bearer, on to admin bypass. That is the same #595 defect in
+// its second shape.
+//
+// This test does not touch enforceUATConstraints; it pins the behaviour the
+// builder fix produces.
+func TestTemplateResource_UATConfinement(t *testing.T) {
+	authz := &AuthzService{}
+	const tokenProject = "project-a"
+
+	// Scope is present in every case below, so a denial can only come from the
+	// project constraint — never from a missing scope.
+	scoped := NewScopedUserIdentity(nil, tokenProject, []string{"template:read"})
+
+	t.Run("template in another project is denied", func(t *testing.T) {
+		r := templateResource(&store.Template{
+			ID: "tmpl-b", Scope: store.TemplateScopeProject, ScopeID: "project-b",
+		})
+		decision := authz.enforceUATConstraints(scoped, r, ActionRead)
+		require.NotNil(t, decision, "a project-pinned UAT must be confined against another project's template")
+		assert.False(t, decision.Allowed)
+		assert.Equal(t, "token not scoped for this project", decision.Reason)
+	})
+
+	t.Run("template in the token's own project is not denied here", func(t *testing.T) {
+		r := templateResource(&store.Template{
+			ID: "tmpl-a", Scope: store.TemplateScopeProject, ScopeID: tokenProject,
+		})
+		assert.Nil(t, authz.enforceUATConstraints(scoped, r, ActionRead),
+			"confinement must not fire on the token's own project")
+	})
+
+	// Global templates remain parentless and so remain outside UAT project
+	// confinement. That is unchanged by this commit and is called out here so
+	// the gap is recorded rather than assumed fixed: a project-pinned UAT can
+	// still reach global templates, subject to policy.
+	t.Run("global template is still not confined (unchanged)", func(t *testing.T) {
+		r := templateResource(&store.Template{ID: "tmpl-global", Scope: store.TemplateScopeGlobal})
+		assert.Nil(t, authz.enforceUATConstraints(scoped, r, ActionRead))
 	})
 }
 
