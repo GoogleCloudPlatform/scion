@@ -185,6 +185,17 @@ func (r *PodmanRuntime) Run(ctx context.Context, config RunConfig) (string, erro
 	}
 
 	// Apply resource constraints from config.
+	//
+	// TODO(cgroup-limits): when r.Rootless is true and the host is on cgroup v1,
+	// Podman cannot apply resource limits and rejects these flags, so the agent
+	// fails to start instead of falling back to an unlimited container. This is
+	// now reachable by default because config.BuiltinDefaultResources() supplies
+	// limits.cpu "2" for every agent. detectRootlessMode already gives us half
+	// the signal; the fix is to also probe
+	// `podman info --format '{{.Host.CgroupsVersion}}'` at construction and skip
+	// these flags with a warning when limits are unsupported. Not implemented
+	// here — affected deployments must set
+	// `runtime.enforce_resource_defaults: false` until it lands.
 	if config.Resources != nil {
 		if config.Resources.Limits.Memory != "" {
 			bytes, err := util.ParseMemory(config.Resources.Limits.Memory)

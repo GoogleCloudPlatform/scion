@@ -158,6 +158,21 @@
         "$ref": "#/$defs/runtimeConfig"
       }
     },
+    "runtime": {
+      "type": "object",
+      "description": "Runtime-wide behaviour that is not specific to a single named entry in 'runtimes'.",
+      "x-scope": "any",
+      "x-since": "1",
+      "additionalProperties": false,
+      "properties": {
+        "enforce_resource_defaults": {
+          "type": "boolean",
+          "description": "Apply built-in resource defaults (limits.cpu '2') to agents with no limits from any other tier. Defaults to true when unset. Set false to restore unlimited Docker/Podman containers.",
+          "x-scope": "any",
+          "x-since": "1"
+        }
+      }
+    },
     "harness_configs": {
       "type": "object",
       "description": "Named harness configurations. Multiple configs may share a harness type.",
