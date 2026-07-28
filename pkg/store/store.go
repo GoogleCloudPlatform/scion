@@ -128,6 +128,9 @@ type Store interface {
 
 	// SkillInjection operations (Injected-Skills List)
 	SkillInjectionStore
+
+	// ProjectPreStartHook operations (Project-Level Pre-Start Customization Scripts)
+	ProjectPreStartHookStore
 }
 
 // AgentStore defines agent-related persistence operations.

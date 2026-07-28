@@ -262,6 +262,22 @@ func (s *Server) populateAgentConfig(ctx context.Context, agent *store.Agent, pr
 		}
 	}
 
+	// Stamp project pre-start hook for broker delivery.
+	// Resolve the active hook for the project and inline its script content into
+	// AppliedConfig so the broker can stage it without an extra Hub round-trip.
+	// Mirrors the HarnessConfigID stamping pattern above.
+	if project != nil && agent.AppliedConfig.ProjectPreStartHookID == "" {
+		hook, hookErr := s.store.GetActiveProjectPreStartHook(ctx, project.ID)
+		if hookErr != nil && !errors.Is(hookErr, store.ErrNotFound) {
+			s.agentLifecycleLog.Warn("failed to resolve project pre-start hook",
+				"project_id", project.ID, "error", hookErr)
+		}
+		if hook != nil {
+			agent.AppliedConfig.ProjectPreStartHookID = hook.ID
+			agent.AppliedConfig.ProjectPreStartHookScript = hook.Script
+		}
+	}
+
 	// Resolve model size aliases (e.g. "extra-large" → "fable") so that
 	// AppliedConfig.Model and InlineConfig.Model carry the concrete model
 	// name. This prevents raw aliases from leaking into SCION_MODEL env var

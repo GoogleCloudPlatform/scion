@@ -365,6 +365,18 @@ func (m *AgentManager) Provision(ctx context.Context, opts api.StartOptions) (*a
 		return cfg, err
 	}
 
+	// Stage the project-level pre-start hook script if one was inlined into
+	// opts at agent-create time. The script is written at
+	// pre-start.d/30-project-custom so it runs after the harness provisioner
+	// (20-harness-provision). A staging failure is fatal — the project owner
+	// explicitly configured this script and a silent skip would be misleading.
+	if opts.ProjectPreStartHookScript != "" {
+		agentHome := config.GetAgentHomePath(opts.ProjectPath, opts.Name)
+		if err := harness.WriteProjectPreStartHook(agentHome, opts.ProjectPreStartHookScript); err != nil {
+			return cfg, fmt.Errorf("stage project pre-start hook: %w", err)
+		}
+	}
+
 	// Persist harness auth override to the on-disk config (for sciontool).
 	// The auth type was already applied via inlineConfig above, but we
 	// re-write to ensure the final file reflects the override.

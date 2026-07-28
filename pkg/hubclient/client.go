@@ -107,6 +107,9 @@ type Client interface {
 	// UserInjectedSkills returns an InjectedSkillsService scoped to the current user.
 	UserInjectedSkills() InjectedSkillsService
 
+	// ProjectPreStartHooks returns a ProjectPreStartHookService scoped to a project.
+	ProjectPreStartHooks(projectID string) ProjectPreStartHookService
+
 	// Health checks API availability.
 	Health(ctx context.Context) (*HealthResponse, error)
 }

@@ -87,6 +87,9 @@ type Project func(*sql.Selector)
 // ProjectContributor is the predicate function for projectcontributor builders.
 type ProjectContributor func(*sql.Selector)
 
+// ProjectPreStartHook is the predicate function for projectprestarthook builders.
+type ProjectPreStartHook func(*sql.Selector)
+
 // ProjectSyncState is the predicate function for projectsyncstate builders.
 type ProjectSyncState func(*sql.Selector)
 

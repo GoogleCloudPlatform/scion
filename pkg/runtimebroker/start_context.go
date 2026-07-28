@@ -403,6 +403,7 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		opts.Profile = in.Config.Profile
 		opts.Branch = in.Config.Branch
 		opts.SharedWorkspace = in.Config.SharedWorkspace
+		opts.ProjectPreStartHookScript = in.Config.ProjectPreStartHookScript
 	}
 
 	if in.InlineConfig != nil {

@@ -832,6 +832,38 @@ var (
 			},
 		},
 	}
+	// ProjectPreStartHooksColumns holds the columns for the "project_pre_start_hooks" table.
+	ProjectPreStartHooksColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "project_id", Type: field.TypeString},
+		{Name: "name", Type: field.TypeString},
+		{Name: "slug", Type: field.TypeString},
+		{Name: "description", Type: field.TypeString, Nullable: true},
+		{Name: "script", Type: field.TypeString},
+		{Name: "status", Type: field.TypeEnum, Enums: []string{"active", "archived"}, Default: "active"},
+		{Name: "created_by", Type: field.TypeString, Nullable: true},
+		{Name: "updated_by", Type: field.TypeString, Nullable: true},
+		{Name: "created", Type: field.TypeTime},
+		{Name: "updated", Type: field.TypeTime},
+	}
+	// ProjectPreStartHooksTable holds the schema information for the "project_pre_start_hooks" table.
+	ProjectPreStartHooksTable = &schema.Table{
+		Name:       "project_pre_start_hooks",
+		Columns:    ProjectPreStartHooksColumns,
+		PrimaryKey: []*schema.Column{ProjectPreStartHooksColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "projectprestarthook_project_id_slug",
+				Unique:  true,
+				Columns: []*schema.Column{ProjectPreStartHooksColumns[1], ProjectPreStartHooksColumns[3]},
+			},
+			{
+				Name:    "projectprestarthook_project_id_status",
+				Unique:  false,
+				Columns: []*schema.Column{ProjectPreStartHooksColumns[1], ProjectPreStartHooksColumns[6]},
+			},
+		},
+	}
 	// ProjectSyncStateColumns holds the columns for the "project_sync_state" table.
 	ProjectSyncStateColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeUUID},
@@ -1340,6 +1372,7 @@ var (
 		PolicyBindingsTable,
 		ProjectsTable,
 		ProjectContributorsTable,
+		ProjectPreStartHooksTable,
 		ProjectSyncStateTable,
 		RuntimeBrokersTable,
 		SchedulesTable,
@@ -1429,6 +1462,9 @@ func init() {
 	}
 	ProjectContributorsTable.Annotation = &entsql.Annotation{
 		Table: "project_contributors",
+	}
+	ProjectPreStartHooksTable.Annotation = &entsql.Annotation{
+		Table: "project_pre_start_hooks",
 	}
 	ProjectSyncStateTable.Annotation = &entsql.Annotation{
 		Table: "project_sync_state",

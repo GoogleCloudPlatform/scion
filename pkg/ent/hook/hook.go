@@ -333,6 +333,18 @@ func (f ProjectContributorFunc) Mutate(ctx context.Context, m ent.Mutation) (ent
 	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.ProjectContributorMutation", m)
 }
 
+// The ProjectPreStartHookFunc type is an adapter to allow the use of ordinary
+// function as ProjectPreStartHook mutator.
+type ProjectPreStartHookFunc func(context.Context, *ent.ProjectPreStartHookMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f ProjectPreStartHookFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.ProjectPreStartHookMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.ProjectPreStartHookMutation", m)
+}
+
 // The ProjectSyncStateFunc type is an adapter to allow the use of ordinary
 // function as ProjectSyncState mutator.
 type ProjectSyncStateFunc func(context.Context, *ent.ProjectSyncStateMutation) (ent.Value, error)

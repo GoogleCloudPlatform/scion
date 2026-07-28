@@ -432,6 +432,17 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		util.Debugf("Start: harness reconciliation failed: %v", err)
 	}
 
+	// Re-stage the project pre-start hook on restart. The script content is
+	// baked into StartOptions at agent-create time and forwarded by the broker,
+	// so no Hub round-trip is needed. A write failure is fatal: if the file is
+	// absent on a fresh restart the abort guard in init.go (projectHookStaged)
+	// will not fire, so the hook would silently not run — worse than aborting.
+	if opts.ProjectPreStartHookScript != "" {
+		if err := harness.WriteProjectPreStartHook(agentHome, opts.ProjectPreStartHookScript); err != nil {
+			return nil, fmt.Errorf("re-stage project pre-start hook: %w", err)
+		}
+	}
+
 	// Resolve auth metadata for the config-driven env var pipeline.
 	// Prefer the on-disk harness config (already resolved above for image/
 	// user); fall back to the settings entry.

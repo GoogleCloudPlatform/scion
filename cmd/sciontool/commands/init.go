@@ -263,17 +263,24 @@ func runInit(args []string) int {
 		return 1
 	}
 
+	// Detect whether a project pre-start hook was staged by the broker.
+	// The presence of this file means the operator explicitly configured a hook
+	// and startup should be aborted if it fails (abort-on-failure policy).
+	projectHookPath := filepath.Join(agentHome, ".scion", "hooks", "pre-start.d", "30-project-custom")
+	_, projectHookStatErr := os.Stat(projectHookPath)
+	projectHookStaged := projectHookStatErr == nil
+
 	// Run pre-start hooks (after setup, before child process)
 	log.Info("Running pre-start hooks...")
 	if err := lifecycleManager.RunPreStart(); err != nil {
 		log.Error("Pre-start hooks failed: %v", err)
-		if harnessReq.Required {
-			log.Error("Container-script harness pre-start provisioning is required; aborting startup")
+		if harnessReq.Required || projectHookStaged {
+			log.Error("Pre-start provisioning is required; aborting startup")
 			_ = statusHandler.UpdatePhase(state.PhaseError, "", "")
-			_ = statusHandler.SetMessage(fmt.Sprintf("pre-start provisioning failed: %v", err))
+			_ = statusHandler.SetMessage(fmt.Sprintf("pre-start hook failed: %v", err))
 			return 1
 		}
-		// Continue anyway - hooks failing shouldn't prevent startup
+		// Continue anyway — non-required harness hooks failing shouldn't prevent startup
 	}
 
 	// Load the env overlay produced by the pre-start provisioner. Resolve

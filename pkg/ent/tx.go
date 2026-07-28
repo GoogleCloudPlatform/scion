@@ -66,6 +66,8 @@ type Tx struct {
 	Project *ProjectClient
 	// ProjectContributor is the client for interacting with the ProjectContributor builders.
 	ProjectContributor *ProjectContributorClient
+	// ProjectPreStartHook is the client for interacting with the ProjectPreStartHook builders.
+	ProjectPreStartHook *ProjectPreStartHookClient
 	// ProjectSyncState is the client for interacting with the ProjectSyncState builders.
 	ProjectSyncState *ProjectSyncStateClient
 	// RuntimeBroker is the client for interacting with the RuntimeBroker builders.
@@ -250,6 +252,7 @@ func (tx *Tx) init() {
 	tx.PolicyBinding = NewPolicyBindingClient(tx.config)
 	tx.Project = NewProjectClient(tx.config)
 	tx.ProjectContributor = NewProjectContributorClient(tx.config)
+	tx.ProjectPreStartHook = NewProjectPreStartHookClient(tx.config)
 	tx.ProjectSyncState = NewProjectSyncStateClient(tx.config)
 	tx.RuntimeBroker = NewRuntimeBrokerClient(tx.config)
 	tx.Schedule = NewScheduleClient(tx.config)

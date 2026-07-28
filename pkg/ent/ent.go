@@ -39,6 +39,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/policybinding"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/project"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/projectcontributor"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/projectprestarthook"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/projectsyncstate"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/runtimebroker"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/schedule"
@@ -139,6 +140,7 @@ func checkColumn(t, c string) error {
 			policybinding.Table:            policybinding.ValidColumn,
 			project.Table:                  project.ValidColumn,
 			projectcontributor.Table:       projectcontributor.ValidColumn,
+			projectprestarthook.Table:      projectprestarthook.ValidColumn,
 			projectsyncstate.Table:         projectsyncstate.ValidColumn,
 			runtimebroker.Table:            runtimebroker.ValidColumn,
 			schedule.Table:                 schedule.ValidColumn,

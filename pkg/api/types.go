@@ -859,6 +859,12 @@ type StartOptions struct {
 	InlineConfig      *ScionConfig    // Inline config from --config flag, merged over template config
 	SharedDirs        []SharedDir     // Project-level shared directories (from Hub, merged with settings)
 	ExtraHosts        []string        // Extra --add-host entries for container networking (e.g. "example.com:host-gateway")
+
+	// ProjectPreStartHookScript is the project-owner-supplied shell script
+	// inlined from the project's active ProjectPreStartHook at agent-create
+	// time. If non-empty, the broker writes it to pre-start.d/30-project-custom
+	// before the agent container starts.
+	ProjectPreStartHookScript string
 }
 
 type StatusEvent struct {
