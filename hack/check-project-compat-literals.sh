@@ -58,6 +58,7 @@ allowed_paths=(
   "^cmd/template_resolution_test.go$"
   "^cmd/templates_test.go$"
   "^extras/agent-viz/internal/logparser/parser_test.go$"
+  "^extras/scion-a2a-bridge/internal/bridge/auth_test.go$"
   "^extras/scion-a2a-bridge/internal/bridge/metrics_test.go$"
   "^extras/scion-a2a-bridge/internal/bridge/server_test.go$"
   "^extras/scion-a2a-bridge/internal/bridge/stream_test.go$"
