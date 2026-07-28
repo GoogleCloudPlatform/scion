@@ -61,7 +61,7 @@ The `scion message` command provides powerful flags for advanced orchestration:
 - **`--raw`**: Sends literal keystrokes to an agent's tmux terminal (e.g., `scion message agent:editor --raw "ENTER"`). Useful for unblocking interactive prompts.
 - **`--wake`**: Resumes a suspended agent and delivers the message.
 - **`--interrupt`**: Interrupts the target agent's current process before delivering the message (use with caution).
-- **`--notify`**: Subscribes you to state-change notifications (e.g., completion, stall) for the target agent.
+- **`--notify`**: Subscribes you to state-change notifications (e.g., completion, stall) for the target agent. Note: `--notify` on `scion start` is **deprecated** — agents that create other agents are automatically subscribed via creation ancestry. Use `--notify` on `scion message` only when subscribing to an agent you did not create.
 - **`--attach <file>`**: Attaches one or more files to the message.
 - **`--in <delay>`**: Schedules a message for a relative delay (e.g., `--in 5m`).
 - **`--at <time>`**: Schedules a message for an absolute time (e.g., `--at "2026-06-10 14:00"`).
@@ -80,14 +80,62 @@ In projects with multiple users:
 
 ## Message Length Limit
 
-scion message fails when the message exceeds the character limit (approximately **2000 characters**). Because the CLI prints the full --help usage text alongside the error, the failure can be easily mistaken for a malformed command. Note that the command still returns a non-zero exit code, so agents checking the exit code will detect the failure.\n\nIf your message is long:\n- Split it into two or more messages, each under ~1800 characters.\n- Or write the content to a shared file and send a short message with the\n  file path.\n\nThe failure signature (a --help dump) looks like a malformed command, not\nan oversized message — check message length first when debugging these\ndelivery failures.
+Messages to **users** (agent-to-human-inbox path) are limited to **2000
+characters** (counted as Unicode runes, not bytes — CJK and emoji each
+count as one character). Agent-to-agent messages have **no enforced cap
+in code** and are not subject to this limit.
+
+When the limit is exceeded, the command returns a non-zero exit code but
+also dumps the full CLI `--help` text to `stderr` — the actual error line
+(`validation_error: message exceeds 2000 character limit`) scrolls off if
+you pipe to `tail`. Redirect `stderr` and pipe to `head` (e.g., `2>&1 | head`) to surface it.
+
+If your user-directed message is long:
+- Split it into two or more messages, each under ~1800 characters.
+- Or write the content to a shared file and send a short message with the
+  file path.
+
+## Inbound Message Types
+
+**Check the `type` field before replying.** Messages carry a type that tells
+you whether they are addressed to you or are notifications about another agent.
+
+- **`instruction`** — addressed to you. Read and act on it.
+- **`state-change`** — a notification that an agent changed state (e.g., completed, stalled). No reply needed.
+- **`input-needed`** — an agent is waiting for input. See below.
+- **`mention`** — you were CC'd or mentioned in a message primarily directed at someone else. Treat as FYI — no action needed unless the message text clearly directs you to do something.
+- **`group-set`** — a user @-mentioned multiple agents (not `@all`). Read and act on it like an `instruction`.
+
+### Handling `input-needed`
+
+When an agent calls `sciontool status ask_user`, the question text is embedded
+in a notification dispatched to that agent's **subscribers** (including any
+agent that created it). The message arrives as
+`"<name> is WAITING_FOR_INPUT: <question>"` with type `input-needed`.
+
+**If you are the parent agent that created the waiting agent**, you may be the
+intended respondent — the child may be asking you for a decision or input as
+part of your coordination. Use `scion message agent:<name>` to reply.
+
+**If you are a peer or unrelated subscriber**, do not answer. The agent is
+likely waiting for a human or its parent, and your reply will not unblock it.
+Repeated appearances are status re-signals, not impatience.
+
+Answering `input-needed` messages you are not responsible for causes:
+- Wasted tokens — the reply goes nowhere useful.
+- False loop signals — repeated echoes look like a stuck agent.
+- **Scope violations** — answering a question meant for someone else can make a recommendation look ratified.
+
+**To request a peer's input, send an `instruction`** via `scion message
+agent:<name>`. Do not rely on your `ask_user` status signal to reach them — it
+is a broadcast to subscribers, not a delivery to an addressee.
 
 ## Anti-Patterns and Red Flags
 
 - **Red Flag**: Using `--broadcast`.
 - **Red Flag**: An agent goes silent for >30 minutes without a milestone update or "blocked" status.
 - **Anti-Pattern**: Sending "I'm still here" or other low-signal filler messages.
-- **Anti-Pattern**: Using `sleep` to wait for something; use `sciontool status blocked` instead.
+- **Anti-Pattern**: Using `sleep` to wait for something; use `sciontool status blocked` instead. For external processes that emit no notification (CI, builds, deploys), pair `status blocked` with a scheduled self-callback — see the `scion-scheduler` skill → **Waiting on external processes**.
 - **Anti-Pattern**: Repeating the entire original brief in a follow-up message (exhausts context).
 
 ## Verification Checklist
