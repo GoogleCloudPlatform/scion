@@ -757,7 +757,9 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		router := agent.NewRoutingSkillResolver(hubResolver)
 		defaultGHToken := req.ResolvedEnv["GITHUB_TOKEN"]
 		ghResolver := agent.NewGitHubSkillResolverWithCredentials(defaultGHToken, req.ProvisionCredentials, s.ghResolutionCache)
-		router.Register("gh", ghResolver)
+		// Route gh:// through Hub first (DB-backed resolution cache + GitHub App
+		// token minting); fall back to in-broker GitHub resolution if Hub fails.
+		router.RegisterFallback("gh", ghResolver)
 
 		// GCP resolver uses Hub API for registry alias lookup.
 		registrySvc := conn.HubClient.SkillRegistries()
