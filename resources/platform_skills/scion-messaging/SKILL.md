@@ -97,26 +97,32 @@ If your user-directed message is long:
 
 ## Inbound Message Types
 
-**Check the `type` field before replying.** Only `instruction` is addressed
-to you. `state-change` and `input-needed` are notifications *about* another
-agent — they require no reply.
+**Check the `type` field before replying.** Messages carry a type that tells
+you whether they are addressed to you or are notifications about another agent.
 
-**Never answer an `input-needed` message.** When an agent calls
-`sciontool status ask_user`, the question text is embedded in a notification
-dispatched to that agent's **subscribers** (including any agent that created
-it). The message arrives as `"<name> is WAITING_FOR_INPUT: <question>"` with
-type `input-needed`. It looks like a direct question, but it is not — that
-agent is blocked waiting for a **human**, and a peer's reply cannot clear it.
+- **`instruction`** — addressed to you. Read and act on it.
+- **`state-change`** — a notification that an agent changed state (e.g., completed, stalled). No reply needed.
+- **`input-needed`** — an agent is waiting for input. See below.
 
-Answering `input-needed` messages causes:
+### Handling `input-needed`
+
+When an agent calls `sciontool status ask_user`, the question text is embedded
+in a notification dispatched to that agent's **subscribers** (including any
+agent that created it). The message arrives as
+`"<name> is WAITING_FOR_INPUT: <question>"` with type `input-needed`.
+
+**If you are the parent agent that created the waiting agent**, you may be the
+intended respondent — the child may be asking you for a decision or input as
+part of your coordination. Use `scion message agent:<name>` to reply.
+
+**If you are a peer or unrelated subscriber**, do not answer. The agent is
+likely waiting for a human or its parent, and your reply will not unblock it.
+Repeated appearances are status re-signals, not impatience.
+
+Answering `input-needed` messages you are not responsible for causes:
 - Wasted tokens — the reply goes nowhere useful.
-- False loop signals — repeated echoes look like a stuck agent when they are just re-signals.
-- **Scope violations** — answering a question meant for a human can make a recommendation look ratified.
-
-**If an `input-needed` echo looks like it needs your input**, the routing is
-likely wrong. Tell the peer to check the recipient on its prompt, and tell the
-human. Do not answer repeatedly — each appearance is a status re-signal, not
-impatience.
+- False loop signals — repeated echoes look like a stuck agent.
+- **Scope violations** — answering a question meant for someone else can make a recommendation look ratified.
 
 **To request a peer's input, send an `instruction`** via `scion message
 agent:<name>`. Do not rely on your `ask_user` status signal to reach them — it
