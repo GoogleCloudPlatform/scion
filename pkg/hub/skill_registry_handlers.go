@@ -96,19 +96,6 @@ func (s *Server) handleSkillRegistryByID(w http.ResponseWriter, r *http.Request)
 	}
 }
 
-func (s *Server) requireAdmin(w http.ResponseWriter, r *http.Request) (UserIdentity, bool) {
-	identity := GetUserIdentityFromContext(r.Context())
-	if identity == nil {
-		writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required", nil)
-		return nil, false
-	}
-	if identity.Role() != store.UserRoleAdmin {
-		Forbidden(w)
-		return nil, false
-	}
-	return identity, true
-}
-
 func (s *Server) listSkillRegistries(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.requireAdmin(w, r); !ok {
 		return
