@@ -699,6 +699,113 @@ func TestBuildStartContext_GCPMetadataExplicitBlock(t *testing.T) {
 	}
 }
 
+// TestBuildStartContext_GCPMetadataUnknownModeRejected covers the fail-open case
+// the allow-list exists to close. Before the inversion an unrecognised mode was
+// treated as a no-op: no SCION_METADATA_MODE, no GCE_METADATA_HOST redirect, and
+// therefore a container talking to the real GCE metadata server. The failure was
+// silent, which is what made it dangerous — a typo in a mode string downgraded
+// the agent to unprotected rather than refusing to start it.
+//
+// The empty-string case matters most. It is not a typo an operator makes; it is
+// what a non-nil GCPIdentity with an unset MetadataMode produces, and it used to
+// be indistinguishable from passthrough.
+func TestBuildStartContext_GCPMetadataUnknownModeRejected(t *testing.T) {
+	modes := map[string]string{
+		"typo":            "blocked",
+		"unknown value":   "sandbox",
+		"empty":           "",
+		"wrong case":      "Block",
+		"leading space":   " block",
+		"prefix of known": "bl",
+	}
+
+	for name, mode := range modes {
+		t.Run(name, func(t *testing.T) {
+			cfg := DefaultServerConfig()
+			cfg.StateDir = t.TempDir()
+			srv := newTestServerForStartContext(t, cfg)
+
+			r := httptest.NewRequest("POST", "/api/v1/agents", nil)
+
+			sc, err := srv.buildStartContext(context.Background(), startContextInputs{
+				Name: "agent-bad-mode",
+				Config: &CreateAgentConfig{
+					GCPIdentity: &GCPIdentityConfig{
+						MetadataMode: mode,
+					},
+				},
+				HTTPRequest: r,
+			})
+			if err == nil {
+				t.Fatalf("expected an error for metadata mode %q, got nil (env: %v)", mode, sc.Opts.Env)
+			}
+			// The start must fail rather than proceed with a partial or absent
+			// redirect, so there is no context to inspect at all.
+			if sc != nil {
+				t.Errorf("expected nil startContext alongside the error, got %+v", sc)
+			}
+			if !strings.Contains(err.Error(), "Invalid GCP metadata mode") {
+				t.Errorf("expected an invalid-mode error, got %q", err.Error())
+			}
+		})
+	}
+}
+
+// TestBuildStartContext_GCPMetadataUnknownModeFromResolvedEnv checks the second
+// input path. The mode can also arrive as hub-injected resolvedEnv on the start
+// path, where there is no CreateAgentConfig at all, so the allow-list has to
+// cover it too — a broker that validated only the create path would still accept
+// an unknown mode from a newer or misbehaving hub.
+func TestBuildStartContext_GCPMetadataUnknownModeFromResolvedEnv(t *testing.T) {
+	cfg := DefaultServerConfig()
+	cfg.StateDir = t.TempDir()
+	srv := newTestServerForStartContext(t, cfg)
+
+	r := httptest.NewRequest("POST", "/api/v1/agents", nil)
+
+	sc, err := srv.buildStartContext(context.Background(), startContextInputs{
+		Name:        "agent-bad-env-mode",
+		ResolvedEnv: map[string]string{"SCION_METADATA_MODE": "blocked"},
+		HTTPRequest: r,
+	})
+	if err == nil {
+		t.Fatalf("expected an error for hub-injected mode 'blocked', got nil (env: %v)", sc.Opts.Env)
+	}
+	if !strings.Contains(err.Error(), "Invalid GCP metadata mode") {
+		t.Errorf("expected an invalid-mode error, got %q", err.Error())
+	}
+}
+
+// TestBuildStartContext_GCPMetadataModeFromResolvedEnvStillAccepted guards the
+// inversion against over-reach: the start path must keep working for the modes
+// the hub legitimately injects.
+func TestBuildStartContext_GCPMetadataModeFromResolvedEnvStillAccepted(t *testing.T) {
+	for _, mode := range []string{"assign", "block"} {
+		t.Run(mode, func(t *testing.T) {
+			cfg := DefaultServerConfig()
+			cfg.StateDir = t.TempDir()
+			srv := newTestServerForStartContext(t, cfg)
+
+			r := httptest.NewRequest("POST", "/api/v1/agents", nil)
+
+			sc, err := srv.buildStartContext(context.Background(), startContextInputs{
+				Name:        "agent-env-mode",
+				ResolvedEnv: map[string]string{"SCION_METADATA_MODE": mode},
+				HTTPRequest: r,
+			})
+			if err != nil {
+				t.Fatalf("expected mode %q to be accepted, got %v", mode, err)
+			}
+			if sc.Opts.Env["SCION_METADATA_MODE"] != mode {
+				t.Errorf("expected SCION_METADATA_MODE=%q, got %q", mode, sc.Opts.Env["SCION_METADATA_MODE"])
+			}
+			if sc.Opts.Env["GCE_METADATA_HOST"] != "localhost:18380" {
+				t.Errorf("expected the metadata redirect to be set, got %q", sc.Opts.Env["GCE_METADATA_HOST"])
+			}
+		})
+	}
+}
+
 // TestBuildStartContext_GCPMetadataFromResolvedEnv verifies that the start
 // path (no Config.GCPIdentity) picks up GCP identity from resolvedEnv
 // injected by the hub.  This is the code path hit by "Create & Edit" where

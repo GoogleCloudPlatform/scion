@@ -16,6 +16,7 @@ package runtimebroker
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -357,7 +358,7 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	//
 	// Priority: explicit Config.GCPIdentity (create path) > resolvedEnv
 	// values injected by the hub (start path) > secure "block" default.
-	gcpMetadataMode := "block" // secure default
+	gcpMetadataMode := store.GCPMetadataModeBlock // secure default
 	if in.Config != nil && in.Config.GCPIdentity != nil {
 		gcpMetadataMode = in.Config.GCPIdentity.MetadataMode
 	} else if mode := env["SCION_METADATA_MODE"]; mode != "" {
@@ -365,10 +366,18 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		// resolvedEnv when dispatching a start for a provisioned agent.
 		gcpMetadataMode = mode
 	}
-	if gcpMetadataMode == "assign" || gcpMetadataMode == "block" {
+	// Allow-list, not a deny-list. The previous form tested for the two modes
+	// that need the redirect and let everything else fall through untouched,
+	// which meant an unrecognised mode — a typo, a value from a newer hub, an
+	// empty MetadataMode on a non-nil GCPIdentity — silently left
+	// GCE_METADATA_HOST unset and the container talking to the real GCE
+	// metadata server. That is the fail-open direction on the exact control
+	// this block exists to enforce, so unknown modes now fail the start.
+	switch gcpMetadataMode {
+	case store.GCPMetadataModeAssign, store.GCPMetadataModeBlock:
 		env["SCION_METADATA_MODE"] = gcpMetadataMode
 		env["SCION_METADATA_PORT"] = "18380"
-		if gcpMetadataMode == "assign" && in.Config != nil && in.Config.GCPIdentity != nil {
+		if gcpMetadataMode == store.GCPMetadataModeAssign && in.Config != nil && in.Config.GCPIdentity != nil {
 			env["SCION_METADATA_SA_EMAIL"] = in.Config.GCPIdentity.SAEmail
 			env["SCION_METADATA_PROJECT_ID"] = in.Config.GCPIdentity.ProjectID
 		}
@@ -376,6 +385,18 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		// gcloud CLI uses GCE_METADATA_ROOT (not GCE_METADATA_HOST) to locate
 		// the metadata server during its initial configuration detection.
 		env["GCE_METADATA_ROOT"] = "localhost:18380"
+	case store.GCPMetadataModePassthrough:
+		// Deliberately no redirect: passthrough means the agent is meant to
+		// reach the real GCE metadata server. Listed explicitly so it is a
+		// recognised mode rather than an unhandled one — the distinction is
+		// the whole point of the default arm below.
+	default:
+		return nil, &startContextError{
+			Status: http.StatusBadRequest,
+			Message: fmt.Sprintf("Invalid GCP metadata mode %q: must be one of %q, %q, %q",
+				gcpMetadataMode,
+				store.GCPMetadataModeAssign, store.GCPMetadataModeBlock, store.GCPMetadataModePassthrough),
+		}
 	}
 
 	// Debug log final env
