@@ -23,6 +23,8 @@ Check both before your first write to `/workspace`.
 Shared directories are independent of workspace mode. When a project defines them,
 each is mounted either at `/scion-volumes/<name>` or, when configured in-workspace,
 at `/workspace/.scion-volumes/<name>` — one location per directory, not both.
+When configured in-workspace and `SCION_WORKSPACE_GIT` is present, adding `.scion-volumes/`
+to `.gitignore` prevents tracking or committing shared volume contents.
 **Shared directories are shared in every workspace mode, including the isolated
 ones.** Treat them as concurrent-access storage regardless of
 `SCION_WORKSPACE_MODE`.
