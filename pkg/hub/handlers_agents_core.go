@@ -63,6 +63,40 @@ var tracer = otel.Tracer("scion-hub")
 // reachable from the caller's project, being specific discloses nothing they
 // could not already read, so the "not verified" message that follows each of
 // these checks stays specific on purpose.
+//
+// ⚠️ THE COST, WHICH IS REAL AND NOT A FREE WIN, AND WHICH LANDS ON WHOEVER
+// VERIFIES THIS NEXT: the response no longer says which branch refused. Scope
+// refusal and nonexistence are one answer to a caller — the point — and they are
+// also one answer to a reviewer, who is not the intended audience but gets the
+// same view.
+//
+// So a test that seeds an unreachable account and asserts "400, this message" is
+// now satisfied by a fixture that never persisted the account at all. Before the
+// collapse that mistake announced itself, because nonexistence answered
+// differently. It is now indistinguishable from success at testing the thing.
+//
+// VERIFICATION THEREFORE HAS TO CONTROL THE FIXTURE, NOT READ THE RESPONSE:
+//   - that the collapse holds — same request, account present-but-unreachable
+//     versus absent, answers identical. requireIndistinguishable in
+//     sa_existence_oracle_test.go, applied to all three sites.
+//   - that the predicate still RUNS — account genuinely present in both arms,
+//     only reachability varied, reachable admitted and unreachable refused.
+//     Named rather than gestured at, because a reader should be able to check
+//     this rather than take it. The tightest pair is PATCH's, both subtests of
+//     TestBypassAgents_UpdateAgentServiceAccountChecks over one fixture:
+//     "service account from another project is rejected" against "verified
+//     in-project service account is still accepted". Create's pair is
+//     TestAgentCreate_HubScopedSA_AssignableByCreatorAndAdmin against
+//     TestAgentCreate_OtherProjectSA_StillRejected, which varies the kind of
+//     scope as well as reachability — weaker, but both arms persist the account,
+//     which is the property that matters here. Without an admitted arm, every
+//     refusal test would still pass over a deleted predicate, for the wrong
+//     reason.
+//
+// The neighbouring distinction — authorization refusal versus scope refusal — is
+// still observable and is pinned by assertDeniedByAuthzNotByScope in
+// handlers_agents_gcp_hubscope_test.go. Only scope-versus-nonexistence went
+// dark, and it went dark on purpose.
 const msgSANotAvailableInProject = "GCP service account not available in this project"
 
 // parseLabelFilters parses label=key=value query parameters into a map and
