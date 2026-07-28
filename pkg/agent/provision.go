@@ -1159,6 +1159,23 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 		}
 	}
 
+	// Apply built-in resource defaults as the LOWEST-priority tier, below the
+	// settings defaults above. Docker and Podman emit cgroup flags only for
+	// non-empty fields, so an agent that reaches this point with no CPU limit
+	// runs completely unconstrained and can saturate every core on the host.
+	//
+	// Only the CPU limit is filled in, and only when nothing else supplied one;
+	// MergeResourceSpec keeps every field that a higher tier already set, so an
+	// explicit memory-only configuration still gains a CPU limit here.
+	// Gated by runtime.enforce_resource_defaults (default true) so an operator
+	// can restore the previous unlimited behaviour without a rollback.
+	if finalScionCfg != nil && config.ShouldEnforceResourceDefaults(settings) {
+		if finalScionCfg.Resources == nil || finalScionCfg.Resources.Limits.CPU == "" {
+			finalScionCfg.Resources = config.MergeResourceSpec(
+				config.BuiltinDefaultResources(), finalScionCfg.Resources)
+		}
+	}
+
 	// Mount the resolved workspace if an external source was determined
 	if workspaceSource != "" {
 		finalScionCfg.Volumes = append(finalScionCfg.Volumes, api.VolumeMount{

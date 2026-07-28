@@ -403,6 +403,13 @@ func (m *mockScheduledEventStore) PurgeOldScheduledEvents(_ context.Context, _ t
 // Pre-start hook lookups. populateAgentConfig resolves the active pre-start
 // hook on every agent create, so these must be stubbed rather than left to the
 // embedded nil store.Store (which would panic). No hooks exist in these tests.
+//
+// NOTE: GetActiveProjectPreStartHook was accidentally declared twice in this
+// file by db8f6fc ("hub-scoped pre-start hooks, web UI, and CLI extension"),
+// which broke compilation of the whole pkg/hub test package. The duplicate
+// further down the file has been removed; this is the canonical declaration.
+// Pre-existing bug fix, unrelated to the maintenance concurrency guard that
+// this branch is otherwise about.
 
 func (m *mockScheduledEventStore) GetActiveProjectPreStartHook(_ context.Context, _ string) (*store.ProjectPreStartHook, error) {
 	return nil, store.ErrNotFound
@@ -473,10 +480,6 @@ func (m *mockScheduledEventStore) GetHubSetting(_ context.Context, _ string) (*s
 
 func (m *mockScheduledEventStore) ListSkillInjections(_ context.Context, _, _ string) ([]store.SkillInjection, error) {
 	return nil, nil
-}
-
-func (m *mockScheduledEventStore) GetActiveProjectPreStartHook(_ context.Context, _ string) (*store.ProjectPreStartHook, error) {
-	return nil, store.ErrNotFound
 }
 
 // getEvent returns a snapshot of an event by ID (test helper, no error).

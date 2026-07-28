@@ -340,6 +340,78 @@ func TestExecuteOperation_Success(t *testing.T) {
 	}
 }
 
+func TestExecuteOperation_AlreadyRunning(t *testing.T) {
+	srv, s := newTestServerWithStore(t)
+
+	// Simulate an in-flight run for this operation.
+	running := &store.MaintenanceOperationRun{
+		ID:           tid("run-in-flight"),
+		OperationKey: "pull-images",
+		Status:       store.MaintenanceStatusRunning,
+		StartedAt:    time.Now(),
+		StartedBy:    "admin@example.com",
+	}
+	if err := s.CreateMaintenanceRun(context.Background(), running); err != nil {
+		t.Fatalf("failed to create run: %v", err)
+	}
+
+	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/maintenance/operations/pull-images/run",
+		strings.NewReader(`{"params":{}}`))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	rr := httptest.NewRecorder()
+	srv.handleAdminMaintenanceOps(rr, req)
+
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	// No second run record should have been created.
+	runs, err := s.ListMaintenanceRuns(context.Background(), "pull-images", 10)
+	if err != nil {
+		t.Fatalf("failed to list runs: %v", err)
+	}
+	if len(runs) != 1 {
+		t.Fatalf("expected 1 run record, got %d", len(runs))
+	}
+}
+
+// TestExecuteOperation_PreviousRunCompleted verifies the concurrency guard does
+// not block a new run once the most recent run has finished.
+func TestExecuteOperation_PreviousRunCompleted(t *testing.T) {
+	srv, s := newTestServerWithStore(t)
+
+	started := time.Now().Add(-time.Minute)
+	completed := started.Add(30 * time.Second)
+	done := &store.MaintenanceOperationRun{
+		ID:           tid("run-done"),
+		OperationKey: "pull-images",
+		Status:       store.MaintenanceStatusCompleted,
+		StartedAt:    started,
+		CompletedAt:  &completed,
+		StartedBy:    "admin@example.com",
+	}
+	if err := s.CreateMaintenanceRun(context.Background(), done); err != nil {
+		t.Fatalf("failed to create run: %v", err)
+	}
+
+	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/maintenance/operations/pull-images/run",
+		strings.NewReader(`{"params":{}}`))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	rr := httptest.NewRecorder()
+	srv.handleAdminMaintenanceOps(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	// Let the async executor settle before the test store is torn down.
+	time.Sleep(200 * time.Millisecond)
+}
+
 func TestListOperationRuns(t *testing.T) {
 	srv, s := newTestServerWithStore(t)
 

@@ -336,6 +336,37 @@ func (s *Server) executeOperation(w http.ResponseWriter, r *http.Request, key st
 		return
 	}
 
+	// Reject the request if this operation already has a run in flight.
+	//
+	// Routine operations do not track running state on the operation record
+	// (unlike migrations, which use op.Status), so the guard is based on the
+	// most recent MaintenanceOperationRun instead. A database read is
+	// sufficient here, and is preferable to an in-process mutex:
+	//   - It survives a hub restart and works across multiple hub processes,
+	//     whereas a mutex would be lost on restart and scoped to one process.
+	//   - Stale "running" runs left behind by a crash are reset to "failed" by
+	//     AbortRunningMaintenanceOps() at startup, so the guard cannot wedge an
+	//     operation permanently.
+	// There is a narrow TOCTOU window — two requests arriving at nearly the
+	// same instant could both pass this check before either writes its run
+	// record — but the goal is to stop accidental double-clicks and repeated
+	// triggers from piling up expensive builds on the hub VM, not to defend
+	// against adversarial concurrency.
+	recentRuns, err := s.store.ListMaintenanceRuns(ctx, key, 1)
+	if err != nil {
+		log.Error("Failed to list recent runs", maintenanceLogAttrs(key, "error", err)...)
+		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to check for running operations", nil)
+		return
+	}
+	if len(recentRuns) > 0 && recentRuns[0].Status == store.MaintenanceStatusRunning {
+		log.Debug("Rejected: operation already running",
+			maintenanceLogAttrs(key, "run_id", recentRuns[0].ID, "user", user.Email())...)
+		writeError(w, http.StatusConflict, ErrCodeConflict, "Operation is already running", map[string]interface{}{
+			"runId": recentRuns[0].ID,
+		})
+		return
+	}
+
 	// Parse request body for params.
 	var body map[string]interface{}
 	if r.Body != nil {

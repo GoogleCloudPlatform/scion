@@ -239,6 +239,7 @@ type VersionedSettings struct {
 	CLI                  *V1CLIConfig                  `json:"cli,omitempty" yaml:"cli,omitempty" koanf:"cli"`
 	Telemetry            *V1TelemetryConfig            `json:"telemetry,omitempty" yaml:"telemetry,omitempty" koanf:"telemetry"`
 	Runtimes             map[string]V1RuntimeConfig    `json:"runtimes,omitempty" yaml:"runtimes,omitempty" koanf:"runtimes"`
+	Runtime              *V1RuntimeDefaultsConfig      `json:"runtime,omitempty" yaml:"runtime,omitempty" koanf:"runtime"`
 	ImageRegistry        string                        `json:"image_registry,omitempty" yaml:"image_registry,omitempty" koanf:"image_registry"`
 	WorkspacePath        string                        `json:"workspace_path,omitempty" yaml:"workspace_path,omitempty" koanf:"workspace_path"`
 	HarnessConfigs       map[string]HarnessConfigEntry `json:"harness_configs,omitempty" yaml:"harness_configs,omitempty" koanf:"harness_configs"`
@@ -719,6 +720,20 @@ type V1RuntimeConfig struct {
 	ListAllNamespaces bool              `json:"list_all_namespaces,omitempty" yaml:"list_all_namespaces,omitempty" koanf:"list_all_namespaces"`
 	// CloudRun holds Cloud Run-specific settings when Type is "cloudrun".
 	CloudRun *V1CloudRunConfig `json:"cloudrun,omitempty" yaml:"cloudrun,omitempty" koanf:"cloudrun"`
+}
+
+// V1RuntimeDefaultsConfig holds runtime-wide behaviour that is not specific to
+// any single named entry in the `runtimes` map. It lives under the singular
+// `runtime` key; `runtimes` (plural) remains the map of named runtime targets.
+type V1RuntimeDefaultsConfig struct {
+	// EnforceResourceDefaults controls whether the built-in resource defaults
+	// (config.BuiltinDefaultResources) are applied to agents that have no
+	// resource limits from any other tier.
+	//
+	// Nil means enabled: the fail-safe direction is to apply a CPU limit.
+	// Set to false to restore the pre-2026-07 behaviour of running Docker and
+	// Podman containers with no cgroup limits at all.
+	EnforceResourceDefaults *bool `json:"enforce_resource_defaults,omitempty" yaml:"enforce_resource_defaults,omitempty" koanf:"enforce_resource_defaults"`
 }
 
 // HarnessConfigEntry defines a harness configuration entry in versioned settings.
