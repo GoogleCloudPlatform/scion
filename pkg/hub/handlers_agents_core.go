@@ -647,7 +647,13 @@ func (s *Server) createAgentInProject(
 			writeErrorFromErr(w, err, "")
 			return
 		}
-		if sa.ScopeID != projectID {
+		// Scope-aware admissibility (P4 item F). This was `sa.ScopeID != projectID`,
+		// which never read sa.Scope and so was not a scope check at all: it
+		// compared a hub-scoped account's hub instance ID against a project ID and
+		// rejected it. ReachableFromProject keeps project-scoped accounts confined
+		// to their own project and admits hub-scoped ones from anywhere, which is
+		// what makes a hub-wide account assignable.
+		if !sa.ReachableFromProject(projectID) {
 			ValidationError(w, "GCP service account does not belong to this project", nil)
 			return
 		}
@@ -659,18 +665,17 @@ func (s *Server) createAgentInProject(
 		// Authorization: any caller who can see the SA can assign it.
 		// SA management (create/mint/delete) is gated on ActionManage elsewhere.
 		//
-		// Read this before assuming it constrains agents — today it does not.
-		// The ScopeID equality above has already confined the service account to
-		// the caller's own project, and an agent holds read access across its own
-		// project, so for agent callers this call cannot deny anything. It is a
-		// real gate for users: a user with update rights on the agent but no read
-		// access to the service account is refused here.
+		// This call has just stopped being a no-op, which is the point of the line
+		// above changing. Previously the ScopeID equality had already confined the
+		// service account to the caller's own project, and an agent holds read
+		// access across its own project, so for agent callers nothing could be
+		// denied here; it gated only users lacking read on the account.
 		//
-		// It stops being a no-op once hub-scoped service accounts become pickable
-		// in any project, because that turns the ScopeID equality into a
-		// scope-aware check and service accounts outside the caller's project
-		// start reaching this line. The PATCH path carries the same call for the
-		// same reason.
+		// Now that hub-scoped accounts reach this line, it is load-bearing for
+		// every caller: a hub-scoped account is parentless
+		// (gcpServiceAccountResource), so admission depends on a hub-scoped policy
+		// matching rather than on project membership. The PATCH path carries the
+		// same call for the same reason.
 		if !s.authorizeMsg(w, r, gcpServiceAccountResource(sa), ActionRead,
 			"You don't have permission to assign GCP service accounts in this project") {
 			return
@@ -924,7 +929,28 @@ func (s *Server) createAgentInProject(
 		case store.GCPMetadataModeAssign:
 			if projectSettings.DefaultGCPIdentityServiceAccountID != "" {
 				sa, err := s.store.GetGCPServiceAccount(ctx, projectSettings.DefaultGCPIdentityServiceAccountID)
-				if err == nil && sa.ScopeID == projectID && sa.Verified {
+				// Scope-aware admissibility (P4 item F), same predicate as the two
+				// caller-supplied assign sites. A project may legitimately nominate
+				// a hub-scoped account as its default, and the old ScopeID equality
+				// silently refused one.
+				//
+				// NO authorization check here, deliberately and by ruling. Unlike
+				// the assign sites, the account is not caller-supplied — it comes
+				// from project settings, so there is no caller-elected privilege to
+				// authorize. Gating it on the caller's permissions would turn a
+				// project-admin decision into a per-caller lottery and break
+				// routine agent creation. Converting the scope predicate and adding
+				// a gate are two different passes over these lines; only the first
+				// belongs here.
+				//
+				// The else branch below is a known defect, filed separately and
+				// deliberately left alone: nothing validates the SA ID when it is
+				// written to project settings, so an unusable default falls through
+				// to metadata mode "block" and every agent in the project silently
+				// gets no identity, with no error surfaced anywhere. This
+				// conversion removes hub-scoped accounts as one cause of that; it
+				// does not fix the silence.
+				if err == nil && sa.ReachableFromProject(projectID) && sa.Verified {
 					agent.AppliedConfig.GCPIdentity = &store.GCPIdentityConfig{
 						MetadataMode:        store.GCPMetadataModeAssign,
 						ServiceAccountID:    sa.ID,
@@ -1985,13 +2011,11 @@ func (s *Server) updateAgent(w http.ResponseWriter, r *http.Request, id string) 
 			// rights on the agent, which the creator has by definition.
 			//
 			// Kept as a near-duplicate rather than factored into a shared helper on
-			// purpose: hub-scoped service accounts are to become pickable in any
-			// project, which turns the ScopeID equality test into a scope-aware
-			// check at BOTH sites. A duplicate that greps identically is what makes
-			// the second site impossible to miss during that pass; a DRY version
-			// that diverges here would present as a service-account bug rather than
-			// a missed conversion.
-			if sa.ScopeID != agent.ProjectID {
+			// purpose. That duplication has now paid for itself once: the ScopeID
+			// equality it describes became scope-aware in P4 item F, and the site
+			// was found by grepping for the create path's shape. The property is
+			// worth preserving — keep these greppably identical to the create path.
+			if !sa.ReachableFromProject(agent.ProjectID) {
 				ValidationError(w, "GCP service account does not belong to this project", nil)
 				return
 			}
