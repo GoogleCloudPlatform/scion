@@ -281,7 +281,7 @@ func (s *Server) populateAgentConfig(ctx context.Context, agent *store.Agent, pr
 	// is ambiguous: the project may well have an override we simply failed to
 	// read, and silently staging the hub script in that case would run the
 	// wrong code. On an ambiguous error we log and stage nothing.
-	if s.store != nil && project != nil && agent.AppliedConfig.ProjectPreStartHookID == "" {
+	if project != nil && agent.AppliedConfig.ProjectPreStartHookID == "" {
 		hook, hookErr := s.store.GetActiveProjectPreStartHook(ctx, project.ID)
 		switch {
 		case hookErr == nil:
