@@ -63,6 +63,22 @@
 #
 # Run `hack/check-authz-guards.sh --self-test` to exercise the classifier
 # against a fixture covering every verdict above.
+#
+# EXIT CODES
+#
+#   0  analysed, no violations
+#   1  analysed, violations found — the list is on stderr
+#   2  COULD NOT ANALYSE (rg missing, no candidate files) — nothing was examined
+#
+# 2 is separate from 1 on purpose. Both fail a build, which is the point: a run
+# that examined no source must not be indistinguishable from a clean one to
+# anything reading only the exit code, or this check becomes the thing it exists
+# to prevent — a guard that never fires. But the two mean opposite things to
+# whoever reads the log. 1 is a security finding against named code; 2 is a
+# broken environment and accuses nobody. Note this differs from the exit-0-on-
+# missing-rg convention in hack/check-project-compat-literals.sh; the difference
+# is deliberate, because a formatting check that silently skips costs a reformat
+# later, while an authorization check that silently skips ships a bypass.
 set -euo pipefail
 
 # Classifier. Walks each candidate guard with a brace-depth counter so the
@@ -347,7 +363,9 @@ cd "$(dirname "$0")/.."
 provenance() {
   local sha
   if ! sha="$(git rev-parse --short HEAD 2>/dev/null)"; then
-    printf '(not a git worktree)'
+    # Covers both "not a worktree" and "git is not on PATH" — the caller cannot
+    # tell those apart from here, so do not claim to.
+    printf '(git unavailable or not a worktree)'
     return
   fi
   if [[ -n "$(git status --porcelain 2>/dev/null)" ]]; then
@@ -358,11 +376,8 @@ provenance() {
 }
 
 if ! command -v rg >/dev/null 2>&1; then
-  # Not a clean result. Distinguish it from one loudly: this exits 0, and an
-  # exit 0 that never looked at any source must not be mistaken for zero
-  # findings by whoever is deciding to open a gate on the strength of it.
   echo "check-authz-guards: ripgrep (rg) not found — NOTHING WAS ANALYSED (skipped, not clean)" >&2
-  exit 0
+  exit 2
 fi
 
 # Narrow to files that mention the getter or the assertion at all. The
@@ -375,11 +390,13 @@ mapfile -t candidate_files < <(
 )
 
 if [[ ${#candidate_files[@]} -eq 0 ]]; then
-  # Also not a clean result. In this repo the getter always matches something,
-  # so zero candidates means the scan ran somewhere unexpected (wrong cwd, empty
-  # checkout) rather than that the codebase is clean.
+  # In this repo the getter always matches something: ~25 attribution sites use
+  # it legitimately and are deliberately not being converted. Zero candidates
+  # therefore means the scan ran somewhere unexpected — wrong cwd, empty or
+  # partial checkout — not that the codebase is clean. If every last caller is
+  # ever removed for real, fix this script deliberately rather than silencing it.
   echo "check-authz-guards: analysed $(provenance) — no candidate files matched, NOTHING WAS ANALYSED (skipped, not clean)" >&2
-  exit 0
+  exit 2
 fi
 
 tmp="$(mktemp)"
