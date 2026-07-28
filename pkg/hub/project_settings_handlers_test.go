@@ -796,9 +796,16 @@ func TestGCPServiceAccount_HubScopedCreateStillRejected(t *testing.T) {
 		map[string]string{"email": "new-hub-sa@hub.iam.gserviceaccount.com"})
 
 	require.Equal(t, http.StatusBadRequest, rec.Code,
-		"hub-scoped SA creation is held at item A, step 5 of 5, and the hold is a SECURITY hold "+
-			"that hangs on step 2 (ActionAssign conversion), not on steps 3 and 4; if this now "+
-			"succeeds, confirm step 2 landed before deleting this test: %s", rec.Body.String())
+		"hub-scoped SA creation is held at item A, step 5 of 5, and the hold is a SECURITY hold. "+
+			"IF THIS NOW SUCCEEDS, step 5 has landed and this test should be DELETED as part of it. "+
+			"DO NOT RESTORE THE REJECTION TO MAKE THIS GREEN — that reinstates a security hold as a "+
+			"bug fix, and the suite will certify it. "+
+			"Before deleting, confirm these two are PRESENT and green (presence, not colour — their "+
+			"absence is what silent failure looks like here): "+
+			"TestAgentCreate_HubScopedSA_PlainHubMemberDenied and "+
+			"TestAgentPatch_HubScopedSA_PlainHubMemberDenied. They are the step 2 (ActionAssign) "+
+			"conversion this hold hangs on; if they are missing, step 5 has landed early and the "+
+			"cross-project exposure of design 8.2 is live. Response: %s", rec.Body.String())
 	assert.Contains(t, rec.Body.String(), "not enabled",
 		"the refusal must stay explicit — a 404 here would read as a missing route")
 }
