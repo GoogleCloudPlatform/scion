@@ -89,8 +89,10 @@ type Client interface {
 	// Schedules returns the recurring schedule operations interface scoped to a project.
 	Schedules(projectID string) ScheduleService
 
-	// GCPServiceAccounts returns the GCP service account operations interface scoped to a project.
-	GCPServiceAccounts(projectID string) GCPServiceAccountService
+	// GCPServiceAccounts returns the GCP service account operations interface.
+	// Scope is chosen per call, not pinned here -- hub-scoped accounts have no
+	// project to pin to.
+	GCPServiceAccounts() GCPServiceAccountService
 
 	// Messages returns the user message inbox operations interface.
 	Messages() MessageService
@@ -296,9 +298,14 @@ func (c *client) Schedules(projectID string) ScheduleService {
 	return &scheduleService{c: c, projectID: projectID}
 }
 
-// GCPServiceAccounts returns the GCP service account operations interface scoped to a project.
-func (c *client) GCPServiceAccounts(projectID string) GCPServiceAccountService {
-	return &gcpServiceAccountService{c: c, projectID: projectID}
+// GCPServiceAccounts returns the GCP service account operations interface.
+//
+// No-arg, matching Templates() and HarnessConfigs(). It used to take a project
+// ID and hand back a service pinned to it, which made hub-scoped accounts
+// unreachable through this client at any address -- they belong to no project.
+// Scope now travels with the individual call.
+func (c *client) GCPServiceAccounts() GCPServiceAccountService {
+	return &gcpServiceAccountService{c: c}
 }
 
 // Messages returns the user message inbox operations interface.
