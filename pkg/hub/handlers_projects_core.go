@@ -1444,7 +1444,7 @@ func (s *Server) handleProjectRoutes(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Check for nested /pre-start-hooks path
-	if strings.HasPrefix(subPath, "pre-start-hooks") {
+	if subPath == "pre-start-hooks" || strings.HasPrefix(subPath, "pre-start-hooks/") {
 		pshPath := strings.TrimPrefix(subPath, "pre-start-hooks")
 		pshPath = strings.TrimPrefix(pshPath, "/")
 		pshPath = strings.TrimSuffix(pshPath, "/")

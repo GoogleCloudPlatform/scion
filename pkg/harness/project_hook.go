@@ -45,9 +45,6 @@ func WriteProjectPreStartHook(agentHome, scriptContent string) error {
 	if scriptContent == "" {
 		// Nothing staged (no hook directory at all, or no such file) is the
 		// common case and not an error; only a real removal failure is.
-		if _, err := os.Lstat(target); err != nil {
-			return nil
-		}
 		if err := os.Remove(target); err != nil && !os.IsNotExist(err) {
 			return fmt.Errorf("remove stale pre-start hook: %w", err)
 		}

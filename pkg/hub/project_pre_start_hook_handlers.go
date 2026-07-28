@@ -109,6 +109,7 @@ func (s *Server) handleProjectPreStartHooks(w http.ResponseWriter, r *http.Reque
 			return
 		}
 
+		r.Body = http.MaxBytesReader(w, r.Body, projectPreStartHookScriptMaxBytes+4096)
 		var req CreateProjectPreStartHookRequest
 		if err := readJSON(r, &req); err != nil {
 			BadRequest(w, "Invalid request body: "+err.Error())
@@ -270,6 +271,7 @@ func (s *Server) handleProjectPreStartHookByID(w http.ResponseWriter, r *http.Re
 			return
 		}
 
+		r.Body = http.MaxBytesReader(w, r.Body, projectPreStartHookScriptMaxBytes+4096)
 		var req UpdateProjectPreStartHookRequest
 		if err := readJSON(r, &req); err != nil {
 			BadRequest(w, "Invalid request body: "+err.Error())
