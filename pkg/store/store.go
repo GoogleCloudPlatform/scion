@@ -1180,6 +1180,13 @@ type GCPServiceAccountFilter struct {
 	// applied afterwards is applied to a set the database never saw as one.
 	// Expressing it as one predicate makes the invariant structural rather than
 	// a rule each caller has to remember.
+	//
+	// The hub arm matches on Scope alone and never on ScopeID. That is a
+	// project-wide invariant, not a local shortcut: on a hub-scoped record
+	// ScopeID is provenance -- which hub instance registered it -- and is never
+	// a predicate. The hub ID is derived from config or a hostname hash, so
+	// filtering on it would orphan every hub-scoped record the first time a
+	// hostname changed, silently, as an empty result.
 	IncludeHubScoped bool
 }
 

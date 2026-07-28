@@ -3073,6 +3073,13 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/templates", s.handleTemplatesV2)
 	s.mux.HandleFunc("/api/v1/templates/", s.handleTemplateByIDV2)
 
+	// Scope-addressed service accounts. The project-nested routes under
+	// /api/v1/projects/{id}/gcp-service-accounts remain registered and
+	// unchanged; this route exists for scopes that have no project to nest
+	// under. Only the collection is registered -- individual accounts keep
+	// their nested address, since P4 does not need a second way to name one.
+	s.mux.HandleFunc("/api/v1/gcp-service-accounts", s.handleGCPServiceAccounts)
+
 	s.mux.HandleFunc("/api/v1/skills", s.handleSkills)
 	s.mux.HandleFunc("/api/v1/skills/", s.handleSkillByID)
 
