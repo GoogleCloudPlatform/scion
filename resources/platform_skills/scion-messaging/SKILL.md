@@ -86,9 +86,9 @@ count as one character). Agent-to-agent messages have **no enforced cap
 in code** and are not subject to this limit.
 
 When the limit is exceeded, the command returns a non-zero exit code but
-also dumps the full CLI `--help` text — the actual error line
+also dumps the full CLI `--help` text to `stderr` — the actual error line
 (`validation_error: message exceeds 2000 character limit`) scrolls off if
-you pipe to `tail`. Pipe to `head` to surface it.
+you pipe to `tail`. Redirect `stderr` and pipe to `head` (e.g., `2>&1 | head`) to surface it.
 
 If your user-directed message is long:
 - Split it into two or more messages, each under ~1800 characters.
