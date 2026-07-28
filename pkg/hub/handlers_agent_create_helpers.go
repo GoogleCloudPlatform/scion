@@ -519,6 +519,31 @@ func (s *Server) createNotifySubscription(ctx context.Context, agentID, projectI
 	}
 }
 
+// resumeInPlaceDecision decides whether an existing agent in a terminal-ish
+// phase may be restarted in place rather than rejected as a duplicate, and
+// whether the harness should be handed its resume flag when that happens.
+//
+// Local (non-Hub) mode applies the same contract in localResumeDecision
+// (cmd/common.go); keep the two in step.
+//
+// A stopped agent restarts with a *fresh* harness session even when resume was
+// requested, mirroring the local CLI's effectiveResume. A forced recovery is
+// the opposite case: the agent died without a clean shutdown (typically a host
+// crash), so the whole point is to continue the interrupted session.
+//
+// phase=running is deliberately not forceable. A live agent must not be
+// recreated out from under itself, and an operator who truly wants that can
+// stop it first.
+func resumeInPlaceDecision(phase string, resume, force bool) (resumeInPlace, forcedRecovery bool) {
+	if !resume {
+		return false, false
+	}
+	if force && phase == string(state.PhaseError) {
+		return true, true
+	}
+	return phase == string(state.PhaseStopped), false
+}
+
 // handleExistingAgent encapsulates the full decision tree for an agent that
 // already exists when a create/start request arrives.
 //
@@ -609,8 +634,8 @@ func (s *Server) handleExistingAgent(
 			existingAgent.Phase == string(state.PhaseStopped) ||
 			existingAgent.Phase == string(state.PhaseError)) {
 
-		// Resume a stopped agent in-place when explicitly requested.
-		if req.Resume && existingAgent.Phase == string(state.PhaseStopped) {
+		resumeInPlace, forcedRecovery := resumeInPlaceDecision(existingAgent.Phase, req.Resume, req.ForceResume)
+		if resumeInPlace {
 			if existingAgent.RuntimeBrokerID == "" && runtimeBrokerID != "" {
 				existingAgent.RuntimeBrokerID = runtimeBrokerID
 			}
@@ -632,7 +657,15 @@ func (s *Server) handleExistingAgent(
 
 			// A stopped agent restarts with a fresh harness session even when
 			// resume was requested (mirrors the local CLI's effectiveResume).
-			if err := dispatcher.DispatchAgentStart(ctx, existingAgent, req.Task, false); err != nil {
+			// A forced recovery is the opposite: the whole point is to continue
+			// the session the crash interrupted, so the harness resume flag is
+			// passed through.
+			if forcedRecovery {
+				s.agentLifecycleLog.Warn("Force-resuming agent from error phase",
+					"agent_id", existingAgent.ID, "agent", existingAgent.Name,
+					"container_status", existingAgent.ContainerStatus)
+			}
+			if err := dispatcher.DispatchAgentStart(ctx, existingAgent, req.Task, forcedRecovery); err != nil {
 				if isContainerNameConflict(err) {
 					Conflict(w, "Agent name is already in use by a stopped container. Please delete the existing agent or choose a different name.")
 				} else {

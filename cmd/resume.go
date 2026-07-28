@@ -28,7 +28,13 @@ preserving its previous state.
 
 The agent-name is required as the first argument. Subsequent arguments
 are optional and form a task prompt to be added to the resumed session
-(if supported by the harness).`,
+(if supported by the harness).
+
+An agent in the error phase (e.g. one whose host crashed mid-run) is refused
+unless --force is given. --force is an error-phase recovery tool only: it acts
+on one named agent at a time, has no effect on a cleanly stopped agent (which
+always starts a fresh session), and never applies to a running agent, which
+must not be recreated while it is live.`,
 	Args:              cobra.MinimumNArgs(1),
 	ValidArgsFunction: getAgentNames,
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -42,6 +48,7 @@ func init() {
 	resumeCmd.Flags().StringVarP(&agentImage, "image", "i", "", "Container image to use (overrides template)")
 	resumeCmd.Flags().BoolVar(&noAuth, "no-auth", false, "Disable authentication propagation")
 	resumeCmd.Flags().BoolVarP(&attach, "attach", "a", false, "Attach to the agent TTY after starting")
+	resumeCmd.Flags().BoolVar(&forceResume, "force", false, "Resume an agent in the error phase (e.g. after a host crash), continuing its previous session")
 
 	resumeCmd.Flags().StringVar(&runtimeBrokerID, "broker", "", "Preferred runtime broker ID or name")
 

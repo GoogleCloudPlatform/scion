@@ -64,6 +64,7 @@ var (
 	agentImage            string
 	noAuth                bool
 	attach                bool
+	forceResume           bool
 	branch                string
 	workspace             string
 	runtimeBrokerID       string
@@ -377,6 +378,36 @@ func GetProjectID(hubCtx *HubContext) (string, error) {
 	return resp.Projects[0].ID, nil
 }
 
+// localResumeDecision mirrors the Hub's resumeInPlaceDecision
+// (pkg/hub/handlers_agent_create_helpers.go) for local (non-Hub) mode, so the
+// two paths present the same contract to the operator.
+//
+// Rules:
+//   - Suspended agents always get harness resume (--continue/--resume), even
+//     when invoked via 'start' (implicit resume).
+//   - Stopped agents always get a fresh session, even when invoked via
+//     'resume'. --force does not change this: a clean shutdown is not a crash.
+//   - Error-phase agents are refused without --force, matching the Hub's 409.
+//     With --force they continue the session interrupted mid-run.
+//
+// Returns the resume flag to hand the harness, plus whether this was an
+// implicit resume or a forced recovery (both purely for operator messaging).
+func localResumeDecision(savedPhase string, resume, force bool, agentName string) (effectiveResume, implicitResume, forcedRecovery bool, err error) {
+	if resume && savedPhase == string(state.PhaseError) && !force {
+		return false, false, false, fmt.Errorf("agent '%s' is in the error phase (e.g. after a host crash) and cannot be resumed without --force", agentName)
+	}
+
+	switch {
+	case savedPhase == string(state.PhaseSuspended):
+		return true, !resume, false, nil
+	case resume && force && savedPhase == string(state.PhaseError):
+		return true, false, true, nil
+	case resume && savedPhase == string(state.PhaseStopped):
+		return false, false, false, nil
+	}
+	return resume, false, false, nil
+}
+
 func RunAgent(cmd *cobra.Command, args []string, resume bool) error {
 	agentName := api.Slugify(args[0])
 	task := strings.Join(args[1:], " ")
@@ -506,18 +537,16 @@ func RunAgent(cmd *cobra.Command, args []string, resume bool) error {
 	}
 
 	// Determine harness resume behavior from the saved phase.
-	// Suspended agents always get harness resume (--continue/--resume),
-	// even when invoked via 'start' (implicit resume). Stopped agents
-	// always get a fresh session, even when invoked via 'resume'.
-	effectiveResume := resume
 	savedPhase := agent.GetSavedPhase(agentName, projectPath)
-	if savedPhase == string(state.PhaseSuspended) {
-		effectiveResume = true
-		if !resume {
-			statusf("Resuming agent '%s'...\n", agentName)
-		}
-	} else if resume && savedPhase == string(state.PhaseStopped) {
-		effectiveResume = false
+	effectiveResume, implicitResume, forcedRecovery, err := localResumeDecision(savedPhase, resume, forceResume, agentName)
+	if err != nil {
+		return err
+	}
+	if implicitResume {
+		statusf("Resuming agent '%s'...\n", agentName)
+	}
+	if forcedRecovery {
+		statusf("Force-resuming agent '%s' (saved phase: %s)...\n", agentName, savedPhase)
 	}
 
 	opts := api.StartOptions{
@@ -733,6 +762,7 @@ func startAgentViaHub(hubCtx *HubContext, agentName, task string, resume bool, i
 		Workspace:       workspace,
 		Labels:          parsedLabels,
 		Resume:          resume,
+		ForceResume:     resume && forceResume,
 		Attach:          attach,
 		GatherEnv:       true, // Enable env-gather flow
 		Notify:          !startNoNotify,
@@ -849,6 +879,9 @@ func startAgentViaHub(hubCtx *HubContext, agentName, task string, resume bool, i
 		action := "Starting"
 		if resume {
 			action = "Resuming"
+		}
+		if resume && forceResume {
+			action = "Force-resuming"
 		}
 		fmt.Printf("%s agent '%s'...\n", action, agentName)
 	}
