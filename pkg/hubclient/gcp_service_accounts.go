@@ -16,9 +16,7 @@ package hubclient
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"net/http"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
@@ -89,20 +87,33 @@ func (s *gcpServiceAccountService) basePath() string {
 	return fmt.Sprintf("/api/v1/projects/%s/gcp-service-accounts", s.projectID)
 }
 
+// listGCPServiceAccountsResponse is the wire shape both list handlers write:
+// pkg/hub/handlers_gcp_identity.go:301, returned by the nested route at :384
+// and the flat scoped route at _scoped.go:224.
+//
+// Unexported and unwrapped deliberately. Surfacing it would change List's
+// signature, and this type exists to repair a shipped break that needs to be
+// cherry-pickable onto release branches; a signature change is not.
+// P5's scope-aware accessor exposes the per-item capabilities properly.
+type listGCPServiceAccountsResponse struct {
+	Items []GCPServiceAccount `json:"items"`
+}
+
 func (s *gcpServiceAccountService) List(ctx context.Context) ([]GCPServiceAccount, error) {
 	resp, err := s.c.get(ctx, s.basePath(), nil)
 	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode >= http.StatusBadRequest {
-		return nil, apiclient.ParseErrorResponse(resp)
+	result, err := apiclient.DecodeResponse[listGCPServiceAccountsResponse](resp)
+	if err != nil {
+		return nil, err
 	}
-	var result []GCPServiceAccount
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("decode response: %w", err)
+	if result == nil {
+		// 204: DecodeResponse yields (nil, nil). No accounts is an empty list,
+		// not a nil-pointer dereference.
+		return []GCPServiceAccount{}, nil
 	}
-	return result, nil
+	return result.Items, nil
 }
 
 func (s *gcpServiceAccountService) Get(ctx context.Context, id string) (*GCPServiceAccount, error) {
@@ -124,8 +135,14 @@ func (s *gcpServiceAccountService) Create(ctx context.Context, req *CreateGCPSer
 
 func (s *gcpServiceAccountService) Delete(ctx context.Context, id string) error {
 	path := fmt.Sprintf("%s/%s", s.basePath(), id)
-	_, err := s.c.delete(ctx, path, nil)
-	return err
+	resp, err := s.c.delete(ctx, path, nil)
+	if err != nil {
+		return err
+	}
+	// The transport error is nil for a 403. Without this, a refused deletion of
+	// a credential binding returns success and the CLI confirms a removal that
+	// did not happen.
+	return apiclient.CheckResponse(resp)
 }
 
 func (s *gcpServiceAccountService) Verify(ctx context.Context, id string) (*GCPServiceAccount, error) {
