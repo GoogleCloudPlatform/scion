@@ -1836,7 +1836,16 @@ func (s *Server) createProjectAgent(w http.ResponseWriter, r *http.Request, proj
 		return
 	}
 
-	// Resolve caller identity for creator tracking
+	// Authorization for every caller kind. This route had no gate at all before
+	// #591: any agent token could create an agent in any project, and it is the
+	// route the CLI uses for create/start/sync. The URL project implies no
+	// isolation by itself.
+	if !s.authorizeAgentCreate(w, r, projectID) {
+		return
+	}
+
+	// Resolve caller identity for creator tracking (attribution only — the
+	// authorization decision is made above).
 	var createdBy string
 	var creatorName string
 	var ancestry []string
