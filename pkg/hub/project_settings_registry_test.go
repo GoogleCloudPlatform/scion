@@ -18,6 +18,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -35,6 +36,19 @@ const projectSettingsSourceFile = "project_settings_handlers.go"
 // guard so that adding or removing a setting shows up as a deliberate edit in
 // the diff rather than passing silently.
 const expectedProjectSettingCount = 16
+
+// isProjectSettingConstName reports whether an identifier names a project
+// settings annotation key constant.
+//
+// The singular "projectSetting" prefix is the naming convention for these keys.
+// Plural "projectSettings*" names (projectSettingsSourceFile, and any future
+// helper such as a projectSettingsPrefix) are deliberately excluded: they are
+// not annotation keys, and matching them would trip the guard on a constant
+// that has no business being in the registry.
+func isProjectSettingConstName(name string) bool {
+	return strings.HasPrefix(name, "projectSetting") &&
+		!strings.HasPrefix(name, "projectSettings")
+}
 
 // declaredProjectSettingConstants parses projectSettingsSourceFile and returns
 // the name and value of every projectSetting* constant, in declaration order.
@@ -61,7 +75,7 @@ func declaredProjectSettingConstants(t *testing.T) (names []string, values []str
 				continue
 			}
 			for i, name := range vs.Names {
-				if !strings.HasPrefix(name.Name, "projectSetting") {
+				if !isProjectSettingConstName(name.Name) {
 					continue
 				}
 				require.Less(t, i, len(vs.Values),
@@ -133,6 +147,65 @@ func TestProjectSettingKeys_NoDrift(t *testing.T) {
 	assert.Equal(t, values, projectSettingKeys,
 		"projectSettingKeys does not match the projectSetting* constants in declaration order; "+
 			"keep the registry, the constants and the §3.1 table in the same order")
+}
+
+// TestProjectSettingKeys_NoConstantsOutsideSourceFile closes the one gap in the
+// drift guard above: that guard parses a single file, so a projectSetting*
+// constant declared in some other pkg/hub file would be invisible to it, would
+// not be required to appear in the registry, and would therefore be silently
+// dropped on clone — the very failure mode the guard exists to prevent, just
+// displaced by one file.
+//
+// Rather than widen the parse (which would start matching unrelated constants
+// across the package), this asserts the narrower and more useful property: the
+// source file is the *only* declaration site, so parsing it is sufficient.
+func TestProjectSettingKeys_NoConstantsOutsideSourceFile(t *testing.T) {
+	fset := token.NewFileSet()
+	pkgs, err := parser.ParseDir(fset, ".", nil, 0)
+	require.NoError(t, err, "failed to parse the pkg/hub directory")
+	require.NotEmpty(t, pkgs, "parsed no packages; this guard is not looking at anything")
+
+	sawSourceFile := false
+	for _, pkg := range pkgs {
+		for path, file := range pkg.Files {
+			if filepath.Base(path) == projectSettingsSourceFile {
+				sawSourceFile = true
+				continue
+			}
+			// Test files may legitimately reference these names.
+			if strings.HasSuffix(path, "_test.go") {
+				continue
+			}
+			for _, decl := range file.Decls {
+				gen, ok := decl.(*ast.GenDecl)
+				if !ok || gen.Tok != token.CONST {
+					continue
+				}
+				for _, spec := range gen.Specs {
+					vs, ok := spec.(*ast.ValueSpec)
+					if !ok {
+						continue
+					}
+					for _, name := range vs.Names {
+						assert.Falsef(t, isProjectSettingConstName(name.Name),
+							"%s declares %s outside %s. The drift guard only parses %s, "+
+								"so this constant would not be required to appear in "+
+								"projectSettingKeys and the setting would be silently dropped "+
+								"on clone. Move it into %s.",
+							path, name.Name, projectSettingsSourceFile,
+							projectSettingsSourceFile, projectSettingsSourceFile)
+					}
+				}
+			}
+		}
+	}
+
+	// Anti-vacuity: if the source file were renamed, every file would be
+	// skipped by the filepath.Base check above and this test would pass while
+	// checking nothing.
+	require.True(t, sawSourceFile,
+		"did not encounter %s while scanning the package; has it been renamed? "+
+			"Update projectSettingsSourceFile.", projectSettingsSourceFile)
 }
 
 // TestProjectSettingKeys_Count pins the number of project settings, so that an
