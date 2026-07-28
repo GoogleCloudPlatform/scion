@@ -382,6 +382,106 @@ func TestAgentCreate_OtherProjectSA_StillRejected(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), msgSANotAvailableInProject)
 }
 
+// REACHABILITY, VARIED ON ITS OWN, AT CREATE. Both arms in one test because the
+// point is the difference between them and a reader should not have to hold two
+// test functions side by side to see it.
+//
+// Why it was added (sa-arch's call, #48 follow-up): create's existing pair is
+// TestAgentCreate_HubScopedSA_AssignableByCreatorAndAdmin against the test above
+// — and those two vary the KIND OF SCOPE as well as reachability. A pair with
+// two variables cannot attribute a failure to either, and worse, it has a blind
+// spot: a predicate rewritten to admit hub-scoped accounts and refuse ALL
+// project-scoped ones leaves both of those arms green, because neither arm is a
+// project-scoped account that ought to be admitted. That case is the common one
+// in production and it had no admitted arm at create. PATCH already had one, in
+// TestBypassAgents_UpdateAgentServiceAccountChecks; this is the create twin.
+//
+// THE BLIND SPOT IS MEASURED, NOT INFERRED, AND IT RUNS ONE WAY ONLY. Replacing
+// the create predicate with `sa.Scope != store.ScopeHub` — admit hub-scoped,
+// refuse every project-scoped account, which would break assignment for
+// essentially every real project — left BOTH existing arms PASSING, and only
+// this test failed. The mirror regression, `sa.Scope != store.ScopeProject`,
+// fails three tests loudly and never needed this one. Direction matters here:
+// the pair that looks symmetric is blind in exactly one of the two directions,
+// and it is blind in the direction that matters more.
+//
+// The two accounts differ in ScopeID and nothing that any predicate reads. ID
+// and Email must differ for uniqueness and are inert here — no decision on this
+// path consults either, they are only echoed back. Scope, Verified and CreatedBy
+// are held equal ON PURPOSE: CreatedBy in particular, because it becomes
+// Resource.OwnerID and admits the caller through the resource-owner
+// short-circuit. Holding it constant means that bypass cannot be what separates
+// the arms; if it were varied, the refused arm might be refused by
+// authorization and the test would prove nothing about scope.
+func TestAgentCreate_ReachabilityIsTheOnlyVariable(t *testing.T) {
+	f := bypassAgentsSetup(t)
+
+	mkSA := func(scopeID string) *store.GCPServiceAccount {
+		sa := &store.GCPServiceAccount{
+			ID:        uuid.New().String(),
+			Scope:     store.ScopeProject,
+			ScopeID:   scopeID,
+			Email:     fmt.Sprintf("reach-%s@proj.iam.gserviceaccount.com", uuid.New().String()[:8]),
+			ProjectID: "gcp-proj",
+			CreatedBy: f.owner.ID,
+			Verified:  true,
+			CreatedAt: time.Now(),
+		}
+		require.NoError(t, f.store.CreateGCPServiceAccount(context.Background(), sa))
+		return sa
+	}
+
+	reachable := mkSA(f.proj.ID)
+	unreachable := mkSA(f.other.ID)
+
+	// Both accounts really are in the store. Stated as an assertion rather than
+	// trusted, because the #48 collapse means a seeding failure and a scope
+	// refusal now produce the same 400 — see msgSANotAvailableInProject. Without
+	// this, the refused arm below is green whether or not its account exists.
+	for _, sa := range []*store.GCPServiceAccount{reachable, unreachable} {
+		got, err := f.store.GetGCPServiceAccount(context.Background(), sa.ID)
+		require.NoError(t, err, "fixture did not persist; the refusal below would be meaningless")
+		require.Equal(t, sa.ScopeID, got.ScopeID)
+	}
+
+	t.Run("in-project account is admitted", func(t *testing.T) {
+		rec := createAgentAsOwner(t, f, CreateAgentRequest{
+			Name: "reachable-sa-agent",
+			GCPIdentity: &GCPIdentityAssignment{
+				MetadataMode:     store.GCPMetadataModeAssign,
+				ServiceAccountID: reachable.ID,
+			},
+		})
+		require.Equal(t, http.StatusCreated, rec.Code,
+			"a verified account scoped to THIS project must be assignable at create; got: %s",
+			rec.Body.String())
+
+		// 201 alone would not prove the assignment happened — a handler that
+		// dropped GCP identity silently would also return 201.
+		var resp CreateAgentResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		require.NotNil(t, resp.Agent)
+		got, err := f.store.GetAgent(context.Background(), resp.Agent.ID)
+		require.NoError(t, err)
+		require.NotNil(t, got.AppliedConfig)
+		require.NotNil(t, got.AppliedConfig.GCPIdentity)
+		assert.Equal(t, reachable.ID, got.AppliedConfig.GCPIdentity.ServiceAccountID)
+	})
+
+	t.Run("the same account scoped elsewhere is refused", func(t *testing.T) {
+		rec := createAgentAsOwner(t, f, CreateAgentRequest{
+			Name: "unreachable-sa-agent",
+			GCPIdentity: &GCPIdentityAssignment{
+				MetadataMode:     store.GCPMetadataModeAssign,
+				ServiceAccountID: unreachable.ID,
+			},
+		})
+		require.Equal(t, http.StatusBadRequest, rec.Code,
+			"the only difference from the admitted arm is ScopeID; got: %s", rec.Body.String())
+		assert.Contains(t, rec.Body.String(), msgSANotAvailableInProject)
+	})
+}
+
 // A user-scoped account must not become assignable. It was excluded before by
 // accident — a user ID rarely equals a project ID — and is excluded now on
 // purpose, by the predicate's fail-closed default arm. The distinction is
