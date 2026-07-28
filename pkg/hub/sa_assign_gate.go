@@ -129,9 +129,12 @@ func (s *Server) callerPrincipal(ctx context.Context) (store.Principal, error) {
 //     because nothing was going to call it.
 //  2. Mode on, no generator — the unavailable checker, which DENIES. An absent
 //     capability must never become an implicit pass. This is the exact defect
-//     in verifyGCPServiceAccount (handlers_gcp_identity.go:471), where the nil
-//     guard wraps the probe but not the success assignment, so a hub with no
-//     generator marks every account verified having contacted nothing.
+//     in verifyGCPServiceAccount (handlers_gcp_identity.go, tracked as #29),
+//     where the nil guard wraps the probe but not the success assignment, so a
+//     hub with no generator marks every account verified having contacted
+//     nothing. ⚠️ The #29 fix must update this comment when it lands: once the
+//     defect is gone, this stops being a live example and becomes a false
+//     statement about the current tree.
 //  3. Mode on, generator present — the configured checker.
 //
 // Substituting the unavailable checker in case 2 is a deliberate downgrade on
