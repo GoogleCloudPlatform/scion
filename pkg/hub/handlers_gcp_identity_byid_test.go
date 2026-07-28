@@ -454,7 +454,7 @@ func TestGCPSA_FlatByID_CollectionRouteStillReachable(t *testing.T) {
 // the divergence in the other direction, or by a cleanup that harmonises one to
 // whatever the code happens to do; a test whose subject IS the sameness cannot.
 func TestGCPSA_FlatByID_NoIdentity_HubAndUserAreIndistinguishable(t *testing.T) {
-	srv, s, _, _, _, project := setupGCPAuthzTest(t)
+	srv, s, owner, _, _, project := setupGCPAuthzTest(t)
 	ctx := context.Background()
 
 	agent := &store.Agent{
@@ -500,6 +500,18 @@ func TestGCPSA_FlatByID_NoIdentity_HubAndUserAreIndistinguishable(t *testing.T) 
 	require.Equal(t, hubRec.Code, nested.Code,
 		"the two renderers must answer an identity-less caller alike: flat gave %d, nested gave %d (%s)",
 		hubRec.Code, nested.Code, nested.Body.String())
+
+	// POSITIVE CONTROL, and it is what makes the parity above mean anything.
+	// sa-arch's note on the sameness idiom: a pin whose shared value is 404 is
+	// the one case where the expected answer and the DEAD-PATH answer coincide.
+	// Unregister the route, misspell the path, delete the handler -- ServeMux
+	// answers 404 to all three requests and every assertion above still passes.
+	// One request that must NOT 404 fixes that, on the same route, in the same
+	// test, so the instrument cannot pass by measuring nothing.
+	live := doRequestAsUser(t, srv, owner, http.MethodGet, flatSAPath+hubSA.ID, nil)
+	require.Equal(t, http.StatusOK, live.Code,
+		"flat GET must be reachable for an identified reader, or the 404s above prove nothing; got: %s",
+		live.Body.String())
 }
 
 // #45, found by sa-arch. THE NESTED ROUTE WAS THE SAME ORACLE WITH A WIDER
@@ -588,13 +600,32 @@ func TestGCPSA_NestedByID_NoIdentity_TheFourRowsAreIndistinguishable(t *testing.
 	require.True(t, saExists(t, s, hubSA.ID), "hub-scoped account must survive")
 	require.True(t, saExists(t, s, hereSA.ID), "project-scoped account must survive")
 	require.True(t, saExists(t, s, elsewhereSA.ID), "the other project's account must survive")
+
+	// POSITIVE CONTROL. sa-arch's note on the idiom they gave me, and it is the
+	// hole in every sameness pin whose shared value is 404: THE EXPECTED ANSWER
+	// AND THE DEAD-PATH ANSWER ARE THE SAME VALUE HERE. Drop the route, rename
+	// the path, delete the handler -- ServeMux answers 404 four times, the
+	// parity holds, and the survival checks hold too, because a request that
+	// never reached a handler deletes exactly as little as a refused one.
+	//
+	// A divergence pin does not need this: two different codes cannot both be
+	// the harness default. A sameness pin at 404 needs one request that must
+	// succeed. The project owner deleting their own project-scoped account is
+	// that request, on the same route, in the same test.
+	ok := doRequestAsUser(t, srv, owner, http.MethodDelete,
+		"/api/v1/projects/"+project.ID+"/gcp-service-accounts/"+hereSA.ID, nil)
+	require.Equal(t, http.StatusNoContent, ok.Code,
+		"nested DELETE must work for an authorized caller, or the four 404s above prove nothing; got: %s",
+		ok.Body.String())
+	require.False(t, saExists(t, s, hereSA.ID),
+		"and the authorized delete must actually delete -- a 204 from a dead path would not")
 }
 
 // The same leak on the write verb, because the fix lives in the renderer and a
 // renderer is reached by every verb. DELETE also gives an observable a status
 // cannot forge: the account is still there afterwards.
 func TestGCPSA_FlatByID_NoIdentity_DeleteIsAlsoIndistinguishable(t *testing.T) {
-	srv, s, _, _, _, project := setupGCPAuthzTest(t)
+	srv, s, _, member, _, project := setupGCPAuthzTest(t)
 	ctx := context.Background()
 
 	agent := &store.Agent{
@@ -614,8 +645,10 @@ func TestGCPSA_FlatByID_NoIdentity_DeleteIsAlsoIndistinguishable(t *testing.T) {
 
 	hubSA := mkSA(t, s, "sa-flat-del-hub", "hubdel@p.iam.gserviceaccount.com",
 		store.ScopeHub, "hub-instance-1", tid("user-stranger"))
+	// Created BY member, so member can delete it below as the positive control.
+	// The identity-less assertions do not care who created it.
 	userSA := mkSA(t, s, "sa-flat-del-user", "userdel@p.iam.gserviceaccount.com",
-		store.ScopeUser, tid("user-stranger"), tid("user-stranger"))
+		store.ScopeUser, member.ID, member.ID)
 
 	hubRec := doRequestWithAgentToken(t, srv, http.MethodDelete, flatSAPath+hubSA.ID, nil, agentToken)
 	userRec := doRequestWithAgentToken(t, srv, http.MethodDelete, flatSAPath+userSA.ID, nil, agentToken)
@@ -627,4 +660,16 @@ func TestGCPSA_FlatByID_NoIdentity_DeleteIsAlsoIndistinguishable(t *testing.T) {
 
 	require.True(t, saExists(t, s, hubSA.ID), "the hub-scoped account must survive a refused delete")
 	require.True(t, saExists(t, s, userSA.ID), "the user-scoped account must survive a refused delete")
+
+	// POSITIVE CONTROL, same reasoning as the GET test above: 404 is what a
+	// dead route returns, so a sameness pin at 404 needs one request on the same
+	// route that must succeed. The creator deleting their own user-scoped
+	// account is it, and it is the strongest available here -- a 204 is not
+	// something ServeMux can produce by accident, and the account is gone after.
+	ok := doRequestAsUser(t, srv, member, http.MethodDelete, flatSAPath+userSA.ID, nil)
+	require.Equal(t, http.StatusNoContent, ok.Code,
+		"flat DELETE must work for the creator, or the 404s above prove nothing; got: %s",
+		ok.Body.String())
+	require.False(t, saExists(t, s, userSA.ID),
+		"and the authorized delete must actually delete")
 }
