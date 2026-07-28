@@ -1125,6 +1125,12 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 	// Seed default policies and groups (idempotent)
 	seedDefaultPoliciesAndGroups(ctx, s)
 
+	// Backfill the per-project service-account assign policy onto projects
+	// that predate it (idempotent). Projects nobody touches never run
+	// createProjectMembersGroupAndPolicy again, so without this their members
+	// would silently lose assign when the gate moves to ActionAssign.
+	backfillProjectAssignPolicies(ctx, s)
+
 	// Seed the dev user when dev-auth is enabled so that Ent FK constraints
 	// on owner_id are satisfied when the dev user creates projects/groups.
 	if cfg.DevAuthToken != "" {

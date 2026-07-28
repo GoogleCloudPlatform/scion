@@ -252,6 +252,72 @@ func (a *AuthzService) checkAccessForAgent(ctx context.Context, agent AgentIdent
 		}
 	}
 
+	// 3b. Project-scoped service-account assign baseline.
+	//
+	// An agent may assign a GCP service account that lives in its own project.
+	// Today the assignment gate checks ActionRead, which step 3 above already
+	// allows for exactly this set of service accounts. svc-accnt P3 converts
+	// that check to ActionAssign so the IAM actAs gate has a resource-shaped
+	// place to hang. Without this arm the conversion would deny every agent
+	// caller hub-wide, because checkAccessForAgent has no admin or owner
+	// bypass and no seeded policy grants assign. The security in that change
+	// comes from the GCP actAs check, not from narrowing the Hub policy layer.
+	//
+	// It is a separate arm rather than an addition to isReadClassAction on
+	// purpose: read-class is deliberately narrow, and widening it would grant
+	// assign on every resource type instead of this one.
+	//
+	// The four properties documented on step 3 apply here unchanged — in
+	// particular the position after policy evaluation, which keeps this
+	// revocable by an explicit deny bound to the project's implicit
+	// "project:<slug>:agents" group, and the pid != "" guard. A fifth is
+	// specific to this arm:
+	//
+	//   5. It preserves the step 3 project-baseline path exactly, and only
+	//      that path. Under ActionRead an agent could also reach :483 via a
+	//      hand-authored read policy (step 2) or a delegation condition
+	//      (step 4), and this arm deliberately does not preserve either,
+	//      because a grant to read a service account is not a grant to assign
+	//      one — reproducing them would over-grant on the very surface this
+	//      change exists to gate. Both are empty for agents on
+	//      gcp_service_account in default configuration, so nothing breaks out
+	//      of the box; an operator who wrote one loses agent assign and must
+	//      grant assign explicitly. Do not cite this arm as
+	//      "reachability-preserving" without that qualification.
+	//
+	// ⚠️ This grant is safe ONLY while service-account assignment is confined
+	// to the caller's own project. Two things enforce that today: the
+	// sa.ScopeID != projectID check in createAgentInProject, and
+	// gcpServiceAccountResource, which gives a project parent only to
+	// project-scoped accounts — so a hub-scoped account yields pid == "" here
+	// and this arm cannot fire for it.
+	//
+	// The human half of this baseline is the per-project assign policy in
+	// seed.go (projectAssignPolicyName), and it is confined by the SAME guard
+	// read the other way: this arm by `pid != ""` immediately below,
+	// that policy by `pid == ""` in matchesResource, which refuses to match a
+	// project-scoped policy against a parentless resource (#595). One
+	// discipline applied in two places, not two unrelated accidents. Neither
+	// side needs a code-side revocation to stay confined, and neither should
+	// grow one.
+	//
+	// Goal 2 relaxes that confinement to make accounts hub-scoped and
+	// assignable across projects. At that moment neither guard holds: this arm
+	// stops being a restatement of existing reach and becomes the only thing
+	// standing between any agent and any service account on the hub. The
+	// coupling is escalated to ptone as task #19; the relaxation must not land
+	// before it is ruled. If you are here to relax scope, this arm is part of
+	// your change.
+	if action == ActionAssign && resource.Type == "gcp_service_account" {
+		if pid := projectIDForResource(resource); pid != "" && pid == agent.ProjectID() {
+			return Decision{
+				Allowed: true,
+				Reason:  "agent project service-account assign baseline",
+				Scope:   "project",
+			}
+		}
+	}
+
 	// 4. Delegation fallback: check policies with delegation conditions
 	return a.checkDelegation(ctx, agent, resource, action, policies)
 }

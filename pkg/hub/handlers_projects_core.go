@@ -688,6 +688,11 @@ func (s *Server) createProjectMembersGroupAndPolicy(ctx context.Context, project
 		s.projectsLogger().Warn("failed to bind project member policy",
 			"project_id", project.ID, "policy", policyName, "error", err.Error())
 	}
+
+	// Create the project-level service-account assign policy alongside it.
+	// See projectAssignPolicyName in seed.go for why it is project-scoped and
+	// what reach it preserves.
+	ensureProjectAssignPolicy(ctx, s.store, project, membersGroup.ID)
 }
 
 // hubManagedProjectPath returns the filesystem path for a hub-managed project workspace.
