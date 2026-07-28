@@ -27,12 +27,17 @@ import (
 
 // ProjectPreStartHook holds the schema definition for the ProjectPreStartHook
 // entity. Each row is a named, versioned shell script that can be associated
-// with a project and staged into the agent container's pre-start hook directory
+// with a project (scope="project") or with the hub as a whole (scope="hub")
+// and staged into the agent container's pre-start hook directory
 // (pre-start.d/30-project-custom) before the agent process starts.
 //
-// One hook has status="active" per project at any given time; the rest are
-// "archived". This invariant is enforced by the store layer (not the DB schema)
-// so that the implementation stays portable across SQLite and Postgres.
+// One hook has status="active" per project at any given time, plus at most one
+// active hub-scoped hook; the rest are "archived". This invariant is enforced
+// by the store layer (not the DB schema) so that the implementation stays
+// portable across SQLite and Postgres.
+//
+// Hub-scoped rows carry an empty project_id. The project-scoped hook (if any)
+// takes precedence over the hub-scoped hook at agent-create time.
 type ProjectPreStartHook struct {
 	ent.Schema
 }
@@ -43,8 +48,18 @@ func (ProjectPreStartHook) Fields() []ent.Field {
 		field.UUID("id", uuid.UUID{}).
 			Default(uuid.New).
 			Immutable(),
+		// scope distinguishes project-scoped hooks from hub-wide hooks.
+		// Hub-scoped hooks act as the fallback for projects with no active
+		// project-scoped hook.
+		field.Enum("scope").
+			Values("project", "hub").
+			Default("project"),
+		// project_id is empty for hub-scoped hooks. It is Optional (rather
+		// than NotEmpty) for that reason; the store layer requires a
+		// non-empty value for project-scoped hooks.
 		field.String("project_id").
-			NotEmpty(),
+			Optional().
+			Default(""),
 		field.String("name").
 			NotEmpty(),
 		field.String("slug").
@@ -74,10 +89,14 @@ func (ProjectPreStartHook) Fields() []ent.Field {
 // Indexes of the ProjectPreStartHook.
 func (ProjectPreStartHook) Indexes() []ent.Index {
 	return []ent.Index{
-		// slug must be unique within a project.
-		index.Fields("project_id", "slug").Unique(),
+		// slug must be unique within a scope+project. Including scope keeps
+		// hub-scoped hooks (project_id="") from colliding with project-scoped
+		// hooks that happen to share a slug.
+		index.Fields("scope", "project_id", "slug").Unique(),
 		// Efficient lookup of all active hooks for a project.
 		index.Fields("project_id", "status"),
+		// Efficient lookup of the active hub-scoped hook.
+		index.Fields("scope", "status"),
 	}
 }
 

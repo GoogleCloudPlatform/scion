@@ -262,16 +262,47 @@ func (s *Server) populateAgentConfig(ctx context.Context, agent *store.Agent, pr
 		}
 	}
 
-	// Stamp project pre-start hook for broker delivery.
-	// Resolve the active hook for the project and inline its script content into
-	// AppliedConfig so the broker can stage it without an extra Hub round-trip.
-	// Mirrors the HarnessConfigID stamping pattern above.
+	// Stamp the pre-start hook for broker delivery.
+	// Resolve the active hook and inline its script content into AppliedConfig
+	// so the broker can stage it without an extra Hub round-trip. Mirrors the
+	// HarnessConfigID stamping pattern above.
+	//
+	// Resolution is a two-step fallback (see
+	// .design/project-prestart-hooks-extensions.md section 1):
+	//   1. The project's active hook wins outright.
+	//   2. Otherwise the hub-wide active hook applies, if any.
+	//   3. Neither → no script staged.
+	// Either way the broker stages a single file (30-project-custom) and
+	// AppliedConfig.ProjectPreStartHookID records which hook it came from, so
+	// no scope-specific fields are needed downstream.
+	//
+	// The hub fallback is entered only on a definitive "no project hook"
+	// (ErrNotFound). Any other project-lookup failure (DB blip, duplicate rows)
+	// is ambiguous: the project may well have an override we simply failed to
+	// read, and silently staging the hub script in that case would run the
+	// wrong code. On an ambiguous error we log and stage nothing.
 	if project != nil && agent.AppliedConfig.ProjectPreStartHookID == "" {
 		hook, hookErr := s.store.GetActiveProjectPreStartHook(ctx, project.ID)
-		if hookErr != nil && !errors.Is(hookErr, store.ErrNotFound) {
-			s.agentLifecycleLog.Warn("failed to resolve project pre-start hook",
+		switch {
+		case hookErr == nil:
+			// 1. Project-scoped hook found — it takes precedence.
+		case errors.Is(hookErr, store.ErrNotFound):
+			// 2. No project hook — fall back to the hub-scoped hook, if any.
+			var hubErr error
+			hook, hubErr = s.store.GetActiveHubPreStartHook(ctx)
+			if hubErr != nil {
+				if !errors.Is(hubErr, store.ErrNotFound) {
+					s.agentLifecycleLog.Warn("failed to resolve hub pre-start hook", "error", hubErr)
+				}
+				hook = nil
+			}
+		default:
+			// 3. Ambiguous project lookup failure — stage nothing.
+			s.agentLifecycleLog.Warn("failed to resolve project pre-start hook; skipping hook staging",
 				"project_id", project.ID, "error", hookErr)
+			hook = nil
 		}
+
 		if hook != nil {
 			agent.AppliedConfig.ProjectPreStartHookID = hook.ID
 			agent.AppliedConfig.ProjectPreStartHookScript = hook.Script

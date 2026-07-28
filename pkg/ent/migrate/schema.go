@@ -835,7 +835,8 @@ var (
 	// ProjectPreStartHooksColumns holds the columns for the "project_pre_start_hooks" table.
 	ProjectPreStartHooksColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeUUID},
-		{Name: "project_id", Type: field.TypeString},
+		{Name: "scope", Type: field.TypeEnum, Enums: []string{"project", "hub"}, Default: "project"},
+		{Name: "project_id", Type: field.TypeString, Nullable: true, Default: ""},
 		{Name: "name", Type: field.TypeString},
 		{Name: "slug", Type: field.TypeString},
 		{Name: "description", Type: field.TypeString, Nullable: true},
@@ -853,14 +854,19 @@ var (
 		PrimaryKey: []*schema.Column{ProjectPreStartHooksColumns[0]},
 		Indexes: []*schema.Index{
 			{
-				Name:    "projectprestarthook_project_id_slug",
+				Name:    "projectprestarthook_scope_project_id_slug",
 				Unique:  true,
-				Columns: []*schema.Column{ProjectPreStartHooksColumns[1], ProjectPreStartHooksColumns[3]},
+				Columns: []*schema.Column{ProjectPreStartHooksColumns[1], ProjectPreStartHooksColumns[2], ProjectPreStartHooksColumns[4]},
 			},
 			{
 				Name:    "projectprestarthook_project_id_status",
 				Unique:  false,
-				Columns: []*schema.Column{ProjectPreStartHooksColumns[1], ProjectPreStartHooksColumns[6]},
+				Columns: []*schema.Column{ProjectPreStartHooksColumns[2], ProjectPreStartHooksColumns[7]},
+			},
+			{
+				Name:    "projectprestarthook_scope_status",
+				Unique:  false,
+				Columns: []*schema.Column{ProjectPreStartHooksColumns[1], ProjectPreStartHooksColumns[7]},
 			},
 		},
 	}

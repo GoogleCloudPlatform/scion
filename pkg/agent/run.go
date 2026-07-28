@@ -437,10 +437,10 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	// so no Hub round-trip is needed. A write failure is fatal: if the file is
 	// absent on a fresh restart the abort guard in init.go (projectHookStaged)
 	// will not fire, so the hook would silently not run — worse than aborting.
-	if opts.ProjectPreStartHookScript != "" {
-		if err := harness.WriteProjectPreStartHook(agentHome, opts.ProjectPreStartHookScript); err != nil {
-			return nil, fmt.Errorf("re-stage project pre-start hook: %w", err)
-		}
+	// Called unconditionally: with an empty script the helper clears any file
+	// staged by an earlier occupant of this agent home.
+	if err := harness.WriteProjectPreStartHook(agentHome, opts.ProjectPreStartHookScript); err != nil {
+		return nil, fmt.Errorf("re-stage project pre-start hook: %w", err)
 	}
 
 	// Resolve auth metadata for the config-driven env var pipeline.

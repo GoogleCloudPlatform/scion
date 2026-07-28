@@ -265,12 +265,12 @@ func (_q *ProjectPreStartHookQuery) Clone() *ProjectPreStartHookQuery {
 // Example:
 //
 //	var v []struct {
-//		ProjectID string `json:"project_id,omitempty"`
+//		Scope projectprestarthook.Scope `json:"scope,omitempty"`
 //		Count int `json:"count,omitempty"`
 //	}
 //
 //	client.ProjectPreStartHook.Query().
-//		GroupBy(projectprestarthook.FieldProjectID).
+//		GroupBy(projectprestarthook.FieldScope).
 //		Aggregate(ent.Count()).
 //		Scan(ctx, &v)
 func (_q *ProjectPreStartHookQuery) GroupBy(field string, fields ...string) *ProjectPreStartHookGroupBy {
@@ -288,11 +288,11 @@ func (_q *ProjectPreStartHookQuery) GroupBy(field string, fields ...string) *Pro
 // Example:
 //
 //	var v []struct {
-//		ProjectID string `json:"project_id,omitempty"`
+//		Scope projectprestarthook.Scope `json:"scope,omitempty"`
 //	}
 //
 //	client.ProjectPreStartHook.Query().
-//		Select(projectprestarthook.FieldProjectID).
+//		Select(projectprestarthook.FieldScope).
 //		Scan(ctx, &v)
 func (_q *ProjectPreStartHookQuery) Select(fields ...string) *ProjectPreStartHookSelect {
 	_q.ctx.Fields = append(_q.ctx.Fields, fields...)

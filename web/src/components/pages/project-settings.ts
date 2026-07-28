@@ -23,7 +23,7 @@
 import { LitElement, html, css } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
-import type { PageData, Project, Template, AdminGroup, GitHubAppProjectStatus, GitHubTokenPermissions, RuntimeBroker, BrokerProfile, GCPServiceAccount } from '../../shared/types.js';
+import type { PageData, Project, Template, AdminGroup, GitHubAppProjectStatus, GitHubTokenPermissions, RuntimeBroker, BrokerProfile, GCPServiceAccount, PreStartHook, PreStartHookSummary } from '../../shared/types.js';
 import { can, canAny } from '../../shared/types.js';
 import { normalizeModelAlias } from '../../shared/model-utils.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
@@ -39,6 +39,7 @@ import '../shared/schedule-list.js';
 import '../shared/resource-list.js';
 import '../shared/resource-import.js';
 import '../shared/injected-skills-panel.js';
+import '../shared/pre-start-hook-list.js';
 
 
 interface ProjectResourceSpec {
@@ -121,6 +122,10 @@ export class ScionPageProjectSettings extends LitElement {
 
   @state()
   private activeSchedulesTab = 'events';
+
+  /** Active hub-scoped pre-start hook, used for the "inherited from hub" banner. */
+  @state()
+  private hubHook: PreStartHookSummary | null = null;
 
   @state()
   private dropdownTemplates: Template[] = [];
@@ -740,6 +745,7 @@ export class ScionPageProjectSettings extends LitElement {
       }
     }
     void this.loadProject().then(() => this.loadMembersGroup());
+    void this.loadHubPreStartHook();
     void this.loadDropdownTemplates();
     void this.loadSettings();
     void this.loadHubTelemetryDefault();
@@ -785,6 +791,28 @@ export class ScionPageProjectSettings extends LitElement {
       this.error = err instanceof Error ? err.message : 'Failed to load project';
     } finally {
       this.loading = false;
+    }
+  }
+
+  /**
+   * Loads the active hub-scoped pre-start hook for the inherited indicator.
+   * This is best-effort: if the endpoint is forbidden or unavailable the banner
+   * simply does not render.
+   */
+  private async loadHubPreStartHook(): Promise<void> {
+    try {
+      const response = await apiFetch('/api/v1/pre-start-hooks?status=active&limit=1');
+      if (!response.ok) {
+        this.hubHook = null;
+        return;
+      }
+      const data = (await response.json()) as { hooks?: PreStartHook[] } | PreStartHook[];
+      const hooks = Array.isArray(data) ? data : data.hooks || [];
+      // Filter client-side as well, so the banner stays correct even if the
+      // endpoint ignores the status query parameter.
+      this.hubHook = hooks.find((h) => h.status === 'active') ?? null;
+    } catch {
+      this.hubHook = null;
     }
   }
 
@@ -1836,6 +1864,7 @@ export class ScionPageProjectSettings extends LitElement {
           <sl-tab slot="nav" panel="shared-dirs" ?active=${this.activeResourcesTab === 'shared-dirs'}>Shared Directories</sl-tab>
           <sl-tab slot="nav" panel="templates" ?active=${this.activeResourcesTab === 'templates'}>Templates</sl-tab>
           <sl-tab slot="nav" panel="harness-configs" ?active=${this.activeResourcesTab === 'harness-configs'}>Harness Configs</sl-tab>
+          <sl-tab slot="nav" panel="pre-start-hooks" ?active=${this.activeResourcesTab === 'pre-start-hooks'}>Pre-Start Hooks</sl-tab>
           <sl-tab slot="nav" panel="gcp-sa" ?active=${this.activeResourcesTab === 'gcp-sa'}>GCP Service Accounts</sl-tab>
           <sl-tab slot="nav" panel="skills" ?active=${this.activeResourcesTab === 'skills'}>Skills</sl-tab>
 
@@ -1868,6 +1897,10 @@ export class ScionPageProjectSettings extends LitElement {
 
           <sl-tab-panel name="harness-configs">
             ${this.renderHarnessConfigsContent()}
+          </sl-tab-panel>
+
+          <sl-tab-panel name="pre-start-hooks">
+            ${this.renderPreStartHooksContent()}
           </sl-tab-panel>
 
           <sl-tab-panel name="gcp-sa">
@@ -1955,6 +1988,25 @@ export class ScionPageProjectSettings extends LitElement {
         ?cloneFromGlobal=${canSync}
         @resource-changed=${() => this.refreshHarnessConfigsList()}
       ></scion-resource-list>
+    `;
+  }
+
+  private renderPreStartHooksContent() {
+    const canEdit = canAny(this.project!._capabilities, 'update', 'manage');
+    return html`
+      <div class="section-header" style="margin-bottom: 1rem;">
+        <div class="section-header-text">
+          <p style="margin: 0;">
+            Project-scoped pre-start scripts staged before each agent container starts.
+            A project hook overrides the hub-wide default.
+          </p>
+        </div>
+      </div>
+      <scion-pre-start-hook-list
+        apiBasePath="/api/v1/projects/${this.projectId}"
+        ?readonly=${!canEdit}
+        .inheritedHook=${this.hubHook}
+      ></scion-pre-start-hook-list>
     `;
   }
 

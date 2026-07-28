@@ -110,6 +110,9 @@ type Client interface {
 	// ProjectPreStartHooks returns a ProjectPreStartHookService scoped to a project.
 	ProjectPreStartHooks(projectID string) ProjectPreStartHookService
 
+	// HubPreStartHooks returns the hub-scoped pre-start hook service.
+	HubPreStartHooks() HubPreStartHookService
+
 	// Health checks API availability.
 	Health(ctx context.Context) (*HealthResponse, error)
 }

@@ -2733,6 +2733,11 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/harness-configs", s.handleHarnessConfigs)
 	s.mux.HandleFunc("/api/v1/harness-configs/", s.handleHarnessConfigByID)
 
+	// Hub-scoped pre-start hooks. The project-scoped equivalents live under
+	// /api/v1/projects/{projectId}/pre-start-hooks (see handleProjectRoutes).
+	s.mux.HandleFunc("/api/v1/pre-start-hooks", s.handleHubPreStartHooks)
+	s.mux.HandleFunc("/api/v1/pre-start-hooks/", s.handleHubPreStartHookByID)
+
 	s.mux.HandleFunc("/api/v1/users", s.handleUsers)
 	s.mux.HandleFunc("/api/v1/users/", s.handleUserByID)
 

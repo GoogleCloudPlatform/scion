@@ -400,6 +400,18 @@ func (m *mockScheduledEventStore) PurgeOldScheduledEvents(_ context.Context, _ t
 	return 0, nil
 }
 
+// Pre-start hook lookups. populateAgentConfig resolves the active pre-start
+// hook on every agent create, so these must be stubbed rather than left to the
+// embedded nil store.Store (which would panic). No hooks exist in these tests.
+
+func (m *mockScheduledEventStore) GetActiveProjectPreStartHook(_ context.Context, _ string) (*store.ProjectPreStartHook, error) {
+	return nil, store.ErrNotFound
+}
+
+func (m *mockScheduledEventStore) GetActiveHubPreStartHook(_ context.Context) (*store.ProjectPreStartHook, error) {
+	return nil, store.ErrNotFound
+}
+
 // Agent-related methods for message handler tests
 
 func (m *mockScheduledEventStore) GetAgent(_ context.Context, id string) (*store.Agent, error) {

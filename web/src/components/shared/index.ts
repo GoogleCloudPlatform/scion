@@ -46,3 +46,4 @@ export { ScionGCPServiceAccountList } from './gcp-service-account-list.js';
 export { ScionSubscriptionManager } from './subscription-manager.js';
 export { ScionGitRemoteDisplay } from './git-remote-display.js';
 export { ScionHashDisplay } from './hash-display.js';
+export { ScionPreStartHookList } from './pre-start-hook-list.js';

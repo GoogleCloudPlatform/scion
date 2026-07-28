@@ -789,27 +789,27 @@ func init() {
 	projectprestarthookFields := schema.ProjectPreStartHook{}.Fields()
 	_ = projectprestarthookFields
 	// projectprestarthookDescProjectID is the schema descriptor for project_id field.
-	projectprestarthookDescProjectID := projectprestarthookFields[1].Descriptor()
-	// projectprestarthook.ProjectIDValidator is a validator for the "project_id" field. It is called by the builders before save.
-	projectprestarthook.ProjectIDValidator = projectprestarthookDescProjectID.Validators[0].(func(string) error)
+	projectprestarthookDescProjectID := projectprestarthookFields[2].Descriptor()
+	// projectprestarthook.DefaultProjectID holds the default value on creation for the project_id field.
+	projectprestarthook.DefaultProjectID = projectprestarthookDescProjectID.Default.(string)
 	// projectprestarthookDescName is the schema descriptor for name field.
-	projectprestarthookDescName := projectprestarthookFields[2].Descriptor()
+	projectprestarthookDescName := projectprestarthookFields[3].Descriptor()
 	// projectprestarthook.NameValidator is a validator for the "name" field. It is called by the builders before save.
 	projectprestarthook.NameValidator = projectprestarthookDescName.Validators[0].(func(string) error)
 	// projectprestarthookDescSlug is the schema descriptor for slug field.
-	projectprestarthookDescSlug := projectprestarthookFields[3].Descriptor()
+	projectprestarthookDescSlug := projectprestarthookFields[4].Descriptor()
 	// projectprestarthook.SlugValidator is a validator for the "slug" field. It is called by the builders before save.
 	projectprestarthook.SlugValidator = projectprestarthookDescSlug.Validators[0].(func(string) error)
 	// projectprestarthookDescScript is the schema descriptor for script field.
-	projectprestarthookDescScript := projectprestarthookFields[5].Descriptor()
+	projectprestarthookDescScript := projectprestarthookFields[6].Descriptor()
 	// projectprestarthook.ScriptValidator is a validator for the "script" field. It is called by the builders before save.
 	projectprestarthook.ScriptValidator = projectprestarthookDescScript.Validators[0].(func(string) error)
 	// projectprestarthookDescCreated is the schema descriptor for created field.
-	projectprestarthookDescCreated := projectprestarthookFields[9].Descriptor()
+	projectprestarthookDescCreated := projectprestarthookFields[10].Descriptor()
 	// projectprestarthook.DefaultCreated holds the default value on creation for the created field.
 	projectprestarthook.DefaultCreated = projectprestarthookDescCreated.Default.(func() time.Time)
 	// projectprestarthookDescUpdated is the schema descriptor for updated field.
-	projectprestarthookDescUpdated := projectprestarthookFields[10].Descriptor()
+	projectprestarthookDescUpdated := projectprestarthookFields[11].Descriptor()
 	// projectprestarthook.DefaultUpdated holds the default value on creation for the updated field.
 	projectprestarthook.DefaultUpdated = projectprestarthookDescUpdated.Default.(func() time.Time)
 	// projectprestarthook.UpdateDefaultUpdated holds the default value on update for the updated field.

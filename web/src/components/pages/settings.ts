@@ -23,18 +23,29 @@
  */
 
 import { LitElement, html, css } from 'lit';
-import { customElement, state } from 'lit/decorators.js';
+import { customElement, property, state } from 'lit/decorators.js';
 
+import type { PageData } from '../../shared/types.js';
 import '../shared/env-var-list.js';
 import '../shared/secret-list.js';
 import '../shared/resource-list.js';
 import '../shared/resource-import.js';
 import '../shared/injected-skills-panel.js';
+import '../shared/pre-start-hook-list.js';
 
 @customElement('scion-page-settings')
 export class ScionPageSettings extends LitElement {
+  /** Page data from the router (used for the current user's role). */
+  @property({ type: Object })
+  pageData: PageData | null = null;
+
   @state()
   private activeTab = 'env-vars';
+
+  /** Hub admins get mutating affordances; everyone else sees a read-only list. */
+  private get isAdmin(): boolean {
+    return this.pageData?.user?.role === 'admin';
+  }
 
   static override styles = css`
     :host {
@@ -146,6 +157,12 @@ export class ScionPageSettings extends LitElement {
           <sl-tab slot="nav" panel="harness-configs" ?active=${this.activeTab === 'harness-configs'}
             >Harness Configs</sl-tab
           >
+          <sl-tab
+            slot="nav"
+            panel="pre-start-hooks"
+            ?active=${this.activeTab === 'pre-start-hooks'}
+            >Pre-Start Hooks</sl-tab
+          >
           <sl-tab slot="nav" panel="skills" ?active=${this.activeTab === 'skills'}
             >Skills</sl-tab
           >
@@ -196,6 +213,17 @@ export class ScionPageSettings extends LitElement {
               canDelete
               @resource-changed=${() => this.refreshList('harness-configs-list')}
             ></scion-resource-list>
+          </sl-tab-panel>
+
+          <sl-tab-panel name="pre-start-hooks">
+            <p class="tab-intro">
+              Hub-wide default pre-start hook. Staged for any agent whose project has no
+              project-level hook active.
+            </p>
+            <scion-pre-start-hook-list
+              apiBasePath="/api/v1"
+              ?readonly=${!this.isAdmin}
+            ></scion-pre-start-hook-list>
           </sl-tab-panel>
 
           <sl-tab-panel name="skills">

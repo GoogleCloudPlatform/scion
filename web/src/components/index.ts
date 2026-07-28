@@ -24,7 +24,7 @@
 export { ScionApp } from './app-shell.js';
 
 // Shared components
-export { ScionNav, ScionHeader, ScionBreadcrumb, ScionStatusBadge, ScionViewToggle } from './shared/index.js';
+export { ScionNav, ScionHeader, ScionBreadcrumb, ScionStatusBadge, ScionViewToggle, ScionPreStartHookList } from './shared/index.js';
 export type { StatusType } from './shared/index.js';
 export type { ViewMode } from './shared/index.js';
 
