@@ -57,7 +57,7 @@ A brief states:
 | Context | what has already been decided, and where to read it |
 | Boundaries | what is explicitly out of scope |
 | Deliverable | what artifact is owed, and in what shape |
-| Reporting | who to report to, and when — including who to ask when blocked (see below) |
+| Reporting | who to report to, and when — including who to ask when blocked ([see below](#direct-questions-to-the-person-who-can-answer-them)) |
 
 ### Direct questions to the person who can answer them
 
