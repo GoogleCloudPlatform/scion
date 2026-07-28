@@ -55,13 +55,25 @@ const (
 
 // projectSettingKeys is the authoritative list of scion.io/* annotation keys
 // that constitute project settings. Anything not in this list is not a project
-// setting and is not copied by clone or reported by the resolved endpoint.
+// setting: it will not be copied by clone, nor reported by the resolved
+// settings endpoint.
+//
+// No production code reads this list yet. The intended consumers are the
+// project clone endpoint and the resolved-settings endpoint, which land in
+// later phases of this workstream; the list is introduced ahead of them so that
+// "copy the project settings" has one precise definition rather than three
+// approximate ones. Until those land, the registry's working value is
+// TestProjectSettingKeys_NoDrift below, which fails the build when a new
+// projectSetting* constant is not registered. Registry and guard are a single
+// executable invariant and should stay together — the list without the test is
+// merely an unused variable, and is reported as one by the linter.
 //
 // This is the single source of truth for "what is a project setting". A key
-// omitted here is silently dropped when a project is cloned; a key wrongly
-// added here is exposed in API responses and propagated into clones. Errors in
-// both directions are user-visible bugs, so treat edits to this list as a
-// change to the project-settings contract rather than as a list edit.
+// omitted here would be silently dropped when a project is cloned; a key
+// wrongly added here would be exposed in API responses and propagated into
+// clones. Errors in both directions are user-visible bugs, so treat edits to
+// this list as a change to the project-settings contract rather than as a list
+// edit.
 //
 // Two properties are maintained deliberately and are enforced by
 // TestProjectSettingKeys_NoDrift:
@@ -80,6 +92,26 @@ const (
 // scion.io/* label is a system marker rather than a project setting, and none
 // belongs here. User and organisational labels use the scion.dev/ prefix
 // instead.
+//
+// Phase 4 (clone) label policy, recorded here because this comment is the
+// nearest thing to a spec for it: clone is to copy scion.dev/* labels and drop
+// the scion.io/* prefix entirely — a prefix rule rather than a two-key denylist,
+// so that a future system marker is not silently propagated into clones.
+//
+// One scion.dev/ label is excluded: store.LabelWorkspaceMode
+// ("scion.dev/workspace-mode") is NOT copied. It is derived for the new project
+// from the clone request and the new project's git remote, by the same
+// validation the create path applies (handlers_projects_core.go), which sets it
+// only when there is a git remote and the mode is one of the two valid values.
+// Copying it raw would bypass that check and let a clone carry a workspace mode
+// inconsistent with its own remote, which IsSharedWorkspace() and
+// IsWorktreePerAgent() would then evaluate against mismatched state.
+//
+// Finally, do not try to "complete" this list from hubclient.ProjectSettings.
+// That struct also carries Bucket, Runtimes, Harnesses and Profiles, which the
+// settings endpoint accepts on PUT, silently ignores, and never returns on GET.
+// They are not annotation-backed, so their absence here is correct and loses
+// nothing on clone.
 var projectSettingKeys = []string{
 	projectSettingDefaultTemplate,
 	projectSettingDefaultHarnessConfig,
