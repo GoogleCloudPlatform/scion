@@ -25,6 +25,9 @@ import (
 )
 
 // Annotation keys for project settings stored in project annotations.
+//
+// When adding a key here, add it to projectSettingKeys below as well.
+// TestProjectSettingKeys_NoDrift enforces this.
 const (
 	projectSettingDefaultTemplate      = "scion.io/default-template"
 	projectSettingDefaultHarnessConfig = "scion.io/default-harness-config"
@@ -49,6 +52,58 @@ const (
 	projectSettingDefaultResourcesMemLim = "scion.io/default-resources-memory-limit"
 	projectSettingDefaultResourcesDisk   = "scion.io/default-resources-disk"
 )
+
+// projectSettingKeys is the authoritative list of scion.io/* annotation keys
+// that constitute project settings. Anything not in this list is not a project
+// setting and is not copied by clone or reported by the resolved endpoint.
+//
+// This is the single source of truth for "what is a project setting". A key
+// omitted here is silently dropped when a project is cloned; a key wrongly
+// added here is exposed in API responses and propagated into clones. Errors in
+// both directions are user-visible bugs, so treat edits to this list as a
+// change to the project-settings contract rather than as a list edit.
+//
+// Two properties are maintained deliberately and are enforced by
+// TestProjectSettingKeys_NoDrift:
+//
+//  1. Every projectSetting* constant declared above appears here exactly once.
+//     A new setting that is not registered fails the build's tests rather than
+//     going unnoticed until someone loses it on clone.
+//  2. The order matches the constant declaration order above, which in turn
+//     matches the table in .design/project-templates.md §3.1, so all three can
+//     be diffed by eye.
+//
+// Note the scope: these are keys in project.Annotations. project.Labels is a
+// separate map that also carries scion.io/* keys — scion.io/system and
+// scion.io/global on the Global project, and the broker markers
+// scion.io/plugin, scion.io/broker-type and scion.io/broker-role. Every
+// scion.io/* label is a system marker rather than a project setting, and none
+// belongs here. User and organisational labels use the scion.dev/ prefix
+// instead.
+var projectSettingKeys = []string{
+	projectSettingDefaultTemplate,
+	projectSettingDefaultHarnessConfig,
+	projectSettingDefaultModel,
+	projectSettingDefaultThinkingLevel,
+	projectSettingTelemetryEnabled,
+	projectSettingActiveProfile,
+
+	// Default agent limits
+	projectSettingDefaultMaxTurns,
+	projectSettingDefaultMaxModelCalls,
+	projectSettingDefaultMaxDuration,
+
+	// Default GCP identity
+	projectSettingDefaultGCPIdentityMode,
+	projectSettingDefaultGCPIdentitySAID,
+
+	// Default resource spec (flat keys)
+	projectSettingDefaultResourcesCPUReq,
+	projectSettingDefaultResourcesMemReq,
+	projectSettingDefaultResourcesCPULim,
+	projectSettingDefaultResourcesMemLim,
+	projectSettingDefaultResourcesDisk,
+}
 
 // handleProjectSettings handles GET/PUT on /api/v1/projects/{projectId}/settings.
 func (s *Server) handleProjectSettings(w http.ResponseWriter, r *http.Request, projectID string) {
