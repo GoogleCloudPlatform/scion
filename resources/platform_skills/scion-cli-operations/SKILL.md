@@ -32,6 +32,17 @@ scion start <name> --non-interactive \
 
 **Use absolute paths** in task prompts and briefs. A sub-agent's working directory may differ from yours — relative paths resolve against the sub-agent's `/workspace`, not yours.
 
+## Working Tree Reset Safety
+
+When cleaning a working tree, **use `git clean -fd`, not `git clean -fdx`**.
+
+- `git clean -fd` removes untracked files but **respects `.gitignore`** — `.scion/`, agent state, and ignored directories survive.
+- `git clean -fdx` deliberately defeats `.gitignore` and **deletes everything** not tracked by git, including `.scion/`, `downloads/`, and any local state.
+
+The `-x` flag is not a stronger clean — it is a different operation. Default to `-fd`; use `-x` only with a specific reason and after verifying nothing irreplaceable is in an ignored directory.
+
+**`downloads/` is an inbox, not storage.** Files downloaded into your container are visible only inside it and invisible to every other agent. Move anything worth keeping to `/scion-volumes/scratchpad/` (shared across all agents) promptly. A `downloads/` file that has not been drained to the scratchpad is one command from gone.
+
 ## Recommended Commands
 
 - **Inspect an Agent**: `scion look <agent-id>` — inspect the recent output and current terminal-UI state of any running agent.
