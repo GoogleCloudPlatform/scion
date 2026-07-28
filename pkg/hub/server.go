@@ -727,6 +727,15 @@ type Server struct {
 	// GCP IAM admin for minting service accounts (nil = minting disabled)
 	gcpIAMAdmin GCPServiceAccountAdmin
 
+	// Caller-permission checker for the agent service-account assignment
+	// surface, and the mode gating whether it is consulted. Both are ALWAYS
+	// set explicitly in NewServer — nil is a wiring bug and denies, it is not
+	// a way to switch the check off. Turning the check off is done by
+	// installing store.NewDisabledCallerPermissionChecker, which is a value
+	// somebody has to construct and pass. See saAssignCheckerFor.
+	saAssignChecker   store.CallerPermissionChecker
+	saAssignCheckMode string
+
 	// GCP token rate limiter (nil = no rate limiting)
 	gcpTokenRateLimiter *GCPTokenRateLimiter
 
@@ -1121,6 +1130,30 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 
 	// Initialize authorization service
 	srv.authzService = NewAuthzService(s, logging.Subsystem("hub.auth"))
+
+	// Wire the caller-permission checker for agent service-account assignment.
+	//
+	// ⚠️ INERT IN THIS RELEASE. svc-accnt Step 2 lands the gate, the plumbing
+	// and the audit record; the GCP prober that would answer CanActAs for real
+	// does not exist yet, so the mode is off and the disabled checker is
+	// installed. The Hub policy layer (ActionAssign) IS live and is doing the
+	// work today.
+	//
+	// Installed explicitly rather than left nil on purpose: a nil checker
+	// denies, so "forgot to wire it" and "chose to switch it off" cannot be
+	// confused for one another. See NewDisabledCallerPermissionChecker.
+	srv.saAssignCheckMode = SAAssignCheckOff
+	srv.saAssignChecker = store.NewDisabledCallerPermissionChecker()
+	if srv.saAssignCheckMode == SAAssignCheckOff {
+		// Names the SURFACE and what it degrades to, not the feature. The same
+		// disabled checker means "policy-gated only" here and "ungated"
+		// elsewhere; a message about "the IAM check" would mislead about the
+		// other one.
+		slog.Warn("GCP caller-permission checking is OFF for agent service-account assignment: "+
+			"assignment is gated by Hub policy only, and no caller is checked for "+
+			store.PermissionActAs+" on the target account",
+			"surface", SurfaceAgentAssign, "mode", srv.saAssignCheckMode)
+	}
 
 	// Seed default policies and groups (idempotent)
 	seedDefaultPoliciesAndGroups(ctx, s)

@@ -662,22 +662,15 @@ func (s *Server) createAgentInProject(
 			return
 		}
 
-		// Authorization: any caller who can see the SA can assign it.
+		// Authorization: ActionAssign in Hub policy, plus iam.serviceAccounts.actAs
+		// on the caller in GCP. "Can see it" is no longer sufficient — reading a
+		// service account and being allowed to run as it are different grants.
 		// SA management (create/mint/delete) is gated on ActionManage elsewhere.
 		//
-		// This call has just stopped being a no-op, which is the point of the line
-		// above changing. Previously the ScopeID equality had already confined the
-		// service account to the caller's own project, and an agent holds read
-		// access across its own project, so for agent callers nothing could be
-		// denied here; it gated only users lacking read on the account.
-		//
-		// Now that hub-scoped accounts reach this line, it is load-bearing for
-		// every caller: a hub-scoped account is parentless
-		// (gcpServiceAccountResource), so admission depends on a hub-scoped policy
-		// matching rather than on project membership. The PATCH path carries the
-		// same call for the same reason.
-		if !s.authorizeMsg(w, r, gcpServiceAccountResource(sa), ActionRead,
-			"You don't have permission to assign GCP service accounts in this project") {
+		// The whole gate lives in authorizeSAAssignment, including the ordering of
+		// the two layers, so the create and PATCH paths cannot drift apart on the
+		// part that matters. Read it there before changing either call.
+		if !s.authorizeSAAssignment(w, r, sa) {
 			return
 		}
 
@@ -2023,12 +2016,11 @@ func (s *Server) updateAgent(w http.ResponseWriter, r *http.Request, id string) 
 				ValidationError(w, "GCP service account is not verified; verify it before assigning to agents", nil)
 				return
 			}
-			// Parity with the create path: any caller who can see the service
-			// account may assign it. See the matching call in
-			// createAgentInProject for why this is narrow today and why it is
-			// nonetheless spelled out at both sites.
-			if !s.authorizeMsg(w, r, gcpServiceAccountResource(sa), ActionRead,
-				"You don't have permission to assign GCP service accounts in this project") {
+			// Parity with the create path, and now literally the same call.
+			// PATCH is the surface that most needs it: reassigning an existing
+			// agent's identity is the cheapest way to acquire a service account
+			// you could not have been given at create time.
+			if !s.authorizeSAAssignment(w, r, sa) {
 				return
 			}
 			agent.AppliedConfig.GCPIdentity = &store.GCPIdentityConfig{
