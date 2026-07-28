@@ -55,6 +55,12 @@
 # createProjectAgent, getGroupMember — has no guard to key on and is invisible
 # to any lexical rule. That gap is the route-authz manifest, issue #598.
 #
+# So a green run from this script is NOT a statement that the codebase is
+# authorized correctly, and it must not be read as one. It says only that nobody
+# has reintroduced the specific mis-shaped-guard idiom below; a route that never
+# checks anything in the first place passes silently. Verifying that every route
+# has an authorization check is a separate problem and is tracked in #598.
+#
 # Run `hack/check-authz-guards.sh --self-test` to exercise the classifier
 # against a fixture covering every verdict above.
 set -euo pipefail
@@ -264,6 +270,33 @@ func (s *Server) failClosed(ctx context.Context) bool {
 	userIdent := GetUserIdentityFromContext(ctx)
 	// WANT-NOT
 	if userIdent == nil {
+		return false
+	}
+	return s.authzService.CheckAccess(ctx, userIdent, res, ActionRead).Allowed
+}
+
+// Shape 3 with a comment between the assignment and the nil test. Still the
+// same fail-open; the classifier must not be shaken off by the gap.
+func (s *Server) failOpenCommented(ctx context.Context) bool {
+	userIdent := GetUserIdentityFromContext(ctx)
+
+	// Brokers and agents do not carry a user identity.
+	// WANT
+	if userIdent == nil {
+		return true
+	}
+	return s.authzService.CheckAccess(ctx, userIdent, res, ActionRead).Allowed
+}
+
+// Nil branch mentions `return true` but does not end in an unconditional one:
+// the block's own last statement denies. Not the fail-open shape.
+func (s *Server) failClosedAfterBranch(ctx context.Context) bool {
+	userIdent := GetUserIdentityFromContext(ctx)
+	// WANT-NOT
+	if userIdent == nil {
+		if isInternalCaller(ctx) {
+			return true
+		}
 		return false
 	}
 	return s.authzService.CheckAccess(ctx, userIdent, res, ActionRead).Allowed
